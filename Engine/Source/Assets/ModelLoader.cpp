@@ -123,8 +123,9 @@ namespace Kurenai::Assets
         std::unordered_map<std::string, RHI::IRHITexture*> textureCache;
         RHI::IRHITexture* whiteTexture = nullptr;
 
-        auto loadTexture = [&](const aiString& texPath) -> RHI::IRHITexture*
+        auto loadTexture = [&](const aiString& texPath, bool sRGB) -> RHI::IRHITexture*
         {
+            // sRGB指定違いで同じパスを再利用することは想定していないため、キーはパス文字列のみで良い
             const std::string key = texPath.C_Str();
             auto it = textureCache.find(key);
             if (it != textureCache.end())
@@ -136,7 +137,7 @@ namespace Kurenai::Assets
             try
             {
                 const std::wstring fullPath = ResolveTexturePath(directory, Utf8ToWide(key));
-                auto texture = device.CreateTextureFromFile(fullPath, true);
+                auto texture = device.CreateTextureFromFile(fullPath, sRGB);
                 rawPtr = texture.get();
                 model.Textures.push_back(std::move(texture));
             }
@@ -161,6 +162,19 @@ namespace Kurenai::Assets
                 model.Textures.push_back(std::move(texture));
             }
             return whiteTexture;
+        };
+
+        RHI::IRHITexture* flatNormalTexture = nullptr;
+        auto getFlatNormalTexture = [&]() -> RHI::IRHITexture*
+        {
+            if (!flatNormalTexture)
+            {
+                // タンジェント空間で(0,0,1)、すなわち「法線マップなし」を表す色
+                auto texture = device.CreateSolidColorTexture(128, 128, 255, 255);
+                flatNormalTexture = texture.get();
+                model.Textures.push_back(std::move(texture));
+            }
+            return flatNormalTexture;
         };
 
         std::vector<std::pair<const aiMesh*, aiMatrix4x4>> meshNodes;
@@ -256,12 +270,37 @@ namespace Kurenai::Assets
             if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS ||
                 material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)
             {
-                outMesh.BaseColorTexture = loadTexture(texPath);
+                outMesh.BaseColorTexture = loadTexture(texPath, true);
             }
             else
             {
                 outMesh.BaseColorTexture = getWhiteTexture();
             }
+
+            if (material->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS)
+            {
+                outMesh.NormalTexture = loadTexture(texPath, false);
+            }
+            else
+            {
+                outMesh.NormalTexture = getFlatNormalTexture();
+            }
+
+            // glTFのmetallicRoughnessテクスチャはG=ラフネス、B=メタリックを1枚に格納しており、
+            // assimpはこれをROUGHNESS/METALNESSの両方のテクスチャタイプとして同じ画像を指す
+            if (material->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == AI_SUCCESS ||
+                material->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS)
+            {
+                outMesh.MetallicRoughnessTexture = loadTexture(texPath, false);
+            }
+            else
+            {
+                outMesh.MetallicRoughnessTexture = getWhiteTexture();
+            }
+
+            // FBXなどPBRメタリック/ラフネスの係数を持たない形式では既定値(非金属・やや粗め)のままになる
+            material->Get(AI_MATKEY_METALLIC_FACTOR, outMesh.MetallicFactor);
+            material->Get(AI_MATKEY_ROUGHNESS_FACTOR, outMesh.RoughnessFactor);
 
             model.Meshes.push_back(std::move(outMesh));
         }

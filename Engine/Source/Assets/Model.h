@@ -14,6 +14,10 @@ namespace Kurenai::Assets
         std::unique_ptr<RHI::IRHIBuffer> IndexBuffer;
         uint32_t IndexCount = 0;
         RHI::IRHITexture* BaseColorTexture = nullptr;
+        RHI::IRHITexture* NormalTexture = nullptr;
+        RHI::IRHITexture* MetallicRoughnessTexture = nullptr;
+        float MetallicFactor = 0.0f;
+        float RoughnessFactor = 0.7f;
     };
 
     struct Model

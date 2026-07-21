@@ -1,6 +1,6 @@
 # KurenaiEngine
 
-DirectX 11 / DirectX 12 対応を目指す自作ゲームエンジン。RHI(Rendering Hardware Interface)抽象化レイヤーの上にDX11バックエンドを実装しており、assimp経由でglTF・FBXモデルの読み込み・描画に対応しています。
+DirectX 11 / DirectX 12 対応を目指す自作ゲームエンジン。RHI(Rendering Hardware Interface)抽象化レイヤーの上にDX11バックエンドを実装しており、assimp経由でglTF・FBXモデルの読み込み・描画に対応しています。ライティングはCook-Torrance(GGX)によるPBR(メタリック/ラフネス)モデルで、法線マッピング(接線は画面空間微分から近似計算)にも対応しています。
 
 ## 構成
 

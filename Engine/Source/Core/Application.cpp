@@ -21,8 +21,16 @@ namespace Kurenai::Core
         struct alignas(16) FrameConstants
         {
             DirectX::XMFLOAT4X4 ViewProj;
+            DirectX::XMFLOAT4 CameraPosition;
             DirectX::XMFLOAT4 LightDirection;
             DirectX::XMFLOAT4 LightColor;
+        };
+
+        struct alignas(16) MaterialConstants
+        {
+            float MetallicFactor;
+            float RoughnessFactor;
+            float Padding[2];
         };
 
         struct SceneEntry
@@ -102,6 +110,11 @@ namespace Kurenai::Core
         constantBufferDesc.Usage = RHI::BufferUsage::Constant;
         constantBufferDesc.SizeInBytes = sizeof(FrameConstants);
         m_FrameConstantBuffer = m_Device->CreateBuffer(constantBufferDesc);
+
+        RHI::BufferDesc materialConstantBufferDesc;
+        materialConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        materialConstantBufferDesc.SizeInBytes = sizeof(MaterialConstants);
+        m_MaterialConstantBuffer = m_Device->CreateBuffer(materialConstantBufferDesc);
 
         LoadScene(0);
     }
@@ -287,8 +300,10 @@ namespace Kurenai::Core
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = m_Camera.GetViewMatrix() * m_Camera.GetProjectionMatrix();
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
+        const DirectX::XMFLOAT3 cameraPosition = m_Camera.GetPosition();
+        constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
         constants.LightDirection = { 0.4f, -0.8f, 0.3f, 0.0f };
-        constants.LightColor = { 1.0f, 0.96f, 0.9f, 0.0f };
+        constants.LightColor = { 3.0f, 2.9f, 2.7f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         commandList->SetPipelineState(m_PipelineState.get());
@@ -297,9 +312,17 @@ namespace Kurenai::Core
 
         for (const auto& mesh : m_Model.Meshes)
         {
+            MaterialConstants materialConstants{};
+            materialConstants.MetallicFactor = mesh.MetallicFactor;
+            materialConstants.RoughnessFactor = mesh.RoughnessFactor;
+            commandList->UpdateBuffer(m_MaterialConstantBuffer.get(), &materialConstants, sizeof(materialConstants));
+            commandList->SetConstantBuffer(1, m_MaterialConstantBuffer.get());
+
             commandList->SetVertexBuffer(mesh.VertexBuffer.get());
             commandList->SetIndexBuffer(mesh.IndexBuffer.get());
             commandList->SetTexture(0, mesh.BaseColorTexture);
+            commandList->SetTexture(1, mesh.NormalTexture);
+            commandList->SetTexture(2, mesh.MetallicRoughnessTexture);
             commandList->DrawIndexed(mesh.IndexCount, 0, 0);
         }
 

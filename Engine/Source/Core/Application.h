@@ -42,6 +42,7 @@ namespace Kurenai::Core
         std::unique_ptr<RHI::IRHIPipelineState> m_PipelineState;
         std::unique_ptr<RHI::IRHISampler> m_Sampler;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> m_MaterialConstantBuffer;
         Assets::Model m_Model;
         size_t m_CurrentSceneIndex = 0;
         bool m_DigitKeyWasDown[9] = {};
