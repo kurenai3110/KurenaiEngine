@@ -1,12 +1,15 @@
 #pragma once
 
 #include <memory>
+#include <string>
 
 #include "IRHIBuffer.h"
 #include "IRHICommandList.h"
 #include "IRHIPipelineState.h"
+#include "IRHISampler.h"
 #include "IRHIShader.h"
 #include "IRHISwapChain.h"
+#include "IRHITexture.h"
 #include "RHIDesc.h"
 
 namespace Kurenai::RHI
@@ -20,6 +23,9 @@ namespace Kurenai::RHI
         virtual std::unique_ptr<IRHIBuffer> CreateBuffer(const BufferDesc& desc) = 0;
         virtual std::unique_ptr<IRHIShader> CreateShader(const ShaderDesc& desc) = 0;
         virtual std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) = 0;
+        virtual std::unique_ptr<IRHITexture> CreateTextureFromFile(const std::wstring& filePath, bool sRGB) = 0;
+        virtual std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
+        virtual std::unique_ptr<IRHISampler> CreateDefaultSampler() = 0;
         virtual IRHICommandList* GetImmediateCommandList() = 0;
     };
 

@@ -1,5 +1,7 @@
 #include <Windows.h>
 
+#include <objbase.h>
+
 #include <exception>
 #include <fstream>
 #include <string>
@@ -24,6 +26,10 @@ namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 {
+    // DirectXTexのWICテクスチャ読み込みがCOMを使用するため初期化しておく
+    HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    int exitCode = 0;
     try
     {
         Kurenai::Core::Application app;
@@ -35,8 +41,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         log << e.what() << std::endl;
 
         MessageBoxW(nullptr, Utf8ToWide(e.what()).c_str(), L"Kurenai Engine - 初期化エラー", MB_OK | MB_ICONERROR);
-        return 1;
+        exitCode = 1;
     }
 
-    return 0;
+    if (SUCCEEDED(comResult))
+    {
+        CoUninitialize();
+    }
+
+    return exitCode;
 }

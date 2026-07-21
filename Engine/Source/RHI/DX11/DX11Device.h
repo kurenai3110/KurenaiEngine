@@ -22,6 +22,9 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHIBuffer> CreateBuffer(const BufferDesc& desc) override;
         std::unique_ptr<IRHIShader> CreateShader(const ShaderDesc& desc) override;
         std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
+        std::unique_ptr<IRHITexture> CreateTextureFromFile(const std::wstring& filePath, bool sRGB) override;
+        std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
+        std::unique_ptr<IRHISampler> CreateDefaultSampler() override;
         IRHICommandList* GetImmediateCommandList() override;
 
     private:

@@ -1,5 +1,5 @@
 # ビルド生成物
-Build/
+/Build/
 
 # Visual Studio
 .vs/
@@ -15,3 +15,7 @@ Build/
 
 # 実行時ログ
 *.log
+
+# 大容量アセット・サンプルデータ(リポジトリ直下のみ対象。Engine/Source/Assets等のソースは含める)
+/Assets/
+/Samples/

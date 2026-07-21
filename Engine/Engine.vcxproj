@@ -55,10 +55,10 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(SolutionDir)ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)ThirdParty\assimp\include;$(SolutionDir)ThirdParty\assimp\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
@@ -68,16 +68,20 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(SolutionDir)ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)ThirdParty\assimp\include;$(SolutionDir)ThirdParty\assimp\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Source\Core\Window.h" />
     <ClInclude Include="Source\Core\Application.h" />
+    <ClInclude Include="Source\Core\Camera.h" />
+    <ClInclude Include="Source\Assets\Vertex.h" />
+    <ClInclude Include="Source\Assets\Model.h" />
+    <ClInclude Include="Source\Assets\ModelLoader.h" />
     <ClInclude Include="Source\RHI\RHIEnums.h" />
     <ClInclude Include="Source\RHI\RHIDesc.h" />
     <ClInclude Include="Source\RHI\IRHIBuffer.h" />
@@ -86,22 +90,31 @@
     <ClInclude Include="Source\RHI\IRHISwapChain.h" />
     <ClInclude Include="Source\RHI\IRHICommandList.h" />
     <ClInclude Include="Source\RHI\IRHIDevice.h" />
+    <ClInclude Include="Source\RHI\IRHITexture.h" />
+    <ClInclude Include="Source\RHI\IRHISampler.h" />
     <ClInclude Include="Source\RHI\DX11\DX11Buffer.h" />
     <ClInclude Include="Source\RHI\DX11\DX11Shader.h" />
     <ClInclude Include="Source\RHI\DX11\DX11PipelineState.h" />
     <ClInclude Include="Source\RHI\DX11\DX11SwapChain.h" />
     <ClInclude Include="Source\RHI\DX11\DX11CommandList.h" />
     <ClInclude Include="Source\RHI\DX11\DX11Device.h" />
+    <ClInclude Include="Source\RHI\DX11\DX11Texture.h" />
+    <ClInclude Include="Source\RHI\DX11\DX11Sampler.h" />
+    <ClInclude Include="Source\RHI\DX11\DX11Util.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Source\Core\Window.cpp" />
     <ClCompile Include="Source\Core\Application.cpp" />
+    <ClCompile Include="Source\Core\Camera.cpp" />
+    <ClCompile Include="Source\Assets\ModelLoader.cpp" />
     <ClCompile Include="Source\RHI\DX11\DX11Buffer.cpp" />
     <ClCompile Include="Source\RHI\DX11\DX11Shader.cpp" />
     <ClCompile Include="Source\RHI\DX11\DX11PipelineState.cpp" />
     <ClCompile Include="Source\RHI\DX11\DX11SwapChain.cpp" />
     <ClCompile Include="Source\RHI\DX11\DX11CommandList.cpp" />
     <ClCompile Include="Source\RHI\DX11\DX11Device.cpp" />
+    <ClCompile Include="Source\RHI\DX11\DX11Texture.cpp" />
+    <ClCompile Include="Source\RHI\DX11\DX11Sampler.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

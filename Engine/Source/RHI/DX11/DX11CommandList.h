@@ -14,13 +14,21 @@ namespace Kurenai::RHI
 
         void SetRenderTarget(IRHISwapChain* swapChain) override;
         void ClearRenderTarget(const ClearColor& color) override;
+        void ClearDepth(float depth) override;
         void SetViewport(const Viewport& viewport) override;
         void SetPipelineState(IRHIPipelineState* pipelineState) override;
         void SetVertexBuffer(IRHIBuffer* buffer) override;
+        void SetIndexBuffer(IRHIBuffer* buffer) override;
+        void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
+        void SetTexture(uint32_t slot, IRHITexture* texture) override;
+        void SetSampler(uint32_t slot, IRHISampler* sampler) override;
+        void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
+        void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
 
     private:
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
         ID3D11RenderTargetView* m_CurrentRenderTargetView = nullptr;
+        ID3D11DepthStencilView* m_CurrentDepthStencilView = nullptr;
     };
 }

@@ -2,13 +2,17 @@
 
 #include <d3dcompiler.h>
 
+#include <DirectXTex.h>
+
 #include <vector>
 
 #include "DX11Buffer.h"
 #include "DX11CommandList.h"
 #include "DX11PipelineState.h"
+#include "DX11Sampler.h"
 #include "DX11Shader.h"
 #include "DX11SwapChain.h"
+#include "DX11Texture.h"
 #include "DX11Util.h"
 
 namespace Kurenai::RHI
@@ -203,6 +207,70 @@ namespace Kurenai::RHI
         ThrowIfFailed(hr, "入力レイアウトの作成に失敗しました");
 
         return std::make_unique<DX11PipelineState>(inputLayout, vertexShader, pixelShader, desc.Topology);
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateTextureFromFile(const std::wstring& filePath, bool sRGB)
+    {
+        DirectX::TexMetadata metadata{};
+        DirectX::ScratchImage image;
+        ThrowIfFailed(
+            DirectX::LoadFromWICFile(filePath.c_str(), DirectX::WIC_FLAGS_FORCE_RGB, &metadata, image),
+            "テクスチャの読み込みに失敗しました");
+
+        if (sRGB)
+        {
+            image.OverrideFormat(DirectX::MakeSRGB(metadata.format));
+        }
+
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        ThrowIfFailed(
+            DirectX::CreateShaderResourceView(m_Device.Get(), image.GetImages(), image.GetImageCount(), image.GetMetadata(), &srv),
+            "シェーダリソースビューの作成に失敗しました");
+
+        return std::make_unique<DX11Texture>(srv);
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+    {
+        const uint8_t pixel[4] = { r, g, b, a };
+
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = 1;
+        textureDesc.Height = 1;
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = 1;
+        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        D3D11_SUBRESOURCE_DATA initData{};
+        initData.pSysMem = pixel;
+        initData.SysMemPitch = sizeof(pixel);
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, &initData, &texture), "テクスチャの作成に失敗しました");
+
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), nullptr, &srv), "シェーダリソースビューの作成に失敗しました");
+
+        return std::make_unique<DX11Texture>(srv);
+    }
+
+    std::unique_ptr<IRHISampler> DX11Device::CreateDefaultSampler()
+    {
+        D3D11_SAMPLER_DESC samplerDesc{};
+        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+        samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+        samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+
+        Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler;
+        ThrowIfFailed(m_Device->CreateSamplerState(&samplerDesc, &sampler), "サンプラーの作成に失敗しました");
+
+        return std::make_unique<DX11Sampler>(sampler);
     }
 
     IRHICommandList* DX11Device::GetImmediateCommandList()
