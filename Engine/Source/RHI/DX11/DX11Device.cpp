@@ -1,0 +1,219 @@
+#include "DX11Device.h"
+
+#include <d3dcompiler.h>
+
+#include <vector>
+
+#include "DX11Buffer.h"
+#include "DX11CommandList.h"
+#include "DX11PipelineState.h"
+#include "DX11Shader.h"
+#include "DX11SwapChain.h"
+#include "DX11Util.h"
+
+namespace Kurenai::RHI
+{
+    namespace
+    {
+        DXGI_FORMAT ToDXGIFormat(Format format)
+        {
+            switch (format)
+            {
+            case Format::R32G32_Float:
+                return DXGI_FORMAT_R32G32_FLOAT;
+            case Format::R32G32B32_Float:
+                return DXGI_FORMAT_R32G32B32_FLOAT;
+            case Format::R32G32B32A32_Float:
+            default:
+                return DXGI_FORMAT_R32G32B32A32_FLOAT;
+            }
+        }
+
+        UINT ToBindFlags(BufferUsage usage)
+        {
+            switch (usage)
+            {
+            case BufferUsage::Vertex:
+                return D3D11_BIND_VERTEX_BUFFER;
+            case BufferUsage::Index:
+                return D3D11_BIND_INDEX_BUFFER;
+            case BufferUsage::Constant:
+            default:
+                return D3D11_BIND_CONSTANT_BUFFER;
+            }
+        }
+    }
+
+    DX11Device::DX11Device() = default;
+    DX11Device::~DX11Device() = default;
+
+    void DX11Device::Initialize()
+    {
+        UINT createDeviceFlags = 0;
+#if defined(_DEBUG)
+        createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+
+        const D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+        D3D_FEATURE_LEVEL selectedFeatureLevel{};
+
+        HRESULT hr = D3D11CreateDevice(
+            nullptr,
+            D3D_DRIVER_TYPE_HARDWARE,
+            nullptr,
+            createDeviceFlags,
+            featureLevels,
+            ARRAYSIZE(featureLevels),
+            D3D11_SDK_VERSION,
+            &m_Device,
+            &selectedFeatureLevel,
+            &m_Context);
+        ThrowIfFailed(hr, "D3D11デバイスの作成に失敗しました");
+
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+        ThrowIfFailed(m_Device.As(&dxgiDevice), "IDXGIDeviceの取得に失敗しました");
+
+        Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+        ThrowIfFailed(dxgiDevice->GetAdapter(&adapter), "DXGIアダプタの取得に失敗しました");
+
+        ThrowIfFailed(adapter->GetParent(IID_PPV_ARGS(&m_Factory)), "DXGIファクトリの取得に失敗しました");
+
+        m_ImmediateCommandList = std::make_unique<DX11CommandList>(m_Context);
+    }
+
+    std::unique_ptr<IRHISwapChain> DX11Device::CreateSwapChain(void* windowHandle, uint32_t width, uint32_t height)
+    {
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = 2;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+
+        Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain;
+        HRESULT hr = m_Factory->CreateSwapChainForHwnd(
+            m_Device.Get(),
+            static_cast<HWND>(windowHandle),
+            &desc,
+            nullptr,
+            nullptr,
+            &swapChain);
+        ThrowIfFailed(hr, "スワップチェインの作成に失敗しました");
+
+        return std::make_unique<DX11SwapChain>(swapChain, m_Device, m_Context, width, height);
+    }
+
+    std::unique_ptr<IRHIBuffer> DX11Device::CreateBuffer(const BufferDesc& desc)
+    {
+        D3D11_BUFFER_DESC bufferDesc{};
+        bufferDesc.ByteWidth = desc.SizeInBytes;
+        bufferDesc.BindFlags = ToBindFlags(desc.Usage);
+        bufferDesc.Usage = desc.InitialData ? D3D11_USAGE_IMMUTABLE : D3D11_USAGE_DEFAULT;
+
+        D3D11_SUBRESOURCE_DATA initData{};
+        initData.pSysMem = desc.InitialData;
+
+        Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
+        HRESULT hr = m_Device->CreateBuffer(&bufferDesc, desc.InitialData ? &initData : nullptr, &buffer);
+        ThrowIfFailed(hr, "バッファの作成に失敗しました");
+
+        return std::make_unique<DX11Buffer>(buffer, desc.StrideInBytes);
+    }
+
+    std::unique_ptr<IRHIShader> DX11Device::CreateShader(const ShaderDesc& desc)
+    {
+        const char* target = desc.Stage == ShaderStage::Vertex ? "vs_5_0" : "ps_5_0";
+
+        UINT compileFlags = 0;
+#if defined(_DEBUG)
+        compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+
+        Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+        Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+        HRESULT hr = D3DCompileFromFile(
+            desc.FilePath.c_str(),
+            nullptr,
+            D3D_COMPILE_STANDARD_FILE_INCLUDE,
+            desc.EntryPoint.c_str(),
+            target,
+            compileFlags,
+            0,
+            &bytecode,
+            &errorBlob);
+
+        if (FAILED(hr))
+        {
+            std::string message = "シェーダのコンパイルに失敗しました";
+            if (errorBlob)
+            {
+                message += ": ";
+                message += static_cast<const char*>(errorBlob->GetBufferPointer());
+            }
+            throw std::runtime_error(message);
+        }
+
+        Microsoft::WRL::ComPtr<ID3D11DeviceChild> shader;
+        if (desc.Stage == ShaderStage::Vertex)
+        {
+            Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader;
+            hr = m_Device->CreateVertexShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &vertexShader);
+            shader = vertexShader;
+        }
+        else
+        {
+            Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader;
+            hr = m_Device->CreatePixelShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &pixelShader);
+            shader = pixelShader;
+        }
+        ThrowIfFailed(hr, "シェーダオブジェクトの作成に失敗しました");
+
+        return std::make_unique<DX11Shader>(desc.Stage, shader, bytecode);
+    }
+
+    std::unique_ptr<IRHIPipelineState> DX11Device::CreatePipelineState(const PipelineStateDesc& desc)
+    {
+        auto* vertexShader = static_cast<DX11Shader*>(desc.VertexShader);
+        auto* pixelShader = static_cast<DX11Shader*>(desc.PixelShader);
+
+        std::vector<D3D11_INPUT_ELEMENT_DESC> elements;
+        elements.reserve(desc.InputLayout.size());
+        for (const auto& element : desc.InputLayout)
+        {
+            D3D11_INPUT_ELEMENT_DESC elementDesc{};
+            elementDesc.SemanticName = element.SemanticName.c_str();
+            elementDesc.SemanticIndex = element.SemanticIndex;
+            elementDesc.Format = ToDXGIFormat(element.Format);
+            elementDesc.InputSlot = 0;
+            elementDesc.AlignedByteOffset = element.AlignedByteOffset;
+            elementDesc.InputSlotClass = D3D11_INPUT_PER_VERTEX_DATA;
+            elementDesc.InstanceDataStepRate = 0;
+            elements.push_back(elementDesc);
+        }
+
+        Microsoft::WRL::ComPtr<ID3D11InputLayout> inputLayout;
+        HRESULT hr = m_Device->CreateInputLayout(
+            elements.data(),
+            static_cast<UINT>(elements.size()),
+            vertexShader->GetBytecode()->GetBufferPointer(),
+            vertexShader->GetBytecode()->GetBufferSize(),
+            &inputLayout);
+        ThrowIfFailed(hr, "入力レイアウトの作成に失敗しました");
+
+        return std::make_unique<DX11PipelineState>(inputLayout, vertexShader, pixelShader, desc.Topology);
+    }
+
+    IRHICommandList* DX11Device::GetImmediateCommandList()
+    {
+        return m_ImmediateCommandList.get();
+    }
+
+    std::unique_ptr<IRHIDevice> CreateDX11Device()
+    {
+        auto device = std::make_unique<DX11Device>();
+        device->Initialize();
+        return device;
+    }
+}

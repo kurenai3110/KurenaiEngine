@@ -1,0 +1,17 @@
+# ビルド生成物
+Build/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+
+# VSCode
+.vscode/
+
+# 実行時ログ
+*.log
