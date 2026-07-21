@@ -1,6 +1,6 @@
 # KurenaiEngine
 
-DirectX 11 / DirectX 12 対応を目指す自作ゲームエンジン。RHI(Rendering Hardware Interface)抽象化レイヤーの上にDX11バックエンドを実装しており、glTFモデルの読み込み・描画に対応しています。
+DirectX 11 / DirectX 12 対応を目指す自作ゲームエンジン。RHI(Rendering Hardware Interface)抽象化レイヤーの上にDX11バックエンドを実装しており、assimp経由でglTF・FBXモデルの読み込み・描画に対応しています。
 
 ## 構成
 
@@ -67,7 +67,7 @@ MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
 
 ## 実行
 
-`Sandbox.exe` を実行すると `Assets\Sponza\Sponza.gltf` を読み込んで表示します。モデルパスは実行ファイルの場所から4階層上をリポジトリルートとみなして解決しているため、`Build\Bin\<Platform>\<Configuration>\` 以外の場所に実行ファイルを配置すると読み込みに失敗します。
+`Sandbox.exe` を実行すると起動時にSponzaを読み込んで表示します。モデルパスは実行ファイルの場所から4階層上をリポジトリルートとみなして解決しているため、`Build\Bin\<Platform>\<Configuration>\` 以外の場所に実行ファイルを配置すると読み込みに失敗します。
 
 ## 操作方法
 
@@ -78,7 +78,24 @@ MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
 | 上下移動 | E / Q |
 | 視点回転 | 右クリックを押しながらマウス移動 |
 | 移動速度アップ | Shift (押している間) |
+| 表示アセットの切り替え | 数字キー 1〜4 |
+
+### 表示アセット一覧(数字キー)
+
+| キー | アセット |
+| --- | --- |
+| 1 | Sponza |
+| 2 | Bistro - Exterior |
+| 3 | Bistro - Interior |
+| 4 | Bistro - Interior (Wine Cellar) |
+
+切り替え時はモデルとテクスチャを同期的に再読み込みするため、Bistroのような大容量アセットでは数秒〜数十秒ウィンドウが応答しなくなります。読み込み完了後、タイトルバーに現在表示中のアセット名が表示されます。
 
 ## Assetsフォルダについて
 
-エンジンが読み込むモデル・テクスチャ類は `Assets/` フォルダで管理します。現在は `Assets/Sponza/` に [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデルを配置しています。`Assets/` と `Samples/` はサイズが大きいためGit管理対象外(`.gitignore`)にしています。
+エンジンが読み込むモデル・テクスチャ類は `Assets/` フォルダで管理します。
+
+- `Assets/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
+- `Assets/Bistro/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) のBistroモデル(FBX形式、`Textures/`にDDS/TGAテクスチャを同梱)
+
+`Assets/` と `Samples/` はサイズが大きいためGit管理対象外(`.gitignore`)にしています。

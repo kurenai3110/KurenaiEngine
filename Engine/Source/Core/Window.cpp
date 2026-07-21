@@ -60,6 +60,11 @@ namespace Kurenai::Core
         }
     }
 
+    void Window::SetTitle(const std::wstring& title)
+    {
+        SetWindowTextW(m_Handle, title.c_str());
+    }
+
     void Window::PumpMessages()
     {
         MSG msg{};

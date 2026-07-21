@@ -24,6 +24,21 @@ namespace Kurenai::Core
             DirectX::XMFLOAT4 LightDirection;
             DirectX::XMFLOAT4 LightColor;
         };
+
+        struct SceneEntry
+        {
+            const wchar_t* DisplayName;
+            const wchar_t* RelativePath;
+        };
+
+        const SceneEntry kScenes[] =
+        {
+            { L"Sponza", L"Assets\\Sponza\\Sponza.gltf" },
+            { L"Bistro - Exterior", L"Assets\\Bistro\\BistroExterior.fbx" },
+            { L"Bistro - Interior", L"Assets\\Bistro\\BistroInterior.fbx" },
+            { L"Bistro - Interior (Wine Cellar)", L"Assets\\Bistro\\BistroInterior_Wine.fbx" },
+        };
+        constexpr size_t kSceneCount = sizeof(kScenes) / sizeof(kScenes[0]);
     }
 
     Application::Application()
@@ -88,9 +103,29 @@ namespace Kurenai::Core
         constantBufferDesc.SizeInBytes = sizeof(FrameConstants);
         m_FrameConstantBuffer = m_Device->CreateBuffer(constantBufferDesc);
 
-        const std::wstring modelPath = repoRoot + L"Assets\\Sponza\\Sponza.gltf";
-        m_Model = Assets::LoadModel(*m_Device, modelPath);
+        LoadScene(0);
+    }
 
+    void Application::LoadScene(size_t sceneIndex)
+    {
+        if (sceneIndex >= kSceneCount)
+        {
+            return;
+        }
+
+        const std::wstring repoRoot = GetExecutableDirectory() + L"..\\..\\..\\..\\";
+        const std::wstring modelPath = repoRoot + kScenes[sceneIndex].RelativePath;
+
+        m_Model = Assets::LoadModel(*m_Device, modelPath);
+        m_CurrentSceneIndex = sceneIndex;
+
+        FrameCameraToModel();
+
+        m_Window->SetTitle(std::wstring(L"Kurenai Engine - ") + kScenes[sceneIndex].DisplayName);
+    }
+
+    void Application::FrameCameraToModel()
+    {
         const float centerX = (m_Model.BoundsMin[0] + m_Model.BoundsMax[0]) * 0.5f;
         const float centerZ = (m_Model.BoundsMin[2] + m_Model.BoundsMax[2]) * 0.5f;
         const float sizeY = m_Model.BoundsMax[1] - m_Model.BoundsMin[1];
@@ -119,6 +154,20 @@ namespace Kurenai::Core
         m_Camera.SetPosition({ posX, eyeHeight, posZ });
         m_Camera.SetYawPitch(yaw, 0.0f);
         m_Camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
+    }
+
+    void Application::UpdateSceneSwitch()
+    {
+        const size_t count = kSceneCount < 9 ? kSceneCount : 9;
+        for (size_t i = 0; i < count; ++i)
+        {
+            const bool isDown = (GetAsyncKeyState('1' + static_cast<int>(i)) & 0x8000) != 0;
+            if (isDown && !m_DigitKeyWasDown[i] && i != m_CurrentSceneIndex)
+            {
+                LoadScene(i);
+            }
+            m_DigitKeyWasDown[i] = isDown;
+        }
     }
 
     void Application::Run()
@@ -211,6 +260,7 @@ namespace Kurenai::Core
 
     void Application::Update(float deltaTime)
     {
+        UpdateSceneSwitch();
         UpdateMouseLook();
         UpdateMovement(deltaTime);
     }

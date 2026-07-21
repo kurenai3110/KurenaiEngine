@@ -52,6 +52,39 @@ namespace Kurenai::Assets
             return pos == std::wstring::npos ? L"" : filePath.substr(0, pos + 1);
         }
 
+        bool FileExists(const std::wstring& path)
+        {
+            return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+        }
+
+        // FBXは「Textures/xxx.dds」のようなパスやファイル名のみを格納している場合があり、
+        // モデルからの相対パスをそのまま連結しただけでは見つからないことがあるため複数候補を試す
+        std::wstring ResolveTexturePath(const std::wstring& directory, const std::wstring& rawPath)
+        {
+            std::wstring candidate = directory + rawPath;
+            if (FileExists(candidate))
+            {
+                return candidate;
+            }
+
+            const size_t slashPos = rawPath.find_last_of(L"/\\");
+            const std::wstring fileName = slashPos == std::wstring::npos ? rawPath : rawPath.substr(slashPos + 1);
+
+            candidate = directory + fileName;
+            if (FileExists(candidate))
+            {
+                return candidate;
+            }
+
+            candidate = directory + L"Textures\\" + fileName;
+            if (FileExists(candidate))
+            {
+                return candidate;
+            }
+
+            return directory + rawPath;
+        }
+
         void CollectMeshNodes(
             const aiScene* scene,
             const aiNode* node,
@@ -99,10 +132,22 @@ namespace Kurenai::Assets
                 return it->second;
             }
 
-            const std::wstring fullPath = directory + Utf8ToWide(key);
-            auto texture = device.CreateTextureFromFile(fullPath, true);
-            RHI::IRHITexture* rawPtr = texture.get();
-            model.Textures.push_back(std::move(texture));
+            RHI::IRHITexture* rawPtr = nullptr;
+            try
+            {
+                const std::wstring fullPath = ResolveTexturePath(directory, Utf8ToWide(key));
+                auto texture = device.CreateTextureFromFile(fullPath, true);
+                rawPtr = texture.get();
+                model.Textures.push_back(std::move(texture));
+            }
+            catch (const std::exception&)
+            {
+                // 読み込みに失敗したテクスチャは目立つ色のプレースホルダーで代替し、モデル全体の読み込みは継続する
+                auto texture = device.CreateSolidColorTexture(255, 0, 255, 255);
+                rawPtr = texture.get();
+                model.Textures.push_back(std::move(texture));
+            }
+
             textureCache.emplace(key, rawPtr);
             return rawPtr;
         };

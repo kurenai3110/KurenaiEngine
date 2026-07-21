@@ -25,6 +25,9 @@ namespace Kurenai::Core
 
     private:
         void CreateSceneResources();
+        void LoadScene(size_t sceneIndex);
+        void FrameCameraToModel();
+        void UpdateSceneSwitch();
         void UpdateMouseLook();
         void UpdateMovement(float deltaTime);
         void Update(float deltaTime);
@@ -40,6 +43,8 @@ namespace Kurenai::Core
         std::unique_ptr<RHI::IRHISampler> m_Sampler;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         Assets::Model m_Model;
+        size_t m_CurrentSceneIndex = 0;
+        bool m_DigitKeyWasDown[9] = {};
 
         Camera m_Camera;
         std::chrono::steady_clock::time_point m_LastFrameTime;

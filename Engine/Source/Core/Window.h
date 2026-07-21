@@ -27,6 +27,7 @@ namespace Kurenai::Core
         uint32_t GetHeight() const { return m_Height; }
 
         void SetResizeCallback(ResizeCallback callback) { m_ResizeCallback = std::move(callback); }
+        void SetTitle(const std::wstring& title);
 
     private:
         static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
