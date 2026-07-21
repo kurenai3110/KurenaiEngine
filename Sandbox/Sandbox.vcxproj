@@ -95,6 +95,7 @@
   <ItemGroup>
     <None Include="Shaders\GBuffer.hlsl" />
     <None Include="Shaders\DeferredLighting.hlsl" />
+    <None Include="Shaders\Present.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Engine\Engine.vcxproj">

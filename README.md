@@ -2,6 +2,8 @@
 
 DirectX 11 / DirectX 12 対応を目指す自作ゲームエンジン。RHI(Rendering Hardware Interface)抽象化レイヤーの上にDX11バックエンドを実装しており、assimp経由でglTF・FBXモデルの読み込み・描画に対応しています。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。法線マッピングの接線は画面空間微分から近似計算しています。
 
+描画パイプラインは ジオメトリパス(G-Buffer書き込み) → ライティングパス(G-Bufferを読みSceneColorへ出力) → Presentパス(SceneColorをバックバッファへ表示) の3パス構成です。G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(`Application`のコンストラクタ引数、既定は1280x720)、Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
+
 ## 構成
 
 - `Engine/` — エンジン本体(静的ライブラリ)。RHI抽象化レイヤー、DX11バックエンド、モデルローダーなど。

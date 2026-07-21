@@ -48,30 +48,56 @@ namespace Kurenai::Core
             { L"Bistro - Interior (Wine Cellar)", L"Assets\\Bistro\\BistroInterior_Wine.fbx" },
         };
         constexpr size_t kSceneCount = sizeof(kScenes) / sizeof(kScenes[0]);
+
+        // レンダー解像度(renderWidth x renderHeight)のアスペクト比を保ったまま、
+        // windowWidth x windowHeight の中央に収まるビューポート(レターボックス/ピラーボックス)を求める
+        RHI::Viewport ComputeLetterboxViewport(uint32_t windowWidth, uint32_t windowHeight, uint32_t renderWidth, uint32_t renderHeight)
+        {
+            const float windowAspect = static_cast<float>(windowWidth) / static_cast<float>(windowHeight);
+            const float renderAspect = static_cast<float>(renderWidth) / static_cast<float>(renderHeight);
+
+            float viewportWidth;
+            float viewportHeight;
+            if (windowAspect > renderAspect)
+            {
+                // ウィンドウの方が横長 -> 高さいっぱいに合わせ、左右に余白(ピラーボックス)
+                viewportHeight = static_cast<float>(windowHeight);
+                viewportWidth = viewportHeight * renderAspect;
+            }
+            else
+            {
+                // ウィンドウの方が縦長 -> 幅いっぱいに合わせ、上下に余白(レターボックス)
+                viewportWidth = static_cast<float>(windowWidth);
+                viewportHeight = viewportWidth / renderAspect;
+            }
+
+            RHI::Viewport viewport;
+            viewport.TopLeftX = (static_cast<float>(windowWidth) - viewportWidth) * 0.5f;
+            viewport.TopLeftY = (static_cast<float>(windowHeight) - viewportHeight) * 0.5f;
+            viewport.Width = viewportWidth;
+            viewport.Height = viewportHeight;
+            return viewport;
+        }
     }
 
-    Application::Application()
+    Application::Application(uint32_t renderWidth, uint32_t renderHeight)
+        : m_RenderWidth(renderWidth)
+        , m_RenderHeight(renderHeight)
     {
         m_Window = std::make_unique<Window>(L"Kurenai Engine", 1280, 720);
         m_Window->SetResizeCallback([this](uint32_t width, uint32_t height)
         {
+            // G-Bufferは指定した内部解像度のまま固定し、表示側でアスペクト比を保って拡大縮小するため
+            // ウィンドウリサイズではスワップチェインのみ更新する
             if (m_SwapChain)
             {
                 m_SwapChain->Resize(width, height);
-            }
-            if (m_Device)
-            {
-                CreateGBuffer(width, height);
-            }
-            if (height > 0)
-            {
-                m_Camera.SetAspectRatio(static_cast<float>(width) / static_cast<float>(height));
             }
         });
 
         m_Device = RHI::CreateDX11Device();
         m_SwapChain = m_Device->CreateSwapChain(m_Window->GetHandle(), m_Window->GetWidth(), m_Window->GetHeight());
-        m_Camera.SetAspectRatio(static_cast<float>(m_Window->GetWidth()) / static_cast<float>(m_Window->GetHeight()));
+        m_Camera.SetAspectRatio(static_cast<float>(m_RenderWidth) / static_cast<float>(m_RenderHeight));
 
         CreateSceneResources();
 
@@ -132,6 +158,25 @@ namespace Kurenai::Core
         lightingPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
         m_LightingPipelineState = m_Device->CreatePipelineState(lightingPipelineDesc);
 
+        // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
+        RHI::ShaderDesc presentVsDesc;
+        presentVsDesc.Stage = RHI::ShaderStage::Vertex;
+        presentVsDesc.FilePath = shaderDirectory + L"Present.hlsl";
+        presentVsDesc.EntryPoint = "VSMain";
+        m_PresentVertexShader = m_Device->CreateShader(presentVsDesc);
+
+        RHI::ShaderDesc presentPsDesc;
+        presentPsDesc.Stage = RHI::ShaderStage::Pixel;
+        presentPsDesc.FilePath = shaderDirectory + L"Present.hlsl";
+        presentPsDesc.EntryPoint = "PSMain";
+        m_PresentPixelShader = m_Device->CreateShader(presentPsDesc);
+
+        RHI::PipelineStateDesc presentPipelineDesc;
+        presentPipelineDesc.VertexShader = m_PresentVertexShader.get();
+        presentPipelineDesc.PixelShader = m_PresentPixelShader.get();
+        presentPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        m_PresentPipelineState = m_Device->CreatePipelineState(presentPipelineDesc);
+
         m_Sampler = m_Device->CreateDefaultSampler();
 
         RHI::BufferDesc constantBufferDesc;
@@ -144,12 +189,12 @@ namespace Kurenai::Core
         materialConstantBufferDesc.SizeInBytes = sizeof(MaterialConstants);
         m_MaterialConstantBuffer = m_Device->CreateBuffer(materialConstantBufferDesc);
 
-        CreateGBuffer(m_Window->GetWidth(), m_Window->GetHeight());
+        CreateRenderTargets(m_RenderWidth, m_RenderHeight);
 
         LoadScene(0);
     }
 
-    void Application::CreateGBuffer(uint32_t width, uint32_t height)
+    void Application::CreateRenderTargets(uint32_t width, uint32_t height)
     {
         if (width == 0 || height == 0)
         {
@@ -160,6 +205,7 @@ namespace Kurenai::Core
         m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_GBufferDepth = m_Device->CreateDepthTexture(width, height);
+        m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
     }
 
     void Application::LoadScene(size_t sceneIndex)
@@ -330,11 +376,6 @@ namespace Kurenai::Core
 
         auto* commandList = m_Device->GetImmediateCommandList();
 
-        RHI::Viewport viewport;
-        viewport.Width = static_cast<float>(m_Window->GetWidth());
-        viewport.Height = static_cast<float>(m_Window->GetHeight());
-        commandList->SetViewport(viewport);
-
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = m_Camera.GetViewMatrix() * m_Camera.GetProjectionMatrix();
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
@@ -347,7 +388,12 @@ namespace Kurenai::Core
         constants.LightColor = { 3.0f, 2.9f, 2.7f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
-        // --- ジオメトリパス: G-Bufferへ書き込む ---
+        // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
+        RHI::Viewport gbufferViewport;
+        gbufferViewport.Width = static_cast<float>(m_RenderWidth);
+        gbufferViewport.Height = static_cast<float>(m_RenderHeight);
+        commandList->SetViewport(gbufferViewport);
+
         RHI::IRHITexture* gbufferTargets[] = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get() };
         commandList->SetRenderTargets(gbufferTargets, 3, m_GBufferDepth.get());
         commandList->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
@@ -373,10 +419,13 @@ namespace Kurenai::Core
             commandList->DrawIndexed(mesh.IndexCount, 0, 0);
         }
 
-        // --- ライティングパス: G-Bufferを読みバックバッファへ出力 ---
-        commandList->SetRenderTarget(m_SwapChain.get());
+        // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
+        RHI::IRHITexture* sceneColorTarget[] = { m_SceneColor.get() };
+        commandList->SetRenderTargets(sceneColorTarget, 1, nullptr);
+        commandList->SetViewport(gbufferViewport);
+        // 深度テストに失敗した(=何も描かれていない)ピクセル用の背景色。discardされた箇所に前フレームのデータが
+        // 残らないよう、フルスクリーン三角形を描く前に明示的にクリアしておく
         commandList->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
-        commandList->ClearDepth(1.0f);
 
         commandList->SetPipelineState(m_LightingPipelineState.get());
         commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
@@ -385,6 +434,21 @@ namespace Kurenai::Core
         commandList->SetTexture(1, m_GBufferNormal.get());
         commandList->SetTexture(2, m_GBufferMaterial.get());
         commandList->SetTexture(3, m_GBufferDepth.get());
+        commandList->Draw(3, 0);
+
+        // --- Presentパス: SceneColorを、アスペクト比を保ってバックバッファへ出力 ---
+        commandList->SetRenderTarget(m_SwapChain.get());
+        commandList->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
+        commandList->ClearDepth(1.0f);
+
+        // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する
+        const RHI::Viewport letterboxViewport = ComputeLetterboxViewport(
+            m_Window->GetWidth(), m_Window->GetHeight(), m_RenderWidth, m_RenderHeight);
+        commandList->SetViewport(letterboxViewport);
+
+        commandList->SetPipelineState(m_PresentPipelineState.get());
+        commandList->SetSampler(0, m_Sampler.get());
+        commandList->SetTexture(0, m_SceneColor.get());
         commandList->Draw(3, 0);
 
         m_SwapChain->Present(true);
