@@ -35,6 +35,7 @@ namespace Kurenai::RHI
         virtual ~IRHICommandList() = default;
 
         virtual void SetRenderTarget(IRHISwapChain* swapChain) = 0;
+        virtual void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture) = 0;
         virtual void ClearRenderTarget(const ClearColor& color) = 0;
         virtual void ClearDepth(float depth) = 0;
         virtual void SetViewport(const Viewport& viewport) = 0;

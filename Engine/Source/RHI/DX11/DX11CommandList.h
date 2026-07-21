@@ -13,6 +13,7 @@ namespace Kurenai::RHI
         explicit DX11CommandList(Microsoft::WRL::ComPtr<ID3D11DeviceContext> context);
 
         void SetRenderTarget(IRHISwapChain* swapChain) override;
+        void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture) override;
         void ClearRenderTarget(const ClearColor& color) override;
         void ClearDepth(float depth) override;
         void SetViewport(const Viewport& viewport) override;
@@ -27,8 +28,11 @@ namespace Kurenai::RHI
         void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
 
     private:
+        static constexpr uint32_t kMaxRenderTargets = 8;
+
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
-        ID3D11RenderTargetView* m_CurrentRenderTargetView = nullptr;
+        ID3D11RenderTargetView* m_CurrentRenderTargetViews[kMaxRenderTargets] = {};
+        uint32_t m_CurrentRenderTargetCount = 0;
         ID3D11DepthStencilView* m_CurrentDepthStencilView = nullptr;
     };
 }

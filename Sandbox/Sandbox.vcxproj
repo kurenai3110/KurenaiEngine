@@ -93,7 +93,8 @@
     <ClCompile Include="Source\Main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="Shaders\Model.hlsl" />
+    <None Include="Shaders\GBuffer.hlsl" />
+    <None Include="Shaders\DeferredLighting.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Engine\Engine.vcxproj">

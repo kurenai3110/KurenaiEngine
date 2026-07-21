@@ -21,6 +21,7 @@ namespace Kurenai::Core
         struct alignas(16) FrameConstants
         {
             DirectX::XMFLOAT4X4 ViewProj;
+            DirectX::XMFLOAT4X4 InvViewProj;
             DirectX::XMFLOAT4 CameraPosition;
             DirectX::XMFLOAT4 LightDirection;
             DirectX::XMFLOAT4 LightColor;
@@ -58,6 +59,10 @@ namespace Kurenai::Core
             {
                 m_SwapChain->Resize(width, height);
             }
+            if (m_Device)
+            {
+                CreateGBuffer(width, height);
+            }
             if (height > 0)
             {
                 m_Camera.SetAspectRatio(static_cast<float>(width) / static_cast<float>(height));
@@ -79,30 +84,53 @@ namespace Kurenai::Core
     {
         // Build/Bin/<Platform>/<Configuration>/ からリポジトリルートまでの相対パス
         const std::wstring repoRoot = GetExecutableDirectory() + L"..\\..\\..\\..\\";
+        const std::wstring shaderDirectory = repoRoot + L"Sandbox\\Shaders\\";
 
-        RHI::ShaderDesc vsDesc;
-        vsDesc.Stage = RHI::ShaderStage::Vertex;
-        vsDesc.FilePath = repoRoot + L"Sandbox\\Shaders\\Model.hlsl";
-        vsDesc.EntryPoint = "VSMain";
-        m_VertexShader = m_Device->CreateShader(vsDesc);
-
-        RHI::ShaderDesc psDesc;
-        psDesc.Stage = RHI::ShaderStage::Pixel;
-        psDesc.FilePath = repoRoot + L"Sandbox\\Shaders\\Model.hlsl";
-        psDesc.EntryPoint = "PSMain";
-        m_PixelShader = m_Device->CreateShader(psDesc);
-
-        RHI::PipelineStateDesc pipelineDesc;
-        pipelineDesc.InputLayout =
+        const std::vector<RHI::InputElementDesc> modelInputLayout =
         {
             { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
             { "NORMAL", 0, RHI::Format::R32G32B32_Float, 12 },
             { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
         };
-        pipelineDesc.VertexShader = m_VertexShader.get();
-        pipelineDesc.PixelShader = m_PixelShader.get();
-        pipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        m_PipelineState = m_Device->CreatePipelineState(pipelineDesc);
+
+        // ジオメトリパス(G-Buffer書き込み)
+        RHI::ShaderDesc gbufferVsDesc;
+        gbufferVsDesc.Stage = RHI::ShaderStage::Vertex;
+        gbufferVsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
+        gbufferVsDesc.EntryPoint = "VSMain";
+        m_GBufferVertexShader = m_Device->CreateShader(gbufferVsDesc);
+
+        RHI::ShaderDesc gbufferPsDesc;
+        gbufferPsDesc.Stage = RHI::ShaderStage::Pixel;
+        gbufferPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
+        gbufferPsDesc.EntryPoint = "PSMain";
+        m_GBufferPixelShader = m_Device->CreateShader(gbufferPsDesc);
+
+        RHI::PipelineStateDesc gbufferPipelineDesc;
+        gbufferPipelineDesc.InputLayout = modelInputLayout;
+        gbufferPipelineDesc.VertexShader = m_GBufferVertexShader.get();
+        gbufferPipelineDesc.PixelShader = m_GBufferPixelShader.get();
+        gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
+
+        // ライティングパス(頂点バッファなしのフルスクリーン三角形)
+        RHI::ShaderDesc lightingVsDesc;
+        lightingVsDesc.Stage = RHI::ShaderStage::Vertex;
+        lightingVsDesc.FilePath = shaderDirectory + L"DeferredLighting.hlsl";
+        lightingVsDesc.EntryPoint = "VSMain";
+        m_LightingVertexShader = m_Device->CreateShader(lightingVsDesc);
+
+        RHI::ShaderDesc lightingPsDesc;
+        lightingPsDesc.Stage = RHI::ShaderStage::Pixel;
+        lightingPsDesc.FilePath = shaderDirectory + L"DeferredLighting.hlsl";
+        lightingPsDesc.EntryPoint = "PSMain";
+        m_LightingPixelShader = m_Device->CreateShader(lightingPsDesc);
+
+        RHI::PipelineStateDesc lightingPipelineDesc;
+        lightingPipelineDesc.VertexShader = m_LightingVertexShader.get();
+        lightingPipelineDesc.PixelShader = m_LightingPixelShader.get();
+        lightingPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        m_LightingPipelineState = m_Device->CreatePipelineState(lightingPipelineDesc);
 
         m_Sampler = m_Device->CreateDefaultSampler();
 
@@ -116,7 +144,22 @@ namespace Kurenai::Core
         materialConstantBufferDesc.SizeInBytes = sizeof(MaterialConstants);
         m_MaterialConstantBuffer = m_Device->CreateBuffer(materialConstantBufferDesc);
 
+        CreateGBuffer(m_Window->GetWidth(), m_Window->GetHeight());
+
         LoadScene(0);
+    }
+
+    void Application::CreateGBuffer(uint32_t width, uint32_t height)
+    {
+        if (width == 0 || height == 0)
+        {
+            return;
+        }
+
+        m_GBufferAlbedo = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_GBufferDepth = m_Device->CreateDepthTexture(width, height);
     }
 
     void Application::LoadScene(size_t sceneIndex)
@@ -287,26 +330,30 @@ namespace Kurenai::Core
 
         auto* commandList = m_Device->GetImmediateCommandList();
 
-        commandList->SetRenderTarget(m_SwapChain.get());
-
         RHI::Viewport viewport;
         viewport.Width = static_cast<float>(m_Window->GetWidth());
         viewport.Height = static_cast<float>(m_Window->GetHeight());
         commandList->SetViewport(viewport);
 
-        commandList->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
-        commandList->ClearDepth(1.0f);
-
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = m_Camera.GetViewMatrix() * m_Camera.GetProjectionMatrix();
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
+        DirectX::XMVECTOR determinant;
+        const DirectX::XMMATRIX invViewProj = DirectX::XMMatrixInverse(&determinant, viewProj);
+        DirectX::XMStoreFloat4x4(&constants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
         const DirectX::XMFLOAT3 cameraPosition = m_Camera.GetPosition();
         constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
         constants.LightDirection = { 0.4f, -0.8f, 0.3f, 0.0f };
         constants.LightColor = { 3.0f, 2.9f, 2.7f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
-        commandList->SetPipelineState(m_PipelineState.get());
+        // --- ジオメトリパス: G-Bufferへ書き込む ---
+        RHI::IRHITexture* gbufferTargets[] = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get() };
+        commandList->SetRenderTargets(gbufferTargets, 3, m_GBufferDepth.get());
+        commandList->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
+        commandList->ClearDepth(1.0f);
+
+        commandList->SetPipelineState(m_GBufferPipelineState.get());
         commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
         commandList->SetSampler(0, m_Sampler.get());
 
@@ -325,6 +372,20 @@ namespace Kurenai::Core
             commandList->SetTexture(2, mesh.MetallicRoughnessTexture);
             commandList->DrawIndexed(mesh.IndexCount, 0, 0);
         }
+
+        // --- ライティングパス: G-Bufferを読みバックバッファへ出力 ---
+        commandList->SetRenderTarget(m_SwapChain.get());
+        commandList->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
+        commandList->ClearDepth(1.0f);
+
+        commandList->SetPipelineState(m_LightingPipelineState.get());
+        commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+        commandList->SetSampler(0, m_Sampler.get());
+        commandList->SetTexture(0, m_GBufferAlbedo.get());
+        commandList->SetTexture(1, m_GBufferNormal.get());
+        commandList->SetTexture(2, m_GBufferMaterial.get());
+        commandList->SetTexture(3, m_GBufferDepth.get());
+        commandList->Draw(3, 0);
 
         m_SwapChain->Present(true);
     }

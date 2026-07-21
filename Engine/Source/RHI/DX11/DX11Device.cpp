@@ -28,6 +28,8 @@ namespace Kurenai::RHI
                 return DXGI_FORMAT_R32G32_FLOAT;
             case Format::R32G32B32_Float:
                 return DXGI_FORMAT_R32G32B32_FLOAT;
+            case Format::R8G8B8A8_UNorm:
+                return DXGI_FORMAT_R8G8B8A8_UNORM;
             case Format::R32G32B32A32_Float:
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -208,14 +210,18 @@ namespace Kurenai::RHI
             elements.push_back(elementDesc);
         }
 
+        // フルスクリーンパスなど頂点入力を持たないシェーダの場合は入力レイアウトを作成しない(IASetInputLayout(nullptr)で運用)
         Microsoft::WRL::ComPtr<ID3D11InputLayout> inputLayout;
-        HRESULT hr = m_Device->CreateInputLayout(
-            elements.data(),
-            static_cast<UINT>(elements.size()),
-            vertexShader->GetBytecode()->GetBufferPointer(),
-            vertexShader->GetBytecode()->GetBufferSize(),
-            &inputLayout);
-        ThrowIfFailed(hr, "入力レイアウトの作成に失敗しました");
+        if (!elements.empty())
+        {
+            HRESULT hr = m_Device->CreateInputLayout(
+                elements.data(),
+                static_cast<UINT>(elements.size()),
+                vertexShader->GetBytecode()->GetBufferPointer(),
+                vertexShader->GetBytecode()->GetBufferSize(),
+                &inputLayout);
+            ThrowIfFailed(hr, "入力レイアウトの作成に失敗しました");
+        }
 
         return std::make_unique<DX11PipelineState>(inputLayout, vertexShader, pixelShader, desc.Topology);
     }
@@ -278,6 +284,63 @@ namespace Kurenai::RHI
         ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), nullptr, &srv), "シェーダリソースビューの作成に失敗しました");
 
         return std::make_unique<DX11Texture>(srv);
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateRenderTexture(uint32_t width, uint32_t height, Format format)
+    {
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = width;
+        textureDesc.Height = height;
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = 1;
+        textureDesc.Format = ToDXGIFormat(format);
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_DEFAULT;
+        textureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, nullptr, &texture), "レンダーテクスチャの作成に失敗しました");
+
+        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv;
+        ThrowIfFailed(m_Device->CreateRenderTargetView(texture.Get(), nullptr, &rtv), "レンダーターゲットビューの作成に失敗しました");
+
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), nullptr, &srv), "シェーダリソースビューの作成に失敗しました");
+
+        return std::make_unique<DX11Texture>(srv, rtv, nullptr);
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateDepthTexture(uint32_t width, uint32_t height)
+    {
+        // 深度テクスチャは後段のライティングパスでサンプリングするためSHADER_RESOURCEも付与し、
+        // Typelessフォーマットで作成してDSV/SRVそれぞれに適したビューを個別に張る
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = width;
+        textureDesc.Height = height;
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = 1;
+        textureDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_DEFAULT;
+        textureDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, nullptr, &texture), "深度テクスチャの作成に失敗しました");
+
+        D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+        dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
+        ThrowIfFailed(m_Device->CreateDepthStencilView(texture.Get(), &dsvDesc, &dsv), "深度ステンシルビューの作成に失敗しました");
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Texture2D.MipLevels = 1;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), &srvDesc, &srv), "深度シェーダリソースビューの作成に失敗しました");
+
+        return std::make_unique<DX11Texture>(srv, nullptr, dsv);
     }
 
     std::unique_ptr<IRHISampler> DX11Device::CreateDefaultSampler()

@@ -3,64 +3,39 @@ static const float PI = 3.14159265359f;
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
+    float4x4 InvViewProj;
     float4 CameraPosition;
     float4 LightDirection;
     float4 LightColor;
 };
 
-cbuffer MaterialConstants : register(b1)
-{
-    float MetallicFactor;
-    float RoughnessFactor;
-    float2 MaterialPadding;
-};
-
-Texture2D BaseColorTexture : register(t0);
+Texture2D AlbedoTexture : register(t0);
 Texture2D NormalTexture : register(t1);
-Texture2D MetallicRoughnessTexture : register(t2);
+Texture2D MaterialTexture : register(t2);
+Texture2D DepthTexture : register(t3);
 SamplerState DefaultSampler : register(s0);
-
-struct VSInput
-{
-    float3 Position : POSITION;
-    float3 Normal : NORMAL;
-    float2 UV : TEXCOORD0;
-};
 
 struct PSInput
 {
     float4 Position : SV_POSITION;
-    float3 Normal : NORMAL;
-    float3 WorldPos : TEXCOORD1;
     float2 UV : TEXCOORD0;
 };
 
-PSInput VSMain(VSInput input)
+// 頂点バッファなしで画面全体を覆う三角形を1枚だけ生成する定番のテクニック
+PSInput VSMain(uint vertexID : SV_VertexID)
 {
     PSInput output;
-    output.Position = mul(float4(input.Position, 1.0f), ViewProj);
-    output.Normal = input.Normal;
-    output.WorldPos = input.Position;
-    output.UV = input.UV;
+    output.UV = float2((vertexID << 1) & 2, vertexID & 2);
+    output.Position = float4(output.UV.x * 2.0f - 1.0f, 1.0f - output.UV.y * 2.0f, 0.0f, 1.0f);
     return output;
 }
 
-// 頂点の接線を持たないため、UV/位置の画面空間微分から接線フレームを近似する
-// (Christian Schuler "Normal Mapping without Precomputed Tangents" の手法)
-float3x3 ComputeTangentFrame(float3 N, float3 worldPos, float2 uv)
+float3 ReconstructWorldPos(float2 uv, float depth)
 {
-    float3 dp1 = ddx(worldPos);
-    float3 dp2 = ddy(worldPos);
-    float2 duv1 = ddx(uv);
-    float2 duv2 = ddy(uv);
-
-    float3 dp2perp = cross(dp2, N);
-    float3 dp1perp = cross(N, dp1);
-    float3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-    float3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-
-    float invMax = rsqrt(max(dot(T, T), dot(B, B)));
-    return float3x3(T * invMax, B * invMax, N);
+    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
+    float4 clipPos = float4(ndc, depth, 1.0f);
+    float4 worldPos = mul(clipPos, InvViewProj);
+    return worldPos.xyz / worldPos.w;
 }
 
 float DistributionGGX(float NdotH, float roughness)
@@ -90,18 +65,20 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float4 baseColorSample = BaseColorTexture.Sample(DefaultSampler, input.UV);
+    float depth = DepthTexture.Sample(DefaultSampler, input.UV).r;
+    if (depth >= 1.0f)
+    {
+        discard;
+    }
 
-    float3 geometricNormal = normalize(input.Normal);
-    float3 normalSample = NormalTexture.Sample(DefaultSampler, input.UV).xyz * 2.0f - 1.0f;
-    float3x3 tbn = ComputeTangentFrame(geometricNormal, input.WorldPos, input.UV);
-    float3 N = normalize(mul(normalSample, tbn));
+    float3 worldPos = ReconstructWorldPos(input.UV, depth);
+    float3 albedo = AlbedoTexture.Sample(DefaultSampler, input.UV).rgb;
+    float3 N = normalize(NormalTexture.Sample(DefaultSampler, input.UV).xyz * 2.0f - 1.0f);
+    float2 material = MaterialTexture.Sample(DefaultSampler, input.UV).rg;
+    float metallic = material.r;
+    float roughness = material.g;
 
-    float3 metallicRoughnessSample = MetallicRoughnessTexture.Sample(DefaultSampler, input.UV).rgb;
-    float metallic = saturate(MetallicFactor * metallicRoughnessSample.b);
-    float roughness = clamp(RoughnessFactor * metallicRoughnessSample.g, 0.045f, 1.0f);
-
-    float3 V = normalize(CameraPosition.xyz - input.WorldPos);
+    float3 V = normalize(CameraPosition.xyz - worldPos);
     float3 L = normalize(-LightDirection.xyz);
     float3 H = normalize(V + L);
 
@@ -110,7 +87,6 @@ float4 PSMain(PSInput input) : SV_TARGET
     float NdotH = saturate(dot(N, H));
     float VdotH = saturate(dot(V, H));
 
-    float3 albedo = baseColorSample.rgb;
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
     float3 diffuseColor = albedo * (1.0f - metallic);
 
@@ -133,5 +109,5 @@ float4 PSMain(PSInput input) : SV_TARGET
     color = color / (color + 1.0f);
     color = pow(color, 1.0f / 2.2f);
 
-    return float4(color, baseColorSample.a);
+    return float4(color, 1.0f);
 }

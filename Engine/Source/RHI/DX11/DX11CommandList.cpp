@@ -19,20 +19,34 @@ namespace Kurenai::RHI
     void DX11CommandList::SetRenderTarget(IRHISwapChain* swapChain)
     {
         auto* dx11SwapChain = static_cast<DX11SwapChain*>(swapChain);
-        m_CurrentRenderTargetView = dx11SwapChain->GetRenderTargetView();
+        m_CurrentRenderTargetViews[0] = dx11SwapChain->GetRenderTargetView();
+        m_CurrentRenderTargetCount = 1;
         m_CurrentDepthStencilView = dx11SwapChain->GetDepthStencilView();
-        m_Context->OMSetRenderTargets(1, &m_CurrentRenderTargetView, m_CurrentDepthStencilView);
+        m_Context->OMSetRenderTargets(1, m_CurrentRenderTargetViews, m_CurrentDepthStencilView);
+    }
+
+    void DX11CommandList::SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture)
+    {
+        count = count < kMaxRenderTargets ? count : kMaxRenderTargets;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            m_CurrentRenderTargetViews[i] = static_cast<DX11Texture*>(targets[i])->GetRenderTargetView();
+        }
+        m_CurrentRenderTargetCount = count;
+        m_CurrentDepthStencilView = depthTexture ? static_cast<DX11Texture*>(depthTexture)->GetDepthStencilView() : nullptr;
+        m_Context->OMSetRenderTargets(count, m_CurrentRenderTargetViews, m_CurrentDepthStencilView);
     }
 
     void DX11CommandList::ClearRenderTarget(const ClearColor& color)
     {
-        if (!m_CurrentRenderTargetView)
-        {
-            return;
-        }
-
         const float clearColor[4] = { color.R, color.G, color.B, color.A };
-        m_Context->ClearRenderTargetView(m_CurrentRenderTargetView, clearColor);
+        for (uint32_t i = 0; i < m_CurrentRenderTargetCount; ++i)
+        {
+            if (m_CurrentRenderTargetViews[i])
+            {
+                m_Context->ClearRenderTargetView(m_CurrentRenderTargetViews[i], clearColor);
+            }
+        }
     }
 
     void DX11CommandList::ClearDepth(float depth)
