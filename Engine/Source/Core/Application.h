@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "Assets/Model.h"
@@ -123,5 +124,8 @@ namespace Kurenai::Core
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};
+
+        // ImGuiのIniFilenameはポインタを保持するだけでコピーしないため、文字列の寿命をここで維持する
+        std::string m_ImGuiIniPath;
     };
 }

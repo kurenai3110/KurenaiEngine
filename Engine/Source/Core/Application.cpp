@@ -234,6 +234,12 @@ namespace Kurenai::Core
         m_Device = RHI::CreateDX11Device();
         m_SwapChain = m_Device->CreateSwapChain(m_Window->GetHandle(), m_Window->GetWidth(), m_Window->GetHeight());
         m_Device->InitImGui(m_Window->GetHandle());
+
+        // imgui.iniの保存先を起動時の作業ディレクトリに依存させず、実行ファイルと同じフォルダに固定する。
+        // ImGuiはIniFilenameのポインタを保持するだけでコピーしないため、m_ImGuiIniPathで寿命を維持する
+        m_ImGuiIniPath = WideToUtf8((GetExecutableDirectory() + L"imgui.ini").c_str());
+        ImGui::GetIO().IniFilename = m_ImGuiIniPath.c_str();
+
         m_Camera.SetAspectRatio(static_cast<float>(m_RenderWidth) / static_cast<float>(m_RenderHeight));
 
         CreateSceneResources();
