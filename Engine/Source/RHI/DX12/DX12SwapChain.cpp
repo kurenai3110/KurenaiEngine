@@ -128,8 +128,10 @@ namespace Kurenai::RHI
             return;
         }
 
-        // GPU上での旧バックバッファ/深度バッファの使用が完了していることを保証してから解放する
-        m_Device->WaitForGPU();
+        // GPU上での旧バックバッファ/深度バッファの使用が完了していることを保証してから解放する。
+        // この時点でコマンドリストは(前フレームのPresent後)開いたまま次の記録待ちの状態になっているため、
+        // WaitForGPU()ではなくコマンドリストに触れないWaitForGPUIdle()を使う
+        m_Device->WaitForGPUIdle();
 
         ReleaseSizeDependentResources();
 

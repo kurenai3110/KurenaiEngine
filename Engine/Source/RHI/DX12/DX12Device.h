@@ -63,6 +63,12 @@ namespace Kurenai::RHI
         void ExecuteCommandList();
         // フェンスでGPUの完了を待ち、次フレーム/次操作用にコマンドリストを開き直す
         void WaitForGPU();
+        // フェンスでGPUの完了のみを待つ(コマンドリストの状態には触れない)。
+        // 1フレーム分の記録を溜めて1回だけ実行する設計上、フレームの合間では
+        // コマンドリストは常に開いた(記録可能な)状態になっているため、
+        // ExecuteCommandList()を経ていない箇所(スワップチェインのリサイズ等)から
+        // GPU完了を待つ場合はこちらを使い、開いたままのコマンドリストへ誤ってReset()しないようにする
+        void WaitForGPUIdle();
         // ExecuteCommandList()とWaitForGPU()をまとめて行う、一度限りの同期処理(テクスチャアップロード等)用の便宜メソッド
         void SubmitAndWaitIdle();
 

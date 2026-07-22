@@ -67,7 +67,7 @@ namespace Kurenai::RHI
     {
         if (m_Device)
         {
-            WaitForGPU();
+            WaitForGPUIdle();
         }
 
         if (m_FenceEvent)
@@ -173,7 +173,7 @@ namespace Kurenai::RHI
         m_CommandQueue->ExecuteCommandLists(1, commandLists);
     }
 
-    void DX12Device::WaitForGPU()
+    void DX12Device::WaitForGPUIdle()
     {
         const uint64_t fenceValueToWaitFor = ++m_FenceValue;
         ThrowIfFailed(m_CommandQueue->Signal(m_Fence.Get(), fenceValueToWaitFor), "フェンスのシグナルに失敗しました");
@@ -183,7 +183,11 @@ namespace Kurenai::RHI
             ThrowIfFailed(m_Fence->SetEventOnCompletion(fenceValueToWaitFor, m_FenceEvent), "フェンスイベントの設定に失敗しました");
             WaitForSingleObject(m_FenceEvent, INFINITE);
         }
+    }
 
+    void DX12Device::WaitForGPU()
+    {
+        WaitForGPUIdle();
         ResetCommandList();
     }
 
