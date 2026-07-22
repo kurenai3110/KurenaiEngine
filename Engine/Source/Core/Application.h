@@ -28,11 +28,11 @@ namespace Kurenai::Core
         void CreateRenderTargets(uint32_t width, uint32_t height);
         void LoadScene(size_t sceneIndex);
         void FrameCameraToModel();
-        void UpdateSceneSwitch();
         void UpdateMouseLook();
         void UpdateMovement(float deltaTime);
         void Update(float deltaTime);
         void Render();
+        void RenderSceneSwitchUI();
         DirectX::XMMATRIX ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const;
 
         std::unique_ptr<Window> m_Window;
@@ -78,7 +78,6 @@ namespace Kurenai::Core
         std::unique_ptr<RHI::IRHIBuffer> m_MaterialConstantBuffer;
         Assets::Model m_Model;
         size_t m_CurrentSceneIndex = 0;
-        bool m_DigitKeyWasDown[9] = {};
 
         Camera m_Camera;
         std::chrono::steady_clock::time_point m_LastFrameTime;

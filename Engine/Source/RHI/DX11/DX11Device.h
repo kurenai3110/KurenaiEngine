@@ -29,10 +29,16 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHISampler> CreateDefaultSampler() override;
         IRHICommandList* GetImmediateCommandList() override;
 
+        void InitImGui(void* windowHandle) override;
+        void ShutdownImGui() override;
+        void ImGuiNewFrame() override;
+        void ImGuiRender() override;
+
     private:
         Microsoft::WRL::ComPtr<ID3D11Device> m_Device;
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
         Microsoft::WRL::ComPtr<IDXGIFactory2> m_Factory;
         std::unique_ptr<DX11CommandList> m_ImmediateCommandList;
+        bool m_ImGuiInitialized = false;
     };
 }

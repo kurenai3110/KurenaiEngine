@@ -80,19 +80,19 @@ MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
 | 上下移動 | E / Q |
 | 視点回転 | 右クリックを押しながらマウス移動 |
 | 移動速度アップ | Shift (押している間) |
-| 表示アセットの切り替え | 数字キー 1〜5 |
+| 表示アセットの切り替え | 画面左上のImGui「Scenes」パネルのボタン |
 
-### 表示アセット一覧(数字キー)
+### 表示アセット一覧(Scenesパネル)
 
-| キー | アセット |
-| --- | --- |
-| 1 | Sponza |
-| 2 | Bistro - Exterior |
-| 3 | Bistro - Interior |
-| 4 | Bistro - Interior (Wine Cellar) |
-| 5 | White Surface Test(粗さ0〜1の球体列) |
+- Sponza
+- Bistro - Exterior
+- Bistro - Interior
+- Bistro - Interior (Wine Cellar)
+- White Surface Test(粗さ0〜1の球体列)
 
-切り替え時はモデルとテクスチャを同期的に再読み込みするため、Bistroのような大容量アセットでは数秒〜数十秒ウィンドウが応答しなくなります。読み込み完了後、タイトルバーに現在表示中のアセット名が表示されます。
+画面左上に常時表示されるImGuiの「Scenes」パネルのボタンをクリックするとそのアセットを読み込みます。現在表示中のアセットに対応するボタンはグレーアウトされます。
+
+切り替え時はモデルとテクスチャを同期的に再読み込みするため、Bistroのような大容量アセットでは数秒〜数十秒ウィンドウが応答しなくなります(2回目以降はモデルキャッシュにより高速化されます)。読み込み完了後、タイトルバーに現在表示中のアセット名が表示されます。
 
 ## Assetsフォルダについて
 

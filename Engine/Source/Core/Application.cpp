@@ -1,6 +1,9 @@
 #include "Application.h"
 
+#include <imgui.h>
+
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 
 #include "Assets/ModelLoader.h"
@@ -16,6 +19,21 @@ namespace Kurenai::Core
             std::wstring pathStr(path);
             size_t pos = pathStr.find_last_of(L"\\/");
             return pos == std::wstring::npos ? L"" : pathStr.substr(0, pos + 1);
+        }
+
+        // シーン名はASCIIのみを想定しているが、将来的な非ASCII文字にも対応できるよう
+        // WideCharToMultiByteで正しくUTF-8へ変換する(ImGuiのテキストAPIはUTF-8を期待する)
+        std::string WideToUtf8(const wchar_t* wide)
+        {
+            if (!wide || !*wide)
+            {
+                return {};
+            }
+            int length = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
+            std::string narrow(length, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, wide, -1, narrow.data(), length, nullptr, nullptr);
+            narrow.resize(length - 1);
+            return narrow;
         }
 
         struct alignas(16) FrameConstants
@@ -108,6 +126,7 @@ namespace Kurenai::Core
 
         m_Device = RHI::CreateDX11Device();
         m_SwapChain = m_Device->CreateSwapChain(m_Window->GetHandle(), m_Window->GetWidth(), m_Window->GetHeight());
+        m_Device->InitImGui(m_Window->GetHandle());
         m_Camera.SetAspectRatio(static_cast<float>(m_RenderWidth) / static_cast<float>(m_RenderHeight));
 
         CreateSceneResources();
@@ -383,18 +402,33 @@ namespace Kurenai::Core
         return lightView * lightProj;
     }
 
-    void Application::UpdateSceneSwitch()
+    void Application::RenderSceneSwitchUI()
     {
-        const size_t count = kSceneCount < 9 ? kSceneCount : 9;
-        for (size_t i = 0; i < count; ++i)
+        ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Scenes");
+
+        for (size_t i = 0; i < kSceneCount; ++i)
         {
-            const bool isDown = (GetAsyncKeyState('1' + static_cast<int>(i)) & 0x8000) != 0;
-            if (isDown && !m_DigitKeyWasDown[i] && i != m_CurrentSceneIndex)
+            const bool isCurrent = (i == m_CurrentSceneIndex);
+            if (isCurrent)
+            {
+                ImGui::BeginDisabled();
+            }
+
+            const std::string label = WideToUtf8(kScenes[i].DisplayName);
+            if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0.0f)))
             {
                 LoadScene(i);
             }
-            m_DigitKeyWasDown[i] = isDown;
+
+            if (isCurrent)
+            {
+                ImGui::EndDisabled();
+            }
         }
+
+        ImGui::End();
     }
 
     void Application::Run()
@@ -487,7 +521,6 @@ namespace Kurenai::Core
 
     void Application::Update(float deltaTime)
     {
-        UpdateSceneSwitch();
         UpdateMouseLook();
         UpdateMovement(deltaTime);
     }
@@ -498,6 +531,9 @@ namespace Kurenai::Core
         {
             return;
         }
+
+        m_Device->ImGuiNewFrame();
+        RenderSceneSwitchUI();
 
         auto* commandList = m_Device->GetImmediateCommandList();
 
@@ -602,6 +638,9 @@ namespace Kurenai::Core
         commandList->SetSampler(0, m_Sampler.get());
         commandList->SetTexture(0, m_SceneColor.get());
         commandList->Draw(3, 0);
+
+        // ImGuiはPresentパスでバインドされたバックバッファにそのまま重ねて描画する
+        m_Device->ImGuiRender();
 
         m_SwapChain->Present(true);
     }

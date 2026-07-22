@@ -1,6 +1,12 @@
 #include "Window.h"
 
+#include <backends/imgui_impl_win32.h>
+
 #include <stdexcept>
+
+// imgui_impl_win32.hは<windows.h>への依存を避けるためこの宣言を#if 0でコメントアウトしており、
+// 呼び出し側でこの1行をコピーして前方宣言することが公式に案内されている
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace Kurenai::Core
 {
@@ -105,6 +111,10 @@ namespace Kurenai::Core
 
     LRESULT Window::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     {
+        // ImGuiがマウス/キーボード入力を使う場合でも、リサイズ等のウィンドウ管理は
+        // このエンジン側で引き続き処理する必要があるため、早期returnはしない
+        ImGui_ImplWin32_WndProcHandler(m_Handle, message, wParam, lParam);
+
         switch (message)
         {
         case WM_CLOSE:
