@@ -108,9 +108,14 @@ namespace Kurenai::Assets
     Model LoadModel(RHI::IRHIDevice& device, const std::wstring& filePath)
     {
         Assimp::Importer importer;
+        // JoinIdenticalVerticesは大規模メッシュで数十秒単位のロード時間増になる一方、
+        // このエンジンでは各メッシュがassimp側で既にインデックス化された状態で読み込まれるため
+        // 頂点共有を行わなくても描画結果には影響しない(頂点バッファがやや冗長になるのみ)ので付けない。
+        // GenSmoothNormalsも対象アセットは全メッシュが法線を持つため実質ノーオップであり、
+        // 万一法線を持たないメッシュがあった場合のみ後段のフォールバック(上向き固定法線)が使われる
         const aiScene* scene = importer.ReadFile(
             WideToUtf8(filePath),
-            aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_JoinIdenticalVertices | aiProcess_ConvertToLeftHanded);
+            aiProcess_Triangulate | aiProcess_ConvertToLeftHanded);
 
         if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode)
         {
