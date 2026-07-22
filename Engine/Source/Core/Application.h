@@ -17,7 +17,7 @@ namespace Kurenai::Core
     class Application
     {
     public:
-        explicit Application(uint32_t renderWidth = 1280, uint32_t renderHeight = 720);
+        explicit Application(RHI::GraphicsAPI api = RHI::GraphicsAPI::DX11, uint32_t renderWidth = 1280, uint32_t renderHeight = 720);
         ~Application();
 
         Application(const Application&) = delete;

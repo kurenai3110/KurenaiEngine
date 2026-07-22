@@ -216,7 +216,7 @@ namespace Kurenai::Core
         }
     }
 
-    Application::Application(uint32_t renderWidth, uint32_t renderHeight)
+    Application::Application(RHI::GraphicsAPI api, uint32_t renderWidth, uint32_t renderHeight)
         : m_RenderWidth(renderWidth)
         , m_RenderHeight(renderHeight)
     {
@@ -231,7 +231,7 @@ namespace Kurenai::Core
             }
         });
 
-        m_Device = RHI::CreateDX11Device();
+        m_Device = api == RHI::GraphicsAPI::DX12 ? RHI::CreateDX12Device() : RHI::CreateDX11Device();
         m_SwapChain = m_Device->CreateSwapChain(m_Window->GetHandle(), m_Window->GetWidth(), m_Window->GetHeight());
         m_Device->InitImGui(m_Window->GetHandle());
 
@@ -280,6 +280,8 @@ namespace Kurenai::Core
         gbufferPipelineDesc.VertexShader = m_GBufferVertexShader.get();
         gbufferPipelineDesc.PixelShader = m_GBufferPixelShader.get();
         gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        gbufferPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm, RHI::Format::R8G8B8A8_UNorm, RHI::Format::R8G8B8A8_UNorm };
+        gbufferPipelineDesc.HasDepthStencil = true;
         m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
 
         // SSAOパス(頂点バッファなしのフルスクリーン三角形。遮蔽率の計算とブラーの2つのピクセルシェーダを同じ頂点シェーダで使い回す)
@@ -299,6 +301,7 @@ namespace Kurenai::Core
         ssaoPipelineDesc.VertexShader = m_SSAOVertexShader.get();
         ssaoPipelineDesc.PixelShader = m_SSAOPixelShader.get();
         ssaoPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        ssaoPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
         m_SSAOPipelineState = m_Device->CreatePipelineState(ssaoPipelineDesc);
 
         RHI::ShaderDesc ssaoBlurPsDesc;
@@ -311,6 +314,7 @@ namespace Kurenai::Core
         ssaoBlurPipelineDesc.VertexShader = m_SSAOVertexShader.get();
         ssaoBlurPipelineDesc.PixelShader = m_SSAOBlurPixelShader.get();
         ssaoBlurPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        ssaoBlurPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
         m_SSAOBlurPipelineState = m_Device->CreatePipelineState(ssaoBlurPipelineDesc);
 
         m_SSAOKernel = GenerateSSAOKernel(kSSAOKernelSize);
@@ -340,6 +344,7 @@ namespace Kurenai::Core
         lightingPipelineDesc.VertexShader = m_LightingVertexShader.get();
         lightingPipelineDesc.PixelShader = m_LightingPixelShader.get();
         lightingPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        lightingPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
         m_LightingPipelineState = m_Device->CreatePipelineState(lightingPipelineDesc);
 
         // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
@@ -359,6 +364,7 @@ namespace Kurenai::Core
         presentPipelineDesc.VertexShader = m_PresentVertexShader.get();
         presentPipelineDesc.PixelShader = m_PresentPixelShader.get();
         presentPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        presentPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
         m_PresentPipelineState = m_Device->CreatePipelineState(presentPipelineDesc);
 
         // シャドウパス(ライト視点への深度のみの描画。頂点入力はPOSITIONのみ使用)
@@ -384,6 +390,7 @@ namespace Kurenai::Core
         shadowPipelineDesc.VertexShader = m_ShadowVertexShader.get();
         shadowPipelineDesc.PixelShader = m_ShadowPixelShader.get();
         shadowPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        shadowPipelineDesc.HasDepthStencil = true;
         m_ShadowPipelineState = m_Device->CreatePipelineState(shadowPipelineDesc);
 
         // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する

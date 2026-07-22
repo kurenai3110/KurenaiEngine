@@ -58,7 +58,7 @@
       <PreprocessorDefinitions>_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(SolutionDir)ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)ThirdParty\assimp\include;$(SolutionDir)ThirdParty\assimp\build\include;$(SolutionDir)ThirdParty\imgui;$(SolutionDir)ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(SolutionDir)ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)ThirdParty\DirectXTex\Common;$(SolutionDir)ThirdParty\assimp\include;$(SolutionDir)ThirdParty\assimp\build\include;$(SolutionDir)ThirdParty\imgui;$(SolutionDir)ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
@@ -71,7 +71,7 @@
       <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(SolutionDir)ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)ThirdParty\assimp\include;$(SolutionDir)ThirdParty\assimp\build\include;$(SolutionDir)ThirdParty\imgui;$(SolutionDir)ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(SolutionDir)ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)ThirdParty\DirectXTex\Common;$(SolutionDir)ThirdParty\assimp\include;$(SolutionDir)ThirdParty\assimp\build\include;$(SolutionDir)ThirdParty\imgui;$(SolutionDir)ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
@@ -101,9 +101,20 @@
     <ClInclude Include="Source\RHI\DX11\DX11Texture.h" />
     <ClInclude Include="Source\RHI\DX11\DX11Sampler.h" />
     <ClInclude Include="Source\RHI\DX11\DX11Util.h" />
+    <ClInclude Include="Source\RHI\DX12\DX12Util.h" />
+    <ClInclude Include="Source\RHI\DX12\DX12DescriptorHeap.h" />
+    <ClInclude Include="Source\RHI\DX12\DX12Buffer.h" />
+    <ClInclude Include="Source\RHI\DX12\DX12Shader.h" />
+    <ClInclude Include="Source\RHI\DX12\DX12PipelineState.h" />
+    <ClInclude Include="Source\RHI\DX12\DX12SwapChain.h" />
+    <ClInclude Include="Source\RHI\DX12\DX12CommandList.h" />
+    <ClInclude Include="Source\RHI\DX12\DX12Device.h" />
+    <ClInclude Include="Source\RHI\DX12\DX12Texture.h" />
+    <ClInclude Include="Source\RHI\DX12\DX12Sampler.h" />
     <ClInclude Include="..\ThirdParty\imgui\imgui.h" />
     <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_win32.h" />
     <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_dx11.h" />
+    <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_dx12.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\ThirdParty\imgui\imgui.cpp" />
@@ -112,6 +123,7 @@
     <ClCompile Include="..\ThirdParty\imgui\imgui_widgets.cpp" />
     <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_win32.cpp" />
     <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_dx11.cpp" />
+    <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_dx12.cpp" />
     <ClCompile Include="Source\Core\Window.cpp" />
     <ClCompile Include="Source\Core\Application.cpp" />
     <ClCompile Include="Source\Core\Camera.cpp" />
@@ -124,6 +136,18 @@
     <ClCompile Include="Source\RHI\DX11\DX11Device.cpp" />
     <ClCompile Include="Source\RHI\DX11\DX11Texture.cpp" />
     <ClCompile Include="Source\RHI\DX11\DX11Sampler.cpp" />
+    <ClCompile Include="Source\RHI\DX12\DX12DescriptorHeap.cpp" />
+    <ClCompile Include="Source\RHI\DX12\DX12Buffer.cpp" />
+    <ClCompile Include="Source\RHI\DX12\DX12Shader.cpp" />
+    <ClCompile Include="Source\RHI\DX12\DX12PipelineState.cpp" />
+    <ClCompile Include="Source\RHI\DX12\DX12SwapChain.cpp" />
+    <ClCompile Include="Source\RHI\DX12\DX12CommandList.cpp" />
+    <ClCompile Include="Source\RHI\DX12\DX12Device.cpp" />
+    <ClCompile Include="Source\RHI\DX12\DX12Texture.cpp" />
+    <ClCompile Include="Source\RHI\DX12\DX12Sampler.cpp" />
+    <!-- 配布されているDirectXTex.libはDesktop_2022向けにD3D11用ソースのみでビルドされておりD3D12関数を含まないため、
+         D3D12ヘルパー(CreateTextureEx/PrepareUpload等)のみこのプロジェクトで直接コンパイルする -->
+    <ClCompile Include="..\ThirdParty\DirectXTex\DirectXTex\DirectXTexD3D12.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

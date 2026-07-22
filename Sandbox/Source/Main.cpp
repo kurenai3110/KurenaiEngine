@@ -1,6 +1,7 @@
 #include <Windows.h>
 
 #include <objbase.h>
+#include <shellapi.h>
 
 #include <exception>
 #include <fstream>
@@ -22,6 +23,30 @@ namespace
         MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, wide.data(), length);
         return wide;
     }
+
+    // 「-dx12」引数が指定されていればDX12バックエンドを使う(再ビルド無しでDX11/DX12を比較するため)
+    Kurenai::RHI::GraphicsAPI ParseGraphicsAPI()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return Kurenai::RHI::GraphicsAPI::DX11;
+        }
+
+        Kurenai::RHI::GraphicsAPI api = Kurenai::RHI::GraphicsAPI::DX11;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-dx12") == 0)
+            {
+                api = Kurenai::RHI::GraphicsAPI::DX12;
+                break;
+            }
+        }
+
+        LocalFree(argv);
+        return api;
+    }
 }
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
@@ -32,7 +57,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     int exitCode = 0;
     try
     {
-        Kurenai::Core::Application app;
+        Kurenai::Core::Application app(ParseGraphicsAPI());
         app.Run();
     }
     catch (const std::exception& e)

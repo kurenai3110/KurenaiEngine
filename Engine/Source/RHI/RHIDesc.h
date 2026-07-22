@@ -39,5 +39,10 @@ namespace Kurenai::RHI
         IRHIShader* VertexShader = nullptr;
         IRHIShader* PixelShader = nullptr;
         PrimitiveTopology Topology = PrimitiveTopology::TriangleList;
+
+        // DX12のパイプラインステートオブジェクト作成時にレンダーターゲット/深度のフォーマットを
+        // 事前に確定させる必要があるため保持する。DX11実装では参照しない
+        std::vector<Format> RenderTargetFormats;
+        bool HasDepthStencil = false;
     };
 }

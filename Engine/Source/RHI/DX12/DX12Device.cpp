@@ -1,0 +1,648 @@
+#include "DX12Device.h"
+
+#include <d3dcompiler.h>
+#include <d3dx12.h>
+
+#include <DirectXTex.h>
+
+#include <backends/imgui_impl_dx12.h>
+#include <backends/imgui_impl_win32.h>
+#include <imgui.h>
+
+#include <cstring>
+#include <cwchar>
+#include <vector>
+
+#include "DX12Buffer.h"
+#include "DX12CommandList.h"
+#include "DX12PipelineState.h"
+#include "DX12Sampler.h"
+#include "DX12Shader.h"
+#include "DX12SwapChain.h"
+#include "DX12Texture.h"
+#include "DX12Util.h"
+
+namespace Kurenai::RHI
+{
+    namespace
+    {
+        // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
+        constexpr uint32_t kTextureSlotCount = 7; // t0〜t6 (DeferredLighting.hlslが最大)
+        constexpr uint32_t kSamplerSlotCount = 1; // s0のみ
+        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t6のkTextureSlotCount個ひと組)の最大数。
+        // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく
+        constexpr uint32_t kMaxSrvTableBlocksPerFrame = 4096;
+        // 定数バッファ(Usage==Constant)がリングとして持つスロット数。1フレーム中にUpdateBufferされる
+        // 最大回数(メッシュ数など)を十分上回る値にしておく
+        constexpr uint32_t kConstantBufferRingCapacity = 4096;
+
+        DXGI_FORMAT ToDXGIFormat(Format format)
+        {
+            switch (format)
+            {
+            case Format::R32G32_Float:
+                return DXGI_FORMAT_R32G32_FLOAT;
+            case Format::R32G32B32_Float:
+                return DXGI_FORMAT_R32G32B32_FLOAT;
+            case Format::R8G8B8A8_UNorm:
+                return DXGI_FORMAT_R8G8B8A8_UNORM;
+            case Format::R32G32B32A32_Float:
+            default:
+                return DXGI_FORMAT_R32G32B32A32_FLOAT;
+            }
+        }
+
+        bool HasExtension(const std::wstring& path, const wchar_t* extension)
+        {
+            const size_t extLen = wcslen(extension);
+            if (path.size() < extLen)
+            {
+                return false;
+            }
+            return _wcsicmp(path.c_str() + (path.size() - extLen), extension) == 0;
+        }
+
+        // ImGui用シェーダ可視SRVヒープのフリーリスト割当コールバック。ImGui_ImplDX12_InitInfo::UserDataに
+        // DX12DescriptorHeap*を渡しておき、ここでキャストして使う
+        void ImGuiSrvAlloc(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE* outCpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE* outGpuHandle)
+        {
+            auto* heap = static_cast<DX12DescriptorHeap*>(info->UserData);
+            const uint32_t index = heap->Allocate();
+            *outCpuHandle = heap->GetCpuHandle(index);
+            *outGpuHandle = heap->GetGpuHandle(index);
+        }
+
+        void ImGuiSrvFree(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle)
+        {
+            (void)gpuHandle;
+            auto* heap = static_cast<DX12DescriptorHeap*>(info->UserData);
+            const D3D12_CPU_DESCRIPTOR_HANDLE base = heap->GetCpuHandle(0);
+            const uint32_t index = static_cast<uint32_t>((cpuHandle.ptr - base.ptr) / heap->GetDescriptorSize());
+            heap->Free(index);
+        }
+    }
+
+    DX12Device::DX12Device() = default;
+
+    DX12Device::~DX12Device()
+    {
+        // デバイス/キューが破棄される前にImGuiのバックエンドを終了させる必要がある
+        ShutdownImGui();
+
+        if (m_Device)
+        {
+            WaitForGPU();
+        }
+
+        if (m_FenceEvent)
+        {
+            CloseHandle(m_FenceEvent);
+        }
+    }
+
+    void DX12Device::Initialize()
+    {
+#if defined(_DEBUG)
+        Microsoft::WRL::ComPtr<ID3D12Debug> debugController;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
+        {
+            debugController->EnableDebugLayer();
+        }
+#endif
+
+        UINT dxgiFactoryFlags = 0;
+#if defined(_DEBUG)
+        dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+#endif
+        ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&m_Factory)), "DXGIファクトリの作成に失敗しました");
+
+        ThrowIfFailed(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_Device)), "D3D12デバイスの作成に失敗しました");
+
+        D3D12_COMMAND_QUEUE_DESC queueDesc{};
+        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        ThrowIfFailed(m_Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_CommandQueue)), "コマンドキューの作成に失敗しました");
+
+        ThrowIfFailed(
+            m_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_CommandAllocator)),
+            "コマンドアロケータの作成に失敗しました");
+        ThrowIfFailed(
+            m_Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_CommandAllocator.Get(), nullptr, IID_PPV_ARGS(&m_CommandList)),
+            "コマンドリストの作成に失敗しました");
+
+        ThrowIfFailed(m_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_Fence)), "フェンスの作成に失敗しました");
+        m_FenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!m_FenceEvent)
+        {
+            throw std::runtime_error("フェンスイベントの作成に失敗しました");
+        }
+
+        m_RtvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 16, false);
+        m_DsvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 8, false);
+        m_SrvCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 256, false);
+        m_SamplerCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 4, false);
+        // 1フレーム分のコマンドをまとめて記録してから1回だけ実行する設計のため、描画のたびに
+        // 新しいkTextureSlotCount個のブロックを払い出せるよう、1フレームに必要な最大数を見込んで確保する
+        m_ShaderVisibleSrvHeap = std::make_unique<DX12DescriptorHeap>(
+            m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kTextureSlotCount * kMaxSrvTableBlocksPerFrame, true);
+        m_ShaderVisibleSamplerHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerSlotCount, true);
+        m_ImGuiSrvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 64, true);
+
+        CreateRootSignature();
+
+        ID3D12DescriptorHeap* heaps[] = { m_ShaderVisibleSrvHeap->GetHeap(), m_ShaderVisibleSamplerHeap->GetHeap() };
+        m_CommandList->SetDescriptorHeaps(2, heaps);
+
+        m_ImmediateCommandList = std::make_unique<DX12CommandList>(this);
+    }
+
+    void DX12Device::CreateRootSignature()
+    {
+        CD3DX12_DESCRIPTOR_RANGE srvRange;
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kTextureSlotCount, 0);
+
+        CD3DX12_DESCRIPTOR_RANGE samplerRange;
+        samplerRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, kSamplerSlotCount, 0);
+
+        CD3DX12_ROOT_PARAMETER rootParams[4];
+        rootParams[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
+        rootParams[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);
+        rootParams[2].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
+        rootParams[3].InitAsDescriptorTable(1, &samplerRange, D3D12_SHADER_VISIBILITY_PIXEL);
+
+        CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc;
+        rootSigDesc.Init(4, rootParams, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;
+        Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+        HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signatureBlob, &errorBlob);
+        if (FAILED(hr))
+        {
+            std::string message = "ルートシグネチャのシリアライズに失敗しました";
+            if (errorBlob)
+            {
+                message += ": ";
+                message += static_cast<const char*>(errorBlob->GetBufferPointer());
+            }
+            throw std::runtime_error(message);
+        }
+
+        ThrowIfFailed(
+            m_Device->CreateRootSignature(0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(), IID_PPV_ARGS(&m_RootSignature)),
+            "ルートシグネチャの作成に失敗しました");
+    }
+
+    void DX12Device::ExecuteCommandList()
+    {
+        ThrowIfFailed(m_CommandList->Close(), "コマンドリストのクローズに失敗しました");
+        ID3D12CommandList* commandLists[] = { m_CommandList.Get() };
+        m_CommandQueue->ExecuteCommandLists(1, commandLists);
+    }
+
+    void DX12Device::WaitForGPU()
+    {
+        const uint64_t fenceValueToWaitFor = ++m_FenceValue;
+        ThrowIfFailed(m_CommandQueue->Signal(m_Fence.Get(), fenceValueToWaitFor), "フェンスのシグナルに失敗しました");
+
+        if (m_Fence->GetCompletedValue() < fenceValueToWaitFor)
+        {
+            ThrowIfFailed(m_Fence->SetEventOnCompletion(fenceValueToWaitFor, m_FenceEvent), "フェンスイベントの設定に失敗しました");
+            WaitForSingleObject(m_FenceEvent, INFINITE);
+        }
+
+        ResetCommandList();
+    }
+
+    void DX12Device::SubmitAndWaitIdle()
+    {
+        ExecuteCommandList();
+        WaitForGPU();
+    }
+
+    void DX12Device::ResetCommandList()
+    {
+        ThrowIfFailed(m_CommandAllocator->Reset(), "コマンドアロケータのリセットに失敗しました");
+        ThrowIfFailed(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "コマンドリストのリセットに失敗しました");
+
+        ID3D12DescriptorHeap* heaps[] = { m_ShaderVisibleSrvHeap->GetHeap(), m_ShaderVisibleSamplerHeap->GetHeap() };
+        m_CommandList->SetDescriptorHeaps(2, heaps);
+
+        m_NextSrvTableIndex = 0;
+    }
+
+    uint32_t DX12Device::AllocateSrvTableBlock(uint32_t count)
+    {
+        if (m_NextSrvTableIndex + count > kTextureSlotCount * kMaxSrvTableBlocksPerFrame)
+        {
+            throw std::runtime_error("SRVテーブルブロックの上限を超えました(1フレーム内の描画回数が多すぎます)");
+        }
+
+        const uint32_t base = m_NextSrvTableIndex;
+        m_NextSrvTableIndex += count;
+        return base;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> DX12Device::CreateUploadBuffer(uint64_t sizeInBytes)
+    {
+        const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_UPLOAD);
+        const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeInBytes);
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(
+            m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&resource)),
+            "アップロードバッファの作成に失敗しました");
+        return resource;
+    }
+
+    std::unique_ptr<IRHISwapChain> DX12Device::CreateSwapChain(void* windowHandle, uint32_t width, uint32_t height)
+    {
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = 2;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+
+        Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain1;
+        ThrowIfFailed(
+            m_Factory->CreateSwapChainForHwnd(m_CommandQueue.Get(), static_cast<HWND>(windowHandle), &desc, nullptr, nullptr, &swapChain1),
+            "スワップチェインの作成に失敗しました");
+
+        Microsoft::WRL::ComPtr<IDXGISwapChain3> swapChain3;
+        ThrowIfFailed(swapChain1.As(&swapChain3), "IDXGISwapChain3の取得に失敗しました");
+
+        return std::make_unique<DX12SwapChain>(this, swapChain3, width, height);
+    }
+
+    std::unique_ptr<IRHIBuffer> DX12Device::CreateBuffer(const BufferDesc& desc)
+    {
+        uint32_t slotSizeInBytes = desc.SizeInBytes;
+        uint32_t ringCapacity = 1;
+        if (desc.Usage == BufferUsage::Constant)
+        {
+            // ルート定数バッファビューは256バイトアライメントを要求するため切り上げる
+            slotSizeInBytes = (slotSizeInBytes + 255) & ~255u;
+
+            // 1フレームぶんのコマンドをすべて記録してから1回だけ実行する設計のため、同じ定数バッファへ
+            // メッシュごとに複数回UpdateBufferすると、GPU実行時にはそのフレーム最後の書き込みへ
+            // 全描画が上書きされてしまう。これを避けるため、リング状に複数コピーを確保しておく
+            ringCapacity = kConstantBufferRingCapacity;
+        }
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource = CreateUploadBuffer(static_cast<uint64_t>(slotSizeInBytes) * ringCapacity);
+
+        void* mappedPtr = nullptr;
+        const D3D12_RANGE readRange{ 0, 0 };
+        ThrowIfFailed(resource->Map(0, &readRange, &mappedPtr), "バッファのマップに失敗しました");
+
+        if (desc.InitialData)
+        {
+            memcpy(mappedPtr, desc.InitialData, desc.SizeInBytes);
+        }
+
+        return std::make_unique<DX12Buffer>(resource, mappedPtr, slotSizeInBytes, desc.StrideInBytes, desc.Usage, ringCapacity);
+    }
+
+    std::unique_ptr<IRHIShader> DX12Device::CreateShader(const ShaderDesc& desc)
+    {
+        const char* target = desc.Stage == ShaderStage::Vertex ? "vs_5_0" : "ps_5_0";
+
+        UINT compileFlags = 0;
+#if defined(_DEBUG)
+        compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+
+        Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
+        Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+        HRESULT hr = D3DCompileFromFile(
+            desc.FilePath.c_str(),
+            nullptr,
+            D3D_COMPILE_STANDARD_FILE_INCLUDE,
+            desc.EntryPoint.c_str(),
+            target,
+            compileFlags,
+            0,
+            &bytecode,
+            &errorBlob);
+
+        if (FAILED(hr))
+        {
+            std::string message = "シェーダのコンパイルに失敗しました";
+            if (errorBlob)
+            {
+                message += ": ";
+                message += static_cast<const char*>(errorBlob->GetBufferPointer());
+            }
+            throw std::runtime_error(message);
+        }
+
+        return std::make_unique<DX12Shader>(desc.Stage, bytecode);
+    }
+
+    std::unique_ptr<IRHIPipelineState> DX12Device::CreatePipelineState(const PipelineStateDesc& desc)
+    {
+        auto* vertexShader = static_cast<DX12Shader*>(desc.VertexShader);
+        auto* pixelShader = static_cast<DX12Shader*>(desc.PixelShader);
+
+        std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
+        elements.reserve(desc.InputLayout.size());
+        for (const auto& element : desc.InputLayout)
+        {
+            D3D12_INPUT_ELEMENT_DESC elementDesc{};
+            elementDesc.SemanticName = element.SemanticName.c_str();
+            elementDesc.SemanticIndex = element.SemanticIndex;
+            elementDesc.Format = ToDXGIFormat(element.Format);
+            elementDesc.InputSlot = 0;
+            elementDesc.AlignedByteOffset = element.AlignedByteOffset;
+            elementDesc.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+            elementDesc.InstanceDataStepRate = 0;
+            elements.push_back(elementDesc);
+        }
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
+        psoDesc.pRootSignature = m_RootSignature.Get();
+        psoDesc.VS = vertexShader->GetBytecode();
+        psoDesc.PS = pixelShader->GetBytecode();
+        psoDesc.InputLayout = { elements.empty() ? nullptr : elements.data(), static_cast<UINT>(elements.size()) };
+        psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        psoDesc.DepthStencilState.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
+        psoDesc.SampleMask = UINT_MAX;
+        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        psoDesc.NumRenderTargets = static_cast<UINT>(desc.RenderTargetFormats.size());
+        for (size_t i = 0; i < desc.RenderTargetFormats.size(); ++i)
+        {
+            psoDesc.RTVFormats[i] = ToDXGIFormat(desc.RenderTargetFormats[i]);
+        }
+        psoDesc.DSVFormat = desc.HasDepthStencil ? DXGI_FORMAT_D24_UNORM_S8_UINT : DXGI_FORMAT_UNKNOWN;
+        psoDesc.SampleDesc.Count = 1;
+
+        Microsoft::WRL::ComPtr<ID3D12PipelineState> pso;
+        ThrowIfFailed(m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pso)), "パイプラインステートの作成に失敗しました");
+
+        return std::make_unique<DX12PipelineState>(pso, desc.Topology);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateTextureFromImage(const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image)
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(
+            DirectX::CreateTextureEx(m_Device.Get(), metadata, D3D12_RESOURCE_FLAG_NONE, DirectX::CREATETEX_DEFAULT, &resource),
+            "テクスチャの作成に失敗しました");
+
+        std::vector<D3D12_SUBRESOURCE_DATA> subresources;
+        ThrowIfFailed(
+            DirectX::PrepareUpload(m_Device.Get(), image.GetImages(), image.GetImageCount(), metadata, subresources),
+            "アップロードデータの準備に失敗しました");
+
+        const UINT subresourceCount = static_cast<UINT>(subresources.size());
+        const D3D12_RESOURCE_DESC destDesc = resource->GetDesc();
+        UINT64 requiredSize = 0;
+        m_Device->GetCopyableFootprints(&destDesc, 0, subresourceCount, 0, nullptr, nullptr, nullptr, &requiredSize);
+
+        // DirectX::CreateTextureEx はデスクトップ環境ではリソースをD3D12_RESOURCE_STATE_COMMONで作成するため、
+        // コピー先として使う前にCOPY_DESTへ明示的に遷移させる必要がある
+        const D3D12_RESOURCE_BARRIER toCopyDestBarrier =
+            CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        m_CommandList->ResourceBarrier(1, &toCopyDestBarrier);
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer = CreateUploadBuffer(requiredSize);
+        UpdateSubresources(m_CommandList.Get(), resource.Get(), uploadBuffer.Get(), 0, 0, subresourceCount, subresources.data());
+
+        const D3D12_RESOURCE_BARRIER toSrvBarrier =
+            CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        m_CommandList->ResourceBarrier(1, &toSrvBarrier);
+
+        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = metadata.format;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        if (metadata.IsCubemap())
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            srvDesc.TextureCube.MipLevels = static_cast<UINT>(metadata.mipLevels);
+        }
+        else
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
+        }
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+        auto texture = std::make_unique<DX12Texture>(
+            this, resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid);
+
+        // アップロードバッファはこの関数を抜けるまで生存させる必要があるため、ここで同期的に実行完了を待つ
+        SubmitAndWaitIdle();
+
+        return texture;
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateTextureFromFile(const std::wstring& filePath, bool sRGB)
+    {
+        DirectX::TexMetadata metadata{};
+        DirectX::ScratchImage image;
+
+        HRESULT hr;
+        if (HasExtension(filePath, L".dds"))
+        {
+            hr = DirectX::LoadFromDDSFile(filePath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, image);
+        }
+        else if (HasExtension(filePath, L".tga"))
+        {
+            hr = DirectX::LoadFromTGAFile(filePath.c_str(), DirectX::TGA_FLAGS_NONE, &metadata, image);
+        }
+        else
+        {
+            hr = DirectX::LoadFromWICFile(filePath.c_str(), DirectX::WIC_FLAGS_FORCE_RGB, &metadata, image);
+        }
+        ThrowIfFailed(hr, "テクスチャの読み込みに失敗しました");
+
+        if (sRGB)
+        {
+            image.OverrideFormat(DirectX::MakeSRGB(metadata.format));
+        }
+
+        return CreateTextureFromImage(image.GetMetadata(), image);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+    {
+        DirectX::TexMetadata metadata{};
+        metadata.width = 1;
+        metadata.height = 1;
+        metadata.depth = 1;
+        metadata.arraySize = 1;
+        metadata.mipLevels = 1;
+        metadata.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        metadata.dimension = DirectX::TEX_DIMENSION_TEXTURE2D;
+
+        DirectX::ScratchImage image;
+        ThrowIfFailed(image.Initialize2D(metadata.format, 1, 1, 1, 1), "1x1テクスチャの作成に失敗しました");
+
+        const uint8_t pixel[4] = { r, g, b, a };
+        memcpy(image.GetImage(0, 0, 0)->pixels, pixel, sizeof(pixel));
+
+        return CreateTextureFromImage(metadata, image);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateRenderTexture(uint32_t width, uint32_t height, Format format)
+    {
+        const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);
+
+        D3D12_CLEAR_VALUE clearValue{};
+        clearValue.Format = dxgiFormat;
+        clearValue.Color[0] = clearValue.Color[1] = clearValue.Color[2] = 0.0f;
+        clearValue.Color[3] = 1.0f;
+
+        const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+        const CD3DX12_RESOURCE_DESC resourceDesc =
+            CD3DX12_RESOURCE_DESC::Tex2D(dxgiFormat, width, height, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(
+            m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_RENDER_TARGET, &clearValue, IID_PPV_ARGS(&resource)),
+            "レンダーテクスチャの作成に失敗しました");
+
+        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = dxgiFormat;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture2D.MipLevels = 1;
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+        const uint32_t rtvIndex = m_RtvHeap->Allocate();
+        m_Device->CreateRenderTargetView(resource.Get(), nullptr, m_RtvHeap->GetCpuHandle(rtvIndex));
+
+        return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_RENDER_TARGET, srvIndex, rtvIndex, DX12Texture::kInvalid);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateDepthTexture(uint32_t width, uint32_t height)
+    {
+        // 深度テクスチャは後段のライティングパスでサンプリングするためSHADER_RESOURCEも付与し、
+        // Typelessフォーマットで作成してDSV/SRVそれぞれに適したビューを個別に張る(DX11実装と同じ方針)
+        D3D12_CLEAR_VALUE clearValue{};
+        clearValue.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        clearValue.DepthStencil.Depth = 1.0f;
+        clearValue.DepthStencil.Stencil = 0;
+
+        const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+        const CD3DX12_RESOURCE_DESC resourceDesc =
+            CD3DX12_RESOURCE_DESC::Tex2D(DXGI_FORMAT_R24G8_TYPELESS, width, height, 1, 1, 1, 0, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(
+            m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue, IID_PPV_ARGS(&resource)),
+            "深度テクスチャの作成に失敗しました");
+
+        const uint32_t dsvIndex = m_DsvHeap->Allocate();
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+        dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        m_Device->CreateDepthStencilView(resource.Get(), &dsvDesc, m_DsvHeap->GetCpuHandle(dsvIndex));
+
+        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture2D.MipLevels = 1;
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+        return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, dsvIndex);
+    }
+
+    std::unique_ptr<IRHISampler> DX12Device::CreateDefaultSampler()
+    {
+        D3D12_SAMPLER_DESC samplerDesc{};
+        samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+
+        const uint32_t index = m_SamplerCpuHeap->Allocate();
+        m_Device->CreateSampler(&samplerDesc, m_SamplerCpuHeap->GetCpuHandle(index));
+
+        return std::make_unique<DX12Sampler>(this, index);
+    }
+
+    IRHICommandList* DX12Device::GetImmediateCommandList()
+    {
+        return m_ImmediateCommandList.get();
+    }
+
+    void DX12Device::InitImGui(void* windowHandle)
+    {
+        if (m_ImGuiInitialized)
+        {
+            return;
+        }
+
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGui::StyleColorsDark();
+
+        ImGui_ImplDX12_InitInfo initInfo{};
+        initInfo.Device = m_Device.Get();
+        initInfo.CommandQueue = m_CommandQueue.Get();
+        initInfo.NumFramesInFlight = 2;
+        initInfo.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        initInfo.SrvDescriptorHeap = m_ImGuiSrvHeap->GetHeap();
+        initInfo.UserData = m_ImGuiSrvHeap.get();
+        initInfo.SrvDescriptorAllocFn = &ImGuiSrvAlloc;
+        initInfo.SrvDescriptorFreeFn = &ImGuiSrvFree;
+
+        if (!ImGui_ImplWin32_Init(windowHandle) || !ImGui_ImplDX12_Init(&initInfo))
+        {
+            ImGui::DestroyContext();
+            throw std::runtime_error("ImGuiの初期化に失敗しました");
+        }
+
+        m_ImGuiInitialized = true;
+    }
+
+    void DX12Device::ShutdownImGui()
+    {
+        if (!m_ImGuiInitialized)
+        {
+            return;
+        }
+
+        ImGui_ImplDX12_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        m_ImGuiInitialized = false;
+    }
+
+    void DX12Device::ImGuiNewFrame()
+    {
+        ImGui_ImplDX12_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        // ImGui_ImplDX12_NewFrame()はテクスチャ管理のため内部でSetDescriptorHeapsを呼び、
+        // シェーダ可視ヒープの割り当てをImGui自身のヒープへ切り替えてしまう。以降の描画が
+        // SetTexture/SetSamplerで使うヒープを正しく参照できるよう、ここで明示的に戻す
+        ID3D12DescriptorHeap* heaps[] = { m_ShaderVisibleSrvHeap->GetHeap(), m_ShaderVisibleSamplerHeap->GetHeap() };
+        m_CommandList->SetDescriptorHeaps(2, heaps);
+    }
+
+    void DX12Device::ImGuiRender()
+    {
+        ImGui::Render();
+        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), m_CommandList.Get());
+    }
+
+    std::unique_ptr<IRHIDevice> CreateDX12Device()
+    {
+        auto device = std::make_unique<DX12Device>();
+        device->Initialize();
+        return device;
+    }
+}

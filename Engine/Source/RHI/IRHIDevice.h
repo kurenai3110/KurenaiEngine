@@ -39,4 +39,5 @@ namespace Kurenai::RHI
     };
 
     std::unique_ptr<IRHIDevice> CreateDX11Device();
+    std::unique_ptr<IRHIDevice> CreateDX12Device();
 }
