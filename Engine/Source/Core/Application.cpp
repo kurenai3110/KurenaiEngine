@@ -39,12 +39,21 @@ namespace Kurenai::Core
         {
             const wchar_t* DisplayName;
             const wchar_t* RelativePath;
+
+            // trueの場合、FrameCameraToModelの自動配置ヒューリスティックの代わりにこの初期カメラ位置を使う。
+            // Bistro Exteriorは密集した屋外の街区全体を包む巨大なバウンディングボックスを持ち、
+            // ホール用ヒューリスティック(バウンズを20%内側に入った位置)では建物の壁の中に埋まってしまうため、
+            // 実際に描画結果を確認して選んだ、街区中心部の広場(街灯・店舗・大きな木がある場所)を
+            // 見渡せる位置を明示的に指定する
+            bool HasCameraOverride = false;
+            float CameraPosition[3] = { 0.0f, 0.0f, 0.0f };
+            float CameraYaw = 0.0f;
         };
 
         const SceneEntry kScenes[] =
         {
             { L"Sponza", L"Assets\\Sponza\\Sponza.gltf" },
-            { L"Bistro - Exterior", L"Assets\\Bistro\\BistroExterior.fbx" },
+            { L"Bistro - Exterior", L"Assets\\Bistro\\BistroExterior.fbx", true, { 64.4f, 2.0f, -58.8f }, 0.0f },
             { L"Bistro - Interior", L"Assets\\Bistro\\BistroInterior.fbx" },
             { L"Bistro - Interior (Wine Cellar)", L"Assets\\Bistro\\BistroInterior_Wine.fbx" },
             { L"White Surface Test", L"Assets\\MaterialTest\\MaterialTest.gltf" },
@@ -258,13 +267,23 @@ namespace Kurenai::Core
 
     void Application::FrameCameraToModel()
     {
-        const float centerX = (m_Model.BoundsMin[0] + m_Model.BoundsMax[0]) * 0.5f;
-        const float centerY = (m_Model.BoundsMin[1] + m_Model.BoundsMax[1]) * 0.5f;
-        const float centerZ = (m_Model.BoundsMin[2] + m_Model.BoundsMax[2]) * 0.5f;
         const float sizeY = m_Model.BoundsMax[1] - m_Model.BoundsMin[1];
         const float dx = m_Model.BoundsMax[0] - m_Model.BoundsMin[0];
         const float dz = m_Model.BoundsMax[2] - m_Model.BoundsMin[2];
         const float diagonal = std::sqrt(dx * dx + sizeY * sizeY + dz * dz);
+
+        const SceneEntry& currentScene = kScenes[m_CurrentSceneIndex];
+        if (currentScene.HasCameraOverride)
+        {
+            m_Camera.SetPosition({ currentScene.CameraPosition[0], currentScene.CameraPosition[1], currentScene.CameraPosition[2] });
+            m_Camera.SetYawPitch(currentScene.CameraYaw, 0.0f);
+            m_Camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
+            return;
+        }
+
+        const float centerX = (m_Model.BoundsMin[0] + m_Model.BoundsMax[0]) * 0.5f;
+        const float centerY = (m_Model.BoundsMin[1] + m_Model.BoundsMax[1]) * 0.5f;
+        const float centerZ = (m_Model.BoundsMin[2] + m_Model.BoundsMax[2]) * 0.5f;
         const float eyeHeight = m_Model.BoundsMin[1] + sizeY * 0.15f;
 
         const float longAxis = std::max(dx, dz);
