@@ -16,6 +16,7 @@ Texture2D MaterialTexture : register(t2);
 Texture2D DepthTexture : register(t3);
 Texture2D ShadowMapTexture : register(t4);
 TextureCube SkyboxTexture : register(t5);
+Texture2D AOTexture : register(t6);
 SamplerState DefaultSampler : register(s0);
 
 struct PSInput
@@ -123,7 +124,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
     float3 diffuseColor = albedo * (1.0f - metallic);
 
-    float3 color = diffuseColor * 0.03f; // 環境光の簡易近似
+    float ao = AOTexture.Sample(DefaultSampler, input.UV).r;
+    float3 color = diffuseColor * 0.03f * ao; // 環境光の簡易近似(SSAOで遮蔽率を適用)
 
     if (NdotL > 0.0f)
     {

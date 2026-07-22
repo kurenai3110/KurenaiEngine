@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <memory>
+#include <vector>
 
 #include "Assets/Model.h"
 #include "Camera.h"
@@ -33,6 +34,7 @@ namespace Kurenai::Core
         void Update(float deltaTime);
         void Render();
         void RenderSceneSwitchUI();
+        void RenderPostProcessUI();
         DirectX::XMMATRIX ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const;
 
         std::unique_ptr<Window> m_Window;
@@ -51,6 +53,21 @@ namespace Kurenai::Core
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
         std::unique_ptr<RHI::IRHITexture> m_GBufferDepth;
+
+        // SSAOパス(G-BufferのNormal/Depthから遮蔽率を計算し、ブラーで均す。G-Bufferと同じレンダー解像度)
+        std::unique_ptr<RHI::IRHIShader> m_SSAOVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_SSAOPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SSAOPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_SSAOBlurPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SSAOBlurPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_SSAORawTexture;
+        std::unique_ptr<RHI::IRHITexture> m_SSAOTexture;
+        std::unique_ptr<RHI::IRHITexture> m_SSAOWhiteTexture; // SSAO無効時に使う、常に遮蔽なし(白)のテクスチャ
+        std::unique_ptr<RHI::IRHIBuffer> m_SSAOConstantBuffer;
+        std::vector<DirectX::XMFLOAT4> m_SSAOKernel;
+        bool m_SSAOEnabled = true;
+        float m_SSAORadius = 0.5f;
+        float m_SSAOPower = 1.5f;
 
         // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)
         std::unique_ptr<RHI::IRHIShader> m_LightingVertexShader;

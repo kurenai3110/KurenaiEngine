@@ -96,6 +96,7 @@
     <None Include="Shaders\GBuffer.hlsl" />
     <None Include="Shaders\DeferredLighting.hlsl" />
     <None Include="Shaders\Present.hlsl" />
+    <None Include="Shaders\SSAO.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Engine\Engine.vcxproj">

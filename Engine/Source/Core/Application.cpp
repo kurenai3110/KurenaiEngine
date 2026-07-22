@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <random>
 
 #include "Assets/ModelLoader.h"
 
@@ -44,6 +45,9 @@ namespace Kurenai::Core
             DirectX::XMFLOAT4 CameraPosition;
             DirectX::XMFLOAT4 LightDirection;
             DirectX::XMFLOAT4 LightColor;
+            // SSAOパスがView空間でのサンプリングに使う(末尾に追加し、既存シェーダのオフセットは変えない)
+            DirectX::XMFLOAT4X4 View;
+            DirectX::XMFLOAT4X4 Proj;
         };
 
         struct alignas(16) MaterialConstants
@@ -52,6 +56,47 @@ namespace Kurenai::Core
             float RoughnessFactor;
             float Padding[2];
         };
+
+        // SSAO.hlsl側のkSSAOKernelSizeと一致させる必要がある
+        constexpr uint32_t kSSAOKernelSize = 16;
+
+        struct alignas(16) SSAOConstants
+        {
+            DirectX::XMFLOAT4 Samples[kSSAOKernelSize]; // タンジェント空間の半球カーネル
+            DirectX::XMFLOAT4 Params;                   // x: 半径, y: バイアス, z: 強さ(べき乗), w: 未使用
+        };
+
+        // タンジェント空間(Z軸=法線方向)の半球状にランダムなカーネルサンプルを生成する。
+        // John Chapmanのチュートリアルにならい、原点付近にサンプルが偏るようスケーリングして
+        // 近距離のディテールを優先的に拾う
+        std::vector<DirectX::XMFLOAT4> GenerateSSAOKernel(uint32_t kernelSize)
+        {
+            std::mt19937 rng(12345);
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+            std::vector<DirectX::XMFLOAT4> kernel;
+            kernel.reserve(kernelSize);
+            for (uint32_t i = 0; i < kernelSize; ++i)
+            {
+                DirectX::XMVECTOR sample = DirectX::XMVectorSet(
+                    dist(rng) * 2.0f - 1.0f,
+                    dist(rng) * 2.0f - 1.0f,
+                    dist(rng),
+                    0.0f);
+                sample = DirectX::XMVector3Normalize(sample);
+                sample = DirectX::XMVectorScale(sample, dist(rng));
+
+                float scale = static_cast<float>(i) / static_cast<float>(kernelSize);
+                scale = 0.1f + 0.9f * scale * scale;
+                sample = DirectX::XMVectorScale(sample, scale);
+
+                DirectX::XMFLOAT4 sampleF;
+                DirectX::XMStoreFloat4(&sampleF, sample);
+                sampleF.w = 0.0f;
+                kernel.push_back(sampleF);
+            }
+            return kernel;
+        }
 
         struct SceneEntry
         {
@@ -169,6 +214,47 @@ namespace Kurenai::Core
         gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
         m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
 
+        // SSAOパス(頂点バッファなしのフルスクリーン三角形。遮蔽率の計算とブラーの2つのピクセルシェーダを同じ頂点シェーダで使い回す)
+        RHI::ShaderDesc ssaoVsDesc;
+        ssaoVsDesc.Stage = RHI::ShaderStage::Vertex;
+        ssaoVsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        ssaoVsDesc.EntryPoint = "VSMain";
+        m_SSAOVertexShader = m_Device->CreateShader(ssaoVsDesc);
+
+        RHI::ShaderDesc ssaoPsDesc;
+        ssaoPsDesc.Stage = RHI::ShaderStage::Pixel;
+        ssaoPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        ssaoPsDesc.EntryPoint = "PSMain";
+        m_SSAOPixelShader = m_Device->CreateShader(ssaoPsDesc);
+
+        RHI::PipelineStateDesc ssaoPipelineDesc;
+        ssaoPipelineDesc.VertexShader = m_SSAOVertexShader.get();
+        ssaoPipelineDesc.PixelShader = m_SSAOPixelShader.get();
+        ssaoPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        m_SSAOPipelineState = m_Device->CreatePipelineState(ssaoPipelineDesc);
+
+        RHI::ShaderDesc ssaoBlurPsDesc;
+        ssaoBlurPsDesc.Stage = RHI::ShaderStage::Pixel;
+        ssaoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        ssaoBlurPsDesc.EntryPoint = "PSMainBlur";
+        m_SSAOBlurPixelShader = m_Device->CreateShader(ssaoBlurPsDesc);
+
+        RHI::PipelineStateDesc ssaoBlurPipelineDesc;
+        ssaoBlurPipelineDesc.VertexShader = m_SSAOVertexShader.get();
+        ssaoBlurPipelineDesc.PixelShader = m_SSAOBlurPixelShader.get();
+        ssaoBlurPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        m_SSAOBlurPipelineState = m_Device->CreatePipelineState(ssaoBlurPipelineDesc);
+
+        m_SSAOKernel = GenerateSSAOKernel(kSSAOKernelSize);
+
+        RHI::BufferDesc ssaoConstantBufferDesc;
+        ssaoConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        ssaoConstantBufferDesc.SizeInBytes = sizeof(SSAOConstants);
+        m_SSAOConstantBuffer = m_Device->CreateBuffer(ssaoConstantBufferDesc);
+
+        // SSAO無効時はこの常に白(遮蔽なし)のテクスチャをライティングパスに渡す
+        m_SSAOWhiteTexture = m_Device->CreateSolidColorTexture(255, 255, 255, 255);
+
         // ライティングパス(頂点バッファなしのフルスクリーン三角形)
         RHI::ShaderDesc lightingVsDesc;
         lightingVsDesc.Stage = RHI::ShaderStage::Vertex;
@@ -266,6 +352,8 @@ namespace Kurenai::Core
         m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_GBufferDepth = m_Device->CreateDepthTexture(width, height);
+        m_SSAORawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_SSAOTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
     }
 
@@ -293,6 +381,10 @@ namespace Kurenai::Core
         const float dx = m_Model.BoundsMax[0] - m_Model.BoundsMin[0];
         const float dz = m_Model.BoundsMax[2] - m_Model.BoundsMin[2];
         const float diagonal = std::sqrt(dx * dx + sizeY * sizeY + dz * dz);
+
+        // SSAOのサンプリング半径はシーンの規模に応じて変わるべきなので、対角線に比例させる
+        // (小さすぎる/大きすぎるシーンでも遮蔽表現が破綻しないよう妥当な範囲にクランプする)
+        m_SSAORadius = std::clamp(diagonal * 0.01f, 0.05f, 2.0f);
 
         const SceneEntry& currentScene = kScenes[m_CurrentSceneIndex];
         if (currentScene.HasCameraOverride)
@@ -431,6 +523,22 @@ namespace Kurenai::Core
         ImGui::End();
     }
 
+    void Application::RenderPostProcessUI()
+    {
+        ImGui::SetNextWindowPos(ImVec2(10.0f, 280.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Post Processing");
+
+        ImGui::Checkbox("Enable SSAO", &m_SSAOEnabled);
+        if (m_SSAOEnabled)
+        {
+            ImGui::SliderFloat("SSAO Radius", &m_SSAORadius, 0.01f, 5.0f);
+            ImGui::SliderFloat("SSAO Power", &m_SSAOPower, 0.1f, 4.0f);
+        }
+
+        ImGui::End();
+    }
+
     void Application::Run()
     {
         while (!m_Window->ShouldClose())
@@ -534,6 +642,7 @@ namespace Kurenai::Core
 
         m_Device->ImGuiNewFrame();
         RenderSceneSwitchUI();
+        RenderPostProcessUI();
 
         auto* commandList = m_Device->GetImmediateCommandList();
 
@@ -553,6 +662,8 @@ namespace Kurenai::Core
         constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
         constants.LightDirection = { lightDirectionNorm.x, lightDirectionNorm.y, lightDirectionNorm.z, 0.0f };
         constants.LightColor = { 3.0f, 2.9f, 2.7f, 0.0f };
+        DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(m_Camera.GetViewMatrix()));
+        DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(m_Camera.GetProjectionMatrix()));
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度) ---
@@ -605,6 +716,34 @@ namespace Kurenai::Core
             commandList->DrawIndexed(mesh.IndexCount, 0, 0);
         }
 
+        // --- SSAOパス: G-BufferのNormal/Depthから遮蔽率を計算し、ブラーで均す(常に指定した内部解像度) ---
+        if (m_SSAOEnabled)
+        {
+            SSAOConstants ssaoConstants{};
+            std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
+            ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
+            commandList->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
+
+            RHI::IRHITexture* ssaoRawTarget[] = { m_SSAORawTexture.get() };
+            commandList->SetRenderTargets(ssaoRawTarget, 1, nullptr);
+            commandList->SetViewport(gbufferViewport);
+
+            commandList->SetPipelineState(m_SSAOPipelineState.get());
+            commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+            commandList->SetConstantBuffer(1, m_SSAOConstantBuffer.get());
+            commandList->SetSampler(0, m_Sampler.get());
+            commandList->SetTexture(0, m_GBufferNormal.get());
+            commandList->SetTexture(1, m_GBufferDepth.get());
+            commandList->Draw(3, 0);
+
+            // ブラーパス: 遮蔽率のタイル状ノイズをボックスブラーで均す
+            RHI::IRHITexture* ssaoBlurTarget[] = { m_SSAOTexture.get() };
+            commandList->SetRenderTargets(ssaoBlurTarget, 1, nullptr);
+            commandList->SetPipelineState(m_SSAOBlurPipelineState.get());
+            commandList->SetTexture(0, m_SSAORawTexture.get());
+            commandList->Draw(3, 0);
+        }
+
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         RHI::IRHITexture* sceneColorTarget[] = { m_SceneColor.get() };
         commandList->SetRenderTargets(sceneColorTarget, 1, nullptr);
@@ -622,6 +761,7 @@ namespace Kurenai::Core
         commandList->SetTexture(3, m_GBufferDepth.get());
         commandList->SetTexture(4, m_ShadowMap.get());
         commandList->SetTexture(5, m_SkyboxTexture.get());
+        commandList->SetTexture(6, m_SSAOEnabled ? m_SSAOTexture.get() : m_SSAOWhiteTexture.get());
         commandList->Draw(3, 0);
 
         // --- Presentパス: SceneColorを、アスペクト比を保ってバックバッファへ出力 ---
