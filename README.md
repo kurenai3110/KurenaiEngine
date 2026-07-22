@@ -1,12 +1,12 @@
 # KurenaiEngine
 
-DirectX 11 / DirectX 12 対応を目指す自作ゲームエンジン。RHI(Rendering Hardware Interface)抽象化レイヤーの上にDX11バックエンドを実装しており、assimp経由でglTF・FBXモデルの読み込み・描画に対応しています。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。法線マッピングの接線は画面空間微分から近似計算しています。
+DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。RHI(Rendering Hardware Interface)抽象化レイヤーの上にDX11・DX12それぞれのバックエンド(デバイス、コマンドリスト、ImGui連携など)を実装しており、実行時に切り替えられます。assimp経由でglTF・FBXモデルの読み込み・描画に対応しています。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。法線マッピングの接線は画面空間微分から近似計算しています。シャドウマッピングによる影の描画、SSAO(スクリーンスペース・アンビエントオクルージョン)、太陽光の昼夜サイクルにも対応しています。
 
-描画パイプラインは ジオメトリパス(G-Buffer書き込み) → ライティングパス(G-Bufferを読みSceneColorへ出力) → Presentパス(SceneColorをバックバッファへ表示) の3パス構成です。G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(`Application`のコンストラクタ引数、既定は1280x720)、Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
+描画パイプラインは シャドウパス(サンライト視点で深度のみ描画) → ジオメトリパス(G-Buffer書き込み) → SSAOパス(Normal/深度からAOを計算しブラー) → ライティングパス(G-Buffer・シャドウマップ・SSAO・スカイボックスを読みSceneColorへ出力) → Presentパス(選択中のデバッグビューをバックバッファへ表示) の5パス構成です。シャドウ・SSAOはそれぞれON/OFF可能で、OFF時はシャドウパス/SSAOパスをスキップします。G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(`Application`のコンストラクタ引数、既定は1280x720)、Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
 
 ## 構成
 
-- `Engine/` — エンジン本体(静的ライブラリ)。RHI抽象化レイヤー、DX11バックエンド、モデルローダーなど。
+- `Engine/` — エンジン本体(静的ライブラリ)。RHI抽象化レイヤー、DX11/DX12バックエンド、モデルローダーなど。
 - `Sandbox/` — 動作確認用の実行ファイル。シェーダ(`Shaders/`)を含む。
 - `ThirdParty/` — 外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp。
 - `Assets/` — エンジンが実際に読み込むモデル・テクスチャなどのアセット。
@@ -71,6 +71,12 @@ MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
 
 `Sandbox.exe` を実行すると起動時にSponzaを読み込んで表示します。モデルパスは実行ファイルの場所から4階層上をリポジトリルートとみなして解決しているため、`Build\Bin\<Platform>\<Configuration>\` 以外の場所に実行ファイルを配置すると読み込みに失敗します。
 
+既定ではDX11バックエンドで起動します。`-dx12` 引数を付けて起動するとDX12バックエンドを使用します(再ビルド不要でDX11/DX12を比較できます)。
+
+```
+Sandbox.exe -dx12
+```
+
 ## 操作方法
 
 | 操作 | 入力 |
@@ -80,19 +86,21 @@ MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
 | 上下移動 | E / Q |
 | 視点回転 | 右クリックを押しながらマウス移動 |
 | 移動速度アップ | Shift (押している間) |
-| 表示アセットの切り替え | 画面左上のImGui「Scenes」パネルのボタン |
+| 各種設定・切り替え | 画面左上のImGuiパネル群(下記) |
 
-### 表示アセット一覧(Scenesパネル)
+### ImGuiパネル
 
-- Sponza
-- Bistro - Exterior
-- Bistro - Interior
-- Bistro - Interior (Wine Cellar)
-- White Surface Test(粗さ0〜1の球体列)
+画面左上に常時表示される4つのImGuiパネルから各種設定を変更できます。
 
-画面左上に常時表示されるImGuiの「Scenes」パネルのボタンをクリックするとそのアセットを読み込みます。現在表示中のアセットに対応するボタンはグレーアウトされます。
-
-切り替え時はモデルとテクスチャを同期的に再読み込みするため、Bistroのような大容量アセットでは数秒〜数十秒ウィンドウが応答しなくなります(2回目以降はモデルキャッシュにより高速化されます)。読み込み完了後、タイトルバーに現在表示中のアセット名が表示されます。
+- **Scenes** — 表示アセットの切り替え。ボタンをクリックするとそのアセットを読み込みます。現在表示中のアセットに対応するボタンはグレーアウトされます。切り替え時はモデルとテクスチャを同期的に再読み込みするため、Bistroのような大容量アセットでは数秒〜数十秒ウィンドウが応答しなくなります(2回目以降はモデルキャッシュにより高速化されます)。読み込み完了後、タイトルバーに現在表示中のアセット名が表示されます。
+  - Sponza
+  - Bistro - Exterior
+  - Bistro - Interior
+  - Bistro - Interior (Wine Cellar)
+  - White Surface Test(粗さ0〜1の球体列)
+- **Post Processing** — SSAOのON/OFFと半径(Radius)/強さ(Power)、シャドウのON/OFFを切り替え
+- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / SSAO / Shadow Map)
+- **Lighting** — 太陽光の時刻(Time of Day, 0〜24時)をスライダーで指定。Auto Advanceを有効にすると時刻が自動で進行(速度をSpeedで調整)
 
 ## Assetsフォルダについて
 
