@@ -189,8 +189,15 @@ namespace Kurenai::Assets
                 continue;
             }
 
-            // 非一様スケールは考慮せず、回転成分のみで法線を変換する簡易実装
-            const aiMatrix3x3 normalMatrix(transform);
+            // 法線を位置と同じ行列でそのまま変換すると、回転と非一様スケールが組み合わさった場合に
+            // 方向が歪んだり反転したりするため、逆行列の転置(inverse-transpose)を用いる。
+            // 特異行列(スケール0など)で逆行列が求まらない場合は、3x3行列をそのまま使う簡易フォールバックとする
+            aiMatrix3x3 normalMatrix(transform);
+            if (normalMatrix.Determinant() != 0.0f)
+            {
+                normalMatrix.Inverse();
+                normalMatrix.Transpose();
+            }
 
             std::vector<Vertex> vertices;
             vertices.reserve(mesh->mNumVertices);
@@ -266,6 +273,7 @@ namespace Kurenai::Assets
             outMesh.IndexCount = static_cast<uint32_t>(indices.size());
 
             const aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
+
             aiString texPath;
             if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS ||
                 material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)

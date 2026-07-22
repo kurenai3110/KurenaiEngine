@@ -75,7 +75,14 @@ PSOutput PSMain(PSInput input)
     float4 baseColorSample = BaseColorTexture.Sample(DefaultSampler, input.UV);
 
     float3 geometricNormal = normalize(input.Normal);
-    float3 normalSample = NormalTexture.Sample(DefaultSampler, input.UV).xyz * 2.0f - 1.0f;
+
+    // BC5(2チャンネル、X/Yのみ)圧縮された法線マップはB/Aチャンネルにデータを持たず、
+    // サンプリング時にハードウェアがB=0を返すため、Bをそのまま使うとタンジェント空間Zが
+    // 常に-1(裏向き)になってしまう。単位ベクトルである前提でX/YからZを再構成する
+    // (通常の3チャンネル法線マップに対しても正しく機能する)
+    float2 normalXY = NormalTexture.Sample(DefaultSampler, input.UV).xy * 2.0f - 1.0f;
+    float normalZ = sqrt(saturate(1.0f - dot(normalXY, normalXY)));
+    float3 normalSample = float3(normalXY, normalZ);
     float3x3 tbn = ComputeTangentFrame(geometricNormal, input.WorldPos, input.UV);
     float3 N = normalize(mul(normalSample, tbn));
 
