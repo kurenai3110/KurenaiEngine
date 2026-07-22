@@ -548,6 +548,8 @@ namespace Kurenai::Core
             ImGui::SliderFloat("SSAO Power", &m_SSAOPower, 0.1f, 4.0f);
         }
 
+        ImGui::Checkbox("Enable Shadow", &m_ShadowEnabled);
+
         ImGui::End();
     }
 
@@ -712,16 +714,21 @@ namespace Kurenai::Core
         commandList->SetViewport(shadowViewport);
 
         commandList->SetRenderTargets(nullptr, 0, m_ShadowMap.get());
+        // 深度1.0(最遠)にクリアしておく。無効時はこの後の描画をスキップするため、
+        // シェーダー側は深度比較で常に「影なし」と判定する(ComputeShadowFactor参照)
         commandList->ClearDepth(1.0f);
 
-        commandList->SetPipelineState(m_ShadowPipelineState.get());
-        commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-
-        for (const auto& mesh : m_Model.Meshes)
+        if (m_ShadowEnabled)
         {
-            commandList->SetVertexBuffer(mesh.VertexBuffer.get());
-            commandList->SetIndexBuffer(mesh.IndexBuffer.get());
-            commandList->DrawIndexed(mesh.IndexCount, 0, 0);
+            commandList->SetPipelineState(m_ShadowPipelineState.get());
+            commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+
+            for (const auto& mesh : m_Model.Meshes)
+            {
+                commandList->SetVertexBuffer(mesh.VertexBuffer.get());
+                commandList->SetIndexBuffer(mesh.IndexBuffer.get());
+                commandList->DrawIndexed(mesh.IndexCount, 0, 0);
+            }
         }
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---

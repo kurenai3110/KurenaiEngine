@@ -101,6 +101,7 @@ namespace Kurenai::Core
         std::unique_ptr<RHI::IRHIShader> m_ShadowPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_ShadowMap;
+        bool m_ShadowEnabled = true;
 
         // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ
         std::unique_ptr<RHI::IRHITexture> m_SkyboxTexture;
