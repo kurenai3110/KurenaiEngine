@@ -216,6 +216,9 @@ namespace Kurenai::Core
         // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する
         m_ShadowMap = m_Device->CreateDepthTexture(kShadowMapSize, kShadowMapSize);
 
+        // 空のキューブマップはシーンに依存しないため一度だけ読み込む
+        m_SkyboxTexture = m_Device->CreateTextureFromFile(repoRoot + L"Assets\\Skybox\\Sky.dds", false);
+
         m_Sampler = m_Device->CreateDefaultSampler();
 
         RHI::BufferDesc constantBufferDesc;
@@ -582,6 +585,7 @@ namespace Kurenai::Core
         commandList->SetTexture(2, m_GBufferMaterial.get());
         commandList->SetTexture(3, m_GBufferDepth.get());
         commandList->SetTexture(4, m_ShadowMap.get());
+        commandList->SetTexture(5, m_SkyboxTexture.get());
         commandList->Draw(3, 0);
 
         // --- Presentパス: SceneColorを、アスペクト比を保ってバックバッファへ出力 ---

@@ -15,6 +15,7 @@ Texture2D NormalTexture : register(t1);
 Texture2D MaterialTexture : register(t2);
 Texture2D DepthTexture : register(t3);
 Texture2D ShadowMapTexture : register(t4);
+TextureCube SkyboxTexture : register(t5);
 SamplerState DefaultSampler : register(s0);
 
 struct PSInput
@@ -93,7 +94,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     float depth = DepthTexture.Sample(DefaultSampler, input.UV).r;
     if (depth >= 1.0f)
     {
-        discard;
+        // 何も描かれなかった背景ピクセル: カメラからそのピクセル方向への視線ベクトルで
+        // 空のキューブマップをサンプリングする
+        float3 farPoint = ReconstructWorldPos(input.UV, 1.0f);
+        float3 rayDir = normalize(farPoint - CameraPosition.xyz);
+        float3 skyColor = SkyboxTexture.Sample(DefaultSampler, rayDir).rgb;
+        skyColor = skyColor / (skyColor + 1.0f);
+        skyColor = pow(skyColor, 1.0f / 2.2f);
+        return float4(skyColor, 1.0f);
     }
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);

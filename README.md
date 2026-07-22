@@ -101,5 +101,6 @@ MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
 - `Assets/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
 - `Assets/Bistro/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) のBistroモデル(FBX形式、`Textures/`にDDS/TGAテクスチャを同梱)
 - `Assets/MaterialTest/` — PBRライティング検証用に生成した、粗さ(roughness)を0.0〜1.0で11段階に変えた白色(非金属)の球体を並べたglTFアセット。`Tools/generate_material_test.py` で再生成できる
+- `Assets/Skybox/` — 背景表示用に生成した青空のキューブマップ(DDS形式)。`Tools/generate_sky_cubemap.py` で再生成できる
 
 `Assets/` と `Samples/` はサイズが大きいためGit管理対象外(`.gitignore`)にしています。
