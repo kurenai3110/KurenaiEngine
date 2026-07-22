@@ -36,6 +36,7 @@ namespace Kurenai::Core
         void RenderSceneSwitchUI();
         void RenderPostProcessUI();
         void RenderDebugViewUI();
+        void RenderLightingUI();
         DirectX::XMMATRIX ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const;
 
         std::unique_ptr<Window> m_Window;
@@ -105,6 +106,11 @@ namespace Kurenai::Core
 
         // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ
         std::unique_ptr<RHI::IRHITexture> m_SkyboxTexture;
+
+        // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
+        float m_TimeOfDay = 12.0f;
+        bool m_TimeAutoAdvance = false;
+        float m_TimeAdvanceSpeed = 1.0f; // 自動進行時、1秒あたりに進む時間(時)
 
         std::unique_ptr<RHI::IRHISampler> m_Sampler;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;

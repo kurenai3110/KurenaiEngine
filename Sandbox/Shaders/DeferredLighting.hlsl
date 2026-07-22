@@ -8,6 +8,10 @@ cbuffer FrameConstants : register(b0)
     float4 CameraPosition;
     float4 LightDirection;
     float4 LightColor;
+    float4x4 View;
+    float4x4 Proj;
+    // 昼夜サイクル用。rgb=環境光の色、a=昼度(0=夜,1=昼)
+    float4 AmbientColor;
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -100,6 +104,9 @@ float4 PSMain(PSInput input) : SV_TARGET
         float3 farPoint = ReconstructWorldPos(input.UV, 1.0f);
         float3 rayDir = normalize(farPoint - CameraPosition.xyz);
         float3 skyColor = SkyboxTexture.Sample(DefaultSampler, rayDir).rgb;
+        // 夜は空を暗い紺色へ落とし込む(スカイボックス自体は昼のテクスチャ固定のため)
+        const float3 kNightSkyColor = float3(0.01f, 0.012f, 0.02f);
+        skyColor = lerp(kNightSkyColor, skyColor, AmbientColor.a);
         skyColor = skyColor / (skyColor + 1.0f);
         skyColor = pow(skyColor, 1.0f / 2.2f);
         return float4(skyColor, 1.0f);
@@ -125,7 +132,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 diffuseColor = albedo * (1.0f - metallic);
 
     float ao = AOTexture.Sample(DefaultSampler, input.UV).r;
-    float3 color = diffuseColor * 0.03f * ao; // 環境光の簡易近似(SSAOで遮蔽率を適用)
+    float3 color = diffuseColor * AmbientColor.rgb * ao; // 環境光(時刻に応じて変化、SSAOで遮蔽率を適用)
 
     if (NdotL > 0.0f)
     {

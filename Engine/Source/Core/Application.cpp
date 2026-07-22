@@ -48,7 +48,62 @@ namespace Kurenai::Core
             // SSAOパスがView空間でのサンプリングに使う(末尾に追加し、既存シェーダのオフセットは変えない)
             DirectX::XMFLOAT4X4 View;
             DirectX::XMFLOAT4X4 Proj;
+            // 昼夜サイクル用(末尾に追加し、既存シェーダのオフセットは変えない)。rgb=環境光の色、a=昼度(0=夜,1=昼)
+            DirectX::XMFLOAT4 AmbientColor;
         };
+
+        // 太陽光の向き・色・環境光を時刻(0〜24時)から計算する
+        struct SunLighting
+        {
+            DirectX::XMFLOAT3 Direction; // 光が進む向き(サーフェスに当たる方向)
+            DirectX::XMFLOAT4 Color;
+            DirectX::XMFLOAT4 Ambient; // rgb=環境光の色, a=昼度(0=夜,1=昼)
+        };
+
+        // edge0とedge1の間をなめらかに0→1で補間する(edge0以下は0、edge1以上は1)
+        float Smoothstep(float edge0, float edge1, float x)
+        {
+            const float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+            return t * t * (3.0f - 2.0f * t);
+        }
+
+        SunLighting ComputeSunLighting(float timeOfDayHours)
+        {
+            using namespace DirectX;
+
+            // 日の出(東)側の水平方向。太陽はこの方向と天頂(真上)を通る鉛直面内で、
+            // 東→天頂(正午)→西→天底(真夜中)と一日一周する半円軌道を描く
+            constexpr XMFLOAT3 kSunriseHorizontal{ -0.6f, 0.0f, 0.8f };
+
+            // 6時=0度(日の出/東)、12時=90度(天頂)、18時=180度(日の入り/西)、24時=270度(天底/真夜中)
+            const float hourAngle = (timeOfDayHours / 24.0f) * XM_2PI - XM_PIDIV2;
+            const float sinHour = std::sin(hourAngle);
+            const float cosHour = std::cos(hourAngle);
+
+            // 太陽の方向(地面から見て太陽がある向き)。kSunriseHorizontalとY軸(天頂)を結ぶ円軌道上の点
+            const XMFLOAT3 sunDirection{ kSunriseHorizontal.x * cosHour, sinHour, kSunriseHorizontal.z * cosHour };
+
+            SunLighting result{};
+            result.Direction = { -sunDirection.x, -sunDirection.y, -sunDirection.z };
+
+            // 6時〜7時でなめらかに夜→昼、17時〜18時でなめらかに昼→夜へ切り替える
+            const float dayFactor = Smoothstep(6.0f, 7.0f, timeOfDayHours) * (1.0f - Smoothstep(17.0f, 18.0f, timeOfDayHours));
+
+            const XMFLOAT3 kDayColor{ 3.0f, 2.9f, 2.7f };
+            result.Color = { kDayColor.x * dayFactor, kDayColor.y * dayFactor, kDayColor.z * dayFactor, 0.0f };
+
+            const XMFLOAT3 kDayAmbient{ 0.03f, 0.03f, 0.03f };
+            const XMFLOAT3 kNightAmbient{ 0.006f, 0.008f, 0.015f };
+            result.Ambient =
+            {
+                kNightAmbient.x + (kDayAmbient.x - kNightAmbient.x) * dayFactor,
+                kNightAmbient.y + (kDayAmbient.y - kNightAmbient.y) * dayFactor,
+                kNightAmbient.z + (kDayAmbient.z - kNightAmbient.z) * dayFactor,
+                dayFactor,
+            };
+
+            return result;
+        }
 
         struct alignas(16) MaterialConstants
         {
@@ -579,6 +634,22 @@ namespace Kurenai::Core
         ImGui::End();
     }
 
+    void Application::RenderLightingUI()
+    {
+        ImGui::SetNextWindowPos(ImVec2(280.0f, 10.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Lighting");
+
+        ImGui::SliderFloat("Time of Day", &m_TimeOfDay, 0.0f, 24.0f, "%.2f h");
+        ImGui::Checkbox("Auto Advance", &m_TimeAutoAdvance);
+        if (m_TimeAutoAdvance)
+        {
+            ImGui::SliderFloat("Speed", &m_TimeAdvanceSpeed, 0.1f, 10.0f, "%.1f h/s");
+        }
+
+        ImGui::End();
+    }
+
     void Application::Run()
     {
         while (!m_Window->ShouldClose())
@@ -671,6 +742,15 @@ namespace Kurenai::Core
     {
         UpdateMouseLook();
         UpdateMovement(deltaTime);
+
+        if (m_TimeAutoAdvance)
+        {
+            m_TimeOfDay = std::fmod(m_TimeOfDay + m_TimeAdvanceSpeed * deltaTime, 24.0f);
+            if (m_TimeOfDay < 0.0f)
+            {
+                m_TimeOfDay += 24.0f;
+            }
+        }
     }
 
     void Application::Render()
@@ -684,13 +764,12 @@ namespace Kurenai::Core
         RenderSceneSwitchUI();
         RenderPostProcessUI();
         RenderDebugViewUI();
+        RenderLightingUI();
 
         auto* commandList = m_Device->GetImmediateCommandList();
 
-        const DirectX::XMFLOAT3 lightDirectionRaw{ 0.4f, -0.8f, 0.3f };
-        DirectX::XMFLOAT3 lightDirectionNorm;
-        DirectX::XMStoreFloat3(&lightDirectionNorm, DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&lightDirectionRaw)));
-        const DirectX::XMMATRIX lightViewProj = ComputeLightViewProj(lightDirectionNorm);
+        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay);
+        const DirectX::XMMATRIX lightViewProj = ComputeLightViewProj(sunLighting.Direction);
 
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = m_Camera.GetViewMatrix() * m_Camera.GetProjectionMatrix();
@@ -701,10 +780,11 @@ namespace Kurenai::Core
         DirectX::XMStoreFloat4x4(&constants.LightViewProj, DirectX::XMMatrixTranspose(lightViewProj));
         const DirectX::XMFLOAT3 cameraPosition = m_Camera.GetPosition();
         constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
-        constants.LightDirection = { lightDirectionNorm.x, lightDirectionNorm.y, lightDirectionNorm.z, 0.0f };
-        constants.LightColor = { 3.0f, 2.9f, 2.7f, 0.0f };
+        constants.LightDirection = { sunLighting.Direction.x, sunLighting.Direction.y, sunLighting.Direction.z, 0.0f };
+        constants.LightColor = sunLighting.Color;
         DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(m_Camera.GetViewMatrix()));
         DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(m_Camera.GetProjectionMatrix()));
+        constants.AmbientColor = sunLighting.Ambient;
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度) ---
