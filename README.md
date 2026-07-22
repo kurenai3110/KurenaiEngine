@@ -104,3 +104,5 @@ MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
 - `Assets/Skybox/` — 背景表示用に生成した青空のキューブマップ(DDS形式)。`Tools/generate_sky_cubemap.py` で再生成できる
 
 `Assets/` と `Samples/` はサイズが大きいためGit管理対象外(`.gitignore`)にしています。
+
+モデルを読み込むと、同じ場所に `<元のファイル名>.kmodelcache` というバイナリキャッシュが自動生成されます。頂点/インデックス/マテリアル参照を解析済みの形で保持しており、2回目以降の読み込みではassimpによる解析をスキップして高速に読み込めます。元のモデルファイルが更新されると自動的に無効化され再生成されるため、手動での削除は基本的に不要です。
