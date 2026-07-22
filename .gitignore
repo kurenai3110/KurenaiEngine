@@ -19,3 +19,6 @@
 # 大容量アセット・サンプルデータ(リポジトリ直下のみ対象。Engine/Source/Assets等のソースは含める)
 /Assets/
 /Samples/
+
+# graphify生成物(ナレッジグラフ出力・キャッシュ)
+/graphify-out/
