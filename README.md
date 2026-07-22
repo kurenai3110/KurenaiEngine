@@ -80,7 +80,7 @@ MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
 | 上下移動 | E / Q |
 | 視点回転 | 右クリックを押しながらマウス移動 |
 | 移動速度アップ | Shift (押している間) |
-| 表示アセットの切り替え | 数字キー 1〜4 |
+| 表示アセットの切り替え | 数字キー 1〜5 |
 
 ### 表示アセット一覧(数字キー)
 
@@ -90,6 +90,7 @@ MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
 | 2 | Bistro - Exterior |
 | 3 | Bistro - Interior |
 | 4 | Bistro - Interior (Wine Cellar) |
+| 5 | White Surface Test(粗さ0〜1の球体列) |
 
 切り替え時はモデルとテクスチャを同期的に再読み込みするため、Bistroのような大容量アセットでは数秒〜数十秒ウィンドウが応答しなくなります。読み込み完了後、タイトルバーに現在表示中のアセット名が表示されます。
 
@@ -99,5 +100,6 @@ MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
 
 - `Assets/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
 - `Assets/Bistro/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) のBistroモデル(FBX形式、`Textures/`にDDS/TGAテクスチャを同梱)
+- `Assets/MaterialTest/` — PBRライティング検証用に生成した、粗さ(roughness)を0.0〜1.0で11段階に変えた白色(非金属)の球体を並べたglTFアセット。`Tools/generate_material_test.py` で再生成できる
 
 `Assets/` と `Samples/` はサイズが大きいためGit管理対象外(`.gitignore`)にしています。

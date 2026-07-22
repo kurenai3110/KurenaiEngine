@@ -46,6 +46,7 @@ namespace Kurenai::Core
             { L"Bistro - Exterior", L"Assets\\Bistro\\BistroExterior.fbx" },
             { L"Bistro - Interior", L"Assets\\Bistro\\BistroInterior.fbx" },
             { L"Bistro - Interior (Wine Cellar)", L"Assets\\Bistro\\BistroInterior_Wine.fbx" },
+            { L"White Surface Test", L"Assets\\MaterialTest\\MaterialTest.gltf" },
         };
         constexpr size_t kSceneCount = sizeof(kScenes) / sizeof(kScenes[0]);
 
@@ -229,6 +230,7 @@ namespace Kurenai::Core
     void Application::FrameCameraToModel()
     {
         const float centerX = (m_Model.BoundsMin[0] + m_Model.BoundsMax[0]) * 0.5f;
+        const float centerY = (m_Model.BoundsMin[1] + m_Model.BoundsMax[1]) * 0.5f;
         const float centerZ = (m_Model.BoundsMin[2] + m_Model.BoundsMax[2]) * 0.5f;
         const float sizeY = m_Model.BoundsMax[1] - m_Model.BoundsMin[1];
         const float dx = m_Model.BoundsMax[0] - m_Model.BoundsMin[0];
@@ -236,26 +238,56 @@ namespace Kurenai::Core
         const float diagonal = std::sqrt(dx * dx + sizeY * sizeY + dz * dz);
         const float eyeHeight = m_Model.BoundsMin[1] + sizeY * 0.15f;
 
-        // ホールの長辺方向の端寄りから中心を見る位置を初期視点にする(中央の装飾物や壁に埋まらないように)
+        const float longAxis = std::max(dx, dz);
+        const float shortAxis = std::min(dx, dz);
+        // 短辺が長辺に対して極端に短い場合は、歩いて回れる建物内部ではなく横に並んだ物体と判断し、
+        // 内部に入り込む配置ではなく外側から全体を見渡す配置にする
+        const bool isThinProp = shortAxis < longAxis * 0.15f;
+
         float posX;
+        float posY;
         float posZ;
         float yaw;
-        if (dx >= dz)
+        float nearZ;
+        const float farZ = std::max(100.0f, diagonal * 4.0f);
+
+        if (isThinProp)
         {
+            // 縦FOVの半角のtanを使い、アスペクト比に依らず長辺全体が収まる距離を保守的に求める
+            const float halfFovTan = std::tan(DirectX::XM_PIDIV4 * 0.5f);
+            const float requiredDistance = (longAxis * 0.5f) / halfFovTan * 1.25f;
+
+            posX = centerX;
+            posY = centerY;
+            posZ = centerZ + requiredDistance;
+            yaw = DirectX::XM_PI;
+
+            // カメラは物体から離れた位置にあるため、near平面をdiagonal基準の極小値のままにすると
+            // 深度バッファの精度が視距離全体で失われてしまう(near:distance比が極端になるため)。
+            // 実際の視距離に応じたスケールにして深度精度を確保する
+            nearZ = std::max(0.05f, requiredDistance * 0.02f);
+        }
+        else if (dx >= dz)
+        {
+            // ホールの長辺方向の端寄りから中心を見る位置を初期視点にする(中央の装飾物や壁に埋まらないように)
             posX = m_Model.BoundsMin[0] + dx * 0.2f;
+            posY = eyeHeight;
             posZ = centerZ;
             yaw = DirectX::XM_PIDIV2;
+            nearZ = std::max(0.01f, diagonal * 0.0005f);
         }
         else
         {
             posX = centerX;
+            posY = eyeHeight;
             posZ = m_Model.BoundsMin[2] + dz * 0.2f;
             yaw = 0.0f;
+            nearZ = std::max(0.01f, diagonal * 0.0005f);
         }
 
-        m_Camera.SetPosition({ posX, eyeHeight, posZ });
+        m_Camera.SetPosition({ posX, posY, posZ });
         m_Camera.SetYawPitch(yaw, 0.0f);
-        m_Camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
+        m_Camera.SetLens(DirectX::XM_PIDIV4, nearZ, farZ);
     }
 
     void Application::UpdateSceneSwitch()
