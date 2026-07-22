@@ -217,7 +217,8 @@ namespace Kurenai::Core
     }
 
     Application::Application(RHI::GraphicsAPI api, uint32_t renderWidth, uint32_t renderHeight)
-        : m_RenderWidth(renderWidth)
+        : m_GraphicsAPI(api)
+        , m_RenderWidth(renderWidth)
         , m_RenderHeight(renderHeight)
     {
         m_Window = std::make_unique<Window>(L"Kurenai Engine", 1280, 720);
@@ -452,7 +453,8 @@ namespace Kurenai::Core
 
         FrameCameraToModel();
 
-        m_Window->SetTitle(std::wstring(L"Kurenai Engine - ") + kScenes[sceneIndex].DisplayName);
+        const wchar_t* apiName = (m_GraphicsAPI == RHI::GraphicsAPI::DX12) ? L"DX12" : L"DX11";
+        m_Window->SetTitle(std::wstring(L"Kurenai Engine [") + apiName + L"] - " + kScenes[sceneIndex].DisplayName);
     }
 
     void Application::FrameCameraToModel()
@@ -579,6 +581,9 @@ namespace Kurenai::Core
         ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Scenes");
+
+        ImGui::TextUnformatted(m_GraphicsAPI == RHI::GraphicsAPI::DX12 ? "Graphics API: DX12" : "Graphics API: DX11");
+        ImGui::Separator();
 
         for (size_t i = 0; i < kSceneCount; ++i)
         {

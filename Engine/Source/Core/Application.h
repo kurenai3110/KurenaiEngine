@@ -42,6 +42,9 @@ namespace Kurenai::Core
 
         std::unique_ptr<Window> m_Window;
 
+        // 起動時に選択されたグラフィックスAPI(タイトルバー・ImGui表示用に保持)
+        RHI::GraphicsAPI m_GraphicsAPI;
+
         // ImGuiのIniFilenameはポインタを保持するだけでコピーしないため、文字列の寿命をここで維持する。
         // m_ImGuiBackendのデストラクタ(ImGui::DestroyContextで最終保存)より後に破棄されるよう、
         // メンバ破棄順(宣言の逆順)に従いm_ImGuiBackendより前で宣言する
