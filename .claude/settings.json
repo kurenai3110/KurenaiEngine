@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git commit *)",
+            "command": "echo '{\"systemMessage\": \"コミットが完了しました。会話が長くなってきたら /compact でコンテキストを整理してください。\"}'"
+          }
+        ]
+      }
+    ]
+  }
+}
