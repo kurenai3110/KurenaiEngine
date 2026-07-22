@@ -35,6 +35,7 @@ namespace Kurenai::Core
         void Render();
         void RenderSceneSwitchUI();
         void RenderPostProcessUI();
+        void RenderDebugViewUI();
         DirectX::XMMATRIX ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const;
 
         std::unique_ptr<Window> m_Window;
@@ -75,10 +76,24 @@ namespace Kurenai::Core
         std::unique_ptr<RHI::IRHIPipelineState> m_LightingPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SceneColor;
 
-        // Presentパス(SceneColorをアスペクト比を保ってバックバッファへ拡大縮小表示)
+        // Presentパス(選択中のレンダーターゲットをアスペクト比を保ってバックバッファへ拡大縮小表示)
         std::unique_ptr<RHI::IRHIShader> m_PresentVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_PresentPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_PresentPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_PresentConstantBuffer;
+
+        // デバッグ表示用: Presentパスで最終的に表示するレンダーターゲットの種類
+        enum class DebugView
+        {
+            Final,
+            Albedo,
+            Normal,
+            Material,
+            Depth,
+            SSAO,
+            ShadowMap,
+        };
+        DebugView m_DebugView = DebugView::Final;
 
         // シャドウパス(平行光のライト視点から深度のみを描画する)
         static constexpr uint32_t kShadowMapSize = 2048;

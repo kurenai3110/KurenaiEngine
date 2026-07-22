@@ -57,6 +57,13 @@ namespace Kurenai::Core
             float Padding[2];
         };
 
+        // Present.hlsl側のModeと一致させる必要がある
+        struct alignas(16) PresentConstants
+        {
+            int32_t Mode;
+            float Padding[3];
+        };
+
         // SSAO.hlsl側のkSSAOKernelSizeと一致させる必要がある
         constexpr uint32_t kSSAOKernelSize = 16;
 
@@ -336,6 +343,11 @@ namespace Kurenai::Core
         materialConstantBufferDesc.SizeInBytes = sizeof(MaterialConstants);
         m_MaterialConstantBuffer = m_Device->CreateBuffer(materialConstantBufferDesc);
 
+        RHI::BufferDesc presentConstantBufferDesc;
+        presentConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        presentConstantBufferDesc.SizeInBytes = sizeof(PresentConstants);
+        m_PresentConstantBuffer = m_Device->CreateBuffer(presentConstantBufferDesc);
+
         CreateRenderTargets(m_RenderWidth, m_RenderHeight);
 
         LoadScene(0);
@@ -539,6 +551,32 @@ namespace Kurenai::Core
         ImGui::End();
     }
 
+    void Application::RenderDebugViewUI()
+    {
+        ImGui::SetNextWindowPos(ImVec2(10.0f, 400.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Render Targets");
+
+        static const char* kDebugViewNames[] =
+        {
+            "Final (Lit)",
+            "Albedo",
+            "Normal",
+            "Material (R=Metallic, G=Roughness)",
+            "Depth",
+            "SSAO",
+            "Shadow Map",
+        };
+
+        int currentIndex = static_cast<int>(m_DebugView);
+        if (ImGui::Combo("View", &currentIndex, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames)))
+        {
+            m_DebugView = static_cast<DebugView>(currentIndex);
+        }
+
+        ImGui::End();
+    }
+
     void Application::Run()
     {
         while (!m_Window->ShouldClose())
@@ -643,6 +681,7 @@ namespace Kurenai::Core
         m_Device->ImGuiNewFrame();
         RenderSceneSwitchUI();
         RenderPostProcessUI();
+        RenderDebugViewUI();
 
         auto* commandList = m_Device->GetImmediateCommandList();
 
@@ -764,19 +803,60 @@ namespace Kurenai::Core
         commandList->SetTexture(6, m_SSAOEnabled ? m_SSAOTexture.get() : m_SSAOWhiteTexture.get());
         commandList->Draw(3, 0);
 
-        // --- Presentパス: SceneColorを、アスペクト比を保ってバックバッファへ出力 ---
+        // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
+        // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
+        // 深度バッファ(GBuffer深度・シャドウマップ)はPresent.hlsl側でグレースケール化するためMode=1を渡す
+        RHI::IRHITexture* presentSourceTexture = m_SceneColor.get();
+        int32_t presentMode = 0;
+        uint32_t presentSourceWidth = m_RenderWidth;
+        uint32_t presentSourceHeight = m_RenderHeight;
+        switch (m_DebugView)
+        {
+        case DebugView::Final:
+            presentSourceTexture = m_SceneColor.get();
+            break;
+        case DebugView::Albedo:
+            presentSourceTexture = m_GBufferAlbedo.get();
+            break;
+        case DebugView::Normal:
+            presentSourceTexture = m_GBufferNormal.get();
+            break;
+        case DebugView::Material:
+            presentSourceTexture = m_GBufferMaterial.get();
+            break;
+        case DebugView::Depth:
+            presentSourceTexture = m_GBufferDepth.get();
+            presentMode = 2;
+            break;
+        case DebugView::SSAO:
+            presentSourceTexture = m_SSAOEnabled ? m_SSAOTexture.get() : m_SSAOWhiteTexture.get();
+            break;
+        case DebugView::ShadowMap:
+            presentSourceTexture = m_ShadowMap.get();
+            presentMode = 1;
+            presentSourceWidth = kShadowMapSize;
+            presentSourceHeight = kShadowMapSize;
+            break;
+        }
+
+        PresentConstants presentConstants{};
+        presentConstants.Mode = presentMode;
+        commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
+
         commandList->SetRenderTarget(m_SwapChain.get());
         commandList->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
         commandList->ClearDepth(1.0f);
 
         // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する
         const RHI::Viewport letterboxViewport = ComputeLetterboxViewport(
-            m_Window->GetWidth(), m_Window->GetHeight(), m_RenderWidth, m_RenderHeight);
+            m_Window->GetWidth(), m_Window->GetHeight(), presentSourceWidth, presentSourceHeight);
         commandList->SetViewport(letterboxViewport);
 
         commandList->SetPipelineState(m_PresentPipelineState.get());
+        commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+        commandList->SetConstantBuffer(1, m_PresentConstantBuffer.get());
         commandList->SetSampler(0, m_Sampler.get());
-        commandList->SetTexture(0, m_SceneColor.get());
+        commandList->SetTexture(0, presentSourceTexture);
         commandList->Draw(3, 0);
 
         // ImGuiはPresentパスでバインドされたバックバッファにそのまま重ねて描画する
