@@ -33,6 +33,7 @@ namespace Kurenai::Core
         void UpdateMovement(float deltaTime);
         void Update(float deltaTime);
         void Render();
+        DirectX::XMMATRIX ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const;
 
         std::unique_ptr<Window> m_Window;
         std::unique_ptr<RHI::IRHIDevice> m_Device;
@@ -61,6 +62,13 @@ namespace Kurenai::Core
         std::unique_ptr<RHI::IRHIShader> m_PresentVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_PresentPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_PresentPipelineState;
+
+        // シャドウパス(平行光のライト視点から深度のみを描画する)
+        static constexpr uint32_t kShadowMapSize = 2048;
+        std::unique_ptr<RHI::IRHIShader> m_ShadowVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_ShadowPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_ShadowMap;
 
         std::unique_ptr<RHI::IRHISampler> m_Sampler;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;

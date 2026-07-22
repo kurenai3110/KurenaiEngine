@@ -2,6 +2,7 @@ cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
     float4x4 InvViewProj;
+    float4x4 LightViewProj;
     float4 CameraPosition;
     float4 LightDirection;
     float4 LightColor;

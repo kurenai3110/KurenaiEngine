@@ -22,6 +22,7 @@ namespace Kurenai::Core
         {
             DirectX::XMFLOAT4X4 ViewProj;
             DirectX::XMFLOAT4X4 InvViewProj;
+            DirectX::XMFLOAT4X4 LightViewProj;
             DirectX::XMFLOAT4 CameraPosition;
             DirectX::XMFLOAT4 LightDirection;
             DirectX::XMFLOAT4 LightColor;
@@ -178,6 +179,34 @@ namespace Kurenai::Core
         presentPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
         m_PresentPipelineState = m_Device->CreatePipelineState(presentPipelineDesc);
 
+        // シャドウパス(ライト視点への深度のみの描画。頂点入力はPOSITIONのみ使用)
+        RHI::ShaderDesc shadowVsDesc;
+        shadowVsDesc.Stage = RHI::ShaderStage::Vertex;
+        shadowVsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowVsDesc.EntryPoint = "VSMain";
+        m_ShadowVertexShader = m_Device->CreateShader(shadowVsDesc);
+
+        RHI::ShaderDesc shadowPsDesc;
+        shadowPsDesc.Stage = RHI::ShaderStage::Pixel;
+        shadowPsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowPsDesc.EntryPoint = "PSMain";
+        m_ShadowPixelShader = m_Device->CreateShader(shadowPsDesc);
+
+        const std::vector<RHI::InputElementDesc> shadowInputLayout =
+        {
+            { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+        };
+
+        RHI::PipelineStateDesc shadowPipelineDesc;
+        shadowPipelineDesc.InputLayout = shadowInputLayout;
+        shadowPipelineDesc.VertexShader = m_ShadowVertexShader.get();
+        shadowPipelineDesc.PixelShader = m_ShadowPixelShader.get();
+        shadowPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        m_ShadowPipelineState = m_Device->CreatePipelineState(shadowPipelineDesc);
+
+        // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する
+        m_ShadowMap = m_Device->CreateDepthTexture(kShadowMapSize, kShadowMapSize);
+
         m_Sampler = m_Device->CreateDefaultSampler();
 
         RHI::BufferDesc constantBufferDesc;
@@ -288,6 +317,48 @@ namespace Kurenai::Core
         m_Camera.SetPosition({ posX, posY, posZ });
         m_Camera.SetYawPitch(yaw, 0.0f);
         m_Camera.SetLens(DirectX::XM_PIDIV4, nearZ, farZ);
+    }
+
+    // 平行光のライト視点からシーン全体を覆う正射影のビュー・プロジェクション行列を求める。
+    // シーンのバウンディングスフィア(AABBの外接球)を基準に、ライト方向の逆側から見渡す位置に
+    // 仮想的なライトカメラを置き、球全体が収まる正射影範囲・奥行きを設定する
+    DirectX::XMMATRIX Application::ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const
+    {
+        using namespace DirectX;
+
+        const XMFLOAT3 center
+        {
+            (m_Model.BoundsMin[0] + m_Model.BoundsMax[0]) * 0.5f,
+            (m_Model.BoundsMin[1] + m_Model.BoundsMax[1]) * 0.5f,
+            (m_Model.BoundsMin[2] + m_Model.BoundsMax[2]) * 0.5f,
+        };
+        const float dx = m_Model.BoundsMax[0] - m_Model.BoundsMin[0];
+        const float dy = m_Model.BoundsMax[1] - m_Model.BoundsMin[1];
+        const float dz = m_Model.BoundsMax[2] - m_Model.BoundsMin[2];
+        const float sceneRadius = std::max(0.01f, std::sqrt(dx * dx + dy * dy + dz * dz) * 0.5f);
+
+        const XMVECTOR lightDirVec = XMVector3Normalize(XMLoadFloat3(&lightDirection));
+        const XMVECTOR centerVec = XMLoadFloat3(&center);
+
+        // シーンを包む球全体を見渡せるよう、ライトが進む方向と逆側に球の半径分だけ余裕を持って離れた位置に置く
+        const float margin = 1.5f;
+        const XMVECTOR eye = XMVectorSubtract(centerVec, XMVectorScale(lightDirVec, sceneRadius * margin));
+
+        // ライト方向がほぼ真上/真下(upベクトルと平行)だとLookAt行列が縮退するため、そのときだけ別軸を使う
+        XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+        if (std::abs(XMVectorGetY(lightDirVec)) > 0.99f)
+        {
+            up = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+        }
+
+        const XMMATRIX lightView = XMMatrixLookAtLH(eye, centerVec, up);
+
+        const float orthoSize = sceneRadius * margin * 2.0f;
+        const float nearZ = 0.1f;
+        const float farZ = sceneRadius * margin * 2.0f + sceneRadius;
+        const XMMATRIX lightProj = XMMatrixOrthographicLH(orthoSize, orthoSize, nearZ, farZ);
+
+        return lightView * lightProj;
     }
 
     void Application::UpdateSceneSwitch()
@@ -408,17 +479,42 @@ namespace Kurenai::Core
 
         auto* commandList = m_Device->GetImmediateCommandList();
 
+        const DirectX::XMFLOAT3 lightDirectionRaw{ 0.4f, -0.8f, 0.3f };
+        DirectX::XMFLOAT3 lightDirectionNorm;
+        DirectX::XMStoreFloat3(&lightDirectionNorm, DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&lightDirectionRaw)));
+        const DirectX::XMMATRIX lightViewProj = ComputeLightViewProj(lightDirectionNorm);
+
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = m_Camera.GetViewMatrix() * m_Camera.GetProjectionMatrix();
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
         DirectX::XMVECTOR determinant;
         const DirectX::XMMATRIX invViewProj = DirectX::XMMatrixInverse(&determinant, viewProj);
         DirectX::XMStoreFloat4x4(&constants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
+        DirectX::XMStoreFloat4x4(&constants.LightViewProj, DirectX::XMMatrixTranspose(lightViewProj));
         const DirectX::XMFLOAT3 cameraPosition = m_Camera.GetPosition();
         constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
-        constants.LightDirection = { 0.4f, -0.8f, 0.3f, 0.0f };
+        constants.LightDirection = { lightDirectionNorm.x, lightDirectionNorm.y, lightDirectionNorm.z, 0.0f };
         constants.LightColor = { 3.0f, 2.9f, 2.7f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
+
+        // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度) ---
+        RHI::Viewport shadowViewport;
+        shadowViewport.Width = static_cast<float>(kShadowMapSize);
+        shadowViewport.Height = static_cast<float>(kShadowMapSize);
+        commandList->SetViewport(shadowViewport);
+
+        commandList->SetRenderTargets(nullptr, 0, m_ShadowMap.get());
+        commandList->ClearDepth(1.0f);
+
+        commandList->SetPipelineState(m_ShadowPipelineState.get());
+        commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+
+        for (const auto& mesh : m_Model.Meshes)
+        {
+            commandList->SetVertexBuffer(mesh.VertexBuffer.get());
+            commandList->SetIndexBuffer(mesh.IndexBuffer.get());
+            commandList->DrawIndexed(mesh.IndexCount, 0, 0);
+        }
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         RHI::Viewport gbufferViewport;
@@ -466,6 +562,7 @@ namespace Kurenai::Core
         commandList->SetTexture(1, m_GBufferNormal.get());
         commandList->SetTexture(2, m_GBufferMaterial.get());
         commandList->SetTexture(3, m_GBufferDepth.get());
+        commandList->SetTexture(4, m_ShadowMap.get());
         commandList->Draw(3, 0);
 
         // --- Presentパス: SceneColorを、アスペクト比を保ってバックバッファへ出力 ---
