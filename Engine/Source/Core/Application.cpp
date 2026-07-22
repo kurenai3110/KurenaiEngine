@@ -233,7 +233,7 @@ namespace Kurenai::Core
 
         m_Device = api == RHI::GraphicsAPI::DX12 ? RHI::CreateDX12Device() : RHI::CreateDX11Device();
         m_SwapChain = m_Device->CreateSwapChain(m_Window->GetHandle(), m_Window->GetWidth(), m_Window->GetHeight());
-        m_Device->InitImGui(m_Window->GetHandle());
+        m_ImGuiBackend = m_Device->CreateImGuiBackend(m_Window->GetHandle());
 
         // imgui.iniの保存先を起動時の作業ディレクトリに依存させず、実行ファイルと同じフォルダに固定する。
         // ImGuiはIniFilenameのポインタを保持するだけでコピーしないため、m_ImGuiIniPathで寿命を維持する
@@ -777,7 +777,7 @@ namespace Kurenai::Core
             return;
         }
 
-        m_Device->ImGuiNewFrame();
+        m_ImGuiBackend->NewFrame();
         RenderSceneSwitchUI();
         RenderPostProcessUI();
         RenderDebugViewUI();
@@ -964,7 +964,7 @@ namespace Kurenai::Core
         commandList->Draw(3, 0);
 
         // ImGuiはPresentパスでバインドされたバックバッファにそのまま重ねて描画する
-        m_Device->ImGuiRender();
+        m_ImGuiBackend->Render();
 
         m_SwapChain->Present(true);
     }

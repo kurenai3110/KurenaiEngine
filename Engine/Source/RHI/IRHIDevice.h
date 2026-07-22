@@ -5,6 +5,7 @@
 
 #include "IRHIBuffer.h"
 #include "IRHICommandList.h"
+#include "IRHIImGuiBackend.h"
 #include "IRHIPipelineState.h"
 #include "IRHISampler.h"
 #include "IRHIShader.h"
@@ -32,10 +33,7 @@ namespace Kurenai::RHI
 
         // ImGui連携。ImGuiはバックエンド(DX11/DX12)ごとに専用の実装が必要なため、
         // このRHI抽象化層でも他のAPIと同様にバックエンド実装側(DX11Deviceなど)に委譲する
-        virtual void InitImGui(void* windowHandle) = 0;
-        virtual void ShutdownImGui() = 0;
-        virtual void ImGuiNewFrame() = 0;
-        virtual void ImGuiRender() = 0;
+        virtual std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) = 0;
     };
 
     std::unique_ptr<IRHIDevice> CreateDX11Device();

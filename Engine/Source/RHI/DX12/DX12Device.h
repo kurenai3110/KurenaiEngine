@@ -38,10 +38,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHISampler> CreateDefaultSampler() override;
         IRHICommandList* GetImmediateCommandList() override;
 
-        void InitImGui(void* windowHandle) override;
-        void ShutdownImGui() override;
-        void ImGuiNewFrame() override;
-        void ImGuiRender() override;
+        std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) override;
 
         // DX12実装内部(DX12SwapChain/DX12Texture/DX12Sampler/DX12CommandList)から利用するアクセサ
         ID3D12Device* GetDevice() const { return m_Device.Get(); }
@@ -91,10 +88,8 @@ namespace Kurenai::RHI
         std::unique_ptr<DX12DescriptorHeap> m_SamplerCpuHeap;
         std::unique_ptr<DX12DescriptorHeap> m_ShaderVisibleSrvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_ShaderVisibleSamplerHeap;
-        std::unique_ptr<DX12DescriptorHeap> m_ImGuiSrvHeap;
 
         std::unique_ptr<DX12CommandList> m_ImmediateCommandList;
-        bool m_ImGuiInitialized = false;
 
         uint32_t m_NextSrvTableIndex = 0;
     };

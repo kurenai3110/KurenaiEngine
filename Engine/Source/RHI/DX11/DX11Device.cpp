@@ -4,15 +4,12 @@
 
 #include <DirectXTex.h>
 
-#include <backends/imgui_impl_dx11.h>
-#include <backends/imgui_impl_win32.h>
-#include <imgui.h>
-
 #include <cwchar>
 #include <vector>
 
 #include "DX11Buffer.h"
 #include "DX11CommandList.h"
+#include "DX11ImGuiBackend.h"
 #include "DX11PipelineState.h"
 #include "DX11Sampler.h"
 #include "DX11Shader.h"
@@ -67,11 +64,7 @@ namespace Kurenai::RHI
 
     DX11Device::DX11Device() = default;
 
-    DX11Device::~DX11Device()
-    {
-        // デバイス/コンテキストが破棄される前にImGuiのバックエンドを終了させる必要がある
-        ShutdownImGui();
-    }
+    DX11Device::~DX11Device() = default;
 
     void DX11Device::Initialize()
     {
@@ -373,50 +366,9 @@ namespace Kurenai::RHI
         return m_ImmediateCommandList.get();
     }
 
-    void DX11Device::InitImGui(void* windowHandle)
+    std::unique_ptr<IRHIImGuiBackend> DX11Device::CreateImGuiBackend(void* windowHandle)
     {
-        if (m_ImGuiInitialized)
-        {
-            return;
-        }
-
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGui::StyleColorsDark();
-
-        if (!ImGui_ImplWin32_Init(windowHandle) || !ImGui_ImplDX11_Init(m_Device.Get(), m_Context.Get()))
-        {
-            ImGui::DestroyContext();
-            throw std::runtime_error("ImGuiの初期化に失敗しました");
-        }
-
-        m_ImGuiInitialized = true;
-    }
-
-    void DX11Device::ShutdownImGui()
-    {
-        if (!m_ImGuiInitialized)
-        {
-            return;
-        }
-
-        ImGui_ImplDX11_Shutdown();
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
-        m_ImGuiInitialized = false;
-    }
-
-    void DX11Device::ImGuiNewFrame()
-    {
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-    }
-
-    void DX11Device::ImGuiRender()
-    {
-        ImGui::Render();
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        return std::make_unique<DX11ImGuiBackend>(m_Device.Get(), m_Context.Get(), windowHandle);
     }
 
     std::unique_ptr<IRHIDevice> CreateDX11Device()

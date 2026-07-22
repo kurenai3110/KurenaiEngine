@@ -43,12 +43,15 @@ namespace Kurenai::Core
         std::unique_ptr<Window> m_Window;
 
         // ImGuiのIniFilenameはポインタを保持するだけでコピーしないため、文字列の寿命をここで維持する。
-        // m_Deviceのデストラクタ(ShutdownImGui→ImGui::DestroyContextで最終保存)より後に
-        // 破棄されるよう、メンバ破棄順(宣言の逆順)に従いm_Deviceより前で宣言する
+        // m_ImGuiBackendのデストラクタ(ImGui::DestroyContextで最終保存)より後に破棄されるよう、
+        // メンバ破棄順(宣言の逆順)に従いm_ImGuiBackendより前で宣言する
         std::string m_ImGuiIniPath;
 
         std::unique_ptr<RHI::IRHIDevice> m_Device;
         std::unique_ptr<RHI::IRHISwapChain> m_SwapChain;
+        // m_Deviceが破棄される前にImGuiのバックエンドを終了させる必要があるため、
+        // メンバ破棄順(宣言の逆順)に従いm_Deviceより後で宣言する
+        std::unique_ptr<RHI::IRHIImGuiBackend> m_ImGuiBackend;
 
         // G-Bufferの内部解像度。ウィンドウサイズとは独立しており、表示時はアスペクト比を保って拡大縮小する
         uint32_t m_RenderWidth;
