@@ -684,7 +684,11 @@ namespace Kurenai::Core
 
     void Application::UpdateMouseLook()
     {
-        if (GetAsyncKeyState(VK_RBUTTON) & 0x8000)
+        // GetAsyncKeyStateはウィンドウフォーカスに関係なくグローバルなキー状態を返すため、
+        // フォアグラウンドウィンドウチェックがないとデスクトップ上の右クリックでも
+        // カーソルがSandboxウィンドウ中央へ強制移動してしまう
+        const bool isForeground = GetForegroundWindow() == m_Window->GetHandle();
+        if (isForeground && (GetAsyncKeyState(VK_RBUTTON) & 0x8000))
         {
             if (!m_MouseCaptured)
             {
