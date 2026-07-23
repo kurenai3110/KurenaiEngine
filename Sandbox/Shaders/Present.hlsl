@@ -5,6 +5,7 @@
 //         そのままpow()しても見分けがつかない。ワールド座標を再構成しカメラからの距離を
 //         線形にグレースケール化する
 //       3=AO/GIバッファのa(遮蔽率)チャンネルをグレースケール表示(SSAOのrgbは常に0のため専用)
+//       4=直接光パスの結果(HDR、トーンマッピング前)をReinhardトーンマッピング+ガンマ補正して表示
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
@@ -73,6 +74,13 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         float ao = sourceColor.a;
         return float4(ao, ao, ao, 1.0f);
+    }
+
+    if (Mode == 4)
+    {
+        float3 color = sourceColor.rgb / (sourceColor.rgb + 1.0f);
+        color = pow(color, 1.0f / 2.2f);
+        return float4(color, 1.0f);
     }
 
     return float4(sourceColor.rgb, 1.0f);

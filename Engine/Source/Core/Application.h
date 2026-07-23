@@ -69,6 +69,14 @@ namespace Kurenai::Core
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
         std::unique_ptr<RHI::IRHITexture> m_GBufferDepth;
 
+        // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
+        // 計算しHDRで書き出す。DeferredLightingパスとSSIL_VisibilityBitmask.hlslの両方から
+        // サンプルされるため、G-Bufferと同じレンダー解像度・R32G32B32A32_Float(HDR)で保持する)
+        std::unique_ptr<RHI::IRHIShader> m_DirectLightVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_DirectLightPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DirectLightPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_DirectLightTexture;
+
         // AO/GI手法の選択。SSAOは遮蔽率のみ、SSIL(Visibility Bitmask)は遮蔽率に加えて
         // 近傍サーフェスからの間接拡散光(バウンス光)も計算する。どちらも出力フォーマットは共通
         // (rgb=間接拡散光, a=遮蔽率)で、ライティングパスは選択中のテクスチャを1枚読むだけでよい
@@ -103,7 +111,7 @@ namespace Kurenai::Core
         std::unique_ptr<RHI::IRHITexture> m_SSILTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSILConstantBuffer;
         float m_SSILRadius = 0.5f;
-        float m_SSILThickness = 0.1f;
+        float m_SSILThickness = 0.01f;
         float m_SSILIntensity = 2.0f;
         float m_SSILPower = 1.5f;
         uint32_t m_SSILSliceCount = 4;
@@ -129,6 +137,7 @@ namespace Kurenai::Core
             Normal,
             Material,
             Depth,
+            DirectLight,     // DirectLightingパスの結果(HDR、シャドウ適用済みの直接光)をトーンマッピングして表示
             AOIndirectLight, // AO/GIバッファのrgb(間接拡散光)をそのまま表示
             AOOcclusion,     // AO/GIバッファのa(遮蔽率)をグレースケール表示
             ShadowMap,

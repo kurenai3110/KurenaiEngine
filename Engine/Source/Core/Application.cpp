@@ -292,6 +292,27 @@ namespace Kurenai::Core
         gbufferPipelineDesc.HasDepthStencil = true;
         m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
 
+        // 直接光パス(頂点バッファなしのフルスクリーン三角形。G-Buffer+シャドウマップからPBRの
+        // 直接光を計算しHDRで書き出す)
+        RHI::ShaderDesc directLightVsDesc;
+        directLightVsDesc.Stage = RHI::ShaderStage::Vertex;
+        directLightVsDesc.FilePath = shaderDirectory + L"DirectLighting.hlsl";
+        directLightVsDesc.EntryPoint = "VSMain";
+        m_DirectLightVertexShader = m_Device->CreateShader(directLightVsDesc);
+
+        RHI::ShaderDesc directLightPsDesc;
+        directLightPsDesc.Stage = RHI::ShaderStage::Pixel;
+        directLightPsDesc.FilePath = shaderDirectory + L"DirectLighting.hlsl";
+        directLightPsDesc.EntryPoint = "PSMain";
+        m_DirectLightPixelShader = m_Device->CreateShader(directLightPsDesc);
+
+        RHI::PipelineStateDesc directLightPipelineDesc;
+        directLightPipelineDesc.VertexShader = m_DirectLightVertexShader.get();
+        directLightPipelineDesc.PixelShader = m_DirectLightPixelShader.get();
+        directLightPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        directLightPipelineDesc.RenderTargetFormats = { RHI::Format::R32G32B32A32_Float };
+        m_DirectLightPipelineState = m_Device->CreatePipelineState(directLightPipelineDesc);
+
         // AO/GI共通の頂点シェーダ(頂点バッファなしのフルスクリーン三角形)。SSAO/SSIL/共通ブラーの
         // 3つのピクセルシェーダで使い回す
         RHI::ShaderDesc aoVsDesc;
@@ -462,6 +483,7 @@ namespace Kurenai::Core
         m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_GBufferDepth = m_Device->CreateDepthTexture(width, height);
+        m_DirectLightTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R32G32B32A32_Float);
         m_SSAORawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SSAOTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SSILRawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
@@ -701,6 +723,7 @@ namespace Kurenai::Core
             "Normal",
             "Material (R=Metallic, G=Roughness)",
             "Depth",
+            "Direct Light",
             "AO/GI - Indirect Light (RGB)",
             "AO/GI - Occlusion (Alpha)",
             "Shadow Map",
@@ -927,6 +950,22 @@ namespace Kurenai::Core
             commandList->DrawIndexed(mesh.IndexCount, 0, 0);
         }
 
+        // --- 直接光パス: G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
+        //     計算しHDRで書き出す(常に指定した内部解像度)。DeferredLighting/SSILの両方から読まれる ---
+        RHI::IRHITexture* directLightTarget[] = { m_DirectLightTexture.get() };
+        commandList->SetRenderTargets(directLightTarget, 1, nullptr);
+        commandList->SetViewport(gbufferViewport);
+
+        commandList->SetPipelineState(m_DirectLightPipelineState.get());
+        commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+        commandList->SetSampler(0, m_Sampler.get());
+        commandList->SetTexture(0, m_GBufferAlbedo.get());
+        commandList->SetTexture(1, m_GBufferNormal.get());
+        commandList->SetTexture(2, m_GBufferMaterial.get());
+        commandList->SetTexture(3, m_GBufferDepth.get());
+        commandList->SetTexture(4, m_ShadowMap.get());
+        commandList->Draw(3, 0);
+
         // --- AO/GIパス: 選択中の手法(SSAO or SSIL)でG-Bufferから遮蔽率(・間接拡散光)を計算し、
         //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどちらもrgb=間接拡散光, a=遮蔽率で共通 ---
         if (m_AOEnabled)
@@ -969,9 +1008,9 @@ namespace Kurenai::Core
 
                 commandList->SetPipelineState(m_SSILPipelineState.get());
                 commandList->SetConstantBuffer(1, m_SSILConstantBuffer.get());
-                commandList->SetTexture(0, m_GBufferAlbedo.get());
-                commandList->SetTexture(1, m_GBufferNormal.get());
-                commandList->SetTexture(2, m_GBufferDepth.get());
+                commandList->SetTexture(0, m_GBufferNormal.get());
+                commandList->SetTexture(1, m_GBufferDepth.get());
+                commandList->SetTexture(2, m_DirectLightTexture.get());
                 commandList->Draw(3, 0);
 
                 aoRawTexture = m_SSILRawTexture.get();
@@ -998,17 +1037,16 @@ namespace Kurenai::Core
         commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
         commandList->SetSampler(0, m_Sampler.get());
         commandList->SetTexture(0, m_GBufferAlbedo.get());
-        commandList->SetTexture(1, m_GBufferNormal.get());
+        commandList->SetTexture(1, m_DirectLightTexture.get());
         commandList->SetTexture(2, m_GBufferMaterial.get());
         commandList->SetTexture(3, m_GBufferDepth.get());
-        commandList->SetTexture(4, m_ShadowMap.get());
-        commandList->SetTexture(5, m_SkyboxTexture.get());
+        commandList->SetTexture(4, m_SkyboxTexture.get());
         RHI::IRHITexture* activeAOTexture = m_AODisabledTexture.get();
         if (m_AOEnabled)
         {
             activeAOTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAOTexture.get() : m_SSILTexture.get();
         }
-        commandList->SetTexture(6, activeAOTexture);
+        commandList->SetTexture(5, activeAOTexture);
         commandList->Draw(3, 0);
 
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
@@ -1035,6 +1073,10 @@ namespace Kurenai::Core
         case DebugView::Depth:
             presentSourceTexture = m_GBufferDepth.get();
             presentMode = 2;
+            break;
+        case DebugView::DirectLight:
+            presentSourceTexture = m_DirectLightTexture.get();
+            presentMode = 4; // HDRのためトーンマッピング(Reinhard)+ガンマ補正して表示
             break;
         case DebugView::AOIndirectLight:
             presentSourceTexture = activeAOTexture;
