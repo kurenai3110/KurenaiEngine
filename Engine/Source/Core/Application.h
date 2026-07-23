@@ -69,20 +69,45 @@ namespace Kurenai::Core
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
         std::unique_ptr<RHI::IRHITexture> m_GBufferDepth;
 
-        // SSAOパス(G-BufferのNormal/Depthから遮蔽率を計算し、ブラーで均す。G-Bufferと同じレンダー解像度)
-        std::unique_ptr<RHI::IRHIShader> m_SSAOVertexShader;
+        // AO/GI手法の選択。SSAOは遮蔽率のみ、SSIL(Visibility Bitmask)は遮蔽率に加えて
+        // 近傍サーフェスからの間接拡散光(バウンス光)も計算する。どちらも出力フォーマットは共通
+        // (rgb=間接拡散光, a=遮蔽率)で、ライティングパスは選択中のテクスチャを1枚読むだけでよい
+        enum class AOTechnique
+        {
+            SSAO,
+            SSILVisibilityBitmask,
+        };
+        bool m_AOEnabled = true;
+        AOTechnique m_AOTechnique = AOTechnique::SSAO;
+        std::unique_ptr<RHI::IRHITexture> m_AODisabledTexture; // AO無効時に使う、遮蔽なし・間接光なしのテクスチャ
+
+        // AO/GI共通のブラーパス(4x4ボックスブラーでrgba全チャンネルを均す。SSAO/SSIL両方から使い回す)
+        std::unique_ptr<RHI::IRHIShader> m_AOVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_AOBlurPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_AOBlurPipelineState;
+
+        // SSAOパス(G-BufferのNormal/Depthから遮蔽率を計算する。G-Bufferと同じレンダー解像度)
         std::unique_ptr<RHI::IRHIShader> m_SSAOPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_SSAOPipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_SSAOBlurPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SSAOBlurPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SSAORawTexture;
         std::unique_ptr<RHI::IRHITexture> m_SSAOTexture;
-        std::unique_ptr<RHI::IRHITexture> m_SSAOWhiteTexture; // SSAO無効時に使う、常に遮蔽なし(白)のテクスチャ
         std::unique_ptr<RHI::IRHIBuffer> m_SSAOConstantBuffer;
         std::vector<DirectX::XMFLOAT4> m_SSAOKernel;
-        bool m_SSAOEnabled = true;
         float m_SSAORadius = 0.5f;
         float m_SSAOPower = 1.5f;
+
+        // SSILパス(Visibility Bitmask): G-BufferのAlbedo/Normal/Depthから遮蔽率と間接拡散光を計算する
+        std::unique_ptr<RHI::IRHIShader> m_SSILPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SSILPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_SSILRawTexture;
+        std::unique_ptr<RHI::IRHITexture> m_SSILTexture;
+        std::unique_ptr<RHI::IRHIBuffer> m_SSILConstantBuffer;
+        float m_SSILRadius = 0.5f;
+        float m_SSILThickness = 0.1f;
+        float m_SSILIntensity = 2.0f;
+        float m_SSILPower = 1.5f;
+        uint32_t m_SSILSliceCount = 4;
+        uint32_t m_SSILStepCount = 6;
 
         // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)
         std::unique_ptr<RHI::IRHIShader> m_LightingVertexShader;
@@ -104,7 +129,7 @@ namespace Kurenai::Core
             Normal,
             Material,
             Depth,
-            SSAO,
+            AO,
             ShadowMap,
         };
         DebugView m_DebugView = DebugView::Final;

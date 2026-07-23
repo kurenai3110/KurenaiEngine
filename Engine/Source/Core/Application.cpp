@@ -128,6 +128,13 @@ namespace Kurenai::Core
             DirectX::XMFLOAT4 Params;                   // x: 半径, y: バイアス, z: 強さ(べき乗), w: 未使用
         };
 
+        // SSIL_VisibilityBitmask.hlsl側のcbuffer SSILConstantsと一致させる必要がある
+        struct alignas(16) SSILConstants
+        {
+            DirectX::XMFLOAT4 Params0; // x: 半径, y: 厚み(Thickness Heuristic), z: 間接光の強さ, w: AOのべき乗
+            DirectX::XMUINT4 Params1;  // x: スライス数, y: スライスあたりのステップ数, z/w: 未使用
+        };
+
         // タンジェント空間(Z軸=法線方向)の半球状にランダムなカーネルサンプルを生成する。
         // John Chapmanのチュートリアルにならい、原点付近にサンプルが偏るようスケーリングして
         // 近距離のディテールを優先的に拾う
@@ -285,13 +292,15 @@ namespace Kurenai::Core
         gbufferPipelineDesc.HasDepthStencil = true;
         m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
 
-        // SSAOパス(頂点バッファなしのフルスクリーン三角形。遮蔽率の計算とブラーの2つのピクセルシェーダを同じ頂点シェーダで使い回す)
-        RHI::ShaderDesc ssaoVsDesc;
-        ssaoVsDesc.Stage = RHI::ShaderStage::Vertex;
-        ssaoVsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
-        ssaoVsDesc.EntryPoint = "VSMain";
-        m_SSAOVertexShader = m_Device->CreateShader(ssaoVsDesc);
+        // AO/GI共通の頂点シェーダ(頂点バッファなしのフルスクリーン三角形)。SSAO/SSIL/共通ブラーの
+        // 3つのピクセルシェーダで使い回す
+        RHI::ShaderDesc aoVsDesc;
+        aoVsDesc.Stage = RHI::ShaderStage::Vertex;
+        aoVsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        aoVsDesc.EntryPoint = "VSMain";
+        m_AOVertexShader = m_Device->CreateShader(aoVsDesc);
 
+        // SSAOパス
         RHI::ShaderDesc ssaoPsDesc;
         ssaoPsDesc.Stage = RHI::ShaderStage::Pixel;
         ssaoPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
@@ -299,24 +308,11 @@ namespace Kurenai::Core
         m_SSAOPixelShader = m_Device->CreateShader(ssaoPsDesc);
 
         RHI::PipelineStateDesc ssaoPipelineDesc;
-        ssaoPipelineDesc.VertexShader = m_SSAOVertexShader.get();
+        ssaoPipelineDesc.VertexShader = m_AOVertexShader.get();
         ssaoPipelineDesc.PixelShader = m_SSAOPixelShader.get();
         ssaoPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
         ssaoPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
         m_SSAOPipelineState = m_Device->CreatePipelineState(ssaoPipelineDesc);
-
-        RHI::ShaderDesc ssaoBlurPsDesc;
-        ssaoBlurPsDesc.Stage = RHI::ShaderStage::Pixel;
-        ssaoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
-        ssaoBlurPsDesc.EntryPoint = "PSMainBlur";
-        m_SSAOBlurPixelShader = m_Device->CreateShader(ssaoBlurPsDesc);
-
-        RHI::PipelineStateDesc ssaoBlurPipelineDesc;
-        ssaoBlurPipelineDesc.VertexShader = m_SSAOVertexShader.get();
-        ssaoBlurPipelineDesc.PixelShader = m_SSAOBlurPixelShader.get();
-        ssaoBlurPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        ssaoBlurPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
-        m_SSAOBlurPipelineState = m_Device->CreatePipelineState(ssaoBlurPipelineDesc);
 
         m_SSAOKernel = GenerateSSAOKernel(kSSAOKernelSize);
 
@@ -325,8 +321,41 @@ namespace Kurenai::Core
         ssaoConstantBufferDesc.SizeInBytes = sizeof(SSAOConstants);
         m_SSAOConstantBuffer = m_Device->CreateBuffer(ssaoConstantBufferDesc);
 
-        // SSAO無効時はこの常に白(遮蔽なし)のテクスチャをライティングパスに渡す
-        m_SSAOWhiteTexture = m_Device->CreateSolidColorTexture(255, 255, 255, 255);
+        // SSILパス(Visibility Bitmask)
+        RHI::ShaderDesc ssilPsDesc;
+        ssilPsDesc.Stage = RHI::ShaderStage::Pixel;
+        ssilPsDesc.FilePath = shaderDirectory + L"SSIL_VisibilityBitmask.hlsl";
+        ssilPsDesc.EntryPoint = "PSMain";
+        m_SSILPixelShader = m_Device->CreateShader(ssilPsDesc);
+
+        RHI::PipelineStateDesc ssilPipelineDesc;
+        ssilPipelineDesc.VertexShader = m_AOVertexShader.get();
+        ssilPipelineDesc.PixelShader = m_SSILPixelShader.get();
+        ssilPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        ssilPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        m_SSILPipelineState = m_Device->CreatePipelineState(ssilPipelineDesc);
+
+        RHI::BufferDesc ssilConstantBufferDesc;
+        ssilConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        ssilConstantBufferDesc.SizeInBytes = sizeof(SSILConstants);
+        m_SSILConstantBuffer = m_Device->CreateBuffer(ssilConstantBufferDesc);
+
+        // AO/GI共通のブラーパス(SSAO.hlslのPSMainBlurを、rgbaフォーマットが同じSSAO/SSIL両方で使い回す)
+        RHI::ShaderDesc aoBlurPsDesc;
+        aoBlurPsDesc.Stage = RHI::ShaderStage::Pixel;
+        aoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        aoBlurPsDesc.EntryPoint = "PSMainBlur";
+        m_AOBlurPixelShader = m_Device->CreateShader(aoBlurPsDesc);
+
+        RHI::PipelineStateDesc aoBlurPipelineDesc;
+        aoBlurPipelineDesc.VertexShader = m_AOVertexShader.get();
+        aoBlurPipelineDesc.PixelShader = m_AOBlurPixelShader.get();
+        aoBlurPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        aoBlurPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        m_AOBlurPipelineState = m_Device->CreatePipelineState(aoBlurPipelineDesc);
+
+        // AO/GI無効時はこの常に黒・不透明(遮蔽なし=a:1、間接光なし=rgb:0)のテクスチャをライティングパスに渡す
+        m_AODisabledTexture = m_Device->CreateSolidColorTexture(0, 0, 0, 255);
 
         // ライティングパス(頂点バッファなしのフルスクリーン三角形)
         RHI::ShaderDesc lightingVsDesc;
@@ -435,6 +464,8 @@ namespace Kurenai::Core
         m_GBufferDepth = m_Device->CreateDepthTexture(width, height);
         m_SSAORawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SSAOTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_SSILRawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_SSILTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
     }
 
@@ -464,9 +495,11 @@ namespace Kurenai::Core
         const float dz = m_Model.BoundsMax[2] - m_Model.BoundsMin[2];
         const float diagonal = std::sqrt(dx * dx + sizeY * sizeY + dz * dz);
 
-        // SSAOのサンプリング半径はシーンの規模に応じて変わるべきなので、対角線に比例させる
+        // SSAO/SSILのサンプリング半径はシーンの規模に応じて変わるべきなので、対角線に比例させる
         // (小さすぎる/大きすぎるシーンでも遮蔽表現が破綻しないよう妥当な範囲にクランプする)
         m_SSAORadius = std::clamp(diagonal * 0.01f, 0.05f, 2.0f);
+        m_SSILRadius = m_SSAORadius;
+        m_SSILThickness = m_SSILRadius * 0.2f;
 
         const SceneEntry& currentScene = kScenes[m_CurrentSceneIndex];
         if (currentScene.HasCameraOverride)
@@ -614,11 +647,40 @@ namespace Kurenai::Core
         ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Post Processing");
 
-        ImGui::Checkbox("Enable SSAO", &m_SSAOEnabled);
-        if (m_SSAOEnabled)
+        ImGui::Checkbox("Enable AO / Indirect Light", &m_AOEnabled);
+        if (m_AOEnabled)
         {
-            ImGui::SliderFloat("SSAO Radius", &m_SSAORadius, 0.01f, 5.0f);
-            ImGui::SliderFloat("SSAO Power", &m_SSAOPower, 0.1f, 4.0f);
+            static const char* kAOTechniqueNames[] = { "SSAO", "SSIL (Visibility Bitmask)" };
+            int techniqueIndex = static_cast<int>(m_AOTechnique);
+            if (ImGui::Combo("Technique", &techniqueIndex, kAOTechniqueNames, IM_ARRAYSIZE(kAOTechniqueNames)))
+            {
+                m_AOTechnique = static_cast<AOTechnique>(techniqueIndex);
+            }
+
+            if (m_AOTechnique == AOTechnique::SSAO)
+            {
+                ImGui::SliderFloat("SSAO Radius", &m_SSAORadius, 0.01f, 5.0f);
+                ImGui::SliderFloat("SSAO Power", &m_SSAOPower, 0.1f, 4.0f);
+            }
+            else
+            {
+                ImGui::SliderFloat("SSIL Radius", &m_SSILRadius, 0.01f, 5.0f);
+                ImGui::SliderFloat("SSIL Thickness", &m_SSILThickness, 0.01f, 2.0f);
+                ImGui::SliderFloat("SSIL Intensity", &m_SSILIntensity, 0.0f, 8.0f);
+                ImGui::SliderFloat("SSIL AO Power", &m_SSILPower, 0.1f, 4.0f);
+
+                int sliceCount = static_cast<int>(m_SSILSliceCount);
+                if (ImGui::SliderInt("SSIL Slices", &sliceCount, 1, 8))
+                {
+                    m_SSILSliceCount = static_cast<uint32_t>(sliceCount);
+                }
+
+                int stepCount = static_cast<int>(m_SSILStepCount);
+                if (ImGui::SliderInt("SSIL Steps", &stepCount, 1, 16))
+                {
+                    m_SSILStepCount = static_cast<uint32_t>(stepCount);
+                }
+            }
         }
 
         ImGui::Checkbox("Enable Shadow", &m_ShadowEnabled);
@@ -628,7 +690,7 @@ namespace Kurenai::Core
 
     void Application::RenderDebugViewUI()
     {
-        ImGui::SetNextWindowPos(ImVec2(10.0f, 400.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowPos(ImVec2(10.0f, 540.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Render Targets");
 
@@ -639,7 +701,7 @@ namespace Kurenai::Core
             "Normal",
             "Material (R=Metallic, G=Roughness)",
             "Depth",
-            "SSAO",
+            "AO / Indirect Light",
             "Shadow Map",
         };
 
@@ -864,31 +926,62 @@ namespace Kurenai::Core
             commandList->DrawIndexed(mesh.IndexCount, 0, 0);
         }
 
-        // --- SSAOパス: G-BufferのNormal/Depthから遮蔽率を計算し、ブラーで均す(常に指定した内部解像度) ---
-        if (m_SSAOEnabled)
+        // --- AO/GIパス: 選択中の手法(SSAO or SSIL)でG-Bufferから遮蔽率(・間接拡散光)を計算し、
+        //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどちらもrgb=間接拡散光, a=遮蔽率で共通 ---
+        if (m_AOEnabled)
         {
-            SSAOConstants ssaoConstants{};
-            std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
-            ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
-            commandList->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
-
-            RHI::IRHITexture* ssaoRawTarget[] = { m_SSAORawTexture.get() };
-            commandList->SetRenderTargets(ssaoRawTarget, 1, nullptr);
             commandList->SetViewport(gbufferViewport);
-
-            commandList->SetPipelineState(m_SSAOPipelineState.get());
             commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-            commandList->SetConstantBuffer(1, m_SSAOConstantBuffer.get());
             commandList->SetSampler(0, m_Sampler.get());
-            commandList->SetTexture(0, m_GBufferNormal.get());
-            commandList->SetTexture(1, m_GBufferDepth.get());
-            commandList->Draw(3, 0);
 
-            // ブラーパス: 遮蔽率のタイル状ノイズをボックスブラーで均す
-            RHI::IRHITexture* ssaoBlurTarget[] = { m_SSAOTexture.get() };
-            commandList->SetRenderTargets(ssaoBlurTarget, 1, nullptr);
-            commandList->SetPipelineState(m_SSAOBlurPipelineState.get());
-            commandList->SetTexture(0, m_SSAORawTexture.get());
+            RHI::IRHITexture* aoRawTexture = nullptr;
+            RHI::IRHITexture* aoBlurredTexture = nullptr;
+
+            if (m_AOTechnique == AOTechnique::SSAO)
+            {
+                SSAOConstants ssaoConstants{};
+                std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
+                ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
+                commandList->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
+
+                RHI::IRHITexture* ssaoRawTarget[] = { m_SSAORawTexture.get() };
+                commandList->SetRenderTargets(ssaoRawTarget, 1, nullptr);
+
+                commandList->SetPipelineState(m_SSAOPipelineState.get());
+                commandList->SetConstantBuffer(1, m_SSAOConstantBuffer.get());
+                commandList->SetTexture(0, m_GBufferNormal.get());
+                commandList->SetTexture(1, m_GBufferDepth.get());
+                commandList->Draw(3, 0);
+
+                aoRawTexture = m_SSAORawTexture.get();
+                aoBlurredTexture = m_SSAOTexture.get();
+            }
+            else
+            {
+                SSILConstants ssilConstants{};
+                ssilConstants.Params0 = { m_SSILRadius, m_SSILThickness, m_SSILIntensity, m_SSILPower };
+                ssilConstants.Params1 = { m_SSILSliceCount, m_SSILStepCount, 0u, 0u };
+                commandList->UpdateBuffer(m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
+
+                RHI::IRHITexture* ssilRawTarget[] = { m_SSILRawTexture.get() };
+                commandList->SetRenderTargets(ssilRawTarget, 1, nullptr);
+
+                commandList->SetPipelineState(m_SSILPipelineState.get());
+                commandList->SetConstantBuffer(1, m_SSILConstantBuffer.get());
+                commandList->SetTexture(0, m_GBufferAlbedo.get());
+                commandList->SetTexture(1, m_GBufferNormal.get());
+                commandList->SetTexture(2, m_GBufferDepth.get());
+                commandList->Draw(3, 0);
+
+                aoRawTexture = m_SSILRawTexture.get();
+                aoBlurredTexture = m_SSILTexture.get();
+            }
+
+            // ブラーパス: 遮蔽率・間接拡散光のタイル状ノイズをボックスブラーで均す(SSAO/SSIL共通シェーダ)
+            RHI::IRHITexture* aoBlurTarget[] = { aoBlurredTexture };
+            commandList->SetRenderTargets(aoBlurTarget, 1, nullptr);
+            commandList->SetPipelineState(m_AOBlurPipelineState.get());
+            commandList->SetTexture(0, aoRawTexture);
             commandList->Draw(3, 0);
         }
 
@@ -909,7 +1002,12 @@ namespace Kurenai::Core
         commandList->SetTexture(3, m_GBufferDepth.get());
         commandList->SetTexture(4, m_ShadowMap.get());
         commandList->SetTexture(5, m_SkyboxTexture.get());
-        commandList->SetTexture(6, m_SSAOEnabled ? m_SSAOTexture.get() : m_SSAOWhiteTexture.get());
+        RHI::IRHITexture* activeAOTexture = m_AODisabledTexture.get();
+        if (m_AOEnabled)
+        {
+            activeAOTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAOTexture.get() : m_SSILTexture.get();
+        }
+        commandList->SetTexture(6, activeAOTexture);
         commandList->Draw(3, 0);
 
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
@@ -937,8 +1035,10 @@ namespace Kurenai::Core
             presentSourceTexture = m_GBufferDepth.get();
             presentMode = 2;
             break;
-        case DebugView::SSAO:
-            presentSourceTexture = m_SSAOEnabled ? m_SSAOTexture.get() : m_SSAOWhiteTexture.get();
+        case DebugView::AO:
+            presentSourceTexture = activeAOTexture;
+            // SSAOはrgbが常に0のため専用のグレースケール(a)表示、SSILはrgb(間接拡散光の色)をそのまま表示する
+            presentMode = (m_AOEnabled && m_AOTechnique == AOTechnique::SSILVisibilityBitmask) ? 0 : 3;
             break;
         case DebugView::ShadowMap:
             presentSourceTexture = m_ShadowMap.get();

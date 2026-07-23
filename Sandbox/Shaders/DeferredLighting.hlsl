@@ -20,6 +20,7 @@ Texture2D MaterialTexture : register(t2);
 Texture2D DepthTexture : register(t3);
 Texture2D ShadowMapTexture : register(t4);
 TextureCube SkyboxTexture : register(t5);
+// SSAO/SSIL(Visibility Bitmask)共通のAO/GIバッファ。rgb=間接拡散光(加算)、a=遮蔽率(乗算)
 Texture2D AOTexture : register(t6);
 SamplerState DefaultSampler : register(s0);
 
@@ -131,8 +132,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
     float3 diffuseColor = albedo * (1.0f - metallic);
 
-    float ao = AOTexture.Sample(DefaultSampler, input.UV).r;
-    float3 color = diffuseColor * AmbientColor.rgb * ao; // 環境光(時刻に応じて変化、SSAOで遮蔽率を適用)
+    float4 aoSample = AOTexture.Sample(DefaultSampler, input.UV);
+    float ao = aoSample.a;
+    float3 indirectLight = aoSample.rgb; // SSIL(Visibility Bitmask)使用時のみ非ゼロ。周囲のサーフェスからの間接拡散光
+    float3 color = diffuseColor * (AmbientColor.rgb * ao + indirectLight); // 環境光(時刻に応じて変化、遮蔽率を適用) + 間接拡散光
 
     if (NdotL > 0.0f)
     {

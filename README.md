@@ -1,8 +1,10 @@
 # KurenaiEngine
 
-DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。RHI(Rendering Hardware Interface)抽象化レイヤーの上にDX11・DX12それぞれのバックエンド(デバイス、コマンドリスト、ImGui連携など)を実装しており、実行時に切り替えられます。assimp経由でglTF・FBXモデルの読み込み・描画に対応しています。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。法線マッピングの接線は画面空間微分から近似計算しています。シャドウマッピングによる影の描画、SSAO(スクリーンスペース・アンビエントオクルージョン)、太陽光の昼夜サイクルにも対応しています。
+DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。RHI(Rendering Hardware Interface)抽象化レイヤーの上にDX11・DX12それぞれのバックエンド(デバイス、コマンドリスト、ImGui連携など)を実装しており、実行時に切り替えられます。assimp経由でglTF・FBXモデルの読み込み・描画に対応しています。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。法線マッピングの接線は画面空間微分から近似計算しています。シャドウマッピングによる影の描画、太陽光の昼夜サイクルにも対応しています。
 
-描画パイプラインは シャドウパス(サンライト視点で深度のみ描画) → ジオメトリパス(G-Buffer書き込み) → SSAOパス(Normal/深度からAOを計算しブラー) → ライティングパス(G-Buffer・シャドウマップ・SSAO・スカイボックスを読みSceneColorへ出力) → Presentパス(選択中のデバッグビューをバックバッファへ表示) の5パス構成です。シャドウ・SSAOはそれぞれON/OFF可能で、OFF時はシャドウパス/SSAOパスをスキップします。G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(`Application`のコンストラクタ引数、既定は1280x720)、Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
+環境光の遮蔽・間接光表現はSSAO(スクリーンスペース・アンビエントオクルージョン)とSSIL(Screen Space Indirect Lighting with Visibility Bitmask)の2手法を実行時に切り替えられます。SSAOはタンジェント空間の半球カーネルサンプリングによる遮蔽率のみを計算するのに対し、SSIL(Visibility Bitmask)はGTAO/HBAOと同様に法線周りのスライスごとにスクリーン空間の水平線サーチを行い、遮蔽を32セクタのビットマスクで表現します。これによりThickness Heuristic(遮蔽物に仮の厚みを持たせる)で薄いオブジェクトの裏に光を回り込ませつつ、新規に隠れたビット数を可視立体角の割合とみなして近傍サーフェスの簡易直接光を間接拡散光として加算します(Olivier Therrien et al. "Screen Space Indirect Lighting with Visibility Bitmask" (2023) を参考にした実装)。
+
+描画パイプラインは シャドウパス(サンライト視点で深度のみ描画) → ジオメトリパス(G-Buffer書き込み) → AO/GIパス(選択中の手法でNormal/Depth、SSILの場合はAlbedoも読みAO・間接拡散光を計算しブラー) → ライティングパス(G-Buffer・シャドウマップ・AO/GI・スカイボックスを読みSceneColorへ出力) → Presentパス(選択中のデバッグビューをバックバッファへ表示) の5パス構成です。シャドウ・AO/GIはそれぞれON/OFF可能で、OFF時はシャドウパス/AOパスをスキップします。G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(`Application`のコンストラクタ引数、既定は1280x720)、Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
 
 ## 構成
 
@@ -98,8 +100,8 @@ Sandbox.exe -dx12
   - Bistro - Interior
   - Bistro - Interior (Wine Cellar)
   - White Surface Test(粗さ0〜1の球体列)
-- **Post Processing** — SSAOのON/OFFと半径(Radius)/強さ(Power)、シャドウのON/OFFを切り替え
-- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / SSAO / Shadow Map)
+- **Post Processing** — AO/間接光のON/OFFと手法(Technique: SSAO / SSIL (Visibility Bitmask))を切り替え。SSAOは半径(Radius)/強さ(Power)、SSILは半径(Radius)/厚み(Thickness)/強さ(Intensity)/AOのコントラスト(AO Power)/スライス数(Slices)/ステップ数(Steps)を調整可能。シャドウのON/OFFもここで切り替え
+- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / AO / Indirect Light / Shadow Map)
 - **Lighting** — 太陽光の時刻(Time of Day, 0〜24時)をスライダーで指定。Auto Advanceを有効にすると時刻が自動で進行(速度をSpeedで調整)
 
 ## Assetsフォルダについて

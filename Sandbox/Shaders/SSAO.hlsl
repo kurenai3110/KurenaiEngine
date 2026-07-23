@@ -1,6 +1,8 @@
 // SSAO(Screen Space Ambient Occlusion)パス。
 // PSMain: G-BufferのNormal/Depthからサンプリングカーネルを使って遮蔽率を計算する(Texture0=World Normal, Texture1=Depth)
-// PSMainBlur: PSMainの出力(タイル状ノイズを含む)を均すための4x4ボックスブラー(Texture0=SSAO Raw)
+// PSMainBlur: PSMainの出力(タイル状ノイズを含む)を均すための4x4ボックスブラー(Texture0=AO Raw)。
+// SSAOとSSIL(Visibility Bitmask)は同じRGBAフォーマット(rgb=間接拡散光, a=遮蔽率)を出力するため、
+// このブラーはSSIL_VisibilityBitmask.hlslのブラーパスとしても共用する
 static const float PI = 3.14159265359f;
 static const int kSSAOKernelSize = 16;
 
@@ -64,8 +66,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     float depth = Texture1.Sample(DefaultSampler, input.UV).r;
     if (depth >= 1.0f)
     {
-        // 背景(スカイ)は遮蔽なし
-        return float4(1.0f, 1.0f, 1.0f, 1.0f);
+        // 背景(スカイ)は遮蔽なし・間接光なし(SSAOは間接光を計算しないのでrgbは常に0)
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
@@ -121,16 +123,18 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float ao = saturate(1.0f - occlusion / float(kSSAOKernelSize));
     ao = pow(ao, power);
-    return float4(ao, ao, ao, 1.0f);
+    // SSAOは間接光を計算しないため、rgb(間接拡散光)は常に0、a(遮蔽率)のみを書き込む
+    return float4(0.0f, 0.0f, 0.0f, ao);
 }
 
+// AO/GIバッファ(rgb=間接拡散光, a=遮蔽率)を4チャンネルまとめて均す汎用ボックスブラー
 float4 PSMainBlur(PSInput input) : SV_TARGET
 {
     uint width, height;
     Texture0.GetDimensions(width, height);
     float2 texelSize = 1.0f / float2(width, height);
 
-    float sum = 0.0f;
+    float4 sum = float4(0.0f, 0.0f, 0.0f, 0.0f);
     [unroll]
     for (int x = -2; x <= 1; ++x)
     {
@@ -138,10 +142,9 @@ float4 PSMainBlur(PSInput input) : SV_TARGET
         for (int y = -2; y <= 1; ++y)
         {
             float2 offsetUV = input.UV + float2(x, y) * texelSize;
-            sum += Texture0.Sample(DefaultSampler, offsetUV).r;
+            sum += Texture0.Sample(DefaultSampler, offsetUV);
         }
     }
 
-    float ao = sum / 16.0f;
-    return float4(ao, ao, ao, 1.0f);
+    return sum / 16.0f;
 }

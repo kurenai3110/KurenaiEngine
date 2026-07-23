@@ -1,9 +1,10 @@
-// Mode: 0=RGB(SceneColor/Albedo/Normal/Material/SSAOなど、そのまま表示できるバッファ用)
+// Mode: 0=RGB(SceneColor/Albedo/Normal/Material/SSILの間接光など、そのまま表示できるバッファ用)
 //       1=単チャンネルの深度をそのままpow()でコントラストを持ち上げて表示(シャドウマップ用。
 //         正射影のため深度がライト視点距離に対して線形に分布し、これで十分見やすくなる)
 //       2=透視投影のGBuffer深度用。NDC深度は遠方ほど値が1.0f付近に密集する非線形分布のため、
 //         そのままpow()しても見分けがつかない。ワールド座標を再構成しカメラからの距離を
 //         線形にグレースケール化する
+//       3=AO/GIバッファのa(遮蔽率)チャンネルをグレースケール表示(SSAOのrgbは常に0のため専用)
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
@@ -66,6 +67,12 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 経験的に選んだ値)。近いほど暗く、遠いほど明るいグレースケールになる
         float depth = saturate(viewZ / (viewZ + 20.0f));
         return float4(depth, depth, depth, 1.0f);
+    }
+
+    if (Mode == 3)
+    {
+        float ao = sourceColor.a;
+        return float4(ao, ao, ao, 1.0f);
     }
 
     return float4(sourceColor.rgb, 1.0f);
