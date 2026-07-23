@@ -242,6 +242,7 @@ namespace Kurenai::Core
         m_Device = api == RHI::GraphicsAPI::DX12 ? RHI::CreateDX12Device() : RHI::CreateDX11Device();
         m_SwapChain = m_Device->CreateSwapChain(m_Window->GetHandle(), m_Window->GetWidth(), m_Window->GetHeight());
         m_ImGuiBackend = m_Device->CreateImGuiBackend(m_Window->GetHandle());
+        m_GPUProfiler = m_Device->CreateGPUProfiler();
 
         // imgui.iniの保存先を起動時の作業ディレクトリに依存させず、実行ファイルと同じフォルダに固定する。
         // ImGuiはIniFilenameのポインタを保持するだけでコピーしないため、m_ImGuiIniPathで寿命を維持する
@@ -759,6 +760,25 @@ namespace Kurenai::Core
         ImGui::End();
     }
 
+    void Application::RenderProfilerUI()
+    {
+        ImGui::SetNextWindowPos(ImVec2(280.0f, 280.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(280.0f, 260.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Profiler");
+
+        ImGui::Text("FPS: %.1f", m_FPS);
+        ImGui::Text("CPU Frame Time: %.3f ms", m_CPUFrameTimeMs);
+        ImGui::Text("GPU Frame Time: %.3f ms", m_GPUProfiler->GetTotalFrameTimeMs());
+        ImGui::Separator();
+        ImGui::TextUnformatted("GPU Pass Breakdown:");
+        for (const auto& result : m_GPUProfiler->GetResults())
+        {
+            ImGui::Text("  %s: %.3f ms", result.Name.c_str(), result.TimeMs);
+        }
+
+        ImGui::End();
+    }
+
     void Application::Run()
     {
         while (!m_Window->ShouldClose())
@@ -773,8 +793,18 @@ namespace Kurenai::Core
             const float deltaTime = std::chrono::duration<float>(now - m_LastFrameTime).count();
             m_LastFrameTime = now;
 
+            const auto cpuStart = std::chrono::steady_clock::now();
             Update(deltaTime);
             Render();
+            const auto cpuEnd = std::chrono::steady_clock::now();
+            m_CPUFrameTimeMs = std::chrono::duration<float, std::milli>(cpuEnd - cpuStart).count();
+
+            // FPSは指数移動平均で平滑化する(生の1/deltaTimeだとフレームごとの揺れが大きく読み取りにくいため)
+            if (deltaTime > 0.0f)
+            {
+                const float instantFPS = 1.0f / deltaTime;
+                m_FPS = (m_FPS == 0.0f) ? instantFPS : (m_FPS * 0.9f + instantFPS * 0.1f);
+            }
         }
     }
 
@@ -892,9 +922,11 @@ namespace Kurenai::Core
             RenderPostProcessUI();
             RenderDebugViewUI();
             RenderLightingUI();
+            RenderProfilerUI();
         }
 
         auto* commandList = m_Device->GetImmediateCommandList();
+        m_GPUProfiler->BeginFrame();
 
         const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay);
         const DirectX::XMMATRIX lightViewProj = ComputeLightViewProj(sunLighting.Direction);
@@ -916,6 +948,7 @@ namespace Kurenai::Core
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度) ---
+        m_GPUProfiler->BeginScope("Shadow");
         RHI::Viewport shadowViewport;
         shadowViewport.Width = static_cast<float>(kShadowMapSize);
         shadowViewport.Height = static_cast<float>(kShadowMapSize);
@@ -938,8 +971,10 @@ namespace Kurenai::Core
                 commandList->DrawIndexed(mesh.IndexCount, 0, 0);
             }
         }
+        m_GPUProfiler->EndScope(); // Shadow
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
+        m_GPUProfiler->BeginScope("GBuffer");
         RHI::Viewport gbufferViewport;
         gbufferViewport.Width = static_cast<float>(m_RenderWidth);
         gbufferViewport.Height = static_cast<float>(m_RenderHeight);
@@ -970,9 +1005,11 @@ namespace Kurenai::Core
             commandList->SetTexture(2, mesh.MetallicRoughnessTexture);
             commandList->DrawIndexed(mesh.IndexCount, 0, 0);
         }
+        m_GPUProfiler->EndScope(); // GBuffer
 
         // --- 直接光パス: G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         //     計算しHDRで書き出す(常に指定した内部解像度)。DeferredLighting/SSILの両方から読まれる ---
+        m_GPUProfiler->BeginScope("DirectLight");
         RHI::IRHITexture* directLightTarget[] = { m_DirectLightTexture.get() };
         commandList->SetRenderTargets(directLightTarget, 1, nullptr);
         commandList->SetViewport(gbufferViewport);
@@ -986,11 +1023,13 @@ namespace Kurenai::Core
         commandList->SetTexture(3, m_GBufferDepth.get());
         commandList->SetTexture(4, m_ShadowMap.get());
         commandList->Draw(3, 0);
+        m_GPUProfiler->EndScope(); // DirectLight
 
         // --- AO/GIパス: 選択中の手法(SSAO or SSIL)でG-Bufferから遮蔽率(・間接拡散光)を計算し、
         //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどちらもrgb=間接拡散光, a=遮蔽率で共通 ---
         if (m_AOEnabled)
         {
+            m_GPUProfiler->BeginScope("AO");
             commandList->SetViewport(gbufferViewport);
             commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
             commandList->SetSampler(0, m_Sampler.get());
@@ -1037,16 +1076,20 @@ namespace Kurenai::Core
                 aoRawTexture = m_SSILRawTexture.get();
                 aoBlurredTexture = m_SSILTexture.get();
             }
+            m_GPUProfiler->EndScope(); // AO
 
             // ブラーパス: 遮蔽率・間接拡散光のタイル状ノイズをボックスブラーで均す(SSAO/SSIL共通シェーダ)
+            m_GPUProfiler->BeginScope("AOBlur");
             RHI::IRHITexture* aoBlurTarget[] = { aoBlurredTexture };
             commandList->SetRenderTargets(aoBlurTarget, 1, nullptr);
             commandList->SetPipelineState(m_AOBlurPipelineState.get());
             commandList->SetTexture(0, aoRawTexture);
             commandList->Draw(3, 0);
+            m_GPUProfiler->EndScope(); // AOBlur
         }
 
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
+        m_GPUProfiler->BeginScope("Lighting");
         RHI::IRHITexture* sceneColorTarget[] = { m_SceneColor.get() };
         commandList->SetRenderTargets(sceneColorTarget, 1, nullptr);
         commandList->SetViewport(gbufferViewport);
@@ -1072,6 +1115,7 @@ namespace Kurenai::Core
         }
         commandList->SetTexture(5, activeAOTexture);
         commandList->Draw(3, 0);
+        m_GPUProfiler->EndScope(); // Lighting
 
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
         // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
@@ -1134,6 +1178,7 @@ namespace Kurenai::Core
         presentConstants.Mode = presentMode;
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
+        m_GPUProfiler->BeginScope("Present");
         commandList->SetRenderTarget(m_SwapChain.get());
         commandList->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
         commandList->ClearDepth(1.0f);
@@ -1149,9 +1194,14 @@ namespace Kurenai::Core
         commandList->SetSampler(0, m_Sampler.get());
         commandList->SetTexture(0, presentSourceTexture);
         commandList->Draw(3, 0);
+        m_GPUProfiler->EndScope(); // Present
 
         // ImGuiはPresentパスでバインドされたバックバッファにそのまま重ねて描画する
         m_ImGuiBackend->Render();
+
+        // Present呼び出しでコマンドリストが実行投入される(DX12)ため、それより前にEndFrame()で
+        // フレーム終端のタイムスタンプ書き込み・結果リードバックのコマンドを記録しておく必要がある
+        m_GPUProfiler->EndFrame();
 
         m_SwapChain->Present(true);
     }

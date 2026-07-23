@@ -11,6 +11,7 @@
 
 #include "DX12Buffer.h"
 #include "DX12CommandList.h"
+#include "DX12GPUProfiler.h"
 #include "DX12ImGuiBackend.h"
 #include "DX12PipelineState.h"
 #include "DX12Sampler.h"
@@ -562,6 +563,11 @@ namespace Kurenai::RHI
     std::unique_ptr<IRHIImGuiBackend> DX12Device::CreateImGuiBackend(void* windowHandle)
     {
         return std::make_unique<DX12ImGuiBackend>(this, windowHandle);
+    }
+
+    std::unique_ptr<IRHIGPUProfiler> DX12Device::CreateGPUProfiler()
+    {
+        return std::make_unique<DX12GPUProfiler>(this);
     }
 
     std::unique_ptr<IRHIDevice> CreateDX12Device()

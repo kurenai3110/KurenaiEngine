@@ -39,6 +39,7 @@ namespace Kurenai::Core
         void RenderPostProcessUI();
         void RenderDebugViewUI();
         void RenderLightingUI();
+        void RenderProfilerUI();
         DirectX::XMMATRIX ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const;
 
         std::unique_ptr<Window> m_Window;
@@ -56,6 +57,9 @@ namespace Kurenai::Core
         // m_Deviceが破棄される前にImGuiのバックエンドを終了させる必要があるため、
         // メンバ破棄順(宣言の逆順)に従いm_Deviceより後で宣言する
         std::unique_ptr<RHI::IRHIImGuiBackend> m_ImGuiBackend;
+
+        // GPUタイムスタンプクエリによる各パスの計測(Shadow/GBuffer/AOなど)。数フレーム遅れの結果が返る
+        std::unique_ptr<RHI::IRHIGPUProfiler> m_GPUProfiler;
 
         // G-Bufferの内部解像度。ウィンドウサイズとは独立しており、表示時はアスペクト比を保って拡大縮小する
         uint32_t m_RenderWidth;
@@ -172,6 +176,10 @@ namespace Kurenai::Core
 
         Camera m_Camera;
         std::chrono::steady_clock::time_point m_LastFrameTime;
+
+        // 統計表示用: 1フレームあたりのCPU時間(Update+Renderの呼び出し時間)と、指数移動平均によるFPS
+        float m_CPUFrameTimeMs = 0.0f;
+        float m_FPS = 0.0f;
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};

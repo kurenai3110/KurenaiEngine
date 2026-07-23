@@ -39,6 +39,7 @@ namespace Kurenai::RHI
         IRHICommandList* GetImmediateCommandList() override;
 
         std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) override;
+        std::unique_ptr<IRHIGPUProfiler> CreateGPUProfiler() override;
 
         // DX12実装内部(DX12SwapChain/DX12Texture/DX12Sampler/DX12CommandList)から利用するアクセサ
         ID3D12Device* GetDevice() const { return m_Device.Get(); }

@@ -30,6 +30,7 @@ namespace Kurenai::RHI
         IRHICommandList* GetImmediateCommandList() override;
 
         std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) override;
+        std::unique_ptr<IRHIGPUProfiler> CreateGPUProfiler() override;
 
     private:
         Microsoft::WRL::ComPtr<ID3D11Device> m_Device;

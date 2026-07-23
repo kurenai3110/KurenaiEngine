@@ -9,6 +9,7 @@
 
 #include "DX11Buffer.h"
 #include "DX11CommandList.h"
+#include "DX11GPUProfiler.h"
 #include "DX11ImGuiBackend.h"
 #include "DX11PipelineState.h"
 #include "DX11Sampler.h"
@@ -385,6 +386,11 @@ namespace Kurenai::RHI
     std::unique_ptr<IRHIImGuiBackend> DX11Device::CreateImGuiBackend(void* windowHandle)
     {
         return std::make_unique<DX11ImGuiBackend>(m_Device.Get(), m_Context.Get(), windowHandle);
+    }
+
+    std::unique_ptr<IRHIGPUProfiler> DX11Device::CreateGPUProfiler()
+    {
+        return std::make_unique<DX11GPUProfiler>(m_Device, m_Context);
     }
 
     std::unique_ptr<IRHIDevice> CreateDX11Device()

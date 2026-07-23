@@ -97,7 +97,7 @@ Sandbox.exe -dx12
 
 ### ImGuiパネル
 
-画面左上に表示される4つのImGuiパネルから各種設定を変更できます(F1キーで表示/非表示を切り替え可能)。
+画面左上に表示される5つのImGuiパネルから各種設定を変更できます(F1キーで表示/非表示を切り替え可能)。
 
 - **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、表示アセットの切り替えを行う。ボタンをクリックするとそのアセットを読み込みます。現在表示中のアセットに対応するボタンはグレーアウトされます。切り替え時はモデルとテクスチャを同期的に再読み込みするため、Bistroのような大容量アセットでは数秒〜数十秒ウィンドウが応答しなくなります(2回目以降はモデルキャッシュにより高速化されます)。読み込み完了後、タイトルバーに現在表示中のアセット名が表示されます。
   - Sponza
@@ -108,6 +108,7 @@ Sandbox.exe -dx12
 - **Post Processing** — AO/間接光のON/OFFと手法(Technique: SSAO / SSIL (Visibility Bitmask))を切り替え。SSAOは半径(Radius)/強さ(Power)、SSILは半径(Radius)/厚み(Thickness)/強さ(Intensity)/AOのコントラスト(AO Power)/スライス数(Slices)/ステップ数(Steps)を調整可能。シャドウのON/OFFもここで切り替え
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / Depth (Raw) / Direct Light / AO/GI - Indirect Light (RGB) / AO/GI - Indirect Light (RGB, Before Blur) / AO/GI - Occlusion (Alpha) / AO/GI - Occlusion (Alpha, Before Blur) / Shadow Map)。Direct Lightは直接光パスの結果(HDR)をトーンマッピングして表示。Depth (Raw)は深度テクスチャの生値(0〜1)を加工せずそのまま表示(reverse-zの生値確認用。近平面が小さいためほとんどの距離で値が0付近になり、無加工ではほぼ黒く見える)。AO/GIバッファはrgb(間接拡散光)とa(遮蔽率)を別々に確認でき、Before Blur付きの項目はブラー前の生バッファ(タイル状ノイズが乗った状態)を表示する
 - **Lighting** — 太陽光の時刻(Time of Day, 0〜24時)をスライダーで指定。Auto Advanceを有効にすると時刻が自動で進行(速度をSpeedで調整)
+- **Profiler** — FPS(指数移動平均)、CPUフレーム時間(Update+Render呼び出し時間)、GPUフレーム時間と各パス(Shadow/GBuffer/DirectLight/AO/AOBlur/Lighting/Present)ごとのGPU実行時間をGPUタイムスタンプクエリで計測して表示。GPU側の計測はDX11/DX12とも数フレーム遅れの値が表示される(AO/AOBlurはAO/間接光が無効の間は表示されない)
 
 ## Assetsフォルダについて
 
