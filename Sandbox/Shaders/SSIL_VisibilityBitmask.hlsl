@@ -163,7 +163,7 @@ void SearchSide(
     float2 baseUV, float2 dir2D, float sideSign, float normalAngle,
     float radius, float thickness, float2 uvRadiusScale,
     float2 depthTexSize, float2 invDepthTexSize,
-    uint stepCount, float invStepCountPlus1,
+    uint stepCount, float invStepCountPlus1, float stepJitter,
     inout uint sliceMask, inout float3 gi)
 {
     [loop]
@@ -176,7 +176,11 @@ void SearchSide(
             break;
         }
 
-        float t = float(s) * invStepCountPlus1;
+        // ステップ位置を±0.5ステップ分の範囲でジッタリングする(stepJitterは[0,1)なので-0.5で中心化)。
+        // 固定間隔サンプリングは遮蔽物の縁に同心円状のバンディングを生むが、
+        // ピクセルごとに異なるstepJitterでずらすことで高周波ノイズに変換できる(後段のブラーで均される)。
+        // 期待値はE[stepJitter]=0.5なので平均的なサンプル半径は元の等間隔サンプリングと変わらない
+        float t = (float(s) + stepJitter - 0.5f) * invStepCountPlus1;
         float2 sampleUV = baseUV + dir2D * (sideSign * t * uvRadiusScale);
         if (sampleUV.x < 0.0f || sampleUV.x > 1.0f || sampleUV.y < 0.0f || sampleUV.y > 1.0f)
         {
@@ -274,7 +278,7 @@ float SearchSlice(
     float2 baseUV, float2 dir2D, float normalAngle,
     float radius, float thickness, float2 uvRadiusScale,
     float2 depthTexSize, float2 invDepthTexSize,
-    uint stepCount, float invStepCountPlus1,
+    uint stepCount, float invStepCountPlus1, float stepJitter,
     inout float3 gi)
 {
     uint sliceMask = 0u;
@@ -283,11 +287,11 @@ float SearchSlice(
     // 即座に打ち切られる(ここでは呼び出し自体をスキップする必要はない)
     SearchSide(P, V, N, normalWorld, worldPos, baseUV, dir2D, 1.0f, normalAngle,
         radius, thickness, uvRadiusScale, depthTexSize, invDepthTexSize,
-        stepCount, invStepCountPlus1, sliceMask, gi);
+        stepCount, invStepCountPlus1, stepJitter, sliceMask, gi);
 
     SearchSide(P, V, N, normalWorld, worldPos, baseUV, dir2D, -1.0f, normalAngle,
         radius, thickness, uvRadiusScale, depthTexSize, invDepthTexSize,
-        stepCount, invStepCountPlus1, sliceMask, gi);
+        stepCount, invStepCountPlus1, stepJitter, sliceMask, gi);
 
     return 1.0f - float(countbits(sliceMask)) / float(kSectorCount);
 }
@@ -340,6 +344,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     float2 uvRadiusScale = float2(1.0f, aspect) * screenRadiusUV;
 
     float jitter = Hash12(input.Position.xy);
+    // スライス角度のjitterと相関しないよう、異なるオフセットでハッシュした値をステップ位置のジッタリングに使う
+    float stepJitter = Hash12(input.Position.xy + 19.19f);
 
     float ao = 0.0f;
     float3 gi = float3(0.0f, 0.0f, 0.0f);
@@ -363,7 +369,7 @@ float4 PSMain(PSInput input) : SV_TARGET
             input.UV, dir2D, normalAngle,
             radius, thickness, uvRadiusScale,
             depthTexSize, invDepthTexSize,
-            stepCount, invStepCountPlus1,
+            stepCount, invStepCountPlus1, stepJitter,
             gi);
     }
 
