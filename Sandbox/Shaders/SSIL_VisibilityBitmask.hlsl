@@ -82,10 +82,11 @@ float2 ProjectToUV(float3 viewPos)
 // バイリニアフィルタで読むとエッジ付近で存在しない中間深度が得られ、再構成した位置が大きくずれる
 // (特に手前・グレージングの床)。テクセル中心ちょうどをサンプルすればバイリニアでも補間が起きず、
 // 実質ポイントサンプリングになる(参照実装XeGTAO/Bevyが深度・法線にポイントサンプラーを使う理由と同じ)。
-// スナップ後のUVを深度サンプルと位置再構成の両方に使うことで、深度とNDC-xyの整合も保たれる
-float2 SnapToTexel(float2 uv, float2 texSize)
+// スナップ後のUVを深度サンプルと位置再構成の両方に使うことで、深度とNDC-xyの整合も保たれる。
+// invTexSizeは呼び出し側で1回だけ計算し、サンプルごとの除算を乗算に置き換える
+float2 SnapToTexel(float2 uv, float2 texSize, float2 invTexSize)
 {
-    return (floor(uv * texSize) + 0.5f) / texSize;
+    return (floor(uv * texSize) + 0.5f) * invTexSize;
 }
 
 // ピクセル座標から[0,1)の疑似乱数を得るハッシュ関数(Dave Hoskinsのhash12)。
@@ -117,6 +118,180 @@ float SignedAngleFromV(float3 w, float3 V, float sideSign)
     return sideSign * acos(cosAngle);
 }
 
+// スライス平面(DとVが張る平面)の法線と、その平面内でVに直交するタンジェント方向e1から、
+// 法線Nをこの平面へ投影したときのV軸基準符号付き角度(normalAngle)を求める(スライスごとに1回だけ)。
+// 平面がほぼ縮退する(D‖V)か、Nがこの平面にほぼ垂直な場合はこのスライスがNの遮蔽判定に
+// ほとんど寄与しないため、falseを返して呼び出し側でスキップさせる
+bool TryComputeNormalAngle(float3 N, float3 V, float2 dir2D, out float normalAngle)
+{
+    normalAngle = 0.0f;
+
+    // dir2DはUV空間の方向(yは下向きが正)。Dはビュー空間の方向として使うため、
+    // UV→NDC変換でyが反転する分をここで打ち消す(ProjectToUV/ReconstructWorldPosのy反転と対応)
+    float3 D = normalize(float3(dir2D.x, -dir2D.y, 0.0f));
+
+    float3 planeNormal = cross(D, V);
+    float planeNormalLen = length(planeNormal);
+    if (planeNormalLen < 1e-5f)
+    {
+        return false;
+    }
+    planeNormal /= planeNormalLen;
+    float3 e1 = normalize(cross(V, planeNormal));
+
+    float3 projectedNormal = N - planeNormal * dot(N, planeNormal);
+    float projectedNormalLen = length(projectedNormal);
+    if (projectedNormalLen < 1e-5f)
+    {
+        // 法線がこのスライス平面にほぼ垂直: このスライスはNの遮蔽判定にほとんど寄与しない
+        return false;
+    }
+
+    // 投影した法線とVのなす角(V軸基準の符号付き角度)。法線はカメラを向いている(front-facing)前提で
+    // cosをsaturateし、normalAngleを[-HALF_PI, HALF_PI]に収める(参照実装XeGTAO/Bevyと同じ)。
+    // これにより後段のangleFront/angleBackが範囲外へ飛んでも、単純なクランプで正しく地平線に収まる
+    float normalSign = SignNonZero(dot(projectedNormal, e1));
+    float cosNormal = saturate(dot(projectedNormal, V) / projectedNormalLen);
+    normalAngle = normalSign * acos(cosNormal);
+    return true;
+}
+
+// 1スライスの片側(sideSign=+1なら+dir2D方向、-1なら-dir2D方向)を水平線サーチし、
+// 可視ビットマスク(sliceMask)と間接光(gi)をinoutで積算する
+void SearchSide(
+    float3 P, float3 V, float3 N, float3 normalWorld, float3 worldPos,
+    float2 baseUV, float2 dir2D, float sideSign, float normalAngle,
+    float radius, float thickness, float2 uvRadiusScale,
+    float2 depthTexSize, float2 invDepthTexSize,
+    uint stepCount, float invStepCountPlus1,
+    inout uint sliceMask, inout float3 gi)
+{
+    [loop]
+    for (uint s = 1; s <= stepCount; ++s)
+    {
+        if (sliceMask == 0xFFFFFFFFu)
+        {
+            // 全セクタが既に埋まっていればこれ以上探索しても変化しない
+            // (side=-1呼び出しがside=+1で埋まったmaskを受け取った場合もここで即座に打ち切られる)
+            break;
+        }
+
+        float t = float(s) * invStepCountPlus1;
+        float2 sampleUV = baseUV + dir2D * (sideSign * t * uvRadiusScale);
+        if (sampleUV.x < 0.0f || sampleUV.x > 1.0f || sampleUV.y < 0.0f || sampleUV.y > 1.0f)
+        {
+            continue;
+        }
+
+        // 深度・法線・直接光のサンプルは、以降すべてこのスナップ後のUVで読む。
+        // これにより深度がポイントサンプリング相当になり、再構成位置(sampleViewPos)が
+        // テクセルの実際の値と一致する
+        sampleUV = SnapToTexel(sampleUV, depthTexSize, invDepthTexSize);
+
+        float sampleDepth = Texture1.Sample(DefaultSampler, sampleUV).r;
+        if (sampleDepth <= 0.0f)
+        {
+            // 背景(スカイ)は寄与しない(Reverse-Zのため遠平面=背景はNDC z=0.0付近になる)
+            continue;
+        }
+
+        float3 sampleWorldPos = ReconstructWorldPos(sampleUV, sampleDepth);
+        float3 sampleViewPos = mul(float4(sampleWorldPos, 1.0f), View).xyz;
+
+        float3 offsetFront = sampleViewPos - P;
+        float distFront = length(offsetFront);
+        if (distFront < 1e-5f || distFront > radius)
+        {
+            continue;
+        }
+
+        // Thickness Heuristic: サンプル点は無限に薄い点ではなく、Vの逆方向(カメラから遠ざかる方向)に
+        // thicknessぶん奥行きを持つ板とみなす。offsetFront/offsetBackはスライス平面(e1とVが張る平面)上に
+        // ほぼ乗っているため、Vずらしても平面上に留まる(e1・Vの線形結合のまま)
+        float3 offsetBack = offsetFront - V * thickness;
+
+        // offsetFront/offsetBackはスライス平面上にほぼ乗っており、+dir2D側/-dir2D側どちらを
+        // サーチしているかは既知(sideSign)なので、e1との内積を別途取らなくても
+        // sign(x)*acos(y/r) ≡ atan2(x,y) (x=平面内接線成分, y=dot(w,V))の関係から符号付き角度が求まる。
+        // 法線基準の角度に変換する(ここでは周期のラップはしない。範囲外は後段のクランプで地平線に収める。
+        // ラップすると±πを跨いだサンプルが反対側の半球へ符号反転して偽の遮蔽を作るため)
+        float angleFront = SignedAngleFromV(offsetFront, V, sideSign) - normalAngle;
+        float angleBack = SignedAngleFromV(offsetBack, V, sideSign) - normalAngle;
+
+        // 法線の接平面より下(可視半球の外)は寄与しないので範囲外として扱う
+        if (angleFront < -HALF_PI && angleBack < -HALF_PI)
+        {
+            continue;
+        }
+        if (angleFront > HALF_PI && angleBack > HALF_PI)
+        {
+            continue;
+        }
+
+        float angleFrontClamped = clamp(angleFront, -HALF_PI, HALF_PI);
+        float angleBackClamped = clamp(angleBack, -HALF_PI, HALF_PI);
+
+        float theta01Min = (min(angleFrontClamped, angleBackClamped) + HALF_PI) / PI;
+        float theta01Max = (max(angleFrontClamped, angleBackClamped) + HALF_PI) / PI;
+
+        // 角度幅が32セクタの分解能に満たない(丸めるとほぼ0になる)場合、無理に1ビット占有させると
+        // 平坦な床のようにほぼ同一平面上のサンプルが多数ある場面で偽の遮蔽・ノイズが積み重なってしまう。
+        // 真に角度幅が無い(=遮蔽していない)サンプルはビットを1つも立てない(bitSpan=0を許容する)
+        uint startBit = min((uint)floor(saturate(theta01Min) * float(kSectorCount)), kSectorCount - 1u);
+        uint bitSpan = (uint)ceil(saturate(theta01Max - theta01Min) * float(kSectorCount));
+        bitSpan = min(bitSpan, kSectorCount - startBit);
+        uint sampleMaskBits = (bitSpan >= kSectorCount) ? 0xFFFFFFFFu : (((1u << bitSpan) - 1u) << startBit);
+
+        // このサンプルで新規に隠れたビット数を、サンプルが担う可視立体角の割合とみなす。
+        // 既に(+側/-側どちらかの)手前のサンプルで隠れていた区間は二重にカウントしない
+        // (=多重遮蔽物の裏に光が回り込む)
+        uint newlySetBits = sampleMaskBits & ~sliceMask;
+        uint newlySetCount = countbits(newlySetBits);
+        if (newlySetCount > 0u)
+        {
+            float3 sampleNormalWorld = normalize(Texture0.Sample(DefaultSampler, sampleUV).xyz * 2.0f - 1.0f);
+
+            float3 lightDirWorld = normalize(sampleWorldPos - worldPos);
+            float receiverNdotL = saturate(dot(normalWorld, lightDirWorld));
+            float emitterNdotL = saturate(dot(sampleNormalWorld, -lightDirWorld));
+
+            // サンプル地点の直接光(DirectLighting.hlslで計算済み、シャドウ適用済み)を
+            // このサンプルが反射・再放射する放射輝度とみなす(環境光は含めない)
+            float3 sampleRadiance = Texture2.Sample(DefaultSampler, sampleUV).rgb;
+
+            float weight = float(newlySetCount) / float(kSectorCount);
+            gi += sampleRadiance * weight * receiverNdotL * emitterNdotL;
+        }
+
+        sliceMask |= sampleMaskBits;
+    }
+}
+
+// 1スライス(直線)の+dir2D側/-dir2D側を水平線サーチし、可視ビットマスクを積算しながら
+// 新規に隠れたビット数の割合でGIを加算する。戻り値はこのスライスのAO寄与(1-遮蔽率)
+float SearchSlice(
+    float3 P, float3 V, float3 N, float3 normalWorld, float3 worldPos,
+    float2 baseUV, float2 dir2D, float normalAngle,
+    float radius, float thickness, float2 uvRadiusScale,
+    float2 depthTexSize, float2 invDepthTexSize,
+    uint stepCount, float invStepCountPlus1,
+    inout float3 gi)
+{
+    uint sliceMask = 0u;
+
+    // +dir2D側で既に全セクタが埋まっていれば、-dir2D側はSearchSide内のループ先頭チェックで
+    // 即座に打ち切られる(ここでは呼び出し自体をスキップする必要はない)
+    SearchSide(P, V, N, normalWorld, worldPos, baseUV, dir2D, 1.0f, normalAngle,
+        radius, thickness, uvRadiusScale, depthTexSize, invDepthTexSize,
+        stepCount, invStepCountPlus1, sliceMask, gi);
+
+    SearchSide(P, V, N, normalWorld, worldPos, baseUV, dir2D, -1.0f, normalAngle,
+        radius, thickness, uvRadiusScale, depthTexSize, invDepthTexSize,
+        stepCount, invStepCountPlus1, sliceMask, gi);
+
+    return 1.0f - float(countbits(sliceMask)) / float(kSectorCount);
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float depth = Texture1.Sample(DefaultSampler, input.UV).r;
@@ -133,11 +308,13 @@ float4 PSMain(PSInput input) : SV_TARGET
     const float aoPower = Params0.w;
     const uint sliceCount = max(Params1.x, 1u);
     const uint stepCount = max(Params1.y, 1u);
+    const float invStepCountPlus1 = 1.0f / float(stepCount + 1u);
 
     // 深度テクスチャの解像度(サンプルUVをテクセル中心へスナップするために使う)
     uint depthTexW, depthTexH;
     Texture1.GetDimensions(depthTexW, depthTexH);
     float2 depthTexSize = float2(depthTexW, depthTexH);
+    float2 invDepthTexSize = 1.0f / depthTexSize;
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
     float3 normalWorld = normalize(Texture0.Sample(DefaultSampler, input.UV).xyz * 2.0f - 1.0f);
@@ -174,143 +351,20 @@ float4 PSMain(PSInput input) : SV_TARGET
         // この直線の+dir2D側と-dir2D側の両方をサーチしてから、まとめてAOへ加算する
         float angle = (float(i) + jitter) / float(sliceCount) * PI;
         float2 dir2D = float2(cos(angle), sin(angle));
-        // dir2DはUV空間の方向(yは下向きが正)。Dはビュー空間の方向として使うため、
-        // UV→NDC変換でyが反転する分をここで打ち消す(ProjectToUV/ReconstructWorldPosのy反転と対応)
-        float3 D = normalize(float3(dir2D.x, -dir2D.y, 0.0f));
 
-        // スライス平面(DとVが張る平面)の法線と、その平面内でVに直交するタンジェント方向を求める。
-        // 法線Nはこの平面上にあるとは限らない(サンプルと違って自由な3次元ベクトルな)ので、
-        // 平面へ投影したうえでe1を基準にした符号付き角度を求める必要がある(スライスごとに1回だけ)
-        float3 planeNormal = cross(D, V);
-        float planeNormalLen = length(planeNormal);
-        if (planeNormalLen < 1e-5f)
+        float normalAngle;
+        if (!TryComputeNormalAngle(N, V, dir2D, normalAngle))
         {
             continue;
         }
-        planeNormal /= planeNormalLen;
-        float3 e1 = normalize(cross(V, planeNormal));
 
-        float3 projectedNormal = N - planeNormal * dot(N, planeNormal);
-        float projectedNormalLen = length(projectedNormal);
-        if (projectedNormalLen < 1e-5f)
-        {
-            // 法線がこのスライス平面にほぼ垂直: このスライスはNの遮蔽判定にほとんど寄与しない
-            continue;
-        }
-        // 投影した法線とVのなす角(V軸基準の符号付き角度)。法線はカメラを向いている(front-facing)前提で
-        // cosをsaturateし、normalAngleを[-HALF_PI, HALF_PI]に収める(参照実装XeGTAO/Bevyと同じ)。
-        // これにより後段のangleFront/angleBackが範囲外へ飛んでも、単純なクランプで正しく地平線に収まる
-        float normalSign = SignNonZero(dot(projectedNormal, e1));
-        float cosNormal = saturate(dot(projectedNormal, V) / projectedNormalLen);
-        float normalAngle = normalSign * acos(cosNormal);
-
-        uint sliceMask = 0u;
-
-        [loop]
-        for (uint side = 0; side < 2u; ++side)
-        {
-            // side=0: +dir2D方向, side=1: -dir2D方向
-            float sideSign = (side == 0u) ? 1.0f : -1.0f;
-
-            [loop]
-            for (uint s = 1; s <= stepCount; ++s)
-            {
-                float t = float(s) / float(stepCount + 1u);
-                float2 sampleUV = input.UV + dir2D * (sideSign * t * uvRadiusScale);
-                if (sampleUV.x < 0.0f || sampleUV.x > 1.0f || sampleUV.y < 0.0f || sampleUV.y > 1.0f)
-                {
-                    continue;
-                }
-
-                // 深度・法線・直接光のサンプルは、以降すべてこのスナップ後のUVで読む。
-                // これにより深度がポイントサンプリング相当になり、再構成位置(sampleViewPos)が
-                // テクセルの実際の値と一致する
-                sampleUV = SnapToTexel(sampleUV, depthTexSize);
-
-                float sampleDepth = Texture1.Sample(DefaultSampler, sampleUV).r;
-                if (sampleDepth <= 0.0f)
-                {
-                    continue;
-                }
-
-                float3 sampleWorldPos = ReconstructWorldPos(sampleUV, sampleDepth);
-                float3 sampleViewPos = mul(float4(sampleWorldPos, 1.0f), View).xyz;
-
-                float3 offsetFront = sampleViewPos - P;
-                float distFront = length(offsetFront);
-                if (distFront < 1e-5f || distFront > radius)
-                {
-                    continue;
-                }
-
-                // Thickness Heuristic: サンプル点は無限に薄い点ではなく、Vの逆方向(カメラから遠ざかる方向)に
-                // thicknessぶん奥行きを持つ板とみなす。offsetFront/offsetBackはスライス平面(e1とVが張る平面)上に
-                // ほぼ乗っているため、Vずらしても平面上に留まる(e1・Vの線形結合のまま)
-                float3 offsetBack = offsetFront - V * thickness;
-
-                // offsetFront/offsetBackはスライス平面上にほぼ乗っており、+dir2D側/-dir2D側どちらを
-                // サーチしているかは既知(sideSign)なので、e1との内積を別途取らなくても
-                // sign(x)*acos(y/r) ≡ atan2(x,y) (x=平面内接線成分, y=dot(w,V))の関係から符号付き角度が求まる。
-                // 法線基準の角度に変換する(ここでは周期のラップはしない。範囲外は後段のクランプで地平線に収める。
-                // ラップすると±πを跨いだサンプルが反対側の半球へ符号反転して偽の遮蔽を作るため)
-                float angleFront = SignedAngleFromV(offsetFront, V, sideSign) - normalAngle;
-                float angleBack = SignedAngleFromV(offsetBack, V, sideSign) - normalAngle;
-
-                // 法線の接平面より下(可視半球の外)は寄与しないので範囲外として扱う
-                if (angleFront < -HALF_PI && angleBack < -HALF_PI)
-                {
-                    continue;
-                }
-                if (angleFront > HALF_PI && angleBack > HALF_PI)
-                {
-                    continue;
-                }
-
-                float angleFrontClamped = clamp(angleFront, -HALF_PI, HALF_PI);
-                float angleBackClamped = clamp(angleBack, -HALF_PI, HALF_PI);
-
-                float theta01Min = (min(angleFrontClamped, angleBackClamped) + HALF_PI) / PI;
-                float theta01Max = (max(angleFrontClamped, angleBackClamped) + HALF_PI) / PI;
-
-                // 角度幅が32セクタの分解能に満たない(丸めるとほぼ0になる)場合、無理に1ビット占有させると
-                // 平坦な床のようにほぼ同一平面上のサンプルが多数ある場面で偽の遮蔽・ノイズが積み重なってしまう。
-                // 真に角度幅が無い(=遮蔽していない)サンプルはビットを1つも立てない(bitSpan=0を許容する)
-                uint startBit = min((uint)floor(saturate(theta01Min) * float(kSectorCount)), kSectorCount - 1u);
-                uint bitSpan = (uint)ceil(saturate(theta01Max - theta01Min) * float(kSectorCount));
-                bitSpan = min(bitSpan, kSectorCount - startBit);
-                uint sampleMaskBits = (bitSpan >= kSectorCount) ? 0xFFFFFFFFu : (((1u << bitSpan) - 1u) << startBit);
-
-                // このサンプルで新規に隠れたビット数を、サンプルが担う可視立体角の割合とみなす。
-                // 既に(+側/-側どちらかの)手前のサンプルで隠れていた区間は二重にカウントしない
-                // (=多重遮蔽物の裏に光が回り込む)
-                uint newlySetBits = sampleMaskBits & ~sliceMask;
-                uint newlySetCount = countbits(newlySetBits);
-                if (newlySetCount > 0u)
-                {
-                    float3 sampleNormalWorld = normalize(Texture0.Sample(DefaultSampler, sampleUV).xyz * 2.0f - 1.0f);
-
-                    float3 lightDirWorld = normalize(sampleWorldPos - worldPos);
-                    float receiverNdotL = saturate(dot(normalWorld, lightDirWorld));
-                    float emitterNdotL = saturate(dot(sampleNormalWorld, -lightDirWorld));
-
-                    // サンプル地点の直接光(DirectLighting.hlslで計算済み、シャドウ適用済み)を
-                    // このサンプルが反射・再放射する放射輝度とみなす(環境光は含めない)
-                    float3 sampleRadiance = Texture2.Sample(DefaultSampler, sampleUV).rgb;
-
-                    float weight = float(newlySetCount) / float(kSectorCount);
-                    gi += sampleRadiance * weight * receiverNdotL * emitterNdotL;
-                }
-
-                sliceMask |= sampleMaskBits;
-                if (sliceMask == 0xFFFFFFFFu)
-                {
-                    // このスライスの全セクタが既に埋まった: これ以上新しい区間は増えないため打ち切る
-                    break;
-                }
-            }
-        }
-
-        ao += 1.0f - float(countbits(sliceMask)) / float(kSectorCount);
+        ao += SearchSlice(
+            P, V, N, normalWorld, worldPos,
+            input.UV, dir2D, normalAngle,
+            radius, thickness, uvRadiusScale,
+            depthTexSize, invDepthTexSize,
+            stepCount, invStepCountPlus1,
+            gi);
     }
 
     ao = saturate(ao / float(sliceCount));
