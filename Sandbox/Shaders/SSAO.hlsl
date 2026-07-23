@@ -142,7 +142,9 @@ float4 PSMainBlur(PSInput input) : SV_TARGET
         [unroll]
         for (int y = -2; y <= 1; ++y)
         {
-            float2 offsetUV = input.UV + float2(x, y) * texelSize;
+            // 4x4(偶数)カーネルなので整数オフセット(-2..1)のままだと中心が半テクセル
+            // 左上へ偏る。+0.5してオフセットを{-1.5,-0.5,0.5,1.5}にし、中心をピクセル中心に揃える
+            float2 offsetUV = input.UV + (float2(x, y) + 0.5f) * texelSize;
             sum += Texture0.Sample(DefaultSampler, offsetUV);
         }
     }
