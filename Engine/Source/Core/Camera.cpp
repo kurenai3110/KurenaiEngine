@@ -72,6 +72,21 @@ namespace Kurenai::Core
 
     XMMATRIX Camera::GetProjectionMatrix() const
     {
-        return XMMatrixPerspectiveFovLH(m_FovY, m_Aspect, m_NearZ, m_FarZ);
+        // Reverse-Z: 近平面をNDC z=1.0、遠平面をNDC z=0.0にマッピングする独自の透視投影行列。
+        // 浮動小数点深度バッファ(D32_FLOAT)は0.0付近の表現密度が高いため、標準のXMMatrixPerspectiveFovLH
+        // (近平面=0.0/遠平面=1.0)のままだと遠方の精度がほとんど残らずZファイティングが起きやすい。
+        // マッピングを反転させることで、この高精度域を遠方に割り当てて分布を均す
+        const float h = 1.0f / tanf(m_FovY * 0.5f);
+        const float w = h / m_Aspect;
+        const float n = m_NearZ;
+        const float f = m_FarZ;
+        const float a = n / (n - f);
+        const float b = -a * f;
+
+        return XMMatrixSet(
+            w, 0.0f, 0.0f, 0.0f,
+            0.0f, h, 0.0f, 0.0f,
+            0.0f, 0.0f, a, 1.0f,
+            0.0f, 0.0f, b, 0.0f);
     }
 }

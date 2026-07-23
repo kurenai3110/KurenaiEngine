@@ -44,5 +44,10 @@ namespace Kurenai::RHI
         // 事前に確定させる必要があるため保持する。DX11実装では参照しない
         std::vector<Format> RenderTargetFormats;
         bool HasDepthStencil = false;
+
+        // Reverse-Z(深度比較をGREATERにし、近平面=1.0/遠平面=0.0にマッピングする)を使うか。
+        // 浮動小数点深度バッファと組み合わせて遠方のZファイティングを抑えるための設定で、
+        // 透視投影のメインカメラパスにのみ使う(正射影のシャドウマップは元々Zが線形分布のため対象外)
+        bool ReverseZ = false;
     };
 }

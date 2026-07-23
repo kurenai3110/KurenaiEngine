@@ -100,9 +100,10 @@ float ComputeShadowFactor(float3 worldPos, float NdotL)
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float depth = DepthTexture.Sample(DefaultSampler, input.UV).r;
-    if (depth >= 1.0f)
+    if (depth <= 0.0f)
     {
         // 背景(スカイ)には直接光はない(スカイボックス自体はDeferredLightingパス側で表示する)
+        // Reverse-Zのため遠平面(=背景)はNDC z=0.0付近になる
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 

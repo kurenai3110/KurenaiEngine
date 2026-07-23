@@ -8,11 +8,13 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11InputLayout> inputLayout,
         DX11Shader* vertexShader,
         DX11Shader* pixelShader,
-        PrimitiveTopology topology)
+        PrimitiveTopology topology,
+        Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilState)
         : m_InputLayout(std::move(inputLayout))
         , m_VertexShader(vertexShader)
         , m_PixelShader(pixelShader)
         , m_Topology(topology)
+        , m_DepthStencilState(std::move(depthStencilState))
     {
     }
 

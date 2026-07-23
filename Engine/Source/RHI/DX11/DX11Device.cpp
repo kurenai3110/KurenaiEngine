@@ -225,7 +225,19 @@ namespace Kurenai::RHI
             ThrowIfFailed(hr, "入力レイアウトの作成に失敗しました");
         }
 
-        return std::make_unique<DX11PipelineState>(inputLayout, vertexShader, pixelShader, desc.Topology);
+        // DX12はPSOごとに深度ステンシルステートを持てるが、DX11はコンテキストへの明示バインドが必要。
+        // 何も設定しないとデフォルト状態(DepthEnable=TRUE, DepthFunc=LESS)になってしまうため、
+        // Reverse-Z(GREATER)を使うパイプラインのぶんも含めてここで明示的に作成する
+        D3D11_DEPTH_STENCIL_DESC depthStencilDesc{};
+        depthStencilDesc.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
+        depthStencilDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        depthStencilDesc.DepthFunc = desc.ReverseZ ? D3D11_COMPARISON_GREATER : D3D11_COMPARISON_LESS;
+        depthStencilDesc.StencilEnable = FALSE;
+
+        Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilState;
+        ThrowIfFailed(m_Device->CreateDepthStencilState(&depthStencilDesc, &depthStencilState), "深度ステンシルステートの作成に失敗しました");
+
+        return std::make_unique<DX11PipelineState>(inputLayout, vertexShader, pixelShader, desc.Topology, depthStencilState);
     }
 
     std::unique_ptr<IRHITexture> DX11Device::CreateTextureFromFile(const std::wstring& filePath, bool sRGB)
@@ -312,16 +324,20 @@ namespace Kurenai::RHI
         return std::make_unique<DX11Texture>(srv, rtv, nullptr);
     }
 
-    std::unique_ptr<IRHITexture> DX11Device::CreateDepthTexture(uint32_t width, uint32_t height)
+    std::unique_ptr<IRHITexture> DX11Device::CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth)
     {
         // 深度テクスチャは後段のライティングパスでサンプリングするためSHADER_RESOURCEも付与し、
-        // Typelessフォーマットで作成してDSV/SRVそれぞれに適したビューを個別に張る
+        // Typelessフォーマットで作成してDSV/SRVそれぞれに適したビューを個別に張る。
+        // ステンシルは使わないためD32_FLOATにしている(Reverse-Zの精度改善はUNORMでは効果がなく、
+        // 浮動小数点フォーマットと組み合わせて初めて意味を持つ)。clearDepthはD3D11では
+        // リソース生成時に宣言する概念がないため未使用(実際のクリア値はClearDepth呼び出し時に指定する)
+        (void)clearDepth;
         D3D11_TEXTURE2D_DESC textureDesc{};
         textureDesc.Width = width;
         textureDesc.Height = height;
         textureDesc.MipLevels = 1;
         textureDesc.ArraySize = 1;
-        textureDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
+        textureDesc.Format = DXGI_FORMAT_R32_TYPELESS;
         textureDesc.SampleDesc.Count = 1;
         textureDesc.Usage = D3D11_USAGE_DEFAULT;
         textureDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
@@ -330,13 +346,13 @@ namespace Kurenai::RHI
         ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, nullptr, &texture), "深度テクスチャの作成に失敗しました");
 
         D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
-        dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
         dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
         Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv;
         ThrowIfFailed(m_Device->CreateDepthStencilView(texture.Get(), &dsvDesc, &dsv), "深度ステンシルビューの作成に失敗しました");
 
         D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
         srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Texture2D.MipLevels = 1;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;

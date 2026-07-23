@@ -51,11 +51,12 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float depth = DepthTexture.Sample(DefaultSampler, input.UV).r;
-    if (depth >= 1.0f)
+    if (depth <= 0.0f)
     {
         // 何も描かれなかった背景ピクセル: カメラからそのピクセル方向への視線ベクトルで
         // 空のキューブマップをサンプリングする
-        float3 farPoint = ReconstructWorldPos(input.UV, 1.0f);
+        // Reverse-Zのため遠平面(=背景)はNDC z=0.0付近になる
+        float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
         float3 rayDir = normalize(farPoint - CameraPosition.xyz);
         float3 skyColor = SkyboxTexture.Sample(DefaultSampler, rayDir).rgb;
         // 夜は空を暗い紺色へ落とし込む(スカイボックス自体は昼のテクスチャ固定のため)

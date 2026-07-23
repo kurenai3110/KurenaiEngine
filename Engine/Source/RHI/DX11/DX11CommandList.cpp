@@ -79,6 +79,7 @@ namespace Kurenai::RHI
         m_Context->IASetPrimitiveTopology(dx11PipelineState->GetTopology());
         m_Context->VSSetShader(dx11PipelineState->GetVertexShader()->GetVertexShader(), nullptr, 0);
         m_Context->PSSetShader(dx11PipelineState->GetPixelShader()->GetPixelShader(), nullptr, 0);
+        m_Context->OMSetDepthStencilState(dx11PipelineState->GetDepthStencilState(), 0);
     }
 
     void DX11CommandList::SetVertexBuffer(IRHIBuffer* buffer)

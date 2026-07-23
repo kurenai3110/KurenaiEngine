@@ -64,9 +64,10 @@ float Hash12(float2 p)
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float depth = Texture1.Sample(DefaultSampler, input.UV).r;
-    if (depth >= 1.0f)
+    if (depth <= 0.0f)
     {
         // 背景(スカイ)は遮蔽なし・間接光なし(SSAOは間接光を計算しないのでrgbは常に0)
+        // Reverse-Zのため遠平面(=背景)はNDC z=0.0付近になる
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
@@ -106,7 +107,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         }
 
         float sampleDepth = Texture1.Sample(DefaultSampler, sampleUV).r;
-        if (sampleDepth >= 1.0f)
+        if (sampleDepth <= 0.0f)
         {
             continue;
         }

@@ -290,6 +290,7 @@ namespace Kurenai::Core
         gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
         gbufferPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm, RHI::Format::R8G8B8A8_UNorm, RHI::Format::R8G8B8A8_UNorm };
         gbufferPipelineDesc.HasDepthStencil = true;
+        gbufferPipelineDesc.ReverseZ = true;
         m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
 
         // 直接光パス(頂点バッファなしのフルスクリーン三角形。G-Buffer+シャドウマップからPBRの
@@ -482,7 +483,8 @@ namespace Kurenai::Core
         m_GBufferAlbedo = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_GBufferDepth = m_Device->CreateDepthTexture(width, height);
+        // Reverse-Zのため近平面側(NDC z=1.0)ではなく遠平面側(NDC z=0.0)にクリアする
+        m_GBufferDepth = m_Device->CreateDepthTexture(width, height, 0.0f);
         m_DirectLightTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R32G32B32A32_Float);
         m_SSAORawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SSAOTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
@@ -928,7 +930,8 @@ namespace Kurenai::Core
         RHI::IRHITexture* gbufferTargets[] = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get() };
         commandList->SetRenderTargets(gbufferTargets, 3, m_GBufferDepth.get());
         commandList->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
-        commandList->ClearDepth(1.0f);
+        // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(GBuffer.hlsl参照)
+        commandList->ClearDepth(0.0f);
 
         commandList->SetPipelineState(m_GBufferPipelineState.get());
         commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
