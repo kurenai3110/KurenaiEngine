@@ -725,9 +725,12 @@ namespace Kurenai::Core
             "Normal",
             "Material (R=Metallic, G=Roughness)",
             "Depth",
+            "Depth (Raw)",
             "Direct Light",
             "AO/GI - Indirect Light (RGB)",
+            "AO/GI - Indirect Light (RGB, Before Blur)",
             "AO/GI - Occlusion (Alpha)",
+            "AO/GI - Occlusion (Alpha, Before Blur)",
             "Shadow Map",
         };
 
@@ -1045,9 +1048,12 @@ namespace Kurenai::Core
         commandList->SetTexture(3, m_GBufferDepth.get());
         commandList->SetTexture(4, m_SkyboxTexture.get());
         RHI::IRHITexture* activeAOTexture = m_AODisabledTexture.get();
+        // デバッグ表示(ブラー前確認用)のため、ブラー前の生バッファへの参照も別途保持しておく
+        RHI::IRHITexture* activeAORawTexture = m_AODisabledTexture.get();
         if (m_AOEnabled)
         {
             activeAOTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAOTexture.get() : m_SSILTexture.get();
+            activeAORawTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAORawTexture.get() : m_SSILRawTexture.get();
         }
         commandList->SetTexture(5, activeAOTexture);
         commandList->Draw(3, 0);
@@ -1077,6 +1083,10 @@ namespace Kurenai::Core
             presentSourceTexture = m_GBufferDepth.get();
             presentMode = 2;
             break;
+        case DebugView::DepthRaw:
+            presentSourceTexture = m_GBufferDepth.get();
+            presentMode = 5; // 生の深度値(0〜1)を加工せずそのまま表示(reverse-z等の生値確認用)
+            break;
         case DebugView::DirectLight:
             presentSourceTexture = m_DirectLightTexture.get();
             presentMode = 4; // HDRのためトーンマッピング(Reinhard)+ガンマ補正して表示
@@ -1085,9 +1095,17 @@ namespace Kurenai::Core
             presentSourceTexture = activeAOTexture;
             presentMode = 0; // rgb(間接拡散光)をそのまま表示。SSAOはrgbが常に0のため常に黒になる
             break;
+        case DebugView::AOIndirectLightRaw:
+            presentSourceTexture = activeAORawTexture;
+            presentMode = 0; // ブラー前の生値(タイル状ノイズが乗った状態)
+            break;
         case DebugView::AOOcclusion:
             presentSourceTexture = activeAOTexture;
             presentMode = 3; // a(遮蔽率)をグレースケール表示
+            break;
+        case DebugView::AOOcclusionRaw:
+            presentSourceTexture = activeAORawTexture;
+            presentMode = 3; // ブラー前の生値(タイル状ノイズが乗った状態)
             break;
         case DebugView::ShadowMap:
             presentSourceTexture = m_ShadowMap.get();

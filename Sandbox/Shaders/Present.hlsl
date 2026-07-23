@@ -6,6 +6,7 @@
 //         線形にグレースケール化する
 //       3=AO/GIバッファのa(遮蔽率)チャンネルをグレースケール表示(SSAOのrgbは常に0のため専用)
 //       4=直接光パスの結果(HDR、トーンマッピング前)をReinhardトーンマッピング+ガンマ補正して表示
+//       5=深度の生値(0〜1)を加工せずそのままグレースケール表示(reverse-z等の生値確認用)
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
@@ -81,6 +82,12 @@ float4 PSMain(PSInput input) : SV_TARGET
         float3 color = sourceColor.rgb / (sourceColor.rgb + 1.0f);
         color = pow(color, 1.0f / 2.2f);
         return float4(color, 1.0f);
+    }
+
+    if (Mode == 5)
+    {
+        float depth = sourceColor.r;
+        return float4(depth, depth, depth, 1.0f);
     }
 
     return float4(sourceColor.rgb, 1.0f);

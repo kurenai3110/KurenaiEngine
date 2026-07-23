@@ -105,7 +105,7 @@ Sandbox.exe -dx12
   - Bistro - Interior (Wine Cellar)
   - White Surface Test(粗さ0〜1の球体列)
 - **Post Processing** — AO/間接光のON/OFFと手法(Technique: SSAO / SSIL (Visibility Bitmask))を切り替え。SSAOは半径(Radius)/強さ(Power)、SSILは半径(Radius)/厚み(Thickness)/強さ(Intensity)/AOのコントラスト(AO Power)/スライス数(Slices)/ステップ数(Steps)を調整可能。シャドウのON/OFFもここで切り替え
-- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / Direct Light / AO/GI - Indirect Light (RGB) / AO/GI - Occlusion (Alpha) / Shadow Map)。Direct Lightは直接光パスの結果(HDR)をトーンマッピングして表示。AO/GIバッファはrgb(間接拡散光)とa(遮蔽率)を別々に確認できる
+- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / Depth (Raw) / Direct Light / AO/GI - Indirect Light (RGB) / AO/GI - Indirect Light (RGB, Before Blur) / AO/GI - Occlusion (Alpha) / AO/GI - Occlusion (Alpha, Before Blur) / Shadow Map)。Direct Lightは直接光パスの結果(HDR)をトーンマッピングして表示。Depth (Raw)は深度テクスチャの生値(0〜1)を加工せずそのまま表示(reverse-zの生値確認用。近平面が小さいためほとんどの距離で値が0付近になり、無加工ではほぼ黒く見える)。AO/GIバッファはrgb(間接拡散光)とa(遮蔽率)を別々に確認でき、Before Blur付きの項目はブラー前の生バッファ(タイル状ノイズが乗った状態)を表示する
 - **Lighting** — 太陽光の時刻(Time of Day, 0〜24時)をスライダーで指定。Auto Advanceを有効にすると時刻が自動で進行(速度をSpeedで調整)
 
 ## Assetsフォルダについて

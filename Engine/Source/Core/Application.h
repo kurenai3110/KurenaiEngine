@@ -137,9 +137,12 @@ namespace Kurenai::Core
             Normal,
             Material,
             Depth,
-            DirectLight,     // DirectLightingパスの結果(HDR、シャドウ適用済みの直接光)をトーンマッピングして表示
-            AOIndirectLight, // AO/GIバッファのrgb(間接拡散光)をそのまま表示
-            AOOcclusion,     // AO/GIバッファのa(遮蔽率)をグレースケール表示
+            DepthRaw,           // 深度テクスチャの生値(0〜1)を加工せずそのままグレースケール表示
+            DirectLight,        // DirectLightingパスの結果(HDR、シャドウ適用済みの直接光)をトーンマッピングして表示
+            AOIndirectLight,    // AO/GIバッファのrgb(間接拡散光、ブラー後)をそのまま表示
+            AOIndirectLightRaw, // AO/GIバッファのrgb(間接拡散光、ブラー前の生値)
+            AOOcclusion,        // AO/GIバッファのa(遮蔽率、ブラー後)をグレースケール表示
+            AOOcclusionRaw,     // AO/GIバッファのa(遮蔽率、ブラー前の生値)
             ShadowMap,
         };
         DebugView m_DebugView = DebugView::Final;
