@@ -851,10 +851,22 @@ namespace Kurenai::Core
         }
     }
 
+    void Application::UpdateImGuiToggle()
+    {
+        const bool isForeground = GetForegroundWindow() == m_Window->GetHandle();
+        const bool isDown = isForeground && (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
+        if (isDown && !m_ImGuiToggleKeyWasDown)
+        {
+            m_ImGuiVisible = !m_ImGuiVisible;
+        }
+        m_ImGuiToggleKeyWasDown = isDown;
+    }
+
     void Application::Update(float deltaTime)
     {
         UpdateMouseLook();
         UpdateMovement(deltaTime);
+        UpdateImGuiToggle();
 
         if (m_TimeAutoAdvance)
         {
@@ -874,10 +886,13 @@ namespace Kurenai::Core
         }
 
         m_ImGuiBackend->NewFrame();
-        RenderSceneSwitchUI();
-        RenderPostProcessUI();
-        RenderDebugViewUI();
-        RenderLightingUI();
+        if (m_ImGuiVisible)
+        {
+            RenderSceneSwitchUI();
+            RenderPostProcessUI();
+            RenderDebugViewUI();
+            RenderLightingUI();
+        }
 
         auto* commandList = m_Device->GetImmediateCommandList();
 

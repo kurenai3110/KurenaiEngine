@@ -32,6 +32,7 @@ namespace Kurenai::Core
         void FrameCameraToModel();
         void UpdateMouseLook();
         void UpdateMovement(float deltaTime);
+        void UpdateImGuiToggle();
         void Update(float deltaTime);
         void Render();
         void RenderSceneSwitchUI();
@@ -174,5 +175,10 @@ namespace Kurenai::Core
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};
+
+        // F1キーでImGuiの表示/非表示を切り替える(GetAsyncKeyStateはキーの押下状態を毎フレーム返すため、
+        // 押した瞬間だけ切り替えるには前フレームの状態と比較するエッジ検出が必要)
+        bool m_ImGuiVisible = true;
+        bool m_ImGuiToggleKeyWasDown = false;
     };
 }
