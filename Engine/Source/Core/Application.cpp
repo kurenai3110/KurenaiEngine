@@ -701,7 +701,8 @@ namespace Kurenai::Core
             "Normal",
             "Material (R=Metallic, G=Roughness)",
             "Depth",
-            "AO / Indirect Light",
+            "AO/GI - Indirect Light (RGB)",
+            "AO/GI - Occlusion (Alpha)",
             "Shadow Map",
         };
 
@@ -1035,10 +1036,13 @@ namespace Kurenai::Core
             presentSourceTexture = m_GBufferDepth.get();
             presentMode = 2;
             break;
-        case DebugView::AO:
+        case DebugView::AOIndirectLight:
             presentSourceTexture = activeAOTexture;
-            // SSAOはrgbが常に0のため専用のグレースケール(a)表示、SSILはrgb(間接拡散光の色)をそのまま表示する
-            presentMode = (m_AOEnabled && m_AOTechnique == AOTechnique::SSILVisibilityBitmask) ? 0 : 3;
+            presentMode = 0; // rgb(間接拡散光)をそのまま表示。SSAOはrgbが常に0のため常に黒になる
+            break;
+        case DebugView::AOOcclusion:
+            presentSourceTexture = activeAOTexture;
+            presentMode = 3; // a(遮蔽率)をグレースケール表示
             break;
         case DebugView::ShadowMap:
             presentSourceTexture = m_ShadowMap.get();

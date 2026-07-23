@@ -129,7 +129,8 @@ namespace Kurenai::Core
             Normal,
             Material,
             Depth,
-            AO,
+            AOIndirectLight, // AO/GIバッファのrgb(間接拡散光)をそのまま表示
+            AOOcclusion,     // AO/GIバッファのa(遮蔽率)をグレースケール表示
             ShadowMap,
         };
         DebugView m_DebugView = DebugView::Final;
