@@ -174,7 +174,9 @@ float4 PSMain(PSInput input) : SV_TARGET
         // この直線の+dir2D側と-dir2D側の両方をサーチしてから、まとめてAOへ加算する
         float angle = (float(i) + jitter) / float(sliceCount) * PI;
         float2 dir2D = float2(cos(angle), sin(angle));
-        float3 D = normalize(float3(dir2D, 0.0f));
+        // dir2DはUV空間の方向(yは下向きが正)。Dはビュー空間の方向として使うため、
+        // UV→NDC変換でyが反転する分をここで打ち消す(ProjectToUV/ReconstructWorldPosのy反転と対応)
+        float3 D = normalize(float3(dir2D.x, -dir2D.y, 0.0f));
 
         // スライス平面(DとVが張る平面)の法線と、その平面内でVに直交するタンジェント方向を求める。
         // 法線Nはこの平面上にあるとは限らない(サンプルと違って自由な3次元ベクトルな)ので、
