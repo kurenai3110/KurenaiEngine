@@ -145,13 +145,21 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 N = normalize(mul(normalWorld, (float3x3)View));
     float3 V = normalize(-P);
 
-    // ワールド半径を、現在の画素の深度における画面UV半径に変換する(視点から遠いほどUV上では小さくなる)
+    // ワールド半径を、現在の画素の深度における画面UV半径に変換する(視点から遠いほどUV上では小さくなる)。
+    // ここではビュー空間X方向のオフセットで測るため、得られるのはUVのX方向スケール。
     float2 uvAtRadius = ProjectToUV(P + float3(radius, 0.0f, 0.0f));
     float screenRadiusUV = clamp(length(uvAtRadius - input.UV), 0.0f, 0.5f);
     if (screenRadiusUV < 1e-5f)
     {
         return float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
+
+    // アスペクト比補正。UV空間は非正方形(16:9等)なので、X方向で校正したscreenRadiusUVを
+    // dir2Dへ等方的に適用すると、UVの円が世界空間では横長の楕円になり、縦方向スライスの
+    // サンプルが世界空間でradius/aspectまでしか届かず非等方になる。dir2DのY成分をaspect倍して
+    // 世界空間で等方な円になるようにする(proj[1][1]=proj[0][0]*aspectの関係より)
+    float aspect = depthTexSize.x / depthTexSize.y;
+    float2 uvRadiusScale = float2(1.0f, aspect) * screenRadiusUV;
 
     float jitter = Hash12(input.Position.xy);
 
@@ -204,13 +212,8 @@ float4 PSMain(PSInput input) : SV_TARGET
             [loop]
             for (uint s = 1; s <= stepCount; ++s)
             {
-                // 近距離ステップ(t=0付近)は、offsetFront自身の距離がthicknessと同程度以下になりやすく、
-                // 角度計算がthicknessに支配されて偽の遮蔽が生じやすい。最初のサンプルでも半径の
-                // tMin倍以上は離すことでこれを避ける
-                const float tMin = 0.3f;
-                float tRaw = float(s) / float(stepCount + 1u);
-                float t = lerp(tMin, 1.0f, tRaw);
-                float2 sampleUV = input.UV + dir2D * (sideSign * t * screenRadiusUV);
+                float t = float(s) / float(stepCount + 1u);
+                float2 sampleUV = input.UV + dir2D * (sideSign * t * uvRadiusScale);
                 if (sampleUV.x < 0.0f || sampleUV.x > 1.0f || sampleUV.y < 0.0f || sampleUV.y > 1.0f)
                 {
                     continue;
