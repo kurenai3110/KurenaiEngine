@@ -1,6 +1,18 @@
 # KurenaiEngine
 
-DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。RHI(Rendering Hardware Interface)抽象化レイヤーの上にDX11・DX12それぞれのバックエンド(デバイス、コマンドリスト、ImGui連携など)を実装しており、実行時に切り替えられます。assimp経由でglTF・FBXモデルの読み込み・描画に対応しています。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。法線マッピングの接線は画面空間微分から近似計算しています。シャドウマッピングによる影の描画、太陽光の昼夜サイクルにも対応しています。
+DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**KurenaiEngine.dll** として
+ビルドされます。すぐに使える完結型API `Kurenai::KurenaiEngine3D`(3D)/
+`Kurenai::KurenaiEngine2D`(2D)に加え、RHI(Rendering Hardware Interface)抽象化レイヤー
+(DX11・DX12それぞれのバックエンドを実行時に切り替え可能)やウィンドウ・カメラ・モデル読み込みと
+いった低レベルAPI(`Kurenai::RHI` / `Kurenai::Core` / `Kurenai::Assets`、まとめて「Library」)も
+公開しており、独自の描画パイプラインを組みたい場合はこちらを直接利用できます(詳細は
+[docs/KurenaiEngine.html](docs/KurenaiEngine.html) を参照)。
+
+`KurenaiEngine3D` はassimp経由でglTF・FBXモデルの読み込み・描画に対応した完結型の
+3Dレンダラーです。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、
+ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。
+法線マッピングの接線は画面空間微分から近似計算しています。シャドウマッピングによる影の描画、
+太陽光の昼夜サイクルにも対応しています。
 
 G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_FLOATを使い、近平面をNDC z=1.0、遠平面をNDC z=0.0にマッピングして深度比較をGREATERで行う)で描画しており、標準的な深度マッピング(近平面=0.0/遠平面=1.0)よりも遠方のZ精度を確保してZファイティングを抑えています。正射影のシャドウマップは元々Zが線形分布のため対象外で、従来どおりのマッピング(D32_FLOAT、近平面=0.0/遠平面=1.0)のままです。
 
@@ -8,18 +20,35 @@ G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_F
 
 環境光の遮蔽・間接光表現はSSAO(スクリーンスペース・アンビエントオクルージョン)とSSIL(Screen Space Indirect Lighting with Visibility Bitmask)の2手法を実行時に切り替えられます。SSAOはタンジェント空間の半球カーネルサンプリングによる遮蔽率のみを計算するのに対し、SSIL(Visibility Bitmask)はGTAO/HBAOと同様に法線周りのスライスごとにスクリーン空間の水平線サーチを行い、遮蔽を32セクタのビットマスクで表現します。これによりThickness Heuristic(遮蔽物に仮の厚みを持たせる)で薄いオブジェクトの裏に光を回り込ませつつ、新規に隠れたビット数を可視立体角の割合とみなして直接光パスの結果(シャドウ適用済み、環境光は含まない)を間接拡散光として加算します(Olivier Therrien et al. "Screen Space Indirect Lighting with Visibility Bitmask" (2023) を参考にした実装)。
 
-金属/滑らかな面の鏡面間接光(環境反射)はSSR(スクリーンスペースリフレクション)で計算します。最終合成パスの出力(SceneColor)を反射先の環境色として再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチング(線形マーチ+2分探索によるヒット位置の精密化)を行います。スカイボックスへのフォールバックは、レイが画面内で実際に背景(深度なし)ピクセルへ到達したことを確認できた場合のみ行い、レイが画面外に外れた場合や最大距離まで判定がつかなかった場合は反射を追加しません(その先に何があるか不明なまま空を映り込ませると、洞窟のように周囲が遮蔽された空間でも誤って空が反射してしまうため)。ミップチェーンによるラフネスブラーは行っていないため、粗い面ほど反射の寄与を弱めてノイズ化を防いでいます。現状レンダーグラフ/コンピュートシェーダー/Hi-Zミップチェーン/PSOのブレンドステート設定は未実装のため、既存のSSAO/SSILと同じフルスクリーン三角形+ピクセルシェーダーのパターンで実装し、反射色の合成もシェーダー内で直接加算しています。
+金属/滑らかな面の鏡面間接光(環境反射)はSSR(スクリーンスペースリフレクション)で計算します。最終合成パスの出力(SceneColor)を反射先の環境色として再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチング(線形マーチ+2分探索によるヒット位置の精密化)を行います。スカイボックスへのフォールバックは、レイが画面内で実際に背景(深度なし)ピクセルへ到達したことを確認できた場合のみ行い、レイが画面外に外れた場合や最大距離まで判定がつかなかった場合は反射を追加しません(その先に何があるか不明なまま空を映り込ませると、洞窟のように周囲が遮蔽された空間でも誤って空が反射してしまうため)。ミップチェーンによるラフネスブラーは行っていないため、粗い面ほど反射の寄与を弱めてノイズ化を防いでいます。
 
-描画パイプラインは シャドウパス(サンライト視点で深度のみ描画) → ジオメトリパス(G-Buffer書き込み) → 直接光パス(G-Buffer・シャドウマップからPBRの直接光をHDRで計算) → AO/GIパス(選択中の手法でNormal/Depth、SSILの場合はAlbedo・直接光バッファも読みAO・間接拡散光を計算しブラー) → 最終合成パス(Albedo・直接光・AO/GI・スカイボックスを合成しトーンマッピングしてSceneColorへ出力) → SSRパス(SceneColor・G-Bufferから鏡面反射を計算し加算) → Presentパス(選択中のデバッグビューをバックバッファへ表示) の7パス構成です。シャドウ・AO/GI・SSRはそれぞれON/OFF可能で、OFF時は該当パスをスキップします。G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(`Application`のコンストラクタ引数、既定は1280x720)、Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
+描画パイプラインは シャドウパス(サンライト視点で深度のみ描画) → ジオメトリパス(G-Buffer書き込み) → 直接光パス(G-Buffer・シャドウマップからPBRの直接光をHDRで計算) → AO/GIパス(選択中の手法でNormal/Depth、SSILの場合はAlbedo・直接光バッファも読みAO・間接拡散光を計算しブラー) → 最終合成パス(Albedo・直接光・AO/GI・スカイボックスを合成しトーンマッピングしてSceneColorへ出力) → SSRパス(SceneColor・G-Bufferから鏡面反射を計算し加算) → Presentパス(選択中のデバッグビューをバックバッファへ表示) の7パス構成です。シャドウ・AO/GI・SSRはそれぞれON/OFF可能で、OFF時は該当パスをスキップします。G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(`KurenaiEngine3D`のコンストラクタ引数、既定は1280x720)、Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
+
+## ドキュメント
+
+`KurenaiEngine3D` / `KurenaiEngine2D` / Library(低レベルAPI)のAPIリファレンスは
+**[docs/KurenaiEngine.html](docs/KurenaiEngine.html)** にまとめています。KurenaiEngineを使って
+新しいアプリケーションを作る場合は、まずこのドキュメントを参照してください。
 
 ## 構成
 
-- `Engine/` — エンジン本体(静的ライブラリ)。RHI抽象化レイヤー、DX11/DX12バックエンド、モデルローダーなど。
-- `Sandbox/` — 動作確認用の実行ファイル。シェーダ(`Shaders/`)を含む。
-- `ThirdParty/` — 外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp。
-- `ThirdParty/SourceModels/` — 参考用にダウンロードしたサンプルアセット集(まだ`Assets/`に取り込んでいないものを含む)。
-- `Assets/` — エンジンが実際に読み込むモデル・テクスチャなどのアセット。
-- `Build/` — ビルド生成物の出力先(Git管理対象外)。
+```
+KurenaiEngine.sln              ルート: KurenaiEngine(DLL)単体のビルド確認用ソリューション
+KurenaiEngine/
+  KurenaiEngine.vcxproj        本体(DynamicLibrary)
+  Source/Engine/                公開API(KurenaiEngine3D, KurenaiEngine2D, KurenaiTypes.h)
+  Source/Library/                公開API(低レベル): RHI抽象化層, Window/Camera, モデル読み込みなど
+  Shaders/                       KurenaiEngine3D/2Dが内部で使うHLSL一式
+Samples/
+  Sample3D/  Sample3D.sln       3Dサンプル(KurenaiEngine3Dを使用)。独立ソリューション
+  Sample2D/  Sample2D.sln       2Dサンプル(KurenaiEngine2Dを使用)。独立ソリューション
+docs/                           APIリファレンス
+ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
+ThirdParty/SourceModels/        参考用にダウンロードしたサンプルアセット集(未使用のものを含む)
+Assets/                         KurenaiEngine3Dが読み込むモデル・テクスチャなどのアセット
+Build/                          ビルド生成物の出力先(Git管理対象外)。全プロジェクトが
+                                 Build\Bin\<Platform>\<Configuration>\ に出力を揃える
+```
 
 ## 必要環境
 
@@ -65,27 +94,34 @@ MSBuild ThirdParty\DirectXTex\DirectXTex\DirectXTex_Desktop_2022.vcxproj /p:Conf
 MSBuild ThirdParty\DirectXTex\DirectXTex\DirectXTex_Desktop_2022.vcxproj /p:Configuration=Release /p:Platform=x64
 ```
 
-### 4. 本体のビルド
+### 4. 本体・サンプルのビルド
 
-`KurenaiEngine.sln` をVisual Studioで開いてビルドするか、MSBuildで直接ビルドします。
+`KurenaiEngine.sln` はKurenaiEngine(DLL)単体のビルド確認用です。実際に動かして確認したい場合は、
+`Samples/Sample3D/Sample3D.sln` または `Samples/Sample2D/Sample2D.sln` をビルドしてください
+(いずれもKurenaiEngine.vcxprojをプロジェクト参照しているため、KurenaiEngine.dllも一緒に
+ビルドされます)。
 
 ```
-MSBuild KurenaiEngine.sln /p:Configuration=Debug /p:Platform=x64
+MSBuild Samples\Sample3D\Sample3D.sln /p:Configuration=Debug /p:Platform=x64
 ```
 
-生成された実行ファイルは `Build\Bin\x64\Debug\Sandbox.exe` に出力されます。
+生成された実行ファイル・DLLはすべて `Build\Bin\x64\Debug\` に出力されます
+(`Sample3D.exe`, `Sample2D.exe`, `KurenaiEngine.dll` が同じフォルダに揃う)。
 
-## 実行
+## 実行(Sample3D)
 
-`Sandbox.exe` を実行すると起動時にSponzaを読み込んで表示します。モデルパスは実行ファイルの場所から4階層上をリポジトリルートとみなして解決しているため、`Build\Bin\<Platform>\<Configuration>\` 以外の場所に実行ファイルを配置すると読み込みに失敗します。
+**起動確認・動作検証には `Sample3D.exe` を使用します**(旧`Sandbox.exe`はこのリファクタリングで
+`Samples/Sample3D` に統合されました)。起動時にSponzaを読み込んで表示します。モデル・シェーダの
+パスは実行ファイルの場所から4階層上をリポジトリルートとみなして解決しているため、
+`Build\Bin\<Platform>\<Configuration>\` 以外の場所に実行ファイルを配置すると読み込みに失敗します。
 
 既定ではDX11バックエンドで起動します。`-dx12` 引数を付けて起動するとDX12バックエンドを使用します(再ビルド不要でDX11/DX12を比較できます)。現在どちらのバックエンドで動作しているかはウィンドウタイトル(例: `Kurenai Engine [DX12] - Sponza`)と「Scenes」パネルの表示で確認できます。
 
 ```
-Sandbox.exe -dx12
+Sample3D.exe -dx12
 ```
 
-## 操作方法
+## 操作方法(Sample3D)
 
 | 操作 | 入力 |
 | --- | --- |
@@ -111,6 +147,30 @@ Sandbox.exe -dx12
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / Depth (Raw) / Direct Light / AO/GI - Indirect Light (RGB) / AO/GI - Indirect Light (RGB, Before Blur) / AO/GI - Occlusion (Alpha) / AO/GI - Occlusion (Alpha, Before Blur) / Shadow Map / SSR (Final + Reflections))。Direct Lightは直接光パスの結果(HDR)をトーンマッピングして表示。Depth (Raw)は深度テクスチャの生値(0〜1)を加工せずそのまま表示(reverse-zの生値確認用。近平面が小さいためほとんどの距離で値が0付近になり、無加工ではほぼ黒く見える)。AO/GIバッファはrgb(間接拡散光)とa(遮蔽率)を別々に確認でき、Before Blur付きの項目はブラー前の生バッファ(タイル状ノイズが乗った状態)を表示する。Finalと同じくSSR無効時はSceneColorがそのまま表示される
 - **Lighting** — 太陽光の時刻(Time of Day, 0〜24時)をスライダーで指定。Auto Advanceを有効にすると時刻が自動で進行(速度をSpeedで調整)
 - **Profiler** — FPS(指数移動平均)、CPUフレーム時間(Update+Render呼び出し時間)、GPUフレーム時間と各パス(Shadow/GBuffer/DirectLight/AO/AOBlur/Lighting/SSR/Present)ごとのGPU実行時間をGPUタイムスタンプクエリで計測して表示。GPU側の計測はDX11/DX12とも数フレーム遅れの値が表示される(AO/AOBlurはAO/間接光が無効の間、SSRはSSRが無効の間は表示されない)
+
+## サンプルプログラム
+
+`Samples/` 以下に、`docs/KurenaiEngine.html` で説明している公開API(`KurenaiEngine3D` /
+`KurenaiEngine2D`)を使ったサンプルプログラムを用意しています。それぞれ独立した`.sln`を持ち、
+`KurenaiEngine.vcxproj`をプロジェクト参照します。実行ファイルの出力先はKurenaiEngine.dllと
+同じ `Build\Bin\x64\<Configuration>\`。
+
+### Sample3D
+
+`Kurenai::KurenaiEngine3D` をそのままインスタンス化して `Run()` を呼ぶだけの構成です
+(`Samples/Sample3D/Source/Main.cpp`)。表示内容・操作方法は上記「実行」「操作方法」の
+とおりで、旧 `Sandbox` と同じ内容(Deferred Shading・シャドウ・SSAO/SSIL・SSR・
+ImGuiパネル一式)がそのまま動作します。**起動確認・動作検証はこのSample3Dを使用します。**
+
+### Sample2D
+
+`Kurenai::KurenaiEngine2D` を使い、画面内を跳ね回る半透明の色つきスプライトを描画するサンプルです。
+単位クアッド1つを使い回し、スプライトごとの位置・大きさ・回転・色は `DrawSprite` の引数として
+毎フレーム渡します(座標系・APIの詳細は `docs/KurenaiEngine.html` 3章を参照)。
+
+| 操作 | 入力 |
+| --- | --- |
+| 終了 | Esc |
 
 ## Assetsフォルダについて
 

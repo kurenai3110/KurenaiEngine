@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KurenaiEngine APIリファレンス</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1c1e21;
+    --muted: #5b6270;
+    --border: #e2e5ea;
+    --code-bg: #f4f5f7;
+    --accent: #a4243b;
+    --accent-bg: #fbeef1;
+    --link: #7a1d30;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --fg: #e8e9ec;
+      --muted: #9aa1ac;
+      --border: #2b2f36;
+      --code-bg: #1d2025;
+      --accent: #e2687e;
+      --accent-bg: #2a1a1f;
+      --link: #f19bab;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  body {
+    font-family: "Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+    line-height: 1.75;
+    font-size: 16px;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 860px);
+    justify-content: center;
+    gap: 48px;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 40px 24px 120px;
+  }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: static !important; margin-bottom: 32px; }
+  }
+  header.page-header {
+    grid-column: 1 / -1;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 24px;
+    margin-bottom: 8px;
+  }
+  header.page-header h1 {
+    margin: 0 0 8px;
+    font-size: 1.9rem;
+  }
+  header.page-header p {
+    margin: 0;
+    color: var(--muted);
+    max-width: 720px;
+  }
+  nav.toc {
+    position: sticky;
+    top: 24px;
+    align-self: start;
+    font-size: 0.92rem;
+  }
+  nav.toc div.toc-title {
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.75rem;
+    margin-bottom: 10px;
+  }
+  nav.toc ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  nav.toc li { margin: 0 0 8px; }
+  nav.toc a {
+    color: var(--fg);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    border-left: 2px solid transparent;
+    padding-left: 10px;
+  }
+  nav.toc a:hover {
+    color: var(--accent);
+    border-left-color: var(--accent);
+  }
+  main {
+    min-width: 0;
+  }
+  h2 {
+    font-size: 1.4rem;
+    margin-top: 3em;
+    padding-top: 0.4em;
+    border-top: 1px solid var(--border);
+  }
+  h2:first-of-type { margin-top: 1.5em; border-top: none; padding-top: 0; }
+  h3 {
+    font-size: 1.12rem;
+    margin-top: 2em;
+    color: var(--accent);
+  }
+  p, li { color: var(--fg); }
+  code {
+    font-family: "Cascadia Code", "Consolas", "SFMono-Regular", Menlo, monospace;
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.88em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-size: 0.86rem;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1.2em 0;
+    font-size: 0.92rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: var(--code-bg);
+    font-weight: 600;
+  }
+  a { color: var(--link); }
+  .note {
+    background: var(--accent-bg);
+    border-left: 4px solid var(--accent);
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin: 1.2em 0;
+  }
+  .note p:first-child { margin-top: 0; }
+  .note p:last-child { margin-bottom: 0; }
+  .tree {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 0.84rem;
+    white-space: pre;
+    line-height: 1.6;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-bg);
+    border-radius: 999px;
+    padding: 2px 10px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  footer {
+    grid-column: 1 / -1;
+    margin-top: 64px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<header class="page-header">
+  <h1>KurenaiEngine APIリファレンス</h1>
+  <p>
+    このドキュメントは、<strong>KurenaiEngine.dll</strong> が公開するAPIを使って
+    アプリケーションを作成するための情報をまとめたものです。すぐに動かしたい場合は
+    3Dサンプル向けの <code>Kurenai::KurenaiEngine3D</code> や2Dサンプル向けの
+    <code>Kurenai::KurenaiEngine2D</code> を、より自由度の高い描画を組みたい場合は
+    低レベルAPI一式(<code>Kurenai::RHI</code> / <code>Kurenai::Core</code> /
+    <code>Kurenai::Assets</code>、まとめて「Library」)を直接利用できます。
+  </p>
+</header>
+
+<nav class="toc">
+  <div class="toc-title">目次</div>
+  <ol>
+    <li><a href="#architecture">1. アーキテクチャ</a></li>
+    <li><a href="#engine3d">2. KurenaiEngine3D</a></li>
+    <li><a href="#engine2d">3. KurenaiEngine2D</a></li>
+    <li><a href="#library">4. Library(低レベルAPI)</a></li>
+    <li><a href="#input">5. 入力について</a></li>
+    <li><a href="#build">6. ビルドに必要な依存ファイル</a></li>
+    <li><a href="#constraints">7. 制約・注意点</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="architecture">
+<h2>1. アーキテクチャ</h2>
+
+<p>
+KurenaiEngineは <strong>DLL</strong>(<code>KurenaiEngine.dll</code> + インポートライブラリ
+<code>KurenaiEngine.lib</code>)としてビルドされます。ソースは2層に分かれています。
+</p>
+
+<pre class="tree">KurenaiEngine/
+  KurenaiEngine.vcxproj
+  Source/
+    Engine/    ← 公開API(このドキュメントで説明する全て)
+      KurenaiTypes.h        GraphicsAPI enum, エクスポートマクロ
+      KurenaiEngineBase.h   3D/2D共通の土台(非公開コンストラクタ)
+      KurenaiEngine3D.h     3Dサンプル向け公開クラス
+      KurenaiEngine2D.h     2Dサンプル向け公開クラス
+    Library/   ← 低レベルAPI(RHI抽象化層、Window、Camera、モデル読み込みなど。4章参照)
+      RHI/ Core/ Assets/
+  Shaders/     ← KurenaiEngine3D/2Dが内部で使うHLSLシェーダ一式</pre>
+
+<p>
+<code>Source/Engine/</code> と <code>Source/Library/</code> は<strong>どちらも公開API</strong>で、
+どちらのクラス・関数も <code>KurenaiEngine.dll</code> から <code>__declspec(dllexport)</code>
+されています(<code>Source/Library/RHI/DX11</code>, <code>DX12</code> 配下のバックエンド実装
+クラス自体は非公開で、<code>RHI::IRHIDevice</code> などのインタフェース越しにのみ利用します)。
+用途に応じて使い分けてください。
+</p>
+<ul>
+<li><strong>まず動かしたい・定番の3D/2D表現で十分</strong>な場合 →
+<code>KurenaiEngine3D</code> / <code>KurenaiEngine2D</code>(2章・3章)</li>
+<li><strong>独自の描画パイプラインを組みたい</strong>場合(カスタムシェーダ、独自のポストエフェクト、
+スプライト以外の2D表現など) → <code>Library</code> の低レベルAPI(4章)を直接利用</li>
+</ul>
+
+<div class="note">
+<p>
+サンプルプログラムを新規に作成する場合、プロジェクトのインクルードディレクトリには
+<code>KurenaiEngine/Source/Engine</code> を追加し(<code>KurenaiEngine3D.h</code> などを
+includeするため)、<code>KurenaiEngine.vcxproj</code> へのプロジェクト参照を張ってください
+(<code>Samples/Sample3D</code>, <code>Samples/Sample2D</code> の <code>.vcxproj</code> を
+参考にできます)。<code>Library</code> の低レベルAPIも使う場合は
+<code>KurenaiEngine/Source/Library</code> もインクルードディレクトリに追加してください
+(<code>RHI/IRHIDevice.h</code> のように <code>Library</code> を起点とした相対パスでincludeする)。
+実行ファイルの出力先はビルドの度に <code>KurenaiEngine.dll</code> が生成される場所(リポジトリ直下の
+<code>Build\Bin\&lt;Platform&gt;\&lt;Configuration&gt;\</code>)と揃えてください。DLLは実行ファイルと
+同じフォルダに置かれていないと起動時に読み込めません。
+</p>
+</div>
+</section>
+
+<section id="engine3d">
+<h2>2. <code>Kurenai::KurenaiEngine3D</code> — 3Dサンプル向け公開API<span class="badge">完結型</span></h2>
+
+<p>
+<code>KurenaiEngine3D</code> は、Deferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness+
+深度)によるPBRレンダリング、シャドウマッピング、SSAO/SSIL(間接光)、SSR(反射)、複数シーンの
+切り替え、ImGuiによる設定パネル一式までを内包した<strong>完結型の3Dレンダラー</strong>です。
+構築して <code>Run()</code> を呼ぶだけでウィンドウが開き、ユーザーが閉じるまでブロックします。
+</p>
+
+<pre><code>#include "KurenaiEngine3D.h"
+#include "KurenaiTypes.h"
+
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
+{
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // WICテクスチャ読み込みに必要
+
+    Kurenai::KurenaiEngine3D engine(Kurenai::GraphicsAPI::DX11); // またはDX12
+    engine.Run();
+
+    CoUninitialize();
+    return 0;
+}</code></pre>
+
+<pre><code>namespace Kurenai
+{
+    class KurenaiEngine3D : public KurenaiEngineBase
+    {
+    public:
+        explicit KurenaiEngine3D(GraphicsAPI api = GraphicsAPI::DX11, uint32_t renderWidth = 1280, uint32_t renderHeight = 720);
+        ~KurenaiEngine3D();
+        void Run();
+    };
+}</code></pre>
+
+<ul>
+<li><code>renderWidth</code>/<code>renderHeight</code> はG-Bufferなどの内部レンダリング解像度
+(ウィンドウサイズとは独立)。ウィンドウは常に1280x720で開始し、リサイズ可能。表示時はアスペクト比を
+保ってレターボックス/ピラーボックス表示される。</li>
+<li><code>Run()</code> を呼ぶと以下を自動的に行う(<strong>設定変更やシーン読み込みはすべて
+ImGuiパネル経由</strong>):
+  <ul>
+    <li><code>WASD</code> で移動、<code>E</code>/<code>Q</code> で上下移動、<code>Shift</code> で高速移動</li>
+    <li>右クリックを押しながらマウス移動でカメラ回転</li>
+    <li><code>F1</code> でImGuiパネルの表示/非表示切り替え</li>
+    <li>画面左上のImGuiパネル(Scenes / Post Processing / Render Targets / Lighting / Profiler)で
+    表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/SSRのON・OFFやパラメータ調整、デバッグ表示
+    バッファの選択、時刻(昼夜サイクル)の調整、FPS/CPU/GPUの計測値確認ができる</li>
+  </ul>
+</li>
+<li>表示できるシーンはビルド済みバイナリに組み込み済み(Sponza / Bistro Exterior /
+Bistro Interior / Bistro Interior (Wine Cellar) / White Surface Test)。カスタムモデルの追加や、
+シーン一覧の外部からのカスタマイズは現状の公開APIではサポートしていない(<code>Run()</code> を
+呼ぶ以外のカスタマイズ余地がないのが <code>KurenaiEngine3D</code> の設計上の割り切り)。</li>
+<li>コンストラクタに渡した <code>GraphicsAPI</code> に応じてDX11/DX12いずれかのバックエンドで
+動作する。</li>
+</ul>
+</section>
+
+<section id="engine2d">
+<h2>3. <code>Kurenai::KurenaiEngine2D</code> — 2Dサンプル向け公開API<span class="badge">軽量API</span></h2>
+
+<p>
+<code>KurenaiEngine2D</code> は正射影カメラとアルファブレンドによる<strong>スプライト描画</strong>を
+提供する軽量なAPIです。<code>KurenaiEngine3D</code> と異なり内部でゲームループを回さず、
+フレームごとの描画呼び出しをアプリケーション側の <code>while</code> ループから行います。
+</p>
+
+<pre><code>namespace Kurenai
+{
+    class TextureHandle
+    {
+    public:
+        TextureHandle() = default;
+        bool IsValid() const;
+    };
+
+    class KurenaiEngine2D : public KurenaiEngineBase
+    {
+    public:
+        KurenaiEngine2D(const std::wstring&amp; title, uint32_t width, uint32_t height, GraphicsAPI api = GraphicsAPI::DX11);
+        ~KurenaiEngine2D();
+
+        TextureHandle LoadTexture(const std::wstring&amp; filePath, bool sRGB = false);
+        TextureHandle CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+
+        void BeginFrame(float clearR, float clearG, float clearB, float clearA = 1.0f);
+        void DrawSprite(float x, float y, float width, float height, float rotationRadians,
+                         TextureHandle texture, float r, float g, float b, float a);
+        void EndFrame(bool vsync = true);
+    };
+}</code></pre>
+
+<p><code>KurenaiEngineBase</code> から継承する共通機能(ウィンドウ・メッセージループ):</p>
+
+<pre><code>bool ShouldClose() const;   // ウィンドウが閉じられたか
+void PumpEvents();          // メッセージポンプ。毎フレーム呼ぶ
+void Close();               // プログラムからウィンドウを閉じる(Escキー等に割り当てるとよい)
+uint32_t GetWidth() const;
+uint32_t GetHeight() const;</code></pre>
+
+<h3>3.1 座標系</h3>
+<p>
+ワールド座標=ウィンドウのピクセル座標(<strong>原点は画面左下、Y-upの標準的な2Dゲーム座標系</strong>)。
+<code>DrawSprite</code> の <code>x, y</code> はスプライト中心の位置、<code>width, height</code> は
+ピクセル単位のサイズ、<code>rotationRadians</code> は画面奥から手前を見た反時計回りのZ軸回転。
+</p>
+
+<h3>3.2 使い方</h3>
+<pre><code>#include "KurenaiEngine2D.h"
+#include "KurenaiTypes.h"
+
+using namespace Kurenai;
+
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
+{
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    KurenaiEngine2D renderer(L"My 2D Game", 1280, 720, GraphicsAPI::DX11);
+
+    TextureHandle playerTexture = renderer.LoadTexture(L"Assets/player.png", false);
+    float x = 640.0f, y = 360.0f;
+
+    while (!renderer.ShouldClose())
+    {
+        renderer.PumpEvents();
+        if (GetAsyncKeyState(VK_ESCAPE) &amp; 0x8000)
+        {
+            renderer.Close();
+        }
+
+        // 入力処理・座標更新はアプリケーション側の責任(WinAPIを直接使う。5章参照)
+        if (GetAsyncKeyState('D') &amp; 0x8000) x += 4.0f;
+        if (GetAsyncKeyState('A') &amp; 0x8000) x -= 4.0f;
+
+        renderer.BeginFrame(0.1f, 0.1f, 0.15f);
+        renderer.DrawSprite(x, y, 64.0f, 64.0f, 0.0f, playerTexture, 1.0f, 1.0f, 1.0f, 1.0f);
+        renderer.EndFrame(true);
+    }
+
+    CoUninitialize();
+    return 0;
+}</code></pre>
+
+<ul>
+<li><code>LoadTexture</code> / <code>CreateSolidColorTexture</code> はロード時にまとめて呼び、
+返ってきた <code>TextureHandle</code> を保持しておいて毎フレームの <code>DrawSprite</code> に
+渡す(<code>KurenaiEngine2D</code> が内部でテクスチャの実体を所有し続けるため、
+<code>renderer</code> が生存している間は有効)。</li>
+<li><code>DrawSprite</code> の <code>r, g, b, a</code> はテクスチャに乗算されるティント色。
+<code>a &lt; 1.0</code> で半透明合成される(常にアルファブレンド有効。深度テストは行わないため、
+重なり順は呼び出し順で決まる — 先に呼んだスプライトほど背面に描かれる)。</li>
+<li><code>BeginFrame</code>/<code>EndFrame</code> は1フレームにつき必ず1回ずつ呼ぶ。
+<code>DrawSprite</code> はその間に好きな回数呼べる。</li>
+</ul>
+</section>
+
+<section id="library">
+<h2>4. Library — 低レベルAPI<span class="badge">上級者向け</span></h2>
+
+<p>
+<code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code> では対応できない独自の描画を組みたい
+場合、<code>Kurenai::RHI</code>(DX11/DX12を抽象化したレンダリングAPI)・<code>Kurenai::Core</code>
+(ウィンドウ・カメラ)・<code>Kurenai::Assets</code>(モデル読み込み)を直接利用できます。
+実際に <code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code> 自身もこのLibraryの上に
+実装されています。
+</p>
+
+<h3>4.1 基本的な流れ</h3>
+<pre><code>Core::Window window(L"My App", 1280, 720);
+auto device = RHI::CreateDX11Device(); // または RHI::CreateDX12Device()
+auto swapChain = device->CreateSwapChain(window.GetHandle(), window.GetWidth(), window.GetHeight());
+
+// シェーダ・パイプラインステート・バッファ・テクスチャ・サンプラーを生成(通常は起動時に1回)
+auto vs = device->CreateShader({ RHI::ShaderStage::Vertex, L"Shader.hlsl", "VSMain" });
+auto ps = device->CreateShader({ RHI::ShaderStage::Pixel,  L"Shader.hlsl", "PSMain" });
+
+RHI::PipelineStateDesc psoDesc;
+psoDesc.InputLayout = { { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 } };
+psoDesc.VertexShader = vs.get();
+psoDesc.PixelShader = ps.get();
+psoDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+auto pipelineState = device->CreatePipelineState(psoDesc);
+
+RHI::IRHICommandList* cmd = device->GetImmediateCommandList();
+while (!window.ShouldClose())
+{
+    window.PumpMessages();
+
+    cmd->SetRenderTarget(swapChain.get()); // スワップチェーン付属の深度バッファも同時にバインドされる
+    cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
+    cmd->SetViewport({ 0, 0, (float)window.GetWidth(), (float)window.GetHeight(), 0.0f, 1.0f });
+    cmd->SetPipelineState(pipelineState.get());
+    // ... SetVertexBuffer / SetConstantBuffer / SetTexture / SetSampler / Draw ...
+
+    swapChain->Present(true);
+}</code></pre>
+
+<h3>4.2 <code>RHI::IRHIDevice</code></h3>
+<p><code>RHI::CreateDX11Device()</code> / <code>RHI::CreateDX12Device()</code> で生成する。主なメソッド:</p>
+<pre><code>std::unique_ptr&lt;IRHISwapChain&gt; CreateSwapChain(void* windowHandle, uint32_t width, uint32_t height);
+std::unique_ptr&lt;IRHIBuffer&gt;    CreateBuffer(const BufferDesc&amp; desc);
+std::unique_ptr&lt;IRHIShader&gt;    CreateShader(const ShaderDesc&amp; desc);
+std::unique_ptr&lt;IRHIPipelineState&gt; CreatePipelineState(const PipelineStateDesc&amp; desc);
+std::unique_ptr&lt;IRHITexture&gt;   CreateTextureFromFile(const std::wstring&amp; filePath, bool sRGB);
+std::unique_ptr&lt;IRHITexture&gt;   CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
+std::unique_ptr&lt;IRHITexture&gt;   CreateRenderTexture(uint32_t width, uint32_t height, Format format);
+std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f);
+std::unique_ptr&lt;IRHISampler&gt;   CreateDefaultSampler();
+IRHICommandList*                GetImmediateCommandList();</code></pre>
+<p>
+<code>CreateTextureFromFile</code> は拡張子(<code>.dds</code>/<code>.tga</code>/その他はWIC経由で
+png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベースカラー等「見た目の色」を持つ
+テクスチャに、法線マップ等のデータ系テクスチャには<code>false</code>を指定する。
+</p>
+
+<h3>4.3 <code>RHI::IRHICommandList</code></h3>
+<pre><code>void SetRenderTarget(IRHISwapChain* swapChain);
+void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture);
+void ClearRenderTarget(const ClearColor&amp; color);
+void ClearDepth(float depth);
+void SetViewport(const Viewport&amp; viewport);
+void SetPipelineState(IRHIPipelineState* pipelineState);
+void SetVertexBuffer(IRHIBuffer* buffer);
+void SetIndexBuffer(IRHIBuffer* buffer);           // 32bit(uint32_t)インデックス固定
+void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer);
+void SetTexture(uint32_t slot, IRHITexture* texture);
+void SetSampler(uint32_t slot, IRHISampler* sampler);
+void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes);
+void Draw(uint32_t vertexCount, uint32_t startVertexLocation);
+void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation);</code></pre>
+
+<div class="note">
+<p><strong>バインドスロットの上限</strong>(DX12バックエンドが固定のルートシグネチャで実装されているため、
+DX11/DX12共通でこの範囲を守る必要がある):</p>
+<table>
+<thead><tr><th>リソース</th><th>有効なスロット</th><th>HLSL側のレジスタ</th></tr></thead>
+<tbody>
+<tr><td>定数バッファ</td><td><code>0</code>, <code>1</code> の2つのみ</td><td><code>register(b0)</code>, <code>register(b1)</code></td></tr>
+<tr><td>テクスチャ</td><td><code>0</code>〜<code>6</code> の最大7つ</td><td><code>register(t0)</code>〜<code>register(t6)</code></td></tr>
+<tr><td>サンプラー</td><td><code>0</code> の1つのみ</td><td><code>register(s0)</code></td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="note">
+<p><strong>定数バッファ更新の制約</strong>: <code>CreateBuffer</code> に<code>InitialData</code>を
+渡すかどうかで、後から<code>UpdateBuffer</code>できるかがDX11/DX12で挙動が変わる。</p>
+<ul>
+<li><strong>毎フレーム更新する定数バッファ</strong>(<code>BufferUsage::Constant</code>): <code>InitialData = nullptr</code>
+で作成し、以後<code>UpdateBuffer()</code>で毎フレーム書き込む(DX11では<code>InitialData</code>を渡すと
+IMMUTABLEになり以後の更新が失敗するため、必ずnullptrで作成すること)。</li>
+<li><strong>頂点/インデックスバッファ</strong>(<code>BufferUsage::Vertex</code>/<code>Index</code>):
+<code>InitialData</code>を渡して作成する静的ジオメトリ専用。生成後に<code>UpdateBuffer</code>しては
+いけない(DX12ではGPU読み取り専用のDEFAULTヒープに配置されるため未定義動作になる)。移動・回転・
+拡縮は定数バッファ経由のワールド行列で表現する。</li>
+</ul>
+</div>
+
+<h3>4.4 その他のRHI型</h3>
+<p>
+<code>IRHIBuffer</code> / <code>IRHITexture</code> / <code>IRHIShader</code> /
+<code>IRHIPipelineState</code> / <code>IRHISampler</code> / <code>IRHISwapChain</code> はいずれも
+中身を持たない不透明なハンドル型。<code>std::unique_ptr&lt;IRHIXxx&gt;</code>として保持し、
+<code>IRHICommandList</code>の各メソッドに生ポインタ(<code>.get()</code>)で渡す。
+<code>RHIDesc.h</code>(<code>BufferDesc</code>, <code>ShaderDesc</code>, <code>InputElementDesc</code>,
+<code>PipelineStateDesc</code>)と<code>RHIEnums.h</code>(<code>ShaderStage</code>,
+<code>BufferUsage</code>, <code>Format</code>, <code>BlendMode</code> など)に描画リソースの
+記述構造体・列挙型がまとまっている。<code>PipelineStateDesc::BlendMode</code>に
+<code>BlendMode::AlphaBlend</code>を指定すると半透明合成のパイプラインになる(既定は
+<code>Opaque</code>)。<code>IRHIGPUProfiler</code>(GPUタイムスタンプ計測)、
+<code>IRHIImGuiBackend</code>(ImGui連携)も同様に公開されている。
+</p>
+
+<h3>4.5 <code>Core::Window</code> / <code>Core::Camera</code></h3>
+<pre><code>Window(const std::wstring&amp; title, uint32_t width, uint32_t height);
+void PumpMessages();          // 毎フレーム呼ぶ
+bool ShouldClose() const;
+HWND GetHandle() const;
+uint32_t GetWidth() const;
+uint32_t GetHeight() const;
+void SetResizeCallback(std::function&lt;void(uint32_t,uint32_t)&gt; callback);
+void SetTitle(const std::wstring&amp; title);</code></pre>
+<p>
+キーボード/マウス入力のAPIは提供されない(5章参照)。<code>Camera</code>は透視投影
+(<code>SetLens</code>、既定でReverse-Z)と正射影(<code>SetOrthographic</code>、2D/UI向け)の
+両方に対応し、<code>GetViewMatrix()</code>/<code>GetProjectionMatrix()</code>で行列を取得する。
+</p>
+
+<h3>4.6 <code>Assets::LoadModel</code></h3>
+<pre><code>Model LoadModel(RHI::IRHIDevice&amp; device, const std::wstring&amp; filePath);</code></pre>
+<p>
+assimp経由でglTF/FBX等を読み込み、頂点/インデックスバッファとテクスチャをRHI経由でGPUへ
+アップロード済みの状態で <code>Model</code>(<code>Mesh</code>の配列)として返す。各メッシュの
+ノード変換(ワールド行列)は頂点座標へ焼き込み済みのため、描画時に別途ワールド行列を掛ける必要は
+ない。頂点レイアウトは <code>POSITION(R32G32B32_Float, offset=0)</code>,
+<code>NORMAL(R32G32B32_Float, offset=12)</code>, <code>TEXCOORD0(R32G32_Float, offset=24)</code>
+(<code>Assets::Vertex</code>, 32バイト)。読み込むと同じ場所に
+<code>&lt;元のファイル名&gt;.kmodelcache</code> というバイナリキャッシュが自動生成され、
+2回目以降の読み込みが高速化される。
+</p>
+</section>
+
+<section id="input">
+<h2>5. 入力について</h2>
+<p>
+<code>KurenaiEngineBase</code> はウィンドウの生成・メッセージポンプのみを担当し、キーボード/マウス
+入力の抽象化は提供しません。<code>KurenaiEngine2D</code> を使うアプリケーションで入力を扱う場合は、
+<code>GetAsyncKeyState</code> / <code>GetCursorPos</code> などのWin32 APIを直接呼びます
+(<code>Samples/Sample2D</code> 参照)。<code>KurenaiEngine3D</code> は移動・カメラ操作を内部で
+完結して処理しているため、この対応は不要です。
+</p>
+</section>
+
+<section id="build">
+<h2>6. ビルドに必要な追加の依存ファイル</h2>
+<p>
+<code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code>/<code>Library</code> のいずれを
+使う場合でも、サンプルプロジェクト自身がDirectXTexやassimpのヘッダー・ライブラリを直接参照する
+必要はありません(すべてDLL内部にリンク済み)。サンプルプロジェクトに必要なのは以下だけです。
+</p>
+<ul>
+<li>インクルードディレクトリ: <code>KurenaiEngine\Source\Engine</code>
+(<code>Library</code>も使う場合は <code>KurenaiEngine\Source\Library</code> も追加)</li>
+<li><code>KurenaiEngine.vcxproj</code> へのプロジェクト参照(自動的にインポートライブラリが
+リンクされる)</li>
+<li>実行時に <code>KurenaiEngine.dll</code> が実行ファイルと同じフォルダに存在すること</li>
+</ul>
+</section>
+
+<section id="constraints">
+<h2>7. 制約・注意点</h2>
+<table>
+<thead><tr><th>項目</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>コピー・代入</td><td><code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code> はいずれも不可</td></tr>
+<tr><td>ウィンドウ数</td><td>1プロセスにつき1つを想定(複数インスタンスの同時生成は未検証)</td></tr>
+<tr><td>2Dの描画パス</td><td><code>KurenaiEngine2D::DrawSprite</code> は常にアルファブレンド・深度テストなしで描画される(不透明専用の高速パスはない)</td></tr>
+<tr><td>COM初期化</td><td><code>wWinMain</code> の先頭で <code>CoInitializeEx</code> を呼ぶこと。DirectXTexのWICテクスチャ読み込み(<code>LoadTexture</code>)がCOMに依存しているため、忘れると読み込みに失敗する</td></tr>
+<tr><td>ビルド設定の一致</td><td><code>KurenaiEngine.dll</code> とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
+<tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAA・UAVなし(4章参照)</td></tr>
+</tbody>
+</table>
+</section>
+
+</main>
+
+<footer>KurenaiEngine &middot; docs/KurenaiEngine.html</footer>
+
+</div>
+</body>
+</html>
