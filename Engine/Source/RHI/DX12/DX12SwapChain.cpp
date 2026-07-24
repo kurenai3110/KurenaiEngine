@@ -117,8 +117,11 @@ namespace Kurenai::RHI
     {
         TransitionToPresent(m_Device->GetCommandList());
         m_Device->ExecuteCommandList();
+        // このフレームの完了を示すフェンス値をシグナルしてから、CPUはGPUの完了を待たずに
+        // 次のフレームスロットの記録へ進む(CPU/GPUがオーバーラップして動作する)
+        m_Device->SignalFrame();
         ThrowIfFailed(m_SwapChain->Present(vsync ? 1 : 0, 0), "Presentに失敗しました");
-        m_Device->WaitForGPU();
+        m_Device->AdvanceToNextFrame();
     }
 
     void DX12SwapChain::Resize(uint32_t width, uint32_t height)

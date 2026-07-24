@@ -57,35 +57,51 @@ namespace Kurenai::RHI
         // CopyDescriptorsSimpleによるディスクリプタ書き込みはGPU実行前にすべて完了してしまう。
         // そのため同じヒープスロットを毎回使い回すと、GPUが実際にDrawを処理する時点では
         // そのフレーム最後のSetTexture呼び出しの内容にすべて上書きされてしまう。
-        // これを避けるため、t0〜t6の連続したkTextureSlotCount個のブロックを描画のたびに新規に払い出す
+        // これを避けるため、t0〜t6の連続したkTextureSlotCount個のブロックを描画のたびに新規に払い出す。
+        // インデックスはフレームをまたいでも巻き戻さない(kFrameCountフレーム分の容量を持つ
+        // リングとして扱う)ため、GPUがまだ読んでいる可能性のある直近フレームのブロックを
+        // 上書きすることはない(詳細はkFrameCountのコメントを参照)
         uint32_t AllocateSrvTableBlock(uint32_t count);
 
         // コマンドリストを閉じてキューへ実行投入する
         void ExecuteCommandList();
-        // フェンスでGPUの完了を待ち、次フレーム/次操作用にコマンドリストを開き直す
-        void WaitForGPU();
-        // フェンスでGPUの完了のみを待つ(コマンドリストの状態には触れない)。
-        // 1フレーム分の記録を溜めて1回だけ実行する設計上、フレームの合間では
-        // コマンドリストは常に開いた(記録可能な)状態になっているため、
-        // ExecuteCommandList()を経ていない箇所(スワップチェインのリサイズ等)から
-        // GPU完了を待つ場合はこちらを使い、開いたままのコマンドリストへ誤ってReset()しないようにする
+        // フェンスに新しい値をシグナルし、現在のフレームスロット(m_FrameIndex)の完了目印として記録する。
+        // ExecuteCommandList()の直後、Presentより前に呼ぶ
+        void SignalFrame();
+        // 次のフレームスロットへ進み、そのスロットを最後に使ったフレームのGPU実行完了を待ってから
+        // (kFrameCountフレーム前の実行なので通常は待たずに完了している)コマンドアロケータ/リストを
+        // 開き直す。CPUはGPUの完了を待たずに次フレームの記録を始められるため、Present直後に
+        // 毎回完全同期していた旧実装と比べてCPU/GPUがオーバーラップして動作する
+        void AdvanceToNextFrame();
+        // フェンスでGPUの完全なアイドルを待つ(全フレームスロットの実行完了を保証する)。
+        // リサイズやシャットダウンなど、パイプライン化の恩恵が不要な箇所でのみ使う
         void WaitForGPUIdle();
-        // ExecuteCommandList()とWaitForGPU()をまとめて行う、一度限りの同期処理(テクスチャアップロード等)用の便宜メソッド
+        // ExecuteCommandList()とWaitForGPUIdle()をまとめて行い、現在のフレームスロットを
+        // 開き直す、一度限りの同期処理(テクスチャアップロード等)用の便宜メソッド
         void SubmitAndWaitIdle();
 
     private:
         void CreateRootSignature();
+        // 現在のフレームスロット(m_FrameIndex)のコマンドアロケータ/リストを開き直す
         void ResetCommandList();
         Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(uint64_t sizeInBytes);
         std::unique_ptr<IRHITexture> CreateTextureFromImage(const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image);
 
+        // CPUがGPUの完了を待たずに次フレームの記録を始められるようにするための多重バッファリング数。
+        // スワップチェインのバッファ数(DX12SwapChain::kBufferCount)と合わせて2にしておく
+        static constexpr uint32_t kFrameCount = 2;
+
         Microsoft::WRL::ComPtr<ID3D12Device> m_Device;
         Microsoft::WRL::ComPtr<IDXGIFactory2> m_Factory;
         Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_CommandQueue;
-        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_CommandAllocator;
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_CommandAllocators[kFrameCount];
         Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_CommandList;
         Microsoft::WRL::ComPtr<ID3D12Fence> m_Fence;
         uint64_t m_FenceValue = 0;
+        // 各フレームスロットを最後に使ったフレームがシグナルしたフェンス値。
+        // AdvanceToNextFrame()でそのスロットを再利用する前にこの値の完了を待つ
+        uint64_t m_FrameFenceValues[kFrameCount] = {};
+        uint32_t m_FrameIndex = 0;
         HANDLE m_FenceEvent = nullptr;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> m_RootSignature;
 
@@ -99,5 +115,9 @@ namespace Kurenai::RHI
         std::unique_ptr<DX12CommandList> m_ImmediateCommandList;
 
         uint32_t m_NextSrvTableIndex = 0;
+        // 1フレームあたりの払い出しブロック数の検証用(実際のリング位置には影響しない)。
+        // kMaxSrvTableBlocksPerFrameを超えて払い出すと、まだGPUが読んでいる可能性のある
+        // 前フレームのブロックを上書きしてしまうため、ResetCommandList()のたびに0に戻して検出する
+        uint32_t m_SrvTableBlocksUsedThisFrame = 0;
     };
 }

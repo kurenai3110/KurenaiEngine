@@ -28,11 +28,14 @@ namespace Kurenai::RHI
         constexpr uint32_t kTextureSlotCount = 7; // t0〜t6 (DeferredLighting.hlslが最大)
         constexpr uint32_t kSamplerSlotCount = 1; // s0のみ
         // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t6のkTextureSlotCount個ひと組)の最大数。
-        // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく
+        // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく。実際に確保するヒープ容量は
+        // これのkFrameCount倍(CPUがGPU完了を待たずに次フレームを記録し始めるため、直近kFrameCount
+        // フレームぶんのブロックがまだGPUに読まれている可能性がある)
         constexpr uint32_t kMaxSrvTableBlocksPerFrame = 4096;
-        // 定数バッファ(Usage==Constant)がリングとして持つスロット数。1フレーム中にUpdateBufferされる
-        // 最大回数(メッシュ数など)を十分上回る値にしておく
-        constexpr uint32_t kConstantBufferRingCapacity = 4096;
+        // 定数バッファ(Usage==Constant)がリングとして持つスロット数。CPUがGPU完了を待たずに次フレームを
+        // 記録し始めるため、直近kFrameCountフレームぶんのUpdateBuffer回数(メッシュ数など)を
+        // 十分上回る値にしておく
+        constexpr uint32_t kConstantBufferRingCapacity = 8192;
 
         DXGI_FORMAT ToDXGIFormat(Format format)
         {
@@ -99,11 +102,17 @@ namespace Kurenai::RHI
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         ThrowIfFailed(m_Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_CommandQueue)), "コマンドキューの作成に失敗しました");
 
+        // CPUがGPUの完了を待たずに次フレームの記録を始められるよう、フレームスロットごとに
+        // 独立したコマンドアロケータを持つ(コマンドリスト自体は1つを使い回し、Reset時に
+        // そのフレームのアロケータへ切り替える)
+        for (uint32_t i = 0; i < kFrameCount; ++i)
+        {
+            ThrowIfFailed(
+                m_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_CommandAllocators[i])),
+                "コマンドアロケータの作成に失敗しました");
+        }
         ThrowIfFailed(
-            m_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_CommandAllocator)),
-            "コマンドアロケータの作成に失敗しました");
-        ThrowIfFailed(
-            m_Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_CommandAllocator.Get(), nullptr, IID_PPV_ARGS(&m_CommandList)),
+            m_Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_CommandAllocators[0].Get(), nullptr, IID_PPV_ARGS(&m_CommandList)),
             "コマンドリストの作成に失敗しました");
 
         ThrowIfFailed(m_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_Fence)), "フェンスの作成に失敗しました");
@@ -118,9 +127,10 @@ namespace Kurenai::RHI
         m_SrvCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 256, false);
         m_SamplerCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 4, false);
         // 1フレーム分のコマンドをまとめて記録してから1回だけ実行する設計のため、描画のたびに
-        // 新しいkTextureSlotCount個のブロックを払い出せるよう、1フレームに必要な最大数を見込んで確保する
+        // 新しいkTextureSlotCount個のブロックを払い出せるよう、1フレームに必要な最大数を見込んで確保する。
+        // さらにCPUがGPU完了を待たずに次フレームを記録し始めるため、kFrameCountフレームぶんの容量を持たせる
         m_ShaderVisibleSrvHeap = std::make_unique<DX12DescriptorHeap>(
-            m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kTextureSlotCount * kMaxSrvTableBlocksPerFrame, true);
+            m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kTextureSlotCount * kMaxSrvTableBlocksPerFrame * kFrameCount, true);
         m_ShaderVisibleSamplerHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerSlotCount, true);
 
         CreateRootSignature();
@@ -186,38 +196,68 @@ namespace Kurenai::RHI
         }
     }
 
-    void DX12Device::WaitForGPU()
+    void DX12Device::SignalFrame()
     {
-        WaitForGPUIdle();
+        const uint64_t fenceValueToSignal = ++m_FenceValue;
+        ThrowIfFailed(m_CommandQueue->Signal(m_Fence.Get(), fenceValueToSignal), "フェンスのシグナルに失敗しました");
+        m_FrameFenceValues[m_FrameIndex] = fenceValueToSignal;
+    }
+
+    void DX12Device::AdvanceToNextFrame()
+    {
+        m_FrameIndex = (m_FrameIndex + 1) % kFrameCount;
+
+        // このスロットを最後に使ったフレーム(kFrameCountフレーム前)のGPU実行完了を待つ。
+        // 通常はすでに完了しているため待たずに素通りする
+        const uint64_t fenceValueToWaitFor = m_FrameFenceValues[m_FrameIndex];
+        if (fenceValueToWaitFor != 0 && m_Fence->GetCompletedValue() < fenceValueToWaitFor)
+        {
+            ThrowIfFailed(m_Fence->SetEventOnCompletion(fenceValueToWaitFor, m_FenceEvent), "フェンスイベントの設定に失敗しました");
+            WaitForSingleObject(m_FenceEvent, INFINITE);
+        }
+
         ResetCommandList();
     }
 
     void DX12Device::SubmitAndWaitIdle()
     {
         ExecuteCommandList();
-        WaitForGPU();
+        WaitForGPUIdle();
+        ResetCommandList();
     }
 
     void DX12Device::ResetCommandList()
     {
-        ThrowIfFailed(m_CommandAllocator->Reset(), "コマンドアロケータのリセットに失敗しました");
-        ThrowIfFailed(m_CommandList->Reset(m_CommandAllocator.Get(), nullptr), "コマンドリストのリセットに失敗しました");
+        auto& allocator = m_CommandAllocators[m_FrameIndex];
+        ThrowIfFailed(allocator->Reset(), "コマンドアロケータのリセットに失敗しました");
+        ThrowIfFailed(m_CommandList->Reset(allocator.Get(), nullptr), "コマンドリストのリセットに失敗しました");
 
         ID3D12DescriptorHeap* heaps[] = { m_ShaderVisibleSrvHeap->GetHeap(), m_ShaderVisibleSamplerHeap->GetHeap() };
         m_CommandList->SetDescriptorHeaps(2, heaps);
 
-        m_NextSrvTableIndex = 0;
+        // m_NextSrvTableIndexはフレームをまたいで巻き戻さない(kFrameCountフレーム分の容量を
+        // 持つリングとして扱う)ため、ここではリセットしない。1フレームあたりの払い出し数の
+        // 検証用カウンタのみリセットする
+        m_SrvTableBlocksUsedThisFrame = 0;
     }
 
     uint32_t DX12Device::AllocateSrvTableBlock(uint32_t count)
     {
-        if (m_NextSrvTableIndex + count > kTextureSlotCount * kMaxSrvTableBlocksPerFrame)
+        m_SrvTableBlocksUsedThisFrame += count;
+        if (m_SrvTableBlocksUsedThisFrame > kTextureSlotCount * kMaxSrvTableBlocksPerFrame)
         {
             throw std::runtime_error("SRVテーブルブロックの上限を超えました(1フレーム内の描画回数が多すぎます)");
         }
 
+        // ヒープ全体をkFrameCountフレームぶんの容量を持つリングとして扱う(フレームごとに0へは
+        // 巻き戻さない)。CPUがGPU完了を待たずに次フレームを記録し始めるため、直近フレームの
+        // ブロックへ書き込み中にGPUがまだそれを読んでいる可能性があるが、1フレームあたりの
+        // 消費量が上のチェックでkMaxSrvTableBlocksPerFrameを超えない限り、ここで巻き戻る位置は
+        // 少なくともkFrameCount-1フレーム前のブロックであり、AdvanceToNextFrame()のフェンス待ちで
+        // そのフレームの実行完了は既に保証されている
+        const uint32_t totalCapacity = kTextureSlotCount * kMaxSrvTableBlocksPerFrame * kFrameCount;
         const uint32_t base = m_NextSrvTableIndex;
-        m_NextSrvTableIndex += count;
+        m_NextSrvTableIndex = (m_NextSrvTableIndex + count) % totalCapacity;
         return base;
     }
 

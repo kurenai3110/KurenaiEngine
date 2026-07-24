@@ -88,9 +88,11 @@ namespace Kurenai::RHI
 
     void DX12GPUProfiler::ResolveSlot(FrameSlot& slot, uint32_t slotIndex)
     {
-        // Present()内でExecuteCommandList直後にWaitForGPU()がGPU完了まで同期しているため、
-        // 次にこのスロットを使い回す時点(kFrameLatencyフレーム後)では対応するフレームの
-        // GPU実行は必ず完了しており、リードバックバッファの内容は確定している
+        // DX12Device::AdvanceToNextFrame()は次フレームの記録を始める前に、kFrameCount
+        // (=2)フレーム前のGPU実行完了をフェンスで保証している。このプロファイラのリング段数
+        // kFrameLatency(=4)はkFrameCountより大きいため、次にこのスロットを使い回す時点
+        // (kFrameLatencyフレーム後)では対応するフレームのGPU実行は必ず完了しており、
+        // リードバックバッファの内容は確定している
         const D3D12_RANGE readRange{
             static_cast<SIZE_T>(slotIndex) * kQueriesPerSlot * sizeof(UINT64),
             static_cast<SIZE_T>(slotIndex + 1) * kQueriesPerSlot * sizeof(UINT64) };
