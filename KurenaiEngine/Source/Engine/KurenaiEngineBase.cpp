@@ -67,6 +67,16 @@ namespace Kurenai
         return m_Window->IsMouseOverWindow();
     }
 
+    bool KurenaiEngineBase::IsMouseButtonDown(MouseButton button) const
+    {
+        return m_Window->IsMouseButtonDown(button);
+    }
+
+    bool KurenaiEngineBase::IsKeyDown(KeyCode key) const
+    {
+        return m_Window->IsKeyDown(key);
+    }
+
     bool KurenaiEngineBase::WasMouseButtonPressed(MouseButton button) const
     {
         return m_Window->WasMouseButtonPressed(button);

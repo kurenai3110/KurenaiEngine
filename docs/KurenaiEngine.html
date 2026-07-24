@@ -708,7 +708,9 @@ assimp経由でglTF/FBX等を読み込み、頂点/インデックスバッフ�
 </p>
 
 <pre><code>bool IsMouseOverWindow() const;                    // カーソルがクライアント領域内にあるか
+bool IsMouseButtonDown(MouseButton button) const;   // 現在押されている状態か(継続的な操作に使う)
 bool WasMouseButtonPressed(MouseButton button) const; // 直前のPumpEvents()中に押された(エッジ検出)か
+bool IsKeyDown(KeyCode key) const;                     // 同上(キー)。WASD移動など「押している間」続く操作に使う
 bool WasKeyPressed(KeyCode key) const;                 // 同上(キー)。オートリピートは無視する
 POINT GetClientMousePosition() const;               // クライアント座標(原点は左上、Y-down)</code></pre>
 
@@ -717,16 +719,34 @@ POINT GetClientMousePosition() const;               // クライアント座標(
 <li><code>KeyCode</code> はWin32仮想キーコード(<code>VK_ESCAPE</code>、<code>'A'</code>〜<code>'Z'</code>など)
 をそのまま使う <code>int</code> のエイリアス。<code>GetAsyncKeyState</code>で使っていたキー定数を
 そのまま流用できる。</li>
-<li><code>Was*Pressed</code>系は「離れた状態から押された状態になった」エッジのみを検出する。
-判定対象の期間は直前の<code>PumpEvents()</code>呼び出し中(1フレームにつき1回呼ぶ想定)。</li>
+<li><code>Is*Down</code>系は「現在押されている状態」を返すレベル状態。WASD移動のような
+「押している間」継続する操作に使う。<code>Was*Pressed</code>系は「離れた状態から押された状態になった」
+エッジのみを検出する。判定対象の期間は直前の<code>PumpEvents()</code>呼び出し中
+(1フレームにつき1回呼ぶ想定)。</li>
 <li><code>GetClientMousePosition</code>が返す座標はWin32標準のクライアント座標(原点は左上、Y-down)。
 <code>KurenaiEngine2D::DrawSprite</code>のワールド座標(原点は左下、Y-up。3.1節参照)とは上下が逆なので、
 スプライト座標と突き合わせる場合は<code>height - y</code>で変換すること。</li>
 <li>これらはいずれも<code>KurenaiEngineBase</code>のメンバなので<code>KurenaiEngine2D</code>/
-<code>KurenaiEngine3D</code>どちらからも呼べる。ただし<code>KurenaiEngine3D::Run()</code>は
-移動・カメラ操作を内部の<code>GetAsyncKeyState</code>ポーリングで完結して処理しているため、
-通常この入力APIを使う必要はない。</li>
+<code>KurenaiEngine3D</code>どちらからも呼べる。<code>KurenaiEngine3D::Run()</code>自身も
+移動(WASD/E/Q)・速度切り替え(Shift)・ImGui表示切り替え(F1)にこのAPI(<code>IsKeyDown</code>/
+<code>WasKeyPressed</code>)を使っており、<code>PostMessage</code>によるキー操作のテスト自動化と
+整合する。ただし右クリックドラッグによる視点回転(マウスルック)だけは意図的に例外で、
+実カーソルの位置取得・固定(<code>GetCursorPos</code>/<code>SetCursorPos</code>)による無限ドラッグを
+実現するため<code>GetAsyncKeyState(VK_RBUTTON)</code>のままにしている。これにより
+<code>PostMessage</code>で<code>WM_RBUTTONDOWN</code>を送っても実カーソルの位置・表示状態には
+一切影響しない(意図しないカーソル操作の経路にならないことを構造的に保証している)。</li>
 <li>複数キー・複数ボタンの同時押しにも対応(それぞれ独立して状態を保持)。マウスホイールは未対応。</li>
+<li><strong>ImGuiパネルの操作</strong>(ボタンクリック等)を<code>PostMessage</code>で行う場合、
+<code>WM_MOUSEMOVE</code> → <code>WM_LBUTTONDOWN</code> → <code>WM_LBUTTONUP</code>の3つを
+<strong>間隔を空けずに連続送信</strong>すること。Dear ImGuiのWin32バックエンド
+(<code>imgui_impl_win32.cpp</code>)は、ウィンドウがフォーカスされている間かつ
+直近に有効なマウス位置追跡が無い場合、実カーソル位置(<code>GetCursorPos</code>)を毎フレーム
+ポーリングして<code>io.MousePos</code>に上書きするフォールバック動作を持つ。さらに
+<code>TrackMouseEvent</code>による<code>WM_MOUSELEAVE</code>検出も実カーソル位置基準のため、
+実カーソルがウィンドウ外にある状態で<code>WM_MOUSEMOVE</code>を送ると、ほぼ即座に(実カーソルの
+位置に基づく)<code>WM_MOUSELEAVE</code>が発生し、次のフレームで実カーソル位置へ上書きされてしまう。
+3メッセージを間隔を空けずに送ることで、この上書きが発生する前に同一フレーム(またはごく近い
+フレーム)内でクリック判定を完了させられる。</li>
 </ul>
 </section>
 

@@ -74,6 +74,10 @@ namespace Kurenai
         // GetAsyncKeyState/GetCursorPosと異なりフォーカスを失った状態では反応せず、PumpEvents()の
         // 呼び出し中に処理されたメッセージのみを反映する
         bool IsMouseOverWindow() const;
+        // 現在押された状態かどうか(WASD移動のような「押している間」継続する操作に使う)
+        bool IsMouseButtonDown(MouseButton button) const;
+        bool IsKeyDown(KeyCode key) const;
+        // 直前のPumpEvents()呼び出し中に押された(エッジ検出)か
         bool WasMouseButtonPressed(MouseButton button) const;
         bool WasKeyPressed(KeyCode key) const;
         POINT GetClientMousePosition() const;

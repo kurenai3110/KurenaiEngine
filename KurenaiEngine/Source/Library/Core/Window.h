@@ -43,8 +43,12 @@ namespace Kurenai::Core
 
         // カーソルがクライアント領域内にあるか
         bool IsMouseOverWindow() const { return m_MouseInClient; }
+        // 現在ボタンが押された状態かどうか(WASD移動のような「押している間」継続する操作に使う)
+        bool IsMouseButtonDown(MouseButton button) const;
         // 直前のPumpMessages()呼び出し中にボタンが押された(離れた状態から押された状態になった)か
         bool WasMouseButtonPressed(MouseButton button) const;
+        // 現在キーが押された状態かどうか(WASD移動のような「押している間」継続する操作に使う)
+        bool IsKeyDown(KeyCode key) const;
         // 直前のPumpMessages()呼び出し中にキーが押された(離れた状態から押された状態になった)か。
         // オートリピートによる連続したWM_KEYDOWNは無視する
         bool WasKeyPressed(KeyCode key) const;

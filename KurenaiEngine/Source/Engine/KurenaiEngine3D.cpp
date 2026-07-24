@@ -919,6 +919,15 @@ namespace Kurenai
 
     void KurenaiEngine3D::UpdateMouseLook()
     {
+        // このメソッドだけは意図的にGetAsyncKeyState/GetCursorPos/SetCursorPosを使い続けている。
+        // カーソルを画面中央へ強制的に固定し続ける(SetCursorPos)ことで無限ドラッグを実現しており、
+        // これは実カーソルを動かす・隠す操作そのものであるため、メッセージベース化(PostMessageで
+        // WM_RBUTTONDOWN/WM_MOUSEMOVEを送るだけで発火する形)にしてしまうと、動作確認用の
+        // PostMessage送信が実デスクトップのカーソルを意図せず動かし・隠してしまう経路になる。
+        // GetAsyncKeyState(VK_RBUTTON)はPostMessageでは変化しない実ハードウェアの状態のため、
+        // このままにしておくことでPostMessageによる動作確認が誤ってカーソル操作を引き起こさない
+        // (=実カーソル・他ウィンドウに影響を与えない)ことを構造的に保証している
+        //
         // GetAsyncKeyStateはウィンドウフォーカスに関係なくグローバルなキー状態を返すため、
         // フォアグラウンドウィンドウチェックがないとデスクトップ上の右クリックでも
         // カーソルがウィンドウ中央へ強制移動してしまう
@@ -959,7 +968,9 @@ namespace Kurenai
 
     void KurenaiEngine3D::UpdateMovement(float deltaTime)
     {
-        const float moveSpeed = (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 20.0f : 5.0f;
+        // メッセージベースの入力API(IsKeyDown)を使う。GetAsyncKeyStateと異なりウィンドウが
+        // フォーカスを失っている間は反応せず、PostMessageによるテスト自動化とも整合する
+        const float moveSpeed = IsKeyDown(VK_SHIFT) ? 20.0f : 5.0f;
         const float moveAmount = moveSpeed * deltaTime;
 
         const DirectX::XMFLOAT3 forward = m_Camera.GetForward();
@@ -973,12 +984,12 @@ namespace Kurenai
             move.z += v.z * sign;
         };
 
-        if (GetAsyncKeyState('W') & 0x8000) add(forward, 1.0f);
-        if (GetAsyncKeyState('S') & 0x8000) add(forward, -1.0f);
-        if (GetAsyncKeyState('D') & 0x8000) add(right, 1.0f);
-        if (GetAsyncKeyState('A') & 0x8000) add(right, -1.0f);
-        if (GetAsyncKeyState('E') & 0x8000) move.y += 1.0f;
-        if (GetAsyncKeyState('Q') & 0x8000) move.y -= 1.0f;
+        if (IsKeyDown('W')) add(forward, 1.0f);
+        if (IsKeyDown('S')) add(forward, -1.0f);
+        if (IsKeyDown('D')) add(right, 1.0f);
+        if (IsKeyDown('A')) add(right, -1.0f);
+        if (IsKeyDown('E')) move.y += 1.0f;
+        if (IsKeyDown('Q')) move.y -= 1.0f;
 
         DirectX::XMVECTOR moveVec = DirectX::XMLoadFloat3(&move);
         if (DirectX::XMVectorGetX(DirectX::XMVector3LengthSq(moveVec)) > 0.0001f)
@@ -992,13 +1003,12 @@ namespace Kurenai
 
     void KurenaiEngine3D::UpdateImGuiToggle()
     {
-        const bool isForeground = GetForegroundWindow() == m_Window->GetHandle();
-        const bool isDown = isForeground && (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
-        if (isDown && !m_ImGuiToggleKeyWasDown)
+        // WasKeyPressedはウィンドウメッセージ由来のエッジ検出を内蔵しているため、
+        // 前フレームの押下状態を自前で保持する必要がない
+        if (WasKeyPressed(VK_F1))
         {
             m_ImGuiVisible = !m_ImGuiVisible;
         }
-        m_ImGuiToggleKeyWasDown = isDown;
     }
 
     void KurenaiEngine3D::Update(float deltaTime)

@@ -92,9 +92,19 @@ namespace Kurenai::Core
         }
     }
 
+    bool Window::IsMouseButtonDown(MouseButton button) const
+    {
+        return m_MouseButtonDown[static_cast<size_t>(button)];
+    }
+
     bool Window::WasMouseButtonPressed(MouseButton button) const
     {
         return m_MouseButtonPressedEdge[static_cast<size_t>(button)];
+    }
+
+    bool Window::IsKeyDown(KeyCode key) const
+    {
+        return key >= 0 && key < 256 && m_KeyDown[key];
     }
 
     bool Window::WasKeyPressed(KeyCode key) const

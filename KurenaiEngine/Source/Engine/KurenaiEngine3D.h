@@ -225,10 +225,9 @@ namespace Kurenai
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};
 
-        // F1キーでImGuiの表示/非表示を切り替える(GetAsyncKeyStateはキーの押下状態を毎フレーム返すため、
-        // 押した瞬間だけ切り替えるには前フレームの状態と比較するエッジ検出が必要)
+        // F1キーでImGuiの表示/非表示を切り替える(WasKeyPressedがエッジ検出を内蔵しているため、
+        // 前フレームの押下状態を保持するメンバは不要)
         bool m_ImGuiVisible = true;
-        bool m_ImGuiToggleKeyWasDown = false;
     };
 }
 
