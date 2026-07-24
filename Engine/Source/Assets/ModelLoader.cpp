@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -238,6 +239,29 @@ namespace Kurenai::Assets
             return s;
         }
 
+        // メッシュをマテリアル(3枚のテクスチャの組み合わせ)単位でまとめておく。
+        // assimpのシーングラフ巡回順のままだと同じマテリアルのメッシュが離れて並びがちで、
+        // DX12バックエンドの「直前の描画と同じテクスチャならSRVテーブルを使い回す」最適化
+        // (DX12CommandList::FlushPendingSrvWrites)がヒットしにくいため、読み込み後にソートしておく
+        void SortMeshesByMaterial(Model& model)
+        {
+            std::sort(
+                model.Meshes.begin(), model.Meshes.end(),
+                [](const Mesh& a, const Mesh& b)
+                {
+                    const std::less<RHI::IRHITexture*> less;
+                    if (a.BaseColorTexture != b.BaseColorTexture)
+                    {
+                        return less(a.BaseColorTexture, b.BaseColorTexture);
+                    }
+                    if (a.NormalTexture != b.NormalTexture)
+                    {
+                        return less(a.NormalTexture, b.NormalTexture);
+                    }
+                    return less(a.MetallicRoughnessTexture, b.MetallicRoughnessTexture);
+                });
+        }
+
         // キャッシュから読み込む。ソースファイルの更新日時/サイズが一致しない、
         // またはキャッシュが存在しない/読み込み中に壊れていることが分かった場合はfalseを返し、
         // 呼び出し側はassimp経由の通常の読み込みにフォールバックする
@@ -334,6 +358,7 @@ namespace Kurenai::Assets
                     model.Meshes.push_back(std::move(outMesh));
                 }
 
+                SortMeshesByMaterial(model);
                 outModel = std::move(model);
                 return true;
             }
@@ -571,6 +596,10 @@ namespace Kurenai::Assets
             cacheOut.seekp(0);
             cacheOut.write(reinterpret_cast<const char*>(&header), sizeof(header));
         }
+
+        // キャッシュファイルへはシーングラフ巡回順のまま書き出し済みのため、ソートは
+        // メモリ上のモデルに対してのみ行う(キャッシュから読み込む側はTryLoadModelFromCache側で行う)
+        SortMeshesByMaterial(model);
 
         return model;
     }
