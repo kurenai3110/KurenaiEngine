@@ -368,7 +368,8 @@ Bistro Interior / Bistro Interior (Wine Cellar) / White Surface Test)。カス�
 void PumpEvents();          // メッセージポンプ。毎フレーム呼ぶ
 void Close();               // プログラムからウィンドウを閉じる(Escキー等に割り当てるとよい)
 uint32_t GetWidth() const;
-uint32_t GetHeight() const;</code></pre>
+uint32_t GetHeight() const;
+HWND GetWindowHandle() const; // 生成したウィンドウのHWND(ScreenToClient等、Win32入力処理に使う)</code></pre>
 
 <h3>3.1 座標系</h3>
 <p>

@@ -55,6 +55,11 @@ namespace Kurenai
         return m_Window->GetHeight();
     }
 
+    HWND KurenaiEngineBase::GetWindowHandle() const
+    {
+        return m_Window->GetHandle();
+    }
+
     RHI::IRHICommandList* KurenaiEngineBase::GetCommandList() const
     {
         return m_Device->GetImmediateCommandList();

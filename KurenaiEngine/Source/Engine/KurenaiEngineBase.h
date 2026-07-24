@@ -36,6 +36,10 @@ namespace Kurenai
         uint32_t GetWidth() const;
         uint32_t GetHeight() const;
 
+        // 生成したウィンドウのHWND。GetCursorPos+ScreenToClient等、アプリ側で一般的な
+        // Win32入力処理を行う際に必要となるため公開する
+        HWND GetWindowHandle() const;
+
     protected:
         KurenaiEngineBase(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api);
 
