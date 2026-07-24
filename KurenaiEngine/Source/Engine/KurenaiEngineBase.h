@@ -40,6 +40,14 @@ namespace Kurenai
         // Win32入力処理を行う際に必要となるため公開する
         HWND GetWindowHandle() const;
 
+        // ウィンドウスコープの入力状態(WM_MOUSEMOVE/WM_LBUTTONDOWN等のメッセージから更新される)。
+        // GetAsyncKeyState/GetCursorPosと異なりフォーカスを失った状態では反応せず、PumpEvents()の
+        // 呼び出し中に処理されたメッセージのみを反映する
+        bool IsMouseOverWindow() const;
+        bool WasMouseButtonPressed(MouseButton button) const;
+        bool WasKeyPressed(KeyCode key) const;
+        POINT GetClientMousePosition() const;
+
     protected:
         KurenaiEngineBase(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api);
 

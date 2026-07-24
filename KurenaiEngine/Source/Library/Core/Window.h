@@ -37,6 +37,20 @@ namespace Kurenai::Core
         void SetResizeCallback(ResizeCallback callback) { m_ResizeCallback = std::move(callback); }
         void SetTitle(const std::wstring& title);
 
+        // 以下はWM_MOUSEMOVE/WM_LBUTTONDOWN等のウィンドウメッセージから状態を更新する
+        // (GetAsyncKeyState/GetCursorPosと違いウィンドウスコープなので、フォーカスを失っていれば
+        // 反応しない。PostMessageによるテスト自動化とも整合する)
+
+        // カーソルがクライアント領域内にあるか
+        bool IsMouseOverWindow() const { return m_MouseInClient; }
+        // 直前のPumpMessages()呼び出し中にボタンが押された(離れた状態から押された状態になった)か
+        bool WasMouseButtonPressed(MouseButton button) const;
+        // 直前のPumpMessages()呼び出し中にキーが押された(離れた状態から押された状態になった)か。
+        // オートリピートによる連続したWM_KEYDOWNは無視する
+        bool WasKeyPressed(KeyCode key) const;
+        // クライアント座標(原点は左上、Y-down。Win32の標準的な座標系)
+        POINT GetClientMousePosition() const { return m_MousePosition; }
+
     private:
         static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
         LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
@@ -46,6 +60,14 @@ namespace Kurenai::Core
         uint32_t m_Height;
         bool m_ShouldClose = false;
         ResizeCallback m_ResizeCallback;
+
+        bool m_MouseInClient = false;
+        bool m_TrackingMouseLeave = false;
+        POINT m_MousePosition{};
+        bool m_MouseButtonDown[3]{};
+        bool m_MouseButtonPressedEdge[3]{};
+        bool m_KeyDown[256]{};
+        bool m_KeyPressedEdge[256]{};
     };
 }
 

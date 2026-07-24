@@ -60,6 +60,26 @@ namespace Kurenai
         return m_Window->GetHandle();
     }
 
+    bool KurenaiEngineBase::IsMouseOverWindow() const
+    {
+        return m_Window->IsMouseOverWindow();
+    }
+
+    bool KurenaiEngineBase::WasMouseButtonPressed(MouseButton button) const
+    {
+        return m_Window->WasMouseButtonPressed(button);
+    }
+
+    bool KurenaiEngineBase::WasKeyPressed(KeyCode key) const
+    {
+        return m_Window->WasKeyPressed(key);
+    }
+
+    POINT KurenaiEngineBase::GetClientMousePosition() const
+    {
+        return m_Window->GetClientMousePosition();
+    }
+
     RHI::IRHICommandList* KurenaiEngineBase::GetCommandList() const
     {
         return m_Device->GetImmediateCommandList();

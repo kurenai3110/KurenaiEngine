@@ -18,4 +18,15 @@ namespace Kurenai
         DX11,
         DX12,
     };
+
+    enum class MouseButton
+    {
+        Left,
+        Right,
+        Middle,
+    };
+
+    // Win32仮想キーコード(VK_ESCAPE, 'A'〜'Z'など)をそのまま使う。
+    // GetAsyncKeyStateから移行する際にキー定数をそのまま流用できるようにするため
+    using KeyCode = int;
 }

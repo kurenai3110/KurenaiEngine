@@ -1,7 +1,9 @@
 #include "Window.h"
 
 #include <backends/imgui_impl_win32.h>
+#include <windowsx.h>
 
+#include <algorithm>
 #include <stdexcept>
 
 // imgui_impl_win32.hは<windows.h>への依存を避けるためこの宣言を#if 0でコメントアウトしており、
@@ -73,6 +75,11 @@ namespace Kurenai::Core
 
     void Window::PumpMessages()
     {
+        // WasKeyPressed/WasMouseButtonPressedは「このPumpMessages呼び出し中に起きた押下」を返すため、
+        // メッセージ処理の前にエッジフラグをクリアする(呼び出し側は1フレームにつき1回呼ぶ想定)
+        std::fill(std::begin(m_KeyPressedEdge), std::end(m_KeyPressedEdge), false);
+        std::fill(std::begin(m_MouseButtonPressedEdge), std::end(m_MouseButtonPressedEdge), false);
+
         MSG msg{};
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
         {
@@ -83,6 +90,16 @@ namespace Kurenai::Core
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+
+    bool Window::WasMouseButtonPressed(MouseButton button) const
+    {
+        return m_MouseButtonPressedEdge[static_cast<size_t>(button)];
+    }
+
+    bool Window::WasKeyPressed(KeyCode key) const
+    {
+        return key >= 0 && key < 256 && m_KeyPressedEdge[key];
     }
 
     LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -136,6 +153,81 @@ namespace Kurenai::Core
                 }
             }
             return 0;
+
+        case WM_MOUSEMOVE:
+            m_MousePosition.x = GET_X_LPARAM(lParam);
+            m_MousePosition.y = GET_Y_LPARAM(lParam);
+            if (!m_TrackingMouseLeave)
+            {
+                // WM_MOUSELEAVEはデフォルトでは発生しないため、TrackMouseEventで明示的に要求する。
+                // このフラグを立てておかないとWM_MOUSEMOVEのたびに再登録してしまう
+                TRACKMOUSEEVENT trackEvent{ sizeof(TRACKMOUSEEVENT), TME_LEAVE, m_Handle, 0 };
+                TrackMouseEvent(&trackEvent);
+                m_TrackingMouseLeave = true;
+            }
+            m_MouseInClient = true;
+            return 0;
+
+        case WM_MOUSELEAVE:
+            m_MouseInClient = false;
+            m_TrackingMouseLeave = false;
+            return 0;
+
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        {
+            const size_t index = message == WM_LBUTTONDOWN ? 0 : message == WM_RBUTTONDOWN ? 1 : 2;
+            if (!m_MouseButtonDown[index])
+            {
+                m_MouseButtonPressedEdge[index] = true;
+            }
+            m_MouseButtonDown[index] = true;
+            return 0;
+        }
+
+        case WM_LBUTTONUP:
+        case WM_RBUTTONUP:
+        case WM_MBUTTONUP:
+        {
+            const size_t index = message == WM_LBUTTONUP ? 0 : message == WM_RBUTTONUP ? 1 : 2;
+            m_MouseButtonDown[index] = false;
+            return 0;
+        }
+
+        case WM_KEYDOWN:
+        {
+            const KeyCode key = static_cast<KeyCode>(wParam);
+            if (key >= 0 && key < 256)
+            {
+                // bit30(前回のキー状態)が立っている場合はオートリピートによる再送のため、
+                // エッジ検出(WasKeyPressed)には反映しない
+                const bool isRepeat = (lParam & (1 << 30)) != 0;
+                if (!isRepeat)
+                {
+                    m_KeyPressedEdge[key] = true;
+                }
+                m_KeyDown[key] = true;
+            }
+            return 0;
+        }
+
+        case WM_KEYUP:
+        {
+            const KeyCode key = static_cast<KeyCode>(wParam);
+            if (key >= 0 && key < 256)
+            {
+                m_KeyDown[key] = false;
+            }
+            return 0;
+        }
+
+        case WM_KILLFOCUS:
+            // フォーカスを失った時点のキー/ボタン押下状態を持ち越すと、フォーカスが戻った後も
+            // 実際には離されているキーが押されたまま扱われてしまうため、ここで全てクリアする
+            std::fill(std::begin(m_KeyDown), std::end(m_KeyDown), false);
+            std::fill(std::begin(m_MouseButtonDown), std::end(m_MouseButtonDown), false);
+            return DefWindowProcW(m_Handle, message, wParam, lParam);
 
         default:
             return DefWindowProcW(m_Handle, message, wParam, lParam);
