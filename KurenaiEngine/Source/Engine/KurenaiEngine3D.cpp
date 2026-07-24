@@ -8,6 +8,7 @@
 #include <random>
 
 #include "Assets/ModelLoader.h"
+#include "Core/RenderGraph.h"
 
 namespace Kurenai
 {
@@ -1067,261 +1068,268 @@ namespace Kurenai
         constants.AmbientColor = sunLighting.Ambient;
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
-        // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度) ---
-        m_GPUProfiler->BeginScope("Shadow");
-        m_CPUProfiler.BeginScope("Shadow");
+        // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
+        // トランジェントリソースの確保は行わず、既存の永続確保済みテクスチャ(G-Buffer・SceneColor等)を
+        // そのまま読み書きする(詳細はRenderGraph.h参照)
+        Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
+
         RHI::Viewport shadowViewport;
         shadowViewport.Width = static_cast<float>(kShadowMapSize);
         shadowViewport.Height = static_cast<float>(kShadowMapSize);
-        commandList->SetViewport(shadowViewport);
 
-        commandList->SetRenderTargets(nullptr, 0, m_ShadowMap.get());
-        // 深度1.0(最遠)にクリアしておく。無効時はこの後の描画をスキップするため、
-        // シェーダー側は深度比較で常に「影なし」と判定する(ComputeShadowFactor参照)
-        commandList->ClearDepth(1.0f);
-
-        if (m_ShadowEnabled)
-        {
-            commandList->SetPipelineState(m_ShadowPipelineState.get());
-            commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-
-            for (const auto& mesh : m_Model.Meshes)
-            {
-                commandList->SetVertexBuffer(mesh.VertexBuffer.get());
-                commandList->SetIndexBuffer(mesh.IndexBuffer.get());
-                commandList->DrawIndexed(mesh.IndexCount, 0, 0);
-            }
-        }
-        m_CPUProfiler.EndScope(); // Shadow
-        m_GPUProfiler->EndScope(); // Shadow
-
-        // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
-        m_GPUProfiler->BeginScope("GBuffer");
-        m_CPUProfiler.BeginScope("GBuffer");
         RHI::Viewport gbufferViewport;
         gbufferViewport.Width = static_cast<float>(m_RenderWidth);
         gbufferViewport.Height = static_cast<float>(m_RenderHeight);
-        commandList->SetViewport(gbufferViewport);
 
-        RHI::IRHITexture* gbufferTargets[] = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get() };
-        commandList->SetRenderTargets(gbufferTargets, 3, m_GBufferDepth.get());
-        commandList->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
-        // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(GBuffer.hlsl参照)
-        commandList->ClearDepth(0.0f);
+        // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度) ---
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "Shadow",
+            .DepthTarget = m_ShadowMap.get(),
+            .Execute = [this, &shadowViewport](RHI::IRHICommandList* cmd)
+            {
+                cmd->SetViewport(shadowViewport);
+                // 深度1.0(最遠)にクリアしておく。無効時はこの後の描画をスキップするため、
+                // シェーダー側は深度比較で常に「影なし」と判定する(ComputeShadowFactor参照)
+                cmd->ClearDepth(1.0f);
 
-        commandList->SetPipelineState(m_GBufferPipelineState.get());
-        commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-        commandList->SetSampler(0, m_Sampler.get());
+                if (m_ShadowEnabled)
+                {
+                    cmd->SetPipelineState(m_ShadowPipelineState.get());
+                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
 
-        for (const auto& mesh : m_Model.Meshes)
-        {
-            MaterialConstants materialConstants{};
-            materialConstants.MetallicFactor = mesh.MetallicFactor;
-            materialConstants.RoughnessFactor = mesh.RoughnessFactor;
-            commandList->UpdateBuffer(m_MaterialConstantBuffer.get(), &materialConstants, sizeof(materialConstants));
-            commandList->SetConstantBuffer(1, m_MaterialConstantBuffer.get());
+                    for (const auto& mesh : m_Model.Meshes)
+                    {
+                        cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                        cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                    }
+                }
+            },
+        });
 
-            commandList->SetVertexBuffer(mesh.VertexBuffer.get());
-            commandList->SetIndexBuffer(mesh.IndexBuffer.get());
-            commandList->SetTexture(0, mesh.BaseColorTexture);
-            commandList->SetTexture(1, mesh.NormalTexture);
-            commandList->SetTexture(2, mesh.MetallicRoughnessTexture);
-            commandList->DrawIndexed(mesh.IndexCount, 0, 0);
-        }
-        m_CPUProfiler.EndScope(); // GBuffer
-        m_GPUProfiler->EndScope(); // GBuffer
+        // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "GBuffer",
+            .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get() },
+            .DepthTarget = m_GBufferDepth.get(),
+            .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+            {
+                cmd->SetViewport(gbufferViewport);
+                cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
+                // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(GBuffer.hlsl参照)
+                cmd->ClearDepth(0.0f);
+
+                cmd->SetPipelineState(m_GBufferPipelineState.get());
+                cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                cmd->SetSampler(0, m_Sampler.get());
+
+                for (const auto& mesh : m_Model.Meshes)
+                {
+                    MaterialConstants materialConstants{};
+                    materialConstants.MetallicFactor = mesh.MetallicFactor;
+                    materialConstants.RoughnessFactor = mesh.RoughnessFactor;
+                    cmd->UpdateBuffer(m_MaterialConstantBuffer.get(), &materialConstants, sizeof(materialConstants));
+                    cmd->SetConstantBuffer(1, m_MaterialConstantBuffer.get());
+
+                    cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                    cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                    cmd->SetTexture(0, mesh.BaseColorTexture);
+                    cmd->SetTexture(1, mesh.NormalTexture);
+                    cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
+                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                }
+            },
+        });
 
         // --- Hi-Zミップチェーン構築パス: G-Buffer深度から1x1までのミップチェーンをコンピュートシェーダーで
         //     構築する(現時点では利用箇所は無く、デバッグ表示専用) ---
-        m_GPUProfiler->BeginScope("HiZ");
-        m_CPUProfiler.BeginScope("HiZ");
-        {
-            // GBufferパスでDSVとしてバインドされたままのG-Buffer深度をコンピュートシェーダーからSRVとして
-            // 読むため、先にOMのレンダーターゲット/深度バインドを解除しておく(DX11はDSVバインド中の
-            // リソースをCSで同時に読もうとするとハザードとして扱われ、ドライバが警告を出すため)
-            commandList->SetRenderTargets(nullptr, 0, nullptr);
-
-            HiZConstants hizConstants{};
-            hizConstants.SrcSize = { m_RenderWidth, m_RenderHeight };
-            hizConstants.DstSize = { m_RenderWidth, m_RenderHeight };
-            commandList->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
-
-            commandList->SetComputePipelineState(m_HiZCopyPipelineState.get());
-            commandList->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
-            commandList->SetComputeTexture(0, m_GBufferDepth.get());
-            commandList->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), 0);
-            commandList->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
-
-            commandList->SetComputePipelineState(m_HiZDownsamplePipelineState.get());
-            uint32_t hizSrcWidth = m_RenderWidth;
-            uint32_t hizSrcHeight = m_RenderHeight;
-            for (uint32_t mip = 1; mip < m_HiZMipLevels; ++mip)
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "HiZ",
+            .Reads = { m_GBufferDepth.get() },
+            .Writes = { m_HiZTexture.get() },
+            .Execute = [this](RHI::IRHICommandList* cmd)
             {
-                const uint32_t hizDstWidth = std::max(1u, hizSrcWidth / 2);
-                const uint32_t hizDstHeight = std::max(1u, hizSrcHeight / 2);
+                HiZConstants hizConstants{};
+                hizConstants.SrcSize = { m_RenderWidth, m_RenderHeight };
+                hizConstants.DstSize = { m_RenderWidth, m_RenderHeight };
+                cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
 
-                hizConstants.SrcSize = { hizSrcWidth, hizSrcHeight };
-                hizConstants.DstSize = { hizDstWidth, hizDstHeight };
-                commandList->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
-                commandList->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
-                commandList->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), mip - 1);
-                commandList->SetComputeUnorderedAccessTexture(1, m_HiZTexture.get(), mip);
-                commandList->Dispatch((hizDstWidth + 7) / 8, (hizDstHeight + 7) / 8, 1);
+                cmd->SetComputePipelineState(m_HiZCopyPipelineState.get());
+                cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
+                cmd->SetComputeTexture(0, m_GBufferDepth.get());
+                cmd->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), 0);
+                cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
 
-                hizSrcWidth = hizDstWidth;
-                hizSrcHeight = hizDstHeight;
-            }
-        }
-        m_CPUProfiler.EndScope(); // HiZ
-        m_GPUProfiler->EndScope(); // HiZ
+                cmd->SetComputePipelineState(m_HiZDownsamplePipelineState.get());
+                uint32_t hizSrcWidth = m_RenderWidth;
+                uint32_t hizSrcHeight = m_RenderHeight;
+                for (uint32_t mip = 1; mip < m_HiZMipLevels; ++mip)
+                {
+                    const uint32_t hizDstWidth = std::max(1u, hizSrcWidth / 2);
+                    const uint32_t hizDstHeight = std::max(1u, hizSrcHeight / 2);
+
+                    hizConstants.SrcSize = { hizSrcWidth, hizSrcHeight };
+                    hizConstants.DstSize = { hizDstWidth, hizDstHeight };
+                    cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
+                    cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), mip - 1);
+                    cmd->SetComputeUnorderedAccessTexture(1, m_HiZTexture.get(), mip);
+                    cmd->Dispatch((hizDstWidth + 7) / 8, (hizDstHeight + 7) / 8, 1);
+
+                    hizSrcWidth = hizDstWidth;
+                    hizSrcHeight = hizDstHeight;
+                }
+            },
+        });
 
         // --- 直接光パス: G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         //     計算しHDRで書き出す(常に指定した内部解像度)。DeferredLighting/SSILの両方から読まれる ---
-        m_GPUProfiler->BeginScope("DirectLight");
-        m_CPUProfiler.BeginScope("DirectLight");
-        RHI::IRHITexture* directLightTarget[] = { m_DirectLightTexture.get() };
-        commandList->SetRenderTargets(directLightTarget, 1, nullptr);
-        commandList->SetViewport(gbufferViewport);
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "DirectLight",
+            .Reads = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_ShadowMap.get() },
+            .RenderTargets = { m_DirectLightTexture.get() },
+            .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+            {
+                cmd->SetViewport(gbufferViewport);
 
-        commandList->SetPipelineState(m_DirectLightPipelineState.get());
-        commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-        commandList->SetSampler(0, m_Sampler.get());
-        commandList->SetTexture(0, m_GBufferAlbedo.get());
-        commandList->SetTexture(1, m_GBufferNormal.get());
-        commandList->SetTexture(2, m_GBufferMaterial.get());
-        commandList->SetTexture(3, m_GBufferDepth.get());
-        commandList->SetTexture(4, m_ShadowMap.get());
-        commandList->Draw(3, 0);
-        m_CPUProfiler.EndScope(); // DirectLight
-        m_GPUProfiler->EndScope(); // DirectLight
+                cmd->SetPipelineState(m_DirectLightPipelineState.get());
+                cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                cmd->SetSampler(0, m_Sampler.get());
+                cmd->SetTexture(0, m_GBufferAlbedo.get());
+                cmd->SetTexture(1, m_GBufferNormal.get());
+                cmd->SetTexture(2, m_GBufferMaterial.get());
+                cmd->SetTexture(3, m_GBufferDepth.get());
+                cmd->SetTexture(4, m_ShadowMap.get());
+                cmd->Draw(3, 0);
+            },
+        });
 
         // --- AO/GIパス: 選択中の手法(SSAO or SSIL)でG-Bufferから遮蔽率(・間接拡散光)を計算し、
         //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどちらもrgb=間接拡散光, a=遮蔽率で共通 ---
         if (m_AOEnabled)
         {
-            m_GPUProfiler->BeginScope("AO");
-            m_CPUProfiler.BeginScope("AO");
-            commandList->SetViewport(gbufferViewport);
-            commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-            commandList->SetSampler(0, m_Sampler.get());
+            RHI::IRHITexture* aoRawTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAORawTexture.get() : m_SSILRawTexture.get();
+            RHI::IRHITexture* aoBlurredTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAOTexture.get() : m_SSILTexture.get();
 
-            RHI::IRHITexture* aoRawTexture = nullptr;
-            RHI::IRHITexture* aoBlurredTexture = nullptr;
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "AO",
+                .Reads = (m_AOTechnique == AOTechnique::SSAO)
+                    ? std::vector<RHI::IRHITexture*>{ m_GBufferNormal.get(), m_GBufferDepth.get() }
+                    : std::vector<RHI::IRHITexture*>{ m_GBufferNormal.get(), m_GBufferDepth.get(), m_DirectLightTexture.get() },
+                .RenderTargets = { aoRawTexture },
+                .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetViewport(gbufferViewport);
+                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetSampler(0, m_Sampler.get());
 
-            if (m_AOTechnique == AOTechnique::SSAO)
-            {
-                SSAOConstants ssaoConstants{};
-                std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
-                ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
-                commandList->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
+                    if (m_AOTechnique == AOTechnique::SSAO)
+                    {
+                        SSAOConstants ssaoConstants{};
+                        std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
+                        ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
+                        cmd->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
 
-                RHI::IRHITexture* ssaoRawTarget[] = { m_SSAORawTexture.get() };
-                commandList->SetRenderTargets(ssaoRawTarget, 1, nullptr);
+                        cmd->SetPipelineState(m_SSAOPipelineState.get());
+                        cmd->SetConstantBuffer(1, m_SSAOConstantBuffer.get());
+                        cmd->SetTexture(0, m_GBufferNormal.get());
+                        cmd->SetTexture(1, m_GBufferDepth.get());
+                        cmd->Draw(3, 0);
+                    }
+                    else
+                    {
+                        SSILConstants ssilConstants{};
+                        ssilConstants.Params0 = { m_SSILRadius, m_SSILThickness, m_SSILIntensity, m_SSILPower };
+                        ssilConstants.Params1 = { m_SSILSliceCount, m_SSILStepCount, 0u, 0u };
+                        cmd->UpdateBuffer(m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
 
-                commandList->SetPipelineState(m_SSAOPipelineState.get());
-                commandList->SetConstantBuffer(1, m_SSAOConstantBuffer.get());
-                commandList->SetTexture(0, m_GBufferNormal.get());
-                commandList->SetTexture(1, m_GBufferDepth.get());
-                commandList->Draw(3, 0);
-
-                aoRawTexture = m_SSAORawTexture.get();
-                aoBlurredTexture = m_SSAOTexture.get();
-            }
-            else
-            {
-                SSILConstants ssilConstants{};
-                ssilConstants.Params0 = { m_SSILRadius, m_SSILThickness, m_SSILIntensity, m_SSILPower };
-                ssilConstants.Params1 = { m_SSILSliceCount, m_SSILStepCount, 0u, 0u };
-                commandList->UpdateBuffer(m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
-
-                RHI::IRHITexture* ssilRawTarget[] = { m_SSILRawTexture.get() };
-                commandList->SetRenderTargets(ssilRawTarget, 1, nullptr);
-
-                commandList->SetPipelineState(m_SSILPipelineState.get());
-                commandList->SetConstantBuffer(1, m_SSILConstantBuffer.get());
-                commandList->SetTexture(0, m_GBufferNormal.get());
-                commandList->SetTexture(1, m_GBufferDepth.get());
-                commandList->SetTexture(2, m_DirectLightTexture.get());
-                commandList->Draw(3, 0);
-
-                aoRawTexture = m_SSILRawTexture.get();
-                aoBlurredTexture = m_SSILTexture.get();
-            }
-            m_CPUProfiler.EndScope(); // AO
-            m_GPUProfiler->EndScope(); // AO
+                        cmd->SetPipelineState(m_SSILPipelineState.get());
+                        cmd->SetConstantBuffer(1, m_SSILConstantBuffer.get());
+                        cmd->SetTexture(0, m_GBufferNormal.get());
+                        cmd->SetTexture(1, m_GBufferDepth.get());
+                        cmd->SetTexture(2, m_DirectLightTexture.get());
+                        cmd->Draw(3, 0);
+                    }
+                },
+            });
 
             // ブラーパス: 遮蔽率・間接拡散光のタイル状ノイズをボックスブラーで均す(SSAO/SSIL共通シェーダ)
-            m_GPUProfiler->BeginScope("AOBlur");
-            m_CPUProfiler.BeginScope("AOBlur");
-            RHI::IRHITexture* aoBlurTarget[] = { aoBlurredTexture };
-            commandList->SetRenderTargets(aoBlurTarget, 1, nullptr);
-            commandList->SetPipelineState(m_AOBlurPipelineState.get());
-            commandList->SetTexture(0, aoRawTexture);
-            commandList->Draw(3, 0);
-            m_CPUProfiler.EndScope(); // AOBlur
-            m_GPUProfiler->EndScope(); // AOBlur
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "AOBlur",
+                .Reads = { aoRawTexture },
+                .RenderTargets = { aoBlurredTexture },
+                .Execute = [this, &gbufferViewport, aoRawTexture](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetViewport(gbufferViewport);
+                    cmd->SetPipelineState(m_AOBlurPipelineState.get());
+                    cmd->SetTexture(0, aoRawTexture);
+                    cmd->Draw(3, 0);
+                },
+            });
         }
 
-        // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
-        m_GPUProfiler->BeginScope("Lighting");
-        m_CPUProfiler.BeginScope("Lighting");
-        RHI::IRHITexture* sceneColorTarget[] = { m_SceneColor.get() };
-        commandList->SetRenderTargets(sceneColorTarget, 1, nullptr);
-        commandList->SetViewport(gbufferViewport);
-        // 深度テストに失敗した(=何も描かれていない)ピクセル用の背景色。discardされた箇所に前フレームのデータが
-        // 残らないよう、フルスクリーン三角形を描く前に明示的にクリアしておく
-        commandList->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
-
-        commandList->SetPipelineState(m_LightingPipelineState.get());
-        commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-        commandList->SetSampler(0, m_Sampler.get());
-        commandList->SetTexture(0, m_GBufferAlbedo.get());
-        commandList->SetTexture(1, m_DirectLightTexture.get());
-        commandList->SetTexture(2, m_GBufferMaterial.get());
-        commandList->SetTexture(3, m_GBufferDepth.get());
-        commandList->SetTexture(4, m_SkyboxTexture.get());
-        RHI::IRHITexture* activeAOTexture = m_AODisabledTexture.get();
         // デバッグ表示(ブラー前確認用)のため、ブラー前の生バッファへの参照も別途保持しておく
+        RHI::IRHITexture* activeAOTexture = m_AODisabledTexture.get();
         RHI::IRHITexture* activeAORawTexture = m_AODisabledTexture.get();
         if (m_AOEnabled)
         {
             activeAOTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAOTexture.get() : m_SSILTexture.get();
             activeAORawTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAORawTexture.get() : m_SSILRawTexture.get();
         }
-        commandList->SetTexture(5, activeAOTexture);
-        commandList->Draw(3, 0);
-        m_CPUProfiler.EndScope(); // Lighting
-        m_GPUProfiler->EndScope(); // Lighting
+
+        // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "Lighting",
+            .Reads = { m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_SkyboxTexture.get(), activeAOTexture },
+            .RenderTargets = { m_SceneColor.get() },
+            .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
+            {
+                cmd->SetViewport(gbufferViewport);
+                // 深度テストに失敗した(=何も描かれていない)ピクセル用の背景色。discardされた箇所に前フレームのデータが
+                // 残らないよう、フルスクリーン三角形を描く前に明示的にクリアしておく
+                cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
+
+                cmd->SetPipelineState(m_LightingPipelineState.get());
+                cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                cmd->SetSampler(0, m_Sampler.get());
+                cmd->SetTexture(0, m_GBufferAlbedo.get());
+                cmd->SetTexture(1, m_DirectLightTexture.get());
+                cmd->SetTexture(2, m_GBufferMaterial.get());
+                cmd->SetTexture(3, m_GBufferDepth.get());
+                cmd->SetTexture(4, m_SkyboxTexture.get());
+                cmd->SetTexture(5, activeAOTexture);
+                cmd->Draw(3, 0);
+            },
+        });
 
         // --- SSRパス: LightingパスのSceneColorとG-Bufferから鏡面反射を計算し加算する。
         //     無効時はスキップし、Presentが直接m_SceneColorを参照する ---
         if (m_SSREnabled)
         {
-            m_GPUProfiler->BeginScope("SSR");
-            m_CPUProfiler.BeginScope("SSR");
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "SSR",
+                .Reads = { m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_SkyboxTexture.get(), m_GBufferAlbedo.get() },
+                .RenderTargets = { m_SSRTexture.get() },
+                .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+                {
+                    SSRConstants ssrConstants{};
+                    ssrConstants.Params0 = { m_SSRMaxDistance, m_SSRThickness, m_SSRRoughnessCutoff, 0.0f };
+                    cmd->UpdateBuffer(m_SSRConstantBuffer.get(), &ssrConstants, sizeof(ssrConstants));
 
-            SSRConstants ssrConstants{};
-            ssrConstants.Params0 = { m_SSRMaxDistance, m_SSRThickness, m_SSRRoughnessCutoff, 0.0f };
-            commandList->UpdateBuffer(m_SSRConstantBuffer.get(), &ssrConstants, sizeof(ssrConstants));
-
-            RHI::IRHITexture* ssrTarget[] = { m_SSRTexture.get() };
-            commandList->SetRenderTargets(ssrTarget, 1, nullptr);
-            commandList->SetViewport(gbufferViewport);
-
-            commandList->SetPipelineState(m_SSRPipelineState.get());
-            commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-            commandList->SetConstantBuffer(1, m_SSRConstantBuffer.get());
-            commandList->SetSampler(0, m_Sampler.get());
-            commandList->SetTexture(0, m_SceneColor.get());
-            commandList->SetTexture(1, m_GBufferNormal.get());
-            commandList->SetTexture(2, m_GBufferMaterial.get());
-            commandList->SetTexture(3, m_GBufferDepth.get());
-            commandList->SetTexture(4, m_SkyboxTexture.get());
-            commandList->SetTexture(5, m_GBufferAlbedo.get());
-            commandList->Draw(3, 0);
-
-            m_CPUProfiler.EndScope(); // SSR
-            m_GPUProfiler->EndScope(); // SSR
+                    cmd->SetViewport(gbufferViewport);
+                    cmd->SetPipelineState(m_SSRPipelineState.get());
+                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetConstantBuffer(1, m_SSRConstantBuffer.get());
+                    cmd->SetSampler(0, m_Sampler.get());
+                    cmd->SetTexture(0, m_SceneColor.get());
+                    cmd->SetTexture(1, m_GBufferNormal.get());
+                    cmd->SetTexture(2, m_GBufferMaterial.get());
+                    cmd->SetTexture(3, m_GBufferDepth.get());
+                    cmd->SetTexture(4, m_SkyboxTexture.get());
+                    cmd->SetTexture(5, m_GBufferAlbedo.get());
+                    cmd->Draw(3, 0);
+                },
+            });
         }
 
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
@@ -1396,29 +1404,30 @@ namespace Kurenai
         presentConstants.MipLevel = static_cast<float>(m_HiZDebugMipLevel);
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
-        // SetRenderTarget(swapChain)はスワップチェインのバックバッファへの書き込みを開始する。
-        // vsync有効時、DX11ではこの時点(GPUが実際にバックバッファへアクセスする際)で
-        // 前フレームの表示に伴う内部的なバッファ確保待ちが発生しうるため、Present GPU/CPUスコープの
-        // 計測範囲には含めない(その待ちはDX11SwapChain::Present()側の実測でGPU Waitとして分離される)
-        commandList->SetRenderTarget(m_SwapChain.get());
-        commandList->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
-        commandList->ClearDepth(1.0f);
-
         // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する
         const RHI::Viewport letterboxViewport = ComputeLetterboxViewport(
             m_Window->GetWidth(), m_Window->GetHeight(), presentSourceWidth, presentSourceHeight);
-        commandList->SetViewport(letterboxViewport);
 
-        m_GPUProfiler->BeginScope("Present");
-        m_CPUProfiler.BeginScope("Present");
-        commandList->SetPipelineState(m_PresentPipelineState.get());
-        commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-        commandList->SetConstantBuffer(1, m_PresentConstantBuffer.get());
-        commandList->SetSampler(0, m_Sampler.get());
-        commandList->SetTexture(0, presentSourceTexture);
-        commandList->Draw(3, 0);
-        m_CPUProfiler.EndScope(); // Present
-        m_GPUProfiler->EndScope(); // Present
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "Present",
+            .Reads = { presentSourceTexture },
+            .SwapChainTarget = m_SwapChain.get(),
+            .Execute = [this, &letterboxViewport, presentSourceTexture](RHI::IRHICommandList* cmd)
+            {
+                cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
+                cmd->ClearDepth(1.0f);
+                cmd->SetViewport(letterboxViewport);
+
+                cmd->SetPipelineState(m_PresentPipelineState.get());
+                cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                cmd->SetConstantBuffer(1, m_PresentConstantBuffer.get());
+                cmd->SetSampler(0, m_Sampler.get());
+                cmd->SetTexture(0, presentSourceTexture);
+                cmd->Draw(3, 0);
+            },
+        });
+
+        graph.Execute();
 
         // ImGuiはPresentパスでバインドされたバックバッファにそのまま重ねて描画する。
         // GPU側は計測していない(このスコープ専用の描画パイプラインを持たないため)が、
