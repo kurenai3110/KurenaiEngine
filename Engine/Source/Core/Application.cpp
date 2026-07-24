@@ -135,6 +135,12 @@ namespace Kurenai::Core
             DirectX::XMUINT4 Params1;  // x: スライス数, y: スライスあたりのステップ数, z/w: 未使用
         };
 
+        // SSR.hlsl側のcbuffer SSRConstantsと一致させる必要がある
+        struct alignas(16) SSRConstants
+        {
+            DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 未使用
+        };
+
         // タンジェント空間(Z軸=法線方向)の半球状にランダムなカーネルサンプルを生成する。
         // John Chapmanのチュートリアルにならい、原点付近にサンプルが偏るようスケーリングして
         // 近距離のディテールを優先的に拾う
@@ -400,6 +406,31 @@ namespace Kurenai::Core
         lightingPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
         m_LightingPipelineState = m_Device->CreatePipelineState(lightingPipelineDesc);
 
+        // SSRパス(頂点バッファなしのフルスクリーン三角形。SceneColorとG-Bufferから鏡面反射を計算し加算する)
+        RHI::ShaderDesc ssrVsDesc;
+        ssrVsDesc.Stage = RHI::ShaderStage::Vertex;
+        ssrVsDesc.FilePath = shaderDirectory + L"SSR.hlsl";
+        ssrVsDesc.EntryPoint = "VSMain";
+        m_SSRVertexShader = m_Device->CreateShader(ssrVsDesc);
+
+        RHI::ShaderDesc ssrPsDesc;
+        ssrPsDesc.Stage = RHI::ShaderStage::Pixel;
+        ssrPsDesc.FilePath = shaderDirectory + L"SSR.hlsl";
+        ssrPsDesc.EntryPoint = "PSMain";
+        m_SSRPixelShader = m_Device->CreateShader(ssrPsDesc);
+
+        RHI::PipelineStateDesc ssrPipelineDesc;
+        ssrPipelineDesc.VertexShader = m_SSRVertexShader.get();
+        ssrPipelineDesc.PixelShader = m_SSRPixelShader.get();
+        ssrPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        ssrPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        m_SSRPipelineState = m_Device->CreatePipelineState(ssrPipelineDesc);
+
+        RHI::BufferDesc ssrConstantBufferDesc;
+        ssrConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        ssrConstantBufferDesc.SizeInBytes = sizeof(SSRConstants);
+        m_SSRConstantBuffer = m_Device->CreateBuffer(ssrConstantBufferDesc);
+
         // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
         RHI::ShaderDesc presentVsDesc;
         presentVsDesc.Stage = RHI::ShaderStage::Vertex;
@@ -492,6 +523,7 @@ namespace Kurenai::Core
         m_SSILRawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SSILTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
     }
 
     void Application::LoadScene(size_t sceneIndex)
@@ -525,6 +557,11 @@ namespace Kurenai::Core
         m_SSAORadius = std::clamp(diagonal * 0.01f, 0.05f, 2.0f);
         m_SSILRadius = m_SSAORadius;
         m_SSILThickness = m_SSILRadius * 0.2f;
+
+        // SSRの最大レイ距離もシーンの規模に応じて変わるべきなので、対角線に比例させる。
+        // ヒット判定の厚みはSSAO/SSILと同様、遮蔽・接触判定として妥当な小さい値にする
+        m_SSRMaxDistance = std::clamp(diagonal * 0.5f, 1.0f, 100.0f);
+        m_SSRThickness = m_SSAORadius * 0.2f;
 
         const SceneEntry& currentScene = kScenes[m_CurrentSceneIndex];
         if (currentScene.HasCameraOverride)
@@ -710,6 +747,14 @@ namespace Kurenai::Core
 
         ImGui::Checkbox("Enable Shadow", &m_ShadowEnabled);
 
+        ImGui::Checkbox("Enable SSR", &m_SSREnabled);
+        if (m_SSREnabled)
+        {
+            ImGui::SliderFloat("SSR Max Distance", &m_SSRMaxDistance, 0.1f, 100.0f);
+            ImGui::SliderFloat("SSR Thickness", &m_SSRThickness, 0.01f, 2.0f);
+            ImGui::SliderFloat("SSR Roughness Cutoff", &m_SSRRoughnessCutoff, 0.05f, 1.0f);
+        }
+
         ImGui::End();
     }
 
@@ -733,6 +778,7 @@ namespace Kurenai::Core
             "AO/GI - Occlusion (Alpha)",
             "AO/GI - Occlusion (Alpha, Before Blur)",
             "Shadow Map",
+            "SSR (Final + Reflections)",
         };
 
         int currentIndex = static_cast<int>(m_DebugView);
@@ -1142,6 +1188,37 @@ namespace Kurenai::Core
         m_CPUProfiler.EndScope(); // Lighting
         m_GPUProfiler->EndScope(); // Lighting
 
+        // --- SSRパス: LightingパスのSceneColorとG-Bufferから鏡面反射を計算し加算する。
+        //     無効時はスキップし、Presentが直接m_SceneColorを参照する ---
+        if (m_SSREnabled)
+        {
+            m_GPUProfiler->BeginScope("SSR");
+            m_CPUProfiler.BeginScope("SSR");
+
+            SSRConstants ssrConstants{};
+            ssrConstants.Params0 = { m_SSRMaxDistance, m_SSRThickness, m_SSRRoughnessCutoff, 0.0f };
+            commandList->UpdateBuffer(m_SSRConstantBuffer.get(), &ssrConstants, sizeof(ssrConstants));
+
+            RHI::IRHITexture* ssrTarget[] = { m_SSRTexture.get() };
+            commandList->SetRenderTargets(ssrTarget, 1, nullptr);
+            commandList->SetViewport(gbufferViewport);
+
+            commandList->SetPipelineState(m_SSRPipelineState.get());
+            commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+            commandList->SetConstantBuffer(1, m_SSRConstantBuffer.get());
+            commandList->SetSampler(0, m_Sampler.get());
+            commandList->SetTexture(0, m_SceneColor.get());
+            commandList->SetTexture(1, m_GBufferNormal.get());
+            commandList->SetTexture(2, m_GBufferMaterial.get());
+            commandList->SetTexture(3, m_GBufferDepth.get());
+            commandList->SetTexture(4, m_SkyboxTexture.get());
+            commandList->SetTexture(5, m_GBufferAlbedo.get());
+            commandList->Draw(3, 0);
+
+            m_CPUProfiler.EndScope(); // SSR
+            m_GPUProfiler->EndScope(); // SSR
+        }
+
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
         // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
         // 深度バッファ(GBuffer深度・シャドウマップ)はPresent.hlsl側でグレースケール化するためMode=1を渡す
@@ -1152,7 +1229,7 @@ namespace Kurenai::Core
         switch (m_DebugView)
         {
         case DebugView::Final:
-            presentSourceTexture = m_SceneColor.get();
+            presentSourceTexture = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
             break;
         case DebugView::Albedo:
             presentSourceTexture = m_GBufferAlbedo.get();
@@ -1196,6 +1273,10 @@ namespace Kurenai::Core
             presentMode = 1;
             presentSourceWidth = kShadowMapSize;
             presentSourceHeight = kShadowMapSize;
+            break;
+        case DebugView::SSR:
+            // SSR無効時はSSRパスをスキップしているため、代わりにSceneColorをそのまま表示する
+            presentSourceTexture = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
             break;
         }
 
