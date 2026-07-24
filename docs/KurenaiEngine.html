@@ -537,9 +537,12 @@ IMMUTABLEになり以後の更新が失敗するため、必ずnullptrで作成�
 <code>RHIDesc.h</code>(<code>BufferDesc</code>, <code>ShaderDesc</code>, <code>InputElementDesc</code>,
 <code>PipelineStateDesc</code>)と<code>RHIEnums.h</code>(<code>ShaderStage</code>,
 <code>BufferUsage</code>, <code>Format</code>, <code>BlendMode</code> など)に描画リソースの
-記述構造体・列挙型がまとまっている。<code>PipelineStateDesc::BlendMode</code>に
-<code>BlendMode::AlphaBlend</code>を指定すると半透明合成のパイプラインになる(既定は
-<code>Opaque</code>)。<code>IRHIGPUProfiler</code>(GPUタイムスタンプ計測)、
+記述構造体・列挙型がまとまっている。<code>PipelineStateDesc::BlendMode</code>には
+<code>Opaque</code>(既定・不透明)、<code>AlphaBlend</code>(標準アルファブレンド)、
+<code>Additive</code>(加算合成。炎・光などの発光エフェクト向け)、
+<code>Multiply</code>(乗算合成。影・すりガラスなどの減光表現向け)、
+<code>PremultipliedAlpha</code>(事前乗算済みアルファブレンド)を指定できる。
+<code>IRHIGPUProfiler</code>(GPUタイムスタンプ計測)、
 <code>IRHIImGuiBackend</code>(ImGui連携)も同様に公開されている。
 </p>
 

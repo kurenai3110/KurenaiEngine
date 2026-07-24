@@ -20,11 +20,14 @@ namespace Kurenai::RHI
         TriangleList,
     };
 
-    // パイプラインステートのアルファブレンド設定。2Dスプライトなど半透明描画を行う場合はAlphaBlendを指定する
+    // パイプラインステートのアルファブレンド設定。2Dスプライトやエフェクト描画で半透明合成を行う場合に指定する
     enum class BlendMode
     {
-        Opaque,     // ブレンドなし(不透明。3Dの通常描画はこちら)
-        AlphaBlend, // src.rgb * src.a + dst.rgb * (1 - src.a) の標準アルファブレンド
+        Opaque,             // ブレンドなし(不透明。3Dの通常描画はこちら)
+        AlphaBlend,         // src.rgb * src.a + dst.rgb * (1 - src.a) の標準アルファブレンド
+        Additive,           // src.rgb * src.a + dst.rgb の加算合成(炎・光などの発光エフェクト向け)
+        Multiply,           // src.rgb * dst.rgb の乗算合成(影・すりガラスなどの減光エフェクト向け)
+        PremultipliedAlpha, // src.rgb + dst.rgb * (1 - src.a) の事前乗算済みアルファブレンド(テクスチャ側でRGBに既にAを乗算済みの場合に使う)
     };
 
     enum class Format

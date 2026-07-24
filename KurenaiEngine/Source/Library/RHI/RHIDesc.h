@@ -50,7 +50,8 @@ namespace Kurenai::RHI
         // 透視投影のメインカメラパスにのみ使う(正射影のシャドウマップは元々Zが線形分布のため対象外)
         bool ReverseZ = false;
 
-        // アルファブレンド設定。既定は不透明(Opaque)。半透明の2Dスプライトなどを描画する場合はAlphaBlendを指定する
+        // アルファブレンド設定。既定は不透明(Opaque)。半透明の2Dスプライトなどを描画する場合はAlphaBlendを、
+        // 炎・光などの発光エフェクトはAdditiveを、減光表現はMultiplyを、事前乗算済みテクスチャはPremultipliedAlphaを指定する
         BlendMode BlendMode = BlendMode::Opaque;
     };
 }

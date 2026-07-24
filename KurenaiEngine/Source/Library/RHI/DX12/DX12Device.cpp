@@ -436,16 +436,51 @@ namespace Kurenai::RHI
         psoDesc.InputLayout = { elements.empty() ? nullptr : elements.data(), static_cast<UINT>(elements.size()) };
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-        if (desc.BlendMode == BlendMode::AlphaBlend)
         {
             D3D12_RENDER_TARGET_BLEND_DESC& rt = psoDesc.BlendState.RenderTarget[0];
-            rt.BlendEnable = TRUE;
-            rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
-            rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-            rt.BlendOp = D3D12_BLEND_OP_ADD;
-            rt.SrcBlendAlpha = D3D12_BLEND_ONE;
-            rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-            rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            switch (desc.BlendMode)
+            {
+            case BlendMode::AlphaBlend:
+                rt.BlendEnable = TRUE;
+                rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+                rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOp = D3D12_BLEND_OP_ADD;
+                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+                rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::Additive:
+                rt.BlendEnable = TRUE;
+                rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+                rt.DestBlend = D3D12_BLEND_ONE;
+                rt.BlendOp = D3D12_BLEND_OP_ADD;
+                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+                rt.DestBlendAlpha = D3D12_BLEND_ONE;
+                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::Multiply:
+                rt.BlendEnable = TRUE;
+                rt.SrcBlend = D3D12_BLEND_DEST_COLOR;
+                rt.DestBlend = D3D12_BLEND_ZERO;
+                rt.BlendOp = D3D12_BLEND_OP_ADD;
+                rt.SrcBlendAlpha = D3D12_BLEND_DEST_ALPHA;
+                rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::PremultipliedAlpha:
+                rt.BlendEnable = TRUE;
+                rt.SrcBlend = D3D12_BLEND_ONE;
+                rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOp = D3D12_BLEND_OP_ADD;
+                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+                rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::Opaque:
+            default:
+                rt.BlendEnable = FALSE;
+                break;
+            }
         }
         psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         psoDesc.DepthStencilState.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;

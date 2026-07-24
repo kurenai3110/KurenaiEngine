@@ -241,20 +241,50 @@ namespace Kurenai::RHI
         // DX12はPSOごとにブレンドステートを持てるが、DX11はコンテキストへの明示バインドが必要なため、
         // 深度ステンシルステートと同様にここでBlendModeに応じたステートを明示的に作成する
         D3D11_BLEND_DESC blendDesc{};
-        blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        if (desc.BlendMode == BlendMode::AlphaBlend)
+        D3D11_RENDER_TARGET_BLEND_DESC& rt0 = blendDesc.RenderTarget[0];
+        rt0.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        switch (desc.BlendMode)
         {
-            blendDesc.RenderTarget[0].BlendEnable = TRUE;
-            blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
-            blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-            blendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-            blendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
-            blendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-            blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-        }
-        else
-        {
-            blendDesc.RenderTarget[0].BlendEnable = FALSE;
+        case BlendMode::AlphaBlend:
+            rt0.BlendEnable = TRUE;
+            rt0.SrcBlend = D3D11_BLEND_SRC_ALPHA;
+            rt0.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+            rt0.BlendOp = D3D11_BLEND_OP_ADD;
+            rt0.SrcBlendAlpha = D3D11_BLEND_ONE;
+            rt0.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+            rt0.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            break;
+        case BlendMode::Additive:
+            rt0.BlendEnable = TRUE;
+            rt0.SrcBlend = D3D11_BLEND_SRC_ALPHA;
+            rt0.DestBlend = D3D11_BLEND_ONE;
+            rt0.BlendOp = D3D11_BLEND_OP_ADD;
+            rt0.SrcBlendAlpha = D3D11_BLEND_ONE;
+            rt0.DestBlendAlpha = D3D11_BLEND_ONE;
+            rt0.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            break;
+        case BlendMode::Multiply:
+            rt0.BlendEnable = TRUE;
+            rt0.SrcBlend = D3D11_BLEND_DEST_COLOR;
+            rt0.DestBlend = D3D11_BLEND_ZERO;
+            rt0.BlendOp = D3D11_BLEND_OP_ADD;
+            rt0.SrcBlendAlpha = D3D11_BLEND_DEST_ALPHA;
+            rt0.DestBlendAlpha = D3D11_BLEND_ZERO;
+            rt0.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            break;
+        case BlendMode::PremultipliedAlpha:
+            rt0.BlendEnable = TRUE;
+            rt0.SrcBlend = D3D11_BLEND_ONE;
+            rt0.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+            rt0.BlendOp = D3D11_BLEND_OP_ADD;
+            rt0.SrcBlendAlpha = D3D11_BLEND_ONE;
+            rt0.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+            rt0.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+            break;
+        case BlendMode::Opaque:
+        default:
+            rt0.BlendEnable = FALSE;
+            break;
         }
 
         Microsoft::WRL::ComPtr<ID3D11BlendState> blendState;
