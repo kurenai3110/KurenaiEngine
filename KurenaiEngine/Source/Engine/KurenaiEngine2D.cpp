@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
@@ -119,8 +120,9 @@ namespace Kurenai
         // BuildFontAtlasはコンストラクタで(BeginFrame/Drawの前に)呼ぶ必要がある。DX12の
         // CreateTextureFromMemoryは内部でSubmitAndWaitIdle(コマンドリストのフラッシュ+リセット)を
         // 伴うため、BeginFrame後のフレーム中に呼ぶとレンダーターゲット/パイプラインステート等の
-        // 設定済み状態が失われてしまう(DrawText初回呼び出し時の遅延生成にしたところクラッシュした)
-        BuildFontAtlas();
+        // 設定済み状態が失われてしまう(DrawText初回呼び出し時の遅延生成にしたところクラッシュした)。
+        // 以後DrawTextで未収録の文字が見つかった場合も、同じ理由でBeginFrame()の先頭でのみ追加する
+        BuildFontAtlas(DefaultAsciiChars());
     }
 
     KurenaiEngine2D::~KurenaiEngine2D() = default;
@@ -143,6 +145,21 @@ namespace Kurenai
 
     void KurenaiEngine2D::BeginFrame(float clearR, float clearG, float clearB, float clearA)
     {
+        // 前フレームのDrawTextで未収録の文字が見つかっていれば、まだ描画コマンドを何も積んでいない
+        // このタイミングでアトラスを再構築する(BuildFontAtlasのコメント参照)
+        if (!m_PendingChars.empty())
+        {
+            std::vector<wchar_t> chars;
+            chars.reserve(m_Glyphs.size() + m_PendingChars.size());
+            for (const auto& glyphEntry : m_Glyphs)
+            {
+                chars.push_back(glyphEntry.first);
+            }
+            chars.insert(chars.end(), m_PendingChars.begin(), m_PendingChars.end());
+            m_PendingChars.clear();
+            BuildFontAtlas(chars);
+        }
+
         const uint32_t width = GetWidth();
         const uint32_t height = GetHeight();
         if (width == 0 || height == 0)
@@ -225,19 +242,37 @@ namespace Kurenai
         DrawSprite((x1 + x2) * 0.5f, (y1 + y2) * 0.5f, length, thickness, angle, m_WhiteTexture, r, g, b, a);
     }
 
-    void KurenaiEngine2D::BuildFontAtlas()
+    std::vector<wchar_t> KurenaiEngine2D::DefaultAsciiChars()
     {
+        std::vector<wchar_t> chars;
+        chars.reserve(0x7E - 0x20 + 1);
+        for (wchar_t ch = 0x20; ch <= 0x7E; ++ch)
+        {
+            chars.push_back(ch);
+        }
+        return chars;
+    }
+
+    void KurenaiEngine2D::BuildFontAtlas(const std::vector<wchar_t>& charsIn)
+    {
+        std::vector<wchar_t> chars = charsIn;
+        std::sort(chars.begin(), chars.end());
+        chars.erase(std::unique(chars.begin(), chars.end()), chars.end());
+        const int charCount = static_cast<int>(chars.size());
+
         HDC screenDC = GetDC(nullptr);
         HDC memDC = CreateCompatibleDC(screenDC);
         ReleaseDC(nullptr, screenDC);
 
         // ゲーム内HUD表示に使える程度の可読性があれば十分なため、厳密なフォントレンダリング
-        // (ヒンティング等)は行わず、GDIでラスタライズしたビットマップフォントとして扱う
+        // (ヒンティング等)は行わず、GDIでラスタライズしたビットマップフォントとして扱う。
+        // ASCII文字だけでなくかな漢字も同じアトラスで扱うため、両方を含む標準的な日本語フォントを使う
+        // (「Yu Gothic UI」はWindows 10/11に標準搭載されており、ASCII/かな/常用漢字を一通りカバーする)
         constexpr int kAtlasFontPixelHeight = 48;
         HFONT font = CreateFontW(
             -kAtlasFontPixelHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Consolas");
+            DEFAULT_PITCH | FF_DONTCARE, L"Yu Gothic UI");
         if (!font)
         {
             DeleteDC(memDC);
@@ -248,16 +283,25 @@ namespace Kurenai
         TEXTMETRICW metrics{};
         GetTextMetricsW(memDC, &metrics);
 
-        // ASCII印字可能文字(0x20〜0x7E)のみをアトラスへ焼き込む。かな漢字等の対応は現状のスコープ外
-        constexpr wchar_t kFirstChar = 0x20;
-        constexpr wchar_t kLastChar = 0x7E;
-        constexpr int kCharCount = kLastChar - kFirstChar + 1;
-        constexpr int kColumns = 16;
+        // セルサイズは実際に使う文字の最大幅に合わせる。tmMaxCharWidthはフォント全体(数千字を含む
+        // CJKフォントの場合、稀な全角記号等)の最大幅を返すため、それを使うとアトラスが不必要に
+        // 肥大化してしまう
         constexpr int kPadding = 2;
-        const int rows = (kCharCount + kColumns - 1) / kColumns;
-        const int cellWidth = metrics.tmMaxCharWidth + kPadding * 2;
+        std::vector<SIZE> glyphSizes(charCount);
+        int maxCharWidth = 1;
+        for (int i = 0; i < charCount; ++i)
+        {
+            GetTextExtentPoint32W(memDC, &chars[i], 1, &glyphSizes[i]);
+            maxCharWidth = (std::max)(maxCharWidth, static_cast<int>(glyphSizes[i].cx));
+        }
+        const int cellWidth = maxCharWidth + kPadding * 2;
         const int cellHeight = metrics.tmHeight + kPadding * 2;
-        const uint32_t atlasWidth = static_cast<uint32_t>(cellWidth * kColumns);
+
+        // 文字数に応じて概ね正方形になるグリッドに配置する(ASCIIのみの少数字数から、日本語を含む
+        // 数百字規模まで、アトラスの縦横比が極端にならないようにするため)
+        const int columns = (std::max)(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(charCount)))));
+        const int rows = (charCount + columns - 1) / columns;
+        const uint32_t atlasWidth = static_cast<uint32_t>(cellWidth * columns);
         const uint32_t atlasHeight = static_cast<uint32_t>(cellHeight * rows);
 
         BITMAPINFO bmi{};
@@ -286,17 +330,17 @@ namespace Kurenai
         SetTextColor(memDC, RGB(255, 255, 255));
         SetBkMode(memDC, TRANSPARENT);
 
-        m_Glyphs.reserve(kCharCount);
-        for (int i = 0; i < kCharCount; ++i)
+        // 再構築のたびに古いグリフ情報を作り直す(古いアトラスのUV座標を引きずらないようにする)
+        m_Glyphs.clear();
+        m_Glyphs.reserve(charCount);
+        for (int i = 0; i < charCount; ++i)
         {
-            const wchar_t ch = static_cast<wchar_t>(kFirstChar + i);
-            const int col = i % kColumns;
-            const int row = i / kColumns;
+            const wchar_t ch = chars[i];
+            const int col = i % columns;
+            const int row = i / columns;
             const int cellX = col * cellWidth;
             const int cellY = row * cellHeight;
 
-            SIZE size{};
-            GetTextExtentPoint32W(memDC, &ch, 1, &size);
             TextOutW(memDC, cellX + kPadding, cellY + kPadding, &ch, 1);
 
             GlyphMetrics glyph{};
@@ -304,7 +348,7 @@ namespace Kurenai
             glyph.V0 = static_cast<float>(cellY) / atlasHeight;
             glyph.U1 = static_cast<float>(cellX + cellWidth) / atlasWidth;
             glyph.V1 = static_cast<float>(cellY + cellHeight) / atlasHeight;
-            glyph.AdvancePixels = static_cast<float>(size.cx);
+            glyph.AdvancePixels = static_cast<float>(glyphSizes[i].cx);
             glyph.WidthPixels = static_cast<float>(cellWidth);
             glyph.HeightPixels = static_cast<float>(cellHeight);
             m_Glyphs.emplace(ch, glyph);
@@ -346,7 +390,13 @@ namespace Kurenai
             const auto it = m_Glyphs.find(ch);
             if (it == m_Glyphs.end())
             {
-                continue; // 未対応文字(ASCII印字可能文字以外)は無視する
+                // アトラス未収録の文字。次のBeginFrame()の先頭でアトラスへ追加されるまでの間、
+                // この文字自体の描画はスキップする(ペン位置も進めない簡易実装)
+                if (std::find(m_PendingChars.begin(), m_PendingChars.end(), ch) == m_PendingChars.end())
+                {
+                    m_PendingChars.push_back(ch);
+                }
+                continue;
             }
             const GlyphMetrics& glyph = it->second;
             const float glyphWidth = glyph.WidthPixels * scale;

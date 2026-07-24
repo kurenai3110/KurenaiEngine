@@ -70,7 +70,11 @@ namespace Kurenai
 
         // (x, y)を左下基準としてtextを描画する。fontSizeはおおよその文字高さ(ピクセル単位)。
         // ビットマップフォント方式のため、厳密なフォントレンダリング(ヒンティング等)は行わない。
-        // 対応文字はASCII印字可能文字(0x20〜0x7E)のみで、それ以外(かな漢字を含む)は表示されずスキップされる
+        // ASCII印字可能文字(0x20〜0x7E)に加え、かな漢字を含む任意のUnicode文字(BMP範囲)に対応する。
+        // ただし初めて描画する文字はその場ではアトラスに含まれていないため1フレームだけ表示されず、
+        // 次のBeginFrame()でアトラスへ追加されてから以降のフレームで表示される
+        // (フレーム中にテクスチャを作り直すとDX12でレンダーターゲット/パイプラインステートの設定が
+        // 失われるため、追加はBeginFrame()の先頭でのみ行う設計になっている)
         void DrawText(float x, float y, const std::wstring& text, float fontSize, float r, float g, float b, float a);
 
         // 描画コマンドを確定してバックバッファへ表示する。1フレームにつき1回だけ呼ぶ
@@ -84,11 +88,14 @@ namespace Kurenai
             float AdvancePixels = 0.0f;
             float WidthPixels = 0.0f, HeightPixels = 0.0f;
         };
-        // GDIでASCII印字可能文字一式をラスタライズし、m_FontAtlasTexture/m_Glyphsを構築する。
-        // コンストラクタでBeginFrame/Drawより前に呼ぶ必要がある(DX12のCreateTextureFromMemoryは
-        // 内部でコマンドリストをフラッシュ・リセットするため、フレーム中に呼ぶと直前に設定した
-        // レンダーターゲット/パイプラインステート等が失われクラッシュする)
-        void BuildFontAtlas();
+        // GDIでcharsに含まれる文字一式をラスタライズし、m_FontAtlasTexture/m_Glyphsを(既存の内容を
+        // 置き換えて)再構築する。コンストラクタ、またはBeginFrame()の先頭でのみ呼ぶ必要がある
+        // (DX12のCreateTextureFromMemoryは内部でコマンドリストをフラッシュ・リセットするため、
+        // 通常の描画コマンドを積んだ後のフレーム中に呼ぶと、それらの設定が失われクラッシュする)
+        void BuildFontAtlas(const std::vector<wchar_t>& chars);
+
+        // 初回のASCII一式(0x20〜0x7E)を返す。コンストラクタでのBuildFontAtlas呼び出し用
+        static std::vector<wchar_t> DefaultAsciiChars();
 
         Core::Camera m_Camera;
 
@@ -122,6 +129,9 @@ namespace Kurenai
         // BuildFontAtlasが生成したフォントの基準ピクセル高さ。DrawTextのfontSizeはこれに対する
         // 拡大率(fontSize / m_FontAtlasPixelHeight)としてグリフの表示サイズに反映される
         float m_FontAtlasPixelHeight = 0.0f;
+        // DrawTextでm_Glyphsに見つからなかった(=アトラス未収録の)文字を一時的に溜めておくキュー。
+        // 次のBeginFrame()の先頭でm_Glyphsの既存キーと合わせてBuildFontAtlasに渡され、消費後クリアされる
+        std::vector<wchar_t> m_PendingChars;
     };
 }
 

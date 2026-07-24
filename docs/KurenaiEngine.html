@@ -434,12 +434,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 回転・拡縮した矩形として<code>DrawSprite</code>と同じパイプラインで描画する。いずれも
 <code>r, g, b, a</code>は塗りつぶし色で半透明可。</li>
 <li><code>DrawText</code>は<code>(x, y)</code>を左下基準として<code>text</code>を描画する。<code>fontSize</code>は
-おおよその文字高さ(ピクセル単位)。コンストラクタ内でGDI(<code>Consolas</code>)によりASCII印字可能文字
+おおよその文字高さ(ピクセル単位)。コンストラクタ内でGDI(<code>Yu Gothic UI</code>)によりASCII印字可能文字
 (<code>0x20</code>〜<code>0x7E</code>)一式をビットマップフォントとしてラスタライズしたテクスチャアトラスを
 生成し、1文字ごとにアトラス内の該当矩形をサンプルするテクスチャ付き矩形として描画する
 (頂点シェーダーでUVをオフセット・スケールする点以外は<code>DrawSprite</code>と同じパイプラインを使う)。
-厳密なフォントレンダリング(ヒンティング等)は行わないため、HUD表示程度の可読性を想定している。
-<strong>ASCII印字可能文字以外(かな漢字を含む)は表示されずスキップされる。</strong></li>
+厳密なフォントレンダリング(ヒンティング等)は行わないため、HUD表示程度の可読性を想定している。</li>
+<li><strong>かな漢字を含む任意のUnicode文字(BMP範囲)にも対応する。</strong>ASCII以外の文字は
+初回のコンストラクタ実行時点ではアトラスに含まれていないため、<code>DrawText</code>がアトラス未収録の
+文字を検出すると、その文字だけをその場では描画せず、次の<code>BeginFrame()</code>の先頭でアトラスへ
+追加してから以降のフレームで表示する(DX12の<code>CreateTextureFromMemory</code>がコマンドリストを
+フラッシュ・リセットする都合上、通常の描画コマンドを積んだ後のフレーム中にアトラスを作り直すと
+レンダーターゲット/パイプラインステートの設定が失われクラッシュするため、追加は
+<code>BeginFrame()</code>の先頭でのみ行う設計になっている)。そのため新しい文字が最初に画面へ
+現れる瞬間だけ1フレーム欠けることがあるが、通常のHUD表示(同じ文字列を毎フレーム描画し続ける用途)
+では気付かない程度の遅延で済む。</li>
 </ul>
 </section>
 
@@ -726,22 +734,24 @@ POINT GetClientMousePosition() const;               // クライアント座標(
 <h2>6. サウンド再生について</h2>
 <p>
 <code>KurenaiEngineBase</code> はXAudio2による簡易なサウンド再生APIを提供します。WAV(PCM)ファイルの
-読み込みと再生のみに対応した最小限の実装で、再生中のサウンドを個別に停止・音量変更する機能はありません
-(効果音・BGM程度の単純な再生が目的)。
+読み込み・再生・停止に対応した最小限の実装で、音量変更等は行えません(効果音・BGM程度の単純な再生が目的)。
 </p>
 
 <pre><code>SoundHandle LoadSound(const std::wstring&amp; filePath);
-void PlaySound(SoundHandle sound, float volume = 1.0f, bool loop = false);</code></pre>
+VoiceHandle PlaySound(SoundHandle sound, float volume = 1.0f, bool loop = false);
+void StopSound(VoiceHandle voice);</code></pre>
 
 <ul>
 <li><code>LoadSound</code> はWAV(PCM)ファイルを読み込み、<code>SoundHandle</code>を返す
 (<code>TextureHandle</code>と同様、ロード時にまとめて呼び、返ってきたハンドルを保持しておいて
 <code>PlaySound</code>に渡す)。</li>
 <li><code>PlaySound</code> は呼び出しのたびに新しいボイスを生成するため、同じサウンドを重ねて
-(前の再生が終わる前に再度)鳴らすことができる。<code>volume</code>は0.0〜1.0。</li>
-<li><code>loop=true</code>の場合、そのボイスは<code>KurenaiEngine2D</code>/<code>KurenaiEngine3D</code>が
-破棄されるまで無限ループし続ける。<strong>停止APIは提供していない</strong>ため、ループ再生は
-BGM等の用途を選んで使うこと。</li>
+(前の再生が終わる前に再度)鳴らすことができる。<code>volume</code>は0.0〜1.0。戻り値の
+<code>VoiceHandle</code>は<code>StopSound</code>に渡す再生中ボイスの識別子。</li>
+<li><code>loop=true</code>の場合、そのボイスは<code>StopSound</code>で明示的に止めるか
+<code>KurenaiEngine2D</code>/<code>KurenaiEngine3D</code>が破棄されるまで無限ループし続ける。
+単発再生(<code>loop=false</code>)は自動的に終了するため、通常<code>StopSound</code>を呼ぶ必要はない
+(呼んでも問題はない)。</li>
 <li>これらは<code>KurenaiEngineBase</code>のメンバなので<code>KurenaiEngine2D</code>/
 <code>KurenaiEngine3D</code>どちらからも呼べる。</li>
 <li>使用にはCOM初期化(<code>CoInitializeEx</code>)が必要(WICテクスチャ読み込みと同じ要件。
@@ -774,7 +784,7 @@ BGM等の用途を選んで使うこと。</li>
 <tr><td>ウィンドウ数</td><td>1プロセスにつき1つを想定(複数インスタンスの同時生成は未検証)</td></tr>
 <tr><td>2Dの描画パス</td><td><code>KurenaiEngine2D::DrawSprite</code> は常にアルファブレンド・深度テストなしで描画される(不透明専用の高速パスはない)</td></tr>
 <tr><td>COM初期化</td><td><code>wWinMain</code> の先頭で <code>CoInitializeEx</code> を呼ぶこと。DirectXTexのWICテクスチャ読み込み(<code>LoadTexture</code>)とXAudio2(<code>LoadSound</code>/<code>PlaySound</code>)がいずれもCOMに依存しているため、忘れると失敗する</td></tr>
-<tr><td>サウンド再生の停止</td><td><code>PlaySound</code>に停止APIは無い。<code>loop=true</code>のボイスは<code>KurenaiEngine2D</code>/<code>KurenaiEngine3D</code>が破棄されるまで無限ループし続ける(6章参照)</td></tr>
+<tr><td>DrawTextの新規文字追加</td><td>ASCII以外(かな漢字等)の文字を初めて<code>DrawText</code>に渡すと、その文字はその1フレームだけ表示されず、次の<code>BeginFrame()</code>でアトラスへ追加されてから表示される(3.2節参照)</td></tr>
 <tr><td>ビルド設定の一致</td><td><code>KurenaiEngine.dll</code> とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
 <tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
 </tbody>

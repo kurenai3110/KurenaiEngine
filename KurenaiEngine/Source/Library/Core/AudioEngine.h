@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <wrl/client.h>
 
@@ -18,8 +19,8 @@
 
 namespace Kurenai::Core
 {
-    // XAudio2による簡易なサウンド再生。WAV(PCM)ファイルの読み込みと再生のみに対応した最小限の実装で、
-    // 再生中のサウンドを個別に停止・音量変更する機能は持たない(効果音・BGM程度の単純な再生が目的)。
+    // XAudio2による簡易なサウンド再生。WAV(PCM)ファイルの読み込みと再生、および再生中ボイスの
+    // 停止に対応した最小限の実装(効果音・BGM程度の単純な再生が目的で、音量変更等は持たない)。
     // 使用にはCoInitializeEx済みであること(WICテクスチャ読み込みと同じCOM初期化要件)
     class KURENAI_API AudioEngine
     {
@@ -35,9 +36,13 @@ namespace Kurenai::Core
 
         // 登録済みサウンドを再生する。呼び出しのたびに新しいボイスを生成するため、同じサウンドを
         // 重ねて(前の再生が終わる前に再度)鳴らすことができる。volumeは0.0〜1.0。
-        // loop=trueの場合、そのボイスはAudioEngineが破棄されるまで無限ループし続ける
-        // (停止APIは提供していないため、ループ再生は用途を選んで使うこと)
-        void PlaySound(uint32_t soundIndex, float volume, bool loop);
+        // 戻り値はStopSoundへ渡すボイスID(0は無効値として予約。実際に発行されるIDは1以上)
+        uint64_t PlaySound(uint32_t soundIndex, float volume, bool loop);
+
+        // PlaySoundが返したボイスIDを指定して再生を即座に停止する。単発再生(loop=false)は通常
+        // 自動的に終了するため呼ぶ必要はないが、ループ再生(loop=true)を止めるにはこれを呼ぶ。
+        // 既に終了済み/無効なIDの場合は何もしない
+        void StopSound(uint64_t voiceId);
 
     private:
         struct SoundData
@@ -48,6 +53,14 @@ namespace Kurenai::Core
         // IXAudio2VoiceCallback実装の詳細(定義は.cpp)。前方宣言のみ公開ヘッダーに出す
         struct OneShotVoiceCallback;
 
+        // 再生中のボイス1件ぶんの情報。Callbackは単発再生(loop=false)のみ持ち、再生完了検知に使う
+        // (ループ再生はStopSoundで明示的に止めるまで自動終了しないためCallback不要)
+        struct VoiceEntry
+        {
+            IXAudio2SourceVoice* Voice = nullptr;
+            std::unique_ptr<OneShotVoiceCallback> Callback;
+        };
+
         // 再生完了を検知済みだが未破棄の単発ボイスをまとめて破棄する。XAudio2のコールバックは
         // 内部スレッドから呼ばれ、そのスレッド内でDestroyVoiceを呼ぶことは禁止されているため
         // (公式ドキュメントで明記)、破棄は呼び出し元スレッド(PlaySound呼び出し時)で行う
@@ -56,7 +69,8 @@ namespace Kurenai::Core
         Microsoft::WRL::ComPtr<IXAudio2> m_XAudio2;
         IXAudio2MasteringVoice* m_MasteringVoice = nullptr;
         std::vector<std::unique_ptr<SoundData>> m_Sounds;
-        std::vector<std::unique_ptr<OneShotVoiceCallback>> m_PendingOneShotCallbacks;
+        std::unordered_map<uint64_t, VoiceEntry> m_ActiveVoices;
+        uint64_t m_NextVoiceId = 1;
     };
 }
 

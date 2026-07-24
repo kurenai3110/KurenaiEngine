@@ -129,32 +129,32 @@ namespace Kurenai::Core
 
     void AudioEngine::CleanupFinishedOneShotVoices()
     {
-        for (size_t i = 0; i < m_PendingOneShotCallbacks.size();)
+        for (auto it = m_ActiveVoices.begin(); it != m_ActiveVoices.end();)
         {
-            if (m_PendingOneShotCallbacks[i]->Finished.load())
+            if (it->second.Callback && it->second.Callback->Finished.load())
             {
-                m_PendingOneShotCallbacks[i]->Voice->DestroyVoice();
-                m_PendingOneShotCallbacks.erase(m_PendingOneShotCallbacks.begin() + i);
+                it->second.Voice->DestroyVoice();
+                it = m_ActiveVoices.erase(it);
             }
             else
             {
-                ++i;
+                ++it;
             }
         }
     }
 
-    void AudioEngine::PlaySound(uint32_t soundIndex, float volume, bool loop)
+    uint64_t AudioEngine::PlaySound(uint32_t soundIndex, float volume, bool loop)
     {
         // 前回までに再生完了した単発ボイスをここでまとめて破棄する(呼び出し元スレッド側)
         CleanupFinishedOneShotVoices();
 
         if (soundIndex >= m_Sounds.size())
         {
-            return;
+            return 0;
         }
         const SoundData& sound = *m_Sounds[soundIndex];
 
-        // ループ再生は停止APIが無いため使い捨てコールバックを付けない(AudioEngine破棄まで鳴り続ける)。
+        // ループ再生はStopSoundで明示的に止めるまで自動終了しないためコールバック不要。
         // 単発再生は再生完了を検知するコールバックを付け、CleanupFinishedOneShotVoicesで破棄する
         std::unique_ptr<OneShotVoiceCallback> callback = loop ? nullptr : std::make_unique<OneShotVoiceCallback>();
 
@@ -175,7 +175,28 @@ namespace Kurenai::Core
         if (callback)
         {
             callback->Voice = voice;
-            m_PendingOneShotCallbacks.push_back(std::move(callback));
         }
+
+        const uint64_t voiceId = m_NextVoiceId++;
+        VoiceEntry entry;
+        entry.Voice = voice;
+        entry.Callback = std::move(callback);
+        m_ActiveVoices.emplace(voiceId, std::move(entry));
+        return voiceId;
+    }
+
+    void AudioEngine::StopSound(uint64_t voiceId)
+    {
+        const auto it = m_ActiveVoices.find(voiceId);
+        if (it == m_ActiveVoices.end())
+        {
+            return;
+        }
+
+        // StopSoundは呼び出し元スレッドから呼ばれる(XAudio2コールバック内からの呼び出しではない)ため、
+        // ここでDestroyVoiceを呼んでも問題ない(禁止されているのはコールバック内から呼ぶことのみ)
+        it->second.Voice->Stop(0);
+        it->second.Voice->DestroyVoice();
+        m_ActiveVoices.erase(it);
     }
 }

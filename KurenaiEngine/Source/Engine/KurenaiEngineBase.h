@@ -33,6 +33,20 @@ namespace Kurenai
         friend class KurenaiEngineBase;
     };
 
+    // PlaySoundが返す再生中ボイスのハンドル。loop=trueで再生したボイスをStopSoundで止める際に使う。
+    // loop=falseの場合も返るが、単発再生は自動的に終了するため通常は使わなくてよい
+    class VoiceHandle
+    {
+    public:
+        VoiceHandle() = default;
+        bool IsValid() const { return m_Id != 0; }
+
+    private:
+        explicit VoiceHandle(uint64_t id) : m_Id(id) {}
+        uint64_t m_Id = 0;
+        friend class KurenaiEngineBase;
+    };
+
     // KurenaiEngine3D/KurenaiEngine2Dに共通する土台(ウィンドウ・デバイス・スワップチェーンの
     // 生成・管理)。サンプルプログラムがこのクラスを直接構築することは想定していない
     // (コンストラクタはprotected)
@@ -66,9 +80,11 @@ namespace Kurenai
 
         // WAV(PCM)ファイルを読み込み、再生用に登録する
         SoundHandle LoadSound(const std::wstring& filePath);
-        // volumeは0.0〜1.0。loop=trueの場合、そのボイスはこのKurenaiEngineBaseが破棄されるまで
-        // 無限ループし続ける(停止APIは提供していないため、ループ再生は用途を選んで使うこと)
-        void PlaySound(SoundHandle sound, float volume = 1.0f, bool loop = false);
+        // volumeは0.0〜1.0。戻り値はStopSoundへ渡すVoiceHandle
+        // (loop=trueのボイスを止める場合に使う。loop=falseは自動的に終了するので通常は使わなくてよい)
+        VoiceHandle PlaySound(SoundHandle sound, float volume = 1.0f, bool loop = false);
+        // PlaySoundが返したVoiceHandleを指定して再生を即座に停止する。単発再生には通常不要
+        void StopSound(VoiceHandle voice);
 
     protected:
         KurenaiEngineBase(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api);

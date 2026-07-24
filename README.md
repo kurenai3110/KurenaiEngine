@@ -12,11 +12,13 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**
 (4.3.2章を参照)。
 
 `KurenaiEngine2D`はスプライト(`DrawSprite`)に加え、円・線分(`DrawCircle`/`DrawLine`)と
-簡易なビットマップフォントによるテキスト描画(`DrawText`)も提供します。`KurenaiEngineBase`
-(2D/3D共通)は、`GetAsyncKeyState`/`GetCursorPos`のようなグローバル入力ではなく
-ウィンドウスコープのメッセージベース入力API(`WasKeyPressed`/`WasMouseButtonPressed`/
-`IsMouseOverWindow`/`GetClientMousePosition`)と、XAudio2による簡易なサウンド再生API
-(`LoadSound`/`PlaySound`、WAV/PCM)も公開しています(詳細は
+簡易なビットマップフォントによるテキスト描画(`DrawText`)も提供します。`DrawText`はASCIIに加え
+かな漢字を含む任意のUnicode文字(BMP範囲)に対応しており、初めて描画する文字は次のフレームから
+表示されます。`KurenaiEngineBase`(2D/3D共通)は、`GetAsyncKeyState`/`GetCursorPos`のような
+グローバル入力ではなくウィンドウスコープのメッセージベース入力API(`WasKeyPressed`/
+`WasMouseButtonPressed`/`IsMouseOverWindow`/`GetClientMousePosition`)と、XAudio2による簡易な
+サウンド再生API(`LoadSound`/`PlaySound`/`StopSound`、WAV/PCM。`PlaySound`が返す`VoiceHandle`を
+`StopSound`に渡すとループ再生を停止できる)も公開しています(詳細は
 [docs/KurenaiEngine.html](docs/KurenaiEngine.html) 3・5・6章を参照)。
 
 `KurenaiEngine3D` はassimp経由でglTF・FBXモデルの読み込み・描画に対応した完結型の

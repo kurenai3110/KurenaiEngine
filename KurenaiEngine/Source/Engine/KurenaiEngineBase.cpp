@@ -87,13 +87,22 @@ namespace Kurenai
         return SoundHandle(m_AudioEngine->LoadSound(filePath));
     }
 
-    void KurenaiEngineBase::PlaySound(SoundHandle sound, float volume, bool loop)
+    VoiceHandle KurenaiEngineBase::PlaySound(SoundHandle sound, float volume, bool loop)
     {
         if (!sound.IsValid())
         {
+            return VoiceHandle();
+        }
+        return VoiceHandle(m_AudioEngine->PlaySound(sound.m_Index, volume, loop));
+    }
+
+    void KurenaiEngineBase::StopSound(VoiceHandle voice)
+    {
+        if (!voice.IsValid())
+        {
             return;
         }
-        m_AudioEngine->PlaySound(sound.m_Index, volume, loop);
+        m_AudioEngine->StopSound(voice.m_Id);
     }
 
     RHI::IRHICommandList* KurenaiEngineBase::GetCommandList() const
