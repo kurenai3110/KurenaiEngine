@@ -61,6 +61,12 @@ namespace Kurenai
             float x, float y, float width, float height, float rotationRadians,
             TextureHandle texture, float r, float g, float b, float a);
 
+        // 中心(x, y)、半径radiusの塗り円を描画する。r, g, b, aは塗りつぶし色(半透明可)
+        void DrawCircle(float x, float y, float radius, float r, float g, float b, float a);
+
+        // (x1, y1)-(x2, y2)を結ぶ、太さthicknessの線分を描画する。r, g, b, aは色(半透明可)
+        void DrawLine(float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a);
+
         // 描画コマンドを確定してバックバッファへ表示する。1フレームにつき1回だけ呼ぶ
         void EndFrame(bool vsync = true);
 
@@ -70,6 +76,15 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_VertexShader;
         std::unique_ptr<RHI::IRHIShader> m_PixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_PipelineState;
+
+        // DrawCircle用。頂点シェーダー・頂点/インデックスバッファはスプライトと共用し、
+        // ピクセルシェーダーとパイプラインステートのみ専用のものを使う
+        std::unique_ptr<RHI::IRHIShader> m_CirclePixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_CirclePipelineState;
+
+        // DrawLineは太さ・長さに拡縮縮小した矩形として、この不透明白テクスチャを使ってDrawSpriteと
+        // 同じスプライトパイプラインで描画する
+        TextureHandle m_WhiteTexture;
 
         std::unique_ptr<RHI::IRHIBuffer> m_QuadVertexBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_QuadIndexBuffer;

@@ -41,3 +41,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     float4 texColor = SpriteTexture.Sample(DefaultSampler, input.UV);
     return texColor * Color;
 }
+
+// DrawCircle用。テクスチャを使わず、UV(0〜1)を中心からの距離に変換した円形マスクで
+// ふちをアンチエイリアスしながら塗りつぶす(KurenaiEngine2D::DrawCircle参照)
+float4 PSCircle(PSInput input) : SV_TARGET
+{
+    const float2 centered = input.UV * 2.0f - 1.0f; // UV(0〜1) -> 中心が原点の-1〜1
+    const float dist = length(centered);
+    const float edge = fwidth(dist);
+    const float coverage = 1.0f - smoothstep(1.0f - edge, 1.0f + edge, dist);
+    return float4(Color.rgb, Color.a * coverage);
+}

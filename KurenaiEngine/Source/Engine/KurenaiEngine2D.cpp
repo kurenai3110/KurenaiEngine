@@ -2,6 +2,8 @@
 
 #include <Windows.h>
 
+#include <cmath>
+
 namespace Kurenai
 {
     namespace
@@ -66,6 +68,13 @@ namespace Kurenai
         pipelineDesc.BlendMode = RHI::BlendMode::AlphaBlend; // 半透明スプライトのため
         m_PipelineState = m_Device->CreatePipelineState(pipelineDesc);
 
+        // DrawCircle用。頂点シェーダー・頂点レイアウトはスプライトと共用し、ピクセルシェーダーのみ
+        // 円形マスク版(PSCircle)に差し替える
+        m_CirclePixelShader = m_Device->CreateShader({ RHI::ShaderStage::Pixel, shaderPath, "PSCircle" });
+        RHI::PipelineStateDesc circlePipelineDesc = pipelineDesc;
+        circlePipelineDesc.PixelShader = m_CirclePixelShader.get();
+        m_CirclePipelineState = m_Device->CreatePipelineState(circlePipelineDesc);
+
         // 原点中心の単位クアッド(-0.5〜0.5)。スプライトごとの位置/大きさ/回転はWorld行列側で表現する
         const Vertex2D quadVertices[] = {
             { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f } },
@@ -100,6 +109,8 @@ namespace Kurenai
         objectConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         objectConstantBufferDesc.SizeInBytes = sizeof(ObjectConstants);
         m_ObjectConstantBuffer = m_Device->CreateBuffer(objectConstantBufferDesc);
+
+        m_WhiteTexture = CreateSolidColorTexture(255, 255, 255, 255); // DrawLineが使う
     }
 
     KurenaiEngine2D::~KurenaiEngine2D() = default;
@@ -172,6 +183,36 @@ namespace Kurenai
         commandList->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
         commandList->SetTexture(0, static_cast<RHI::IRHITexture*>(texture.m_Handle));
         commandList->DrawIndexed(6, 0, 0);
+    }
+
+    void KurenaiEngine2D::DrawCircle(float x, float y, float radius, float r, float g, float b, float a)
+    {
+        ObjectConstants objectConstants{};
+        const DirectX::XMMATRIX world = DirectX::XMMatrixScaling(radius * 2.0f, radius * 2.0f, 1.0f) *
+            DirectX::XMMatrixTranslation(x, y, 0.0f);
+        DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixTranspose(world));
+        objectConstants.Color = { r, g, b, a };
+
+        RHI::IRHICommandList* commandList = GetCommandList();
+        commandList->SetPipelineState(m_CirclePipelineState.get());
+        commandList->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+        commandList->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+        commandList->DrawIndexed(6, 0, 0);
+        commandList->SetPipelineState(m_PipelineState.get()); // 以降のDrawSprite呼び出しのため戻す
+    }
+
+    void KurenaiEngine2D::DrawLine(float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a)
+    {
+        const float dx = x2 - x1;
+        const float dy = y2 - y1;
+        const float length = std::sqrt(dx * dx + dy * dy);
+        if (length <= 0.0f)
+        {
+            return;
+        }
+
+        const float angle = std::atan2(dy, dx);
+        DrawSprite((x1 + x2) * 0.5f, (y1 + y2) * 0.5f, length, thickness, angle, m_WhiteTexture, r, g, b, a);
     }
 
     void KurenaiEngine2D::EndFrame(bool vsync)
