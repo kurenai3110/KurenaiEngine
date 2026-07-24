@@ -1,5 +1,6 @@
 #include "DX12CommandList.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "DX12Buffer.h"
@@ -109,6 +110,10 @@ namespace Kurenai::RHI
         cmdList->IASetPrimitiveTopology(dx12PipelineState->GetTopology());
         // SRVテーブル(ルートパラメータ2)は描画ごとにSetTexture(0, ...)が新しいブロックを割り当てて再バインドする
         cmdList->SetGraphicsRootDescriptorTable(3, m_Device->GetShaderVisibleSamplerHeap()->GetGpuHandle(0));
+
+        // SetGraphicsRootSignatureでルートパラメータ2(SRVテーブル)も無効化されたため、
+        // 「直前の描画と同じテクスチャならテーブルを使い回す」キャッシュは無効にする
+        m_HasLastDraw = false;
     }
 
     void DX12CommandList::SetVertexBuffer(IRHIBuffer* buffer)
@@ -137,23 +142,16 @@ namespace Kurenai::RHI
         auto* cmdList = m_Device->GetCommandList();
         dx12Texture->TransitionTo(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
-        // slot 0は新しい描画の開始とみなし、t0〜t6ぶんの新しいブロックを割り当てて
-        // ルートシグネチャのSRVテーブル(ルートパラメータ2)をそこへ向け直す。
-        // これをしないと、1フレームぶんまとめて記録してから1回だけ実行する設計上、
-        // GPUが実際にDrawを処理する時点ではそのフレーム最後のSetTexture呼び出しの内容に
-        // 全ての描画が上書きされてしまう
+        // slot 0は新しい描画の開始とみなす。通常はDraw/DrawIndexedで前回ぶんは既に反映済みだが、
+        // Drawを挟まず連続でslot 0が呼ばれた場合に備えて念のためここでも反映しておく
         if (slot == 0)
         {
-            // 通常はDraw/DrawIndexedで既に反映済みだが、Drawを挟まず連続でslot 0が
-            // 呼ばれた場合に備えて念のためここでも反映しておく
             FlushPendingSrvWrites();
-            m_CurrentSrvTableBase = m_Device->AllocateSrvTableBlock(kTextureSlotCount);
-            cmdList->SetGraphicsRootDescriptorTable(2, m_Device->GetShaderVisibleSrvHeap()->GetGpuHandle(m_CurrentSrvTableBase));
         }
 
-        // CopyDescriptorsSimpleはこの場では呼ばず、コピー元だけ溜めておく。メッシュごとに
-        // テクスチャの数だけ個別に呼ぶとドライバ呼び出しのCPUオーバーヘッドが積み重なるため、
-        // 実際のコピーはDraw直前にFlushPendingSrvWrites()でまとめて1回行う
+        // SRVテーブルの割り当て・CopyDescriptorsはこの場では行わず、コピー元だけ溜めておく。
+        // 実際の割り当て・コピーはDraw直前のFlushPendingSrvWrites()でまとめて行う(そこで
+        // 直前の描画と同じ組み合わせかどうかも判定し、同じなら丸ごと省略する)
         m_PendingSrvHandles[slot] = dx12Texture->GetSrvCpuHandle();
         m_PendingSrvSlotMask |= (1u << slot);
     }
@@ -165,25 +163,53 @@ namespace Kurenai::RHI
             return;
         }
 
-        D3D12_CPU_DESCRIPTOR_HANDLE destRanges[kTextureSlotCount];
-        D3D12_CPU_DESCRIPTOR_HANDLE srcRanges[kTextureSlotCount];
-        uint32_t rangeCount = 0;
-
-        auto* heap = m_Device->GetShaderVisibleSrvHeap();
-        for (uint32_t slot = 0; slot < kTextureSlotCount; ++slot)
+        // 直前にDrawへ反映した組み合わせと完全に一致するか(同じマテリアルを使う連続した
+        // メッシュではよくある)を調べる。一致するならルートパラメータ2は既に正しいブロックを
+        // 指したままなので、新規割り当て・CopyDescriptors・ルートテーブルの再バインドを
+        // まるごと省略できる
+        bool sameAsLastDraw = m_HasLastDraw && m_PendingSrvSlotMask == m_LastDrawSlotMask;
+        if (sameAsLastDraw)
         {
-            if (m_PendingSrvSlotMask & (1u << slot))
+            for (uint32_t slot = 0; slot < kTextureSlotCount; ++slot)
             {
-                destRanges[rangeCount] = heap->GetCpuHandle(m_CurrentSrvTableBase + slot);
-                srcRanges[rangeCount] = m_PendingSrvHandles[slot];
-                ++rangeCount;
+                if ((m_PendingSrvSlotMask & (1u << slot)) && m_PendingSrvHandles[slot].ptr != m_LastDrawSrvHandles[slot].ptr)
+                {
+                    sameAsLastDraw = false;
+                    break;
+                }
             }
         }
 
-        // 各レンジはすべてサイズ1(pRangeSizes=nullptrは各レンジサイズ1を意味する)なので、
-        // この描画で設定された分をまとめて1回のCopyDescriptorsで反映する
-        m_Device->GetDevice()->CopyDescriptors(
-            rangeCount, destRanges, nullptr, rangeCount, srcRanges, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        if (!sameAsLastDraw)
+        {
+            auto* cmdList = m_Device->GetCommandList();
+            m_CurrentSrvTableBase = m_Device->AllocateSrvTableBlock(kTextureSlotCount);
+            cmdList->SetGraphicsRootDescriptorTable(2, m_Device->GetShaderVisibleSrvHeap()->GetGpuHandle(m_CurrentSrvTableBase));
+
+            D3D12_CPU_DESCRIPTOR_HANDLE destRanges[kTextureSlotCount];
+            D3D12_CPU_DESCRIPTOR_HANDLE srcRanges[kTextureSlotCount];
+            uint32_t rangeCount = 0;
+
+            auto* heap = m_Device->GetShaderVisibleSrvHeap();
+            for (uint32_t slot = 0; slot < kTextureSlotCount; ++slot)
+            {
+                if (m_PendingSrvSlotMask & (1u << slot))
+                {
+                    destRanges[rangeCount] = heap->GetCpuHandle(m_CurrentSrvTableBase + slot);
+                    srcRanges[rangeCount] = m_PendingSrvHandles[slot];
+                    ++rangeCount;
+                }
+            }
+
+            // 各レンジはすべてサイズ1(pRangeSizes=nullptrは各レンジサイズ1を意味する)なので、
+            // この描画で設定された分をまとめて1回のCopyDescriptorsで反映する
+            m_Device->GetDevice()->CopyDescriptors(
+                rangeCount, destRanges, nullptr, rangeCount, srcRanges, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+            std::copy(std::begin(m_PendingSrvHandles), std::end(m_PendingSrvHandles), std::begin(m_LastDrawSrvHandles));
+            m_LastDrawSlotMask = m_PendingSrvSlotMask;
+            m_HasLastDraw = true;
+        }
 
         m_PendingSrvSlotMask = 0;
     }

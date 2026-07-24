@@ -56,5 +56,15 @@ namespace Kurenai::RHI
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         uint32_t m_PendingSrvSlotMask = 0;
         void FlushPendingSrvWrites();
+
+        // 直前にDraw/DrawIndexedへ実際に反映した(コピー済みの)テクスチャの組み合わせ。
+        // 同じマテリアルを使う連続したメッシュではテクスチャの組み合わせが変わらないため、
+        // 次の描画がこれと完全に一致する場合はSRVテーブルの新規割り当て・CopyDescriptors・
+        // ルートテーブルの再バインドをまるごと省略し、既存のブロックをそのまま使い回す。
+        // SetPipelineState()はSetGraphicsRootSignatureを呼び直すたびにルート引数を無効化するため、
+        // その直後は必ずm_HasLastDrawをfalseにして使い回しを禁止する
+        D3D12_CPU_DESCRIPTOR_HANDLE m_LastDrawSrvHandles[kTextureSlotCount]{};
+        uint32_t m_LastDrawSlotMask = 0;
+        bool m_HasLastDraw = false;
     };
 }
