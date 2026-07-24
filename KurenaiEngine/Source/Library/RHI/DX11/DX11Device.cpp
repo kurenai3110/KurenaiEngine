@@ -9,6 +9,7 @@
 
 #include "DX11Buffer.h"
 #include "DX11CommandList.h"
+#include "DX11ComputePipelineState.h"
 #include "DX11GPUProfiler.h"
 #include "DX11ImGuiBackend.h"
 #include "DX11PipelineState.h"
@@ -127,6 +128,37 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHIBuffer> DX11Device::CreateBuffer(const BufferDesc& desc)
     {
+        // 構造化バッファ(RWStructuredBuffer)はUAV+SRVの両方を持つDEFAULTヒープに作成するため、
+        // 単純なBindFlagsマッピングでは表現できず専用の経路で作成する
+        if (desc.Usage == BufferUsage::Structured)
+        {
+            D3D11_BUFFER_DESC structuredDesc{};
+            structuredDesc.ByteWidth = desc.SizeInBytes;
+            structuredDesc.Usage = D3D11_USAGE_DEFAULT;
+            structuredDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+            structuredDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            structuredDesc.StructureByteStride = desc.StrideInBytes;
+
+            D3D11_SUBRESOURCE_DATA structuredInitData{};
+            structuredInitData.pSysMem = desc.InitialData;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> structuredBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&structuredDesc, desc.InitialData ? &structuredInitData : nullptr, &structuredBuffer),
+                "構造化バッファの作成に失敗しました");
+
+            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            uavDesc.Buffer.FirstElement = 0;
+            uavDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
+
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+            ThrowIfFailed(m_Device->CreateUnorderedAccessView(structuredBuffer.Get(), &uavDesc, &uav), "アンオーダードアクセスビューの作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, uav);
+        }
+
         D3D11_BUFFER_DESC bufferDesc{};
         bufferDesc.ByteWidth = desc.SizeInBytes;
         bufferDesc.BindFlags = ToBindFlags(desc.Usage);
@@ -144,7 +176,8 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHIShader> DX11Device::CreateShader(const ShaderDesc& desc)
     {
-        const char* target = desc.Stage == ShaderStage::Vertex ? "vs_5_0" : "ps_5_0";
+        const char* target =
+            desc.Stage == ShaderStage::Vertex ? "vs_5_0" : desc.Stage == ShaderStage::Compute ? "cs_5_0" : "ps_5_0";
 
         UINT compileFlags = 0;
 #if defined(_DEBUG)
@@ -181,6 +214,12 @@ namespace Kurenai::RHI
             Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader;
             hr = m_Device->CreateVertexShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &vertexShader);
             shader = vertexShader;
+        }
+        else if (desc.Stage == ShaderStage::Compute)
+        {
+            Microsoft::WRL::ComPtr<ID3D11ComputeShader> computeShader;
+            hr = m_Device->CreateComputeShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &computeShader);
+            shader = computeShader;
         }
         else
         {
@@ -293,6 +332,12 @@ namespace Kurenai::RHI
         return std::make_unique<DX11PipelineState>(inputLayout, vertexShader, pixelShader, desc.Topology, depthStencilState, blendState);
     }
 
+    std::unique_ptr<IRHIPipelineState> DX11Device::CreateComputePipelineState(const ComputePipelineStateDesc& desc)
+    {
+        auto* computeShader = static_cast<DX11Shader*>(desc.ComputeShader);
+        return std::make_unique<DX11ComputePipelineState>(computeShader);
+    }
+
     std::unique_ptr<IRHITexture> DX11Device::CreateTextureFromFile(const std::wstring& filePath, bool sRGB)
     {
         DirectX::TexMetadata metadata{};
@@ -375,6 +420,30 @@ namespace Kurenai::RHI
         ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), nullptr, &srv), "シェーダリソースビューの作成に失敗しました");
 
         return std::make_unique<DX11Texture>(srv, rtv, nullptr);
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateUAVTexture(uint32_t width, uint32_t height, Format format)
+    {
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = width;
+        textureDesc.Height = height;
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = 1;
+        textureDesc.Format = ToDXGIFormat(format);
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_DEFAULT;
+        textureDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, nullptr, &texture), "UAVテクスチャの作成に失敗しました");
+
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), nullptr, &srv), "シェーダリソースビューの作成に失敗しました");
+
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+        ThrowIfFailed(m_Device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav), "アンオーダードアクセスビューの作成に失敗しました");
+
+        return std::make_unique<DX11Texture>(srv, nullptr, nullptr, uav);
     }
 
     std::unique_ptr<IRHITexture> DX11Device::CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth)

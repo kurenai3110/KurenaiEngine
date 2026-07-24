@@ -16,6 +16,7 @@ namespace Kurenai::RHI
         ShaderStage GetStage() const { return m_Stage; }
         ID3D11VertexShader* GetVertexShader() const;
         ID3D11PixelShader* GetPixelShader() const;
+        ID3D11ComputeShader* GetComputeShader() const;
         ID3DBlob* GetBytecode() const { return m_Bytecode.Get(); }
 
     private:

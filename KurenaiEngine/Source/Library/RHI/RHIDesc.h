@@ -54,4 +54,9 @@ namespace Kurenai::RHI
         // 炎・光などの発光エフェクトはAdditiveを、減光表現はMultiplyを、事前乗算済みテクスチャはPremultipliedAlphaを指定する
         BlendMode BlendMode = BlendMode::Opaque;
     };
+
+    struct ComputePipelineStateDesc
+    {
+        IRHIShader* ComputeShader = nullptr;
+    };
 }

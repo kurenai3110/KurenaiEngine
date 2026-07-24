@@ -34,6 +34,13 @@ namespace Kurenai::RHI
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
         void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
 
+        void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
+        void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
+        void SetComputeTexture(uint32_t slot, IRHITexture* texture) override;
+        void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture) override;
+        void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
+        void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
+
     private:
         static constexpr uint32_t kMaxRenderTargets = 8;
 
@@ -66,5 +73,19 @@ namespace Kurenai::RHI
         D3D12_CPU_DESCRIPTOR_HANDLE m_LastDrawSrvHandles[kTextureSlotCount]{};
         uint32_t m_LastDrawSlotMask = 0;
         bool m_HasLastDraw = false;
+
+        // コンピュートシェーダー用SRV(t0〜)+UAV(u0〜)テーブル。グラフィックスのSRVテーブルと同様、
+        // Set*の時点ではコピー元だけ溜めておき、Dispatch直前のFlushPendingComputeWrites()でまとめて
+        // CopyDescriptors・ルートテーブルの再バインドを行う
+        static constexpr uint32_t kComputeSrvSlotCount = 4;
+        static constexpr uint32_t kComputeUavSlotCount = 4;
+        D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeSrvHandles[kComputeSrvSlotCount]{};
+        uint32_t m_PendingComputeSrvSlotMask = 0;
+        D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeUavHandles[kComputeUavSlotCount]{};
+        uint32_t m_PendingComputeUavSlotMask = 0;
+        // 今回のDispatchでUAVとしてバインドされているリソース。Dispatch直後にUAVバリアを発行し、
+        // 後続のDispatch/描画がこのDispatchの書き込み完了を確実に見えるようにするため保持する
+        ID3D12Resource* m_BoundComputeUavResources[kComputeUavSlotCount]{};
+        void FlushPendingComputeWrites();
     };
 }

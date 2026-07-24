@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "DX12Device.h"
+
 namespace Kurenai::RHI
 {
     DX12Buffer::DX12Buffer(
@@ -32,6 +34,25 @@ namespace Kurenai::RHI
         }
     }
 
+    DX12Buffer::DX12Buffer(DX12Device* device, Microsoft::WRL::ComPtr<ID3D12Resource> resource, uint32_t uavIndex, uint32_t sizeInBytes, uint32_t strideInBytes)
+        : m_Device(device)
+        , m_Resource(std::move(resource))
+        , m_MappedPtr(nullptr)
+        , m_SlotSizeInBytes(sizeInBytes)
+        , m_RingCapacity(1)
+        , m_UavIndex(uavIndex)
+    {
+        (void)strideInBytes;
+    }
+
+    DX12Buffer::~DX12Buffer()
+    {
+        if (m_UavIndex != kInvalid)
+        {
+            m_Device->GetSrvCpuHeap()->Free(m_UavIndex);
+        }
+    }
+
     D3D12_GPU_VIRTUAL_ADDRESS DX12Buffer::GetGPUVirtualAddress() const
     {
         return m_Resource->GetGPUVirtualAddress() + static_cast<UINT64>(m_CurrentRingIndex) * m_SlotSizeInBytes;
@@ -41,5 +62,10 @@ namespace Kurenai::RHI
     {
         m_CurrentRingIndex = (m_CurrentRingIndex + 1) % m_RingCapacity;
         return static_cast<uint8_t*>(m_MappedPtr) + static_cast<size_t>(m_CurrentRingIndex) * m_SlotSizeInBytes;
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE DX12Buffer::GetUavCpuHandle() const
+    {
+        return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_UavIndex);
     }
 }

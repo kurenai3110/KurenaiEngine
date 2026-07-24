@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cstring>
 
+#include <d3dx12.h>
+
 #include "DX12Buffer.h"
+#include "DX12ComputePipelineState.h"
 #include "DX12Device.h"
 #include "DX12PipelineState.h"
 #include "DX12Sampler.h"
@@ -237,5 +240,119 @@ namespace Kurenai::RHI
     {
         FlushPendingSrvWrites();
         m_Device->GetCommandList()->DrawIndexedInstanced(indexCount, 1, startIndexLocation, baseVertexLocation, 0);
+    }
+
+    void DX12CommandList::SetComputePipelineState(IRHIPipelineState* pipelineState)
+    {
+        auto* dx12ComputePipelineState = static_cast<DX12ComputePipelineState*>(pipelineState);
+        auto* cmdList = m_Device->GetCommandList();
+
+        // SetComputeRootSignatureは以前バインドされていたルート引数を無効化するため、
+        // このPSOで実際に使うb0/b1/SRV・UAVは呼び出し側が直後にSetComputeConstantBuffer/
+        // SetComputeTexture/SetComputeUnorderedAccessTexture(Buffer)で設定し直す
+        cmdList->SetComputeRootSignature(m_Device->GetComputeRootSignature());
+        cmdList->SetPipelineState(dx12ComputePipelineState->GetPipelineState());
+        // サンプラーテーブル(ルートパラメータ3)はグラフィックス同様s0固定で常に同じものを使うため、
+        // ここで一度だけバインドしておく
+        cmdList->SetComputeRootDescriptorTable(3, m_Device->GetShaderVisibleSamplerHeap()->GetGpuHandle(0));
+    }
+
+    void DX12CommandList::SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer)
+    {
+        auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+        m_Device->GetCommandList()->SetComputeRootConstantBufferView(slot, dx12Buffer->GetGPUVirtualAddress());
+    }
+
+    void DX12CommandList::SetComputeTexture(uint32_t slot, IRHITexture* texture)
+    {
+        auto* dx12Texture = static_cast<DX12Texture*>(texture);
+        dx12Texture->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        m_PendingComputeSrvHandles[slot] = dx12Texture->GetSrvCpuHandle();
+        m_PendingComputeSrvSlotMask |= (1u << slot);
+    }
+
+    void DX12CommandList::SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture)
+    {
+        auto* dx12Texture = static_cast<DX12Texture*>(texture);
+        dx12Texture->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        m_PendingComputeUavHandles[slot] = dx12Texture->GetUavCpuHandle();
+        m_PendingComputeUavSlotMask |= (1u << slot);
+        m_BoundComputeUavResources[slot] = dx12Texture->GetResource();
+    }
+
+    void DX12CommandList::SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer)
+    {
+        auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+
+        m_PendingComputeUavHandles[slot] = dx12Buffer->GetUavCpuHandle();
+        m_PendingComputeUavSlotMask |= (1u << slot);
+        m_BoundComputeUavResources[slot] = dx12Buffer->GetResource();
+    }
+
+    void DX12CommandList::FlushPendingComputeWrites()
+    {
+        if (m_PendingComputeSrvSlotMask == 0 && m_PendingComputeUavSlotMask == 0)
+        {
+            return;
+        }
+
+        const uint32_t tableBase = m_Device->AllocateComputeTableBlock(kComputeSrvSlotCount + kComputeUavSlotCount);
+        auto* heap = m_Device->GetShaderVisibleSrvHeap();
+        m_Device->GetCommandList()->SetComputeRootDescriptorTable(2, heap->GetGpuHandle(tableBase));
+
+        D3D12_CPU_DESCRIPTOR_HANDLE destRanges[kComputeSrvSlotCount + kComputeUavSlotCount];
+        D3D12_CPU_DESCRIPTOR_HANDLE srcRanges[kComputeSrvSlotCount + kComputeUavSlotCount];
+        uint32_t rangeCount = 0;
+
+        for (uint32_t slot = 0; slot < kComputeSrvSlotCount; ++slot)
+        {
+            if (m_PendingComputeSrvSlotMask & (1u << slot))
+            {
+                destRanges[rangeCount] = heap->GetCpuHandle(tableBase + slot);
+                srcRanges[rangeCount] = m_PendingComputeSrvHandles[slot];
+                ++rangeCount;
+            }
+        }
+        for (uint32_t slot = 0; slot < kComputeUavSlotCount; ++slot)
+        {
+            if (m_PendingComputeUavSlotMask & (1u << slot))
+            {
+                destRanges[rangeCount] = heap->GetCpuHandle(tableBase + kComputeSrvSlotCount + slot);
+                srcRanges[rangeCount] = m_PendingComputeUavHandles[slot];
+                ++rangeCount;
+            }
+        }
+
+        m_Device->GetDevice()->CopyDescriptors(
+            rangeCount, destRanges, nullptr, rangeCount, srcRanges, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        m_PendingComputeSrvSlotMask = 0;
+        m_PendingComputeUavSlotMask = 0;
+    }
+
+    void DX12CommandList::Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+    {
+        FlushPendingComputeWrites();
+        m_Device->GetCommandList()->Dispatch(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+
+        // このDispatchでUAVとして書き込んだリソースは、直後に別のDispatchやSRVとして読む場合に
+        // 書き込み完了を保証する必要があるため、UAVバリアを発行しておく
+        D3D12_RESOURCE_BARRIER barriers[kComputeUavSlotCount];
+        uint32_t barrierCount = 0;
+        for (uint32_t slot = 0; slot < kComputeUavSlotCount; ++slot)
+        {
+            if (m_BoundComputeUavResources[slot])
+            {
+                barriers[barrierCount] = CD3DX12_RESOURCE_BARRIER::UAV(m_BoundComputeUavResources[slot]);
+                ++barrierCount;
+                m_BoundComputeUavResources[slot] = nullptr;
+            }
+        }
+        if (barrierCount > 0)
+        {
+            m_Device->GetCommandList()->ResourceBarrier(barrierCount, barriers);
+        }
     }
 }

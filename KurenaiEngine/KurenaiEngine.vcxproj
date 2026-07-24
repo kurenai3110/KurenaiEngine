@@ -113,6 +113,7 @@
     <ClInclude Include="Source\Library\RHI\DX11\DX11Buffer.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11Shader.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11PipelineState.h" />
+    <ClInclude Include="Source\Library\RHI\DX11\DX11ComputePipelineState.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11SwapChain.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11CommandList.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11Device.h" />
@@ -126,6 +127,7 @@
     <ClInclude Include="Source\Library\RHI\DX12\DX12Buffer.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Shader.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12PipelineState.h" />
+    <ClInclude Include="Source\Library\RHI\DX12\DX12ComputePipelineState.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12SwapChain.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12CommandList.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Device.h" />
@@ -156,6 +158,7 @@
     <ClCompile Include="Source\Library\RHI\DX11\DX11Buffer.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Shader.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11PipelineState.cpp" />
+    <ClCompile Include="Source\Library\RHI\DX11\DX11ComputePipelineState.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11SwapChain.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11CommandList.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Device.cpp" />
@@ -167,6 +170,7 @@
     <ClCompile Include="Source\Library\RHI\DX12\DX12Buffer.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Shader.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12PipelineState.cpp" />
+    <ClCompile Include="Source\Library\RHI\DX12\DX12ComputePipelineState.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12SwapChain.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12CommandList.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Device.cpp" />

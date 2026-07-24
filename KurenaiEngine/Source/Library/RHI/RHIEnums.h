@@ -6,6 +6,7 @@ namespace Kurenai::RHI
     {
         Vertex,
         Pixel,
+        Compute,
     };
 
     enum class BufferUsage
@@ -13,6 +14,9 @@ namespace Kurenai::RHI
         Vertex,
         Index,
         Constant,
+        // コンピュートシェーダーから読み書きする構造化バッファ(RWStructuredBuffer)。
+        // UAV+SRVの両方を持つDEFAULT/GPU専用ヒープに作成される
+        Structured,
     };
 
     enum class PrimitiveTopology

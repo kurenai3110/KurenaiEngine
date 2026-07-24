@@ -23,13 +23,16 @@ namespace Kurenai::RHI
             D3D12_RESOURCE_STATES initialState,
             uint32_t srvIndex,
             uint32_t rtvIndex,
-            uint32_t dsvIndex);
+            uint32_t dsvIndex,
+            uint32_t uavIndex = kInvalid);
         ~DX12Texture() override;
 
         ID3D12Resource* GetResource() const { return m_Resource.Get(); }
         D3D12_CPU_DESCRIPTOR_HANDLE GetSrvCpuHandle() const;
         D3D12_CPU_DESCRIPTOR_HANDLE GetRtvCpuHandle() const;
         D3D12_CPU_DESCRIPTOR_HANDLE GetDsvCpuHandle() const;
+        // CreateUAVTextureで作成した場合のみ有効(コンピュートシェーダーからのRW用)
+        D3D12_CPU_DESCRIPTOR_HANDLE GetUavCpuHandle() const;
 
         // 現在の状態と異なる場合のみバリアを発行して遷移する
         void TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState);
@@ -41,5 +44,6 @@ namespace Kurenai::RHI
         uint32_t m_SrvIndex;
         uint32_t m_RtvIndex;
         uint32_t m_DsvIndex;
+        uint32_t m_UavIndex;
     };
 }

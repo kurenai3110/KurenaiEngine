@@ -9,6 +9,8 @@
 
 namespace Kurenai::RHI
 {
+    class DX12Device;
+
     // 頂点/インデックス/定数バッファすべてこの1種類で扱うが、ヒープの配置はUsageによって異なる
     // (DX12Device::CreateBuffer参照)。
     //
@@ -33,18 +35,29 @@ namespace Kurenai::RHI
             BufferUsage usage,
             uint32_t ringCapacity = 1);
 
+        // BufferUsage::Structured(RWStructuredBuffer)用: UAVディスクリプタのインデックスを保持し、
+        // 破棄時にDX12Deviceのディスクリプタヒープへ返却する
+        static constexpr uint32_t kInvalid = 0xFFFFFFFFu;
+        DX12Buffer(DX12Device* device, Microsoft::WRL::ComPtr<ID3D12Resource> resource, uint32_t uavIndex, uint32_t sizeInBytes, uint32_t strideInBytes);
+        ~DX12Buffer() override;
+
+        ID3D12Resource* GetResource() const { return m_Resource.Get(); }
         D3D12_GPU_VIRTUAL_ADDRESS GetGPUVirtualAddress() const;
         // UpdateBuffer用: リング上の次のスロットへ書き込み位置を進め、そのCPUマップ済みポインタを返す
         void* AdvanceRingAndGetWritePtr();
         const D3D12_VERTEX_BUFFER_VIEW& GetVertexBufferView() const { return m_VertexBufferView; }
         const D3D12_INDEX_BUFFER_VIEW& GetIndexBufferView() const { return m_IndexBufferView; }
+        // BufferUsage::Structuredで作成した場合のみ有効なUAVハンドル(コンピュートシェーダーからのRW用)
+        D3D12_CPU_DESCRIPTOR_HANDLE GetUavCpuHandle() const;
 
     private:
+        DX12Device* m_Device = nullptr;
         Microsoft::WRL::ComPtr<ID3D12Resource> m_Resource;
         void* m_MappedPtr;
         uint32_t m_SlotSizeInBytes;
         uint32_t m_RingCapacity;
         uint32_t m_CurrentRingIndex = 0;
+        uint32_t m_UavIndex = kInvalid;
         D3D12_VERTEX_BUFFER_VIEW m_VertexBufferView{};
         D3D12_INDEX_BUFFER_VIEW m_IndexBufferView{};
     };

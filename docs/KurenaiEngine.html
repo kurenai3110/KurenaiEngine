@@ -473,10 +473,12 @@ while (!window.ShouldClose())
 std::unique_ptr&lt;IRHIBuffer&gt;    CreateBuffer(const BufferDesc&amp; desc);
 std::unique_ptr&lt;IRHIShader&gt;    CreateShader(const ShaderDesc&amp; desc);
 std::unique_ptr&lt;IRHIPipelineState&gt; CreatePipelineState(const PipelineStateDesc&amp; desc);
+std::unique_ptr&lt;IRHIPipelineState&gt; CreateComputePipelineState(const ComputePipelineStateDesc&amp; desc);
 std::unique_ptr&lt;IRHITexture&gt;   CreateTextureFromFile(const std::wstring&amp; filePath, bool sRGB);
 std::unique_ptr&lt;IRHITexture&gt;   CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 std::unique_ptr&lt;IRHITexture&gt;   CreateRenderTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f);
+std::unique_ptr&lt;IRHITexture&gt;   CreateUAVTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHISampler&gt;   CreateDefaultSampler();
 IRHICommandList*                GetImmediateCommandList();</code></pre>
 <p>
@@ -499,7 +501,41 @@ void SetTexture(uint32_t slot, IRHITexture* texture);
 void SetSampler(uint32_t slot, IRHISampler* sampler);
 void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes);
 void Draw(uint32_t vertexCount, uint32_t startVertexLocation);
-void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation);</code></pre>
+void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation);
+
+// コンピュートシェーダー(4.3.1参照)。SetPipelineState等のグラフィックス用APIとは
+// レジスタ空間が独立している
+void SetComputePipelineState(IRHIPipelineState* pipelineState);
+void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer);
+void SetComputeTexture(uint32_t slot, IRHITexture* texture);
+void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture);
+void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer);
+void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ);</code></pre>
+
+<h4 id="compute">4.3.1 コンピュートシェーダー</h4>
+<p>
+<code>ShaderStage::Compute</code>で<code>CreateShader</code>したシェーダーを
+<code>CreateComputePipelineState</code>に渡してコンピュート用パイプラインステートを作る。
+グラフィックス用の<code>SetPipelineState</code>/<code>SetConstantBuffer</code>/<code>SetTexture</code>とは
+別のレジスタ空間(DX12では専用のルートシグネチャ)を使うため、必ず<code>SetCompute&#8230;</code>系の
+専用APIを使うこと。
+</p>
+<pre><code>auto cs = device->CreateShader({ RHI::ShaderStage::Compute, L"Blur.hlsl", "CSMain" });
+auto pso = device->CreateComputePipelineState({ cs.get() });
+auto output = device->CreateUAVTexture(width, height, RHI::Format::R8G8B8A8_UNorm); // RWTexture2D
+
+cmd->SetComputePipelineState(pso.get());
+cmd->SetComputeTexture(0, inputTexture.get());              // t0 (SRV, 読み取り専用)
+cmd->SetComputeUnorderedAccessTexture(0, output.get());     // u0 (RWTexture2D)
+cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);         // HLSL側は[numthreads(8, 8, 1)]</code></pre>
+<p>
+構造化バッファ(<code>RWStructuredBuffer</code>)を使う場合は<code>BufferDesc::Usage = BufferUsage::Structured</code>
+で<code>CreateBuffer</code>し、<code>SetComputeUnorderedAccessBuffer</code>でu0〜u3にバインドする。
+<code>Dispatch</code>の直後に書き込み完了を保証するUAVバリアが自動的に発行されるため、続けて同じ
+リソースを別のDispatchやグラフィックスパスで読んでも呼び出し側でバリアを意識する必要はない。
+DX11バックエンドも同じAPIで動作するが、UAVはDispatch呼び出しの範囲内でのみバインドされ、
+呼び出し後に自動的にアンバインドされる(同一リソースをUAVとSRVへ同時バインドできないDX11の制約のため)。
+</p>
 
 <div class="note">
 <p><strong>バインドスロットの上限</strong>(DX12バックエンドが固定のルートシグネチャで実装されているため、
@@ -510,6 +546,16 @@ DX11/DX12共通でこの範囲を守る必要がある):</p>
 <tr><td>定数バッファ</td><td><code>0</code>, <code>1</code> の2つのみ</td><td><code>register(b0)</code>, <code>register(b1)</code></td></tr>
 <tr><td>テクスチャ</td><td><code>0</code>〜<code>6</code> の最大7つ</td><td><code>register(t0)</code>〜<code>register(t6)</code></td></tr>
 <tr><td>サンプラー</td><td><code>0</code> の1つのみ</td><td><code>register(s0)</code></td></tr>
+</tbody>
+</table>
+<p>コンピュートシェーダー(<code>SetCompute&#8230;</code>系、4.3.1参照)はグラフィックスとは別のスロット空間を持つ:</p>
+<table>
+<thead><tr><th>リソース</th><th>有効なスロット</th><th>HLSL側のレジスタ</th></tr></thead>
+<tbody>
+<tr><td>定数バッファ</td><td><code>0</code>, <code>1</code> の2つのみ</td><td><code>register(b0)</code>, <code>register(b1)</code></td></tr>
+<tr><td>テクスチャ(SRV)</td><td><code>0</code>〜<code>3</code> の最大4つ</td><td><code>register(t0)</code>〜<code>register(t3)</code></td></tr>
+<tr><td>UAV(RWTexture2D/RWStructuredBuffer)</td><td><code>0</code>〜<code>3</code> の最大4つ</td><td><code>register(u0)</code>〜<code>register(u3)</code></td></tr>
+<tr><td>サンプラー</td><td><code>0</code> の1つのみ(グラフィックスと共有)</td><td><code>register(s0)</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -535,8 +581,10 @@ IMMUTABLEになり以後の更新が失敗するため、必ずnullptrで作成�
 中身を持たない不透明なハンドル型。<code>std::unique_ptr&lt;IRHIXxx&gt;</code>として保持し、
 <code>IRHICommandList</code>の各メソッドに生ポインタ(<code>.get()</code>)で渡す。
 <code>RHIDesc.h</code>(<code>BufferDesc</code>, <code>ShaderDesc</code>, <code>InputElementDesc</code>,
-<code>PipelineStateDesc</code>)と<code>RHIEnums.h</code>(<code>ShaderStage</code>,
-<code>BufferUsage</code>, <code>Format</code>, <code>BlendMode</code> など)に描画リソースの
+<code>PipelineStateDesc</code>, <code>ComputePipelineStateDesc</code>)と<code>RHIEnums.h</code>
+(<code>ShaderStage</code>: <code>Vertex</code>/<code>Pixel</code>/<code>Compute</code>、
+<code>BufferUsage</code>: <code>Vertex</code>/<code>Index</code>/<code>Constant</code>/<code>Structured</code>(コンピュートシェーダー用のRWStructuredBuffer)、
+<code>Format</code>, <code>BlendMode</code> など)に描画リソースの
 記述構造体・列挙型がまとまっている。<code>PipelineStateDesc::BlendMode</code>には
 <code>Opaque</code>(既定・不透明)、<code>AlphaBlend</code>(標準アルファブレンド)、
 <code>Additive</code>(加算合成。炎・光などの発光エフェクト向け)、
@@ -612,7 +660,7 @@ assimp経由でglTF/FBX等を読み込み、頂点/インデックスバッフ�
 <tr><td>2Dの描画パス</td><td><code>KurenaiEngine2D::DrawSprite</code> は常にアルファブレンド・深度テストなしで描画される(不透明専用の高速パスはない)</td></tr>
 <tr><td>COM初期化</td><td><code>wWinMain</code> の先頭で <code>CoInitializeEx</code> を呼ぶこと。DirectXTexのWICテクスチャ読み込み(<code>LoadTexture</code>)がCOMに依存しているため、忘れると読み込みに失敗する</td></tr>
 <tr><td>ビルド設定の一致</td><td><code>KurenaiEngine.dll</code> とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
-<tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAA・UAVなし(4章参照)</td></tr>
+<tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
 </tbody>
 </table>
 </section>

@@ -5,8 +5,9 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**
 `Kurenai::KurenaiEngine2D`(2D)に加え、RHI(Rendering Hardware Interface)抽象化レイヤー
 (DX11・DX12それぞれのバックエンドを実行時に切り替え可能)やウィンドウ・カメラ・モデル読み込みと
 いった低レベルAPI(`Kurenai::RHI` / `Kurenai::Core` / `Kurenai::Assets`、まとめて「Library」)も
-公開しており、独自の描画パイプラインを組みたい場合はこちらを直接利用できます(詳細は
-[docs/KurenaiEngine.html](docs/KurenaiEngine.html) を参照)。
+公開しており、独自の描画パイプラインを組みたい場合はこちらを直接利用できます。RHI層はコンピュート
+シェーダー(`RWTexture2D`/`RWStructuredBuffer`によるUAV書き込み)にもDX11/DX12両対応で対応しています
+(詳細は[docs/KurenaiEngine.html](docs/KurenaiEngine.html) 4.3.1章を参照)。
 
 `KurenaiEngine3D` はassimp経由でglTF・FBXモデルの読み込み・描画に対応した完結型の
 3Dレンダラーです。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、

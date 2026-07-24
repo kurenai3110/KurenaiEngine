@@ -20,4 +20,9 @@ namespace Kurenai::RHI
     {
         return static_cast<ID3D11PixelShader*>(m_Shader.Get());
     }
+
+    ID3D11ComputeShader* DX11Shader::GetComputeShader() const
+    {
+        return static_cast<ID3D11ComputeShader*>(m_Shader.Get());
+    }
 }

@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "DX11Buffer.h"
+#include "DX11ComputePipelineState.h"
 #include "DX11PipelineState.h"
 #include "DX11Sampler.h"
 #include "DX11Shader.h"
@@ -135,5 +136,54 @@ namespace Kurenai::RHI
     void DX11CommandList::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
     {
         m_Context->DrawIndexed(indexCount, startIndexLocation, baseVertexLocation);
+    }
+
+    void DX11CommandList::SetComputePipelineState(IRHIPipelineState* pipelineState)
+    {
+        auto* dx11ComputePipelineState = static_cast<DX11ComputePipelineState*>(pipelineState);
+        m_Context->CSSetShader(dx11ComputePipelineState->GetComputeShader()->GetComputeShader(), nullptr, 0);
+    }
+
+    void DX11CommandList::SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer)
+    {
+        auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
+        ID3D11Buffer* buffers[] = { dx11Buffer->GetBuffer() };
+        m_Context->CSSetConstantBuffers(slot, 1, buffers);
+    }
+
+    void DX11CommandList::SetComputeTexture(uint32_t slot, IRHITexture* texture)
+    {
+        auto* dx11Texture = static_cast<DX11Texture*>(texture);
+        ID3D11ShaderResourceView* srvs[] = { dx11Texture->GetShaderResourceView() };
+        m_Context->CSSetShaderResources(slot, 1, srvs);
+    }
+
+    void DX11CommandList::SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture)
+    {
+        auto* dx11Texture = static_cast<DX11Texture*>(texture);
+        ID3D11UnorderedAccessView* uavs[] = { dx11Texture->GetUnorderedAccessView() };
+        m_Context->CSSetUnorderedAccessViews(slot, 1, uavs, nullptr);
+        m_BoundComputeUavSlotMask |= (1u << slot);
+    }
+
+    void DX11CommandList::SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer)
+    {
+        auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
+        ID3D11UnorderedAccessView* uavs[] = { dx11Buffer->GetUnorderedAccessView() };
+        m_Context->CSSetUnorderedAccessViews(slot, 1, uavs, nullptr);
+        m_BoundComputeUavSlotMask |= (1u << slot);
+    }
+
+    void DX11CommandList::Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+    {
+        m_Context->Dispatch(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+
+        // バインドしたUAVはこのDispatchでのみ有効とし、直後に明示的に解放する(コメントはヘッダ側参照)
+        if (m_BoundComputeUavSlotMask != 0)
+        {
+            ID3D11UnorderedAccessView* nullUavs[kComputeUavSlotCount] = {};
+            m_Context->CSSetUnorderedAccessViews(0, kComputeUavSlotCount, nullUavs, nullptr);
+            m_BoundComputeUavSlotMask = 0;
+        }
     }
 }
