@@ -6,6 +6,7 @@
 - 実装が完了したらコミットとpushをするかユーザーに聞く
 - 機能実装時はREADME.mdも合わせて更新する
 - ドキュメントはHTMLで書く
+- https://github.com/Graphify-Labs/graphify を使用する
 
 # Claudeによる動作確認時の入力操作方針
 - マウス操作: 実カーソルを動かす`SetCursorPos`/`mouse_event`ではなく、対象ウィンドウのHWNDへ`PostMessage`/`SendMessage`でメッセージを直接送る方式を使う(実デスクトップのカーソル・フォーカスに影響を与えないため)
