@@ -400,6 +400,31 @@ namespace Kurenai::RHI
         return std::make_unique<DX11Texture>(srv);
     }
 
+    std::unique_ptr<IRHITexture> DX11Device::CreateTextureFromMemory(uint32_t width, uint32_t height, const void* pixelsRGBA8)
+    {
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = width;
+        textureDesc.Height = height;
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = 1;
+        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        D3D11_SUBRESOURCE_DATA initData{};
+        initData.pSysMem = pixelsRGBA8;
+        initData.SysMemPitch = width * 4;
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, &initData, &texture), "テクスチャの作成に失敗しました");
+
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), nullptr, &srv), "シェーダリソースビューの作成に失敗しました");
+
+        return std::make_unique<DX11Texture>(srv);
+    }
+
     std::unique_ptr<IRHITexture> DX11Device::CreateRenderTexture(uint32_t width, uint32_t height, Format format)
     {
         D3D11_TEXTURE2D_DESC textureDesc{};

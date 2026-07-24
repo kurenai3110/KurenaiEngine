@@ -755,6 +755,32 @@ namespace Kurenai::RHI
         return CreateTextureFromImage(metadata, image);
     }
 
+    std::unique_ptr<IRHITexture> DX12Device::CreateTextureFromMemory(uint32_t width, uint32_t height, const void* pixelsRGBA8)
+    {
+        DirectX::TexMetadata metadata{};
+        metadata.width = width;
+        metadata.height = height;
+        metadata.depth = 1;
+        metadata.arraySize = 1;
+        metadata.mipLevels = 1;
+        metadata.format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        metadata.dimension = DirectX::TEX_DIMENSION_TEXTURE2D;
+
+        DirectX::ScratchImage image;
+        ThrowIfFailed(image.Initialize2D(metadata.format, width, height, 1, 1), "テクスチャの作成に失敗しました");
+
+        // 入力(pixelsRGBA8)はタイトパッキング(1行=width*4バイト)だが、ScratchImageの行ピッチは
+        // アライメントの都合で異なる場合があるため、行ごとにコピーする
+        const DirectX::Image* image0 = image.GetImage(0, 0, 0);
+        const uint8_t* src = static_cast<const uint8_t*>(pixelsRGBA8);
+        for (uint32_t y = 0; y < height; ++y)
+        {
+            memcpy(image0->pixels + y * image0->rowPitch, src + static_cast<size_t>(y) * width * 4, static_cast<size_t>(width) * 4);
+        }
+
+        return CreateTextureFromImage(metadata, image);
+    }
+
     std::unique_ptr<IRHITexture> DX12Device::CreateRenderTexture(uint32_t width, uint32_t height, Format format)
     {
         const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);

@@ -3,6 +3,8 @@
 #include <Windows.h>
 
 #include <cmath>
+#include <stdexcept>
+#include <vector>
 
 namespace Kurenai
 {
@@ -43,6 +45,8 @@ namespace Kurenai
         {
             DirectX::XMFLOAT4X4 World;
             DirectX::XMFLOAT4 Color;
+            // xy=UVオフセット, zw=UVスケール。DrawText以外は恒等変換(0, 0, 1, 1)で使う
+            DirectX::XMFLOAT4 UVOffsetScale = { 0.0f, 0.0f, 1.0f, 1.0f };
         };
     }
 
@@ -111,6 +115,12 @@ namespace Kurenai
         m_ObjectConstantBuffer = m_Device->CreateBuffer(objectConstantBufferDesc);
 
         m_WhiteTexture = CreateSolidColorTexture(255, 255, 255, 255); // DrawLineが使う
+
+        // BuildFontAtlasはコンストラクタで(BeginFrame/Drawの前に)呼ぶ必要がある。DX12の
+        // CreateTextureFromMemoryは内部でSubmitAndWaitIdle(コマンドリストのフラッシュ+リセット)を
+        // 伴うため、BeginFrame後のフレーム中に呼ぶとレンダーターゲット/パイプラインステート等の
+        // 設定済み状態が失われてしまう(DrawText初回呼び出し時の遅延生成にしたところクラッシュした)
+        BuildFontAtlas();
     }
 
     KurenaiEngine2D::~KurenaiEngine2D() = default;
@@ -213,6 +223,150 @@ namespace Kurenai
 
         const float angle = std::atan2(dy, dx);
         DrawSprite((x1 + x2) * 0.5f, (y1 + y2) * 0.5f, length, thickness, angle, m_WhiteTexture, r, g, b, a);
+    }
+
+    void KurenaiEngine2D::BuildFontAtlas()
+    {
+        HDC screenDC = GetDC(nullptr);
+        HDC memDC = CreateCompatibleDC(screenDC);
+        ReleaseDC(nullptr, screenDC);
+
+        // ゲーム内HUD表示に使える程度の可読性があれば十分なため、厳密なフォントレンダリング
+        // (ヒンティング等)は行わず、GDIでラスタライズしたビットマップフォントとして扱う
+        constexpr int kAtlasFontPixelHeight = 48;
+        HFONT font = CreateFontW(
+            -kAtlasFontPixelHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, L"Consolas");
+        if (!font)
+        {
+            DeleteDC(memDC);
+            throw std::runtime_error("フォントアトラス用フォントの作成に失敗しました");
+        }
+        HFONT oldFont = static_cast<HFONT>(SelectObject(memDC, font));
+
+        TEXTMETRICW metrics{};
+        GetTextMetricsW(memDC, &metrics);
+
+        // ASCII印字可能文字(0x20〜0x7E)のみをアトラスへ焼き込む。かな漢字等の対応は現状のスコープ外
+        constexpr wchar_t kFirstChar = 0x20;
+        constexpr wchar_t kLastChar = 0x7E;
+        constexpr int kCharCount = kLastChar - kFirstChar + 1;
+        constexpr int kColumns = 16;
+        constexpr int kPadding = 2;
+        const int rows = (kCharCount + kColumns - 1) / kColumns;
+        const int cellWidth = metrics.tmMaxCharWidth + kPadding * 2;
+        const int cellHeight = metrics.tmHeight + kPadding * 2;
+        const uint32_t atlasWidth = static_cast<uint32_t>(cellWidth * kColumns);
+        const uint32_t atlasHeight = static_cast<uint32_t>(cellHeight * rows);
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = static_cast<LONG>(atlasWidth);
+        bmi.bmiHeader.biHeight = -static_cast<LONG>(atlasHeight); // 負値=トップダウンDIB(先頭行が画像上端)
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        void* bits = nullptr;
+        HBITMAP bitmap = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!bitmap)
+        {
+            SelectObject(memDC, oldFont);
+            DeleteObject(font);
+            DeleteDC(memDC);
+            throw std::runtime_error("フォントアトラス用ビットマップの作成に失敗しました");
+        }
+        HBITMAP oldBitmap = static_cast<HBITMAP>(SelectObject(memDC, bitmap));
+
+        // 背景を黒、文字を白で描画し、後でRGB輝度(=白文字/黒背景なのでR=G=Bのグレースケール値)を
+        // そのままアルファ値として使う(RGBは常に白のままにし、DrawText呼び出し時のColorで乗算ティントする)
+        const RECT fillRect{ 0, 0, static_cast<LONG>(atlasWidth), static_cast<LONG>(atlasHeight) };
+        FillRect(memDC, &fillRect, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        SetTextColor(memDC, RGB(255, 255, 255));
+        SetBkMode(memDC, TRANSPARENT);
+
+        m_Glyphs.reserve(kCharCount);
+        for (int i = 0; i < kCharCount; ++i)
+        {
+            const wchar_t ch = static_cast<wchar_t>(kFirstChar + i);
+            const int col = i % kColumns;
+            const int row = i / kColumns;
+            const int cellX = col * cellWidth;
+            const int cellY = row * cellHeight;
+
+            SIZE size{};
+            GetTextExtentPoint32W(memDC, &ch, 1, &size);
+            TextOutW(memDC, cellX + kPadding, cellY + kPadding, &ch, 1);
+
+            GlyphMetrics glyph{};
+            glyph.U0 = static_cast<float>(cellX) / atlasWidth;
+            glyph.V0 = static_cast<float>(cellY) / atlasHeight;
+            glyph.U1 = static_cast<float>(cellX + cellWidth) / atlasWidth;
+            glyph.V1 = static_cast<float>(cellY + cellHeight) / atlasHeight;
+            glyph.AdvancePixels = static_cast<float>(size.cx);
+            glyph.WidthPixels = static_cast<float>(cellWidth);
+            glyph.HeightPixels = static_cast<float>(cellHeight);
+            m_Glyphs.emplace(ch, glyph);
+        }
+
+        GdiFlush();
+
+        std::vector<uint8_t> pixels(static_cast<size_t>(atlasWidth) * atlasHeight * 4);
+        const uint8_t* src = static_cast<const uint8_t*>(bits);
+        const size_t pixelCount = static_cast<size_t>(atlasWidth) * atlasHeight;
+        for (size_t p = 0; p < pixelCount; ++p)
+        {
+            const uint8_t coverage = src[p * 4 + 0]; // DIBはBGRA順。B成分=R=G(グレースケールAA)をアルファに使う
+            pixels[p * 4 + 0] = 255;
+            pixels[p * 4 + 1] = 255;
+            pixels[p * 4 + 2] = 255;
+            pixels[p * 4 + 3] = coverage;
+        }
+
+        SelectObject(memDC, oldBitmap);
+        DeleteObject(bitmap);
+        SelectObject(memDC, oldFont);
+        DeleteObject(font);
+        DeleteDC(memDC);
+
+        m_FontAtlasTexture = m_Device->CreateTextureFromMemory(atlasWidth, atlasHeight, pixels.data());
+        m_FontAtlasPixelHeight = static_cast<float>(metrics.tmHeight);
+    }
+
+    void KurenaiEngine2D::DrawText(float x, float y, const std::wstring& text, float fontSize, float r, float g, float b, float a)
+    {
+        const float scale = fontSize / m_FontAtlasPixelHeight;
+        RHI::IRHICommandList* commandList = GetCommandList();
+        commandList->SetTexture(0, m_FontAtlasTexture.get());
+
+        float penX = x;
+        for (const wchar_t ch : text)
+        {
+            const auto it = m_Glyphs.find(ch);
+            if (it == m_Glyphs.end())
+            {
+                continue; // 未対応文字(ASCII印字可能文字以外)は無視する
+            }
+            const GlyphMetrics& glyph = it->second;
+            const float glyphWidth = glyph.WidthPixels * scale;
+            const float glyphHeight = glyph.HeightPixels * scale;
+
+            ObjectConstants objectConstants{};
+            // (x, y)はテキスト左下基準。DrawSpriteと同様ワールド座標はY-upなので、
+            // グリフ矩形の中心はペン位置から右・上へずらした位置になる
+            const DirectX::XMMATRIX world = DirectX::XMMatrixScaling(glyphWidth, glyphHeight, 1.0f) *
+                DirectX::XMMatrixTranslation(penX + glyphWidth * 0.5f, y + glyphHeight * 0.5f, 0.0f);
+            DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixTranspose(world));
+            objectConstants.Color = { r, g, b, a };
+            objectConstants.UVOffsetScale = { glyph.U0, glyph.V0, glyph.U1 - glyph.U0, glyph.V1 - glyph.V0 };
+
+            commandList->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+            commandList->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+            commandList->DrawIndexed(6, 0, 0);
+
+            penX += glyph.AdvancePixels * scale;
+        }
     }
 
     void KurenaiEngine2D::EndFrame(bool vsync)

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "KurenaiEngineBase.h"
@@ -67,10 +68,28 @@ namespace Kurenai
         // (x1, y1)-(x2, y2)を結ぶ、太さthicknessの線分を描画する。r, g, b, aは色(半透明可)
         void DrawLine(float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a);
 
+        // (x, y)を左下基準としてtextを描画する。fontSizeはおおよその文字高さ(ピクセル単位)。
+        // ビットマップフォント方式のため、厳密なフォントレンダリング(ヒンティング等)は行わない。
+        // 対応文字はASCII印字可能文字(0x20〜0x7E)のみで、それ以外(かな漢字を含む)は表示されずスキップされる
+        void DrawText(float x, float y, const std::wstring& text, float fontSize, float r, float g, float b, float a);
+
         // 描画コマンドを確定してバックバッファへ表示する。1フレームにつき1回だけ呼ぶ
         void EndFrame(bool vsync = true);
 
     private:
+        // DrawText用の1文字ぶんのメトリクス。すべてBuildFontAtlasの生成時解像度(m_FontAtlasPixelHeight)基準の値
+        struct GlyphMetrics
+        {
+            float U0 = 0.0f, V0 = 0.0f, U1 = 0.0f, V1 = 0.0f; // アトラス内のUV矩形
+            float AdvancePixels = 0.0f;
+            float WidthPixels = 0.0f, HeightPixels = 0.0f;
+        };
+        // GDIでASCII印字可能文字一式をラスタライズし、m_FontAtlasTexture/m_Glyphsを構築する。
+        // コンストラクタでBeginFrame/Drawより前に呼ぶ必要がある(DX12のCreateTextureFromMemoryは
+        // 内部でコマンドリストをフラッシュ・リセットするため、フレーム中に呼ぶと直前に設定した
+        // レンダーターゲット/パイプラインステート等が失われクラッシュする)
+        void BuildFontAtlas();
+
         Core::Camera m_Camera;
 
         std::unique_ptr<RHI::IRHIShader> m_VertexShader;
@@ -96,6 +115,13 @@ namespace Kurenai
         // LoadTexture/CreateSolidColorTextureで読み込んだテクスチャの実体を保持する
         // (TextureHandleは所有権を持たない借用ポインタのため)
         std::vector<std::unique_ptr<RHI::IRHITexture>> m_Textures;
+
+        // DrawText用。コンストラクタでBuildFontAtlasにより生成される
+        std::unique_ptr<RHI::IRHITexture> m_FontAtlasTexture;
+        std::unordered_map<wchar_t, GlyphMetrics> m_Glyphs;
+        // BuildFontAtlasが生成したフォントの基準ピクセル高さ。DrawTextのfontSizeはこれに対する
+        // 拡大率(fontSize / m_FontAtlasPixelHeight)としてグリフの表示サイズに反映される
+        float m_FontAtlasPixelHeight = 0.0f;
     };
 }
 

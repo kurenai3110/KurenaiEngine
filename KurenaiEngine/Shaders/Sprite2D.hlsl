@@ -10,6 +10,9 @@ cbuffer ObjectConstants : register(b1)
 {
     float4x4 World;
     float4 Color;
+    // xy=UVオフセット, zw=UVスケール。DrawText(フォントアトラスの1文字ぶんの矩形)専用で、
+    // それ以外(DrawSprite/DrawCircle)は(0, 0, 1, 1)の恒等変換で呼ぶ
+    float4 UVOffsetScale;
 };
 
 Texture2D SpriteTexture : register(t0);
@@ -32,7 +35,7 @@ PSInput VSMain(VSInput input)
     PSInput output;
     float4 worldPos = mul(float4(input.Position, 1.0f), World);
     output.Position = mul(worldPos, ViewProj);
-    output.UV = input.UV;
+    output.UV = UVOffsetScale.xy + input.UV * UVOffsetScale.zw;
     return output;
 }
 
