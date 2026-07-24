@@ -40,6 +40,8 @@ namespace Kurenai::RHI
         R32G32B32_Float,
         R32G32B32A32_Float,
         R8G8B8A8_UNorm,
+        // Hi-Zミップチェーン用の単チャンネル深度フォーマット。RWTexture2D<float>としてUAV書き込みする
+        R32_Float,
     };
 
     // 使用するグラフィックスAPIバックエンドの選択

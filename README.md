@@ -6,8 +6,10 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**
 (DX11・DX12それぞれのバックエンドを実行時に切り替え可能)やウィンドウ・カメラ・モデル読み込みと
 いった低レベルAPI(`Kurenai::RHI` / `Kurenai::Core` / `Kurenai::Assets`、まとめて「Library」)も
 公開しており、独自の描画パイプラインを組みたい場合はこちらを直接利用できます。RHI層はコンピュート
-シェーダー(`RWTexture2D`/`RWStructuredBuffer`によるUAV書き込み)にもDX11/DX12両対応で対応しています
-(詳細は[docs/KurenaiEngine.html](docs/KurenaiEngine.html) 4.3.1章を参照)。
+シェーダー(`RWTexture2D`/`RWStructuredBuffer`によるUAV書き込み)にもDX11/DX12両対応で対応しており
+(詳細は[docs/KurenaiEngine.html](docs/KurenaiEngine.html) 4.3.1章を参照)、そのコンピュートシェーダー
+対応を使ってHi-Zミップチェーン(深度のミップごとの縮小テクスチャ)を構築するAPIも用意しています
+(4.3.2章を参照)。
 
 `KurenaiEngine3D` はassimp経由でglTF・FBXモデルの読み込み・描画に対応した完結型の
 3Dレンダラーです。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、
@@ -23,7 +25,9 @@ G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_F
 
 金属/滑らかな面の鏡面間接光(環境反射)はSSR(スクリーンスペースリフレクション)で計算します。最終合成パスの出力(SceneColor)を反射先の環境色として再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチング(線形マーチ+2分探索によるヒット位置の精密化)を行います。スカイボックスへのフォールバックは、レイが画面内で実際に背景(深度なし)ピクセルへ到達したことを確認できた場合のみ行い、レイが画面外に外れた場合や最大距離まで判定がつかなかった場合は反射を追加しません(その先に何があるか不明なまま空を映り込ませると、洞窟のように周囲が遮蔽された空間でも誤って空が反射してしまうため)。ミップチェーンによるラフネスブラーは行っていないため、粗い面ほど反射の寄与を弱めてノイズ化を防いでいます。
 
-描画パイプラインは シャドウパス(サンライト視点で深度のみ描画) → ジオメトリパス(G-Buffer書き込み) → 直接光パス(G-Buffer・シャドウマップからPBRの直接光をHDRで計算) → AO/GIパス(選択中の手法でNormal/Depth、SSILの場合はAlbedo・直接光バッファも読みAO・間接拡散光を計算しブラー) → 最終合成パス(Albedo・直接光・AO/GI・スカイボックスを合成しトーンマッピングしてSceneColorへ出力) → SSRパス(SceneColor・G-Bufferから鏡面反射を計算し加算) → Presentパス(選択中のデバッグビューをバックバッファへ表示) の7パス構成です。シャドウ・AO/GI・SSRはそれぞれON/OFF可能で、OFF時は該当パスをスキップします。G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(`KurenaiEngine3D`のコンストラクタ引数、既定は1280x720)、Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
+描画パイプラインは シャドウパス(サンライト視点で深度のみ描画) → ジオメトリパス(G-Buffer書き込み) → Hi-Zパス(G-Buffer深度からコンピュートシェーダーでミップチェーンを構築) → 直接光パス(G-Buffer・シャドウマップからPBRの直接光をHDRで計算) → AO/GIパス(選択中の手法でNormal/Depth、SSILの場合はAlbedo・直接光バッファも読みAO・間接拡散光を計算しブラー) → 最終合成パス(Albedo・直接光・AO/GI・スカイボックスを合成しトーンマッピングしてSceneColorへ出力) → SSRパス(SceneColor・G-Bufferから鏡面反射を計算し加算) → Presentパス(選択中のデバッグビューをバックバッファへ表示) の8パス構成です。シャドウ・AO/GI・SSRはそれぞれON/OFF可能で、OFF時は該当パスをスキップします。G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(`KurenaiEngine3D`のコンストラクタ引数、既定は1280x720)、Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
+
+Hi-Zパスは、G-Buffer深度(単一ミップ)をコンピュートシェーダーで1x1になるまで縮小し、各ミップが2x2ブロックの最小値を持つミップチェーンを構築します。Reverse-Zでは値が小さいほど遠方を表すため、ブロックの最小値は「そのブロック内で最も遠い可視サーフェス」を意味し、将来のオクルージョンカリングやSSRのレイマーチング高速化の土台として使えます。現時点ではこのミップチェーンを利用する処理は未実装で、Presentパスのデバッグビュー(Render Targets - Hi-Z)でミップごとの内容を確認できるのみです。
 
 ## ドキュメント
 
@@ -145,9 +149,9 @@ Sample3D.exe -dx12
   - Bistro - Interior (Wine Cellar)
   - White Surface Test(粗さ0〜1の球体列)
 - **Post Processing** — AO/間接光のON/OFFと手法(Technique: SSAO / SSIL (Visibility Bitmask))を切り替え。SSAOは半径(Radius)/強さ(Power)、SSILは半径(Radius)/厚み(Thickness)/強さ(Intensity)/AOのコントラスト(AO Power)/スライス数(Slices)/ステップ数(Steps)を調整可能。シャドウのON/OFFもここで切り替え。SSRのON/OFFと最大レイ距離(Max Distance)/ヒット判定の厚み(Thickness)/ラフネスカットオフ(Roughness Cutoff)もここで調整可能
-- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / Depth (Raw) / Direct Light / AO/GI - Indirect Light (RGB) / AO/GI - Indirect Light (RGB, Before Blur) / AO/GI - Occlusion (Alpha) / AO/GI - Occlusion (Alpha, Before Blur) / Shadow Map / SSR (Final + Reflections))。Direct Lightは直接光パスの結果(HDR)をトーンマッピングして表示。Depth (Raw)は深度テクスチャの生値(0〜1)を加工せずそのまま表示(reverse-zの生値確認用。近平面が小さいためほとんどの距離で値が0付近になり、無加工ではほぼ黒く見える)。AO/GIバッファはrgb(間接拡散光)とa(遮蔽率)を別々に確認でき、Before Blur付きの項目はブラー前の生バッファ(タイル状ノイズが乗った状態)を表示する。Finalと同じくSSR無効時はSceneColorがそのまま表示される
+- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / Depth (Raw) / Direct Light / AO/GI - Indirect Light (RGB) / AO/GI - Indirect Light (RGB, Before Blur) / AO/GI - Occlusion (Alpha) / AO/GI - Occlusion (Alpha, Before Blur) / Shadow Map / SSR (Final + Reflections) / Hi-Z (Depth Mip Chain))。Direct Lightは直接光パスの結果(HDR)をトーンマッピングして表示。Depth (Raw)は深度テクスチャの生値(0〜1)を加工せずそのまま表示(reverse-zの生値確認用。近平面が小さいためほとんどの距離で値が0付近になり、無加工ではほぼ黒く見える)。AO/GIバッファはrgb(間接拡散光)とa(遮蔽率)を別々に確認でき、Before Blur付きの項目はブラー前の生バッファ(タイル状ノイズが乗った状態)を表示する。Finalと同じくSSR無効時はSceneColorがそのまま表示される。Hi-Zを選択するとミップレベルを指定するスライダーが表示され、Hi-Zミップチェーンの指定ミップの生値をグレースケール表示する(ミップが上がるほど解像度が半分ずつになりレターボックス表示も追従する)
 - **Lighting** — 太陽光の時刻(Time of Day, 0〜24時)をスライダーで指定。Auto Advanceを有効にすると時刻が自動で進行(速度をSpeedで調整)
-- **Profiler** — FPS(指数移動平均)、CPUフレーム時間(Update+Render呼び出し時間)、GPUフレーム時間と各パス(Shadow/GBuffer/DirectLight/AO/AOBlur/Lighting/SSR/Present)ごとのGPU実行時間をGPUタイムスタンプクエリで計測して表示。GPU側の計測はDX11/DX12とも数フレーム遅れの値が表示される(AO/AOBlurはAO/間接光が無効の間、SSRはSSRが無効の間は表示されない)
+- **Profiler** — FPS(指数移動平均)、CPUフレーム時間(Update+Render呼び出し時間)、GPUフレーム時間と各パス(Shadow/GBuffer/HiZ/DirectLight/AO/AOBlur/Lighting/SSR/Present)ごとのGPU実行時間をGPUタイムスタンプクエリで計測して表示。GPU側の計測はDX11/DX12とも数フレーム遅れの値が表示される(AO/AOBlurはAO/間接光が無効の間、SSRはSSRが無効の間は表示されない)
 
 ## サンプルプログラム
 

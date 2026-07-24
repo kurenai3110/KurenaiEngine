@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include <vector>
 #include <wrl/client.h>
 
 #include "RHI/IRHITexture.h"
@@ -14,18 +15,25 @@ namespace Kurenai::RHI
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv,
             Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv = nullptr,
             Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv = nullptr,
-            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = nullptr);
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = nullptr,
+            std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>> mipUavs = {});
 
         ID3D11ShaderResourceView* GetShaderResourceView() const { return m_Srv.Get(); }
         ID3D11RenderTargetView* GetRenderTargetView() const { return m_Rtv.Get(); }
         ID3D11DepthStencilView* GetDepthStencilView() const { return m_Dsv.Get(); }
-        // CreateUAVTextureで作成した場合のみ非nullptr(コンピュートシェーダーからのRW用)
-        ID3D11UnorderedAccessView* GetUnorderedAccessView() const { return m_Uav.Get(); }
+        // CreateUAVTexture/CreateHiZTextureで作成した場合のみ非nullptr(コンピュートシェーダーからのRW用)。
+        // CreateHiZTextureのミップチェーンテクスチャはミップごとに個別のUAVを持つためmipLevelで選択する
+        // (CreateUAVTextureは常に1ミップのみなので既定値の0で単一UAVが返る)
+        ID3D11UnorderedAccessView* GetUnorderedAccessView(uint32_t mipLevel = 0) const
+        {
+            return m_MipUavs.empty() ? m_Uav.Get() : m_MipUavs[mipLevel].Get();
+        }
 
     private:
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_Srv;
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_Rtv;
         Microsoft::WRL::ComPtr<ID3D11DepthStencilView> m_Dsv;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> m_Uav;
+        std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>> m_MipUavs;
     };
 }

@@ -7,6 +7,7 @@
 //       3=AO/GIバッファのa(遮蔽率)チャンネルをグレースケール表示(SSAOのrgbは常に0のため専用)
 //       4=直接光パスの結果(HDR、トーンマッピング前)をReinhardトーンマッピング+ガンマ補正して表示
 //       5=深度の生値(0〜1)を加工せずそのままグレースケール表示(reverse-z等の生値確認用)
+//       6=Hi-Zミップチェーンの指定ミップ(MipLevel)をSampleLevelで読み、生値のままグレースケール表示
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
@@ -22,7 +23,8 @@ cbuffer FrameConstants : register(b0)
 cbuffer PresentConstants : register(b1)
 {
     int Mode;
-    float3 PresentPadding;
+    float MipLevel;
+    float2 PresentPadding;
 };
 
 Texture2D SourceTexture : register(t0);
@@ -53,6 +55,14 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
+    if (Mode == 6)
+    {
+        // Hi-Zはミップごとに解像度が異なるため、画面スケールから決まる自動ミップ選択(Sample)ではなく
+        // 明示的に指定したミップ(MipLevel)を必ず読む
+        float depth = SourceTexture.SampleLevel(DefaultSampler, input.UV, MipLevel).r;
+        return float4(depth, depth, depth, 1.0f);
+    }
+
     float4 sourceColor = SourceTexture.Sample(DefaultSampler, input.UV);
 
     if (Mode == 1)

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <d3d12.h>
+#include <vector>
 #include <wrl/client.h>
 
 #include "RHI/IRHITexture.h"
@@ -24,15 +25,18 @@ namespace Kurenai::RHI
             uint32_t srvIndex,
             uint32_t rtvIndex,
             uint32_t dsvIndex,
-            uint32_t uavIndex = kInvalid);
+            uint32_t uavIndex = kInvalid,
+            std::vector<uint32_t> mipUavIndices = {});
         ~DX12Texture() override;
 
         ID3D12Resource* GetResource() const { return m_Resource.Get(); }
         D3D12_CPU_DESCRIPTOR_HANDLE GetSrvCpuHandle() const;
         D3D12_CPU_DESCRIPTOR_HANDLE GetRtvCpuHandle() const;
         D3D12_CPU_DESCRIPTOR_HANDLE GetDsvCpuHandle() const;
-        // CreateUAVTextureで作成した場合のみ有効(コンピュートシェーダーからのRW用)
-        D3D12_CPU_DESCRIPTOR_HANDLE GetUavCpuHandle() const;
+        // CreateUAVTexture/CreateHiZTextureで作成した場合のみ有効(コンピュートシェーダーからのRW用)。
+        // CreateHiZTextureのミップチェーンテクスチャはミップごとに個別のUAVを持つためmipLevelで選択する
+        // (CreateUAVTextureは常に1ミップのみなので既定値の0で単一UAVが返る)
+        D3D12_CPU_DESCRIPTOR_HANDLE GetUavCpuHandle(uint32_t mipLevel = 0) const;
 
         // 現在の状態と異なる場合のみバリアを発行して遷移する
         void TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState);
@@ -45,5 +49,6 @@ namespace Kurenai::RHI
         uint32_t m_RtvIndex;
         uint32_t m_DsvIndex;
         uint32_t m_UavIndex;
+        std::vector<uint32_t> m_MipUavIndices;
     };
 }

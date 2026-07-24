@@ -479,6 +479,7 @@ std::unique_ptr&lt;IRHITexture&gt;   CreateSolidColorTexture(uint8_t r, uint8_t 
 std::unique_ptr&lt;IRHITexture&gt;   CreateRenderTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f);
 std::unique_ptr&lt;IRHITexture&gt;   CreateUAVTexture(uint32_t width, uint32_t height, Format format);
+std::unique_ptr&lt;IRHITexture&gt;   CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels);
 std::unique_ptr&lt;IRHISampler&gt;   CreateDefaultSampler();
 IRHICommandList*                GetImmediateCommandList();</code></pre>
 <p>
@@ -508,7 +509,7 @@ void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseV
 void SetComputePipelineState(IRHIPipelineState* pipelineState);
 void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer);
 void SetComputeTexture(uint32_t slot, IRHITexture* texture);
-void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture);
+void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0); // mipLevelはCreateHiZTexture用(4.3.2参照)
 void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer);
 void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ);</code></pre>
 
@@ -535,6 +536,49 @@ cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);         // HLSL側は[numth
 リソースを別のDispatchやグラフィックスパスで読んでも呼び出し側でバリアを意識する必要はない。
 DX11バックエンドも同じAPIで動作するが、UAVはDispatch呼び出しの範囲内でのみバインドされ、
 呼び出し後に自動的にアンバインドされる(同一リソースをUAVとSRVへ同時バインドできないDX11の制約のため)。
+</p>
+
+<h4 id="hiz">4.3.2 Hi-Zミップチェーン</h4>
+<p>
+<code>CreateHiZTexture(width, height, mipLevels)</code>は、単チャンネル(<code>R32_Float</code>)で
+<code>width</code>/<code>height</code>から1x1までのフルミップチェーンを持つテクスチャを作る。
+通常の<code>CreateUAVTexture</code>が常に1ミップしか持たないのに対し、こちらは
+<strong>ミップごとに個別のUAV</strong>を張るため、<code>SetComputeUnorderedAccessTexture</code>の
+第3引数<code>mipLevel</code>で「どのミップに書き込むか」を指定できる。SRV側は全ミップをまとめて見る
+1枚のビューになっており(<code>SampleLevel</code>で任意のミップを読む用途、ミップ0のコピー元は別テクスチャ)、
+ミップ単位で読みたい場合はUAVを読み取り専用として使う(下記例のように隣接ミップを2枚ともUAVでバインドする)。
+</p>
+<pre><code>auto copyCs = device->CreateShader({ RHI::ShaderStage::Compute, L"HiZ.hlsl", "CSCopy" });
+auto copyPso = device->CreateComputePipelineState({ copyCs.get() });
+auto downsampleCs = device->CreateShader({ RHI::ShaderStage::Compute, L"HiZ.hlsl", "CSDownsample" });
+auto downsamplePso = device->CreateComputePipelineState({ downsampleCs.get() });
+
+const uint32_t mipLevels = /* floor(log2(max(width, height))) + 1 */;
+auto hiZTexture = device->CreateHiZTexture(width, height, mipLevels);
+
+// ミップ0: 通常の深度テクスチャ(1ミップ)からコピーする
+cmd->SetComputePipelineState(copyPso.get());
+cmd->SetComputeTexture(0, depthTexture.get());                    // t0 (SRV)
+cmd->SetComputeUnorderedAccessTexture(0, hiZTexture.get(), 0);    // u0 = ミップ0
+cmd->Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+
+// ミップ1以降: 1つ前のミップを読み、2x2ブロックの最小値(Reverse-Zのため最も遠い深度)を次のミップへ書く
+cmd->SetComputePipelineState(downsamplePso.get());
+for (uint32_t mip = 1; mip &lt; mipLevels; ++mip)
+{
+    cmd->SetComputeUnorderedAccessTexture(0, hiZTexture.get(), mip - 1); // u0 = 読み取り元ミップ
+    cmd->SetComputeUnorderedAccessTexture(1, hiZTexture.get(), mip);     // u1 = 書き込み先ミップ
+    cmd->Dispatch(/* 出力ミップの幅高さに応じたグループ数 */);
+}</code></pre>
+<p>
+最小値でダウンサンプルするのは、このエンジンがReverse-Z(近平面=1.0/遠平面=0.0、深度比較はGREATER)を
+使っているため。あるブロックの最小深度値は
+「そのブロック内で最も遠い可視サーフェス」を表し、候補オブジェクトの最も近い点でさえこの値より
+奥であれば、ブロック内のどのピクセルにも遮蔽されていることが保証できる(非Reverse-Zで最大値を
+取る一般的なHi-Zカリング手法を、Reverse-Zの向きに合わせて反転させたもの)。<code>KurenaiEngine3D</code>
+はG-Buffer深度からこのミップチェーンを毎フレーム構築しているが、現時点ではオクルージョンカリングや
+SSRのレイマーチング高速化といった利用箇所は未実装で、デバッグ表示(Render Targets - Hi-Z)でのみ
+内容を確認できる。
 </p>
 
 <div class="note">

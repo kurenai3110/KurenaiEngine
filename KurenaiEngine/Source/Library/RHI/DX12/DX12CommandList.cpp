@@ -272,12 +272,12 @@ namespace Kurenai::RHI
         m_PendingComputeSrvSlotMask |= (1u << slot);
     }
 
-    void DX12CommandList::SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture)
+    void DX12CommandList::SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel)
     {
         auto* dx12Texture = static_cast<DX12Texture*>(texture);
         dx12Texture->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        m_PendingComputeUavHandles[slot] = dx12Texture->GetUavCpuHandle();
+        m_PendingComputeUavHandles[slot] = dx12Texture->GetUavCpuHandle(mipLevel);
         m_PendingComputeUavSlotMask |= (1u << slot);
         m_BoundComputeUavResources[slot] = dx12Texture->GetResource();
     }

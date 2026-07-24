@@ -116,8 +116,30 @@ namespace Kurenai
         struct alignas(16) PresentConstants
         {
             int32_t Mode;
-            float Padding[3];
+            float MipLevel; // Mode==6(Hi-Z)でSampleLevelに渡すミップレベル
+            float Padding[2];
         };
+
+        // HiZ.hlsl側のcbuffer HiZConstantsと一致させる必要がある
+        struct alignas(16) HiZConstants
+        {
+            DirectX::XMUINT2 SrcSize;
+            DirectX::XMUINT2 DstSize;
+        };
+
+        // widthとheightのうち大きい方が1になるまでのミップ数(width/heightそのものを含む)を返す。
+        // 例: 1280x720 -> max=1280 -> 1280,640,320,160,80,40,20,10,5,2,1 の11ミップ
+        uint32_t ComputeMipLevelCount(uint32_t width, uint32_t height)
+        {
+            uint32_t levels = 1;
+            uint32_t size = std::max(width, height);
+            while (size > 1)
+            {
+                size /= 2;
+                ++levels;
+            }
+            return levels;
+        }
 
         // SSAO.hlsl側のkSSAOKernelSizeと一致させる必要がある
         constexpr uint32_t kSSAOKernelSize = 16;
@@ -394,6 +416,27 @@ namespace Kurenai
         lightingPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
         m_LightingPipelineState = m_Device->CreatePipelineState(lightingPipelineDesc);
 
+        // Hi-Zミップチェーン構築パス(コンピュートシェーダー)。CSCopyでG-Buffer深度をミップ0へコピーし、
+        // CSDownsampleをミップ数-1回ディスパッチして1x1まで縮小する
+        RHI::ShaderDesc hizCopyCsDesc;
+        hizCopyCsDesc.Stage = RHI::ShaderStage::Compute;
+        hizCopyCsDesc.FilePath = shaderDirectory + L"HiZ.hlsl";
+        hizCopyCsDesc.EntryPoint = "CSCopy";
+        m_HiZCopyComputeShader = m_Device->CreateShader(hizCopyCsDesc);
+        m_HiZCopyPipelineState = m_Device->CreateComputePipelineState({ m_HiZCopyComputeShader.get() });
+
+        RHI::ShaderDesc hizDownsampleCsDesc;
+        hizDownsampleCsDesc.Stage = RHI::ShaderStage::Compute;
+        hizDownsampleCsDesc.FilePath = shaderDirectory + L"HiZ.hlsl";
+        hizDownsampleCsDesc.EntryPoint = "CSDownsample";
+        m_HiZDownsampleComputeShader = m_Device->CreateShader(hizDownsampleCsDesc);
+        m_HiZDownsamplePipelineState = m_Device->CreateComputePipelineState({ m_HiZDownsampleComputeShader.get() });
+
+        RHI::BufferDesc hizConstantBufferDesc;
+        hizConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        hizConstantBufferDesc.SizeInBytes = sizeof(HiZConstants);
+        m_HiZConstantBuffer = m_Device->CreateBuffer(hizConstantBufferDesc);
+
         // SSRパス(頂点バッファなしのフルスクリーン三角形。SceneColorとG-Bufferから鏡面反射を計算し加算する)
         RHI::ShaderDesc ssrVsDesc;
         ssrVsDesc.Stage = RHI::ShaderStage::Vertex;
@@ -512,6 +555,10 @@ namespace Kurenai
         m_SSILTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+
+        m_HiZMipLevels = ComputeMipLevelCount(width, height);
+        m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
+        m_HiZDebugMipLevel = 0;
     }
 
     void KurenaiEngine3D::LoadScene(size_t sceneIndex)
@@ -769,12 +816,18 @@ namespace Kurenai
             "AO/GI - Occlusion (Alpha, Before Blur)",
             "Shadow Map",
             "SSR (Final + Reflections)",
+            "Hi-Z (Depth Mip Chain)",
         };
 
         int currentIndex = static_cast<int>(m_DebugView);
         if (ImGui::Combo("View", &currentIndex, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames)))
         {
             m_DebugView = static_cast<DebugView>(currentIndex);
+        }
+
+        if (m_DebugView == DebugView::HiZ)
+        {
+            ImGui::SliderInt("Hi-Z Mip Level", &m_HiZDebugMipLevel, 0, static_cast<int>(m_HiZMipLevels) - 1);
         }
 
         ImGui::End();
@@ -1060,6 +1113,50 @@ namespace Kurenai
         m_CPUProfiler.EndScope(); // GBuffer
         m_GPUProfiler->EndScope(); // GBuffer
 
+        // --- Hi-Zミップチェーン構築パス: G-Buffer深度から1x1までのミップチェーンをコンピュートシェーダーで
+        //     構築する(現時点では利用箇所は無く、デバッグ表示専用) ---
+        m_GPUProfiler->BeginScope("HiZ");
+        m_CPUProfiler.BeginScope("HiZ");
+        {
+            // GBufferパスでDSVとしてバインドされたままのG-Buffer深度をコンピュートシェーダーからSRVとして
+            // 読むため、先にOMのレンダーターゲット/深度バインドを解除しておく(DX11はDSVバインド中の
+            // リソースをCSで同時に読もうとするとハザードとして扱われ、ドライバが警告を出すため)
+            commandList->SetRenderTargets(nullptr, 0, nullptr);
+
+            HiZConstants hizConstants{};
+            hizConstants.SrcSize = { m_RenderWidth, m_RenderHeight };
+            hizConstants.DstSize = { m_RenderWidth, m_RenderHeight };
+            commandList->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
+
+            commandList->SetComputePipelineState(m_HiZCopyPipelineState.get());
+            commandList->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
+            commandList->SetComputeTexture(0, m_GBufferDepth.get());
+            commandList->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), 0);
+            commandList->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+
+            commandList->SetComputePipelineState(m_HiZDownsamplePipelineState.get());
+            uint32_t hizSrcWidth = m_RenderWidth;
+            uint32_t hizSrcHeight = m_RenderHeight;
+            for (uint32_t mip = 1; mip < m_HiZMipLevels; ++mip)
+            {
+                const uint32_t hizDstWidth = std::max(1u, hizSrcWidth / 2);
+                const uint32_t hizDstHeight = std::max(1u, hizSrcHeight / 2);
+
+                hizConstants.SrcSize = { hizSrcWidth, hizSrcHeight };
+                hizConstants.DstSize = { hizDstWidth, hizDstHeight };
+                commandList->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
+                commandList->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
+                commandList->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), mip - 1);
+                commandList->SetComputeUnorderedAccessTexture(1, m_HiZTexture.get(), mip);
+                commandList->Dispatch((hizDstWidth + 7) / 8, (hizDstHeight + 7) / 8, 1);
+
+                hizSrcWidth = hizDstWidth;
+                hizSrcHeight = hizDstHeight;
+            }
+        }
+        m_CPUProfiler.EndScope(); // HiZ
+        m_GPUProfiler->EndScope(); // HiZ
+
         // --- 直接光パス: G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         //     計算しHDRで書き出す(常に指定した内部解像度)。DeferredLighting/SSILの両方から読まれる ---
         m_GPUProfiler->BeginScope("DirectLight");
@@ -1268,10 +1365,17 @@ namespace Kurenai
             // SSR無効時はSSRパスをスキップしているため、代わりにSceneColorをそのまま表示する
             presentSourceTexture = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
             break;
+        case DebugView::HiZ:
+            presentSourceTexture = m_HiZTexture.get();
+            presentMode = 6; // 指定ミップをSampleLevelで読みグレースケール表示
+            presentSourceWidth = std::max(1u, m_RenderWidth >> m_HiZDebugMipLevel);
+            presentSourceHeight = std::max(1u, m_RenderHeight >> m_HiZDebugMipLevel);
+            break;
         }
 
         PresentConstants presentConstants{};
         presentConstants.Mode = presentMode;
+        presentConstants.MipLevel = static_cast<float>(m_HiZDebugMipLevel);
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
         // SetRenderTarget(swapChain)はスワップチェインのバックバッファへの書き込みを開始する。

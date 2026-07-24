@@ -158,10 +158,10 @@ namespace Kurenai::RHI
         m_Context->CSSetShaderResources(slot, 1, srvs);
     }
 
-    void DX11CommandList::SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture)
+    void DX11CommandList::SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel)
     {
         auto* dx11Texture = static_cast<DX11Texture*>(texture);
-        ID3D11UnorderedAccessView* uavs[] = { dx11Texture->GetUnorderedAccessView() };
+        ID3D11UnorderedAccessView* uavs[] = { dx11Texture->GetUnorderedAccessView(mipLevel) };
         m_Context->CSSetUnorderedAccessViews(slot, 1, uavs, nullptr);
         m_BoundComputeUavSlotMask |= (1u << slot);
     }

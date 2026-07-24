@@ -37,7 +37,7 @@ namespace Kurenai::RHI
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
         void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeTexture(uint32_t slot, IRHITexture* texture) override;
-        void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture) override;
+        void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0) override;
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 

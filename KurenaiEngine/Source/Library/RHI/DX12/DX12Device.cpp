@@ -62,6 +62,8 @@ namespace Kurenai::RHI
                 return DXGI_FORMAT_R32G32B32_FLOAT;
             case Format::R8G8B8A8_UNorm:
                 return DXGI_FORMAT_R8G8B8A8_UNORM;
+            case Format::R32_Float:
+                return DXGI_FORMAT_R32_FLOAT;
             case Format::R32G32B32A32_Float:
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -814,6 +816,46 @@ namespace Kurenai::RHI
 
         return std::make_unique<DX12Texture>(
             this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid, uavIndex);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels)
+    {
+        const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+        const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R32_FLOAT, width, height, 1, static_cast<UINT16>(mipLevels), 1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(
+            m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
+            "Hi-Zテクスチャの作成に失敗しました");
+
+        // 全ミップを見るSRV(MipLevels=全指定)。デバッグ表示などでSampleLevelにより任意のミップを読む用
+        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture2D.MipLevels = mipLevels;
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+        // ミップごとに単一ミップのUAVを張り、ダウンサンプルのコンピュートシェーダーが
+        // 「ミップNを読んでミップN+1へ書く」を1ミップずつディスパッチできるようにする
+        std::vector<uint32_t> mipUavIndices;
+        mipUavIndices.reserve(mipLevels);
+        for (uint32_t mip = 0; mip < mipLevels; ++mip)
+        {
+            const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
+            uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            uavDesc.Texture2D.MipSlice = mip;
+            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+            mipUavIndices.push_back(uavIndex);
+        }
+
+        return std::make_unique<DX12Texture>(
+            this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
+            DX12Texture::kInvalid, std::move(mipUavIndices));
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth)

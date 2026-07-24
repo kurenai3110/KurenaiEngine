@@ -133,6 +133,20 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_LightingPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SceneColor;
 
+        // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
+        // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
+        // オクルージョンカリングやSSRのレイマーチング高速化に使えるデータ構造だが、現時点では
+        // それらの利用箇所は未実装で、デバッグ表示(Render Targets - Hi-Z)でのみ確認できる
+        std::unique_ptr<RHI::IRHIShader> m_HiZCopyComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_HiZCopyPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_HiZDownsampleComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_HiZDownsamplePipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_HiZTexture;
+        std::unique_ptr<RHI::IRHIBuffer> m_HiZConstantBuffer;
+        uint32_t m_HiZMipLevels = 1;
+        // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベル
+        int32_t m_HiZDebugMipLevel = 0;
+
         // SSR(Screen Space Reflections)パス: LightingパスのSceneColorを反射先の環境色として
         // 再利用し、G-Buffer(Normal/Material/Depth)からワールド空間でレイマーチングして
         // 鏡面反射を加算する。無効時はこのパスをスキップし、Presentが直接m_SceneColorを参照する
@@ -175,6 +189,7 @@ namespace Kurenai
             AOOcclusionRaw,     // AO/GIバッファのa(遮蔽率、ブラー前の生値)
             ShadowMap,
             SSR,                // SSRパスの出力(SceneColor+反射)。SSR無効時はSceneColorと同一
+            HiZ,                // Hi-Zミップチェーンの指定ミップ(m_HiZDebugMipLevel)をグレースケール表示
         };
         DebugView m_DebugView = DebugView::Final;
 

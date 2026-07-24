@@ -13,7 +13,8 @@ namespace Kurenai::RHI
         uint32_t srvIndex,
         uint32_t rtvIndex,
         uint32_t dsvIndex,
-        uint32_t uavIndex)
+        uint32_t uavIndex,
+        std::vector<uint32_t> mipUavIndices)
         : m_Device(device)
         , m_Resource(std::move(resource))
         , m_CurrentState(initialState)
@@ -21,6 +22,7 @@ namespace Kurenai::RHI
         , m_RtvIndex(rtvIndex)
         , m_DsvIndex(dsvIndex)
         , m_UavIndex(uavIndex)
+        , m_MipUavIndices(std::move(mipUavIndices))
     {
     }
 
@@ -42,6 +44,10 @@ namespace Kurenai::RHI
         {
             m_Device->GetSrvCpuHeap()->Free(m_UavIndex);
         }
+        for (const uint32_t mipUavIndex : m_MipUavIndices)
+        {
+            m_Device->GetSrvCpuHeap()->Free(mipUavIndex);
+        }
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetSrvCpuHandle() const
@@ -59,9 +65,10 @@ namespace Kurenai::RHI
         return m_Device->GetDsvHeap()->GetCpuHandle(m_DsvIndex);
     }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetUavCpuHandle() const
+    D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetUavCpuHandle(uint32_t mipLevel) const
     {
-        return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_UavIndex);
+        const uint32_t index = m_MipUavIndices.empty() ? m_UavIndex : m_MipUavIndices[mipLevel];
+        return m_Device->GetSrvCpuHeap()->GetCpuHandle(index);
     }
 
     void DX12Texture::TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState)

@@ -56,8 +56,10 @@ namespace Kurenai::RHI
         virtual void SetComputePipelineState(IRHIPipelineState* pipelineState) = 0;
         virtual void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void SetComputeTexture(uint32_t slot, IRHITexture* texture) = 0;
-        // RWTexture2D/RWStructuredBufferとしてバインドする(書き込み可能)
-        virtual void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture) = 0;
+        // RWTexture2D/RWStructuredBufferとしてバインドする(書き込み可能)。
+        // mipLevelはCreateHiZTextureで作成したミップチェーンテクスチャの特定ミップを指定する場合に使う
+        // (通常のCreateUAVTextureは常に1ミップのみのため既定値の0で問題ない)
+        virtual void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0) = 0;
         virtual void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) = 0;
     };
