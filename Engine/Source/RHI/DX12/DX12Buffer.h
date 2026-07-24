@@ -9,16 +9,19 @@
 
 namespace Kurenai::RHI
 {
-    // 常にUPLOADヒープに作成し、CPUから直接書き込めるようマップしたままにする。
-    // 頂点/インデックス/定数バッファすべてこの1種類で扱う(頂点/インデックスは初回アップロード後
-    // 書き換えないためringCapacity=1で十分)。
+    // 頂点/インデックス/定数バッファすべてこの1種類で扱うが、ヒープの配置はUsageによって異なる
+    // (DX12Device::CreateBuffer参照)。
     //
-    // 定数バッファ(Usage==Constant)は、1フレームぶんのコマンドをすべて記録してから1回だけ実行する設計上、
+    // 定数バッファ(Usage==Constant)はCPUから毎フレームUpdateBufferで書き込むため、UPLOADヒープに
+    // 常駐させマップしたままにする。1フレームぶんのコマンドをすべて記録してから1回だけ実行する設計上、
     // 単純に同じ領域へ複数回UpdateBufferすると(例: メッシュごとに material 定数を書き換える場合)、
     // GPU実行時にはそのフレーム最後に書き込んだ内容へ全描画が上書きされてしまう。これを避けるため、
     // 定数バッファは内部でリング状に複数コピーを持ち、UpdateBufferのたびに次のスロットへ書き込みを進める。
     // CPUはGPU完了を待たずに次フレームの記録を始める(DX12Device::kFrameCount)ため、リング容量は
-    // 直近数フレームぶんのUpdateBuffer回数を十分上回る値にしてある(DX12Device::kConstantBufferRingCapacity)
+    // 直近数フレームぶんのUpdateBuffer回数を十分上回る値にしてある(DX12Device::kConstantBufferRingCapacity)。
+    //
+    // 頂点/インデックスバッファは初回アップロード後書き換えないため、GPUからの読み取りが高速な
+    // DEFAULTヒープに作成する(m_MappedPtrはnullptr、ringCapacity=1でAdvanceRingAndGetWritePtrは呼ばれない)
     class DX12Buffer : public IRHIBuffer
     {
     public:

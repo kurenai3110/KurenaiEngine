@@ -303,31 +303,74 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHIBuffer> DX12Device::CreateBuffer(const BufferDesc& desc)
     {
-        uint32_t slotSizeInBytes = desc.SizeInBytes;
-        uint32_t ringCapacity = 1;
+        // 定数バッファはCPUから毎フレームUpdateBufferで書き込むため、UPLOADヒープに常駐させ
+        // マップしたままにする(従来通り)
         if (desc.Usage == BufferUsage::Constant)
         {
             // ルート定数バッファビューは256バイトアライメントを要求するため切り上げる
-            slotSizeInBytes = (slotSizeInBytes + 255) & ~255u;
+            const uint32_t slotSizeInBytes = (desc.SizeInBytes + 255) & ~255u;
 
             // 1フレームぶんのコマンドをすべて記録してから1回だけ実行する設計のため、同じ定数バッファへ
             // メッシュごとに複数回UpdateBufferすると、GPU実行時にはそのフレーム最後の書き込みへ
             // 全描画が上書きされてしまう。これを避けるため、リング状に複数コピーを確保しておく
-            ringCapacity = kConstantBufferRingCapacity;
+            const uint32_t ringCapacity = kConstantBufferRingCapacity;
+
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource = CreateUploadBuffer(static_cast<uint64_t>(slotSizeInBytes) * ringCapacity);
+
+            void* mappedPtr = nullptr;
+            const D3D12_RANGE readRange{ 0, 0 };
+            ThrowIfFailed(resource->Map(0, &readRange, &mappedPtr), "バッファのマップに失敗しました");
+
+            if (desc.InitialData)
+            {
+                memcpy(mappedPtr, desc.InitialData, desc.SizeInBytes);
+            }
+
+            return std::make_unique<DX12Buffer>(resource, mappedPtr, slotSizeInBytes, desc.StrideInBytes, desc.Usage, ringCapacity);
         }
 
-        Microsoft::WRL::ComPtr<ID3D12Resource> resource = CreateUploadBuffer(static_cast<uint64_t>(slotSizeInBytes) * ringCapacity);
-
-        void* mappedPtr = nullptr;
-        const D3D12_RANGE readRange{ 0, 0 };
-        ThrowIfFailed(resource->Map(0, &readRange, &mappedPtr), "バッファのマップに失敗しました");
+        // 頂点/インデックスバッファは初回アップロード後書き換えないため、CPUから見える(低速な)
+        // UPLOADヒープに置きっぱなしにせず、GPUからの読み取りが高速なDEFAULTヒープに作成する。
+        // ピクセルシェーダの負荷がほぼ無くGPU側が頂点フェッチ律速になるシャドウパスなどで、
+        // UPLOADヒープ配置は実測で数倍のGPU時間差として現れることを確認済み
+        const CD3DX12_HEAP_PROPERTIES defaultHeapProps(D3D12_HEAP_TYPE_DEFAULT);
+        const CD3DX12_RESOURCE_DESC defaultResourceDesc = CD3DX12_RESOURCE_DESC::Buffer(desc.SizeInBytes);
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(
+            m_Device->CreateCommittedResource(
+                &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &defaultResourceDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&resource)),
+            "バッファの作成に失敗しました");
 
         if (desc.InitialData)
         {
+            // アップロードヒープの一時バッファ経由でDEFAULTヒープへコピーする
+            Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer = CreateUploadBuffer(desc.SizeInBytes);
+
+            void* mappedPtr = nullptr;
+            const D3D12_RANGE readRange{ 0, 0 };
+            ThrowIfFailed(uploadBuffer->Map(0, &readRange, &mappedPtr), "アップロードバッファのマップに失敗しました");
             memcpy(mappedPtr, desc.InitialData, desc.SizeInBytes);
+            uploadBuffer->Unmap(0, nullptr);
+
+            m_CommandList->CopyBufferRegion(resource.Get(), 0, uploadBuffer.Get(), 0, desc.SizeInBytes);
+
+            const D3D12_RESOURCE_BARRIER toReadBarrier =
+                CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+            m_CommandList->ResourceBarrier(1, &toReadBarrier);
+
+            // アップロードバッファはこの関数を抜けるまで生存させる必要があるため、ここで同期的に実行完了を待つ
+            SubmitAndWaitIdle();
+        }
+        else
+        {
+            const D3D12_RESOURCE_BARRIER toReadBarrier =
+                CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+            m_CommandList->ResourceBarrier(1, &toReadBarrier);
         }
 
-        return std::make_unique<DX12Buffer>(resource, mappedPtr, slotSizeInBytes, desc.StrideInBytes, desc.Usage, ringCapacity);
+        // DEFAULTヒープはCPUからマップできないためnullptrを渡す。頂点/インデックスバッファは
+        // 初回アップロード後書き換えない(ringCapacity=1でAdvanceRingAndGetWritePtrは呼ばれない)
+        return std::make_unique<DX12Buffer>(resource, nullptr, desc.SizeInBytes, desc.StrideInBytes, desc.Usage, 1);
     }
 
     std::unique_ptr<IRHIShader> DX12Device::CreateShader(const ShaderDesc& desc)
