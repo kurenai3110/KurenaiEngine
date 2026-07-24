@@ -769,6 +769,9 @@ namespace Kurenai::Core
         ImGui::Text("FPS: %.1f", m_FPS);
         ImGui::Text("CPU Frame Time: %.3f ms", m_CPUFrameTimeMs);
         ImGui::Text("GPU Frame Time: %.3f ms", m_GPUProfiler->GetTotalFrameTimeMs());
+        // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)。CPU Frame Timeや
+        // PresentSubmitの計測値からは既に除外済みなので、参考情報として別枠で表示する
+        ImGui::Text("GPU Wait: %.3f ms", m_Device->GetLastFrameGPUWaitTimeMs());
         ImGui::Separator();
         ImGui::TextUnformatted("CPU Pass Breakdown:");
         for (const auto& result : m_CPUProfiler.GetResults())
@@ -803,7 +806,10 @@ namespace Kurenai::Core
             Update(deltaTime);
             Render();
             const auto cpuEnd = std::chrono::steady_clock::now();
-            m_CPUFrameTimeMs = std::chrono::duration<float, std::milli>(cpuEnd - cpuStart).count();
+            // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく
+            // GPU側の処理時間の反映なので差し引く(DX11は常に0が返るため影響しない)
+            const float rawCPUTimeMs = std::chrono::duration<float, std::milli>(cpuEnd - cpuStart).count();
+            m_CPUFrameTimeMs = std::max(0.0f, rawCPUTimeMs - m_Device->GetLastFrameGPUWaitTimeMs());
 
             // FPSは指数移動平均で平滑化する(生の1/deltaTimeだとフレームごとの揺れが大きく読み取りにくいため)
             if (deltaTime > 0.0f)
@@ -1234,5 +1240,9 @@ namespace Kurenai::Core
         m_CPUProfiler.BeginScope("PresentSubmit");
         m_SwapChain->Present(true);
         m_CPUProfiler.EndScope(); // PresentSubmit
+
+        // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく
+        // GPU側の処理時間の反映なので、PresentSubmitの計測値からは除外しておく
+        m_CPUProfiler.SubtractFromScope("PresentSubmit", m_Device->GetLastFrameGPUWaitTimeMs());
     }
 }

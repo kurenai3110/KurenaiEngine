@@ -31,6 +31,8 @@ namespace Kurenai::RHI
 
         std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) override;
         std::unique_ptr<IRHIGPUProfiler> CreateGPUProfiler() override;
+        // DX11はフレームパイプライン化(多重バッファリング)を行っていないため常に0を返す
+        float GetLastFrameGPUWaitTimeMs() const override { return 0.0f; }
 
     private:
         Microsoft::WRL::ComPtr<ID3D11Device> m_Device;

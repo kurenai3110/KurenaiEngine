@@ -42,6 +42,12 @@ namespace Kurenai::RHI
         // GPUタイムスタンプクエリによる区間計測。DX11/DX12でクエリの仕組みが異なるため
         // バックエンド実装側(DX11Deviceなど)に委譲する
         virtual std::unique_ptr<IRHIGPUProfiler> CreateGPUProfiler() = 0;
+
+        // 直前のPresent呼び出しでCPUがGPUの完了を待つのに費やした時間(ms)。
+        // フレームパイプライン化(多重バッファリング)を行わないDX11では常に0を返す。
+        // これは実際のCPU負荷ではなくGPU側の処理時間を反映した待ち時間なので、
+        // CPU時間の表示からはこの値を差し引いて実質的なCPU負荷のみを示す
+        virtual float GetLastFrameGPUWaitTimeMs() const = 0;
     };
 
     std::unique_ptr<IRHIDevice> CreateDX11Device();

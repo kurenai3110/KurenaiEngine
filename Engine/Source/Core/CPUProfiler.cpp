@@ -1,5 +1,7 @@
 #include "CPUProfiler.h"
 
+#include <algorithm>
+
 namespace Kurenai::Core
 {
     void CPUProfiler::BeginFrame()
@@ -26,5 +28,16 @@ namespace Kurenai::Core
         const float timeMs = std::chrono::duration<float, std::milli>(now - m_ScopeStart).count();
         m_Results.push_back({ m_CurrentScopeName, timeMs });
         m_ScopeActive = false;
+    }
+
+    void CPUProfiler::SubtractFromScope(const std::string& name, float deltaMs)
+    {
+        const auto it = std::find_if(m_Results.begin(), m_Results.end(), [&name](const CPUTimingResult& result) { return result.Name == name; });
+        if (it == m_Results.end())
+        {
+            return;
+        }
+
+        it->TimeMs = std::max(0.0f, it->TimeMs - deltaMs);
     }
 }

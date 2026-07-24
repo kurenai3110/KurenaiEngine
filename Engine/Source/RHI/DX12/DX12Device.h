@@ -40,6 +40,7 @@ namespace Kurenai::RHI
 
         std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) override;
         std::unique_ptr<IRHIGPUProfiler> CreateGPUProfiler() override;
+        float GetLastFrameGPUWaitTimeMs() const override { return m_LastFrameGPUWaitTimeMs; }
 
         // DX12実装内部(DX12SwapChain/DX12Texture/DX12Sampler/DX12CommandList)から利用するアクセサ
         ID3D12Device* GetDevice() const { return m_Device.Get(); }
@@ -103,6 +104,9 @@ namespace Kurenai::RHI
         uint64_t m_FrameFenceValues[kFrameCount] = {};
         uint32_t m_FrameIndex = 0;
         HANDLE m_FenceEvent = nullptr;
+        // 直前のAdvanceToNextFrame()でWaitForSingleObjectに実際に費やした時間(ms)。
+        // フェンスが既に満たされていて待たなかった場合は0になる
+        float m_LastFrameGPUWaitTimeMs = 0.0f;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> m_RootSignature;
 
         std::unique_ptr<DX12DescriptorHeap> m_RtvHeap;

@@ -5,6 +5,7 @@
 
 #include <DirectXTex.h>
 
+#include <chrono>
 #include <cstring>
 #include <cwchar>
 #include <vector>
@@ -208,12 +209,17 @@ namespace Kurenai::RHI
         m_FrameIndex = (m_FrameIndex + 1) % kFrameCount;
 
         // このスロットを最後に使ったフレーム(kFrameCountフレーム前)のGPU実行完了を待つ。
-        // 通常はすでに完了しているため待たずに素通りする
+        // 通常はすでに完了しているため待たずに素通りする。この待ち時間は実際のCPU負荷ではなく
+        // GPU側の処理時間を反映したものなので、GetLastFrameGPUWaitTimeMs()で別途取得できるようにし、
+        // 呼び出し側(Application)がCPU時間の表示から差し引けるようにしておく
+        m_LastFrameGPUWaitTimeMs = 0.0f;
         const uint64_t fenceValueToWaitFor = m_FrameFenceValues[m_FrameIndex];
         if (fenceValueToWaitFor != 0 && m_Fence->GetCompletedValue() < fenceValueToWaitFor)
         {
+            const auto waitStart = std::chrono::steady_clock::now();
             ThrowIfFailed(m_Fence->SetEventOnCompletion(fenceValueToWaitFor, m_FenceEvent), "フェンスイベントの設定に失敗しました");
             WaitForSingleObject(m_FenceEvent, INFINITE);
+            m_LastFrameGPUWaitTimeMs = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - waitStart).count();
         }
 
         ResetCommandList();

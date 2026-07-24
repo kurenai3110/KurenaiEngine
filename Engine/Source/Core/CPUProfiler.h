@@ -26,6 +26,11 @@ namespace Kurenai::Core
         void BeginScope(const std::string& name);
         void EndScope();
 
+        // 指定した名前の直近の計測値からdeltaMsを差し引く(0未満にはならない)。
+        // GPUの完了待ちなど、実際のCPU負荷ではない時間を含むスコープから、
+        // その内訳を除外して表示したい場合に使う。該当スコープが無ければ何もしない
+        void SubtractFromScope(const std::string& name, float deltaMs);
+
         const std::vector<CPUTimingResult>& GetResults() const { return m_Results; }
 
     private:
