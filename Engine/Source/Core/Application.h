@@ -9,6 +9,7 @@
 
 #include "Assets/Model.h"
 #include "Camera.h"
+#include "CPUProfiler.h"
 #include "RHI/IRHIDevice.h"
 #include "Window.h"
 
@@ -60,6 +61,8 @@ namespace Kurenai::Core
 
         // GPUタイムスタンプクエリによる各パスの計測(Shadow/GBuffer/AOなど)。数フレーム遅れの結果が返る
         std::unique_ptr<RHI::IRHIGPUProfiler> m_GPUProfiler;
+        // 各パスのコマンド記録にかかるCPU時間の計測(RHIに依存しないためDX11/DX12を直接比較できる)
+        CPUProfiler m_CPUProfiler;
 
         // G-Bufferの内部解像度。ウィンドウサイズとは独立しており、表示時はアスペクト比を保って拡大縮小する
         uint32_t m_RenderWidth;

@@ -763,12 +763,18 @@ namespace Kurenai::Core
     void Application::RenderProfilerUI()
     {
         ImGui::SetNextWindowPos(ImVec2(280.0f, 280.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(280.0f, 260.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(280.0f, 460.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Profiler");
 
         ImGui::Text("FPS: %.1f", m_FPS);
         ImGui::Text("CPU Frame Time: %.3f ms", m_CPUFrameTimeMs);
         ImGui::Text("GPU Frame Time: %.3f ms", m_GPUProfiler->GetTotalFrameTimeMs());
+        ImGui::Separator();
+        ImGui::TextUnformatted("CPU Pass Breakdown:");
+        for (const auto& result : m_CPUProfiler.GetResults())
+        {
+            ImGui::Text("  %s: %.3f ms", result.Name.c_str(), result.TimeMs);
+        }
         ImGui::Separator();
         ImGui::TextUnformatted("GPU Pass Breakdown:");
         for (const auto& result : m_GPUProfiler->GetResults())
@@ -927,6 +933,7 @@ namespace Kurenai::Core
 
         auto* commandList = m_Device->GetImmediateCommandList();
         m_GPUProfiler->BeginFrame();
+        m_CPUProfiler.BeginFrame();
 
         const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay);
         const DirectX::XMMATRIX lightViewProj = ComputeLightViewProj(sunLighting.Direction);
@@ -949,6 +956,7 @@ namespace Kurenai::Core
 
         // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度) ---
         m_GPUProfiler->BeginScope("Shadow");
+        m_CPUProfiler.BeginScope("Shadow");
         RHI::Viewport shadowViewport;
         shadowViewport.Width = static_cast<float>(kShadowMapSize);
         shadowViewport.Height = static_cast<float>(kShadowMapSize);
@@ -971,10 +979,12 @@ namespace Kurenai::Core
                 commandList->DrawIndexed(mesh.IndexCount, 0, 0);
             }
         }
+        m_CPUProfiler.EndScope(); // Shadow
         m_GPUProfiler->EndScope(); // Shadow
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         m_GPUProfiler->BeginScope("GBuffer");
+        m_CPUProfiler.BeginScope("GBuffer");
         RHI::Viewport gbufferViewport;
         gbufferViewport.Width = static_cast<float>(m_RenderWidth);
         gbufferViewport.Height = static_cast<float>(m_RenderHeight);
@@ -1005,11 +1015,13 @@ namespace Kurenai::Core
             commandList->SetTexture(2, mesh.MetallicRoughnessTexture);
             commandList->DrawIndexed(mesh.IndexCount, 0, 0);
         }
+        m_CPUProfiler.EndScope(); // GBuffer
         m_GPUProfiler->EndScope(); // GBuffer
 
         // --- 直接光パス: G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         //     計算しHDRで書き出す(常に指定した内部解像度)。DeferredLighting/SSILの両方から読まれる ---
         m_GPUProfiler->BeginScope("DirectLight");
+        m_CPUProfiler.BeginScope("DirectLight");
         RHI::IRHITexture* directLightTarget[] = { m_DirectLightTexture.get() };
         commandList->SetRenderTargets(directLightTarget, 1, nullptr);
         commandList->SetViewport(gbufferViewport);
@@ -1023,6 +1035,7 @@ namespace Kurenai::Core
         commandList->SetTexture(3, m_GBufferDepth.get());
         commandList->SetTexture(4, m_ShadowMap.get());
         commandList->Draw(3, 0);
+        m_CPUProfiler.EndScope(); // DirectLight
         m_GPUProfiler->EndScope(); // DirectLight
 
         // --- AO/GIパス: 選択中の手法(SSAO or SSIL)でG-Bufferから遮蔽率(・間接拡散光)を計算し、
@@ -1030,6 +1043,7 @@ namespace Kurenai::Core
         if (m_AOEnabled)
         {
             m_GPUProfiler->BeginScope("AO");
+            m_CPUProfiler.BeginScope("AO");
             commandList->SetViewport(gbufferViewport);
             commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
             commandList->SetSampler(0, m_Sampler.get());
@@ -1076,20 +1090,24 @@ namespace Kurenai::Core
                 aoRawTexture = m_SSILRawTexture.get();
                 aoBlurredTexture = m_SSILTexture.get();
             }
+            m_CPUProfiler.EndScope(); // AO
             m_GPUProfiler->EndScope(); // AO
 
             // ブラーパス: 遮蔽率・間接拡散光のタイル状ノイズをボックスブラーで均す(SSAO/SSIL共通シェーダ)
             m_GPUProfiler->BeginScope("AOBlur");
+            m_CPUProfiler.BeginScope("AOBlur");
             RHI::IRHITexture* aoBlurTarget[] = { aoBlurredTexture };
             commandList->SetRenderTargets(aoBlurTarget, 1, nullptr);
             commandList->SetPipelineState(m_AOBlurPipelineState.get());
             commandList->SetTexture(0, aoRawTexture);
             commandList->Draw(3, 0);
+            m_CPUProfiler.EndScope(); // AOBlur
             m_GPUProfiler->EndScope(); // AOBlur
         }
 
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         m_GPUProfiler->BeginScope("Lighting");
+        m_CPUProfiler.BeginScope("Lighting");
         RHI::IRHITexture* sceneColorTarget[] = { m_SceneColor.get() };
         commandList->SetRenderTargets(sceneColorTarget, 1, nullptr);
         commandList->SetViewport(gbufferViewport);
@@ -1115,6 +1133,7 @@ namespace Kurenai::Core
         }
         commandList->SetTexture(5, activeAOTexture);
         commandList->Draw(3, 0);
+        m_CPUProfiler.EndScope(); // Lighting
         m_GPUProfiler->EndScope(); // Lighting
 
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
@@ -1179,6 +1198,7 @@ namespace Kurenai::Core
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
         m_GPUProfiler->BeginScope("Present");
+        m_CPUProfiler.BeginScope("Present");
         commandList->SetRenderTarget(m_SwapChain.get());
         commandList->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
         commandList->ClearDepth(1.0f);
@@ -1194,15 +1214,25 @@ namespace Kurenai::Core
         commandList->SetSampler(0, m_Sampler.get());
         commandList->SetTexture(0, presentSourceTexture);
         commandList->Draw(3, 0);
+        m_CPUProfiler.EndScope(); // Present
         m_GPUProfiler->EndScope(); // Present
 
-        // ImGuiはPresentパスでバインドされたバックバッファにそのまま重ねて描画する
+        // ImGuiはPresentパスでバインドされたバックバッファにそのまま重ねて描画する。
+        // GPU側は計測していない(このスコープ専用の描画パイプラインを持たないため)が、
+        // CPU側のコマンド記録コストはDX11/DX12で差が出やすいのでここも計測しておく
+        m_CPUProfiler.BeginScope("ImGui");
         m_ImGuiBackend->Render();
+        m_CPUProfiler.EndScope(); // ImGui
 
         // Present呼び出しでコマンドリストが実行投入される(DX12)ため、それより前にEndFrame()で
         // フレーム終端のタイムスタンプ書き込み・結果リードバックのコマンドを記録しておく必要がある
         m_GPUProfiler->EndFrame();
 
+        // ExecuteCommandLists・実際のPresent・(DX12のみ)フェンス待ちを含む区間。
+        // Present呼び出し自体のCPUコストはここで計測しないと、各パスのコマンド記録時間の
+        // 合計とCPU Frame Time全体の差分がどこにあるのか分からなくなるため計測しておく
+        m_CPUProfiler.BeginScope("PresentSubmit");
         m_SwapChain->Present(true);
+        m_CPUProfiler.EndScope(); // PresentSubmit
     }
 }

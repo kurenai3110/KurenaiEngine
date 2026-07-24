@@ -79,6 +79,7 @@
     <ClInclude Include="Source\Core\Window.h" />
     <ClInclude Include="Source\Core\Application.h" />
     <ClInclude Include="Source\Core\Camera.h" />
+    <ClInclude Include="Source\Core\CPUProfiler.h" />
     <ClInclude Include="Source\Assets\Vertex.h" />
     <ClInclude Include="Source\Assets\Model.h" />
     <ClInclude Include="Source\Assets\ModelLoader.h" />
@@ -133,6 +134,7 @@
     <ClCompile Include="Source\Core\Window.cpp" />
     <ClCompile Include="Source\Core\Application.cpp" />
     <ClCompile Include="Source\Core\Camera.cpp" />
+    <ClCompile Include="Source\Core\CPUProfiler.cpp" />
     <ClCompile Include="Source\Assets\ModelLoader.cpp" />
     <ClCompile Include="Source\RHI\DX11\DX11Buffer.cpp" />
     <ClCompile Include="Source\RHI\DX11\DX11Shader.cpp" />
