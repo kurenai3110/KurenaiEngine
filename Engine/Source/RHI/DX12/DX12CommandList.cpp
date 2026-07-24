@@ -144,12 +144,48 @@ namespace Kurenai::RHI
         // 全ての描画が上書きされてしまう
         if (slot == 0)
         {
+            // 通常はDraw/DrawIndexedで既に反映済みだが、Drawを挟まず連続でslot 0が
+            // 呼ばれた場合に備えて念のためここでも反映しておく
+            FlushPendingSrvWrites();
             m_CurrentSrvTableBase = m_Device->AllocateSrvTableBlock(kTextureSlotCount);
             cmdList->SetGraphicsRootDescriptorTable(2, m_Device->GetShaderVisibleSrvHeap()->GetGpuHandle(m_CurrentSrvTableBase));
         }
 
-        const D3D12_CPU_DESCRIPTOR_HANDLE dest = m_Device->GetShaderVisibleSrvHeap()->GetCpuHandle(m_CurrentSrvTableBase + slot);
-        m_Device->GetDevice()->CopyDescriptorsSimple(1, dest, dx12Texture->GetSrvCpuHandle(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        // CopyDescriptorsSimpleはこの場では呼ばず、コピー元だけ溜めておく。メッシュごとに
+        // テクスチャの数だけ個別に呼ぶとドライバ呼び出しのCPUオーバーヘッドが積み重なるため、
+        // 実際のコピーはDraw直前にFlushPendingSrvWrites()でまとめて1回行う
+        m_PendingSrvHandles[slot] = dx12Texture->GetSrvCpuHandle();
+        m_PendingSrvSlotMask |= (1u << slot);
+    }
+
+    void DX12CommandList::FlushPendingSrvWrites()
+    {
+        if (m_PendingSrvSlotMask == 0)
+        {
+            return;
+        }
+
+        D3D12_CPU_DESCRIPTOR_HANDLE destRanges[kTextureSlotCount];
+        D3D12_CPU_DESCRIPTOR_HANDLE srcRanges[kTextureSlotCount];
+        uint32_t rangeCount = 0;
+
+        auto* heap = m_Device->GetShaderVisibleSrvHeap();
+        for (uint32_t slot = 0; slot < kTextureSlotCount; ++slot)
+        {
+            if (m_PendingSrvSlotMask & (1u << slot))
+            {
+                destRanges[rangeCount] = heap->GetCpuHandle(m_CurrentSrvTableBase + slot);
+                srcRanges[rangeCount] = m_PendingSrvHandles[slot];
+                ++rangeCount;
+            }
+        }
+
+        // 各レンジはすべてサイズ1(pRangeSizes=nullptrは各レンジサイズ1を意味する)なので、
+        // この描画で設定された分をまとめて1回のCopyDescriptorsで反映する
+        m_Device->GetDevice()->CopyDescriptors(
+            rangeCount, destRanges, nullptr, rangeCount, srcRanges, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        m_PendingSrvSlotMask = 0;
     }
 
     void DX12CommandList::SetSampler(uint32_t slot, IRHISampler* sampler)
@@ -167,11 +203,13 @@ namespace Kurenai::RHI
 
     void DX12CommandList::Draw(uint32_t vertexCount, uint32_t startVertexLocation)
     {
+        FlushPendingSrvWrites();
         m_Device->GetCommandList()->DrawInstanced(vertexCount, 1, startVertexLocation, 0);
     }
 
     void DX12CommandList::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
     {
+        FlushPendingSrvWrites();
         m_Device->GetCommandList()->DrawIndexedInstanced(indexCount, 1, startIndexLocation, baseVertexLocation, 0);
     }
 }

@@ -48,5 +48,13 @@ namespace Kurenai::RHI
         // 同じスロットを使い回すとGPU実行時にはそのフレーム最後の書き込みで上書きされてしまう)
         static constexpr uint32_t kTextureSlotCount = 7;
         uint32_t m_CurrentSrvTableBase = 0;
+
+        // SetTexture()はCopyDescriptorsをその場では呼ばず、コピー元ハンドルをここに溜めておき、
+        // Draw直前にFlushPendingSrvWrites()でまとめて1回のCopyDescriptorsに反映する。
+        // メッシュごとにテクスチャの数だけCopyDescriptorsSimpleを呼んでいた際のドライバ呼び出し
+        // オーバーヘッド(CPU側のディスクリプタコピーコスト)を削減するため
+        D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
+        uint32_t m_PendingSrvSlotMask = 0;
+        void FlushPendingSrvWrites();
     };
 }
