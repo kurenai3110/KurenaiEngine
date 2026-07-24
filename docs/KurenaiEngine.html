@@ -212,8 +212,9 @@
     <li><a href="#engine2d">3. KurenaiEngine2D</a></li>
     <li><a href="#library">4. Library(低レベルAPI)</a></li>
     <li><a href="#input">5. 入力について</a></li>
-    <li><a href="#build">6. ビルドに必要な依存ファイル</a></li>
-    <li><a href="#constraints">7. 制約・注意点</a></li>
+    <li><a href="#sound">6. サウンド再生について</a></li>
+    <li><a href="#build">7. ビルドに必要な依存ファイル</a></li>
+    <li><a href="#constraints">8. 制約・注意点</a></li>
   </ol>
 </nav>
 
@@ -721,8 +722,35 @@ POINT GetClientMousePosition() const;               // クライアント座標(
 </ul>
 </section>
 
+<section id="sound">
+<h2>6. サウンド再生について</h2>
+<p>
+<code>KurenaiEngineBase</code> はXAudio2による簡易なサウンド再生APIを提供します。WAV(PCM)ファイルの
+読み込みと再生のみに対応した最小限の実装で、再生中のサウンドを個別に停止・音量変更する機能はありません
+(効果音・BGM程度の単純な再生が目的)。
+</p>
+
+<pre><code>SoundHandle LoadSound(const std::wstring&amp; filePath);
+void PlaySound(SoundHandle sound, float volume = 1.0f, bool loop = false);</code></pre>
+
+<ul>
+<li><code>LoadSound</code> はWAV(PCM)ファイルを読み込み、<code>SoundHandle</code>を返す
+(<code>TextureHandle</code>と同様、ロード時にまとめて呼び、返ってきたハンドルを保持しておいて
+<code>PlaySound</code>に渡す)。</li>
+<li><code>PlaySound</code> は呼び出しのたびに新しいボイスを生成するため、同じサウンドを重ねて
+(前の再生が終わる前に再度)鳴らすことができる。<code>volume</code>は0.0〜1.0。</li>
+<li><code>loop=true</code>の場合、そのボイスは<code>KurenaiEngine2D</code>/<code>KurenaiEngine3D</code>が
+破棄されるまで無限ループし続ける。<strong>停止APIは提供していない</strong>ため、ループ再生は
+BGM等の用途を選んで使うこと。</li>
+<li>これらは<code>KurenaiEngineBase</code>のメンバなので<code>KurenaiEngine2D</code>/
+<code>KurenaiEngine3D</code>どちらからも呼べる。</li>
+<li>使用にはCOM初期化(<code>CoInitializeEx</code>)が必要(WICテクスチャ読み込みと同じ要件。
+8章参照)。</li>
+</ul>
+</section>
+
 <section id="build">
-<h2>6. ビルドに必要な追加の依存ファイル</h2>
+<h2>7. ビルドに必要な追加の依存ファイル</h2>
 <p>
 <code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code>/<code>Library</code> のいずれを
 使う場合でも、サンプルプロジェクト自身がDirectXTexやassimpのヘッダー・ライブラリを直接参照する
@@ -738,14 +766,15 @@ POINT GetClientMousePosition() const;               // クライアント座標(
 </section>
 
 <section id="constraints">
-<h2>7. 制約・注意点</h2>
+<h2>8. 制約・注意点</h2>
 <table>
 <thead><tr><th>項目</th><th>内容</th></tr></thead>
 <tbody>
 <tr><td>コピー・代入</td><td><code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code> はいずれも不可</td></tr>
 <tr><td>ウィンドウ数</td><td>1プロセスにつき1つを想定(複数インスタンスの同時生成は未検証)</td></tr>
 <tr><td>2Dの描画パス</td><td><code>KurenaiEngine2D::DrawSprite</code> は常にアルファブレンド・深度テストなしで描画される(不透明専用の高速パスはない)</td></tr>
-<tr><td>COM初期化</td><td><code>wWinMain</code> の先頭で <code>CoInitializeEx</code> を呼ぶこと。DirectXTexのWICテクスチャ読み込み(<code>LoadTexture</code>)がCOMに依存しているため、忘れると読み込みに失敗する</td></tr>
+<tr><td>COM初期化</td><td><code>wWinMain</code> の先頭で <code>CoInitializeEx</code> を呼ぶこと。DirectXTexのWICテクスチャ読み込み(<code>LoadTexture</code>)とXAudio2(<code>LoadSound</code>/<code>PlaySound</code>)がいずれもCOMに依存しているため、忘れると失敗する</td></tr>
+<tr><td>サウンド再生の停止</td><td><code>PlaySound</code>に停止APIは無い。<code>loop=true</code>のボイスは<code>KurenaiEngine2D</code>/<code>KurenaiEngine3D</code>が破棄されるまで無限ループし続ける(6章参照)</td></tr>
 <tr><td>ビルド設定の一致</td><td><code>KurenaiEngine.dll</code> とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
 <tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
 </tbody>

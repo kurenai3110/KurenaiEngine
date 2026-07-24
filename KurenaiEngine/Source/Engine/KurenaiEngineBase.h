@@ -6,6 +6,7 @@
 
 #include "KurenaiTypes.h"
 
+#include "Core/AudioEngine.h"
 #include "Core/Window.h"
 #include "RHI/IRHIDevice.h"
 
@@ -17,6 +18,21 @@
 
 namespace Kurenai
 {
+    // KurenaiEngineBase::LoadSoundが返す不透明なサウンドハンドル。内部ではCore::AudioEngine内の
+    // インデックスを保持する
+    class SoundHandle
+    {
+    public:
+        SoundHandle() = default;
+        bool IsValid() const { return m_Valid; }
+
+    private:
+        explicit SoundHandle(uint32_t index) : m_Index(index), m_Valid(true) {}
+        uint32_t m_Index = 0;
+        bool m_Valid = false;
+        friend class KurenaiEngineBase;
+    };
+
     // KurenaiEngine3D/KurenaiEngine2Dに共通する土台(ウィンドウ・デバイス・スワップチェーンの
     // 生成・管理)。サンプルプログラムがこのクラスを直接構築することは想定していない
     // (コンストラクタはprotected)
@@ -48,6 +64,12 @@ namespace Kurenai
         bool WasKeyPressed(KeyCode key) const;
         POINT GetClientMousePosition() const;
 
+        // WAV(PCM)ファイルを読み込み、再生用に登録する
+        SoundHandle LoadSound(const std::wstring& filePath);
+        // volumeは0.0〜1.0。loop=trueの場合、そのボイスはこのKurenaiEngineBaseが破棄されるまで
+        // 無限ループし続ける(停止APIは提供していないため、ループ再生は用途を選んで使うこと)
+        void PlaySound(SoundHandle sound, float volume = 1.0f, bool loop = false);
+
     protected:
         KurenaiEngineBase(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api);
 
@@ -56,6 +78,7 @@ namespace Kurenai
         std::unique_ptr<Core::Window> m_Window;
         std::unique_ptr<RHI::IRHIDevice> m_Device;
         std::unique_ptr<RHI::IRHISwapChain> m_SwapChain;
+        std::unique_ptr<Core::AudioEngine> m_AudioEngine;
     };
 }
 

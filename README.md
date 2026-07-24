@@ -11,6 +11,14 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**
 対応を使ってHi-Zミップチェーン(深度のミップごとの縮小テクスチャ)を構築するAPIも用意しています
 (4.3.2章を参照)。
 
+`KurenaiEngine2D`はスプライト(`DrawSprite`)に加え、円・線分(`DrawCircle`/`DrawLine`)と
+簡易なビットマップフォントによるテキスト描画(`DrawText`)も提供します。`KurenaiEngineBase`
+(2D/3D共通)は、`GetAsyncKeyState`/`GetCursorPos`のようなグローバル入力ではなく
+ウィンドウスコープのメッセージベース入力API(`WasKeyPressed`/`WasMouseButtonPressed`/
+`IsMouseOverWindow`/`GetClientMousePosition`)と、XAudio2による簡易なサウンド再生API
+(`LoadSound`/`PlaySound`、WAV/PCM)も公開しています(詳細は
+[docs/KurenaiEngine.html](docs/KurenaiEngine.html) 3・5・6章を参照)。
+
 `KurenaiEngine3D` はassimp経由でglTF・FBXモデルの読み込み・描画に対応した完結型の
 3Dレンダラーです。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、
 ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。

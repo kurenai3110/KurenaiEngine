@@ -64,7 +64,7 @@
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Debug;$(ProjectDir)..\ThirdParty\assimp\build\lib\Debug;$(ProjectDir)..\ThirdParty\assimp\build\contrib\zlib\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;DirectXTex.lib;assimp-vc143-mtd.lib;zlibstaticd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;assimp-vc143-mtd.lib;zlibstaticd.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -84,7 +84,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Release;$(ProjectDir)..\ThirdParty\assimp\build\lib\Release;$(ProjectDir)..\ThirdParty\assimp\build\contrib\zlib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;DirectXTex.lib;assimp-vc143-mt.lib;zlibstatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;assimp-vc143-mt.lib;zlibstatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
@@ -105,6 +105,7 @@ exit /b 0</Command>
     <ClInclude Include="Source\Engine\KurenaiEngine2D.h" />
     <ClInclude Include="Source\Library\Core\Window.h" />
     <ClInclude Include="Source\Library\Core\Camera.h" />
+    <ClInclude Include="Source\Library\Core\AudioEngine.h" />
     <ClInclude Include="Source\Library\Core\CPUProfiler.h" />
     <ClInclude Include="Source\Library\Assets\Vertex.h" />
     <ClInclude Include="Source\Library\Assets\Model.h" />
@@ -164,6 +165,7 @@ exit /b 0</Command>
     <ClCompile Include="Source\Engine\KurenaiEngine2D.cpp" />
     <ClCompile Include="Source\Library\Core\Window.cpp" />
     <ClCompile Include="Source\Library\Core\Camera.cpp" />
+    <ClCompile Include="Source\Library\Core\AudioEngine.cpp" />
     <ClCompile Include="Source\Library\Core\CPUProfiler.cpp" />
     <ClCompile Include="Source\Library\Assets\ModelLoader.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Buffer.cpp" />

@@ -26,6 +26,8 @@ namespace Kurenai
 
         m_Device = ToRHI(api) == RHI::GraphicsAPI::DX12 ? RHI::CreateDX12Device() : RHI::CreateDX11Device();
         m_SwapChain = m_Device->CreateSwapChain(m_Window->GetHandle(), m_Window->GetWidth(), m_Window->GetHeight());
+
+        m_AudioEngine = std::make_unique<Core::AudioEngine>();
     }
 
     KurenaiEngineBase::~KurenaiEngineBase() = default;
@@ -78,6 +80,20 @@ namespace Kurenai
     POINT KurenaiEngineBase::GetClientMousePosition() const
     {
         return m_Window->GetClientMousePosition();
+    }
+
+    SoundHandle KurenaiEngineBase::LoadSound(const std::wstring& filePath)
+    {
+        return SoundHandle(m_AudioEngine->LoadSound(filePath));
+    }
+
+    void KurenaiEngineBase::PlaySound(SoundHandle sound, float volume, bool loop)
+    {
+        if (!sound.IsValid())
+        {
+            return;
+        }
+        m_AudioEngine->PlaySound(sound.m_Index, volume, loop);
     }
 
     RHI::IRHICommandList* KurenaiEngineBase::GetCommandList() const
