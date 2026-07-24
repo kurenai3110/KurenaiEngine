@@ -100,19 +100,21 @@ namespace Kurenai::RHI
         ThrowIfFailed(m_ReadbackBuffer->Map(0, &readRange, reinterpret_cast<void**>(&mapped)), "GPUプロファイラのリードバック結果取得に失敗しました");
 
         const UINT64* slotData = mapped + static_cast<uint64_t>(slotIndex) * kQueriesPerSlot;
-        const UINT64 frameStart = slotData[0];
-        const UINT64 frameEnd = slotData[1];
-        m_TotalFrameTimeMs = static_cast<float>(frameEnd - frameStart) * 1000.0f / static_cast<float>(m_TimestampFrequency);
 
         m_Results.clear();
         m_Results.reserve(slot.ScopeCount);
+        // GPU Frame Timeは各パスの計測値の合計として算出する(FrameStart~FrameEndの全区間ではない)。
+        // DX11GPUProfiler::ResolveSlot()と算出方法を揃え、両バックエンドで同じ意味の値になるようにする
+        float totalFrameTimeMs = 0.0f;
         for (uint32_t i = 0; i < slot.ScopeCount; ++i)
         {
             const UINT64 begin = slotData[2 + i * 2];
             const UINT64 end = slotData[2 + i * 2 + 1];
             const float timeMs = static_cast<float>(end - begin) * 1000.0f / static_cast<float>(m_TimestampFrequency);
             m_Results.push_back({ slot.ScopeNames[i], timeMs });
+            totalFrameTimeMs += timeMs;
         }
+        m_TotalFrameTimeMs = totalFrameTimeMs;
 
         const D3D12_RANGE writtenRange{ 0, 0 };
         m_ReadbackBuffer->Unmap(0, &writtenRange);

@@ -735,6 +735,8 @@ namespace Kurenai
 
         ImGui::Checkbox("Enable Shadow", &m_ShadowEnabled);
 
+        ImGui::Checkbox("Enable VSync", &m_VSyncEnabled);
+
         ImGui::Checkbox("Enable SSR", &m_SSREnabled);
         if (m_SSREnabled)
         {
@@ -1272,8 +1274,10 @@ namespace Kurenai
         presentConstants.Mode = presentMode;
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
-        m_GPUProfiler->BeginScope("Present");
-        m_CPUProfiler.BeginScope("Present");
+        // SetRenderTarget(swapChain)はスワップチェインのバックバッファへの書き込みを開始する。
+        // vsync有効時、DX11ではこの時点(GPUが実際にバックバッファへアクセスする際)で
+        // 前フレームの表示に伴う内部的なバッファ確保待ちが発生しうるため、Present GPU/CPUスコープの
+        // 計測範囲には含めない(その待ちはDX11SwapChain::Present()側の実測でGPU Waitとして分離される)
         commandList->SetRenderTarget(m_SwapChain.get());
         commandList->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
         commandList->ClearDepth(1.0f);
@@ -1283,6 +1287,8 @@ namespace Kurenai
             m_Window->GetWidth(), m_Window->GetHeight(), presentSourceWidth, presentSourceHeight);
         commandList->SetViewport(letterboxViewport);
 
+        m_GPUProfiler->BeginScope("Present");
+        m_CPUProfiler.BeginScope("Present");
         commandList->SetPipelineState(m_PresentPipelineState.get());
         commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
         commandList->SetConstantBuffer(1, m_PresentConstantBuffer.get());
@@ -1307,7 +1313,7 @@ namespace Kurenai
         // Present呼び出し自体のCPUコストはここで計測しないと、各パスのコマンド記録時間の
         // 合計とCPU Frame Time全体の差分がどこにあるのか分からなくなるため計測しておく
         m_CPUProfiler.BeginScope("PresentSubmit");
-        m_SwapChain->Present(true);
+        m_SwapChain->Present(m_VSyncEnabled);
         m_CPUProfiler.EndScope(); // PresentSubmit
 
         // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく

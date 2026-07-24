@@ -146,6 +146,13 @@ namespace Kurenai
         float m_SSRThickness = 0.1f;
         float m_SSRRoughnessCutoff = 0.6f;
 
+        // 垂直同期。既定で無効。有効にするとPresentがvblankまでブロックするため、GPU負荷が軽い
+        // シーンではvsync待ちの間GPUがアイドル→省電力クロックに落ち、次フレームの立ち上がりが
+        // 遅くなる・待ち時間自体もジッタで1vblank/2vblank分を行き来するなど計測値が不安定になる。
+        // 既定はGPU/CPU双方の実処理時間を素直に見られるOFFとし、ティアリングを許容する
+        // (ON時はPresentが即座に返らず、モニタのリフレッシュレートにFPSが制限される)
+        bool m_VSyncEnabled = false;
+
         // Presentパス(選択中のレンダーターゲットをアスペクト比を保ってバックバッファへ拡大縮小表示)
         std::unique_ptr<RHI::IRHIShader> m_PresentVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_PresentPixelShader;

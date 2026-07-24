@@ -9,10 +9,13 @@
 
 namespace Kurenai::RHI
 {
+    class DX11Device;
+
     class DX11SwapChain : public IRHISwapChain
     {
     public:
         DX11SwapChain(
+            DX11Device* ownerDevice,
             Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain,
             Microsoft::WRL::ComPtr<ID3D11Device> device,
             Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
@@ -31,6 +34,7 @@ namespace Kurenai::RHI
         void CreateRenderTargetView();
         void CreateDepthStencilView();
 
+        DX11Device* m_OwnerDevice;
         Microsoft::WRL::ComPtr<IDXGISwapChain1> m_SwapChain;
         Microsoft::WRL::ComPtr<ID3D11Device> m_Device;
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;

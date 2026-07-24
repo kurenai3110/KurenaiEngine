@@ -100,14 +100,15 @@ namespace Kurenai::RHI
             return;
         }
 
-        UINT64 frameStart = 0;
-        UINT64 frameEnd = 0;
-        m_Context->GetData(slot.FrameStartQuery.Get(), &frameStart, sizeof(frameStart), 0);
-        m_Context->GetData(slot.FrameEndQuery.Get(), &frameEnd, sizeof(frameEnd), 0);
-        m_TotalFrameTimeMs = static_cast<float>(frameEnd - frameStart) * 1000.0f / static_cast<float>(disjointData.Frequency);
-
         m_Results.clear();
         m_Results.reserve(slot.ScopeCount);
+        // GPU Frame Timeは各パスの計測値の合計として算出する(FrameStart~FrameEndの全区間ではない)。
+        // DX11はSetRenderTarget(swapChain)でバックバッファに触れる際、vsyncによる暗黙のバッファ確保待ちが
+        // 同一コマンドストリーム内でGPU側の待ちとして発生しうるが、この待ちはどのスコープにも属さない
+        // (DX11SwapChain::Present()の実測でGPU Waitとして別途報告される)。全区間で計算すると
+        // この待ちが計上されてしまいDX12(フェンス待ちが完全に計測区間外で発生する)と数値の意味が
+        // 揃わなくなるため、両バックエンドとも「各パスの合計」に統一する
+        float totalFrameTimeMs = 0.0f;
         for (uint32_t i = 0; i < slot.ScopeCount; ++i)
         {
             UINT64 begin = 0;
@@ -116,6 +117,8 @@ namespace Kurenai::RHI
             m_Context->GetData(slot.EndQueries[i].Get(), &end, sizeof(end), 0);
             const float timeMs = static_cast<float>(end - begin) * 1000.0f / static_cast<float>(disjointData.Frequency);
             m_Results.push_back({ slot.ScopeNames[i], timeMs });
+            totalFrameTimeMs += timeMs;
         }
+        m_TotalFrameTimeMs = totalFrameTimeMs;
     }
 }

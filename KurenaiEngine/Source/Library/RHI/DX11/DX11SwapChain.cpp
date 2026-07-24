@@ -1,18 +1,22 @@
 #include "DX11SwapChain.h"
 
+#include <chrono>
 #include <utility>
 
+#include "DX11Device.h"
 #include "DX11Util.h"
 
 namespace Kurenai::RHI
 {
     DX11SwapChain::DX11SwapChain(
+        DX11Device* ownerDevice,
         Microsoft::WRL::ComPtr<IDXGISwapChain1> swapChain,
         Microsoft::WRL::ComPtr<ID3D11Device> device,
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> context,
         uint32_t width,
         uint32_t height)
-        : m_SwapChain(std::move(swapChain))
+        : m_OwnerDevice(ownerDevice)
+        , m_SwapChain(std::move(swapChain))
         , m_Device(std::move(device))
         , m_Context(std::move(context))
         , m_Width(width)
@@ -47,7 +51,15 @@ namespace Kurenai::RHI
 
     void DX11SwapChain::Present(bool vsync)
     {
+        // DX11のイミディエイトコンテキストにはDX12のようなフェンスによる多重バッファリングがなく、
+        // GPUの描画完了待ちや(vsync有効時の)次のvblankまでの待ちはすべてこの呼び出し自体の
+        // ブロッキング時間として現れる。実測してDX11Deviceへ報告することで、DX12の
+        // GetLastFrameGPUWaitTimeMs()と同様にCPU Frame Time/PresentSubmitの表示から
+        // この待ち時間を分離できるようにする
+        const auto presentStart = std::chrono::steady_clock::now();
         m_SwapChain->Present(vsync ? 1 : 0, 0);
+        const float presentTimeMs = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - presentStart).count();
+        m_OwnerDevice->SetLastFrameGPUWaitTimeMs(presentTimeMs);
     }
 
     void DX11SwapChain::Resize(uint32_t width, uint32_t height)

@@ -122,7 +122,7 @@ namespace Kurenai::RHI
             &swapChain);
         ThrowIfFailed(hr, "スワップチェインの作成に失敗しました");
 
-        return std::make_unique<DX11SwapChain>(swapChain, m_Device, m_Context, width, height);
+        return std::make_unique<DX11SwapChain>(this, swapChain, m_Device, m_Context, width, height);
     }
 
     std::unique_ptr<IRHIBuffer> DX11Device::CreateBuffer(const BufferDesc& desc)
