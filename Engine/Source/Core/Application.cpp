@@ -961,30 +961,47 @@ namespace Kurenai::Core
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度) ---
-        m_GPUProfiler->BeginScope("Shadow");
-        m_CPUProfiler.BeginScope("Shadow");
         RHI::Viewport shadowViewport;
         shadowViewport.Width = static_cast<float>(kShadowMapSize);
         shadowViewport.Height = static_cast<float>(kShadowMapSize);
-        commandList->SetViewport(shadowViewport);
 
-        commandList->SetRenderTargets(nullptr, 0, m_ShadowMap.get());
         // 深度1.0(最遠)にクリアしておく。無効時はこの後の描画をスキップするため、
         // シェーダー側は深度比較で常に「影なし」と判定する(ComputeShadowFactor参照)
-        commandList->ClearDepth(1.0f);
-
-        if (m_ShadowEnabled)
+        const auto drawShadowPass = [&]()
         {
-            commandList->SetPipelineState(m_ShadowPipelineState.get());
-            commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+            commandList->SetViewport(shadowViewport);
+            commandList->SetRenderTargets(nullptr, 0, m_ShadowMap.get());
+            commandList->ClearDepth(1.0f);
 
-            for (const auto& mesh : m_Model.Meshes)
+            if (m_ShadowEnabled)
             {
-                commandList->SetVertexBuffer(mesh.VertexBuffer.get());
-                commandList->SetIndexBuffer(mesh.IndexBuffer.get());
-                commandList->DrawIndexed(mesh.IndexCount, 0, 0);
+                commandList->SetPipelineState(m_ShadowPipelineState.get());
+                commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+
+                for (const auto& mesh : m_Model.Meshes)
+                {
+                    commandList->SetVertexBuffer(mesh.VertexBuffer.get());
+                    commandList->SetIndexBuffer(mesh.IndexBuffer.get());
+                    commandList->DrawIndexed(mesh.IndexCount, 0, 0);
+                }
             }
-        }
+        };
+
+        // DX12は1フレームぶんのコマンドをまとめてExecuteCommandListsする設計のため、そのフレームで
+        // 最初に実行されるGPU処理にはディスパッチの立ち上がりコストが乗ってしまい、GPUタイムスタンプ
+        // クエリで正しく計測できない(実測により確認済み)。そのフレーム最初の処理として本番と全く同じ
+        // 内容を「Warmup」として計測なしで一度実行しておき、この立ち上がりコストを吸収させることで、
+        // 直後の本番の「Shadow」計測値が実際の描画コストに近い値になるようにする
+        // (Warmup分の描画結果は直後のClearDepthで上書きされるため、最終的な描画結果には影響しない)
+        m_GPUProfiler->BeginScope("Warmup");
+        m_CPUProfiler.BeginScope("Warmup");
+        drawShadowPass();
+        m_CPUProfiler.EndScope(); // Warmup
+        m_GPUProfiler->EndScope(); // Warmup
+
+        m_GPUProfiler->BeginScope("Shadow");
+        m_CPUProfiler.BeginScope("Shadow");
+        drawShadowPass();
         m_CPUProfiler.EndScope(); // Shadow
         m_GPUProfiler->EndScope(); // Shadow
 
