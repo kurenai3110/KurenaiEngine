@@ -15,8 +15,8 @@ G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_F
 - `Engine/` — エンジン本体(静的ライブラリ)。RHI抽象化レイヤー、DX11/DX12バックエンド、モデルローダーなど。
 - `Sandbox/` — 動作確認用の実行ファイル。シェーダ(`Shaders/`)を含む。
 - `ThirdParty/` — 外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp。
+- `ThirdParty/SourceModels/` — 参考用にダウンロードしたサンプルアセット集(まだ`Assets/`に取り込んでいないものを含む)。
 - `Assets/` — エンジンが実際に読み込むモデル・テクスチャなどのアセット。
-- `Samples/` — 参考用にダウンロードしたサンプルアセット集(まだ`Assets/`に取り込んでいないものを含む)。
 - `Build/` — ビルド生成物の出力先(Git管理対象外)。
 
 ## 必要環境
@@ -119,6 +119,6 @@ Sandbox.exe -dx12
 - `Assets/MaterialTest/` — PBRライティング検証用に生成した、粗さ(roughness)を0.0〜1.0で11段階に変えた白色(非金属)の球体を並べたglTFアセット。`Tools/generate_material_test.py` で再生成できる
 - `Assets/Skybox/` — 背景表示用に生成した青空のキューブマップ(DDS形式)。`Tools/generate_sky_cubemap.py` で再生成できる
 
-`Assets/` と `Samples/` はサイズが大きいためGit管理対象外(`.gitignore`)にしています。
+`Assets/` と `ThirdParty/SourceModels/` はサイズが大きいためGit管理対象外(`.gitignore`)にしています。
 
 モデルを読み込むと、同じ場所に `<元のファイル名>.kmodelcache` というバイナリキャッシュが自動生成されます。頂点/インデックス/マテリアル参照を解析済みの形で保持しており、2回目以降の読み込みではassimpによる解析をスキップして高速に読み込めます。元のモデルファイルが更新されると自動的に無効化され再生成されるため、手動での削除は基本的に不要です。

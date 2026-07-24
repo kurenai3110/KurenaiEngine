@@ -16,9 +16,9 @@
 # 実行時ログ
 *.log
 
-# 大容量アセット・サンプルデータ(リポジトリ直下のみ対象。Engine/Source/Assets等のソースは含める)
+# 大容量アセット・サンプルデータ(Engine/Source/Assets等のソースは含める)
 /Assets/
-/Samples/
+/ThirdParty/SourceModels/
 
 # graphify生成物(ナレッジグラフ出力・キャッシュ)
 /graphify-out/
