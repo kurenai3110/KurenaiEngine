@@ -13,10 +13,19 @@ namespace Kurenai
 {
     namespace
     {
-        std::wstring GetExecutableDirectory()
+        // 呼び出し元(exe)ではなくKurenaiEngine.dll自身のフォルダを返す。
+        // Shaders/AssetsはDLLと同じフォルダに配置される運用のため、DLLがどこにコピー
+        // されて使われても(各サンプルのBuildフォルダ配下など)データを正しく解決できる
+        std::wstring GetModuleDirectory()
         {
+            HMODULE module = nullptr;
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&GetModuleDirectory),
+                &module);
+
             wchar_t path[MAX_PATH];
-            GetModuleFileNameW(nullptr, path, MAX_PATH);
+            GetModuleFileNameW(module, path, MAX_PATH);
             std::wstring pathStr(path);
             size_t pos = pathStr.find_last_of(L"\\/");
             return pos == std::wstring::npos ? L"" : pathStr.substr(0, pos + 1);
@@ -260,9 +269,9 @@ namespace Kurenai
         m_ImGuiBackend = m_Device->CreateImGuiBackend(m_Window->GetHandle());
         m_GPUProfiler = m_Device->CreateGPUProfiler();
 
-        // imgui.iniの保存先を起動時の作業ディレクトリに依存させず、実行ファイルと同じフォルダに固定する。
+        // imgui.iniの保存先を起動時の作業ディレクトリに依存させず、KurenaiEngine.dllと同じフォルダに固定する。
         // ImGuiはIniFilenameのポインタを保持するだけでコピーしないため、m_ImGuiIniPathで寿命を維持する
-        m_ImGuiIniPath = WideToUtf8((GetExecutableDirectory() + L"imgui.ini").c_str());
+        m_ImGuiIniPath = WideToUtf8((GetModuleDirectory() + L"imgui.ini").c_str());
         ImGui::GetIO().IniFilename = m_ImGuiIniPath.c_str();
 
         m_Camera.SetAspectRatio(static_cast<float>(m_RenderWidth) / static_cast<float>(m_RenderHeight));
@@ -276,9 +285,9 @@ namespace Kurenai
 
     void KurenaiEngine3D::CreateSceneResources()
     {
-        // Build/Bin/<Platform>/<Configuration>/ からリポジトリルートまでの相対パス
-        const std::wstring repoRoot = GetExecutableDirectory() + L"..\\..\\..\\..\\";
-        const std::wstring shaderDirectory = repoRoot + L"KurenaiEngine\\Shaders\\";
+        // Shaders/AssetsはビルドでKurenaiEngine.dllと同じフォルダにコピーされる
+        const std::wstring dataRoot = GetModuleDirectory();
+        const std::wstring shaderDirectory = dataRoot + L"Shaders\\";
 
         const std::vector<RHI::InputElementDesc> modelInputLayout =
         {
@@ -512,7 +521,7 @@ namespace Kurenai
         m_ShadowMap = m_Device->CreateDepthTexture(kShadowMapSize, kShadowMapSize);
 
         // 空のキューブマップはシーンに依存しないため一度だけ読み込む
-        m_SkyboxTexture = m_Device->CreateTextureFromFile(repoRoot + L"Assets\\Skybox\\Sky.dds", false);
+        m_SkyboxTexture = m_Device->CreateTextureFromFile(dataRoot + L"Assets\\Skybox\\Sky.dds", false);
 
         m_Sampler = m_Device->CreateDefaultSampler();
 
@@ -568,8 +577,7 @@ namespace Kurenai
             return;
         }
 
-        const std::wstring repoRoot = GetExecutableDirectory() + L"..\\..\\..\\..\\";
-        const std::wstring modelPath = repoRoot + kScenes[sceneIndex].RelativePath;
+        const std::wstring modelPath = GetModuleDirectory() + kScenes[sceneIndex].RelativePath;
 
         m_Model = Assets::LoadModel(*m_Device, modelPath);
         m_CurrentSceneIndex = sceneIndex;

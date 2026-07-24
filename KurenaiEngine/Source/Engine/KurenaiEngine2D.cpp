@@ -6,10 +6,19 @@ namespace Kurenai
 {
     namespace
     {
-        std::wstring GetExecutableDirectory()
+        // 呼び出し元(exe)ではなくKurenaiEngine.dll自身のフォルダを返す。
+        // Shaders/AssetsはDLLと同じフォルダに配置される運用のため、DLLがどこにコピー
+        // されて使われても(各サンプルのBuildフォルダ配下など)データを正しく解決できる
+        std::wstring GetModuleDirectory()
         {
+            HMODULE module = nullptr;
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&GetModuleDirectory),
+                &module);
+
             wchar_t path[MAX_PATH];
-            GetModuleFileNameW(nullptr, path, MAX_PATH);
+            GetModuleFileNameW(module, path, MAX_PATH);
             std::wstring pathStr(path);
             const size_t pos = pathStr.find_last_of(L"\\/");
             return pos == std::wstring::npos ? L"" : pathStr.substr(0, pos + 1);
@@ -38,8 +47,8 @@ namespace Kurenai
     KurenaiEngine2D::KurenaiEngine2D(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api)
         : KurenaiEngineBase(title, width, height, api)
     {
-        const std::wstring repoRoot = GetExecutableDirectory() + L"..\\..\\..\\..\\";
-        const std::wstring shaderPath = repoRoot + L"KurenaiEngine\\Shaders\\Sprite2D.hlsl";
+        // ShadersはビルドでKurenaiEngine.dllと同じフォルダにコピーされる
+        const std::wstring shaderPath = GetModuleDirectory() + L"Shaders\\Sprite2D.hlsl";
 
         m_VertexShader = m_Device->CreateShader({ RHI::ShaderStage::Vertex, shaderPath, "VSMain" });
         m_PixelShader = m_Device->CreateShader({ RHI::ShaderStage::Pixel, shaderPath, "PSMain" });

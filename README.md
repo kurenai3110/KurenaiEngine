@@ -46,14 +46,22 @@ KurenaiEngine/
   Shaders/                       KurenaiEngine3D/2Dが内部で使うHLSL一式
 Samples/
   Sample3D/  Sample3D.sln       3Dサンプル(KurenaiEngine3Dを使用)。独立ソリューション
+             Build/             Sample3D.exeの出力先(Git管理対象外)
   Sample2D/  Sample2D.sln       2Dサンプル(KurenaiEngine2Dを使用)。独立ソリューション
+             Build/             Sample2D.exeの出力先(Git管理対象外)
 docs/                           APIリファレンス
 ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
 ThirdParty/SourceModels/        参考用にダウンロードしたサンプルアセット集(未使用のものを含む)
 Assets/                         KurenaiEngine3Dが読み込むモデル・テクスチャなどのアセット
-Build/                          ビルド生成物の出力先(Git管理対象外)。全プロジェクトが
-                                 Build\Bin\<Platform>\<Configuration>\ に出力を揃える
+Build/                          KurenaiEngine.dll単体の出力先(Git管理対象外)。
+                                 Build\Bin\<Platform>\<Configuration>\ にDLLと、それが参照する
+                                 Shaders/Assetsのコピーが揃う
 ```
+
+KurenaiEngine.dllが実行時に参照するShaders/Assetsは、ビルド時のPostBuildEventでDLLと
+同じフォルダへ自動的にコピーされます。Sample3D/Sample2Dも同様に、自身のビルド後に
+KurenaiEngine.dllとShaders/Assetsを自分の出力フォルダへコピーするため、各実行ファイルは
+`Samples\Sample3D\Build\...` / `Samples\Sample2D\Build\...` 以下だけで単独で動作します。
 
 ## 必要環境
 
@@ -110,15 +118,19 @@ MSBuild ThirdParty\DirectXTex\DirectXTex\DirectXTex_Desktop_2022.vcxproj /p:Conf
 MSBuild Samples\Sample3D\Sample3D.sln /p:Configuration=Debug /p:Platform=x64
 ```
 
-生成された実行ファイル・DLLはすべて `Build\Bin\x64\Debug\` に出力されます
-(`Sample3D.exe`, `Sample2D.exe`, `KurenaiEngine.dll` が同じフォルダに揃う)。
+`KurenaiEngine.dll`は `Build\Bin\x64\Debug\` に、`Sample3D.exe`/`Sample2D.exe`はそれぞれ
+`Samples\Sample3D\Build\Bin\x64\Debug\` / `Samples\Sample2D\Build\Bin\x64\Debug\` に出力されます。
+いずれのフォルダにもKurenaiEngine.dllと、それが参照するShaders/Assetsが自動でコピーされるため、
+各フォルダはそれだけで完結して動作します。
 
 ## 実行(Sample3D)
 
 **起動確認・動作検証には `Sample3D.exe` を使用します**(旧`Sandbox.exe`はこのリファクタリングで
 `Samples/Sample3D` に統合されました)。起動時にSponzaを読み込んで表示します。モデル・シェーダの
-パスは実行ファイルの場所から4階層上をリポジトリルートとみなして解決しているため、
-`Build\Bin\<Platform>\<Configuration>\` 以外の場所に実行ファイルを配置すると読み込みに失敗します。
+パスは実行中の`KurenaiEngine.dll`自身の場所を基準に解決しているため、`KurenaiEngine.dll`と
+`Shaders\` / `Assets\` が同じフォルダに揃ってさえいれば、実行ファイルをどこに配置しても
+読み込みに成功します(`Samples\Sample3D\Build\Bin\<Platform>\<Configuration>\` はビルド時に
+自動でこの構成になります)。
 
 既定ではDX11バックエンドで起動します。`-dx12` 引数を付けて起動するとDX12バックエンドを使用します(再ビルド不要でDX11/DX12を比較できます)。現在どちらのバックエンドで動作しているかはウィンドウタイトル(例: `Kurenai Engine [DX12] - Sponza`)と「Scenes」パネルの表示で確認できます。
 
@@ -157,8 +169,9 @@ Sample3D.exe -dx12
 
 `Samples/` 以下に、`docs/KurenaiEngine.html` で説明している公開API(`KurenaiEngine3D` /
 `KurenaiEngine2D`)を使ったサンプルプログラムを用意しています。それぞれ独立した`.sln`を持ち、
-`KurenaiEngine.vcxproj`をプロジェクト参照します。実行ファイルの出力先はKurenaiEngine.dllと
-同じ `Build\Bin\x64\<Configuration>\`。
+`KurenaiEngine.vcxproj`をプロジェクト参照します。実行ファイルの出力先は各サンプル自身の
+`Samples\Sample3D\Build\Bin\x64\<Configuration>\` / `Samples\Sample2D\Build\Bin\x64\<Configuration>\`
+で、ビルド後処理でKurenaiEngine.dllとShaders/Assetsが同じフォルダへコピーされます。
 
 ### Sample3D
 

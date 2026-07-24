@@ -87,6 +87,17 @@
       <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;DirectXTex.lib;assimp-vc143-mt.lib;zlibstatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup>
+    <!-- KurenaiEngine.dllが実行時に参照するShaders/AssetsをDLLと同じフォルダに揃える。
+         xcopy /D により変更のあったファイルのみコピーし、対象が無い場合の終了コード(1)は
+         ビルド失敗として扱わないようexit /bで無視する -->
+    <PostBuildEvent>
+      <Command>xcopy /Y /I /E /D "$(ProjectDir)Shaders" "$(OutDir)Shaders\"
+xcopy /Y /I /E /D "$(ProjectDir)..\Assets" "$(OutDir)Assets\"
+exit /b 0</Command>
+      <Message>Shaders/AssetsをOutDirへコピー</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Source\Engine\KurenaiTypes.h" />
     <ClInclude Include="Source\Engine\KurenaiEngineBase.h" />

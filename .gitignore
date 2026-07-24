@@ -1,5 +1,7 @@
 # ビルド生成物
 /Build/
+/Samples/Sample3D/Build/
+/Samples/Sample2D/Build/
 
 # Visual Studio
 .vs/
