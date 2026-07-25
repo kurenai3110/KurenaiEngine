@@ -25,6 +25,7 @@ struct VSInput
     float3 Position : POSITION;
     float3 Normal : NORMAL;
     float2 UV : TEXCOORD0;
+    float4 Tangent : TANGENT;
 };
 
 struct PSInput
@@ -33,6 +34,7 @@ struct PSInput
     float3 Normal : NORMAL;
     float3 WorldPos : TEXCOORD1;
     float2 UV : TEXCOORD0;
+    float4 Tangent : TANGENT;
 };
 
 struct PSOutput
@@ -49,25 +51,19 @@ PSInput VSMain(VSInput input)
     output.Normal = input.Normal;
     output.WorldPos = input.Position;
     output.UV = input.UV;
+    output.Tangent = input.Tangent;
     return output;
 }
 
-// 頂点の接線を持たないため、UV/位置の画面空間微分から接線フレームを近似する
-// (Christian Schuler "Normal Mapping without Precomputed Tangents" の手法)
-float3x3 ComputeTangentFrame(float3 N, float3 worldPos, float2 uv)
+// 頂点接線(xyz)と従法線の向き(w = +1/-1)からTBN行列を構築する。
+// UV/位置の画面空間微分(ddx/ddy)から近似する手法は、UV継ぎ目(シームがある円筒状展開の
+// グラス類など)でピクセルクアッドがトポロジー的に不連続になり法線が破綻するため使用しない
+float3x3 ComputeTangentFrame(float3 N, float4 tangent)
 {
-    float3 dp1 = ddx(worldPos);
-    float3 dp2 = ddy(worldPos);
-    float2 duv1 = ddx(uv);
-    float2 duv2 = ddy(uv);
-
-    float3 dp2perp = cross(dp2, N);
-    float3 dp1perp = cross(N, dp1);
-    float3 T = dp2perp * duv1.x + dp1perp * duv2.x;
-    float3 B = dp2perp * duv1.y + dp1perp * duv2.y;
-
-    float invMax = rsqrt(max(dot(T, T), dot(B, B)));
-    return float3x3(T * invMax, B * invMax, N);
+    // 頂点補間でTとNの直交性が崩れるため、ピクセル単位でGram-Schmidt再直交化する
+    float3 T = normalize(tangent.xyz - N * dot(N, tangent.xyz));
+    float3 B = cross(N, T) * tangent.w;
+    return float3x3(T, B, N);
 }
 
 PSOutput PSMain(PSInput input)
@@ -83,7 +79,7 @@ PSOutput PSMain(PSInput input)
     float2 normalXY = NormalTexture.Sample(DefaultSampler, input.UV).xy * 2.0f - 1.0f;
     float normalZ = sqrt(saturate(1.0f - dot(normalXY, normalXY)));
     float3 normalSample = float3(normalXY, normalZ);
-    float3x3 tbn = ComputeTangentFrame(geometricNormal, input.WorldPos, input.UV);
+    float3x3 tbn = ComputeTangentFrame(geometricNormal, input.Tangent);
     float3 N = normalize(mul(normalSample, tbn));
 
     float3 metallicRoughnessSample = MetallicRoughnessTexture.Sample(DefaultSampler, input.UV).rgb;

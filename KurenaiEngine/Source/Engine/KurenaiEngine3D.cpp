@@ -297,6 +297,7 @@ namespace Kurenai
             { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
             { "NORMAL", 0, RHI::Format::R32G32B32_Float, 12 },
             { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
+            { "TANGENT", 0, RHI::Format::R32G32B32A32_Float, 32 },
         };
 
         // ジオメトリパス(G-Buffer書き込み)
