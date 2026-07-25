@@ -89,6 +89,10 @@ namespace Kurenai::Core
 
         bool m_MouseInClient = false;
         bool m_TrackingMouseLeave = false;
+        // PostMessageによる自動操作時、TrackMouseEventが実カーソル位置基準で生成するWM_MOUSELEAVEが
+        // m_MouseInClientを誤ってfalseに戻すのを抑制するため、HandleMessage内で直近のWM_MOUSEMOVE
+        // 処理時刻を記録する(HandleMessageはWndProcから直接呼ばれ単一スレッドでのみ読み書きするためlock不要)
+        std::chrono::steady_clock::time_point m_LastMouseMoveTime{};
         POINT m_MousePosition{};
         bool m_MouseButtonDown[3]{};
         bool m_MouseButtonPressedEdge[3]{};

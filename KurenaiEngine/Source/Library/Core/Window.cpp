@@ -216,9 +216,24 @@ namespace Kurenai::Core
                 m_TrackingMouseLeave = true;
             }
             m_MouseInClient = true;
+            m_LastMouseMoveTime = std::chrono::steady_clock::now();
             return 0;
 
         case WM_MOUSELEAVE:
+            // PostMessageによる自動操作(実カーソルはウィンドウ外にあることが多い)では、注入した
+            // WM_MOUSEMOVEの直後にTrackMouseEventが実カーソル位置に基づいてWM_MOUSELEAVEを生成して
+            // しまい、m_MouseInClientが真になった直後に偽へ戻ることを繰り返してホバー/クリック判定が
+            // 成立しなくなる(ForwardQueuedMessagesToImGuiのkMouseLeaveSuppressionと同種の問題)。
+            // 直近kMouseLeaveSuppressionウィンドウ内にWM_MOUSEMOVEを処理していれば、このWM_MOUSELEAVEは
+            // 実カーソル基準の古い判定によるノイズとみなしてm_MouseInClientを戻さない
+            {
+                constexpr auto kMouseLeaveSuppression = std::chrono::milliseconds(100);
+                if ((std::chrono::steady_clock::now() - m_LastMouseMoveTime) < kMouseLeaveSuppression)
+                {
+                    m_TrackingMouseLeave = false;
+                    return 0;
+                }
+            }
             m_MouseInClient = false;
             m_TrackingMouseLeave = false;
             return 0;

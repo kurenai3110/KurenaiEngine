@@ -19,7 +19,10 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**
 表示されます。`KurenaiEngineBase`(2D/3D共通)は、`GetAsyncKeyState`/`GetCursorPos`のような
 グローバル入力ではなくウィンドウスコープのメッセージベース入力API(`IsKeyDown`/`WasKeyPressed`/
 `IsMouseButtonDown`/`WasMouseButtonPressed`/`IsMouseOverWindow`/`GetClientMousePosition`)を
-公開しています。`KurenaiEngine3D`自身もWASD移動・F1のImGui表示切替にこのAPIを使っており、
+公開しています。`IsMouseOverWindow`は`TrackMouseEvent`由来の`WM_MOUSELEAVE`ノイズ
+(実カーソルがウィンドウ外にある状態で`PostMessage`により`WM_MOUSEMOVE`を注入した際に発生しうる)
+を抑制するため、直近に`WM_MOUSEMOVE`を処理していれば後続の`WM_MOUSELEAVE`を無視します。
+`KurenaiEngine3D`自身もWASD移動・F1のImGui表示切替にこのAPIを使っており、
 `PostMessage`によるキー操作のテスト自動化と整合します。加えて、XAudio2による簡易な
 サウンド再生API(`LoadSound`/`PlaySound`/`StopSound`、WAV/PCM。`PlaySound`が返す`VoiceHandle`を
 `StopSound`に渡すとループ再生を停止できる)も公開しています(詳細は

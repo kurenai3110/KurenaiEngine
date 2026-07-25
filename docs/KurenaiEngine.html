@@ -746,6 +746,14 @@ POINT GetClientMousePosition() const;               // クライアント座標(
 <code>PostMessage</code>で<code>WM_RBUTTONDOWN</code>を送っても実カーソルの位置・表示状態には
 一切影響しない(意図しないカーソル操作の経路にならないことを構造的に保証している)。</li>
 <li>複数キー・複数ボタンの同時押しにも対応(それぞれ独立して状態を保持)。マウスホイールは未対応。</li>
+<li><code>IsMouseOverWindow</code>も、下記のImGui側と同様の理由で
+<code>TrackMouseEvent</code>由来の<code>WM_MOUSELEAVE</code>ノイズを抑制する。実カーソルが
+ウィンドウ外にある状態で<code>PostMessage</code>により<code>WM_MOUSEMOVE</code>を注入すると、
+直後に実カーソル位置に基づく<code>WM_MOUSELEAVE</code>が割り込み、素朴に実装すると
+<code>IsMouseOverWindow</code>が真になった直後に偽へ戻ることを繰り返してしまう。これを防ぐため、
+直近100ms以内に<code>WM_MOUSEMOVE</code>を処理していれば、その後届いた<code>WM_MOUSELEAVE</code>は
+古い実カーソル位置によるノイズとみなして無視する(実際にウィンドウ外に出た場合も、新たな
+<code>WM_MOUSEMOVE</code>が来ない限りこの猶予はすぐ過ぎるため、通常どおり検出される)。</li>
 <li><strong>ImGuiパネルの操作</strong>(ボタンクリック等)を<code>PostMessage</code>で行う場合、
 <code>WM_MOUSEMOVE</code> → <code>WM_LBUTTONDOWN</code> → <code>WM_LBUTTONUP</code>の3つを
 <strong>間隔を空けずに連続送信</strong>すること。Dear ImGuiのWin32バックエンド
