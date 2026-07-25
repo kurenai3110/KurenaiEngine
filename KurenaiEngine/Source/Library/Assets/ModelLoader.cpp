@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "Core/Logger.h"
 #include "Vertex.h"
 
 namespace Kurenai::Assets
@@ -171,9 +172,10 @@ namespace Kurenai::Assets
                     rawPtr = texture.get();
                     m_Model.Textures.push_back(std::move(texture));
                 }
-                catch (const std::exception&)
+                catch (const std::exception& e)
                 {
                     // 読み込みに失敗したテクスチャは目立つ色のプレースホルダーで代替し、モデル全体の読み込みは継続する
+                    Core::Logger::Error("ModelLoader", "テクスチャの読み込みに失敗しました (" + path + "): " + e.what());
                     auto texture = m_Device.CreateSolidColorTexture(255, 0, 255, 255);
                     rawPtr = texture.get();
                     m_Model.Textures.push_back(std::move(texture));
@@ -205,8 +207,9 @@ namespace Kurenai::Assets
                     rawPtr = texture.get();
                     m_Model.Textures.push_back(std::move(texture));
                 }
-                catch (const std::exception&)
+                catch (const std::exception& e)
                 {
+                    Core::Logger::Error("ModelLoader", "法線マップの読み込みに失敗しました (" + path + "): " + e.what());
                     rawPtr = GetFlatNormal();
                 }
 
@@ -444,9 +447,10 @@ namespace Kurenai::Assets
                 outModel = std::move(model);
                 return true;
             }
-            catch (const std::exception&)
+            catch (const std::exception& e)
             {
                 // キャッシュが壊れている/バージョン不一致などの場合は通常経路にフォールバックする
+                Core::Logger::Warning("ModelLoader", "モデルキャッシュの読み込みに失敗したため、通常経路にフォールバックします: " + std::string(e.what()));
                 return false;
             }
         }

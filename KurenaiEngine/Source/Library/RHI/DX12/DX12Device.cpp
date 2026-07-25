@@ -221,6 +221,7 @@ namespace Kurenai::RHI
                 message += ": ";
                 message += static_cast<const char*>(errorBlob->GetBufferPointer());
             }
+            Core::Logger::Error("DX12", message);
             throw std::runtime_error(message);
         }
 
@@ -263,6 +264,7 @@ namespace Kurenai::RHI
                 message += ": ";
                 message += static_cast<const char*>(errorBlob->GetBufferPointer());
             }
+            Core::Logger::Error("DX12", message);
             throw std::runtime_error(message);
         }
 
@@ -595,6 +597,7 @@ namespace Kurenai::RHI
                 message += ": ";
                 message += static_cast<const char*>(errorBlob->GetBufferPointer());
             }
+            Core::Logger::Error("DX12", message);
             throw std::runtime_error(message);
         }
 

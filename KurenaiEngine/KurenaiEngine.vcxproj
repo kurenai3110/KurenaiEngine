@@ -107,6 +107,7 @@ exit /b 0</Command>
     <ClInclude Include="Source\Library\Core\Camera.h" />
     <ClInclude Include="Source\Library\Core\AudioEngine.h" />
     <ClInclude Include="Source\Library\Core\CPUProfiler.h" />
+    <ClInclude Include="Source\Library\Core\Logger.h" />
     <ClInclude Include="Source\Library\Core\RenderGraph.h" />
     <ClInclude Include="Source\Library\Assets\Vertex.h" />
     <ClInclude Include="Source\Library\Assets\Model.h" />
@@ -168,6 +169,7 @@ exit /b 0</Command>
     <ClCompile Include="Source\Library\Core\Camera.cpp" />
     <ClCompile Include="Source\Library\Core\AudioEngine.cpp" />
     <ClCompile Include="Source\Library\Core\CPUProfiler.cpp" />
+    <ClCompile Include="Source\Library\Core\Logger.cpp" />
     <ClCompile Include="Source\Library\Core\RenderGraph.cpp" />
     <ClCompile Include="Source\Library\Assets\ModelLoader.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Buffer.cpp" />

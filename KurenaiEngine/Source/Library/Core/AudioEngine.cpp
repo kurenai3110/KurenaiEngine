@@ -5,6 +5,8 @@
 #include <fstream>
 #include <stdexcept>
 
+#include "Logger.h"
+
 namespace Kurenai::Core
 {
     // 単発再生(loop=false)のボイスが再生を終えたことを検知するためのコールバック。
@@ -31,7 +33,12 @@ namespace Kurenai::Core
         {
             if (FAILED(hr))
             {
-                throw std::runtime_error(std::string(message) + " (HRESULT: 0x" + std::to_string(static_cast<uint32_t>(hr)) + ")");
+                const std::string fullMessage = std::string(message) + " (HRESULT: 0x" + std::to_string(static_cast<uint32_t>(hr)) + ")";
+
+                // 例外を送出する前に、ログを出力する
+                Logger::Error("Audio", fullMessage);
+
+                throw std::runtime_error(fullMessage);
             }
         }
 

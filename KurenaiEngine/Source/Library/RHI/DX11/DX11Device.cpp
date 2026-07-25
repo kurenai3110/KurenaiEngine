@@ -207,6 +207,7 @@ namespace Kurenai::RHI
                 message += ": ";
                 message += static_cast<const char*>(errorBlob->GetBufferPointer());
             }
+            Core::Logger::Error("DX11", message);
             throw std::runtime_error(message);
         }
 
@@ -576,6 +577,7 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11Query> query;
         if (FAILED(m_Device->CreateQuery(&queryDesc, &query)))
         {
+            Core::Logger::Error("DX11", "WaitForGPUIdle: 同期用クエリの作成に失敗したため、GPU待機をスキップします");
             return;
         }
 
