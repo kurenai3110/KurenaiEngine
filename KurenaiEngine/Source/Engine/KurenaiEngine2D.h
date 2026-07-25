@@ -68,6 +68,15 @@ namespace Kurenai
         // (x1, y1)-(x2, y2)を結ぶ、太さthicknessの線分を描画する。r, g, b, aは色(半透明可)
         void DrawLine(float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a);
 
+        // 中心(x, y)、サイズwidth x height、角丸半径cornerRadiusPixelsの角丸矩形を描画する。
+        // r, g, b, aは塗りつぶし色(半透明可)。borderThicknessPixelsを0より大きくすると、
+        // 塗りの内側にborderR/G/B/Aの枠線を重ねて描画する(既定では枠線なし)
+        void DrawRoundedRect(
+            float x, float y, float width, float height, float cornerRadiusPixels,
+            float r, float g, float b, float a,
+            float borderThicknessPixels = 0.0f,
+            float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f);
+
         // (x, y)を左下基準としてtextを描画する。fontSizeはおおよその文字高さ(ピクセル単位)。
         // ビットマップフォント方式のため、厳密なフォントレンダリング(ヒンティング等)は行わない。
         // ASCII印字可能文字(0x20〜0x7E)に加え、かな漢字を含む任意のUnicode文字(BMP範囲)に対応する。
@@ -107,6 +116,11 @@ namespace Kurenai
         // ピクセルシェーダーとパイプラインステートのみ専用のものを使う
         std::unique_ptr<RHI::IRHIShader> m_CirclePixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_CirclePipelineState;
+
+        // DrawRoundedRect用。DrawCircleと同様、頂点シェーダー・頂点/インデックスバッファは
+        // スプライトと共用し、ピクセルシェーダーとパイプラインステートのみ専用のものを使う
+        std::unique_ptr<RHI::IRHIShader> m_RoundedRectPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_RoundedRectPipelineState;
 
         // DrawLineは太さ・長さに拡縮縮小した矩形として、この不透明白テクスチャを使ってDrawSpriteと
         // 同じスプライトパイプラインで描画する

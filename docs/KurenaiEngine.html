@@ -361,6 +361,10 @@ Bistro Interior / Bistro Interior (Wine Cellar) / White Surface Test)。カス�
                          TextureHandle texture, float r, float g, float b, float a);
         void DrawCircle(float x, float y, float radius, float r, float g, float b, float a);
         void DrawLine(float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a);
+        void DrawRoundedRect(float x, float y, float width, float height, float cornerRadiusPixels,
+                              float r, float g, float b, float a,
+                              float borderThicknessPixels = 0.0f,
+                              float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f);
         void DrawText(float x, float y, const std::wstring&amp; text, float fontSize, float r, float g, float b, float a);
         void EndFrame(bool vsync = true);
     };
@@ -427,12 +431,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 <code>a &lt; 1.0</code> で半透明合成される(常にアルファブレンド有効。深度テストは行わないため、
 重なり順は呼び出し順で決まる — 先に呼んだスプライトほど背面に描かれる)。</li>
 <li><code>BeginFrame</code>/<code>EndFrame</code> は1フレームにつき必ず1回ずつ呼ぶ。
-<code>DrawSprite</code>/<code>DrawCircle</code>/<code>DrawLine</code>はその間に好きな回数呼べる。</li>
+<code>DrawSprite</code>/<code>DrawCircle</code>/<code>DrawLine</code>/<code>DrawRoundedRect</code>はその間に好きな回数呼べる。</li>
 <li><code>DrawCircle</code>は中心<code>(x, y)</code>・半径<code>radius</code>の塗り円をふちのアンチエイリアス付きで描画する
 (テクスチャ不要、ピクセルシェーダーの距離場でマスクする)。<code>DrawLine</code>は
 <code>(x1, y1)</code>-<code>(x2, y2)</code>を結ぶ太さ<code>thickness</code>の線分を、内部的には
 回転・拡縮した矩形として<code>DrawSprite</code>と同じパイプラインで描画する。いずれも
 <code>r, g, b, a</code>は塗りつぶし色で半透明可。</li>
+<li><code>DrawRoundedRect</code>は中心<code>(x, y)</code>、サイズ<code>width</code> x <code>height</code>、
+角丸半径<code>cornerRadiusPixels</code>(ピクセル単位)の角丸矩形を、<code>DrawCircle</code>と同様
+テクスチャ不要のピクセルシェーダー距離場(SDF)でふちをアンチエイリアスしながら描画する。
+<code>borderThicknessPixels</code>を0より大きくすると、塗りの内側に<code>borderR/G/B/A</code>の
+枠線をさらに重ねて描画する(既定は枠線なし)。UIのボタンやパネル背景など、角丸+枠線を
+1回の描画コマンドで表現したい場合に使う。</li>
 <li><code>DrawText</code>は<code>(x, y)</code>を左下基準として<code>text</code>を描画する。<code>fontSize</code>は
 おおよその文字高さ(ピクセル単位)。コンストラクタ内でGDI(<code>Yu Gothic UI</code>)によりASCII印字可能文字
 (<code>0x20</code>〜<code>0x7E</code>)一式をビットマップフォントとしてラスタライズしたテクスチャアトラスを
@@ -805,6 +815,7 @@ void StopSound(VoiceHandle voice);</code></pre>
 <tr><td>2Dの描画パス</td><td><code>KurenaiEngine2D::DrawSprite</code> は常にアルファブレンド・深度テストなしで描画される(不透明専用の高速パスはない)</td></tr>
 <tr><td>COM初期化</td><td><code>wWinMain</code> の先頭で <code>CoInitializeEx</code> を呼ぶこと。DirectXTexのWICテクスチャ読み込み(<code>LoadTexture</code>)とXAudio2(<code>LoadSound</code>/<code>PlaySound</code>)がいずれもCOMに依存しているため、忘れると失敗する</td></tr>
 <tr><td>DrawTextの新規文字追加</td><td>ASCII以外(かな漢字等)の文字を初めて<code>DrawText</code>に渡すと、その文字はその1フレームだけ表示されず、次の<code>BeginFrame()</code>でアトラスへ追加されてから表示される(3.2節参照)</td></tr>
+<tr><td>DrawRoundedRectの角丸半径</td><td><code>cornerRadiusPixels</code>が<code>width</code>/<code>height</code>の半分より大きい値の場合、ピクセルシェーダー側で半幅・半高さの小さい方に自動的にクランプされる(矩形からはみ出す角丸にはならない)</td></tr>
 <tr><td>ビルド設定の一致</td><td><code>KurenaiEngine.dll</code> とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
 <tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
 </tbody>

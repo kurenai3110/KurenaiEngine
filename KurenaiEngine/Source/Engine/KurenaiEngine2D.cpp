@@ -48,6 +48,11 @@ namespace Kurenai
             DirectX::XMFLOAT4 Color;
             // xy=UVオフセット, zw=UVスケール。DrawText以外は恒等変換(0, 0, 1, 1)で使う
             DirectX::XMFLOAT4 UVOffsetScale = { 0.0f, 0.0f, 1.0f, 1.0f };
+            // DrawRoundedRect専用。xy=半幅・半高さ(ピクセル), z=角丸半径(ピクセル), w=枠線太さ(ピクセル)。
+            // それ以外の描画では未使用のため既定値のままでよい
+            DirectX::XMFLOAT4 ShapeParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+            // DrawRoundedRect専用。枠線の色
+            DirectX::XMFLOAT4 BorderColor = { 0.0f, 0.0f, 0.0f, 0.0f };
         };
     }
 
@@ -79,6 +84,13 @@ namespace Kurenai
         RHI::PipelineStateDesc circlePipelineDesc = pipelineDesc;
         circlePipelineDesc.PixelShader = m_CirclePixelShader.get();
         m_CirclePipelineState = m_Device->CreatePipelineState(circlePipelineDesc);
+
+        // DrawRoundedRect用。DrawCircleと同様、頂点シェーダー・頂点レイアウトはスプライトと共用し、
+        // ピクセルシェーダーのみ角丸矩形マスク版(PSRoundedRect)に差し替える
+        m_RoundedRectPixelShader = m_Device->CreateShader({ RHI::ShaderStage::Pixel, shaderPath, "PSRoundedRect" });
+        RHI::PipelineStateDesc roundedRectPipelineDesc = pipelineDesc;
+        roundedRectPipelineDesc.PixelShader = m_RoundedRectPixelShader.get();
+        m_RoundedRectPipelineState = m_Device->CreatePipelineState(roundedRectPipelineDesc);
 
         // 原点中心の単位クアッド(-0.5〜0.5)。スプライトごとの位置/大きさ/回転はWorld行列側で表現する
         const Vertex2D quadVertices[] = {
@@ -240,6 +252,28 @@ namespace Kurenai
 
         const float angle = std::atan2(dy, dx);
         DrawSprite((x1 + x2) * 0.5f, (y1 + y2) * 0.5f, length, thickness, angle, m_WhiteTexture, r, g, b, a);
+    }
+
+    void KurenaiEngine2D::DrawRoundedRect(
+        float x, float y, float width, float height, float cornerRadiusPixels,
+        float r, float g, float b, float a,
+        float borderThicknessPixels,
+        float borderR, float borderG, float borderB, float borderA)
+    {
+        ObjectConstants objectConstants{};
+        const DirectX::XMMATRIX world = DirectX::XMMatrixScaling(width, height, 1.0f) *
+            DirectX::XMMatrixTranslation(x, y, 0.0f);
+        DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixTranspose(world));
+        objectConstants.Color = { r, g, b, a };
+        objectConstants.ShapeParams = { width * 0.5f, height * 0.5f, cornerRadiusPixels, borderThicknessPixels };
+        objectConstants.BorderColor = { borderR, borderG, borderB, borderA };
+
+        RHI::IRHICommandList* commandList = GetCommandList();
+        commandList->SetPipelineState(m_RoundedRectPipelineState.get());
+        commandList->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+        commandList->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+        commandList->DrawIndexed(6, 0, 0);
+        commandList->SetPipelineState(m_PipelineState.get()); // 以降のDrawSprite呼び出しのため戻す
     }
 
     std::vector<wchar_t> KurenaiEngine2D::DefaultAsciiChars()
