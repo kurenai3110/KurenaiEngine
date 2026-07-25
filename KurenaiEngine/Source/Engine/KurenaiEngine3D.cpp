@@ -2,6 +2,8 @@
 
 #include <imgui.h>
 
+#include <objbase.h>
+
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -610,6 +612,9 @@ namespace Kurenai
         const SceneEntry& currentScene = kScenes[m_CurrentSceneIndex];
         if (currentScene.HasCameraOverride)
         {
+            // シーン切り替え(RenderSceneSwitchUI、Renderスレッド)とUpdateMouseLook/UpdateMovement
+            // (Updateスレッド)が同時にm_Cameraへ触れ得るため保護する
+            std::lock_guard<std::mutex> cameraLock(m_CameraMutex);
             m_Camera.SetPosition({ currentScene.CameraPosition[0], currentScene.CameraPosition[1], currentScene.CameraPosition[2] });
             m_Camera.SetYawPitch(currentScene.CameraYaw, 0.0f);
             m_Camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
@@ -668,6 +673,9 @@ namespace Kurenai
             nearZ = std::max(0.01f, diagonal * 0.0005f);
         }
 
+        // シーン切り替え(RenderSceneSwitchUI、Renderスレッド)とUpdateMouseLook/UpdateMovement
+        // (Updateスレッド)が同時にm_Cameraへ触れ得るため保護する
+        std::lock_guard<std::mutex> cameraLock(m_CameraMutex);
         m_Camera.SetPosition({ posX, posY, posZ });
         m_Camera.SetYawPitch(yaw, 0.0f);
         m_Camera.SetLens(DirectX::XM_PIDIV4, nearZ, farZ);
@@ -888,6 +896,10 @@ namespace Kurenai
 
     void KurenaiEngine3D::Run()
     {
+        // 描画専用スレッドを起動する。以後このスレッドがRender()の呼び出しとPresentを担当し、
+        // 呼び出し元スレッド(以下Updateスレッド)はPumpMessages/Updateに専念する
+        m_RenderThread = std::thread(&KurenaiEngine3D::RenderThreadMain, this);
+
         while (!m_Window->ShouldClose())
         {
             m_Window->PumpMessages();
@@ -900,9 +912,86 @@ namespace Kurenai
             const float deltaTime = std::chrono::duration<float>(now - m_LastFrameTime).count();
             m_LastFrameTime = now;
 
-            const auto cpuStart = std::chrono::steady_clock::now();
             Update(deltaTime);
-            Render();
+
+            FrameState newFrameState;
+            {
+                std::lock_guard<std::mutex> cameraLock(m_CameraMutex);
+                newFrameState.Camera = m_Camera;
+            }
+            newFrameState.ImGuiVisible = m_ImGuiVisible;
+
+            // Renderスレッドが直前フレーム分を取り込み終えるまで待つ(キュー深度1)。
+            // 取り込み自体はスナップショットのコピーだけなので即座に完了し、その後の重いGPU発行は
+            // このUpdateスレッドの次フレーム処理と並行して進む
+            {
+                std::unique_lock<std::mutex> lock(m_FrameStateMutex);
+                m_FrameStateCV.wait(lock, [this] { return m_FrameStateTaken; });
+                m_FrameState = newFrameState;
+                m_FrameStateReady = true;
+                m_FrameStateTaken = false;
+            }
+            m_FrameStateCV.notify_one();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_FrameStateMutex);
+            m_StopRenderThread = true;
+        }
+        m_FrameStateCV.notify_one();
+        m_RenderThread.join();
+    }
+
+    void KurenaiEngine3D::RenderThreadMain()
+    {
+        // LoadScene(RenderSceneSwitchUI経由でこのスレッドから呼ばれる)がWICテクスチャ読み込みで
+        // COMを使用する。COMはスレッドごとに初期化が必要(wWinMainでのCoInitializeExはUpdate
+        // スレッド=呼び出し元スレッドにしか適用されない)なため、この描画スレッドでも初期化しておく。
+        // 未初期化のままだとWIC呼び出しがハングする(Main.cppと同じAPARTMENTTHREADEDに揃える)
+        const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        m_LastRenderFrameTime = std::chrono::steady_clock::now();
+
+        for (;;)
+        {
+            FrameState frameState;
+            {
+                std::unique_lock<std::mutex> lock(m_FrameStateMutex);
+                m_FrameStateCV.wait(lock, [this] { return m_FrameStateReady || m_StopRenderThread; });
+                if (m_StopRenderThread && !m_FrameStateReady)
+                {
+                    break;
+                }
+                frameState = m_FrameState;
+                m_FrameStateReady = false;
+                m_FrameStateTaken = true;
+            }
+            m_FrameStateCV.notify_one();
+
+            const auto now = std::chrono::steady_clock::now();
+            const float renderDeltaTime = std::chrono::duration<float>(now - m_LastRenderFrameTime).count();
+            m_LastRenderFrameTime = now;
+
+            // 昼夜サイクルの自動進行はUpdateスレッドではなくこちら(Renderスレッド)で行う。
+            // m_TimeOfDay/m_TimeAutoAdvance/m_TimeAdvanceSpeedはImGuiパネル(RenderLightingUI、
+            // Renderスレッドから描画)でも書き換えられるため、両方をRenderスレッド専有にすることで
+            // 追加の排他制御なしに済ませられる
+            if (m_TimeAutoAdvance)
+            {
+                m_TimeOfDay = std::fmod(m_TimeOfDay + m_TimeAdvanceSpeed * renderDeltaTime, 24.0f);
+                if (m_TimeOfDay < 0.0f)
+                {
+                    m_TimeOfDay += 24.0f;
+                }
+            }
+
+            const auto cpuStart = std::chrono::steady_clock::now();
+            {
+                // WM_SIZEによるスワップチェーンのリサイズ(Updateスレッド側で同期的に発生)と
+                // 同時に走らないよう、Render()全体をこのミューテックスで保護する
+                std::lock_guard<std::mutex> swapChainLock(m_SwapChainMutex);
+                Render(frameState);
+            }
             const auto cpuEnd = std::chrono::steady_clock::now();
             // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく
             // GPU側の処理時間の反映なので差し引く(DX11は常に0が返るため影響しない)
@@ -910,11 +999,16 @@ namespace Kurenai
             m_CPUFrameTimeMs = std::max(0.0f, rawCPUTimeMs - m_Device->GetLastFrameGPUWaitTimeMs());
 
             // FPSは指数移動平均で平滑化する(生の1/deltaTimeだとフレームごとの揺れが大きく読み取りにくいため)
-            if (deltaTime > 0.0f)
+            if (renderDeltaTime > 0.0f)
             {
-                const float instantFPS = 1.0f / deltaTime;
+                const float instantFPS = 1.0f / renderDeltaTime;
                 m_FPS = (m_FPS == 0.0f) ? instantFPS : (m_FPS * 0.9f + instantFPS * 0.1f);
             }
+        }
+
+        if (SUCCEEDED(comResult))
+        {
+            CoUninitialize();
         }
     }
 
@@ -955,6 +1049,8 @@ namespace Kurenai
                 const float deltaY = static_cast<float>(currentPos.y - m_MouseCaptureCenter.y);
 
                 const float mouseSensitivity = 0.0025f;
+                // m_CameraはLoadScene(Renderスレッド、シーン切り替えUIから)からも書き換えられ得るため保護する
+                std::lock_guard<std::mutex> cameraLock(m_CameraMutex);
                 m_Camera.Rotate(deltaX * mouseSensitivity, -deltaY * mouseSensitivity);
 
                 SetCursorPos(m_MouseCaptureCenter.x, m_MouseCaptureCenter.y);
@@ -973,6 +1069,10 @@ namespace Kurenai
         // フォーカスを失っている間は反応せず、PostMessageによるテスト自動化とも整合する
         const float moveSpeed = IsKeyDown(VK_SHIFT) ? 20.0f : 5.0f;
         const float moveAmount = moveSpeed * deltaTime;
+
+        // m_CameraはLoadScene(Renderスレッド、シーン切り替えUIから)からも書き換えられ得るため、
+        // 読み取り(GetForward/GetRight)からMoveまでを一貫して保護する
+        std::lock_guard<std::mutex> cameraLock(m_CameraMutex);
 
         const DirectX::XMFLOAT3 forward = m_Camera.GetForward();
         const DirectX::XMFLOAT3 right = m_Camera.GetRight();
@@ -1017,26 +1117,23 @@ namespace Kurenai
         UpdateMouseLook();
         UpdateMovement(deltaTime);
         UpdateImGuiToggle();
-
-        if (m_TimeAutoAdvance)
-        {
-            m_TimeOfDay = std::fmod(m_TimeOfDay + m_TimeAdvanceSpeed * deltaTime, 24.0f);
-            if (m_TimeOfDay < 0.0f)
-            {
-                m_TimeOfDay += 24.0f;
-            }
-        }
+        // 昼夜サイクルの自動進行(m_TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
     }
 
-    void KurenaiEngine3D::Render()
+    void KurenaiEngine3D::Render(const FrameState& frameState)
     {
         if (m_Window->GetWidth() == 0 || m_Window->GetHeight() == 0)
         {
             return;
         }
 
+        // WndProc(Updateスレッド)でキューイングされたメッセージを、ImGuiの状態を実際に読み書きする
+        // このRenderスレッド自身からImGui_ImplWin32_WndProcHandlerへ転送する。ImGui::NewFrame()より前に
+        // 行うことで、このフレームのNewFrame()が最新のマウス/キーボード状態を反映できる
+        m_Window->ForwardQueuedMessagesToImGui();
+
         m_ImGuiBackend->NewFrame();
-        if (m_ImGuiVisible)
+        if (frameState.ImGuiVisible)
         {
             RenderSceneSwitchUI();
             RenderPostProcessUI();
@@ -1053,18 +1150,18 @@ namespace Kurenai
         const DirectX::XMMATRIX lightViewProj = ComputeLightViewProj(sunLighting.Direction);
 
         FrameConstants constants;
-        const DirectX::XMMATRIX viewProj = m_Camera.GetViewMatrix() * m_Camera.GetProjectionMatrix();
+        const DirectX::XMMATRIX viewProj = frameState.Camera.GetViewMatrix() * frameState.Camera.GetProjectionMatrix();
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
         DirectX::XMVECTOR determinant;
         const DirectX::XMMATRIX invViewProj = DirectX::XMMatrixInverse(&determinant, viewProj);
         DirectX::XMStoreFloat4x4(&constants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
         DirectX::XMStoreFloat4x4(&constants.LightViewProj, DirectX::XMMatrixTranspose(lightViewProj));
-        const DirectX::XMFLOAT3 cameraPosition = m_Camera.GetPosition();
+        const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
         constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
         constants.LightDirection = { sunLighting.Direction.x, sunLighting.Direction.y, sunLighting.Direction.z, 0.0f };
         constants.LightColor = sunLighting.Color;
-        DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(m_Camera.GetViewMatrix()));
-        DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(m_Camera.GetProjectionMatrix()));
+        DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameState.Camera.GetViewMatrix()));
+        DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameState.Camera.GetProjectionMatrix()));
         constants.AmbientColor = sunLighting.Ambient;
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 

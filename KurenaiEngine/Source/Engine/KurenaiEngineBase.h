@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "KurenaiTypes.h"
@@ -99,6 +100,12 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIDevice> m_Device;
         std::unique_ptr<RHI::IRHISwapChain> m_SwapChain;
         std::unique_ptr<Core::AudioEngine> m_AudioEngine;
+
+        // WM_SIZEによるスワップチェーンのリサイズ(PumpEvents呼び出し元スレッドで同期的に発生)と、
+        // 描画専用スレッドによるスワップチェーンへの描画・Presentが同時に走らないようにするための
+        // 排他制御。派生クラスがRender()を別スレッドで実行する場合、Render()の呼び出し全体を
+        // このミューテックスでロックすること
+        std::mutex m_SwapChainMutex;
     };
 }
 

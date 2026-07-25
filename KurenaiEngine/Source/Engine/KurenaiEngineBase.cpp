@@ -18,6 +18,8 @@ namespace Kurenai
         m_Window->SetResizeCallback(
             [this](uint32_t newWidth, uint32_t newHeight)
             {
+                // 描画スレッドがRender()実行中(m_SwapChainを使用中)にリサイズが割り込まないよう排他する
+                std::lock_guard<std::mutex> swapChainLock(m_SwapChainMutex);
                 if (m_SwapChain)
                 {
                     m_SwapChain->Resize(newWidth, newHeight);

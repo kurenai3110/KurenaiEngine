@@ -3,8 +3,11 @@
 #include <Windows.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "KurenaiEngineBase.h"
@@ -32,6 +35,15 @@ namespace Kurenai
         void Run();
 
     private:
+        // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
+        // スナップショット。m_TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
+        // ここには含めない(RenderThreadMain参照)
+        struct FrameState
+        {
+            Core::Camera Camera;
+            bool ImGuiVisible = true;
+        };
+
         void CreateSceneResources();
         void CreateRenderTargets(uint32_t width, uint32_t height);
         void LoadScene(size_t sceneIndex);
@@ -40,7 +52,8 @@ namespace Kurenai
         void UpdateMovement(float deltaTime);
         void UpdateImGuiToggle();
         void Update(float deltaTime);
-        void Render();
+        void RenderThreadMain();
+        void Render(const FrameState& frameState);
         void RenderSceneSwitchUI();
         void RenderPostProcessUI();
         void RenderDebugViewUI();
@@ -215,10 +228,31 @@ namespace Kurenai
         Assets::Model m_Model;
         size_t m_CurrentSceneIndex = 0;
 
+        // Update(Updateスレッド=Run()を呼んだ元スレッド)とLoadScene/FrameCameraToModel(Renderスレッド、
+        // シーン切り替えUIから呼ばれる)の双方から書き換えられ得るため、アクセスは常にm_CameraMutexで保護する。
+        // Render()自身は毎フレームm_FrameStateへコピーされたスナップショット経由で読むため、
+        // Render()の本体(GPU発行中)ではこのミューテックスを取らない
         Core::Camera m_Camera;
+        std::mutex m_CameraMutex;
         std::chrono::steady_clock::time_point m_LastFrameTime;
 
-        // 統計表示用: 1フレームあたりのCPU時間(Update+Renderの呼び出し時間)と、指数移動平均によるFPS
+        // Update(メインスレッド)とRender(描画専用スレッド)を並列化するためのハンドオフ機構。
+        // キュー深度1(バッファ1面)で、Updateが1フレーム分書き込むたびにRenderが取り込んでから
+        // 重いGPU発行に入るため、UpdateスレッドはRenderの実際の描画時間とは並行して次フレームを
+        // 計算できる(=Update(N+1)とRender(N)が並列に進む)
+        std::thread m_RenderThread;
+        std::mutex m_FrameStateMutex;
+        std::condition_variable m_FrameStateCV;
+        FrameState m_FrameState;
+        bool m_FrameStateReady = false;
+        bool m_FrameStateTaken = true;
+        bool m_StopRenderThread = false;
+        // Renderスレッド側のフレーム間隔計測用(時刻自動進行・FPS計測に使う。Renderスレッドのみが読み書きする)
+        std::chrono::steady_clock::time_point m_LastRenderFrameTime;
+
+        // 統計表示用: 1フレームあたりのCPU時間(Renderの呼び出し時間)と、指数移動平均によるFPS。
+        // どちらもRenderスレッドのみが書き込み、ImGui描画(同じくRenderスレッド)のみが読むため
+        // 追加の排他制御は不要
         float m_CPUFrameTimeMs = 0.0f;
         float m_FPS = 0.0f;
 
