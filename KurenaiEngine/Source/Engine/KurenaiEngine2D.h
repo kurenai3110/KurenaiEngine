@@ -77,14 +77,27 @@ namespace Kurenai
             float borderThicknessPixels = 0.0f,
             float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f);
 
-        // (x, y)を左下基準としてtextを描画する。fontSizeはおおよその文字高さ(ピクセル単位)。
-        // ビットマップフォント方式のため、厳密なフォントレンダリング(ヒンティング等)は行わない。
-        // ASCII印字可能文字(0x20〜0x7E)に加え、かな漢字を含む任意のUnicode文字(BMP範囲)に対応する。
+        // fontSizeはおおよその文字高さ(ピクセル単位)。ビットマップフォント方式のため、
+        // 厳密なフォントレンダリング(ヒンティング等)は行わない。ASCII印字可能文字(0x20〜0x7E)に
+        // 加え、かな漢字を含む任意のUnicode文字(BMP範囲)に対応する。
         // ただし初めて描画する文字はその場ではアトラスに含まれていないため1フレームだけ表示されず、
         // 次のBeginFrame()でアトラスへ追加されてから以降のフレームで表示される
         // (フレーム中にテクスチャを作り直すとDX12でレンダーターゲット/パイプラインステートの設定が
-        // 失われるため、追加はBeginFrame()の先頭でのみ行う設計になっている)
-        void DrawText(float x, float y, const std::wstring& text, float fontSize, float r, float g, float b, float a);
+        // 失われるため、追加はBeginFrame()の先頭でのみ行う設計になっている)。
+        // bold=trueの場合、通常とは別に構築される太字(FW_BOLD)アトラスを使って描画する。
+        // xの意味はalignで変わる(Left(既定)=テキスト左端基準、Center=テキスト中央基準、
+        // Right=テキスト右端基準)。yの意味はverticalAlignで変わる(Bottom(既定)=テキスト下端基準、
+        // Middle=テキスト上下中央基準、Top=テキスト上端基準)。Left/Bottom以外の場合、内部で
+        // MeasureText相当の幅・高さ計測を行ってから描画開始位置を決めるため、呼び出し側で
+        // 手動に幅・高さを計算する必要はない
+        void DrawText(
+            float x, float y, const std::wstring& text, float fontSize, float r, float g, float b, float a,
+            bool bold = false, TextAlign align = TextAlign::Left, TextVerticalAlign verticalAlign = TextVerticalAlign::Bottom);
+
+        // textをfontSize(・bold)で描画した場合の実測済み幅(ピクセル単位、AdvancePixelsの合計)を返す。
+        // ボタンラベル等の正確な中央揃えに使う。DrawTextと同様、アトラス未収録の文字はその場では
+        // 幅0として扱われ、次のBeginFrame()でアトラスに追加された以降は正しい幅が返る
+        float MeasureText(const std::wstring& text, float fontSize, bool bold = false);
 
         // 描画コマンドを確定してバックバッファへ表示する。1フレームにつき1回だけ呼ぶ
         void EndFrame(bool vsync = true);
@@ -97,11 +110,20 @@ namespace Kurenai
             float AdvancePixels = 0.0f;
             float WidthPixels = 0.0f, HeightPixels = 0.0f;
         };
-        // GDIでcharsに含まれる文字一式をラスタライズし、m_FontAtlasTexture/m_Glyphsを(既存の内容を
-        // 置き換えて)再構築する。コンストラクタ、またはBeginFrame()の先頭でのみ呼ぶ必要がある
+        // GDIでcharsに含まれる文字一式をラスタライズし、bold=falseならm_FontAtlasTexture/m_Glyphsを、
+        // bold=trueならm_BoldFontAtlasTexture/m_BoldGlyphsを(既存の内容を置き換えて)再構築する。
+        // コンストラクタ、またはBeginFrame()の先頭でのみ呼ぶ必要がある
         // (DX12のCreateTextureFromMemoryは内部でコマンドリストをフラッシュ・リセットするため、
         // 通常の描画コマンドを積んだ後のフレーム中に呼ぶと、それらの設定が失われクラッシュする)
-        void BuildFontAtlas(const std::vector<wchar_t>& chars);
+        void BuildFontAtlas(const std::vector<wchar_t>& chars, bool bold);
+
+        // m_PendingChars(bold=false)またはm_PendingBoldChars(bold=true)に溜まった文字があれば、
+        // 対応する既存グリフ一式と合わせてBuildFontAtlasで再構築する。BeginFrame()の先頭から呼ぶ
+        void RebuildFontAtlasIfPending(bool bold);
+
+        // 文字chのメトリクスを返す。boldに応じてm_Glyphs/m_BoldGlyphsを参照し、未収録の場合は
+        // 対応するpendingキューへ積んでnullptrを返す(DrawText/MeasureText共通のヘルパー)
+        const GlyphMetrics* FindGlyph(wchar_t ch, bool bold);
 
         // 初回のASCII一式(0x20〜0x7E)を返す。コンストラクタでのBuildFontAtlas呼び出し用
         static std::vector<wchar_t> DefaultAsciiChars();
@@ -143,9 +165,21 @@ namespace Kurenai
         // BuildFontAtlasが生成したフォントの基準ピクセル高さ。DrawTextのfontSizeはこれに対する
         // 拡大率(fontSize / m_FontAtlasPixelHeight)としてグリフの表示サイズに反映される
         float m_FontAtlasPixelHeight = 0.0f;
+        // アトラス内の1文字ぶんのセル高さ(パディング込み。GlyphMetrics::HeightPixelsと同じ値で、
+        // 文字集合によらずアトラス全体で共通)。DrawTextのverticalAlign(Middle/Top)で、個々の文字を
+        // 探さずに済むよう、この値だけでテキスト全体の高さを算出するために使う
+        float m_FontAtlasCellHeight = 0.0f;
         // DrawTextでm_Glyphsに見つからなかった(=アトラス未収録の)文字を一時的に溜めておくキュー。
         // 次のBeginFrame()の先頭でm_Glyphsの既存キーと合わせてBuildFontAtlasに渡され、消費後クリアされる
         std::vector<wchar_t> m_PendingChars;
+
+        // DrawText(bold=true)/MeasureText(bold=true)用の太字版一式。通常版とは別のフォント
+        // (FW_BOLD)・別のアトラス・別の文字集合として独立に管理する(役割は上記の各メンバと同様)
+        std::unique_ptr<RHI::IRHITexture> m_BoldFontAtlasTexture;
+        std::unordered_map<wchar_t, GlyphMetrics> m_BoldGlyphs;
+        float m_BoldFontAtlasPixelHeight = 0.0f;
+        float m_BoldFontAtlasCellHeight = 0.0f;
+        std::vector<wchar_t> m_PendingBoldChars;
     };
 }
 

@@ -16,7 +16,11 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**
 1回の描画コマンドでアンチエイリアス付き描画できる)と
 簡易なビットマップフォントによるテキスト描画(`DrawText`)も提供します。`DrawText`はASCIIに加え
 かな漢字を含む任意のUnicode文字(BMP範囲)に対応しており、初めて描画する文字は次のフレームから
-表示されます。`KurenaiEngineBase`(2D/3D共通)は、`GetAsyncKeyState`/`GetCursorPos`のような
+表示されます。`bold`引数で通常とは別の太字(`FW_BOLD`)アトラスを使った描画にも対応し、
+`align`(`TextAlign::Left`/`Center`/`Right`)・`verticalAlign`(`TextVerticalAlign::Bottom`/`Middle`/`Top`)
+引数で`(x, y)`の意味を切り替えられるため、ボタンの中心座標を渡すだけで内部で幅・高さを実測して
+正確に中央揃え等ができます(実測幅そのものが必要な場合は`MeasureText`も公開しています)。
+`KurenaiEngineBase`(2D/3D共通)は、`GetAsyncKeyState`/`GetCursorPos`のような
 グローバル入力ではなくウィンドウスコープのメッセージベース入力API(`IsKeyDown`/`WasKeyPressed`/
 `IsMouseButtonDown`/`WasMouseButtonPressed`/`IsMouseOverWindow`/`GetClientMousePosition`)を
 公開しています。環境変数`KURENAI_INPUT_AUTOMATION=1`が設定されている場合に限り、

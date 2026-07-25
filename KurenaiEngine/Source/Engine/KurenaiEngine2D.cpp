@@ -134,7 +134,8 @@ namespace Kurenai
         // 伴うため、BeginFrame後のフレーム中に呼ぶとレンダーターゲット/パイプラインステート等の
         // 設定済み状態が失われてしまう(DrawText初回呼び出し時の遅延生成にしたところクラッシュした)。
         // 以後DrawTextで未収録の文字が見つかった場合も、同じ理由でBeginFrame()の先頭でのみ追加する
-        BuildFontAtlas(DefaultAsciiChars());
+        BuildFontAtlas(DefaultAsciiChars(), false);
+        BuildFontAtlas(DefaultAsciiChars(), true);
     }
 
     KurenaiEngine2D::~KurenaiEngine2D() = default;
@@ -157,20 +158,10 @@ namespace Kurenai
 
     void KurenaiEngine2D::BeginFrame(float clearR, float clearG, float clearB, float clearA)
     {
-        // 前フレームのDrawTextで未収録の文字が見つかっていれば、まだ描画コマンドを何も積んでいない
-        // このタイミングでアトラスを再構築する(BuildFontAtlasのコメント参照)
-        if (!m_PendingChars.empty())
-        {
-            std::vector<wchar_t> chars;
-            chars.reserve(m_Glyphs.size() + m_PendingChars.size());
-            for (const auto& glyphEntry : m_Glyphs)
-            {
-                chars.push_back(glyphEntry.first);
-            }
-            chars.insert(chars.end(), m_PendingChars.begin(), m_PendingChars.end());
-            m_PendingChars.clear();
-            BuildFontAtlas(chars);
-        }
+        // 前フレームのDrawText/MeasureTextで未収録の文字が見つかっていれば、まだ描画コマンドを
+        // 何も積んでいないこのタイミングでアトラスを再構築する(BuildFontAtlasのコメント参照)
+        RebuildFontAtlasIfPending(false);
+        RebuildFontAtlasIfPending(true);
 
         const uint32_t width = GetWidth();
         const uint32_t height = GetHeight();
@@ -287,7 +278,7 @@ namespace Kurenai
         return chars;
     }
 
-    void KurenaiEngine2D::BuildFontAtlas(const std::vector<wchar_t>& charsIn)
+    void KurenaiEngine2D::BuildFontAtlas(const std::vector<wchar_t>& charsIn, bool bold)
     {
         std::vector<wchar_t> chars = charsIn;
         std::sort(chars.begin(), chars.end());
@@ -304,7 +295,7 @@ namespace Kurenai
         // (「Yu Gothic UI」はWindows 10/11に標準搭載されており、ASCII/かな/常用漢字を一通りカバーする)
         constexpr int kAtlasFontPixelHeight = 48;
         HFONT font = CreateFontW(
-            -kAtlasFontPixelHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            -kAtlasFontPixelHeight, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE, L"Yu Gothic UI");
         if (!font)
@@ -365,8 +356,9 @@ namespace Kurenai
         SetBkMode(memDC, TRANSPARENT);
 
         // 再構築のたびに古いグリフ情報を作り直す(古いアトラスのUV座標を引きずらないようにする)
-        m_Glyphs.clear();
-        m_Glyphs.reserve(charCount);
+        std::unordered_map<wchar_t, GlyphMetrics>& glyphs = bold ? m_BoldGlyphs : m_Glyphs;
+        glyphs.clear();
+        glyphs.reserve(charCount);
         for (int i = 0; i < charCount; ++i)
         {
             const wchar_t ch = chars[i];
@@ -385,7 +377,7 @@ namespace Kurenai
             glyph.AdvancePixels = static_cast<float>(glyphSizes[i].cx);
             glyph.WidthPixels = static_cast<float>(cellWidth);
             glyph.HeightPixels = static_cast<float>(cellHeight);
-            m_Glyphs.emplace(ch, glyph);
+            glyphs.emplace(ch, glyph);
         }
 
         GdiFlush();
@@ -408,49 +400,123 @@ namespace Kurenai
         DeleteObject(font);
         DeleteDC(memDC);
 
-        m_FontAtlasTexture = m_Device->CreateTextureFromMemory(atlasWidth, atlasHeight, pixels.data());
-        m_FontAtlasPixelHeight = static_cast<float>(metrics.tmHeight);
+        std::unique_ptr<RHI::IRHITexture>& atlasTexture = bold ? m_BoldFontAtlasTexture : m_FontAtlasTexture;
+        atlasTexture = m_Device->CreateTextureFromMemory(atlasWidth, atlasHeight, pixels.data());
+        (bold ? m_BoldFontAtlasPixelHeight : m_FontAtlasPixelHeight) = static_cast<float>(metrics.tmHeight);
+        (bold ? m_BoldFontAtlasCellHeight : m_FontAtlasCellHeight) = static_cast<float>(cellHeight);
     }
 
-    void KurenaiEngine2D::DrawText(float x, float y, const std::wstring& text, float fontSize, float r, float g, float b, float a)
+    void KurenaiEngine2D::RebuildFontAtlasIfPending(bool bold)
     {
-        const float scale = fontSize / m_FontAtlasPixelHeight;
-        RHI::IRHICommandList* commandList = GetCommandList();
-        commandList->SetTexture(0, m_FontAtlasTexture.get());
+        std::vector<wchar_t>& pendingChars = bold ? m_PendingBoldChars : m_PendingChars;
+        if (pendingChars.empty())
+        {
+            return;
+        }
+        const std::unordered_map<wchar_t, GlyphMetrics>& glyphs = bold ? m_BoldGlyphs : m_Glyphs;
 
+        std::vector<wchar_t> chars;
+        chars.reserve(glyphs.size() + pendingChars.size());
+        for (const auto& glyphEntry : glyphs)
+        {
+            chars.push_back(glyphEntry.first);
+        }
+        chars.insert(chars.end(), pendingChars.begin(), pendingChars.end());
+        pendingChars.clear();
+        BuildFontAtlas(chars, bold);
+    }
+
+    const KurenaiEngine2D::GlyphMetrics* KurenaiEngine2D::FindGlyph(wchar_t ch, bool bold)
+    {
+        std::unordered_map<wchar_t, GlyphMetrics>& glyphs = bold ? m_BoldGlyphs : m_Glyphs;
+        const auto it = glyphs.find(ch);
+        if (it != glyphs.end())
+        {
+            return &it->second;
+        }
+
+        // アトラス未収録の文字。次のBeginFrame()の先頭でアトラスへ追加されるまでの間、
+        // この文字自体の描画・幅計測はスキップする(呼び出し側で対応する)
+        std::vector<wchar_t>& pendingChars = bold ? m_PendingBoldChars : m_PendingChars;
+        if (std::find(pendingChars.begin(), pendingChars.end(), ch) == pendingChars.end())
+        {
+            pendingChars.push_back(ch);
+        }
+        return nullptr;
+    }
+
+    void KurenaiEngine2D::DrawText(
+        float x, float y, const std::wstring& text, float fontSize, float r, float g, float b, float a,
+        bool bold, TextAlign align, TextVerticalAlign verticalAlign)
+    {
+        const float atlasPixelHeight = bold ? m_BoldFontAtlasPixelHeight : m_FontAtlasPixelHeight;
+        const float scale = fontSize / atlasPixelHeight;
+        RHI::IRHICommandList* commandList = GetCommandList();
+        commandList->SetTexture(0, (bold ? m_BoldFontAtlasTexture : m_FontAtlasTexture).get());
+
+        // Center/Rightの場合、xをテキスト左端基準に変換してから描画ループに入る。
+        // MeasureTextと同じFindGlyphを経由するため、未収録文字のpendingキュー登録も一貫する
         float penX = x;
+        if (align != TextAlign::Left)
+        {
+            const float totalWidth = MeasureText(text, fontSize, bold);
+            penX = (align == TextAlign::Center) ? x - totalWidth * 0.5f : x - totalWidth;
+        }
+
+        // Middle/Topの場合、yをテキスト下端基準に変換する。1文字ぶんのセル高さはアトラス全体で
+        // 共通(m_FontAtlasCellHeight/m_BoldFontAtlasCellHeight)なので、個々の文字を探す必要はない
+        float penY = y;
+        if (verticalAlign != TextVerticalAlign::Bottom)
+        {
+            const float lineHeight = (bold ? m_BoldFontAtlasCellHeight : m_FontAtlasCellHeight) * scale;
+            penY = (verticalAlign == TextVerticalAlign::Middle) ? y - lineHeight * 0.5f : y - lineHeight;
+        }
+
         for (const wchar_t ch : text)
         {
-            const auto it = m_Glyphs.find(ch);
-            if (it == m_Glyphs.end())
+            const GlyphMetrics* glyph = FindGlyph(ch, bold);
+            if (!glyph)
             {
                 // アトラス未収録の文字。次のBeginFrame()の先頭でアトラスへ追加されるまでの間、
                 // この文字自体の描画はスキップする(ペン位置も進めない簡易実装)
-                if (std::find(m_PendingChars.begin(), m_PendingChars.end(), ch) == m_PendingChars.end())
-                {
-                    m_PendingChars.push_back(ch);
-                }
                 continue;
             }
-            const GlyphMetrics& glyph = it->second;
-            const float glyphWidth = glyph.WidthPixels * scale;
-            const float glyphHeight = glyph.HeightPixels * scale;
+            const float glyphWidth = glyph->WidthPixels * scale;
+            const float glyphHeight = glyph->HeightPixels * scale;
 
             ObjectConstants objectConstants{};
-            // (x, y)はテキスト左下基準。DrawSpriteと同様ワールド座標はY-upなので、
-            // グリフ矩形の中心はペン位置から右・上へずらした位置になる
+            // penX/penYは常にテキスト左下基準(align/verticalAlignによるオフセットは呼び出し前に
+            // 適用済み)。DrawSpriteと同様ワールド座標はY-upなので、グリフ矩形の中心はペン位置から
+            // 右・上へずらした位置になる
             const DirectX::XMMATRIX world = DirectX::XMMatrixScaling(glyphWidth, glyphHeight, 1.0f) *
-                DirectX::XMMatrixTranslation(penX + glyphWidth * 0.5f, y + glyphHeight * 0.5f, 0.0f);
+                DirectX::XMMatrixTranslation(penX + glyphWidth * 0.5f, penY + glyphHeight * 0.5f, 0.0f);
             DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixTranspose(world));
             objectConstants.Color = { r, g, b, a };
-            objectConstants.UVOffsetScale = { glyph.U0, glyph.V0, glyph.U1 - glyph.U0, glyph.V1 - glyph.V0 };
+            objectConstants.UVOffsetScale = { glyph->U0, glyph->V0, glyph->U1 - glyph->U0, glyph->V1 - glyph->V0 };
 
             commandList->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
             commandList->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
             commandList->DrawIndexed(6, 0, 0);
 
-            penX += glyph.AdvancePixels * scale;
+            penX += glyph->AdvancePixels * scale;
         }
+    }
+
+    float KurenaiEngine2D::MeasureText(const std::wstring& text, float fontSize, bool bold)
+    {
+        const float atlasPixelHeight = bold ? m_BoldFontAtlasPixelHeight : m_FontAtlasPixelHeight;
+        const float scale = fontSize / atlasPixelHeight;
+
+        float width = 0.0f;
+        for (const wchar_t ch : text)
+        {
+            const GlyphMetrics* glyph = FindGlyph(ch, bold);
+            if (glyph)
+            {
+                width += glyph->AdvancePixels * scale;
+            }
+        }
+        return width;
     }
 
     void KurenaiEngine2D::EndFrame(bool vsync)

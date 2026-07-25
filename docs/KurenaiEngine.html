@@ -365,7 +365,9 @@ Bistro (McGuire) Interior / White Surface Test)。カスタムモデルの追加
                               float r, float g, float b, float a,
                               float borderThicknessPixels = 0.0f,
                               float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f);
-        void DrawText(float x, float y, const std::wstring&amp; text, float fontSize, float r, float g, float b, float a);
+        void DrawText(float x, float y, const std::wstring&amp; text, float fontSize, float r, float g, float b, float a,
+                      bool bold = false, TextAlign align = TextAlign::Left, TextVerticalAlign verticalAlign = TextVerticalAlign::Bottom);
+        float MeasureText(const std::wstring&amp; text, float fontSize, bool bold = false);
         void EndFrame(bool vsync = true);
     };
 }</code></pre>
@@ -443,12 +445,25 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 <code>borderThicknessPixels</code>を0より大きくすると、塗りの内側に<code>borderR/G/B/A</code>の
 枠線をさらに重ねて描画する(既定は枠線なし)。UIのボタンやパネル背景など、角丸+枠線を
 1回の描画コマンドで表現したい場合に使う。</li>
-<li><code>DrawText</code>は<code>(x, y)</code>を左下基準として<code>text</code>を描画する。<code>fontSize</code>は
+<li><code>DrawText</code>は既定(<code>align = TextAlign::Left</code>, <code>verticalAlign = TextVerticalAlign::Bottom</code>)
+では<code>(x, y)</code>をテキスト左下基準として<code>text</code>を描画する。<code>fontSize</code>は
 おおよその文字高さ(ピクセル単位)。コンストラクタ内でGDI(<code>Yu Gothic UI</code>)によりASCII印字可能文字
 (<code>0x20</code>〜<code>0x7E</code>)一式をビットマップフォントとしてラスタライズしたテクスチャアトラスを
 生成し、1文字ごとにアトラス内の該当矩形をサンプルするテクスチャ付き矩形として描画する
 (頂点シェーダーでUVをオフセット・スケールする点以外は<code>DrawSprite</code>と同じパイプラインを使う)。
 厳密なフォントレンダリング(ヒンティング等)は行わないため、HUD表示程度の可読性を想定している。</li>
+<li><code>bold = true</code>を指定すると、通常とは別に構築される太字(<code>FW_BOLD</code>)アトラスを
+使って描画する(通常版と太字版は別テクスチャ・別文字集合として独立に管理され、コンストラクタで
+両方ともASCII一式が事前構築される)。</li>
+<li><code>align</code>(<code>TextAlign::Left</code>/<code>Center</code>/<code>Right</code>)で<code>x</code>の意味が変わり、
+<code>verticalAlign</code>(<code>TextVerticalAlign::Bottom</code>/<code>Middle</code>/<code>Top</code>)で<code>y</code>の意味が変わる。
+たとえば<code>align = Center</code>なら<code>x</code>はテキスト中央基準になり、ボタンの中心座標を
+そのまま渡すだけで正確に中央揃えできる(内部で<code>MeasureText</code>相当の幅計測を行ってから
+描画開始位置を決めるため、呼び出し側で幅を計算する必要はない)。</li>
+<li><code>MeasureText(text, fontSize, bold)</code>は指定した文字列・サイズ・太さで描画した場合の
+実測済み幅(ピクセル単位、各グリフの<code>AdvancePixels</code>の合計)を返す。<code>DrawText</code>と同様、
+アトラス未収録の文字はその場では幅0として扱われ、次の<code>BeginFrame()</code>でアトラスに追加された
+以降は正しい幅が返る。ボタン幅の自動計算など、中央揃え以外の用途で幅そのものが必要な場合に使う。</li>
 <li><strong>かな漢字を含む任意のUnicode文字(BMP範囲)にも対応する。</strong>ASCII以外の文字は
 初回のコンストラクタ実行時点ではアトラスに含まれていないため、<code>DrawText</code>がアトラス未収録の
 文字を検出すると、その文字だけをその場では描画せず、次の<code>BeginFrame()</code>の先頭でアトラスへ
