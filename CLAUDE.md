@@ -19,8 +19,14 @@
 
 # Claudeによるスクリーンショットの撮り方
 - ウィンドウのスクリーンショットを撮る際、`GetWindowRect`はDWMの不可視リサイズ枠を含んだ座標を返すため、これを使って`CopyFromScreen`すると撮影範囲がズレる(枠の分だけ内容が欠けたり、隣接ウィンドウが写り込んだりする)
-- 正しい範囲を取得するには`DwmGetWindowAttribute`に`DWMWA_EXTENDED_FRAME_BOUNDS`(値9)を指定し、実際に見えているウィンドウ境界を取得してから`CopyFromScreen`する
-- 撮影前に`ShowWindow`(SW_RESTORE)と`SetForegroundWindow`で対象ウィンドウを最前面に出しておく
+- 正しい範囲を取得するには`DwmGetWindowAttribute`に`DWMWA_EXTENDED_FRAME_BOUNDS`(値9)を指定し、実際に見えているウィンドウ境界(物理ピクセル)を取得する
+- キャプチャ自体は`CopyFromScreen`(実画面のピクセルをコピー)ではなく`PrintWindow`に`PW_RENDERFULLCONTENT`(値2)を指定する方式を使うこと。`CopyFromScreen`は対象ウィンドウが実際に画面の最前面に出ていることが前提だが、自動化スクリプト(バックグラウンドのPowerShellプロセス)から呼ぶ`SetForegroundWindow`はWindowsのフォアグラウンドロックにより戻り値が`true`でも実際には最前面化されないことがある(実際に発生した事例: 無関係な別ウィンドウ(IDE)がスクリーンショットに写り込み続けた)。`PrintWindow`はZオーダー/被覆状態に関係なくDWMにウィンドウの内容を直接描画させるため、フォーカスを一切操作せずに撮影できる(DirectX描画のウィンドウでも`PW_RENDERFULLCONTENT`指定でハードウェアアクセラレーション内容が正しく取得できる)
+- 上記2点を実装済みのヘルパーが`Tools/WinAutomation.ps1`にある。動作確認のたびに再実装せず、これをドットソース(`. Tools\WinAutomation.ps1`)して使うこと。日本語コメントを含むPowerShellスクリプトは、UTF-8 BOM無しで保存すると`Add-Type`内のC#コードがWindows PowerShell 5.1のデフォルトANSIコードページで読まれて文字化けし、コンパイルエラーになることがある(実際に発生)。このファイルを編集する場合は`Set-Content -Encoding utf8`(Windows PowerShell 5.1ではBOM付きUTF-8になる)で保存し直すこと
+
+# Claudeによるクリック座標の計算(スクリーンショット→クライアント座標変換)
+- スクリーンショットで目視したピクセル位置を、そのまま`PostMessage`の`lParam`(クライアント座標)として使ってはいけない。Windowsのディスプレイ拡大率(例: 150%)が100%でない環境では、ウィンドウの内部解像度(`KurenaiEngine3D`は既定1280x720固定)と実際の画面上の物理ピクセルサイズが一致しないため、スクリーンショット上の座標をそのまま使うとクリック位置が大きくズレる(実際に発生し、ボタンを外し続けてクリックが無反応になった事例がある)
+- `ClientToScreen`/`GetWindowRect`を自動化スクリプト側(呼び出し元プロセス)のDPI認識状態のままクロスプロセスで使うと、WindowsのDPI仮想化により値が不整合になることがある(実際に発生: クライアント原点がウィンドウ枠の外側にずれるおかしな値になった)
+- 正しく変換するには`GetClientRect`(ウィンドウ自身の論理サイズ。内部解像度そのものなのでDPI仮想化されない)と`DwmGetWindowAttribute`の`DWMWA_EXTENDED_FRAME_BOUNDS`(物理ピクセル)の比率からスケール・タイトルバー高さを直接計算する。`Tools/WinAutomation.ps1`の`ScreenshotPixelToClient`関数がこれを実装済みなので、スクリーンショット上でクリックしたい位置を特定したら必ずこの関数を通してから`ClickClient`に渡すこと
 
 # Compact instructions
 要約するときは、実行したコマンドとその結果、コードの変更内容を優先して残してください。途中の議論や試行錯誤は省いて構いません。
