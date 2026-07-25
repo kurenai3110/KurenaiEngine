@@ -92,6 +92,40 @@ namespace Kurenai::Core
         }
     }
 
+    void Window::ForwardQueuedMessagesToImGui()
+    {
+        std::vector<PendingWndProcMessage> messages;
+        {
+            std::lock_guard<std::mutex> lock(m_PendingImGuiMessagesMutex);
+            messages.swap(m_PendingImGuiMessages);
+        }
+
+        // PostMessageによる自動操作(実カーソルはウィンドウ外にあることが多い)では、注入した
+        // WM_MOUSEMOVEの直後にTrackMouseEvent(Window/ImGui双方が個別に登録している)が実カーソル位置に
+        // 基づいてWM_MOUSELEAVEを生成してしまい、ImGui側のio.MousePosが-FLT_MAXへ戻されてクリック判定が
+        // 成立しなくなることがある。このWM_MOUSELEAVEは注入したWM_MOUSEMOVEと同じバッチに載らず
+        // 数フレーム遅れて届くこともあるため、直近kMouseLeaveSuppressionウィンドウ内にWM_MOUSEMOVEを
+        // 転送していればWM_MOUSELEAVEは実カーソル基準の古い判定によるノイズとみなして転送しない
+        // (実際に離れた場合も、新たなWM_MOUSEMOVEが来ない限りこの猶予はすぐ過ぎるため、後続の
+        // WM_MOUSELEAVEは通常どおり転送される)
+        constexpr auto kMouseLeaveSuppression = std::chrono::milliseconds(100);
+        const auto now = std::chrono::steady_clock::now();
+
+        for (const auto& message : messages)
+        {
+            if (message.Message == WM_MOUSEMOVE)
+            {
+                m_LastForwardedMouseMoveTime = now;
+            }
+            else if (message.Message == WM_MOUSELEAVE && (now - m_LastForwardedMouseMoveTime) < kMouseLeaveSuppression)
+            {
+                continue;
+            }
+
+            ImGui_ImplWin32_WndProcHandler(m_Handle, message.Message, message.WParam, message.LParam);
+        }
+    }
+
     bool Window::IsMouseButtonDown(MouseButton button) const
     {
         return m_MouseButtonDown[static_cast<size_t>(button)];
@@ -139,8 +173,14 @@ namespace Kurenai::Core
     LRESULT Window::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     {
         // ImGuiがマウス/キーボード入力を使う場合でも、リサイズ等のウィンドウ管理は
-        // このエンジン側で引き続き処理する必要があるため、早期returnはしない
-        ImGui_ImplWin32_WndProcHandler(m_Handle, message, wParam, lParam);
+        // このエンジン側で引き続き処理する必要があるため、早期returnはしない。
+        // ImGui_ImplWin32_WndProcHandlerはこのスレッド(Updateスレッド)から直接呼ばず、
+        // キューに積んでForwardQueuedMessagesToImGui経由でRenderスレッドへ転送する
+        // (ImGui::NewFrame()等と同時にImGuiの内部状態を触るとデータ競合になるため)
+        {
+            std::lock_guard<std::mutex> lock(m_PendingImGuiMessagesMutex);
+            m_PendingImGuiMessages.push_back({ message, wParam, lParam });
+        }
 
         switch (message)
         {

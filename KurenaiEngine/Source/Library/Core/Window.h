@@ -2,9 +2,13 @@
 
 #include <Windows.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <vector>
 
 #include "KurenaiTypes.h"
 
@@ -55,13 +59,31 @@ namespace Kurenai::Core
         // クライアント座標(原点は左上、Y-down。Win32の標準的な座標系)
         POINT GetClientMousePosition() const { return m_MousePosition; }
 
+        // WndProc(PumpMessages呼び出し元スレッド=Updateスレッド)で受け取ったメッセージのうち
+        // ImGui向けにキューイングされた分を、呼び出し元スレッド上でImGui_ImplWin32_WndProcHandlerへ
+        // 転送する。Dear ImGuiはシングルスレッド前提のライブラリで、ImGui::NewFrame()/描画処理を
+        // 行うスレッド以外からImGuiの状態を触ってはならないため、Renderスレッドを持つ構成(KurenaiEngine3D)
+        // では毎フレームNewFrame()の直前に「Renderスレッド自身から」この関数を呼び出すこと
+        // (WndProc側で直接ImGui_ImplWin32_WndProcHandlerを呼ぶと、Renderスレッドと同時に
+        // ImGuiの内部状態を書き換えてしまいデータ競合になる)
+        void ForwardQueuedMessagesToImGui();
+
     private:
+        struct PendingWndProcMessage
+        {
+            UINT Message;
+            WPARAM WParam;
+            LPARAM LParam;
+        };
+
         static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
         LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
 
         HWND m_Handle = nullptr;
-        uint32_t m_Width;
-        uint32_t m_Height;
+        // Render()を別スレッドで動かす場合、WM_SIZE(PumpMessages呼び出し元スレッド)による書き込みと
+        // GetWidth/GetHeight(描画スレッドからの読み取り)が同時に発生し得るためatomicにしておく
+        std::atomic<uint32_t> m_Width;
+        std::atomic<uint32_t> m_Height;
         bool m_ShouldClose = false;
         ResizeCallback m_ResizeCallback;
 
@@ -72,6 +94,14 @@ namespace Kurenai::Core
         bool m_MouseButtonPressedEdge[3]{};
         bool m_KeyDown[256]{};
         bool m_KeyPressedEdge[256]{};
+
+        // WndProc(Updateスレッド)からForwardQueuedMessagesToImGui呼び出し元(Renderスレッド)への
+        // メッセージ受け渡し用。ImGui自体はこのキューにもWndProc処理にも関与しないため、
+        // ここは単純なvector+mutexで足りる
+        std::mutex m_PendingImGuiMessagesMutex;
+        std::vector<PendingWndProcMessage> m_PendingImGuiMessages;
+        // ForwardQueuedMessagesToImGui呼び出し元(Renderスレッド)のみが読み書きする
+        std::chrono::steady_clock::time_point m_LastForwardedMouseMoveTime{};
     };
 }
 
