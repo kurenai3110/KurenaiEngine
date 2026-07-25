@@ -24,3 +24,8 @@
 
 # graphify生成物(ナレッジグラフ出力・キャッシュ)
 /graphify-out/
+
+# Claude Code用の設定・資料(リポジトリには含めない)
+/CLAUDE.md
+/.claude/
+/Claude/
