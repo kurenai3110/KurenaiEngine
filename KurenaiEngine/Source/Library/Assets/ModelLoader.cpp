@@ -256,7 +256,9 @@ namespace Kurenai::Assets
         // 読み込みではassimpを経由せずキャッシュから直接構築する
 
         constexpr char kCacheMagic[4] = { 'K', 'M', 'C', '1' };
-        constexpr uint32_t kCacheVersion = 9;
+        // v10: 同一マテリアルのメッシュを結合してドローコール数を削減する変更に伴い、
+        // 既存キャッシュ(メッシュ粒度がaiMesh単位のまま)を破棄して再生成させるため加算
+        constexpr uint32_t kCacheVersion = 10;
 
         struct CacheHeader
         {
@@ -493,6 +495,20 @@ namespace Kurenai::Assets
 
         bool boundsInitialized = false;
 
+        // マテリアルインデックスごとに頂点・インデックスを結合してから1つのバッファ/ドローコールに
+        // まとめる。OBJ形式のように同一マテリアルの三角形群が(usemtlの切り替えのたびに)大量の
+        // 小さなaiMeshへ分割されているアセットでは、aiMeshごとに個別のバッファ/ドローコールを
+        // 発行すると数万件規模になり、GPU側のドライバウォッチドッグ(TDR)によるハングを
+        // 引き起こしうる(実際にBistroのMcGuire版OBJ配布(usemtl切り替え22,396回、実質132
+        // マテリアル)で確認済み)ため、マテリアル単位でまとめてドローコール数を実質マテリアル数まで
+        // 削減する
+        struct MergedMeshAccumulator
+        {
+            std::vector<Vertex> Vertices;
+            std::vector<uint32_t> Indices;
+        };
+        std::unordered_map<unsigned int, MergedMeshAccumulator> meshesByMaterial;
+
         // キャッシュ書き込み用ファイル。ヘッダーはbounds/meshCountが確定してから
         // 先頭にシークして書き直すため、まずプレースホルダーを書いておく。
         // 本来のキャッシュパス(GetCachePath)ではなく一時パス(GetCacheTempPath)に書き、
@@ -699,6 +715,31 @@ namespace Kurenai::Assets
                 }
             }
 
+            // GPU側のバッファ作成・テクスチャ読み込みはここでは行わず、マテリアルインデックスごとに
+            // 頂点・インデックスを結合するだけにとどめる(実際のバッファ作成は全aiMeshを走査し
+            // 終えた後、マテリアルごとに1回だけ行う。下記参照)
+            MergedMeshAccumulator& accum = meshesByMaterial[mesh->mMaterialIndex];
+            const uint32_t indexBase = static_cast<uint32_t>(accum.Vertices.size());
+            accum.Vertices.insert(accum.Vertices.end(), vertices.begin(), vertices.end());
+            accum.Indices.reserve(accum.Indices.size() + indices.size());
+            for (uint32_t idx : indices)
+            {
+                accum.Indices.push_back(indexBase + idx);
+            }
+        }
+
+        // マテリアルインデックスの昇順(assimpのマテリアル配列順)に処理することで、同じソースから
+        // 生成したキャッシュのメッシュ順が実行のたびに変わらないようにする
+        for (unsigned int materialIndex = 0; materialIndex < scene->mNumMaterials; ++materialIndex)
+        {
+            const auto accumIt = meshesByMaterial.find(materialIndex);
+            if (accumIt == meshesByMaterial.end() || accumIt->second.Indices.empty())
+            {
+                continue;
+            }
+            const std::vector<Vertex>& vertices = accumIt->second.Vertices;
+            const std::vector<uint32_t>& indices = accumIt->second.Indices;
+
             Mesh outMesh;
 
             RHI::BufferDesc vertexBufferDesc;
@@ -716,7 +757,7 @@ namespace Kurenai::Assets
             outMesh.IndexBuffer = device.CreateBuffer(indexBufferDesc);
             outMesh.IndexCount = static_cast<uint32_t>(indices.size());
 
-            const aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
+            const aiMaterial* material = scene->mMaterials[materialIndex];
             aiString texPath;
 
             std::string baseColorPath;
@@ -731,8 +772,11 @@ namespace Kurenai::Assets
                 outMesh.BaseColorTexture = textureLoader.GetWhite();
             }
 
+            // OBJ形式は法線マップをaiTextureType_NORMALSではなくmap_bump(aiTextureType_HEIGHT)として
+            // 格納する慣習があるため、NORMALSが無い場合はHEIGHTにもフォールバックする
             std::string normalPath;
-            if (material->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS)
+            if (material->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS ||
+                material->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS)
             {
                 normalPath = texPath.C_Str();
                 outMesh.NormalTexture = textureLoader.LoadNormal(normalPath);

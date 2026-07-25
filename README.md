@@ -42,7 +42,11 @@ UV継ぎ目でピクセルクアッドがトポロジー的に不連続になる
 法線マップの読み込みに失敗した場合(不正なDDS等)は、タンジェント空間法線として解釈すると
 幾何学的にありえない方向になってしまうため、汎用の読み込み失敗プレースホルダー(マゼンタ)ではなく
 「法線マップなし」を表す平坦法線にフォールバックします。シャドウマッピングによる影の描画、
-太陽光の昼夜サイクルにも対応しています。
+太陽光の昼夜サイクルにも対応しています。モデル読み込み時、同一マテリアルを参照する複数のaiMeshは
+頂点/インデックスバッファを結合してから1つのドローコールにまとめます(マテリアルの切り替えが
+多い生データ、例えばOBJ形式のusemtl切り替えのたびにサブメッシュが分割されるようなアセットでは
+aiMeshが数万件規模になり得るため、まとめないとドローコール数がGPUドライバのウォッチドッグ(TDR)を
+誘発しうるほど膨大になる)。
 
 G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_FLOATを使い、近平面をNDC z=1.0、遠平面をNDC z=0.0にマッピングして深度比較をGREATERで行う)で描画しており、標準的な深度マッピング(近平面=0.0/遠平面=1.0)よりも遠方のZ精度を確保してZファイティングを抑えています。正射影のシャドウマップは元々Zが線形分布のため対象外で、従来どおりのマッピング(D32_FLOAT、近平面=0.0/遠平面=1.0)のままです。
 
@@ -185,9 +189,7 @@ Sample3D.exe -dx12
 
 - **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、表示アセットの切り替えを行う。ボタンをクリックするとそのアセットを読み込みます。現在表示中のアセットに対応するボタンはグレーアウトされます。切り替え時はモデルとテクスチャを同期的に再読み込みするため、Bistroのような大容量アセットでは数秒〜数十秒ウィンドウが応答しなくなります(2回目以降はモデルキャッシュにより高速化されます)。読み込み完了後、タイトルバーに現在表示中のアセット名が表示されます。
   - Sponza
-  - Bistro - Exterior
-  - Bistro - Interior
-  - Bistro - Interior (Wine Cellar)
+  - Bistro (McGuire) - Exterior / Interior(Amazon Lumberyard BistroのMorgan McGuire版OBJ配布をglTFに変換したもの。`Assets/BistroMcGuire/`)
   - White Surface Test(粗さ0〜1の球体列)
 - **Post Processing** — AO/間接光のON/OFFと手法(Technique: SSAO / SSIL (Visibility Bitmask))を切り替え。SSAOは半径(Radius)/強さ(Power)、SSILは半径(Radius)/厚み(Thickness)/強さ(Intensity)/AOのコントラスト(AO Power)/スライス数(Slices)/ステップ数(Steps)を調整可能。シャドウのON/OFFもここで切り替え。SSRのON/OFFと最大レイ距離(Max Distance)/ヒット判定の厚み(Thickness)/ラフネスカットオフ(Roughness Cutoff)もここで調整可能
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / Depth (Raw) / Direct Light / AO/GI - Indirect Light (RGB) / AO/GI - Indirect Light (RGB, Before Blur) / AO/GI - Occlusion (Alpha) / AO/GI - Occlusion (Alpha, Before Blur) / Shadow Map / SSR (Final + Reflections) / Hi-Z (Depth Mip Chain))。Direct Lightは直接光パスの結果(HDR)をトーンマッピングして表示。Depth (Raw)は深度テクスチャの生値(0〜1)を加工せずそのまま表示(reverse-zの生値確認用。近平面が小さいためほとんどの距離で値が0付近になり、無加工ではほぼ黒く見える)。AO/GIバッファはrgb(間接拡散光)とa(遮蔽率)を別々に確認でき、Before Blur付きの項目はブラー前の生バッファ(タイル状ノイズが乗った状態)を表示する。Finalと同じくSSR無効時はSceneColorがそのまま表示される。Hi-Zを選択するとミップレベルを指定するスライダーが表示され、Hi-Zミップチェーンの指定ミップの生値をグレースケール表示する(ミップが上がるほど解像度が半分ずつになりレターボックス表示も追従する)
@@ -224,7 +226,7 @@ ImGuiパネル一式)がそのまま動作します。**起動確認・動作検
 エンジンが読み込むモデル・テクスチャ類は `Assets/` フォルダで管理します。
 
 - `Assets/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
-- `Assets/Bistro/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) のBistroモデル(FBX形式、`Textures/`にDDS/TGAテクスチャを同梱)
+- `Assets/BistroMcGuire/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)のMorgan McGuire版OBJ配布([awesome-3d-meshes](https://github.com/Graphify-Labs/awesome-3d-meshes)経由、`ThirdParty/SourceModels/awesome-3d-meshes-master/McGuire/Amazon Lumberyard Bistro/`の各種7z/zipアーカイブを展開したもの)をglTFに変換したもの(`Exterior_gltf/exterior.gltf` / `Interior_gltf/interior.gltf`)。元のOBJ/MTLは同一マテリアルの三角形群がusemtl切り替えのたびに大量の小さなサブメッシュへ分割されており(exteriorは実質132マテリアルに対しusemtl切り替え22,396回)、そのままassimpのOBJインポータへ読み込ませると解析が現実的な時間で終わらず、仮に読み込めてもドローコール数がGPUドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になるため、Blender(headless、`--factory-startup`でユーザー導入アドオンを無効化した状態)でOBJを読み込みglTFへ変換したもの(diffuse→BaseColor、_ddna→Normal Mapのノード配線をPythonスクリプトで自動化)を実際に読み込む。展開直後の生データ(obj/mtl/PNGテクスチャ群)はglTF変換後は不要なため保持していない
 - `Assets/MaterialTest/` — PBRライティング検証用に生成した、粗さ(roughness)を0.0〜1.0で11段階に変えた白色(非金属)の球体を並べたglTFアセット。`Tools/generate_material_test.py` で再生成できる
 - `Assets/Skybox/` — 背景表示用に生成した青空のキューブマップ(DDS形式)。`Tools/generate_sky_cubemap.py` で再生成できる
 
