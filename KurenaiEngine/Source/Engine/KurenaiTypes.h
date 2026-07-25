@@ -26,8 +26,8 @@ namespace Kurenai
         Middle,
     };
 
-    // KurenaiEngine2D::DrawTextの水平方向の文字揃え。(x, y)の意味がalignごとに変わる
-    // (Left: テキスト左下基準/Center: テキスト中央下基準/Right: テキスト右下基準)
+    // KurenaiEngine2D::DrawTextの水平方向の文字揃え。xの意味がalignごとに変わる
+    // (Left: テキスト左端基準/Center: テキスト中央基準(既定)/Right: テキスト右端基準)
     enum class TextAlign
     {
         Left,
@@ -35,9 +35,8 @@ namespace Kurenai
         Right,
     };
 
-    // KurenaiEngine2D::DrawTextの垂直方向の文字揃え。(x, y)のyの意味がverticalAlignごとに変わる
-    // (Bottom: テキスト下端基準(既定、TextAlignのみだった頃と同じ挙動)/Middle: テキスト上下中央基準/
-    // Top: テキスト上端基準)
+    // KurenaiEngine2D::DrawTextの垂直方向の文字揃え。yの意味がverticalAlignごとに変わる
+    // (Bottom: テキスト下端基準/Middle: テキスト上下中央基準(既定)/Top: テキスト上端基準)
     enum class TextVerticalAlign
     {
         Bottom,

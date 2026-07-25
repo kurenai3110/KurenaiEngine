@@ -454,8 +454,8 @@ namespace Kurenai
         RHI::IRHICommandList* commandList = GetCommandList();
         commandList->SetTexture(0, (bold ? m_BoldFontAtlasTexture : m_FontAtlasTexture).get());
 
-        // Center/Rightの場合、xをテキスト左端基準に変換してから描画ループに入る。
-        // MeasureTextと同じFindGlyphを経由するため、未収録文字のpendingキュー登録も一貫する
+        // align=Left(既定はCenterだが、この分岐自体はLeftのときだけ計算を省く)の場合はxがそのまま
+        // テキスト左端基準になるため、MeasureTextによる幅の実測は不要。Center/Rightのときだけ実測する
         float penX = x;
         if (align != TextAlign::Left)
         {
@@ -463,13 +463,14 @@ namespace Kurenai
             penX = (align == TextAlign::Center) ? x - totalWidth * 0.5f : x - totalWidth;
         }
 
-        // Middle/Topの場合、yをテキスト下端基準に変換する。1文字ぶんのセル高さはアトラス全体で
-        // 共通(m_FontAtlasCellHeight/m_BoldFontAtlasCellHeight)なので、個々の文字を探す必要はない
-        float penY = y;
-        if (verticalAlign != TextVerticalAlign::Bottom)
+        // verticalAlign=Topの場合はyがそのままテキスト上端基準になるため、セル高さの取得は不要。
+        // Middle/Bottomのときだけ、アトラス全体で共通の1文字ぶんのセル高さ
+        // (m_FontAtlasCellHeight/m_BoldFontAtlasCellHeight)を使ってオフセットを計算する
+        float penYFromTop = y;
+        if (verticalAlign != TextVerticalAlign::Top)
         {
             const float lineHeight = (bold ? m_BoldFontAtlasCellHeight : m_FontAtlasCellHeight) * scale;
-            penY = (verticalAlign == TextVerticalAlign::Middle) ? y - lineHeight * 0.5f : y - lineHeight;
+            penYFromTop = (verticalAlign == TextVerticalAlign::Middle) ? y + lineHeight * 0.5f : y + lineHeight;
         }
 
         for (const wchar_t ch : text)
@@ -485,11 +486,11 @@ namespace Kurenai
             const float glyphHeight = glyph->HeightPixels * scale;
 
             ObjectConstants objectConstants{};
-            // penX/penYは常にテキスト左下基準(align/verticalAlignによるオフセットは呼び出し前に
-            // 適用済み)。DrawSpriteと同様ワールド座標はY-upなので、グリフ矩形の中心はペン位置から
-            // 右・上へずらした位置になる
+            // penXはテキスト左端基準、penYFromTopはテキスト上端基準(align/verticalAlignによる
+            // オフセットは呼び出し前に適用済み)。DrawSpriteと同様ワールド座標はY-upなので、
+            // グリフ矩形の中心はpenXから右へ、penYFromTopから下(Y-upなので減算方向)へずらした位置になる
             const DirectX::XMMATRIX world = DirectX::XMMatrixScaling(glyphWidth, glyphHeight, 1.0f) *
-                DirectX::XMMatrixTranslation(penX + glyphWidth * 0.5f, penY + glyphHeight * 0.5f, 0.0f);
+                DirectX::XMMatrixTranslation(penX + glyphWidth * 0.5f, penYFromTop - glyphHeight * 0.5f, 0.0f);
             DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixTranspose(world));
             objectConstants.Color = { r, g, b, a };
             objectConstants.UVOffsetScale = { glyph->U0, glyph->V0, glyph->U1 - glyph->U0, glyph->V1 - glyph->V0 };

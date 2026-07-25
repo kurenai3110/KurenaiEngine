@@ -85,14 +85,15 @@ namespace Kurenai
         // (フレーム中にテクスチャを作り直すとDX12でレンダーターゲット/パイプラインステートの設定が
         // 失われるため、追加はBeginFrame()の先頭でのみ行う設計になっている)。
         // bold=trueの場合、通常とは別に構築される太字(FW_BOLD)アトラスを使って描画する。
-        // xの意味はalignで変わる(Left(既定)=テキスト左端基準、Center=テキスト中央基準、
-        // Right=テキスト右端基準)。yの意味はverticalAlignで変わる(Bottom(既定)=テキスト下端基準、
-        // Middle=テキスト上下中央基準、Top=テキスト上端基準)。Left/Bottom以外の場合、内部で
-        // MeasureText相当の幅・高さ計測を行ってから描画開始位置を決めるため、呼び出し側で
-        // 手動に幅・高さを計算する必要はない
+        // xの意味はalignで変わる(Left=テキスト左端基準、Center(既定)=テキスト中央基準、
+        // Right=テキスト右端基準)。yの意味はverticalAlignで変わる(Bottom=テキスト下端基準、
+        // Middle(既定)=テキスト上下中央基準、Top=テキスト上端基準)。align=Center/Rightまたは
+        // verticalAlign=Bottom/Middleの場合、内部でMeasureText相当の幅・高さ計測を行ってから
+        // 描画開始位置を決めるため、呼び出し側で手動に幅・高さを計算する必要はない
+        // (align=Left・verticalAlign=Topの組み合わせのみ、計測なしでそのまま(x, y)を使う)
         void DrawText(
             float x, float y, const std::wstring& text, float fontSize, float r, float g, float b, float a,
-            bool bold = false, TextAlign align = TextAlign::Left, TextVerticalAlign verticalAlign = TextVerticalAlign::Bottom);
+            bool bold = false, TextAlign align = TextAlign::Center, TextVerticalAlign verticalAlign = TextVerticalAlign::Middle);
 
         // textをfontSize(・bold)で描画した場合の実測済み幅(ピクセル単位、AdvancePixelsの合計)を返す。
         // ボタンラベル等の正確な中央揃えに使う。DrawTextと同様、アトラス未収録の文字はその場では
