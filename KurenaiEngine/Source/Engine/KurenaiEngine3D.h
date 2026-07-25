@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -51,6 +52,10 @@ namespace Kurenai
         void UpdateMouseLook();
         void UpdateMovement(float deltaTime);
         void UpdateImGuiToggle();
+        // RenderSceneSwitchUI(Renderスレッド)がm_PendingSceneIndexへ書き込んだシーン切り替え要求を
+        // 見て、あればこのUpdateスレッドからLoadSceneを呼ぶ(LoadSceneをUpdateスレッド上で実行するための
+        // ハンドオフ。詳細はm_PendingSceneIndexのコメント参照)
+        void UpdateSceneSwitch();
         void Update(float deltaTime);
         void RenderThreadMain();
         void Render(const FrameState& frameState);
@@ -225,15 +230,25 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHISampler> m_Sampler;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_MaterialConstantBuffer;
+
+        // LoadScene(Updateスレッド。UpdateSceneSwitch経由で呼ばれる)が書き込み、Render()(Renderスレッド。
+        // 描画そのものに加えRenderPostProcessUI等のImGuiスライダーがm_SSAORadius等を直接書き換える)が
+        // 読み書きする「シーン状態」一式をこのミューテックスで保護する。LoadScene呼び出し全体と
+        // Render()呼び出し全体をそれぞれこのミューテックスで包むため、この2つは同時に走らない
+        // (=個々のメンバに追加のロックは不要)。対象はm_Model/m_CurrentSceneIndex/m_Cameraと、
+        // FrameCameraToModelが書き換えるm_SSAORadius等のPost Processingパラメータ
+        // (宣言はそれぞれの節にあるが、書き込み元がLoadScene/ImGuiスライダーの2スレッドにまたがる点は共通)
+        std::mutex m_SceneMutex;
         Assets::Model m_Model;
         size_t m_CurrentSceneIndex = 0;
-
-        // Update(Updateスレッド=Run()を呼んだ元スレッド)とLoadScene/FrameCameraToModel(Renderスレッド、
-        // シーン切り替えUIから呼ばれる)の双方から書き換えられ得るため、アクセスは常にm_CameraMutexで保護する。
-        // Render()自身は毎フレームm_FrameStateへコピーされたスナップショット経由で読むため、
-        // Render()の本体(GPU発行中)ではこのミューテックスを取らない
         Core::Camera m_Camera;
-        std::mutex m_CameraMutex;
+
+        // RenderSceneSwitchUI(Renderスレッド)でシーン切り替えボタンが押されたときに書き込まれ、
+        // UpdateSceneSwitch(Updateスレッド)が毎フレーム読み取って消費する1要素の受け渡し用。
+        // LoadScene自体はUpdateスレッドから(m_SceneMutexで保護して)呼ぶ必要があるため、
+        // クリック検出(Renderスレッド)と実際の呼び出し(Updateスレッド)をこれで分離する
+        std::atomic<int> m_PendingSceneIndex{ -1 };
+
         std::chrono::steady_clock::time_point m_LastFrameTime;
 
         // Update(メインスレッド)とRender(描画専用スレッド)を並列化するためのハンドオフ機構。

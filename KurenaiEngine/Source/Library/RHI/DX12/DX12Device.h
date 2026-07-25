@@ -4,6 +4,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <memory>
+#include <mutex>
 #include <wrl/client.h>
 
 #include "DX12DescriptorHeap.h"
@@ -86,10 +87,7 @@ namespace Kurenai::RHI
         void AdvanceToNextFrame();
         // フェンスでGPUの完全なアイドルを待つ(全フレームスロットの実行完了を保証する)。
         // リサイズやシャットダウンなど、パイプライン化の恩恵が不要な箇所でのみ使う
-        void WaitForGPUIdle();
-        // ExecuteCommandList()とWaitForGPUIdle()をまとめて行い、現在のフレームスロットを
-        // 開き直す、一度限りの同期処理(テクスチャアップロード等)用の便宜メソッド
-        void SubmitAndWaitIdle();
+        void WaitForGPUIdle() override;
 
     private:
         void CreateRootSignature();
@@ -98,6 +96,10 @@ namespace Kurenai::RHI
         void ResetCommandList();
         Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(uint64_t sizeInBytes);
         std::unique_ptr<IRHITexture> CreateTextureFromImage(const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image);
+        // m_UploadCommandListへ記録した内容をクローズして実行投入し、完了を同期的に待ってから開き直す。
+        // CreateBuffer/CreateTextureFromImageの初期データアップロード専用(詳細はm_UploadCommandListの
+        // コメント参照)
+        void UploadSubmitAndWait();
 
         // CPUがGPUの完了を待たずに次フレームの記録を始められるようにするための多重バッファリング数。
         // スワップチェインのバッファ数(DX12SwapChain::kBufferCount)と合わせて2にしておく
@@ -118,6 +120,23 @@ namespace Kurenai::RHI
         // 直前のAdvanceToNextFrame()でWaitForSingleObjectに実際に費やした時間(ms)。
         // フェンスが既に満たされていて待たなかった場合は0になる
         float m_LastFrameGPUWaitTimeMs = 0.0f;
+
+        // CreateBuffer/CreateTextureFromImageの初期データアップロード専用のコマンドリスト/アロケータ/
+        // フェンス。m_CommandList(GetImmediateCommandList、毎フレームRenderスレッドが使う)とは
+        // 完全に独立させてある。これらを共有していた旧実装では、シーン切り替え(LoadScene)のような
+        // Render()呼び出しの外からのリソース作成が、Render()が記録中のコマンドリストを
+        // Close/Reset/実行してしまい、設定済みのレンダーターゲット/パイプラインステート等を
+        // 破壊するバグがあった(KurenaiEngine2D::BuildFontAtlasをBeginFrame後に呼べない制約の原因もこれ)。
+        // 独立させたことで、LoadSceneをRenderスレッド以外(Updateスレッド等)から呼んでも
+        // 毎フレームの描画と安全に共存できる
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_UploadCommandAllocator;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_UploadCommandList;
+        Microsoft::WRL::ComPtr<ID3D12Fence> m_UploadFence;
+        uint64_t m_UploadFenceValue = 0;
+        HANDLE m_UploadFenceEvent = nullptr;
+        // 複数スレッドから同時にCreateBuffer/CreateTextureFromImageが呼ばれても
+        // m_UploadCommandListへの記録が競合しないようにする
+        std::mutex m_UploadMutex;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> m_RootSignature;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> m_ComputeRootSignature;
 

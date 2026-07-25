@@ -63,6 +63,14 @@ namespace Kurenai::RHI
         // これは実際のCPU負荷ではなくGPU側の処理時間を反映した待ち時間なので、
         // CPU時間の表示からはこの値を差し引いて実質的なCPU負荷のみを示す
         virtual float GetLastFrameGPUWaitTimeMs() const = 0;
+
+        // GPUが投入済みのコマンドをすべて処理し終えるまでCPU側でブロックする。DX12はCPUがGPUの
+        // 完了を待たずに次フレームの記録を始める多重バッファリング設計のため、直前数フレームぶんの
+        // 描画コマンドがまだGPU上で実行中の可能性がある。LoadScene等で既存のGPUリソース
+        // (頂点/インデックスバッファ・テクスチャ)を破棄する前にこれを呼ばないと、GPUがまだ
+        // 参照しているメモリを解放してしまい、ヒープ破損やクラッシュを引き起こし得る。
+        // DX11は同期的なリソース管理のため実質的に即座に返る
+        virtual void WaitForGPUIdle() = 0;
     };
 
     KURENAI_API std::unique_ptr<IRHIDevice> CreateDX11Device();

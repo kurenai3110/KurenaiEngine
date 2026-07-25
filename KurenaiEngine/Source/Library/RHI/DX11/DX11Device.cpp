@@ -569,6 +569,26 @@ namespace Kurenai::RHI
         return m_ImmediateCommandList.get();
     }
 
+    void DX11Device::WaitForGPUIdle()
+    {
+        D3D11_QUERY_DESC queryDesc{};
+        queryDesc.Query = D3D11_QUERY_EVENT;
+        Microsoft::WRL::ComPtr<ID3D11Query> query;
+        if (FAILED(m_Device->CreateQuery(&queryDesc, &query)))
+        {
+            return;
+        }
+
+        m_Context->End(query.Get());
+        m_Context->Flush();
+
+        // GetDataはGPUが該当区間(End呼び出しまでに発行された全コマンド)の実行を完了するまでS_FALSEを返す
+        while (m_Context->GetData(query.Get(), nullptr, 0, 0) == S_FALSE)
+        {
+            Sleep(0);
+        }
+    }
+
     std::unique_ptr<IRHIImGuiBackend> DX11Device::CreateImGuiBackend(void* windowHandle)
     {
         return std::make_unique<DX11ImGuiBackend>(m_Device.Get(), m_Context.Get(), windowHandle);

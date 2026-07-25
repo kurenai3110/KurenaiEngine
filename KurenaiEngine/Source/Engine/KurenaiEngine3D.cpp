@@ -580,8 +580,26 @@ namespace Kurenai
             return;
         }
 
+        // m_Model/m_Camera/Post ProcessingパラメータはRender()(Renderスレッド)も読み書きするため、
+        // この関数全体をm_SceneMutexで保護する(詳細はm_SceneMutexのコメント参照)。UpdateSceneSwitch
+        // (Updateスレッド)からのみ呼ばれる前提のため、Renderスレッドとの競合はこれで排他できる
+        std::lock_guard<std::mutex> sceneLock(m_SceneMutex);
+
         const std::wstring modelPath = GetModuleDirectory() + kScenes[sceneIndex].RelativePath;
 
+        // 旧シーン(m_Model)のバッファ/テクスチャを破棄する前に、GPUが旧シーンを参照する
+        // コマンド(直前まで提出されていた描画コマンド)の実行を終えるまで待つ。特にDX12は
+        // CPUがGPU完了を待たずに次フレームの記録を始める多重バッファリング設計のため、
+        // これを省くとGPUがまだ読んでいるバッファ/テクスチャを解放してしまい、
+        // ヒープ破損によるクラッシュを引き起こす(詳細はIRHIDevice::WaitForGPUIdleのコメント参照)
+        m_Device->WaitForGPUIdle();
+
+        // Assets::LoadModelの戻り値(新シーンの全テクスチャ/バッファ)を作り終えてから代入すると、
+        // 代入演算子が旧m_Modelを破棄するまでの間、新旧シーンのGPUリソース(特にDX12の
+        // 非シェーダー可視SRVディスクリプタ)が同時に確保された状態になり、大規模シーンでは
+        // ディスクリプタヒープを圧迫する。先に空のModelで置き換えて旧シーンを解放しておく
+        // (直前のWaitForGPUIdleによりGPUはもう旧シーンを参照していないため安全)
+        m_Model = Assets::Model{};
         m_Model = Assets::LoadModel(*m_Device, modelPath);
         m_CurrentSceneIndex = sceneIndex;
 
@@ -612,9 +630,6 @@ namespace Kurenai
         const SceneEntry& currentScene = kScenes[m_CurrentSceneIndex];
         if (currentScene.HasCameraOverride)
         {
-            // シーン切り替え(RenderSceneSwitchUI、Renderスレッド)とUpdateMouseLook/UpdateMovement
-            // (Updateスレッド)が同時にm_Cameraへ触れ得るため保護する
-            std::lock_guard<std::mutex> cameraLock(m_CameraMutex);
             m_Camera.SetPosition({ currentScene.CameraPosition[0], currentScene.CameraPosition[1], currentScene.CameraPosition[2] });
             m_Camera.SetYawPitch(currentScene.CameraYaw, 0.0f);
             m_Camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
@@ -673,9 +688,6 @@ namespace Kurenai
             nearZ = std::max(0.01f, diagonal * 0.0005f);
         }
 
-        // シーン切り替え(RenderSceneSwitchUI、Renderスレッド)とUpdateMouseLook/UpdateMovement
-        // (Updateスレッド)が同時にm_Cameraへ触れ得るため保護する
-        std::lock_guard<std::mutex> cameraLock(m_CameraMutex);
         m_Camera.SetPosition({ posX, posY, posZ });
         m_Camera.SetYawPitch(yaw, 0.0f);
         m_Camera.SetLens(DirectX::XM_PIDIV4, nearZ, farZ);
@@ -743,7 +755,9 @@ namespace Kurenai
             const std::string label = WideToUtf8(kScenes[i].DisplayName);
             if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0.0f)))
             {
-                LoadScene(i);
+                // LoadScene自体はUpdateスレッドから呼ぶ必要があるため、ここでは要求を書き込むだけにする
+                // (UpdateSceneSwitch参照)
+                m_PendingSceneIndex.store(static_cast<int>(i));
             }
 
             if (isCurrent)
@@ -914,11 +928,11 @@ namespace Kurenai
 
             Update(deltaTime);
 
+            // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/LoadScene経由のFrameCameraToModel)
+            // のみが書き込み、Render()はframeStateのスナップショット経由でしか読まないため、
+            // ここでの読み取りに追加のロックは不要
             FrameState newFrameState;
-            {
-                std::lock_guard<std::mutex> cameraLock(m_CameraMutex);
-                newFrameState.Camera = m_Camera;
-            }
+            newFrameState.Camera = m_Camera;
             newFrameState.ImGuiVisible = m_ImGuiVisible;
 
             // Renderスレッドが直前フレーム分を取り込み終えるまで待つ(キュー深度1)。
@@ -987,9 +1001,12 @@ namespace Kurenai
 
             const auto cpuStart = std::chrono::steady_clock::now();
             {
-                // WM_SIZEによるスワップチェーンのリサイズ(Updateスレッド側で同期的に発生)と
-                // 同時に走らないよう、Render()全体をこのミューテックスで保護する
-                std::lock_guard<std::mutex> swapChainLock(m_SwapChainMutex);
+                // WM_SIZEによるスワップチェーンのリサイズ、およびLoadScene(Updateスレッド、
+                // UpdateSceneSwitch経由)によるm_Model/m_Camera/Post Processingパラメータの書き換えと
+                // 同時に走らないよう、Render()全体をこれらのミューテックスで保護する。この2つの
+                // ミューテックスをこの組み合わせ・この順序でロックするのはここだけなので、
+                // std::scoped_lockでなくてもデッドロックの心配はないが、明示的にまとめて扱っておく
+                std::scoped_lock renderLock(m_SwapChainMutex, m_SceneMutex);
                 Render(frameState);
             }
             const auto cpuEnd = std::chrono::steady_clock::now();
@@ -1049,8 +1066,6 @@ namespace Kurenai
                 const float deltaY = static_cast<float>(currentPos.y - m_MouseCaptureCenter.y);
 
                 const float mouseSensitivity = 0.0025f;
-                // m_CameraはLoadScene(Renderスレッド、シーン切り替えUIから)からも書き換えられ得るため保護する
-                std::lock_guard<std::mutex> cameraLock(m_CameraMutex);
                 m_Camera.Rotate(deltaX * mouseSensitivity, -deltaY * mouseSensitivity);
 
                 SetCursorPos(m_MouseCaptureCenter.x, m_MouseCaptureCenter.y);
@@ -1069,10 +1084,6 @@ namespace Kurenai
         // フォーカスを失っている間は反応せず、PostMessageによるテスト自動化とも整合する
         const float moveSpeed = IsKeyDown(VK_SHIFT) ? 20.0f : 5.0f;
         const float moveAmount = moveSpeed * deltaTime;
-
-        // m_CameraはLoadScene(Renderスレッド、シーン切り替えUIから)からも書き換えられ得るため、
-        // 読み取り(GetForward/GetRight)からMoveまでを一貫して保護する
-        std::lock_guard<std::mutex> cameraLock(m_CameraMutex);
 
         const DirectX::XMFLOAT3 forward = m_Camera.GetForward();
         const DirectX::XMFLOAT3 right = m_Camera.GetRight();
@@ -1112,11 +1123,23 @@ namespace Kurenai
         }
     }
 
+    void KurenaiEngine3D::UpdateSceneSwitch()
+    {
+        // -1は「切り替え要求なし」を表す番兵値。exchangeで読み取りと同時に-1へ戻すことで、
+        // 同じ要求を二重に処理しない
+        const int pendingIndex = m_PendingSceneIndex.exchange(-1);
+        if (pendingIndex >= 0)
+        {
+            LoadScene(static_cast<size_t>(pendingIndex));
+        }
+    }
+
     void KurenaiEngine3D::Update(float deltaTime)
     {
         UpdateMouseLook();
         UpdateMovement(deltaTime);
         UpdateImGuiToggle();
+        UpdateSceneSwitch();
         // 昼夜サイクルの自動進行(m_TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
     }
 

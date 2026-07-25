@@ -204,6 +204,13 @@ namespace Kurenai::Assets
             return filePath + L".kmodelcache";
         }
 
+        // 書き込み中のキャッシュはこの一時パスに書き、完了後にGetCachePath()へリネームする
+        // (下のLoadModel参照)
+        std::wstring GetCacheTempPath(const std::wstring& filePath)
+        {
+            return GetCachePath(filePath) + L".tmp";
+        }
+
         bool GetFileTimeAndSize(const std::wstring& path, uint64_t& outTime, uint64_t& outSize)
         {
             WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -290,6 +297,14 @@ namespace Kurenai::Assets
                     header.Version != kCacheVersion ||
                     header.SourceFileTime != sourceTime ||
                     header.SourceFileSize != sourceSize)
+                {
+                    return false;
+                }
+
+                // MeshCount==0はヘッダーだけ書かれたプレースホルダー(LoadModelが書き込み中に中断された
+                // 場合に残る状態。詳細はLoadModel側のGetCacheTempPathのコメント参照)である可能性が高く、
+                // 有効なモデルでは通常あり得ないため、壊れたキャッシュとして扱いassimp経由のフォールバックへ回す
+                if (header.MeshCount == 0)
                 {
                     return false;
                 }
@@ -404,15 +419,22 @@ namespace Kurenai::Assets
         bool boundsInitialized = false;
 
         // キャッシュ書き込み用ファイル。ヘッダーはbounds/meshCountが確定してから
-        // 先頭にシークして書き直すため、まずプレースホルダーを書いておく
+        // 先頭にシークして書き直すため、まずプレースホルダーを書いておく。
+        // 本来のキャッシュパス(GetCachePath)ではなく一時パス(GetCacheTempPath)に書き、
+        // 書き込みが最後まで成功した場合にのみ本来のパスへリネームする。処理がここで中断された
+        // (アプリの強制終了など)場合でも、中途半端な一時ファイルが残るだけで本来のキャッシュ
+        // ファイル(既存のもの、または今回分)には影響しないため、次回以降のTryLoadModelFromCacheが
+        // 「ヘッダーだけのプレースホルダー」を正常なキャッシュとして誤読することがない
         uint64_t sourceTime = 0;
         uint64_t sourceSize = 0;
         const bool haveSourceStat = GetFileTimeAndSize(filePath, sourceTime, sourceSize);
         std::ofstream cacheOut;
         bool cacheWritable = false;
+        std::wstring cacheTempPath;
         if (haveSourceStat)
         {
-            cacheOut.open(GetCachePath(filePath), std::ios::binary | std::ios::trunc);
+            cacheTempPath = GetCacheTempPath(filePath);
+            cacheOut.open(cacheTempPath, std::ios::binary | std::ios::trunc);
             cacheWritable = cacheOut.is_open();
         }
         if (cacheWritable)
@@ -595,6 +617,17 @@ namespace Kurenai::Assets
             header.MeshCount = static_cast<uint32_t>(model.Meshes.size());
             cacheOut.seekp(0);
             cacheOut.write(reinterpret_cast<const char*>(&header), sizeof(header));
+            cacheWritable = static_cast<bool>(cacheOut);
+            cacheOut.close();
+
+            // 一時ファイルへの書き込みが最後まで成功した場合にのみ、本来のキャッシュパスへ差し替える
+            // (同一ボリューム上でのリネームなので、この置き換え自体は事実上原子的)。MeshCount==0
+            // (アセット側に有効なメッシュが1つもなかった場合)はTryLoadModelFromCache側でも常に
+            // 拒否されるだけなので書き出さない
+            if (cacheWritable && header.MeshCount > 0)
+            {
+                MoveFileExW(cacheTempPath.c_str(), GetCachePath(filePath).c_str(), MOVEFILE_REPLACE_EXISTING);
+            }
         }
 
         // キャッシュファイルへはシーングラフ巡回順のまま書き出し済みのため、ソートは

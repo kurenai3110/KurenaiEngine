@@ -44,6 +44,12 @@ namespace Kurenai::RHI
         // (IRHIDeviceの公開インタフェースではなく、DX11実装内部でのみ使う)
         void SetLastFrameGPUWaitTimeMs(float ms) { m_LastFrameGPUWaitTimeMs = ms; }
 
+        // DX11はDX12のような多重バッファリングを行わず、ID3D11DeviceContextがリソースの
+        // 使用状況を暗黙に追跡してくれるため、DX12ほど厳密なフェンス待ちは不要だが、
+        // Flushで発行済みコマンドをGPUへ送り切ってから完了を待つことで、LoadScene等が
+        // 直前まで参照されていたリソースを破棄する前に安全マージンを確保する
+        void WaitForGPUIdle() override;
+
     private:
         Microsoft::WRL::ComPtr<ID3D11Device> m_Device;
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;

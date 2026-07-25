@@ -52,6 +52,15 @@ namespace Kurenai::RHI
         constexpr uint32_t kGraphicsSrvHeapCapacityPerFrame = kTextureSlotCount * kMaxSrvTableBlocksPerFrame;
         constexpr uint32_t kComputeSrvHeapCapacityPerFrame = kComputeTableSlotCount * kMaxComputeDispatchesPerFrame;
 
+        // m_SrvCpuHeap(非シェーダー可視。テクスチャ/構造化バッファ作成時にCreateShaderResourceView等の
+        // 恒久的なビューを1つずつ確保する)の総容量。LoadSceneはm_Model = Assets::LoadModel(...)のように
+        // 新シーンのテクスチャを先にすべて作成してから旧シーンのテクスチャを解放する(右辺の評価が先に
+        // 終わってから代入される)ため、切り替え中は旧シーン+新シーンのテクスチャが一時的に同時に
+        // 確保された状態になる。Bistro Exteriorのような大規模シーンではこの一時的な二重確保だけで
+        // 数百ディスクリプタに達するため、余裕を持った値にしておく(非シェーダー可視ヒープでCPUメモリの
+        // みを消費するため、大きめにしても実害はない)
+        constexpr uint32_t kSrvCpuHeapCapacity = 4096;
+
         DXGI_FORMAT ToDXGIFormat(Format format)
         {
             switch (format)
@@ -94,6 +103,11 @@ namespace Kurenai::RHI
         if (m_FenceEvent)
         {
             CloseHandle(m_FenceEvent);
+        }
+
+        if (m_UploadFenceEvent)
+        {
+            CloseHandle(m_UploadFenceEvent);
         }
     }
 
@@ -139,9 +153,23 @@ namespace Kurenai::RHI
             throw std::runtime_error("フェンスイベントの作成に失敗しました");
         }
 
+        // リソースアップロード専用のコマンドリスト/アロケータ/フェンス(m_UploadCommandListのコメント参照)
+        ThrowIfFailed(
+            m_Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_UploadCommandAllocator)),
+            "アップロード用コマンドアロケータの作成に失敗しました");
+        ThrowIfFailed(
+            m_Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_UploadCommandAllocator.Get(), nullptr, IID_PPV_ARGS(&m_UploadCommandList)),
+            "アップロード用コマンドリストの作成に失敗しました");
+        ThrowIfFailed(m_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_UploadFence)), "アップロード用フェンスの作成に失敗しました");
+        m_UploadFenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (!m_UploadFenceEvent)
+        {
+            throw std::runtime_error("アップロード用フェンスイベントの作成に失敗しました");
+        }
+
         m_RtvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 16, false);
         m_DsvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 8, false);
-        m_SrvCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 256, false);
+        m_SrvCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvCpuHeapCapacity, false);
         m_SamplerCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 4, false);
         // 1フレーム分のコマンドをまとめて記録してから1回だけ実行する設計のため、描画のたびに
         // 新しいkTextureSlotCount個のブロックを払い出せるよう、1フレームに必要な最大数を見込んで確保する。
@@ -290,11 +318,24 @@ namespace Kurenai::RHI
         ResetCommandList();
     }
 
-    void DX12Device::SubmitAndWaitIdle()
+    void DX12Device::UploadSubmitAndWait()
     {
-        ExecuteCommandList();
-        WaitForGPUIdle();
-        ResetCommandList();
+        ThrowIfFailed(m_UploadCommandList->Close(), "アップロード用コマンドリストのクローズに失敗しました");
+        ID3D12CommandList* commandLists[] = { m_UploadCommandList.Get() };
+        m_CommandQueue->ExecuteCommandLists(1, commandLists);
+
+        // アップロードバッファ(呼び出し元のCreateUploadBufferで確保した一時リソース)はこの完了待ちを
+        // 抜けるまで生存させる必要があるため、ExecuteCommandLists後にフェンスで同期的に待つ
+        const uint64_t fenceValueToWaitFor = ++m_UploadFenceValue;
+        ThrowIfFailed(m_CommandQueue->Signal(m_UploadFence.Get(), fenceValueToWaitFor), "アップロード用フェンスのシグナルに失敗しました");
+        if (m_UploadFence->GetCompletedValue() < fenceValueToWaitFor)
+        {
+            ThrowIfFailed(m_UploadFence->SetEventOnCompletion(fenceValueToWaitFor, m_UploadFenceEvent), "アップロード用フェンスイベントの設定に失敗しました");
+            WaitForSingleObject(m_UploadFenceEvent, INFINITE);
+        }
+
+        ThrowIfFailed(m_UploadCommandAllocator->Reset(), "アップロード用コマンドアロケータのリセットに失敗しました");
+        ThrowIfFailed(m_UploadCommandList->Reset(m_UploadCommandAllocator.Get(), nullptr), "アップロード用コマンドリストのリセットに失敗しました");
     }
 
     void DX12Device::ResetCommandList()
@@ -386,6 +427,12 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHIBuffer> DX12Device::CreateBuffer(const BufferDesc& desc)
     {
+        // 初期データのアップロードはm_CommandList(Renderスレッドが毎フレーム使うコマンドリスト)ではなく
+        // m_UploadCommandList専用のコマンドリストで行う(詳細はm_UploadCommandListのコメント参照)。
+        // この関数はLoadScene等どのスレッドからも呼ばれ得るため、m_UploadCommandListへの記録から
+        // UploadSubmitAndWait()完了までをミューテックスで直列化する
+        std::lock_guard<std::mutex> uploadLock(m_UploadMutex);
+
         // 構造化バッファ(RWStructuredBuffer)はコンピュートシェーダーからのUAV書き込みが前提のため、
         // GPUからの読み書きが高速なDEFAULTヒープにD3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS付きで作成する
         if (desc.Usage == BufferUsage::Structured)
@@ -395,12 +442,12 @@ namespace Kurenai::RHI
                 CD3DX12_RESOURCE_DESC::Buffer(desc.SizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
             Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-            ThrowIfFailed(
-                m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource)),
-                "構造化バッファの作成に失敗しました");
-
             if (desc.InitialData)
             {
+                ThrowIfFailed(
+                    m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource)),
+                    "構造化バッファの作成に失敗しました");
+
                 Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer = CreateUploadBuffer(desc.SizeInBytes);
 
                 void* mappedPtr = nullptr;
@@ -411,20 +458,25 @@ namespace Kurenai::RHI
 
                 const D3D12_RESOURCE_BARRIER toCopyDestBarrier =
                     CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-                m_CommandList->ResourceBarrier(1, &toCopyDestBarrier);
-                m_CommandList->CopyBufferRegion(resource.Get(), 0, uploadBuffer.Get(), 0, desc.SizeInBytes);
+                m_UploadCommandList->ResourceBarrier(1, &toCopyDestBarrier);
+                m_UploadCommandList->CopyBufferRegion(resource.Get(), 0, uploadBuffer.Get(), 0, desc.SizeInBytes);
                 const D3D12_RESOURCE_BARRIER toUavBarrier =
                     CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                m_CommandList->ResourceBarrier(1, &toUavBarrier);
+                m_UploadCommandList->ResourceBarrier(1, &toUavBarrier);
 
                 // アップロードバッファはこの関数を抜けるまで生存させる必要があるため、ここで同期的に実行完了を待つ
-                SubmitAndWaitIdle();
+                UploadSubmitAndWait();
             }
             else
             {
-                const D3D12_RESOURCE_BARRIER toUavBarrier =
-                    CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                m_CommandList->ResourceBarrier(1, &toUavBarrier);
+                // 初期データがない場合はコマンドリストでの状態遷移を経由せず、作成時点で直接
+                // UNORDERED_ACCESS状態にしておく。m_UploadCommandListは初期データがある呼び出しでのみ
+                // Submitされるため、ここでバリアだけ積んで済ませると、他の初期データ付きバッファ/
+                // テクスチャの作成が一度も起きないまま先にこのリソースがコンピュートシェーダーから
+                // 使われた場合に、遷移が未実行のまま参照されてしまう
+                ThrowIfFailed(
+                    m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
+                    "構造化バッファの作成に失敗しました");
             }
 
             const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
@@ -471,13 +523,14 @@ namespace Kurenai::RHI
         const CD3DX12_HEAP_PROPERTIES defaultHeapProps(D3D12_HEAP_TYPE_DEFAULT);
         const CD3DX12_RESOURCE_DESC defaultResourceDesc = CD3DX12_RESOURCE_DESC::Buffer(desc.SizeInBytes);
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-        ThrowIfFailed(
-            m_Device->CreateCommittedResource(
-                &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &defaultResourceDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&resource)),
-            "バッファの作成に失敗しました");
 
         if (desc.InitialData)
         {
+            ThrowIfFailed(
+                m_Device->CreateCommittedResource(
+                    &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &defaultResourceDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&resource)),
+                "バッファの作成に失敗しました");
+
             // アップロードヒープの一時バッファ経由でDEFAULTヒープへコピーする
             Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer = CreateUploadBuffer(desc.SizeInBytes);
 
@@ -487,20 +540,23 @@ namespace Kurenai::RHI
             memcpy(mappedPtr, desc.InitialData, desc.SizeInBytes);
             uploadBuffer->Unmap(0, nullptr);
 
-            m_CommandList->CopyBufferRegion(resource.Get(), 0, uploadBuffer.Get(), 0, desc.SizeInBytes);
+            m_UploadCommandList->CopyBufferRegion(resource.Get(), 0, uploadBuffer.Get(), 0, desc.SizeInBytes);
 
             const D3D12_RESOURCE_BARRIER toReadBarrier =
                 CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
-            m_CommandList->ResourceBarrier(1, &toReadBarrier);
+            m_UploadCommandList->ResourceBarrier(1, &toReadBarrier);
 
             // アップロードバッファはこの関数を抜けるまで生存させる必要があるため、ここで同期的に実行完了を待つ
-            SubmitAndWaitIdle();
+            UploadSubmitAndWait();
         }
         else
         {
-            const D3D12_RESOURCE_BARRIER toReadBarrier =
-                CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
-            m_CommandList->ResourceBarrier(1, &toReadBarrier);
+            // 初期データがない場合はコマンドリストでの状態遷移を経由せず、作成時点で直接
+            // GENERIC_READ状態にしておく(構造化バッファ側のコメント参照)
+            ThrowIfFailed(
+                m_Device->CreateCommittedResource(
+                    &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &defaultResourceDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&resource)),
+                "バッファの作成に失敗しました");
         }
 
         // DEFAULTヒープはCPUからマップできないためnullptrを渡す。頂点/インデックスバッファは
@@ -654,6 +710,12 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHITexture> DX12Device::CreateTextureFromImage(const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image)
     {
+        // 初期データのアップロードはm_CommandList(Renderスレッドが毎フレーム使うコマンドリスト)ではなく
+        // m_UploadCommandList専用のコマンドリストで行う(詳細はm_UploadCommandListのコメント参照)。
+        // この関数はLoadScene等どのスレッドからも呼ばれ得るため、m_UploadCommandListへの記録から
+        // UploadSubmitAndWait()完了までをミューテックスで直列化する
+        std::lock_guard<std::mutex> uploadLock(m_UploadMutex);
+
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         ThrowIfFailed(
             DirectX::CreateTextureEx(m_Device.Get(), metadata, D3D12_RESOURCE_FLAG_NONE, DirectX::CREATETEX_DEFAULT, &resource),
@@ -673,14 +735,14 @@ namespace Kurenai::RHI
         // コピー先として使う前にCOPY_DESTへ明示的に遷移させる必要がある
         const D3D12_RESOURCE_BARRIER toCopyDestBarrier =
             CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
-        m_CommandList->ResourceBarrier(1, &toCopyDestBarrier);
+        m_UploadCommandList->ResourceBarrier(1, &toCopyDestBarrier);
 
         Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer = CreateUploadBuffer(requiredSize);
-        UpdateSubresources(m_CommandList.Get(), resource.Get(), uploadBuffer.Get(), 0, 0, subresourceCount, subresources.data());
+        UpdateSubresources(m_UploadCommandList.Get(), resource.Get(), uploadBuffer.Get(), 0, 0, subresourceCount, subresources.data());
 
         const D3D12_RESOURCE_BARRIER toSrvBarrier =
             CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        m_CommandList->ResourceBarrier(1, &toSrvBarrier);
+        m_UploadCommandList->ResourceBarrier(1, &toSrvBarrier);
 
         const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
@@ -702,7 +764,7 @@ namespace Kurenai::RHI
             this, resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid);
 
         // アップロードバッファはこの関数を抜けるまで生存させる必要があるため、ここで同期的に実行完了を待つ
-        SubmitAndWaitIdle();
+        UploadSubmitAndWait();
 
         return texture;
     }
