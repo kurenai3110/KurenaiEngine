@@ -124,6 +124,7 @@ exit /b 0</Command>
     <ClInclude Include="Source\Library\RHI\IRHIGPUProfiler.h" />
     <ClInclude Include="Source\Library\RHI\IRHITexture.h" />
     <ClInclude Include="Source\Library\RHI\IRHISampler.h" />
+    <ClInclude Include="Source\Library\RHI\TextureImage.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11Buffer.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11Shader.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11PipelineState.h" />
@@ -172,6 +173,7 @@ exit /b 0</Command>
     <ClCompile Include="Source\Library\Core\Logger.cpp" />
     <ClCompile Include="Source\Library\Core\RenderGraph.cpp" />
     <ClCompile Include="Source\Library\Assets\ModelLoader.cpp" />
+    <ClCompile Include="Source\Library\RHI\TextureImage.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Buffer.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Shader.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11PipelineState.cpp" />

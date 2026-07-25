@@ -7,15 +7,24 @@
 #include <assimp/scene.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <functional>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "Core/Logger.h"
+#include "RHI/TextureImage.h"
 #include "Vertex.h"
 
 namespace Kurenai::Assets
@@ -217,6 +226,171 @@ namespace Kurenai::Assets
                 return rawPtr;
             }
 
+            // Prefetchに渡すテクスチャ読み込み要求。IsNormalMapは失敗時のフォールバック先
+            // (マゼンタの単色テクスチャ or フラット法線)を選ぶためだけに使う
+            struct PrefetchRequest
+            {
+                std::string Path;
+                bool SRGB = false;
+                bool IsNormalMap = false;
+            };
+
+            // requestsに含まれるテクスチャを論理コア数ぶんのワーカースレッドで並列にデコードし、
+            // 完了したものから随時このスレッド(呼び出し元)でGPUリソース化してm_Cacheへ登録する。
+            // デコード(TextureImage::LoadFromFile、CPU処理でDirectXTexのWIC/BC7圧縮を含む)は
+            // GPUデバイスを必要としないためワーカーで並列化できるが、GPUリソース作成
+            // (device.CreateTextureFromImage)はデバイスに紐づく処理のためこのスレッドで直列に行う。
+            // 呼び出し後は、Load/LoadNormalが同じpathに対してキャッシュヒットで即座に返るようになる
+            // (フォールバック処理自体はLoad/LoadNormalと同じ内容をここでも個別に行っており、
+            // 両者の分岐を変えたわけではない)
+            void Prefetch(const std::vector<PrefetchRequest>& requests)
+            {
+                std::vector<const PrefetchRequest*> pending;
+                std::unordered_set<std::string> seen;
+                for (const auto& request : requests)
+                {
+                    if (request.Path.empty() || m_Cache.find(request.Path) != m_Cache.end())
+                    {
+                        continue;
+                    }
+                    if (!seen.insert(request.Path).second)
+                    {
+                        continue;
+                    }
+                    pending.push_back(&request);
+                }
+                if (pending.empty())
+                {
+                    return;
+                }
+
+                // BC7圧縮はGPU(コンピュートシェーダー)で行うようになった(TextureImage::CompressBC7)ため、
+                // ここでの並列化はもはやCPUの奪い合いにならない: 各ワーカーが行うWICデコード/ミップ生成は
+                // 純粋なCPU作業でコア数ぶん安全に並列化できる一方、GPU圧縮そのものは共有のGPUデバイスを
+                // 使うためTextureImage側のミューテックスで自動的に直列化される(イミディエイトコンテキストは
+                // 複数スレッドから同時に使えないため)。論理コア数をそのまま使うと(BC7ソフトウェア圧縮への
+                // フォールバック時など)過剰になりうるため、上限を設けておく
+                constexpr unsigned int kMaxPrefetchWorkers = 8;
+                const unsigned int hardwareThreads = std::min(kMaxPrefetchWorkers, std::max(1u, std::thread::hardware_concurrency()));
+                const unsigned int workerCount = std::min(hardwareThreads, static_cast<unsigned int>(pending.size()));
+
+                struct CompletedItem
+                {
+                    const PrefetchRequest* Request = nullptr;
+                    std::optional<RHI::TextureImage> Image;
+                    std::string ErrorMessage;
+                    uint64_t SizeInBytes = 0;
+                };
+
+                std::mutex queueMutex;
+                std::condition_variable spaceAvailable;
+                std::condition_variable itemAvailable;
+                std::deque<CompletedItem> completedQueue;
+                uint64_t pendingBytes = 0;
+                std::atomic<size_t> nextIndex{ 0 };
+
+                // ワーカーがGPU化(このスレッド)に追いつかれすぎてデコード済みイメージを
+                // メモリに溜め込みすぎないよう、件数とバイト数の両方で上限を設ける
+                const size_t maxPendingCount = static_cast<size_t>(workerCount) * 2;
+                constexpr uint64_t kMaxPendingBytes = 1ull * 1024 * 1024 * 1024;
+
+                auto workerFn = [&]()
+                {
+                    for (;;)
+                    {
+                        const size_t index = nextIndex.fetch_add(1);
+                        if (index >= pending.size())
+                        {
+                            break;
+                        }
+                        const PrefetchRequest* request = pending[index];
+
+                        CompletedItem item;
+                        item.Request = request;
+                        try
+                        {
+                            const std::wstring fullPath = ResolveTexturePath(m_Directory, Utf8ToWide(request->Path));
+                            RHI::TextureImage image = RHI::TextureImage::LoadFromFile(fullPath, request->SRGB);
+                            item.SizeInBytes = image.GetSizeInBytes();
+                            item.Image = std::move(image);
+                        }
+                        catch (const std::exception& e)
+                        {
+                            item.ErrorMessage = e.what();
+                        }
+
+                        std::unique_lock<std::mutex> lock(queueMutex);
+                        spaceAvailable.wait(lock, [&] { return completedQueue.size() < maxPendingCount && pendingBytes < kMaxPendingBytes; });
+                        pendingBytes += item.SizeInBytes;
+                        completedQueue.push_back(std::move(item));
+                        lock.unlock();
+                        itemAvailable.notify_one();
+                    }
+                };
+
+                std::vector<std::thread> workers;
+                workers.reserve(workerCount);
+                for (unsigned int w = 0; w < workerCount; ++w)
+                {
+                    workers.emplace_back(workerFn);
+                }
+
+                for (size_t consumed = 0; consumed < pending.size(); ++consumed)
+                {
+                    std::unique_lock<std::mutex> lock(queueMutex);
+                    itemAvailable.wait(lock, [&] { return !completedQueue.empty(); });
+                    CompletedItem item = std::move(completedQueue.front());
+                    completedQueue.pop_front();
+                    pendingBytes -= item.SizeInBytes;
+                    lock.unlock();
+                    spaceAvailable.notify_one();
+
+                    if (item.Image.has_value())
+                    {
+                        RHI::IRHITexture* rawPtr = nullptr;
+                        try
+                        {
+                            auto texture = m_Device.CreateTextureFromImage(*item.Image);
+                            rawPtr = texture.get();
+                            m_Model.Textures.push_back(std::move(texture));
+                        }
+                        catch (const std::exception& e)
+                        {
+                            Core::Logger::Error("ModelLoader", "テクスチャのGPU転送に失敗しました (" + item.Request->Path + "): " + e.what());
+                            if (item.Request->IsNormalMap)
+                            {
+                                rawPtr = GetFlatNormal();
+                            }
+                            else
+                            {
+                                auto placeholder = m_Device.CreateSolidColorTexture(255, 0, 255, 255);
+                                rawPtr = placeholder.get();
+                                m_Model.Textures.push_back(std::move(placeholder));
+                            }
+                        }
+                        m_Cache.emplace(item.Request->Path, rawPtr);
+                    }
+                    else if (item.Request->IsNormalMap)
+                    {
+                        Core::Logger::Error("ModelLoader", "法線マップの読み込みに失敗しました (" + item.Request->Path + "): " + item.ErrorMessage);
+                        m_Cache.emplace(item.Request->Path, GetFlatNormal());
+                    }
+                    else
+                    {
+                        Core::Logger::Error("ModelLoader", "テクスチャの読み込みに失敗しました (" + item.Request->Path + "): " + item.ErrorMessage);
+                        auto texture = m_Device.CreateSolidColorTexture(255, 0, 255, 255);
+                        RHI::IRHITexture* rawPtr = texture.get();
+                        m_Model.Textures.push_back(std::move(texture));
+                        m_Cache.emplace(item.Request->Path, rawPtr);
+                    }
+                }
+
+                for (auto& worker : workers)
+                {
+                    worker.join();
+                }
+            }
+
             RHI::IRHITexture* GetWhite()
             {
                 if (!m_White)
@@ -295,6 +469,12 @@ namespace Kurenai::Assets
             return true;
         }
 
+        // 2時点間の経過時間をミリ秒の整数文字列にする(ログ表示用)
+        std::string FormatMs(std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point end)
+        {
+            return std::to_string(static_cast<long long>(std::chrono::duration<double, std::milli>(end - start).count()));
+        }
+
         void WriteCacheString(std::ofstream& out, const std::string& s)
         {
             const uint32_t length = static_cast<uint32_t>(s.size());
@@ -353,11 +533,20 @@ namespace Kurenai::Assets
                 return false;
             }
 
-            std::ifstream in(GetCachePath(filePath), std::ios::binary);
+            // 既定のstreambufバッファ(通常数百バイト~数KB)のままだと、Bistro級(100MB超)の
+            // キャッシュを細切れのreadで読むことになりオーバーヘッドが無視できないため、
+            // openより前に大きめ(1MB)のバッファを設定しておく。ioBufferはinより先に構築し
+            // (=inより後に破棄され)、in使用中は常に有効な状態を保つ
+            std::vector<char> ioBuffer(1 << 20);
+            std::ifstream in;
+            in.rdbuf()->pubsetbuf(ioBuffer.data(), static_cast<std::streamsize>(ioBuffer.size()));
+            in.open(GetCachePath(filePath), std::ios::binary);
             if (!in.is_open())
             {
                 return false;
             }
+
+            const auto startTime = std::chrono::steady_clock::now();
 
             try
             {
@@ -392,61 +581,111 @@ namespace Kurenai::Assets
                 TextureLoader textureLoader(device, GetDirectory(filePath), model);
                 model.Meshes.reserve(header.MeshCount);
 
-                for (uint32_t i = 0; i < header.MeshCount; ++i)
+                // 1周目: メッシュデータ・テクスチャパス文字列をすべてメモリへ読み切る(GPUバッファ作成・
+                // テクスチャ読み込みはまだ行わない)。これにより、テクスチャパスが出揃った時点で
+                // Prefetch()にまとめて渡し、並列デコードしてからバッファ作成へ進める
+                struct CachedMeshRecord
+                {
+                    std::vector<Vertex> Vertices;
+                    std::vector<uint32_t> Indices;
+                    float MetallicFactor = 0.0f;
+                    float RoughnessFactor = 0.7f;
+                    std::string BaseColorPath;
+                    std::string NormalPath;
+                    std::string MetallicRoughnessPath;
+                };
+
+                std::vector<CachedMeshRecord> records(header.MeshCount);
+                for (CachedMeshRecord& record : records)
                 {
                     uint32_t vertexCount = 0;
                     in.read(reinterpret_cast<char*>(&vertexCount), sizeof(vertexCount));
-                    std::vector<Vertex> vertices(vertexCount);
+                    record.Vertices.resize(vertexCount);
                     if (vertexCount > 0)
                     {
-                        in.read(reinterpret_cast<char*>(vertices.data()), static_cast<std::streamsize>(vertexCount * sizeof(Vertex)));
+                        in.read(reinterpret_cast<char*>(record.Vertices.data()), static_cast<std::streamsize>(vertexCount * sizeof(Vertex)));
                     }
 
                     uint32_t indexCount = 0;
                     in.read(reinterpret_cast<char*>(&indexCount), sizeof(indexCount));
-                    std::vector<uint32_t> indices(indexCount);
+                    record.Indices.resize(indexCount);
                     if (indexCount > 0)
                     {
-                        in.read(reinterpret_cast<char*>(indices.data()), static_cast<std::streamsize>(indexCount * sizeof(uint32_t)));
+                        in.read(reinterpret_cast<char*>(record.Indices.data()), static_cast<std::streamsize>(indexCount * sizeof(uint32_t)));
                     }
 
-                    float metallicFactor = 0.0f;
-                    float roughnessFactor = 0.7f;
-                    in.read(reinterpret_cast<char*>(&metallicFactor), sizeof(metallicFactor));
-                    in.read(reinterpret_cast<char*>(&roughnessFactor), sizeof(roughnessFactor));
+                    in.read(reinterpret_cast<char*>(&record.MetallicFactor), sizeof(record.MetallicFactor));
+                    in.read(reinterpret_cast<char*>(&record.RoughnessFactor), sizeof(record.RoughnessFactor));
 
-                    const std::string baseColorPath = ReadCacheString(in);
-                    const std::string normalPath = ReadCacheString(in);
-                    const std::string metallicRoughnessPath = ReadCacheString(in);
+                    record.BaseColorPath = ReadCacheString(in);
+                    record.NormalPath = ReadCacheString(in);
+                    record.MetallicRoughnessPath = ReadCacheString(in);
+                }
 
+                const auto geometryReadTime = std::chrono::steady_clock::now();
+
+                std::vector<TextureLoader::PrefetchRequest> prefetchRequests;
+                prefetchRequests.reserve(records.size() * 3);
+                for (const CachedMeshRecord& record : records)
+                {
+                    if (!record.BaseColorPath.empty())
+                    {
+                        prefetchRequests.push_back({ record.BaseColorPath, true, false });
+                    }
+                    if (!record.NormalPath.empty())
+                    {
+                        prefetchRequests.push_back({ record.NormalPath, false, true });
+                    }
+                    if (!record.MetallicRoughnessPath.empty())
+                    {
+                        prefetchRequests.push_back({ record.MetallicRoughnessPath, false, false });
+                    }
+                }
+                textureLoader.Prefetch(prefetchRequests);
+
+                const auto textureLoadTime = std::chrono::steady_clock::now();
+
+                // 2周目: GPUバッファを作成し、テクスチャはPrefetch済みのキャッシュヒットで即座に解決する
+                for (CachedMeshRecord& record : records)
+                {
                     Mesh outMesh;
 
                     RHI::BufferDesc vertexBufferDesc;
                     vertexBufferDesc.Usage = RHI::BufferUsage::Vertex;
-                    vertexBufferDesc.SizeInBytes = static_cast<uint32_t>(vertices.size() * sizeof(Vertex));
+                    vertexBufferDesc.SizeInBytes = static_cast<uint32_t>(record.Vertices.size() * sizeof(Vertex));
                     vertexBufferDesc.StrideInBytes = sizeof(Vertex);
-                    vertexBufferDesc.InitialData = vertices.data();
+                    vertexBufferDesc.InitialData = record.Vertices.data();
                     outMesh.VertexBuffer = device.CreateBuffer(vertexBufferDesc);
 
                     RHI::BufferDesc indexBufferDesc;
                     indexBufferDesc.Usage = RHI::BufferUsage::Index;
-                    indexBufferDesc.SizeInBytes = static_cast<uint32_t>(indices.size() * sizeof(uint32_t));
+                    indexBufferDesc.SizeInBytes = static_cast<uint32_t>(record.Indices.size() * sizeof(uint32_t));
                     indexBufferDesc.StrideInBytes = sizeof(uint32_t);
-                    indexBufferDesc.InitialData = indices.data();
+                    indexBufferDesc.InitialData = record.Indices.data();
                     outMesh.IndexBuffer = device.CreateBuffer(indexBufferDesc);
-                    outMesh.IndexCount = static_cast<uint32_t>(indices.size());
+                    outMesh.IndexCount = static_cast<uint32_t>(record.Indices.size());
 
-                    outMesh.BaseColorTexture = baseColorPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(baseColorPath, true);
-                    outMesh.NormalTexture = normalPath.empty() ? textureLoader.GetFlatNormal() : textureLoader.LoadNormal(normalPath);
-                    outMesh.MetallicRoughnessTexture = metallicRoughnessPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(metallicRoughnessPath, false);
-                    outMesh.MetallicFactor = metallicFactor;
-                    outMesh.RoughnessFactor = roughnessFactor;
+                    outMesh.BaseColorTexture = record.BaseColorPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(record.BaseColorPath, true);
+                    outMesh.NormalTexture = record.NormalPath.empty() ? textureLoader.GetFlatNormal() : textureLoader.LoadNormal(record.NormalPath);
+                    outMesh.MetallicRoughnessTexture = record.MetallicRoughnessPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(record.MetallicRoughnessPath, false);
+                    outMesh.MetallicFactor = record.MetallicFactor;
+                    outMesh.RoughnessFactor = record.RoughnessFactor;
 
                     model.Meshes.push_back(std::move(outMesh));
                 }
 
                 SortMeshesByMaterial(model);
                 outModel = std::move(model);
+
+                const auto endTime = std::chrono::steady_clock::now();
+                Core::Logger::Info(
+                    "ModelLoader",
+                    "モデル読み込み完了(キャッシュ): " + WideToUtf8(filePath) +
+                    " (ジオメトリ " + FormatMs(startTime, geometryReadTime) + "ms" +
+                    " / テクスチャ " + FormatMs(geometryReadTime, textureLoadTime) + "ms" +
+                    " / 合計 " + FormatMs(startTime, endTime) + "ms" +
+                    ", テクスチャ要求 " + std::to_string(prefetchRequests.size()) + "件)");
+
                 return true;
             }
             catch (const std::exception& e)
@@ -465,6 +704,8 @@ namespace Kurenai::Assets
         {
             return cachedModel;
         }
+
+        const auto startTime = std::chrono::steady_clock::now();
 
         Assimp::Importer importer;
         // GenSmoothNormalsは対象アセットは全メッシュが法線を持つため実質ノーオップであり、
@@ -728,8 +969,66 @@ namespace Kurenai::Assets
             }
         }
 
+        const auto geometryTime = std::chrono::steady_clock::now();
+
         // マテリアルインデックスの昇順(assimpのマテリアル配列順)に処理することで、同じソースから
-        // 生成したキャッシュのメッシュ順が実行のたびに変わらないようにする
+        // 生成したキャッシュのメッシュ順が実行のたびに変わらないようにする。
+        // 1周目: テクスチャパスの解決だけを行い、Prefetch()にまとめて渡して並列デコードさせる
+        // (GPUバッファ作成やLoad/LoadNormal呼び出しはまだ行わない)
+        struct MaterialTexturePaths
+        {
+            std::string BaseColorPath;
+            std::string NormalPath;
+            std::string MetallicRoughnessPath;
+        };
+        std::unordered_map<unsigned int, MaterialTexturePaths> materialTexturePaths;
+        std::vector<TextureLoader::PrefetchRequest> prefetchRequests;
+
+        for (unsigned int materialIndex = 0; materialIndex < scene->mNumMaterials; ++materialIndex)
+        {
+            const auto accumIt = meshesByMaterial.find(materialIndex);
+            if (accumIt == meshesByMaterial.end() || accumIt->second.Indices.empty())
+            {
+                continue;
+            }
+
+            const aiMaterial* material = scene->mMaterials[materialIndex];
+            aiString texPath;
+            MaterialTexturePaths paths;
+
+            if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS ||
+                material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)
+            {
+                paths.BaseColorPath = texPath.C_Str();
+                prefetchRequests.push_back({ paths.BaseColorPath, true, false });
+            }
+
+            // OBJ形式は法線マップをaiTextureType_NORMALSではなくmap_bump(aiTextureType_HEIGHT)として
+            // 格納する慣習があるため、NORMALSが無い場合はHEIGHTにもフォールバックする
+            if (material->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS ||
+                material->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS)
+            {
+                paths.NormalPath = texPath.C_Str();
+                prefetchRequests.push_back({ paths.NormalPath, false, true });
+            }
+
+            // glTFのmetallicRoughnessテクスチャはG=ラフネス、B=メタリックを1枚に格納しており、
+            // assimpはこれをROUGHNESS/METALNESSの両方のテクスチャタイプとして同じ画像を指す
+            if (material->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == AI_SUCCESS ||
+                material->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS)
+            {
+                paths.MetallicRoughnessPath = texPath.C_Str();
+                prefetchRequests.push_back({ paths.MetallicRoughnessPath, false, false });
+            }
+
+            materialTexturePaths.emplace(materialIndex, std::move(paths));
+        }
+
+        textureLoader.Prefetch(prefetchRequests);
+
+        const auto textureTime = std::chrono::steady_clock::now();
+
+        // 2周目: GPUバッファを作成し、テクスチャはPrefetch済みのキャッシュヒットで即座に解決する
         for (unsigned int materialIndex = 0; materialIndex < scene->mNumMaterials; ++materialIndex)
         {
             const auto accumIt = meshesByMaterial.find(materialIndex);
@@ -739,6 +1038,7 @@ namespace Kurenai::Assets
             }
             const std::vector<Vertex>& vertices = accumIt->second.Vertices;
             const std::vector<uint32_t>& indices = accumIt->second.Indices;
+            const MaterialTexturePaths& paths = materialTexturePaths.at(materialIndex);
 
             Mesh outMesh;
 
@@ -758,47 +1058,10 @@ namespace Kurenai::Assets
             outMesh.IndexCount = static_cast<uint32_t>(indices.size());
 
             const aiMaterial* material = scene->mMaterials[materialIndex];
-            aiString texPath;
 
-            std::string baseColorPath;
-            if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)
-            {
-                baseColorPath = texPath.C_Str();
-                outMesh.BaseColorTexture = textureLoader.Load(baseColorPath, true);
-            }
-            else
-            {
-                outMesh.BaseColorTexture = textureLoader.GetWhite();
-            }
-
-            // OBJ形式は法線マップをaiTextureType_NORMALSではなくmap_bump(aiTextureType_HEIGHT)として
-            // 格納する慣習があるため、NORMALSが無い場合はHEIGHTにもフォールバックする
-            std::string normalPath;
-            if (material->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS)
-            {
-                normalPath = texPath.C_Str();
-                outMesh.NormalTexture = textureLoader.LoadNormal(normalPath);
-            }
-            else
-            {
-                outMesh.NormalTexture = textureLoader.GetFlatNormal();
-            }
-
-            // glTFのmetallicRoughnessテクスチャはG=ラフネス、B=メタリックを1枚に格納しており、
-            // assimpはこれをROUGHNESS/METALNESSの両方のテクスチャタイプとして同じ画像を指す
-            std::string metallicRoughnessPath;
-            if (material->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS)
-            {
-                metallicRoughnessPath = texPath.C_Str();
-                outMesh.MetallicRoughnessTexture = textureLoader.Load(metallicRoughnessPath, false);
-            }
-            else
-            {
-                outMesh.MetallicRoughnessTexture = textureLoader.GetWhite();
-            }
+            outMesh.BaseColorTexture = paths.BaseColorPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(paths.BaseColorPath, true);
+            outMesh.NormalTexture = paths.NormalPath.empty() ? textureLoader.GetFlatNormal() : textureLoader.LoadNormal(paths.NormalPath);
+            outMesh.MetallicRoughnessTexture = paths.MetallicRoughnessPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(paths.MetallicRoughnessPath, false);
 
             // FBXなどPBRメタリック/ラフネスの係数を持たない形式では既定値(非金属・やや粗め)のままになる
             material->Get(AI_MATKEY_METALLIC_FACTOR, outMesh.MetallicFactor);
@@ -822,9 +1085,9 @@ namespace Kurenai::Assets
                 cacheOut.write(reinterpret_cast<const char*>(indices.data()), static_cast<std::streamsize>(indices.size() * sizeof(uint32_t)));
                 cacheOut.write(reinterpret_cast<const char*>(&outMesh.MetallicFactor), sizeof(float));
                 cacheOut.write(reinterpret_cast<const char*>(&outMesh.RoughnessFactor), sizeof(float));
-                WriteCacheString(cacheOut, baseColorPath);
-                WriteCacheString(cacheOut, normalPath);
-                WriteCacheString(cacheOut, metallicRoughnessPath);
+                WriteCacheString(cacheOut, paths.BaseColorPath);
+                WriteCacheString(cacheOut, paths.NormalPath);
+                WriteCacheString(cacheOut, paths.MetallicRoughnessPath);
                 cacheWritable = static_cast<bool>(cacheOut);
             }
 
@@ -863,6 +1126,15 @@ namespace Kurenai::Assets
         // キャッシュファイルへはシーングラフ巡回順のまま書き出し済みのため、ソートは
         // メモリ上のモデルに対してのみ行う(キャッシュから読み込む側はTryLoadModelFromCache側で行う)
         SortMeshesByMaterial(model);
+
+        const auto endTime = std::chrono::steady_clock::now();
+        Core::Logger::Info(
+            "ModelLoader",
+            "モデル読み込み完了: " + WideToUtf8(filePath) +
+            " (ジオメトリ " + FormatMs(startTime, geometryTime) + "ms" +
+            " / テクスチャ " + FormatMs(geometryTime, textureTime) + "ms" +
+            " / 合計 " + FormatMs(startTime, endTime) + "ms" +
+            ", テクスチャ要求 " + std::to_string(prefetchRequests.size()) + "件)");
 
         return model;
     }

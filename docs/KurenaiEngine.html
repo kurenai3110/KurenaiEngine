@@ -528,6 +528,7 @@ std::unique_ptr&lt;IRHIShader&gt;    CreateShader(const ShaderDesc&amp; desc);
 std::unique_ptr&lt;IRHIPipelineState&gt; CreatePipelineState(const PipelineStateDesc&amp; desc);
 std::unique_ptr&lt;IRHIPipelineState&gt; CreateComputePipelineState(const ComputePipelineStateDesc&amp; desc);
 std::unique_ptr&lt;IRHITexture&gt;   CreateTextureFromFile(const std::wstring&amp; filePath, bool sRGB);
+std::unique_ptr&lt;IRHITexture&gt;   CreateTextureFromImage(const RHI::TextureImage&amp; image);
 std::unique_ptr&lt;IRHITexture&gt;   CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 std::unique_ptr&lt;IRHITexture&gt;   CreateTextureFromMemory(uint32_t width, uint32_t height, const void* pixelsRGBA8);
 std::unique_ptr&lt;IRHITexture&gt;   CreateRenderTexture(uint32_t width, uint32_t height, Format format);
@@ -543,6 +544,14 @@ png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベー�
 <code>CreateTextureFromMemory</code> はRGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)の
 ピクセルデータから直接テクスチャを作成する(実行時に生成したデータをアップロードする用途向け。
 <code>KurenaiEngine2D::DrawText</code>のフォントアトラス生成で使用)。
+</p>
+<p>
+<code>RHI::TextureImage::LoadFromFile(filePath, sRGB)</code>(<code>TextureImage.h</code>)は
+ファイルのデコードのみを行い、GPUデバイスを必要としない静的関数。<code>CreateTextureFromFile</code>は
+内部でこれを呼んでから<code>CreateTextureFromImage</code>でGPUリソース化しているだけであり、
+両者を分離しているのは、デコード(CPU処理)をワーカースレッドで並列に行い、GPUリソース作成
+(デバイスに紐づくため直列)だけを呼び出し元スレッドで行うため(4.6の<code>Assets::LoadModel</code>の
+並列プリフェッチが実例)。
 </p>
 
 <h3>4.3 <code>RHI::IRHICommandList</code></h3>
@@ -721,6 +730,41 @@ assimp経由でglTF/FBX等を読み込み、頂点/インデックスバッフ�
 (<code>Assets::Vertex</code>, 32バイト)。読み込むと同じ場所に
 <code>&lt;元のファイル名&gt;.kmodelcache</code> というバイナリキャッシュが自動生成され、
 2回目以降の読み込みが高速化される。
+</p>
+<h4>4.6.1 テクスチャキャッシュと並列プリフェッチ</h4>
+<p>
+PNG/JPG等の無圧縮テクスチャは、読み込むと同じ場所に
+<code>&lt;元のテクスチャファイル名&gt;.srgb.ktexcache</code> /
+<code>.linear.ktexcache</code>(ベースカラー等sRGBとして読むかで
+ファイル名を分ける。同じ画像を異なる色空間で参照するケースの取り違え防止)という、
+ミップマップ生成済み・BC7圧縮済みのDDSペイロードを保持するバイナリキャッシュが自動生成される
+(<code>RHI::TextureImage::LoadFromFile</code>が担当)。初回はWICデコード・ミップ生成・BC7圧縮が
+走るが、BC7圧縮はGPU(コンピュートシェーダー)で行うため初回でも十分高速(Sponza69枚で実測7秒程度)。
+2回目以降はこのキャッシュを読むだけになりほぼ瞬時に完了する。
+DDS/TGA(既に圧縮・ミップ済みである前提の配布形式)はこのキャッシュの対象外。
+</p>
+<p>
+BC7圧縮は<code>DirectXTex::Compress</code>のGPU版(<code>ID3D11Device</code>を渡すオーバーロード、
+コンピュートシェーダーで実装されたBCDirectCompute)を使う(<code>TextureImage.cpp</code>内の
+<code>CompressBC7</code>)。この用途専用に、エンジン本体のレンダリングデバイス(DX11/DX12どちらでも)
+とは独立した小さなD3D11デバイスを遅延生成して使い回す(<code>GetCompressionDevice</code>)。
+DX12バックエンド利用時でもこのデバイスだけは常にD3D11で用意する。CPU版<code>Compress</code>への
+フォールバックは持たない(ソフトウェアBC7圧縮は実用的な速度が出ないため)。GPU圧縮用デバイスの
+作成に失敗した環境(古いGPU/ドライバ等)や個々の圧縮呼び出し自体が失敗した場合は、
+<code>LoadFromFile</code>側の既存の「圧縮失敗時は非圧縮のまま使う」フォールバックへそのまま合流する
+(この場合その画像だけキャッシュは書き出されず、次回また圧縮を試みる)。
+</p>
+<p>
+<code>LoadModel</code>はモデル1つぶんのテクスチャ読み込みをまとめて並列化する
+(<code>ModelLoader.cpp</code>内の<code>TextureLoader::Prefetch</code>、論理コア数を上限8で
+クランプしたワーカースレッドを使う)。各ワーカーが行うWICデコード・ミップ生成は純粋なCPU作業のため
+コア数ぶん安全に並列化できる一方、GPU圧縮自体は共有のGPUデバイスを使うため
+<code>TextureImage.cpp</code>内のミューテックスで直列化される(BCDirectComputeはデバイスの
+イミディエイトコンテキストを直接使うため、複数スレッドから同時に呼べない)。この設計に至る前に
+「ワーカースレッド数×BC7圧縮内部の並列度」が掛け算されてしまう問題(CPU版<code>Compress</code>に
+<code>TEX_COMPRESS_PARALLEL</code>を指定してOpenMPで並列化しつつ、外側もワーカー並列化していたため
+論理コア数を大幅に超えるスレッドが競合しマシン全体が重くなった)を実機で確認しており、GPU圧縮への
+切り替えはこの問題の根本的な解決も兼ねている。
 </p>
 </section>
 

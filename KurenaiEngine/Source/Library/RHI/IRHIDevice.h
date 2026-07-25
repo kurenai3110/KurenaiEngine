@@ -15,6 +15,7 @@
 #include "IRHISwapChain.h"
 #include "IRHITexture.h"
 #include "RHIDesc.h"
+#include "TextureImage.h"
 
 namespace Kurenai::RHI
 {
@@ -30,6 +31,11 @@ namespace Kurenai::RHI
         // コンピュートシェーダー(ShaderStage::Computeで作成したIRHIShader)用のパイプラインステート
         virtual std::unique_ptr<IRHIPipelineState> CreateComputePipelineState(const ComputePipelineStateDesc& desc) = 0;
         virtual std::unique_ptr<IRHITexture> CreateTextureFromFile(const std::wstring& filePath, bool sRGB) = 0;
+        // デコード済みのTextureImageからGPUリソースを作成する。デコード(CPU処理、TextureImage::LoadFromFile)は
+        // GPUデバイスを必要としないためワーカースレッドで並列に行えるが、GPUリソース作成自体は
+        // デバイスに紐づく処理なので直列に行う必要がある。呼び出し側(ModelLoader::TextureLoader::Prefetch)は
+        // この2つを分離することで、大量のテクスチャを持つモデルの読み込みを並列化する
+        virtual std::unique_ptr<IRHITexture> CreateTextureFromImage(const TextureImage& image) = 0;
         virtual std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
         // RGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)のピクセルデータからテクスチャを
         // 作成する。実行時に生成したデータ(フォントアトラス等)をアップロードする用途向け

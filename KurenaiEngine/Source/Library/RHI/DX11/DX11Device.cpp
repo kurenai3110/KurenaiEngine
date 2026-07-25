@@ -18,6 +18,7 @@
 #include "DX11SwapChain.h"
 #include "DX11Texture.h"
 #include "DX11Util.h"
+#include "RHI/TextureImage.h"
 
 namespace Kurenai::RHI
 {
@@ -39,16 +40,6 @@ namespace Kurenai::RHI
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
             }
-        }
-
-        bool HasExtension(const std::wstring& path, const wchar_t* extension)
-        {
-            const size_t extLen = wcslen(extension);
-            if (path.size() < extLen)
-            {
-                return false;
-            }
-            return _wcsicmp(path.c_str() + (path.size() - extLen), extension) == 0;
         }
 
         UINT ToBindFlags(BufferUsage usage)
@@ -343,32 +334,16 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHITexture> DX11Device::CreateTextureFromFile(const std::wstring& filePath, bool sRGB)
     {
-        DirectX::TexMetadata metadata{};
-        DirectX::ScratchImage image;
+        return CreateTextureFromImage(TextureImage::LoadFromFile(filePath, sRGB));
+    }
 
-        HRESULT hr;
-        if (HasExtension(filePath, L".dds"))
-        {
-            hr = DirectX::LoadFromDDSFile(filePath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, image);
-        }
-        else if (HasExtension(filePath, L".tga"))
-        {
-            hr = DirectX::LoadFromTGAFile(filePath.c_str(), DirectX::TGA_FLAGS_NONE, &metadata, image);
-        }
-        else
-        {
-            hr = DirectX::LoadFromWICFile(filePath.c_str(), DirectX::WIC_FLAGS_FORCE_RGB, &metadata, image);
-        }
-        ThrowIfFailed(hr, "テクスチャの読み込みに失敗しました");
-
-        if (sRGB)
-        {
-            image.OverrideFormat(DirectX::MakeSRGB(metadata.format));
-        }
+    std::unique_ptr<IRHITexture> DX11Device::CreateTextureFromImage(const TextureImage& image)
+    {
+        const DirectX::ScratchImage& scratchImage = image.GetImage();
 
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
         ThrowIfFailed(
-            DirectX::CreateShaderResourceView(m_Device.Get(), image.GetImages(), image.GetImageCount(), image.GetMetadata(), &srv),
+            DirectX::CreateShaderResourceView(m_Device.Get(), scratchImage.GetImages(), scratchImage.GetImageCount(), image.GetMetadata(), &srv),
             "シェーダリソースビューの作成に失敗しました");
 
         return std::make_unique<DX11Texture>(srv);

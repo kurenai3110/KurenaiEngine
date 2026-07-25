@@ -21,6 +21,7 @@
 #include "DX12SwapChain.h"
 #include "DX12Texture.h"
 #include "DX12Util.h"
+#include "RHI/TextureImage.h"
 
 namespace Kurenai::RHI
 {
@@ -77,16 +78,6 @@ namespace Kurenai::RHI
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
             }
-        }
-
-        bool HasExtension(const std::wstring& path, const wchar_t* extension)
-        {
-            const size_t extLen = wcslen(extension);
-            if (path.size() < extLen)
-            {
-                return false;
-            }
-            return _wcsicmp(path.c_str() + (path.size() - extLen), extension) == 0;
         }
 
     }
@@ -711,7 +702,7 @@ namespace Kurenai::RHI
         return std::make_unique<DX12ComputePipelineState>(pso);
     }
 
-    std::unique_ptr<IRHITexture> DX12Device::CreateTextureFromImage(const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image)
+    std::unique_ptr<IRHITexture> DX12Device::CreateTextureResourceFromImage(const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image)
     {
         // 初期データのアップロードはm_CommandList(Renderスレッドが毎フレーム使うコマンドリスト)ではなく
         // m_UploadCommandList専用のコマンドリストで行う(詳細はm_UploadCommandListのコメント参照)。
@@ -774,30 +765,12 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHITexture> DX12Device::CreateTextureFromFile(const std::wstring& filePath, bool sRGB)
     {
-        DirectX::TexMetadata metadata{};
-        DirectX::ScratchImage image;
+        return CreateTextureFromImage(TextureImage::LoadFromFile(filePath, sRGB));
+    }
 
-        HRESULT hr;
-        if (HasExtension(filePath, L".dds"))
-        {
-            hr = DirectX::LoadFromDDSFile(filePath.c_str(), DirectX::DDS_FLAGS_NONE, &metadata, image);
-        }
-        else if (HasExtension(filePath, L".tga"))
-        {
-            hr = DirectX::LoadFromTGAFile(filePath.c_str(), DirectX::TGA_FLAGS_NONE, &metadata, image);
-        }
-        else
-        {
-            hr = DirectX::LoadFromWICFile(filePath.c_str(), DirectX::WIC_FLAGS_FORCE_RGB, &metadata, image);
-        }
-        ThrowIfFailed(hr, "テクスチャの読み込みに失敗しました");
-
-        if (sRGB)
-        {
-            image.OverrideFormat(DirectX::MakeSRGB(metadata.format));
-        }
-
-        return CreateTextureFromImage(image.GetMetadata(), image);
+    std::unique_ptr<IRHITexture> DX12Device::CreateTextureFromImage(const TextureImage& image)
+    {
+        return CreateTextureResourceFromImage(image.GetMetadata(), image.GetImage());
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
@@ -817,7 +790,7 @@ namespace Kurenai::RHI
         const uint8_t pixel[4] = { r, g, b, a };
         memcpy(image.GetImage(0, 0, 0)->pixels, pixel, sizeof(pixel));
 
-        return CreateTextureFromImage(metadata, image);
+        return CreateTextureResourceFromImage(metadata, image);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateTextureFromMemory(uint32_t width, uint32_t height, const void* pixelsRGBA8)
@@ -843,7 +816,7 @@ namespace Kurenai::RHI
             memcpy(image0->pixels + y * image0->rowPitch, src + static_cast<size_t>(y) * width * 4, static_cast<size_t>(width) * 4);
         }
 
-        return CreateTextureFromImage(metadata, image);
+        return CreateTextureResourceFromImage(metadata, image);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateRenderTexture(uint32_t width, uint32_t height, Format format)
