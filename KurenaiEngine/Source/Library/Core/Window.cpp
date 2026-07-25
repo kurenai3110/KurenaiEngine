@@ -57,6 +57,14 @@ namespace Kurenai::Core
             throw std::runtime_error("ウィンドウの作成に失敗しました (GetLastError: " + std::to_string(GetLastError()) + ")");
         }
 
+        // 自動操作テストのハーネス(外部プロセスからPostMessageで入力を注入する側)が起動前に
+        // 設定する想定の環境変数。通常起動では未設定のため、WM_MOUSELEAVEの抑制ロジックは
+        // 無効のままとなり実操作の挙動には一切影響しない
+        wchar_t automationFlag[8]{};
+        m_MouseLeaveSuppressionEnabled =
+            GetEnvironmentVariableW(L"KURENAI_INPUT_AUTOMATION", automationFlag, static_cast<DWORD>(sizeof(automationFlag) / sizeof(automationFlag[0]))) > 0
+            && automationFlag[0] == L'1';
+
         ShowWindow(m_Handle, SW_SHOW);
     }
 
@@ -220,12 +228,15 @@ namespace Kurenai::Core
             return 0;
 
         case WM_MOUSELEAVE:
-            // PostMessageによる自動操作(実カーソルはウィンドウ外にあることが多い)では、注入した
-            // WM_MOUSEMOVEの直後にTrackMouseEventが実カーソル位置に基づいてWM_MOUSELEAVEを生成して
-            // しまい、m_MouseInClientが真になった直後に偽へ戻ることを繰り返してホバー/クリック判定が
-            // 成立しなくなる(ForwardQueuedMessagesToImGuiのkMouseLeaveSuppressionと同種の問題)。
+            // m_MouseLeaveSuppressionEnabled(環境変数KURENAI_INPUT_AUTOMATION=1)が有効な場合のみ、
+            // PostMessageによる自動操作(実カーソルはウィンドウ外にあることが多い)で注入した
+            // WM_MOUSEMOVEの直後にTrackMouseEventが実カーソル位置に基づいてWM_MOUSELEAVEを生成し
+            // m_MouseInClientが真になった直後に偽へ戻ることを繰り返してしまう問題を抑制する
+            // (ForwardQueuedMessagesToImGuiのkMouseLeaveSuppressionと同種の問題)。
             // 直近kMouseLeaveSuppressionウィンドウ内にWM_MOUSEMOVEを処理していれば、このWM_MOUSELEAVEは
-            // 実カーソル基準の古い判定によるノイズとみなしてm_MouseInClientを戻さない
+            // 実カーソル基準の古い判定によるノイズとみなしてm_MouseInClientを戻さない。
+            // 通常起動時(環境変数未設定)はこのブロック自体を通らず、従来どおり即座にfalseへ戻す
+            if (m_MouseLeaveSuppressionEnabled)
             {
                 constexpr auto kMouseLeaveSuppression = std::chrono::milliseconds(100);
                 if ((std::chrono::steady_clock::now() - m_LastMouseMoveTime) < kMouseLeaveSuppression)
