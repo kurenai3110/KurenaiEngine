@@ -191,7 +191,7 @@ Sample3D.exe -dx12
   - White Surface Test(粗さ0〜1の球体列)
 - **Post Processing** — AO/間接光のON/OFFと手法(Technique: SSAO / SSIL (Visibility Bitmask))を切り替え。SSAOは半径(Radius)/強さ(Power)、SSILは半径(Radius)/厚み(Thickness)/強さ(Intensity)/AOのコントラスト(AO Power)/スライス数(Slices)/ステップ数(Steps)を調整可能。シャドウのON/OFFもここで切り替え。SSRのON/OFFと最大レイ距離(Max Distance)/ヒット判定の厚み(Thickness)/ラフネスカットオフ(Roughness Cutoff)もここで調整可能
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / Depth (Raw) / Direct Light / AO/GI - Indirect Light (RGB) / AO/GI - Indirect Light (RGB, Before Blur) / AO/GI - Occlusion (Alpha) / AO/GI - Occlusion (Alpha, Before Blur) / Shadow Map / SSR (Final + Reflections) / Hi-Z (Depth Mip Chain))。Direct Lightは直接光パスの結果(HDR)をトーンマッピングして表示。Depth (Raw)は深度テクスチャの生値(0〜1)を加工せずそのまま表示(reverse-zの生値確認用。近平面が小さいためほとんどの距離で値が0付近になり、無加工ではほぼ黒く見える)。AO/GIバッファはrgb(間接拡散光)とa(遮蔽率)を別々に確認でき、Before Blur付きの項目はブラー前の生バッファ(タイル状ノイズが乗った状態)を表示する。Finalと同じくSSR無効時はSceneColorがそのまま表示される。Hi-Zを選択するとミップレベルを指定するスライダーが表示され、Hi-Zミップチェーンの指定ミップの生値をグレースケール表示する(ミップが上がるほど解像度が半分ずつになりレターボックス表示も追従する)
-- **Lighting** — 太陽光の時刻(Time of Day, 0〜24時)をスライダーで指定。Auto Advanceを有効にすると時刻が自動で進行(速度をSpeedで調整)
+- **Lighting** — 太陽光の時刻(Time of Day, 0〜24時)をスライダーで指定。Auto Advanceを有効にすると時刻が自動で進行(速度をSpeedで調整)。Sun Azimuth(0〜360度)で太陽が昇ってくる水平方向(方位角)を調整可能
 - **Profiler** — FPS(指数移動平均)、CPUフレーム時間(Update+Render呼び出し時間)、GPUフレーム時間と各パス(Shadow/GBuffer/HiZ/DirectLight/AO/AOBlur/Lighting/SSR/Present)ごとのGPU実行時間をGPUタイムスタンプクエリで計測して表示。GPU側の計測はDX11/DX12とも数フレーム遅れの値が表示される(AO/AOBlurはAO/間接光が無効の間、SSRはSSRが無効の間は表示されない)
 
 ## サンプルプログラム

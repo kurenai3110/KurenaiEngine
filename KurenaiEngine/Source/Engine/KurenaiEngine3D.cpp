@@ -79,13 +79,15 @@ namespace Kurenai
             return t * t * (3.0f - 2.0f * t);
         }
 
-        SunLighting ComputeSunLighting(float timeOfDayHours)
+        SunLighting ComputeSunLighting(float timeOfDayHours, float sunAzimuthDegrees)
         {
             using namespace DirectX;
 
             // 日の出(東)側の水平方向。太陽はこの方向と天頂(真上)を通る鉛直面内で、
-            // 東→天頂(正午)→西→天底(真夜中)と一日一周する半円軌道を描く
-            constexpr XMFLOAT3 kSunriseHorizontal{ -0.6f, 0.0f, 0.8f };
+            // 東→天頂(正午)→西→天底(真夜中)と一日一周する半円軌道を描く。
+            // 方位角(sunAzimuthDegrees)はX軸を0度、Z軸(+方向)を90度としてImGuiで調整する
+            const float azimuthRadians = XMConvertToRadians(sunAzimuthDegrees);
+            const XMFLOAT3 kSunriseHorizontal{ std::cos(azimuthRadians), 0.0f, std::sin(azimuthRadians) };
 
             // 6時=0度(日の出/東)、12時=90度(天頂)、18時=180度(日の入り/西)、24時=270度(天底/真夜中)
             const float hourAngle = (timeOfDayHours / 24.0f) * XM_2PI - XM_PIDIV2;
@@ -877,6 +879,7 @@ namespace Kurenai
         {
             ImGui::SliderFloat("Speed", &m_TimeAdvanceSpeed, 0.1f, 10.0f, "%.1f h/s");
         }
+        ImGui::SliderFloat("Sun Azimuth", &m_SunAzimuthDegrees, 0.0f, 360.0f, "%.1f deg");
 
         ImGui::End();
     }
@@ -1170,7 +1173,7 @@ namespace Kurenai
         m_GPUProfiler->BeginFrame();
         m_CPUProfiler.BeginFrame();
 
-        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay);
+        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay, m_SunAzimuthDegrees);
         const DirectX::XMMATRIX lightViewProj = ComputeLightViewProj(sunLighting.Direction);
 
         FrameConstants constants;

@@ -227,6 +227,10 @@ namespace Kurenai
         bool m_TimeAutoAdvance = false;
         float m_TimeAdvanceSpeed = 1.0f; // 自動進行時、1秒あたりに進む時間(時)
 
+        // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
+        // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)
+        float m_SunAzimuthDegrees = 126.87f;
+
         std::unique_ptr<RHI::IRHISampler> m_Sampler;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_MaterialConstantBuffer;
