@@ -909,7 +909,7 @@ namespace Kurenai
     {
         const float nearZ = camera.GetNearZ();
         const float farZ = camera.GetFarZ();
-        const float lambda = 0.5f;
+        const float lambda = 0.75f;
 
         for (uint32_t i = 0; i < kCascadeCount; ++i)
         {
