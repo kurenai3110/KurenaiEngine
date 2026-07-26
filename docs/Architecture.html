@@ -217,8 +217,9 @@
 <section id="pipeline">
 <h2>1. 描画パイプライン</h2>
 <p>
-<code>KurenaiEngine3D</code>はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で描画し、
-ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。
+<code>KurenaiEngine3D</code>はDeferred Shading(G-Buffer: Albedo/Normal(オクタヘドラルエンコード)/
+Metallic-Roughness/Emissive + 深度)で描画し、ライティングパスでCook-Torrance(GGX)による
+PBR(メタリック/ラフネス)計算を行います。
 描画パイプラインは以下の8パス構成です。
 </p>
 <ol>
@@ -240,6 +241,24 @@ Presentパスでアスペクト比を保ったままウィンドウに収まる�
 直接光(太陽光のCook-Torrance PBR、シャドウ適用済み)は専用の直接光パスでHDR(R32G32B32A32_Float)のレンダーターゲットへ書き出し、
 最終合成パスとSSILパスの両方がそれをサンプルする構成になっています。これによりSSILの間接拡散光もシャドウ・PBRの結果と
 整合の取れた値を反射光源として使えます。
+</p>
+<p>
+G-Bufferの法線はオクタヘドラル図法でエンコードし、R16G16_Float(浮動小数点、2チャンネル)へ格納しています
+(<code>Shaders/NormalEncoding.hlsli</code>、Cigolle et al. "A Survey of Efficient Representations for
+Independent Unit Vectors" (2014) の手法)。従来のR8G8B8A8(XYZを0〜1へ再マップして4チャンネルへ格納)は
+チャンネルあたり8bitしかなく低ラフネスの鏡面ハイライトにバンディングが出ていたため、チャンネル数を
+2つに減らしつつビット深度を増やす形に変更しました。浮動小数点フォーマットのため[-1,1]の符号付き値を
+そのまま格納でき、UNORMのような0〜1への再マッピングも不要です。法線を読む全パス(直接光・SSAO・SSIL・SSR)と
+Presentパスのデバッグ表示(Render Targets - Normal)がこの共通ヘッダのエンコード/デコード関数を使います。
+</p>
+<p>
+G-Bufferにはエミッシブ(自発光)専用のレンダーターゲットも持たせています。マテリアルのエミッシブ
+テクスチャ・係数(<code>AI_MATKEY_COLOR_EMISSIVE</code>)をジオメトリパスでそのまま書き込み、
+最終合成パスでAO/シャドウの影響を受けずに常に加算します。またglTFの<code>alphaMode</code>が
+<code>MASK</code>のマテリアルのみ、<code>alphaCutoff</code>(既定0.5)でベースカラーのアルファを
+<code>clip()</code>するアルファカットアウトに対応しています(FBX/OBJ等、glTFのalphaMode拡張情報を
+持たない形式では常に不透明として扱います)。RHIのデフォルトサンプラーも異方性16xフィルタリングを
+既定にしており、浅い角度で見る床・路面などのボケを抑えています(<code>RHI::SamplerDesc</code>)。
 </p>
 </section>
 

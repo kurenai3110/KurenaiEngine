@@ -95,6 +95,8 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
+        // 自発光(エミッシブ)。AO/シャドウの影響を受けずライティングパスで常に加算される
+        std::unique_ptr<RHI::IRHITexture> m_GBufferEmissive;
         std::unique_ptr<RHI::IRHITexture> m_GBufferDepth;
 
         // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
@@ -198,6 +200,7 @@ namespace Kurenai
             Albedo,
             Normal,
             Material,
+            Emissive,
             Depth,
             DepthRaw,           // 深度テクスチャの生値(0〜1)を加工せずそのままグレースケール表示
             DirectLight,        // DirectLightingパスの結果(HDR、シャドウ適用済みの直接光)をトーンマッピングして表示

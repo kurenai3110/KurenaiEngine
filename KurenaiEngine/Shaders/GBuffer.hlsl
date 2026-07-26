@@ -1,3 +1,5 @@
+#include "NormalEncoding.hlsli"
+
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
@@ -12,12 +14,18 @@ cbuffer MaterialConstants : register(b1)
 {
     float MetallicFactor;
     float RoughnessFactor;
-    float2 MaterialPadding;
+    // 0以下ならアルファカットアウト無効(常に不透明として扱う)。glTFのalphaMode=MASKの
+    // マテリアルのみalphaCutoff(既定0.5)が設定される
+    float AlphaCutoff;
+    float MaterialPadding0;
+    float3 EmissiveFactor;
+    float MaterialPadding1;
 };
 
 Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
+Texture2D EmissiveTexture : register(t3);
 SamplerState DefaultSampler : register(s0);
 
 struct VSInput
@@ -40,8 +48,9 @@ struct PSInput
 struct PSOutput
 {
     float4 Albedo : SV_TARGET0;
-    float4 Normal : SV_TARGET1;
+    float2 Normal : SV_TARGET1;
     float4 Material : SV_TARGET2;
+    float4 Emissive : SV_TARGET3;
 };
 
 PSInput VSMain(VSInput input)
@@ -70,6 +79,10 @@ PSOutput PSMain(PSInput input)
 {
     float4 baseColorSample = BaseColorTexture.Sample(DefaultSampler, input.UV);
 
+    // AlphaCutoff<=0(アルファカットアウト無効)の場合、alpha(0〜1)は常にAlphaCutoff以上になるため
+    // clipは発火しない。AlphaCutoff>0の場合のみ、alphaがそれを下回るピクセルを破棄する
+    clip(baseColorSample.a - AlphaCutoff);
+
     float3 geometricNormal = normalize(input.Normal);
 
     // BC5(2チャンネル、X/Yのみ)圧縮された法線マップはB/Aチャンネルにデータを持たず、
@@ -86,9 +99,12 @@ PSOutput PSMain(PSInput input)
     float metallic = saturate(MetallicFactor * metallicRoughnessSample.b);
     float roughness = clamp(RoughnessFactor * metallicRoughnessSample.g, 0.045f, 1.0f);
 
+    float3 emissive = EmissiveTexture.Sample(DefaultSampler, input.UV).rgb * EmissiveFactor;
+
     PSOutput output;
     output.Albedo = float4(baseColorSample.rgb, 1.0f);
-    output.Normal = float4(N * 0.5f + 0.5f, 0.0f);
+    output.Normal = OctEncode(N);
     output.Material = float4(metallic, roughness, 0.0f, 0.0f);
+    output.Emissive = float4(emissive, 1.0f);
     return output;
 }

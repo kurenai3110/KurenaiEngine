@@ -3,6 +3,8 @@
 // PSMainBlur: PSMainの出力(タイル状ノイズを含む)を均すための4x4ボックスブラー(Texture0=AO Raw)。
 // SSAOとSSIL(Visibility Bitmask)は同じRGBAフォーマット(rgb=間接拡散光, a=遮蔽率)を出力するため、
 // このブラーはSSIL_VisibilityBitmask.hlslのブラーパスとしても共用する
+#include "NormalEncoding.hlsli"
+
 static const float PI = 3.14159265359f;
 static const int kSSAOKernelSize = 16;
 
@@ -72,7 +74,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 normalWorld = normalize(Texture0.Sample(DefaultSampler, input.UV).xyz * 2.0f - 1.0f);
+    float3 normalWorld = OctDecode(Texture0.Sample(DefaultSampler, input.UV).xy);
 
     float3 viewPos = mul(float4(worldPos, 1.0f), View).xyz;
     float3 viewNormal = normalize(mul(normalWorld, (float3x3)View));

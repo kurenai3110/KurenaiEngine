@@ -9,6 +9,8 @@
 // このエンジンにはレンダーグラフ/コンピュートシェーダー/Hi-Zミップチェーン/PSOのブレンドステートが
 // 未実装のため、既存のSSAO/SSILと同じフルスクリーン三角形+ピクセルシェーダーのパターンで実装し、
 // 反射色の合成もブレンドステートではなくこのシェーダー内で直接加算する。
+#include "NormalEncoding.hlsli"
+
 static const int kSSRStepCount = 32;
 static const int kSSRBinaryStepCount = 6;
 static const float kSSREdgeFadeDistance = 0.1f;
@@ -127,7 +129,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 N = normalize(NormalTexture.Sample(DefaultSampler, input.UV).xyz * 2.0f - 1.0f);
+    float3 N = OctDecode(NormalTexture.Sample(DefaultSampler, input.UV).xy);
     float3 V = normalize(CameraPosition.xyz - worldPos);
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
     float NdotV = saturate(dot(N, V));
