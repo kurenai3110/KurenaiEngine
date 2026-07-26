@@ -22,8 +22,9 @@
 /Assets/
 /ThirdParty/SourceModels/
 
-# graphify生成物(ナレッジグラフ出力・キャッシュ)
+# graphify生成物(ナレッジグラフ出力・キャッシュ)・ローカル設定
 /graphify-out/
+/.graphifyignore
 
 # Claude Code用の設定・資料(リポジトリには含めない)
 /CLAUDE.md
