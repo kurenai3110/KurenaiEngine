@@ -74,6 +74,10 @@ namespace Kurenai::RHI
                 return DXGI_FORMAT_R8G8B8A8_UNORM;
             case Format::R32_Float:
                 return DXGI_FORMAT_R32_FLOAT;
+            case Format::R16G16_Float:
+                return DXGI_FORMAT_R16G16_FLOAT;
+            case Format::R16G16B16A16_Float:
+                return DXGI_FORMAT_R16G16B16A16_FLOAT;
             case Format::R32G32B32A32_Float:
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -1009,13 +1013,15 @@ namespace Kurenai::RHI
         return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, dsvIndex);
     }
 
-    std::unique_ptr<IRHISampler> DX12Device::CreateDefaultSampler()
+    std::unique_ptr<IRHISampler> DX12Device::CreateDefaultSampler(const SamplerDesc& desc)
     {
         D3D12_SAMPLER_DESC samplerDesc{};
-        samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplerDesc.Filter = desc.Filter == SamplerFilter::Anisotropic ? D3D12_FILTER_ANISOTROPIC : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        // MaxAnisotropyはFilterがANISOTROPICでない場合ハードウェア側で無視されるため、常に設定してよい
+        samplerDesc.MaxAnisotropy = desc.MaxAnisotropy;
         samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
         samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
 

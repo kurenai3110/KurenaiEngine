@@ -148,11 +148,19 @@ namespace Kurenai
             return result;
         }
 
+        // GBuffer.hlsl側のcbuffer MaterialConstantsと一致させる必要がある。float3(EmissiveFactor)は
+        // HLSLのcbufferパッキング規則により16バイト境界をまたげないため、直前にPaddingを1つ挟んで
+        // オフセット16から始まるようにしている(挟まなくてもHLSLコンパイラが自動的に同じ位置へ
+        // パディングするが、C++側のレイアウトを明示的に一致させるためここでも挟む)
         struct alignas(16) MaterialConstants
         {
             float MetallicFactor;
             float RoughnessFactor;
-            float Padding[2];
+            // 0以下ならアルファカットアウト無効
+            float AlphaCutoff;
+            float Padding0;
+            float EmissiveFactor[3];
+            float Padding1;
         };
 
         // Present.hlsl側のModeと一致させる必要がある
@@ -414,7 +422,13 @@ namespace Kurenai
         gbufferPipelineDesc.VertexShader = m_GBufferVertexShader.get();
         gbufferPipelineDesc.PixelShader = m_GBufferPixelShader.get();
         gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        gbufferPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm, RHI::Format::R8G8B8A8_UNorm, RHI::Format::R8G8B8A8_UNorm };
+        gbufferPipelineDesc.RenderTargetFormats =
+        {
+            RHI::Format::R8G8B8A8_UNorm, // Albedo
+            RHI::Format::R16G16_Float,   // Normal(オクタヘドラルエンコード)
+            RHI::Format::R8G8B8A8_UNorm, // Material(R=Metallic, G=Roughness)
+            RHI::Format::R8G8B8A8_UNorm, // Emissive
+        };
         gbufferPipelineDesc.HasDepthStencil = true;
         gbufferPipelineDesc.ReverseZ = true;
         m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
@@ -522,7 +536,7 @@ namespace Kurenai
         lightingPipelineDesc.VertexShader = m_LightingVertexShader.get();
         lightingPipelineDesc.PixelShader = m_LightingPixelShader.get();
         lightingPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        lightingPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        lightingPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
         m_LightingPipelineState = m_Device->CreatePipelineState(lightingPipelineDesc);
 
         // Hi-Zミップチェーン構築パス(コンピュートシェーダー)。CSCopyでG-Buffer深度をミップ0へコピーし、
@@ -563,13 +577,33 @@ namespace Kurenai
         ssrPipelineDesc.VertexShader = m_SSRVertexShader.get();
         ssrPipelineDesc.PixelShader = m_SSRPixelShader.get();
         ssrPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        ssrPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        ssrPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
         m_SSRPipelineState = m_Device->CreatePipelineState(ssrPipelineDesc);
 
         RHI::BufferDesc ssrConstantBufferDesc;
         ssrConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         ssrConstantBufferDesc.SizeInBytes = sizeof(SSRConstants);
         m_SSRConstantBuffer = m_Device->CreateBuffer(ssrConstantBufferDesc);
+
+        // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
+        RHI::ShaderDesc tonemapVsDesc;
+        tonemapVsDesc.Stage = RHI::ShaderStage::Vertex;
+        tonemapVsDesc.FilePath = shaderDirectory + L"Tonemap.hlsl";
+        tonemapVsDesc.EntryPoint = "VSMain";
+        m_TonemapVertexShader = m_Device->CreateShader(tonemapVsDesc);
+
+        RHI::ShaderDesc tonemapPsDesc;
+        tonemapPsDesc.Stage = RHI::ShaderStage::Pixel;
+        tonemapPsDesc.FilePath = shaderDirectory + L"Tonemap.hlsl";
+        tonemapPsDesc.EntryPoint = "PSMain";
+        m_TonemapPixelShader = m_Device->CreateShader(tonemapPsDesc);
+
+        RHI::PipelineStateDesc tonemapPipelineDesc;
+        tonemapPipelineDesc.VertexShader = m_TonemapVertexShader.get();
+        tonemapPipelineDesc.PixelShader = m_TonemapPixelShader.get();
+        tonemapPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        tonemapPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        m_TonemapPipelineState = m_Device->CreatePipelineState(tonemapPipelineDesc);
 
         // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
         RHI::ShaderDesc presentVsDesc;
@@ -666,8 +700,9 @@ namespace Kurenai
         }
 
         m_GBufferAlbedo = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16_Float);
         m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_GBufferEmissive = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         // Reverse-Zのため近平面側(NDC z=1.0)ではなく遠平面側(NDC z=0.0)にクリアする
         m_GBufferDepth = m_Device->CreateDepthTexture(width, height, 0.0f);
         m_DirectLightTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R32G32B32A32_Float);
@@ -675,8 +710,9 @@ namespace Kurenai
         m_SSAOTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SSILRawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SSILTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+        m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+        m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
 
         m_HiZMipLevels = ComputeMipLevelCount(width, height);
         m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
@@ -931,6 +967,26 @@ namespace Kurenai
 
         ImGui::Checkbox("Enable VSync", &m_VSyncEnabled);
 
+        ImGui::Checkbox("Fixed FPS", &m_FixedFPSEnabled);
+        if (m_FixedFPSEnabled)
+        {
+            static const char* kTargetFPSNames[] = { "30", "60", "120" };
+            static const float kTargetFPSValues[] = { 30.0f, 60.0f, 120.0f };
+            int targetFPSIndex = 1; // 見つからない場合は60fps相当の位置にしておく
+            for (int i = 0; i < IM_ARRAYSIZE(kTargetFPSValues); ++i)
+            {
+                if (kTargetFPSValues[i] == m_TargetFPS)
+                {
+                    targetFPSIndex = i;
+                    break;
+                }
+            }
+            if (ImGui::Combo("Target FPS", &targetFPSIndex, kTargetFPSNames, IM_ARRAYSIZE(kTargetFPSNames)))
+            {
+                m_TargetFPS = kTargetFPSValues[targetFPSIndex];
+            }
+        }
+
         ImGui::Checkbox("Enable SSR", &m_SSREnabled);
         if (m_SSREnabled)
         {
@@ -954,6 +1010,7 @@ namespace Kurenai
             "Albedo",
             "Normal",
             "Material (R=Metallic, G=Roughness)",
+            "Emissive",
             "Depth",
             "Depth (Raw)",
             "Direct Light",
@@ -1263,6 +1320,20 @@ namespace Kurenai
             const float rawCPUTimeMs = std::chrono::duration<float, std::milli>(cpuEnd - cpuStart).count();
             m_CPUFrameTimeMs = std::max(0.0f, rawCPUTimeMs - m_Device->GetLastFrameGPUWaitTimeMs());
 
+            // 固定FPSモード: このフレームの処理(Time of Day更新+Render+Present)が目標フレーム時間
+            // より短く終わった場合、余った時間だけ待機して間隔を揃える。CPU/GPU計測(上記)の後に
+            // 行うことで、この待機時間自体がプロファイラの計測値に混ざらないようにしている
+            if (m_FixedFPSEnabled && m_TargetFPS > 0.0f)
+            {
+                const auto targetFrameDuration = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(1.0 / m_TargetFPS));
+                const auto frameDeadline = now + targetFrameDuration;
+                if (std::chrono::steady_clock::now() < frameDeadline)
+                {
+                    std::this_thread::sleep_until(frameDeadline);
+                }
+            }
+
             // FPSは指数移動平均で平滑化する(生の1/deltaTimeだとフレームごとの揺れが大きく読み取りにくいため)
             if (renderDeltaTime > 0.0f)
             {
@@ -1478,7 +1549,7 @@ namespace Kurenai
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "GBuffer",
-            .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get() },
+            .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferEmissive.get() },
             .DepthTarget = m_GBufferDepth.get(),
             .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
             {
@@ -1496,6 +1567,10 @@ namespace Kurenai
                     MaterialConstants materialConstants{};
                     materialConstants.MetallicFactor = mesh.MetallicFactor;
                     materialConstants.RoughnessFactor = mesh.RoughnessFactor;
+                    materialConstants.AlphaCutoff = mesh.AlphaCutoff;
+                    materialConstants.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+                    materialConstants.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+                    materialConstants.EmissiveFactor[2] = mesh.EmissiveFactor[2];
                     cmd->UpdateBuffer(m_MaterialConstantBuffer.get(), &materialConstants, sizeof(materialConstants));
                     cmd->SetConstantBuffer(1, m_MaterialConstantBuffer.get());
 
@@ -1504,6 +1579,7 @@ namespace Kurenai
                     cmd->SetTexture(0, mesh.BaseColorTexture);
                     cmd->SetTexture(1, mesh.NormalTexture);
                     cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
+                    cmd->SetTexture(3, mesh.EmissiveTexture);
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                 }
             },
@@ -1708,7 +1784,7 @@ namespace Kurenai
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Lighting",
-            .Reads = { m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_SkyboxTexture.get(), activeAOTexture },
+            .Reads = { m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_SkyboxTexture.get(), activeAOTexture, m_GBufferEmissive.get() },
             .RenderTargets = { m_SceneColor.get() },
             .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
             {
@@ -1726,6 +1802,7 @@ namespace Kurenai
                 cmd->SetTexture(3, m_GBufferDepth.get());
                 cmd->SetTexture(4, m_SkyboxTexture.get());
                 cmd->SetTexture(5, activeAOTexture);
+                cmd->SetTexture(6, m_GBufferEmissive.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -1760,26 +1837,48 @@ namespace Kurenai
             });
         }
 
+        // --- Tonemapパス: HDRのSceneColor(SSR有効時はSSR適用後)をLDRへ変換する。
+        //     SSR等のHDR演算がすべて完了した後、Present直前の独立したステージとして常に実行する ---
+        RHI::IRHITexture* hdrSceneColor = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "Tonemap",
+            .Reads = { hdrSceneColor },
+            .RenderTargets = { m_TonemapTexture.get() },
+            .Execute = [this, &gbufferViewport, hdrSceneColor](RHI::IRHICommandList* cmd)
+            {
+                cmd->SetViewport(gbufferViewport);
+                cmd->SetPipelineState(m_TonemapPipelineState.get());
+                cmd->SetSampler(0, m_Sampler.get());
+                cmd->SetTexture(0, hdrSceneColor);
+                cmd->Draw(3, 0);
+            },
+        });
+
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
         // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
         // 深度バッファ(GBuffer深度・シャドウマップ)はPresent.hlsl側でグレースケール化するためMode=1を渡す
-        RHI::IRHITexture* presentSourceTexture = m_SceneColor.get();
+        RHI::IRHITexture* presentSourceTexture = m_TonemapTexture.get();
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = m_RenderWidth;
         uint32_t presentSourceHeight = m_RenderHeight;
         switch (m_DebugView)
         {
         case DebugView::Final:
-            presentSourceTexture = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
+            // Tonemapパスが既にSSR有効/無効を考慮したHDRソースをLDR変換済みのため、そのまま使う
+            presentSourceTexture = m_TonemapTexture.get();
             break;
         case DebugView::Albedo:
             presentSourceTexture = m_GBufferAlbedo.get();
             break;
         case DebugView::Normal:
             presentSourceTexture = m_GBufferNormal.get();
+            presentMode = 7; // オクタヘドラルエンコードをデコードして[0,1]へ再マップして表示
             break;
         case DebugView::Material:
             presentSourceTexture = m_GBufferMaterial.get();
+            break;
+        case DebugView::Emissive:
+            presentSourceTexture = m_GBufferEmissive.get();
             break;
         case DebugView::Depth:
             presentSourceTexture = m_GBufferDepth.get();
@@ -1816,8 +1915,9 @@ namespace Kurenai
             presentSourceHeight = kShadowMapSize;
             break;
         case DebugView::SSR:
-            // SSR無効時はSSRパスをスキップしているため、代わりにSceneColorをそのまま表示する
-            presentSourceTexture = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
+            // SSR無効時はSSRパスをスキップしているため、Tonemapパスの入力もSceneColorになり
+            // 結果的にFinalと同一表示になる
+            presentSourceTexture = m_TonemapTexture.get();
             break;
         case DebugView::HiZ:
             presentSourceTexture = m_HiZTexture.get();

@@ -8,10 +8,10 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**
 こちらを直接利用できます。
 
 `KurenaiEngine3D`はassimp経由でglTF・FBXモデルの読み込み・描画に対応した、Deferred Shading・
-シャドウ・SSAO/SSIL・SSR・複数ライト(ポイント/スポット、カンデラ/ルクス単位)を備えた完結型
-3Dレンダラーです。`KurenaiEngine2D`はスプライト・図形・テキスト描画を提供する軽量な2D APIです。
-内部の描画パイプラインや実装判断については[実装者向けドキュメント](docs/Architecture.html)を
-参照してください。
+HDRレンダリング・シャドウ・SSAO/SSIL・SSR・複数ライト(ポイント/スポット、カンデラ/ルクス単位)を
+備えた完結型3Dレンダラーです。`KurenaiEngine2D`はスプライト・図形・テキスト描画を提供する軽量な
+2D APIです。内部の描画パイプラインや実装判断については
+[実装者向けドキュメント](docs/Architecture.html)を参照してください。
 
 ## ドキュメント
 
@@ -138,7 +138,7 @@ Sample3D.exe -dx12
   - Bistro (McGuire) - Exterior / Interior
   - White Surface Test(粗さ0〜1の球体列)
   - Light Test(ポイント/スポット/平行光の検証用シーン)
-- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・SSRのON/OFFと各パラメータもここで調整できます
+- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・SSRのON/OFFと各パラメータもここで調整できます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth 等、各パス中間結果のデバッグ表示)
 - **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)・
   EV100(実在の写真露出値。太陽/環境光/ポイント・スポットライトすべてに一様にかかるシーン全体の

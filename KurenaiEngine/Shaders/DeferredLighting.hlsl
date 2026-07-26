@@ -1,7 +1,9 @@
 // 最終合成パス。DirectLightingパスで計算済みの直接光(拡散+鏡面反射、シャドウ適用済み)を
 // サンプルし、環境光(時刻に応じて変化、AO/SSILの遮蔽率を適用)・間接拡散光(SSIL使用時)を
-// 加算してトーンマッピングする。PBRのライティング計算自体はDirectLighting.hlsl側で行うため、
-// このパスはバッファの合成のみを行う。
+// 加算する。PBRのライティング計算自体はDirectLighting.hlsl側で行うため、このパスはバッファの
+// 合成のみを行う。出力はHDR(SceneColor、1.0を超える輝度を保持)のままで、トーンマッピングは
+// 行わない。SSRパスがこのHDR値を反射元として参照するため、ここでLDRへ落とすとSSRの反射色が
+// 1.0を超えられずエネルギー保存が破れる。トーンマッピングはPresent直前のTonemap.hlslで行う
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
@@ -23,6 +25,8 @@ Texture2D DepthTexture : register(t3);
 TextureCube SkyboxTexture : register(t4);
 // SSAO/SSIL(Visibility Bitmask)共通のAO/GIバッファ。rgb=間接拡散光(加算)、a=遮蔽率(乗算)
 Texture2D AOTexture : register(t5);
+// G-Bufferのエミッシブ(自発光)バッファ。AO/シャドウの影響を受けず常に加算する
+Texture2D EmissiveTexture : register(t6);
 SamplerState DefaultSampler : register(s0);
 
 struct PSInput
@@ -62,8 +66,6 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 夜は空を暗い紺色へ落とし込む(スカイボックス自体は昼のテクスチャ固定のため)
         const float3 kNightSkyColor = float3(0.01f, 0.012f, 0.02f);
         skyColor = lerp(kNightSkyColor, skyColor, AmbientColor.a);
-        skyColor = skyColor / (skyColor + 1.0f);
-        skyColor = pow(skyColor, 1.0f / 2.2f);
         return float4(skyColor, 1.0f);
     }
 
@@ -75,12 +77,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     float ao = aoSample.a;
     float3 indirectLight = aoSample.rgb; // SSIL(Visibility Bitmask)使用時のみ非ゼロ。周囲のサーフェスからの間接拡散光
     float3 directLight = DirectLightTexture.Sample(DefaultSampler, input.UV).rgb; // DirectLighting.hlslで計算済み(シャドウ適用済み)
+    float3 emissive = EmissiveTexture.Sample(DefaultSampler, input.UV).rgb;
 
-    float3 color = diffuseColor * (AmbientColor.rgb * ao + indirectLight) + directLight;
-
-    // トーンマッピング(Reinhard)とガンマ補正
-    color = color / (color + 1.0f);
-    color = pow(color, 1.0f / 2.2f);
+    // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する
+    float3 color = diffuseColor * (AmbientColor.rgb * ao + indirectLight) + directLight + emissive;
 
     return float4(color, 1.0f);
 }

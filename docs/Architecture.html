@@ -218,9 +218,10 @@
 <section id="pipeline">
 <h2>1. 描画パイプライン</h2>
 <p>
-<code>KurenaiEngine3D</code>はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で描画し、
-ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。
-描画パイプラインは以下の8パス構成です。
+<code>KurenaiEngine3D</code>はDeferred Shading(G-Buffer: Albedo/Normal(オクタヘドラルエンコード)/
+Metallic-Roughness/Emissive + 深度)で描画し、ライティングパスでCook-Torrance(GGX)による
+PBR(メタリック/ラフネス)計算を行います。
+描画パイプラインは以下の9パス構成です。
 </p>
 <ol>
 <li>シャドウパス — サンライト視点で深度のみ描画</li>
@@ -230,8 +231,9 @@
 続けてポイント/スポットライトのリスト(構造化バッファ)をループして影なしで加算する(11章参照)。
 パス数はライトを追加しても8のまま変わらない</li>
 <li>AO/GIパス — 選択中の手法(SSAO/SSIL)でNormal/Depth(SSILの場合はAlbedo・直接光バッファも読む)からAO・間接拡散光を計算しブラー</li>
-<li>最終合成パス — Albedo・直接光・AO/GI・スカイボックスを合成しトーンマッピングしてSceneColorへ出力</li>
-<li>SSRパス — SceneColor・G-Bufferから鏡面反射を計算し加算</li>
+<li>最終合成パス — Albedo・直接光・AO/GI・スカイボックスを合成し、HDRのままSceneColorへ出力(トーンマッピングは行わない)</li>
+<li>SSRパス — SceneColor・G-Bufferから鏡面反射をHDRのまま計算し加算</li>
+<li>Tonemapパス — HDRのSceneColor(SSR有効時はSSR適用後)をReinhardトーンマッピング+ガンマ補正でLDRへ変換</li>
 <li>Presentパス — 選択中のデバッグビューをバックバッファへ表示</li>
 </ol>
 <p>
@@ -243,6 +245,34 @@ Presentパスでアスペクト比を保ったままウィンドウに収まる�
 直接光(太陽光のCook-Torrance PBR、シャドウ適用済み)は専用の直接光パスでHDR(R32G32B32A32_Float)のレンダーターゲットへ書き出し、
 最終合成パスとSSILパスの両方がそれをサンプルする構成になっています。これによりSSILの間接拡散光もシャドウ・PBRの結果と
 整合の取れた値を反射光源として使えます。
+</p>
+<p>
+G-Bufferの法線はオクタヘドラル図法でエンコードし、R16G16_Float(浮動小数点、2チャンネル)へ格納しています
+(<code>Shaders/NormalEncoding.hlsli</code>、Cigolle et al. "A Survey of Efficient Representations for
+Independent Unit Vectors" (2014) の手法)。従来のR8G8B8A8(XYZを0〜1へ再マップして4チャンネルへ格納)は
+チャンネルあたり8bitしかなく低ラフネスの鏡面ハイライトにバンディングが出ていたため、チャンネル数を
+2つに減らしつつビット深度を増やす形に変更しました。浮動小数点フォーマットのため[-1,1]の符号付き値を
+そのまま格納でき、UNORMのような0〜1への再マッピングも不要です。法線を読む全パス(直接光・SSAO・SSIL・SSR)と
+Presentパスのデバッグ表示(Render Targets - Normal)がこの共通ヘッダのエンコード/デコード関数を使います。
+</p>
+<p>
+G-Bufferにはエミッシブ(自発光)専用のレンダーターゲットも持たせています。マテリアルのエミッシブ
+テクスチャ・係数(<code>AI_MATKEY_COLOR_EMISSIVE</code>)をジオメトリパスでそのまま書き込み、
+最終合成パスでAO/シャドウの影響を受けずに常に加算します。またglTFの<code>alphaMode</code>が
+<code>MASK</code>のマテリアルのみ、<code>alphaCutoff</code>(既定0.5)でベースカラーのアルファを
+<code>clip()</code>するアルファカットアウトに対応しています(FBX/OBJ等、glTFのalphaMode拡張情報を
+持たない形式では常に不透明として扱います)。RHIのデフォルトサンプラーも異方性16xフィルタリングを
+既定にしており、浅い角度で見る床・路面などのボケを抑えています(<code>RHI::SamplerDesc</code>)。
+</p>
+<p>
+SceneColor(最終合成パスの出力)はHDR(<code>R16G16B16A16_Float</code>)で保持し、トーンマッピングは
+Present直前の独立したTonemapパスへ切り出しています。以前は最終合成パス自身がReinhardトーンマッピング+
+ガンマ補正までを行い、SceneColorをLDR(<code>R8G8B8A8_UNorm</code>)で書き出していました。しかしこの構成では
+後段のSSRパスがトーンマップ済みのLDR値を反射元として読むことになり、反射色が1.0を超えられず
+エネルギー保存が破れていました(明るい光源やスカイボックスの反射が不自然に暗くクリップされる)。
+SceneColorをHDRのまま保持しSSRもHDR値の上で反射を加算するよう変更したことで、この問題を解消しています。
+Tonemapパスの出力(LDR、<code>R8G8B8A8_UNorm</code>)はSSRの有効/無効にかかわらずPresentパスの
+「Final」「SSR」デバッグビュー双方が参照する共通の最終画像です。
 </p>
 </section>
 
@@ -305,8 +335,8 @@ with Visibility Bitmask" (2023) を参考にした実装)。
 <section id="ssr">
 <h2>6. SSR(スクリーンスペースリフレクション)</h2>
 <p>
-金属/滑らかな面の鏡面間接光(環境反射)はSSRで計算します。最終合成パスの出力(SceneColor)を
-反射先の環境色として再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチング
+金属/滑らかな面の鏡面間接光(環境反射)はSSRで計算します。最終合成パスの出力(SceneColor、HDR、
+トーンマップ前)を反射先の環境色として再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチング
 (線形マーチ+2分探索によるヒット位置の精密化)を行います。スカイボックスへのフォールバックは、
 レイが画面内で実際に背景(深度なし)ピクセルへ到達したことを確認できた場合のみ行い、レイが画面外に
 外れた場合や最大距離まで判定がつかなかった場合は反射を追加しません(その先に何があるか不明なまま

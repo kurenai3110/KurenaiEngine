@@ -6,6 +6,8 @@
 // この結果はDeferredLightingパス(最終合成)とSSIL_VisibilityBitmask.hlsl(間接光サンプルの
 // 簡易直接光の代わりに実際の直接光を使うことでシャドウも含めて正確にする)の両方からサンプルされる。
 // レンダー解像度と同じ内部解像度で、HDR(トーンマップ前)の値をR32G32B32A32_Floatへ書き込む。
+#include "NormalEncoding.hlsli"
+
 static const float PI = 3.14159265359f;
 
 cbuffer FrameConstants : register(b0)
@@ -222,7 +224,7 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
     float3 albedo = AlbedoTexture.Sample(DefaultSampler, input.UV).rgb;
-    float3 N = normalize(NormalTexture.Sample(DefaultSampler, input.UV).xyz * 2.0f - 1.0f);
+    float3 N = OctDecode(NormalTexture.Sample(DefaultSampler, input.UV).xy);
     float2 material = MaterialTexture.Sample(DefaultSampler, input.UV).rg;
     float metallic = material.r;
     float roughness = material.g;

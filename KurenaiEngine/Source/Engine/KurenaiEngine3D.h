@@ -95,6 +95,8 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
+        // 自発光(エミッシブ)。AO/シャドウの影響を受けずライティングパスで常に加算される
+        std::unique_ptr<RHI::IRHITexture> m_GBufferEmissive;
         std::unique_ptr<RHI::IRHITexture> m_GBufferDepth;
 
         // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
@@ -145,7 +147,8 @@ namespace Kurenai
         uint32_t m_SSILSliceCount = 4;
         uint32_t m_SSILStepCount = 6;
 
-        // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)
+        // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)。
+        // SceneColorはHDR(R16G16B16A16_Float)で、トーンマッピングは行わない(Tonemapパス参照)
         std::unique_ptr<RHI::IRHIShader> m_LightingVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_LightingPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_LightingPipelineState;
@@ -178,12 +181,28 @@ namespace Kurenai
         float m_SSRThickness = 0.1f;
         float m_SSRRoughnessCutoff = 0.6f;
 
+        // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
+        // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
+        // 独立したステージとして置くことで、反射や将来のブルーム/露出制御(M7)がトーンマップの
+        // 影響を受けないHDR値の上に成立できるようにする
+        std::unique_ptr<RHI::IRHIShader> m_TonemapVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_TonemapPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_TonemapPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_TonemapTexture;
+
         // 垂直同期。既定で無効。有効にするとPresentがvblankまでブロックするため、GPU負荷が軽い
         // シーンではvsync待ちの間GPUがアイドル→省電力クロックに落ち、次フレームの立ち上がりが
         // 遅くなる・待ち時間自体もジッタで1vblank/2vblank分を行き来するなど計測値が不安定になる。
         // 既定はGPU/CPU双方の実処理時間を素直に見られるOFFとし、ティアリングを許容する
         // (ON時はPresentが即座に返らず、モニタのリフレッシュレートにFPSが制限される)
         bool m_VSyncEnabled = false;
+
+        // 固定FPSモード。有効時、Renderスレッドが目標FPSより速く回った分だけ待機してフレーム間隔を
+        // 一定に保つ。VSyncはモニタのリフレッシュレート依存かつティアリング防止が目的だが、こちらは
+        // 任意のFPS値に固定できる(物理更新の再現性確保や環境間でのフレーム時間比較などが目的)。
+        // 既定で60fps固定を有効にする
+        bool m_FixedFPSEnabled = true;
+        float m_TargetFPS = 60.0f;
 
         // Presentパス(選択中のレンダーターゲットをアスペクト比を保ってバックバッファへ拡大縮小表示)
         std::unique_ptr<RHI::IRHIShader> m_PresentVertexShader;
@@ -198,6 +217,7 @@ namespace Kurenai
             Albedo,
             Normal,
             Material,
+            Emissive,
             Depth,
             DepthRaw,           // 深度テクスチャの生値(0〜1)を加工せずそのままグレースケール表示
             DirectLight,        // DirectLightingパスの結果(HDR、シャドウ適用済みの直接光)をトーンマッピングして表示

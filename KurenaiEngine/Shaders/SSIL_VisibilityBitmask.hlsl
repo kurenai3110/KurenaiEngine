@@ -16,6 +16,8 @@
 //
 // PSMain: G-BufferのNormal/Depthと直接光バッファから遮蔽率(AO, alpha)と間接拡散光(GI, rgb)を計算する
 // PSMainBlur: SSAOパスと共有する汎用RGBAボックスブラー(SSAO.hlsl側)を使い回すため、ここには実装しない
+#include "NormalEncoding.hlsli"
+
 static const float PI = 3.14159265359f;
 static const float HALF_PI = 1.57079632679f;
 static const uint kSectorCount = 32u;
@@ -253,7 +255,7 @@ void SearchSide(
         uint newlySetCount = countbits(newlySetBits);
         if (newlySetCount > 0u)
         {
-            float3 sampleNormalWorld = normalize(Texture0.Sample(DefaultSampler, sampleUV).xyz * 2.0f - 1.0f);
+            float3 sampleNormalWorld = OctDecode(Texture0.Sample(DefaultSampler, sampleUV).xy);
 
             float3 lightDirWorld = normalize(sampleWorldPos - worldPos);
             float receiverNdotL = saturate(dot(normalWorld, lightDirWorld));
@@ -321,7 +323,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float2 invDepthTexSize = 1.0f / depthTexSize;
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 normalWorld = normalize(Texture0.Sample(DefaultSampler, input.UV).xyz * 2.0f - 1.0f);
+    float3 normalWorld = OctDecode(Texture0.Sample(DefaultSampler, input.UV).xy);
 
     float3 P = mul(float4(worldPos, 1.0f), View).xyz;
     float3 N = normalize(mul(normalWorld, (float3x3)View));

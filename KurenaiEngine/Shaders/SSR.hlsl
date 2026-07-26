@@ -1,6 +1,8 @@
 // スクリーンスペースリフレクション(SSR)パス。
-// Lightingパスで完成したSceneColor(トーンマップ済みLDR)を「反射先の環境色」として
+// Lightingパスで完成したSceneColor(HDR、トーンマップ前)を「反射先の環境色」として
 // 簡易的に再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチングする。
+// HDRのまま反射色を加算するため、1.0を超える輝度(明るい光源の反射など)も正しく合成できる。
+// トーンマッピングはこのパスより後段のTonemap.hlsl(Present直前)でまとめて行う。
 // スカイボックスへのフォールバックは、レイが画面内で実際に背景(深度なし)ピクセルへ到達したことを
 // 確認できた場合のみ行う。画面外に外れた場合や最大距離まで判定がつかなかった場合は、その先に
 // 何があるか(スカイなのか、単に画面外の別ジオメトリなのか)分からないため反射を追加しない。
@@ -9,6 +11,8 @@
 // このエンジンにはレンダーグラフ/コンピュートシェーダー/Hi-Zミップチェーン/PSOのブレンドステートが
 // 未実装のため、既存のSSAO/SSILと同じフルスクリーン三角形+ピクセルシェーダーのパターンで実装し、
 // 反射色の合成もブレンドステートではなくこのシェーダー内で直接加算する。
+#include "NormalEncoding.hlsli"
+
 static const int kSSRStepCount = 32;
 static const int kSSRBinaryStepCount = 6;
 static const float kSSREdgeFadeDistance = 0.1f;
@@ -127,7 +131,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 N = normalize(NormalTexture.Sample(DefaultSampler, input.UV).xyz * 2.0f - 1.0f);
+    float3 N = OctDecode(NormalTexture.Sample(DefaultSampler, input.UV).xy);
     float3 V = normalize(CameraPosition.xyz - worldPos);
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
     float NdotV = saturate(dot(N, V));

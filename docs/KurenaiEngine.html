@@ -536,7 +536,7 @@ std::unique_ptr&lt;IRHITexture&gt;   CreateRenderTexture(uint32_t width, uint32_
 std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f);
 std::unique_ptr&lt;IRHITexture&gt;   CreateUAVTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels);
-std::unique_ptr&lt;IRHISampler&gt;   CreateDefaultSampler();
+std::unique_ptr&lt;IRHISampler&gt;   CreateDefaultSampler(const SamplerDesc&amp; desc = SamplerDesc{});
 IRHICommandList*                GetImmediateCommandList();</code></pre>
 <p>
 <code>CreateTextureFromFile</code> は拡張子(<code>.dds</code>/<code>.tga</code>/その他はWIC経由で
@@ -545,6 +545,11 @@ png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベー�
 <code>CreateTextureFromMemory</code> はRGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)の
 ピクセルデータから直接テクスチャを作成する(実行時に生成したデータをアップロードする用途向け。
 <code>KurenaiEngine2D::DrawText</code>のフォントアトラス生成で使用)。
+</p>
+<p>
+<code>SamplerDesc</code>(<code>RHIDesc.h</code>)は<code>Filter</code>(<code>SamplerFilter::Linear</code> /
+<code>Anisotropic</code>)と<code>MaxAnisotropy</code>を持つ。既定値は<code>Anisotropic</code>・16xで、
+浅い角度で見る面(床・路面など)のボケを抑える。AddressU/V/Wは常にWrap固定のため公開していない。
 </p>
 <p>
 <code>RHI::TextureImage::LoadFromFile(filePath, sRGB)</code>(<code>TextureImage.h</code>)は
