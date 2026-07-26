@@ -211,6 +211,7 @@
     <li><a href="#cache">10. モデルパッケージ形式とシーン形式</a></li>
     <li><a href="#bistro">11. Bistroアセットの変換パイプライン</a></li>
     <li><a href="#lights">12. 複数ライト</a></li>
+    <li><a href="#dllsplit">13. 3DLL構成への分割</a></li>
   </ol>
 </nav>
 
@@ -427,8 +428,8 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 <ul>
 <li>初回起動が重い(assimpのフルパース・WICデコード・BC7圧縮がユーザーの初回起動時に走る)</li>
 <li>キャッシュ生成が実行環境(誰のマシンで初回起動したか)に依存し、CIやバッチで事前に潰せない</li>
-<li>パース専用のassimp/zlibがレンダリングに不要な重い依存として<code>KurenaiEngine.dll</code>に
-残り続ける</li>
+<li>パース専用のassimp/zlibがレンダリングに不要な重い依存としてエンジンDLL(当時は単一の
+<code>KurenaiEngine.dll</code>、現在は<code>KurenaiEngineLibrary.dll</code>)に残り続ける</li>
 <li><code>.kmodelcache</code>/<code>.ktexcache</code>は「元ファイルの更新日時+サイズ」で自動失効する
 派生物であり、元ファイルが無ければ成立しない。配布可能な成果物ではない</li>
 </ul>
@@ -439,8 +440,9 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 違いは、<strong>キャッシュ(自動失効する派生物、元ファイル前提)</strong>ではなく
 <strong>パッケージ(元ファイル無しでも成立する配布可能なアセット)</strong>であるという設計上の
 位置づけにある。無効化は「パッカーを再実行するか」というビルド上の判断に一本化され、
-ランタイムはファイルのタイムスタンプを一切見ない。この結果<code>KurenaiEngine.dll</code>からassimp/
-zlibへの依存は完全に無くなった(<code>dumpbin /dependents</code>で確認可能)。
+ランタイムはファイルのタイムスタンプを一切見ない。この結果エンジンDLL(現在は
+<code>KurenaiEngineLibrary.dll</code>)からassimp/zlibへの依存は完全に無くなった
+(<code>dumpbin /dependents</code>で確認可能)。
 </p>
 <p>
 形式定義は<code>ModelPackage.h</code>(ランタイムとKurenaiPackerの両方から参照する単一の正)に
@@ -745,6 +747,102 @@ LUTテクスチャ2枚を要求し、<code>kTextureSlotCount = 7</code>に対し
 ライトリストで足りない)と、<code>m_DirectLightTexture</code>のRTV+UAV両対応があれば載ります。
 </li>
 </ul>
+</section>
+
+<section id="dllsplit">
+<h2>13. 3DLL構成への分割</h2>
+<p>
+以前は<code>KurenaiEngine.dll</code>という単一のDLLに、共通基盤(<code>KurenaiEngineBase</code>・
+Library一式)と<code>KurenaiEngine3D</code>・<code>KurenaiEngine2D</code>の両方をまとめてビルドして
+いた。2Dのみを使うアプリでも、3Dレンダラー一式(Deferred Shading・SSAO/SSIL・SSR・複数ライト等の
+シェーダとコード)を常に同梱する必要があり、2D単独配布ができなかった。これを
+<strong><code>KurenaiEngineLibrary.dll</code></strong>(共通基盤)・
+<strong><code>KurenaiEngine3D.dll</code></strong>・<strong><code>KurenaiEngine2D.dll</code></strong>の
+3つに分割し、3D/2Dはいずれも共通基盤にのみ依存し互いには依存しない構成にした。
+</p>
+
+<h3>12.1 エクスポートマクロを3つに分けた理由</h3>
+<p>
+分割前は<code>KURENAI_API</code>という単一のマクロが<code>KURENAI_ENGINE_EXPORTS</code>を見て
+dllexport/dllimportを切り替えていた。3つのDLLに分けると、例えば<code>KurenaiEngine3D.dll</code>を
+ビルドするコンパイル単位では「自分自身のクラス(<code>KurenaiEngine3D</code>)はdllexportしたいが、
+Libraryのクラス(<code>KurenaiEngineBase</code>・<code>Window</code>・<code>IRHIDevice</code>等)は
+dllimportとして扱いたい」という、単一マクロでは表現できない要求が生じる。そのため
+<code>KURENAI_LIB_API</code>(<code>KURENAI_LIBRARY_EXPORTS</code>)・
+<code>KURENAI_3D_API</code>(<code>KURENAI_ENGINE3D_EXPORTS</code>)・
+<code>KURENAI_2D_API</code>(<code>KURENAI_ENGINE2D_EXPORTS</code>)の3つに分離し、各<code>.vcxproj</code>が
+自分に対応する<code>_EXPORTS</code>マクロだけを定義するようにした。<code>KURENAI_LIBRARY_EXPORTS</code>が
+KurenaiEngine3D/2Dのプロジェクトへ誤って漏れると、Libraryの全メンバがそのDLL内でdllexport
+(=定義を要求)されてしまいLNK2001の嵐になるため、この3つのマクロは各プロジェクトでちょうど1つだけが
+定義される前提を厳密に守る必要がある。
+</p>
+<p>
+<code>Core::RenderGraph</code>は分割前は(Library内でのみ使われる想定だったため)エクスポートマクロを
+持っていなかったが、<code>KurenaiEngine3D.cpp</code>から直接インスタンス化・呼び出しされているため、
+DLL境界を跨ぐ以上<code>KURENAI_LIB_API</code>を新たに付与した。
+</p>
+
+<h3>12.2 ImGuiをDLL境界越しに使う仕組み</h3>
+<p>
+ImGuiのコンテキスト生成(<code>ImGui::CreateContext()</code>)は<code>DX11ImGuiBackend</code>/
+<code>DX12ImGuiBackend</code>(Library側)で行われる一方、<code>KurenaiEngine3D.cpp</code>は
+ImGuiパネル描画のために<code>ImGui::*</code>関数を直接、約80箇所で呼び出している。ImGui本体
+(<code>imgui.cpp</code>等)はKurenaiEngineLibrary.dllにのみコンパイルし、KurenaiEngine3D.dllからは
+その関数群をdllimportする形にした。具体的には<code>imgui.h</code>が参照する<code>IMGUI_API</code>マクロを
+プリプロセッサ定義で外側から与える。
+</p>
+<pre><code>KurenaiEngineLibrary.vcxproj: IMGUI_API=__declspec(dllexport)
+KurenaiEngine3D.vcxproj:      IMGUI_API=__declspec(dllimport)
+KurenaiEngine2D.vcxproj:      (imgui を一切includeしないため定義不要)</code></pre>
+<p>
+この方式にした理由は、ImGuiのコンテキスト・アロケータを1つのDLLに閉じ込められる点にある。
+代替案として「imguiをKurenaiEngine3D側にも重複コンパイルし、<code>SetCurrentContext</code>/
+<code>SetAllocatorFunctions</code>でコンテキストを受け渡す」方式も検討したが、その場合
+<code>IRHIImGuiBackend</code>に新しい公開APIを追加する必要があり、かつImGuiのコード・グローバル状態
+(<code>GImGui</code>等)が2つのDLLに二重化してしまう。今回使用しているimgui(1.92.9 WIP)は
+<code>imgui.h</code>内で構造体単位に<code>IMGUI_API</code>を付けている箇所が無く(個々の関数・一部の
+静的データメンバのみ)、構造体単位でdllexportされる型は<code>imgui_internal.h</code>側にしか無い。
+<code>imgui_internal.h</code>はLibraryしかincludeしないため、<code>IMGUI_API</code>定義による
+問題は生じない。
+</p>
+
+<h3>12.3 DLLを経由したProjectReferenceはリンクを推移しない</h3>
+<p>
+MSBuildの<code>ProjectReference</code>は、参照先が<code>StaticLibrary</code>の場合はリンク対象を
+再帰的に解決するが、<code>DynamicLibrary</code>の場合は参照先自身のインポートライブラリしか
+伝播しない。そのため<code>Sample3D → KurenaiEngine3D.vcxproj → KurenaiEngineLibrary.vcxproj</code>という
+参照chainだけでは、<code>Sample3D.exe</code>のリンクに<code>KurenaiEngineLibrary.lib</code>が
+含まれない。<code>Sample3D</code>は<code>KurenaiEngineBase</code>のメンバ(<code>PumpEvents</code>/
+<code>ShouldClose</code>/<code>IsKeyDown</code>等、いずれもLibraryがエクスポート)を直接呼ぶため、
+これが無いとLNK2019になる。そのため各サンプルは<strong>KurenaiEngineLibraryとKurenaiEngine3D/2Dの
+両方へ明示的にProjectReferenceを張る</strong>(ビルド順序は参照chainだけでも保証されるが、リンクは
+明示しないと解決されない)。同様の理由でKurenaiEngine3D/2Dの各<code>.vcxproj</code>自身も
+KurenaiEngineLibraryへの参照を持つ。
+</p>
+
+<h3>12.4 Assetsをエンジン側の出力に置かない理由</h3>
+<p>
+分割前は<code>KurenaiEngine.vcxproj</code>のPostBuildEventが<code>Assets\Packed</code>
+(数GB)を自身のOutDirへコピーしていた。3分割にあたり各DLLのOutDirを
+<code>Build\Bin\&lt;Platform&gt;\&lt;Configuration&gt;\&lt;プロジェクト名&gt;\</code>という
+プロジェクトごとのサブフォルダへ変更したため、同じ仕組みのままだと<code>KurenaiEngine3D.dll</code>の
+出力先が変わるたびに数GBのコピーが増殖する。<code>KurenaiEngine3D.dll</code>はモジュール自身の
+ディレクトリを基準にShaders/Assetsを解決する(<code>GetModuleDirectory()</code>)ため、実行時に
+Assetsが実行ファイルと同じフォルダにありさえすれば動作は変わらない。そこで
+<strong>Assetsのコピーはエンジン側(KurenaiEngine3D.vcxproj)ではなくサンプル側(Sample3D.vcxproj)の
+PostBuildEventでリポジトリ直下の<code>Assets\Packed</code>から直接行う</strong>ことにし、中間コピーを
+1つ削減した。Shaders(数KB)は従来どおり各エンジンDLLが自分のPostBuildEventでコピーする。
+</p>
+
+<h3>12.5 2D単独配布</h3>
+<p>
+Sample2Dの出力フォルダには<code>KurenaiEngineLibrary.dll</code>・<code>KurenaiEngine2D.dll</code>・
+<code>Shaders\Sprite2D.hlsl</code>のみが揃い、<code>KurenaiEngine3D.dll</code>・Assetsは一切含まれない
+(<code>Sample2D.sln</code>もKurenaiEngine3D.vcxprojを参照しないため、Sample2Dだけをビルドする限り
+3D側は一切ビルドされない)。<code>dumpbin /dependents KurenaiEngine2D.dll</code>で確認すると、依存は
+<code>KurenaiEngineLibrary.dll</code>とkernel32/user32/gdi32のみで、d3d11.dll/d3d12.dll/dxgi.dllへの
+依存は無い(RHIの実装がLibrary側に完全に隠蔽されているため)。
+</p>
 </section>
 
 </main>

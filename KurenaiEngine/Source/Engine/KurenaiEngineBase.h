@@ -51,7 +51,7 @@ namespace Kurenai
     // KurenaiEngine3D/KurenaiEngine2Dに共通する土台(ウィンドウ・デバイス・スワップチェーンの
     // 生成・管理)。サンプルプログラムがこのクラスを直接構築することは想定していない
     // (コンストラクタはprotected)
-    class KURENAI_API KurenaiEngineBase
+    class KURENAI_LIB_API KurenaiEngineBase
     {
     public:
         virtual ~KurenaiEngineBase();

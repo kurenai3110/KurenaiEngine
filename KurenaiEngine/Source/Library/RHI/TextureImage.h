@@ -28,7 +28,7 @@ namespace Kurenai::RHI
     // ビルドツール)が事前に行い、.ktexへ書き出す。ランタイムはLoadFromPackedTextureで
     // その.ktexを読むだけであり、WICデコード・ミップ生成・BC7圧縮のいずれも発生しない
     // (LoadFromFileはKurenaiPacker自身と、スカイボックス等の.dds直接読み込みでのみ使う)
-    class KURENAI_API TextureImage
+    class KURENAI_LIB_API TextureImage
     {
     public:
         TextureImage(TextureImage&& other) noexcept;

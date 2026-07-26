@@ -4,7 +4,7 @@
 
 namespace Kurenai::RHI
 {
-    class KURENAI_API IRHIPipelineState
+    class KURENAI_LIB_API IRHIPipelineState
     {
     public:
         virtual ~IRHIPipelineState() = default;

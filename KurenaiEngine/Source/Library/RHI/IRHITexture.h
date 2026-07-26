@@ -4,7 +4,7 @@
 
 namespace Kurenai::RHI
 {
-    class KURENAI_API IRHITexture
+    class KURENAI_LIB_API IRHITexture
     {
     public:
         virtual ~IRHITexture() = default;

@@ -4,7 +4,7 @@
 
 namespace Kurenai::RHI
 {
-    class KURENAI_API IRHIShader
+    class KURENAI_LIB_API IRHIShader
     {
     public:
         virtual ~IRHIShader() = default;

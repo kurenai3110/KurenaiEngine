@@ -1,11 +1,13 @@
 # KurenaiEngine
 
-DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**KurenaiEngine.dll** として
-ビルドされます。すぐに使える完結型API `Kurenai::KurenaiEngine3D`(3D)/
-`Kurenai::KurenaiEngine2D`(2D)に加え、RHI(Rendering Hardware Interface)抽象化レイヤーや
-ウィンドウ・カメラ・モデル読み込みといった低レベルAPI(`Kurenai::RHI` / `Kurenai::Core` /
-`Kurenai::Assets`、まとめて「Library」)も公開しており、独自の描画パイプラインを組みたい場合は
-こちらを直接利用できます。
+DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**KurenaiEngineLibrary.dll**
+(共通基盤)・**KurenaiEngine3D.dll**・**KurenaiEngine2D.dll**の3つのDLLに分かれてビルドされます。
+すぐに使える完結型API `Kurenai::KurenaiEngine3D`(3D)/`Kurenai::KurenaiEngine2D`(2D)に加え、
+RHI(Rendering Hardware Interface)抽象化レイヤーやウィンドウ・カメラ・モデル読み込みといった
+低レベルAPI(`Kurenai::RHI` / `Kurenai::Core` / `Kurenai::Assets`、まとめて「Library」)も
+KurenaiEngineLibrary.dllから公開しており、独自の描画パイプラインを組みたい場合はこちらを
+直接利用できます。3D/2Dは互いに依存しないため、2Dのみのアプリは`KurenaiEngineLibrary.dll` +
+`KurenaiEngine2D.dll`だけで動作し、`KurenaiEngine3D.dll`やAssetsを同梱する必要はありません。
 
 `KurenaiEngine3D`はKurenaiEngine専用モデルパッケージ(`.kmodel`)とシーンファイル(`.kscene`)の
 読み込み・描画に対応した、Deferred Shading・HDRレンダリング・カスケードシャドウマップ(PCF/PCSS)・
@@ -25,12 +27,16 @@ SSAO/SSIL・SSR・複数ライト(ポイント/スポット、カンデラ/ル�
 ## 構成
 
 ```
-KurenaiEngine.sln              ルート: KurenaiEngine(DLL)単体のビルド確認用ソリューション
+KurenaiEngine.sln              ルート: 3つのDLL単体のビルド確認用ソリューション
 KurenaiEngine/
-  KurenaiEngine.vcxproj        本体(DynamicLibrary)。assimpには依存しない
-  Source/Engine/                公開API(KurenaiEngine3D, KurenaiEngine2D, KurenaiTypes.h)
+  KurenaiEngineLibrary.vcxproj  共通基盤(DynamicLibrary)。RHI抽象化層・Window/Camera・
+                                 モデル/シーン読み込み・KurenaiEngineBaseを含む。assimpには依存しない
+  KurenaiEngine3D.vcxproj       3D API(DynamicLibrary)。KurenaiEngineLibraryにのみ依存
+  KurenaiEngine2D.vcxproj       2D API(DynamicLibrary)。KurenaiEngineLibraryにのみ依存
+  Source/Engine/                 公開API(KurenaiEngine3D, KurenaiEngine2D, KurenaiEngineBase, KurenaiTypes.h)
   Source/Library/                公開API(低レベル): RHI抽象化層, Window/Camera, モデル/シーン読み込みなど
-  Shaders/                       KurenaiEngine3D/2Dが内部で使うHLSL一式
+  Shaders/3D/                    KurenaiEngine3Dが内部で使うHLSL一式
+  Shaders/2D/                    KurenaiEngine2Dが内部で使うHLSL(Sprite2D.hlsl)
 Samples/
   Sample3D/  Sample3D.sln       3Dサンプル(KurenaiEngine3Dを使用)。独立ソリューション
              Build/             Sample3D.exeの出力先(Git管理対象外)
@@ -38,7 +44,7 @@ Samples/
              Build/             Sample2D.exeの出力先(Git管理対象外)
 Tools/
   KurenaiPacker/  KurenaiPacker.sln   アセットビルドツール(Application)。独立ソリューション。
-                                       assimp/DirectXTexに依存(KurenaiEngine.dllとは別依存)
+                                       assimp/DirectXTexに依存(KurenaiEngineの各DLLとは別依存)
                   Build/               KurenaiPacker.exeの出力先(Git管理対象外)
 docs/                           ドキュメント(APIリファレンス・実装者向け)
 ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
@@ -46,15 +52,17 @@ Assets/                         アセット(Git管理対象外)
   Source/                        入力。ソースモデル(.gltf/.fbx等)と手書きの.kscene
   Packed/                        出力。KurenaiPacker.exeが生成する.kmodel/.kgeom/.ktexと
                                    検証済みの.kscene。KurenaiEngine3Dが実際に読み込むのはこちら
-Build/                          KurenaiEngine.dll単体の出力先(Git管理対象外)。
-                                 Build\Bin\<Platform>\<Configuration>\ にDLLと、それが参照する
-                                 Shaders/Assets(Packed)のコピーが揃う
+Build/                          3つのDLL単体の出力先(Git管理対象外)。
+                                 Build\Bin\<Platform>\<Configuration>\<プロジェクト名>\ にDLLと、
+                                 それが参照するShadersのコピーが揃う
 ```
 
-KurenaiEngine.dllが実行時に参照するShaders/Assets(`Assets\Packed\`の中身)は、ビルド時の
-PostBuildEventでDLLと同じフォルダへ自動的にコピーされます。Sample3D/Sample2Dも同様に、自身の
-ビルド後にKurenaiEngine.dllとShaders/Assetsを自分の出力フォルダへコピーするため、各実行ファイルは
+KurenaiEngine3D.dll/KurenaiEngine2D.dllが実行時に参照するShadersは、ビルド時のPostBuildEventで
+それぞれのDLLと同じフォルダへ自動的にコピーされます。Sample3D/Sample2Dも同様に、自身のビルド後に
+必要なDLLとShadersを自分の出力フォルダへコピーするため、各実行ファイルは
 `Samples\Sample3D\Build\...` / `Samples\Sample2D\Build\...` 以下だけで単独で動作します。
+Sample3Dはさらに`Assets\Packed\`もコピーしますが、Sample2Dは`KurenaiEngine3D.dll`・Assetsのどちらも
+必要としないため同梱しません。
 
 ## 必要環境
 
@@ -72,9 +80,9 @@ git submodule update --init --recursive
 
 ### 2. assimpのビルド (CMake)
 
-glTF・FBXインポータのみを有効にした静的ライブラリとしてビルドします。**assimpは
-`KurenaiEngine.dll`にはリンクされず、後述のKurenaiPacker.exe(アセット変換ツール)のビルドに
-のみ必要**です。KurenaiEngine本体・サンプルだけをビルドする場合はこの手順は不要です。
+glTF・FBXインポータのみを有効にした静的ライブラリとしてビルドします。**assimpはKurenaiEngineの
+いずれのDLLにもリンクされず、後述のKurenaiPacker.exe(アセット変換ツール)のビルドにのみ必要**です。
+KurenaiEngine本体・サンプルだけをビルドする場合はこの手順は不要です。
 
 ```
 cmake -S ThirdParty/assimp -B ThirdParty/assimp/build -G "Visual Studio 17 2022" -A x64 ^
@@ -104,20 +112,23 @@ MSBuild ThirdParty\DirectXTex\DirectXTex\DirectXTex_Desktop_2022.vcxproj /p:Conf
 
 ### 4. 本体・サンプルのビルド
 
-`KurenaiEngine.sln` はKurenaiEngine(DLL)単体のビルド確認用です。実際に動かして確認したい場合は、
-`Samples/Sample3D/Sample3D.sln` または `Samples/Sample2D/Sample2D.sln` をビルドしてください
-(いずれもKurenaiEngine.vcxprojをプロジェクト参照しているため、KurenaiEngine.dllも一緒に
-ビルドされます)。
+`KurenaiEngine.sln` は3つのDLL(KurenaiEngineLibrary/KurenaiEngine3D/KurenaiEngine2D)単体の
+ビルド確認用です。実際に動かして確認したい場合は、`Samples/Sample3D/Sample3D.sln` または
+`Samples/Sample2D/Sample2D.sln` をビルドしてください(Sample3DはKurenaiEngineLibrary+
+KurenaiEngine3D、Sample2DはKurenaiEngineLibrary+KurenaiEngine2Dをそれぞれプロジェクト参照して
+いるため、必要なDLLも一緒にビルドされます)。
 
 ```
 MSBuild Samples\Sample3D\Sample3D.sln /p:Configuration=Debug /p:Platform=x64
 ```
 
-`KurenaiEngine.dll`は `Build\Bin\x64\Debug\` に、`Sample3D.exe`/`Sample2D.exe`はそれぞれ
+各DLLは `Build\Bin\x64\Debug\<プロジェクト名>\` に、`Sample3D.exe`/`Sample2D.exe`はそれぞれ
 `Samples\Sample3D\Build\Bin\x64\Debug\` / `Samples\Sample2D\Build\Bin\x64\Debug\` に出力されます。
-いずれのフォルダにもKurenaiEngine.dllと、それが参照するShaders/Assets(`Assets\Packed\`の中身)が
-自動でコピーされるため、各フォルダはそれだけで完結して動作します。**この時点では`Assets\Packed\`が
-空のため、次の「アセットの準備」を行うまでSample3Dは表示するモデルがありません。**
+Sample3Dの出力フォルダにはKurenaiEngineLibrary.dll・KurenaiEngine3D.dllと、それが参照する
+Shaders/Assets(`Assets\Packed\`の中身)が、Sample2Dの出力フォルダにはKurenaiEngineLibrary.dll・
+KurenaiEngine2D.dllとSprite2D.hlslのみが自動でコピーされるため、各フォルダはそれだけで完結して
+動作します。**この時点では`Assets\Packed\`が空のため、次の「アセットの準備」を行うまでSample3Dは
+表示するモデルがありません。**
 
 ### 5. アセットの準備(KurenaiPacker)
 
@@ -206,7 +217,8 @@ Sample3D.exe -dx12
 
 `Samples/` 以下に、`docs/KurenaiEngine.html` で説明している公開API(`KurenaiEngine3D` /
 `KurenaiEngine2D`)を使ったサンプルプログラムを用意しています。それぞれ独立した`.sln`を持ち、
-`KurenaiEngine.vcxproj`をプロジェクト参照します。
+Sample3DはKurenaiEngineLibrary.vcxproj+KurenaiEngine3D.vcxprojを、Sample2Dは
+KurenaiEngineLibrary.vcxproj+KurenaiEngine2D.vcxprojをプロジェクト参照します。
 
 ### Sample3D
 

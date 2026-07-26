@@ -8,5 +8,5 @@
 
 namespace Kurenai::Assets
 {
-    KURENAI_API Model LoadModel(RHI::IRHIDevice& device, const std::wstring& filePath);
+    KURENAI_LIB_API Model LoadModel(RHI::IRHIDevice& device, const std::wstring& filePath);
 }

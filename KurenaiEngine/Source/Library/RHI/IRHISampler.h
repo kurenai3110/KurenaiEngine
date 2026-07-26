@@ -4,7 +4,7 @@
 
 namespace Kurenai::RHI
 {
-    class KURENAI_API IRHISampler
+    class KURENAI_LIB_API IRHISampler
     {
     public:
         virtual ~IRHISampler() = default;

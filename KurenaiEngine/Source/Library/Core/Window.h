@@ -20,7 +20,7 @@
 
 namespace Kurenai::Core
 {
-    class KURENAI_API Window
+    class KURENAI_LIB_API Window
     {
     public:
         using ResizeCallback = std::function<void(uint32_t, uint32_t)>;

@@ -60,7 +60,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <!-- 公開API(KurenaiEngine3D/KurenaiEngine2D)のヘッダーはPImplを使わず内部型を直接メンバに
            持つため、コンパイルにはSource\Libraryも到達可能である必要がある。ただし実際に
-           サンプルから低レベルRHIのシンボルを呼ぶことはKurenaiEngine.dllが公開クラス以外を
+           サンプルから低レベルRHIのシンボルを呼ぶことはKurenaiEngineLibrary.dllが公開クラス以外を
            エクスポートしていないためリンク段階で失敗する(強制力はリンカー側にある) -->
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\KurenaiEngine\Source\Engine;$(SolutionDir)..\..\KurenaiEngine\Source\Library;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
@@ -90,20 +90,29 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
-    <!-- KurenaiEngine.dllとそれが参照するShaders/Assetsを、プロジェクト参照のビルドで
-         生成された出力フォルダから実行ファイルと同じフォルダへコピーする -->
+    <!-- KurenaiEngineLibrary.dll/KurenaiEngine3D.dllとそれが参照するShaders・Assetsを、
+         プロジェクト参照のビルドで生成された出力フォルダ・リポジトリのAssetsから
+         実行ファイルと同じフォルダへコピーする。AssetsはKurenaiEngine3D.dll側の出力に
+         置かず、ここで直接コピーする(3D DLLのOutDirを変えるたびに増殖させないため) -->
     <PostBuildEvent>
-      <Command>xcopy /Y /I /E /D "$(ProjectDir)..\..\Build\Bin\$(Platform)\$(Configuration)\*" "$(OutDir)"
+      <Command>set KURENAI_BIN=$(ProjectDir)..\..\Build\Bin\$(Platform)\$(Configuration)
+xcopy /Y /I /D "%KURENAI_BIN%\KurenaiEngineLibrary\*.dll" "$(OutDir)"
+xcopy /Y /I /D "%KURENAI_BIN%\KurenaiEngine3D\*.dll" "$(OutDir)"
+xcopy /Y /I /E /D "%KURENAI_BIN%\KurenaiEngine3D\Shaders" "$(OutDir)Shaders\"
+xcopy /Y /I /E /D "$(ProjectDir)..\..\Assets\Packed" "$(OutDir)Assets\"
 exit /b 0</Command>
-      <Message>KurenaiEngine.dllと関連データをOutDirへコピー</Message>
+      <Message>KurenaiEngineLibrary/3D・シェーダー・AssetsをOutDirへコピー</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Source\Main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\KurenaiEngine\KurenaiEngine.vcxproj">
-      <Project>{061b33de-deed-4982-af84-5a2469676f24}</Project>
+    <ProjectReference Include="..\..\KurenaiEngine\KurenaiEngineLibrary.vcxproj">
+      <Project>{7f2c9a41-5b3d-4e68-9a17-0c4e8d2b6f35}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\..\KurenaiEngine\KurenaiEngine3D.vcxproj">
+      <Project>{1d6b4e83-2a97-4c50-b3e8-7f91c5a02d64}</Project>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

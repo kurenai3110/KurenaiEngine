@@ -4,12 +4,20 @@
 #include <string>
 #include <vector>
 
+#include "KurenaiTypes.h"
+
 #include "RHI/IRHICommandList.h"
 #include "RHI/IRHIGPUProfiler.h"
 #include "RHI/IRHISwapChain.h"
 #include "RHI/IRHITexture.h"
 
 #include "Core/CPUProfiler.h"
+
+// dllexportされたクラスが非export型(std::vector<RenderGraphPassDesc>など)をメンバに持つ
+// ことによるC4251警告を抑制する。KurenaiEngineLibrary.dllと各サンプルは常に同一コンパイラ・
+// 同一ランタイムライブラリ設定でビルドされるため、実務上は問題にならない
+#pragma warning(push)
+#pragma warning(disable: 4251)
 
 namespace Kurenai::Core
 {
@@ -51,7 +59,7 @@ namespace Kurenai::Core
     // (DX12Texture::TransitionTo、SetRenderTargets/SetTexture呼び出し時に暗黙に発行される)ため、
     // このクラスの責務は純粋に「パスの実行順序の決定」「レンダーターゲットの自動バインド」
     // 「CPU/GPUプロファイラのスコープ計測」の3点に絞っている
-    class RenderGraph
+    class KURENAI_LIB_API RenderGraph
     {
     public:
         RenderGraph(RHI::IRHICommandList* commandList, RHI::IRHIGPUProfiler* gpuProfiler, CPUProfiler* cpuProfiler);
@@ -76,3 +84,5 @@ namespace Kurenai::Core
         std::vector<size_t> ResolveExecutionOrder() const;
     };
 }
+
+#pragma warning(pop)

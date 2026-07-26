@@ -4,7 +4,7 @@
 
 namespace Kurenai::RHI
 {
-    class KURENAI_API IRHIBuffer
+    class KURENAI_LIB_API IRHIBuffer
     {
     public:
         virtual ~IRHIBuffer() = default;
