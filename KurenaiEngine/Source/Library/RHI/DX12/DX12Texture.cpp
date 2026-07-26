@@ -71,6 +71,12 @@ namespace Kurenai::RHI
         return m_Device->GetSrvCpuHeap()->GetCpuHandle(index);
     }
 
+    D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetCubeUavCpuHandle(uint32_t face, uint32_t mipLevel) const
+    {
+        const uint32_t index = m_MipUavIndices[mipLevel * kCubeFaceCount + face];
+        return m_Device->GetSrvCpuHeap()->GetCpuHandle(index);
+    }
+
     void DX12Texture::TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState)
     {
         if (m_CurrentState == newState)

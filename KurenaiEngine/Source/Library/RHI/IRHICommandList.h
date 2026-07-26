@@ -60,10 +60,21 @@ namespace Kurenai::RHI
         virtual void SetComputePipelineState(IRHIPipelineState* pipelineState) = 0;
         virtual void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void SetComputeTexture(uint32_t slot, IRHITexture* texture) = 0;
+        // TextureCube(スカイボックス)をコンピュートシェーダーからSampleLevelで読む(IBLの畳み込み等)場合に
+        // 必要。DX11はステージごとに独立したサンプラースロットを持つため、グラフィックス側のSetSamplerとは
+        // 別に明示的なバインドが要る(DX12はグラフィックス・コンピュートで同じs0固定の共有ヒープを使うため、
+        // 呼び出し不要でも動作するが、DX11との整合のため両バックエンドで同じ呼び出し規約にする)
+        virtual void SetComputeSampler(uint32_t slot, IRHISampler* sampler) = 0;
         // RWTexture2D/RWStructuredBufferとしてバインドする(書き込み可能)。
         // mipLevelはCreateHiZTextureで作成したミップチェーンテクスチャの特定ミップを指定する場合に使う
         // (通常のCreateUAVTextureは常に1ミップのみのため既定値の0で問題ない)
         virtual void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0) = 0;
+        // CreateUAVTextureCube/CreateMippedUAVTextureCubeで作成したキューブマップの、指定した面・
+        // ミップ1枚だけをRWTexture2DArray(要素数1のビュー)としてバインドする。キューブマップの
+        // 6面は同一リソース内の配列スライスとして実装されており(D3D11/D3D12ともに)、コンピュート
+        // シェーダー側は面ごとに1回ずつディスパッチする必要がある(HLSLがリソースを動的に
+        // スライス選択できないため。カスケードシャドウマップのテクスチャ分岐と同種の制約)
+        virtual void SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0) = 0;
         virtual void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) = 0;
     };

@@ -30,6 +30,9 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHITexture> CreateRenderTexture(uint32_t width, uint32_t height, Format format) override;
         std::unique_ptr<IRHITexture> CreateUAVTexture(uint32_t width, uint32_t height, Format format) override;
         std::unique_ptr<IRHITexture> CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels) override;
+        std::unique_ptr<IRHITexture> CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels) override;
+        std::unique_ptr<IRHITexture> CreateUAVTextureCube(uint32_t size, Format format) override;
+        std::unique_ptr<IRHITexture> CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels) override;
         std::unique_ptr<IRHITexture> CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f) override;
         std::unique_ptr<IRHISampler> CreateDefaultSampler(const SamplerDesc& desc) override;
         IRHICommandList* GetImmediateCommandList() override;

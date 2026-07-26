@@ -28,9 +28,9 @@ namespace Kurenai::RHI
     namespace
     {
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
-        constexpr uint32_t kTextureSlotCount = 9; // t0〜t8 (DirectLighting.hlslのカスケードシャドウマップ4枚+ライトリストが最大)
+        constexpr uint32_t kTextureSlotCount = 11; // t0〜t10 (DeferredLighting.hlslのG-Buffer+IBL(Irradiance/Prefilter/BRDFLUT)が最大)
         constexpr uint32_t kSamplerSlotCount = 1; // s0のみ
-        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t8のkTextureSlotCount個ひと組)の最大数。
+        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t10のkTextureSlotCount個ひと組)の最大数。
         // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく。実際に確保するヒープ容量は
         // これのkFrameCount倍(CPUがGPU完了を待たずに次フレームを記録し始めるため、直近kFrameCount
         // フレームぶんのブロックがまだGPUに読まれている可能性がある)
@@ -938,37 +938,101 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHITexture> DX12Device::CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels)
     {
+        return CreateMippedUAVTexture(width, height, Format::R32_Float, mipLevels);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels)
+    {
+        const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);
+
         const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
         const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Tex2D(
-            DXGI_FORMAT_R32_FLOAT, width, height, 1, static_cast<UINT16>(mipLevels), 1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+            dxgiFormat, width, height, 1, static_cast<UINT16>(mipLevels), 1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         ThrowIfFailed(
             m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
-            "Hi-Zテクスチャの作成に失敗しました");
+            "ミップ付きUAVテクスチャの作成に失敗しました");
 
         // 全ミップを見るSRV(MipLevels=全指定)。デバッグ表示などでSampleLevelにより任意のミップを読む用
         const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        srvDesc.Format = dxgiFormat;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MipLevels = mipLevels;
         m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
 
-        // ミップごとに単一ミップのUAVを張り、ダウンサンプルのコンピュートシェーダーが
-        // 「ミップNを読んでミップN+1へ書く」を1ミップずつディスパッチできるようにする
+        // ミップごとに単一ミップのUAVを張り、コンピュートシェーダーがミップ単位で書き込めるようにする
+        // (Hi-Zの「前段ミップを読んで次段へ書く」ダウンサンプルだけでなく、IBLプリフィルタ済み鏡面マップの
+        // 「ミップごとに異なるラフネスで独立に畳み込む」用途でも同じ仕組みを再利用する)
         std::vector<uint32_t> mipUavIndices;
         mipUavIndices.reserve(mipLevels);
         for (uint32_t mip = 0; mip < mipLevels; ++mip)
         {
             const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
             D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-            uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
+            uavDesc.Format = dxgiFormat;
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             uavDesc.Texture2D.MipSlice = mip;
             m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
             mipUavIndices.push_back(uavIndex);
+        }
+
+        return std::make_unique<DX12Texture>(
+            this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
+            DX12Texture::kInvalid, std::move(mipUavIndices));
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateUAVTextureCube(uint32_t size, Format format)
+    {
+        return CreateMippedUAVTextureCube(size, format, 1);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels)
+    {
+        const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);
+
+        const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+        const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+            dxgiFormat, size, size, static_cast<UINT16>(DX12Texture::kCubeFaceCount), static_cast<UINT16>(mipLevels),
+            1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(
+            m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
+            "キューブマップUAVテクスチャの作成に失敗しました");
+
+        // 全6面・全ミップを1枚のTextureCubeとして読むSRV(サンプリング側、DeferredLighting.hlsl等)
+        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = dxgiFormat;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.TextureCube.MostDetailedMip = 0;
+        srvDesc.TextureCube.MipLevels = mipLevels;
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+        // 面×ミップの組み合わせごとに単一配列スライス・単一ミップのUAV(Texture2DArray、要素数1)を張り、
+        // コンピュートシェーダーが面ごとに1回ずつディスパッチして書き込めるようにする(HLSL側は
+        // RWTexture2DArrayとして宣言する必要がある。IBLConvolve.hlsl参照)。mip*kCubeFaceCount+face の
+        // 順でフラットに格納する(DX12Texture::GetCubeUavCpuHandle参照)
+        std::vector<uint32_t> mipUavIndices;
+        mipUavIndices.reserve(mipLevels * DX12Texture::kCubeFaceCount);
+        for (uint32_t mip = 0; mip < mipLevels; ++mip)
+        {
+            for (uint32_t face = 0; face < DX12Texture::kCubeFaceCount; ++face)
+            {
+                const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+                D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+                uavDesc.Format = dxgiFormat;
+                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+                uavDesc.Texture2DArray.MipSlice = mip;
+                uavDesc.Texture2DArray.FirstArraySlice = face;
+                uavDesc.Texture2DArray.ArraySize = 1;
+                m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+                mipUavIndices.push_back(uavIndex);
+            }
         }
 
         return std::make_unique<DX12Texture>(

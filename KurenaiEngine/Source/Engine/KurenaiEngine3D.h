@@ -247,6 +247,9 @@ namespace Kurenai
             ShadowMap,          // m_ShadowDebugCascadeで選択したカスケードのシャドウマップを表示
             SSR,                // SSRパスの出力(SceneColor+反射)。SSR無効時はSceneColorと同一
             HiZ,                // Hi-Zミップチェーンの指定ミップ(m_HiZDebugMipLevel)をグレースケール表示
+            IBLIrradiance,      // IBL拡散イラディアンスマップ(TextureCube。現在の視線方向で球面を見回す表示)
+            IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLPrefilterDebugMipLevel、TextureCube)
+            IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス)
         };
         DebugView m_DebugView = DebugView::Final;
 
@@ -271,6 +274,48 @@ namespace Kurenai
         // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ
         std::unique_ptr<RHI::IRHITexture> m_SkyboxTexture;
 
+        // IBL(Image Based Lighting): m_SkyboxTextureから拡散イラディアンス・プリフィルタ済み鏡面・
+        // BRDF積分LUTの3つをコンピュートシェーダーで畳み込む(split-sum近似、Karis 2013)。
+        // スカイボックスは実行時に変化しない静的アセットのため、起動後最初のRender()で一度だけ
+        // 焼いてm_IBLBakedを立て、以降は焼き直さない(詳細はdocs/Architecture.html参照)。
+        // 拡散イラディアンス・プリフィルタ済み鏡面はいずれも本物のTextureCube
+        // (CreateUAVTextureCube/CreateMippedUAVTextureCube、面ごとに個別のUAVを持つ)で、
+        // IBLConvolve.hlslが面ごとに1回ずつディスパッチして書き込む
+        // キューブマップの面数(D3D標準順: +X,-X,+Y,-Y,+Z,-Z)。IBLの2つのキューブマップは
+        // いずれもこの順で面ごとにディスパッチする(IBLConvolve.hlsl CubeFaceDirectionと一致させる)
+        static constexpr uint32_t kCubeFaceCount = 6;
+        static constexpr uint32_t kIBLIrradianceSize = 32;
+        static constexpr uint32_t kIBLPrefilterBaseSize = 128;
+        // プリフィルタ済み鏡面マップのミップ数(128,64,32,16,8,4の6段)。ラフネス[0,1]を
+        // [0, kIBLPrefilterMipLevels-1]のミップ番号へ線形マッピングする(DeferredLighting.hlsl参照)
+        static constexpr uint32_t kIBLPrefilterMipLevels = 6;
+        static constexpr uint32_t kIBLBRDFLUTSize = 128;
+        bool m_IBLBaked = false;
+        std::unique_ptr<RHI::IRHITexture> m_IrradianceTexture;
+        std::unique_ptr<RHI::IRHITexture> m_PrefilteredEnvTexture;
+        std::unique_ptr<RHI::IRHITexture> m_BRDFLUTTexture;
+        std::unique_ptr<RHI::IRHIShader> m_BRDFLUTComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_PrefilterPipelineState;
+        // プリフィルタ済み鏡面のミップごとの畳み込みで使うラフネス値を渡す専用の定数バッファ
+        std::unique_ptr<RHI::IRHIBuffer> m_IBLPrefilterConstantBuffer;
+        // デバッグ表示(Render Targets)で確認するプリフィルタ済み鏡面マップのミップレベル
+        int32_t m_IBLPrefilterDebugMipLevel = 0;
+        // IBL(拡散イラディアンス+プリフィルタ済み鏡面)のON/OFFと強度。無効時はシェーダ側
+        // (DeferredLighting.hlsl)でEvaluateIBLの代わりにIBL導入以前と同じ定数色アンビエント
+        // (AmbientColor.rgb)へフォールバックする(真っ暗にはしない)。既定値を1.0でなく0.5に
+        // しているのは、スカイボックスの空の輝度分布を明るく補正した(14.6節)結果、既定の
+        // Perez分布そのままではIBL全体の寄与が強すぎたため(実機で指摘された見た目の問題)
+        bool m_IBLEnabled = true;
+        float m_IBLIntensity = 0.5f;
+        // Enable IBL無効時に使う定数色アンビエントフォールバックの強度倍率。シェーダ側ではなく
+        // Render()がFrameConstants.AmbientColorへ書き込む時点でrgb(alphaのdayFactorは除く)に
+        // 乗算する(HLSL側は素のAmbientColor.rgbを読むだけでよい)
+        float m_AmbientScale = 0.2f;
+
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = 12.0f;
         bool m_TimeAutoAdvance = false;
@@ -284,7 +329,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_ObjectConstantBuffer;
 
-        // ポイント/スポットライトのリスト(t5、StructuredReadOnly)と、有効ライト数を渡すb1。
+        // ポイント/スポットライトのリスト(t8、StructuredReadOnly)と、有効ライト数を渡すb1。
         // 太陽(平行光)はb0のLightDirection/LightColorのまま(詳細はdocs/Architecture.html参照)
         std::unique_ptr<RHI::IRHIBuffer> m_LightBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_LightingConstantBuffer;
