@@ -2,6 +2,8 @@
 
 #include <string>
 
+#include "KurenaiTypes.h"
+
 namespace Kurenai::Core
 {
     enum class LogLevel
@@ -15,7 +17,7 @@ namespace Kurenai::Core
     // OutputDebugString(DebugView等で確認可能)と実行ファイルと同じディレクトリの
     // KurenaiEngine.logの両方に出力する。Update/Renderが別スレッドで動作するため、
     // 内部で排他制御しており、どのスレッドから呼んでも安全
-    class Logger
+    class KURENAI_API Logger
     {
     public:
         static void Info(const std::string& tag, const std::string& message);

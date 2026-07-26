@@ -317,11 +317,12 @@ ImGuiパネル経由</strong>):
     <li><code>F1</code> でImGuiパネルの表示/非表示切り替え</li>
     <li>画面左上のImGuiパネル(Scenes / Post Processing / Render Targets / Lighting / Profiler)で
     表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/SSRのON・OFFやパラメータ調整、デバッグ表示
-    バッファの選択、時刻(昼夜サイクル)の調整、FPS/CPU/GPUの計測値確認ができる</li>
+    バッファの選択、時刻(昼夜サイクル)とEV100(露出)の調整、ポイント/スポットライトの
+    一覧・追加・削除・編集、FPS/CPU/GPUの計測値確認ができる</li>
   </ul>
 </li>
 <li>表示できるシーンはビルド済みバイナリに組み込み済み(Sponza / Bistro (McGuire) Exterior /
-Bistro (McGuire) Interior / White Surface Test)。カスタムモデルの追加や、
+Bistro (McGuire) Interior / White Surface Test / Light Test)。カスタムモデルの追加や、
 シーン一覧の外部からのカスタマイズは現状の公開APIではサポートしていない(<code>Run()</code> を
 呼ぶ以外のカスタマイズ余地がないのが <code>KurenaiEngine3D</code> の設計上の割り切り)。</li>
 <li>コンストラクタに渡した <code>GraphicsAPI</code> に応じてDX11/DX12いずれかのバックエンドで
@@ -571,6 +572,7 @@ void SetIndexBuffer(IRHIBuffer* buffer);           // 32bit(uint32_t)インデ�
 void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer);
 void SetTexture(uint32_t slot, IRHITexture* texture);
 void SetSampler(uint32_t slot, IRHISampler* sampler);
+void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer); // BufferUsage::StructuredReadOnly用(下記4.4参照)
 void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes);
 void Draw(uint32_t vertexCount, uint32_t startVertexLocation);
 void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation);
@@ -583,6 +585,14 @@ void SetComputeTexture(uint32_t slot, IRHITexture* texture);
 void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0); // mipLevelはCreateHiZTexture用(4.3.2参照)
 void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer);
 void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ);</code></pre>
+<p>
+<code>SetShaderResourceBuffer</code>は<code>BufferUsage::StructuredReadOnly</code>で作成した
+バッファを<code>StructuredBuffer&lt;T&gt;</code>としてピクセルシェーダへ読み取り専用でバインドする
+(要素数が可変で定数バッファに収めるには大きい配列向け。詳細は4.4参照)。<strong>スロット空間は
+<code>SetTexture</code>と共通</strong>(<code>t0</code>〜<code>t6</code>)のため、同じ描画内で
+テクスチャとスロットが衝突しないよう呼び出し側で調整すること。DX11バックエンドでは
+<code>SetTexture</code>と同様ピクセルシェーダからのみ参照できる。
+</p>
 
 <h4 id="compute">4.3.1 コンピュートシェーダー</h4>
 <p>
@@ -698,7 +708,11 @@ IMMUTABLEになり以後の更新が失敗するため、必ずnullptrで作成�
 <code>RHIDesc.h</code>(<code>BufferDesc</code>, <code>ShaderDesc</code>, <code>InputElementDesc</code>,
 <code>PipelineStateDesc</code>, <code>ComputePipelineStateDesc</code>)と<code>RHIEnums.h</code>
 (<code>ShaderStage</code>: <code>Vertex</code>/<code>Pixel</code>/<code>Compute</code>、
-<code>BufferUsage</code>: <code>Vertex</code>/<code>Index</code>/<code>Constant</code>/<code>Structured</code>(コンピュートシェーダー用のRWStructuredBuffer)、
+<code>BufferUsage</code>: <code>Vertex</code>/<code>Index</code>/<code>Constant</code>/<code>Structured</code>(コンピュートシェーダー用のRWStructuredBuffer)/
+<code>StructuredReadOnly</code>(CPUから毎フレーム<code>UpdateBuffer</code>で書き換え、
+シェーダからは<code>StructuredBuffer&lt;T&gt;</code>として読み取り専用。<code>SetShaderResourceBuffer</code>で
+グラフィックスパイプラインへバインドする。要素数が可変で定数バッファに収めるには大きい配列
+— <code>KurenaiEngine3D</code>のポイント/スポットライトリストが実例 — 向け)、
 <code>Format</code>, <code>BlendMode</code> など)に描画リソースの
 記述構造体・列挙型がまとまっている。<code>PipelineStateDesc::BlendMode</code>には
 <code>Opaque</code>(既定・不透明)、<code>AlphaBlend</code>(標準アルファブレンド)、
@@ -727,50 +741,195 @@ void SetTitle(const std::wstring&amp; title);</code></pre>
 <h3>4.6 <code>Assets::LoadModel</code></h3>
 <pre><code>Model LoadModel(RHI::IRHIDevice&amp; device, const std::wstring&amp; filePath);</code></pre>
 <p>
-assimp経由でglTF/FBX等を読み込み、頂点/インデックスバッファとテクスチャをRHI経由でGPUへ
-アップロード済みの状態で <code>Model</code>(<code>Mesh</code>の配列)として返す。各メッシュの
-ノード変換(ワールド行列)は頂点座標へ焼き込み済みのため、描画時に別途ワールド行列を掛ける必要は
-ない。頂点レイアウトは <code>POSITION(R32G32B32_Float, offset=0)</code>,
-<code>NORMAL(R32G32B32_Float, offset=12)</code>, <code>TEXCOORD0(R32G32_Float, offset=24)</code>
-(<code>Assets::Vertex</code>, 32バイト)。読み込むと同じ場所に
-<code>&lt;元のファイル名&gt;.kmodelcache</code> というバイナリキャッシュが自動生成され、
-2回目以降の読み込みが高速化される。
+<strong>KurenaiPacker.exe</strong>(本リポジトリ同梱のオフラインアセットビルドツール)が事前生成した
+<code>.kmodel</code>(マニフェスト)・<code>.kgeom</code>(ジオメトリ実体)・<code>.ktex</code>
+(BC7圧縮・ミップ生成済みテクスチャ実体)の3種のファイルを読み込み、頂点/インデックスバッファと
+テクスチャをRHI経由でGPUへアップロード済みの状態で <code>Model</code>(<code>Mesh</code>の配列)
+として返す。<code>filePath</code>には<code>.kmodel</code>のパスを渡す
+(<code>.gltf</code>/<code>.fbx</code>等のソースモデルを直接渡すことはできない。事前に
+KurenaiPacker.exeで変換すること。使い方は<a href="../README.md">README.md</a>参照)。
 </p>
-<h4>4.6.1 テクスチャキャッシュと並列プリフェッチ</h4>
+
+<h4 id="lights">4.6.1 ライトの読み込み(<code>Model::Lights</code>)</h4>
 <p>
-PNG/JPG等の無圧縮テクスチャは、読み込むと同じ場所に
-<code>&lt;元のテクスチャファイル名&gt;.srgb.ktexcache</code> /
-<code>.linear.ktexcache</code>(ベースカラー等sRGBとして読むかで
-ファイル名を分ける。同じ画像を異なる色空間で参照するケースの取り違え防止)という、
-ミップマップ生成済み・BC7圧縮済みのDDSペイロードを保持するバイナリキャッシュが自動生成される
-(<code>RHI::TextureImage::LoadFromFile</code>が担当)。初回はWICデコード・ミップ生成・BC7圧縮が
-走るが、BC7圧縮はGPU(コンピュートシェーダー)で行うため初回でも十分高速(Sponza69枚で実測7秒程度)。
-2回目以降はこのキャッシュを読むだけになりほぼ瞬時に完了する。
-DDS/TGA(既に圧縮・ミップ済みである前提の配布形式)はこのキャッシュの対象外。
+モデルファイルにポイント/スポット/平行光が含まれる場合、<code>Model::Lights</code>
+(<code>std::vector&lt;Assets::Light&gt;</code>)として読み込まれる。glTFは
+<code>KHR_lights_punctual</code> 拡張、FBXはLightノードから読み込む(抽出自体はKurenaiPacker.exeが
+パック時に行い、<code>.kmodel</code>の<code>LightEntry[]</code>として格納する。ランタイムはそれを
+そのまま読むだけで、assimpには依存しない)。
+</p>
+<pre><code>enum class LightType { Directional, Point, Spot };
+
+struct Light
+{
+    LightType Type;
+    float Position[3];         // ローカル座標(モデル自身の空間。Directionalでは未使用)
+    float Direction[3];        // 光が進む向き(正規化済み)。Spot/Directionalで使用
+    float Color[3];            // 線形色。最大成分が1になるよう正規化済み
+    float Intensity;           // 測光量。Point/Spotはカンデラ(cd)、Directionalはルクス(lx)
+    float Range;                // 影響半径。Directionalでは未使用
+    float SpotInnerConeAngle;   // ラジアン。Spotのみ
+    float SpotOuterConeAngle;
+    bool Enabled;
+    std::string Name;
+};</code></pre>
+<ul>
+<li><code>Intensity</code>の単位は物理量。glTFは<code>KHR_lights_punctual</code>の値
+(カンデラ/ルクス)をそのまま読み込むため正確。FBXには物理単位が存在しないため、DCC側の
+<code>Intensity</code>プロパティをカンデラ相当として近似する(精度は保証されない)。</li>
+<li>表示上の明るさは測光量に実在の写真露出値<strong>EV100</strong>(<code>KurenaiEngine3D</code>の
+Lightingパネルの「EV100」)を直接掛けて求める(<code>exposure = 1 / (1.2 * 2^EV100)</code>)。
+太陽光・環境光にも同じ露出が一様にかかる、シーン全体で単一の設定になっている。EV100は値が
+大きいほど明るいシーンを表す実在の写真用語であり、<strong>値を上げるほど描画は暗くなる</strong>
+(Photoshop等の「露出」スライダーとは向きが逆なので注意)。</li>
+<li><code>Range</code>はglTFにノードのメタデータ<code>PBR_LightRange</code>があればその値を
+使う。無ければ打ち切り輝度からEV100=15.0(既定値)を仮定して逆算した推定値が入る
+(この推定はKurenaiPacker.exeのパック時に一度だけ行われるため、後からEV100を大きく変更すると
+実際に見えるべき範囲と合わなくなることがある。その場合はImGuiでRangeを手動調整する)。</li>
+<li>平行光は太陽光との二重照明を避けるため、読み込み時は既定で<code>Enabled = false</code>
+になる(ImGuiから有効化できる)。</li>
+<li><strong>エリアライト(球・チューブ・矩形)は未対応</strong>。glTFの
+<code>KHR_lights_punctual</code>にエリアライトの定義が無く、FBXのエリアライトはassimpが
+未対応種別として扱うため、いずれの形式からも読み込めない。</li>
+<li><code>Position</code>/<code>Direction</code>は<code>.kmodel</code>内ではモデル自身の
+ローカル空間のまま保持される。複数モデルをシーン上へ配置する場合(下記4.7)、
+<code>Assets::LoadScene</code>が各<code>ModelInstance::World</code>でワールド空間へ変換し、
+<code>.kscene</code>自身の<code>[Light]</code>セクションのライトと合成した
+<code>Scene::Lights</code>として返す。</li>
+</ul>
+
+<h4>4.6.2 パッケージ読み込みと並列プリフェッチ</h4>
+<p>
+<code>.kmodel</code>が参照するユニークな<code>.ktex</code>は、<code>ModelLoader.cpp</code>内の
+<code>TextureLoader::LoadAll</code>がワーカースレッドで並列にデコードする。パック済みの
+<code>.ktex</code>は既にBC7圧縮・ミップ生成済みのDDSペイロードを持つため、ランタイム側では
+<code>RHI::TextureImage::LoadFromPackedTexture</code>によるファイル読み込み+DDSデコードのみが
+発生し、WICデコード・ミップ生成・GPU BC7圧縮は一切走らない(これらは全てKurenaiPacker.exeが
+パック時に済ませている)。デコード自体はGPUデバイスを必要としないためワーカースレッドで
+並列化できるが、GPUリソース化(<code>device.CreateTextureFromImage</code>)はデバイスに紐づく
+処理のため呼び出し元スレッドで直列に行う。テクスチャ個別の読み込みに失敗した場合は、
+スロットの種類に応じて白/フラット法線/マゼンタのプレースホルダーへフォールバックし、
+モデル全体の読み込みは継続する。
 </p>
 <p>
-BC7圧縮は<code>DirectXTex::Compress</code>のGPU版(<code>ID3D11Device</code>を渡すオーバーロード、
-コンピュートシェーダーで実装されたBCDirectCompute)を使う(<code>TextureImage.cpp</code>内の
-<code>CompressBC7</code>)。この用途専用に、エンジン本体のレンダリングデバイス(DX11/DX12どちらでも)
-とは独立した小さなD3D11デバイスを遅延生成して使い回す(<code>GetCompressionDevice</code>)。
-DX12バックエンド利用時でもこのデバイスだけは常にD3D11で用意する。CPU版<code>Compress</code>への
-フォールバックは持たない(ソフトウェアBC7圧縮は実用的な速度が出ないため)。GPU圧縮用デバイスの
-作成に失敗した環境(古いGPU/ドライバ等)や個々の圧縮呼び出し自体が失敗した場合は、
-<code>LoadFromFile</code>側の既存の「圧縮失敗時は非圧縮のまま使う」フォールバックへそのまま合流する
-(この場合その画像だけキャッシュは書き出されず、次回また圧縮を試みる)。
+各メッシュのノード変換(ワールド行列)はパック時に頂点座標へ焼き込み済みのため、
+<code>Model</code>自体を描画する分には別途ワールド行列を掛ける必要はない
+(複数モデルをシーン上の別位置へ配置する場合は下記4.7の<code>Assets::LoadScene</code>を使う)。
+頂点レイアウトは<code>POSITION(R32G32B32_Float, offset=0)</code>,
+<code>NORMAL(R32G32B32_Float, offset=12)</code>, <code>TEXCOORD0(R32G32_Float, offset=24)</code>,
+<code>TANGENT(R32G32B32A32_Float, offset=32)</code>(<code>Assets::Vertex</code>, 48バイト)。
+インデックスは常に32bit固定。
 </p>
 <p>
-<code>LoadModel</code>はモデル1つぶんのテクスチャ読み込みをまとめて並列化する
-(<code>ModelLoader.cpp</code>内の<code>TextureLoader::Prefetch</code>、論理コア数を上限8で
-クランプしたワーカースレッドを使う)。各ワーカーが行うWICデコード・ミップ生成は純粋なCPU作業のため
-コア数ぶん安全に並列化できる一方、GPU圧縮自体は共有のGPUデバイスを使うため
-<code>TextureImage.cpp</code>内のミューテックスで直列化される(BCDirectComputeはデバイスの
-イミディエイトコンテキストを直接使うため、複数スレッドから同時に呼べない)。この設計に至る前に
-「ワーカースレッド数×BC7圧縮内部の並列度」が掛け算されてしまう問題(CPU版<code>Compress</code>に
-<code>TEX_COMPRESS_PARALLEL</code>を指定してOpenMPで並列化しつつ、外側もワーカー並列化していたため
-論理コア数を大幅に超えるスレッドが競合しマシン全体が重くなった)を実機で確認しており、GPU圧縮への
-切り替えはこの問題の根本的な解決も兼ねている。
+<code>.kmodel</code>のバージョンがランタイムと一致しない、ファイルが壊れている、参照する
+<code>.kgeom</code>/<code>.ktex</code>が見つからない等、読み込みに失敗した場合は
+<code>std::runtime_error</code>を投げる(呼び出し前と異なりフォールバック先が無いため)。
+個々のテクスチャの読み込みに失敗した場合はモデル全体は読み込みを継続し、白1x1
+(BaseColor/MetallicRoughness)またはフラット法線(Normal)、あるいは目立つマゼンタ色の
+プレースホルダーに差し替えられる。
 </p>
+<h4>4.6.1 パッケージ読み込みと並列プリフェッチ</h4>
+<p>
+<code>.ktex</code>はKurenaiPacker.exeがWICデコード・ミップ生成・GPU BC7圧縮を事前に済ませた
+DDSペイロードをそのまま格納したファイルのため、<code>LoadModel</code>はファイルを読んで
+<code>DirectX::LoadFromDDSMemory</code>でデコードするだけでよく、WICデコード・ミップ生成・
+BC7圧縮のいずれも実行時には発生しない。
+</p>
+<p>
+それでも大量のテクスチャを持つモデル(Bistro等)では、ファイルI/Oとデコードの合計時間を
+短縮するため<code>LoadModel</code>はモデル1つぶんのテクスチャ読み込みをまとめて並列化する
+(<code>ModelLoader.cpp</code>内の<code>TextureLoader::LoadAll</code>、論理コア数を上限8で
+クランプしたワーカースレッドを使う)。各ワーカーが行うのは
+<code>RHI::TextureImage::LoadFromPackedTexture</code>によるファイル読み込み+DDSデコードのみで
+GPUデバイスを必要としないため安全に並列化できる一方、GPUリソース作成
+(<code>device.CreateTextureFromImage</code>)自体はデバイスに紐づく処理のため呼び出し元スレッドで
+直列に行う。
+</p>
+<h3>4.7 シーンファイル(<code>.kscene</code>)と <code>Assets::LoadScene</code></h3>
+<pre><code>Scene LoadScene(RHI::IRHIDevice&amp; device, const std::wstring&amp; sceneFilePath, const std::wstring&amp; assetRootDirectory);
+std::wstring ReadSceneName(const std::wstring&amp; sceneFilePath);</code></pre>
+<p>
+<code>.kscene</code>は複数モデルの配置(平行移動・回転・スケール)とカメラ・太陽光の初期値を
+1ファイルにまとめる、UTF-8のテキスト形式。バイナリ変換を経ずランタイムが直接パースするため、
+配置や太陽の向きをKurenaiPackerの再実行なしに即座に調整できる。<code>Assets::KurenaiEngine3D</code>は
+起動時に<code>&lt;DLLフォルダ&gt;/Assets/Scenes/*.kscene</code>を列挙し、ImGuiの「Scenes」パネルへ
+ファイル名の昇順で並べる(表示名は<code>ReadSceneName</code>が読む<code>[Scene] Name</code>、
+省略時はファイル名)。
+</p>
+<p>
+<code>LoadScene</code>は<code>[Model]</code>ごとに<code>Assets::LoadModel</code>を実際に呼び出し、
+TRS(平行移動・回転・スケール)から計算したワールド行列・法線行列(逆転置)・
+<code>TangentSignFlip</code>(負スケール時の従法線反転補正)を持つ<code>ModelInstance</code>の
+配列として<code>Scene</code>を返す。各モデルのAABBをワールド変換して合成したシーン全体のAABBも
+保持し、カメラの自動配置やシャドウマップのフィッティングに使われる。失敗時は
+<code>std::runtime_error</code>を投げる(ファイル名・行番号・該当行の内容をログに出力する)。
+</p>
+<table>
+<thead><tr><th>型</th><th>書式</th><th>例</th></tr></thead>
+<tbody>
+<tr><td><code>string</code></td><td>行末までの文字列。UTF-8。前後の半角空白/タブのみトリム。内部の空白・日本語・記号はそのまま保持。<code>"</code>で囲むと前後の空白も含めて完全にそのまま扱う</td><td><code>Bistro (McGuire) - Exterior</code></td></tr>
+<tr><td><code>path</code></td><td><code>string</code>と同じ扱い。加えて<code>\</code>を<code>/</code>に正規化する。絶対パス・<code>..</code>は不可</td><td><code>BistroMcGuire/Exterior.kmodel</code></td></tr>
+<tr><td><code>float</code></td><td>10進浮動小数。指数表記可</td><td><code>12.0</code> / <code>-53.5</code></td></tr>
+<tr><td><code>float3</code></td><td><code>float</code>をカンマ区切りで3つ。各要素の前後空白は無視</td><td><code>21.5, 16.0, -53.5</code></td></tr>
+<tr><td><code>bool</code></td><td><code>true</code> / <code>false</code>(大文字小文字無視)</td><td><code>true</code></td></tr>
+<tr><td><code>enum</code></td><td>定義された識別子(大文字小文字無視)</td><td><code>Point</code> / <code>Spot</code></td></tr>
+</tbody>
+</table>
+<table>
+<thead><tr><th>セクション</th><th>出現</th><th>キー</th><th>型</th><th>必須</th><th>既定値</th><th>説明</th></tr></thead>
+<tbody>
+<tr><td><code>[Scene]</code></td><td>0〜1</td><td><code>Name</code></td><td>string</td><td>-</td><td>ファイル名</td><td>ImGuiのシーン一覧に出る表示名</td></tr>
+<tr><td rowspan="3"><code>[Model]</code></td><td rowspan="3">1以上</td><td><code>Path</code></td><td>path</td><td><strong>必須</strong></td><td>-</td><td>Assetsルートからの<code>.kmodel</code>相対パス</td></tr>
+<tr><td><code>Translation</code></td><td>float3</td><td>-</td><td>0,0,0</td><td>平行移動</td></tr>
+<tr><td><code>RotationEuler</code>/<code>Scale</code></td><td>float3</td><td>-</td><td>0,0,0 / 1,1,1</td><td>回転(度、pitch/yaw/roll)・スケール(負値も可)</td></tr>
+<tr><td rowspan="2"><code>[Camera]</code></td><td rowspan="2">0〜1</td><td><code>Position</code></td><td>float3</td><td>セクションがあれば必須</td><td>-</td><td>初期カメラ位置</td></tr>
+<tr><td><code>Yaw</code> / <code>Pitch</code></td><td>float</td><td>-</td><td>0.0</td><td>度</td></tr>
+<tr><td rowspan="3"><code>[Sun]</code></td><td rowspan="3">0〜1</td><td><code>TimeOfDay</code></td><td>float</td><td>-</td><td>12.0</td><td>0〜24。範囲外はエラー</td></tr>
+<tr><td><code>AzimuthDegrees</code></td><td>float</td><td>-</td><td>126.87</td><td>太陽が昇る方位角</td></tr>
+<tr><td><code>Shadow</code></td><td>bool</td><td>-</td><td>true</td><td>シャドウマップの有効/無効</td></tr>
+<tr><td rowspan="6"><code>[Light]</code></td><td rowspan="6">0以上</td><td><code>Type</code></td><td>enum</td><td><strong>必須</strong></td><td>-</td><td><code>Point</code> / <code>Spot</code></td></tr>
+<tr><td><code>Position</code></td><td>float3</td><td><strong>必須</strong></td><td>-</td><td>-</td></tr>
+<tr><td><code>Direction</code></td><td>float3</td><td>Spotのみ必須</td><td>-</td><td>-</td></tr>
+<tr><td><code>Color</code> / <code>Intensity</code></td><td>float3 / float</td><td>-</td><td>1,1,1 / 1.0</td><td>リニア空間RGB</td></tr>
+<tr><td><code>Range</code></td><td>float</td><td>-</td><td>10.0</td><td>-</td></tr>
+<tr><td><code>ConeAngleDegrees</code></td><td>float</td><td>Spotのみ</td><td>45.0</td><td>-</td></tr>
+</tbody>
+</table>
+<p>
+<code>[Light]</code>で指定したライトはワールド空間の値として扱われ、モデル埋め込みのライト
+(4.6.1節参照)と合成された<code>Scene::Lights</code>としてそのまま描画に反映される
+(カンデラ/ルクス・EV100露出の扱いは4.6.1節と同じ。内部実装は
+<a href="Architecture.html#lights">実装者向けドキュメント 11章「複数ライト」</a>を参照)。
+</p>
+<p>
+<strong>パースの規則</strong>: ファイルはUTF-8(BOM許容)。<code>#</code>は行頭、または直前が
+半角空白/タブの場合のみコメント開始とみなす(<code>Path = Textures/#1/foo.kmodel</code>のように
+非空白文字に直接続く<code>#</code>は文字通り扱われ、パスが壊れない)。<code>key = value</code>は
+最初の<code>=</code>だけで分割する。値の前後の半角空白/タブのみをトリムし、値全体が<code>"</code>で
+囲まれている場合は引用符を剥がして中身を一切トリムしない(前後に意図的な空白を含むパスや、
+非空白直後でない<code>#</code>から始まるパスを書きたい場合に使う)。未知のセクション・未知のキーは
+警告ログを出してスキップする(前方互換性のため、将来項目が増えても古いランタイムが落ちない)。
+</p>
+<p>
+<strong><code>[Model] Path</code>の基準ディレクトリに注意</strong>: <code>.kscene</code>の
+<code>[Model] Path</code>は<strong>Assetsルート</strong>(実行時は<code>&lt;DLLフォルダ&gt;/Assets/</code>)
+からの相対パスだが、<code>.kmodel</code>内部が持つ<code>.kgeom</code>/<code>.ktex</code>への
+パスは<strong><code>.kmodel</code>自身のあるディレクトリ</strong>からの相対パスであり、基準が異なる。
+</p>
+<pre><code># KurenaiEngine シーンファイル
+[Scene]
+Name = Bistro (McGuire) - Exterior
+
+[Model]
+Path = BistroMcGuire/Exterior.kmodel
+
+[Camera]
+Position = 21.5, 16.0, -53.5
+Yaw = 0.0
+
+[Sun]
+TimeOfDay = 12.0
+AzimuthDegrees = 126.87</code></pre>
 </section>
 
 <section id="input">
@@ -871,8 +1030,10 @@ void StopSound(VoiceHandle voice);</code></pre>
 <h2>7. ビルドに必要な追加の依存ファイル</h2>
 <p>
 <code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code>/<code>Library</code> のいずれを
-使う場合でも、サンプルプロジェクト自身がDirectXTexやassimpのヘッダー・ライブラリを直接参照する
-必要はありません(すべてDLL内部にリンク済み)。サンプルプロジェクトに必要なのは以下だけです。
+使う場合でも、サンプルプロジェクト自身がDirectXTexのヘッダー・ライブラリを直接参照する
+必要はありません(DLL内部にリンク済み)。<strong>assimpはKurenaiEngine.dllにはリンクされていない</strong>
+(モデル解析はすべてオフラインの<code>KurenaiPacker.exe</code>側で行うため)。サンプルプロジェクトに
+必要なのは以下だけです。
 </p>
 <ul>
 <li>インクルードディレクトリ: <code>KurenaiEngine\Source\Engine</code>
@@ -881,6 +1042,13 @@ void StopSound(VoiceHandle voice);</code></pre>
 リンクされる)</li>
 <li>実行時に <code>KurenaiEngine.dll</code> が実行ファイルと同じフォルダに存在すること</li>
 </ul>
+<p>
+一方<strong><code>KurenaiPacker.exe</code>(<code>Tools\KurenaiPacker\KurenaiPacker.vcxproj</code>)は
+assimp・DirectXTexに加え<code>KurenaiEngine.vcxproj</code>への依存を持つ</strong>
+(<code>RHI::TextureImage</code>によるBC7圧縮を利用するため)。アセットを<code>.gltf</code>/
+<code>.fbx</code>から<code>.kmodel</code>へ変換する場合のみビルド・実行が必要で、詳細な
+ビルド手順・コマンドラインはREADME.mdを参照。
+</p>
 </section>
 
 <section id="constraints">
@@ -896,6 +1064,11 @@ void StopSound(VoiceHandle voice);</code></pre>
 <tr><td>DrawRoundedRectの角丸半径</td><td><code>cornerRadiusPixels</code>が<code>width</code>/<code>height</code>の半分より大きい値の場合、ピクセルシェーダー側で半幅・半高さの小さい方に自動的にクランプされる(矩形からはみ出す角丸にはならない)</td></tr>
 <tr><td>ビルド設定の一致</td><td><code>KurenaiEngine.dll</code> とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
 <tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
+<tr><td>アセットの事前変換が必須</td><td><code>Assets::LoadModel</code>は<code>.kmodel</code>のみを受け付ける。<code>.gltf</code>/<code>.fbx</code>等のソースモデルは、実行前に<code>KurenaiPacker.exe</code>で変換しておく必要がある(7章参照)</td></tr>
+<tr><td>ポイント/スポットライトの影</td><td>影を落とさない(シャドウマップは平行光1灯のみ対応)</td></tr>
+<tr><td>ライトの同時描画数</td><td>最大1024灯まで(実データでの想定はせいぜい数灯〜十数灯)。超過分はカメラに近い順に採用される</td></tr>
+<tr><td>エリアライト</td><td>未対応(4.6.1参照)。球・チューブ・矩形のライトはモデルからもImGuiからも作成できない</td></tr>
+<tr><td>EV100と屋内シーン</td><td>太陽・環境光・ポイント/スポットライトすべてに同じEV100が一様にかかるため、屋外の直射日光を基準にした既定値(EV100=15)のままだと屋内照明だけのシーンは暗くなる。EV100は値が大きいほど明るいシーンを表す実在の写真用語のため、値を上げると描画は暗くなる(実カメラの露出と同様の向き)。シーンに応じてEV100を下げて調整する(自動露出は無い)</td></tr>
 </tbody>
 </table>
 </section>

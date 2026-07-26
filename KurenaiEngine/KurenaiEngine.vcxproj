@@ -58,13 +58,13 @@
       <PreprocessorDefinitions>KURENAI_ENGINE_EXPORTS;_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\assimp\include;$(ProjectDir)..\ThirdParty\assimp\build\include;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Debug;$(ProjectDir)..\ThirdParty\assimp\build\lib\Debug;$(ProjectDir)..\ThirdParty\assimp\build\contrib\zlib\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;assimp-vc143-mtd.lib;zlibstaticd.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -76,15 +76,15 @@
       <PreprocessorDefinitions>KURENAI_ENGINE_EXPORTS;NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\assimp\include;$(ProjectDir)..\ThirdParty\assimp\build\include;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Release;$(ProjectDir)..\ThirdParty\assimp\build\lib\Release;$(ProjectDir)..\ThirdParty\assimp\build\contrib\zlib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;assimp-vc143-mt.lib;zlibstatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
@@ -93,9 +93,9 @@
          ビルド失敗として扱わないようexit /bで無視する -->
     <PostBuildEvent>
       <Command>xcopy /Y /I /E /D "$(ProjectDir)Shaders" "$(OutDir)Shaders\"
-xcopy /Y /I /E /D "$(ProjectDir)..\Assets" "$(OutDir)Assets\"
+xcopy /Y /I /E /D "$(ProjectDir)..\Assets\Packed" "$(OutDir)Assets\"
 exit /b 0</Command>
-      <Message>Shaders/AssetsをOutDirへコピー</Message>
+      <Message>Shaders/Assets(Packed)をOutDirへコピー</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -109,9 +109,13 @@ exit /b 0</Command>
     <ClInclude Include="Source\Library\Core\CPUProfiler.h" />
     <ClInclude Include="Source\Library\Core\Logger.h" />
     <ClInclude Include="Source\Library\Core\RenderGraph.h" />
+    <ClInclude Include="Source\Library\Core\StringUtil.h" />
     <ClInclude Include="Source\Library\Assets\Vertex.h" />
     <ClInclude Include="Source\Library\Assets\Model.h" />
     <ClInclude Include="Source\Library\Assets\ModelLoader.h" />
+    <ClInclude Include="Source\Library\Assets\ModelPackage.h" />
+    <ClInclude Include="Source\Library\Assets\Scene.h" />
+    <ClInclude Include="Source\Library\Assets\SceneLoader.h" />
     <ClInclude Include="Source\Library\RHI\RHIEnums.h" />
     <ClInclude Include="Source\Library\RHI\RHIDesc.h" />
     <ClInclude Include="Source\Library\RHI\IRHIBuffer.h" />
@@ -173,6 +177,7 @@ exit /b 0</Command>
     <ClCompile Include="Source\Library\Core\Logger.cpp" />
     <ClCompile Include="Source\Library\Core\RenderGraph.cpp" />
     <ClCompile Include="Source\Library\Assets\ModelLoader.cpp" />
+    <ClCompile Include="Source\Library\Assets\SceneLoader.cpp" />
     <ClCompile Include="Source\Library\RHI\TextureImage.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Buffer.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Shader.cpp" />
@@ -205,6 +210,7 @@ exit /b 0</Command>
     <None Include="Shaders\GBuffer.hlsl" />
     <None Include="Shaders\DirectLighting.hlsl" />
     <None Include="Shaders\DeferredLighting.hlsl" />
+    <None Include="Shaders\HiZ.hlsl" />
     <None Include="Shaders\Present.hlsl" />
     <None Include="Shaders\SSAO.hlsl" />
     <None Include="Shaders\SSIL_VisibilityBitmask.hlsl" />

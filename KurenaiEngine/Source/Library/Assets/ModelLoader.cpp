@@ -2,11 +2,6 @@
 
 #include <Windows.h>
 
-#include <assimp/GltfMaterial.h>
-#include <assimp/Importer.hpp>
-#include <assimp/postprocess.h>
-#include <assimp/scene.h>
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -14,270 +9,90 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
-#include <functional>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <thread>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
 #include <vector>
 
 #include "Core/Logger.h"
+#include "Core/StringUtil.h"
+#include "ModelPackage.h"
 #include "RHI/TextureImage.h"
 #include "Vertex.h"
+
+// KurenaiPacker.exe(オフラインのアセットビルドツール)が生成した.kmodel/.kgeom/.ktexを
+// 読み込む。以前はここでassimpによるモデル解析とWICデコード・ミップ生成・GPU BC7圧縮を
+// 実行時に行い、その結果を.kmodelcache/.ktexcacheへキャッシュしていたが、その前処理は
+// すべてKurenaiPackerへ移した。そのためこのファイルはもうassimp/zlibに依存せず、
+// 「パース済み・圧縮済みのデータをファイルから読み、GPUバッファ/テクスチャへ流し込むだけ」
+// になっている。詳細な設計判断はdocs/Architecture.htmlの「モデルパッケージ形式」の章を参照
 
 namespace Kurenai::Assets
 {
     namespace
     {
-        std::string WideToUtf8(const std::wstring& wide)
-        {
-            if (wide.empty())
-            {
-                return {};
-            }
-
-            int length = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
-            std::string narrow(length, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, narrow.data(), length, nullptr, nullptr);
-            narrow.resize(length - 1);
-            return narrow;
-        }
-
-        std::wstring Utf8ToWide(const std::string& narrow)
-        {
-            if (narrow.empty())
-            {
-                return {};
-            }
-
-            int length = MultiByteToWideChar(CP_UTF8, 0, narrow.c_str(), -1, nullptr, 0);
-            std::wstring wide(length, L'\0');
-            MultiByteToWideChar(CP_UTF8, 0, narrow.c_str(), -1, wide.data(), length);
-            wide.resize(length - 1);
-            return wide;
-        }
+        using Core::Utf8ToWide;
+        using Core::WideToUtf8;
 
         std::wstring GetDirectory(const std::wstring& filePath)
         {
-            size_t pos = filePath.find_last_of(L"/\\");
+            const size_t pos = filePath.find_last_of(L"/\\");
             return pos == std::wstring::npos ? L"" : filePath.substr(0, pos + 1);
         }
 
-        bool FileExists(const std::wstring& path)
+        // 2時点間の経過時間をミリ秒の整数文字列にする(ログ表示用)
+        std::string FormatMs(std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point end)
         {
-            return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+            return std::to_string(static_cast<long long>(std::chrono::duration<double, std::milli>(end - start).count()));
         }
 
-        // FBXは「Textures/xxx.dds」のようなパスやファイル名のみを格納している場合があり、
-        // モデルからの相対パスをそのまま連結しただけでは見つからないことがあるため複数候補を試す
-        std::wstring ResolveTexturePath(const std::wstring& directory, const std::wstring& rawPath)
+        // StringPool(offset,length)からUTF-8部分文字列を安全に取り出す。壊れた.kmodelが
+        // 範囲外を指していてもプロセスを異常終了させないよう、必ず範囲チェックを行う
+        std::string ReadPoolString(const std::string& pool, uint32_t offset, uint32_t length, const char* fieldNameForError)
         {
-            std::wstring candidate = directory + rawPath;
-            if (FileExists(candidate))
+            if (static_cast<uint64_t>(offset) + length > pool.size())
             {
-                return candidate;
+                throw std::runtime_error(std::string("パッケージのStringPool参照が範囲外です: ") + fieldNameForError);
             }
-
-            const size_t slashPos = rawPath.find_last_of(L"/\\");
-            const std::wstring fileName = slashPos == std::wstring::npos ? rawPath : rawPath.substr(slashPos + 1);
-
-            candidate = directory + fileName;
-            if (FileExists(candidate))
-            {
-                return candidate;
-            }
-
-            candidate = directory + L"Textures\\" + fileName;
-            if (FileExists(candidate))
-            {
-                return candidate;
-            }
-
-            return directory + rawPath;
+            return pool.substr(offset, length);
         }
 
-        // 位置・法線が一致する頂点は、assimp内部では複数の面にまたがって別インスタンスとして
-        // 複製されていても本来同一の滑らかな表面点であるはずだが、CalcTangentSpace相当の計算を
-        // 面ごとに独立して行うと数値誤差で接線がばらつき、UV面積がほぼ0の縮退三角形が絡むと
-        // 接線がほぼ正反対になることすらある(法線マップがパッチワーク状に破綻して見える)。
-        // そのため「位置+法線」をキーに接線を蓄積・平均化して補う。
-        // UVはキーに含めない: 円筒状UV展開の継ぎ目(位置・法線は連続だがUVだけジャンプする、
-        // ごく普通のシームレス継ぎ目)ではUVが異なっても平均化すべきであり、キーにUVを含めると
-        // そこで平均化がブロックされて継ぎ目が硬い線として見えてしまう(実際にBistroのワイン
-        // グラスで確認済み)。ミラーUV(左右反転コピー)のような本当に別方向を向く継ぎ目は
-        // 通常「位置」自体が完全一致しない(モデリング上、鏡像コピーは別ジオメトリになる)ため、
-        // このキーで誤って混ざることは実用上ほぼない
-        struct TangentAccumKey
-        {
-            float Px, Py, Pz, Nx, Ny, Nz;
-
-            bool operator==(const TangentAccumKey& other) const
-            {
-                return Px == other.Px && Py == other.Py && Pz == other.Pz &&
-                    Nx == other.Nx && Ny == other.Ny && Nz == other.Nz;
-            }
-        };
-
-        struct TangentAccumKeyHash
-        {
-            size_t operator()(const TangentAccumKey& key) const
-            {
-                const std::hash<float> hasher;
-                size_t seed = hasher(key.Px);
-                for (float f : { key.Py, key.Pz, key.Nx, key.Ny, key.Nz })
-                {
-                    seed ^= hasher(f) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
-                }
-                return seed;
-            }
-        };
-
-        void CollectMeshNodes(
-            const aiScene* scene,
-            const aiNode* node,
-            const aiMatrix4x4& parentTransform,
-            std::vector<std::pair<const aiMesh*, aiMatrix4x4>>& out)
-        {
-            aiMatrix4x4 transform = parentTransform * node->mTransformation;
-
-            for (unsigned int i = 0; i < node->mNumMeshes; ++i)
-            {
-                out.emplace_back(scene->mMeshes[node->mMeshes[i]], transform);
-            }
-
-            for (unsigned int i = 0; i < node->mNumChildren; ++i)
-            {
-                CollectMeshNodes(scene, node->mChildren[i], transform, out);
-            }
-        }
-
-        // テクスチャの読み込みとキャッシュ・共有インスタンス(白/フラット法線)の管理を、
-        // assimp経由の読み込みとバイナリキャッシュ経由の読み込みの両方で共通して使う
+        // テクスチャの読み込みとキャッシュ・共有インスタンス(白/フラット法線/マゼンタ)の管理。
+        // .kmodelのTextureEntryは既にKurenaiPacker側でユニーク化(同じ画像+同じsRGBは1件に集約)
+        // 済みのため、旧実装のようなパス文字列ベースの重複排除キャッシュはもう不要で、
+        // 添字(TextureEntryのインデックス)だけで管理できる
         class TextureLoader
         {
         public:
-            TextureLoader(RHI::IRHIDevice& device, std::wstring directory, Model& model)
+            TextureLoader(RHI::IRHIDevice& device, Model& model)
                 : m_Device(device)
-                , m_Directory(std::move(directory))
                 , m_Model(model)
             {
             }
 
-            RHI::IRHITexture* Load(const std::string& path, bool sRGB)
+            // texturePathsの各要素(.ktexへのフルパス)を並列にデコードし、成功した分だけGPU
+            // リソース化してoutTexturesへ格納する。失敗した添字はoutTextures[i]==nullptrのまま
+            // 残すので、呼び出し側(LoadModel)がスロットの種類(BaseColor/Normal/MetallicRoughness)
+            // ごとに適切なフォールバック(白/フラット法線/マゼンタ)を選んで埋めること
+            void LoadAll(const std::vector<std::wstring>& texturePaths, std::vector<RHI::IRHITexture*>& outTextures)
             {
-                auto it = m_Cache.find(path);
-                if (it != m_Cache.end())
-                {
-                    return it->second;
-                }
-
-                RHI::IRHITexture* rawPtr = nullptr;
-                try
-                {
-                    const std::wstring fullPath = ResolveTexturePath(m_Directory, Utf8ToWide(path));
-                    auto texture = m_Device.CreateTextureFromFile(fullPath, sRGB);
-                    rawPtr = texture.get();
-                    m_Model.Textures.push_back(std::move(texture));
-                }
-                catch (const std::exception& e)
-                {
-                    // 読み込みに失敗したテクスチャは目立つ色のプレースホルダーで代替し、モデル全体の読み込みは継続する
-                    Core::Logger::Error("ModelLoader", "テクスチャの読み込みに失敗しました (" + path + "): " + e.what());
-                    auto texture = m_Device.CreateSolidColorTexture(255, 0, 255, 255);
-                    rawPtr = texture.get();
-                    m_Model.Textures.push_back(std::move(texture));
-                }
-
-                m_Cache.emplace(path, rawPtr);
-                return rawPtr;
-            }
-
-            // 法線マップ専用のロード関数。読み込みに失敗した場合、Load()と同じマゼンタの
-            // プレースホルダーにフォールバックすると、ピクセルシェーダーがそれをタンジェント
-            // 空間法線(1,0,1)として解釈してしまい、幾何学的にありえない方向の法線が
-            // 生成されてしまう(実際にBistroのTransparentGlass_Normal.ddsが1x1のBC5圧縮という
-            // 不正な形式でSRV生成に失敗し、この問題を引き起こしていたことをRenderDocで確認済み)。
-            // そのため法線マップの読み込み失敗時は「法線マップなし」を表す平坦法線にフォールバックする
-            RHI::IRHITexture* LoadNormal(const std::string& path)
-            {
-                auto it = m_Cache.find(path);
-                if (it != m_Cache.end())
-                {
-                    return it->second;
-                }
-
-                RHI::IRHITexture* rawPtr = nullptr;
-                try
-                {
-                    const std::wstring fullPath = ResolveTexturePath(m_Directory, Utf8ToWide(path));
-                    auto texture = m_Device.CreateTextureFromFile(fullPath, false);
-                    rawPtr = texture.get();
-                    m_Model.Textures.push_back(std::move(texture));
-                }
-                catch (const std::exception& e)
-                {
-                    Core::Logger::Error("ModelLoader", "法線マップの読み込みに失敗しました (" + path + "): " + e.what());
-                    rawPtr = GetFlatNormal();
-                }
-
-                m_Cache.emplace(path, rawPtr);
-                return rawPtr;
-            }
-
-            // Prefetchに渡すテクスチャ読み込み要求。IsNormalMapは失敗時のフォールバック先
-            // (マゼンタの単色テクスチャ or フラット法線)を選ぶためだけに使う
-            struct PrefetchRequest
-            {
-                std::string Path;
-                bool SRGB = false;
-                bool IsNormalMap = false;
-            };
-
-            // requestsに含まれるテクスチャを論理コア数ぶんのワーカースレッドで並列にデコードし、
-            // 完了したものから随時このスレッド(呼び出し元)でGPUリソース化してm_Cacheへ登録する。
-            // デコード(TextureImage::LoadFromFile、CPU処理でDirectXTexのWIC/BC7圧縮を含む)は
-            // GPUデバイスを必要としないためワーカーで並列化できるが、GPUリソース作成
-            // (device.CreateTextureFromImage)はデバイスに紐づく処理のためこのスレッドで直列に行う。
-            // 呼び出し後は、Load/LoadNormalが同じpathに対してキャッシュヒットで即座に返るようになる
-            // (フォールバック処理自体はLoad/LoadNormalと同じ内容をここでも個別に行っており、
-            // 両者の分岐を変えたわけではない)
-            void Prefetch(const std::vector<PrefetchRequest>& requests)
-            {
-                std::vector<const PrefetchRequest*> pending;
-                std::unordered_set<std::string> seen;
-                for (const auto& request : requests)
-                {
-                    if (request.Path.empty() || m_Cache.find(request.Path) != m_Cache.end())
-                    {
-                        continue;
-                    }
-                    if (!seen.insert(request.Path).second)
-                    {
-                        continue;
-                    }
-                    pending.push_back(&request);
-                }
-                if (pending.empty())
+                outTextures.assign(texturePaths.size(), nullptr);
+                if (texturePaths.empty())
                 {
                     return;
                 }
 
-                // BC7圧縮はGPU(コンピュートシェーダー)で行うようになった(TextureImage::CompressBC7)ため、
-                // ここでの並列化はもはやCPUの奪い合いにならない: 各ワーカーが行うWICデコード/ミップ生成は
-                // 純粋なCPU作業でコア数ぶん安全に並列化できる一方、GPU圧縮そのものは共有のGPUデバイスを
-                // 使うためTextureImage側のミューテックスで自動的に直列化される(イミディエイトコンテキストは
-                // 複数スレッドから同時に使えないため)。論理コア数をそのまま使うと(BC7ソフトウェア圧縮への
-                // フォールバック時など)過剰になりうるため、上限を設けておく
-                constexpr unsigned int kMaxPrefetchWorkers = 8;
-                const unsigned int hardwareThreads = std::min(kMaxPrefetchWorkers, std::max(1u, std::thread::hardware_concurrency()));
-                const unsigned int workerCount = std::min(hardwareThreads, static_cast<unsigned int>(pending.size()));
+                // デコード(TextureImage::LoadFromPackedTexture、単なるファイル読み込み+DDSデコードで
+                // GPUデバイスを必要としない)はワーカースレッドで並列化できるが、GPUリソース作成
+                // (device.CreateTextureFromImage)はデバイスに紐づく処理のためこのスレッドで直列に行う
+                constexpr unsigned int kMaxWorkers = 8;
+                const unsigned int hardwareThreads = std::min(kMaxWorkers, std::max(1u, std::thread::hardware_concurrency()));
+                const unsigned int workerCount = std::min(hardwareThreads, static_cast<unsigned int>(texturePaths.size()));
 
                 struct CompletedItem
                 {
-                    const PrefetchRequest* Request = nullptr;
+                    size_t Index = 0;
                     std::optional<RHI::TextureImage> Image;
                     std::string ErrorMessage;
                     uint64_t SizeInBytes = 0;
@@ -300,18 +115,16 @@ namespace Kurenai::Assets
                     for (;;)
                     {
                         const size_t index = nextIndex.fetch_add(1);
-                        if (index >= pending.size())
+                        if (index >= texturePaths.size())
                         {
                             break;
                         }
-                        const PrefetchRequest* request = pending[index];
 
                         CompletedItem item;
-                        item.Request = request;
+                        item.Index = index;
                         try
                         {
-                            const std::wstring fullPath = ResolveTexturePath(m_Directory, Utf8ToWide(request->Path));
-                            RHI::TextureImage image = RHI::TextureImage::LoadFromFile(fullPath, request->SRGB);
+                            RHI::TextureImage image = RHI::TextureImage::LoadFromPackedTexture(texturePaths[index]);
                             item.SizeInBytes = image.GetSizeInBytes();
                             item.Image = std::move(image);
                         }
@@ -336,7 +149,7 @@ namespace Kurenai::Assets
                     workers.emplace_back(workerFn);
                 }
 
-                for (size_t consumed = 0; consumed < pending.size(); ++consumed)
+                for (size_t consumed = 0; consumed < texturePaths.size(); ++consumed)
                 {
                     std::unique_lock<std::mutex> lock(queueMutex);
                     itemAvailable.wait(lock, [&] { return !completedQueue.empty(); });
@@ -348,41 +161,20 @@ namespace Kurenai::Assets
 
                     if (item.Image.has_value())
                     {
-                        RHI::IRHITexture* rawPtr = nullptr;
                         try
                         {
                             auto texture = m_Device.CreateTextureFromImage(*item.Image);
-                            rawPtr = texture.get();
+                            outTextures[item.Index] = texture.get();
                             m_Model.Textures.push_back(std::move(texture));
                         }
                         catch (const std::exception& e)
                         {
-                            Core::Logger::Error("ModelLoader", "テクスチャのGPU転送に失敗しました (" + item.Request->Path + "): " + e.what());
-                            if (item.Request->IsNormalMap)
-                            {
-                                rawPtr = GetFlatNormal();
-                            }
-                            else
-                            {
-                                auto placeholder = m_Device.CreateSolidColorTexture(255, 0, 255, 255);
-                                rawPtr = placeholder.get();
-                                m_Model.Textures.push_back(std::move(placeholder));
-                            }
+                            Core::Logger::Error("ModelLoader", "テクスチャのGPU転送に失敗しました (" + WideToUtf8(texturePaths[item.Index]) + "): " + e.what());
                         }
-                        m_Cache.emplace(item.Request->Path, rawPtr);
-                    }
-                    else if (item.Request->IsNormalMap)
-                    {
-                        Core::Logger::Error("ModelLoader", "法線マップの読み込みに失敗しました (" + item.Request->Path + "): " + item.ErrorMessage);
-                        m_Cache.emplace(item.Request->Path, GetFlatNormal());
                     }
                     else
                     {
-                        Core::Logger::Error("ModelLoader", "テクスチャの読み込みに失敗しました (" + item.Request->Path + "): " + item.ErrorMessage);
-                        auto texture = m_Device.CreateSolidColorTexture(255, 0, 255, 255);
-                        RHI::IRHITexture* rawPtr = texture.get();
-                        m_Model.Textures.push_back(std::move(texture));
-                        m_Cache.emplace(item.Request->Path, rawPtr);
+                        Core::Logger::Error("ModelLoader", "テクスチャの読み込みに失敗しました (" + WideToUtf8(texturePaths[item.Index]) + "): " + item.ErrorMessage);
                     }
                 }
 
@@ -415,94 +207,31 @@ namespace Kurenai::Assets
                 return m_FlatNormal;
             }
 
+            // 読み込みに失敗したBaseColor/MetallicRoughnessテクスチャの代替。目立つ色にすることで
+            // モデル全体の読み込みは継続しつつ問題箇所が分かるようにする
+            RHI::IRHITexture* GetMagentaPlaceholder()
+            {
+                if (!m_Magenta)
+                {
+                    auto texture = m_Device.CreateSolidColorTexture(255, 0, 255, 255);
+                    m_Magenta = texture.get();
+                    m_Model.Textures.push_back(std::move(texture));
+                }
+                return m_Magenta;
+            }
+
         private:
             RHI::IRHIDevice& m_Device;
-            std::wstring m_Directory;
             Model& m_Model;
-            std::unordered_map<std::string, RHI::IRHITexture*> m_Cache;
             RHI::IRHITexture* m_White = nullptr;
             RHI::IRHITexture* m_FlatNormal = nullptr;
+            RHI::IRHITexture* m_Magenta = nullptr;
         };
-
-        // === モデル読み込みキャッシュ ===
-        // assimpによるFBX/glTFの解析(特にJoinIdenticalVerticesを外した後も残る純粋なパース処理)は
-        // 大規模アセットで数秒〜十数秒かかるため、一度読み込んだモデルの頂点/インデックス/マテリアル
-        // 参照をバイナリファイルにキャッシュし、ソースファイルが更新されていない限り2回目以降の
-        // 読み込みではassimpを経由せずキャッシュから直接構築する
-
-        constexpr char kCacheMagic[4] = { 'K', 'M', 'C', '1' };
-        // v11: エミッシブ(自発光)テクスチャ・係数とアルファカットアウト(alphaCutoff)への対応に伴い、
-        // メッシュレコードのフィールド構成が変わったため加算
-        constexpr uint32_t kCacheVersion = 11;
-
-        struct CacheHeader
-        {
-            char Magic[4];
-            uint32_t Version;
-            uint64_t SourceFileTime;
-            uint64_t SourceFileSize;
-            float BoundsMin[3];
-            float BoundsMax[3];
-            uint32_t MeshCount;
-        };
-
-        std::wstring GetCachePath(const std::wstring& filePath)
-        {
-            return filePath + L".kmodelcache";
-        }
-
-        // 書き込み中のキャッシュはこの一時パスに書き、完了後にGetCachePath()へリネームする
-        // (下のLoadModel参照)
-        std::wstring GetCacheTempPath(const std::wstring& filePath)
-        {
-            return GetCachePath(filePath) + L".tmp";
-        }
-
-        bool GetFileTimeAndSize(const std::wstring& path, uint64_t& outTime, uint64_t& outSize)
-        {
-            WIN32_FILE_ATTRIBUTE_DATA data{};
-            if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data))
-            {
-                return false;
-            }
-            outTime = (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) | data.ftLastWriteTime.dwLowDateTime;
-            outSize = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
-            return true;
-        }
-
-        // 2時点間の経過時間をミリ秒の整数文字列にする(ログ表示用)
-        std::string FormatMs(std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point end)
-        {
-            return std::to_string(static_cast<long long>(std::chrono::duration<double, std::milli>(end - start).count()));
-        }
-
-        void WriteCacheString(std::ofstream& out, const std::string& s)
-        {
-            const uint32_t length = static_cast<uint32_t>(s.size());
-            out.write(reinterpret_cast<const char*>(&length), sizeof(length));
-            if (length > 0)
-            {
-                out.write(s.data(), length);
-            }
-        }
-
-        std::string ReadCacheString(std::ifstream& in)
-        {
-            uint32_t length = 0;
-            in.read(reinterpret_cast<char*>(&length), sizeof(length));
-            std::string s;
-            if (length > 0)
-            {
-                s.resize(length);
-                in.read(s.data(), static_cast<std::streamsize>(length));
-            }
-            return s;
-        }
 
         // メッシュをマテリアル(3枚のテクスチャの組み合わせ)単位でまとめておく。
-        // assimpのシーングラフ巡回順のままだと同じマテリアルのメッシュが離れて並びがちで、
-        // DX12バックエンドの「直前の描画と同じテクスチャならSRVテーブルを使い回す」最適化
-        // (DX12CommandList::FlushPendingSrvWrites)がヒットしにくいため、読み込み後にソートしておく
+        // .kmodelはKurenaiPackerがシーングラフ巡回順のまま書き出しているため、DX12バックエンドの
+        // 「直前の描画と同じテクスチャならSRVテーブルを使い回す」最適化(DX12CommandList::
+        // FlushPendingSrvWrites)がヒットしやすいよう、読み込み後にソートしておく
         void SortMeshesByMaterial(Model& model)
         {
             std::sort(
@@ -521,669 +250,268 @@ namespace Kurenai::Assets
                     return less(a.MetallicRoughnessTexture, b.MetallicRoughnessTexture);
                 });
         }
-
-        // キャッシュから読み込む。ソースファイルの更新日時/サイズが一致しない、
-        // またはキャッシュが存在しない/読み込み中に壊れていることが分かった場合はfalseを返し、
-        // 呼び出し側はassimp経由の通常の読み込みにフォールバックする
-        bool TryLoadModelFromCache(RHI::IRHIDevice& device, const std::wstring& filePath, Model& outModel)
-        {
-            uint64_t sourceTime = 0;
-            uint64_t sourceSize = 0;
-            if (!GetFileTimeAndSize(filePath, sourceTime, sourceSize))
-            {
-                return false;
-            }
-
-            // 既定のstreambufバッファ(通常数百バイト~数KB)のままだと、Bistro級(100MB超)の
-            // キャッシュを細切れのreadで読むことになりオーバーヘッドが無視できないため、
-            // openより前に大きめ(1MB)のバッファを設定しておく。ioBufferはinより先に構築し
-            // (=inより後に破棄され)、in使用中は常に有効な状態を保つ
-            std::vector<char> ioBuffer(1 << 20);
-            std::ifstream in;
-            in.rdbuf()->pubsetbuf(ioBuffer.data(), static_cast<std::streamsize>(ioBuffer.size()));
-            in.open(GetCachePath(filePath), std::ios::binary);
-            if (!in.is_open())
-            {
-                return false;
-            }
-
-            const auto startTime = std::chrono::steady_clock::now();
-
-            try
-            {
-                in.exceptions(std::ios::failbit | std::ios::badbit);
-
-                CacheHeader header{};
-                in.read(reinterpret_cast<char*>(&header), sizeof(header));
-                if (std::memcmp(header.Magic, kCacheMagic, sizeof(kCacheMagic)) != 0 ||
-                    header.Version != kCacheVersion ||
-                    header.SourceFileTime != sourceTime ||
-                    header.SourceFileSize != sourceSize)
-                {
-                    return false;
-                }
-
-                // MeshCount==0はヘッダーだけ書かれたプレースホルダー(LoadModelが書き込み中に中断された
-                // 場合に残る状態。詳細はLoadModel側のGetCacheTempPathのコメント参照)である可能性が高く、
-                // 有効なモデルでは通常あり得ないため、壊れたキャッシュとして扱いassimp経由のフォールバックへ回す
-                if (header.MeshCount == 0)
-                {
-                    return false;
-                }
-
-                Model model;
-                model.BoundsMin[0] = header.BoundsMin[0];
-                model.BoundsMin[1] = header.BoundsMin[1];
-                model.BoundsMin[2] = header.BoundsMin[2];
-                model.BoundsMax[0] = header.BoundsMax[0];
-                model.BoundsMax[1] = header.BoundsMax[1];
-                model.BoundsMax[2] = header.BoundsMax[2];
-
-                TextureLoader textureLoader(device, GetDirectory(filePath), model);
-                model.Meshes.reserve(header.MeshCount);
-
-                // 1周目: メッシュデータ・テクスチャパス文字列をすべてメモリへ読み切る(GPUバッファ作成・
-                // テクスチャ読み込みはまだ行わない)。これにより、テクスチャパスが出揃った時点で
-                // Prefetch()にまとめて渡し、並列デコードしてからバッファ作成へ進める
-                struct CachedMeshRecord
-                {
-                    std::vector<Vertex> Vertices;
-                    std::vector<uint32_t> Indices;
-                    float MetallicFactor = 0.0f;
-                    float RoughnessFactor = 0.7f;
-                    float AlphaCutoff = 0.0f;
-                    float EmissiveFactor[3] = { 0.0f, 0.0f, 0.0f };
-                    std::string BaseColorPath;
-                    std::string NormalPath;
-                    std::string MetallicRoughnessPath;
-                    std::string EmissivePath;
-                };
-
-                std::vector<CachedMeshRecord> records(header.MeshCount);
-                for (CachedMeshRecord& record : records)
-                {
-                    uint32_t vertexCount = 0;
-                    in.read(reinterpret_cast<char*>(&vertexCount), sizeof(vertexCount));
-                    record.Vertices.resize(vertexCount);
-                    if (vertexCount > 0)
-                    {
-                        in.read(reinterpret_cast<char*>(record.Vertices.data()), static_cast<std::streamsize>(vertexCount * sizeof(Vertex)));
-                    }
-
-                    uint32_t indexCount = 0;
-                    in.read(reinterpret_cast<char*>(&indexCount), sizeof(indexCount));
-                    record.Indices.resize(indexCount);
-                    if (indexCount > 0)
-                    {
-                        in.read(reinterpret_cast<char*>(record.Indices.data()), static_cast<std::streamsize>(indexCount * sizeof(uint32_t)));
-                    }
-
-                    in.read(reinterpret_cast<char*>(&record.MetallicFactor), sizeof(record.MetallicFactor));
-                    in.read(reinterpret_cast<char*>(&record.RoughnessFactor), sizeof(record.RoughnessFactor));
-                    in.read(reinterpret_cast<char*>(&record.AlphaCutoff), sizeof(record.AlphaCutoff));
-                    in.read(reinterpret_cast<char*>(record.EmissiveFactor), sizeof(record.EmissiveFactor));
-
-                    record.BaseColorPath = ReadCacheString(in);
-                    record.NormalPath = ReadCacheString(in);
-                    record.MetallicRoughnessPath = ReadCacheString(in);
-                    record.EmissivePath = ReadCacheString(in);
-                }
-
-                const auto geometryReadTime = std::chrono::steady_clock::now();
-
-                std::vector<TextureLoader::PrefetchRequest> prefetchRequests;
-                prefetchRequests.reserve(records.size() * 4);
-                for (const CachedMeshRecord& record : records)
-                {
-                    if (!record.BaseColorPath.empty())
-                    {
-                        prefetchRequests.push_back({ record.BaseColorPath, true, false });
-                    }
-                    if (!record.NormalPath.empty())
-                    {
-                        prefetchRequests.push_back({ record.NormalPath, false, true });
-                    }
-                    if (!record.MetallicRoughnessPath.empty())
-                    {
-                        prefetchRequests.push_back({ record.MetallicRoughnessPath, false, false });
-                    }
-                    if (!record.EmissivePath.empty())
-                    {
-                        prefetchRequests.push_back({ record.EmissivePath, true, false });
-                    }
-                }
-                textureLoader.Prefetch(prefetchRequests);
-
-                const auto textureLoadTime = std::chrono::steady_clock::now();
-
-                // 2周目: GPUバッファを作成し、テクスチャはPrefetch済みのキャッシュヒットで即座に解決する
-                for (CachedMeshRecord& record : records)
-                {
-                    Mesh outMesh;
-
-                    RHI::BufferDesc vertexBufferDesc;
-                    vertexBufferDesc.Usage = RHI::BufferUsage::Vertex;
-                    vertexBufferDesc.SizeInBytes = static_cast<uint32_t>(record.Vertices.size() * sizeof(Vertex));
-                    vertexBufferDesc.StrideInBytes = sizeof(Vertex);
-                    vertexBufferDesc.InitialData = record.Vertices.data();
-                    outMesh.VertexBuffer = device.CreateBuffer(vertexBufferDesc);
-
-                    RHI::BufferDesc indexBufferDesc;
-                    indexBufferDesc.Usage = RHI::BufferUsage::Index;
-                    indexBufferDesc.SizeInBytes = static_cast<uint32_t>(record.Indices.size() * sizeof(uint32_t));
-                    indexBufferDesc.StrideInBytes = sizeof(uint32_t);
-                    indexBufferDesc.InitialData = record.Indices.data();
-                    outMesh.IndexBuffer = device.CreateBuffer(indexBufferDesc);
-                    outMesh.IndexCount = static_cast<uint32_t>(record.Indices.size());
-
-                    outMesh.BaseColorTexture = record.BaseColorPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(record.BaseColorPath, true);
-                    outMesh.NormalTexture = record.NormalPath.empty() ? textureLoader.GetFlatNormal() : textureLoader.LoadNormal(record.NormalPath);
-                    outMesh.MetallicRoughnessTexture = record.MetallicRoughnessPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(record.MetallicRoughnessPath, false);
-                    // EmissiveFactorが0の場合はテクスチャの有無によらず結果は黒になるため、
-                    // BaseColor等と同様に白のプレースホルダーへフォールバックしてよい
-                    outMesh.EmissiveTexture = record.EmissivePath.empty() ? textureLoader.GetWhite() : textureLoader.Load(record.EmissivePath, true);
-                    outMesh.MetallicFactor = record.MetallicFactor;
-                    outMesh.RoughnessFactor = record.RoughnessFactor;
-                    outMesh.AlphaCutoff = record.AlphaCutoff;
-                    outMesh.EmissiveFactor[0] = record.EmissiveFactor[0];
-                    outMesh.EmissiveFactor[1] = record.EmissiveFactor[1];
-                    outMesh.EmissiveFactor[2] = record.EmissiveFactor[2];
-
-                    model.Meshes.push_back(std::move(outMesh));
-                }
-
-                SortMeshesByMaterial(model);
-                outModel = std::move(model);
-
-                const auto endTime = std::chrono::steady_clock::now();
-                Core::Logger::Info(
-                    "ModelLoader",
-                    "モデル読み込み完了(キャッシュ): " + WideToUtf8(filePath) +
-                    " (ジオメトリ " + FormatMs(startTime, geometryReadTime) + "ms" +
-                    " / テクスチャ " + FormatMs(geometryReadTime, textureLoadTime) + "ms" +
-                    " / 合計 " + FormatMs(startTime, endTime) + "ms" +
-                    ", テクスチャ要求 " + std::to_string(prefetchRequests.size()) + "件)");
-
-                return true;
-            }
-            catch (const std::exception& e)
-            {
-                // キャッシュが壊れている/バージョン不一致などの場合は通常経路にフォールバックする
-                Core::Logger::Warning("ModelLoader", "モデルキャッシュの読み込みに失敗したため、通常経路にフォールバックします: " + std::string(e.what()));
-                return false;
-            }
-        }
     }
 
     Model LoadModel(RHI::IRHIDevice& device, const std::wstring& filePath)
     {
-        Model cachedModel;
-        if (TryLoadModelFromCache(device, filePath, cachedModel))
-        {
-            return cachedModel;
-        }
-
         const auto startTime = std::chrono::steady_clock::now();
-
-        Assimp::Importer importer;
-        // GenSmoothNormalsは対象アセットは全メッシュが法線を持つため実質ノーオップであり、
-        // 万一法線を持たないメッシュがあった場合のみ後段のフォールバック(上向き固定法線)が使われる。
-        // 接線はassimpのaiProcess_CalcTangentSpaceに任せず自前で計算する(下記の頂点ループ内、
-        // TangentAccumKey関連のコード参照)。CalcTangentSpaceはUV面積がほぼ0(縮退)の三角形で
-        // 接線が数値的に不安定になり、位置・法線・UVが完全に同一の頂点間でさえ接線がほぼ正反対に
-        // なることがある(Bistroのグラスメッシュで実際に確認済み)。JoinIdenticalVerticesは
-        // 以前は「頂点バッファがやや冗長になるだけ」という理由で付けていなかったが、重複頂点を
-        // 減らせるため付けておく(自前の接線平均化は位置+法線をキーにしており重複頂点の有無に
-        // 依存しないため、平均化の正しさ自体には影響しない)
-        const aiScene* scene = importer.ReadFile(
-            WideToUtf8(filePath),
-            aiProcess_Triangulate | aiProcess_ConvertToLeftHanded | aiProcess_JoinIdenticalVertices);
-
-        if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode)
-        {
-            throw std::runtime_error(std::string("モデルの読み込みに失敗しました: ") + importer.GetErrorString());
-        }
-
         const std::wstring directory = GetDirectory(filePath);
 
+        // 既定のstreambufバッファ(通常数百バイト~数KB)のままだと、Bistro級の.kgeom
+        // (100MB超)を細切れのreadで読むことになりオーバーヘッドが無視できないため、
+        // openより前に大きめ(1MB)のバッファを設定しておく。ioBufferはinより先に構築し
+        // (=inより後に破棄され)、in使用中は常に有効な状態を保つ
+        std::vector<char> manifestIoBuffer(1 << 20);
+        std::ifstream in;
+        in.rdbuf()->pubsetbuf(manifestIoBuffer.data(), static_cast<std::streamsize>(manifestIoBuffer.size()));
+        in.open(filePath, std::ios::binary);
+        if (!in.is_open())
+        {
+            throw std::runtime_error("モデルパッケージを開けませんでした: " + WideToUtf8(filePath));
+        }
+
+        PackageHeader header{};
+        std::vector<TextureEntry> textureEntries;
+        std::vector<MeshEntry> meshEntries;
+        std::vector<LightEntry> lightEntries;
+        std::string stringPool;
+
+        try
+        {
+            in.exceptions(std::ios::failbit | std::ios::badbit);
+
+            in.read(reinterpret_cast<char*>(&header), sizeof(header));
+            if (std::memcmp(header.Magic, kPackageMagic, sizeof(kPackageMagic)) != 0)
+            {
+                throw std::runtime_error("マジックナンバーが不正です");
+            }
+            if (header.Version != kPackageVersion)
+            {
+                throw std::runtime_error(
+                    "バージョンが対応していません(ファイル: " + std::to_string(header.Version) +
+                    ", ランタイム: " + std::to_string(kPackageVersion) + ")");
+            }
+            if (header.VertexStride != sizeof(Vertex) || header.IndexStride != sizeof(uint32_t))
+            {
+                throw std::runtime_error("頂点/インデックスのレイアウトが現在のランタイムと一致しません");
+            }
+
+            textureEntries.resize(header.TextureCount);
+            if (header.TextureCount > 0)
+            {
+                in.read(reinterpret_cast<char*>(textureEntries.data()), static_cast<std::streamsize>(textureEntries.size() * sizeof(TextureEntry)));
+            }
+
+            meshEntries.resize(header.MeshCount);
+            if (header.MeshCount > 0)
+            {
+                in.read(reinterpret_cast<char*>(meshEntries.data()), static_cast<std::streamsize>(meshEntries.size() * sizeof(MeshEntry)));
+            }
+
+            lightEntries.resize(header.LightCount);
+            if (header.LightCount > 0)
+            {
+                in.read(reinterpret_cast<char*>(lightEntries.data()), static_cast<std::streamsize>(lightEntries.size() * sizeof(LightEntry)));
+            }
+
+            stringPool.resize(header.StringPoolSize);
+            if (header.StringPoolSize > 0)
+            {
+                in.read(stringPool.data(), static_cast<std::streamsize>(stringPool.size()));
+            }
+        }
+        catch (const std::exception& e)
+        {
+            throw std::runtime_error("モデルパッケージの読み込みに失敗しました(" + WideToUtf8(filePath) + "): " + e.what());
+        }
+
+        if (meshEntries.empty())
+        {
+            throw std::runtime_error("モデルパッケージにメッシュが含まれていません: " + WideToUtf8(filePath));
+        }
+
+        // StringPoolからジオメトリ/テクスチャのパスを解決する(.kmodel自身のディレクトリからの相対パス)
+        const std::wstring geometryPath = directory + Utf8ToWide(
+            ReadPoolString(stringPool, header.GeometryPathOffset, header.GeometryPathLength, "GeometryPath"));
+
+        std::vector<std::wstring> texturePaths(textureEntries.size());
+        for (size_t i = 0; i < textureEntries.size(); ++i)
+        {
+            texturePaths[i] = directory + Utf8ToWide(
+                ReadPoolString(stringPool, textureEntries[i].PathOffset, textureEntries[i].PathLength, "TexturePath"));
+        }
+
+        const auto manifestReadTime = std::chrono::steady_clock::now();
+
+        // .kgeomを読み込む。Bistro級では100MBを超えるため、こちらにも大きめのI/Oバッファを設定する
+        std::vector<char> geometryIoBuffer(1 << 20);
+        std::ifstream geomIn;
+        geomIn.rdbuf()->pubsetbuf(geometryIoBuffer.data(), static_cast<std::streamsize>(geometryIoBuffer.size()));
+        geomIn.open(geometryPath, std::ios::binary);
+        if (!geomIn.is_open())
+        {
+            throw std::runtime_error("ジオメトリファイルを開けませんでした: " + WideToUtf8(geometryPath));
+        }
+
+        std::vector<uint8_t> geometryPayload;
+        try
+        {
+            geomIn.exceptions(std::ios::failbit | std::ios::badbit);
+
+            GeometryHeader geomHeader{};
+            geomIn.read(reinterpret_cast<char*>(&geomHeader), sizeof(geomHeader));
+            if (std::memcmp(geomHeader.Magic, kGeometryMagic, sizeof(kGeometryMagic)) != 0)
+            {
+                throw std::runtime_error("マジックナンバーが不正です");
+            }
+            if (geomHeader.Version != kGeometryVersion)
+            {
+                throw std::runtime_error("バージョンが対応していません");
+            }
+            if (geomHeader.VertexStride != sizeof(Vertex) || geomHeader.IndexStride != sizeof(uint32_t))
+            {
+                throw std::runtime_error("頂点/インデックスのレイアウトが現在のランタイムと一致しません");
+            }
+
+            geometryPayload.resize(geomHeader.PayloadSize);
+            if (geomHeader.PayloadSize > 0)
+            {
+                geomIn.read(reinterpret_cast<char*>(geometryPayload.data()), static_cast<std::streamsize>(geometryPayload.size()));
+            }
+        }
+        catch (const std::exception& e)
+        {
+            throw std::runtime_error("ジオメトリファイルの読み込みに失敗しました(" + WideToUtf8(geometryPath) + "): " + e.what());
+        }
+
+        // 各MeshEntryのオフセット/カウントがペイロード範囲内かを必ず検証する。不正な.kmodelを
+        // 読んだ場合にバッファオーバーラン(境界外の頂点/インデックスデータを読む)を防ぐため
+        for (size_t i = 0; i < meshEntries.size(); ++i)
+        {
+            const MeshEntry& mesh = meshEntries[i];
+            const uint64_t vertexEnd = mesh.VertexOffset + static_cast<uint64_t>(mesh.VertexCount) * sizeof(Vertex);
+            const uint64_t indexEnd = mesh.IndexOffset + static_cast<uint64_t>(mesh.IndexCount) * sizeof(uint32_t);
+            if (vertexEnd > geometryPayload.size() || indexEnd > geometryPayload.size())
+            {
+                throw std::runtime_error(
+                    "メッシュ[" + std::to_string(i) + "]がジオメトリペイロードの範囲外を参照しています: " + WideToUtf8(geometryPath));
+            }
+            if (mesh.BaseColorTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                mesh.NormalTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                mesh.MetallicRoughnessTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                mesh.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()))
+            {
+                throw std::runtime_error("メッシュ[" + std::to_string(i) + "]が範囲外のテクスチャを参照しています: " + WideToUtf8(filePath));
+            }
+        }
+
+        const auto geometryReadTime = std::chrono::steady_clock::now();
+
         Model model;
-        TextureLoader textureLoader(device, directory, model);
+        model.BoundsMin[0] = header.BoundsMin[0];
+        model.BoundsMin[1] = header.BoundsMin[1];
+        model.BoundsMin[2] = header.BoundsMin[2];
+        model.BoundsMax[0] = header.BoundsMax[0];
+        model.BoundsMax[1] = header.BoundsMax[1];
+        model.BoundsMax[2] = header.BoundsMax[2];
 
-        std::vector<std::pair<const aiMesh*, aiMatrix4x4>> meshNodes;
-        CollectMeshNodes(scene, scene->mRootNode, aiMatrix4x4(), meshNodes);
+        TextureLoader textureLoader(device, model);
+        std::vector<RHI::IRHITexture*> resolvedTextures;
+        textureLoader.LoadAll(texturePaths, resolvedTextures);
 
-        bool boundsInitialized = false;
+        const auto textureLoadTime = std::chrono::steady_clock::now();
 
-        // マテリアルインデックスごとに頂点・インデックスを結合してから1つのバッファ/ドローコールに
-        // まとめる。OBJ形式のように同一マテリアルの三角形群が(usemtlの切り替えのたびに)大量の
-        // 小さなaiMeshへ分割されているアセットでは、aiMeshごとに個別のバッファ/ドローコールを
-        // 発行すると数万件規模になり、GPU側のドライバウォッチドッグ(TDR)によるハングを
-        // 引き起こしうる(実際にBistroのMcGuire版OBJ配布(usemtl切り替え22,396回、実質132
-        // マテリアル)で確認済み)ため、マテリアル単位でまとめてドローコール数を実質マテリアル数まで
-        // 削減する
-        struct MergedMeshAccumulator
+        // -1(指定なし)は白/フラット法線、指定されていたのに読み込みに失敗した場合は
+        // マゼンタ/フラット法線を使う(旧実装のTextureLoader::Load/LoadNormalのフォールバック
+        // 方針を踏襲。詳細はGetMagentaPlaceholder/GetFlatNormalのコメント参照)
+        auto resolveBaseColorOrMetallicRoughness = [&](int32_t index) -> RHI::IRHITexture*
         {
-            std::vector<Vertex> Vertices;
-            std::vector<uint32_t> Indices;
+            if (index == kNoTextureIndex)
+            {
+                return textureLoader.GetWhite();
+            }
+            RHI::IRHITexture* texture = resolvedTextures[static_cast<size_t>(index)];
+            return texture ? texture : textureLoader.GetMagentaPlaceholder();
         };
-        std::unordered_map<unsigned int, MergedMeshAccumulator> meshesByMaterial;
-
-        // キャッシュ書き込み用ファイル。ヘッダーはbounds/meshCountが確定してから
-        // 先頭にシークして書き直すため、まずプレースホルダーを書いておく。
-        // 本来のキャッシュパス(GetCachePath)ではなく一時パス(GetCacheTempPath)に書き、
-        // 書き込みが最後まで成功した場合にのみ本来のパスへリネームする。処理がここで中断された
-        // (アプリの強制終了など)場合でも、中途半端な一時ファイルが残るだけで本来のキャッシュ
-        // ファイル(既存のもの、または今回分)には影響しないため、次回以降のTryLoadModelFromCacheが
-        // 「ヘッダーだけのプレースホルダー」を正常なキャッシュとして誤読することがない
-        uint64_t sourceTime = 0;
-        uint64_t sourceSize = 0;
-        const bool haveSourceStat = GetFileTimeAndSize(filePath, sourceTime, sourceSize);
-        std::ofstream cacheOut;
-        bool cacheWritable = false;
-        std::wstring cacheTempPath;
-        if (haveSourceStat)
+        auto resolveNormal = [&](int32_t index) -> RHI::IRHITexture*
         {
-            cacheTempPath = GetCacheTempPath(filePath);
-            cacheOut.open(cacheTempPath, std::ios::binary | std::ios::trunc);
-            cacheWritable = cacheOut.is_open();
-        }
-        if (cacheWritable)
-        {
-            CacheHeader placeholder{};
-            std::memcpy(placeholder.Magic, kCacheMagic, sizeof(kCacheMagic));
-            placeholder.Version = kCacheVersion;
-            placeholder.SourceFileTime = sourceTime;
-            placeholder.SourceFileSize = sourceSize;
-            cacheOut.write(reinterpret_cast<const char*>(&placeholder), sizeof(placeholder));
-            cacheWritable = static_cast<bool>(cacheOut);
-        }
-
-        for (const auto& [mesh, transform] : meshNodes)
-        {
-            if (!mesh->HasPositions() || !mesh->HasFaces())
+            if (index == kNoTextureIndex)
             {
-                continue;
+                return textureLoader.GetFlatNormal();
             }
-
-            // 法線を位置と同じ行列でそのまま変換すると、回転と非一様スケールが組み合わさった場合に
-            // 方向が歪んだり反転したりするため、逆行列の転置(inverse-transpose)を用いる。
-            // 特異行列(スケール0など)で逆行列が求まらない場合は、3x3行列をそのまま使う簡易フォールバックとする
-            aiMatrix3x3 normalMatrix(transform);
-            if (normalMatrix.Determinant() != 0.0f)
-            {
-                normalMatrix.Inverse();
-                normalMatrix.Transpose();
-            }
-
-            // 接線は面上の方向ベクトル(位置の差分に相当)なので、法線と異なりinverse-transposeではなく
-            // 位置と同じ3x3行列で変換する。非一様スケールで法線との直交性が崩れるため、変換後に
-            // 法線に対してGram-Schmidt再直交化を行う
-            aiMatrix3x3 tangentMatrix(transform);
-
-            // assimpのCalcTangentSpace(aiProcess_CalcTangentSpace)が返す頂点接線は、UV面積が
-            // ほぼ0(縮退)な三角形では不安定になり、位置・法線・UVが完全に同一の頂点間でさえ
-            // 接線がほぼ正反対になることがある(実際にBistroのグラスメッシュで確認済み)。
-            // そのため頂点接線は使わず、三角形ごとに自前で接線を計算し、UV面積がほぼ0の
-            // 三角形は寄与から除外したうえで「位置+法線」をキーに蓄積・平均化する
-            std::unordered_map<TangentAccumKey, aiVector3D, TangentAccumKeyHash> tangentAccum;
-            std::unordered_map<TangentAccumKey, aiVector3D, TangentAccumKeyHash> bitangentAccum;
-            if (mesh->HasTextureCoords(0))
-            {
-                tangentAccum.reserve(mesh->mNumVertices);
-                bitangentAccum.reserve(mesh->mNumVertices);
-                for (unsigned int f = 0; f < mesh->mNumFaces; ++f)
-                {
-                    const aiFace& face = mesh->mFaces[f];
-                    if (face.mNumIndices != 3)
-                    {
-                        continue;
-                    }
-
-                    const unsigned int i0 = face.mIndices[0];
-                    const unsigned int i1 = face.mIndices[1];
-                    const unsigned int i2 = face.mIndices[2];
-
-                    const aiVector3D& p0 = mesh->mVertices[i0];
-                    const aiVector3D edge1 = mesh->mVertices[i1] - p0;
-                    const aiVector3D edge2 = mesh->mVertices[i2] - p0;
-
-                    const aiVector2D uv0(mesh->mTextureCoords[0][i0].x, mesh->mTextureCoords[0][i0].y);
-                    const aiVector2D duv1(mesh->mTextureCoords[0][i1].x - uv0.x, mesh->mTextureCoords[0][i1].y - uv0.y);
-                    const aiVector2D duv2(mesh->mTextureCoords[0][i2].x - uv0.x, mesh->mTextureCoords[0][i2].y - uv0.y);
-
-                    const float denom = duv1.x * duv2.y - duv2.x * duv1.y;
-                    if (std::abs(denom) < 1e-8f)
-                    {
-                        // UV空間で面積がほぼ0の三角形(UVフォールディング/縮退)は接線方向が
-                        // 数値的に不安定になるため、平均化への寄与から除外する
-                        continue;
-                    }
-
-                    // 従法線は連立方程式(edge = duv.x*T + duv.y*B)を素直に解いた符号(+V方向)を使う。
-                    // (assimpのCalcTangentsProcessに合わせて符号反転させたことがあるが、
-                    // 実際のBistroグラスの法線マップでは明暗が改善しなかったため元に戻した)
-                    const float r = 1.0f / denom;
-                    const aiVector3D faceTangent = (edge1 * duv2.y - edge2 * duv1.y) * r;
-                    const aiVector3D faceBitangent = (edge2 * duv1.x - edge1 * duv2.x) * r;
-                    if (faceTangent.SquareLength() < 1e-12f)
-                    {
-                        continue;
-                    }
-
-                    for (unsigned int idx : { i0, i1, i2 })
-                    {
-                        const aiVector3D& p = mesh->mVertices[idx];
-                        const aiVector3D localNormal = mesh->HasNormals() ? mesh->mNormals[idx] : aiVector3D(0.0f, 1.0f, 0.0f);
-                        const TangentAccumKey key{ p.x, p.y, p.z, localNormal.x, localNormal.y, localNormal.z };
-                        tangentAccum[key] += faceTangent;
-                        bitangentAccum[key] += faceBitangent;
-                    }
-                }
-            }
-
-            std::vector<Vertex> vertices;
-            vertices.reserve(mesh->mNumVertices);
-            for (unsigned int v = 0; v < mesh->mNumVertices; ++v)
-            {
-                aiVector3D position = transform * mesh->mVertices[v];
-                aiVector3D normal = mesh->HasNormals() ? (normalMatrix * mesh->mNormals[v]) : aiVector3D(0.0f, 1.0f, 0.0f);
-                normal.Normalize();
-
-                aiVector3D tangent(1.0f, 0.0f, 0.0f);
-                float tangentSign = 1.0f;
-                if (mesh->HasTextureCoords(0))
-                {
-                    const aiVector3D& localNormalForKey = mesh->HasNormals() ? mesh->mNormals[v] : aiVector3D(0.0f, 1.0f, 0.0f);
-                    const TangentAccumKey key{
-                        mesh->mVertices[v].x, mesh->mVertices[v].y, mesh->mVertices[v].z,
-                        localNormalForKey.x, localNormalForKey.y, localNormalForKey.z };
-                    const auto tangentIt = tangentAccum.find(key);
-                    const auto bitangentIt = bitangentAccum.find(key);
-                    const bool hasAccum = tangentIt != tangentAccum.end() && tangentIt->second.SquareLength() > 1e-12f;
-
-                    aiVector3D rawTangent = hasAccum ? (tangentMatrix * tangentIt->second) : aiVector3D(0.0f, 0.0f, 0.0f);
-
-                    tangent = rawTangent - normal * (normal * rawTangent);
-                    if (hasAccum && tangent.SquareLength() > 1e-12f)
-                    {
-                        tangent.Normalize();
-                        const aiVector3D rawBitangent = bitangentIt != bitangentAccum.end()
-                            ? (tangentMatrix * bitangentIt->second)
-                            : (normal ^ tangent);
-                        tangentSign = ((normal ^ tangent) * rawBitangent) < 0.0f ? -1.0f : 1.0f;
-                    }
-                    else
-                    {
-                        // 全ての隣接三角形がUV縮退などで接線寄与を持たない場合、法線に直交する適当な軸で代用する
-                        aiVector3D fallbackAxis = std::abs(normal.y) < 0.99f ? aiVector3D(0.0f, 1.0f, 0.0f) : aiVector3D(1.0f, 0.0f, 0.0f);
-                        tangent = (fallbackAxis ^ normal);
-                        tangent.Normalize();
-                        tangentSign = 1.0f;
-                    }
-                }
-
-                Vertex vertex{};
-                vertex.Position[0] = position.x;
-                vertex.Position[1] = position.y;
-                vertex.Position[2] = position.z;
-                vertex.Normal[0] = normal.x;
-                vertex.Normal[1] = normal.y;
-                vertex.Normal[2] = normal.z;
-                vertex.Tangent[0] = tangent.x;
-                vertex.Tangent[1] = tangent.y;
-                vertex.Tangent[2] = tangent.z;
-                vertex.Tangent[3] = tangentSign;
-                if (mesh->HasTextureCoords(0))
-                {
-                    vertex.UV[0] = mesh->mTextureCoords[0][v].x;
-                    vertex.UV[1] = mesh->mTextureCoords[0][v].y;
-                }
-                else
-                {
-                    vertex.UV[0] = 0.0f;
-                    vertex.UV[1] = 0.0f;
-                }
-                vertices.push_back(vertex);
-
-                if (!boundsInitialized)
-                {
-                    model.BoundsMin[0] = model.BoundsMax[0] = position.x;
-                    model.BoundsMin[1] = model.BoundsMax[1] = position.y;
-                    model.BoundsMin[2] = model.BoundsMax[2] = position.z;
-                    boundsInitialized = true;
-                }
-                else
-                {
-                    model.BoundsMin[0] = std::min(model.BoundsMin[0], position.x);
-                    model.BoundsMin[1] = std::min(model.BoundsMin[1], position.y);
-                    model.BoundsMin[2] = std::min(model.BoundsMin[2], position.z);
-                    model.BoundsMax[0] = std::max(model.BoundsMax[0], position.x);
-                    model.BoundsMax[1] = std::max(model.BoundsMax[1], position.y);
-                    model.BoundsMax[2] = std::max(model.BoundsMax[2], position.z);
-                }
-            }
-
-            std::vector<uint32_t> indices;
-            indices.reserve(static_cast<size_t>(mesh->mNumFaces) * 3);
-            for (unsigned int f = 0; f < mesh->mNumFaces; ++f)
-            {
-                const aiFace& face = mesh->mFaces[f];
-                for (unsigned int idx = 0; idx < face.mNumIndices; ++idx)
-                {
-                    indices.push_back(face.mIndices[idx]);
-                }
-            }
-
-            // GPU側のバッファ作成・テクスチャ読み込みはここでは行わず、マテリアルインデックスごとに
-            // 頂点・インデックスを結合するだけにとどめる(実際のバッファ作成は全aiMeshを走査し
-            // 終えた後、マテリアルごとに1回だけ行う。下記参照)
-            MergedMeshAccumulator& accum = meshesByMaterial[mesh->mMaterialIndex];
-            const uint32_t indexBase = static_cast<uint32_t>(accum.Vertices.size());
-            accum.Vertices.insert(accum.Vertices.end(), vertices.begin(), vertices.end());
-            accum.Indices.reserve(accum.Indices.size() + indices.size());
-            for (uint32_t idx : indices)
-            {
-                accum.Indices.push_back(indexBase + idx);
-            }
-        }
-
-        const auto geometryTime = std::chrono::steady_clock::now();
-
-        // マテリアルインデックスの昇順(assimpのマテリアル配列順)に処理することで、同じソースから
-        // 生成したキャッシュのメッシュ順が実行のたびに変わらないようにする。
-        // 1周目: テクスチャパスの解決だけを行い、Prefetch()にまとめて渡して並列デコードさせる
-        // (GPUバッファ作成やLoad/LoadNormal呼び出しはまだ行わない)
-        struct MaterialTexturePaths
-        {
-            std::string BaseColorPath;
-            std::string NormalPath;
-            std::string MetallicRoughnessPath;
-            std::string EmissivePath;
+            RHI::IRHITexture* texture = resolvedTextures[static_cast<size_t>(index)];
+            return texture ? texture : textureLoader.GetFlatNormal();
         };
-        std::unordered_map<unsigned int, MaterialTexturePaths> materialTexturePaths;
-        std::vector<TextureLoader::PrefetchRequest> prefetchRequests;
 
-        for (unsigned int materialIndex = 0; materialIndex < scene->mNumMaterials; ++materialIndex)
+        model.Meshes.reserve(meshEntries.size());
+        for (const MeshEntry& mesh : meshEntries)
         {
-            const auto accumIt = meshesByMaterial.find(materialIndex);
-            if (accumIt == meshesByMaterial.end() || accumIt->second.Indices.empty())
-            {
-                continue;
-            }
-
-            const aiMaterial* material = scene->mMaterials[materialIndex];
-            aiString texPath;
-            MaterialTexturePaths paths;
-
-            if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)
-            {
-                paths.BaseColorPath = texPath.C_Str();
-                prefetchRequests.push_back({ paths.BaseColorPath, true, false });
-            }
-
-            // OBJ形式は法線マップをaiTextureType_NORMALSではなくmap_bump(aiTextureType_HEIGHT)として
-            // 格納する慣習があるため、NORMALSが無い場合はHEIGHTにもフォールバックする
-            if (material->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS)
-            {
-                paths.NormalPath = texPath.C_Str();
-                prefetchRequests.push_back({ paths.NormalPath, false, true });
-            }
-
-            // glTFのmetallicRoughnessテクスチャはG=ラフネス、B=メタリックを1枚に格納しており、
-            // assimpはこれをROUGHNESS/METALNESSの両方のテクスチャタイプとして同じ画像を指す
-            if (material->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS)
-            {
-                paths.MetallicRoughnessPath = texPath.C_Str();
-                prefetchRequests.push_back({ paths.MetallicRoughnessPath, false, false });
-            }
-
-            if (material->GetTexture(aiTextureType_EMISSIVE, 0, &texPath) == AI_SUCCESS)
-            {
-                paths.EmissivePath = texPath.C_Str();
-                prefetchRequests.push_back({ paths.EmissivePath, true, false });
-            }
-
-            materialTexturePaths.emplace(materialIndex, std::move(paths));
-        }
-
-        textureLoader.Prefetch(prefetchRequests);
-
-        const auto textureTime = std::chrono::steady_clock::now();
-
-        // 2周目: GPUバッファを作成し、テクスチャはPrefetch済みのキャッシュヒットで即座に解決する
-        for (unsigned int materialIndex = 0; materialIndex < scene->mNumMaterials; ++materialIndex)
-        {
-            const auto accumIt = meshesByMaterial.find(materialIndex);
-            if (accumIt == meshesByMaterial.end() || accumIt->second.Indices.empty())
-            {
-                continue;
-            }
-            const std::vector<Vertex>& vertices = accumIt->second.Vertices;
-            const std::vector<uint32_t>& indices = accumIt->second.Indices;
-            const MaterialTexturePaths& paths = materialTexturePaths.at(materialIndex);
-
             Mesh outMesh;
 
             RHI::BufferDesc vertexBufferDesc;
             vertexBufferDesc.Usage = RHI::BufferUsage::Vertex;
-            vertexBufferDesc.SizeInBytes = static_cast<uint32_t>(vertices.size() * sizeof(Vertex));
+            vertexBufferDesc.SizeInBytes = static_cast<uint32_t>(mesh.VertexCount) * sizeof(Vertex);
             vertexBufferDesc.StrideInBytes = sizeof(Vertex);
-            vertexBufferDesc.InitialData = vertices.data();
+            vertexBufferDesc.InitialData = geometryPayload.data() + mesh.VertexOffset;
             outMesh.VertexBuffer = device.CreateBuffer(vertexBufferDesc);
 
             RHI::BufferDesc indexBufferDesc;
             indexBufferDesc.Usage = RHI::BufferUsage::Index;
-            indexBufferDesc.SizeInBytes = static_cast<uint32_t>(indices.size() * sizeof(uint32_t));
+            indexBufferDesc.SizeInBytes = static_cast<uint32_t>(mesh.IndexCount) * sizeof(uint32_t);
             indexBufferDesc.StrideInBytes = sizeof(uint32_t);
-            indexBufferDesc.InitialData = indices.data();
+            indexBufferDesc.InitialData = geometryPayload.data() + mesh.IndexOffset;
             outMesh.IndexBuffer = device.CreateBuffer(indexBufferDesc);
-            outMesh.IndexCount = static_cast<uint32_t>(indices.size());
+            outMesh.IndexCount = mesh.IndexCount;
 
-            const aiMaterial* material = scene->mMaterials[materialIndex];
-
-            outMesh.BaseColorTexture = paths.BaseColorPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(paths.BaseColorPath, true);
-            outMesh.NormalTexture = paths.NormalPath.empty() ? textureLoader.GetFlatNormal() : textureLoader.LoadNormal(paths.NormalPath);
-            outMesh.MetallicRoughnessTexture = paths.MetallicRoughnessPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(paths.MetallicRoughnessPath, false);
-            // EmissiveFactorが0の場合はテクスチャの有無によらず結果は黒になるため、
-            // BaseColor等と同様に白のプレースホルダーへフォールバックしてよい
-            outMesh.EmissiveTexture = paths.EmissivePath.empty() ? textureLoader.GetWhite() : textureLoader.Load(paths.EmissivePath, true);
-
-            // FBXなどPBRメタリック/ラフネスの係数を持たない形式では既定値(非金属・やや粗め)のままになる
-            material->Get(AI_MATKEY_METALLIC_FACTOR, outMesh.MetallicFactor);
-            material->Get(AI_MATKEY_ROUGHNESS_FACTOR, outMesh.RoughnessFactor);
-            // FBXの古いPhong系マテリアル(Shininessのみ持つ)をassimpがPBRラフネスへ変換する際、
-            // 変換式が破綻して[0,1]範囲外の値(Bistroのガラス系マテリアルで実測: -2.2)を返すことがある。
-            // シェーダー側でclampされて常に最小ラフネス(ほぼ鏡面)に張り付き、SSRの反射が
-            // 単一サンプルで粗くなって不自然に破綻して見えるため、範囲外の値は既定値にフォールバックする
-            if (!(outMesh.RoughnessFactor >= 0.0f && outMesh.RoughnessFactor <= 1.0f))
-            {
-                outMesh.RoughnessFactor = 0.7f;
-            }
-
-            aiColor3D emissiveColor(0.0f, 0.0f, 0.0f);
-            material->Get(AI_MATKEY_COLOR_EMISSIVE, emissiveColor);
-            outMesh.EmissiveFactor[0] = emissiveColor.r;
-            outMesh.EmissiveFactor[1] = emissiveColor.g;
-            outMesh.EmissiveFactor[2] = emissiveColor.b;
-
-            // アルファカットアウトはglTFのalphaMode拡張情報でのみ判定する(FBX/OBJ等には概念自体がない)。
-            // MASK以外(既定のOPAQUE、または半透明のBLEND)ではAlphaCutoff=0のままにし、
-            // GBuffer.hlsl側のclip()を発火させない(BLENDの半透明合成はDeferredでは別途対応が必要なため、
-            // このエンジンでは現状不透明として扱う)
-            aiString alphaMode;
-            float alphaCutoff = 0.5f;
-            material->Get(AI_MATKEY_GLTF_ALPHACUTOFF, alphaCutoff);
-            outMesh.AlphaCutoff =
-                (material->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == AI_SUCCESS && std::strcmp(alphaMode.C_Str(), "MASK") == 0)
-                ? alphaCutoff
-                : 0.0f;
-
-            if (cacheWritable)
-            {
-                const uint32_t vertexCount = static_cast<uint32_t>(vertices.size());
-                const uint32_t indexCount = static_cast<uint32_t>(indices.size());
-                cacheOut.write(reinterpret_cast<const char*>(&vertexCount), sizeof(vertexCount));
-                cacheOut.write(reinterpret_cast<const char*>(vertices.data()), static_cast<std::streamsize>(vertices.size() * sizeof(Vertex)));
-                cacheOut.write(reinterpret_cast<const char*>(&indexCount), sizeof(indexCount));
-                cacheOut.write(reinterpret_cast<const char*>(indices.data()), static_cast<std::streamsize>(indices.size() * sizeof(uint32_t)));
-                cacheOut.write(reinterpret_cast<const char*>(&outMesh.MetallicFactor), sizeof(float));
-                cacheOut.write(reinterpret_cast<const char*>(&outMesh.RoughnessFactor), sizeof(float));
-                cacheOut.write(reinterpret_cast<const char*>(&outMesh.AlphaCutoff), sizeof(float));
-                cacheOut.write(reinterpret_cast<const char*>(outMesh.EmissiveFactor), sizeof(outMesh.EmissiveFactor));
-                WriteCacheString(cacheOut, paths.BaseColorPath);
-                WriteCacheString(cacheOut, paths.NormalPath);
-                WriteCacheString(cacheOut, paths.MetallicRoughnessPath);
-                WriteCacheString(cacheOut, paths.EmissivePath);
-                cacheWritable = static_cast<bool>(cacheOut);
-            }
+            outMesh.BaseColorTexture = resolveBaseColorOrMetallicRoughness(mesh.BaseColorTextureIndex);
+            outMesh.NormalTexture = resolveNormal(mesh.NormalTextureIndex);
+            outMesh.MetallicRoughnessTexture = resolveBaseColorOrMetallicRoughness(mesh.MetallicRoughnessTextureIndex);
+            outMesh.EmissiveTexture = resolveBaseColorOrMetallicRoughness(mesh.EmissiveTextureIndex);
+            outMesh.MetallicFactor = mesh.MetallicFactor;
+            outMesh.RoughnessFactor = mesh.RoughnessFactor;
+            outMesh.AlphaCutoff = mesh.AlphaCutoff;
+            outMesh.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+            outMesh.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+            outMesh.EmissiveFactor[2] = mesh.EmissiveFactor[2];
 
             model.Meshes.push_back(std::move(outMesh));
         }
 
-        if (cacheWritable)
+        model.Lights.reserve(lightEntries.size());
+        for (const LightEntry& entry : lightEntries)
         {
-            CacheHeader header{};
-            std::memcpy(header.Magic, kCacheMagic, sizeof(kCacheMagic));
-            header.Version = kCacheVersion;
-            header.SourceFileTime = sourceTime;
-            header.SourceFileSize = sourceSize;
-            header.BoundsMin[0] = model.BoundsMin[0];
-            header.BoundsMin[1] = model.BoundsMin[1];
-            header.BoundsMin[2] = model.BoundsMin[2];
-            header.BoundsMax[0] = model.BoundsMax[0];
-            header.BoundsMax[1] = model.BoundsMax[1];
-            header.BoundsMax[2] = model.BoundsMax[2];
-            header.MeshCount = static_cast<uint32_t>(model.Meshes.size());
-            cacheOut.seekp(0);
-            cacheOut.write(reinterpret_cast<const char*>(&header), sizeof(header));
-            cacheWritable = static_cast<bool>(cacheOut);
-            cacheOut.close();
+            Light light;
+            light.Type = static_cast<LightType>(entry.Type);
+            light.Position[0] = entry.Position[0];
+            light.Position[1] = entry.Position[1];
+            light.Position[2] = entry.Position[2];
+            light.Direction[0] = entry.Direction[0];
+            light.Direction[1] = entry.Direction[1];
+            light.Direction[2] = entry.Direction[2];
+            light.Color[0] = entry.Color[0];
+            light.Color[1] = entry.Color[1];
+            light.Color[2] = entry.Color[2];
+            light.Intensity = entry.Intensity;
+            light.Range = entry.Range;
+            light.SpotInnerConeAngle = entry.SpotInnerConeAngle;
+            light.SpotOuterConeAngle = entry.SpotOuterConeAngle;
+            light.Enabled = entry.Enabled != 0;
+            light.Name = ReadPoolString(stringPool, entry.NameOffset, entry.NameLength, "LightName");
 
-            // 一時ファイルへの書き込みが最後まで成功した場合にのみ、本来のキャッシュパスへ差し替える
-            // (同一ボリューム上でのリネームなので、この置き換え自体は事実上原子的)。MeshCount==0
-            // (アセット側に有効なメッシュが1つもなかった場合)はTryLoadModelFromCache側でも常に
-            // 拒否されるだけなので書き出さない
-            if (cacheWritable && header.MeshCount > 0)
-            {
-                MoveFileExW(cacheTempPath.c_str(), GetCachePath(filePath).c_str(), MOVEFILE_REPLACE_EXISTING);
-            }
+            model.Lights.push_back(std::move(light));
         }
 
-        // キャッシュファイルへはシーングラフ巡回順のまま書き出し済みのため、ソートは
-        // メモリ上のモデルに対してのみ行う(キャッシュから読み込む側はTryLoadModelFromCache側で行う)
         SortMeshesByMaterial(model);
 
         const auto endTime = std::chrono::steady_clock::now();
         Core::Logger::Info(
             "ModelLoader",
             "モデル読み込み完了: " + WideToUtf8(filePath) +
-            " (ジオメトリ " + FormatMs(startTime, geometryTime) + "ms" +
-            " / テクスチャ " + FormatMs(geometryTime, textureTime) + "ms" +
+            " (マニフェスト " + FormatMs(startTime, manifestReadTime) + "ms" +
+            " / ジオメトリ " + FormatMs(manifestReadTime, geometryReadTime) + "ms" +
+            " / テクスチャ " + FormatMs(geometryReadTime, textureLoadTime) + "ms" +
             " / 合計 " + FormatMs(startTime, endTime) + "ms" +
-            ", テクスチャ要求 " + std::to_string(prefetchRequests.size()) + "件)");
+            ", テクスチャ要求 " + std::to_string(texturePaths.size()) + "件)");
 
         return model;
     }

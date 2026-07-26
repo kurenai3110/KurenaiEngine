@@ -15,25 +15,15 @@
 #include <stdexcept>
 #include <vector>
 
+#include "Assets/ModelPackage.h"
 #include "Core/Logger.h"
+#include "Core/StringUtil.h"
 
 namespace Kurenai::RHI
 {
     namespace
     {
-        std::string WideToUtf8(const std::wstring& wide)
-        {
-            if (wide.empty())
-            {
-                return {};
-            }
-
-            int length = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
-            std::string narrow(length, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, narrow.data(), length, nullptr, nullptr);
-            narrow.resize(length - 1);
-            return narrow;
-        }
+        using Core::WideToUtf8;
 
         void ThrowIfFailed(HRESULT hr, const std::string& message)
         {
@@ -55,125 +45,6 @@ namespace Kurenai::RHI
                 return false;
             }
             return _wcsicmp(path.c_str() + (path.size() - extLen), extension) == 0;
-        }
-
-        bool GetFileTimeAndSize(const std::wstring& path, uint64_t& outTime, uint64_t& outSize)
-        {
-            WIN32_FILE_ATTRIBUTE_DATA data{};
-            if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data))
-            {
-                return false;
-            }
-            outTime = (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) | data.ftLastWriteTime.dwLowDateTime;
-            outSize = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
-            return true;
-        }
-
-        // sRGBの有無でキャッシュファイル名を分ける。同じ画像ファイルがベースカラー(sRGB)と
-        // メタリック/ラフネス(linear)の両方から参照された場合に、片方のキャッシュをもう片方が
-        // 誤って読んでしまう(色空間の解釈を取り違える)ことを防ぐため
-        std::wstring GetCachePath(const std::wstring& filePath, bool sRGB)
-        {
-            return filePath + (sRGB ? L".srgb.ktexcache" : L".linear.ktexcache");
-        }
-
-        std::wstring GetCacheTempPath(const std::wstring& filePath, bool sRGB)
-        {
-            return GetCachePath(filePath, sRGB) + L".tmp";
-        }
-
-        constexpr char kTexCacheMagic[4] = { 'K', 'T', 'C', '1' };
-        // BC7圧縮+ミップ生成済みのDDSペイロードをそのまま格納する形式のバージョン
-        constexpr uint32_t kTexCacheVersion = 1;
-
-        struct TexCacheHeader
-        {
-            char Magic[4];
-            uint32_t Version;
-            uint64_t SourceFileTime;
-            uint64_t SourceFileSize;
-            uint64_t PayloadSize;
-        };
-
-        // キャッシュの読み込みに失敗した場合(存在しない/バージョン不一致/ソース更新/壊れている)は
-        // falseを返し、呼び出し側は通常のWICデコード経路にフォールバックする
-        bool TryLoadDDSCache(
-            const std::wstring& cachePath,
-            uint64_t sourceTime,
-            uint64_t sourceSize,
-            DirectX::TexMetadata& outMetadata,
-            DirectX::ScratchImage& outImage)
-        {
-            std::ifstream in(cachePath, std::ios::binary);
-            if (!in.is_open())
-            {
-                return false;
-            }
-
-            try
-            {
-                in.exceptions(std::ios::failbit | std::ios::badbit);
-
-                TexCacheHeader header{};
-                in.read(reinterpret_cast<char*>(&header), sizeof(header));
-                if (std::memcmp(header.Magic, kTexCacheMagic, sizeof(kTexCacheMagic)) != 0 ||
-                    header.Version != kTexCacheVersion ||
-                    header.SourceFileTime != sourceTime ||
-                    header.SourceFileSize != sourceSize ||
-                    header.PayloadSize == 0)
-                {
-                    return false;
-                }
-
-                std::vector<uint8_t> payload(header.PayloadSize);
-                in.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
-
-                return SUCCEEDED(DirectX::LoadFromDDSMemory(payload.data(), payload.size(), DirectX::DDS_FLAGS_NONE, &outMetadata, outImage));
-            }
-            catch (const std::exception& e)
-            {
-                Core::Logger::Warning("TextureImage", "テクスチャキャッシュの読み込みに失敗したため、通常経路にフォールバックします: " + std::string(e.what()));
-                return false;
-            }
-        }
-
-        // キャッシュの書き込みに失敗しても例外にはしない(次回また生成を試みるだけでよいため)。
-        // 一時ファイルへ書いてから完了時のみ本来のパスへリネームする(ModelLoaderの.kmodelcacheと同じ設計)
-        void WriteDDSCacheBestEffort(const std::wstring& filePath, bool sRGB, uint64_t sourceTime, uint64_t sourceSize, const DirectX::ScratchImage& compressed)
-        {
-            DirectX::Blob blob;
-            HRESULT hr = DirectX::SaveToDDSMemory(compressed.GetImages(), compressed.GetImageCount(), compressed.GetMetadata(), DirectX::DDS_FLAGS_NONE, blob);
-            if (FAILED(hr))
-            {
-                Core::Logger::Warning("TextureImage", "テクスチャキャッシュのDDSエンコードに失敗しました: " + WideToUtf8(filePath));
-                return;
-            }
-
-            const std::wstring tempPath = GetCacheTempPath(filePath, sRGB);
-            std::ofstream out(tempPath, std::ios::binary | std::ios::trunc);
-            if (!out.is_open())
-            {
-                Core::Logger::Warning("TextureImage", "テクスチャキャッシュの書き込みに失敗しました: " + WideToUtf8(tempPath));
-                return;
-            }
-
-            TexCacheHeader header{};
-            std::memcpy(header.Magic, kTexCacheMagic, sizeof(kTexCacheMagic));
-            header.Version = kTexCacheVersion;
-            header.SourceFileTime = sourceTime;
-            header.SourceFileSize = sourceSize;
-            header.PayloadSize = blob.GetBufferSize();
-
-            out.write(reinterpret_cast<const char*>(&header), sizeof(header));
-            out.write(reinterpret_cast<const char*>(blob.GetBufferPointer()), static_cast<std::streamsize>(blob.GetBufferSize()));
-            if (!out)
-            {
-                Core::Logger::Warning("TextureImage", "テクスチャキャッシュの書き込みに失敗しました: " + WideToUtf8(tempPath));
-                return;
-            }
-            out.close();
-
-            MoveFileExW(tempPath.c_str(), GetCachePath(filePath, sRGB).c_str(), MOVEFILE_REPLACE_EXISTING);
         }
 
         // BC7圧縮専用の、エンジン本体のレンダリングデバイス(DX11/DX12どちらでもよい)とは独立した
@@ -280,8 +151,8 @@ namespace Kurenai::RHI
     {
         TextureImage result;
 
-        // DDS/TGAは既に圧縮・ミップ済みであることを前提とした配布形式のため、キャッシュは作らず
-        // そのまま読み込む(PNG/JPG等の無圧縮形式のみがBC7+ミップキャッシュの対象)
+        // DDS/TGAは既に圧縮・ミップ済みであることを前提とした配布形式のため、
+        // BC7圧縮・ミップ生成は行わずそのまま読み込む
         if (HasExtension(filePath, L".dds"))
         {
             ThrowIfFailed(
@@ -307,15 +178,6 @@ namespace Kurenai::RHI
             return result;
         }
 
-        uint64_t sourceTime = 0;
-        uint64_t sourceSize = 0;
-        const bool haveSourceStat = GetFileTimeAndSize(filePath, sourceTime, sourceSize);
-
-        if (haveSourceStat && TryLoadDDSCache(GetCachePath(filePath, sRGB), sourceTime, sourceSize, result.m_Impl->Metadata, result.m_Impl->Image))
-        {
-            return result;
-        }
-
         DirectX::TexMetadata rawMetadata{};
         DirectX::ScratchImage rawImage;
         ThrowIfFailed(
@@ -336,9 +198,10 @@ namespace Kurenai::RHI
         }
         DirectX::ScratchImage& baseImage = SUCCEEDED(mipHr) ? mipChain : rawImage;
 
-        // BC7のソフトウェア圧縮は非常に重く(実機で1枚あたり数十秒規模になることを確認済み)、
-        // GPU(コンピュートシェーダー)版のCompress()を優先して使う(CompressBC7参照。
-        // GPUが使えない環境ではCPU版へ自動フォールバックする)
+        // BC7のソフトウェア圧縮は非常に重く(実機で1枚あたり数十秒規模になることを確認済み)なため、
+        // GPU(コンピュートシェーダー)版のCompress()のみを使う。CPU版フォールバックは持たない
+        // (CompressBC7参照)。GPU圧縮用デバイスが作れない/圧縮自体が失敗した場合は、
+        // 下のFAILED(compressHr)分岐で非圧縮のまま使用する
         const DXGI_FORMAT compressedFormat = sRGB ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
         DirectX::ScratchImage compressed;
         const HRESULT compressHr = CompressBC7(
@@ -346,20 +209,70 @@ namespace Kurenai::RHI
             compressedFormat, compressed);
         if (FAILED(compressHr))
         {
-            // 圧縮に失敗した場合は非圧縮のまま使用する(キャッシュも書かない。次回また圧縮を試みる)
+            // 圧縮に失敗した場合は非圧縮のまま使用する
             Core::Logger::Warning("TextureImage", "BC7圧縮に失敗したため非圧縮のまま使用します: " + WideToUtf8(filePath));
             result.m_Impl->Metadata = baseImage.GetMetadata();
             result.m_Impl->Image = std::move(baseImage);
             return result;
         }
 
-        if (haveSourceStat)
-        {
-            WriteDDSCacheBestEffort(filePath, sRGB, sourceTime, sourceSize, compressed);
-        }
-
         result.m_Impl->Metadata = compressed.GetMetadata();
         result.m_Impl->Image = std::move(compressed);
         return result;
+    }
+
+    TextureImage TextureImage::LoadFromPackedTexture(const std::wstring& filePath)
+    {
+        TextureImage result;
+
+        // 既定のstreambufバッファのままだと大きなテクスチャ(BC7圧縮後でも数MB~数十MB)を
+        // 細切れのreadで読むことになるため、ModelLoaderの.kmodel読み込みと同様に
+        // openより前に大きめ(1MB)のバッファを設定しておく
+        std::vector<char> ioBuffer(1 << 20);
+        std::ifstream in;
+        in.rdbuf()->pubsetbuf(ioBuffer.data(), static_cast<std::streamsize>(ioBuffer.size()));
+        in.open(filePath, std::ios::binary);
+        if (!in.is_open())
+        {
+            throw std::runtime_error("パック済みテクスチャを開けませんでした: " + WideToUtf8(filePath));
+        }
+
+        try
+        {
+            in.exceptions(std::ios::failbit | std::ios::badbit);
+
+            Assets::PackedTextureHeader header{};
+            in.read(reinterpret_cast<char*>(&header), sizeof(header));
+            if (std::memcmp(header.Magic, Assets::kPackedTextureMagic, sizeof(Assets::kPackedTextureMagic)) != 0)
+            {
+                throw std::runtime_error("パック済みテクスチャのマジックナンバーが不正です: " + WideToUtf8(filePath));
+            }
+            if (header.Version != Assets::kPackedTextureVersion)
+            {
+                throw std::runtime_error(
+                    "パック済みテクスチャのバージョンが対応していません(ファイル: " +
+                    std::to_string(header.Version) + ", ランタイム: " + std::to_string(Assets::kPackedTextureVersion) +
+                    "): " + WideToUtf8(filePath));
+            }
+            if (header.PayloadSize == 0)
+            {
+                throw std::runtime_error("パック済みテクスチャのペイロードが空です: " + WideToUtf8(filePath));
+            }
+
+            std::vector<uint8_t> payload(header.PayloadSize);
+            in.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+
+            // ヘッダ検証後はDDSペイロードをデコードするだけなので、WICデコード・ミップ生成・
+            // BC7圧縮はいずれも発生しない
+            ThrowIfFailed(
+                DirectX::LoadFromDDSMemory(payload.data(), payload.size(), DirectX::DDS_FLAGS_NONE, &result.m_Impl->Metadata, result.m_Impl->Image),
+                "パック済みテクスチャのDDSデコードに失敗しました: " + WideToUtf8(filePath));
+
+            return result;
+        }
+        catch (const std::ios_base::failure&)
+        {
+            throw std::runtime_error("パック済みテクスチャの読み込み中に入出力エラーが発生しました: " + WideToUtf8(filePath));
+        }
     }
 }

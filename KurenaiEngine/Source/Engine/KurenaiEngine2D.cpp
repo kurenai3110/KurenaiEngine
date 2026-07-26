@@ -7,27 +7,13 @@
 #include <stdexcept>
 #include <vector>
 
+#include "Core/StringUtil.h"
+
 namespace Kurenai
 {
     namespace
     {
-        // 呼び出し元(exe)ではなくKurenaiEngine.dll自身のフォルダを返す。
-        // Shaders/AssetsはDLLと同じフォルダに配置される運用のため、DLLがどこにコピー
-        // されて使われても(各サンプルのBuildフォルダ配下など)データを正しく解決できる
-        std::wstring GetModuleDirectory()
-        {
-            HMODULE module = nullptr;
-            GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<LPCWSTR>(&GetModuleDirectory),
-                &module);
-
-            wchar_t path[MAX_PATH];
-            GetModuleFileNameW(module, path, MAX_PATH);
-            std::wstring pathStr(path);
-            const size_t pos = pathStr.find_last_of(L"\\/");
-            return pos == std::wstring::npos ? L"" : pathStr.substr(0, pos + 1);
-        }
+        using Core::GetModuleDirectory;
 
         struct Vertex2D
         {

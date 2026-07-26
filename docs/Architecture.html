@@ -208,8 +208,9 @@
     <li><a href="#ssr">7. SSR(スクリーンスペースリフレクション)</a></li>
     <li><a href="#hiz">8. Hi-Zミップチェーン</a></li>
     <li><a href="#drawcall">9. ドローコール削減</a></li>
-    <li><a href="#cache">10. モデル・テクスチャキャッシュ</a></li>
+    <li><a href="#cache">10. モデルパッケージ形式とシーン形式</a></li>
     <li><a href="#bistro">11. Bistroアセットの変換パイプライン</a></li>
+    <li><a href="#lights">12. 複数ライト</a></li>
   </ol>
 </nav>
 
@@ -227,7 +228,9 @@ PBR(メタリック/ラフネス)計算を行います。
 <li>シャドウパス — サンライト視点で深度のみ描画。カスケードシャドウマップ(CSM)のため実際には4カスケード分(4回)実行する</li>
 <li>ジオメトリパス — G-Buffer書き込み</li>
 <li>Hi-Zパス — G-Buffer深度からコンピュートシェーダーでミップチェーンを構築</li>
-<li>直接光パス — G-Buffer・シャドウマップからPBRの直接光をHDRで計算</li>
+<li>直接光パス — G-Buffer・シャドウマップから太陽(平行光、シャドウ適用済み)のPBR直接光を計算し、
+続けてポイント/スポットライトのリスト(構造化バッファ)をループして影なしで加算する(11章参照)。
+パス数はライトを追加しても8のまま変わらない</li>
 <li>AO/GIパス — 選択中の手法(SSAO/SSIL)でNormal/Depth(SSILの場合はAlbedo・直接光バッファも読む)からAO・間接拡散光を計算しブラー</li>
 <li>最終合成パス — Albedo・直接光・AO/GI・スカイボックスを合成し、HDRのままSceneColorへ出力(トーンマッピングは行わない)</li>
 <li>SSRパス — SceneColor・G-Bufferから鏡面反射をHDRのまま計算し加算</li>
@@ -341,7 +344,9 @@ Shadows、Fernando 2005)を組み合わせています(<code>DirectLighting.hlsl
 <section id="tangent">
 <h2>5. 法線マッピングの接線ベクトル計算</h2>
 <p>
-法線マッピングの接線は、モデル読み込み時にassimpの三角形ごとの位置/UV差分から独自に計算した
+法線マッピングの接線は、モデルパック時(<code>KurenaiPacker.exe</code>、<code>ModelSource.cpp</code>。
+以前はランタイムの<code>ModelLoader.cpp</code>で行っていたが、9章の経緯によりオフラインのパック処理へ
+移設した)にassimpの三角形ごとの位置/UV差分から独自に計算した
 実接線ベクトル(Lengyelの手法。UV面積がほぼ0の縮退三角形は数値不安定なため除外)を、
 位置+法線をキーに複製頂点間で平均化して平滑化したうえで頂点バッファに格納し、
 ピクセルシェーダーではそれを補間・再直交化(Gram-Schmidt)してTBN行列を構築しています
@@ -398,38 +403,114 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 <section id="drawcall">
 <h2>9. ドローコール削減</h2>
 <p>
-モデル読み込み時、同一マテリアルを参照する複数のaiMeshは頂点/インデックスバッファを結合してから
-1つのドローコールにまとめます(マテリアルの切り替えが多い生データ、例えばOBJ形式のusemtl切り替えの
-たびにサブメッシュが分割されるようなアセットでは、aiMeshが数万件規模になり得るため、まとめないと
-ドローコール数がGPUドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になる)。
+モデルパック時(<code>KurenaiPacker.exe</code>、<code>ModelSource.cpp</code>)、同一マテリアルを
+参照する複数のaiMeshは頂点/インデックスバッファを結合してから1つのメッシュ(=実行時のドローコール1回)に
+まとめます(マテリアルの切り替えが多い生データ、例えばOBJ形式のusemtl切り替えのたびにサブメッシュが
+分割されるようなアセットでは、aiMeshが数万件規模になり得るため、まとめないとドローコール数がGPU
+ドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になる)。この結合はパック時に完了しており、
+<code>.kmodel</code>の<code>MeshEntry</code>数はほぼマテリアル数と一致する。ランタイム側では
+<code>ModelLoader.cpp</code>の<code>SortMeshesByMaterial</code>が、読み込んだメッシュをテクスチャ
+ポインタでソートする(DX12バックエンドの「直前の描画と同じテクスチャならSRVテーブルを使い回す」
+最適化のヒット率を上げるため)。
 </p>
 </section>
 
 <section id="cache">
-<h2>10. モデル・テクスチャキャッシュ</h2>
+<h2>10. モデルパッケージ形式とシーン形式</h2>
 <p>
-モデルを読み込むと、同じ場所に<code>&lt;元のファイル名&gt;.kmodelcache</code>というバイナリキャッシュが
-自動生成されます。頂点/インデックス/マテリアル参照を解析済みの形で保持しており、2回目以降の読み込みでは
-assimpによる解析をスキップして高速に読み込めます。元のモデルファイルが更新されると自動的に無効化され
-再生成されるため、手動での削除は基本的に不要です。
+以前は<code>Assets::LoadModel</code>実行時にassimpでモデルを解析し、頂点/インデックス/マテリアル
+参照を<code>&lt;元のファイル名&gt;.kmodelcache</code>へ、PNG/JPG等のテクスチャをWICデコード・
+ミップ生成・GPU BC7圧縮したうえで<code>&lt;元のファイル名&gt;.srgb/.linear.ktexcache</code>へ、
+それぞれ初回読み込み時にバイナリキャッシュとして書き出していた。しかし前処理をランタイムに
+持つ設計には次の問題があった。
+</p>
+<ul>
+<li>初回起動が重い(assimpのフルパース・WICデコード・BC7圧縮がユーザーの初回起動時に走る)</li>
+<li>キャッシュ生成が実行環境(誰のマシンで初回起動したか)に依存し、CIやバッチで事前に潰せない</li>
+<li>パース専用のassimp/zlibがレンダリングに不要な重い依存として<code>KurenaiEngine.dll</code>に
+残り続ける</li>
+<li><code>.kmodelcache</code>/<code>.ktexcache</code>は「元ファイルの更新日時+サイズ」で自動失効する
+派生物であり、元ファイルが無ければ成立しない。配布可能な成果物ではない</li>
+</ul>
+<p>
+この前処理をオフラインの<strong><code>KurenaiPacker.exe</code></strong>
+(<code>Tools/KurenaiPacker/</code>)へ完全に移し、その出力を<strong>KurenaiEngine専用モデル
+パッケージ形式</strong>として定義した。<code>.kmodelcache</code>/<code>.ktexcache</code>との決定的な
+違いは、<strong>キャッシュ(自動失効する派生物、元ファイル前提)</strong>ではなく
+<strong>パッケージ(元ファイル無しでも成立する配布可能なアセット)</strong>であるという設計上の
+位置づけにある。無効化は「パッカーを再実行するか」というビルド上の判断に一本化され、
+ランタイムはファイルのタイムスタンプを一切見ない。この結果<code>KurenaiEngine.dll</code>からassimp/
+zlibへの依存は完全に無くなった(<code>dumpbin /dependents</code>で確認可能)。
 </p>
 <p>
-同様に、PNG/JPG等の無圧縮テクスチャを読み込むと<code>&lt;元のテクスチャファイル名&gt;.srgb.ktexcache</code> /
-<code>.linear.ktexcache</code>(ベースカラー等sRGBとして読むか、法線/メタリック・ラフネス等linearとして
-読むかでファイルを分ける)というBC7圧縮+ミップ生成済みのDDSキャッシュが自動生成されます。初回読み込み時は
-WICデコード・ミップ生成・BC7圧縮が走りますが、BC7圧縮はGPU(コンピュートシェーダー)で行うため、
-Sponza(69枚)で実測7秒程度と初回でも十分高速です。GPUが使えない環境(古いGPU/ドライバ等)ではBC7圧縮
-自体をスキップし非圧縮のまま使用します(CPUソフトウェア圧縮へのフォールバックは行いません)。
-2回目以降はこのキャッシュを読むだけになりほぼ瞬時に完了します。テクスチャファイルが更新されると
-自動的に無効化され再生成されます。DDS/TGA形式(既に圧縮・ミップ済みである前提)はこのキャッシュの
-対象外です。
+形式定義は<code>ModelPackage.h</code>(ランタイムとKurenaiPackerの両方から参照する単一の正)に
+まとまっている。3種類のファイルで1モデルを構成する。
+</p>
+<table>
+<thead><tr><th>ファイル</th><th>役割</th><th>マジック/バージョン</th></tr></thead>
+<tbody>
+<tr><td><code>.kmodel</code></td><td>マニフェスト(<code>PackageHeader</code> + <code>TextureEntry[]</code> + <code>MeshEntry[]</code> + <code>LightEntry[]</code> + StringPool)。ジオメトリ・テクスチャの実体は持たず、パスとオフセットだけを持つ</td><td><code>'K','M','D','L'</code> / 2</td></tr>
+<tr><td><code>.kgeom</code></td><td>ジオメトリ実体。頂点(<code>Assets::Vertex</code>そのまま)/インデックス(<code>uint32_t</code>そのまま)ブロックをメッシュ順に16バイト境界で連結しただけで、読み込み後の加工が一切不要</td><td><code>'K','G','E','O'</code> / 1</td></tr>
+<tr><td><code>.ktex</code></td><td>テクスチャ実体。<code>DirectX::SaveToDDSMemory</code>が出力したDDSファイル全体(BC7圧縮・ミップ生成済み)をそのまま格納</td><td><code>'K','T','E','X'</code> / 1</td></tr>
+</tbody>
+</table>
+<p>
+<code>MeshEntry</code>は<code>BaseColorTextureIndex</code>/<code>NormalTextureIndex</code>/
+<code>MetallicRoughnessTextureIndex</code>/<code>EmissiveTextureIndex</code>という4つの
+<code>int32_t</code>(-1=指定なし)で<code>TextureEntry</code>を参照するほか、<code>AlphaCutoff</code>
+(0以下ならアルファカットアウト無効。glTFの<code>alphaMode=MASK</code>のマテリアルのみ設定される)と
+<code>EmissiveFactor[3]</code>を持つ。旧実装のようなパス文字列ベースの重複排除キャッシュは、
+KurenaiPacker側で(パス, sRGB)ごとに<code>TextureEntry</code>を1件へ集約する時点で完結しており、
+ランタイムの<code>ModelLoader.cpp</code>は添字だけで解決できる。読み込み後は
+<code>ModelLoader.cpp</code>内で各<code>MeshEntry</code>のオフセット/カウントが<code>.kgeom</code>の
+ペイロード範囲内に収まっているかを必ず検証する(壊れた<code>.kmodel</code>によるバッファ
+オーバーランを防ぐため)。<code>LightEntry[]</code>はglTFの<code>KHR_lights_punctual</code>拡張や
+FBXのライトノードに由来するモデル埋め込みライト(11章参照)をそのまま格納したもので、Position/
+Directionはモデルのローカル空間のまま(ワールド変換は<code>SceneLoader.cpp</code>の
+<code>LoadScene</code>が<code>ModelInstance::World</code>で行う)保持する。
+</p>
+<p>
+<code>KurenaiPacker.exe</code>のジオメトリ解析(<code>ModelSource.cpp</code>)は、旧
+<code>ModelLoader.cpp</code>のassimp解析部分をそのまま移設したものであり、実測に基づく判断
+(4章の接線平均化、8章のマテリアル単位メッシュ結合、ラフネスの範囲外値補正、glTFテクスチャURIの
+パーセントデコード(<code>%20</code>等)の必要性、11章のライトのノード経由ワールド変換など)は
+変更していない。BC7圧縮は<code>RHI::TextureImage::LoadFromFile</code>(内部で専用のD3D11デバイスを
+遅延生成して使う、<code>TextureImage.cpp</code>の<code>GetCompressionDevice</code>)をKurenaiPacker
+からそのまま呼び出しており、DX11/DX12どちらのランタイムバックエンド向けにパックする場合でも同一である。
+</p>
+<p>
+複数モデルの配置(平行移動・回転・スケール)とカメラ・太陽光の初期値をまとめる
+<strong><code>.kscene</code></strong>(UTF-8テキスト形式)も同時に導入した。書式・パース規則の
+詳細は<a href="KurenaiEngine.html#library">KurenaiEngine.html 4.7節</a>を参照。実装上の要点は、
+TRS(平行移動・回転・スケール)から<code>Assets::ModelInstance::World</code>
+(ワールド行列)・<code>NormalMatrix</code>(<code>World</code>の3x3部分の逆転置。回転+非一様
+スケールで法線が歪むのを防ぐ、4章と同じ理由)・<code>TangentSignFlip</code>(<code>World</code>の
+行列式が負、すなわちミラーリングを含む場合に-1。接線のw成分に掛けて従法線の向きを補正する)を
+<code>SceneLoader.cpp</code>の<code>LoadScene</code>が計算する点にある。<code>LoadScene</code>は
+同時に各<code>ModelInstance</code>の<code>Model::Lights</code>(<code>.kmodel</code>の
+<code>LightEntry[]</code>由来、ローカル空間)を<code>World</code>でワールド空間へ変換し、
+<code>.kscene</code>自身の<code>[Light]</code>セクション(元からワールド空間)と合成して
+<code>Scene::Lights</code>にまとめる。<code>KurenaiEngine3D</code>はこれをそのまま11章の
+ライトバッファ構築に使う。
+</p>
+<p>
+このモデル行列の追加にあたり、DX12バックエンドの制約が設計に影響した。DX12のルートシグネチャは
+CBV(定数バッファ)のルートパラメータを<strong>b0/b1の2枠しか持たない</strong>
+(<code>DX12Device::CreateRootSignature</code>)。b2を新設するとルートシグネチャと
+<code>DX12CommandList</code>のスロット処理まで変更が波及するため、既存のb1(<code>ObjectConstants</code>)
+に<code>World</code>/<code>NormalMatrix</code>/<code>TangentSignFlip</code>と、マテリアル側の
+<code>MetallicFactor</code>/<code>RoughnessFactor</code>/<code>AlphaCutoff</code>/
+<code>EmissiveFactor</code>を同居させることでルートシグネチャ自体は変更していない。シャドウパスは
+World以外を使わないが、GBufferパスと同じルートシグネチャ(=同じb1)を共有しているため、Worldが
+恒等行列であっても必ずbindする必要がある(バインドを省略するとDX12で前フレームの内容を参照する
+未定義動作になり得る)。
 </p>
 </section>
 
 <section id="bistro">
 <h2>11. Bistroアセットの変換パイプライン</h2>
 <p>
-<code>Assets/BistroMcGuire/</code>は
+<code>Assets/Source/BistroMcGuire/</code>は
 <a href="https://developer.nvidia.com/orca/amazon-lumberyard-bistro">Amazon Lumberyard Bistro</a>の
 Morgan McGuire版OBJ配布(<a href="https://github.com/Graphify-Labs/awesome-3d-meshes">awesome-3d-meshes</a>経由、
 <code>ThirdParty/SourceModels/awesome-3d-meshes-master/McGuire/Amazon Lumberyard Bistro/</code>の各種7z/zip
@@ -439,9 +520,231 @@ Morgan McGuire版OBJ配布(<a href="https://github.com/Graphify-Labs/awesome-3d-
 そのままassimpのOBJインポータへ読み込ませると解析が現実的な時間で終わらず、仮に読み込めてもドローコール数が
 GPUドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になるため、Blender(headless、
 <code>--factory-startup</code>でユーザー導入アドオンを無効化した状態)でOBJを読み込みglTFへ変換したもの
-(diffuse→BaseColor、_ddna→Normal Mapのノード配線をPythonスクリプトで自動化)を実際に読み込みます。
-展開直後の生データ(obj/mtl/PNGテクスチャ群)はglTF変換後は不要なため保持していません。
+(diffuse→BaseColor、_ddna→Normal Mapのノード配線をPythonスクリプトで自動化)を、さらに
+<code>KurenaiPacker.exe</code>で<code>Assets/Packed/BistroMcGuire/Exterior.kmodel</code> /
+<code>Interior.kmodel</code>へパックしたものを実際に読み込みます。展開直後の生データ
+(obj/mtl/PNGテクスチャ群)はglTF変換後は不要なため保持していません。
 </p>
+</section>
+
+<section id="lights">
+<h2>12. 複数ライト</h2>
+
+<h3>11.1 なぜ構造化バッファ(SRV)なのか</h3>
+<p>
+ポイント/スポットライトのリストは定数バッファ配列ではなく、<code>BufferUsage::StructuredReadOnly</code>
+という新規のRHI機能(<code>StructuredBuffer&lt;T&gt;</code>としてピクセルシェーダへ読み取り専用で
+バインドする構造化バッファ)で保持しています。定数バッファの固定長配列でも実装できましたが、以下の
+理由で構造化バッファを選びました。
+</p>
+<ul>
+<li>ライト数の上限がcbufferサイズに縛られない(可変長リストの本来の形)。</li>
+<li>DX12の定数バッファは<code>((size+255)&amp;~255) &times; kConstantBufferRingCapacity(8192)</code>を
+UPLOADヒープに常駐確保する設計(メッシュごとに<code>UpdateBuffer</code>する<code>ObjectConstants</code>
+向けの設計)のため、64灯の固定長cbuffer配列だと約34MiBを消費してしまう。このバッファは1フレーム
+1回しか更新しないため、リングのほとんどが無駄になる。</li>
+<li>将来タイル/クラスタカリングやGPU駆動描画へ進む際の土台になる(11.9参照)。</li>
+</ul>
+<p>
+現状<code>IRHICommandList::SetTexture</code>は<code>IRHITexture*</code>しか受け取らず、
+既存の<code>BufferUsage::Structured</code>はUAV(コンピュートシェーダー用の
+<code>RWStructuredBuffer</code>)しか作らないため、<strong>構造化バッファをグラフィックス
+パイプラインへSRVとしてバインドする手段がRHIに存在しませんでした</strong>。これが今回追加した
+<code>BufferUsage::StructuredReadOnly</code> / <code>IRHICommandList::SetShaderResourceBuffer</code>の
+動機です。
+</p>
+
+<h3>11.2 <code>StructuredReadOnly</code>の実装</h3>
+<p>
+DX11とDX12でヒープ配置の考え方が異なります。
+</p>
+<ul>
+<li><strong>DX11</strong>: <code>D3D11_USAGE_DYNAMIC</code> + <code>CPU_ACCESS_WRITE</code>で作成し、
+<code>UpdateBuffer</code>は<code>Map(D3D11_MAP_WRITE_DISCARD)</code>経由で書き込む
+(<code>UpdateSubresource</code>はDYNAMICバッファには使えないため、<code>DX11CommandList::UpdateBuffer</code>に
+分岐を追加しています)。</li>
+<li><strong>DX12</strong>: 本体は<strong>DEFAULTヒープ</strong>に置きます(ピクセルごとに読まれるため、
+CPUから見える代わりにGPU読み取りが低速なUPLOADヒープには向きません。頂点/インデックスバッファを
+DEFAULTヒープに置いている理由と同じです)。CPUからの書き込みは、UPLOADヒープに確保した
+ステージングリング(<code>kFrameCount+1</code>スロット。CPUがGPU完了を待たずに次フレームの記録を
+始めるため、直近フレームぶんの書き込みが同時に生存できる必要がある)へ<code>UpdateBuffer</code>のたびに
+書き込み、コマンドリスト上で<code>CopyBufferRegion</code>によりDEFAULTヒープ本体へコピーします
+(<code>TransitionTo</code>でCOPY_DEST⇔PIXEL_SHADER_RESOURCEを遷移。<code>DX12Texture::TransitionTo</code>と
+同じ「現在の状態と異なる場合のみバリアを発行する」パターンを<code>DX12Buffer</code>にも実装しました)。</li>
+</ul>
+<p>
+<strong>ルートシグネチャは変更していません。</strong>SRVテーブルは<code>t0</code>〜<code>t6</code>の
+<code>kTextureSlotCount = 7</code>で、<code>DirectLighting.hlsl</code>は元々<code>t0</code>〜<code>t4</code>
+しか使っていなかったため、ライトリストは<code>t5</code>に収まりました。
+<code>SetShaderResourceBuffer</code>は<code>SetTexture</code>と全く同じディスクリプタテーブル共有の
+仕組み(<code>m_PendingSrvHandles</code> / <code>FlushPendingSrvWrites</code>)にそのまま乗っており、
+DX12CommandList側の変更は「テクスチャの代わりにバッファのSRVハンドルを積む」だけです。
+</p>
+
+<h3>11.3 GPULightのレイアウトと容量</h3>
+<p>
+1灯あたり64バイト(<code>float4</code> &times; 4)。HLSL側の<code>struct GPULight</code>と
+C++側の<code>struct GPULight</code>(<code>KurenaiEngine3D.cpp</code>)を並び・ストライドとも
+一致させる必要があり、<code>static_assert(sizeof(GPULight) == 64)</code>で検証しています。
+</p>
+<pre><code>struct GPULight
+{
+    float4 PositionType;   // xyz=ワールド座標, w=LightType(0=Directional, 1=Point, 2=Spot)
+    float4 ColorRange;     // rgb=Color*Intensity*exposure(EV100)(露出済み放射輝度), w=Range
+    float4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
+    float4 Params;         // x=spotAngleOffset, yzw=未使用(将来のエリアライト用に予約)
+};</code></pre>
+<p>
+容量は<code>kMaxLights = 1024</code>(64KB)。実データの上限はBistro Interiorの4灯なので
+実質的に無制限で、シェーダは<code>LightCount.x</code>までしかループしないため容量自体を
+大きく取ってもGPU時間には影響しません。
+</p>
+
+<h3>11.4 太陽は<code>FrameConstants</code>(b0)に残す</h3>
+<p>
+太陽(平行光)は既存の<code>FrameConstants</code>(b0)の<code>LightDirection</code>/
+<code>LightColor</code>のままです。<strong>構造体のバイナリレイアウトは一切変更していません</strong> —
+<code>ComputeSunLighting()</code>がC++側で計算した「ルクス値をEV100露出で変換した後の放射輝度」を
+既存フィールドへ書き込むだけで、HLSL側の7ファイルに散らばる手書き重複宣言(<code>KurenaiEngine3D.cpp</code>の
+「末尾に追加し既存オフセットは変えない」規約)を一切書き換えずに済んでいます。太陽だけが
+<code>LightViewProj</code>(b0)とShadowMap(t4)を持つ特殊光源であるため、配列に統合すると
+要素ごとのシャドウ分岐が必要になる、という理由もあります。<code>DirectLighting.hlsl</code>の
+<code>PSMain</code>は「太陽1灯(シャドウ付き) &rarr; t5のライトリストのループ(影なし)」の
+2段構成になっています。
+</p>
+<div class="note">
+<p>
+<strong>落とし穴</strong>: 元の実装は太陽のNdotLが0以下のとき<code>PSMain</code>全体を
+<code>return</code>していました。これをそのまま残すと太陽が当たっていない面(夜、または太陽が
+反対側を向いている面)ではポイント/スポットライトのループにすら到達しません。太陽の寄与を
+<code>if (sunNdotL &gt; 0.0f) { ... }</code>のブロックへ閉じ込め、その後に必ずライトリストの
+ループへ進むよう修正しています。
+</p>
+</div>
+
+<h3>11.5 強度の単位系</h3>
+<p>
+<code>Light::Intensity</code>はPoint/Spotがカンデラ(cd)、Directionalがルクス(lx)という、
+glTFの<code>KHR_lights_punctual</code>仕様どおりの物理単位です。ゲームエンジンの実務
+(Unreal EngineのLight Intensity、Google FilamentのPhysically Based Cameraドキュメント、
+Lagarde &amp; de Rousiers, "Moving Frostbite to Physically Based Rendering"(SIGGRAPH 2014
+course notes))にならい、大気散乱などの放射量(W)ベースの物理モデルと混在させない限り、
+測光量のままBRDFへ投入し、カメラのEV100(実在の写真露出値)から
+<code>exposure = 1.0 / (1.2 * 2^EV100)</code>で表示レンジへ変換します。
+本エンジンには放射量ベースの大気モデルが無いため、発光効率定数(683 lm/W)による放射量への
+変換は行いません(変換段を増やす意味が無いため)。
+</p>
+<p>
+太陽・環境光もこの経路に統合しています。<code>ComputeSunLighting()</code>内の照度の基準値は
+Lagarde &amp; de Rousiers 2014の照度参照テーブルから、直射日光(正午・快晴)を100,000 lx、
+空光(環境光)を20,000 lx(同テーブルの曇天相当値。直射日光に対する空光の比率がおおむね1〜2割で
+あることの根拠としても妥当)としています。太陽の色味(既存の<code>(3.0, 2.9, 2.7)</code>)は
+正規化してティントとして残し、日の出/日の入りの遷移カーブ(<code>Smoothstep</code>による
+<code>dayFactor</code>)は物理的な大気散乱シミュレーションではなく既存のアート的な遷移のまま
+です。夜間の環境光は、天文学的に正確な星明かり(約0.001 lx)・満月(約0.1〜0.3 lx)をそのまま
+使うとほぼ完全な黒になり視認性が失われるため、視認性確保のためのアート的な下限値のまま
+意図的に残しています。
+</p>
+<p>
+既定の<code>m_SceneExposureEV100 = 15.0</code>は、太陽100,000 lxを旧来のアート値ピーク
+(<code>3.0</code>)に近づける逆算(<code>exposure &asymp; 3.0/100000</code> &rarr;
+<code>EV100 &asymp; 14.75</code>)を、実写真の「Sunny 16」(晴天屋外の経験則、EV100 &asymp; 15)に
+丸めた値です。二つの独立な根拠(旧アート値の再現・実写真の経験則)が一致したことの記録として
+残しています。<strong>この露出はシーン全体で単一の値</strong>であり、太陽・環境光・
+ポイント/スポットライトすべてに同じ式が適用されます。実カメラの露出設定が画角内の全光源に
+一様にかかるのと同じ理由です。屋内シーン(直射日光が無い/弱いシーン)では、実際のカメラで
+暗い室内を撮るときと同様に<strong>ユーザーがEV100を下げて調整する運用</strong>になります
+(自動露出は無い、既知の制約)。
+</p>
+<p>
+FBXには物理単位が存在しません。assimpは<code>Intensity/100</code>を色に畳み込むだけ
+(DCC側の相対値)のため、FBX読み込み時はこの値を「カンデラ相当の近似値」として扱い、
+Infoログで明示します(事実と異なる精度を主張しないため)。
+</p>
+
+<h3>11.6 影を持たない理由とSSILへの波及</h3>
+<p>
+ポイント/スポットライトはシャドウを落としません(今回のスコープ外)。既存の平行光シャドウ
+(2048x2048のシャドウマップ1枚)はそのままです。一方で、<code>SSIL_VisibilityBitmask.hlsl</code>は
+直接光パスの出力(t2)を間接光の放射源としてサンプルするため、<strong>新規ライトは既存コードの
+変更なしに自動的にSSILの間接拡散光へ波及します</strong>(直接光パスの出力に太陽+ポイント/
+スポットライトの合計が乗っているため)。
+</p>
+
+<h3>11.7 ModelLoaderのライト読み込みとassimpの落とし穴</h3>
+<p>
+<code>ModelLoader.cpp</code>の<code>ImportLights</code>は<code>aiScene::mLights</code>を
+<code>Assets::Light</code>へ変換します。実装時に踏んだ、あるいは踏みかけた落とし穴を記録します。
+</p>
+<ul>
+<li><code>aiProcess_ConvertToLeftHanded</code>は<code>aiScene::mLights</code>自体を変換しません
+(<code>ConvertToLHProcess.cpp</code>にnode/mesh/material/animation/cameraのループはあるが
+ライトだけ無い)。</li>
+<li>glTF2/FBXの両インポータとも<code>aiLight::mPosition</code>は<strong>(0,0,0)固定</strong>、
+<code>mDirection</code>はノードローカルの固定値(glTF: <code>(0,0,-1)</code> / FBX:
+<code>(0,-1,0)</code>)のままで、ライトが付いていたノードの名前が<code>mName</code>に入るだけです。
+そのため位置・向きは<strong>ノードのワールド変換行列</strong>から求める必要があります
+(<code>CollectMeshNodes</code>と同じ再帰下降で、ノード名→<code>{aiNode*, aiMatrix4x4}</code>の
+マップを作る<code>CollectNodeWorldTransforms</code>を追加)。この経路ならノード変換自体は
+メッシュと同じく左手系へミラー済みのため、左手系変換も同時に正しく効きます(実際に
+<code>LightTest.gltf</code>で検証時、右手系で authored した Z=-2 の位置が、ノード変換経由で
+正しくZ=+2として読み込まれることを確認しました)。逆に<code>aiLight::mPosition/mDirection</code>を
+素の値として使うと座標系がズレます。</li>
+<li>FBXの強度は<code>Intensity/100</code>を色に畳み込むだけ(DCC側の相対値)。glTFは
+<code>color &times; intensity</code>(カンデラ)と単位が異なります。</li>
+<li><strong>FBXのエリアライトは<code>aiLightSource_UNDEFINED</code>に落ちます</strong>
+(<code>FBXConverter.cpp</code>の<code>ConvertLight</code>、<code>Light::Type_Area</code>の
+ケース)。glTFの<code>KHR_lights_punctual</code>にもエリアライトの定義自体が無いため、
+エリアライトはどちらの形式からも読み込めません(11.9参照)。</li>
+<li><code>aiLight</code>の既定コーン角(<code>mAngleInnerCone</code>/<code>mAngleOuterCone</code>)は
+<code>2&pi;</code>のため、SPOT以外で読むと壊れます。SPOTのときだけ読むようにしています。</li>
+<li><code>mAttenuationConstant/Linear/Quadratic</code>はglTFが常に<code>(0,0,1)</code>、FBXが
+DecayTypeに応じて<code>2/decay</code>や<code>2/decay&sup2;</code>と意味が異なるため、
+エンジン側は常に「windowed逆二乗 + Range」に正規化する設計とし、これらの値はRangeの推定にも
+使っていません(参考としてどこにもログ出力していない、線形/定数減衰はPBRパイプラインでは
+表現しないという設計判断)。</li>
+</ul>
+<p>
+Rangeの推定はglTFのノードメタデータ<code>PBR_LightRange</code>(<code>range</code>プロパティが
+明示されている場合のみassimpが設定する)を優先し、無ければ打ち切り輝度
+(<code>kCutoffRadiance = 0.01</code>、既定EV100=15.0での露出後の値と比較)から逆算します。
+この推定はモデル読み込み時に一度だけ行われるため、後からユーザーがEV100を大きく変更すると
+実際に見えるべき範囲とズレることがあります(Bistro Interiorの実データ検証で確認済み: EV100=15
+基準で推定したRangeは0.85m程度と非常に小さく、屋内向けにEV100を下げて見ると光源の
+すぐ近くでしか効果が無い)。Rangeは自動では再計算せず、ImGuiで手動調整する運用としています。
+</p>
+<p>
+<code>.kmodelcache</code>のライトセクションは全メッシュレコードの後(ファイル末尾)に追記します。
+こうすることで既存のメッシュ読み込み/書き出しループを変更せずに済みます。<code>Assets::Light</code>は
+<code>std::string Name</code>を含むためmemcpyできず、POD部分(<code>CachedLightRecord</code>)と
+既存の<code>WriteCacheString</code>/<code>ReadCacheString</code>で分けて読み書きしています。
+</p>
+
+<h3>11.8 CPU側ライトカリングは今回不要</h3>
+<p>
+全画面ディファードなので、フラスタムカリングは「容量(<code>kMaxLights</code>)を超えたときどれを
+残すか」以外には効果がありません(フラスタム内のライトについてはコストが変わらないため)。
+実データの上限はBistro Interiorの4灯です。安全弁として、容量を超える場合は
+<strong>カメラからの距離昇順で先頭<code>kMaxLights</code>灯のみ採用</strong>し、超過を検出した
+最初のフレームだけ警告ログを出す実装にしています(<code>kMaxLights</code>を意図的に2まで縮小し、
+5灯を注入して動作確認済み)。
+</p>
+
+<h3>11.9 将来の拡張余地</h3>
+<ul>
+<li><strong>エリアライト(球・チューブ・矩形)</strong>: 代表点近似(Karis, "Real Shading in
+Unreal Engine 4", 2013)なら追加リソースゼロで載ります。LTC(Linearly Transformed Cosines)は
+LUTテクスチャ2枚を要求し、<code>kTextureSlotCount = 7</code>に対し<code>DeferredLighting.hlsl</code>が
+既に<code>t0</code>〜<code>t5</code>を使っているため余裕が乏しく、代表点近似の方が現実的です。
+<code>GPULight::Params.yzw</code>と5つ目の<code>float4</code>(接線軸)を足せば収まります。
+実装する際は<strong><code>DistributionGGX(NdotH, roughness)</code>が引数を内部で2乗する
+実装</strong>である点に注意してください。ラフネス補正後の<code>alphaPrime</code>ではなく
+<code>sqrt(alphaPrime)</code>を渡す必要があります。</li>
+<li><strong>タイル/クラスタカリング</strong>: 構造化バッファが入ったので、あとはコンピュート用
+ルートシグネチャのSRVスロット拡張(<code>kComputeSrvSlotCount = 4</code>ではG-Buffer4枚+
+ライトリストで足りない)と、<code>m_DirectLightTexture</code>のRTV+UAV両対応があれば載ります。
+</li>
+</ul>
 </section>
 
 </main>

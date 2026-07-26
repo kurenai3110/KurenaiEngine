@@ -7,47 +7,20 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <random>
 
-#include "Assets/ModelLoader.h"
+#include "Assets/SceneLoader.h"
+#include "Core/Logger.h"
 #include "Core/RenderGraph.h"
+#include "Core/StringUtil.h"
 
 namespace Kurenai
 {
     namespace
     {
-        // 呼び出し元(exe)ではなくKurenaiEngine.dll自身のフォルダを返す。
-        // Shaders/AssetsはDLLと同じフォルダに配置される運用のため、DLLがどこにコピー
-        // されて使われても(各サンプルのBuildフォルダ配下など)データを正しく解決できる
-        std::wstring GetModuleDirectory()
-        {
-            HMODULE module = nullptr;
-            GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<LPCWSTR>(&GetModuleDirectory),
-                &module);
-
-            wchar_t path[MAX_PATH];
-            GetModuleFileNameW(module, path, MAX_PATH);
-            std::wstring pathStr(path);
-            size_t pos = pathStr.find_last_of(L"\\/");
-            return pos == std::wstring::npos ? L"" : pathStr.substr(0, pos + 1);
-        }
-
-        // シーン名はASCIIのみを想定しているが、将来的な非ASCII文字にも対応できるよう
-        // WideCharToMultiByteで正しくUTF-8へ変換する(ImGuiのテキストAPIはUTF-8を期待する)
-        std::string WideToUtf8(const wchar_t* wide)
-        {
-            if (!wide || !*wide)
-            {
-                return {};
-            }
-            int length = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
-            std::string narrow(length, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, wide, -1, narrow.data(), length, nullptr, nullptr);
-            narrow.resize(length - 1);
-            return narrow;
-        }
+        using Core::GetModuleDirectory;
+        using Core::WideToUtf8;
 
         struct alignas(16) FrameConstants
         {
@@ -93,7 +66,18 @@ namespace Kurenai
             return t * t * (3.0f - 2.0f * t);
         }
 
-        SunLighting ComputeSunLighting(float timeOfDayHours, float sunAzimuthDegrees)
+        // 実在の写真露出値(EV100)から露出係数を求める。絞り値・シャッター速度・ISO感度から一意に
+        // 定まる実在の量で、Lagarde & de Rousiers, "Moving Frostbite to Physically Based Rendering"
+        // (SIGGRAPH 2014 course notes)やGoogle FilamentのPhysically Based Cameraドキュメントが
+        // 採る標準式。カンデラ/ルクスの測光量に直接掛けることで表示レンジへ変換する
+        // (放射量(W)への変換は行わない。本エンジンには放射量ベースの大気モデルが無く、
+        // 変換段を増やす意味が無いため)
+        float ComputeExposure(float ev100)
+        {
+            return 1.0f / (1.2f * std::pow(2.0f, ev100));
+        }
+
+        SunLighting ComputeSunLighting(float timeOfDayHours, float sunAzimuthDegrees, float exposureEV100)
         {
             using namespace DirectX;
 
@@ -114,39 +98,77 @@ namespace Kurenai
             SunLighting result{};
             result.Direction = { -sunDirection.x, -sunDirection.y, -sunDirection.z };
 
-            // 6時〜7時でなめらかに夜→昼、17時〜18時でなめらかに昼→夜へ切り替える
+            // 6時〜7時でなめらかに夜→昼、17時〜18時でなめらかに昼→夜へ切り替える。
+            // この遷移カーブ自体は物理的な大気散乱シミュレーションではなく既存のアート的な遷移のまま
             const float dayFactor = Smoothstep(6.0f, 7.0f, timeOfDayHours) * (1.0f - Smoothstep(17.0f, 18.0f, timeOfDayHours));
 
-            const XMFLOAT3 kDayColor{ 3.0f, 2.9f, 2.7f };
-            result.Color = { kDayColor.x * dayFactor, kDayColor.y * dayFactor, kDayColor.z * dayFactor, 0.0f };
+            // 太陽の色味(ティント)。ピーク照度はkSunIlluminanceLuxが持つので、ここは相対比のみ
+            const XMFLOAT3 kSunColorTint{ 1.0f, 0.967f, 0.9f };
+            // 直射日光(正午・快晴)の照度[lx]。Lagarde & de Rousiers 2014の照度参照テーブルに
+            // 掲載される代表値
+            constexpr float kSunIlluminanceLux = 100000.0f;
+            // 空光(直射日光を除いた間接照度)の照度[lx]。同テーブルの曇天相当値を、直射日光に対する
+            // 空光の比率(おおむね1〜2割)としても妥当な範囲であることの根拠として採用する
+            constexpr float kSkylightIlluminanceLux = 20000.0f;
+            // 夜間の環境光は天文学的な実測値(星明かり~0.001lx、満月~0.1〜0.3lx)をそのまま使うと
+            // ほぼ完全な黒になり視認性が失われるため、視認性確保のためのアート的な下限値のまま残す
+            // (物理値ではないことを明記した上での意図的な妥協)
+            const XMFLOAT3 kNightAmbientArt{ 0.006f, 0.008f, 0.015f };
 
-            const XMFLOAT3 kDayAmbient{ 0.03f, 0.03f, 0.03f };
-            const XMFLOAT3 kNightAmbient{ 0.006f, 0.008f, 0.015f };
+            const float exposure = ComputeExposure(exposureEV100);
+
+            const float sunPeak = kSunIlluminanceLux * dayFactor * exposure;
+            result.Color = { kSunColorTint.x * sunPeak, kSunColorTint.y * sunPeak, kSunColorTint.z * sunPeak, 0.0f };
+
+            const float skyPeak = kSkylightIlluminanceLux * exposure;
+            const XMFLOAT3 dayAmbient{ kSunColorTint.x * skyPeak, kSunColorTint.y * skyPeak, kSunColorTint.z * skyPeak };
             result.Ambient =
             {
-                kNightAmbient.x + (kDayAmbient.x - kNightAmbient.x) * dayFactor,
-                kNightAmbient.y + (kDayAmbient.y - kNightAmbient.y) * dayFactor,
-                kNightAmbient.z + (kDayAmbient.z - kNightAmbient.z) * dayFactor,
+                kNightAmbientArt.x + (dayAmbient.x - kNightAmbientArt.x) * dayFactor,
+                kNightAmbientArt.y + (dayAmbient.y - kNightAmbientArt.y) * dayFactor,
+                kNightAmbientArt.z + (dayAmbient.z - kNightAmbientArt.z) * dayFactor,
                 dayFactor,
             };
 
             return result;
         }
 
-        // GBuffer.hlsl側のcbuffer MaterialConstantsと一致させる必要がある。float3(EmissiveFactor)は
-        // HLSLのcbufferパッキング規則により16バイト境界をまたげないため、直前にPaddingを1つ挟んで
-        // オフセット16から始まるようにしている(挟まなくてもHLSLコンパイラが自動的に同じ位置へ
-        // パディングするが、C++側のレイアウトを明示的に一致させるためここでも挟む)
-        struct alignas(16) MaterialConstants
+        // Shaders/GBuffer.hlsl・Shaders/Shadow.hlslのObjectConstants(register b1)と
+        // レイアウトを一致させる必要がある。DX12のルートシグネチャがCBVをb0/b1の2枠しか
+        // 持たないため、モデル行列もマテリアル係数(Emissive/AlphaCutoff含む)と同居させている
+        // (Architecture.html参照)。float3(EmissiveFactor)以降が16バイト境界をまたがないよう、
+        // 直前のMetallicFactor/RoughnessFactor/TangentSignFlip/AlphaCutoffで先に16バイトを
+        // 埋めてからEmissiveFactor+Paddingで次の16バイトを埋める配置にしている
+        struct alignas(16) ObjectConstants
         {
+            DirectX::XMFLOAT4X4 World;
+            DirectX::XMFLOAT4X4 NormalMatrix;
             float MetallicFactor;
             float RoughnessFactor;
+            float TangentSignFlip;
             // 0以下ならアルファカットアウト無効
             float AlphaCutoff;
-            float Padding0;
             float EmissiveFactor[3];
-            float Padding1;
+            float Padding;
         };
+
+        // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
+        // TRS(平行移動・回転・スケール)から計算済み(HLSL側のmul(vec, matrix)規約に合わせて
+        // 転置済み)なので、ここでは単純にコピーするだけでよい
+        ObjectConstants MakeObjectConstants(const Assets::ModelInstance& instance, const Assets::Mesh& mesh)
+        {
+            ObjectConstants constants{};
+            constants.World = instance.World;
+            constants.NormalMatrix = instance.NormalMatrix;
+            constants.MetallicFactor = mesh.MetallicFactor;
+            constants.RoughnessFactor = mesh.RoughnessFactor;
+            constants.TangentSignFlip = instance.TangentSignFlip;
+            constants.AlphaCutoff = mesh.AlphaCutoff;
+            constants.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+            constants.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+            constants.EmissiveFactor[2] = mesh.EmissiveFactor[2];
+            return constants;
+        }
 
         // Present.hlsl側のModeと一致させる必要がある
         struct alignas(16) PresentConstants
@@ -199,6 +221,72 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 未使用
         };
 
+        // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
+        struct alignas(16) GPULight
+        {
+            DirectX::XMFLOAT4 PositionType;   // xyz=ワールド座標, w=LightType
+            DirectX::XMFLOAT4 ColorRange;     // rgb=露出済み放射輝度, w=Range
+            DirectX::XMFLOAT4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
+            DirectX::XMFLOAT4 Params;         // x=spotAngleOffset, yzw=未使用(エリアライト用に予約)
+        };
+        static_assert(sizeof(GPULight) == 64, "GPULightはDirectLighting.hlsl側と64バイトで一致させる必要がある");
+
+        // t5の構造化バッファに詰めるライトの最大数。実データ(BistroInterior.fbxで4灯)に対しては
+        // 十分すぎる余裕を持たせてあるが、構造化バッファなのでこの容量自体がGPU時間へ影響することはない
+        // (シェーダはLightCount.xまでしかループしないため)
+        constexpr uint32_t kMaxLights = 1024;
+
+        // DirectLighting.hlsl側のcbuffer LightingConstantsと一致させる必要がある
+        struct alignas(16) LightingConstants
+        {
+            DirectX::XMUINT4 LightCount; // x=有効ライト数, yzw=未使用
+        };
+
+        // Assets::LightをGPU側のGPULightへ変換する。カンデラ/ルクスの測光量にEV100露出を直接掛けて
+        // 表示レンジへ変換する(設計判断は「強度の単位」節を参照)。Frostbiteのスポット角度減衰用
+        // lightAngleScale/lightAngleOffsetもここでCPU事前計算する
+        GPULight MakeGPULight(const Assets::Light& light, float exposureEV100)
+        {
+            const float exposure = ComputeExposure(exposureEV100);
+            const float radiance = light.Intensity * exposure;
+
+            GPULight gpuLight{};
+            gpuLight.PositionType = { light.Position[0], light.Position[1], light.Position[2], static_cast<float>(light.Type) };
+            gpuLight.ColorRange = { light.Color[0] * radiance, light.Color[1] * radiance, light.Color[2] * radiance, light.Range };
+
+            float angleScale = 0.0f;
+            float angleOffset = 0.0f;
+            if (light.Type == Assets::LightType::Spot)
+            {
+                // Frostbiteのスポット減衰式: t = saturate(dot(spotDir,-L)*scale + offset), atten = t*t
+                const float cosOuter = std::cos(light.SpotOuterConeAngle);
+                const float cosInner = std::cos(light.SpotInnerConeAngle);
+                angleScale = 1.0f / std::max(0.001f, cosInner - cosOuter);
+                angleOffset = -cosOuter * angleScale;
+            }
+            gpuLight.DirectionAngle = { light.Direction[0], light.Direction[1], light.Direction[2], angleScale };
+            gpuLight.Params = { angleOffset, 0.0f, 0.0f, 0.0f };
+            return gpuLight;
+        }
+
+        // ImGuiでのライト方向編集用。正規化済み方向ベクトルをYaw/Pitch(度)に変換する。
+        // DragFloat3で直接編集すると正規化のたびに値が跳ねて操作しづらいため、角度で編集する。
+        // Yawは水平面内の角度(X軸を0度、Z軸を90度)、Pitchは水平面からの仰角(下向きが負)
+        void DirectionToYawPitch(const float direction[3], float& outYawDegrees, float& outPitchDegrees)
+        {
+            outYawDegrees = DirectX::XMConvertToDegrees(std::atan2(direction[2], direction[0]));
+            outPitchDegrees = DirectX::XMConvertToDegrees(std::asin(std::clamp(direction[1], -1.0f, 1.0f)));
+        }
+
+        void YawPitchToDirection(float yawDegrees, float pitchDegrees, float outDirection[3])
+        {
+            const float yaw = DirectX::XMConvertToRadians(yawDegrees);
+            const float pitch = DirectX::XMConvertToRadians(pitchDegrees);
+            outDirection[0] = std::cos(pitch) * std::cos(yaw);
+            outDirection[1] = std::sin(pitch);
+            outDirection[2] = std::cos(pitch) * std::sin(yaw);
+        }
+
         // タンジェント空間(Z軸=法線方向)の半球状にランダムなカーネルサンプルを生成する。
         // John Chapmanのチュートリアルにならい、原点付近にサンプルが偏るようスケーリングして
         // 近距離のディテールを優先的に拾う
@@ -230,29 +318,6 @@ namespace Kurenai
             }
             return kernel;
         }
-
-        struct SceneEntry
-        {
-            const wchar_t* DisplayName;
-            const wchar_t* RelativePath;
-
-            // trueの場合、FrameCameraToModelの自動配置ヒューリスティックの代わりにこの初期カメラ位置を使う。
-            // 密集した屋外の街区全体を包む巨大なバウンディングボックスを持つアセットでは、
-            // ホール用ヒューリスティック(バウンズを20%内側に入った位置)では建物の壁の中に埋まってしまうため、
-            // そのような場合に実際の描画結果を確認して選んだ初期位置を明示的に指定できるようにしている
-            bool HasCameraOverride = false;
-            float CameraPosition[3] = { 0.0f, 0.0f, 0.0f };
-            float CameraYaw = 0.0f;
-        };
-
-        const SceneEntry kScenes[] =
-        {
-            { L"Sponza", L"Assets\\Sponza\\Sponza.gltf" },
-            { L"Bistro (McGuire) - Exterior", L"Assets\\BistroMcGuire\\Exterior_gltf\\exterior.gltf", true, { 21.5f, 16.0f, -53.5f }, 0.0f },
-            { L"Bistro (McGuire) - Interior", L"Assets\\BistroMcGuire\\Interior_gltf\\interior.gltf" },
-            { L"White Surface Test", L"Assets\\MaterialTest\\MaterialTest.gltf" },
-        };
-        constexpr size_t kSceneCount = sizeof(kScenes) / sizeof(kScenes[0]);
 
         // レンダー解像度(renderWidth x renderHeight)のアスペクト比を保ったまま、
         // windowWidth x windowHeight の中央に収まるビューポート(レターボックス/ピラーボックス)を求める
@@ -296,7 +361,7 @@ namespace Kurenai
 
         // imgui.iniの保存先を起動時の作業ディレクトリに依存させず、KurenaiEngine.dllと同じフォルダに固定する。
         // ImGuiはIniFilenameのポインタを保持するだけでコピーしないため、m_ImGuiIniPathで寿命を維持する
-        m_ImGuiIniPath = WideToUtf8((GetModuleDirectory() + L"imgui.ini").c_str());
+        m_ImGuiIniPath = WideToUtf8(GetModuleDirectory() + L"imgui.ini");
         ImGui::GetIO().IniFilename = m_ImGuiIniPath.c_str();
 
         m_Camera.SetAspectRatio(static_cast<float>(m_RenderWidth) / static_cast<float>(m_RenderHeight));
@@ -594,10 +659,23 @@ namespace Kurenai
         cascadeConstantBufferDesc.SizeInBytes = sizeof(CascadeConstants);
         m_ShadowCascadeConstantBuffer = m_Device->CreateBuffer(cascadeConstantBufferDesc);
 
-        RHI::BufferDesc materialConstantBufferDesc;
-        materialConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        materialConstantBufferDesc.SizeInBytes = sizeof(MaterialConstants);
-        m_MaterialConstantBuffer = m_Device->CreateBuffer(materialConstantBufferDesc);
+        RHI::BufferDesc objectConstantBufferDesc;
+        objectConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        objectConstantBufferDesc.SizeInBytes = sizeof(ObjectConstants);
+        m_ObjectConstantBuffer = m_Device->CreateBuffer(objectConstantBufferDesc);
+
+        // ポイント/スポットライトのリスト(t8)。CPUから毎フレーム更新するが、ピクセルシェーダから
+        // 読み取り専用でよいためStructuredReadOnly(RWStructuredBufferではなくStructuredBuffer)で作成する
+        RHI::BufferDesc lightBufferDesc;
+        lightBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+        lightBufferDesc.SizeInBytes = sizeof(GPULight) * kMaxLights;
+        lightBufferDesc.StrideInBytes = sizeof(GPULight);
+        m_LightBuffer = m_Device->CreateBuffer(lightBufferDesc);
+
+        RHI::BufferDesc lightingConstantBufferDesc;
+        lightingConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        lightingConstantBufferDesc.SizeInBytes = sizeof(LightingConstants);
+        m_LightingConstantBuffer = m_Device->CreateBuffer(lightingConstantBufferDesc);
 
         RHI::BufferDesc presentConstantBufferDesc;
         presentConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -606,7 +684,58 @@ namespace Kurenai
 
         CreateRenderTargets(m_RenderWidth, m_RenderHeight);
 
+        DiscoverScenes();
         LoadScene(0);
+    }
+
+    void KurenaiEngine3D::DiscoverScenes()
+    {
+        const std::wstring sceneDirectory = GetModuleDirectory() + L"Assets\\Scenes\\";
+
+        std::vector<std::wstring> fileNames;
+        WIN32_FIND_DATAW findData{};
+        HANDLE findHandle = FindFirstFileW((sceneDirectory + L"*.kscene").c_str(), &findData);
+        if (findHandle != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                {
+                    fileNames.push_back(findData.cFileName);
+                }
+            } while (FindNextFileW(findHandle, &findData));
+            FindClose(findHandle);
+        }
+
+        // ImGuiのシーン一覧・LoadSceneのインデックスをビルドのたびに変わらないようにする
+        std::sort(fileNames.begin(), fileNames.end(), [](const std::wstring& a, const std::wstring& b)
+        {
+            return _wcsicmp(a.c_str(), b.c_str()) < 0;
+        });
+
+        m_SceneFilePaths.clear();
+        m_SceneDisplayNames.clear();
+        for (const std::wstring& fileName : fileNames)
+        {
+            const std::wstring fullPath = sceneDirectory + fileName;
+            try
+            {
+                m_SceneDisplayNames.push_back(Assets::ReadSceneName(fullPath));
+                m_SceneFilePaths.push_back(fullPath);
+            }
+            catch (const std::exception& e)
+            {
+                // 1ファイルの不備でアプリ全体が起動できなくなるのを避け、そのファイルだけ除外して続行する
+                Core::Logger::Error("KurenaiEngine3D", "シーンファイルの読み込みに失敗したため一覧から除外します (" + WideToUtf8(fullPath) + "): " + e.what());
+            }
+        }
+
+        if (m_SceneFilePaths.empty())
+        {
+            const std::string message = "有効なシーンファイル(.kscene)が見つかりませんでした: " + WideToUtf8(sceneDirectory);
+            Core::Logger::Error("KurenaiEngine3D", message);
+            throw std::runtime_error(message);
+        }
     }
 
     void KurenaiEngine3D::CreateRenderTargets(uint32_t width, uint32_t height)
@@ -638,45 +767,61 @@ namespace Kurenai
 
     void KurenaiEngine3D::LoadScene(size_t sceneIndex)
     {
-        if (sceneIndex >= kSceneCount)
+        if (sceneIndex >= m_SceneFilePaths.size())
         {
             return;
         }
 
-        // m_Model/m_Camera/Post ProcessingパラメータはRender()(Renderスレッド)も読み書きするため、
+        // m_Scene/m_Camera/Post ProcessingパラメータはRender()(Renderスレッド)も読み書きするため、
         // この関数全体をm_SceneMutexで保護する(詳細はm_SceneMutexのコメント参照)。UpdateSceneSwitch
         // (Updateスレッド)からのみ呼ばれる前提のため、Renderスレッドとの競合はこれで排他できる
         std::lock_guard<std::mutex> sceneLock(m_SceneMutex);
 
-        const std::wstring modelPath = GetModuleDirectory() + kScenes[sceneIndex].RelativePath;
+        // [Model]Pathの基準ディレクトリ(Assetsルート)。.kmodel自身の内部パス(.kmodelがある
+        // ディレクトリからの相対)とは基準が異なる点に注意(SceneLoader.h参照)
+        const std::wstring assetRootDirectory = GetModuleDirectory() + L"Assets\\";
 
-        // 旧シーン(m_Model)のバッファ/テクスチャを破棄する前に、GPUが旧シーンを参照する
+        // 旧シーン(m_Scene)のバッファ/テクスチャを破棄する前に、GPUが旧シーンを参照する
         // コマンド(直前まで提出されていた描画コマンド)の実行を終えるまで待つ。特にDX12は
         // CPUがGPU完了を待たずに次フレームの記録を始める多重バッファリング設計のため、
         // これを省くとGPUがまだ読んでいるバッファ/テクスチャを解放してしまい、
         // ヒープ破損によるクラッシュを引き起こす(詳細はIRHIDevice::WaitForGPUIdleのコメント参照)
         m_Device->WaitForGPUIdle();
 
-        // Assets::LoadModelの戻り値(新シーンの全テクスチャ/バッファ)を作り終えてから代入すると、
-        // 代入演算子が旧m_Modelを破棄するまでの間、新旧シーンのGPUリソース(特にDX12の
+        // Assets::LoadSceneの戻り値(新シーンの全テクスチャ/バッファ)を作り終えてから代入すると、
+        // 代入演算子が旧m_Sceneを破棄するまでの間、新旧シーンのGPUリソース(特にDX12の
         // 非シェーダー可視SRVディスクリプタ)が同時に確保された状態になり、大規模シーンでは
-        // ディスクリプタヒープを圧迫する。先に空のModelで置き換えて旧シーンを解放しておく
+        // ディスクリプタヒープを圧迫する。先に空のSceneで置き換えて旧シーンを解放しておく
         // (直前のWaitForGPUIdleによりGPUはもう旧シーンを参照していないため安全)
-        m_Model = Assets::Model{};
-        m_Model = Assets::LoadModel(*m_Device, modelPath);
+        m_Scene = Assets::Scene{};
+        m_Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory);
         m_CurrentSceneIndex = sceneIndex;
+
+        // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
+        // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
+        m_TimeOfDay = m_Scene.SunTimeOfDay;
+        m_SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
+        m_ShadowEnabled = m_Scene.ShadowEnabled;
+
+        // アセット由来のライトをユーザー編集用のコピーへ複製する(m_Scene.Lightsは直接編集しない。
+        // シーンを再読み込みすればアセット既定値に戻るようにするため)。m_Scene.Lightsは
+        // SceneLoaderが各ModelInstanceのModel::Lightsをワールド空間へ変換し、.kscene自身の
+        // [Light]セクションのライトと合成済みのシーン全体のライト一覧(Scene.h参照)
+        m_Lights = m_Scene.Lights;
+        m_SelectedLightIndex = m_Lights.empty() ? -1 : 0;
+        m_LightOverflowLogged = false;
 
         FrameCameraToModel();
 
         const wchar_t* apiName = (m_GraphicsAPI == GraphicsAPI::DX12) ? L"DX12" : L"DX11";
-        m_Window->SetTitle(std::wstring(L"Kurenai Engine [") + apiName + L"] - " + kScenes[sceneIndex].DisplayName);
+        m_Window->SetTitle(std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name);
     }
 
     void KurenaiEngine3D::FrameCameraToModel()
     {
-        const float sizeY = m_Model.BoundsMax[1] - m_Model.BoundsMin[1];
-        const float dx = m_Model.BoundsMax[0] - m_Model.BoundsMin[0];
-        const float dz = m_Model.BoundsMax[2] - m_Model.BoundsMin[2];
+        const float sizeY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
+        const float dx = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
+        const float dz = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
         const float diagonal = std::sqrt(dx * dx + sizeY * sizeY + dz * dz);
 
         // SSAO/SSILのサンプリング半径はシーンの規模に応じて変わるべきなので、対角線に比例させる
@@ -690,19 +835,18 @@ namespace Kurenai
         m_SSRMaxDistance = std::clamp(diagonal * 0.5f, 1.0f, 100.0f);
         m_SSRThickness = m_SSAORadius * 0.2f;
 
-        const SceneEntry& currentScene = kScenes[m_CurrentSceneIndex];
-        if (currentScene.HasCameraOverride)
+        if (m_Scene.HasCameraOverride)
         {
-            m_Camera.SetPosition({ currentScene.CameraPosition[0], currentScene.CameraPosition[1], currentScene.CameraPosition[2] });
-            m_Camera.SetYawPitch(currentScene.CameraYaw, 0.0f);
+            m_Camera.SetPosition({ m_Scene.CameraPosition[0], m_Scene.CameraPosition[1], m_Scene.CameraPosition[2] });
+            m_Camera.SetYawPitch(m_Scene.CameraYaw, m_Scene.CameraPitch);
             m_Camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
             return;
         }
 
-        const float centerX = (m_Model.BoundsMin[0] + m_Model.BoundsMax[0]) * 0.5f;
-        const float centerY = (m_Model.BoundsMin[1] + m_Model.BoundsMax[1]) * 0.5f;
-        const float centerZ = (m_Model.BoundsMin[2] + m_Model.BoundsMax[2]) * 0.5f;
-        const float eyeHeight = m_Model.BoundsMin[1] + sizeY * 0.15f;
+        const float centerX = (m_Scene.BoundsMin[0] + m_Scene.BoundsMax[0]) * 0.5f;
+        const float centerY = (m_Scene.BoundsMin[1] + m_Scene.BoundsMax[1]) * 0.5f;
+        const float centerZ = (m_Scene.BoundsMin[2] + m_Scene.BoundsMax[2]) * 0.5f;
+        const float eyeHeight = m_Scene.BoundsMin[1] + sizeY * 0.15f;
 
         const float longAxis = std::max(dx, dz);
         const float shortAxis = std::min(dx, dz);
@@ -736,7 +880,7 @@ namespace Kurenai
         else if (dx >= dz)
         {
             // ホールの長辺方向の端寄りから中心を見る位置を初期視点にする(中央の装飾物や壁に埋まらないように)
-            posX = m_Model.BoundsMin[0] + dx * 0.2f;
+            posX = m_Scene.BoundsMin[0] + dx * 0.2f;
             posY = eyeHeight;
             posZ = centerZ;
             yaw = DirectX::XM_PIDIV2;
@@ -746,7 +890,7 @@ namespace Kurenai
         {
             posX = centerX;
             posY = eyeHeight;
-            posZ = m_Model.BoundsMin[2] + dz * 0.2f;
+            posZ = m_Scene.BoundsMin[2] + dz * 0.2f;
             yaw = 0.0f;
             nearZ = std::max(0.01f, diagonal * 0.0005f);
         }
@@ -876,7 +1020,7 @@ namespace Kurenai
         ImGui::TextUnformatted(m_GraphicsAPI == GraphicsAPI::DX12 ? "Graphics API: DX12" : "Graphics API: DX11");
         ImGui::Separator();
 
-        for (size_t i = 0; i < kSceneCount; ++i)
+        for (size_t i = 0; i < m_SceneDisplayNames.size(); ++i)
         {
             const bool isCurrent = (i == m_CurrentSceneIndex);
             if (isCurrent)
@@ -884,7 +1028,7 @@ namespace Kurenai
                 ImGui::BeginDisabled();
             }
 
-            const std::string label = WideToUtf8(kScenes[i].DisplayName);
+            const std::string label = WideToUtf8(m_SceneDisplayNames[i]);
             if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0.0f)))
             {
                 // LoadScene自体はUpdateスレッドから呼ぶ必要があるため、ここでは要求を書き込むだけにする
@@ -1028,26 +1172,157 @@ namespace Kurenai
         ImGui::End();
     }
 
-    void KurenaiEngine3D::RenderLightingUI()
+    void KurenaiEngine3D::RenderLightingUI(const FrameState& frameState)
     {
+        // ライトを選択して全項目を開くと縦に長くなるため、Profiler(280,490に移動済み)と
+        // 重ならないよう十分な高さを確保しておく
         ImGui::SetNextWindowPos(ImVec2(280.0f, 10.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(300.0f, 470.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Lighting");
 
-        ImGui::SliderFloat("Time of Day", &m_TimeOfDay, 0.0f, 24.0f, "%.2f h");
-        ImGui::Checkbox("Auto Advance", &m_TimeAutoAdvance);
-        if (m_TimeAutoAdvance)
+        if (ImGui::CollapsingHeader("Sun", ImGuiTreeNodeFlags_DefaultOpen))
         {
-            ImGui::SliderFloat("Speed", &m_TimeAdvanceSpeed, 0.1f, 10.0f, "%.1f h/s");
+            ImGui::SliderFloat("Time of Day", &m_TimeOfDay, 0.0f, 24.0f, "%.2f h");
+            ImGui::Checkbox("Auto Advance", &m_TimeAutoAdvance);
+            if (m_TimeAutoAdvance)
+            {
+                ImGui::SliderFloat("Speed", &m_TimeAdvanceSpeed, 0.1f, 10.0f, "%.1f h/s");
+            }
+            ImGui::SliderFloat("Sun Azimuth", &m_SunAzimuthDegrees, 0.0f, 360.0f, "%.1f deg");
+            // 太陽・環境光・下記ポイント/スポットライトすべてに一様にかかるシーン全体の露出
+            // (実在の写真露出値EV100)。屋内シーンでは実カメラと同様に下げて調整する運用になる
+            ImGui::SliderFloat("EV100", &m_SceneExposureEV100, -8.0f, 20.0f, "%.2f");
         }
-        ImGui::SliderFloat("Sun Azimuth", &m_SunAzimuthDegrees, 0.0f, 360.0f, "%.1f deg");
+
+        if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            uint32_t activeCount = 0;
+            for (const Assets::Light& light : m_Lights)
+            {
+                if (light.Enabled)
+                {
+                    ++activeCount;
+                }
+            }
+            ImGui::Text("Active: %u / %zu", activeCount, m_Lights.size());
+
+            ImGui::BeginChild("LightList", ImVec2(0.0f, 90.0f), true);
+            for (size_t i = 0; i < m_Lights.size(); ++i)
+            {
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::Checkbox("##enabled", &m_Lights[i].Enabled);
+                ImGui::SameLine();
+                const char* typeLabel = m_Lights[i].Type == Assets::LightType::Directional ? "Directional"
+                                       : m_Lights[i].Type == Assets::LightType::Spot ? "Spot" : "Point";
+                char label[192];
+                std::snprintf(
+                    label, sizeof(label), "[%s] %s", typeLabel, m_Lights[i].Name.empty() ? "(no name)" : m_Lights[i].Name.c_str());
+                if (ImGui::Selectable(label, m_SelectedLightIndex == static_cast<int>(i)))
+                {
+                    m_SelectedLightIndex = static_cast<int>(i);
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+
+            if (ImGui::Button("Add"))
+            {
+                Assets::Light newLight;
+                const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
+                newLight.Position[0] = cameraPosition.x;
+                newLight.Position[1] = cameraPosition.y;
+                newLight.Position[2] = cameraPosition.z;
+                newLight.Name = "New Light";
+                m_Lights.push_back(newLight);
+                m_SelectedLightIndex = static_cast<int>(m_Lights.size()) - 1;
+            }
+
+            const bool hasSelection = m_SelectedLightIndex >= 0 && m_SelectedLightIndex < static_cast<int>(m_Lights.size());
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!hasSelection);
+            if (ImGui::Button("Duplicate") && hasSelection)
+            {
+                Assets::Light duplicated = m_Lights[static_cast<size_t>(m_SelectedLightIndex)];
+                duplicated.Name += " (Copy)";
+                m_Lights.push_back(duplicated);
+                m_SelectedLightIndex = static_cast<int>(m_Lights.size()) - 1;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Remove") && hasSelection)
+            {
+                m_Lights.erase(m_Lights.begin() + m_SelectedLightIndex);
+                m_SelectedLightIndex =
+                    m_Lights.empty() ? -1 : std::min(m_SelectedLightIndex, static_cast<int>(m_Lights.size()) - 1);
+            }
+            ImGui::EndDisabled();
+
+            if (hasSelection)
+            {
+                Assets::Light& light = m_Lights[static_cast<size_t>(m_SelectedLightIndex)];
+
+                char nameBuffer[128];
+                std::snprintf(nameBuffer, sizeof(nameBuffer), "%s", light.Name.c_str());
+                if (ImGui::InputText("Name", nameBuffer, sizeof(nameBuffer)))
+                {
+                    light.Name = nameBuffer;
+                }
+
+                int typeIndex = static_cast<int>(light.Type);
+                const char* typeItems[] = { "Directional", "Point", "Spot" };
+                if (ImGui::Combo("Type", &typeIndex, typeItems, IM_ARRAYSIZE(typeItems)))
+                {
+                    light.Type = static_cast<Assets::LightType>(typeIndex);
+                }
+
+                ImGui::ColorEdit3("Color", light.Color);
+                ImGui::SliderFloat(
+                    "Intensity (cd/lx)", &light.Intensity, 0.01f, 1000000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+
+                if (light.Type != Assets::LightType::Directional)
+                {
+                    ImGui::DragFloat3("Position", light.Position, 0.1f);
+                    ImGui::SliderFloat("Range", &light.Range, 0.1f, 500.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+                }
+
+                if (light.Type != Assets::LightType::Point)
+                {
+                    float yawDegrees = 0.0f;
+                    float pitchDegrees = 0.0f;
+                    DirectionToYawPitch(light.Direction, yawDegrees, pitchDegrees);
+                    bool directionChanged = false;
+                    directionChanged |= ImGui::SliderFloat("Direction Yaw", &yawDegrees, -180.0f, 180.0f, "%.1f deg");
+                    directionChanged |= ImGui::SliderFloat("Direction Pitch", &pitchDegrees, -89.0f, 89.0f, "%.1f deg");
+                    if (directionChanged)
+                    {
+                        YawPitchToDirection(yawDegrees, pitchDegrees, light.Direction);
+                    }
+                }
+
+                if (light.Type == Assets::LightType::Spot)
+                {
+                    float innerDegrees = DirectX::XMConvertToDegrees(light.SpotInnerConeAngle);
+                    float outerDegrees = DirectX::XMConvertToDegrees(light.SpotOuterConeAngle);
+                    ImGui::SliderFloat("Inner Cone", &innerDegrees, 0.0f, 89.0f, "%.1f deg");
+                    ImGui::SliderFloat("Outer Cone", &outerDegrees, 0.0f, 90.0f, "%.1f deg");
+                    if (innerDegrees > outerDegrees)
+                    {
+                        innerDegrees = outerDegrees;
+                    }
+                    light.SpotInnerConeAngle = DirectX::XMConvertToRadians(innerDegrees);
+                    light.SpotOuterConeAngle = DirectX::XMConvertToRadians(outerDegrees);
+                }
+            }
+        }
 
         ImGui::End();
     }
 
     void KurenaiEngine3D::RenderProfilerUI()
     {
-        ImGui::SetNextWindowPos(ImVec2(280.0f, 280.0f), ImGuiCond_FirstUseEver);
+        // Lightingパネル(280,10)がライト編集項目を全部開くと縦に480px近く必要になるため、
+        // それより下(490)に配置して重ならないようにする
+        ImGui::SetNextWindowPos(ImVec2(280.0f, 490.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(280.0f, 460.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Profiler");
 
@@ -1167,7 +1442,7 @@ namespace Kurenai
             const auto cpuStart = std::chrono::steady_clock::now();
             {
                 // WM_SIZEによるスワップチェーンのリサイズ、およびLoadScene(Updateスレッド、
-                // UpdateSceneSwitch経由)によるm_Model/m_Camera/Post Processingパラメータの書き換えと
+                // UpdateSceneSwitch経由)によるm_Scene/m_Camera/Post Processingパラメータの書き換えと
                 // 同時に走らないよう、Render()全体をこれらのミューテックスで保護する。この2つの
                 // ミューテックスをこの組み合わせ・この順序でロックするのはここだけなので、
                 // std::scoped_lockでなくてもデッドロックの心配はないが、明示的にまとめて扱っておく
@@ -1340,7 +1615,7 @@ namespace Kurenai
             RenderSceneSwitchUI();
             RenderPostProcessUI();
             RenderDebugViewUI();
-            RenderLightingUI();
+            RenderLightingUI(frameState);
             RenderProfilerUI();
         }
 
@@ -1348,7 +1623,7 @@ namespace Kurenai
         m_GPUProfiler->BeginFrame();
         m_CPUProfiler.BeginFrame();
 
-        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay, m_SunAzimuthDegrees);
+        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay, m_SunAzimuthDegrees, m_SceneExposureEV100);
 
         // カスケードシャドウマップ: カメラ視錐台をkCascadeCount個の深度範囲に分割し、
         // それぞれ専用のライト正射影ビュー・プロジェクション行列を求める
@@ -1420,11 +1695,20 @@ namespace Kurenai
                         cmd->SetPipelineState(m_ShadowPipelineState.get());
                         cmd->SetConstantBuffer(0, m_ShadowCascadeConstantBuffer.get());
 
-                        for (const auto& mesh : m_Model.Meshes)
+                        for (const auto& instance : m_Scene.Instances)
                         {
-                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            for (const auto& mesh : instance.Model.Meshes)
+                            {
+                                // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
+                                // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
+                                const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
+                                cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                                cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                                cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                                cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            }
                         }
                     }
                 },
@@ -1447,25 +1731,22 @@ namespace Kurenai
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetSampler(0, m_Sampler.get());
 
-                for (const auto& mesh : m_Model.Meshes)
+                for (const auto& instance : m_Scene.Instances)
                 {
-                    MaterialConstants materialConstants{};
-                    materialConstants.MetallicFactor = mesh.MetallicFactor;
-                    materialConstants.RoughnessFactor = mesh.RoughnessFactor;
-                    materialConstants.AlphaCutoff = mesh.AlphaCutoff;
-                    materialConstants.EmissiveFactor[0] = mesh.EmissiveFactor[0];
-                    materialConstants.EmissiveFactor[1] = mesh.EmissiveFactor[1];
-                    materialConstants.EmissiveFactor[2] = mesh.EmissiveFactor[2];
-                    cmd->UpdateBuffer(m_MaterialConstantBuffer.get(), &materialConstants, sizeof(materialConstants));
-                    cmd->SetConstantBuffer(1, m_MaterialConstantBuffer.get());
+                    for (const auto& mesh : instance.Model.Meshes)
+                    {
+                        const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
+                        cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                        cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
-                    cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                    cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                    cmd->SetTexture(0, mesh.BaseColorTexture);
-                    cmd->SetTexture(1, mesh.NormalTexture);
-                    cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
-                    cmd->SetTexture(3, mesh.EmissiveTexture);
-                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                        cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                        cmd->SetTexture(0, mesh.BaseColorTexture);
+                        cmd->SetTexture(1, mesh.NormalTexture);
+                        cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
+                        cmd->SetTexture(3, mesh.EmissiveTexture);
+                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                    }
                 }
             },
         });
@@ -1521,12 +1802,62 @@ namespace Kurenai
                 m_ShadowCascades[0].get(), m_ShadowCascades[1].get(), m_ShadowCascades[2].get(), m_ShadowCascades[3].get(),
             },
             .RenderTargets = { m_DirectLightTexture.get() },
-            .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, &frameState](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
                 cmd->SetPipelineState(m_DirectLightPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+
+                // 有効なライトだけを詰めてt8のライトリストへ渡す。シェーダはLightCount.xまでしか
+                // ループしないため、無効なライトはそもそもGPUへ送らない
+                std::vector<GPULight> gpuLights;
+                gpuLights.reserve(m_Lights.size());
+                for (const Assets::Light& light : m_Lights)
+                {
+                    if (!light.Enabled)
+                    {
+                        continue;
+                    }
+                    gpuLights.push_back(MakeGPULight(light, m_SceneExposureEV100));
+                }
+
+                // 容量(kMaxLights)を超える場合は、カメラに近い順に先頭kMaxLights灯のみ採用する。
+                // 全画面ディファードなのでフラスタムカリングは効果が薄く、これは容量超過時の
+                // 安全弁としてのみ機能する(実データの上限はBistroInteriorの4灯)
+                if (gpuLights.size() > kMaxLights)
+                {
+                    const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
+                    std::sort(
+                        gpuLights.begin(), gpuLights.end(),
+                        [&cameraPosition](const GPULight& a, const GPULight& b)
+                        {
+                            const float dxA = a.PositionType.x - cameraPosition.x;
+                            const float dyA = a.PositionType.y - cameraPosition.y;
+                            const float dzA = a.PositionType.z - cameraPosition.z;
+                            const float dxB = b.PositionType.x - cameraPosition.x;
+                            const float dyB = b.PositionType.y - cameraPosition.y;
+                            const float dzB = b.PositionType.z - cameraPosition.z;
+                            return (dxA * dxA + dyA * dyA + dzA * dzA) < (dxB * dxB + dyB * dyB + dzB * dzB);
+                        });
+                    gpuLights.resize(kMaxLights);
+
+                    if (!m_LightOverflowLogged)
+                    {
+                        Core::Logger::Warning(
+                            "KurenaiEngine3D",
+                            "ライト数が上限(" + std::to_string(kMaxLights) + ")を超えたため、カメラに近い順に描画します");
+                        m_LightOverflowLogged = true;
+                    }
+                }
+
+                LightingConstants lightingConstants{};
+                lightingConstants.LightCount = { static_cast<uint32_t>(gpuLights.size()), 0u, 0u, 0u };
+                // UpdateBufferはSetConstantBufferより前に呼ぶ必要がある。DX12の定数バッファは
+                // リングバッファで、GetGPUVirtualAddress()が現在のリングスロットのアドレスを返すため
+                cmd->UpdateBuffer(m_LightingConstantBuffer.get(), &lightingConstants, sizeof(lightingConstants));
+                cmd->SetConstantBuffer(1, m_LightingConstantBuffer.get());
+
                 cmd->SetSampler(0, m_Sampler.get());
                 cmd->SetTexture(0, m_GBufferAlbedo.get());
                 cmd->SetTexture(1, m_GBufferNormal.get());
@@ -1536,6 +1867,16 @@ namespace Kurenai
                 {
                     cmd->SetTexture(4 + cascade, m_ShadowCascades[cascade].get());
                 }
+
+                // ライトが1つも無いフレームでもSetShaderResourceBufferは必ず呼ぶ(SetPipelineStateが
+                // 毎回ルート引数を無効化するため、シェーダが宣言しているリソースを未バインドのまま
+                // Drawすることになってしまう)。UpdateBuffer自体は0灯なら省略してよい
+                if (!gpuLights.empty())
+                {
+                    cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
+                }
+                cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+
                 cmd->Draw(3, 0);
             },
         });
