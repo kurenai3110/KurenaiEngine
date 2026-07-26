@@ -202,13 +202,14 @@
     <li><a href="#pipeline">1. 描画パイプライン</a></li>
     <li><a href="#rendergraph">2. RenderGraph</a></li>
     <li><a href="#depth">3. 深度バッファ(Reverse-Z)</a></li>
-    <li><a href="#tangent">4. 法線マッピングの接線ベクトル計算</a></li>
-    <li><a href="#ao-gi">5. AO/GI(SSAO・SSIL)</a></li>
-    <li><a href="#ssr">6. SSR(スクリーンスペースリフレクション)</a></li>
-    <li><a href="#hiz">7. Hi-Zミップチェーン</a></li>
-    <li><a href="#drawcall">8. ドローコール削減</a></li>
-    <li><a href="#cache">9. モデル・テクスチャキャッシュ</a></li>
-    <li><a href="#bistro">10. Bistroアセットの変換パイプライン</a></li>
+    <li><a href="#shadow">4. カスケードシャドウマップ(CSM)とPCSS</a></li>
+    <li><a href="#tangent">5. 法線マッピングの接線ベクトル計算</a></li>
+    <li><a href="#ao-gi">6. AO/GI(SSAO・SSIL)</a></li>
+    <li><a href="#ssr">7. SSR(スクリーンスペースリフレクション)</a></li>
+    <li><a href="#hiz">8. Hi-Zミップチェーン</a></li>
+    <li><a href="#drawcall">9. ドローコール削減</a></li>
+    <li><a href="#cache">10. モデル・テクスチャキャッシュ</a></li>
+    <li><a href="#bistro">11. Bistroアセットの変換パイプライン</a></li>
   </ol>
 </nav>
 
@@ -223,7 +224,7 @@ PBR(メタリック/ラフネス)計算を行います。
 描画パイプラインは以下の9パス構成です。
 </p>
 <ol>
-<li>シャドウパス — サンライト視点で深度のみ描画</li>
+<li>シャドウパス — サンライト視点で深度のみ描画。カスケードシャドウマップ(CSM)のため実際には4カスケード分(4回)実行する</li>
 <li>ジオメトリパス — G-Buffer書き込み</li>
 <li>Hi-Zパス — G-Buffer深度からコンピュートシェーダーでミップチェーンを構築</li>
 <li>直接光パス — G-Buffer・シャドウマップからPBRの直接光をHDRで計算</li>
@@ -297,8 +298,48 @@ G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_F
 </p>
 </section>
 
+<section id="shadow">
+<h2>4. カスケードシャドウマップ(CSM)とPCSS</h2>
+<p>
+以前は単一2048x2048のシャドウマップでシーン全体のバウンディングスフィアを覆っていましたが、
+Sponza/Bistro規模のシーンではテクセル密度が足りずシャドウのエッジがギザついていました。
+現在はカメラ視錐台を<code>kCascadeCount</code>(既定4)個の深度範囲に分割し、それぞれに専用の
+2048x2048シャドウマップとライト正射影を持たせるカスケードシャドウマップ(CSM)方式です。
+カメラに近いカスケードほど狭い範囲を高いテクセル密度でカバーし、遠いカスケードほど広い範囲を
+粗くカバーします。
+</p>
+<p>
+分割境界は対数分割(遠くのカスケードほど急激に広がる)と均等分割(どのカスケードも同じ奥行き)を
+按分するPractical Split Scheme(GPU Gems 3, Dimitrov 2007)を使っています
+(<code>KurenaiEngine3D::ComputeCascadeSplits</code>)。各カスケードのライト視点正射影は、その
+深度範囲のカメラ視錐台スライスの8頂点から外接球を求め(タイトなAABBだとカメラの向きで形が
+変わりちらつくため、回転に対して安定な球を使う)、その球を覆う範囲で構築します
+(<code>KurenaiEngine3D::ComputeCascadeLightViewProj</code>)。カメラが動いた際のシャドウの縁の
+ちらつき(シャドウシマー)を抑えるため、ライト視点の位置をシャドウマップのテクセル単位に
+スナップしています。
+</p>
+<p>
+シャドウのサンプリングはPCF(Percentage-Closer Filtering)とPCSS(Percentage-Closer Soft
+Shadows、Fernando 2005)を組み合わせています(<code>DirectLighting.hlsl</code>の
+<code>ComputeShadowFactor</code>)。まず受光点周辺をブロッカーサーチし、受光点より光源側にある
+遮蔽物の平均深度を求めます。ブロッカーが見つからなければ完全に光が当たるとみなしPCFをスキップします
+(コスト削減も兼ねる)。ブロッカーが見つかった場合は受光点との深度差から半影(ペナンブラ)の
+広さを推定し、その広さでPCFの複数タップ深度比較を行うことで、接触部が硬く遠方が柔らかい半影を
+表現します。本来のPCSSは透視投影のライトを前提に受光点までの距離で半影の広さをスケールしますが、
+このエンジンの平行光は正射影のシャドウマップを使うため、代わりに正規化された深度値([0,1])
+同士の比をそのまま使う近似で代用しています。半影の広さの基準になる「ライトサイズ」はImGui
+(Post Processing - Shadow Light Size)から調整できます。
+</p>
+<p>
+ピクセルのView空間深度からどのカスケードのシャドウマップを使うか選びます
+(<code>DirectLighting.hlsl</code>の<code>ComputeCascadedShadowFactor</code>)。HLSLはリソース
+(<code>Texture2D</code>)を動的添字の配列として扱えないため、カスケードごとに宣言した4枚の
+シャドウマップ(<code>t4</code>〜<code>t7</code>)を分岐で選択しています。
+</p>
+</section>
+
 <section id="tangent">
-<h2>4. 法線マッピングの接線ベクトル計算</h2>
+<h2>5. 法線マッピングの接線ベクトル計算</h2>
 <p>
 法線マッピングの接線は、モデル読み込み時にassimpの三角形ごとの位置/UV差分から独自に計算した
 実接線ベクトル(Lengyelの手法。UV面積がほぼ0の縮退三角形は数値不安定なため除外)を、
@@ -316,7 +357,7 @@ G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_F
 </section>
 
 <section id="ao-gi">
-<h2>5. AO/GI(SSAO・SSIL)</h2>
+<h2>6. AO/GI(SSAO・SSIL)</h2>
 <p>
 環境光の遮蔽・間接光表現はSSAO(スクリーンスペース・アンビエントオクルージョン)とSSIL(Screen Space
 Indirect Lighting with Visibility Bitmask)の2手法を実行時に切り替えられます。SSAOはタンジェント空間の
@@ -330,7 +371,7 @@ with Visibility Bitmask" (2023) を参考にした実装)。
 </section>
 
 <section id="ssr">
-<h2>6. SSR(スクリーンスペースリフレクション)</h2>
+<h2>7. SSR(スクリーンスペースリフレクション)</h2>
 <p>
 金属/滑らかな面の鏡面間接光(環境反射)はSSRで計算します。最終合成パスの出力(SceneColor、HDR、
 トーンマップ前)を反射先の環境色として再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチング
@@ -344,7 +385,7 @@ with Visibility Bitmask" (2023) を参考にした実装)。
 </section>
 
 <section id="hiz">
-<h2>7. Hi-Zミップチェーン</h2>
+<h2>8. Hi-Zミップチェーン</h2>
 <p>
 Hi-Zパスは、G-Buffer深度(単一ミップ)をコンピュートシェーダーで1x1になるまで縮小し、各ミップが
 2x2ブロックの最小値を持つミップチェーンを構築します。Reverse-Zでは値が小さいほど遠方を表すため、
@@ -355,7 +396,7 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 </section>
 
 <section id="drawcall">
-<h2>8. ドローコール削減</h2>
+<h2>9. ドローコール削減</h2>
 <p>
 モデル読み込み時、同一マテリアルを参照する複数のaiMeshは頂点/インデックスバッファを結合してから
 1つのドローコールにまとめます(マテリアルの切り替えが多い生データ、例えばOBJ形式のusemtl切り替えの
@@ -365,7 +406,7 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 </section>
 
 <section id="cache">
-<h2>9. モデル・テクスチャキャッシュ</h2>
+<h2>10. モデル・テクスチャキャッシュ</h2>
 <p>
 モデルを読み込むと、同じ場所に<code>&lt;元のファイル名&gt;.kmodelcache</code>というバイナリキャッシュが
 自動生成されます。頂点/インデックス/マテリアル参照を解析済みの形で保持しており、2回目以降の読み込みでは
@@ -386,7 +427,7 @@ Sponza(69枚)で実測7秒程度と初回でも十分高速です。GPUが使え
 </section>
 
 <section id="bistro">
-<h2>10. Bistroアセットの変換パイプライン</h2>
+<h2>11. Bistroアセットの変換パイプライン</h2>
 <p>
 <code>Assets/BistroMcGuire/</code>は
 <a href="https://developer.nvidia.com/orca/amazon-lumberyard-bistro">Amazon Lumberyard Bistro</a>の

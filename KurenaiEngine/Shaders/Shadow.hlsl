@@ -1,11 +1,10 @@
-// シャドウパス: ライト視点から深度のみを描画する(頂点位置以外は不要)
-// FrameConstantsはライティングパスと共通のバッファを使い回すため、
-// このシェーダで使わない末尾のフィールドも含めて同じ並び順で宣言する
-cbuffer FrameConstants : register(b0)
+// シャドウパス: ライト視点から深度のみを描画する(頂点位置以外は不要)。
+// カスケードシャドウマップ(CSM)のため、カスケードごとに1回ずつこのパスを実行し、
+// その都度CascadeConstantsを該当カスケードのビュー・プロジェクション行列で更新して呼び出す。
+// 共有のFrameConstantsとは別の専用バッファ(このシェーダはFrameConstantsを一切使わない)
+cbuffer CascadeConstants : register(b0)
 {
     float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 LightViewProj;
 };
 
 struct VSInput
@@ -21,7 +20,7 @@ struct PSInput
 PSInput VSMain(VSInput input)
 {
     PSInput output;
-    output.Position = mul(float4(input.Position, 1.0f), LightViewProj);
+    output.Position = mul(float4(input.Position, 1.0f), ViewProj);
     return output;
 }
 
