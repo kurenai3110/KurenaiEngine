@@ -28,9 +28,9 @@ namespace Kurenai::RHI
     namespace
     {
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
-        constexpr uint32_t kTextureSlotCount = 7; // t0〜t6 (DeferredLighting.hlslが最大)
+        constexpr uint32_t kTextureSlotCount = 9; // t0〜t8 (DirectLighting.hlslのカスケードシャドウマップ4枚+ライトリストが最大)
         constexpr uint32_t kSamplerSlotCount = 1; // s0のみ
-        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t6のkTextureSlotCount個ひと組)の最大数。
+        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t8のkTextureSlotCount個ひと組)の最大数。
         // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく。実際に確保するヒープ容量は
         // これのkFrameCount倍(CPUがGPU完了を待たずに次フレームを記録し始めるため、直近kFrameCount
         // フレームぶんのブロックがまだGPUに読まれている可能性がある)
