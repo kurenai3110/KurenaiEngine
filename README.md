@@ -2,77 +2,22 @@
 
 DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**KurenaiEngine.dll** として
 ビルドされます。すぐに使える完結型API `Kurenai::KurenaiEngine3D`(3D)/
-`Kurenai::KurenaiEngine2D`(2D)に加え、RHI(Rendering Hardware Interface)抽象化レイヤー
-(DX11・DX12それぞれのバックエンドを実行時に切り替え可能)やウィンドウ・カメラ・モデル読み込みと
-いった低レベルAPI(`Kurenai::RHI` / `Kurenai::Core` / `Kurenai::Assets`、まとめて「Library」)も
-公開しており、独自の描画パイプラインを組みたい場合はこちらを直接利用できます。RHI層はコンピュート
-シェーダー(`RWTexture2D`/`RWStructuredBuffer`によるUAV書き込み)にもDX11/DX12両対応で対応しており
-(詳細は[docs/KurenaiEngine.html](docs/KurenaiEngine.html) 4.3.1章を参照)、そのコンピュートシェーダー
-対応を使ってHi-Zミップチェーン(深度のミップごとの縮小テクスチャ)を構築するAPIも用意しています
-(4.3.2章を参照)。
+`Kurenai::KurenaiEngine2D`(2D)に加え、RHI(Rendering Hardware Interface)抽象化レイヤーや
+ウィンドウ・カメラ・モデル読み込みといった低レベルAPI(`Kurenai::RHI` / `Kurenai::Core` /
+`Kurenai::Assets`、まとめて「Library」)も公開しており、独自の描画パイプラインを組みたい場合は
+こちらを直接利用できます。
 
-`KurenaiEngine2D`はスプライト(`DrawSprite`)に加え、円・線分(`DrawCircle`/`DrawLine`)、
-枠線付き角丸矩形(`DrawRoundedRect`。ボタンやパネル背景などのUI向けに、角丸+内側枠線を
-1回の描画コマンドでアンチエイリアス付き描画できる)と
-簡易なビットマップフォントによるテキスト描画(`DrawText`)も提供します。`DrawText`はASCIIに加え
-かな漢字を含む任意のUnicode文字(BMP範囲)に対応しており、初めて描画する文字は次のフレームから
-表示されます。`bold`引数で通常とは別の太字(`FW_BOLD`)アトラスを使った描画にも対応し、
-`align`(`TextAlign::Left`/`Center`(既定)/`Right`)・`verticalAlign`(`TextVerticalAlign::Bottom`/`Middle`(既定)/`Top`)
-引数で`(x, y)`の意味を切り替えられます。既定のまま(`Center`/`Middle`)ならボタンの中心座標を
-渡すだけで内部で幅・高さを実測して正確に中央揃えができ、`Left`/`Top`の組み合わせだけは実測なしで
-`(x, y)`をそのままテキスト左上基準として使う最も低コストな経路になっています
-(実測幅そのものが必要な場合は`MeasureText`も公開しています)。
-`KurenaiEngineBase`(2D/3D共通)は、`GetAsyncKeyState`/`GetCursorPos`のような
-グローバル入力ではなくウィンドウスコープのメッセージベース入力API(`IsKeyDown`/`WasKeyPressed`/
-`IsMouseButtonDown`/`WasMouseButtonPressed`/`IsMouseOverWindow`/`GetClientMousePosition`)を
-公開しています。環境変数`KURENAI_INPUT_AUTOMATION=1`が設定されている場合に限り、
-`IsMouseOverWindow`は`TrackMouseEvent`由来の`WM_MOUSELEAVE`ノイズ
-(実カーソルがウィンドウ外にある状態で`PostMessage`により`WM_MOUSEMOVE`を注入した際に発生しうる)
-を抑制するため、直近に`WM_MOUSEMOVE`を処理していれば後続の`WM_MOUSELEAVE`を無視します。
-未設定の通常起動ではこの抑制ロジックは無効のままで、実操作には影響しません。
-`KurenaiEngine3D`自身もWASD移動・F1のImGui表示切替にこのAPIを使っており、
-`PostMessage`によるキー操作のテスト自動化と整合します。加えて、XAudio2による簡易な
-サウンド再生API(`LoadSound`/`PlaySound`/`StopSound`、WAV/PCM。`PlaySound`が返す`VoiceHandle`を
-`StopSound`に渡すとループ再生を停止できる)も公開しています(詳細は
-[docs/KurenaiEngine.html](docs/KurenaiEngine.html) 3・5・6章を参照)。
-
-`KurenaiEngine3D` はassimp経由でglTF・FBXモデルの読み込み・描画に対応した完結型の
-3Dレンダラーです。描画はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で、
-ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。
-法線マッピングの接線は、モデル読み込み時にassimpの三角形ごとの位置/UV差分から独自に計算した
-実接線ベクトル(Lengyelの手法。UV面積がほぼ0の縮退三角形は数値不安定なため除外)を、
-位置+法線をキーに複製頂点間で平均化して平滑化したうえで頂点バッファに格納し、ピクセルシェーダーでは
-それを補間・再直交化(Gram-Schmidt)してTBN行列を構築しています(以前はassimp標準の
-`aiProcess_CalcTangentSpace`や画面空間微分(ddx/ddy)からの近似を使用していましたが、
-UV継ぎ目でピクセルクアッドがトポロジー的に不連続になる箇所で法線が破綻するため廃止しました)。
-法線マップの読み込みに失敗した場合(不正なDDS等)は、タンジェント空間法線として解釈すると
-幾何学的にありえない方向になってしまうため、汎用の読み込み失敗プレースホルダー(マゼンタ)ではなく
-「法線マップなし」を表す平坦法線にフォールバックします。シャドウマッピングによる影の描画、
-太陽光の昼夜サイクルにも対応しています。モデル読み込み時、同一マテリアルを参照する複数のaiMeshは
-頂点/インデックスバッファを結合してから1つのドローコールにまとめます(マテリアルの切り替えが
-多い生データ、例えばOBJ形式のusemtl切り替えのたびにサブメッシュが分割されるようなアセットでは
-aiMeshが数万件規模になり得るため、まとめないとドローコール数がGPUドライバのウォッチドッグ(TDR)を
-誘発しうるほど膨大になる)。
-
-G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_FLOATを使い、近平面をNDC z=1.0、遠平面をNDC z=0.0にマッピングして深度比較をGREATERで行う)で描画しており、標準的な深度マッピング(近平面=0.0/遠平面=1.0)よりも遠方のZ精度を確保してZファイティングを抑えています。正射影のシャドウマップは元々Zが線形分布のため対象外で、従来どおりのマッピング(D32_FLOAT、近平面=0.0/遠平面=1.0)のままです。
-
-直接光(太陽光のCook-Torrance PBR、シャドウ適用済み)は専用の直接光パスでHDR(R32G32B32A32_Float)のレンダーターゲットへ書き出し、最終合成パスとSSILパスの両方がそれをサンプルする構成になっています。これによりSSILの間接拡散光もシャドウ・PBRの結果と整合の取れた値を反射光源として使えます。
-
-環境光の遮蔽・間接光表現はSSAO(スクリーンスペース・アンビエントオクルージョン)とSSIL(Screen Space Indirect Lighting with Visibility Bitmask)の2手法を実行時に切り替えられます。SSAOはタンジェント空間の半球カーネルサンプリングによる遮蔽率のみを計算するのに対し、SSIL(Visibility Bitmask)はGTAO/HBAOと同様に法線周りのスライスごとにスクリーン空間の水平線サーチを行い、遮蔽を32セクタのビットマスクで表現します。これによりThickness Heuristic(遮蔽物に仮の厚みを持たせる)で薄いオブジェクトの裏に光を回り込ませつつ、新規に隠れたビット数を可視立体角の割合とみなして直接光パスの結果(シャドウ適用済み、環境光は含まない)を間接拡散光として加算します(Olivier Therrien et al. "Screen Space Indirect Lighting with Visibility Bitmask" (2023) を参考にした実装)。
-
-金属/滑らかな面の鏡面間接光(環境反射)はSSR(スクリーンスペースリフレクション)で計算します。最終合成パスの出力(SceneColor)を反射先の環境色として再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチング(線形マーチ+2分探索によるヒット位置の精密化)を行います。スカイボックスへのフォールバックは、レイが画面内で実際に背景(深度なし)ピクセルへ到達したことを確認できた場合のみ行い、レイが画面外に外れた場合や最大距離まで判定がつかなかった場合は反射を追加しません(その先に何があるか不明なまま空を映り込ませると、洞窟のように周囲が遮蔽された空間でも誤って空が反射してしまうため)。ミップチェーンによるラフネスブラーは行っていないため、粗い面ほど反射の寄与を弱めてノイズ化を防いでいます。
-
-描画パイプラインは シャドウパス(サンライト視点で深度のみ描画) → ジオメトリパス(G-Buffer書き込み) → Hi-Zパス(G-Buffer深度からコンピュートシェーダーでミップチェーンを構築) → 直接光パス(G-Buffer・シャドウマップからPBRの直接光をHDRで計算) → AO/GIパス(選択中の手法でNormal/Depth、SSILの場合はAlbedo・直接光バッファも読みAO・間接拡散光を計算しブラー) → 最終合成パス(Albedo・直接光・AO/GI・スカイボックスを合成しトーンマッピングしてSceneColorへ出力) → SSRパス(SceneColor・G-Bufferから鏡面反射を計算し加算) → Presentパス(選択中のデバッグビューをバックバッファへ表示) の8パス構成です。シャドウ・AO/GI・SSRはそれぞれON/OFF可能で、OFF時は該当パスをスキップします。G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(`KurenaiEngine3D`のコンストラクタ引数、既定は1280x720)、Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
-
-上記の各パスは、内部的には`Kurenai::Core::RenderGraph`(軽量なレンダーグラフ、`Source/Library/Core/RenderGraph.h`)へパスごとに読み書きするテクスチャを宣言する形で登録されており、実行順序はその読み書き依存関係から自動的に解決されます(トランジェントリソースの確保・エイリアシングは行わず、上記の永続確保済みテクスチャをそのまま扱う軽量な実装です)。レンダーターゲットの自動バインドとCPU/GPUプロファイラのスコープ計測もこのクラスが肩代わりするため、`KurenaiEngine3D::Render()`側は各パスの中身(ビューポート設定・クリア・描画/ディスパッチ呼び出し)を書くだけで済みます。
-
-Hi-Zパスは、G-Buffer深度(単一ミップ)をコンピュートシェーダーで1x1になるまで縮小し、各ミップが2x2ブロックの最小値を持つミップチェーンを構築します。Reverse-Zでは値が小さいほど遠方を表すため、ブロックの最小値は「そのブロック内で最も遠い可視サーフェス」を意味し、将来のオクルージョンカリングやSSRのレイマーチング高速化の土台として使えます。現時点ではこのミップチェーンを利用する処理は未実装で、Presentパスのデバッグビュー(Render Targets - Hi-Z)でミップごとの内容を確認できるのみです。
+`KurenaiEngine3D`はassimp経由でglTF・FBXモデルの読み込み・描画に対応した、Deferred Shading・
+シャドウ・SSAO/SSIL・SSRを備えた完結型3Dレンダラーです。`KurenaiEngine2D`はスプライト・図形・
+テキスト描画を提供する軽量な2D APIです。内部の描画パイプラインや実装判断については
+[実装者向けドキュメント](docs/Architecture.html)を参照してください。
 
 ## ドキュメント
 
-`KurenaiEngine3D` / `KurenaiEngine2D` / Library(低レベルAPI)のAPIリファレンスは
-**[docs/KurenaiEngine.html](docs/KurenaiEngine.html)** にまとめています。KurenaiEngineを使って
-新しいアプリケーションを作る場合は、まずこのドキュメントを参照してください。
+- **[docs/KurenaiEngine.html](docs/KurenaiEngine.html)** — APIリファレンス。KurenaiEngineを
+  使って新しいアプリケーションを作る場合は、まずこちらを参照してください。
+- **[docs/Architecture.html](docs/Architecture.html)** — 実装者向けドキュメント。描画パイプラインの
+  内部設計や実装判断について知りたい場合はこちらを参照してください。
 
 ## 構成
 
@@ -88,9 +33,8 @@ Samples/
              Build/             Sample3D.exeの出力先(Git管理対象外)
   Sample2D/  Sample2D.sln       2Dサンプル(KurenaiEngine2Dを使用)。独立ソリューション
              Build/             Sample2D.exeの出力先(Git管理対象外)
-docs/                           APIリファレンス
+docs/                           ドキュメント(APIリファレンス・実装者向け)
 ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
-ThirdParty/SourceModels/        参考用にダウンロードしたサンプルアセット集(未使用のものを含む)
 Assets/                         KurenaiEngine3Dが読み込むモデル・テクスチャなどのアセット
 Build/                          KurenaiEngine.dll単体の出力先(Git管理対象外)。
                                  Build\Bin\<Platform>\<Configuration>\ にDLLと、それが参照する
@@ -164,12 +108,7 @@ MSBuild Samples\Sample3D\Sample3D.sln /p:Configuration=Debug /p:Platform=x64
 
 ## 実行(Sample3D)
 
-**起動確認・動作検証には `Sample3D.exe` を使用します**(旧`Sandbox.exe`はこのリファクタリングで
-`Samples/Sample3D` に統合されました)。起動時にSponzaを読み込んで表示します。モデル・シェーダの
-パスは実行中の`KurenaiEngine.dll`自身の場所を基準に解決しているため、`KurenaiEngine.dll`と
-`Shaders\` / `Assets\` が同じフォルダに揃ってさえいれば、実行ファイルをどこに配置しても
-読み込みに成功します(`Samples\Sample3D\Build\Bin\<Platform>\<Configuration>\` はビルド時に
-自動でこの構成になります)。
+**起動確認・動作検証には `Sample3D.exe` を使用します。**起動時にSponzaを読み込んで表示します。
 
 既定ではDX11バックエンドで起動します。`-dx12` 引数を付けて起動するとDX12バックエンドを使用します(再ビルド不要でDX11/DX12を比較できます)。現在どちらのバックエンドで動作しているかはウィンドウタイトル(例: `Kurenai Engine [DX12] - Sponza`)と「Scenes」パネルの表示で確認できます。
 
@@ -193,35 +132,31 @@ Sample3D.exe -dx12
 
 画面左上に表示される5つのImGuiパネルから各種設定を変更できます(F1キーで表示/非表示を切り替え可能)。
 
-- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、表示アセットの切り替えを行う。ボタンをクリックするとそのアセットを読み込みます。現在表示中のアセットに対応するボタンはグレーアウトされます。切り替え時はモデルとテクスチャを同期的に再読み込みするため、Bistroのような大容量アセットでは初回はウィンドウが応答しなくなることがあります(モデル/テクスチャの両方にディスクキャッシュがあり、2回目以降はほぼ瞬時に完了します。詳細は「Assetsフォルダについて」参照)。読み込み完了後、タイトルバーに現在表示中のアセット名が表示されます。
+- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、表示アセットの切り替えを行います。ボタンをクリックするとそのアセットを読み込みます(初回読み込みは時間がかかる場合があります。詳細は「Assetsフォルダについて」参照)。
   - Sponza
-  - Bistro (McGuire) - Exterior / Interior(Amazon Lumberyard BistroのMorgan McGuire版OBJ配布をglTFに変換したもの。`Assets/BistroMcGuire/`)
+  - Bistro (McGuire) - Exterior / Interior
   - White Surface Test(粗さ0〜1の球体列)
-- **Post Processing** — AO/間接光のON/OFFと手法(Technique: SSAO / SSIL (Visibility Bitmask))を切り替え。SSAOは半径(Radius)/強さ(Power)、SSILは半径(Radius)/厚み(Thickness)/強さ(Intensity)/AOのコントラスト(AO Power)/スライス数(Slices)/ステップ数(Steps)を調整可能。シャドウのON/OFFもここで切り替え。SSRのON/OFFと最大レイ距離(Max Distance)/ヒット判定の厚み(Thickness)/ラフネスカットオフ(Roughness Cutoff)もここで調整可能
-- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / Depth (Raw) / Direct Light / AO/GI - Indirect Light (RGB) / AO/GI - Indirect Light (RGB, Before Blur) / AO/GI - Occlusion (Alpha) / AO/GI - Occlusion (Alpha, Before Blur) / Shadow Map / SSR (Final + Reflections) / Hi-Z (Depth Mip Chain))。Direct Lightは直接光パスの結果(HDR)をトーンマッピングして表示。Depth (Raw)は深度テクスチャの生値(0〜1)を加工せずそのまま表示(reverse-zの生値確認用。近平面が小さいためほとんどの距離で値が0付近になり、無加工ではほぼ黒く見える)。AO/GIバッファはrgb(間接拡散光)とa(遮蔽率)を別々に確認でき、Before Blur付きの項目はブラー前の生バッファ(タイル状ノイズが乗った状態)を表示する。Finalと同じくSSR無効時はSceneColorがそのまま表示される。Hi-Zを選択するとミップレベルを指定するスライダーが表示され、Hi-Zミップチェーンの指定ミップの生値をグレースケール表示する(ミップが上がるほど解像度が半分ずつになりレターボックス表示も追従する)
-- **Lighting** — 太陽光の時刻(Time of Day, 0〜24時)をスライダーで指定。Auto Advanceを有効にすると時刻が自動で進行(速度をSpeedで調整)。Sun Azimuth(0〜360度)で太陽が昇ってくる水平方向(方位角)を調整可能
-- **Profiler** — FPS(指数移動平均)、CPUフレーム時間(Update+Render呼び出し時間)、GPUフレーム時間と各パス(Shadow/GBuffer/HiZ/DirectLight/AO/AOBlur/Lighting/SSR/Present)ごとのGPU実行時間をGPUタイムスタンプクエリで計測して表示。GPU側の計測はDX11/DX12とも数フレーム遅れの値が表示される(AO/AOBlurはAO/間接光が無効の間、SSRはSSRが無効の間は表示されない)
+- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・SSRのON/OFFと各パラメータもここで調整できます
+- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth 等、各パス中間結果のデバッグ表示)
+- **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)を調整
+- **Profiler** — FPS、CPU/GPUフレーム時間を各パスごとに表示
 
 ## サンプルプログラム
 
 `Samples/` 以下に、`docs/KurenaiEngine.html` で説明している公開API(`KurenaiEngine3D` /
 `KurenaiEngine2D`)を使ったサンプルプログラムを用意しています。それぞれ独立した`.sln`を持ち、
-`KurenaiEngine.vcxproj`をプロジェクト参照します。実行ファイルの出力先は各サンプル自身の
-`Samples\Sample3D\Build\Bin\x64\<Configuration>\` / `Samples\Sample2D\Build\Bin\x64\<Configuration>\`
-で、ビルド後処理でKurenaiEngine.dllとShaders/Assetsが同じフォルダへコピーされます。
+`KurenaiEngine.vcxproj`をプロジェクト参照します。
 
 ### Sample3D
 
 `Kurenai::KurenaiEngine3D` をそのままインスタンス化して `Run()` を呼ぶだけの構成です
 (`Samples/Sample3D/Source/Main.cpp`)。表示内容・操作方法は上記「実行」「操作方法」の
-とおりで、旧 `Sandbox` と同じ内容(Deferred Shading・シャドウ・SSAO/SSIL・SSR・
-ImGuiパネル一式)がそのまま動作します。**起動確認・動作検証はこのSample3Dを使用します。**
+とおりです。**起動確認・動作検証はこのSample3Dを使用します。**
 
 ### Sample2D
 
-`Kurenai::KurenaiEngine2D` を使い、画面内を跳ね回る半透明の色つきスプライトを描画するサンプルです。
-単位クアッド1つを使い回し、スプライトごとの位置・大きさ・回転・色は `DrawSprite` の引数として
-毎フレーム渡します(座標系・APIの詳細は `docs/KurenaiEngine.html` 3章を参照)。
+`Kurenai::KurenaiEngine2D` を使い、画面内を跳ね回る半透明の色つきスプライトを描画するサンプルです
+(座標系・APIの詳細は `docs/KurenaiEngine.html` 3章を参照)。
 
 | 操作 | 入力 |
 | --- | --- |
@@ -229,15 +164,14 @@ ImGuiパネル一式)がそのまま動作します。**起動確認・動作検
 
 ## Assetsフォルダについて
 
-エンジンが読み込むモデル・テクスチャ類は `Assets/` フォルダで管理します。
+エンジンが読み込むモデル・テクスチャ類は `Assets/` フォルダで管理します。サイズが大きいため
+Git管理対象外(`.gitignore`)にしています。
 
 - `Assets/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
-- `Assets/BistroMcGuire/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)のMorgan McGuire版OBJ配布([awesome-3d-meshes](https://github.com/Graphify-Labs/awesome-3d-meshes)経由、`ThirdParty/SourceModels/awesome-3d-meshes-master/McGuire/Amazon Lumberyard Bistro/`の各種7z/zipアーカイブを展開したもの)をglTFに変換したもの(`Exterior_gltf/exterior.gltf` / `Interior_gltf/interior.gltf`)。元のOBJ/MTLは同一マテリアルの三角形群がusemtl切り替えのたびに大量の小さなサブメッシュへ分割されており(exteriorは実質132マテリアルに対しusemtl切り替え22,396回)、そのままassimpのOBJインポータへ読み込ませると解析が現実的な時間で終わらず、仮に読み込めてもドローコール数がGPUドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になるため、Blender(headless、`--factory-startup`でユーザー導入アドオンを無効化した状態)でOBJを読み込みglTFへ変換したもの(diffuse→BaseColor、_ddna→Normal Mapのノード配線をPythonスクリプトで自動化)を実際に読み込む。展開直後の生データ(obj/mtl/PNGテクスチャ群)はglTF変換後は不要なため保持していない
-- `Assets/MaterialTest/` — PBRライティング検証用に生成した、粗さ(roughness)を0.0〜1.0で11段階に変えた白色(非金属)の球体を並べたglTFアセット。`Tools/generate_material_test.py` で再生成できる
-- `Assets/Skybox/` — 背景表示用に生成した青空のキューブマップ(DDS形式)。`Tools/generate_sky_cubemap.py` で再生成できる
+- `Assets/BistroMcGuire/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)のMorgan McGuire版OBJ配布([awesome-3d-meshes](https://github.com/Graphify-Labs/awesome-3d-meshes)経由)をglTFに変換したもの。変換手順は[実装者向けドキュメント](docs/Architecture.html)を参照
+- `Assets/MaterialTest/` — PBRライティング検証用の白色球体列。`Tools/generate_material_test.py` で再生成できる
+- `Assets/Skybox/` — 背景表示用の青空キューブマップ(DDS形式)。`Tools/generate_sky_cubemap.py` で再生成できる
 
-`Assets/` と `ThirdParty/SourceModels/` はサイズが大きいためGit管理対象外(`.gitignore`)にしています。
-
-モデルを読み込むと、同じ場所に `<元のファイル名>.kmodelcache` というバイナリキャッシュが自動生成されます。頂点/インデックス/マテリアル参照を解析済みの形で保持しており、2回目以降の読み込みではassimpによる解析をスキップして高速に読み込めます。元のモデルファイルが更新されると自動的に無効化され再生成されるため、手動での削除は基本的に不要です。
-
-同様に、PNG/JPG等の無圧縮テクスチャを読み込むと `<元のテクスチャファイル名>.srgb.ktexcache` / `.linear.ktexcache`(ベースカラー等sRGBとして読むか、法線/メタリック・ラフネス等linearとして読むかでファイルを分ける)というBC7圧縮+ミップ生成済みのDDSキャッシュが自動生成されます。初回読み込み時はWICデコード・ミップ生成・BC7圧縮が走りますが、BC7圧縮はGPU(コンピュートシェーダー)で行うため、Sponza(69枚)で実測7秒程度と初回でも十分高速です。GPUが使えない環境(古いGPU/ドライバ等)ではBC7圧縮自体をスキップし非圧縮のまま使用します(CPUソフトウェア圧縮へのフォールバックは行いません)。2回目以降はこのキャッシュを読むだけになりほぼ瞬時に完了します。テクスチャファイルが更新されると自動的に無効化され再生成されます。DDS/TGA形式(既に圧縮・ミップ済みである前提)はこのキャッシュの対象外です。
+モデル・テクスチャは初回読み込み時にディスクキャッシュ(`.kmodelcache` / `.ktexcache`)が自動生成され、
+2回目以降はそのキャッシュを読むだけになるため高速に読み込めます。元ファイルが更新されると自動的に
+再生成されるため、手動でのキャッシュ削除は基本的に不要です。

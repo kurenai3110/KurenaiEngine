@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KurenaiEngine 実装者向けドキュメント</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1c1e21;
+    --muted: #5b6270;
+    --border: #e2e5ea;
+    --code-bg: #f4f5f7;
+    --accent: #a4243b;
+    --accent-bg: #fbeef1;
+    --link: #7a1d30;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a;
+      --fg: #e8e9ec;
+      --muted: #9aa1ac;
+      --border: #2b2f36;
+      --code-bg: #1d2025;
+      --accent: #e2687e;
+      --accent-bg: #2a1a1f;
+      --link: #f19bab;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  body {
+    font-family: "Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+    line-height: 1.75;
+    font-size: 16px;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 860px);
+    justify-content: center;
+    gap: 48px;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 40px 24px 120px;
+  }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: static !important; margin-bottom: 32px; }
+  }
+  header.page-header {
+    grid-column: 1 / -1;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 24px;
+    margin-bottom: 8px;
+  }
+  header.page-header h1 {
+    margin: 0 0 8px;
+    font-size: 1.9rem;
+  }
+  header.page-header p {
+    margin: 0;
+    color: var(--muted);
+    max-width: 720px;
+  }
+  nav.toc {
+    position: sticky;
+    top: 24px;
+    align-self: start;
+    font-size: 0.92rem;
+  }
+  nav.toc div.toc-title {
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.75rem;
+    margin-bottom: 10px;
+  }
+  nav.toc ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  nav.toc li { margin: 0 0 8px; }
+  nav.toc a {
+    color: var(--fg);
+    text-decoration: none;
+    display: block;
+    padding: 4px 0;
+    border-left: 2px solid transparent;
+    padding-left: 10px;
+  }
+  nav.toc a:hover {
+    color: var(--accent);
+    border-left-color: var(--accent);
+  }
+  main {
+    min-width: 0;
+  }
+  h2 {
+    font-size: 1.4rem;
+    margin-top: 3em;
+    padding-top: 0.4em;
+    border-top: 1px solid var(--border);
+  }
+  h2:first-of-type { margin-top: 1.5em; border-top: none; padding-top: 0; }
+  h3 {
+    font-size: 1.12rem;
+    margin-top: 2em;
+    color: var(--accent);
+  }
+  p, li { color: var(--fg); }
+  code {
+    font-family: "Cascadia Code", "Consolas", "SFMono-Regular", Menlo, monospace;
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.88em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-size: 0.86rem;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+    font-size: inherit;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1.2em 0;
+    font-size: 0.92rem;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: var(--code-bg);
+    font-weight: 600;
+  }
+  a { color: var(--link); }
+  .note {
+    background: var(--accent-bg);
+    border-left: 4px solid var(--accent);
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin: 1.2em 0;
+  }
+  .note p:first-child { margin-top: 0; }
+  .note p:last-child { margin-bottom: 0; }
+  .badge {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-bg);
+    border-radius: 999px;
+    padding: 2px 10px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  footer {
+    grid-column: 1 / -1;
+    margin-top: 64px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<header class="page-header">
+  <h1>KurenaiEngine 実装者向けドキュメント</h1>
+  <p>
+    このドキュメントはKurenaiEngine自体の内部設計・実装判断・既知の制約をまとめたものです。
+    KurenaiEngineを使ってアプリケーションを作る場合は
+    <a href="KurenaiEngine.html">docs/KurenaiEngine.html(APIリファレンス)</a>を、
+    ビルド・実行方法は<a href="../README.md">README.md</a>を参照してください。
+  </p>
+</header>
+
+<nav class="toc">
+  <div class="toc-title">目次</div>
+  <ol>
+    <li><a href="#pipeline">1. 描画パイプライン</a></li>
+    <li><a href="#rendergraph">2. RenderGraph</a></li>
+    <li><a href="#depth">3. 深度バッファ(Reverse-Z)</a></li>
+    <li><a href="#tangent">4. 法線マッピングの接線ベクトル計算</a></li>
+    <li><a href="#ao-gi">5. AO/GI(SSAO・SSIL)</a></li>
+    <li><a href="#ssr">6. SSR(スクリーンスペースリフレクション)</a></li>
+    <li><a href="#hiz">7. Hi-Zミップチェーン</a></li>
+    <li><a href="#drawcall">8. ドローコール削減</a></li>
+    <li><a href="#cache">9. モデル・テクスチャキャッシュ</a></li>
+    <li><a href="#bistro">10. Bistroアセットの変換パイプライン</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<section id="pipeline">
+<h2>1. 描画パイプライン</h2>
+<p>
+<code>KurenaiEngine3D</code>はDeferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness + 深度)で描画し、
+ライティングパスでCook-Torrance(GGX)によるPBR(メタリック/ラフネス)計算を行います。
+描画パイプラインは以下の8パス構成です。
+</p>
+<ol>
+<li>シャドウパス — サンライト視点で深度のみ描画</li>
+<li>ジオメトリパス — G-Buffer書き込み</li>
+<li>Hi-Zパス — G-Buffer深度からコンピュートシェーダーでミップチェーンを構築</li>
+<li>直接光パス — G-Buffer・シャドウマップからPBRの直接光をHDRで計算</li>
+<li>AO/GIパス — 選択中の手法(SSAO/SSIL)でNormal/Depth(SSILの場合はAlbedo・直接光バッファも読む)からAO・間接拡散光を計算しブラー</li>
+<li>最終合成パス — Albedo・直接光・AO/GI・スカイボックスを合成しトーンマッピングしてSceneColorへ出力</li>
+<li>SSRパス — SceneColor・G-Bufferから鏡面反射を計算し加算</li>
+<li>Presentパス — 選択中のデバッグビューをバックバッファへ表示</li>
+</ol>
+<p>
+シャドウ・AO/GI・SSRはそれぞれON/OFF可能で、OFF時は該当パスをスキップします。
+G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(<code>KurenaiEngine3D</code>のコンストラクタ引数、既定は1280x720)、
+Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
+</p>
+<p>
+直接光(太陽光のCook-Torrance PBR、シャドウ適用済み)は専用の直接光パスでHDR(R32G32B32A32_Float)のレンダーターゲットへ書き出し、
+最終合成パスとSSILパスの両方がそれをサンプルする構成になっています。これによりSSILの間接拡散光もシャドウ・PBRの結果と
+整合の取れた値を反射光源として使えます。
+</p>
+</section>
+
+<section id="rendergraph">
+<h2>2. RenderGraph</h2>
+<p>
+上記の各パスは、内部的には<code>Kurenai::Core::RenderGraph</code>(軽量なレンダーグラフ、
+<code>Source/Library/Core/RenderGraph.h</code>)へパスごとに読み書きするテクスチャを宣言する形で
+登録されており、実行順序はその読み書き依存関係から自動的に解決されます(トランジェントリソースの
+確保・エイリアシングは行わず、永続確保済みテクスチャをそのまま扱う軽量な実装です)。
+レンダーターゲットの自動バインドとCPU/GPUプロファイラのスコープ計測もこのクラスが肩代わりするため、
+<code>KurenaiEngine3D::Render()</code>側は各パスの中身(ビューポート設定・クリア・描画/ディスパッチ呼び出し)を
+書くだけで済みます。
+</p>
+</section>
+
+<section id="depth">
+<h2>3. 深度バッファ(Reverse-Z)</h2>
+<p>
+G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_FLOATを使い、近平面をNDC z=1.0、
+遠平面をNDC z=0.0にマッピングして深度比較をGREATERで行う)で描画しており、標準的な深度マッピング
+(近平面=0.0/遠平面=1.0)よりも遠方のZ精度を確保してZファイティングを抑えています。
+正射影のシャドウマップは元々Zが線形分布のため対象外で、従来どおりのマッピング
+(D32_FLOAT、近平面=0.0/遠平面=1.0)のままです。
+</p>
+</section>
+
+<section id="tangent">
+<h2>4. 法線マッピングの接線ベクトル計算</h2>
+<p>
+法線マッピングの接線は、モデル読み込み時にassimpの三角形ごとの位置/UV差分から独自に計算した
+実接線ベクトル(Lengyelの手法。UV面積がほぼ0の縮退三角形は数値不安定なため除外)を、
+位置+法線をキーに複製頂点間で平均化して平滑化したうえで頂点バッファに格納し、
+ピクセルシェーダーではそれを補間・再直交化(Gram-Schmidt)してTBN行列を構築しています
+(以前はassimp標準の<code>aiProcess_CalcTangentSpace</code>や画面空間微分(ddx/ddy)からの近似を
+使用していましたが、UV継ぎ目でピクセルクアッドがトポロジー的に不連続になる箇所で法線が破綻するため
+廃止しました)。
+</p>
+<p>
+法線マップの読み込みに失敗した場合(不正なDDS等)は、タンジェント空間法線として解釈すると
+幾何学的にありえない方向になってしまうため、汎用の読み込み失敗プレースホルダー(マゼンタ)ではなく
+「法線マップなし」を表す平坦法線にフォールバックします。
+</p>
+</section>
+
+<section id="ao-gi">
+<h2>5. AO/GI(SSAO・SSIL)</h2>
+<p>
+環境光の遮蔽・間接光表現はSSAO(スクリーンスペース・アンビエントオクルージョン)とSSIL(Screen Space
+Indirect Lighting with Visibility Bitmask)の2手法を実行時に切り替えられます。SSAOはタンジェント空間の
+半球カーネルサンプリングによる遮蔽率のみを計算するのに対し、SSIL(Visibility Bitmask)はGTAO/HBAOと
+同様に法線周りのスライスごとにスクリーン空間の水平線サーチを行い、遮蔽を32セクタのビットマスクで
+表現します。これによりThickness Heuristic(遮蔽物に仮の厚みを持たせる)で薄いオブジェクトの裏に光を
+回り込ませつつ、新規に隠れたビット数を可視立体角の割合とみなして直接光パスの結果(シャドウ適用済み、
+環境光は含まない)を間接拡散光として加算します(Olivier Therrien et al. "Screen Space Indirect Lighting
+with Visibility Bitmask" (2023) を参考にした実装)。
+</p>
+</section>
+
+<section id="ssr">
+<h2>6. SSR(スクリーンスペースリフレクション)</h2>
+<p>
+金属/滑らかな面の鏡面間接光(環境反射)はSSRで計算します。最終合成パスの出力(SceneColor)を
+反射先の環境色として再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチング
+(線形マーチ+2分探索によるヒット位置の精密化)を行います。スカイボックスへのフォールバックは、
+レイが画面内で実際に背景(深度なし)ピクセルへ到達したことを確認できた場合のみ行い、レイが画面外に
+外れた場合や最大距離まで判定がつかなかった場合は反射を追加しません(その先に何があるか不明なまま
+空を映り込ませると、洞窟のように周囲が遮蔽された空間でも誤って空が反射してしまうため)。
+ミップチェーンによるラフネスブラーは行っていないため、粗い面ほど反射の寄与を弱めてノイズ化を
+防いでいます。
+</p>
+</section>
+
+<section id="hiz">
+<h2>7. Hi-Zミップチェーン</h2>
+<p>
+Hi-Zパスは、G-Buffer深度(単一ミップ)をコンピュートシェーダーで1x1になるまで縮小し、各ミップが
+2x2ブロックの最小値を持つミップチェーンを構築します。Reverse-Zでは値が小さいほど遠方を表すため、
+ブロックの最小値は「そのブロック内で最も遠い可視サーフェス」を意味し、将来のオクルージョンカリングや
+SSRのレイマーチング高速化の土台として使えます。現時点ではこのミップチェーンを利用する処理は
+未実装で、Presentパスのデバッグビュー(Render Targets - Hi-Z)でミップごとの内容を確認できるのみです。
+</p>
+</section>
+
+<section id="drawcall">
+<h2>8. ドローコール削減</h2>
+<p>
+モデル読み込み時、同一マテリアルを参照する複数のaiMeshは頂点/インデックスバッファを結合してから
+1つのドローコールにまとめます(マテリアルの切り替えが多い生データ、例えばOBJ形式のusemtl切り替えの
+たびにサブメッシュが分割されるようなアセットでは、aiMeshが数万件規模になり得るため、まとめないと
+ドローコール数がGPUドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になる)。
+</p>
+</section>
+
+<section id="cache">
+<h2>9. モデル・テクスチャキャッシュ</h2>
+<p>
+モデルを読み込むと、同じ場所に<code>&lt;元のファイル名&gt;.kmodelcache</code>というバイナリキャッシュが
+自動生成されます。頂点/インデックス/マテリアル参照を解析済みの形で保持しており、2回目以降の読み込みでは
+assimpによる解析をスキップして高速に読み込めます。元のモデルファイルが更新されると自動的に無効化され
+再生成されるため、手動での削除は基本的に不要です。
+</p>
+<p>
+同様に、PNG/JPG等の無圧縮テクスチャを読み込むと<code>&lt;元のテクスチャファイル名&gt;.srgb.ktexcache</code> /
+<code>.linear.ktexcache</code>(ベースカラー等sRGBとして読むか、法線/メタリック・ラフネス等linearとして
+読むかでファイルを分ける)というBC7圧縮+ミップ生成済みのDDSキャッシュが自動生成されます。初回読み込み時は
+WICデコード・ミップ生成・BC7圧縮が走りますが、BC7圧縮はGPU(コンピュートシェーダー)で行うため、
+Sponza(69枚)で実測7秒程度と初回でも十分高速です。GPUが使えない環境(古いGPU/ドライバ等)ではBC7圧縮
+自体をスキップし非圧縮のまま使用します(CPUソフトウェア圧縮へのフォールバックは行いません)。
+2回目以降はこのキャッシュを読むだけになりほぼ瞬時に完了します。テクスチャファイルが更新されると
+自動的に無効化され再生成されます。DDS/TGA形式(既に圧縮・ミップ済みである前提)はこのキャッシュの
+対象外です。
+</p>
+</section>
+
+<section id="bistro">
+<h2>10. Bistroアセットの変換パイプライン</h2>
+<p>
+<code>Assets/BistroMcGuire/</code>は
+<a href="https://developer.nvidia.com/orca/amazon-lumberyard-bistro">Amazon Lumberyard Bistro</a>の
+Morgan McGuire版OBJ配布(<a href="https://github.com/Graphify-Labs/awesome-3d-meshes">awesome-3d-meshes</a>経由、
+<code>ThirdParty/SourceModels/awesome-3d-meshes-master/McGuire/Amazon Lumberyard Bistro/</code>の各種7z/zip
+アーカイブを展開したもの)をglTFに変換したもの(<code>Exterior_gltf/exterior.gltf</code> /
+<code>Interior_gltf/interior.gltf</code>)です。元のOBJ/MTLは同一マテリアルの三角形群がusemtl切り替えの
+たびに大量の小さなサブメッシュへ分割されており(exteriorは実質132マテリアルに対しusemtl切り替え22,396回)、
+そのままassimpのOBJインポータへ読み込ませると解析が現実的な時間で終わらず、仮に読み込めてもドローコール数が
+GPUドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になるため、Blender(headless、
+<code>--factory-startup</code>でユーザー導入アドオンを無効化した状態)でOBJを読み込みglTFへ変換したもの
+(diffuse→BaseColor、_ddna→Normal Mapのノード配線をPythonスクリプトで自動化)を実際に読み込みます。
+展開直後の生データ(obj/mtl/PNGテクスチャ群)はglTF変換後は不要なため保持していません。
+</p>
+</section>
+
+</main>
+
+<footer>KurenaiEngine 実装者向けドキュメント</footer>
+
+</div>
+</body>
+</html>
