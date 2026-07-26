@@ -147,7 +147,8 @@ namespace Kurenai
         uint32_t m_SSILSliceCount = 4;
         uint32_t m_SSILStepCount = 6;
 
-        // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)
+        // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)。
+        // SceneColorはHDR(R16G16B16A16_Float)で、トーンマッピングは行わない(Tonemapパス参照)
         std::unique_ptr<RHI::IRHIShader> m_LightingVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_LightingPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_LightingPipelineState;
@@ -179,6 +180,15 @@ namespace Kurenai
         float m_SSRMaxDistance = 5.0f;
         float m_SSRThickness = 0.1f;
         float m_SSRRoughnessCutoff = 0.6f;
+
+        // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
+        // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
+        // 独立したステージとして置くことで、反射や将来のブルーム/露出制御(M7)がトーンマップの
+        // 影響を受けないHDR値の上に成立できるようにする
+        std::unique_ptr<RHI::IRHIShader> m_TonemapVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_TonemapPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_TonemapPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_TonemapTexture;
 
         // 垂直同期。既定で無効。有効にするとPresentがvblankまでブロックするため、GPU負荷が軽い
         // シーンではvsync待ちの間GPUがアイドル→省電力クロックに落ち、次フレームの立ち上がりが

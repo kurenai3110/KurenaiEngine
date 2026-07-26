@@ -1,7 +1,9 @@
 // 最終合成パス。DirectLightingパスで計算済みの直接光(拡散+鏡面反射、シャドウ適用済み)を
 // サンプルし、環境光(時刻に応じて変化、AO/SSILの遮蔽率を適用)・間接拡散光(SSIL使用時)を
-// 加算してトーンマッピングする。PBRのライティング計算自体はDirectLighting.hlsl側で行うため、
-// このパスはバッファの合成のみを行う。
+// 加算する。PBRのライティング計算自体はDirectLighting.hlsl側で行うため、このパスはバッファの
+// 合成のみを行う。出力はHDR(SceneColor、1.0を超える輝度を保持)のままで、トーンマッピングは
+// 行わない。SSRパスがこのHDR値を反射元として参照するため、ここでLDRへ落とすとSSRの反射色が
+// 1.0を超えられずエネルギー保存が破れる。トーンマッピングはPresent直前のTonemap.hlslで行う
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
@@ -64,8 +66,6 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 夜は空を暗い紺色へ落とし込む(スカイボックス自体は昼のテクスチャ固定のため)
         const float3 kNightSkyColor = float3(0.01f, 0.012f, 0.02f);
         skyColor = lerp(kNightSkyColor, skyColor, AmbientColor.a);
-        skyColor = skyColor / (skyColor + 1.0f);
-        skyColor = pow(skyColor, 1.0f / 2.2f);
         return float4(skyColor, 1.0f);
     }
 
@@ -81,10 +81,6 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する
     float3 color = diffuseColor * (AmbientColor.rgb * ao + indirectLight) + directLight + emissive;
-
-    // トーンマッピング(Reinhard)とガンマ補正
-    color = color / (color + 1.0f);
-    color = pow(color, 1.0f / 2.2f);
 
     return float4(color, 1.0f);
 }
