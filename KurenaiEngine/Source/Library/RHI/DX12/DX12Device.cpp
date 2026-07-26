@@ -74,6 +74,10 @@ namespace Kurenai::RHI
                 return DXGI_FORMAT_R8G8B8A8_UNORM;
             case Format::R32_Float:
                 return DXGI_FORMAT_R32_FLOAT;
+            case Format::R16G16_Float:
+                return DXGI_FORMAT_R16G16_FLOAT;
+            case Format::R16G16B16A16_Float:
+                return DXGI_FORMAT_R16G16B16A16_FLOAT;
             case Format::R32G32B32A32_Float:
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -481,6 +485,56 @@ namespace Kurenai::RHI
             m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
 
             return std::make_unique<DX12Buffer>(this, resource, uavIndex, desc.SizeInBytes, desc.StrideInBytes);
+        }
+
+        // 読み取り専用の構造化バッファ(StructuredBuffer<T>)。ピクセルシェーダが毎フレーム読むため
+        // 本体はDEFAULTヒープに置く(UPLOADヒープはCPUから見える代わりにGPU読み取りが低速なため、
+        // ピクセルごとに読まれる用途には向かない。頂点/インデックスバッファをDEFAULTヒープに
+        // 置いている理由と同じ)。CPUからの書き込みはUPLOADヒープのステージングリング経由で行い、
+        // 実際のDEFAULTヒープへのコピーはDX12CommandList::UpdateBufferがCopyBufferRegionで行う
+        if (desc.Usage == BufferUsage::StructuredReadOnly)
+        {
+            const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+            const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Buffer(desc.SizeInBytes);
+
+            // 初期データを持たないため、構造化バッファ(UAVなし初期化)と同様に作成時点で直接
+            // PIXEL_SHADER_RESOURCE状態にしておく。これによりUpdateBufferが一度も呼ばれなくても
+            // (例: ライトが1つも無いフレーム)SetShaderResourceBufferで安全にバインドできる
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+            ThrowIfFailed(
+                m_Device->CreateCommittedResource(
+                    &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&resource)),
+                "読み取り専用構造化バッファの作成に失敗しました");
+
+            const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
+            srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
+            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+            // CPUはGPU完了を待たずに次フレームの記録を始める(kFrameCount)ため、直近フレームぶんの
+            // 書き込みが同時に生存できるようkFrameCount+1スロットのステージングリングを持たせる
+            constexpr uint32_t kStructuredReadOnlyUploadRingCapacity = kFrameCount + 1;
+            Microsoft::WRL::ComPtr<ID3D12Resource> uploadResource =
+                CreateUploadBuffer(static_cast<uint64_t>(desc.SizeInBytes) * kStructuredReadOnlyUploadRingCapacity);
+
+            void* uploadMappedPtr = nullptr;
+            const D3D12_RANGE readRange{ 0, 0 };
+            ThrowIfFailed(uploadResource->Map(0, &readRange, &uploadMappedPtr), "ステージングバッファのマップに失敗しました");
+
+            return std::make_unique<DX12Buffer>(
+                this,
+                resource,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                srvIndex,
+                uploadResource,
+                uploadMappedPtr,
+                desc.SizeInBytes,
+                desc.StrideInBytes,
+                kStructuredReadOnlyUploadRingCapacity);
         }
 
         // 定数バッファはCPUから毎フレームUpdateBufferで書き込むため、UPLOADヒープに常駐させ
@@ -959,13 +1013,15 @@ namespace Kurenai::RHI
         return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, dsvIndex);
     }
 
-    std::unique_ptr<IRHISampler> DX12Device::CreateDefaultSampler()
+    std::unique_ptr<IRHISampler> DX12Device::CreateDefaultSampler(const SamplerDesc& desc)
     {
         D3D12_SAMPLER_DESC samplerDesc{};
-        samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplerDesc.Filter = desc.Filter == SamplerFilter::Anisotropic ? D3D12_FILTER_ANISOTROPIC : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
         samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        // MaxAnisotropyはFilterがANISOTROPICでない場合ハードウェア側で無視されるため、常に設定してよい
+        samplerDesc.MaxAnisotropy = desc.MaxAnisotropy;
         samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
         samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
 

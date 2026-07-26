@@ -317,11 +317,12 @@ ImGuiパネル経由</strong>):
     <li><code>F1</code> でImGuiパネルの表示/非表示切り替え</li>
     <li>画面左上のImGuiパネル(Scenes / Post Processing / Render Targets / Lighting / Profiler)で
     表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/SSRのON・OFFやパラメータ調整、デバッグ表示
-    バッファの選択、時刻(昼夜サイクル)の調整、FPS/CPU/GPUの計測値確認ができる</li>
+    バッファの選択、時刻(昼夜サイクル)とEV100(露出)の調整、ポイント/スポットライトの
+    一覧・追加・削除・編集、FPS/CPU/GPUの計測値確認ができる</li>
   </ul>
 </li>
 <li>表示できるシーンはビルド済みバイナリに組み込み済み(Sponza / Bistro (McGuire) Exterior /
-Bistro (McGuire) Interior / White Surface Test)。カスタムモデルの追加や、
+Bistro (McGuire) Interior / White Surface Test / Light Test)。カスタムモデルの追加や、
 シーン一覧の外部からのカスタマイズは現状の公開APIではサポートしていない(<code>Run()</code> を
 呼ぶ以外のカスタマイズ余地がないのが <code>KurenaiEngine3D</code> の設計上の割り切り)。</li>
 <li>コンストラクタに渡した <code>GraphicsAPI</code> に応じてDX11/DX12いずれかのバックエンドで
@@ -535,7 +536,7 @@ std::unique_ptr&lt;IRHITexture&gt;   CreateRenderTexture(uint32_t width, uint32_
 std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f);
 std::unique_ptr&lt;IRHITexture&gt;   CreateUAVTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels);
-std::unique_ptr&lt;IRHISampler&gt;   CreateDefaultSampler();
+std::unique_ptr&lt;IRHISampler&gt;   CreateDefaultSampler(const SamplerDesc&amp; desc = SamplerDesc{});
 IRHICommandList*                GetImmediateCommandList();</code></pre>
 <p>
 <code>CreateTextureFromFile</code> は拡張子(<code>.dds</code>/<code>.tga</code>/その他はWIC経由で
@@ -544,6 +545,11 @@ png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベー�
 <code>CreateTextureFromMemory</code> はRGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)の
 ピクセルデータから直接テクスチャを作成する(実行時に生成したデータをアップロードする用途向け。
 <code>KurenaiEngine2D::DrawText</code>のフォントアトラス生成で使用)。
+</p>
+<p>
+<code>SamplerDesc</code>(<code>RHIDesc.h</code>)は<code>Filter</code>(<code>SamplerFilter::Linear</code> /
+<code>Anisotropic</code>)と<code>MaxAnisotropy</code>を持つ。既定値は<code>Anisotropic</code>・16xで、
+浅い角度で見る面(床・路面など)のボケを抑える。AddressU/V/Wは常にWrap固定のため公開していない。
 </p>
 <p>
 <code>RHI::TextureImage::LoadFromFile(filePath, sRGB)</code>(<code>TextureImage.h</code>)は
@@ -566,6 +572,7 @@ void SetIndexBuffer(IRHIBuffer* buffer);           // 32bit(uint32_t)インデ�
 void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer);
 void SetTexture(uint32_t slot, IRHITexture* texture);
 void SetSampler(uint32_t slot, IRHISampler* sampler);
+void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer); // BufferUsage::StructuredReadOnly用(下記4.4参照)
 void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes);
 void Draw(uint32_t vertexCount, uint32_t startVertexLocation);
 void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation);
@@ -578,6 +585,14 @@ void SetComputeTexture(uint32_t slot, IRHITexture* texture);
 void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0); // mipLevelはCreateHiZTexture用(4.3.2参照)
 void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer);
 void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ);</code></pre>
+<p>
+<code>SetShaderResourceBuffer</code>は<code>BufferUsage::StructuredReadOnly</code>で作成した
+バッファを<code>StructuredBuffer&lt;T&gt;</code>としてピクセルシェーダへ読み取り専用でバインドする
+(要素数が可変で定数バッファに収めるには大きい配列向け。詳細は4.4参照)。<strong>スロット空間は
+<code>SetTexture</code>と共通</strong>(<code>t0</code>〜<code>t6</code>)のため、同じ描画内で
+テクスチャとスロットが衝突しないよう呼び出し側で調整すること。DX11バックエンドでは
+<code>SetTexture</code>と同様ピクセルシェーダからのみ参照できる。
+</p>
 
 <h4 id="compute">4.3.1 コンピュートシェーダー</h4>
 <p>
@@ -693,7 +708,11 @@ IMMUTABLEになり以後の更新が失敗するため、必ずnullptrで作成�
 <code>RHIDesc.h</code>(<code>BufferDesc</code>, <code>ShaderDesc</code>, <code>InputElementDesc</code>,
 <code>PipelineStateDesc</code>, <code>ComputePipelineStateDesc</code>)と<code>RHIEnums.h</code>
 (<code>ShaderStage</code>: <code>Vertex</code>/<code>Pixel</code>/<code>Compute</code>、
-<code>BufferUsage</code>: <code>Vertex</code>/<code>Index</code>/<code>Constant</code>/<code>Structured</code>(コンピュートシェーダー用のRWStructuredBuffer)、
+<code>BufferUsage</code>: <code>Vertex</code>/<code>Index</code>/<code>Constant</code>/<code>Structured</code>(コンピュートシェーダー用のRWStructuredBuffer)/
+<code>StructuredReadOnly</code>(CPUから毎フレーム<code>UpdateBuffer</code>で書き換え、
+シェーダからは<code>StructuredBuffer&lt;T&gt;</code>として読み取り専用。<code>SetShaderResourceBuffer</code>で
+グラフィックスパイプラインへバインドする。要素数が可変で定数バッファに収めるには大きい配列
+— <code>KurenaiEngine3D</code>のポイント/スポットライトリストが実例 — 向け)、
 <code>Format</code>, <code>BlendMode</code> など)に描画リソースの
 記述構造体・列挙型がまとまっている。<code>PipelineStateDesc::BlendMode</code>には
 <code>Opaque</code>(既定・不透明)、<code>AlphaBlend</code>(標準アルファブレンド)、
@@ -729,6 +748,68 @@ void SetTitle(const std::wstring&amp; title);</code></pre>
 として返す。<code>filePath</code>には<code>.kmodel</code>のパスを渡す
 (<code>.gltf</code>/<code>.fbx</code>等のソースモデルを直接渡すことはできない。事前に
 KurenaiPacker.exeで変換すること。使い方は<a href="../README.md">README.md</a>参照)。
+</p>
+
+<h4 id="lights">4.6.1 ライトの読み込み(<code>Model::Lights</code>)</h4>
+<p>
+モデルファイルにポイント/スポット/平行光が含まれる場合、<code>Model::Lights</code>
+(<code>std::vector&lt;Assets::Light&gt;</code>)として読み込まれる。glTFは
+<code>KHR_lights_punctual</code> 拡張、FBXはLightノードから読み込む(抽出自体はKurenaiPacker.exeが
+パック時に行い、<code>.kmodel</code>の<code>LightEntry[]</code>として格納する。ランタイムはそれを
+そのまま読むだけで、assimpには依存しない)。
+</p>
+<pre><code>enum class LightType { Directional, Point, Spot };
+
+struct Light
+{
+    LightType Type;
+    float Position[3];         // ローカル座標(モデル自身の空間。Directionalでは未使用)
+    float Direction[3];        // 光が進む向き(正規化済み)。Spot/Directionalで使用
+    float Color[3];            // 線形色。最大成分が1になるよう正規化済み
+    float Intensity;           // 測光量。Point/Spotはカンデラ(cd)、Directionalはルクス(lx)
+    float Range;                // 影響半径。Directionalでは未使用
+    float SpotInnerConeAngle;   // ラジアン。Spotのみ
+    float SpotOuterConeAngle;
+    bool Enabled;
+    std::string Name;
+};</code></pre>
+<ul>
+<li><code>Intensity</code>の単位は物理量。glTFは<code>KHR_lights_punctual</code>の値
+(カンデラ/ルクス)をそのまま読み込むため正確。FBXには物理単位が存在しないため、DCC側の
+<code>Intensity</code>プロパティをカンデラ相当として近似する(精度は保証されない)。</li>
+<li>表示上の明るさは測光量に実在の写真露出値<strong>EV100</strong>(<code>KurenaiEngine3D</code>の
+Lightingパネルの「EV100」)を直接掛けて求める(<code>exposure = 1 / (1.2 * 2^EV100)</code>)。
+太陽光・環境光にも同じ露出が一様にかかる、シーン全体で単一の設定になっている。EV100は値が
+大きいほど明るいシーンを表す実在の写真用語であり、<strong>値を上げるほど描画は暗くなる</strong>
+(Photoshop等の「露出」スライダーとは向きが逆なので注意)。</li>
+<li><code>Range</code>はglTFにノードのメタデータ<code>PBR_LightRange</code>があればその値を
+使う。無ければ打ち切り輝度からEV100=15.0(既定値)を仮定して逆算した推定値が入る
+(この推定はKurenaiPacker.exeのパック時に一度だけ行われるため、後からEV100を大きく変更すると
+実際に見えるべき範囲と合わなくなることがある。その場合はImGuiでRangeを手動調整する)。</li>
+<li>平行光は太陽光との二重照明を避けるため、読み込み時は既定で<code>Enabled = false</code>
+になる(ImGuiから有効化できる)。</li>
+<li><strong>エリアライト(球・チューブ・矩形)は未対応</strong>。glTFの
+<code>KHR_lights_punctual</code>にエリアライトの定義が無く、FBXのエリアライトはassimpが
+未対応種別として扱うため、いずれの形式からも読み込めない。</li>
+<li><code>Position</code>/<code>Direction</code>は<code>.kmodel</code>内ではモデル自身の
+ローカル空間のまま保持される。複数モデルをシーン上へ配置する場合(下記4.7)、
+<code>Assets::LoadScene</code>が各<code>ModelInstance::World</code>でワールド空間へ変換し、
+<code>.kscene</code>自身の<code>[Light]</code>セクションのライトと合成した
+<code>Scene::Lights</code>として返す。</li>
+</ul>
+
+<h4>4.6.2 パッケージ読み込みと並列プリフェッチ</h4>
+<p>
+<code>.kmodel</code>が参照するユニークな<code>.ktex</code>は、<code>ModelLoader.cpp</code>内の
+<code>TextureLoader::LoadAll</code>がワーカースレッドで並列にデコードする。パック済みの
+<code>.ktex</code>は既にBC7圧縮・ミップ生成済みのDDSペイロードを持つため、ランタイム側では
+<code>RHI::TextureImage::LoadFromPackedTexture</code>によるファイル読み込み+DDSデコードのみが
+発生し、WICデコード・ミップ生成・GPU BC7圧縮は一切走らない(これらは全てKurenaiPacker.exeが
+パック時に済ませている)。デコード自体はGPUデバイスを必要としないためワーカースレッドで
+並列化できるが、GPUリソース化(<code>device.CreateTextureFromImage</code>)はデバイスに紐づく
+処理のため呼び出し元スレッドで直列に行う。テクスチャ個別の読み込みに失敗した場合は、
+スロットの種類に応じて白/フラット法線/マゼンタのプレースホルダーへフォールバックし、
+モデル全体の読み込みは継続する。
 </p>
 <p>
 各メッシュのノード変換(ワールド行列)はパック時に頂点座標へ焼き込み済みのため、
@@ -815,8 +896,10 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 </tbody>
 </table>
 <p>
-<strong><code>[Light]</code>は現時点でパース・保持のみ行い、描画には反映されない</strong>
-(将来の点光源/スポットライト実装用の受け皿)。反映されるのは<code>[Sun]</code>による太陽光のみ。
+<code>[Light]</code>で指定したライトはワールド空間の値として扱われ、モデル埋め込みのライト
+(4.6.1節参照)と合成された<code>Scene::Lights</code>としてそのまま描画に反映される
+(カンデラ/ルクス・EV100露出の扱いは4.6.1節と同じ。内部実装は
+<a href="Architecture.html#lights">実装者向けドキュメント 11章「複数ライト」</a>を参照)。
 </p>
 <p>
 <strong>パースの規則</strong>: ファイルはUTF-8(BOM許容)。<code>#</code>は行頭、または直前が
@@ -982,7 +1065,10 @@ assimp・DirectXTexに加え<code>KurenaiEngine.vcxproj</code>への依存を持
 <tr><td>ビルド設定の一致</td><td><code>KurenaiEngine.dll</code> とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
 <tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
 <tr><td>アセットの事前変換が必須</td><td><code>Assets::LoadModel</code>は<code>.kmodel</code>のみを受け付ける。<code>.gltf</code>/<code>.fbx</code>等のソースモデルは、実行前に<code>KurenaiPacker.exe</code>で変換しておく必要がある(7章参照)</td></tr>
-<tr><td><code>[Light]</code>は描画未反映</td><td><code>.kscene</code>の<code>[Light]</code>セクション(点光源/スポットライト)は現時点でパース・保持のみで、実際の照明計算には反映されない(4.7節参照)。反映されるのは<code>[Sun]</code>による太陽光のみ</td></tr>
+<tr><td>ポイント/スポットライトの影</td><td>影を落とさない(シャドウマップは平行光1灯のみ対応)</td></tr>
+<tr><td>ライトの同時描画数</td><td>最大1024灯まで(実データでの想定はせいぜい数灯〜十数灯)。超過分はカメラに近い順に採用される</td></tr>
+<tr><td>エリアライト</td><td>未対応(4.6.1参照)。球・チューブ・矩形のライトはモデルからもImGuiからも作成できない</td></tr>
+<tr><td>EV100と屋内シーン</td><td>太陽・環境光・ポイント/スポットライトすべてに同じEV100が一様にかかるため、屋外の直射日光を基準にした既定値(EV100=15)のままだと屋内照明だけのシーンは暗くなる。EV100は値が大きいほど明るいシーンを表す実在の写真用語のため、値を上げると描画は暗くなる(実カメラの露出と同様の向き)。シーンに応じてEV100を下げて調整する(自動露出は無い)</td></tr>
 </tbody>
 </table>
 </section>

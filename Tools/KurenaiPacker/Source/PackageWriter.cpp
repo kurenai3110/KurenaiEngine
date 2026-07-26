@@ -32,6 +32,7 @@ using Kurenai::Assets::kPackedTextureFlagSRGB;
 using Kurenai::Assets::kPackedTextureMagic;
 using Kurenai::Assets::kPackedTextureVersion;
 using Kurenai::Assets::kTextureEntryFlagSRGB;
+using Kurenai::Assets::LightEntry;
 using Kurenai::Assets::MeshEntry;
 using Kurenai::Assets::PackageHeader;
 using Kurenai::Assets::PackedTextureHeader;
@@ -94,6 +95,7 @@ namespace KurenaiPacker
             size_t BaseColor = kNoRequest;
             size_t Normal = kNoRequest;
             size_t MetallicRoughness = kNoRequest;
+            size_t Emissive = kNoRequest;
         };
 
         // texturePathをsourceModelDirectoryからの相対パスとしてoutputDirectory配下へ
@@ -204,6 +206,7 @@ namespace KurenaiPacker
             meshTextureRefs[i].BaseColor = registerRequest(mesh.BaseColorPath, true);
             meshTextureRefs[i].Normal = registerRequest(mesh.NormalPath, false);
             meshTextureRefs[i].MetallicRoughness = registerRequest(mesh.MetallicRoughnessPath, false);
+            meshTextureRefs[i].Emissive = registerRequest(mesh.EmissivePath, true);
         }
 
         // === 2. テクスチャをワーカースレッドで並列処理する ===
@@ -376,9 +379,14 @@ namespace KurenaiPacker
             entry.IndexCount = static_cast<uint32_t>(mesh.Indices.size());
             entry.MetallicFactor = mesh.MetallicFactor;
             entry.RoughnessFactor = mesh.RoughnessFactor;
+            entry.AlphaCutoff = mesh.AlphaCutoff;
+            entry.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+            entry.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+            entry.EmissiveFactor[2] = mesh.EmissiveFactor[2];
             entry.BaseColorTextureIndex = resolveTextureIndex(meshTextureRefs[i].BaseColor);
             entry.NormalTextureIndex = resolveTextureIndex(meshTextureRefs[i].Normal);
             entry.MetallicRoughnessTextureIndex = resolveTextureIndex(meshTextureRefs[i].MetallicRoughness);
+            entry.EmissiveTextureIndex = resolveTextureIndex(meshTextureRefs[i].Emissive);
 
             result.VertexCount += mesh.Vertices.size();
             result.IndexCount += mesh.Indices.size();
@@ -412,6 +420,34 @@ namespace KurenaiPacker
             stringPool += texturePathStrings[i];
         }
 
+        // ライト名(StringPool)を先に確定させる。ライトのPosition/Direction等は
+        // ワールド空間ではなくモデルのローカル空間のまま(SceneLoaderがModelInstance::Worldで
+        // 変換する。Assets/SceneLoader.cpp参照)そのまま書き出せばよい
+        std::vector<LightEntry> lightEntries(sourceModel.Lights.size());
+        for (size_t i = 0; i < sourceModel.Lights.size(); ++i)
+        {
+            const SourceLight& light = sourceModel.Lights[i];
+            LightEntry& entry = lightEntries[i];
+            entry.Type = static_cast<uint32_t>(light.Type);
+            entry.Position[0] = light.Position[0];
+            entry.Position[1] = light.Position[1];
+            entry.Position[2] = light.Position[2];
+            entry.Direction[0] = light.Direction[0];
+            entry.Direction[1] = light.Direction[1];
+            entry.Direction[2] = light.Direction[2];
+            entry.Color[0] = light.Color[0];
+            entry.Color[1] = light.Color[1];
+            entry.Color[2] = light.Color[2];
+            entry.Intensity = light.Intensity;
+            entry.Range = light.Range;
+            entry.SpotInnerConeAngle = light.SpotInnerConeAngle;
+            entry.SpotOuterConeAngle = light.SpotOuterConeAngle;
+            entry.Enabled = light.Enabled ? 1u : 0u;
+            entry.NameOffset = static_cast<uint32_t>(stringPool.size());
+            entry.NameLength = static_cast<uint32_t>(light.Name.size());
+            stringPool += light.Name;
+        }
+
         const std::string geometryPathString = ToPackagePathString(kgeomPath.filename());
         const uint32_t geometryPathOffset = static_cast<uint32_t>(stringPool.size());
         stringPool += geometryPathString;
@@ -429,12 +465,15 @@ namespace KurenaiPacker
         header.BoundsMax[2] = sourceModel.BoundsMax[2];
         header.MeshCount = static_cast<uint32_t>(meshEntries.size());
         header.TextureCount = static_cast<uint32_t>(finalTextureEntries.size());
+        header.LightCount = static_cast<uint32_t>(lightEntries.size());
         header.GeometryPathOffset = geometryPathOffset;
         header.GeometryPathLength = static_cast<uint32_t>(geometryPathString.size());
         header.StringPoolSize = static_cast<uint32_t>(stringPool.size());
 
         std::vector<uint8_t> fileBytes;
-        fileBytes.resize(sizeof(header) + finalTextureEntries.size() * sizeof(TextureEntry) + meshEntries.size() * sizeof(MeshEntry) + stringPool.size());
+        fileBytes.resize(
+            sizeof(header) + finalTextureEntries.size() * sizeof(TextureEntry) + meshEntries.size() * sizeof(MeshEntry) +
+            lightEntries.size() * sizeof(LightEntry) + stringPool.size());
         size_t writeOffset = 0;
         std::memcpy(fileBytes.data() + writeOffset, &header, sizeof(header));
         writeOffset += sizeof(header);
@@ -445,6 +484,11 @@ namespace KurenaiPacker
         }
         std::memcpy(fileBytes.data() + writeOffset, meshEntries.data(), meshEntries.size() * sizeof(MeshEntry));
         writeOffset += meshEntries.size() * sizeof(MeshEntry);
+        if (!lightEntries.empty())
+        {
+            std::memcpy(fileBytes.data() + writeOffset, lightEntries.data(), lightEntries.size() * sizeof(LightEntry));
+            writeOffset += lightEntries.size() * sizeof(LightEntry);
+        }
         if (!stringPool.empty())
         {
             std::memcpy(fileBytes.data() + writeOffset, stringPool.data(), stringPool.size());

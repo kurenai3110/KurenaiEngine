@@ -21,30 +21,16 @@ namespace Kurenai::Assets
         float TangentSignFlip = 1.0f;       // Worldの行列式が負(ミラーリング)なら-1
     };
 
-    enum class LightType
-    {
-        Point,
-        Spot,
-    };
-
-    // .ksceneの[Light]セクションから読み取った内容を保持するだけで、現時点では描画に反映しない
-    // (太陽光のみが実際の照明に使われる。将来の点光源/スポットライト実装用の受け皿)
-    struct SceneLight
-    {
-        LightType Type = LightType::Point;
-        float Position[3] = { 0.0f, 0.0f, 0.0f };
-        float Direction[3] = { 0.0f, -1.0f, 0.0f }; // Spotのみ意味を持つ
-        float Color[3] = { 1.0f, 1.0f, 1.0f };
-        float Intensity = 1.0f;
-        float Range = 10.0f;
-        float ConeAngleDegrees = 45.0f;             // Spotのみ意味を持つ
-    };
-
     struct Scene
     {
         std::wstring Name;
         std::vector<ModelInstance> Instances;
-        std::vector<SceneLight> Lights;
+
+        // 各ModelInstanceが持つModel::Lights(モデルファイル埋め込みのライト。glTFのKHR_lights_punctual
+        // やFBXのライトノード由来)をInstance::Worldでワールド空間へ変換したものと、.kscene自身の
+        // [Light]セクションで直接指定されたライト(元からワールド空間)を合成した、シーン全体の
+        // ライト一覧。KurenaiEngine3Dはこれをそのまま読んでGPUのライトバッファを構築する
+        std::vector<Light> Lights;
 
         // [Camera]セクションが無い場合はfalseのままで、呼び出し側はFrameCameraToModel相当の
         // 自動配置ヒューリスティックを使う

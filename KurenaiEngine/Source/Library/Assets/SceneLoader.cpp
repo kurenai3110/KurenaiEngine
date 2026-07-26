@@ -538,21 +538,25 @@ namespace Kurenai::Assets
         scene.SunAzimuthDegrees = parsed.SunAzimuthDegrees;
         scene.ShadowEnabled = parsed.SunShadow;
 
+        // .kscene自身の[Light]で直接指定されたライトは、既にワールド空間の値として書かれているため
+        // 変換不要でそのままScene::Lightsへ入れる(モデル埋め込みライトは下のモデルループ内で
+        // Instance::Worldによるワールド空間への変換を行ってから追加する)
         for (const ParsedLightEntry& parsedLight : parsed.Lights)
         {
-            SceneLight light;
+            Light light;
             light.Type = parsedLight.Type;
             std::memcpy(light.Position, parsedLight.Position, sizeof(light.Position));
             std::memcpy(light.Direction, parsedLight.Direction, sizeof(light.Direction));
             std::memcpy(light.Color, parsedLight.Color, sizeof(light.Color));
             light.Intensity = parsedLight.Intensity;
             light.Range = parsedLight.Range;
-            light.ConeAngleDegrees = parsedLight.ConeAngleDegrees;
+            // .ksceneはコーン角を1つ(外側)しか持たないため、内側も同じ値にしてソフトエッジ無しの
+            // 単純な円錐として扱う
+            const float outerRadians = DirectX::XMConvertToRadians(parsedLight.ConeAngleDegrees);
+            light.SpotOuterConeAngle = outerRadians;
+            light.SpotInnerConeAngle = outerRadians;
+            light.Enabled = true;
             scene.Lights.push_back(light);
-        }
-        if (!scene.Lights.empty())
-        {
-            Core::Logger::Info("SceneLoader", "ライト" + std::to_string(scene.Lights.size()) + "件を読み込みましたが、現時点では描画に反映されません: " + WideToUtf8(sceneFilePath));
         }
 
         bool boundsInitialized = false;
@@ -631,6 +635,35 @@ namespace Kurenai::Assets
                     scene.BoundsMax[1] = std::max(scene.BoundsMax[1], transformedFloat3.y);
                     scene.BoundsMax[2] = std::max(scene.BoundsMax[2], transformedFloat3.z);
                 }
+            }
+
+            // モデルファイル埋め込みのライト(glTFのKHR_lights_punctual・FBXのライトノード由来、
+            // ModelLoader.cppがModel::Lightsへ読み込み済み)をInstance::Worldでワールド空間へ変換して
+            // シーン全体のライト一覧へ追加する。Positionは平行移動を含む点として、Directionは
+            // 平行移動を含まない方向ベクトルとして変換する必要があるため、それぞれ
+            // XMVector3TransformCoord/TransformNormalを使い分ける(法線のような逆転置は不要。
+            // 接線ベクトルの変換(GBuffer.hlsl)と同じ理由)
+            for (const Light& localLight : instance.Model.Lights)
+            {
+                Light worldLight = localLight;
+
+                const XMVECTOR localPosition = XMVectorSet(localLight.Position[0], localLight.Position[1], localLight.Position[2], 0.0f);
+                const XMVECTOR worldPosition = XMVector3TransformCoord(localPosition, worldMathSpace);
+                XMFLOAT3 worldPositionFloat3;
+                XMStoreFloat3(&worldPositionFloat3, worldPosition);
+                worldLight.Position[0] = worldPositionFloat3.x;
+                worldLight.Position[1] = worldPositionFloat3.y;
+                worldLight.Position[2] = worldPositionFloat3.z;
+
+                const XMVECTOR localDirection = XMVectorSet(localLight.Direction[0], localLight.Direction[1], localLight.Direction[2], 0.0f);
+                const XMVECTOR worldDirection = XMVector3Normalize(XMVector3TransformNormal(localDirection, worldMathSpace));
+                XMFLOAT3 worldDirectionFloat3;
+                XMStoreFloat3(&worldDirectionFloat3, worldDirection);
+                worldLight.Direction[0] = worldDirectionFloat3.x;
+                worldLight.Direction[1] = worldDirectionFloat3.y;
+                worldLight.Direction[2] = worldDirectionFloat3.z;
+
+                scene.Lights.push_back(worldLight);
             }
 
             scene.Instances.push_back(std::move(instance));

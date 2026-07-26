@@ -8,7 +8,8 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**
 こちらを直接利用できます。
 
 `KurenaiEngine3D`はKurenaiEngine専用モデルパッケージ(`.kmodel`)とシーンファイル(`.kscene`)の
-読み込み・描画に対応した、Deferred Shading・シャドウ・SSAO/SSIL・SSRを備えた完結型3Dレンダラーです。
+読み込み・描画に対応した、Deferred Shading・HDRレンダリング・シャドウ・SSAO/SSIL・SSR・
+複数ライト(ポイント/スポット、カンデラ/ルクス単位)を備えた完結型3Dレンダラーです。
 `.gltf`/`.fbx`等のソースモデルは、付属のオフラインツール**KurenaiPacker.exe**で`.kmodel`へ事前変換して
 から使います(下記「アセットの準備(KurenaiPacker)」参照)。`KurenaiEngine2D`はスプライト・図形・
 テキスト描画を提供する軽量な2D APIです。内部の描画パイプラインや実装判断については
@@ -192,10 +193,13 @@ Sample3D.exe -dx12
 
 画面左上に表示される5つのImGuiパネルから各種設定を変更できます(F1キーで表示/非表示を切り替え可能)。
 
-- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Surface Test(粗さ0〜1の球体列)、Multi Model Test(TRS配置の確認用))
-- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・SSRのON/OFFと各パラメータもここで調整できます
+- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Surface Test(粗さ0〜1の球体列)、Light Test(ポイント/スポット/平行光の検証用シーン)、Multi Model Test(TRS配置の確認用))
+- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・SSRのON/OFFと各パラメータもここで調整できます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth 等、各パス中間結果のデバッグ表示)
-- **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)を調整
+- **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)・
+  EV100(実在の写真露出値。太陽/環境光/ポイント・スポットライトすべてに一様にかかるシーン全体の
+  露出)を調整するほか、ポイント/スポットライトの一覧・追加・削除・型切替・パラメータ編集(強度は
+  カンデラ/ルクス)ができます
 - **Profiler** — FPS、CPU/GPUフレーム時間を各パスごとに表示
 
 ## サンプルプログラム
@@ -229,6 +233,8 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
 - `Assets/Source/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
 - `Assets/Source/BistroMcGuire/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)のMorgan McGuire版OBJ配布([awesome-3d-meshes](https://github.com/Graphify-Labs/awesome-3d-meshes)経由)をglTFに変換したもの。変換手順は[実装者向けドキュメント](docs/Architecture.html)を参照
 - `Assets/Source/MaterialTest/` — PBRライティング検証用の白色球体列。`Tools/generate_material_test.py` で再生成できる
+- `Assets/Source/LightTest/` — ポイント/スポット/平行光の検証用シーン(床・壁・粗さ違いの球4個)。
+  `Tools/generate_light_test.py` で再生成できる
 - `Assets/Source/Scenes/` — 手書きの`.kscene`(シーンファイル)
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
 - `Assets/Packed/Skybox/` — 背景表示用の青空キューブマップ(DDS形式、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py` で再生成できる

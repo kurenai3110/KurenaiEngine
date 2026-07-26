@@ -66,7 +66,7 @@ namespace Kurenai
         void RenderSceneSwitchUI();
         void RenderPostProcessUI();
         void RenderDebugViewUI();
-        void RenderLightingUI();
+        void RenderLightingUI(const FrameState& frameState);
         void RenderProfilerUI();
         DirectX::XMMATRIX ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const;
 
@@ -99,6 +99,8 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
+        // 自発光(エミッシブ)。AO/シャドウの影響を受けずライティングパスで常に加算される
+        std::unique_ptr<RHI::IRHITexture> m_GBufferEmissive;
         std::unique_ptr<RHI::IRHITexture> m_GBufferDepth;
 
         // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
@@ -149,7 +151,8 @@ namespace Kurenai
         uint32_t m_SSILSliceCount = 4;
         uint32_t m_SSILStepCount = 6;
 
-        // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)
+        // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)。
+        // SceneColorはHDR(R16G16B16A16_Float)で、トーンマッピングは行わない(Tonemapパス参照)
         std::unique_ptr<RHI::IRHIShader> m_LightingVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_LightingPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_LightingPipelineState;
@@ -182,12 +185,28 @@ namespace Kurenai
         float m_SSRThickness = 0.1f;
         float m_SSRRoughnessCutoff = 0.6f;
 
+        // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
+        // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
+        // 独立したステージとして置くことで、反射や将来のブルーム/露出制御(M7)がトーンマップの
+        // 影響を受けないHDR値の上に成立できるようにする
+        std::unique_ptr<RHI::IRHIShader> m_TonemapVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_TonemapPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_TonemapPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_TonemapTexture;
+
         // 垂直同期。既定で無効。有効にするとPresentがvblankまでブロックするため、GPU負荷が軽い
         // シーンではvsync待ちの間GPUがアイドル→省電力クロックに落ち、次フレームの立ち上がりが
         // 遅くなる・待ち時間自体もジッタで1vblank/2vblank分を行き来するなど計測値が不安定になる。
         // 既定はGPU/CPU双方の実処理時間を素直に見られるOFFとし、ティアリングを許容する
         // (ON時はPresentが即座に返らず、モニタのリフレッシュレートにFPSが制限される)
         bool m_VSyncEnabled = false;
+
+        // 固定FPSモード。有効時、Renderスレッドが目標FPSより速く回った分だけ待機してフレーム間隔を
+        // 一定に保つ。VSyncはモニタのリフレッシュレート依存かつティアリング防止が目的だが、こちらは
+        // 任意のFPS値に固定できる(物理更新の再現性確保や環境間でのフレーム時間比較などが目的)。
+        // 既定で60fps固定を有効にする
+        bool m_FixedFPSEnabled = true;
+        float m_TargetFPS = 60.0f;
 
         // Presentパス(選択中のレンダーターゲットをアスペクト比を保ってバックバッファへ拡大縮小表示)
         std::unique_ptr<RHI::IRHIShader> m_PresentVertexShader;
@@ -202,6 +221,7 @@ namespace Kurenai
             Albedo,
             Normal,
             Material,
+            Emissive,
             Depth,
             DepthRaw,           // 深度テクスチャの生値(0〜1)を加工せずそのままグレースケール表示
             DirectLight,        // DirectLightingパスの結果(HDR、シャドウ適用済みの直接光)をトーンマッピングして表示
@@ -239,12 +259,20 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_ObjectConstantBuffer;
 
+        // ポイント/スポットライトのリスト(t5、StructuredReadOnly)と、有効ライト数を渡すb1。
+        // 太陽(平行光)はb0のLightDirection/LightColorのまま(詳細はdocs/Architecture.html参照)
+        std::unique_ptr<RHI::IRHIBuffer> m_LightBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> m_LightingConstantBuffer;
+        // 容量(kMaxLights)超過を検出した最初のフレームだけ警告ログを出すためのフラグ
+        bool m_LightOverflowLogged = false;
+
         // LoadScene(Updateスレッド。UpdateSceneSwitch経由で呼ばれる)が書き込み、Render()(Renderスレッド。
         // 描画そのものに加えRenderPostProcessUI等のImGuiスライダーがm_SSAORadius等を直接書き換える)が
         // 読み書きする「シーン状態」一式をこのミューテックスで保護する。LoadScene呼び出し全体と
         // Render()呼び出し全体をそれぞれこのミューテックスで包むため、この2つは同時に走らない
         // (=個々のメンバに追加のロックは不要)。対象はm_Scene/m_CurrentSceneIndex/m_Cameraと、
-        // FrameCameraToModelが書き換えるm_SSAORadius等のPost Processingパラメータ
+        // FrameCameraToModelが書き換えるm_SSAORadius等のPost Processingパラメータ、および
+        // m_Lights/m_SelectedLightIndex/m_SceneExposureEV100
         // (宣言はそれぞれの節にあるが、書き込み元がLoadScene/ImGuiスライダーの2スレッドにまたがる点は共通)
         std::mutex m_SceneMutex;
         Assets::Scene m_Scene;
@@ -255,6 +283,17 @@ namespace Kurenai
         // 一覧・LoadSceneのインデックスに対応する(ファイル名の昇順)
         std::vector<std::wstring> m_SceneFilePaths;
         std::vector<std::wstring> m_SceneDisplayNames;
+
+        // LoadSceneがm_Scene.Lights(SceneLoaderが各ModelInstanceのModel::Lightsをワールド空間へ
+        // 変換し、.kscene自身の[Light]セクションのライトと合成済みのシーン全体のライト一覧)から
+        // コピーし、以降ImGui(Lightingパネル)が編集する。アセット由来のデータとユーザー編集を
+        // 分離するため(シーンを再読み込みすればアセット既定値に戻る)。m_SceneMutexで保護される
+        // (m_Sceneと同じ理由)
+        std::vector<Assets::Light> m_Lights;
+        int m_SelectedLightIndex = -1;
+        // 実在の写真露出値(EV100)。太陽・環境光・ポイント/スポットライトすべてに同じ値がかかる、
+        // シーン全体で単一の露出設定(詳細はdocs/Architecture.html参照)
+        float m_SceneExposureEV100 = 15.0f;
 
         // RenderSceneSwitchUI(Renderスレッド)でシーン切り替えボタンが押されたときに書き込まれ、
         // UpdateSceneSwitch(Updateスレッド)が毎フレーム読み取って消費する1要素の受け渡し用。

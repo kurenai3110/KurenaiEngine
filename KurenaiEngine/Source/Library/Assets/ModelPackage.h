@@ -31,13 +31,18 @@ namespace Kurenai::Assets
     //   [PackageHeader]
     //   [TextureEntry × TextureCount]
     //   [MeshEntry    × MeshCount]
+    //   [LightEntry   × LightCount]
     //   [StringPool (StringPoolSize bytes)]
     //
     // StringPool中のパスはすべて「この.kmodel自身のあるディレクトリ」からの相対パス。
     // (.kscene内の[Model]Pathが「Assetsルート」からの相対パスであるのとは基準が異なる点に注意)
 
     constexpr char kPackageMagic[4] = { 'K', 'M', 'D', 'L' };
-    constexpr uint32_t kPackageVersion = 1;
+    // v2: MeshEntryへAlphaCutoff/EmissiveFactor/EmissiveTextureIndexを追加し、
+    // LightEntry(モデルファイル埋め込みのライト。glTFのKHR_lights_punctual/FBXライトノード由来)
+    // を追加したため加算。v1の.kmodelはVersion不一致で読み込み拒否され、KurenaiPackerの
+    // 再実行で再生成される
+    constexpr uint32_t kPackageVersion = 2;
 
     struct PackageHeader
     {
@@ -49,10 +54,10 @@ namespace Kurenai::Assets
         float    BoundsMax[3];
         uint32_t MeshCount;
         uint32_t TextureCount;
+        uint32_t LightCount;
         uint32_t GeometryPathOffset;      // StringPool内オフセット。対になる.kgeomの相対パス
         uint32_t GeometryPathLength;
         uint32_t StringPoolSize;
-        uint32_t Reserved;                // 0固定(将来の拡張用)
     };
     static_assert(sizeof(PackageHeader) == 64, "PackageHeaderのレイアウトは64バイト固定");
 
@@ -75,14 +80,43 @@ namespace Kurenai::Assets
         uint32_t IndexCount;
         float    MetallicFactor;
         float    RoughnessFactor;
+        // 0以下ならアルファカットアウト無効(常に不透明)。glTFのalphaMode=MASKのマテリアルのみ
+        // alphaCutoff(既定0.5)が設定される
+        float    AlphaCutoff;
+        float    EmissiveFactor[3];
         int32_t  BaseColorTextureIndex;           // -1 = 指定なし → 白1x1
         int32_t  NormalTextureIndex;              // -1 = 指定なし → フラット法線
         int32_t  MetallicRoughnessTextureIndex;   // -1 = 指定なし → 白1x1
-        uint32_t Reserved;                // 0固定
+        // -1 = 指定なし → 白1x1(EmissiveFactorが0ならどのみち結果は黒になるため、
+        // BaseColor等と同様に白のプレースホルダーへフォールバックしてよい)
+        int32_t  EmissiveTextureIndex;
     };
-    static_assert(sizeof(MeshEntry) == 48, "MeshEntryのレイアウトは48バイト固定");
+    static_assert(sizeof(MeshEntry) == 64, "MeshEntryのレイアウトは64バイト固定");
 
     constexpr int32_t kNoTextureIndex = -1;
+
+    // === LightEntry (モデルファイル埋め込みのライト) ===
+    //
+    // glTFのKHR_lights_punctual拡張やFBXのライトノードなど、モデルファイル自体が持つライト情報。
+    // Assets::Light/LightType(Model.h)のPOD部分と1対1対応する。TypeはAssets::LightTypeの値
+    // (0=Directional, 1=Point, 2=Spot)をそのまま格納する
+
+    struct LightEntry
+    {
+        uint32_t Type;
+        float    Position[3];
+        float    Direction[3];             // 正規化済み。Point以外で意味を持つ
+        float    Color[3];                 // 線形色。最大成分が1になるよう正規化済み
+        float    Intensity;                // Point/SpotはカンデラCd、Directionalはルクスlx
+        float    Range;
+        float    SpotInnerConeAngle;       // ラジアン。Spotのみ
+        float    SpotOuterConeAngle;
+        uint32_t Enabled;                  // bool(0/1)
+        uint32_t NameOffset;               // StringPool内オフセット。ImGui一覧の表示名(aiLight::mName由来)
+        uint32_t NameLength;
+        uint32_t Reserved;                 // 0固定
+    };
+    static_assert(sizeof(LightEntry) == 72, "LightEntryのレイアウトは72バイト固定");
 
     // === .kgeom (ジオメトリ実体) ===
     //

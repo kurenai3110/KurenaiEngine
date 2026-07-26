@@ -53,7 +53,7 @@ namespace Kurenai::RHI
         // IRHICommandList::ClearDepthで毎回明示的に指定するが、DX12は生成時に宣言した値と
         // 一致しないと高速クリアパスが使えないため、Reverse-Zで0.0fクリアするテクスチャはここも合わせる
         virtual std::unique_ptr<IRHITexture> CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f) = 0;
-        virtual std::unique_ptr<IRHISampler> CreateDefaultSampler() = 0;
+        virtual std::unique_ptr<IRHISampler> CreateDefaultSampler(const SamplerDesc& desc = SamplerDesc{}) = 0;
         virtual IRHICommandList* GetImmediateCommandList() = 0;
 
         // ImGui連携。ImGuiはバックエンド(DX11/DX12)ごとに専用の実装が必要なため、

@@ -273,6 +273,7 @@ namespace Kurenai::Assets
         PackageHeader header{};
         std::vector<TextureEntry> textureEntries;
         std::vector<MeshEntry> meshEntries;
+        std::vector<LightEntry> lightEntries;
         std::string stringPool;
 
         try
@@ -305,6 +306,12 @@ namespace Kurenai::Assets
             if (header.MeshCount > 0)
             {
                 in.read(reinterpret_cast<char*>(meshEntries.data()), static_cast<std::streamsize>(meshEntries.size() * sizeof(MeshEntry)));
+            }
+
+            lightEntries.resize(header.LightCount);
+            if (header.LightCount > 0)
+            {
+                in.read(reinterpret_cast<char*>(lightEntries.data()), static_cast<std::streamsize>(lightEntries.size() * sizeof(LightEntry)));
             }
 
             stringPool.resize(header.StringPoolSize);
@@ -391,7 +398,8 @@ namespace Kurenai::Assets
             }
             if (mesh.BaseColorTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
                 mesh.NormalTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                mesh.MetallicRoughnessTextureIndex >= static_cast<int32_t>(textureEntries.size()))
+                mesh.MetallicRoughnessTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                mesh.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()))
             {
                 throw std::runtime_error("メッシュ[" + std::to_string(i) + "]が範囲外のテクスチャを参照しています: " + WideToUtf8(filePath));
             }
@@ -458,10 +466,39 @@ namespace Kurenai::Assets
             outMesh.BaseColorTexture = resolveBaseColorOrMetallicRoughness(mesh.BaseColorTextureIndex);
             outMesh.NormalTexture = resolveNormal(mesh.NormalTextureIndex);
             outMesh.MetallicRoughnessTexture = resolveBaseColorOrMetallicRoughness(mesh.MetallicRoughnessTextureIndex);
+            outMesh.EmissiveTexture = resolveBaseColorOrMetallicRoughness(mesh.EmissiveTextureIndex);
             outMesh.MetallicFactor = mesh.MetallicFactor;
             outMesh.RoughnessFactor = mesh.RoughnessFactor;
+            outMesh.AlphaCutoff = mesh.AlphaCutoff;
+            outMesh.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+            outMesh.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+            outMesh.EmissiveFactor[2] = mesh.EmissiveFactor[2];
 
             model.Meshes.push_back(std::move(outMesh));
+        }
+
+        model.Lights.reserve(lightEntries.size());
+        for (const LightEntry& entry : lightEntries)
+        {
+            Light light;
+            light.Type = static_cast<LightType>(entry.Type);
+            light.Position[0] = entry.Position[0];
+            light.Position[1] = entry.Position[1];
+            light.Position[2] = entry.Position[2];
+            light.Direction[0] = entry.Direction[0];
+            light.Direction[1] = entry.Direction[1];
+            light.Direction[2] = entry.Direction[2];
+            light.Color[0] = entry.Color[0];
+            light.Color[1] = entry.Color[1];
+            light.Color[2] = entry.Color[2];
+            light.Intensity = entry.Intensity;
+            light.Range = entry.Range;
+            light.SpotInnerConeAngle = entry.SpotInnerConeAngle;
+            light.SpotOuterConeAngle = entry.SpotOuterConeAngle;
+            light.Enabled = entry.Enabled != 0;
+            light.Name = ReadPoolString(stringPool, entry.NameOffset, entry.NameLength, "LightName");
+
+            model.Lights.push_back(std::move(light));
         }
 
         SortMeshesByMaterial(model);

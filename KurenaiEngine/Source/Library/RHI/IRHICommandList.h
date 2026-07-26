@@ -47,6 +47,10 @@ namespace Kurenai::RHI
         virtual void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void SetTexture(uint32_t slot, IRHITexture* texture) = 0;
         virtual void SetSampler(uint32_t slot, IRHISampler* sampler) = 0;
+        // BufferUsage::StructuredReadOnlyで作成したバッファをStructuredBuffer<T>としてピクセルシェーダへ
+        // バインドする。スロット空間はSetTextureと共通(t0〜)なので、同じ描画内でスロットが衝突しないよう
+        // 呼び出し側で調整すること
+        virtual void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) = 0;
         virtual void Draw(uint32_t vertexCount, uint32_t startVertexLocation) = 0;
         virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) = 0;

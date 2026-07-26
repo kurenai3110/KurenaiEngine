@@ -36,6 +36,10 @@ namespace Kurenai::RHI
                 return DXGI_FORMAT_R8G8B8A8_UNORM;
             case Format::R32_Float:
                 return DXGI_FORMAT_R32_FLOAT;
+            case Format::R16G16_Float:
+                return DXGI_FORMAT_R16G16_FLOAT;
+            case Format::R16G16B16A16_Float:
+                return DXGI_FORMAT_R16G16B16A16_FLOAT;
             case Format::R32G32B32A32_Float:
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -150,6 +154,38 @@ namespace Kurenai::RHI
             ThrowIfFailed(m_Device->CreateUnorderedAccessView(structuredBuffer.Get(), &uavDesc, &uav), "アンオーダードアクセスビューの作成に失敗しました");
 
             return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, uav);
+        }
+
+        // 読み取り専用の構造化バッファ(StructuredBuffer)。CPUから毎フレームUpdateBufferで書き換える前提
+        // なのでD3D11_USAGE_DYNAMIC + CPU_ACCESS_WRITEで作成し、Map(WRITE_DISCARD)経由で更新する
+        // (UAVを持たないためUpdateSubresourceが使えるDEFAULTヒープにする必要はない)
+        if (desc.Usage == BufferUsage::StructuredReadOnly)
+        {
+            D3D11_BUFFER_DESC structuredDesc{};
+            structuredDesc.ByteWidth = desc.SizeInBytes;
+            structuredDesc.Usage = D3D11_USAGE_DYNAMIC;
+            structuredDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            structuredDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            structuredDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            structuredDesc.StructureByteStride = desc.StrideInBytes;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> structuredBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&structuredDesc, nullptr, &structuredBuffer),
+                "読み取り専用構造化バッファの作成に失敗しました");
+
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            srvDesc.Buffer.FirstElement = 0;
+            srvDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
+
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+            ThrowIfFailed(
+                m_Device->CreateShaderResourceView(structuredBuffer.Get(), &srvDesc, &srv),
+                "読み取り専用構造化バッファのシェーダリソースビュー作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, srv, /*isDynamic=*/true);
         }
 
         D3D11_BUFFER_DESC bufferDesc{};
@@ -524,13 +560,15 @@ namespace Kurenai::RHI
         return std::make_unique<DX11Texture>(srv, nullptr, dsv);
     }
 
-    std::unique_ptr<IRHISampler> DX11Device::CreateDefaultSampler()
+    std::unique_ptr<IRHISampler> DX11Device::CreateDefaultSampler(const SamplerDesc& desc)
     {
         D3D11_SAMPLER_DESC samplerDesc{};
-        samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        samplerDesc.Filter = desc.Filter == SamplerFilter::Anisotropic ? D3D11_FILTER_ANISOTROPIC : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
         samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
         samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        // MaxAnisotropyはFilterがANISOTROPICでない場合ハードウェア側で無視されるため、常に設定してよい
+        samplerDesc.MaxAnisotropy = desc.MaxAnisotropy;
         samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
         samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
 

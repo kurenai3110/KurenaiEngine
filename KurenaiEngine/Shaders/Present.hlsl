@@ -8,6 +8,10 @@
 //       4=直接光パスの結果(HDR、トーンマッピング前)をReinhardトーンマッピング+ガンマ補正して表示
 //       5=深度の生値(0〜1)を加工せずそのままグレースケール表示(reverse-z等の生値確認用)
 //       6=Hi-Zミップチェーンの指定ミップ(MipLevel)をSampleLevelで読み、生値のままグレースケール表示
+//       7=G-Bufferのオクタヘドラルエンコード法線(R16G16_Float)をデコードし、[-1,1]を[0,1]へ
+//         再マップして表示(法線マップのデバッグ表示で見慣れた配色にするため)
+#include "NormalEncoding.hlsli"
+
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
@@ -64,6 +68,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float4 sourceColor = SourceTexture.Sample(DefaultSampler, input.UV);
+
+    if (Mode == 7)
+    {
+        float3 n = OctDecode(sourceColor.xy);
+        return float4(n * 0.5f + 0.5f, 1.0f);
+    }
 
     if (Mode == 1)
     {

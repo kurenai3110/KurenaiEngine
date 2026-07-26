@@ -2,16 +2,21 @@
 
 #include <Windows.h>
 
+#include <assimp/GltfMaterial.h>
 #include <assimp/Importer.hpp>
+#include <assimp/light.h>
+#include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <unordered_map>
 
+#include "Core/Logger.h"
 #include "Core/StringUtil.h"
 
 using Kurenai::Assets::Vertex;
@@ -154,6 +159,164 @@ namespace KurenaiPacker
             std::vector<Vertex> Vertices;
             std::vector<uint32_t> Indices;
         };
+
+        // aiLight::mName に入っているノード名からワールド変換行列(と、Rangeのメタデータを読むための
+        // aiNode自体)を引くための走査。glTF2/FBXの両インポータともaiLight::mPositionは(0,0,0)固定、
+        // mDirectionはノードローカルの固定値のままで、ライトが付いていたノードの名前がmNameに入る
+        // だけなので、位置・向きはこの経路(ノードのワールド変換を掛ける)で求める必要がある。
+        // なおaiProcess_ConvertToLeftHandedはaiScene::mLights自体を変換しないが、ノード変換は
+        // メッシュと同じく左手系へミラー済みなので、この経路なら正しい結果になる
+        struct LightNodeRecord
+        {
+            const aiNode* Node = nullptr;
+            aiMatrix4x4 WorldTransform;
+        };
+
+        void CollectNodeWorldTransforms(
+            const aiNode* node,
+            const aiMatrix4x4& parentTransform,
+            std::unordered_map<std::string, LightNodeRecord>& out)
+        {
+            aiMatrix4x4 transform = parentTransform * node->mTransformation;
+            // 同名ノードが複数ある場合はemplaceにより最初に見つかったものを採用する
+            out.emplace(std::string(node->mName.C_Str()), LightNodeRecord{ node, transform });
+
+            for (unsigned int i = 0; i < node->mNumChildren; ++i)
+            {
+                CollectNodeWorldTransforms(node->mChildren[i], transform, out);
+            }
+        }
+
+        // aiScene::mLightsをSourceLightへ変換する。呼び出し元はscene->mNumLights > 0のときだけ呼ぶ
+        void ImportLights(const aiScene* scene, const std::wstring& filePath, std::vector<SourceLight>& outLights)
+        {
+            // FBXにはglTFのKHR_lights_punctualのような物理単位(カンデラ/ルクス)が無く、
+            // assimpはDCC側のIntensity(相対値)/100を色に畳み込むだけのため、後段でカンデラ相当の
+            // 近似値として扱っていることをInfoログで明示する(事実と異なる精度を主張しないため)
+            const bool isFbxSource = filePath.size() >= 4 &&
+                _wcsicmp(filePath.c_str() + filePath.size() - 4, L".fbx") == 0;
+
+            std::unordered_map<std::string, LightNodeRecord> nodeTransforms;
+            CollectNodeWorldTransforms(scene->mRootNode, aiMatrix4x4(), nodeTransforms);
+
+            // KurenaiEngine3D::m_SceneExposureEV100の既定値と合わせる(Range未指定時の推定にのみ使う)
+            constexpr float kDefaultExposureEV100 = 15.0f;
+            constexpr float kCutoffRadiance = 0.01f;
+            constexpr float kHalfPi = 1.57079632679f;
+
+            for (unsigned int i = 0; i < scene->mNumLights; ++i)
+            {
+                const aiLight* light = scene->mLights[i];
+                const std::string name = light->mName.C_Str();
+
+                SourceLightType type;
+                bool enabledByDefault = true;
+                switch (light->mType)
+                {
+                case aiLightSource_POINT:
+                    type = SourceLightType::Point;
+                    break;
+                case aiLightSource_SPOT:
+                    type = SourceLightType::Spot;
+                    break;
+                case aiLightSource_DIRECTIONAL:
+                    // b0の太陽(平行光)との二重照明を避けるため既定で無効にする。ImGuiから有効化できる
+                    type = SourceLightType::Directional;
+                    enabledByDefault = false;
+                    break;
+                default:
+                    // aiLightSource_AMBIENT(環境光はAmbientColorが担当)・aiLightSource_AREA
+                    // (エリアライトは今回未実装。FBXのエリアライトはassimpがUNDEFINEDへ落とす)・
+                    // aiLightSource_UNDEFINEDはここでまとめてスキップする
+                    Kurenai::Core::Logger::Warning("ModelSource", "未対応のライト種別のためスキップします: " + name);
+                    continue;
+                }
+
+                const auto nodeIt = nodeTransforms.find(name);
+                if (nodeIt == nodeTransforms.end())
+                {
+                    Kurenai::Core::Logger::Warning("ModelSource", "ライトに対応するノードが見つかりません: " + name);
+                    continue;
+                }
+                const aiMatrix4x4& transform = nodeIt->second.WorldTransform;
+
+                const aiVector3D worldPosition = transform * aiVector3D(0.0f, 0.0f, 0.0f);
+                const aiMatrix3x3 rotation(transform);
+                aiVector3D worldDirection = rotation * light->mDirection;
+                if (worldDirection.SquareLength() < 1e-12f)
+                {
+                    // ポイントライトはmDirectionが(0,0,0)のままなので、既定の下向きにフォールバックする
+                    worldDirection = aiVector3D(0.0f, -1.0f, 0.0f);
+                }
+                worldDirection.Normalize();
+
+                // 色/強度分離: 最大成分を測光量(カンデラ/ルクス)、残りを最大成分1に正規化した色として
+                // 保持する。glTFはこの値が仕様どおり正確な測光量、FBXはDCC側のIntensityを近似したもの
+                const aiColor3D& diffuse = light->mColorDiffuse;
+                const float maxComponent = std::max({ diffuse.r, diffuse.g, diffuse.b });
+                if (maxComponent <= 0.0f)
+                {
+                    Kurenai::Core::Logger::Warning("ModelSource", "ライトの色/強度が0のためスキップします: " + name);
+                    continue;
+                }
+
+                SourceLight outLight;
+                outLight.Type = type;
+                outLight.Position[0] = worldPosition.x;
+                outLight.Position[1] = worldPosition.y;
+                outLight.Position[2] = worldPosition.z;
+                outLight.Direction[0] = worldDirection.x;
+                outLight.Direction[1] = worldDirection.y;
+                outLight.Direction[2] = worldDirection.z;
+                outLight.Color[0] = diffuse.r / maxComponent;
+                outLight.Color[1] = diffuse.g / maxComponent;
+                outLight.Color[2] = diffuse.b / maxComponent;
+                outLight.Intensity = maxComponent;
+                outLight.Enabled = enabledByDefault;
+                outLight.Name = name;
+
+                if (isFbxSource)
+                {
+                    Kurenai::Core::Logger::Info(
+                        "ModelSource",
+                        "ライト\"" + name + "\"の強度はFBXのIntensityから近似したカンデラ相当値です(精度は保証されません)");
+                }
+
+                // Range: glTFの場合はノードのメタデータ"PBR_LightRange"を優先する。無ければ、
+                // 打ち切り輝度(既定EV100=15.0での露出後の値)から逆算した推定値を使う。
+                // mAttenuationConstant/Linear/Quadraticはformatによって意味が異なる(glTFは常に
+                // (0,0,1)、FBXはDecayTypeに応じて2/decayや2/decay^2)ため、正規化には使わない
+                float range = 0.0f;
+                const bool hasExplicitRange =
+                    nodeIt->second.Node->mMetaData != nullptr && nodeIt->second.Node->mMetaData->Get("PBR_LightRange", range) && range > 0.0f;
+                if (!hasExplicitRange)
+                {
+                    const float exposure = 1.0f / (1.2f * std::pow(2.0f, kDefaultExposureEV100));
+                    const float effectiveRadiance = outLight.Intensity * exposure;
+                    range = std::clamp(std::sqrt(effectiveRadiance / kCutoffRadiance), 0.1f, 1000.0f);
+                    Kurenai::Core::Logger::Info("ModelSource", "ライト\"" + name + "\"のRangeを推定しました: " + std::to_string(range));
+                }
+                outLight.Range = range;
+
+                // コーン角はSPOTのときだけ読む(aiLightの既定値は2πなのでPOINTで読むと壊れる)
+                if (type == SourceLightType::Spot)
+                {
+                    float inner = light->mAngleInnerCone;
+                    float outer = light->mAngleOuterCone;
+                    if (inner > outer)
+                    {
+                        std::swap(inner, outer);
+                        Kurenai::Core::Logger::Warning("ModelSource", "スポットライトの内側角が外側角より大きいため入れ替えました: " + name);
+                    }
+                    outer = std::clamp(outer, 0.0f, kHalfPi);
+                    inner = std::clamp(inner, 0.0f, outer);
+                    outLight.SpotInnerConeAngle = inner;
+                    outLight.SpotOuterConeAngle = outer;
+                }
+
+                outLights.push_back(std::move(outLight));
+            }
+        }
     }
 
     SourceModel LoadSourceModel(const std::wstring& filePath)
@@ -418,6 +581,11 @@ namespace KurenaiPacker
                 outMesh.MetallicRoughnessPath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
             }
 
+            if (material->GetTexture(aiTextureType_EMISSIVE, 0, &texPath) == AI_SUCCESS)
+            {
+                outMesh.EmissivePath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
+            }
+
             // FBXなどPBRメタリック/ラフネスの係数を持たない形式では既定値(非金属・やや粗め)のままになる
             material->Get(AI_MATKEY_METALLIC_FACTOR, outMesh.MetallicFactor);
             material->Get(AI_MATKEY_ROUGHNESS_FACTOR, outMesh.RoughnessFactor);
@@ -430,7 +598,30 @@ namespace KurenaiPacker
                 outMesh.RoughnessFactor = 0.7f;
             }
 
+            aiColor3D emissiveColor(0.0f, 0.0f, 0.0f);
+            material->Get(AI_MATKEY_COLOR_EMISSIVE, emissiveColor);
+            outMesh.EmissiveFactor[0] = emissiveColor.r;
+            outMesh.EmissiveFactor[1] = emissiveColor.g;
+            outMesh.EmissiveFactor[2] = emissiveColor.b;
+
+            // アルファカットアウトはglTFのalphaMode拡張情報でのみ判定する(FBX/OBJ等には概念自体がない)。
+            // MASK以外(既定のOPAQUE、または半透明のBLEND)ではAlphaCutoff=0のままにし、
+            // GBuffer.hlsl側のclip()を発火させない(BLENDの半透明合成はDeferredでは別途対応が必要なため、
+            // このエンジンでは現状不透明として扱う)
+            aiString alphaMode;
+            float alphaCutoff = 0.5f;
+            material->Get(AI_MATKEY_GLTF_ALPHACUTOFF, alphaCutoff);
+            outMesh.AlphaCutoff =
+                (material->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == AI_SUCCESS && std::strcmp(alphaMode.C_Str(), "MASK") == 0)
+                ? alphaCutoff
+                : 0.0f;
+
             model.Meshes.push_back(std::move(outMesh));
+        }
+
+        if (scene->mNumLights > 0)
+        {
+            ImportLights(scene, filePath, model.Lights);
         }
 
         return model;
