@@ -1,0 +1,2 @@
+# ThirdParty配下は外部ライブラリ(git submodule)のため、ナレッジグラフの対象から除外する
+/ThirdParty/
