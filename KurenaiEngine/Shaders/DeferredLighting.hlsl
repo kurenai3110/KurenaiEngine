@@ -4,6 +4,8 @@
 // 合成のみを行う。出力はHDR(SceneColor、1.0を超える輝度を保持)のままで、トーンマッピングは
 // 行わない。SSRパスがこのHDR値を反射元として参照するため、ここでLDRへ落とすとSSRの反射色が
 // 1.0を超えられずエネルギー保存が破れる。トーンマッピングはPresent直前のTonemap.hlslで行う
+static const float PI = 3.14159265359f;
+
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
@@ -79,8 +81,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 directLight = DirectLightTexture.Sample(DefaultSampler, input.UV).rgb; // DirectLighting.hlslで計算済み(シャドウ適用済み)
     float3 emissive = EmissiveTexture.Sample(DefaultSampler, input.UV).rgb;
 
-    // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する
-    float3 color = diffuseColor * (AmbientColor.rgb * ao + indirectLight) + directLight + emissive;
+    // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する。
+    // DirectLighting.hlslの拡散反射(kd*albedo/PI)とスケールを揃えるため、こちらもPIで正規化する
+    // (以前は/PIが抜けており、環境光がπ倍(意図の20%に対し実際は約65%)明るくなっていた)
+    float3 color = (diffuseColor / PI) * (AmbientColor.rgb * ao + indirectLight) + directLight + emissive;
 
     return float4(color, 1.0f);
 }
