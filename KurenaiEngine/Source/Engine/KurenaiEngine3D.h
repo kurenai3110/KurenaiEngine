@@ -27,7 +27,7 @@ namespace Kurenai
     // シャドウマッピング、SSAO/SSIL(間接光)、SSR(反射)、ImGuiによる各種設定パネル、
     // 複数シーンの切り替えまでを内包した完結型のレンダラー。
     // 構築してRun()を呼ぶだけでウィンドウが開き、終了するまでブロックする
-    class KURENAI_API KurenaiEngine3D : public KurenaiEngineBase
+    class KURENAI_3D_API KurenaiEngine3D : public KurenaiEngineBase
     {
     public:
         explicit KurenaiEngine3D(GraphicsAPI api = GraphicsAPI::DX11, uint32_t renderWidth = 1280, uint32_t renderHeight = 720);

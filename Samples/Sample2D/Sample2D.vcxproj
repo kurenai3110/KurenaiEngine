@@ -86,20 +86,28 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
-    <!-- KurenaiEngine.dllとそれが参照するShaders/Assetsを、プロジェクト参照のビルドで
-         生成された出力フォルダから実行ファイルと同じフォルダへコピーする -->
+    <!-- KurenaiEngineLibrary.dll/KurenaiEngine2D.dllとそれが参照するShadersを、プロジェクト参照の
+         ビルドで生成された出力フォルダから実行ファイルと同じフォルダへコピーする。
+         2D単独配布(KurenaiEngine3D.dll・Assetsを含めない)のため、Library/2Dの出力フォルダから
+         個別にコピーする -->
     <PostBuildEvent>
-      <Command>xcopy /Y /I /E /D "$(ProjectDir)..\..\Build\Bin\$(Platform)\$(Configuration)\*" "$(OutDir)"
+      <Command>set KURENAI_BIN=$(ProjectDir)..\..\Build\Bin\$(Platform)\$(Configuration)
+xcopy /Y /I /D "%KURENAI_BIN%\KurenaiEngineLibrary\*.dll" "$(OutDir)"
+xcopy /Y /I /D "%KURENAI_BIN%\KurenaiEngine2D\*.dll" "$(OutDir)"
+xcopy /Y /I /E /D "%KURENAI_BIN%\KurenaiEngine2D\Shaders" "$(OutDir)Shaders\"
 exit /b 0</Command>
-      <Message>KurenaiEngine.dllと関連データをOutDirへコピー</Message>
+      <Message>KurenaiEngineLibrary/2Dと2DシェーダーをOutDirへコピー</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Source\Main.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\KurenaiEngine\KurenaiEngine.vcxproj">
-      <Project>{061b33de-deed-4982-af84-5a2469676f24}</Project>
+    <ProjectReference Include="..\..\KurenaiEngine\KurenaiEngineLibrary.vcxproj">
+      <Project>{7f2c9a41-5b3d-4e68-9a17-0c4e8d2b6f35}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\..\KurenaiEngine\KurenaiEngine2D.vcxproj">
+      <Project>{4a8e3c57-9f62-41b0-8d2a-5c73e1b94f08}</Project>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

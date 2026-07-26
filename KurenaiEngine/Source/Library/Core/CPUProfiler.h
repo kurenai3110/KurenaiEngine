@@ -21,7 +21,7 @@ namespace Kurenai::Core
     // RHIに依存せずDX11/DX12共通のApplication::Render()から直接使えるため、
     // 各パスのコマンド記録にかかるCPU時間をバックエンド間で直接比較できる。
     // GPUProfiler同様、ネスト不可・シーケンシャルな区間のみをサポートする
-    class KURENAI_API CPUProfiler
+    class KURENAI_LIB_API CPUProfiler
     {
     public:
         // フレームの計測開始時に呼ぶ。前フレームの結果をクリアする

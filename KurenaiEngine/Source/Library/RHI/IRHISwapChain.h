@@ -6,7 +6,7 @@
 
 namespace Kurenai::RHI
 {
-    class KURENAI_API IRHISwapChain
+    class KURENAI_LIB_API IRHISwapChain
     {
     public:
         virtual ~IRHISwapChain() = default;

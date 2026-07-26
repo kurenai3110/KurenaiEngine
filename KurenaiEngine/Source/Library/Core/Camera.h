@@ -12,7 +12,7 @@
 
 namespace Kurenai::Core
 {
-    class KURENAI_API Camera
+    class KURENAI_LIB_API Camera
     {
     public:
         void SetPosition(const DirectX::XMFLOAT3& position) { m_Position = position; }
