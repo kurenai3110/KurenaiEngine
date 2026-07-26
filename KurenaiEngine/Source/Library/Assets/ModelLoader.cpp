@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <assimp/GltfMaterial.h>
 #include <assimp/Importer.hpp>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
@@ -430,9 +431,9 @@ namespace Kurenai::Assets
         // 読み込みではassimpを経由せずキャッシュから直接構築する
 
         constexpr char kCacheMagic[4] = { 'K', 'M', 'C', '1' };
-        // v10: 同一マテリアルのメッシュを結合してドローコール数を削減する変更に伴い、
-        // 既存キャッシュ(メッシュ粒度がaiMesh単位のまま)を破棄して再生成させるため加算
-        constexpr uint32_t kCacheVersion = 10;
+        // v11: エミッシブ(自発光)テクスチャ・係数とアルファカットアウト(alphaCutoff)への対応に伴い、
+        // メッシュレコードのフィールド構成が変わったため加算
+        constexpr uint32_t kCacheVersion = 11;
 
         struct CacheHeader
         {
@@ -590,9 +591,12 @@ namespace Kurenai::Assets
                     std::vector<uint32_t> Indices;
                     float MetallicFactor = 0.0f;
                     float RoughnessFactor = 0.7f;
+                    float AlphaCutoff = 0.0f;
+                    float EmissiveFactor[3] = { 0.0f, 0.0f, 0.0f };
                     std::string BaseColorPath;
                     std::string NormalPath;
                     std::string MetallicRoughnessPath;
+                    std::string EmissivePath;
                 };
 
                 std::vector<CachedMeshRecord> records(header.MeshCount);
@@ -616,16 +620,19 @@ namespace Kurenai::Assets
 
                     in.read(reinterpret_cast<char*>(&record.MetallicFactor), sizeof(record.MetallicFactor));
                     in.read(reinterpret_cast<char*>(&record.RoughnessFactor), sizeof(record.RoughnessFactor));
+                    in.read(reinterpret_cast<char*>(&record.AlphaCutoff), sizeof(record.AlphaCutoff));
+                    in.read(reinterpret_cast<char*>(record.EmissiveFactor), sizeof(record.EmissiveFactor));
 
                     record.BaseColorPath = ReadCacheString(in);
                     record.NormalPath = ReadCacheString(in);
                     record.MetallicRoughnessPath = ReadCacheString(in);
+                    record.EmissivePath = ReadCacheString(in);
                 }
 
                 const auto geometryReadTime = std::chrono::steady_clock::now();
 
                 std::vector<TextureLoader::PrefetchRequest> prefetchRequests;
-                prefetchRequests.reserve(records.size() * 3);
+                prefetchRequests.reserve(records.size() * 4);
                 for (const CachedMeshRecord& record : records)
                 {
                     if (!record.BaseColorPath.empty())
@@ -639,6 +646,10 @@ namespace Kurenai::Assets
                     if (!record.MetallicRoughnessPath.empty())
                     {
                         prefetchRequests.push_back({ record.MetallicRoughnessPath, false, false });
+                    }
+                    if (!record.EmissivePath.empty())
+                    {
+                        prefetchRequests.push_back({ record.EmissivePath, true, false });
                     }
                 }
                 textureLoader.Prefetch(prefetchRequests);
@@ -668,8 +679,15 @@ namespace Kurenai::Assets
                     outMesh.BaseColorTexture = record.BaseColorPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(record.BaseColorPath, true);
                     outMesh.NormalTexture = record.NormalPath.empty() ? textureLoader.GetFlatNormal() : textureLoader.LoadNormal(record.NormalPath);
                     outMesh.MetallicRoughnessTexture = record.MetallicRoughnessPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(record.MetallicRoughnessPath, false);
+                    // EmissiveFactorが0の場合はテクスチャの有無によらず結果は黒になるため、
+                    // BaseColor等と同様に白のプレースホルダーへフォールバックしてよい
+                    outMesh.EmissiveTexture = record.EmissivePath.empty() ? textureLoader.GetWhite() : textureLoader.Load(record.EmissivePath, true);
                     outMesh.MetallicFactor = record.MetallicFactor;
                     outMesh.RoughnessFactor = record.RoughnessFactor;
+                    outMesh.AlphaCutoff = record.AlphaCutoff;
+                    outMesh.EmissiveFactor[0] = record.EmissiveFactor[0];
+                    outMesh.EmissiveFactor[1] = record.EmissiveFactor[1];
+                    outMesh.EmissiveFactor[2] = record.EmissiveFactor[2];
 
                     model.Meshes.push_back(std::move(outMesh));
                 }
@@ -980,6 +998,7 @@ namespace Kurenai::Assets
             std::string BaseColorPath;
             std::string NormalPath;
             std::string MetallicRoughnessPath;
+            std::string EmissivePath;
         };
         std::unordered_map<unsigned int, MaterialTexturePaths> materialTexturePaths;
         std::vector<TextureLoader::PrefetchRequest> prefetchRequests;
@@ -1019,6 +1038,12 @@ namespace Kurenai::Assets
             {
                 paths.MetallicRoughnessPath = texPath.C_Str();
                 prefetchRequests.push_back({ paths.MetallicRoughnessPath, false, false });
+            }
+
+            if (material->GetTexture(aiTextureType_EMISSIVE, 0, &texPath) == AI_SUCCESS)
+            {
+                paths.EmissivePath = texPath.C_Str();
+                prefetchRequests.push_back({ paths.EmissivePath, true, false });
             }
 
             materialTexturePaths.emplace(materialIndex, std::move(paths));
@@ -1062,6 +1087,9 @@ namespace Kurenai::Assets
             outMesh.BaseColorTexture = paths.BaseColorPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(paths.BaseColorPath, true);
             outMesh.NormalTexture = paths.NormalPath.empty() ? textureLoader.GetFlatNormal() : textureLoader.LoadNormal(paths.NormalPath);
             outMesh.MetallicRoughnessTexture = paths.MetallicRoughnessPath.empty() ? textureLoader.GetWhite() : textureLoader.Load(paths.MetallicRoughnessPath, false);
+            // EmissiveFactorが0の場合はテクスチャの有無によらず結果は黒になるため、
+            // BaseColor等と同様に白のプレースホルダーへフォールバックしてよい
+            outMesh.EmissiveTexture = paths.EmissivePath.empty() ? textureLoader.GetWhite() : textureLoader.Load(paths.EmissivePath, true);
 
             // FBXなどPBRメタリック/ラフネスの係数を持たない形式では既定値(非金属・やや粗め)のままになる
             material->Get(AI_MATKEY_METALLIC_FACTOR, outMesh.MetallicFactor);
@@ -1075,6 +1103,24 @@ namespace Kurenai::Assets
                 outMesh.RoughnessFactor = 0.7f;
             }
 
+            aiColor3D emissiveColor(0.0f, 0.0f, 0.0f);
+            material->Get(AI_MATKEY_COLOR_EMISSIVE, emissiveColor);
+            outMesh.EmissiveFactor[0] = emissiveColor.r;
+            outMesh.EmissiveFactor[1] = emissiveColor.g;
+            outMesh.EmissiveFactor[2] = emissiveColor.b;
+
+            // アルファカットアウトはglTFのalphaMode拡張情報でのみ判定する(FBX/OBJ等には概念自体がない)。
+            // MASK以外(既定のOPAQUE、または半透明のBLEND)ではAlphaCutoff=0のままにし、
+            // GBuffer.hlsl側のclip()を発火させない(BLENDの半透明合成はDeferredでは別途対応が必要なため、
+            // このエンジンでは現状不透明として扱う)
+            aiString alphaMode;
+            float alphaCutoff = 0.5f;
+            material->Get(AI_MATKEY_GLTF_ALPHACUTOFF, alphaCutoff);
+            outMesh.AlphaCutoff =
+                (material->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == AI_SUCCESS && std::strcmp(alphaMode.C_Str(), "MASK") == 0)
+                ? alphaCutoff
+                : 0.0f;
+
             if (cacheWritable)
             {
                 const uint32_t vertexCount = static_cast<uint32_t>(vertices.size());
@@ -1085,9 +1131,12 @@ namespace Kurenai::Assets
                 cacheOut.write(reinterpret_cast<const char*>(indices.data()), static_cast<std::streamsize>(indices.size() * sizeof(uint32_t)));
                 cacheOut.write(reinterpret_cast<const char*>(&outMesh.MetallicFactor), sizeof(float));
                 cacheOut.write(reinterpret_cast<const char*>(&outMesh.RoughnessFactor), sizeof(float));
+                cacheOut.write(reinterpret_cast<const char*>(&outMesh.AlphaCutoff), sizeof(float));
+                cacheOut.write(reinterpret_cast<const char*>(outMesh.EmissiveFactor), sizeof(outMesh.EmissiveFactor));
                 WriteCacheString(cacheOut, paths.BaseColorPath);
                 WriteCacheString(cacheOut, paths.NormalPath);
                 WriteCacheString(cacheOut, paths.MetallicRoughnessPath);
+                WriteCacheString(cacheOut, paths.EmissivePath);
                 cacheWritable = static_cast<bool>(cacheOut);
             }
 

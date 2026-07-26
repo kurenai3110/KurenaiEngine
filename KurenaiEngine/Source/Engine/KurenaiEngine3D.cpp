@@ -119,11 +119,19 @@ namespace Kurenai
             return result;
         }
 
+        // GBuffer.hlsl側のcbuffer MaterialConstantsと一致させる必要がある。float3(EmissiveFactor)は
+        // HLSLのcbufferパッキング規則により16バイト境界をまたげないため、直前にPaddingを1つ挟んで
+        // オフセット16から始まるようにしている(挟まなくてもHLSLコンパイラが自動的に同じ位置へ
+        // パディングするが、C++側のレイアウトを明示的に一致させるためここでも挟む)
         struct alignas(16) MaterialConstants
         {
             float MetallicFactor;
             float RoughnessFactor;
-            float Padding[2];
+            // 0以下ならアルファカットアウト無効
+            float AlphaCutoff;
+            float Padding0;
+            float EmissiveFactor[3];
+            float Padding1;
         };
 
         // Present.hlsl側のModeと一致させる必要がある
@@ -318,7 +326,13 @@ namespace Kurenai
         gbufferPipelineDesc.VertexShader = m_GBufferVertexShader.get();
         gbufferPipelineDesc.PixelShader = m_GBufferPixelShader.get();
         gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        gbufferPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm, RHI::Format::R8G8B8A8_UNorm, RHI::Format::R8G8B8A8_UNorm };
+        gbufferPipelineDesc.RenderTargetFormats =
+        {
+            RHI::Format::R8G8B8A8_UNorm, // Albedo
+            RHI::Format::R16G16_Float,   // Normal(オクタヘドラルエンコード)
+            RHI::Format::R8G8B8A8_UNorm, // Material(R=Metallic, G=Roughness)
+            RHI::Format::R8G8B8A8_UNorm, // Emissive
+        };
         gbufferPipelineDesc.HasDepthStencil = true;
         gbufferPipelineDesc.ReverseZ = true;
         m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
@@ -557,8 +571,9 @@ namespace Kurenai
         }
 
         m_GBufferAlbedo = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16_Float);
         m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_GBufferEmissive = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         // Reverse-Zのため近平面側(NDC z=1.0)ではなく遠平面側(NDC z=0.0)にクリアする
         m_GBufferDepth = m_Device->CreateDepthTexture(width, height, 0.0f);
         m_DirectLightTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R32G32B32A32_Float);
@@ -839,6 +854,7 @@ namespace Kurenai
             "Albedo",
             "Normal",
             "Material (R=Metallic, G=Roughness)",
+            "Emissive",
             "Depth",
             "Depth (Raw)",
             "Direct Light",
@@ -1232,7 +1248,7 @@ namespace Kurenai
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "GBuffer",
-            .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get() },
+            .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferEmissive.get() },
             .DepthTarget = m_GBufferDepth.get(),
             .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
             {
@@ -1250,6 +1266,10 @@ namespace Kurenai
                     MaterialConstants materialConstants{};
                     materialConstants.MetallicFactor = mesh.MetallicFactor;
                     materialConstants.RoughnessFactor = mesh.RoughnessFactor;
+                    materialConstants.AlphaCutoff = mesh.AlphaCutoff;
+                    materialConstants.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+                    materialConstants.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+                    materialConstants.EmissiveFactor[2] = mesh.EmissiveFactor[2];
                     cmd->UpdateBuffer(m_MaterialConstantBuffer.get(), &materialConstants, sizeof(materialConstants));
                     cmd->SetConstantBuffer(1, m_MaterialConstantBuffer.get());
 
@@ -1258,6 +1278,7 @@ namespace Kurenai
                     cmd->SetTexture(0, mesh.BaseColorTexture);
                     cmd->SetTexture(1, mesh.NormalTexture);
                     cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
+                    cmd->SetTexture(3, mesh.EmissiveTexture);
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                 }
             },
@@ -1402,7 +1423,7 @@ namespace Kurenai
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Lighting",
-            .Reads = { m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_SkyboxTexture.get(), activeAOTexture },
+            .Reads = { m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_SkyboxTexture.get(), activeAOTexture, m_GBufferEmissive.get() },
             .RenderTargets = { m_SceneColor.get() },
             .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
             {
@@ -1420,6 +1441,7 @@ namespace Kurenai
                 cmd->SetTexture(3, m_GBufferDepth.get());
                 cmd->SetTexture(4, m_SkyboxTexture.get());
                 cmd->SetTexture(5, activeAOTexture);
+                cmd->SetTexture(6, m_GBufferEmissive.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -1471,9 +1493,13 @@ namespace Kurenai
             break;
         case DebugView::Normal:
             presentSourceTexture = m_GBufferNormal.get();
+            presentMode = 7; // オクタヘドラルエンコードをデコードして[0,1]へ再マップして表示
             break;
         case DebugView::Material:
             presentSourceTexture = m_GBufferMaterial.get();
+            break;
+        case DebugView::Emissive:
+            presentSourceTexture = m_GBufferEmissive.get();
             break;
         case DebugView::Depth:
             presentSourceTexture = m_GBufferDepth.get();

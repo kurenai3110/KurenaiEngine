@@ -23,6 +23,8 @@ Texture2D DepthTexture : register(t3);
 TextureCube SkyboxTexture : register(t4);
 // SSAO/SSIL(Visibility Bitmask)共通のAO/GIバッファ。rgb=間接拡散光(加算)、a=遮蔽率(乗算)
 Texture2D AOTexture : register(t5);
+// G-Bufferのエミッシブ(自発光)バッファ。AO/シャドウの影響を受けず常に加算する
+Texture2D EmissiveTexture : register(t6);
 SamplerState DefaultSampler : register(s0);
 
 struct PSInput
@@ -75,8 +77,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     float ao = aoSample.a;
     float3 indirectLight = aoSample.rgb; // SSIL(Visibility Bitmask)使用時のみ非ゼロ。周囲のサーフェスからの間接拡散光
     float3 directLight = DirectLightTexture.Sample(DefaultSampler, input.UV).rgb; // DirectLighting.hlslで計算済み(シャドウ適用済み)
+    float3 emissive = EmissiveTexture.Sample(DefaultSampler, input.UV).rgb;
 
-    float3 color = diffuseColor * (AmbientColor.rgb * ao + indirectLight) + directLight;
+    // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する
+    float3 color = diffuseColor * (AmbientColor.rgb * ao + indirectLight) + directLight + emissive;
 
     // トーンマッピング(Reinhard)とガンマ補正
     color = color / (color + 1.0f);
