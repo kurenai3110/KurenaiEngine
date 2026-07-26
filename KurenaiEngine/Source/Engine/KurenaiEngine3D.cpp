@@ -440,7 +440,7 @@ namespace Kurenai
         lightingPipelineDesc.VertexShader = m_LightingVertexShader.get();
         lightingPipelineDesc.PixelShader = m_LightingPixelShader.get();
         lightingPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        lightingPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        lightingPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
         m_LightingPipelineState = m_Device->CreatePipelineState(lightingPipelineDesc);
 
         // Hi-Zミップチェーン構築パス(コンピュートシェーダー)。CSCopyでG-Buffer深度をミップ0へコピーし、
@@ -481,13 +481,33 @@ namespace Kurenai
         ssrPipelineDesc.VertexShader = m_SSRVertexShader.get();
         ssrPipelineDesc.PixelShader = m_SSRPixelShader.get();
         ssrPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        ssrPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        ssrPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
         m_SSRPipelineState = m_Device->CreatePipelineState(ssrPipelineDesc);
 
         RHI::BufferDesc ssrConstantBufferDesc;
         ssrConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         ssrConstantBufferDesc.SizeInBytes = sizeof(SSRConstants);
         m_SSRConstantBuffer = m_Device->CreateBuffer(ssrConstantBufferDesc);
+
+        // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
+        RHI::ShaderDesc tonemapVsDesc;
+        tonemapVsDesc.Stage = RHI::ShaderStage::Vertex;
+        tonemapVsDesc.FilePath = shaderDirectory + L"Tonemap.hlsl";
+        tonemapVsDesc.EntryPoint = "VSMain";
+        m_TonemapVertexShader = m_Device->CreateShader(tonemapVsDesc);
+
+        RHI::ShaderDesc tonemapPsDesc;
+        tonemapPsDesc.Stage = RHI::ShaderStage::Pixel;
+        tonemapPsDesc.FilePath = shaderDirectory + L"Tonemap.hlsl";
+        tonemapPsDesc.EntryPoint = "PSMain";
+        m_TonemapPixelShader = m_Device->CreateShader(tonemapPsDesc);
+
+        RHI::PipelineStateDesc tonemapPipelineDesc;
+        tonemapPipelineDesc.VertexShader = m_TonemapVertexShader.get();
+        tonemapPipelineDesc.PixelShader = m_TonemapPixelShader.get();
+        tonemapPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        tonemapPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        m_TonemapPipelineState = m_Device->CreatePipelineState(tonemapPipelineDesc);
 
         // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
         RHI::ShaderDesc presentVsDesc;
@@ -581,8 +601,9 @@ namespace Kurenai
         m_SSAOTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SSILRawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
         m_SSILTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+        m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+        m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
 
         m_HiZMipLevels = ComputeMipLevelCount(width, height);
         m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
@@ -1510,17 +1531,35 @@ namespace Kurenai
             });
         }
 
+        // --- Tonemapパス: HDRのSceneColor(SSR有効時はSSR適用後)をLDRへ変換する。
+        //     SSR等のHDR演算がすべて完了した後、Present直前の独立したステージとして常に実行する ---
+        RHI::IRHITexture* hdrSceneColor = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "Tonemap",
+            .Reads = { hdrSceneColor },
+            .RenderTargets = { m_TonemapTexture.get() },
+            .Execute = [this, &gbufferViewport, hdrSceneColor](RHI::IRHICommandList* cmd)
+            {
+                cmd->SetViewport(gbufferViewport);
+                cmd->SetPipelineState(m_TonemapPipelineState.get());
+                cmd->SetSampler(0, m_Sampler.get());
+                cmd->SetTexture(0, hdrSceneColor);
+                cmd->Draw(3, 0);
+            },
+        });
+
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
         // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
         // 深度バッファ(GBuffer深度・シャドウマップ)はPresent.hlsl側でグレースケール化するためMode=1を渡す
-        RHI::IRHITexture* presentSourceTexture = m_SceneColor.get();
+        RHI::IRHITexture* presentSourceTexture = m_TonemapTexture.get();
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = m_RenderWidth;
         uint32_t presentSourceHeight = m_RenderHeight;
         switch (m_DebugView)
         {
         case DebugView::Final:
-            presentSourceTexture = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
+            // Tonemapパスが既にSSR有効/無効を考慮したHDRソースをLDR変換済みのため、そのまま使う
+            presentSourceTexture = m_TonemapTexture.get();
             break;
         case DebugView::Albedo:
             presentSourceTexture = m_GBufferAlbedo.get();
@@ -1570,8 +1609,9 @@ namespace Kurenai
             presentSourceHeight = kShadowMapSize;
             break;
         case DebugView::SSR:
-            // SSR無効時はSSRパスをスキップしているため、代わりにSceneColorをそのまま表示する
-            presentSourceTexture = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
+            // SSR無効時はSSRパスをスキップしているため、Tonemapパスの入力もSceneColorになり
+            // 結果的にFinalと同一表示になる
+            presentSourceTexture = m_TonemapTexture.get();
             break;
         case DebugView::HiZ:
             presentSourceTexture = m_HiZTexture.get();

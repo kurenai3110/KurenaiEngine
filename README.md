@@ -8,7 +8,7 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジン。**
 こちらを直接利用できます。
 
 `KurenaiEngine3D`はassimp経由でglTF・FBXモデルの読み込み・描画に対応した、Deferred Shading・
-シャドウ・SSAO/SSIL・SSRを備えた完結型3Dレンダラーです。`KurenaiEngine2D`はスプライト・図形・
+HDRレンダリング・シャドウ・SSAO/SSIL・SSRを備えた完結型3Dレンダラーです。`KurenaiEngine2D`はスプライト・図形・
 テキスト描画を提供する軽量な2D APIです。内部の描画パイプラインや実装判断については
 [実装者向けドキュメント](docs/Architecture.html)を参照してください。
 

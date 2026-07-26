@@ -220,7 +220,7 @@
 <code>KurenaiEngine3D</code>はDeferred Shading(G-Buffer: Albedo/Normal(オクタヘドラルエンコード)/
 Metallic-Roughness/Emissive + 深度)で描画し、ライティングパスでCook-Torrance(GGX)による
 PBR(メタリック/ラフネス)計算を行います。
-描画パイプラインは以下の8パス構成です。
+描画パイプラインは以下の9パス構成です。
 </p>
 <ol>
 <li>シャドウパス — サンライト視点で深度のみ描画</li>
@@ -228,8 +228,9 @@ PBR(メタリック/ラフネス)計算を行います。
 <li>Hi-Zパス — G-Buffer深度からコンピュートシェーダーでミップチェーンを構築</li>
 <li>直接光パス — G-Buffer・シャドウマップからPBRの直接光をHDRで計算</li>
 <li>AO/GIパス — 選択中の手法(SSAO/SSIL)でNormal/Depth(SSILの場合はAlbedo・直接光バッファも読む)からAO・間接拡散光を計算しブラー</li>
-<li>最終合成パス — Albedo・直接光・AO/GI・スカイボックスを合成しトーンマッピングしてSceneColorへ出力</li>
-<li>SSRパス — SceneColor・G-Bufferから鏡面反射を計算し加算</li>
+<li>最終合成パス — Albedo・直接光・AO/GI・スカイボックスを合成し、HDRのままSceneColorへ出力(トーンマッピングは行わない)</li>
+<li>SSRパス — SceneColor・G-Bufferから鏡面反射をHDRのまま計算し加算</li>
+<li>Tonemapパス — HDRのSceneColor(SSR有効時はSSR適用後)をReinhardトーンマッピング+ガンマ補正でLDRへ変換</li>
 <li>Presentパス — 選択中のデバッグビューをバックバッファへ表示</li>
 </ol>
 <p>
@@ -259,6 +260,16 @@ G-Bufferにはエミッシブ(自発光)専用のレンダーターゲットも�
 <code>clip()</code>するアルファカットアウトに対応しています(FBX/OBJ等、glTFのalphaMode拡張情報を
 持たない形式では常に不透明として扱います)。RHIのデフォルトサンプラーも異方性16xフィルタリングを
 既定にしており、浅い角度で見る床・路面などのボケを抑えています(<code>RHI::SamplerDesc</code>)。
+</p>
+<p>
+SceneColor(最終合成パスの出力)はHDR(<code>R16G16B16A16_Float</code>)で保持し、トーンマッピングは
+Present直前の独立したTonemapパスへ切り出しています。以前は最終合成パス自身がReinhardトーンマッピング+
+ガンマ補正までを行い、SceneColorをLDR(<code>R8G8B8A8_UNorm</code>)で書き出していました。しかしこの構成では
+後段のSSRパスがトーンマップ済みのLDR値を反射元として読むことになり、反射色が1.0を超えられず
+エネルギー保存が破れていました(明るい光源やスカイボックスの反射が不自然に暗くクリップされる)。
+SceneColorをHDRのまま保持しSSRもHDR値の上で反射を加算するよう変更したことで、この問題を解消しています。
+Tonemapパスの出力(LDR、<code>R8G8B8A8_UNorm</code>)はSSRの有効/無効にかかわらずPresentパスの
+「Final」「SSR」デバッグビュー双方が参照する共通の最終画像です。
 </p>
 </section>
 
@@ -321,8 +332,8 @@ with Visibility Bitmask" (2023) を参考にした実装)。
 <section id="ssr">
 <h2>6. SSR(スクリーンスペースリフレクション)</h2>
 <p>
-金属/滑らかな面の鏡面間接光(環境反射)はSSRで計算します。最終合成パスの出力(SceneColor)を
-反射先の環境色として再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチング
+金属/滑らかな面の鏡面間接光(環境反射)はSSRで計算します。最終合成パスの出力(SceneColor、HDR、
+トーンマップ前)を反射先の環境色として再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチング
 (線形マーチ+2分探索によるヒット位置の精密化)を行います。スカイボックスへのフォールバックは、
 レイが画面内で実際に背景(深度なし)ピクセルへ到達したことを確認できた場合のみ行い、レイが画面外に
 外れた場合や最大距離まで判定がつかなかった場合は反射を追加しません(その先に何があるか不明なまま
