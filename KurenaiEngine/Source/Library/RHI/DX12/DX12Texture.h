@@ -38,6 +38,12 @@ namespace Kurenai::RHI
         // (CreateUAVTextureは常に1ミップのみなので既定値の0で単一UAVが返る)
         D3D12_CPU_DESCRIPTOR_HANDLE GetUavCpuHandle(uint32_t mipLevel = 0) const;
 
+        // キューブマップ(CreateUAVTextureCube/CreateMippedUAVTextureCube)専用。m_MipUavIndicesに
+        // mip*kCubeFaceCount+face の順でフラットに格納しているため、この2引数版で個別の面・
+        // ミップのUAVを取り出す
+        static constexpr uint32_t kCubeFaceCount = 6;
+        D3D12_CPU_DESCRIPTOR_HANDLE GetCubeUavCpuHandle(uint32_t face, uint32_t mipLevel = 0) const;
+
         // 現在の状態と異なる場合のみバリアを発行して遷移する
         void TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState);
 

@@ -38,7 +38,9 @@ namespace Kurenai::RHI
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
         void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeTexture(uint32_t slot, IRHITexture* texture) override;
+        void SetComputeSampler(uint32_t slot, IRHISampler* sampler) override;
         void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0) override;
+        void SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0) override;
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
@@ -54,7 +56,7 @@ namespace Kurenai::RHI
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス。SetTexture(0, ...)のたびに
         // 新しいブロックを割り当て直す(1フレームぶんまとめて記録してから1回だけ実行する設計のため、
         // 同じスロットを使い回すとGPU実行時にはそのフレーム最後の書き込みで上書きされてしまう)
-        static constexpr uint32_t kTextureSlotCount = 9;
+        static constexpr uint32_t kTextureSlotCount = 11;
         uint32_t m_CurrentSrvTableBase = 0;
 
         // SetTexture()はCopyDescriptorsをその場では呼ばず、コピー元ハンドルをここに溜めておき、

@@ -49,6 +49,19 @@ namespace Kurenai::RHI
         // 最小値(Reverse-Zのため最も遠い深度)を書き込む」ダウンサンプルを1ミップずつ繰り返せるようにするための、
         // 通常のCreateUAVTexture(常に1ミップ)とは別の専用ファクトリ
         virtual std::unique_ptr<IRHITexture> CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels) = 0;
+        // CreateHiZTextureの汎用版。フォーマットを指定できるフルミップチェーンのUAV+SRVテクスチャを作る。
+        // IBLのプリフィルタ済み鏡面マップ(ラフネスに応じてミップごとに異なる畳み込みを書き込む、
+        // HDRのためR16G16B16A16_Float)のように、Hi-Z以外の用途でもミップ単位のUAV書き込みが必要な場合に使う
+        virtual std::unique_ptr<IRHITexture> CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels) = 0;
+        // コンピュートシェーダーから面ごとに書き込み可能なキューブマップ(6面、単一ミップ)。
+        // IBLの拡散イラディアンス(IBLConvolve.hlsl CSIrradiance)のように、畳み込み結果を
+        // 本物のTextureCubeとして保持したい場合に使う(SetComputeUnorderedAccessTextureCubeFaceで
+        // 面を選んで書き込み、通常のSetTexture/SetComputeTextureでTextureCubeとして読める)
+        virtual std::unique_ptr<IRHITexture> CreateUAVTextureCube(uint32_t size, Format format) = 0;
+        // CreateUAVTextureCubeのフルミップチェーン版。IBLのプリフィルタ済み鏡面(ミップごとに
+        // 異なるラフネスで畳み込む)のように、面×ミップの組み合わせごとに個別のUAV書き込みが
+        // 必要な場合に使う
+        virtual std::unique_ptr<IRHITexture> CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels) = 0;
         // clearDepth: このテクスチャの最適クリア値(DX12のD3D12_CLEAR_VALUE用)。実際のクリア値は
         // IRHICommandList::ClearDepthで毎回明示的に指定するが、DX12は生成時に宣言した値と
         // 一致しないと高速クリアパスが使えないため、Reverse-Zで0.0fクリアするテクスチャはここも合わせる

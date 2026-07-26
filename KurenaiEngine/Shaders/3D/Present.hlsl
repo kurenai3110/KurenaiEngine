@@ -10,6 +10,12 @@
 //       6=Hi-Zミップチェーンの指定ミップ(MipLevel)をSampleLevelで読み、生値のままグレースケール表示
 //       7=G-Bufferのオクタヘドラルエンコード法線(R16G16_Float)をデコードし、[-1,1]を[0,1]へ
 //         再マップして表示(法線マップのデバッグ表示で見慣れた配色にするため)
+//       8=IBLプリフィルタ済み鏡面マップ(HDR、ミップごとにラフネスが異なる)の指定ミップ(MipLevel)を
+//         SampleLevelで読み、Mode4と同じくReinhardトーンマッピング+ガンマ補正して表示
+//       9=IBLの拡散イラディアンス/プリフィルタ済み鏡面(いずれも本物のTextureCube)のデバッグ表示。
+//         SourceTexture(t0)ではなくDebugCubeTexture(t1)を、現在のカメラ視線方向で球面を
+//         見回すように(背景スカイの表示と同じ要領でカメラ位置→ピクセル方向のレイを再構成して)
+//         サンプルする。右クリックドラッグで視点を回せば球面全体を確認できる
 #include "NormalEncoding.hlsli"
 
 cbuffer FrameConstants : register(b0)
@@ -33,6 +39,9 @@ cbuffer PresentConstants : register(b1)
 };
 
 Texture2D SourceTexture : register(t0);
+// IBLのIrradiance/PrefilteredEnv(Mode 9)専用。それ以外のModeでは未使用(t0と違いTextureCube
+// でなければならないため、専用の登録スロットを分けている)
+TextureCube DebugCubeTexture : register(t1);
 SamplerState DefaultSampler : register(s0);
 
 struct PSInput
@@ -66,6 +75,26 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 明示的に指定したミップ(MipLevel)を必ず読む
         float depth = SourceTexture.SampleLevel(DefaultSampler, input.UV, MipLevel).r;
         return float4(depth, depth, depth, 1.0f);
+    }
+
+    if (Mode == 8)
+    {
+        float3 color = SourceTexture.SampleLevel(DefaultSampler, input.UV, MipLevel).rgb;
+        color = color / (color + 1.0f);
+        color = pow(color, 1.0f / 2.2f);
+        return float4(color, 1.0f);
+    }
+
+    if (Mode == 9)
+    {
+        // 背景スカイの表示(DeferredLighting.hlsl)と同じ要領で、カメラ位置からこのピクセル方向への
+        // レイを再構成する。Reverse-Zのため遠平面(=背景)はNDC z=0.0f付近になる
+        float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
+        float3 rayDir = normalize(farPoint - CameraPosition.xyz);
+        float3 color = DebugCubeTexture.SampleLevel(DefaultSampler, rayDir, MipLevel).rgb;
+        color = color / (color + 1.0f);
+        color = pow(color, 1.0f / 2.2f);
+        return float4(color, 1.0f);
     }
 
     float4 sourceColor = SourceTexture.Sample(DefaultSampler, input.UV);
