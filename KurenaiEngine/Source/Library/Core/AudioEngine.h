@@ -22,7 +22,7 @@ namespace Kurenai::Core
     // XAudio2による簡易なサウンド再生。WAV(PCM)ファイルの読み込みと再生、および再生中ボイスの
     // 停止に対応した最小限の実装(効果音・BGM程度の単純な再生が目的で、音量変更等は持たない)。
     // 使用にはCoInitializeEx済みであること(WICテクスチャ読み込みと同じCOM初期化要件)
-    class KURENAI_API AudioEngine
+    class KURENAI_LIB_API AudioEngine
     {
     public:
         AudioEngine();

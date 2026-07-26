@@ -13,20 +13,19 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{F1D64B44-C820-4005-9D43-4FDB67E7A7F4}</ProjectGuid>
-    <RootNamespace>KurenaiPacker</RootNamespace>
+    <ProjectGuid>{4A8E3C57-9F62-41B0-8D2A-5C73E1B94F08}</ProjectGuid>
+    <RootNamespace>KurenaiEngine2D</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
-    <!-- CLIツールのためコンソールサブシステム(Sample3D/Sample2Dはウィンドウアプリのため異なる) -->
-    <ConfigurationType>Application</ConfigurationType>
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
@@ -45,28 +44,25 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>$(ProjectDir)Build\Bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(ProjectDir)Build\Intermediate\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir>$(ProjectDir)..\Build\Bin\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
+    <IntDir>$(ProjectDir)..\Build\Intermediate\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(ProjectDir)Build\Bin\$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(ProjectDir)Build\Intermediate\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir>$(ProjectDir)..\Build\Bin\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
+    <IntDir>$(ProjectDir)..\Build\Intermediate\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>KURENAI_ENGINE2D_EXPORTS;_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\KurenaiEngine\Source\Library;$(SolutionDir)..\..\KurenaiEngine\Source\Engine;$(SolutionDir)..\..\ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)..\..\ThirdParty\DirectXTex\Common;$(SolutionDir)..\..\ThirdParty\assimp\include;$(SolutionDir)..\..\ThirdParty\assimp\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(SolutionDir)..\..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Debug;$(SolutionDir)..\..\ThirdParty\assimp\build\lib\Debug;$(SolutionDir)..\..\ThirdParty\assimp\build\contrib\zlib\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ole32.lib;DirectXTex.lib;assimp-vc143-mtd.lib;zlibstaticd.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -75,41 +71,40 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>KURENAI_ENGINE2D_EXPORTS;NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\KurenaiEngine\Source\Library;$(SolutionDir)..\..\KurenaiEngine\Source\Engine;$(SolutionDir)..\..\ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)..\..\ThirdParty\DirectXTex\Common;$(SolutionDir)..\..\ThirdParty\assimp\include;$(SolutionDir)..\..\ThirdParty\assimp\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalLibraryDirectories>$(SolutionDir)..\..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Release;$(SolutionDir)..\..\ThirdParty\assimp\build\lib\Release;$(SolutionDir)..\..\ThirdParty\assimp\build\contrib\zlib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ole32.lib;DirectXTex.lib;assimp-vc143-mt.lib;zlibstatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
-    <!-- KurenaiEngineLibrary.dll(TextureImage::LoadFromFile/GetImage等をリンク時に必要とする)を
-         プロジェクト参照のビルド出力フォルダからKurenaiPacker.exeと同じフォルダへコピーする -->
+    <!-- KurenaiEngine2D.dllが実行時に参照するShaders(Sprite2D.hlsl)をDLLと同じフォルダに揃える。
+         xcopy /D により変更のあったファイルのみコピーし、対象が無い場合の終了コード(1)は
+         ビルド失敗として扱わないようexit /bで無視する -->
     <PostBuildEvent>
-      <Command>xcopy /Y /I /D "$(SolutionDir)..\..\Build\Bin\$(Platform)\$(Configuration)\KurenaiEngineLibrary\KurenaiEngineLibrary.dll" "$(OutDir)"
+      <Command>xcopy /Y /I /E /D "$(ProjectDir)Shaders\2D" "$(OutDir)Shaders\"
 exit /b 0</Command>
-      <Message>KurenaiEngineLibrary.dllをOutDirへコピー</Message>
+      <Message>2DシェーダーをOutDirへコピー</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="Source\Main.cpp" />
-    <ClCompile Include="Source\ModelSource.cpp" />
-    <ClCompile Include="Source\PackageWriter.cpp" />
+    <ClInclude Include="Source\Engine\KurenaiTypes.h" />
+    <ClInclude Include="Source\Engine\KurenaiEngine2D.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="Source\ModelSource.h" />
-    <ClInclude Include="Source\PackageWriter.h" />
+    <ClCompile Include="Source\Engine\KurenaiEngine2D.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\KurenaiEngine\KurenaiEngineLibrary.vcxproj">
+    <None Include="Shaders\2D\Sprite2D.hlsl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="KurenaiEngineLibrary.vcxproj">
       <Project>{7f2c9a41-5b3d-4e68-9a17-0c4e8d2b6f35}</Project>
     </ProjectReference>
   </ItemGroup>

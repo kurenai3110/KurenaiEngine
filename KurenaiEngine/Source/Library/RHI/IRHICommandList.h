@@ -31,7 +31,7 @@ namespace Kurenai::RHI
         float A = 1.0f;
     };
 
-    class KURENAI_API IRHICommandList
+    class KURENAI_LIB_API IRHICommandList
     {
     public:
         virtual ~IRHICommandList() = default;

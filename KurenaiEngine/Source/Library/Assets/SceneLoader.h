@@ -16,15 +16,15 @@ namespace Kurenai::Assets
     // sceneFilePath: 読み込む.ksceneのパス
     // assetRootDirectory: [Model]Pathの基準ディレクトリ(通常は<DLLフォルダ>/Assets/)。
     //                      .kmodel自身の内部パス(StringPool)の基準とは異なる点に注意
-    KURENAI_API Scene LoadScene(RHI::IRHIDevice& device, const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory);
+    KURENAI_LIB_API Scene LoadScene(RHI::IRHIDevice& device, const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory);
 
     // ImGuiのシーン一覧構築用。[Model]の実体(.kmodel)は読み込まず、[Scene]Nameだけを取り出す
     // (省略されていればファイル名(拡張子なし)を返す)。失敗時はstd::runtime_errorを投げる
-    KURENAI_API std::wstring ReadSceneName(const std::wstring& sceneFilePath);
+    KURENAI_LIB_API std::wstring ReadSceneName(const std::wstring& sceneFilePath);
 
     // KurenaiPacker.exeの--sceneモードが使う軽量な検証。書式の妥当性(ParseSceneFileと同じ規則)に加え、
     // 各[Model]Pathが指す.kmodelが実在し、ヘッダ(マジックナンバー・バージョン)が読めることまで確認する。
     // LoadSceneと異なりIRHIDeviceを必要とせず、ジオメトリ/テクスチャの実読み込みも行わない
     // (KurenaiPackerはGPUデバイスを持たないため)。失敗時はstd::runtime_errorを投げる
-    KURENAI_API void ValidateScene(const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory);
+    KURENAI_LIB_API void ValidateScene(const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory);
 }

@@ -19,7 +19,7 @@
 
 namespace Kurenai::RHI
 {
-    class KURENAI_API IRHIDevice
+    class KURENAI_LIB_API IRHIDevice
     {
     public:
         virtual ~IRHIDevice() = default;
@@ -79,6 +79,6 @@ namespace Kurenai::RHI
         virtual void WaitForGPUIdle() = 0;
     };
 
-    KURENAI_API std::unique_ptr<IRHIDevice> CreateDX11Device();
-    KURENAI_API std::unique_ptr<IRHIDevice> CreateDX12Device();
+    KURENAI_LIB_API std::unique_ptr<IRHIDevice> CreateDX11Device();
+    KURENAI_LIB_API std::unique_ptr<IRHIDevice> CreateDX12Device();
 }

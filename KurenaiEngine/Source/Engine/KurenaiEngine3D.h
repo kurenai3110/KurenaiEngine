@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -27,13 +28,21 @@ namespace Kurenai
     // シャドウマッピング、SSAO/SSIL(間接光)、SSR(反射)、ImGuiによる各種設定パネル、
     // 複数シーンの切り替えまでを内包した完結型のレンダラー。
     // 構築してRun()を呼ぶだけでウィンドウが開き、終了するまでブロックする
-    class KURENAI_API KurenaiEngine3D : public KurenaiEngineBase
+    class KURENAI_3D_API KurenaiEngine3D : public KurenaiEngineBase
     {
     public:
         explicit KurenaiEngine3D(GraphicsAPI api = GraphicsAPI::DX11, uint32_t renderWidth = 1280, uint32_t renderHeight = 720);
         ~KurenaiEngine3D();
 
         void Run();
+
+        // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
+        // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
+        // FrameConstants::CascadeSplitsがXMFLOAT4(4要素)にfar距離を詰めているため、
+        // この値を変える場合はKurenaiEngine3D.cppのCascadeSplits周りも合わせて変更が必要。
+        // KurenaiEngine3D.cpp側の匿名名前空間(FrameConstants宣言)からも参照するためpublicにしている
+        static constexpr uint32_t kCascadeCount = 4;
+        static_assert(kCascadeCount == 4, "CascadeSplitsはXMFLOAT4前提のため4カスケード固定");
 
     private:
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
@@ -68,7 +77,13 @@ namespace Kurenai
         void RenderDebugViewUI();
         void RenderLightingUI(const FrameState& frameState);
         void RenderProfilerUI();
-        DirectX::XMMATRIX ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const;
+        // カメラ視錐台をkCascadeCount個の深度範囲に分割する(near/far境界、View空間での距離)。
+        // 対数分割と均等分割を混合した実用的な分割(Practical Split Scheme)を使う
+        void ComputeCascadeSplits(const Core::Camera& camera, float (&outSplits)[kCascadeCount]) const;
+        // カメラ視錐台のうち[splitNear, splitFar]の範囲(View空間距離)だけを覆う、平行光のライト視点
+        // 正射影ビュー・プロジェクション行列を求める。カスケードごとに1回呼ぶ
+        DirectX::XMMATRIX ComputeCascadeLightViewProj(
+            const DirectX::XMFLOAT3& lightDirection, const Core::Camera& camera, float splitNear, float splitFar) const;
 
         // 起動時に選択されたグラフィックスAPI(タイトルバー・ImGui表示用に保持)
         GraphicsAPI m_GraphicsAPI;
@@ -229,19 +244,29 @@ namespace Kurenai
             AOIndirectLightRaw, // AO/GIバッファのrgb(間接拡散光、ブラー前の生値)
             AOOcclusion,        // AO/GIバッファのa(遮蔽率、ブラー後)をグレースケール表示
             AOOcclusionRaw,     // AO/GIバッファのa(遮蔽率、ブラー前の生値)
-            ShadowMap,
+            ShadowMap,          // m_ShadowDebugCascadeで選択したカスケードのシャドウマップを表示
             SSR,                // SSRパスの出力(SceneColor+反射)。SSR無効時はSceneColorと同一
             HiZ,                // Hi-Zミップチェーンの指定ミップ(m_HiZDebugMipLevel)をグレースケール表示
         };
         DebugView m_DebugView = DebugView::Final;
 
-        // シャドウパス(平行光のライト視点から深度のみを描画する)
+        // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
+        // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
+        // カスケードシャドウマップ(CSM)。近いカスケードほどテクセル密度が高く、遠いカスケードほど
+        // 広い範囲を粗くカバーする
         static constexpr uint32_t kShadowMapSize = 2048;
         std::unique_ptr<RHI::IRHIShader> m_ShadowVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_ShadowPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_ShadowMap;
+        std::array<std::unique_ptr<RHI::IRHITexture>, kCascadeCount> m_ShadowCascades;
+        // シャドウパスの各カスケード描画で使う専用の定数バッファ(カスケードごとに値を更新して使い回す)
+        std::unique_ptr<RHI::IRHIBuffer> m_ShadowCascadeConstantBuffer;
         bool m_ShadowEnabled = true;
+        // PCSS(Percentage Closer Soft Shadows)のライトサイズ。シャドウマップUV空間での
+        // ブロッカーサーチ・半影の広さを決める係数(値が大きいほど半影が広く柔らかくなる)
+        float m_ShadowLightSize = 0.02f;
+        // デバッグ表示(Render Targets - Shadow Map)で確認するカスケード番号(0=カメラに近い方)
+        int32_t m_ShadowDebugCascade = 0;
 
         // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ
         std::unique_ptr<RHI::IRHITexture> m_SkyboxTexture;

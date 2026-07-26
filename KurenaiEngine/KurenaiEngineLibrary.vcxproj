@@ -13,8 +13,8 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{061B33DE-DEED-4982-AF84-5A2469676F24}</ProjectGuid>
-    <RootNamespace>KurenaiEngine</RootNamespace>
+    <ProjectGuid>{7F2C9A41-5B3D-4E68-9A17-0C4E8D2B6F35}</ProjectGuid>
+    <RootNamespace>KurenaiEngineLibrary</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -44,18 +44,18 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>$(ProjectDir)..\Build\Bin\$(Platform)\$(Configuration)\</OutDir>
+    <OutDir>$(ProjectDir)..\Build\Bin\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
     <IntDir>$(ProjectDir)..\Build\Intermediate\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(ProjectDir)..\Build\Bin\$(Platform)\$(Configuration)\</OutDir>
+    <OutDir>$(ProjectDir)..\Build\Bin\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
     <IntDir>$(ProjectDir)..\Build\Intermediate\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>KURENAI_ENGINE_EXPORTS;_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>KURENAI_LIBRARY_EXPORTS;IMGUI_API=__declspec(dllexport);_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -73,7 +73,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>KURENAI_ENGINE_EXPORTS;NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>KURENAI_LIBRARY_EXPORTS;IMGUI_API=__declspec(dllexport);NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -87,22 +87,9 @@
       <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
-  <ItemDefinitionGroup>
-    <!-- KurenaiEngine.dllが実行時に参照するShaders/AssetsをDLLと同じフォルダに揃える。
-         xcopy /D により変更のあったファイルのみコピーし、対象が無い場合の終了コード(1)は
-         ビルド失敗として扱わないようexit /bで無視する -->
-    <PostBuildEvent>
-      <Command>xcopy /Y /I /E /D "$(ProjectDir)Shaders" "$(OutDir)Shaders\"
-xcopy /Y /I /E /D "$(ProjectDir)..\Assets\Packed" "$(OutDir)Assets\"
-exit /b 0</Command>
-      <Message>Shaders/Assets(Packed)をOutDirへコピー</Message>
-    </PostBuildEvent>
-  </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Source\Engine\KurenaiTypes.h" />
     <ClInclude Include="Source\Engine\KurenaiEngineBase.h" />
-    <ClInclude Include="Source\Engine\KurenaiEngine3D.h" />
-    <ClInclude Include="Source\Engine\KurenaiEngine2D.h" />
     <ClInclude Include="Source\Library\Core\Window.h" />
     <ClInclude Include="Source\Library\Core\Camera.h" />
     <ClInclude Include="Source\Library\Core\AudioEngine.h" />
@@ -168,8 +155,6 @@ exit /b 0</Command>
     <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_dx11.cpp" />
     <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_dx12.cpp" />
     <ClCompile Include="Source\Engine\KurenaiEngineBase.cpp" />
-    <ClCompile Include="Source\Engine\KurenaiEngine3D.cpp" />
-    <ClCompile Include="Source\Engine\KurenaiEngine2D.cpp" />
     <ClCompile Include="Source\Library\Core\Window.cpp" />
     <ClCompile Include="Source\Library\Core\Camera.cpp" />
     <ClCompile Include="Source\Library\Core\AudioEngine.cpp" />
@@ -205,18 +190,6 @@ exit /b 0</Command>
     <!-- 配布されているDirectXTex.libはDesktop_2022向けにD3D11用ソースのみでビルドされておりD3D12関数を含まないため、
          D3D12ヘルパー(CreateTextureEx/PrepareUpload等)のみこのプロジェクトで直接コンパイルする -->
     <ClCompile Include="..\ThirdParty\DirectXTex\DirectXTex\DirectXTexD3D12.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="Shaders\GBuffer.hlsl" />
-    <None Include="Shaders\DirectLighting.hlsl" />
-    <None Include="Shaders\DeferredLighting.hlsl" />
-    <None Include="Shaders\HiZ.hlsl" />
-    <None Include="Shaders\Present.hlsl" />
-    <None Include="Shaders\SSAO.hlsl" />
-    <None Include="Shaders\SSIL_VisibilityBitmask.hlsl" />
-    <None Include="Shaders\SSR.hlsl" />
-    <None Include="Shaders\Shadow.hlsl" />
-    <None Include="Shaders\Sprite2D.hlsl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

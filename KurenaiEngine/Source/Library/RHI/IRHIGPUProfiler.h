@@ -16,7 +16,7 @@ namespace Kurenai::RHI
     // GPUタイムスタンプクエリによる区間計測。DX11(ID3D11Query)とDX12(ID3D12QueryHeap)で
     // 実装機構が大きく異なるため、他のRHIリソースと同様にIRHIDevice経由でバックエンド実装を生成する。
     // ネスト不可・シーケンシャルな区間のみをサポートする(Shadow→GBuffer→...のような直列パスの計測用)
-    class KURENAI_API IRHIGPUProfiler
+    class KURENAI_LIB_API IRHIGPUProfiler
     {
     public:
         virtual ~IRHIGPUProfiler() = default;

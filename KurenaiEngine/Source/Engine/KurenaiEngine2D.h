@@ -43,7 +43,7 @@ namespace Kurenai
     //       renderer.DrawSprite(x, y, w, h, 0.0f, tex, 1, 1, 1, 1);
     //       renderer.EndFrame();
     //   }
-    class KURENAI_API KurenaiEngine2D : public KurenaiEngineBase
+    class KURENAI_2D_API KurenaiEngine2D : public KurenaiEngineBase
     {
     public:
         KurenaiEngine2D(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api = GraphicsAPI::DX11);

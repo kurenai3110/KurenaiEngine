@@ -195,8 +195,9 @@
 <header class="page-header">
   <h1>KurenaiEngine APIリファレンス</h1>
   <p>
-    このドキュメントは、<strong>KurenaiEngine.dll</strong> が公開するAPIを使って
-    アプリケーションを作成するための情報をまとめたものです。すぐに動かしたい場合は
+    このドキュメントは、<strong>KurenaiEngineLibrary.dll / KurenaiEngine3D.dll /
+    KurenaiEngine2D.dll</strong> が公開するAPIを使ってアプリケーションを作成するための
+    情報をまとめたものです。すぐに動かしたい場合は
     3Dサンプル向けの <code>Kurenai::KurenaiEngine3D</code> や2Dサンプル向けの
     <code>Kurenai::KurenaiEngine2D</code> を、より自由度の高い描画を組みたい場合は
     低レベルAPI一式(<code>Kurenai::RHI</code> / <code>Kurenai::Core</code> /
@@ -224,27 +225,33 @@
 <h2>1. アーキテクチャ</h2>
 
 <p>
-KurenaiEngineは <strong>DLL</strong>(<code>KurenaiEngine.dll</code> + インポートライブラリ
-<code>KurenaiEngine.lib</code>)としてビルドされます。ソースは2層に分かれています。
+KurenaiEngineは <strong>3つのDLL</strong>に分かれてビルドされます。
+<code>KurenaiEngineLibrary.dll</code>(共通基盤。RHI抽象化層・Window・Camera・
+モデル/シーン読み込みと、3D/2D共通の土台<code>KurenaiEngineBase</code>を公開)、
+<code>KurenaiEngine3D.dll</code>、<code>KurenaiEngine2D.dll</code>で、3D/2Dはいずれも
+KurenaiEngineLibraryにのみ依存し、互いには依存しません。
 </p>
 
 <pre class="tree">KurenaiEngine/
-  KurenaiEngine.vcxproj
+  KurenaiEngineLibrary.vcxproj  ← 共通基盤(DynamicLibrary)
+  KurenaiEngine3D.vcxproj       ← 3D API(DynamicLibrary)。Libraryにのみ依存
+  KurenaiEngine2D.vcxproj       ← 2D API(DynamicLibrary)。Libraryにのみ依存
   Source/
     Engine/    ← 公開API(このドキュメントで説明する全て)
-      KurenaiTypes.h        GraphicsAPI enum, エクスポートマクロ
-      KurenaiEngineBase.h   3D/2D共通の土台(非公開コンストラクタ)
-      KurenaiEngine3D.h     3Dサンプル向け公開クラス
-      KurenaiEngine2D.h     2Dサンプル向け公開クラス
-    Library/   ← 低レベルAPI(RHI抽象化層、Window、Camera、モデル読み込みなど。4章参照)
+      KurenaiTypes.h        GraphicsAPI enum, DLLごとのエクスポートマクロ
+      KurenaiEngineBase.h   3D/2D共通の土台(非公開コンストラクタ。KurenaiEngineLibraryが公開)
+      KurenaiEngine3D.h     3Dサンプル向け公開クラス(KurenaiEngine3Dが公開)
+      KurenaiEngine2D.h     2Dサンプル向け公開クラス(KurenaiEngine2Dが公開)
+    Library/   ← 低レベルAPI(RHI抽象化層、Window、Camera、モデル読み込みなど。4章参照。KurenaiEngineLibraryが公開)
       RHI/ Core/ Assets/
-  Shaders/     ← KurenaiEngine3D/2Dが内部で使うHLSLシェーダ一式</pre>
+  Shaders/3D/  ← KurenaiEngine3Dが内部で使うHLSLシェーダ一式
+  Shaders/2D/  ← KurenaiEngine2Dが内部で使うHLSL(Sprite2D.hlsl)</pre>
 
 <p>
 <code>Source/Engine/</code> と <code>Source/Library/</code> は<strong>どちらも公開API</strong>で、
-どちらのクラス・関数も <code>KurenaiEngine.dll</code> から <code>__declspec(dllexport)</code>
-されています(<code>Source/Library/RHI/DX11</code>, <code>DX12</code> 配下のバックエンド実装
-クラス自体は非公開で、<code>RHI::IRHIDevice</code> などのインタフェース越しにのみ利用します)。
+どちらのクラス・関数も対応するDLLから <code>__declspec(dllexport)</code> されています
+(<code>Source/Library/RHI/DX11</code>, <code>DX12</code> 配下のバックエンド実装クラス自体は
+非公開で、<code>RHI::IRHIDevice</code> などのインタフェース越しにのみ利用します)。
 用途に応じて使い分けてください。
 </p>
 <ul>
@@ -258,14 +265,16 @@ KurenaiEngineは <strong>DLL</strong>(<code>KurenaiEngine.dll</code> + インポ
 <p>
 サンプルプログラムを新規に作成する場合、プロジェクトのインクルードディレクトリには
 <code>KurenaiEngine/Source/Engine</code> を追加し(<code>KurenaiEngine3D.h</code> などを
-includeするため)、<code>KurenaiEngine.vcxproj</code> へのプロジェクト参照を張ってください
+includeするため)、<code>KurenaiEngineLibrary.vcxproj</code> と、使う方(<code>KurenaiEngine3D.vcxproj</code>
+または <code>KurenaiEngine2D.vcxproj</code>)の2つへプロジェクト参照を張ってください
 (<code>Samples/Sample3D</code>, <code>Samples/Sample2D</code> の <code>.vcxproj</code> を
-参考にできます)。<code>Library</code> の低レベルAPIも使う場合は
+参考にできます。DLLを経由したプロジェクト参照は推移的にリンクされないため、Libraryへの参照は
+省略できません)。<code>Library</code> の低レベルAPIも使う場合は
 <code>KurenaiEngine/Source/Library</code> もインクルードディレクトリに追加してください
 (<code>RHI/IRHIDevice.h</code> のように <code>Library</code> を起点とした相対パスでincludeする)。
-実行ファイルの出力先はビルドの度に <code>KurenaiEngine.dll</code> が生成される場所(リポジトリ直下の
-<code>Build\Bin\&lt;Platform&gt;\&lt;Configuration&gt;\</code>)と揃えてください。DLLは実行ファイルと
-同じフォルダに置かれていないと起動時に読み込めません。
+実行ファイルの出力先はビルドの度に各DLLが生成される場所(リポジトリ直下の
+<code>Build\Bin\&lt;Platform&gt;\&lt;Configuration&gt;\&lt;プロジェクト名&gt;\</code>)と揃えてください。
+DLLは実行ファイルと同じフォルダに置かれていないと起動時に読み込めません。
 </p>
 </div>
 </section>
@@ -1031,20 +1040,22 @@ void StopSound(VoiceHandle voice);</code></pre>
 <p>
 <code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code>/<code>Library</code> のいずれを
 使う場合でも、サンプルプロジェクト自身がDirectXTexのヘッダー・ライブラリを直接参照する
-必要はありません(DLL内部にリンク済み)。<strong>assimpはKurenaiEngine.dllにはリンクされていない</strong>
-(モデル解析はすべてオフラインの<code>KurenaiPacker.exe</code>側で行うため)。サンプルプロジェクトに
-必要なのは以下だけです。
+必要はありません(<code>KurenaiEngineLibrary.dll</code>内部にリンク済み)。<strong>assimpは
+KurenaiEngineのいずれのDLLにもリンクされていない</strong>(モデル解析はすべてオフラインの
+<code>KurenaiPacker.exe</code>側で行うため)。サンプルプロジェクトに必要なのは以下だけです。
 </p>
 <ul>
 <li>インクルードディレクトリ: <code>KurenaiEngine\Source\Engine</code>
 (<code>Library</code>も使う場合は <code>KurenaiEngine\Source\Library</code> も追加)</li>
-<li><code>KurenaiEngine.vcxproj</code> へのプロジェクト参照(自動的にインポートライブラリが
-リンクされる)</li>
-<li>実行時に <code>KurenaiEngine.dll</code> が実行ファイルと同じフォルダに存在すること</li>
+<li><code>KurenaiEngineLibrary.vcxproj</code> と、使う方(<code>KurenaiEngine3D.vcxproj</code>
+または <code>KurenaiEngine2D.vcxproj</code>)への2つのプロジェクト参照(自動的に両方の
+インポートライブラリがリンクされる。DLLを経由した参照は推移的にリンクされないため、
+Libraryへの参照だけを省略することはできない)</li>
+<li>実行時に上記2つのDLLが実行ファイルと同じフォルダに存在すること</li>
 </ul>
 <p>
 一方<strong><code>KurenaiPacker.exe</code>(<code>Tools\KurenaiPacker\KurenaiPacker.vcxproj</code>)は
-assimp・DirectXTexに加え<code>KurenaiEngine.vcxproj</code>への依存を持つ</strong>
+assimp・DirectXTexに加え<code>KurenaiEngineLibrary.vcxproj</code>への依存を持つ</strong>
 (<code>RHI::TextureImage</code>によるBC7圧縮を利用するため)。アセットを<code>.gltf</code>/
 <code>.fbx</code>から<code>.kmodel</code>へ変換する場合のみビルド・実行が必要で、詳細な
 ビルド手順・コマンドラインはREADME.mdを参照。
@@ -1062,7 +1073,7 @@ assimp・DirectXTexに加え<code>KurenaiEngine.vcxproj</code>への依存を持
 <tr><td>COM初期化</td><td><code>wWinMain</code> の先頭で <code>CoInitializeEx</code> を呼ぶこと。DirectXTexのWICテクスチャ読み込み(<code>LoadTexture</code>)とXAudio2(<code>LoadSound</code>/<code>PlaySound</code>)がいずれもCOMに依存しているため、忘れると失敗する</td></tr>
 <tr><td>DrawTextの新規文字追加</td><td>ASCII以外(かな漢字等)の文字を初めて<code>DrawText</code>に渡すと、その文字はその1フレームだけ表示されず、次の<code>BeginFrame()</code>でアトラスへ追加されてから表示される(3.2節参照)</td></tr>
 <tr><td>DrawRoundedRectの角丸半径</td><td><code>cornerRadiusPixels</code>が<code>width</code>/<code>height</code>の半分より大きい値の場合、ピクセルシェーダー側で半幅・半高さの小さい方に自動的にクランプされる(矩形からはみ出す角丸にはならない)</td></tr>
-<tr><td>ビルド設定の一致</td><td><code>KurenaiEngine.dll</code> とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
+<tr><td>ビルド設定の一致</td><td>3つのDLL(KurenaiEngineLibrary/KurenaiEngine3D/KurenaiEngine2D)とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
 <tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
 <tr><td>アセットの事前変換が必須</td><td><code>Assets::LoadModel</code>は<code>.kmodel</code>のみを受け付ける。<code>.gltf</code>/<code>.fbx</code>等のソースモデルは、実行前に<code>KurenaiPacker.exe</code>で変換しておく必要がある(7章参照)</td></tr>
 <tr><td>ポイント/スポットライトの影</td><td>影を落とさない(シャドウマップは平行光1灯のみ対応)</td></tr>
