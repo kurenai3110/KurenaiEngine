@@ -26,7 +26,11 @@ namespace Kurenai
         {
             DirectX::XMFLOAT4X4 ViewProj;
             DirectX::XMFLOAT4X4 InvViewProj;
-            DirectX::XMFLOAT4X4 LightViewProj;
+            // カスケードシャドウマップ(CSM)用、カスケードごとのライト視点ビュー・プロジェクション行列。
+            // 以前は単一行列(LightViewProj)だったが、M2でカスケード化した際にここを直接配列化した
+            // (このフィールドより後ろにCameraPosition等が続くため、この配列サイズを変える場合は
+            // 全シェーダのFrameConstants宣言を合わせて更新する必要がある)
+            DirectX::XMFLOAT4X4 CascadeViewProj[KurenaiEngine3D::kCascadeCount];
             DirectX::XMFLOAT4 CameraPosition;
             DirectX::XMFLOAT4 LightDirection;
             DirectX::XMFLOAT4 LightColor;
@@ -35,6 +39,16 @@ namespace Kurenai
             DirectX::XMFLOAT4X4 Proj;
             // 昼夜サイクル用(末尾に追加し、既存シェーダのオフセットは変えない)。rgb=環境光の色、a=昼度(0=夜,1=昼)
             DirectX::XMFLOAT4 AmbientColor;
+            // M2: カスケード選択・PCSS用(末尾に追加)。xyzw = 各カスケードのView空間far距離
+            DirectX::XMFLOAT4 CascadeSplits;
+            // x: PCSSのライトサイズ(m_ShadowLightSize)、yzwは未使用
+            DirectX::XMFLOAT4 ShadowParams;
+        };
+
+        // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
+        struct alignas(16) CascadeConstants
+        {
+            DirectX::XMFLOAT4X4 ViewProj;
         };
 
         // 太陽光の向き・色・環境光を時刻(0〜24時)から計算する
@@ -620,8 +634,13 @@ namespace Kurenai
         shadowPipelineDesc.HasDepthStencil = true;
         m_ShadowPipelineState = m_Device->CreatePipelineState(shadowPipelineDesc);
 
-        // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する
-        m_ShadowMap = m_Device->CreateDepthTexture(kShadowMapSize, kShadowMapSize);
+        // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する。
+        // カスケードごとに独立したテクスチャを持つ(RHIがテクスチャ配列/DSVスライスを持たないため、
+        // 既存のHi-Zミップループ等と同様に単純な配列で代替する)
+        for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
+        {
+            m_ShadowCascades[cascade] = m_Device->CreateDepthTexture(kShadowMapSize, kShadowMapSize);
+        }
 
         // 空のキューブマップはシーンに依存しないため一度だけ読み込む
         m_SkyboxTexture = m_Device->CreateTextureFromFile(dataRoot + L"Assets\\Skybox\\Sky.dds", false);
@@ -633,12 +652,19 @@ namespace Kurenai
         constantBufferDesc.SizeInBytes = sizeof(FrameConstants);
         m_FrameConstantBuffer = m_Device->CreateBuffer(constantBufferDesc);
 
+        // シャドウパスはカスケードごとに異なるビュー・プロジェクション行列で同じメッシュ群を描き直すため、
+        // 共有のFrameConstantsとは別に、この1個の行列だけを持つ専用バッファを使い回す
+        RHI::BufferDesc cascadeConstantBufferDesc;
+        cascadeConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        cascadeConstantBufferDesc.SizeInBytes = sizeof(CascadeConstants);
+        m_ShadowCascadeConstantBuffer = m_Device->CreateBuffer(cascadeConstantBufferDesc);
+
         RHI::BufferDesc objectConstantBufferDesc;
         objectConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         objectConstantBufferDesc.SizeInBytes = sizeof(ObjectConstants);
         m_ObjectConstantBuffer = m_Device->CreateBuffer(objectConstantBufferDesc);
 
-        // ポイント/スポットライトのリスト(t5)。CPUから毎フレーム更新するが、ピクセルシェーダから
+        // ポイント/スポットライトのリスト(t8)。CPUから毎フレーム更新するが、ピクセルシェーダから
         // 読み取り専用でよいためStructuredReadOnly(RWStructuredBufferではなくStructuredBuffer)で作成する
         RHI::BufferDesc lightBufferDesc;
         lightBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
@@ -874,43 +900,112 @@ namespace Kurenai
         m_Camera.SetLens(DirectX::XM_PIDIV4, nearZ, farZ);
     }
 
-    // 平行光のライト視点からシーン全体を覆う正射影のビュー・プロジェクション行列を求める。
-    // シーンのバウンディングスフィア(AABBの外接球)を基準に、ライト方向の逆側から見渡す位置に
-    // 仮想的なライトカメラを置き、球全体が収まる正射影範囲・奥行きを設定する
-    DirectX::XMMATRIX KurenaiEngine3D::ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const
+    // カメラ視錐台をkCascadeCount個の深度範囲に分割する境界(View空間でのカメラからの距離)を求める。
+    // 対数分割(遠くのカスケードほど急激に広がる。人間の目の距離知覚・遠近感に合う)と均等分割
+    // (どのカスケードも同じ奥行きを持つ)を按分するPractical Split Scheme(GPU Gems 3, Dimitrov 2007)を使う。
+    // 対数分割のみだと手前のカスケードが極端に狭くなり、均等分割のみだと遠方のテクセル密度が
+    // 不足するため、両者を混ぜることで手前の精度と遠方のカバレッジを両立する
+    void KurenaiEngine3D::ComputeCascadeSplits(const Core::Camera& camera, float (&outSplits)[kCascadeCount]) const
+    {
+        const float nearZ = camera.GetNearZ();
+        const float farZ = camera.GetFarZ();
+        const float lambda = 0.5f;
+
+        for (uint32_t i = 0; i < kCascadeCount; ++i)
+        {
+            const float p = static_cast<float>(i + 1) / static_cast<float>(kCascadeCount);
+            const float logSplit = nearZ * std::pow(farZ / nearZ, p);
+            const float uniformSplit = nearZ + (farZ - nearZ) * p;
+            outSplits[i] = lambda * logSplit + (1.0f - lambda) * uniformSplit;
+        }
+    }
+
+    // 平行光のライト視点から、カメラ視錐台のうち[splitNear, splitFar]の範囲(View空間距離)だけを
+    // 覆う正射影のビュー・プロジェクション行列を求める(カスケードシャドウマップの1カスケード分)。
+    // その深度範囲の視錐台スライスの8頂点を求め、外接球を基準にライト視点を配置する
+    DirectX::XMMATRIX KurenaiEngine3D::ComputeCascadeLightViewProj(
+        const DirectX::XMFLOAT3& lightDirection, const Core::Camera& camera, float splitNear, float splitFar) const
     {
         using namespace DirectX;
 
-        const XMFLOAT3 center
+        const XMFLOAT3 positionF = camera.GetPosition();
+        const XMFLOAT3 forwardF = camera.GetForward();
+        const XMFLOAT3 rightF = camera.GetRight();
+        const XMVECTOR position = XMLoadFloat3(&positionF);
+        const XMVECTOR forward = XMLoadFloat3(&forwardF);
+        const XMVECTOR right = XMLoadFloat3(&rightF);
+        const XMVECTOR camUp = XMVector3Normalize(XMVector3Cross(right, forward));
+
+        const float tanHalfFovY = std::tan(camera.GetFovY() * 0.5f);
+        const float aspect = camera.GetAspectRatio();
+
+        // splitNear/splitFarそれぞれの断面の4隅(ワールド座標)を求め、視錐台スライスの8頂点とする
+        XMVECTOR corners[8];
+        int cornerIndex = 0;
+        for (const float dist : { splitNear, splitFar })
         {
-            (m_Scene.BoundsMin[0] + m_Scene.BoundsMax[0]) * 0.5f,
-            (m_Scene.BoundsMin[1] + m_Scene.BoundsMax[1]) * 0.5f,
-            (m_Scene.BoundsMin[2] + m_Scene.BoundsMax[2]) * 0.5f,
-        };
-        const float dx = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
-        const float dy = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
-        const float dz = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
-        const float sceneRadius = std::max(0.01f, std::sqrt(dx * dx + dy * dy + dz * dz) * 0.5f);
-
-        const XMVECTOR lightDirVec = XMVector3Normalize(XMLoadFloat3(&lightDirection));
-        const XMVECTOR centerVec = XMLoadFloat3(&center);
-
-        // シーンを包む球全体を見渡せるよう、ライトが進む方向と逆側に球の半径分だけ余裕を持って離れた位置に置く
-        const float margin = 1.5f;
-        const XMVECTOR eye = XMVectorSubtract(centerVec, XMVectorScale(lightDirVec, sceneRadius * margin));
-
-        // ライト方向がほぼ真上/真下(upベクトルと平行)だとLookAt行列が縮退するため、そのときだけ別軸を使う
-        XMVECTOR up = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-        if (std::abs(XMVectorGetY(lightDirVec)) > 0.99f)
-        {
-            up = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+            const float halfHeight = dist * tanHalfFovY;
+            const float halfWidth = halfHeight * aspect;
+            const XMVECTOR centerAtDist = XMVectorAdd(position, XMVectorScale(forward, dist));
+            for (const float sy : { -1.0f, 1.0f })
+            {
+                for (const float sx : { -1.0f, 1.0f })
+                {
+                    corners[cornerIndex++] = XMVectorAdd(
+                        centerAtDist,
+                        XMVectorAdd(XMVectorScale(right, halfWidth * sx), XMVectorScale(camUp, halfHeight * sy)));
+                }
+            }
         }
 
-        const XMMATRIX lightView = XMMatrixLookAtLH(eye, centerVec, up);
+        // 8頂点の外接球を使う(タイトなAABBだとカメラの向きによって毎フレーム形が変わり、
+        // シャドウマップの見かけのサイズが揺れてちらつく。半径ベースにすることで回転に対して安定する)
+        XMVECTOR centerSum = XMVectorZero();
+        for (const XMVECTOR& corner : corners)
+        {
+            centerSum = XMVectorAdd(centerSum, corner);
+        }
+        const XMVECTOR sphereCenter = XMVectorScale(centerSum, 1.0f / 8.0f);
 
-        const float orthoSize = sceneRadius * margin * 2.0f;
+        float sphereRadius = 0.01f;
+        for (const XMVECTOR& corner : corners)
+        {
+            sphereRadius = std::max(sphereRadius, XMVectorGetX(XMVector3Length(XMVectorSubtract(corner, sphereCenter))));
+        }
+
+        const XMVECTOR lightDirVec = XMVector3Normalize(XMLoadFloat3(&lightDirection));
+
+        // ライト方向がほぼ真上/真下(upベクトルと平行)だとLookAt行列が縮退するため、そのときだけ別軸を使う
+        XMVECTOR lightUp = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+        if (std::abs(XMVectorGetY(lightDirVec)) > 0.99f)
+        {
+            lightUp = XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+        }
+
+        // シャドウマップのテクセル単位に中心位置をスナップし、カメラが動いた際にシャドウの縁が
+        // 1テクセル未満の単位でちらつく(シャドウシマー)のを抑える。ライトの「向き」だけを持つ
+        // (平行移動のない)基準行列でワールド座標をライト空間へ変換してからテクセル単位に丸め、
+        // 再度ワールド空間へ戻す。フレームごとに視点位置から作り直す行列を直接使うと、常に
+        // 中心が原点近辺の値になってしまい意味がないため、この向きだけの基準行列を使う
+        const XMMATRIX lightRotation = XMMatrixLookAtLH(XMVectorZero(), lightDirVec, lightUp);
+        const float orthoSize = sphereRadius * 2.0f;
+        const float texelSize = orthoSize / static_cast<float>(kShadowMapSize);
+
+        XMFLOAT3 centerLightSpace;
+        XMStoreFloat3(&centerLightSpace, XMVector3TransformCoord(sphereCenter, lightRotation));
+        centerLightSpace.x = std::floor(centerLightSpace.x / texelSize) * texelSize;
+        centerLightSpace.y = std::floor(centerLightSpace.y / texelSize) * texelSize;
+
+        const XMMATRIX lightRotationInv = XMMatrixInverse(nullptr, lightRotation);
+        const XMVECTOR snappedCenter = XMVector3TransformCoord(XMLoadFloat3(&centerLightSpace), lightRotationInv);
+
+        // ライトが進む方向と逆側に球の半径分だけ余裕を持って離れた位置に仮想的なライトカメラを置く
+        const float margin = 1.5f;
+        const XMVECTOR eye = XMVectorSubtract(snappedCenter, XMVectorScale(lightDirVec, sphereRadius * margin));
+        const XMMATRIX lightView = XMMatrixLookAtLH(eye, snappedCenter, lightUp);
+
         const float nearZ = 0.1f;
-        const float farZ = sceneRadius * margin * 2.0f + sceneRadius;
+        const float farZ = sphereRadius * margin * 2.0f + sphereRadius;
         const XMMATRIX lightProj = XMMatrixOrthographicLH(orthoSize, orthoSize, nearZ, farZ);
 
         return lightView * lightProj;
@@ -993,6 +1088,10 @@ namespace Kurenai
         }
 
         ImGui::Checkbox("Enable Shadow", &m_ShadowEnabled);
+        if (m_ShadowEnabled)
+        {
+            ImGui::SliderFloat("Shadow Light Size", &m_ShadowLightSize, 0.001f, 0.05f, "%.4f");
+        }
 
         ImGui::Checkbox("Enable VSync", &m_VSyncEnabled);
 
@@ -1029,7 +1128,9 @@ namespace Kurenai
 
     void KurenaiEngine3D::RenderDebugViewUI()
     {
-        ImGui::SetNextWindowPos(ImVec2(10.0f, 540.0f), ImGuiCond_FirstUseEver);
+        // Post Processingパネル(Shadow Light Size追加分含む)が伸びた際に重ならないよう、
+        // 十分な余白を空けた位置を既定にする
+        ImGui::SetNextWindowPos(ImVec2(10.0f, 620.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Render Targets");
 
@@ -1061,6 +1162,11 @@ namespace Kurenai
         if (m_DebugView == DebugView::HiZ)
         {
             ImGui::SliderInt("Hi-Z Mip Level", &m_HiZDebugMipLevel, 0, static_cast<int>(m_HiZMipLevels) - 1);
+        }
+
+        if (m_DebugView == DebugView::ShadowMap)
+        {
+            ImGui::SliderInt("Shadow Cascade", &m_ShadowDebugCascade, 0, static_cast<int>(kCascadeCount) - 1);
         }
 
         ImGui::End();
@@ -1518,7 +1624,19 @@ namespace Kurenai
         m_CPUProfiler.BeginFrame();
 
         const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay, m_SunAzimuthDegrees, m_SceneExposureEV100);
-        const DirectX::XMMATRIX lightViewProj = ComputeLightViewProj(sunLighting.Direction);
+
+        // カスケードシャドウマップ: カメラ視錐台をkCascadeCount個の深度範囲に分割し、
+        // それぞれ専用のライト正射影ビュー・プロジェクション行列を求める
+        float cascadeSplits[kCascadeCount];
+        ComputeCascadeSplits(frameState.Camera, cascadeSplits);
+        DirectX::XMMATRIX cascadeViewProj[kCascadeCount];
+        float cascadeNear = frameState.Camera.GetNearZ();
+        for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
+        {
+            cascadeViewProj[cascade] =
+                ComputeCascadeLightViewProj(sunLighting.Direction, frameState.Camera, cascadeNear, cascadeSplits[cascade]);
+            cascadeNear = cascadeSplits[cascade];
+        }
 
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = frameState.Camera.GetViewMatrix() * frameState.Camera.GetProjectionMatrix();
@@ -1526,7 +1644,10 @@ namespace Kurenai
         DirectX::XMVECTOR determinant;
         const DirectX::XMMATRIX invViewProj = DirectX::XMMatrixInverse(&determinant, viewProj);
         DirectX::XMStoreFloat4x4(&constants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
-        DirectX::XMStoreFloat4x4(&constants.LightViewProj, DirectX::XMMatrixTranspose(lightViewProj));
+        for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
+        {
+            DirectX::XMStoreFloat4x4(&constants.CascadeViewProj[cascade], DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
+        }
         const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
         constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
         constants.LightDirection = { sunLighting.Direction.x, sunLighting.Direction.y, sunLighting.Direction.z, 0.0f };
@@ -1534,6 +1655,8 @@ namespace Kurenai
         DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameState.Camera.GetViewMatrix()));
         DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameState.Camera.GetProjectionMatrix()));
         constants.AmbientColor = sunLighting.Ambient;
+        constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
+        constants.ShadowParams = { m_ShadowLightSize, 0.0f, 0.0f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
@@ -1549,40 +1672,48 @@ namespace Kurenai
         gbufferViewport.Width = static_cast<float>(m_RenderWidth);
         gbufferViewport.Height = static_cast<float>(m_RenderHeight);
 
-        // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度) ---
-        graph.AddPass(Core::RenderGraphPassDesc{
-            .Name = "Shadow",
-            .DepthTarget = m_ShadowMap.get(),
-            .Execute = [this, &shadowViewport](RHI::IRHICommandList* cmd)
-            {
-                cmd->SetViewport(shadowViewport);
-                // 深度1.0(最遠)にクリアしておく。無効時はこの後の描画をスキップするため、
-                // シェーダー側は深度比較で常に「影なし」と判定する(ComputeShadowFactor参照)
-                cmd->ClearDepth(1.0f);
-
-                if (m_ShadowEnabled)
+        // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度)。
+        //     カスケードごとに1回ずつ、同じメッシュ群を異なるライト正射影で描き直す ---
+        for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "Shadow" + std::to_string(cascade),
+                .DepthTarget = m_ShadowCascades[cascade].get(),
+                .Execute = [this, &shadowViewport, cascade, &cascadeViewProj](RHI::IRHICommandList* cmd)
                 {
-                    cmd->SetPipelineState(m_ShadowPipelineState.get());
-                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetViewport(shadowViewport);
+                    // 深度1.0(最遠)にクリアしておく。無効時はこの後の描画をスキップするため、
+                    // シェーダー側は深度比較で常に「影なし」と判定する(ComputeShadowFactor参照)
+                    cmd->ClearDepth(1.0f);
 
-                    for (const auto& instance : m_Scene.Instances)
+                    if (m_ShadowEnabled)
                     {
-                        for (const auto& mesh : instance.Model.Meshes)
-                        {
-                            // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
-                            // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
-                            const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
-                            cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                            cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+                        CascadeConstants cascadeConstants{};
+                        DirectX::XMStoreFloat4x4(&cascadeConstants.ViewProj, DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
+                        cmd->UpdateBuffer(m_ShadowCascadeConstantBuffer.get(), &cascadeConstants, sizeof(cascadeConstants));
 
-                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        cmd->SetPipelineState(m_ShadowPipelineState.get());
+                        cmd->SetConstantBuffer(0, m_ShadowCascadeConstantBuffer.get());
+
+                        for (const auto& instance : m_Scene.Instances)
+                        {
+                            for (const auto& mesh : instance.Model.Meshes)
+                            {
+                                // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
+                                // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
+                                const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
+                                cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                                cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                                cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                                cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            }
                         }
                     }
-                }
-            },
-        });
+                },
+            });
+        }
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
@@ -1665,7 +1796,11 @@ namespace Kurenai
         //     計算しHDRで書き出す(常に指定した内部解像度)。DeferredLighting/SSILの両方から読まれる ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "DirectLight",
-            .Reads = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_ShadowMap.get() },
+            .Reads =
+            {
+                m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                m_ShadowCascades[0].get(), m_ShadowCascades[1].get(), m_ShadowCascades[2].get(), m_ShadowCascades[3].get(),
+            },
             .RenderTargets = { m_DirectLightTexture.get() },
             .Execute = [this, &gbufferViewport, &frameState](RHI::IRHICommandList* cmd)
             {
@@ -1674,7 +1809,7 @@ namespace Kurenai
                 cmd->SetPipelineState(m_DirectLightPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
 
-                // 有効なライトだけを詰めてt5のライトリストへ渡す。シェーダはLightCount.xまでしか
+                // 有効なライトだけを詰めてt8のライトリストへ渡す。シェーダはLightCount.xまでしか
                 // ループしないため、無効なライトはそもそもGPUへ送らない
                 std::vector<GPULight> gpuLights;
                 gpuLights.reserve(m_Lights.size());
@@ -1728,7 +1863,10 @@ namespace Kurenai
                 cmd->SetTexture(1, m_GBufferNormal.get());
                 cmd->SetTexture(2, m_GBufferMaterial.get());
                 cmd->SetTexture(3, m_GBufferDepth.get());
-                cmd->SetTexture(4, m_ShadowMap.get());
+                for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
+                {
+                    cmd->SetTexture(4 + cascade, m_ShadowCascades[cascade].get());
+                }
 
                 // ライトが1つも無いフレームでもSetShaderResourceBufferは必ず呼ぶ(SetPipelineStateが
                 // 毎回ルート引数を無効化するため、シェーダが宣言しているリソースを未バインドのまま
@@ -1737,7 +1875,7 @@ namespace Kurenai
                 {
                     cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
                 }
-                cmd->SetShaderResourceBuffer(5, m_LightBuffer.get());
+                cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
 
                 cmd->Draw(3, 0);
             },
@@ -1944,7 +2082,7 @@ namespace Kurenai
             presentMode = 3; // ブラー前の生値(タイル状ノイズが乗った状態)
             break;
         case DebugView::ShadowMap:
-            presentSourceTexture = m_ShadowMap.get();
+            presentSourceTexture = m_ShadowCascades[std::clamp(m_ShadowDebugCascade, 0, static_cast<int32_t>(kCascadeCount) - 1)].get();
             presentMode = 1;
             presentSourceWidth = kShadowMapSize;
             presentSourceHeight = kShadowMapSize;

@@ -25,6 +25,12 @@ namespace Kurenai::Core
         void SetAspectRatio(float aspect) { m_Aspect = aspect; }
         void SetLens(float fovYRadians, float nearZ, float farZ);
 
+        // カスケードシャドウマップの分割距離・視錐台コーナー計算に使う
+        float GetFovY() const { return m_FovY; }
+        float GetAspectRatio() const { return m_Aspect; }
+        float GetNearZ() const { return m_NearZ; }
+        float GetFarZ() const { return m_FarZ; }
+
         // 正射影(2D/UI向け)に切り替える。viewWidth/viewHeightはワールド単位で見える範囲
         // (例えばピクセルとワールド単位を1:1にしたい場合は画面の幅・高さをそのまま渡す)。
         // 呼び出すとGetProjectionMatrixは以後この正射影行列を返すようになる。

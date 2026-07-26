@@ -10,8 +10,8 @@ KurenaiEngineLibrary.dllから公開しており、独自の描画パイプラ�
 `KurenaiEngine2D.dll`だけで動作し、`KurenaiEngine3D.dll`やAssetsを同梱する必要はありません。
 
 `KurenaiEngine3D`はKurenaiEngine専用モデルパッケージ(`.kmodel`)とシーンファイル(`.kscene`)の
-読み込み・描画に対応した、Deferred Shading・HDRレンダリング・シャドウ・SSAO/SSIL・SSR・
-複数ライト(ポイント/スポット、カンデラ/ルクス単位)を備えた完結型3Dレンダラーです。
+読み込み・描画に対応した、Deferred Shading・HDRレンダリング・カスケードシャドウマップ(PCF/PCSS)・
+SSAO/SSIL・SSR・複数ライト(ポイント/スポット、カンデラ/ルクス単位)を備えた完結型3Dレンダラーです。
 `.gltf`/`.fbx`等のソースモデルは、付属のオフラインツール**KurenaiPacker.exe**で`.kmodel`へ事前変換して
 から使います(下記「アセットの準備(KurenaiPacker)」参照)。`KurenaiEngine2D`はスプライト・図形・
 テキスト描画を提供する軽量な2D APIです。内部の描画パイプラインや実装判断については
