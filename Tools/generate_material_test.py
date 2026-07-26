@@ -10,7 +10,7 @@ SPHERE_COUNT = 11
 SPACING = 2.5
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(SCRIPT_DIR, "..", "Assets", "MaterialTest")
+OUT_DIR = os.path.join(SCRIPT_DIR, "..", "Assets", "Source", "MaterialTest")
 GLTF_NAME = "MaterialTest.gltf"
 BIN_NAME = "MaterialTest.bin"
 

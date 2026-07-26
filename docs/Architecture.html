@@ -207,7 +207,7 @@
     <li><a href="#ssr">6. SSR(スクリーンスペースリフレクション)</a></li>
     <li><a href="#hiz">7. Hi-Zミップチェーン</a></li>
     <li><a href="#drawcall">8. ドローコール削減</a></li>
-    <li><a href="#cache">9. モデル・テクスチャキャッシュ</a></li>
+    <li><a href="#cache">9. モデルパッケージ形式とシーン形式</a></li>
     <li><a href="#bistro">10. Bistroアセットの変換パイプライン</a></li>
     <li><a href="#lights">11. 複数ライト</a></li>
   </ol>
@@ -303,7 +303,9 @@ G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_F
 <section id="tangent">
 <h2>4. 法線マッピングの接線ベクトル計算</h2>
 <p>
-法線マッピングの接線は、モデル読み込み時にassimpの三角形ごとの位置/UV差分から独自に計算した
+法線マッピングの接線は、モデルパック時(<code>KurenaiPacker.exe</code>、<code>ModelSource.cpp</code>。
+以前はランタイムの<code>ModelLoader.cpp</code>で行っていたが、9章の経緯によりオフラインのパック処理へ
+移設した)にassimpの三角形ごとの位置/UV差分から独自に計算した
 実接線ベクトル(Lengyelの手法。UV面積がほぼ0の縮退三角形は数値不安定なため除外)を、
 位置+法線をキーに複製頂点間で平均化して平滑化したうえで頂点バッファに格納し、
 ピクセルシェーダーではそれを補間・再直交化(Gram-Schmidt)してTBN行列を構築しています
@@ -360,47 +362,114 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 <section id="drawcall">
 <h2>8. ドローコール削減</h2>
 <p>
-モデル読み込み時、同一マテリアルを参照する複数のaiMeshは頂点/インデックスバッファを結合してから
-1つのドローコールにまとめます(マテリアルの切り替えが多い生データ、例えばOBJ形式のusemtl切り替えの
-たびにサブメッシュが分割されるようなアセットでは、aiMeshが数万件規模になり得るため、まとめないと
-ドローコール数がGPUドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になる)。
+モデルパック時(<code>KurenaiPacker.exe</code>、<code>ModelSource.cpp</code>)、同一マテリアルを
+参照する複数のaiMeshは頂点/インデックスバッファを結合してから1つのメッシュ(=実行時のドローコール1回)に
+まとめます(マテリアルの切り替えが多い生データ、例えばOBJ形式のusemtl切り替えのたびにサブメッシュが
+分割されるようなアセットでは、aiMeshが数万件規模になり得るため、まとめないとドローコール数がGPU
+ドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になる)。この結合はパック時に完了しており、
+<code>.kmodel</code>の<code>MeshEntry</code>数はほぼマテリアル数と一致する。ランタイム側では
+<code>ModelLoader.cpp</code>の<code>SortMeshesByMaterial</code>が、読み込んだメッシュをテクスチャ
+ポインタでソートする(DX12バックエンドの「直前の描画と同じテクスチャならSRVテーブルを使い回す」
+最適化のヒット率を上げるため)。
 </p>
 </section>
 
 <section id="cache">
-<h2>9. モデル・テクスチャキャッシュ</h2>
+<h2>9. モデルパッケージ形式とシーン形式</h2>
 <p>
-モデルを読み込むと、同じ場所に<code>&lt;元のファイル名&gt;.kmodelcache</code>というバイナリキャッシュが
-自動生成されます。頂点/インデックス/マテリアル参照を解析済みの形で保持しており、2回目以降の読み込みでは
-assimpによる解析をスキップして高速に読み込めます。元のモデルファイルが更新されると自動的に無効化され
-再生成されるため、手動での削除は基本的に不要です。
+以前は<code>Assets::LoadModel</code>実行時にassimpでモデルを解析し、頂点/インデックス/マテリアル
+参照を<code>&lt;元のファイル名&gt;.kmodelcache</code>へ、PNG/JPG等のテクスチャをWICデコード・
+ミップ生成・GPU BC7圧縮したうえで<code>&lt;元のファイル名&gt;.srgb/.linear.ktexcache</code>へ、
+それぞれ初回読み込み時にバイナリキャッシュとして書き出していた。しかし前処理をランタイムに
+持つ設計には次の問題があった。
+</p>
+<ul>
+<li>初回起動が重い(assimpのフルパース・WICデコード・BC7圧縮がユーザーの初回起動時に走る)</li>
+<li>キャッシュ生成が実行環境(誰のマシンで初回起動したか)に依存し、CIやバッチで事前に潰せない</li>
+<li>パース専用のassimp/zlibがレンダリングに不要な重い依存として<code>KurenaiEngine.dll</code>に
+残り続ける</li>
+<li><code>.kmodelcache</code>/<code>.ktexcache</code>は「元ファイルの更新日時+サイズ」で自動失効する
+派生物であり、元ファイルが無ければ成立しない。配布可能な成果物ではない</li>
+</ul>
+<p>
+この前処理をオフラインの<strong><code>KurenaiPacker.exe</code></strong>
+(<code>Tools/KurenaiPacker/</code>)へ完全に移し、その出力を<strong>KurenaiEngine専用モデル
+パッケージ形式</strong>として定義した。<code>.kmodelcache</code>/<code>.ktexcache</code>との決定的な
+違いは、<strong>キャッシュ(自動失効する派生物、元ファイル前提)</strong>ではなく
+<strong>パッケージ(元ファイル無しでも成立する配布可能なアセット)</strong>であるという設計上の
+位置づけにある。無効化は「パッカーを再実行するか」というビルド上の判断に一本化され、
+ランタイムはファイルのタイムスタンプを一切見ない。この結果<code>KurenaiEngine.dll</code>からassimp/
+zlibへの依存は完全に無くなった(<code>dumpbin /dependents</code>で確認可能)。
 </p>
 <p>
-キャッシュフォーマットは<code>kCacheVersion</code>(現在11。ライト情報を追加したv10→v11で加算)で
-バージョン管理されており、<code>TryLoadModelFromCache</code>はヘッダーの<code>Version</code>が
-一致しない場合にキャッシュを即座に拒否してassimp経由の通常読み込みへフォールバックします。
-そのため新しいフィールドを追加する際にバイナリレイアウトの後方互換性を気にする必要はなく、
-バージョンを上げるだけで古いキャッシュは丸ごと破棄・再生成されます。ライトのレコードは
-全メッシュレコードの後(ファイル末尾)に追記する構成にしており、既存のメッシュ読み込み/
-書き出しループには一切手を入れずに済んでいます。
+形式定義は<code>ModelPackage.h</code>(ランタイムとKurenaiPackerの両方から参照する単一の正)に
+まとまっている。3種類のファイルで1モデルを構成する。
+</p>
+<table>
+<thead><tr><th>ファイル</th><th>役割</th><th>マジック/バージョン</th></tr></thead>
+<tbody>
+<tr><td><code>.kmodel</code></td><td>マニフェスト(<code>PackageHeader</code> + <code>TextureEntry[]</code> + <code>MeshEntry[]</code> + <code>LightEntry[]</code> + StringPool)。ジオメトリ・テクスチャの実体は持たず、パスとオフセットだけを持つ</td><td><code>'K','M','D','L'</code> / 2</td></tr>
+<tr><td><code>.kgeom</code></td><td>ジオメトリ実体。頂点(<code>Assets::Vertex</code>そのまま)/インデックス(<code>uint32_t</code>そのまま)ブロックをメッシュ順に16バイト境界で連結しただけで、読み込み後の加工が一切不要</td><td><code>'K','G','E','O'</code> / 1</td></tr>
+<tr><td><code>.ktex</code></td><td>テクスチャ実体。<code>DirectX::SaveToDDSMemory</code>が出力したDDSファイル全体(BC7圧縮・ミップ生成済み)をそのまま格納</td><td><code>'K','T','E','X'</code> / 1</td></tr>
+</tbody>
+</table>
+<p>
+<code>MeshEntry</code>は<code>BaseColorTextureIndex</code>/<code>NormalTextureIndex</code>/
+<code>MetallicRoughnessTextureIndex</code>/<code>EmissiveTextureIndex</code>という4つの
+<code>int32_t</code>(-1=指定なし)で<code>TextureEntry</code>を参照するほか、<code>AlphaCutoff</code>
+(0以下ならアルファカットアウト無効。glTFの<code>alphaMode=MASK</code>のマテリアルのみ設定される)と
+<code>EmissiveFactor[3]</code>を持つ。旧実装のようなパス文字列ベースの重複排除キャッシュは、
+KurenaiPacker側で(パス, sRGB)ごとに<code>TextureEntry</code>を1件へ集約する時点で完結しており、
+ランタイムの<code>ModelLoader.cpp</code>は添字だけで解決できる。読み込み後は
+<code>ModelLoader.cpp</code>内で各<code>MeshEntry</code>のオフセット/カウントが<code>.kgeom</code>の
+ペイロード範囲内に収まっているかを必ず検証する(壊れた<code>.kmodel</code>によるバッファ
+オーバーランを防ぐため)。<code>LightEntry[]</code>はglTFの<code>KHR_lights_punctual</code>拡張や
+FBXのライトノードに由来するモデル埋め込みライト(11章参照)をそのまま格納したもので、Position/
+Directionはモデルのローカル空間のまま(ワールド変換は<code>SceneLoader.cpp</code>の
+<code>LoadScene</code>が<code>ModelInstance::World</code>で行う)保持する。
 </p>
 <p>
-同様に、PNG/JPG等の無圧縮テクスチャを読み込むと<code>&lt;元のテクスチャファイル名&gt;.srgb.ktexcache</code> /
-<code>.linear.ktexcache</code>(ベースカラー等sRGBとして読むか、法線/メタリック・ラフネス等linearとして
-読むかでファイルを分ける)というBC7圧縮+ミップ生成済みのDDSキャッシュが自動生成されます。初回読み込み時は
-WICデコード・ミップ生成・BC7圧縮が走りますが、BC7圧縮はGPU(コンピュートシェーダー)で行うため、
-Sponza(69枚)で実測7秒程度と初回でも十分高速です。GPUが使えない環境(古いGPU/ドライバ等)ではBC7圧縮
-自体をスキップし非圧縮のまま使用します(CPUソフトウェア圧縮へのフォールバックは行いません)。
-2回目以降はこのキャッシュを読むだけになりほぼ瞬時に完了します。テクスチャファイルが更新されると
-自動的に無効化され再生成されます。DDS/TGA形式(既に圧縮・ミップ済みである前提)はこのキャッシュの
-対象外です。
+<code>KurenaiPacker.exe</code>のジオメトリ解析(<code>ModelSource.cpp</code>)は、旧
+<code>ModelLoader.cpp</code>のassimp解析部分をそのまま移設したものであり、実測に基づく判断
+(4章の接線平均化、8章のマテリアル単位メッシュ結合、ラフネスの範囲外値補正、glTFテクスチャURIの
+パーセントデコード(<code>%20</code>等)の必要性、11章のライトのノード経由ワールド変換など)は
+変更していない。BC7圧縮は<code>RHI::TextureImage::LoadFromFile</code>(内部で専用のD3D11デバイスを
+遅延生成して使う、<code>TextureImage.cpp</code>の<code>GetCompressionDevice</code>)をKurenaiPacker
+からそのまま呼び出しており、DX11/DX12どちらのランタイムバックエンド向けにパックする場合でも同一である。
+</p>
+<p>
+複数モデルの配置(平行移動・回転・スケール)とカメラ・太陽光の初期値をまとめる
+<strong><code>.kscene</code></strong>(UTF-8テキスト形式)も同時に導入した。書式・パース規則の
+詳細は<a href="KurenaiEngine.html#library">KurenaiEngine.html 4.7節</a>を参照。実装上の要点は、
+TRS(平行移動・回転・スケール)から<code>Assets::ModelInstance::World</code>
+(ワールド行列)・<code>NormalMatrix</code>(<code>World</code>の3x3部分の逆転置。回転+非一様
+スケールで法線が歪むのを防ぐ、4章と同じ理由)・<code>TangentSignFlip</code>(<code>World</code>の
+行列式が負、すなわちミラーリングを含む場合に-1。接線のw成分に掛けて従法線の向きを補正する)を
+<code>SceneLoader.cpp</code>の<code>LoadScene</code>が計算する点にある。<code>LoadScene</code>は
+同時に各<code>ModelInstance</code>の<code>Model::Lights</code>(<code>.kmodel</code>の
+<code>LightEntry[]</code>由来、ローカル空間)を<code>World</code>でワールド空間へ変換し、
+<code>.kscene</code>自身の<code>[Light]</code>セクション(元からワールド空間)と合成して
+<code>Scene::Lights</code>にまとめる。<code>KurenaiEngine3D</code>はこれをそのまま11章の
+ライトバッファ構築に使う。
+</p>
+<p>
+このモデル行列の追加にあたり、DX12バックエンドの制約が設計に影響した。DX12のルートシグネチャは
+CBV(定数バッファ)のルートパラメータを<strong>b0/b1の2枠しか持たない</strong>
+(<code>DX12Device::CreateRootSignature</code>)。b2を新設するとルートシグネチャと
+<code>DX12CommandList</code>のスロット処理まで変更が波及するため、既存のb1(<code>ObjectConstants</code>)
+に<code>World</code>/<code>NormalMatrix</code>/<code>TangentSignFlip</code>と、マテリアル側の
+<code>MetallicFactor</code>/<code>RoughnessFactor</code>/<code>AlphaCutoff</code>/
+<code>EmissiveFactor</code>を同居させることでルートシグネチャ自体は変更していない。シャドウパスは
+World以外を使わないが、GBufferパスと同じルートシグネチャ(=同じb1)を共有しているため、Worldが
+恒等行列であっても必ずbindする必要がある(バインドを省略するとDX12で前フレームの内容を参照する
+未定義動作になり得る)。
 </p>
 </section>
 
 <section id="bistro">
 <h2>10. Bistroアセットの変換パイプライン</h2>
 <p>
-<code>Assets/BistroMcGuire/</code>は
+<code>Assets/Source/BistroMcGuire/</code>は
 <a href="https://developer.nvidia.com/orca/amazon-lumberyard-bistro">Amazon Lumberyard Bistro</a>の
 Morgan McGuire版OBJ配布(<a href="https://github.com/Graphify-Labs/awesome-3d-meshes">awesome-3d-meshes</a>経由、
 <code>ThirdParty/SourceModels/awesome-3d-meshes-master/McGuire/Amazon Lumberyard Bistro/</code>の各種7z/zip
@@ -410,8 +479,10 @@ Morgan McGuire版OBJ配布(<a href="https://github.com/Graphify-Labs/awesome-3d-
 そのままassimpのOBJインポータへ読み込ませると解析が現実的な時間で終わらず、仮に読み込めてもドローコール数が
 GPUドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になるため、Blender(headless、
 <code>--factory-startup</code>でユーザー導入アドオンを無効化した状態)でOBJを読み込みglTFへ変換したもの
-(diffuse→BaseColor、_ddna→Normal Mapのノード配線をPythonスクリプトで自動化)を実際に読み込みます。
-展開直後の生データ(obj/mtl/PNGテクスチャ群)はglTF変換後は不要なため保持していません。
+(diffuse→BaseColor、_ddna→Normal Mapのノード配線をPythonスクリプトで自動化)を、さらに
+<code>KurenaiPacker.exe</code>で<code>Assets/Packed/BistroMcGuire/Exterior.kmodel</code> /
+<code>Interior.kmodel</code>へパックしたものを実際に読み込みます。展開直後の生データ
+(obj/mtl/PNGテクスチャ群)はglTF変換後は不要なため保持していません。
 </p>
 </section>
 
@@ -428,7 +499,7 @@ GPUドライバのウォッチドッグ(TDR)を誘発しうるほど膨大にな
 <ul>
 <li>ライト数の上限がcbufferサイズに縛られない(可変長リストの本来の形)。</li>
 <li>DX12の定数バッファは<code>((size+255)&amp;~255) &times; kConstantBufferRingCapacity(8192)</code>を
-UPLOADヒープに常駐確保する設計(メッシュごとに<code>UpdateBuffer</code>する<code>MaterialConstants</code>
+UPLOADヒープに常駐確保する設計(メッシュごとに<code>UpdateBuffer</code>する<code>ObjectConstants</code>
 向けの設計)のため、64灯の固定長cbuffer配列だと約34MiBを消費してしまう。このバッファは1フレーム
 1回しか更新しないため、リングのほとんどが無駄になる。</li>
 <li>将来タイル/クラスタカリングやGPU駆動描画へ進む際の土台になる(11.9参照)。</li>

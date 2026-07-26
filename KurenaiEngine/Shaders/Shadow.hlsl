@@ -8,6 +8,18 @@ cbuffer FrameConstants : register(b0)
     float4x4 LightViewProj;
 };
 
+// GBuffer.hlslのObjectConstantsと同じレイアウト(このパスではWorldしか使わないが、
+// 同じルートシグネチャ/定数バッファを共有するため並び順を合わせる)
+cbuffer ObjectConstants : register(b1)
+{
+    float4x4 World;
+    float4x4 NormalMatrix;
+    float MetallicFactor;
+    float RoughnessFactor;
+    float TangentSignFlip;
+    float ObjectPadding;
+};
+
 struct VSInput
 {
     float3 Position : POSITION;
@@ -21,7 +33,8 @@ struct PSInput
 PSInput VSMain(VSInput input)
 {
     PSInput output;
-    output.Position = mul(float4(input.Position, 1.0f), LightViewProj);
+    float3 worldPos = mul(float4(input.Position, 1.0f), World).xyz;
+    output.Position = mul(float4(worldPos, 1.0f), LightViewProj);
     return output;
 }
 

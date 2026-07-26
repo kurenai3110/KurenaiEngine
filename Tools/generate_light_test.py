@@ -4,7 +4,7 @@ import struct
 import os
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(SCRIPT_DIR, "..", "Assets", "LightTest")
+OUT_DIR = os.path.join(SCRIPT_DIR, "..", "Assets", "Source", "LightTest")
 GLTF_NAME = "LightTest.gltf"
 BIN_NAME = "LightTest.bin"
 

@@ -2,6 +2,7 @@
 /Build/
 /Samples/Sample3D/Build/
 /Samples/Sample2D/Build/
+/Tools/KurenaiPacker/Build/
 
 # Visual Studio
 .vs/

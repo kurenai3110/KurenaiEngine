@@ -14,7 +14,7 @@
 #include "KurenaiEngineBase.h"
 #include "KurenaiTypes.h"
 
-#include "Assets/Model.h"
+#include "Assets/Scene.h"
 #include "Core/Camera.h"
 #include "Core/CPUProfiler.h"
 
@@ -47,6 +47,10 @@ namespace Kurenai
 
         void CreateSceneResources();
         void CreateRenderTargets(uint32_t width, uint32_t height);
+        // <DLLフォルダ>/Assets/Scenes/*.ksceneを列挙し、m_SceneFilePaths/m_SceneDisplayNamesを構築する。
+        // 個々のファイルの[Scene]Name読み取りに失敗した場合はそのファイルを警告ログとともに
+        // スキップする(1ファイルの不備でアプリ全体が起動できなくなるのを避けるため)
+        void DiscoverScenes();
         void LoadScene(size_t sceneIndex);
         void FrameCameraToModel();
         void UpdateMouseLook();
@@ -253,7 +257,7 @@ namespace Kurenai
 
         std::unique_ptr<RHI::IRHISampler> m_Sampler;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
-        std::unique_ptr<RHI::IRHIBuffer> m_MaterialConstantBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> m_ObjectConstantBuffer;
 
         // ポイント/スポットライトのリスト(t5、StructuredReadOnly)と、有効ライト数を渡すb1。
         // 太陽(平行光)はb0のLightDirection/LightColorのまま(詳細はdocs/Architecture.html参照)
@@ -266,17 +270,25 @@ namespace Kurenai
         // 描画そのものに加えRenderPostProcessUI等のImGuiスライダーがm_SSAORadius等を直接書き換える)が
         // 読み書きする「シーン状態」一式をこのミューテックスで保護する。LoadScene呼び出し全体と
         // Render()呼び出し全体をそれぞれこのミューテックスで包むため、この2つは同時に走らない
-        // (=個々のメンバに追加のロックは不要)。対象はm_Model/m_CurrentSceneIndex/m_Cameraと、
-        // FrameCameraToModelが書き換えるm_SSAORadius等のPost Processingパラメータ
+        // (=個々のメンバに追加のロックは不要)。対象はm_Scene/m_CurrentSceneIndex/m_Cameraと、
+        // FrameCameraToModelが書き換えるm_SSAORadius等のPost Processingパラメータ、および
+        // m_Lights/m_SelectedLightIndex/m_SceneExposureEV100
         // (宣言はそれぞれの節にあるが、書き込み元がLoadScene/ImGuiスライダーの2スレッドにまたがる点は共通)
         std::mutex m_SceneMutex;
-        Assets::Model m_Model;
+        Assets::Scene m_Scene;
         size_t m_CurrentSceneIndex = 0;
         Core::Camera m_Camera;
 
-        // LoadSceneがm_Model.Lightsからコピーし、以降ImGui(Lightingパネル)が編集する。
-        // アセット由来のデータとユーザー編集を分離するため(シーンを再読み込みすればアセット既定値に戻る)。
-        // m_SceneMutexで保護される(m_Modelと同じ理由)
+        // DiscoverScenesが起動時に一度だけ列挙する.ksceneの一覧。要素の並びがImGuiのシーン
+        // 一覧・LoadSceneのインデックスに対応する(ファイル名の昇順)
+        std::vector<std::wstring> m_SceneFilePaths;
+        std::vector<std::wstring> m_SceneDisplayNames;
+
+        // LoadSceneがm_Scene.Lights(SceneLoaderが各ModelInstanceのModel::Lightsをワールド空間へ
+        // 変換し、.kscene自身の[Light]セクションのライトと合成済みのシーン全体のライト一覧)から
+        // コピーし、以降ImGui(Lightingパネル)が編集する。アセット由来のデータとユーザー編集を
+        // 分離するため(シーンを再読み込みすればアセット既定値に戻る)。m_SceneMutexで保護される
+        // (m_Sceneと同じ理由)
         std::vector<Assets::Light> m_Lights;
         int m_SelectedLightIndex = -1;
         // 実在の写真露出値(EV100)。太陽・環境光・ポイント/スポットライトすべてに同じ値がかかる、

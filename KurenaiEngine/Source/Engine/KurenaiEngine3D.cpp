@@ -10,46 +10,17 @@
 #include <cstdio>
 #include <random>
 
-#include "Assets/ModelLoader.h"
+#include "Assets/SceneLoader.h"
 #include "Core/Logger.h"
 #include "Core/RenderGraph.h"
+#include "Core/StringUtil.h"
 
 namespace Kurenai
 {
     namespace
     {
-        // 呼び出し元(exe)ではなくKurenaiEngine.dll自身のフォルダを返す。
-        // Shaders/AssetsはDLLと同じフォルダに配置される運用のため、DLLがどこにコピー
-        // されて使われても(各サンプルのBuildフォルダ配下など)データを正しく解決できる
-        std::wstring GetModuleDirectory()
-        {
-            HMODULE module = nullptr;
-            GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<LPCWSTR>(&GetModuleDirectory),
-                &module);
-
-            wchar_t path[MAX_PATH];
-            GetModuleFileNameW(module, path, MAX_PATH);
-            std::wstring pathStr(path);
-            size_t pos = pathStr.find_last_of(L"\\/");
-            return pos == std::wstring::npos ? L"" : pathStr.substr(0, pos + 1);
-        }
-
-        // シーン名はASCIIのみを想定しているが、将来的な非ASCII文字にも対応できるよう
-        // WideCharToMultiByteで正しくUTF-8へ変換する(ImGuiのテキストAPIはUTF-8を期待する)
-        std::string WideToUtf8(const wchar_t* wide)
-        {
-            if (!wide || !*wide)
-            {
-                return {};
-            }
-            int length = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
-            std::string narrow(length, '\0');
-            WideCharToMultiByte(CP_UTF8, 0, wide, -1, narrow.data(), length, nullptr, nullptr);
-            narrow.resize(length - 1);
-            return narrow;
-        }
+        using Core::GetModuleDirectory;
+        using Core::WideToUtf8;
 
         struct alignas(16) FrameConstants
         {
@@ -148,20 +119,42 @@ namespace Kurenai
             return result;
         }
 
-        // GBuffer.hlsl側のcbuffer MaterialConstantsと一致させる必要がある。float3(EmissiveFactor)は
-        // HLSLのcbufferパッキング規則により16バイト境界をまたげないため、直前にPaddingを1つ挟んで
-        // オフセット16から始まるようにしている(挟まなくてもHLSLコンパイラが自動的に同じ位置へ
-        // パディングするが、C++側のレイアウトを明示的に一致させるためここでも挟む)
-        struct alignas(16) MaterialConstants
+        // Shaders/GBuffer.hlsl・Shaders/Shadow.hlslのObjectConstants(register b1)と
+        // レイアウトを一致させる必要がある。DX12のルートシグネチャがCBVをb0/b1の2枠しか
+        // 持たないため、モデル行列もマテリアル係数(Emissive/AlphaCutoff含む)と同居させている
+        // (Architecture.html参照)。float3(EmissiveFactor)以降が16バイト境界をまたがないよう、
+        // 直前のMetallicFactor/RoughnessFactor/TangentSignFlip/AlphaCutoffで先に16バイトを
+        // 埋めてからEmissiveFactor+Paddingで次の16バイトを埋める配置にしている
+        struct alignas(16) ObjectConstants
         {
+            DirectX::XMFLOAT4X4 World;
+            DirectX::XMFLOAT4X4 NormalMatrix;
             float MetallicFactor;
             float RoughnessFactor;
+            float TangentSignFlip;
             // 0以下ならアルファカットアウト無効
             float AlphaCutoff;
-            float Padding0;
             float EmissiveFactor[3];
-            float Padding1;
+            float Padding;
         };
+
+        // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
+        // TRS(平行移動・回転・スケール)から計算済み(HLSL側のmul(vec, matrix)規約に合わせて
+        // 転置済み)なので、ここでは単純にコピーするだけでよい
+        ObjectConstants MakeObjectConstants(const Assets::ModelInstance& instance, const Assets::Mesh& mesh)
+        {
+            ObjectConstants constants{};
+            constants.World = instance.World;
+            constants.NormalMatrix = instance.NormalMatrix;
+            constants.MetallicFactor = mesh.MetallicFactor;
+            constants.RoughnessFactor = mesh.RoughnessFactor;
+            constants.TangentSignFlip = instance.TangentSignFlip;
+            constants.AlphaCutoff = mesh.AlphaCutoff;
+            constants.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+            constants.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+            constants.EmissiveFactor[2] = mesh.EmissiveFactor[2];
+            return constants;
+        }
 
         // Present.hlsl側のModeと一致させる必要がある
         struct alignas(16) PresentConstants
@@ -312,30 +305,6 @@ namespace Kurenai
             return kernel;
         }
 
-        struct SceneEntry
-        {
-            const wchar_t* DisplayName;
-            const wchar_t* RelativePath;
-
-            // trueの場合、FrameCameraToModelの自動配置ヒューリスティックの代わりにこの初期カメラ位置を使う。
-            // 密集した屋外の街区全体を包む巨大なバウンディングボックスを持つアセットでは、
-            // ホール用ヒューリスティック(バウンズを20%内側に入った位置)では建物の壁の中に埋まってしまうため、
-            // そのような場合に実際の描画結果を確認して選んだ初期位置を明示的に指定できるようにしている
-            bool HasCameraOverride = false;
-            float CameraPosition[3] = { 0.0f, 0.0f, 0.0f };
-            float CameraYaw = 0.0f;
-        };
-
-        const SceneEntry kScenes[] =
-        {
-            { L"Sponza", L"Assets\\Sponza\\Sponza.gltf" },
-            { L"Bistro (McGuire) - Exterior", L"Assets\\BistroMcGuire\\Exterior_gltf\\exterior.gltf", true, { 21.5f, 16.0f, -53.5f }, 0.0f },
-            { L"Bistro (McGuire) - Interior", L"Assets\\BistroMcGuire\\Interior_gltf\\interior.gltf" },
-            { L"White Surface Test", L"Assets\\MaterialTest\\MaterialTest.gltf" },
-            { L"Light Test", L"Assets\\LightTest\\LightTest.gltf" },
-        };
-        constexpr size_t kSceneCount = sizeof(kScenes) / sizeof(kScenes[0]);
-
         // レンダー解像度(renderWidth x renderHeight)のアスペクト比を保ったまま、
         // windowWidth x windowHeight の中央に収まるビューポート(レターボックス/ピラーボックス)を求める
         RHI::Viewport ComputeLetterboxViewport(uint32_t windowWidth, uint32_t windowHeight, uint32_t renderWidth, uint32_t renderHeight)
@@ -378,7 +347,7 @@ namespace Kurenai
 
         // imgui.iniの保存先を起動時の作業ディレクトリに依存させず、KurenaiEngine.dllと同じフォルダに固定する。
         // ImGuiはIniFilenameのポインタを保持するだけでコピーしないため、m_ImGuiIniPathで寿命を維持する
-        m_ImGuiIniPath = WideToUtf8((GetModuleDirectory() + L"imgui.ini").c_str());
+        m_ImGuiIniPath = WideToUtf8(GetModuleDirectory() + L"imgui.ini");
         ImGui::GetIO().IniFilename = m_ImGuiIniPath.c_str();
 
         m_Camera.SetAspectRatio(static_cast<float>(m_RenderWidth) / static_cast<float>(m_RenderHeight));
@@ -664,10 +633,10 @@ namespace Kurenai
         constantBufferDesc.SizeInBytes = sizeof(FrameConstants);
         m_FrameConstantBuffer = m_Device->CreateBuffer(constantBufferDesc);
 
-        RHI::BufferDesc materialConstantBufferDesc;
-        materialConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        materialConstantBufferDesc.SizeInBytes = sizeof(MaterialConstants);
-        m_MaterialConstantBuffer = m_Device->CreateBuffer(materialConstantBufferDesc);
+        RHI::BufferDesc objectConstantBufferDesc;
+        objectConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        objectConstantBufferDesc.SizeInBytes = sizeof(ObjectConstants);
+        m_ObjectConstantBuffer = m_Device->CreateBuffer(objectConstantBufferDesc);
 
         // ポイント/スポットライトのリスト(t5)。CPUから毎フレーム更新するが、ピクセルシェーダから
         // 読み取り専用でよいためStructuredReadOnly(RWStructuredBufferではなくStructuredBuffer)で作成する
@@ -689,7 +658,58 @@ namespace Kurenai
 
         CreateRenderTargets(m_RenderWidth, m_RenderHeight);
 
+        DiscoverScenes();
         LoadScene(0);
+    }
+
+    void KurenaiEngine3D::DiscoverScenes()
+    {
+        const std::wstring sceneDirectory = GetModuleDirectory() + L"Assets\\Scenes\\";
+
+        std::vector<std::wstring> fileNames;
+        WIN32_FIND_DATAW findData{};
+        HANDLE findHandle = FindFirstFileW((sceneDirectory + L"*.kscene").c_str(), &findData);
+        if (findHandle != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                {
+                    fileNames.push_back(findData.cFileName);
+                }
+            } while (FindNextFileW(findHandle, &findData));
+            FindClose(findHandle);
+        }
+
+        // ImGuiのシーン一覧・LoadSceneのインデックスをビルドのたびに変わらないようにする
+        std::sort(fileNames.begin(), fileNames.end(), [](const std::wstring& a, const std::wstring& b)
+        {
+            return _wcsicmp(a.c_str(), b.c_str()) < 0;
+        });
+
+        m_SceneFilePaths.clear();
+        m_SceneDisplayNames.clear();
+        for (const std::wstring& fileName : fileNames)
+        {
+            const std::wstring fullPath = sceneDirectory + fileName;
+            try
+            {
+                m_SceneDisplayNames.push_back(Assets::ReadSceneName(fullPath));
+                m_SceneFilePaths.push_back(fullPath);
+            }
+            catch (const std::exception& e)
+            {
+                // 1ファイルの不備でアプリ全体が起動できなくなるのを避け、そのファイルだけ除外して続行する
+                Core::Logger::Error("KurenaiEngine3D", "シーンファイルの読み込みに失敗したため一覧から除外します (" + WideToUtf8(fullPath) + "): " + e.what());
+            }
+        }
+
+        if (m_SceneFilePaths.empty())
+        {
+            const std::string message = "有効なシーンファイル(.kscene)が見つかりませんでした: " + WideToUtf8(sceneDirectory);
+            Core::Logger::Error("KurenaiEngine3D", message);
+            throw std::runtime_error(message);
+        }
     }
 
     void KurenaiEngine3D::CreateRenderTargets(uint32_t width, uint32_t height)
@@ -721,51 +741,61 @@ namespace Kurenai
 
     void KurenaiEngine3D::LoadScene(size_t sceneIndex)
     {
-        if (sceneIndex >= kSceneCount)
+        if (sceneIndex >= m_SceneFilePaths.size())
         {
             return;
         }
 
-        // m_Model/m_Camera/Post ProcessingパラメータはRender()(Renderスレッド)も読み書きするため、
+        // m_Scene/m_Camera/Post ProcessingパラメータはRender()(Renderスレッド)も読み書きするため、
         // この関数全体をm_SceneMutexで保護する(詳細はm_SceneMutexのコメント参照)。UpdateSceneSwitch
         // (Updateスレッド)からのみ呼ばれる前提のため、Renderスレッドとの競合はこれで排他できる
         std::lock_guard<std::mutex> sceneLock(m_SceneMutex);
 
-        const std::wstring modelPath = GetModuleDirectory() + kScenes[sceneIndex].RelativePath;
+        // [Model]Pathの基準ディレクトリ(Assetsルート)。.kmodel自身の内部パス(.kmodelがある
+        // ディレクトリからの相対)とは基準が異なる点に注意(SceneLoader.h参照)
+        const std::wstring assetRootDirectory = GetModuleDirectory() + L"Assets\\";
 
-        // 旧シーン(m_Model)のバッファ/テクスチャを破棄する前に、GPUが旧シーンを参照する
+        // 旧シーン(m_Scene)のバッファ/テクスチャを破棄する前に、GPUが旧シーンを参照する
         // コマンド(直前まで提出されていた描画コマンド)の実行を終えるまで待つ。特にDX12は
         // CPUがGPU完了を待たずに次フレームの記録を始める多重バッファリング設計のため、
         // これを省くとGPUがまだ読んでいるバッファ/テクスチャを解放してしまい、
         // ヒープ破損によるクラッシュを引き起こす(詳細はIRHIDevice::WaitForGPUIdleのコメント参照)
         m_Device->WaitForGPUIdle();
 
-        // Assets::LoadModelの戻り値(新シーンの全テクスチャ/バッファ)を作り終えてから代入すると、
-        // 代入演算子が旧m_Modelを破棄するまでの間、新旧シーンのGPUリソース(特にDX12の
+        // Assets::LoadSceneの戻り値(新シーンの全テクスチャ/バッファ)を作り終えてから代入すると、
+        // 代入演算子が旧m_Sceneを破棄するまでの間、新旧シーンのGPUリソース(特にDX12の
         // 非シェーダー可視SRVディスクリプタ)が同時に確保された状態になり、大規模シーンでは
-        // ディスクリプタヒープを圧迫する。先に空のModelで置き換えて旧シーンを解放しておく
+        // ディスクリプタヒープを圧迫する。先に空のSceneで置き換えて旧シーンを解放しておく
         // (直前のWaitForGPUIdleによりGPUはもう旧シーンを参照していないため安全)
-        m_Model = Assets::Model{};
-        m_Model = Assets::LoadModel(*m_Device, modelPath);
+        m_Scene = Assets::Scene{};
+        m_Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory);
         m_CurrentSceneIndex = sceneIndex;
 
-        // アセット由来のライトをユーザー編集用のコピーへ複製する(m_Model.Lightsは直接編集しない。
-        // シーンを再読み込みすればアセット既定値に戻るようにするため)
-        m_Lights = m_Model.Lights;
+        // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
+        // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
+        m_TimeOfDay = m_Scene.SunTimeOfDay;
+        m_SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
+        m_ShadowEnabled = m_Scene.ShadowEnabled;
+
+        // アセット由来のライトをユーザー編集用のコピーへ複製する(m_Scene.Lightsは直接編集しない。
+        // シーンを再読み込みすればアセット既定値に戻るようにするため)。m_Scene.Lightsは
+        // SceneLoaderが各ModelInstanceのModel::Lightsをワールド空間へ変換し、.kscene自身の
+        // [Light]セクションのライトと合成済みのシーン全体のライト一覧(Scene.h参照)
+        m_Lights = m_Scene.Lights;
         m_SelectedLightIndex = m_Lights.empty() ? -1 : 0;
         m_LightOverflowLogged = false;
 
         FrameCameraToModel();
 
         const wchar_t* apiName = (m_GraphicsAPI == GraphicsAPI::DX12) ? L"DX12" : L"DX11";
-        m_Window->SetTitle(std::wstring(L"Kurenai Engine [") + apiName + L"] - " + kScenes[sceneIndex].DisplayName);
+        m_Window->SetTitle(std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name);
     }
 
     void KurenaiEngine3D::FrameCameraToModel()
     {
-        const float sizeY = m_Model.BoundsMax[1] - m_Model.BoundsMin[1];
-        const float dx = m_Model.BoundsMax[0] - m_Model.BoundsMin[0];
-        const float dz = m_Model.BoundsMax[2] - m_Model.BoundsMin[2];
+        const float sizeY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
+        const float dx = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
+        const float dz = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
         const float diagonal = std::sqrt(dx * dx + sizeY * sizeY + dz * dz);
 
         // SSAO/SSILのサンプリング半径はシーンの規模に応じて変わるべきなので、対角線に比例させる
@@ -779,19 +809,18 @@ namespace Kurenai
         m_SSRMaxDistance = std::clamp(diagonal * 0.5f, 1.0f, 100.0f);
         m_SSRThickness = m_SSAORadius * 0.2f;
 
-        const SceneEntry& currentScene = kScenes[m_CurrentSceneIndex];
-        if (currentScene.HasCameraOverride)
+        if (m_Scene.HasCameraOverride)
         {
-            m_Camera.SetPosition({ currentScene.CameraPosition[0], currentScene.CameraPosition[1], currentScene.CameraPosition[2] });
-            m_Camera.SetYawPitch(currentScene.CameraYaw, 0.0f);
+            m_Camera.SetPosition({ m_Scene.CameraPosition[0], m_Scene.CameraPosition[1], m_Scene.CameraPosition[2] });
+            m_Camera.SetYawPitch(m_Scene.CameraYaw, m_Scene.CameraPitch);
             m_Camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
             return;
         }
 
-        const float centerX = (m_Model.BoundsMin[0] + m_Model.BoundsMax[0]) * 0.5f;
-        const float centerY = (m_Model.BoundsMin[1] + m_Model.BoundsMax[1]) * 0.5f;
-        const float centerZ = (m_Model.BoundsMin[2] + m_Model.BoundsMax[2]) * 0.5f;
-        const float eyeHeight = m_Model.BoundsMin[1] + sizeY * 0.15f;
+        const float centerX = (m_Scene.BoundsMin[0] + m_Scene.BoundsMax[0]) * 0.5f;
+        const float centerY = (m_Scene.BoundsMin[1] + m_Scene.BoundsMax[1]) * 0.5f;
+        const float centerZ = (m_Scene.BoundsMin[2] + m_Scene.BoundsMax[2]) * 0.5f;
+        const float eyeHeight = m_Scene.BoundsMin[1] + sizeY * 0.15f;
 
         const float longAxis = std::max(dx, dz);
         const float shortAxis = std::min(dx, dz);
@@ -825,7 +854,7 @@ namespace Kurenai
         else if (dx >= dz)
         {
             // ホールの長辺方向の端寄りから中心を見る位置を初期視点にする(中央の装飾物や壁に埋まらないように)
-            posX = m_Model.BoundsMin[0] + dx * 0.2f;
+            posX = m_Scene.BoundsMin[0] + dx * 0.2f;
             posY = eyeHeight;
             posZ = centerZ;
             yaw = DirectX::XM_PIDIV2;
@@ -835,7 +864,7 @@ namespace Kurenai
         {
             posX = centerX;
             posY = eyeHeight;
-            posZ = m_Model.BoundsMin[2] + dz * 0.2f;
+            posZ = m_Scene.BoundsMin[2] + dz * 0.2f;
             yaw = 0.0f;
             nearZ = std::max(0.01f, diagonal * 0.0005f);
         }
@@ -854,13 +883,13 @@ namespace Kurenai
 
         const XMFLOAT3 center
         {
-            (m_Model.BoundsMin[0] + m_Model.BoundsMax[0]) * 0.5f,
-            (m_Model.BoundsMin[1] + m_Model.BoundsMax[1]) * 0.5f,
-            (m_Model.BoundsMin[2] + m_Model.BoundsMax[2]) * 0.5f,
+            (m_Scene.BoundsMin[0] + m_Scene.BoundsMax[0]) * 0.5f,
+            (m_Scene.BoundsMin[1] + m_Scene.BoundsMax[1]) * 0.5f,
+            (m_Scene.BoundsMin[2] + m_Scene.BoundsMax[2]) * 0.5f,
         };
-        const float dx = m_Model.BoundsMax[0] - m_Model.BoundsMin[0];
-        const float dy = m_Model.BoundsMax[1] - m_Model.BoundsMin[1];
-        const float dz = m_Model.BoundsMax[2] - m_Model.BoundsMin[2];
+        const float dx = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
+        const float dy = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
+        const float dz = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
         const float sceneRadius = std::max(0.01f, std::sqrt(dx * dx + dy * dy + dz * dz) * 0.5f);
 
         const XMVECTOR lightDirVec = XMVector3Normalize(XMLoadFloat3(&lightDirection));
@@ -896,7 +925,7 @@ namespace Kurenai
         ImGui::TextUnformatted(m_GraphicsAPI == GraphicsAPI::DX12 ? "Graphics API: DX12" : "Graphics API: DX11");
         ImGui::Separator();
 
-        for (size_t i = 0; i < kSceneCount; ++i)
+        for (size_t i = 0; i < m_SceneDisplayNames.size(); ++i)
         {
             const bool isCurrent = (i == m_CurrentSceneIndex);
             if (isCurrent)
@@ -904,7 +933,7 @@ namespace Kurenai
                 ImGui::BeginDisabled();
             }
 
-            const std::string label = WideToUtf8(kScenes[i].DisplayName);
+            const std::string label = WideToUtf8(m_SceneDisplayNames[i]);
             if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0.0f)))
             {
                 // LoadScene自体はUpdateスレッドから呼ぶ必要があるため、ここでは要求を書き込むだけにする
@@ -1307,7 +1336,7 @@ namespace Kurenai
             const auto cpuStart = std::chrono::steady_clock::now();
             {
                 // WM_SIZEによるスワップチェーンのリサイズ、およびLoadScene(Updateスレッド、
-                // UpdateSceneSwitch経由)によるm_Model/m_Camera/Post Processingパラメータの書き換えと
+                // UpdateSceneSwitch経由)によるm_Scene/m_Camera/Post Processingパラメータの書き換えと
                 // 同時に走らないよう、Render()全体をこれらのミューテックスで保護する。この2つの
                 // ミューテックスをこの組み合わせ・この順序でロックするのはここだけなので、
                 // std::scoped_lockでなくてもデッドロックの心配はないが、明示的にまとめて扱っておく
@@ -1536,11 +1565,20 @@ namespace Kurenai
                     cmd->SetPipelineState(m_ShadowPipelineState.get());
                     cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
 
-                    for (const auto& mesh : m_Model.Meshes)
+                    for (const auto& instance : m_Scene.Instances)
                     {
-                        cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                        cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        for (const auto& mesh : instance.Model.Meshes)
+                        {
+                            // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
+                            // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
+                            const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
+                            cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                            cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        }
                     }
                 }
             },
@@ -1562,25 +1600,22 @@ namespace Kurenai
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetSampler(0, m_Sampler.get());
 
-                for (const auto& mesh : m_Model.Meshes)
+                for (const auto& instance : m_Scene.Instances)
                 {
-                    MaterialConstants materialConstants{};
-                    materialConstants.MetallicFactor = mesh.MetallicFactor;
-                    materialConstants.RoughnessFactor = mesh.RoughnessFactor;
-                    materialConstants.AlphaCutoff = mesh.AlphaCutoff;
-                    materialConstants.EmissiveFactor[0] = mesh.EmissiveFactor[0];
-                    materialConstants.EmissiveFactor[1] = mesh.EmissiveFactor[1];
-                    materialConstants.EmissiveFactor[2] = mesh.EmissiveFactor[2];
-                    cmd->UpdateBuffer(m_MaterialConstantBuffer.get(), &materialConstants, sizeof(materialConstants));
-                    cmd->SetConstantBuffer(1, m_MaterialConstantBuffer.get());
+                    for (const auto& mesh : instance.Model.Meshes)
+                    {
+                        const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
+                        cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                        cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
-                    cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                    cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                    cmd->SetTexture(0, mesh.BaseColorTexture);
-                    cmd->SetTexture(1, mesh.NormalTexture);
-                    cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
-                    cmd->SetTexture(3, mesh.EmissiveTexture);
-                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                        cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                        cmd->SetTexture(0, mesh.BaseColorTexture);
+                        cmd->SetTexture(1, mesh.NormalTexture);
+                        cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
+                        cmd->SetTexture(3, mesh.EmissiveTexture);
+                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                    }
                 }
             },
         });
