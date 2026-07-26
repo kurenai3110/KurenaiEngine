@@ -39,6 +39,25 @@ namespace Kurenai::RHI
         // 破棄時にDX12Deviceのディスクリプタヒープへ返却する
         static constexpr uint32_t kInvalid = 0xFFFFFFFFu;
         DX12Buffer(DX12Device* device, Microsoft::WRL::ComPtr<ID3D12Resource> resource, uint32_t uavIndex, uint32_t sizeInBytes, uint32_t strideInBytes);
+
+        // BufferUsage::StructuredReadOnly(StructuredBuffer<T>、読み取り専用)用:
+        // ピクセルシェーダが読むSRV本体(DEFAULTヒープ、resource/initialState/srvIndex)と、
+        // CPUが毎フレームUpdateBufferで書き込むUPLOADヒープのステージングリング
+        // (uploadResource/uploadMappedPtr/uploadRingCapacity)の両方を保持する。
+        // ピクセルごとに読まれるためUPLOADヒープに本体を置くことはできないが、UPLOADヒープに
+        // 直接書き込めるConstantバッファのリングとは異なり、DEFAULTヒープへは
+        // CopyBufferRegion(コマンドリスト経由)でしか書けないため、ステージング用の中間バッファが要る
+        DX12Buffer(
+            DX12Device* device,
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+            D3D12_RESOURCE_STATES initialState,
+            uint32_t srvIndex,
+            Microsoft::WRL::ComPtr<ID3D12Resource> uploadResource,
+            void* uploadMappedPtr,
+            uint32_t sizeInBytes,
+            uint32_t strideInBytes,
+            uint32_t uploadRingCapacity);
+
         ~DX12Buffer() override;
 
         ID3D12Resource* GetResource() const { return m_Resource.Get(); }
@@ -49,6 +68,19 @@ namespace Kurenai::RHI
         const D3D12_INDEX_BUFFER_VIEW& GetIndexBufferView() const { return m_IndexBufferView; }
         // BufferUsage::Structuredで作成した場合のみ有効なUAVハンドル(コンピュートシェーダーからのRW用)
         D3D12_CPU_DESCRIPTOR_HANDLE GetUavCpuHandle() const;
+        // BufferUsage::StructuredReadOnlyで作成した場合のみ有効なSRVハンドル(ピクセルシェーダからの読み取り用)
+        D3D12_CPU_DESCRIPTOR_HANDLE GetSrvCpuHandle() const;
+        // BufferUsage::StructuredReadOnlyで作成されたか(UpdateBufferの分岐に使う)。
+        // このバッファ種別だけがm_SrvIndexを有効値で持つことを利用して判定する
+        bool IsStructuredReadOnly() const { return m_SrvIndex != kInvalid; }
+        // 現在のリソース状態と異なる場合のみバリアを発行して遷移する(DX12Texture::TransitionToと同じパターン)。
+        // BufferUsage::StructuredReadOnlyでのみ使う
+        void TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState);
+        // UpdateBuffer用: ステージングリングの次のスロットへ書き込み位置を進め、そのCPUマップ済みポインタを返す。
+        // BufferUsage::StructuredReadOnlyでのみ使う
+        void* AdvanceUploadRingAndGetWritePtr();
+        ID3D12Resource* GetUploadResource() const { return m_UploadResource.Get(); }
+        uint64_t GetUploadRingOffset() const { return static_cast<uint64_t>(m_UploadRingIndex) * m_SlotSizeInBytes; }
 
     private:
         DX12Device* m_Device = nullptr;
@@ -60,5 +92,13 @@ namespace Kurenai::RHI
         uint32_t m_UavIndex = kInvalid;
         D3D12_VERTEX_BUFFER_VIEW m_VertexBufferView{};
         D3D12_INDEX_BUFFER_VIEW m_IndexBufferView{};
+
+        // BufferUsage::StructuredReadOnly専用のメンバ
+        D3D12_RESOURCE_STATES m_CurrentState = D3D12_RESOURCE_STATE_COMMON;
+        uint32_t m_SrvIndex = kInvalid;
+        Microsoft::WRL::ComPtr<ID3D12Resource> m_UploadResource;
+        void* m_UploadMappedPtr = nullptr;
+        uint32_t m_UploadRingCapacity = 1;
+        uint32_t m_UploadRingIndex = 0;
     };
 }

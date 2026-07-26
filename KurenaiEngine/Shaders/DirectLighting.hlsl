@@ -1,6 +1,8 @@
-// 直接光(太陽光)パス。G-Buffer(Albedo/Normal/Material/Depth)とシャドウマップから
+// 直接光パス。G-Buffer(Albedo/Normal/Material/Depth)とシャドウマップから
 // Cook-Torrance(GGX)のPBRで直接光(拡散+鏡面反射、シャドウ適用済み)だけを計算し、
 // 専用のレンダーターゲットへ書き出す(環境光・間接光は含まない)。
+// 太陽(平行光、b0、シャドウ付き)に加え、t5の構造化バッファに詰めたポイント/スポットライトを
+// 影なしでループ加算する(詳細はdocs/Architecture.htmlの「複数ライト」章を参照)。
 // この結果はDeferredLightingパス(最終合成)とSSIL_VisibilityBitmask.hlsl(間接光サンプルの
 // 簡易直接光の代わりに実際の直接光を使うことでシャドウも含めて正確にする)の両方からサンプルされる。
 // レンダー解像度と同じ内部解像度で、HDR(トーンマップ前)の値をR32G32B32A32_Floatへ書き込む。
@@ -19,6 +21,26 @@ cbuffer FrameConstants : register(b0)
     float4x4 View;
     float4x4 Proj;
     float4 AmbientColor;
+};
+
+// ポイント/スポットライト1灯ぶんのデータ。C++側 KurenaiEngine3D.cpp の GPULight と
+// 並び・ストライド(64バイト)を一致させる必要がある。既存の SSAOConstants/SSILConstants と同様、
+// パッキング規則の解釈揺れを避けるためメンバはすべて float4 単位で宣言する
+struct GPULight
+{
+    float4 PositionType;   // xyz=ワールド座標, w=LightType(0=Directional, 1=Point, 2=Spot)
+    // rgb = Color * Intensity[cd] * exposure(EV100)。カンデラ→露出済みの最終放射輝度で、
+    // CPU側(MakeGPULight)で計算してあるためシェーダ側はそのまま乗算するだけでよい
+    float4 ColorRange;     // rgb=露出済み放射輝度, w=Range
+    float4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
+    float4 Params;         // x=spotAngleOffset, yzw=未使用(エリアライト用に予約)
+};
+StructuredBuffer<GPULight> Lights : register(t5);
+
+// DirectLighting.hlsl側のこの宣言とC++側 KurenaiEngine3D.cpp の LightingConstants を一致させる必要がある
+cbuffer LightingConstants : register(b1)
+{
+    uint4 LightCount; // x=有効ライト数, yzw=未使用
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -99,6 +121,97 @@ float ComputeShadowFactor(float3 worldPos, float NdotL)
     return (lightNdc.z - bias > shadowMapDepth) ? 0.0f : 1.0f;
 }
 
+// Cook-Torrance を1灯ぶん評価する(シャドウ・ライト色・減衰は呼び出し側で乗算する)。
+// 太陽(b0)とポイント/スポットライト(t5)の両方から共通で呼ばれる
+float3 EvaluateDirectBRDF(float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness)
+{
+    float3 H = normalize(V + L);
+    float NdotL = saturate(dot(N, L));
+    float NdotH = saturate(dot(N, H));
+    float VdotH = saturate(dot(V, H));
+
+    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
+    float D = DistributionGGX(NdotH, roughness);
+    float G = GeometrySmith(NdotV, NdotL, roughness);
+    float3 F = FresnelSchlick(VdotH, F0);
+
+    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f);
+    float3 kd = (1.0f - F) * (1.0f - metallic);
+    float3 diffuse = kd * albedo / PI;
+
+    return (diffuse + specular) * NdotL;
+}
+
+// Karis 2013 / Frostbite の windowed inverse-square。Range を超えると厳密に0になり、
+// 打ち切り境界でのハードエッジが出ない
+float DistanceAttenuation(float distSq, float range)
+{
+    float factor = distSq / max(range * range, 1e-4f); // (d/r)^2
+    float window = saturate(1.0f - factor * factor);   // 1 - (d/r)^4
+    // 光源に極端に近づいたときの発散を抑える。定数1.0を足す実装はシーンスケール依存になるため、
+    // 最小距離二乗でのクランプにする
+    return (window * window) / max(distSq, 0.0001f);
+}
+
+// Frostbite の lightAngleScale / lightAngleOffset。CPU側(MakeGPULight)で事前計算した値を
+// GPULight.DirectionAngle.w / Params.x として受け取る
+//   scale  = 1 / max(0.001, cos(inner) - cos(outer))
+//   offset = -cos(outer) * scale
+float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float angleOffset)
+{
+    float t = saturate(dot(spotDirection, -L) * angleScale + angleOffset);
+    return t * t;
+}
+
+// t5のライトリストを1灯ぶん評価する(影なし)。early-outは効きの強い順(距離→減衰→スポット円錐→NdotL)に並べる
+float3 EvaluateLight(GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness)
+{
+    uint lightType = (uint)light.PositionType.w;
+    float range = light.ColorRange.w;
+
+    float3 L;
+    float atten = 1.0f;
+
+    if (lightType == 0u) // Directional
+    {
+        L = normalize(-light.DirectionAngle.xyz);
+    }
+    else
+    {
+        float3 toLight = light.PositionType.xyz - worldPos;
+        float distSq = dot(toLight, toLight);
+        if (distSq > range * range)
+        {
+            return float3(0.0f, 0.0f, 0.0f);
+        }
+
+        atten = DistanceAttenuation(distSq, range);
+        if (atten <= 0.0f)
+        {
+            return float3(0.0f, 0.0f, 0.0f);
+        }
+
+        L = toLight * rsqrt(max(distSq, 1e-8f));
+
+        if (lightType == 2u) // Spot
+        {
+            float spotAtten = SpotAttenuation(light.DirectionAngle.xyz, L, light.DirectionAngle.w, light.Params.x);
+            if (spotAtten <= 0.0f)
+            {
+                return float3(0.0f, 0.0f, 0.0f);
+            }
+            atten *= spotAtten;
+        }
+    }
+
+    if (dot(N, L) <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness) * light.ColorRange.rgb * atten;
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float depth = DepthTexture.Sample(DefaultSampler, input.UV).r;
@@ -117,30 +230,27 @@ float4 PSMain(PSInput input) : SV_TARGET
     float roughness = material.g;
 
     float3 V = normalize(CameraPosition.xyz - worldPos);
-    float3 L = normalize(-LightDirection.xyz);
-    float3 H = normalize(V + L);
-
     float NdotV = saturate(dot(N, V)) + 1e-5f;
-    float NdotL = saturate(dot(N, L));
-    float NdotH = saturate(dot(N, H));
-    float VdotH = saturate(dot(V, H));
 
-    if (NdotL <= 0.0f)
+    float3 directLight = float3(0.0f, 0.0f, 0.0f);
+
+    // --- 太陽(b0、シャドウ付き) ---
+    // ここでNdotL<=0のとき関数全体を打ち切ってはいけない(以前の実装の落とし穴)。
+    // 太陽の寄与だけをこのブロックに閉じ込め、その後は必ずライトリストのループへ進む
+    float3 sunL = normalize(-LightDirection.xyz);
+    float sunNdotL = saturate(dot(N, sunL));
+    if (sunNdotL > 0.0f)
     {
-        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+        float shadow = ComputeShadowFactor(worldPos, sunNdotL);
+        directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness) * LightColor.rgb * shadow;
     }
 
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    float shadow = ComputeShadowFactor(worldPos, NdotL);
+    // --- t5のライトリスト(影なし) ---
+    [loop]
+    for (uint i = 0; i < LightCount.x; ++i)
+    {
+        directLight += EvaluateLight(Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness);
+    }
 
-    float D = DistributionGGX(NdotH, roughness);
-    float G = GeometrySmith(NdotV, NdotL, roughness);
-    float3 F = FresnelSchlick(VdotH, F0);
-
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f);
-    float3 kd = (1.0f - F) * (1.0f - metallic);
-    float3 diffuse = kd * albedo / PI;
-
-    float3 directLight = (diffuse + specular) * LightColor.rgb * NdotL * shadow;
     return float4(directLight, 1.0f);
 }

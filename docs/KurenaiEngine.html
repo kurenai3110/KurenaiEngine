@@ -317,11 +317,12 @@ ImGuiパネル経由</strong>):
     <li><code>F1</code> でImGuiパネルの表示/非表示切り替え</li>
     <li>画面左上のImGuiパネル(Scenes / Post Processing / Render Targets / Lighting / Profiler)で
     表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/SSRのON・OFFやパラメータ調整、デバッグ表示
-    バッファの選択、時刻(昼夜サイクル)の調整、FPS/CPU/GPUの計測値確認ができる</li>
+    バッファの選択、時刻(昼夜サイクル)とEV100(露出)の調整、ポイント/スポットライトの
+    一覧・追加・削除・編集、FPS/CPU/GPUの計測値確認ができる</li>
   </ul>
 </li>
 <li>表示できるシーンはビルド済みバイナリに組み込み済み(Sponza / Bistro (McGuire) Exterior /
-Bistro (McGuire) Interior / White Surface Test)。カスタムモデルの追加や、
+Bistro (McGuire) Interior / White Surface Test / Light Test)。カスタムモデルの追加や、
 シーン一覧の外部からのカスタマイズは現状の公開APIではサポートしていない(<code>Run()</code> を
 呼ぶ以外のカスタマイズ余地がないのが <code>KurenaiEngine3D</code> の設計上の割り切り)。</li>
 <li>コンストラクタに渡した <code>GraphicsAPI</code> に応じてDX11/DX12いずれかのバックエンドで
@@ -571,6 +572,7 @@ void SetIndexBuffer(IRHIBuffer* buffer);           // 32bit(uint32_t)インデ�
 void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer);
 void SetTexture(uint32_t slot, IRHITexture* texture);
 void SetSampler(uint32_t slot, IRHISampler* sampler);
+void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer); // BufferUsage::StructuredReadOnly用(下記4.4参照)
 void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes);
 void Draw(uint32_t vertexCount, uint32_t startVertexLocation);
 void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation);
@@ -583,6 +585,14 @@ void SetComputeTexture(uint32_t slot, IRHITexture* texture);
 void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0); // mipLevelはCreateHiZTexture用(4.3.2参照)
 void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer);
 void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ);</code></pre>
+<p>
+<code>SetShaderResourceBuffer</code>は<code>BufferUsage::StructuredReadOnly</code>で作成した
+バッファを<code>StructuredBuffer&lt;T&gt;</code>としてピクセルシェーダへ読み取り専用でバインドする
+(要素数が可変で定数バッファに収めるには大きい配列向け。詳細は4.4参照)。<strong>スロット空間は
+<code>SetTexture</code>と共通</strong>(<code>t0</code>〜<code>t6</code>)のため、同じ描画内で
+テクスチャとスロットが衝突しないよう呼び出し側で調整すること。DX11バックエンドでは
+<code>SetTexture</code>と同様ピクセルシェーダからのみ参照できる。
+</p>
 
 <h4 id="compute">4.3.1 コンピュートシェーダー</h4>
 <p>
@@ -698,7 +708,11 @@ IMMUTABLEになり以後の更新が失敗するため、必ずnullptrで作成�
 <code>RHIDesc.h</code>(<code>BufferDesc</code>, <code>ShaderDesc</code>, <code>InputElementDesc</code>,
 <code>PipelineStateDesc</code>, <code>ComputePipelineStateDesc</code>)と<code>RHIEnums.h</code>
 (<code>ShaderStage</code>: <code>Vertex</code>/<code>Pixel</code>/<code>Compute</code>、
-<code>BufferUsage</code>: <code>Vertex</code>/<code>Index</code>/<code>Constant</code>/<code>Structured</code>(コンピュートシェーダー用のRWStructuredBuffer)、
+<code>BufferUsage</code>: <code>Vertex</code>/<code>Index</code>/<code>Constant</code>/<code>Structured</code>(コンピュートシェーダー用のRWStructuredBuffer)/
+<code>StructuredReadOnly</code>(CPUから毎フレーム<code>UpdateBuffer</code>で書き換え、
+シェーダからは<code>StructuredBuffer&lt;T&gt;</code>として読み取り専用。<code>SetShaderResourceBuffer</code>で
+グラフィックスパイプラインへバインドする。要素数が可変で定数バッファに収めるには大きい配列
+— <code>KurenaiEngine3D</code>のポイント/スポットライトリストが実例 — 向け)、
 <code>Format</code>, <code>BlendMode</code> など)に描画リソースの
 記述構造体・列挙型がまとまっている。<code>PipelineStateDesc::BlendMode</code>には
 <code>Opaque</code>(既定・不透明)、<code>AlphaBlend</code>(標準アルファブレンド)、
@@ -736,7 +750,49 @@ assimp経由でglTF/FBX等を読み込み、頂点/インデックスバッフ�
 <code>&lt;元のファイル名&gt;.kmodelcache</code> というバイナリキャッシュが自動生成され、
 2回目以降の読み込みが高速化される。
 </p>
-<h4>4.6.1 テクスチャキャッシュと並列プリフェッチ</h4>
+
+<h4 id="lights">4.6.1 ライトの読み込み(<code>Model::Lights</code>)</h4>
+<p>
+モデルファイルにポイント/スポット/平行光が含まれる場合、<code>Model::Lights</code>
+(<code>std::vector&lt;Assets::Light&gt;</code>)として読み込まれる。glTFは
+<code>KHR_lights_punctual</code> 拡張、FBXはLightノードから読み込む。
+</p>
+<pre><code>enum class LightType { Directional, Point, Spot };
+
+struct Light
+{
+    LightType Type;
+    float Position[3];         // ワールド座標(Directionalでは未使用)
+    float Direction[3];        // 光が進む向き(正規化済み)。Spot/Directionalで使用
+    float Color[3];            // 線形色。最大成分が1になるよう正規化済み
+    float Intensity;           // 測光量。Point/Spotはカンデラ(cd)、Directionalはルクス(lx)
+    float Range;                // 影響半径。Directionalでは未使用
+    float SpotInnerConeAngle;   // ラジアン。Spotのみ
+    float SpotOuterConeAngle;
+    bool Enabled;
+    std::string Name;
+};</code></pre>
+<ul>
+<li><code>Intensity</code>の単位は物理量。glTFは<code>KHR_lights_punctual</code>の値
+(カンデラ/ルクス)をそのまま読み込むため正確。FBXには物理単位が存在しないため、DCC側の
+<code>Intensity</code>プロパティをカンデラ相当として近似する(精度は保証されない)。</li>
+<li>表示上の明るさは測光量に実在の写真露出値<strong>EV100</strong>(<code>KurenaiEngine3D</code>の
+Lightingパネルの「EV100」)を直接掛けて求める(<code>exposure = 1 / (1.2 * 2^EV100)</code>)。
+太陽光・環境光にも同じ露出が一様にかかる、シーン全体で単一の設定になっている。EV100は値が
+大きいほど明るいシーンを表す実在の写真用語であり、<strong>値を上げるほど描画は暗くなる</strong>
+(Photoshop等の「露出」スライダーとは向きが逆なので注意)。</li>
+<li><code>Range</code>はglTFにノードのメタデータ<code>PBR_LightRange</code>があればその値を
+使う。無ければ打ち切り輝度からEV100=15.0(既定値)を仮定して逆算した推定値が入る
+(この推定はモデル読み込み時に一度だけ行われるため、後からEV100を大きく変更すると
+実際に見えるべき範囲と合わなくなることがある。その場合はImGuiでRangeを手動調整する)。</li>
+<li>平行光は太陽光との二重照明を避けるため、読み込み時は既定で<code>Enabled = false</code>
+になる(ImGuiから有効化できる)。</li>
+<li><strong>エリアライト(球・チューブ・矩形)は未対応</strong>。glTFの
+<code>KHR_lights_punctual</code>にエリアライトの定義が無く、FBXのエリアライトはassimpが
+未対応種別として扱うため、いずれの形式からも読み込めない。</li>
+</ul>
+
+<h4>4.6.2 テクスチャキャッシュと並列プリフェッチ</h4>
 <p>
 PNG/JPG等の無圧縮テクスチャは、読み込むと同じ場所に
 <code>&lt;元のテクスチャファイル名&gt;.srgb.ktexcache</code> /
@@ -896,6 +952,10 @@ void StopSound(VoiceHandle voice);</code></pre>
 <tr><td>DrawRoundedRectの角丸半径</td><td><code>cornerRadiusPixels</code>が<code>width</code>/<code>height</code>の半分より大きい値の場合、ピクセルシェーダー側で半幅・半高さの小さい方に自動的にクランプされる(矩形からはみ出す角丸にはならない)</td></tr>
 <tr><td>ビルド設定の一致</td><td><code>KurenaiEngine.dll</code> とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
 <tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
+<tr><td>ポイント/スポットライトの影</td><td>影を落とさない(シャドウマップは平行光1灯のみ対応)</td></tr>
+<tr><td>ライトの同時描画数</td><td>最大1024灯まで(実データでの想定はせいぜい数灯〜十数灯)。超過分はカメラに近い順に採用される</td></tr>
+<tr><td>エリアライト</td><td>未対応(4.6.1参照)。球・チューブ・矩形のライトはモデルからもImGuiからも作成できない</td></tr>
+<tr><td>EV100と屋内シーン</td><td>太陽・環境光・ポイント/スポットライトすべてに同じEV100が一様にかかるため、屋外の直射日光を基準にした既定値(EV100=15)のままだと屋内照明だけのシーンは暗くなる。EV100は値が大きいほど明るいシーンを表す実在の写真用語のため、値を上げると描画は暗くなる(実カメラの露出と同様の向き)。シーンに応じてEV100を下げて調整する(自動露出は無い)</td></tr>
 </tbody>
 </table>
 </section>

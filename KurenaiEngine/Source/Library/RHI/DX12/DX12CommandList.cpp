@@ -224,9 +224,43 @@ namespace Kurenai::RHI
         m_Device->GetDevice()->CopyDescriptorsSimple(1, dest, dx12Sampler->GetCpuHandle(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     }
 
+    void DX12CommandList::SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer)
+    {
+        // BufferUsage::StructuredReadOnlyのSRVはSetTextureのテクスチャSRVと同じディスクリプタテーブル
+        // (t0〜t6)を共有するため、バインド経路もSetTextureと完全に同じ(コピー元だけ溜めておき、
+        // Draw直前のFlushPendingSrvWritesでまとめて反映する)にする
+        auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+        auto* cmdList = m_Device->GetCommandList();
+        dx12Buffer->TransitionTo(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        if (slot == 0)
+        {
+            FlushPendingSrvWrites();
+        }
+
+        m_PendingSrvHandles[slot] = dx12Buffer->GetSrvCpuHandle();
+        m_PendingSrvSlotMask |= (1u << slot);
+    }
+
     void DX12CommandList::UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes)
     {
         auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+
+        // BufferUsage::StructuredReadOnlyはUPLOADヒープに直接マップされていない(ピクセルごとに
+        // 読まれるためDEFAULTヒープに本体を置いている)。ステージングリングへ書き込んでから
+        // コマンドリスト上でCopyBufferRegionによりDEFAULTヒープ本体へコピーする
+        if (dx12Buffer->IsStructuredReadOnly())
+        {
+            memcpy(dx12Buffer->AdvanceUploadRingAndGetWritePtr(), data, sizeInBytes);
+
+            auto* cmdList = m_Device->GetCommandList();
+            dx12Buffer->TransitionTo(cmdList, D3D12_RESOURCE_STATE_COPY_DEST);
+            cmdList->CopyBufferRegion(
+                dx12Buffer->GetResource(), 0, dx12Buffer->GetUploadResource(), dx12Buffer->GetUploadRingOffset(), sizeInBytes);
+            dx12Buffer->TransitionTo(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            return;
+        }
+
         memcpy(dx12Buffer->AdvanceRingAndGetWritePtr(), data, sizeInBytes);
     }
 

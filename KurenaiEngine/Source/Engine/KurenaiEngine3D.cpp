@@ -7,9 +7,11 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <random>
 
 #include "Assets/ModelLoader.h"
+#include "Core/Logger.h"
 #include "Core/RenderGraph.h"
 
 namespace Kurenai
@@ -79,7 +81,18 @@ namespace Kurenai
             return t * t * (3.0f - 2.0f * t);
         }
 
-        SunLighting ComputeSunLighting(float timeOfDayHours, float sunAzimuthDegrees)
+        // 実在の写真露出値(EV100)から露出係数を求める。絞り値・シャッター速度・ISO感度から一意に
+        // 定まる実在の量で、Lagarde & de Rousiers, "Moving Frostbite to Physically Based Rendering"
+        // (SIGGRAPH 2014 course notes)やGoogle FilamentのPhysically Based Cameraドキュメントが
+        // 採る標準式。カンデラ/ルクスの測光量に直接掛けることで表示レンジへ変換する
+        // (放射量(W)への変換は行わない。本エンジンには放射量ベースの大気モデルが無く、
+        // 変換段を増やす意味が無いため)
+        float ComputeExposure(float ev100)
+        {
+            return 1.0f / (1.2f * std::pow(2.0f, ev100));
+        }
+
+        SunLighting ComputeSunLighting(float timeOfDayHours, float sunAzimuthDegrees, float exposureEV100)
         {
             using namespace DirectX;
 
@@ -100,19 +113,35 @@ namespace Kurenai
             SunLighting result{};
             result.Direction = { -sunDirection.x, -sunDirection.y, -sunDirection.z };
 
-            // 6時〜7時でなめらかに夜→昼、17時〜18時でなめらかに昼→夜へ切り替える
+            // 6時〜7時でなめらかに夜→昼、17時〜18時でなめらかに昼→夜へ切り替える。
+            // この遷移カーブ自体は物理的な大気散乱シミュレーションではなく既存のアート的な遷移のまま
             const float dayFactor = Smoothstep(6.0f, 7.0f, timeOfDayHours) * (1.0f - Smoothstep(17.0f, 18.0f, timeOfDayHours));
 
-            const XMFLOAT3 kDayColor{ 3.0f, 2.9f, 2.7f };
-            result.Color = { kDayColor.x * dayFactor, kDayColor.y * dayFactor, kDayColor.z * dayFactor, 0.0f };
+            // 太陽の色味(ティント)。ピーク照度はkSunIlluminanceLuxが持つので、ここは相対比のみ
+            const XMFLOAT3 kSunColorTint{ 1.0f, 0.967f, 0.9f };
+            // 直射日光(正午・快晴)の照度[lx]。Lagarde & de Rousiers 2014の照度参照テーブルに
+            // 掲載される代表値
+            constexpr float kSunIlluminanceLux = 100000.0f;
+            // 空光(直射日光を除いた間接照度)の照度[lx]。同テーブルの曇天相当値を、直射日光に対する
+            // 空光の比率(おおむね1〜2割)としても妥当な範囲であることの根拠として採用する
+            constexpr float kSkylightIlluminanceLux = 20000.0f;
+            // 夜間の環境光は天文学的な実測値(星明かり~0.001lx、満月~0.1〜0.3lx)をそのまま使うと
+            // ほぼ完全な黒になり視認性が失われるため、視認性確保のためのアート的な下限値のまま残す
+            // (物理値ではないことを明記した上での意図的な妥協)
+            const XMFLOAT3 kNightAmbientArt{ 0.006f, 0.008f, 0.015f };
 
-            const XMFLOAT3 kDayAmbient{ 0.03f, 0.03f, 0.03f };
-            const XMFLOAT3 kNightAmbient{ 0.006f, 0.008f, 0.015f };
+            const float exposure = ComputeExposure(exposureEV100);
+
+            const float sunPeak = kSunIlluminanceLux * dayFactor * exposure;
+            result.Color = { kSunColorTint.x * sunPeak, kSunColorTint.y * sunPeak, kSunColorTint.z * sunPeak, 0.0f };
+
+            const float skyPeak = kSkylightIlluminanceLux * exposure;
+            const XMFLOAT3 dayAmbient{ kSunColorTint.x * skyPeak, kSunColorTint.y * skyPeak, kSunColorTint.z * skyPeak };
             result.Ambient =
             {
-                kNightAmbient.x + (kDayAmbient.x - kNightAmbient.x) * dayFactor,
-                kNightAmbient.y + (kDayAmbient.y - kNightAmbient.y) * dayFactor,
-                kNightAmbient.z + (kDayAmbient.z - kNightAmbient.z) * dayFactor,
+                kNightAmbientArt.x + (dayAmbient.x - kNightAmbientArt.x) * dayFactor,
+                kNightAmbientArt.y + (dayAmbient.y - kNightAmbientArt.y) * dayFactor,
+                kNightAmbientArt.z + (dayAmbient.z - kNightAmbientArt.z) * dayFactor,
                 dayFactor,
             };
 
@@ -185,6 +214,72 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 未使用
         };
 
+        // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
+        struct alignas(16) GPULight
+        {
+            DirectX::XMFLOAT4 PositionType;   // xyz=ワールド座標, w=LightType
+            DirectX::XMFLOAT4 ColorRange;     // rgb=露出済み放射輝度, w=Range
+            DirectX::XMFLOAT4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
+            DirectX::XMFLOAT4 Params;         // x=spotAngleOffset, yzw=未使用(エリアライト用に予約)
+        };
+        static_assert(sizeof(GPULight) == 64, "GPULightはDirectLighting.hlsl側と64バイトで一致させる必要がある");
+
+        // t5の構造化バッファに詰めるライトの最大数。実データ(BistroInterior.fbxで4灯)に対しては
+        // 十分すぎる余裕を持たせてあるが、構造化バッファなのでこの容量自体がGPU時間へ影響することはない
+        // (シェーダはLightCount.xまでしかループしないため)
+        constexpr uint32_t kMaxLights = 1024;
+
+        // DirectLighting.hlsl側のcbuffer LightingConstantsと一致させる必要がある
+        struct alignas(16) LightingConstants
+        {
+            DirectX::XMUINT4 LightCount; // x=有効ライト数, yzw=未使用
+        };
+
+        // Assets::LightをGPU側のGPULightへ変換する。カンデラ/ルクスの測光量にEV100露出を直接掛けて
+        // 表示レンジへ変換する(設計判断は「強度の単位」節を参照)。Frostbiteのスポット角度減衰用
+        // lightAngleScale/lightAngleOffsetもここでCPU事前計算する
+        GPULight MakeGPULight(const Assets::Light& light, float exposureEV100)
+        {
+            const float exposure = ComputeExposure(exposureEV100);
+            const float radiance = light.Intensity * exposure;
+
+            GPULight gpuLight{};
+            gpuLight.PositionType = { light.Position[0], light.Position[1], light.Position[2], static_cast<float>(light.Type) };
+            gpuLight.ColorRange = { light.Color[0] * radiance, light.Color[1] * radiance, light.Color[2] * radiance, light.Range };
+
+            float angleScale = 0.0f;
+            float angleOffset = 0.0f;
+            if (light.Type == Assets::LightType::Spot)
+            {
+                // Frostbiteのスポット減衰式: t = saturate(dot(spotDir,-L)*scale + offset), atten = t*t
+                const float cosOuter = std::cos(light.SpotOuterConeAngle);
+                const float cosInner = std::cos(light.SpotInnerConeAngle);
+                angleScale = 1.0f / std::max(0.001f, cosInner - cosOuter);
+                angleOffset = -cosOuter * angleScale;
+            }
+            gpuLight.DirectionAngle = { light.Direction[0], light.Direction[1], light.Direction[2], angleScale };
+            gpuLight.Params = { angleOffset, 0.0f, 0.0f, 0.0f };
+            return gpuLight;
+        }
+
+        // ImGuiでのライト方向編集用。正規化済み方向ベクトルをYaw/Pitch(度)に変換する。
+        // DragFloat3で直接編集すると正規化のたびに値が跳ねて操作しづらいため、角度で編集する。
+        // Yawは水平面内の角度(X軸を0度、Z軸を90度)、Pitchは水平面からの仰角(下向きが負)
+        void DirectionToYawPitch(const float direction[3], float& outYawDegrees, float& outPitchDegrees)
+        {
+            outYawDegrees = DirectX::XMConvertToDegrees(std::atan2(direction[2], direction[0]));
+            outPitchDegrees = DirectX::XMConvertToDegrees(std::asin(std::clamp(direction[1], -1.0f, 1.0f)));
+        }
+
+        void YawPitchToDirection(float yawDegrees, float pitchDegrees, float outDirection[3])
+        {
+            const float yaw = DirectX::XMConvertToRadians(yawDegrees);
+            const float pitch = DirectX::XMConvertToRadians(pitchDegrees);
+            outDirection[0] = std::cos(pitch) * std::cos(yaw);
+            outDirection[1] = std::sin(pitch);
+            outDirection[2] = std::cos(pitch) * std::sin(yaw);
+        }
+
         // タンジェント空間(Z軸=法線方向)の半球状にランダムなカーネルサンプルを生成する。
         // John Chapmanのチュートリアルにならい、原点付近にサンプルが偏るようスケーリングして
         // 近距離のディテールを優先的に拾う
@@ -237,6 +332,7 @@ namespace Kurenai
             { L"Bistro (McGuire) - Exterior", L"Assets\\BistroMcGuire\\Exterior_gltf\\exterior.gltf", true, { 21.5f, 16.0f, -53.5f }, 0.0f },
             { L"Bistro (McGuire) - Interior", L"Assets\\BistroMcGuire\\Interior_gltf\\interior.gltf" },
             { L"White Surface Test", L"Assets\\MaterialTest\\MaterialTest.gltf" },
+            { L"Light Test", L"Assets\\LightTest\\LightTest.gltf" },
         };
         constexpr size_t kSceneCount = sizeof(kScenes) / sizeof(kScenes[0]);
 
@@ -573,6 +669,19 @@ namespace Kurenai
         materialConstantBufferDesc.SizeInBytes = sizeof(MaterialConstants);
         m_MaterialConstantBuffer = m_Device->CreateBuffer(materialConstantBufferDesc);
 
+        // ポイント/スポットライトのリスト(t5)。CPUから毎フレーム更新するが、ピクセルシェーダから
+        // 読み取り専用でよいためStructuredReadOnly(RWStructuredBufferではなくStructuredBuffer)で作成する
+        RHI::BufferDesc lightBufferDesc;
+        lightBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+        lightBufferDesc.SizeInBytes = sizeof(GPULight) * kMaxLights;
+        lightBufferDesc.StrideInBytes = sizeof(GPULight);
+        m_LightBuffer = m_Device->CreateBuffer(lightBufferDesc);
+
+        RHI::BufferDesc lightingConstantBufferDesc;
+        lightingConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        lightingConstantBufferDesc.SizeInBytes = sizeof(LightingConstants);
+        m_LightingConstantBuffer = m_Device->CreateBuffer(lightingConstantBufferDesc);
+
         RHI::BufferDesc presentConstantBufferDesc;
         presentConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         presentConstantBufferDesc.SizeInBytes = sizeof(PresentConstants);
@@ -639,6 +748,12 @@ namespace Kurenai
         m_Model = Assets::Model{};
         m_Model = Assets::LoadModel(*m_Device, modelPath);
         m_CurrentSceneIndex = sceneIndex;
+
+        // アセット由来のライトをユーザー編集用のコピーへ複製する(m_Model.Lightsは直接編集しない。
+        // シーンを再読み込みすればアセット既定値に戻るようにするため)
+        m_Lights = m_Model.Lights;
+        m_SelectedLightIndex = m_Lights.empty() ? -1 : 0;
+        m_LightOverflowLogged = false;
 
         FrameCameraToModel();
 
@@ -922,26 +1037,157 @@ namespace Kurenai
         ImGui::End();
     }
 
-    void KurenaiEngine3D::RenderLightingUI()
+    void KurenaiEngine3D::RenderLightingUI(const FrameState& frameState)
     {
+        // ライトを選択して全項目を開くと縦に長くなるため、Profiler(280,490に移動済み)と
+        // 重ならないよう十分な高さを確保しておく
         ImGui::SetNextWindowPos(ImVec2(280.0f, 10.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(300.0f, 470.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Lighting");
 
-        ImGui::SliderFloat("Time of Day", &m_TimeOfDay, 0.0f, 24.0f, "%.2f h");
-        ImGui::Checkbox("Auto Advance", &m_TimeAutoAdvance);
-        if (m_TimeAutoAdvance)
+        if (ImGui::CollapsingHeader("Sun", ImGuiTreeNodeFlags_DefaultOpen))
         {
-            ImGui::SliderFloat("Speed", &m_TimeAdvanceSpeed, 0.1f, 10.0f, "%.1f h/s");
+            ImGui::SliderFloat("Time of Day", &m_TimeOfDay, 0.0f, 24.0f, "%.2f h");
+            ImGui::Checkbox("Auto Advance", &m_TimeAutoAdvance);
+            if (m_TimeAutoAdvance)
+            {
+                ImGui::SliderFloat("Speed", &m_TimeAdvanceSpeed, 0.1f, 10.0f, "%.1f h/s");
+            }
+            ImGui::SliderFloat("Sun Azimuth", &m_SunAzimuthDegrees, 0.0f, 360.0f, "%.1f deg");
+            // 太陽・環境光・下記ポイント/スポットライトすべてに一様にかかるシーン全体の露出
+            // (実在の写真露出値EV100)。屋内シーンでは実カメラと同様に下げて調整する運用になる
+            ImGui::SliderFloat("EV100", &m_SceneExposureEV100, -8.0f, 20.0f, "%.2f");
         }
-        ImGui::SliderFloat("Sun Azimuth", &m_SunAzimuthDegrees, 0.0f, 360.0f, "%.1f deg");
+
+        if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            uint32_t activeCount = 0;
+            for (const Assets::Light& light : m_Lights)
+            {
+                if (light.Enabled)
+                {
+                    ++activeCount;
+                }
+            }
+            ImGui::Text("Active: %u / %zu", activeCount, m_Lights.size());
+
+            ImGui::BeginChild("LightList", ImVec2(0.0f, 90.0f), true);
+            for (size_t i = 0; i < m_Lights.size(); ++i)
+            {
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::Checkbox("##enabled", &m_Lights[i].Enabled);
+                ImGui::SameLine();
+                const char* typeLabel = m_Lights[i].Type == Assets::LightType::Directional ? "Directional"
+                                       : m_Lights[i].Type == Assets::LightType::Spot ? "Spot" : "Point";
+                char label[192];
+                std::snprintf(
+                    label, sizeof(label), "[%s] %s", typeLabel, m_Lights[i].Name.empty() ? "(no name)" : m_Lights[i].Name.c_str());
+                if (ImGui::Selectable(label, m_SelectedLightIndex == static_cast<int>(i)))
+                {
+                    m_SelectedLightIndex = static_cast<int>(i);
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+
+            if (ImGui::Button("Add"))
+            {
+                Assets::Light newLight;
+                const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
+                newLight.Position[0] = cameraPosition.x;
+                newLight.Position[1] = cameraPosition.y;
+                newLight.Position[2] = cameraPosition.z;
+                newLight.Name = "New Light";
+                m_Lights.push_back(newLight);
+                m_SelectedLightIndex = static_cast<int>(m_Lights.size()) - 1;
+            }
+
+            const bool hasSelection = m_SelectedLightIndex >= 0 && m_SelectedLightIndex < static_cast<int>(m_Lights.size());
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!hasSelection);
+            if (ImGui::Button("Duplicate") && hasSelection)
+            {
+                Assets::Light duplicated = m_Lights[static_cast<size_t>(m_SelectedLightIndex)];
+                duplicated.Name += " (Copy)";
+                m_Lights.push_back(duplicated);
+                m_SelectedLightIndex = static_cast<int>(m_Lights.size()) - 1;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Remove") && hasSelection)
+            {
+                m_Lights.erase(m_Lights.begin() + m_SelectedLightIndex);
+                m_SelectedLightIndex =
+                    m_Lights.empty() ? -1 : std::min(m_SelectedLightIndex, static_cast<int>(m_Lights.size()) - 1);
+            }
+            ImGui::EndDisabled();
+
+            if (hasSelection)
+            {
+                Assets::Light& light = m_Lights[static_cast<size_t>(m_SelectedLightIndex)];
+
+                char nameBuffer[128];
+                std::snprintf(nameBuffer, sizeof(nameBuffer), "%s", light.Name.c_str());
+                if (ImGui::InputText("Name", nameBuffer, sizeof(nameBuffer)))
+                {
+                    light.Name = nameBuffer;
+                }
+
+                int typeIndex = static_cast<int>(light.Type);
+                const char* typeItems[] = { "Directional", "Point", "Spot" };
+                if (ImGui::Combo("Type", &typeIndex, typeItems, IM_ARRAYSIZE(typeItems)))
+                {
+                    light.Type = static_cast<Assets::LightType>(typeIndex);
+                }
+
+                ImGui::ColorEdit3("Color", light.Color);
+                ImGui::SliderFloat(
+                    "Intensity (cd/lx)", &light.Intensity, 0.01f, 1000000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+
+                if (light.Type != Assets::LightType::Directional)
+                {
+                    ImGui::DragFloat3("Position", light.Position, 0.1f);
+                    ImGui::SliderFloat("Range", &light.Range, 0.1f, 500.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+                }
+
+                if (light.Type != Assets::LightType::Point)
+                {
+                    float yawDegrees = 0.0f;
+                    float pitchDegrees = 0.0f;
+                    DirectionToYawPitch(light.Direction, yawDegrees, pitchDegrees);
+                    bool directionChanged = false;
+                    directionChanged |= ImGui::SliderFloat("Direction Yaw", &yawDegrees, -180.0f, 180.0f, "%.1f deg");
+                    directionChanged |= ImGui::SliderFloat("Direction Pitch", &pitchDegrees, -89.0f, 89.0f, "%.1f deg");
+                    if (directionChanged)
+                    {
+                        YawPitchToDirection(yawDegrees, pitchDegrees, light.Direction);
+                    }
+                }
+
+                if (light.Type == Assets::LightType::Spot)
+                {
+                    float innerDegrees = DirectX::XMConvertToDegrees(light.SpotInnerConeAngle);
+                    float outerDegrees = DirectX::XMConvertToDegrees(light.SpotOuterConeAngle);
+                    ImGui::SliderFloat("Inner Cone", &innerDegrees, 0.0f, 89.0f, "%.1f deg");
+                    ImGui::SliderFloat("Outer Cone", &outerDegrees, 0.0f, 90.0f, "%.1f deg");
+                    if (innerDegrees > outerDegrees)
+                    {
+                        innerDegrees = outerDegrees;
+                    }
+                    light.SpotInnerConeAngle = DirectX::XMConvertToRadians(innerDegrees);
+                    light.SpotOuterConeAngle = DirectX::XMConvertToRadians(outerDegrees);
+                }
+            }
+        }
 
         ImGui::End();
     }
 
     void KurenaiEngine3D::RenderProfilerUI()
     {
-        ImGui::SetNextWindowPos(ImVec2(280.0f, 280.0f), ImGuiCond_FirstUseEver);
+        // Lightingパネル(280,10)がライト編集項目を全部開くと縦に480px近く必要になるため、
+        // それより下(490)に配置して重ならないようにする
+        ImGui::SetNextWindowPos(ImVec2(280.0f, 490.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(280.0f, 460.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Profiler");
 
@@ -1234,7 +1480,7 @@ namespace Kurenai
             RenderSceneSwitchUI();
             RenderPostProcessUI();
             RenderDebugViewUI();
-            RenderLightingUI();
+            RenderLightingUI(frameState);
             RenderProfilerUI();
         }
 
@@ -1242,7 +1488,7 @@ namespace Kurenai
         m_GPUProfiler->BeginFrame();
         m_CPUProfiler.BeginFrame();
 
-        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay, m_SunAzimuthDegrees);
+        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay, m_SunAzimuthDegrees, m_SceneExposureEV100);
         const DirectX::XMMATRIX lightViewProj = ComputeLightViewProj(sunLighting.Direction);
 
         FrameConstants constants;
@@ -1386,18 +1632,78 @@ namespace Kurenai
             .Name = "DirectLight",
             .Reads = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_ShadowMap.get() },
             .RenderTargets = { m_DirectLightTexture.get() },
-            .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, &frameState](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
                 cmd->SetPipelineState(m_DirectLightPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+
+                // 有効なライトだけを詰めてt5のライトリストへ渡す。シェーダはLightCount.xまでしか
+                // ループしないため、無効なライトはそもそもGPUへ送らない
+                std::vector<GPULight> gpuLights;
+                gpuLights.reserve(m_Lights.size());
+                for (const Assets::Light& light : m_Lights)
+                {
+                    if (!light.Enabled)
+                    {
+                        continue;
+                    }
+                    gpuLights.push_back(MakeGPULight(light, m_SceneExposureEV100));
+                }
+
+                // 容量(kMaxLights)を超える場合は、カメラに近い順に先頭kMaxLights灯のみ採用する。
+                // 全画面ディファードなのでフラスタムカリングは効果が薄く、これは容量超過時の
+                // 安全弁としてのみ機能する(実データの上限はBistroInteriorの4灯)
+                if (gpuLights.size() > kMaxLights)
+                {
+                    const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
+                    std::sort(
+                        gpuLights.begin(), gpuLights.end(),
+                        [&cameraPosition](const GPULight& a, const GPULight& b)
+                        {
+                            const float dxA = a.PositionType.x - cameraPosition.x;
+                            const float dyA = a.PositionType.y - cameraPosition.y;
+                            const float dzA = a.PositionType.z - cameraPosition.z;
+                            const float dxB = b.PositionType.x - cameraPosition.x;
+                            const float dyB = b.PositionType.y - cameraPosition.y;
+                            const float dzB = b.PositionType.z - cameraPosition.z;
+                            return (dxA * dxA + dyA * dyA + dzA * dzA) < (dxB * dxB + dyB * dyB + dzB * dzB);
+                        });
+                    gpuLights.resize(kMaxLights);
+
+                    if (!m_LightOverflowLogged)
+                    {
+                        Core::Logger::Warning(
+                            "KurenaiEngine3D",
+                            "ライト数が上限(" + std::to_string(kMaxLights) + ")を超えたため、カメラに近い順に描画します");
+                        m_LightOverflowLogged = true;
+                    }
+                }
+
+                LightingConstants lightingConstants{};
+                lightingConstants.LightCount = { static_cast<uint32_t>(gpuLights.size()), 0u, 0u, 0u };
+                // UpdateBufferはSetConstantBufferより前に呼ぶ必要がある。DX12の定数バッファは
+                // リングバッファで、GetGPUVirtualAddress()が現在のリングスロットのアドレスを返すため
+                cmd->UpdateBuffer(m_LightingConstantBuffer.get(), &lightingConstants, sizeof(lightingConstants));
+                cmd->SetConstantBuffer(1, m_LightingConstantBuffer.get());
+
                 cmd->SetSampler(0, m_Sampler.get());
                 cmd->SetTexture(0, m_GBufferAlbedo.get());
                 cmd->SetTexture(1, m_GBufferNormal.get());
                 cmd->SetTexture(2, m_GBufferMaterial.get());
                 cmd->SetTexture(3, m_GBufferDepth.get());
                 cmd->SetTexture(4, m_ShadowMap.get());
+
+                // ライトが1つも無いフレームでもSetShaderResourceBufferは必ず呼ぶ(SetPipelineStateが
+                // 毎回ルート引数を無効化するため、シェーダが宣言しているリソースを未バインドのまま
+                // Drawすることになってしまう)。UpdateBuffer自体は0灯なら省略してよい
+                if (!gpuLights.empty())
+                {
+                    cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
+                }
+                cmd->SetShaderResourceBuffer(5, m_LightBuffer.get());
+
                 cmd->Draw(3, 0);
             },
         });

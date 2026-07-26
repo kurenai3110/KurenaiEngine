@@ -1,6 +1,9 @@
 #include "DX11CommandList.h"
 
+#include <cstring>
 #include <utility>
+
+#include "Core/Logger.h"
 
 #include "DX11Buffer.h"
 #include "DX11ComputePipelineState.h"
@@ -121,10 +124,35 @@ namespace Kurenai::RHI
         m_Context->PSSetSamplers(slot, 1, samplers);
     }
 
+    void DX11CommandList::SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer)
+    {
+        auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
+        ID3D11ShaderResourceView* srvs[] = { dx11Buffer->GetShaderResourceView() };
+        m_Context->PSSetShaderResources(slot, 1, srvs);
+    }
+
     void DX11CommandList::UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes)
     {
-        (void)sizeInBytes;
         auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
+
+        // BufferUsage::StructuredReadOnly(D3D11_USAGE_DYNAMIC)はUpdateSubresourceが使えないため
+        // Map(WRITE_DISCARD)経由で書き込む。有効なライト数ぶんだけ書けばよく、残りは未定義のままで
+        // 構わない(シェーダ側はLightCount.xまでしかループしないため読まれない)
+        if (dx11Buffer->IsDynamic())
+        {
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            HRESULT hr = m_Context->Map(dx11Buffer->GetBuffer(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+            if (FAILED(hr))
+            {
+                Core::Logger::Error("DX11", "動的バッファのMapに失敗しました");
+                return;
+            }
+            std::memcpy(mapped.pData, data, sizeInBytes);
+            m_Context->Unmap(dx11Buffer->GetBuffer(), 0);
+            return;
+        }
+
+        (void)sizeInBytes;
         m_Context->UpdateSubresource(dx11Buffer->GetBuffer(), 0, nullptr, data, 0, 0);
     }
 
