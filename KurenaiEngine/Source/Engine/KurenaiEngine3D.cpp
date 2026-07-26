@@ -831,6 +831,26 @@ namespace Kurenai
 
         ImGui::Checkbox("Enable VSync", &m_VSyncEnabled);
 
+        ImGui::Checkbox("Fixed FPS", &m_FixedFPSEnabled);
+        if (m_FixedFPSEnabled)
+        {
+            static const char* kTargetFPSNames[] = { "30", "60", "120" };
+            static const float kTargetFPSValues[] = { 30.0f, 60.0f, 120.0f };
+            int targetFPSIndex = 1; // 見つからない場合は60fps相当の位置にしておく
+            for (int i = 0; i < IM_ARRAYSIZE(kTargetFPSValues); ++i)
+            {
+                if (kTargetFPSValues[i] == m_TargetFPS)
+                {
+                    targetFPSIndex = i;
+                    break;
+                }
+            }
+            if (ImGui::Combo("Target FPS", &targetFPSIndex, kTargetFPSNames, IM_ARRAYSIZE(kTargetFPSNames)))
+            {
+                m_TargetFPS = kTargetFPSValues[targetFPSIndex];
+            }
+        }
+
         ImGui::Checkbox("Enable SSR", &m_SSREnabled);
         if (m_SSREnabled)
         {
@@ -1032,6 +1052,20 @@ namespace Kurenai
             // GPU側の処理時間の反映なので差し引く(DX11は常に0が返るため影響しない)
             const float rawCPUTimeMs = std::chrono::duration<float, std::milli>(cpuEnd - cpuStart).count();
             m_CPUFrameTimeMs = std::max(0.0f, rawCPUTimeMs - m_Device->GetLastFrameGPUWaitTimeMs());
+
+            // 固定FPSモード: このフレームの処理(Time of Day更新+Render+Present)が目標フレーム時間
+            // より短く終わった場合、余った時間だけ待機して間隔を揃える。CPU/GPU計測(上記)の後に
+            // 行うことで、この待機時間自体がプロファイラの計測値に混ざらないようにしている
+            if (m_FixedFPSEnabled && m_TargetFPS > 0.0f)
+            {
+                const auto targetFrameDuration = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(1.0 / m_TargetFPS));
+                const auto frameDeadline = now + targetFrameDuration;
+                if (std::chrono::steady_clock::now() < frameDeadline)
+                {
+                    std::this_thread::sleep_until(frameDeadline);
+                }
+            }
 
             // FPSは指数移動平均で平滑化する(生の1/deltaTimeだとフレームごとの揺れが大きく読み取りにくいため)
             if (renderDeltaTime > 0.0f)

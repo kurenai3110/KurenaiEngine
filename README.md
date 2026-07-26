@@ -136,7 +136,7 @@ Sample3D.exe -dx12
   - Sponza
   - Bistro (McGuire) - Exterior / Interior
   - White Surface Test(粗さ0〜1の球体列)
-- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・SSRのON/OFFと各パラメータもここで調整できます
+- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・SSRのON/OFFと各パラメータもここで調整できます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth 等、各パス中間結果のデバッグ表示)
 - **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)を調整
 - **Profiler** — FPS、CPU/GPUフレーム時間を各パスごとに表示

@@ -187,6 +187,13 @@ namespace Kurenai
         // (ON時はPresentが即座に返らず、モニタのリフレッシュレートにFPSが制限される)
         bool m_VSyncEnabled = false;
 
+        // 固定FPSモード。有効時、Renderスレッドが目標FPSより速く回った分だけ待機してフレーム間隔を
+        // 一定に保つ。VSyncはモニタのリフレッシュレート依存かつティアリング防止が目的だが、こちらは
+        // 任意のFPS値に固定できる(物理更新の再現性確保や環境間でのフレーム時間比較などが目的)。
+        // 既定で60fps固定を有効にする
+        bool m_FixedFPSEnabled = true;
+        float m_TargetFPS = 60.0f;
+
         // Presentパス(選択中のレンダーターゲットをアスペクト比を保ってバックバッファへ拡大縮小表示)
         std::unique_ptr<RHI::IRHIShader> m_PresentVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_PresentPixelShader;
