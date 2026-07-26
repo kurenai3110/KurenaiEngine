@@ -3,7 +3,7 @@ import os
 import struct
 
 FACE_SIZE = 256
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Assets", "Skybox")
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Assets", "Packed", "Skybox")
 OUT_PATH = os.path.join(OUT_DIR, "Sky.dds")
 
 # 地平線付近は明るい水色、天頂は濃い青空色へグラデーションする

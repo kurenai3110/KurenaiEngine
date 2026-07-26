@@ -24,9 +24,10 @@ namespace Kurenai::RHI
     // テクスチャファイルのデコード結果(DirectXTexのTexMetadata/ScratchImage)を保持するクラス。
     // GPUデバイスを一切必要としないため、ワーカースレッドから並列に呼び出せる
     // (GPUリソース作成はIRHIDevice::CreateTextureFromImageへ別途渡す側で行う)。
-    // PNG/JPG等の非圧縮形式は、初回のみBC7圧縮+ミップ生成を行いディスクキャッシュ
-    // (<元ファイル>.srgb.ktexcache / .linear.ktexcache)へ保存する。2回目以降はこのキャッシュを
-    // 読むだけになり、WICデコード・ミップ生成・BC7圧縮のいずれも発生しない
+    // PNG/JPG等の非圧縮形式のBC7圧縮+ミップ生成はKurenaiPacker.exe(オフラインのアセット
+    // ビルドツール)が事前に行い、.ktexへ書き出す。ランタイムはLoadFromPackedTextureで
+    // その.ktexを読むだけであり、WICデコード・ミップ生成・BC7圧縮のいずれも発生しない
+    // (LoadFromFileはKurenaiPacker自身と、スカイボックス等の.dds直接読み込みでのみ使う)
     class KURENAI_API TextureImage
     {
     public:
@@ -36,8 +37,15 @@ namespace Kurenai::RHI
         TextureImage& operator=(const TextureImage&) = delete;
         ~TextureImage();
 
-        // 失敗した場合はstd::runtime_errorを投げる(呼び出し側でフォールバック処理を行うこと)
+        // 失敗した場合はstd::runtime_errorを投げる(呼び出し側でフォールバック処理を行うこと)。
+        // PNG/JPG等はWICデコード+ミップ生成+GPU BC7圧縮を行う(KurenaiPacker.exeが使う)。
+        // DDS/TGAは既に圧縮・ミップ済みの配布形式として扱いそのまま読み込む(スカイボックス等)
         static TextureImage LoadFromFile(const std::wstring& filePath, bool sRGB);
+
+        // KurenaiPacker.exeが生成した.ktex(ModelPackage.h参照)を読み込む。
+        // ヘッダ検証後、DDSペイロードをDirectX::LoadFromDDSMemoryでデコードするだけなので、
+        // WICデコード・ミップ生成・BC7圧縮はいずれも発生しない。失敗時はstd::runtime_errorを投げる
+        static TextureImage LoadFromPackedTexture(const std::wstring& filePath);
 
         // デコード済みデータの総バイト数。並列プリフェッチ時のメモリ使用量制御に使う
         uint64_t GetSizeInBytes() const;

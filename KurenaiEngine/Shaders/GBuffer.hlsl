@@ -8,11 +8,21 @@ cbuffer FrameConstants : register(b0)
     float4 LightColor;
 };
 
-cbuffer MaterialConstants : register(b1)
+// メッシュ単位(将来的にはシーン上のモデルインスタンス単位)の情報。
+// DX12のルートシグネチャがCBVをb0/b1の2枠しか持たないため、モデル行列もここへ同居させている
+cbuffer ObjectConstants : register(b1)
 {
+    float4x4 World;
+    // Worldの3x3部分の逆転置(4x4に格納)。回転+非一様スケールで法線が歪むのを防ぐため、
+    // 位置と同じWorldではなくこちらを法線の変換に使う(Architecture.html「法線マッピングの
+    // 接線ベクトル計算」参照)
+    float4x4 NormalMatrix;
     float MetallicFactor;
     float RoughnessFactor;
-    float2 MaterialPadding;
+    // Worldの行列式が負(ミラーリングを含む非一様スケール)の場合は-1。従法線の向きが
+    // 反転するため、頂点接線のw成分(従法線の向き)に掛け合わせて補正する
+    float TangentSignFlip;
+    float ObjectPadding;
 };
 
 Texture2D BaseColorTexture : register(t0);
@@ -47,11 +57,14 @@ struct PSOutput
 PSInput VSMain(VSInput input)
 {
     PSInput output;
-    output.Position = mul(float4(input.Position, 1.0f), ViewProj);
-    output.Normal = input.Normal;
-    output.WorldPos = input.Position;
+    float3 worldPos = mul(float4(input.Position, 1.0f), World).xyz;
+    output.Position = mul(float4(worldPos, 1.0f), ViewProj);
+    output.Normal = mul(input.Normal, (float3x3)NormalMatrix);
+    output.WorldPos = worldPos;
     output.UV = input.UV;
-    output.Tangent = input.Tangent;
+    // 接線は面上の方向ベクトルなので、法線と異なりinverse-transposeではなく
+    // Worldの3x3部分そのままで変換する(位置と同じ変換)
+    output.Tangent = float4(mul(input.Tangent.xyz, (float3x3)World), input.Tangent.w * TangentSignFlip);
     return output;
 }
 
