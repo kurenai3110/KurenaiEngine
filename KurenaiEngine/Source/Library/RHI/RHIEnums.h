@@ -17,6 +17,10 @@ namespace Kurenai::RHI
         // コンピュートシェーダーから読み書きする構造化バッファ(RWStructuredBuffer)。
         // UAV+SRVの両方を持つDEFAULT/GPU専用ヒープに作成される
         Structured,
+        // CPUから毎フレーム書き換え、シェーダからは読み取り専用(StructuredBuffer<T>)の構造化バッファ。
+        // ライトリストのような「要素数が可変で定数バッファに収めるには大きい配列」を
+        // グラフィックスパイプラインのピクセルシェーダへSRVとしてバインドする用途向け
+        StructuredReadOnly,
     };
 
     enum class PrimitiveTopology

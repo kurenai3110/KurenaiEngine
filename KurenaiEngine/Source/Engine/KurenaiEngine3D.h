@@ -62,7 +62,7 @@ namespace Kurenai
         void RenderSceneSwitchUI();
         void RenderPostProcessUI();
         void RenderDebugViewUI();
-        void RenderLightingUI();
+        void RenderLightingUI(const FrameState& frameState);
         void RenderProfilerUI();
         DirectX::XMMATRIX ComputeLightViewProj(const DirectX::XMFLOAT3& lightDirection) const;
 
@@ -235,6 +235,13 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_MaterialConstantBuffer;
 
+        // ポイント/スポットライトのリスト(t5、StructuredReadOnly)と、有効ライト数を渡すb1。
+        // 太陽(平行光)はb0のLightDirection/LightColorのまま(詳細はdocs/Architecture.html参照)
+        std::unique_ptr<RHI::IRHIBuffer> m_LightBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> m_LightingConstantBuffer;
+        // 容量(kMaxLights)超過を検出した最初のフレームだけ警告ログを出すためのフラグ
+        bool m_LightOverflowLogged = false;
+
         // LoadScene(Updateスレッド。UpdateSceneSwitch経由で呼ばれる)が書き込み、Render()(Renderスレッド。
         // 描画そのものに加えRenderPostProcessUI等のImGuiスライダーがm_SSAORadius等を直接書き換える)が
         // 読み書きする「シーン状態」一式をこのミューテックスで保護する。LoadScene呼び出し全体と
@@ -246,6 +253,15 @@ namespace Kurenai
         Assets::Model m_Model;
         size_t m_CurrentSceneIndex = 0;
         Core::Camera m_Camera;
+
+        // LoadSceneがm_Model.Lightsからコピーし、以降ImGui(Lightingパネル)が編集する。
+        // アセット由来のデータとユーザー編集を分離するため(シーンを再読み込みすればアセット既定値に戻る)。
+        // m_SceneMutexで保護される(m_Modelと同じ理由)
+        std::vector<Assets::Light> m_Lights;
+        int m_SelectedLightIndex = -1;
+        // 実在の写真露出値(EV100)。太陽・環境光・ポイント/スポットライトすべてに同じ値がかかる、
+        // シーン全体で単一の露出設定(詳細はdocs/Architecture.html参照)
+        float m_SceneExposureEV100 = 15.0f;
 
         // RenderSceneSwitchUI(Renderスレッド)でシーン切り替えボタンが押されたときに書き込まれ、
         // UpdateSceneSwitch(Updateスレッド)が毎フレーム読み取って消費する1要素の受け渡し用。

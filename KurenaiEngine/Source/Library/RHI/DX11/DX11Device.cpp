@@ -152,6 +152,38 @@ namespace Kurenai::RHI
             return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, uav);
         }
 
+        // 読み取り専用の構造化バッファ(StructuredBuffer)。CPUから毎フレームUpdateBufferで書き換える前提
+        // なのでD3D11_USAGE_DYNAMIC + CPU_ACCESS_WRITEで作成し、Map(WRITE_DISCARD)経由で更新する
+        // (UAVを持たないためUpdateSubresourceが使えるDEFAULTヒープにする必要はない)
+        if (desc.Usage == BufferUsage::StructuredReadOnly)
+        {
+            D3D11_BUFFER_DESC structuredDesc{};
+            structuredDesc.ByteWidth = desc.SizeInBytes;
+            structuredDesc.Usage = D3D11_USAGE_DYNAMIC;
+            structuredDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            structuredDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            structuredDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            structuredDesc.StructureByteStride = desc.StrideInBytes;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> structuredBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&structuredDesc, nullptr, &structuredBuffer),
+                "読み取り専用構造化バッファの作成に失敗しました");
+
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            srvDesc.Buffer.FirstElement = 0;
+            srvDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
+
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+            ThrowIfFailed(
+                m_Device->CreateShaderResourceView(structuredBuffer.Get(), &srvDesc, &srv),
+                "読み取り専用構造化バッファのシェーダリソースビュー作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, srv, /*isDynamic=*/true);
+        }
+
         D3D11_BUFFER_DESC bufferDesc{};
         bufferDesc.ByteWidth = desc.SizeInBytes;
         bufferDesc.BindFlags = ToBindFlags(desc.Usage);
