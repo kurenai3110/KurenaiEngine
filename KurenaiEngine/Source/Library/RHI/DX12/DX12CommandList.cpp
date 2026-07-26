@@ -297,6 +297,14 @@ namespace Kurenai::RHI
         m_Device->GetCommandList()->SetComputeRootConstantBufferView(slot, dx12Buffer->GetGPUVirtualAddress());
     }
 
+    void DX12CommandList::SetComputeSampler(uint32_t slot, IRHISampler* sampler)
+    {
+        // コンピュート用ルートシグネチャもグラフィックスと同じs0固定の共有サンプラーヒープ
+        // (SetComputePipelineStateが毎回ルートパラメータ3をこのヒープの先頭にバインドする)を使うため、
+        // 実装はSetSamplerと同一(書き込み先ヒープが同じであれば呼び出し元のステージは問わない)
+        SetSampler(slot, sampler);
+    }
+
     void DX12CommandList::SetComputeTexture(uint32_t slot, IRHITexture* texture)
     {
         auto* dx12Texture = static_cast<DX12Texture*>(texture);
@@ -312,6 +320,16 @@ namespace Kurenai::RHI
         dx12Texture->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         m_PendingComputeUavHandles[slot] = dx12Texture->GetUavCpuHandle(mipLevel);
+        m_PendingComputeUavSlotMask |= (1u << slot);
+        m_BoundComputeUavResources[slot] = dx12Texture->GetResource();
+    }
+
+    void DX12CommandList::SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel)
+    {
+        auto* dx12Texture = static_cast<DX12Texture*>(texture);
+        dx12Texture->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        m_PendingComputeUavHandles[slot] = dx12Texture->GetCubeUavCpuHandle(face, mipLevel);
         m_PendingComputeUavSlotMask |= (1u << slot);
         m_BoundComputeUavResources[slot] = dx12Texture->GetResource();
     }

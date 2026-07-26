@@ -37,11 +37,17 @@ namespace Kurenai
             // SSAOパスがView空間でのサンプリングに使う(末尾に追加し、既存シェーダのオフセットは変えない)
             DirectX::XMFLOAT4X4 View;
             DirectX::XMFLOAT4X4 Proj;
-            // 昼夜サイクル用(末尾に追加し、既存シェーダのオフセットは変えない)。rgb=環境光の色、a=昼度(0=夜,1=昼)
+            // 昼夜サイクル用(末尾に追加し、既存シェーダのオフセットは変えない)。rgb=環境光の色
+            // (m_AmbientScale乗算済み、Render()側のconstants.AmbientColor代入部を参照)、
+            // a=昼度(0=夜,1=昼。m_AmbientScaleは掛けない)
             DirectX::XMFLOAT4 AmbientColor;
             // M2: カスケード選択・PCSS用(末尾に追加)。xyzw = 各カスケードのView空間far距離
             DirectX::XMFLOAT4 CascadeSplits;
-            // x: PCSSのライトサイズ(m_ShadowLightSize)、yzwは未使用
+            // x: PCSSのライトサイズ(m_ShadowLightSize)。y: IBLプリフィルタ済み鏡面マップの
+            // 最大ミップレベル(kIBLPrefilterMipLevels-1、DeferredLighting.hlslがラフネス→ミップの
+            // 変換に使う)。z: IBL強度倍率(m_IBLEnabled=falseの場合は0.0fを渡し、シェーダ側で
+            // EvaluateIBLの代わりに定数色アンビエント(AmbientColor.rgb)へフォールバックする)。
+            // wは未使用
             DirectX::XMFLOAT4 ShadowParams;
         };
 
@@ -49,6 +55,15 @@ namespace Kurenai
         struct alignas(16) CascadeConstants
         {
             DirectX::XMFLOAT4X4 ViewProj;
+        };
+
+        // IBLConvolve.hlsl(CSIrradiance/CSPrefilter)へ、処理対象の面(キューブマップは面ごとに
+        // 個別ディスパッチが必要)とCSPrefilterのみが使うラフネス値を渡す専用の定数バッファ
+        struct alignas(16) IBLFaceConstants
+        {
+            uint32_t Face = 0;
+            float Roughness = 0.0f;
+            DirectX::XMFLOAT2 Padding{};
         };
 
         // 太陽光の向き・色・環境光を時刻(0〜24時)から計算する
@@ -647,6 +662,40 @@ namespace Kurenai
 
         m_Sampler = m_Device->CreateDefaultSampler();
 
+        // IBL(Image Based Lighting)の3つの畳み込み結果を保持するテクスチャと、それを生成する
+        // コンピュートシェーダー一式。実際の畳み込み(スカイボックスのサンプリング)はRender()の
+        // 最初のフレームで一度だけ行う(m_IBLBaked参照)。ここではリソースの作成のみ行う
+        m_IrradianceTexture = m_Device->CreateUAVTextureCube(kIBLIrradianceSize, RHI::Format::R16G16B16A16_Float);
+        m_PrefilteredEnvTexture = m_Device->CreateMippedUAVTextureCube(
+            kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels);
+        m_BRDFLUTTexture = m_Device->CreateUAVTexture(kIBLBRDFLUTSize, kIBLBRDFLUTSize, RHI::Format::R16G16_Float);
+
+        RHI::ShaderDesc brdfLutCsDesc;
+        brdfLutCsDesc.Stage = RHI::ShaderStage::Compute;
+        brdfLutCsDesc.FilePath = shaderDirectory + L"BRDFLUT.hlsl";
+        brdfLutCsDesc.EntryPoint = "CSMain";
+        m_BRDFLUTComputeShader = m_Device->CreateShader(brdfLutCsDesc);
+        m_BRDFLUTPipelineState = m_Device->CreateComputePipelineState({ m_BRDFLUTComputeShader.get() });
+
+        RHI::ShaderDesc irradianceCsDesc;
+        irradianceCsDesc.Stage = RHI::ShaderStage::Compute;
+        irradianceCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        irradianceCsDesc.EntryPoint = "CSIrradiance";
+        m_IrradianceComputeShader = m_Device->CreateShader(irradianceCsDesc);
+        m_IrradiancePipelineState = m_Device->CreateComputePipelineState({ m_IrradianceComputeShader.get() });
+
+        RHI::ShaderDesc prefilterCsDesc;
+        prefilterCsDesc.Stage = RHI::ShaderStage::Compute;
+        prefilterCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        prefilterCsDesc.EntryPoint = "CSPrefilter";
+        m_PrefilterComputeShader = m_Device->CreateShader(prefilterCsDesc);
+        m_PrefilterPipelineState = m_Device->CreateComputePipelineState({ m_PrefilterComputeShader.get() });
+
+        RHI::BufferDesc iblPrefilterConstantBufferDesc;
+        iblPrefilterConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        iblPrefilterConstantBufferDesc.SizeInBytes = sizeof(IBLFaceConstants);
+        m_IBLPrefilterConstantBuffer = m_Device->CreateBuffer(iblPrefilterConstantBufferDesc);
+
         RHI::BufferDesc constantBufferDesc;
         constantBufferDesc.Usage = RHI::BufferUsage::Constant;
         constantBufferDesc.SizeInBytes = sizeof(FrameConstants);
@@ -1093,6 +1142,16 @@ namespace Kurenai
             ImGui::SliderFloat("Shadow Light Size", &m_ShadowLightSize, 0.001f, 0.05f, "%.4f");
         }
 
+        ImGui::Checkbox("Enable IBL", &m_IBLEnabled);
+        if (m_IBLEnabled)
+        {
+            ImGui::SliderFloat("IBL Intensity", &m_IBLIntensity, 0.0f, 2.0f);
+        }
+        else
+        {
+            ImGui::SliderFloat("Ambient Scale", &m_AmbientScale, 0.0f, 3.0f);
+        }
+
         ImGui::Checkbox("Enable VSync", &m_VSyncEnabled);
 
         ImGui::Checkbox("Fixed FPS", &m_FixedFPSEnabled);
@@ -1151,6 +1210,9 @@ namespace Kurenai
             "Shadow Map",
             "SSR (Final + Reflections)",
             "Hi-Z (Depth Mip Chain)",
+            "IBL - Irradiance (Cubemap, Look Around)",
+            "IBL - Prefiltered Specular (Cubemap Mip Chain, Look Around)",
+            "IBL - BRDF LUT (X=NdotV, Y=Roughness)",
         };
 
         int currentIndex = static_cast<int>(m_DebugView);
@@ -1167,6 +1229,11 @@ namespace Kurenai
         if (m_DebugView == DebugView::ShadowMap)
         {
             ImGui::SliderInt("Shadow Cascade", &m_ShadowDebugCascade, 0, static_cast<int>(kCascadeCount) - 1);
+        }
+
+        if (m_DebugView == DebugView::IBLPrefilter)
+        {
+            ImGui::SliderInt("Prefilter Mip Level", &m_IBLPrefilterDebugMipLevel, 0, static_cast<int>(kIBLPrefilterMipLevels) - 1);
         }
 
         ImGui::End();
@@ -1654,15 +1721,80 @@ namespace Kurenai
         constants.LightColor = sunLighting.Color;
         DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameState.Camera.GetViewMatrix()));
         DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameState.Camera.GetProjectionMatrix()));
-        constants.AmbientColor = sunLighting.Ambient;
+        // rgb(環境光の色)にm_AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
+        // (DeferredLighting.hlsl)の強度調整用で、alpha(dayFactor、IBLの夜間減光・背景スカイの
+        // 昼夜ブレンドに使う)には掛けない
+        constants.AmbientColor =
+        {
+            sunLighting.Ambient.x * m_AmbientScale,
+            sunLighting.Ambient.y * m_AmbientScale,
+            sunLighting.Ambient.z * m_AmbientScale,
+            sunLighting.Ambient.w,
+        };
         constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
-        constants.ShadowParams = { m_ShadowLightSize, 0.0f, 0.0f, 0.0f };
+        const float iblIntensity = m_IBLEnabled ? m_IBLIntensity : 0.0f;
+        constants.ShadowParams = { m_ShadowLightSize, static_cast<float>(kIBLPrefilterMipLevels - 1), iblIntensity, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
         // トランジェントリソースの確保は行わず、既存の永続確保済みテクスチャ(G-Buffer・SceneColor等)を
         // そのまま読み書きする(詳細はRenderGraph.h参照)
         Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
+
+        // --- IBL畳み込みパス: スカイボックスは実行時に変化しない静的アセットのため、
+        //     起動後最初のフレームでのみ実行し、以降は焼き直さない(m_IBLBaked) ---
+        if (!m_IBLBaked)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "IBLBake",
+                .Reads = { m_SkyboxTexture.get() },
+                .Writes = { m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    // BRDF積分LUT(スカイボックスに依存しない、NdotV×ラフネスの128x128グリッド)
+                    cmd->SetComputePipelineState(m_BRDFLUTPipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_BRDFLUTTexture.get(), 0);
+                    cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
+
+                    // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
+                    // スライス選択できないため、面ごとに1回ずつディスパッチする
+                    cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
+                    cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+                    cmd->SetComputeSampler(0, m_Sampler.get());
+                    for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                    {
+                        IBLFaceConstants faceConstants{};
+                        faceConstants.Face = face;
+                        cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                        cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                        cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_IrradianceTexture.get(), face, 0);
+                        cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
+                    }
+
+                    // プリフィルタ済み鏡面(本物のTextureCube、ミップごとに異なるラフネスで畳み込む)。
+                    // 面×ミップの組み合わせごとに1回ずつディスパッチする
+                    cmd->SetComputePipelineState(m_PrefilterPipelineState.get());
+                    cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+                    cmd->SetComputeSampler(0, m_Sampler.get());
+                    for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
+                    {
+                        const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
+                        const float roughness = static_cast<float>(mip) / static_cast<float>(kIBLPrefilterMipLevels - 1);
+                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                        {
+                            IBLFaceConstants faceConstants{};
+                            faceConstants.Face = face;
+                            faceConstants.Roughness = roughness;
+                            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_PrefilteredEnvTexture.get(), face, mip);
+                            cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
+                        }
+                    }
+                },
+            });
+            m_IBLBaked = true;
+        }
 
         RHI::Viewport shadowViewport;
         shadowViewport.Width = static_cast<float>(kShadowMapSize);
@@ -1957,7 +2089,11 @@ namespace Kurenai
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Lighting",
-            .Reads = { m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_SkyboxTexture.get(), activeAOTexture, m_GBufferEmissive.get() },
+            .Reads = {
+                m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                m_SkyboxTexture.get(), activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
+                m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
+            },
             .RenderTargets = { m_SceneColor.get() },
             .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
             {
@@ -1976,6 +2112,10 @@ namespace Kurenai
                 cmd->SetTexture(4, m_SkyboxTexture.get());
                 cmd->SetTexture(5, activeAOTexture);
                 cmd->SetTexture(6, m_GBufferEmissive.get());
+                cmd->SetTexture(7, m_GBufferNormal.get());
+                cmd->SetTexture(8, m_IrradianceTexture.get());
+                cmd->SetTexture(9, m_PrefilteredEnvTexture.get());
+                cmd->SetTexture(10, m_BRDFLUTTexture.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -2031,6 +2171,9 @@ namespace Kurenai
         // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
         // 深度バッファ(GBuffer深度・シャドウマップ)はPresent.hlsl側でグレースケール化するためMode=1を渡す
         RHI::IRHITexture* presentSourceTexture = m_TonemapTexture.get();
+        // Mode 9(IBL Irradiance/Prefilterのキューブマップ表示)専用。他のModeでは使われないが、
+        // t1には常に何らかの有効なTextureCubeをバインドしておく必要があるため既定値を持たせる
+        RHI::IRHITexture* presentDebugCubeTexture = m_SkyboxTexture.get();
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = m_RenderWidth;
         uint32_t presentSourceHeight = m_RenderHeight;
@@ -2098,11 +2241,42 @@ namespace Kurenai
             presentSourceWidth = std::max(1u, m_RenderWidth >> m_HiZDebugMipLevel);
             presentSourceHeight = std::max(1u, m_RenderHeight >> m_HiZDebugMipLevel);
             break;
+        case DebugView::IBLIrradiance:
+            // 本物のTextureCubeのため、SourceTexture(t0、Texture2D)ではなくDebugCubeTexture(t1)を
+            // 現在のカメラ視線方向でサンプルする(Present.hlsl Mode 9、presentDebugCubeTexture参照)
+            presentDebugCubeTexture = m_IrradianceTexture.get();
+            presentMode = 9;
+            presentSourceWidth = m_RenderWidth;
+            presentSourceHeight = m_RenderHeight;
+            break;
+        case DebugView::IBLPrefilter:
+            presentDebugCubeTexture = m_PrefilteredEnvTexture.get();
+            presentMode = 9;
+            presentSourceWidth = m_RenderWidth;
+            presentSourceHeight = m_RenderHeight;
+            break;
+        case DebugView::IBLBRDFLUT:
+            presentSourceTexture = m_BRDFLUTTexture.get();
+            presentMode = 0; // (scale, bias)の生値をそのままRGとして表示(値域はおおむね[0,1])
+            presentSourceWidth = kIBLBRDFLUTSize;
+            presentSourceHeight = kIBLBRDFLUTSize;
+            break;
         }
 
         PresentConstants presentConstants{};
         presentConstants.Mode = presentMode;
-        presentConstants.MipLevel = static_cast<float>(m_HiZDebugMipLevel);
+        if (m_DebugView == DebugView::IBLPrefilter)
+        {
+            presentConstants.MipLevel = static_cast<float>(m_IBLPrefilterDebugMipLevel);
+        }
+        else if (m_DebugView == DebugView::IBLIrradiance)
+        {
+            presentConstants.MipLevel = 0.0f; // イラディアンスマップは常に1ミップのみ
+        }
+        else
+        {
+            presentConstants.MipLevel = static_cast<float>(m_HiZDebugMipLevel);
+        }
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
         // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する
@@ -2111,9 +2285,9 @@ namespace Kurenai
 
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Present",
-            .Reads = { presentSourceTexture },
+            .Reads = { presentSourceTexture, presentDebugCubeTexture },
             .SwapChainTarget = m_SwapChain.get(),
-            .Execute = [this, &letterboxViewport, presentSourceTexture](RHI::IRHICommandList* cmd)
+            .Execute = [this, &letterboxViewport, presentSourceTexture, presentDebugCubeTexture](RHI::IRHICommandList* cmd)
             {
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
                 cmd->ClearDepth(1.0f);
@@ -2124,6 +2298,7 @@ namespace Kurenai
                 cmd->SetConstantBuffer(1, m_PresentConstantBuffer.get());
                 cmd->SetSampler(0, m_Sampler.get());
                 cmd->SetTexture(0, presentSourceTexture);
+                cmd->SetTexture(1, presentDebugCubeTexture);
                 cmd->Draw(3, 0);
             },
         });

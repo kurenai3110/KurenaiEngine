@@ -29,6 +29,15 @@ namespace Kurenai::RHI
             return m_MipUavs.empty() ? m_Uav.Get() : m_MipUavs[mipLevel].Get();
         }
 
+        // キューブマップ(CreateUAVTextureCube/CreateMippedUAVTextureCube)専用。m_MipUavsに
+        // mip*kCubeFaceCount+face の順でフラットに格納しているため、この2引数版で個別の面・
+        // ミップのUAVを取り出す
+        static constexpr uint32_t kCubeFaceCount = 6;
+        ID3D11UnorderedAccessView* GetCubeUnorderedAccessView(uint32_t face, uint32_t mipLevel = 0) const
+        {
+            return m_MipUavs[mipLevel * kCubeFaceCount + face].Get();
+        }
+
     private:
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_Srv;
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_Rtv;

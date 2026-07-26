@@ -186,10 +186,25 @@ namespace Kurenai::RHI
         m_Context->CSSetShaderResources(slot, 1, srvs);
     }
 
+    void DX11CommandList::SetComputeSampler(uint32_t slot, IRHISampler* sampler)
+    {
+        auto* dx11Sampler = static_cast<DX11Sampler*>(sampler);
+        ID3D11SamplerState* samplers[] = { dx11Sampler->GetSamplerState() };
+        m_Context->CSSetSamplers(slot, 1, samplers);
+    }
+
     void DX11CommandList::SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel)
     {
         auto* dx11Texture = static_cast<DX11Texture*>(texture);
         ID3D11UnorderedAccessView* uavs[] = { dx11Texture->GetUnorderedAccessView(mipLevel) };
+        m_Context->CSSetUnorderedAccessViews(slot, 1, uavs, nullptr);
+        m_BoundComputeUavSlotMask |= (1u << slot);
+    }
+
+    void DX11CommandList::SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel)
+    {
+        auto* dx11Texture = static_cast<DX11Texture*>(texture);
+        ID3D11UnorderedAccessView* uavs[] = { dx11Texture->GetCubeUnorderedAccessView(face, mipLevel) };
         m_Context->CSSetUnorderedAccessViews(slot, 1, uavs, nullptr);
         m_BoundComputeUavSlotMask |= (1u << slot);
     }

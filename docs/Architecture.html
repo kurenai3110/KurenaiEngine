@@ -212,6 +212,7 @@
     <li><a href="#bistro">11. Bistroアセットの変換パイプライン</a></li>
     <li><a href="#lights">12. 複数ライト</a></li>
     <li><a href="#dllsplit">13. 3DLL構成への分割</a></li>
+    <li><a href="#ibl">14. IBL(Image Based Lighting)</a></li>
   </ol>
 </nav>
 
@@ -233,11 +234,16 @@ PBR(メタリック/ラフネス)計算を行います。
 続けてポイント/スポットライトのリスト(構造化バッファ)をループして影なしで加算する(11章参照)。
 パス数はライトを追加しても8のまま変わらない</li>
 <li>AO/GIパス — 選択中の手法(SSAO/SSIL)でNormal/Depth(SSILの場合はAlbedo・直接光バッファも読む)からAO・間接拡散光を計算しブラー</li>
-<li>最終合成パス — Albedo・直接光・AO/GI・スカイボックスを合成し、HDRのままSceneColorへ出力(トーンマッピングは行わない)</li>
+<li>最終合成パス — Albedo・直接光・AO/GI・スカイボックス・IBL(拡散イラディアンス+プリフィルタ済み鏡面、14章参照)を合成し、HDRのままSceneColorへ出力(トーンマッピングは行わない)</li>
 <li>SSRパス — SceneColor・G-Bufferから鏡面反射をHDRのまま計算し加算</li>
 <li>Tonemapパス — HDRのSceneColor(SSR有効時はSSR適用後)をReinhardトーンマッピング+ガンマ補正でLDRへ変換</li>
 <li>Presentパス — 選択中のデバッグビューをバックバッファへ表示</li>
 </ol>
+<p>
+上記に加え、起動後最初のフレームだけ「IBL畳み込みパス」が実行されます(スカイボックスは実行時に
+変化しない静的アセットのため一度だけで十分、詳細は14章参照)。毎フレーム実行される9パスとは
+性質が異なるため上のリストには含めていません。
+</p>
 <p>
 シャドウ・AO/GI・SSRはそれぞれON/OFF可能で、OFF時は該当パスをスキップします。
 G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(<code>KurenaiEngine3D</code>のコンストラクタ引数、既定は1280x720)、
@@ -842,6 +848,209 @@ Sample2Dの出力フォルダには<code>KurenaiEngineLibrary.dll</code>・<code
 3D側は一切ビルドされない)。<code>dumpbin /dependents KurenaiEngine2D.dll</code>で確認すると、依存は
 <code>KurenaiEngineLibrary.dll</code>とkernel32/user32/gdi32のみで、d3d11.dll/d3d12.dll/dxgi.dllへの
 依存は無い(RHIの実装がLibrary側に完全に隠蔽されているため)。
+</p>
+</section>
+
+<section id="ibl">
+<h2>14. IBL(Image Based Lighting)</h2>
+<p>
+以前の環境光は太陽の昼度から求めた<strong>定数色</strong>(<code>AmbientColor.rgb</code>)を
+AO率と乗算するだけで、鏡面の間接光はSSR(画面内に映るものしか反射できない)頼みだった。
+金属・光沢面がフォトリアルにならない主要因だったため、スカイボックスから
+(1)拡散イラディアンス、(2)ラフネス別プリフィルタ済み鏡面、(3)BRDF積分LUTの3つを
+畳み込み、split-sum近似(Karis, "Real Shading in Unreal Engine 4", 2013)でDeferredLighting.hlsl
+(最終合成パス)の環境光項を物理ベースに置き換えた。
+</p>
+
+<h3>14.1 拡散イラディアンス・プリフィルタ済み鏡面は本物のTextureCube</h3>
+<p>
+拡散イラディアンス・プリフィルタ済み鏡面はいずれも「方向→色」のマップのため、本物のTextureCube
+(<code>CreateUAVTextureCube</code>/<code>CreateMippedUAVTextureCube</code>)として実装している。
+当初はRHI変更を避けるため法線エンコード(5章、<code>NormalEncoding.hlsli</code>の
+<code>OctEncode</code>/<code>OctDecode</code>)と同じオクタヘドラル図法の2Dテクスチャで代用したが、
+実装コストよりTextureCubeとして正しく持つことを優先すべきと判断し、RHI抽象化層
+(<code>IRHIDevice</code>/<code>IRHICommandList</code>)にキューブマップ用のUAV作成・面単位の
+ディスパッチAPIを追加した(14.3節)。
+</p>
+<p>
+HLSLはリソースを動的にスライス選択できないため、コンピュートシェーダーからキューブマップの
+各面へ書き込むには面ごとに個別のUAV(<code>Texture2DArray</code>ビュー、要素数1)を張り、
+C++側(<code>KurenaiEngine3D::Render</code>のIBLBakeパス)が面ごとに1回ずつディスパッチする
+(カスケードシャドウマップが各カスケードの深度パスを個別に描画するのと同じ制約・同じ対処)。
+どの面を処理するかは<code>IBLFaceConstants.Face</code>(D3D標準の面順: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5)
+で渡し、<code>IBLConvolve.hlsl</code>の<code>CubeFaceDirection(face, uv)</code>がその面・
+テクセルが表す方向を計算する。
+</p>
+
+<h3>14.2 3つの畳み込みと生成タイミング</h3>
+<ul>
+<li><strong>BRDF積分LUT</strong>(<code>BRDFLUT.hlsl</code> CSMain) — スカイボックスに依存しないため
+(NdotV, ラフネス)の128x128グリッドをGGXインポータンスサンプリング(1024サンプル)で積分し、
+(スケールA, バイアスB)のペアをR16G16_Floatへ焼く。IBL用の可視性項は直接光用(<code>k=(r+1)^2/8</code>)
+とは異なり<code>k=roughness^2/2</code>を使う(Karis 2013)。方向性を持たない2Dテーブルのため、
+これだけは通常のTexture2Dのまま(面ごとのディスパッチは不要)。</li>
+<li><strong>拡散イラディアンス</strong>(<code>IBLConvolve.hlsl</code> CSIrradiance) —
+出力テクセルが表す法線方向Nについて、接空間の半球を(phi, theta)の等間隔グリッド
+(0.025rad刻み)で離散化し、cosθsinθ重み付き平均をとる(モンテカルロではなく決定的な離散化。
+32x32x6面、R16G16B16A16_Float)。</li>
+<li><strong>プリフィルタ済み鏡面</strong>(<code>IBLConvolve.hlsl</code> CSPrefilter) — ミップごとに
+異なるラフネス(<code>Roughness = mip / (kIBLPrefilterMipLevels-1)</code>)でGGXインポータンス
+サンプリング(256サンプル)し、反射方向R周りの放射輝度をNdotL重み付き平均する。リアルタイムIBLの
+定番近似(Karis 2013)としてV=R=Nを仮定し、視線依存の伸びは無視する。128x128x6面を基準に6ミップ
+(128,64,32,16,8,4)のミップチェーンを持つ(面×ミップの組み合わせごとに1回ずつディスパッチ)。</li>
+</ul>
+<p>
+スカイボックスは実行時に変化しない静的アセットのため、この3つはいずれも
+<strong>起動後最初のフレームでのみ</strong>1回だけ実行する(<code>KurenaiEngine3D::Render</code>の
+<code>m_IBLBaked</code>フラグ、通常のRenderGraphパスとして登録され毎フレームの仕組みをそのまま使う)。
+以降は焼き直さない。
+</p>
+
+<h3>14.3 RHIへの追加</h3>
+<p>
+この機能のために<code>IRHIDevice</code>/<code>IRHICommandList</code>へ以下のAPIを追加した。
+</p>
+<ul>
+<li><code>CreateMippedUAVTexture(width, height, format, mipLevels)</code> —
+<code>CreateHiZTexture</code>(R32_Float固定)を一般化し、フォーマットを指定できるようにしたもの。
+内部実装はHi-Zと同じ「ミップごとに個別のUAVを張る」方式を流用しており、
+<code>CreateHiZTexture</code>自身もこの関数を固定引数で呼ぶだけの薄いラッパーに書き換えた。</li>
+<li><code>CreateUAVTextureCube(size, format)</code> / <code>CreateMippedUAVTextureCube(size, format, mipLevels)</code> —
+上記の「キューブマップ版」。DX11は<code>ArraySize=6</code> + <code>D3D11_RESOURCE_MISC_TEXTURECUBE</code>の
+<code>Texture2D</code>として作成し、読み取り用SRVは<code>D3D11_SRV_DIMENSION_TEXTURECUBE</code>(全6面・
+全ミップ)、書き込み用UAVは面・ミップの組み合わせごとに<code>D3D11_UAV_DIMENSION_TEXTURE2DARRAY</code>
+(<code>FirstArraySlice</code>=面、<code>ArraySize</code>=1)を張る。DX12も同じ考え方で
+<code>D3D12_SRV_DIMENSION_TEXTURECUBE</code> / <code>D3D12_UAV_DIMENSION_TEXTURE2DARRAY</code>を使う。
+面×ミップ単位のUAVは<code>mip*6+face</code>の順でフラットに保持し、
+<code>DX11Texture::GetCubeUnorderedAccessView(face, mip)</code> /
+<code>DX12Texture::GetCubeUavCpuHandle(face, mip)</code>で個別に取り出す。</li>
+<li><code>SetComputeUnorderedAccessTextureCubeFace(slot, texture, face, mipLevel)</code> —
+上記のキューブマップの指定した面・ミップだけを<code>RWTexture2DArray</code>(要素数1)として
+コンピュートシェーダーへバインドする。</li>
+<li><code>SetComputeSampler(slot, sampler)</code> — TextureCube(スカイボックス)をコンピュート
+シェーダーから<code>SampleLevel</code>する際に必要。DX11はグラフィックス/コンピュートで
+サンプラースロットが独立しているため<code>CSSetSamplers</code>を明示的に呼ぶ必要がある一方、
+DX12はグラフィックス・コンピュート共通のs0固定共有ヒープを使う設計(3.2章参照)のため実装は
+<code>SetSampler</code>への単純な委譲になる。</li>
+</ul>
+
+<h3>14.4 テクスチャレジスタ・DX12のkTextureSlotCount・デバッグ表示</h3>
+<p>
+最終合成パスはG-Buffer法線(拡散イラディアンス・鏡面の方向を求めるのに必要)とIBLの3テクスチャを
+新たに読むため、t0〜t6(既存7枚)にt7(Normal)・t8(Irradiance、TextureCube)・
+t9(PrefilteredEnv、TextureCube)・t10(BRDFLUT)を追加し11枚になった。DX12は全パイプラインステートで
+共有する固定サイズのSRVディスクリプタテーブルを使う設計(4章のシャドウカスケード統合時と同じ制約)
+のため、<code>DX12CommandList::kTextureSlotCount</code>と<code>DX12Device.cpp</code>側の同名定数を
+9(t0〜t8)から11(t0〜t10)へ拡張した。
+</p>
+<p>
+Render Targetsパネルの「IBL - Irradiance」「IBL - Prefiltered Specular」デバッグ表示は、
+オクタヘドラル図法だった頃は小さな2Dテクスチャをそのまま拡大表示していたが、TextureCubeは
+<code>Present.hlsl</code>のSourceTexture(t0、常にTexture2D)にそのままバインドできない。そこで
+専用のDebugCubeTexture(t1)を追加し、背景スカイの表示(1章)と同じ要領で現在のカメラ位置から
+各ピクセル方向へのレイを再構成してキューブマップをサンプルする(Present.hlsl Mode 9)。
+右クリックドラッグで視点を回せば球面全体を見回して確認できる。
+</p>
+
+<h3>14.5 スペキュラオクルージョンと夜間の扱い</h3>
+<p>
+SSAO/SSILのAO率を拡散IBLにそのまま乗算するのは妥当だが、鏡面IBLに同じAO率をそのまま使うと
+粗い面でハイライトまで過剰に暗くなる。Lagarde &amp; de Rousiers,
+"Moving Frostbite to Physically Based Rendering 3.0"(2014)のスペキュラオクルージョン近似
+(<code>saturate(pow(NdotV + ao, exp2(-16*roughness-1)) - 1 + ao)</code>)を経由してから適用する
+ことで、ラフネスが高いほどAOの効きを弱める。
+</p>
+<p>
+拡散イラディアンス・プリフィルタ済み鏡面はいずれも昼固定のスカイボックスから焼いたものなので、
+夜間はこれらのマップ自体は変化しない。既存の背景スカイ表示(<code>AmbientColor.a</code>で
+夜色へlerp)と一貫性を保つため、IBL全体の寄与に<code>AmbientColor.a</code>(昼度)を乗算する形で
+近似している。太陽が沈むとIBLの寄与も比例して弱まるが、厳密には不正確(本来は空自体の色が
+変化するべき)である点は既知の制約として残る。
+</p>
+
+<h3>14.6 HDRスカイボックス生成(<code>Tools/generate_sky_cubemap.py</code>)</h3>
+<p>
+当初<code>Assets/Packed/Skybox/Sky.dds</code>は地平線色→天頂色を単純に線形補間するだけの
+LDR(R8G8B8A8_UNorm、[0,1]にクランプ済み)キューブマップだった。これではIBLの入力に十分な
+ダイナミックレンジがそもそも存在せず、プリフィルタ済み鏡面・拡散イラディアンスのどちらも
+実質的にほぼ一様な弱い値にしかならなかった。
+</p>
+<p>
+実写ベースのHDR環境マップ取得の定番手法であるDebevec &amp; Malik法
+("Recovering High Dynamic Range Radiance Maps from Photographs", SIGGRAPH 1997)は、
+露出を変えて同一シーンを複数枚ブラケット撮影した<strong>実写真</strong>からカメラの応答関数を
+最小二乗法で推定してHDR化する手法であり、本質的に実写真の入力を必要とする。本リポジトリには
+そのような撮影素材が無く、代替の実写真を用意することもできなかったため、実写真無しに適用できる
+<strong>物理ベースの手続き的HDR空生成</strong>へ切り替えた(架空の撮影データを捏造することは
+プロジェクト方針(事実ベースのみ)に反するため行っていない)。
+</p>
+<p>
+空の輝度分布はPerez, Seals &amp; Michalsky,
+"All-Weather Model for Sky Luminance Distribution"(1993)/
+Preetham, Shirley &amp; Smits, "A Practical Analytic Model for Daylight"(SIGGRAPH 1999)が
+まとめているCIE快晴空の係数(a=-1, b=-0.32, c=10, d=-3, e=0.45)によるPerez分布関数
+<code>L(θ,γ)/L(0,θs) = f(θ,γ)/f(0,θs)</code>で天頂角θ・太陽との角度γごとの相対輝度を求める。
+絶対輝度のスケール(天頂輝度)は<code>KurenaiEngine3D.cpp</code>の<code>ComputeSunLighting</code>と
+<strong>同じ出典・同じ値</strong>(Lagarde &amp; de Rousiers 2014の照度参照テーブル、空光20,000lx)に
+<code>ComputeExposure(EV100=15)</code>と同じ露出式を適用して求めており、太陽本体(平行光)・
+ポイント/スポットライトと同じHDRスケールに揃えている。
+</p>
+<p>
+太陽の可視円盤は描かない(ユーザー指示。「空だけでよい」)。太陽の方向(<code>sun_direction</code>、
+<code>ComputeSunLighting</code>と同じ式・同じ既定値: Time of Day=12時、Sun Azimuth=126.87度)は
+Perez分布のcircumsolar項(太陽に近い方向ほど散乱で明るくなるという、空自体の輝度分布の形)を
+決めるためだけに使う。このスカイボックス自体は起動時に一度だけ焼くオフラインアセットのため、
+<strong>実行中にImGuiの太陽スライダーを動かしても空の輝度分布の形自体は追従しない</strong>
+(14.5節の夜間近似と同種の、静的アセットゆえの既知の制約)。地面より下方向は空のモデルの
+適用範囲外のため、水平線のプラトー色から暗い接地色(アート的な近似値)へなだらかにフェードさせている。
+</p>
+
+<h3>14.7 実装時に見つかった不具合と修正の経緯</h3>
+<p>
+<strong>(1) 地平線付近が青空に見えない。</strong>天頂色→地平線色の補間を単純な線形補間にし、
+かつ地平線色をほぼ白(0.92, 0.94, 1.0)にしていたため、ゲームカメラが実際に見る典型的な低めの
+仰角(建物越しに覗く空など)では既に大きく地平線色側へ寄ってしまい、彩度がほぼ失われて灰色に
+見えた(実機で確認された不具合)。天頂色・地平線色そのものをより彩度の高い青に変更
+(天頂: (0.30, 0.55, 0.95)、地平線: (0.65, 0.80, 1.0))した上で、補間カーブを線形から3乗
+(<code>(1-cosθ)³</code>)に変更し、実際の快晴の空と同様に「高い仰角ではほぼ天頂色を保ち、
+水平線ぎわの最後の範囲だけ急速に白っぽくなる」挙動に直した。
+</p>
+<p>
+<strong>(2) circumsolar項による「くすんだ空」。</strong>CIE快晴空係数(c=10, d=-3)は太陽から45度も
+離れると輝度が天頂の1/4程度まで急激に落ち込む(単一散乱のみを仮定した理想的な快晴空のモデルの
+ため)。実際の大気は多重散乱・エアロゾルにより太陽から離れた領域もある程度明るく保たれるため、
+そのままだと典型的なカメラ視点(太陽の真下ではない方向)で暗く見えた(実機で指摘された見た目の
+問題)。<code>RELATIVE_LUMINANCE_FLOOR</code>(0.45)で最低輝度を底上げし、多重散乱を簡略化して
+表現した。
+</p>
+<p>
+<strong>(3) 太陽の可視円盤を追加した後、削除した。</strong>一時的に太陽本体(実際の平均角直径
+0.53度から求めた立体角で、照度100,000lxを輝度へ変換した円盤)を描画していたが、その角半径は
+<code>IBLConvolve.hlsl</code> CSIrradianceの離散化ステップ(0.025rad≈1.43度)よりずっと小さく、
+「たまたま積分の格子点が太陽に当たったテクセルだけ突出して明るい」という深刻なエイリアシングが
+Render Targets - IBL Irradianceで格子状のノイズとして現れた。見かけの角半径をサンプリング格子より
+大きく見せてエネルギー保存する対策(実時間レンダリングで広く使われる手法)でこの不具合自体は
+解消したが、その後ユーザー判断で「太陽の可視円盤は不要、青空のみでよい」となったため、
+太陽本体の描画処理一式を削除した(空の輝度分布の形を決めるcircumsolar項の計算自体は残っている)。
+結果としてエイリアシングの根本原因(サブテクセルサイズの極端に明るい点)自体が無くなっている。
+</p>
+<p>
+なお<code>Tools/generate_sky_cubemap.py</code>自体は当初Python標準ライブラリのみで実装していたが
+(512x512x6面のピクセルループで約10秒)、上記の反復検証を素早く行うためnumpyを使った
+ベクトル化書き換えを行った(同条件で1秒未満)。半精度浮動小数点への変換も自前のビット演算から
+numpyの<code>astype(np.float16)</code>に置き換えている。
+</p>
+
+<h3>14.8 Enable IBLトグルと無効時のフォールバック</h3>
+<p>
+Post ProcessingパネルにEnable IBLチェックボックス・IBL Intensityスライダー(既定0.5)を追加した。
+<code>FrameConstants.ShadowParams.z</code>にIBL強度倍率(無効時は0.0f)を渡し、
+<code>DeferredLighting.hlsl</code>側でこれが0以下の場合は<code>EvaluateIBL</code>の代わりに
+IBL導入以前と同じ定数色アンビエント(<code>AmbientColor.rgb * ao</code>、昼夜サイクルで変化する
+簡易近似)へフォールバックする(何もライティングしない真っ暗な状態にはしない)。IBL Intensityの
+既定値を1.0でなく0.5にしているのは、14.7節(2)の明るさ底上げの結果、既定のPerez分布そのままでは
+IBL全体の寄与が強すぎたため(実機でON/OFF比較したところ、IBL無効時はシーンがほぼ真っ暗になるほど
+IBLが支配的だったことから、既定強度を下げて調整可能にした)。
 </p>
 </section>
 

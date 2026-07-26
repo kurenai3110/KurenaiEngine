@@ -487,37 +487,105 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHITexture> DX11Device::CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels)
     {
+        return CreateMippedUAVTexture(width, height, Format::R32_Float, mipLevels);
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels)
+    {
+        const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);
+
         D3D11_TEXTURE2D_DESC textureDesc{};
         textureDesc.Width = width;
         textureDesc.Height = height;
         textureDesc.MipLevels = mipLevels;
         textureDesc.ArraySize = 1;
-        textureDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        textureDesc.Format = dxgiFormat;
         textureDesc.SampleDesc.Count = 1;
         textureDesc.Usage = D3D11_USAGE_DEFAULT;
         textureDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
 
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
-        ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, nullptr, &texture), "Hi-Zテクスチャの作成に失敗しました");
+        ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, nullptr, &texture), "ミップ付きUAVテクスチャの作成に失敗しました");
 
         // 全ミップを見るSRV(nullptrで既定=全ミップ)。デバッグ表示などでSampleLevelにより任意のミップを読む用
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
-        ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), nullptr, &srv), "Hi-Zシェーダリソースビューの作成に失敗しました");
+        ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), nullptr, &srv), "ミップ付きUAVシェーダリソースビューの作成に失敗しました");
 
-        // ミップごとに単一ミップのUAVを張り、ダウンサンプルのコンピュートシェーダーが
-        // 「ミップNを読んでミップN+1へ書く」を1ミップずつディスパッチできるようにする
+        // ミップごとに単一ミップのUAVを張り、コンピュートシェーダーがミップ単位で書き込めるようにする
+        // (Hi-Zの「前段ミップを読んで次段へ書く」ダウンサンプルだけでなく、IBLプリフィルタ済み鏡面マップの
+        // 「ミップごとに異なるラフネスで独立に畳み込む」用途でも同じ仕組みを再利用する)
         std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>> mipUavs;
         mipUavs.reserve(mipLevels);
         for (uint32_t mip = 0; mip < mipLevels; ++mip)
         {
             D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-            uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
+            uavDesc.Format = dxgiFormat;
             uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
             uavDesc.Texture2D.MipSlice = mip;
 
             Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
-            ThrowIfFailed(m_Device->CreateUnorderedAccessView(texture.Get(), &uavDesc, &uav), "Hi-Zアンオーダードアクセスビューの作成に失敗しました");
+            ThrowIfFailed(m_Device->CreateUnorderedAccessView(texture.Get(), &uavDesc, &uav), "ミップ付きUAVアンオーダードアクセスビューの作成に失敗しました");
             mipUavs.push_back(std::move(uav));
+        }
+
+        return std::make_unique<DX11Texture>(srv, nullptr, nullptr, nullptr, std::move(mipUavs));
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateUAVTextureCube(uint32_t size, Format format)
+    {
+        return CreateMippedUAVTextureCube(size, format, 1);
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels)
+    {
+        const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);
+
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = size;
+        textureDesc.Height = size;
+        textureDesc.MipLevels = mipLevels;
+        textureDesc.ArraySize = DX11Texture::kCubeFaceCount;
+        textureDesc.Format = dxgiFormat;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_DEFAULT;
+        textureDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+        textureDesc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, nullptr, &texture), "キューブマップUAVテクスチャの作成に失敗しました");
+
+        // 全6面・全ミップを1枚のTextureCubeとして読むSRV(サンプリング側、DeferredLighting.hlsl等)
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = dxgiFormat;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+        srvDesc.TextureCube.MostDetailedMip = 0;
+        srvDesc.TextureCube.MipLevels = mipLevels;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), &srvDesc, &srv), "キューブマップシェーダリソースビューの作成に失敗しました");
+
+        // 面×ミップの組み合わせごとに単一配列スライス・単一ミップのUAV(Texture2DArray、要素数1)を張り、
+        // コンピュートシェーダーが面ごとに1回ずつディスパッチして書き込めるようにする(HLSL側は
+        // RWTexture2DArrayとして宣言する必要がある。IBLConvolve.hlsl参照)。mip*kCubeFaceCount+face の
+        // 順でフラットに格納する(DX11Texture::GetCubeUnorderedAccessView参照)
+        std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>> mipUavs;
+        mipUavs.reserve(mipLevels * DX11Texture::kCubeFaceCount);
+        for (uint32_t mip = 0; mip < mipLevels; ++mip)
+        {
+            for (uint32_t face = 0; face < DX11Texture::kCubeFaceCount; ++face)
+            {
+                D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+                uavDesc.Format = dxgiFormat;
+                uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+                uavDesc.Texture2DArray.MipSlice = mip;
+                uavDesc.Texture2DArray.FirstArraySlice = face;
+                uavDesc.Texture2DArray.ArraySize = 1;
+
+                Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+                ThrowIfFailed(
+                    m_Device->CreateUnorderedAccessView(texture.Get(), &uavDesc, &uav),
+                    "キューブマップアンオーダードアクセスビューの作成に失敗しました");
+                mipUavs.push_back(std::move(uav));
+            }
         }
 
         return std::make_unique<DX11Texture>(srv, nullptr, nullptr, nullptr, std::move(mipUavs));
