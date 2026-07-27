@@ -36,6 +36,9 @@ namespace Kurenai::Core
         std::vector<RHI::IRHITexture*> RenderTargets;
         // このパスがDSVとして書くテクスチャ
         RHI::IRHITexture* DepthTarget = nullptr;
+        // DepthTargetがCreateDepthTextureArrayで作られたテクスチャ配列の場合に、書き込み先のスライスを指定する
+        // (カスケードシャドウマップが1カスケード=1スライスで使う)。通常の深度テクスチャでは0のままでよい
+        uint32_t DepthTargetArraySlice = 0;
 
         // RTV/DSV以外の手段(コンピュートシェーダーのUAV書き込み等)でこのパスが書くテクスチャ。
         // RenderTargets/DepthTargetと違い自動バインドはされず、依存関係の解決にのみ使う

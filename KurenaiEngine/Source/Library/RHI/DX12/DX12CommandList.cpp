@@ -38,7 +38,8 @@ namespace Kurenai::RHI
         cmdList->OMSetRenderTargets(1, &m_CurrentRenderTargetViews[0], FALSE, &m_CurrentDepthStencilView);
     }
 
-    void DX12CommandList::SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture)
+    void DX12CommandList::SetRenderTargets(
+        IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice)
     {
         count = count < kMaxRenderTargets ? count : kMaxRenderTargets;
         auto* cmdList = m_Device->GetCommandList();
@@ -55,8 +56,21 @@ namespace Kurenai::RHI
         if (depthTexture)
         {
             auto* dx12Depth = static_cast<DX12Texture*>(depthTexture);
+
+            // 範囲外のスライスはGetDsvCpuHandleがベクタ外アクセスになるため、事前に弾いてログを残す
+            const uint32_t sliceCount = dx12Depth->GetDepthSliceCount();
+            uint32_t slice = depthArraySlice;
+            if (sliceCount > 0 && slice >= sliceCount)
+            {
+                Core::Logger::Error(
+                    "DX12",
+                    "SetRenderTargets: 深度配列スライス" + std::to_string(slice) + "が範囲外です(スライス数: " +
+                        std::to_string(sliceCount) + ")。スライス0へフォールバックします");
+                slice = 0;
+            }
+
             dx12Depth->TransitionTo(cmdList, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            m_CurrentDepthStencilView = dx12Depth->GetDsvCpuHandle();
+            m_CurrentDepthStencilView = dx12Depth->GetDsvCpuHandle(slice);
         }
 
         cmdList->OMSetRenderTargets(

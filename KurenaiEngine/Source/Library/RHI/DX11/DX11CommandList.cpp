@@ -29,7 +29,8 @@ namespace Kurenai::RHI
         m_Context->OMSetRenderTargets(1, m_CurrentRenderTargetViews, m_CurrentDepthStencilView);
     }
 
-    void DX11CommandList::SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture)
+    void DX11CommandList::SetRenderTargets(
+        IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice)
     {
         count = count < kMaxRenderTargets ? count : kMaxRenderTargets;
         for (uint32_t i = 0; i < count; ++i)
@@ -37,7 +38,22 @@ namespace Kurenai::RHI
             m_CurrentRenderTargetViews[i] = static_cast<DX11Texture*>(targets[i])->GetRenderTargetView();
         }
         m_CurrentRenderTargetCount = count;
-        m_CurrentDepthStencilView = depthTexture ? static_cast<DX11Texture*>(depthTexture)->GetDepthStencilView() : nullptr;
+
+        m_CurrentDepthStencilView = nullptr;
+        if (depthTexture)
+        {
+            auto* dx11Depth = static_cast<DX11Texture*>(depthTexture);
+            m_CurrentDepthStencilView = dx11Depth->GetDepthStencilView(depthArraySlice);
+            if (!m_CurrentDepthStencilView)
+            {
+                // 範囲外のスライス指定は深度なしで描かれて結果が静かに壊れるため、必ずログを残す
+                Core::Logger::Error(
+                    "DX11",
+                    "SetRenderTargets: 深度配列スライス" + std::to_string(depthArraySlice) +
+                        "が範囲外です(スライス数: " + std::to_string(dx11Depth->GetDepthSliceCount()) + ")");
+            }
+        }
+
         m_Context->OMSetRenderTargets(count, m_CurrentRenderTargetViews, m_CurrentDepthStencilView);
     }
 

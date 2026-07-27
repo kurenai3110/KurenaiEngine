@@ -24,6 +24,10 @@ namespace Kurenai::Core
         {
             throw std::runtime_error("RenderGraph: パス '" + desc.Name + "' はSwapChainTargetとRenderTargets/DepthTargetを同時に指定できません");
         }
+        if (desc.DepthTargetArraySlice != 0 && desc.DepthTarget == nullptr)
+        {
+            throw std::runtime_error("RenderGraph: パス '" + desc.Name + "' はDepthTargetを指定せずにDepthTargetArraySliceを指定しています");
+        }
 
         m_Passes.push_back(std::move(desc));
     }
@@ -149,7 +153,8 @@ namespace Kurenai::Core
             if (pass.SwapChainTarget == nullptr)
             {
                 RHI::IRHITexture* const* targets = pass.RenderTargets.empty() ? nullptr : pass.RenderTargets.data();
-                m_CommandList->SetRenderTargets(targets, static_cast<uint32_t>(pass.RenderTargets.size()), pass.DepthTarget);
+                m_CommandList->SetRenderTargets(
+                    targets, static_cast<uint32_t>(pass.RenderTargets.size()), pass.DepthTarget, pass.DepthTargetArraySlice);
             }
 
             pass.Execute(m_CommandList);

@@ -26,13 +26,18 @@ namespace Kurenai::RHI
             uint32_t rtvIndex,
             uint32_t dsvIndex,
             uint32_t uavIndex = kInvalid,
-            std::vector<uint32_t> mipUavIndices = {});
+            std::vector<uint32_t> mipUavIndices = {},
+            std::vector<uint32_t> sliceDsvIndices = {});
         ~DX12Texture() override;
 
         ID3D12Resource* GetResource() const { return m_Resource.Get(); }
         D3D12_CPU_DESCRIPTOR_HANDLE GetSrvCpuHandle() const;
         D3D12_CPU_DESCRIPTOR_HANDLE GetRtvCpuHandle() const;
-        D3D12_CPU_DESCRIPTOR_HANDLE GetDsvCpuHandle() const;
+        // CreateDepthTextureArrayで作成した場合のみスライスごとの個別DSVを持ち、arraySliceで選択する
+        // (通常のCreateDepthTextureは単一DSVのため既定値の0でそのDSVが返る)
+        D3D12_CPU_DESCRIPTOR_HANDLE GetDsvCpuHandle(uint32_t arraySlice = 0) const;
+        // 深度スライス数(0 = テクスチャ配列ではない通常の深度テクスチャ)。範囲外指定時のログ用
+        uint32_t GetDepthSliceCount() const { return static_cast<uint32_t>(m_SliceDsvIndices.size()); }
         // CreateUAVTexture/CreateHiZTextureで作成した場合のみ有効(コンピュートシェーダーからのRW用)。
         // CreateHiZTextureのミップチェーンテクスチャはミップごとに個別のUAVを持つためmipLevelで選択する
         // (CreateUAVTextureは常に1ミップのみなので既定値の0で単一UAVが返る)
@@ -56,5 +61,6 @@ namespace Kurenai::RHI
         uint32_t m_DsvIndex;
         uint32_t m_UavIndex;
         std::vector<uint32_t> m_MipUavIndices;
+        std::vector<uint32_t> m_SliceDsvIndices;
     };
 }

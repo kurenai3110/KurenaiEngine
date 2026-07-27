@@ -175,7 +175,11 @@ namespace Kurenai::RHI
         }
 
         m_RtvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 16, false);
-        m_DsvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 8, false);
+        // DSVの内訳: スワップチェーンの深度1 + G-Bufferの深度1 + シャドウマップ配列のスライス4 = 常時6本。
+        // ただしCreateRenderTargetsのリサイズ処理は「新しいテクスチャを作ってから古いunique_ptrを解放する」
+        // 順になるため、リサイズ中は一時的に7本必要になる。余裕を持たせて16本確保する(DSVヒープは
+        // CPU側のみでGPUメモリを消費しないため、多めに取っても実害がない)
+        m_DsvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false);
         m_SrvCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvCpuHeapCapacity, false);
         // 1フレーム分のコマンドをまとめて記録してから1回だけ実行する設計のため、描画のたびに
         // 新しいkTextureSlotCount個のブロックを払い出せるよう、1フレームに必要な最大数を見込んで確保する。
@@ -1114,6 +1118,81 @@ namespace Kurenai::RHI
         m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
 
         return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, dsvIndex);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateDepthTextureArray(
+        uint32_t width, uint32_t height, uint32_t arraySize, float clearDepth)
+    {
+        if (width == 0 || height == 0 || arraySize == 0)
+        {
+            const std::string message = "CreateDepthTextureArray: 不正なサイズが指定されました(width=" +
+                                        std::to_string(width) + ", height=" + std::to_string(height) +
+                                        ", arraySize=" + std::to_string(arraySize) + ")";
+            Core::Logger::Error("DX12", message);
+            throw std::runtime_error(message);
+        }
+
+        if (arraySize > D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION)
+        {
+            const std::string message = "CreateDepthTextureArray: 配列サイズがD3D12の上限を超えています(arraySize=" +
+                                        std::to_string(arraySize) +
+                                        ", 上限=" + std::to_string(D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) + ")";
+            Core::Logger::Error("DX12", message);
+            throw std::runtime_error(message);
+        }
+
+        // 方針はCreateDepthTextureと同じ(R32_TYPELESSで作りDSV/SRVを個別に張る)。違いは
+        // ArraySizeが1より大きいことと、DSVをスライスごとに(Texture2DArray、要素数1で)張ること
+        D3D12_CLEAR_VALUE clearValue{};
+        clearValue.Format = DXGI_FORMAT_D32_FLOAT;
+        clearValue.DepthStencil.Depth = clearDepth;
+        clearValue.DepthStencil.Stencil = 0;
+
+        const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+        const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R32_TYPELESS, width, height, static_cast<UINT16>(arraySize), 1, 1, 0,
+            D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(
+            m_Device->CreateCommittedResource(
+                &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue,
+                IID_PPV_ARGS(&resource)),
+            "深度テクスチャ配列の作成に失敗しました");
+
+        // 全スライスを1枚のTexture2DArrayとして読むSRV(サンプリング側。ShadowSampling.hlsli等)
+        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture2DArray.MostDetailedMip = 0;
+        srvDesc.Texture2DArray.MipLevels = 1;
+        srvDesc.Texture2DArray.FirstArraySlice = 0;
+        srvDesc.Texture2DArray.ArraySize = arraySize;
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+        // スライスごとに単一配列スライスのDSVを張り、パスごとに1スライスずつ描き込めるようにする
+        // (CreateMippedUAVTextureCubeが面ごとのUAVを張るのと同じ考え方)
+        std::vector<uint32_t> sliceDsvIndices;
+        sliceDsvIndices.reserve(arraySize);
+        for (uint32_t slice = 0; slice < arraySize; ++slice)
+        {
+            const uint32_t sliceDsvIndex = m_DsvHeap->Allocate();
+            D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+            dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+            dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+            dsvDesc.Texture2DArray.MipSlice = 0;
+            dsvDesc.Texture2DArray.FirstArraySlice = slice;
+            dsvDesc.Texture2DArray.ArraySize = 1;
+            m_Device->CreateDepthStencilView(resource.Get(), &dsvDesc, m_DsvHeap->GetCpuHandle(sliceDsvIndex));
+            sliceDsvIndices.push_back(sliceDsvIndex);
+        }
+
+        // dsvIndexはkInvalidにする(スライスごとのDSVで代替するため。~DX12Textureでの二重解放も防ぐ)
+        return std::make_unique<DX12Texture>(
+            this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
+            DX12Texture::kInvalid, std::vector<uint32_t>{}, std::move(sliceDsvIndices));
     }
 
     std::unique_ptr<IRHISamplerSet> DX12Device::CreateSamplerSet(const SamplerDesc* descs, uint32_t count)

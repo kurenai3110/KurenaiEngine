@@ -66,6 +66,17 @@ namespace Kurenai::RHI
         // IRHICommandList::ClearDepthで毎回明示的に指定するが、DX12は生成時に宣言した値と
         // 一致しないと高速クリアパスが使えないため、Reverse-Zで0.0fクリアするテクスチャはここも合わせる
         virtual std::unique_ptr<IRHITexture> CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f) = 0;
+        // CreateDepthTextureのテクスチャ配列版。arraySize枚のスライスを1つのリソースとして持ち、
+        // 書き込みはスライスごとの個別DSV(IRHICommandList::SetRenderTargetsのdepthArraySliceで選ぶ)、
+        // 読み取りは全スライスをまとめた1本のTexture2DArray SRVで行う。
+        //
+        // カスケードシャドウマップのように「スライスごとに別の深度を描き、サンプル時は動的に
+        // スライスを選びたい」用途で使う。CreateDepthTextureを枚数分並べる方式と違い、HLSL側が
+        // ShadowMapArray.Sample(s, float3(uv, index))と書けるのが利点(HLSLはリソースそのものを
+        // 動的添字で選べないが、配列スライスは選べるため、カスケードごとの分岐が不要になる)。
+        // clearDepthの意味はCreateDepthTextureと同じ
+        virtual std::unique_ptr<IRHITexture> CreateDepthTextureArray(
+            uint32_t width, uint32_t height, uint32_t arraySize, float clearDepth = 1.0f) = 0;
         // 1パスがまとめてバインドするサンプラーの組を作る。descs[i]がレジスタs(i)に対応する。
         // countがバックエンドのスロット数(DX12のkSamplerSlotCount)に満たない場合、残りのスロットは
         // 既定のサンプラーで埋められる(DX12は未初期化のディスクリプタがテーブルに含まれると動作が未定義になるため)。

@@ -278,7 +278,12 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_ShadowPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineStateMirrored;
-        std::array<std::unique_ptr<RHI::IRHITexture>, kCascadeCount> m_ShadowCascades;
+        // 全カスケードの深度を1つのTexture2DArray(スライス番号=カスケード番号)として保持する。
+        // 書き込みはスライスごとの個別DSV(RenderGraphPassDesc::DepthTargetArraySlice)で行い、
+        // 読み取りは配列全体を指す1本のSRV(t4)を1回バインドするだけでよい。シェーダ側は
+        // ShadowMapArray.Sample(DataSampler, float3(uv, cascadeIndex))で動的にカスケードを選べる
+        // (ShadowSampling.hlsli参照)
+        std::unique_ptr<RHI::IRHITexture> m_ShadowCascadeArray;
         // シャドウパスの各カスケード描画で使う専用の定数バッファ(カスケードごとに値を更新して使い回す)
         std::unique_ptr<RHI::IRHIBuffer> m_ShadowCascadeConstantBuffer;
         bool m_ShadowEnabled = true;

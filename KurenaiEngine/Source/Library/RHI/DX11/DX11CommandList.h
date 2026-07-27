@@ -13,7 +13,8 @@ namespace Kurenai::RHI
         explicit DX11CommandList(Microsoft::WRL::ComPtr<ID3D11DeviceContext> context);
 
         void SetRenderTarget(IRHISwapChain* swapChain) override;
-        void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture) override;
+        void SetRenderTargets(
+            IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice = 0) override;
         void ClearRenderTarget(const ClearColor& color) override;
         void ClearDepth(float depth) override;
         void SetViewport(const Viewport& viewport) override;

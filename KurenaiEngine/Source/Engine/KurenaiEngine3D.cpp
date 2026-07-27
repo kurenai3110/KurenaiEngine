@@ -204,7 +204,8 @@ namespace Kurenai
         {
             int32_t Mode;
             float MipLevel; // Mode==6(Hi-Z)でSampleLevelに渡すミップレベル
-            float Padding[2];
+            float ArraySlice; // Mode==10(シャドウマップ配列)で表示する配列スライス(=カスケード番号)
+            float Padding;
         };
 
         // HiZ.hlsl側のcbuffer HiZConstantsと一致させる必要がある
@@ -710,12 +711,8 @@ namespace Kurenai
         m_ShadowPipelineStateMirrored = m_Device->CreatePipelineState(shadowPipelineDesc);
 
         // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する。
-        // カスケードごとに独立したテクスチャを持つ(RHIがテクスチャ配列/DSVスライスを持たないため、
-        // 既存のHi-Zミップループ等と同様に単純な配列で代替する)
-        for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
-        {
-            m_ShadowCascades[cascade] = m_Device->CreateDepthTexture(kShadowMapSize, kShadowMapSize);
-        }
+        // 全カスケードを1つのTexture2DArrayにまとめ、スライスごとのDSVで1カスケードずつ描き込む
+        m_ShadowCascadeArray = m_Device->CreateDepthTextureArray(kShadowMapSize, kShadowMapSize, kCascadeCount);
 
         // 既定のスカイボックス。.ksceneの[Scene]Skyboxで差し替えられる(LoadScene参照)ため、
         // 現在読み込んでいるパスを覚えておき、同じパスなら読み直さない
@@ -1997,7 +1994,8 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "Shadow" + std::to_string(cascade),
-                .DepthTarget = m_ShadowCascades[cascade].get(),
+                .DepthTarget = m_ShadowCascadeArray.get(),
+                .DepthTargetArraySlice = cascade,
                 .Execute = [this, &shadowViewport, cascade, &cascadeViewProj](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(shadowViewport);
@@ -2166,7 +2164,7 @@ namespace Kurenai
             .Reads =
             {
                 m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
-                m_ShadowCascades[0].get(), m_ShadowCascades[1].get(), m_ShadowCascades[2].get(), m_ShadowCascades[3].get(),
+                m_ShadowCascadeArray.get(),
                 // スペキュラのエネルギー補正(14.9節)でEss=brdf.x+brdf.yを引くためBRDF積分LUTを読む。
                 // Readsに挙げることでRenderGraphがIBLBakeパス(このLUTのWriter)より後に順序付ける
                 m_BRDFLUTTexture.get(),
@@ -2191,10 +2189,7 @@ namespace Kurenai
                 cmd->SetTexture(1, m_GBufferNormal.get());
                 cmd->SetTexture(2, m_GBufferMaterial.get());
                 cmd->SetTexture(3, m_GBufferDepth.get());
-                for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
-                {
-                    cmd->SetTexture(4 + cascade, m_ShadowCascades[cascade].get());
-                }
+                cmd->SetTexture(4, m_ShadowCascadeArray.get());
 
                 // ライトが1つも無いフレームでもSetShaderResourceBufferは必ず呼ぶ(SetPipelineStateが
                 // 毎回ルート引数を無効化するため、シェーダが宣言しているリソースを未バインドのまま
@@ -2412,10 +2407,7 @@ namespace Kurenai
                     cmd->SetTexture(1, draw.Mesh->NormalTexture);
                     cmd->SetTexture(2, draw.Mesh->MetallicRoughnessTexture);
                     cmd->SetTexture(3, draw.Mesh->EmissiveTexture);
-                    for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
-                    {
-                        cmd->SetTexture(4 + cascade, m_ShadowCascades[cascade].get());
-                    }
+                    cmd->SetTexture(4, m_ShadowCascadeArray.get());
                     cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
                     // IBL(14章)。このパスにはSSRが適用されないため、半透明サーフェスの環境の
                     // 映り込みはこの3枚だけが担う
@@ -2482,6 +2474,9 @@ namespace Kurenai
         // Mode 9(IBL Irradiance/Prefilterのキューブマップ表示)専用。他のModeでは使われないが、
         // t1には常に何らかの有効なTextureCubeをバインドしておく必要があるため既定値を持たせる
         RHI::IRHITexture* presentDebugCubeTexture = m_SkyboxTexture.get();
+        // Mode 10(シャドウマップのカスケード表示)専用。t1と同じ理由で、t2にも常に有効な
+        // Texture2DArrayをバインドしておく必要があるためシャドウマップ配列自身を既定値にする
+        RHI::IRHITexture* presentDebugArrayTexture = m_ShadowCascadeArray.get();
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = m_RenderWidth;
         uint32_t presentSourceHeight = m_RenderHeight;
@@ -2533,8 +2528,11 @@ namespace Kurenai
             presentMode = 3; // ブラー前の生値(タイル状ノイズが乗った状態)
             break;
         case DebugView::ShadowMap:
-            presentSourceTexture = m_ShadowCascades[std::clamp(m_ShadowDebugCascade, 0, static_cast<int32_t>(kCascadeCount) - 1)].get();
-            presentMode = 1;
+            // Texture2DArrayはSourceTexture(t0、Texture2D)へバインドできないため、専用の
+            // DebugArrayTexture(t2)を表示スライス指定付きでサンプルする(IBLキューブマップの
+            // Mode 9と同じ方式。Present.hlsl参照)
+            presentDebugArrayTexture = m_ShadowCascadeArray.get();
+            presentMode = 10;
             presentSourceWidth = kShadowMapSize;
             presentSourceHeight = kShadowMapSize;
             break;
@@ -2585,6 +2583,8 @@ namespace Kurenai
         {
             presentConstants.MipLevel = static_cast<float>(m_HiZDebugMipLevel);
         }
+        presentConstants.ArraySlice =
+            static_cast<float>(std::clamp(m_ShadowDebugCascade, 0, static_cast<int32_t>(kCascadeCount) - 1));
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
         // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する
@@ -2593,9 +2593,10 @@ namespace Kurenai
 
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Present",
-            .Reads = { presentSourceTexture, presentDebugCubeTexture },
+            .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture },
             .SwapChainTarget = m_SwapChain.get(),
-            .Execute = [this, &letterboxViewport, presentSourceTexture, presentDebugCubeTexture](RHI::IRHICommandList* cmd)
+            .Execute = [this, &letterboxViewport, presentSourceTexture, presentDebugCubeTexture,
+                        presentDebugArrayTexture](RHI::IRHICommandList* cmd)
             {
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
                 cmd->ClearDepth(1.0f);
@@ -2607,6 +2608,7 @@ namespace Kurenai
                 cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
                 cmd->SetTexture(0, presentSourceTexture);
                 cmd->SetTexture(1, presentDebugCubeTexture);
+                cmd->SetTexture(2, presentDebugArrayTexture);
                 cmd->Draw(3, 0);
             },
         });

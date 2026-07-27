@@ -37,7 +37,13 @@ namespace Kurenai::RHI
         virtual ~IRHICommandList() = default;
 
         virtual void SetRenderTarget(IRHISwapChain* swapChain) = 0;
-        virtual void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture) = 0;
+        // depthArraySlice: depthTextureがCreateDepthTextureArrayで作られたテクスチャ配列の場合に、
+        // 書き込み先の配列スライスを選ぶ(SetComputeUnorderedAccessTextureのmipLevelと同じ考え方の省略可能引数)。
+        // 通常のCreateDepthTextureは1枚しか持たないため既定値の0でよい。
+        // ClearDepthはこの呼び出しで確定した現在のDSV(=選んだスライス)に対して働くので、
+        // スライスごとのクリアは呼び出し側で追加の指定をせずそのまま成立する
+        virtual void SetRenderTargets(
+            IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice = 0) = 0;
         virtual void ClearRenderTarget(const ClearColor& color) = 0;
         virtual void ClearDepth(float depth) = 0;
         virtual void SetViewport(const Viewport& viewport) = 0;

@@ -16,6 +16,9 @@
 //         SourceTexture(t0)ではなくDebugCubeTexture(t1)を、現在のカメラ視線方向で球面を
 //         見回すように(背景スカイの表示と同じ要領でカメラ位置→ピクセル方向のレイを再構成して)
 //         サンプルする。右クリックドラッグで視点を回せば球面全体を確認できる
+//      10=カスケードシャドウマップ(Texture2DArray)の指定スライス(ArraySlice)をMode 1と同じ要領で
+//         表示する。SourceTexture(t0)はTexture2Dのためテクスチャ配列を受け取れず、Mode 9と同じく
+//         専用のDebugArrayTexture(t2)を使う
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
@@ -36,13 +39,17 @@ cbuffer PresentConstants : register(b1)
 {
     int Mode;
     float MipLevel;
-    float2 PresentPadding;
+    float ArraySlice;
+    float PresentPadding;
 };
 
 Texture2D SourceTexture : register(t0);
 // IBLのIrradiance/PrefilteredEnv(Mode 9)専用。それ以外のModeでは未使用(t0と違いTextureCube
 // でなければならないため、専用の登録スロットを分けている)
 TextureCube DebugCubeTexture : register(t1);
+// カスケードシャドウマップ(Mode 10)専用。t1と同じ理由で、Texture2DArrayを受けるための
+// 専用スロットを分けている
+Texture2DArray DebugArrayTexture : register(t2);
 
 struct PSInput
 {
@@ -96,6 +103,15 @@ float4 PSMain(PSInput input) : SV_TARGET
         color = color / (color + 1.0f);
         color = pow(color, 1.0f / 2.2f);
         return float4(color, 1.0f);
+    }
+
+    if (Mode == 10)
+    {
+        // Mode 1と同じくpow()でコントラストを持ち上げる(正射影のため深度はライト視点距離に対して線形)。
+        // 深度なのでMode 1と同様DataSamplerで引く
+        float depth = DebugArrayTexture.Sample(DataSampler, float3(input.UV, ArraySlice)).r;
+        depth = pow(saturate(depth), 0.25f);
+        return float4(depth, depth, depth, 1.0f);
     }
 
     // Mode 1/2/5は深度、Mode 7はオクタヘドラルエンコードされた法線を読むため、補間されると

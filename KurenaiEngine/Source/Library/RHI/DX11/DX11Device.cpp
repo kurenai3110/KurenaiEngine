@@ -639,6 +639,82 @@ namespace Kurenai::RHI
         return std::make_unique<DX11Texture>(srv, nullptr, dsv);
     }
 
+    std::unique_ptr<IRHITexture> DX11Device::CreateDepthTextureArray(
+        uint32_t width, uint32_t height, uint32_t arraySize, float clearDepth)
+    {
+        if (width == 0 || height == 0 || arraySize == 0)
+        {
+            const std::string message = "CreateDepthTextureArray: 不正なサイズが指定されました(width=" +
+                                        std::to_string(width) + ", height=" + std::to_string(height) +
+                                        ", arraySize=" + std::to_string(arraySize) + ")";
+            Core::Logger::Error("DX11", message);
+            throw std::runtime_error(message);
+        }
+
+        if (arraySize > D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION)
+        {
+            const std::string message = "CreateDepthTextureArray: 配列サイズがD3D11の上限を超えています(arraySize=" +
+                                        std::to_string(arraySize) +
+                                        ", 上限=" + std::to_string(D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) + ")";
+            Core::Logger::Error("DX11", message);
+            throw std::runtime_error(message);
+        }
+
+        // CreateDepthTextureと同じくR32_TYPELESSで作り、書き込み用のD32_FLOAT DSVと
+        // 読み取り用のR32_FLOAT SRVを別々に張る。違いはArraySizeが1より大きいことと、
+        // DSVをスライスごとに(Texture2DArray、要素数1で)張ること。
+        // clearDepthが未使用な理由はCreateDepthTextureと同じ
+        (void)clearDepth;
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = width;
+        textureDesc.Height = height;
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = arraySize;
+        textureDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_DEFAULT;
+        textureDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, nullptr, &texture), "深度テクスチャ配列の作成に失敗しました");
+
+        // 全スライスを1枚のTexture2DArrayとして読むSRV(サンプリング側。ShadowSampling.hlsli等)
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        srvDesc.Texture2DArray.MostDetailedMip = 0;
+        srvDesc.Texture2DArray.MipLevels = 1;
+        srvDesc.Texture2DArray.FirstArraySlice = 0;
+        srvDesc.Texture2DArray.ArraySize = arraySize;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        ThrowIfFailed(
+            m_Device->CreateShaderResourceView(texture.Get(), &srvDesc, &srv),
+            "深度テクスチャ配列のシェーダリソースビューの作成に失敗しました");
+
+        // スライスごとに単一配列スライスのDSV(Texture2DArray、要素数1)を張り、
+        // パスごとに1スライスずつ描き込めるようにする(CreateMippedUAVTextureCubeのUAVと同じ考え方)
+        std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>> sliceDsvs;
+        sliceDsvs.reserve(arraySize);
+        for (uint32_t slice = 0; slice < arraySize; ++slice)
+        {
+            D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+            dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+            dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+            dsvDesc.Texture2DArray.MipSlice = 0;
+            dsvDesc.Texture2DArray.FirstArraySlice = slice;
+            dsvDesc.Texture2DArray.ArraySize = 1;
+            Microsoft::WRL::ComPtr<ID3D11DepthStencilView> sliceDsv;
+            ThrowIfFailed(
+                m_Device->CreateDepthStencilView(texture.Get(), &dsvDesc, &sliceDsv),
+                "深度テクスチャ配列のスライス" + std::to_string(slice) + "の深度ステンシルビューの作成に失敗しました");
+            sliceDsvs.push_back(std::move(sliceDsv));
+        }
+
+        return std::make_unique<DX11Texture>(
+            srv, nullptr, nullptr, nullptr,
+            std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>>{}, std::move(sliceDsvs));
+    }
+
     std::unique_ptr<IRHISamplerSet> DX11Device::CreateSamplerSet(const SamplerDesc* descs, uint32_t count)
     {
         if (!descs || count == 0)

@@ -543,6 +543,7 @@ std::unique_ptr&lt;IRHITexture&gt;   CreateSolidColorTexture(uint8_t r, uint8_t 
 std::unique_ptr&lt;IRHITexture&gt;   CreateTextureFromMemory(uint32_t width, uint32_t height, const void* pixelsRGBA8);
 std::unique_ptr&lt;IRHITexture&gt;   CreateRenderTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f);
+std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTextureArray(uint32_t width, uint32_t height, uint32_t arraySize, float clearDepth = 1.0f);
 std::unique_ptr&lt;IRHITexture&gt;   CreateUAVTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels);
 std::unique_ptr&lt;IRHISamplerSet&gt; CreateSamplerSet(const SamplerDesc* descs, uint32_t count);
@@ -554,6 +555,14 @@ png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベー�
 <code>CreateTextureFromMemory</code> はRGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)の
 ピクセルデータから直接テクスチャを作成する(実行時に生成したデータをアップロードする用途向け。
 <code>KurenaiEngine2D::DrawText</code>のフォントアトラス生成で使用)。
+</p>
+<p>
+<code>CreateDepthTextureArray</code> は<code>CreateDepthTexture</code>のテクスチャ配列版で、
+<code>arraySize</code>枚のスライスを1つのリソースとして作成する。書き込みは
+<code>IRHICommandList::SetRenderTargets</code>の<code>depthArraySlice</code>でスライスを選んで行い、
+読み取りはシェーダ側で<code>Texture2DArray</code>として1本のスロットから行う。
+カスケードシャドウマップのように「スライスごとに別の深度を描き、サンプル時はスライスを
+動的に選びたい」用途で使う。
 </p>
 <p>
 <code>SamplerDesc</code>(<code>RHIDesc.h</code>)は<code>Filter</code>(<code>SamplerFilter::Linear</code> /
@@ -595,7 +604,8 @@ DX12実装はシェーダ可視ディスクリプタヒープへ直接書き込�
 
 <h3>4.3 <code>RHI::IRHICommandList</code></h3>
 <pre><code>void SetRenderTarget(IRHISwapChain* swapChain);
-void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture);
+void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture,
+                      uint32_t depthArraySlice = 0);  // depthArraySliceはCreateDepthTextureArray用
 void ClearRenderTarget(const ClearColor&amp; color);
 void ClearDepth(float depth);
 void SetViewport(const Viewport&amp; viewport);

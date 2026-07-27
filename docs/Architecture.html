@@ -347,9 +347,53 @@ Shadows、Fernando 2005)を組み合わせています(<code>DirectLighting.hlsl
 </p>
 <p>
 ピクセルのView空間深度からどのカスケードのシャドウマップを使うか選びます
-(<code>DirectLighting.hlsl</code>の<code>ComputeCascadedShadowFactor</code>)。HLSLはリソース
-(<code>Texture2D</code>)を動的添字の配列として扱えないため、カスケードごとに宣言した4枚の
-シャドウマップ(<code>t4</code>〜<code>t7</code>)を分岐で選択しています。
+(<code>ShadowSampling.hlsli</code>の<code>ComputeCascadedShadowFactor</code>)。全カスケードの深度は
+1つの<code>Texture2DArray</code>(<code>t4</code>、スライス番号=カスケード番号)にまとめてあり、
+<code>ShadowMapArray.Sample(DataSampler, float3(uv, cascadeIndex))</code>のように配列スライスを
+動的添字で選べます。
+</p>
+
+<h3>4.1 カスケードシャドウマップのTexture2DArray統合</h3>
+<p>
+以前はカスケードごとに独立した深度テクスチャを4枚持ち、<code>t4</code>〜<code>t7</code>へ1枚ずつ
+バインドしていました。これはHLSLがリソース(<code>Texture2D</code>)そのものを動的添字の配列として
+扱えないという制約のためで、<code>ComputeCascadedShadowFactor</code>はカスケードごとの
+<code>if/else</code>4分岐でテクスチャを選ぶ必要がありました。
+</p>
+<p>
+<strong>配列スライスであれば動的添字で選べる</strong>ため、4枚を1つの<code>Texture2DArray</code>へ
+統合してこの制約自体を取り除いています。具体的には、RHIに
+<code>IRHIDevice::CreateDepthTextureArray</code>を追加し、次の2種類のビューを張っています
+(IBLのキューブマップが面ごとのUAVと全体のSRVを持つのと同じ構造です)。
+</p>
+<ul>
+<li><strong>書き込み</strong>: スライスごとに単一配列スライスのDSV
+(<code>*_DSV_DIMENSION_TEXTURE2DARRAY</code>、<code>ArraySize = 1</code>)。シャドウパスは
+<code>RenderGraphPassDesc::DepthTargetArraySlice</code>でカスケード番号を指定し、1パス=1スライスで描き込みます
+(RenderGraphはこれを<code>IRHICommandList::SetRenderTargets</code>の第4引数
+<code>depthArraySlice</code>へ渡します。<code>SetComputeUnorderedAccessTexture</code>の
+<code>mipLevel</code>と同じ省略可能引数の作法です)。
+<code>ClearDepth</code>はバインド中のDSVに対して働くため、スライスごとのクリアは自動的に成立します。</li>
+<li><strong>読み取り</strong>: 全スライスをまとめた1本のSRV
+(<code>*_SRV_DIMENSION_TEXTURE2DARRAY</code>)。<code>t4</code>へ1回バインドするだけで済みます。</li>
+</ul>
+<p>
+この統合により、(1)シェーダの4分岐が1回の呼び出しに潰れ、(2)SRVスロットの消費が4本から1本になり、
+(3)DX12のリソース状態遷移が4回から1回に減ります(<code>DX12Texture::TransitionTo</code>はリソース全体を
+<code>ALL_SUBRESOURCES</code>で遷移させるため、4スライスを連続で書いてから1度だけ
+<code>PIXEL_SHADER_RESOURCE</code>へ移せばよくなります)。
+</p>
+<p>
+空いた<code>t5</code>〜<code>t7</code>は意図的に穴のまま残しています。詰めて振り直すと
+<code>Transparent.hlsl</code>の<code>t8</code>〜<code>t11</code>とそのC++側バインドまで
+同時に書き換える必要があり、ずれると「黙って別のテクスチャを読む」不具合になるためです。
+現状スロット数(<code>kTextureSlotCount = 12</code>)は不足していないため、実利のない変更は避けています。
+</p>
+<p>
+なお、PCSSのサンプリング実装は<code>DirectLighting.hlsl</code>(ディファード)と
+<code>Transparent.hlsl</code>(半透明フォワード)に同じものが重複していましたが、この統合に合わせて
+<code>ShadowSampling.hlsli</code>へ切り出しました。以前は片方だけ修正すると不透明と半透明で影が
+食い違う事故が起きやすかったため、構造的にずれないようにしています。
 </p>
 </section>
 
@@ -943,7 +987,7 @@ Infoログで明示します(事実と異なる精度を主張しないため)�
 <h3>11.6 影を持たない理由とSSILへの波及</h3>
 <p>
 ポイント/スポットライトはシャドウを落としません(今回のスコープ外)。既存の平行光シャドウ
-(2048x2048のシャドウマップ1枚)はそのままです。一方で、<code>SSIL_VisibilityBitmask.hlsl</code>は
+(2048x2048×4スライスの<code>Texture2DArray</code>によるカスケードシャドウ)はそのままです。一方で、<code>SSIL_VisibilityBitmask.hlsl</code>は
 直接光パスの出力(t2)を間接光の放射源としてサンプルするため、<strong>新規ライトは既存コードの
 変更なしに自動的にSSILの間接拡散光へ波及します</strong>(直接光パスの出力に太陽+ポイント/
 スポットライトの合計が乗っているため)。
@@ -1146,7 +1190,8 @@ AO率と乗算するだけで、鏡面の間接光はSSR(画面内に映るも�
 HLSLはリソースを動的にスライス選択できないため、コンピュートシェーダーからキューブマップの
 各面へ書き込むには面ごとに個別のUAV(<code>Texture2DArray</code>ビュー、要素数1)を張り、
 C++側(<code>KurenaiEngine3D::Render</code>のIBLBakeパス)が面ごとに1回ずつディスパッチする
-(カスケードシャドウマップが各カスケードの深度パスを個別に描画するのと同じ制約・同じ対処)。
+(カスケードシャドウマップも同じ手法を採っており、スライスごとに個別のDSVを張って1パス=1スライスで
+描き込んでいる。4.1節参照)。
 どの面を処理するかは<code>IBLFaceConstants.Face</code>(D3D標準の面順: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5)
 で渡し、<code>IBLConvolve.hlsl</code>の<code>CubeFaceDirection(face, uv)</code>がその面・
 テクセルが表す方向を計算する。
@@ -1404,15 +1449,16 @@ DX12はグラフィックス・コンピュートで同じサンプラーヒー�
 最終合成パスはG-Buffer法線(拡散イラディアンス・鏡面の方向を求めるのに必要)とIBLの3テクスチャを
 新たに読むため、t0〜t6(既存7枚)にt7(Normal)・t8(Irradiance、TextureCube)・
 t9(PrefilteredEnv、TextureCube)・t10(BRDFLUT)を追加し11枚になった。DX12は全パイプラインステートで
-共有する固定サイズのSRVディスクリプタテーブルを使う設計(4章のシャドウカスケード統合時と同じ制約)
+共有する固定サイズのSRVディスクリプタテーブルを使う設計(全パスが同じスロット数を共有するという制約)
 のため、<code>DX12CommandList::kTextureSlotCount</code>と<code>DX12Device.cpp</code>側の同名定数を
 9(t0〜t8)から11(t0〜t10)へ拡張した。
 </p>
 <p>
 その後、直接光パス(<code>DirectLighting.hlsl</code>)もBRDF積分LUTを読むようになった
 (14.9節のエネルギー補正で<code>Ess = brdf.x + brdf.y</code>が必要なため)。このパスは
-t0〜t7がG-Buffer+シャドウカスケード、<b>t8がライトリストの<code>StructuredBuffer</code></b>で
-埋まっているため、LUTは<code>t9</code>に置いた。使用スロットは10枚で既存の
+t0〜t3がG-Buffer、t4がシャドウマップ配列(<code>Texture2DArray</code>。4.1節。当時はt4〜t7の4枚だった)、
+<b>t8がライトリストの<code>StructuredBuffer</code></b>で
+埋まっているため、LUTは<code>t9</code>に置いた。使用スロットは既存の
 <code>kTextureSlotCount = 12</code>に収まるため、上限の再拡張は不要だった。
 RenderGraphの<code>.Reads</code>へ<code>m_BRDFLUTTexture</code>を挙げることで、
 このLUTのWriterであるIBLBakeパスより後に自動的に順序付けられる。
@@ -1424,6 +1470,14 @@ Render Targetsパネルの「IBL - Irradiance」「IBL - Prefiltered Specular」
 専用のDebugCubeTexture(t1)を追加し、背景スカイの表示(1章)と同じ要領で現在のカメラ位置から
 各ピクセル方向へのレイを再構成してキューブマップをサンプルする(Present.hlsl Mode 9)。
 右クリックドラッグで視点を回せば球面全体を見回して確認できる。
+</p>
+<p>
+この「t0は<code>Texture2D</code>固定なので他のディメンションを表示できない」問題は、
+その後カスケードシャドウマップを<code>Texture2DArray</code>へ統合した際(4.1節)にも同じ形で現れた。
+対処も同じで、専用のDebugArrayTexture(<code>t2</code>)と表示スライス指定
+(<code>PresentConstants.ArraySlice</code>)を追加し、Mode 10として深度をMode 1と同じ要領で
+グレースケール表示している。Render Targetsパネルの「Shadow Map」+「Shadow Cascade」スライダーの
+組み合わせは従来どおり動作する。
 </p>
 
 <h3>14.5 スペキュラオクルージョンと夜間の扱い</h3>
@@ -1853,8 +1907,9 @@ Write-after-Writeの依存関係から自動的にその後に置かれる。SSR
 <p>
 半透明フォワードパスはDeferredの直接光パス(<code>DirectLighting.hlsl</code>)を経由しないため、
 太陽(平行光、カスケードシャドウ付き)とt8のライトリスト(ポイント/スポット、影なし)によるPBR
-直接光の計算式・PCSS(Percentage Closer Soft Shadows)のシャドウサンプリングを<code>Transparent.hlsl</code>
-側にそのまま複製している。両ファイルはフルスクリーンパス(<code>DirectLighting.hlsl</code>)と
+直接光の計算式を<code>Transparent.hlsl</code>
+側にそのまま複製している(PCSSのシャドウサンプリングも当初は複製していたが、後述のとおり現在は
+共有ヘッダー化済み)。両ファイルはフルスクリーンパス(<code>DirectLighting.hlsl</code>)と
 頂点ごとに個別描画するフォワードパス(<code>Transparent.hlsl</code>)という異なる呼び出し形態を
 持つため、当初は共有ヘッダーを設けて<code>DirectLighting.hlsl</code>側を書き換えるより、
 既存のコードをそのまま複製する方が既存パスへの影響がなく安全と判断した。
@@ -1868,8 +1923,18 @@ Smith可視性項とスペキュラのエネルギー補正を持ち、<code>Dir
 なければエネルギー補正が成り立たないため、<b>複製ではなく共有が要件</b>になったという事情がある。
 </p>
 <p>
-一方、<code>D</code>項(<code>DistributionGGX</code>)・フレネル項・PCSSのシャドウサンプリングは
-依然として両ファイルに複製されている(呼び出し形態やバインドされるリソースに依存するため)。
+その後、PCSSのシャドウサンプリングも<code>ShadowSampling.hlsli</code>(4つ目の共有ヘッダー)へ
+切り出した。カスケードシャドウマップを<code>Texture2DArray</code>へ統合した際(4.1節)、
+サンプリング側もあわせて書き換える必要があり、そのタイミングで重複を解消している。
+バインドされるリソース(<code>ShadowMapArray</code>、<code>t4</code>)もヘッダー側で宣言しているため、
+両ファイルは<code>#include</code>するだけでよい。
+<b>この共有ヘッダーは<code>FrameConstants</code>(<code>CascadeViewProj</code>/<code>CascadeSplits</code>/
+<code>ShadowParams</code>)と<code>DataSampler</code>の宣言より後で<code>#include</code>する必要がある</b>
+(既存の共有ヘッダーと同様、インクルードガードは持たない)。
+</p>
+<p>
+一方、<code>D</code>項(<code>DistributionGGX</code>)・フレネル項は依然として両ファイルに
+複製されている(呼び出し形態やバインドされるリソースに依存するため)。
 <b>これらの物理式を変更する場合は両方を同時に修正する必要がある。</b>
 </p>
 <h3>15.6 有効ライト数の受け渡し(<code>ActiveLightCount</code>)</h3>
@@ -1964,6 +2029,8 @@ BRDF積分LUT)をこのパスにもバインドし(<code>t9</code>/<code>t10</co
 このバインドにより半透明パスが使うSRVスロットはマテリアル4枚 + シャドウ4枚 + ライトリスト +
 IBL 3枚の計12個になったため、DX12のルートシグネチャの
 <code>kTextureSlotCount</code>を11から12へ引き上げた
+(その後シャドウ4枚は<code>Texture2DArray</code>1枚に統合され実使用は9個になったが、
+<code>kTextureSlotCount = 12</code>は余裕としてそのまま維持している。4.1節参照)
 (<code>DX12CommandList.h</code>と<code>DX12Device.cpp</code>の2箇所。
 シェーダー可視ディスクリプタヒープの容量は<code>kTextureSlotCount</code>から算出されるため
 自動的に追随する)。

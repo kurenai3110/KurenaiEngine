@@ -14,7 +14,8 @@ namespace Kurenai::RHI
         uint32_t rtvIndex,
         uint32_t dsvIndex,
         uint32_t uavIndex,
-        std::vector<uint32_t> mipUavIndices)
+        std::vector<uint32_t> mipUavIndices,
+        std::vector<uint32_t> sliceDsvIndices)
         : m_Device(device)
         , m_Resource(std::move(resource))
         , m_CurrentState(initialState)
@@ -23,6 +24,7 @@ namespace Kurenai::RHI
         , m_DsvIndex(dsvIndex)
         , m_UavIndex(uavIndex)
         , m_MipUavIndices(std::move(mipUavIndices))
+        , m_SliceDsvIndices(std::move(sliceDsvIndices))
     {
     }
 
@@ -48,6 +50,13 @@ namespace Kurenai::RHI
         {
             m_Device->GetSrvCpuHeap()->Free(mipUavIndex);
         }
+        // スライスごとのDSVはSRVヒープではなくDSVヒープから確保しているため、解放先も分ける
+        // (CreateDepthTextureArrayで作成した場合はm_DsvIndexをkInvalidのままにしてあるので、
+        //  上のm_DsvIndex解放と二重に解放されることはない)
+        for (const uint32_t sliceDsvIndex : m_SliceDsvIndices)
+        {
+            m_Device->GetDsvHeap()->Free(sliceDsvIndex);
+        }
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetSrvCpuHandle() const
@@ -60,9 +69,10 @@ namespace Kurenai::RHI
         return m_Device->GetRtvHeap()->GetCpuHandle(m_RtvIndex);
     }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetDsvCpuHandle() const
+    D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetDsvCpuHandle(uint32_t arraySlice) const
     {
-        return m_Device->GetDsvHeap()->GetCpuHandle(m_DsvIndex);
+        const uint32_t index = m_SliceDsvIndices.empty() ? m_DsvIndex : m_SliceDsvIndices[arraySlice];
+        return m_Device->GetDsvHeap()->GetCpuHandle(index);
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetUavCpuHandle(uint32_t mipLevel) const
