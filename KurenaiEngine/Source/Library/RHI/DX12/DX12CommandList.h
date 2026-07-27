@@ -56,7 +56,7 @@ namespace Kurenai::RHI
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス。SetTexture(0, ...)のたびに
         // 新しいブロックを割り当て直す(1フレームぶんまとめて記録してから1回だけ実行する設計のため、
         // 同じスロットを使い回すとGPU実行時にはそのフレーム最後の書き込みで上書きされてしまう)
-        static constexpr uint32_t kTextureSlotCount = 11;
+        static constexpr uint32_t kTextureSlotCount = 12;
         uint32_t m_CurrentSrvTableBase = 0;
 
         // SetTexture()はCopyDescriptorsをその場では呼ばず、コピー元ハンドルをここに溜めておき、

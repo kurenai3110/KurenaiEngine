@@ -28,8 +28,11 @@ namespace Kurenai::RHI
     namespace
     {
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
-        constexpr uint32_t kTextureSlotCount = 11; // t0〜t10 (DeferredLighting.hlslのG-Buffer+IBL(Irradiance/Prefilter/BRDFLUT)が最大)
-        constexpr uint32_t kSamplerSlotCount = 1; // s0のみ
+        constexpr uint32_t kTextureSlotCount = 12; // t0〜t11 (Transparent.hlslのマテリアル4枚+シャドウ4枚+ライトリスト+IBL(Irradiance/Prefilter/BRDFLUT)が最大)
+        // s0 = 汎用(異方性16x + Wrap)、s1 = ルックアップテーブル用(Linear + Clamp。BRDF積分LUT向け)。
+        // s1を宣言しないシェーダーでもテーブルはkSamplerSlotCount個ぶんまとめてバインドされるため、
+        // 全スロットは初期化時に既定のサンプラーで埋めておく(下のCreateSamplerループ参照)
+        constexpr uint32_t kSamplerSlotCount = 2;
         // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t10のkTextureSlotCount個ひと組)の最大数。
         // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく。実際に確保するヒープ容量は
         // これのkFrameCount倍(CPUがGPU完了を待たずに次フレームを記録し始めるため、直近kFrameCount
@@ -178,6 +181,24 @@ namespace Kurenai::RHI
             (kGraphicsSrvHeapCapacityPerFrame + kComputeSrvHeapCapacityPerFrame) * kFrameCount,
             true);
         m_ShaderVisibleSamplerHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerSlotCount, true);
+
+        // サンプラーのディスクリプタテーブルはkSamplerSlotCount個ぶんまとめてバインドされるため、
+        // 上位層がSetSamplerを呼ばなかったスロットにも有効なディスクリプタが必要になる
+        // (未初期化のディスクリプタがテーブルに含まれると動作が未定義になる)。
+        // ここで全スロットを既定のサンプラーで埋めておき、上位層は必要なスロットだけ上書きする
+        {
+            D3D12_SAMPLER_DESC defaultSamplerDesc{};
+            defaultSamplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+            defaultSamplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            defaultSamplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            defaultSamplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            defaultSamplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+            defaultSamplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+            for (uint32_t slot = 0; slot < kSamplerSlotCount; ++slot)
+            {
+                m_Device->CreateSampler(&defaultSamplerDesc, m_ShaderVisibleSamplerHeap->GetCpuHandle(slot));
+            }
+        }
 
         CreateRootSignature();
         CreateComputeRootSignature();
@@ -724,6 +745,7 @@ namespace Kurenai::RHI
         }
         psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         psoDesc.DepthStencilState.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
+        psoDesc.DepthStencilState.DepthWriteMask = desc.DepthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
         // Reverse-Z: 近平面=1.0/遠平面=0.0にマッピングするため、深度テストの向きもGREATERに反転する
         psoDesc.DepthStencilState.DepthFunc = desc.ReverseZ ? D3D12_COMPARISON_FUNC_GREATER : D3D12_COMPARISON_FUNC_LESS;
         psoDesc.SampleMask = UINT_MAX;
@@ -1081,9 +1103,11 @@ namespace Kurenai::RHI
     {
         D3D12_SAMPLER_DESC samplerDesc{};
         samplerDesc.Filter = desc.Filter == SamplerFilter::Anisotropic ? D3D12_FILTER_ANISOTROPIC : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        const D3D12_TEXTURE_ADDRESS_MODE addressMode =
+            desc.AddressMode == SamplerAddressMode::Clamp ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samplerDesc.AddressU = addressMode;
+        samplerDesc.AddressV = addressMode;
+        samplerDesc.AddressW = addressMode;
         // MaxAnisotropyはFilterがANISOTROPICでない場合ハードウェア側で無視されるため、常に設定してよい
         samplerDesc.MaxAnisotropy = desc.MaxAnisotropy;
         samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;

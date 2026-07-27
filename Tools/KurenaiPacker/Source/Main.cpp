@@ -4,7 +4,7 @@
 // あわせて、.kscene(シーンファイル)の検証・配置も行う(--sceneモード)。
 //
 // 使い方:
-//   KurenaiPacker.exe <入力モデル> -o <出力.kmodel> [--force] [--jobs N]
+//   KurenaiPacker.exe <入力モデル> -o <出力.kmodel> [--force] [--jobs N] [--scale S]
 //   KurenaiPacker.exe --scene <入力.kscene> -o <出力.kscene>
 //
 // --sceneモードは.ksceneの書式(セクション/キー/数値範囲)を検証し、参照している
@@ -60,6 +60,9 @@ namespace
             "      --scene <path>    <入力モデル>の代わりに.ksceneを検証・配置するモードにする\n"
             "      --force           既存の.ktexがあっても再圧縮して上書きする(モデルモードのみ)\n"
             "      --jobs <N>        テクスチャ処理のワーカースレッド数(既定: 論理コア数、上限8。モデルモードのみ)\n"
+            "      --scale <S>       頂点位置・バウンズに乗算する係数(既定1.0、モデルモードのみ)。\n"
+            "                        OBJ等ファイル自体に単位情報を持たない形式で、センチメートル単位の\n"
+            "                        アセットをメートル単位として読み込みたい場合は0.01を指定する\n"
             "  -h, --help            このヘルプを表示する\n";
     }
 
@@ -74,6 +77,7 @@ namespace
         std::wstring OutputPath;
         bool Force = false;
         unsigned int JobCount = 0;
+        float Scale = 1.0f;
         bool ShowHelp = false;
         bool SceneMode = false;
     };
@@ -126,6 +130,23 @@ namespace
                 catch (const std::exception&)
                 {
                     PrintError("--jobs の値が不正です: " + WideToUtf8(argv[i]));
+                    return std::nullopt;
+                }
+            }
+            else if (arg == L"--scale")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--scale には値が必要です");
+                    return std::nullopt;
+                }
+                try
+                {
+                    args.Scale = std::stof(argv[++i]);
+                }
+                catch (const std::exception&)
+                {
+                    PrintError("--scale の値が不正です: " + WideToUtf8(argv[i]));
                     return std::nullopt;
                 }
             }
@@ -274,7 +295,7 @@ int wmain(int argc, wchar_t** argv)
     KurenaiPacker::SourceModel sourceModel;
     try
     {
-        sourceModel = KurenaiPacker::LoadSourceModel(inputAbsolute.wstring());
+        sourceModel = KurenaiPacker::LoadSourceModel(inputAbsolute.wstring(), args.Scale);
     }
     catch (const std::exception& e)
     {

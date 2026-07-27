@@ -7,6 +7,9 @@
 // 簡易直接光の代わりに実際の直接光を使うことでシャドウも含めて正確にする)の両方からサンプルされる。
 // レンダー解像度と同じ内部解像度で、HDR(トーンマップ前)の値をR32G32B32A32_Floatへ書き込む。
 #include "NormalEncoding.hlsli"
+// Smith可視性項とスペキュラのエネルギー補正。BRDF積分LUT(BRDFLUT.hlsl)と同じ可視性項を
+// 使うことがエネルギー補正の前提になるため、定義を共有する
+#include "SpecularEnergy.hlsli"
 
 static const float PI = 3.14159265359f;
 
@@ -58,6 +61,11 @@ Texture2D ShadowMap0 : register(t4);
 Texture2D ShadowMap1 : register(t5);
 Texture2D ShadowMap2 : register(t6);
 Texture2D ShadowMap3 : register(t7);
+// split-sum近似の第2項、BRDF積分LUT(x=NdotV, y=ラフネス。BRDFLUT.hlslで生成)。
+// このパスはIBLを計算しないが、スペキュラのエネルギー補正(SpecularEnergy.hlsli、14.9節)で
+// Ess = brdf.x + brdf.y を必要とするためバインドしている。
+// t8はライトリスト(StructuredBuffer<GPULight>)が占有しているためt9に置く
+Texture2D BRDFLUTTexture : register(t9);
 SamplerState DefaultSampler : register(s0);
 
 struct PSInput
@@ -91,17 +99,8 @@ float DistributionGGX(float NdotH, float roughness)
     return a2 / max(PI * d * d, 1e-6f);
 }
 
-float GeometrySchlickGGX(float NdotX, float roughness)
-{
-    float r = roughness + 1.0f;
-    float k = (r * r) / 8.0f;
-    return NdotX / (NdotX * (1.0f - k) + k);
-}
-
-float GeometrySmith(float NdotV, float NdotL, float roughness)
-{
-    return GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
-}
+// GeometrySchlickGGX / GeometrySmith はSpecularEnergy.hlsliの共有定義を使う
+// (以前ここにあったDisneyのラフネス再マップ k=(roughness+1)^2/8 は除去した。理由は同ヘッダー参照)
 
 float3 FresnelSchlick(float cosTheta, float3 F0)
 {
@@ -224,8 +223,13 @@ float ComputeCascadedShadowFactor(float3 worldPos, float viewDepth, float NdotL)
 }
 
 // Cook-Torrance を1灯ぶん評価する(シャドウ・ライト色・減衰は呼び出し側で乗算する)。
-// 太陽(b0)とポイント/スポットライト(t8)の両方から共通で呼ばれる
-float3 EvaluateDirectBRDF(float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness)
+// 太陽(b0)とポイント/スポットライト(t8)の両方から共通で呼ばれる。
+// energyCompensationはスペキュラのエネルギー補正倍率(14.9節)。Ess=(NdotV, ラフネス)だけの
+// 関数でピクセル内では一定なので、ライトのループへ入る前にPSMainで1度だけ求めて渡す
+// (ここでLUTを引くとライト数ぶんテクスチャフェッチが増えてしまう)
+float3 EvaluateDirectBRDF(
+    float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness,
+    float3 energyCompensation)
 {
     float3 H = normalize(V + L);
     float NdotL = saturate(dot(N, L));
@@ -237,7 +241,8 @@ float3 EvaluateDirectBRDF(float3 N, float3 V, float3 L, float NdotV, float3 albe
     float G = GeometrySmith(NdotV, NdotL, roughness);
     float3 F = FresnelSchlick(VdotH, F0);
 
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f);
+    // 補正は鏡面項にのみ掛ける(拡散項kdは変更しない。理由は14.9節)
+    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energyCompensation;
     float3 kd = (1.0f - F) * (1.0f - metallic);
     float3 diffuse = kd * albedo / PI;
 
@@ -266,7 +271,9 @@ float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float an
 }
 
 // t8のライトリストを1灯ぶん評価する(影なし)。early-outは効きの強い順(距離→減衰→スポット円錐→NdotL)に並べる
-float3 EvaluateLight(GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness)
+float3 EvaluateLight(
+    GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
+    float3 energyCompensation)
 {
     uint lightType = (uint)light.PositionType.w;
     float range = light.ColorRange.w;
@@ -311,7 +318,7 @@ float3 EvaluateLight(GPULight light, float3 worldPos, float3 N, float3 V, float 
         return float3(0.0f, 0.0f, 0.0f);
     }
 
-    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness) * light.ColorRange.rgb * atten;
+    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energyCompensation) * light.ColorRange.rgb * atten;
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
@@ -334,6 +341,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 V = normalize(CameraPosition.xyz - worldPos);
     float NdotV = saturate(dot(N, V)) + 1e-5f;
 
+    // スペキュラのエネルギー補正(SpecularEnergy.hlsli、14.9節)。Ess=(NdotV, ラフネス)だけの
+    // 関数でピクセル内では一定なので、太陽・ライトリストのループへ入る前に1度だけ求める。
+    // F0のlerpはEvaluateDirectBRDF内と同じ式(この式はコードベース内の複数箇所に登場するため
+    // ここだけ引数化して特別扱いはしない)
+    const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
+    const float2 brdf = BRDFLUTTexture.Sample(BRDFLUTSampler, float2(NdotV, roughness)).rg;
+    const float3 energyCompensation = SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
+
     float3 directLight = float3(0.0f, 0.0f, 0.0f);
 
     // --- 太陽(b0、カスケードシャドウ付き) ---
@@ -345,14 +360,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         float viewDepth = mul(float4(worldPos, 1.0f), View).z;
         float shadow = ComputeCascadedShadowFactor(worldPos, viewDepth, sunNdotL);
-        directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness) * LightColor.rgb * shadow;
+        directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energyCompensation) * LightColor.rgb * shadow;
     }
 
     // --- t8のライトリスト(影なし) ---
     [loop]
     for (uint i = 0; i < LightCount.x; ++i)
     {
-        directLight += EvaluateLight(Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness);
+        directLight += EvaluateLight(Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness, energyCompensation);
     }
 
     return float4(directLight, 1.0f);

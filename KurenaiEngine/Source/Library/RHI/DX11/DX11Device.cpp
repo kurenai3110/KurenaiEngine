@@ -300,7 +300,7 @@ namespace Kurenai::RHI
         // Reverse-Z(GREATER)を使うパイプラインのぶんも含めてここで明示的に作成する
         D3D11_DEPTH_STENCIL_DESC depthStencilDesc{};
         depthStencilDesc.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
-        depthStencilDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        depthStencilDesc.DepthWriteMask = desc.DepthWriteEnabled ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
         depthStencilDesc.DepthFunc = desc.ReverseZ ? D3D11_COMPARISON_GREATER : D3D11_COMPARISON_LESS;
         depthStencilDesc.StencilEnable = FALSE;
 
@@ -632,9 +632,11 @@ namespace Kurenai::RHI
     {
         D3D11_SAMPLER_DESC samplerDesc{};
         samplerDesc.Filter = desc.Filter == SamplerFilter::Anisotropic ? D3D11_FILTER_ANISOTROPIC : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-        samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
-        samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
-        samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        const D3D11_TEXTURE_ADDRESS_MODE addressMode =
+            desc.AddressMode == SamplerAddressMode::Clamp ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
+        samplerDesc.AddressU = addressMode;
+        samplerDesc.AddressV = addressMode;
+        samplerDesc.AddressW = addressMode;
         // MaxAnisotropyはFilterがANISOTROPICでない場合ハードウェア側で無視されるため、常に設定してよい
         samplerDesc.MaxAnisotropy = desc.MaxAnisotropy;
         samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
