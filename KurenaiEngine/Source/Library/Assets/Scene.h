@@ -19,6 +19,11 @@ namespace Kurenai::Assets
         DirectX::XMFLOAT4X4 World;          // Scale * Rotation * Translation(転置済み、HLSLへそのまま渡せる形)
         DirectX::XMFLOAT4X4 NormalMatrix;   // Worldの3x3部分の逆転置(4x4に格納、転置済み)
         float TangentSignFlip = 1.0f;       // Worldの行列式が負(ミラーリング)なら-1
+
+        // Worldの行列式が負(ミラーリング)か。TangentSignFlipと同じ条件から求まるが、用途が異なる。
+        // TangentSignFlipは接線の向きを補正するためにシェーダーへ渡す係数で、こちらは三角形の
+        // ワインディングが反転することへの対処(表裏判定を入れ替えたパイプラインで描く)に使う
+        bool IsMirrored = false;
     };
 
     struct Scene

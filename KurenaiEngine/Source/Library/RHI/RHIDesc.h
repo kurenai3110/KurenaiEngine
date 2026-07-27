@@ -59,6 +59,16 @@ namespace Kurenai::RHI
         // アルファブレンド設定。既定は不透明(Opaque)。半透明の2Dスプライトなどを描画する場合はAlphaBlendを、
         // 炎・光などの発光エフェクトはAdditiveを、減光表現はMultiplyを、事前乗算済みテクスチャはPremultipliedAlphaを指定する
         BlendMode BlendMode = BlendMode::Opaque;
+
+        // 三角形の表面(front face)を反時計回り(CCW)とみなすか。既定のfalseは「時計回りが表」で、
+        // D3D11/D3D12双方のラスタライザ既定値と一致する(裏面はカリングされる)。
+        //
+        // ワールド行列に負のスケール(ミラーリング)が含まれるとインデックスの巡回順は変わらないまま
+        // スクリーン上での三角形の向きだけが反転するため、既定のままでは表と裏の判定が入れ替わり、
+        // 本来見えるはずの面がカリングされて物体の内側が描画されてしまう。そうしたインスタンスは
+        // このフラグをtrueにしたパイプラインで描くことで、カリングを効かせたまま正しい面を残す
+        // (docs/Architecture.html 10.2節)
+        bool FrontCounterClockwise = false;
     };
 
     struct ComputePipelineStateDesc

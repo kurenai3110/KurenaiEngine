@@ -709,6 +709,10 @@ namespace Kurenai::RHI
         psoDesc.PS = pixelShader->GetBytecode();
         psoDesc.InputLayout = { elements.empty() ? nullptr : elements.data(), static_cast<UINT>(elements.size()) };
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        // 既定は「時計回りが表・裏面カリング」。ミラーリング(負のスケール)を含むインスタンスは
+        // スクリーン上での三角形の向きが反転するため、表裏の判定を入れ替えたPSOで描く
+        // (RHIDesc.hのFrontCounterClockwise、docs/Architecture.html 10.2節)
+        psoDesc.RasterizerState.FrontCounterClockwise = desc.FrontCounterClockwise ? TRUE : FALSE;
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         {
             D3D12_RENDER_TARGET_BLEND_DESC& rt = psoDesc.BlendState.RenderTarget[0];

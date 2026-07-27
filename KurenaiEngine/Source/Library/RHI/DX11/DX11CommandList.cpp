@@ -85,6 +85,7 @@ namespace Kurenai::RHI
         m_Context->PSSetShader(dx11PipelineState->GetPixelShader()->GetPixelShader(), nullptr, 0);
         m_Context->OMSetDepthStencilState(dx11PipelineState->GetDepthStencilState(), 0);
         m_Context->OMSetBlendState(dx11PipelineState->GetBlendState(), nullptr, 0xFFFFFFFF);
+        m_Context->RSSetState(dx11PipelineState->GetRasterizerState());
     }
 
     void DX11CommandList::SetVertexBuffer(IRHIBuffer* buffer)

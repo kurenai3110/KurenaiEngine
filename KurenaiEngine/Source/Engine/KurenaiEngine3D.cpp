@@ -445,6 +445,12 @@ namespace Kurenai
         gbufferPipelineDesc.ReverseZ = true;
         m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
 
+        // ミラーリングされたインスタンス用に、表裏判定だけを入れ替えた同じパイプラインを用意する。
+        // DX12はラスタライザステートがPSOに焼き込まれ描画中に差し替えられないため、DX11/DX12で
+        // 同じ構成にできるよう両バックエンドともPSOを2本持つ方式にしている
+        gbufferPipelineDesc.FrontCounterClockwise = true;
+        m_GBufferPipelineStateMirrored = m_Device->CreatePipelineState(gbufferPipelineDesc);
+
         // 直接光パス(頂点バッファなしのフルスクリーン三角形。G-Buffer+シャドウマップからPBRの
         // 直接光を計算しHDRで書き出す)
         RHI::ShaderDesc directLightVsDesc;
@@ -584,6 +590,8 @@ namespace Kurenai
         // 鏡面反射は減衰させずに加算した色を出力する(詳細はdocs/Architecture.htmlの半透明描画の章を参照)
         transparentPipelineDesc.BlendMode = RHI::BlendMode::PremultipliedAlpha;
         m_TransparentPipelineState = m_Device->CreatePipelineState(transparentPipelineDesc);
+        transparentPipelineDesc.FrontCounterClockwise = true;
+        m_TransparentPipelineStateMirrored = m_Device->CreatePipelineState(transparentPipelineDesc);
 
         // Hi-Zミップチェーン構築パス(コンピュートシェーダー)。CSCopyでG-Buffer深度をミップ0へコピーし、
         // CSDownsampleをミップ数-1回ディスパッチして1x1まで縮小する
@@ -696,6 +704,10 @@ namespace Kurenai
         shadowPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
         shadowPipelineDesc.HasDepthStencil = true;
         m_ShadowPipelineState = m_Device->CreatePipelineState(shadowPipelineDesc);
+        // 影も同様に、ミラーリングされたインスタンスは表裏が入れ替わる。放置すると
+        // シャドウマップへ内側の面の深度が書かれ、影の形と自己遮蔽の出方がずれる
+        shadowPipelineDesc.FrontCounterClockwise = true;
+        m_ShadowPipelineStateMirrored = m_Device->CreatePipelineState(shadowPipelineDesc);
 
         // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する。
         // カスケードごとに独立したテクスチャを持つ(RHIがテクスチャ配列/DSVスライスを持たないため、
@@ -2002,10 +2014,28 @@ namespace Kurenai
                         cmd->SetPipelineState(m_ShadowPipelineState.get());
                         cmd->SetConstantBuffer(0, m_ShadowCascadeConstantBuffer.get());
 
+                        // ミラーリングされたインスタンスは表裏が入れ替わるため、GBufferパスと同じく
+                        // 表裏判定を反転したパイプラインへ切り替える(切り替え時はb0も張り直す)
+                        RHI::IRHIPipelineState* currentPipelineState = m_ShadowPipelineState.get();
+                        const auto bindPipelineState = [&](bool mirrored)
+                        {
+                            RHI::IRHIPipelineState* const wanted =
+                                mirrored ? m_ShadowPipelineStateMirrored.get() : m_ShadowPipelineState.get();
+                            if (wanted == currentPipelineState)
+                            {
+                                return;
+                            }
+                            cmd->SetPipelineState(wanted);
+                            cmd->SetConstantBuffer(0, m_ShadowCascadeConstantBuffer.get());
+                            currentPipelineState = wanted;
+                        };
+
                         for (const auto& instance : m_Scene.Instances)
                         {
                             for (const auto& mesh : instance.Model.Meshes)
                             {
+                                bindPipelineState(instance.IsMirrored);
+
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
                                 const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
@@ -2038,6 +2068,27 @@ namespace Kurenai
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetSamplerSet(m_MaterialSamplers.get());
 
+                // ミラーリング(Worldの行列式が負)されたインスタンスだけ、表裏判定を入れ替えた
+                // パイプラインへ切り替える。上で通常のパイプラインを先にバインドしてあるため、
+                // ミラーリングを含まないシーンでは以下のラムダは一度も切り替えを行わず、
+                // 発行されるコマンド列はこの機能の追加前と完全に同一になる。
+                // DX12のSetPipelineStateはルートシグネチャを張り直して既存のバインドを
+                // 無効化するので、切り替えたときはパス共通のバインドもやり直す
+                RHI::IRHIPipelineState* currentPipelineState = m_GBufferPipelineState.get();
+                const auto bindPipelineState = [&](bool mirrored)
+                {
+                    RHI::IRHIPipelineState* const wanted =
+                        mirrored ? m_GBufferPipelineStateMirrored.get() : m_GBufferPipelineState.get();
+                    if (wanted == currentPipelineState)
+                    {
+                        return;
+                    }
+                    cmd->SetPipelineState(wanted);
+                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetSamplerSet(m_MaterialSamplers.get());
+                    currentPipelineState = wanted;
+                };
+
                 for (const auto& instance : m_Scene.Instances)
                 {
                     for (const auto& mesh : instance.Model.Meshes)
@@ -2048,6 +2099,8 @@ namespace Kurenai
                         {
                             continue;
                         }
+
+                        bindPipelineState(instance.IsMirrored);
 
                         const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -2325,8 +2378,27 @@ namespace Kurenai
                     cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
                 }
 
+                // 半透明は奥から手前への描画順そのものが正しさの前提なので並べ替えられない。
+                // そのため必要になった時点でパイプラインを切り替える(GBufferパスと同じ方式)
+                RHI::IRHIPipelineState* currentPipelineState = m_TransparentPipelineState.get();
+                const auto bindPipelineState = [&](bool mirrored)
+                {
+                    RHI::IRHIPipelineState* const wanted =
+                        mirrored ? m_TransparentPipelineStateMirrored.get() : m_TransparentPipelineState.get();
+                    if (wanted == currentPipelineState)
+                    {
+                        return;
+                    }
+                    cmd->SetPipelineState(wanted);
+                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetSamplerSet(m_MaterialSamplers.get());
+                    currentPipelineState = wanted;
+                };
+
                 for (const TransparentDraw& draw : draws)
                 {
+                    bindPipelineState(draw.Instance->IsMirrored);
+
                     const ObjectConstants objectConstants = MakeObjectConstants(*draw.Instance, *draw.Mesh);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());

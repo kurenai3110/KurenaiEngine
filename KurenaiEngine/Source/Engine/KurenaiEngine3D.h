@@ -115,6 +115,9 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_GBufferVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_GBufferPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferPipelineState;
+        // ミラーリング(Worldの行列式が負)されたインスタンス用。表裏判定を入れ替えただけで
+        // 他は上と同一(ModelInstance::IsMirrored、docs/Architecture.html 10.2節)
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferPipelineStateMirrored;
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
@@ -184,6 +187,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_TransparentVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_TransparentPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineStateMirrored;
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
@@ -273,6 +277,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_ShadowVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_ShadowPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineStateMirrored;
         std::array<std::unique_ptr<RHI::IRHITexture>, kCascadeCount> m_ShadowCascades;
         // シャドウパスの各カスケード描画で使う専用の定数バッファ(カスケードごとに値を更新して使い回す)
         std::unique_ptr<RHI::IRHIBuffer> m_ShadowCascadeConstantBuffer;

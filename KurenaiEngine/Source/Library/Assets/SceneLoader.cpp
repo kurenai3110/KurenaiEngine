@@ -647,6 +647,9 @@ namespace Kurenai::Assets
 
             const float determinant = XMVectorGetX(XMMatrixDeterminant(worldMathSpace));
             instance.TangentSignFlip = determinant < 0.0f ? -1.0f : 1.0f;
+            // ミラーリングは三角形のワインディングも反転させるため、描画時に表裏判定を
+            // 入れ替えたパイプラインを選ぶ必要がある(KurenaiEngine3D::Renderの各ジオメトリパス)
+            instance.IsMirrored = determinant < 0.0f;
 
             // 法線用行列はWorldの3x3部分の逆転置(inverse-transpose)。回転+非一様スケールが
             // 組み合わさった場合に法線が歪むのを防ぐ(ModelSource.cppの同種の処理と同じ理由)。
