@@ -36,8 +36,11 @@ namespace Kurenai::RHI
 
     void DX12SwapChain::CreateDepthStencilView()
     {
+        // オフスクリーンの深度テクスチャ(CreateDepthTexture)と同じD32_FLOATに揃える。
+        // ステンシルはエンジン全体で使っておらず、PSOのDSVFormat(HasDepthStencil指定時はD32_FLOAT)と
+        // 実際にバインドされるDSVのフォーマットが一致していないとD3D12の仕様違反になるため
         D3D12_CLEAR_VALUE clearValue{};
-        clearValue.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        clearValue.Format = DXGI_FORMAT_D32_FLOAT;
         clearValue.DepthStencil.Depth = 1.0f;
         clearValue.DepthStencil.Stencil = 0;
 
@@ -50,7 +53,7 @@ namespace Kurenai::RHI
         resourceDesc.Height = m_Height;
         resourceDesc.DepthOrArraySize = 1;
         resourceDesc.MipLevels = 1;
-        resourceDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        resourceDesc.Format = DXGI_FORMAT_D32_FLOAT;
         resourceDesc.SampleDesc.Count = 1;
         resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 

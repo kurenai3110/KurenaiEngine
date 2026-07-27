@@ -214,6 +214,7 @@
     <li><a href="#dllsplit">13. 3DLL構成への分割</a></li>
     <li><a href="#ibl">14. IBL(Image Based Lighting)</a></li>
     <li><a href="#transparent">15. 半透明描画(フォワードパス)</a></li>
+    <li><a href="#rhi-binding">16. RHIのバインド寿命(DX11/DX12の挙動統一)</a></li>
   </ol>
 </nav>
 
@@ -2066,6 +2067,150 @@ Exteriorは4個)。</li>
 <li>ソートの粒度はモデルインスタンス単位(15.4節)であり、三角形単位のソートは行わない。
 単一メッシュが自己交差するような凹形状では奥行きの一部が正しく合成されない場合がある</li>
 </ul>
+</section>
+
+<section id="rhi-binding">
+<h2>16. RHIのバインド寿命(DX11/DX12の挙動統一)</h2>
+
+<p>「DX12だけ描画がおかしい」の大半は、DX11とDX12で<strong>バインドの寿命</strong>の意味が違うことが原因だった。
+このため、RHIの利用者から見た寿命が両バックエンドで完全に同じになるよう実装を揃えてある。
+呼び出し側(<code>KurenaiEngine3D</code>など)にDX12固有の呼び出し順や再バインド義務は一切残っていない。</p>
+
+<h3>16.1 何が違っていたか</h3>
+
+<p>DX11の<code>ID3D11DeviceContext</code>はステートフルで、<code>PSSetShaderResources</code>や
+<code>PSSetConstantBuffers</code>で張ったバインドは上書きするまで残る。DrawをまたいでもPSOを切り替えても消えない。</p>
+
+<p>一方DX12には次の2つの事情がある。</p>
+
+<ul>
+<li><code>SetGraphicsRootSignature</code>は<strong>それまでのルート引数をすべて無効化する</strong>。
+<code>SetPipelineState</code>は毎回これを呼ぶため、b0/b1もディスクリプタテーブルも失われる</li>
+<li>KurenaiEngineは1フレームぶんのコマンドをすべて記録してから1回だけ実行する設計なので、
+シェーダ可視ヒープの同じ位置を使い回すと、GPUが実際に描画する時点では「そのフレーム最後に書いた内容」に
+全描画が上書きされてしまう。そのため<strong>描画のたびに新しいディスクリプタテーブルのブロックを払い出す</strong>必要がある</li>
+</ul>
+
+<p>旧実装は後者を「今回<code>SetTexture</code>されたスロットだけをコピーする」方式で実現しており、
+再セットしなかったスロットは払い出したブロックの<strong>前世代の使い回しディスクリプタ(未初期化)</strong>を指していた。
+これがDX11との挙動差の正体で、<code>Transparent</code>パスには「t0〜t11の12スロット全てを
+<code>DrawIndexed</code>ごとに再設定する」という手動のワークアラウンドが入っていた。</p>
+
+<h3>16.2 統一後の設計</h3>
+
+<p><code>DX12CommandList</code>が「DX11のイミディエイトコンテキストが持っているのと同じ状態」を
+<strong>シャドウコピー</strong>として保持し、ルート引数が無効化されるたびに自動で張り直す。
+この方式はもともとサンプラーテーブル(<code>m_CurrentSamplerSetBase</code>)で導入したもので、
+それをSRVテーブルと定数バッファへ広げた形になる。</p>
+
+<table>
+<thead><tr><th>対象</th><th>シャドウ</th><th>張り直す契機</th></tr></thead>
+<tbody>
+<tr><td>定数バッファ b0/b1</td><td><code>m_CurrentRootCbv[2]</code>(GPU仮想アドレス)</td><td><code>SetPipelineState</code></td></tr>
+<tr><td>SRVテーブル t0〜t11</td><td><code>m_PendingSrvHandles[12]</code></td><td><code>Draw</code>/<code>DrawIndexed</code>直前(<code>FlushPendingSrvWrites</code>)</td></tr>
+<tr><td>サンプラーテーブル s0〜s2</td><td><code>m_CurrentSamplerSetBase</code></td><td><code>SetPipelineState</code></td></tr>
+<tr><td>コンピュート b0/b1・t0〜t3・u0〜u3</td><td>同名の<code>Compute</code>版</td><td><code>SetComputePipelineState</code> / <code>Dispatch</code>直前</td></tr>
+</tbody>
+</table>
+
+<p>要になっているのが<strong>nullディスクリプタ</strong>である。<code>DX12Device</code>が初期化時に
+<code>CreateShaderResourceView(nullptr, ...)</code> / <code>CreateUnorderedAccessView(nullptr, ...)</code> で
+「読むと0が返る」ディスクリプタを1つずつ作り、<code>DX12CommandList</code>のコンストラクタが
+シャドウ配列の全スロットをこれで初期化する。この結果:</p>
+
+<ul>
+<li>払い出したブロックのどの位置も未初期化のまま残らない(毎回全スロットをコピーするため)</li>
+<li>一度もバインドしていないスロットを読むと0が返る = DX11の未バインドスロットと同じ</li>
+<li>「どのスロットが設定済みか」を表すマスクが不要になり、そのクリア漏れ/クリアしすぎという
+不具合クラスごと無くなった(この不具合はコンピュート側でも一度発生している。14.7節)</li>
+</ul>
+
+<h3>16.3 レンダーターゲットになったテクスチャの自動アンバインド</h3>
+
+<p>D3D11のドライバは、同一リソースがSRVとRTVに同時バインドされると自動でSRV側を解除する。
+DX12にはこの保護がないため、<code>SetRenderTarget</code>/<code>SetRenderTargets</code>で
+バインドするテクスチャのSRVがシャドウに残っていればnullディスクリプタへ戻すようにした
+(<code>DX12CommandList::UnbindSrvSlotsBoundTo</code>)。DX11と挙動が揃うと同時に、
+<code>RENDER_TARGET</code>状態のリソースを指すディスクリプタがテーブルに残るというDX12固有の危険も断てる。</p>
+
+<p>コンピュートのUAVについては逆方向の統一を行っている。DX11は<code>Dispatch</code>直後に
+<code>CSSetUnorderedAccessViews</code>でnullを張って全スロットを解除する(同一リソースをSRVとUAVに
+同時バインドできない制約への対処)ため、DX12も<code>Dispatch</code>直後にUAVスロットをnullへ戻す。
+コンピュートのSRVはDX11も解除しないので張りっぱなしのままにしてある。</p>
+
+<h3>16.4 残っている唯一の呼び出し順の制約</h3>
+
+<p><code>UpdateBuffer</code> → <code>SetConstantBuffer</code> の順で呼ぶこと。これはルート引数の話ではなく、
+DX12の定数バッファがリング状に複数コピーを持ち<code>UpdateBuffer</code>が書き込み先を次のスロットへ
+進めるためで、先にバインドすると1つ前のスロット(更新前の内容)を指したままになる。
+DX11はイミディエイト実行のためこの制約がないが、両バックエンドで同じ順序で書く。</p>
+
+<h3>16.5 リングの上限とその検出</h3>
+
+<p>CPUは<code>kFrameCount</code>フレームぶん先行して記録するため、1フレームで安全に使えるリングは
+容量の<code>kFrameCount</code>分の1までである。これを超えるとGPUがまだ読んでいるスロットを上書きし、
+描画結果が静かに壊れる(定数バッファならメッシュの変換行列、構造化バッファならライトリスト)。</p>
+
+<p><code>DX12Buffer::CheckRingOverflow</code>が<code>DX12Device::GetFrameStamp()</code>を使って
+フレーム単位の書き込み回数を数え、上限を超えたらログを出す(バッファごとに1回だけ)。
+読み取り専用構造化バッファのステージングリングは元々<code>kFrameCount + 1</code>=3しかなく、
+<code>m_LightBuffer</code>がDirectLightパスとTransparentパスで1フレームに2回更新されるため
+既に上限を超えていた。現在は「1フレームあたりの更新回数の上限×<code>kFrameCount</code>+1」に拡張してある。</p>
+
+<h3>16.6 その他のDX11/DX12差の是正</h3>
+
+<table>
+<thead><tr><th>項目</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>シザー矩形</td><td>DX11はラスタライザが<code>ScissorEnable=FALSE</code>でクリップしない。DX12は必ず設定が要るため、レターボックスで非整数になるビューポートを左上<code>floor</code>・右下<code>ceil</code>で包む(切り捨てるとDX12だけ右端・下端が1px欠ける)</td></tr>
+<tr><td>DSVフォーマット</td><td>DX12はPSOが申告した<code>DSVFormat</code>と実際にバインドされるDSVが一致していないと仕様違反になる。スワップチェインの深度を<code>D24_UNORM_S8_UINT</code>から<code>D32_FLOAT</code>へ変更して(ステンシルは未使用)オフスクリーン深度と揃え、深度テストは使わないがDSVは張られるパス(Present / 2D / ImGui)向けに<code>PipelineStateDesc::DepthTargetAttached</code>を追加した。<code>HasDepthStencil</code>で兼ねると深度テストまで有効になってしまうため別フラグにしている</td></tr>
+<tr><td>スロット範囲</td><td>DX12は<code>SetConstantBuffer</code>のslotをそのままルートパラメータ番号として使うため、b2以降を渡すとSRV/サンプラーテーブルのルート引数を破壊する。b0〜b1・t0〜t11・コンピュートのt0〜t3/u0〜u3を範囲チェックし、外れたらログを出してスキップする</td></tr>
+<tr><td>無効なビュー</td><td>DX11はRTV/SRVを持たないテクスチャに対してnullptrをバインドして静かに描画をやめるが、DX12は<code>kInvalid</code>(0xFFFFFFFF)から「ヒープ先頭+0xFFFFFFFF×ディスクリプタサイズ」というでたらめなハンドルを作りデバイス削除に至る。<code>DX12Texture::HasSrv()/HasRtv()/HasDsv()</code>で事前に判定し、SRV/UAVはnullディスクリプタで代替、RTV/DSVはログを出してそのターゲットを除外する</td></tr>
+<tr><td>ImGuiのヒープ</td><td><code>ImGui_ImplDX12_RenderDrawData</code>はImGui自身のヒープ上のハンドルを<code>SetGraphicsRootDescriptorTable</code>へ渡すが<code>SetDescriptorHeaps</code>は呼ばない(呼び出し側が事前にバインドしておく規約)。エンジンのヒープを張ったまま呼んでいたためD3D12の仕様違反になっており、<code>DX12ImGuiBackend::Render</code>でImGuiのヒープへ切り替えてから描画し、直後に戻すようにした</td></tr>
+</tbody>
+</table>
+
+<h3>16.7 デバッグレイヤーの指摘をログへ出す</h3>
+
+<p>D3D12デバッグレイヤーの指摘はそのままではデバッガの出力ウィンドウにしか出ず、デバッガを繋がずに
+実行すると気付けない。<code>DX12Device</code>が<code>ID3D12InfoQueue</code>に溜まったメッセージを
+毎フレーム引き取り、<code>KurenaiEngine.log</code>へ警告以上を書き出す(デバッグビルドのみ)。
+上記の不具合はいずれもこの仕組みを入れて初めて可視化できたもの。</p>
+
+<p>ログ行にはメッセージIDを併記してあり、除外したい指摘が出たら<code>DX12Device::Initialize</code>の
+<code>deniedIds</code>へその番号を追加できる。現在除外しているのは実害が無いと確認済みで、かつ
+毎フレーム大量に出てログを埋め尽くす次の2件(実測で1回の起動あたり約2万件)。</p>
+
+<ul>
+<li><code>CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE</code> — レンダーテクスチャを一律<code>{0,0,0,1}</code>で作り
+パスごとに別の色でクリアしているため出る性能上の注意。高速クリア経路には乗らないが結果は正しい。
+用途ごとのクリア色をテクスチャ生成時に指定できるようにすれば解消できるが、RHIのAPI変更を伴うため現状は許容している</li>
+<li><code>CREATERESOURCE_STATE_IGNORED</code>(ID 1328) — バッファはD3D12の仕様上つねに<code>COMMON</code>状態で
+作られるため<code>InitialState</code>が無視される、という通知。仕様通りの動作で対処のしようがない。
+この列挙子はビルドに使っているWindows SDK 10.0.19041のヘッダにまだ存在しないため数値で指定している</li>
+</ul>
+
+<h3>16.8 既知の残る差異</h3>
+
+<ul>
+<li><code>SetTexture</code>が発行する<code>TransitionTo(PIXEL_SHADER_RESOURCE)</code>は、スロットが永続化しても
+再発行されない。16.3節のレンダーターゲット自動アンバインドで主要なケースは塞がるが、
+コンピュートのUAVを経由した状態遷移までは追跡していない</li>
+<li>コンピュートのSRVはDX11同様に張りっぱなしなので、そこにバインドしたテクスチャが破棄されると
+ハンドルが陳腐化する(ヒープインデックスが再利用されるため、クラッシュではなく別リソースを指す)。
+DX11も同じくコンピュートSRVを解除しないため、これは<em>挙動が一致した状態</em>である</li>
+<li><code>DX12Texture::TransitionTo</code>は常に<code>ALL_SUBRESOURCES</code>単位。ミップ/フェイス単位の
+read+writeが同一パスでできない制約はそのまま(Hi-Zダウンサンプルが両ミップをUAVでバインドしている理由)</li>
+</ul>
+
+<h3>16.9 検証方法</h3>
+
+<p>DX11とDX12を同時に起動して同じ操作を行い、スクリーンショットをピクセル単位で比較する。
+<code>Sample3D.exe</code>(既定でDX11)と<code>Sample3D.exe -dx12</code>を別プロセスで立ち上げ、
+「Scenes」パネルから各シーンへ切り替えながら撮り比べる。統一後は
+Bistro Exterior / Interior / Light Test / White Furnace Test / Material Test の全シーンと、
+「Render Targets」のAO/GI表示、ウィンドウリサイズ前後のいずれもピクセル単位で完全一致し、
+<code>KurenaiEngine.log</code>にデバッグレイヤーの指摘が1件も出ないことを確認している。</p>
 </section>
 
 </main>

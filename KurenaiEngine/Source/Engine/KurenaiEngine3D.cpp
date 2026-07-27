@@ -678,6 +678,9 @@ namespace Kurenai
         presentPipelineDesc.PixelShader = m_PresentPixelShader.get();
         presentPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
         presentPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        // スワップチェインへ描くパスは深度テストこそ使わないが、SetRenderTarget(swapChain)が
+        // スワップチェインのDSVをバインドするため、DSVフォーマットの申告だけは必要になる
+        presentPipelineDesc.DepthTargetAttached = true;
         m_PresentPipelineState = m_Device->CreatePipelineState(presentPipelineDesc);
 
         // シャドウパス(ライト視点への深度のみの描画。頂点入力はPOSITIONのみ使用)
@@ -2373,6 +2376,17 @@ namespace Kurenai
                     cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
                 }
 
+                // メッシュによらずパス全体で共通のテクスチャはここで一度だけバインドする。
+                // テクスチャのバインドは上書きするまで維持されるため(IRHICommandList::SetTexture参照)、
+                // メッシュごとのループ内で張り直す必要はない
+                cmd->SetTexture(4, m_ShadowCascadeArray.get());
+                cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+                // IBL(14章)。このパスにはSSRが適用されないため、半透明サーフェスの環境の
+                // 映り込みはこの3枚だけが担う
+                cmd->SetTexture(9, m_IrradianceTexture.get());
+                cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
+                cmd->SetTexture(11, m_BRDFLUTTexture.get());
+
                 // 半透明は奥から手前への描画順そのものが正しさの前提なので並べ替えられない。
                 // そのため必要になった時点でパイプラインを切り替える(GBufferパスと同じ方式)
                 RHI::IRHIPipelineState* currentPipelineState = m_TransparentPipelineState.get();
@@ -2400,20 +2414,12 @@ namespace Kurenai
 
                     cmd->SetVertexBuffer(draw.Mesh->VertexBuffer.get());
                     cmd->SetIndexBuffer(draw.Mesh->IndexBuffer.get());
-                    // t0〜t11の12スロット全てをDrawIndexedごとに再設定する。DX12はslot 0のSetTextureで
-                    // 新しい描画のSRVテーブルを確定させるため(DX12CommandList::FlushPendingSrvWrites参照)、
-                    // shadow/light/IBLのように値が変わらないスロットも含め毎回セットし直す必要がある
+                    // メッシュごとに変わるマテリアルテクスチャのみ差し替える
+                    // (t4以降のシャドウ/ライト/IBLはループ前に一度バインドしたものがそのまま残る)
                     cmd->SetTexture(0, draw.Mesh->BaseColorTexture);
                     cmd->SetTexture(1, draw.Mesh->NormalTexture);
                     cmd->SetTexture(2, draw.Mesh->MetallicRoughnessTexture);
                     cmd->SetTexture(3, draw.Mesh->EmissiveTexture);
-                    cmd->SetTexture(4, m_ShadowCascadeArray.get());
-                    cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
-                    // IBL(14章)。このパスにはSSRが適用されないため、半透明サーフェスの環境の
-                    // 映り込みはこの3枚だけが担う
-                    cmd->SetTexture(9, m_IrradianceTexture.get());
-                    cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
-                    cmd->SetTexture(11, m_BRDFLUTTexture.get());
 
                     cmd->DrawIndexed(draw.Mesh->IndexCount, 0, 0);
                 }

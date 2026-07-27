@@ -31,6 +31,15 @@ namespace Kurenai::RHI
         ~DX12Texture() override;
 
         ID3D12Resource* GetResource() const { return m_Resource.Get(); }
+
+        // 対応するビューを持っているか。持っていないインデックス(kInvalid)でGetCpuHandleを呼ぶと
+        // 「ヒープ先頭 + 0xFFFFFFFF × ディスクリプタサイズ」というでたらめなハンドルができ、
+        // それをそのままD3D12へ渡すとデバイス削除(TDR)に至る。DX11は同じ状況でnullptrを
+        // バインドして静かに描画をやめるだけなので、呼び出し側はこれで事前に判定する
+        bool HasSrv() const { return m_SrvIndex != kInvalid; }
+        bool HasRtv() const { return m_RtvIndex != kInvalid; }
+        bool HasDsv() const { return m_DsvIndex != kInvalid || !m_SliceDsvIndices.empty(); }
+
         D3D12_CPU_DESCRIPTOR_HANDLE GetSrvCpuHandle() const;
         D3D12_CPU_DESCRIPTOR_HANDLE GetRtvCpuHandle() const;
         // CreateDepthTextureArrayで作成した場合のみスライスごとの個別DSVを持ち、arraySliceで選択する

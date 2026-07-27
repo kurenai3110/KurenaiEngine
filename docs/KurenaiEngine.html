@@ -514,6 +514,9 @@ psoDesc.InputLayout = { { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 } };
 psoDesc.VertexShader = vs.get();
 psoDesc.PixelShader = ps.get();
 psoDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+// SetRenderTarget(swapChain)はスワップチェーン付属の深度バッファも一緒にバインドするため、
+// 深度テストを使わない場合でもこれをtrueにする(DX12で必要。下記の注記を参照)
+psoDesc.DepthTargetAttached = true;
 auto pipelineState = device->CreatePipelineState(psoDesc);
 
 RHI::IRHICommandList* cmd = device->GetImmediateCommandList();
@@ -632,9 +635,38 @@ void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t t
 <code>SetShaderResourceBuffer</code>は<code>BufferUsage::StructuredReadOnly</code>で作成した
 バッファを<code>StructuredBuffer&lt;T&gt;</code>としてピクセルシェーダへ読み取り専用でバインドする
 (要素数が可変で定数バッファに収めるには大きい配列向け。詳細は4.4参照)。<strong>スロット空間は
-<code>SetTexture</code>と共通</strong>(<code>t0</code>〜<code>t6</code>)のため、同じ描画内で
+<code>SetTexture</code>と共通</strong>(<code>t0</code>〜<code>t11</code>)のため、同じ描画内で
 テクスチャとスロットが衝突しないよう呼び出し側で調整すること。DX11バックエンドでは
 <code>SetTexture</code>と同様ピクセルシェーダからのみ参照できる。
+</p>
+
+<h4>バインドの寿命と呼び出し順</h4>
+<p>
+<code>SetConstantBuffer</code> / <code>SetTexture</code> / <code>SetSamplerSet</code> /
+<code>SetShaderResourceBuffer</code> のバインドは、<strong>同じスロットを上書きするまで維持される</strong>。
+<code>Draw</code>/<code>DrawIndexed</code>をまたいでも、<code>SetPipelineState</code>で
+パイプラインステートを切り替えても残るため、パス全体で共通のテクスチャはメッシュごとのループの外で
+1回バインドすればよい。一度もバインドしていないスロットを読むと0が返る。
+この挙動はDX11・DX12で完全に同一である。
+</p>
+<p>
+例外として、<code>SetTexture</code>でバインドしたテクスチャを
+<code>SetRenderTarget</code>/<code>SetRenderTargets</code>で描画先に指定すると、そのバインドは
+自動的に解除される(同じリソースを読みながら書くことはできないため)。
+コンピュートの<code>SetComputeUnorderedAccessTexture</code>/<code>...Buffer</code>も同じ理由で
+<code>Dispatch</code>のたびに解除されるので、ディスパッチごとにバインドし直すこと
+(<code>SetComputeTexture</code>のSRVは維持される)。
+</p>
+<p>
+呼び出し順で1点だけ注意がある。同じバッファを<code>UpdateBuffer</code>してからバインドする場合は、
+必ず<strong><code>UpdateBuffer</code> → <code>SetConstantBuffer</code>の順</strong>で呼ぶこと。
+逆順にするとDX12で更新前の内容が参照される。
+</p>
+<p>
+スロット番号の上限は定数バッファが<code>b0</code>〜<code>b1</code>、テクスチャ/構造化バッファが
+<code>t0</code>〜<code>t11</code>、コンピュートが<code>b0</code>〜<code>b1</code>・
+<code>t0</code>〜<code>t3</code>・<code>u0</code>〜<code>u3</code>。範囲外を指定した場合は
+ログを出してバインドをスキップする。
 </p>
 
 <h4 id="compute">4.3.1 コンピュートシェーダー</h4>
@@ -764,6 +796,17 @@ IMMUTABLEになり以後の更新が失敗するため、必ずnullptrで作成�
 <code>PremultipliedAlpha</code>(事前乗算済みアルファブレンド)を指定できる。
 <code>IRHIGPUProfiler</code>(GPUタイムスタンプ計測)、
 <code>IRHIImGuiBackend</code>(ImGui連携)も同様に公開されている。
+</p>
+<p>
+深度に関わる<code>PipelineStateDesc</code>のフラグは2つある。<code>HasDepthStencil</code>は
+<strong>深度テストを行うか</strong>で、<code>DepthTargetAttached</code>は
+<strong>深度テストはしないが描画時に深度バッファがバインドされた状態になるか</strong>を表す。
+後者はDX12が「パイプラインステートが想定する深度フォーマット」と「実際にバインドされている深度バッファ」の
+一致を要求するために必要で、<code>SetRenderTarget(swapChain)</code>はスワップチェーン付属の深度バッファを
+必ずバインドするため、スワップチェーンへ直接描くパイプラインステートでは深度テストを使わなくても
+<code>DepthTargetAttached = true</code>にする(<code>HasDepthStencil = true</code>で代用すると
+意図しない深度テストが有効になってしまう)。<code>SetRenderTargets</code>で深度テクスチャに
+<code>nullptr</code>を渡すパスでは両方とも<code>false</code>のままでよい。
 </p>
 
 <h3>4.5 <code>Core::Window</code> / <code>Core::Camera</code></h3>

@@ -28,6 +28,7 @@ namespace Kurenai::RHI
     {
     public:
         DX12Buffer(
+            DX12Device* device,
             Microsoft::WRL::ComPtr<ID3D12Resource> resource,
             void* mappedPtr,
             uint32_t sizeInBytes,
@@ -100,5 +101,19 @@ namespace Kurenai::RHI
         void* m_UploadMappedPtr = nullptr;
         uint32_t m_UploadRingCapacity = 1;
         uint32_t m_UploadRingIndex = 0;
+
+        // リング周回の検出用。1フレーム内に「リング容量 ÷ kFrameCount」を超えて書き込むと、
+        // まだGPUが読んでいる可能性のある直近フレームのスロットを上書きしてしまい、
+        // 描画結果が静かに壊れる(定数バッファならメッシュの変換行列、構造化バッファならライトリスト)。
+        // 例外を投げるとシーンが大きいだけでアプリが落ちてしまうため、検出したらログを出して継続する
+        uint64_t m_LastWriteFrameStamp = 0;
+        uint32_t m_RingWritesThisFrame = 0;
+        uint32_t m_UploadRingWritesThisFrame = 0;
+        bool m_RingOverflowReported = false;
+        bool m_UploadRingOverflowReported = false;
+        // リングへの書き込み回数をフレーム単位で数え直し、1フレームあたりの上限を超えていたらログを出す。
+        // 戻り値は使わず、副作用(カウント・ログ)のみが目的
+        void CheckRingOverflow(
+            uint32_t ringCapacity, uint32_t& writesThisFrame, bool& reported, const char* bufferKindName);
     };
 }

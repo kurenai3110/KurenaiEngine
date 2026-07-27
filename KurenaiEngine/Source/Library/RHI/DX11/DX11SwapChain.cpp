@@ -40,7 +40,10 @@ namespace Kurenai::RHI
         depthDesc.Height = m_Height;
         depthDesc.MipLevels = 1;
         depthDesc.ArraySize = 1;
-        depthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        // オフスクリーンの深度テクスチャ(CreateDepthTexture)と同じD32_FLOATに揃える。
+        // ステンシルはエンジン全体で使っておらず(StencilEnable=FALSE)、DX12側では
+        // PSOのDSVFormatと実際にバインドされるDSVのフォーマットが一致している必要があるため
+        depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
         depthDesc.SampleDesc.Count = 1;
         depthDesc.Usage = D3D11_USAGE_DEFAULT;
         depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;

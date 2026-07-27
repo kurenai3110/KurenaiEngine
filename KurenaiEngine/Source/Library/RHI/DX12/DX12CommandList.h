@@ -54,19 +54,37 @@ namespace Kurenai::RHI
         D3D12_CPU_DESCRIPTOR_HANDLE m_CurrentDepthStencilView{};
         bool m_HasDepthStencilView = false;
 
-        // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス。SetTexture(0, ...)のたびに
-        // 新しいブロックを割り当て直す(1フレームぶんまとめて記録してから1回だけ実行する設計のため、
-        // 同じスロットを使い回すとGPU実行時にはそのフレーム最後の書き込みで上書きされてしまう)
-        static constexpr uint32_t kTextureSlotCount = 12;
-        uint32_t m_CurrentSrvTableBase = 0;
+        // --- バインド状態のシャドウコピー -------------------------------------------------
+        // DX11はイミディエイトコンテキストがステートフルで、PSSetShaderResources/PSSetConstantBuffers
+        // で張ったバインドは上書きするまで(Drawやパイプラインステート切り替えをまたいで)残る。
+        // DX12はSetGraphicsRootSignatureがルート引数をすべて無効化し、かつディスクリプタテーブルは
+        // 描画ごとに新しいブロックを払い出す必要があるため、放っておくと寿命の意味がDX11と食い違う。
+        // そこで「DX11のコンテキストが持っているのと同じ状態」をここにシャドウコピーとして保持し、
+        // ルート引数が無効化されるたびに自動で張り直すことで、両バックエンドの挙動を一致させる。
+        // (この方式はサンプラーテーブルで先に導入したもの。m_CurrentSamplerSetBase参照)
 
-        // SetTexture()はCopyDescriptorsをその場では呼ばず、コピー元ハンドルをここに溜めておき、
-        // Draw直前にFlushPendingSrvWrites()でまとめて1回のCopyDescriptorsに反映する。
-        // メッシュごとにテクスチャの数だけCopyDescriptorsSimpleを呼んでいた際のドライバ呼び出し
-        // オーバーヘッド(CPU側のディスクリプタコピーコスト)を削減するため
+        // ルート定数バッファビュー(b0/b1)のGPU仮想アドレス。0は未設定を表す
+        static constexpr uint32_t kConstantBufferSlotCount = 2;
+        D3D12_GPU_VIRTUAL_ADDRESS m_CurrentRootCbv[kConstantBufferSlotCount]{};
+        D3D12_GPU_VIRTUAL_ADDRESS m_CurrentComputeRootCbv[kConstantBufferSlotCount]{};
+
+        // SRVスロット(t0〜t11)のシャドウ。SetTexture/SetShaderResourceBufferはCopyDescriptorsを
+        // その場では呼ばず、コピー元ハンドルをここへ記録するだけにして、Draw直前の
+        // FlushPendingSrvWrites()でまとめて1回のCopyDescriptorsに反映する(メッシュごとに
+        // テクスチャの数だけCopyDescriptorsSimpleを呼ぶドライバ呼び出しコストの削減)。
+        // 全スロットはコンストラクタでnullディスクリプタに初期化してあり、以降は必ず有効な
+        // ディスクリプタを指す。そのため「どのスロットが設定済みか」を区別する必要がなく、
+        // 未バインドのスロットを読むと0が返るというDX11と同じ挙動になる
+        static constexpr uint32_t kTextureSlotCount = 12;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
-        uint32_t m_PendingSrvSlotMask = 0;
+        // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
+        uint32_t m_CurrentSrvTableBase = 0;
         void FlushPendingSrvWrites();
+        // レンダーターゲット/深度としてバインドされるテクスチャのSRVがシャドウに残っていたら
+        // nullディスクリプタへ戻す。D3D11ドライバが同一リソースのSRVとRTVの同時バインドを
+        // 検出して自動で解除するのと同じ挙動を再現し、あわせて「RENDER_TARGET状態のリソースを
+        // 指すディスクリプタがテーブルに残る」というDX12固有の危険も断つ
+        void UnbindSrvSlotsBoundTo(IRHITexture* texture);
 
         // 直前にDraw/DrawIndexedへ実際に反映した(コピー済みの)テクスチャの組み合わせ。
         // 同じマテリアルを使う連続したメッシュではテクスチャの組み合わせが変わらないため、
@@ -75,7 +93,6 @@ namespace Kurenai::RHI
         // SetPipelineState()はSetGraphicsRootSignatureを呼び直すたびにルート引数を無効化するため、
         // その直後は必ずm_HasLastDrawをfalseにして使い回しを禁止する
         D3D12_CPU_DESCRIPTOR_HANDLE m_LastDrawSrvHandles[kTextureSlotCount]{};
-        uint32_t m_LastDrawSlotMask = 0;
         bool m_HasLastDraw = false;
 
         // 直近にSetSamplerSet/SetComputeSamplerSetで指定されたセットの、ヒープ上のブロック先頭。
@@ -90,13 +107,13 @@ namespace Kurenai::RHI
 
         // コンピュートシェーダー用SRV(t0〜)+UAV(u0〜)テーブル。グラフィックスのSRVテーブルと同様、
         // Set*の時点ではコピー元だけ溜めておき、Dispatch直前のFlushPendingComputeWrites()でまとめて
-        // CopyDescriptors・ルートテーブルの再バインドを行う
+        // CopyDescriptors・ルートテーブルの再バインドを行う。
+        // SRVはDX11と同じく上書きするまで維持され、UAVはDX11がDispatch直後に
+        // CSSetUnorderedAccessViewsでnullを張るのに合わせてDispatch直後にnullへ戻す
         static constexpr uint32_t kComputeSrvSlotCount = 4;
         static constexpr uint32_t kComputeUavSlotCount = 4;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeSrvHandles[kComputeSrvSlotCount]{};
-        uint32_t m_PendingComputeSrvSlotMask = 0;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeUavHandles[kComputeUavSlotCount]{};
-        uint32_t m_PendingComputeUavSlotMask = 0;
         // 今回のDispatchでUAVとしてバインドされているリソース。Dispatch直後にUAVバリアを発行し、
         // 後続のDispatch/描画がこのDispatchの書き込み完了を確実に見えるようにするため保持する
         ID3D12Resource* m_BoundComputeUavResources[kComputeUavSlotCount]{};
