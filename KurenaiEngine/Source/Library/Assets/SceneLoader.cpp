@@ -184,6 +184,14 @@ namespace Kurenai::Assets
             float ConeAngleDegrees = 45.0f;
         };
 
+        struct ParsedReflectionProbeEntry
+        {
+            bool HasPosition = false;
+            float Position[3] = { 0.0f, 0.0f, 0.0f };
+            float Radius = 10.0f;
+            std::wstring Name;
+        };
+
         struct ParsedScene
         {
             std::wstring Name;
@@ -210,6 +218,7 @@ namespace Kurenai::Assets
             bool SSREnabled = true;
 
             std::vector<ParsedLightEntry> Lights;
+            std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
         };
 
         enum class Section
@@ -220,6 +229,7 @@ namespace Kurenai::Assets
             Camera,
             Sun,
             Light,
+            ReflectionProbe,
             Unknown,
         };
 
@@ -230,6 +240,7 @@ namespace Kurenai::Assets
             if (CaseInsensitiveEquals(name, L"Camera")) return Section::Camera;
             if (CaseInsensitiveEquals(name, L"Sun")) return Section::Sun;
             if (CaseInsensitiveEquals(name, L"Light")) return Section::Light;
+            if (CaseInsensitiveEquals(name, L"ReflectionProbe")) return Section::ReflectionProbe;
             return Section::Unknown;
         }
 
@@ -311,6 +322,10 @@ namespace Kurenai::Assets
                     else if (currentSection == Section::Light)
                     {
                         result.Lights.emplace_back();
+                    }
+                    else if (currentSection == Section::ReflectionProbe)
+                    {
+                        result.ReflectionProbes.emplace_back();
                     }
                     else if (currentSection == Section::Camera)
                     {
@@ -509,6 +524,30 @@ namespace Kurenai::Assets
                     break;
                 }
 
+                case Section::ReflectionProbe:
+                {
+                    ParsedReflectionProbeEntry& entry = result.ReflectionProbes.back();
+                    if (CaseInsensitiveEquals(key, L"Position"))
+                    {
+                        if (!ParseFloat3(value, entry.Position)) errorAt(lineNumber, rawLine, "Positionの値が不正です(x, y, zの3要素が必要)");
+                        entry.HasPosition = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Radius"))
+                    {
+                        if (!ParseFloatToken(value, entry.Radius)) errorAt(lineNumber, rawLine, "Radiusの値が不正です");
+                        if (entry.Radius <= 0.0f) errorAt(lineNumber, rawLine, "Radiusは0より大きい値で指定してください");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Name"))
+                    {
+                        entry.Name = value;
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
                 default:
                     break;
                 }
@@ -542,6 +581,13 @@ namespace Kurenai::Assets
                 if (light.Type == LightType::Spot && !light.HasDirection)
                 {
                     throw std::runtime_error("[Light]の" + std::to_string(i + 1) + "番目(Spot)にDirectionが指定されていません: " + WideToUtf8(filePath));
+                }
+            }
+            for (size_t i = 0; i < result.ReflectionProbes.size(); ++i)
+            {
+                if (!result.ReflectionProbes[i].HasPosition)
+                {
+                    throw std::runtime_error("[ReflectionProbe]の" + std::to_string(i + 1) + "番目にPositionが指定されていません: " + WideToUtf8(filePath));
                 }
             }
             if (result.HasCamera && !result.CameraPositionSet)
@@ -615,6 +661,18 @@ namespace Kurenai::Assets
             light.SpotInnerConeAngle = outerRadians;
             light.Enabled = true;
             scene.Lights.push_back(light);
+        }
+
+        // [ReflectionProbe]も[Light]と同様、.kscene上の値が既にワールド空間のため変換不要
+        for (const ParsedReflectionProbeEntry& parsedProbe : parsed.ReflectionProbes)
+        {
+            ReflectionProbe probe;
+            std::memcpy(probe.Position, parsedProbe.Position, sizeof(probe.Position));
+            probe.Radius = parsedProbe.Radius;
+            probe.Name = parsedProbe.Name.empty()
+                ? ("Probe " + std::to_string(scene.ReflectionProbes.size()))
+                : WideToUtf8(parsedProbe.Name);
+            scene.ReflectionProbes.push_back(probe);
         }
 
         bool boundsInitialized = false;

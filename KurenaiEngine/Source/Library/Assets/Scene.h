@@ -21,6 +21,19 @@ namespace Kurenai::Assets
         float TangentSignFlip = 1.0f;       // Worldの行列式が負(ミラーリング)なら-1
     };
 
+    // 反射プローブ(リフレクションプローブ)。この位置から周囲をキューブマップへキャプチャし、
+    // 畳み込んだものを影響範囲内のピクセルのIBL環境ソースとして使う。シーン全体で1つしかない
+    // スカイボックス由来のIBLと違い、位置ごとに異なる環境(屋内なら屋内の壁・天井)を反映できる
+    struct ReflectionProbe
+    {
+        // ワールド空間のキャプチャ位置(この点から6方向を撮る)
+        float Position[3] = { 0.0f, 0.0f, 0.0f };
+        // 影響範囲の半径(ワールド単位)。この球の内側のピクセルがこのプローブの環境を受け、
+        // 外側はスカイボックス由来のグローバルIBLへフォールバックする
+        float Radius = 10.0f;
+        std::string Name;
+    };
+
     struct Scene
     {
         std::wstring Name;
@@ -31,6 +44,10 @@ namespace Kurenai::Assets
         // [Light]セクションで直接指定されたライト(元からワールド空間)を合成した、シーン全体の
         // ライト一覧。KurenaiEngine3Dはこれをそのまま読んでGPUのライトバッファを構築する
         std::vector<Light> Lights;
+
+        // .ksceneの[ReflectionProbe]セクションで配置された反射プローブの一覧(ワールド空間)。
+        // ライトと違いモデルファイルへ埋め込む概念が無いため、.ksceneに書かれたものが全て
+        std::vector<ReflectionProbe> ReflectionProbes;
 
         // [Camera]セクションが無い場合はfalseのままで、呼び出し側はFrameCameraToModel相当の
         // 自動配置ヒューリスティックを使う

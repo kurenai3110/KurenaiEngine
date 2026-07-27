@@ -214,6 +214,7 @@
     <li><a href="#dllsplit">13. 3DLL構成への分割</a></li>
     <li><a href="#ibl">14. IBL(Image Based Lighting)</a></li>
     <li><a href="#transparent">15. 半透明描画(フォワードパス)</a></li>
+    <li><a href="#reflectionprobe">16. 反射プローブ(リフレクションプローブ)</a></li>
   </ol>
 </nav>
 
@@ -1950,6 +1951,172 @@ Exteriorは4個)。</li>
 <li>半透明物体同士は互いに影を落とさない(シャドウマップは不透明物体のみで構築される)</li>
 <li>ソートの粒度はモデルインスタンス単位(15.4節)であり、三角形単位のソートは行わない。
 単一メッシュが自己交差するような凹形状では奥行きの一部が正しく合成されない場合がある</li>
+</ul>
+</section>
+
+<section id="reflectionprobe">
+<h2>16. 反射プローブ(リフレクションプローブ)</h2>
+<p>
+<a href="#ibl">14章</a>のIBLはスカイボックス1枚から焼くため、<strong>シーン全体で単一の環境</strong>
+しか持てない。屋内でも空が映り込む、壁際と部屋の中央で環境光が同じ、といった破綻が原理的に避けられない。
+反射プローブは<strong>シーン内の任意位置で環境をキャプチャし、位置に応じた環境反射・環境光を与える</strong>
+ことでこれを解消する。
+</p>
+
+<h3>16.1 IBLの畳み込みをそのまま再利用する</h3>
+<p>
+この機能で新しく実装したのは<strong>キャプチャ部分だけ</strong>である。プローブのキューブマップを
+拡散イラディアンス・プリフィルタ済み鏡面へ畳み込む処理は、<code>IBLConvolve.hlsl</code>の
+<code>CSIrradiance</code>/<code>CSPrefilter</code>を<b>一切変更せずそのまま呼んでいる</b>。
+これらは畳み込み元を<code>TextureCube SourceSkybox : register(t0)</code>として受け取るだけなので、
+スカイボックスの代わりにプローブのキューブマップをバインドすれば済む。BRDF積分LUTは方向依存を
+持たないためプローブ間・グローバルIBLと共有する(焼き直し不要)。
+</p>
+<p>
+評価側(<code>DeferredLighting.hlsl</code>の<code>EvaluateIBL</code>)も同様で、split-sum近似の式は
+そのまま、<strong>引くキューブマップだけを差し替える</strong>形にした。プローブとグローバルIBLで
+解像度・ミップ構成を揃えてある(<code>kProbeCaptureSize == kIBLPrefilterBaseSize</code>)のは
+このためで、ラフネス→ミップの変換式も共通のまま使える。
+</p>
+
+<h3>16.2 キューブマップへ直接描画せず、2Dへ描いてUAVでコピーする</h3>
+<p>
+RHIには<strong>キューブマップの面ごとのRTV</strong>が無い。これを新設せず、次の経路でキューブマップを
+組み立てている。
+</p>
+<ol>
+<li>プローブ位置から1面ぶんを、通常の2Dレンダーターゲット(<code>m_ProbeCaptureColor</code>、
+HDR 128&times;128)へフォワード描画する(<code>ProbeCapture.hlsl</code>)</li>
+<li>コンピュートシェーダー(<code>IBLConvolve.hlsl</code>の<code>CSCopyCaptureToCubeFace</code>)が
+その結果をキューブマップの該当面のUAVへ書き写す</li>
+<li>これを6面ぶん繰り返す</li>
+</ol>
+<p>
+この方式を選んだのは、<strong>面ごとのUAV書き込み(<code>SetComputeUnorderedAccessTextureCubeFace</code>)が
+IBLで既に両バックエンドとも実績のある経路であり、RTV/DSVのディスクリプタ管理をDX11・DX12双方へ
+新規に追加せずに済む</strong>ため。コストは128&times;128のディスパッチ6回で、ベイク全体から見れば無視できる。
+</p>
+<p>
+ジオメトリが描かれなかったピクセル(深度が書き込まれなかった=Reverse-Zで0のまま)は、コピー側で
+その面・そのテクセルが表す方向のスカイボックスを引いて埋める。面&rarr;方向の対応
+(<code>CubeFaceDirection</code>)は畳み込みと1文字も違ってはいけないため、コピーのシェーダーは
+あえて<code>IBLConvolve.hlsl</code>側に置いて関数を直接共有している。
+</p>
+
+<h3>16.3 複数プローブにはTextureCubeArrayが要る</h3>
+<p>
+HLSLは別々の<code>TextureCube</code>リソースを<strong>動的に添字参照できない</strong>。カスケードシャドウマップが
+<code>ShadowMap0</code>&sim;<code>3</code>を個別スロットに分けて<code>if</code>で分岐しているのはこの制約によるが、
+プローブは数が可変なので分岐では書けない。そのため畳み込み結果は<code>TextureCubeArray</code>で保持し、
+ピクセルごとに選んだプローブ番号でサンプルする。
+</p>
+<p>
+RHIへの追加(<code>CreateMippedUAVTextureCubeArray</code>、
+<code>SetComputeUnorderedAccessTextureCubeFace</code>の<code>cubeIndex</code>引数)は小さな差分で済んだ。
+面ごとのUAVはもともと<code>Texture2DArray</code>(要素数1)ビューであり、<code>FirstArraySlice</code>を
+<code>cubeIndex * 6 + face</code>にするだけで配列へ拡張できるためである。SRVの次元だけが
+<code>TEXTURECUBE</code>/<code>TEXTURECUBEARRAY</code>で変わる。
+</p>
+<p>
+一方で<strong>畳み込みの入力</strong>だけは<code>TextureCube</code>(配列ではない)でなければならない。
+<code>IBLConvolve.hlsl</code>の<code>SourceSkybox</code>が<code>TextureCube</code>宣言のままだからである。
+プローブは1つずつ順に焼くため、キャプチャした6面を組み上げるスクラッチのキューブマップ
+(<code>m_ProbeRadianceCube</code>)は<strong>1枚だけ</strong>確保して使い回している。
+これにより畳み込みシェーダーを変更せずに済んでいる。
+</p>
+
+<h3>16.4 キャプチャ時のライティングと定数バッファの与え方</h3>
+<p>
+キャプチャは<code>Transparent.hlsl</code>(半透明フォワードパス)と同じ式のフォワードシェーディングで、
+<strong>直接光(太陽+CSMシャドウ+ポイント/スポットライト)+スカイボックス由来のグローバルIBL+エミッシブ</strong>
+までを含む。他のプローブの寄与は含めない(含めるとプローブ同士が相互参照して発散するため、
+反射の中の反射は1バウンスで打ち切る)。
+</p>
+<p>
+定数バッファは<strong><code>FrameConstants</code>の宣言を一切変えずに</strong>、このパス専用のバッファへ
+視点に関わる値だけを差し替えて渡している。
+</p>
+<table>
+<tr><th>フィールド</th><th>渡す値</th><th>理由</th></tr>
+<tr><td><code>ViewProj</code></td><td>プローブのその面のビュー・プロジェクション</td><td>ラスタライズ用</td></tr>
+<tr><td><code>View</code></td><td><b>カメラ</b>のビュー行列</td><td>カスケード選択の深度が<code>CascadeSplits</code>(カメラ視錐台基準)と対応している必要があるため、ここだけプローブではなくカメラのものを渡す</td></tr>
+<tr><td><code>CameraPosition</code></td><td>プローブのワールド座標</td><td>視線ベクトル<code>V</code>の起点。プローブから見た放射輝度を捉えるのが目的のため</td></tr>
+</table>
+<p>
+キャプチャ用プロジェクションは画角90度・アスペクト1で、<code>Core::Camera</code>と同じ
+Reverse-Z(近平面=NDC z=1.0、遠平面=NDC z=0.0)で組む(<code>ComputeCubeFaceProjection</code>)。
+面ごとのビュー行列(<code>ComputeCubeFaceView</code>)の前方向・上方向の組は、
+<code>CubeFaceDirection</code>が定める面&rarr;方向の対応と一致していなければならない
+(ずれると焼いた面が回転・反転する)。
+</p>
+<p>
+影は<code>ProbeCapture.hlsl</code>側でPCSSではなく単純な3&times;3のPCFに落としている。プローブに映る影は
+反射像としてさらに縮小・ぼかされるため、半影の正確さより焼き直しのコストを優先した。
+</p>
+
+<h3>16.5 DX12でプローブが真っ黒に焼けた原因(SRVテーブルのブロック割り当て)</h3>
+<p>
+実装当初、<strong>DX11では正しく焼けるのにDX12だけプローブのキューブマップが真っ黒になる</strong>という
+症状が出た。原因はDX12のSRVディスクリプタテーブルの割り当て方式である。
+</p>
+<p>
+<code>DX12CommandList::SetTexture</code>は<code>slot == 0</code>を「新しい描画の開始」とみなして
+<code>FlushPendingSrvWrites()</code>を呼び、そこで<strong>新しいテーブルブロックを割り当て、
+その描画で設定されたスロットだけをコピーしてから保留マスクをクリアする</strong>。
+つまり<b>ブロックをまたいで前回のバインドは引き継がれない</b>。
+</p>
+<p>
+当初のベイクパスは「メッシュのループに入る前にシャドウマップ(t4&sim;t7)とIBL(t9&sim;t11)をバインドし、
+ループの中でマテリアル(t0&sim;t3)をバインドする」という順序で書いていた。DX11はSRVが永続的にバインド
+されるためこれで動くが、DX12では<code>SetTexture(0, ...)</code>の時点でブロックが切り替わり、
+<strong>シャドウマップとIBLのスロットが未初期化のディスクリプタのまま描画される</strong>。結果として
+「常に影の中」「環境光ゼロ」となり、キャプチャがほぼ黒くなっていた。
+</p>
+<p>
+修正は、半透明フォワードパスが同じ理由で採っている順序に揃えること ――
+<strong>1回の描画で使うテクスチャは必ずスロット0から順に、描画ループの中でまとめてバインドする</strong>。
+このバックエンド間の挙動差は、パスを新規に追加するたびに踏みうる落とし穴である。
+</p>
+
+<h3>16.6 ベイクのタイミング</h3>
+<p>
+スカイボックス由来のIBLは静的アセットなので「起動後の最初のフレームで一度だけ」焼けばよい
+(<code>m_IBLBaked</code>)。一方プローブの中身は<strong>シーンのジオメトリ・ライト・時刻に依存する</strong>ため、
+明示的な要求ベース(<code>m_ProbeBakeRequested</code>)にしてある。要求が立つのは次の場合。
+</p>
+<ul>
+<li>シーンを読み込んだとき(<code>LoadScene</code>)</li>
+<li>ImGuiでプローブを追加した/位置を動かしたとき</li>
+<li>ImGuiの「Bake」ボタンを押したとき(ライトや時刻を変えた後に使う)</li>
+</ul>
+<p>
+半径の変更は影響範囲だけの話でキャプチャ内容には影響しないため、焼き直しは要求しない。
+また一度も焼けていない間(<code>m_ProbeBaked == false</code>)は<code>ProbeParams.x</code>(有効プローブ数)を
+0にして、シェーダー側の選択ループ自体を回さない ―― 中身が未定義のキューブマップを引かせないため。
+</p>
+<p>
+レンダーグラフ上の順序は依存関係で自動的に解決される。ベイクパスは<code>Reads</code>にシャドウマップと
+グローバルIBLの畳み込み結果を挙げているためシャドウパス・IBLBakeパスより後になり、
+Lightingパスは<code>Reads</code>にプローブのキューブマップ配列を挙げているためベイクパスより後になる。
+</p>
+
+<h3>16.7 現時点の実装範囲と既知の制約</h3>
+<ul>
+<li><strong>影響範囲は球のみ、ブレンドなし</strong>。影響範囲に入っているプローブのうち中心が最も近い1つを
+選ぶだけなので、<strong>影響範囲の境界には継ぎ目が出る</strong>(これは現時点では既知の挙動)。
+Boxの影響範囲・視差補正(box projection)・プローブ間の重み付きブレンドは未実装</li>
+<li><strong>視差補正が無い</strong>ため、プローブ中心から離れた位置のピクセルほど反射像の位置がずれる。
+室内反射を実用品質にするにはこれが要る</li>
+<li>更新はベイク(要求時)のみ。<strong>動的な物体は焼き直すまで反射に反映されない</strong>。
+リアルタイム更新(時間分割で1フレームに1面ずつ焼く等)は未実装</li>
+<li><strong>SSRのフォールバックはまだプローブを使っていない</strong>。<code>SSR.hlsl</code>は従来どおり、
+画面内で空へ到達した場合のみ生のスカイボックスを引く(<a href="#ssr">7章</a>)</li>
+<li>カスケードシャドウマップは<strong>カメラ</strong>視錐台に合わせてフィットされるため、カメラから遠く離れた
+位置のプローブを焼くとシャドウマップの範囲外になり影が落ちない。プローブは視界内で焼く前提</li>
+<li>プローブ数の上限は8(<code>kMaxReflectionProbes</code>)。<code>TextureCubeArray</code>は実行時に
+伸縮できないため固定容量で確保している。超過分は警告ログを出して切り捨てる</li>
+<li>半透明フォワードパス(<a href="#transparent">15章</a>)はプローブに対応しておらず、
+グローバルIBLのみを使う</li>
 </ul>
 </section>
 

@@ -49,6 +49,50 @@ float3 CubeFaceDirection(uint face, float2 uv)
     return normalize(dir);
 }
 
+// 反射プローブのキャプチャ結果(ProbeCapture.hlslが2Dレンダーターゲットへ描いた1面ぶん)を、
+// キューブマップの該当面へ書き写す。キューブマップへ直接描画する仕組み(面ごとのRTV)を
+// RHIが持たないため、この経路でキューブマップを組み立てる。
+// このシェーダーがIBLConvolve.hlsl側にあるのは、面→方向の対応(CubeFaceDirection)を
+// 畳み込み側と1文字も違わず共有する必要があるため(ここがずれると焼いた面の向きが食い違う)。
+//
+// ジオメトリが描かれなかった(深度が書き込まれなかった)ピクセルは、その面・そのテクセルが
+// 表す方向でスカイボックスを引いて埋める。夜間の減衰はここでは掛けない
+// (プローブを使う側のEvaluateIBLが実行時に改めて掛けるため、焼き込み時にも掛けると二重になる)
+Texture2D CaptureColor : register(t1);
+Texture2D CaptureDepth : register(t2);
+RWTexture2DArray<float4> ProbeRadianceOut : register(u0);
+
+[numthreads(8, 8, 1)]
+void CSCopyCaptureToCubeFace(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    uint width, height, elements;
+    ProbeRadianceOut.GetDimensions(width, height, elements);
+    if (dispatchThreadID.x >= width || dispatchThreadID.y >= height)
+    {
+        return;
+    }
+
+    // キャプチャ用レンダーターゲットとキューブ面は同じ解像度で確保しているため、
+    // テクセルは1対1で対応する(補間を挟まないようLoadで読む)
+    const int3 texel = int3(int2(dispatchThreadID.xy), 0);
+    const float depth = CaptureDepth.Load(texel).r;
+
+    float3 radiance;
+    if (depth <= 0.0f)
+    {
+        // Reverse-Zのため、何も描かれなかった背景はNDC z=0.0のまま
+        const float2 uv = (float2(dispatchThreadID.xy) + 0.5f) / float2(width, height);
+        const float3 direction = CubeFaceDirection(Face, uv);
+        radiance = SourceSkybox.SampleLevel(MaterialSampler, direction, 0.0f).rgb;
+    }
+    else
+    {
+        radiance = CaptureColor.Load(texel).rgb;
+    }
+
+    ProbeRadianceOut[uint3(dispatchThreadID.xy, 0)] = float4(radiance, 1.0f);
+}
+
 RWTexture2DArray<float4> IrradianceOut : register(u0);
 
 [numthreads(8, 8, 1)]

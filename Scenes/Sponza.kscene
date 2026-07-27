@@ -5,3 +5,10 @@ Name = Sponza
 
 [Model]
 Path = Sponza/Sponza.kmodel
+
+# 反射プローブ: アトリウム中央に1つ置く。屋内のため、スカイボックス由来のグローバルIBLのままだと
+# 金属面に空が映り込んでしまう。実際の柱・壁・床が映るようにするためのもの
+[ReflectionProbe]
+Name = Atrium
+Position = 0.0, 5.0, 0.0
+Radius = 50.0

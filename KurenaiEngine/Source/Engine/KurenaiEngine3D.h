@@ -80,6 +80,8 @@ namespace Kurenai
         void RenderPostProcessUI();
         void RenderDebugViewUI();
         void RenderLightingUI(const FrameState& frameState);
+        // 反射プローブの一覧・プロパティ編集・再ベイクのパネル(RenderLightingUIと同じ構成)
+        void RenderReflectionProbeUI();
         void RenderProfilerUI();
         // カメラ視錐台をkCascadeCount個の深度範囲に分割する(near/far境界、View空間での距離)。
         // 対数分割と均等分割を混合した実用的な分割(Practical Split Scheme)を使う
@@ -262,6 +264,9 @@ namespace Kurenai
             IBLIrradiance,      // IBL拡散イラディアンスマップ(TextureCube。現在の視線方向で球面を見回す表示)
             IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLPrefilterDebugMipLevel、TextureCube)
             IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス)
+            ProbeIrradiance,    // 反射プローブの拡散イラディアンス(m_ProbeDebugIndex番のプローブ)
+            ProbePrefilter,     // 反射プローブのプリフィルタ済み鏡面(ミップ0がキャプチャ結果そのもの)
+            ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
         };
         DebugView m_DebugView = DebugView::Final;
 
@@ -348,6 +353,54 @@ namespace Kurenai
         // Render()がFrameConstants.AmbientColorへ書き込む時点でrgb(alphaのdayFactorは除く)に
         // 乗算する(HLSL側は素のAmbientColor.rgbを読むだけでよい)
         float m_AmbientScale = 0.2f;
+
+        // 反射プローブ(15章): プローブ位置から6方向をProbeCapture.hlslで2Dレンダーターゲットへ描き、
+        // IBLConvolve.hlsl CSCopyCaptureToCubeFaceでスクラッチのキューブマップへ組み上げてから、
+        // IBLと同じCSIrradiance/CSPrefilterで畳み込んでプローブごとのキューブマップ配列へ書き込む。
+        // 環境ソースを差し替えるだけなので、シェーダー側の評価式(EvaluateIBL)はIBLと完全に共通。
+        //
+        // キューブマップ配列の枚数上限。TextureCubeArrayは実行時に伸縮できないため固定容量で確保し、
+        // これを超えるプローブが置かれたシーンは先頭からこの数だけを採用する(警告ログを出す)
+        static constexpr uint32_t kMaxReflectionProbes = 8;
+        // キャプチャ解像度。プリフィルタ済み鏡面のベース解像度(kIBLPrefilterBaseSize)と揃えることで、
+        // ミップ0が「畳み込み無しのキャプチャそのもの」になりデバッグ表示で生の映り込みを確認できる
+        static constexpr uint32_t kProbeCaptureSize = kIBLPrefilterBaseSize;
+        std::unique_ptr<RHI::IRHIShader> m_ProbeCaptureVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_ProbeCapturePixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCapturePipelineState;
+        // 1面ぶんのキャプチャ先(6面で使い回す)。HDRのままキューブへ写すためG-Bufferと違いFloat
+        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureColor;
+        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDepth;
+        std::unique_ptr<RHI::IRHIShader> m_ProbeCubeCopyComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCubeCopyPipelineState;
+        // キャプチャした6面を組み上げるスクラッチのキューブマップ(単一キューブ)。畳み込みの入力に
+        // なるためTextureCubeArrayではなくTextureCubeである必要がある(IBLConvolve.hlslのSourceSkyboxは
+        // TextureCube宣言のまま。これによりIBLの畳み込みシェーダーを一切変更せず再利用できる)。
+        // プローブは1つずつ順に焼くため1枚で足りる
+        std::unique_ptr<RHI::IRHITexture> m_ProbeRadianceCube;
+        // 畳み込み結果(プローブごと)。DeferredLighting.hlslがTextureCubeArrayとして読む
+        std::unique_ptr<RHI::IRHITexture> m_ProbeIrradianceArray;
+        std::unique_ptr<RHI::IRHITexture> m_ProbePrefilteredArray;
+        // プローブの影響範囲(位置・半径)をシェーダーへ渡すStructuredBuffer(t13)
+        std::unique_ptr<RHI::IRHIBuffer> m_ProbeBuffer;
+        // キャプチャの面ごとに値を更新して使い回すFrameConstants(共有のm_FrameConstantBufferとは別。
+        // ViewProj/CameraPositionだけをプローブのものへ差し替える。詳細はProbeCapture.hlsl冒頭)
+        std::unique_ptr<RHI::IRHIBuffer> m_ProbeCaptureConstantBuffer;
+        // LoadSceneがm_Scene.ReflectionProbesからコピーし、以降ImGuiが編集する(m_Lightsと同じ方針)。
+        // m_SceneMutexで保護される
+        std::vector<Assets::ReflectionProbe> m_ReflectionProbes;
+        int m_SelectedProbeIndex = -1;
+        // 次のRender()でプローブを焼き直す要求。シーン読み込み時とImGuiのBakeボタンで立てる。
+        // スカイボックス由来のIBLと違いシーンのジオメトリ・ライトに依存するため、
+        // 「一度焼いたら二度と焼かない」ではなく明示的な要求ベースにしている
+        bool m_ProbeBakeRequested = false;
+        // 一度でも焼けたか。焼く前のプローブは中身が未定義なので、それまでは影響を無効にして
+        // グローバルIBLのまま描く(未初期化のキューブマップが映り込むのを防ぐ)
+        bool m_ProbeBaked = false;
+        bool m_ReflectionProbeEnabled = true;
+        // デバッグ表示(Render Targets)で確認するプローブ番号とプリフィルタのミップレベル
+        int32_t m_ProbeDebugIndex = 0;
+        int32_t m_ProbePrefilterDebugMipLevel = 0;
 
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = 12.0f;

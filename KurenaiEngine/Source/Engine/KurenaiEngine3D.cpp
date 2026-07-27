@@ -55,6 +55,10 @@ namespace Kurenai
             // 専用のLightingConstants(b1)で受け取るためこのフィールドを使わない(末尾に追加のため
             // 既存シェーダのオフセットは変わらない)
             DirectX::XMFLOAT4 ActiveLightCount;
+            // 反射プローブ用(末尾に追加)。x=有効プローブ数(0ならプローブを使わずグローバルIBLのみ)、
+            // y=影響範囲のデバッグ表示フラグ(1以上でプローブ番号ごとの色分け表示)、zw=未使用。
+            // DeferredLighting.hlslのみが読む
+            DirectX::XMFLOAT4 ProbeParams;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -71,6 +75,58 @@ namespace Kurenai
             float Roughness = 0.0f;
             DirectX::XMFLOAT2 Padding{};
         };
+
+        // DeferredLighting.hlsl側のstruct GPUReflectionProbeと並び・ストライド(16バイト)を
+        // 一致させる必要がある
+        struct alignas(16) GPUReflectionProbe
+        {
+            DirectX::XMFLOAT4 PositionRadius; // xyz=ワールド座標, w=影響半径
+        };
+
+        // キューブマップの1面を撮るためのビュー行列(左手系)。前方向・上方向の組は
+        // IBLConvolve.hlslのCubeFaceDirectionが定める面→方向の対応と一致していなければならない
+        // (ずれると焼いた面が回転・反転する)。D3Dのキューブマップ標準順(+X,-X,+Y,-Y,+Z,-Z)
+        DirectX::XMMATRIX ComputeCubeFaceView(const DirectX::XMFLOAT3& position, uint32_t face)
+        {
+            using namespace DirectX;
+
+            static const XMFLOAT3 kForward[6] =
+            {
+                {  1.0f,  0.0f,  0.0f }, // +X
+                { -1.0f,  0.0f,  0.0f }, // -X
+                {  0.0f,  1.0f,  0.0f }, // +Y
+                {  0.0f, -1.0f,  0.0f }, // -Y
+                {  0.0f,  0.0f,  1.0f }, // +Z
+                {  0.0f,  0.0f, -1.0f }, // -Z
+            };
+            static const XMFLOAT3 kUp[6] =
+            {
+                { 0.0f, 1.0f,  0.0f },
+                { 0.0f, 1.0f,  0.0f },
+                { 0.0f, 0.0f, -1.0f },
+                { 0.0f, 0.0f,  1.0f },
+                { 0.0f, 1.0f,  0.0f },
+                { 0.0f, 1.0f,  0.0f },
+            };
+
+            return XMMatrixLookToLH(XMLoadFloat3(&position), XMLoadFloat3(&kForward[face]), XMLoadFloat3(&kUp[face]));
+        }
+
+        // プローブのキャプチャ用プロジェクション(画角90度・アスペクト1)。Core::Cameraの
+        // 遠近投影と同じReverse-Z(近平面=NDC z=1.0、遠平面=NDC z=0.0)で作る必要がある
+        // (深度クリア値・PipelineStateDesc::ReverseZが同じ前提で組まれているため)
+        DirectX::XMMATRIX ComputeCubeFaceProjection(float nearZ, float farZ)
+        {
+            // 画角90度なのでtan(45度)=1、すなわちw=h=1になる
+            const float a = nearZ / (nearZ - farZ);
+            const float b = -a * farZ;
+
+            return DirectX::XMMatrixSet(
+                1.0f, 0.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f,
+                0.0f, 0.0f, a, 1.0f,
+                0.0f, 0.0f, b, 0.0f);
+        }
 
         // 太陽光の向き・色・環境光を時刻(0〜24時)から計算する
         struct SunLighting
@@ -203,8 +259,9 @@ namespace Kurenai
         struct alignas(16) PresentConstants
         {
             int32_t Mode;
-            float MipLevel; // Mode==6(Hi-Z)でSampleLevelに渡すミップレベル
-            float Padding[2];
+            float MipLevel;   // Mode==6(Hi-Z)でSampleLevelに渡すミップレベル
+            float ArrayIndex; // Mode==10(反射プローブのキューブマップ配列)で表示するプローブ番号
+            float Padding;
         };
 
         // HiZ.hlsl側のcbuffer HiZConstantsと一致させる必要がある
@@ -747,6 +804,63 @@ namespace Kurenai
         iblPrefilterConstantBufferDesc.SizeInBytes = sizeof(IBLFaceConstants);
         m_IBLPrefilterConstantBuffer = m_Device->CreateBuffer(iblPrefilterConstantBufferDesc);
 
+        // --- 反射プローブ(15章) ---
+        // キャプチャ先(1面ぶんを6面で使い回す)。キューブへ写す前のHDR値を保つためFloatにする
+        m_ProbeCaptureColor = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
+        // Reverse-Zのため遠平面側(0.0)でクリアする(G-Buffer深度と同じ)
+        m_ProbeCaptureDepth = m_Device->CreateDepthTexture(kProbeCaptureSize, kProbeCaptureSize, 0.0f);
+        // 畳み込みの入力になるスクラッチのキューブマップ(TextureCubeとして読めること
+        // = 配列ではないことが必須。理由はヘッダのm_ProbeRadianceCubeのコメント参照)
+        m_ProbeRadianceCube = m_Device->CreateUAVTextureCube(kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
+        // 畳み込み結果はプローブごとに保持するためキューブマップ配列で確保する
+        m_ProbeIrradianceArray = m_Device->CreateMippedUAVTextureCubeArray(
+            kIBLIrradianceSize, RHI::Format::R16G16B16A16_Float, 1, kMaxReflectionProbes);
+        m_ProbePrefilteredArray = m_Device->CreateMippedUAVTextureCubeArray(
+            kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels, kMaxReflectionProbes);
+
+        RHI::ShaderDesc probeCaptureVsDesc;
+        probeCaptureVsDesc.Stage = RHI::ShaderStage::Vertex;
+        probeCaptureVsDesc.FilePath = shaderDirectory + L"ProbeCapture.hlsl";
+        probeCaptureVsDesc.EntryPoint = "VSMain";
+        m_ProbeCaptureVertexShader = m_Device->CreateShader(probeCaptureVsDesc);
+
+        RHI::ShaderDesc probeCapturePsDesc;
+        probeCapturePsDesc.Stage = RHI::ShaderStage::Pixel;
+        probeCapturePsDesc.FilePath = shaderDirectory + L"ProbeCapture.hlsl";
+        probeCapturePsDesc.EntryPoint = "PSMain";
+        m_ProbeCapturePixelShader = m_Device->CreateShader(probeCapturePsDesc);
+
+        RHI::PipelineStateDesc probeCapturePipelineDesc;
+        probeCapturePipelineDesc.InputLayout = modelInputLayout;
+        probeCapturePipelineDesc.VertexShader = m_ProbeCaptureVertexShader.get();
+        probeCapturePipelineDesc.PixelShader = m_ProbeCapturePixelShader.get();
+        probeCapturePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        probeCapturePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        probeCapturePipelineDesc.HasDepthStencil = true;
+        probeCapturePipelineDesc.ReverseZ = true;
+        m_ProbeCapturePipelineState = m_Device->CreatePipelineState(probeCapturePipelineDesc);
+
+        RHI::ShaderDesc probeCubeCopyCsDesc;
+        probeCubeCopyCsDesc.Stage = RHI::ShaderStage::Compute;
+        probeCubeCopyCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        probeCubeCopyCsDesc.EntryPoint = "CSCopyCaptureToCubeFace";
+        m_ProbeCubeCopyComputeShader = m_Device->CreateShader(probeCubeCopyCsDesc);
+        m_ProbeCubeCopyPipelineState = m_Device->CreateComputePipelineState({ m_ProbeCubeCopyComputeShader.get() });
+
+        // プローブの影響範囲(位置・半径)を渡すStructuredBuffer(t13)。ライトリストと同じく
+        // ピクセルシェーダからは読み取り専用でよい
+        RHI::BufferDesc probeBufferDesc;
+        probeBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+        probeBufferDesc.SizeInBytes = sizeof(GPUReflectionProbe) * kMaxReflectionProbes;
+        probeBufferDesc.StrideInBytes = sizeof(GPUReflectionProbe);
+        m_ProbeBuffer = m_Device->CreateBuffer(probeBufferDesc);
+
+        // キャプチャの面ごとに更新するFrameConstants(共有のm_FrameConstantBufferとは別インスタンス)
+        RHI::BufferDesc probeCaptureConstantBufferDesc;
+        probeCaptureConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        probeCaptureConstantBufferDesc.SizeInBytes = sizeof(FrameConstants);
+        m_ProbeCaptureConstantBuffer = m_Device->CreateBuffer(probeCaptureConstantBufferDesc);
+
         RHI::BufferDesc constantBufferDesc;
         constantBufferDesc.Usage = RHI::BufferUsage::Constant;
         constantBufferDesc.SizeInBytes = sizeof(FrameConstants);
@@ -973,6 +1087,23 @@ namespace Kurenai
         m_Lights = m_Scene.Lights;
         m_SelectedLightIndex = m_Lights.empty() ? -1 : 0;
         m_LightOverflowLogged = false;
+
+        // 反射プローブもライトと同じ方針でユーザー編集用のコピーへ複製する。
+        // プローブの中身(キューブマップ)はシーンのジオメトリ・ライトに依存するため、
+        // シーンを読み込んだら必ず焼き直す必要がある
+        m_ReflectionProbes = m_Scene.ReflectionProbes;
+        if (m_ReflectionProbes.size() > kMaxReflectionProbes)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "反射プローブ数が上限(" + std::to_string(kMaxReflectionProbes) + ")を超えたため、先頭から" +
+                    std::to_string(kMaxReflectionProbes) + "個のみ使用します: " + std::to_string(m_ReflectionProbes.size()) + "個");
+            m_ReflectionProbes.resize(kMaxReflectionProbes);
+        }
+        m_SelectedProbeIndex = m_ReflectionProbes.empty() ? -1 : 0;
+        m_ProbeDebugIndex = 0;
+        m_ProbeBaked = false;
+        m_ProbeBakeRequested = !m_ReflectionProbes.empty();
 
         FrameCameraToModel();
 
@@ -1331,6 +1462,9 @@ namespace Kurenai
             "IBL - Irradiance (Cubemap, Look Around)",
             "IBL - Prefiltered Specular (Cubemap Mip Chain, Look Around)",
             "IBL - BRDF LUT (X=NdotV, Y=Roughness)",
+            "Probe - Irradiance (Cubemap Array, Look Around)",
+            "Probe - Prefiltered Specular (Mip 0 = Raw Capture)",
+            "Probe - Influence (Color per Probe)",
         };
 
         int currentIndex = static_cast<int>(m_DebugView);
@@ -1352,6 +1486,18 @@ namespace Kurenai
         if (m_DebugView == DebugView::IBLPrefilter)
         {
             ImGui::SliderInt("Prefilter Mip Level", &m_IBLPrefilterDebugMipLevel, 0, static_cast<int>(kIBLPrefilterMipLevels) - 1);
+        }
+
+        if (m_DebugView == DebugView::ProbeIrradiance || m_DebugView == DebugView::ProbePrefilter)
+        {
+            // プローブが1つも無いシーンでもスライダーの範囲が壊れないよう下限を0に保つ
+            const int maxProbeIndex = m_ReflectionProbes.empty() ? 0 : static_cast<int>(m_ReflectionProbes.size()) - 1;
+            ImGui::SliderInt("Probe Index", &m_ProbeDebugIndex, 0, maxProbeIndex);
+            if (m_DebugView == DebugView::ProbePrefilter)
+            {
+                ImGui::SliderInt(
+                    "Probe Prefilter Mip", &m_ProbePrefilterDebugMipLevel, 0, static_cast<int>(kIBLPrefilterMipLevels) - 1);
+            }
         }
 
         ImGui::End();
@@ -1501,6 +1647,100 @@ namespace Kurenai
                     light.SpotOuterConeAngle = DirectX::XMConvertToRadians(outerDegrees);
                 }
             }
+        }
+
+        ImGui::End();
+    }
+
+    void KurenaiEngine3D::RenderReflectionProbeUI()
+    {
+        ImGui::SetNextWindowPos(ImVec2(590.0f, 10.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(300.0f, 320.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Reflection Probes");
+
+        ImGui::Checkbox("Enable Reflection Probes", &m_ReflectionProbeEnabled);
+        ImGui::Text("Probes: %zu / %u", m_ReflectionProbes.size(), kMaxReflectionProbes);
+        if (!m_ProbeBaked && !m_ReflectionProbes.empty())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "Not baked yet");
+        }
+
+        ImGui::BeginChild("ProbeList", ImVec2(0.0f, 90.0f), true);
+        for (size_t i = 0; i < m_ReflectionProbes.size(); ++i)
+        {
+            ImGui::PushID(static_cast<int>(i));
+            char label[192];
+            std::snprintf(
+                label, sizeof(label), "[%zu] %s", i,
+                m_ReflectionProbes[i].Name.empty() ? "(no name)" : m_ReflectionProbes[i].Name.c_str());
+            if (ImGui::Selectable(label, m_SelectedProbeIndex == static_cast<int>(i)))
+            {
+                m_SelectedProbeIndex = static_cast<int>(i);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+
+        // キューブマップ配列は固定容量のため、上限に達したら追加できない
+        ImGui::BeginDisabled(m_ReflectionProbes.size() >= kMaxReflectionProbes);
+        if (ImGui::Button("Add"))
+        {
+            // 追加位置はプローブ一覧の中心ではなくシーンAABBの中心にする(カメラ位置だと
+            // 壁や地面へめり込んだ位置に置かれやすく、そのまま焼くと真っ暗なプローブになるため)
+            Assets::ReflectionProbe newProbe;
+            newProbe.Position[0] = (m_Scene.BoundsMin[0] + m_Scene.BoundsMax[0]) * 0.5f;
+            newProbe.Position[1] = (m_Scene.BoundsMin[1] + m_Scene.BoundsMax[1]) * 0.5f;
+            newProbe.Position[2] = (m_Scene.BoundsMin[2] + m_Scene.BoundsMax[2]) * 0.5f;
+            newProbe.Name = "New Probe";
+            m_ReflectionProbes.push_back(newProbe);
+            m_SelectedProbeIndex = static_cast<int>(m_ReflectionProbes.size()) - 1;
+            m_ProbeBakeRequested = true;
+        }
+        ImGui::EndDisabled();
+
+        const bool hasSelection =
+            m_SelectedProbeIndex >= 0 && m_SelectedProbeIndex < static_cast<int>(m_ReflectionProbes.size());
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!hasSelection);
+        if (ImGui::Button("Remove") && hasSelection)
+        {
+            m_ReflectionProbes.erase(m_ReflectionProbes.begin() + m_SelectedProbeIndex);
+            m_SelectedProbeIndex = m_ReflectionProbes.empty()
+                ? -1
+                : std::min(m_SelectedProbeIndex, static_cast<int>(m_ReflectionProbes.size()) - 1);
+            // 番号がずれるため残り全部を焼き直す
+            m_ProbeBakeRequested = !m_ReflectionProbes.empty();
+            m_ProbeBaked = m_ProbeBaked && !m_ReflectionProbes.empty();
+        }
+        ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(m_ReflectionProbes.empty());
+        if (ImGui::Button("Bake"))
+        {
+            m_ProbeBakeRequested = true;
+        }
+        ImGui::EndDisabled();
+
+        if (hasSelection)
+        {
+            Assets::ReflectionProbe& probe = m_ReflectionProbes[static_cast<size_t>(m_SelectedProbeIndex)];
+
+            char nameBuffer[128];
+            std::snprintf(nameBuffer, sizeof(nameBuffer), "%s", probe.Name.c_str());
+            if (ImGui::InputText("Name", nameBuffer, sizeof(nameBuffer)))
+            {
+                probe.Name = nameBuffer;
+            }
+
+            // 位置・半径はキャプチャ内容そのものを変えるため、動かしたら焼き直す必要がある
+            if (ImGui::DragFloat3("Position", probe.Position, 0.1f))
+            {
+                m_ProbeBakeRequested = true;
+            }
+            // 半径は影響範囲だけの話でキャプチャ内容には影響しないため焼き直し不要
+            ImGui::DragFloat("Radius", &probe.Radius, 0.1f, 0.1f, 1000.0f, "%.2f");
         }
 
         ImGui::End();
@@ -1804,6 +2044,7 @@ namespace Kurenai
             RenderPostProcessUI();
             RenderDebugViewUI();
             RenderLightingUI(frameState);
+            RenderReflectionProbeUI();
             RenderProfilerUI();
         }
 
@@ -1909,6 +2150,27 @@ namespace Kurenai
             specularEnergyCompensation,
         };
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
+
+        // 反射プローブの影響範囲をt13のStructuredBufferへ渡す。まだ一度も焼けていない場合
+        // (m_ProbeBaked=false)や機能を無効にしている場合はプローブ数を0にして、シェーダー側の
+        // 選択ループ自体を回さない=中身が未定義のキューブマップを引かせないようにする
+        std::vector<GPUReflectionProbe> gpuProbes;
+        if (m_ReflectionProbeEnabled && m_ProbeBaked)
+        {
+            gpuProbes.reserve(m_ReflectionProbes.size());
+            for (const Assets::ReflectionProbe& probe : m_ReflectionProbes)
+            {
+                gpuProbes.push_back(GPUReflectionProbe{
+                    DirectX::XMFLOAT4{ probe.Position[0], probe.Position[1], probe.Position[2], probe.Radius } });
+            }
+        }
+        if (!gpuProbes.empty())
+        {
+            commandList->UpdateBuffer(m_ProbeBuffer.get(), gpuProbes.data(), sizeof(GPUReflectionProbe) * gpuProbes.size());
+        }
+
+        const float probeInfluenceDebug = (m_DebugView == DebugView::ProbeInfluence) ? 1.0f : 0.0f;
+        constants.ProbeParams = { static_cast<float>(gpuProbes.size()), probeInfluenceDebug, 0.0f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
@@ -2020,6 +2282,159 @@ namespace Kurenai
                     }
                 },
             });
+        }
+
+        // --- 反射プローブのベイクパス(15章) ---
+        // シーン読み込み時とImGuiのBakeボタンで要求されたときだけ実行する。プローブの中身は
+        // シーンのジオメトリ・ライト・時刻に依存するため、スカイボックス由来のIBLのような
+        // 「起動時に一度だけ」では足りない。
+        // Readsにシャドウマップとグローバルの畳み込み結果を挙げることで、レンダーグラフが
+        // このパスをシャドウパス・IBLBakeパスより後ろへ順序付ける
+        if (m_ProbeBakeRequested && !m_ReflectionProbes.empty())
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "ProbeBake",
+                .Reads = {
+                    m_ShadowCascades[0].get(), m_ShadowCascades[1].get(), m_ShadowCascades[2].get(), m_ShadowCascades[3].get(),
+                    m_SkyboxTexture.get(), m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
+                },
+                .Writes = {
+                    m_ProbeCaptureColor.get(), m_ProbeCaptureDepth.get(), m_ProbeRadianceCube.get(),
+                    m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(),
+                },
+                .Execute = [this, &frameState, &constants](RHI::IRHICommandList* cmd)
+                {
+                    RHI::Viewport probeViewport;
+                    probeViewport.Width = static_cast<float>(kProbeCaptureSize);
+                    probeViewport.Height = static_cast<float>(kProbeCaptureSize);
+
+                    const DirectX::XMMATRIX faceProjection =
+                        ComputeCubeFaceProjection(frameState.Camera.GetNearZ(), frameState.Camera.GetFarZ());
+                    RHI::IRHITexture* const captureTargets[] = { m_ProbeCaptureColor.get() };
+
+                    for (size_t probeIndex = 0; probeIndex < m_ReflectionProbes.size(); ++probeIndex)
+                    {
+                        const Assets::ReflectionProbe& probe = m_ReflectionProbes[probeIndex];
+                        const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
+                        const uint32_t cubeIndex = static_cast<uint32_t>(probeIndex);
+
+                        // --- 6面をキャプチャし、スクラッチのキューブマップへ組み上げる ---
+                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                        {
+                            // 太陽・カスケード・ライト数・IBL設定は共有のFrameConstantsをそのまま使い、
+                            // 視点に関わる2つだけをプローブのものへ差し替える(ProbeCapture.hlsl冒頭参照)。
+                            // Viewはカメラのまま残す(カスケード選択の深度がカメラ視錐台基準のため)
+                            FrameConstants captureConstants = constants;
+                            const DirectX::XMMATRIX faceViewProj = ComputeCubeFaceView(probePosition, face) * faceProjection;
+                            DirectX::XMStoreFloat4x4(&captureConstants.ViewProj, DirectX::XMMatrixTranspose(faceViewProj));
+                            captureConstants.CameraPosition = { probePosition.x, probePosition.y, probePosition.z, 0.0f };
+                            cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
+
+                            cmd->SetRenderTargets(captureTargets, 1, m_ProbeCaptureDepth.get());
+                            cmd->SetViewport(probeViewport);
+                            cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
+                            // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする。コピー側はこの0を
+                            // 「何も描かれなかった=スカイ」の判定に使う
+                            cmd->ClearDepth(0.0f);
+
+                            cmd->SetPipelineState(m_ProbeCapturePipelineState.get());
+                            cmd->SetConstantBuffer(0, m_ProbeCaptureConstantBuffer.get());
+                            cmd->SetSamplerSet(m_MaterialSamplers.get());
+
+                            for (const auto& instance : m_Scene.Instances)
+                            {
+                                for (const auto& mesh : instance.Model.Meshes)
+                                {
+                                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
+                                    cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                    cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                                    cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                                    cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+
+                                    // テクスチャは必ずスロット0から順に、1回の描画ぶんをまとめてバインドする。
+                                    // DX12はSetTexture(0, ...)を「新しい描画の開始」とみなしてSRVディスクリプタ
+                                    // テーブルのブロックを割り当て直すため、ループの外で4番以降だけを先に
+                                    // バインドしても次のブロックへは引き継がれない(=シャドウマップ・IBLが
+                                    // 未初期化のディスクリプタのままになり、DX12だけプローブが真っ黒に焼ける)。
+                                    // 半透明フォワードパスが同じ理由で同じ順序にしている
+                                    cmd->SetTexture(0, mesh.BaseColorTexture);
+                                    cmd->SetTexture(1, mesh.NormalTexture);
+                                    cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
+                                    cmd->SetTexture(3, mesh.EmissiveTexture);
+                                    for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
+                                    {
+                                        cmd->SetTexture(4 + cascade, m_ShadowCascades[cascade].get());
+                                    }
+                                    cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+                                    cmd->SetTexture(9, m_IrradianceTexture.get());
+                                    cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
+                                    cmd->SetTexture(11, m_BRDFLUTTexture.get());
+
+                                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                                }
+                            }
+
+                            // 描き終えたカラー/深度をコンピュートシェーダーからSRVとして読むため、
+                            // 先にレンダーターゲットのバインドを外す(D3D11は同一リソースの
+                            // RTV/DSVとSRVの同時バインドを許さず、SRV側がnullに落とされる)
+                            cmd->SetRenderTargets(nullptr, 0, nullptr);
+
+                            IBLFaceConstants faceConstants{};
+                            faceConstants.Face = face;
+                            cmd->SetComputePipelineState(m_ProbeCubeCopyPipelineState.get());
+                            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+                            cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+                            cmd->SetComputeTexture(1, m_ProbeCaptureColor.get());
+                            cmd->SetComputeTexture(2, m_ProbeCaptureDepth.get());
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeRadianceCube.get(), face, 0, 0);
+                            cmd->Dispatch((kProbeCaptureSize + 7) / 8, (kProbeCaptureSize + 7) / 8, 1);
+                        }
+
+                        // --- 組み上がったキューブマップをIBLとまったく同じ手順で畳み込む ---
+                        // 入力(スクラッチのキューブマップ)が違うだけで、シェーダーはIBLBakeパスと共通
+                        cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
+                        cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
+                        cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                        {
+                            IBLFaceConstants faceConstants{};
+                            faceConstants.Face = face;
+                            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeIrradianceArray.get(), face, 0, cubeIndex);
+                            cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
+                        }
+
+                        cmd->SetComputePipelineState(m_PrefilterPipelineState.get());
+                        cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
+                        cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+                        for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
+                        {
+                            const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
+                            const float roughness = static_cast<float>(mip) / static_cast<float>(kIBLPrefilterMipLevels - 1);
+                            for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                            {
+                                IBLFaceConstants faceConstants{};
+                                faceConstants.Face = face;
+                                faceConstants.Roughness = roughness;
+                                cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                                cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                                cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbePrefilteredArray.get(), face, mip, cubeIndex);
+                                cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
+                            }
+                        }
+                    }
+                },
+            });
+
+            m_ProbeBakeRequested = false;
+            // このフレームの描画時点ではまだ焼き上がっていない(同じコマンドリスト内でこの後の
+            // Lightingパスが読むのは問題ないが、gpuProbesは既に確定済み)。次フレームから
+            // プローブが有効になるよう、ここでフラグだけ立てる
+            m_ProbeBaked = true;
         }
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
@@ -2243,6 +2658,8 @@ namespace Kurenai
                 m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                 m_SkyboxTexture.get(), activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
                 m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
+                // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)
+                m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
             .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
@@ -2266,6 +2683,12 @@ namespace Kurenai
                 cmd->SetTexture(8, m_IrradianceTexture.get());
                 cmd->SetTexture(9, m_PrefilteredEnvTexture.get());
                 cmd->SetTexture(10, m_BRDFLUTTexture.get());
+                // 反射プローブ(15章)。FrameConstants.ProbeParams.xが0のとき(未ベイク・無効時)は
+                // シェーダー側が選択ループを回さないため中身は参照されないが、DX12は
+                // ディスクリプタテーブルに未初期化のスロットが残ると動作が未定義になるため常にバインドする
+                cmd->SetTexture(11, m_ProbeIrradianceArray.get());
+                cmd->SetTexture(12, m_ProbePrefilteredArray.get());
+                cmd->SetShaderResourceBuffer(13, m_ProbeBuffer.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -2410,6 +2833,9 @@ namespace Kurenai
         // Mode 9(IBL Irradiance/Prefilterのキューブマップ表示)専用。他のModeでは使われないが、
         // t1には常に何らかの有効なTextureCubeをバインドしておく必要があるため既定値を持たせる
         RHI::IRHITexture* presentDebugCubeTexture = m_SkyboxTexture.get();
+        // Mode 10(反射プローブのキューブマップ配列)専用。Mode 9のTextureCubeとは型が違うため
+        // 別スロット(t2)が要る。こちらも常に有効なテクスチャをバインドしておく必要がある
+        RHI::IRHITexture* presentDebugCubeArrayTexture = m_ProbeIrradianceArray.get();
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = m_RenderWidth;
         uint32_t presentSourceHeight = m_RenderHeight;
@@ -2491,6 +2917,20 @@ namespace Kurenai
             presentSourceWidth = m_RenderWidth;
             presentSourceHeight = m_RenderHeight;
             break;
+        case DebugView::ProbeIrradiance:
+            // キューブマップ配列のためMode 9(TextureCube)ではなくMode 10(TextureCubeArray)を使う
+            presentDebugCubeArrayTexture = m_ProbeIrradianceArray.get();
+            presentMode = 10;
+            break;
+        case DebugView::ProbePrefilter:
+            presentDebugCubeArrayTexture = m_ProbePrefilteredArray.get();
+            presentMode = 10;
+            break;
+        case DebugView::ProbeInfluence:
+            // 塗り分けはDeferredLighting.hlsl側(FrameConstants.ProbeParams.y)で行うため、
+            // Presentは通常どおり最終結果を表示するだけでよい
+            presentSourceTexture = m_TonemapTexture.get();
+            break;
         case DebugView::IBLBRDFLUT:
             presentSourceTexture = m_BRDFLUTTexture.get();
             presentMode = 0; // (scale, bias)の生値をそのままRGとして表示(値域はおおむね[0,1])
@@ -2505,14 +2945,21 @@ namespace Kurenai
         {
             presentConstants.MipLevel = static_cast<float>(m_IBLPrefilterDebugMipLevel);
         }
-        else if (m_DebugView == DebugView::IBLIrradiance)
+        else if (m_DebugView == DebugView::IBLIrradiance || m_DebugView == DebugView::ProbeIrradiance)
         {
             presentConstants.MipLevel = 0.0f; // イラディアンスマップは常に1ミップのみ
+        }
+        else if (m_DebugView == DebugView::ProbePrefilter)
+        {
+            presentConstants.MipLevel = static_cast<float>(m_ProbePrefilterDebugMipLevel);
         }
         else
         {
             presentConstants.MipLevel = static_cast<float>(m_HiZDebugMipLevel);
         }
+        // プローブが1つも無い場合でも配列の範囲外を引かないようクランプする
+        presentConstants.ArrayIndex = static_cast<float>(
+            std::clamp(m_ProbeDebugIndex, 0, std::max(0, static_cast<int32_t>(m_ReflectionProbes.size()) - 1)));
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
         // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する
@@ -2521,9 +2968,11 @@ namespace Kurenai
 
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Present",
-            .Reads = { presentSourceTexture, presentDebugCubeTexture },
+            .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugCubeArrayTexture },
             .SwapChainTarget = m_SwapChain.get(),
-            .Execute = [this, &letterboxViewport, presentSourceTexture, presentDebugCubeTexture](RHI::IRHICommandList* cmd)
+            .Execute =
+                [this, &letterboxViewport, presentSourceTexture, presentDebugCubeTexture, presentDebugCubeArrayTexture](
+                    RHI::IRHICommandList* cmd)
             {
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
                 cmd->ClearDepth(1.0f);
@@ -2535,6 +2984,7 @@ namespace Kurenai
                 cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
                 cmd->SetTexture(0, presentSourceTexture);
                 cmd->SetTexture(1, presentDebugCubeTexture);
+                cmd->SetTexture(2, presentDebugCubeArrayTexture);
                 cmd->Draw(3, 0);
             },
         });

@@ -30,7 +30,9 @@ namespace Kurenai::RHI
     namespace
     {
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
-        constexpr uint32_t kTextureSlotCount = 12; // t0〜t11 (Transparent.hlslのマテリアル4枚+シャドウ4枚+ライトリスト+IBL(Irradiance/Prefilter/BRDFLUT)が最大)
+        // t0〜t13。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
+        // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer)
+        constexpr uint32_t kTextureSlotCount = 14;
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
         // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler(役割の定義はShaders/Samplers.hlsli)。
         // どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。
@@ -58,8 +60,10 @@ namespace Kurenai::RHI
         constexpr uint32_t kComputeSrvSlotCount = 4;
         constexpr uint32_t kComputeUavSlotCount = 4;
         constexpr uint32_t kComputeTableSlotCount = kComputeSrvSlotCount + kComputeUavSlotCount;
-        // 1フレームあたりに払い出せるコンピュートSRV+UAVテーブルブロックの最大数(Dispatch呼び出し回数の上限)
-        constexpr uint32_t kMaxComputeDispatchesPerFrame = 256;
+        // 1フレームあたりに払い出せるコンピュートSRV+UAVテーブルブロックの最大数(Dispatch呼び出し回数の上限)。
+        // 反射プローブのベイクは1プローブあたり6(面コピー)+6(イラディアンス)+36(プリフィルタ6ミップ×6面)=48回
+        // ディスパッチし、複数プローブを同一フレームでまとめて焼くため、プローブ数ぶんの余裕が要る
+        constexpr uint32_t kMaxComputeDispatchesPerFrame = 1024;
         // グラフィックス用SRVテーブル領域の1フレームあたりのディスクリプタ数。m_ShaderVisibleSrvHeap内では
         // 先頭からこの数×kFrameCountぶんをグラフィックス用が占有し、コンピュートシェーダー用のSRV+UAVテーブルは
         // それより後ろの区画に別リングとして確保する(kFrameCountはDX12Deviceのprivateメンバのため、

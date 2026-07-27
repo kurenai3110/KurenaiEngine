@@ -35,6 +35,11 @@ cbuffer FrameConstants : register(b0)
     // PSMain側でこれが0以下の場合はEvaluateIBLの代わりにAmbientColor.rgbの定数色アンビエントへ
     // フォールバックする)。x/wはこのシェーダでは未使用
     float4 ShadowParams;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する。半透明パス専用)
+    float4 ActiveLightCount;
+    // 反射プローブ用。x=有効プローブ数(0ならプローブは一切使わずグローバルIBLのみ)、
+    // y=影響範囲のデバッグ表示フラグ(1以上でプローブ番号ごとの色分け表示に切り替える)、zw=未使用
+    float4 ProbeParams;
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -56,17 +61,78 @@ TextureCube PrefilteredEnvTexture : register(t9);
 // split-sum近似の第2項、BRDF積分LUT(x=NdotV, y=ラフネス。BRDFLUT.hlslで生成、方向性を持たない
 // (NdotV, ラフネス)の2Dルックアップテーブルのため、これだけは通常のTexture2Dのまま)
 Texture2D BRDFLUTTexture : register(t10);
+// 反射プローブ(15章)。プローブごとにキャプチャ・畳み込んだ拡散イラディアンスとプリフィルタ済み鏡面を、
+// TextureCubeArrayとして1枚にまとめて持つ。HLSLは別々のTextureCubeリソースを動的に添字参照できないため、
+// ピクセルごとに異なるプローブを選ぶには配列でなければならない(カスケードシャドウマップがShadowMap0〜3を
+// 個別スロットに分けて分岐しているのと同じ制約。プローブは数が可変なので分岐では書けない)
+TextureCubeArray ProbeIrradianceTexture : register(t11);
+TextureCubeArray ProbePrefilteredTexture : register(t12);
+
+// プローブ1つぶんの影響範囲。C++側 KurenaiEngine3D.cpp の GPUReflectionProbe と
+// 並び・ストライド(16バイト)を一致させる必要がある
+struct GPUReflectionProbe
+{
+    float4 PositionRadius; // xyz=ワールド座標, w=影響半径
+};
+StructuredBuffer<GPUReflectionProbe> ReflectionProbes : register(t13);
+
+// ワールド座標を影響範囲に含むプローブのうち、中心が最も近いものの番号を返す(無ければ-1)。
+// Phase 1では「最も近い1つを選ぶ」だけでブレンドしないため、影響範囲の境界には継ぎ目が出る
+// (プローブ間の重み付きブレンドはPhase 2で入れる)
+int SelectReflectionProbe(float3 worldPos)
+{
+    int selected = -1;
+    float bestDistSq = 3.402823466e+38f; // FLT_MAX
+
+    const uint probeCount = (uint)ProbeParams.x;
+    [loop]
+    for (uint i = 0; i < probeCount; ++i)
+    {
+        const float4 positionRadius = ReflectionProbes[i].PositionRadius;
+        const float3 toProbe = positionRadius.xyz - worldPos;
+        const float distSq = dot(toProbe, toProbe);
+        const float radius = positionRadius.w;
+        if (distSq <= radius * radius && distSq < bestDistSq)
+        {
+            bestDistSq = distSq;
+            selected = (int)i;
+        }
+    }
+
+    return selected;
+}
 
 // IBL(split-sum近似、Karis 2013)による環境光の評価。ao(SSAO/SSILの遮蔽率)は拡散項へそのまま、
 // 鏡面項へはLagarde & de Rousiers 2014のスペキュラオクルージョン近似を通してから適用する
-// (拡散用のAOをそのまま鏡面に使うと、粗い面で鏡面ハイライトまで過剰に暗くなってしまうため)
-float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, float ao)
+// (拡散用のAOをそのまま鏡面に使うと、粗い面で鏡面ハイライトまで過剰に暗くなってしまうため)。
+// probeIndexが0以上なら環境ソースをスカイボックス由来のグローバルIBLからそのプローブへ差し替える
+// (式そのものは同一で、引くキューブマップだけが変わる)
+float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, float ao, int probeIndex)
 {
     const float NdotV = saturate(dot(N, V));
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
 
+    const float3 R = reflect(-V, N);
+    // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(ミップ数-1、KurenaiEngine3D側で設定)
+    const float mipLevel = roughness * ShadowParams.y;
+
+    // 環境ソースの選択。プローブとグローバルIBLはどちらも同じ手順で焼かれており(IBLConvolve.hlslを
+    // 共有している)、解像度・ミップ構成も揃えてあるため、ここで引き先を差し替えるだけで済む
+    float3 irradiance;
+    float3 prefiltered;
+    if (probeIndex >= 0)
+    {
+        // TextureCubeArrayのサンプリングは float4(方向, 配列番号)
+        irradiance = ProbeIrradianceTexture.Sample(MaterialSampler, float4(N, probeIndex)).rgb;
+        prefiltered = ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(R, probeIndex), mipLevel).rgb;
+    }
+    else
+    {
+        irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
+        prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
+    }
+
     // --- 拡散IBL ---
-    const float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")。粗い面ほど
     // 視線に対するフレネルの立ち上がりが緩やかになる近似で、鏡面に回らない分をkdへ反映する
     const float3 fresnelRoughness = F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
@@ -74,10 +140,6 @@ float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roug
     const float3 diffuseIBL = kd * albedo * irradiance;
 
     // --- 鏡面IBL(split-sum近似) ---
-    const float3 R = reflect(-V, N);
-    // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(ミップ数-1、KurenaiEngine3D側で設定)
-    const float mipLevel = roughness * ShadowParams.y;
-    const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
     const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)。
     // ShadowParams.w = ImGuiトグル(0で無効=倍率1.0)
@@ -159,10 +221,31 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 拡散反射(kd*albedo/PI)とスケールを揃えるべくここで明示的に/PIする
     // (以前このフォールバックだけ/PIが抜けており、環境光がπ倍(意図の20%に対し実際は約65%)
     // 明るくなっていた)
+    // 反射プローブ(15章)。影響範囲に入っていればIBLの環境ソースをそのプローブへ差し替える。
+    // どのプローブも効いていない場合は-1のままで、従来どおりスカイボックス由来のグローバルIBLになる
+    const int probeIndex = SelectReflectionProbe(worldPos);
+
+    // ProbeParams.y = 影響範囲のデバッグ表示。どのプローブが効いているかをプローブ番号ごとの色で
+    // 塗り分けて返す(ライティングは行わない)。プローブの配置・半径の確認用
+    if (ProbeParams.y > 0.0f)
+    {
+        if (probeIndex < 0)
+        {
+            // どのプローブの影響下でもない(グローバルIBLのまま)ことを示すグレー
+            return float4(0.15f, 0.15f, 0.15f, 1.0f);
+        }
+        // 番号を3bitとみなしてRGBへ散らす。隣り合う番号が必ず別の色になればよく、色自体に意味は無い
+        const float3 probeColor = float3(
+            ((probeIndex + 1) & 1) ? 1.0f : 0.25f,
+            ((probeIndex + 1) & 2) ? 1.0f : 0.25f,
+            ((probeIndex + 1) & 4) ? 1.0f : 0.25f);
+        return float4(probeColor, 1.0f);
+    }
+
     float3 ambient;
     if (ShadowParams.z > 0.0f)
     {
-        ambient = EvaluateIBL(N, V, albedo, metallic, roughness, ao) * ShadowParams.z;
+        ambient = EvaluateIBL(N, V, albedo, metallic, roughness, ao, probeIndex) * ShadowParams.z;
     }
     else
     {
