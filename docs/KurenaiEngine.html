@@ -331,7 +331,7 @@ ImGuiパネル経由</strong>):
   </ul>
 </li>
 <li>表示できるシーンはビルド済みバイナリに組み込み済み(Sponza / Bistro (McGuire) Exterior /
-Bistro (McGuire) Interior / White Surface Test / Light Test)。カスタムモデルの追加や、
+Bistro (McGuire) Interior / White Furnace Test / Material Test / Light Test)。カスタムモデルの追加や、
 シーン一覧の外部からのカスタマイズは現状の公開APIではサポートしていない(<code>Run()</code> を
 呼ぶ以外のカスタマイズ余地がないのが <code>KurenaiEngine3D</code> の設計上の割り切り)。</li>
 <li>コンストラクタに渡した <code>GraphicsAPI</code> に応じてDX11/DX12いずれかのバックエンドで
@@ -557,8 +557,12 @@ png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベー�
 </p>
 <p>
 <code>SamplerDesc</code>(<code>RHIDesc.h</code>)は<code>Filter</code>(<code>SamplerFilter::Linear</code> /
-<code>Anisotropic</code>)と<code>MaxAnisotropy</code>を持つ。既定値は<code>Anisotropic</code>・16xで、
-浅い角度で見る面(床・路面など)のボケを抑える。AddressU/V/Wは常にWrap固定のため公開していない。
+<code>Anisotropic</code>)、<code>AddressMode</code>(<code>SamplerAddressMode::Wrap</code> /
+<code>Clamp</code>)、<code>MaxAnisotropy</code>を持つ。既定値は<code>Anisotropic</code>・<code>Wrap</code>・16xで、
+浅い角度で見る面(床・路面など)のボケを抑える。<code>AddressMode</code>はAddressU/V/Wへまとめて適用される
+(軸ごとに別々の指定はできない)。タイリングするマテリアルテクスチャは<code>Wrap</code>、
+ルックアップテーブルのように「UVの端が定義域の端」であるテクスチャは<code>Clamp</code>を指定する
+(<code>Wrap</code>のままだと端でフィルタのタップが反対側の端へ回り込み、無関係な値が混ざる)。
 </p>
 <p>
 <code>RHI::TextureImage::LoadFromFile(filePath, sRGB)</code>(<code>TextureImage.h</code>)は
@@ -854,6 +858,28 @@ GPUデバイスを必要としないため安全に並列化できる一方、GP
 (<code>device.CreateTextureFromImage</code>)自体はデバイスに紐づく処理のため呼び出し元スレッドで
 直列に行う。
 </p>
+
+<h4>4.6.3 アルファモード(カットアウト/半透明)</h4>
+<p>
+<code>Mesh</code>はglTFの<code>alphaMode</code>に応じて<code>AlphaCutoff</code>と
+<code>IsTransparent</code>のいずれかが設定される(両方が同時に立つことはない)。
+</p>
+<ul>
+<li><code>alphaMode = "MASK"</code> — <code>AlphaCutoff</code>(既定0.5)が設定され、ベースカラー
+テクスチャのアルファがこの値未満のピクセルは描画されない(葉・網戸などのカットアウト表現)。
+不透明物体と同じジオメトリパスで描画される。</li>
+<li><code>alphaMode = "BLEND"</code> — <code>IsTransparent = true</code>になり、
+<code>KurenaiEngine3D</code>ではジオメトリパス(G-Buffer)には描画されず、専用の半透明フォワードパスで
+奥から手前の順にアルファブレンド合成される(不透明物体には隠れるが、AO/間接光・SSR等の
+ポストプロセスは適用されない。既知の制約の詳細は<a href="Architecture.html#transparent">実装者向け
+ドキュメント14章</a>参照)。色・不透明度は<code>baseColorTexture.rgba * baseColorFactor</code>
+(glTF仕様どおり)で決まる。テクスチャを持たずbaseColorFactorのみで色/不透明度を指定するマテリアル
+(ガラス等でよくあるパターン)も正しく反映されるが、<code>baseColorFactor.a</code>自体が
+<code>1.0</code>(不透明)のマテリアルは<code>alphaMode=BLEND</code>が付いていても見た目上は
+不透明のまま描画される(モデルデータがそう定義しているため。実例・詳細は
+<a href="Architecture.html#transparent">実装者向けドキュメント14.7/14.8節</a>参照)。</li>
+<li><code>alphaMode = "OPAQUE"</code>(既定)または非対応形式(FBX/OBJ等) — 常に不透明として扱われる。</li>
+</ul>
 <h3>4.7 シーンファイル(<code>.kscene</code>)と <code>Assets::LoadScene</code></h3>
 <pre><code>Scene LoadScene(RHI::IRHIDevice&amp; device, const std::wstring&amp; sceneFilePath, const std::wstring&amp; assetRootDirectory);
 std::wstring ReadSceneName(const std::wstring&amp; sceneFilePath);</code></pre>
@@ -887,15 +913,20 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <table>
 <thead><tr><th>セクション</th><th>出現</th><th>キー</th><th>型</th><th>必須</th><th>既定値</th><th>説明</th></tr></thead>
 <tbody>
-<tr><td><code>[Scene]</code></td><td>0〜1</td><td><code>Name</code></td><td>string</td><td>-</td><td>ファイル名</td><td>ImGuiのシーン一覧に出る表示名</td></tr>
+<tr><td rowspan="5"><code>[Scene]</code></td><td rowspan="5">0〜1</td><td><code>Name</code></td><td>string</td><td>-</td><td>ファイル名</td><td>ImGuiのシーン一覧に出る表示名</td></tr>
+<tr><td><code>Skybox</code></td><td>path</td><td>-</td><td>Skybox/Sky.dds</td><td>Assetsルートからのキューブマップ<code>.dds</code>相対パス。IBLの環境光もこれから焼かれる</td></tr>
+<tr><td><code>IBLIntensity</code></td><td>float</td><td>-</td><td>変更しない</td><td>IBLの強度倍率。0以上</td></tr>
+<tr><td><code>AmbientOcclusion</code></td><td>bool</td><td>-</td><td>true</td><td>AO/間接光(SSAO・SSIL)の有効/無効</td></tr>
+<tr><td><code>ScreenSpaceReflection</code></td><td>bool</td><td>-</td><td>true</td><td>SSRの有効/無効</td></tr>
 <tr><td rowspan="3"><code>[Model]</code></td><td rowspan="3">1以上</td><td><code>Path</code></td><td>path</td><td><strong>必須</strong></td><td>-</td><td>Assetsルートからの<code>.kmodel</code>相対パス</td></tr>
 <tr><td><code>Translation</code></td><td>float3</td><td>-</td><td>0,0,0</td><td>平行移動</td></tr>
 <tr><td><code>RotationEuler</code>/<code>Scale</code></td><td>float3</td><td>-</td><td>0,0,0 / 1,1,1</td><td>回転(度、pitch/yaw/roll)・スケール(負値も可)</td></tr>
 <tr><td rowspan="2"><code>[Camera]</code></td><td rowspan="2">0〜1</td><td><code>Position</code></td><td>float3</td><td>セクションがあれば必須</td><td>-</td><td>初期カメラ位置</td></tr>
 <tr><td><code>Yaw</code> / <code>Pitch</code></td><td>float</td><td>-</td><td>0.0</td><td>度</td></tr>
-<tr><td rowspan="3"><code>[Sun]</code></td><td rowspan="3">0〜1</td><td><code>TimeOfDay</code></td><td>float</td><td>-</td><td>12.0</td><td>0〜24。範囲外はエラー</td></tr>
+<tr><td rowspan="4"><code>[Sun]</code></td><td rowspan="4">0〜1</td><td><code>TimeOfDay</code></td><td>float</td><td>-</td><td>12.0</td><td>0〜24。範囲外はエラー</td></tr>
 <tr><td><code>AzimuthDegrees</code></td><td>float</td><td>-</td><td>126.87</td><td>太陽が昇る方位角</td></tr>
 <tr><td><code>Shadow</code></td><td>bool</td><td>-</td><td>true</td><td>シャドウマップの有効/無効</td></tr>
+<tr><td><code>Enabled</code></td><td>bool</td><td>-</td><td>true</td><td>太陽(平行光)そのものの有効/無効。<code>TimeOfDay</code>を夜にすると環境光の明るさも一緒に落ちるが、こちらは太陽だけを消す</td></tr>
 <tr><td rowspan="6"><code>[Light]</code></td><td rowspan="6">0以上</td><td><code>Type</code></td><td>enum</td><td><strong>必須</strong></td><td>-</td><td><code>Point</code> / <code>Spot</code></td></tr>
 <tr><td><code>Position</code></td><td>float3</td><td><strong>必須</strong></td><td>-</td><td>-</td></tr>
 <tr><td><code>Direction</code></td><td>float3</td><td>Spotのみ必須</td><td>-</td><td>-</td></tr>

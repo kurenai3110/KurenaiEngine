@@ -107,6 +107,7 @@ exit /b 0</Command>
     <None Include="Shaders\3D\DeferredLighting.hlsl" />
     <None Include="Shaders\3D\HiZ.hlsl" />
     <None Include="Shaders\3D\NormalEncoding.hlsli" />
+    <None Include="Shaders\3D\SpecularEnergy.hlsli" />
     <None Include="Shaders\3D\Present.hlsl" />
     <None Include="Shaders\3D\SSAO.hlsl" />
     <None Include="Shaders\3D\SSIL_VisibilityBitmask.hlsl" />

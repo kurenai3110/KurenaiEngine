@@ -201,6 +201,13 @@ namespace Kurenai::Assets
             float SunTimeOfDay = 12.0f;
             float SunAzimuthDegrees = 126.87f;
             bool SunShadow = true;
+            bool SunEnabled = true;
+
+            std::wstring SkyboxPath;
+            bool HasIBLIntensity = false;
+            float IBLIntensity = 1.0f;
+            bool AOEnabled = true;
+            bool SSREnabled = true;
 
             std::vector<ParsedLightEntry> Lights;
         };
@@ -352,6 +359,30 @@ namespace Kurenai::Assets
                         result.Name = value;
                         result.HasName = true;
                     }
+                    else if (CaseInsensitiveEquals(key, L"Skybox"))
+                    {
+                        // スカイボックス(キューブマップDDS)のAssetsルートからの相対パス。
+                        // [Model]Pathと同じ基準・同じルート外チェックを適用する
+                        result.SkyboxPath = value;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"IBLIntensity"))
+                    {
+                        if (!ParseFloatToken(value, result.IBLIntensity)) errorAt(lineNumber, rawLine, "IBLIntensityの値が不正です");
+                        if (result.IBLIntensity < 0.0f) errorAt(lineNumber, rawLine, "IBLIntensityは0以上で指定してください");
+                        result.HasIBLIntensity = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"AmbientOcclusion"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "AmbientOcclusionの値はtrue/falseで指定してください");
+                        result.AOEnabled = *parsedValue;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"ScreenSpaceReflection"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "ScreenSpaceReflectionの値はtrue/falseで指定してください");
+                        result.SSREnabled = *parsedValue;
+                    }
                     else
                     {
                         warnUnknownKey();
@@ -420,6 +451,14 @@ namespace Kurenai::Assets
                         const std::optional<bool> parsed = ParseBoolToken(value);
                         if (!parsed) errorAt(lineNumber, rawLine, "Shadowの値はtrue/falseで指定してください");
                         result.SunShadow = *parsed;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Enabled"))
+                    {
+                        // 太陽(平行光)そのものの有効/無効。TimeOfDayを夜にすると昼度も一緒に
+                        // 落ちて環境光まで消えるため、「昼のまま太陽だけ消す」にはこちらを使う
+                        const std::optional<bool> parsed = ParseBoolToken(value);
+                        if (!parsed) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
+                        result.SunEnabled = *parsed;
                     }
                     else
                     {
@@ -537,6 +576,25 @@ namespace Kurenai::Assets
         scene.SunTimeOfDay = parsed.SunTimeOfDay;
         scene.SunAzimuthDegrees = parsed.SunAzimuthDegrees;
         scene.ShadowEnabled = parsed.SunShadow;
+        scene.SunEnabled = parsed.SunEnabled;
+        scene.AOEnabled = parsed.AOEnabled;
+        scene.SSREnabled = parsed.SSREnabled;
+        scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
+        scene.IBLIntensity = parsed.IBLIntensity;
+
+        // [Scene]Skyboxは[Model]Pathと同じくAssetsルートからの相対パスとして扱い、
+        // 同じルート外チェックを適用したうえで絶対パスへ解決してから返す
+        if (!parsed.SkyboxPath.empty())
+        {
+            const std::wstring normalizedSkyboxPath = NormalizePathSeparators(parsed.SkyboxPath);
+            if (IsPathEscaping(normalizedSkyboxPath))
+            {
+                throw std::runtime_error(
+                    "[Scene]Skyboxがルート外を指しています(絶対パスまたは'..'は使用できません): " +
+                    WideToUtf8(parsed.SkyboxPath) + " (" + WideToUtf8(sceneFilePath) + ")");
+            }
+            scene.SkyboxPath = assetRootDirectory + normalizedSkyboxPath;
+        }
 
         // .kscene自身の[Light]で直接指定されたライトは、既にワールド空間の値として書かれているため
         // 変換不要でそのままScene::Lightsへ入れる(モデル埋め込みライトは下のモデルループ内で

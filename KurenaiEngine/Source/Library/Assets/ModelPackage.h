@@ -40,9 +40,14 @@ namespace Kurenai::Assets
     constexpr char kPackageMagic[4] = { 'K', 'M', 'D', 'L' };
     // v2: MeshEntryへAlphaCutoff/EmissiveFactor/EmissiveTextureIndexを追加し、
     // LightEntry(モデルファイル埋め込みのライト。glTFのKHR_lights_punctual/FBXライトノード由来)
-    // を追加したため加算。v1の.kmodelはVersion不一致で読み込み拒否され、KurenaiPackerの
-    // 再実行で再生成される
-    constexpr uint32_t kPackageVersion = 2;
+    // を追加したため加算。
+    // v3: MeshEntryへFlags(bit0=半透明。glTFのalphaMode=BLEND)を追加したため加算。
+    // v4: MeshEntryへBaseColorFactor[4](glTFのpbrMetallicRoughness.baseColorFactor)を追加したため
+    // 加算。テクスチャを持たずbaseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等でよくある
+    // パターン)がBaseColorTextureIndex=-1(白1x1プレースホルダー、alpha=1)へ機械的にフォールバックし、
+    // 意図した色・アルファと異なる見た目になっていたため追加した(14章参照)。
+    // v3以前の.kmodelはVersion不一致で読み込み拒否され、KurenaiPackerの再実行で再生成される
+    constexpr uint32_t kPackageVersion = 4;
 
     struct PackageHeader
     {
@@ -90,10 +95,29 @@ namespace Kurenai::Assets
         // -1 = 指定なし → 白1x1(EmissiveFactorが0ならどのみち結果は黒になるため、
         // BaseColor等と同様に白のプレースホルダーへフォールバックしてよい)
         int32_t  EmissiveTextureIndex;
+        uint32_t Flags;                    // bit0: 半透明(kMeshEntryFlagTransparent。glTFのalphaMode=BLEND)
+        uint32_t Reserved;                 // 0固定(uint64_tメンバがあるため構造体全体が8バイト境界に
+                                            // アラインされ、Flagsだけでは68バイトになり暗黙のパディングが
+                                            // 発生してしまうため、明示的なフィールドとして72バイトに揃える)
+        // glTFのpbrMetallicRoughness.baseColorFactor(RGBA、既定[1,1,1,1])。テクスチャの有無に
+        // 関わらず常に設定され、BaseColorTextureIndex=-1の場合の白1x1プレースホルダーと乗算される
+        // ことで、テクスチャを持たずbaseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等)を
+        // 正しく再現する(14章参照)
+        float    BaseColorFactor[4];
     };
-    static_assert(sizeof(MeshEntry) == 64, "MeshEntryのレイアウトは64バイト固定");
+    static_assert(sizeof(MeshEntry) == 88, "MeshEntryのレイアウトは88バイト固定");
 
     constexpr int32_t kNoTextureIndex = -1;
+    constexpr uint32_t kMeshEntryFlagTransparent = 1u << 0;
+
+    // マテリアルの係数がソースデータに存在しなかったことを表す無効値。
+    // 実在する係数の値域は[0,1]なので、負値であれば「データに無い」と一意に判別できる。
+    // KurenaiPackerは、ソースモデルが持っていない係数に対してもっともらしい既定値を勝手に
+    // 埋めることはせず、この無効値をそのまま書き出す(何を既定値とするかはフォーマットや
+    // アセットによって異なり、パッカーが決めてよい値ではないため)。
+    // 無効値をどう解釈するかは消費側の責任で、シェーダーは係数1.0(テクスチャの値をそのまま使う)
+    // として扱う
+    constexpr float kInvalidMaterialFactor = -1.0f;
 
     // === LightEntry (モデルファイル埋め込みのライト) ===
     //

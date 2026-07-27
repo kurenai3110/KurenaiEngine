@@ -25,6 +25,7 @@ using Kurenai::Assets::GeometryHeader;
 using Kurenai::Assets::kGeometryBlockAlignment;
 using Kurenai::Assets::kGeometryMagic;
 using Kurenai::Assets::kGeometryVersion;
+using Kurenai::Assets::kMeshEntryFlagTransparent;
 using Kurenai::Assets::kNoTextureIndex;
 using Kurenai::Assets::kPackageMagic;
 using Kurenai::Assets::kPackageVersion;
@@ -387,6 +388,12 @@ namespace KurenaiPacker
             entry.NormalTextureIndex = resolveTextureIndex(meshTextureRefs[i].Normal);
             entry.MetallicRoughnessTextureIndex = resolveTextureIndex(meshTextureRefs[i].MetallicRoughness);
             entry.EmissiveTextureIndex = resolveTextureIndex(meshTextureRefs[i].Emissive);
+            entry.Flags = mesh.IsTransparent ? kMeshEntryFlagTransparent : 0u;
+            entry.Reserved = 0u;
+            entry.BaseColorFactor[0] = mesh.BaseColorFactor[0];
+            entry.BaseColorFactor[1] = mesh.BaseColorFactor[1];
+            entry.BaseColorFactor[2] = mesh.BaseColorFactor[2];
+            entry.BaseColorFactor[3] = mesh.BaseColorFactor[3];
 
             result.VertexCount += mesh.Vertices.size();
             result.IndexCount += mesh.Indices.size();

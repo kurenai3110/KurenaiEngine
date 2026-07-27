@@ -6,6 +6,8 @@
 // SSRパスがこのHDR値を反射元として参照するため、ここでLDRへ落とすとSSRの反射色が
 // 1.0を超えられずエネルギー保存が破れる。トーンマッピングはPresent直前のTonemap.hlslで行う
 #include "NormalEncoding.hlsli"
+// スペキュラのマルチスキャッタリング・エネルギー補正(14.9節)
+#include "SpecularEnergy.hlsli"
 
 static const float PI = 3.14159265359f;
 
@@ -77,8 +79,11 @@ float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roug
     // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(ミップ数-1、KurenaiEngine3D側で設定)
     const float mipLevel = roughness * ShadowParams.y;
     const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(DefaultSampler, R, mipLevel).rgb;
-    const float2 brdf = BRDFLUTTexture.Sample(DefaultSampler, float2(NdotV, roughness)).rg;
-    const float3 specularIBL = prefiltered * (F0 * brdf.x + brdf.y);
+    const float2 brdf = BRDFLUTTexture.Sample(BRDFLUTSampler, float2(NdotV, roughness)).rg;
+    // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)。
+    // ShadowParams.w = ImGuiトグル(0で無効=倍率1.0)
+    const float3 specularIBL =
+        prefiltered * (F0 * brdf.x + brdf.y) * SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
 
     // スペキュラオクルージョン(Lagarde & de Rousiers, "Moving Frostbite to Physically Based
     // Rendering 3.0", 2014)。ラフネスが高いほど指数を1に近づけ、AOの効きを弱める

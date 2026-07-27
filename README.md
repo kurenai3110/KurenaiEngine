@@ -12,8 +12,10 @@ KurenaiEngineLibrary.dllから公開しており、独自の描画パイプラ�
 `KurenaiEngine3D`はKurenaiEngine専用モデルパッケージ(`.kmodel`)とシーンファイル(`.kscene`)の
 読み込み・描画に対応した、Deferred Shading・HDRレンダリング・カスケードシャドウマップ(PCF/PCSS)・
 IBL(スカイボックスから焼いた拡散イラディアンス・プリフィルタ済み鏡面による環境光)・
-SSAO/SSIL・SSR・複数ライト(ポイント/スポット、カンデラ/ルクス単位)を備えた完結型3Dレンダラーです。
-`.gltf`/`.fbx`等のソースモデルは、付属のオフラインツール**KurenaiPacker.exe**で`.kmodel`へ事前変換して
+スペキュラのマルチスキャッタリング・エネルギー補正・
+SSAO/SSIL・SSR・複数ライト(ポイント/スポット、カンデラ/ルクス単位)・半透明描画(専用フォワードパスで
+アルファブレンド合成)を備えた完結型3Dレンダラーです。
+`.gltf`/`.fbx`/`.obj`等のソースモデルは、付属のオフラインツール**KurenaiPacker.exe**で`.kmodel`へ事前変換して
 から使います(下記「アセットの準備(KurenaiPacker)」参照)。`KurenaiEngine2D`はスプライト・図形・
 テキスト描画を提供する軽量な2D APIです。内部の描画パイプラインや実装判断については
 [実装者向けドキュメント](docs/Architecture.html)を参照してください。
@@ -134,7 +136,7 @@ KurenaiEngine2D.dllとSprite2D.hlslのみが自動でコピーされるため、
 ### 5. アセットの準備(KurenaiPacker)
 
 `KurenaiEngine3D`が読み込めるのは`.kmodel`(KurenaiEngine専用モデルパッケージ)のみです。
-`.gltf`/`.fbx`等のソースモデルは`Assets\Source\`に置き、`KurenaiPacker.exe`で`Assets\Packed\`へ
+`.gltf`/`.fbx`/`.obj`等のソースモデルは`Assets\Source\`に置き、`KurenaiPacker.exe`で`Assets\Packed\`へ
 変換してから使います。まずKurenaiPacker自身をビルドします(assimp・DirectXTexのビルドが
 事前に必要。手順2・3参照)。
 
@@ -153,6 +155,9 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 - 既に出力済みの`.ktex`はスキップして高速に再パックします。強制的に再圧縮する場合は`--force`を付けます
 - テクスチャ処理は既定で論理コア数(上限8)のワーカースレッドを使って並列に行われます。`--jobs <N>`で変更できます
 - 個々のテクスチャの読み込みに失敗しても、そのテクスチャだけフォールバック(白/フラット法線)として扱いパックは続行します
+- `.obj`/`.mtl`も入力に使えます。OBJ形式は単位情報を持たないため、センチメートル単位で作成された
+  アセットはそのままだと100倍の大きさになります。その場合は`--scale <係数>`で補正してください
+  (例: Amazon Lumberyard Bistroの`.obj`配布は`--scale 0.01`)
 
 複数のモデルとカメラ・太陽光の初期値をまとめる`.kscene`(シーンファイル)は、`--scene`を付けて
 検証・配置します(書式の詳細は[docs/KurenaiEngine.html](docs/KurenaiEngine.html) 4.7節を参照)。
@@ -205,8 +210,8 @@ Sample3D.exe -dx12
 
 画面左上に表示される5つのImGuiパネルから各種設定を変更できます(F1キーで表示/非表示を切り替え可能)。
 
-- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Surface Test(粗さ0〜1の球体列)、Light Test(ポイント/スポット/平行光の検証用シーン)、Multi Model Test(TRS配置の確認用))
-- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能)。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
+- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Furnace Test(スペキュラBRDFのエネルギー保存を目視で検証するシーン)、Material Test(粗さ0〜1の球体列+半透明ガラス球)、Light Test(ポイント/スポット/平行光の検証用シーン)、Multi Model Test(TRS配置の確認用))
+- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能)。スペキュラBRDFのマルチスキャッタリング・エネルギー補正もここでON/OFFできます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / IBL(拡散イラディアンス・プリフィルタ済み鏡面・BRDF LUT) 等、各パス中間結果のデバッグ表示)
 - **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)・
   EV100(実在の写真露出値。太陽/環境光/ポイント・スポットライトすべてに一様にかかるシーン全体の
@@ -245,7 +250,12 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
 
 - `Assets/Source/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
 - `Assets/Source/BistroMcGuire/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)のMorgan McGuire版OBJ配布([awesome-3d-meshes](https://github.com/Graphify-Labs/awesome-3d-meshes)経由)をglTFに変換したもの。変換手順は[実装者向けドキュメント](docs/Architecture.html)を参照
-- `Assets/Source/MaterialTest/` — PBRライティング検証用の白色球体列。`Tools/generate_material_test.py` で再生成できる
+- `Assets/Source/FurnaceTest/` — White Furnace Test用の金属球列(`metallic=1.0`、粗さ0.0〜1.0の11個)。
+  一様な放射輝度のキューブマップ(`Assets/Packed/Skybox/UniformWhite.dds`)と合わせて
+  `Tools/generate_furnace_test.py` で再生成できる
+- `Assets/Source/MaterialTest/` — PBRライティング検証用の球体列。粗さ0.0〜1.0の白色球11個と、
+  半透明描画(`alphaMode=BLEND`)検証用の赤いガラス球1個。参照するテクスチャ(`GlassRed.png`)も含めて
+  `Tools/generate_material_test.py` で再生成できる
 - `Assets/Source/LightTest/` — ポイント/スポット/平行光の検証用シーン(床・壁・粗さ違いの球4個)。
   `Tools/generate_light_test.py` で再生成できる
 - `Assets/Source/Scenes/` — 手書きの`.kscene`(シーンファイル)

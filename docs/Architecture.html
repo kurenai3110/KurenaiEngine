@@ -213,6 +213,7 @@
     <li><a href="#lights">12. 複数ライト</a></li>
     <li><a href="#dllsplit">13. 3DLL構成への分割</a></li>
     <li><a href="#ibl">14. IBL(Image Based Lighting)</a></li>
+    <li><a href="#transparent">15. 半透明描画(フォワードパス)</a></li>
   </ol>
 </nav>
 
@@ -224,17 +225,18 @@
 <code>KurenaiEngine3D</code>はDeferred Shading(G-Buffer: Albedo/Normal(オクタヘドラルエンコード)/
 Metallic-Roughness/Emissive + 深度)で描画し、ライティングパスでCook-Torrance(GGX)による
 PBR(メタリック/ラフネス)計算を行います。
-描画パイプラインは以下の9パス構成です。
+描画パイプラインは以下の10パス構成です。
 </p>
 <ol>
 <li>シャドウパス — サンライト視点で深度のみ描画。カスケードシャドウマップ(CSM)のため実際には4カスケード分(4回)実行する</li>
-<li>ジオメトリパス — G-Buffer書き込み</li>
+<li>ジオメトリパス — G-Buffer書き込み(glTFの<code>alphaMode=BLEND</code>のメッシュは書き込まず、9のフォワードパスへ回す。14章参照)</li>
 <li>Hi-Zパス — G-Buffer深度からコンピュートシェーダーでミップチェーンを構築</li>
 <li>直接光パス — G-Buffer・シャドウマップから太陽(平行光、シャドウ適用済み)のPBR直接光を計算し、
 続けてポイント/スポットライトのリスト(構造化バッファ)をループして影なしで加算する(11章参照)。
 パス数はライトを追加しても8のまま変わらない</li>
 <li>AO/GIパス — 選択中の手法(SSAO/SSIL)でNormal/Depth(SSILの場合はAlbedo・直接光バッファも読む)からAO・間接拡散光を計算しブラー</li>
 <li>最終合成パス — Albedo・直接光・AO/GI・スカイボックス・IBL(拡散イラディアンス+プリフィルタ済み鏡面、14章参照)を合成し、HDRのままSceneColorへ出力(トーンマッピングは行わない)</li>
+<li>半透明フォワードパス — 半透明マテリアルのメッシュだけをSceneColorへ直接フォワードシェーディングし、事前乗算済みアルファで合成する(15章参照)</li>
 <li>SSRパス — SceneColor・G-Bufferから鏡面反射をHDRのまま計算し加算</li>
 <li>Tonemapパス — HDRのSceneColor(SSR有効時はSSR適用後)をReinhardトーンマッピング+ガンマ補正でLDRへ変換</li>
 <li>Presentパス — 選択中のデバッグビューをバックバッファへ表示</li>
@@ -268,8 +270,9 @@ G-Bufferにはエミッシブ(自発光)専用のレンダーターゲットも�
 テクスチャ・係数(<code>AI_MATKEY_COLOR_EMISSIVE</code>)をジオメトリパスでそのまま書き込み、
 最終合成パスでAO/シャドウの影響を受けずに常に加算します。またglTFの<code>alphaMode</code>が
 <code>MASK</code>のマテリアルのみ、<code>alphaCutoff</code>(既定0.5)でベースカラーのアルファを
-<code>clip()</code>するアルファカットアウトに対応しています(FBX/OBJ等、glTFのalphaMode拡張情報を
-持たない形式では常に不透明として扱います)。RHIのデフォルトサンプラーも異方性16xフィルタリングを
+<code>clip()</code>するアルファカットアウトに対応しています。<code>alphaMode=BLEND</code>のマテリアルは
+ジオメトリパスには一切描画されず、専用の半透明フォワードパスへ回されます(14章参照)。FBX/OBJ等、
+glTFのalphaMode拡張情報を持たない形式では常に不透明として扱います。RHIのデフォルトサンプラーも異方性16xフィルタリングを
 既定にしており、浅い角度で見る床・路面などのボケを抑えています(<code>RHI::SamplerDesc</code>)。
 </p>
 <p>
@@ -457,7 +460,7 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 <table>
 <thead><tr><th>ファイル</th><th>役割</th><th>マジック/バージョン</th></tr></thead>
 <tbody>
-<tr><td><code>.kmodel</code></td><td>マニフェスト(<code>PackageHeader</code> + <code>TextureEntry[]</code> + <code>MeshEntry[]</code> + <code>LightEntry[]</code> + StringPool)。ジオメトリ・テクスチャの実体は持たず、パスとオフセットだけを持つ</td><td><code>'K','M','D','L'</code> / 2</td></tr>
+<tr><td><code>.kmodel</code></td><td>マニフェスト(<code>PackageHeader</code> + <code>TextureEntry[]</code> + <code>MeshEntry[]</code> + <code>LightEntry[]</code> + StringPool)。ジオメトリ・テクスチャの実体は持たず、パスとオフセットだけを持つ</td><td><code>'K','M','D','L'</code> / 4</td></tr>
 <tr><td><code>.kgeom</code></td><td>ジオメトリ実体。頂点(<code>Assets::Vertex</code>そのまま)/インデックス(<code>uint32_t</code>そのまま)ブロックをメッシュ順に16バイト境界で連結しただけで、読み込み後の加工が一切不要</td><td><code>'K','G','E','O'</code> / 1</td></tr>
 <tr><td><code>.ktex</code></td><td>テクスチャ実体。<code>DirectX::SaveToDDSMemory</code>が出力したDDSファイル全体(BC7圧縮・ミップ生成済み)をそのまま格納</td><td><code>'K','T','E','X'</code> / 1</td></tr>
 </tbody>
@@ -467,7 +470,11 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 <code>MetallicRoughnessTextureIndex</code>/<code>EmissiveTextureIndex</code>という4つの
 <code>int32_t</code>(-1=指定なし)で<code>TextureEntry</code>を参照するほか、<code>AlphaCutoff</code>
 (0以下ならアルファカットアウト無効。glTFの<code>alphaMode=MASK</code>のマテリアルのみ設定される)と
-<code>EmissiveFactor[3]</code>を持つ。旧実装のようなパス文字列ベースの重複排除キャッシュは、
+<code>EmissiveFactor[3]</code>を持つ。v3で追加した<code>Flags</code>(bit0=<code>kMeshEntryFlagTransparent</code>)は
+glTFの<code>alphaMode=BLEND</code>を表し、<code>AlphaCutoff</code>とは排他(glTF仕様上alphaModeは
+OPAQUE/MASK/BLENDのいずれか1つ)。<code>uint64_t</code>メンバを含む都合上構造体全体が8バイト境界に
+アラインされるため、<code>Flags</code>単体では暗黙のパディングが生じてしまい、明示的な
+<code>Reserved</code>を追加して72バイトに揃えている(詳細は14章参照)。旧実装のようなパス文字列ベースの重複排除キャッシュは、
 KurenaiPacker側で(パス, sRGB)ごとに<code>TextureEntry</code>を1件へ集約する時点で完結しており、
 ランタイムの<code>ModelLoader.cpp</code>は添字だけで解決できる。読み込み後は
 <code>ModelLoader.cpp</code>内で各<code>MeshEntry</code>のオフセット/カウントが<code>.kgeom</code>の
@@ -511,28 +518,210 @@ CBV(定数バッファ)のルートパラメータを<strong>b0/b1の2枠しか�
 <code>EmissiveFactor</code>を同居させることでルートシグネチャ自体は変更していない。シャドウパスは
 World以外を使わないが、GBufferパスと同じルートシグネチャ(=同じb1)を共有しているため、Worldが
 恒等行列であっても必ずbindする必要がある(バインドを省略するとDX12で前フレームの内容を参照する
-未定義動作になり得る)。
+未定義動作になり得る)。この制約は14章の半透明フォワードパスでも再び現れる(そちらはb1が
+<code>ObjectConstants</code>で埋まっているため、有効ライト数を<code>FrameConstants</code>(b0)の
+末尾に追加する形で回避している)。
 </p>
 </section>
 
 <section id="bistro">
 <h2>11. Bistroアセットの変換パイプライン</h2>
 <p>
-<code>Assets/Source/BistroMcGuire/</code>は
+<code>Assets/Packed/BistroMcGuire/Exterior.kmodel</code> / <code>Interior.kmodel</code>は
 <a href="https://developer.nvidia.com/orca/amazon-lumberyard-bistro">Amazon Lumberyard Bistro</a>の
 Morgan McGuire版OBJ配布(<a href="https://github.com/Graphify-Labs/awesome-3d-meshes">awesome-3d-meshes</a>経由、
 <code>ThirdParty/SourceModels/awesome-3d-meshes-master/McGuire/Amazon Lumberyard Bistro/</code>の各種7z/zip
-アーカイブを展開したもの)をglTFに変換したもの(<code>Exterior_gltf/exterior.gltf</code> /
-<code>Interior_gltf/interior.gltf</code>)です。元のOBJ/MTLは同一マテリアルの三角形群がusemtl切り替えの
-たびに大量の小さなサブメッシュへ分割されており(exteriorは実質132マテリアルに対しusemtl切り替え22,396回)、
-そのままassimpのOBJインポータへ読み込ませると解析が現実的な時間で終わらず、仮に読み込めてもドローコール数が
-GPUドライバのウォッチドッグ(TDR)を誘発しうるほど膨大になるため、Blender(headless、
-<code>--factory-startup</code>でユーザー導入アドオンを無効化した状態)でOBJを読み込みglTFへ変換したもの
-(diffuse→BaseColor、_ddna→Normal Mapのノード配線をPythonスクリプトで自動化)を、さらに
-<code>KurenaiPacker.exe</code>で<code>Assets/Packed/BistroMcGuire/Exterior.kmodel</code> /
-<code>Interior.kmodel</code>へパックしたものを実際に読み込みます。展開直後の生データ
-(obj/mtl/PNGテクスチャ群)はglTF変換後は不要なため保持していません。
+アーカイブを展開したもの)を<code>KurenaiPacker.exe</code>で直接パックしたものです。
 </p>
+<pre><code>KurenaiPacker.exe &lt;展開先&gt;/interior.obj -o Assets/Packed/BistroMcGuire/Interior.kmodel --scale 0.01
+KurenaiPacker.exe &lt;展開先&gt;/exterior.obj -o Assets/Packed/BistroMcGuire/Exterior.kmodel --scale 0.01</code></pre>
+<p>
+OBJ/MTLはKurenaiPacker内部のassimpインポータで直接読む(glTF/FBXと同じ<code>ModelSource.cpp</code>の
+<code>LoadSourceModel</code>経路)。かつてはBlenderへ一度glTF変換してから読み込んでいたが、
+glTF変換そのものがBlenderのOBJインポータの制約(11.2節参照)に起因する不具合の温床になっていたため、
+assimpのOBJインポータをこのプロジェクト向けのビルドで有効化(後述)し、直接読み込む方式へ置き換えた。
+</p>
+<h3>11.1 assimpのOBJインポータの有効化</h3>
+<p>
+このエンジンが依存する<code>ThirdParty/assimp</code>は、ビルド時間短縮のため
+<code>ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT=OFF</code>としたうえでFBX/glTFのみを個別に有効化しており、
+OBJインポータ(<code>ASSIMP_BUILD_OBJ_IMPORTER</code>)は既定で無効だった(実際にOBJを読ませると
+"No suitable reader found"で失敗することを確認済み)。<code>ThirdParty/assimp/build</code>で
+以下のようにCMakeを再実行し、<code>ASSIMP_BUILD_OBJ_IMPORTER=ON</code>を追加してassimpを再ビルドする
+必要がある(既存の他フラグ値は維持したまま追加する。値を省略すると意図せず既定値に戻る場合があるため、
+<code>CMakeCache.txt</code>の既存値を確認してから実行すること)。
+</p>
+<pre><code>cmake .. -G "Visual Studio 17 2022" -A x64 -DASSIMP_BUILD_OBJ_IMPORTER=ON [既存の他フラグ...]
+MSBuild Assimp.sln /p:Configuration=Debug /p:Platform=x64</code></pre>
+<h3>11.2 メッシュのマテリアル単位マージ</h3>
+<p>
+元のOBJ/MTLは同一マテリアルの三角形群がusemtl切り替えのたびに大量の小さなサブメッシュへ
+分割されており(exteriorは実質132マテリアルに対しusemtl切り替え22,396回)、aiMeshごとに個別の
+頂点/インデックスバッファを発行するとドローコール数がGPUドライバのウォッチドッグ(TDR)を
+誘発しうるほど膨大になる。<code>ModelSource.cpp</code>の<code>LoadSourceModel</code>は
+マテリアルインデックスごとに全aiMeshの頂点・インデックスを結合してから1メッシュにまとめており、
+これはglTF/FBXと共通のロジックであるため、OBJ対応のために新たに追加したものではない。</p>
+<h3>11.3 半透明・カットアウト判定(<code>AI_MATKEY_OPACITY</code>)</h3>
+<p>
+glTFの<code>alphaMode</code>(OPAQUE/MASK/BLEND)に相当する概念はOBJ/MTLには無いが、assimpの
+<code>ObjFileMtlImporter.cpp</code>はMTLの<code>d</code>/<code>Tr</code>を素直に
+<code>alpha = d</code>(または<code>1 - Tr</code>)として解釈し<code>AI_MATKEY_OPACITY</code>へ
+格納する(<code>illum</code>(照光モデル)の値は一切参照しない)。そのため
+<a href="#transparent">15章</a>で述べたglTF専用の<code>AI_MATKEY_GLTF_ALPHAMODE</code>が
+取得できない場合(=OBJ等)は<code>AI_MATKEY_OPACITY</code>を見て、1.0未満なら
+<code>IsTransparent=true</code>・<code>BaseColorFactor.a</code>へ反映する
+(<code>d</code>/<code>Tr</code>がどちらも無ければassimpは既定の1.0を返すため、架空の値を
+補うことにはならない)。ベースカラーのRGBも同様に、glTF専用の<code>AI_MATKEY_BASE_COLOR</code>が
+取得できない場合は<code>AI_MATKEY_COLOR_DIFFUSE</code>(MTLの<code>Kd</code>)へフォールバックする
+(テクスチャを持たず<code>Kd</code>が黒<code>[0,0,0]</code>のガラス系マテリアル
+(<code>Paris_LiquorBottle_*_Glass</code>等)を白1x1プレースホルダーへ誤ってフォールバックさせない
+ため)。
+</p>
+<p>
+実測(interior.obj/exterior.objを実際にパックして確認)では、<code>Tr 0.800</code>/<code>0.900</code>の
+明確に半透明なガラス(<code>MASTER_Interior_01_Glass</code>、<code>Paris_Cashregister_Glass</code>)が
+<code>IsTransparent=true</code>・<code>BaseColorFactor.a=0.2</code>/<code>0.1</code>として正しく
+パックされることを、生成された<code>.kmodel</code>のバイナリを直接検証して確認済み。
+</p>
+
+<h4>11.3.1 <code>illum</code> + <code>Tf</code>による透明度(<code>d</code>/<code>Tr</code>だけでは足りない)</h4>
+<p>
+MTLには<code>d</code>/<code>Tr</code>とは別に、<b>透過を伴う照光モデル(<code>illum</code> 4/6/7/9)と
+<code>Tf</code>(transmission filter)で透明度を表現する書き方</b>がある。assimpのOBJインポータは
+<code>Tf</code>を<code>AI_MATKEY_COLOR_TRANSPARENT</code>へ、<code>illum</code>を
+<code>AI_MATKEY_OBJ_ILLUM</code>へ格納するだけで、<code>AI_MATKEY_OPACITY</code>には一切反映しない
+(<code>ObjFileImporter.cpp</code>の<code>CreateMaterial</code>。<code>AI_MATKEY_OPACITY</code>へ
+入るのは<code>d</code>/<code>Tr</code>由来の値のみ)。そのため<code>d</code>/<code>Tr</code>だけを
+見ていると、この書き方のマテリアルがすべて不透明として扱われる。
+</p>
+<p>
+Bistro(McGuire版OBJ配布)のガラスは大半がこの書き方であり、<code>d</code>/<code>Tr</code>のみの判定では
+半透明メッシュが<b>シーン全体で計36三角形(板ガラス2枚)</b>しか出ていなかった。該当マテリアルの実測値:
+</p>
+<table>
+<tr><th>マテリアル</th><th><code>d</code>/<code>Tr</code>由来の不透明度</th><th><code>Tf</code></th><th><code>illum</code></th><th>三角形数</th></tr>
+<tr><td>interior <code>Paris_LiquorBottle_01_Glass1</code></td><td>1.000(記載なし)</td><td>0.030 0.05 0.04</td><td>7</td><td>128,248</td></tr>
+<tr><td>interior <code>Paris_LiquorBottle_02_Glass</code></td><td>1.000(<code>d 1.000</code>)</td><td>0.200 0.10 0.000</td><td>7</td><td>51,324</td></tr>
+<tr><td>interior <code>Paris_LiquorBottle_01_Glass</code></td><td>1.000</td><td>0.2 0.2 0.2</td><td>7</td><td>24,352</td></tr>
+<tr><td>interior <code>Paris_LiquorBottle_03_Glass</code></td><td>1.000</td><td>0.2 0.2 0.2</td><td>7</td><td>14,336</td></tr>
+<tr><td>interior <code>CookieJar_Glass1</code></td><td>1.000</td><td>0.1 0.1 0.1</td><td>7</td><td>2,544</td></tr>
+<tr><td>exterior <code>MASTER_Glass_Dirty</code>(店舗の窓)</td><td>1.000</td><td>0.2 0.2 0.2</td><td>7</td><td>1,176</td></tr>
+<tr><td>exterior <code>MASTER_Glass_Clean</code>(店舗の窓)</td><td>1.000</td><td>0.2 0.2 0.2</td><td>7</td><td>582</td></tr>
+<tr><td>exterior <code>Streetlight_Glass</code></td><td>1.000</td><td>0.3 0.3 0.3</td><td>7</td><td>2,016</td></tr>
+</table>
+<p>
+<b><code>Tf</code>の解釈</b>: MTLの原仕様では<code>Tf</code>は「透過光にかけるフィルタ色」であり
+<code>Tf 1,1,1</code>が無着色=全透過を意味するが、このアセットは
+<code>Tf = 1 - Tr</code>(=<code>d</code>)、つまり<b>不透明度そのもの</b>として書いている。
+<code>d</code>/<code>Tr</code>と<code>Tf</code>を両方持つマテリアルの実測値がその根拠:
+<code>MASTER_Interior_01_Glass</code>(<code>Tr 0.800</code> / <code>Tf 0.2 0.2 0.2</code>)、
+<code>Paris_Cashregister_Glass</code>(<code>Tr 0.900</code> / <code>Tf 0.1 0.1 0.1</code>)、
+<code>Paris_LiquorBottle_01_Glass_Wine</code>(<code>Tr 0.000</code> / <code>Tf 1.0 1.0 1.0</code>)と、
+いずれも<code>Tf == 1 - Tr</code>で一貫している。
+</p>
+<p>
+そこで<code>ModelSource.cpp</code>は、glTFの<code>alphaMode</code>が無く、かつ<code>d</code>/<code>Tr</code>で
+半透明と判定されなかったマテリアルに限り、<code>illum</code>が4/6/7/9で<code>Tf</code>の平均が1未満なら
+その平均を不透明度として採用する。assimpの<code>Tf</code>既定値も<code>(1,1,1)</code>
+(<code>ObjFileData.h</code>の<code>Material::transparent</code>)なので、<code>Tf</code>を書いていない
+通常のOBJがこの経路で誤って半透明化されることはない。なお原仕様どおり「<code>Tf</code>=透過率」と
+解釈すると<code>Tf</code>未記載の全マテリアルが全透過になってしまい実用にならないため、
+この解釈以外に選択肢が無い。
+</p>
+<p>
+この対応により、interiorの半透明メッシュは2個(36三角形)から<b>7個(220,840三角形)</b>へ、
+exteriorは1個から4個へ増えた(生成された<code>.kmodel</code>の<code>MeshEntry.Flags</code>を
+バイナリレベルで検証)。実機(Sample3D / DX11)でも、酒瓶のガラス本体が透過してラベル・キャップ
+(別マテリアルの不透明メッシュ)と背後の棚板が見える状態になることを確認済み。
+</p>
+<p>
+<b>付随して判明したアセット側の不備</b>: exteriorの<code>MASTER_Glass_Clean</code>は
+MTL内で<code>Kd 1.000 0.000 0.000 #TODO</code>と、赤の仮値とTODOコメントが残ったまま配布されている。
+KurenaiPackerはこれをそのまま<code>BaseColorFactor=(1,0,0,0.2)</code>としてパックする
+(配布データの内容を改変しない方針のため、パッカー側では補正しない)。
+</p>
+
+<h4>11.3.2 ラフネス(MTLの<code>Ns</code>からの変換と、無効値の書き出し)</h4>
+<p>
+<b>方針</b>: KurenaiPackerは、ソースモデルが持っていない係数に対してもっともらしい既定値を
+勝手に埋めない。何を既定値とするかはフォーマットやアセットによって異なり、変換ツールが決めてよい
+値ではないうえ、埋めてしまうと消費側が「明示的に指定された値」と「データに無かった」を
+区別できなくなるためである。値が無い場合は
+<code>Assets::kInvalidMaterialFactor</code>(<code>-1.0f</code>。実在する係数の値域は[0,1]なので
+負値なら一意に判別できる)をそのまま書き出し、解釈は消費側の責任とする。
+<code>GBuffer.hlsl</code>/<code>Transparent.hlsl</code>は負値を「係数の指定なし」とみなし、
+係数1.0(メタリック/ラフネステクスチャの値をそのまま使う)として扱う。
+</p>
+<p>
+OBJ/MTLはPBRのラフネス(<code>AI_MATKEY_ROUGHNESS_FACTOR</code>)を持たないが、代わりに
+Blinn-Phongの鏡面反射指数<code>Ns</code>を持っていることがあり、assimpはこれを
+<code>AI_MATKEY_SHININESS</code>へ格納する。<code>AI_MATKEY_ROUGHNESS_FACTOR</code>が
+取得できなかった場合に限り、一般的な近似式
+<code>roughness = sqrt(2 / (Ns + 2))</code>(<code>Ns</code>→∞で0、<code>Ns</code>=0で1に漸近)で
+変換する。実測値の変換結果:
+</p>
+<table>
+<tr><th><code>Ns</code></th><th>変換後のラフネス</th></tr>
+<tr><td>5000</td><td>0.020</td></tr>
+<tr><td>1024</td><td>0.044</td></tr>
+<tr><td>200</td><td>0.100</td></tr>
+<tr><td>15.85</td><td>0.335</td></tr>
+<tr><td>10</td><td>0.408</td></tr>
+</table>
+<p>
+パッカー側では[0,1]にクランプするだけで、シェーダーの最小ラフネス(0.045)には合わせない。
+そこはシェーダー側の数値安定性のための下限であり、アセットが持つ値を変換ツールが丸めてよい理由には
+ならないため(実際にシェーダーが<code>clamp(roughness, 0.045f, 1.0f)</code>で受け止める)。
+assimpが<code>AI_MATKEY_ROUGHNESS_FACTOR</code>を返した場合(glTF等)はそちらを優先するが、
+古いPhong系マテリアルをassimpがPBRラフネスへ変換する際に変換式が破綻して[0,1]範囲外の値を
+返すことがある(実測で負値を確認済み)。この場合は警告ログを出したうえで、既定値へ丸めるのではなく
+「取得できなかった」と同じ扱い(無効値)にする。
+</p>
+<p>
+<b><code>Ns 100.000</code>ちょうどの値は採用しない</b>。これはOBJエクスポータが書き出す定型の既定値で、
+マテリアルごとに調整された値ではないため。実測したMTLでは全マテリアルの8割前後
+(132マテリアル中106個、66マテリアル中56個)がこの値ちょうどであり、その中には石畳や漆喰のような
+明らかに粗い材質まで含まれていた。これを採用するとそれらがラフネス0.140(ほぼ鏡面)になり、
+IBL(<a href="#ibl">14章</a>)の鏡面項がシーン全体へ強くかかって白く霞んだ絵になる
+(実機で確認: 3D描画領域449,297ピクセルが変化、最大差119/255。建物のファサード全体が白く霞み、
+黒い看板が灰色になるほどコントラストが失われた)。情報量の無い値として無視し、無効値のままにする。
+</p>
+<p>
+この方針でパックした結果のラフネス分布は、Interiorが66メッシュ中56個が無効値・残りが
+0.020〜0.408、Exteriorが132メッシュ中106個が無効値・残りが0.044〜0.816となり、
+<b><code>Ns</code>が明示的に調整されているマテリアルだけが係数を持つ</b>状態になる。
+</p>
+<p>
+なお、この除外により<code>Ns 100.000</code>を持つ半透明マテリアル(実測で2件)はラフネスが
+無効値のままになり、ハイライトが乗らない。半透明判定(<code>Tr</code>由来)には影響しない。
+<code>Ns</code>が既定値である以上、このアセットからは本来のラフネスを知る手段が無いため許容している。
+</p>
+
+<h3>11.4 スケール(<code>--scale</code>)</h3>
+<p>
+OBJ形式自体は単位情報を持たないため、centimeter単位で作成されたアセットをそのまま読み込むと
+1 OBJ単位 = 1メートルとして扱われ、本来より100倍大きいスケールでパックされてしまう
+(Amazon Lumberyard BistroのOBJ配布で実測: 正しいInteriorの寸法は約15m&times;4m&times;18.6mだが、
+無補正では1502m&times;403m&times;1864mになる)。<code>KurenaiPacker.exe</code>の
+<code>--scale</code>オプション(<code>LoadSourceModel</code>の<code>scale</code>引数)で頂点位置と
+バウンズに乗算する係数を明示的に指定する。Bistroは<code>--scale 0.01</code>を指定する。
+係数を自動推定するヒューリスティックは持たず、呼び出し側が既知の単位変換係数を渡す方式とした
+(バウンディングボックスの大きさなどから推測する自動検出は、意図せず正しいスケールのアセットまで
+誤って補正してしまう恐れがあるため採用しなかった)。
+</p>
+<h3>11.5 既知の制約</h3>
+<ul>
+<li>カットアウト(<code>map_d</code>で指定される、葉っぱ等のアルファマスク画像)は現状OBJ経由では
+未対応。OBJのdiffuse(<code>map_Kd</code>)とopacity(<code>map_d</code>)は別々の画像ファイルであり、
+glTFのようにBaseColorテクスチャのアルファチャンネルとして1枚にまとまっていないため、
+現在の<code>MeshEntry</code>(BaseColorTextureIndexが1枚のみを持つ)ではこの2枚を合成する
+仕組みが無い。該当するマテリアル(<code>Foliage_Leaves</code>等)はOBJ経由では不透明として
+パックされる(既存動作からの後退ではなく、元々未対応だった範囲)。</li>
+<li>配布元のテクスチャ展開に起因する個別の読み込み失敗(実測で
+<code>Paris_CeilingFan_01A_emi.png</code>が1件)は、既存のフォールバック機構により白1x1
+プレースホルダーへ自動的に置き換わり、警告ログが出力される(<a href="#transparent">15.8節</a>で
+説明する「マゼンタ色のプレースホルダー」とは別の、より穏やかなフォールバック経路)。</li>
+</ul>
 </section>
 
 <section id="lights">
@@ -886,9 +1075,13 @@ C++側(<code>KurenaiEngine3D::Render</code>のIBLBakeパス)が面ごとに1回�
 <ul>
 <li><strong>BRDF積分LUT</strong>(<code>BRDFLUT.hlsl</code> CSMain) — スカイボックスに依存しないため
 (NdotV, ラフネス)の128x128グリッドをGGXインポータンスサンプリング(1024サンプル)で積分し、
-(スケールA, バイアスB)のペアをR16G16_Floatへ焼く。IBL用の可視性項は直接光用(<code>k=(r+1)^2/8</code>)
-とは異なり<code>k=roughness^2/2</code>を使う(Karis 2013)。方向性を持たない2Dテーブルのため、
-これだけは通常のTexture2Dのまま(面ごとのディスパッチは不要)。</li>
+(スケールA, バイアスB)のペアをR16G16_Floatへ焼く。可視性項はSmith-GGXへの最良フィットである
+<code>k=roughness^2/2</code>を使う。<b>この可視性項は実行時のスペキュラBRDFと必ず同一でなければ
+ならない</b>(14.9節のエネルギー補正がこのLUTを実際のBRDFの方向アルベドとして使うため)ので、
+定義は共有ヘッダー<code>SpecularEnergy.hlsli</code>へ一本化し、このLUT生成と
+<code>DirectLighting.hlsl</code>/<code>Transparent.hlsl</code>が同じ関数を呼ぶようにしている。
+方向性を持たない2Dテーブルのため、これだけは通常のTexture2Dのまま(面ごとのディスパッチは不要)。
+<b>サンプリングには専用のサンプラー(Linear + Clamp)を使う</b> ―― 理由は下の14.2.1節。</li>
 <li><strong>拡散イラディアンス</strong>(<code>IBLConvolve.hlsl</code> CSIrradiance) —
 出力テクセルが表す法線方向Nについて、接空間の半球を(phi, theta)の等間隔グリッド
 (0.025rad刻み)で離散化し、cosθsinθ重み付き平均をとる(モンテカルロではなく決定的な離散化。
@@ -904,6 +1097,80 @@ C++側(<code>KurenaiEngine3D::Render</code>のIBLBakeパス)が面ごとに1回�
 <strong>起動後最初のフレームでのみ</strong>1回だけ実行する(<code>KurenaiEngine3D::Render</code>の
 <code>m_IBLBaked</code>フラグ、通常のRenderGraphパスとして登録され毎フレームの仕組みをそのまま使う)。
 以降は焼き直さない。
+</p>
+
+<h4>14.2.1 BRDF積分LUTのサンプラーをWrapからClampへ直した経緯</h4>
+<p>
+このエンジンのサンプラーは長らく<b>AddressU/V/WがWrap固定</b>で、<code>SamplerDesc</code>にも
+アドレッシングを指定する手段が無かった(<code>RHIDesc.h</code>のコメントにも「常にWrapのみを使う」と
+書かれていた)。マテリアルテクスチャはタイリングするためWrapで正しいが、
+<b>BRDF積分LUTはUVそのものが定義域(u = NdotV、v = roughness、どちらも[0,1])であり、
+UVの端が値域の端を意味する</b>。ここをWrapで引くと、端でバイリニア補間のタップが
+反対側の端のテクセルへ回り込み、まったく無関係な値が混ざる。
+</p>
+<p>
+実際に<b>White Furnace Testの球の中心(視線と法線が一致する点、NdotV = 1)に
+数ピクセルの斑点</b>として現れていた。<code>u = 1.0</code>のサンプルが
+<code>u &asymp; 0</code>(グレージング角)のテクセルと50/50で混ざるためで、
+LUTは128テクセル幅なので影響範囲は最後の1〜2テクセル、球面上では<code>NdotV &gt; 0.99</code>の
+ごく狭い領域 ―― 見た目の「中心の斑点」と一致する。さらに汎用サンプラーは異方性16xだったため、
+画面空間の勾配ぶんだけタップが広がり斑点が数ピクセルに拡大していた。
+斑点の符号がラフネスで反転していた(滑らかな球では暗く、粗い球では明るい)ことも、
+<code>Ess(NdotV&asymp;0)</code>と<code>Ess(NdotV&asymp;1)</code>の大小がラフネス
+0.6付近で入れ替わることで説明がつく。
+</p>
+<p>
+v軸(roughness)にも同じ問題があり、<b>roughness = 0の面にroughness &asymp; 1の値が、
+roughness = 1の面にroughness &asymp; 0の値が混ざっていた</b>。こちらはNdotV軸より影響が大きく、
+本来は完全な鏡面として背景と区別がつかないはずのroughness 0の金属球が暗く沈んでいた。
+</p>
+<p>
+対処として<code>SamplerAddressMode</code>(<code>Wrap</code> / <code>Clamp</code>)を
+<code>RHIEnums.h</code>へ追加し、<code>SamplerDesc::AddressMode</code>で選べるようにした
+(既定は従来どおり<code>Wrap</code>)。<code>KurenaiEngine3D</code>は
+<b>LUT専用のサンプラー<code>m_LUTSampler</code>(Linear + Clamp)</b>を追加で生成し、
+LUTを読む3パス(DirectLight / Lighting / Transparent)で<code>s1</code>へバインドする。
+異方性を外してLinearにしているのは、LUTに対する異方性フィルタリングは
+「画面空間の勾配ぶんだけLUT上の広い範囲を平均する」だけで意味が無く、端をまたぐ距離を
+広げるだけだからである。シェーダー側の宣言
+(<code>SamplerState BRDFLUTSampler : register(s1);</code>)は
+<code>SpecularEnergy.hlsli</code>に置き、「LUTを引く側は必ずこのサンプラーを使う」ことを
+共有ヘッダーで担保している。
+</p>
+<p>
+DX12はサンプラーもディスクリプタテーブル経由のため、<code>kSamplerSlotCount</code>を
+1から2へ増やした。テーブルはスロット数ぶんまとめてバインドされるので、<code>s1</code>を
+宣言しないシェーダーの描画でもスロット1に有効なディスクリプタが必要になる
+(未初期化ディスクリプタがテーブルに含まれると動作は未定義)。上位層の呼び出し漏れに
+依存しないよう、<code>DX12Device</code>の初期化時に全スロットを既定のサンプラーで
+埋めてから上位層が必要なスロットだけ上書きする形にした。
+</p>
+<p>
+<b>修正後の実測</b>(White Furnace Test、補正OFF、球中心のHDR値を背景で割った比。
+Reinhardトーンマップとガンマの逆変換をかけて算出):
+</p>
+<table>
+<tr><th>roughness</th><th>0.0</th><th>0.2</th><th>0.4</th><th>0.6</th><th>0.8</th><th>1.0</th></tr>
+<tr><td>実測比</td><td>1.0000</td><td>1.0000</td><td>0.9541</td><td>0.7947</td><td>0.5368</td><td>0.3144</td></tr>
+<tr><td>理論<code>Ess</code></td><td>1.0000</td><td>0.9978</td><td>0.9572</td><td>0.7965</td><td>0.5367</td><td>0.3071</td></tr>
+</table>
+<p>
+全ラフネスで理論値と8bit量子化の範囲内(最大誤差0.012)で一致し、球中心の斑点も消えた。
+補正ONでは11球すべてが背景と同じ186で、1ピクセルも差が無い。DX11 / DX12の3D描画領域の
+画素差分は0(差はタイトルバーの「DX11」「DX12」の文字のみ)。
+</p>
+<p>
+<b>この修正はエネルギー補正の実装そのものとは独立</b>である点に注意。補正ON時は
+<code>comp = 1/Ess</code>(金属では<code>F0 = 1</code>)が<code>Ess</code>を厳密に打ち消すため、
+<code>Ess</code>が汚染されていても結果は背景と一致してしまい、<b>不具合が見えなくなっていた</b>。
+補正OFFの絵を観察して初めて表面化した。
+</p>
+<p>
+<b>残る既知の課題</b>: 汎用サンプラー(<code>m_Sampler</code>)は依然としてWrapのまま、
+シャドウマップやフルスクリーンパスの中間テクスチャにも使われている。これらもUVの端が
+定義域の端であるため、原理的には同じ回り込みが起きうる(現時点で目に見える不具合は
+確認していない)。アドレッシングを選べる仕組みは今回入ったので、対処するならサンプラーを
+用途ごとに分けるだけでよい。
 </p>
 
 <h3>14.3 RHIへの追加</h3>
@@ -942,6 +1209,15 @@ t9(PrefilteredEnv、TextureCube)・t10(BRDFLUT)を追加し11枚になった。D
 共有する固定サイズのSRVディスクリプタテーブルを使う設計(4章のシャドウカスケード統合時と同じ制約)
 のため、<code>DX12CommandList::kTextureSlotCount</code>と<code>DX12Device.cpp</code>側の同名定数を
 9(t0〜t8)から11(t0〜t10)へ拡張した。
+</p>
+<p>
+その後、直接光パス(<code>DirectLighting.hlsl</code>)もBRDF積分LUTを読むようになった
+(14.9節のエネルギー補正で<code>Ess = brdf.x + brdf.y</code>が必要なため)。このパスは
+t0〜t7がG-Buffer+シャドウカスケード、<b>t8がライトリストの<code>StructuredBuffer</code></b>で
+埋まっているため、LUTは<code>t9</code>に置いた。使用スロットは10枚で既存の
+<code>kTextureSlotCount = 12</code>に収まるため、上限の再拡張は不要だった。
+RenderGraphの<code>.Reads</code>へ<code>m_BRDFLUTTexture</code>を挙げることで、
+このLUTのWriterであるIBLBakeパスより後に自動的に順序付けられる。
 </p>
 <p>
 Render Targetsパネルの「IBL - Irradiance」「IBL - Prefiltered Specular」デバッグ表示は、
@@ -1052,6 +1328,479 @@ IBL導入以前と同じ定数色アンビエント(<code>AmbientColor.rgb * ao<
 IBL全体の寄与が強すぎたため(実機でON/OFF比較したところ、IBL無効時はシーンがほぼ真っ暗になるほど
 IBLが支配的だったことから、既定強度を下げて調整可能にした)。
 </p>
+
+<h3>14.9 スペキュラのエネルギー整合(Disney再マップ除去 + マルチスキャッタリング補正)</h3>
+<p>
+Cook-Torrance(GGX)のスペキュラ項<code>f = D&middot;G&middot;F / (4(n&middot;l)(n&middot;v))</code>は、
+マイクロファセット間の<b>1回だけの反射</b>しか考慮していない。Smith幾何項<code>G</code>が遮蔽として
+捨てた光は、現実には隣のマイクロファセットへ跳ね返って外へ出ていくが、単一散乱モデルはそれを
+数えないためエネルギーが失われる。失われる量は<code>F = 1</code>としたときの方向アルベド
+<code>Ess</code>で測れる(<code>BRDFLUT.hlsl</code>の<code>IntegrateBRDF</code>を再現して算出、
+N&middot;V = 1.0):
+</p>
+<table>
+<tr><th>roughness</th><th>0.0</th><th>0.4</th><th>0.6</th><th>0.8</th><th>1.0</th></tr>
+<tr><td><code>Ess</code></td><td>1.000</td><td>0.957</td><td>0.797</td><td>0.537</td><td>0.307</td></tr>
+<tr><td>失われる割合</td><td>0%</td><td>4%</td><td>20%</td><td>46%</td><td><b>69%</b></td></tr>
+</table>
+<p>
+ラフネス1.0では7割が消える。粗い金属が本来より暗く、多重反射のたびに金属色が乗るはずの彩度も
+低く見える原因である。
+</p>
+
+<h4>14.9.1 前提として直接光のDisneyラフネス再マップを除去した</h4>
+<p>
+直接光とIBLは<b>同じSchlick-GGX可視性項</b><code>G1(x) = (n&middot;x) / ((n&middot;x)(1-k) + k)</code>を
+使うが、以前は<code>k</code>が異なっていた。直接光が<code>(roughness + 1)&sup2; / 8</code>、
+IBL(BRDF LUT)が<code>roughness&sup2; / 2</code>である。
+</p>
+<p>
+Schlick近似がSmith-GGXに最もよく一致するのは<code>k = &alpha;/2</code>(&alpha; = roughness&sup2;)で、
+<b>IBL側が物理的に正しいフィット</b>である。直接光側はそこに<b>Disneyのラフネス再マップ</b>
+(Burley 2012)<code>&alpha;' = ((roughness+1)/2)&sup2;</code>を挟んだもので、点光源のハイライトが
+低ラフネスで鋭すぎる問題("hotness")を意図的に抑えるための<b>非物理な調整</b>である
+(Karis, SIGGRAPH 2013 "Real Shading in Unreal Engine 4"。同文献はこの再マップについて
+「解析光源にのみ使うこと。IBLに適用すると斜めの角度で暗くなりすぎる」と明記している)。
+</p>
+<p>
+この再マップは2つの弊害を生んでいた。<b>(1)</b> Smith-GGXの正しいフィットから意図的にずらしており
+物理的に不正確。<b>(2)</b> BRDF積分LUTは<code>k = roughness&sup2;/2</code>で焼かれているため、
+<code>k</code>の違う直接光へLUT由来の<code>Ess</code>を適用してもエネルギー補正が整合しない。
+そこで<b>再マップを除去し、直接光もIBLと同じ<code>k = roughness&sup2;/2</code>へ統一した</b>。
+可視性項の定義は共有ヘッダー<code>SpecularEnergy.hlsli</code>へ一本化し、
+LUT生成(<code>BRDFLUT.hlsl</code>)・直接光(<code>DirectLighting.hlsl</code>)・半透明
+(<code>Transparent.hlsl</code>)の3つが同じ関数を呼ぶことで、
+<b>「LUTと実行時BRDFが同じ可視性項を使う」という不変条件をコメントではなく構造で保証</b>している。
+</p>
+<p>
+除去による直接光スペキュラのエネルギー倍率
+<code>Ess(k=r&sup2;/2) / Ess(k=(r+1)&sup2;/8)</code>の実測値(行が N&middot;V、列が roughness):
+</p>
+<table>
+<tr><th>N&middot;V</th><th>r=0.1</th><th>r=0.2</th><th>r=0.4</th><th>r=0.7</th><th>r=1.0</th></tr>
+<tr><td><b>0.1</b>(ほぼ真横)</td><td>5.01x</td><td>4.09x</td><td>2.32x</td><td>1.42x</td><td>1.00x</td></tr>
+<tr><td><b>0.2</b></td><td>2.47x</td><td>2.45x</td><td>1.86x</td><td>1.32x</td><td>1.00x</td></tr>
+<tr><td><b>0.4</b></td><td>1.48x</td><td>1.52x</td><td>1.44x</td><td>1.21x</td><td>1.00x</td></tr>
+<tr><td><b>0.7</b></td><td>1.13x</td><td>1.15x</td><td>1.16x</td><td>1.11x</td><td>1.00x</td></tr>
+<tr><td><b>1.0</b>(正面)</td><td>1.00x</td><td>1.00x</td><td>1.03x</td><td>1.05x</td><td>1.00x</td></tr>
+</table>
+<p>
+斜め視線 &times; 滑らかな面で最大5倍明るくなる(グレージング角でフレネルが1へ漸近する物理的に
+正しい挙動)。<code>roughness = 1.0</code>では<code>1&sup2;/2 = 0.5 = (1+1)&sup2;/8</code>で
+両者が厳密に一致するため変化せず、正面視(N&middot;V = 1)でも<code>G1</code>は<code>k</code>に
+よらず1になるため変化しない。
+</p>
+
+<h4>14.9.2 補正式とBRDF LUTの再利用</h4>
+<p>
+Kulla &amp; Conty, "Revisiting Physically Based Shading at Imageworks"(SIGGRAPH 2017)の
+multiple-scattering energy compensationの実時間近似を使う。
+</p>
+<pre><code>Ess  = brdf.x + brdf.y
+comp = 1 + F0 * (1 / Ess - 1)
+specular *= comp</code></pre>
+<p>
+補正後の方向アルベドは<code>Ess &middot; comp = Ess + F0(1 - Ess)</code>となり、
+「失われたぶんを<code>F0</code>で1回だけ跳ね返して戻す」形(等比級数の第1項近似)になる。
+<code>F0 = 1</code>(完全な金属)なら厳密に1でエネルギー保存し、<code>F0 = 0.04</code>(誘電体)なら
+失われたぶんの4%しか戻さない ―― これも正しく、誘電体は残りを透過・吸収するため。
+</p>
+<p>
+<b><code>Ess</code>は既存のBRDF積分LUTから追加チャンネル無しで得られる。</b>
+<code>BRDFLUT.hlsl</code>はSchlickのフレネル<code>F = F0(1-Fc) + Fc</code>を括り出して
+<code>A = &int;(1-Fc)Gvis</code>、<code>B = &int;Fc&middot;Gvis</code>を焼いており、
+<code>F0&middot;A + B</code>はそのF0における方向アルベドそのものである。よって<code>F0 = 1</code>を
+代入した<code>A + B</code>が、ここで必要な「<code>F = 1</code>のときの方向アルベド」に一致する。
+LUTのフォーマット(R16G16_Float / 128x128)変更もチャンネル追加も不要だった。
+</p>
+<p>
+<b>残る近似</b>: 本来のKulla-Contyは<code>E(N&middot;V)</code>・<code>E(N&middot;L)</code>・
+<code>Eavg</code>(全方向平均)の3つを使うが、この実時間近似は<code>E(N&middot;V)</code>のみで
+済ませているため、視線方向と光源方向の非対称性(相反性)は厳密には再現されない。
+</p>
+
+<h4>14.9.3 適用箇所とトグル</h4>
+<p>
+補正は<b>鏡面項にのみ</b>掛ける。適用は5箇所:
+</p>
+<table>
+<tr><th>ファイル</th><th>対象</th></tr>
+<tr><td><code>DeferredLighting.hlsl</code></td><td><code>EvaluateIBL</code>の<code>specularIBL</code></td></tr>
+<tr><td><code>DirectLighting.hlsl</code></td><td><code>EvaluateDirectBRDF</code>の<code>specular</code>(太陽・ライトリストの両方から呼ばれる)</td></tr>
+<tr><td><code>Transparent.hlsl</code></td><td><code>EvaluateDirectBRDF</code>の<code>outSpecular</code> / <code>EvaluateIBLSplit</code>の<code>outSpecular</code> / IBL無効時フォールバックの<code>ambientSpecular</code></td></tr>
+</table>
+<p>
+<code>Ess</code>は<code>(N&middot;V, roughness)</code>だけの関数でピクセル内では一定なので、
+LUTのサンプルと補正倍率の計算はPSMainで1度だけ行い、ライトのループへは
+<code>float3 energyCompensation</code>を引数で渡している(ループ内でLUTを引くとライト数ぶん
+テクスチャフェッチが増えてしまう)。追加コストはピクセルあたり1サンプルのみ。
+<code>Transparent.hlsl</code>の<code>EvaluateDirectBRDF</code>は事前乗算済みアルファ出力(15.8節)の
+ために拡散/鏡面を分離して返す構造になっているため、<b>補正が鏡面側にだけ掛かることがコード上で
+自明</b>になっている。
+</p>
+<p>
+ImGuiのPost Processingパネルに<code>Specular Energy Compensation</code>チェックボックスを追加した。
+IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>のネストの<b>外</b>に置いている。
+値は未使用だった<code>FrameConstants.ShadowParams.w</code>へ1.0f/0.0fとして渡すため、
+<code>FrameConstants</code>のレイアウト(末尾追加規約)に手を入れる必要はなかった。
+無効時は共有ヘッダーの<code>SpecularEnergyCompensation</code>が恒等元の1を返すので、
+呼び出し側5箇所はすべて無条件に乗算するだけでよく、分岐の書き忘れが起きない。
+</p>
+
+<h4>14.9.4 拡散項<code>kd</code>を変更しない判断</h4>
+<p>
+鏡面が増えるぶん拡散を減らすべきか検討したが、<code>kd = (1 - F)(1 - metallic)</code>は
+変更しないこととした。
+</p>
+<ul>
+<li>補正が最大になる金属では<code>kd = 0</code>で、そもそも削るべき拡散項が存在しない</li>
+<li>誘電体では補正倍率が最大1.090にとどまり、しかも掛かる先は小さな鏡面項。総出射エネルギーへの
+増分は1%未満のオーダー</li>
+<li><code>Ess &middot; comp = Ess + F0(1 - Ess) &le; 1</code>が<code>F0 &le; 1</code>から従うため、
+<code>kd</code>をそのままにしてもエネルギー超過は起きない</li>
+<li>直接光とIBLで<code>kd</code>の式が既に異なる(直接光は<code>F(V&middot;H)</code>、IBLはLagardeの
+ラフネス考慮フレネル)ため、両者へ整合をとりながら減算を入れると修正箇所が5から9へ増え、
+どこかで不整合が生じるリスクが上がる</li>
+</ul>
+
+<h4>14.9.5 SSRを対象外とした判断</h4>
+<p>
+<code>SSR.hlsl</code>の反射の重みは<code>reflectivity = max(FresnelSchlick(N&middot;V, F0))</code>という
+アドホックなスカラーで、方向アルベドではない。Kulla-Contyの補正式は「乗算先が単一散乱の方向
+アルベドである」ことを前提に導出されているため、この量に掛けても意味を持たない。加えてSSRは
+補正済みの<code>specularIBL</code>を含む<code>baseColor</code>へ<b>加算</b>合成するので、
+掛けると同じ多重散乱ぶんを二重に計上してしまう。さらにSSRの<code>roughnessCutoff</code>(既定0.6)
+より上でしか補正は意味を持たないが、その領域では<code>roughnessFade</code>がゼロに落ちる。
+</p>
+
+<h4>14.9.6 White Furnace Testによる検証</h4>
+<p>
+<b>可視性項の共有ヘッダー化はLUTを変えていない</b>: Render Targetsパネルの
+「IBL - BRDF LUT」表示を移行前後で画素比較し、<b>差分ゼロ</b>を確認した(同一式のため期待値どおり)。
+</p>
+<p>
+<b>Bistroでは再マップ除去の差がほぼ出ない</b>: Bistro Exteriorの既定カメラで差分ゼロ、Interiorで
+12ピクセルだった。原因はアセット側にある ―― Bistroの全198メッシュが
+<code>MetallicRoughnessTextureIndex = -1</code>(白1x1プレースホルダー &rarr; g = 1.0)であり、
+うち162メッシュはラフネス係数も無効値(11.3.2節)のため係数1.0として扱われる。結果として
+<b><code>roughness = 1.0</code>で描かれ、これは再マップの差が厳密に消える値</b>である。
+</p>
+<p>
+<b>エネルギー補正は現行アセットでは目視できない</b>: 全パッケージの<code>MeshEntry</code>を
+パースすると<b>210メッシュすべて<code>MetallicFactor = 0.0</code></b>である
+(Exterior 132 / Interior 66 / MaterialTest 12。BistroはOBJ/MTL由来で
+<code>AI_MATKEY_METALLIC_FACTOR</code>を持たないため既定値0のまま)。<code>F0 = 0.04</code>固定では
+補正倍率が最大1.090にとどまり、Material Test(白球・アルベド1.0)ではトグルON/OFFの差が
+<b>1ピクセル</b>しか出なかった(球ごとの平均輝度では+0.001〜+0.014%の一貫した増加として観測でき、
+配線自体は機能している)。白い誘電体では鏡面成分が全体のごく一部だからである。
+</p>
+<p>
+<b>Bistroでのエネルギー補正のON/OFF比較</b>: Bistroは前述のとおり全面<code>roughness = 1.0</code>で
+描かれるため、<code>Ess = 0.307</code>&rarr;補正倍率1.090となり、<b>誘電体としては補正が最大になる
+条件</b>にあたる。ImGuiパネルを避けた3D領域(580x510)で既定カメラのON/OFFを比較した結果:
+</p>
+<table>
+<tr><th>シーン</th><th>差分が出たピクセル</th><th>1chあたりの最大差分</th><th>領域平均輝度の変化</th></tr>
+<tr><td>Exterior</td><td>177,462 / 295,800(60.0%)</td><td>2/255</td><td>79.365 &rarr; 79.698(+0.420%)</td></tr>
+<tr><td>Interior</td><td>222,046 / 295,800(75.1%)</td><td>2/255</td><td>52.192 &rarr; 52.663(+0.904%)</td></tr>
+</table>
+<p>
+シーンのほぼ全面に効いているが変化量は1〜2階調にとどまり、<b>目視では区別できない</b>。Interiorの
+方が相対変化が大きいのは元々暗く(平均52対79)、鏡面成分の占める割合が相対的に大きいためである。
+なお<b>純粋な空の領域では差分が厳密にゼロ</b>であることも確認した
+(<code>DeferredLighting.hlsl</code>が背景ピクセルを早期returnしBRDFを通さないため。
+期待どおりの挙動)。
+</p>
+<p>
+<b>そこで専用の検証シーン「White Furnace Test」を用意した。</b>
+White Furnace Testは「一様な放射輝度の環境に物体を置くと、BRDFがエネルギー保存していれば
+物体が背景と完全に同じ明るさになり見分けがつかなくなる」ことを利用した検証手法である。
+金属(<code>F0 = baseColor = 1</code>)の鏡面IBLは、放射輝度<code>L</code>の一様な環境では
+</p>
+<pre><code>specularIBL = L * (F0 * A + B) = L * (A + B) = L * Ess</code></pre>
+<p>
+となり単一散乱のままでは<code>Ess &lt; 1</code>のぶんだけ背景より暗くなるが、
+補正<code>comp = 1/Ess</code>(<code>F0 = 1</code>のとき)を掛けると<code>L</code>に一致して
+球が消える。つまり<b>補正OFFで粗い球ほど暗い影として浮き上がり、補正ONで球が背景に溶ける</b>という
+形で、補正の正しさが定性的にも定量的にも判定できる。
+</p>
+<p>
+実測結果(背景の輝度186.00に対する球の比):
+</p>
+<table>
+<tr><th>roughness</th><th>補正OFF</th><th>補正ON</th></tr>
+<tr><td>0.2</td><td>0.988</td><td><b>1.000</b></td></tr>
+<tr><td>0.3</td><td>0.976</td><td><b>1.000</b></td></tr>
+<tr><td>0.4</td><td>0.958</td><td><b>1.000</b></td></tr>
+<tr><td>0.5</td><td>0.931</td><td><b>1.000</b></td></tr>
+<tr><td>0.6</td><td>0.899</td><td><b>1.000</b></td></tr>
+</table>
+<p>
+<b>補正ONでは全ラフネスの球が背景と1ピクセルも違わない(比が厳密に1.000)。</b>
+これは<code>Ess &middot; comp = Ess + F0(1 - Ess) = 1</code>というエネルギー保存の性質そのもので、
+式が正しく実装されていることの直接的な証拠である。DX11 / DX12の画素差分もON/OFFとも0だった。
+</p>
+<p>
+<b>DX11 / DX12の一致</b>: 3シーン(Exterior / Interior / Material Test)すべてで画素差分は
+0〜3ピクセル。<code>metallic = 1.0</code>を強制した検証時も差分ゼロだった。
+</p>
+<h4>14.9.7 Furnace Testを成立させるためのシーン設定</h4>
+<p>
+Furnace Testは「球と背景の明るさが厳密に一致するか」を見る検証なので、環境光以外の寄与が
+1つでも混ざると成立しない。そのため<code>.kscene</code>へシーン単位の設定を追加した
+(いずれも他のシーンでも使える汎用のキーで、既定値は従来どおりの挙動)。
+</p>
+<table>
+<tr><th>キー</th><th>Furnace Testでの値</th><th>必要な理由</th></tr>
+<tr><td><code>[Scene] Skybox</code></td><td><code>Skybox/UniformWhite.dds</code></td>
+<td>一様な放射輝度の環境を作る。スカイボックスは従来<code>Assets/Skybox/Sky.dds</code>固定だったため、
+シーンごとに差し替えられるようにした。IBLはスカイボックスから焼かれるので、差し替え時は
+<code>m_IBLBaked</code>を倒して次フレームで焼き直す</td></tr>
+<tr><td><code>[Sun] Enabled</code></td><td><code>false</code></td>
+<td>太陽が乗ると球が背景より明るくなる。<code>TimeOfDay</code>を夜にする方法では昼度
+(<code>AmbientColor.a</code>)まで一緒に落ちて環境光ごと消えてしまうため、太陽だけを消すキーが要る。
+実装は<code>FrameConstants.LightColor</code>をゼロにするだけでシェーダー変更は不要</td></tr>
+<tr><td><code>[Scene] IBLIntensity</code></td><td><code>1.0</code></td>
+<td>背景のスカイボックスは強度倍率を掛けずそのまま描かれるため、既定の0.5では球だけが半分の
+明るさになる</td></tr>
+<tr><td><code>[Scene] AmbientOcclusion</code></td><td><code>false</code></td>
+<td>球の縁がAOで暗くなると「エネルギー損失による暗さ」と区別がつかなくなる</td></tr>
+<tr><td><code>[Scene] ScreenSpaceReflection</code></td><td><code>false</code></td>
+<td>SSRは既にエネルギー保存している鏡面IBLへ反射色を<b>加算</b>する設計のため、有効なままだと
+球が背景より<b>明るく</b>なる(14.9.5節で述べた二重計上が、この検証で実際に目に見える形で現れた)</td></tr>
+</table>
+<p>
+アセット(一様キューブマップと金属球列)は<code>Tools/generate_furnace_test.py</code>が生成する。
+球は<code>metallic = 1.0</code>・<code>baseColorFactor = [1,1,1,1]</code>でラフネスのみ0.0〜1.0に
+振ってあり、<code>F0 = 1</code>となるため補正後の方向アルベドが厳密に1になる。
+</p>
+
+<p>
+<b>まとめ</b>: 今回の変更で目に見える差が出るのは再マップ除去(斜め視線 &times; 滑らかな面)だけで、
+エネルギー補正は物理的な正しさの底上げにとどまる。効果が最大化する「粗い金属」を現行のアセットは
+一つも持っていないため、将来<code>metallicFactor = 1.0</code>のマテリアルを追加した時点で
+初めて視覚的に意味を持つ。
+</p>
+</section>
+
+<section id="transparent">
+<h2>15. 半透明描画(フォワードパス)</h2>
+<p>
+Deferred Shadingは1ピクセルに1つのマテリアルしか保持できない(G-BufferのAlbedoは常に
+<code>alpha=1.0</code>で書き込まれる。<code>GBuffer.hlsl</code>)ため、複数の半透明サーフェスが
+重なって見えるような合成をG-Buffer上で行うことができない。そのためglTFの<code>alphaMode=BLEND</code>
+のメッシュだけを別扱いし、G-Bufferには一切書き込まず、最終合成パスの後に専用の
+<strong>半透明フォワードパス</strong>(<code>Transparent.hlsl</code>)でSceneColorへ直接
+フォワードシェーディングする構成にした。<code>alphaMode=MASK</code>(アルファカットアウト)は
+このパスの対象ではなく、従来どおりジオメトリパスで<code>clip()</code>する(1章参照)。
+</p>
+<h3>15.1 マテリアルからのデータの流れ</h3>
+<p>
+<code>KurenaiPacker</code>の<code>ModelSource.cpp</code>が<code>AI_MATKEY_GLTF_ALPHAMODE</code>を
+読み、値が<code>"BLEND"</code>のマテリアルを<code>SourceMesh::IsTransparent</code>としてマークする
+(<code>"MASK"</code>との判定は元から排他だったため、同じ<code>if</code>チェーンに追加するだけで
+済んだ)。<code>PackageWriter.cpp</code>がこれを<code>MeshEntry::Flags</code>
+(<code>kMeshEntryFlagTransparent</code>、10章参照)へ落とし込み、ランタイムの
+<code>ModelLoader.cpp</code>が<code>Assets::Mesh::IsTransparent</code>へ復元する。
+<code>KurenaiEngine3D::Render()</code>のジオメトリパスは<code>mesh.IsTransparent</code>のメッシュを
+<code>continue</code>でスキップし、代わりに半透明フォワードパスが<code>m_Scene.Instances</code>を
+もう一度走査してそれらだけを描画する(1シーンにつき2回メッシュを走査する形になるが、
+実データでは半透明メッシュの数はごく少数であり、フラットな配列を単純に線形走査するだけの
+コストは無視できる)。
+</p>
+<h3>15.2 深度テストと書き込みの分離(<code>DepthWriteEnabled</code>)</h3>
+<p>
+半透明物体は「既存の不透明物体には隠れたい(深度テストは有効)が、自分自身の深度を書き込んでは
+いけない(奥から手前へ複数の半透明物体を描く際、後に描く物体が先に描いた物体の深度に隠されて
+しまう)」という、テストと書き込みが非対称な深度ステートを要求する。従来の
+<code>RHI::PipelineStateDesc</code>は<code>HasDepthStencil</code>(テストの有効/無効)しか持たず、
+書き込みは常にON(<code>D3D11_DEPTH_WRITE_MASK_ALL</code> / <code>D3D12_DEPTH_WRITE_MASK_ALL</code>)
+だったため、<code>DepthWriteEnabled</code>(既定<code>true</code>、既存の全パイプラインステートは
+無変更で従来通り書き込む)を追加し、<code>DX11Device::CreatePipelineState</code>/
+<code>DX12Device::CreatePipelineState</code>の両方で<code>DepthWriteMask</code>へ反映するように
+した。半透明パイプラインステートは<code>HasDepthStencil=true</code>・<code>DepthWriteEnabled=false</code>・
+<code>ReverseZ=true</code>(G-Bufferの深度と同じ比較関数・マッピングで比較する必要があるため)で
+作成し、<code>RenderGraphPassDesc::DepthTarget</code>にG-Bufferの深度テクスチャをそのまま指定する
+(実際には書き込まないが、DSVとして同じテクスチャへバインドする必要があるため、RenderGraph上の
+依存関係解決では「書き手」として扱われる。詳細は14.3節)。
+</p>
+<h3>15.3 RenderGraph上の実行順序</h3>
+<p>
+<code>Core::RenderGraph</code>(2章)は明示的なパス間の順序指定を持たず、各パスが宣言する
+Reads/RenderTargets/DepthTargetから依存関係を機械的に解決する。半透明フォワードパスは
+<code>RenderTargets = { SceneColor }</code>を最終合成パスの直後・SSRパスの直前で<code>AddPass</code>する
+ことで、正しい順序を保証している。最終合成パスもSceneColorを書くため、半透明フォワードパスは
+Write-after-Writeの依存関係から自動的にその後に置かれる。SSRパス(有効時)はSceneColorを
+<strong>読む</strong>ため、Read-after-Writeの依存関係から自動的に半透明フォワードパスの後に置かれる
+(SSRが無効な場合はTonemapパスがSceneColorを直接読むため、同じ理屈でTonemapが後に置かれる)。
+この2つの依存関係だけで、<code>m_SSREnabled</code>の値に関わらず「最終合成→半透明→SSR/Tonemap」の
+順序が常に成立する。<code>DepthTarget = GBufferDepth</code>もWriteとして扱われるため
+ジオメトリパスの後に置かれるという(実際には書き込まないため過剰だが無害な)依存関係が追加で
+生まれるが、SceneColor側の依存関係だけで必要な順序は既に確定しているため実害はない。
+</p>
+<h3>15.4 描画順序(奥から手前へのソート)</h3>
+<p>
+半透明合成は描画順に結果が依存する(奥から手前の順で描かないと、後ろの物体が前の物体を通して
+正しく透けて見えない)ため、半透明フォワードパスの実行時に<code>m_Scene.Instances</code>を
+カメラからの距離の降順(遠い順)にソートしてから描画する。距離はメッシュ単位ではなく
+<strong>モデルインスタンス単位</strong>で計算する(<code>instance.World</code>の平行移動成分と
+カメラ位置の距離の2乗)。<code>instance.World</code>はHLSL側の<code>mul(vec, World)</code>規約に
+合わせて転置済み(10章参照)のため、平行移動成分は行ではなく列(<code>_14</code>/<code>_24</code>/
+<code>_34</code>)に入っている点に注意。これは既知の制約として、同一インスタンス内に複数の
+半透明メッシュがある場合、それらメッシュ同士の順序はソートされない(元の配列順のまま)。
+実用上はモデル単位で半透明/不透明が分かれることが多く、1インスタンスが複数の半透明メッシュを
+持つケースは稀なため、この粒度で十分と判断した。
+</p>
+<h3>15.5 ライティングとDirectLighting.hlslとの重複</h3>
+<p>
+半透明フォワードパスはDeferredの直接光パス(<code>DirectLighting.hlsl</code>)を経由しないため、
+太陽(平行光、カスケードシャドウ付き)とt8のライトリスト(ポイント/スポット、影なし)によるPBR
+直接光の計算式・PCSS(Percentage Closer Soft Shadows)のシャドウサンプリングを<code>Transparent.hlsl</code>
+側にそのまま複製している。両ファイルはフルスクリーンパス(<code>DirectLighting.hlsl</code>)と
+頂点ごとに個別描画するフォワードパス(<code>Transparent.hlsl</code>)という異なる呼び出し形態を
+持つため、当初は共有ヘッダーを設けて<code>DirectLighting.hlsl</code>側を書き換えるより、
+既存のコードをそのまま複製する方が既存パスへの影響がなく安全と判断した。
+</p>
+<p>
+その後、<b>リソースにも呼び出し形態にも依存しない純粋な数式だけは共有ヘッダーへ切り出す</b>方針へ
+改めた。<code>SpecularEnergy.hlsli</code>(<code>NormalEncoding.hlsli</code>に次ぐ2つ目の共有ヘッダー)が
+Smith可視性項とスペキュラのエネルギー補正を持ち、<code>DirectLighting.hlsl</code>・
+<code>Transparent.hlsl</code>・<code>BRDFLUT.hlsl</code>の3つがこれを<code>#include</code>する
+(14.9節)。可視性項については、BRDF積分LUTを焼くときのBRDFと実行時に評価するBRDFが必ず同一で
+なければエネルギー補正が成り立たないため、<b>複製ではなく共有が要件</b>になったという事情がある。
+</p>
+<p>
+一方、<code>D</code>項(<code>DistributionGGX</code>)・フレネル項・PCSSのシャドウサンプリングは
+依然として両ファイルに複製されている(呼び出し形態やバインドされるリソースに依存するため)。
+<b>これらの物理式を変更する場合は両方を同時に修正する必要がある。</b>
+</p>
+<h3>15.6 有効ライト数の受け渡し(<code>ActiveLightCount</code>)</h3>
+<p>
+10章で述べたとおりDX12のルートシグネチャはCBVをb0/b1の2枠しか持たない。
+<code>DirectLighting.hlsl</code>はb1を<code>LightingConstants</code>(有効ライト数)として使えるが、
+<code>Transparent.hlsl</code>は<code>GBuffer.hlsl</code>と同様にb1を<code>ObjectConstants</code>
+(モデル行列)として使うため、この方法は使えない。そこで<code>FrameConstants</code>(b0)の末尾に
+<code>ActiveLightCount</code>(x=t8のライトリストの有効数)を追加した。既存のシェーダーはこの
+フィールドを宣言していない(=読まない)ため、末尾に追加する限りオフセットへの影響は無い
+(9章で確立した「末尾にのみ追加する」規約に従っている)。有効ライト数のリスト自体
+(<code>gpuLights</code>、カメラ距離によるソート・容量超過時の間引きを含む)は
+<code>KurenaiEngine3D::Render()</code>内で1度だけ構築し、直接光パスと半透明フォワードパスの
+両方が同じ配列を参照する(以前は直接光パスのExecute内で構築していたが、<code>FrameConstants</code>
+確定より前に人数が必要になったため、<code>Render()</code>本体へ引き上げた)。
+</p>
+<h3>15.7 <code>baseColorFactor</code>の反映(<code>BaseColorFactor</code>)</h3>
+<p>
+初版の実装ではベースカラーテクスチャが無いマテリアル(<code>BaseColorTextureIndex=-1</code>)は
+常に白1x1プレースホルダー(<code>alpha=1</code>)へフォールバックしていた。しかし実データ
+(Bistro Interiorの<code>Paris_LiquorBottle_*_Glass</code>等、ワインボトル/ジャーのガラス
+マテリアル)で検証したところ、これらは<code>alphaMode=BLEND</code>でありながらテクスチャを持たず、
+<code>pbrMetallicRoughness.baseColorFactor</code>だけで色を指定していたため、意図した色(黒に近い
+ガラス色)ではなく常に白で描画されてしまう問題が見つかった。そこで<code>MeshEntry</code>
+(v4、<code>BaseColorFactor[4]</code>)・<code>Mesh::BaseColorFactor</code>を追加し、
+<code>ModelSource.cpp</code>で<code>AI_MATKEY_BASE_COLOR</code>(assimpの glTF
+<code>baseColorFactor</code>への標準マッピング。取得できない形式では既定<code>[1,1,1,1]</code>のまま)
+を読み取るようにした。<code>Transparent.hlsl</code>は<code>baseColorTexture.rgba * baseColorFactor</code>
+(glTF仕様どおりの式)でベースカラー/アルファの両方を求める。
+</p>
+<p>
+この反映は<strong>半透明フォワードパスのみ</strong>に限定しており、<code>GBuffer.hlsl</code>
+(不透明・MASKカットアウト)は<code>ObjectConstants</code>に<code>BaseColorFactor</code>を
+宣言・使用しておらず、既存の見た目を変えない。オフセットは末尾追加のみのため
+<code>Shadow.hlsl</code>を含む既存シェーダーへの影響も無い(14.6節と同じ「末尾にのみ追加する」
+規約)。不透明マテリアル全般への<code>baseColorFactor</code>適用は、既存シーンの見た目を
+広範囲に変える可能性がある独立した変更と考え、今回のスコープ(半透明描画)には含めていない。
+</p>
+<h3>15.8 鏡面反射を減衰させない合成(事前乗算済みアルファ)</h3>
+<p>
+半透明パスのブレンドモードは標準アルファブレンドではなく
+<code>RHI::BlendMode::PremultipliedAlpha</code>(<code>out = src.rgb + dst.rgb * (1 - src.a)</code>)を使う。
+標準アルファブレンド(<code>src.rgb * src.a + dst.rgb * (1 - src.a)</code>)はシェーダーの出力色
+<b>全体</b>に<code>src.a</code>を掛けてしまうため、不透明度の低いガラスではハイライトまで一緒に潰れる。
+MTLの<code>Tf</code>由来で不透明度0.04になる酒瓶のガラスでは、スペキュラが1/25になり、
+ガラスが「透明」ではなく「何も無い」ように見えていた。
+</p>
+<p>
+そこで<code>Transparent.hlsl</code>は、<code>EvaluateDirectBRDF</code>/<code>EvaluateLight</code>を
+拡散反射項と鏡面反射項を別々に返す形(<code>out</code>引数)へ変更し、最終出力を次のように組み立てる。
+</p>
+<pre><code>float alpha = saturate(baseColorSample.a);
+float3 premultipliedColor =
+    (ambientDiffuse + directDiffuse) * alpha + directSpecular + ambientSpecular + emissive;
+return float4(premultipliedColor, alpha);</code></pre>
+<p>
+拡散光・環境光は「面が背景を覆う割合」ぶんだけ寄与するので<code>alpha</code>を乗じ、
+鏡面反射・自発光は「面が反射・放射して足す光」で背景を遮る量とは無関係なので減衰させない、
+という区別をここで付けている。
+</p>
+<p>
+検証(Sample3D / DX11、Bistro Exteriorの店舗窓ガラス、太陽を低い位置<code>TimeOfDay=8.0</code> /
+<code>AzimuthDegrees=270</code>に置いてガラス面へ直射光を当てた条件で、ブレンドモードのみを
+入れ替えた同一カメラのA/B比較): 3D描画領域で83,641ピクセルに差が出ることを確認した
+(ガラス面全体に反射の膜が乗る)。
+</p>
+<p>
+なお<b>ラフネスが正しく入っていないとこの差は出ない</b>。OBJ/MTLはPBRのラフネスを持たないため、
+当初は全マテリアルが同じ既定値(かなり粗い側)に張り付いており、A/B比較の差がImGuiパネルの
+数値変化(681ピクセル)しか出なかった。MTLの<code>Ns</code>(Blinn-Phongの鏡面反射指数)を
+<code>AI_MATKEY_SHININESS</code>から読んでラフネスへ変換する対応(11.3.2節)を入れて初めて、
+ガラスが鏡面らしいラフネス(0.02〜0.10)になり差が現れた。
+</p>
+
+<h3>15.9 半透明パスのIBL</h3>
+<p>
+半透明パスにはSSRが適用されない(15.10節)ため、ガラスにとってはIBL(<a href="#ibl">14章</a>)が
+唯一の「環境の映り込み」になる。デルタ光源(太陽・ポイント/スポットライト)のスペキュラだけでは、
+ラフネスの低いガラスは正反射条件を満たす極めて狭い帯にしかハイライトが出ず、
+透明なだけの面に見えてしまう。
+</p>
+<p>
+そこで<code>DeferredLighting.hlsl</code>と同じ3枚(拡散イラディアンス・プリフィルタ済み鏡面・
+BRDF積分LUT)をこのパスにもバインドし(<code>t9</code>/<code>t10</code>/<code>t11</code>)、
+<code>EvaluateIBLSplit</code>で評価する。<code>DeferredLighting.hlsl</code>の
+<code>EvaluateIBL</code>と式は同じだが、事前乗算済みアルファ出力(15.8節)のために拡散項と鏡面項を
+<b>分けて返す</b>点だけが異なる(拡散にはalphaを乗じ、鏡面は減衰させない)。
+半透明パスはAO/GIバッファを持たない(常に<code>ao=1</code>)ため、
+<code>EvaluateIBL</code>側のスペキュラオクルージョンは常に1になり、計算そのものを省いている。
+</p>
+<p>
+このバインドにより半透明パスが使うSRVスロットはマテリアル4枚 + シャドウ4枚 + ライトリスト +
+IBL 3枚の計12個になったため、DX12のルートシグネチャの
+<code>kTextureSlotCount</code>を11から12へ引き上げた
+(<code>DX12CommandList.h</code>と<code>DX12Device.cpp</code>の2箇所。
+シェーダー可視ディスクリプタヒープの容量は<code>kTextureSlotCount</code>から算出されるため
+自動的に追随する)。
+</p>
+<p>
+<b>Enable IBL無効時のフォールバック</b>: <code>DeferredLighting.hlsl</code>と同じく
+<code>ShadowParams.z</code>(IBL強度倍率、無効なら0)で分岐する。拡散はIBL導入以前と同じ
+定数色アンビエントに戻すが、<b>鏡面項は0にせず</b>、同じ定数色を「方向依存を持たない一様な
+環境radiance」とみなしてsplit-sum近似の第2項(BRDF積分LUT。方向性を持たない
+(NdotV, ラフネス)のテーブルなのでIBLの有効/無効に関わらず使える)を掛けた値を使う。
+鏡面項を0にしてしまうと、金属(拡散項が0になる)が環境光の下で真っ黒になり、
+ラフネスの低いガラスもハイライトを完全に失うため。
+</p>
+<h3>15.10 既知の制約</h3>
+<ul>
+<li>アルファ値は<code>baseColorTexture.a * baseColorFactor.a</code>で決まる(15.7節)。ただし
+<code>alphaMode=BLEND</code>のマテリアルであっても<code>baseColorFactor.a</code>自体が
+<code>1.0</code>(不透明)のまま、テクスチャにも変化する値が無ければ見た目は不透明になる。
+glTFの<code>KHR_materials_transmission</code>(屈折による物理ベースのガラス表現)は非対応であり、
+このような「アルファ以外の手段で透明感を出すことを前提に作られたコンテンツ」は、たとえ
+<code>alphaMode=BLEND</code>が付いていても見た目上は不透明のまま描画される(エンジンの不具合ではなく、
+モデルデータが実際にそのように定義されているため)。<br>
+Bistroについては、glTFを経由せずOBJ/MTLを直接パックする現行のパイプライン(11章)により、
+MTLの<code>d</code>/<code>Tr</code>と<code>illum</code>+<code>Tf</code>の両方から不透明度を
+読み取っているため、この問題には該当しない(Interiorの半透明メッシュは7個・220,840三角形、
+Exteriorは4個)。</li>
+<li>AO/間接光(SSAO/SSIL)・SSR(スクリーンスペースリフレクション)は半透明物体には適用されない。
+環境光はIBL(<a href="#ibl">14章</a>、15.9節)で評価するが、
+遮蔽(常に<code>ao=1</code>)・間接拡散光の計算は行わない</li>
+<li>半透明物体はG-Bufferの深度/法線に一切現れないため、SSRのレイマーチングは半透明物体を
+遮蔽物として認識しない(半透明の向こう側のオブジェクトを反射してしまう可能性がある)</li>
+<li>半透明物体同士は互いに影を落とさない(シャドウマップは不透明物体のみで構築される)</li>
+<li>ソートの粒度はモデルインスタンス単位(15.4節)であり、三角形単位のソートは行わない。
+単一メッシュが自己交差するような凹形状では奥行きの一部が正しく合成されない場合がある</li>
+</ul>
 </section>
 
 </main>

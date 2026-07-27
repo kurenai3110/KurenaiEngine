@@ -173,6 +173,14 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_LightingPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SceneColor;
 
+        // 半透明フォワードパス: Deferred(G-Buffer)には書き込まれなかったBLENDマテリアルのメッシュを、
+        // Lightingパスの後にSceneColorへ直接フォワードシェーディングしてアルファブレンド合成する
+        // (深度テストはGBuffer深度に対して行うが書き込みは行わない)。頂点レイアウトはGBufferパスと
+        // 共通(POSITION/NORMAL/TEXCOORD/TANGENT)
+        std::unique_ptr<RHI::IRHIShader> m_TransparentVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_TransparentPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineState;
+
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
         // オクルージョンカリングやSSRのレイマーチング高速化に使えるデータ構造だが、現時点では
@@ -271,8 +279,21 @@ namespace Kurenai
         // デバッグ表示(Render Targets - Shadow Map)で確認するカスケード番号(0=カメラに近い方)
         int32_t m_ShadowDebugCascade = 0;
 
-        // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ
+        // 太陽(平行光)そのものの有効/無効。.ksceneの[Sun]Enabledで設定される。
+        // TimeOfDayを夜にすると昼度(AmbientColor.a)も一緒に落ちて環境光まで消えてしまうため、
+        // 「昼のまま太陽だけ消す」にはこちらを使う(White Furnace Testが必要とする)。
+        // 無効時はFrameConstants.LightColorをゼロにするだけでよく、シェーダー側の変更は不要
+        bool m_SunEnabled = true;
+
+        // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ。
+        // .ksceneの[Scene]Skyboxでシーンごとに差し替えられる(LoadScene参照)
         std::unique_ptr<RHI::IRHITexture> m_SkyboxTexture;
+        // 既定のスカイボックス(Assets/Skybox/Sky.dds)の絶対パス。[Scene]Skybox指定が無いシーンへ
+        // 切り替えたときはここへ戻す
+        std::wstring m_DefaultSkyboxPath;
+        // 現在m_SkyboxTextureへ読み込んでいるファイルの絶対パス。シーン切り替えのたびに
+        // 読み直さずに済むよう比較に使う
+        std::wstring m_CurrentSkyboxPath;
 
         // IBL(Image Based Lighting): m_SkyboxTextureから拡散イラディアンス・プリフィルタ済み鏡面・
         // BRDF積分LUTの3つをコンピュートシェーダーで畳み込む(split-sum近似、Karis 2013)。
@@ -311,6 +332,14 @@ namespace Kurenai
         // Perez分布そのままではIBL全体の寄与が強すぎたため(実機で指摘された見た目の問題)
         bool m_IBLEnabled = true;
         float m_IBLIntensity = 0.5f;
+        // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)のON/OFF。
+        // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立したトグルにしている。
+        // FrameConstants.ShadowParams.wへ1.0f/0.0fとして渡し、3つのシェーダー(DirectLighting/
+        // DeferredLighting/Transparent)が共有するSpecularEnergy.hlsliの
+        // SpecularEnergyCompensationがこれを見て倍率1.0へ落とす。
+        // 既定でONにしているのは、補正しない状態がエネルギー的に不正(粗い面ほど暗い)であり、
+        // OFFは実装検証・A/B比較のための選択肢という位置付けのため(14.9節)
+        bool m_SpecularEnergyCompensationEnabled = true;
         // Enable IBL無効時に使う定数色アンビエントフォールバックの強度倍率。シェーダ側ではなく
         // Render()がFrameConstants.AmbientColorへ書き込む時点でrgb(alphaのdayFactorは除く)に
         // 乗算する(HLSL側は素のAmbientColor.rgbを読むだけでよい)
@@ -326,6 +355,10 @@ namespace Kurenai
         float m_SunAzimuthDegrees = 126.87f;
 
         std::unique_ptr<RHI::IRHISampler> m_Sampler;
+        // BRDF積分LUT専用のサンプラー(s1)。LUTはUVの端が定義域の端(NdotV=0/1、roughness=0/1)
+        // であるため、汎用サンプラー(m_Sampler)のWrap + 異方性フィルタでは端のタップが
+        // 反対側の端へ回り込んで無関係な値が混ざる。Clamp + Linearで引く
+        std::unique_ptr<RHI::IRHISampler> m_LUTSampler;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_ObjectConstantBuffer;
 

@@ -19,6 +19,9 @@
 # 実行時ログ
 *.log
 
+# Pythonのバイトコードキャッシュ(Tools/以下のスクリプトが相互importすると生成される)
+__pycache__/
+
 # 大容量アセット・サンプルデータ(Engine/Source/Assets等のソースは含める)
 /Assets/
 /ThirdParty/SourceModels/
