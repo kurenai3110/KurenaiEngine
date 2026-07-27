@@ -84,7 +84,7 @@ git submodule update --init --recursive
 
 ### 2. assimpのビルド (CMake)
 
-glTF・FBXインポータのみを有効にした静的ライブラリとしてビルドします。**assimpはKurenaiEngineの
+glTF・FBX・OBJインポータのみを有効にした静的ライブラリとしてビルドします。**assimpはKurenaiEngineの
 いずれのDLLにもリンクされず、後述のKurenaiPacker.exe(アセット変換ツール)のビルドにのみ必要**です。
 KurenaiEngine本体・サンプルだけをビルドする場合はこの手順は不要です。
 
@@ -97,6 +97,7 @@ cmake -S ThirdParty/assimp -B ThirdParty/assimp/build -G "Visual Studio 17 2022"
   -DASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT=OFF ^
   -DASSIMP_BUILD_GLTF_IMPORTER=ON ^
   -DASSIMP_BUILD_FBX_IMPORTER=ON ^
+  -DASSIMP_BUILD_OBJ_IMPORTER=ON ^
   -DASSIMP_BUILD_ZLIB=ON ^
   -DASSIMP_NO_EXPORT=ON ^
   -DASSIMP_WARNINGS_AS_ERRORS=OFF
@@ -253,7 +254,8 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
 こちらはリポジトリに含まれています。
 
 - `Assets/Source/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
-- `Assets/Source/BistroMcGuire/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)のMorgan McGuire版OBJ配布([awesome-3d-meshes](https://github.com/Graphify-Labs/awesome-3d-meshes)経由)をglTFに変換したもの。変換手順は[実装者向けドキュメント](docs/Architecture.html)を参照
+- `Assets/Source/BistroMcGuire/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)のMorgan McGuire版OBJ配布([awesome-3d-meshes](https://github.com/Graphify-Labs/awesome-3d-meshes)経由、`ThirdParty/SourceModels/`内の7z/zipアーカイブを展開したもの)。
+  KurenaiPacker内蔵のassimp OBJインポータで直接パックする(`--scale 0.01`が必要)。詳細・展開手順は[実装者向けドキュメント](docs/Architecture.html)11章を参照
 - `Assets/Source/FurnaceTest/` — White Furnace Test用の金属球列(`metallic=1.0`、粗さ0.0〜1.0の11個)。
   一様な放射輝度のキューブマップ(`Assets/Packed/Skybox/UniformWhite.dds`)と合わせて
   `Tools/generate_furnace_test.py` で再生成できる
