@@ -40,7 +40,8 @@ namespace Kurenai::RHI
         void SetComputeTexture(uint32_t slot, IRHITexture* texture) override;
         void SetComputeSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0) override;
-        void SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0) override;
+        void SetComputeUnorderedAccessTextureCubeFace(
+            uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0, uint32_t cubeIndex = 0) override;
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 

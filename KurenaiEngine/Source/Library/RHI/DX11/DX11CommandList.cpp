@@ -211,10 +211,25 @@ namespace Kurenai::RHI
         m_BoundComputeUavSlotMask |= (1u << slot);
     }
 
-    void DX11CommandList::SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel)
+    void DX11CommandList::SetComputeUnorderedAccessTextureCubeFace(
+        uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel, uint32_t cubeIndex)
     {
+        if (!texture)
+        {
+            Core::Logger::Error("DX11", "SetComputeUnorderedAccessTextureCubeFace: テクスチャがnullptrのためバインドをスキップします");
+            return;
+        }
+
         auto* dx11Texture = static_cast<DX11Texture*>(texture);
-        ID3D11UnorderedAccessView* uavs[] = { dx11Texture->GetCubeUnorderedAccessView(face, mipLevel) };
+        // 範囲外指定の場合はDX11Texture側がログを出してnullptrを返す。ここでバインドを打ち切らず
+        // そのまま渡すと以降のディスパッチが古いUAVを掴んだままになるため、明示的に中断する
+        ID3D11UnorderedAccessView* uav = dx11Texture->GetCubeUnorderedAccessView(face, mipLevel, cubeIndex);
+        if (!uav)
+        {
+            return;
+        }
+
+        ID3D11UnorderedAccessView* uavs[] = { uav };
         m_Context->CSSetUnorderedAccessViews(slot, 1, uavs, nullptr);
         m_BoundComputeUavSlotMask |= (1u << slot);
     }

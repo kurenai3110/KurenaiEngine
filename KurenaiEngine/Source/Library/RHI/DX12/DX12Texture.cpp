@@ -1,6 +1,9 @@
 #include "DX12Texture.h"
 
+#include <string>
 #include <utility>
+
+#include "Core/Logger.h"
 
 #include "DX12Device.h"
 
@@ -14,7 +17,8 @@ namespace Kurenai::RHI
         uint32_t rtvIndex,
         uint32_t dsvIndex,
         uint32_t uavIndex,
-        std::vector<uint32_t> mipUavIndices)
+        std::vector<uint32_t> mipUavIndices,
+        uint32_t cubeCount)
         : m_Device(device)
         , m_Resource(std::move(resource))
         , m_CurrentState(initialState)
@@ -23,6 +27,7 @@ namespace Kurenai::RHI
         , m_DsvIndex(dsvIndex)
         , m_UavIndex(uavIndex)
         , m_MipUavIndices(std::move(mipUavIndices))
+        , m_CubeCount(cubeCount)
     {
     }
 
@@ -71,10 +76,28 @@ namespace Kurenai::RHI
         return m_Device->GetSrvCpuHeap()->GetCpuHandle(index);
     }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetCubeUavCpuHandle(uint32_t face, uint32_t mipLevel) const
+    D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetCubeUavCpuHandle(uint32_t face, uint32_t mipLevel, uint32_t cubeIndex) const
     {
-        const uint32_t index = m_MipUavIndices[mipLevel * kCubeFaceCount + face];
-        return m_Device->GetSrvCpuHeap()->GetCpuHandle(index);
+        if (face >= kCubeFaceCount || cubeIndex >= m_CubeCount)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "GetCubeUavCpuHandle: 範囲外の指定です (face=" + std::to_string(face) +
+                    ", cubeIndex=" + std::to_string(cubeIndex) + ", cubeCount=" + std::to_string(m_CubeCount) + ")");
+            return D3D12_CPU_DESCRIPTOR_HANDLE{ 0 };
+        }
+
+        const size_t flatIndex = (static_cast<size_t>(mipLevel) * m_CubeCount + cubeIndex) * kCubeFaceCount + face;
+        if (flatIndex >= m_MipUavIndices.size())
+        {
+            Core::Logger::Error(
+                "DX12",
+                "GetCubeUavCpuHandle: ミップレベルが範囲外です (mipLevel=" + std::to_string(mipLevel) +
+                    ", UAV数=" + std::to_string(m_MipUavIndices.size()) + ")");
+            return D3D12_CPU_DESCRIPTOR_HANDLE{ 0 };
+        }
+
+        return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_MipUavIndices[flatIndex]);
     }
 
     void DX12Texture::TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState)

@@ -8,6 +8,8 @@
 #include <chrono>
 #include <cstring>
 #include <cwchar>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "DX12Buffer.h"
@@ -1026,11 +1028,46 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHITexture> DX12Device::CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels)
     {
+        // cubeCount=1のときはSRVをTextureCubeArrayではなくTextureCubeとして張る(HLSL側の
+        // TextureCube宣言と一致させるため。IBLConvolve.hlsl等)
+        return CreateCubeTextureInternal(size, format, mipLevels, 1, false);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateMippedUAVTextureCubeArray(
+        uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount)
+    {
+        return CreateCubeTextureInternal(size, format, mipLevels, cubeCount, true);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateCubeTextureInternal(
+        uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray)
+    {
+        if (size == 0 || mipLevels == 0 || cubeCount == 0)
+        {
+            const std::string message =
+                "キューブマップUAVテクスチャの作成に失敗しました: サイズ・ミップ数・キューブ数はいずれも1以上である必要があります (size=" +
+                std::to_string(size) + ", mipLevels=" + std::to_string(mipLevels) + ", cubeCount=" + std::to_string(cubeCount) + ")";
+            Core::Logger::Error("DX12", message);
+            throw std::runtime_error(message);
+        }
+
+        // D3D12のTexture2D配列は最大2048スライス。キューブマップは1枚あたり6スライス消費する
+        const uint32_t arraySize = cubeCount * DX12Texture::kCubeFaceCount;
+        if (arraySize > D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION)
+        {
+            const std::string message =
+                "キューブマップUAVテクスチャの作成に失敗しました: 配列スライス数が上限を超えています (cubeCount=" +
+                std::to_string(cubeCount) + ", 必要スライス数=" + std::to_string(arraySize) +
+                ", 上限=" + std::to_string(D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) + ")";
+            Core::Logger::Error("DX12", message);
+            throw std::runtime_error(message);
+        }
+
         const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);
 
         const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
         const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Tex2D(
-            dxgiFormat, size, size, static_cast<UINT16>(DX12Texture::kCubeFaceCount), static_cast<UINT16>(mipLevels),
+            dxgiFormat, size, size, static_cast<UINT16>(arraySize), static_cast<UINT16>(mipLevels),
             1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
@@ -1038,41 +1075,57 @@ namespace Kurenai::RHI
             m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
             "キューブマップUAVテクスチャの作成に失敗しました");
 
-        // 全6面・全ミップを1枚のTextureCubeとして読むSRV(サンプリング側、DeferredLighting.hlsl等)
+        // 全6面・全ミップを1枚のTextureCube(配列版はTextureCubeArray)として読むSRV
+        // (サンプリング側、DeferredLighting.hlsl等)
         const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.TextureCube.MostDetailedMip = 0;
-        srvDesc.TextureCube.MipLevels = mipLevels;
+        if (asArray)
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+            srvDesc.TextureCubeArray.MostDetailedMip = 0;
+            srvDesc.TextureCubeArray.MipLevels = mipLevels;
+            srvDesc.TextureCubeArray.First2DArrayFace = 0;
+            srvDesc.TextureCubeArray.NumCubes = cubeCount;
+        }
+        else
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            srvDesc.TextureCube.MostDetailedMip = 0;
+            srvDesc.TextureCube.MipLevels = mipLevels;
+        }
         m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
 
-        // 面×ミップの組み合わせごとに単一配列スライス・単一ミップのUAV(Texture2DArray、要素数1)を張り、
-        // コンピュートシェーダーが面ごとに1回ずつディスパッチして書き込めるようにする(HLSL側は
-        // RWTexture2DArrayとして宣言する必要がある。IBLConvolve.hlsl参照)。mip*kCubeFaceCount+face の
-        // 順でフラットに格納する(DX12Texture::GetCubeUavCpuHandle参照)
+        // キューブ×面×ミップの組み合わせごとに単一配列スライス・単一ミップのUAV(Texture2DArray、要素数1)を
+        // 張り、コンピュートシェーダーが面ごとに1回ずつディスパッチして書き込めるようにする(HLSL側は
+        // RWTexture2DArrayとして宣言する必要がある。IBLConvolve.hlsl参照)。
+        // (mip*cubeCount + cubeIndex)*kCubeFaceCount + face の順でフラットに格納する
+        // (DX12Texture::GetCubeUavCpuHandle参照)
         std::vector<uint32_t> mipUavIndices;
-        mipUavIndices.reserve(mipLevels * DX12Texture::kCubeFaceCount);
+        mipUavIndices.reserve(static_cast<size_t>(mipLevels) * arraySize);
         for (uint32_t mip = 0; mip < mipLevels; ++mip)
         {
-            for (uint32_t face = 0; face < DX12Texture::kCubeFaceCount; ++face)
+            for (uint32_t cube = 0; cube < cubeCount; ++cube)
             {
-                const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
-                D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-                uavDesc.Format = dxgiFormat;
-                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-                uavDesc.Texture2DArray.MipSlice = mip;
-                uavDesc.Texture2DArray.FirstArraySlice = face;
-                uavDesc.Texture2DArray.ArraySize = 1;
-                m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
-                mipUavIndices.push_back(uavIndex);
+                for (uint32_t face = 0; face < DX12Texture::kCubeFaceCount; ++face)
+                {
+                    const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+                    uavDesc.Format = dxgiFormat;
+                    uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+                    uavDesc.Texture2DArray.MipSlice = mip;
+                    uavDesc.Texture2DArray.FirstArraySlice = cube * DX12Texture::kCubeFaceCount + face;
+                    uavDesc.Texture2DArray.ArraySize = 1;
+                    m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+                    mipUavIndices.push_back(uavIndex);
+                }
             }
         }
 
         return std::make_unique<DX12Texture>(
             this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
-            DX12Texture::kInvalid, std::move(mipUavIndices));
+            DX12Texture::kInvalid, std::move(mipUavIndices), cubeCount);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth)

@@ -43,6 +43,8 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHITexture> CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels) override;
         std::unique_ptr<IRHITexture> CreateUAVTextureCube(uint32_t size, Format format) override;
         std::unique_ptr<IRHITexture> CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels) override;
+        std::unique_ptr<IRHITexture> CreateMippedUAVTextureCubeArray(
+            uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount) override;
         std::unique_ptr<IRHITexture> CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f) override;
         std::unique_ptr<IRHISamplerSet> CreateSamplerSet(const SamplerDesc* descs, uint32_t count) override;
         IRHICommandList* GetImmediateCommandList() override;
@@ -98,6 +100,11 @@ namespace Kurenai::RHI
     private:
         void CreateRootSignature();
         void CreateComputeRootSignature();
+        // CreateMippedUAVTextureCube(単一キューブ、SRVはTextureCube)と
+        // CreateMippedUAVTextureCubeArray(配列、SRVはTextureCubeArray)の共通実装。
+        // 両者はSRVの次元とキューブ枚数以外まったく同じ手順のため1箇所にまとめている
+        std::unique_ptr<IRHITexture> CreateCubeTextureInternal(
+            uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray);
         // 現在のフレームスロット(m_FrameIndex)のコマンドアロケータ/リストを開き直す
         void ResetCommandList();
         Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(uint64_t sizeInBytes);

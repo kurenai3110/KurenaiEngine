@@ -62,6 +62,18 @@ namespace Kurenai::RHI
         // 異なるラフネスで畳み込む)のように、面×ミップの組み合わせごとに個別のUAV書き込みが
         // 必要な場合に使う
         virtual std::unique_ptr<IRHITexture> CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels) = 0;
+        // CreateMippedUAVTextureCubeのキューブマップ配列版(SRVはTextureCubeArray)。
+        // リフレクションプローブのように「同じ解像度のキューブマップを複数枚持ち、シェーダー側で
+        // ピクセルごとに異なる番号のキューブを選んでサンプルしたい」場合に使う。HLSLは別々の
+        // TextureCubeリソースを動的に添字参照できないため(カスケードシャドウマップが
+        // ShadowMap0〜3を個別スロットに分けているのと同じ制約)、複数プローブを1つの
+        // TextureCubeArrayにまとめる必要がある。
+        //
+        // 単一キューブのCreateMippedUAVTextureCubeとはSRVの次元が異なる(TextureCube /
+        // TextureCubeArray)ため、HLSL側の宣言と一致する方を選んで使い分けること。
+        // 書き込みはSetComputeUnorderedAccessTextureCubeFaceのcubeIndex引数でキューブを選ぶ
+        virtual std::unique_ptr<IRHITexture> CreateMippedUAVTextureCubeArray(
+            uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount) = 0;
         // clearDepth: このテクスチャの最適クリア値(DX12のD3D12_CLEAR_VALUE用)。実際のクリア値は
         // IRHICommandList::ClearDepthで毎回明示的に指定するが、DX12は生成時に宣言した値と
         // 一致しないと高速クリアパスが使えないため、Reverse-Zで0.0fクリアするテクスチャはここも合わせる
