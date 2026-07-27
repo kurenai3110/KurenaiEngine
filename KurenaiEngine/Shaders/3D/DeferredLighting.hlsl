@@ -56,7 +56,6 @@ TextureCube PrefilteredEnvTexture : register(t9);
 // split-sum近似の第2項、BRDF積分LUT(x=NdotV, y=ラフネス。BRDFLUT.hlslで生成、方向性を持たない
 // (NdotV, ラフネス)の2Dルックアップテーブルのため、これだけは通常のTexture2Dのまま)
 Texture2D BRDFLUTTexture : register(t10);
-SamplerState DefaultSampler : register(s0);
 
 // IBL(split-sum近似、Karis 2013)による環境光の評価。ao(SSAO/SSILの遮蔽率)は拡散項へそのまま、
 // 鏡面項へはLagarde & de Rousiers 2014のスペキュラオクルージョン近似を通してから適用する
@@ -67,7 +66,7 @@ float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roug
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
 
     // --- 拡散IBL ---
-    const float3 irradiance = IrradianceTexture.Sample(DefaultSampler, N).rgb;
+    const float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")。粗い面ほど
     // 視線に対するフレネルの立ち上がりが緩やかになる近似で、鏡面に回らない分をkdへ反映する
     const float3 fresnelRoughness = F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
@@ -78,8 +77,8 @@ float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roug
     const float3 R = reflect(-V, N);
     // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(ミップ数-1、KurenaiEngine3D側で設定)
     const float mipLevel = roughness * ShadowParams.y;
-    const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(DefaultSampler, R, mipLevel).rgb;
-    const float2 brdf = BRDFLUTTexture.Sample(BRDFLUTSampler, float2(NdotV, roughness)).rg;
+    const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
+    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)。
     // ShadowParams.w = ImGuiトグル(0で無効=倍率1.0)
     const float3 specularIBL =
@@ -121,7 +120,7 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float depth = DepthTexture.Sample(DefaultSampler, input.UV).r;
+    float depth = DepthTexture.Sample(DataSampler, input.UV).r;
     if (depth <= 0.0f)
     {
         // 何も描かれなかった背景ピクセル: カメラからそのピクセル方向への視線ベクトルで
@@ -129,28 +128,28 @@ float4 PSMain(PSInput input) : SV_TARGET
         // Reverse-Zのため遠平面(=背景)はNDC z=0.0付近になる
         float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
         float3 rayDir = normalize(farPoint - CameraPosition.xyz);
-        float3 skyColor = SkyboxTexture.Sample(DefaultSampler, rayDir).rgb;
+        float3 skyColor = SkyboxTexture.Sample(MaterialSampler, rayDir).rgb;
         // 夜は空を暗い紺色へ落とし込む(スカイボックス自体は昼のテクスチャ固定のため)
         const float3 kNightSkyColor = float3(0.01f, 0.012f, 0.02f);
         skyColor = lerp(kNightSkyColor, skyColor, AmbientColor.a);
         return float4(skyColor, 1.0f);
     }
 
-    float3 albedo = AlbedoTexture.Sample(DefaultSampler, input.UV).rgb;
-    float2 material = MaterialTexture.Sample(DefaultSampler, input.UV).rg;
+    float3 albedo = AlbedoTexture.Sample(ColorSampler, input.UV).rgb;
+    float2 material = MaterialTexture.Sample(DataSampler, input.UV).rg;
     float metallic = material.r;
     float roughness = material.g;
     float3 diffuseColor = albedo * (1.0f - metallic);
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 N = OctDecode(NormalTexture.Sample(DefaultSampler, input.UV).xy);
+    float3 N = OctDecode(NormalTexture.Sample(DataSampler, input.UV).xy);
     float3 V = normalize(CameraPosition.xyz - worldPos);
 
-    float4 aoSample = AOTexture.Sample(DefaultSampler, input.UV);
+    float4 aoSample = AOTexture.Sample(ColorSampler, input.UV);
     float ao = aoSample.a;
     float3 indirectLight = aoSample.rgb; // SSIL(Visibility Bitmask)使用時のみ非ゼロ。周囲のサーフェスからの間接拡散光
-    float3 directLight = DirectLightTexture.Sample(DefaultSampler, input.UV).rgb; // DirectLighting.hlslで計算済み(シャドウ適用済み)
-    float3 emissive = EmissiveTexture.Sample(DefaultSampler, input.UV).rgb;
+    float3 directLight = DirectLightTexture.Sample(ColorSampler, input.UV).rgb; // DirectLighting.hlslで計算済み(シャドウ適用済み)
+    float3 emissive = EmissiveTexture.Sample(ColorSampler, input.UV).rgb;
 
     // ShadowParams.z = IBL強度倍率(0以下ならEnable IBL無効)。無効時はIBL導入以前と同じ、
     // 定数色(昼夜サイクルで変化するAmbientColor.rgb)による簡易アンビエントにフォールバックする

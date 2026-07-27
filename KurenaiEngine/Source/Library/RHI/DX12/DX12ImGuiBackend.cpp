@@ -75,7 +75,7 @@ namespace Kurenai::RHI
 
         // ImGui_ImplDX12_NewFrame()はテクスチャ管理のため内部でSetDescriptorHeapsを呼び、
         // シェーダ可視ヒープの割り当てをImGui自身のヒープへ切り替えてしまう。以降の描画が
-        // SetTexture/SetSamplerで使うヒープを正しく参照できるよう、ここで明示的に戻す
+        // SetTexture/SetSamplerSetで使うヒープを正しく参照できるよう、ここで明示的に戻す
         ID3D12DescriptorHeap* heaps[] = { m_Device->GetShaderVisibleSrvHeap()->GetHeap(), m_Device->GetShaderVisibleSamplerHeap()->GetHeap() };
         m_Device->GetCommandList()->SetDescriptorHeaps(2, heaps);
     }

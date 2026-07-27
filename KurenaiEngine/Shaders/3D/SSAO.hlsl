@@ -4,6 +4,7 @@
 // SSAOとSSIL(Visibility Bitmask)は同じRGBAフォーマット(rgb=間接拡散光, a=遮蔽率)を出力するため、
 // このブラーはSSIL_VisibilityBitmask.hlslのブラーパスとしても共用する
 #include "NormalEncoding.hlsli"
+#include "Samplers.hlsli"
 
 static const float PI = 3.14159265359f;
 static const int kSSAOKernelSize = 16;
@@ -30,7 +31,6 @@ cbuffer SSAOConstants : register(b1)
 // PSMainではNormal(t0)/Depth(t1)、PSMainBlurではSSAO Raw(t0)をバインドして使い回す
 Texture2D Texture0 : register(t0);
 Texture2D Texture1 : register(t1);
-SamplerState DefaultSampler : register(s0);
 
 struct PSInput
 {
@@ -66,7 +66,7 @@ float Hash12(float2 p)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float depth = Texture1.Sample(DefaultSampler, input.UV).r;
+    float depth = Texture1.Sample(DataSampler, input.UV).r;
     if (depth <= 0.0f)
     {
         // 背景(スカイ)は遮蔽なし・間接光なし(SSAOは間接光を計算しないのでrgbは常に0)
@@ -75,7 +75,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 normalWorld = OctDecode(Texture0.Sample(DefaultSampler, input.UV).xy);
+    float3 normalWorld = OctDecode(Texture0.Sample(DataSampler, input.UV).xy);
 
     float3 viewPos = mul(float4(worldPos, 1.0f), View).xyz;
     float3 viewNormal = normalize(mul(normalWorld, (float3x3)View));
@@ -109,7 +109,7 @@ float4 PSMain(PSInput input) : SV_TARGET
             continue;
         }
 
-        float sampleDepth = Texture1.Sample(DefaultSampler, sampleUV).r;
+        float sampleDepth = Texture1.Sample(DataSampler, sampleUV).r;
         if (sampleDepth <= 0.0f)
         {
             continue;
@@ -146,9 +146,12 @@ float4 PSMainBlur(PSInput input) : SV_TARGET
         for (int y = -2; y <= 1; ++y)
         {
             // 4x4(偶数)カーネルなので整数オフセット(-2..1)のままだと中心が半テクセル
-            // 左上へ偏る。+0.5してオフセットを{-1.5,-0.5,0.5,1.5}にし、中心をピクセル中心に揃える
+            // 左上へ偏る。+0.5してオフセットを{-1.5,-0.5,0.5,1.5}にし、中心をピクセル中心に揃える。
+            // offsetUVは画面端で[0,1]をはみ出すが、ColorSamplerはClampなので端のテクセルが
+            // 引き伸ばされるだけで済む(Wrapのサンプラーで引くと反対側の端のAO/GIが混ざり、
+            // 画面の四辺2px幅に無関係な遮蔽が滲む)
             float2 offsetUV = input.UV + (float2(x, y) + 0.5f) * texelSize;
-            sum += Texture0.Sample(DefaultSampler, offsetUV);
+            sum += Texture0.Sample(ColorSampler, offsetUV);
         }
     }
 

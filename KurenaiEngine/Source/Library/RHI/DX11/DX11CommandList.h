@@ -22,7 +22,7 @@ namespace Kurenai::RHI
         void SetIndexBuffer(IRHIBuffer* buffer) override;
         void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetTexture(uint32_t slot, IRHITexture* texture) override;
-        void SetSampler(uint32_t slot, IRHISampler* sampler) override;
+        void SetSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
@@ -31,7 +31,7 @@ namespace Kurenai::RHI
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
         void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeTexture(uint32_t slot, IRHITexture* texture) override;
-        void SetComputeSampler(uint32_t slot, IRHISampler* sampler) override;
+        void SetComputeSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0) override;
         void SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0) override;
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;

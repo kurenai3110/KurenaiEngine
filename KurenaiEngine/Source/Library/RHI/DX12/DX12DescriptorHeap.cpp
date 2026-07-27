@@ -35,6 +35,28 @@ namespace Kurenai::RHI
         return m_NextIndex++;
     }
 
+    uint32_t DX12DescriptorHeap::AllocateBlock(uint32_t count)
+    {
+        if (count == 0)
+        {
+            Core::Logger::Error("DX12", "AllocateBlock: 確保するディスクリプタ数が0です");
+            throw std::runtime_error("AllocateBlockに0が指定されました");
+        }
+
+        if (m_NextIndex + count > m_Capacity)
+        {
+            const std::string message = "ディスクリプタヒープの容量を超えました(要求: " + std::to_string(count) +
+                                        ", 残り: " + std::to_string(m_Capacity - m_NextIndex) +
+                                        ", 容量: " + std::to_string(m_Capacity) + ")";
+            Core::Logger::Error("DX12", message);
+            throw std::runtime_error(message);
+        }
+
+        const uint32_t base = m_NextIndex;
+        m_NextIndex += count;
+        return base;
+    }
+
     void DX12DescriptorHeap::Free(uint32_t index)
     {
         m_FreeList.push_back(index);

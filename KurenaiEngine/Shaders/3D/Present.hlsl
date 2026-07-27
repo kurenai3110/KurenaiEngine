@@ -17,6 +17,7 @@
 //         見回すように(背景スカイの表示と同じ要領でカメラ位置→ピクセル方向のレイを再構成して)
 //         サンプルする。右クリックドラッグで視点を回せば球面全体を確認できる
 #include "NormalEncoding.hlsli"
+#include "Samplers.hlsli"
 
 cbuffer FrameConstants : register(b0)
 {
@@ -42,7 +43,6 @@ Texture2D SourceTexture : register(t0);
 // IBLのIrradiance/PrefilteredEnv(Mode 9)専用。それ以外のModeでは未使用(t0と違いTextureCube
 // でなければならないため、専用の登録スロットを分けている)
 TextureCube DebugCubeTexture : register(t1);
-SamplerState DefaultSampler : register(s0);
 
 struct PSInput
 {
@@ -72,14 +72,15 @@ float4 PSMain(PSInput input) : SV_TARGET
     if (Mode == 6)
     {
         // Hi-Zはミップごとに解像度が異なるため、画面スケールから決まる自動ミップ選択(Sample)ではなく
-        // 明示的に指定したミップ(MipLevel)を必ず読む
-        float depth = SourceTexture.SampleLevel(DefaultSampler, input.UV, MipLevel).r;
+        // 明示的に指定したミップ(MipLevel)を必ず読む。
+        // 深度なのでDataSamplerで引き、テクセルの値をそのまま可視化する
+        float depth = SourceTexture.SampleLevel(DataSampler, input.UV, MipLevel).r;
         return float4(depth, depth, depth, 1.0f);
     }
 
     if (Mode == 8)
     {
-        float3 color = SourceTexture.SampleLevel(DefaultSampler, input.UV, MipLevel).rgb;
+        float3 color = SourceTexture.SampleLevel(ColorSampler, input.UV, MipLevel).rgb;
         color = color / (color + 1.0f);
         color = pow(color, 1.0f / 2.2f);
         return float4(color, 1.0f);
@@ -91,13 +92,21 @@ float4 PSMain(PSInput input) : SV_TARGET
         // レイを再構成する。Reverse-Zのため遠平面(=背景)はNDC z=0.0f付近になる
         float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
         float3 rayDir = normalize(farPoint - CameraPosition.xyz);
-        float3 color = DebugCubeTexture.SampleLevel(DefaultSampler, rayDir, MipLevel).rgb;
+        float3 color = DebugCubeTexture.SampleLevel(MaterialSampler, rayDir, MipLevel).rgb;
         color = color / (color + 1.0f);
         color = pow(color, 1.0f / 2.2f);
         return float4(color, 1.0f);
     }
 
-    float4 sourceColor = SourceTexture.Sample(DefaultSampler, input.UV);
+    // Mode 1/2/5は深度、Mode 7はオクタヘドラルエンコードされた法線を読むため、補間されると
+    // ジオメトリの縁で実在しない値になる(Mode 7は縁がにじみ、Mode 2は再構成位置がずれる)。
+    // これらだけDataSamplerで引く。それ以外は色バッファなので、レターボックスの拡縮で
+    // ブロック状にならないようColorSamplerで引く。
+    // Modeは定数バッファ由来で波面内で一様のため、この分岐のコストは実質ゼロ
+    const bool readsRawData = (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7);
+    float4 sourceColor = readsRawData
+        ? SourceTexture.Sample(DataSampler, input.UV)
+        : SourceTexture.Sample(ColorSampler, input.UV);
 
     if (Mode == 7)
     {

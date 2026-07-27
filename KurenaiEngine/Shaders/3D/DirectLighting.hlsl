@@ -66,7 +66,6 @@ Texture2D ShadowMap3 : register(t7);
 // Ess = brdf.x + brdf.y を必要とするためバインドしている。
 // t8はライトリスト(StructuredBuffer<GPULight>)が占有しているためt9に置く
 Texture2D BRDFLUTTexture : register(t9);
-SamplerState DefaultSampler : register(s0);
 
 struct PSInput
 {
@@ -154,7 +153,7 @@ float ComputeShadowFactor(Texture2D shadowMap, float4x4 cascadeViewProj, float3 
         for (int bx = -kBlockerHalf; bx <= kBlockerHalf; ++bx)
         {
             const float2 offset = float2(bx, by) * (lightSize / float(kBlockerTaps));
-            const float sampleDepth = shadowMap.Sample(DefaultSampler, shadowUV + offset).r;
+            const float sampleDepth = shadowMap.Sample(DataSampler, shadowUV + offset).r;
             if (sampleDepth < compareDepth)
             {
                 blockerDepthSum += sampleDepth;
@@ -186,7 +185,7 @@ float ComputeShadowFactor(Texture2D shadowMap, float4x4 cascadeViewProj, float3 
         for (int px = -kPCFHalf; px <= kPCFHalf; ++px)
         {
             const float2 offset = float2(px, py) * (filterRadius / float(kPCFTaps));
-            const float sampleDepth = shadowMap.Sample(DefaultSampler, shadowUV + offset).r;
+            const float sampleDepth = shadowMap.Sample(DataSampler, shadowUV + offset).r;
             shadowSum += (sampleDepth < compareDepth) ? 0.0f : 1.0f;
         }
     }
@@ -323,7 +322,7 @@ float3 EvaluateLight(
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float depth = DepthTexture.Sample(DefaultSampler, input.UV).r;
+    float depth = DepthTexture.Sample(DataSampler, input.UV).r;
     if (depth <= 0.0f)
     {
         // 背景(スカイ)には直接光はない(スカイボックス自体はDeferredLightingパス側で表示する)
@@ -332,9 +331,9 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 albedo = AlbedoTexture.Sample(DefaultSampler, input.UV).rgb;
-    float3 N = OctDecode(NormalTexture.Sample(DefaultSampler, input.UV).xy);
-    float2 material = MaterialTexture.Sample(DefaultSampler, input.UV).rg;
+    float3 albedo = AlbedoTexture.Sample(ColorSampler, input.UV).rgb;
+    float3 N = OctDecode(NormalTexture.Sample(DataSampler, input.UV).xy);
+    float2 material = MaterialTexture.Sample(DataSampler, input.UV).rg;
     float metallic = material.r;
     float roughness = material.g;
 
@@ -346,7 +345,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // F0のlerpはEvaluateDirectBRDF内と同じ式(この式はコードベース内の複数箇所に登場するため
     // ここだけ引数化して特別扱いはしない)
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    const float2 brdf = BRDFLUTTexture.Sample(BRDFLUTSampler, float2(NdotV, roughness)).rg;
+    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
     const float3 energyCompensation = SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
 
     float3 directLight = float3(0.0f, 0.0f, 0.0f);

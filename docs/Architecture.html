@@ -272,8 +272,10 @@ G-Bufferにはエミッシブ(自発光)専用のレンダーターゲットも�
 <code>MASK</code>のマテリアルのみ、<code>alphaCutoff</code>(既定0.5)でベースカラーのアルファを
 <code>clip()</code>するアルファカットアウトに対応しています。<code>alphaMode=BLEND</code>のマテリアルは
 ジオメトリパスには一切描画されず、専用の半透明フォワードパスへ回されます(14章参照)。FBX/OBJ等、
-glTFのalphaMode拡張情報を持たない形式では常に不透明として扱います。RHIのデフォルトサンプラーも異方性16xフィルタリングを
-既定にしており、浅い角度で見る床・路面などのボケを抑えています(<code>RHI::SamplerDesc</code>)。
+glTFのalphaMode拡張情報を持たない形式では常に不透明として扱います。ジオメトリパスがマテリアルテクスチャを読むときは
+異方性16x + Wrapのサンプラー(<code>MaterialSamplers</code>セットの<code>s0</code>)を使い、浅い角度で見る
+床・路面などのボケを抑えています。サンプラーはパスの用途ごとにセット単位でバインドする方式で、
+役割ごとの使い分けは<code>Shaders/3D/Samplers.hlsli</code>、設計理由は14.2.2節を参照してください。
 </p>
 <p>
 SceneColor(最終合成パスの出力)はHDR(<code>R16G16B16A16_Float</code>)で保持し、トーンマッピングは
@@ -1163,10 +1165,9 @@ roughness = 1の面にroughness &asymp; 0の値が混ざっていた</b>。こ�
 LUTを読む3パス(DirectLight / Lighting / Transparent)で<code>s1</code>へバインドする。
 異方性を外してLinearにしているのは、LUTに対する異方性フィルタリングは
 「画面空間の勾配ぶんだけLUT上の広い範囲を平均する」だけで意味が無く、端をまたぐ距離を
-広げるだけだからである。シェーダー側の宣言
-(<code>SamplerState BRDFLUTSampler : register(s1);</code>)は
-<code>SpecularEnergy.hlsli</code>に置き、「LUTを引く側は必ずこのサンプラーを使う」ことを
-共有ヘッダーで担保している。
+広げるだけだからである。シェーダー側の宣言は共有ヘッダーに置き、「LUTを引く側は必ず
+このサンプラーを使う」ことを構造で担保している(この宣言はのちに14.2.2節の
+<code>Samplers.hlsli</code>へ移り、名前も<code>ColorSampler</code>になった)。
 </p>
 <p>
 DX12はサンプラーもディスクリプタテーブル経由のため、<code>kSamplerSlotCount</code>を
@@ -1174,7 +1175,8 @@ DX12はサンプラーもディスクリプタテーブル経由のため、<cod
 宣言しないシェーダーの描画でもスロット1に有効なディスクリプタが必要になる
 (未初期化ディスクリプタがテーブルに含まれると動作は未定義)。上位層の呼び出し漏れに
 依存しないよう、<code>DX12Device</code>の初期化時に全スロットを既定のサンプラーで
-埋めてから上位層が必要なスロットだけ上書きする形にした。
+埋めてから上位層が必要なスロットだけ上書きする形にした
+(この「ヒープの同じスロットを上書きする」やり方自体があとで問題になる。14.2.2節参照)。
 </p>
 <p>
 <b>修正後の実測</b>(White Furnace Test、補正OFF、球中心のHDR値を背景で割った比。
@@ -1197,12 +1199,129 @@ Reinhardトーンマップとガンマの逆変換をかけて算出):
 補正OFFの絵を観察して初めて表面化した。
 </p>
 <p>
-<b>残る既知の課題</b>: 汎用サンプラー(<code>m_Sampler</code>)は依然としてWrapのまま、
-シャドウマップやフルスクリーンパスの中間テクスチャにも使われている。これらもUVの端が
-定義域の端であるため、原理的には同じ回り込みが起きうる(現時点で目に見える不具合は
-確認していない)。アドレッシングを選べる仕組みは今回入ったので、対処するならサンプラーを
-用途ごとに分けるだけでよい。
+<b>この時点で残っていた課題</b>: 汎用サンプラー(<code>m_Sampler</code>)は依然としてWrapのまま、
+シャドウマップやフルスクリーンパスの中間テクスチャにも使われていた。これらもUVの端が
+定義域の端であるため、原理的には同じ回り込みが起きうる。次の14.2.2節がこれに対処している。
 </p>
+
+<h4>14.2.2 サンプラーを用途ごとに分ける(サンプラーセット)</h4>
+<p>
+14.2.1節でLUTだけを切り出した後も、<b>残りのテクスチャはすべて<code>s0</code>の
+「異方性16x + Wrap」1本で読まれていた</b>。全HLSLシェーダのテクスチャ×サンプラー対応を
+洗い出したところ、次の3種類の不整合が見つかった。
+</p>
+<ul>
+<li><b>補間してはいけない値をバイリニア補間していた</b> ―― 深度、オクタヘドラルエンコードされた
+法線、metallic/roughness。シルエットを跨いだタップが実在しない中間値を作り、そこから
+再構成したワールド座標・法線がどのジオメトリにも対応しない値になる。
+<code>SSIL_VisibilityBitmask.hlsl</code>だけは<code>SnapToTexel</code>(UVをテクセル中心へ
+丸める)という手動の回避策を持っていたが、<code>SSAO.hlsl</code>・<code>SSR.hlsl</code>には
+無く、補間された深度をそのまま位置再構成に使っていた。</li>
+<li><b>Wrapによる画面端の折り返し</b> ―― <code>SSAO.hlsl</code>の<code>PSMainBlur</code>は
+4x4カーネルのタップに境界チェックが無く、画面の四辺2px幅で<b>反対側の端のAO/GIが
+混ざっていた</b>。<code>Present.hlsl</code>・<code>Tonemap.hlsl</code>も同様。
+(<code>SSAO::PSMain</code>・SSIL・SSRの本体は明示的に境界チェックしていたため実害は無い)</li>
+<li><b>シャドウマップ</b> ―― 深度を補間してから比較しており、PCF本来の「比較してから平均」と
+順序が逆。ブロッカー平均深度もシルエット跨ぎで実在しない値になる。加えてNDC境界チェックは
+中心UVにしか効いておらず、PCFのタップは<code>[0,1]</code>を超えてシャドウマップの
+反対端を読みうる。</li>
+</ul>
+
+<h5>なぜ「サンプラーを1個ずつ差し替える」方式が採れないか</h5>
+<p>
+用途ごとに正しいサンプラーを使うには、パスごとに<code>s0</code>の中身を変えればよさそうに見える。
+しかし<b>この方式はDX12で機能しない</b>。<code>DX12CommandList::SetSampler</code>は
+コマンドリストに何も記録せず、シェーダ可視サンプラーヒープのスロットへ
+<code>CopyDescriptorsSimple</code>で直接書き込んでいた。このエンジンは1フレーム分の
+コマンドをすべて記録してからフレーム末に1回だけ<code>ExecuteCommandLists</code>する設計
+(<code>DX12Device.h</code>参照)なので、時系列は次のようになる。
+</p>
+<pre>
+[CPU 記録フェーズ]
+  AOパス      : SetSampler(0, Point)   → ヒープslot0 = Point        … Draw を記録
+  Tonemapパス : SetSampler(0, Linear)  → ヒープslot0 = Linear(上書き) … Draw を記録
+  ExecuteCommandList()            ← ここで初めてGPUが動き出す
+
+[GPU 実行フェーズ]  ヒープslot0 の中身は Linear ひとつだけ
+  AOの Draw      → ルートパラメータ3 → slot0 → Linear   ← 意図した Point ではない
+  Tonemapの Draw → ルートパラメータ3 → slot0 → Linear
+</pre>
+<p>
+<b>そのフレームの全パスが「最後に書かれたサンプラー」を見る。</b>競合状態ではなく決定的にこうなり、
+パスの実行順を変えるだけで結果が変わる。しかもDX11は即時コンテキストへ
+<code>PSSetSamplers</code>を発行するため正しく動いてしまい、<b>DX11とDX12で絵が食い違う</b>。
+これはSRVテーブルをブロック単位のリング払い出しにしている理由(<code>DX12Device.h</code>の
+<code>AllocateSrvTableBlock</code>のコメント)とまったく同じ現象で、SRVは対策済み・
+サンプラーは未対策という状態だった。当時これがバグとして表面化していなかったのは、
+<code>s0</code>には常に<code>m_Sampler</code>、<code>s1</code>には常に<code>m_LUTSampler</code>しか
+書かれず、上書きしても中身が変わらなかったからである。
+</p>
+<p>
+SRVと同様にサンプラーテーブルもリング払い出しにする案は採らなかった。シェーダ可視
+サンプラーヒープはD3D12の仕様上<b>最大2048ディスクリプタ</b>
+(<code>D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE</code>。CBV/SRV/UAV側は1,000,000)で、
+SRVリングの現行サイズをそのまま移すと
+<code>3 &times; kMaxSrvTableBlocksPerFrame(4096) &times; kFrameCount(2) = 24,576</code>となり
+上限の12倍でヒープを作成すらできない。粒度を落とせば容量自体は収まるが、専用の予算管理を
+新たに書くことになる。
+</p>
+
+<h5>採った方式: 不変のサンプラーセット + テーブル先頭の切り替え</h5>
+<p>
+初期化時に<b>用途ごとのサンプラーの組(セット)をヒープ上の連続ブロックとして焼き込み、
+以後一切書き換えない</b>。パスごとに行うのはルートディスクリプタテーブルの先頭位置を
+差し替えることだけなので、上書きハザードが原理的に起きない。容量管理も要らない
+(セットは2つで、2048に対して十分小さい)。
+</p>
+<p>
+シェーダは<b>役割名</b>でサンプラーを宣言し、どの実体が入るかはC++側が決める
+(<code>Shaders/3D/Samplers.hlsli</code>)。
+</p>
+<table>
+<tr><th>セット</th><th><code>s0</code> MaterialSampler</th><th><code>s1</code> ColorSampler</th><th><code>s2</code> DataSampler</th></tr>
+<tr><td><code>MaterialSamplers</code></td><td><b>Anisotropic 16x + Wrap</b></td><td>Linear + Clamp</td><td>Point + Clamp</td></tr>
+<tr><td><code>ScreenSpaceSamplers</code></td><td><b>Linear + Clamp</b></td><td>Linear + Clamp</td><td>Point + Clamp</td></tr>
+</table>
+<p>
+<code>MaterialSamplers</code>はG-Buffer・半透明フォワード・スプライト・IBL畳み込みが、
+<code>ScreenSpaceSamplers</code>はそれ以外のフルスクリーンパスが使う。
+<b><code>s0</code>の実体がセット間で異なるのがこの方式の要点</b>で、スクリーン空間パスには
+Wrapのサンプラーが1つもバインドされない ―― シェーダ側で役割を選び違えても、
+画面端でUVが反対側へ回り込む不具合が構造的に起きない。フィルタ品質(異方性の倍率など)を
+シェーダを触らずC++側だけで調整できるようにもなった。
+</p>
+<p>
+スロット数が3必要なのは<code>Transparent.hlsl</code>が「マテリアル(Aniso+Wrap)・
+シャドウマップ(Point+Clamp)・BRDF積分LUT(Linear+Clamp)」を1回のピクセルシェーダ実行で
+同時に使うため。RHIは<code>IRHISampler</code>+<code>CreateDefaultSampler</code>+
+<code>SetSampler</code>(=上書きハザードを持つAPIそのもの)を廃し、
+<code>IRHISamplerSet</code>+<code>CreateSamplerSet</code>+<code>SetSamplerSet</code>へ
+置き換えた。<code>CreateSamplerSet</code>はDX12実装がシェーダ可視ヒープへ直接書き込むため、
+<b>描画開始前(初期化時)にのみ呼ぶ</b>という制約がある。
+</p>
+<p>
+<code>SSIL_VisibilityBitmask.hlsl</code>の<code>SnapToTexel</code>は<b>削除せず残した</b>。
+深度サンプル自体は<code>DataSampler</code>でポイント化されるが、<code>sampleUV</code>は
+<code>ReconstructWorldPos</code>にも渡しており、スナップを外すと「深度はテクセル中心の値なのに
+NDC-xyはテクセル中心からずれた位置」という不整合が生じるため。
+</p>
+<p>
+<b>検証結果</b>(Bistro Exterior、Debug、DX11/DX12それぞれ起動直後の同一カメラ):
+</p>
+<ul>
+<li><b>DX11 / DX12の一致</b>: 3D描画領域の画素差分は17px(最大差18)。<b>修正前のベースラインは
+35px(最大差18)</b>で、同じ座標に同じ差分が出ている ―― つまりこの残差は本変更とは無関係な
+既存のバックエンド間差分であり、本変更でむしろ半減した。パスごとにセットを切り替える機構が
+DX12で正しく効いていることの裏付けでもある(効いていなければ大きく食い違う)。</li>
+<li><b>変更の影響</b>: 修正前後の画素差分はDX11で96,022px・DX12で96,015pxと<b>ほぼ同数</b>。
+両バックエンドに同じ変更が同じように効いている。</li>
+<li><b>画面端の折り返し解消</b>: 描画領域の右端・下端2px幅の変化率と平均差は
+22.5% / 4.62、24.1% / 1.99(最大差55 / 25)で、内側の参考領域(5.9% / 1.0、最大差1)より
+明確に大きい。SSAOブラーの回り込みが消えたことに対応する。</li>
+<li><b>回帰なし</b>: White Furnace Test(補正OFF)で球の中心に斑点は出ず、ラフネス方向に
+滑らかな単調グラデーションのまま(BRDF積分LUTのサンプラーが14.2.1節の状態を保っている)。
+Presentのデバッグ表示Mode 7(法線)も正しく描画される。DX12デバッグレイヤの警告も無し。</li>
+</ul>
 
 <h3>14.3 RHIへの追加</h3>
 <p>
@@ -1225,11 +1344,11 @@ Reinhardトーンマップとガンマの逆変換をかけて算出):
 <li><code>SetComputeUnorderedAccessTextureCubeFace(slot, texture, face, mipLevel)</code> —
 上記のキューブマップの指定した面・ミップだけを<code>RWTexture2DArray</code>(要素数1)として
 コンピュートシェーダーへバインドする。</li>
-<li><code>SetComputeSampler(slot, sampler)</code> — TextureCube(スカイボックス)をコンピュート
+<li><code>SetComputeSamplerSet(samplerSet)</code> — TextureCube(スカイボックス)をコンピュート
 シェーダーから<code>SampleLevel</code>する際に必要。DX11はグラフィックス/コンピュートで
 サンプラースロットが独立しているため<code>CSSetSamplers</code>を明示的に呼ぶ必要がある一方、
-DX12はグラフィックス・コンピュート共通のs0固定共有ヒープを使う設計(3.2章参照)のため実装は
-<code>SetSampler</code>への単純な委譲になる。</li>
+DX12はグラフィックス・コンピュートで同じサンプラーヒープを共有するため、違いは
+ルート引数を設定する先(グラフィックス用/コンピュート用)だけになる(14.2.2節参照)。</li>
 </ul>
 
 <h3>14.4 テクスチャレジスタ・DX12のkTextureSlotCount・デバッグ表示</h3>

@@ -80,7 +80,6 @@ Texture2D ShadowMap3 : register(t7);
 TextureCube IrradianceTexture : register(t9);
 TextureCube PrefilteredEnvTexture : register(t10);
 Texture2D BRDFLUTTexture : register(t11);
-SamplerState DefaultSampler : register(s0);
 
 struct VSInput
 {
@@ -169,7 +168,7 @@ float ComputeShadowFactor(Texture2D shadowMap, float4x4 cascadeViewProj, float3 
         for (int bx = -kBlockerHalf; bx <= kBlockerHalf; ++bx)
         {
             const float2 offset = float2(bx, by) * (lightSize / float(kBlockerTaps));
-            const float sampleDepth = shadowMap.Sample(DefaultSampler, shadowUV + offset).r;
+            const float sampleDepth = shadowMap.Sample(DataSampler, shadowUV + offset).r;
             if (sampleDepth < compareDepth)
             {
                 blockerDepthSum += sampleDepth;
@@ -198,7 +197,7 @@ float ComputeShadowFactor(Texture2D shadowMap, float4x4 cascadeViewProj, float3 
         for (int px = -kPCFHalf; px <= kPCFHalf; ++px)
         {
             const float2 offset = float2(px, py) * (filterRadius / float(kPCFTaps));
-            const float sampleDepth = shadowMap.Sample(DefaultSampler, shadowUV + offset).r;
+            const float sampleDepth = shadowMap.Sample(DataSampler, shadowUV + offset).r;
             shadowSum += (sampleDepth < compareDepth) ? 0.0f : 1.0f;
         }
     }
@@ -272,7 +271,7 @@ void EvaluateIBLSplit(
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
 
     // --- 拡散IBL ---
-    const float3 irradiance = IrradianceTexture.Sample(DefaultSampler, N).rgb;
+    const float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")
     const float3 fresnelRoughness =
         F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
@@ -282,8 +281,8 @@ void EvaluateIBLSplit(
     const float3 R = reflect(-V, N);
     // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(KurenaiEngine3D側で設定)
     const float mipLevel = roughness * ShadowParams.y;
-    const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(DefaultSampler, R, mipLevel).rgb;
-    const float2 brdf = BRDFLUTTexture.Sample(BRDFLUTSampler, float2(NdotV, roughness)).rg;
+    const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
+    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
 
     // 夜間の減衰はDeferredLighting.hlslと同じくAmbientColor.aで行う(プリフィルタマップ・
     // イラディアンスマップは昼固定のスカイボックスから焼いたものなので、これが唯一の減光手段)
@@ -370,16 +369,16 @@ float4 PSMain(PSInput input) : SV_TARGET
     // glTF仕様どおりbaseColorTexture.rgba * baseColorFactorで最終的なベースカラー/アルファを求める。
     // テクスチャを持たないマテリアル(BaseColorTexture=白1x1プレースホルダー、alpha=1)は
     // BaseColorFactorだけで色・不透明度が決まる
-    float4 baseColorSample = BaseColorTexture.Sample(DefaultSampler, input.UV) * BaseColorFactor;
+    float4 baseColorSample = BaseColorTexture.Sample(MaterialSampler, input.UV) * BaseColorFactor;
 
     float3 geometricNormal = normalize(input.Normal);
-    float2 normalXY = NormalTexture.Sample(DefaultSampler, input.UV).xy * 2.0f - 1.0f;
+    float2 normalXY = NormalTexture.Sample(MaterialSampler, input.UV).xy * 2.0f - 1.0f;
     float normalZ = sqrt(saturate(1.0f - dot(normalXY, normalXY)));
     float3 normalSample = float3(normalXY, normalZ);
     float3x3 tbn = ComputeTangentFrame(geometricNormal, input.Tangent);
     float3 N = normalize(mul(normalSample, tbn));
 
-    float3 metallicRoughnessSample = MetallicRoughnessTexture.Sample(DefaultSampler, input.UV).rgb;
+    float3 metallicRoughnessSample = MetallicRoughnessTexture.Sample(MaterialSampler, input.UV).rgb;
     float metallic = saturate(MetallicFactor * metallicRoughnessSample.b);
     // RoughnessFactorが負の場合はソースデータにラフネス係数が無かったことを表す
     // (Assets::kInvalidMaterialFactor)。パッカーが勝手な既定値を埋めない方針のため、
@@ -387,7 +386,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float roughnessFactor = (RoughnessFactor < 0.0f) ? 1.0f : RoughnessFactor;
     float roughness = clamp(roughnessFactor * metallicRoughnessSample.g, 0.045f, 1.0f);
 
-    float3 emissive = EmissiveTexture.Sample(DefaultSampler, input.UV).rgb * EmissiveFactor;
+    float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor;
 
     float3 albedo = baseColorSample.rgb;
     float3 V = normalize(CameraPosition.xyz - input.WorldPos);
@@ -397,7 +396,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 関数でピクセル内では一定なので、ライトのループへ入る前に1度だけ求める。
     // 下のIBL無効時フォールバックもこのF0/brdfをそのまま再利用する
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    const float2 brdf = BRDFLUTTexture.Sample(BRDFLUTSampler, float2(NdotV, roughness)).rg;
+    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
     const float3 energyCompensation = SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
 
     float3 directDiffuse = float3(0.0f, 0.0f, 0.0f);

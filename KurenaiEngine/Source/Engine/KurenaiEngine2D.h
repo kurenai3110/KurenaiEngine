@@ -152,7 +152,9 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_QuadVertexBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_QuadIndexBuffer;
 
-        std::unique_ptr<RHI::IRHISampler> m_Sampler;
+        // 2Dはスプライトを1枚読むだけなのでs0(MaterialSampler)しか使わない。
+        // スロットの役割はShaders/3D/Samplers.hlsliの定義に揃えてある(Sprite2D.hlsl参照)
+        std::unique_ptr<RHI::IRHISamplerSet> m_SamplerSet;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_ObjectConstantBuffer;
 

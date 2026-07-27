@@ -8,7 +8,7 @@
 #include "DX11Buffer.h"
 #include "DX11ComputePipelineState.h"
 #include "DX11PipelineState.h"
-#include "DX11Sampler.h"
+#include "DX11SamplerSet.h"
 #include "DX11Shader.h"
 #include "DX11SwapChain.h"
 #include "DX11Texture.h"
@@ -117,11 +117,16 @@ namespace Kurenai::RHI
         m_Context->PSSetShaderResources(slot, 1, srvs);
     }
 
-    void DX11CommandList::SetSampler(uint32_t slot, IRHISampler* sampler)
+    void DX11CommandList::SetSamplerSet(IRHISamplerSet* samplerSet)
     {
-        auto* dx11Sampler = static_cast<DX11Sampler*>(sampler);
-        ID3D11SamplerState* samplers[] = { dx11Sampler->GetSamplerState() };
-        m_Context->PSSetSamplers(slot, 1, samplers);
+        if (!samplerSet)
+        {
+            Core::Logger::Error("DX11", "SetSamplerSet: サンプラーセットがnullptrのためバインドをスキップします");
+            return;
+        }
+
+        auto* dx11SamplerSet = static_cast<DX11SamplerSet*>(samplerSet);
+        m_Context->PSSetSamplers(0, dx11SamplerSet->GetCount(), dx11SamplerSet->GetSamplers());
     }
 
     void DX11CommandList::SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer)
@@ -186,11 +191,16 @@ namespace Kurenai::RHI
         m_Context->CSSetShaderResources(slot, 1, srvs);
     }
 
-    void DX11CommandList::SetComputeSampler(uint32_t slot, IRHISampler* sampler)
+    void DX11CommandList::SetComputeSamplerSet(IRHISamplerSet* samplerSet)
     {
-        auto* dx11Sampler = static_cast<DX11Sampler*>(sampler);
-        ID3D11SamplerState* samplers[] = { dx11Sampler->GetSamplerState() };
-        m_Context->CSSetSamplers(slot, 1, samplers);
+        if (!samplerSet)
+        {
+            Core::Logger::Error("DX11", "SetComputeSamplerSet: サンプラーセットがnullptrのためバインドをスキップします");
+            return;
+        }
+
+        auto* dx11SamplerSet = static_cast<DX11SamplerSet*>(samplerSet);
+        m_Context->CSSetSamplers(0, dx11SamplerSet->GetCount(), dx11SamplerSet->GetSamplers());
     }
 
     void DX11CommandList::SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel)

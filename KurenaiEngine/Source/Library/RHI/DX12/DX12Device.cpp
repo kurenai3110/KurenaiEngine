@@ -16,7 +16,7 @@
 #include "DX12GPUProfiler.h"
 #include "DX12ImGuiBackend.h"
 #include "DX12PipelineState.h"
-#include "DX12Sampler.h"
+#include "DX12SamplerSet.h"
 #include "DX12Shader.h"
 #include "DX12SwapChain.h"
 #include "DX12Texture.h"
@@ -29,10 +29,19 @@ namespace Kurenai::RHI
     {
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
         constexpr uint32_t kTextureSlotCount = 12; // t0〜t11 (Transparent.hlslのマテリアル4枚+シャドウ4枚+ライトリスト+IBL(Irradiance/Prefilter/BRDFLUT)が最大)
-        // s0 = 汎用(異方性16x + Wrap)、s1 = ルックアップテーブル用(Linear + Clamp。BRDF積分LUT向け)。
-        // s1を宣言しないシェーダーでもテーブルはkSamplerSlotCount個ぶんまとめてバインドされるため、
-        // 全スロットは初期化時に既定のサンプラーで埋めておく(下のCreateSamplerループ参照)
-        constexpr uint32_t kSamplerSlotCount = 2;
+        // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
+        // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler(役割の定義はShaders/Samplers.hlsli)。
+        // どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。
+        // 3必要なのはTransparent.hlslが「マテリアル・シャドウマップ・BRDF積分LUT」の3種類を
+        // 1回のピクセルシェーダ実行で同時に使うため。
+        // 一部のスロットしか宣言しないシェーダーでもテーブルはkSamplerSlotCount個ぶんまとめて
+        // バインドされるため、セット生成時に余ったスロットは既定のサンプラーで埋める(CreateSamplerSet参照)
+        constexpr uint32_t kSamplerSlotCount = 3;
+        // 作成できるサンプラーセットの最大数。セットは初期化時にだけ作られ解放されないため、
+        // 用途の種類数(現状はマテリアル用・スクリーン空間用の2つ)に余裕を持たせた値でよい。
+        // シェーダ可視Samplerヒープの上限はD3D12の仕様で2048ディスクリプタ
+        // (D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE)なので、この程度なら十分収まる
+        constexpr uint32_t kMaxSamplerSets = 8;
         // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t10のkTextureSlotCount個ひと組)の最大数。
         // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく。実際に確保するヒープ容量は
         // これのkFrameCount倍(CPUがGPU完了を待たずに次フレームを記録し始めるため、直近kFrameCount
@@ -168,7 +177,6 @@ namespace Kurenai::RHI
         m_RtvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 16, false);
         m_DsvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 8, false);
         m_SrvCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvCpuHeapCapacity, false);
-        m_SamplerCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 4, false);
         // 1フレーム分のコマンドをまとめて記録してから1回だけ実行する設計のため、描画のたびに
         // 新しいkTextureSlotCount個のブロックを払い出せるよう、1フレームに必要な最大数を見込んで確保する。
         // さらにCPUがGPU完了を待たずに次フレームを記録し始めるため、kFrameCountフレームぶんの容量を持たせる
@@ -180,23 +188,28 @@ namespace Kurenai::RHI
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
             (kGraphicsSrvHeapCapacityPerFrame + kComputeSrvHeapCapacityPerFrame) * kFrameCount,
             true);
-        m_ShaderVisibleSamplerHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerSlotCount, true);
+        // サンプラーセットはCreateSamplerSetで連続ブロックとして払い出す(kMaxSamplerSets個ぶん)。
+        // 加えて先頭に1ブロックぶんのフォールバックを確保しておく(下記参照)
+        m_ShaderVisibleSamplerHeap = std::make_unique<DX12DescriptorHeap>(
+            m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerSlotCount * (kMaxSamplerSets + 1), true);
 
-        // サンプラーのディスクリプタテーブルはkSamplerSlotCount個ぶんまとめてバインドされるため、
-        // 上位層がSetSamplerを呼ばなかったスロットにも有効なディスクリプタが必要になる
-        // (未初期化のディスクリプタがテーブルに含まれると動作が未定義になる)。
-        // ここで全スロットを既定のサンプラーで埋めておき、上位層は必要なスロットだけ上書きする
+        // 上位層が一度もSetSamplerSetを呼ばないままDrawした場合に備えたフォールバックのブロック。
+        // ルートディスクリプタテーブルは常にkSamplerSlotCount個ぶんを指すため、未初期化の
+        // ディスクリプタを指してしまうと動作が未定義になる。ヒープ先頭の1ブロックを既定の
+        // サンプラーで埋めておき、DX12CommandListはセットが未設定のあいだここを指す
         {
+            m_FallbackSamplerSetBase = m_ShaderVisibleSamplerHeap->AllocateBlock(kSamplerSlotCount);
+
             D3D12_SAMPLER_DESC defaultSamplerDesc{};
             defaultSamplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-            defaultSamplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-            defaultSamplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-            defaultSamplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            defaultSamplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            defaultSamplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            defaultSamplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
             defaultSamplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
             defaultSamplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
             for (uint32_t slot = 0; slot < kSamplerSlotCount; ++slot)
             {
-                m_Device->CreateSampler(&defaultSamplerDesc, m_ShaderVisibleSamplerHeap->GetCpuHandle(slot));
+                m_Device->CreateSampler(&defaultSamplerDesc, m_ShaderVisibleSamplerHeap->GetCpuHandle(m_FallbackSamplerSetBase + slot));
             }
         }
 
@@ -1099,24 +1112,97 @@ namespace Kurenai::RHI
         return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, dsvIndex);
     }
 
-    std::unique_ptr<IRHISampler> DX12Device::CreateDefaultSampler(const SamplerDesc& desc)
+    std::unique_ptr<IRHISamplerSet> DX12Device::CreateSamplerSet(const SamplerDesc* descs, uint32_t count)
     {
-        D3D12_SAMPLER_DESC samplerDesc{};
-        samplerDesc.Filter = desc.Filter == SamplerFilter::Anisotropic ? D3D12_FILTER_ANISOTROPIC : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        const D3D12_TEXTURE_ADDRESS_MODE addressMode =
-            desc.AddressMode == SamplerAddressMode::Clamp ? D3D12_TEXTURE_ADDRESS_MODE_CLAMP : D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        samplerDesc.AddressU = addressMode;
-        samplerDesc.AddressV = addressMode;
-        samplerDesc.AddressW = addressMode;
-        // MaxAnisotropyはFilterがANISOTROPICでない場合ハードウェア側で無視されるため、常に設定してよい
-        samplerDesc.MaxAnisotropy = desc.MaxAnisotropy;
-        samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-        samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+        if (!descs || count == 0)
+        {
+            Core::Logger::Error("DX12", "CreateSamplerSet: サンプラー記述子が指定されていません");
+            throw std::runtime_error("CreateSamplerSetにサンプラー記述子が指定されていません");
+        }
 
-        const uint32_t index = m_SamplerCpuHeap->Allocate();
-        m_Device->CreateSampler(&samplerDesc, m_SamplerCpuHeap->GetCpuHandle(index));
+        if (count > kSamplerSlotCount)
+        {
+            Core::Logger::Warning(
+                "DX12",
+                "CreateSamplerSet: 指定されたサンプラー数(" + std::to_string(count) + ")がスロット数(" +
+                    std::to_string(kSamplerSlotCount) + ")を超えているため、超過分は無視されます");
+            count = kSamplerSlotCount;
+        }
 
-        return std::make_unique<DX12Sampler>(this, index);
+        // シェーダ可視ヒープ上に連続したkSamplerSlotCount個のブロックを確保し、そこへ直接書き込む。
+        // シェーダ可視Samplerヒープに対するCreateSamplerはCPUからの書き込みとして許可されており、
+        // このAPIは描画開始前にのみ呼ばれる約束(IRHIDevice::CreateSamplerSet参照)なので、
+        // GPUが読んでいる最中のディスクリプタを壊すことはない
+        const uint32_t baseIndex = m_ShaderVisibleSamplerHeap->AllocateBlock(kSamplerSlotCount);
+
+        for (uint32_t slot = 0; slot < kSamplerSlotCount; ++slot)
+        {
+            D3D12_SAMPLER_DESC samplerDesc{};
+
+            if (slot < count)
+            {
+                const SamplerDesc& desc = descs[slot];
+
+                switch (desc.Filter)
+                {
+                case SamplerFilter::Anisotropic:
+                    samplerDesc.Filter = D3D12_FILTER_ANISOTROPIC;
+                    break;
+                case SamplerFilter::Point:
+                    samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+                    break;
+                case SamplerFilter::Linear:
+                    samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+                    break;
+                default:
+                    Core::Logger::Warning(
+                        "DX12",
+                        "CreateSamplerSet: 未知のSamplerFilter(" + std::to_string(static_cast<int>(desc.Filter)) +
+                            ")が指定されたためLinearで代用します");
+                    samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+                    break;
+                }
+
+                D3D12_TEXTURE_ADDRESS_MODE addressMode = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+                switch (desc.AddressMode)
+                {
+                case SamplerAddressMode::Clamp:
+                    addressMode = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                    break;
+                case SamplerAddressMode::Wrap:
+                    addressMode = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+                    break;
+                default:
+                    Core::Logger::Warning(
+                        "DX12",
+                        "CreateSamplerSet: 未知のSamplerAddressMode(" + std::to_string(static_cast<int>(desc.AddressMode)) +
+                            ")が指定されたためWrapで代用します");
+                    addressMode = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+                    break;
+                }
+                samplerDesc.AddressU = addressMode;
+                samplerDesc.AddressV = addressMode;
+                samplerDesc.AddressW = addressMode;
+                // MaxAnisotropyはFilterがANISOTROPICでない場合ハードウェア側で無視されるため、常に設定してよい
+                samplerDesc.MaxAnisotropy = desc.MaxAnisotropy;
+            }
+            else
+            {
+                // 呼び出し側が指定しなかったスロット。テーブルはkSamplerSlotCount個ぶんまとめて
+                // バインドされ、未初期化のディスクリプタが含まれると動作が未定義になるため埋めておく
+                samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+                samplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                samplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+                samplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            }
+
+            samplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+            samplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+
+            m_Device->CreateSampler(&samplerDesc, m_ShaderVisibleSamplerHeap->GetCpuHandle(baseIndex + slot));
+        }
+
+        return std::make_unique<DX12SamplerSet>(this, baseIndex);
     }
 
     IRHICommandList* DX12Device::GetImmediateCommandList()

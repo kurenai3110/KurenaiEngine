@@ -12,6 +12,7 @@
 // 未実装のため、既存のSSAO/SSILと同じフルスクリーン三角形+ピクセルシェーダーのパターンで実装し、
 // 反射色の合成もブレンドステートではなくこのシェーダー内で直接加算する。
 #include "NormalEncoding.hlsli"
+#include "Samplers.hlsli"
 
 static const int kSSRStepCount = 32;
 static const int kSSRBinaryStepCount = 6;
@@ -42,7 +43,6 @@ Texture2D MaterialTexture : register(t2);
 Texture2D DepthTexture : register(t3);
 TextureCube SkyboxTexture : register(t4);
 Texture2D AlbedoTexture : register(t5);
-SamplerState DefaultSampler : register(s0);
 
 struct PSInput
 {
@@ -93,7 +93,7 @@ bool ProjectToScreen(float3 worldPos, out float2 uv, out float viewZ)
 // UV位置の実際のジオメトリのView空間Zを取得する。背景(深度なし)ならfalseを返す
 bool SampleSceneViewZ(float2 uv, out float viewZ)
 {
-    float sceneDepth = DepthTexture.Sample(DefaultSampler, uv).r;
+    float sceneDepth = DepthTexture.Sample(DataSampler, uv).r;
     if (sceneDepth <= 0.0f)
     {
         viewZ = 0.0f;
@@ -106,17 +106,17 @@ bool SampleSceneViewZ(float2 uv, out float viewZ)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float3 baseColor = SceneColorTexture.Sample(DefaultSampler, input.UV).rgb;
+    float3 baseColor = SceneColorTexture.Sample(ColorSampler, input.UV).rgb;
 
-    float depth = DepthTexture.Sample(DefaultSampler, input.UV).r;
+    float depth = DepthTexture.Sample(DataSampler, input.UV).r;
     if (depth <= 0.0f)
     {
         // 背景(スカイ)には反射元のサーフェスがない
         return float4(baseColor, 1.0f);
     }
 
-    float3 albedo = AlbedoTexture.Sample(DefaultSampler, input.UV).rgb;
-    float2 material = MaterialTexture.Sample(DefaultSampler, input.UV).rg;
+    float3 albedo = AlbedoTexture.Sample(ColorSampler, input.UV).rgb;
+    float2 material = MaterialTexture.Sample(DataSampler, input.UV).rg;
     float metallic = material.r;
     float roughness = material.g;
 
@@ -132,7 +132,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 N = OctDecode(NormalTexture.Sample(DefaultSampler, input.UV).xy);
+    float3 N = OctDecode(NormalTexture.Sample(DataSampler, input.UV).xy);
     float3 V = normalize(CameraPosition.xyz - worldPos);
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
     float NdotV = saturate(dot(N, V));
@@ -211,7 +211,7 @@ float4 PSMain(PSInput input) : SV_TARGET
             }
         }
 
-        float3 reflectionColor = SceneColorTexture.Sample(DefaultSampler, hitUV).rgb;
+        float3 reflectionColor = SceneColorTexture.Sample(ColorSampler, hitUV).rgb;
 
         // 反射先が画面の縁に近いほど弱める(画面外へレイが抜ける際の急な打ち切りを緩和する)
         float2 edgeDist = min(hitUV, float2(1.0f, 1.0f) - hitUV);
@@ -224,7 +224,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         // 画面内で実際にスカイへ到達したことが確定した場合のみ、reflectDir方向の正しい
         // スカイ色をスカイボックスから直接サンプルする
-        float3 skyColor = SkyboxTexture.Sample(DefaultSampler, reflectDir).rgb;
+        float3 skyColor = SkyboxTexture.Sample(MaterialSampler, reflectDir).rgb;
         return float4(baseColor + skyColor * weight, 1.0f);
     }
 

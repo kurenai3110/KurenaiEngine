@@ -5,11 +5,13 @@
 
 #include <d3dx12.h>
 
+#include "Core/Logger.h"
+
 #include "DX12Buffer.h"
 #include "DX12ComputePipelineState.h"
 #include "DX12Device.h"
 #include "DX12PipelineState.h"
-#include "DX12Sampler.h"
+#include "DX12SamplerSet.h"
 #include "DX12SwapChain.h"
 #include "DX12Texture.h"
 
@@ -17,6 +19,8 @@ namespace Kurenai::RHI
 {
     DX12CommandList::DX12CommandList(DX12Device* device)
         : m_Device(device)
+        , m_CurrentSamplerSetBase(device->GetFallbackSamplerSetBase())
+        , m_CurrentComputeSamplerSetBase(device->GetFallbackSamplerSetBase())
     {
     }
 
@@ -107,12 +111,14 @@ namespace Kurenai::RHI
         auto* cmdList = m_Device->GetCommandList();
 
         // SetGraphicsRootSignatureは以前バインドされていたルート引数を無効化するため、
-        // このPSOで実際に使うb0/b1/テクスチャ/サンプラーは呼び出し側が直後にSetConstantBuffer/SetTexture/SetSamplerで設定し直す
+        // このPSOで実際に使うb0/b1/テクスチャは呼び出し側が直後にSetConstantBuffer/SetTextureで設定し直す
         cmdList->SetGraphicsRootSignature(m_Device->GetRootSignature());
         cmdList->SetPipelineState(dx12PipelineState->GetPipelineState());
         cmdList->IASetPrimitiveTopology(dx12PipelineState->GetTopology());
-        // SRVテーブル(ルートパラメータ2)は描画ごとにSetTexture(0, ...)が新しいブロックを割り当てて再バインドする
-        cmdList->SetGraphicsRootDescriptorTable(3, m_Device->GetShaderVisibleSamplerHeap()->GetGpuHandle(0));
+        // SRVテーブル(ルートパラメータ2)は描画ごとにSetTexture(0, ...)が新しいブロックを割り当てて再バインドする。
+        // サンプラーテーブル(ルートパラメータ3)はここで直近のセットへ張り直しておく。パスがこの直後に
+        // SetSamplerSetを呼べばそちらで上書きされるが、呼ばなかった場合でも有効なブロックを指した状態を保てる
+        cmdList->SetGraphicsRootDescriptorTable(3, m_Device->GetShaderVisibleSamplerHeap()->GetGpuHandle(m_CurrentSamplerSetBase));
 
         // SetGraphicsRootSignatureでルートパラメータ2(SRVテーブル)も無効化されたため、
         // 「直前の描画と同じテクスチャならテーブルを使い回す」キャッシュは無効にする
@@ -217,11 +223,20 @@ namespace Kurenai::RHI
         m_PendingSrvSlotMask = 0;
     }
 
-    void DX12CommandList::SetSampler(uint32_t slot, IRHISampler* sampler)
+    void DX12CommandList::SetSamplerSet(IRHISamplerSet* samplerSet)
     {
-        auto* dx12Sampler = static_cast<DX12Sampler*>(sampler);
-        const D3D12_CPU_DESCRIPTOR_HANDLE dest = m_Device->GetShaderVisibleSamplerHeap()->GetCpuHandle(slot);
-        m_Device->GetDevice()->CopyDescriptorsSimple(1, dest, dx12Sampler->GetCpuHandle(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        if (!samplerSet)
+        {
+            Core::Logger::Error("DX12", "SetSamplerSet: サンプラーセットがnullptrのためバインドをスキップします");
+            return;
+        }
+
+        // ヒープの中身は書き換えず、テーブルの先頭位置だけを切り替える。
+        // これによりフレーム中に複数のパスが別々のセットを使っても互いに干渉しない(IRHISamplerSet.h参照)
+        auto* dx12SamplerSet = static_cast<DX12SamplerSet*>(samplerSet);
+        const D3D12_GPU_DESCRIPTOR_HANDLE base = dx12SamplerSet->GetBaseGpuHandle();
+        m_CurrentSamplerSetBase = dx12SamplerSet->GetBaseDescriptorIndex();
+        m_Device->GetCommandList()->SetGraphicsRootDescriptorTable(3, base);
     }
 
     void DX12CommandList::SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer)
@@ -286,9 +301,8 @@ namespace Kurenai::RHI
         // SetComputeTexture/SetComputeUnorderedAccessTexture(Buffer)で設定し直す
         cmdList->SetComputeRootSignature(m_Device->GetComputeRootSignature());
         cmdList->SetPipelineState(dx12ComputePipelineState->GetPipelineState());
-        // サンプラーテーブル(ルートパラメータ3)はグラフィックス同様s0固定で常に同じものを使うため、
-        // ここで一度だけバインドしておく
-        cmdList->SetComputeRootDescriptorTable(3, m_Device->GetShaderVisibleSamplerHeap()->GetGpuHandle(0));
+        // グラフィックス側と同じ理由で、サンプラーテーブル(ルートパラメータ3)は直近のセットへ張り直す
+        cmdList->SetComputeRootDescriptorTable(3, m_Device->GetShaderVisibleSamplerHeap()->GetGpuHandle(m_CurrentComputeSamplerSetBase));
     }
 
     void DX12CommandList::SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer)
@@ -297,12 +311,20 @@ namespace Kurenai::RHI
         m_Device->GetCommandList()->SetComputeRootConstantBufferView(slot, dx12Buffer->GetGPUVirtualAddress());
     }
 
-    void DX12CommandList::SetComputeSampler(uint32_t slot, IRHISampler* sampler)
+    void DX12CommandList::SetComputeSamplerSet(IRHISamplerSet* samplerSet)
     {
-        // コンピュート用ルートシグネチャもグラフィックスと同じs0固定の共有サンプラーヒープ
-        // (SetComputePipelineStateが毎回ルートパラメータ3をこのヒープの先頭にバインドする)を使うため、
-        // 実装はSetSamplerと同一(書き込み先ヒープが同じであれば呼び出し元のステージは問わない)
-        SetSampler(slot, sampler);
+        if (!samplerSet)
+        {
+            Core::Logger::Error("DX12", "SetComputeSamplerSet: サンプラーセットがnullptrのためバインドをスキップします");
+            return;
+        }
+
+        // コンピュート用ルートシグネチャもグラフィックスと同じサンプラーヒープを共有する。
+        // 違いはルート引数を設定する先(グラフィックス用/コンピュート用)だけ
+        auto* dx12SamplerSet = static_cast<DX12SamplerSet*>(samplerSet);
+        const D3D12_GPU_DESCRIPTOR_HANDLE base = dx12SamplerSet->GetBaseGpuHandle();
+        m_CurrentComputeSamplerSetBase = dx12SamplerSet->GetBaseDescriptorIndex();
+        m_Device->GetCommandList()->SetComputeRootDescriptorTable(3, base);
     }
 
     void DX12CommandList::SetComputeTexture(uint32_t slot, IRHITexture* texture)

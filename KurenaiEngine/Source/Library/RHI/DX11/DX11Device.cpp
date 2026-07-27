@@ -13,7 +13,7 @@
 #include "DX11GPUProfiler.h"
 #include "DX11ImGuiBackend.h"
 #include "DX11PipelineState.h"
-#include "DX11Sampler.h"
+#include "DX11SamplerSet.h"
 #include "DX11Shader.h"
 #include "DX11SwapChain.h"
 #include "DX11Texture.h"
@@ -628,24 +628,75 @@ namespace Kurenai::RHI
         return std::make_unique<DX11Texture>(srv, nullptr, dsv);
     }
 
-    std::unique_ptr<IRHISampler> DX11Device::CreateDefaultSampler(const SamplerDesc& desc)
+    std::unique_ptr<IRHISamplerSet> DX11Device::CreateSamplerSet(const SamplerDesc* descs, uint32_t count)
     {
-        D3D11_SAMPLER_DESC samplerDesc{};
-        samplerDesc.Filter = desc.Filter == SamplerFilter::Anisotropic ? D3D11_FILTER_ANISOTROPIC : D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-        const D3D11_TEXTURE_ADDRESS_MODE addressMode =
-            desc.AddressMode == SamplerAddressMode::Clamp ? D3D11_TEXTURE_ADDRESS_CLAMP : D3D11_TEXTURE_ADDRESS_WRAP;
-        samplerDesc.AddressU = addressMode;
-        samplerDesc.AddressV = addressMode;
-        samplerDesc.AddressW = addressMode;
-        // MaxAnisotropyはFilterがANISOTROPICでない場合ハードウェア側で無視されるため、常に設定してよい
-        samplerDesc.MaxAnisotropy = desc.MaxAnisotropy;
-        samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-        samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+        if (!descs || count == 0)
+        {
+            Core::Logger::Error("DX11", "CreateSamplerSet: サンプラー記述子が指定されていません");
+            throw std::runtime_error("CreateSamplerSetにサンプラー記述子が指定されていません");
+        }
 
-        Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler;
-        ThrowIfFailed(m_Device->CreateSamplerState(&samplerDesc, &sampler), "サンプラーの作成に失敗しました");
+        std::vector<Microsoft::WRL::ComPtr<ID3D11SamplerState>> samplers;
+        samplers.reserve(count);
 
-        return std::make_unique<DX11Sampler>(sampler);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const SamplerDesc& desc = descs[i];
+
+            D3D11_SAMPLER_DESC samplerDesc{};
+            switch (desc.Filter)
+            {
+            case SamplerFilter::Anisotropic:
+                samplerDesc.Filter = D3D11_FILTER_ANISOTROPIC;
+                break;
+            case SamplerFilter::Point:
+                samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+                break;
+            case SamplerFilter::Linear:
+                samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+                break;
+            default:
+                Core::Logger::Warning(
+                    "DX11",
+                    "CreateSamplerSet: 未知のSamplerFilter(" + std::to_string(static_cast<int>(desc.Filter)) +
+                        ")が指定されたためLinearで代用します");
+                samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+                break;
+            }
+
+            D3D11_TEXTURE_ADDRESS_MODE addressMode = D3D11_TEXTURE_ADDRESS_WRAP;
+            switch (desc.AddressMode)
+            {
+            case SamplerAddressMode::Clamp:
+                addressMode = D3D11_TEXTURE_ADDRESS_CLAMP;
+                break;
+            case SamplerAddressMode::Wrap:
+                addressMode = D3D11_TEXTURE_ADDRESS_WRAP;
+                break;
+            default:
+                Core::Logger::Warning(
+                    "DX11",
+                    "CreateSamplerSet: 未知のSamplerAddressMode(" + std::to_string(static_cast<int>(desc.AddressMode)) +
+                        ")が指定されたためWrapで代用します");
+                addressMode = D3D11_TEXTURE_ADDRESS_WRAP;
+                break;
+            }
+            samplerDesc.AddressU = addressMode;
+            samplerDesc.AddressV = addressMode;
+            samplerDesc.AddressW = addressMode;
+            // MaxAnisotropyはFilterがANISOTROPICでない場合ハードウェア側で無視されるため、常に設定してよい
+            samplerDesc.MaxAnisotropy = desc.MaxAnisotropy;
+            samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+            samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+
+            Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler;
+            ThrowIfFailed(
+                m_Device->CreateSamplerState(&samplerDesc, &sampler),
+                "サンプラー(スロット" + std::to_string(i) + ")の作成に失敗しました");
+            samplers.push_back(std::move(sampler));
+        }
+
+        return std::make_unique<DX11SamplerSet>(std::move(samplers));
     }
 
     IRHICommandList* DX11Device::GetImmediateCommandList()

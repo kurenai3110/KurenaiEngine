@@ -5,8 +5,9 @@
 // エネルギー保存が破れていた。SceneColorをHDRのまま保持しトーンマップをPresent直前の
 // この独立パスへ切り出すことで、SSR・将来のブルーム/露出制御(M7)が物理的に正しいHDR値の
 // 上に成立できるようにする
+#include "Samplers.hlsli"
+
 Texture2D SceneColorTexture : register(t0);
-SamplerState DefaultSampler : register(s0);
 
 struct PSInput
 {
@@ -25,7 +26,7 @@ PSInput VSMain(uint vertexID : SV_VertexID)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float3 color = SceneColorTexture.Sample(DefaultSampler, input.UV).rgb;
+    float3 color = SceneColorTexture.Sample(ColorSampler, input.UV).rgb;
 
     // トーンマッピング(Reinhard)とガンマ補正
     color = color / (color + 1.0f);

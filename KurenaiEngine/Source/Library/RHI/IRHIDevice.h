@@ -10,7 +10,7 @@
 #include "IRHIGPUProfiler.h"
 #include "IRHIImGuiBackend.h"
 #include "IRHIPipelineState.h"
-#include "IRHISampler.h"
+#include "IRHISamplerSet.h"
 #include "IRHIShader.h"
 #include "IRHISwapChain.h"
 #include "IRHITexture.h"
@@ -66,7 +66,13 @@ namespace Kurenai::RHI
         // IRHICommandList::ClearDepthで毎回明示的に指定するが、DX12は生成時に宣言した値と
         // 一致しないと高速クリアパスが使えないため、Reverse-Zで0.0fクリアするテクスチャはここも合わせる
         virtual std::unique_ptr<IRHITexture> CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f) = 0;
-        virtual std::unique_ptr<IRHISampler> CreateDefaultSampler(const SamplerDesc& desc = SamplerDesc{}) = 0;
+        // 1パスがまとめてバインドするサンプラーの組を作る。descs[i]がレジスタs(i)に対応する。
+        // countがバックエンドのスロット数(DX12のkSamplerSlotCount)に満たない場合、残りのスロットは
+        // 既定のサンプラーで埋められる(DX12は未初期化のディスクリプタがテーブルに含まれると動作が未定義になるため)。
+        //
+        // 【重要】描画開始前(初期化時)にのみ呼ぶこと。DX12実装はシェーダ可視ヒープへ直接書き込むため、
+        // 描画中に呼ぶとGPUがまだ読んでいる可能性のあるディスクリプタを壊す(詳細はIRHISamplerSet.h)
+        virtual std::unique_ptr<IRHISamplerSet> CreateSamplerSet(const SamplerDesc* descs, uint32_t count) = 0;
         virtual IRHICommandList* GetImmediateCommandList() = 0;
 
         // ImGui連携。ImGuiはバックエンド(DX11/DX12)ごとに専用の実装が必要なため、

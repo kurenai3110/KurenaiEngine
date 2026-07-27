@@ -7,7 +7,7 @@
 
 #include "IRHIBuffer.h"
 #include "IRHIPipelineState.h"
-#include "IRHISampler.h"
+#include "IRHISamplerSet.h"
 #include "IRHISwapChain.h"
 #include "IRHITexture.h"
 
@@ -46,7 +46,12 @@ namespace Kurenai::RHI
         virtual void SetIndexBuffer(IRHIBuffer* buffer) = 0;
         virtual void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void SetTexture(uint32_t slot, IRHITexture* texture) = 0;
-        virtual void SetSampler(uint32_t slot, IRHISampler* sampler) = 0;
+        // このパスで使うサンプラーの組をまとめてバインドする(セットのi番目がレジスタs(i)になる)。
+        // セットの中身は初期化時に決まっていて書き換わらないため、ここで切り替わるのは
+        // 「どのセットを見るか」だけ(理由はIRHISamplerSet.h)。
+        // DX12はSetPipelineStateがルート引数を無効化するため、パイプラインステート設定後に呼ぶこと
+        // (呼び忘れても直近のセットが自動で再バインドされるが、意図を明示するため各パスで呼ぶ)
+        virtual void SetSamplerSet(IRHISamplerSet* samplerSet) = 0;
         // BufferUsage::StructuredReadOnlyで作成したバッファをStructuredBuffer<T>としてピクセルシェーダへ
         // バインドする。スロット空間はSetTextureと共通(t0〜)なので、同じ描画内でスロットが衝突しないよう
         // 呼び出し側で調整すること
@@ -61,10 +66,10 @@ namespace Kurenai::RHI
         virtual void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void SetComputeTexture(uint32_t slot, IRHITexture* texture) = 0;
         // TextureCube(スカイボックス)をコンピュートシェーダーからSampleLevelで読む(IBLの畳み込み等)場合に
-        // 必要。DX11はステージごとに独立したサンプラースロットを持つため、グラフィックス側のSetSamplerとは
-        // 別に明示的なバインドが要る(DX12はグラフィックス・コンピュートで同じs0固定の共有ヒープを使うため、
+        // 必要。DX11はステージごとに独立したサンプラースロットを持つため、グラフィックス側のSetSamplerSetとは
+        // 別に明示的なバインドが要る(DX12はグラフィックス・コンピュートで同じサンプラーヒープを共有するため
         // 呼び出し不要でも動作するが、DX11との整合のため両バックエンドで同じ呼び出し規約にする)
-        virtual void SetComputeSampler(uint32_t slot, IRHISampler* sampler) = 0;
+        virtual void SetComputeSamplerSet(IRHISamplerSet* samplerSet) = 0;
         // RWTexture2D/RWStructuredBufferとしてバインドする(書き込み可能)。
         // mipLevelはCreateHiZTextureで作成したミップチェーンテクスチャの特定ミップを指定する場合に使う
         // (通常のCreateUAVTextureは常に1ミップのみのため既定値の0で問題ない)

@@ -55,6 +55,10 @@ namespace Kurenai
         };
 
         void CreateSceneResources();
+        // パス用途ごとのサンプラーセット(m_MaterialSamplers / m_ScreenSpaceSamplers)を作る。
+        // セットの中身は作成後に書き換えないことが前提のAPIなので、描画を始める前に一度だけ呼ぶ
+        // (理由はRHI/IRHISamplerSet.h)
+        void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
         // <DLLフォルダ>/Assets/Scenes/*.ksceneを列挙し、m_SceneFilePaths/m_SceneDisplayNamesを構築する。
         // 個々のファイルの[Scene]Name読み取りに失敗した場合はそのファイルを警告ログとともに
@@ -354,11 +358,18 @@ namespace Kurenai
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)
         float m_SunAzimuthDegrees = 126.87f;
 
-        std::unique_ptr<RHI::IRHISampler> m_Sampler;
-        // BRDF積分LUT専用のサンプラー(s1)。LUTはUVの端が定義域の端(NdotV=0/1、roughness=0/1)
-        // であるため、汎用サンプラー(m_Sampler)のWrap + 異方性フィルタでは端のタップが
-        // 反対側の端へ回り込んで無関係な値が混ざる。Clamp + Linearで引く
-        std::unique_ptr<RHI::IRHISampler> m_LUTSampler;
+        // パスごとにバインドするサンプラーの組。スロットの役割(s0=MaterialSampler、
+        // s1=ColorSampler、s2=DataSampler)はShaders/3D/Samplers.hlsliで定義しており、
+        // どちらのセットを使うかでs0の実体だけが変わる。
+        //
+        // マテリアルをタイリングで読むパス(G-Buffer・半透明フォワード・IBL畳み込み)用。
+        // s0は異方性16x + Wrap
+        std::unique_ptr<RHI::IRHISamplerSet> m_MaterialSamplers;
+        // フルスクリーンのスクリーン空間パス(DirectLighting/DeferredLighting/SSAO/SSIL/SSR/
+        // AOブラー/トーンマップ/Present)用。これらは画面内の中間バッファしか読まないため、
+        // s0にもWrapではなくLinear + Clampを入れる。こうしておくとシェーダ側で役割を選び違えても
+        // 画面端でUVが反対側へ回り込む不具合が起きない
+        std::unique_ptr<RHI::IRHISamplerSet> m_ScreenSpaceSamplers;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_ObjectConstantBuffer;
 

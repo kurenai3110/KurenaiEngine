@@ -20,7 +20,10 @@ cbuffer ObjectConstants : register(b1)
 };
 
 Texture2D SpriteTexture : register(t0);
-SamplerState DefaultSampler : register(s0);
+// 役割はKurenaiEngine/Shaders/3D/Samplers.hlsliのMaterialSamplerと同じ(s0固定)。
+// 2Dは3D側の共有ヘッダーに依存させないため、ここで単独に宣言している。
+// KurenaiEngine2Dはこのスロットへ異方性16x + Wrapのサンプラーを1つだけ持つセットをバインドする
+SamplerState MaterialSampler : register(s0);
 
 struct VSInput
 {
@@ -45,7 +48,7 @@ PSInput VSMain(VSInput input)
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float4 texColor = SpriteTexture.Sample(DefaultSampler, input.UV);
+    float4 texColor = SpriteTexture.Sample(MaterialSampler, input.UV);
     return texColor * Color;
 }
 

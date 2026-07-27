@@ -1,4 +1,5 @@
 #include "NormalEncoding.hlsli"
+#include "Samplers.hlsli"
 
 cbuffer FrameConstants : register(b0)
 {
@@ -37,7 +38,6 @@ Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
 Texture2D EmissiveTexture : register(t3);
-SamplerState DefaultSampler : register(s0);
 
 struct VSInput
 {
@@ -91,7 +91,7 @@ float3x3 ComputeTangentFrame(float3 N, float4 tangent)
 
 PSOutput PSMain(PSInput input)
 {
-    float4 baseColorSample = BaseColorTexture.Sample(DefaultSampler, input.UV);
+    float4 baseColorSample = BaseColorTexture.Sample(MaterialSampler, input.UV);
 
     // AlphaCutoff<=0(アルファカットアウト無効)の場合、alpha(0〜1)は常にAlphaCutoff以上になるため
     // clipは発火しない。AlphaCutoff>0の場合のみ、alphaがそれを下回るピクセルを破棄する
@@ -103,13 +103,13 @@ PSOutput PSMain(PSInput input)
     // サンプリング時にハードウェアがB=0を返すため、Bをそのまま使うとタンジェント空間Zが
     // 常に-1(裏向き)になってしまう。単位ベクトルである前提でX/YからZを再構成する
     // (通常の3チャンネル法線マップに対しても正しく機能する)
-    float2 normalXY = NormalTexture.Sample(DefaultSampler, input.UV).xy * 2.0f - 1.0f;
+    float2 normalXY = NormalTexture.Sample(MaterialSampler, input.UV).xy * 2.0f - 1.0f;
     float normalZ = sqrt(saturate(1.0f - dot(normalXY, normalXY)));
     float3 normalSample = float3(normalXY, normalZ);
     float3x3 tbn = ComputeTangentFrame(geometricNormal, input.Tangent);
     float3 N = normalize(mul(normalSample, tbn));
 
-    float3 metallicRoughnessSample = MetallicRoughnessTexture.Sample(DefaultSampler, input.UV).rgb;
+    float3 metallicRoughnessSample = MetallicRoughnessTexture.Sample(MaterialSampler, input.UV).rgb;
     float metallic = saturate(MetallicFactor * metallicRoughnessSample.b);
     // RoughnessFactorが負の場合はソースデータにラフネス係数が無かったことを表す
     // (Assets::kInvalidMaterialFactor)。パッカーが勝手な既定値を埋めない方針のため、
@@ -117,7 +117,7 @@ PSOutput PSMain(PSInput input)
     float roughnessFactor = (RoughnessFactor < 0.0f) ? 1.0f : RoughnessFactor;
     float roughness = clamp(roughnessFactor * metallicRoughnessSample.g, 0.045f, 1.0f);
 
-    float3 emissive = EmissiveTexture.Sample(DefaultSampler, input.UV).rgb * EmissiveFactor;
+    float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor;
 
     PSOutput output;
     output.Albedo = float4(baseColorSample.rgb, 1.0f);

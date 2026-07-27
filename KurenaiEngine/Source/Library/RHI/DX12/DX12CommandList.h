@@ -6,7 +6,7 @@
 #include "RHI/IRHIBuffer.h"
 #include "RHI/IRHICommandList.h"
 #include "RHI/IRHIPipelineState.h"
-#include "RHI/IRHISampler.h"
+#include "RHI/IRHISamplerSet.h"
 #include "RHI/IRHISwapChain.h"
 #include "RHI/IRHITexture.h"
 
@@ -29,7 +29,7 @@ namespace Kurenai::RHI
         void SetIndexBuffer(IRHIBuffer* buffer) override;
         void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetTexture(uint32_t slot, IRHITexture* texture) override;
-        void SetSampler(uint32_t slot, IRHISampler* sampler) override;
+        void SetSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
@@ -38,7 +38,7 @@ namespace Kurenai::RHI
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
         void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeTexture(uint32_t slot, IRHITexture* texture) override;
-        void SetComputeSampler(uint32_t slot, IRHISampler* sampler) override;
+        void SetComputeSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0) override;
         void SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0) override;
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
@@ -76,6 +76,16 @@ namespace Kurenai::RHI
         D3D12_CPU_DESCRIPTOR_HANDLE m_LastDrawSrvHandles[kTextureSlotCount]{};
         uint32_t m_LastDrawSlotMask = 0;
         bool m_HasLastDraw = false;
+
+        // 直近にSetSamplerSet/SetComputeSamplerSetで指定されたセットの、ヒープ上のブロック先頭。
+        // SetPipelineState/SetComputePipelineStateはルートシグネチャを設定し直してルート引数を
+        // 無効化するため、そのたびにここを見てサンプラーテーブルを張り直す。
+        // 初期値はDX12Deviceが既定サンプラーで埋めたフォールバックのブロック(コンストラクタで設定)で、
+        // 上位層がSetSamplerSetを呼び忘れても未初期化のディスクリプタを指さないようにしている。
+        // SRVテーブルと違いブロックを毎回払い出さないのは、セットの中身が初期化後に不変だから
+        // (=同じブロックをフレーム中いくつのパスが参照しても上書きが起きない。詳細はIRHISamplerSet.h)
+        uint32_t m_CurrentSamplerSetBase = 0;
+        uint32_t m_CurrentComputeSamplerSetBase = 0;
 
         // コンピュートシェーダー用SRV(t0〜)+UAV(u0〜)テーブル。グラフィックスのSRVテーブルと同様、
         // Set*の時点ではコピー元だけ溜めておき、Dispatch直前のFlushPendingComputeWrites()でまとめて

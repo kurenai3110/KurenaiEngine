@@ -545,7 +545,7 @@ std::unique_ptr&lt;IRHITexture&gt;   CreateRenderTexture(uint32_t width, uint32_
 std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f);
 std::unique_ptr&lt;IRHITexture&gt;   CreateUAVTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels);
-std::unique_ptr&lt;IRHISampler&gt;   CreateDefaultSampler(const SamplerDesc&amp; desc = SamplerDesc{});
+std::unique_ptr&lt;IRHISamplerSet&gt; CreateSamplerSet(const SamplerDesc* descs, uint32_t count);
 IRHICommandList*                GetImmediateCommandList();</code></pre>
 <p>
 <code>CreateTextureFromFile</code> は拡張子(<code>.dds</code>/<code>.tga</code>/その他はWIC経由で
@@ -557,12 +557,32 @@ png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベー�
 </p>
 <p>
 <code>SamplerDesc</code>(<code>RHIDesc.h</code>)は<code>Filter</code>(<code>SamplerFilter::Linear</code> /
-<code>Anisotropic</code>)、<code>AddressMode</code>(<code>SamplerAddressMode::Wrap</code> /
+<code>Anisotropic</code> / <code>Point</code>)、<code>AddressMode</code>(<code>SamplerAddressMode::Wrap</code> /
 <code>Clamp</code>)、<code>MaxAnisotropy</code>を持つ。既定値は<code>Anisotropic</code>・<code>Wrap</code>・16xで、
 浅い角度で見る面(床・路面など)のボケを抑える。<code>AddressMode</code>はAddressU/V/Wへまとめて適用される
-(軸ごとに別々の指定はできない)。タイリングするマテリアルテクスチャは<code>Wrap</code>、
-ルックアップテーブルのように「UVの端が定義域の端」であるテクスチャは<code>Clamp</code>を指定する
-(<code>Wrap</code>のままだと端でフィルタのタップが反対側の端へ回り込み、無関係な値が混ざる)。
+(軸ごとに別々の指定はできない)。用途ごとの選び方は次のとおり。
+</p>
+<ul>
+<li>タイリングするマテリアルテクスチャ: <code>Anisotropic</code> + <code>Wrap</code></li>
+<li>色バッファ・ルックアップテーブルのように「UVの端が定義域の端」であるもの:
+<code>Linear</code> + <code>Clamp</code>(<code>Wrap</code>だと端でフィルタのタップが反対側の端へ
+回り込み、無関係な値が混ざる)</li>
+<li>深度・エンコードされた法線・metallic/roughness・シャドウマップのように、テクセルに格納された
+値そのものに意味があり補間してはいけないもの: <code>Point</code> + <code>Clamp</code></li>
+</ul>
+<p>
+サンプラーは1個ずつではなく<b>セット単位</b>で扱う。<code>CreateSamplerSet</code>に
+<code>SamplerDesc</code>の配列を渡すと、<code>descs[i]</code>がシェーダの<code>register(s(i))</code>に
+対応する1つの組ができ、描画パスの先頭で<code>IRHICommandList::SetSamplerSet</code>により
+まとめてバインドする。<code>count</code>がバックエンドのスロット数に満たない場合、残りは
+既定のサンプラーで埋められる。
+</p>
+<p>
+<b><code>CreateSamplerSet</code>は描画を始める前(初期化時)にのみ呼ぶこと。</b>
+DX12実装はシェーダ可視ディスクリプタヒープへ直接書き込むため、描画中に呼ぶとGPUがまだ
+読んでいる可能性のあるディスクリプタを壊す。セットの中身が作成後に不変であることが、
+パスごとに異なるサンプラーを安全に使い分けられる根拠になっている
+(設計理由は<code>IRHISamplerSet.h</code>および<code>Architecture.html</code> 14.2.2節)。
 </p>
 <p>
 <code>RHI::TextureImage::LoadFromFile(filePath, sRGB)</code>(<code>TextureImage.h</code>)は
@@ -584,7 +604,7 @@ void SetVertexBuffer(IRHIBuffer* buffer);
 void SetIndexBuffer(IRHIBuffer* buffer);           // 32bit(uint32_t)インデックス固定
 void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer);
 void SetTexture(uint32_t slot, IRHITexture* texture);
-void SetSampler(uint32_t slot, IRHISampler* sampler);
+void SetSamplerSet(IRHISamplerSet* samplerSet);    // このパスで使うサンプラー一式(下記4.2参照)
 void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer); // BufferUsage::StructuredReadOnly用(下記4.4参照)
 void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes);
 void Draw(uint32_t vertexCount, uint32_t startVertexLocation);
@@ -715,7 +735,7 @@ IMMUTABLEになり以後の更新が失敗するため、必ずnullptrで作成�
 <h3>4.4 その他のRHI型</h3>
 <p>
 <code>IRHIBuffer</code> / <code>IRHITexture</code> / <code>IRHIShader</code> /
-<code>IRHIPipelineState</code> / <code>IRHISampler</code> / <code>IRHISwapChain</code> はいずれも
+<code>IRHIPipelineState</code> / <code>IRHISamplerSet</code> / <code>IRHISwapChain</code> はいずれも
 中身を持たない不透明なハンドル型。<code>std::unique_ptr&lt;IRHIXxx&gt;</code>として保持し、
 <code>IRHICommandList</code>の各メソッドに生ポインタ(<code>.get()</code>)で渡す。
 <code>RHIDesc.h</code>(<code>BufferDesc</code>, <code>ShaderDesc</code>, <code>InputElementDesc</code>,

@@ -10,16 +10,12 @@
 #ifndef KURENAI_SPECULAR_ENERGY_HLSLI
 #define KURENAI_SPECULAR_ENERGY_HLSLI
 
-// BRDF積分LUT専用のサンプラー。LUTはUVそのものが定義域(u = NdotV、v = roughness、どちらも[0,1])
-// なので、汎用サンプラー(s0)のWrapで引いてはいけない。Wrapだと u→1(視線が法線と一致する面の中央)
-// でバイリニアのタップが u≈0(グレージング角)のテクセルへ回り込み、まったく別のEssが混ざる。
-// 実際にWhite Furnace Testの球の中心へ数ピクセルの斑点として現れた
-// (異方性フィルタも併用していたため、画面空間の勾配のぶんだけ回り込みが広がっていた)。
-// v(roughness)側も同様で、roughness=0の面にroughness≈1の値が混ざる。
-// エンジン側はここへLinear + Clampのサンプラーをバインドする(KurenaiEngine3D::m_LUTSampler)。
-// LUT生成側(BRDFLUT.hlsl)はテクスチャを読まないためこの宣言を使わないが、共有ヘッダーに置くことで
-// 「LUTを引く側は必ずこのサンプラーを使う」ことを構造で担保する
-SamplerState BRDFLUTSampler : register(s1);
+// BRDF積分LUTは必ずColorSampler(s1、Linear + Clamp)で引くこと。
+// LUTはUVそのものが定義域(u = NdotV、v = roughness、どちらも[0,1])なので、
+// MaterialSampler(s0)側にWrapが入るパスで引くと端が反対側へ回り込んで別のEssが混ざる
+// (経緯と実際に出た絵はSamplers.hlsliのColorSamplerのコメント参照)。
+// LUT生成側(BRDFLUT.hlsl)はテクスチャを読まないためサンプラーを使わない
+#include "Samplers.hlsli"
 
 // Smith幾何項のSchlick近似。kはSmith-GGXへの最良フィットである α/2 (α = roughness^2) を使う。
 //

@@ -101,7 +101,12 @@ namespace Kurenai
         indexBufferDesc.InitialData = quadIndices;
         m_QuadIndexBuffer = m_Device->CreateBuffer(indexBufferDesc);
 
-        m_Sampler = m_Device->CreateDefaultSampler();
+        // スプライト用。UVOffsetScaleでアトラスを切り出す用途と、タイリングするスプライトの
+        // 両方に対応するためWrap。拡大縮小したスプライトのボケを抑えるため異方性16x
+        RHI::SamplerDesc spriteSampler{};
+        spriteSampler.Filter = RHI::SamplerFilter::Anisotropic;
+        spriteSampler.AddressMode = RHI::SamplerAddressMode::Wrap;
+        m_SamplerSet = m_Device->CreateSamplerSet(&spriteSampler, 1);
 
         RHI::BufferDesc frameConstantBufferDesc;
         frameConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -175,7 +180,7 @@ namespace Kurenai
         commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
         commandList->SetVertexBuffer(m_QuadVertexBuffer.get());
         commandList->SetIndexBuffer(m_QuadIndexBuffer.get());
-        commandList->SetSampler(0, m_Sampler.get());
+        commandList->SetSamplerSet(m_SamplerSet.get());
     }
 
     void KurenaiEngine2D::DrawSprite(

@@ -44,7 +44,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHITexture> CreateUAVTextureCube(uint32_t size, Format format) override;
         std::unique_ptr<IRHITexture> CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels) override;
         std::unique_ptr<IRHITexture> CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f) override;
-        std::unique_ptr<IRHISampler> CreateDefaultSampler(const SamplerDesc& desc) override;
+        std::unique_ptr<IRHISamplerSet> CreateSamplerSet(const SamplerDesc* descs, uint32_t count) override;
         IRHICommandList* GetImmediateCommandList() override;
 
         std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) override;
@@ -60,9 +60,11 @@ namespace Kurenai::RHI
         DX12DescriptorHeap* GetRtvHeap() const { return m_RtvHeap.get(); }
         DX12DescriptorHeap* GetDsvHeap() const { return m_DsvHeap.get(); }
         DX12DescriptorHeap* GetSrvCpuHeap() const { return m_SrvCpuHeap.get(); }
-        DX12DescriptorHeap* GetSamplerCpuHeap() const { return m_SamplerCpuHeap.get(); }
         DX12DescriptorHeap* GetShaderVisibleSrvHeap() const { return m_ShaderVisibleSrvHeap.get(); }
         DX12DescriptorHeap* GetShaderVisibleSamplerHeap() const { return m_ShaderVisibleSamplerHeap.get(); }
+        // 上位層が一度もSetSamplerSetを呼ばないままDrawした場合に使う、既定サンプラーで埋めたブロックの先頭。
+        // ルートディスクリプタテーブルが未初期化のディスクリプタを指さないようにするための保険
+        uint32_t GetFallbackSamplerSetBase() const { return m_FallbackSamplerSetBase; }
 
         // 1フレーム分のコマンドをすべて記録してから1回だけExecuteCommandListsする設計のため、
         // CopyDescriptorsSimpleによるディスクリプタ書き込みはGPU実行前にすべて完了してしまう。
@@ -150,9 +152,9 @@ namespace Kurenai::RHI
         std::unique_ptr<DX12DescriptorHeap> m_RtvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_DsvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_SrvCpuHeap;
-        std::unique_ptr<DX12DescriptorHeap> m_SamplerCpuHeap;
         std::unique_ptr<DX12DescriptorHeap> m_ShaderVisibleSrvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_ShaderVisibleSamplerHeap;
+        uint32_t m_FallbackSamplerSetBase = 0;
 
         std::unique_ptr<DX12CommandList> m_ImmediateCommandList;
 

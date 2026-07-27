@@ -17,8 +17,9 @@
 
 static const float PI = 3.14159265359f;
 
+#include "Samplers.hlsli"
+
 TextureCube SourceSkybox : register(t0);
-SamplerState SourceSampler : register(s0);
 
 // IBLConvolve.hlsl側のこの宣言とC++側 KurenaiEngine3D.cpp の IBLFaceConstants を一致させる必要がある
 cbuffer IBLFaceConstants : register(b0)
@@ -81,7 +82,7 @@ void CSIrradiance(uint3 dispatchThreadID : SV_DispatchThreadID)
             const float3 tangentSample = float3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
             const float3 sampleDir = tangentX * tangentSample.x + tangentY * tangentSample.y + N * tangentSample.z;
 
-            irradiance += SourceSkybox.SampleLevel(SourceSampler, sampleDir, 0.0f).rgb * cos(theta) * sin(theta);
+            irradiance += SourceSkybox.SampleLevel(MaterialSampler, sampleDir, 0.0f).rgb * cos(theta) * sin(theta);
             sampleCount += 1;
         }
     }
@@ -149,7 +150,7 @@ void CSPrefilter(uint3 dispatchThreadID : SV_DispatchThreadID)
     if (Roughness < 1e-3f)
     {
         // ラフネス0(ミップ0)は鏡面そのものなので畳み込み不要。そのままスカイボックスをコピーする
-        PrefilterOut[uint3(dispatchThreadID.xy, 0)] = float4(SourceSkybox.SampleLevel(SourceSampler, N, 0.0f).rgb, 1.0f);
+        PrefilterOut[uint3(dispatchThreadID.xy, 0)] = float4(SourceSkybox.SampleLevel(MaterialSampler, N, 0.0f).rgb, 1.0f);
         return;
     }
 
@@ -166,11 +167,11 @@ void CSPrefilter(uint3 dispatchThreadID : SV_DispatchThreadID)
         const float NdotL = saturate(dot(N, L));
         if (NdotL > 0.0f)
         {
-            prefilteredColor += SourceSkybox.SampleLevel(SourceSampler, L, 0.0f).rgb * NdotL;
+            prefilteredColor += SourceSkybox.SampleLevel(MaterialSampler, L, 0.0f).rgb * NdotL;
             totalWeight += NdotL;
         }
     }
 
-    prefilteredColor = (totalWeight > 0.0f) ? (prefilteredColor / totalWeight) : SourceSkybox.SampleLevel(SourceSampler, N, 0.0f).rgb;
+    prefilteredColor = (totalWeight > 0.0f) ? (prefilteredColor / totalWeight) : SourceSkybox.SampleLevel(MaterialSampler, N, 0.0f).rgb;
     PrefilterOut[uint3(dispatchThreadID.xy, 0)] = float4(prefilteredColor, 1.0f);
 }

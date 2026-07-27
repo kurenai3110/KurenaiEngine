@@ -711,14 +711,7 @@ namespace Kurenai
         m_CurrentSkyboxPath = m_DefaultSkyboxPath;
         m_SkyboxTexture = m_Device->CreateTextureFromFile(m_CurrentSkyboxPath, false);
 
-        m_Sampler = m_Device->CreateDefaultSampler();
-
-        // BRDF積分LUT用。異方性フィルタは画面空間の勾配からタップ位置を広げるため、
-        // NdotVが急変する球の輪郭付近などでLUTの端を大きくまたいでしまう。Linear + Clampにする
-        RHI::SamplerDesc lutSamplerDesc{};
-        lutSamplerDesc.Filter = RHI::SamplerFilter::Linear;
-        lutSamplerDesc.AddressMode = RHI::SamplerAddressMode::Clamp;
-        m_LUTSampler = m_Device->CreateDefaultSampler(lutSamplerDesc);
+        CreateSamplerSets();
 
         // IBL(Image Based Lighting)の3つの畳み込み結果を保持するテクスチャと、それを生成する
         // コンピュートシェーダー一式。実際の畳み込み(スカイボックスのサンプリング)はRender()の
@@ -843,6 +836,38 @@ namespace Kurenai
             Core::Logger::Error("KurenaiEngine3D", message);
             throw std::runtime_error(message);
         }
+    }
+
+    void KurenaiEngine3D::CreateSamplerSets()
+    {
+        // スロットの並びはShaders/3D/Samplers.hlsliの役割定義と一致させること
+        // (s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler)。
+
+        // 色バッファ・LUT用。UVの端が定義域の端なのでClamp、拡縮でブロック状にならないようLinear。
+        // BRDF積分LUTをWrapで引いて実際に不具合を出した経緯はdocs/Architecture.html 14.2.1節
+        RHI::SamplerDesc colorSampler{};
+        colorSampler.Filter = RHI::SamplerFilter::Linear;
+        colorSampler.AddressMode = RHI::SamplerAddressMode::Clamp;
+
+        // 深度・エンコード法線・metallic/roughness・シャドウマップ用。
+        // 補間するとシルエット跨ぎで実在しない値になるためPoint、
+        // カーネルのタップが[0,1]を出たときに反対側の端を読まないためClamp
+        RHI::SamplerDesc dataSampler{};
+        dataSampler.Filter = RHI::SamplerFilter::Point;
+        dataSampler.AddressMode = RHI::SamplerAddressMode::Clamp;
+
+        // マテリアル用。タイリング前提のWrapと、浅い角度で見る床・路面のボケを抑える異方性16x
+        RHI::SamplerDesc materialSampler{};
+        materialSampler.Filter = RHI::SamplerFilter::Anisotropic;
+        materialSampler.AddressMode = RHI::SamplerAddressMode::Wrap;
+
+        const RHI::SamplerDesc materialSet[] = { materialSampler, colorSampler, dataSampler };
+        m_MaterialSamplers = m_Device->CreateSamplerSet(materialSet, static_cast<uint32_t>(std::size(materialSet)));
+
+        // スクリーン空間パスは画面内の中間バッファしか読まないため、s0にもWrapを置かない。
+        // 万一シェーダ側で役割を選び違えても、画面端でUVが反対側へ回り込む不具合が起きないようにする
+        const RHI::SamplerDesc screenSpaceSet[] = { colorSampler, colorSampler, dataSampler };
+        m_ScreenSpaceSamplers = m_Device->CreateSamplerSet(screenSpaceSet, static_cast<uint32_t>(std::size(screenSpaceSet)));
     }
 
     void KurenaiEngine3D::CreateRenderTargets(uint32_t width, uint32_t height)
@@ -1910,7 +1935,7 @@ namespace Kurenai
                     // スライス選択できないため、面ごとに1回ずつディスパッチする
                     cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
                     cmd->SetComputeTexture(0, m_SkyboxTexture.get());
-                    cmd->SetComputeSampler(0, m_Sampler.get());
+                    cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                     for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                     {
                         IBLFaceConstants faceConstants{};
@@ -1925,7 +1950,7 @@ namespace Kurenai
                     // 面×ミップの組み合わせごとに1回ずつディスパッチする
                     cmd->SetComputePipelineState(m_PrefilterPipelineState.get());
                     cmd->SetComputeTexture(0, m_SkyboxTexture.get());
-                    cmd->SetComputeSampler(0, m_Sampler.get());
+                    cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                     for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
                     {
                         const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
@@ -2011,7 +2036,7 @@ namespace Kurenai
 
                 cmd->SetPipelineState(m_GBufferPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-                cmd->SetSampler(0, m_Sampler.get());
+                cmd->SetSamplerSet(m_MaterialSamplers.get());
 
                 for (const auto& instance : m_Scene.Instances)
                 {
@@ -2108,9 +2133,7 @@ namespace Kurenai
                 cmd->UpdateBuffer(m_LightingConstantBuffer.get(), &lightingConstants, sizeof(lightingConstants));
                 cmd->SetConstantBuffer(1, m_LightingConstantBuffer.get());
 
-                cmd->SetSampler(0, m_Sampler.get());
-                // BRDF積分LUT(t9)はエネルギー補正用に引くため、Clampサンプラーを合わせてバインドする
-                cmd->SetSampler(1, m_LUTSampler.get());
+                cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
                 cmd->SetTexture(0, m_GBufferAlbedo.get());
                 cmd->SetTexture(1, m_GBufferNormal.get());
                 cmd->SetTexture(2, m_GBufferMaterial.get());
@@ -2153,7 +2176,7 @@ namespace Kurenai
                 {
                     cmd->SetViewport(gbufferViewport);
                     cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-                    cmd->SetSampler(0, m_Sampler.get());
+                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
 
                     if (m_AOTechnique == AOTechnique::SSAO)
                     {
@@ -2194,6 +2217,10 @@ namespace Kurenai
                 {
                     cmd->SetViewport(gbufferViewport);
                     cmd->SetPipelineState(m_AOBlurPipelineState.get());
+                    // ブラーはカーネルのタップが画面端で[0,1]を出るため、Wrapのサンプラーが
+                    // 1つも入っていないこのセットを明示的にバインドする(以前は直前のパスの
+                    // バインドがそのまま残るのに依存していた)
+                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
                     cmd->SetTexture(0, aoRawTexture);
                     cmd->Draw(3, 0);
                 },
@@ -2227,9 +2254,7 @@ namespace Kurenai
 
                 cmd->SetPipelineState(m_LightingPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-                cmd->SetSampler(0, m_Sampler.get());
-                // BRDF積分LUT(t10)用のClampサンプラー
-                cmd->SetSampler(1, m_LUTSampler.get());
+                cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
                 cmd->SetTexture(0, m_GBufferAlbedo.get());
                 cmd->SetTexture(1, m_DirectLightTexture.get());
                 cmd->SetTexture(2, m_GBufferMaterial.get());
@@ -2293,9 +2318,7 @@ namespace Kurenai
                 cmd->SetViewport(gbufferViewport);
                 cmd->SetPipelineState(m_TransparentPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-                cmd->SetSampler(0, m_Sampler.get());
-                // BRDF積分LUT(t11)用のClampサンプラー
-                cmd->SetSampler(1, m_LUTSampler.get());
+                cmd->SetSamplerSet(m_MaterialSamplers.get());
 
                 if (!gpuLights.empty())
                 {
@@ -2351,7 +2374,7 @@ namespace Kurenai
                     cmd->SetPipelineState(m_SSRPipelineState.get());
                     cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                     cmd->SetConstantBuffer(1, m_SSRConstantBuffer.get());
-                    cmd->SetSampler(0, m_Sampler.get());
+                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
                     cmd->SetTexture(0, m_SceneColor.get());
                     cmd->SetTexture(1, m_GBufferNormal.get());
                     cmd->SetTexture(2, m_GBufferMaterial.get());
@@ -2374,7 +2397,7 @@ namespace Kurenai
             {
                 cmd->SetViewport(gbufferViewport);
                 cmd->SetPipelineState(m_TonemapPipelineState.get());
-                cmd->SetSampler(0, m_Sampler.get());
+                cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
                 cmd->SetTexture(0, hdrSceneColor);
                 cmd->Draw(3, 0);
             },
@@ -2509,7 +2532,7 @@ namespace Kurenai
                 cmd->SetPipelineState(m_PresentPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetConstantBuffer(1, m_PresentConstantBuffer.get());
-                cmd->SetSampler(0, m_Sampler.get());
+                cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
                 cmd->SetTexture(0, presentSourceTexture);
                 cmd->SetTexture(1, presentDebugCubeTexture);
                 cmd->Draw(3, 0);

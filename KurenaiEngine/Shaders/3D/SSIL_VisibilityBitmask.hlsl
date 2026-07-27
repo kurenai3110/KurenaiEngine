@@ -17,6 +17,7 @@
 // PSMain: G-BufferのNormal/Depthと直接光バッファから遮蔽率(AO, alpha)と間接拡散光(GI, rgb)を計算する
 // PSMainBlur: SSAOパスと共有する汎用RGBAボックスブラー(SSAO.hlsl側)を使い回すため、ここには実装しない
 #include "NormalEncoding.hlsli"
+#include "Samplers.hlsli"
 
 static const float PI = 3.14159265359f;
 static const float HALF_PI = 1.57079632679f;
@@ -47,7 +48,6 @@ cbuffer SSILConstants : register(b1)
 Texture2D Texture0 : register(t0);
 Texture2D Texture1 : register(t1);
 Texture2D Texture2 : register(t2);
-SamplerState DefaultSampler : register(s0);
 
 struct PSInput
 {
@@ -81,11 +81,14 @@ float2 ProjectToUV(float3 viewPos)
     return float2(ndc.x * 0.5f + 0.5f, 1.0f - (ndc.y * 0.5f + 0.5f));
 }
 
-// UVを最近傍テクセル中心へスナップする。深度は非線形かつグレージング面で急激に変化するため、
-// バイリニアフィルタで読むとエッジ付近で存在しない中間深度が得られ、再構成した位置が大きくずれる
-// (特に手前・グレージングの床)。テクセル中心ちょうどをサンプルすればバイリニアでも補間が起きず、
-// 実質ポイントサンプリングになる(参照実装XeGTAO/Bevyが深度・法線にポイントサンプラーを使う理由と同じ)。
-// スナップ後のUVを深度サンプルと位置再構成の両方に使うことで、深度とNDC-xyの整合も保たれる。
+// UVを最近傍テクセル中心へスナップする。
+//
+// サンプリング自体はDataSampler(Point + Clamp)なので補間は起きない。それでもこのスナップが
+// 必要なのは、深度とNDC-xyの整合を取るため。sampleUVは深度の読み取りだけでなく
+// ReconstructWorldPosにも渡しており、スナップしないと「深度はテクセル中心の値なのに
+// NDC-xyはテクセル中心からずれた位置」という食い違いが生じ、再構成した位置が実際の
+// ジオメトリからずれる(特に手前・グレージングの床で顕著)。
+// 法線・直接光も同じスナップ後のUVで読むことで、同一テクセルの値どうしで計算できる。
 // invTexSizeは呼び出し側で1回だけ計算し、サンプルごとの除算を乗算に置き換える
 float2 SnapToTexel(float2 uv, float2 texSize, float2 invTexSize)
 {
@@ -191,11 +194,10 @@ void SearchSide(
         }
 
         // 深度・法線・直接光のサンプルは、以降すべてこのスナップ後のUVで読む。
-        // これにより深度がポイントサンプリング相当になり、再構成位置(sampleViewPos)が
-        // テクセルの実際の値と一致する
+        // これにより再構成位置(sampleViewPos)がテクセルの実際の値と一致する(SnapToTexelのコメント参照)
         sampleUV = SnapToTexel(sampleUV, depthTexSize, invDepthTexSize);
 
-        float sampleDepth = Texture1.Sample(DefaultSampler, sampleUV).r;
+        float sampleDepth = Texture1.Sample(DataSampler, sampleUV).r;
         if (sampleDepth <= 0.0f)
         {
             // 背景(スカイ)は寄与しない(Reverse-Zのため遠平面=背景はNDC z=0.0付近になる)
@@ -256,7 +258,7 @@ void SearchSide(
         uint newlySetCount = countbits(newlySetBits);
         if (newlySetCount > 0u)
         {
-            float3 sampleNormalWorld = OctDecode(Texture0.Sample(DefaultSampler, sampleUV).xy);
+            float3 sampleNormalWorld = OctDecode(Texture0.Sample(DataSampler, sampleUV).xy);
 
             float3 lightDirWorld = normalize(sampleWorldPos - worldPos);
             float receiverNdotL = saturate(dot(normalWorld, lightDirWorld));
@@ -264,7 +266,7 @@ void SearchSide(
 
             // サンプル地点の直接光(DirectLighting.hlslで計算済み、シャドウ適用済み)を
             // このサンプルが反射・再放射する放射輝度とみなす(環境光は含めない)
-            float3 sampleRadiance = Texture2.Sample(DefaultSampler, sampleUV).rgb;
+            float3 sampleRadiance = Texture2.Sample(DataSampler, sampleUV).rgb;
 
             float weight = float(newlySetCount) / float(kSectorCount);
             gi += sampleRadiance * weight * receiverNdotL * emitterNdotL;
@@ -301,7 +303,7 @@ float SearchSlice(
 
 float4 PSMain(PSInput input) : SV_TARGET
 {
-    float depth = Texture1.Sample(DefaultSampler, input.UV).r;
+    float depth = Texture1.Sample(DataSampler, input.UV).r;
     if (depth <= 0.0f)
     {
         // 背景(スカイ)は遮蔽なし・間接光なし
@@ -324,7 +326,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float2 invDepthTexSize = 1.0f / depthTexSize;
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 normalWorld = OctDecode(Texture0.Sample(DefaultSampler, input.UV).xy);
+    float3 normalWorld = OctDecode(Texture0.Sample(DataSampler, input.UV).xy);
 
     float3 P = mul(float4(worldPos, 1.0f), View).xyz;
     float3 N = normalize(mul(normalWorld, (float3x3)View));

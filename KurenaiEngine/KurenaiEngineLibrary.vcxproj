@@ -114,7 +114,7 @@
     <ClInclude Include="Source\Library\RHI\IRHIImGuiBackend.h" />
     <ClInclude Include="Source\Library\RHI\IRHIGPUProfiler.h" />
     <ClInclude Include="Source\Library\RHI\IRHITexture.h" />
-    <ClInclude Include="Source\Library\RHI\IRHISampler.h" />
+    <ClInclude Include="Source\Library\RHI\IRHISamplerSet.h" />
     <ClInclude Include="Source\Library\RHI\TextureImage.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11Buffer.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11Shader.h" />
@@ -126,7 +126,7 @@
     <ClInclude Include="Source\Library\RHI\DX11\DX11ImGuiBackend.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11GPUProfiler.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11Texture.h" />
-    <ClInclude Include="Source\Library\RHI\DX11\DX11Sampler.h" />
+    <ClInclude Include="Source\Library\RHI\DX11\DX11SamplerSet.h" />
     <ClInclude Include="Source\Library\RHI\DX11\DX11Util.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Util.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12DescriptorHeap.h" />
@@ -140,7 +140,7 @@
     <ClInclude Include="Source\Library\RHI\DX12\DX12ImGuiBackend.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12GPUProfiler.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Texture.h" />
-    <ClInclude Include="Source\Library\RHI\DX12\DX12Sampler.h" />
+    <ClInclude Include="Source\Library\RHI\DX12\DX12SamplerSet.h" />
     <ClInclude Include="..\ThirdParty\imgui\imgui.h" />
     <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_win32.h" />
     <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_dx11.h" />
@@ -174,7 +174,7 @@
     <ClCompile Include="Source\Library\RHI\DX11\DX11ImGuiBackend.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11GPUProfiler.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Texture.cpp" />
-    <ClCompile Include="Source\Library\RHI\DX11\DX11Sampler.cpp" />
+    <ClCompile Include="Source\Library\RHI\DX11\DX11SamplerSet.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12DescriptorHeap.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Buffer.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Shader.cpp" />
@@ -186,7 +186,7 @@
     <ClCompile Include="Source\Library\RHI\DX12\DX12ImGuiBackend.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12GPUProfiler.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Texture.cpp" />
-    <ClCompile Include="Source\Library\RHI\DX12\DX12Sampler.cpp" />
+    <ClCompile Include="Source\Library\RHI\DX12\DX12SamplerSet.cpp" />
     <!-- 配布されているDirectXTex.libはDesktop_2022向けにD3D11用ソースのみでビルドされておりD3D12関数を含まないため、
          D3D12ヘルパー(CreateTextureEx/PrepareUpload等)のみこのプロジェクトで直接コンパイルする -->
     <ClCompile Include="..\ThirdParty\DirectXTex\DirectXTex\DirectXTexD3D12.cpp" />
