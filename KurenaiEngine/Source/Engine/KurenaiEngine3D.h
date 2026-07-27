@@ -319,6 +319,14 @@ namespace Kurenai
         // Perez分布そのままではIBL全体の寄与が強すぎたため(実機で指摘された見た目の問題)
         bool m_IBLEnabled = true;
         float m_IBLIntensity = 0.5f;
+        // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)のON/OFF。
+        // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立したトグルにしている。
+        // FrameConstants.ShadowParams.wへ1.0f/0.0fとして渡し、3つのシェーダー(DirectLighting/
+        // DeferredLighting/Transparent)が共有するSpecularEnergy.hlsliの
+        // SpecularEnergyCompensationがこれを見て倍率1.0へ落とす。
+        // 既定でONにしているのは、補正しない状態がエネルギー的に不正(粗い面ほど暗い)であり、
+        // OFFは実装検証・A/B比較のための選択肢という位置付けのため(14.9節)
+        bool m_SpecularEnergyCompensationEnabled = true;
         // Enable IBL無効時に使う定数色アンビエントフォールバックの強度倍率。シェーダ側ではなく
         // Render()がFrameConstants.AmbientColorへ書き込む時点でrgb(alphaのdayFactorは除く)に
         // 乗算する(HLSL側は素のAmbientColor.rgbを読むだけでよい)

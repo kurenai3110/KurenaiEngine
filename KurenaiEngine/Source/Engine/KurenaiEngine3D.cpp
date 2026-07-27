@@ -47,7 +47,9 @@ namespace Kurenai
             // 最大ミップレベル(kIBLPrefilterMipLevels-1、DeferredLighting.hlslがラフネス→ミップの
             // 変換に使う)。z: IBL強度倍率(m_IBLEnabled=falseの場合は0.0fを渡し、シェーダ側で
             // EvaluateIBLの代わりに定数色アンビエント(AmbientColor.rgb)へフォールバックする)。
-            // wは未使用
+            // w: スペキュラのマルチスキャッタリング・エネルギー補正の有効フラグ
+            // (m_SpecularEnergyCompensationEnabled、1.0f=有効/0.0f=無効。共有ヘッダー
+            // SpecularEnergy.hlsliのSpecularEnergyCompensationが読む。14.9節)
             DirectX::XMFLOAT4 ShadowParams;
             // 半透明パス(Transparent.hlsl)専用。x=t8のライトリストの有効数。DirectLighting.hlslは
             // 専用のLightingConstants(b1)で受け取るためこのフィールドを使わない(末尾に追加のため
@@ -1198,6 +1200,10 @@ namespace Kurenai
             ImGui::SliderFloat("Ambient Scale", &m_AmbientScale, 0.0f, 3.0f);
         }
 
+        // スペキュラのマルチスキャッタリング・エネルギー補正(14.9節)。IBL鏡面・直接光鏡面の
+        // 両方に効くため、Enable IBLのブロックの内側ではなく独立したチェックボックスにする
+        ImGui::Checkbox("Specular Energy Compensation", &m_SpecularEnergyCompensationEnabled);
+
         ImGui::Checkbox("Enable VSync", &m_VSyncEnabled);
 
         ImGui::Checkbox("Fixed FPS", &m_FixedFPSEnabled);
@@ -1823,7 +1829,13 @@ namespace Kurenai
         };
         constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
         const float iblIntensity = m_IBLEnabled ? m_IBLIntensity : 0.0f;
-        constants.ShadowParams = { m_ShadowLightSize, static_cast<float>(kIBLPrefilterMipLevels - 1), iblIntensity, 0.0f };
+        const float specularEnergyCompensation = m_SpecularEnergyCompensationEnabled ? 1.0f : 0.0f;
+        constants.ShadowParams = {
+            m_ShadowLightSize,
+            static_cast<float>(kIBLPrefilterMipLevels - 1),
+            iblIntensity,
+            specularEnergyCompensation,
+        };
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
@@ -2030,6 +2042,9 @@ namespace Kurenai
             {
                 m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                 m_ShadowCascades[0].get(), m_ShadowCascades[1].get(), m_ShadowCascades[2].get(), m_ShadowCascades[3].get(),
+                // スペキュラのエネルギー補正(14.9節)でEss=brdf.x+brdf.yを引くためBRDF積分LUTを読む。
+                // Readsに挙げることでRenderGraphがIBLBakeパス(このLUTのWriter)より後に順序付ける
+                m_BRDFLUTTexture.get(),
             },
             .RenderTargets = { m_DirectLightTexture.get() },
             .Execute = [this, &gbufferViewport, &gpuLights](RHI::IRHICommandList* cmd)
@@ -2064,6 +2079,9 @@ namespace Kurenai
                     cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
                 }
                 cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+                // スペキュラのエネルギー補正(14.9節)用のBRDF積分LUT。t8はライトリスト
+                // (StructuredBuffer)が占有しているためt9に置く
+                cmd->SetTexture(9, m_BRDFLUTTexture.get());
 
                 cmd->Draw(3, 0);
             },

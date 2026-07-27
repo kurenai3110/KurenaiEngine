@@ -12,6 +12,7 @@ KurenaiEngineLibrary.dllから公開しており、独自の描画パイプラ�
 `KurenaiEngine3D`はKurenaiEngine専用モデルパッケージ(`.kmodel`)とシーンファイル(`.kscene`)の
 読み込み・描画に対応した、Deferred Shading・HDRレンダリング・カスケードシャドウマップ(PCF/PCSS)・
 IBL(スカイボックスから焼いた拡散イラディアンス・プリフィルタ済み鏡面による環境光)・
+スペキュラのマルチスキャッタリング・エネルギー補正・
 SSAO/SSIL・SSR・複数ライト(ポイント/スポット、カンデラ/ルクス単位)・半透明描画(専用フォワードパスで
 アルファブレンド合成)を備えた完結型3Dレンダラーです。
 `.gltf`/`.fbx`/`.obj`等のソースモデルは、付属のオフラインツール**KurenaiPacker.exe**で`.kmodel`へ事前変換して
@@ -210,7 +211,7 @@ Sample3D.exe -dx12
 画面左上に表示される5つのImGuiパネルから各種設定を変更できます(F1キーで表示/非表示を切り替え可能)。
 
 - **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Surface Test(粗さ0〜1の球体列)、Light Test(ポイント/スポット/平行光の検証用シーン)、Multi Model Test(TRS配置の確認用))
-- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能)。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
+- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能)。スペキュラBRDFのマルチスキャッタリング・エネルギー補正もここでON/OFFできます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / IBL(拡散イラディアンス・プリフィルタ済み鏡面・BRDF LUT) 等、各パス中間結果のデバッグ表示)
 - **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)・
   EV100(実在の写真露出値。太陽/環境光/ポイント・スポットライトすべてに一様にかかるシーン全体の

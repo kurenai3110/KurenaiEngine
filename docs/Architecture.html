@@ -1075,9 +1075,12 @@ C++側(<code>KurenaiEngine3D::Render</code>のIBLBakeパス)が面ごとに1回�
 <ul>
 <li><strong>BRDF積分LUT</strong>(<code>BRDFLUT.hlsl</code> CSMain) — スカイボックスに依存しないため
 (NdotV, ラフネス)の128x128グリッドをGGXインポータンスサンプリング(1024サンプル)で積分し、
-(スケールA, バイアスB)のペアをR16G16_Floatへ焼く。IBL用の可視性項は直接光用(<code>k=(r+1)^2/8</code>)
-とは異なり<code>k=roughness^2/2</code>を使う(Karis 2013)。方向性を持たない2Dテーブルのため、
-これだけは通常のTexture2Dのまま(面ごとのディスパッチは不要)。</li>
+(スケールA, バイアスB)のペアをR16G16_Floatへ焼く。可視性項はSmith-GGXへの最良フィットである
+<code>k=roughness^2/2</code>を使う。<b>この可視性項は実行時のスペキュラBRDFと必ず同一でなければ
+ならない</b>(14.9節のエネルギー補正がこのLUTを実際のBRDFの方向アルベドとして使うため)ので、
+定義は共有ヘッダー<code>SpecularEnergy.hlsli</code>へ一本化し、このLUT生成と
+<code>DirectLighting.hlsl</code>/<code>Transparent.hlsl</code>が同じ関数を呼ぶようにしている。
+方向性を持たない2Dテーブルのため、これだけは通常のTexture2Dのまま(面ごとのディスパッチは不要)。</li>
 <li><strong>拡散イラディアンス</strong>(<code>IBLConvolve.hlsl</code> CSIrradiance) —
 出力テクセルが表す法線方向Nについて、接空間の半球を(phi, theta)の等間隔グリッド
 (0.025rad刻み)で離散化し、cosθsinθ重み付き平均をとる(モンテカルロではなく決定的な離散化。
@@ -1131,6 +1134,15 @@ t9(PrefilteredEnv、TextureCube)・t10(BRDFLUT)を追加し11枚になった。D
 共有する固定サイズのSRVディスクリプタテーブルを使う設計(4章のシャドウカスケード統合時と同じ制約)
 のため、<code>DX12CommandList::kTextureSlotCount</code>と<code>DX12Device.cpp</code>側の同名定数を
 9(t0〜t8)から11(t0〜t10)へ拡張した。
+</p>
+<p>
+その後、直接光パス(<code>DirectLighting.hlsl</code>)もBRDF積分LUTを読むようになった
+(14.9節のエネルギー補正で<code>Ess = brdf.x + brdf.y</code>が必要なため)。このパスは
+t0〜t7がG-Buffer+シャドウカスケード、<b>t8がライトリストの<code>StructuredBuffer</code></b>で
+埋まっているため、LUTは<code>t9</code>に置いた。使用スロットは10枚で既存の
+<code>kTextureSlotCount = 12</code>に収まるため、上限の再拡張は不要だった。
+RenderGraphの<code>.Reads</code>へ<code>m_BRDFLUTTexture</code>を挙げることで、
+このLUTのWriterであるIBLBakeパスより後に自動的に順序付けられる。
 </p>
 <p>
 Render Targetsパネルの「IBL - Irradiance」「IBL - Prefiltered Specular」デバッグ表示は、
@@ -1241,6 +1253,208 @@ IBL導入以前と同じ定数色アンビエント(<code>AmbientColor.rgb * ao<
 IBL全体の寄与が強すぎたため(実機でON/OFF比較したところ、IBL無効時はシーンがほぼ真っ暗になるほど
 IBLが支配的だったことから、既定強度を下げて調整可能にした)。
 </p>
+
+<h3>14.9 スペキュラのエネルギー整合(Disney再マップ除去 + マルチスキャッタリング補正)</h3>
+<p>
+Cook-Torrance(GGX)のスペキュラ項<code>f = D&middot;G&middot;F / (4(n&middot;l)(n&middot;v))</code>は、
+マイクロファセット間の<b>1回だけの反射</b>しか考慮していない。Smith幾何項<code>G</code>が遮蔽として
+捨てた光は、現実には隣のマイクロファセットへ跳ね返って外へ出ていくが、単一散乱モデルはそれを
+数えないためエネルギーが失われる。失われる量は<code>F = 1</code>としたときの方向アルベド
+<code>Ess</code>で測れる(<code>BRDFLUT.hlsl</code>の<code>IntegrateBRDF</code>を再現して算出、
+N&middot;V = 1.0):
+</p>
+<table>
+<tr><th>roughness</th><th>0.0</th><th>0.4</th><th>0.6</th><th>0.8</th><th>1.0</th></tr>
+<tr><td><code>Ess</code></td><td>1.000</td><td>0.957</td><td>0.797</td><td>0.537</td><td>0.307</td></tr>
+<tr><td>失われる割合</td><td>0%</td><td>4%</td><td>20%</td><td>46%</td><td><b>69%</b></td></tr>
+</table>
+<p>
+ラフネス1.0では7割が消える。粗い金属が本来より暗く、多重反射のたびに金属色が乗るはずの彩度も
+低く見える原因である。
+</p>
+
+<h4>14.9.1 前提として直接光のDisneyラフネス再マップを除去した</h4>
+<p>
+直接光とIBLは<b>同じSchlick-GGX可視性項</b><code>G1(x) = (n&middot;x) / ((n&middot;x)(1-k) + k)</code>を
+使うが、以前は<code>k</code>が異なっていた。直接光が<code>(roughness + 1)&sup2; / 8</code>、
+IBL(BRDF LUT)が<code>roughness&sup2; / 2</code>である。
+</p>
+<p>
+Schlick近似がSmith-GGXに最もよく一致するのは<code>k = &alpha;/2</code>(&alpha; = roughness&sup2;)で、
+<b>IBL側が物理的に正しいフィット</b>である。直接光側はそこに<b>Disneyのラフネス再マップ</b>
+(Burley 2012)<code>&alpha;' = ((roughness+1)/2)&sup2;</code>を挟んだもので、点光源のハイライトが
+低ラフネスで鋭すぎる問題("hotness")を意図的に抑えるための<b>非物理な調整</b>である
+(Karis, SIGGRAPH 2013 "Real Shading in Unreal Engine 4"。同文献はこの再マップについて
+「解析光源にのみ使うこと。IBLに適用すると斜めの角度で暗くなりすぎる」と明記している)。
+</p>
+<p>
+この再マップは2つの弊害を生んでいた。<b>(1)</b> Smith-GGXの正しいフィットから意図的にずらしており
+物理的に不正確。<b>(2)</b> BRDF積分LUTは<code>k = roughness&sup2;/2</code>で焼かれているため、
+<code>k</code>の違う直接光へLUT由来の<code>Ess</code>を適用してもエネルギー補正が整合しない。
+そこで<b>再マップを除去し、直接光もIBLと同じ<code>k = roughness&sup2;/2</code>へ統一した</b>。
+可視性項の定義は共有ヘッダー<code>SpecularEnergy.hlsli</code>へ一本化し、
+LUT生成(<code>BRDFLUT.hlsl</code>)・直接光(<code>DirectLighting.hlsl</code>)・半透明
+(<code>Transparent.hlsl</code>)の3つが同じ関数を呼ぶことで、
+<b>「LUTと実行時BRDFが同じ可視性項を使う」という不変条件をコメントではなく構造で保証</b>している。
+</p>
+<p>
+除去による直接光スペキュラのエネルギー倍率
+<code>Ess(k=r&sup2;/2) / Ess(k=(r+1)&sup2;/8)</code>の実測値(行が N&middot;V、列が roughness):
+</p>
+<table>
+<tr><th>N&middot;V</th><th>r=0.1</th><th>r=0.2</th><th>r=0.4</th><th>r=0.7</th><th>r=1.0</th></tr>
+<tr><td><b>0.1</b>(ほぼ真横)</td><td>5.01x</td><td>4.09x</td><td>2.32x</td><td>1.42x</td><td>1.00x</td></tr>
+<tr><td><b>0.2</b></td><td>2.47x</td><td>2.45x</td><td>1.86x</td><td>1.32x</td><td>1.00x</td></tr>
+<tr><td><b>0.4</b></td><td>1.48x</td><td>1.52x</td><td>1.44x</td><td>1.21x</td><td>1.00x</td></tr>
+<tr><td><b>0.7</b></td><td>1.13x</td><td>1.15x</td><td>1.16x</td><td>1.11x</td><td>1.00x</td></tr>
+<tr><td><b>1.0</b>(正面)</td><td>1.00x</td><td>1.00x</td><td>1.03x</td><td>1.05x</td><td>1.00x</td></tr>
+</table>
+<p>
+斜め視線 &times; 滑らかな面で最大5倍明るくなる(グレージング角でフレネルが1へ漸近する物理的に
+正しい挙動)。<code>roughness = 1.0</code>では<code>1&sup2;/2 = 0.5 = (1+1)&sup2;/8</code>で
+両者が厳密に一致するため変化せず、正面視(N&middot;V = 1)でも<code>G1</code>は<code>k</code>に
+よらず1になるため変化しない。
+</p>
+
+<h4>14.9.2 補正式とBRDF LUTの再利用</h4>
+<p>
+Kulla &amp; Conty, "Revisiting Physically Based Shading at Imageworks"(SIGGRAPH 2017)の
+multiple-scattering energy compensationの実時間近似を使う。
+</p>
+<pre><code>Ess  = brdf.x + brdf.y
+comp = 1 + F0 * (1 / Ess - 1)
+specular *= comp</code></pre>
+<p>
+補正後の方向アルベドは<code>Ess &middot; comp = Ess + F0(1 - Ess)</code>となり、
+「失われたぶんを<code>F0</code>で1回だけ跳ね返して戻す」形(等比級数の第1項近似)になる。
+<code>F0 = 1</code>(完全な金属)なら厳密に1でエネルギー保存し、<code>F0 = 0.04</code>(誘電体)なら
+失われたぶんの4%しか戻さない ―― これも正しく、誘電体は残りを透過・吸収するため。
+</p>
+<p>
+<b><code>Ess</code>は既存のBRDF積分LUTから追加チャンネル無しで得られる。</b>
+<code>BRDFLUT.hlsl</code>はSchlickのフレネル<code>F = F0(1-Fc) + Fc</code>を括り出して
+<code>A = &int;(1-Fc)Gvis</code>、<code>B = &int;Fc&middot;Gvis</code>を焼いており、
+<code>F0&middot;A + B</code>はそのF0における方向アルベドそのものである。よって<code>F0 = 1</code>を
+代入した<code>A + B</code>が、ここで必要な「<code>F = 1</code>のときの方向アルベド」に一致する。
+LUTのフォーマット(R16G16_Float / 128x128)変更もチャンネル追加も不要だった。
+</p>
+<p>
+<b>残る近似</b>: 本来のKulla-Contyは<code>E(N&middot;V)</code>・<code>E(N&middot;L)</code>・
+<code>Eavg</code>(全方向平均)の3つを使うが、この実時間近似は<code>E(N&middot;V)</code>のみで
+済ませているため、視線方向と光源方向の非対称性(相反性)は厳密には再現されない。
+</p>
+
+<h4>14.9.3 適用箇所とトグル</h4>
+<p>
+補正は<b>鏡面項にのみ</b>掛ける。適用は5箇所:
+</p>
+<table>
+<tr><th>ファイル</th><th>対象</th></tr>
+<tr><td><code>DeferredLighting.hlsl</code></td><td><code>EvaluateIBL</code>の<code>specularIBL</code></td></tr>
+<tr><td><code>DirectLighting.hlsl</code></td><td><code>EvaluateDirectBRDF</code>の<code>specular</code>(太陽・ライトリストの両方から呼ばれる)</td></tr>
+<tr><td><code>Transparent.hlsl</code></td><td><code>EvaluateDirectBRDF</code>の<code>outSpecular</code> / <code>EvaluateIBLSplit</code>の<code>outSpecular</code> / IBL無効時フォールバックの<code>ambientSpecular</code></td></tr>
+</table>
+<p>
+<code>Ess</code>は<code>(N&middot;V, roughness)</code>だけの関数でピクセル内では一定なので、
+LUTのサンプルと補正倍率の計算はPSMainで1度だけ行い、ライトのループへは
+<code>float3 energyCompensation</code>を引数で渡している(ループ内でLUTを引くとライト数ぶん
+テクスチャフェッチが増えてしまう)。追加コストはピクセルあたり1サンプルのみ。
+<code>Transparent.hlsl</code>の<code>EvaluateDirectBRDF</code>は事前乗算済みアルファ出力(15.8節)の
+ために拡散/鏡面を分離して返す構造になっているため、<b>補正が鏡面側にだけ掛かることがコード上で
+自明</b>になっている。
+</p>
+<p>
+ImGuiのPost Processingパネルに<code>Specular Energy Compensation</code>チェックボックスを追加した。
+IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>のネストの<b>外</b>に置いている。
+値は未使用だった<code>FrameConstants.ShadowParams.w</code>へ1.0f/0.0fとして渡すため、
+<code>FrameConstants</code>のレイアウト(末尾追加規約)に手を入れる必要はなかった。
+無効時は共有ヘッダーの<code>SpecularEnergyCompensation</code>が恒等元の1を返すので、
+呼び出し側5箇所はすべて無条件に乗算するだけでよく、分岐の書き忘れが起きない。
+</p>
+
+<h4>14.9.4 拡散項<code>kd</code>を変更しない判断</h4>
+<p>
+鏡面が増えるぶん拡散を減らすべきか検討したが、<code>kd = (1 - F)(1 - metallic)</code>は
+変更しないこととした。
+</p>
+<ul>
+<li>補正が最大になる金属では<code>kd = 0</code>で、そもそも削るべき拡散項が存在しない</li>
+<li>誘電体では補正倍率が最大1.090にとどまり、しかも掛かる先は小さな鏡面項。総出射エネルギーへの
+増分は1%未満のオーダー</li>
+<li><code>Ess &middot; comp = Ess + F0(1 - Ess) &le; 1</code>が<code>F0 &le; 1</code>から従うため、
+<code>kd</code>をそのままにしてもエネルギー超過は起きない</li>
+<li>直接光とIBLで<code>kd</code>の式が既に異なる(直接光は<code>F(V&middot;H)</code>、IBLはLagardeの
+ラフネス考慮フレネル)ため、両者へ整合をとりながら減算を入れると修正箇所が5から9へ増え、
+どこかで不整合が生じるリスクが上がる</li>
+</ul>
+
+<h4>14.9.5 SSRを対象外とした判断</h4>
+<p>
+<code>SSR.hlsl</code>の反射の重みは<code>reflectivity = max(FresnelSchlick(N&middot;V, F0))</code>という
+アドホックなスカラーで、方向アルベドではない。Kulla-Contyの補正式は「乗算先が単一散乱の方向
+アルベドである」ことを前提に導出されているため、この量に掛けても意味を持たない。加えてSSRは
+補正済みの<code>specularIBL</code>を含む<code>baseColor</code>へ<b>加算</b>合成するので、
+掛けると同じ多重散乱ぶんを二重に計上してしまう。さらにSSRの<code>roughnessCutoff</code>(既定0.6)
+より上でしか補正は意味を持たないが、その領域では<code>roughnessFade</code>がゼロに落ちる。
+</p>
+
+<h4>14.9.6 実機での検証結果と、現行アセットにおける効果の限界</h4>
+<p>
+<b>可視性項の共有ヘッダー化はLUTを変えていない</b>: Render Targetsパネルの
+「IBL - BRDF LUT」表示を移行前後で画素比較し、<b>差分ゼロ</b>を確認した(同一式のため期待値どおり)。
+</p>
+<p>
+<b>Bistroでは再マップ除去の差がほぼ出ない</b>: Bistro Exteriorの既定カメラで差分ゼロ、Interiorで
+12ピクセルだった。原因はアセット側にある ―― Bistroの全198メッシュが
+<code>MetallicRoughnessTextureIndex = -1</code>(白1x1プレースホルダー &rarr; g = 1.0)であり、
+うち162メッシュはラフネス係数も無効値(11.3.2節)のため係数1.0として扱われる。結果として
+<b><code>roughness = 1.0</code>で描かれ、これは再マップの差が厳密に消える値</b>である。
+</p>
+<p>
+<b>エネルギー補正は現行アセットでは目視できない</b>: 全パッケージの<code>MeshEntry</code>を
+パースすると<b>210メッシュすべて<code>MetallicFactor = 0.0</code></b>である
+(Exterior 132 / Interior 66 / MaterialTest 12。BistroはOBJ/MTL由来で
+<code>AI_MATKEY_METALLIC_FACTOR</code>を持たないため既定値0のまま)。<code>F0 = 0.04</code>固定では
+補正倍率が最大1.090にとどまり、White Surface Test(白球・アルベド1.0)ではトグルON/OFFの差が
+<b>1ピクセル</b>しか出なかった(球ごとの平均輝度では+0.001〜+0.014%の一貫した増加として観測でき、
+配線自体は機能している)。白い誘電体では鏡面成分が全体のごく一部だからである。
+</p>
+<p>
+<b>Bistroでのエネルギー補正のON/OFF比較</b>: Bistroは前述のとおり全面<code>roughness = 1.0</code>で
+描かれるため、<code>Ess = 0.307</code>&rarr;補正倍率1.090となり、<b>誘電体としては補正が最大になる
+条件</b>にあたる。ImGuiパネルを避けた3D領域(580x510)で既定カメラのON/OFFを比較した結果:
+</p>
+<table>
+<tr><th>シーン</th><th>差分が出たピクセル</th><th>1chあたりの最大差分</th><th>領域平均輝度の変化</th></tr>
+<tr><td>Exterior</td><td>177,462 / 295,800(60.0%)</td><td>2/255</td><td>79.365 &rarr; 79.698(+0.420%)</td></tr>
+<tr><td>Interior</td><td>222,046 / 295,800(75.1%)</td><td>2/255</td><td>52.192 &rarr; 52.663(+0.904%)</td></tr>
+</table>
+<p>
+シーンのほぼ全面に効いているが変化量は1〜2階調にとどまり、<b>目視では区別できない</b>。Interiorの
+方が相対変化が大きいのは元々暗く(平均52対79)、鏡面成分の占める割合が相対的に大きいためである。
+なお<b>純粋な空の領域では差分が厳密にゼロ</b>であることも確認した
+(<code>DeferredLighting.hlsl</code>が背景ピクセルを早期returnしBRDFを通さないため。
+期待どおりの挙動)。
+</p>
+<p>
+<b>そこで一時的に<code>metallic = 1.0</code>を強制して実装の正しさを検証した</b>
+(<code>DeferredLighting.hlsl</code>/<code>DirectLighting.hlsl</code>のPSMainへデバッグコードを入れ、
+検証後に撤去)。トグルON/OFFの差は11,060ピクセル・最大112/255に拡大し、White Surface Testの
+球ごとの倍率は<b>粗い側1.163倍から滑らかな側1.036倍へ単調減少</b>した。さらに<b>補正ON時の輝度が
+全ラフネスでほぼ一定(165〜166)</b>になった ―― これは<code>F0 = 1</code>のとき
+<code>Ess &middot; comp = 1</code>となるエネルギー保存の性質そのもので、式が正しく実装されている
+ことの直接的な証拠である。
+</p>
+<p>
+<b>DX11 / DX12の一致</b>: 3シーン(Exterior / Interior / White Surface Test)すべてで画素差分は
+0〜3ピクセル。<code>metallic = 1.0</code>を強制した検証時も差分ゼロだった。
+</p>
+<p>
+<b>まとめ</b>: 今回の変更で目に見える差が出るのは再マップ除去(斜め視線 &times; 滑らかな面)だけで、
+エネルギー補正は物理的な正しさの底上げにとどまる。効果が最大化する「粗い金属」を現行のアセットは
+一つも持っていないため、将来<code>metallicFactor = 1.0</code>のマテリアルを追加した時点で
+初めて視覚的に意味を持つ。
+</p>
 </section>
 
 <section id="transparent">
@@ -1318,11 +1532,21 @@ Write-after-Writeの依存関係から自動的にその後に置かれる。SSR
 直接光の計算式・PCSS(Percentage Closer Soft Shadows)のシャドウサンプリングを<code>Transparent.hlsl</code>
 側にそのまま複製している。両ファイルはフルスクリーンパス(<code>DirectLighting.hlsl</code>)と
 頂点ごとに個別描画するフォワードパス(<code>Transparent.hlsl</code>)という異なる呼び出し形態を
-持ち、既存のシェーダー間で関数を共有する<code>#include</code>の仕組みがこのエンジンには
-(<code>NormalEncoding.hlsli</code>以外)存在しないため、新たに共有ヘッダーを設けて
-<code>DirectLighting.hlsl</code>側を書き換えるより、既存のコードをそのまま複製する方が
-既存パスへの影響がなく安全と判断した。両ファイルの物理式を変更する場合は両方を同時に
-修正する必要がある。
+持つため、当初は共有ヘッダーを設けて<code>DirectLighting.hlsl</code>側を書き換えるより、
+既存のコードをそのまま複製する方が既存パスへの影響がなく安全と判断した。
+</p>
+<p>
+その後、<b>リソースにも呼び出し形態にも依存しない純粋な数式だけは共有ヘッダーへ切り出す</b>方針へ
+改めた。<code>SpecularEnergy.hlsli</code>(<code>NormalEncoding.hlsli</code>に次ぐ2つ目の共有ヘッダー)が
+Smith可視性項とスペキュラのエネルギー補正を持ち、<code>DirectLighting.hlsl</code>・
+<code>Transparent.hlsl</code>・<code>BRDFLUT.hlsl</code>の3つがこれを<code>#include</code>する
+(14.9節)。可視性項については、BRDF積分LUTを焼くときのBRDFと実行時に評価するBRDFが必ず同一で
+なければエネルギー補正が成り立たないため、<b>複製ではなく共有が要件</b>になったという事情がある。
+</p>
+<p>
+一方、<code>D</code>項(<code>DistributionGGX</code>)・フレネル項・PCSSのシャドウサンプリングは
+依然として両ファイルに複製されている(呼び出し形態やバインドされるリソースに依存するため)。
+<b>これらの物理式を変更する場合は両方を同時に修正する必要がある。</b>
 </p>
 <h3>15.6 有効ライト数の受け渡し(<code>ActiveLightCount</code>)</h3>
 <p>

@@ -7,10 +7,17 @@
 // ライティングのPBR計算・PCSS(Percentage Closer Soft Shadows)はDirectLighting.hlslと同じ式を使う
 // (このシェーダーは1メッシュぶんずつ描画するフォワードパスのため、フルスクリーンパスの
 // DirectLighting.hlslとは呼び出し形態が異なり#includeで共有できず、必要な関数のみ複製している)。
+// ただしSmith可視性項とスペキュラのエネルギー補正は、リソースにも呼び出し形態にも依存しない
+// 純粋な数式であり、かつBRDF積分LUTの生成と必ず一致していなければならないため、
+// SpecularEnergy.hlsliへ切り出して共有している。
 //
 // DX12のルートシグネチャがCBVをb0/b1の2枠しか持たないため、GBuffer.hlslと同じくb1に
 // ObjectConstants(モデル行列)を置く。そのためDirectLighting.hlsl側のb1(LightingConstants、
 // 有効ライト数)をここでは使えず、有効ライト数はFrameConstants末尾のActiveLightCountで受け取る
+
+// Smith可視性項とスペキュラのエネルギー補正。DirectLighting.hlslのPBR計算を複製している
+// このシェーダーでも、BRDF積分LUT(BRDFLUT.hlsl)と同じ可視性項を使う必要があるため共有する
+#include "SpecularEnergy.hlsli"
 
 static const float PI = 3.14159265359f;
 
@@ -120,17 +127,8 @@ float DistributionGGX(float NdotH, float roughness)
     return a2 / max(PI * d * d, 1e-6f);
 }
 
-float GeometrySchlickGGX(float NdotX, float roughness)
-{
-    float r = roughness + 1.0f;
-    float k = (r * r) / 8.0f;
-    return NdotX / (NdotX * (1.0f - k) + k);
-}
-
-float GeometrySmith(float NdotV, float NdotL, float roughness)
-{
-    return GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
-}
+// GeometrySchlickGGX / GeometrySmith はSpecularEnergy.hlsliの共有定義を使う
+// (以前ここにあったDisneyのラフネス再マップ k=(roughness+1)^2/8 は除去した。理由は同ヘッダー参照)
 
 float3 FresnelSchlick(float cosTheta, float3 F0)
 {
@@ -238,6 +236,7 @@ float ComputeCascadedShadowFactor(float3 worldPos, float viewDepth, float NdotL)
 // 鏡面反射は不透明度で減衰させず背景の上へ加算するため。PSMain末尾のコメント参照)
 void EvaluateDirectBRDF(
     float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness,
+    float3 energyCompensation,
     out float3 outDiffuse, out float3 outSpecular)
 {
     float3 H = normalize(V + L);
@@ -250,7 +249,10 @@ void EvaluateDirectBRDF(
     float G = GeometrySmith(NdotV, NdotL, roughness);
     float3 F = FresnelSchlick(VdotH, F0);
 
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f);
+    // energyCompensationはPSMainで1度だけ計算して渡される(SpecularEnergy.hlsli、14.9節)。
+    // このシェーダーは拡散/鏡面を別々に返すため、補正が鏡面側にだけ掛かることがコード上で自明になる
+    // (拡散項kdは変更しない。理由は14.9節)
+    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energyCompensation;
     float3 kd = (1.0f - F) * (1.0f - metallic);
     float3 diffuse = kd * albedo / PI;
 
@@ -286,7 +288,8 @@ void EvaluateIBLSplit(
     // 夜間の減衰はDeferredLighting.hlslと同じくAmbientColor.aで行う(プリフィルタマップ・
     // イラディアンスマップは昼固定のスカイボックスから焼いたものなので、これが唯一の減光手段)
     outDiffuse = kd * albedo * irradiance * AmbientColor.a;
-    outSpecular = prefiltered * (F0 * brdf.x + brdf.y) * AmbientColor.a;
+    outSpecular = prefiltered * (F0 * brdf.x + brdf.y)
+        * SpecularEnergyCompensation(F0, brdf, ShadowParams.w) * AmbientColor.a;
 }
 
 float DistanceAttenuation(float distSq, float range)
@@ -304,6 +307,7 @@ float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float an
 
 void EvaluateLight(
     GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
+    float3 energyCompensation,
     out float3 outDiffuse, out float3 outSpecular)
 {
     outDiffuse = float3(0.0f, 0.0f, 0.0f);
@@ -354,7 +358,7 @@ void EvaluateLight(
 
     float3 diffuse;
     float3 specular;
-    EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, diffuse, specular);
+    EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energyCompensation, diffuse, specular);
 
     float3 radiance = light.ColorRange.rgb * atten;
     outDiffuse = diffuse * radiance;
@@ -389,6 +393,13 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 V = normalize(CameraPosition.xyz - input.WorldPos);
     float NdotV = saturate(dot(N, V)) + 1e-5f;
 
+    // スペキュラのエネルギー補正(SpecularEnergy.hlsli、14.9節)。Ess=(NdotV, ラフネス)だけの
+    // 関数でピクセル内では一定なので、ライトのループへ入る前に1度だけ求める。
+    // 下のIBL無効時フォールバックもこのF0/brdfをそのまま再利用する
+    const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
+    const float2 brdf = BRDFLUTTexture.Sample(DefaultSampler, float2(NdotV, roughness)).rg;
+    const float3 energyCompensation = SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
+
     float3 directDiffuse = float3(0.0f, 0.0f, 0.0f);
     float3 directSpecular = float3(0.0f, 0.0f, 0.0f);
 
@@ -402,7 +413,7 @@ float4 PSMain(PSInput input) : SV_TARGET
 
         float3 sunDiffuse;
         float3 sunSpecular;
-        EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, sunDiffuse, sunSpecular);
+        EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energyCompensation, sunDiffuse, sunSpecular);
 
         float3 sunRadiance = LightColor.rgb * shadow;
         directDiffuse += sunDiffuse * sunRadiance;
@@ -416,7 +427,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         float3 lightDiffuse;
         float3 lightSpecular;
-        EvaluateLight(Lights[i], input.WorldPos, N, V, NdotV, albedo, metallic, roughness, lightDiffuse, lightSpecular);
+        EvaluateLight(Lights[i], input.WorldPos, N, V, NdotV, albedo, metallic, roughness, energyCompensation, lightDiffuse, lightSpecular);
         directDiffuse += lightDiffuse;
         directSpecular += lightSpecular;
     }
@@ -443,10 +454,9 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 方向性を持たない(NdotV, ラフネス)のテーブルなのでIBLの有効/無効に関わらず使える)を掛ける。
         // 鏡面項を0にしてしまうと、金属(拡散項が0になる)が環境光の下で真っ黒になり、
         // 低ラフネスのガラスもハイライトを完全に失うため、必ず計算する
-        const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-        const float2 brdf = BRDFLUTTexture.Sample(DefaultSampler, float2(NdotV, roughness)).rg;
+        // F0とbrdfはPSMain冒頭でエネルギー補正用に既に求めてあるため再サンプルしない
         ambientDiffuse = albedo * (1.0f - metallic) * AmbientColor.rgb;
-        ambientSpecular = AmbientColor.rgb * (F0 * brdf.x + brdf.y);
+        ambientSpecular = AmbientColor.rgb * (F0 * brdf.x + brdf.y) * energyCompensation;
     }
 
     // 事前乗算済みアルファ(BlendMode::PremultipliedAlpha)で出力する。

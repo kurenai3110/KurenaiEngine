@@ -1,7 +1,11 @@
 // IBL(split-sum近似, Karis 2013 "Real Shading in Unreal Engine 4")の第2項、
 // BRDF積分ルックアップテーブルの生成。スカイボックスに依存しないため、エンジン起動時に一度だけ
 // (NdotV, ラフネス)の128x128グリッドをコンピュートシェーダーで焼く。実行時はDeferredLighting.hlsl側で
-// このテーブルの(x=スケール, y=バイアス)を F0*x + y として鏡面フレネル項に適用する
+// このテーブルの(x=スケール, y=バイアス)を F0*x + y として鏡面フレネル項に適用する。
+// 可視性項は実行時の直接光BRDF(DirectLighting.hlsl / Transparent.hlsl)と必ず同じものを
+// 使う必要があるため、SpecularEnergy.hlsliの共有定義を用いる(そこにkの選定理由を記載)
+#include "SpecularEnergy.hlsli"
+
 static const float PI = 3.14159265359f;
 static const uint kSampleCount = 1024;
 
@@ -43,18 +47,6 @@ float3 ImportanceSampleGGX(float2 xi, float3 N, float roughness)
     return tangentX * H.x + tangentY * H.y + N * H.z;
 }
 
-// IBL用のSchlick-GGX可視性項はダイレクトライト用(k=(r+1)^2/8)とは異なりk=roughness^2/2を使う(Karis 2013)
-float GeometrySchlickGGX_IBL(float NdotX, float roughness)
-{
-    float k = (roughness * roughness) / 2.0f;
-    return NdotX / (NdotX * (1.0f - k) + k);
-}
-
-float GeometrySmith_IBL(float NdotV, float NdotL, float roughness)
-{
-    return GeometrySchlickGGX_IBL(NdotV, roughness) * GeometrySchlickGGX_IBL(NdotL, roughness);
-}
-
 float2 IntegrateBRDF(float NdotV, float roughness)
 {
     float3 V;
@@ -79,7 +71,7 @@ float2 IntegrateBRDF(float NdotV, float roughness)
 
         if (NdotL > 0.0f)
         {
-            float G = GeometrySmith_IBL(NdotV, NdotL, roughness);
+            float G = GeometrySmith(NdotV, NdotL, roughness);
             float Gvis = (G * VdotH) / max(NdotH * NdotV, 1e-5f);
             float Fc = pow(1.0f - VdotH, 5.0f);
 
