@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "Assets/ModelPackage.h"
 #include "Assets/Vertex.h"
 
 // assimpによるモデルファイル(glTF/FBX/OBJ等)の解析。GPUデバイスに一切依存しないため
@@ -18,11 +19,19 @@ namespace KurenaiPacker
         std::vector<Kurenai::Assets::Vertex> Vertices;
         std::vector<uint32_t> Indices;
         float MetallicFactor = 0.0f;
-        float RoughnessFactor = 0.7f;
+        // ソースデータがラフネスを持たない場合は、もっともらしい既定値を勝手に埋めず
+        // Kurenai::Assets::kInvalidMaterialFactor(負値)を設定する
+        float RoughnessFactor = 0.0f;
         // 0以下ならアルファカットアウト無効(常に不透明)。glTFのalphaMode=MASKのマテリアルのみ
         // alphaCutoff(既定0.5)が設定される
         float AlphaCutoff = 0.0f;
+        // glTFのalphaMode=BLENDのマテリアルのみtrue。AlphaCutoffとは排他(alphaModeはOPAQUE/MASK/BLENDの
+        // いずれか1つ)
+        bool IsTransparent = false;
         float EmissiveFactor[3] = { 0.0f, 0.0f, 0.0f };
+        // glTFのpbrMetallicRoughness.baseColorFactor(RGBA、既定[1,1,1,1])。BaseColorTextureが
+        // 無いマテリアル(色/不透明度をbaseColorFactorのみで表現するガラス等)を正しく再現するため
+        float BaseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
         // 解決済みのフルパス(存在確認まで済んでいるとは限らない)。空 = 指定なし。
         // sRGBの要否はスロットで決まる(BaseColor/Emissive=true、Normal/MetallicRoughness=false)ため
@@ -64,6 +73,10 @@ namespace KurenaiPacker
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
     };
 
-    // モデルファイルをassimpで解析する。失敗時はstd::runtime_errorを投げる
-    SourceModel LoadSourceModel(const std::wstring& filePath);
+    // モデルファイルをassimpで解析する。失敗時はstd::runtime_errorを投げる。
+    // scale: 頂点位置・バウンズに乗算する係数(既定1.0)。OBJ等、ファイル自体に単位情報を
+    // 持たない形式では、センチメートル単位で作成されたアセットを
+    // そのまま読み込むと本来の100倍のスケールになってしまうことがあるため、呼び出し側
+    // (KurenaiPacker.exeの--scaleオプション)が既知の単位変換係数を明示的に渡す
+    SourceModel LoadSourceModel(const std::wstring& filePath, float scale = 1.0f);
 }

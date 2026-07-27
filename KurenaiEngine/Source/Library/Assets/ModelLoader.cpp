@@ -470,6 +470,11 @@ namespace Kurenai::Assets
             outMesh.MetallicFactor = mesh.MetallicFactor;
             outMesh.RoughnessFactor = mesh.RoughnessFactor;
             outMesh.AlphaCutoff = mesh.AlphaCutoff;
+            outMesh.IsTransparent = (mesh.Flags & kMeshEntryFlagTransparent) != 0;
+            outMesh.BaseColorFactor[0] = mesh.BaseColorFactor[0];
+            outMesh.BaseColorFactor[1] = mesh.BaseColorFactor[1];
+            outMesh.BaseColorFactor[2] = mesh.BaseColorFactor[2];
+            outMesh.BaseColorFactor[3] = mesh.BaseColorFactor[3];
             outMesh.EmissiveFactor[0] = mesh.EmissiveFactor[0];
             outMesh.EmissiveFactor[1] = mesh.EmissiveFactor[1];
             outMesh.EmissiveFactor[2] = mesh.EmissiveFactor[2];

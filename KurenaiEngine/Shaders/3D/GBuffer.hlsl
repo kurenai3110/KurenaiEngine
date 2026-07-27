@@ -111,7 +111,11 @@ PSOutput PSMain(PSInput input)
 
     float3 metallicRoughnessSample = MetallicRoughnessTexture.Sample(DefaultSampler, input.UV).rgb;
     float metallic = saturate(MetallicFactor * metallicRoughnessSample.b);
-    float roughness = clamp(RoughnessFactor * metallicRoughnessSample.g, 0.045f, 1.0f);
+    // RoughnessFactorが負の場合はソースデータにラフネス係数が無かったことを表す
+    // (Assets::kInvalidMaterialFactor)。パッカーが勝手な既定値を埋めない方針のため、
+    // ここで係数1.0=テクスチャの値をそのまま使う、と解釈する
+    float roughnessFactor = (RoughnessFactor < 0.0f) ? 1.0f : RoughnessFactor;
+    float roughness = clamp(roughnessFactor * metallicRoughnessSample.g, 0.045f, 1.0f);
 
     float3 emissive = EmissiveTexture.Sample(DefaultSampler, input.UV).rgb * EmissiveFactor;
 

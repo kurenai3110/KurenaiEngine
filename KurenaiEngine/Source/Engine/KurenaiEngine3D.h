@@ -173,6 +173,14 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_LightingPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SceneColor;
 
+        // 半透明フォワードパス: Deferred(G-Buffer)には書き込まれなかったBLENDマテリアルのメッシュを、
+        // Lightingパスの後にSceneColorへ直接フォワードシェーディングしてアルファブレンド合成する
+        // (深度テストはGBuffer深度に対して行うが書き込みは行わない)。頂点レイアウトはGBufferパスと
+        // 共通(POSITION/NORMAL/TEXCOORD/TANGENT)
+        std::unique_ptr<RHI::IRHIShader> m_TransparentVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_TransparentPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineState;
+
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
         // オクルージョンカリングやSSRのレイマーチング高速化に使えるデータ構造だが、現時点では

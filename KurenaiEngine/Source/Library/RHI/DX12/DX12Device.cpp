@@ -28,7 +28,7 @@ namespace Kurenai::RHI
     namespace
     {
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
-        constexpr uint32_t kTextureSlotCount = 11; // t0〜t10 (DeferredLighting.hlslのG-Buffer+IBL(Irradiance/Prefilter/BRDFLUT)が最大)
+        constexpr uint32_t kTextureSlotCount = 12; // t0〜t11 (Transparent.hlslのマテリアル4枚+シャドウ4枚+ライトリスト+IBL(Irradiance/Prefilter/BRDFLUT)が最大)
         constexpr uint32_t kSamplerSlotCount = 1; // s0のみ
         // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t10のkTextureSlotCount個ひと組)の最大数。
         // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく。実際に確保するヒープ容量は
@@ -724,6 +724,7 @@ namespace Kurenai::RHI
         }
         psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         psoDesc.DepthStencilState.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
+        psoDesc.DepthStencilState.DepthWriteMask = desc.DepthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
         // Reverse-Z: 近平面=1.0/遠平面=0.0にマッピングするため、深度テストの向きもGREATERに反転する
         psoDesc.DepthStencilState.DepthFunc = desc.ReverseZ ? D3D12_COMPARISON_FUNC_GREATER : D3D12_COMPARISON_FUNC_LESS;
         psoDesc.SampleMask = UINT_MAX;

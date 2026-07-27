@@ -49,6 +49,10 @@ namespace Kurenai
             // EvaluateIBLの代わりに定数色アンビエント(AmbientColor.rgb)へフォールバックする)。
             // wは未使用
             DirectX::XMFLOAT4 ShadowParams;
+            // 半透明パス(Transparent.hlsl)専用。x=t8のライトリストの有効数。DirectLighting.hlslは
+            // 専用のLightingConstants(b1)で受け取るためこのフィールドを使わない(末尾に追加のため
+            // 既存シェーダのオフセットは変わらない)
+            DirectX::XMFLOAT4 ActiveLightCount;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -165,6 +169,10 @@ namespace Kurenai
             float AlphaCutoff;
             float EmissiveFactor[3];
             float Padding;
+            // glTFのbaseColorFactor(既定[1,1,1,1])。GBuffer.hlsl/Shadow.hlslはこのフィールドを
+            // 宣言していない(=読まない)ため、末尾に追加してもオフセットへの影響は無い。
+            // Transparent.hlsl(半透明フォワードパス)のみがBaseColorTextureと乗算して使う(14章参照)
+            float BaseColorFactor[4];
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -182,6 +190,10 @@ namespace Kurenai
             constants.EmissiveFactor[0] = mesh.EmissiveFactor[0];
             constants.EmissiveFactor[1] = mesh.EmissiveFactor[1];
             constants.EmissiveFactor[2] = mesh.EmissiveFactor[2];
+            constants.BaseColorFactor[0] = mesh.BaseColorFactor[0];
+            constants.BaseColorFactor[1] = mesh.BaseColorFactor[1];
+            constants.BaseColorFactor[2] = mesh.BaseColorFactor[2];
+            constants.BaseColorFactor[3] = mesh.BaseColorFactor[3];
             return constants;
         }
 
@@ -536,6 +548,40 @@ namespace Kurenai
         lightingPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
         lightingPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
         m_LightingPipelineState = m_Device->CreatePipelineState(lightingPipelineDesc);
+
+        // 半透明フォワードパス(Transparent.hlsl)。頂点入力・トポロジはGBufferパスと共通で、
+        // 出力先はLightingパスと同じSceneColor(R16G16B16A16_Float)
+        RHI::ShaderDesc transparentVsDesc;
+        transparentVsDesc.Stage = RHI::ShaderStage::Vertex;
+        transparentVsDesc.FilePath = shaderDirectory + L"Transparent.hlsl";
+        transparentVsDesc.EntryPoint = "VSMain";
+        m_TransparentVertexShader = m_Device->CreateShader(transparentVsDesc);
+
+        RHI::ShaderDesc transparentPsDesc;
+        transparentPsDesc.Stage = RHI::ShaderStage::Pixel;
+        transparentPsDesc.FilePath = shaderDirectory + L"Transparent.hlsl";
+        transparentPsDesc.EntryPoint = "PSMain";
+        m_TransparentPixelShader = m_Device->CreateShader(transparentPsDesc);
+
+        RHI::PipelineStateDesc transparentPipelineDesc;
+        transparentPipelineDesc.InputLayout = modelInputLayout;
+        transparentPipelineDesc.VertexShader = m_TransparentVertexShader.get();
+        transparentPipelineDesc.PixelShader = m_TransparentPixelShader.get();
+        transparentPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        transparentPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        transparentPipelineDesc.HasDepthStencil = true;
+        // 既存の不透明物体には隠れさせたいが(テストは有効)、奥から手前に描く半透明同士が互いの深度で
+        // 隠し合わないよう書き込みは行わない
+        transparentPipelineDesc.DepthWriteEnabled = false;
+        transparentPipelineDesc.ReverseZ = true;
+        // 事前乗算済みアルファ(src.rgb + dst.rgb * (1 - src.a))。標準アルファブレンドではなく
+        // こちらを使うのは、ガラスの鏡面反射(スペキュラ)を不透明度で減衰させないため。
+        // 標準アルファブレンドはシェーダーの出力色全体にsrc.aを掛けるので、Bistroの酒瓶のように
+        // 不透明度が0.04しかないマテリアルではハイライトまで1/25に潰れ、ガラスが「透明」ではなく
+        // 「何も無い」ように見えてしまう。Transparent.hlsl側で拡散光にのみ不透明度を乗じ、
+        // 鏡面反射は減衰させずに加算した色を出力する(詳細はdocs/Architecture.htmlの半透明描画の章を参照)
+        transparentPipelineDesc.BlendMode = RHI::BlendMode::PremultipliedAlpha;
+        m_TransparentPipelineState = m_Device->CreatePipelineState(transparentPipelineDesc);
 
         // Hi-Zミップチェーン構築パス(コンピュートシェーダー)。CSCopyでG-Buffer深度をミップ0へコピーし、
         // CSDownsampleをミップ数-1回ディスパッチして1x1まで縮小する
@@ -1705,6 +1751,51 @@ namespace Kurenai
             cascadeNear = cascadeSplits[cascade];
         }
 
+        const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
+
+        // 有効なライトだけを詰めてt8のライトリストへ渡す。シェーダはLightCount(・ActiveLightCount)の
+        // 数までしかループしないため、無効なライトはそもそもGPUへ送らない。DirectLight/Transparentの
+        // 両パスがこの1つのリストを共有する(FrameConstants.ActiveLightCountに人数を書き込むため、
+        // 各パスのExecute内ではなくFrameConstants確定より前にここで組み立てる必要がある)
+        std::vector<GPULight> gpuLights;
+        gpuLights.reserve(m_Lights.size());
+        for (const Assets::Light& light : m_Lights)
+        {
+            if (!light.Enabled)
+            {
+                continue;
+            }
+            gpuLights.push_back(MakeGPULight(light, m_SceneExposureEV100));
+        }
+
+        // 容量(kMaxLights)を超える場合は、カメラに近い順に先頭kMaxLights灯のみ採用する。
+        // 全画面ディファードなのでフラスタムカリングは効果が薄く、これは容量超過時の
+        // 安全弁としてのみ機能する(実データの上限はBistroInteriorの4灯)
+        if (gpuLights.size() > kMaxLights)
+        {
+            std::sort(
+                gpuLights.begin(), gpuLights.end(),
+                [&cameraPosition](const GPULight& a, const GPULight& b)
+                {
+                    const float dxA = a.PositionType.x - cameraPosition.x;
+                    const float dyA = a.PositionType.y - cameraPosition.y;
+                    const float dzA = a.PositionType.z - cameraPosition.z;
+                    const float dxB = b.PositionType.x - cameraPosition.x;
+                    const float dyB = b.PositionType.y - cameraPosition.y;
+                    const float dzB = b.PositionType.z - cameraPosition.z;
+                    return (dxA * dxA + dyA * dyA + dzA * dzA) < (dxB * dxB + dyB * dyB + dzB * dzB);
+                });
+            gpuLights.resize(kMaxLights);
+
+            if (!m_LightOverflowLogged)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "ライト数が上限(" + std::to_string(kMaxLights) + ")を超えたため、カメラに近い順に描画します");
+                m_LightOverflowLogged = true;
+            }
+        }
+
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = frameState.Camera.GetViewMatrix() * frameState.Camera.GetProjectionMatrix();
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
@@ -1715,7 +1806,6 @@ namespace Kurenai
         {
             DirectX::XMStoreFloat4x4(&constants.CascadeViewProj[cascade], DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
         }
-        const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
         constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
         constants.LightDirection = { sunLighting.Direction.x, sunLighting.Direction.y, sunLighting.Direction.z, 0.0f };
         constants.LightColor = sunLighting.Color;
@@ -1734,6 +1824,7 @@ namespace Kurenai
         constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
         const float iblIntensity = m_IBLEnabled ? m_IBLIntensity : 0.0f;
         constants.ShadowParams = { m_ShadowLightSize, static_cast<float>(kIBLPrefilterMipLevels - 1), iblIntensity, 0.0f };
+        constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
@@ -1867,6 +1958,13 @@ namespace Kurenai
                 {
                     for (const auto& mesh : instance.Model.Meshes)
                     {
+                        // BLENDマテリアル(mesh.IsTransparent)はG-Bufferに書き込まず、専用のTransparentパスで
+                        // フォワードシェーディングする(G-Bufferのアルファは常に1.0で半透明合成ができないため)
+                        if (mesh.IsTransparent)
+                        {
+                            continue;
+                        }
+
                         const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
@@ -1934,54 +2032,12 @@ namespace Kurenai
                 m_ShadowCascades[0].get(), m_ShadowCascades[1].get(), m_ShadowCascades[2].get(), m_ShadowCascades[3].get(),
             },
             .RenderTargets = { m_DirectLightTexture.get() },
-            .Execute = [this, &gbufferViewport, &frameState](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, &gpuLights](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
                 cmd->SetPipelineState(m_DirectLightPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-
-                // 有効なライトだけを詰めてt8のライトリストへ渡す。シェーダはLightCount.xまでしか
-                // ループしないため、無効なライトはそもそもGPUへ送らない
-                std::vector<GPULight> gpuLights;
-                gpuLights.reserve(m_Lights.size());
-                for (const Assets::Light& light : m_Lights)
-                {
-                    if (!light.Enabled)
-                    {
-                        continue;
-                    }
-                    gpuLights.push_back(MakeGPULight(light, m_SceneExposureEV100));
-                }
-
-                // 容量(kMaxLights)を超える場合は、カメラに近い順に先頭kMaxLights灯のみ採用する。
-                // 全画面ディファードなのでフラスタムカリングは効果が薄く、これは容量超過時の
-                // 安全弁としてのみ機能する(実データの上限はBistroInteriorの4灯)
-                if (gpuLights.size() > kMaxLights)
-                {
-                    const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
-                    std::sort(
-                        gpuLights.begin(), gpuLights.end(),
-                        [&cameraPosition](const GPULight& a, const GPULight& b)
-                        {
-                            const float dxA = a.PositionType.x - cameraPosition.x;
-                            const float dyA = a.PositionType.y - cameraPosition.y;
-                            const float dzA = a.PositionType.z - cameraPosition.z;
-                            const float dxB = b.PositionType.x - cameraPosition.x;
-                            const float dyB = b.PositionType.y - cameraPosition.y;
-                            const float dzB = b.PositionType.z - cameraPosition.z;
-                            return (dxA * dxA + dyA * dyA + dzA * dzA) < (dxB * dxB + dyB * dyB + dzB * dzB);
-                        });
-                    gpuLights.resize(kMaxLights);
-
-                    if (!m_LightOverflowLogged)
-                    {
-                        Core::Logger::Warning(
-                            "KurenaiEngine3D",
-                            "ライト数が上限(" + std::to_string(kMaxLights) + ")を超えたため、カメラに近い順に描画します");
-                        m_LightOverflowLogged = true;
-                    }
-                }
 
                 LightingConstants lightingConstants{};
                 lightingConstants.LightCount = { static_cast<uint32_t>(gpuLights.size()), 0u, 0u, 0u };
@@ -2117,6 +2173,92 @@ namespace Kurenai
                 cmd->SetTexture(9, m_PrefilteredEnvTexture.get());
                 cmd->SetTexture(10, m_BRDFLUTTexture.get());
                 cmd->Draw(3, 0);
+            },
+        });
+
+        // --- 半透明フォワードパス: glTFのalphaMode=BLENDのメッシュ(mesh.IsTransparent)だけを、
+        //     LightingパスのSceneColorの上にカメラから遠い順(奥から手前)でアルファブレンド合成する。
+        //     深度テストはGBuffer深度に対して行うが書き込みは行わない(半透明パイプラインステートの
+        //     DepthWriteEnabled=false)ため、不透明物体には隠れる一方、半透明同士は常に描画順で
+        //     正しく重なる。RenderTargets/DepthTargetにSceneColor/GBuffer深度を指定しているだけで
+        //     ClearRenderTarget/ClearDepthは呼ばないため、Lightingパスが書いた内容の上に描き足す形になる ---
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "Transparent",
+            .RenderTargets = { m_SceneColor.get() },
+            .DepthTarget = m_GBufferDepth.get(),
+            .Execute = [this, &gbufferViewport, &gpuLights, &cameraPosition](RHI::IRHICommandList* cmd)
+            {
+                // 半透明メッシュをインスタンス単位でカメラからの距離降順(奥から手前)に並べる。
+                // instance.WorldはHLSL(mul(vec, World))に合わせて転置済みのため、ワールド座標の
+                // 平行移動成分は行ではなく列(_14/_24/_34)に入っている
+                struct TransparentDraw
+                {
+                    const Assets::ModelInstance* Instance;
+                    const Assets::Mesh* Mesh;
+                    float DistanceSq;
+                };
+                std::vector<TransparentDraw> draws;
+                for (const auto& instance : m_Scene.Instances)
+                {
+                    const float dx = instance.World._14 - cameraPosition.x;
+                    const float dy = instance.World._24 - cameraPosition.y;
+                    const float dz = instance.World._34 - cameraPosition.z;
+                    const float distanceSq = dx * dx + dy * dy + dz * dz;
+                    for (const auto& mesh : instance.Model.Meshes)
+                    {
+                        if (!mesh.IsTransparent)
+                        {
+                            continue;
+                        }
+                        draws.push_back({ &instance, &mesh, distanceSq });
+                    }
+                }
+                if (draws.empty())
+                {
+                    return;
+                }
+                std::sort(
+                    draws.begin(), draws.end(),
+                    [](const TransparentDraw& a, const TransparentDraw& b) { return a.DistanceSq > b.DistanceSq; });
+
+                cmd->SetViewport(gbufferViewport);
+                cmd->SetPipelineState(m_TransparentPipelineState.get());
+                cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                cmd->SetSampler(0, m_Sampler.get());
+
+                if (!gpuLights.empty())
+                {
+                    cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
+                }
+
+                for (const TransparentDraw& draw : draws)
+                {
+                    const ObjectConstants objectConstants = MakeObjectConstants(*draw.Instance, *draw.Mesh);
+                    cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                    cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                    cmd->SetVertexBuffer(draw.Mesh->VertexBuffer.get());
+                    cmd->SetIndexBuffer(draw.Mesh->IndexBuffer.get());
+                    // t0〜t11の12スロット全てをDrawIndexedごとに再設定する。DX12はslot 0のSetTextureで
+                    // 新しい描画のSRVテーブルを確定させるため(DX12CommandList::FlushPendingSrvWrites参照)、
+                    // shadow/light/IBLのように値が変わらないスロットも含め毎回セットし直す必要がある
+                    cmd->SetTexture(0, draw.Mesh->BaseColorTexture);
+                    cmd->SetTexture(1, draw.Mesh->NormalTexture);
+                    cmd->SetTexture(2, draw.Mesh->MetallicRoughnessTexture);
+                    cmd->SetTexture(3, draw.Mesh->EmissiveTexture);
+                    for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
+                    {
+                        cmd->SetTexture(4 + cascade, m_ShadowCascades[cascade].get());
+                    }
+                    cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+                    // IBL(14章)。このパスにはSSRが適用されないため、半透明サーフェスの環境の
+                    // 映り込みはこの3枚だけが担う
+                    cmd->SetTexture(9, m_IrradianceTexture.get());
+                    cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
+                    cmd->SetTexture(11, m_BRDFLUTTexture.get());
+
+                    cmd->DrawIndexed(draw.Mesh->IndexCount, 0, 0);
+                }
             },
         });
 

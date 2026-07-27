@@ -19,11 +19,24 @@ namespace Kurenai::Assets
         RHI::IRHITexture* MetallicRoughnessTexture = nullptr;
         RHI::IRHITexture* EmissiveTexture = nullptr;
         float MetallicFactor = 0.0f;
-        float RoughnessFactor = 0.7f;
+        // ソースデータに値が無い場合はkInvalidMaterialFactor(負値)が入る。シェーダー側は
+        // 負値を「係数の指定なし」とみなし1.0(テクスチャの値をそのまま使う)として扱う
+        float RoughnessFactor = 0.0f;
         float EmissiveFactor[3] = { 0.0f, 0.0f, 0.0f };
         // 0以下ならアルファカットアウト無効(常に不透明)。glTFのalphaMode=MASKのマテリアルのみ
         // alphaCutoff(既定0.5)が設定される
         float AlphaCutoff = 0.0f;
+        // glTFのalphaMode=BLENDのマテリアルのみtrue。GBufferパス(不透明)には描画されず、
+        // 専用のTransparentパス(KurenaiEngine3D::Render参照)でカメラから遠い順にアルファブレンド
+        // 合成される。AlphaCutoffとは排他(glTF仕様上alphaModeはOPAQUE/MASK/BLENDのいずれか1つ)
+        bool IsTransparent = false;
+        // glTFのpbrMetallicRoughness.baseColorFactor(RGBA、既定[1,1,1,1])。BaseColorTextureと
+        // 乗算して使う。テクスチャを持たずbaseColorFactorのみで色/不透明度を表現するマテリアル
+        // (ガラス等でよくあるパターン)は、これが無いとBaseColorTexture=nullptr時の白1x1
+        // プレースホルダー(alpha=1)にフォールバックし、意図した色・アルファと異なる見た目になる。
+        // 現状このフォールバック乗算はTransparentパス(Transparent.hlsl)のみが行い、GBufferパス
+        // (不透明・MASK)は既存動作を変えないため引き続きテクスチャの色をそのまま使う
+        float BaseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     };
 
     enum class LightType : uint32_t

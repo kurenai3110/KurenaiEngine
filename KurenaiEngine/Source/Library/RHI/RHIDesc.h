@@ -45,6 +45,12 @@ namespace Kurenai::RHI
         std::vector<Format> RenderTargetFormats;
         bool HasDepthStencil = false;
 
+        // 深度への書き込みを行うか。既定はtrue(通常の不透明描画)。半透明描画では、既存の不透明物体の
+        // 深度に対してテストはしたいが(裏側の物体に隠れさせるため)、書き込みは行いたくない
+        // (奥から手前に描く複数の半透明物体同士が互いの深度で隠し合わないようにするため)。
+        // そのためHasDepthStencil=true(テスト有効)のまま、こちらだけfalseにする
+        bool DepthWriteEnabled = true;
+
         // Reverse-Z(深度比較をGREATERにし、近平面=1.0/遠平面=0.0にマッピングする)を使うか。
         // 浮動小数点深度バッファと組み合わせて遠方のZファイティングを抑えるための設定で、
         // 透視投影のメインカメラパスにのみ使う(正射影のシャドウマップは元々Zが線形分布のため対象外)

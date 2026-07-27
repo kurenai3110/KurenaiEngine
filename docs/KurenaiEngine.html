@@ -854,6 +854,28 @@ GPUデバイスを必要としないため安全に並列化できる一方、GP
 (<code>device.CreateTextureFromImage</code>)自体はデバイスに紐づく処理のため呼び出し元スレッドで
 直列に行う。
 </p>
+
+<h4>4.6.3 アルファモード(カットアウト/半透明)</h4>
+<p>
+<code>Mesh</code>はglTFの<code>alphaMode</code>に応じて<code>AlphaCutoff</code>と
+<code>IsTransparent</code>のいずれかが設定される(両方が同時に立つことはない)。
+</p>
+<ul>
+<li><code>alphaMode = "MASK"</code> — <code>AlphaCutoff</code>(既定0.5)が設定され、ベースカラー
+テクスチャのアルファがこの値未満のピクセルは描画されない(葉・網戸などのカットアウト表現)。
+不透明物体と同じジオメトリパスで描画される。</li>
+<li><code>alphaMode = "BLEND"</code> — <code>IsTransparent = true</code>になり、
+<code>KurenaiEngine3D</code>ではジオメトリパス(G-Buffer)には描画されず、専用の半透明フォワードパスで
+奥から手前の順にアルファブレンド合成される(不透明物体には隠れるが、AO/間接光・SSR等の
+ポストプロセスは適用されない。既知の制約の詳細は<a href="Architecture.html#transparent">実装者向け
+ドキュメント14章</a>参照)。色・不透明度は<code>baseColorTexture.rgba * baseColorFactor</code>
+(glTF仕様どおり)で決まる。テクスチャを持たずbaseColorFactorのみで色/不透明度を指定するマテリアル
+(ガラス等でよくあるパターン)も正しく反映されるが、<code>baseColorFactor.a</code>自体が
+<code>1.0</code>(不透明)のマテリアルは<code>alphaMode=BLEND</code>が付いていても見た目上は
+不透明のまま描画される(モデルデータがそう定義しているため。実例・詳細は
+<a href="Architecture.html#transparent">実装者向けドキュメント14.7/14.8節</a>参照)。</li>
+<li><code>alphaMode = "OPAQUE"</code>(既定)または非対応形式(FBX/OBJ等) — 常に不透明として扱われる。</li>
+</ul>
 <h3>4.7 シーンファイル(<code>.kscene</code>)と <code>Assets::LoadScene</code></h3>
 <pre><code>Scene LoadScene(RHI::IRHIDevice&amp; device, const std::wstring&amp; sceneFilePath, const std::wstring&amp; assetRootDirectory);
 std::wstring ReadSceneName(const std::wstring&amp; sceneFilePath);</code></pre>

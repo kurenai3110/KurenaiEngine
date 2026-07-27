@@ -4,6 +4,7 @@
 
 #include <assimp/GltfMaterial.h>
 #include <assimp/Importer.hpp>
+#include <assimp/ObjMaterial.h>
 #include <assimp/light.h>
 #include <assimp/metadata.h>
 #include <assimp/postprocess.h>
@@ -30,9 +31,8 @@ namespace KurenaiPacker
         // glTFのテクスチャURI(aiMaterial::GetTextureが返すaiString)はRFC 3986のURIであり、
         // ファイル名中の空白などは"%20"のようにパーセントエンコードされている。assimpは
         // このデコードを行わず生のURI文字列をそのまま返すため、デコードせずファイルパスとして
-        // 扱うと実ファイル名と一致せず読み込みに失敗する(実際にBistroの
-        // "Metal_ RollDoor_01_diff.png"や"Paris_ShopSign_ties shop_diff.png"で確認済み。
-        // glTF側は"Metal_%20RollDoor_01_diff.png"のようにエンコードして格納している)。
+        // 扱うと実ファイル名と一致せず読み込みに失敗する(ファイル名に空白を含むテクスチャで確認済み。
+        // glTF側は空白を"%20"のようにエンコードして格納している)。
         // FBX/OBJ等の非URIパスに対しても一律に適用しているが、ファイル名に本物の
         // "%XX"(16進2桁)を含むケースは実用上ほぼ無いため実害はない
         std::string UriDecode(const std::string& uri)
@@ -106,8 +106,8 @@ namespace KurenaiPacker
         // そのため「位置+法線」をキーに接線を蓄積・平均化して補う。
         // UVはキーに含めない: 円筒状UV展開の継ぎ目(位置・法線は連続だがUVだけジャンプする、
         // ごく普通のシームレス継ぎ目)ではUVが異なっても平均化すべきであり、キーにUVを含めると
-        // そこで平均化がブロックされて継ぎ目が硬い線として見えてしまう(実際にBistroのワイン
-        // グラスで確認済み)。ミラーUV(左右反転コピー)のような本当に別方向を向く継ぎ目は
+        // そこで平均化がブロックされて継ぎ目が硬い線として見えてしまう(ガラス製小物のような、
+        // 円筒状UV展開を持つメッシュで実際に確認済み)。ミラーUV(左右反転コピー)のような本当に別方向を向く継ぎ目は
         // 通常「位置」自体が完全一致しない(モデリング上、鏡像コピーは別ジオメトリになる)ため、
         // このキーで誤って混ざることは実用上ほぼない
         struct TangentAccumKey
@@ -319,7 +319,7 @@ namespace KurenaiPacker
         }
     }
 
-    SourceModel LoadSourceModel(const std::wstring& filePath)
+    SourceModel LoadSourceModel(const std::wstring& filePath, float scale)
     {
         Assimp::Importer importer;
         // GenSmoothNormalsは対象アセットは全メッシュが法線を持つため実質ノーオップであり、
@@ -327,7 +327,7 @@ namespace KurenaiPacker
         // 接線はassimpのaiProcess_CalcTangentSpaceに任せず自前で計算する(下記の頂点ループ内、
         // TangentAccumKey関連のコード参照)。CalcTangentSpaceはUV面積がほぼ0(縮退)の三角形で
         // 接線が数値的に不安定になり、位置・法線・UVが完全に同一の頂点間でさえ接線がほぼ正反対に
-        // なることがある(Bistroのグラスメッシュで実際に確認済み)。JoinIdenticalVerticesは
+        // なることがある(ガラス製小物のメッシュで実際に確認済み)。JoinIdenticalVerticesは
         // 以前は「頂点バッファがやや冗長になるだけ」という理由で付けていなかったが、重複頂点を
         // 減らせるため付けておく(自前の接線平均化は位置+法線をキーにしており重複頂点の有無に
         // 依存しないため、平均化の正しさ自体には影響しない)
@@ -353,8 +353,8 @@ namespace KurenaiPacker
         // OBJ形式のように同一マテリアルの三角形群が(usemtlの切り替えのたびに)大量の
         // 小さなaiMeshへ分割されているアセットでは、aiMeshごとに個別のバッファ/ドローコールを
         // 発行すると数万件規模になり、GPU側のドライバウォッチドッグ(TDR)によるハングを
-        // 引き起こしうる(実際にBistroのMcGuire版OBJ配布(usemtl切り替え22,396回、実質132
-        // マテリアル)で確認済み)ため、マテリアル単位でまとめてドローコール数を実質マテリアル数まで
+        // 引き起こしうる(実測した大規模なOBJ配布では、実質132マテリアルに対して
+        // usemtl切り替えが22,396回あった)ため、マテリアル単位でまとめてドローコール数を実質マテリアル数まで
         // 削減する
         std::unordered_map<unsigned int, MergedMeshAccumulator> meshesByMaterial;
 
@@ -382,7 +382,7 @@ namespace KurenaiPacker
 
             // assimpのCalcTangentSpace(aiProcess_CalcTangentSpace)が返す頂点接線は、UV面積が
             // ほぼ0(縮退)な三角形では不安定になり、位置・法線・UVが完全に同一の頂点間でさえ
-            // 接線がほぼ正反対になることがある(実際にBistroのグラスメッシュで確認済み)。
+            // 接線がほぼ正反対になることがある(ガラス製小物のメッシュで実際に確認済み)。
             // そのため頂点接線は使わず、三角形ごとに自前で接線を計算し、UV面積がほぼ0の
             // 三角形は寄与から除外したうえで「位置+法線」をキーに蓄積・平均化する
             std::unordered_map<TangentAccumKey, aiVector3D, TangentAccumKeyHash> tangentAccum;
@@ -443,7 +443,7 @@ namespace KurenaiPacker
             vertices.reserve(mesh->mNumVertices);
             for (unsigned int v = 0; v < mesh->mNumVertices; ++v)
             {
-                aiVector3D position = transform * mesh->mVertices[v];
+                aiVector3D position = (transform * mesh->mVertices[v]) * scale;
                 aiVector3D normal = mesh->HasNormals() ? (normalMatrix * mesh->mNormals[v]) : aiVector3D(0.0f, 1.0f, 0.0f);
                 normal.Normalize();
 
@@ -586,16 +586,55 @@ namespace KurenaiPacker
                 outMesh.EmissivePath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
             }
 
-            // FBXなどPBRメタリック/ラフネスの係数を持たない形式では既定値(非金属・やや粗め)のままになる
+            // FBXなどPBRメタリック係数を持たない形式では既定値(非金属)のままになる
             material->Get(AI_MATKEY_METALLIC_FACTOR, outMesh.MetallicFactor);
-            material->Get(AI_MATKEY_ROUGHNESS_FACTOR, outMesh.RoughnessFactor);
-            // FBXの古いPhong系マテリアル(Shininessのみ持つ)をassimpがPBRラフネスへ変換する際、
-            // 変換式が破綻して[0,1]範囲外の値(Bistroのガラス系マテリアルで実測: -2.2)を返すことがある。
-            // シェーダー側でclampされて常に最小ラフネス(ほぼ鏡面)に張り付き、SSRの反射が
-            // 単一サンプルで粗くなって不自然に破綻して見えるため、範囲外の値は既定値にフォールバックする
-            if (!(outMesh.RoughnessFactor >= 0.0f && outMesh.RoughnessFactor <= 1.0f))
+
+            // ラフネスは「ソースデータが持っていなければ無効値を書き出す」方針を取る。
+            // もっともらしい既定値(例: 0.7)をパッカーが勝手に埋めると、データに無い値が
+            // 事実として下流へ流れてしまい、消費側は「指定された0.7」と「データに無かった」を
+            // 区別できなくなる。何を既定値とするかはフォーマットやアセットによって異なり、
+            // 変換ツールが決めてよい値ではない。無効値の解釈は消費側の責任とする
+            // (シェーダーは係数1.0=テクスチャの値をそのまま使う、として扱う)
+            outMesh.RoughnessFactor = Kurenai::Assets::kInvalidMaterialFactor;
+
+            float roughnessFactor = 0.0f;
+            if (material->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughnessFactor) == AI_SUCCESS)
             {
-                outMesh.RoughnessFactor = 0.7f;
+                // 古いPhong系マテリアル(Shininessのみ持つ)をassimpがPBRラフネスへ変換する際、
+                // 変換式が破綻して[0,1]範囲外の値を返すことがある(実測で負値を確認済み)。
+                // そのまま流すとシェーダー側のclampで最小ラフネス(ほぼ鏡面)に張り付いてしまうため、
+                // 範囲外は「取得できなかった」と同じ扱いにする
+                if (roughnessFactor >= 0.0f && roughnessFactor <= 1.0f)
+                {
+                    outMesh.RoughnessFactor = roughnessFactor;
+                }
+                else
+                {
+                    Kurenai::Core::Logger::Warning(
+                        "ModelSource",
+                        "ラフネス係数が[0,1]の範囲外のため無効値として扱います: " + std::to_string(roughnessFactor));
+                }
+            }
+            else
+            {
+                // WavefrontMTL(OBJ)はPBRのラフネスを持たない代わりに、Blinn-Phongの鏡面反射指数Ns
+                // (assimpがAI_MATKEY_SHININESSへ格納する)を持っていることがある。変換式は
+                // Blinn-Phong指数 → GGXラフネス の一般的な近似 roughness = sqrt(2 / (Ns + 2))
+                // (Ns→∞で0、Ns=0で1に漸近する)。
+                //
+                // ただしNs = 100.000 ちょうどの値は採用しない。これはOBJエクスポータが書き出す
+                // 定型の既定値で、マテリアルごとに調整された値ではないため。実測したMTLでは
+                // 全マテリアルの8割前後がこの値ちょうどで、石畳や漆喰のような明らかに粗い材質まで
+                // 含まれていた。これを採用するとそれらがラフネス0.14(ほぼ鏡面)になり、
+                // 環境光の鏡面反射がシーン全体へ強くかかって白く霞んだ絵になることを実機で確認している。
+                // 情報量の無い値として無視し、無効値のままにする
+                constexpr float kMtlDefaultShininess = 100.0f;
+                float shininess = 0.0f;
+                if (material->Get(AI_MATKEY_SHININESS, shininess) == AI_SUCCESS && shininess > 0.0f &&
+                    std::abs(shininess - kMtlDefaultShininess) > 0.001f)
+                {
+                    outMesh.RoughnessFactor = std::clamp(std::sqrt(2.0f / (shininess + 2.0f)), 0.0f, 1.0f);
+                }
             }
 
             aiColor3D emissiveColor(0.0f, 0.0f, 0.0f);
@@ -604,17 +643,88 @@ namespace KurenaiPacker
             outMesh.EmissiveFactor[1] = emissiveColor.g;
             outMesh.EmissiveFactor[2] = emissiveColor.b;
 
-            // アルファカットアウトはglTFのalphaMode拡張情報でのみ判定する(FBX/OBJ等には概念自体がない)。
-            // MASK以外(既定のOPAQUE、または半透明のBLEND)ではAlphaCutoff=0のままにし、
-            // GBuffer.hlsl側のclip()を発火させない(BLENDの半透明合成はDeferredでは別途対応が必要なため、
-            // このエンジンでは現状不透明として扱う)
+            // glTFのpbrMetallicRoughness.baseColorFactor(既定[1,1,1,1])。テクスチャを持たず
+            // baseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等)を正しく再現するために
+            // 読み取る。取得できない場合(FBX/OBJ等、AI_MATKEY_BASE_COLORはglTF専用のため常に失敗する)は
+            // 代わりにOBJ/FBXの古典的なPhongモデルのKd(拡散色)であるAI_MATKEY_COLOR_DIFFUSEを使う
+            // (ガラス系マテリアルによくあるKdが黒[0,0,0]のケースを、白1x1プレースホルダーへ
+            // 誤ってフォールバックさせないため)
+            aiColor4D baseColorFactor(1.0f, 1.0f, 1.0f, 1.0f);
+            if (material->Get(AI_MATKEY_BASE_COLOR, baseColorFactor) != AI_SUCCESS)
+            {
+                aiColor3D diffuseColor(1.0f, 1.0f, 1.0f);
+                material->Get(AI_MATKEY_COLOR_DIFFUSE, diffuseColor);
+                baseColorFactor = aiColor4D(diffuseColor.r, diffuseColor.g, diffuseColor.b, 1.0f);
+            }
+
+            // アルファモード(BLEND/MASK/OPAQUE)はglTFの拡張情報でのみ判定できる(FBX/OBJ等には
+            // この3値の概念自体が無い)。MASKはAlphaCutoffを設定してGBuffer.hlsl側のclip()で
+            // カットアウトさせ、BLENDはIsTransparent=trueにしてKurenaiEngine3DのTransparentパス
+            // (フォワードシェーディング+アルファブレンド)へ回す
             aiString alphaMode;
             float alphaCutoff = 0.5f;
             material->Get(AI_MATKEY_GLTF_ALPHACUTOFF, alphaCutoff);
-            outMesh.AlphaCutoff =
-                (material->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == AI_SUCCESS && std::strcmp(alphaMode.C_Str(), "MASK") == 0)
-                ? alphaCutoff
-                : 0.0f;
+            const bool hasAlphaMode = material->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == AI_SUCCESS;
+            outMesh.AlphaCutoff = (hasAlphaMode && std::strcmp(alphaMode.C_Str(), "MASK") == 0) ? alphaCutoff : 0.0f;
+            outMesh.IsTransparent = hasAlphaMode && std::strcmp(alphaMode.C_Str(), "BLEND") == 0;
+
+            // OBJ等、alphaModeの概念を持たない形式ではAI_MATKEY_OPACITY(WavefrontMTLの
+            // d/Trから変換された不透明度。assimpのObjFileImporter.cppが
+            // AI_MATKEY_OPACITYへ格納する)を見る。d/Trがどちらも無ければassimpは既定の1.0
+            // (不透明)を返すため、架空の値を補うことにはならない
+            float opacity = 1.0f;
+            if (!hasAlphaMode && material->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS && opacity < 0.999f)
+            {
+                outMesh.IsTransparent = true;
+                baseColorFactor.a = opacity;
+            }
+
+            // WavefrontMTLには、d/Trとは別に「透過を伴う照明モデル(illum 4/6/7/9)+ Tf(透過フィルタ)」で
+            // 透明度を表現する書き方がある。assimpのOBJインポータはTfをAI_MATKEY_COLOR_TRANSPARENTへ、
+            // illumをAI_MATKEY_OBJ_ILLUMへ格納するだけで、不透明度(AI_MATKEY_OPACITY)には一切反映しない
+            // (ObjFileImporter.cppのCreateMaterial。AI_MATKEY_OPACITYへ入るのはd/Tr由来の値のみ)。
+            // そのためd/Trだけを見ていると、この書き方のマテリアルがすべて不透明として扱われる。
+            // 実測した大規模なOBJ配布では、瓶・窓・街灯といったガラス系マテリアルの大半がこの書き方で、
+            // d/Trのみの判定ではシーン全体で半透明メッシュが計36三角形しか出ていなかった。
+            //
+            // Tfの解釈: MTLの原仕様では「透過光にかけるフィルタ色」(Tf=1,1,1が無着色=全透過)だが、
+            // Tf = 1 - Tr(= d)、つまり不透明度そのものとして書き出すエクスポータが実在する。
+            // d/TrとTfを両方持つマテリアルの実測値(Tr 0.800/Tf 0.2、Tr 0.900/Tf 0.1、
+            // Tr 0.000/Tf 1.0)がいずれもTf == 1 - Trで一貫していたため、Tfを不透明度として読む。
+            // assimpのTf既定値も(1,1,1)(ObjFileData.hのMaterial::transparent)なので、Tfを書いていない
+            // 通常のOBJがこの経路で誤って半透明化されることはない。
+            // なお原仕様どおり「Tf=透過率」と解釈するとTf未記載の全マテリアルが全透過になってしまい、
+            // 実用にならない点でも、この解釈以外に選択肢がない
+            if (!hasAlphaMode && !outMesh.IsTransparent)
+            {
+                int illuminationModel = 1;
+                aiColor3D transmissionFilter(1.0f, 1.0f, 1.0f);
+                if (material->Get(AI_MATKEY_OBJ_ILLUM, illuminationModel) == AI_SUCCESS &&
+                    (illuminationModel == 4 || illuminationModel == 6 || illuminationModel == 7 || illuminationModel == 9) &&
+                    material->Get(AI_MATKEY_COLOR_TRANSPARENT, transmissionFilter) == AI_SUCCESS)
+                {
+                    const float filterOpacity =
+                        (transmissionFilter.r + transmissionFilter.g + transmissionFilter.b) / 3.0f;
+                    if (filterOpacity < 0.999f)
+                    {
+                        outMesh.IsTransparent = true;
+                        baseColorFactor.a = std::clamp(filterOpacity, 0.0f, 1.0f);
+
+                        aiString materialName;
+                        material->Get(AI_MATKEY_NAME, materialName);
+                        Kurenai::Core::Logger::Info(
+                            "ModelSource",
+                            std::string("マテリアル\"") + materialName.C_Str() + "\"をillum " +
+                                std::to_string(illuminationModel) + " + Tfから半透明と判定しました(不透明度 " +
+                                std::to_string(baseColorFactor.a) + ")");
+                    }
+                }
+            }
+
+            outMesh.BaseColorFactor[0] = baseColorFactor.r;
+            outMesh.BaseColorFactor[1] = baseColorFactor.g;
+            outMesh.BaseColorFactor[2] = baseColorFactor.b;
+            outMesh.BaseColorFactor[3] = baseColorFactor.a;
 
             model.Meshes.push_back(std::move(outMesh));
         }

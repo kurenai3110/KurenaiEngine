@@ -12,8 +12,9 @@ KurenaiEngineLibrary.dllから公開しており、独自の描画パイプラ�
 `KurenaiEngine3D`はKurenaiEngine専用モデルパッケージ(`.kmodel`)とシーンファイル(`.kscene`)の
 読み込み・描画に対応した、Deferred Shading・HDRレンダリング・カスケードシャドウマップ(PCF/PCSS)・
 IBL(スカイボックスから焼いた拡散イラディアンス・プリフィルタ済み鏡面による環境光)・
-SSAO/SSIL・SSR・複数ライト(ポイント/スポット、カンデラ/ルクス単位)を備えた完結型3Dレンダラーです。
-`.gltf`/`.fbx`等のソースモデルは、付属のオフラインツール**KurenaiPacker.exe**で`.kmodel`へ事前変換して
+SSAO/SSIL・SSR・複数ライト(ポイント/スポット、カンデラ/ルクス単位)・半透明描画(専用フォワードパスで
+アルファブレンド合成)を備えた完結型3Dレンダラーです。
+`.gltf`/`.fbx`/`.obj`等のソースモデルは、付属のオフラインツール**KurenaiPacker.exe**で`.kmodel`へ事前変換して
 から使います(下記「アセットの準備(KurenaiPacker)」参照)。`KurenaiEngine2D`はスプライト・図形・
 テキスト描画を提供する軽量な2D APIです。内部の描画パイプラインや実装判断については
 [実装者向けドキュメント](docs/Architecture.html)を参照してください。
@@ -134,7 +135,7 @@ KurenaiEngine2D.dllとSprite2D.hlslのみが自動でコピーされるため、
 ### 5. アセットの準備(KurenaiPacker)
 
 `KurenaiEngine3D`が読み込めるのは`.kmodel`(KurenaiEngine専用モデルパッケージ)のみです。
-`.gltf`/`.fbx`等のソースモデルは`Assets\Source\`に置き、`KurenaiPacker.exe`で`Assets\Packed\`へ
+`.gltf`/`.fbx`/`.obj`等のソースモデルは`Assets\Source\`に置き、`KurenaiPacker.exe`で`Assets\Packed\`へ
 変換してから使います。まずKurenaiPacker自身をビルドします(assimp・DirectXTexのビルドが
 事前に必要。手順2・3参照)。
 
@@ -153,6 +154,9 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 - 既に出力済みの`.ktex`はスキップして高速に再パックします。強制的に再圧縮する場合は`--force`を付けます
 - テクスチャ処理は既定で論理コア数(上限8)のワーカースレッドを使って並列に行われます。`--jobs <N>`で変更できます
 - 個々のテクスチャの読み込みに失敗しても、そのテクスチャだけフォールバック(白/フラット法線)として扱いパックは続行します
+- `.obj`/`.mtl`も入力に使えます。OBJ形式は単位情報を持たないため、センチメートル単位で作成された
+  アセットはそのままだと100倍の大きさになります。その場合は`--scale <係数>`で補正してください
+  (例: Amazon Lumberyard Bistroの`.obj`配布は`--scale 0.01`)
 
 複数のモデルとカメラ・太陽光の初期値をまとめる`.kscene`(シーンファイル)は、`--scene`を付けて
 検証・配置します(書式の詳細は[docs/KurenaiEngine.html](docs/KurenaiEngine.html) 4.7節を参照)。

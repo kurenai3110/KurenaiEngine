@@ -300,7 +300,7 @@ namespace Kurenai::RHI
         // Reverse-Z(GREATER)を使うパイプラインのぶんも含めてここで明示的に作成する
         D3D11_DEPTH_STENCIL_DESC depthStencilDesc{};
         depthStencilDesc.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
-        depthStencilDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        depthStencilDesc.DepthWriteMask = desc.DepthWriteEnabled ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
         depthStencilDesc.DepthFunc = desc.ReverseZ ? D3D11_COMPARISON_GREATER : D3D11_COMPARISON_LESS;
         depthStencilDesc.StencilEnable = FALSE;
 
