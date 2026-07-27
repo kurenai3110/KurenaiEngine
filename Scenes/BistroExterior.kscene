@@ -1,0 +1,14 @@
+# KurenaiEngine シーンファイル
+
+[Scene]
+Name = Bistro (McGuire) - Exterior
+
+[Model]
+Path = BistroMcGuire/Exterior.kmodel
+
+# 密集した屋外の街区全体を包む巨大なバウンディングボックスを持つアセットのため、
+# 自動配置ヒューリスティック(バウンズを20%内側に入った位置)では建物の壁の中に
+# 埋まってしまう。実際の描画結果を確認して選んだ初期位置を明示的に指定する
+[Camera]
+Position = 21.5, 16.0, -53.5
+Yaw = 0.0

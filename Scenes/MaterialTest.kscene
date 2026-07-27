@@ -1,0 +1,7 @@
+# KurenaiEngine シーンファイル
+
+[Scene]
+Name = Material Test
+
+[Model]
+Path = MaterialTest/MaterialTest.kmodel

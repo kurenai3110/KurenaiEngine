@@ -1,0 +1,7 @@
+# KurenaiEngine シーンファイル
+
+[Scene]
+Name = Sponza
+
+[Model]
+Path = Sponza/Sponza.kmodel

@@ -1,0 +1,10 @@
+# KurenaiEngine シーンファイル
+
+[Scene]
+Name = Light Test
+
+[Model]
+Path = LightTest/LightTest.kmodel
+
+[Sun]
+Shadow = false

@@ -1,0 +1,23 @@
+# KurenaiEngine シーンファイル - 複数モデル配置の動作確認用
+# MaterialTest(白色球体列)を平行移動・回転・非一様スケール・負スケールで3体並べ、
+# TRS変換(法線のinverse-transpose・接線のTangentSignFlipを含む)が正しく機能しているかを
+# 目視確認するためのシーン
+
+[Scene]
+Name = Multi Model Test
+
+[Model]
+Path = MaterialTest/MaterialTest.kmodel
+Translation = 0, 0, 0
+
+[Model]
+Path = MaterialTest/MaterialTest.kmodel
+Translation = 30, 0, 0
+RotationEuler = 0, 45, 0
+
+# 非一様スケール+X軸のみ負(ミラーリング)の組み合わせ。法線が歪まないこと
+# (inverse-transpose)と、法線マップ相当の陰影が裏返らないこと(TangentSignFlip)を確認する
+[Model]
+Path = MaterialTest/MaterialTest.kmodel
+Translation = -30, 0, 0
+Scale = -1, 1.5, 1

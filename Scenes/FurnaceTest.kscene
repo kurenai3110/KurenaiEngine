@@ -1,0 +1,15 @@
+# KurenaiEngine シーンファイル - White Furnace Test
+# 検証の成立条件は docs/Architecture.html 14.9.7 参照
+
+[Scene]
+Name = White Furnace Test
+Skybox = Skybox/UniformWhite.dds
+IBLIntensity = 1.0
+AmbientOcclusion = false
+ScreenSpaceReflection = false
+
+[Model]
+Path = FurnaceTest/FurnaceTest.kmodel
+
+[Sun]
+Enabled = false

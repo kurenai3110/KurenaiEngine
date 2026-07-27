@@ -522,6 +522,37 @@ World以外を使わないが、GBufferパスと同じルートシグネチャ(=
 <code>ObjectConstants</code>で埋まっているため、有効ライト数を<code>FrameConstants</code>(b0)の
 末尾に追加する形で回避している)。
 </p>
+<h3>10.1 手書き<code>.kscene</code>だけをGit管理する理由と置き場所</h3>
+<p>
+アセットのうち<code>.kmodel</code>/<code>.kgeom</code>/<code>.ktex</code>およびスカイボックスの
+<code>.dds</code>は、ソースモデルと<code>KurenaiPacker</code>・生成スクリプトから<b>いつでも再生成できる
+バイナリ生成物</b>なのでGit管理せず、<code>.gitignore</code>の<code>/Assets/</code>でまとめて除外している。
+一方<code>.kscene</code>は事情が違う。これは人間が書くテキストであり、<b>エンジンのコード変更と不可分</b>
+である ―― <code>[Scene] Skybox</code>や<code>[Sun] Enabled</code>のようなキーの追加は
+<code>SceneLoader.cpp</code>の変更と同時に行われ、新しい検証シーンの追加はその機能の追加そのものだからだ。
+</p>
+<p>
+実際にこれが問題として現れた。14.9.6節のWhite Furnace Testを追加したコミットは、シェーダー・
+<code>SceneLoader.cpp</code>・ドキュメントを変更した一方で、肝心の<code>FurnaceTest.kscene</code>と
+<code>MaterialTest.kscene</code>の改名(旧称<code>White Surface Test</code>)は<code>Assets/</code>配下に
+あったためコミットに含められず、<b>別のクローン/worktreeではシーン一覧にすら現れない</b>状態になった。
+そのため手書きの<code>.kscene</code>はGit管理下へ移した。
+</p>
+<p>
+置き場所は<code>Assets/Source/Scenes/</code>ではなく<b>リポジトリ直下の<code>Scenes/</code></b>にした。
+gitは除外されたディレクトリの中を走査しないため、<code>/Assets/</code>を除外したまま
+その内側のファイルを<code>!</code>で再包含することはできず、
+<code>/Assets/*</code>・<code>!/Assets/Source/</code>・<code>/Assets/Source/*</code>…と
+階層ごとに除外と再包含を積む記述が必要になる。<code>Assets/</code>の外へ出せば
+<code>.gitignore</code>は<code>/Assets/</code>のまま一行も変えずに済む。
+</p>
+<p>
+ランタイムが読むのは従来どおり<code>Assets/Packed/Scenes/</code>側で、この点は変わっていない。
+<code>KurenaiPacker</code>の<code>--scene</code>モードは入力パスを問わず
+(<code>[Model]Path</code>の基準となるAssetsルートは<code>-o</code>の出力パスから
+「Scenesフォルダの1つ上」として推定する。<code>Main.cpp</code>の<code>RunSceneMode</code>)、
+<code>Scenes/</code> &rarr; <code>Assets/Packed/Scenes/</code>へ検証・配置する。
+</p>
 </section>
 
 <section id="bistro">

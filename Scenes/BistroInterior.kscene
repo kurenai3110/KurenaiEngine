@@ -1,0 +1,7 @@
+# KurenaiEngine シーンファイル
+
+[Scene]
+Name = Bistro (McGuire) - Interior
+
+[Model]
+Path = BistroMcGuire/Interior.kmodel

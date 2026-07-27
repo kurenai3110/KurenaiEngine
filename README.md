@@ -51,8 +51,9 @@ Tools/
                   Build/               KurenaiPacker.exeの出力先(Git管理対象外)
 docs/                           ドキュメント(APIリファレンス・実装者向け)
 ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
+Scenes/                         手書きの.kscene(シーンファイル)。小さなテキストのためGit管理対象
 Assets/                         アセット(Git管理対象外)
-  Source/                        入力。ソースモデル(.gltf/.fbx等)と手書きの.kscene
+  Source/                        入力。ソースモデル(.gltf/.fbx等)
   Packed/                        出力。KurenaiPacker.exeが生成する.kmodel/.kgeom/.ktexと
                                    検証済みの.kscene。KurenaiEngine3Dが実際に読み込むのはこちら
 Build/                          3つのDLL単体の出力先(Git管理対象外)。
@@ -161,17 +162,19 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 
 複数のモデルとカメラ・太陽光の初期値をまとめる`.kscene`(シーンファイル)は、`--scene`を付けて
 検証・配置します(書式の詳細は[docs/KurenaiEngine.html](docs/KurenaiEngine.html) 4.7節を参照)。
+`.kscene`はリポジトリの`Scenes\`に含まれているため、clone直後に自分で書く必要はありません
+(`Assets\Packed\Scenes\`へ配置するこのコマンドだけを実行してください)。
 
 ```
 Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
-  --scene Assets\Source\Scenes\Sponza.kscene -o Assets\Packed\Scenes\Sponza.kscene
+  --scene Scenes\Sponza.kscene -o Assets\Packed\Scenes\Sponza.kscene
 ```
 
 `KurenaiEngine3D`は起動時に`Assets\Packed\Scenes\*.kscene`をファイル名の昇順で列挙し、
 ImGuiの「Scenes」パネルに並べます(シーンを追加するには`.kscene`を1つ置くだけです)。
 
 ```ini
-# .ksceneの記述例(Assets\Source\Scenes\BistroExterior.kscene)
+# .ksceneの記述例(Scenes\BistroExterior.kscene)
 [Scene]
 Name = Bistro (McGuire) - Exterior
 
@@ -246,7 +249,8 @@ KurenaiEngineLibrary.vcxproj+KurenaiEngine2D.vcxprojをプロジェクト参照�
 エンジンが読み込むモデル・テクスチャ類は `Assets/` フォルダで管理します。サイズが大きいため
 Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と`Assets/Packed/`(出力)に
 分かれており、`KurenaiEngine3D`が実際に読み込むのは常に`Assets/Packed/`側です
-(手順5「アセットの準備」参照)。
+(手順5「アセットの準備」参照)。手書きの`.kscene`だけは`Assets/`の外の`Scenes/`にあり、
+こちらはリポジトリに含まれています。
 
 - `Assets/Source/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
 - `Assets/Source/BistroMcGuire/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)のMorgan McGuire版OBJ配布([awesome-3d-meshes](https://github.com/Graphify-Labs/awesome-3d-meshes)経由)をglTFに変換したもの。変換手順は[実装者向けドキュメント](docs/Architecture.html)を参照
@@ -258,7 +262,7 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   `Tools/generate_material_test.py` で再生成できる
 - `Assets/Source/LightTest/` — ポイント/スポット/平行光の検証用シーン(床・壁・粗さ違いの球4個)。
   `Tools/generate_light_test.py` で再生成できる
-- `Assets/Source/Scenes/` — 手書きの`.kscene`(シーンファイル)
+- `Scenes/` — 手書きの`.kscene`(シーンファイル)。`Assets/`の外にあり**Git管理対象**
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
 - `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる
 
