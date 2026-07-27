@@ -380,8 +380,15 @@ namespace Kurenai::RHI
         m_Device->GetDevice()->CopyDescriptors(
             rangeCount, destRanges, nullptr, rangeCount, srcRanges, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-        m_PendingComputeSrvSlotMask = 0;
-        m_PendingComputeUavSlotMask = 0;
+        // マスクはここでクリアしない。Dispatchのたびに新しいテーブルブロックを払い出して
+        // 「マスクが立っているスロットだけ」をコピーする方式のため、クリアしてしまうと
+        // 2回目以降のDispatchで前回のバインドが引き継がれず、未初期化のディスクリプタを
+        // 参照することになる。DX11は同じリソースをバインドし直さなくても
+        // 次のDispatchまでバインドが維持されるため、この差がバックエンド間の挙動差になる。
+        // 実際にIBL畳み込みパス(SetComputeTextureでスカイボックスを1回だけバインドし、
+        // 面ごとにUAVだけ差し替えて6回Dispatchする)で、DX12だけ2面目以降が
+        // スカイボックスを読めず真っ黒になる不具合として現れた。
+        // グラフィックス側のFlushPendingSrvWritesも同様にマスクをクリアしない
     }
 
     void DX12CommandList::Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
