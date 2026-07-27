@@ -79,7 +79,7 @@ float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roug
     // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(ミップ数-1、KurenaiEngine3D側で設定)
     const float mipLevel = roughness * ShadowParams.y;
     const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(DefaultSampler, R, mipLevel).rgb;
-    const float2 brdf = BRDFLUTTexture.Sample(DefaultSampler, float2(NdotV, roughness)).rg;
+    const float2 brdf = BRDFLUTTexture.Sample(BRDFLUTSampler, float2(NdotV, roughness)).rg;
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)。
     // ShadowParams.w = ImGuiトグル(0で無効=倍率1.0)
     const float3 specularIBL =

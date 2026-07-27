@@ -346,7 +346,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // F0のlerpはEvaluateDirectBRDF内と同じ式(この式はコードベース内の複数箇所に登場するため
     // ここだけ引数化して特別扱いはしない)
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    const float2 brdf = BRDFLUTTexture.Sample(DefaultSampler, float2(NdotV, roughness)).rg;
+    const float2 brdf = BRDFLUTTexture.Sample(BRDFLUTSampler, float2(NdotV, roughness)).rg;
     const float3 energyCompensation = SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
 
     float3 directLight = float3(0.0f, 0.0f, 0.0f);

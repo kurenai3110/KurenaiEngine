@@ -705,10 +705,20 @@ namespace Kurenai
             m_ShadowCascades[cascade] = m_Device->CreateDepthTexture(kShadowMapSize, kShadowMapSize);
         }
 
-        // 空のキューブマップはシーンに依存しないため一度だけ読み込む
-        m_SkyboxTexture = m_Device->CreateTextureFromFile(dataRoot + L"Assets\\Skybox\\Sky.dds", false);
+        // 既定のスカイボックス。.ksceneの[Scene]Skyboxで差し替えられる(LoadScene参照)ため、
+        // 現在読み込んでいるパスを覚えておき、同じパスなら読み直さない
+        m_DefaultSkyboxPath = dataRoot + L"Assets\\Skybox\\Sky.dds";
+        m_CurrentSkyboxPath = m_DefaultSkyboxPath;
+        m_SkyboxTexture = m_Device->CreateTextureFromFile(m_CurrentSkyboxPath, false);
 
         m_Sampler = m_Device->CreateDefaultSampler();
+
+        // BRDF積分LUT用。異方性フィルタは画面空間の勾配からタップ位置を広げるため、
+        // NdotVが急変する球の輪郭付近などでLUTの端を大きくまたいでしまう。Linear + Clampにする
+        RHI::SamplerDesc lutSamplerDesc{};
+        lutSamplerDesc.Filter = RHI::SamplerFilter::Linear;
+        lutSamplerDesc.AddressMode = RHI::SamplerAddressMode::Clamp;
+        m_LUTSampler = m_Device->CreateDefaultSampler(lutSamplerDesc);
 
         // IBL(Image Based Lighting)の3つの畳み込み結果を保持するテクスチャと、それを生成する
         // コンピュートシェーダー一式。実際の畳み込み(スカイボックスのサンプリング)はRender()の
@@ -899,6 +909,37 @@ namespace Kurenai
         m_TimeOfDay = m_Scene.SunTimeOfDay;
         m_SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
         m_ShadowEnabled = m_Scene.ShadowEnabled;
+        m_SunEnabled = m_Scene.SunEnabled;
+        m_AOEnabled = m_Scene.AOEnabled;
+        m_SSREnabled = m_Scene.SSREnabled;
+        if (m_Scene.HasIBLIntensityOverride)
+        {
+            m_IBLIntensity = m_Scene.IBLIntensity;
+        }
+
+        // [Scene]Skyboxでスカイボックスを差し替える(指定が無ければ既定へ戻す)。
+        // IBLの拡散イラディアンス・プリフィルタ済み鏡面はスカイボックスから焼かれるため、
+        // 差し替えたらm_IBLBakedを倒して次フレームで焼き直させる必要がある。
+        // 直前にWaitForGPUIdle済みなので旧テクスチャを解放しても安全
+        const std::wstring desiredSkyboxPath = m_Scene.SkyboxPath.empty() ? m_DefaultSkyboxPath : m_Scene.SkyboxPath;
+        if (desiredSkyboxPath != m_CurrentSkyboxPath)
+        {
+            try
+            {
+                m_SkyboxTexture = m_Device->CreateTextureFromFile(desiredSkyboxPath, false);
+                m_CurrentSkyboxPath = desiredSkyboxPath;
+                m_IBLBaked = false;
+                Core::Logger::Info("KurenaiEngine3D", "スカイボックスを差し替えました: " + WideToUtf8(desiredSkyboxPath));
+            }
+            catch (const std::exception& e)
+            {
+                // 読み込みに失敗しても現在のスカイボックスのまま描画を続ける(シーン切り替え自体は成立させる)
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "スカイボックスの読み込みに失敗しました。現在のスカイボックスを維持します: " +
+                        WideToUtf8(desiredSkyboxPath) + " : " + e.what());
+            }
+        }
 
         // アセット由来のライトをユーザー編集用のコピーへ複製する(m_Scene.Lightsは直接編集しない。
         // シーンを再読み込みすればアセット既定値に戻るようにするため)。m_Scene.Lightsは
@@ -1308,6 +1349,9 @@ namespace Kurenai
                 ImGui::SliderFloat("Speed", &m_TimeAdvanceSpeed, 0.1f, 10.0f, "%.1f h/s");
             }
             ImGui::SliderFloat("Sun Azimuth", &m_SunAzimuthDegrees, 0.0f, 360.0f, "%.1f deg");
+            // 太陽だけを消して環境光のみで照らす状態を作る(White Furnace Testが使う)。
+            // TimeOfDayを夜にする方法と違い、昼度(環境光の明るさ)は下がらない
+            ImGui::Checkbox("Enable Sun", &m_SunEnabled);
             // 太陽・環境光・下記ポイント/スポットライトすべてに一様にかかるシーン全体の露出
             // (実在の写真露出値EV100)。屋内シーンでは実カメラと同様に下げて調整する運用になる
             ImGui::SliderFloat("EV100", &m_SceneExposureEV100, -8.0f, 20.0f, "%.2f");
@@ -1814,7 +1858,10 @@ namespace Kurenai
         }
         constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
         constants.LightDirection = { sunLighting.Direction.x, sunLighting.Direction.y, sunLighting.Direction.z, 0.0f };
-        constants.LightColor = sunLighting.Color;
+        // 太陽を無効にする場合は色をゼロにするだけでよい(シェーダー側は太陽の寄与に
+        // LightColor.rgbを乗算するため、これで完全に消える)。TimeOfDayを夜にする方法と違い
+        // 昼度(AmbientColor.a)は下がらないので、環境光だけで照らす状態を作れる
+        constants.LightColor = m_SunEnabled ? sunLighting.Color : DirectX::XMFLOAT4{ 0.0f, 0.0f, 0.0f, 0.0f };
         DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameState.Camera.GetViewMatrix()));
         DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameState.Camera.GetProjectionMatrix()));
         // rgb(環境光の色)にm_AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
@@ -2062,6 +2109,8 @@ namespace Kurenai
                 cmd->SetConstantBuffer(1, m_LightingConstantBuffer.get());
 
                 cmd->SetSampler(0, m_Sampler.get());
+                // BRDF積分LUT(t9)はエネルギー補正用に引くため、Clampサンプラーを合わせてバインドする
+                cmd->SetSampler(1, m_LUTSampler.get());
                 cmd->SetTexture(0, m_GBufferAlbedo.get());
                 cmd->SetTexture(1, m_GBufferNormal.get());
                 cmd->SetTexture(2, m_GBufferMaterial.get());
@@ -2179,6 +2228,8 @@ namespace Kurenai
                 cmd->SetPipelineState(m_LightingPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetSampler(0, m_Sampler.get());
+                // BRDF積分LUT(t10)用のClampサンプラー
+                cmd->SetSampler(1, m_LUTSampler.get());
                 cmd->SetTexture(0, m_GBufferAlbedo.get());
                 cmd->SetTexture(1, m_DirectLightTexture.get());
                 cmd->SetTexture(2, m_GBufferMaterial.get());
@@ -2243,6 +2294,8 @@ namespace Kurenai
                 cmd->SetPipelineState(m_TransparentPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetSampler(0, m_Sampler.get());
+                // BRDF積分LUT(t11)用のClampサンプラー
+                cmd->SetSampler(1, m_LUTSampler.get());
 
                 if (!gpuLights.empty())
                 {

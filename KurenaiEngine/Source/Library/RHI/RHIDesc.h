@@ -66,12 +66,13 @@ namespace Kurenai::RHI
         IRHIShader* ComputeShader = nullptr;
     };
 
-    // サンプラーの記述子。既定値は異方性16xで、これまでの固定MIN_MAG_MIP_LINEARより
-    // 浅い角度で見る面のボケを抑える。AddressU/V/Wはこのエンジンでは常にWrapのみを使うため
-    // 個別に公開せず、CreateDefaultSampler側で固定している
+    // サンプラーの記述子。既定値は異方性16x + Wrapで、これまでの固定MIN_MAG_MIP_LINEARより
+    // 浅い角度で見る面のボケを抑える。AddressU/V/Wは3軸まとめてAddressModeで指定する
+    // (このエンジンでは軸ごとに別のアドレッシングを使う用途が無いため)
     struct SamplerDesc
     {
         SamplerFilter Filter = SamplerFilter::Anisotropic;
+        SamplerAddressMode AddressMode = SamplerAddressMode::Wrap;
         uint32_t MaxAnisotropy = 16;
     };
 }

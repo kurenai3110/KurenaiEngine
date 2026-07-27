@@ -279,8 +279,21 @@ namespace Kurenai
         // デバッグ表示(Render Targets - Shadow Map)で確認するカスケード番号(0=カメラに近い方)
         int32_t m_ShadowDebugCascade = 0;
 
-        // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ
+        // 太陽(平行光)そのものの有効/無効。.ksceneの[Sun]Enabledで設定される。
+        // TimeOfDayを夜にすると昼度(AmbientColor.a)も一緒に落ちて環境光まで消えてしまうため、
+        // 「昼のまま太陽だけ消す」にはこちらを使う(White Furnace Testが必要とする)。
+        // 無効時はFrameConstants.LightColorをゼロにするだけでよく、シェーダー側の変更は不要
+        bool m_SunEnabled = true;
+
+        // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ。
+        // .ksceneの[Scene]Skyboxでシーンごとに差し替えられる(LoadScene参照)
         std::unique_ptr<RHI::IRHITexture> m_SkyboxTexture;
+        // 既定のスカイボックス(Assets/Skybox/Sky.dds)の絶対パス。[Scene]Skybox指定が無いシーンへ
+        // 切り替えたときはここへ戻す
+        std::wstring m_DefaultSkyboxPath;
+        // 現在m_SkyboxTextureへ読み込んでいるファイルの絶対パス。シーン切り替えのたびに
+        // 読み直さずに済むよう比較に使う
+        std::wstring m_CurrentSkyboxPath;
 
         // IBL(Image Based Lighting): m_SkyboxTextureから拡散イラディアンス・プリフィルタ済み鏡面・
         // BRDF積分LUTの3つをコンピュートシェーダーで畳み込む(split-sum近似、Karis 2013)。
@@ -342,6 +355,10 @@ namespace Kurenai
         float m_SunAzimuthDegrees = 126.87f;
 
         std::unique_ptr<RHI::IRHISampler> m_Sampler;
+        // BRDF積分LUT専用のサンプラー(s1)。LUTはUVの端が定義域の端(NdotV=0/1、roughness=0/1)
+        // であるため、汎用サンプラー(m_Sampler)のWrap + 異方性フィルタでは端のタップが
+        // 反対側の端へ回り込んで無関係な値が混ざる。Clamp + Linearで引く
+        std::unique_ptr<RHI::IRHISampler> m_LUTSampler;
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_ObjectConstantBuffer;
 

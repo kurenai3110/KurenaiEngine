@@ -1080,7 +1080,8 @@ C++側(<code>KurenaiEngine3D::Render</code>のIBLBakeパス)が面ごとに1回�
 ならない</b>(14.9節のエネルギー補正がこのLUTを実際のBRDFの方向アルベドとして使うため)ので、
 定義は共有ヘッダー<code>SpecularEnergy.hlsli</code>へ一本化し、このLUT生成と
 <code>DirectLighting.hlsl</code>/<code>Transparent.hlsl</code>が同じ関数を呼ぶようにしている。
-方向性を持たない2Dテーブルのため、これだけは通常のTexture2Dのまま(面ごとのディスパッチは不要)。</li>
+方向性を持たない2Dテーブルのため、これだけは通常のTexture2Dのまま(面ごとのディスパッチは不要)。
+<b>サンプリングには専用のサンプラー(Linear + Clamp)を使う</b> ―― 理由は下の14.2.1節。</li>
 <li><strong>拡散イラディアンス</strong>(<code>IBLConvolve.hlsl</code> CSIrradiance) —
 出力テクセルが表す法線方向Nについて、接空間の半球を(phi, theta)の等間隔グリッド
 (0.025rad刻み)で離散化し、cosθsinθ重み付き平均をとる(モンテカルロではなく決定的な離散化。
@@ -1096,6 +1097,80 @@ C++側(<code>KurenaiEngine3D::Render</code>のIBLBakeパス)が面ごとに1回�
 <strong>起動後最初のフレームでのみ</strong>1回だけ実行する(<code>KurenaiEngine3D::Render</code>の
 <code>m_IBLBaked</code>フラグ、通常のRenderGraphパスとして登録され毎フレームの仕組みをそのまま使う)。
 以降は焼き直さない。
+</p>
+
+<h4>14.2.1 BRDF積分LUTのサンプラーをWrapからClampへ直した経緯</h4>
+<p>
+このエンジンのサンプラーは長らく<b>AddressU/V/WがWrap固定</b>で、<code>SamplerDesc</code>にも
+アドレッシングを指定する手段が無かった(<code>RHIDesc.h</code>のコメントにも「常にWrapのみを使う」と
+書かれていた)。マテリアルテクスチャはタイリングするためWrapで正しいが、
+<b>BRDF積分LUTはUVそのものが定義域(u = NdotV、v = roughness、どちらも[0,1])であり、
+UVの端が値域の端を意味する</b>。ここをWrapで引くと、端でバイリニア補間のタップが
+反対側の端のテクセルへ回り込み、まったく無関係な値が混ざる。
+</p>
+<p>
+実際に<b>White Furnace Testの球の中心(視線と法線が一致する点、NdotV = 1)に
+数ピクセルの斑点</b>として現れていた。<code>u = 1.0</code>のサンプルが
+<code>u &asymp; 0</code>(グレージング角)のテクセルと50/50で混ざるためで、
+LUTは128テクセル幅なので影響範囲は最後の1〜2テクセル、球面上では<code>NdotV &gt; 0.99</code>の
+ごく狭い領域 ―― 見た目の「中心の斑点」と一致する。さらに汎用サンプラーは異方性16xだったため、
+画面空間の勾配ぶんだけタップが広がり斑点が数ピクセルに拡大していた。
+斑点の符号がラフネスで反転していた(滑らかな球では暗く、粗い球では明るい)ことも、
+<code>Ess(NdotV&asymp;0)</code>と<code>Ess(NdotV&asymp;1)</code>の大小がラフネス
+0.6付近で入れ替わることで説明がつく。
+</p>
+<p>
+v軸(roughness)にも同じ問題があり、<b>roughness = 0の面にroughness &asymp; 1の値が、
+roughness = 1の面にroughness &asymp; 0の値が混ざっていた</b>。こちらはNdotV軸より影響が大きく、
+本来は完全な鏡面として背景と区別がつかないはずのroughness 0の金属球が暗く沈んでいた。
+</p>
+<p>
+対処として<code>SamplerAddressMode</code>(<code>Wrap</code> / <code>Clamp</code>)を
+<code>RHIEnums.h</code>へ追加し、<code>SamplerDesc::AddressMode</code>で選べるようにした
+(既定は従来どおり<code>Wrap</code>)。<code>KurenaiEngine3D</code>は
+<b>LUT専用のサンプラー<code>m_LUTSampler</code>(Linear + Clamp)</b>を追加で生成し、
+LUTを読む3パス(DirectLight / Lighting / Transparent)で<code>s1</code>へバインドする。
+異方性を外してLinearにしているのは、LUTに対する異方性フィルタリングは
+「画面空間の勾配ぶんだけLUT上の広い範囲を平均する」だけで意味が無く、端をまたぐ距離を
+広げるだけだからである。シェーダー側の宣言
+(<code>SamplerState BRDFLUTSampler : register(s1);</code>)は
+<code>SpecularEnergy.hlsli</code>に置き、「LUTを引く側は必ずこのサンプラーを使う」ことを
+共有ヘッダーで担保している。
+</p>
+<p>
+DX12はサンプラーもディスクリプタテーブル経由のため、<code>kSamplerSlotCount</code>を
+1から2へ増やした。テーブルはスロット数ぶんまとめてバインドされるので、<code>s1</code>を
+宣言しないシェーダーの描画でもスロット1に有効なディスクリプタが必要になる
+(未初期化ディスクリプタがテーブルに含まれると動作は未定義)。上位層の呼び出し漏れに
+依存しないよう、<code>DX12Device</code>の初期化時に全スロットを既定のサンプラーで
+埋めてから上位層が必要なスロットだけ上書きする形にした。
+</p>
+<p>
+<b>修正後の実測</b>(White Furnace Test、補正OFF、球中心のHDR値を背景で割った比。
+Reinhardトーンマップとガンマの逆変換をかけて算出):
+</p>
+<table>
+<tr><th>roughness</th><th>0.0</th><th>0.2</th><th>0.4</th><th>0.6</th><th>0.8</th><th>1.0</th></tr>
+<tr><td>実測比</td><td>1.0000</td><td>1.0000</td><td>0.9541</td><td>0.7947</td><td>0.5368</td><td>0.3144</td></tr>
+<tr><td>理論<code>Ess</code></td><td>1.0000</td><td>0.9978</td><td>0.9572</td><td>0.7965</td><td>0.5367</td><td>0.3071</td></tr>
+</table>
+<p>
+全ラフネスで理論値と8bit量子化の範囲内(最大誤差0.012)で一致し、球中心の斑点も消えた。
+補正ONでは11球すべてが背景と同じ186で、1ピクセルも差が無い。DX11 / DX12の3D描画領域の
+画素差分は0(差はタイトルバーの「DX11」「DX12」の文字のみ)。
+</p>
+<p>
+<b>この修正はエネルギー補正の実装そのものとは独立</b>である点に注意。補正ON時は
+<code>comp = 1/Ess</code>(金属では<code>F0 = 1</code>)が<code>Ess</code>を厳密に打ち消すため、
+<code>Ess</code>が汚染されていても結果は背景と一致してしまい、<b>不具合が見えなくなっていた</b>。
+補正OFFの絵を観察して初めて表面化した。
+</p>
+<p>
+<b>残る既知の課題</b>: 汎用サンプラー(<code>m_Sampler</code>)は依然としてWrapのまま、
+シャドウマップやフルスクリーンパスの中間テクスチャにも使われている。これらもUVの端が
+定義域の端であるため、原理的には同じ回り込みが起きうる(現時点で目に見える不具合は
+確認していない)。アドレッシングを選べる仕組みは今回入ったので、対処するならサンプラーを
+用途ごとに分けるだけでよい。
 </p>
 
 <h3>14.3 RHIへの追加</h3>
@@ -1398,7 +1473,7 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 より上でしか補正は意味を持たないが、その領域では<code>roughnessFade</code>がゼロに落ちる。
 </p>
 
-<h4>14.9.6 実機での検証結果と、現行アセットにおける効果の限界</h4>
+<h4>14.9.6 White Furnace Testによる検証</h4>
 <p>
 <b>可視性項の共有ヘッダー化はLUTを変えていない</b>: Render Targetsパネルの
 「IBL - BRDF LUT」表示を移行前後で画素比較し、<b>差分ゼロ</b>を確認した(同一式のため期待値どおり)。
@@ -1415,7 +1490,7 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 パースすると<b>210メッシュすべて<code>MetallicFactor = 0.0</code></b>である
 (Exterior 132 / Interior 66 / MaterialTest 12。BistroはOBJ/MTL由来で
 <code>AI_MATKEY_METALLIC_FACTOR</code>を持たないため既定値0のまま)。<code>F0 = 0.04</code>固定では
-補正倍率が最大1.090にとどまり、White Surface Test(白球・アルベド1.0)ではトグルON/OFFの差が
+補正倍率が最大1.090にとどまり、Material Test(白球・アルベド1.0)ではトグルON/OFFの差が
 <b>1ピクセル</b>しか出なかった(球ごとの平均輝度では+0.001〜+0.014%の一貫した増加として観測でき、
 配線自体は機能している)。白い誘電体では鏡面成分が全体のごく一部だからである。
 </p>
@@ -1437,18 +1512,69 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 期待どおりの挙動)。
 </p>
 <p>
-<b>そこで一時的に<code>metallic = 1.0</code>を強制して実装の正しさを検証した</b>
-(<code>DeferredLighting.hlsl</code>/<code>DirectLighting.hlsl</code>のPSMainへデバッグコードを入れ、
-検証後に撤去)。トグルON/OFFの差は11,060ピクセル・最大112/255に拡大し、White Surface Testの
-球ごとの倍率は<b>粗い側1.163倍から滑らかな側1.036倍へ単調減少</b>した。さらに<b>補正ON時の輝度が
-全ラフネスでほぼ一定(165〜166)</b>になった ―― これは<code>F0 = 1</code>のとき
-<code>Ess &middot; comp = 1</code>となるエネルギー保存の性質そのもので、式が正しく実装されている
-ことの直接的な証拠である。
+<b>そこで専用の検証シーン「White Furnace Test」を用意した。</b>
+White Furnace Testは「一様な放射輝度の環境に物体を置くと、BRDFがエネルギー保存していれば
+物体が背景と完全に同じ明るさになり見分けがつかなくなる」ことを利用した検証手法である。
+金属(<code>F0 = baseColor = 1</code>)の鏡面IBLは、放射輝度<code>L</code>の一様な環境では
+</p>
+<pre><code>specularIBL = L * (F0 * A + B) = L * (A + B) = L * Ess</code></pre>
+<p>
+となり単一散乱のままでは<code>Ess &lt; 1</code>のぶんだけ背景より暗くなるが、
+補正<code>comp = 1/Ess</code>(<code>F0 = 1</code>のとき)を掛けると<code>L</code>に一致して
+球が消える。つまり<b>補正OFFで粗い球ほど暗い影として浮き上がり、補正ONで球が背景に溶ける</b>という
+形で、補正の正しさが定性的にも定量的にも判定できる。
 </p>
 <p>
-<b>DX11 / DX12の一致</b>: 3シーン(Exterior / Interior / White Surface Test)すべてで画素差分は
+実測結果(背景の輝度186.00に対する球の比):
+</p>
+<table>
+<tr><th>roughness</th><th>補正OFF</th><th>補正ON</th></tr>
+<tr><td>0.2</td><td>0.988</td><td><b>1.000</b></td></tr>
+<tr><td>0.3</td><td>0.976</td><td><b>1.000</b></td></tr>
+<tr><td>0.4</td><td>0.958</td><td><b>1.000</b></td></tr>
+<tr><td>0.5</td><td>0.931</td><td><b>1.000</b></td></tr>
+<tr><td>0.6</td><td>0.899</td><td><b>1.000</b></td></tr>
+</table>
+<p>
+<b>補正ONでは全ラフネスの球が背景と1ピクセルも違わない(比が厳密に1.000)。</b>
+これは<code>Ess &middot; comp = Ess + F0(1 - Ess) = 1</code>というエネルギー保存の性質そのもので、
+式が正しく実装されていることの直接的な証拠である。DX11 / DX12の画素差分もON/OFFとも0だった。
+</p>
+<p>
+<b>DX11 / DX12の一致</b>: 3シーン(Exterior / Interior / Material Test)すべてで画素差分は
 0〜3ピクセル。<code>metallic = 1.0</code>を強制した検証時も差分ゼロだった。
 </p>
+<h4>14.9.7 Furnace Testを成立させるためのシーン設定</h4>
+<p>
+Furnace Testは「球と背景の明るさが厳密に一致するか」を見る検証なので、環境光以外の寄与が
+1つでも混ざると成立しない。そのため<code>.kscene</code>へシーン単位の設定を追加した
+(いずれも他のシーンでも使える汎用のキーで、既定値は従来どおりの挙動)。
+</p>
+<table>
+<tr><th>キー</th><th>Furnace Testでの値</th><th>必要な理由</th></tr>
+<tr><td><code>[Scene] Skybox</code></td><td><code>Skybox/UniformWhite.dds</code></td>
+<td>一様な放射輝度の環境を作る。スカイボックスは従来<code>Assets/Skybox/Sky.dds</code>固定だったため、
+シーンごとに差し替えられるようにした。IBLはスカイボックスから焼かれるので、差し替え時は
+<code>m_IBLBaked</code>を倒して次フレームで焼き直す</td></tr>
+<tr><td><code>[Sun] Enabled</code></td><td><code>false</code></td>
+<td>太陽が乗ると球が背景より明るくなる。<code>TimeOfDay</code>を夜にする方法では昼度
+(<code>AmbientColor.a</code>)まで一緒に落ちて環境光ごと消えてしまうため、太陽だけを消すキーが要る。
+実装は<code>FrameConstants.LightColor</code>をゼロにするだけでシェーダー変更は不要</td></tr>
+<tr><td><code>[Scene] IBLIntensity</code></td><td><code>1.0</code></td>
+<td>背景のスカイボックスは強度倍率を掛けずそのまま描かれるため、既定の0.5では球だけが半分の
+明るさになる</td></tr>
+<tr><td><code>[Scene] AmbientOcclusion</code></td><td><code>false</code></td>
+<td>球の縁がAOで暗くなると「エネルギー損失による暗さ」と区別がつかなくなる</td></tr>
+<tr><td><code>[Scene] ScreenSpaceReflection</code></td><td><code>false</code></td>
+<td>SSRは既にエネルギー保存している鏡面IBLへ反射色を<b>加算</b>する設計のため、有効なままだと
+球が背景より<b>明るく</b>なる(14.9.5節で述べた二重計上が、この検証で実際に目に見える形で現れた)</td></tr>
+</table>
+<p>
+アセット(一様キューブマップと金属球列)は<code>Tools/generate_furnace_test.py</code>が生成する。
+球は<code>metallic = 1.0</code>・<code>baseColorFactor = [1,1,1,1]</code>でラフネスのみ0.0〜1.0に
+振ってあり、<code>F0 = 1</code>となるため補正後の方向アルベドが厳密に1になる。
+</p>
+
 <p>
 <b>まとめ</b>: 今回の変更で目に見える差が出るのは再マップ除去(斜め視線 &times; 滑らかな面)だけで、
 エネルギー補正は物理的な正しさの底上げにとどまる。効果が最大化する「粗い金属」を現行のアセットは

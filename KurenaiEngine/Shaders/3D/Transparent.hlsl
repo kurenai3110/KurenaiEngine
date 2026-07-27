@@ -283,7 +283,7 @@ void EvaluateIBLSplit(
     // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(KurenaiEngine3D側で設定)
     const float mipLevel = roughness * ShadowParams.y;
     const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(DefaultSampler, R, mipLevel).rgb;
-    const float2 brdf = BRDFLUTTexture.Sample(DefaultSampler, float2(NdotV, roughness)).rg;
+    const float2 brdf = BRDFLUTTexture.Sample(BRDFLUTSampler, float2(NdotV, roughness)).rg;
 
     // 夜間の減衰はDeferredLighting.hlslと同じくAmbientColor.aで行う(プリフィルタマップ・
     // イラディアンスマップは昼固定のスカイボックスから焼いたものなので、これが唯一の減光手段)
@@ -397,7 +397,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 関数でピクセル内では一定なので、ライトのループへ入る前に1度だけ求める。
     // 下のIBL無効時フォールバックもこのF0/brdfをそのまま再利用する
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    const float2 brdf = BRDFLUTTexture.Sample(DefaultSampler, float2(NdotV, roughness)).rg;
+    const float2 brdf = BRDFLUTTexture.Sample(BRDFLUTSampler, float2(NdotV, roughness)).rg;
     const float3 energyCompensation = SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
 
     float3 directDiffuse = float3(0.0f, 0.0f, 0.0f);
