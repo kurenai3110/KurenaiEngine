@@ -326,6 +326,9 @@ namespace Kurenai
         static constexpr uint32_t kIBLPrefilterMipLevels = 6;
         static constexpr uint32_t kIBLBRDFLUTSize = 128;
         bool m_IBLBaked = false;
+        // 検証用の拡散イラディアンスマップを焼き終えたか(m_IBLBakedとは別管理)。既定の描画経路は
+        // プリフィルタ済み鏡面の最終ミップなので、こちらは検証を有効にしたときにだけ焼く
+        bool m_IBLIrradianceBaked = false;
         std::unique_ptr<RHI::IRHITexture> m_IrradianceTexture;
         std::unique_ptr<RHI::IRHITexture> m_PrefilteredEnvTexture;
         std::unique_ptr<RHI::IRHITexture> m_BRDFLUTTexture;
@@ -346,6 +349,16 @@ namespace Kurenai
         // Perez分布そのままではIBL全体の寄与が強すぎたため(実機で指摘された見た目の問題)
         bool m_IBLEnabled = true;
         float m_IBLIntensity = 0.5f;
+        // 拡散イラディアンスを専用マップ(m_IrradianceTexture)から取るかどうか。既定はfalseで、
+        // プリフィルタ済み鏡面の最終ミップ(roughness=1)を使う。CSPrefilterがV=R=Nを仮定して
+        // いるためroughness=1ではGGXの実効カーネルがコサイン畳み込みへ厳密に退化し、両者は同じ
+        // E(N)/πを格納する(14.10節)。White Furnace Testで画素一致、実スカイボックスでも
+        // 最大2〜4/255の差しか出ないことを実機で確認したうえで専用マップを既定経路から外した。
+        // これによりリフレクションプローブのような実行時のキューブマップ焼き直しから、最も重い
+        // CSIrradiance(約9750万サンプル)を丸ごと省ける。
+        // 畳み込み処理自体はいつでも検証できるよう残してあり、このトグルをONにすると
+        // その場で焼いて(m_IBLIrradianceBaked)従来経路に切り替わる
+        bool m_IBLUseDedicatedIrradiance = false;
         // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)のON/OFF。
         // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立したトグルにしている。
         // FrameConstants.ShadowParams.wへ1.0f/0.0fとして渡し、3つのシェーダー(DirectLighting/

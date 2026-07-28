@@ -35,6 +35,13 @@ cbuffer FrameConstants : register(b0)
     // PSMain側でこれが0以下の場合はEvaluateIBLの代わりにAmbientColor.rgbの定数色アンビエントへ
     // フォールバックする)。x/wはこのシェーダでは未使用
     float4 ShadowParams;
+    // 半透明パス(Transparent.hlsl)専用のフィールドで、このシェーダでは使わない。cbufferのレイアウトは
+    // 宣言順で決まり途中のフィールドを飛ばせないため、後続のIBLParamsのオフセットを合わせる目的で
+    // 宣言だけしている(C++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること)
+    float4 ActiveLightCount;
+    // x: 拡散イラディアンスの取得元(0=専用イラディアンスマップ(t8)、1=プリフィルタ済み鏡面の
+    // 最終ミップ)。EvaluateIBL参照。yzwは未使用
+    float4 IBLParams;
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -66,7 +73,16 @@ float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roug
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
 
     // --- 拡散IBL ---
-    const float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
+    // 既定ではプリフィルタ済み鏡面の最終ミップ(roughness=1、ShadowParams.yがそのミップ番号)を
+    // 法線方向で引く。CSPrefilterはV=R=Nを仮定しているため、roughness=1(α=1)ではGGX
+    // インポータンスサンプリングの実効カーネルがコサイン畳み込みへ厳密に退化し(θ_L=2θ_H・
+    // 重みcos(2θ_H)の変数変換でcosθ_L・sinθ_L dθ_L dφになる)、NdotL重み付き平均の結果も
+    // CSIrradianceと同じE(N)/πになる。近似ではなく等価であり、専用のイラディアンスマップを
+    // 焼く必要がない(White Furnace Testで画素一致を確認済み。14.10節)。
+    // IBLParams.x=1のときだけ従来の専用マップを引く(検証用に残している経路)
+    const float3 irradiance = (IBLParams.x > 0.5f)
+        ? IrradianceTexture.Sample(MaterialSampler, N).rgb
+        : PrefilteredEnvTexture.SampleLevel(MaterialSampler, N, ShadowParams.y).rgb;
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")。粗い面ほど
     // 視線に対するフレネルの立ち上がりが緩やかになる近似で、鏡面に回らない分をkdへ反映する
     const float3 fresnelRoughness = F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);

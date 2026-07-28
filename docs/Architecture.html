@@ -243,9 +243,10 @@ PBR(メタリック/ラフネス)計算を行います。
 <li>Presentパス — 選択中のデバッグビューをバックバッファへ表示</li>
 </ol>
 <p>
-上記に加え、起動後最初のフレームだけ「IBL畳み込みパス」が実行されます(スカイボックスは実行時に
-変化しない静的アセットのため一度だけで十分、詳細は14章参照)。毎フレーム実行される9パスとは
-性質が異なるため上のリストには含めていません。
+上記に加え、起動後最初のフレームだけ「IBL畳み込みパス」(<code>IBLBake</code>)が実行されます
+(スカイボックスは実行時に変化しない静的アセットのため一度だけで十分、詳細は14章参照)。
+毎フレーム実行される9パスとは性質が異なるため上のリストには含めていません。なお検証用の
+<code>IBLIrradianceBake</code>パスは通常の描画では一度も実行されません(14.10.3節)。
 </p>
 <p>
 シャドウ・AO/GI・SSRはそれぞれON/OFF可能で、OFF時は該当パスをスキップします。
@@ -1220,10 +1221,16 @@ C++側(<code>KurenaiEngine3D::Render</code>のIBLBakeパス)が面ごとに1回�
 (128,64,32,16,8,4)のミップチェーンを持つ(面×ミップの組み合わせごとに1回ずつディスパッチ)。</li>
 </ul>
 <p>
-スカイボックスは実行時に変化しない静的アセットのため、この3つはいずれも
+スカイボックスは実行時に変化しない静的アセットのため、これらは
 <strong>起動後最初のフレームでのみ</strong>1回だけ実行する(<code>KurenaiEngine3D::Render</code>の
 <code>m_IBLBaked</code>フラグ、通常のRenderGraphパスとして登録され毎フレームの仕組みをそのまま使う)。
 以降は焼き直さない。
+</p>
+<p>
+ただし<b>拡散イラディアンスだけは既定の描画経路から外れており、通常は焼かれない</b>。
+実際の拡散イラディアンスはプリフィルタ済み鏡面の最終ミップ(roughness = 1)から得ている。
+これはコサイン畳み込みへ厳密に退化するため専用マップと同じ値を与えるからで、詳しい導出と
+検証結果、および専用マップを削除せず検証経路として残してある理由は14.10節を参照。
 </p>
 
 <h4>14.2.1 BRDF積分LUTのサンプラーをWrapからClampへ直した経緯</h4>
@@ -1833,6 +1840,172 @@ Furnace Testは「球と背景の明るさが厳密に一致するか」を見�
 エネルギー補正は物理的な正しさの底上げにとどまる。効果が最大化する「粗い金属」を現行のアセットは
 一つも持っていないため、将来<code>metallicFactor = 1.0</code>のマテリアルを追加した時点で
 初めて視覚的に意味を持つ。
+</p>
+
+<h3>14.10 拡散イラディアンスをプリフィルタ済み鏡面の最終ミップで代替する</h3>
+<p>
+拡散イラディアンス(<code>CSIrradiance</code>)は3つの畳み込みの中で最も重く、
+32&times;32&times;6面 &times; 1テクセルあたり約15,876サンプル = <b>約9,750万サンプル</b>を消費する
+(プリフィルタ済み鏡面の約3倍)。スカイボックスが静的な現状では起動時の1フレームで済むため
+実害は小さいが、将来キューブマップを実行時に焼き直す用途(ローカル反射プローブ等)では
+プローブ1個ごとにこのコストが乗る。そこで<b>専用のイラディアンスマップを廃止し、
+プリフィルタ済み鏡面の最終ミップ(roughness = 1)で代替できないか</b>を検証した。
+</p>
+
+<h4>14.10.1 なぜ等価になるのか</h4>
+<p>
+<code>CSPrefilter</code>はKaris 2013に従い<code>V = R = N</code>を仮定している(14.2節)。
+この仮定の下でroughness = 1(&alpha; = 1)にすると、GGXインポータンスサンプリングの実効カーネルは
+<b>コサイン畳み込みへ厳密に退化する</b>。近似ではなく等式である。
+</p>
+<ol>
+<li><code>ImportanceSampleGGX_P</code>の<code>cosθ_H = sqrt((1-ξ_y)/(1+(a²-1)ξ_y))</code>は
+a = 1で<code>sqrt(1-ξ_y)</code>となり、ハーフベクトルHはN周りの<b>コサイン分布</b>になる</li>
+<li><code>L = 2(V·H)H - V</code>でV = Nなので<code>N·L = 2cos²θ_H - 1 = cos(2θ_H)</code>、
+すなわち<b>θ_L = 2θ_H</b>(方位角φは保存される)</li>
+<li>重み<code>NdotL = cos(2θ_H)</code>が正になるのはθ_H &lt; 45&deg;で、これがちょうど
+θ_L &lt; 90&deg;(法線半球)に対応する。半球の外は自然に棄却される</li>
+<li>θ_Lへ変数変換すると<code>cosθ_H・sinθ_H dθ_H = (1/4)sinθ_L dθ_L</code>となり、
+実効カーネルは<code>cosθ_L・sinθ_L dθ_L dφ</code> = コサイン畳み込みそのものになる</li>
+</ol>
+<p>
+さらに<b>格納される値も一致する</b>。プリフィルタのNdotL重み付き平均は
+<code>Σ L・NdotL / Σ NdotL = ∫L cosθ dω / ∫cosθ dω = E(N)/π</code>。
+一方<code>CSIrradiance</code>は<code>PI * Σ(L cosθ sinθ) / sampleCount</code>を書き込むが、
+グリッド刻みが<code>ΔθΔφ = π²/N</code>なので<code>Σ ≈ E(N)・N/π²</code>、したがって
+<code>π・Σ/N = E(N)/π</code>。<b>両者は同じ量E(N)/πを格納している</b>
+(この「1/πを畳み込み側で相殺済み」という規約自体は14.2節のとおりで、
+<code>DeferredLighting.hlsl</code>は追加のπ処理なしにalbedoへ直接乗算できる)。
+</p>
+
+<h4>14.10.2 唯一の差は解像度とサンプル数</h4>
+<p>
+プリフィルタ済み鏡面は1枚のテクスチャのミップチェーンであり、roughness &rarr; ミップ番号は
+<code>mip / (kIBLPrefilterMipLevels - 1)</code>の線形固定(<code>DeferredLighting.hlsl</code>が
+<code>roughness * ShadowParams.y</code>でハードウェアの三線形補間へそのまま載せるための設計)。
+そのため<b>roughness = 1は必ず最終ミップに焼かれ、その解像度は<code>128 &gt;&gt; 5 = 4</code>に
+構造的に決まる</b>。解像度だけを独立に選ぶことはできない。
+</p>
+<table>
+<tr><th>mip</th><th>解像度</th><th>roughness</th></tr>
+<tr><td>0</td><td>128&times;128</td><td>0.0</td></tr>
+<tr><td>1</td><td>64&times;64</td><td>0.2</td></tr>
+<tr><td>2</td><td>32&times;32</td><td>0.4</td></tr>
+<tr><td>3</td><td>16&times;16</td><td>0.6</td></tr>
+<tr><td>4</td><td>8&times;8</td><td>0.8</td></tr>
+<tr><td>5</td><td><b>4&times;4</b></td><td><b>1.0</b></td></tr>
+</table>
+<p>
+専用イラディアンスマップは32&times;32なので、面あたり1024テクセル &rarr; 16テクセルと64分の1になる。
+ただし<b>情報量としては足りている</b>: Ramamoorthi &amp; Hanrahan (2001)が示すとおりコサイン畳み込みは
+l &ge; 3の球面調和帯域を1%未満まで減衰させるため、イラディアンスは実質9係数の帯域制限信号であり、
+4&times;4&times;6 = 96テクセルは自由度として十分に足りる。したがって懸念は情報量ではなく
+<b>(a) バイライナー再構成による面取り</b>と<b>(b) 1テクセルあたり256サンプルのモンテカルロ由来の
+ブロッチ</b>の2点に絞られ、これは机上では決着しないため実機A/Bで判断した。
+</p>
+
+<h4>14.10.3 実装: 既定経路の切り替えと検証経路の温存</h4>
+<p>
+検証の結果(14.10.4)を受けて、<b>既定の描画経路をプリフィルタ済み鏡面の最終ミップにし、
+専用イラディアンスマップは既定経路から外した</b>。ただし
+<code>CSIrradiance</code>・<code>m_IrradianceTexture</code>・
+<code>m_IrradiancePipelineState</code>・デバッグ表示はいずれも<b>削除せずそのまま残してある</b>
+(いつでも両経路を突き合わせて検証できる状態を保つため)。
+<code>FrameConstants</code>末尾へ<code>IBLParams</code>を追加し(末尾追加なので既存シェーダの
+オフセットは変わらない)、その<code>x</code>で取得元を選ぶ。
+</p>
+<pre><code>const float3 irradiance = (IBLParams.x &gt; 0.5f)
+    ? IrradianceTexture.Sample(MaterialSampler, N).rgb                              // 検証用の従来経路
+    : PrefilteredEnvTexture.SampleLevel(MaterialSampler, N, ShadowParams.y).rgb;    // 既定</code></pre>
+<p>
+畳み込みの実行も分離した。従来は<code>IBLBake</code>パス1つがBRDF LUT・拡散イラディアンス・
+プリフィルタ済み鏡面の3つをまとめて焼いていたが、拡散イラディアンスだけを
+<code>IBLIrradianceBake</code>という別パスへ切り出し、<b>検証が要求されたときにだけ登録する</b>
+ようにしている。
+</p>
+<pre><code>const bool needIrradianceBake =
+    m_IBLUseDedicatedIrradiance || m_DebugView == DebugView::IBLIrradiance;
+if (needIrradianceBake &amp;&amp; !m_IBLIrradianceBaked) { /* パスを登録 */ }</code></pre>
+<p>
+つまり<b>通常の起動・描画では約9,750万サンプルの<code>CSIrradiance</code>が一度も走らない</b>。
+ImGuiの「Use Dedicated Irradiance Map」トグルを入れるか、Render Targetsで
+イラディアンス表示を選んだ時点で初めて焼かれる。RenderGraphが<code>Reads</code>/<code>Writes</code>
+から自動で順序付けるため(2章)、トグルを入れたその同じフレームでLightingパスより先に実行され、
+1フレームだけ古い内容が見えるようなことはない。焼き済みフラグは
+<code>m_IBLBaked</code>とは別の<code>m_IBLIrradianceBaked</code>で管理し、スカイボックス差し替え時は
+両方を倒す(検証マップも古いスカイボックス由来になるため)。
+</p>
+<p>
+<b>実装上の注意</b>: HLSLのcbufferレイアウトは宣言順で決まり途中のフィールドを飛ばせない。
+<code>DeferredLighting.hlsl</code>は<code>ActiveLightCount</code>(半透明パス専用)を宣言して
+いなかったため、<code>IBLParams</code>のオフセットを合わせる目的でこれを未使用のまま宣言してある。
+</p>
+<p>
+<code>ShadowParams.y</code>(= ミップ数 - 1 = 最終ミップ番号)は両シェーダで既に利用可能なため
+新しい定数は要らない。分岐は定数バッファ値によるuniform分岐なので発散コストはない。
+不透明(<code>DeferredLighting.hlsl</code>の<code>EvaluateIBL</code>)と
+半透明(<code>Transparent.hlsl</code>の<code>EvaluateIBLSplit</code>)の両方へ同じ切り替えを入れ、
+片方だけ取得元が食い違わないようにしている。
+</p>
+
+<h4>14.10.4 検証結果</h4>
+<p>
+DX11・DX12の両方で、トグルのON/OFFを実際に切り替えた同一カメラのスクリーンショットを
+画素単位で比較した(ビューポート領域を2画素間隔でサンプル、各17万点)。
+</p>
+<table>
+<tr><th>シーン</th><th>バックエンド</th><th>最大差</th><th>平均差</th><th>差のある画素</th></tr>
+<tr><td>White Furnace Test</td><td>DX11</td><td><b>0 / 255</b></td><td>0</td><td>0%</td></tr>
+<tr><td>Bistro Exterior</td><td>DX11</td><td>2 / 255</td><td>0.07</td><td>7.2%</td></tr>
+<tr><td>Bistro Exterior</td><td>DX12</td><td>2 / 255</td><td>0.05</td><td>5.3%</td></tr>
+<tr><td>Bistro Interior</td><td>DX11</td><td>4 / 255</td><td>0.24</td><td>20.2%</td></tr>
+</table>
+<p>
+一様放射輝度のWhite Furnace Testでは<b>完全に画素一致</b>し、14.10.1の導出が実装レベルでも
+成立していることが確認できた(L = 1一様なら両経路ともE(N)/π = 1になる。この検証は導出か実装の
+どちらかが間違っていれば必ず落ちるため、最も強い判定になる)。方向性のある実スカイボックスでも
+最大差は2〜4 / 255にとどまり、8bit表示の1LSB程度で知覚できない。屋内のBistro Interiorで差が
+やや大きいのは、直接光が乏しく拡散IBLの寄与が支配的になるぶん4&times;4と32&times;32の違いが
+効きやすいためだが、それでも最大4 / 255である。<b>懸念していた面取り・ブロッチはいずれの
+シーンでも視認できなかった。</b>
+</p>
+<p>
+<b>未検証の項目</b>: Render Targetsデバッグ表示でイラディアンスマップと最終ミップを
+直接見比べる比較は、ミップレベルスライダーがパネル幅でクリップされており
+<code>PostMessage</code>ベースの自動操作で最終ミップまで動かしきれなかったため行っていない。
+最終画像での比較が上表のとおり決着しているため、マップ単体の比較は診断目的にとどまる。
+IBLBakeパスのGPU実測値(ms)も、このパスが起動直後の1フレームにしか存在せずスクリーンショットで
+捕捉できなかったため記録していない。現時点で根拠にできるのは前述のサンプル数比のみである。
+</p>
+
+<h4>14.10.5 なぜ削除ではなく「既定から外す」に留めたか</h4>
+<p>
+専用イラディアンスマップは既定の描画経路から外したが、リソース・シェーダ・パイプラインステート・
+デバッグ表示は削除していない。<b>これは意図的な判断である</b>。
+</p>
+<ul>
+<li>この置き換えの正しさは「roughness = 1のGGXがコサイン畳み込みへ退化する」という
+<code>V = R = N</code>仮定に依存した性質の上に成り立っている。将来
+<code>CSPrefilter</code>のサンプリング(例えば14.2節で未実装と述べたdistribution-based
+mip selectionの導入や、V依存の伸びを扱う変更)に手を入れると、この等価性が静かに崩れうる。
+そのとき<b>「正しいコサイン畳み込み」を即座に隣に並べて突き合わせられること</b>が、
+回帰に気付く唯一の実用的な手段になる</li>
+<li>残しても通常の描画コストはゼロである。畳み込みは検証が要求されたときにしか実行されず
+(14.10.3)、常時のコストは32&times;32&times;6面 &times; RGBA16F = 48KBのVRAMと
+SRVスロット1本だけで、いずれも実測できる負荷ではない</li>
+</ul>
+<p>
+一方で<b>目的だった実行時コストの削減は達成できている</b>。通常の起動・シーン切り替えでは
+<code>CSIrradiance</code>が一度も走らないため、実行時にキューブマップを焼き直す用途
+(ローカル反射プローブ等)ではプローブ1個あたり約9,750万サンプル
+&mdash; 3つの畳み込みのうち最も重い、プリフィルタ済み鏡面の約3倍 &mdash; を丸ごと省ける。
+</p>
+<p>
+<b>将来SRVスロットが逼迫した場合</b>にのみ、完全削除(<code>m_IrradianceTexture</code> /
+<code>CSIrradiance</code> / <code>m_IrradiancePipelineState</code> / デバッグ表示
+<code>IBLIrradiance</code>の削除)を検討する。削除すればDeferredはt8が空き、半透明は
+<code>kTextureSlotCount</code>が12&rarr;11になる(DX12の半透明パスは<code>DrawIndexed</code>ごとに
+全スロットを再設定する設計(16章)のため、ディスクリプタコピーも1本ぶん減る)。
 </p>
 </section>
 

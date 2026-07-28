@@ -40,6 +40,9 @@ cbuffer FrameConstants : register(b0)
     // 半透明パス専用。x=t8のライトリストの有効数(DirectLighting.hlsl側のLightingConstants.LightCount.xと
     // 同じ値)。他のシェーダーはこのフィールドを宣言していないため、末尾に追加してもオフセットは変わらない
     float4 ActiveLightCount;
+    // x: 拡散イラディアンスの取得元(0=専用イラディアンスマップ(t9)、1=プリフィルタ済み鏡面の
+    // 最終ミップ)。EvaluateIBLSplit参照。yzwは未使用
+    float4 IBLParams;
 };
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で
@@ -179,7 +182,13 @@ void EvaluateIBLSplit(
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
 
     // --- 拡散IBL ---
-    const float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
+    // 既定はプリフィルタ済み鏡面の最終ミップ(roughness=1)。IBLParams.x=1のときだけ従来の
+    // 専用イラディアンスマップを引く(検証用に残している経路)。詳細な根拠は
+    // DeferredLighting.hlslのEvaluateIBLの同じ箇所を参照(14.10節)。半透明だけ取得元が
+    // 食い違わないよう、必ず不透明側と同じ切り替えを行う
+    const float3 irradiance = (IBLParams.x > 0.5f)
+        ? IrradianceTexture.Sample(MaterialSampler, N).rgb
+        : PrefilteredEnvTexture.SampleLevel(MaterialSampler, N, ShadowParams.y).rgb;
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")
     const float3 fresnelRoughness =
         F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);

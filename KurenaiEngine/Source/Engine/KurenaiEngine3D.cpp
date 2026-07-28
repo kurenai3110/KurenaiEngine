@@ -55,6 +55,12 @@ namespace Kurenai
             // 専用のLightingConstants(b1)で受け取るためこのフィールドを使わない(末尾に追加のため
             // 既存シェーダのオフセットは変わらない)
             DirectX::XMFLOAT4 ActiveLightCount;
+            // 拡散IBLの取得元切り替え(末尾に追加のため既存シェーダのオフセットは変わらない)。
+            // x: 0(既定)=プリフィルタ済み鏡面の最終ミップ(roughness=1)、1=従来の専用
+            // イラディアンスマップ(t8。検証用に残している経路)。CSPrefilterはV=R=Nを仮定して
+            // いるため、roughness=1(α=1)ではGGXインポータンスサンプリングの実効カーネルが
+            // コサイン畳み込みへ厳密に退化し、格納値もCSIrradianceと同じE(N)/πになる(14.10節)
+            DirectX::XMFLOAT4 IBLParams;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -966,6 +972,9 @@ namespace Kurenai
                 m_SkyboxTexture = m_Device->CreateTextureFromFile(desiredSkyboxPath, false);
                 m_CurrentSkyboxPath = desiredSkyboxPath;
                 m_IBLBaked = false;
+                // 検証用の拡散イラディアンスマップも古いスカイボックス由来のものになるため倒す
+                // (実際に焼き直すのは検証トグル・デバッグ表示が有効なときだけ)
+                m_IBLIrradianceBaked = false;
                 Core::Logger::Info("KurenaiEngine3D", "スカイボックスを差し替えました: " + WideToUtf8(desiredSkyboxPath));
             }
             catch (const std::exception& e)
@@ -1272,6 +1281,9 @@ namespace Kurenai
         if (m_IBLEnabled)
         {
             ImGui::SliderFloat("IBL Intensity", &m_IBLIntensity, 0.0f, 2.0f);
+            // 既定はプリフィルタ済み鏡面の最終ミップ(roughness=1)による拡散イラディアンス。
+            // これをONにすると従来の専用イラディアンスマップをその場で焼いて切り替える(14.10節)
+            ImGui::Checkbox("Use Dedicated Irradiance Map", &m_IBLUseDedicatedIrradiance);
         }
         else
         {
@@ -1921,6 +1933,7 @@ namespace Kurenai
             specularEnergyCompensation,
         };
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
+        constants.IBLParams = { m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
@@ -1935,28 +1948,13 @@ namespace Kurenai
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "IBLBake",
                 .Reads = { m_SkyboxTexture.get() },
-                .Writes = { m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get() },
+                .Writes = { m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get() },
                 .Execute = [this](RHI::IRHICommandList* cmd)
                 {
                     // BRDF積分LUT(スカイボックスに依存しない、NdotV×ラフネスの128x128グリッド)
                     cmd->SetComputePipelineState(m_BRDFLUTPipelineState.get());
                     cmd->SetComputeUnorderedAccessTexture(0, m_BRDFLUTTexture.get(), 0);
                     cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
-
-                    // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
-                    // スライス選択できないため、面ごとに1回ずつディスパッチする
-                    cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
-                    cmd->SetComputeTexture(0, m_SkyboxTexture.get());
-                    cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
-                    for (uint32_t face = 0; face < kCubeFaceCount; ++face)
-                    {
-                        IBLFaceConstants faceConstants{};
-                        faceConstants.Face = face;
-                        cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-                        cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
-                        cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_IrradianceTexture.get(), face, 0);
-                        cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
-                    }
 
                     // プリフィルタ済み鏡面(本物のTextureCube、ミップごとに異なるラフネスで畳み込む)。
                     // 面×ミップの組み合わせごとに1回ずつディスパッチする
@@ -1981,6 +1979,45 @@ namespace Kurenai
                 },
             });
             m_IBLBaked = true;
+        }
+
+        // --- 専用の拡散イラディアンスマップ(検証用に残している経路) ---
+        // 既定の描画経路はプリフィルタ済み鏡面の最終ミップ(roughness=1)である。CSPrefilterは
+        // V=R=Nを仮定しているためroughness=1のGGXはコサイン畳み込みへ厳密に退化し、専用マップと
+        // 同じE(N)/πを与える(14.10節。White Furnace Testで画素一致を確認済み)。そのため通常の
+        // 描画では1テクセルあたり約15,876サンプル(全体で約9,750万サンプル)のCSIrradianceを
+        // 一切実行しない。この畳み込み処理自体はいつでも検証できるよう残してあり、ImGuiの
+        // 「Use Dedicated Irradiance Map」トグルか、Render Targetsでイラディアンス表示を選んだ
+        // ときだけ焼く。RenderGraphがReads/Writesから順序付けるため、トグルを入れたその同じ
+        // フレームでLightingパスより先に実行される
+        const bool needIrradianceBake =
+            m_IBLUseDedicatedIrradiance || m_DebugView == DebugView::IBLIrradiance;
+        if (needIrradianceBake && !m_IBLIrradianceBaked)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "IBLIrradianceBake",
+                .Reads = { m_SkyboxTexture.get() },
+                .Writes = { m_IrradianceTexture.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
+                    // スライス選択できないため、面ごとに1回ずつディスパッチする
+                    cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
+                    cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+                    cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+                    for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                    {
+                        IBLFaceConstants faceConstants{};
+                        faceConstants.Face = face;
+                        cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                        cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                        cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_IrradianceTexture.get(), face, 0);
+                        cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
+                    }
+                },
+            });
+            m_IBLIrradianceBaked = true;
+            Core::Logger::Info("KurenaiEngine3D", "検証用の拡散イラディアンスマップを焼きました(通常の描画経路では使用しません)");
         }
 
         RHI::Viewport shadowViewport;
