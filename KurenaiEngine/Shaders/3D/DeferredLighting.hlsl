@@ -38,7 +38,9 @@ cbuffer FrameConstants : register(b0)
     // このシェーダでは未使用(オフセット合わせのためだけに宣言する。半透明パス専用)
     float4 ActiveLightCount;
     // 反射プローブ用。x=有効プローブ数(0ならプローブは一切使わずグローバルIBLのみ)、
-    // y=影響範囲のデバッグ表示フラグ(1以上でプローブ番号ごとの色分け表示に切り替える)、zw=未使用
+    // y=影響範囲のデバッグ表示フラグ(1以上でプローブごとの色分け表示に切り替える)、
+    // z=視差補正(box projection)の有効フラグ、w=プローブ間ブレンドの有効フラグ。
+    // z/wはPhase 1(補正なし・ブレンドなし)との見比べのためにImGuiから切り替えられる
     float4 ProbeParams;
 };
 
@@ -69,17 +71,46 @@ TextureCubeArray ProbeIrradianceTexture : register(t11);
 TextureCubeArray ProbePrefilteredTexture : register(t12);
 
 // プローブ1つぶんの影響範囲。C++側 KurenaiEngine3D.cpp の GPUReflectionProbe と
-// 並び・ストライド(16バイト)を一致させる必要がある
+// 並び・ストライド(48バイト)を一致させる必要がある
 struct GPUReflectionProbe
 {
-    float4 PositionRadius; // xyz=ワールド座標, w=影響半径
+    float4 PositionRadius; // xyz=ワールド座標(Box形状では箱の中心), w=Sphere形状の影響半径
+    float4 BoxExtents;     // xyz=Box形状の各軸の半径(ハーフエクステント), w=ブレンド距離
+    float4 ShapeParams;    // x=形状(0=Sphere,1=Box), y=sin(Yaw), z=cos(Yaw), w=未使用
 };
 StructuredBuffer<GPUReflectionProbe> ReflectionProbes : register(t13);
 
+// ワールド空間のベクトルをプローブのローカル空間(Yaw回転を打ち消した空間)へ移す。
+// 回転はY軸まわりだけなので、逆回転は-Yawの回転(sinの符号反転)で足りる
+float3 WorldToProbeLocal(float3 v, float sinYaw, float cosYaw)
+{
+    return float3(v.x * cosYaw - v.z * sinYaw, v.y, v.x * sinYaw + v.z * cosYaw);
+}
+
+// 影響範囲の内側で正、境界でちょうど0、外側で0になる重み。境界からBlendDistanceだけ内側へ
+// 入った時点で1に達する。BlendDistanceが0に近いほどPhase 1の「境界で突然切り替わる」挙動に近づく
+float ProbeInfluenceWeight(GPUReflectionProbe probe, float3 worldPos)
+{
+    const float blendDistance = max(probe.BoxExtents.w, 1e-4f);
+
+    if (probe.ShapeParams.x > 0.5f)
+    {
+        // Box(OBB): ローカル空間で各軸の面までの距離を取り、最も近い面までの距離で重みを決める。
+        // 1軸でも箱の外に出ていればその軸の距離が負になり、minを通してsaturateで0になる
+        const float3 local = WorldToProbeLocal(worldPos - probe.PositionRadius.xyz, probe.ShapeParams.y, probe.ShapeParams.z);
+        const float3 toBoundary = probe.BoxExtents.xyz - abs(local);
+        const float distanceToBoundary = min(min(toBoundary.x, toBoundary.y), toBoundary.z);
+        return saturate(distanceToBoundary / blendDistance);
+    }
+
+    // Sphere: 中心からの距離が半径を超えれば負になり、同様に0となる
+    const float distanceToCenter = length(worldPos - probe.PositionRadius.xyz);
+    return saturate((probe.PositionRadius.w - distanceToCenter) / blendDistance);
+}
+
 // ワールド座標を影響範囲に含むプローブのうち、中心が最も近いものの番号を返す(無ければ-1)。
-// Phase 1では「最も近い1つを選ぶ」だけでブレンドしないため、影響範囲の境界には継ぎ目が出る
-// (プローブ間の重み付きブレンドはPhase 2で入れる)
-int SelectReflectionProbe(float3 worldPos)
+// ブレンド無効時(Phase 1相当)の選択に使う。境界に継ぎ目が出るのはこの方式の性質
+int SelectNearestProbe(float3 worldPos)
 {
     int selected = -1;
     float bestDistSq = 3.402823466e+38f; // FLT_MAX
@@ -88,11 +119,11 @@ int SelectReflectionProbe(float3 worldPos)
     [loop]
     for (uint i = 0; i < probeCount; ++i)
     {
-        const float4 positionRadius = ReflectionProbes[i].PositionRadius;
-        const float3 toProbe = positionRadius.xyz - worldPos;
+        if (ProbeInfluenceWeight(ReflectionProbes[i], worldPos) <= 0.0f) continue;
+
+        const float3 toProbe = ReflectionProbes[i].PositionRadius.xyz - worldPos;
         const float distSq = dot(toProbe, toProbe);
-        const float radius = positionRadius.w;
-        if (distSq <= radius * radius && distSq < bestDistSq)
+        if (distSq < bestDistSq)
         {
             bestDistSq = distSq;
             selected = (int)i;
@@ -102,12 +133,154 @@ int SelectReflectionProbe(float3 worldPos)
     return selected;
 }
 
+// 視差補正(box projection)。プローブのキューブマップは「プローブ位置1点から見た景色」なので、
+// プローブ位置から離れたピクセルで反射ベクトルRをそのまま引くと、映る像の位置が実際の反射位置と
+// ずれる(壁際なのに部屋の反対側が映る等)。Rをプローブの箱(部屋の壁に合わせて置く)と交差させ、
+// その交点をプローブ中心から見た方向へ引き直すことでずれを打ち消す。
+// Sphere形状には交差させる箱が無いため適用しない(Box形状にする動機のひとつ)
+float3 ParallaxCorrectDirection(GPUReflectionProbe probe, float3 worldPos, float3 R)
+{
+    const float sinYaw = probe.ShapeParams.y;
+    const float cosYaw = probe.ShapeParams.z;
+    const float3 localPos = WorldToProbeLocal(worldPos - probe.PositionRadius.xyz, sinYaw, cosYaw);
+    const float3 localR = WorldToProbeLocal(R, sinYaw, cosYaw);
+
+    // 軸に平行な成分は対応する面と交差しない。0除算のinfをそのまま使うと後段のmaxで0*inf=NaNに
+    // なり得るため、符号を保ったまま絶対値に下限を与えてから逆数を取る
+    const float3 safeR = max(abs(localR), 1e-5f) * ((localR < 0.0f) ? -1.0f : 1.0f);
+    const float3 invR = 1.0f / safeR;
+    const float3 planeNegative = (-probe.BoxExtents.xyz - localPos) * invR;
+    const float3 planePositive = (probe.BoxExtents.xyz - localPos) * invR;
+    // 軸ごとに「Rの進む向きにある面」までの距離を取り、その最小値が箱から抜け出る点になる
+    const float3 exitDistance = max(planeNegative, planePositive);
+    const float hitDistance = min(min(exitDistance.x, exitDistance.y), exitDistance.z);
+
+    // 交点をプローブ中心から見た方向。キューブマップはワールド軸で焼かれているのでワールド空間で返す
+    return (worldPos + R * max(hitDistance, 0.0f)) - probe.PositionRadius.xyz;
+}
+
+// 環境ソース(拡散イラディアンス・プリフィルタ済み鏡面)を求める。影響下のプローブを重み付きで
+// 合成し、重みの合計が1に満たない残りをスカイボックス由来のグローバルIBLで埋める。
+// これによりプローブの影響範囲の外へ出るとき、境界で切り替わるのではなく徐々にグローバルIBLへ
+// 戻っていく。プローブが1つも効いていない場合は従来どおり完全にグローバルIBLになる
+void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
+                       out float3 irradiance, out float3 prefiltered)
+{
+    float3 accumulatedIrradiance = float3(0.0f, 0.0f, 0.0f);
+    float3 accumulatedPrefiltered = float3(0.0f, 0.0f, 0.0f);
+    float totalWeight = 0.0f;
+
+    const uint probeCount = (uint)ProbeParams.x;
+    const bool parallaxEnabled = ProbeParams.z > 0.5f;
+
+    if (ProbeParams.w > 0.5f)
+    {
+        // ブレンド有効: 影響下の全プローブを重み付きで加算する。プローブ数の上限が8と小さいため、
+        // 上位N個を選ぶソートは置かず素直に全走査する
+        [loop]
+        for (uint i = 0; i < probeCount; ++i)
+        {
+            const GPUReflectionProbe probe = ReflectionProbes[i];
+            const float weight = ProbeInfluenceWeight(probe, worldPos);
+            if (weight <= 0.0f) continue;
+
+            // 拡散イラディアンスは低周波で位置による差が小さく、視差補正しても得られるものが
+            // ほとんど無い一方で交差計算のコストは掛かるため、鏡面の反射ベクトルにのみ適用する
+            const float3 sampleR = (parallaxEnabled && probe.ShapeParams.x > 0.5f)
+                ? ParallaxCorrectDirection(probe, worldPos, R)
+                : R;
+
+            accumulatedIrradiance += ProbeIrradianceTexture.Sample(MaterialSampler, float4(N, i)).rgb * weight;
+            accumulatedPrefiltered += ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(sampleR, i), mipLevel).rgb * weight;
+            totalWeight += weight;
+        }
+
+        // プローブが深く重なっている領域では合計が1を超える。そのまま加算すると環境光が過剰に
+        // 明るくなるので、超えた分は正規化して1に収める
+        if (totalWeight > 1.0f)
+        {
+            accumulatedIrradiance /= totalWeight;
+            accumulatedPrefiltered /= totalWeight;
+            totalWeight = 1.0f;
+        }
+    }
+    else
+    {
+        // ブレンド無効(Phase 1相当): 影響範囲に含む最も近いプローブ1つだけを重み1で使う
+        const int nearest = SelectNearestProbe(worldPos);
+        if (nearest >= 0)
+        {
+            const GPUReflectionProbe probe = ReflectionProbes[nearest];
+            const float3 sampleR = (parallaxEnabled && probe.ShapeParams.x > 0.5f)
+                ? ParallaxCorrectDirection(probe, worldPos, R)
+                : R;
+
+            accumulatedIrradiance = ProbeIrradianceTexture.Sample(MaterialSampler, float4(N, nearest)).rgb;
+            accumulatedPrefiltered = ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(sampleR, nearest), mipLevel).rgb;
+            totalWeight = 1.0f;
+        }
+    }
+
+    const float globalWeight = 1.0f - totalWeight;
+    if (globalWeight > 0.0f)
+    {
+        accumulatedIrradiance += IrradianceTexture.Sample(MaterialSampler, N).rgb * globalWeight;
+        accumulatedPrefiltered += PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb * globalWeight;
+    }
+
+    irradiance = accumulatedIrradiance;
+    prefiltered = accumulatedPrefiltered;
+}
+
+// 影響範囲のデバッグ表示用の色。ブレンド有効時は重み付き平均の色になるため、プローブ同士が
+// 混ざり合う遷移帯がグラデーションとして見える(ブレンド無効時は単色の塗り分けのまま)
+float3 ProbeInfluenceDebugColor(float3 worldPos)
+{
+    // 番号を3bitとみなしてRGBへ散らす。隣り合う番号が必ず別の色になればよく、色自体に意味は無い
+    const float3 noProbeColor = float3(0.15f, 0.15f, 0.15f); // どのプローブも効いていない(グローバルIBL)
+
+    const uint probeCount = (uint)ProbeParams.x;
+    if (ProbeParams.w <= 0.5f)
+    {
+        const int nearest = SelectNearestProbe(worldPos);
+        if (nearest < 0) return noProbeColor;
+        return float3(
+            ((nearest + 1) & 1) ? 1.0f : 0.25f,
+            ((nearest + 1) & 2) ? 1.0f : 0.25f,
+            ((nearest + 1) & 4) ? 1.0f : 0.25f);
+    }
+
+    float3 accumulated = float3(0.0f, 0.0f, 0.0f);
+    float totalWeight = 0.0f;
+    [loop]
+    for (uint i = 0; i < probeCount; ++i)
+    {
+        const float weight = ProbeInfluenceWeight(ReflectionProbes[i], worldPos);
+        if (weight <= 0.0f) continue;
+
+        const int index = (int)i + 1;
+        accumulated += float3(
+            (index & 1) ? 1.0f : 0.25f,
+            (index & 2) ? 1.0f : 0.25f,
+            (index & 4) ? 1.0f : 0.25f) * weight;
+        totalWeight += weight;
+    }
+
+    if (totalWeight > 1.0f)
+    {
+        accumulated /= totalWeight;
+        totalWeight = 1.0f;
+    }
+    return accumulated + noProbeColor * (1.0f - totalWeight);
+}
+
 // IBL(split-sum近似、Karis 2013)による環境光の評価。ao(SSAO/SSILの遮蔽率)は拡散項へそのまま、
 // 鏡面項へはLagarde & de Rousiers 2014のスペキュラオクルージョン近似を通してから適用する
 // (拡散用のAOをそのまま鏡面に使うと、粗い面で鏡面ハイライトまで過剰に暗くなってしまうため)。
-// probeIndexが0以上なら環境ソースをスカイボックス由来のグローバルIBLからそのプローブへ差し替える
-// (式そのものは同一で、引くキューブマップだけが変わる)
-float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, float ao, int probeIndex)
+// 環境ソース(プローブとグローバルIBLの重み付き合成)はSampleEnvironmentが返す。プローブと
+// グローバルIBLはどちらも同じ手順で焼かれており(IBLConvolve.hlslを共有している)、解像度・
+// ミップ構成も揃えてあるため、式そのものは同一で引くキューブマップだけが変わる
+float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness, float ao)
 {
     const float NdotV = saturate(dot(N, V));
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
@@ -116,21 +289,9 @@ float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roug
     // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(ミップ数-1、KurenaiEngine3D側で設定)
     const float mipLevel = roughness * ShadowParams.y;
 
-    // 環境ソースの選択。プローブとグローバルIBLはどちらも同じ手順で焼かれており(IBLConvolve.hlslを
-    // 共有している)、解像度・ミップ構成も揃えてあるため、ここで引き先を差し替えるだけで済む
     float3 irradiance;
     float3 prefiltered;
-    if (probeIndex >= 0)
-    {
-        // TextureCubeArrayのサンプリングは float4(方向, 配列番号)
-        irradiance = ProbeIrradianceTexture.Sample(MaterialSampler, float4(N, probeIndex)).rgb;
-        prefiltered = ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(R, probeIndex), mipLevel).rgb;
-    }
-    else
-    {
-        irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
-        prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
-    }
+    SampleEnvironment(worldPos, N, R, mipLevel, irradiance, prefiltered);
 
     // --- 拡散IBL ---
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")。粗い面ほど
@@ -221,31 +382,19 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 拡散反射(kd*albedo/PI)とスケールを揃えるべくここで明示的に/PIする
     // (以前このフォールバックだけ/PIが抜けており、環境光がπ倍(意図の20%に対し実際は約65%)
     // 明るくなっていた)
-    // 反射プローブ(15章)。影響範囲に入っていればIBLの環境ソースをそのプローブへ差し替える。
-    // どのプローブも効いていない場合は-1のままで、従来どおりスカイボックス由来のグローバルIBLになる
-    const int probeIndex = SelectReflectionProbe(worldPos);
-
-    // ProbeParams.y = 影響範囲のデバッグ表示。どのプローブが効いているかをプローブ番号ごとの色で
-    // 塗り分けて返す(ライティングは行わない)。プローブの配置・半径の確認用
+    // ProbeParams.y = 影響範囲のデバッグ表示。どのプローブがどれだけ効いているかを色で
+    // 塗り分けて返す(ライティングは行わない)。プローブの配置・形状・ブレンド幅の確認用
     if (ProbeParams.y > 0.0f)
     {
-        if (probeIndex < 0)
-        {
-            // どのプローブの影響下でもない(グローバルIBLのまま)ことを示すグレー
-            return float4(0.15f, 0.15f, 0.15f, 1.0f);
-        }
-        // 番号を3bitとみなしてRGBへ散らす。隣り合う番号が必ず別の色になればよく、色自体に意味は無い
-        const float3 probeColor = float3(
-            ((probeIndex + 1) & 1) ? 1.0f : 0.25f,
-            ((probeIndex + 1) & 2) ? 1.0f : 0.25f,
-            ((probeIndex + 1) & 4) ? 1.0f : 0.25f);
-        return float4(probeColor, 1.0f);
+        return float4(ProbeInfluenceDebugColor(worldPos), 1.0f);
     }
 
     float3 ambient;
     if (ShadowParams.z > 0.0f)
     {
-        ambient = EvaluateIBL(N, V, albedo, metallic, roughness, ao, probeIndex) * ShadowParams.z;
+        // 反射プローブ(15章)はEvaluateIBL内のSampleEnvironmentで環境ソースへ合成される。
+        // プローブが1つも効いていない位置では従来どおりスカイボックス由来のグローバルIBLになる
+        ambient = EvaluateIBL(N, V, worldPos, albedo, metallic, roughness, ao) * ShadowParams.z;
     }
     else
     {

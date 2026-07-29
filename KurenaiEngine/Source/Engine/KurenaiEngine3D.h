@@ -398,6 +398,12 @@ namespace Kurenai
         // グローバルIBLのまま描く(未初期化のキューブマップが映り込むのを防ぐ)
         bool m_ProbeBaked = false;
         bool m_ReflectionProbeEnabled = true;
+        // 視差補正(box projection)を行うか。Box形状のプローブにのみ効く。無効にすると
+        // 反射ベクトルをそのまま引くPhase 1相当の挙動になり、壁際で反射位置がずれるのを確認できる
+        bool m_ProbeParallaxCorrectionEnabled = true;
+        // プローブ間・プローブとグローバルIBLの重み付きブレンドを行うか。無効にすると
+        // 「影響範囲に入る最も近い1つだけを使う」Phase 1相当の挙動になり、境界の継ぎ目を確認できる
+        bool m_ProbeBlendingEnabled = true;
         // デバッグ表示(Render Targets)で確認するプローブ番号とプリフィルタのミップレベル
         int32_t m_ProbeDebugIndex = 0;
         int32_t m_ProbePrefilterDebugMipLevel = 0;

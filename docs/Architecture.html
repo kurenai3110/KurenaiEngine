@@ -1974,7 +1974,8 @@ Exteriorは4個)。</li>
 </p>
 <p>
 評価側(<code>DeferredLighting.hlsl</code>の<code>EvaluateIBL</code>)も同様で、split-sum近似の式は
-そのまま、<strong>引くキューブマップだけを差し替える</strong>形にした。プローブとグローバルIBLで
+そのまま、<strong>環境ソースの求め方だけを差し替える</strong>形にした(<code>SampleEnvironment</code>が
+プローブとグローバルIBLを重み付きで合成して返す。16.7節)。プローブとグローバルIBLで
 解像度・ミップ構成を揃えてある(<code>kProbeCaptureSize == kIBLPrefilterBaseSize</code>)のは
 このためで、ラフネス→ミップの変換式も共通のまま使える。
 </p>
@@ -2090,7 +2091,8 @@ Reverse-Z(近平面=NDC z=1.0、遠平面=NDC z=0.0)で組む(<code>ComputeCubeF
 <li>ImGuiの「Bake」ボタンを押したとき(ライトや時刻を変えた後に使う)</li>
 </ul>
 <p>
-半径の変更は影響範囲だけの話でキャプチャ内容には影響しないため、焼き直しは要求しない。
+影響範囲の変更(形状・半径・<code>BoxExtents</code>・<code>Yaw</code>・<code>BlendDistance</code>)は
+どこから撮るかを変えず、キャプチャ内容に影響しないため焼き直しは要求しない。
 また一度も焼けていない間(<code>m_ProbeBaked == false</code>)は<code>ProbeParams.x</code>(有効プローブ数)を
 0にして、シェーダー側の選択ループ自体を回さない ―― 中身が未定義のキューブマップを引かせないため。
 </p>
@@ -2100,13 +2102,87 @@ Reverse-Z(近平面=NDC z=1.0、遠平面=NDC z=0.0)で組む(<code>ComputeCubeF
 Lightingパスは<code>Reads</code>にプローブのキューブマップ配列を挙げているためベイクパスより後になる。
 </p>
 
-<h3>16.7 現時点の実装範囲と既知の制約</h3>
+<h3>16.7 影響範囲の形状・視差補正・ブレンド</h3>
+<p>
+影響範囲は球(<code>Sphere</code>)と直方体(<code>Box</code>、Y軸まわりの回転のみを持つOBB)から選べる。
+GPUへ渡す1プローブぶんの構造は次のとおりで、<code>KurenaiEngine3D.cpp</code>の
+<code>GPUReflectionProbe</code>と<code>DeferredLighting.hlsl</code>の同名構造体で並び・ストライド(48バイト)を
+一致させている。<code>Yaw</code>はピクセルごとに三角関数を回さずに済むよう、C++側で<code>sin</code>/<code>cos</code>へ
+展開してから渡す。
+</p>
+<table>
+<tr><th>フィールド</th><th>内容</th></tr>
+<tr><td><code>PositionRadius</code></td><td>xyz=ワールド座標(Boxでは箱の中心)、w=Sphereの影響半径</td></tr>
+<tr><td><code>BoxExtents</code></td><td>xyz=Boxの各軸の半径(ハーフエクステント)、w=ブレンド距離</td></tr>
+<tr><td><code>ShapeParams</code></td><td>x=形状(0=Sphere,1=Box)、y=sin(Yaw)、z=cos(Yaw)</td></tr>
+</table>
+
+<h4>影響の重み</h4>
+<p>
+<code>ProbeInfluenceWeight</code>は<strong>影響範囲の境界からの内向き距離</strong>を<code>BlendDistance</code>で
+正規化して<code>saturate</code>した値を返す。境界でちょうど0、そこから<code>BlendDistance</code>だけ内側で1になる。
+Boxでは各軸の面までの距離の最小値を使うため、1軸でも箱の外へ出れば負になり自動的に0となる。
+Sphereも中心からの距離が半径を超えれば負になり同様に0となるので、<strong>「範囲内かどうかの判定」と
+「重み」を1本の式で兼ねられる</strong>。
+</p>
+
+<h4>視差補正(box projection)</h4>
+<p>
+プローブのキューブマップは<strong>プローブ位置1点から見た景色</strong>なので、そこから離れたピクセルで
+反射ベクトル<code>R</code>をそのまま引くと、映る像の位置が実際の反射位置とずれる(壁際なのに部屋の
+反対側が映る、など)。<code>ParallaxCorrectDirection</code>は<code>R</code>をプローブの箱と交差させ、
+その交点を<strong>プローブ中心から見た方向</strong>へ引き直すことでずれを打ち消す。
+</p>
+<pre><code>localPos  = WorldToProbeLocal(worldPos - center)
+localR    = WorldToProbeLocal(R)
+exit      = max((-extents - localPos) / localR, (extents - localPos) / localR)  // 軸ごとに進行方向の面まで
+hitDist   = min(exit.x, exit.y, exit.z)                                        // 最初に箱から抜ける点
+sampleDir = (worldPos + R * hitDist) - center                                  // キューブはワールド軸で焼かれている</code></pre>
+<p>
+<code>localR</code>のある成分が0(その軸に平行)だと逆数が<code>inf</code>になり、後段の<code>max</code>で
+<code>0 * inf = NaN</code>が出得るため、<strong>符号を保ったまま絶対値に下限を与えてから</strong>逆数を取っている。
+</p>
+<p>
+補正は<strong>鏡面の反射ベクトルにのみ</strong>適用し、拡散イラディアンスのサンプル方向(法線)には掛けない。
+イラディアンスは低周波で位置による差が小さく、補正しても得られるものがほとんど無い一方で交差計算の
+コストは掛かるためである。またSphere形状には交差させる箱が無いため適用されない ―― これがBox形状を
+選ぶ主な動機になる。
+</p>
+<p>
+なお本実装では<strong>影響範囲の箱がそのまま視差補正の投影ボックスを兼ねる</strong>(両者を別々に持てない)。
+そのため<code>BoxExtents</code>は部屋の壁とおおよそ一致させる必要がある。箱を壁から大きく離すと
+補正がかえってずれ、逆に小さくしすぎると壁面自体が影響範囲の外へ出てしまう。
+</p>
+
+<h4>ブレンド</h4>
+<p>
+<code>SampleEnvironment</code>は影響下のプローブを重み付きで加算し、<strong>重みの合計が1に満たない残りを
+スカイボックス由来のグローバルIBLで埋める</strong>。これにより影響範囲の外へ出るときも境界で切り替わらず、
+徐々に元の環境光へ戻る。プローブが深く重なって合計が1を超える場合は正規化して1に収める
+(そのまま加算すると環境光が過剰に明るくなるため)。
+</p>
+<p>
+上位N個を選ぶソートは置かず、プローブを素直に全走査して重みが正のものだけを加算している。
+プローブ数の上限が8と小さく、HLSLで動的添字の配列へ挿入ソートを書くとレジスタに載らず
+スクラッチメモリへ落ちるためである。
+</p>
+<p>
+ImGuiの「Parallax Correction」「Probe Blending」(<code>ProbeParams.z</code>/<code>.w</code>)で
+それぞれ無効にでき、無効時は<strong>反射ベクトルをそのまま引く/影響範囲に入る最も近い1つだけを重み1で使う</strong>
+という導入前の挙動に戻る。壁際での反射位置のずれと影響範囲の境界の継ぎ目を、実機で見比べるための
+スイッチである。デバッグ表示「Probe - Influence」もブレンドの有無に追随し、有効時はプローブごとの色の
+重み付き平均になるため遷移帯がグラデーションとして見える。
+</p>
+<p>
+これらは影響範囲の話でしかなく<strong>キャプチャ内容には影響しない</strong>ため、形状・範囲・ブレンド距離を
+変えても焼き直しは要求しない(焼き直しが要るのは<code>Position</code>を動かしたときだけ)。
+</p>
+
+<h3>16.8 現時点の実装範囲と既知の制約</h3>
 <ul>
-<li><strong>影響範囲は球のみ、ブレンドなし</strong>。影響範囲に入っているプローブのうち中心が最も近い1つを
-選ぶだけなので、<strong>影響範囲の境界には継ぎ目が出る</strong>(これは現時点では既知の挙動)。
-Boxの影響範囲・視差補正(box projection)・プローブ間の重み付きブレンドは未実装</li>
-<li><strong>視差補正が無い</strong>ため、プローブ中心から離れた位置のピクセルほど反射像の位置がずれる。
-室内反射を実用品質にするにはこれが要る</li>
+<li>Boxの回転は<strong>Y軸まわりのみ</strong>。傾いた床・天井を持つ空間は想定していない</li>
+<li><strong>影響範囲の箱と視差補正の投影ボックスを分離できない</strong>(16.7節)。
+壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある</li>
 <li>更新はベイク(要求時)のみ。<strong>動的な物体は焼き直すまで反射に反映されない</strong>。
 リアルタイム更新(時間分割で1フレームに1面ずつ焼く等)は未実装</li>
 <li><strong>SSRのフォールバックはまだプローブを使っていない</strong>。<code>SSR.hlsl</code>は従来どおり、
@@ -2118,6 +2194,100 @@ Boxの影響範囲・視差補正(box projection)・プローブ間の重み付�
 <li>半透明フォワードパス(<a href="#transparent">15章</a>)はプローブに対応しておらず、
 グローバルIBLのみを使う</li>
 </ul>
+
+<h3>16.9 検証シーン(Reflection Probe Test)</h3>
+<p>
+プローブの効きを目視で確認するための専用シーン。Sponzaは非金属・中〜高ラフネスのマテリアルばかりで
+鏡面反射が弱く、アトリウムが上に開いていてプローブにも空が大量に写り込むため、
+<strong>「プローブが効いているかどうか」が判別できない</strong>。そこで検証用のホールを別途用意している。
+</p>
+<p>
+ジオメトリは<code>Tools/generate_probe_test.py</code>が生成する
+(<code>FurnaceTest</code>/<code>LightTest</code>/<code>MaterialTest</code>と同じく、標準ライブラリだけで
+glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/ProbeTest.kscene</code>側にある。
+</p>
+<pre><code>    ┌───────────────────┬───────────┐  y=7
+    │▓▓▓▓ 天井あり ▓▓▓▓│ 天井開口  │      ▓ = 中央の仕切り壁(中央に開口部)
+    │   西室(密閉)     ▓  東室     │
+    │   暖色の壁+ポイント▓ 寒色の壁  │
+    │   ライト+エミッシブ▓ +太陽光   │
+    │  ●   ●   ●   ●   ●   ●   ●  │  ← 金属球列(metallic=1.0, roughness=0.05)
+    └───────────────────┴───────────┘  y=0
+   x=-12                x=0        x=+12
+            床 = 磨いた石(非金属, roughness=0.06)</code></pre>
+
+<h4>何をどう切り替えると何が見えるか</h4>
+<table>
+<tr><th>ImGuiの操作</th><th>見えるもの</th><th>検証している実装</th></tr>
+<tr>
+<td>Enable Reflection Probes を切る</td>
+<td>密閉の西室にいるはずの金属球が<strong>一様な空色</strong>になり、床に映っていたエミッシブ帯も消える</td>
+<td>環境ソースがプローブからグローバルIBLへ落ちること(16.1節)</td>
+</tr>
+<tr>
+<td>Probe Blending を切る</td>
+<td>開口部付近で反射色が<strong>不連続に切り替わる</strong></td>
+<td><code>SelectNearestProbe</code>経路と重み付き合成の差(16.7節)</td>
+</tr>
+<tr>
+<td>Parallax Correction を切る</td>
+<td>床に映るエミッシブ帯が、個々の帯ではなく<strong>連続した滲みになって壁の接地点からずれる</strong></td>
+<td><code>ParallaxCorrectDirection</code>(16.7節)</td>
+</tr>
+<tr>
+<td>Render Targets &rarr; Probe - Influence</td>
+<td>西室が赤・東室が緑・開口部付近がその中間色のグラデーション</td>
+<td><code>ProbeInfluenceWeight</code>とBox形状の影響範囲</td>
+</tr>
+<tr>
+<td>Render Targets &rarr; Probe - Prefiltered Specular、Probe Index を 0/1</td>
+<td>0=暖色の密閉室、1=空を含む明るい室。<strong>まったく別の環境が焼かれている</strong></td>
+<td>プローブごとの<code>TextureCubeArray</code>スライス(16.3節)</td>
+</tr>
+</table>
+
+<h4>シーン構成上の判断</h4>
+<ul>
+<li><strong>西室を密閉、東室を天井開口にした</strong>のは、2つのプローブに焼かれる環境を「暖色・
+ポイントライト」と「寒色・太陽光」で完全に別物にするため。球列が開口部を貫くので、
+ブレンドの遷移が反射色の変化としてそのまま読める。副次的に、東室側は太陽光とCSM影を受けるので
+<code>ProbeCapture.hlsl</code>のシャドウ経路も同時に検証できる</li>
+<li><strong>床は金属ではなく磨いた石(非金属・低ラフネス)</strong>。<code>metallic=1.0</code>にすると
+拡散反射が消えて薄暗い室内ではほぼ真っ黒に沈み、映り込みの位置を読み取る土台が見えなくなる。
+非金属はF0=0.04と反射が弱いが、ホールを見通す浅い角度ではフレネルで十分に強く出る</li>
+<li><strong>エミッシブ帯は照明ではなく目印</strong>。G-Bufferのエミッシブバッファは
+<code>R8G8B8A8_UNorm</code>で[0,1]にクランプされるため、1.0を超える値を指定しても室内を照らす
+主光源にはならない。室内の照明はポイントライト(カンデラ指定なので数千まで上げられる)が担う</li>
+<li><strong>仕切り壁の開口部は広め(幅8・高さ5.5)</strong>。仕切りの役目は「2部屋として別々の環境が
+焼かれること」であって視線を遮ることではない。狭いと球列と西室が見通せず、何が起きているか
+読み取れなくなる</li>
+<li><code>ScreenSpaceReflection = false</code>をシーン側で指定している。SSRもプローブと同じく
+「環境の反射」を足すため、両方効いていると差の切り分けができない</li>
+</ul>
+
+<h4>面の巻き順を機械的に決めている理由</h4>
+<p>
+glTFは右手座標系でCCWが表なので、正しく描かれる巻き順とは<strong>「三角形の外積(右手系)が
+シェーディング法線と同じ向きになる巻き順」</strong>を指す。これを面ごとに手で合わせると、
+取り違えた面だけが<strong>黒くなる</strong>(法線が裏を向き、拡散も環境光も反対側の半球を引く)という
+分かりにくい形で現れる。実際、床の巻き順を取り違えて「床だけ真っ黒」になる不具合を出した。
+</p>
+<p>
+そのため<code>generate_quad_double_sided</code>は、渡された4点の周回向きから幾何法線を求め、
+指定された法線と内積を取って巻き順を自動的に揃える。あわせて法線・巻き順を反転した2組目を
+同じ座標へ重ね、板を両面にしている(裏面はバックフェースカリングで落ちるため同一平面でも
+Zファイティングは起きない)。
+</p>
+
+<h4>副産物: <code>[Camera]</code>のYaw/Pitchの単位不整合</h4>
+<p>
+このシーンが<strong><code>[Camera]</code>でYawに0以外を指定する最初のシーン</strong>だったため、
+<code>SceneLoader</code>で度→ラジアン変換が抜けていたことが判明した
+(<code>Camera::SetYawPitch</code>はラジアンを受け取る)。ドキュメントは一貫して「度」と書いており、
+<code>[Light]</code>の<code>ConeAngleDegrees</code>や<code>[Model]</code>の<code>RotationEuler</code>は
+変換していたので、<code>[Camera]</code>だけが例外だった。既存シーンは<code>Yaw = 0.0</code>しか
+使っておらず度とラジアンで同じ値になるため表面化していなかったもので、他と同じ変換を入れて修正した。
+</p>
 </section>
 
 </main>

@@ -191,12 +191,37 @@ Yaw = 0.0
 配置できます。屋内など、シーン全体で共通のスカイボックス由来の環境光では空が映り込んでしまう場所で、
 実際の壁・柱・床が映るようになります。セクションを繰り返して複数(最大8個)配置できます。
 
+影響範囲の形は球(`Sphere`)と直方体(`Box`)から選べます。
+
 ```ini
 [ReflectionProbe]
 Name = Atrium          # 省略可(ImGuiの一覧に表示される名前)
 Position = 0.0, 5.0, 0.0
-Radius = 50.0          # 影響範囲の半径。この球の内側のピクセルがこのプローブの環境を受ける
+Shape = Sphere         # 省略可(既定Sphere)。SphereまたはBox
+Radius = 50.0          # Shape = Sphere のときの影響範囲の半径
+BlendDistance = 2.0    # 省略可(既定2.0)。影響範囲の境界から内側へこの距離をかけて
+                       # プローブの重みが1まで立ち上がる。0にすると境界で不連続に切り替わる
 ```
+
+```ini
+[ReflectionProbe]
+Name = Atrium West
+Position = -8.0, 5.0, 0.0
+Shape = Box
+BoxExtents = 10.0, 6.5, 10.0  # 各軸の半径(ハーフエクステント)。Positionが箱の中心
+Yaw = 0.0                     # 省略可(既定0)。Y軸まわりの回転(度)
+BlendDistance = 1.0
+```
+
+`Shape = Box`にすると、影響範囲が部屋の形に沿うようになるだけでなく、**視差補正**が有効になります。
+プローブのキューブマップは1点から撮ったものなので、プローブ位置から離れた壁際では映る像の位置が
+本来の反射位置とずれます。視差補正は反射ベクトルをこの箱と交差させて、その交点の方向で
+キューブマップを引き直すことでずれを打ち消します。`BoxExtents`は部屋の壁とおおよそ一致させてください
+(箱を実際の壁から大きく離すと補正がかえってずれます)。
+
+影響範囲が重なっているプローブ同士は`BlendDistance`に応じて滑らかに混ざります。どのプローブの
+重みも1に満たない場所では、残りをスカイボックス由来のグローバルIBLが埋めるため、影響範囲の外へ
+出るときも境界で切り替わらず徐々に元の環境光へ戻ります。
 
 ## 実行(Sample3D)
 
@@ -225,16 +250,20 @@ Sample3D.exe -dx12
 
 画面左上に表示される6つのImGuiパネルから各種設定を変更できます(F1キーで表示/非表示を切り替え可能)。
 
-- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Furnace Test(スペキュラBRDFのエネルギー保存を目視で検証するシーン)、Material Test(粗さ0〜1の球体列+半透明ガラス球)、Light Test(ポイント/スポット/平行光の検証用シーン)、Multi Model Test(TRS配置の確認用))
+- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Furnace Test(スペキュラBRDFのエネルギー保存を目視で検証するシーン)、Material Test(粗さ0〜1の球体列+半透明ガラス球)、Light Test(ポイント/スポット/平行光の検証用シーン)、Reflection Probe Test(反射プローブの効果を目視で確認するシーン)、Multi Model Test(TRS配置の確認用))
 - **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能)。スペキュラBRDFのマルチスキャッタリング・エネルギー補正もここでON/OFFできます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / IBL(拡散イラディアンス・プリフィルタ済み鏡面・BRDF LUT) / 反射プローブ(キャプチャ結果・影響範囲の色分け) 等、各パス中間結果のデバッグ表示)
 - **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)・
   EV100(実在の写真露出値。太陽/環境光/ポイント・スポットライトすべてに一様にかかるシーン全体の
   露出)を調整するほか、ポイント/スポットライトの一覧・追加・削除・型切替・パラメータ編集(強度は
   カンデラ/ルクス)ができます
-- **Reflection Probes** — 反射プローブのON/OFFと、プローブの一覧・追加・削除・位置/半径の編集ができます。
+- **Reflection Probes** — 反射プローブのON/OFFと、プローブの一覧・追加・削除・位置や影響範囲
+  (形状Sphere/Box・半径・BoxExtents・Yaw・Blend Distance)の編集ができます。
   プローブの中身はシーンのジオメトリやライトに依存するため、シーン読み込み時と位置を動かしたときに
-  自動で焼き直されます。ライトや時刻を変えた後に焼き直したい場合は「Bake」ボタンを押してください
+  自動で焼き直されます(影響範囲だけを変えた場合は焼き直し不要です)。ライトや時刻を変えた後に
+  焼き直したい場合は「Bake」ボタンを押してください。
+  「Parallax Correction」「Probe Blending」は視差補正・プローブ間ブレンドの有無を切り替えるもので、
+  無効にしたときの見た目(壁際での反射位置のずれ、影響範囲の境界の継ぎ目)と見比べられます
 - **Profiler** — FPS、CPU/GPUフレーム時間を各パスごとに表示
 
 ## サンプルプログラム
@@ -278,6 +307,10 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   `Tools/generate_material_test.py` で再生成できる
 - `Assets/Source/LightTest/` — ポイント/スポット/平行光の検証用シーン(床・壁・粗さ違いの球4個)。
   `Tools/generate_light_test.py` で再生成できる
+- `Assets/Source/ProbeTest/` — 反射プローブの検証用シーン。中央の仕切り壁で「密閉の西室(暖色)」と
+  「天井が開いた東室(寒色・太陽光)」に分かれたホールと、その間を貫く金属球列(`metallic=1.0`、
+  粗さ0.05)。床は磨いた石(粗さ0.06)で、壁のエミッシブ帯の映り込みから視差補正の効きを読み取る。
+  `Tools/generate_probe_test.py` で再生成できる
 - `Scenes/` — 手書きの`.kscene`(シーンファイル)。`Assets/`の外にあり**Git管理対象**
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
 - `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる

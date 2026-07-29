@@ -1,0 +1,75 @@
+# KurenaiEngine シーンファイル - 反射プローブ(リフレクションプローブ)の検証用
+#
+# ジオメトリは Tools/generate_probe_test.py が生成する。ホールは x[-12,12] y[0,7] z[-6,6] で、
+# x=0 の仕切り壁(中央に開口部)で西室(密閉)と東室(天井開口)に分かれている。
+# 床だけが metallic=1.0 / roughness=0.12 の鏡面で、z=0 の軸上に金属球が7個並ぶ。
+#
+# 確認手順(ImGuiの「Reflection Probes」パネル):
+#   1. Enable Reflection Probes を切る → 密閉の西室にいるはずの金属球が空色に光る(破綻)
+#   2. 戻す → 実際の暖色の壁とエミッシブ帯が映る
+#   3. Probe Blending を切る → 開口部付近の球の反射色に硬い継ぎ目が出る
+#   4. Parallax Correction を切る → 鏡面の床に映るエミッシブ帯が壁の接地点からずれる
+
+[Scene]
+Name = Reflection Probe Test
+# SSRもプローブと同じく「環境の反射」を足すため、両方効いていると差の切り分けができない。
+# プローブ単体の挙動を見るシーンなので既定で切っておく(ImGuiで随時オンにして比較できる)
+ScreenSpaceReflection = false
+
+[Model]
+Path = ProbeTest/ProbeTest.kmodel
+
+# 東室側から開口部越しに球列を見通す位置。Yaw=-90でX軸の負方向(西室側)を向く
+# (Camera::GetForwardは forward=(cos(pitch)sin(yaw), sin(pitch), cos(pitch)cos(yaw)))。
+# カスケードシャドウマップはカメラ視錐台にフィットするため、シーン読み込み直後の自動ベイクで
+# 両室のプローブに影が乗るよう、ここから両室が視界に入るようにしてある
+[Camera]
+Position = 11.5, 4.2, 2.6
+Yaw = -101.0
+Pitch = -11.0
+
+# 東室は天井が開いているので太陽光が直接差し込む。西室には届かないため、
+# 2つの部屋で焼かれる環境が明るさの面でもはっきり分かれる
+[Sun]
+TimeOfDay = 12.0
+Shadow = true
+
+# 西室の照明。密閉で太陽光が入らないため、この2灯とエミッシブ帯だけが光源になる。
+# 色は壁のベースカラー(暖色)とエミッシブ帯に揃えてあり、プローブに焼かれる環境が
+# 「暖色の室内」としてまとまるようにしている
+[Light]
+Type = Point
+Position = -9.0, 5.5, 0.0
+Color = 1.0, 0.55, 0.25
+Intensity = 6000.0
+Range = 24.0
+
+[Light]
+Type = Point
+Position = -3.5, 5.5, 0.0
+Color = 1.0, 0.55, 0.25
+Intensity = 6000.0
+Range = 24.0
+
+# 反射プローブ。影響範囲(Box)の数値の根拠:
+#   X : 西 x∈[-13,3] / 東 x∈[-3,13]。開口部を挟んで6単位重なり、ここがブレンド帯になる
+#   Y : y∈[-1.5,8.5]。床(y=0)・天井(y=7)が境界から1.5内側に入るので、BlendDistance=1.5で
+#       ちょうど重み1.0に達する。床が空のIBLへ薄まらないようにするための設定
+#   Z : z∈[-7.5,7.5]。側壁(z=±6)も同じく1.5内側に入る
+#
+# 箱は実際の部屋より各面1.5だけ大きいため、視差補正はその分ずれる。これはPhase 2の既知の制約
+# (影響ボリュームと視差補正の投影ボックスを分離できない)そのもので、ImGuiでBox Extentsを
+# 縮めると視差が合う代わりに壁面が空へ薄まる、というトレードオフを実機で試せる
+[ReflectionProbe]
+Name = West Room (Enclosed)
+Position = -5.0, 3.5, 0.0
+Shape = Box
+BoxExtents = 8.0, 5.0, 7.5
+BlendDistance = 1.5
+
+[ReflectionProbe]
+Name = East Room (Open Ceiling)
+Position = 5.0, 3.5, 0.0
+Shape = Box
+BoxExtents = 8.0, 5.0, 7.5
+BlendDistance = 1.5

@@ -189,6 +189,10 @@ namespace Kurenai::Assets
             bool HasPosition = false;
             float Position[3] = { 0.0f, 0.0f, 0.0f };
             float Radius = 10.0f;
+            ReflectionProbeShape Shape = ReflectionProbeShape::Sphere;
+            float BoxExtents[3] = { 10.0f, 10.0f, 10.0f };
+            float YawDegrees = 0.0f;
+            float BlendDistance = 2.0f;
             std::wstring Name;
         };
 
@@ -537,6 +541,29 @@ namespace Kurenai::Assets
                         if (!ParseFloatToken(value, entry.Radius)) errorAt(lineNumber, rawLine, "Radiusの値が不正です");
                         if (entry.Radius <= 0.0f) errorAt(lineNumber, rawLine, "Radiusは0より大きい値で指定してください");
                     }
+                    else if (CaseInsensitiveEquals(key, L"Shape"))
+                    {
+                        if (CaseInsensitiveEquals(value, L"Sphere")) entry.Shape = ReflectionProbeShape::Sphere;
+                        else if (CaseInsensitiveEquals(value, L"Box")) entry.Shape = ReflectionProbeShape::Box;
+                        else errorAt(lineNumber, rawLine, "Shapeの値が不正です(SphereまたはBox)");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"BoxExtents"))
+                    {
+                        if (!ParseFloat3(value, entry.BoxExtents)) errorAt(lineNumber, rawLine, "BoxExtentsの値が不正です(x, y, zの3要素が必要)");
+                        if (entry.BoxExtents[0] <= 0.0f || entry.BoxExtents[1] <= 0.0f || entry.BoxExtents[2] <= 0.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "BoxExtentsは全ての軸を0より大きい値で指定してください");
+                        }
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Yaw"))
+                    {
+                        if (!ParseFloatToken(value, entry.YawDegrees)) errorAt(lineNumber, rawLine, "Yawの値が不正です");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"BlendDistance"))
+                    {
+                        if (!ParseFloatToken(value, entry.BlendDistance)) errorAt(lineNumber, rawLine, "BlendDistanceの値が不正です");
+                        if (entry.BlendDistance < 0.0f) errorAt(lineNumber, rawLine, "BlendDistanceは0以上の値で指定してください");
+                    }
                     else if (CaseInsensitiveEquals(key, L"Name"))
                     {
                         entry.Name = value;
@@ -617,8 +644,12 @@ namespace Kurenai::Assets
         scene.CameraPosition[0] = parsed.CameraPosition[0];
         scene.CameraPosition[1] = parsed.CameraPosition[1];
         scene.CameraPosition[2] = parsed.CameraPosition[2];
-        scene.CameraYaw = parsed.CameraYaw;
-        scene.CameraPitch = parsed.CameraPitch;
+        // .kscene上のYaw/Pitchは度(ドキュメント4.7節)。Camera::SetYawPitchはラジアンを受け取るため、
+        // [Light]のConeAngleDegreesや[Model]のRotationEulerと同様にここで変換する
+        // (これまで変換が抜けていたが、[Camera]を持つ既存シーンがYaw = 0.0しか使っておらず
+        //  度とラジアンで同じ値になるため表面化していなかった)
+        scene.CameraYaw = DirectX::XMConvertToRadians(parsed.CameraYaw);
+        scene.CameraPitch = DirectX::XMConvertToRadians(parsed.CameraPitch);
         scene.SunTimeOfDay = parsed.SunTimeOfDay;
         scene.SunAzimuthDegrees = parsed.SunAzimuthDegrees;
         scene.ShadowEnabled = parsed.SunShadow;
@@ -669,6 +700,10 @@ namespace Kurenai::Assets
             ReflectionProbe probe;
             std::memcpy(probe.Position, parsedProbe.Position, sizeof(probe.Position));
             probe.Radius = parsedProbe.Radius;
+            probe.Shape = parsedProbe.Shape;
+            std::memcpy(probe.BoxExtents, parsedProbe.BoxExtents, sizeof(probe.BoxExtents));
+            probe.YawDegrees = parsedProbe.YawDegrees;
+            probe.BlendDistance = parsedProbe.BlendDistance;
             probe.Name = parsedProbe.Name.empty()
                 ? ("Probe " + std::to_string(scene.ReflectionProbes.size()))
                 : WideToUtf8(parsedProbe.Name);

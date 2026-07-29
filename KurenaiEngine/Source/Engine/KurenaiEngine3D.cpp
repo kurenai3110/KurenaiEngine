@@ -76,11 +76,13 @@ namespace Kurenai
             DirectX::XMFLOAT2 Padding{};
         };
 
-        // DeferredLighting.hlsl側のstruct GPUReflectionProbeと並び・ストライド(16バイト)を
+        // DeferredLighting.hlsl側のstruct GPUReflectionProbeと並び・ストライド(48バイト)を
         // 一致させる必要がある
         struct alignas(16) GPUReflectionProbe
         {
-            DirectX::XMFLOAT4 PositionRadius; // xyz=ワールド座標, w=影響半径
+            DirectX::XMFLOAT4 PositionRadius; // xyz=ワールド座標(Box形状では箱の中心), w=Sphere形状の影響半径
+            DirectX::XMFLOAT4 BoxExtents;     // xyz=Box形状の各軸の半径(ハーフエクステント), w=ブレンド距離
+            DirectX::XMFLOAT4 ShapeParams;    // x=形状(0=Sphere,1=Box), y=sin(Yaw), z=cos(Yaw), w=未使用
         };
 
         // キューブマップの1面を撮るためのビュー行列(左手系)。前方向・上方向の組は
@@ -1655,10 +1657,24 @@ namespace Kurenai
     void KurenaiEngine3D::RenderReflectionProbeUI()
     {
         ImGui::SetNextWindowPos(ImVec2(590.0f, 10.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(300.0f, 320.0f), ImGuiCond_FirstUseEver);
+        // Box形状を選ぶとBox Extents/Yawが増えるため、それでもスクロール無しで収まる高さにしておく
+        ImGui::SetNextWindowSize(ImVec2(300.0f, 430.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Reflection Probes");
 
         ImGui::Checkbox("Enable Reflection Probes", &m_ReflectionProbeEnabled);
+        // 以下2つはPhase 1(球形・単一選択・視差補正なし)との見比べ用。どちらも焼き直し不要で、
+        // 環境ソースの引き方だけが変わる
+        ImGui::Checkbox("Parallax Correction", &m_ProbeParallaxCorrectionEnabled);
+        if (ImGui::IsItemHovered())
+        {
+            // ImGuiの既定フォント(ProggyClean)はASCIIしか持たないため、UI文言は他と同様に英語で書く
+            ImGui::SetTooltip("Box shape only. Intersects the reflection vector with the box\nso reflections line up away from the probe center.");
+        }
+        ImGui::Checkbox("Probe Blending", &m_ProbeBlendingEnabled);
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Fades weights over Blend Distance inward from the volume border.\nOff: uses only the nearest probe, leaving a seam at the border.");
+        }
         ImGui::Text("Probes: %zu / %u", m_ReflectionProbes.size(), kMaxReflectionProbes);
         if (!m_ProbeBaked && !m_ReflectionProbes.empty())
         {
@@ -1739,8 +1755,39 @@ namespace Kurenai
             {
                 m_ProbeBakeRequested = true;
             }
-            // 半径は影響範囲だけの話でキャプチャ内容には影響しないため焼き直し不要
-            ImGui::DragFloat("Radius", &probe.Radius, 0.1f, 0.1f, 1000.0f, "%.2f");
+            // 以下の影響範囲パラメータはどれもキャプチャ内容には影響しない(どこから撮るかは
+            // Positionだけで決まる)ため、変更しても焼き直しは不要
+            int shapeIndex = (probe.Shape == Assets::ReflectionProbeShape::Box) ? 1 : 0;
+            const char* const shapeNames[] = { "Sphere", "Box" };
+            if (ImGui::Combo("Shape", &shapeIndex, shapeNames, IM_ARRAYSIZE(shapeNames)))
+            {
+                probe.Shape = (shapeIndex == 1)
+                    ? Assets::ReflectionProbeShape::Box
+                    : Assets::ReflectionProbeShape::Sphere;
+            }
+
+            if (probe.Shape == Assets::ReflectionProbeShape::Box)
+            {
+                // 各軸の半径。0以下だと箱が潰れて交差計算が成り立たないため下限を与える
+                if (ImGui::DragFloat3("Box Extents", probe.BoxExtents, 0.1f, 0.1f, 1000.0f, "%.2f"))
+                {
+                    for (float& extent : probe.BoxExtents)
+                    {
+                        extent = std::max(extent, 0.1f);
+                    }
+                }
+                ImGui::DragFloat("Yaw", &probe.YawDegrees, 0.5f, -180.0f, 180.0f, "%.1f deg");
+            }
+            else
+            {
+                ImGui::DragFloat("Radius", &probe.Radius, 0.1f, 0.1f, 1000.0f, "%.2f");
+            }
+
+            ImGui::DragFloat("Blend Distance", &probe.BlendDistance, 0.05f, 0.0f, 100.0f, "%.2f");
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("Distance inward from the volume border over which this probe's\nweight ramps up to 1. Zero makes the border a hard cut.");
+            }
         }
 
         ImGui::End();
@@ -2160,8 +2207,19 @@ namespace Kurenai
             gpuProbes.reserve(m_ReflectionProbes.size());
             for (const Assets::ReflectionProbe& probe : m_ReflectionProbes)
             {
-                gpuProbes.push_back(GPUReflectionProbe{
-                    DirectX::XMFLOAT4{ probe.Position[0], probe.Position[1], probe.Position[2], probe.Radius } });
+                // Yawはシェーダー側で毎ピクセル三角関数を回さずに済むよう、ここでsin/cosへ展開しておく
+                const float yawRadians = DirectX::XMConvertToRadians(probe.YawDegrees);
+                const bool isBox = probe.Shape == Assets::ReflectionProbeShape::Box;
+
+                GPUReflectionProbe gpuProbe{};
+                gpuProbe.PositionRadius = { probe.Position[0], probe.Position[1], probe.Position[2], probe.Radius };
+                gpuProbe.BoxExtents = {
+                    probe.BoxExtents[0], probe.BoxExtents[1], probe.BoxExtents[2], probe.BlendDistance
+                };
+                gpuProbe.ShapeParams = {
+                    isBox ? 1.0f : 0.0f, std::sin(yawRadians), std::cos(yawRadians), 0.0f
+                };
+                gpuProbes.push_back(gpuProbe);
             }
         }
         if (!gpuProbes.empty())
@@ -2170,7 +2228,12 @@ namespace Kurenai
         }
 
         const float probeInfluenceDebug = (m_DebugView == DebugView::ProbeInfluence) ? 1.0f : 0.0f;
-        constants.ProbeParams = { static_cast<float>(gpuProbes.size()), probeInfluenceDebug, 0.0f, 0.0f };
+        constants.ProbeParams = {
+            static_cast<float>(gpuProbes.size()),
+            probeInfluenceDebug,
+            m_ProbeParallaxCorrectionEnabled ? 1.0f : 0.0f,
+            m_ProbeBlendingEnabled ? 1.0f : 0.0f,
+        };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
