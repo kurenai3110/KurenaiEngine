@@ -459,6 +459,26 @@ namespace Kurenai::RHI
         m_PendingComputeSrvHandles[slot] = dx12Texture->GetSrvCpuHandle();
     }
 
+    void DX12CommandList::SetComputeShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer)
+    {
+        if (slot >= kComputeSrvSlotCount)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "SetComputeShaderResourceBuffer: スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0〜t" +
+                    std::to_string(kComputeSrvSlotCount - 1) + ")。バインドをスキップします");
+            return;
+        }
+
+        // 構造化バッファのSRVはSetComputeTextureのテクスチャSRVと同じディスクリプタテーブルを共有するため、
+        // バインド経路もSetComputeTextureと完全に同じにする(コピー元だけ記録しておき、
+        // Dispatch直前のFlushPendingComputeWritesでまとめて反映する)
+        auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+        dx12Buffer->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        m_PendingComputeSrvHandles[slot] = dx12Buffer->GetSrvCpuHandle();
+    }
+
     void DX12CommandList::SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel)
     {
         if (slot >= kComputeUavSlotCount)

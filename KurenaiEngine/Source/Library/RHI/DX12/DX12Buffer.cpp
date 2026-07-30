@@ -22,6 +22,7 @@ namespace Kurenai::RHI
         , m_MappedPtr(mappedPtr)
         , m_SlotSizeInBytes(sizeInBytes)
         , m_RingCapacity(ringCapacity)
+        , m_Usage(usage)
     {
         const D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = m_Resource->GetGPUVirtualAddress();
 
@@ -46,9 +47,33 @@ namespace Kurenai::RHI
         , m_SlotSizeInBytes(sizeInBytes)
         , m_RingCapacity(1)
         , m_UavIndex(uavIndex)
+        , m_Usage(BufferUsage::Structured)
         // BufferUsage::Structuredのリソースは作成時点でUNORDERED_ACCESS状態になっている
         // (DX12Device::CreateBuffer参照)。TransitionToが余計なバリアを積まないよう実態に合わせる
         , m_CurrentState(D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+    {
+        (void)strideInBytes;
+    }
+
+    DX12Buffer::DX12Buffer(
+        DX12Device* device,
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+        uint32_t uavIndex,
+        uint32_t srvIndex,
+        uint32_t sizeInBytes,
+        uint32_t strideInBytes)
+        : m_Device(device)
+        , m_Resource(std::move(resource))
+        , m_MappedPtr(nullptr)
+        , m_SlotSizeInBytes(sizeInBytes)
+        , m_RingCapacity(1)
+        , m_UavIndex(uavIndex)
+        , m_Usage(BufferUsage::StructuredRW)
+        // BufferUsage::StructuredRWのリソースもStructuredと同じく作成時点でUNORDERED_ACCESS状態
+        // (DX12Device::CreateBuffer参照)。以降はSetComputeUnorderedAccessBuffer /
+        // SetShaderResourceBufferの呼び出しでUNORDERED_ACCESS↔PIXEL_SHADER_RESOURCEを往復する
+        , m_CurrentState(D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        , m_SrvIndex(srvIndex)
     {
         (void)strideInBytes;
     }
@@ -68,6 +93,7 @@ namespace Kurenai::RHI
         , m_MappedPtr(nullptr)
         , m_SlotSizeInBytes(sizeInBytes)
         , m_RingCapacity(1)
+        , m_Usage(BufferUsage::StructuredReadOnly)
         , m_CurrentState(initialState)
         , m_SrvIndex(srvIndex)
         , m_UploadResource(std::move(uploadResource))

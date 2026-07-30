@@ -190,6 +190,56 @@ namespace Kurenai::RHI
             return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, srv, /*isDynamic=*/true);
         }
 
+        // コンピュートがUAVで書き、ピクセルシェーダがSRVで読む構造化バッファ。CPUからは書き込まないので
+        // D3D11_USAGE_DEFAULT(CPUAccessFlagsなし)。DX11は同じリソースをUAVとSRVに同時バインドできないが、
+        // DX11CommandList::DispatchがDispatch直後にUAVを全解除しているため追加の対処は要らない
+        if (desc.Usage == BufferUsage::StructuredRW)
+        {
+            if (desc.StrideInBytes == 0)
+            {
+                Core::Logger::Error("DX11", "StructuredRWバッファのStrideInBytesが0です。作成を中止します");
+                throw std::runtime_error("StructuredRWバッファのStrideInBytesが0です");
+            }
+
+            D3D11_BUFFER_DESC structuredDesc{};
+            structuredDesc.ByteWidth = desc.SizeInBytes;
+            structuredDesc.Usage = D3D11_USAGE_DEFAULT;
+            structuredDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+            structuredDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            structuredDesc.StructureByteStride = desc.StrideInBytes;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> structuredBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&structuredDesc, nullptr, &structuredBuffer),
+                "読み書き構造化バッファ(StructuredRW)の作成に失敗しました");
+
+            const UINT elementCount = desc.SizeInBytes / desc.StrideInBytes;
+
+            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            uavDesc.Buffer.FirstElement = 0;
+            uavDesc.Buffer.NumElements = elementCount;
+
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+            ThrowIfFailed(
+                m_Device->CreateUnorderedAccessView(structuredBuffer.Get(), &uavDesc, &uav),
+                "読み書き構造化バッファのアンオーダードアクセスビュー作成に失敗しました");
+
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            srvDesc.Buffer.FirstElement = 0;
+            srvDesc.Buffer.NumElements = elementCount;
+
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+            ThrowIfFailed(
+                m_Device->CreateShaderResourceView(structuredBuffer.Get(), &srvDesc, &srv),
+                "読み書き構造化バッファのシェーダリソースビュー作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, uav, srv);
+        }
+
         D3D11_BUFFER_DESC bufferDesc{};
         bufferDesc.ByteWidth = desc.SizeInBytes;
         bufferDesc.BindFlags = ToBindFlags(desc.Usage);

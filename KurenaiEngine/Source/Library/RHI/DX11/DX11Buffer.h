@@ -24,11 +24,19 @@ namespace Kurenai::RHI
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv,
             bool isDynamic);
 
+        // BufferUsage::StructuredRW用: コンピュートがUAVで書き、ピクセルシェーダがSRVで読むため
+        // 両方のビューを持つ。CPUからは書き込まないのでD3D11_USAGE_DEFAULT(isDynamicはfalse)
+        DX11Buffer(
+            Microsoft::WRL::ComPtr<ID3D11Buffer> buffer,
+            uint32_t strideInBytes,
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav,
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv);
+
         ID3D11Buffer* GetBuffer() const { return m_Buffer.Get(); }
         uint32_t GetStride() const { return m_StrideInBytes; }
-        // BufferUsage::Structuredで作成した場合のみ非nullptr(コンピュートシェーダーからのRW用)
+        // BufferUsage::Structured / StructuredRWで作成した場合のみ非nullptr(コンピュートシェーダーからのRW用)
         ID3D11UnorderedAccessView* GetUnorderedAccessView() const { return m_Uav.Get(); }
-        // BufferUsage::StructuredReadOnlyで作成した場合のみ非nullptr(ピクセルシェーダからの読み取り専用)
+        // BufferUsage::StructuredReadOnly / StructuredRWで作成した場合のみ非nullptr(シェーダからの読み取り用)
         ID3D11ShaderResourceView* GetShaderResourceView() const { return m_Srv.Get(); }
         // D3D11_USAGE_DYNAMICで作成されたか(UpdateBufferの分岐に使う)
         bool IsDynamic() const { return m_IsDynamic; }
