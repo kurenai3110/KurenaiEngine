@@ -88,6 +88,11 @@ namespace Kurenai::RHI
         // 有効なスロットはt0〜t3。SetTextureと同じく、上書きするまでバインドは維持される
         // (SetComputeUnorderedAccessTexture系のUAVだけはDispatch直後に解除される。下記参照)
         virtual void SetComputeTexture(uint32_t slot, IRHITexture* texture) = 0;
+        // 構造化バッファをStructuredBuffer<T>としてコンピュートシェーダーへバインドする。
+        // スロット空間はSetComputeTextureと共有(t0〜t3)なので、同じディスパッチ内で衝突しないよう
+        // 呼び出し側で調整すること。タイルライトカリングがライトリスト(StructuredReadOnly)を
+        // 読むのに使う
+        virtual void SetComputeShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         // TextureCube(スカイボックス)をコンピュートシェーダーからSampleLevelで読む(IBLの畳み込み等)場合に
         // 必要。DX11はステージごとに独立したサンプラースロットを持つため、グラフィックス側のSetSamplerSetとは
         // 別に明示的なバインドが要る(DX12はグラフィックス・コンピュートで同じサンプラーヒープを共有するため

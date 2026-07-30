@@ -372,6 +372,7 @@ namespace Kurenai
             IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLPrefilterDebugMipLevel、TextureCube)
             IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス)
             Bloom,              // ブルームのピラミッド最上段(半解像度、HDR)をトーンマッピングして表示
+            LightTiles,         // タイルライトカリングのライトグリッド(タイルあたりのライト数)をヒートマップ表示
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -521,6 +522,48 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_LightingConstantBuffer;
         // 容量(kMaxLights)超過を検出した最初のフレームだけ警告ログを出すためのフラグ
         bool m_LightOverflowLogged = false;
+
+        // ポイント/スポットライトのスクリーンスペースシャドウ(接触影)の設定。
+        // シャドウマップを増やさず、G-Bufferの深度バッファをライト方向へレイマーチして影を出す
+        // (Shaders/3D/ScreenSpaceShadow.hlsli、docs/Architecture.html 18章)
+        bool m_ScreenSpaceShadowEnabled = true;
+        // レイマーチのステップ数。ScreenSpaceShadow.hlsliのkSSSMaxStepCount(64)が上限
+        int m_ScreenSpaceShadowStepCount = 16;
+        // 1本のレイが伸びる最大のワールド距離。ライトまでの距離がこれより短ければそちらが優先される。
+        // 短いほど「接触影」寄りになり、コストも下がる
+        float m_ScreenSpaceShadowMaxRayLength = 1.5f;
+        // 遮蔽と判定する深度差の上限。深度バッファがサーフェスの厚みを持たないための近似で、
+        // 大きすぎると遠景が無限に厚い遮蔽物として振る舞い、小さすぎると薄い物体を貫通する
+        float m_ScreenSpaceShadowThickness = 0.5f;
+        // レイ始点を法線方向へ押し出す量(View空間深度に比例させる係数)。自己遮蔽(シャドウアクネ)対策
+        float m_ScreenSpaceShadowNormalBias = 0.002f;
+        // ヒット位置が画面端に近いときに影を弱める幅(UV単位)。SSRのkSSREdgeFadeDistanceと同じ役割
+        float m_ScreenSpaceShadowEdgeFade = 0.1f;
+        // 1ピクセルが撃てるシャドウレイ数の上限。ライトを増やしてもレイマーチのコストが
+        // 線形に伸び続けないようにするための予算
+        int m_ScreenSpaceShadowMaxLightsPerPixel = 4;
+
+        // タイルライトカリング(Shaders/3D/LightCulling.hlsl)。画面を16x16ピクセルのタイルに分け、
+        // タイルごとに「そのタイルに届くライト」のインデックスリストをコンピュートシェーダーで作る。
+        // 直接光パスはそのリストだけをループするため、ピクセルあたりのコストが
+        // シーン全体のライト数ではなくタイル内のライト数になる。
+        // これは純粋な最適化であり、有効/無効で最終画像が変わってはならない
+        std::unique_ptr<RHI::IRHIShader> m_LightCullingComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_LightCullingPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_LightCullingConstantBuffer;
+        // ライトグリッド本体(BufferUsage::StructuredRW)。コンピュートがUAVで書き、
+        // 直接光パスのピクセルシェーダがSRVで読む。解像度に依存するためCreateRenderTargetsで作り直す
+        std::unique_ptr<RHI::IRHIBuffer> m_LightTileBuffer;
+        uint32_t m_LightTileCountX = 0;
+        uint32_t m_LightTileCountY = 0;
+        bool m_LightCullingEnabled = true;
+        // タイル容量の超過"条件"(シーンのライト数が容量を超えている)を検出した最初のフレームだけ
+        // 警告ログを出すためのフラグ(m_LightOverflowLoggedと同じ作法)。
+        // 実際に超過したかはGPU側にしか無いため、確認はDebugView::LightTilesのマゼンタで行う
+        bool m_LightTileOverflowLogged = false;
+        // DebugView::LightTilesのヒートマップで赤に振り切る基準のライト数。容量(64)を基準にすると
+        // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
+        int m_LightTileHeatmapMax = 8;
 
         // LoadScene(Updateスレッド。UpdateSceneSwitch経由で呼ばれる)が書き込み、Render()(Renderスレッド。
         // 描画そのものに加えRenderPostProcessUI等のImGuiスライダーがm_SSAORadius等を直接書き換える)が

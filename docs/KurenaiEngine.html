@@ -1000,12 +1000,13 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>AzimuthDegrees</code></td><td>float</td><td>-</td><td>126.87</td><td>太陽が昇る方位角</td></tr>
 <tr><td><code>Shadow</code></td><td>bool</td><td>-</td><td>true</td><td>シャドウマップの有効/無効</td></tr>
 <tr><td><code>Enabled</code></td><td>bool</td><td>-</td><td>true</td><td>太陽(平行光)そのものの有効/無効。<code>TimeOfDay</code>を夜にすると環境光の明るさも一緒に落ちるが、こちらは太陽だけを消す</td></tr>
-<tr><td rowspan="6"><code>[Light]</code></td><td rowspan="6">0以上</td><td><code>Type</code></td><td>enum</td><td><strong>必須</strong></td><td>-</td><td><code>Point</code> / <code>Spot</code></td></tr>
+<tr><td rowspan="7"><code>[Light]</code></td><td rowspan="7">0以上</td><td><code>Type</code></td><td>enum</td><td><strong>必須</strong></td><td>-</td><td><code>Point</code> / <code>Spot</code></td></tr>
 <tr><td><code>Position</code></td><td>float3</td><td><strong>必須</strong></td><td>-</td><td>-</td></tr>
 <tr><td><code>Direction</code></td><td>float3</td><td>Spotのみ必須</td><td>-</td><td>-</td></tr>
 <tr><td><code>Color</code> / <code>Intensity</code></td><td>float3 / float</td><td>-</td><td>1,1,1 / 1.0</td><td>リニア空間RGB</td></tr>
 <tr><td><code>Range</code></td><td>float</td><td>-</td><td>10.0</td><td>-</td></tr>
 <tr><td><code>ConeAngleDegrees</code></td><td>float</td><td>Spotのみ</td><td>45.0</td><td>-</td></tr>
+<tr><td><code>CastShadow</code></td><td>bool</td><td>-</td><td>true</td><td>このライトがスクリーンスペースシャドウを落とすか。1ピクセルが撃てるシャドウレイ数には上限(Lightingパネルの<code>Max Shadowed Lights</code>)があるため、影を出したいライトへ予算を回すのに使う</td></tr>
 </tbody>
 </table>
 <p>

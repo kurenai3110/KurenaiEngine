@@ -160,6 +160,8 @@
     border-radius: 6px;
     margin: 1.2em 0;
   }
+  /* 箇条書きの途中に「後の章で更新された」と差し込むための短い注記 */
+  .note-inline { color: #b58900; }
   .note p:first-child { margin-top: 0; }
   .note p:last-child { margin-bottom: 0; }
   .badge {
@@ -216,6 +218,7 @@
     <li><a href="#transparent">15. 半透明描画(フォワードパス)</a></li>
     <li><a href="#rhi-binding">16. RHIのバインド寿命(DX11/DX12の挙動統一)</a></li>
     <li><a href="#tonemap-exposure-bloom">17. トーンマッピング・露出・ブルーム</a></li>
+    <li><a href="#sss-tiled-lights">18. スクリーンスペースシャドウとタイルライトカリング</a></li>
   </ol>
 </nav>
 
@@ -988,6 +991,12 @@ Infoログで明示します(事実と異なる精度を主張しないため)�
 </p>
 
 <h3>11.6 影を持たない理由とSSILへの波及</h3>
+<p class="note">
+<strong>【18章で更新】</strong> この節は複数ライト導入時点の記述です。その後、シャドウマップを増やさずに
+深度バッファをレイマーチする<strong>スクリーンスペースシャドウ</strong>でポイント/スポットライトの影を
+出せるようにしました(<a href="#sss-tiled-lights">18章</a>)。以下の「シャドウを落とさない」は
+現在は当てはまりません。SSILへ自動的に波及するという後半の説明は現在も有効です。
+</p>
 <p>
 ポイント/スポットライトはシャドウを落としません(今回のスコープ外)。既存の平行光シャドウ
 (2048x2048×4スライスの<code>Texture2DArray</code>によるカスケードシャドウ)はそのままです。一方で、<code>SSIL_VisibilityBitmask.hlsl</code>は
@@ -1046,6 +1055,12 @@ Rangeの推定はglTFのノードメタデータ<code>PBR_LightRange</code>(<cod
 </p>
 
 <h3>11.8 CPU側ライトカリングは今回不要</h3>
+<p class="note">
+<strong>【18章で更新】</strong> 「CPU側の」フラスタムカリングが効かないという以下の判断は現在も有効です
+(全画面ディファードである以上、フラスタム内のライトについてはCPU側で削れることが無いため)。
+その後、<strong>GPU側のタイルベースのライトカリング</strong>を導入し、ピクセルあたりの走査対象を
+そのタイルへ届くライトだけに絞れるようにしました(<a href="#sss-tiled-lights">18章</a>)。
+</p>
 <p>
 全画面ディファードなので、フラスタムカリングは「容量(<code>kMaxLights</code>)を超えたときどれを
 残すか」以外には効果がありません(フラスタム内のライトについてはコストが変わらないため)。
@@ -1065,9 +1080,18 @@ LUTテクスチャ2枚を要求し、<code>kTextureSlotCount = 7</code>に対し
 実装する際は<strong><code>DistributionGGX(NdotH, roughness)</code>が引数を内部で2乗する
 実装</strong>である点に注意してください。ラフネス補正後の<code>alphaPrime</code>ではなく
 <code>sqrt(alphaPrime)</code>を渡す必要があります。</li>
-<li><strong>タイル/クラスタカリング</strong>: 構造化バッファが入ったので、あとはコンピュート用
-ルートシグネチャのSRVスロット拡張(<code>kComputeSrvSlotCount = 4</code>ではG-Buffer4枚+
-ライトリストで足りない)と、<code>m_DirectLightTexture</code>のRTV+UAV両対応があれば載ります。
+<li><strong>タイル/クラスタカリング</strong>:
+<span class="note-inline"><strong>【18章で実装済み】</strong></span>
+タイルベースのカリングを実装しました(<a href="#sss-tiled-lights">18章</a>)。
+実際に必要だったのは、ここで挙げていた「SRVスロット拡張」と
+「<code>m_DirectLightTexture</code>のRTV+UAV両対応」ではなく、
+<strong>コンピュートが書いてピクセルシェーダがSRVで読めるバッファ種別</strong>
+(<code>BufferUsage::StructuredRW</code>)の新設と、
+コンピュートから構造化バッファをSRVで読む<code>SetComputeShaderResourceBuffer</code>の追加でした。
+カリングCSが読むのはライトリストと深度の2本だけなので<code>kComputeSrvSlotCount = 4</code>のままで足り、
+出力もライトグリッド用の専用バッファなので直接光テクスチャをUAV化する必要もありませんでした
+(18.9節)。クラスタ(深度方向の分割)は未実装で、タイルごとの深度範囲による
+スラブ判定で代用しています。
 </li>
 </ul>
 </section>
@@ -2544,6 +2568,256 @@ HDRのブルームには使えない。レベルごとに別テクスチャに�
 <p>White Furnace Testも回帰確認に使っている。トーンマッピングカーブや露出を変えても
 「物体と背景が区別できない」という性質は保たれるはずで、実際に画面全体が3色
 (うち2色はディザによる隣接コード)の完全な一様グレーになることを確認した。</p>
+</section>
+
+<section id="sss-tiled-lights">
+<h2>18. スクリーンスペースシャドウとタイルライトカリング</h2>
+<p>
+11章の時点でポイント/スポットライトは影を落としていなかった(11.6節)。ライトごとにシャドウマップを
+持たせる(ポイントなら立方体6面)のはメモリ・描画パスともに負荷が大きいため、
+<strong>シャドウマップを1枚も増やさずに</strong>影を出す方針として、既にあるG-Bufferの深度バッファを
+ライト方向へレイマーチする<strong>スクリーンスペースシャドウ(SSS)</strong>を導入した。
+あわせて、ライト数が増えたときにピクセルあたりのコストが線形に伸びないよう
+<strong>タイルベースのライトカリング</strong>を入れた(11.8/11.9節の判断を更新する)。
+</p>
+
+<h3>18.1 この手法で「出せる影」と「出せない影」</h3>
+<p>
+SSSが遮蔽物として扱えるのは<strong>深度バッファに写っている面だけ</strong>である。したがって
+</p>
+<ul>
+<li>画面外にある遮蔽物は影を落とさない</li>
+<li>手前の面に隠れて深度バッファに残っていない遮蔽物は影を落とさない</li>
+<li>深度バッファはサーフェスの厚みを持たないため、遮蔽と判定する深度差に上限(<code>thickness</code>)が要る</li>
+</ul>
+<p>
+得られるのは「壁でランプが完全に遮られる」ような影ではなく、<strong>接触影・中距離の遮蔽</strong>である。
+これは手法の性質であって実装の不備ではない。UI(Lightingパネルの説明文)にも同じ内容を書いてある。
+画面外まで含めた本物の影が要るなら、グローバルSDFのように「画面に依存しない遮蔽表現」を
+別途持つ必要があり、それはRHIへの3Dテクスチャ追加とベイクパイプラインを伴う別規模の作業になる。
+</p>
+
+<h3>18.2 Hi-Zチェーンは流用できない(縮約の向きが逆)</h3>
+<p>
+レイマーチの高速化にはHi-Zによる空き空間スキップが定番だが、<strong>このエンジンの既存のHi-Zは
+使えない</strong>。<code>HiZ.hlsl</code>の<code>CSDownsample</code>は<strong>min縮約</strong>で、
+Reverse-Zではmin =「ブロック内で最も遠い可視サーフェス」を意味する。これはオクルージョンカリングが
+必要とする「候補は確実に遮蔽されている」の判定に向いた向きであり、レイマーチの空き空間スキップが
+必要とする「このブロックに遮蔽物は確実に無い」の判定には<strong>max = 最も近いサーフェス</strong>が要る。
+向きが逆なので流用できず、今回は全解像度の深度を線形マーチしている。
+将来スキップを入れるならmaxチェーンを別に作る必要がある。
+</p>
+
+<h3>18.3 同次座標の線形補間で歩く</h3>
+<p>
+レイのステップごとに<code>mul()</code>で再投影すると、ライト数 &times; ステップ数だけ行列積が積み上がる
+(<code>SSR.hlsl</code>の<code>ProjectToScreen</code>はステップごとに<code>mul</code>を2回行っている)。
+SSSはライトごとに回るためこの差が効くので、踏襲していない。
+</p>
+<p>
+代わりに、レイの始点・終点をループ前に1回だけクリップ空間へ変換し、各ステップは
+<code>lerp(clipStart, clipEnd, t)</code>で求める。射影は同次座標に対して線形なので、
+これはワールド空間で等間隔に進むことと<strong>厳密に等価</strong>である。
+さらに、行ベクトル規約のこの射影行列では<code>clip.w</code>がそのままView空間Zになるため、
+レイのView空間深度も同じ<code>lerp</code>から取り出せて追加コストがゼロになる。
+</p>
+<p>
+シーン側のView空間Zも、<code>ReconstructWorldPos</code> + <code>mul(View)</code>(行列積2回)ではなく
+射影定数から除算1回で復元する。<code>clip.z = viewZ &times; a + b</code>、<code>clip.w = viewZ</code>なので
+<code>depth = a + b / viewZ</code>、逆に解いて<code>viewZ = b / (depth - a)</code>。
+<code>a</code>/<code>b</code>はCPU側(<code>KurenaiEngine3D::Render</code>)が
+<strong>射影行列の要素をそのまま読んで</strong>渡す(近平面・遠平面から組み立て直さないのは、
+Reverse-Zの組み方を変えても自動的に追随させるため)。
+</p>
+<p>
+ライトがカメラの手前・背後にあると、レイ終端のView空間Zが0以下へ回り込んで
+<code>clip.w</code>での除算が破綻し、画面上をレイが逆走する。そうなる前に、
+<code>clipEnd.w</code>が最小値を下回る場合はレイを切り詰めている。
+</p>
+
+<h3>18.4 ジッタにフレーム番号を混ぜてはいけない</h3>
+<p>
+等間隔サンプリングは縞状のバンディングを出すため、ステップ位置をピクセルごとにずらして
+高周波のディザへ変換する(インターリーブド・グラディエント・ノイズ、Jimenez 2014)。
+</p>
+<p>
+<strong>ここでフレーム番号を混ぜてはいけない</strong>。このエンジンにはTAAが無く、
+時間方向に平均化する後段が存在しないため、フレームごとにパターンを変えると
+平均化されないまま画面全体がちらつき続けることになる。ピクセル座標だけの関数にしておけば、
+カメラが止まっている限りノイズも完全に静止し「わずかにディザが乗った静止画」で済む。
+<code>SSIL_VisibilityBitmask.hlsl</code>の<code>stepJitter</code>が同じ理由で
+ピクセル座標のみの関数になっているのと同じ判断である。
+</p>
+
+<h3>18.5 バイアスと厚みの上限</h3>
+<p>
+遮蔽と判定する最小深度差は<strong>View空間深度への相対値</strong>にしている
+(<code>kSSSRelativeDepthBias = 0.002</code>)。深度バッファの精度も1ピクセルが占める世界距離も
+距離に比例して粗くなるため、絶対値のバイアスでは近距離で過剰・遠距離で不足になる。
+これに加えてレイの始点を法線方向へ押し出している(こちらもView空間深度でスケールする)。
+</p>
+<p>
+上限(<code>thickness</code>)が必要なのは深度バッファがサーフェスの厚みを持たないためで、
+上限を外すとレイの後ろにある遠景すべてが「無限に厚い遮蔽物」として影を作ってしまう。
+</p>
+<p>
+画面外へレイが外れた場合は<strong>遮蔽なし(明るいまま)で打ち切る</strong>。
+<code>SSR.hlsl</code>が「その先に何があるか分からないので反射を足さない」のと同じ理由で、
+分からないものを影にはしない。加えてヒット位置が画面端に近いほど影を弱め、
+カメラを振って遮蔽物が画面外へ出た瞬間の急変を緩和している。
+</p>
+
+<h3>18.6 ピクセルあたりのシャドウレイ数に上限を置く</h3>
+<p>
+SSSのコストはライトごとに積み上がるため、<code>EvaluateLight</code>に
+「このピクセルで残り何本レイを撃ってよいか」の予算(<code>inout uint shadowRayBudget</code>)を渡し、
+既存のearly-out(距離 → 減衰 → スポット円錐 → NdotL)を<strong>すべて通過した後に</strong>消費する。
+この順序なら、そのピクセルに実際に届いているライトから順に予算が使われる。
+ライト単位の<code>CastShadow</code>フラグ(<code>GPULight::Params.y</code>)と組み合わせて、
+影を出したいライトへ予算を寄せられる。
+</p>
+<p>
+<code>Assets::Light::CastShadow</code>は<strong>永続化していない</strong>。
+<code>.kmodelcache</code>の<code>CachedLightRecord</code>(POD)へ足すとレイアウトが変わり
+<code>kPackageVersion</code>の更新と全アセットの再パックが必要になるが、得られるのは
+「モデルファイル埋め込みライトごとの既定値」だけで見合わない。モデル由来のライトは常に既定値
+(true)で読み込まれ、<code>.kscene</code>(テキスト形式なので互換性の問題が無い)とImGuiで上書きする。
+</p>
+
+<h3>18.7 タイルライトカリング</h3>
+<p>
+画面を16x16ピクセルのタイルに分け、1スレッドグループ256スレッドでタイルごとの
+ライトインデックスリストを作る(<code>LightCulling.hlsl</code>)。
+各スレッドが自分のピクセルの深度をgroupsharedの<code>InterlockedMin/Max</code>で集約してタイルの深度範囲を求め、
+タイルの視錐台側面4枚 + 深度スラブと、各ライトの<strong>バウンディングスフィア</strong>を判定する
+(スポットは円錐の外接球。厳密な円錐判定より保守的=多めに残るが、カリングは「取りこぼさない」ことが
+正しさの条件なので保守的側でよい)。Reverse-Zの深度値は[0,1]の非負floatなので、
+ビットパターンのままuintとして比較しても大小関係が保たれる。
+</p>
+<p>
+出力は<strong>1本の<code>RWStructuredBuffer&lt;uint&gt;</code></strong>で、タイルごとの固定長ブロックに
+「先頭1要素=ライト数、以降=ライトインデックス」を詰める。
+<strong>タイルごとに固定容量を割り当てることで、グローバルなアトミックカウンタも
+「カウンタを毎フレーム0クリアするパス」も不要になる</strong>。
+このエンジンのRHIにはバッファをクリアする手段(<code>ClearUnorderedAccessViewUint</code>相当)が
+無いため、これは実装上の要件でもある。
+</p>
+<p>
+容量を超えた場合も<strong>飽和させずに実際の数をそのまま書き</strong>、読み手(<code>DirectLighting.hlsl</code>)が
+容量で打ち切る。こうしておくとデバッグ表示が容量超過を検出でき、ライトが静かに欠落しない。
+CPU側でも「シーンのライト数が容量を超えている」という<em>条件</em>を検出した最初のフレームに
+警告ログを出す(実際に超過したかはGPU側にしか無いため、確認はデバッグ表示で行う)。
+</p>
+
+<h3>18.8 追加順を昇順へ並べ替える理由</h3>
+<p>
+<code>InterlockedAdd</code>の戻り値はスレッドの実行順に依存するため、そのままではリストの順序が
+タイルごと・フレームごとに変わる。順序が変わると18.6のシャドウレイ予算で
+<strong>どのライトが選ばれるかが揺れて影がちらつく</strong>。
+そこで書き出し前にライト番号の昇順へ並べ替えている。要素数が最大64と少ないので、
+各要素の順位(自分より小さい要素の個数)を数える単純な方法で足りる
+(要素は必ず相異なるライト番号なので順位も一意になる)。
+</p>
+
+<h3>18.9 RHIへの追加</h3>
+<p>
+<strong><code>BufferUsage::StructuredRW</code></strong>を新設した。既存の2種はどちらも片側しか持たず、
+「コンピュートがUAVで書き、ピクセルシェーダがSRVで読む」という今回の用途に使えなかったため:
+</p>
+<ul>
+<li><code>Structured</code> … UAVのみ。SRVディスクリプタが無くPSから読めない</li>
+<li><code>StructuredReadOnly</code> … SRVのみ。UPLOADヒープ経由のCPU書き込み専用でUAVが無い</li>
+</ul>
+<p>
+DX12では<code>UNORDERED_ACCESS</code>と<code>PIXEL_SHADER_RESOURCE</code>の間を
+<code>DX12Buffer::TransitionTo</code>で往復させる(バインド時に暗黙に発行される)。
+なお<code>IsStructuredReadOnly()</code>の判定を「<code>m_SrvIndex</code>が有効値か」から
+<strong><code>Usage</code>を直接持って比較する</strong>形へ変えた。<code>StructuredRW</code>もSRVを持つように
+なったため、旧判定では両者を区別できず、ステージングリングを持たない<code>StructuredRW</code>が
+<code>UpdateBuffer</code>の<code>StructuredReadOnly</code>経路へ入ってしまう。
+</p>
+<p>
+コンピュートシェーダーが構造化バッファ(ライトリスト)をSRVで読むための
+<strong><code>SetComputeShaderResourceBuffer</code></strong>も追加した。
+なお<code>kComputeSrvSlotCount = 4</code>の拡張は<strong>不要だった</strong>
+(カリングCSはt0=ライトリスト・t1=深度の2本で足りる)。11.9節の「拡張が必要」という見立ては
+今回の構成には当たらない。
+</p>
+
+<h3>18.10 DX11の「SRV→UAV」方向のアンバインド</h3>
+<p>
+DX11は同一リソースをSRVとUAVへ同時にバインドできない。既存の実装は
+<code>Dispatch</code>直後にUAVを全解除することで「UAV→SRV」方向に対処していたが、
+今回のライトグリッドは<strong>前フレームにPSがSRVで読んだリソースを次フレームのDispatchがUAVで書く</strong>ため、
+逆方向の対処が要る。<code>DX11CommandList::UnbindPixelSrvForResource</code>を追加し、
+UAVバインドの直前に同一リソースのSRVスロットを明示的に外している
+(そうしないと「どちらが外れるか」がドライバ任せになり、デバッグレイヤーの警告も出続ける)。
+</p>
+<p>
+このために各PS SRVスロットのビューを保持しているが、生ポインタではなく<code>ComPtr</code>で持っている。
+解像度変更などでテクスチャ/バッファが作り直された際に、解放済みのビューを
+<code>GetResource</code>で触ってしまうのを防ぐため。
+</p>
+
+<h3>18.11 RenderGraphにバッファ依存を足した理由</h3>
+<p>
+<code>RenderGraphPassDesc</code>は<code>IRHITexture*</code>の読み書きしか表現できなかった。
+カリングパスと直接光パスは<strong>どちらも<code>m_GBufferDepth</code>をReadsするだけの「読み手同士」</strong>に
+なるため、テクスチャの依存だけでは両者の間に辺が張られない。トポロジカルソートは依存が同点なら
+登録順を優先するのでたまたま正しく動くが、本当の依存関係(カリングが書いたライトグリッドを
+直接光が読む)がグラフ上に現れない状態を残したくない。
+<code>BufferReads</code>/<code>BufferWrites</code>を追加し、テクスチャ側と同じ手順で辺を張っている。
+</p>
+<p>
+あわせて、ライトバッファの<code>UpdateBuffer</code>を<strong>グラフ構築前の1箇所に集約</strong>した。
+以前は直接光パスと半透明パスの中でそれぞれ呼んでいたが、カリングパスが両者より先に
+このバッファを読むようになったため、パス内での更新では間に合わない(更新回数が2回から1回に減る
+副次的な効果もある)。
+</p>
+
+<h3>18.12 デバッグ表示(<code>DebugView::LightTiles</code>)</h3>
+<p>
+ライトグリッドは構造化バッファなので<code>Present.hlsl</code>の<code>SourceTexture</code>(t0)では
+受け取れず、専用のt3から読む(Mode 11)。タイルあたりのライト数を
+黒(0灯)→青→緑→赤のヒートマップで示し、<strong>容量超過のタイルはマゼンタ</strong>で塗る。
+色は「数が読める」ことより「異常が目立つ」ことを優先している。
+赤に振り切る基準のライト数は容量(64)ではなく別のつまみにしてある。実データは数灯程度で、
+容量を基準にするとほぼ真っ青になって差が読めないため。
+</p>
+
+<h3>18.13 半透明パスは対象外</h3>
+<p>
+<code>Transparent.hlsl</code>はb1が<code>ObjectConstants</code>で埋まっておりタイル定数を渡せないため、
+<code>FrameConstants.ActiveLightCount</code>経由で全ライトをループする現状のままとした(15.6節の設計)。
+SSSもカリングも不透明パスのみに適用される。半透明パスはt5〜t7が空いているので、
+深度バッファを追加バインドして同じ共有ヘッダーをincludeすれば追い足せる。
+</p>
+
+<h3>18.14 検証</h3>
+<ul>
+<li><strong>影が出ること</strong>: Light Testのモデル(床+壁+粗さ違いの球)を、太陽を切って
+ポイント/スポットだけで照らし、AOも切って交絡を除いた状態で確認した。
+球と床の接地部に接触影が出て、Screen-Space ShadowsをOFFにすると球が浮いた見た目に戻る。</li>
+<li><strong>カリングが見た目を変えないこと</strong>: 同一シーン・同一カメラでカリングON/OFFの
+スクリーンショットを撮り、3Dビューポート領域の<strong>122,120画素を比較して差0画素・
+最大チャンネル差0</strong>(完全一致)を確認した。OFF時にProfilerから<code>LightCull</code>パスが
+消えることも併せて確認し、トグルが実際に効いていることを担保している。</li>
+<li><strong>ヒートマップ</strong>: ライトの配置と整合する分布(壁面=1灯の青、両方のライトが届く
+床の手前=2灯の緑寄り)になることを確認した。</li>
+<li><strong>DX11/DX12</strong>: 両バックエンドで同一シーンを表示し、<code>LightCull</code>パスが動作して
+同じ見た目になることを確認した。</li>
+<li><strong>容量超過の警告</strong>: 64灯を配置したシーン(モデル埋め込みの2灯と合わせて66灯)で、
+容量(64)超過の条件を検出した警告ログが1度だけ出ることを確認した。</li>
+</ul>
+<p>
+<strong>性能については有意な差を測れていない</strong>。64灯を20x20の床へ分散させたシーンを
+1280x720・Debugビルドで測ったが、フレーム全体が1ms前後で固定オーバーヘッドに支配されており、
+カリングON/OFFの差は実行ごとのばらつき(GPU Frame Timeが0.6〜1.9msの範囲で揺れる)に埋もれる。
+<code>LightCull</code>パス自体のCPU時間が約0.01msであることまでは確認できたが、
+「カリングによってDirectLightが速くなる」ことを数値で示すには、Releaseビルドと
+ライティングパスが実際にボトルネックになるシーン(高解像度・Rangeの大きいライトを多数重ねる)が要る。
+現時点で言えるのは<strong>正しさ(見た目が変わらない)を確認済みで、速度の利得は未計測</strong>という状態である。
+</p>
 </section>
 
 </main>

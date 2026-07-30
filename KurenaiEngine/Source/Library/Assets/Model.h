@@ -61,6 +61,16 @@ namespace Kurenai::Assets
         float SpotInnerConeAngle = 0.4f;          // ラジアン(軸からの半角)。Spot のみ
         float SpotOuterConeAngle = 0.6f;
         bool Enabled = true;
+        // このライトがスクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)を落とすか。
+        // ピクセルあたりのシャドウレイ数には上限があるため、影を出したいライトへ予算を回せるよう
+        // ライト単位で切れるようにしてある。
+        //
+        // 【永続化しない】このフラグは .kmodelcache の CachedLightRecord(POD)には含めない。
+        // 含めるとレコードのレイアウトが変わり kPackageVersion の更新と全アセットの再パックが
+        // 必要になるが、得られるのは「モデルファイルに埋め込まれたライトごとの既定値」だけで
+        // 見合わない。モデル由来のライトは常にこの既定値(true)で読み込まれ、
+        // .kscene の [Light] セクション(テキスト形式)と ImGui で上書きする運用とする
+        bool CastShadow = true;
         std::string Name;                         // aiLight::mName 由来。ImGui 一覧の表示に使う
     };
 

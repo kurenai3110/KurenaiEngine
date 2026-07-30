@@ -217,6 +217,11 @@ namespace Kurenai
             float ArraySlice; // Mode==10(シャドウマップ配列)で表示する配列スライス(=カスケード番号)
             // デバッグ表示の輝度倍率(m_DebugViewGain)。色として表示するMode 0/3/4にだけ効く
             float Gain;
+            // Mode==11(タイルライトカリングのヒートマップ)専用。
+            // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数
+            DirectX::XMFLOAT4 TileParams;
+            // Mode==11専用。xy=レンダー解像度(UVからタイル座標を求めるのに使う), zw=未使用
+            DirectX::XMFLOAT4 TileRenderSize;
         };
 
         // Tonemap.hlsl側のcbuffer TonemapConstantsと一致させる必要がある
@@ -322,7 +327,9 @@ namespace Kurenai
             DirectX::XMFLOAT4 PositionType;   // xyz=ワールド座標, w=LightType
             DirectX::XMFLOAT4 ColorRange;     // rgb=露出済み放射輝度, w=Range
             DirectX::XMFLOAT4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
-            DirectX::XMFLOAT4 Params;         // x=spotAngleOffset, yzw=未使用(エリアライト用に予約)
+            // x=spotAngleOffset, y=CastShadow(1でスクリーンスペースシャドウを撃つ / 0で撃たない),
+            // zw=未使用(エリアライト用に予約)
+            DirectX::XMFLOAT4 Params;
         };
         static_assert(sizeof(GPULight) == 64, "GPULightはDirectLighting.hlsl側と64バイトで一致させる必要がある");
 
@@ -331,10 +338,48 @@ namespace Kurenai
         // (シェーダはLightCount.xまでしかループしないため)
         constexpr uint32_t kMaxLights = 1024;
 
-        // DirectLighting.hlsl側のcbuffer LightingConstantsと一致させる必要がある
+        // DirectLighting.hlsl側のcbuffer LightingConstantsと一致させる必要がある。
+        // b0はFrameConstantsが使っており定数バッファスロットは2本しか無いため、
+        // 直接光パス固有のパラメータはすべてここへ足していく
         struct alignas(16) LightingConstants
         {
-            DirectX::XMUINT4 LightCount; // x=有効ライト数, yzw=未使用
+            // x=有効ライト数, y=ピクセルあたりに撃つスクリーンスペースシャドウのレイ数の上限, zw=未使用
+            DirectX::XMUINT4 LightCount;
+            // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)のパラメータ。
+            // x=レイマーチのステップ数, y=最大レイ長(ワールド単位), z=遮蔽とみなす深度差の上限(thickness),
+            // w=有効フラグ(0で無効)
+            DirectX::XMFLOAT4 SSSParams0;
+            // x=深度リニアライズ定数a, y=同b(viewZ = b / (depth - a))、
+            // z=レイ始点の法線方向への押し出し量(View空間深度に比例させる係数)、w=画面端フェード幅(UV)
+            DirectX::XMFLOAT4 SSSParams1;
+            // タイルライトカリング(LightCulling.hlsl)のパラメータ。
+            // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=カリング有効フラグ
+            DirectX::XMUINT4 TileParams;
+        };
+
+        // タイルライトカリングのタイルサイズ(1辺のピクセル数)。
+        // LightCulling.hlsl の kTileSize および numthreads と必ず一致させること
+        constexpr uint32_t kLightTileSize = 16;
+
+        // 1タイルが保持できるライト数の上限。LightCulling.hlsl の kMaxLightsPerTile および
+        // DirectLighting.hlsl の同名の定数と必ず一致させること(バッファのストライドがこの値で決まる)。
+        // HLSL側はgroupshared配列のサイズに使うためコンパイル時定数である必要があり、
+        // C++からの受け渡しでは代用できないので、3箇所で同じ値を書く形になっている
+        constexpr uint32_t kLightTileCapacity = 64;
+
+        // ライトグリッド1タイルぶんの要素数(先頭1個がライト数、残りがライトインデックス)
+        constexpr uint32_t kLightTileStride = 1 + kLightTileCapacity;
+
+        // LightCulling.hlsl側のcbuffer LightCullingConstantsと一致させる必要がある
+        struct alignas(16) LightCullingConstants
+        {
+            DirectX::XMFLOAT4X4 View;
+            // x=タイル数X, y=タイル数Y, z=有効ライト数, w=1タイルあたりの容量
+            DirectX::XMUINT4 TileParams;
+            // x=レンダー解像度の幅, y=同 高さ, zw=未使用
+            DirectX::XMUINT4 RenderSize;
+            // x=射影行列の(0,0)成分, y=同(1,1)成分, z=深度リニアライズ定数a, w=同b
+            DirectX::XMFLOAT4 ProjParams;
         };
 
         // Assets::LightをGPU側のGPULightへ変換する。カンデラ/ルクスの測光量にEV100露出を直接掛けて
@@ -360,7 +405,10 @@ namespace Kurenai
                 angleOffset = -cosOuter * angleScale;
             }
             gpuLight.DirectionAngle = { light.Direction[0], light.Direction[1], light.Direction[2], angleScale };
-            gpuLight.Params = { angleOffset, 0.0f, 0.0f, 0.0f };
+            // Params.y = このライトがスクリーンスペースシャドウを落とすか。ライトごとに切れるようにしてあるのは、
+            // ピクセルあたりのシャドウレイ数に上限(LightingConstants.LightCount.y)があり、
+            // 「影を出したいライト」に予算を回せるようにするため
+            gpuLight.Params = { angleOffset, light.CastShadow ? 1.0f : 0.0f, 0.0f, 0.0f };
             return gpuLight;
         }
 
@@ -679,6 +727,20 @@ namespace Kurenai
         hizConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         hizConstantBufferDesc.SizeInBytes = sizeof(HiZConstants);
         m_HiZConstantBuffer = m_Device->CreateBuffer(hizConstantBufferDesc);
+
+        // タイルライトカリングパス(コンピュートシェーダー)。タイルごとに届くライトのインデックスリストを作る。
+        // ライトグリッド本体(m_LightTileBuffer)は解像度に依存するためCreateRenderTargetsで作る
+        RHI::ShaderDesc lightCullingCsDesc;
+        lightCullingCsDesc.Stage = RHI::ShaderStage::Compute;
+        lightCullingCsDesc.FilePath = shaderDirectory + L"LightCulling.hlsl";
+        lightCullingCsDesc.EntryPoint = "CSMain";
+        m_LightCullingComputeShader = m_Device->CreateShader(lightCullingCsDesc);
+        m_LightCullingPipelineState = m_Device->CreateComputePipelineState({ m_LightCullingComputeShader.get() });
+
+        RHI::BufferDesc lightCullingConstantBufferDesc;
+        lightCullingConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        lightCullingConstantBufferDesc.SizeInBytes = sizeof(LightCullingConstants);
+        m_LightCullingConstantBuffer = m_Device->CreateBuffer(lightCullingConstantBufferDesc);
 
         // SSRパス(頂点バッファなしのフルスクリーン三角形。SceneColorとG-Bufferから鏡面反射を計算し加算する)
         RHI::ShaderDesc ssrVsDesc;
@@ -1065,6 +1127,18 @@ namespace Kurenai
             m_HiZMipLevels = ComputeMipLevelCount(width, height);
             m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
             m_HiZDebugMipLevel = 0;
+
+            // タイルライトカリングのライトグリッド。タイル数は解像度に依存するためここで作り直す。
+            // 端のタイルは部分的にしか埋まらないので切り上げる
+            m_LightTileCountX = (width + kLightTileSize - 1) / kLightTileSize;
+            m_LightTileCountY = (height + kLightTileSize - 1) / kLightTileSize;
+            RHI::BufferDesc lightTileBufferDesc;
+            lightTileBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+            lightTileBufferDesc.SizeInBytes =
+                static_cast<uint32_t>(sizeof(uint32_t)) * kLightTileStride * m_LightTileCountX * m_LightTileCountY;
+            lightTileBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+            m_LightTileBuffer = m_Device->CreateBuffer(lightTileBufferDesc);
+            m_LightTileOverflowLogged = false;
 
             // ブルームのピラミッド。第0段が半解像度で、以降1段ごとに半分になる。
             // 1x1まで落とさず段数を固定しているのは、これ以上小さくしても裾の広がりが
@@ -1623,11 +1697,12 @@ namespace Kurenai
             "IBL - Prefiltered Specular (Cubemap Mip Chain, Look Around)",
             "IBL - BRDF LUT (X=NdotV, Y=Roughness)",
             "Bloom (Pyramid Top, Half Res)",
+            "Light Tiles (Lights per Tile Heatmap)",
         };
         // DebugView enumと並びが一致していないと表示と実際のバッファがずれる
         static_assert(
-            static_cast<int>(DebugView::Bloom) == 18,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はBloom)");
+            static_cast<int>(DebugView::LightTiles) == 19,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はLightTiles)");
 
         int currentIndex = static_cast<int>(m_DebugView);
         if (ImGui::Combo("View", &currentIndex, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames)))
@@ -1648,6 +1723,18 @@ namespace Kurenai
         if (m_DebugView == DebugView::IBLPrefilter)
         {
             ImGui::SliderInt("Prefilter Mip Level", &m_IBLPrefilterDebugMipLevel, 0, static_cast<int>(kIBLPrefilterMipLevels) - 1);
+        }
+
+        if (m_DebugView == DebugView::LightTiles)
+        {
+            // ヒートマップの色: 黒=0灯、青=少ない、緑、赤=Heatmap Max以上、マゼンタ=タイル容量超過。
+            // ImGuiのフォントはASCIIのみなので英語で書く
+            ImGui::TextWrapped("black=0, blue -> green -> red = more lights, magenta = tile capacity exceeded");
+            ImGui::SliderInt("Heatmap Max Lights", &m_LightTileHeatmapMax, 1, static_cast<int>(kLightTileCapacity));
+            if (!m_LightCullingEnabled)
+            {
+                ImGui::TextWrapped("Tiled Light Culling is disabled - the grid is not being updated.");
+            }
         }
 
         // AO/GIバッファの間接拡散光のように値が小さいバッファ(暗い室内では0.02〜0.1程度)は
@@ -1809,7 +1896,47 @@ namespace Kurenai
                     light.SpotInnerConeAngle = DirectX::XMConvertToRadians(innerDegrees);
                     light.SpotOuterConeAngle = DirectX::XMConvertToRadians(outerDegrees);
                 }
+
+                // このライトがスクリーンスペースシャドウを落とすか。ピクセルあたりのシャドウレイ数には
+                // 上限(Max Shadowed Lights)があるため、影を出したいライトへ予算を回すのに使う
+                ImGui::Checkbox("Cast Shadow", &light.CastShadow);
             }
+        }
+
+        if (ImGui::CollapsingHeader("Screen-Space Shadows"))
+        {
+            // ImGuiのフォントは既定のProggyClean(ASCIIのみ)で日本語グリフを持たないため、
+            // 画面に出す文字列はASCIIで書く(日本語を渡すと "????" に化ける。実機で確認済み)
+            ImGui::TextWrapped(
+                "Shadows for point / spot lights, without shadow maps. Rays are marched through the "
+                "depth buffer toward each light, so occluders that are not visible on screen "
+                "(off-screen, or hidden behind a closer surface) cast no shadow. "
+                "The result is contact / mid-range occlusion rather than full shadowing.");
+            ImGui::Checkbox("Enable##SSS", &m_ScreenSpaceShadowEnabled);
+            ImGui::BeginDisabled(!m_ScreenSpaceShadowEnabled);
+            // 上限はScreenSpaceShadow.hlsliのkSSSMaxStepCountと揃える
+            ImGui::SliderInt("Steps", &m_ScreenSpaceShadowStepCount, 1, 64);
+            ImGui::SliderFloat(
+                "Max Ray Length", &m_ScreenSpaceShadowMaxRayLength, 0.05f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat(
+                "Thickness##SSS", &m_ScreenSpaceShadowThickness, 0.01f, 5.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat(
+                "Normal Bias##SSS", &m_ScreenSpaceShadowNormalBias, 0.0f, 0.02f, "%.4f");
+            ImGui::SliderFloat("Edge Fade##SSS", &m_ScreenSpaceShadowEdgeFade, 0.01f, 0.5f, "%.3f");
+            // 0にすると全ライトで影が消える。ライトを増やしたときのコスト上限を決めるつまみ
+            ImGui::SliderInt("Max Shadowed Lights", &m_ScreenSpaceShadowMaxLightsPerPixel, 0, 16);
+            ImGui::EndDisabled();
+        }
+
+        if (ImGui::CollapsingHeader("Tiled Light Culling"))
+        {
+            ImGui::TextWrapped(
+                "Splits the screen into 16x16 pixel tiles and builds a per-tile list of the lights that "
+                "reach it, so the lighting pass loops over the lights in the tile instead of every light "
+                "in the scene. This is a pure optimization: the image must not change when it is toggled. "
+                "Use the Light Tiles debug view to inspect the grid.");
+            ImGui::Checkbox("Enable##LightCulling", &m_LightCullingEnabled);
+            ImGui::Text("Tiles: %u x %u (%u per tile max)", m_LightTileCountX, m_LightTileCountY, kLightTileCapacity);
         }
 
         ImGui::End();
@@ -2194,6 +2321,22 @@ namespace Kurenai
             }
         }
 
+        // タイルライトカリングの1タイルあたりの容量超過の可能性を早めに知らせる。
+        // 実際に超過したかどうかはGPU側にしか無く(バッファのリードバック経路がRHIに無い)、
+        // ここで分かるのは「シーンのライト数が容量を超えているので、1つのタイルに集中すれば
+        // 超過し得る」という条件までである。実際の超過はデバッグ表示(DebugView::LightTiles)の
+        // マゼンタで確認する
+        if (m_LightCullingEnabled && gpuLights.size() > kLightTileCapacity && !m_LightTileOverflowLogged)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "有効ライト数(" + std::to_string(gpuLights.size()) + ")がタイルの容量(" +
+                    std::to_string(kLightTileCapacity) +
+                    ")を超えています。1タイルへ集中した場合そのタイルではライトが欠落します"
+                    "(Render TargetsのLight Tiles表示でマゼンタのタイルとして確認できます)");
+            m_LightTileOverflowLogged = true;
+        }
+
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = frameState.Camera.GetViewMatrix() * frameState.Camera.GetProjectionMatrix();
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
@@ -2234,6 +2377,58 @@ namespace Kurenai
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
         constants.IBLParams = { m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
+
+        // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
+        // 復元するための定数。Camera::GetProjectionMatrixの射影行列(行ベクトル規約)は
+        // clip.z = viewZ * a + b、clip.w = viewZ なので depth = a + b / viewZ となり、
+        // 逆に解いて viewZ = b / (depth - a)。近平面・遠平面から直接組み立てず射影行列の要素を
+        // 読むのは、Reverse-Zの組み方が変わっても自動的に追従させるため
+        // (XMFLOAT4X4の_rcは1始まりの行・列なので、_33が行2列2=a、_43が行3列2=b)
+        DirectX::XMFLOAT4X4 projectionForDepthLinearize;
+        DirectX::XMStoreFloat4x4(&projectionForDepthLinearize, frameState.Camera.GetProjectionMatrix());
+        const float depthLinearizeA = projectionForDepthLinearize._33;
+        const float depthLinearizeB = projectionForDepthLinearize._43;
+
+        // 直接光パスのb1へ渡すスクリーンスペースシャドウのパラメータ。パスのラムダから
+        // 値キャプチャできるようここで組み立てておく
+        LightingConstants lightingConstants{};
+        lightingConstants.LightCount =
+        {
+            static_cast<uint32_t>(gpuLights.size()),
+            static_cast<uint32_t>(std::max(0, m_ScreenSpaceShadowMaxLightsPerPixel)),
+            0u,
+            0u,
+        };
+        lightingConstants.SSSParams0 =
+        {
+            static_cast<float>(m_ScreenSpaceShadowStepCount),
+            m_ScreenSpaceShadowMaxRayLength,
+            m_ScreenSpaceShadowThickness,
+            m_ScreenSpaceShadowEnabled ? 1.0f : 0.0f,
+        };
+        lightingConstants.SSSParams1 =
+        {
+            depthLinearizeA,
+            depthLinearizeB,
+            m_ScreenSpaceShadowNormalBias,
+            m_ScreenSpaceShadowEdgeFade,
+        };
+        lightingConstants.TileParams =
+        {
+            m_LightTileCountX,
+            kLightTileSize,
+            kLightTileCapacity,
+            m_LightCullingEnabled ? 1u : 0u,
+        };
+
+        // ライトリストの中身の更新。以前は直接光パスと半透明パスの中でそれぞれ呼んでいたが、
+        // タイルライトカリングパスが両者より先にこのバッファを読むようになったため、
+        // グラフを組み立てる前に1箇所でまとめて済ませる(2回の更新が1回に減る副次的な効果もある)。
+        // 0灯のフレームでは更新自体を省略してよい(シェーダはライト数までしかループしないため)
+        if (!gpuLights.empty())
+        {
+            commandList->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
+        }
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
         // トランジェントリソースの確保は行わず、既存の永続確保済みテクスチャ(G-Buffer・SceneColor等)を
@@ -2498,6 +2693,55 @@ namespace Kurenai
             },
         });
 
+        // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
+        //     インデックスリストをコンピュートシェーダーで作る。直接光パスはそのリストだけをループする。
+        //     BufferReads/BufferWritesを宣言しているのは、このパスと直接光パスがどちらもm_GBufferDepthを
+        //     Readsするだけの「読み手同士」で、テクスチャの依存だけでは両者の間に順序が張られないため ---
+        if (m_LightCullingEnabled)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "LightCull",
+                .Reads = { m_GBufferDepth.get() },
+                .BufferReads = { m_LightBuffer.get() },
+                .BufferWrites = { m_LightTileBuffer.get() },
+                .Execute = [this, &gpuLights, &frameState](RHI::IRHICommandList* cmd)
+                {
+                    LightCullingConstants cullingConstants{};
+                    DirectX::XMStoreFloat4x4(
+                        &cullingConstants.View, DirectX::XMMatrixTranspose(frameState.Camera.GetViewMatrix()));
+                    cullingConstants.TileParams =
+                    {
+                        m_LightTileCountX,
+                        m_LightTileCountY,
+                        static_cast<uint32_t>(gpuLights.size()),
+                        kLightTileCapacity,
+                    };
+                    cullingConstants.RenderSize = { m_RenderWidth, m_RenderHeight, 0u, 0u };
+
+                    // タイル錐台の側面を組み立てるのに射影行列の(0,0)/(1,1)成分が要る。
+                    // 深度リニアライズ定数(z/w)は直接光パスへ渡しているものと同じ
+                    DirectX::XMFLOAT4X4 projection;
+                    DirectX::XMStoreFloat4x4(&projection, frameState.Camera.GetProjectionMatrix());
+                    cullingConstants.ProjParams =
+                    {
+                        projection._11,
+                        projection._22,
+                        projection._33,
+                        projection._43,
+                    };
+
+                    cmd->UpdateBuffer(m_LightCullingConstantBuffer.get(), &cullingConstants, sizeof(cullingConstants));
+
+                    cmd->SetComputePipelineState(m_LightCullingPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_LightCullingConstantBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(0, m_LightBuffer.get());
+                    cmd->SetComputeTexture(1, m_GBufferDepth.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_LightTileBuffer.get());
+                    cmd->Dispatch(m_LightTileCountX, m_LightTileCountY, 1);
+                },
+            });
+        }
+
         // --- 直接光パス: G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         //     計算しHDRで書き出す(常に指定した内部解像度)。DeferredLighting/SSILの両方から読まれる ---
         graph.AddPass(Core::RenderGraphPassDesc{
@@ -2511,15 +2755,13 @@ namespace Kurenai
                 m_BRDFLUTTexture.get(),
             },
             .RenderTargets = { m_DirectLightTexture.get() },
-            .Execute = [this, &gbufferViewport, &gpuLights](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, &gpuLights, &lightingConstants](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
                 cmd->SetPipelineState(m_DirectLightPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
 
-                LightingConstants lightingConstants{};
-                lightingConstants.LightCount = { static_cast<uint32_t>(gpuLights.size()), 0u, 0u, 0u };
                 // UpdateBufferはSetConstantBufferより前に呼ぶ必要がある。DX12の定数バッファは
                 // リングバッファで、GetGPUVirtualAddress()が現在のリングスロットのアドレスを返すため
                 cmd->UpdateBuffer(m_LightingConstantBuffer.get(), &lightingConstants, sizeof(lightingConstants));
@@ -2534,12 +2776,11 @@ namespace Kurenai
 
                 // ライトが1つも無いフレームでもSetShaderResourceBufferは必ず呼ぶ(SetPipelineStateが
                 // 毎回ルート引数を無効化するため、シェーダが宣言しているリソースを未バインドのまま
-                // Drawすることになってしまう)。UpdateBuffer自体は0灯なら省略してよい
-                if (!gpuLights.empty())
-                {
-                    cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
-                }
+                // Drawすることになってしまう)。バッファの中身の更新はグラフ構築前に1回だけ済ませてある
                 cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+                // タイルライトカリングが書いたライトグリッド。カリング無効時もシェーダが宣言している
+                // リソースは必ずバインドする(上と同じ理由)
+                cmd->SetShaderResourceBuffer(5, m_LightTileBuffer.get());
                 // スペキュラのエネルギー補正(14.9節)用のBRDF積分LUT。t8はライトリスト
                 // (StructuredBuffer)が占有しているためt9に置く
                 cmd->SetTexture(9, m_BRDFLUTTexture.get());
@@ -2709,10 +2950,8 @@ namespace Kurenai
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetSamplerSet(m_MaterialSamplers.get());
 
-                if (!gpuLights.empty())
-                {
-                    cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
-                }
+                // ライトバッファの中身の更新はグラフ構築前に1回だけ済ませてある
+                // (タイルライトカリングパスがこのパスより先に読むため、パス内で更新できない)
 
                 // メッシュによらずパス全体で共通のテクスチャはここで一度だけバインドする。
                 // テクスチャのバインドは上書きするまで維持されるため(IRHICommandList::SetTexture参照)、
@@ -3082,10 +3321,33 @@ namespace Kurenai
                 presentSourceHeight = m_BloomLevelSizes[0].y;
             }
             break;
+        case DebugView::LightTiles:
+            // ライトグリッドは構造化バッファなのでSourceTexture(t0)では受け取れず、専用のt3から読む
+            // (Present.hlsl Mode 11)。t0には何かをバインドしておく必要があるため、
+            // 解像度だけ合わせてm_TonemapTextureをそのまま渡す(Mode 11では読まれない)
+            presentSourceTexture = m_TonemapTexture.get();
+            presentMode = 11;
+            break;
         }
 
         PresentConstants presentConstants{};
         presentConstants.Mode = presentMode;
+        presentConstants.TileParams =
+        {
+            static_cast<float>(m_LightTileCountX),
+            static_cast<float>(kLightTileSize),
+            static_cast<float>(kLightTileCapacity),
+            // ヒートマップで赤に振り切る基準のライト数。容量そのものを基準にすると
+            // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
+            static_cast<float>(std::max(1, m_LightTileHeatmapMax)),
+        };
+        presentConstants.TileRenderSize =
+        {
+            static_cast<float>(m_RenderWidth),
+            static_cast<float>(m_RenderHeight),
+            0.0f,
+            0.0f,
+        };
         if (m_DebugView == DebugView::IBLPrefilter)
         {
             presentConstants.MipLevel = static_cast<float>(m_IBLPrefilterDebugMipLevel);
@@ -3112,6 +3374,8 @@ namespace Kurenai
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Present",
             .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture },
+            // DebugView::LightTilesでライトグリッドを読むため、カリングパスより後に順序付ける
+            .BufferReads = { m_LightTileBuffer.get() },
             .SwapChainTarget = m_SwapChain.get(),
             .Execute = [this, &letterboxViewport, presentSourceTexture, presentDebugCubeTexture,
                         presentDebugArrayTexture](RHI::IRHICommandList* cmd)
@@ -3127,6 +3391,9 @@ namespace Kurenai
                 cmd->SetTexture(0, presentSourceTexture);
                 cmd->SetTexture(1, presentDebugCubeTexture);
                 cmd->SetTexture(2, presentDebugArrayTexture);
+                // Mode 11(ライトグリッドのヒートマップ)以外でも、シェーダが宣言しているリソースは
+                // 必ずバインドする(SetPipelineStateが毎回ルート引数を無効化するため)
+                cmd->SetShaderResourceBuffer(3, m_LightTileBuffer.get());
                 cmd->Draw(3, 0);
             },
         });
