@@ -298,8 +298,12 @@ namespace Kurenai
         bool m_AutoExposureEnabled = true;
         // 露出のクランプ範囲(EV100)。ヒストグラムのビン割りもこの範囲で行うため、
         // 実シーンの輝度がこの外に出ると端に張り付く
-        float m_AutoExposureMinEV100 = 0.0f;
-        float m_AutoExposureMaxEV100 = 16.0f;
+        // 下限-6は月夜の地表(反射率0.2の面で約0.016 cd/m^2 = EV100約-3)を余裕をもって含む値。
+        // 星明かりだけの夜まで追うならさらに下げる必要があるが、実写の夜景もEV -3〜-5程度で
+        // 撮るのが普通なので実用上はここで足りる。
+        // 上限18は、正規化後の昼の空(約6400 cd/m^2 = EV100約15.6)に余裕を持たせた値
+        float m_AutoExposureMinEV100 = -6.0f;
+        float m_AutoExposureMaxEV100 = 18.0f;
         // 明順応(暗→明)と暗順応(明→暗)の速度。人間の目は暗順応のほうが遅いため既定値も分けている
         float m_AutoExposureSpeedUp = 3.0f;
         float m_AutoExposureSpeedDown = 1.0f;
@@ -589,6 +593,25 @@ namespace Kurenai
         // 実在の写真露出値(EV100)。太陽・環境光・ポイント/スポットライトすべてに同じ値がかかる、
         // シーン全体で単一の露出設定(詳細はdocs/Architecture.html参照)
         float m_SceneExposureEV100 = 15.0f;
+
+        // 実際にライト強度へ事前乗算される「実効プリ露出」。m_SceneExposureEV100(ユーザー設定)に
+        // 時刻由来のバイアスを足したもので、Renderスレッドのみが読み書きする。
+        //
+        // 【なぜ可変にする必要があるか】
+        // プリ露出をEV100=15固定のままだと夜がfp16でつぶれる。満月の照度は0.25lxで、
+        // 反射率0.2の面の輝度は 0.25*0.2/π = 0.016 cd/m^2。これに ComputeExposure(15)=2.54e-5 を
+        // 掛けると 4.0e-7 となり、SceneColor(R16G16B16A16_Float、最小正規化数6.1e-5)の
+        // 非正規化域へ落ちて情報が失われる。AutoExposure.hlsl も輝度1e-6未満の画素は
+        // ヒストグラムに数えないため、露出計にも乗らず復元できない。
+        //
+        // M7で導入したプリ露出方式は Tonemap・Bloom・AutoExposure がすべて同じ値を受け取って
+        // 割り戻す構造になっているため、**フレーム単位で変えても最終的な絵は変わらない**。
+        // その性質をそのまま利用して、バッファの数値レンジだけを健全に保つ
+        float m_EffectiveExposureEV100 = 15.0f;
+        // 実効プリ露出が初期化済みか(初回フレームは平滑化せず即座に合わせる)
+        bool m_EffectiveExposureInitialized = false;
+        // 実効プリ露出の時間平滑化の速さ[1/秒]。段付きを防ぐために指数追従させる
+        float m_EffectiveExposureAdaptSpeed = 2.0f;
 
         // RenderSceneSwitchUI(Renderスレッド)でシーン切り替えボタンが押されたときに書き込まれ、
         // UpdateSceneSwitch(Updateスレッド)が毎フレーム読み取って消費する1要素の受け渡し用。

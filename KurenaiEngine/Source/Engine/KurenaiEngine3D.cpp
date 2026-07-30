@@ -92,11 +92,11 @@ namespace Kurenai
             float SkyIlluminanceLux;
             // 薄明係数(仰角[-15°,+15°] = 時刻でちょうど5-7時/17-19時)
             float TwilightFactor;
-            // 太陽が「ある」向き(= -Direction)。手続き空(SkyGenerate.hlsl)がPerez分布の
-            // circumsolar項の基準に使う。光が進む向きと符号が逆なので取り違えないよう別に持つ
+            // 太陽が「ある」向き。手続き空(SkyGenerate.hlsl)がPerez分布のcircumsolar項の
+            // 基準に使う。月が支配的なときも**常に太陽の位置**であることに注意
             DirectX::XMFLOAT3 SunPosition;
-            // このフレームの露出係数(ComputeExposureの結果)。手続き空の天頂輝度に掛ける
-            float SkyExposure;
+            // このフレームのキーとなる照度[lx]。可変プリ露出の基準になる
+            float KeyIlluminanceLux;
         };
 
         // 直射日光(正午・快晴)の照度[lx]。Lagarde & de Rousiers 2014の照度参照テーブルに
@@ -239,7 +239,10 @@ namespace Kurenai
             return 1.0f / (1.2f * std::pow(2.0f, ev100));
         }
 
-        SunLighting ComputeSunLighting(float timeOfDayHours, float sunAzimuthDegrees, float exposureEV100)
+        // 太陽・月・空の状態を時刻から求める。
+        // **露出は一切掛けない**(すべて絶対的な測光量[lx]のまま返す)。露出はこの結果から
+        // 決まる実効EV100を使ってRender()側で掛ける(可変プリ露出。KurenaiEngine3D.h参照)
+        SunLighting ComputeSunLighting(float timeOfDayHours, float sunAzimuthDegrees)
         {
             using namespace DirectX;
 
@@ -302,8 +305,6 @@ namespace Kurenai
             // (物理値ではないことを明記した上での意図的な妥協)
             const XMFLOAT3 kNightAmbientArt{ 0.006f, 0.008f, 0.015f };
 
-            const float exposure = ComputeExposure(exposureEV100);
-
             // === 平行光源1枠を太陽と月で共有し、支配的な方を選ぶ ===
             // 太陽10万lx と満月0.25lx は40万倍違うので、両者の照度が入れ替わるのは
             // 実質的に仰角0度ちょうどの一点だけ。そこでは SunFactor も MoonFactor も
@@ -314,7 +315,7 @@ namespace Kurenai
             const float moonIlluminance = kMoonIlluminanceLux * moonFactor;
             result.DominantIsSun = (sunIlluminance >= moonIlluminance);
 
-            const float dominantPeak = (result.DominantIsSun ? sunIlluminance : moonIlluminance) * exposure;
+            const float dominantPeak = result.DominantIsSun ? sunIlluminance : moonIlluminance;
             const XMFLOAT3& dominantTint = result.DominantIsSun ? kSunColorTint : kMoonColorTint;
             result.Color = {
                 dominantTint.x * dominantPeak, dominantTint.y * dominantPeak, dominantTint.z * dominantPeak, 0.0f
@@ -329,13 +330,15 @@ namespace Kurenai
             // 非IBLフォールバック用の定数色アンビエント(Enable IBL 無効時のみ使われる)。
             // 昼度は薄明係数をそのまま使う
             const float dayFactor = twilightFactor;
-            const float skyPeak = kSkylightIlluminanceLux * exposure;
+            const float skyPeak = kSkylightIlluminanceLux;
             const XMFLOAT3 dayAmbient{ kSunColorTint.x * skyPeak, kSunColorTint.y * skyPeak, kSunColorTint.z * skyPeak };
+            // 夜間の下限値もここでは絶対値のまま持つ(露出はRender()側で掛ける)
+            const float kNightAmbientScale = kMoonSkyIlluminanceLux;
             result.Ambient =
             {
-                kNightAmbientArt.x + (dayAmbient.x - kNightAmbientArt.x) * dayFactor,
-                kNightAmbientArt.y + (dayAmbient.y - kNightAmbientArt.y) * dayFactor,
-                kNightAmbientArt.z + (dayAmbient.z - kNightAmbientArt.z) * dayFactor,
+                kNightAmbientArt.x * kNightAmbientScale + (dayAmbient.x - kNightAmbientArt.x * kNightAmbientScale) * dayFactor,
+                kNightAmbientArt.y * kNightAmbientScale + (dayAmbient.y - kNightAmbientArt.y * kNightAmbientScale) * dayFactor,
+                kNightAmbientArt.z * kNightAmbientScale + (dayAmbient.z - kNightAmbientArt.z * kNightAmbientScale) * dayFactor,
                 dayFactor,
             };
 
@@ -350,7 +353,11 @@ namespace Kurenai
             // 空生成が使うのは**常に太陽の位置**(月が支配的でもPerez分布の基準は太陽のまま)。
             // result.Direction は支配ライトの向きなので、そこから逆算してはいけない
             result.SunPosition = sunDirection;
-            result.SkyExposure = exposure;
+
+            // このフレームの「キーとなる照度」。可変プリ露出の基準にする(Render()参照)。
+            // 支配ライトと空の両方を足すのは、太陽が沈んだ直後のように
+            // 直接光がほぼ0でも空がまだ明るい時間帯を正しく拾うため
+            result.KeyIlluminanceLux = std::max(sunIlluminance, moonIlluminance) + result.SkyIlluminanceLux;
 
             return result;
         }
@@ -2377,7 +2384,37 @@ namespace Kurenai
         m_GPUProfiler->BeginFrame();
         m_CPUProfiler.BeginFrame();
 
-        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay, m_SunAzimuthDegrees, m_SceneExposureEV100);
+        // 太陽・月・空の状態を求める(すべて絶対的な測光量[lx]。露出はまだ掛かっていない)
+        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay, m_SunAzimuthDegrees);
+
+        // === 可変プリ露出の決定 ===
+        // 昼(直射日光10万lx)を基準0として、そのフレームのキー照度が何段暗いかを求め、
+        // ユーザー設定のEV100へ足す。これによりHDRバッファへ流れる値のレンジが
+        // 昼でも夜でもおおむね一定に保たれ、夜がfp16でつぶれなくなる
+        // (詳細な理由はm_EffectiveExposureEV100の宣言コメント)。
+        // 露出はTonemap/Bloom/AutoExposureが同じ値で割り戻すため、これを動かしても絵は変わらない
+        {
+            const float keyIlluminance = std::max(sunLighting.KeyIlluminanceLux, 1e-6f);
+            const float autoBias = std::log2(keyIlluminance / kSunIlluminanceLux);
+            // 下限-18段は満月の夜(キー照度0.3lx前後)がちょうど収まる範囲。
+            // 上限0段は「昼より明るくはしない」の意味
+            const float targetEV100 = m_SceneExposureEV100 + std::clamp(autoBias, -18.0f, 0.0f);
+
+            if (!m_EffectiveExposureInitialized)
+            {
+                // 起動直後・シーン切り替え直後は平滑化せず即座に合わせる
+                m_EffectiveExposureEV100 = targetEV100;
+                m_EffectiveExposureInitialized = true;
+            }
+            else
+            {
+                // 一時停止や巨大なdtで飛ばないよう上限を設ける
+                const float deltaTime = std::clamp(m_RenderDeltaTime, 0.0f, 0.1f);
+                const float t = std::clamp(1.0f - std::exp(-deltaTime * m_EffectiveExposureAdaptSpeed), 0.0f, 1.0f);
+                m_EffectiveExposureEV100 += (targetEV100 - m_EffectiveExposureEV100) * t;
+            }
+        }
+        const float effectiveExposure = ComputeExposure(m_EffectiveExposureEV100);
 
         // カスケードシャドウマップ: カメラ視錐台をkCascadeCount個の深度範囲に分割し、
         // それぞれ専用のライト正射影ビュー・プロジェクション行列を求める
@@ -2406,7 +2443,7 @@ namespace Kurenai
             {
                 continue;
             }
-            gpuLights.push_back(MakeGPULight(light, m_SceneExposureEV100));
+            gpuLights.push_back(MakeGPULight(light, m_EffectiveExposureEV100));
         }
 
         // 容量(kMaxLights)を超える場合は、カメラに近い順に先頭kMaxLights灯のみ採用する。
@@ -2452,7 +2489,14 @@ namespace Kurenai
         // 太陽を無効にする場合は色をゼロにするだけでよい(シェーダー側は太陽の寄与に
         // LightColor.rgbを乗算するため、これで完全に消える)。TimeOfDayを夜にする方法と違い
         // 昼度(AmbientColor.a)は下がらないので、環境光だけで照らす状態を作れる
-        constants.LightColor = m_SunEnabled ? sunLighting.Color : DirectX::XMFLOAT4{ 0.0f, 0.0f, 0.0f, 0.0f };
+        // sunLighting.Color は絶対的な測光量[lx]なので、ここで実効プリ露出を掛けて表示レンジへ移す
+        constants.LightColor = m_SunEnabled
+            ? DirectX::XMFLOAT4{
+                  sunLighting.Color.x * effectiveExposure,
+                  sunLighting.Color.y * effectiveExposure,
+                  sunLighting.Color.z * effectiveExposure,
+                  0.0f }
+            : DirectX::XMFLOAT4{ 0.0f, 0.0f, 0.0f, 0.0f };
         DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameState.Camera.GetViewMatrix()));
         DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameState.Camera.GetProjectionMatrix()));
         // rgb(環境光の色)にm_AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
@@ -2460,9 +2504,9 @@ namespace Kurenai
         // 昼夜ブレンドに使う)には掛けない
         constants.AmbientColor =
         {
-            sunLighting.Ambient.x * m_AmbientScale,
-            sunLighting.Ambient.y * m_AmbientScale,
-            sunLighting.Ambient.z * m_AmbientScale,
+            sunLighting.Ambient.x * m_AmbientScale * effectiveExposure,
+            sunLighting.Ambient.y * m_AmbientScale * effectiveExposure,
+            sunLighting.Ambient.z * m_AmbientScale * effectiveExposure,
             sunLighting.Ambient.w,
         };
         constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
@@ -2511,7 +2555,7 @@ namespace Kurenai
             // 1.6万回の評価になるため、実際に焼くこのタイミングでだけ計算する
             // (詳細と「なぜπ倍誤差が生じていたか」はComputeSkyZenithScaleのコメント参照)
             const float skyZenithLuminance =
-                ComputeSkyZenithScale(sunLighting.SunPosition, sunLighting.SkyIlluminanceLux) * sunLighting.SkyExposure;
+                ComputeSkyZenithScale(sunLighting.SunPosition, sunLighting.SkyIlluminanceLux) * effectiveExposure;
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyGenerate",
@@ -3127,7 +3171,7 @@ namespace Kurenai
                     // Min>Maxのような不正な範囲だとヒストグラムのビン割りが破綻するため順序を保証する
                     autoExposureConstants.MinEV100 = std::min(m_AutoExposureMinEV100, m_AutoExposureMaxEV100);
                     autoExposureConstants.MaxEV100 = std::max(m_AutoExposureMinEV100, m_AutoExposureMaxEV100);
-                    autoExposureConstants.PreExposureEV100 = m_SceneExposureEV100;
+                    autoExposureConstants.PreExposureEV100 = m_EffectiveExposureEV100;
                     // 一時停止やシーン読み込み直後の巨大なdtで順応が飛ばないよう上限を設ける
                     autoExposureConstants.DeltaTime = std::clamp(m_RenderDeltaTime, 0.0f, 0.1f);
                     autoExposureConstants.AdaptationSpeedUp = m_AutoExposureSpeedUp;
@@ -3190,7 +3234,7 @@ namespace Kurenai
                     // しきい値を「表示上の白」基準の直感的な値のままにするため、
                     // ピラミッドの入力段で露出を反映する(Bloom.hlsl ExposureScale()参照)
                     bloomConstants.UseAutoExposure = m_AutoExposureEnabled ? 1.0f : 0.0f;
-                    bloomConstants.PreExposureEV100 = m_SceneExposureEV100;
+                    bloomConstants.PreExposureEV100 = m_EffectiveExposureEV100;
 
                     // --- ダウンサンプル: SceneColor -> down[0] -> down[1] -> ... ---
                     cmd->SetComputePipelineState(m_BloomDownsamplePipelineState.get());
@@ -3266,7 +3310,7 @@ namespace Kurenai
                 tonemapConstants.ExposureScale = 1.0f;
                 tonemapConstants.DitherStrength = m_DitherEnabled ? 1.0f : 0.0f;
                 tonemapConstants.UseAutoExposure = m_AutoExposureEnabled ? 1.0f : 0.0f;
-                tonemapConstants.PreExposureEV100 = m_SceneExposureEV100;
+                tonemapConstants.PreExposureEV100 = m_EffectiveExposureEV100;
                 tonemapConstants.BloomStrength =
                     (m_BloomEnabled && !m_BloomUpTextures.empty()) ? m_BloomStrength : 0.0f;
                 cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
