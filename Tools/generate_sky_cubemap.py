@@ -45,29 +45,89 @@ DEFAULT_EV100 = 15.0             # KurenaiEngine3D::m_SceneExposureEV100の既�
 DEFAULT_TIME_OF_DAY_HOURS = 12.0
 DEFAULT_SUN_AZIMUTH_DEGREES = 126.87
 
-# 空の色味(天頂は青みが強く、地平線付近は白っぽくなる)。物理的な分光計算(Rayleigh散乱の
-# 波長依存性を積分するなど)はせず、Perez分布が与える輝度の大きさ(スケール)はそのままに、
-# 色味だけをこの範囲で補間する簡略化(アート的な近似であることを明記する)。
+# 空の色味。物理的な分光計算(Rayleigh散乱の波長依存性を積分するなど)はせず、Perez分布が
+# 与える輝度の大きさ(スケール)はそのままに、色味だけを太陽高度で補間する簡略化
+# (アート的な近似であることを明記する)。
 # 実際の快晴の空は天頂から中程度の高度まで彩度の高い青を保ち、本当の水平線ぎわ(最後の
 # 20〜30度程度)でようやく白っぽくなる。天頂→水平線を単純に線形補間すると、ゲームカメラが
 # 見る典型的な低めの仰角(建物越しに覗く空など)でもすでに大きく白側へ寄ってしまい、
 # 「青空に見えない」結果になる(実際に一度この問題が起きた)。そのためTINT自体を水平線側でも
-# はっきり青みが残る値にし、かつ後述のブレンド係数も水平線ぎわに寄せてある
-ZENITH_TINT = np.array([0.30, 0.55, 0.95])
-HORIZON_TINT = np.array([0.65, 0.80, 1.0])
+# はっきり青みが残る値にし、かつ後述のブレンド係数も水平線ぎわに寄せてある。
+#
+# KurenaiEngine3D.cpp の ComputeSkyTint と同じ値・同じ補間であること。
+# 一方だけ変えるとオフラインで焼いたDDSと手続き空の色が食い違う
+DAY_ZENITH_TINT = np.array([0.22, 0.45, 1.0])
+DAY_HORIZON_TINT = np.array([0.55, 0.74, 1.0])
+DAY_GROUND_TINT = np.array([0.10, 0.09, 0.08])
+# 薄明(太陽仰角0度)。天頂は青を残したまま暗く、水平線は夕焼けの橙へ
+DUSK_ZENITH_TINT = np.array([0.13, 0.22, 0.60])
+DUSK_HORIZON_TINT = np.array([0.95, 0.50, 0.28])
+DUSK_GROUND_TINT = np.array([0.06, 0.05, 0.05])
+# 夜(太陽仰角-15度以下)。月光は分光的にはほぼ太陽光そのもので、夜空が青く見えるのは
+# 暗所視のプルキンエ現象による知覚的なもの。青へ寄せるのは正しいが寄せすぎると
+# ネオンブルーになるため、昼空と同程度の彩度に留める
+NIGHT_ZENITH_TINT = np.array([0.09, 0.15, 0.40])
+NIGHT_HORIZON_TINT = np.array([0.16, 0.24, 0.50])
+NIGHT_GROUND_TINT = np.array([0.02, 0.02, 0.03])
+# 太陽方向に乗せる夕焼け・朝焼けの暖色
+SUN_GLOW_TINT = np.array([1.0, 0.38, 0.12])
 
 # 地平線よりさらに下(地面方向)は空のモデルの適用範囲外のため、水平線のプラトー色から
 # この暗い接地色へフェードさせる(実際の地面反射を計算しているわけではないアート的な近似。
 # ゼロにはせずIBLの拡散イラディアンス積分が下半球で完全な暗黒にならないようにする)
-GROUND_TINT = np.array([0.10, 0.09, 0.08])
 GROUND_FADE_START_Y = -0.02
 GROUND_FADE_END_Y = -0.6
 
-# CIE快晴空係数(circumsolar項 c=10, d=-3)は太陽から45度離れると輝度が天頂の1/4程度まで落ちる。
-# 実際の大気は多重散乱で太陽から離れた領域もある程度明るいため、最低輝度を底上げする
+# CIE快晴空係数(circumsolar項 c=10, d=-3)は反太陽側の水平線で輝度が天頂の0.2倍程度まで落ちる。
+# 実際の大気は多重散乱で暗部が持ち上がるためゼロにはしないが、0.45まで底上げしていたときは
+# 輝度の勾配がほぼ消えて空全体が一様なスレートグレーになっていた(実測: 彩度0.26で時刻不変)。
+# 勾配が残る値まで下げてある
 # (sky_color_upper と compute_zenith_scale の両方から参照するのでモジュール定数にしてある。
 #  SkyGenerate.hlsl の kRelativeLuminanceFloor と一致させること)
-RELATIVE_LUMINANCE_FLOOR = 0.45
+RELATIVE_LUMINANCE_FLOOR = 0.12
+
+
+def smoothstep(edge0, edge1, x):
+    t = np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def compute_sky_tint(sun_elevation_sin):
+    """太陽高度のサインから空の色味を決める。KurenaiEngine3D.cpp の ComputeSkyTint と同じ式。
+
+    ここで色味を暗くしても空が暗くなるわけではない点に注意。compute_zenith_scale が
+    「色味の輝度成分込みで積分して目標照度に合わせる」ため、色味は最終的な明るさではなく
+    色相・彩度だけを決める。
+    """
+    sin_15deg = np.sin(np.radians(15.0))
+    day_blend = smoothstep(0.0, sin_15deg, sun_elevation_sin)
+    night_blend = smoothstep(0.0, sin_15deg, -sun_elevation_sin)
+
+    def blend(dusk, night, day):
+        return (dusk + (night - dusk) * night_blend) * (1.0 - day_blend) + day * day_blend
+
+    return {
+        "zenith": blend(DUSK_ZENITH_TINT, NIGHT_ZENITH_TINT, DAY_ZENITH_TINT),
+        "horizon": blend(DUSK_HORIZON_TINT, NIGHT_HORIZON_TINT, DAY_HORIZON_TINT),
+        "ground": blend(DUSK_GROUND_TINT, NIGHT_GROUND_TINT, DAY_GROUND_TINT),
+        "sun_glow": SUN_GLOW_TINT,
+        # 暖色は仰角0度で最大、±15度で0になる三角窓
+        "sun_glow_strength": (1.0 - day_blend) * (1.0 - night_blend),
+    }
+
+
+def sky_tint(cos_theta, cos_gamma, tint_set):
+    """方向に対する空の色味。KurenaiEngine3D.cpp / SkyGenerate.hlsl の SkyTint と同じ式。"""
+    # 水平線側への寄せを3乗カーブにし、高度がある程度あるうちは天頂色をほぼ保ったまま、
+    # 水平線ぎわ(仰角の低い最後の範囲)だけで急速に水平線色へブレンドする
+    horizon_blend = ((1.0 - np.clip(cos_theta, 0.0, 1.0)) ** 3)[..., None]
+    base = tint_set["zenith"] + (tint_set["horizon"] - tint_set["zenith"]) * horizon_blend
+
+    # 太陽から離れるほど急に落ちる4乗カーブ。太陽が地平線下にあっても、その方位の低空には
+    # まだ暖色が残る(実際の夕焼けの残光と同じ構造)
+    proximity = np.clip(cos_gamma, 0.0, 1.0)
+    glow = np.clip(tint_set["sun_glow_strength"] * proximity ** 4, 0.0, 1.0)[..., None]
+    return base + (tint_set["sun_glow"] - base) * glow
 
 
 def compute_exposure(ev100):
@@ -123,7 +183,7 @@ def perez_relative_luminance(cos_theta, gamma, cos_theta_sun, theta_sun):
     return numerator / denominator
 
 
-def sky_color_upper(dirs, sun_dir, zenith_luminance):
+def sky_color_upper(dirs, sun_dir, zenith_luminance, tint_set):
     # dirsは(...,3)の方向配列。水平線以上(GROUND_FADE_START_Y以上)を仮定した空モデルの色を返す
     # (呼び出し側でground_fadeと合成する)
     dir_y = dirs[..., 1]
@@ -140,36 +200,31 @@ def sky_color_upper(dirs, sun_dir, zenith_luminance):
 
     relative = perez_relative_luminance(cos_theta, gamma, cos_theta_sun, theta_sun)
     relative = np.maximum(relative, 0.0)
-    # CIE快晴空係数(circumsolar項、c=10, d=-3)は太陽から45度も離れると輝度が天頂の1/4程度まで
-    # 急激に落ち込む(単一散乱のみを仮定した理想的な快晴空のモデルのため)。実際の大気は多重散乱・
-    # エアロゾルにより太陽から離れた領域もある程度明るく保たれるため、そのままだと典型的な
-    # カメラ視点(太陽の真下ではない方向)で「くすんだ暗い空」に見えてしまう(実機で指摘された
-    # 見た目の問題)。RELATIVE_LUMINANCE_FLOORで最低輝度を底上げし、circumsolarのハイライトは
-    # 保ったまま全体の見た目を明るくする(多重散乱を簡略化して表現するアート的な近似)
+    # CIE快晴空係数(circumsolar項、c=10, d=-3)は反太陽側の水平線で輝度が天頂の0.2倍程度まで
+    # 落ち込む(単一散乱のみを仮定した理想的な快晴空のモデルのため)。実際の大気は多重散乱・
+    # エアロゾルにより暗部が持ち上がるので、RELATIVE_LUMINANCE_FLOORで最低輝度を底上げする
+    # (多重散乱を簡略化して表現するアート的な近似)
     relative = RELATIVE_LUMINANCE_FLOOR + (1.0 - RELATIVE_LUMINANCE_FLOOR) * relative
 
-    # 水平線側への寄せを3乗カーブにし、高度がある程度あるうちは天頂色をほぼ保ったまま、
-    # 水平線ぎわ(仰角の低い最後の範囲)だけで急速に白側へブレンドする
-    horizon_blend = (1.0 - np.clip(cos_theta, 0.0, 1.0)) ** 3
-    tint = ZENITH_TINT[None, None, :] + (HORIZON_TINT - ZENITH_TINT)[None, None, :] * horizon_blend[..., None]
+    tint = sky_tint(cos_theta, cos_gamma, tint_set)
     luminance = relative * zenith_luminance
     return luminance[..., None] * tint
 
 
-def build_face_array(face, sun_dir, zenith_luminance):
+def build_face_array(face, sun_dir, zenith_luminance, tint_set):
     dirs = face_direction_grid(face)  # (FACE_SIZE, FACE_SIZE, 3)
     dir_y = dirs[..., 1]
 
-    upper_color = sky_color_upper(dirs, sun_dir, zenith_luminance)
+    upper_color = sky_color_upper(dirs, sun_dir, zenith_luminance, tint_set)
 
     # 水平線より下: プラトー色(GROUND_FADE_START_Yの高さに射影した方向の空色)から
     # 暗い接地色へフェード(地面の物理モデルは持たないアート的近似)
     plateau_dirs = dirs.copy()
     plateau_dirs[..., 1] = GROUND_FADE_START_Y
     plateau_dirs = plateau_dirs / np.linalg.norm(plateau_dirs, axis=-1, keepdims=True)
-    plateau_color = sky_color_upper(plateau_dirs, sun_dir, zenith_luminance)
+    plateau_color = sky_color_upper(plateau_dirs, sun_dir, zenith_luminance, tint_set)
 
-    ground_color = zenith_luminance * GROUND_TINT
+    ground_color = zenith_luminance * tint_set["ground"]
     ground_t = np.clip((dir_y - GROUND_FADE_START_Y) / (GROUND_FADE_END_Y - GROUND_FADE_START_Y), 0.0, 1.0)
     below_color = plateau_color * (1.0 - ground_t[..., None]) + ground_color[None, None, :] * ground_t[..., None]
 
@@ -180,7 +235,7 @@ def build_face_array(face, sun_dir, zenith_luminance):
     return rgba.astype(np.float16)
 
 
-def compute_zenith_scale(sun_dir, target_illuminance_lux):
+def compute_zenith_scale(sun_dir, target_illuminance_lux, tint_set):
     # 天頂輝度スケールを、上半球の余弦重み積分が目標照度に一致するよう正規化して求める。
     #
     # 照度E[lx]と輝度L[cd/m^2]は E = ∫L·cosθ dω の関係にあるので、SKY_ILLUMINANCE_LUXを
@@ -188,11 +243,13 @@ def compute_zenith_scale(sun_dir, target_illuminance_lux):
     # 形は太陽高度で変わるため、そのずれ自体が時刻とともに動く。
     #   太陽高度90度 → 積分1.080 → 届く照度 21,600 lx
     #   太陽高度45度 → 積分1.898 → 届く照度 37,960 lx
+    # (輝度フロア0.45・旧ティントでの実測値。フロアとティントを変えれば積分値も変わるが、
+    #  正規化しているので最終的な照度は変わらない)
     # 正規化すると常に目標値ちょうどになる。
     #
     # 補足: 「一様な空ならL=E/πなので従来はπ倍明るかった」という説明は誤り。積分には
-    # ティントの輝度成分(Rec.709でZENITH=0.526, HORIZON=0.783)も入るため、単位球の積分は
-    # π(3.14)ではなく1.08にしかならず、正午での補正は8%にすぎない。
+    # ティントの輝度成分(Rec.709)も入るため、単位球の積分はπ(3.14)には遠く及ばず、
+    # 正午での補正は数%〜十数%にすぎない。
     #
     # KurenaiEngine3D.cpp の ComputeSkyZenithScale と同じ結果になること。
     # 一方だけ変えると、オフラインで焼いたDDSと手続き空の明るさが食い違う
@@ -224,9 +281,9 @@ def compute_zenith_scale(sun_dir, target_illuminance_lux):
     relative = np.maximum(relative, 0.0)
     relative = RELATIVE_LUMINANCE_FLOOR + (1.0 - RELATIVE_LUMINANCE_FLOOR) * relative
 
-    # 色味は天頂角にのみ依存する。照度は測光的な輝度で測るのでティントの輝度成分を重みに掛ける
-    horizon_blend = (1.0 - np.clip(cos_theta, 0.0, 1.0)) ** 3
-    tint = ZENITH_TINT[None, None, :] + (HORIZON_TINT - ZENITH_TINT)[None, None, :] * horizon_blend[..., None]
+    # 夕焼けの暖色が太陽の方位にだけ乗るようになったため、色味は天頂角だけの関数ではない。
+    # 照度は測光的な輝度で測るのでティントの輝度成分(Rec.709)を重みに掛ける
+    tint = sky_tint(np.broadcast_to(cos_theta, (theta_steps, phi_steps)), cos_gamma, tint_set)
     tint_luminance = tint[..., 0] * 0.2126 + tint[..., 1] * 0.7152 + tint[..., 2] * 0.0722
 
     # dω = sinθ dθ dφ、余弦重みは cosθ
@@ -241,7 +298,9 @@ def main():
 
     exposure = compute_exposure(DEFAULT_EV100)
     sun_dir = sun_direction(DEFAULT_TIME_OF_DAY_HOURS, DEFAULT_SUN_AZIMUTH_DEGREES)
-    zenith_luminance = compute_zenith_scale(sun_dir, SKY_ILLUMINANCE_LUX) * exposure
+    # 空の色味は太陽高度で決まる。生成と照度正規化の両方が同じセットを使う必要がある
+    tint_set = compute_sky_tint(sun_dir[1])
+    zenith_luminance = compute_zenith_scale(sun_dir, SKY_ILLUMINANCE_LUX, tint_set) * exposure
 
     DDSD_CAPS = 0x1
     DDSD_HEIGHT = 0x2
@@ -313,7 +372,7 @@ def main():
         f.write(header_dxt10)
         # D3Dキューブマップの面順: +X, -X, +Y, -Y, +Z, -Z
         for face in range(6):
-            arr = build_face_array(face, sun_dir, zenith_luminance)
+            arr = build_face_array(face, sun_dir, zenith_luminance, tint_set)
             f.write(arr.tobytes())
 
     print(f"wrote {OUT_PATH} ({FACE_SIZE}x{FACE_SIZE} x6 faces, R16G16B16A16_Float)")

@@ -1,4 +1,4 @@
-#include "KurenaiEngine3D.h"
+﻿#include "KurenaiEngine3D.h"
 
 #include <imgui.h>
 
@@ -107,17 +107,113 @@ namespace Kurenai
         // 手続き空の天頂輝度の正規化目標にもなるためRender()からも参照する
         constexpr float kSkylightIlluminanceLux = 20000.0f;
         // 満月が地表へ与える照度[lx]。太陽(10万lx)の約40万分の1という実測値。
-        // 月は常に反太陽方向にあるものとして扱う(=常に満月。満ち欠けは未実装の簡略化)
+        // 満ち欠けは未実装(常に満月)。位置は時刻に連動せず、ImGuiで手動指定する
         constexpr float kMoonIlluminanceLux = 0.25f;
-        // 満月時に夜空全体が散乱で持つ照度[lx]。地表照度0.25lxのうち空由来の寄与にあたる概算値
+        // 満月時に夜空全体が散乱で持つ照度[lx]。地表照度0.25lxのうち空由来の寄与にあたる概算値。
+        //
+        // 【月と夜空の比が夜の影の見え方を決める】影の濃さは「平行光(月) : 環境光(夜空)」の比で
+        // 決まる。物理値の0.25:0.05は5:1で、影は十分な濃さを持つ。この比を保ったまま
+        // 表示上の明るさだけを調整したい場合は、照度ではなく自動露出の
+        // m_AutoExposureNightRolloffEV(夜の露出切り詰め量)を動かすこと
         constexpr float kMoonSkyIlluminanceLux = 0.05f;
+        // 星明かりだけの夜空の照度[lx]。月が地平線下にあるときの下限になる。
+        // 月の位置が手動指定になったことで「月の出ていない夜」がスライダー一つで作れるように
+        // なったが、そこで夜空の目標照度が厳密に0になると空が真っ黒になり、
+        // 自動露出が持ち上げようのない画になる。星明かりは実在する量(約0.001lx)なので、
+        // アート的な下駄ではなく物理値としてここに置く
+        constexpr float kStarlightIlluminanceLux = 0.001f;
+
+        // edge0とedge1の間をなめらかに0→1で補間する(edge0以下は0、edge1以上は1)
+        float Smoothstep(float edge0, float edge1, float x)
+        {
+            const float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+            return t * t * (3.0f - 2.0f * t);
+        }
 
         // --- 手続き空(SkyGenerate.hlsl)と厳密に一致させる必要がある定数・式 ---
         // ここを変えるときは SkyGenerate.hlsl と Tools/generate_sky_cubemap.py も同時に直すこと。
         // 3者がずれると、空の見た目・IBLの明るさ・オフライン参照実装が食い違う
-        constexpr float kSkyRelativeLuminanceFloor = 0.45f;
-        const DirectX::XMFLOAT3 kSkyZenithTint{ 0.30f, 0.55f, 0.95f };
-        const DirectX::XMFLOAT3 kSkyHorizonTint{ 0.65f, 0.80f, 1.0f };
+        //
+        // 【フロアを0.45から下げた理由】CIE快晴空の相対輝度は反太陽側の水平線で天頂の0.2倍程度まで
+        // 落ちる。これは実際の快晴空の姿だが、以前はここを0.45まで底上げしていたため輝度の勾配が
+        // ほぼ消え、空全体が一様なスレートグレーになっていた(実測: 空の彩度0.26、時刻を問わず一定)。
+        // 多重散乱で暗部が持ち上がるのは事実なので0にはしないが、勾配が残る値まで下げる
+        constexpr float kSkyRelativeLuminanceFloor = 0.12f;
+
+        // 空の色味セット。太陽高度から選んでCPUで1度だけ決め、cbufferでシェーダーへ配る。
+        //
+        // 【なぜCPUで決めるのか】この色味は
+        //   (1) SkyGenerate.hlsl のキューブマップ生成
+        //   (2) ComputeSkyZenithScale の照度正規化(積分の重みに色味の輝度成分が入る)
+        // の両方で完全に一致していなければならない。CPUで決めて配れば両者がずれることが
+        // 構造的に起きなくなる(以前は定数を2箇所に複製していた)。
+        // Tools/generate_sky_cubemap.py だけは独立した実装なので手で合わせる必要が残る
+        struct SkyTintSet
+        {
+            DirectX::XMFLOAT3 Zenith;
+            DirectX::XMFLOAT3 Horizon;
+            DirectX::XMFLOAT3 Ground;
+            // 太陽方向まわりに乗せる暖色(夕焼け・朝焼け)
+            DirectX::XMFLOAT3 SunGlow;
+            float SunGlowStrength;
+        };
+
+        DirectX::XMFLOAT3 LerpColor(const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b, float t)
+        {
+            return { a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t };
+        }
+
+        // 太陽高度(のサイン)から空の色味を決める。
+        //
+        // 【物理ではなくアート的な近似であることの明示】本来の夕焼けは、太陽光が大気を長く通る
+        // ことで短波長がRayleigh散乱により失われる波長依存の消散で生じる。それを解くには
+        // Preetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。本エンジンは
+        // Perez分布(輝度の分布のみを与え、色は与えない)を使っているため、色は昼・薄明・夜の
+        // 3セットを高度で補間して作る。物理的な導出ではない。
+        //
+        // 【重要】ここで色味を暗くしても空が暗くなるわけではない。ComputeSkyZenithScaleが
+        // 「色味の輝度成分込みで積分して目標照度に合わせる」ため、色味は最終的な明るさではなく
+        // 色相・彩度だけを決める。明るさはSunLighting::SkyIlluminanceLuxが持つ
+        SkyTintSet ComputeSkyTint(float sunElevationSin)
+        {
+            using namespace DirectX;
+
+            // 昼(仰角15度以上)。従来からの値
+            const XMFLOAT3 kDayZenith{ 0.22f, 0.45f, 1.0f };
+            const XMFLOAT3 kDayHorizon{ 0.55f, 0.74f, 1.0f };
+            const XMFLOAT3 kDayGround{ 0.10f, 0.09f, 0.08f };
+            // 薄明(仰角0度)。天頂は青を残したまま暗く、水平線は夕焼けの橙へ
+            const XMFLOAT3 kDuskZenith{ 0.13f, 0.22f, 0.60f };
+            const XMFLOAT3 kDuskHorizon{ 0.95f, 0.50f, 0.28f };
+            const XMFLOAT3 kDuskGround{ 0.06f, 0.05f, 0.05f };
+            // 夜(仰角-15度以下)。月光で散乱した深い青。ここを昼と同じ色にしていたため
+            // 「夜なのに昼と同じ空色」になっていた。
+            // 月光は分光的にはほぼ太陽光そのもので、夜空が青く見えるのは暗所視の
+            // プルキンエ現象による知覚的なもの。したがって青へ寄せるのは正しいが、
+            // 寄せすぎるとネオンブルーになる(R比7倍まで振ったときは実測B/R=13になった)ので
+            // 昼空(B/R約4.5)と同程度の彩度に留める
+            const XMFLOAT3 kNightZenith{ 0.09f, 0.15f, 0.40f };
+            const XMFLOAT3 kNightHorizon{ 0.16f, 0.24f, 0.50f };
+            const XMFLOAT3 kNightGround{ 0.02f, 0.02f, 0.03f };
+            // 太陽方向の暖色(夕焼けの芯)
+            const XMFLOAT3 kSunGlow{ 1.0f, 0.38f, 0.12f };
+
+            const float kSin15Deg = std::sin(XMConvertToRadians(15.0f));
+            // 仰角0度→15度で薄明から昼へ
+            const float dayBlend = Smoothstep(0.0f, kSin15Deg, sunElevationSin);
+            // 仰角0度→-15度で薄明から夜へ
+            const float nightBlend = Smoothstep(0.0f, kSin15Deg, -sunElevationSin);
+
+            SkyTintSet result{};
+            result.Zenith = LerpColor(LerpColor(kDuskZenith, kNightZenith, nightBlend), kDayZenith, dayBlend);
+            result.Horizon = LerpColor(LerpColor(kDuskHorizon, kNightHorizon, nightBlend), kDayHorizon, dayBlend);
+            result.Ground = LerpColor(LerpColor(kDuskGround, kNightGround, nightBlend), kDayGround, dayBlend);
+            result.SunGlow = kSunGlow;
+            // 暖色は仰角0度で最大、±15度で0になる三角窓。
+            // dayBlendもnightBlendも仰角0度で0・±15度で1なので、両方の補数の積がそのまま窓になる
+            result.SunGlowStrength = (1.0f - dayBlend) * (1.0f - nightBlend);
+            return result;
+        }
 
         // Perezの5係数関数(CIE快晴空、Perez et al. 1993 / Preetham et al. 1999 Table 1)
         float PerezF(float cosTheta, float gamma)
@@ -139,6 +235,26 @@ namespace Kurenai
             return kSkyRelativeLuminanceFloor + (1.0f - kSkyRelativeLuminanceFloor) * relative;
         }
 
+        // 太陽の暖色を混ぜる重み。SkyGenerate.hlsl の SunGlowWeight と同じ式であること。
+        // 太陽から離れるほど急に落ちる4乗カーブ。太陽が地平線下にあっても、その方位の
+        // 低空はまだ暖色が残る(実際の夕焼けの残光と同じ構造)
+        float SunGlowWeight(float cosGamma, float glowStrength)
+        {
+            const float proximity = std::clamp(cosGamma, 0.0f, 1.0f);
+            const float falloff = proximity * proximity * proximity * proximity;
+            return std::clamp(glowStrength * falloff, 0.0f, 1.0f);
+        }
+
+        // 方向(天頂角と太陽との離角)に対する空の色味。
+        // SkyGenerate.hlsl の SkyTint と同じ式であること
+        DirectX::XMFLOAT3 SkyTint(float cosTheta, float cosGamma, const SkyTintSet& tintSet)
+        {
+            // 水平線側への寄せを3乗カーブにして、高度があるうちは天頂色をほぼ保つ
+            const float horizonBlend = std::pow(1.0f - std::clamp(cosTheta, 0.0f, 1.0f), 3.0f);
+            const DirectX::XMFLOAT3 base = LerpColor(tintSet.Zenith, tintSet.Horizon, horizonBlend);
+            return LerpColor(base, tintSet.SunGlow, SunGlowWeight(cosGamma, tintSet.SunGlowStrength));
+        }
+
         // 空の天頂輝度スケールを、上半球の余弦重み積分が目標照度に一致するよう正規化して求める。
         //
         // 【なぜ必要か】従来は zenith_luminance = 空光の照度[lx] をそのまま天頂輝度として
@@ -146,21 +262,21 @@ namespace Kurenai
         // 実際に届く照度は「積分値の分だけ」ずれる。しかも Perez 分布の形は太陽高度で変わるため、
         // そのずれ自体が時刻とともに動く。
         //
-        // 実測(Tools/generate_sky_cubemap.py の compute_zenith_scale で確認):
-        //   太陽高度 90度 → 積分1.080 → 届く照度 21,600 lx
-        //   太陽高度 45度 → 積分1.898 → 届く照度 37,960 lx
-        //   太陽高度 15度 → 積分1.636 → 届く照度 32,720 lx
-        // つまり正規化前は空光の照度が1.8倍も勝手に変動していた。ここで正規化すると
-        // 常に目標値ちょうどになり、時刻による空の明るさは(Step3で入れる薄明係数のように)
+        // 正規化前は、Perez分布の形が太陽高度で変わるぶんだけ空光の照度が1.8倍も勝手に変動して
+        // いた(輝度フロア0.45・旧ティストでの実測。太陽高度90度で積分1.080、45度で1.898)。
+        // ここで正規化すると常に目標値ちょうどになり、時刻による空の明るさは薄明係数のように
         // 意図した係数だけで制御できるようになる。
+        // 積分値そのものはフロアとティントを変えると当然変わるが、正規化しているので
+        // 最終的な照度は変わらない(だから上の実測値は現在の設定のものではない)。
         //
         // 補足: 「一様な空なら L = E/π なので従来はπ倍明るかった」という説明は誤り。
-        // 積分にはティントの輝度成分(Rec.709でZENITH=0.526, HORIZON=0.783)も入るため、
-        // 単位球の積分はπ(3.14)ではなく1.08にしかならない。正午での補正は8%にすぎない。
+        // 積分にはティントの輝度成分(Rec.709)も入るため、単位球の積分はπ(3.14)には遠く
+        // 及ばない。正午での補正は数%〜十数%の範囲にとどまる。
         //
         // 積分は θ64分割 × φ256分割の中点則。1.6万回の評価で数十μs程度であり、
         // 空を焼き直すタイミングでしか呼ばれないため負荷は問題にならない
-        float ComputeSkyZenithScale(const DirectX::XMFLOAT3& sunPosition, float targetIlluminanceLux)
+        float ComputeSkyZenithScale(
+            const DirectX::XMFLOAT3& sunPosition, float targetIlluminanceLux, const SkyTintSet& tintSet)
         {
             using namespace DirectX;
 
@@ -184,16 +300,6 @@ namespace Kurenai
                 const float cosTheta = std::clamp(
                     std::max(cosThetaRaw, std::cos(XMConvertToRadians(89.5f))), 1e-3f, 1.0f);
 
-                // 色味は天頂角にのみ依存する。照度は測光的な輝度で測るので、
-                // ティントの輝度成分(Rec.709)を重みに掛ける
-                const float horizonBlend = std::pow(1.0f - std::clamp(cosTheta, 0.0f, 1.0f), 3.0f);
-                const XMFLOAT3 tint{
-                    kSkyZenithTint.x + (kSkyHorizonTint.x - kSkyZenithTint.x) * horizonBlend,
-                    kSkyZenithTint.y + (kSkyHorizonTint.y - kSkyZenithTint.y) * horizonBlend,
-                    kSkyZenithTint.z + (kSkyHorizonTint.z - kSkyZenithTint.z) * horizonBlend,
-                };
-                const float tintLuminance = 0.2126f * tint.x + 0.7152f * tint.y + 0.0722f * tint.z;
-
                 for (uint32_t pi = 0; pi < kPhiSteps; ++pi)
                 {
                     const float phi = (static_cast<float>(pi) + 0.5f) * dPhi;
@@ -201,6 +307,13 @@ namespace Kurenai
                     const float cosGamma = std::clamp(
                         dir.x * sunPosition.x + dir.y * sunPosition.y + dir.z * sunPosition.z, -1.0f, 1.0f);
                     const float gamma = std::acos(cosGamma);
+
+                    // 色味の評価はφループの内側で行う。夕焼けの暖色が太陽の方位にだけ乗るように
+                    // なったため、色味が天頂角だけの関数ではなくなった(以前はθループの外で
+                    // 1回だけ求めていた)。Perezの評価が既に1.6万回あるので追加コストは誤差。
+                    // 照度は測光的な輝度で測るので、ティントの輝度成分(Rec.709)を重みに掛ける
+                    const XMFLOAT3 tint = SkyTint(cosTheta, cosGamma, tintSet);
+                    const float tintLuminance = 0.2126f * tint.x + 0.7152f * tint.y + 0.0722f * tint.z;
 
                     const float relative = SkyRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun);
                     // dω = sinθ dθ dφ、余弦重みは cosθ
@@ -221,13 +334,6 @@ namespace Kurenai
             return targetIlluminanceLux / static_cast<float>(integral);
         }
 
-        // edge0とedge1の間をなめらかに0→1で補間する(edge0以下は0、edge1以上は1)
-        float Smoothstep(float edge0, float edge1, float x)
-        {
-            const float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
-            return t * t * (3.0f - 2.0f * t);
-        }
-
         // 実在の写真露出値(EV100)から露出係数を求める。絞り値・シャッター速度・ISO感度から一意に
         // 定まる実在の量で、Lagarde & de Rousiers, "Moving Frostbite to Physically Based Rendering"
         // (SIGGRAPH 2014 course notes)やGoogle FilamentのPhysically Based Cameraドキュメントが
@@ -239,10 +345,30 @@ namespace Kurenai
             return 1.0f / (1.2f * std::pow(2.0f, ev100));
         }
 
+        // 環境の照度[lx]から「そのシーンの基準EV100」を求める。
+        //
+        // 自動露出のヒストグラムと違い、これは**画面に何が写っているかに一切依存しない**。
+        // 測光値が構図で振れる(空が画面に占める割合で2〜3.5段動く)のを抑えるための
+        // 足がかりとして使う(AutoExposure.hlsl の KeyReferenceEV100 参照)。
+        //
+        // 導出: 反射率ρのLambertian面が照度Eを受けたときの輝度は L = E·ρ/π。
+        // EV100と輝度の関係は L = 2^EV100 · K/S(反射光式露出計の標準、K=12.5・S=100)
+        // すなわち EV100 = log2(8L)。ρには中庸なグレーの18%を使う。
+        // 検算: E=100,000lx(直射日光) → EV100=15.5、E=0.3lx(満月の夜) → EV100=-2.9。
+        // どちらも実写の露出値と一致する
+        float ComputeReferenceEV100(float illuminanceLux)
+        {
+            constexpr float kMiddleGreyReflectance = 0.18f;
+            const float luminance =
+                std::max(illuminanceLux, 1e-6f) * kMiddleGreyReflectance / DirectX::XM_PI;
+            return std::log2(8.0f * luminance);
+        }
+
         // 太陽・月・空の状態を時刻から求める。
         // **露出は一切掛けない**(すべて絶対的な測光量[lx]のまま返す)。露出はこの結果から
         // 決まる実効EV100を使ってRender()側で掛ける(可変プリ露出。KurenaiEngine3D.h参照)
-        SunLighting ComputeSunLighting(float timeOfDayHours, float sunAzimuthDegrees)
+        SunLighting ComputeSunLighting(
+            float timeOfDayHours, float sunAzimuthDegrees, float moonAzimuthDegrees, float moonElevationDegrees)
         {
             using namespace DirectX;
 
@@ -282,8 +408,34 @@ namespace Kurenai
             const float kSin15Deg = std::sin(XMConvertToRadians(15.0f));
             const float sunFactor = Smoothstep(0.0f, kSin15Deg, sunElevationSin);
             const float twilightFactor = Smoothstep(-kSin15Deg, kSin15Deg, sunElevationSin);
-            // 月は反太陽方向に置く(常に満月という既知の簡略化)。太陽が沈むと月が昇る
-            const float moonFactor = Smoothstep(0.0f, kSin15Deg, -sunElevationSin);
+
+            // === 月は時刻に連動せず、方位角と仰角で手動指定する ===
+            // 実際の月は太陽とは独立した周期(朔望月)で動くため、反太陽方向に固定するのは
+            // 「常に満月かつ常に真夜中に南中する」という二重の簡略化だった。
+            // 位置を手動指定にすることで、任意の月齢・任意の時刻の見え方を作れるようにする。
+            // 方位角の規約は太陽と同じ(X軸が0度、Z軸(+方向)が90度)
+            const float moonAzimuthRadians = XMConvertToRadians(moonAzimuthDegrees);
+            const float moonElevationRadians = XMConvertToRadians(moonElevationDegrees);
+            const float moonCosElevation = std::cos(moonElevationRadians);
+            const XMFLOAT3 moonDirection{
+                moonCosElevation * std::cos(moonAzimuthRadians),
+                std::sin(moonElevationRadians),
+                moonCosElevation * std::sin(moonAzimuthRadians),
+            };
+
+            // 月が地平線より上にあるかどうか(太陽と同じく仰角[0°,15°]で立ち上げる)
+            const float moonElevationFactor = Smoothstep(0.0f, kSin15Deg, moonDirection.y);
+            // 【なぜ太陽の高度でも月を絞るのか】平行光源の枠は1つしかないので、
+            // 太陽と月は「支配的な方」を選んで切り替える。月を反太陽方向に固定していたときは
+            // 切替点(太陽の仰角0度)で月の係数もちょうど0になり、向きが反転しても
+            // 何も見えないためポップが原理的に起きなかった。
+            // 月の位置が独立になるとこの保証が失われ、太陽が沈む瞬間に月が高く昇っていると
+            // 0.25lxの直接光が向きだけ突然入れ替わる(夜の影が見える明るさなので実際に目に付く)。
+            // そこで月の立ち上がりを太陽の仰角0°→-5°に遅らせ、
+            // **切替点では太陽も月も厳密に0**という元の性質を取り戻す
+            const float kSin5Deg = std::sin(XMConvertToRadians(5.0f));
+            const float moonNightGate = Smoothstep(0.0f, kSin5Deg, -sunElevationSin);
+            const float moonFactor = moonElevationFactor * moonNightGate;
 
             // 太陽の色味(ティント)。ピーク照度はkSunIlluminanceLuxが持つので、ここは相対比のみ。
             // 仰角が低いほど暖色へ寄せる(大気の光路長が伸びて短波長が散乱で失われる現象の
@@ -307,9 +459,9 @@ namespace Kurenai
 
             // === 平行光源1枠を太陽と月で共有し、支配的な方を選ぶ ===
             // 太陽10万lx と満月0.25lx は40万倍違うので、両者の照度が入れ替わるのは
-            // 実質的に仰角0度ちょうどの一点だけ。そこでは SunFactor も MoonFactor も
-            // 厳密に0(=どちらの色もゼロ)なので、光源の向きが180度反転しても
-            // 直接光も影も一切見えず、ポップは原理的に発生しない。
+            // 実質的に太陽の仰角0度ちょうどの一点だけ。そこでは SunFactor も MoonFactor も
+            // 厳密に0(=どちらの色もゼロ)になるよう moonNightGate で仕込んであるので、
+            // 光源の向きが突然変わっても直接光も影も一切見えず、ポップは原理的に発生しない。
             // このためヒステリシスのような追加の対策は要らない
             const float sunIlluminance = kSunIlluminanceLux * sunFactor;
             const float moonIlluminance = kMoonIlluminanceLux * moonFactor;
@@ -320,12 +472,12 @@ namespace Kurenai
             result.Color = {
                 dominantTint.x * dominantPeak, dominantTint.y * dominantPeak, dominantTint.z * dominantPeak, 0.0f
             };
-            // 支配ライトの向き。月は反太陽方向なので符号が逆になる。
+            // 支配ライトの向き(光が進む向き)。天体が「ある」向きの符号を反転したもの。
             // **カスケードシャドウの行列もこの向きから作ること**(LightColorだけ切り替えると
             // 月夜に太陽方向の影が残ってしまう)
             result.Direction = result.DominantIsSun
                 ? XMFLOAT3{ -sunDirection.x, -sunDirection.y, -sunDirection.z }
-                : XMFLOAT3{ sunDirection.x, sunDirection.y, sunDirection.z };
+                : XMFLOAT3{ -moonDirection.x, -moonDirection.y, -moonDirection.z };
 
             // 非IBLフォールバック用の定数色アンビエント(Enable IBL 無効時のみ使われる)。
             // 昼度は薄明係数をそのまま使う
@@ -346,9 +498,13 @@ namespace Kurenai
             // 空が届ける照度は薄明係数で変調する。正規化(ComputeSkyZenithScale)により
             // 「目標照度ちょうど」が保証されるようになったので、時刻による空の明るさは
             // ここの係数だけで素直に制御できる。
-            // 夜側は月明かりで散乱する空の照度を足す(満月時の夜空はおよそ0.05lx相当)
-            result.SkyIlluminanceLux =
-                kSkylightIlluminanceLux * twilightFactor + kMoonSkyIlluminanceLux * moonFactor;
+            // 夜側は月明かりで散乱する空の照度を足す(満月時の夜空はおよそ0.05lx相当)。
+            // 月が地平線下でも星明かりぶんは残る(月の位置を手動指定にしたことで
+            // 「月の出ていない夜」が作れるようになったため、そこで0にしない)
+            const float nightFactor = 1.0f - twilightFactor;
+            result.SkyIlluminanceLux = kSkylightIlluminanceLux * twilightFactor +
+                                       kMoonSkyIlluminanceLux * moonFactor +
+                                       kStarlightIlluminanceLux * nightFactor;
             result.TwilightFactor = twilightFactor;
             // 空生成が使うのは**常に太陽の位置**(月が支配的でもPerez分布の基準は太陽のまま)。
             // result.Direction は支配ライトの向きなので、そこから逆算してはいけない
@@ -426,7 +582,8 @@ namespace Kurenai
         {
             // KurenaiEngine3D::TonemapCurve(0=Reinhard, 1=ACES, 2=AgX)
             int32_t Curve;
-            // 露出倍率。プリ露出方式(露出はCPU側でライト強度へ事前乗算済み)のため現状は常に1.0
+            // 手動露出時に掛ける倍率。プリ露出は時刻連動で変動するため、ユーザー設定EV100との
+            // 差分 2^(実効EV100 - 設定EV100) を割り戻して固定露出の絵に戻す(1.0固定ではない)
             float ExposureScale;
             // ディザの強さ(0=無効、1=±1LSB)
             float DitherStrength;
@@ -436,7 +593,10 @@ namespace Kurenai
             float PreExposureEV100;
             // ブルームの合成比(0で無効)
             float BloomStrength;
-            float Padding[2];
+            // 薄明視の適用量(0で無効、1で完全適用)
+            float MesopicStrength;
+            // 目が順応している明るさ(EV100)。構図にも露出設定にも依存しない
+            float MesopicAdaptationEV100;
         };
 
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
@@ -449,6 +609,12 @@ namespace Kurenai
             float Padding0[2];
             // 太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)
             DirectX::XMFLOAT4 SunDirection;
+            // 色味セット(ComputeSkyTintがCPUで決めた値)。xyzのみ使う
+            DirectX::XMFLOAT4 ZenithTint;
+            DirectX::XMFLOAT4 HorizonTint;
+            DirectX::XMFLOAT4 GroundTint;
+            // xyz=夕焼けの暖色、w=その強さ(仰角0度で1、±15度で0)
+            DirectX::XMFLOAT4 SunGlowTint;
         };
 
         // Bloom.hlsl側のcbuffer BloomConstantsと一致させる必要がある
@@ -466,7 +632,9 @@ namespace Kurenai
 
             // CPU側でライト強度へ事前乗算済みのEV100(プリ露出)
             float PreExposureEV100;
-            float Padding[3];
+            // 手動露出時に掛ける倍率(TonemapConstants::ExposureScaleと同じ値)
+            float ExposureScale;
+            float Padding[2];
         };
 
         // AutoExposure.hlsl側のcbuffer AutoExposureConstantsと一致させる必要がある
@@ -484,7 +652,15 @@ namespace Kurenai
             float LowPercentile;
             float HighPercentile;
             float ExposureCompensation;
-            float Padding;
+
+            // 暗いシーンをわざと暗いまま写すための補正カーブ(AutoExposure.hlsl参照)
+            float NightRolloffEV;
+            float NightRolloffDarkEV100;
+            float NightRolloffBrightEV100;
+
+            // 測光値の上側クランプ(構図依存を抑える。AutoExposure.hlsl参照)
+            float KeyReferenceEV100;
+            float KeyCeilingEV;
         };
 
         // HiZ.hlsl側のcbuffer HiZConstantsと一致させる必要がある
@@ -1783,6 +1959,18 @@ namespace Kurenai
             m_TonemapCurve = static_cast<TonemapCurve>(curveIndex);
         }
 
+        // 薄明視。暗所で錐体が働かなくなり色が判別できなくなる現象の再現
+        ImGui::SliderFloat("Mesopic Vision", &m_MesopicStrength, 0.0f, 1.0f, "%.2f");
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+        {
+            ImGui::SetTooltip(
+                "暗所視の再現量。0で無効。\n"
+                "実際の輝度が0.01cd/m^2を下回ると桿体だけの視覚になり色が判別できなくなる\n"
+                "(3cd/m^2以上は通常の錐体視のまま。間は対数で補間)。\n"
+                "桿体の分光感度が短波長寄りなので、赤は沈み青は明るく見える(プルキンエ現象)。\n"
+                "露出を下げるだけでは「暗いが色鮮やかな夜」になり肉眼の見え方と合わない。");
+        }
+
         // 暗部グラデーションのバンディングは中間バッファの精度ではなく最終8bit量子化が主因
         // (実測で確認済み)。ここでON/OFFして効果をA/B比較できるようにしている
         ImGui::Checkbox("Output Dithering", &m_DitherEnabled);
@@ -1803,6 +1991,26 @@ namespace Kurenai
             ImGui::SliderFloat("AE Min EV100", &m_AutoExposureMinEV100, -8.0f, 20.0f, "%.1f");
             ImGui::SliderFloat("AE Max EV100", &m_AutoExposureMaxEV100, -8.0f, 20.0f, "%.1f");
             ImGui::SliderFloat("AE Compensation", &m_AutoExposureCompensation, -4.0f, 4.0f, "%.2f EV");
+            ImGui::SliderFloat("AE Key Ceiling", &m_AutoExposureKeyCeilingEV, -4.0f, 16.0f, "%.2f EV");
+            if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+            {
+                ImGui::SetTooltip(
+                    "測光値が「シーンの基準EV」から何段上まで行くのを許すか。\n"
+                    "基準EVは太陽・月・空の照度から求めるので画面の構図に依存しない。\n"
+                    "小さくするほど、空が画面に占める割合で露出が振れるのを抑えられる。\n"
+                    "16まで上げると従来どおりヒストグラムだけで決まる挙動に戻る。\n"
+                    "屋内が暗くならないよう、止めるのは上側だけ(下限はAE Min EV100)。");
+            }
+            ImGui::SliderFloat("AE Night Rolloff", &m_AutoExposureNightRolloffEV, 0.0f, 8.0f, "%.2f EV");
+            if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+            {
+                ImGui::SetTooltip(
+                    "暗いシーンをわざと暗いまま写す量。\n"
+                    "自動露出は測ったものを中庸なグレーへ持ち上げるため、\n"
+                    "0にすると夜が昼と同じ明るさで出る。\n"
+                    "測定EV100が %.1f 以下で最大、%.1f 以上で0、間は線形。",
+                    m_AutoExposureNightRolloffDarkEV100, m_AutoExposureNightRolloffBrightEV100);
+            }
             ImGui::SliderFloat("AE Speed (to bright)", &m_AutoExposureSpeedUp, 0.1f, 10.0f, "%.2f");
             ImGui::SliderFloat("AE Speed (to dark)", &m_AutoExposureSpeedDown, 0.1f, 10.0f, "%.2f");
             ImGui::SliderFloat("AE Low Percentile", &m_AutoExposureLowPercentile, 0.0f, 1.0f, "%.2f");
@@ -1920,6 +2128,21 @@ namespace Kurenai
                 ImGui::SliderFloat("Speed", &m_TimeAdvanceSpeed, 0.1f, 10.0f, "%.1f h/s");
             }
             ImGui::SliderFloat("Sun Azimuth", &m_SunAzimuthDegrees, 0.0f, 360.0f, "%.1f deg");
+            // 月の位置。**時刻には連動しない**(実際の月は太陽と独立した周期で動くため)。
+            // 平行光源の枠は太陽と共有しており、太陽が沈むと支配ライトが月へ切り替わる
+            // 月を動かすと夜空の目標照度(SkyIlluminanceLux)が変わるため、空を焼き直す必要がある
+            bool moonMoved = ImGui::SliderFloat("Moon Azimuth", &m_MoonAzimuthDegrees, 0.0f, 360.0f, "%.1f deg");
+            moonMoved |= ImGui::SliderFloat("Moon Elevation", &m_MoonElevationDegrees, -90.0f, 90.0f, "%.1f deg");
+            if (moonMoved)
+            {
+                m_SkyBakeDirty = true;
+            }
+            if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+            {
+                ImGui::SetTooltip(
+                    "月の仰角。0度以下なら地平線下にあり月光は出ない。\n"
+                    "時刻に連動しないため、任意の月齢・任意の時刻の見え方を作れる。");
+            }
             // 太陽だけを消して環境光のみで照らす状態を作る(White Furnace Testが使う)。
             // TimeOfDayを夜にする方法と違い、昼度(環境光の明るさ)は下がらない
             ImGui::Checkbox("Enable Sun", &m_SunEnabled);
@@ -2385,7 +2608,8 @@ namespace Kurenai
         m_CPUProfiler.BeginFrame();
 
         // 太陽・月・空の状態を求める(すべて絶対的な測光量[lx]。露出はまだ掛かっていない)
-        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay, m_SunAzimuthDegrees);
+        const SunLighting sunLighting = ComputeSunLighting(
+            m_TimeOfDay, m_SunAzimuthDegrees, m_MoonAzimuthDegrees, m_MoonElevationDegrees);
 
         // === 可変プリ露出の決定 ===
         // 昼(直射日光10万lx)を基準0として、そのフレームのキー照度が何段暗いかを求め、
@@ -2415,6 +2639,19 @@ namespace Kurenai
             }
         }
         const float effectiveExposure = ComputeExposure(m_EffectiveExposureEV100);
+
+        // 手動露出時にTonemap/Bloomが掛ける倍率。
+        // HDRバッファには「実効EV100」でプリ露出された値が入っているが、ユーザーが見たいのは
+        // 「設定EV100で撮った絵」なので、その差分を割り戻す。
+        // 実効EV100は夜に最大18段下がる(=バッファ上の値が26万倍明るくなる)ため、
+        // ここを1.0に固定していると夜が昼と同じ明るさで出てしまい、
+        // 自動露出をオフにしても露出が時刻に追従し続ける状態になる
+        const float manualExposureScale = std::exp2(m_EffectiveExposureEV100 - m_SceneExposureEV100);
+
+        // 自動露出の測光値を上側で止めるための、構図に依存しない基準EV。
+        // キー照度は画面に何が写っていようと変わらないので、
+        // 「空が画面のどれだけを占めるか」で露出が振れるのを抑えられる
+        const float keyReferenceEV100 = ComputeReferenceEV100(sunLighting.KeyIlluminanceLux);
 
         // カスケードシャドウマップ: カメラ視錐台をkCascadeCount個の深度範囲に分割し、
         // それぞれ専用のライト正射影ビュー・プロジェクション行列を求める
@@ -2559,16 +2796,21 @@ namespace Kurenai
         //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否はm_SkyBakeDirtyで判定する ---
         if (usingProceduralSky && m_SkyBakeDirty)
         {
+            // 空の色味(昼・薄明・夜の補間と夕焼けの暖色)を先に決める。
+            // 生成シェーダーと下の照度正規化の両方がこの同じ値を使う
+            const SkyTintSet skyTintSet = ComputeSkyTint(sunLighting.SunPosition.y);
+
             // 上半球の余弦重み積分が空光の照度に一致するよう天頂輝度を正規化する。
             // 1.6万回の評価になるため、実際に焼くこのタイミングでだけ計算する
             // (詳細と「なぜπ倍誤差が生じていたか」はComputeSkyZenithScaleのコメント参照)
             const float skyZenithLuminance =
-                ComputeSkyZenithScale(sunLighting.SunPosition, sunLighting.SkyIlluminanceLux) * effectiveExposure;
+                ComputeSkyZenithScale(sunLighting.SunPosition, sunLighting.SkyIlluminanceLux, skyTintSet) *
+                effectiveExposure;
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyGenerate",
                 .Writes = { m_ProceduralSkyTexture.get() },
-                .Execute = [this, &sunLighting, skyZenithLuminance](RHI::IRHICommandList* cmd)
+                .Execute = [this, &sunLighting, skyZenithLuminance, skyTintSet](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_SkyGeneratePipelineState.get());
                     for (uint32_t face = 0; face < kCubeFaceCount; ++face)
@@ -2578,6 +2820,19 @@ namespace Kurenai
                         skyConstants.ZenithLuminance = skyZenithLuminance;
                         skyConstants.SunDirection = {
                             sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+                        };
+                        skyConstants.ZenithTint = {
+                            skyTintSet.Zenith.x, skyTintSet.Zenith.y, skyTintSet.Zenith.z, 0.0f
+                        };
+                        skyConstants.HorizonTint = {
+                            skyTintSet.Horizon.x, skyTintSet.Horizon.y, skyTintSet.Horizon.z, 0.0f
+                        };
+                        skyConstants.GroundTint = {
+                            skyTintSet.Ground.x, skyTintSet.Ground.y, skyTintSet.Ground.z, 0.0f
+                        };
+                        skyConstants.SunGlowTint = {
+                            skyTintSet.SunGlow.x, skyTintSet.SunGlow.y, skyTintSet.SunGlow.z,
+                            skyTintSet.SunGlowStrength
                         };
                         cmd->UpdateBuffer(m_SkyBakeConstantBuffer.get(), &skyConstants, sizeof(skyConstants));
                         cmd->SetComputeConstantBuffer(0, m_SkyBakeConstantBuffer.get());
@@ -3171,9 +3426,9 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AutoExposure",
-                .Reads = { hdrSceneColor },
+                .Reads = { hdrSceneColor, m_GBufferDepth.get() },
                 .Writes = { m_ExposureTexture.get() },
-                .Execute = [this, hdrSceneColor](RHI::IRHICommandList* cmd)
+                .Execute = [this, hdrSceneColor, keyReferenceEV100, usingProceduralSky](RHI::IRHICommandList* cmd)
                 {
                     AutoExposureConstants autoExposureConstants{};
                     autoExposureConstants.InputSize = { m_RenderWidth, m_RenderHeight };
@@ -3188,6 +3443,24 @@ namespace Kurenai
                     autoExposureConstants.LowPercentile = std::min(m_AutoExposureLowPercentile, m_AutoExposureHighPercentile);
                     autoExposureConstants.HighPercentile = std::max(m_AutoExposureLowPercentile, m_AutoExposureHighPercentile);
                     autoExposureConstants.ExposureCompensation = m_AutoExposureCompensation;
+                    autoExposureConstants.NightRolloffEV = m_AutoExposureNightRolloffEV;
+                    // 折れ点は必ずDark < Brightにする(逆転すると補正が不連続になる)
+                    autoExposureConstants.NightRolloffDarkEV100 =
+                        std::min(m_AutoExposureNightRolloffDarkEV100, m_AutoExposureNightRolloffBrightEV100);
+                    autoExposureConstants.NightRolloffBrightEV100 =
+                        std::max(m_AutoExposureNightRolloffDarkEV100, m_AutoExposureNightRolloffBrightEV100);
+                    // 構図に依存しないシーンの基準EV。測光値の上限の足がかりになる。
+                    //
+                    // **手続き空を使っていないシーンではクランプを無効にする**。
+                    // 基準EVはこのエンジンの太陽・月・空モデルが出す照度から求めているので、
+                    // .ksceneが独自のスカイボックスを指定しているシーン(White Furnace Testなど)
+                    // では、そのシーンを実際に照らしている光と無関係な値になってしまう。
+                    // 実際、無効化前はWhite Furnace Testの一様グレーが107から208まで持ち上がり、
+                    // 白飛びまで余裕が無くなっていた(一様性そのものは保たれていたが、
+                    // 飽和させてしまうとエネルギー保存の検証が成立しなくなる)
+                    autoExposureConstants.KeyReferenceEV100 = keyReferenceEV100;
+                    autoExposureConstants.KeyCeilingEV =
+                        usingProceduralSky ? m_AutoExposureKeyCeilingEV : 1.0e4f;
                     cmd->UpdateBuffer(m_AutoExposureConstantBuffer.get(), &autoExposureConstants, sizeof(autoExposureConstants));
 
                     // 1) ヒストグラムをゼロクリア
@@ -3201,6 +3474,8 @@ namespace Kurenai
                     cmd->SetComputePipelineState(m_AutoExposureHistogramPipelineState.get());
                     cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
                     cmd->SetComputeTexture(0, hdrSceneColor);
+                    // 空(背景)を測光から外すために深度を読む(AutoExposure.hlsl参照)
+                    cmd->SetComputeTexture(1, m_GBufferDepth.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
                     cmd->Dispatch((m_RenderWidth + 15) / 16, (m_RenderHeight + 15) / 16, 1);
 
@@ -3233,7 +3508,7 @@ namespace Kurenai
                 .Name = "Bloom",
                 .Reads = { hdrSceneColor, m_ExposureTexture.get() },
                 .Writes = std::move(bloomWrites),
-                .Execute = [this, hdrSceneColor](RHI::IRHICommandList* cmd)
+                .Execute = [this, hdrSceneColor, manualExposureScale](RHI::IRHICommandList* cmd)
                 {
                     const uint32_t levelCount = static_cast<uint32_t>(m_BloomDownTextures.size());
 
@@ -3241,9 +3516,11 @@ namespace Kurenai
                     bloomConstants.Threshold = m_BloomThreshold;
                     bloomConstants.SoftKnee = m_BloomSoftKnee;
                     // しきい値を「表示上の白」基準の直感的な値のままにするため、
-                    // ピラミッドの入力段で露出を反映する(Bloom.hlsl ExposureScale()参照)
+                    // ピラミッドの入力段で露出を反映する(Bloom.hlsl ExposureScale()参照)。
+                    // Tonemapと同じ倍率でなければ、ブルームだけ露出がずれて合成比が狂う
                     bloomConstants.UseAutoExposure = m_AutoExposureEnabled ? 1.0f : 0.0f;
                     bloomConstants.PreExposureEV100 = m_EffectiveExposureEV100;
+                    bloomConstants.ExposureScale = manualExposureScale;
 
                     // --- ダウンサンプル: SceneColor -> down[0] -> down[1] -> ... ---
                     cmd->SetComputePipelineState(m_BloomDownsamplePipelineState.get());
@@ -3310,18 +3587,23 @@ namespace Kurenai
             .Name = "Tonemap",
             .Reads = { hdrSceneColor, m_ExposureTexture.get(), bloomResultTexture },
             .RenderTargets = { m_TonemapTexture.get() },
-            .Execute = [this, &gbufferViewport, hdrSceneColor, bloomResultTexture](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale,
+                        keyReferenceEV100](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
                 tonemapConstants.Curve = static_cast<int32_t>(m_TonemapCurve);
-                // 手動露出時: 露出はComputeSunLighting/MakeGPULightがライト強度へ事前乗算済みの
-                // ため、ここで追加の露出は掛けない
-                tonemapConstants.ExposureScale = 1.0f;
+                // 手動露出時: プリ露出は時刻連動で変動するので、設定EV100との差分を割り戻して
+                // 「設定EV100で固定した絵」へ戻す(manualExposureScaleの算出箇所のコメント参照)
+                tonemapConstants.ExposureScale = manualExposureScale;
                 tonemapConstants.DitherStrength = m_DitherEnabled ? 1.0f : 0.0f;
                 tonemapConstants.UseAutoExposure = m_AutoExposureEnabled ? 1.0f : 0.0f;
                 tonemapConstants.PreExposureEV100 = m_EffectiveExposureEV100;
                 tonemapConstants.BloomStrength =
                     (m_BloomEnabled && !m_BloomUpTextures.empty()) ? m_BloomStrength : 0.0f;
+                tonemapConstants.MesopicStrength = m_MesopicStrength;
+                // 目の順応は画面の構図ではなくシーンの明るさで決まるので、
+                // 自動露出の測光値ではなくキー照度から求めた基準EVを使う
+                tonemapConstants.MesopicAdaptationEV100 = keyReferenceEV100;
                 cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
 
                 cmd->SetViewport(gbufferViewport);

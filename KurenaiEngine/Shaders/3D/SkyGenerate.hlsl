@@ -26,25 +26,29 @@ cbuffer SkyBakeConstants : register(b0)
     // 太陽が「ある」向き(正規化済み)。光が進む向きとは符号が逆なので注意
     // (KurenaiEngine3D.cpp ComputeSunLighting の sunDirection と同じ向き)
     float4 SunDirection;
+    // --- 空の色味。太陽高度に応じてCPU側(ComputeSkyTint)が決めた値。xyzのみ使う ---
+    // 【なぜCPUで決めるのか】この色味は、ここでの描画と CPU 側の照度正規化
+    // (ComputeSkyZenithScale。積分の重みに色味の輝度成分が入る)の両方で完全に一致して
+    // いなければならない。CPUで1度決めて配れば、両者がずれることが構造的に起きなくなる
+    float4 ZenithTint;
+    float4 HorizonTint;
+    float4 GroundTint;
+    // xyz=夕焼け・朝焼けの暖色、w=その強さ(太陽の仰角0度で1、±15度で0)
+    float4 SunGlowTint;
 };
 
 RWTexture2DArray<float4> SkyOut : register(u0);
 
 // --- generate_sky_cubemap.py と一致させる定数 ---
-// 空の色味。物理的な分光計算はせず、Perez分布が与える輝度の大きさはそのままに色味だけ補間する
-// (アート的な近似)。天頂→水平線を単純に線形補間すると、ゲームカメラが見る典型的な低い仰角でも
-// 白側へ寄りすぎて「青空に見えない」ため、水平線側にも青みを残した値にしてある
-static const float3 kZenithTint = float3(0.30f, 0.55f, 0.95f);
-static const float3 kHorizonTint = float3(0.65f, 0.80f, 1.0f);
 // 地平線より下は空モデルの適用範囲外。プラトー色から暗い接地色へフェードさせる。
 // ゼロにしないのは、IBLの拡散イラディアンス積分で下半球が完全な暗黒にならないようにするため
-static const float3 kGroundTint = float3(0.10f, 0.09f, 0.08f);
 static const float kGroundFadeStartY = -0.02f;
 static const float kGroundFadeEndY = -0.6f;
-// CIE快晴空係数(circumsolar項 c=10, d=-3)は太陽から45度離れると輝度が天頂の1/4程度まで落ちる。
-// 実際の大気は多重散乱で太陽から離れた領域もある程度明るいため、そのままだと「くすんだ暗い空」に
-// 見える。最低輝度を底上げしてcircumsolarのハイライトは保ったまま全体を明るくする
-static const float kRelativeLuminanceFloor = 0.45f;
+// CIE快晴空係数(circumsolar項 c=10, d=-3)は反太陽側の水平線で輝度が天頂の0.2倍程度まで落ちる。
+// 実際の大気は多重散乱で暗部が持ち上がるためゼロにはしないが、以前ここを0.45にしていたときは
+// 輝度の勾配がほぼ消えて空全体が一様なスレートグレーになっていた(実測: 彩度0.26で時刻不変)。
+// 勾配が残る値まで下げてある。KurenaiEngine3D.cpp の kSkyRelativeLuminanceFloor と同じ値であること
+static const float kRelativeLuminanceFloor = 0.12f;
 
 // キューブマップの1面上のUV([0,1]^2)から方向を求める。
 // IBLConvolve.hlsl の CubeFaceDirection および generate_sky_cubemap.py の face_direction_grid と
@@ -84,6 +88,26 @@ float PerezRelativeLuminance(float cosTheta, float gamma, float cosThetaSun, flo
     return PerezF(cosTheta, gamma, a, b, c, d, e) / PerezF(cosThetaSun, thetaSun, a, b, c, d, e);
 }
 
+// 太陽の暖色を混ぜる重み。KurenaiEngine3D.cpp の SunGlowWeight と同じ式であること。
+// 太陽から離れるほど急に落ちる4乗カーブ。太陽が地平線下にあっても、その方位の低空には
+// まだ暖色が残る(実際の夕焼けの残光と同じ構造)
+float SunGlowWeight(float cosGamma, float glowStrength)
+{
+    const float proximity = saturate(cosGamma);
+    const float falloff = proximity * proximity * proximity * proximity;
+    return saturate(glowStrength * falloff);
+}
+
+// 方向(天頂角と太陽との離角)に対する空の色味。
+// KurenaiEngine3D.cpp の SkyTint と同じ式であること
+float3 SkyTint(float cosTheta, float cosGamma)
+{
+    // 水平線側への寄せを3乗カーブにして、高度があるうちは天頂色をほぼ保つ
+    const float horizonBlend = pow(1.0f - saturate(cosTheta), 3.0f);
+    const float3 base = lerp(ZenithTint.rgb, HorizonTint.rgb, horizonBlend);
+    return lerp(base, SunGlowTint.rgb, SunGlowWeight(cosGamma, SunGlowTint.w));
+}
+
 // 水平線以上を仮定した空の色(呼び出し側で地面フェードと合成する)
 float3 SkyColorUpper(float3 dir, float3 sunDir)
 {
@@ -100,11 +124,7 @@ float3 SkyColorUpper(float3 dir, float3 sunDir)
     float relative = max(PerezRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun), 0.0f);
     relative = kRelativeLuminanceFloor + (1.0f - kRelativeLuminanceFloor) * relative;
 
-    // 水平線側への寄せを3乗カーブにして、高度があるうちは天頂色をほぼ保つ
-    const float horizonBlend = pow(1.0f - saturate(cosTheta), 3.0f);
-    const float3 tint = lerp(kZenithTint, kHorizonTint, horizonBlend);
-
-    return relative * ZenithLuminance * tint;
+    return relative * ZenithLuminance * SkyTint(cosTheta, cosGamma);
 }
 
 float3 SkyColor(float3 dir, float3 sunDir)
@@ -120,7 +140,7 @@ float3 SkyColor(float3 dir, float3 sunDir)
     plateauDir = normalize(plateauDir);
     const float3 plateauColor = SkyColorUpper(plateauDir, sunDir);
 
-    const float3 groundColor = ZenithLuminance * kGroundTint;
+    const float3 groundColor = ZenithLuminance * GroundTint.rgb;
     const float groundT = saturate((dir.y - kGroundFadeStartY) / (kGroundFadeEndY - kGroundFadeStartY));
     return lerp(plateauColor, groundColor, groundT);
 }
