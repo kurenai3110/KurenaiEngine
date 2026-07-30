@@ -8,6 +8,7 @@
 
 #include "DX12DescriptorHeap.h"
 #include "DX12Device.h"
+#include "RHI/ImGuiContextSetup.h"
 
 namespace Kurenai::RHI
 {
@@ -39,9 +40,9 @@ namespace Kurenai::RHI
         m_SrvHeap = std::make_unique<DX12DescriptorHeap>(device->GetDevice(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 64, true);
         m_SrvHeap->GetHeap()->SetName(L"ImGui Shader Visible SRV Heap");
 
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGui::StyleColorsDark();
+        // コンテキスト生成と共通設定(ドッキング有効化等)はDX11側と共通のためImGuiContextSetupへ集約した。
+        // スタイル・フォントはRHIの責務ではないためここでは設定せず、KurenaiEngine3D側が行う
+        Detail::CreateImGuiContextCommon();
 
         ImGui_ImplDX12_InitInfo initInfo{};
         initInfo.Device = device->GetDevice();

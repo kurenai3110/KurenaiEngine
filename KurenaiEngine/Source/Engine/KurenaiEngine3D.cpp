@@ -1454,6 +1454,37 @@ namespace Kurenai
         return lightView * lightProj;
     }
 
+    void KurenaiEngine3D::RenderMainMenuAndDockSpaceUI()
+    {
+        // マルチビューポートはこのプロジェクトでは使わない(動作確認のPostMessageによる自動クリックが
+        // メインウィンドウのHWND前提のため。ImGuiContextSetup参照)。何らかの理由で有効化された場合に
+        // 備え、毎フレーム落としてログに残す
+        ImGuiIO& io = ImGui::GetIO();
+        if ((io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0)
+        {
+            io.ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
+            Core::Logger::Warning("ImGui", "ImGuiConfigFlags_ViewportsEnableが有効だったため無効化しました");
+        }
+
+        // メニューバーを先に出す。DockSpaceOverViewportはビューポートのWorkPos/WorkSize
+        // (メニューバーの高さを差し引いた領域)を使うため、この順序でなければドックスペースが
+        // メニューバーの下に潜り込む
+        if (ImGui::BeginMainMenuBar())
+        {
+            ImGui::TextUnformatted(m_GraphicsAPI == GraphicsAPI::DX12 ? "Graphics API: DX12" : "Graphics API: DX11");
+            ImGui::EndMainMenuBar();
+        }
+
+        // PassthruCentralNode: どのパネルもドッキングされていない中央ノードを完全に透過させる。
+        // これによりPresentパスが描いた3D映像がそのまま中央に見えるため、「3Dをテクスチャへ描いて
+        // ImGui::Imageで出す」構成にしなくてもドッキングが成立する。
+        // NoDockingOverCentralNode: 中央ノードを常に空のまま保つ。付けないとユーザーが誤って
+        // 中央へパネルをドロップし、3D映像が完全に隠れてしまう
+        const ImGuiDockNodeFlags dockFlags =
+            ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_NoDockingOverCentralNode;
+        ImGui::DockSpaceOverViewport(0, nullptr, dockFlags);
+    }
+
     void KurenaiEngine3D::RenderSceneSwitchUI()
     {
         ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
@@ -2163,6 +2194,7 @@ namespace Kurenai
         m_ImGuiBackend->NewFrame();
         if (frameState.ImGuiVisible)
         {
+            RenderMainMenuAndDockSpaceUI();
             RenderSceneSwitchUI();
             RenderPostProcessUI();
             RenderDebugViewUI();

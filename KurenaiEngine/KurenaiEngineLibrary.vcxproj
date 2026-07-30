@@ -112,6 +112,7 @@
     <ClInclude Include="Source\Library\RHI\IRHICommandList.h" />
     <ClInclude Include="Source\Library\RHI\IRHIDevice.h" />
     <ClInclude Include="Source\Library\RHI\IRHIImGuiBackend.h" />
+    <ClInclude Include="Source\Library\RHI\ImGuiContextSetup.h" />
     <ClInclude Include="Source\Library\RHI\IRHIGPUProfiler.h" />
     <ClInclude Include="Source\Library\RHI\IRHITexture.h" />
     <ClInclude Include="Source\Library\RHI\IRHISamplerSet.h" />
@@ -164,6 +165,7 @@
     <ClCompile Include="Source\Library\Assets\ModelLoader.cpp" />
     <ClCompile Include="Source\Library\Assets\SceneLoader.cpp" />
     <ClCompile Include="Source\Library\RHI\TextureImage.cpp" />
+    <ClCompile Include="Source\Library\RHI\ImGuiContextSetup.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Buffer.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Shader.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11PipelineState.cpp" />

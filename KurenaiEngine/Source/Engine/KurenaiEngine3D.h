@@ -87,6 +87,9 @@ namespace Kurenai
         void Update(float deltaTime);
         void RenderThreadMain();
         void Render(const FrameState& frameState);
+        // メインメニューバーと、画面全体を覆うドックスペースを出す。各パネルのImGui::Beginより前に
+        // 呼ぶこと(パネルがドックへ吸着できるようにするため)
+        void RenderMainMenuAndDockSpaceUI();
         void RenderSceneSwitchUI();
         void RenderPostProcessUI();
         void RenderDebugViewUI();
