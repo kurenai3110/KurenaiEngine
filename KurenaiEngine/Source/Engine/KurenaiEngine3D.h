@@ -88,6 +88,8 @@ namespace Kurenai
         void RenderPostProcessUI();
         void RenderDebugViewUI();
         void RenderLightingUI(const FrameState& frameState);
+        // 反射プローブの一覧・プロパティ編集・再ベイクのパネル(RenderLightingUIと同じ構成)
+        void RenderReflectionProbeUI();
         void RenderProfilerUI();
         // カメラ視錐台をkCascadeCount個の深度範囲に分割する(near/far境界、View空間での距離)。
         // 対数分割と均等分割を混合した実用的な分割(Practical Split Scheme)を使う
@@ -355,7 +357,7 @@ namespace Kurenai
         // 何段上まで行くのを許すか[EV]。十分大きな値(16など)で無効になる。
         //
         // 【位置づけ】構図で露出が振れる問題そのものは、AutoExposure.hlslで
-        // **空を測光から外した**ことで根本的に解決している(18.9.8節)。
+        // **空を測光から外した**ことで根本的に解決している(21.9.8節)。
         // こちらは残った病的なケースへの保険で、通常は発動しない:
         // 夜の街で明るい看板が画面の大半を占めるようなとき、明るい側に寄った測光範囲
         // (50〜95パーセンタイル)がその看板に支配され、街並みが黒く沈むのを防ぐ。
@@ -439,6 +441,10 @@ namespace Kurenai
             IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLPrefilterDebugMipLevel、TextureCube)
             IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス)
             Bloom,              // ブルームのピラミッド最上段(半解像度、HDR)をトーンマッピングして表示
+            LightTiles,         // タイルライトカリングのライトグリッド(タイルあたりのライト数)をヒートマップ表示
+            ProbeIrradiance,    // 反射プローブの拡散イラディアンス(m_ProbeDebugIndex番のプローブ)
+            ProbePrefilter,     // 反射プローブのプリフィルタ済み鏡面(ミップ0がキャプチャ結果そのもの)
+            ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -592,6 +598,87 @@ namespace Kurenai
         // (KHR_materials_emissive_strengthをインポータが読むようになれば本来はそちらが正しい)
         float m_EmissiveIntensity = 1.0f;
 
+        // 反射プローブ(19章): プローブ位置から6方向をProbeCapture.hlslで2Dレンダーターゲットへ描き、
+        // IBLConvolve.hlsl CSCopyCaptureToCubeFaceでスクラッチのキューブマップへ組み上げてから、
+        // IBLと同じCSIrradiance/CSPrefilterで畳み込んでプローブごとのキューブマップ配列へ書き込む。
+        // 環境ソースを差し替えるだけなので、シェーダー側の評価式(EvaluateIBL)はIBLと完全に共通。
+        //
+        // キューブマップ配列の枚数上限。TextureCubeArrayは実行時に伸縮できないため固定容量で確保し、
+        // これを超えるプローブが置かれたシーンは先頭からこの数だけを採用する(警告ログを出す)
+        static constexpr uint32_t kMaxReflectionProbes = 8;
+        // キャプチャ解像度。プリフィルタ済み鏡面のベース解像度(kIBLPrefilterBaseSize)と揃えることで、
+        // ミップ0が「畳み込み無しのキャプチャそのもの」になりデバッグ表示で生の映り込みを確認できる
+        static constexpr uint32_t kProbeCaptureSize = kIBLPrefilterBaseSize;
+        std::unique_ptr<RHI::IRHIShader> m_ProbeCaptureVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_ProbeCapturePixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCapturePipelineState;
+        // 1面ぶんのキャプチャ先(6面で使い回す)。HDRのままキューブへ写すためG-Bufferと違いFloat
+        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureColor;
+        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDepth;
+        std::unique_ptr<RHI::IRHIShader> m_ProbeCubeCopyComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCubeCopyPipelineState;
+        // キャプチャした6面を組み上げるスクラッチのキューブマップ(単一キューブ)。畳み込みの入力に
+        // なるためTextureCubeArrayではなくTextureCubeである必要がある(IBLConvolve.hlslのSourceSkyboxは
+        // TextureCube宣言のまま。これによりIBLの畳み込みシェーダーを一切変更せず再利用できる)。
+        // プローブは1つずつ順に焼くため1枚で足りる
+        std::unique_ptr<RHI::IRHITexture> m_ProbeRadianceCube;
+        // 畳み込み結果(プローブごと)。DeferredLighting.hlslがTextureCubeArrayとして読む
+        std::unique_ptr<RHI::IRHITexture> m_ProbeIrradianceArray;
+        std::unique_ptr<RHI::IRHITexture> m_ProbePrefilteredArray;
+        // プローブの影響範囲(位置・半径)をシェーダーへ渡すStructuredBuffer(t13)
+        std::unique_ptr<RHI::IRHIBuffer> m_ProbeBuffer;
+        // キャプチャの面ごとに値を更新して使い回すFrameConstants(共有のm_FrameConstantBufferとは別。
+        // ViewProj/CameraPositionだけをプローブのものへ差し替える。詳細はProbeCapture.hlsl冒頭)
+        std::unique_ptr<RHI::IRHIBuffer> m_ProbeCaptureConstantBuffer;
+        // LoadSceneがm_Scene.ReflectionProbesからコピーし、以降ImGuiが編集する(m_Lightsと同じ方針)。
+        // m_SceneMutexで保護される
+        std::vector<Assets::ReflectionProbe> m_ReflectionProbes;
+        int m_SelectedProbeIndex = -1;
+        // 次のRender()でプローブを焼き直す要求。シーン読み込み時とImGuiのBakeボタンで立てる。
+        // スカイボックス由来のIBLと違いシーンのジオメトリ・ライトに依存するため、
+        // 「一度焼いたら二度と焼かない」ではなく明示的な要求ベースにしている
+        bool m_ProbeBakeRequested = false;
+        // 一度でも焼けたか。焼く前のプローブは中身が未定義なので、それまでは影響を無効にして
+        // グローバルIBLのまま描く(未初期化のキューブマップが映り込むのを防ぐ)
+        bool m_ProbeBaked = false;
+        bool m_ReflectionProbeEnabled = true;
+        // 視差補正(box projection)を行うか。Box形状のプローブにのみ効く。無効にすると
+        // 反射ベクトルをそのまま引くPhase 1相当の挙動になり、壁際で反射位置がずれるのを確認できる
+        bool m_ProbeParallaxCorrectionEnabled = true;
+        // プローブ間・プローブとグローバルIBLの重み付きブレンドを行うか。無効にすると
+        // 「影響範囲に入る最も近い1つだけを使う」Phase 1相当の挙動になり、境界の継ぎ目を確認できる
+        bool m_ProbeBlendingEnabled = true;
+        // デバッグ表示(Render Targets)で確認するプローブ番号とプリフィルタのミップレベル
+        int32_t m_ProbeDebugIndex = 0;
+        int32_t m_ProbePrefilterDebugMipLevel = 0;
+
+        // プローブの更新モード。焼き直しのコストと「シーンの変化への追従」のどちらを取るかの選択で、
+        // ImGuiで切り替えて負荷と品質を比較できるようにしてある(19.10節)
+        enum class ProbeUpdateMode
+        {
+            // シーン読み込み時とImGuiのBakeボタンのときだけ焼く。実行時コストはゼロだが、
+            // ライトや時刻を動かしても反射は焼いた時点のまま止まる
+            Baked,
+            // 上に加えて、焼き上がりに影響する状態(時刻・太陽・ライト)の変化を検出して自動で焼き直す。
+            // 変化していないフレームのコストはゼロだが、変化したフレームは全プローブぶんの
+            // フルベイクが1フレームに集中する
+            OnDemand,
+            // 上に加えて、毎フレーム1面ずつ焼き直す。6面揃った時点でそのプローブを畳み込み、
+            // 次のプローブへ回る(ラウンドロビン)。全プローブを毎フレーム焼くとドローコールが
+            // プローブ数×6倍になり非現実的なため、時間分割を既定の実装方式にしている
+            Realtime,
+        };
+        ProbeUpdateMode m_ProbeUpdateMode = ProbeUpdateMode::Baked;
+        // Realtimeの進行状態。次に焼くプローブ番号と面番号
+        uint32_t m_ProbeRealtimeProbeIndex = 0;
+        uint32_t m_ProbeRealtimeFace = 0;
+        // OnDemandの変化検出用。最後にフルベイクを発行した時点の状態の署名。
+        // 毎フレームの署名と突き合わせ、変わっていれば焼き直しを要求する
+        uint64_t m_ProbeBakeSignature = 0;
+        // 焼き上がりに影響する状態(時刻・太陽・シャドウ・IBL強度・全ライト)から署名を作る。
+        // 影響範囲(形状・半径・ブレンド距離)はキャプチャ内容を変えないため含めない
+        uint64_t ComputeProbeBakeSignature() const;
+
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = 12.0f;
         bool m_TimeAutoAdvance = false;
@@ -632,6 +719,48 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_LightingConstantBuffer;
         // 容量(kMaxLights)超過を検出した最初のフレームだけ警告ログを出すためのフラグ
         bool m_LightOverflowLogged = false;
+
+        // ポイント/スポットライトのスクリーンスペースシャドウ(接触影)の設定。
+        // シャドウマップを増やさず、G-Bufferの深度バッファをライト方向へレイマーチして影を出す
+        // (Shaders/3D/ScreenSpaceShadow.hlsli、docs/Architecture.html 18章)
+        bool m_ScreenSpaceShadowEnabled = true;
+        // レイマーチのステップ数。ScreenSpaceShadow.hlsliのkSSSMaxStepCount(64)が上限
+        int m_ScreenSpaceShadowStepCount = 16;
+        // 1本のレイが伸びる最大のワールド距離。ライトまでの距離がこれより短ければそちらが優先される。
+        // 短いほど「接触影」寄りになり、コストも下がる
+        float m_ScreenSpaceShadowMaxRayLength = 1.5f;
+        // 遮蔽と判定する深度差の上限。深度バッファがサーフェスの厚みを持たないための近似で、
+        // 大きすぎると遠景が無限に厚い遮蔽物として振る舞い、小さすぎると薄い物体を貫通する
+        float m_ScreenSpaceShadowThickness = 0.5f;
+        // レイ始点を法線方向へ押し出す量(View空間深度に比例させる係数)。自己遮蔽(シャドウアクネ)対策
+        float m_ScreenSpaceShadowNormalBias = 0.002f;
+        // ヒット位置が画面端に近いときに影を弱める幅(UV単位)。SSRのkSSREdgeFadeDistanceと同じ役割
+        float m_ScreenSpaceShadowEdgeFade = 0.1f;
+        // 1ピクセルが撃てるシャドウレイ数の上限。ライトを増やしてもレイマーチのコストが
+        // 線形に伸び続けないようにするための予算
+        int m_ScreenSpaceShadowMaxLightsPerPixel = 4;
+
+        // タイルライトカリング(Shaders/3D/LightCulling.hlsl)。画面を16x16ピクセルのタイルに分け、
+        // タイルごとに「そのタイルに届くライト」のインデックスリストをコンピュートシェーダーで作る。
+        // 直接光パスはそのリストだけをループするため、ピクセルあたりのコストが
+        // シーン全体のライト数ではなくタイル内のライト数になる。
+        // これは純粋な最適化であり、有効/無効で最終画像が変わってはならない
+        std::unique_ptr<RHI::IRHIShader> m_LightCullingComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_LightCullingPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_LightCullingConstantBuffer;
+        // ライトグリッド本体(BufferUsage::StructuredRW)。コンピュートがUAVで書き、
+        // 直接光パスのピクセルシェーダがSRVで読む。解像度に依存するためCreateRenderTargetsで作り直す
+        std::unique_ptr<RHI::IRHIBuffer> m_LightTileBuffer;
+        uint32_t m_LightTileCountX = 0;
+        uint32_t m_LightTileCountY = 0;
+        bool m_LightCullingEnabled = true;
+        // タイル容量の超過"条件"(シーンのライト数が容量を超えている)を検出した最初のフレームだけ
+        // 警告ログを出すためのフラグ(m_LightOverflowLoggedと同じ作法)。
+        // 実際に超過したかはGPU側にしか無いため、確認はDebugView::LightTilesのマゼンタで行う
+        bool m_LightTileOverflowLogged = false;
+        // DebugView::LightTilesのヒートマップで赤に振り切る基準のライト数。容量(64)を基準にすると
+        // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
+        int m_LightTileHeatmapMax = 8;
 
         // LoadScene(Updateスレッド。UpdateSceneSwitch経由で呼ばれる)が書き込み、Render()(Renderスレッド。
         // 描画そのものに加えRenderPostProcessUI等のImGuiスライダーがm_SSAORadius等を直接書き換える)が

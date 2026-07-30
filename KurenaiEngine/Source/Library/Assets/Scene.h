@@ -26,6 +26,44 @@ namespace Kurenai::Assets
         bool IsMirrored = false;
     };
 
+    // 反射プローブ(リフレクションプローブ)。この位置から周囲をキューブマップへキャプチャし、
+    // 畳み込んだものを影響範囲内のピクセルのIBL環境ソースとして使う。シーン全体で1つしかない
+    // スカイボックス由来のIBLと違い、位置ごとに異なる環境(屋内なら屋内の壁・天井)を反映できる
+    // 反射プローブの影響範囲の形状
+    enum class ReflectionProbeShape
+    {
+        // 中心からの距離だけで判定する球。設定項目がRadiusひとつで済む反面、部屋の形に
+        // 沿わせられず、視差補正(下記)も行えない
+        Sphere,
+        // プローブ位置を中心とする、Y軸まわりに回転できる直方体(OBB)。部屋の壁・床・天井に
+        // 合わせて置くことで、影響範囲が部屋の外へはみ出さなくなるうえ、反射ベクトルを
+        // この箱と交差させる視差補正が使えるようになる
+        Box,
+    };
+
+    struct ReflectionProbe
+    {
+        // ワールド空間のキャプチャ位置(この点から6方向を撮る)。Box形状の場合は箱の中心でもある
+        float Position[3] = { 0.0f, 0.0f, 0.0f };
+        // 影響範囲の半径(ワールド単位)。この球の内側のピクセルがこのプローブの環境を受け、
+        // 外側はスカイボックス由来のグローバルIBLへフォールバックする(Sphere形状のときのみ使用)
+        float Radius = 10.0f;
+
+        ReflectionProbeShape Shape = ReflectionProbeShape::Sphere;
+        // Box形状の各軸の半径(ハーフエクステント)。プローブのローカル空間(Yaw回転後)での値
+        float BoxExtents[3] = { 10.0f, 10.0f, 10.0f };
+        // Box形状のY軸まわりの回転(度)。壁が軸に平行でない部屋へ合わせるためのもの。
+        // 傾いた床・天井を持つ空間は想定していないため、ピッチ・ロールは持たない
+        float YawDegrees = 0.0f;
+
+        // 影響範囲の境界から内側へ何ワールド単位かけて重みを1まで立ち上げるか。
+        // 0だと境界でプローブが突然切り替わり継ぎ目が出る(Phase 1の挙動)。
+        // 重なり合うプローブ同士・プローブとグローバルIBLの間の滑らかな移行に使う
+        float BlendDistance = 2.0f;
+
+        std::string Name;
+    };
+
     struct Scene
     {
         std::wstring Name;
@@ -36,6 +74,10 @@ namespace Kurenai::Assets
         // [Light]セクションで直接指定されたライト(元からワールド空間)を合成した、シーン全体の
         // ライト一覧。KurenaiEngine3Dはこれをそのまま読んでGPUのライトバッファを構築する
         std::vector<Light> Lights;
+
+        // .ksceneの[ReflectionProbe]セクションで配置された反射プローブの一覧(ワールド空間)。
+        // ライトと違いモデルファイルへ埋め込む概念が無いため、.ksceneに書かれたものが全て
+        std::vector<ReflectionProbe> ReflectionProbes;
 
         // [Camera]セクションが無い場合はfalseのままで、呼び出し側はFrameCameraToModel相当の
         // 自動配置ヒューリスティックを使う

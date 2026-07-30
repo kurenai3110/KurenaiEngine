@@ -32,9 +32,11 @@ namespace Kurenai::RHI
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
         void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeTexture(uint32_t slot, IRHITexture* texture) override;
+        void SetComputeShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0) override;
-        void SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0) override;
+        void SetComputeUnorderedAccessTextureCubeFace(
+            uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0, uint32_t cubeIndex = 0) override;
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
@@ -42,6 +44,16 @@ namespace Kurenai::RHI
         static constexpr uint32_t kMaxRenderTargets = 8;
         // SetComputeUnorderedAccessTexture/Bufferで使えるUAVスロット数(u0〜u3)
         static constexpr uint32_t kComputeUavSlotCount = 4;
+        // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t11)。
+        // DX12側のDX12CommandList::kTextureSlotCountと同じ値にしておくこと
+        static constexpr uint32_t kTextureSlotCount = 12;
+
+        // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
+        // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。
+        // 生ポインタではなくComPtrで持つのは、テクスチャ/バッファが解像度変更等で作り直された際に
+        // 解放済みのビューをGetResourceで触ってしまうのを防ぐため
+        void UnbindPixelSrvForResource(ID3D11Resource* resource);
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_BoundPixelSrvs[kTextureSlotCount];
 
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
         ID3D11RenderTargetView* m_CurrentRenderTargetViews[kMaxRenderTargets] = {};
@@ -50,7 +62,11 @@ namespace Kurenai::RHI
 
         // Dispatch後にUAVを明示的にアンバインドするための、直前のDispatchでバインドしたスロットのビットマスク。
         // DX11はUAVとSRVを同一リソースへ同時バインドできないため、バインドしっぱなしにすると
-        // 次にそのリソースをSetTexture(SRV)で読もうとした際にドライバが自動でUAV側を外して警告を出す
+        // 次にそのリソースをSetTexture(SRV)で読もうとした際にドライバが自動でUAV側を外して警告を出す。
+        //
+        // これは「UAV→SRV」方向の対処で、逆の「SRV→UAV」方向(前フレームにPSがSRVで読んだリソースを
+        // 次フレームのDispatchがUAVで書く。タイルライトカリングのライトグリッドが該当する)は
+        // UnbindPixelSrvForResourceで対処している
         uint32_t m_BoundComputeUavSlotMask = 0;
     };
 }

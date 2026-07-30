@@ -160,6 +160,8 @@
     border-radius: 6px;
     margin: 1.2em 0;
   }
+  /* 箇条書きの途中に「後の章で更新された」と差し込むための短い注記 */
+  .note-inline { color: #b58900; }
   .note p:first-child { margin-top: 0; }
   .note p:last-child { margin-bottom: 0; }
   .badge {
@@ -216,7 +218,10 @@
     <li><a href="#transparent">15. 半透明描画(フォワードパス)</a></li>
     <li><a href="#rhi-binding">16. RHIのバインド寿命(DX11/DX12の挙動統一)</a></li>
     <li><a href="#tonemap-exposure-bloom">17. トーンマッピング・露出・ブルーム</a></li>
-    <li><a href="#procedural-sky">18. 手続き空・月光・昼夜遷移</a></li>
+    <li><a href="#sss-tiled-lights">18. スクリーンスペースシャドウとタイルライトカリング</a></li>
+    <li><a href="#reflectionprobe">19. 反射プローブ(リフレクションプローブ)</a></li>
+    <li><a href="#ssrprobe">20. SSRとプローブの合成(加算から差し替えへ)</a></li>
+    <li><a href="#procedural-sky">21. 手続き空・月光・昼夜遷移</a></li>
   </ol>
 </nav>
 
@@ -447,6 +452,13 @@ with Visibility Bitmask" (2023) を参考にした実装)。
 ミップチェーンによるラフネスブラーは行っていないため、粗い面ほど反射の寄与を弱めてノイズ化を
 防いでいます。
 </p>
+<div class="note">
+この章はレイマーチングそのものの説明です。<b>反射色をどう合成するかは
+<a href="#ssrprobe">20章</a>で作り直されており、現在は「加算」ではなく
+「Lightingパスが適用した鏡面IBLの放射輝度を差し替える」方式です。</b>
+反射プローブ(19章)の導入により、画面外へ外れた場合の扱いも
+「何も足さない」から「プローブに任せる(確信度0)」へ変わっています。
+</div>
 </section>
 
 <section id="hiz">
@@ -989,6 +1001,12 @@ Infoログで明示します(事実と異なる精度を主張しないため)�
 </p>
 
 <h3>11.6 影を持たない理由とSSILへの波及</h3>
+<p class="note">
+<strong>【18章で更新】</strong> この節は複数ライト導入時点の記述です。その後、シャドウマップを増やさずに
+深度バッファをレイマーチする<strong>スクリーンスペースシャドウ</strong>でポイント/スポットライトの影を
+出せるようにしました(<a href="#sss-tiled-lights">18章</a>)。以下の「シャドウを落とさない」は
+現在は当てはまりません。SSILへ自動的に波及するという後半の説明は現在も有効です。
+</p>
 <p>
 ポイント/スポットライトはシャドウを落としません(今回のスコープ外)。既存の平行光シャドウ
 (2048x2048×4スライスの<code>Texture2DArray</code>によるカスケードシャドウ)はそのままです。一方で、<code>SSIL_VisibilityBitmask.hlsl</code>は
@@ -1047,6 +1065,12 @@ Rangeの推定はglTFのノードメタデータ<code>PBR_LightRange</code>(<cod
 </p>
 
 <h3>11.8 CPU側ライトカリングは今回不要</h3>
+<p class="note">
+<strong>【18章で更新】</strong> 「CPU側の」フラスタムカリングが効かないという以下の判断は現在も有効です
+(全画面ディファードである以上、フラスタム内のライトについてはCPU側で削れることが無いため)。
+その後、<strong>GPU側のタイルベースのライトカリング</strong>を導入し、ピクセルあたりの走査対象を
+そのタイルへ届くライトだけに絞れるようにしました(<a href="#sss-tiled-lights">18章</a>)。
+</p>
 <p>
 全画面ディファードなので、フラスタムカリングは「容量(<code>kMaxLights</code>)を超えたときどれを
 残すか」以外には効果がありません(フラスタム内のライトについてはコストが変わらないため)。
@@ -1066,9 +1090,18 @@ LUTテクスチャ2枚を要求し、<code>kTextureSlotCount = 7</code>に対し
 実装する際は<strong><code>DistributionGGX(NdotH, roughness)</code>が引数を内部で2乗する
 実装</strong>である点に注意してください。ラフネス補正後の<code>alphaPrime</code>ではなく
 <code>sqrt(alphaPrime)</code>を渡す必要があります。</li>
-<li><strong>タイル/クラスタカリング</strong>: 構造化バッファが入ったので、あとはコンピュート用
-ルートシグネチャのSRVスロット拡張(<code>kComputeSrvSlotCount = 4</code>ではG-Buffer4枚+
-ライトリストで足りない)と、<code>m_DirectLightTexture</code>のRTV+UAV両対応があれば載ります。
+<li><strong>タイル/クラスタカリング</strong>:
+<span class="note-inline"><strong>【18章で実装済み】</strong></span>
+タイルベースのカリングを実装しました(<a href="#sss-tiled-lights">18章</a>)。
+実際に必要だったのは、ここで挙げていた「SRVスロット拡張」と
+「<code>m_DirectLightTexture</code>のRTV+UAV両対応」ではなく、
+<strong>コンピュートが書いてピクセルシェーダがSRVで読めるバッファ種別</strong>
+(<code>BufferUsage::StructuredRW</code>)の新設と、
+コンピュートから構造化バッファをSRVで読む<code>SetComputeShaderResourceBuffer</code>の追加でした。
+カリングCSが読むのはライトリストと深度の2本だけなので<code>kComputeSrvSlotCount = 4</code>のままで足り、
+出力もライトグリッド用の専用バッファなので直接光テクスチャをUAV化する必要もありませんでした
+(18.9節)。クラスタ(深度方向の分割)は未実装で、タイルごとの深度範囲による
+スラブ判定で代用しています。
 </li>
 </ul>
 </section>
@@ -1505,7 +1538,7 @@ SSAO/SSILのAO率を拡散IBLにそのまま乗算するのは妥当だが、鏡
 その結果、<strong>IBLを有効にすると無効時よりも夜が暗くなる</strong>という逆転が起きていた
 (IBL無効時のフォールバックには視認性確保のための夜間下限値が入っていたのに対し、
 IBL有効時は厳密にゼロになるため)。実測でも建物がコード0の真っ黒な影絵になることを確認している。
-現在は手続き空が太陽高度に応じて自分で暗くなるため、この乗算は撤廃した(18.4節)。
+現在は手続き空が太陽高度に応じて自分で暗くなるため、この乗算は撤廃した(21.4節)。
 </p>
 
 <h3>14.6 HDRスカイボックス生成(<code>Tools/generate_sky_cubemap.py</code>)</h3>
@@ -1557,7 +1590,7 @@ Perez分布のcircumsolar項(太陽に近い方向ほど散乱で明るくなる
 かつ地平線色をほぼ白(0.92, 0.94, 1.0)にしていたため、ゲームカメラが実際に見る典型的な低めの
 仰角(建物越しに覗く空など)では既に大きく地平線色側へ寄ってしまい、彩度がほぼ失われて灰色に
 見えた(実機で確認された不具合)。天頂色・地平線色そのものをより彩度の高い青に変更
-(天頂: (0.30, 0.55, 0.95)、地平線: (0.65, 0.80, 1.0)。この2値は後に18.9.3節で
+(天頂: (0.30, 0.55, 0.95)、地平線: (0.65, 0.80, 1.0)。この2値は後に21.9.3節で
 太陽高度に応じた3セットの補間へ置き換えた)した上で、補間カーブを線形から3乗
 (<code>(1-cosθ)³</code>)に変更し、実際の快晴の空と同様に「高い仰角ではほぼ天頂色を保ち、
 水平線ぎわの最後の範囲だけ急速に白っぽくなる」挙動に直した。
@@ -1572,7 +1605,7 @@ Perez分布のcircumsolar項(太陽に近い方向ほど散乱で明るくなる
 </p>
 <p class="note">
 この底上げは当初0.45にしていたが、それでは輝度の勾配がほぼ消えて空全体が一様なスレートグレーに
-なることが後の実測で判明したため、0.12へ下げた(18.9.4節)。
+なることが後の実測で判明したため、0.12へ下げた(21.9.4節)。
 </p>
 <p>
 <strong>(3) 太陽の可視円盤を追加した後、削除した。</strong>一時的に太陽本体(実際の平均角直径
@@ -1738,7 +1771,7 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 どこかで不整合が生じるリスクが上がる</li>
 </ul>
 
-<h4>14.9.5 SSRを対象外とした判断</h4>
+<h4>14.9.5 SSRを対象外とした判断(<a href="#ssrprobe">20章</a>で解消済み)</h4>
 <p>
 <code>SSR.hlsl</code>の反射の重みは<code>reflectivity = max(FresnelSchlick(N&middot;V, F0))</code>という
 アドホックなスカラーで、方向アルベドではない。Kulla-Contyの補正式は「乗算先が単一散乱の方向
@@ -1747,6 +1780,12 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 掛けると同じ多重散乱ぶんを二重に計上してしまう。さらにSSRの<code>roughnessCutoff</code>(既定0.6)
 より上でしか補正は意味を持たないが、その領域では<code>roughnessFade</code>がゼロに落ちる。
 </p>
+<div class="note">
+<b>この節は現在の実装には当てはまらない。</b><a href="#ssrprobe">20章</a>でSSRを
+<b>加算</b>から<b>環境の放射輝度の差し替え</b>へ作り直し、係数には
+<code>SpecularIBLWeight</code>(split-sum近似+マルチスキャッタリング補正)を
+DeferredLightingと共有して使うようにした。アドホックなスカラーも二重計上も無くなっている。
+</div>
 
 <h4>14.9.6 White Furnace Testによる検証</h4>
 <p>
@@ -1840,9 +1879,12 @@ Furnace Testは「球と背景の明るさが厳密に一致するか」を見�
 明るさになる</td></tr>
 <tr><td><code>[Scene] AmbientOcclusion</code></td><td><code>false</code></td>
 <td>球の縁がAOで暗くなると「エネルギー損失による暗さ」と区別がつかなくなる</td></tr>
-<tr><td><code>[Scene] ScreenSpaceReflection</code></td><td><code>false</code></td>
-<td>SSRは既にエネルギー保存している鏡面IBLへ反射色を<b>加算</b>する設計のため、有効なままだと
-球が背景より<b>明るく</b>なる(14.9.5節で述べた二重計上が、この検証で実際に目に見える形で現れた)</td></tr>
+<tr><td><code>[Scene] ScreenSpaceReflection</code></td><td><code>true</code></td>
+<td>当初は<code>false</code>だった。SSRが鏡面IBLへ反射色を<b>加算</b>する設計で、有効にすると
+球が背景より<b>明るく</b>なり検証が成立しなかったため(14.9.5節で述べた二重計上が、この検証で
+実際に目に見える形で現れた)。<a href="#ssrprobe">20章</a>で加算をやめて差し替えにしたことで
+二重計上が解消し、SSR有効でも3Dシーンの画素が1つも変わらないことを確認したので有効へ戻した。
+現在このシーンは<b>SSRの合成が壊れていないことの回帰テストも兼ねる</b></td></tr>
 </table>
 <p>
 アセット(一様キューブマップと金属球列)は<code>Tools/generate_furnace_test.py</code>が生成する。
@@ -2430,11 +2472,11 @@ CPU側でライト強度へ直接乗算していた。自動露出を入れる�
 
 <p class="note">
 <strong>手動露出時も1.0ではない。</strong>M7時点ではプリ露出が固定値だったため、手動露出のときは
-「露出はCPU側でライト強度へ乗算済み」として倍率1.0でよかった。しかし18.5節で
+「露出はCPU側でライト強度へ乗算済み」として倍率1.0でよかった。しかし21.5節で
 プリ露出を時刻連動の可変値にした時点でこれは成立しなくなり、
 <code>2^(実効EV100 − ユーザー設定EV100)</code>を割り戻す必要がある。
 この割り戻しの欠落が実機で「夜が明るすぎる」「自動露出が無効化できない」として現れた
-(18.9.1節)。<strong>Tonemapと同じ倍率をBloomにも渡すこと</strong>。違う値にすると
+(21.9.1節)。<strong>Tonemapと同じ倍率をBloomにも渡すこと</strong>。違う値にすると
 ブルームだけ露出がずれて合成比が狂う。</p>
 
 <p>露出の保存先を<code>float4</code>1テクセルではなく<code>R32_Float</code>を2テクセル並べた形にしているのは、
@@ -2569,15 +2611,815 @@ HDRのブルームには使えない。レベルごとに別テクスチャに�
 (うち2色はディザによる隣接コード)の完全な一様グレーになることを確認した。</p>
 </section>
 
+<section id="sss-tiled-lights">
+<h2>18. スクリーンスペースシャドウとタイルライトカリング</h2>
+<p>
+11章の時点でポイント/スポットライトは影を落としていなかった(11.6節)。ライトごとにシャドウマップを
+持たせる(ポイントなら立方体6面)のはメモリ・描画パスともに負荷が大きいため、
+<strong>シャドウマップを1枚も増やさずに</strong>影を出す方針として、既にあるG-Bufferの深度バッファを
+ライト方向へレイマーチする<strong>スクリーンスペースシャドウ(SSS)</strong>を導入した。
+あわせて、ライト数が増えたときにピクセルあたりのコストが線形に伸びないよう
+<strong>タイルベースのライトカリング</strong>を入れた(11.8/11.9節の判断を更新する)。
+</p>
+
+<h3>18.1 この手法で「出せる影」と「出せない影」</h3>
+<p>
+SSSが遮蔽物として扱えるのは<strong>深度バッファに写っている面だけ</strong>である。したがって
+</p>
+<ul>
+<li>画面外にある遮蔽物は影を落とさない</li>
+<li>手前の面に隠れて深度バッファに残っていない遮蔽物は影を落とさない</li>
+<li>深度バッファはサーフェスの厚みを持たないため、遮蔽と判定する深度差に上限(<code>thickness</code>)が要る</li>
+</ul>
+<p>
+得られるのは「壁でランプが完全に遮られる」ような影ではなく、<strong>接触影・中距離の遮蔽</strong>である。
+これは手法の性質であって実装の不備ではない。UI(Lightingパネルの説明文)にも同じ内容を書いてある。
+画面外まで含めた本物の影が要るなら、グローバルSDFのように「画面に依存しない遮蔽表現」を
+別途持つ必要があり、それはRHIへの3Dテクスチャ追加とベイクパイプラインを伴う別規模の作業になる。
+</p>
+
+<h3>18.2 Hi-Zチェーンは流用できない(縮約の向きが逆)</h3>
+<p>
+レイマーチの高速化にはHi-Zによる空き空間スキップが定番だが、<strong>このエンジンの既存のHi-Zは
+使えない</strong>。<code>HiZ.hlsl</code>の<code>CSDownsample</code>は<strong>min縮約</strong>で、
+Reverse-Zではmin =「ブロック内で最も遠い可視サーフェス」を意味する。これはオクルージョンカリングが
+必要とする「候補は確実に遮蔽されている」の判定に向いた向きであり、レイマーチの空き空間スキップが
+必要とする「このブロックに遮蔽物は確実に無い」の判定には<strong>max = 最も近いサーフェス</strong>が要る。
+向きが逆なので流用できず、今回は全解像度の深度を線形マーチしている。
+将来スキップを入れるならmaxチェーンを別に作る必要がある。
+</p>
+
+<h3>18.3 同次座標の線形補間で歩く</h3>
+<p>
+レイのステップごとに<code>mul()</code>で再投影すると、ライト数 &times; ステップ数だけ行列積が積み上がる
+(<code>SSR.hlsl</code>の<code>ProjectToScreen</code>はステップごとに<code>mul</code>を2回行っている)。
+SSSはライトごとに回るためこの差が効くので、踏襲していない。
+</p>
+<p>
+代わりに、レイの始点・終点をループ前に1回だけクリップ空間へ変換し、各ステップは
+<code>lerp(clipStart, clipEnd, t)</code>で求める。射影は同次座標に対して線形なので、
+これはワールド空間で等間隔に進むことと<strong>厳密に等価</strong>である。
+さらに、行ベクトル規約のこの射影行列では<code>clip.w</code>がそのままView空間Zになるため、
+レイのView空間深度も同じ<code>lerp</code>から取り出せて追加コストがゼロになる。
+</p>
+<p>
+シーン側のView空間Zも、<code>ReconstructWorldPos</code> + <code>mul(View)</code>(行列積2回)ではなく
+射影定数から除算1回で復元する。<code>clip.z = viewZ &times; a + b</code>、<code>clip.w = viewZ</code>なので
+<code>depth = a + b / viewZ</code>、逆に解いて<code>viewZ = b / (depth - a)</code>。
+<code>a</code>/<code>b</code>はCPU側(<code>KurenaiEngine3D::Render</code>)が
+<strong>射影行列の要素をそのまま読んで</strong>渡す(近平面・遠平面から組み立て直さないのは、
+Reverse-Zの組み方を変えても自動的に追随させるため)。
+</p>
+<p>
+ライトがカメラの手前・背後にあると、レイ終端のView空間Zが0以下へ回り込んで
+<code>clip.w</code>での除算が破綻し、画面上をレイが逆走する。そうなる前に、
+<code>clipEnd.w</code>が最小値を下回る場合はレイを切り詰めている。
+</p>
+
+<h3>18.4 ジッタにフレーム番号を混ぜてはいけない</h3>
+<p>
+等間隔サンプリングは縞状のバンディングを出すため、ステップ位置をピクセルごとにずらして
+高周波のディザへ変換する(インターリーブド・グラディエント・ノイズ、Jimenez 2014)。
+</p>
+<p>
+<strong>ここでフレーム番号を混ぜてはいけない</strong>。このエンジンにはTAAが無く、
+時間方向に平均化する後段が存在しないため、フレームごとにパターンを変えると
+平均化されないまま画面全体がちらつき続けることになる。ピクセル座標だけの関数にしておけば、
+カメラが止まっている限りノイズも完全に静止し「わずかにディザが乗った静止画」で済む。
+<code>SSIL_VisibilityBitmask.hlsl</code>の<code>stepJitter</code>が同じ理由で
+ピクセル座標のみの関数になっているのと同じ判断である。
+</p>
+
+<h3>18.5 バイアスと厚みの上限</h3>
+<p>
+遮蔽と判定する最小深度差は<strong>View空間深度への相対値</strong>にしている
+(<code>kSSSRelativeDepthBias = 0.002</code>)。深度バッファの精度も1ピクセルが占める世界距離も
+距離に比例して粗くなるため、絶対値のバイアスでは近距離で過剰・遠距離で不足になる。
+これに加えてレイの始点を法線方向へ押し出している(こちらもView空間深度でスケールする)。
+</p>
+<p>
+上限(<code>thickness</code>)が必要なのは深度バッファがサーフェスの厚みを持たないためで、
+上限を外すとレイの後ろにある遠景すべてが「無限に厚い遮蔽物」として影を作ってしまう。
+</p>
+<p>
+画面外へレイが外れた場合は<strong>遮蔽なし(明るいまま)で打ち切る</strong>。
+<code>SSR.hlsl</code>が「その先に何があるか分からないので反射を足さない」のと同じ理由で、
+分からないものを影にはしない。加えてヒット位置が画面端に近いほど影を弱め、
+カメラを振って遮蔽物が画面外へ出た瞬間の急変を緩和している。
+</p>
+
+<h3>18.6 ピクセルあたりのシャドウレイ数に上限を置く</h3>
+<p>
+SSSのコストはライトごとに積み上がるため、<code>EvaluateLight</code>に
+「このピクセルで残り何本レイを撃ってよいか」の予算(<code>inout uint shadowRayBudget</code>)を渡し、
+既存のearly-out(距離 → 減衰 → スポット円錐 → NdotL)を<strong>すべて通過した後に</strong>消費する。
+この順序なら、そのピクセルに実際に届いているライトから順に予算が使われる。
+ライト単位の<code>CastShadow</code>フラグ(<code>GPULight::Params.y</code>)と組み合わせて、
+影を出したいライトへ予算を寄せられる。
+</p>
+<p>
+<code>Assets::Light::CastShadow</code>は<strong>永続化していない</strong>。
+<code>.kmodelcache</code>の<code>CachedLightRecord</code>(POD)へ足すとレイアウトが変わり
+<code>kPackageVersion</code>の更新と全アセットの再パックが必要になるが、得られるのは
+「モデルファイル埋め込みライトごとの既定値」だけで見合わない。モデル由来のライトは常に既定値
+(true)で読み込まれ、<code>.kscene</code>(テキスト形式なので互換性の問題が無い)とImGuiで上書きする。
+</p>
+
+<h3>18.7 タイルライトカリング</h3>
+<p>
+画面を16x16ピクセルのタイルに分け、1スレッドグループ256スレッドでタイルごとの
+ライトインデックスリストを作る(<code>LightCulling.hlsl</code>)。
+各スレッドが自分のピクセルの深度をgroupsharedの<code>InterlockedMin/Max</code>で集約してタイルの深度範囲を求め、
+タイルの視錐台側面4枚 + 深度スラブと、各ライトの<strong>バウンディングスフィア</strong>を判定する
+(スポットは円錐の外接球。厳密な円錐判定より保守的=多めに残るが、カリングは「取りこぼさない」ことが
+正しさの条件なので保守的側でよい)。Reverse-Zの深度値は[0,1]の非負floatなので、
+ビットパターンのままuintとして比較しても大小関係が保たれる。
+</p>
+<p>
+出力は<strong>1本の<code>RWStructuredBuffer&lt;uint&gt;</code></strong>で、タイルごとの固定長ブロックに
+「先頭1要素=ライト数、以降=ライトインデックス」を詰める。
+<strong>タイルごとに固定容量を割り当てることで、グローバルなアトミックカウンタも
+「カウンタを毎フレーム0クリアするパス」も不要になる</strong>。
+このエンジンのRHIにはバッファをクリアする手段(<code>ClearUnorderedAccessViewUint</code>相当)が
+無いため、これは実装上の要件でもある。
+</p>
+<p>
+容量を超えた場合も<strong>飽和させずに実際の数をそのまま書き</strong>、読み手(<code>DirectLighting.hlsl</code>)が
+容量で打ち切る。こうしておくとデバッグ表示が容量超過を検出でき、ライトが静かに欠落しない。
+CPU側でも「シーンのライト数が容量を超えている」という<em>条件</em>を検出した最初のフレームに
+警告ログを出す(実際に超過したかはGPU側にしか無いため、確認はデバッグ表示で行う)。
+</p>
+
+<h3>18.8 追加順を昇順へ並べ替える理由</h3>
+<p>
+<code>InterlockedAdd</code>の戻り値はスレッドの実行順に依存するため、そのままではリストの順序が
+タイルごと・フレームごとに変わる。順序が変わると18.6のシャドウレイ予算で
+<strong>どのライトが選ばれるかが揺れて影がちらつく</strong>。
+そこで書き出し前にライト番号の昇順へ並べ替えている。要素数が最大64と少ないので、
+各要素の順位(自分より小さい要素の個数)を数える単純な方法で足りる
+(要素は必ず相異なるライト番号なので順位も一意になる)。
+</p>
+
+<h3>18.9 RHIへの追加</h3>
+<p>
+<strong><code>BufferUsage::StructuredRW</code></strong>を新設した。既存の2種はどちらも片側しか持たず、
+「コンピュートがUAVで書き、ピクセルシェーダがSRVで読む」という今回の用途に使えなかったため:
+</p>
+<ul>
+<li><code>Structured</code> … UAVのみ。SRVディスクリプタが無くPSから読めない</li>
+<li><code>StructuredReadOnly</code> … SRVのみ。UPLOADヒープ経由のCPU書き込み専用でUAVが無い</li>
+</ul>
+<p>
+DX12では<code>UNORDERED_ACCESS</code>と<code>PIXEL_SHADER_RESOURCE</code>の間を
+<code>DX12Buffer::TransitionTo</code>で往復させる(バインド時に暗黙に発行される)。
+なお<code>IsStructuredReadOnly()</code>の判定を「<code>m_SrvIndex</code>が有効値か」から
+<strong><code>Usage</code>を直接持って比較する</strong>形へ変えた。<code>StructuredRW</code>もSRVを持つように
+なったため、旧判定では両者を区別できず、ステージングリングを持たない<code>StructuredRW</code>が
+<code>UpdateBuffer</code>の<code>StructuredReadOnly</code>経路へ入ってしまう。
+</p>
+<p>
+コンピュートシェーダーが構造化バッファ(ライトリスト)をSRVで読むための
+<strong><code>SetComputeShaderResourceBuffer</code></strong>も追加した。
+なお<code>kComputeSrvSlotCount = 4</code>の拡張は<strong>不要だった</strong>
+(カリングCSはt0=ライトリスト・t1=深度の2本で足りる)。11.9節の「拡張が必要」という見立ては
+今回の構成には当たらない。
+</p>
+
+<h3>18.10 DX11の「SRV→UAV」方向のアンバインド</h3>
+<p>
+DX11は同一リソースをSRVとUAVへ同時にバインドできない。既存の実装は
+<code>Dispatch</code>直後にUAVを全解除することで「UAV→SRV」方向に対処していたが、
+今回のライトグリッドは<strong>前フレームにPSがSRVで読んだリソースを次フレームのDispatchがUAVで書く</strong>ため、
+逆方向の対処が要る。<code>DX11CommandList::UnbindPixelSrvForResource</code>を追加し、
+UAVバインドの直前に同一リソースのSRVスロットを明示的に外している
+(そうしないと「どちらが外れるか」がドライバ任せになり、デバッグレイヤーの警告も出続ける)。
+</p>
+<p>
+このために各PS SRVスロットのビューを保持しているが、生ポインタではなく<code>ComPtr</code>で持っている。
+解像度変更などでテクスチャ/バッファが作り直された際に、解放済みのビューを
+<code>GetResource</code>で触ってしまうのを防ぐため。
+</p>
+
+<h3>18.11 RenderGraphにバッファ依存を足した理由</h3>
+<p>
+<code>RenderGraphPassDesc</code>は<code>IRHITexture*</code>の読み書きしか表現できなかった。
+カリングパスと直接光パスは<strong>どちらも<code>m_GBufferDepth</code>をReadsするだけの「読み手同士」</strong>に
+なるため、テクスチャの依存だけでは両者の間に辺が張られない。トポロジカルソートは依存が同点なら
+登録順を優先するのでたまたま正しく動くが、本当の依存関係(カリングが書いたライトグリッドを
+直接光が読む)がグラフ上に現れない状態を残したくない。
+<code>BufferReads</code>/<code>BufferWrites</code>を追加し、テクスチャ側と同じ手順で辺を張っている。
+</p>
+<p>
+あわせて、ライトバッファの<code>UpdateBuffer</code>を<strong>グラフ構築前の1箇所に集約</strong>した。
+以前は直接光パスと半透明パスの中でそれぞれ呼んでいたが、カリングパスが両者より先に
+このバッファを読むようになったため、パス内での更新では間に合わない(更新回数が2回から1回に減る
+副次的な効果もある)。
+</p>
+
+<h3>18.12 デバッグ表示(<code>DebugView::LightTiles</code>)</h3>
+<p>
+ライトグリッドは構造化バッファなので<code>Present.hlsl</code>の<code>SourceTexture</code>(t0)では
+受け取れず、専用のt3から読む(Mode 11)。タイルあたりのライト数を
+黒(0灯)→青→緑→赤のヒートマップで示し、<strong>容量超過のタイルはマゼンタ</strong>で塗る。
+色は「数が読める」ことより「異常が目立つ」ことを優先している。
+赤に振り切る基準のライト数は容量(64)ではなく別のつまみにしてある。実データは数灯程度で、
+容量を基準にするとほぼ真っ青になって差が読めないため。
+</p>
+
+<h3>18.13 半透明パスは対象外</h3>
+<p>
+<code>Transparent.hlsl</code>はb1が<code>ObjectConstants</code>で埋まっておりタイル定数を渡せないため、
+<code>FrameConstants.ActiveLightCount</code>経由で全ライトをループする現状のままとした(15.6節の設計)。
+SSSもカリングも不透明パスのみに適用される。半透明パスはt5〜t7が空いているので、
+深度バッファを追加バインドして同じ共有ヘッダーをincludeすれば追い足せる。
+</p>
+
+<h3>18.14 検証</h3>
+<ul>
+<li><strong>影が出ること</strong>: Light Testのモデル(床+壁+粗さ違いの球)を、太陽を切って
+ポイント/スポットだけで照らし、AOも切って交絡を除いた状態で確認した。
+球と床の接地部に接触影が出て、Screen-Space ShadowsをOFFにすると球が浮いた見た目に戻る。</li>
+<li><strong>カリングが見た目を変えないこと</strong>: 同一シーン・同一カメラでカリングON/OFFの
+スクリーンショットを撮り、3Dビューポート領域の<strong>122,120画素を比較して差0画素・
+最大チャンネル差0</strong>(完全一致)を確認した。OFF時にProfilerから<code>LightCull</code>パスが
+消えることも併せて確認し、トグルが実際に効いていることを担保している。</li>
+<li><strong>ヒートマップ</strong>: ライトの配置と整合する分布(壁面=1灯の青、両方のライトが届く
+床の手前=2灯の緑寄り)になることを確認した。</li>
+<li><strong>DX11/DX12</strong>: 両バックエンドで同一シーンを表示し、<code>LightCull</code>パスが動作して
+同じ見た目になることを確認した。</li>
+<li><strong>容量超過の警告</strong>: 64灯を配置したシーン(モデル埋め込みの2灯と合わせて66灯)で、
+容量(64)超過の条件を検出した警告ログが1度だけ出ることを確認した。</li>
+</ul>
+<p>
+<strong>性能については有意な差を測れていない</strong>。64灯を20x20の床へ分散させたシーンを
+1280x720・Debugビルドで測ったが、フレーム全体が1ms前後で固定オーバーヘッドに支配されており、
+カリングON/OFFの差は実行ごとのばらつき(GPU Frame Timeが0.6〜1.9msの範囲で揺れる)に埋もれる。
+<code>LightCull</code>パス自体のCPU時間が約0.01msであることまでは確認できたが、
+「カリングによってDirectLightが速くなる」ことを数値で示すには、Releaseビルドと
+ライティングパスが実際にボトルネックになるシーン(高解像度・Rangeの大きいライトを多数重ねる)が要る。
+現時点で言えるのは<strong>正しさ(見た目が変わらない)を確認済みで、速度の利得は未計測</strong>という状態である。
+</p>
+
+<section id="reflectionprobe">
+<h2>19. 反射プローブ(リフレクションプローブ)</h2>
+<p>
+<a href="#ibl">14章</a>のIBLはスカイボックス1枚から焼くため、<strong>シーン全体で単一の環境</strong>
+しか持てない。屋内でも空が映り込む、壁際と部屋の中央で環境光が同じ、といった破綻が原理的に避けられない。
+反射プローブは<strong>シーン内の任意位置で環境をキャプチャし、位置に応じた環境反射・環境光を与える</strong>
+ことでこれを解消する。
+</p>
+
+<h3>19.1 IBLの畳み込みをそのまま再利用する</h3>
+<p>
+この機能で新しく実装したのは<strong>キャプチャ部分だけ</strong>である。プローブのキューブマップを
+拡散イラディアンス・プリフィルタ済み鏡面へ畳み込む処理は、<code>IBLConvolve.hlsl</code>の
+<code>CSIrradiance</code>/<code>CSPrefilter</code>を<b>一切変更せずそのまま呼んでいる</b>。
+これらは畳み込み元を<code>TextureCube SourceSkybox : register(t0)</code>として受け取るだけなので、
+スカイボックスの代わりにプローブのキューブマップをバインドすれば済む。BRDF積分LUTは方向依存を
+持たないためプローブ間・グローバルIBLと共有する(焼き直し不要)。
+</p>
+<p>
+評価側(<code>DeferredLighting.hlsl</code>の<code>EvaluateIBL</code>)も同様で、split-sum近似の式は
+そのまま、<strong>環境ソースの求め方だけを差し替える</strong>形にした(<code>SampleEnvironment</code>が
+プローブとグローバルIBLを重み付きで合成して返す。19.7節)。プローブとグローバルIBLで
+解像度・ミップ構成を揃えてある(<code>kProbeCaptureSize == kIBLPrefilterBaseSize</code>)のは
+このためで、ラフネス→ミップの変換式も共通のまま使える。
+</p>
+
+<h3>19.2 キューブマップへ直接描画せず、2Dへ描いてUAVでコピーする</h3>
+<p>
+RHIには<strong>キューブマップの面ごとのRTV</strong>が無い。これを新設せず、次の経路でキューブマップを
+組み立てている。
+</p>
+<ol>
+<li>プローブ位置から1面ぶんを、通常の2Dレンダーターゲット(<code>m_ProbeCaptureColor</code>、
+HDR 128&times;128)へフォワード描画する(<code>ProbeCapture.hlsl</code>)</li>
+<li>コンピュートシェーダー(<code>IBLConvolve.hlsl</code>の<code>CSCopyCaptureToCubeFace</code>)が
+その結果をキューブマップの該当面のUAVへ書き写す</li>
+<li>これを6面ぶん繰り返す</li>
+</ol>
+<p>
+この方式を選んだのは、<strong>面ごとのUAV書き込み(<code>SetComputeUnorderedAccessTextureCubeFace</code>)が
+IBLで既に両バックエンドとも実績のある経路であり、RTV/DSVのディスクリプタ管理をDX11・DX12双方へ
+新規に追加せずに済む</strong>ため。コストは128&times;128のディスパッチ6回で、ベイク全体から見れば無視できる。
+</p>
+<p>
+ジオメトリが描かれなかったピクセル(深度が書き込まれなかった=Reverse-Zで0のまま)は、コピー側で
+その面・そのテクセルが表す方向のスカイボックスを引いて埋める。面&rarr;方向の対応
+(<code>CubeFaceDirection</code>)は畳み込みと1文字も違ってはいけないため、コピーのシェーダーは
+あえて<code>IBLConvolve.hlsl</code>側に置いて関数を直接共有している。
+</p>
+
+<h3>19.3 複数プローブにはTextureCubeArrayが要る</h3>
+<p>
+HLSLは別々の<code>TextureCube</code>リソースを<strong>動的に添字参照できない</strong>。カスケードシャドウマップが
+<code>ShadowMap0</code>&sim;<code>3</code>を個別スロットに分けて<code>if</code>で分岐しているのはこの制約によるが、
+プローブは数が可変なので分岐では書けない。そのため畳み込み結果は<code>TextureCubeArray</code>で保持し、
+ピクセルごとに選んだプローブ番号でサンプルする。
+</p>
+<p>
+RHIへの追加(<code>CreateMippedUAVTextureCubeArray</code>、
+<code>SetComputeUnorderedAccessTextureCubeFace</code>の<code>cubeIndex</code>引数)は小さな差分で済んだ。
+面ごとのUAVはもともと<code>Texture2DArray</code>(要素数1)ビューであり、<code>FirstArraySlice</code>を
+<code>cubeIndex * 6 + face</code>にするだけで配列へ拡張できるためである。SRVの次元だけが
+<code>TEXTURECUBE</code>/<code>TEXTURECUBEARRAY</code>で変わる。
+</p>
+<p>
+一方で<strong>畳み込みの入力</strong>だけは<code>TextureCube</code>(配列ではない)でなければならない。
+<code>IBLConvolve.hlsl</code>の<code>SourceSkybox</code>が<code>TextureCube</code>宣言のままだからである。
+プローブは1つずつ順に焼くため、キャプチャした6面を組み上げるスクラッチのキューブマップ
+(<code>m_ProbeRadianceCube</code>)は<strong>1枚だけ</strong>確保して使い回している。
+これにより畳み込みシェーダーを変更せずに済んでいる。
+</p>
+
+<h3>19.4 キャプチャ時のライティングと定数バッファの与え方</h3>
+<p>
+キャプチャは<code>Transparent.hlsl</code>(半透明フォワードパス)と同じ式のフォワードシェーディングで、
+<strong>直接光(太陽+CSMシャドウ+ポイント/スポットライト)+スカイボックス由来のグローバルIBL+エミッシブ</strong>
+までを含む。他のプローブの寄与は含めない(含めるとプローブ同士が相互参照して発散するため、
+反射の中の反射は1バウンスで打ち切る)。
+</p>
+<p>
+定数バッファは<strong><code>FrameConstants</code>の宣言を一切変えずに</strong>、このパス専用のバッファへ
+視点に関わる値だけを差し替えて渡している。
+</p>
+<table>
+<tr><th>フィールド</th><th>渡す値</th><th>理由</th></tr>
+<tr><td><code>ViewProj</code></td><td>プローブのその面のビュー・プロジェクション</td><td>ラスタライズ用</td></tr>
+<tr><td><code>View</code></td><td><b>カメラ</b>のビュー行列</td><td>カスケード選択の深度が<code>CascadeSplits</code>(カメラ視錐台基準)と対応している必要があるため、ここだけプローブではなくカメラのものを渡す</td></tr>
+<tr><td><code>CameraPosition</code></td><td>プローブのワールド座標</td><td>視線ベクトル<code>V</code>の起点。プローブから見た放射輝度を捉えるのが目的のため</td></tr>
+</table>
+<p>
+キャプチャ用プロジェクションは画角90度・アスペクト1で、<code>Core::Camera</code>と同じ
+Reverse-Z(近平面=NDC z=1.0、遠平面=NDC z=0.0)で組む(<code>ComputeCubeFaceProjection</code>)。
+面ごとのビュー行列(<code>ComputeCubeFaceView</code>)の前方向・上方向の組は、
+<code>CubeFaceDirection</code>が定める面&rarr;方向の対応と一致していなければならない
+(ずれると焼いた面が回転・反転する)。
+</p>
+<p>
+影は<code>ProbeCapture.hlsl</code>側でPCSSではなく単純な3&times;3のPCFに落としている。プローブに映る影は
+反射像としてさらに縮小・ぼかされるため、半影の正確さより焼き直しのコストを優先した。
+</p>
+
+<h3>19.5 DX12でプローブが真っ黒に焼けた原因(SRVテーブルのブロック割り当て)</h3>
+<p>
+実装当初、<strong>DX11では正しく焼けるのにDX12だけプローブのキューブマップが真っ黒になる</strong>という
+症状が出た。原因はDX12のSRVディスクリプタテーブルの割り当て方式である。
+</p>
+<p>
+<code>DX12CommandList::SetTexture</code>は<code>slot == 0</code>を「新しい描画の開始」とみなして
+<code>FlushPendingSrvWrites()</code>を呼び、そこで<strong>新しいテーブルブロックを割り当て、
+その描画で設定されたスロットだけをコピーしてから保留マスクをクリアする</strong>。
+つまり<b>ブロックをまたいで前回のバインドは引き継がれない</b>。
+</p>
+<p>
+当初のベイクパスは「メッシュのループに入る前にシャドウマップ(t4&sim;t7)とIBL(t9&sim;t11)をバインドし、
+ループの中でマテリアル(t0&sim;t3)をバインドする」という順序で書いていた。DX11はSRVが永続的にバインド
+されるためこれで動くが、DX12では<code>SetTexture(0, ...)</code>の時点でブロックが切り替わり、
+<strong>シャドウマップとIBLのスロットが未初期化のディスクリプタのまま描画される</strong>。結果として
+「常に影の中」「環境光ゼロ」となり、キャプチャがほぼ黒くなっていた。
+</p>
+<p>
+当時の対処は、半透明フォワードパスが同じ理由で採っていた順序に揃えること ――
+<strong>1回の描画で使うテクスチャは必ずスロット0から順に、描画ループの中でまとめてバインドする</strong>
+だった。
+</p>
+<div class="note">
+<b>この回避策は現在は不要になっている。</b><a href="#rhi-binding">16章</a>でDX12側が
+バインド状態のシャドウコピーを持つようになり、テクスチャのバインドがDX11と同じく
+「上書きするまで維持される」寿命になった。ベイクパスも他のパスと同様、メッシュによらず共通の
+バインド(シャドウマップ配列・ライト・IBL)を描画ループの外で1回だけ行う形に戻してある。
+ここに記録を残しているのは、<b>バックエンド間のバインド寿命の食い違いがどういう症状として
+現れるか</b>(=片方のAPIだけ真っ黒になる)を残しておくため。
+</div>
+
+<h3>19.6 ベイクのタイミング</h3>
+<p>
+スカイボックス由来のIBLは静的アセットなので「起動後の最初のフレームで一度だけ」焼けばよい
+(<code>m_IBLBaked</code>)。一方プローブの中身は<strong>シーンのジオメトリ・ライト・時刻に依存する</strong>ため、
+明示的な要求ベース(<code>m_ProbeBakeRequested</code>)にしてある。要求が立つのは次の場合。
+</p>
+<ul>
+<li>シーンを読み込んだとき(<code>LoadScene</code>)</li>
+<li>ImGuiでプローブを追加した/位置を動かしたとき</li>
+<li>ImGuiの「Bake」ボタンを押したとき(ライトや時刻を変えた後に使う)</li>
+</ul>
+<p>
+影響範囲の変更(形状・半径・<code>BoxExtents</code>・<code>Yaw</code>・<code>BlendDistance</code>)は
+どこから撮るかを変えず、キャプチャ内容に影響しないため焼き直しは要求しない。
+また一度も焼けていない間(<code>m_ProbeBaked == false</code>)は<code>ProbeParams.x</code>(有効プローブ数)を
+0にして、シェーダー側の選択ループ自体を回さない ―― 中身が未定義のキューブマップを引かせないため。
+</p>
+<p>
+レンダーグラフ上の順序は依存関係で自動的に解決される。ベイクパスは<code>Reads</code>にシャドウマップと
+グローバルIBLの畳み込み結果を挙げているためシャドウパス・IBLBakeパスより後になり、
+Lightingパスは<code>Reads</code>にプローブのキューブマップ配列を挙げているためベイクパスより後になる。
+</p>
+
+<h3>19.7 影響範囲の形状・視差補正・ブレンド</h3>
+<p>
+影響範囲は球(<code>Sphere</code>)と直方体(<code>Box</code>、Y軸まわりの回転のみを持つOBB)から選べる。
+GPUへ渡す1プローブぶんの構造は次のとおりで、<code>KurenaiEngine3D.cpp</code>の
+<code>GPUReflectionProbe</code>と<code>DeferredLighting.hlsl</code>の同名構造体で並び・ストライド(48バイト)を
+一致させている。<code>Yaw</code>はピクセルごとに三角関数を回さずに済むよう、C++側で<code>sin</code>/<code>cos</code>へ
+展開してから渡す。
+</p>
+<table>
+<tr><th>フィールド</th><th>内容</th></tr>
+<tr><td><code>PositionRadius</code></td><td>xyz=ワールド座標(Boxでは箱の中心)、w=Sphereの影響半径</td></tr>
+<tr><td><code>BoxExtents</code></td><td>xyz=Boxの各軸の半径(ハーフエクステント)、w=ブレンド距離</td></tr>
+<tr><td><code>ShapeParams</code></td><td>x=形状(0=Sphere,1=Box)、y=sin(Yaw)、z=cos(Yaw)</td></tr>
+</table>
+
+<h4>影響の重み</h4>
+<p>
+<code>ProbeInfluenceWeight</code>は<strong>影響範囲の境界からの内向き距離</strong>を<code>BlendDistance</code>で
+正規化して<code>saturate</code>した値を返す。境界でちょうど0、そこから<code>BlendDistance</code>だけ内側で1になる。
+Boxでは各軸の面までの距離の最小値を使うため、1軸でも箱の外へ出れば負になり自動的に0となる。
+Sphereも中心からの距離が半径を超えれば負になり同様に0となるので、<strong>「範囲内かどうかの判定」と
+「重み」を1本の式で兼ねられる</strong>。
+</p>
+
+<h4>視差補正(box projection)</h4>
+<p>
+プローブのキューブマップは<strong>プローブ位置1点から見た景色</strong>なので、そこから離れたピクセルで
+反射ベクトル<code>R</code>をそのまま引くと、映る像の位置が実際の反射位置とずれる(壁際なのに部屋の
+反対側が映る、など)。<code>ParallaxCorrectDirection</code>は<code>R</code>をプローブの箱と交差させ、
+その交点を<strong>プローブ中心から見た方向</strong>へ引き直すことでずれを打ち消す。
+</p>
+<pre><code>localPos  = WorldToProbeLocal(worldPos - center)
+localR    = WorldToProbeLocal(R)
+exit      = max((-extents - localPos) / localR, (extents - localPos) / localR)  // 軸ごとに進行方向の面まで
+hitDist   = min(exit.x, exit.y, exit.z)                                        // 最初に箱から抜ける点
+sampleDir = (worldPos + R * hitDist) - center                                  // キューブはワールド軸で焼かれている</code></pre>
+<p>
+<code>localR</code>のある成分が0(その軸に平行)だと逆数が<code>inf</code>になり、後段の<code>max</code>で
+<code>0 * inf = NaN</code>が出得るため、<strong>符号を保ったまま絶対値に下限を与えてから</strong>逆数を取っている。
+</p>
+<p>
+補正は<strong>鏡面の反射ベクトルにのみ</strong>適用し、拡散イラディアンスのサンプル方向(法線)には掛けない。
+イラディアンスは低周波で位置による差が小さく、補正しても得られるものがほとんど無い一方で交差計算の
+コストは掛かるためである。またSphere形状には交差させる箱が無いため適用されない ―― これがBox形状を
+選ぶ主な動機になる。
+</p>
+<p>
+なお本実装では<strong>影響範囲の箱がそのまま視差補正の投影ボックスを兼ねる</strong>(両者を別々に持てない)。
+そのため<code>BoxExtents</code>は部屋の壁とおおよそ一致させる必要がある。箱を壁から大きく離すと
+補正がかえってずれ、逆に小さくしすぎると壁面自体が影響範囲の外へ出てしまう。
+</p>
+
+<h4>ブレンド</h4>
+<p>
+<code>SampleEnvironment</code>は影響下のプローブを重み付きで加算し、<strong>重みの合計が1に満たない残りを
+スカイボックス由来のグローバルIBLで埋める</strong>。これにより影響範囲の外へ出るときも境界で切り替わらず、
+徐々に元の環境光へ戻る。プローブが深く重なって合計が1を超える場合は正規化して1に収める
+(そのまま加算すると環境光が過剰に明るくなるため)。
+</p>
+<p>
+上位N個を選ぶソートは置かず、プローブを素直に全走査して重みが正のものだけを加算している。
+プローブ数の上限が8と小さく、HLSLで動的添字の配列へ挿入ソートを書くとレジスタに載らず
+スクラッチメモリへ落ちるためである。
+</p>
+<p>
+ImGuiの「Parallax Correction」「Probe Blending」(<code>ProbeParams.z</code>/<code>.w</code>)で
+それぞれ無効にでき、無効時は<strong>反射ベクトルをそのまま引く/影響範囲に入る最も近い1つだけを重み1で使う</strong>
+という導入前の挙動に戻る。壁際での反射位置のずれと影響範囲の境界の継ぎ目を、実機で見比べるための
+スイッチである。デバッグ表示「Probe - Influence」もブレンドの有無に追随し、有効時はプローブごとの色の
+重み付き平均になるため遷移帯がグラデーションとして見える。
+</p>
+<p>
+これらは影響範囲の話でしかなく<strong>キャプチャ内容には影響しない</strong>ため、形状・範囲・ブレンド距離を
+変えても焼き直しは要求しない(焼き直しが要るのは<code>Position</code>を動かしたときだけ)。
+</p>
+
+<h3>19.8 現時点の実装範囲と既知の制約</h3>
+<ul>
+<li>Boxの回転は<strong>Y軸まわりのみ</strong>。傾いた床・天井を持つ空間は想定していない</li>
+<li><strong>影響範囲の箱と視差補正の投影ボックスを分離できない</strong>(19.7節)。
+壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある</li>
+<li>更新モードはBaked / OnDemand / Realtimeの3種(19.10節)。ただし<strong>時間分割できているのは
+キャプチャだけで、畳み込みは分散できていない</strong>。キャプチャが0.02 msなのに対し畳み込みは
+約14 msあるため、Realtimeでも6フレームに1回そのスパイクが乗る</li>
+<li>OnDemandの変化検出が見るのは時刻・太陽・ライト・IBL強度・プローブ位置のみ。
+<strong>ジオメトリが動いても検出されない</strong>(モデルのTRSは<code>.kscene</code>で静的に決まり
+実行中に変わらないため、現状は検出対象に入れていない)</li>
+<li>SSRとの合成は<a href="#ssrprobe">20章</a>で「加算」から「環境の放射輝度の差し替え」へ作り直した。
+SSRが判定できなかった領域(画面外・最大距離まで判定不能)は確信度0となり、Lightingパスが適用した
+プローブがそのまま残る</li>
+<li>カスケードシャドウマップは<strong>カメラ</strong>視錐台に合わせてフィットされるため、カメラから遠く離れた
+位置のプローブを焼くとシャドウマップの範囲外になり影が落ちない。プローブは視界内で焼く前提</li>
+<li>プローブ数の上限は8(<code>kMaxReflectionProbes</code>)。<code>TextureCubeArray</code>は実行時に
+伸縮できないため固定容量で確保している。超過分は警告ログを出して切り捨てる</li>
+<li>半透明フォワードパス(<a href="#transparent">15章</a>)はプローブに対応しておらず、
+グローバルIBLのみを使う</li>
+</ul>
+
+<h3>19.9 検証シーン(Reflection Probe Test)</h3>
+<p>
+プローブの効きを目視で確認するための専用シーン。Sponzaは非金属・中〜高ラフネスのマテリアルばかりで
+鏡面反射が弱く、アトリウムが上に開いていてプローブにも空が大量に写り込むため、
+<strong>「プローブが効いているかどうか」が判別できない</strong>。そこで検証用のホールを別途用意している。
+</p>
+<p>
+ジオメトリは<code>Tools/generate_probe_test.py</code>が生成する
+(<code>FurnaceTest</code>/<code>LightTest</code>/<code>MaterialTest</code>と同じく、標準ライブラリだけで
+glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/ProbeTest.kscene</code>側にある。
+</p>
+<pre><code>    ┌───────────────────┬───────────┐  y=7
+    │▓▓▓▓ 天井あり ▓▓▓▓│ 天井開口  │      ▓ = 中央の仕切り壁(中央に開口部)
+    │   西室(密閉)     ▓  東室     │
+    │   暖色の壁+ポイント▓ 寒色の壁  │
+    │   ライト+エミッシブ▓ +太陽光   │
+    │  ●   ●   ●   ●   ●   ●   ●  │  ← 金属球列(metallic=1.0, roughness=0.05)
+    └───────────────────┴───────────┘  y=0
+   x=-12                x=0        x=+12
+            床 = 磨いた石(非金属, roughness=0.06)</code></pre>
+
+<h4>何をどう切り替えると何が見えるか</h4>
+<table>
+<tr><th>ImGuiの操作</th><th>見えるもの</th><th>検証している実装</th></tr>
+<tr>
+<td>Enable Reflection Probes を切る</td>
+<td>密閉の西室にいるはずの金属球が<strong>一様な空色</strong>になり、床に映っていたエミッシブ帯も消える</td>
+<td>環境ソースがプローブからグローバルIBLへ落ちること(19.1節)</td>
+</tr>
+<tr>
+<td>Probe Blending を切る</td>
+<td>開口部付近で反射色が<strong>不連続に切り替わる</strong></td>
+<td><code>SelectNearestProbe</code>経路と重み付き合成の差(19.7節)</td>
+</tr>
+<tr>
+<td>Parallax Correction を切る</td>
+<td>床に映るエミッシブ帯が、個々の帯ではなく<strong>連続した滲みになって壁の接地点からずれる</strong></td>
+<td><code>ParallaxCorrectDirection</code>(19.7節)</td>
+</tr>
+<tr>
+<td>Render Targets &rarr; Probe - Influence</td>
+<td>西室が赤・東室が緑・開口部付近がその中間色のグラデーション</td>
+<td><code>ProbeInfluenceWeight</code>とBox形状の影響範囲</td>
+</tr>
+<tr>
+<td>Render Targets &rarr; Probe - Prefiltered Specular、Probe Index を 0/1</td>
+<td>0=暖色の密閉室、1=空を含む明るい室。<strong>まったく別の環境が焼かれている</strong></td>
+<td>プローブごとの<code>TextureCubeArray</code>スライス(19.3節)</td>
+</tr>
+<tr>
+<td>上の表示のまま Post Processing の Enable IBL を切り、Update Mode を Baked &rarr; Realtime</td>
+<td>Bakedではキャプチャが<strong>1ピクセルも変わらず</strong>、Realtimeにすると追従して暗くなる</td>
+<td>更新モードの時間分割(19.10節)</td>
+</tr>
+</table>
+<p>
+最後の項目で<strong>ポイントライトではなく<code>Enable IBL</code>を動かしている</strong>のには理由がある。
+このシーンのポイントライトは6000 cdだが、EV100=15(晴天昼)の露出下では遮蔽なしの空IBLのほうが
+桁違いに強く、1灯どころか2灯とも消してもキャプチャがほとんど変化しない。
+更新モードの追従を見るには、キャプチャの明るさを支配している空IBLのほうを動かす必要がある。
+</p>
+
+<h4>シーン構成上の判断</h4>
+<ul>
+<li><strong>西室を密閉、東室を天井開口にした</strong>のは、2つのプローブに焼かれる環境を「暖色・
+ポイントライト」と「寒色・太陽光」で完全に別物にするため。球列が開口部を貫くので、
+ブレンドの遷移が反射色の変化としてそのまま読める。副次的に、東室側は太陽光とCSM影を受けるので
+<code>ProbeCapture.hlsl</code>のシャドウ経路も同時に検証できる</li>
+<li><strong>床は金属ではなく磨いた石(非金属・低ラフネス)</strong>。<code>metallic=1.0</code>にすると
+拡散反射が消えて薄暗い室内ではほぼ真っ黒に沈み、映り込みの位置を読み取る土台が見えなくなる。
+非金属はF0=0.04と反射が弱いが、ホールを見通す浅い角度ではフレネルで十分に強く出る</li>
+<li><strong>エミッシブ帯は照明ではなく目印</strong>。G-Bufferのエミッシブバッファは
+<code>R8G8B8A8_UNorm</code>で[0,1]にクランプされるため、1.0を超える値を指定しても室内を照らす
+主光源にはならない。室内の照明はポイントライト(カンデラ指定なので数千まで上げられる)が担う</li>
+<li><strong>仕切り壁の開口部は広め(幅8・高さ5.5)</strong>。仕切りの役目は「2部屋として別々の環境が
+焼かれること」であって視線を遮ることではない。狭いと球列と西室が見通せず、何が起きているか
+読み取れなくなる</li>
+<li><code>ScreenSpaceReflection = false</code>をシーン側で指定している。SSRもプローブと同じく
+「環境の反射」を足すため、両方効いていると差の切り分けができない</li>
+</ul>
+
+<h4>面の巻き順を機械的に決めている理由</h4>
+<p>
+glTFは右手座標系でCCWが表なので、正しく描かれる巻き順とは<strong>「三角形の外積(右手系)が
+シェーディング法線と同じ向きになる巻き順」</strong>を指す。これを面ごとに手で合わせると、
+取り違えた面だけが<strong>黒くなる</strong>(法線が裏を向き、拡散も環境光も反対側の半球を引く)という
+分かりにくい形で現れる。実際、床の巻き順を取り違えて「床だけ真っ黒」になる不具合を出した。
+</p>
+<p>
+そのため<code>generate_quad_double_sided</code>は、渡された4点の周回向きから幾何法線を求め、
+指定された法線と内積を取って巻き順を自動的に揃える。あわせて法線・巻き順を反転した2組目を
+同じ座標へ重ね、板を両面にしている(裏面はバックフェースカリングで落ちるため同一平面でも
+Zファイティングは起きない)。
+</p>
+
+<h4>副産物: <code>[Camera]</code>のYaw/Pitchの単位不整合</h4>
+<p>
+このシーンが<strong><code>[Camera]</code>でYawに0以外を指定する最初のシーン</strong>だったため、
+<code>SceneLoader</code>で度→ラジアン変換が抜けていたことが判明した
+(<code>Camera::SetYawPitch</code>はラジアンを受け取る)。ドキュメントは一貫して「度」と書いており、
+<code>[Light]</code>の<code>ConeAngleDegrees</code>や<code>[Model]</code>の<code>RotationEuler</code>は
+変換していたので、<code>[Camera]</code>だけが例外だった。既存シーンは<code>Yaw = 0.0</code>しか
+使っておらず度とラジアンで同じ値になるため表面化していなかったもので、他と同じ変換を入れて修正した。
+</p>
+<h3>19.10 更新モード(Baked / OnDemand / Realtime)</h3>
+<p>
+プローブの中身はシーンのジオメトリ・ライト・時刻に依存するため、「いつ焼き直すか」は
+<strong>焼き直しのコスト</strong>と<strong>シーンの変化への追従</strong>のトレードオフになる。
+ImGuiの「Update Mode」で3方式を切り替えて比較できるようにしてある。
+</p>
+<table>
+<tr><th>モード</th><th>焼き直す契機</th><th>実行時コスト</th></tr>
+<tr><td><code>Baked</code></td><td>シーン読み込み時とBakeボタンのみ</td><td>ゼロ。ただし反射は焼いた時点で止まる</td></tr>
+<tr><td><code>OnDemand</code></td><td>上に加えて、焼き上がりに影響する状態が変わったフレーム</td><td>変化が無ければゼロ。変化したフレームは全プローブぶんのフルベイクが集中する</td></tr>
+<tr><td><code>Realtime</code></td><td>毎フレーム1面ずつ(6面揃うごとに畳み込み、プローブはラウンドロビン)</td><td>キャプチャは毎フレーム、畳み込みは6フレームに1回</td></tr>
+</table>
+
+<h4>OnDemandの変化検出</h4>
+<p>
+<code>ComputeProbeBakeSignature</code>が、焼き上がりに影響する値
+(時刻・太陽の方位角・太陽/シャドウの有効フラグ・IBL強度・全ライトのパラメータ・プローブ位置)から
+FNV-1aの64bitハッシュを作る。毎フレームの署名と、最後にフルベイクした時点の署名を突き合わせる。
+影響範囲(形状・半径・<code>BoxExtents</code>・<code>BlendDistance</code>)は<strong>含めない</strong> ――
+どこから撮るかを変えないため焼き直しが不要だからである(19.6節)。
+衝突しても起きるのは「本来必要な焼き直しを1回取りこぼす」だけなので、この程度の強度で足りる。
+</p>
+
+<h4>時間分割の状態機械</h4>
+<p>
+<code>m_ProbeRealtimeProbeIndex</code> / <code>m_ProbeRealtimeFace</code> が「次に焼く面」を指す。
+1フレームに1面をスクラッチのキューブマップへキャプチャし、6面揃った時点でそのプローブを畳み込んで
+配列スライスへ書き、次のプローブへ回る。<strong>畳み込みは6面が揃うまで走らない</strong>ため、
+その間スライスは前回の内容のまま表示され、描きかけのキューブが映り込むことはない。
+</p>
+<p>
+Realtimeは<strong>最低1回フルベイクが済んでいること</strong>(<code>m_ProbeBaked</code>)を前提にしている。
+シーン読み込み時に必ずフルベイクを要求しているのでこの前提は常に満たされ、
+一度も畳み込まれていない未初期化のスライスが表示されることはない。
+またフルベイクと時間分割はスクラッチのキューブマップを共有するため、
+<strong>同じフレームで両方を走らせてはならない</strong>(コード上も<code>else if</code>で排他にしてある)。
+</p>
+
+<h4>計測結果(Reflection Probe Test、プローブ2個・キャプチャ128²・DX11)</h4>
+<p>
+フルベイクはプローブごとに別パス(<code>ProbeBake0</code> / <code>ProbeBake1</code>)へ分けてあり、
+GPUプロファイラで1プローブぶんのコストが読める。各パスがスクラッチのキューブマップへ書くため、
+レンダーグラフのWrite-after-Write依存で登録順に直列化される。
+</p>
+<table>
+<tr><th>パス</th><th>GPU時間</th><th>頻度</th></tr>
+<tr><td><code>ProbeBake0</code> / <code>ProbeBake1</code></td><td>20.1 ms / 15.3 ms</td><td>フルベイクしたフレームのみ</td></tr>
+<tr><td><code>ProbeRealtimeCapture</code></td><td>0.018&ndash;0.020 ms</td><td>毎フレーム</td></tr>
+<tr><td><code>ProbeRealtimeConvolve</code></td><td>10.6&ndash;14.8 ms</td><td>6フレームに1回</td></tr>
+</table>
+<p>
+比較のため、同じフレームのGBufferパスは0.039 ms、Lightingパスは0.031 ms。
+</p>
+<p>
+<strong>この計測でいちばん重要な点は「キャプチャは実質ただ(0.02 ms)で、支配的なのは畳み込み(約14 ms)」
+ということである。</strong>つまり<strong>時間分割はキャプチャを分散させているだけで、畳み込みは
+分散できていない</strong>。Realtimeでも6フレームに1回は14 msのスパイクが乗るため、
+フルベイク32 msを1回浴びるか14 msを6フレームごとに浴びるかの違いでしかなく、
+「毎フレーム滑らかに追従する」状態には至っていない。
+</p>
+<p>
+畳み込みが重いのは、IBLと共有している<code>CSIrradiance</code>(半球積分)と
+<code>CSPrefilter</code>(ミップごとの重要度サンプリング)を、6面×(1+5ミップ)ぶん素直に回しているため。
+実用的な改善方向は、時間分割の粒度を「面」ではなく「畳み込みのディスパッチ」まで細かくするか、
+畳み込み自体のサンプル数・解像度を下げることになる。現時点では未実装。
+</p>
+
+</section>
+
+<section id="ssrprobe">
+<h2>20. SSRとプローブの合成(加算から差し替えへ)</h2>
+<p>
+<a href="#ssr">7章</a>のSSRは反射色を<code>SceneColor</code>へ<strong>加算</strong>する設計だった。
+しかしLightingパスは既に鏡面IBLを<code>SceneColor</code>へ書き込んでいるため、同じ反射を二重に
+計上していた(<a href="#ibl">14章</a>9.5節)。White Furnace Testが
+<code>ScreenSpaceReflection = false</code>を指定していたのは、この二重計上で球が背景より明るくなり
+検証そのものが成立しなくなるためである。
+</p>
+<p>
+反射プローブ(19章)が入ったことで、この問題を放置できなくなった。プローブは画面外の環境も持って
+いるので「SSRが判定できなかった領域をプローブで埋める」ことが可能になったが、加算のままそれを
+やると<strong>いま二重計上していない領域まで二重計上に変わってしまう</strong>。そこでSSRを
+<b>加算</b>から<b>環境の放射輝度の差し替え</b>へ作り直した。
+</p>
+
+<h3>20.1 分解: 放射輝度 × 係数</h3>
+<p>
+鏡面IBLを次の形に分解する。
+</p>
+<pre><code>鏡面IBL = 環境の放射輝度 * SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ...)</code></pre>
+<p>
+SSRがやりたいのは「環境の放射輝度を、スクリーンスペースで実際に見えている色へ差し替える」こと
+だけで、係数の側は共通である。したがってSSRパスの出力はこう書ける。
+</p>
+<pre><code>出力 = SceneColor + (SSRが得た放射輝度 - Lightingが使った放射輝度) * SpecularIBLWeight(...) * 確信度</code></pre>
+<p>
+確信度が0なら出力は<code>SceneColor</code>と<strong>厳密に一致</strong>し、1ならSSRの放射輝度が
+鏡面IBLを完全に置き換える。加算ではないので二重計上は原理的に起こらない。
+</p>
+
+<h3>20.2 「足した覚えのない値を引く」ことを防ぐ</h3>
+<p>
+この方式は、SSRが引き算する量とLightingパスが足した量が<strong>厳密に一致している</strong>ことに
+全面的に依存する。片方の式だけが変われば、SSRは存在しない値を引いて画面を暗くしてしまう。
+そこで両者が使う定義を<code>Shaders/3D/ReflectionProbe.hlsli</code>に集約し、
+<code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>がそれをインクルードする構成にした。
+共有しているのは次の2つ。
+</p>
+<ul>
+<li><code>SampleEnvironment</code> ―― プローブの選択・視差補正・ブレンドと、グローバルIBLへの
+フォールバックまで含めた<b>環境の放射輝度</b>(19.7節)</li>
+<li><code>SpecularIBLWeight</code> ―― split-sum近似の第2項・マルチスキャッタリング補正・
+スペキュラオクルージョン・昼夜減衰・IBL強度倍率をまとめた<b>係数</b></li>
+</ul>
+<p>
+2つのシェーダーは既に使っているレジスタ番号が違うため、ヘッダー側のリソース宣言は
+インクルード前に定義するマクロで受け取る形にした
+(<code>KURENAI_PROBE_PREFILTERED_REGISTER</code>等)。SSRは拡散イラディアンスを必要としないので、
+拡散側のマクロを定義しなければそのサンプルはコンパイルされない。
+</p>
+
+<h3>20.3 確信度の決め方</h3>
+<table>
+<tr><th>レイマーチの結果</th><th>差し替える放射輝度</th><th>確信度</th></tr>
+<tr>
+<td>画面内でヒット</td>
+<td><code>SceneColor</code>のヒット地点。プローブより新しく視差も完全に正しい</td>
+<td><code>roughnessFade * edgeFade</code></td>
+</tr>
+<tr>
+<td>画面内で背景(スカイ)へ到達</td>
+<td>プリフィルタ済み鏡面をラフネス&rarr;ミップで引いた値</td>
+<td><code>roughnessFade</code></td>
+</tr>
+<tr>
+<td>画面外へ外れた / 最大距離まで判定不能</td>
+<td>&mdash;</td>
+<td><b>0</b></td>
+</tr>
+</table>
+<p>
+<strong>画面外の扱いが7章から反転している。</strong>プローブ導入前は「その先に何があるか不明なので
+何も足さない」という判断だったが、いまはLightingパスがプローブを適用済みで、プローブは画面外の
+情報を持っている。したがって<strong>確信度0=何もしない=プローブに任せる</strong>が正しい答えになる。
+洞窟で誤って空が映り込まないという7章の性質も、そのまま保たれる。
+</p>
+<p>
+スカイへ到達した場合に<strong>生のスカイボックスではなくプリフィルタ済み鏡面を引く</strong>ように
+変えたのは、従来はミップ選択が無く粗い面でも鮮鋭な鏡像を返していたためで、これ自体が品質改善に
+なる。なおプローブが1つも効いていない屋外では、差し替え前後の放射輝度がどちらもグローバルIBLと
+一致するため差がゼロになり、正しく「何も変わらない」。
+</p>
+<p>
+反射の重み付けに使っていた<code>reflectivity = max(FresnelSchlick(N&middot;V, F0))</code>という
+アドホックなスカラーは廃止した。14.9.5節でマルチスキャッタリング補正の対象外とした理由が
+「この量は方向アルベドではない」ことだったが、いまは<code>SpecularIBLWeight</code>の
+split-sum近似が係数を担うため、その懸念自体が消えている。
+<code>roughnessFade</code>は残してあるが、役割は「反射の強さ」ではなく
+<strong>SSRの結果をどれだけ信用するか</strong>に変わった(スクリーンスペースのレイマーチは
+ヒット色を1点サンプルするだけで、粗い面に必要な円錐状のぼかしを持たないため)。
+</p>
+
+<h3>20.4 検証: White Furnace TestでSSRを有効に戻せた</h3>
+<p>
+この変更の正しさは、エンジン自身のエネルギー保存テストで直接測れる。White Furnace Testは
+一様な放射輝度のキューブマップの中に<code>metallic = 1.0</code>の金属球を並べたシーンで、
+エネルギーが保存していれば<strong>球が背景に完全に溶けて見えなくなる</strong>。
+</p>
+<p>
+SSRを有効にして計測したところ、<strong>3Dシーンの画素は1つも変化しなかった</strong>
+(51480点サンプル。差分が出た76画素はすべてImGuiパネル見出しのハイライトで、座標も
+(300-305, 45-57)のUI領域に限られていた)。加算だった頃は球が背景より明るくなっていたので、
+二重計上が解消したことの直接の証拠になる。
+</p>
+<p>
+これを受けて<code>Scenes/FurnaceTest.kscene</code>の
+<code>ScreenSpaceReflection</code>を<code>true</code>へ戻した。以後このシーンは
+<strong>SSRの合成が壊れていないことの回帰テストも兼ねる</strong> ―― 球が背景から浮き上がって
+見えたら、SSRが引く量とLightingが足す量がずれている。
+</p>
+
+<h3>20.5 既知の制約</h3>
+<ul>
+<li><strong>半透明サーフェスのピクセルでは引き算が正しくない</strong>。SSRはG-Bufferを読むが、
+半透明はフォワードパスで描かれG-Bufferに入らないため、そこでのG-Bufferは「ガラスの奥にある
+不透明面」の値になる。引く鏡面IBLが<code>SceneColor</code>(ガラスで上書き済み)に含まれておらず
+負へ振れうるので、最終的な色を<code>max(0)</code>でクランプしている。半透明パスがSSRの対象外で
+ある以上この不一致は避けられない</li>
+<li>SSRは<strong>拡散側には一切関与しない</strong>。差し替えるのは鏡面の放射輝度だけで、
+拡散IBL(プローブのイラディアンス)はLightingパスの結果がそのまま残る</li>
+<li><code>roughnessCutoff</code>(既定0.6)より粗い面ではSSRを一切使わない。この領域は
+プローブ/グローバルIBLに委ねられる</li>
+</ul>
 <section id="procedural-sky">
-<h2>18. 手続き空・月光・昼夜遷移</h2>
+<h2>21. 手続き空・月光・昼夜遷移</h2>
 
 <p>「IBLを有効にすると夜がとても暗い」という指摘の調査から始まった一連の変更。
 原因は14.5節に書いたとおり、空が昼固定のスカイボックスから焼かれているために
 夜を表現する手段が「IBL全体を昼度で0倍する」ことしか無かったことにある。
 本章はその根治と、それに伴って必要になった月光・昼夜遷移の作り直しを扱う。</p>
 
-<h3>18.1 なぜ「昼夜2枚のDDSをブレンド」ではなくGPUの手続き生成なのか</h3>
+<h3>21.1 なぜ「昼夜2枚のDDSをブレンド」ではなくGPUの手続き生成なのか</h3>
 
 <p>畳み込みは線形演算である。したがって</p>
 <pre><code>prefilter(lerp(昼, 夜, t)) == lerp(prefilter(昼), prefilter(夜), t)</code></pre>
@@ -2606,7 +3448,7 @@ Perez分布は太陽の位置に依存するので、時刻が変わるとcircum
 手続き空のトグルに関わらず必ずDDSを使う。<strong>新しい<code>.kscene</code>キーは不要</strong>。
 </p>
 
-<h3>18.2 空の天頂輝度を「届く照度」で正規化する</h3>
+<h3>21.2 空の天頂輝度を「届く照度」で正規化する</h3>
 
 <p>
 従来は空光の照度[lx]をそのまま天頂輝度[cd/m²]として使っていた。照度と輝度は
@@ -2622,7 +3464,7 @@ E = ∫L·cosθ dω の関係にあるので、この扱いだと実際に届く
 <p>
 つまり空光の照度が時刻によって<strong>1.8倍も勝手に変動していた</strong>。
 上半球の余弦重み積分が目標照度に一致するよう天頂輝度を正規化することでこれを固定し、
-時刻による空の明るさを意図した係数(18.3節の薄明係数)だけで制御できるようにした。
+時刻による空の明るさを意図した係数(21.3節の薄明係数)だけで制御できるようにした。
 積分はθ64分割×φ256分割の中点則で、1.6万回の評価になるため毎フレームではなく
 実際に空を焼くフレームでだけ計算する。
 </p>
@@ -2634,7 +3476,7 @@ E = ∫L·cosθ dω の関係にあるので、この扱いだと実際に届く
 <code>m_IBLIntensity</code>の既定は変更していない。
 </p>
 
-<h3>18.3 昼夜遷移を「時刻」ではなく「太陽の仰角」で決める</h3>
+<h3>21.3 昼夜遷移を「時刻」ではなく「太陽の仰角」で決める</h3>
 
 <p>
 遷移窓を5-7時/17-19時へ広げたいという要求があったが、素直に広げると破綻する。
@@ -2662,7 +3504,7 @@ E = ∫L·cosθ dω の関係にあるので、この扱いだと実際に届く
 地平線で(1.0, 0.55, 0.30))、朝焼け・夕焼けの赤みが出るようにした。
 </p>
 
-<h3>18.4 月光と、平行光源1枠の共有</h3>
+<h3>21.4 月光と、平行光源1枠の共有</h3>
 
 <p>
 照度は満月の実測値0.25 lx、色は暗所視で青く感じられる現象(プルキンエ効果)に合わせた
@@ -2687,7 +3529,7 @@ E = ∫L·cosθ dω の関係にあるので、この扱いだと実際に届く
 月を反太陽方向に固定していたときは、切替点(太陽の仰角0度)で月の係数もちょうど0になり、
 向きが180度反転しても何も見えないためポップが原理的に起きなかった。
 月の位置が独立になるとこの保証が失われ、太陽が沈む瞬間に月が高く昇っていると
-<strong>0.25 lxの直接光が向きだけ突然入れ替わる</strong>。18.9.2節で夜の露出を切り詰めて
+<strong>0.25 lxの直接光が向きだけ突然入れ替わる</strong>。21.9.2節で夜の露出を切り詰めて
 月光の影が見える明るさにしたので、これは実際に目に付く。
 そこで月の立ち上がりを<strong>太陽の仰角0°→−5°</strong>に遅らせるゲートを掛け、
 切替点では太陽も月も厳密に0という元の性質を取り戻している
@@ -2707,7 +3549,7 @@ E = ∫L·cosθ dω の関係にあるので、この扱いだと実際に届く
 支配ライトの向きから逆算してはいけない。
 </p>
 
-<h3>18.5 プリ露出を時刻連動の可変値にする(fp16アンダーフローの回避)</h3>
+<h3>21.5 プリ露出を時刻連動の可変値にする(fp16アンダーフローの回避)</h3>
 
 <p>
 月光を物理値で入れると、プリ露出をEV100=15固定のままでは夜がHDRバッファでつぶれる。
@@ -2739,11 +3581,11 @@ E = ∫L·cosθ dω の関係にあるので、この扱いだと実際に届く
 (0.05段=約3.5%を閾値にしている)。焼き直さないと空だけ古い露出のまま取り残される。
 </p>
 
-<h3>18.6 当初計画から外れた点: 絶対輝度への移行は不要だった</h3>
+<h3>21.6 当初計画から外れた点: 絶対輝度への移行は不要だった</h3>
 
 <p>
 当初は「空を絶対輝度で格納し、サンプル時にプリ露出を掛ける」大きな移行を計画していた。
-しかし18.5節の可変プリ露出を入れた結果、空のベイクもライトも同じ実効プリ露出を使うようになり、
+しかし21.5節の可変プリ露出を入れた結果、空のベイクもライトも同じ実効プリ露出を使うようになり、
 <strong>全体が既に一つの整合した空間に乗っている</strong>ことが分かった。絶対輝度への移行は不要になり、
 それに伴って必要だった<code>SSR.hlsl</code>のcbuffer拡張
 (このシェーダーだけ<code>AmbientColor</code>までしか宣言しておらず、
@@ -2754,7 +3596,7 @@ E = ∫L·cosθ dω の関係にあるので、この扱いだと実際に届く
 空のキューブマップ自体が夜に暗くなるため、特別扱いが要らなくなったためである。
 </p>
 
-<h3>18.7 再ベイクのコストと閾値</h3>
+<h3>21.7 再ベイクのコストと閾値</h3>
 
 <p>1回の焼き直しの内訳は次のとおり。</p>
 <table>
@@ -2778,7 +3620,7 @@ BRDF積分LUTは(NdotV, ラフネス)の2Dテーブルで空にも太陽にも�
 (mip1=64、mip2=128、mip3以降=256)のが効く。
 </p>
 
-<h3>18.8 検証</h3>
+<h3>21.8 検証</h3>
 
 <p>Bistro Exteriorで撮影し、相異なる色数・走査線上の階調数・同一色の最大連長(バンド幅)で比較した。</p>
 <table>
@@ -2807,21 +3649,21 @@ BRDF積分LUTは(NdotV, ラフネス)の2Dテーブルで空にも太陽にも�
 一様グレーのままで、エネルギー保存は崩れていない</li>
 </ul>
 
-<h3>18.9 実機で残った4つの見た目の問題と、その原因</h3>
+<h3>21.9 実機で残った4つの見た目の問題と、その原因</h3>
 
 <p>
-18.8までの実装を実機で確認した結果、次の4点が指摘された。
+21.8までの実装を実機で確認した結果、次の4点が指摘された。
 <strong>4点のうち2点は同一のバグに由来し、残る2点は空のモデルの構造的な限界だった。</strong>
 </p>
 
-<h4>18.9.1 「自動露出が無効化できない」「夜が明るすぎる」— 割り戻しの欠落</h4>
+<h4>21.9.1 「自動露出が無効化できない」「夜が明るすぎる」— 割り戻しの欠落</h4>
 
 <p>
 どちらも原因は1つで、<strong>手動露出時にTonemapが可変プリ露出を割り戻していなかった</strong>ことによる。
 <code>Tonemap.hlsl</code>は自動露出が有効なときだけ <code>exp2(プリ露出EV − 自動露出EV)</code> を掛け、
 無効なときはCPU側が渡す<code>ExposureScale</code>をそのまま使う。ところがCPU側は
 これを<strong>1.0固定</strong>で渡していた。17.1節のプリ露出方式では正しい値だったが、
-18.5節で可変プリ露出を入れた時点で成立しなくなっていた。
+21.5節で可変プリ露出を入れた時点で成立しなくなっていた。
 </p>
 <p>
 実効プリ露出は夜に最大18段下がる。つまりHDRバッファ上の夜の値は約26万倍明るく積まれており、
@@ -2839,7 +3681,7 @@ BRDF積分LUTは(NdotV, ラフネス)の2Dテーブルで空にも太陽にも�
 昼のカメラ設定で夜を撮れば真っ黒になるのが正しい挙動であり、これが「手動露出が効いている」ことの証拠になる。
 </p>
 
-<h4>18.9.2 「夜が明るすぎる」の残り — 自動露出そのものの性質</h4>
+<h4>21.9.2 「夜が明るすぎる」の残り — 自動露出そのものの性質</h4>
 
 <p>
 自動露出は「測ったものを中庸なグレーへ持ち上げる」機能なので、正しく動くほど夜は昼と同じ明るさになる。
@@ -2852,7 +3694,7 @@ BRDF積分LUTは(NdotV, ラフネス)の2Dテーブルで空にも太陽にも�
 </p>
 <p>
 既定値は「月明かりの影が見えるか見えないかぐらい」を狙って実測で決めた
-(18.9.6節のクランプを入れた状態での値。満月に照らされた石壁の8bitコードを、
+(21.9.6節のクランプを入れた状態での値。満月に照らされた石壁の8bitコードを、
 空が画面の約40%を占める屋上視点と空が入らない構図の両方で測っている)。
 </p>
 <table>
@@ -2867,7 +3709,7 @@ BRDF積分LUTは(NdotV, ラフネス)の2Dテーブルで空にも太陽にも�
 <code>AE Night Rolloff</code>で調整できる。
 </p>
 <p class="note">
-<strong>この値は18.9.6節のクランプとセットでしか意味を持たない。</strong>
+<strong>この値は21.9.6節のクランプとセットでしか意味を持たない。</strong>
 クランプが無いと測光値が構図で2〜3.5段振れるため、ここをいくつにしても
 カメラの向きで夜の明るさが変わってしまう。
 </p>
@@ -2878,10 +3720,10 @@ BRDF積分LUTは(NdotV, ラフネス)の2Dテーブルで空にも太陽にも�
 照度側を触ると空の明るさやIBLの寄与まで一緒に動いてしまう。
 </p>
 
-<h4>18.9.3 「スカイボックスの色が夕方や夜に合わない」— 色味が時刻に依存していなかった</h4>
+<h4>21.9.3 「スカイボックスの色が夕方や夜に合わない」— 色味が時刻に依存していなかった</h4>
 
 <p>
-Perez分布が与えるのは<strong>輝度の分布だけ</strong>で、色は与えない。18.8までの実装は色味を
+Perez分布が与えるのは<strong>輝度の分布だけ</strong>で、色は与えない。21.8までの実装は色味を
 天頂・地平線の2定数で固定していたため、<strong>太陽高度が変わっても空の色相は一切変わらなかった</strong>。
 実測でも12/17/18/19/22時の空の色が1コード以内で完全に一致していた。
 </p>
@@ -2895,7 +3737,7 @@ Perez分布が与えるのは<strong>輝度の分布だけ</strong>で、色は�
 </p>
 <p>
 暖色の強さは<strong>太陽仰角0度で最大、±15度で0になる三角窓</strong>にしている。
-18.3節の<code>dayBlend</code>・<code>nightBlend</code>がどちらも仰角0度で0・±15度で1になるので、
+21.3節の<code>dayBlend</code>・<code>nightBlend</code>がどちらも仰角0度で0・±15度で1になるので、
 両者の補数の積がそのまま窓になる。太陽が地平線下にあってもその方位の低空には暖色が残るため、
 実際の夕焼けの残光と同じ構造になる。
 </p>
@@ -2915,21 +3757,21 @@ CPUで1度決めて配れば<strong>両者がずれることが構造的に起�
 照度は変わらない。
 </p>
 
-<h4>18.9.4 「空がまだくすんで見える」— 輝度フロアが勾配を潰していた</h4>
+<h4>21.9.4 「空がまだくすんで見える」— 輝度フロアが勾配を潰していた</h4>
 
 <p>
-18.2節(2)で入れた<code>RELATIVE_LUMINANCE_FLOOR</code>=0.45が主因だった。
+21.2節(2)で入れた<code>RELATIVE_LUMINANCE_FLOOR</code>=0.45が主因だった。
 CIE快晴空の相対輝度は反太陽側の水平線で天頂の0.2倍程度まで落ちる。これは実際の快晴空の姿だが、
 0.45まで底上げすると<strong>輝度の勾配がほぼ消えて空全体が一様なスレートグレーになる</strong>。
 実測で空の彩度が0.26しかなく、しかも時刻を問わず一定だった。
 多重散乱で暗部が持ち上がるのは事実なのでゼロにはせず、勾配が残る0.12へ下げた。
 </p>
 <p>
-18.9.3の色味変更とあわせた効果と、残る要因は次のとおり。
+21.9.3の色味変更とあわせた効果と、残る要因は次のとおり。
 </p>
 <table>
 <tr><th>構成</th><th>正午の空の彩度</th><th>B/R(8bitコード比)</th></tr>
-<tr><td>18.8時点(フロア0.45・固定ティント)</td><td>0.261</td><td>1.35</td></tr>
+<tr><td>21.8時点(フロア0.45・固定ティント)</td><td>0.261</td><td>1.35</td></tr>
 <tr><td>フロア0.12・時刻依存ティント</td><td><strong>0.328</strong></td><td><strong>1.49</strong></td></tr>
 </table>
 <p>
@@ -2943,7 +3785,7 @@ ACESの色相シフトを避けるためなので、<strong>ここを変える�
 したがって今回は空側の要因(フロアとティント)のみを直し、ルック変換の追加は保留した。
 </p>
 
-<h4>18.9.5 検証</h4>
+<h4>21.9.5 検証</h4>
 
 <p>Bistro Exterior・自動露出有効で、開けた空の領域(260×200px)の平均RGBを時刻ごとに測った。</p>
 <table>
@@ -2959,7 +3801,7 @@ ACESの色相シフトを避けるためなので、<strong>ここを変える�
 <tr><td>22時</td><td>−87°</td><td>21.3</td><td>37.8</td><td>64.5</td><td>0.671</td></tr>
 </table>
 <p>
-日の出・日の入りだけR&gt;Bになり(暖色)、夜は深い青になる。18.8時点ではこの列が
+日の出・日の入りだけR&gt;Bになり(暖色)、夜は深い青になる。21.8時点ではこの列が
 全時刻で一致していた。
 </p>
 <ul>
@@ -2978,10 +3820,10 @@ ACESの色相シフトを避けるためなので、<strong>ここを変える�
 (0.1, 0.2, 0.4) となり月光は消え、星明かりの空だけが残る</li>
 </ul>
 
-<h3>18.9.6 実機で発覚した続き: 夜の明るさが構図で3.5段振れる</h3>
+<h3>21.9.6 実機で発覚した続き: 夜の明るさが構図で3.5段振れる</h3>
 
 <p>
-18.9.2節の補正カーブを入れた後、街路視点で<code>AE Night Rolloff</code>を3.5段にしても
+21.9.2節の補正カーブを入れた後、街路視点で<code>AE Night Rolloff</code>を3.5段にしても
 まだ明るい、という指摘を受けた。調べた結果<strong>実装は正しく動いており、
 表に載せた数字が特定の構図に紐づいていた</strong>ことが原因だった。
 </p>
@@ -3069,10 +3911,10 @@ White Furnace Testの一様グレーが107から208まで持ち上がり、白�
 <li><strong>DX11/DX12</strong> — 夜22時で完全一致</li>
 </ul>
 
-<h3>18.9.7 「肉眼で見た夜」に合わせる — 薄明視(mesopic vision)</h3>
+<h3>21.9.7 「肉眼で見た夜」に合わせる — 薄明視(mesopic vision)</h3>
 
 <p>
-18.9.6のクランプを入れてもまだ夜が明るい、肉眼で見た感じに合わせたい、という指摘を受けた。
+21.9.6のクランプを入れてもまだ夜が明るい、肉眼で見た感じに合わせたい、という指摘を受けた。
 ここで効いていたのは明るさの数字ではなく<strong>暗所での色の見え方</strong>だった。
 </p>
 <p>
@@ -3105,7 +3947,7 @@ sRGBの原色付近でのV'(λ)の比 (0.024, 0.368, 0.608) をRGBの重みに�
 薄明視の範囲に入ることがあるが、目はシーン全体の明るさに順応しているので錐体は働いており、
 日陰の色はちゃんと見える。実際、画素ごとに判定した実装では
 <strong>昼の日陰が脱色された</strong>(壁の彩度0.235→0.136)。
-順応輝度には18.9.6節の<code>ComputeReferenceEV100</code>(構図にも露出設定にも依存しない)を使う。
+順応輝度には21.9.6節の<code>ComputeReferenceEV100</code>(構図にも露出設定にも依存しない)を使う。
 画面全体で1つの値になるので、分岐もテクスチャ読みも増えない。
 </p>
 
@@ -3147,16 +3989,16 @@ sRGBの原色付近でのV'(λ)の比 (0.024, 0.368, 0.608) をRGBの重みに�
 使うときにImGuiの<code>Mesopic Vision</code>で明示的に上げる。
 </p>
 
-<h3>18.9.8 根治: 自動露出の測光から空を外す</h3>
+<h3>21.9.8 根治: 自動露出の測光から空を外す</h3>
 
 <p>
-18.9.6でキー照度によるクランプを入れてもまだ夜が明るく、
+21.9.6でキー照度によるクランプを入れてもまだ夜が明るく、
 <strong>「自動露出の輝度計算に空の明るさは必要なのか」</strong>という指摘を受けた。これが本質だった。
 </p>
 <p>
 <strong>空は「被写体」ではなく「光源」である。</strong>写真でも露出は被写体に合わせるものであって、
 空にカメラを向けたぶんだけ地上が暗く写るのは逆光の露出失敗にあたる。
-18.9.6で見つけた「構図で露出が2〜3.5段振れる」現象は、空を測光に数えていたことが原因そのもので、
+21.9.6で見つけた「構図で露出が2〜3.5段振れる」現象は、空を測光に数えていたことが原因そのもので、
 キー照度によるクランプはその症状を外から押さえていたにすぎなかった。
 </p>
 <p>
@@ -3167,7 +4009,7 @@ sRGBの原色付近でのV'(λ)の比 (0.024, 0.368, 0.608) をRGBの重みに�
 
 <h4>効果</h4>
 <table>
-<tr><th>構図</th><th>クランプで対処(18.9.6)</th><th>空を測光から外す(クランプ無効)</th></tr>
+<tr><th>構図</th><th>クランプで対処(21.9.6)</th><th>空を測光から外す(クランプ無効)</th></tr>
 <tr><td>夜・屋上視点</td><td>15.4</td><td><strong>3.8</strong></td></tr>
 <tr><td>夜・空が入らない構図</td><td>12.9</td><td><strong>4.2</strong></td></tr>
 <tr><td>昼・屋上視点</td><td>44.8</td><td><strong>93.9</strong></td></tr>
@@ -3178,7 +4020,7 @@ sRGBの原色付近でのV'(λ)の比 (0.024, 0.368, 0.608) をRGBの重みに�
 <strong>クランプを無効にした状態でこの一致</strong>なので、クランプは役目を終えている。
 </p>
 <p>
-夜が暗くなったのは、空を外すと測光値が下がり、18.9.2節の補正カーブが
+夜が暗くなったのは、空を外すと測光値が下がり、21.9.2節の補正カーブが
 「より暗いシーン」と判定してより多く切り詰めるため。狙いどおりの方向である。
 </p>
 <p>

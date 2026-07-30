@@ -324,14 +324,15 @@ ImGuiパネル経由</strong>):
     <li><code>WASD</code> で移動、<code>E</code>/<code>Q</code> で上下移動、<code>Shift</code> で高速移動</li>
     <li>右クリックを押しながらマウス移動でカメラ回転</li>
     <li><code>F1</code> でImGuiパネルの表示/非表示切り替え</li>
-    <li>画面左上のImGuiパネル(Scenes / Post Processing / Render Targets / Lighting / Profiler)で
+    <li>画面左上のImGuiパネル(Scenes / Post Processing / Render Targets / Lighting / Reflection Probes / Profiler)で
     表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/SSRのON・OFFやパラメータ調整、デバッグ表示
     バッファの選択、時刻(昼夜サイクル)とEV100(露出)の調整、ポイント/スポットライトの
     一覧・追加・削除・編集、FPS/CPU/GPUの計測値確認ができる</li>
   </ul>
 </li>
 <li>表示できるシーンはビルド済みバイナリに組み込み済み(Sponza / Bistro (McGuire) Exterior /
-Bistro (McGuire) Interior / White Furnace Test / Material Test / Light Test)。カスタムモデルの追加や、
+Bistro (McGuire) Interior / White Furnace Test / Material Test / Light Test /
+Reflection Probe Test)。カスタムモデルの追加や、
 シーン一覧の外部からのカスタマイズは現状の公開APIではサポートしていない(<code>Run()</code> を
 呼ぶ以外のカスタマイズ余地がないのが <code>KurenaiEngine3D</code> の設計上の割り切り)。</li>
 <li>コンストラクタに渡した <code>GraphicsAPI</code> に応じてDX11/DX12いずれかのバックエンドで
@@ -990,7 +991,7 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>Skybox</code></td><td>path</td><td>-</td><td>Skybox/Sky.dds</td><td>Assetsルートからのキューブマップ<code>.dds</code>相対パス。IBLの環境光もこれから焼かれる</td></tr>
 <tr><td><code>IBLIntensity</code></td><td>float</td><td>-</td><td>変更しない</td><td>IBLの強度倍率。0以上</td></tr>
 <tr><td><code>AmbientOcclusion</code></td><td>bool</td><td>-</td><td>true</td><td>AO/間接光(SSAO・SSIL)の有効/無効</td></tr>
-<tr><td><code>ScreenSpaceReflection</code></td><td>bool</td><td>-</td><td>true</td><td>SSRの有効/無効</td></tr>
+<tr><td><code>ScreenSpaceReflection</code></td><td>bool</td><td>-</td><td>true</td><td>SSRの有効/無効。SSRは画面内で反射先が見つかった場合にその色で反射を<strong>差し替える</strong>(加算ではない)。見つからなかった場合は反射プローブ由来の反射がそのまま残るため、ON/OFFで全体の明るさは変わらず反射の鮮明さだけが変わる</td></tr>
 <tr><td rowspan="3"><code>[Model]</code></td><td rowspan="3">1以上</td><td><code>Path</code></td><td>path</td><td><strong>必須</strong></td><td>-</td><td>Assetsルートからの<code>.kmodel</code>相対パス</td></tr>
 <tr><td><code>Translation</code></td><td>float3</td><td>-</td><td>0,0,0</td><td>平行移動</td></tr>
 <tr><td><code>RotationEuler</code>/<code>Scale</code></td><td>float3</td><td>-</td><td>0,0,0 / 1,1,1</td><td>回転(度、pitch/yaw/roll)・スケール(負値も可)</td></tr>
@@ -1000,14 +1001,66 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>AzimuthDegrees</code></td><td>float</td><td>-</td><td>126.87</td><td>太陽が昇る方位角</td></tr>
 <tr><td><code>Shadow</code></td><td>bool</td><td>-</td><td>true</td><td>シャドウマップの有効/無効</td></tr>
 <tr><td><code>Enabled</code></td><td>bool</td><td>-</td><td>true</td><td>太陽(平行光)そのものの有効/無効。<code>TimeOfDay</code>を夜にすると環境光の明るさも一緒に落ちるが、こちらは太陽だけを消す</td></tr>
-<tr><td rowspan="6"><code>[Light]</code></td><td rowspan="6">0以上</td><td><code>Type</code></td><td>enum</td><td><strong>必須</strong></td><td>-</td><td><code>Point</code> / <code>Spot</code></td></tr>
+<tr><td rowspan="8"><code>[Light]</code></td><td rowspan="8">0以上</td><td><code>Type</code></td><td>enum</td><td><strong>必須</strong></td><td>-</td><td><code>Point</code> / <code>Spot</code></td></tr>
 <tr><td><code>Position</code></td><td>float3</td><td><strong>必須</strong></td><td>-</td><td>-</td></tr>
 <tr><td><code>Direction</code></td><td>float3</td><td>Spotのみ必須</td><td>-</td><td>-</td></tr>
 <tr><td><code>Color</code> / <code>Intensity</code></td><td>float3 / float</td><td>-</td><td>1,1,1 / 1.0</td><td>リニア空間RGB</td></tr>
 <tr><td><code>Range</code></td><td>float</td><td>-</td><td>10.0</td><td>-</td></tr>
 <tr><td><code>ConeAngleDegrees</code></td><td>float</td><td>Spotのみ</td><td>45.0</td><td>-</td></tr>
+<tr><td><code>CastShadow</code></td><td>bool</td><td>-</td><td>true</td><td>このライトがスクリーンスペースシャドウを落とすか。1ピクセルが撃てるシャドウレイ数には上限(Lightingパネルの<code>Max Shadowed Lights</code>)があるため、影を出したいライトへ予算を回すのに使う</td></tr>
+<tr><td rowspan="7"><code>[ReflectionProbe]</code></td><td rowspan="7">0〜8</td><td><code>Position</code></td><td>float3</td><td><strong>必須</strong></td><td>-</td><td>キャプチャ位置(ワールド空間)。<code>Shape = Box</code>では箱の中心も兼ねる</td></tr>
+<tr><td><code>Shape</code></td><td>enum</td><td>-</td><td><code>Sphere</code></td><td><code>Sphere</code> / <code>Box</code>。それ以外はエラー</td></tr>
+<tr><td><code>Radius</code></td><td>float</td><td>-</td><td>10.0</td><td><code>Sphere</code>のときの影響範囲の半径。0以下はエラー</td></tr>
+<tr><td><code>BoxExtents</code></td><td>float3</td><td>-</td><td>10,10,10</td><td><code>Box</code>のときの各軸の半径(ハーフエクステント)。0以下の軸があればエラー</td></tr>
+<tr><td><code>Yaw</code></td><td>float</td><td>-</td><td>0.0</td><td><code>Box</code>のY軸まわりの回転(度)</td></tr>
+<tr><td><code>BlendDistance</code></td><td>float</td><td>-</td><td>2.0</td><td>影響範囲の境界から内側へこの距離をかけて重みが1まで立ち上がる。負値はエラー</td></tr>
+<tr><td><code>Name</code></td><td>string</td><td>-</td><td><code>Probe N</code></td><td>ImGuiの一覧に表示される名前</td></tr>
 </tbody>
 </table>
+<p>
+<code>[ReflectionProbe]</code>は<strong>反射プローブ</strong>を配置します。指定した位置から周囲を
+キューブマップへキャプチャし、影響範囲の内側のピクセルはその環境をIBLの環境ソースとして使います。
+屋内など、シーン全体で共通のスカイボックス由来の環境光では空が映り込んでしまう場所で、
+実際の壁・柱・床が映るようになります。影響範囲の外側は従来どおりスカイボックス由来のIBLになります。
+</p>
+<p>
+影響範囲は<code>Shape</code>で球(<code>Sphere</code>、<code>Radius</code>で指定)と
+直方体(<code>Box</code>、<code>BoxExtents</code>と<code>Yaw</code>で指定)から選べます。
+<code>Box</code>には、影響範囲を部屋の形に沿わせられることに加えて<strong>視差補正</strong>が
+効くという利点があります。プローブのキューブマップは1点から撮ったものなので、プローブ位置から
+離れた壁際では映る像の位置が本来の反射位置とずれます。視差補正は反射ベクトルをこの箱と交差させ、
+その交点の方向でキューブマップを引き直すことでずれを打ち消します。そのため
+<code>BoxExtents</code>は部屋の壁とおおよそ一致させてください(実際の壁から大きく離すと
+補正がかえってずれます)。
+</p>
+<p>
+影響範囲が重なっているプローブ同士は、<code>BlendDistance</code>(境界から内側へ重みが1まで
+立ち上がる距離)に応じた重み付き平均で混ざります。どのプローブの重みも1に満たない場所では
+残りをスカイボックス由来のグローバルIBLが埋めるため、影響範囲の外へ出るときも境界で切り替わらず
+徐々に元の環境光へ戻ります。
+</p>
+<p>
+プローブの中身はシーンのジオメトリ・ライトに依存するため、シーン読み込み時に自動で焼かれます。
+実行中にライトや時刻を変えた後に反映したい場合は、ImGuiの「Reflection Probes」パネルの
+「Bake」ボタンを押してください(同パネルでプローブの追加・削除・位置と影響範囲の編集もできます。
+影響範囲だけを変えた場合は焼き直し不要です)。
+</p>
+<p>
+同パネルの「Update Mode」で焼き直しの方式を選べます。
+<strong>Baked</strong>はシーン読み込み時と「Bake」ボタンのときだけ焼きます(実行時コストはゼロですが、
+ライトや時刻を動かしても反射は焼いた時点のまま止まります)。
+<strong>On Demand</strong>は加えて、太陽・時刻・ライトなど焼き上がりに影響する状態の変化を検出して
+自動で焼き直します(変化していない間のコストはゼロですが、変化したフレームに全プローブぶんの
+焼き直しが集中します)。
+<strong>Realtime</strong>は毎フレーム1面ずつ焼き直し、6面揃った時点で次のプローブへ回ります
+(パネルに現在どのプローブの何面目を焼いているかが表示されます)。
+各方式のコストはImGuiの「Profiler」パネルで<code>ProbeBake0</code>/<code>ProbeBake1</code>、
+<code>ProbeRealtimeCapture</code>、<code>ProbeRealtimeConvolve</code>として比較できます。同パネルの「Parallax Correction」「Probe Blending」で
+視差補正・ブレンドの有無を切り替えて見比べることもできます。上限は8個で、超えた分は警告ログを
+出してスキップします。現時点では箱の回転はY軸まわりのみで、影響範囲の箱がそのまま視差補正の
+投影ボックスを兼ねます(両者を別々に指定することはできません)。内部実装は
+<a href="Architecture.html#reflectionprobe">実装者向けドキュメント 16章「反射プローブ」</a>を参照してください。
+</p>
 <p>
 <code>[Light]</code>で指定したライトはワールド空間の値として扱われ、モデル埋め込みのライト
 (4.6.1節参照)と合成された<code>Scene::Lights</code>としてそのまま描画に反映される
