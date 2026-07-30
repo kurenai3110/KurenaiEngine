@@ -1,22 +1,38 @@
 // スクリーンスペースリフレクション(SSR)パス。
 // Lightingパスで完成したSceneColor(HDR、トーンマップ前)を「反射先の環境色」として
 // 簡易的に再利用し、G-Buffer(Normal/Material/Depth)を使ってワールド空間でレイマーチングする。
-// HDRのまま反射色を加算するため、1.0を超える輝度(明るい光源の反射など)も正しく合成できる。
+// HDRのまま扱うため、1.0を超える輝度(明るい光源の反射など)も正しく合成できる。
 // トーンマッピングはこのパスより後段のTonemap.hlsl(Present直前)でまとめて行う。
-// スカイボックスへのフォールバックは、レイが画面内で実際に背景(深度なし)ピクセルへ到達したことを
-// 確認できた場合のみ行う。画面外に外れた場合や最大距離まで判定がつかなかった場合は、その先に
-// 何があるか(スカイなのか、単に画面外の別ジオメトリなのか)分からないため反射を追加しない。
-// そうしないと、洞窟のように周囲が完全に遮蔽された空間でも、レイが画面外に外れただけで
-// 誤って空が映り込んでしまう。
-// このエンジンにはレンダーグラフ/コンピュートシェーダー/Hi-Zミップチェーン/PSOのブレンドステートが
-// 未実装のため、既存のSSAO/SSILと同じフルスクリーン三角形+ピクセルシェーダーのパターンで実装し、
-// 反射色の合成もブレンドステートではなくこのシェーダー内で直接加算する。
+//
+// このパスは反射色を「加算」しない(20章)。Lightingパスは既に鏡面IBL
+//   鏡面IBL = 環境の放射輝度(プローブ+グローバルIBLの合成) * SpecularIBLWeight(...)
+// をSceneColorへ書き込んでいるため、SSRの結果をそのまま足すと同じ反射を二重に計上してしまう
+// (14.9.5節。White Furnace TestがSSRを切っているのはこれが目に見える形で出るため)。
+// 代わりにSSRは「環境の放射輝度だけを差し替える」:
+//   出力 = SceneColor + (SSRが得た放射輝度 - Lightingが使った放射輝度) * SpecularIBLWeight(...) * 確信度
+// 確信度が0なら出力はSceneColorと厳密に一致し、1ならSSRの放射輝度が鏡面IBLを完全に置き換える。
+// 係数SpecularIBLWeightと環境の放射輝度SampleEnvironmentはReflectionProbe.hlsliで
+// DeferredLighting.hlslと共有しており、「足した覚えのない値を引く」ことが起きないようにしている。
+//
+// レイが画面外に外れた場合や最大距離まで判定がつかなかった場合は確信度0とし、Lightingパスが
+// 適用したプローブ/グローバルIBLをそのまま残す。プローブ導入以前は「その先に何があるか不明なため
+// 何も足さない」という判断だったが、いまはプローブが画面外の情報を持っているため、
+// 「何もしない=プローブに任せる」が正しい答えになった。
+//
+// このエンジンにはPSOのブレンドステートが無いため、既存のSSAO/SSILと同じ
+// フルスクリーン三角形+ピクセルシェーダーのパターンで実装し、合成もこのシェーダー内で直接行う。
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
 static const int kSSRStepCount = 32;
 static const int kSSRBinaryStepCount = 6;
 static const float kSSREdgeFadeDistance = 0.1f;
+
+// 反射プローブの環境ソースと鏡面IBLの重み(DeferredLighting.hlslと共有)。
+// 拡散イラディアンスは使わないため、拡散側のレジスタは定義しない
+#define KURENAI_GLOBAL_PREFILTERED_REGISTER t7
+#define KURENAI_PROBE_PREFILTERED_REGISTER t8
+#define KURENAI_PROBE_BUFFER_REGISTER t9
 
 cbuffer FrameConstants : register(b0)
 {
@@ -29,7 +45,20 @@ cbuffer FrameConstants : register(b0)
     float4 LightColor;
     float4x4 View;
     float4x4 Proj;
+    // a=昼度。鏡面IBLの重みに含まれるためSpecularIBLWeightへ渡す
     float4 AmbientColor;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 CascadeSplits;
+    // y: プリフィルタ済み鏡面マップの最大ミップレベル、z: IBL強度倍率、
+    // w: スペキュラのマルチスキャッタリング・エネルギー補正のトグル
+    float4 ShadowParams;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 ActiveLightCount;
+    // 拡散イラディアンスの取得元切り替え。このシェーダは鏡面しか扱わないため未使用だが、
+    // 後続のProbeParamsのオフセットを合わせるために宣言だけしている
+    float4 IBLParams;
+    // 反射プローブ用。ReflectionProbe.hlsliのプローブ選択・ブレンドが読む
+    float4 ProbeParams;
 };
 
 cbuffer SSRConstants : register(b1)
@@ -41,8 +70,16 @@ Texture2D SceneColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MaterialTexture : register(t2);
 Texture2D DepthTexture : register(t3);
-TextureCube SkyboxTexture : register(t4);
-Texture2D AlbedoTexture : register(t5);
+Texture2D AlbedoTexture : register(t4);
+// SSAO/SSILのAO/GIバッファ。a=遮蔽率。スペキュラオクルージョンに使う
+// (Lightingパスが適用した鏡面IBLの重みを再現するために必要)
+Texture2D AOTexture : register(t5);
+// split-sum近似の第2項、BRDF積分LUT
+Texture2D BRDFLUTTexture : register(t6);
+
+// プリフィルタ済み鏡面(t7)・プローブのキューブマップ配列(t8)・プローブの影響範囲バッファ(t9)の
+// 宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みはReflectionProbe.hlsliが持つ
+#include "ReflectionProbe.hlsli"
 
 struct PSInput
 {
@@ -67,10 +104,6 @@ float3 ReconstructWorldPos(float2 uv, float depth)
     return worldPos.xyz / worldPos.w;
 }
 
-float3 FresnelSchlick(float cosTheta, float3 F0)
-{
-    return F0 + (1.0f - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
-}
 
 // ワールド座標を画面UVとView空間Z(カメラからの距離。値が大きいほど遠い)へ投影する。
 // カメラ背後、または画面外に出た場合はfalseを返す
@@ -124,10 +157,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     const float thickness = Params0.y;
     const float roughnessCutoff = Params0.z;
 
-    // ミップ/ブラーによる粗さ表現がないため、粗い面ほど反射を弱めてノイズ化を防ぐ
+    // スクリーンスペースのレイマーチはヒット色を1点サンプルするだけで、粗い面に必要な
+    // 円錐状のぼかしを持たない。そのため粗い面ほどSSRの結果を信用しない
     float roughnessFade = 1.0f - smoothstep(0.0f, roughnessCutoff, roughness);
     if (roughnessFade <= 0.0f)
     {
+        // SSRを信用しない=Lightingパスが適用したプローブ/グローバルIBLをそのまま残す
         return float4(baseColor, 1.0f);
     }
 
@@ -136,16 +171,21 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 V = normalize(CameraPosition.xyz - worldPos);
     float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
     float NdotV = saturate(dot(N, V));
-    float3 fresnel = FresnelSchlick(NdotV, F0);
-    float reflectivity = max(fresnel.r, max(fresnel.g, fresnel.b));
-
-    float weight = reflectivity * roughnessFade;
-    if (weight <= 0.001f)
-    {
-        return float4(baseColor, 1.0f);
-    }
 
     float3 reflectDir = normalize(reflect(-V, N));
+
+    // --- Lightingパスが適用した鏡面IBLを、そのときとまったく同じ式で再現する ---
+    // 環境の放射輝度と、それに掛かる係数。どちらもReflectionProbe.hlsliの定義を共有しているため、
+    // ここで求めた値はLightingパスがSceneColorへ足したものと定義上一致する
+    const float ao = AOTexture.Sample(ColorSampler, input.UV).a;
+    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
+    const float3 specularWeight =
+        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, AmbientColor.a, ShadowParams.z);
+
+    const float mipLevel = roughness * ShadowParams.y;
+    float3 unusedIrradiance;
+    float3 envRadiance;
+    SampleEnvironment(worldPos, N, reflectDir, mipLevel, unusedIrradiance, envRadiance);
 
     // 線形マーチ: レイに沿って一定間隔でサンプルし、G-Buffer深度より奥に入った地点(ヒット)を探す
     const float stepSize = maxDistance / float(kSSRStepCount);
@@ -187,6 +227,11 @@ float4 PSMain(PSInput input) : SV_TARGET
         }
     }
 
+    // --- 環境の放射輝度を差し替える ---
+    // newRadiance が envRadiance の代わりに使う放射輝度、confidence がその信用度
+    float3 newRadiance = envRadiance;
+    float confidence = 0.0f;
+
     if (hit)
     {
         // 2分探索でヒット区間[tPrev, tCurr]を精密化し、貫通による誤差を減らす
@@ -211,24 +256,32 @@ float4 PSMain(PSInput input) : SV_TARGET
             }
         }
 
-        float3 reflectionColor = SceneColorTexture.Sample(ColorSampler, hitUV).rgb;
+        // 画面内に実際に映っているサーフェスの色。プローブより新しく、視差も完全に正しい
+        newRadiance = SceneColorTexture.Sample(ColorSampler, hitUV).rgb;
 
-        // 反射先が画面の縁に近いほど弱める(画面外へレイが抜ける際の急な打ち切りを緩和する)
+        // 反射先が画面の縁に近いほど信用を落とす(画面外へレイが抜ける際の急な打ち切りを緩和する)。
+        // 縁で確信度が0へ落ちると、その分だけプローブ/グローバルIBLへ滑らかに戻る
         float2 edgeDist = min(hitUV, float2(1.0f, 1.0f) - hitUV);
         float edgeFade = saturate(min(edgeDist.x, edgeDist.y) / kSSREdgeFadeDistance);
 
-        return float4(baseColor + reflectionColor * weight * edgeFade, 1.0f);
+        confidence = roughnessFade * edgeFade;
     }
-
-    if (skyHit)
+    else if (skyHit)
     {
-        // 画面内で実際にスカイへ到達したことが確定した場合のみ、reflectDir方向の正しい
-        // スカイ色をスカイボックスから直接サンプルする
-        float3 skyColor = SkyboxTexture.Sample(MaterialSampler, reflectDir).rgb;
-        return float4(baseColor + skyColor * weight, 1.0f);
+        // 画面内で実際にスカイへ到達したことが確定した場合。プローブは屋内の壁を返しうるが、
+        // このレイは確かに外へ抜けているので、空のほうが正しい答えになる。
+        // 生のスカイボックスではなくプリフィルタ済み鏡面をラフネス→ミップで引く
+        // (以前は生のスカイボックスを引いていたため、粗い面でも鮮鋭な鏡像が返っていた)
+        newRadiance = PrefilteredEnvTexture.SampleLevel(MaterialSampler, reflectDir, mipLevel).rgb;
+        confidence = roughnessFade;
     }
+    // 画面外に外れた、または最大距離まで判定がつかなかった場合は confidence = 0 のまま。
+    // Lightingパスが適用したプローブ/グローバルIBLをそのまま残す(プローブが画面外を知っている)
 
-    // 画面外に外れた、または最大距離まで判定がつかなかった場合は、その先に何があるか
-    // 不明なため反射を追加しない(洞窟内などで誤って空を映り込ませないため)
-    return float4(baseColor, 1.0f);
+    const float3 composited = baseColor + (newRadiance - envRadiance) * specularWeight * confidence;
+
+    // 半透明サーフェスのピクセルではG-Bufferが「ガラスの奥にある不透明面」の値を持つため、
+    // ここで引く鏡面IBLがSceneColor(ガラスで上書き済み)に含まれておらず負へ振れうる。
+    // 半透明パスがSSRの対象外である以上この不一致は避けられないので、負の輝度だけは止めておく
+    return float4(max(composited, float3(0.0f, 0.0f, 0.0f)), 1.0f);
 }

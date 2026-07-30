@@ -23,6 +23,9 @@
 //         タイルあたりのライト数を青→緑→赤で示し、容量超過のタイルはマゼンタで塗る。
 //         カリングが効いているか・容量が足りているかを目視で確認する唯一の手段なので、
 //         色は「数が読める」ことより「異常が目立つ」ことを優先している
+//      12=反射プローブのキューブマップ配列(DebugCubeArrayTexture、t4)のデバッグ表示。
+//         Mode 9と同じ見回し方で、ArraySliceで指定した番号のプローブをサンプルする
+//         (TextureCubeArrayはMode 10のTexture2DArrayとも別の型のため、さらにスロットを分ける)
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
@@ -43,6 +46,7 @@ cbuffer PresentConstants : register(b1)
 {
     int Mode;
     float MipLevel;
+    // Mode 10ではカスケード番号、Mode 12では表示するプローブ番号として使う
     float ArraySlice;
     // デバッグ表示の輝度倍率。AO/GIバッファの間接拡散光のように値そのものが小さいバッファは
     // 等倍表示ではほぼ真っ黒になり、8bit格納時のポスタリゼーションが何段あるのか判別できない。
@@ -65,6 +69,9 @@ TextureCube DebugCubeTexture : register(t1);
 Texture2DArray DebugArrayTexture : register(t2);
 // タイルライトカリングのライトグリッド(Mode 11)専用。レイアウトはLightCulling.hlsl冒頭を参照
 StructuredBuffer<uint> LightTiles : register(t3);
+// 反射プローブのキューブマップ配列(Mode 12)専用。TextureCubeArrayはTextureCube(t1)とも
+// Texture2DArray(t2)とも別の型のため、さらにスロットを分ける必要がある
+TextureCubeArray DebugCubeArrayTexture : register(t4);
 
 struct PSInput
 {
@@ -103,6 +110,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     if (Mode == 8)
     {
         float3 color = SourceTexture.SampleLevel(ColorSampler, input.UV, MipLevel).rgb;
+        color = color / (color + 1.0f);
+        color = pow(color, 1.0f / 2.2f);
+        return float4(color, 1.0f);
+    }
+
+    if (Mode == 12)
+    {
+        // Mode 9と同じ見回し方。TextureCubeArrayのサンプリングは float4(方向, 配列番号)
+        float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
+        float3 rayDir = normalize(farPoint - CameraPosition.xyz);
+        float3 color = DebugCubeArrayTexture.SampleLevel(MaterialSampler, float4(rayDir, ArraySlice), MipLevel).rgb;
         color = color / (color + 1.0f);
         color = pow(color, 1.0f / 2.2f);
         return float4(color, 1.0f);

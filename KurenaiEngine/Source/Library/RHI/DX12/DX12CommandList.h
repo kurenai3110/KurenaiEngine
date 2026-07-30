@@ -42,7 +42,8 @@ namespace Kurenai::RHI
         void SetComputeShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0) override;
-        void SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0) override;
+        void SetComputeUnorderedAccessTextureCubeFace(
+            uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0, uint32_t cubeIndex = 0) override;
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
@@ -69,14 +70,17 @@ namespace Kurenai::RHI
         D3D12_GPU_VIRTUAL_ADDRESS m_CurrentRootCbv[kConstantBufferSlotCount]{};
         D3D12_GPU_VIRTUAL_ADDRESS m_CurrentComputeRootCbv[kConstantBufferSlotCount]{};
 
-        // SRVスロット(t0〜t11)のシャドウ。SetTexture/SetShaderResourceBufferはCopyDescriptorsを
+        // SRVスロット(t0〜t13)のシャドウ。SetTexture/SetShaderResourceBufferはCopyDescriptorsを
         // その場では呼ばず、コピー元ハンドルをここへ記録するだけにして、Draw直前の
         // FlushPendingSrvWrites()でまとめて1回のCopyDescriptorsに反映する(メッシュごとに
         // テクスチャの数だけCopyDescriptorsSimpleを呼ぶドライバ呼び出しコストの削減)。
         // 全スロットはコンストラクタでnullディスクリプタに初期化してあり、以降は必ず有効な
         // ディスクリプタを指す。そのため「どのスロットが設定済みか」を区別する必要がなく、
-        // 未バインドのスロットを読むと0が返るというDX11と同じ挙動になる
-        static constexpr uint32_t kTextureSlotCount = 12;
+        // 未バインドのスロットを読むと0が返るというDX11と同じ挙動になる。
+        // 反射プローブ(16章)がDeferredLighting.hlslでt11〜t13(イラディアンス配列・プリフィルタ配列・
+        // 影響範囲バッファ)を使うため14スロット必要。DX12Device.cpp側の同名の定数
+        // (ルートシグネチャのSRVレンジ幅)と必ず一致させること
+        static constexpr uint32_t kTextureSlotCount = 14;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;

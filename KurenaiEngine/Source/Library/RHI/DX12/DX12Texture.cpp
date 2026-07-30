@@ -18,7 +18,8 @@ namespace Kurenai::RHI
         uint32_t dsvIndex,
         uint32_t uavIndex,
         std::vector<uint32_t> mipUavIndices,
-        std::vector<uint32_t> sliceDsvIndices)
+        std::vector<uint32_t> sliceDsvIndices,
+        uint32_t cubeCount)
         : m_Device(device)
         , m_Resource(std::move(resource))
         , m_CurrentState(initialState)
@@ -28,6 +29,7 @@ namespace Kurenai::RHI
         , m_UavIndex(uavIndex)
         , m_MipUavIndices(std::move(mipUavIndices))
         , m_SliceDsvIndices(std::move(sliceDsvIndices))
+        , m_CubeCount(cubeCount)
     {
     }
 
@@ -133,15 +135,18 @@ namespace Kurenai::RHI
         return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_UavIndex);
     }
 
-    D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetCubeUavCpuHandle(uint32_t face, uint32_t mipLevel) const
+    D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetCubeUavCpuHandle(uint32_t face, uint32_t mipLevel, uint32_t cubeIndex) const
     {
-        const size_t index = static_cast<size_t>(mipLevel) * kCubeFaceCount + face;
-        if (face >= kCubeFaceCount || index >= m_MipUavIndices.size())
+        // m_MipUavIndicesは (mip * cubeCount + cubeIndex) * kCubeFaceCount + face の順でフラットに
+        // 格納されている(キューブマップ配列でない場合はcubeCount=1で従来と同じ並びになる)
+        const size_t index = (static_cast<size_t>(mipLevel) * m_CubeCount + cubeIndex) * kCubeFaceCount + face;
+        if (face >= kCubeFaceCount || cubeIndex >= m_CubeCount || index >= m_MipUavIndices.size())
         {
             Core::Logger::Error(
                 "DX12",
                 "GetCubeUavCpuHandle: 面" + std::to_string(face) + " / ミップ" + std::to_string(mipLevel) +
-                    "が範囲外です(UAV数: " + std::to_string(m_MipUavIndices.size()) + ")。nullディスクリプタで代替します");
+                    " / キューブ" + std::to_string(cubeIndex) + "が範囲外です(キューブ数: " + std::to_string(m_CubeCount) +
+                    ", UAV数: " + std::to_string(m_MipUavIndices.size()) + ")。nullディスクリプタで代替します");
             return m_Device->GetNullUavCpuHandle();
         }
         return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_MipUavIndices[index]);

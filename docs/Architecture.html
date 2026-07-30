@@ -219,6 +219,8 @@
     <li><a href="#rhi-binding">16. RHIのバインド寿命(DX11/DX12の挙動統一)</a></li>
     <li><a href="#tonemap-exposure-bloom">17. トーンマッピング・露出・ブルーム</a></li>
     <li><a href="#sss-tiled-lights">18. スクリーンスペースシャドウとタイルライトカリング</a></li>
+    <li><a href="#reflectionprobe">19. 反射プローブ(リフレクションプローブ)</a></li>
+    <li><a href="#ssrprobe">20. SSRとプローブの合成(加算から差し替えへ)</a></li>
   </ol>
 </nav>
 
@@ -449,6 +451,13 @@ with Visibility Bitmask" (2023) を参考にした実装)。
 ミップチェーンによるラフネスブラーは行っていないため、粗い面ほど反射の寄与を弱めてノイズ化を
 防いでいます。
 </p>
+<div class="note">
+この章はレイマーチングそのものの説明です。<b>反射色をどう合成するかは
+<a href="#ssrprobe">20章</a>で作り直されており、現在は「加算」ではなく
+「Lightingパスが適用した鏡面IBLの放射輝度を差し替える」方式です。</b>
+反射プローブ(19章)の導入により、画面外へ外れた場合の扱いも
+「何も足さない」から「プローブに任せる(確信度0)」へ変わっています。
+</div>
 </section>
 
 <section id="hiz">
@@ -1748,7 +1757,7 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 どこかで不整合が生じるリスクが上がる</li>
 </ul>
 
-<h4>14.9.5 SSRを対象外とした判断</h4>
+<h4>14.9.5 SSRを対象外とした判断(<a href="#ssrprobe">20章</a>で解消済み)</h4>
 <p>
 <code>SSR.hlsl</code>の反射の重みは<code>reflectivity = max(FresnelSchlick(N&middot;V, F0))</code>という
 アドホックなスカラーで、方向アルベドではない。Kulla-Contyの補正式は「乗算先が単一散乱の方向
@@ -1757,6 +1766,12 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 掛けると同じ多重散乱ぶんを二重に計上してしまう。さらにSSRの<code>roughnessCutoff</code>(既定0.6)
 より上でしか補正は意味を持たないが、その領域では<code>roughnessFade</code>がゼロに落ちる。
 </p>
+<div class="note">
+<b>この節は現在の実装には当てはまらない。</b><a href="#ssrprobe">20章</a>でSSRを
+<b>加算</b>から<b>環境の放射輝度の差し替え</b>へ作り直し、係数には
+<code>SpecularIBLWeight</code>(split-sum近似+マルチスキャッタリング補正)を
+DeferredLightingと共有して使うようにした。アドホックなスカラーも二重計上も無くなっている。
+</div>
 
 <h4>14.9.6 White Furnace Testによる検証</h4>
 <p>
@@ -1850,9 +1865,12 @@ Furnace Testは「球と背景の明るさが厳密に一致するか」を見�
 明るさになる</td></tr>
 <tr><td><code>[Scene] AmbientOcclusion</code></td><td><code>false</code></td>
 <td>球の縁がAOで暗くなると「エネルギー損失による暗さ」と区別がつかなくなる</td></tr>
-<tr><td><code>[Scene] ScreenSpaceReflection</code></td><td><code>false</code></td>
-<td>SSRは既にエネルギー保存している鏡面IBLへ反射色を<b>加算</b>する設計のため、有効なままだと
-球が背景より<b>明るく</b>なる(14.9.5節で述べた二重計上が、この検証で実際に目に見える形で現れた)</td></tr>
+<tr><td><code>[Scene] ScreenSpaceReflection</code></td><td><code>true</code></td>
+<td>当初は<code>false</code>だった。SSRが鏡面IBLへ反射色を<b>加算</b>する設計で、有効にすると
+球が背景より<b>明るく</b>なり検証が成立しなかったため(14.9.5節で述べた二重計上が、この検証で
+実際に目に見える形で現れた)。<a href="#ssrprobe">20章</a>で加算をやめて差し替えにしたことで
+二重計上が解消し、SSR有効でも3Dシーンの画素が1つも変わらないことを確認したので有効へ戻した。
+現在このシーンは<b>SSRの合成が壊れていないことの回帰テストも兼ねる</b></td></tr>
 </table>
 <p>
 アセット(一様キューブマップと金属球列)は<code>Tools/generate_furnace_test.py</code>が生成する。
@@ -2818,6 +2836,558 @@ SSSもカリングも不透明パスのみに適用される。半透明パス�
 ライティングパスが実際にボトルネックになるシーン(高解像度・Rangeの大きいライトを多数重ねる)が要る。
 現時点で言えるのは<strong>正しさ(見た目が変わらない)を確認済みで、速度の利得は未計測</strong>という状態である。
 </p>
+
+<section id="reflectionprobe">
+<h2>19. 反射プローブ(リフレクションプローブ)</h2>
+<p>
+<a href="#ibl">14章</a>のIBLはスカイボックス1枚から焼くため、<strong>シーン全体で単一の環境</strong>
+しか持てない。屋内でも空が映り込む、壁際と部屋の中央で環境光が同じ、といった破綻が原理的に避けられない。
+反射プローブは<strong>シーン内の任意位置で環境をキャプチャし、位置に応じた環境反射・環境光を与える</strong>
+ことでこれを解消する。
+</p>
+
+<h3>19.1 IBLの畳み込みをそのまま再利用する</h3>
+<p>
+この機能で新しく実装したのは<strong>キャプチャ部分だけ</strong>である。プローブのキューブマップを
+拡散イラディアンス・プリフィルタ済み鏡面へ畳み込む処理は、<code>IBLConvolve.hlsl</code>の
+<code>CSIrradiance</code>/<code>CSPrefilter</code>を<b>一切変更せずそのまま呼んでいる</b>。
+これらは畳み込み元を<code>TextureCube SourceSkybox : register(t0)</code>として受け取るだけなので、
+スカイボックスの代わりにプローブのキューブマップをバインドすれば済む。BRDF積分LUTは方向依存を
+持たないためプローブ間・グローバルIBLと共有する(焼き直し不要)。
+</p>
+<p>
+評価側(<code>DeferredLighting.hlsl</code>の<code>EvaluateIBL</code>)も同様で、split-sum近似の式は
+そのまま、<strong>環境ソースの求め方だけを差し替える</strong>形にした(<code>SampleEnvironment</code>が
+プローブとグローバルIBLを重み付きで合成して返す。19.7節)。プローブとグローバルIBLで
+解像度・ミップ構成を揃えてある(<code>kProbeCaptureSize == kIBLPrefilterBaseSize</code>)のは
+このためで、ラフネス→ミップの変換式も共通のまま使える。
+</p>
+
+<h3>19.2 キューブマップへ直接描画せず、2Dへ描いてUAVでコピーする</h3>
+<p>
+RHIには<strong>キューブマップの面ごとのRTV</strong>が無い。これを新設せず、次の経路でキューブマップを
+組み立てている。
+</p>
+<ol>
+<li>プローブ位置から1面ぶんを、通常の2Dレンダーターゲット(<code>m_ProbeCaptureColor</code>、
+HDR 128&times;128)へフォワード描画する(<code>ProbeCapture.hlsl</code>)</li>
+<li>コンピュートシェーダー(<code>IBLConvolve.hlsl</code>の<code>CSCopyCaptureToCubeFace</code>)が
+その結果をキューブマップの該当面のUAVへ書き写す</li>
+<li>これを6面ぶん繰り返す</li>
+</ol>
+<p>
+この方式を選んだのは、<strong>面ごとのUAV書き込み(<code>SetComputeUnorderedAccessTextureCubeFace</code>)が
+IBLで既に両バックエンドとも実績のある経路であり、RTV/DSVのディスクリプタ管理をDX11・DX12双方へ
+新規に追加せずに済む</strong>ため。コストは128&times;128のディスパッチ6回で、ベイク全体から見れば無視できる。
+</p>
+<p>
+ジオメトリが描かれなかったピクセル(深度が書き込まれなかった=Reverse-Zで0のまま)は、コピー側で
+その面・そのテクセルが表す方向のスカイボックスを引いて埋める。面&rarr;方向の対応
+(<code>CubeFaceDirection</code>)は畳み込みと1文字も違ってはいけないため、コピーのシェーダーは
+あえて<code>IBLConvolve.hlsl</code>側に置いて関数を直接共有している。
+</p>
+
+<h3>19.3 複数プローブにはTextureCubeArrayが要る</h3>
+<p>
+HLSLは別々の<code>TextureCube</code>リソースを<strong>動的に添字参照できない</strong>。カスケードシャドウマップが
+<code>ShadowMap0</code>&sim;<code>3</code>を個別スロットに分けて<code>if</code>で分岐しているのはこの制約によるが、
+プローブは数が可変なので分岐では書けない。そのため畳み込み結果は<code>TextureCubeArray</code>で保持し、
+ピクセルごとに選んだプローブ番号でサンプルする。
+</p>
+<p>
+RHIへの追加(<code>CreateMippedUAVTextureCubeArray</code>、
+<code>SetComputeUnorderedAccessTextureCubeFace</code>の<code>cubeIndex</code>引数)は小さな差分で済んだ。
+面ごとのUAVはもともと<code>Texture2DArray</code>(要素数1)ビューであり、<code>FirstArraySlice</code>を
+<code>cubeIndex * 6 + face</code>にするだけで配列へ拡張できるためである。SRVの次元だけが
+<code>TEXTURECUBE</code>/<code>TEXTURECUBEARRAY</code>で変わる。
+</p>
+<p>
+一方で<strong>畳み込みの入力</strong>だけは<code>TextureCube</code>(配列ではない)でなければならない。
+<code>IBLConvolve.hlsl</code>の<code>SourceSkybox</code>が<code>TextureCube</code>宣言のままだからである。
+プローブは1つずつ順に焼くため、キャプチャした6面を組み上げるスクラッチのキューブマップ
+(<code>m_ProbeRadianceCube</code>)は<strong>1枚だけ</strong>確保して使い回している。
+これにより畳み込みシェーダーを変更せずに済んでいる。
+</p>
+
+<h3>19.4 キャプチャ時のライティングと定数バッファの与え方</h3>
+<p>
+キャプチャは<code>Transparent.hlsl</code>(半透明フォワードパス)と同じ式のフォワードシェーディングで、
+<strong>直接光(太陽+CSMシャドウ+ポイント/スポットライト)+スカイボックス由来のグローバルIBL+エミッシブ</strong>
+までを含む。他のプローブの寄与は含めない(含めるとプローブ同士が相互参照して発散するため、
+反射の中の反射は1バウンスで打ち切る)。
+</p>
+<p>
+定数バッファは<strong><code>FrameConstants</code>の宣言を一切変えずに</strong>、このパス専用のバッファへ
+視点に関わる値だけを差し替えて渡している。
+</p>
+<table>
+<tr><th>フィールド</th><th>渡す値</th><th>理由</th></tr>
+<tr><td><code>ViewProj</code></td><td>プローブのその面のビュー・プロジェクション</td><td>ラスタライズ用</td></tr>
+<tr><td><code>View</code></td><td><b>カメラ</b>のビュー行列</td><td>カスケード選択の深度が<code>CascadeSplits</code>(カメラ視錐台基準)と対応している必要があるため、ここだけプローブではなくカメラのものを渡す</td></tr>
+<tr><td><code>CameraPosition</code></td><td>プローブのワールド座標</td><td>視線ベクトル<code>V</code>の起点。プローブから見た放射輝度を捉えるのが目的のため</td></tr>
+</table>
+<p>
+キャプチャ用プロジェクションは画角90度・アスペクト1で、<code>Core::Camera</code>と同じ
+Reverse-Z(近平面=NDC z=1.0、遠平面=NDC z=0.0)で組む(<code>ComputeCubeFaceProjection</code>)。
+面ごとのビュー行列(<code>ComputeCubeFaceView</code>)の前方向・上方向の組は、
+<code>CubeFaceDirection</code>が定める面&rarr;方向の対応と一致していなければならない
+(ずれると焼いた面が回転・反転する)。
+</p>
+<p>
+影は<code>ProbeCapture.hlsl</code>側でPCSSではなく単純な3&times;3のPCFに落としている。プローブに映る影は
+反射像としてさらに縮小・ぼかされるため、半影の正確さより焼き直しのコストを優先した。
+</p>
+
+<h3>19.5 DX12でプローブが真っ黒に焼けた原因(SRVテーブルのブロック割り当て)</h3>
+<p>
+実装当初、<strong>DX11では正しく焼けるのにDX12だけプローブのキューブマップが真っ黒になる</strong>という
+症状が出た。原因はDX12のSRVディスクリプタテーブルの割り当て方式である。
+</p>
+<p>
+<code>DX12CommandList::SetTexture</code>は<code>slot == 0</code>を「新しい描画の開始」とみなして
+<code>FlushPendingSrvWrites()</code>を呼び、そこで<strong>新しいテーブルブロックを割り当て、
+その描画で設定されたスロットだけをコピーしてから保留マスクをクリアする</strong>。
+つまり<b>ブロックをまたいで前回のバインドは引き継がれない</b>。
+</p>
+<p>
+当初のベイクパスは「メッシュのループに入る前にシャドウマップ(t4&sim;t7)とIBL(t9&sim;t11)をバインドし、
+ループの中でマテリアル(t0&sim;t3)をバインドする」という順序で書いていた。DX11はSRVが永続的にバインド
+されるためこれで動くが、DX12では<code>SetTexture(0, ...)</code>の時点でブロックが切り替わり、
+<strong>シャドウマップとIBLのスロットが未初期化のディスクリプタのまま描画される</strong>。結果として
+「常に影の中」「環境光ゼロ」となり、キャプチャがほぼ黒くなっていた。
+</p>
+<p>
+当時の対処は、半透明フォワードパスが同じ理由で採っていた順序に揃えること ――
+<strong>1回の描画で使うテクスチャは必ずスロット0から順に、描画ループの中でまとめてバインドする</strong>
+だった。
+</p>
+<div class="note">
+<b>この回避策は現在は不要になっている。</b><a href="#rhi-binding">16章</a>でDX12側が
+バインド状態のシャドウコピーを持つようになり、テクスチャのバインドがDX11と同じく
+「上書きするまで維持される」寿命になった。ベイクパスも他のパスと同様、メッシュによらず共通の
+バインド(シャドウマップ配列・ライト・IBL)を描画ループの外で1回だけ行う形に戻してある。
+ここに記録を残しているのは、<b>バックエンド間のバインド寿命の食い違いがどういう症状として
+現れるか</b>(=片方のAPIだけ真っ黒になる)を残しておくため。
+</div>
+
+<h3>19.6 ベイクのタイミング</h3>
+<p>
+スカイボックス由来のIBLは静的アセットなので「起動後の最初のフレームで一度だけ」焼けばよい
+(<code>m_IBLBaked</code>)。一方プローブの中身は<strong>シーンのジオメトリ・ライト・時刻に依存する</strong>ため、
+明示的な要求ベース(<code>m_ProbeBakeRequested</code>)にしてある。要求が立つのは次の場合。
+</p>
+<ul>
+<li>シーンを読み込んだとき(<code>LoadScene</code>)</li>
+<li>ImGuiでプローブを追加した/位置を動かしたとき</li>
+<li>ImGuiの「Bake」ボタンを押したとき(ライトや時刻を変えた後に使う)</li>
+</ul>
+<p>
+影響範囲の変更(形状・半径・<code>BoxExtents</code>・<code>Yaw</code>・<code>BlendDistance</code>)は
+どこから撮るかを変えず、キャプチャ内容に影響しないため焼き直しは要求しない。
+また一度も焼けていない間(<code>m_ProbeBaked == false</code>)は<code>ProbeParams.x</code>(有効プローブ数)を
+0にして、シェーダー側の選択ループ自体を回さない ―― 中身が未定義のキューブマップを引かせないため。
+</p>
+<p>
+レンダーグラフ上の順序は依存関係で自動的に解決される。ベイクパスは<code>Reads</code>にシャドウマップと
+グローバルIBLの畳み込み結果を挙げているためシャドウパス・IBLBakeパスより後になり、
+Lightingパスは<code>Reads</code>にプローブのキューブマップ配列を挙げているためベイクパスより後になる。
+</p>
+
+<h3>19.7 影響範囲の形状・視差補正・ブレンド</h3>
+<p>
+影響範囲は球(<code>Sphere</code>)と直方体(<code>Box</code>、Y軸まわりの回転のみを持つOBB)から選べる。
+GPUへ渡す1プローブぶんの構造は次のとおりで、<code>KurenaiEngine3D.cpp</code>の
+<code>GPUReflectionProbe</code>と<code>DeferredLighting.hlsl</code>の同名構造体で並び・ストライド(48バイト)を
+一致させている。<code>Yaw</code>はピクセルごとに三角関数を回さずに済むよう、C++側で<code>sin</code>/<code>cos</code>へ
+展開してから渡す。
+</p>
+<table>
+<tr><th>フィールド</th><th>内容</th></tr>
+<tr><td><code>PositionRadius</code></td><td>xyz=ワールド座標(Boxでは箱の中心)、w=Sphereの影響半径</td></tr>
+<tr><td><code>BoxExtents</code></td><td>xyz=Boxの各軸の半径(ハーフエクステント)、w=ブレンド距離</td></tr>
+<tr><td><code>ShapeParams</code></td><td>x=形状(0=Sphere,1=Box)、y=sin(Yaw)、z=cos(Yaw)</td></tr>
+</table>
+
+<h4>影響の重み</h4>
+<p>
+<code>ProbeInfluenceWeight</code>は<strong>影響範囲の境界からの内向き距離</strong>を<code>BlendDistance</code>で
+正規化して<code>saturate</code>した値を返す。境界でちょうど0、そこから<code>BlendDistance</code>だけ内側で1になる。
+Boxでは各軸の面までの距離の最小値を使うため、1軸でも箱の外へ出れば負になり自動的に0となる。
+Sphereも中心からの距離が半径を超えれば負になり同様に0となるので、<strong>「範囲内かどうかの判定」と
+「重み」を1本の式で兼ねられる</strong>。
+</p>
+
+<h4>視差補正(box projection)</h4>
+<p>
+プローブのキューブマップは<strong>プローブ位置1点から見た景色</strong>なので、そこから離れたピクセルで
+反射ベクトル<code>R</code>をそのまま引くと、映る像の位置が実際の反射位置とずれる(壁際なのに部屋の
+反対側が映る、など)。<code>ParallaxCorrectDirection</code>は<code>R</code>をプローブの箱と交差させ、
+その交点を<strong>プローブ中心から見た方向</strong>へ引き直すことでずれを打ち消す。
+</p>
+<pre><code>localPos  = WorldToProbeLocal(worldPos - center)
+localR    = WorldToProbeLocal(R)
+exit      = max((-extents - localPos) / localR, (extents - localPos) / localR)  // 軸ごとに進行方向の面まで
+hitDist   = min(exit.x, exit.y, exit.z)                                        // 最初に箱から抜ける点
+sampleDir = (worldPos + R * hitDist) - center                                  // キューブはワールド軸で焼かれている</code></pre>
+<p>
+<code>localR</code>のある成分が0(その軸に平行)だと逆数が<code>inf</code>になり、後段の<code>max</code>で
+<code>0 * inf = NaN</code>が出得るため、<strong>符号を保ったまま絶対値に下限を与えてから</strong>逆数を取っている。
+</p>
+<p>
+補正は<strong>鏡面の反射ベクトルにのみ</strong>適用し、拡散イラディアンスのサンプル方向(法線)には掛けない。
+イラディアンスは低周波で位置による差が小さく、補正しても得られるものがほとんど無い一方で交差計算の
+コストは掛かるためである。またSphere形状には交差させる箱が無いため適用されない ―― これがBox形状を
+選ぶ主な動機になる。
+</p>
+<p>
+なお本実装では<strong>影響範囲の箱がそのまま視差補正の投影ボックスを兼ねる</strong>(両者を別々に持てない)。
+そのため<code>BoxExtents</code>は部屋の壁とおおよそ一致させる必要がある。箱を壁から大きく離すと
+補正がかえってずれ、逆に小さくしすぎると壁面自体が影響範囲の外へ出てしまう。
+</p>
+
+<h4>ブレンド</h4>
+<p>
+<code>SampleEnvironment</code>は影響下のプローブを重み付きで加算し、<strong>重みの合計が1に満たない残りを
+スカイボックス由来のグローバルIBLで埋める</strong>。これにより影響範囲の外へ出るときも境界で切り替わらず、
+徐々に元の環境光へ戻る。プローブが深く重なって合計が1を超える場合は正規化して1に収める
+(そのまま加算すると環境光が過剰に明るくなるため)。
+</p>
+<p>
+上位N個を選ぶソートは置かず、プローブを素直に全走査して重みが正のものだけを加算している。
+プローブ数の上限が8と小さく、HLSLで動的添字の配列へ挿入ソートを書くとレジスタに載らず
+スクラッチメモリへ落ちるためである。
+</p>
+<p>
+ImGuiの「Parallax Correction」「Probe Blending」(<code>ProbeParams.z</code>/<code>.w</code>)で
+それぞれ無効にでき、無効時は<strong>反射ベクトルをそのまま引く/影響範囲に入る最も近い1つだけを重み1で使う</strong>
+という導入前の挙動に戻る。壁際での反射位置のずれと影響範囲の境界の継ぎ目を、実機で見比べるための
+スイッチである。デバッグ表示「Probe - Influence」もブレンドの有無に追随し、有効時はプローブごとの色の
+重み付き平均になるため遷移帯がグラデーションとして見える。
+</p>
+<p>
+これらは影響範囲の話でしかなく<strong>キャプチャ内容には影響しない</strong>ため、形状・範囲・ブレンド距離を
+変えても焼き直しは要求しない(焼き直しが要るのは<code>Position</code>を動かしたときだけ)。
+</p>
+
+<h3>19.8 現時点の実装範囲と既知の制約</h3>
+<ul>
+<li>Boxの回転は<strong>Y軸まわりのみ</strong>。傾いた床・天井を持つ空間は想定していない</li>
+<li><strong>影響範囲の箱と視差補正の投影ボックスを分離できない</strong>(19.7節)。
+壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある</li>
+<li>更新モードはBaked / OnDemand / Realtimeの3種(19.10節)。ただし<strong>時間分割できているのは
+キャプチャだけで、畳み込みは分散できていない</strong>。キャプチャが0.02 msなのに対し畳み込みは
+約14 msあるため、Realtimeでも6フレームに1回そのスパイクが乗る</li>
+<li>OnDemandの変化検出が見るのは時刻・太陽・ライト・IBL強度・プローブ位置のみ。
+<strong>ジオメトリが動いても検出されない</strong>(モデルのTRSは<code>.kscene</code>で静的に決まり
+実行中に変わらないため、現状は検出対象に入れていない)</li>
+<li>SSRとの合成は<a href="#ssrprobe">20章</a>で「加算」から「環境の放射輝度の差し替え」へ作り直した。
+SSRが判定できなかった領域(画面外・最大距離まで判定不能)は確信度0となり、Lightingパスが適用した
+プローブがそのまま残る</li>
+<li>カスケードシャドウマップは<strong>カメラ</strong>視錐台に合わせてフィットされるため、カメラから遠く離れた
+位置のプローブを焼くとシャドウマップの範囲外になり影が落ちない。プローブは視界内で焼く前提</li>
+<li>プローブ数の上限は8(<code>kMaxReflectionProbes</code>)。<code>TextureCubeArray</code>は実行時に
+伸縮できないため固定容量で確保している。超過分は警告ログを出して切り捨てる</li>
+<li>半透明フォワードパス(<a href="#transparent">15章</a>)はプローブに対応しておらず、
+グローバルIBLのみを使う</li>
+</ul>
+
+<h3>19.9 検証シーン(Reflection Probe Test)</h3>
+<p>
+プローブの効きを目視で確認するための専用シーン。Sponzaは非金属・中〜高ラフネスのマテリアルばかりで
+鏡面反射が弱く、アトリウムが上に開いていてプローブにも空が大量に写り込むため、
+<strong>「プローブが効いているかどうか」が判別できない</strong>。そこで検証用のホールを別途用意している。
+</p>
+<p>
+ジオメトリは<code>Tools/generate_probe_test.py</code>が生成する
+(<code>FurnaceTest</code>/<code>LightTest</code>/<code>MaterialTest</code>と同じく、標準ライブラリだけで
+glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/ProbeTest.kscene</code>側にある。
+</p>
+<pre><code>    ┌───────────────────┬───────────┐  y=7
+    │▓▓▓▓ 天井あり ▓▓▓▓│ 天井開口  │      ▓ = 中央の仕切り壁(中央に開口部)
+    │   西室(密閉)     ▓  東室     │
+    │   暖色の壁+ポイント▓ 寒色の壁  │
+    │   ライト+エミッシブ▓ +太陽光   │
+    │  ●   ●   ●   ●   ●   ●   ●  │  ← 金属球列(metallic=1.0, roughness=0.05)
+    └───────────────────┴───────────┘  y=0
+   x=-12                x=0        x=+12
+            床 = 磨いた石(非金属, roughness=0.06)</code></pre>
+
+<h4>何をどう切り替えると何が見えるか</h4>
+<table>
+<tr><th>ImGuiの操作</th><th>見えるもの</th><th>検証している実装</th></tr>
+<tr>
+<td>Enable Reflection Probes を切る</td>
+<td>密閉の西室にいるはずの金属球が<strong>一様な空色</strong>になり、床に映っていたエミッシブ帯も消える</td>
+<td>環境ソースがプローブからグローバルIBLへ落ちること(19.1節)</td>
+</tr>
+<tr>
+<td>Probe Blending を切る</td>
+<td>開口部付近で反射色が<strong>不連続に切り替わる</strong></td>
+<td><code>SelectNearestProbe</code>経路と重み付き合成の差(19.7節)</td>
+</tr>
+<tr>
+<td>Parallax Correction を切る</td>
+<td>床に映るエミッシブ帯が、個々の帯ではなく<strong>連続した滲みになって壁の接地点からずれる</strong></td>
+<td><code>ParallaxCorrectDirection</code>(19.7節)</td>
+</tr>
+<tr>
+<td>Render Targets &rarr; Probe - Influence</td>
+<td>西室が赤・東室が緑・開口部付近がその中間色のグラデーション</td>
+<td><code>ProbeInfluenceWeight</code>とBox形状の影響範囲</td>
+</tr>
+<tr>
+<td>Render Targets &rarr; Probe - Prefiltered Specular、Probe Index を 0/1</td>
+<td>0=暖色の密閉室、1=空を含む明るい室。<strong>まったく別の環境が焼かれている</strong></td>
+<td>プローブごとの<code>TextureCubeArray</code>スライス(19.3節)</td>
+</tr>
+<tr>
+<td>上の表示のまま Post Processing の Enable IBL を切り、Update Mode を Baked &rarr; Realtime</td>
+<td>Bakedではキャプチャが<strong>1ピクセルも変わらず</strong>、Realtimeにすると追従して暗くなる</td>
+<td>更新モードの時間分割(19.10節)</td>
+</tr>
+</table>
+<p>
+最後の項目で<strong>ポイントライトではなく<code>Enable IBL</code>を動かしている</strong>のには理由がある。
+このシーンのポイントライトは6000 cdだが、EV100=15(晴天昼)の露出下では遮蔽なしの空IBLのほうが
+桁違いに強く、1灯どころか2灯とも消してもキャプチャがほとんど変化しない。
+更新モードの追従を見るには、キャプチャの明るさを支配している空IBLのほうを動かす必要がある。
+</p>
+
+<h4>シーン構成上の判断</h4>
+<ul>
+<li><strong>西室を密閉、東室を天井開口にした</strong>のは、2つのプローブに焼かれる環境を「暖色・
+ポイントライト」と「寒色・太陽光」で完全に別物にするため。球列が開口部を貫くので、
+ブレンドの遷移が反射色の変化としてそのまま読める。副次的に、東室側は太陽光とCSM影を受けるので
+<code>ProbeCapture.hlsl</code>のシャドウ経路も同時に検証できる</li>
+<li><strong>床は金属ではなく磨いた石(非金属・低ラフネス)</strong>。<code>metallic=1.0</code>にすると
+拡散反射が消えて薄暗い室内ではほぼ真っ黒に沈み、映り込みの位置を読み取る土台が見えなくなる。
+非金属はF0=0.04と反射が弱いが、ホールを見通す浅い角度ではフレネルで十分に強く出る</li>
+<li><strong>エミッシブ帯は照明ではなく目印</strong>。G-Bufferのエミッシブバッファは
+<code>R8G8B8A8_UNorm</code>で[0,1]にクランプされるため、1.0を超える値を指定しても室内を照らす
+主光源にはならない。室内の照明はポイントライト(カンデラ指定なので数千まで上げられる)が担う</li>
+<li><strong>仕切り壁の開口部は広め(幅8・高さ5.5)</strong>。仕切りの役目は「2部屋として別々の環境が
+焼かれること」であって視線を遮ることではない。狭いと球列と西室が見通せず、何が起きているか
+読み取れなくなる</li>
+<li><code>ScreenSpaceReflection = false</code>をシーン側で指定している。SSRもプローブと同じく
+「環境の反射」を足すため、両方効いていると差の切り分けができない</li>
+</ul>
+
+<h4>面の巻き順を機械的に決めている理由</h4>
+<p>
+glTFは右手座標系でCCWが表なので、正しく描かれる巻き順とは<strong>「三角形の外積(右手系)が
+シェーディング法線と同じ向きになる巻き順」</strong>を指す。これを面ごとに手で合わせると、
+取り違えた面だけが<strong>黒くなる</strong>(法線が裏を向き、拡散も環境光も反対側の半球を引く)という
+分かりにくい形で現れる。実際、床の巻き順を取り違えて「床だけ真っ黒」になる不具合を出した。
+</p>
+<p>
+そのため<code>generate_quad_double_sided</code>は、渡された4点の周回向きから幾何法線を求め、
+指定された法線と内積を取って巻き順を自動的に揃える。あわせて法線・巻き順を反転した2組目を
+同じ座標へ重ね、板を両面にしている(裏面はバックフェースカリングで落ちるため同一平面でも
+Zファイティングは起きない)。
+</p>
+
+<h4>副産物: <code>[Camera]</code>のYaw/Pitchの単位不整合</h4>
+<p>
+このシーンが<strong><code>[Camera]</code>でYawに0以外を指定する最初のシーン</strong>だったため、
+<code>SceneLoader</code>で度→ラジアン変換が抜けていたことが判明した
+(<code>Camera::SetYawPitch</code>はラジアンを受け取る)。ドキュメントは一貫して「度」と書いており、
+<code>[Light]</code>の<code>ConeAngleDegrees</code>や<code>[Model]</code>の<code>RotationEuler</code>は
+変換していたので、<code>[Camera]</code>だけが例外だった。既存シーンは<code>Yaw = 0.0</code>しか
+使っておらず度とラジアンで同じ値になるため表面化していなかったもので、他と同じ変換を入れて修正した。
+</p>
+<h3>19.10 更新モード(Baked / OnDemand / Realtime)</h3>
+<p>
+プローブの中身はシーンのジオメトリ・ライト・時刻に依存するため、「いつ焼き直すか」は
+<strong>焼き直しのコスト</strong>と<strong>シーンの変化への追従</strong>のトレードオフになる。
+ImGuiの「Update Mode」で3方式を切り替えて比較できるようにしてある。
+</p>
+<table>
+<tr><th>モード</th><th>焼き直す契機</th><th>実行時コスト</th></tr>
+<tr><td><code>Baked</code></td><td>シーン読み込み時とBakeボタンのみ</td><td>ゼロ。ただし反射は焼いた時点で止まる</td></tr>
+<tr><td><code>OnDemand</code></td><td>上に加えて、焼き上がりに影響する状態が変わったフレーム</td><td>変化が無ければゼロ。変化したフレームは全プローブぶんのフルベイクが集中する</td></tr>
+<tr><td><code>Realtime</code></td><td>毎フレーム1面ずつ(6面揃うごとに畳み込み、プローブはラウンドロビン)</td><td>キャプチャは毎フレーム、畳み込みは6フレームに1回</td></tr>
+</table>
+
+<h4>OnDemandの変化検出</h4>
+<p>
+<code>ComputeProbeBakeSignature</code>が、焼き上がりに影響する値
+(時刻・太陽の方位角・太陽/シャドウの有効フラグ・IBL強度・全ライトのパラメータ・プローブ位置)から
+FNV-1aの64bitハッシュを作る。毎フレームの署名と、最後にフルベイクした時点の署名を突き合わせる。
+影響範囲(形状・半径・<code>BoxExtents</code>・<code>BlendDistance</code>)は<strong>含めない</strong> ――
+どこから撮るかを変えないため焼き直しが不要だからである(19.6節)。
+衝突しても起きるのは「本来必要な焼き直しを1回取りこぼす」だけなので、この程度の強度で足りる。
+</p>
+
+<h4>時間分割の状態機械</h4>
+<p>
+<code>m_ProbeRealtimeProbeIndex</code> / <code>m_ProbeRealtimeFace</code> が「次に焼く面」を指す。
+1フレームに1面をスクラッチのキューブマップへキャプチャし、6面揃った時点でそのプローブを畳み込んで
+配列スライスへ書き、次のプローブへ回る。<strong>畳み込みは6面が揃うまで走らない</strong>ため、
+その間スライスは前回の内容のまま表示され、描きかけのキューブが映り込むことはない。
+</p>
+<p>
+Realtimeは<strong>最低1回フルベイクが済んでいること</strong>(<code>m_ProbeBaked</code>)を前提にしている。
+シーン読み込み時に必ずフルベイクを要求しているのでこの前提は常に満たされ、
+一度も畳み込まれていない未初期化のスライスが表示されることはない。
+またフルベイクと時間分割はスクラッチのキューブマップを共有するため、
+<strong>同じフレームで両方を走らせてはならない</strong>(コード上も<code>else if</code>で排他にしてある)。
+</p>
+
+<h4>計測結果(Reflection Probe Test、プローブ2個・キャプチャ128²・DX11)</h4>
+<p>
+フルベイクはプローブごとに別パス(<code>ProbeBake0</code> / <code>ProbeBake1</code>)へ分けてあり、
+GPUプロファイラで1プローブぶんのコストが読める。各パスがスクラッチのキューブマップへ書くため、
+レンダーグラフのWrite-after-Write依存で登録順に直列化される。
+</p>
+<table>
+<tr><th>パス</th><th>GPU時間</th><th>頻度</th></tr>
+<tr><td><code>ProbeBake0</code> / <code>ProbeBake1</code></td><td>20.1 ms / 15.3 ms</td><td>フルベイクしたフレームのみ</td></tr>
+<tr><td><code>ProbeRealtimeCapture</code></td><td>0.018&ndash;0.020 ms</td><td>毎フレーム</td></tr>
+<tr><td><code>ProbeRealtimeConvolve</code></td><td>10.6&ndash;14.8 ms</td><td>6フレームに1回</td></tr>
+</table>
+<p>
+比較のため、同じフレームのGBufferパスは0.039 ms、Lightingパスは0.031 ms。
+</p>
+<p>
+<strong>この計測でいちばん重要な点は「キャプチャは実質ただ(0.02 ms)で、支配的なのは畳み込み(約14 ms)」
+ということである。</strong>つまり<strong>時間分割はキャプチャを分散させているだけで、畳み込みは
+分散できていない</strong>。Realtimeでも6フレームに1回は14 msのスパイクが乗るため、
+フルベイク32 msを1回浴びるか14 msを6フレームごとに浴びるかの違いでしかなく、
+「毎フレーム滑らかに追従する」状態には至っていない。
+</p>
+<p>
+畳み込みが重いのは、IBLと共有している<code>CSIrradiance</code>(半球積分)と
+<code>CSPrefilter</code>(ミップごとの重要度サンプリング)を、6面×(1+5ミップ)ぶん素直に回しているため。
+実用的な改善方向は、時間分割の粒度を「面」ではなく「畳み込みのディスパッチ」まで細かくするか、
+畳み込み自体のサンプル数・解像度を下げることになる。現時点では未実装。
+</p>
+
+</section>
+
+<section id="ssrprobe">
+<h2>20. SSRとプローブの合成(加算から差し替えへ)</h2>
+<p>
+<a href="#ssr">7章</a>のSSRは反射色を<code>SceneColor</code>へ<strong>加算</strong>する設計だった。
+しかしLightingパスは既に鏡面IBLを<code>SceneColor</code>へ書き込んでいるため、同じ反射を二重に
+計上していた(<a href="#ibl">14章</a>9.5節)。White Furnace Testが
+<code>ScreenSpaceReflection = false</code>を指定していたのは、この二重計上で球が背景より明るくなり
+検証そのものが成立しなくなるためである。
+</p>
+<p>
+反射プローブ(19章)が入ったことで、この問題を放置できなくなった。プローブは画面外の環境も持って
+いるので「SSRが判定できなかった領域をプローブで埋める」ことが可能になったが、加算のままそれを
+やると<strong>いま二重計上していない領域まで二重計上に変わってしまう</strong>。そこでSSRを
+<b>加算</b>から<b>環境の放射輝度の差し替え</b>へ作り直した。
+</p>
+
+<h3>20.1 分解: 放射輝度 × 係数</h3>
+<p>
+鏡面IBLを次の形に分解する。
+</p>
+<pre><code>鏡面IBL = 環境の放射輝度 * SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ...)</code></pre>
+<p>
+SSRがやりたいのは「環境の放射輝度を、スクリーンスペースで実際に見えている色へ差し替える」こと
+だけで、係数の側は共通である。したがってSSRパスの出力はこう書ける。
+</p>
+<pre><code>出力 = SceneColor + (SSRが得た放射輝度 - Lightingが使った放射輝度) * SpecularIBLWeight(...) * 確信度</code></pre>
+<p>
+確信度が0なら出力は<code>SceneColor</code>と<strong>厳密に一致</strong>し、1ならSSRの放射輝度が
+鏡面IBLを完全に置き換える。加算ではないので二重計上は原理的に起こらない。
+</p>
+
+<h3>20.2 「足した覚えのない値を引く」ことを防ぐ</h3>
+<p>
+この方式は、SSRが引き算する量とLightingパスが足した量が<strong>厳密に一致している</strong>ことに
+全面的に依存する。片方の式だけが変われば、SSRは存在しない値を引いて画面を暗くしてしまう。
+そこで両者が使う定義を<code>Shaders/3D/ReflectionProbe.hlsli</code>に集約し、
+<code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>がそれをインクルードする構成にした。
+共有しているのは次の2つ。
+</p>
+<ul>
+<li><code>SampleEnvironment</code> ―― プローブの選択・視差補正・ブレンドと、グローバルIBLへの
+フォールバックまで含めた<b>環境の放射輝度</b>(19.7節)</li>
+<li><code>SpecularIBLWeight</code> ―― split-sum近似の第2項・マルチスキャッタリング補正・
+スペキュラオクルージョン・昼夜減衰・IBL強度倍率をまとめた<b>係数</b></li>
+</ul>
+<p>
+2つのシェーダーは既に使っているレジスタ番号が違うため、ヘッダー側のリソース宣言は
+インクルード前に定義するマクロで受け取る形にした
+(<code>KURENAI_PROBE_PREFILTERED_REGISTER</code>等)。SSRは拡散イラディアンスを必要としないので、
+拡散側のマクロを定義しなければそのサンプルはコンパイルされない。
+</p>
+
+<h3>20.3 確信度の決め方</h3>
+<table>
+<tr><th>レイマーチの結果</th><th>差し替える放射輝度</th><th>確信度</th></tr>
+<tr>
+<td>画面内でヒット</td>
+<td><code>SceneColor</code>のヒット地点。プローブより新しく視差も完全に正しい</td>
+<td><code>roughnessFade * edgeFade</code></td>
+</tr>
+<tr>
+<td>画面内で背景(スカイ)へ到達</td>
+<td>プリフィルタ済み鏡面をラフネス&rarr;ミップで引いた値</td>
+<td><code>roughnessFade</code></td>
+</tr>
+<tr>
+<td>画面外へ外れた / 最大距離まで判定不能</td>
+<td>&mdash;</td>
+<td><b>0</b></td>
+</tr>
+</table>
+<p>
+<strong>画面外の扱いが7章から反転している。</strong>プローブ導入前は「その先に何があるか不明なので
+何も足さない」という判断だったが、いまはLightingパスがプローブを適用済みで、プローブは画面外の
+情報を持っている。したがって<strong>確信度0=何もしない=プローブに任せる</strong>が正しい答えになる。
+洞窟で誤って空が映り込まないという7章の性質も、そのまま保たれる。
+</p>
+<p>
+スカイへ到達した場合に<strong>生のスカイボックスではなくプリフィルタ済み鏡面を引く</strong>ように
+変えたのは、従来はミップ選択が無く粗い面でも鮮鋭な鏡像を返していたためで、これ自体が品質改善に
+なる。なおプローブが1つも効いていない屋外では、差し替え前後の放射輝度がどちらもグローバルIBLと
+一致するため差がゼロになり、正しく「何も変わらない」。
+</p>
+<p>
+反射の重み付けに使っていた<code>reflectivity = max(FresnelSchlick(N&middot;V, F0))</code>という
+アドホックなスカラーは廃止した。14.9.5節でマルチスキャッタリング補正の対象外とした理由が
+「この量は方向アルベドではない」ことだったが、いまは<code>SpecularIBLWeight</code>の
+split-sum近似が係数を担うため、その懸念自体が消えている。
+<code>roughnessFade</code>は残してあるが、役割は「反射の強さ」ではなく
+<strong>SSRの結果をどれだけ信用するか</strong>に変わった(スクリーンスペースのレイマーチは
+ヒット色を1点サンプルするだけで、粗い面に必要な円錐状のぼかしを持たないため)。
+</p>
+
+<h3>20.4 検証: White Furnace TestでSSRを有効に戻せた</h3>
+<p>
+この変更の正しさは、エンジン自身のエネルギー保存テストで直接測れる。White Furnace Testは
+一様な放射輝度のキューブマップの中に<code>metallic = 1.0</code>の金属球を並べたシーンで、
+エネルギーが保存していれば<strong>球が背景に完全に溶けて見えなくなる</strong>。
+</p>
+<p>
+SSRを有効にして計測したところ、<strong>3Dシーンの画素は1つも変化しなかった</strong>
+(51480点サンプル。差分が出た76画素はすべてImGuiパネル見出しのハイライトで、座標も
+(300-305, 45-57)のUI領域に限られていた)。加算だった頃は球が背景より明るくなっていたので、
+二重計上が解消したことの直接の証拠になる。
+</p>
+<p>
+これを受けて<code>Scenes/FurnaceTest.kscene</code>の
+<code>ScreenSpaceReflection</code>を<code>true</code>へ戻した。以後このシーンは
+<strong>SSRの合成が壊れていないことの回帰テストも兼ねる</strong> ―― 球が背景から浮き上がって
+見えたら、SSRが引く量とLightingが足す量がずれている。
+</p>
+
+<h3>20.5 既知の制約</h3>
+<ul>
+<li><strong>半透明サーフェスのピクセルでは引き算が正しくない</strong>。SSRはG-Bufferを読むが、
+半透明はフォワードパスで描かれG-Bufferに入らないため、そこでのG-Bufferは「ガラスの奥にある
+不透明面」の値になる。引く鏡面IBLが<code>SceneColor</code>(ガラスで上書き済み)に含まれておらず
+負へ振れうるので、最終的な色を<code>max(0)</code>でクランプしている。半透明パスがSSRの対象外で
+ある以上この不一致は避けられない</li>
+<li>SSRは<strong>拡散側には一切関与しない</strong>。差し替えるのは鏡面の放射輝度だけで、
+拡散IBL(プローブのイラディアンス)はLightingパスの結果がそのまま残る</li>
+<li><code>roughnessCutoff</code>(既定0.6)より粗い面ではSSRを一切使わない。この領域は
+プローブ/グローバルIBLに委ねられる</li>
+</ul>
 </section>
 
 </main>

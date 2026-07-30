@@ -497,7 +497,8 @@ namespace Kurenai::RHI
         m_BoundComputeUavResources[slot] = dx12Texture->GetResource();
     }
 
-    void DX12CommandList::SetComputeUnorderedAccessTextureCubeFace(uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel)
+    void DX12CommandList::SetComputeUnorderedAccessTextureCubeFace(
+        uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel, uint32_t cubeIndex)
     {
         if (slot >= kComputeUavSlotCount)
         {
@@ -507,11 +508,18 @@ namespace Kurenai::RHI
                     std::to_string(kComputeUavSlotCount - 1) + ")。バインドをスキップします");
             return;
         }
+        if (!texture)
+        {
+            Core::Logger::Error("DX12", "SetComputeUnorderedAccessTextureCubeFace: テクスチャがnullptrのためバインドをスキップします");
+            return;
+        }
 
         auto* dx12Texture = static_cast<DX12Texture*>(texture);
+
         dx12Texture->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        m_PendingComputeUavHandles[slot] = dx12Texture->GetCubeUavCpuHandle(face, mipLevel);
+        // 面・ミップ・キューブ番号が範囲外の場合はDX12Texture側がログを出してnullディスクリプタを返す
+        m_PendingComputeUavHandles[slot] = dx12Texture->GetCubeUavCpuHandle(face, mipLevel, cubeIndex);
         m_BoundComputeUavResources[slot] = dx12Texture->GetResource();
     }
 
