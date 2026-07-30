@@ -105,10 +105,12 @@ float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roug
     const float specularOcclusionExponent = exp2(-16.0f * roughness - 1.0f);
     const float specularOcclusion = saturate(pow(NdotV + ao, specularOcclusionExponent) - 1.0f + ao);
 
-    // 夜は空を暗い紺色へ落とし込む(背景スカイと同じ扱い)ため、IBL全体もAmbientColor.aで減衰させる。
-    // プリフィルタマップ・イラディアンスマップ自体は昼固定のスカイボックスから焼いたものなので、
-    // 夜間はこの係数だけが唯一の減光手段になる
-    return (diffuseIBL * ao + specularIBL * specularOcclusion) * AmbientColor.a;
+    // 【昼度による減衰はしない】かつては空が昼固定のスカイボックスから焼かれていたため、
+    // 夜を表現する手段が「IBL全体をAmbientColor.a(昼度)で0倍する」ことしか無かった。
+    // その結果、IBLを有効にすると夜の環境光が厳密にゼロになり、建物が真っ黒な影絵になっていた。
+    // 現在は手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなり、夜は月明かりの
+    // 空になるため、ここで追加の減衰を掛ける必要がない(掛けると二重に暗くなる)
+    return diffuseIBL * ao + specularIBL * specularOcclusion;
 }
 
 struct PSInput
@@ -144,10 +146,9 @@ float4 PSMain(PSInput input) : SV_TARGET
         // Reverse-Zのため遠平面(=背景)はNDC z=0.0付近になる
         float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
         float3 rayDir = normalize(farPoint - CameraPosition.xyz);
-        float3 skyColor = SkyboxTexture.Sample(MaterialSampler, rayDir).rgb;
-        // 夜は空を暗い紺色へ落とし込む(スカイボックス自体は昼のテクスチャ固定のため)
-        const float3 kNightSkyColor = float3(0.01f, 0.012f, 0.02f);
-        skyColor = lerp(kNightSkyColor, skyColor, AmbientColor.a);
+        // 手続き空は太陽高度に応じた明るさで焼かれている(夜は月明かりの空になる)ため、
+        // かつてここで行っていた「夜は暗い紺色へlerpする」補正は不要になった
+        const float3 skyColor = SkyboxTexture.Sample(MaterialSampler, rayDir).rgb;
         return float4(skyColor, 1.0f);
     }
 

@@ -470,6 +470,9 @@ namespace Kurenai
         // 最後に焼いたときの太陽の向き。これと現在の向きの角度差が閾値を超えたら焼き直す。
         // 毎フレーム焼くと空生成6回+プリフィルタ36回が常時走って無駄なため
         DirectX::XMFLOAT3 m_LastBakedSunPosition{ 0.0f, 0.0f, 0.0f };
+        // 最後に焼いたときの実効プリ露出。空はプリ露出済みの値で焼かれるため、
+        // 露出が動いたときも焼き直さないと空だけ古い露出のまま取り残される
+        float m_LastBakedExposureEV100 = 0.0f;
         // 焼き直しの角度閾値(度)。Auto Advance既定(1h/s)では太陽は15度/秒動くので、
         // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
         float m_SkyBakeAngleThresholdDegrees = 1.0f;

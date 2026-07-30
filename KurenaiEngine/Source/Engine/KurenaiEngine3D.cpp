@@ -2534,13 +2534,21 @@ namespace Kurenai
         const bool usingProceduralSky = (skyTexture == m_ProceduralSkyTexture.get());
 
         // 太陽が閾値以上動いていたら手続き空を焼き直す。毎フレーム焼くと
-        // 空生成6回+プリフィルタ36回のディスパッチが常時走って無駄になる
+        // 空生成6回+プリフィルタ36回のディスパッチが常時走って無駄になる。
+        // 空はプリ露出済みの値で焼かれるため、実効プリ露出が動いたときも焼き直す必要がある
+        // (焼き直さないと空だけ古い露出のまま取り残される)
         if (usingProceduralSky && !m_SkyBakeDirty)
         {
             const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
             const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_LastBakedSunPosition);
             const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
-            if (cosAngle < std::cos(DirectX::XMConvertToRadians(m_SkyBakeAngleThresholdDegrees)))
+            const bool sunMoved =
+                cosAngle < std::cos(DirectX::XMConvertToRadians(m_SkyBakeAngleThresholdDegrees));
+            // 露出が0.05段(約3.5%)以上動いたら焼き直す。時刻変化に伴う露出の追従でも
+            // 動くため、太陽の角度閾値とあわせて実質的に連続した更新になる
+            const bool exposureMoved =
+                std::abs(m_EffectiveExposureEV100 - m_LastBakedExposureEV100) > 0.05f;
+            if (sunMoved || exposureMoved)
             {
                 m_SkyBakeDirty = true;
             }
@@ -2581,6 +2589,7 @@ namespace Kurenai
             // 空が変わったのでプリフィルタ済み鏡面も焼き直す必要がある
             m_SkyBakeDirty = false;
             m_LastBakedSunPosition = sunLighting.SunPosition;
+            m_LastBakedExposureEV100 = m_EffectiveExposureEV100;
             m_IBLBaked = false;
             m_IBLIrradianceBaked = false;
         }
