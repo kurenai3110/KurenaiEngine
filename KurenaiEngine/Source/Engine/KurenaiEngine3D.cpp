@@ -84,6 +84,11 @@ namespace Kurenai
             DirectX::XMFLOAT3 Direction; // 光が進む向き(サーフェスに当たる方向)
             DirectX::XMFLOAT4 Color;
             DirectX::XMFLOAT4 Ambient; // rgb=環境光の色, a=昼度(0=夜,1=昼)
+            // 太陽が「ある」向き(= -Direction)。手続き空(SkyGenerate.hlsl)がPerez分布の
+            // circumsolar項の基準に使う。光が進む向きと符号が逆なので取り違えないよう別に持つ
+            DirectX::XMFLOAT3 SunPosition;
+            // 手続き空へ渡す天頂輝度のスケール
+            float SkyZenithLuminance;
         };
 
         // edge0とedge1の間をなめらかに0→1で補間する(edge0以下は0、edge1以上は1)
@@ -156,6 +161,12 @@ namespace Kurenai
                 kNightAmbientArt.z + (dayAmbient.z - kNightAmbientArt.z) * dayFactor,
                 dayFactor,
             };
+
+            // 手続き空(SkyGenerate.hlsl)へ渡す値。太陽が「ある」向きは光が進む向きの符号違い。
+            // 天頂輝度はオフラインDDS(generate_sky_cubemap.py)と同じ
+            // 「空光の照度 × 露出」を使い、両者が同じ絵を出すようにしてある
+            result.SunPosition = { -result.Direction.x, -result.Direction.y, -result.Direction.z };
+            result.SkyZenithLuminance = skyPeak;
 
             return result;
         }
@@ -235,6 +246,18 @@ namespace Kurenai
             // ブルームの合成比(0で無効)
             float BloomStrength;
             float Padding[2];
+        };
+
+        // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
+        struct alignas(16) SkyBakeConstants
+        {
+            // 処理対象の面(D3D標準順: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5)
+            uint32_t Face;
+            // 天頂輝度のスケール
+            float ZenithLuminance;
+            float Padding0[2];
+            // 太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)
+            DirectX::XMFLOAT4 SunDirection;
         };
 
         // Bloom.hlsl側のcbuffer BloomConstantsと一致させる必要がある
@@ -888,6 +911,24 @@ namespace Kurenai
         m_PrefilterComputeShader = m_Device->CreateShader(prefilterCsDesc);
         m_PrefilterPipelineState = m_Device->CreateComputePipelineState({ m_PrefilterComputeShader.get() });
 
+        // 手続き空(SkyGenerate.hlsl)。太陽が動くたびに焼き直すため、IBLのプリフィルタと同じく
+        // 面ごとに1回ずつディスパッチする。プリフィルタの入力にしかならないので解像度は
+        // オフラインDDS(512)より小さい256で足りる(生成コストが1/4になる)
+        m_ProceduralSkyTexture =
+            m_Device->CreateUAVTextureCube(kProceduralSkySize, RHI::Format::R16G16B16A16_Float);
+
+        RHI::ShaderDesc skyGenerateCsDesc;
+        skyGenerateCsDesc.Stage = RHI::ShaderStage::Compute;
+        skyGenerateCsDesc.FilePath = shaderDirectory + L"SkyGenerate.hlsl";
+        skyGenerateCsDesc.EntryPoint = "CSGenerateSky";
+        m_SkyGenerateComputeShader = m_Device->CreateShader(skyGenerateCsDesc);
+        m_SkyGeneratePipelineState = m_Device->CreateComputePipelineState({ m_SkyGenerateComputeShader.get() });
+
+        RHI::BufferDesc skyBakeConstantBufferDesc;
+        skyBakeConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        skyBakeConstantBufferDesc.SizeInBytes = sizeof(SkyBakeConstants);
+        m_SkyBakeConstantBuffer = m_Device->CreateBuffer(skyBakeConstantBufferDesc);
+
         RHI::BufferDesc iblPrefilterConstantBufferDesc;
         iblPrefilterConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         iblPrefilterConstantBufferDesc.SizeInBytes = sizeof(IBLFaceConstants);
@@ -1014,6 +1055,15 @@ namespace Kurenai
         // 万一シェーダ側で役割を選び違えても、画面端でUVが反対側へ回り込む不具合が起きないようにする
         const RHI::SamplerDesc screenSpaceSet[] = { colorSampler, colorSampler, dataSampler };
         m_ScreenSpaceSamplers = m_Device->CreateSamplerSet(screenSpaceSet, static_cast<uint32_t>(std::size(screenSpaceSet)));
+    }
+
+    RHI::IRHITexture* KurenaiEngine3D::ActiveSkyTexture() const
+    {
+        // .ksceneが[Scene]Skyboxを明示しているシーンは、そのDDSでなければ意味を成さない
+        // (White Furnace Testの一様放射輝度キューブマップが該当する)。手続き空で
+        // 上書きしてしまうと検証そのものが壊れるため、明示指定があるときは必ずDDSを使う
+        const bool useProcedural = m_ProceduralSkyEnabled && m_Scene.SkyboxPath.empty();
+        return useProcedural ? m_ProceduralSkyTexture.get() : m_SkyboxTexture.get();
     }
 
     void KurenaiEngine3D::CreateRenderTargets(uint32_t width, uint32_t height)
@@ -1682,6 +1732,15 @@ namespace Kurenai
             // 太陽だけを消して環境光のみで照らす状態を作る(White Furnace Testが使う)。
             // TimeOfDayを夜にする方法と違い、昼度(環境光の明るさ)は下がらない
             ImGui::Checkbox("Enable Sun", &m_SunEnabled);
+            // 手続き空(Perez分布をGPUで評価)。無効にするとオフラインで焼いたSky.ddsへ戻る。
+            // .ksceneがスカイボックスを明示しているシーン(White Furnace Test)では
+            // このトグルに関わらず常にそのDDSが使われる(ActiveSkyTexture参照)
+            if (ImGui::Checkbox("Procedural Sky", &m_ProceduralSkyEnabled))
+            {
+                m_SkyBakeDirty = true;
+                m_IBLBaked = false;
+                m_IBLIrradianceBaked = false;
+            }
             // 太陽・環境光・下記ポイント/スポットライトすべてに一様にかかるシーン全体の露出
             // (実在の写真露出値EV100)。屋内シーンでは実カメラと同様に下げて調整する運用になる
             ImGui::SliderFloat("EV100", &m_SceneExposureEV100, -8.0f, 20.0f, "%.2f");
@@ -2240,25 +2299,89 @@ namespace Kurenai
         // そのまま読み書きする(詳細はRenderGraph.h参照)
         Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
 
-        // --- IBL畳み込みパス: スカイボックスは実行時に変化しない静的アセットのため、
-        //     起動後最初のフレームでのみ実行し、以降は焼き直さない(m_IBLBaked) ---
-        if (!m_IBLBaked)
+        // このフレームで空として使うキューブマップ。手続き空(SkyGenerate)か.ksceneのDDSかが
+        // ここで確定する。**RenderGraphのReads宣言と実際のバインドの両方でこのローカルを使うこと**
+        // (ActiveSkyTexture()を都度呼ぶと両者が食い違って依存解決が壊れる)
+        RHI::IRHITexture* const skyTexture = ActiveSkyTexture();
+        const bool usingProceduralSky = (skyTexture == m_ProceduralSkyTexture.get());
+
+        // 太陽が閾値以上動いていたら手続き空を焼き直す。毎フレーム焼くと
+        // 空生成6回+プリフィルタ36回のディスパッチが常時走って無駄になる
+        if (usingProceduralSky && !m_SkyBakeDirty)
+        {
+            const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
+            const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_LastBakedSunPosition);
+            const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
+            if (cosAngle < std::cos(DirectX::XMConvertToRadians(m_SkyBakeAngleThresholdDegrees)))
+            {
+                m_SkyBakeDirty = true;
+            }
+        }
+
+        // --- 手続き空の生成パス: Perez分布をGPUで評価してキューブマップを焼く。
+        //     太陽が動くと空の輝度分布の形も変わるため、オフラインDDSと違い焼き直しが要る
+        //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否はm_SkyBakeDirtyで判定する ---
+        if (usingProceduralSky && m_SkyBakeDirty)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "IBLBake",
-                .Reads = { m_SkyboxTexture.get() },
-                .Writes = { m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get() },
+                .Name = "SkyGenerate",
+                .Writes = { m_ProceduralSkyTexture.get() },
+                .Execute = [this, &sunLighting](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_SkyGeneratePipelineState.get());
+                    for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                    {
+                        SkyBakeConstants skyConstants{};
+                        skyConstants.Face = face;
+                        skyConstants.ZenithLuminance = sunLighting.SkyZenithLuminance;
+                        skyConstants.SunDirection = {
+                            sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+                        };
+                        cmd->UpdateBuffer(m_SkyBakeConstantBuffer.get(), &skyConstants, sizeof(skyConstants));
+                        cmd->SetComputeConstantBuffer(0, m_SkyBakeConstantBuffer.get());
+                        cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProceduralSkyTexture.get(), face, 0);
+                        cmd->Dispatch((kProceduralSkySize + 7) / 8, (kProceduralSkySize + 7) / 8, 1);
+                    }
+                },
+            });
+            // 空が変わったのでプリフィルタ済み鏡面も焼き直す必要がある
+            m_SkyBakeDirty = false;
+            m_LastBakedSunPosition = sunLighting.SunPosition;
+            m_IBLBaked = false;
+            m_IBLIrradianceBaked = false;
+        }
+
+        // --- BRDF積分LUTのベイクパス: (NdotV, ラフネス)の2Dテーブルで、スカイボックスにも
+        //     太陽の位置にも一切依存しないため起動後に一度だけ焼く。
+        //     プリフィルタ済み鏡面(下記)が空の変化へ追従して焼き直されるようになっても、
+        //     こちらが巻き込まれないよう別パス・別フラグに分離してある(m_BRDFLUTBaked参照) ---
+        if (!m_BRDFLUTBaked)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "BRDFLUTBake",
+                .Writes = { m_BRDFLUTTexture.get() },
                 .Execute = [this](RHI::IRHICommandList* cmd)
                 {
-                    // BRDF積分LUT(スカイボックスに依存しない、NdotV×ラフネスの128x128グリッド)
                     cmd->SetComputePipelineState(m_BRDFLUTPipelineState.get());
                     cmd->SetComputeUnorderedAccessTexture(0, m_BRDFLUTTexture.get(), 0);
                     cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
+                },
+            });
+            m_BRDFLUTBaked = true;
+        }
 
-                    // プリフィルタ済み鏡面(本物のTextureCube、ミップごとに異なるラフネスで畳み込む)。
-                    // 面×ミップの組み合わせごとに1回ずつディスパッチする
+        // --- プリフィルタ済み鏡面の畳み込みパス: スカイボックスを入力に、ミップごとに異なる
+        //     ラフネスで畳み込む(面×ミップの組み合わせごとに1回ずつディスパッチ) ---
+        if (!m_IBLBaked)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "IBLPrefilter",
+                .Reads = { skyTexture },
+                .Writes = { m_PrefilteredEnvTexture.get() },
+                .Execute = [this, skyTexture](RHI::IRHICommandList* cmd)
+                {
                     cmd->SetComputePipelineState(m_PrefilterPipelineState.get());
-                    cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+                    cmd->SetComputeTexture(0, skyTexture);
                     cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                     for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
                     {
@@ -2295,14 +2418,14 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "IBLIrradianceBake",
-                .Reads = { m_SkyboxTexture.get() },
+                .Reads = { skyTexture },
                 .Writes = { m_IrradianceTexture.get() },
-                .Execute = [this](RHI::IRHICommandList* cmd)
+                .Execute = [this, skyTexture](RHI::IRHICommandList* cmd)
                 {
                     // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
                     // スライス選択できないため、面ごとに1回ずつディスパッチする
                     cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
-                    cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+                    cmd->SetComputeTexture(0, skyTexture);
                     cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                     for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                     {
@@ -2507,7 +2630,7 @@ namespace Kurenai
                 m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                 m_ShadowCascadeArray.get(),
                 // スペキュラのエネルギー補正(14.9節)でEss=brdf.x+brdf.yを引くためBRDF積分LUTを読む。
-                // Readsに挙げることでRenderGraphがIBLBakeパス(このLUTのWriter)より後に順序付ける
+                // Readsに挙げることでRenderGraphがBRDFLUTBakeパス(このLUTのWriter)より後に順序付ける
                 m_BRDFLUTTexture.get(),
             },
             .RenderTargets = { m_DirectLightTexture.get() },
@@ -2630,11 +2753,11 @@ namespace Kurenai
             .Name = "Lighting",
             .Reads = {
                 m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
-                m_SkyboxTexture.get(), activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
+                skyTexture, activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
                 m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
-            .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, activeAOTexture, skyTexture](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // 深度テストに失敗した(=何も描かれていない)ピクセル用の背景色。discardされた箇所に前フレームのデータが
@@ -2648,7 +2771,7 @@ namespace Kurenai
                 cmd->SetTexture(1, m_DirectLightTexture.get());
                 cmd->SetTexture(2, m_GBufferMaterial.get());
                 cmd->SetTexture(3, m_GBufferDepth.get());
-                cmd->SetTexture(4, m_SkyboxTexture.get());
+                cmd->SetTexture(4, skyTexture);
                 cmd->SetTexture(5, activeAOTexture);
                 cmd->SetTexture(6, m_GBufferEmissive.get());
                 cmd->SetTexture(7, m_GBufferNormal.get());
@@ -2771,9 +2894,9 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SSR",
-                .Reads = { m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_SkyboxTexture.get(), m_GBufferAlbedo.get() },
+                .Reads = { m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), skyTexture, m_GBufferAlbedo.get() },
                 .RenderTargets = { m_SSRTexture.get() },
-                .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gbufferViewport, skyTexture](RHI::IRHICommandList* cmd)
                 {
                     SSRConstants ssrConstants{};
                     ssrConstants.Params0 = { m_SSRMaxDistance, m_SSRThickness, m_SSRRoughnessCutoff, 0.0f };
@@ -2788,7 +2911,7 @@ namespace Kurenai
                     cmd->SetTexture(1, m_GBufferNormal.get());
                     cmd->SetTexture(2, m_GBufferMaterial.get());
                     cmd->SetTexture(3, m_GBufferDepth.get());
-                    cmd->SetTexture(4, m_SkyboxTexture.get());
+                    cmd->SetTexture(4, skyTexture);
                     cmd->SetTexture(5, m_GBufferAlbedo.get());
                     cmd->Draw(3, 0);
                 },
@@ -2978,7 +3101,7 @@ namespace Kurenai
         RHI::IRHITexture* presentSourceTexture = m_TonemapTexture.get();
         // Mode 9(IBL Irradiance/Prefilterのキューブマップ表示)専用。他のModeでは使われないが、
         // t1には常に何らかの有効なTextureCubeをバインドしておく必要があるため既定値を持たせる
-        RHI::IRHITexture* presentDebugCubeTexture = m_SkyboxTexture.get();
+        RHI::IRHITexture* presentDebugCubeTexture = skyTexture;
         // Mode 10(シャドウマップのカスケード表示)専用。t1と同じ理由で、t2にも常に有効な
         // Texture2DArrayをバインドしておく必要があるためシャドウマップ配列自身を既定値にする
         RHI::IRHITexture* presentDebugArrayTexture = m_ShadowCascadeArray.get();

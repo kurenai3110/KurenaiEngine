@@ -114,6 +114,7 @@ exit /b 0</Command>
     <None Include="Shaders\3D\SSR.hlsl" />
     <None Include="Shaders\3D\Shadow.hlsl" />
     <None Include="Shaders\3D\Tonemap.hlsl" />
+    <None Include="Shaders\3D\SkyGenerate.hlsl" />
     <None Include="Shaders\3D\AutoExposure.hlsl" />
     <None Include="Shaders\3D\Bloom.hlsl" />
   </ItemGroup>

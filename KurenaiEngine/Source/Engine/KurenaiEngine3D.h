@@ -60,6 +60,14 @@ namespace Kurenai
         // (理由はRHI/IRHISamplerSet.h)
         void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
+        // このフレームで空として使うキューブマップを返す。手続き空が有効で、かつ.ksceneが
+        // スカイボックスを明示していないときだけ手続き空を使う(明示しているシーンは
+        // そのDDSでなければ意味を成さないため。White Furnace Testが該当する)。
+        //
+        // 【重要】Render()の冒頭で一度だけ呼んでローカル変数へ保持し、RenderGraphの
+        // Reads宣言と実際のバインドの両方で同じポインタを使うこと。
+        // 呼び出しごとに評価すると両者が食い違い、依存解決が壊れる
+        RHI::IRHITexture* ActiveSkyTexture() const;
         // <DLLフォルダ>/Assets/Scenes/*.ksceneを列挙し、m_SceneFilePaths/m_SceneDisplayNamesを構築する。
         // 個々のファイルの[Scene]Name読み取りに失敗した場合はそのファイルを警告ログとともに
         // スキップする(1ファイルの不備でアプリ全体が起動できなくなるのを避けるため)
@@ -437,7 +445,38 @@ namespace Kurenai
         // [0, kIBLPrefilterMipLevels-1]のミップ番号へ線形マッピングする(DeferredLighting.hlsl参照)
         static constexpr uint32_t kIBLPrefilterMipLevels = 6;
         static constexpr uint32_t kIBLBRDFLUTSize = 128;
+        // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
+        // オフラインで焼いたDDS(Sky.dds)と違い、太陽が動くと空の輝度分布の「形」も追従する
+        // (circumsolarの明るい領域が太陽と一緒に動く)。詳細はSkyGenerate.hlsl冒頭。
+        //
+        // .ksceneで[Scene]Skyboxを明示しているシーン(White Furnace TestのUniformWhite.dds)は
+        // 従来どおりDDSを使う必要があるため、手続き空は別テクスチャに持ち、
+        // ActiveSkyTexture()がフレームごとにどちらを使うか決める
+        static constexpr uint32_t kProceduralSkySize = 256;
+        std::unique_ptr<RHI::IRHITexture> m_ProceduralSkyTexture;
+        std::unique_ptr<RHI::IRHIShader> m_SkyGenerateComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SkyGeneratePipelineState;
+        // SkyGenerate用の専用定数バッファ。m_IBLPrefilterConstantBufferと共用しないこと
+        // (UpdateBuffer→SetComputeConstantBufferの順序制約があり、共用すると事故りやすい。
+        //  詳細はRHI/IRHICommandList.hのSetConstantBufferのコメント)
+        std::unique_ptr<RHI::IRHIBuffer> m_SkyBakeConstantBuffer;
+        bool m_ProceduralSkyEnabled = true;
+        // 手続き空を焼き直す必要があるか。太陽が動いたとき等に立てる
+        bool m_SkyBakeDirty = true;
+        // 最後に焼いたときの太陽の向き。これと現在の向きの角度差が閾値を超えたら焼き直す。
+        // 毎フレーム焼くと空生成6回+プリフィルタ36回が常時走って無駄なため
+        DirectX::XMFLOAT3 m_LastBakedSunPosition{ 0.0f, 0.0f, 0.0f };
+        // 焼き直しの角度閾値(度)。Auto Advance既定(1h/s)では太陽は15度/秒動くので、
+        // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
+        float m_SkyBakeAngleThresholdDegrees = 1.0f;
+
         bool m_IBLBaked = false;
+        // BRDF積分LUTを焼き終えたか(m_IBLBakedとは別管理)。このLUTは(NdotV, ラフネス)の
+        // 2Dテーブルでスカイボックスにも太陽の位置にも一切依存しないため、起動後に一度焼けば
+        // 二度と焼き直す必要がない。プリフィルタ済み鏡面が空の変化に追従して再ベイクされるように
+        // なった以降も巻き込まれて焼き直されないよう、専用のフラグとパスに分離してある
+        // (128x128 x 1024サンプル = 約1,680万イテレーションあり、毎回焼くと丸損になる)
+        bool m_BRDFLUTBaked = false;
         // 検証用の拡散イラディアンスマップを焼き終えたか(m_IBLBakedとは別管理)。既定の描画経路は
         // プリフィルタ済み鏡面の最終ミップなので、こちらは検証を有効にしたときにだけ焼く
         bool m_IBLIrradianceBaked = false;
