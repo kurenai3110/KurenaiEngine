@@ -1027,11 +1027,14 @@ namespace Kurenai
         // Legacy8bitはM7以前の「すべてR8G8B8A8_UNorm」構成をそのまま再現する
         const bool legacyPrecision = (m_BufferPrecision == BufferPrecision::Legacy8bit);
 
-        // Albedo: リニア値をsRGBカーブで格納すると符号点が暗部へ寄り、暗いマテリアルの
-        // 量子化が細かくなる(リニア反射率L=0.02で約4.3倍)。ただしL>0.244では逆に粗くなるため、
-        // 明るいマテリアルが支配的なシーンでは不利になり得る(Architecture.htmlの損益分岐の表を参照)
-        const RHI::Format albedoFormat =
-            legacyPrecision ? RHI::Format::R8G8B8A8_UNorm : RHI::Format::R8G8B8A8_UNorm_SRGB;
+        // Albedoは両構成ともリニアのR8G8B8A8_UNormのままにする。
+        // sRGB格納(R8G8B8A8_UNorm_SRGB)にすれば符号点が暗部へ寄り、暗いマテリアルの量子化は
+        // 細かくなる(リニア反射率L=0.02で約4.3倍)。しかし実測すると最終画像への寄与は
+        // 平均0.03/255と測定限界以下だった。アルベドの量子化は面ごとの一定オフセットとして出るため、
+        // 狙っていた暗部のバンディング(=照明の滑らかな変化が最終8bitで潰れる現象)には
+        // そもそも効かない。加えてL>0.244では逆に粗くなり、金属はアルベドバッファの値を
+        // F0として使う(DeferredLighting.hlsl)ぶん確実にその領域へ入るため、
+        // 利点が確認できないまま欠点だけを抱えることになる。詳細はArchitecture.html 17.4節
         // Emissive: 1.0でクリップされると照明器具がHDRな輝度を持てず、ブルームが成立しない。
         // アルファを使わないためR11G11B10_Floatで足りる(帯域はR16G16B16A16_Floatの半分)
         const RHI::Format emissiveFormat =
@@ -1044,7 +1047,7 @@ namespace Kurenai
 
         try
         {
-            m_GBufferAlbedo = m_Device->CreateRenderTexture(width, height, albedoFormat);
+            m_GBufferAlbedo = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
             m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16_Float);
             m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
             m_GBufferEmissive = m_Device->CreateRenderTexture(width, height, emissiveFormat);
@@ -1100,7 +1103,7 @@ namespace Kurenai
                 throw;
             }
 
-            // R11G11B10_Float / R8G8B8A8_UNorm_SRGB / R16G16B16A16_Float のいずれかが
+            // R11G11B10_Float / R16G16B16A16_Float のいずれかが
             // このデバイスでレンダーターゲットとして使えない場合の保険。8bit構成へ落として続行する
             // (画質は落ちるが起動できなくなるよりはよい)
             Core::Logger::Error(
@@ -1583,8 +1586,9 @@ namespace Kurenai
         if (ImGui::IsItemHovered() || ImGui::IsItemActive())
         {
             ImGui::SetTooltip(
-                "HDR: Albedo=sRGB8, Emissive=R11G11B10F, AO/GI=RGBA16F\n"
-                "Legacy 8bit: すべてRGBA8_UNorm (M7以前の構成)");
+                "HDR: Emissive=R11G11B10F, AO/GI=RGBA16F\n"
+                "Legacy 8bit: すべてRGBA8_UNorm (M7以前の構成)\n"
+                "(Albedoはどちらもリニアの8bit。sRGB格納は効果が測定限界以下だったため不採用)");
         }
 
         ImGui::End();
