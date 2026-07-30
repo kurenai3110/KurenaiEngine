@@ -111,6 +111,25 @@ namespace Kurenai
         uint32_t m_RenderWidth;
         uint32_t m_RenderHeight;
 
+        // 中間バッファの精度構成。HDRが本来採用したい構成で、Legacy8bitはM7以前の
+        // 「中間バッファはすべてR8G8B8A8_UNorm」だった構成を再現する比較用の経路。
+        //
+        // 精度改善の効果を主観ではなく実測で比較できるようにするために残している。
+        // UNorm8は刻みが絶対値1/255=0.392%で固定なのに対し、half floatは仮数10bitで
+        // 相対2^-11=0.049%が一定のため、両者の相対精度比は格納値vに対して8/vになる
+        // (v=0.1で80倍、v=0.02で401倍)。暗い間接光ほど差が開く
+        // (詳細と各バッファの根拠はdocs/Architecture.html)
+        enum class BufferPrecision
+        {
+            HDR,
+            Legacy8bit,
+        };
+        BufferPrecision m_BufferPrecision = BufferPrecision::HDR;
+        // ImGuiでBufferPrecisionが変更されたことをRender()へ伝えるフラグ。レンダーターゲットの
+        // 作り直しはGPUがそれらを参照していない状態で行う必要があるため、UI関数の中では実行せず
+        // Render()の先頭(RenderGraphの構築より前)でm_Device->WaitForGPUIdle()を挟んで処理する
+        bool m_BufferPrecisionDirty = false;
+
         // ジオメトリパス(G-Buffer書き込み)
         std::unique_ptr<RHI::IRHIShader> m_GBufferVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_GBufferPixelShader;
@@ -224,6 +243,92 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_TonemapPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_TonemapPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_TonemapTexture;
+        std::unique_ptr<RHI::IRHIBuffer> m_TonemapConstantBuffer;
+
+        // トーンマッピングカーブ。Tonemap.hlsl側のCurveと値を一致させること
+        enum class TonemapCurve
+        {
+            Reinhard, // c/(c+1)。M7以前の唯一のカーブで、比較用リファレンスとして残す
+            ACES,     // Narkowicz 2015のフィット近似
+            AgX,      // Troy Sobotka の AgX(Filament/three.jsの実装形)
+        };
+        // 既定をAgXにしている理由: ACESは飽和した明るい色の色相がシフトする(赤がオレンジへ寄る)
+        // ことが知られており、Bistro内観のように赤い壁が支配的なシーンでその欠点が最も出やすい。
+        // AgXはハイライトが色相を保ったまま白へ脱色するため、この用途では素直な絵になる
+        TonemapCurve m_TonemapCurve = TonemapCurve::AgX;
+
+        // 出力8bit量子化の直前に加えるディザリング。実測(Bistro Interior)では走査線上に
+        // 同一色が24px連続しており、これは中間バッファをHDR化しても変わらなかった。
+        // つまり暗部のバンディングの主因は最終8bit量子化であり、ここでしか直せない。
+        // 効果をA/B比較できるようトグルにしてある
+        bool m_DitherEnabled = true;
+
+        // 自動露出(eye adaptation)パス: SceneColorの輝度ヒストグラムをGPUで作り、
+        // 低/高パーセンタイルを除外した加重平均から目標EV100を求めて時間方向に追従させる。
+        // 結果はm_ExposureTextureへ書かれ、Tonemapパスが読んで露出倍率に変換する。
+        //
+        // 露出そのものはCPU側でライト強度へ事前乗算されている(プリ露出方式、
+        // m_SceneExposureEV100)。自動露出の結果をライト強度へ戻すとフィードバックループになり、
+        // かつGPU→CPUのリードバック(同期待ち)が要るため、プリ露出は固定のままにして
+        // 「プリ露出EVと自動露出EVの差」だけをTonemapで掛ける構成にしている
+        // (詳細はAutoExposure.hlsl冒頭)
+        std::unique_ptr<RHI::IRHIShader> m_AutoExposureClearComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_AutoExposureClearPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_AutoExposureHistogramComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_AutoExposureHistogramPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_AutoExposureResolveComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_AutoExposureResolvePipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_ExposureHistogramBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> m_AutoExposureConstantBuffer;
+        // 2x1のR32_Float。texel(0,0)=平滑化後のEV100、texel(1,0)=初期化済みフラグ。
+        // フレームをまたいで保持する必要があるためCreateRenderTargetsではなく一度だけ作る
+        // (ウィンドウリサイズで作り直すと順応がリセットされてしまうため)
+        std::unique_ptr<RHI::IRHITexture> m_ExposureTexture;
+        // 輝度ヒストグラムのビン数。AutoExposure.hlslのHISTOGRAM_BINSと一致させること
+        static constexpr uint32_t kExposureHistogramBins = 256;
+
+        bool m_AutoExposureEnabled = true;
+        // 露出のクランプ範囲(EV100)。ヒストグラムのビン割りもこの範囲で行うため、
+        // 実シーンの輝度がこの外に出ると端に張り付く
+        float m_AutoExposureMinEV100 = 0.0f;
+        float m_AutoExposureMaxEV100 = 16.0f;
+        // 明順応(暗→明)と暗順応(明→暗)の速度。人間の目は暗順応のほうが遅いため既定値も分けている
+        float m_AutoExposureSpeedUp = 3.0f;
+        float m_AutoExposureSpeedDown = 1.0f;
+        // 加重平均から除外する下側/上側の累積割合。暗すぎる画素・明るすぎる画素に露出が
+        // 引きずられるのを防ぐ
+        float m_AutoExposureLowPercentile = 0.5f;
+        float m_AutoExposureHighPercentile = 0.95f;
+        // 測定結果に対してユーザーが意図的に足すオフセット(EV)
+        float m_AutoExposureCompensation = 0.0f;
+
+        // ブルームパス(Bloom.hlsl): 半解像度から始まるピラミッドを段階的にダウンサンプルし、
+        // 3x3テントで戻しながら加算することで広く滑らかな光の裾を作る。
+        //
+        // ピラミッドをミップチェーン1枚ではなくレベルごとの独立テクスチャで持っているのは、
+        // 同一リソースのSRV/UAV同時バインドを避けるため(理由の詳細はBloom.hlsl冒頭)。
+        // m_BloomDownTexturesがダウンサンプル結果、m_BloomUpTexturesがアップサンプルの累積で、
+        // 最終的にm_BloomUpTextures[0](半解像度)をTonemapパスが読む
+        std::unique_ptr<RHI::IRHIShader> m_BloomDownsampleComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_BloomDownsamplePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_BloomUpsampleComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_BloomUpsamplePipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_BloomConstantBuffer;
+        std::vector<std::unique_ptr<RHI::IRHITexture>> m_BloomDownTextures;
+        std::vector<std::unique_ptr<RHI::IRHITexture>> m_BloomUpTextures;
+        // ピラミッドの段数。半解像度を第0段として、これ以上小さくしても見た目が変わらない範囲で選ぶ
+        static constexpr uint32_t kBloomLevelCount = 6;
+        // 各段の解像度(CreateRenderTargetsで内部解像度から決まる)
+        std::vector<DirectX::XMUINT2> m_BloomLevelSizes;
+
+        bool m_BloomEnabled = true;
+        // 最終合成の混合比。エネルギー保存のため加算ではなくlerpで混ぜるので、
+        // 物理的にレンズ散乱が持ち去る割合(数%)に相当する小さい値が既定になる
+        float m_BloomStrength = 0.06f;
+        // しきい値は既定で十分低くしてある(物理的にはブルームは全輝度に掛かるのが正しい)。
+        // アート制御として上げられるようにだけしてある
+        float m_BloomThreshold = 1.0f;
+        float m_BloomSoftKnee = 0.5f;
 
         // 垂直同期。既定で無効。有効にするとPresentがvblankまでブロックするため、GPU負荷が軽い
         // シーンではvsync待ちの間GPUがアイドル→省電力クロックに落ち、次フレームの立ち上がりが
@@ -266,8 +371,15 @@ namespace Kurenai
             IBLIrradiance,      // IBL拡散イラディアンスマップ(TextureCube。現在の視線方向で球面を見回す表示)
             IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLPrefilterDebugMipLevel、TextureCube)
             IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス)
+            Bloom,              // ブルームのピラミッド最上段(半解像度、HDR)をトーンマッピングして表示
         };
         DebugView m_DebugView = DebugView::Final;
+        // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
+        // 値そのものが小さいバッファ(この暗い室内では0.02〜0.1程度)は、等倍で表示しても
+        // ほぼ真っ黒で階調の粗さが判別できない。持ち上げて表示することで、8bit格納時の
+        // ポスタリゼーションが何段あるかを目視で確認できるようにする。
+        // 色として表示するモード(Present.hlsl Mode 0/3/4)にのみ効く
+        float m_DebugViewGain = 1.0f;
 
         // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
         // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
@@ -372,6 +484,13 @@ namespace Kurenai
         // 乗算する(HLSL側は素のAmbientColor.rgbを読むだけでよい)
         float m_AmbientScale = 0.2f;
 
+        // シーン全体の自発光(エミッシブ)の強度倍率。MakeObjectConstantsがmesh.EmissiveFactorへ
+        // 乗算する。glTFのemissiveFactorは通常1.0以下に収まるため、G-Bufferのエミッシブを
+        // HDR化(R11G11B10_Float)しただけでは照明器具の輝度が1.0を超えず、ブルームが効かない。
+        // アセットを再オーサリングせずにHDRな自発光を得るための倍率
+        // (KHR_materials_emissive_strengthをインポータが読むようになれば本来はそちらが正しい)
+        float m_EmissiveIntensity = 1.0f;
+
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = 12.0f;
         bool m_TimeAutoAdvance = false;
@@ -453,6 +572,10 @@ namespace Kurenai
         bool m_StopRenderThread = false;
         // Renderスレッド側のフレーム間隔計測用(時刻自動進行・FPS計測に使う。Renderスレッドのみが読み書きする)
         std::chrono::steady_clock::time_point m_LastRenderFrameTime;
+        // 直前のRenderフレームの経過時間[秒]。自動露出の時間方向の順応に使う。
+        // RenderThreadMainが書き、Render()が読む。どちらもRenderスレッドなので追加の排他は不要
+        // (m_TimeOfDayと同じ扱い)
+        float m_RenderDeltaTime = 0.0f;
 
         // 統計表示用: 1フレームあたりのCPU時間(Renderの呼び出し時間)と、指数移動平均によるFPS。
         // どちらもRenderスレッドのみが書き込み、ImGui描画(同じくRenderスレッド)のみが読むため

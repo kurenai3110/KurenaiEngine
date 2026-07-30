@@ -186,7 +186,11 @@ namespace Kurenai
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
         // TRS(平行移動・回転・スケール)から計算済み(HLSL側のmul(vec, matrix)規約に合わせて
         // 転置済み)なので、ここでは単純にコピーするだけでよい
-        ObjectConstants MakeObjectConstants(const Assets::ModelInstance& instance, const Assets::Mesh& mesh)
+        // emissiveIntensity: シーン全体の自発光の強度倍率(m_EmissiveIntensity)。glTFの
+        // emissiveFactorは通常1.0以下に収まるため、これを掛けないとG-Bufferのエミッシブを
+        // HDR化しても照明器具の輝度が1.0を超えず、ブルームが効かない
+        ObjectConstants MakeObjectConstants(
+            const Assets::ModelInstance& instance, const Assets::Mesh& mesh, float emissiveIntensity)
         {
             ObjectConstants constants{};
             constants.World = instance.World;
@@ -195,9 +199,9 @@ namespace Kurenai
             constants.RoughnessFactor = mesh.RoughnessFactor;
             constants.TangentSignFlip = instance.TangentSignFlip;
             constants.AlphaCutoff = mesh.AlphaCutoff;
-            constants.EmissiveFactor[0] = mesh.EmissiveFactor[0];
-            constants.EmissiveFactor[1] = mesh.EmissiveFactor[1];
-            constants.EmissiveFactor[2] = mesh.EmissiveFactor[2];
+            constants.EmissiveFactor[0] = mesh.EmissiveFactor[0] * emissiveIntensity;
+            constants.EmissiveFactor[1] = mesh.EmissiveFactor[1] * emissiveIntensity;
+            constants.EmissiveFactor[2] = mesh.EmissiveFactor[2] * emissiveIntensity;
             constants.BaseColorFactor[0] = mesh.BaseColorFactor[0];
             constants.BaseColorFactor[1] = mesh.BaseColorFactor[1];
             constants.BaseColorFactor[2] = mesh.BaseColorFactor[2];
@@ -211,6 +215,61 @@ namespace Kurenai
             int32_t Mode;
             float MipLevel; // Mode==6(Hi-Z)でSampleLevelに渡すミップレベル
             float ArraySlice; // Mode==10(シャドウマップ配列)で表示する配列スライス(=カスケード番号)
+            // デバッグ表示の輝度倍率(m_DebugViewGain)。色として表示するMode 0/3/4にだけ効く
+            float Gain;
+        };
+
+        // Tonemap.hlsl側のcbuffer TonemapConstantsと一致させる必要がある
+        struct alignas(16) TonemapConstants
+        {
+            // KurenaiEngine3D::TonemapCurve(0=Reinhard, 1=ACES, 2=AgX)
+            int32_t Curve;
+            // 露出倍率。プリ露出方式(露出はCPU側でライト強度へ事前乗算済み)のため現状は常に1.0
+            float ExposureScale;
+            // ディザの強さ(0=無効、1=±1LSB)
+            float DitherStrength;
+            // 1.0=自動露出、0.0=手動
+            float UseAutoExposure;
+            // CPU側でライト強度へ事前乗算済みのEV100(プリ露出)
+            float PreExposureEV100;
+            // ブルームの合成比(0で無効)
+            float BloomStrength;
+            float Padding[2];
+        };
+
+        // Bloom.hlsl側のcbuffer BloomConstantsと一致させる必要がある
+        struct alignas(16) BloomConstants
+        {
+            DirectX::XMUINT2 SrcSize;
+            DirectX::XMUINT2 DstSize;
+
+            float Threshold;
+            float SoftKnee;
+            // 1.0なら最初のダウンサンプル(Karis平均としきい値を適用する)
+            float ApplyKarisAndThreshold;
+            // 1.0=自動露出、0.0=手動(Tonemapと同じ意味)
+            float UseAutoExposure;
+
+            // CPU側でライト強度へ事前乗算済みのEV100(プリ露出)
+            float PreExposureEV100;
+            float Padding[3];
+        };
+
+        // AutoExposure.hlsl側のcbuffer AutoExposureConstantsと一致させる必要がある
+        struct alignas(16) AutoExposureConstants
+        {
+            DirectX::XMUINT2 InputSize;
+            float MinEV100;
+            float MaxEV100;
+
+            float PreExposureEV100;
+            float DeltaTime;
+            float AdaptationSpeedUp;
+            float AdaptationSpeedDown;
+
+            float LowPercentile;
+            float HighPercentile;
+            float ExposureCompensation;
             float Padding;
         };
 
@@ -666,6 +725,75 @@ namespace Kurenai
         tonemapPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
         m_TonemapPipelineState = m_Device->CreatePipelineState(tonemapPipelineDesc);
 
+        RHI::BufferDesc tonemapConstantBufferDesc;
+        tonemapConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        tonemapConstantBufferDesc.SizeInBytes = sizeof(TonemapConstants);
+        m_TonemapConstantBuffer = m_Device->CreateBuffer(tonemapConstantBufferDesc);
+
+        // 自動露出パス(輝度ヒストグラムの構築→縮約→時間方向の順応。すべてコンピュートシェーダー)
+        RHI::ShaderDesc autoExposureClearCsDesc;
+        autoExposureClearCsDesc.Stage = RHI::ShaderStage::Compute;
+        autoExposureClearCsDesc.FilePath = shaderDirectory + L"AutoExposure.hlsl";
+        autoExposureClearCsDesc.EntryPoint = "CSClearHistogram";
+        m_AutoExposureClearComputeShader = m_Device->CreateShader(autoExposureClearCsDesc);
+        m_AutoExposureClearPipelineState =
+            m_Device->CreateComputePipelineState({ m_AutoExposureClearComputeShader.get() });
+
+        RHI::ShaderDesc autoExposureHistogramCsDesc;
+        autoExposureHistogramCsDesc.Stage = RHI::ShaderStage::Compute;
+        autoExposureHistogramCsDesc.FilePath = shaderDirectory + L"AutoExposure.hlsl";
+        autoExposureHistogramCsDesc.EntryPoint = "CSHistogram";
+        m_AutoExposureHistogramComputeShader = m_Device->CreateShader(autoExposureHistogramCsDesc);
+        m_AutoExposureHistogramPipelineState =
+            m_Device->CreateComputePipelineState({ m_AutoExposureHistogramComputeShader.get() });
+
+        RHI::ShaderDesc autoExposureResolveCsDesc;
+        autoExposureResolveCsDesc.Stage = RHI::ShaderStage::Compute;
+        autoExposureResolveCsDesc.FilePath = shaderDirectory + L"AutoExposure.hlsl";
+        autoExposureResolveCsDesc.EntryPoint = "CSResolve";
+        m_AutoExposureResolveComputeShader = m_Device->CreateShader(autoExposureResolveCsDesc);
+        m_AutoExposureResolvePipelineState =
+            m_Device->CreateComputePipelineState({ m_AutoExposureResolveComputeShader.get() });
+
+        RHI::BufferDesc exposureHistogramBufferDesc;
+        exposureHistogramBufferDesc.Usage = RHI::BufferUsage::Structured;
+        exposureHistogramBufferDesc.SizeInBytes = sizeof(uint32_t) * kExposureHistogramBins;
+        exposureHistogramBufferDesc.StrideInBytes = sizeof(uint32_t);
+        m_ExposureHistogramBuffer = m_Device->CreateBuffer(exposureHistogramBufferDesc);
+
+        RHI::BufferDesc autoExposureConstantBufferDesc;
+        autoExposureConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        autoExposureConstantBufferDesc.SizeInBytes = sizeof(AutoExposureConstants);
+        m_AutoExposureConstantBuffer = m_Device->CreateBuffer(autoExposureConstantBufferDesc);
+
+        // 露出の保存先。フレームをまたいで順応の履歴を保持するため、ウィンドウリサイズで
+        // 作り直されるCreateRenderTargetsではなくここで一度だけ作る。
+        // 生成直後はゼロクリアされており、texel(1,0)=0が「未初期化」を意味する
+        // (CSResolveがこれを見て初回だけ順応を飛ばして即座に目標値へ合わせる)
+        m_ExposureTexture = m_Device->CreateUAVTexture(2, 1, RHI::Format::R32_Float);
+
+        // ブルームパス(ダウンサンプル/アップサンプルの2エントリ。テクスチャはCreateRenderTargetsで作る)
+        RHI::ShaderDesc bloomDownCsDesc;
+        bloomDownCsDesc.Stage = RHI::ShaderStage::Compute;
+        bloomDownCsDesc.FilePath = shaderDirectory + L"Bloom.hlsl";
+        bloomDownCsDesc.EntryPoint = "CSDownsample";
+        m_BloomDownsampleComputeShader = m_Device->CreateShader(bloomDownCsDesc);
+        m_BloomDownsamplePipelineState =
+            m_Device->CreateComputePipelineState({ m_BloomDownsampleComputeShader.get() });
+
+        RHI::ShaderDesc bloomUpCsDesc;
+        bloomUpCsDesc.Stage = RHI::ShaderStage::Compute;
+        bloomUpCsDesc.FilePath = shaderDirectory + L"Bloom.hlsl";
+        bloomUpCsDesc.EntryPoint = "CSUpsample";
+        m_BloomUpsampleComputeShader = m_Device->CreateShader(bloomUpCsDesc);
+        m_BloomUpsamplePipelineState =
+            m_Device->CreateComputePipelineState({ m_BloomUpsampleComputeShader.get() });
+
+        RHI::BufferDesc bloomConstantBufferDesc;
+        bloomConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        bloomConstantBufferDesc.SizeInBytes = sizeof(BloomConstants);
+        m_BloomConstantBuffer = m_Device->CreateBuffer(bloomConstantBufferDesc);
+
         // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
         RHI::ShaderDesc presentVsDesc;
         presentVsDesc.Stage = RHI::ShaderStage::Vertex;
@@ -895,24 +1023,103 @@ namespace Kurenai
             return;
         }
 
-        m_GBufferAlbedo = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16_Float);
-        m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_GBufferEmissive = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        // Reverse-Zのため近平面側(NDC z=1.0)ではなく遠平面側(NDC z=0.0)にクリアする
-        m_GBufferDepth = m_Device->CreateDepthTexture(width, height, 0.0f);
-        m_DirectLightTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R32G32B32A32_Float);
-        m_SSAORawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_SSAOTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_SSILRawTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_SSILTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
-        m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
-        m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        // 中間バッファのフォーマットはm_BufferPrecisionで切り替える(A/B比較用。BufferPrecision参照)。
+        // Legacy8bitはM7以前の「すべてR8G8B8A8_UNorm」構成をそのまま再現する
+        const bool legacyPrecision = (m_BufferPrecision == BufferPrecision::Legacy8bit);
 
-        m_HiZMipLevels = ComputeMipLevelCount(width, height);
-        m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
-        m_HiZDebugMipLevel = 0;
+        // Albedoは両構成ともリニアのR8G8B8A8_UNormのままにする。
+        // sRGB格納(R8G8B8A8_UNorm_SRGB)にすれば符号点が暗部へ寄り、暗いマテリアルの量子化は
+        // 細かくなる(リニア反射率L=0.02で約4.3倍)。しかし実測すると最終画像への寄与は
+        // 平均0.03/255と測定限界以下だった。アルベドの量子化は面ごとの一定オフセットとして出るため、
+        // 狙っていた暗部のバンディング(=照明の滑らかな変化が最終8bitで潰れる現象)には
+        // そもそも効かない。加えてL>0.244では逆に粗くなり、金属はアルベドバッファの値を
+        // F0として使う(DeferredLighting.hlsl)ぶん確実にその領域へ入るため、
+        // 利点が確認できないまま欠点だけを抱えることになる。詳細はArchitecture.html 17.4節
+        // Emissive: 1.0でクリップされると照明器具がHDRな輝度を持てず、ブルームが成立しない。
+        // アルファを使わないためR11G11B10_Floatで足りる(帯域はR16G16B16A16_Floatの半分)
+        const RHI::Format emissiveFormat =
+            legacyPrecision ? RHI::Format::R8G8B8A8_UNorm : RHI::Format::R11G11B10_Float;
+        // AO/GIバッファ: rgb=間接拡散光(HDR)、a=遮蔽率。間接光はこの暗い室内では0.02〜0.1に
+        // 収まり、UNorm8ではコード5〜26の約20階調しか使えずポスタリゼーションする。
+        // aに遮蔽率を持つためアルファ付きのR16G16B16A16_Floatを使う
+        const RHI::Format aoFormat =
+            legacyPrecision ? RHI::Format::R8G8B8A8_UNorm : RHI::Format::R16G16B16A16_Float;
+
+        try
+        {
+            m_GBufferAlbedo = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+            m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16_Float);
+            m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+            m_GBufferEmissive = m_Device->CreateRenderTexture(width, height, emissiveFormat);
+            // Reverse-Zのため近平面側(NDC z=1.0)ではなく遠平面側(NDC z=0.0)にクリアする
+            m_GBufferDepth = m_Device->CreateDepthTexture(width, height, 0.0f);
+            m_DirectLightTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R32G32B32A32_Float);
+            m_SSAORawTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
+            m_SSAOTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
+            m_SSILRawTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
+            m_SSILTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
+            m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+
+            m_HiZMipLevels = ComputeMipLevelCount(width, height);
+            m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
+            m_HiZDebugMipLevel = 0;
+
+            // ブルームのピラミッド。第0段が半解像度で、以降1段ごとに半分になる。
+            // 1x1まで落とさず段数を固定しているのは、これ以上小さくしても裾の広がりが
+            // 見た目に寄与しないため(解像度が低いと逆にアップサンプル時のちらつき源になる)。
+            // レベルごとに独立したテクスチャにしている理由はBloom.hlsl冒頭を参照
+            m_BloomLevelSizes.clear();
+            m_BloomDownTextures.clear();
+            m_BloomUpTextures.clear();
+            uint32_t bloomWidth = std::max(1u, width / 2);
+            uint32_t bloomHeight = std::max(1u, height / 2);
+            for (uint32_t level = 0; level < kBloomLevelCount; ++level)
+            {
+                m_BloomLevelSizes.push_back({ bloomWidth, bloomHeight });
+                // アルファを使わないHDRバッファなのでR11G11B10_Floatで足りる。
+                // Legacy8bit構成でもブルームはHDR値を扱う必要があるためここは常にHDRのままにする
+                // (8bitにすると1.0でクリップされ、ブルームの意味が失われる)
+                m_BloomDownTextures.push_back(
+                    m_Device->CreateUAVTexture(bloomWidth, bloomHeight, RHI::Format::R16G16B16A16_Float));
+                m_BloomUpTextures.push_back(
+                    m_Device->CreateUAVTexture(bloomWidth, bloomHeight, RHI::Format::R16G16B16A16_Float));
+
+                bloomWidth = std::max(1u, bloomWidth / 2);
+                bloomHeight = std::max(1u, bloomHeight / 2);
+            }
+        }
+        catch (const std::exception& e)
+        {
+            // Legacy8bit構成でも失敗する場合は、このエンジンが前提とする最低限の
+            // フォーマット(R8G8B8A8_UNorm等)すら作れていないため復旧手段が無い
+            if (legacyPrecision)
+            {
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    std::string("レンダーターゲットの作成に失敗しました (") + std::to_string(width) + "x" +
+                        std::to_string(height) + ", バッファ精度=Legacy8bit): " + e.what());
+                throw;
+            }
+
+            // R11G11B10_Float / R16G16B16A16_Float のいずれかが
+            // このデバイスでレンダーターゲットとして使えない場合の保険。8bit構成へ落として続行する
+            // (画質は落ちるが起動できなくなるよりはよい)
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                std::string("HDR精度のレンダーターゲット作成に失敗したためLegacy8bit構成へフォールバックします (") +
+                    std::to_string(width) + "x" + std::to_string(height) + "): " + e.what());
+            m_BufferPrecision = BufferPrecision::Legacy8bit;
+            CreateRenderTargets(width, height);
+            return;
+        }
+
+        // A/B比較の記録用。どちらの構成で描かれたスクリーンショットなのかをログから追えるようにする
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("レンダーターゲットを作成しました (") + std::to_string(width) + "x" + std::to_string(height) +
+                ", バッファ精度=" + (legacyPrecision ? "Legacy8bit" : "HDR") + ")");
     }
 
     void KurenaiEngine3D::LoadScene(size_t sceneIndex)
@@ -1324,6 +1531,66 @@ namespace Kurenai
             ImGui::SliderFloat("SSR Roughness Cutoff", &m_SSRRoughnessCutoff, 0.05f, 1.0f);
         }
 
+        ImGui::Separator();
+
+        // トーンマッピングカーブ。既定のAgXは、飽和した明るい色でACESに出る色相シフト
+        // (赤→オレンジ)を避けられる。Reinhardは比較用リファレンスとして残してある
+        static const char* kTonemapCurveNames[] = { "Reinhard", "ACES", "AgX" };
+        int curveIndex = static_cast<int>(m_TonemapCurve);
+        if (ImGui::Combo("Tonemap Curve", &curveIndex, kTonemapCurveNames, IM_ARRAYSIZE(kTonemapCurveNames)))
+        {
+            m_TonemapCurve = static_cast<TonemapCurve>(curveIndex);
+        }
+
+        // 暗部グラデーションのバンディングは中間バッファの精度ではなく最終8bit量子化が主因
+        // (実測で確認済み)。ここでON/OFFして効果をA/B比較できるようにしている
+        ImGui::Checkbox("Output Dithering", &m_DitherEnabled);
+
+        // ブルーム。しきい値は既定で低め(物理的にはレンズ散乱なので全輝度に掛かるのが正しい)
+        ImGui::Checkbox("Enable Bloom", &m_BloomEnabled);
+        if (m_BloomEnabled)
+        {
+            ImGui::SliderFloat("Bloom Strength", &m_BloomStrength, 0.0f, 0.5f, "%.3f");
+            ImGui::SliderFloat("Bloom Threshold", &m_BloomThreshold, 0.0f, 8.0f, "%.2f");
+            ImGui::SliderFloat("Bloom Soft Knee", &m_BloomSoftKnee, 0.0f, 1.0f, "%.2f");
+        }
+
+        // 自動露出。無効にするとLightingパネルのEV100スライダーがそのまま最終露出になる
+        ImGui::Checkbox("Auto Exposure", &m_AutoExposureEnabled);
+        if (m_AutoExposureEnabled)
+        {
+            ImGui::SliderFloat("AE Min EV100", &m_AutoExposureMinEV100, -8.0f, 20.0f, "%.1f");
+            ImGui::SliderFloat("AE Max EV100", &m_AutoExposureMaxEV100, -8.0f, 20.0f, "%.1f");
+            ImGui::SliderFloat("AE Compensation", &m_AutoExposureCompensation, -4.0f, 4.0f, "%.2f EV");
+            ImGui::SliderFloat("AE Speed (to bright)", &m_AutoExposureSpeedUp, 0.1f, 10.0f, "%.2f");
+            ImGui::SliderFloat("AE Speed (to dark)", &m_AutoExposureSpeedDown, 0.1f, 10.0f, "%.2f");
+            ImGui::SliderFloat("AE Low Percentile", &m_AutoExposureLowPercentile, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("AE High Percentile", &m_AutoExposureHighPercentile, 0.0f, 1.0f, "%.2f");
+        }
+
+        ImGui::Separator();
+
+        // 中間バッファの精度構成のA/B比較(BufferPrecision参照)。切り替えるとレンダーターゲットを
+        // 作り直す必要があるが、ここで直接作り直すとGPUがまだ読んでいるテクスチャを壊すため、
+        // フラグだけ立ててRender()側で(WaitForGPUIdleを挟んで)処理する
+        ImGui::TextUnformatted("Buffer Precision");
+        int precisionIndex = static_cast<int>(m_BufferPrecision);
+        bool precisionChanged = ImGui::RadioButton("HDR", &precisionIndex, static_cast<int>(BufferPrecision::HDR));
+        ImGui::SameLine();
+        precisionChanged |= ImGui::RadioButton("Legacy 8bit", &precisionIndex, static_cast<int>(BufferPrecision::Legacy8bit));
+        if (precisionChanged && precisionIndex != static_cast<int>(m_BufferPrecision))
+        {
+            m_BufferPrecision = static_cast<BufferPrecision>(precisionIndex);
+            m_BufferPrecisionDirty = true;
+        }
+        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+        {
+            ImGui::SetTooltip(
+                "HDR: Emissive=R11G11B10F, AO/GI=RGBA16F\n"
+                "Legacy 8bit: すべてRGBA8_UNorm (M7以前の構成)\n"
+                "(Albedoはどちらもリニアの8bit。sRGB格納は効果が測定限界以下だったため不採用)");
+        }
+
         ImGui::End();
     }
 
@@ -1355,7 +1622,12 @@ namespace Kurenai
             "IBL - Irradiance (Cubemap, Look Around)",
             "IBL - Prefiltered Specular (Cubemap Mip Chain, Look Around)",
             "IBL - BRDF LUT (X=NdotV, Y=Roughness)",
+            "Bloom (Pyramid Top, Half Res)",
         };
+        // DebugView enumと並びが一致していないと表示と実際のバッファがずれる
+        static_assert(
+            static_cast<int>(DebugView::Bloom) == 18,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はBloom)");
 
         int currentIndex = static_cast<int>(m_DebugView);
         if (ImGui::Combo("View", &currentIndex, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames)))
@@ -1376,6 +1648,15 @@ namespace Kurenai
         if (m_DebugView == DebugView::IBLPrefilter)
         {
             ImGui::SliderInt("Prefilter Mip Level", &m_IBLPrefilterDebugMipLevel, 0, static_cast<int>(kIBLPrefilterMipLevels) - 1);
+        }
+
+        // AO/GIバッファの間接拡散光のように値が小さいバッファ(暗い室内では0.02〜0.1程度)は
+        // 等倍表示だとほぼ真っ黒で階調の粗さが判別できない。持ち上げて表示することで、
+        // 8bit格納時のポスタリゼーションが何段あるかを目視で比較できる(Buffer Precisionと併用する)。
+        // Finalは見た目そのものを確認する表示なので倍率を適用しない(Render()側で1.0固定)
+        if (m_DebugView != DebugView::Final)
+        {
+            ImGui::SliderFloat("Debug View Gain", &m_DebugViewGain, 1.0f, 64.0f, "%.1fx", ImGuiSliderFlags_Logarithmic);
         }
 
         ImGui::End();
@@ -1404,6 +1685,10 @@ namespace Kurenai
             // 太陽・環境光・下記ポイント/スポットライトすべてに一様にかかるシーン全体の露出
             // (実在の写真露出値EV100)。屋内シーンでは実カメラと同様に下げて調整する運用になる
             ImGui::SliderFloat("EV100", &m_SceneExposureEV100, -8.0f, 20.0f, "%.2f");
+            // シーン全体の自発光の強度倍率。glTFのemissiveFactorは通常1.0以下に収まるため、
+            // G-BufferのエミッシブをHDR化(Buffer Precision=HDR)しただけでは照明器具の輝度が
+            // 1.0を超えられない。アセットを再オーサリングせずにHDRな自発光を作るための倍率
+            ImGui::SliderFloat("Emissive Intensity", &m_EmissiveIntensity, 0.0f, 64.0f, "%.2fx", ImGuiSliderFlags_Logarithmic);
         }
 
         if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
@@ -1637,6 +1922,8 @@ namespace Kurenai
             const auto now = std::chrono::steady_clock::now();
             const float renderDeltaTime = std::chrono::duration<float>(now - m_LastRenderFrameTime).count();
             m_LastRenderFrameTime = now;
+            // 自動露出の時間方向の順応で使う(次フレームのRender()が読む)
+            m_RenderDeltaTime = renderDeltaTime;
 
             // 昼夜サイクルの自動進行はUpdateスレッドではなくこちら(Renderスレッド)で行う。
             // m_TimeOfDay/m_TimeAutoAdvance/m_TimeAdvanceSpeedはImGuiパネル(RenderLightingUI、
@@ -1829,6 +2116,18 @@ namespace Kurenai
             RenderDebugViewUI();
             RenderLightingUI(frameState);
             RenderProfilerUI();
+        }
+
+        // バッファ精度の切り替え要求(RenderPostProcessUIのラジオボタン)をここで処理する。
+        // レンダーターゲットを破棄する前に、DX12がまだ実行中かもしれない直前数フレームの
+        // 描画コマンドを完了させる必要がある(LoadSceneがGPUリソースを破棄する前に
+        // WaitForGPUIdleを呼ぶのと同じ理由)。このフレームのGPUコマンドはまだ1つも
+        // 積んでいないため、ここで待っても待ち時間は前フレームぶんだけで済む
+        if (m_BufferPrecisionDirty)
+        {
+            m_BufferPrecisionDirty = false;
+            m_Device->WaitForGPUIdle();
+            CreateRenderTargets(m_RenderWidth, m_RenderHeight);
         }
 
         auto* commandList = m_Device->GetImmediateCommandList();
@@ -2076,7 +2375,8 @@ namespace Kurenai
 
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
-                                const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
+                                const ObjectConstants objectConstants =
+                                    MakeObjectConstants(instance, mesh, m_EmissiveIntensity);
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -2140,7 +2440,8 @@ namespace Kurenai
 
                         bindPipelineState(instance.IsMirrored);
 
-                        const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
+                        const ObjectConstants objectConstants =
+                            MakeObjectConstants(instance, mesh, m_EmissiveIntensity);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -2445,7 +2746,8 @@ namespace Kurenai
                 {
                     bindPipelineState(draw.Instance->IsMirrored);
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(*draw.Instance, *draw.Mesh);
+                    const ObjectConstants objectConstants =
+                        MakeObjectConstants(*draw.Instance, *draw.Mesh, m_EmissiveIntensity);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -2496,16 +2798,176 @@ namespace Kurenai
         // --- Tonemapパス: HDRのSceneColor(SSR有効時はSSR適用後)をLDRへ変換する。
         //     SSR等のHDR演算がすべて完了した後、Present直前の独立したステージとして常に実行する ---
         RHI::IRHITexture* hdrSceneColor = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
+
+        // --- 自動露出パス: SceneColorの輝度ヒストグラムから目標EV100を求め、時間方向に順応させる。
+        //     結果はm_ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
+        if (m_AutoExposureEnabled)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "AutoExposure",
+                .Reads = { hdrSceneColor },
+                .Writes = { m_ExposureTexture.get() },
+                .Execute = [this, hdrSceneColor](RHI::IRHICommandList* cmd)
+                {
+                    AutoExposureConstants autoExposureConstants{};
+                    autoExposureConstants.InputSize = { m_RenderWidth, m_RenderHeight };
+                    // Min>Maxのような不正な範囲だとヒストグラムのビン割りが破綻するため順序を保証する
+                    autoExposureConstants.MinEV100 = std::min(m_AutoExposureMinEV100, m_AutoExposureMaxEV100);
+                    autoExposureConstants.MaxEV100 = std::max(m_AutoExposureMinEV100, m_AutoExposureMaxEV100);
+                    autoExposureConstants.PreExposureEV100 = m_SceneExposureEV100;
+                    // 一時停止やシーン読み込み直後の巨大なdtで順応が飛ばないよう上限を設ける
+                    autoExposureConstants.DeltaTime = std::clamp(m_RenderDeltaTime, 0.0f, 0.1f);
+                    autoExposureConstants.AdaptationSpeedUp = m_AutoExposureSpeedUp;
+                    autoExposureConstants.AdaptationSpeedDown = m_AutoExposureSpeedDown;
+                    autoExposureConstants.LowPercentile = std::min(m_AutoExposureLowPercentile, m_AutoExposureHighPercentile);
+                    autoExposureConstants.HighPercentile = std::max(m_AutoExposureLowPercentile, m_AutoExposureHighPercentile);
+                    autoExposureConstants.ExposureCompensation = m_AutoExposureCompensation;
+                    cmd->UpdateBuffer(m_AutoExposureConstantBuffer.get(), &autoExposureConstants, sizeof(autoExposureConstants));
+
+                    // 1) ヒストグラムをゼロクリア
+                    cmd->SetComputePipelineState(m_AutoExposureClearPipelineState.get());
+                    cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
+                    cmd->Dispatch(1, 1, 1);
+
+                    // 2) SceneColorから輝度ヒストグラムを構築
+                    //    (UAVはDispatch直後に解除されるため毎回バインドし直す。IRHICommandList.h参照)
+                    cmd->SetComputePipelineState(m_AutoExposureHistogramPipelineState.get());
+                    cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
+                    cmd->SetComputeTexture(0, hdrSceneColor);
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
+                    cmd->Dispatch((m_RenderWidth + 15) / 16, (m_RenderHeight + 15) / 16, 1);
+
+                    // 3) 縮約して目標EV100を求め、前フレームの値から指数的に順応させて書き戻す
+                    cmd->SetComputePipelineState(m_AutoExposureResolvePipelineState.get());
+                    cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
+                    cmd->SetComputeUnorderedAccessTexture(1, m_ExposureTexture.get());
+                    cmd->Dispatch(1, 1, 1);
+                },
+            });
+        }
+
+        // --- ブルームパス: SceneColorから半解像度のピラミッドを作り、段階的にダウンサンプル→
+        //     3x3テントでアップサンプルしながら加算する。最終段(m_BloomUpTextures[0])をTonemapが読む ---
+        if (m_BloomEnabled && !m_BloomDownTextures.empty())
+        {
+            std::vector<RHI::IRHITexture*> bloomWrites;
+            bloomWrites.reserve(m_BloomDownTextures.size() + m_BloomUpTextures.size());
+            for (const auto& texture : m_BloomDownTextures)
+            {
+                bloomWrites.push_back(texture.get());
+            }
+            for (const auto& texture : m_BloomUpTextures)
+            {
+                bloomWrites.push_back(texture.get());
+            }
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "Bloom",
+                .Reads = { hdrSceneColor, m_ExposureTexture.get() },
+                .Writes = std::move(bloomWrites),
+                .Execute = [this, hdrSceneColor](RHI::IRHICommandList* cmd)
+                {
+                    const uint32_t levelCount = static_cast<uint32_t>(m_BloomDownTextures.size());
+
+                    BloomConstants bloomConstants{};
+                    bloomConstants.Threshold = m_BloomThreshold;
+                    bloomConstants.SoftKnee = m_BloomSoftKnee;
+                    // しきい値を「表示上の白」基準の直感的な値のままにするため、
+                    // ピラミッドの入力段で露出を反映する(Bloom.hlsl ExposureScale()参照)
+                    bloomConstants.UseAutoExposure = m_AutoExposureEnabled ? 1.0f : 0.0f;
+                    bloomConstants.PreExposureEV100 = m_SceneExposureEV100;
+
+                    // --- ダウンサンプル: SceneColor -> down[0] -> down[1] -> ... ---
+                    cmd->SetComputePipelineState(m_BloomDownsamplePipelineState.get());
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    for (uint32_t level = 0; level < levelCount; ++level)
+                    {
+                        const bool isFirst = (level == 0);
+                        RHI::IRHITexture* source = isFirst ? hdrSceneColor : m_BloomDownTextures[level - 1].get();
+                        const DirectX::XMUINT2 srcSize = isFirst
+                            ? DirectX::XMUINT2{ m_RenderWidth, m_RenderHeight }
+                            : m_BloomLevelSizes[level - 1];
+                        const DirectX::XMUINT2 dstSize = m_BloomLevelSizes[level];
+
+                        bloomConstants.SrcSize = srcSize;
+                        bloomConstants.DstSize = dstSize;
+                        // 最初のダウンサンプルだけKaris平均としきい値を適用する(理由はBloom.hlsl冒頭)
+                        bloomConstants.ApplyKarisAndThreshold = isFirst ? 1.0f : 0.0f;
+                        cmd->UpdateBuffer(m_BloomConstantBuffer.get(), &bloomConstants, sizeof(bloomConstants));
+
+                        cmd->SetComputeConstantBuffer(1, m_BloomConstantBuffer.get());
+                        cmd->SetComputeTexture(0, source);
+                        cmd->SetComputeTexture(2, m_ExposureTexture.get());
+                        // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+                        cmd->SetComputeUnorderedAccessTexture(0, m_BloomDownTextures[level].get());
+                        cmd->Dispatch((dstSize.x + 7) / 8, (dstSize.y + 7) / 8, 1);
+                    }
+
+                    // --- アップサンプル: 最下段から上へ、down[level] + tent(1段下) を up[level] へ書く ---
+                    cmd->SetComputePipelineState(m_BloomUpsamplePipelineState.get());
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    for (int32_t level = static_cast<int32_t>(levelCount) - 2; level >= 0; --level)
+                    {
+                        // 最下段の1つ上だけは、まだup[]が書かれていないのでdown[]の最下段を読む
+                        const bool readsDownChain = (level == static_cast<int32_t>(levelCount) - 2);
+                        RHI::IRHITexture* lower = readsDownChain
+                            ? m_BloomDownTextures[level + 1].get()
+                            : m_BloomUpTextures[level + 1].get();
+
+                        const DirectX::XMUINT2 srcSize = m_BloomLevelSizes[level + 1];
+                        const DirectX::XMUINT2 dstSize = m_BloomLevelSizes[level];
+
+                        bloomConstants.SrcSize = srcSize;
+                        bloomConstants.DstSize = dstSize;
+                        bloomConstants.ApplyKarisAndThreshold = 0.0f;
+                        cmd->UpdateBuffer(m_BloomConstantBuffer.get(), &bloomConstants, sizeof(bloomConstants));
+
+                        cmd->SetComputeConstantBuffer(1, m_BloomConstantBuffer.get());
+                        cmd->SetComputeTexture(0, m_BloomDownTextures[level].get());
+                        cmd->SetComputeTexture(1, lower);
+                        cmd->SetComputeUnorderedAccessTexture(0, m_BloomUpTextures[level].get());
+                        cmd->Dispatch((dstSize.x + 7) / 8, (dstSize.y + 7) / 8, 1);
+                    }
+                },
+            });
+        }
+
+        // Tonemapがブルームとして読むテクスチャ。無効時も有効なテクスチャを常にt2へバインドする
+        // 必要があるため、その場合はピラミッド最上段(内容は前フレームのまま)を渡し、
+        // BloomStrength=0で寄与しないようにする
+        RHI::IRHITexture* bloomResultTexture =
+            m_BloomUpTextures.empty() ? hdrSceneColor : m_BloomUpTextures[0].get();
+
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Tonemap",
-            .Reads = { hdrSceneColor },
+            .Reads = { hdrSceneColor, m_ExposureTexture.get(), bloomResultTexture },
             .RenderTargets = { m_TonemapTexture.get() },
-            .Execute = [this, &gbufferViewport, hdrSceneColor](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, hdrSceneColor, bloomResultTexture](RHI::IRHICommandList* cmd)
             {
+                TonemapConstants tonemapConstants{};
+                tonemapConstants.Curve = static_cast<int32_t>(m_TonemapCurve);
+                // 手動露出時: 露出はComputeSunLighting/MakeGPULightがライト強度へ事前乗算済みの
+                // ため、ここで追加の露出は掛けない
+                tonemapConstants.ExposureScale = 1.0f;
+                tonemapConstants.DitherStrength = m_DitherEnabled ? 1.0f : 0.0f;
+                tonemapConstants.UseAutoExposure = m_AutoExposureEnabled ? 1.0f : 0.0f;
+                tonemapConstants.PreExposureEV100 = m_SceneExposureEV100;
+                tonemapConstants.BloomStrength =
+                    (m_BloomEnabled && !m_BloomUpTextures.empty()) ? m_BloomStrength : 0.0f;
+                cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
+
                 cmd->SetViewport(gbufferViewport);
                 cmd->SetPipelineState(m_TonemapPipelineState.get());
+                cmd->SetConstantBuffer(1, m_TonemapConstantBuffer.get());
                 cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
                 cmd->SetTexture(0, hdrSceneColor);
+                cmd->SetTexture(1, m_ExposureTexture.get());
+                // t2は必ずバインドすること。SRVのバインドは上書きするまで維持されるため、
+                // ここを省くと直前のパスが張ったテクスチャをブルームとして読んでしまう
+                // (実際にG-Bufferのバッファを読んで画面全体が緑に転ぶ不具合を出した)
+                cmd->SetTexture(2, bloomResultTexture);
                 cmd->Draw(3, 0);
             },
         });
@@ -2610,6 +3072,16 @@ namespace Kurenai
             presentSourceWidth = kIBLBRDFLUTSize;
             presentSourceHeight = kIBLBRDFLUTSize;
             break;
+        case DebugView::Bloom:
+            // ピラミッド最上段(半解像度、HDR)。Mode 4でトーンマッピングしてから表示する
+            if (!m_BloomUpTextures.empty())
+            {
+                presentSourceTexture = m_BloomUpTextures[0].get();
+                presentMode = 4;
+                presentSourceWidth = m_BloomLevelSizes[0].x;
+                presentSourceHeight = m_BloomLevelSizes[0].y;
+            }
+            break;
         }
 
         PresentConstants presentConstants{};
@@ -2628,6 +3100,9 @@ namespace Kurenai
         }
         presentConstants.ArraySlice =
             static_cast<float>(std::clamp(m_ShadowDebugCascade, 0, static_cast<int32_t>(kCascadeCount) - 1));
+        // Finalの見た目は倍率の影響を受けてはならないため、デバッグ表示のときだけ倍率を掛ける
+        // (Gainはゼロ初期化のままだと0倍=真っ黒になるので、必ず明示的に設定すること)
+        presentConstants.Gain = (m_DebugView == DebugView::Final) ? 1.0f : m_DebugViewGain;
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
         // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する

@@ -40,7 +40,11 @@ cbuffer PresentConstants : register(b1)
     int Mode;
     float MipLevel;
     float ArraySlice;
-    float PresentPadding;
+    // デバッグ表示の輝度倍率。AO/GIバッファの間接拡散光のように値そのものが小さいバッファは
+    // 等倍表示ではほぼ真っ黒になり、8bit格納時のポスタリゼーションが何段あるのか判別できない。
+    // 色として表示するモード(0/3/4)にだけ適用する(深度・法線のように値の絶対値そのものに
+    // 意味があるモードへ掛けると、かえって読み取れなくなるため)
+    float Gain;
 };
 
 Texture2D SourceTexture : register(t0);
@@ -148,13 +152,14 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     if (Mode == 3)
     {
-        float ao = sourceColor.a;
+        float ao = sourceColor.a * Gain;
         return float4(ao, ao, ao, 1.0f);
     }
 
     if (Mode == 4)
     {
-        float3 color = sourceColor.rgb / (sourceColor.rgb + 1.0f);
+        float3 hdr = sourceColor.rgb * Gain;
+        float3 color = hdr / (hdr + 1.0f);
         color = pow(color, 1.0f / 2.2f);
         return float4(color, 1.0f);
     }
@@ -165,5 +170,5 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(depth, depth, depth, 1.0f);
     }
 
-    return float4(sourceColor.rgb, 1.0f);
+    return float4(sourceColor.rgb * Gain, 1.0f);
 }
