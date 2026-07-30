@@ -81,9 +81,17 @@ namespace Kurenai
         // 太陽光の向き・色・環境光を時刻(0〜24時)から計算する
         struct SunLighting
         {
-            DirectX::XMFLOAT3 Direction; // 光が進む向き(サーフェスに当たる方向)
+            // 支配ライト(太陽 or 月)の、光が進む向き(サーフェスに当たる方向)。
+            // カスケードシャドウの行列もこの向きから作ること
+            DirectX::XMFLOAT3 Direction;
             DirectX::XMFLOAT4 Color;
             DirectX::XMFLOAT4 Ambient; // rgb=環境光の色, a=昼度(0=夜,1=昼)
+            // 支配ライトが太陽か月か(ImGuiの表示とデバッグ用)
+            bool DominantIsSun;
+            // 手続き空の天頂輝度を正規化する際の目標照度[lx]。薄明係数と月明かりで変調済み
+            float SkyIlluminanceLux;
+            // 薄明係数(仰角[-15°,+15°] = 時刻でちょうど5-7時/17-19時)
+            float TwilightFactor;
             // 太陽が「ある」向き(= -Direction)。手続き空(SkyGenerate.hlsl)がPerez分布の
             // circumsolar項の基準に使う。光が進む向きと符号が逆なので取り違えないよう別に持つ
             DirectX::XMFLOAT3 SunPosition;
@@ -98,6 +106,11 @@ namespace Kurenai
         // 空光の比率(おおむね1〜2割)としても妥当な範囲であることの根拠として採用する。
         // 手続き空の天頂輝度の正規化目標にもなるためRender()からも参照する
         constexpr float kSkylightIlluminanceLux = 20000.0f;
+        // 満月が地表へ与える照度[lx]。太陽(10万lx)の約40万分の1という実測値。
+        // 月は常に反太陽方向にあるものとして扱う(=常に満月。満ち欠けは未実装の簡略化)
+        constexpr float kMoonIlluminanceLux = 0.25f;
+        // 満月時に夜空全体が散乱で持つ照度[lx]。地表照度0.25lxのうち空由来の寄与にあたる概算値
+        constexpr float kMoonSkyIlluminanceLux = 0.05f;
 
         // --- 手続き空(SkyGenerate.hlsl)と厳密に一致させる必要がある定数・式 ---
         // ここを変えるときは SkyGenerate.hlsl と Tools/generate_sky_cubemap.py も同時に直すこと。
@@ -245,14 +258,45 @@ namespace Kurenai
             const XMFLOAT3 sunDirection{ kSunriseHorizontal.x * cosHour, sinHour, kSunriseHorizontal.z * cosHour };
 
             SunLighting result{};
-            result.Direction = { -sunDirection.x, -sunDirection.y, -sunDirection.z };
 
-            // 6時〜7時でなめらかに夜→昼、17時〜18時でなめらかに昼→夜へ切り替える。
-            // この遷移カーブ自体は物理的な大気散乱シミュレーションではなく既存のアート的な遷移のまま
-            const float dayFactor = Smoothstep(6.0f, 7.0f, timeOfDayHours) * (1.0f - Smoothstep(17.0f, 18.0f, timeOfDayHours));
+            // === 昼夜の遷移係数を「時刻」ではなく「太陽の仰角」で決める ===
+            // sinHour がそのまま太陽仰角のサインになる(軌道が単位円のため)。
+            //
+            // 【なぜ時刻ベースをやめたか】従来は Smoothstep(6,7) * (1 - Smoothstep(17,18)) と
+            // 時刻で遷移させていた。この窓は仰角0度〜15度にちょうど一致しており偶然うまく
+            // 成立していたが、遷移を長くしようと窓を5-7時/17-19時へ広げると
+            // 5.5時(仰角-7.5度)で dayFactor≈0.156 となり、**地平線下の太陽が15,600 lx で照らす**
+            // ことになる。LightDirection.y > 0 となってカスケードシャドウが地面の下から
+            // 影を焼き、物体の裏側が照らされる。
+            //
+            // そこで遷移を2本に分ける:
+            //   SunFactor      … 直接光と影。仰角[0°,15°]。地平線下では厳密に0
+            //   TwilightFactor … 空の輝度と環境光。仰角[-15°,+15°] = 時刻でちょうど5-7時/17-19時
+            // 「2時間かけて遷移する」という見た目の要求は TwilightFactor が満たし、
+            // 直接光は物理的に成立する範囲(地平線より上)に留まる。
+            // 実際の市民薄明(太陽が地平線下0〜-6度)もこの構造になっている。
+            const float sunElevationSin = sinHour;
+            const float kSin15Deg = std::sin(XMConvertToRadians(15.0f));
+            const float sunFactor = Smoothstep(0.0f, kSin15Deg, sunElevationSin);
+            const float twilightFactor = Smoothstep(-kSin15Deg, kSin15Deg, sunElevationSin);
+            // 月は反太陽方向に置く(常に満月という既知の簡略化)。太陽が沈むと月が昇る
+            const float moonFactor = Smoothstep(0.0f, kSin15Deg, -sunElevationSin);
 
-            // 太陽の色味(ティント)。ピーク照度はkSunIlluminanceLuxが持つので、ここは相対比のみ
-            const XMFLOAT3 kSunColorTint{ 1.0f, 0.967f, 0.9f };
+            // 太陽の色味(ティント)。ピーク照度はkSunIlluminanceLuxが持つので、ここは相対比のみ。
+            // 仰角が低いほど暖色へ寄せる(大気の光路長が伸びて短波長が散乱で失われる現象の
+            // アート的な近似。朝焼け・夕焼けの赤みはこれで出る)
+            const XMFLOAT3 kSunColorTintHigh{ 1.0f, 0.967f, 0.9f };
+            const XMFLOAT3 kSunColorTintHorizon{ 1.0f, 0.55f, 0.30f };
+            const float warmth = 1.0f - sunFactor; // 仰角15度以上で0、地平線で1
+            const XMFLOAT3 kSunColorTint{
+                kSunColorTintHigh.x + (kSunColorTintHorizon.x - kSunColorTintHigh.x) * warmth,
+                kSunColorTintHigh.y + (kSunColorTintHorizon.y - kSunColorTintHigh.y) * warmth,
+                kSunColorTintHigh.z + (kSunColorTintHorizon.z - kSunColorTintHigh.z) * warmth,
+            };
+            // 満月の照度[lx]。太陽(10万lx)の40万分の1という実測値。
+            // 月光は分光的には太陽光とほぼ同じだが、暗所視で青く感じられる(プルキンエ現象)ため
+            // 慣例に従って寒色のティントを当てる(物理ではなくアート的な選択)
+            const XMFLOAT3 kMoonColorTint{ 0.75f, 0.85f, 1.0f };
             // 夜間の環境光は天文学的な実測値(星明かり~0.001lx、満月~0.1〜0.3lx)をそのまま使うと
             // ほぼ完全な黒になり視認性が失われるため、視認性確保のためのアート的な下限値のまま残す
             // (物理値ではないことを明記した上での意図的な妥協)
@@ -260,9 +304,31 @@ namespace Kurenai
 
             const float exposure = ComputeExposure(exposureEV100);
 
-            const float sunPeak = kSunIlluminanceLux * dayFactor * exposure;
-            result.Color = { kSunColorTint.x * sunPeak, kSunColorTint.y * sunPeak, kSunColorTint.z * sunPeak, 0.0f };
+            // === 平行光源1枠を太陽と月で共有し、支配的な方を選ぶ ===
+            // 太陽10万lx と満月0.25lx は40万倍違うので、両者の照度が入れ替わるのは
+            // 実質的に仰角0度ちょうどの一点だけ。そこでは SunFactor も MoonFactor も
+            // 厳密に0(=どちらの色もゼロ)なので、光源の向きが180度反転しても
+            // 直接光も影も一切見えず、ポップは原理的に発生しない。
+            // このためヒステリシスのような追加の対策は要らない
+            const float sunIlluminance = kSunIlluminanceLux * sunFactor;
+            const float moonIlluminance = kMoonIlluminanceLux * moonFactor;
+            result.DominantIsSun = (sunIlluminance >= moonIlluminance);
 
+            const float dominantPeak = (result.DominantIsSun ? sunIlluminance : moonIlluminance) * exposure;
+            const XMFLOAT3& dominantTint = result.DominantIsSun ? kSunColorTint : kMoonColorTint;
+            result.Color = {
+                dominantTint.x * dominantPeak, dominantTint.y * dominantPeak, dominantTint.z * dominantPeak, 0.0f
+            };
+            // 支配ライトの向き。月は反太陽方向なので符号が逆になる。
+            // **カスケードシャドウの行列もこの向きから作ること**(LightColorだけ切り替えると
+            // 月夜に太陽方向の影が残ってしまう)
+            result.Direction = result.DominantIsSun
+                ? XMFLOAT3{ -sunDirection.x, -sunDirection.y, -sunDirection.z }
+                : XMFLOAT3{ sunDirection.x, sunDirection.y, sunDirection.z };
+
+            // 非IBLフォールバック用の定数色アンビエント(Enable IBL 無効時のみ使われる)。
+            // 昼度は薄明係数をそのまま使う
+            const float dayFactor = twilightFactor;
             const float skyPeak = kSkylightIlluminanceLux * exposure;
             const XMFLOAT3 dayAmbient{ kSunColorTint.x * skyPeak, kSunColorTint.y * skyPeak, kSunColorTint.z * skyPeak };
             result.Ambient =
@@ -273,10 +339,17 @@ namespace Kurenai
                 dayFactor,
             };
 
-            // 手続き空(SkyGenerate.hlsl)へ渡す値。太陽が「ある」向きは光が進む向きの符号違い。
-            // 天頂輝度の正規化(ComputeSkyZenithScale)は1.6万回の積分になるため、
-            // ここではなく実際に空を焼くフレームでだけ計算する(Render()のSkyGenerateパス参照)
-            result.SunPosition = { -result.Direction.x, -result.Direction.y, -result.Direction.z };
+            // === 手続き空(SkyGenerate.hlsl)へ渡す値 ===
+            // 空が届ける照度は薄明係数で変調する。正規化(ComputeSkyZenithScale)により
+            // 「目標照度ちょうど」が保証されるようになったので、時刻による空の明るさは
+            // ここの係数だけで素直に制御できる。
+            // 夜側は月明かりで散乱する空の照度を足す(満月時の夜空はおよそ0.05lx相当)
+            result.SkyIlluminanceLux =
+                kSkylightIlluminanceLux * twilightFactor + kMoonSkyIlluminanceLux * moonFactor;
+            result.TwilightFactor = twilightFactor;
+            // 空生成が使うのは**常に太陽の位置**(月が支配的でもPerez分布の基準は太陽のまま)。
+            // result.Direction は支配ライトの向きなので、そこから逆算してはいけない
+            result.SunPosition = sunDirection;
             result.SkyExposure = exposure;
 
             return result;
@@ -2438,7 +2511,7 @@ namespace Kurenai
             // 1.6万回の評価になるため、実際に焼くこのタイミングでだけ計算する
             // (詳細と「なぜπ倍誤差が生じていたか」はComputeSkyZenithScaleのコメント参照)
             const float skyZenithLuminance =
-                ComputeSkyZenithScale(sunLighting.SunPosition, kSkylightIlluminanceLux) * sunLighting.SkyExposure;
+                ComputeSkyZenithScale(sunLighting.SunPosition, sunLighting.SkyIlluminanceLux) * sunLighting.SkyExposure;
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyGenerate",
