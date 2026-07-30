@@ -380,7 +380,13 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     ao = saturate(ao / float(sliceCount));
     ao = pow(ao, aoPower);
-    gi = saturate(gi / float(sliceCount) * intensity);
+    // 間接拡散光はHDR(DirectLightingパスの1.0を超える輝度を集めた値)なので[0,1]へ丸めない。
+    // AO/GIバッファがR16G16B16A16_Floatのとき、ここでsaturateすると明るい面からのバウンス光が
+    // 頭打ちになる。Legacy8bit(R8G8B8A8_UNorm)構成ではROPが書き込み時に自動でクランプするため、
+    // saturateを外してもそちらの挙動は変わらない。
+    // 負値だけは念のため落とす(SearchSliceの重み付けが負を生むことは無い想定だが、
+    // 負値がHDRバッファへ入るとブラーやブルームへ伝播して回復不能になるため)
+    gi = max(gi / float(sliceCount) * intensity, 0.0f);
 
     return float4(gi, ao);
 }

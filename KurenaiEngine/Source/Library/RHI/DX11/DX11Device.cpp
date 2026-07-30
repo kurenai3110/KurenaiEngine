@@ -40,6 +40,10 @@ namespace Kurenai::RHI
                 return DXGI_FORMAT_R16G16_FLOAT;
             case Format::R16G16B16A16_Float:
                 return DXGI_FORMAT_R16G16B16A16_FLOAT;
+            case Format::R11G11B10_Float:
+                return DXGI_FORMAT_R11G11B10_FLOAT;
+            case Format::R8G8B8A8_UNorm_SRGB:
+                return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
             case Format::R32G32B32A32_Float:
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
