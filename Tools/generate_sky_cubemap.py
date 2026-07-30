@@ -63,6 +63,12 @@ GROUND_TINT = np.array([0.10, 0.09, 0.08])
 GROUND_FADE_START_Y = -0.02
 GROUND_FADE_END_Y = -0.6
 
+# CIE快晴空係数(circumsolar項 c=10, d=-3)は太陽から45度離れると輝度が天頂の1/4程度まで落ちる。
+# 実際の大気は多重散乱で太陽から離れた領域もある程度明るいため、最低輝度を底上げする
+# (sky_color_upper と compute_zenith_scale の両方から参照するのでモジュール定数にしてある。
+#  SkyGenerate.hlsl の kRelativeLuminanceFloor と一致させること)
+RELATIVE_LUMINANCE_FLOOR = 0.45
+
 
 def compute_exposure(ev100):
     return 1.0 / (1.2 * (2.0 ** ev100))
@@ -140,7 +146,6 @@ def sky_color_upper(dirs, sun_dir, zenith_luminance):
     # カメラ視点(太陽の真下ではない方向)で「くすんだ暗い空」に見えてしまう(実機で指摘された
     # 見た目の問題)。RELATIVE_LUMINANCE_FLOORで最低輝度を底上げし、circumsolarのハイライトは
     # 保ったまま全体の見た目を明るくする(多重散乱を簡略化して表現するアート的な近似)
-    RELATIVE_LUMINANCE_FLOOR = 0.45
     relative = RELATIVE_LUMINANCE_FLOOR + (1.0 - RELATIVE_LUMINANCE_FLOOR) * relative
 
     # 水平線側への寄せを3乗カーブにし、高度がある程度あるうちは天頂色をほぼ保ったまま、
@@ -175,12 +180,68 @@ def build_face_array(face, sun_dir, zenith_luminance):
     return rgba.astype(np.float16)
 
 
+def compute_zenith_scale(sun_dir, target_illuminance_lux):
+    # 天頂輝度スケールを、上半球の余弦重み積分が目標照度に一致するよう正規化して求める。
+    #
+    # 照度E[lx]と輝度L[cd/m^2]は E = ∫L·cosθ dω の関係にあるので、SKY_ILLUMINANCE_LUXを
+    # そのまま天頂輝度として使うと、実際に届く照度は積分値の分だけずれる。しかもPerez分布の
+    # 形は太陽高度で変わるため、そのずれ自体が時刻とともに動く。
+    #   太陽高度90度 → 積分1.080 → 届く照度 21,600 lx
+    #   太陽高度45度 → 積分1.898 → 届く照度 37,960 lx
+    # 正規化すると常に目標値ちょうどになる。
+    #
+    # 補足: 「一様な空ならL=E/πなので従来はπ倍明るかった」という説明は誤り。積分には
+    # ティントの輝度成分(Rec.709でZENITH=0.526, HORIZON=0.783)も入るため、単位球の積分は
+    # π(3.14)ではなく1.08にしかならず、正午での補正は8%にすぎない。
+    #
+    # KurenaiEngine3D.cpp の ComputeSkyZenithScale と同じ結果になること。
+    # 一方だけ変えると、オフラインで焼いたDDSと手続き空の明るさが食い違う
+    theta_steps = 64
+    phi_steps = 256
+
+    theta_sun = np.arccos(np.clip(sun_dir[1], -1.0, 1.0))
+    cos_theta_sun = max(np.cos(theta_sun), 1e-3)
+
+    d_theta = (np.pi / 2.0) / theta_steps
+    d_phi = (2.0 * np.pi) / phi_steps
+
+    # 中点則。thetaは行、phiは列
+    theta = (np.arange(theta_steps) + 0.5) * d_theta
+    phi = (np.arange(phi_steps) + 0.5) * d_phi
+
+    cos_theta_raw = np.cos(theta)[:, None]
+    sin_theta = np.sin(theta)[:, None]
+    # SkyGenerate.hlslと同じクランプ(水平線でPerezが発散するため)
+    cos_theta = np.clip(np.maximum(cos_theta_raw, np.cos(np.radians(89.5))), 1e-3, 1.0)
+
+    dirs_x = sin_theta * np.cos(phi)[None, :]
+    dirs_y = np.broadcast_to(cos_theta_raw, (theta_steps, phi_steps))
+    dirs_z = sin_theta * np.sin(phi)[None, :]
+    cos_gamma = np.clip(dirs_x * sun_dir[0] + dirs_y * sun_dir[1] + dirs_z * sun_dir[2], -1.0, 1.0)
+    gamma = np.arccos(cos_gamma)
+
+    relative = perez_relative_luminance(cos_theta, gamma, cos_theta_sun, theta_sun)
+    relative = np.maximum(relative, 0.0)
+    relative = RELATIVE_LUMINANCE_FLOOR + (1.0 - RELATIVE_LUMINANCE_FLOOR) * relative
+
+    # 色味は天頂角にのみ依存する。照度は測光的な輝度で測るのでティントの輝度成分を重みに掛ける
+    horizon_blend = (1.0 - np.clip(cos_theta, 0.0, 1.0)) ** 3
+    tint = ZENITH_TINT[None, None, :] + (HORIZON_TINT - ZENITH_TINT)[None, None, :] * horizon_blend[..., None]
+    tint_luminance = tint[..., 0] * 0.2126 + tint[..., 1] * 0.7152 + tint[..., 2] * 0.0722
+
+    # dω = sinθ dθ dφ、余弦重みは cosθ
+    integral = np.sum(relative * tint_luminance * cos_theta_raw * sin_theta) * d_theta * d_phi
+    if integral < 1e-6:
+        return target_illuminance_lux
+    return target_illuminance_lux / integral
+
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
 
     exposure = compute_exposure(DEFAULT_EV100)
-    zenith_luminance = SKY_ILLUMINANCE_LUX * exposure
     sun_dir = sun_direction(DEFAULT_TIME_OF_DAY_HOURS, DEFAULT_SUN_AZIMUTH_DEGREES)
+    zenith_luminance = compute_zenith_scale(sun_dir, SKY_ILLUMINANCE_LUX) * exposure
 
     DDSD_CAPS = 0x1
     DDSD_HEIGHT = 0x2

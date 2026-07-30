@@ -87,9 +87,126 @@ namespace Kurenai
             // 太陽が「ある」向き(= -Direction)。手続き空(SkyGenerate.hlsl)がPerez分布の
             // circumsolar項の基準に使う。光が進む向きと符号が逆なので取り違えないよう別に持つ
             DirectX::XMFLOAT3 SunPosition;
-            // 手続き空へ渡す天頂輝度のスケール
-            float SkyZenithLuminance;
+            // このフレームの露出係数(ComputeExposureの結果)。手続き空の天頂輝度に掛ける
+            float SkyExposure;
         };
+
+        // 直射日光(正午・快晴)の照度[lx]。Lagarde & de Rousiers 2014の照度参照テーブルに
+        // 掲載される代表値
+        constexpr float kSunIlluminanceLux = 100000.0f;
+        // 空光(直射日光を除いた間接照度)の照度[lx]。同テーブルの曇天相当値を、直射日光に対する
+        // 空光の比率(おおむね1〜2割)としても妥当な範囲であることの根拠として採用する。
+        // 手続き空の天頂輝度の正規化目標にもなるためRender()からも参照する
+        constexpr float kSkylightIlluminanceLux = 20000.0f;
+
+        // --- 手続き空(SkyGenerate.hlsl)と厳密に一致させる必要がある定数・式 ---
+        // ここを変えるときは SkyGenerate.hlsl と Tools/generate_sky_cubemap.py も同時に直すこと。
+        // 3者がずれると、空の見た目・IBLの明るさ・オフライン参照実装が食い違う
+        constexpr float kSkyRelativeLuminanceFloor = 0.45f;
+        const DirectX::XMFLOAT3 kSkyZenithTint{ 0.30f, 0.55f, 0.95f };
+        const DirectX::XMFLOAT3 kSkyHorizonTint{ 0.65f, 0.80f, 1.0f };
+
+        // Perezの5係数関数(CIE快晴空、Perez et al. 1993 / Preetham et al. 1999 Table 1)
+        float PerezF(float cosTheta, float gamma)
+        {
+            constexpr float a = -1.0f;
+            constexpr float b = -0.32f;
+            constexpr float c = 10.0f;
+            constexpr float d = -3.0f;
+            constexpr float e = 0.45f;
+            const float cosGamma = std::cos(gamma);
+            return (1.0f + a * std::exp(b / cosTheta)) * (1.0f + c * std::exp(d * gamma) + e * cosGamma * cosGamma);
+        }
+
+        // 天頂輝度を1としたときの相対輝度。SkyGenerate.hlsl の PerezRelativeLuminance +
+        // kRelativeLuminanceFloor の適用と同じ結果になること
+        float SkyRelativeLuminance(float cosTheta, float gamma, float cosThetaSun, float thetaSun)
+        {
+            const float relative = std::max(PerezF(cosTheta, gamma) / PerezF(cosThetaSun, thetaSun), 0.0f);
+            return kSkyRelativeLuminanceFloor + (1.0f - kSkyRelativeLuminanceFloor) * relative;
+        }
+
+        // 空の天頂輝度スケールを、上半球の余弦重み積分が目標照度に一致するよう正規化して求める。
+        //
+        // 【なぜ必要か】従来は zenith_luminance = 空光の照度[lx] をそのまま天頂輝度として
+        // 使っていた。照度E[lx]と輝度L[cd/m^2]は E = ∫L·cosθ dω の関係にあるので、この扱いだと
+        // 実際に届く照度は「積分値の分だけ」ずれる。しかも Perez 分布の形は太陽高度で変わるため、
+        // そのずれ自体が時刻とともに動く。
+        //
+        // 実測(Tools/generate_sky_cubemap.py の compute_zenith_scale で確認):
+        //   太陽高度 90度 → 積分1.080 → 届く照度 21,600 lx
+        //   太陽高度 45度 → 積分1.898 → 届く照度 37,960 lx
+        //   太陽高度 15度 → 積分1.636 → 届く照度 32,720 lx
+        // つまり正規化前は空光の照度が1.8倍も勝手に変動していた。ここで正規化すると
+        // 常に目標値ちょうどになり、時刻による空の明るさは(Step3で入れる薄明係数のように)
+        // 意図した係数だけで制御できるようになる。
+        //
+        // 補足: 「一様な空なら L = E/π なので従来はπ倍明るかった」という説明は誤り。
+        // 積分にはティントの輝度成分(Rec.709でZENITH=0.526, HORIZON=0.783)も入るため、
+        // 単位球の積分はπ(3.14)ではなく1.08にしかならない。正午での補正は8%にすぎない。
+        //
+        // 積分は θ64分割 × φ256分割の中点則。1.6万回の評価で数十μs程度であり、
+        // 空を焼き直すタイミングでしか呼ばれないため負荷は問題にならない
+        float ComputeSkyZenithScale(const DirectX::XMFLOAT3& sunPosition, float targetIlluminanceLux)
+        {
+            using namespace DirectX;
+
+            constexpr uint32_t kThetaSteps = 64;
+            constexpr uint32_t kPhiSteps = 256;
+
+            const float thetaSun = std::acos(std::clamp(sunPosition.y, -1.0f, 1.0f));
+            const float cosThetaSun = std::max(std::cos(thetaSun), 1e-3f);
+
+            const float dTheta = (XM_PIDIV2) / static_cast<float>(kThetaSteps);
+            const float dPhi = (XM_2PI) / static_cast<float>(kPhiSteps);
+
+            double integral = 0.0;
+            for (uint32_t ti = 0; ti < kThetaSteps; ++ti)
+            {
+                // 中点則
+                const float theta = (static_cast<float>(ti) + 0.5f) * dTheta;
+                const float cosThetaRaw = std::cos(theta);
+                const float sinTheta = std::sin(theta);
+                // SkyGenerate.hlsl と同じクランプ(水平線でPerezが発散するため)
+                const float cosTheta = std::clamp(
+                    std::max(cosThetaRaw, std::cos(XMConvertToRadians(89.5f))), 1e-3f, 1.0f);
+
+                // 色味は天頂角にのみ依存する。照度は測光的な輝度で測るので、
+                // ティントの輝度成分(Rec.709)を重みに掛ける
+                const float horizonBlend = std::pow(1.0f - std::clamp(cosTheta, 0.0f, 1.0f), 3.0f);
+                const XMFLOAT3 tint{
+                    kSkyZenithTint.x + (kSkyHorizonTint.x - kSkyZenithTint.x) * horizonBlend,
+                    kSkyZenithTint.y + (kSkyHorizonTint.y - kSkyZenithTint.y) * horizonBlend,
+                    kSkyZenithTint.z + (kSkyHorizonTint.z - kSkyZenithTint.z) * horizonBlend,
+                };
+                const float tintLuminance = 0.2126f * tint.x + 0.7152f * tint.y + 0.0722f * tint.z;
+
+                for (uint32_t pi = 0; pi < kPhiSteps; ++pi)
+                {
+                    const float phi = (static_cast<float>(pi) + 0.5f) * dPhi;
+                    const XMFLOAT3 dir{ sinTheta * std::cos(phi), cosThetaRaw, sinTheta * std::sin(phi) };
+                    const float cosGamma = std::clamp(
+                        dir.x * sunPosition.x + dir.y * sunPosition.y + dir.z * sunPosition.z, -1.0f, 1.0f);
+                    const float gamma = std::acos(cosGamma);
+
+                    const float relative = SkyRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun);
+                    // dω = sinθ dθ dφ、余弦重みは cosθ
+                    integral += static_cast<double>(relative) * tintLuminance * cosThetaRaw * sinTheta * dTheta * dPhi;
+                }
+            }
+
+            // 積分がゼロ近傍になることは無い想定だが、ゼロ除算だけは防いでおく
+            if (integral < 1e-6)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "空の余弦重み積分が異常に小さいため天頂輝度の正規化をスキップします(積分値=" +
+                        std::to_string(integral) + ")");
+                return targetIlluminanceLux;
+            }
+
+            return targetIlluminanceLux / static_cast<float>(integral);
+        }
 
         // edge0とedge1の間をなめらかに0→1で補間する(edge0以下は0、edge1以上は1)
         float Smoothstep(float edge0, float edge1, float x)
@@ -136,12 +253,6 @@ namespace Kurenai
 
             // 太陽の色味(ティント)。ピーク照度はkSunIlluminanceLuxが持つので、ここは相対比のみ
             const XMFLOAT3 kSunColorTint{ 1.0f, 0.967f, 0.9f };
-            // 直射日光(正午・快晴)の照度[lx]。Lagarde & de Rousiers 2014の照度参照テーブルに
-            // 掲載される代表値
-            constexpr float kSunIlluminanceLux = 100000.0f;
-            // 空光(直射日光を除いた間接照度)の照度[lx]。同テーブルの曇天相当値を、直射日光に対する
-            // 空光の比率(おおむね1〜2割)としても妥当な範囲であることの根拠として採用する
-            constexpr float kSkylightIlluminanceLux = 20000.0f;
             // 夜間の環境光は天文学的な実測値(星明かり~0.001lx、満月~0.1〜0.3lx)をそのまま使うと
             // ほぼ完全な黒になり視認性が失われるため、視認性確保のためのアート的な下限値のまま残す
             // (物理値ではないことを明記した上での意図的な妥協)
@@ -163,10 +274,10 @@ namespace Kurenai
             };
 
             // 手続き空(SkyGenerate.hlsl)へ渡す値。太陽が「ある」向きは光が進む向きの符号違い。
-            // 天頂輝度はオフラインDDS(generate_sky_cubemap.py)と同じ
-            // 「空光の照度 × 露出」を使い、両者が同じ絵を出すようにしてある
+            // 天頂輝度の正規化(ComputeSkyZenithScale)は1.6万回の積分になるため、
+            // ここではなく実際に空を焼くフレームでだけ計算する(Render()のSkyGenerateパス参照)
             result.SunPosition = { -result.Direction.x, -result.Direction.y, -result.Direction.z };
-            result.SkyZenithLuminance = skyPeak;
+            result.SkyExposure = exposure;
 
             return result;
         }
@@ -2323,17 +2434,23 @@ namespace Kurenai
         //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否はm_SkyBakeDirtyで判定する ---
         if (usingProceduralSky && m_SkyBakeDirty)
         {
+            // 上半球の余弦重み積分が空光の照度に一致するよう天頂輝度を正規化する。
+            // 1.6万回の評価になるため、実際に焼くこのタイミングでだけ計算する
+            // (詳細と「なぜπ倍誤差が生じていたか」はComputeSkyZenithScaleのコメント参照)
+            const float skyZenithLuminance =
+                ComputeSkyZenithScale(sunLighting.SunPosition, kSkylightIlluminanceLux) * sunLighting.SkyExposure;
+
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyGenerate",
                 .Writes = { m_ProceduralSkyTexture.get() },
-                .Execute = [this, &sunLighting](RHI::IRHICommandList* cmd)
+                .Execute = [this, &sunLighting, skyZenithLuminance](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_SkyGeneratePipelineState.get());
                     for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                     {
                         SkyBakeConstants skyConstants{};
                         skyConstants.Face = face;
-                        skyConstants.ZenithLuminance = sunLighting.SkyZenithLuminance;
+                        skyConstants.ZenithLuminance = skyZenithLuminance;
                         skyConstants.SunDirection = {
                             sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
                         };
