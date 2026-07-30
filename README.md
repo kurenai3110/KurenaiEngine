@@ -14,7 +14,8 @@ KurenaiEngineLibrary.dllから公開しており、独自の描画パイプラ�
 IBL(スカイボックスから焼いたプリフィルタ済み鏡面による環境光。拡散イラディアンスもその最終ミップから得る)・
 スペキュラのマルチスキャッタリング・エネルギー補正・
 SSAO/SSIL・SSR・複数ライト(ポイント/スポット、カンデラ/ルクス単位)・半透明描画(専用フォワードパスで
-アルファブレンド合成)・トーンマッピング(AgX / ACES / Reinhardから選択)・自動露出・ブルームを備えた
+アルファブレンド合成)・トーンマッピング(AgX / ACES / Reinhardから選択)・自動露出・ブルーム・
+昼夜サイクル(GPUで手続き生成する空、月光、太陽の移動に追従するIBLの動的再ベイク)を備えた
 完結型3Dレンダラーです。
 `.gltf`/`.fbx`/`.obj`等のソースモデルは、付属のオフラインツール**KurenaiPacker.exe**で`.kmodel`へ事前変換して
 から使います(下記「アセットの準備(KurenaiPacker)」参照)。`KurenaiEngine2D`はスプライト・図形・
@@ -219,6 +220,8 @@ Sample3D.exe -dx12
 - **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能。拡散イラディアンスは既定でプリフィルタ済み鏡面の最終ミップから得ますが、検証用に専用のイラディアンスマップへ切り替えることもできます)。スペキュラBRDFのマルチスキャッタリング・エネルギー補正もここでON/OFFできます。トーンマッピングカーブ(AgX / ACES / Reinhard。既定はAgX)、出力ディザリング、ブルーム(強度・しきい値・ソフトニー)、自動露出(EV100の上下限・露出補正・明順応/暗順応の速度・測光に使うパーセンタイル範囲)もここで調整します。中間バッファの精度構成(HDR / Legacy 8bit)を切り替えて画質を比較することもできます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / IBL(プリフィルタ済み鏡面・BRDF LUT・検証用の拡散イラディアンス) / Bloom 等、各パス中間結果のデバッグ表示)。間接光のように値が小さいバッファを見るための輝度倍率(Debug View Gain)も指定できます
 - **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)・
+  Procedural Sky(GPUで手続き生成する空のON/OFF。無効にするとオフラインで焼いた`Sky.dds`に戻ります。
+  なお`.kscene`で`[Scene]Skybox`を明示しているシーンでは、このトグルに関わらず常にそのDDSが使われます)・
   EV100(実在の写真露出値。太陽/環境光/ポイント・スポットライトすべてに一様にかかるシーン全体の
   露出。自動露出が有効なときは、この値はバッファの数値レンジを決める基準値として働きます)・
   Emissive Intensity(シーン全体の自発光の強度倍率)を調整するほか、ポイント/スポットライトの
@@ -268,7 +271,7 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   `Tools/generate_light_test.py` で再生成できる
 - `Scenes/` — 手書きの`.kscene`(シーンファイル)。`Assets/`の外にあり**Git管理対象**
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
-- `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる
+- `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる。既定では空をGPUで手続き生成するため通常は使われず、Procedural Skyを無効にしたときのフォールバックと、`[Scene]Skybox`を明示するシーン向けのアセットとして残っている
 
 `.kmodel`/`.ktex`は元ファイルのタイムスタンプを見て自動生成・自動更新されることはありません
 (実行時のディスクキャッシュではなく、KurenaiPacker.exeが生成する配布可能なアセットのため)。
