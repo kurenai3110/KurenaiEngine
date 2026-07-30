@@ -2183,8 +2183,12 @@ ImGuiの「Parallax Correction」「Probe Blending」(<code>ProbeParams.z</code>
 <li>Boxの回転は<strong>Y軸まわりのみ</strong>。傾いた床・天井を持つ空間は想定していない</li>
 <li><strong>影響範囲の箱と視差補正の投影ボックスを分離できない</strong>(16.7節)。
 壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある</li>
-<li>更新はベイク(要求時)のみ。<strong>動的な物体は焼き直すまで反射に反映されない</strong>。
-リアルタイム更新(時間分割で1フレームに1面ずつ焼く等)は未実装</li>
+<li>更新モードはBaked / OnDemand / Realtimeの3種(16.10節)。ただし<strong>時間分割できているのは
+キャプチャだけで、畳み込みは分散できていない</strong>。キャプチャが0.02 msなのに対し畳み込みは
+約14 msあるため、Realtimeでも6フレームに1回そのスパイクが乗る</li>
+<li>OnDemandの変化検出が見るのは時刻・太陽・ライト・IBL強度・プローブ位置のみ。
+<strong>ジオメトリが動いても検出されない</strong>(モデルのTRSは<code>.kscene</code>で静的に決まり
+実行中に変わらないため、現状は検出対象に入れていない)</li>
 <li><strong>SSRのフォールバックはまだプローブを使っていない</strong>。<code>SSR.hlsl</code>は従来どおり、
 画面内で空へ到達した場合のみ生のスカイボックスを引く(<a href="#ssr">7章</a>)</li>
 <li>カスケードシャドウマップは<strong>カメラ</strong>視錐台に合わせてフィットされるため、カメラから遠く離れた
@@ -2244,7 +2248,18 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 <td>0=暖色の密閉室、1=空を含む明るい室。<strong>まったく別の環境が焼かれている</strong></td>
 <td>プローブごとの<code>TextureCubeArray</code>スライス(16.3節)</td>
 </tr>
+<tr>
+<td>上の表示のまま Post Processing の Enable IBL を切り、Update Mode を Baked &rarr; Realtime</td>
+<td>Bakedではキャプチャが<strong>1ピクセルも変わらず</strong>、Realtimeにすると追従して暗くなる</td>
+<td>更新モードの時間分割(16.10節)</td>
+</tr>
 </table>
+<p>
+最後の項目で<strong>ポイントライトではなく<code>Enable IBL</code>を動かしている</strong>のには理由がある。
+このシーンのポイントライトは6000 cdだが、EV100=15(晴天昼)の露出下では遮蔽なしの空IBLのほうが
+桁違いに強く、1灯どころか2灯とも消してもキャプチャがほとんど変化しない。
+更新モードの追従を見るには、キャプチャの明るさを支配している空IBLのほうを動かす必要がある。
+</p>
 
 <h4>シーン構成上の判断</h4>
 <ul>
@@ -2288,6 +2303,73 @@ Zファイティングは起きない)。
 変換していたので、<code>[Camera]</code>だけが例外だった。既存シーンは<code>Yaw = 0.0</code>しか
 使っておらず度とラジアンで同じ値になるため表面化していなかったもので、他と同じ変換を入れて修正した。
 </p>
+<h3>16.10 更新モード(Baked / OnDemand / Realtime)</h3>
+<p>
+プローブの中身はシーンのジオメトリ・ライト・時刻に依存するため、「いつ焼き直すか」は
+<strong>焼き直しのコスト</strong>と<strong>シーンの変化への追従</strong>のトレードオフになる。
+ImGuiの「Update Mode」で3方式を切り替えて比較できるようにしてある。
+</p>
+<table>
+<tr><th>モード</th><th>焼き直す契機</th><th>実行時コスト</th></tr>
+<tr><td><code>Baked</code></td><td>シーン読み込み時とBakeボタンのみ</td><td>ゼロ。ただし反射は焼いた時点で止まる</td></tr>
+<tr><td><code>OnDemand</code></td><td>上に加えて、焼き上がりに影響する状態が変わったフレーム</td><td>変化が無ければゼロ。変化したフレームは全プローブぶんのフルベイクが集中する</td></tr>
+<tr><td><code>Realtime</code></td><td>毎フレーム1面ずつ(6面揃うごとに畳み込み、プローブはラウンドロビン)</td><td>キャプチャは毎フレーム、畳み込みは6フレームに1回</td></tr>
+</table>
+
+<h4>OnDemandの変化検出</h4>
+<p>
+<code>ComputeProbeBakeSignature</code>が、焼き上がりに影響する値
+(時刻・太陽の方位角・太陽/シャドウの有効フラグ・IBL強度・全ライトのパラメータ・プローブ位置)から
+FNV-1aの64bitハッシュを作る。毎フレームの署名と、最後にフルベイクした時点の署名を突き合わせる。
+影響範囲(形状・半径・<code>BoxExtents</code>・<code>BlendDistance</code>)は<strong>含めない</strong> ――
+どこから撮るかを変えないため焼き直しが不要だからである(16.6節)。
+衝突しても起きるのは「本来必要な焼き直しを1回取りこぼす」だけなので、この程度の強度で足りる。
+</p>
+
+<h4>時間分割の状態機械</h4>
+<p>
+<code>m_ProbeRealtimeProbeIndex</code> / <code>m_ProbeRealtimeFace</code> が「次に焼く面」を指す。
+1フレームに1面をスクラッチのキューブマップへキャプチャし、6面揃った時点でそのプローブを畳み込んで
+配列スライスへ書き、次のプローブへ回る。<strong>畳み込みは6面が揃うまで走らない</strong>ため、
+その間スライスは前回の内容のまま表示され、描きかけのキューブが映り込むことはない。
+</p>
+<p>
+Realtimeは<strong>最低1回フルベイクが済んでいること</strong>(<code>m_ProbeBaked</code>)を前提にしている。
+シーン読み込み時に必ずフルベイクを要求しているのでこの前提は常に満たされ、
+一度も畳み込まれていない未初期化のスライスが表示されることはない。
+またフルベイクと時間分割はスクラッチのキューブマップを共有するため、
+<strong>同じフレームで両方を走らせてはならない</strong>(コード上も<code>else if</code>で排他にしてある)。
+</p>
+
+<h4>計測結果(Reflection Probe Test、プローブ2個・キャプチャ128²・DX11)</h4>
+<p>
+フルベイクはプローブごとに別パス(<code>ProbeBake0</code> / <code>ProbeBake1</code>)へ分けてあり、
+GPUプロファイラで1プローブぶんのコストが読める。各パスがスクラッチのキューブマップへ書くため、
+レンダーグラフのWrite-after-Write依存で登録順に直列化される。
+</p>
+<table>
+<tr><th>パス</th><th>GPU時間</th><th>頻度</th></tr>
+<tr><td><code>ProbeBake0</code> / <code>ProbeBake1</code></td><td>17.1 ms / 15.3 ms</td><td>フルベイクしたフレームのみ</td></tr>
+<tr><td><code>ProbeRealtimeCapture</code></td><td>0.018&ndash;0.020 ms</td><td>毎フレーム</td></tr>
+<tr><td><code>ProbeRealtimeConvolve</code></td><td>10.6&ndash;14.8 ms</td><td>6フレームに1回</td></tr>
+</table>
+<p>
+比較のため、同じフレームのGBufferパスは0.039 ms、Lightingパスは0.031 ms。
+</p>
+<p>
+<strong>この計測でいちばん重要な点は「キャプチャは実質ただ(0.02 ms)で、支配的なのは畳み込み(約14 ms)」
+ということである。</strong>つまり<strong>時間分割はキャプチャを分散させているだけで、畳み込みは
+分散できていない</strong>。Realtimeでも6フレームに1回は14 msのスパイクが乗るため、
+フルベイク32 msを1回浴びるか14 msを6フレームごとに浴びるかの違いでしかなく、
+「毎フレーム滑らかに追従する」状態には至っていない。
+</p>
+<p>
+畳み込みが重いのは、IBLと共有している<code>CSIrradiance</code>(半球積分)と
+<code>CSPrefilter</code>(ミップごとの重要度サンプリング)を、6面×(1+5ミップ)ぶん素直に回しているため。
+実用的な改善方向は、時間分割の粒度を「面」ではなく「畳み込みのディスパッチ」まで細かくするか、
+畳み込み自体のサンプル数・解像度を下げることになる。現時点では未実装。
+</p>
+
 </section>
 
 </main>

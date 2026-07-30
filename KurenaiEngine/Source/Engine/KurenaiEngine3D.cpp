@@ -1106,11 +1106,65 @@ namespace Kurenai
         m_ProbeDebugIndex = 0;
         m_ProbeBaked = false;
         m_ProbeBakeRequested = !m_ReflectionProbes.empty();
+        // Realtimeのラウンドロビンは先頭から仕切り直す(シーンが変わればプローブの数も並びも変わる)
+        m_ProbeRealtimeProbeIndex = 0;
+        m_ProbeRealtimeFace = 0;
 
         FrameCameraToModel();
 
         const wchar_t* apiName = (m_GraphicsAPI == GraphicsAPI::DX12) ? L"DX12" : L"DX11";
         m_Window->SetTitle(std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name);
+    }
+
+    uint64_t KurenaiEngine3D::ComputeProbeBakeSignature() const
+    {
+        // FNV-1a(64bit)。焼き上がりに影響する値だけを順に混ぜる。衝突しても起きるのは
+        // 「本来必要な焼き直しを1回取りこぼす」だけで破綻はしないため、この程度の強度で足りる
+        uint64_t hash = 1469598103934665603ull;
+        const auto mixBytes = [&hash](const void* data, size_t size)
+        {
+            const auto* bytes = static_cast<const unsigned char*>(data);
+            for (size_t i = 0; i < size; ++i)
+            {
+                hash ^= bytes[i];
+                hash *= 1099511628211ull;
+            }
+        };
+        const auto mixFloat = [&mixBytes](float value) { mixBytes(&value, sizeof(value)); };
+        const auto mixBool = [&mixBytes](bool value) { const unsigned char v = value ? 1u : 0u; mixBytes(&v, sizeof(v)); };
+
+        // 太陽と昼夜サイクル。ProbeCapture.hlslは共有のFrameConstantsから太陽の向き・色を読むため、
+        // 時刻を動かすと焼き上がりが変わる
+        mixFloat(m_TimeOfDay);
+        mixFloat(m_SunAzimuthDegrees);
+        mixBool(m_SunEnabled);
+        mixBool(m_ShadowEnabled);
+        // キャプチャ内の環境項はグローバルIBLを引くため、その強度も焼き上がりに影響する
+        mixFloat(m_IBLEnabled ? m_IBLIntensity : 0.0f);
+
+        // ライトは構造体ごとダンプすると詰め物(padding)の未初期化バイトを拾い得るため、
+        // 使うフィールドだけを明示的に混ぜる
+        for (const Assets::Light& light : m_Lights)
+        {
+            mixBytes(&light.Type, sizeof(light.Type));
+            for (int i = 0; i < 3; ++i) mixFloat(light.Position[i]);
+            for (int i = 0; i < 3; ++i) mixFloat(light.Direction[i]);
+            for (int i = 0; i < 3; ++i) mixFloat(light.Color[i]);
+            mixFloat(light.Intensity);
+            mixFloat(light.Range);
+            mixFloat(light.SpotInnerConeAngle);
+            mixFloat(light.SpotOuterConeAngle);
+            mixBool(light.Enabled);
+        }
+
+        // プローブの位置はキャプチャ地点そのものなので含める(影響範囲は含めない。
+        // 形状・半径・ブレンド距離を変えてもどこから撮るかは変わらないため)
+        for (const Assets::ReflectionProbe& probe : m_ReflectionProbes)
+        {
+            for (int i = 0; i < 3; ++i) mixFloat(probe.Position[i]);
+        }
+
+        return hash;
     }
 
     void KurenaiEngine3D::FrameCameraToModel()
@@ -1675,10 +1729,34 @@ namespace Kurenai
         {
             ImGui::SetTooltip("Fades weights over Blend Distance inward from the volume border.\nOff: uses only the nearest probe, leaving a seam at the border.");
         }
+        // 更新モード(16.10節)。焼き直しのコストとシーンの変化への追従はトレードオフの関係にあり、
+        // Profilerパネルの ProbeBakeN / ProbeRealtimeCapture / ProbeRealtimeConvolve と
+        // 見比べながら選べるようにしてある
+        int updateModeIndex = static_cast<int>(m_ProbeUpdateMode);
+        const char* const updateModeNames[] = { "Baked", "On Demand", "Realtime (time-sliced)" };
+        if (ImGui::Combo("Update Mode", &updateModeIndex, updateModeNames, IM_ARRAYSIZE(updateModeNames)))
+        {
+            m_ProbeUpdateMode = static_cast<ProbeUpdateMode>(updateModeIndex);
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "Baked:     bake on scene load and the Bake button only.\n"
+                "On Demand: also re-bake when the sun, time of day or lights change.\n"
+                "Realtime:  also bake one cube face per frame, round-robin over probes.");
+        }
+
         ImGui::Text("Probes: %zu / %u", m_ReflectionProbes.size(), kMaxReflectionProbes);
         if (!m_ProbeBaked && !m_ReflectionProbes.empty())
         {
             ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "Not baked yet");
+        }
+        else if (m_ProbeUpdateMode == ProbeUpdateMode::Realtime && !m_ReflectionProbes.empty())
+        {
+            // 今どのプローブの何面目を焼いているか。1周にプローブ数×6フレームかかるので、
+            // 「変化が反射へ現れるまでの遅れ」がこの進行から読める
+            ImGui::Text(
+                "Updating probe %u, face %u / %u", m_ProbeRealtimeProbeIndex, m_ProbeRealtimeFace + 1, kCubeFaceCount);
         }
 
         ImGui::BeginChild("ProbeList", ImVec2(0.0f, 90.0f), true);
@@ -2347,157 +2425,239 @@ namespace Kurenai
             });
         }
 
-        // --- 反射プローブのベイクパス(15章) ---
-        // シーン読み込み時とImGuiのBakeボタンで要求されたときだけ実行する。プローブの中身は
-        // シーンのジオメトリ・ライト・時刻に依存するため、スカイボックス由来のIBLのような
-        // 「起動時に一度だけ」では足りない。
-        // Readsにシャドウマップとグローバルの畳み込み結果を挙げることで、レンダーグラフが
-        // このパスをシャドウパス・IBLBakeパスより後ろへ順序付ける
-        if (m_ProbeBakeRequested && !m_ReflectionProbes.empty())
+        // --- 反射プローブの更新(15章・16.10節) ---
+        // 更新モードに応じて「フルベイク(全プローブの全面を1フレームで焼く)」か
+        // 「時間分割(1フレームに1面だけ焼く)」のどちらかを実行する。両者はスクラッチの
+        // キューブマップ(m_ProbeRadianceCube)を共有するため、同じフレームで両方を走らせてはならない
+
+        const DirectX::XMMATRIX probeFaceProjection =
+            ComputeCubeFaceProjection(frameState.Camera.GetNearZ(), frameState.Camera.GetFarZ());
+
+        // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
+        // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
+        const auto captureProbeFace =
+            [this, &constants, probeFaceProjection](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "ProbeBake",
-                .Reads = {
-                    m_ShadowCascades[0].get(), m_ShadowCascades[1].get(), m_ShadowCascades[2].get(), m_ShadowCascades[3].get(),
-                    m_SkyboxTexture.get(), m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
-                },
-                .Writes = {
-                    m_ProbeCaptureColor.get(), m_ProbeCaptureDepth.get(), m_ProbeRadianceCube.get(),
-                    m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(),
-                },
-                .Execute = [this, &frameState, &constants](RHI::IRHICommandList* cmd)
+            const Assets::ReflectionProbe& probe = m_ReflectionProbes[probeIndex];
+            const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
+
+            RHI::Viewport probeViewport;
+            probeViewport.Width = static_cast<float>(kProbeCaptureSize);
+            probeViewport.Height = static_cast<float>(kProbeCaptureSize);
+            RHI::IRHITexture* const captureTargets[] = { m_ProbeCaptureColor.get() };
+
+            // 太陽・カスケード・ライト数・IBL設定は共有のFrameConstantsをそのまま使い、
+            // 視点に関わる2つだけをプローブのものへ差し替える(ProbeCapture.hlsl冒頭参照)。
+            // Viewはカメラのまま残す(カスケード選択の深度がカメラ視錐台基準のため)
+            FrameConstants captureConstants = constants;
+            const DirectX::XMMATRIX faceViewProj = ComputeCubeFaceView(probePosition, face) * probeFaceProjection;
+            DirectX::XMStoreFloat4x4(&captureConstants.ViewProj, DirectX::XMMatrixTranspose(faceViewProj));
+            captureConstants.CameraPosition = { probePosition.x, probePosition.y, probePosition.z, 0.0f };
+            cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
+
+            cmd->SetRenderTargets(captureTargets, 1, m_ProbeCaptureDepth.get());
+            cmd->SetViewport(probeViewport);
+            cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
+            // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする。コピー側はこの0を
+            // 「何も描かれなかった=スカイ」の判定に使う
+            cmd->ClearDepth(0.0f);
+
+            cmd->SetPipelineState(m_ProbeCapturePipelineState.get());
+            cmd->SetConstantBuffer(0, m_ProbeCaptureConstantBuffer.get());
+            cmd->SetSamplerSet(m_MaterialSamplers.get());
+
+            for (const auto& instance : m_Scene.Instances)
+            {
+                for (const auto& mesh : instance.Model.Meshes)
                 {
-                    RHI::Viewport probeViewport;
-                    probeViewport.Width = static_cast<float>(kProbeCaptureSize);
-                    probeViewport.Height = static_cast<float>(kProbeCaptureSize);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
+                    cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                    cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
-                    const DirectX::XMMATRIX faceProjection =
-                        ComputeCubeFaceProjection(frameState.Camera.GetNearZ(), frameState.Camera.GetFarZ());
-                    RHI::IRHITexture* const captureTargets[] = { m_ProbeCaptureColor.get() };
+                    cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                    cmd->SetIndexBuffer(mesh.IndexBuffer.get());
 
-                    for (size_t probeIndex = 0; probeIndex < m_ReflectionProbes.size(); ++probeIndex)
+                    // テクスチャは必ずスロット0から順に、1回の描画ぶんをまとめてバインドする。
+                    // DX12はSetTexture(0, ...)を「新しい描画の開始」とみなしてSRVディスクリプタ
+                    // テーブルのブロックを割り当て直すため、ループの外で4番以降だけを先に
+                    // バインドしても次のブロックへは引き継がれない(=シャドウマップ・IBLが
+                    // 未初期化のディスクリプタのままになり、DX12だけプローブが真っ黒に焼ける)。
+                    // 半透明フォワードパスが同じ理由で同じ順序にしている
+                    cmd->SetTexture(0, mesh.BaseColorTexture);
+                    cmd->SetTexture(1, mesh.NormalTexture);
+                    cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
+                    cmd->SetTexture(3, mesh.EmissiveTexture);
+                    for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
                     {
-                        const Assets::ReflectionProbe& probe = m_ReflectionProbes[probeIndex];
-                        const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
-                        const uint32_t cubeIndex = static_cast<uint32_t>(probeIndex);
-
-                        // --- 6面をキャプチャし、スクラッチのキューブマップへ組み上げる ---
-                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
-                        {
-                            // 太陽・カスケード・ライト数・IBL設定は共有のFrameConstantsをそのまま使い、
-                            // 視点に関わる2つだけをプローブのものへ差し替える(ProbeCapture.hlsl冒頭参照)。
-                            // Viewはカメラのまま残す(カスケード選択の深度がカメラ視錐台基準のため)
-                            FrameConstants captureConstants = constants;
-                            const DirectX::XMMATRIX faceViewProj = ComputeCubeFaceView(probePosition, face) * faceProjection;
-                            DirectX::XMStoreFloat4x4(&captureConstants.ViewProj, DirectX::XMMatrixTranspose(faceViewProj));
-                            captureConstants.CameraPosition = { probePosition.x, probePosition.y, probePosition.z, 0.0f };
-                            cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
-
-                            cmd->SetRenderTargets(captureTargets, 1, m_ProbeCaptureDepth.get());
-                            cmd->SetViewport(probeViewport);
-                            cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
-                            // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする。コピー側はこの0を
-                            // 「何も描かれなかった=スカイ」の判定に使う
-                            cmd->ClearDepth(0.0f);
-
-                            cmd->SetPipelineState(m_ProbeCapturePipelineState.get());
-                            cmd->SetConstantBuffer(0, m_ProbeCaptureConstantBuffer.get());
-                            cmd->SetSamplerSet(m_MaterialSamplers.get());
-
-                            for (const auto& instance : m_Scene.Instances)
-                            {
-                                for (const auto& mesh : instance.Model.Meshes)
-                                {
-                                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh);
-                                    cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                                    cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
-
-                                    cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                                    cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-
-                                    // テクスチャは必ずスロット0から順に、1回の描画ぶんをまとめてバインドする。
-                                    // DX12はSetTexture(0, ...)を「新しい描画の開始」とみなしてSRVディスクリプタ
-                                    // テーブルのブロックを割り当て直すため、ループの外で4番以降だけを先に
-                                    // バインドしても次のブロックへは引き継がれない(=シャドウマップ・IBLが
-                                    // 未初期化のディスクリプタのままになり、DX12だけプローブが真っ黒に焼ける)。
-                                    // 半透明フォワードパスが同じ理由で同じ順序にしている
-                                    cmd->SetTexture(0, mesh.BaseColorTexture);
-                                    cmd->SetTexture(1, mesh.NormalTexture);
-                                    cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
-                                    cmd->SetTexture(3, mesh.EmissiveTexture);
-                                    for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
-                                    {
-                                        cmd->SetTexture(4 + cascade, m_ShadowCascades[cascade].get());
-                                    }
-                                    cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
-                                    cmd->SetTexture(9, m_IrradianceTexture.get());
-                                    cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
-                                    cmd->SetTexture(11, m_BRDFLUTTexture.get());
-
-                                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
-                                }
-                            }
-
-                            // 描き終えたカラー/深度をコンピュートシェーダーからSRVとして読むため、
-                            // 先にレンダーターゲットのバインドを外す(D3D11は同一リソースの
-                            // RTV/DSVとSRVの同時バインドを許さず、SRV側がnullに落とされる)
-                            cmd->SetRenderTargets(nullptr, 0, nullptr);
-
-                            IBLFaceConstants faceConstants{};
-                            faceConstants.Face = face;
-                            cmd->SetComputePipelineState(m_ProbeCubeCopyPipelineState.get());
-                            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-                            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
-                            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
-                            cmd->SetComputeTexture(0, m_SkyboxTexture.get());
-                            cmd->SetComputeTexture(1, m_ProbeCaptureColor.get());
-                            cmd->SetComputeTexture(2, m_ProbeCaptureDepth.get());
-                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeRadianceCube.get(), face, 0, 0);
-                            cmd->Dispatch((kProbeCaptureSize + 7) / 8, (kProbeCaptureSize + 7) / 8, 1);
-                        }
-
-                        // --- 組み上がったキューブマップをIBLとまったく同じ手順で畳み込む ---
-                        // 入力(スクラッチのキューブマップ)が違うだけで、シェーダーはIBLBakeパスと共通
-                        cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
-                        cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
-                        cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
-                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
-                        {
-                            IBLFaceConstants faceConstants{};
-                            faceConstants.Face = face;
-                            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-                            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
-                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeIrradianceArray.get(), face, 0, cubeIndex);
-                            cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
-                        }
-
-                        cmd->SetComputePipelineState(m_PrefilterPipelineState.get());
-                        cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
-                        cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
-                        for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
-                        {
-                            const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
-                            const float roughness = static_cast<float>(mip) / static_cast<float>(kIBLPrefilterMipLevels - 1);
-                            for (uint32_t face = 0; face < kCubeFaceCount; ++face)
-                            {
-                                IBLFaceConstants faceConstants{};
-                                faceConstants.Face = face;
-                                faceConstants.Roughness = roughness;
-                                cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-                                cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
-                                cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbePrefilteredArray.get(), face, mip, cubeIndex);
-                                cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
-                            }
-                        }
+                        cmd->SetTexture(4 + cascade, m_ShadowCascades[cascade].get());
                     }
-                },
-            });
+                    cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+                    cmd->SetTexture(9, m_IrradianceTexture.get());
+                    cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
+                    cmd->SetTexture(11, m_BRDFLUTTexture.get());
+
+                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                }
+            }
+
+            // 描き終えたカラー/深度をコンピュートシェーダーからSRVとして読むため、
+            // 先にレンダーターゲットのバインドを外す(D3D11は同一リソースの
+            // RTV/DSVとSRVの同時バインドを許さず、SRV側がnullに落とされる)
+            cmd->SetRenderTargets(nullptr, 0, nullptr);
+
+            IBLFaceConstants faceConstants{};
+            faceConstants.Face = face;
+            cmd->SetComputePipelineState(m_ProbeCubeCopyPipelineState.get());
+            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+            cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+            cmd->SetComputeTexture(1, m_ProbeCaptureColor.get());
+            cmd->SetComputeTexture(2, m_ProbeCaptureDepth.get());
+            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeRadianceCube.get(), face, 0, 0);
+            cmd->Dispatch((kProbeCaptureSize + 7) / 8, (kProbeCaptureSize + 7) / 8, 1);
+        };
+
+        // 組み上がったスクラッチのキューブマップを、IBLとまったく同じ手順で畳み込んで
+        // プローブのスライスへ書き込む。入力が違うだけでシェーダーはIBLBakeパスと共通
+        const auto convolveProbe = [this](RHI::IRHICommandList* cmd, size_t probeIndex)
+        {
+            const uint32_t cubeIndex = static_cast<uint32_t>(probeIndex);
+
+            cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
+            cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
+            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+            for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+            {
+                IBLFaceConstants faceConstants{};
+                faceConstants.Face = face;
+                cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeIrradianceArray.get(), face, 0, cubeIndex);
+                cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
+            }
+
+            cmd->SetComputePipelineState(m_PrefilterPipelineState.get());
+            cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
+            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+            for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
+            {
+                const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
+                const float roughness = static_cast<float>(mip) / static_cast<float>(kIBLPrefilterMipLevels - 1);
+                for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                {
+                    IBLFaceConstants faceConstants{};
+                    faceConstants.Face = face;
+                    faceConstants.Roughness = roughness;
+                    cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                    cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                    cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbePrefilteredArray.get(), face, mip, cubeIndex);
+                    cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
+                }
+            }
+        };
+
+        // キャプチャパスがReadsにシャドウマップとグローバルの畳み込み結果を挙げることで、
+        // レンダーグラフがこれらをシャドウパス・IBLBakeパスより後ろへ順序付ける
+        const std::vector<RHI::IRHITexture*> probeCaptureReads = {
+            m_ShadowCascades[0].get(), m_ShadowCascades[1].get(), m_ShadowCascades[2].get(), m_ShadowCascades[3].get(),
+            m_SkyboxTexture.get(), m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
+        };
+        const size_t probeCount = m_ReflectionProbes.size();
+
+        // OnDemandは、焼き上がりに影響する状態(時刻・太陽・ライト)が変わったフレームだけ焼き直す。
+        // 一度も焼けていない間はシーン読み込み時の要求が既に立っているのでここでは何もしない
+        if (m_ProbeUpdateMode == ProbeUpdateMode::OnDemand && probeCount > 0 && m_ProbeBaked &&
+            ComputeProbeBakeSignature() != m_ProbeBakeSignature)
+        {
+            m_ProbeBakeRequested = true;
+        }
+
+        if (m_ProbeBakeRequested && probeCount > 0)
+        {
+            // --- フルベイク: 全プローブの6面を1フレームで焼く ---
+            // プローブごとに別パスへ分けることで、GPUプロファイラで1プローブぶんのコストを読める。
+            // 各パスがm_ProbeRadianceCubeへ書くため、レンダーグラフのWrite-after-Write依存で
+            // 登録順に直列化される(スクラッチを共有しても取り違えは起きない)
+            for (size_t probeIndex = 0; probeIndex < probeCount; ++probeIndex)
+            {
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "ProbeBake" + std::to_string(probeIndex),
+                    .Reads = probeCaptureReads,
+                    .Writes = {
+                        m_ProbeCaptureColor.get(), m_ProbeCaptureDepth.get(), m_ProbeRadianceCube.get(),
+                        m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(),
+                    },
+                    .Execute = [&captureProbeFace, &convolveProbe, probeIndex](RHI::IRHICommandList* cmd)
+                    {
+                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                        {
+                            captureProbeFace(cmd, probeIndex, face);
+                        }
+                        convolveProbe(cmd, probeIndex);
+                    },
+                });
+            }
 
             m_ProbeBakeRequested = false;
             // このフレームの描画時点ではまだ焼き上がっていない(同じコマンドリスト内でこの後の
             // Lightingパスが読むのは問題ないが、gpuProbesは既に確定済み)。次フレームから
             // プローブが有効になるよう、ここでフラグだけ立てる
             m_ProbeBaked = true;
+            m_ProbeBakeSignature = ComputeProbeBakeSignature();
+            // 全プローブが今焼けたので、時間分割は先頭から仕切り直す
+            m_ProbeRealtimeProbeIndex = 0;
+            m_ProbeRealtimeFace = 0;
+        }
+        else if (m_ProbeUpdateMode == ProbeUpdateMode::Realtime && probeCount > 0 && m_ProbeBaked)
+        {
+            // --- 時間分割: 1フレームにつき1面だけ焼き、6面揃った時点で畳み込んで次のプローブへ回る ---
+            // 畳み込みは6面が揃うまで走らないため、その間プローブのスライスは前回の内容のまま
+            // 表示され続ける(描きかけのキューブが映り込むことはない)。
+            // m_ProbeBakedがtrueであること、つまり最低1回フルベイクが済んでいることが前提
+            if (m_ProbeRealtimeProbeIndex >= probeCount)
+            {
+                m_ProbeRealtimeProbeIndex = 0;
+                m_ProbeRealtimeFace = 0;
+            }
+            const size_t realtimeProbe = m_ProbeRealtimeProbeIndex;
+            const uint32_t realtimeFace = m_ProbeRealtimeFace;
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "ProbeRealtimeCapture",
+                .Reads = probeCaptureReads,
+                .Writes = { m_ProbeCaptureColor.get(), m_ProbeCaptureDepth.get(), m_ProbeRadianceCube.get() },
+                .Execute = [&captureProbeFace, realtimeProbe, realtimeFace](RHI::IRHICommandList* cmd)
+                {
+                    captureProbeFace(cmd, realtimeProbe, realtimeFace);
+                },
+            });
+
+            if (realtimeFace + 1 == kCubeFaceCount)
+            {
+                // 畳み込みだけを別パスにしてあるのは、6フレームに1回だけ乗るこのコストを
+                // 毎フレームのキャプチャと分けて計測できるようにするため。
+                // Readsにスクラッチのキューブマップがあるのでキャプチャパスのあとに順序付けられる
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "ProbeRealtimeConvolve",
+                    .Reads = { m_ProbeRadianceCube.get() },
+                    .Writes = { m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get() },
+                    .Execute = [&convolveProbe, realtimeProbe](RHI::IRHICommandList* cmd)
+                    {
+                        convolveProbe(cmd, realtimeProbe);
+                    },
+                });
+            }
+
+            m_ProbeRealtimeFace = realtimeFace + 1;
+            if (m_ProbeRealtimeFace >= kCubeFaceCount)
+            {
+                m_ProbeRealtimeFace = 0;
+                m_ProbeRealtimeProbeIndex = static_cast<uint32_t>((realtimeProbe + 1) % probeCount);
+            }
+            // 常に焼き直しているのでOnDemandの署名も追随させておく。こうしておかないと
+            // Realtimeから切り替えた直後に不要なフルベイクが1回走る
+            m_ProbeBakeSignature = ComputeProbeBakeSignature();
         }
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---

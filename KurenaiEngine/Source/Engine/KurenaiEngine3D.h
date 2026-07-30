@@ -408,6 +408,33 @@ namespace Kurenai
         int32_t m_ProbeDebugIndex = 0;
         int32_t m_ProbePrefilterDebugMipLevel = 0;
 
+        // プローブの更新モード。焼き直しのコストと「シーンの変化への追従」のどちらを取るかの選択で、
+        // ImGuiで切り替えて負荷と品質を比較できるようにしてある(16.10節)
+        enum class ProbeUpdateMode
+        {
+            // シーン読み込み時とImGuiのBakeボタンのときだけ焼く。実行時コストはゼロだが、
+            // ライトや時刻を動かしても反射は焼いた時点のまま止まる
+            Baked,
+            // 上に加えて、焼き上がりに影響する状態(時刻・太陽・ライト)の変化を検出して自動で焼き直す。
+            // 変化していないフレームのコストはゼロだが、変化したフレームは全プローブぶんの
+            // フルベイクが1フレームに集中する
+            OnDemand,
+            // 上に加えて、毎フレーム1面ずつ焼き直す。6面揃った時点でそのプローブを畳み込み、
+            // 次のプローブへ回る(ラウンドロビン)。全プローブを毎フレーム焼くとドローコールが
+            // プローブ数×6倍になり非現実的なため、時間分割を既定の実装方式にしている
+            Realtime,
+        };
+        ProbeUpdateMode m_ProbeUpdateMode = ProbeUpdateMode::Baked;
+        // Realtimeの進行状態。次に焼くプローブ番号と面番号
+        uint32_t m_ProbeRealtimeProbeIndex = 0;
+        uint32_t m_ProbeRealtimeFace = 0;
+        // OnDemandの変化検出用。最後にフルベイクを発行した時点の状態の署名。
+        // 毎フレームの署名と突き合わせ、変わっていれば焼き直しを要求する
+        uint64_t m_ProbeBakeSignature = 0;
+        // 焼き上がりに影響する状態(時刻・太陽・シャドウ・IBL強度・全ライト)から署名を作る。
+        // 影響範囲(形状・半径・ブレンド距離)はキャプチャ内容を変えないため含めない
+        uint64_t ComputeProbeBakeSignature() const;
+
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = 12.0f;
         bool m_TimeAutoAdvance = false;
