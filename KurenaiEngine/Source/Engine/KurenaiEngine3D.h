@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 
+#include "EngineDefaults.h"
 #include "KurenaiEngineBase.h"
 #include "KurenaiTypes.h"
 
@@ -21,6 +22,18 @@
 
 #pragma warning(push)
 #pragma warning(disable: 4251)
+
+namespace Kurenai::UI
+{
+    class UIManager;
+    class ScenePanel;
+    class RenderingPanel;
+    class PostProcessPanel;
+    class DebugViewPanel;
+    class LightingPanel;
+    class SystemPanel;
+    class ProfilerPanel;
+}
 
 namespace Kurenai
 {
@@ -45,6 +58,23 @@ namespace Kurenai
         static_assert(kCascadeCount == 4, "CascadeSplitsはXMFLOAT4前提のため4カスケード固定");
 
     private:
+        // UIパネル群(Source/Engine/UI/)は、m_SSAORadius等のパラメータメンバをImGuiウィジェットへ
+        // アドレスで直接渡すためprivateへアクセスする必要がある。
+        // パラメータを専用の構造体へ切り出して物理的に移動させる案も検討したが、Render()内の
+        // 参照が約200箇所あり、書き換えの過程で1箇所間違えてもコンパイルが通ってしまい静かに
+        // 壊れるため見送った(元々UI関数がメンバ関数としてprivateに触れていた構造を、
+        // 「friendだから触れる」へ平行移動しただけで、振る舞いの差分は無い)。
+        // friendにしても「UIから触ってよいのはパラメータ用メンバだけで、RHIリソース
+        // (m_GBufferAlbedo等)には触らない」という規約は各パネルの実装側で守ること
+        friend class UI::UIManager;
+        friend class UI::ScenePanel;
+        friend class UI::RenderingPanel;
+        friend class UI::PostProcessPanel;
+        friend class UI::DebugViewPanel;
+        friend class UI::LightingPanel;
+        friend class UI::SystemPanel;
+        friend class UI::ProfilerPanel;
+
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
         // スナップショット。m_TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
         // ここには含めない(RenderThreadMain参照)
@@ -76,25 +106,27 @@ namespace Kurenai
         // スキップする(1ファイルの不備でアプリ全体が起動できなくなるのを避けるため)
         void DiscoverScenes();
         void LoadScene(size_t sceneIndex);
+        // SSAO/SSILの半径・厚みとSSRの距離・厚みを、現在のシーンの対角長から決め直す。
+        // これらは固定の既定値を持たないため、UIの「既定値に戻す」ではなくこれを呼ぶ
+        // (シーン読み込み時はFrameCameraToModelの先頭から呼ばれる)
+        void ResetSceneDependentParams();
         void FrameCameraToModel();
-        void UpdateMouseLook();
+        // imguiWantsMouseはImGuiがマウス入力を掴んでいるか(Renderスレッドから
+        // m_ImGuiWantCaptureMouse経由で受け取る)。パネルの上で右ドラッグを始めても
+        // 視点回転が始まらないようにするために使う
+        void UpdateMouseLook(bool imguiWantsMouse);
         void UpdateMovement(float deltaTime);
         void UpdateImGuiToggle();
-        // RenderSceneSwitchUI(Renderスレッド)がm_PendingSceneIndexへ書き込んだシーン切り替え要求を
+        // ScenePanel(Renderスレッド)がm_PendingSceneIndexへ書き込んだシーン切り替え要求を
         // 見て、あればこのUpdateスレッドからLoadSceneを呼ぶ(LoadSceneをUpdateスレッド上で実行するための
         // ハンドオフ。詳細はm_PendingSceneIndexのコメント参照)
         void UpdateSceneSwitch();
         void Update(float deltaTime);
         void RenderThreadMain();
         void Render(const FrameState& frameState);
-        // メインメニューバーと、画面全体を覆うドックスペースを出す。各パネルのImGui::Beginより前に
-        // 呼ぶこと(パネルがドックへ吸着できるようにするため)
-        void RenderMainMenuAndDockSpaceUI();
-        void RenderSceneSwitchUI();
-        void RenderPostProcessUI();
-        void RenderDebugViewUI();
-        void RenderLightingUI(const FrameState& frameState);
-        void RenderProfilerUI();
+        // ProfilerPanel用。m_DeviceはKurenaiEngineBaseのprotectedメンバであり、派生クラスの
+        // friendから触れるかどうかはC++の規則の解釈が分かれるため、ここで明示的に橋渡しする
+        float GetLastFrameGPUWaitTimeMs() const;
         // カメラ視錐台をkCascadeCount個の深度範囲に分割する(near/far境界、View空間での距離)。
         // 対数分割と均等分割を混合した実用的な分割(Practical Split Scheme)を使う
         void ComputeCascadeSplits(const Core::Camera& camera, float (&outSplits)[kCascadeCount]) const;
@@ -115,6 +147,17 @@ namespace Kurenai
         // 終了させる必要があるが、基底クラスのメンバは派生クラスのメンバより後に破棄されるため
         // (C++の破棄順の規則上)、この宣言順のままで安全に成立する
         std::unique_ptr<RHI::IRHIImGuiBackend> m_ImGuiBackend;
+
+        // UIパネル群の所有者。ImGuiコンテキストが生きている間だけ有効であればよいため、
+        // m_ImGuiBackendより後に宣言してメンバ破棄順(宣言の逆順)で先に破棄させる。
+        // UI::UIManagerは不完全型のままにするため、デストラクタは.cpp側で定義する
+        std::unique_ptr<UI::UIManager> m_UIManager;
+
+        // ImGuiが入力を掴んでいるかを、RenderスレッドからUpdateスレッドへ返す逆方向のハンドオフ。
+        // FrameState(Update→Render)の逆向きだが、渡す値がboolを2つだけなのでロックを増やす
+        // 価値がなく、atomicで足りる。Updateスレッドはこれを見てWASD移動と視点回転の開始を抑止する
+        std::atomic<bool> m_ImGuiWantCaptureKeyboard{ false };
+        std::atomic<bool> m_ImGuiWantCaptureMouse{ false };
 
         // GPUタイムスタンプクエリによる各パスの計測(Shadow/GBufferなど)。数フレーム遅れの結果が返る
         std::unique_ptr<RHI::IRHIGPUProfiler> m_GPUProfiler;
@@ -174,7 +217,7 @@ namespace Kurenai
             SSAO,
             SSILVisibilityBitmask,
         };
-        bool m_AOEnabled = true;
+        bool m_AOEnabled = Defaults::AOEnabled;
         AOTechnique m_AOTechnique = AOTechnique::SSAO;
         std::unique_ptr<RHI::IRHITexture> m_AODisabledTexture; // AO無効時に使う、遮蔽なし・間接光なしのテクスチャ
 
@@ -190,8 +233,8 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_SSAOTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSAOConstantBuffer;
         std::vector<DirectX::XMFLOAT4> m_SSAOKernel;
-        float m_SSAORadius = 0.5f;
-        float m_SSAOPower = 1.5f;
+        float m_SSAORadius = Defaults::SSAORadius;
+        float m_SSAOPower = Defaults::SSAOPower;
 
         // SSILパス(Visibility Bitmask): G-BufferのAlbedo/Normal/Depthから遮蔽率と間接拡散光を計算する
         std::unique_ptr<RHI::IRHIShader> m_SSILPixelShader;
@@ -199,12 +242,12 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_SSILRawTexture;
         std::unique_ptr<RHI::IRHITexture> m_SSILTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSILConstantBuffer;
-        float m_SSILRadius = 0.5f;
-        float m_SSILThickness = 0.01f;
-        float m_SSILIntensity = 2.0f;
-        float m_SSILPower = 1.5f;
-        uint32_t m_SSILSliceCount = 4;
-        uint32_t m_SSILStepCount = 6;
+        float m_SSILRadius = Defaults::SSILRadius;
+        float m_SSILThickness = Defaults::SSILThickness;
+        float m_SSILIntensity = Defaults::SSILIntensity;
+        float m_SSILPower = Defaults::SSILPower;
+        uint32_t m_SSILSliceCount = Defaults::SSILSliceCount;
+        uint32_t m_SSILStepCount = Defaults::SSILStepCount;
 
         // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)。
         // SceneColorはHDR(R16G16B16A16_Float)で、トーンマッピングは行わない(Tonemapパス参照)
@@ -244,10 +287,10 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_SSRPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SSRTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSRConstantBuffer;
-        bool m_SSREnabled = true;
-        float m_SSRMaxDistance = 5.0f;
-        float m_SSRThickness = 0.1f;
-        float m_SSRRoughnessCutoff = 0.6f;
+        bool m_SSREnabled = Defaults::SSREnabled;
+        float m_SSRMaxDistance = Defaults::SSRMaxDistance;
+        float m_SSRThickness = Defaults::SSRThickness;
+        float m_SSRRoughnessCutoff = Defaults::SSRRoughnessCutoff;
 
         // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
         // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
@@ -275,7 +318,7 @@ namespace Kurenai
         // 同一色が24px連続しており、これは中間バッファをHDR化しても変わらなかった。
         // つまり暗部のバンディングの主因は最終8bit量子化であり、ここでしか直せない。
         // 効果をA/B比較できるようトグルにしてある
-        bool m_DitherEnabled = true;
+        bool m_DitherEnabled = Defaults::DitherEnabled;
 
         // 自動露出(eye adaptation)パス: SceneColorの輝度ヒストグラムをGPUで作り、
         // 低/高パーセンタイルを除外した加重平均から目標EV100を求めて時間方向に追従させる。
@@ -301,20 +344,20 @@ namespace Kurenai
         // 輝度ヒストグラムのビン数。AutoExposure.hlslのHISTOGRAM_BINSと一致させること
         static constexpr uint32_t kExposureHistogramBins = 256;
 
-        bool m_AutoExposureEnabled = true;
+        bool m_AutoExposureEnabled = Defaults::AutoExposureEnabled;
         // 露出のクランプ範囲(EV100)。ヒストグラムのビン割りもこの範囲で行うため、
         // 実シーンの輝度がこの外に出ると端に張り付く
-        float m_AutoExposureMinEV100 = 0.0f;
-        float m_AutoExposureMaxEV100 = 16.0f;
+        float m_AutoExposureMinEV100 = Defaults::AutoExposureMinEV100;
+        float m_AutoExposureMaxEV100 = Defaults::AutoExposureMaxEV100;
         // 明順応(暗→明)と暗順応(明→暗)の速度。人間の目は暗順応のほうが遅いため既定値も分けている
-        float m_AutoExposureSpeedUp = 3.0f;
-        float m_AutoExposureSpeedDown = 1.0f;
+        float m_AutoExposureSpeedUp = Defaults::AutoExposureSpeedUp;
+        float m_AutoExposureSpeedDown = Defaults::AutoExposureSpeedDown;
         // 加重平均から除外する下側/上側の累積割合。暗すぎる画素・明るすぎる画素に露出が
         // 引きずられるのを防ぐ
-        float m_AutoExposureLowPercentile = 0.5f;
-        float m_AutoExposureHighPercentile = 0.95f;
+        float m_AutoExposureLowPercentile = Defaults::AutoExposureLowPercentile;
+        float m_AutoExposureHighPercentile = Defaults::AutoExposureHighPercentile;
         // 測定結果に対してユーザーが意図的に足すオフセット(EV)
-        float m_AutoExposureCompensation = 0.0f;
+        float m_AutoExposureCompensation = Defaults::AutoExposureCompensation;
 
         // ブルームパス(Bloom.hlsl): 半解像度から始まるピラミッドを段階的にダウンサンプルし、
         // 3x3テントで戻しながら加算することで広く滑らかな光の裾を作る。
@@ -335,28 +378,28 @@ namespace Kurenai
         // 各段の解像度(CreateRenderTargetsで内部解像度から決まる)
         std::vector<DirectX::XMUINT2> m_BloomLevelSizes;
 
-        bool m_BloomEnabled = true;
+        bool m_BloomEnabled = Defaults::BloomEnabled;
         // 最終合成の混合比。エネルギー保存のため加算ではなくlerpで混ぜるので、
         // 物理的にレンズ散乱が持ち去る割合(数%)に相当する小さい値が既定になる
-        float m_BloomStrength = 0.06f;
+        float m_BloomStrength = Defaults::BloomStrength;
         // しきい値は既定で十分低くしてある(物理的にはブルームは全輝度に掛かるのが正しい)。
         // アート制御として上げられるようにだけしてある
-        float m_BloomThreshold = 1.0f;
-        float m_BloomSoftKnee = 0.5f;
+        float m_BloomThreshold = Defaults::BloomThreshold;
+        float m_BloomSoftKnee = Defaults::BloomSoftKnee;
 
         // 垂直同期。既定で無効。有効にするとPresentがvblankまでブロックするため、GPU負荷が軽い
         // シーンではvsync待ちの間GPUがアイドル→省電力クロックに落ち、次フレームの立ち上がりが
         // 遅くなる・待ち時間自体もジッタで1vblank/2vblank分を行き来するなど計測値が不安定になる。
         // 既定はGPU/CPU双方の実処理時間を素直に見られるOFFとし、ティアリングを許容する
         // (ON時はPresentが即座に返らず、モニタのリフレッシュレートにFPSが制限される)
-        bool m_VSyncEnabled = false;
+        bool m_VSyncEnabled = Defaults::VSyncEnabled;
 
         // 固定FPSモード。有効時、Renderスレッドが目標FPSより速く回った分だけ待機してフレーム間隔を
         // 一定に保つ。VSyncはモニタのリフレッシュレート依存かつティアリング防止が目的だが、こちらは
         // 任意のFPS値に固定できる(物理更新の再現性確保や環境間でのフレーム時間比較などが目的)。
         // 既定で60fps固定を有効にする
-        bool m_FixedFPSEnabled = true;
-        float m_TargetFPS = 60.0f;
+        bool m_FixedFPSEnabled = Defaults::FixedFPSEnabled;
+        float m_TargetFPS = Defaults::TargetFPS;
 
         // Presentパス(選択中のレンダーターゲットをアスペクト比を保ってバックバッファへ拡大縮小表示)
         std::unique_ptr<RHI::IRHIShader> m_PresentVertexShader;
@@ -393,7 +436,7 @@ namespace Kurenai
         // ほぼ真っ黒で階調の粗さが判別できない。持ち上げて表示することで、8bit格納時の
         // ポスタリゼーションが何段あるかを目視で確認できるようにする。
         // 色として表示するモード(Present.hlsl Mode 0/3/4)にのみ効く
-        float m_DebugViewGain = 1.0f;
+        float m_DebugViewGain = Defaults::DebugViewGain;
 
         // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
         // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
@@ -412,10 +455,10 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_ShadowCascadeArray;
         // シャドウパスの各カスケード描画で使う専用の定数バッファ(カスケードごとに値を更新して使い回す)
         std::unique_ptr<RHI::IRHIBuffer> m_ShadowCascadeConstantBuffer;
-        bool m_ShadowEnabled = true;
+        bool m_ShadowEnabled = Defaults::ShadowEnabled;
         // PCSS(Percentage Closer Soft Shadows)のライトサイズ。シャドウマップUV空間での
         // ブロッカーサーチ・半影の広さを決める係数(値が大きいほど半影が広く柔らかくなる)
-        float m_ShadowLightSize = 0.02f;
+        float m_ShadowLightSize = Defaults::ShadowLightSize;
         // デバッグ表示(Render Targets - Shadow Map)で確認するカスケード番号(0=カメラに近い方)
         int32_t m_ShadowDebugCascade = 0;
 
@@ -423,7 +466,7 @@ namespace Kurenai
         // TimeOfDayを夜にすると昼度(AmbientColor.a)も一緒に落ちて環境光まで消えてしまうため、
         // 「昼のまま太陽だけ消す」にはこちらを使う(White Furnace Testが必要とする)。
         // 無効時はFrameConstants.LightColorをゼロにするだけでよく、シェーダー側の変更は不要
-        bool m_SunEnabled = true;
+        bool m_SunEnabled = Defaults::SunEnabled;
 
         // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ。
         // .ksceneの[Scene]Skyboxでシーンごとに差し替えられる(LoadScene参照)
@@ -473,8 +516,8 @@ namespace Kurenai
         // (AmbientColor.rgb)へフォールバックする(真っ暗にはしない)。既定値を1.0でなく0.5に
         // しているのは、スカイボックスの空の輝度分布を明るく補正した(14.6節)結果、既定の
         // Perez分布そのままではIBL全体の寄与が強すぎたため(実機で指摘された見た目の問題)
-        bool m_IBLEnabled = true;
-        float m_IBLIntensity = 0.5f;
+        bool m_IBLEnabled = Defaults::IBLEnabled;
+        float m_IBLIntensity = Defaults::IBLIntensity;
         // 拡散イラディアンスを専用マップ(m_IrradianceTexture)から取るかどうか。既定はfalseで、
         // プリフィルタ済み鏡面の最終ミップ(roughness=1)を使う。CSPrefilterがV=R=Nを仮定して
         // いるためroughness=1ではGGXの実効カーネルがコサイン畳み込みへ厳密に退化し、両者は同じ
@@ -484,7 +527,7 @@ namespace Kurenai
         // CSIrradiance(約9750万サンプル)を丸ごと省ける。
         // 畳み込み処理自体はいつでも検証できるよう残してあり、このトグルをONにすると
         // その場で焼いて(m_IBLIrradianceBaked)従来経路に切り替わる
-        bool m_IBLUseDedicatedIrradiance = false;
+        bool m_IBLUseDedicatedIrradiance = Defaults::IBLUseDedicatedIrradiance;
         // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)のON/OFF。
         // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立したトグルにしている。
         // FrameConstants.ShadowParams.wへ1.0f/0.0fとして渡し、3つのシェーダー(DirectLighting/
@@ -492,27 +535,27 @@ namespace Kurenai
         // SpecularEnergyCompensationがこれを見て倍率1.0へ落とす。
         // 既定でONにしているのは、補正しない状態がエネルギー的に不正(粗い面ほど暗い)であり、
         // OFFは実装検証・A/B比較のための選択肢という位置付けのため(14.9節)
-        bool m_SpecularEnergyCompensationEnabled = true;
+        bool m_SpecularEnergyCompensationEnabled = Defaults::SpecularEnergyCompensationEnabled;
         // Enable IBL無効時に使う定数色アンビエントフォールバックの強度倍率。シェーダ側ではなく
         // Render()がFrameConstants.AmbientColorへ書き込む時点でrgb(alphaのdayFactorは除く)に
         // 乗算する(HLSL側は素のAmbientColor.rgbを読むだけでよい)
-        float m_AmbientScale = 0.2f;
+        float m_AmbientScale = Defaults::AmbientScale;
 
         // シーン全体の自発光(エミッシブ)の強度倍率。MakeObjectConstantsがmesh.EmissiveFactorへ
         // 乗算する。glTFのemissiveFactorは通常1.0以下に収まるため、G-Bufferのエミッシブを
         // HDR化(R11G11B10_Float)しただけでは照明器具の輝度が1.0を超えず、ブルームが効かない。
         // アセットを再オーサリングせずにHDRな自発光を得るための倍率
         // (KHR_materials_emissive_strengthをインポータが読むようになれば本来はそちらが正しい)
-        float m_EmissiveIntensity = 1.0f;
+        float m_EmissiveIntensity = Defaults::EmissiveIntensity;
 
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
-        float m_TimeOfDay = 12.0f;
-        bool m_TimeAutoAdvance = false;
-        float m_TimeAdvanceSpeed = 1.0f; // 自動進行時、1秒あたりに進む時間(時)
+        float m_TimeOfDay = Defaults::TimeOfDay;
+        bool m_TimeAutoAdvance = Defaults::TimeAutoAdvance;
+        float m_TimeAdvanceSpeed = Defaults::TimeAdvanceSpeed; // 自動進行時、1秒あたりに進む時間(時)
 
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)
-        float m_SunAzimuthDegrees = 126.87f;
+        float m_SunAzimuthDegrees = Defaults::SunAzimuthDegrees;
 
         // パスごとにバインドするサンプラーの組。スロットの役割(s0=MaterialSampler、
         // s1=ColorSampler、s2=DataSampler)はShaders/3D/Samplers.hlsliで定義しており、
@@ -563,7 +606,7 @@ namespace Kurenai
         int m_SelectedLightIndex = -1;
         // 実在の写真露出値(EV100)。太陽・環境光・ポイント/スポットライトすべてに同じ値がかかる、
         // シーン全体で単一の露出設定(詳細はdocs/Architecture.html参照)
-        float m_SceneExposureEV100 = 15.0f;
+        float m_SceneExposureEV100 = Defaults::SceneExposureEV100;
 
         // RenderSceneSwitchUI(Renderスレッド)でシーン切り替えボタンが押されたときに書き込まれ、
         // UpdateSceneSwitch(Updateスレッド)が毎フレーム読み取って消費する1要素の受け渡し用。
