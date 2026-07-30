@@ -251,7 +251,8 @@ Sample3D.exe -dx12
 画面左上に表示される6つのImGuiパネルから各種設定を変更できます(F1キーで表示/非表示を切り替え可能)。
 
 - **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Furnace Test(スペキュラBRDFのエネルギー保存を目視で検証するシーン)、Material Test(粗さ0〜1の球体列+半透明ガラス球)、Light Test(ポイント/スポット/平行光の検証用シーン)、Reflection Probe Test(反射プローブの効果を目視で確認するシーン)、Multi Model Test(TRS配置の確認用))
-- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能)。スペキュラBRDFのマルチスキャッタリング・エネルギー補正もここでON/OFFできます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
+- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能)。
+  SSRは画面内で反射先が見つかった場合にその色で反射を差し替えます。見つからなかった場合は反射プローブ(またはスカイボックス由来のIBL)の結果がそのまま残るため、SSRのON/OFFで全体の明るさは変わらず、反射の鮮明さだけが変わります。スペキュラBRDFのマルチスキャッタリング・エネルギー補正もここでON/OFFできます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / IBL(拡散イラディアンス・プリフィルタ済み鏡面・BRDF LUT) / 反射プローブ(キャプチャ結果・影響範囲の色分け) 等、各パス中間結果のデバッグ表示)
 - **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)・
   EV100(実在の写真露出値。太陽/環境光/ポイント・スポットライトすべてに一様にかかるシーン全体の

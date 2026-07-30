@@ -3008,9 +3008,16 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SSR",
-                .Reads = { m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_SkyboxTexture.get(), m_GBufferAlbedo.get() },
+                // SSRはLightingパスが適用した鏡面IBLを「差し替える」ため、そのとき使ったものと
+                // 同じ環境ソース(プローブ配列・グローバルのプリフィルタ済み鏡面)とBRDF LUT・AOを
+                // 読む必要がある(17章)
+                .Reads = {
+                    m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                    m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
+                    m_ProbePrefilteredArray.get(),
+                },
                 .RenderTargets = { m_SSRTexture.get() },
-                .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
                 {
                     SSRConstants ssrConstants{};
                     ssrConstants.Params0 = { m_SSRMaxDistance, m_SSRThickness, m_SSRRoughnessCutoff, 0.0f };
@@ -3025,8 +3032,12 @@ namespace Kurenai
                     cmd->SetTexture(1, m_GBufferNormal.get());
                     cmd->SetTexture(2, m_GBufferMaterial.get());
                     cmd->SetTexture(3, m_GBufferDepth.get());
-                    cmd->SetTexture(4, m_SkyboxTexture.get());
-                    cmd->SetTexture(5, m_GBufferAlbedo.get());
+                    cmd->SetTexture(4, m_GBufferAlbedo.get());
+                    cmd->SetTexture(5, activeAOTexture);
+                    cmd->SetTexture(6, m_BRDFLUTTexture.get());
+                    cmd->SetTexture(7, m_PrefilteredEnvTexture.get());
+                    cmd->SetTexture(8, m_ProbePrefilteredArray.get());
+                    cmd->SetShaderResourceBuffer(9, m_ProbeBuffer.get());
                     cmd->Draw(3, 0);
                 },
             });

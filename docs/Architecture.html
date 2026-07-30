@@ -215,6 +215,7 @@
     <li><a href="#ibl">14. IBL(Image Based Lighting)</a></li>
     <li><a href="#transparent">15. 半透明描画(フォワードパス)</a></li>
     <li><a href="#reflectionprobe">16. 反射プローブ(リフレクションプローブ)</a></li>
+    <li><a href="#ssrprobe">17. SSRとプローブの合成(加算から差し替えへ)</a></li>
   </ol>
 </nav>
 
@@ -400,6 +401,13 @@ with Visibility Bitmask" (2023) を参考にした実装)。
 ミップチェーンによるラフネスブラーは行っていないため、粗い面ほど反射の寄与を弱めてノイズ化を
 防いでいます。
 </p>
+<div class="note">
+この章はレイマーチングそのものの説明です。<b>反射色をどう合成するかは
+<a href="#ssrprobe">17章</a>で作り直されており、現在は「加算」ではなく
+「Lightingパスが適用した鏡面IBLの放射輝度を差し替える」方式です。</b>
+反射プローブ(16章)の導入により、画面外へ外れた場合の扱いも
+「何も足さない」から「プローブに任せる(確信度0)」へ変わっています。
+</div>
 </section>
 
 <section id="hiz">
@@ -1614,7 +1622,7 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 どこかで不整合が生じるリスクが上がる</li>
 </ul>
 
-<h4>14.9.5 SSRを対象外とした判断</h4>
+<h4>14.9.5 SSRを対象外とした判断(<a href="#ssrprobe">17章</a>で解消済み)</h4>
 <p>
 <code>SSR.hlsl</code>の反射の重みは<code>reflectivity = max(FresnelSchlick(N&middot;V, F0))</code>という
 アドホックなスカラーで、方向アルベドではない。Kulla-Contyの補正式は「乗算先が単一散乱の方向
@@ -1623,6 +1631,12 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 掛けると同じ多重散乱ぶんを二重に計上してしまう。さらにSSRの<code>roughnessCutoff</code>(既定0.6)
 より上でしか補正は意味を持たないが、その領域では<code>roughnessFade</code>がゼロに落ちる。
 </p>
+<div class="note">
+<b>この節は現在の実装には当てはまらない。</b><a href="#ssrprobe">17章</a>でSSRを
+<b>加算</b>から<b>環境の放射輝度の差し替え</b>へ作り直し、係数には
+<code>SpecularIBLWeight</code>(split-sum近似+マルチスキャッタリング補正)を
+DeferredLightingと共有して使うようにした。アドホックなスカラーも二重計上も無くなっている。
+</div>
 
 <h4>14.9.6 White Furnace Testによる検証</h4>
 <p>
@@ -1716,9 +1730,12 @@ Furnace Testは「球と背景の明るさが厳密に一致するか」を見�
 明るさになる</td></tr>
 <tr><td><code>[Scene] AmbientOcclusion</code></td><td><code>false</code></td>
 <td>球の縁がAOで暗くなると「エネルギー損失による暗さ」と区別がつかなくなる</td></tr>
-<tr><td><code>[Scene] ScreenSpaceReflection</code></td><td><code>false</code></td>
-<td>SSRは既にエネルギー保存している鏡面IBLへ反射色を<b>加算</b>する設計のため、有効なままだと
-球が背景より<b>明るく</b>なる(14.9.5節で述べた二重計上が、この検証で実際に目に見える形で現れた)</td></tr>
+<tr><td><code>[Scene] ScreenSpaceReflection</code></td><td><code>true</code></td>
+<td>当初は<code>false</code>だった。SSRが鏡面IBLへ反射色を<b>加算</b>する設計で、有効にすると
+球が背景より<b>明るく</b>なり検証が成立しなかったため(14.9.5節で述べた二重計上が、この検証で
+実際に目に見える形で現れた)。<a href="#ssrprobe">17章</a>で加算をやめて差し替えにしたことで
+二重計上が解消し、SSR有効でも3Dシーンの画素が1つも変わらないことを確認したので有効へ戻した。
+現在このシーンは<b>SSRの合成が壊れていないことの回帰テストも兼ねる</b></td></tr>
 </table>
 <p>
 アセット(一様キューブマップと金属球列)は<code>Tools/generate_furnace_test.py</code>が生成する。
@@ -2189,8 +2206,9 @@ ImGuiの「Parallax Correction」「Probe Blending」(<code>ProbeParams.z</code>
 <li>OnDemandの変化検出が見るのは時刻・太陽・ライト・IBL強度・プローブ位置のみ。
 <strong>ジオメトリが動いても検出されない</strong>(モデルのTRSは<code>.kscene</code>で静的に決まり
 実行中に変わらないため、現状は検出対象に入れていない)</li>
-<li><strong>SSRのフォールバックはまだプローブを使っていない</strong>。<code>SSR.hlsl</code>は従来どおり、
-画面内で空へ到達した場合のみ生のスカイボックスを引く(<a href="#ssr">7章</a>)</li>
+<li>SSRとの合成は<a href="#ssrprobe">17章</a>で「加算」から「環境の放射輝度の差し替え」へ作り直した。
+SSRが判定できなかった領域(画面外・最大距離まで判定不能)は確信度0となり、Lightingパスが適用した
+プローブがそのまま残る</li>
 <li>カスケードシャドウマップは<strong>カメラ</strong>視錐台に合わせてフィットされるため、カメラから遠く離れた
 位置のプローブを焼くとシャドウマップの範囲外になり影が落ちない。プローブは視界内で焼く前提</li>
 <li>プローブ数の上限は8(<code>kMaxReflectionProbes</code>)。<code>TextureCubeArray</code>は実行時に
@@ -2370,6 +2388,132 @@ GPUプロファイラで1プローブぶんのコストが読める。各パス�
 畳み込み自体のサンプル数・解像度を下げることになる。現時点では未実装。
 </p>
 
+</section>
+
+<section id="ssrprobe">
+<h2>17. SSRとプローブの合成(加算から差し替えへ)</h2>
+<p>
+<a href="#ssr">7章</a>のSSRは反射色を<code>SceneColor</code>へ<strong>加算</strong>する設計だった。
+しかしLightingパスは既に鏡面IBLを<code>SceneColor</code>へ書き込んでいるため、同じ反射を二重に
+計上していた(<a href="#ibl">14章</a>9.5節)。White Furnace Testが
+<code>ScreenSpaceReflection = false</code>を指定していたのは、この二重計上で球が背景より明るくなり
+検証そのものが成立しなくなるためである。
+</p>
+<p>
+反射プローブ(16章)が入ったことで、この問題を放置できなくなった。プローブは画面外の環境も持って
+いるので「SSRが判定できなかった領域をプローブで埋める」ことが可能になったが、加算のままそれを
+やると<strong>いま二重計上していない領域まで二重計上に変わってしまう</strong>。そこでSSRを
+<b>加算</b>から<b>環境の放射輝度の差し替え</b>へ作り直した。
+</p>
+
+<h3>17.1 分解: 放射輝度 × 係数</h3>
+<p>
+鏡面IBLを次の形に分解する。
+</p>
+<pre><code>鏡面IBL = 環境の放射輝度 * SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ...)</code></pre>
+<p>
+SSRがやりたいのは「環境の放射輝度を、スクリーンスペースで実際に見えている色へ差し替える」こと
+だけで、係数の側は共通である。したがってSSRパスの出力はこう書ける。
+</p>
+<pre><code>出力 = SceneColor + (SSRが得た放射輝度 - Lightingが使った放射輝度) * SpecularIBLWeight(...) * 確信度</code></pre>
+<p>
+確信度が0なら出力は<code>SceneColor</code>と<strong>厳密に一致</strong>し、1ならSSRの放射輝度が
+鏡面IBLを完全に置き換える。加算ではないので二重計上は原理的に起こらない。
+</p>
+
+<h3>17.2 「足した覚えのない値を引く」ことを防ぐ</h3>
+<p>
+この方式は、SSRが引き算する量とLightingパスが足した量が<strong>厳密に一致している</strong>ことに
+全面的に依存する。片方の式だけが変われば、SSRは存在しない値を引いて画面を暗くしてしまう。
+そこで両者が使う定義を<code>Shaders/3D/ReflectionProbe.hlsli</code>に集約し、
+<code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>がそれをインクルードする構成にした。
+共有しているのは次の2つ。
+</p>
+<ul>
+<li><code>SampleEnvironment</code> ―― プローブの選択・視差補正・ブレンドと、グローバルIBLへの
+フォールバックまで含めた<b>環境の放射輝度</b>(16.7節)</li>
+<li><code>SpecularIBLWeight</code> ―― split-sum近似の第2項・マルチスキャッタリング補正・
+スペキュラオクルージョン・昼夜減衰・IBL強度倍率をまとめた<b>係数</b></li>
+</ul>
+<p>
+2つのシェーダーは既に使っているレジスタ番号が違うため、ヘッダー側のリソース宣言は
+インクルード前に定義するマクロで受け取る形にした
+(<code>KURENAI_PROBE_PREFILTERED_REGISTER</code>等)。SSRは拡散イラディアンスを必要としないので、
+拡散側のマクロを定義しなければそのサンプルはコンパイルされない。
+</p>
+
+<h3>17.3 確信度の決め方</h3>
+<table>
+<tr><th>レイマーチの結果</th><th>差し替える放射輝度</th><th>確信度</th></tr>
+<tr>
+<td>画面内でヒット</td>
+<td><code>SceneColor</code>のヒット地点。プローブより新しく視差も完全に正しい</td>
+<td><code>roughnessFade * edgeFade</code></td>
+</tr>
+<tr>
+<td>画面内で背景(スカイ)へ到達</td>
+<td>プリフィルタ済み鏡面をラフネス&rarr;ミップで引いた値</td>
+<td><code>roughnessFade</code></td>
+</tr>
+<tr>
+<td>画面外へ外れた / 最大距離まで判定不能</td>
+<td>&mdash;</td>
+<td><b>0</b></td>
+</tr>
+</table>
+<p>
+<strong>画面外の扱いが7章から反転している。</strong>プローブ導入前は「その先に何があるか不明なので
+何も足さない」という判断だったが、いまはLightingパスがプローブを適用済みで、プローブは画面外の
+情報を持っている。したがって<strong>確信度0=何もしない=プローブに任せる</strong>が正しい答えになる。
+洞窟で誤って空が映り込まないという7章の性質も、そのまま保たれる。
+</p>
+<p>
+スカイへ到達した場合に<strong>生のスカイボックスではなくプリフィルタ済み鏡面を引く</strong>ように
+変えたのは、従来はミップ選択が無く粗い面でも鮮鋭な鏡像を返していたためで、これ自体が品質改善に
+なる。なおプローブが1つも効いていない屋外では、差し替え前後の放射輝度がどちらもグローバルIBLと
+一致するため差がゼロになり、正しく「何も変わらない」。
+</p>
+<p>
+反射の重み付けに使っていた<code>reflectivity = max(FresnelSchlick(N&middot;V, F0))</code>という
+アドホックなスカラーは廃止した。14.9.5節でマルチスキャッタリング補正の対象外とした理由が
+「この量は方向アルベドではない」ことだったが、いまは<code>SpecularIBLWeight</code>の
+split-sum近似が係数を担うため、その懸念自体が消えている。
+<code>roughnessFade</code>は残してあるが、役割は「反射の強さ」ではなく
+<strong>SSRの結果をどれだけ信用するか</strong>に変わった(スクリーンスペースのレイマーチは
+ヒット色を1点サンプルするだけで、粗い面に必要な円錐状のぼかしを持たないため)。
+</p>
+
+<h3>17.4 検証: White Furnace TestでSSRを有効に戻せた</h3>
+<p>
+この変更の正しさは、エンジン自身のエネルギー保存テストで直接測れる。White Furnace Testは
+一様な放射輝度のキューブマップの中に<code>metallic = 1.0</code>の金属球を並べたシーンで、
+エネルギーが保存していれば<strong>球が背景に完全に溶けて見えなくなる</strong>。
+</p>
+<p>
+SSRを有効にして計測したところ、<strong>3Dシーンの画素は1つも変化しなかった</strong>
+(51480点サンプル。差分が出た76画素はすべてImGuiパネル見出しのハイライトで、座標も
+(300-305, 45-57)のUI領域に限られていた)。加算だった頃は球が背景より明るくなっていたので、
+二重計上が解消したことの直接の証拠になる。
+</p>
+<p>
+これを受けて<code>Scenes/FurnaceTest.kscene</code>の
+<code>ScreenSpaceReflection</code>を<code>true</code>へ戻した。以後このシーンは
+<strong>SSRの合成が壊れていないことの回帰テストも兼ねる</strong> ―― 球が背景から浮き上がって
+見えたら、SSRが引く量とLightingが足す量がずれている。
+</p>
+
+<h3>17.5 既知の制約</h3>
+<ul>
+<li><strong>半透明サーフェスのピクセルでは引き算が正しくない</strong>。SSRはG-Bufferを読むが、
+半透明はフォワードパスで描かれG-Bufferに入らないため、そこでのG-Bufferは「ガラスの奥にある
+不透明面」の値になる。引く鏡面IBLが<code>SceneColor</code>(ガラスで上書き済み)に含まれておらず
+負へ振れうるので、最終的な色を<code>max(0)</code>でクランプしている。半透明パスがSSRの対象外で
+ある以上この不一致は避けられない</li>
+<li>SSRは<strong>拡散側には一切関与しない</strong>。差し替えるのは鏡面の放射輝度だけで、
+拡散IBL(プローブのイラディアンス)はLightingパスの結果がそのまま残る</li>
+<li><code>roughnessCutoff</code>(既定0.6)より粗い面ではSSRを一切使わない。この領域は
+プローブ/グローバルIBLに委ねられる</li>
+</ul>
 </section>
 
 </main>

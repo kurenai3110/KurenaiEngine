@@ -938,7 +938,7 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>Skybox</code></td><td>path</td><td>-</td><td>Skybox/Sky.dds</td><td>Assetsルートからのキューブマップ<code>.dds</code>相対パス。IBLの環境光もこれから焼かれる</td></tr>
 <tr><td><code>IBLIntensity</code></td><td>float</td><td>-</td><td>変更しない</td><td>IBLの強度倍率。0以上</td></tr>
 <tr><td><code>AmbientOcclusion</code></td><td>bool</td><td>-</td><td>true</td><td>AO/間接光(SSAO・SSIL)の有効/無効</td></tr>
-<tr><td><code>ScreenSpaceReflection</code></td><td>bool</td><td>-</td><td>true</td><td>SSRの有効/無効</td></tr>
+<tr><td><code>ScreenSpaceReflection</code></td><td>bool</td><td>-</td><td>true</td><td>SSRの有効/無効。SSRは画面内で反射先が見つかった場合にその色で反射を<strong>差し替える</strong>(加算ではない)。見つからなかった場合は反射プローブ由来の反射がそのまま残るため、ON/OFFで全体の明るさは変わらず反射の鮮明さだけが変わる</td></tr>
 <tr><td rowspan="3"><code>[Model]</code></td><td rowspan="3">1以上</td><td><code>Path</code></td><td>path</td><td><strong>必須</strong></td><td>-</td><td>Assetsルートからの<code>.kmodel</code>相対パス</td></tr>
 <tr><td><code>Translation</code></td><td>float3</td><td>-</td><td>0,0,0</td><td>平行移動</td></tr>
 <tr><td><code>RotationEuler</code>/<code>Scale</code></td><td>float3</td><td>-</td><td>0,0,0 / 1,1,1</td><td>回転(度、pitch/yaw/roll)・スケール(負値も可)</td></tr>
