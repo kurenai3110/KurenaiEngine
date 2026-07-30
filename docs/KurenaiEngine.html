@@ -515,6 +515,9 @@ psoDesc.InputLayout = { { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 } };
 psoDesc.VertexShader = vs.get();
 psoDesc.PixelShader = ps.get();
 psoDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+// SetRenderTarget(swapChain)はスワップチェーン付属の深度バッファも一緒にバインドするため、
+// 深度テストを使わない場合でもこれをtrueにする(DX12で必要。下記の注記を参照)
+psoDesc.DepthTargetAttached = true;
 auto pipelineState = device->CreatePipelineState(psoDesc);
 
 RHI::IRHICommandList* cmd = device->GetImmediateCommandList();
@@ -544,6 +547,7 @@ std::unique_ptr&lt;IRHITexture&gt;   CreateSolidColorTexture(uint8_t r, uint8_t 
 std::unique_ptr&lt;IRHITexture&gt;   CreateTextureFromMemory(uint32_t width, uint32_t height, const void* pixelsRGBA8);
 std::unique_ptr&lt;IRHITexture&gt;   CreateRenderTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f);
+std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTextureArray(uint32_t width, uint32_t height, uint32_t arraySize, float clearDepth = 1.0f);
 std::unique_ptr&lt;IRHITexture&gt;   CreateUAVTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels);
 std::unique_ptr&lt;IRHISamplerSet&gt; CreateSamplerSet(const SamplerDesc* descs, uint32_t count);
@@ -555,6 +559,14 @@ png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベー�
 <code>CreateTextureFromMemory</code> はRGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)の
 ピクセルデータから直接テクスチャを作成する(実行時に生成したデータをアップロードする用途向け。
 <code>KurenaiEngine2D::DrawText</code>のフォントアトラス生成で使用)。
+</p>
+<p>
+<code>CreateDepthTextureArray</code> は<code>CreateDepthTexture</code>のテクスチャ配列版で、
+<code>arraySize</code>枚のスライスを1つのリソースとして作成する。書き込みは
+<code>IRHICommandList::SetRenderTargets</code>の<code>depthArraySlice</code>でスライスを選んで行い、
+読み取りはシェーダ側で<code>Texture2DArray</code>として1本のスロットから行う。
+カスケードシャドウマップのように「スライスごとに別の深度を描き、サンプル時はスライスを
+動的に選びたい」用途で使う。
 </p>
 <p>
 <code>SamplerDesc</code>(<code>RHIDesc.h</code>)は<code>Filter</code>(<code>SamplerFilter::Linear</code> /
@@ -596,7 +608,8 @@ DX12実装はシェーダ可視ディスクリプタヒープへ直接書き込�
 
 <h3>4.3 <code>RHI::IRHICommandList</code></h3>
 <pre><code>void SetRenderTarget(IRHISwapChain* swapChain);
-void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture);
+void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture,
+                      uint32_t depthArraySlice = 0);  // depthArraySliceはCreateDepthTextureArray用
 void ClearRenderTarget(const ClearColor&amp; color);
 void ClearDepth(float depth);
 void SetViewport(const Viewport&amp; viewport);
@@ -623,9 +636,38 @@ void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t t
 <code>SetShaderResourceBuffer</code>は<code>BufferUsage::StructuredReadOnly</code>で作成した
 バッファを<code>StructuredBuffer&lt;T&gt;</code>としてピクセルシェーダへ読み取り専用でバインドする
 (要素数が可変で定数バッファに収めるには大きい配列向け。詳細は4.4参照)。<strong>スロット空間は
-<code>SetTexture</code>と共通</strong>(<code>t0</code>〜<code>t6</code>)のため、同じ描画内で
+<code>SetTexture</code>と共通</strong>(<code>t0</code>〜<code>t11</code>)のため、同じ描画内で
 テクスチャとスロットが衝突しないよう呼び出し側で調整すること。DX11バックエンドでは
 <code>SetTexture</code>と同様ピクセルシェーダからのみ参照できる。
+</p>
+
+<h4>バインドの寿命と呼び出し順</h4>
+<p>
+<code>SetConstantBuffer</code> / <code>SetTexture</code> / <code>SetSamplerSet</code> /
+<code>SetShaderResourceBuffer</code> のバインドは、<strong>同じスロットを上書きするまで維持される</strong>。
+<code>Draw</code>/<code>DrawIndexed</code>をまたいでも、<code>SetPipelineState</code>で
+パイプラインステートを切り替えても残るため、パス全体で共通のテクスチャはメッシュごとのループの外で
+1回バインドすればよい。一度もバインドしていないスロットを読むと0が返る。
+この挙動はDX11・DX12で完全に同一である。
+</p>
+<p>
+例外として、<code>SetTexture</code>でバインドしたテクスチャを
+<code>SetRenderTarget</code>/<code>SetRenderTargets</code>で描画先に指定すると、そのバインドは
+自動的に解除される(同じリソースを読みながら書くことはできないため)。
+コンピュートの<code>SetComputeUnorderedAccessTexture</code>/<code>...Buffer</code>も同じ理由で
+<code>Dispatch</code>のたびに解除されるので、ディスパッチごとにバインドし直すこと
+(<code>SetComputeTexture</code>のSRVは維持される)。
+</p>
+<p>
+呼び出し順で1点だけ注意がある。同じバッファを<code>UpdateBuffer</code>してからバインドする場合は、
+必ず<strong><code>UpdateBuffer</code> → <code>SetConstantBuffer</code>の順</strong>で呼ぶこと。
+逆順にするとDX12で更新前の内容が参照される。
+</p>
+<p>
+スロット番号の上限は定数バッファが<code>b0</code>〜<code>b1</code>、テクスチャ/構造化バッファが
+<code>t0</code>〜<code>t11</code>、コンピュートが<code>b0</code>〜<code>b1</code>・
+<code>t0</code>〜<code>t3</code>・<code>u0</code>〜<code>u3</code>。範囲外を指定した場合は
+ログを出してバインドをスキップする。
 </p>
 
 <h4 id="compute">4.3.1 コンピュートシェーダー</h4>
@@ -755,6 +797,17 @@ IMMUTABLEになり以後の更新が失敗するため、必ずnullptrで作成�
 <code>PremultipliedAlpha</code>(事前乗算済みアルファブレンド)を指定できる。
 <code>IRHIGPUProfiler</code>(GPUタイムスタンプ計測)、
 <code>IRHIImGuiBackend</code>(ImGui連携)も同様に公開されている。
+</p>
+<p>
+深度に関わる<code>PipelineStateDesc</code>のフラグは2つある。<code>HasDepthStencil</code>は
+<strong>深度テストを行うか</strong>で、<code>DepthTargetAttached</code>は
+<strong>深度テストはしないが描画時に深度バッファがバインドされた状態になるか</strong>を表す。
+後者はDX12が「パイプラインステートが想定する深度フォーマット」と「実際にバインドされている深度バッファ」の
+一致を要求するために必要で、<code>SetRenderTarget(swapChain)</code>はスワップチェーン付属の深度バッファを
+必ずバインドするため、スワップチェーンへ直接描くパイプラインステートでは深度テストを使わなくても
+<code>DepthTargetAttached = true</code>にする(<code>HasDepthStencil = true</code>で代用すると
+意図しない深度テストが有効になってしまう)。<code>SetRenderTargets</code>で深度テクスチャに
+<code>nullptr</code>を渡すパスでは両方とも<code>false</code>のままでよい。
 </p>
 
 <h3>4.5 <code>Core::Window</code> / <code>Core::Camera</code></h3>
@@ -948,12 +1001,13 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>AzimuthDegrees</code></td><td>float</td><td>-</td><td>126.87</td><td>太陽が昇る方位角</td></tr>
 <tr><td><code>Shadow</code></td><td>bool</td><td>-</td><td>true</td><td>シャドウマップの有効/無効</td></tr>
 <tr><td><code>Enabled</code></td><td>bool</td><td>-</td><td>true</td><td>太陽(平行光)そのものの有効/無効。<code>TimeOfDay</code>を夜にすると環境光の明るさも一緒に落ちるが、こちらは太陽だけを消す</td></tr>
-<tr><td rowspan="6"><code>[Light]</code></td><td rowspan="6">0以上</td><td><code>Type</code></td><td>enum</td><td><strong>必須</strong></td><td>-</td><td><code>Point</code> / <code>Spot</code></td></tr>
+<tr><td rowspan="8"><code>[Light]</code></td><td rowspan="8">0以上</td><td><code>Type</code></td><td>enum</td><td><strong>必須</strong></td><td>-</td><td><code>Point</code> / <code>Spot</code></td></tr>
 <tr><td><code>Position</code></td><td>float3</td><td><strong>必須</strong></td><td>-</td><td>-</td></tr>
 <tr><td><code>Direction</code></td><td>float3</td><td>Spotのみ必須</td><td>-</td><td>-</td></tr>
 <tr><td><code>Color</code> / <code>Intensity</code></td><td>float3 / float</td><td>-</td><td>1,1,1 / 1.0</td><td>リニア空間RGB</td></tr>
 <tr><td><code>Range</code></td><td>float</td><td>-</td><td>10.0</td><td>-</td></tr>
 <tr><td><code>ConeAngleDegrees</code></td><td>float</td><td>Spotのみ</td><td>45.0</td><td>-</td></tr>
+<tr><td><code>CastShadow</code></td><td>bool</td><td>-</td><td>true</td><td>このライトがスクリーンスペースシャドウを落とすか。1ピクセルが撃てるシャドウレイ数には上限(Lightingパネルの<code>Max Shadowed Lights</code>)があるため、影を出したいライトへ予算を回すのに使う</td></tr>
 <tr><td rowspan="7"><code>[ReflectionProbe]</code></td><td rowspan="7">0〜8</td><td><code>Position</code></td><td>float3</td><td><strong>必須</strong></td><td>-</td><td>キャプチャ位置(ワールド空間)。<code>Shape = Box</code>では箱の中心も兼ねる</td></tr>
 <tr><td><code>Shape</code></td><td>enum</td><td>-</td><td><code>Sphere</code></td><td><code>Sphere</code> / <code>Box</code>。それ以外はエラー</td></tr>
 <tr><td><code>Radius</code></td><td>float</td><td>-</td><td>10.0</td><td><code>Sphere</code>のときの影響範囲の半径。0以下はエラー</td></tr>

@@ -2,7 +2,10 @@
 // Cook-Torrance(GGX)のPBRで直接光(拡散+鏡面反射、シャドウ適用済み)だけを計算し、
 // 専用のレンダーターゲットへ書き出す(環境光・間接光は含まない)。
 // 太陽(平行光、b0、カスケードシャドウ付き)に加え、t8の構造化バッファに詰めたポイント/スポットライトを
-// 影なしでループ加算する(詳細はdocs/Architecture.htmlの「複数ライト」「カスケードシャドウマップ」章を参照)。
+// ループ加算する。ポイント/スポットの影はシャドウマップを増やさず、深度バッファをライト方向へ
+// レイマーチするスクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)で求める
+// (詳細はdocs/Architecture.htmlの「複数ライト」「カスケードシャドウマップ」
+// 「スクリーンスペースシャドウとタイルライトカリング」章を参照)。
 // この結果はDeferredLightingパス(最終合成)とSSIL_VisibilityBitmask.hlsl(間接光サンプルの
 // 簡易直接光の代わりに実際の直接光を使うことでシャドウも含めて正確にする)の両方からサンプルされる。
 // レンダー解像度と同じ内部解像度で、HDR(トーンマップ前)の値をR32G32B32A32_Floatへ書き込む。
@@ -43,24 +46,50 @@ struct GPULight
     // CPU側(MakeGPULight)で計算してあるためシェーダ側はそのまま乗算するだけでよい
     float4 ColorRange;     // rgb=露出済み放射輝度, w=Range
     float4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
-    float4 Params;         // x=spotAngleOffset, yzw=未使用(エリアライト用に予約)
+    // x=spotAngleOffset, y=CastShadow(1でスクリーンスペースシャドウを撃つ / 0で撃たない),
+    // zw=未使用(エリアライト用に予約)
+    float4 Params;
 };
 StructuredBuffer<GPULight> Lights : register(t8);
 
-// DirectLighting.hlsl側のこの宣言とC++側 KurenaiEngine3D.cpp の LightingConstants を一致させる必要がある
+// タイルライトカリング(LightCulling.hlsl)が書いたライトグリッド。レイアウトは
+//   base = tileIndex * (1 + kMaxLightsPerTile)
+//   [base + 0]     = そのタイルに届いたライト数(容量超過時はそのままの数が入るのでここで打ち切る)
+//   [base + 1 + n] = n番目のライトの、Lights(t8)側でのインデックス
+// LightCulling.hlsl側のkMaxLightsPerTile・C++側のkLightTileCapacityと必ず同じ値にすること
+static const uint kMaxLightsPerTile = 64u;
+StructuredBuffer<uint> LightTiles : register(t5);
+
+// DirectLighting.hlsl側のこの宣言とC++側 KurenaiEngine3D.cpp の LightingConstants を一致させる必要がある。
+// b0はFrameConstantsが使っており、RHIの定数バッファスロットは2本(DX12Sの kConstantBufferSlotCount = 2)
+// しか無いため、このパス固有のパラメータはすべてこのb1へ足していく
 cbuffer LightingConstants : register(b1)
 {
-    uint4 LightCount; // x=有効ライト数, yzw=未使用
+    // x=有効ライト数, y=ピクセルあたりに撃つスクリーンスペースシャドウのレイ数の上限, zw=未使用
+    uint4 LightCount;
+    // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)のパラメータ。
+    // x=レイマーチのステップ数, y=最大レイ長(ワールド単位), z=遮蔽とみなす深度差の上限(thickness),
+    // w=有効フラグ(0で無効)
+    float4 SSSParams0;
+    // x=深度リニアライズ定数a, y=同b(viewZ = b / (depth - a))、
+    // z=レイ始点の法線方向への押し出し量(View空間深度に比例させる係数)、w=画面端フェード幅(UV)
+    float4 SSSParams1;
+    // タイルライトカリング(LightCulling.hlsl)のパラメータ。
+    // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=カリング有効フラグ(0で無効)
+    uint4 TileParams;
 };
 
 Texture2D AlbedoTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MaterialTexture : register(t2);
 Texture2D DepthTexture : register(t3);
-Texture2D ShadowMap0 : register(t4);
-Texture2D ShadowMap1 : register(t5);
-Texture2D ShadowMap2 : register(t6);
-Texture2D ShadowMap3 : register(t7);
+// カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
+// FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)とDataSamplerを参照するため、
+// それらの宣言より後でインクルードする必要がある
+#include "ShadowSampling.hlsli"
+// ポイント/スポットライトのスクリーンスペースシャドウ。FrameConstants(ViewProj)・
+// LightingConstants(SSSParams0/1)・DataSampler・DepthTextureを参照するため、それらより後でインクルードする
+#include "ScreenSpaceShadow.hlsli"
 // split-sum近似の第2項、BRDF積分LUT(x=NdotV, y=ラフネス。BRDFLUT.hlslで生成)。
 // このパスはIBLを計算しないが、スペキュラのエネルギー補正(SpecularEnergy.hlsli、14.9節)で
 // Ess = brdf.x + brdf.y を必要とするためバインドしている。
@@ -104,121 +133,6 @@ float DistributionGGX(float NdotH, float roughness)
 float3 FresnelSchlick(float cosTheta, float3 F0)
 {
     return F0 + (1.0f - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
-}
-
-// PCSS(Percentage Closer Soft Shadows)。ライト視点のクリップ空間へ変換した上で、
-// (1)近傍のブロッカー(受光点より手前=光源側にある遮蔽物)の平均深度を探し、
-// (2)受光点との深度差から半影(ペナンブラ)の広さを推定し、
-// (3)その広さでPCF(複数タップの深度比較平均)を行う。
-// ブロッカーが見つからない場合は完全に光が当たるとみなしPCFをスキップする(コスト削減も兼ねる)。
-// 戻り値は0(完全に影)〜1(完全に光が当たる)の連続値。シャドウマップの範囲外は影を落とさない。
-//
-// 本来のPCSS(Fernando 2005)は透視投影のライトを前提に「受光点までの距離」で半影の広さを
-// スケールするが、このエンジンの平行光は正射影のシャドウマップを使うため、代わりに
-// 正規化された深度値([0,1])同士の比をそのまま使う近似で代用している
-float ComputeShadowFactor(Texture2D shadowMap, float4x4 cascadeViewProj, float3 worldPos, float NdotL)
-{
-    float4 lightClipPos = mul(float4(worldPos, 1.0f), cascadeViewProj);
-    float3 lightNdc = lightClipPos.xyz / lightClipPos.w;
-
-    if (abs(lightNdc.x) > 1.0f || abs(lightNdc.y) > 1.0f || lightNdc.z < 0.0f || lightNdc.z > 1.0f)
-    {
-        return 1.0f;
-    }
-
-    float2 shadowUV = float2(lightNdc.x * 0.5f + 0.5f, 1.0f - (lightNdc.y * 0.5f + 0.5f));
-    float receiverDepth = lightNdc.z;
-
-    // シャドウアクネ対策のバイアス。斜入射(NdotLが小さい)ほどアクネが出やすいため傾斜に応じて大きくする
-    const float kShadowBiasMin = 0.0005f;
-    const float kShadowBiasMax = 0.0025f;
-    const float bias = lerp(kShadowBiasMax, kShadowBiasMin, NdotL);
-    const float compareDepth = receiverDepth - bias;
-
-    // シャドウマップの1テクセル分のUVサイズ(KurenaiEngine3D::kShadowMapSizeと合わせる)
-    const float kTexelSize = 1.0f / 2048.0f;
-    const float lightSize = max(ShadowParams.x, kTexelSize);
-
-    // --- (1) ブロッカーサーチ: lightSizeの範囲を5x5タップでサンプルし、受光点より光源側にある
-    //     (=深度がより小さい)テクセルの平均深度を求める ---
-    const int kBlockerTaps = 5;
-    const int kBlockerHalf = kBlockerTaps / 2;
-    float blockerDepthSum = 0.0f;
-    int blockerCount = 0;
-
-    [unroll]
-    for (int by = -kBlockerHalf; by <= kBlockerHalf; ++by)
-    {
-        [unroll]
-        for (int bx = -kBlockerHalf; bx <= kBlockerHalf; ++bx)
-        {
-            const float2 offset = float2(bx, by) * (lightSize / float(kBlockerTaps));
-            const float sampleDepth = shadowMap.Sample(DataSampler, shadowUV + offset).r;
-            if (sampleDepth < compareDepth)
-            {
-                blockerDepthSum += sampleDepth;
-                blockerCount += 1;
-            }
-        }
-    }
-
-    if (blockerCount == 0)
-    {
-        return 1.0f;
-    }
-
-    const float avgBlockerDepth = blockerDepthSum / float(blockerCount);
-
-    // --- (2) 半影サイズの推定 ---
-    const float penumbraRatio = (receiverDepth - avgBlockerDepth) / max(avgBlockerDepth, 1e-5f);
-    const float filterRadius = clamp(penumbraRatio * lightSize, kTexelSize, lightSize);
-
-    // --- (3) 推定した半径でPCF(5x5タップの深度比較平均) ---
-    const int kPCFTaps = 5;
-    const int kPCFHalf = kPCFTaps / 2;
-    float shadowSum = 0.0f;
-
-    [unroll]
-    for (int py = -kPCFHalf; py <= kPCFHalf; ++py)
-    {
-        [unroll]
-        for (int px = -kPCFHalf; px <= kPCFHalf; ++px)
-        {
-            const float2 offset = float2(px, py) * (filterRadius / float(kPCFTaps));
-            const float sampleDepth = shadowMap.Sample(DataSampler, shadowUV + offset).r;
-            shadowSum += (sampleDepth < compareDepth) ? 0.0f : 1.0f;
-        }
-    }
-
-    return shadowSum / float(kPCFTaps * kPCFTaps);
-}
-
-// ピクセルのView空間深度からカスケード番号(0=カメラに近い方)を選び、対応するシャドウマップで
-// ComputeShadowFactorを呼ぶ。HLSLはリソース(Texture2D)を動的添字の配列として扱えないため、
-// 分岐でカスケードごとのテクスチャを選択する
-float ComputeCascadedShadowFactor(float3 worldPos, float viewDepth, float NdotL)
-{
-    int cascadeIndex = 0;
-    if (viewDepth > CascadeSplits.x) cascadeIndex = 1;
-    if (viewDepth > CascadeSplits.y) cascadeIndex = 2;
-    if (viewDepth > CascadeSplits.z) cascadeIndex = 3;
-
-    if (cascadeIndex == 0)
-    {
-        return ComputeShadowFactor(ShadowMap0, CascadeViewProj[0], worldPos, NdotL);
-    }
-    else if (cascadeIndex == 1)
-    {
-        return ComputeShadowFactor(ShadowMap1, CascadeViewProj[1], worldPos, NdotL);
-    }
-    else if (cascadeIndex == 2)
-    {
-        return ComputeShadowFactor(ShadowMap2, CascadeViewProj[2], worldPos, NdotL);
-    }
-    else
-    {
-        return ComputeShadowFactor(ShadowMap3, CascadeViewProj[3], worldPos, NdotL);
-    }
 }
 
 // Cook-Torrance を1灯ぶん評価する(シャドウ・ライト色・減衰は呼び出し側で乗算する)。
@@ -269,16 +183,24 @@ float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float an
     return t * t;
 }
 
-// t8のライトリストを1灯ぶん評価する(影なし)。early-outは効きの強い順(距離→減衰→スポット円錐→NdotL)に並べる
+// t8のライトリストを1灯ぶん評価する。early-outは効きの強い順(距離→減衰→スポット円錐→NdotL)に並べる。
+// 影はシャドウマップではなくスクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)で求める。
+//
+// shadowRayBudgetは「このピクセルで残り何本シャドウレイを撃ってよいか」。ライト数が増えても
+// ピクセルあたりのレイマーチ回数が青天井にならないよう、呼び出し側(PSMain)で上限を渡して
+// ここで消費していく。early-outをすべて通過した後にだけ消費するので、
+// そのピクセルに実際に届いているライトから順に予算が使われる
 float3 EvaluateLight(
     GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
-    float3 energyCompensation)
+    float3 energyCompensation, float2 pixelCoord, inout uint shadowRayBudget)
 {
     uint lightType = (uint)light.PositionType.w;
     float range = light.ColorRange.w;
 
     float3 L;
     float atten = 1.0f;
+    // 平行光は光源が無限遠にあるため、レイ長は常に最大レイ長(SSSParams0.y)側で決まる
+    float distanceToLight = 1e30f;
 
     if (lightType == 0u) // Directional
     {
@@ -299,7 +221,9 @@ float3 EvaluateLight(
             return float3(0.0f, 0.0f, 0.0f);
         }
 
-        L = toLight * rsqrt(max(distSq, 1e-8f));
+        float dist = sqrt(max(distSq, 1e-16f));
+        distanceToLight = dist;
+        L = toLight / dist;
 
         if (lightType == 2u) // Spot
         {
@@ -317,7 +241,17 @@ float3 EvaluateLight(
         return float3(0.0f, 0.0f, 0.0f);
     }
 
-    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energyCompensation) * light.ColorRange.rgb * atten;
+    // ここまで来たライトだけが実際にこのピクセルを照らす。予算が残っていて、かつ
+    // そのライトが影を落とす設定(Params.y)ならレイマーチする
+    float shadow = 1.0f;
+    if (shadowRayBudget > 0u && light.Params.y > 0.5f)
+    {
+        shadow = ComputeScreenSpaceShadow(worldPos, N, L, distanceToLight, pixelCoord);
+        shadowRayBudget -= 1u;
+    }
+
+    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energyCompensation)
+        * light.ColorRange.rgb * atten * shadow;
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
@@ -362,11 +296,38 @@ float4 PSMain(PSInput input) : SV_TARGET
         directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energyCompensation) * LightColor.rgb * shadow;
     }
 
-    // --- t8のライトリスト(影なし) ---
-    [loop]
-    for (uint i = 0; i < LightCount.x; ++i)
+    // --- t8のライトリスト(スクリーンスペースシャドウ付き) ---
+    // ピクセルあたりのシャドウレイ数の上限。ライトを増やしてもレイマーチのコストが
+    // 線形に伸び続けないようにするための予算で、EvaluateLightが消費する
+    uint shadowRayBudget = LightCount.y;
+
+    // タイルライトカリング有効時は、このピクセルが属するタイルのリストだけをループする。
+    // 無効時は従来どおり全ライトを回す(カリングの有無で結果が変わらないことの検証に使う)
+    if (TileParams.w != 0u)
     {
-        directLight += EvaluateLight(Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness, energyCompensation);
+        const uint2 tileCoord = uint2(input.Position.xy) / TileParams.y;
+        const uint tileBase = (tileCoord.y * TileParams.x + tileCoord.x) * (1u + TileParams.z);
+        // カリング側は容量を超えた数もそのまま書く(デバッグ表示が超過を検出できるように)ため、
+        // 読み手のここで実際に格納されている件数まで打ち切る
+        const uint tileLightCount = min(LightTiles[tileBase], kMaxLightsPerTile);
+
+        [loop]
+        for (uint t = 0; t < tileLightCount; ++t)
+        {
+            directLight += EvaluateLight(
+                Lights[LightTiles[tileBase + 1u + t]], worldPos, N, V, NdotV, albedo, metallic, roughness,
+                energyCompensation, input.Position.xy, shadowRayBudget);
+        }
+    }
+    else
+    {
+        [loop]
+        for (uint i = 0; i < LightCount.x; ++i)
+        {
+            directLight += EvaluateLight(
+                Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness, energyCompensation,
+                input.Position.xy, shadowRayBudget);
+        }
     }
 
     return float4(directLight, 1.0f);

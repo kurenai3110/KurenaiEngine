@@ -29,7 +29,8 @@ namespace Kurenai::RHI
         m_Context->OMSetRenderTargets(1, m_CurrentRenderTargetViews, m_CurrentDepthStencilView);
     }
 
-    void DX11CommandList::SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture)
+    void DX11CommandList::SetRenderTargets(
+        IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice)
     {
         count = count < kMaxRenderTargets ? count : kMaxRenderTargets;
         for (uint32_t i = 0; i < count; ++i)
@@ -37,7 +38,22 @@ namespace Kurenai::RHI
             m_CurrentRenderTargetViews[i] = static_cast<DX11Texture*>(targets[i])->GetRenderTargetView();
         }
         m_CurrentRenderTargetCount = count;
-        m_CurrentDepthStencilView = depthTexture ? static_cast<DX11Texture*>(depthTexture)->GetDepthStencilView() : nullptr;
+
+        m_CurrentDepthStencilView = nullptr;
+        if (depthTexture)
+        {
+            auto* dx11Depth = static_cast<DX11Texture*>(depthTexture);
+            m_CurrentDepthStencilView = dx11Depth->GetDepthStencilView(depthArraySlice);
+            if (!m_CurrentDepthStencilView)
+            {
+                // 範囲外のスライス指定は深度なしで描かれて結果が静かに壊れるため、必ずログを残す
+                Core::Logger::Error(
+                    "DX11",
+                    "SetRenderTargets: 深度配列スライス" + std::to_string(depthArraySlice) +
+                        "が範囲外です(スライス数: " + std::to_string(dx11Depth->GetDepthSliceCount()) + ")");
+            }
+        }
+
         m_Context->OMSetRenderTargets(count, m_CurrentRenderTargetViews, m_CurrentDepthStencilView);
     }
 
@@ -85,6 +101,7 @@ namespace Kurenai::RHI
         m_Context->PSSetShader(dx11PipelineState->GetPixelShader()->GetPixelShader(), nullptr, 0);
         m_Context->OMSetDepthStencilState(dx11PipelineState->GetDepthStencilState(), 0);
         m_Context->OMSetBlendState(dx11PipelineState->GetBlendState(), nullptr, 0xFFFFFFFF);
+        m_Context->RSSetState(dx11PipelineState->GetRasterizerState());
     }
 
     void DX11CommandList::SetVertexBuffer(IRHIBuffer* buffer)
@@ -115,6 +132,10 @@ namespace Kurenai::RHI
         auto* dx11Texture = static_cast<DX11Texture*>(texture);
         ID3D11ShaderResourceView* srvs[] = { dx11Texture->GetShaderResourceView() };
         m_Context->PSSetShaderResources(slot, 1, srvs);
+        if (slot < kTextureSlotCount)
+        {
+            m_BoundPixelSrvs[slot] = srvs[0];
+        }
     }
 
     void DX11CommandList::SetSamplerSet(IRHISamplerSet* samplerSet)
@@ -134,6 +155,40 @@ namespace Kurenai::RHI
         auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
         ID3D11ShaderResourceView* srvs[] = { dx11Buffer->GetShaderResourceView() };
         m_Context->PSSetShaderResources(slot, 1, srvs);
+        if (slot < kTextureSlotCount)
+        {
+            m_BoundPixelSrvs[slot] = srvs[0];
+        }
+    }
+
+    // 指定リソースをピクセルシェーダのSRVスロットから外す。
+    // DX11は同一リソースをSRVとUAVに同時バインドできず、そのまま両方バインドすると
+    // ドライバが片方を黙って外して警告を出す。UAVでの書き込み直前にSRV側を明示的に外すことで、
+    // 「どちらが外れるか」がドライバ任せにならないようにする。
+    // Dispatch後のUAV解除(m_BoundComputeUavSlotMask)と対になる処理
+    void DX11CommandList::UnbindPixelSrvForResource(ID3D11Resource* resource)
+    {
+        if (resource == nullptr)
+        {
+            return;
+        }
+
+        ID3D11ShaderResourceView* nullSrv[] = { nullptr };
+        for (uint32_t slot = 0; slot < kTextureSlotCount; ++slot)
+        {
+            if (!m_BoundPixelSrvs[slot])
+            {
+                continue;
+            }
+
+            Microsoft::WRL::ComPtr<ID3D11Resource> boundResource;
+            m_BoundPixelSrvs[slot]->GetResource(&boundResource);
+            if (boundResource.Get() == resource)
+            {
+                m_Context->PSSetShaderResources(slot, 1, nullSrv);
+                m_BoundPixelSrvs[slot].Reset();
+            }
+        }
     }
 
     void DX11CommandList::UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes)
@@ -191,6 +246,27 @@ namespace Kurenai::RHI
         m_Context->CSSetShaderResources(slot, 1, srvs);
     }
 
+    void DX11CommandList::SetComputeShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer)
+    {
+        if (!buffer)
+        {
+            Core::Logger::Error("DX11", "SetComputeShaderResourceBuffer: バッファがnullptrのためバインドをスキップします");
+            return;
+        }
+
+        auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
+        ID3D11ShaderResourceView* srvs[] = { dx11Buffer->GetShaderResourceView() };
+        if (srvs[0] == nullptr)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "SetComputeShaderResourceBuffer: SRVを持たないバッファです"
+                "(BufferUsage::StructuredReadOnly / StructuredRW で作成してください)。バインドをスキップします");
+            return;
+        }
+        m_Context->CSSetShaderResources(slot, 1, srvs);
+    }
+
     void DX11CommandList::SetComputeSamplerSet(IRHISamplerSet* samplerSet)
     {
         if (!samplerSet)
@@ -237,6 +313,10 @@ namespace Kurenai::RHI
     void DX11CommandList::SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer)
     {
         auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
+        // 前フレームにピクセルシェーダがSRVで読んだままになっている場合は先に外す
+        // (BufferUsage::StructuredRWのライトグリッドが毎フレームこの経路を通る)
+        UnbindPixelSrvForResource(dx11Buffer->GetBuffer());
+
         ID3D11UnorderedAccessView* uavs[] = { dx11Buffer->GetUnorderedAccessView() };
         m_Context->CSSetUnorderedAccessViews(slot, 1, uavs, nullptr);
         m_BoundComputeUavSlotMask |= (1u << slot);

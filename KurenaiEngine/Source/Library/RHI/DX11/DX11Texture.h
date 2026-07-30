@@ -17,11 +17,24 @@ namespace Kurenai::RHI
             Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv = nullptr,
             Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = nullptr,
             std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>> mipUavs = {},
+            std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>> sliceDsvs = {},
             uint32_t cubeCount = 1);
 
         ID3D11ShaderResourceView* GetShaderResourceView() const { return m_Srv.Get(); }
         ID3D11RenderTargetView* GetRenderTargetView() const { return m_Rtv.Get(); }
-        ID3D11DepthStencilView* GetDepthStencilView() const { return m_Dsv.Get(); }
+        // CreateDepthTextureArrayで作成した場合のみスライスごとの個別DSVを持ち、arraySliceで選択する
+        // (通常のCreateDepthTextureは単一DSVのため既定値の0でそのDSVが返る)。
+        // 範囲外はnullptrを返し、呼び出し側(DX11CommandList::SetRenderTargets)がログを出す
+        ID3D11DepthStencilView* GetDepthStencilView(uint32_t arraySlice = 0) const
+        {
+            if (m_SliceDsvs.empty())
+            {
+                return m_Dsv.Get();
+            }
+            return arraySlice < m_SliceDsvs.size() ? m_SliceDsvs[arraySlice].Get() : nullptr;
+        }
+        // 深度スライス数(0 = テクスチャ配列ではない通常の深度テクスチャ)。範囲外指定時のログ用
+        uint32_t GetDepthSliceCount() const { return static_cast<uint32_t>(m_SliceDsvs.size()); }
         // CreateUAVTexture/CreateHiZTextureで作成した場合のみ非nullptr(コンピュートシェーダーからのRW用)。
         // CreateHiZTextureのミップチェーンテクスチャはミップごとに個別のUAVを持つためmipLevelで選択する
         // (CreateUAVTextureは常に1ミップのみなので既定値の0で単一UAVが返る)
@@ -44,6 +57,7 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11DepthStencilView> m_Dsv;
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> m_Uav;
         std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>> m_MipUavs;
+        std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>> m_SliceDsvs;
         // キューブマップ配列の枚数(非キューブマップ・単一キューブは1)。m_MipUavsのフラット添字計算に使う
         uint32_t m_CubeCount = 1;
     };

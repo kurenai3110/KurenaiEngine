@@ -160,6 +160,8 @@
     border-radius: 6px;
     margin: 1.2em 0;
   }
+  /* 箇条書きの途中に「後の章で更新された」と差し込むための短い注記 */
+  .note-inline { color: #b58900; }
   .note p:first-child { margin-top: 0; }
   .note p:last-child { margin-bottom: 0; }
   .badge {
@@ -214,8 +216,11 @@
     <li><a href="#dllsplit">13. 3DLL構成への分割</a></li>
     <li><a href="#ibl">14. IBL(Image Based Lighting)</a></li>
     <li><a href="#transparent">15. 半透明描画(フォワードパス)</a></li>
-    <li><a href="#reflectionprobe">16. 反射プローブ(リフレクションプローブ)</a></li>
-    <li><a href="#ssrprobe">17. SSRとプローブの合成(加算から差し替えへ)</a></li>
+    <li><a href="#rhi-binding">16. RHIのバインド寿命(DX11/DX12の挙動統一)</a></li>
+    <li><a href="#tonemap-exposure-bloom">17. トーンマッピング・露出・ブルーム</a></li>
+    <li><a href="#sss-tiled-lights">18. スクリーンスペースシャドウとタイルライトカリング</a></li>
+    <li><a href="#reflectionprobe">19. 反射プローブ(リフレクションプローブ)</a></li>
+    <li><a href="#ssrprobe">20. SSRとプローブの合成(加算から差し替えへ)</a></li>
   </ol>
 </nav>
 
@@ -244,9 +249,10 @@ PBR(メタリック/ラフネス)計算を行います。
 <li>Presentパス — 選択中のデバッグビューをバックバッファへ表示</li>
 </ol>
 <p>
-上記に加え、起動後最初のフレームだけ「IBL畳み込みパス」が実行されます(スカイボックスは実行時に
-変化しない静的アセットのため一度だけで十分、詳細は14章参照)。毎フレーム実行される9パスとは
-性質が異なるため上のリストには含めていません。
+上記に加え、起動後最初のフレームだけ「IBL畳み込みパス」(<code>IBLBake</code>)が実行されます
+(スカイボックスは実行時に変化しない静的アセットのため一度だけで十分、詳細は14章参照)。
+毎フレーム実行される9パスとは性質が異なるため上のリストには含めていません。なお検証用の
+<code>IBLIrradianceBake</code>パスは通常の描画では一度も実行されません(14.10.3節)。
 </p>
 <p>
 シャドウ・AO/GI・SSRはそれぞれON/OFF可能で、OFF時は該当パスをスキップします。
@@ -349,9 +355,53 @@ Shadows、Fernando 2005)を組み合わせています(<code>DirectLighting.hlsl
 </p>
 <p>
 ピクセルのView空間深度からどのカスケードのシャドウマップを使うか選びます
-(<code>DirectLighting.hlsl</code>の<code>ComputeCascadedShadowFactor</code>)。HLSLはリソース
-(<code>Texture2D</code>)を動的添字の配列として扱えないため、カスケードごとに宣言した4枚の
-シャドウマップ(<code>t4</code>〜<code>t7</code>)を分岐で選択しています。
+(<code>ShadowSampling.hlsli</code>の<code>ComputeCascadedShadowFactor</code>)。全カスケードの深度は
+1つの<code>Texture2DArray</code>(<code>t4</code>、スライス番号=カスケード番号)にまとめてあり、
+<code>ShadowMapArray.Sample(DataSampler, float3(uv, cascadeIndex))</code>のように配列スライスを
+動的添字で選べます。
+</p>
+
+<h3>4.1 カスケードシャドウマップのTexture2DArray統合</h3>
+<p>
+以前はカスケードごとに独立した深度テクスチャを4枚持ち、<code>t4</code>〜<code>t7</code>へ1枚ずつ
+バインドしていました。これはHLSLがリソース(<code>Texture2D</code>)そのものを動的添字の配列として
+扱えないという制約のためで、<code>ComputeCascadedShadowFactor</code>はカスケードごとの
+<code>if/else</code>4分岐でテクスチャを選ぶ必要がありました。
+</p>
+<p>
+<strong>配列スライスであれば動的添字で選べる</strong>ため、4枚を1つの<code>Texture2DArray</code>へ
+統合してこの制約自体を取り除いています。具体的には、RHIに
+<code>IRHIDevice::CreateDepthTextureArray</code>を追加し、次の2種類のビューを張っています
+(IBLのキューブマップが面ごとのUAVと全体のSRVを持つのと同じ構造です)。
+</p>
+<ul>
+<li><strong>書き込み</strong>: スライスごとに単一配列スライスのDSV
+(<code>*_DSV_DIMENSION_TEXTURE2DARRAY</code>、<code>ArraySize = 1</code>)。シャドウパスは
+<code>RenderGraphPassDesc::DepthTargetArraySlice</code>でカスケード番号を指定し、1パス=1スライスで描き込みます
+(RenderGraphはこれを<code>IRHICommandList::SetRenderTargets</code>の第4引数
+<code>depthArraySlice</code>へ渡します。<code>SetComputeUnorderedAccessTexture</code>の
+<code>mipLevel</code>と同じ省略可能引数の作法です)。
+<code>ClearDepth</code>はバインド中のDSVに対して働くため、スライスごとのクリアは自動的に成立します。</li>
+<li><strong>読み取り</strong>: 全スライスをまとめた1本のSRV
+(<code>*_SRV_DIMENSION_TEXTURE2DARRAY</code>)。<code>t4</code>へ1回バインドするだけで済みます。</li>
+</ul>
+<p>
+この統合により、(1)シェーダの4分岐が1回の呼び出しに潰れ、(2)SRVスロットの消費が4本から1本になり、
+(3)DX12のリソース状態遷移が4回から1回に減ります(<code>DX12Texture::TransitionTo</code>はリソース全体を
+<code>ALL_SUBRESOURCES</code>で遷移させるため、4スライスを連続で書いてから1度だけ
+<code>PIXEL_SHADER_RESOURCE</code>へ移せばよくなります)。
+</p>
+<p>
+空いた<code>t5</code>〜<code>t7</code>は意図的に穴のまま残しています。詰めて振り直すと
+<code>Transparent.hlsl</code>の<code>t8</code>〜<code>t11</code>とそのC++側バインドまで
+同時に書き換える必要があり、ずれると「黙って別のテクスチャを読む」不具合になるためです。
+現状スロット数(<code>kTextureSlotCount = 12</code>)は不足していないため、実利のない変更は避けています。
+</p>
+<p>
+なお、PCSSのサンプリング実装は<code>DirectLighting.hlsl</code>(ディファード)と
+<code>Transparent.hlsl</code>(半透明フォワード)に同じものが重複していましたが、この統合に合わせて
+<code>ShadowSampling.hlsli</code>へ切り出しました。以前は片方だけ修正すると不透明と半透明で影が
+食い違う事故が起きやすかったため、構造的にずれないようにしています。
 </p>
 </section>
 
@@ -403,9 +453,9 @@ with Visibility Bitmask" (2023) を参考にした実装)。
 </p>
 <div class="note">
 この章はレイマーチングそのものの説明です。<b>反射色をどう合成するかは
-<a href="#ssrprobe">17章</a>で作り直されており、現在は「加算」ではなく
+<a href="#ssrprobe">20章</a>で作り直されており、現在は「加算」ではなく
 「Lightingパスが適用した鏡面IBLの放射輝度を差し替える」方式です。</b>
-反射プローブ(16章)の導入により、画面外へ外れた場合の扱いも
+反射プローブ(19章)の導入により、画面外へ外れた場合の扱いも
 「何も足さない」から「プローブに任せる(確信度0)」へ変わっています。
 </div>
 </section>
@@ -563,6 +613,54 @@ gitは除外されたディレクトリの中を走査しないため、<code>/A
 (<code>[Model]Path</code>の基準となるAssetsルートは<code>-o</code>の出力パスから
 「Scenesフォルダの1つ上」として推定する。<code>Main.cpp</code>の<code>RunSceneMode</code>)、
 <code>Scenes/</code> &rarr; <code>Assets/Packed/Scenes/</code>へ検証・配置する。
+</p>
+
+<h3>10.2 ミラーリング(負のスケール)インスタンスのカリング</h3>
+<p>
+<code>.kscene</code>の<code>[Model] Scale</code>に負の値を含めるとワールド行列の行列式が負になる。
+このとき<b>頂点インデックスの巡回順は変わらないまま、スクリーン上での三角形の向きだけが反転する</b>。
+ラスタライザの表裏判定はスクリーン上の巻き方向で行われるため、本来の表面が裏面と判定されて
+カリングされ、<b>物体の内側(奥の面)が描画される</b>。
+</p>
+<p>
+この状態では見えている面の法線がカメラと逆を向くため、Multi Model Testのミラーリングした
+インスタンスでは<b>環境の映り込みが上下逆</b>(空が下、地面が上)になり、輪郭にも黒い縁が出ていた。
+法線行列(<code>NormalMatrix</code>、Worldの3x3の逆転置)も接線の補正(<code>TangentSignFlip</code>)も
+正しく計算されており、原因はもっぱらカリングの側にあった。
+</p>
+<p>
+エンジンは長らくラスタライザステートを一切作らず、D3D11/D3D12双方の既定値
+(ソリッド塗り・裏面カリング・<b>時計回りが表</b>)に任せていた。そこで
+<code>PipelineStateDesc</code>へ<code>FrontCounterClockwise</code>を追加し、
+<b>表裏判定だけを入れ替えたパイプラインをもう1本持つ</b>方式で対処した。
+<code>SceneLoader</code>が行列式の符号から<code>ModelInstance::IsMirrored</code>を立て、
+ジオメトリパス(G-Buffer・シャドウ・半透明フォワード)の各描画ループが、この値に応じて
+2本のパイプラインを切り替える。
+</p>
+<p>
+<b>なぜカリングを切る(<code>CULL_NONE</code>)のではなくパイプラインを2本持つのか</b>:
+カリングを無効にすると閉じた不透明メッシュでも裏面のピクセルシェーダーが走って無駄が増え、
+さらに半透明フォワードパスでは裏面まで合成されて見た目自体が変わってしまう。
+表裏の判定を入れ替えるだけなら、カリングの効果を保ったまま正しい面だけを残せる。
+</p>
+<p>
+<b>なぜDX11でも「PSOを2本」なのか</b>: DX11は<code>RSSetState</code>で描画中にラスタライザ
+ステートを差し替えられるが、DX12はラスタライザステートがPSOへ焼き込まれるため同じことができない。
+そこでDX11側も<code>DX11PipelineState</code>が<code>ID3D11RasterizerState</code>を保持し、
+<code>SetPipelineState</code>でバインドする形に揃え、両バックエンドで同一の構成にしている。
+この変更でDX11は初めて明示的なラスタライザステートを持つことになったが、
+<code>CD3D11_RASTERIZER_DESC(D3D11_DEFAULT)</code>は暗黙の既定状態と全項目一致するため、
+<code>FrontCounterClockwise</code>以外の挙動は変わらない。
+</p>
+<p>
+<b>切り替えの副作用に注意</b>: DX12の<code>SetPipelineState</code>はルートシグネチャを張り直して
+既存のバインドを無効化する(<code>DX12CommandList::SetPipelineState</code>)。そのため各描画ループは、
+パイプラインを切り替えたときにパス共通のバインド(<code>b0</code>・サンプラーセット)もやり直す。
+また各ループは<b>ループ前に通常のパイプラインを先にバインドしておき</b>、ミラーリングされた
+インスタンスに出会ったときだけ切り替える構成にしてある。これにより<b>ミラーリングを含まない
+シーンでは発行されるコマンド列がこの機能の追加前と完全に同一</b>になり、非回帰が構造的に保証される
+(実測でもBistro Exteriorの3D描画領域32万画素が修正前と完全一致した)。半透明パスは奥から手前への
+描画順が正しさの前提で並べ替えられないため、この「必要になった時点で切り替える」方式が必須になる。
 </p>
 </section>
 
@@ -902,9 +1000,15 @@ Infoログで明示します(事実と異なる精度を主張しないため)�
 </p>
 
 <h3>11.6 影を持たない理由とSSILへの波及</h3>
+<p class="note">
+<strong>【18章で更新】</strong> この節は複数ライト導入時点の記述です。その後、シャドウマップを増やさずに
+深度バッファをレイマーチする<strong>スクリーンスペースシャドウ</strong>でポイント/スポットライトの影を
+出せるようにしました(<a href="#sss-tiled-lights">18章</a>)。以下の「シャドウを落とさない」は
+現在は当てはまりません。SSILへ自動的に波及するという後半の説明は現在も有効です。
+</p>
 <p>
 ポイント/スポットライトはシャドウを落としません(今回のスコープ外)。既存の平行光シャドウ
-(2048x2048のシャドウマップ1枚)はそのままです。一方で、<code>SSIL_VisibilityBitmask.hlsl</code>は
+(2048x2048×4スライスの<code>Texture2DArray</code>によるカスケードシャドウ)はそのままです。一方で、<code>SSIL_VisibilityBitmask.hlsl</code>は
 直接光パスの出力(t2)を間接光の放射源としてサンプルするため、<strong>新規ライトは既存コードの
 変更なしに自動的にSSILの間接拡散光へ波及します</strong>(直接光パスの出力に太陽+ポイント/
 スポットライトの合計が乗っているため)。
@@ -960,6 +1064,12 @@ Rangeの推定はglTFのノードメタデータ<code>PBR_LightRange</code>(<cod
 </p>
 
 <h3>11.8 CPU側ライトカリングは今回不要</h3>
+<p class="note">
+<strong>【18章で更新】</strong> 「CPU側の」フラスタムカリングが効かないという以下の判断は現在も有効です
+(全画面ディファードである以上、フラスタム内のライトについてはCPU側で削れることが無いため)。
+その後、<strong>GPU側のタイルベースのライトカリング</strong>を導入し、ピクセルあたりの走査対象を
+そのタイルへ届くライトだけに絞れるようにしました(<a href="#sss-tiled-lights">18章</a>)。
+</p>
 <p>
 全画面ディファードなので、フラスタムカリングは「容量(<code>kMaxLights</code>)を超えたときどれを
 残すか」以外には効果がありません(フラスタム内のライトについてはコストが変わらないため)。
@@ -979,9 +1089,18 @@ LUTテクスチャ2枚を要求し、<code>kTextureSlotCount = 7</code>に対し
 実装する際は<strong><code>DistributionGGX(NdotH, roughness)</code>が引数を内部で2乗する
 実装</strong>である点に注意してください。ラフネス補正後の<code>alphaPrime</code>ではなく
 <code>sqrt(alphaPrime)</code>を渡す必要があります。</li>
-<li><strong>タイル/クラスタカリング</strong>: 構造化バッファが入ったので、あとはコンピュート用
-ルートシグネチャのSRVスロット拡張(<code>kComputeSrvSlotCount = 4</code>ではG-Buffer4枚+
-ライトリストで足りない)と、<code>m_DirectLightTexture</code>のRTV+UAV両対応があれば載ります。
+<li><strong>タイル/クラスタカリング</strong>:
+<span class="note-inline"><strong>【18章で実装済み】</strong></span>
+タイルベースのカリングを実装しました(<a href="#sss-tiled-lights">18章</a>)。
+実際に必要だったのは、ここで挙げていた「SRVスロット拡張」と
+「<code>m_DirectLightTexture</code>のRTV+UAV両対応」ではなく、
+<strong>コンピュートが書いてピクセルシェーダがSRVで読めるバッファ種別</strong>
+(<code>BufferUsage::StructuredRW</code>)の新設と、
+コンピュートから構造化バッファをSRVで読む<code>SetComputeShaderResourceBuffer</code>の追加でした。
+カリングCSが読むのはライトリストと深度の2本だけなので<code>kComputeSrvSlotCount = 4</code>のままで足り、
+出力もライトグリッド用の専用バッファなので直接光テクスチャをUAV化する必要もありませんでした
+(18.9節)。クラスタ(深度方向の分割)は未実装で、タイルごとの深度範囲による
+スラブ判定で代用しています。
 </li>
 </ul>
 </section>
@@ -1107,7 +1226,8 @@ AO率と乗算するだけで、鏡面の間接光はSSR(画面内に映るも�
 HLSLはリソースを動的にスライス選択できないため、コンピュートシェーダーからキューブマップの
 各面へ書き込むには面ごとに個別のUAV(<code>Texture2DArray</code>ビュー、要素数1)を張り、
 C++側(<code>KurenaiEngine3D::Render</code>のIBLBakeパス)が面ごとに1回ずつディスパッチする
-(カスケードシャドウマップが各カスケードの深度パスを個別に描画するのと同じ制約・同じ対処)。
+(カスケードシャドウマップも同じ手法を採っており、スライスごとに個別のDSVを張って1パス=1スライスで
+描き込んでいる。4.1節参照)。
 どの面を処理するかは<code>IBLFaceConstants.Face</code>(D3D標準の面順: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5)
 で渡し、<code>IBLConvolve.hlsl</code>の<code>CubeFaceDirection(face, uv)</code>がその面・
 テクセルが表す方向を計算する。
@@ -1135,10 +1255,16 @@ C++側(<code>KurenaiEngine3D::Render</code>のIBLBakeパス)が面ごとに1回�
 (128,64,32,16,8,4)のミップチェーンを持つ(面×ミップの組み合わせごとに1回ずつディスパッチ)。</li>
 </ul>
 <p>
-スカイボックスは実行時に変化しない静的アセットのため、この3つはいずれも
+スカイボックスは実行時に変化しない静的アセットのため、これらは
 <strong>起動後最初のフレームでのみ</strong>1回だけ実行する(<code>KurenaiEngine3D::Render</code>の
 <code>m_IBLBaked</code>フラグ、通常のRenderGraphパスとして登録され毎フレームの仕組みをそのまま使う)。
 以降は焼き直さない。
+</p>
+<p>
+ただし<b>拡散イラディアンスだけは既定の描画経路から外れており、通常は焼かれない</b>。
+実際の拡散イラディアンスはプリフィルタ済み鏡面の最終ミップ(roughness = 1)から得ている。
+これはコサイン畳み込みへ厳密に退化するため専用マップと同じ値を与えるからで、詳しい導出と
+検証結果、および専用マップを削除せず検証経路として残してある理由は14.10節を参照。
 </p>
 
 <h4>14.2.1 BRDF積分LUTのサンプラーをWrapからClampへ直した経緯</h4>
@@ -1365,15 +1491,16 @@ DX12はグラフィックス・コンピュートで同じサンプラーヒー�
 最終合成パスはG-Buffer法線(拡散イラディアンス・鏡面の方向を求めるのに必要)とIBLの3テクスチャを
 新たに読むため、t0〜t6(既存7枚)にt7(Normal)・t8(Irradiance、TextureCube)・
 t9(PrefilteredEnv、TextureCube)・t10(BRDFLUT)を追加し11枚になった。DX12は全パイプラインステートで
-共有する固定サイズのSRVディスクリプタテーブルを使う設計(4章のシャドウカスケード統合時と同じ制約)
+共有する固定サイズのSRVディスクリプタテーブルを使う設計(全パスが同じスロット数を共有するという制約)
 のため、<code>DX12CommandList::kTextureSlotCount</code>と<code>DX12Device.cpp</code>側の同名定数を
 9(t0〜t8)から11(t0〜t10)へ拡張した。
 </p>
 <p>
 その後、直接光パス(<code>DirectLighting.hlsl</code>)もBRDF積分LUTを読むようになった
 (14.9節のエネルギー補正で<code>Ess = brdf.x + brdf.y</code>が必要なため)。このパスは
-t0〜t7がG-Buffer+シャドウカスケード、<b>t8がライトリストの<code>StructuredBuffer</code></b>で
-埋まっているため、LUTは<code>t9</code>に置いた。使用スロットは10枚で既存の
+t0〜t3がG-Buffer、t4がシャドウマップ配列(<code>Texture2DArray</code>。4.1節。当時はt4〜t7の4枚だった)、
+<b>t8がライトリストの<code>StructuredBuffer</code></b>で
+埋まっているため、LUTは<code>t9</code>に置いた。使用スロットは既存の
 <code>kTextureSlotCount = 12</code>に収まるため、上限の再拡張は不要だった。
 RenderGraphの<code>.Reads</code>へ<code>m_BRDFLUTTexture</code>を挙げることで、
 このLUTのWriterであるIBLBakeパスより後に自動的に順序付けられる。
@@ -1385,6 +1512,14 @@ Render Targetsパネルの「IBL - Irradiance」「IBL - Prefiltered Specular」
 専用のDebugCubeTexture(t1)を追加し、背景スカイの表示(1章)と同じ要領で現在のカメラ位置から
 各ピクセル方向へのレイを再構成してキューブマップをサンプルする(Present.hlsl Mode 9)。
 右クリックドラッグで視点を回せば球面全体を見回して確認できる。
+</p>
+<p>
+この「t0は<code>Texture2D</code>固定なので他のディメンションを表示できない」問題は、
+その後カスケードシャドウマップを<code>Texture2DArray</code>へ統合した際(4.1節)にも同じ形で現れた。
+対処も同じで、専用のDebugArrayTexture(<code>t2</code>)と表示スライス指定
+(<code>PresentConstants.ArraySlice</code>)を追加し、Mode 10として深度をMode 1と同じ要領で
+グレースケール表示している。Render Targetsパネルの「Shadow Map」+「Shadow Cascade」スライダーの
+組み合わせは従来どおり動作する。
 </p>
 
 <h3>14.5 スペキュラオクルージョンと夜間の扱い</h3>
@@ -1622,7 +1757,7 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 どこかで不整合が生じるリスクが上がる</li>
 </ul>
 
-<h4>14.9.5 SSRを対象外とした判断(<a href="#ssrprobe">17章</a>で解消済み)</h4>
+<h4>14.9.5 SSRを対象外とした判断(<a href="#ssrprobe">20章</a>で解消済み)</h4>
 <p>
 <code>SSR.hlsl</code>の反射の重みは<code>reflectivity = max(FresnelSchlick(N&middot;V, F0))</code>という
 アドホックなスカラーで、方向アルベドではない。Kulla-Contyの補正式は「乗算先が単一散乱の方向
@@ -1632,7 +1767,7 @@ IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>の
 より上でしか補正は意味を持たないが、その領域では<code>roughnessFade</code>がゼロに落ちる。
 </p>
 <div class="note">
-<b>この節は現在の実装には当てはまらない。</b><a href="#ssrprobe">17章</a>でSSRを
+<b>この節は現在の実装には当てはまらない。</b><a href="#ssrprobe">20章</a>でSSRを
 <b>加算</b>から<b>環境の放射輝度の差し替え</b>へ作り直し、係数には
 <code>SpecularIBLWeight</code>(split-sum近似+マルチスキャッタリング補正)を
 DeferredLightingと共有して使うようにした。アドホックなスカラーも二重計上も無くなっている。
@@ -1733,7 +1868,7 @@ Furnace Testは「球と背景の明るさが厳密に一致するか」を見�
 <tr><td><code>[Scene] ScreenSpaceReflection</code></td><td><code>true</code></td>
 <td>当初は<code>false</code>だった。SSRが鏡面IBLへ反射色を<b>加算</b>する設計で、有効にすると
 球が背景より<b>明るく</b>なり検証が成立しなかったため(14.9.5節で述べた二重計上が、この検証で
-実際に目に見える形で現れた)。<a href="#ssrprobe">17章</a>で加算をやめて差し替えにしたことで
+実際に目に見える形で現れた)。<a href="#ssrprobe">20章</a>で加算をやめて差し替えにしたことで
 二重計上が解消し、SSR有効でも3Dシーンの画素が1つも変わらないことを確認したので有効へ戻した。
 現在このシーンは<b>SSRの合成が壊れていないことの回帰テストも兼ねる</b></td></tr>
 </table>
@@ -1748,6 +1883,172 @@ Furnace Testは「球と背景の明るさが厳密に一致するか」を見�
 エネルギー補正は物理的な正しさの底上げにとどまる。効果が最大化する「粗い金属」を現行のアセットは
 一つも持っていないため、将来<code>metallicFactor = 1.0</code>のマテリアルを追加した時点で
 初めて視覚的に意味を持つ。
+</p>
+
+<h3>14.10 拡散イラディアンスをプリフィルタ済み鏡面の最終ミップで代替する</h3>
+<p>
+拡散イラディアンス(<code>CSIrradiance</code>)は3つの畳み込みの中で最も重く、
+32&times;32&times;6面 &times; 1テクセルあたり約15,876サンプル = <b>約9,750万サンプル</b>を消費する
+(プリフィルタ済み鏡面の約3倍)。スカイボックスが静的な現状では起動時の1フレームで済むため
+実害は小さいが、将来キューブマップを実行時に焼き直す用途(ローカル反射プローブ等)では
+プローブ1個ごとにこのコストが乗る。そこで<b>専用のイラディアンスマップを廃止し、
+プリフィルタ済み鏡面の最終ミップ(roughness = 1)で代替できないか</b>を検証した。
+</p>
+
+<h4>14.10.1 なぜ等価になるのか</h4>
+<p>
+<code>CSPrefilter</code>はKaris 2013に従い<code>V = R = N</code>を仮定している(14.2節)。
+この仮定の下でroughness = 1(&alpha; = 1)にすると、GGXインポータンスサンプリングの実効カーネルは
+<b>コサイン畳み込みへ厳密に退化する</b>。近似ではなく等式である。
+</p>
+<ol>
+<li><code>ImportanceSampleGGX_P</code>の<code>cosθ_H = sqrt((1-ξ_y)/(1+(a²-1)ξ_y))</code>は
+a = 1で<code>sqrt(1-ξ_y)</code>となり、ハーフベクトルHはN周りの<b>コサイン分布</b>になる</li>
+<li><code>L = 2(V·H)H - V</code>でV = Nなので<code>N·L = 2cos²θ_H - 1 = cos(2θ_H)</code>、
+すなわち<b>θ_L = 2θ_H</b>(方位角φは保存される)</li>
+<li>重み<code>NdotL = cos(2θ_H)</code>が正になるのはθ_H &lt; 45&deg;で、これがちょうど
+θ_L &lt; 90&deg;(法線半球)に対応する。半球の外は自然に棄却される</li>
+<li>θ_Lへ変数変換すると<code>cosθ_H・sinθ_H dθ_H = (1/4)sinθ_L dθ_L</code>となり、
+実効カーネルは<code>cosθ_L・sinθ_L dθ_L dφ</code> = コサイン畳み込みそのものになる</li>
+</ol>
+<p>
+さらに<b>格納される値も一致する</b>。プリフィルタのNdotL重み付き平均は
+<code>Σ L・NdotL / Σ NdotL = ∫L cosθ dω / ∫cosθ dω = E(N)/π</code>。
+一方<code>CSIrradiance</code>は<code>PI * Σ(L cosθ sinθ) / sampleCount</code>を書き込むが、
+グリッド刻みが<code>ΔθΔφ = π²/N</code>なので<code>Σ ≈ E(N)・N/π²</code>、したがって
+<code>π・Σ/N = E(N)/π</code>。<b>両者は同じ量E(N)/πを格納している</b>
+(この「1/πを畳み込み側で相殺済み」という規約自体は14.2節のとおりで、
+<code>DeferredLighting.hlsl</code>は追加のπ処理なしにalbedoへ直接乗算できる)。
+</p>
+
+<h4>14.10.2 唯一の差は解像度とサンプル数</h4>
+<p>
+プリフィルタ済み鏡面は1枚のテクスチャのミップチェーンであり、roughness &rarr; ミップ番号は
+<code>mip / (kIBLPrefilterMipLevels - 1)</code>の線形固定(<code>DeferredLighting.hlsl</code>が
+<code>roughness * ShadowParams.y</code>でハードウェアの三線形補間へそのまま載せるための設計)。
+そのため<b>roughness = 1は必ず最終ミップに焼かれ、その解像度は<code>128 &gt;&gt; 5 = 4</code>に
+構造的に決まる</b>。解像度だけを独立に選ぶことはできない。
+</p>
+<table>
+<tr><th>mip</th><th>解像度</th><th>roughness</th></tr>
+<tr><td>0</td><td>128&times;128</td><td>0.0</td></tr>
+<tr><td>1</td><td>64&times;64</td><td>0.2</td></tr>
+<tr><td>2</td><td>32&times;32</td><td>0.4</td></tr>
+<tr><td>3</td><td>16&times;16</td><td>0.6</td></tr>
+<tr><td>4</td><td>8&times;8</td><td>0.8</td></tr>
+<tr><td>5</td><td><b>4&times;4</b></td><td><b>1.0</b></td></tr>
+</table>
+<p>
+専用イラディアンスマップは32&times;32なので、面あたり1024テクセル &rarr; 16テクセルと64分の1になる。
+ただし<b>情報量としては足りている</b>: Ramamoorthi &amp; Hanrahan (2001)が示すとおりコサイン畳み込みは
+l &ge; 3の球面調和帯域を1%未満まで減衰させるため、イラディアンスは実質9係数の帯域制限信号であり、
+4&times;4&times;6 = 96テクセルは自由度として十分に足りる。したがって懸念は情報量ではなく
+<b>(a) バイライナー再構成による面取り</b>と<b>(b) 1テクセルあたり256サンプルのモンテカルロ由来の
+ブロッチ</b>の2点に絞られ、これは机上では決着しないため実機A/Bで判断した。
+</p>
+
+<h4>14.10.3 実装: 既定経路の切り替えと検証経路の温存</h4>
+<p>
+検証の結果(14.10.4)を受けて、<b>既定の描画経路をプリフィルタ済み鏡面の最終ミップにし、
+専用イラディアンスマップは既定経路から外した</b>。ただし
+<code>CSIrradiance</code>・<code>m_IrradianceTexture</code>・
+<code>m_IrradiancePipelineState</code>・デバッグ表示はいずれも<b>削除せずそのまま残してある</b>
+(いつでも両経路を突き合わせて検証できる状態を保つため)。
+<code>FrameConstants</code>末尾へ<code>IBLParams</code>を追加し(末尾追加なので既存シェーダの
+オフセットは変わらない)、その<code>x</code>で取得元を選ぶ。
+</p>
+<pre><code>const float3 irradiance = (IBLParams.x &gt; 0.5f)
+    ? IrradianceTexture.Sample(MaterialSampler, N).rgb                              // 検証用の従来経路
+    : PrefilteredEnvTexture.SampleLevel(MaterialSampler, N, ShadowParams.y).rgb;    // 既定</code></pre>
+<p>
+畳み込みの実行も分離した。従来は<code>IBLBake</code>パス1つがBRDF LUT・拡散イラディアンス・
+プリフィルタ済み鏡面の3つをまとめて焼いていたが、拡散イラディアンスだけを
+<code>IBLIrradianceBake</code>という別パスへ切り出し、<b>検証が要求されたときにだけ登録する</b>
+ようにしている。
+</p>
+<pre><code>const bool needIrradianceBake =
+    m_IBLUseDedicatedIrradiance || m_DebugView == DebugView::IBLIrradiance;
+if (needIrradianceBake &amp;&amp; !m_IBLIrradianceBaked) { /* パスを登録 */ }</code></pre>
+<p>
+つまり<b>通常の起動・描画では約9,750万サンプルの<code>CSIrradiance</code>が一度も走らない</b>。
+ImGuiの「Use Dedicated Irradiance Map」トグルを入れるか、Render Targetsで
+イラディアンス表示を選んだ時点で初めて焼かれる。RenderGraphが<code>Reads</code>/<code>Writes</code>
+から自動で順序付けるため(2章)、トグルを入れたその同じフレームでLightingパスより先に実行され、
+1フレームだけ古い内容が見えるようなことはない。焼き済みフラグは
+<code>m_IBLBaked</code>とは別の<code>m_IBLIrradianceBaked</code>で管理し、スカイボックス差し替え時は
+両方を倒す(検証マップも古いスカイボックス由来になるため)。
+</p>
+<p>
+<b>実装上の注意</b>: HLSLのcbufferレイアウトは宣言順で決まり途中のフィールドを飛ばせない。
+<code>DeferredLighting.hlsl</code>は<code>ActiveLightCount</code>(半透明パス専用)を宣言して
+いなかったため、<code>IBLParams</code>のオフセットを合わせる目的でこれを未使用のまま宣言してある。
+</p>
+<p>
+<code>ShadowParams.y</code>(= ミップ数 - 1 = 最終ミップ番号)は両シェーダで既に利用可能なため
+新しい定数は要らない。分岐は定数バッファ値によるuniform分岐なので発散コストはない。
+不透明(<code>DeferredLighting.hlsl</code>の<code>EvaluateIBL</code>)と
+半透明(<code>Transparent.hlsl</code>の<code>EvaluateIBLSplit</code>)の両方へ同じ切り替えを入れ、
+片方だけ取得元が食い違わないようにしている。
+</p>
+
+<h4>14.10.4 検証結果</h4>
+<p>
+DX11・DX12の両方で、トグルのON/OFFを実際に切り替えた同一カメラのスクリーンショットを
+画素単位で比較した(ビューポート領域を2画素間隔でサンプル、各17万点)。
+</p>
+<table>
+<tr><th>シーン</th><th>バックエンド</th><th>最大差</th><th>平均差</th><th>差のある画素</th></tr>
+<tr><td>White Furnace Test</td><td>DX11</td><td><b>0 / 255</b></td><td>0</td><td>0%</td></tr>
+<tr><td>Bistro Exterior</td><td>DX11</td><td>2 / 255</td><td>0.07</td><td>7.2%</td></tr>
+<tr><td>Bistro Exterior</td><td>DX12</td><td>2 / 255</td><td>0.05</td><td>5.3%</td></tr>
+<tr><td>Bistro Interior</td><td>DX11</td><td>4 / 255</td><td>0.24</td><td>20.2%</td></tr>
+</table>
+<p>
+一様放射輝度のWhite Furnace Testでは<b>完全に画素一致</b>し、14.10.1の導出が実装レベルでも
+成立していることが確認できた(L = 1一様なら両経路ともE(N)/π = 1になる。この検証は導出か実装の
+どちらかが間違っていれば必ず落ちるため、最も強い判定になる)。方向性のある実スカイボックスでも
+最大差は2〜4 / 255にとどまり、8bit表示の1LSB程度で知覚できない。屋内のBistro Interiorで差が
+やや大きいのは、直接光が乏しく拡散IBLの寄与が支配的になるぶん4&times;4と32&times;32の違いが
+効きやすいためだが、それでも最大4 / 255である。<b>懸念していた面取り・ブロッチはいずれの
+シーンでも視認できなかった。</b>
+</p>
+<p>
+<b>未検証の項目</b>: Render Targetsデバッグ表示でイラディアンスマップと最終ミップを
+直接見比べる比較は、ミップレベルスライダーがパネル幅でクリップされており
+<code>PostMessage</code>ベースの自動操作で最終ミップまで動かしきれなかったため行っていない。
+最終画像での比較が上表のとおり決着しているため、マップ単体の比較は診断目的にとどまる。
+IBLBakeパスのGPU実測値(ms)も、このパスが起動直後の1フレームにしか存在せずスクリーンショットで
+捕捉できなかったため記録していない。現時点で根拠にできるのは前述のサンプル数比のみである。
+</p>
+
+<h4>14.10.5 なぜ削除ではなく「既定から外す」に留めたか</h4>
+<p>
+専用イラディアンスマップは既定の描画経路から外したが、リソース・シェーダ・パイプラインステート・
+デバッグ表示は削除していない。<b>これは意図的な判断である</b>。
+</p>
+<ul>
+<li>この置き換えの正しさは「roughness = 1のGGXがコサイン畳み込みへ退化する」という
+<code>V = R = N</code>仮定に依存した性質の上に成り立っている。将来
+<code>CSPrefilter</code>のサンプリング(例えば14.2節で未実装と述べたdistribution-based
+mip selectionの導入や、V依存の伸びを扱う変更)に手を入れると、この等価性が静かに崩れうる。
+そのとき<b>「正しいコサイン畳み込み」を即座に隣に並べて突き合わせられること</b>が、
+回帰に気付く唯一の実用的な手段になる</li>
+<li>残しても通常の描画コストはゼロである。畳み込みは検証が要求されたときにしか実行されず
+(14.10.3)、常時のコストは32&times;32&times;6面 &times; RGBA16F = 48KBのVRAMと
+SRVスロット1本だけで、いずれも実測できる負荷ではない</li>
+</ul>
+<p>
+一方で<b>目的だった実行時コストの削減は達成できている</b>。通常の起動・シーン切り替えでは
+<code>CSIrradiance</code>が一度も走らないため、実行時にキューブマップを焼き直す用途
+(ローカル反射プローブ等)ではプローブ1個あたり約9,750万サンプル
+&mdash; 3つの畳み込みのうち最も重い、プリフィルタ済み鏡面の約3倍 &mdash; を丸ごと省ける。
+</p>
+<p>
+<b>将来SRVスロットが逼迫した場合</b>にのみ、完全削除(<code>m_IrradianceTexture</code> /
+<code>CSIrradiance</code> / <code>m_IrradiancePipelineState</code> / デバッグ表示
+<code>IBLIrradiance</code>の削除)を検討する。削除すればDeferredはt8が空き、半透明は
+<code>kTextureSlotCount</code>が12&rarr;11になる(DX12の半透明パスは<code>DrawIndexed</code>ごとに
+全スロットを再設定する設計(16章)のため、ディスクリプタコピーも1本ぶん減る)。
 </p>
 </section>
 
@@ -1823,8 +2124,9 @@ Write-after-Writeの依存関係から自動的にその後に置かれる。SSR
 <p>
 半透明フォワードパスはDeferredの直接光パス(<code>DirectLighting.hlsl</code>)を経由しないため、
 太陽(平行光、カスケードシャドウ付き)とt8のライトリスト(ポイント/スポット、影なし)によるPBR
-直接光の計算式・PCSS(Percentage Closer Soft Shadows)のシャドウサンプリングを<code>Transparent.hlsl</code>
-側にそのまま複製している。両ファイルはフルスクリーンパス(<code>DirectLighting.hlsl</code>)と
+直接光の計算式を<code>Transparent.hlsl</code>
+側にそのまま複製している(PCSSのシャドウサンプリングも当初は複製していたが、後述のとおり現在は
+共有ヘッダー化済み)。両ファイルはフルスクリーンパス(<code>DirectLighting.hlsl</code>)と
 頂点ごとに個別描画するフォワードパス(<code>Transparent.hlsl</code>)という異なる呼び出し形態を
 持つため、当初は共有ヘッダーを設けて<code>DirectLighting.hlsl</code>側を書き換えるより、
 既存のコードをそのまま複製する方が既存パスへの影響がなく安全と判断した。
@@ -1838,8 +2140,18 @@ Smith可視性項とスペキュラのエネルギー補正を持ち、<code>Dir
 なければエネルギー補正が成り立たないため、<b>複製ではなく共有が要件</b>になったという事情がある。
 </p>
 <p>
-一方、<code>D</code>項(<code>DistributionGGX</code>)・フレネル項・PCSSのシャドウサンプリングは
-依然として両ファイルに複製されている(呼び出し形態やバインドされるリソースに依存するため)。
+その後、PCSSのシャドウサンプリングも<code>ShadowSampling.hlsli</code>(4つ目の共有ヘッダー)へ
+切り出した。カスケードシャドウマップを<code>Texture2DArray</code>へ統合した際(4.1節)、
+サンプリング側もあわせて書き換える必要があり、そのタイミングで重複を解消している。
+バインドされるリソース(<code>ShadowMapArray</code>、<code>t4</code>)もヘッダー側で宣言しているため、
+両ファイルは<code>#include</code>するだけでよい。
+<b>この共有ヘッダーは<code>FrameConstants</code>(<code>CascadeViewProj</code>/<code>CascadeSplits</code>/
+<code>ShadowParams</code>)と<code>DataSampler</code>の宣言より後で<code>#include</code>する必要がある</b>
+(既存の共有ヘッダーと同様、インクルードガードは持たない)。
+</p>
+<p>
+一方、<code>D</code>項(<code>DistributionGGX</code>)・フレネル項は依然として両ファイルに
+複製されている(呼び出し形態やバインドされるリソースに依存するため)。
 <b>これらの物理式を変更する場合は両方を同時に修正する必要がある。</b>
 </p>
 <h3>15.6 有効ライト数の受け渡し(<code>ActiveLightCount</code>)</h3>
@@ -1934,6 +2246,8 @@ BRDF積分LUT)をこのパスにもバインドし(<code>t9</code>/<code>t10</co
 このバインドにより半透明パスが使うSRVスロットはマテリアル4枚 + シャドウ4枚 + ライトリスト +
 IBL 3枚の計12個になったため、DX12のルートシグネチャの
 <code>kTextureSlotCount</code>を11から12へ引き上げた
+(その後シャドウ4枚は<code>Texture2DArray</code>1枚に統合され実使用は9個になったが、
+<code>kTextureSlotCount = 12</code>は余裕としてそのまま維持している。4.1節参照)
 (<code>DX12CommandList.h</code>と<code>DX12Device.cpp</code>の2箇所。
 シェーダー可視ディスクリプタヒープの容量は<code>kTextureSlotCount</code>から算出されるため
 自動的に追随する)。
@@ -1971,8 +2285,560 @@ Exteriorは4個)。</li>
 </ul>
 </section>
 
+<section id="rhi-binding">
+<h2>16. RHIのバインド寿命(DX11/DX12の挙動統一)</h2>
+
+<p>「DX12だけ描画がおかしい」の大半は、DX11とDX12で<strong>バインドの寿命</strong>の意味が違うことが原因だった。
+このため、RHIの利用者から見た寿命が両バックエンドで完全に同じになるよう実装を揃えてある。
+呼び出し側(<code>KurenaiEngine3D</code>など)にDX12固有の呼び出し順や再バインド義務は一切残っていない。</p>
+
+<h3>16.1 何が違っていたか</h3>
+
+<p>DX11の<code>ID3D11DeviceContext</code>はステートフルで、<code>PSSetShaderResources</code>や
+<code>PSSetConstantBuffers</code>で張ったバインドは上書きするまで残る。DrawをまたいでもPSOを切り替えても消えない。</p>
+
+<p>一方DX12には次の2つの事情がある。</p>
+
+<ul>
+<li><code>SetGraphicsRootSignature</code>は<strong>それまでのルート引数をすべて無効化する</strong>。
+<code>SetPipelineState</code>は毎回これを呼ぶため、b0/b1もディスクリプタテーブルも失われる</li>
+<li>KurenaiEngineは1フレームぶんのコマンドをすべて記録してから1回だけ実行する設計なので、
+シェーダ可視ヒープの同じ位置を使い回すと、GPUが実際に描画する時点では「そのフレーム最後に書いた内容」に
+全描画が上書きされてしまう。そのため<strong>描画のたびに新しいディスクリプタテーブルのブロックを払い出す</strong>必要がある</li>
+</ul>
+
+<p>旧実装は後者を「今回<code>SetTexture</code>されたスロットだけをコピーする」方式で実現しており、
+再セットしなかったスロットは払い出したブロックの<strong>前世代の使い回しディスクリプタ(未初期化)</strong>を指していた。
+これがDX11との挙動差の正体で、<code>Transparent</code>パスには「t0〜t11の12スロット全てを
+<code>DrawIndexed</code>ごとに再設定する」という手動のワークアラウンドが入っていた。</p>
+
+<h3>16.2 統一後の設計</h3>
+
+<p><code>DX12CommandList</code>が「DX11のイミディエイトコンテキストが持っているのと同じ状態」を
+<strong>シャドウコピー</strong>として保持し、ルート引数が無効化されるたびに自動で張り直す。
+この方式はもともとサンプラーテーブル(<code>m_CurrentSamplerSetBase</code>)で導入したもので、
+それをSRVテーブルと定数バッファへ広げた形になる。</p>
+
+<table>
+<thead><tr><th>対象</th><th>シャドウ</th><th>張り直す契機</th></tr></thead>
+<tbody>
+<tr><td>定数バッファ b0/b1</td><td><code>m_CurrentRootCbv[2]</code>(GPU仮想アドレス)</td><td><code>SetPipelineState</code></td></tr>
+<tr><td>SRVテーブル t0〜t11</td><td><code>m_PendingSrvHandles[12]</code></td><td><code>Draw</code>/<code>DrawIndexed</code>直前(<code>FlushPendingSrvWrites</code>)</td></tr>
+<tr><td>サンプラーテーブル s0〜s2</td><td><code>m_CurrentSamplerSetBase</code></td><td><code>SetPipelineState</code></td></tr>
+<tr><td>コンピュート b0/b1・t0〜t3・u0〜u3</td><td>同名の<code>Compute</code>版</td><td><code>SetComputePipelineState</code> / <code>Dispatch</code>直前</td></tr>
+</tbody>
+</table>
+
+<p>要になっているのが<strong>nullディスクリプタ</strong>である。<code>DX12Device</code>が初期化時に
+<code>CreateShaderResourceView(nullptr, ...)</code> / <code>CreateUnorderedAccessView(nullptr, ...)</code> で
+「読むと0が返る」ディスクリプタを1つずつ作り、<code>DX12CommandList</code>のコンストラクタが
+シャドウ配列の全スロットをこれで初期化する。この結果:</p>
+
+<ul>
+<li>払い出したブロックのどの位置も未初期化のまま残らない(毎回全スロットをコピーするため)</li>
+<li>一度もバインドしていないスロットを読むと0が返る = DX11の未バインドスロットと同じ</li>
+<li>「どのスロットが設定済みか」を表すマスクが不要になり、そのクリア漏れ/クリアしすぎという
+不具合クラスごと無くなった(この不具合はコンピュート側でも一度発生している。14.7節)</li>
+</ul>
+
+<h3>16.3 レンダーターゲットになったテクスチャの自動アンバインド</h3>
+
+<p>D3D11のドライバは、同一リソースがSRVとRTVに同時バインドされると自動でSRV側を解除する。
+DX12にはこの保護がないため、<code>SetRenderTarget</code>/<code>SetRenderTargets</code>で
+バインドするテクスチャのSRVがシャドウに残っていればnullディスクリプタへ戻すようにした
+(<code>DX12CommandList::UnbindSrvSlotsBoundTo</code>)。DX11と挙動が揃うと同時に、
+<code>RENDER_TARGET</code>状態のリソースを指すディスクリプタがテーブルに残るというDX12固有の危険も断てる。</p>
+
+<p>コンピュートのUAVについては逆方向の統一を行っている。DX11は<code>Dispatch</code>直後に
+<code>CSSetUnorderedAccessViews</code>でnullを張って全スロットを解除する(同一リソースをSRVとUAVに
+同時バインドできない制約への対処)ため、DX12も<code>Dispatch</code>直後にUAVスロットをnullへ戻す。
+コンピュートのSRVはDX11も解除しないので張りっぱなしのままにしてある。</p>
+
+<h3>16.4 残っている唯一の呼び出し順の制約</h3>
+
+<p><code>UpdateBuffer</code> → <code>SetConstantBuffer</code> の順で呼ぶこと。これはルート引数の話ではなく、
+DX12の定数バッファがリング状に複数コピーを持ち<code>UpdateBuffer</code>が書き込み先を次のスロットへ
+進めるためで、先にバインドすると1つ前のスロット(更新前の内容)を指したままになる。
+DX11はイミディエイト実行のためこの制約がないが、両バックエンドで同じ順序で書く。</p>
+
+<h3>16.5 リングの上限とその検出</h3>
+
+<p>CPUは<code>kFrameCount</code>フレームぶん先行して記録するため、1フレームで安全に使えるリングは
+容量の<code>kFrameCount</code>分の1までである。これを超えるとGPUがまだ読んでいるスロットを上書きし、
+描画結果が静かに壊れる(定数バッファならメッシュの変換行列、構造化バッファならライトリスト)。</p>
+
+<p><code>DX12Buffer::CheckRingOverflow</code>が<code>DX12Device::GetFrameStamp()</code>を使って
+フレーム単位の書き込み回数を数え、上限を超えたらログを出す(バッファごとに1回だけ)。
+読み取り専用構造化バッファのステージングリングは元々<code>kFrameCount + 1</code>=3しかなく、
+<code>m_LightBuffer</code>がDirectLightパスとTransparentパスで1フレームに2回更新されるため
+既に上限を超えていた。現在は「1フレームあたりの更新回数の上限×<code>kFrameCount</code>+1」に拡張してある。</p>
+
+<h3>16.6 その他のDX11/DX12差の是正</h3>
+
+<table>
+<thead><tr><th>項目</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>シザー矩形</td><td>DX11はラスタライザが<code>ScissorEnable=FALSE</code>でクリップしない。DX12は必ず設定が要るため、レターボックスで非整数になるビューポートを左上<code>floor</code>・右下<code>ceil</code>で包む(切り捨てるとDX12だけ右端・下端が1px欠ける)</td></tr>
+<tr><td>DSVフォーマット</td><td>DX12はPSOが申告した<code>DSVFormat</code>と実際にバインドされるDSVが一致していないと仕様違反になる。スワップチェインの深度を<code>D24_UNORM_S8_UINT</code>から<code>D32_FLOAT</code>へ変更して(ステンシルは未使用)オフスクリーン深度と揃え、深度テストは使わないがDSVは張られるパス(Present / 2D / ImGui)向けに<code>PipelineStateDesc::DepthTargetAttached</code>を追加した。<code>HasDepthStencil</code>で兼ねると深度テストまで有効になってしまうため別フラグにしている</td></tr>
+<tr><td>スロット範囲</td><td>DX12は<code>SetConstantBuffer</code>のslotをそのままルートパラメータ番号として使うため、b2以降を渡すとSRV/サンプラーテーブルのルート引数を破壊する。b0〜b1・t0〜t11・コンピュートのt0〜t3/u0〜u3を範囲チェックし、外れたらログを出してスキップする</td></tr>
+<tr><td>無効なビュー</td><td>DX11はRTV/SRVを持たないテクスチャに対してnullptrをバインドして静かに描画をやめるが、DX12は<code>kInvalid</code>(0xFFFFFFFF)から「ヒープ先頭+0xFFFFFFFF×ディスクリプタサイズ」というでたらめなハンドルを作りデバイス削除に至る。<code>DX12Texture::HasSrv()/HasRtv()/HasDsv()</code>で事前に判定し、SRV/UAVはnullディスクリプタで代替、RTV/DSVはログを出してそのターゲットを除外する</td></tr>
+<tr><td>ImGuiのヒープ</td><td><code>ImGui_ImplDX12_RenderDrawData</code>はImGui自身のヒープ上のハンドルを<code>SetGraphicsRootDescriptorTable</code>へ渡すが<code>SetDescriptorHeaps</code>は呼ばない(呼び出し側が事前にバインドしておく規約)。エンジンのヒープを張ったまま呼んでいたためD3D12の仕様違反になっており、<code>DX12ImGuiBackend::Render</code>でImGuiのヒープへ切り替えてから描画し、直後に戻すようにした</td></tr>
+</tbody>
+</table>
+
+<h3>16.7 デバッグレイヤーの指摘をログへ出す</h3>
+
+<p>D3D12デバッグレイヤーの指摘はそのままではデバッガの出力ウィンドウにしか出ず、デバッガを繋がずに
+実行すると気付けない。<code>DX12Device</code>が<code>ID3D12InfoQueue</code>に溜まったメッセージを
+毎フレーム引き取り、<code>KurenaiEngine.log</code>へ警告以上を書き出す(デバッグビルドのみ)。
+上記の不具合はいずれもこの仕組みを入れて初めて可視化できたもの。</p>
+
+<p>ログ行にはメッセージIDを併記してあり、除外したい指摘が出たら<code>DX12Device::Initialize</code>の
+<code>deniedIds</code>へその番号を追加できる。現在除外しているのは実害が無いと確認済みで、かつ
+毎フレーム大量に出てログを埋め尽くす次の2件(実測で1回の起動あたり約2万件)。</p>
+
+<ul>
+<li><code>CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE</code> — レンダーテクスチャを一律<code>{0,0,0,1}</code>で作り
+パスごとに別の色でクリアしているため出る性能上の注意。高速クリア経路には乗らないが結果は正しい。
+用途ごとのクリア色をテクスチャ生成時に指定できるようにすれば解消できるが、RHIのAPI変更を伴うため現状は許容している</li>
+<li><code>CREATERESOURCE_STATE_IGNORED</code>(ID 1328) — バッファはD3D12の仕様上つねに<code>COMMON</code>状態で
+作られるため<code>InitialState</code>が無視される、という通知。仕様通りの動作で対処のしようがない。
+この列挙子はビルドに使っているWindows SDK 10.0.19041のヘッダにまだ存在しないため数値で指定している</li>
+</ul>
+
+<h3>16.8 既知の残る差異</h3>
+
+<ul>
+<li><code>SetTexture</code>が発行する<code>TransitionTo(PIXEL_SHADER_RESOURCE)</code>は、スロットが永続化しても
+再発行されない。16.3節のレンダーターゲット自動アンバインドで主要なケースは塞がるが、
+コンピュートのUAVを経由した状態遷移までは追跡していない</li>
+<li>コンピュートのSRVはDX11同様に張りっぱなしなので、そこにバインドしたテクスチャが破棄されると
+ハンドルが陳腐化する(ヒープインデックスが再利用されるため、クラッシュではなく別リソースを指す)。
+DX11も同じくコンピュートSRVを解除しないため、これは<em>挙動が一致した状態</em>である</li>
+<li><code>DX12Texture::TransitionTo</code>は常に<code>ALL_SUBRESOURCES</code>単位。ミップ/フェイス単位の
+read+writeが同一パスでできない制約はそのまま(Hi-Zダウンサンプルが両ミップをUAVでバインドしている理由)</li>
+</ul>
+
+<h3>16.9 検証方法</h3>
+
+<p>DX11とDX12を同時に起動して同じ操作を行い、スクリーンショットをピクセル単位で比較する。
+<code>Sample3D.exe</code>(既定でDX11)と<code>Sample3D.exe -dx12</code>を別プロセスで立ち上げ、
+「Scenes」パネルから各シーンへ切り替えながら撮り比べる。統一後は
+Bistro Exterior / Interior / Light Test / White Furnace Test / Material Test の全シーンと、
+「Render Targets」のAO/GI表示、ウィンドウリサイズ前後のいずれもピクセル単位で完全一致し、
+<code>KurenaiEngine.log</code>にデバッグレイヤーの指摘が1件も出ないことを確認している。</p>
+</section>
+
+<section id="tonemap-exposure-bloom">
+<h2>17. トーンマッピング・露出・ブルーム</h2>
+
+<p>M7で追加した「画作り基盤」一式。<code>Tonemap.hlsl</code>(カーブ選択・露出適用・ブルーム合成・
+sRGBエンコード・ディザ)、<code>AutoExposure.hlsl</code>(輝度ヒストグラムによる自動露出)、
+<code>Bloom.hlsl</code>(ピラミッド方式のブルーム)の3本で構成される。</p>
+
+<h3>17.1 露出は「ライト強度への事前乗算」のまま、適用だけをトーンマップ段へ寄せる(プリ露出)</h3>
+
+<p>このエンジンは以前から、EV100露出を<code>ComputeSunLighting</code>/<code>MakeGPULight</code>が
+CPU側でライト強度へ直接乗算していた。自動露出を入れるにあたり、この構造をどう扱うかが最大の設計判断だった。</p>
+
+<p>素直に「自動露出の結果をライト強度へ戻す」と2つの問題が出る。1つは<strong>フィードバックループ</strong>で、
+露出が変わるとHDRバッファの値そのものが動き、その値から測った輝度でまた露出が変わる。
+もう1つは<strong>GPU→CPUのリードバック</strong>が必要になることで、同期待ちかフレーム遅延を強いられる。</p>
+
+<p>採ったのは、CPU側の乗算(<code>m_SceneExposureEV100</code>)を<strong>プリ露出</strong>として固定したまま残し、
+自動露出はGPU上だけで完結させる方式である。HDRバッファには常にプリ露出済みの値が流れるので、
+<code>絶対輝度 = バッファの値 ÷ preExposure</code>で元の測光量へ戻せる。ヒストグラムはこの絶対輝度に対して働くため、
+プリ露出をどう設定しても測定結果は変わらない(プリ露出はバッファの数値レンジを<code>R16G16B16A16_Float</code>の
+範囲に収めるための係数でしかなくなる)。</p>
+
+<p>トーンマップ側は、プリ露出EVと自動露出EVの<strong>差</strong>だけを掛ければよい。
+<code>exposure(ev) = 1/(1.2·2^ev)</code>なので<code>exposure(auto)/exposure(pre) = 2^(pre−auto)</code>となり、
+1回の<code>exp2</code>で済む。結果はCPUを経由せず1x2の<code>R32_Float</code>テクスチャに置き、
+トーンマップとブルームが直接読む。リードバックは一切発生しない。</p>
+
+<p>露出の保存先を<code>float4</code>1テクセルではなく<code>R32_Float</code>を2テクセル並べた形にしているのは、
+<code>RWTexture2D</code>からの<strong>型付き読み出しが保証されているのはR32系だけ</strong>だからである
+(それ以外は<code>TypedUAVLoadAdditionalFormats</code>が必要)。texel(0,0)にEV100、texel(1,0)に初期化済みフラグを持ち、
+UAVテクスチャがゼロ初期化されることを利用して「初回だけ順応を飛ばして即座に目標値へ合わせる」判定に使っている。</p>
+
+<h3>17.2 既定のカーブにACESではなくAgXを選んだ理由</h3>
+
+<p>ACES(Narkowicz近似)は飽和した明るい色の色相がシフトすることが知られており、特に赤がオレンジへ寄る。
+Bistro内観は赤い壁が画面の大半を占めるため、この欠点が最も出やすい題材だった。
+AgXはハイライトが色相を保ったまま白へ素直に脱色するので、この用途では素直な絵になる。
+3つとも実装して切り替えられるようにしてあり、Reinhardは「M7以前の見え方」を再現する比較用リファレンスとして残している。</p>
+
+<p>あわせて出力のガンマを<code>pow(color, 1/2.2)</code>の近似から<strong>厳密なsRGB OETF(区分関数)</strong>へ置き換えた。
+テクスチャ側のデコードはハードウェアのsRGB(区分関数)で行われているため、エンコードだけ2.2の冪にすると暗部が系統的にずれる。</p>
+
+<h3>17.3 暗部バンディングの主因は中間バッファの精度ではなく最終8bit量子化だった</h3>
+
+<p>Bistro Interiorの暗部に出ていたバンディングについて、原因を実測で切り分けた。
+同一カメラで撮影し、クライアント領域の<strong>相異なる色数</strong>と、
+走査線上で<strong>同一色が何ピクセル連続するか(バンド幅)</strong>を比較している。</p>
+
+<table>
+<tr><th>構成</th><th>相異なる色数</th><th>バンド幅</th><th>平均輝度(G)</th></tr>
+<tr><td>Reinhard・ディザ無・Legacy 8bitバッファ(M7以前)</td><td>89</td><td>24px</td><td>24.8</td></tr>
+<tr><td>Reinhard・ディザ無・HDRバッファ</td><td>89</td><td>26px</td><td>24.9</td></tr>
+<tr><td>AgX・ディザ無・HDRバッファ</td><td>115</td><td>25px</td><td>10.0</td></tr>
+<tr><td>AgX・<strong>ディザ有</strong>・HDRバッファ</td><td>114</td><td><strong>10px</strong></td><td>8.9</td></tr>
+<tr><td>AgX・ディザ有・HDRバッファ・<strong>自動露出</strong></td><td><strong>202</strong></td><td><strong>7px</strong></td><td>93.7</td></tr>
+</table>
+
+<p>カーブを固定してディザだけをON/OFFすると、階調数は101対102とほぼ変わらないのに
+バンド幅だけが25px→10pxへ落ちる。ディザは階調を増やすのではなく、同一色の連続を崩して
+等高線を見えなくするものなので、この結果は挙動どおりである。
+実装はinterleaved gradient noise(Jimenez 2014)を2つ使った三角分布ノイズを、
+sRGBエンコード後・8bit量子化直前に±1LSBだけ加えるもので、コストは実質ゼロ。</p>
+
+<h3>17.4 中間バッファのHDR化は「最終画像には効かなかった」ことの記録</h3>
+
+<p>EmissiveとAO/GIバッファをHDRフォーマットに変更した。
+このうち<strong>AO/GIバッファのHDR化だけは単体で明確な効果がある</strong>。
+Bistro ExteriorでSSILの間接光バッファを16倍のゲインで表示して階調数を数えると、
+<code>R8G8B8A8_UNorm</code>では10段(値は0,5,11,16,21,27,32,37,43,48と等間隔=量子化の痕跡)なのに対し、
+<code>R16G16B16A16_Float</code>では53段の連続した値になる(約5.3倍)。</p>
+
+<p>ただし<strong>最終画像には差が出ない</strong>。Bistro Interior・Bistro Exterior(SSIL有効)の
+両方でHDR構成とLegacy 8bit構成を撮り比べたが、相異なる色数もバンド幅も測定限界内で一致した
+(例: Exterior+SSILで156対157色、バンド幅18px対18px)。理由は2つある。</p>
+
+<ul>
+<li>SSILの間接光は<code>diffuseColor/π</code>を掛けてから、はるかに大きい直接光+IBLの項へ加算される。
+その時点で量子化誤差は最終8bit出力の1段より小さく薄まる</li>
+<li>17.3のディザリングが残った量子化を隠す</li>
+</ul>
+
+<p>さらにBistro Interior(既定カメラ)では<strong>直接光が実質ゼロ</strong>だった。
+SSILは<code>DirectLightTexture</code>から間接光を集める実装なので、直接光が0なら間接光も0になり、
+AO/GIバッファのRGBチャンネルにそもそも信号が存在しない。
+室内が暗いのは露出の問題ではなく、屋内に届く直接光がないためである(点光源の影が未実装なことと合わせて、
+室内の見た目を決めているのは実質IBLのアンビエントだけになっている)。</p>
+
+<h4>試して取り下げた案: AlbedoのsRGB格納</h4>
+
+<p>G-BufferのAlbedoを<code>R8G8B8A8_UNorm_SRGB</code>にする案も実装して測定したが、<strong>採用しなかった</strong>。
+記録として経緯を残す。</p>
+
+<p>狙いは量子化の細かさだった。同じ8bitでもsRGBカーブで格納すれば符号点が暗部へ寄るため、
+リニア反射率L=0.02で約4.3倍、L=0.01で約6.5倍細かくなる。実在のマテリアルの反射率は
+暗い木材0.05〜0.1、アスファルト0.04、炭0.02〜0.04と大半が暗い側に集まるので、
+平均すれば得になるはずだった。</p>
+
+<p>取り下げた理由は3つある。</p>
+
+<ul>
+<li><strong>狙っていた問題に効かない</strong> — アルベドの量子化は面の中でほぼ一定なので、
+「その面全体がわずかに違う色になる」形で出るだけで縞にはならない。
+17.3のバンディングは照明が滑らかに変化することで生まれるものなので、最初から別の現象を叩いていた</li>
+<li><strong>実測で差が出ない</strong> — Bistro Interior / Exterior(SSIL有効)の両方で
+最終画像への寄与は平均0.03/255。出力も8bitなので、アルベドに入る誤差(最大でも値の0.4%程度)は
+照明計算を通る間に出力1コードより小さくなる</li>
+<li><strong>金属で確実に不利になる</strong> — sRGB格納は<strong>L&gt;0.244では逆に粗くなる</strong>
+(sRGBカーブの傾きが1を超えるため)。そして金属はアルベドバッファの値をF0として使う
+(<code>DeferredLighting.hlsl</code>の<code>F0 = lerp(0.04, albedo, metallic)</code>)。
+金のF0は(1.0, 0.77, 0.34)、アルミは0.91、鉄は0.56で、いずれも確実にその領域に入る</li>
+</ul>
+
+<p>利点が測定で確認できないまま、金属だけ精度が落ちる欠点を抱えることになるため、
+Albedoは両構成ともリニアの<code>R8G8B8A8_UNorm</code>のままにした。
+<code>Format</code>から<code>R8G8B8A8_UNorm_SRGB</code>自体も削除してある(利用箇所が無くなったため)。</p>
+
+<p>これらを主観ではなく数値で比較できるよう、中間バッファの精度構成は
+<strong>実行中に切り替えられる</strong>(<code>BufferPrecision</code>、「Post Processing」パネル)。
+切り替え時はレンダーターゲットを作り直す必要があるが、GPUがまだ参照している可能性があるため
+UI関数の中では実行せず、フラグを立てて<code>Render()</code>の先頭で<code>WaitForGPUIdle()</code>を挟んで処理する。
+あわせてデバッグ表示に輝度倍率(Debug View Gain)を追加してあり、
+間接光のように値が小さいバッファでも階調の粗さを目視で比較できる。</p>
+
+<h3>17.5 ブルーム: 最初のダウンサンプルだけKaris平均が要る</h3>
+
+<p>Jimenez, "Next Generation Post Processing in Call of Duty: Advanced Warfare" (SIGGRAPH 2014) 方式で、
+13タップのダウンサンプルと3x3テントのアップサンプルをピラミッド上で繰り返す。</p>
+
+<p>SSR/SSILのノイズや鏡面ハイライトのように「面積は1画素でも輝度が極端に高い」点が入力にあると、
+ダウンサンプルで平均されたあとも大きな値として残り、カメラが動くたびにその画素が出入りして激しくちらつく
+(ファイアフライ)。最初のダウンサンプルだけ、各ブロックを輝度の逆数<code>1/(1+luma)</code>で重み付けしてから
+平均する(Karis平均)ことでこれを抑える。2段目以降は既に平均済みで極端な値が残っていないため素直な平均でよい。</p>
+
+<p>ピラミッドを<strong>ミップチェーン1枚ではなくレベルごとの独立したテクスチャ</strong>で持っているのは、
+ミップチェーンだと「あるミップをUAVで書きながら別のミップをSRVで読む」形になり、
+同一リソースのSRV/UAV同時バインド(サブリソースの重なり)になってしまうからである。
+Hi-Zはこれを避けるため読み書きともUAVで行っているが、その手が使えるのは
+<code>R32_Float</code>が型付きUAV読み出しを保証されている数少ないフォーマットだからで、
+HDRのブルームには使えない。レベルごとに別テクスチャにすれば読み書きが別リソースになり、この問題が両方とも消える。</p>
+
+<p>しきい値は<strong>ピラミッドの入力段で露出を反映してから</strong>適用する。SceneColorはプリ露出済み
+(EV100=15なら約1/39000倍)なので、そのままではしきい値1.0が事実上「何も通さない」設定になってしまう。
+先に露出を掛けておくことで、しきい値を「表示上の白」を基準にした直感的な値のまま扱える。
+これに合わせてトーンマップ側でも、露出を適用した<strong>後</strong>にブルームを混ぜている。</p>
+
+<p>合成は加算ではなく<code>lerp(color, bloom, strength)</code>とした。加算だと画面全体が明るくなり、
+露出を上げたのと区別がつかなくなるため。既定の強度0.06は、物理的にレンズ散乱が持ち去る割合(数%)に相当する。</p>
+
+<h3>17.6 検証</h3>
+
+<p>DX11とDX12で同一シーン・同一カメラのスクリーンショットを撮り、
+相異なる色数・平均輝度・バンド幅がすべて完全一致することを確認している
+(自動露出・ブルームともコンピュートシェーダーとUAVを新規に使うため、両バックエンドの追随を確認する必要がある)。</p>
+
+<p>White Furnace Testも回帰確認に使っている。トーンマッピングカーブや露出を変えても
+「物体と背景が区別できない」という性質は保たれるはずで、実際に画面全体が3色
+(うち2色はディザによる隣接コード)の完全な一様グレーになることを確認した。</p>
+</section>
+
+<section id="sss-tiled-lights">
+<h2>18. スクリーンスペースシャドウとタイルライトカリング</h2>
+<p>
+11章の時点でポイント/スポットライトは影を落としていなかった(11.6節)。ライトごとにシャドウマップを
+持たせる(ポイントなら立方体6面)のはメモリ・描画パスともに負荷が大きいため、
+<strong>シャドウマップを1枚も増やさずに</strong>影を出す方針として、既にあるG-Bufferの深度バッファを
+ライト方向へレイマーチする<strong>スクリーンスペースシャドウ(SSS)</strong>を導入した。
+あわせて、ライト数が増えたときにピクセルあたりのコストが線形に伸びないよう
+<strong>タイルベースのライトカリング</strong>を入れた(11.8/11.9節の判断を更新する)。
+</p>
+
+<h3>18.1 この手法で「出せる影」と「出せない影」</h3>
+<p>
+SSSが遮蔽物として扱えるのは<strong>深度バッファに写っている面だけ</strong>である。したがって
+</p>
+<ul>
+<li>画面外にある遮蔽物は影を落とさない</li>
+<li>手前の面に隠れて深度バッファに残っていない遮蔽物は影を落とさない</li>
+<li>深度バッファはサーフェスの厚みを持たないため、遮蔽と判定する深度差に上限(<code>thickness</code>)が要る</li>
+</ul>
+<p>
+得られるのは「壁でランプが完全に遮られる」ような影ではなく、<strong>接触影・中距離の遮蔽</strong>である。
+これは手法の性質であって実装の不備ではない。UI(Lightingパネルの説明文)にも同じ内容を書いてある。
+画面外まで含めた本物の影が要るなら、グローバルSDFのように「画面に依存しない遮蔽表現」を
+別途持つ必要があり、それはRHIへの3Dテクスチャ追加とベイクパイプラインを伴う別規模の作業になる。
+</p>
+
+<h3>18.2 Hi-Zチェーンは流用できない(縮約の向きが逆)</h3>
+<p>
+レイマーチの高速化にはHi-Zによる空き空間スキップが定番だが、<strong>このエンジンの既存のHi-Zは
+使えない</strong>。<code>HiZ.hlsl</code>の<code>CSDownsample</code>は<strong>min縮約</strong>で、
+Reverse-Zではmin =「ブロック内で最も遠い可視サーフェス」を意味する。これはオクルージョンカリングが
+必要とする「候補は確実に遮蔽されている」の判定に向いた向きであり、レイマーチの空き空間スキップが
+必要とする「このブロックに遮蔽物は確実に無い」の判定には<strong>max = 最も近いサーフェス</strong>が要る。
+向きが逆なので流用できず、今回は全解像度の深度を線形マーチしている。
+将来スキップを入れるならmaxチェーンを別に作る必要がある。
+</p>
+
+<h3>18.3 同次座標の線形補間で歩く</h3>
+<p>
+レイのステップごとに<code>mul()</code>で再投影すると、ライト数 &times; ステップ数だけ行列積が積み上がる
+(<code>SSR.hlsl</code>の<code>ProjectToScreen</code>はステップごとに<code>mul</code>を2回行っている)。
+SSSはライトごとに回るためこの差が効くので、踏襲していない。
+</p>
+<p>
+代わりに、レイの始点・終点をループ前に1回だけクリップ空間へ変換し、各ステップは
+<code>lerp(clipStart, clipEnd, t)</code>で求める。射影は同次座標に対して線形なので、
+これはワールド空間で等間隔に進むことと<strong>厳密に等価</strong>である。
+さらに、行ベクトル規約のこの射影行列では<code>clip.w</code>がそのままView空間Zになるため、
+レイのView空間深度も同じ<code>lerp</code>から取り出せて追加コストがゼロになる。
+</p>
+<p>
+シーン側のView空間Zも、<code>ReconstructWorldPos</code> + <code>mul(View)</code>(行列積2回)ではなく
+射影定数から除算1回で復元する。<code>clip.z = viewZ &times; a + b</code>、<code>clip.w = viewZ</code>なので
+<code>depth = a + b / viewZ</code>、逆に解いて<code>viewZ = b / (depth - a)</code>。
+<code>a</code>/<code>b</code>はCPU側(<code>KurenaiEngine3D::Render</code>)が
+<strong>射影行列の要素をそのまま読んで</strong>渡す(近平面・遠平面から組み立て直さないのは、
+Reverse-Zの組み方を変えても自動的に追随させるため)。
+</p>
+<p>
+ライトがカメラの手前・背後にあると、レイ終端のView空間Zが0以下へ回り込んで
+<code>clip.w</code>での除算が破綻し、画面上をレイが逆走する。そうなる前に、
+<code>clipEnd.w</code>が最小値を下回る場合はレイを切り詰めている。
+</p>
+
+<h3>18.4 ジッタにフレーム番号を混ぜてはいけない</h3>
+<p>
+等間隔サンプリングは縞状のバンディングを出すため、ステップ位置をピクセルごとにずらして
+高周波のディザへ変換する(インターリーブド・グラディエント・ノイズ、Jimenez 2014)。
+</p>
+<p>
+<strong>ここでフレーム番号を混ぜてはいけない</strong>。このエンジンにはTAAが無く、
+時間方向に平均化する後段が存在しないため、フレームごとにパターンを変えると
+平均化されないまま画面全体がちらつき続けることになる。ピクセル座標だけの関数にしておけば、
+カメラが止まっている限りノイズも完全に静止し「わずかにディザが乗った静止画」で済む。
+<code>SSIL_VisibilityBitmask.hlsl</code>の<code>stepJitter</code>が同じ理由で
+ピクセル座標のみの関数になっているのと同じ判断である。
+</p>
+
+<h3>18.5 バイアスと厚みの上限</h3>
+<p>
+遮蔽と判定する最小深度差は<strong>View空間深度への相対値</strong>にしている
+(<code>kSSSRelativeDepthBias = 0.002</code>)。深度バッファの精度も1ピクセルが占める世界距離も
+距離に比例して粗くなるため、絶対値のバイアスでは近距離で過剰・遠距離で不足になる。
+これに加えてレイの始点を法線方向へ押し出している(こちらもView空間深度でスケールする)。
+</p>
+<p>
+上限(<code>thickness</code>)が必要なのは深度バッファがサーフェスの厚みを持たないためで、
+上限を外すとレイの後ろにある遠景すべてが「無限に厚い遮蔽物」として影を作ってしまう。
+</p>
+<p>
+画面外へレイが外れた場合は<strong>遮蔽なし(明るいまま)で打ち切る</strong>。
+<code>SSR.hlsl</code>が「その先に何があるか分からないので反射を足さない」のと同じ理由で、
+分からないものを影にはしない。加えてヒット位置が画面端に近いほど影を弱め、
+カメラを振って遮蔽物が画面外へ出た瞬間の急変を緩和している。
+</p>
+
+<h3>18.6 ピクセルあたりのシャドウレイ数に上限を置く</h3>
+<p>
+SSSのコストはライトごとに積み上がるため、<code>EvaluateLight</code>に
+「このピクセルで残り何本レイを撃ってよいか」の予算(<code>inout uint shadowRayBudget</code>)を渡し、
+既存のearly-out(距離 → 減衰 → スポット円錐 → NdotL)を<strong>すべて通過した後に</strong>消費する。
+この順序なら、そのピクセルに実際に届いているライトから順に予算が使われる。
+ライト単位の<code>CastShadow</code>フラグ(<code>GPULight::Params.y</code>)と組み合わせて、
+影を出したいライトへ予算を寄せられる。
+</p>
+<p>
+<code>Assets::Light::CastShadow</code>は<strong>永続化していない</strong>。
+<code>.kmodelcache</code>の<code>CachedLightRecord</code>(POD)へ足すとレイアウトが変わり
+<code>kPackageVersion</code>の更新と全アセットの再パックが必要になるが、得られるのは
+「モデルファイル埋め込みライトごとの既定値」だけで見合わない。モデル由来のライトは常に既定値
+(true)で読み込まれ、<code>.kscene</code>(テキスト形式なので互換性の問題が無い)とImGuiで上書きする。
+</p>
+
+<h3>18.7 タイルライトカリング</h3>
+<p>
+画面を16x16ピクセルのタイルに分け、1スレッドグループ256スレッドでタイルごとの
+ライトインデックスリストを作る(<code>LightCulling.hlsl</code>)。
+各スレッドが自分のピクセルの深度をgroupsharedの<code>InterlockedMin/Max</code>で集約してタイルの深度範囲を求め、
+タイルの視錐台側面4枚 + 深度スラブと、各ライトの<strong>バウンディングスフィア</strong>を判定する
+(スポットは円錐の外接球。厳密な円錐判定より保守的=多めに残るが、カリングは「取りこぼさない」ことが
+正しさの条件なので保守的側でよい)。Reverse-Zの深度値は[0,1]の非負floatなので、
+ビットパターンのままuintとして比較しても大小関係が保たれる。
+</p>
+<p>
+出力は<strong>1本の<code>RWStructuredBuffer&lt;uint&gt;</code></strong>で、タイルごとの固定長ブロックに
+「先頭1要素=ライト数、以降=ライトインデックス」を詰める。
+<strong>タイルごとに固定容量を割り当てることで、グローバルなアトミックカウンタも
+「カウンタを毎フレーム0クリアするパス」も不要になる</strong>。
+このエンジンのRHIにはバッファをクリアする手段(<code>ClearUnorderedAccessViewUint</code>相当)が
+無いため、これは実装上の要件でもある。
+</p>
+<p>
+容量を超えた場合も<strong>飽和させずに実際の数をそのまま書き</strong>、読み手(<code>DirectLighting.hlsl</code>)が
+容量で打ち切る。こうしておくとデバッグ表示が容量超過を検出でき、ライトが静かに欠落しない。
+CPU側でも「シーンのライト数が容量を超えている」という<em>条件</em>を検出した最初のフレームに
+警告ログを出す(実際に超過したかはGPU側にしか無いため、確認はデバッグ表示で行う)。
+</p>
+
+<h3>18.8 追加順を昇順へ並べ替える理由</h3>
+<p>
+<code>InterlockedAdd</code>の戻り値はスレッドの実行順に依存するため、そのままではリストの順序が
+タイルごと・フレームごとに変わる。順序が変わると18.6のシャドウレイ予算で
+<strong>どのライトが選ばれるかが揺れて影がちらつく</strong>。
+そこで書き出し前にライト番号の昇順へ並べ替えている。要素数が最大64と少ないので、
+各要素の順位(自分より小さい要素の個数)を数える単純な方法で足りる
+(要素は必ず相異なるライト番号なので順位も一意になる)。
+</p>
+
+<h3>18.9 RHIへの追加</h3>
+<p>
+<strong><code>BufferUsage::StructuredRW</code></strong>を新設した。既存の2種はどちらも片側しか持たず、
+「コンピュートがUAVで書き、ピクセルシェーダがSRVで読む」という今回の用途に使えなかったため:
+</p>
+<ul>
+<li><code>Structured</code> … UAVのみ。SRVディスクリプタが無くPSから読めない</li>
+<li><code>StructuredReadOnly</code> … SRVのみ。UPLOADヒープ経由のCPU書き込み専用でUAVが無い</li>
+</ul>
+<p>
+DX12では<code>UNORDERED_ACCESS</code>と<code>PIXEL_SHADER_RESOURCE</code>の間を
+<code>DX12Buffer::TransitionTo</code>で往復させる(バインド時に暗黙に発行される)。
+なお<code>IsStructuredReadOnly()</code>の判定を「<code>m_SrvIndex</code>が有効値か」から
+<strong><code>Usage</code>を直接持って比較する</strong>形へ変えた。<code>StructuredRW</code>もSRVを持つように
+なったため、旧判定では両者を区別できず、ステージングリングを持たない<code>StructuredRW</code>が
+<code>UpdateBuffer</code>の<code>StructuredReadOnly</code>経路へ入ってしまう。
+</p>
+<p>
+コンピュートシェーダーが構造化バッファ(ライトリスト)をSRVで読むための
+<strong><code>SetComputeShaderResourceBuffer</code></strong>も追加した。
+なお<code>kComputeSrvSlotCount = 4</code>の拡張は<strong>不要だった</strong>
+(カリングCSはt0=ライトリスト・t1=深度の2本で足りる)。11.9節の「拡張が必要」という見立ては
+今回の構成には当たらない。
+</p>
+
+<h3>18.10 DX11の「SRV→UAV」方向のアンバインド</h3>
+<p>
+DX11は同一リソースをSRVとUAVへ同時にバインドできない。既存の実装は
+<code>Dispatch</code>直後にUAVを全解除することで「UAV→SRV」方向に対処していたが、
+今回のライトグリッドは<strong>前フレームにPSがSRVで読んだリソースを次フレームのDispatchがUAVで書く</strong>ため、
+逆方向の対処が要る。<code>DX11CommandList::UnbindPixelSrvForResource</code>を追加し、
+UAVバインドの直前に同一リソースのSRVスロットを明示的に外している
+(そうしないと「どちらが外れるか」がドライバ任せになり、デバッグレイヤーの警告も出続ける)。
+</p>
+<p>
+このために各PS SRVスロットのビューを保持しているが、生ポインタではなく<code>ComPtr</code>で持っている。
+解像度変更などでテクスチャ/バッファが作り直された際に、解放済みのビューを
+<code>GetResource</code>で触ってしまうのを防ぐため。
+</p>
+
+<h3>18.11 RenderGraphにバッファ依存を足した理由</h3>
+<p>
+<code>RenderGraphPassDesc</code>は<code>IRHITexture*</code>の読み書きしか表現できなかった。
+カリングパスと直接光パスは<strong>どちらも<code>m_GBufferDepth</code>をReadsするだけの「読み手同士」</strong>に
+なるため、テクスチャの依存だけでは両者の間に辺が張られない。トポロジカルソートは依存が同点なら
+登録順を優先するのでたまたま正しく動くが、本当の依存関係(カリングが書いたライトグリッドを
+直接光が読む)がグラフ上に現れない状態を残したくない。
+<code>BufferReads</code>/<code>BufferWrites</code>を追加し、テクスチャ側と同じ手順で辺を張っている。
+</p>
+<p>
+あわせて、ライトバッファの<code>UpdateBuffer</code>を<strong>グラフ構築前の1箇所に集約</strong>した。
+以前は直接光パスと半透明パスの中でそれぞれ呼んでいたが、カリングパスが両者より先に
+このバッファを読むようになったため、パス内での更新では間に合わない(更新回数が2回から1回に減る
+副次的な効果もある)。
+</p>
+
+<h3>18.12 デバッグ表示(<code>DebugView::LightTiles</code>)</h3>
+<p>
+ライトグリッドは構造化バッファなので<code>Present.hlsl</code>の<code>SourceTexture</code>(t0)では
+受け取れず、専用のt3から読む(Mode 11)。タイルあたりのライト数を
+黒(0灯)→青→緑→赤のヒートマップで示し、<strong>容量超過のタイルはマゼンタ</strong>で塗る。
+色は「数が読める」ことより「異常が目立つ」ことを優先している。
+赤に振り切る基準のライト数は容量(64)ではなく別のつまみにしてある。実データは数灯程度で、
+容量を基準にするとほぼ真っ青になって差が読めないため。
+</p>
+
+<h3>18.13 半透明パスは対象外</h3>
+<p>
+<code>Transparent.hlsl</code>はb1が<code>ObjectConstants</code>で埋まっておりタイル定数を渡せないため、
+<code>FrameConstants.ActiveLightCount</code>経由で全ライトをループする現状のままとした(15.6節の設計)。
+SSSもカリングも不透明パスのみに適用される。半透明パスはt5〜t7が空いているので、
+深度バッファを追加バインドして同じ共有ヘッダーをincludeすれば追い足せる。
+</p>
+
+<h3>18.14 検証</h3>
+<ul>
+<li><strong>影が出ること</strong>: Light Testのモデル(床+壁+粗さ違いの球)を、太陽を切って
+ポイント/スポットだけで照らし、AOも切って交絡を除いた状態で確認した。
+球と床の接地部に接触影が出て、Screen-Space ShadowsをOFFにすると球が浮いた見た目に戻る。</li>
+<li><strong>カリングが見た目を変えないこと</strong>: 同一シーン・同一カメラでカリングON/OFFの
+スクリーンショットを撮り、3Dビューポート領域の<strong>122,120画素を比較して差0画素・
+最大チャンネル差0</strong>(完全一致)を確認した。OFF時にProfilerから<code>LightCull</code>パスが
+消えることも併せて確認し、トグルが実際に効いていることを担保している。</li>
+<li><strong>ヒートマップ</strong>: ライトの配置と整合する分布(壁面=1灯の青、両方のライトが届く
+床の手前=2灯の緑寄り)になることを確認した。</li>
+<li><strong>DX11/DX12</strong>: 両バックエンドで同一シーンを表示し、<code>LightCull</code>パスが動作して
+同じ見た目になることを確認した。</li>
+<li><strong>容量超過の警告</strong>: 64灯を配置したシーン(モデル埋め込みの2灯と合わせて66灯)で、
+容量(64)超過の条件を検出した警告ログが1度だけ出ることを確認した。</li>
+</ul>
+<p>
+<strong>性能については有意な差を測れていない</strong>。64灯を20x20の床へ分散させたシーンを
+1280x720・Debugビルドで測ったが、フレーム全体が1ms前後で固定オーバーヘッドに支配されており、
+カリングON/OFFの差は実行ごとのばらつき(GPU Frame Timeが0.6〜1.9msの範囲で揺れる)に埋もれる。
+<code>LightCull</code>パス自体のCPU時間が約0.01msであることまでは確認できたが、
+「カリングによってDirectLightが速くなる」ことを数値で示すには、Releaseビルドと
+ライティングパスが実際にボトルネックになるシーン(高解像度・Rangeの大きいライトを多数重ねる)が要る。
+現時点で言えるのは<strong>正しさ(見た目が変わらない)を確認済みで、速度の利得は未計測</strong>という状態である。
+</p>
+
 <section id="reflectionprobe">
-<h2>16. 反射プローブ(リフレクションプローブ)</h2>
+<h2>19. 反射プローブ(リフレクションプローブ)</h2>
 <p>
 <a href="#ibl">14章</a>のIBLはスカイボックス1枚から焼くため、<strong>シーン全体で単一の環境</strong>
 しか持てない。屋内でも空が映り込む、壁際と部屋の中央で環境光が同じ、といった破綻が原理的に避けられない。
@@ -1980,7 +2846,7 @@ Exteriorは4個)。</li>
 ことでこれを解消する。
 </p>
 
-<h3>16.1 IBLの畳み込みをそのまま再利用する</h3>
+<h3>19.1 IBLの畳み込みをそのまま再利用する</h3>
 <p>
 この機能で新しく実装したのは<strong>キャプチャ部分だけ</strong>である。プローブのキューブマップを
 拡散イラディアンス・プリフィルタ済み鏡面へ畳み込む処理は、<code>IBLConvolve.hlsl</code>の
@@ -1992,12 +2858,12 @@ Exteriorは4個)。</li>
 <p>
 評価側(<code>DeferredLighting.hlsl</code>の<code>EvaluateIBL</code>)も同様で、split-sum近似の式は
 そのまま、<strong>環境ソースの求め方だけを差し替える</strong>形にした(<code>SampleEnvironment</code>が
-プローブとグローバルIBLを重み付きで合成して返す。16.7節)。プローブとグローバルIBLで
+プローブとグローバルIBLを重み付きで合成して返す。19.7節)。プローブとグローバルIBLで
 解像度・ミップ構成を揃えてある(<code>kProbeCaptureSize == kIBLPrefilterBaseSize</code>)のは
 このためで、ラフネス→ミップの変換式も共通のまま使える。
 </p>
 
-<h3>16.2 キューブマップへ直接描画せず、2Dへ描いてUAVでコピーする</h3>
+<h3>19.2 キューブマップへ直接描画せず、2Dへ描いてUAVでコピーする</h3>
 <p>
 RHIには<strong>キューブマップの面ごとのRTV</strong>が無い。これを新設せず、次の経路でキューブマップを
 組み立てている。
@@ -2021,7 +2887,7 @@ IBLで既に両バックエンドとも実績のある経路であり、RTV/DSV�
 あえて<code>IBLConvolve.hlsl</code>側に置いて関数を直接共有している。
 </p>
 
-<h3>16.3 複数プローブにはTextureCubeArrayが要る</h3>
+<h3>19.3 複数プローブにはTextureCubeArrayが要る</h3>
 <p>
 HLSLは別々の<code>TextureCube</code>リソースを<strong>動的に添字参照できない</strong>。カスケードシャドウマップが
 <code>ShadowMap0</code>&sim;<code>3</code>を個別スロットに分けて<code>if</code>で分岐しているのはこの制約によるが、
@@ -2043,7 +2909,7 @@ RHIへの追加(<code>CreateMippedUAVTextureCubeArray</code>、
 これにより畳み込みシェーダーを変更せずに済んでいる。
 </p>
 
-<h3>16.4 キャプチャ時のライティングと定数バッファの与え方</h3>
+<h3>19.4 キャプチャ時のライティングと定数バッファの与え方</h3>
 <p>
 キャプチャは<code>Transparent.hlsl</code>(半透明フォワードパス)と同じ式のフォワードシェーディングで、
 <strong>直接光(太陽+CSMシャドウ+ポイント/スポットライト)+スカイボックス由来のグローバルIBL+エミッシブ</strong>
@@ -2072,7 +2938,7 @@ Reverse-Z(近平面=NDC z=1.0、遠平面=NDC z=0.0)で組む(<code>ComputeCubeF
 反射像としてさらに縮小・ぼかされるため、半影の正確さより焼き直しのコストを優先した。
 </p>
 
-<h3>16.5 DX12でプローブが真っ黒に焼けた原因(SRVテーブルのブロック割り当て)</h3>
+<h3>19.5 DX12でプローブが真っ黒に焼けた原因(SRVテーブルのブロック割り当て)</h3>
 <p>
 実装当初、<strong>DX11では正しく焼けるのにDX12だけプローブのキューブマップが真っ黒になる</strong>という
 症状が出た。原因はDX12のSRVディスクリプタテーブルの割り当て方式である。
@@ -2091,12 +2957,20 @@ Reverse-Z(近平面=NDC z=1.0、遠平面=NDC z=0.0)で組む(<code>ComputeCubeF
 「常に影の中」「環境光ゼロ」となり、キャプチャがほぼ黒くなっていた。
 </p>
 <p>
-修正は、半透明フォワードパスが同じ理由で採っている順序に揃えること ――
-<strong>1回の描画で使うテクスチャは必ずスロット0から順に、描画ループの中でまとめてバインドする</strong>。
-このバックエンド間の挙動差は、パスを新規に追加するたびに踏みうる落とし穴である。
+当時の対処は、半透明フォワードパスが同じ理由で採っていた順序に揃えること ――
+<strong>1回の描画で使うテクスチャは必ずスロット0から順に、描画ループの中でまとめてバインドする</strong>
+だった。
 </p>
+<div class="note">
+<b>この回避策は現在は不要になっている。</b><a href="#rhi-binding">16章</a>でDX12側が
+バインド状態のシャドウコピーを持つようになり、テクスチャのバインドがDX11と同じく
+「上書きするまで維持される」寿命になった。ベイクパスも他のパスと同様、メッシュによらず共通の
+バインド(シャドウマップ配列・ライト・IBL)を描画ループの外で1回だけ行う形に戻してある。
+ここに記録を残しているのは、<b>バックエンド間のバインド寿命の食い違いがどういう症状として
+現れるか</b>(=片方のAPIだけ真っ黒になる)を残しておくため。
+</div>
 
-<h3>16.6 ベイクのタイミング</h3>
+<h3>19.6 ベイクのタイミング</h3>
 <p>
 スカイボックス由来のIBLは静的アセットなので「起動後の最初のフレームで一度だけ」焼けばよい
 (<code>m_IBLBaked</code>)。一方プローブの中身は<strong>シーンのジオメトリ・ライト・時刻に依存する</strong>ため、
@@ -2119,7 +2993,7 @@ Reverse-Z(近平面=NDC z=1.0、遠平面=NDC z=0.0)で組む(<code>ComputeCubeF
 Lightingパスは<code>Reads</code>にプローブのキューブマップ配列を挙げているためベイクパスより後になる。
 </p>
 
-<h3>16.7 影響範囲の形状・視差補正・ブレンド</h3>
+<h3>19.7 影響範囲の形状・視差補正・ブレンド</h3>
 <p>
 影響範囲は球(<code>Sphere</code>)と直方体(<code>Box</code>、Y軸まわりの回転のみを持つOBB)から選べる。
 GPUへ渡す1プローブぶんの構造は次のとおりで、<code>KurenaiEngine3D.cpp</code>の
@@ -2195,18 +3069,18 @@ ImGuiの「Parallax Correction」「Probe Blending」(<code>ProbeParams.z</code>
 変えても焼き直しは要求しない(焼き直しが要るのは<code>Position</code>を動かしたときだけ)。
 </p>
 
-<h3>16.8 現時点の実装範囲と既知の制約</h3>
+<h3>19.8 現時点の実装範囲と既知の制約</h3>
 <ul>
 <li>Boxの回転は<strong>Y軸まわりのみ</strong>。傾いた床・天井を持つ空間は想定していない</li>
-<li><strong>影響範囲の箱と視差補正の投影ボックスを分離できない</strong>(16.7節)。
+<li><strong>影響範囲の箱と視差補正の投影ボックスを分離できない</strong>(19.7節)。
 壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある</li>
-<li>更新モードはBaked / OnDemand / Realtimeの3種(16.10節)。ただし<strong>時間分割できているのは
+<li>更新モードはBaked / OnDemand / Realtimeの3種(19.10節)。ただし<strong>時間分割できているのは
 キャプチャだけで、畳み込みは分散できていない</strong>。キャプチャが0.02 msなのに対し畳み込みは
 約14 msあるため、Realtimeでも6フレームに1回そのスパイクが乗る</li>
 <li>OnDemandの変化検出が見るのは時刻・太陽・ライト・IBL強度・プローブ位置のみ。
 <strong>ジオメトリが動いても検出されない</strong>(モデルのTRSは<code>.kscene</code>で静的に決まり
 実行中に変わらないため、現状は検出対象に入れていない)</li>
-<li>SSRとの合成は<a href="#ssrprobe">17章</a>で「加算」から「環境の放射輝度の差し替え」へ作り直した。
+<li>SSRとの合成は<a href="#ssrprobe">20章</a>で「加算」から「環境の放射輝度の差し替え」へ作り直した。
 SSRが判定できなかった領域(画面外・最大距離まで判定不能)は確信度0となり、Lightingパスが適用した
 プローブがそのまま残る</li>
 <li>カスケードシャドウマップは<strong>カメラ</strong>視錐台に合わせてフィットされるため、カメラから遠く離れた
@@ -2217,7 +3091,7 @@ SSRが判定できなかった領域(画面外・最大距離まで判定不能)
 グローバルIBLのみを使う</li>
 </ul>
 
-<h3>16.9 検証シーン(Reflection Probe Test)</h3>
+<h3>19.9 検証シーン(Reflection Probe Test)</h3>
 <p>
 プローブの効きを目視で確認するための専用シーン。Sponzaは非金属・中〜高ラフネスのマテリアルばかりで
 鏡面反射が弱く、アトリウムが上に開いていてプローブにも空が大量に写り込むため、
@@ -2244,17 +3118,17 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 <tr>
 <td>Enable Reflection Probes を切る</td>
 <td>密閉の西室にいるはずの金属球が<strong>一様な空色</strong>になり、床に映っていたエミッシブ帯も消える</td>
-<td>環境ソースがプローブからグローバルIBLへ落ちること(16.1節)</td>
+<td>環境ソースがプローブからグローバルIBLへ落ちること(19.1節)</td>
 </tr>
 <tr>
 <td>Probe Blending を切る</td>
 <td>開口部付近で反射色が<strong>不連続に切り替わる</strong></td>
-<td><code>SelectNearestProbe</code>経路と重み付き合成の差(16.7節)</td>
+<td><code>SelectNearestProbe</code>経路と重み付き合成の差(19.7節)</td>
 </tr>
 <tr>
 <td>Parallax Correction を切る</td>
 <td>床に映るエミッシブ帯が、個々の帯ではなく<strong>連続した滲みになって壁の接地点からずれる</strong></td>
-<td><code>ParallaxCorrectDirection</code>(16.7節)</td>
+<td><code>ParallaxCorrectDirection</code>(19.7節)</td>
 </tr>
 <tr>
 <td>Render Targets &rarr; Probe - Influence</td>
@@ -2264,12 +3138,12 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 <tr>
 <td>Render Targets &rarr; Probe - Prefiltered Specular、Probe Index を 0/1</td>
 <td>0=暖色の密閉室、1=空を含む明るい室。<strong>まったく別の環境が焼かれている</strong></td>
-<td>プローブごとの<code>TextureCubeArray</code>スライス(16.3節)</td>
+<td>プローブごとの<code>TextureCubeArray</code>スライス(19.3節)</td>
 </tr>
 <tr>
 <td>上の表示のまま Post Processing の Enable IBL を切り、Update Mode を Baked &rarr; Realtime</td>
 <td>Bakedではキャプチャが<strong>1ピクセルも変わらず</strong>、Realtimeにすると追従して暗くなる</td>
-<td>更新モードの時間分割(16.10節)</td>
+<td>更新モードの時間分割(19.10節)</td>
 </tr>
 </table>
 <p>
@@ -2321,7 +3195,7 @@ Zファイティングは起きない)。
 変換していたので、<code>[Camera]</code>だけが例外だった。既存シーンは<code>Yaw = 0.0</code>しか
 使っておらず度とラジアンで同じ値になるため表面化していなかったもので、他と同じ変換を入れて修正した。
 </p>
-<h3>16.10 更新モード(Baked / OnDemand / Realtime)</h3>
+<h3>19.10 更新モード(Baked / OnDemand / Realtime)</h3>
 <p>
 プローブの中身はシーンのジオメトリ・ライト・時刻に依存するため、「いつ焼き直すか」は
 <strong>焼き直しのコスト</strong>と<strong>シーンの変化への追従</strong>のトレードオフになる。
@@ -2340,7 +3214,7 @@ ImGuiの「Update Mode」で3方式を切り替えて比較できるようにし
 (時刻・太陽の方位角・太陽/シャドウの有効フラグ・IBL強度・全ライトのパラメータ・プローブ位置)から
 FNV-1aの64bitハッシュを作る。毎フレームの署名と、最後にフルベイクした時点の署名を突き合わせる。
 影響範囲(形状・半径・<code>BoxExtents</code>・<code>BlendDistance</code>)は<strong>含めない</strong> ――
-どこから撮るかを変えないため焼き直しが不要だからである(16.6節)。
+どこから撮るかを変えないため焼き直しが不要だからである(19.6節)。
 衝突しても起きるのは「本来必要な焼き直しを1回取りこぼす」だけなので、この程度の強度で足りる。
 </p>
 
@@ -2367,7 +3241,7 @@ GPUプロファイラで1プローブぶんのコストが読める。各パス�
 </p>
 <table>
 <tr><th>パス</th><th>GPU時間</th><th>頻度</th></tr>
-<tr><td><code>ProbeBake0</code> / <code>ProbeBake1</code></td><td>17.1 ms / 15.3 ms</td><td>フルベイクしたフレームのみ</td></tr>
+<tr><td><code>ProbeBake0</code> / <code>ProbeBake1</code></td><td>20.1 ms / 15.3 ms</td><td>フルベイクしたフレームのみ</td></tr>
 <tr><td><code>ProbeRealtimeCapture</code></td><td>0.018&ndash;0.020 ms</td><td>毎フレーム</td></tr>
 <tr><td><code>ProbeRealtimeConvolve</code></td><td>10.6&ndash;14.8 ms</td><td>6フレームに1回</td></tr>
 </table>
@@ -2391,7 +3265,7 @@ GPUプロファイラで1プローブぶんのコストが読める。各パス�
 </section>
 
 <section id="ssrprobe">
-<h2>17. SSRとプローブの合成(加算から差し替えへ)</h2>
+<h2>20. SSRとプローブの合成(加算から差し替えへ)</h2>
 <p>
 <a href="#ssr">7章</a>のSSRは反射色を<code>SceneColor</code>へ<strong>加算</strong>する設計だった。
 しかしLightingパスは既に鏡面IBLを<code>SceneColor</code>へ書き込んでいるため、同じ反射を二重に
@@ -2400,13 +3274,13 @@ GPUプロファイラで1プローブぶんのコストが読める。各パス�
 検証そのものが成立しなくなるためである。
 </p>
 <p>
-反射プローブ(16章)が入ったことで、この問題を放置できなくなった。プローブは画面外の環境も持って
+反射プローブ(19章)が入ったことで、この問題を放置できなくなった。プローブは画面外の環境も持って
 いるので「SSRが判定できなかった領域をプローブで埋める」ことが可能になったが、加算のままそれを
 やると<strong>いま二重計上していない領域まで二重計上に変わってしまう</strong>。そこでSSRを
 <b>加算</b>から<b>環境の放射輝度の差し替え</b>へ作り直した。
 </p>
 
-<h3>17.1 分解: 放射輝度 × 係数</h3>
+<h3>20.1 分解: 放射輝度 × 係数</h3>
 <p>
 鏡面IBLを次の形に分解する。
 </p>
@@ -2421,7 +3295,7 @@ SSRがやりたいのは「環境の放射輝度を、スクリーンスペー�
 鏡面IBLを完全に置き換える。加算ではないので二重計上は原理的に起こらない。
 </p>
 
-<h3>17.2 「足した覚えのない値を引く」ことを防ぐ</h3>
+<h3>20.2 「足した覚えのない値を引く」ことを防ぐ</h3>
 <p>
 この方式は、SSRが引き算する量とLightingパスが足した量が<strong>厳密に一致している</strong>ことに
 全面的に依存する。片方の式だけが変われば、SSRは存在しない値を引いて画面を暗くしてしまう。
@@ -2431,7 +3305,7 @@ SSRがやりたいのは「環境の放射輝度を、スクリーンスペー�
 </p>
 <ul>
 <li><code>SampleEnvironment</code> ―― プローブの選択・視差補正・ブレンドと、グローバルIBLへの
-フォールバックまで含めた<b>環境の放射輝度</b>(16.7節)</li>
+フォールバックまで含めた<b>環境の放射輝度</b>(19.7節)</li>
 <li><code>SpecularIBLWeight</code> ―― split-sum近似の第2項・マルチスキャッタリング補正・
 スペキュラオクルージョン・昼夜減衰・IBL強度倍率をまとめた<b>係数</b></li>
 </ul>
@@ -2442,7 +3316,7 @@ SSRがやりたいのは「環境の放射輝度を、スクリーンスペー�
 拡散側のマクロを定義しなければそのサンプルはコンパイルされない。
 </p>
 
-<h3>17.3 確信度の決め方</h3>
+<h3>20.3 確信度の決め方</h3>
 <table>
 <tr><th>レイマーチの結果</th><th>差し替える放射輝度</th><th>確信度</th></tr>
 <tr>
@@ -2483,7 +3357,7 @@ split-sum近似が係数を担うため、その懸念自体が消えている�
 ヒット色を1点サンプルするだけで、粗い面に必要な円錐状のぼかしを持たないため)。
 </p>
 
-<h3>17.4 検証: White Furnace TestでSSRを有効に戻せた</h3>
+<h3>20.4 検証: White Furnace TestでSSRを有効に戻せた</h3>
 <p>
 この変更の正しさは、エンジン自身のエネルギー保存テストで直接測れる。White Furnace Testは
 一様な放射輝度のキューブマップの中に<code>metallic = 1.0</code>の金属球を並べたシーンで、
@@ -2502,7 +3376,7 @@ SSRを有効にして計測したところ、<strong>3Dシーンの画素は1つ
 見えたら、SSRが引く量とLightingが足す量がずれている。
 </p>
 
-<h3>17.5 既知の制約</h3>
+<h3>20.5 既知の制約</h3>
 <ul>
 <li><strong>半透明サーフェスのピクセルでは引き算が正しくない</strong>。SSRはG-Bufferを読むが、
 半透明はフォワードパスで描かれG-Bufferに入らないため、そこでのG-Bufferは「ガラスの奥にある

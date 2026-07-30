@@ -1,4 +1,4 @@
-// 反射プローブ(リフレクションプローブ、16章)の共有ヘッダー。
+// 反射プローブ(リフレクションプローブ、19章)の共有ヘッダー。
 //
 // DeferredLighting.hlsl(鏡面IBLを適用する側)とSSR.hlsl(その鏡面IBLをスクリーンスペースの
 // 反射で差し替える側)の両方が、まったく同じ環境ソースとまったく同じBRDF重みを使う必要がある。
@@ -17,8 +17,10 @@
 // 拡散側の2つを定義しなければ拡散イラディアンスのサンプルはコンパイルされず、
 // SampleEnvironmentは常にirradiance=0を返す(SSRは鏡面しか要らないためこちらを使う)。
 //
-// このヘッダーはFrameConstants(b0)の ProbeParams / ShadowParams / AmbientColor を参照する。
-// インクルードする側はこれらを含む形でFrameConstantsを宣言しておく必要がある。
+// このヘッダーはFrameConstants(b0)の ProbeParams / ShadowParams / AmbientColor / IBLParams を
+// 参照する(IBLParamsは拡散側のマクロを定義した場合のみ)。インクルードする側はこれらを含む形で
+// FrameConstantsを宣言しておく必要がある。cbufferのレイアウトは宣言順で決まるため、
+// 途中のフィールドを飛ばさずC++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること。
 #ifndef KURENAI_REFLECTION_PROBE_HLSLI
 #define KURENAI_REFLECTION_PROBE_HLSLI
 
@@ -124,6 +126,29 @@ float3 ParallaxCorrectDirection(GPUReflectionProbe probe, float3 worldPos, float
     return (worldPos + R * max(hitDistance, 0.0f)) - probe.PositionRadius.xyz;
 }
 
+// 拡散イラディアンスの取得元。既定(IBLParams.x = 0)ではプリフィルタ済み鏡面の最終ミップ
+// (roughness=1、ShadowParams.yがそのミップ番号)を法線方向で引く。CSPrefilterはV=R=Nを仮定して
+// いるため、roughness=1(α=1)ではGGXインポータンスサンプリングの実効カーネルがコサイン畳み込みへ
+// 厳密に退化し、格納値もCSIrradianceと同じE(N)/πになる。近似ではなく等価であり、専用の
+// イラディアンスマップを焼く必要がない(14.10節)。IBLParams.x=1のときだけ従来の専用マップを引く。
+// この規則はグローバルIBLとプローブの両方へまったく同じように適用する
+#ifdef KURENAI_GLOBAL_IRRADIANCE_REGISTER
+float3 SampleGlobalIrradiance(float3 N)
+{
+    return (IBLParams.x > 0.5f)
+        ? IrradianceTexture.Sample(MaterialSampler, N).rgb
+        : PrefilteredEnvTexture.SampleLevel(MaterialSampler, N, ShadowParams.y).rgb;
+}
+#endif
+#ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
+float3 SampleProbeIrradiance(float3 N, uint probeIndex)
+{
+    return (IBLParams.x > 0.5f)
+        ? ProbeIrradianceTexture.Sample(MaterialSampler, float4(N, probeIndex)).rgb
+        : ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(N, probeIndex), ShadowParams.y).rgb;
+}
+#endif
+
 // 環境ソース(拡散イラディアンス・プリフィルタ済み鏡面)を求める。影響下のプローブを重み付きで
 // 合成し、重みの合計が1に満たない残りをスカイボックス由来のグローバルIBLで埋める。
 // これによりプローブの影響範囲の外へ出るとき、境界で切り替わるのではなく徐々にグローバルIBLへ
@@ -157,7 +182,7 @@ void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
                 : R;
 
 #ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
-            accumulatedIrradiance += ProbeIrradianceTexture.Sample(MaterialSampler, float4(N, i)).rgb * weight;
+            accumulatedIrradiance += SampleProbeIrradiance(N, i) * weight;
 #endif
             accumulatedPrefiltered += ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(sampleR, i), mipLevel).rgb * weight;
             totalWeight += weight;
@@ -184,7 +209,7 @@ void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
                 : R;
 
 #ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
-            accumulatedIrradiance = ProbeIrradianceTexture.Sample(MaterialSampler, float4(N, nearest)).rgb;
+            accumulatedIrradiance = SampleProbeIrradiance(N, (uint)nearest);
 #endif
             accumulatedPrefiltered = ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(sampleR, nearest), mipLevel).rgb;
             totalWeight = 1.0f;
@@ -195,7 +220,7 @@ void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
     if (globalWeight > 0.0f)
     {
 #ifdef KURENAI_GLOBAL_IRRADIANCE_REGISTER
-        accumulatedIrradiance += IrradianceTexture.Sample(MaterialSampler, N).rgb * globalWeight;
+        accumulatedIrradiance += SampleGlobalIrradiance(N) * globalWeight;
 #endif
         accumulatedPrefiltered += PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb * globalWeight;
     }
@@ -253,7 +278,7 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 // という形に分解しておくことで、SSRは放射輝度だけを差し替えて
 //   出力 = SceneColor + (SSRの放射輝度 - 環境の放射輝度) * SpecularIBLWeight(...)
 // と書ける。DeferredLightingが適用した量とSSRが引き算する量が定義上必ず一致するように、
-// この係数の定義はここ1か所しか持たない(17章)。
+// この係数の定義はここ1か所しか持たない(20章)。
 //
 //   brdf                       BRDF積分LUT(split-sum近似の第2項)の値
 //   energyCompensationEnabled  ShadowParams.w(マルチスキャッタリング補正のトグル)

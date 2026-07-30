@@ -4,7 +4,7 @@
 // HDRのまま扱うため、1.0を超える輝度(明るい光源の反射など)も正しく合成できる。
 // トーンマッピングはこのパスより後段のTonemap.hlsl(Present直前)でまとめて行う。
 //
-// このパスは反射色を「加算」しない(17章)。Lightingパスは既に鏡面IBL
+// このパスは反射色を「加算」しない(20章)。Lightingパスは既に鏡面IBL
 //   鏡面IBL = 環境の放射輝度(プローブ+グローバルIBLの合成) * SpecularIBLWeight(...)
 // をSceneColorへ書き込んでいるため、SSRの結果をそのまま足すと同じ反射を二重に計上してしまう
 // (14.9.5節。White Furnace TestがSSRを切っているのはこれが目に見える形で出るため)。
@@ -54,6 +54,9 @@ cbuffer FrameConstants : register(b0)
     float4 ShadowParams;
     // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
     float4 ActiveLightCount;
+    // 拡散イラディアンスの取得元切り替え。このシェーダは鏡面しか扱わないため未使用だが、
+    // 後続のProbeParamsのオフセットを合わせるために宣言だけしている
+    float4 IBLParams;
     // 反射プローブ用。ReflectionProbe.hlsliのプローブ選択・ブレンドが読む
     float4 ProbeParams;
 };

@@ -16,8 +16,16 @@
 //         SourceTexture(t0)ではなくDebugCubeTexture(t1)を、現在のカメラ視線方向で球面を
 //         見回すように(背景スカイの表示と同じ要領でカメラ位置→ピクセル方向のレイを再構成して)
 //         サンプルする。右クリックドラッグで視点を回せば球面全体を確認できる
-//      10=反射プローブのキューブマップ配列(DebugCubeArrayTexture、t2)のデバッグ表示。
-//         Mode 9と同じ見回し方で、ArrayIndexで指定した番号のプローブをサンプルする
+//      10=カスケードシャドウマップ(Texture2DArray)の指定スライス(ArraySlice)をMode 1と同じ要領で
+//         表示する。SourceTexture(t0)はTexture2Dのためテクスチャ配列を受け取れず、Mode 9と同じく
+//         専用のDebugArrayTexture(t2)を使う
+//      11=タイルライトカリング(LightCulling.hlsl)のライトグリッドをヒートマップ表示する。
+//         タイルあたりのライト数を青→緑→赤で示し、容量超過のタイルはマゼンタで塗る。
+//         カリングが効いているか・容量が足りているかを目視で確認する唯一の手段なので、
+//         色は「数が読める」ことより「異常が目立つ」ことを優先している
+//      12=反射プローブのキューブマップ配列(DebugCubeArrayTexture、t4)のデバッグ表示。
+//         Mode 9と同じ見回し方で、ArraySliceで指定した番号のプローブをサンプルする
+//         (TextureCubeArrayはMode 10のTexture2DArrayとも別の型のため、さらにスロットを分ける)
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
@@ -38,18 +46,32 @@ cbuffer PresentConstants : register(b1)
 {
     int Mode;
     float MipLevel;
-    // Mode 10(反射プローブのキューブマップ配列)で表示するプローブ番号
-    float ArrayIndex;
-    float PresentPadding;
+    // Mode 10ではカスケード番号、Mode 12では表示するプローブ番号として使う
+    float ArraySlice;
+    // デバッグ表示の輝度倍率。AO/GIバッファの間接拡散光のように値そのものが小さいバッファは
+    // 等倍表示ではほぼ真っ黒になり、8bit格納時のポスタリゼーションが何段あるのか判別できない。
+    // 色として表示するモード(0/3/4)にだけ適用する(深度・法線のように値の絶対値そのものに
+    // 意味があるモードへ掛けると、かえって読み取れなくなるため)
+    float Gain;
+    // Mode 11(タイルライトカリングのヒートマップ)専用。
+    // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数
+    float4 TileParams;
+    // Mode 11専用。xy=レンダー解像度(UVからタイル座標を求めるのに使う), zw=未使用
+    float4 TileRenderSize;
 };
 
 Texture2D SourceTexture : register(t0);
 // IBLのIrradiance/PrefilteredEnv(Mode 9)専用。それ以外のModeでは未使用(t0と違いTextureCube
 // でなければならないため、専用の登録スロットを分けている)
 TextureCube DebugCubeTexture : register(t1);
-// 反射プローブのキューブマップ配列(Mode 10)専用。TextureCubeとTextureCubeArrayは別の型のため、
-// Mode 9のDebugCubeTextureとはさらにスロットを分ける必要がある
-TextureCubeArray DebugCubeArrayTexture : register(t2);
+// カスケードシャドウマップ(Mode 10)専用。t1と同じ理由で、Texture2DArrayを受けるための
+// 専用スロットを分けている
+Texture2DArray DebugArrayTexture : register(t2);
+// タイルライトカリングのライトグリッド(Mode 11)専用。レイアウトはLightCulling.hlsl冒頭を参照
+StructuredBuffer<uint> LightTiles : register(t3);
+// 反射プローブのキューブマップ配列(Mode 12)専用。TextureCubeArrayはTextureCube(t1)とも
+// Texture2DArray(t2)とも別の型のため、さらにスロットを分ける必要がある
+TextureCubeArray DebugCubeArrayTexture : register(t4);
 
 struct PSInput
 {
@@ -93,12 +115,12 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(color, 1.0f);
     }
 
-    if (Mode == 10)
+    if (Mode == 12)
     {
         // Mode 9と同じ見回し方。TextureCubeArrayのサンプリングは float4(方向, 配列番号)
         float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
         float3 rayDir = normalize(farPoint - CameraPosition.xyz);
-        float3 color = DebugCubeArrayTexture.SampleLevel(MaterialSampler, float4(rayDir, ArrayIndex), MipLevel).rgb;
+        float3 color = DebugCubeArrayTexture.SampleLevel(MaterialSampler, float4(rayDir, ArraySlice), MipLevel).rgb;
         color = color / (color + 1.0f);
         color = pow(color, 1.0f / 2.2f);
         return float4(color, 1.0f);
@@ -114,6 +136,45 @@ float4 PSMain(PSInput input) : SV_TARGET
         color = color / (color + 1.0f);
         color = pow(color, 1.0f / 2.2f);
         return float4(color, 1.0f);
+    }
+
+    if (Mode == 10)
+    {
+        // Mode 1と同じくpow()でコントラストを持ち上げる(正射影のため深度はライト視点距離に対して線形)。
+        // 深度なのでMode 1と同様DataSamplerで引く
+        float depth = DebugArrayTexture.Sample(DataSampler, float3(input.UV, ArraySlice)).r;
+        depth = pow(saturate(depth), 0.25f);
+        return float4(depth, depth, depth, 1.0f);
+    }
+
+    if (Mode == 11)
+    {
+        // UVはレンダーターゲット全体の[0,1]なので、レンダー解像度を掛ければピクセル座標になる。
+        // タイル数Xでの割り算ではなくタイルサイズで割るのは、端の半端なタイルも正しく含めるため
+        const uint2 pixelCoord = uint2(saturate(input.UV) * TileRenderSize.xy);
+        const uint tileSize = max((uint)TileParams.y, 1u);
+        const uint2 tileCoord = pixelCoord / tileSize;
+        const uint tileCapacity = (uint)TileParams.z;
+        const uint tileBase = (tileCoord.y * (uint)TileParams.x + tileCoord.x) * (1u + tileCapacity);
+
+        // カリング側は容量を超えた数もそのまま書いているので、ここで超過を検出できる
+        const uint lightCount = LightTiles[tileBase];
+        if (lightCount > tileCapacity)
+        {
+            // 容量超過。ライトが静かに欠落している状態なので、他のどの色とも混ざらないマゼンタで示す
+            return float4(1.0f, 0.0f, 1.0f, 1.0f);
+        }
+        if (lightCount == 0u)
+        {
+            return float4(0.0f, 0.0f, 0.0f, 1.0f);
+        }
+
+        // 1灯を青、上限(TileParams.w)を赤として青→緑→赤へ遷移させる
+        const float t = saturate(float(lightCount) / max(TileParams.w, 1.0f));
+        const float3 heat = (t < 0.5f)
+            ? lerp(float3(0.0f, 0.0f, 1.0f), float3(0.0f, 1.0f, 0.0f), t * 2.0f)
+            : lerp(float3(0.0f, 1.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), (t - 0.5f) * 2.0f);
+        return float4(heat, 1.0f);
     }
 
     // Mode 1/2/5は深度、Mode 7はオクタヘドラルエンコードされた法線を読むため、補間されると
@@ -150,13 +211,14 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     if (Mode == 3)
     {
-        float ao = sourceColor.a;
+        float ao = sourceColor.a * Gain;
         return float4(ao, ao, ao, 1.0f);
     }
 
     if (Mode == 4)
     {
-        float3 color = sourceColor.rgb / (sourceColor.rgb + 1.0f);
+        float3 hdr = sourceColor.rgb * Gain;
+        float3 color = hdr / (hdr + 1.0f);
         color = pow(color, 1.0f / 2.2f);
         return float4(color, 1.0f);
     }
@@ -167,5 +229,5 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(depth, depth, depth, 1.0f);
     }
 
-    return float4(sourceColor.rgb, 1.0f);
+    return float4(sourceColor.rgb * Gain, 1.0f);
 }

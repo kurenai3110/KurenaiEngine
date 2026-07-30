@@ -21,6 +21,18 @@ namespace Kurenai::RHI
         // ライトリストのような「要素数が可変で定数バッファに収めるには大きい配列」を
         // グラフィックスパイプラインのピクセルシェーダへSRVとしてバインドする用途向け
         StructuredReadOnly,
+        // コンピュートシェーダーがUAVで書き、ピクセルシェーダがSRVで読む構造化バッファ。
+        // CPUからは書き込まない(GPUだけで完結する中間データ)。タイルライトカリングの
+        // ライトグリッドがこれにあたる。
+        //
+        // 既存の2種はどちらも片側しか持たないためこの用途に使えない:
+        //   Structured         … UAVのみ。SRVディスクリプタが無くPSから読めない
+        //   StructuredReadOnly … SRVのみ。UPLOADヒープ経由のCPU書き込み専用でUAVが無い
+        // DX12ではUNORDERED_ACCESSとPIXEL_SHADER_RESOURCEの間を明示的に遷移させる
+        // (DX12Buffer::TransitionTo。バインド時に暗黙に発行される)。
+        // DX11はUAVとSRVを同時にバインドできないが、DX11CommandList::DispatchがDispatch直後に
+        // UAVを全解除しているため追加の対処は要らない
+        StructuredRW,
     };
 
     enum class PrimitiveTopology
@@ -52,6 +64,12 @@ namespace Kurenai::RHI
         R16G16_Float,
         // HDR中間バッファ用(SceneColor等)。トーンマップ前の1.0を超える輝度値を保持できる
         R16G16B16A16_Float,
+        // アルファを持たないHDRバッファ用(G-Bufferのエミッシブ、ブルームのミップチェーン)。
+        // R16G16B16A16_Floatの半分の帯域で1.0を超える輝度を保持できる。
+        // ただし仮数はR/G=6bit・B=5bitで相対精度は約1.6%と、1.0付近ではR8G8B8A8_UNorm(0.39%)より粗い。
+        // 買っているのは精度ではなく1.0超のヘッドルームなので、「1.0を超えたい」場合にのみ使うこと
+        // (広い面積の淡いHDR値を格納するとバンディングし得る。その場合はR16G16B16A16_Floatへ上げる)
+        R11G11B10_Float,
     };
 
     // サンプラーのフィルタリング方式

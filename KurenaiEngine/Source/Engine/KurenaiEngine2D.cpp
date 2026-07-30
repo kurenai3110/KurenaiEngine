@@ -60,6 +60,9 @@ namespace Kurenai
         pipelineDesc.PixelShader = m_PixelShader.get();
         pipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
         pipelineDesc.HasDepthStencil = false; // 2Dは深度テスト不要(描画順で前後関係を決める)
+        // ただしスワップチェインへ描くためDSV自体はバインドされる。DX12はPSOが申告した
+        // DSVフォーマットと実際のDSVが一致している必要があるため、フォーマットの申告だけは行う
+        pipelineDesc.DepthTargetAttached = true;
         pipelineDesc.ReverseZ = false;
         pipelineDesc.BlendMode = RHI::BlendMode::AlphaBlend; // 半透明スプライトのため
         m_PipelineState = m_Device->CreatePipelineState(pipelineDesc);

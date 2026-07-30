@@ -106,14 +106,18 @@ exit /b 0</Command>
     <None Include="Shaders\3D\DirectLighting.hlsl" />
     <None Include="Shaders\3D\DeferredLighting.hlsl" />
     <None Include="Shaders\3D\HiZ.hlsl" />
+    <None Include="Shaders\3D\LightCulling.hlsl" />
     <None Include="Shaders\3D\NormalEncoding.hlsli" />
     <None Include="Shaders\3D\SpecularEnergy.hlsli" />
+    <None Include="Shaders\3D\ScreenSpaceShadow.hlsli" />
     <None Include="Shaders\3D\Present.hlsl" />
     <None Include="Shaders\3D\SSAO.hlsl" />
     <None Include="Shaders\3D\SSIL_VisibilityBitmask.hlsl" />
     <None Include="Shaders\3D\SSR.hlsl" />
     <None Include="Shaders\3D\Shadow.hlsl" />
     <None Include="Shaders\3D\Tonemap.hlsl" />
+    <None Include="Shaders\3D\AutoExposure.hlsl" />
+    <None Include="Shaders\3D\Bloom.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="KurenaiEngineLibrary.vcxproj">

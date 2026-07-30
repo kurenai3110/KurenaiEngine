@@ -37,6 +37,7 @@ namespace Kurenai::RHI
         : m_Device(device)
     {
         m_SrvHeap = std::make_unique<DX12DescriptorHeap>(device->GetDevice(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 64, true);
+        m_SrvHeap->GetHeap()->SetName(L"ImGui Shader Visible SRV Heap");
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
@@ -47,7 +48,10 @@ namespace Kurenai::RHI
         initInfo.CommandQueue = device->GetCommandQueue();
         initInfo.NumFramesInFlight = 2;
         initInfo.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-        initInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        // ImGuiはスワップチェインのレンダーターゲット(DSVがバインドされた状態)へ描くため、
+        // 実際にバインドされるDSVと同じフォーマットを申告する必要がある(UNKNOWNのままだと
+        // D3D12デバッグレイヤーがRT/DSVとPSOのフォーマット不一致としてエラーを出す)
+        initInfo.DSVFormat = DXGI_FORMAT_D32_FLOAT;
         initInfo.SrvDescriptorHeap = m_SrvHeap->GetHeap();
         initInfo.UserData = m_SrvHeap.get();
         initInfo.SrvDescriptorAllocFn = &ImGuiSrvAlloc;
@@ -73,16 +77,31 @@ namespace Kurenai::RHI
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        // ImGui_ImplDX12_NewFrame()はテクスチャ管理のため内部でSetDescriptorHeapsを呼び、
-        // シェーダ可視ヒープの割り当てをImGui自身のヒープへ切り替えてしまう。以降の描画が
-        // SetTexture/SetSamplerSetで使うヒープを正しく参照できるよう、ここで明示的に戻す
-        ID3D12DescriptorHeap* heaps[] = { m_Device->GetShaderVisibleSrvHeap()->GetHeap(), m_Device->GetShaderVisibleSamplerHeap()->GetHeap() };
-        m_Device->GetCommandList()->SetDescriptorHeaps(2, heaps);
+        // ImGuiのフォントテクスチャ生成などでヒープの割り当て状態が変わっても、以降の描画が
+        // SetTexture/SetSamplerSetで使うヒープを正しく参照できるよう、ここで明示的に戻しておく
+        BindEngineDescriptorHeaps();
     }
 
     void DX12ImGuiBackend::Render()
     {
         ImGui::Render();
+
+        // ImGui_ImplDX12_RenderDrawDataはSetGraphicsRootDescriptorTableへImGui自身のヒープ上の
+        // ハンドルを渡すが、SetDescriptorHeapsは呼ばない(呼び出し側が事前にバインドしておく規約)。
+        // エンジンのヒープを張ったまま呼ぶと「ハンドルの所属ヒープと現在バインド中のヒープが違う」
+        // というD3D12の仕様違反になるため、ImGuiのヒープへ切り替えてから描画する
+        ID3D12DescriptorHeap* imguiHeaps[] = { m_SrvHeap->GetHeap() };
+        m_Device->GetCommandList()->SetDescriptorHeaps(1, imguiHeaps);
+
         ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), m_Device->GetCommandList());
+
+        // 同じフレーム内でこの後に描画が続く場合に備えて元へ戻す
+        BindEngineDescriptorHeaps();
+    }
+
+    void DX12ImGuiBackend::BindEngineDescriptorHeaps()
+    {
+        ID3D12DescriptorHeap* heaps[] = { m_Device->GetShaderVisibleSrvHeap()->GetHeap(), m_Device->GetShaderVisibleSamplerHeap()->GetHeap() };
+        m_Device->GetCommandList()->SetDescriptorHeaps(2, heaps);
     }
 }

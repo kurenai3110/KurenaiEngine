@@ -10,13 +10,15 @@ namespace Kurenai::RHI
         DX11Shader* pixelShader,
         PrimitiveTopology topology,
         Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilState,
-        Microsoft::WRL::ComPtr<ID3D11BlendState> blendState)
+        Microsoft::WRL::ComPtr<ID3D11BlendState> blendState,
+        Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerState)
         : m_InputLayout(std::move(inputLayout))
         , m_VertexShader(vertexShader)
         , m_PixelShader(pixelShader)
         , m_Topology(topology)
         , m_DepthStencilState(std::move(depthStencilState))
         , m_BlendState(std::move(blendState))
+        , m_RasterizerState(std::move(rasterizerState))
     {
     }
 

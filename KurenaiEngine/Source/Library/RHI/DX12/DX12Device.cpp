@@ -46,7 +46,7 @@ namespace Kurenai::RHI
         // シェーダ可視Samplerヒープの上限はD3D12の仕様で2048ディスクリプタ
         // (D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE)なので、この程度なら十分収まる
         constexpr uint32_t kMaxSamplerSets = 8;
-        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t10のkTextureSlotCount個ひと組)の最大数。
+        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t13のkTextureSlotCount個ひと組)の最大数。
         // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく。実際に確保するヒープ容量は
         // これのkFrameCount倍(CPUがGPU完了を待たずに次フレームを記録し始めるため、直近kFrameCount
         // フレームぶんのブロックがまだGPUに読まれている可能性がある)
@@ -96,6 +96,8 @@ namespace Kurenai::RHI
                 return DXGI_FORMAT_R16G16_FLOAT;
             case Format::R16G16B16A16_Float:
                 return DXGI_FORMAT_R16G16B16A16_FLOAT;
+            case Format::R11G11B10_Float:
+                return DXGI_FORMAT_R11G11B10_FLOAT;
             case Format::R32G32B32A32_Float:
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -142,6 +144,50 @@ namespace Kurenai::RHI
 
         ThrowIfFailed(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_Device)), "D3D12デバイスの作成に失敗しました");
 
+#if defined(_DEBUG)
+        // デバッグレイヤーの指摘はそのままではデバッガの出力ウィンドウにしか出ず、
+        // デバッガを繋がずに実行した場合に気付けない。ID3D12InfoQueueに溜まったメッセージを
+        // 毎フレーム引き取ってKurenaiEngine.logへ出すことで、通常の実行でも検出できるようにする
+        if (SUCCEEDED(m_Device.As(&m_InfoQueue)))
+        {
+            // 情報レベルの通知は量が多く実害もないため保存しない(警告以上のみ残す)
+            m_InfoQueue->SetMuteDebugOutput(FALSE);
+            m_InfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
+            D3D12_MESSAGE_SEVERITY deniedSeverities[] = { D3D12_MESSAGE_SEVERITY_INFO, D3D12_MESSAGE_SEVERITY_MESSAGE };
+
+            // 実害が無いと確認済みで、かつ毎フレーム大量に出るためログを埋め尽くしてしまう指摘は除外する。
+            // 除外しないと本当に見たいエラーが埋もれる(実測でこの2件だけで1回の起動あたり約2万件)
+            D3D12_MESSAGE_ID deniedIds[] = {
+                // クリア色がリソース生成時に指定した最適化用クリア値と違う、という性能上の注意。
+                // エンジンはレンダーテクスチャを一律{0,0,0,1}で作り、パスごとに別の色でクリアしている
+                // (G-Bufferは{0,0,0,0}、Lighting/Presentは{0.05,0.05,0.08,1})。高速クリア経路には
+                // 乗らないが結果は正しい。用途ごとのクリア色をテクスチャ生成時に指定できるようにすれば
+                // 解消できるが、RHIのAPI変更を伴うため現状は許容している
+                D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+                // バッファはD3D12の仕様上つねにCOMMON状態で作られるため、CreateCommittedResourceへ
+                // 渡したInitialStateが無視される、という通知(CREATERESOURCE_STATE_IGNORED)。
+                // 仕様通りの動作で対処のしようがない。このIDの列挙子はビルドに使っている
+                // Windows SDK 10.0.19041のd3d12sdklayers.hにまだ存在しないため数値で指定する
+                static_cast<D3D12_MESSAGE_ID>(1328),
+            };
+
+            D3D12_INFO_QUEUE_FILTER filter{};
+            filter.DenyList.NumSeverities = _countof(deniedSeverities);
+            filter.DenyList.pSeverityList = deniedSeverities;
+            filter.DenyList.NumIDs = _countof(deniedIds);
+            filter.DenyList.pIDList = deniedIds;
+            m_InfoQueue->PushStorageFilter(&filter);
+
+            // 以降このログにD3D12DebugLayerの行が出なければ「指摘が無い」と判断してよいことを
+            // はっきりさせるため、引き取りが有効になったこと自体を記録しておく
+            Core::Logger::Info("DX12", "デバッグレイヤーの指摘をKurenaiEngine.logへ出力します(警告以上のみ)");
+        }
+        else
+        {
+            Core::Logger::Warning("DX12", "ID3D12InfoQueueを取得できませんでした。デバッグレイヤーの指摘はログに出ません");
+        }
+#endif
+
         D3D12_COMMAND_QUEUE_DESC queueDesc{};
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         ThrowIfFailed(m_Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_CommandQueue)), "コマンドキューの作成に失敗しました");
@@ -180,8 +226,16 @@ namespace Kurenai::RHI
             throw std::runtime_error("アップロード用フェンスイベントの作成に失敗しました");
         }
 
-        m_RtvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 16, false);
-        m_DsvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 8, false);
+        // RTVの内訳: スワップチェーンのバックバッファ2 + オフスクリーンのレンダーテクスチャ12 = 常時14。
+        // DSVと同じくCreateRenderTargetsのリサイズ処理は「新しいテクスチャを作ってから古いunique_ptrを
+        // 解放する」順になるため、リサイズ中はほぼ倍のRTVが同時に生存する。余裕を持たせて32本確保する
+        // (RTVヒープはCPU側のみでGPUメモリを消費しないため、多めに取っても実害がない)
+        m_RtvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 32, false);
+        // DSVの内訳: スワップチェーンの深度1 + G-Bufferの深度1 + シャドウマップ配列のスライス4 = 常時6本。
+        // ただしCreateRenderTargetsのリサイズ処理は「新しいテクスチャを作ってから古いunique_ptrを解放する」
+        // 順になるため、リサイズ中は一時的に7本必要になる。余裕を持たせて16本確保する(DSVヒープは
+        // CPU側のみでGPUメモリを消費しないため、多めに取っても実害がない)
+        m_DsvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false);
         m_SrvCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvCpuHeapCapacity, false);
         // 1フレーム分のコマンドをまとめて記録してから1回だけ実行する設計のため、描画のたびに
         // 新しいkTextureSlotCount個のブロックを払い出せるよう、1フレームに必要な最大数を見込んで確保する。
@@ -198,6 +252,14 @@ namespace Kurenai::RHI
         // 加えて先頭に1ブロックぶんのフォールバックを確保しておく(下記参照)
         m_ShaderVisibleSamplerHeap = std::make_unique<DX12DescriptorHeap>(
             m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, kSamplerSlotCount * (kMaxSamplerSets + 1), true);
+
+        // デバッグレイヤーの指摘に「どのヒープか」が出るよう名前を付けておく
+        // (名前が無いと"Unnamed ID3D12DescriptorHeap Object"としか出ず、アドレスから推測するしかない)
+        m_RtvHeap->GetHeap()->SetName(L"KurenaiEngine RTV Heap");
+        m_DsvHeap->GetHeap()->SetName(L"KurenaiEngine DSV Heap");
+        m_SrvCpuHeap->GetHeap()->SetName(L"KurenaiEngine SRV CPU Heap");
+        m_ShaderVisibleSrvHeap->GetHeap()->SetName(L"KurenaiEngine Shader Visible SRV Heap");
+        m_ShaderVisibleSamplerHeap->GetHeap()->SetName(L"KurenaiEngine Shader Visible Sampler Heap");
 
         // 上位層が一度もSetSamplerSetを呼ばないままDrawした場合に備えたフォールバックのブロック。
         // ルートディスクリプタテーブルは常にkSamplerSlotCount個ぶんを指すため、未初期化の
@@ -217,6 +279,26 @@ namespace Kurenai::RHI
             {
                 m_Device->CreateSampler(&defaultSamplerDesc, m_ShaderVisibleSamplerHeap->GetCpuHandle(m_FallbackSamplerSetBase + slot));
             }
+        }
+
+        // 一度もバインドされていないSRV/UAVスロットを埋めるためのnullディスクリプタ。
+        // D3D12はリソースにnullptrを渡したビューの作成を認めており、そのディスクリプタを読むと0が返る
+        // (=DX11の未バインドスロットと同じ挙動)。これをDX12CommandListのシャドウ配列の初期値にすることで、
+        // ディスクリプタテーブルのブロックに未初期化のまま残る領域が構造的に無くなる
+        {
+            m_NullSrvIndex = m_SrvCpuHeap->Allocate();
+            D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvDesc{};
+            nullSrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            nullSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            nullSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            nullSrvDesc.Texture2D.MipLevels = 1;
+            m_Device->CreateShaderResourceView(nullptr, &nullSrvDesc, m_SrvCpuHeap->GetCpuHandle(m_NullSrvIndex));
+
+            m_NullUavIndex = m_SrvCpuHeap->Allocate();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC nullUavDesc{};
+            nullUavDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            nullUavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+            m_Device->CreateUnorderedAccessView(nullptr, nullptr, &nullUavDesc, m_SrvCpuHeap->GetCpuHandle(m_NullUavIndex));
         }
 
         CreateRootSignature();
@@ -389,6 +471,52 @@ namespace Kurenai::RHI
         // 検証用カウンタのみリセットする
         m_SrvTableBlocksUsedThisFrame = 0;
         m_ComputeTableBlocksUsedThisFrame = 0;
+
+        // DX12Bufferがリングへの書き込みを「同一フレーム内で何回目か」として数えるための通し番号を進める
+        ++m_FrameStamp;
+
+        DrainDebugMessages();
+    }
+
+    void DX12Device::DrainDebugMessages()
+    {
+        if (!m_InfoQueue)
+        {
+            return;
+        }
+
+        const UINT64 messageCount = m_InfoQueue->GetNumStoredMessages();
+        for (UINT64 i = 0; i < messageCount; ++i)
+        {
+            SIZE_T messageLength = 0;
+            if (FAILED(m_InfoQueue->GetMessage(i, nullptr, &messageLength)) || messageLength == 0)
+            {
+                continue;
+            }
+
+            std::vector<uint8_t> storage(messageLength);
+            auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+            if (FAILED(m_InfoQueue->GetMessage(i, message, &messageLength)))
+            {
+                continue;
+            }
+
+            // メッセージIDも併記する。除外したい指摘が出たときに、この番号をそのまま
+            // Initialize()のdeniedIdsへ追加できるようにするため
+            const std::string text =
+                "[ID " + std::to_string(static_cast<int>(message->ID)) + "] " +
+                std::string(message->pDescription, message->DescriptionByteLength > 0 ? message->DescriptionByteLength - 1 : 0);
+            if (message->Severity == D3D12_MESSAGE_SEVERITY_WARNING)
+            {
+                Core::Logger::Warning("D3D12DebugLayer", text);
+            }
+            else
+            {
+                Core::Logger::Error("D3D12DebugLayer", text);
+            }
+        }
+
+        m_InfoQueue->ClearStoredMessages();
     }
 
     uint32_t DX12Device::AllocateSrvTableBlock(uint32_t count)
@@ -527,6 +655,51 @@ namespace Kurenai::RHI
             return std::make_unique<DX12Buffer>(this, resource, uavIndex, desc.SizeInBytes, desc.StrideInBytes);
         }
 
+        // コンピュートがUAVで書き、ピクセルシェーダがSRVで読む構造化バッファ。CPUからは書き込まないため
+        // 初期データもステージングリングも持たず、DEFAULTヒープにUAV+SRVの2つのディスクリプタを作る。
+        // BufferUsage::Structuredと同じく、作成時点で直接UNORDERED_ACCESS状態にしておく
+        // (m_UploadCommandListはInitialDataがある呼び出しでしかSubmitされないため、
+        //  ここでバリアだけ積むと未実行のまま参照される可能性がある)
+        if (desc.Usage == BufferUsage::StructuredRW)
+        {
+            if (desc.StrideInBytes == 0)
+            {
+                Core::Logger::Error("DX12", "StructuredRWバッファのStrideInBytesが0です。作成を中止します");
+                throw std::runtime_error("StructuredRWバッファのStrideInBytesが0です");
+            }
+
+            const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+            const CD3DX12_RESOURCE_DESC resourceDesc =
+                CD3DX12_RESOURCE_DESC::Buffer(desc.SizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+            ThrowIfFailed(
+                m_Device->CreateCommittedResource(
+                    &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
+                "読み書き構造化バッファ(StructuredRW)の作成に失敗しました");
+
+            const uint32_t elementCount = desc.SizeInBytes / desc.StrideInBytes;
+
+            const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+            uavDesc.Buffer.NumElements = elementCount;
+            uavDesc.Buffer.StructureByteStride = desc.StrideInBytes;
+            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+
+            const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDesc.Buffer.NumElements = elementCount;
+            srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
+            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+            return std::make_unique<DX12Buffer>(this, resource, uavIndex, srvIndex, desc.SizeInBytes, desc.StrideInBytes);
+        }
+
         // 読み取り専用の構造化バッファ(StructuredBuffer<T>)。ピクセルシェーダが毎フレーム読むため
         // 本体はDEFAULTヒープに置く(UPLOADヒープはCPUから見える代わりにGPU読み取りが低速なため、
         // ピクセルごとに読まれる用途には向かない。頂点/インデックスバッファをDEFAULTヒープに
@@ -556,8 +729,13 @@ namespace Kurenai::RHI
             m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
 
             // CPUはGPU完了を待たずに次フレームの記録を始める(kFrameCount)ため、直近フレームぶんの
-            // 書き込みが同時に生存できるようkFrameCount+1スロットのステージングリングを持たせる
-            constexpr uint32_t kStructuredReadOnlyUploadRingCapacity = kFrameCount + 1;
+            // 書き込みが同時に生存できるだけのステージングリングを持たせる。
+            // 1フレーム内に同じバッファへ複数回UpdateBufferすることがある(例: m_LightBufferは
+            // DirectLightパスとTransparentパスの2回)ため、kFrameCount+1では足りない。
+            // 「1フレームあたりの更新回数の上限×kFrameCount」に余裕を足した値にしておく
+            // (超過はDX12Buffer::AdvanceUploadRingAndGetWritePtrがログで検出する)
+            constexpr uint32_t kMaxStructuredUpdatesPerFrame = 4;
+            constexpr uint32_t kStructuredReadOnlyUploadRingCapacity = kMaxStructuredUpdatesPerFrame * kFrameCount + 1;
             Microsoft::WRL::ComPtr<ID3D12Resource> uploadResource =
                 CreateUploadBuffer(static_cast<uint64_t>(desc.SizeInBytes) * kStructuredReadOnlyUploadRingCapacity);
 
@@ -600,7 +778,7 @@ namespace Kurenai::RHI
                 memcpy(mappedPtr, desc.InitialData, desc.SizeInBytes);
             }
 
-            return std::make_unique<DX12Buffer>(resource, mappedPtr, slotSizeInBytes, desc.StrideInBytes, desc.Usage, ringCapacity);
+            return std::make_unique<DX12Buffer>(this, resource, mappedPtr, slotSizeInBytes, desc.StrideInBytes, desc.Usage, ringCapacity);
         }
 
         // 頂点/インデックスバッファは初回アップロード後書き換えないため、CPUから見える(低速な)
@@ -648,7 +826,7 @@ namespace Kurenai::RHI
 
         // DEFAULTヒープはCPUからマップできないためnullptrを渡す。頂点/インデックスバッファは
         // 初回アップロード後書き換えない(ringCapacity=1でAdvanceRingAndGetWritePtrは呼ばれない)
-        return std::make_unique<DX12Buffer>(resource, nullptr, desc.SizeInBytes, desc.StrideInBytes, desc.Usage, 1);
+        return std::make_unique<DX12Buffer>(this, resource, nullptr, desc.SizeInBytes, desc.StrideInBytes, desc.Usage, 1);
     }
 
     std::unique_ptr<IRHIShader> DX12Device::CreateShader(const ShaderDesc& desc)
@@ -715,6 +893,10 @@ namespace Kurenai::RHI
         psoDesc.PS = pixelShader->GetBytecode();
         psoDesc.InputLayout = { elements.empty() ? nullptr : elements.data(), static_cast<UINT>(elements.size()) };
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        // 既定は「時計回りが表・裏面カリング」。ミラーリング(負のスケール)を含むインスタンスは
+        // スクリーン上での三角形の向きが反転するため、表裏の判定を入れ替えたPSOで描く
+        // (RHIDesc.hのFrontCounterClockwise、docs/Architecture.html 10.2節)
+        psoDesc.RasterizerState.FrontCounterClockwise = desc.FrontCounterClockwise ? TRUE : FALSE;
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         {
             D3D12_RENDER_TARGET_BLEND_DESC& rt = psoDesc.BlendState.RenderTarget[0];
@@ -774,7 +956,9 @@ namespace Kurenai::RHI
         {
             psoDesc.RTVFormats[i] = ToDXGIFormat(desc.RenderTargetFormats[i]);
         }
-        psoDesc.DSVFormat = desc.HasDepthStencil ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
+        // 実際にDSVがバインドされる描画では、深度テストの有無に関わらずフォーマットを申告する必要がある
+        // (エンジン内の深度バッファはオフスクリーン・スワップチェインともD32_FLOATで統一している)
+        psoDesc.DSVFormat = (desc.HasDepthStencil || desc.DepthTargetAttached) ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
         psoDesc.SampleDesc.Count = 1;
 
         Microsoft::WRL::ComPtr<ID3D12PipelineState> pso;
@@ -1129,7 +1313,7 @@ namespace Kurenai::RHI
 
         return std::make_unique<DX12Texture>(
             this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
-            DX12Texture::kInvalid, std::move(mipUavIndices), cubeCount);
+            DX12Texture::kInvalid, std::move(mipUavIndices), std::vector<uint32_t>{}, cubeCount);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth)
@@ -1167,6 +1351,81 @@ namespace Kurenai::RHI
         m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
 
         return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, dsvIndex);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateDepthTextureArray(
+        uint32_t width, uint32_t height, uint32_t arraySize, float clearDepth)
+    {
+        if (width == 0 || height == 0 || arraySize == 0)
+        {
+            const std::string message = "CreateDepthTextureArray: 不正なサイズが指定されました(width=" +
+                                        std::to_string(width) + ", height=" + std::to_string(height) +
+                                        ", arraySize=" + std::to_string(arraySize) + ")";
+            Core::Logger::Error("DX12", message);
+            throw std::runtime_error(message);
+        }
+
+        if (arraySize > D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION)
+        {
+            const std::string message = "CreateDepthTextureArray: 配列サイズがD3D12の上限を超えています(arraySize=" +
+                                        std::to_string(arraySize) +
+                                        ", 上限=" + std::to_string(D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) + ")";
+            Core::Logger::Error("DX12", message);
+            throw std::runtime_error(message);
+        }
+
+        // 方針はCreateDepthTextureと同じ(R32_TYPELESSで作りDSV/SRVを個別に張る)。違いは
+        // ArraySizeが1より大きいことと、DSVをスライスごとに(Texture2DArray、要素数1で)張ること
+        D3D12_CLEAR_VALUE clearValue{};
+        clearValue.Format = DXGI_FORMAT_D32_FLOAT;
+        clearValue.DepthStencil.Depth = clearDepth;
+        clearValue.DepthStencil.Stencil = 0;
+
+        const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+        const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+            DXGI_FORMAT_R32_TYPELESS, width, height, static_cast<UINT16>(arraySize), 1, 1, 0,
+            D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(
+            m_Device->CreateCommittedResource(
+                &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue,
+                IID_PPV_ARGS(&resource)),
+            "深度テクスチャ配列の作成に失敗しました");
+
+        // 全スライスを1枚のTexture2DArrayとして読むSRV(サンプリング側。ShadowSampling.hlsli等)
+        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture2DArray.MostDetailedMip = 0;
+        srvDesc.Texture2DArray.MipLevels = 1;
+        srvDesc.Texture2DArray.FirstArraySlice = 0;
+        srvDesc.Texture2DArray.ArraySize = arraySize;
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+        // スライスごとに単一配列スライスのDSVを張り、パスごとに1スライスずつ描き込めるようにする
+        // (CreateMippedUAVTextureCubeが面ごとのUAVを張るのと同じ考え方)
+        std::vector<uint32_t> sliceDsvIndices;
+        sliceDsvIndices.reserve(arraySize);
+        for (uint32_t slice = 0; slice < arraySize; ++slice)
+        {
+            const uint32_t sliceDsvIndex = m_DsvHeap->Allocate();
+            D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+            dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+            dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+            dsvDesc.Texture2DArray.MipSlice = 0;
+            dsvDesc.Texture2DArray.FirstArraySlice = slice;
+            dsvDesc.Texture2DArray.ArraySize = 1;
+            m_Device->CreateDepthStencilView(resource.Get(), &dsvDesc, m_DsvHeap->GetCpuHandle(sliceDsvIndex));
+            sliceDsvIndices.push_back(sliceDsvIndex);
+        }
+
+        // dsvIndexはkInvalidにする(スライスごとのDSVで代替するため。~DX12Textureでの二重解放も防ぐ)
+        return std::make_unique<DX12Texture>(
+            this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
+            DX12Texture::kInvalid, std::vector<uint32_t>{}, std::move(sliceDsvIndices));
     }
 
     std::unique_ptr<IRHISamplerSet> DX12Device::CreateSamplerSet(const SamplerDesc* descs, uint32_t count)

@@ -11,7 +11,7 @@
 
 static const float PI = 3.14159265359f;
 
-// 反射プローブの環境ソースと鏡面IBLの重み。SSR.hlslが同じ定義を共有する(17章)。
+// 反射プローブの環境ソースと鏡面IBLの重み。SSR.hlslが同じ定義を共有する(20章)。
 // ReflectionProbe.hlsliはSamplers.hlsliのMaterialSamplerとFrameConstantsの
 // ProbeParams/ShadowParams/AmbientColorを参照するため、それらの宣言より後でインクルードする
 #define KURENAI_GLOBAL_IRRADIANCE_REGISTER t8
@@ -44,12 +44,16 @@ cbuffer FrameConstants : register(b0)
     // PSMain側でこれが0以下の場合はEvaluateIBLの代わりにAmbientColor.rgbの定数色アンビエントへ
     // フォールバックする)。x/wはこのシェーダでは未使用
     float4 ShadowParams;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する。半透明パス専用)
+    // 半透明パス(Transparent.hlsl)専用のフィールドで、このシェーダでは使わない。cbufferのレイアウトは
+    // 宣言順で決まり途中のフィールドを飛ばせないため、後続のIBLParams/ProbeParamsのオフセットを
+    // 合わせる目的で宣言だけしている(C++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること)
     float4 ActiveLightCount;
-    // 反射プローブ用。x=有効プローブ数(0ならプローブは一切使わずグローバルIBLのみ)、
+    // x: 拡散イラディアンスの取得元(0=プリフィルタ済み鏡面の最終ミップ、1=専用イラディアンスマップ)。
+    // EvaluateIBL参照。yzwは未使用
+    float4 IBLParams;
+    // 反射プローブ用(19章)。x=有効プローブ数(0ならプローブは一切使わずグローバルIBLのみ)、
     // y=影響範囲のデバッグ表示フラグ(1以上でプローブごとの色分け表示に切り替える)、
-    // z=視差補正(box projection)の有効フラグ、w=プローブ間ブレンドの有効フラグ。
-    // z/wはPhase 1(補正なし・ブレンドなし)との見比べのためにImGuiから切り替えられる
+    // z=視差補正(box projection)の有効フラグ、w=プローブ間ブレンドの有効フラグ
     float4 ProbeParams;
 };
 
@@ -91,6 +95,9 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     SampleEnvironment(worldPos, N, R, mipLevel, irradiance, prefiltered);
 
     // --- 拡散IBL ---
+    // irradianceの取得元(専用マップ or プリフィルタ済み鏡面の最終ミップ)の切り替えは
+    // SampleEnvironmentの中で行う。プローブ側にもまったく同じ規則を適用するため、
+    // IBLParams.xの判定はReflectionProbe.hlsliに1か所だけ置いている(14.10節・19.7節)
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")。粗い面ほど
     // 視線に対するフレネルの立ち上がりが緩やかになる近似で、鏡面に回らない分をkdへ反映する
     const float3 fresnelRoughness = F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
@@ -99,7 +106,7 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
 
     // --- 鏡面IBL(split-sum近似) ---
     // 「環境の放射輝度 × 係数」の形に分解しておく。SSRはこの放射輝度だけを差し替えるため、
-    // 係数の定義はReflectionProbe.hlsliのSpecularIBLWeightに1か所だけ置いている(17章)
+    // 係数の定義はReflectionProbe.hlsliのSpecularIBLWeightに1か所だけ置いている(20章)
     const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
     const float3 specularWeight =
         SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, AmbientColor.a, ShadowParams.z);
@@ -185,7 +192,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 ambient;
     if (ShadowParams.z > 0.0f)
     {
-        // 反射プローブ(15章)はEvaluateIBL内のSampleEnvironmentで環境ソースへ合成される。
+        // 反射プローブ(19章)はEvaluateIBL内のSampleEnvironmentで環境ソースへ合成される。
         // プローブが1つも効いていない位置では従来どおりスカイボックス由来のグローバルIBLになる。
         // IBL強度倍率(ShadowParams.z)はEvaluateIBLの中で拡散・鏡面それぞれに掛かっている
         ambient = EvaluateIBL(N, V, worldPos, albedo, metallic, roughness, ao);

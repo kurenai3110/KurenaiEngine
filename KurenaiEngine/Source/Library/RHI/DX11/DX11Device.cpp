@@ -42,6 +42,8 @@ namespace Kurenai::RHI
                 return DXGI_FORMAT_R16G16_FLOAT;
             case Format::R16G16B16A16_Float:
                 return DXGI_FORMAT_R16G16B16A16_FLOAT;
+            case Format::R11G11B10_Float:
+                return DXGI_FORMAT_R11G11B10_FLOAT;
             case Format::R32G32B32A32_Float:
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -188,6 +190,56 @@ namespace Kurenai::RHI
                 "読み取り専用構造化バッファのシェーダリソースビュー作成に失敗しました");
 
             return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, srv, /*isDynamic=*/true);
+        }
+
+        // コンピュートがUAVで書き、ピクセルシェーダがSRVで読む構造化バッファ。CPUからは書き込まないので
+        // D3D11_USAGE_DEFAULT(CPUAccessFlagsなし)。DX11は同じリソースをUAVとSRVに同時バインドできないが、
+        // DX11CommandList::DispatchがDispatch直後にUAVを全解除しているため追加の対処は要らない
+        if (desc.Usage == BufferUsage::StructuredRW)
+        {
+            if (desc.StrideInBytes == 0)
+            {
+                Core::Logger::Error("DX11", "StructuredRWバッファのStrideInBytesが0です。作成を中止します");
+                throw std::runtime_error("StructuredRWバッファのStrideInBytesが0です");
+            }
+
+            D3D11_BUFFER_DESC structuredDesc{};
+            structuredDesc.ByteWidth = desc.SizeInBytes;
+            structuredDesc.Usage = D3D11_USAGE_DEFAULT;
+            structuredDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+            structuredDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            structuredDesc.StructureByteStride = desc.StrideInBytes;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> structuredBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&structuredDesc, nullptr, &structuredBuffer),
+                "読み書き構造化バッファ(StructuredRW)の作成に失敗しました");
+
+            const UINT elementCount = desc.SizeInBytes / desc.StrideInBytes;
+
+            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            uavDesc.Buffer.FirstElement = 0;
+            uavDesc.Buffer.NumElements = elementCount;
+
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+            ThrowIfFailed(
+                m_Device->CreateUnorderedAccessView(structuredBuffer.Get(), &uavDesc, &uav),
+                "読み書き構造化バッファのアンオーダードアクセスビュー作成に失敗しました");
+
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            srvDesc.Buffer.FirstElement = 0;
+            srvDesc.Buffer.NumElements = elementCount;
+
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+            ThrowIfFailed(
+                m_Device->CreateShaderResourceView(structuredBuffer.Get(), &srvDesc, &srv),
+                "読み書き構造化バッファのシェーダリソースビュー作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, uav, srv);
         }
 
         D3D11_BUFFER_DESC bufferDesc{};
@@ -361,7 +413,18 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11BlendState> blendState;
         ThrowIfFailed(m_Device->CreateBlendState(&blendDesc, &blendState), "ブレンドステートの作成に失敗しました");
 
-        return std::make_unique<DX11PipelineState>(inputLayout, vertexShader, pixelShader, desc.Topology, depthStencilState, blendState);
+        // ラスタライザステートも同様にPSO単位で持たせる。以前はRSSetStateを一度も呼ばず
+        // D3D11の既定状態(ソリッド塗り・裏面カリング・時計回りが表)に任せていたが、
+        // ミラーリングされたインスタンスをFrontCounterClockwise=TRUEで描き分けられるように
+        // 明示的に作成する。CD3D11_RASTERIZER_DESC(D3D11_DEFAULT)はその既定状態そのものなので、
+        // FrontCounterClockwise以外の項目は従来の挙動から変わらない
+        CD3D11_RASTERIZER_DESC rasterizerDesc(D3D11_DEFAULT);
+        rasterizerDesc.FrontCounterClockwise = desc.FrontCounterClockwise ? TRUE : FALSE;
+
+        Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerState;
+        ThrowIfFailed(m_Device->CreateRasterizerState(&rasterizerDesc, &rasterizerState), "ラスタライザステートの作成に失敗しました");
+
+        return std::make_unique<DX11PipelineState>(inputLayout, vertexShader, pixelShader, desc.Topology, depthStencilState, blendState, rasterizerState);
     }
 
     std::unique_ptr<IRHIPipelineState> DX11Device::CreateComputePipelineState(const ComputePipelineStateDesc& desc)
@@ -641,7 +704,9 @@ namespace Kurenai::RHI
             }
         }
 
-        return std::make_unique<DX11Texture>(srv, nullptr, nullptr, nullptr, std::move(mipUavs), cubeCount);
+        return std::make_unique<DX11Texture>(
+            srv, nullptr, nullptr, nullptr, std::move(mipUavs),
+            std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>>{}, cubeCount);
     }
 
     std::unique_ptr<IRHITexture> DX11Device::CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth)
@@ -679,6 +744,82 @@ namespace Kurenai::RHI
         ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), &srvDesc, &srv), "深度シェーダリソースビューの作成に失敗しました");
 
         return std::make_unique<DX11Texture>(srv, nullptr, dsv);
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateDepthTextureArray(
+        uint32_t width, uint32_t height, uint32_t arraySize, float clearDepth)
+    {
+        if (width == 0 || height == 0 || arraySize == 0)
+        {
+            const std::string message = "CreateDepthTextureArray: 不正なサイズが指定されました(width=" +
+                                        std::to_string(width) + ", height=" + std::to_string(height) +
+                                        ", arraySize=" + std::to_string(arraySize) + ")";
+            Core::Logger::Error("DX11", message);
+            throw std::runtime_error(message);
+        }
+
+        if (arraySize > D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION)
+        {
+            const std::string message = "CreateDepthTextureArray: 配列サイズがD3D11の上限を超えています(arraySize=" +
+                                        std::to_string(arraySize) +
+                                        ", 上限=" + std::to_string(D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) + ")";
+            Core::Logger::Error("DX11", message);
+            throw std::runtime_error(message);
+        }
+
+        // CreateDepthTextureと同じくR32_TYPELESSで作り、書き込み用のD32_FLOAT DSVと
+        // 読み取り用のR32_FLOAT SRVを別々に張る。違いはArraySizeが1より大きいことと、
+        // DSVをスライスごとに(Texture2DArray、要素数1で)張ること。
+        // clearDepthが未使用な理由はCreateDepthTextureと同じ
+        (void)clearDepth;
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = width;
+        textureDesc.Height = height;
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = arraySize;
+        textureDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_DEFAULT;
+        textureDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+        ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, nullptr, &texture), "深度テクスチャ配列の作成に失敗しました");
+
+        // 全スライスを1枚のTexture2DArrayとして読むSRV(サンプリング側。ShadowSampling.hlsli等)
+        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        srvDesc.Texture2DArray.MostDetailedMip = 0;
+        srvDesc.Texture2DArray.MipLevels = 1;
+        srvDesc.Texture2DArray.FirstArraySlice = 0;
+        srvDesc.Texture2DArray.ArraySize = arraySize;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        ThrowIfFailed(
+            m_Device->CreateShaderResourceView(texture.Get(), &srvDesc, &srv),
+            "深度テクスチャ配列のシェーダリソースビューの作成に失敗しました");
+
+        // スライスごとに単一配列スライスのDSV(Texture2DArray、要素数1)を張り、
+        // パスごとに1スライスずつ描き込めるようにする(CreateMippedUAVTextureCubeのUAVと同じ考え方)
+        std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>> sliceDsvs;
+        sliceDsvs.reserve(arraySize);
+        for (uint32_t slice = 0; slice < arraySize; ++slice)
+        {
+            D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+            dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+            dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+            dsvDesc.Texture2DArray.MipSlice = 0;
+            dsvDesc.Texture2DArray.FirstArraySlice = slice;
+            dsvDesc.Texture2DArray.ArraySize = 1;
+            Microsoft::WRL::ComPtr<ID3D11DepthStencilView> sliceDsv;
+            ThrowIfFailed(
+                m_Device->CreateDepthStencilView(texture.Get(), &dsvDesc, &sliceDsv),
+                "深度テクスチャ配列のスライス" + std::to_string(slice) + "の深度ステンシルビューの作成に失敗しました");
+            sliceDsvs.push_back(std::move(sliceDsv));
+        }
+
+        return std::make_unique<DX11Texture>(
+            srv, nullptr, nullptr, nullptr,
+            std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>>{}, std::move(sliceDsvs));
     }
 
     std::unique_ptr<IRHISamplerSet> DX11Device::CreateSamplerSet(const SamplerDesc* descs, uint32_t count)

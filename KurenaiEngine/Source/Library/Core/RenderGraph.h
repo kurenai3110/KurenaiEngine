@@ -6,6 +6,7 @@
 
 #include "KurenaiTypes.h"
 
+#include "RHI/IRHIBuffer.h"
 #include "RHI/IRHICommandList.h"
 #include "RHI/IRHIGPUProfiler.h"
 #include "RHI/IRHISwapChain.h"
@@ -36,11 +37,24 @@ namespace Kurenai::Core
         std::vector<RHI::IRHITexture*> RenderTargets;
         // このパスがDSVとして書くテクスチャ
         RHI::IRHITexture* DepthTarget = nullptr;
+        // DepthTargetがCreateDepthTextureArrayで作られたテクスチャ配列の場合に、書き込み先のスライスを指定する
+        // (カスケードシャドウマップが1カスケード=1スライスで使う)。通常の深度テクスチャでは0のままでよい
+        uint32_t DepthTargetArraySlice = 0;
 
         // RTV/DSV以外の手段(コンピュートシェーダーのUAV書き込み等)でこのパスが書くテクスチャ。
         // RenderTargets/DepthTargetと違い自動バインドはされず、依存関係の解決にのみ使う
         // (実際のUAVバインドはExecute内でSetComputeUnorderedAccessTexture等を呼んで行う)
         std::vector<RHI::IRHITexture*> Writes;
+
+        // テクスチャではなくバッファ(構造化バッファ)を介した依存関係。Reads/Writesと同じく
+        // 実行順序の決定にのみ使い、実際のバインドはExecute内で行う。
+        //
+        // 【なぜ必要か】タイルライトカリングのパスと直接光パスは、どちらもm_GBufferDepthを
+        // Readsするだけの「読み手同士」になる。テクスチャの依存だけでは両者の間に辺が張られず、
+        // 「カリングが書いたライトグリッドを直接光が読む」という本当の依存関係が
+        // グラフ上に現れない(登録順が同点解決に使われてたまたま動くだけになる)
+        std::vector<RHI::IRHIBuffer*> BufferReads;
+        std::vector<RHI::IRHIBuffer*> BufferWrites;
 
         // バックバッファへ直接描画するパス(Present)の場合に指定する。RenderTargets/DepthTargetの
         // 代わりにSetRenderTarget(swapChain)で自動的にバインドされる。vsync有効時、このバインド呼び出し

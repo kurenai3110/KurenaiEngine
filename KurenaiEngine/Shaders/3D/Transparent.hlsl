@@ -4,12 +4,15 @@
 // 完結させて出力する(SSAO/SSIL/SSRのようなスクリーンスペース手法は非対応。既知の制約は
 // docs/Architecture.htmlの「半透明描画(フォワードパス)」章を参照)。
 //
-// ライティングのPBR計算・PCSS(Percentage Closer Soft Shadows)はDirectLighting.hlslと同じ式を使う
-// (このシェーダーは1メッシュぶんずつ描画するフォワードパスのため、フルスクリーンパスの
-// DirectLighting.hlslとは呼び出し形態が異なり#includeで共有できず、必要な関数のみ複製している)。
-// ただしSmith可視性項とスペキュラのエネルギー補正は、リソースにも呼び出し形態にも依存しない
-// 純粋な数式であり、かつBRDF積分LUTの生成と必ず一致していなければならないため、
-// SpecularEnergy.hlsliへ切り出して共有している。
+// ライティングのPBR計算はDirectLighting.hlslと同じ式を使う(このシェーダーは1メッシュぶんずつ
+// 描画するフォワードパスのため、フルスクリーンパスのDirectLighting.hlslとは呼び出し形態が異なり、
+// PSMainの構造に依存する部分は#includeで共有できず複製している)。
+// ただし以下はリソースにも呼び出し形態にも依存しないため、共有ヘッダーへ切り出している:
+//   - Smith可視性項とスペキュラのエネルギー補正(SpecularEnergy.hlsli)。BRDF積分LUTの生成と
+//     必ず一致していなければならないため
+//   - PCSS(Percentage Closer Soft Shadows)によるカスケードシャドウのサンプリング
+//     (ShadowSampling.hlsli)。以前はここに複製していたが、片方だけ直すと半透明と不透明で
+//     影が食い違う事故が起きやすかったため統合した
 //
 // DX12のルートシグネチャがCBVをb0/b1の2枠しか持たないため、GBuffer.hlslと同じくb1に
 // ObjectConstants(モデル行列)を置く。そのためDirectLighting.hlsl側のb1(LightingConstants、
@@ -37,6 +40,9 @@ cbuffer FrameConstants : register(b0)
     // 半透明パス専用。x=t8のライトリストの有効数(DirectLighting.hlsl側のLightingConstants.LightCount.xと
     // 同じ値)。他のシェーダーはこのフィールドを宣言していないため、末尾に追加してもオフセットは変わらない
     float4 ActiveLightCount;
+    // x: 拡散イラディアンスの取得元(0=専用イラディアンスマップ(t9)、1=プリフィルタ済み鏡面の
+    // 最終ミップ)。EvaluateIBLSplit参照。yzwは未使用
+    float4 IBLParams;
 };
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で
@@ -71,10 +77,11 @@ Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
 Texture2D EmissiveTexture : register(t3);
-Texture2D ShadowMap0 : register(t4);
-Texture2D ShadowMap1 : register(t5);
-Texture2D ShadowMap2 : register(t6);
-Texture2D ShadowMap3 : register(t7);
+// カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
+// DirectLighting.hlslと同じ実装を共有しているため、半透明と不透明で影がずれることはない。
+// FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)とDataSamplerを参照するため、
+// それらの宣言より後でインクルードする必要がある
+#include "ShadowSampling.hlsli"
 // IBL(14章)。DeferredLighting.hlslと同じ3枚をこのパスにもバインドする。半透明パスにはSSRが
 // 適用されないため、ガラスにとってはこのIBLが唯一の環境の映り込みになる
 TextureCube IrradianceTexture : register(t9);
@@ -134,102 +141,6 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
     return F0 + (1.0f - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
 }
 
-// DirectLighting.hlslのComputeShadowFactor(PCSS)と同じ式。定数(バイアス・タップ数)も揃える
-float ComputeShadowFactor(Texture2D shadowMap, float4x4 cascadeViewProj, float3 worldPos, float NdotL)
-{
-    float4 lightClipPos = mul(float4(worldPos, 1.0f), cascadeViewProj);
-    float3 lightNdc = lightClipPos.xyz / lightClipPos.w;
-
-    if (abs(lightNdc.x) > 1.0f || abs(lightNdc.y) > 1.0f || lightNdc.z < 0.0f || lightNdc.z > 1.0f)
-    {
-        return 1.0f;
-    }
-
-    float2 shadowUV = float2(lightNdc.x * 0.5f + 0.5f, 1.0f - (lightNdc.y * 0.5f + 0.5f));
-    float receiverDepth = lightNdc.z;
-
-    const float kShadowBiasMin = 0.0005f;
-    const float kShadowBiasMax = 0.0025f;
-    const float bias = lerp(kShadowBiasMax, kShadowBiasMin, NdotL);
-    const float compareDepth = receiverDepth - bias;
-
-    const float kTexelSize = 1.0f / 2048.0f;
-    const float lightSize = max(ShadowParams.x, kTexelSize);
-
-    const int kBlockerTaps = 5;
-    const int kBlockerHalf = kBlockerTaps / 2;
-    float blockerDepthSum = 0.0f;
-    int blockerCount = 0;
-
-    [unroll]
-    for (int by = -kBlockerHalf; by <= kBlockerHalf; ++by)
-    {
-        [unroll]
-        for (int bx = -kBlockerHalf; bx <= kBlockerHalf; ++bx)
-        {
-            const float2 offset = float2(bx, by) * (lightSize / float(kBlockerTaps));
-            const float sampleDepth = shadowMap.Sample(DataSampler, shadowUV + offset).r;
-            if (sampleDepth < compareDepth)
-            {
-                blockerDepthSum += sampleDepth;
-                blockerCount += 1;
-            }
-        }
-    }
-
-    if (blockerCount == 0)
-    {
-        return 1.0f;
-    }
-
-    const float avgBlockerDepth = blockerDepthSum / float(blockerCount);
-    const float penumbraRatio = (receiverDepth - avgBlockerDepth) / max(avgBlockerDepth, 1e-5f);
-    const float filterRadius = clamp(penumbraRatio * lightSize, kTexelSize, lightSize);
-
-    const int kPCFTaps = 5;
-    const int kPCFHalf = kPCFTaps / 2;
-    float shadowSum = 0.0f;
-
-    [unroll]
-    for (int py = -kPCFHalf; py <= kPCFHalf; ++py)
-    {
-        [unroll]
-        for (int px = -kPCFHalf; px <= kPCFHalf; ++px)
-        {
-            const float2 offset = float2(px, py) * (filterRadius / float(kPCFTaps));
-            const float sampleDepth = shadowMap.Sample(DataSampler, shadowUV + offset).r;
-            shadowSum += (sampleDepth < compareDepth) ? 0.0f : 1.0f;
-        }
-    }
-
-    return shadowSum / float(kPCFTaps * kPCFTaps);
-}
-
-float ComputeCascadedShadowFactor(float3 worldPos, float viewDepth, float NdotL)
-{
-    int cascadeIndex = 0;
-    if (viewDepth > CascadeSplits.x) cascadeIndex = 1;
-    if (viewDepth > CascadeSplits.y) cascadeIndex = 2;
-    if (viewDepth > CascadeSplits.z) cascadeIndex = 3;
-
-    if (cascadeIndex == 0)
-    {
-        return ComputeShadowFactor(ShadowMap0, CascadeViewProj[0], worldPos, NdotL);
-    }
-    else if (cascadeIndex == 1)
-    {
-        return ComputeShadowFactor(ShadowMap1, CascadeViewProj[1], worldPos, NdotL);
-    }
-    else if (cascadeIndex == 2)
-    {
-        return ComputeShadowFactor(ShadowMap2, CascadeViewProj[2], worldPos, NdotL);
-    }
-    else
-    {
-        return ComputeShadowFactor(ShadowMap3, CascadeViewProj[3], worldPos, NdotL);
-    }
-}
-
 // 拡散反射項と鏡面反射項を分けて返す(DirectLighting.hlslは両者を足した1つの値を返すが、
 // このシェーダーは事前乗算済みアルファ出力のために両者を別々に積算する必要がある。
 // 鏡面反射は不透明度で減衰させず背景の上へ加算するため。PSMain末尾のコメント参照)
@@ -271,7 +182,13 @@ void EvaluateIBLSplit(
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
 
     // --- 拡散IBL ---
-    const float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
+    // 既定はプリフィルタ済み鏡面の最終ミップ(roughness=1)。IBLParams.x=1のときだけ従来の
+    // 専用イラディアンスマップを引く(検証用に残している経路)。詳細な根拠は
+    // DeferredLighting.hlslのEvaluateIBLの同じ箇所を参照(14.10節)。半透明だけ取得元が
+    // 食い違わないよう、必ず不透明側と同じ切り替えを行う
+    const float3 irradiance = (IBLParams.x > 0.5f)
+        ? IrradianceTexture.Sample(MaterialSampler, N).rgb
+        : PrefilteredEnvTexture.SampleLevel(MaterialSampler, N, ShadowParams.y).rgb;
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")
     const float3 fresnelRoughness =
         F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);

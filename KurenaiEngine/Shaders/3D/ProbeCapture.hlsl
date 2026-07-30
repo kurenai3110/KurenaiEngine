@@ -71,10 +71,11 @@ Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
 Texture2D EmissiveTexture : register(t3);
-Texture2D ShadowMap0 : register(t4);
-Texture2D ShadowMap1 : register(t5);
-Texture2D ShadowMap2 : register(t6);
-Texture2D ShadowMap3 : register(t7);
+// カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
+// DirectLighting.hlsl/Transparent.hlslと同じ実装を共有しているため、プローブに焼かれる影と
+// 本編の影が食い違うことはない。FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)と
+// DataSamplerを参照するため、それらの宣言より後でインクルードする必要がある
+#include "ShadowSampling.hlsli"
 // スカイボックス由来のグローバルIBL。プローブに映る面の環境光として使う
 TextureCube IrradianceTexture : register(t9);
 TextureCube PrefilteredEnvTexture : register(t10);
@@ -128,75 +129,6 @@ float DistributionGGX(float NdotH, float roughness)
 float3 FresnelSchlick(float cosTheta, float3 F0)
 {
     return F0 + (1.0f - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
-}
-
-// DirectLighting.hlsl/Transparent.hlslのPCSSと同じ式だが、こちらは128x128程度の低解像度な
-// キューブ面へ書き込むためタップ数を落とした単純なPCF(3x3)にしている。プローブに映る影は
-// 反射像としてさらに縮小・ぼかされるため、半影の正確さより焼き直しのコストを優先する
-float ComputeShadowFactor(Texture2D shadowMap, float4x4 cascadeViewProj, float3 worldPos, float NdotL)
-{
-    float4 lightClipPos = mul(float4(worldPos, 1.0f), cascadeViewProj);
-    float3 lightNdc = lightClipPos.xyz / lightClipPos.w;
-
-    if (abs(lightNdc.x) > 1.0f || abs(lightNdc.y) > 1.0f || lightNdc.z < 0.0f || lightNdc.z > 1.0f)
-    {
-        return 1.0f;
-    }
-
-    float2 shadowUV = float2(lightNdc.x * 0.5f + 0.5f, 1.0f - (lightNdc.y * 0.5f + 0.5f));
-
-    // バイアスはDirectLighting.hlslと同じ値に揃える(同じシャドウマップを読むため)
-    const float kShadowBiasMin = 0.0005f;
-    const float kShadowBiasMax = 0.0025f;
-    const float bias = lerp(kShadowBiasMax, kShadowBiasMin, NdotL);
-    const float compareDepth = lightNdc.z - bias;
-
-    const float kTexelSize = 1.0f / 2048.0f;
-
-    const int kPCFTaps = 3;
-    const int kPCFHalf = kPCFTaps / 2;
-    float shadowSum = 0.0f;
-
-    [unroll]
-    for (int py = -kPCFHalf; py <= kPCFHalf; ++py)
-    {
-        [unroll]
-        for (int px = -kPCFHalf; px <= kPCFHalf; ++px)
-        {
-            const float2 offset = float2(px, py) * kTexelSize;
-            const float sampleDepth = shadowMap.Sample(DataSampler, shadowUV + offset).r;
-            shadowSum += (sampleDepth < compareDepth) ? 0.0f : 1.0f;
-        }
-    }
-
-    return shadowSum / float(kPCFTaps * kPCFTaps);
-}
-
-// カスケード選択はカメラ基準(FrameConstants.Viewにカメラのビュー行列が入っている。
-// ファイル冒頭の「定数バッファの与え方」参照)
-float ComputeCascadedShadowFactor(float3 worldPos, float viewDepth, float NdotL)
-{
-    int cascadeIndex = 0;
-    if (viewDepth > CascadeSplits.x) cascadeIndex = 1;
-    if (viewDepth > CascadeSplits.y) cascadeIndex = 2;
-    if (viewDepth > CascadeSplits.z) cascadeIndex = 3;
-
-    if (cascadeIndex == 0)
-    {
-        return ComputeShadowFactor(ShadowMap0, CascadeViewProj[0], worldPos, NdotL);
-    }
-    else if (cascadeIndex == 1)
-    {
-        return ComputeShadowFactor(ShadowMap1, CascadeViewProj[1], worldPos, NdotL);
-    }
-    else if (cascadeIndex == 2)
-    {
-        return ComputeShadowFactor(ShadowMap2, CascadeViewProj[2], worldPos, NdotL);
-    }
-    else
-    {
-        return ComputeShadowFactor(ShadowMap3, CascadeViewProj[3], worldPos, NdotL);
-    }
 }
 
 // DirectLighting.hlslのEvaluateDirectBRDFと同じ(拡散+鏡面を足した1つの値を返す)

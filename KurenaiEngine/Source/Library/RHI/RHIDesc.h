@@ -43,7 +43,16 @@ namespace Kurenai::RHI
         // DX12のパイプラインステートオブジェクト作成時にレンダーターゲット/深度のフォーマットを
         // 事前に確定させる必要があるため保持する。DX11実装では参照しない
         std::vector<Format> RenderTargetFormats;
+        // 深度テストを行うか(DX12ではこれがtrueのときDSVフォーマットも申告する)
         bool HasDepthStencil = false;
+
+        // 深度テストはしないが、描画時に深度ステンシルビューがバインドされた状態になるか。
+        // スワップチェインへ描くパス(Present / 2D / ImGui)が該当する。DX12は「PSOが申告した
+        // DSVフォーマット」と「実際にバインドされているDSV」が一致していないと仕様違反になるため、
+        // 深度テストを使わなくてもDSVが張られるならフォーマットの申告だけは必要になる
+        // (HasDepthStencilで兼ねると深度テストまで有効になってしまうため別のフラグにしている)。
+        // DX11はパイプラインステートと実際のDSVが独立しているため参照しない
+        bool DepthTargetAttached = false;
 
         // 深度への書き込みを行うか。既定はtrue(通常の不透明描画)。半透明描画では、既存の不透明物体の
         // 深度に対してテストはしたいが(裏側の物体に隠れさせるため)、書き込みは行いたくない
@@ -59,6 +68,16 @@ namespace Kurenai::RHI
         // アルファブレンド設定。既定は不透明(Opaque)。半透明の2Dスプライトなどを描画する場合はAlphaBlendを、
         // 炎・光などの発光エフェクトはAdditiveを、減光表現はMultiplyを、事前乗算済みテクスチャはPremultipliedAlphaを指定する
         BlendMode BlendMode = BlendMode::Opaque;
+
+        // 三角形の表面(front face)を反時計回り(CCW)とみなすか。既定のfalseは「時計回りが表」で、
+        // D3D11/D3D12双方のラスタライザ既定値と一致する(裏面はカリングされる)。
+        //
+        // ワールド行列に負のスケール(ミラーリング)が含まれるとインデックスの巡回順は変わらないまま
+        // スクリーン上での三角形の向きだけが反転するため、既定のままでは表と裏の判定が入れ替わり、
+        // 本来見えるはずの面がカリングされて物体の内側が描画されてしまう。そうしたインスタンスは
+        // このフラグをtrueにしたパイプラインで描くことで、カリングを効かせたまま正しい面を残す
+        // (docs/Architecture.html 10.2節)
+        bool FrontCounterClockwise = false;
     };
 
     struct ComputePipelineStateDesc

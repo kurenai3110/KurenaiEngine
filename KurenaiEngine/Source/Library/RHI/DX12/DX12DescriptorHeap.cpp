@@ -29,7 +29,10 @@ namespace Kurenai::RHI
 
         if (m_NextIndex >= m_Capacity)
         {
-            throw std::runtime_error("ディスクリプタヒープの容量を超えました");
+            const std::string message =
+                "ディスクリプタヒープの容量を超えました(容量: " + std::to_string(m_Capacity) + ")";
+            Core::Logger::Error("DX12", message);
+            throw std::runtime_error(message);
         }
 
         return m_NextIndex++;

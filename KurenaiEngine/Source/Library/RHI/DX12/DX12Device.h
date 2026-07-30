@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <d3d12.h>
+#include <d3d12sdklayers.h> // ID3D12InfoQueue(デバッグレイヤーのメッセージ引き取り用)
 #include <dxgi1_4.h>
 #include <memory>
 #include <mutex>
@@ -28,6 +29,11 @@ namespace Kurenai::RHI
 
         void Initialize();
 
+        // CPUがGPUの完了を待たずに次フレームの記録を始められるようにするための多重バッファリング数。
+        // スワップチェインのバッファ数(DX12SwapChain::kBufferCount)と合わせて2にしておく。
+        // DX12Bufferがリングの1フレームあたり書き込み上限を求めるのにも使うためpublicに置く
+        static constexpr uint32_t kFrameCount = 2;
+
         std::unique_ptr<IRHISwapChain> CreateSwapChain(void* windowHandle, uint32_t width, uint32_t height) override;
         std::unique_ptr<IRHIBuffer> CreateBuffer(const BufferDesc& desc) override;
         std::unique_ptr<IRHIShader> CreateShader(const ShaderDesc& desc) override;
@@ -46,6 +52,8 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHITexture> CreateMippedUAVTextureCubeArray(
             uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount) override;
         std::unique_ptr<IRHITexture> CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f) override;
+        std::unique_ptr<IRHITexture> CreateDepthTextureArray(
+            uint32_t width, uint32_t height, uint32_t arraySize, float clearDepth = 1.0f) override;
         std::unique_ptr<IRHISamplerSet> CreateSamplerSet(const SamplerDesc* descs, uint32_t count) override;
         IRHICommandList* GetImmediateCommandList() override;
 
@@ -67,6 +75,19 @@ namespace Kurenai::RHI
         // 上位層が一度もSetSamplerSetを呼ばないままDrawした場合に使う、既定サンプラーで埋めたブロックの先頭。
         // ルートディスクリプタテーブルが未初期化のディスクリプタを指さないようにするための保険
         uint32_t GetFallbackSamplerSetBase() const { return m_FallbackSamplerSetBase; }
+
+        // 一度もバインドされていないSRV/UAVスロットを埋めるためのnullディスクリプタ。
+        // DX11では未バインドのスロットを読むと0が返るが、DX12は描画のたびに払い出す
+        // ディスクリプタテーブルのブロックが未初期化(リングの前世代の使い回し)のままになるため、
+        // そのままではシェーダが破棄済みリソースのディスクリプタを読みうる。
+        // DX12CommandListはシャドウ配列の全スロットをこれで初期化しておくことで、
+        // 「未バインドのスロットは0を返す」というDX11と同じ挙動を構造的に保証する
+        D3D12_CPU_DESCRIPTOR_HANDLE GetNullSrvCpuHandle() const { return m_SrvCpuHeap->GetCpuHandle(m_NullSrvIndex); }
+        D3D12_CPU_DESCRIPTOR_HANDLE GetNullUavCpuHandle() const { return m_SrvCpuHeap->GetCpuHandle(m_NullUavIndex); }
+
+        // フレームごとに1ずつ増える通し番号。DX12Bufferがリングへの書き込み回数を
+        // 「同一フレーム内で何回目か」として数えるために参照する(ResetCommandList()で進む)
+        uint64_t GetFrameStamp() const { return m_FrameStamp; }
 
         // 1フレーム分のコマンドをすべて記録してから1回だけExecuteCommandListsする設計のため、
         // CopyDescriptorsSimpleによるディスクリプタ書き込みはGPU実行前にすべて完了してしまう。
@@ -107,6 +128,9 @@ namespace Kurenai::RHI
             uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray);
         // 現在のフレームスロット(m_FrameIndex)のコマンドアロケータ/リストを開き直す
         void ResetCommandList();
+        // デバッグレイヤーが溜めたメッセージを引き取ってKurenaiEngine.logへ出す(デバッグビルドのみ有効)。
+        // そのままではデバッガの出力ウィンドウにしか出ず、デバッガを繋がない実行で気付けないため
+        void DrainDebugMessages();
         Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(uint64_t sizeInBytes);
         // 公開APIのCreateTextureFromImage(const TextureImage&)から、内部のTexMetadata/ScratchImageを
         // 取り出して実際のGPUリソース作成を行う共通処理(CreateTextureFromFile/CreateSolidColorTexture/
@@ -117,11 +141,9 @@ namespace Kurenai::RHI
         // コメント参照)
         void UploadSubmitAndWait();
 
-        // CPUがGPUの完了を待たずに次フレームの記録を始められるようにするための多重バッファリング数。
-        // スワップチェインのバッファ数(DX12SwapChain::kBufferCount)と合わせて2にしておく
-        static constexpr uint32_t kFrameCount = 2;
-
         Microsoft::WRL::ComPtr<ID3D12Device> m_Device;
+        // デバッグビルドでのみ取得する(リリースビルドではnullptrのままDrainDebugMessagesが即座に返る)
+        Microsoft::WRL::ComPtr<ID3D12InfoQueue> m_InfoQueue;
         Microsoft::WRL::ComPtr<IDXGIFactory2> m_Factory;
         Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_CommandQueue;
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_CommandAllocators[kFrameCount];
@@ -162,6 +184,13 @@ namespace Kurenai::RHI
         std::unique_ptr<DX12DescriptorHeap> m_ShaderVisibleSrvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_ShaderVisibleSamplerHeap;
         uint32_t m_FallbackSamplerSetBase = 0;
+        // 未バインドスロット埋め用のnullディスクリプタ(m_SrvCpuHeap上に1個ずつ確保する)。
+        // デバイスと寿命を共にするため解放は行わない
+        uint32_t m_NullSrvIndex = 0;
+        uint32_t m_NullUavIndex = 0;
+
+        // ResetCommandList()のたびに進むフレーム通し番号(GetFrameStamp参照)
+        uint64_t m_FrameStamp = 0;
 
         std::unique_ptr<DX12CommandList> m_ImmediateCommandList;
 

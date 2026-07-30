@@ -24,6 +24,10 @@ namespace Kurenai::Core
         {
             throw std::runtime_error("RenderGraph: パス '" + desc.Name + "' はSwapChainTargetとRenderTargets/DepthTargetを同時に指定できません");
         }
+        if (desc.DepthTargetArraySlice != 0 && desc.DepthTarget == nullptr)
+        {
+            throw std::runtime_error("RenderGraph: パス '" + desc.Name + "' はDepthTargetを指定せずにDepthTargetArraySliceを指定しています");
+        }
 
         m_Passes.push_back(std::move(desc));
     }
@@ -35,6 +39,8 @@ namespace Kurenai::Core
         // 各テクスチャを最後に書いたパスのインデックス。同じテクスチャに複数のパスが書く場合
         // (Write-after-Write)も順序を保持するため、書き込みのたびにここを更新する
         std::unordered_map<const RHI::IRHITexture*, size_t> lastWriter;
+        // バッファ版。テクスチャ側と完全に同じ扱いで、依存の種類が違うだけ
+        std::unordered_map<const RHI::IRHIBuffer*, size_t> lastBufferWriter;
 
         std::vector<std::vector<size_t>> dependents(passCount); // パスi -> iの完了を待つパス群
         std::vector<size_t> inDegree(passCount, 0);
@@ -89,6 +95,33 @@ namespace Kurenai::Core
             for (const RHI::IRHITexture* texture : pass.Writes)
             {
                 recordWrite(texture);
+            }
+
+            // バッファ側も同じ手順(Read-after-Write → Write-after-Write)で辺を張る
+            for (const RHI::IRHIBuffer* buffer : pass.BufferReads)
+            {
+                if (buffer == nullptr)
+                {
+                    continue;
+                }
+                const auto it = lastBufferWriter.find(buffer);
+                if (it != lastBufferWriter.end())
+                {
+                    addDependencyOn(it->second);
+                }
+            }
+            for (const RHI::IRHIBuffer* buffer : pass.BufferWrites)
+            {
+                if (buffer == nullptr)
+                {
+                    continue;
+                }
+                const auto it = lastBufferWriter.find(buffer);
+                if (it != lastBufferWriter.end())
+                {
+                    addDependencyOn(it->second);
+                }
+                lastBufferWriter[buffer] = i;
             }
         }
 
@@ -149,7 +182,8 @@ namespace Kurenai::Core
             if (pass.SwapChainTarget == nullptr)
             {
                 RHI::IRHITexture* const* targets = pass.RenderTargets.empty() ? nullptr : pass.RenderTargets.data();
-                m_CommandList->SetRenderTargets(targets, static_cast<uint32_t>(pass.RenderTargets.size()), pass.DepthTarget);
+                m_CommandList->SetRenderTargets(
+                    targets, static_cast<uint32_t>(pass.RenderTargets.size()), pass.DepthTarget, pass.DepthTargetArraySlice);
             }
 
             pass.Execute(m_CommandList);

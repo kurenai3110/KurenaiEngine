@@ -25,4 +25,16 @@ namespace Kurenai::RHI
         , m_IsDynamic(isDynamic)
     {
     }
+
+    DX11Buffer::DX11Buffer(
+        Microsoft::WRL::ComPtr<ID3D11Buffer> buffer,
+        uint32_t strideInBytes,
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav,
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv)
+        : m_Buffer(std::move(buffer))
+        , m_StrideInBytes(strideInBytes)
+        , m_Uav(std::move(uav))
+        , m_Srv(std::move(srv))
+    {
+    }
 }
