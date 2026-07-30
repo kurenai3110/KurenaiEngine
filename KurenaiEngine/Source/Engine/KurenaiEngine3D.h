@@ -122,11 +122,18 @@ namespace Kurenai
         // ハンドオフ。詳細はm_PendingSceneIndexのコメント参照)
         void UpdateSceneSwitch();
         void Update(float deltaTime);
+        // 1フレーム分のUpdateと、Renderスレッドへのフレーム状態の受け渡しを行う。
+        // 通常はRun()のループから、ウィンドウのドラッグ中(Windowsのモーダルループ中で
+        // PumpMessagesが戻ってこない間)はWindowのタイマーから呼ばれる
+        void TickFrame();
         void RenderThreadMain();
         void Render(const FrameState& frameState);
         // ProfilerPanel用。m_DeviceはKurenaiEngineBaseのprotectedメンバであり、派生クラスの
         // friendから触れるかどうかはC++の規則の解釈が分かれるため、ここで明示的に橋渡しする
         float GetLastFrameGPUWaitTimeMs() const;
+        // SystemPanelの表示用。m_Windowも同様の理由で橋渡しする。
+        // Windowsのディスプレイ設定で指定されている拡大率(UIの拡大率もこれに追従する)
+        float GetMonitorDpiScale() const;
         // カメラ視錐台をkCascadeCount個の深度範囲に分割する(near/far境界、View空間での距離)。
         // 対数分割と均等分割を混合した実用的な分割(Practical Split Scheme)を使う
         void ComputeCascadeSplits(const Core::Camera& camera, float (&outSplits)[kCascadeCount]) const;

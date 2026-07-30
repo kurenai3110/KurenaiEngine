@@ -96,8 +96,12 @@ namespace Kurenai::UI
             "パネルの配置とサイズを既定へ戻し、閉じたパネルも表示し直す。"
             "配置はexeと同じフォルダのimgui.iniへ自動保存される");
 
-        // フォントとパネル寸法の拡大率。DPIへの追従状況を確認できるようにしておく
-        ImGui::Text("UIスケール: %.2fx", ImGui::GetStyle().FontScaleDpi);
-        ItemHelp("モニタのDPIから決まるUI全体の拡大率。96 DPIを1.00xとする");
+        // UIの拡大率はWindowsのディスプレイ設定の拡大率に追従する
+        ImGui::Text("UIスケール: %.2fx", ImGui::GetStyle().FontScaleMain);
+        ItemHelp(
+            "UI全体の拡大率。Windowsのディスプレイ設定の拡大率に追従する。"
+            "全体をもう少し大きく/小さくしたい場合はUITheme::kUIScaleMultiplierを変える");
+        ImGui::Text("Windowsの拡大率: %.0f%%", m_Engine.GetMonitorDpiScale() * 100.0f);
+        ItemHelp("このウィンドウが乗っているモニタに対して、Windowsのディスプレイ設定で指定されている拡大率");
     }
 }

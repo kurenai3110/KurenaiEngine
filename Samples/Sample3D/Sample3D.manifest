@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sample3D を Per-Monitor V2 の DPI 対応プロセスにするマニフェスト。
+
+  DPI 非対応のままだと GetDpiForWindow / GetDpiForMonitor(MDT_EFFECTIVE_DPI) が常に 96 を返し、
+  ImGui の UI スケール(style.FontScaleDpi / ScaleAllSizes)を実際のモニタへ合わせられない。
+  その状態では OS がウィンドウの最終ビットマップを拡大表示するため、高DPI環境で UI がぼやける。
+
+  ここで宣言する理由(コードで SetProcessDpiAwarenessContext を呼ばない理由):
+   - DPI 認識状態はプロセス単位の設定で、最初のウィンドウ生成より前に確定していなければならない。
+     ウィンドウ生成は KurenaiEngineBase のコンストラクタで行われるため、KurenaiEngine3D 側から
+     呼んだのでは手遅れになる
+   - DLL(エンジン側)がプロセス全体の DPI 方針を書き換えるのは、KurenaiEngine を組み込む
+     アプリケーションにとって予期しない副作用になる。実行ファイル側で宣言するのが筋
+
+  注意: これを有効にすると PrintWindow で撮ったスクリーンショットと GetClientRect の関係が
+  変わる。動作確認の自動化については docs/Architecture.html と CLAUDE.md を参照
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <!-- PerMonitorV2 を解釈できない古い OS 向けのフォールバック -->
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+    </windowsSettings>
+  </application>
+</assembly>

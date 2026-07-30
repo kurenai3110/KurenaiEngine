@@ -54,5 +54,25 @@ namespace Kurenai::Core
             float height,
             const ImGuiDockSlotDesc* slots,
             std::size_t slotCount);
+
+        // UIの拡大率が変わったときに、ImGuiがピクセル単位で保持しているレイアウト情報を
+        // まとめてratio倍する。ImGui::NewFrame()の前に呼ぶこと。対象は次の2つ。
+        //
+        // (1) ドックノードの寸法(Size / SizeRef)
+        //     ImGuiは、中央ノードを含む側と分割されているノードの幅・高さを「絶対ピクセル値」
+        //     として保持し、ドックスペースが広がっても維持して増分を中央ノードへ全部渡す
+        //     (imgui.cppのDockNodeTreeUpdatePosSize、サイズ配分ポリシーの3番)。
+        //     そのため拡大率だけ変えると、文字は大きくなるのにパネルの幅は据え置きとなり、
+        //     見た目の比率が変わってしまう。
+        //
+        // (2) 各ウィンドウが持つ、前フレーム由来のレイアウト情報
+        //     スクロールバーの有無・長さ・位置は、Begin()内で前フレームの利用可能サイズ
+        //     (InnerRectとScrollbarSizes)と内容サイズから決まるため、これらを合わせておかないと
+        //     拡大率が変わったフレームだけ表示が乱れる。
+        //     スクロール量と、ドッキングしていない(浮いている)パネルのサイズもここで追従する。
+        //
+        // ドックノードが存在しない(初回起動でまだレイアウトが組まれていない)場合、
+        // (1)は何もせずfalseを返すが、(2)は実行する
+        static bool ScaleForUIScaleChange(unsigned int dockSpaceId, float ratio);
     };
 }

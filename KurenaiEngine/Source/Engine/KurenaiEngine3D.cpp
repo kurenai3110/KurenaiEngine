@@ -15,6 +15,7 @@
 #include "Core/RenderGraph.h"
 #include "Core/StringUtil.h"
 #include "UI/UIManager.h"
+#include "UI/UITheme.h"
 
 namespace Kurenai
 {
@@ -1456,12 +1457,22 @@ namespace Kurenai
         return m_Device->GetLastFrameGPUWaitTimeMs();
     }
 
+    float KurenaiEngine3D::GetMonitorDpiScale() const
+    {
+        return m_Window->GetDpiScale();
+    }
+
+
     void KurenaiEngine3D::Run()
     {
         // 描画専用スレッドを起動する。以後このスレッドがRender()の呼び出しとPresentを担当し、
         // 呼び出し元スレッド(以下Updateスレッド)はPumpMessages/Updateに専念する
         m_RenderThread = std::thread(&KurenaiEngine3D::RenderThreadMain, this);
 
+        // 注意: ウィンドウのドラッグ中(移動・リサイズ)はWindowsが自前のモーダルループを回すため、
+        // このループのPumpMessages()は戻ってこない。その間は1フレームも進まず画面が固まる
+        // (ドラッグ中は描画不要という方針のためこのままにしている)。
+        // その結果、モニタをまたいだときのUI拡大率の変化はマウスを離した時点でまとめて反映される
         while (!m_Window->ShouldClose())
         {
             m_Window->PumpMessages();
@@ -1470,30 +1481,7 @@ namespace Kurenai
                 break;
             }
 
-            const auto now = std::chrono::steady_clock::now();
-            const float deltaTime = std::chrono::duration<float>(now - m_LastFrameTime).count();
-            m_LastFrameTime = now;
-
-            Update(deltaTime);
-
-            // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/LoadScene経由のFrameCameraToModel)
-            // のみが書き込み、Render()はframeStateのスナップショット経由でしか読まないため、
-            // ここでの読み取りに追加のロックは不要
-            FrameState newFrameState;
-            newFrameState.Camera = m_Camera;
-            newFrameState.ImGuiVisible = m_ImGuiVisible;
-
-            // Renderスレッドが直前フレーム分を取り込み終えるまで待つ(キュー深度1)。
-            // 取り込み自体はスナップショットのコピーだけなので即座に完了し、その後の重いGPU発行は
-            // このUpdateスレッドの次フレーム処理と並行して進む
-            {
-                std::unique_lock<std::mutex> lock(m_FrameStateMutex);
-                m_FrameStateCV.wait(lock, [this] { return m_FrameStateTaken; });
-                m_FrameState = newFrameState;
-                m_FrameStateReady = true;
-                m_FrameStateTaken = false;
-            }
-            m_FrameStateCV.notify_one();
+            TickFrame();
         }
 
         {
@@ -1502,6 +1490,34 @@ namespace Kurenai
         }
         m_FrameStateCV.notify_one();
         m_RenderThread.join();
+    }
+
+    void KurenaiEngine3D::TickFrame()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const float deltaTime = std::chrono::duration<float>(now - m_LastFrameTime).count();
+        m_LastFrameTime = now;
+
+        Update(deltaTime);
+
+        // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/LoadScene経由のFrameCameraToModel)
+        // のみが書き込み、Render()はframeStateのスナップショット経由でしか読まないため、
+        // ここでの読み取りに追加のロックは不要
+        FrameState newFrameState;
+        newFrameState.Camera = m_Camera;
+        newFrameState.ImGuiVisible = m_ImGuiVisible;
+
+        // Renderスレッドが直前フレーム分を取り込み終えるまで待つ(キュー深度1)。
+        // 取り込み自体はスナップショットのコピーだけなので即座に完了し、その後の重いGPU発行は
+        // このUpdateスレッドの次フレーム処理と並行して進む
+        {
+            std::unique_lock<std::mutex> lock(m_FrameStateMutex);
+            m_FrameStateCV.wait(lock, [this] { return m_FrameStateTaken; });
+            m_FrameState = newFrameState;
+            m_FrameStateReady = true;
+            m_FrameStateTaken = false;
+        }
+        m_FrameStateCV.notify_one();
     }
 
     void KurenaiEngine3D::RenderThreadMain()
@@ -1743,6 +1759,11 @@ namespace Kurenai
         // このRenderスレッド自身からImGui_ImplWin32_WndProcHandlerへ転送する。ImGui::NewFrame()より前に
         // 行うことで、このフレームのNewFrame()が最新のマウス/キーボード状態を反映できる
         m_Window->ForwardQueuedMessagesToImGui();
+
+        // モニタの拡大率に合わせてUIの大きさを揃える。ImGuiの状態を触るのはこのRenderスレッド
+        // だけという不変条件を守るため、Window側は値をatomicへ置くだけにし、
+        // 実際のスタイル再適用はここで行う
+        m_UIManager->OnUIScaleChanged(m_Window->GetDpiScale() * UI::UITheme::kUIScaleMultiplier);
 
         m_ImGuiBackend->NewFrame();
         if (frameState.ImGuiVisible)

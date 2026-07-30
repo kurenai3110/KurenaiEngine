@@ -9,6 +9,113 @@
 
 namespace Kurenai::Core
 {
+    namespace
+    {
+        // ノードツリーを辿って寸法をratio倍する。ImGuiDockNodeはimgui_internal.hの型なので
+        // この翻訳単位(Library側)でしか触れない
+        void ScaleNodeSizesRecursive(ImGuiDockNode* node, float ratio)
+        {
+            if (node == nullptr)
+            {
+                return;
+            }
+
+            node->Size.x *= ratio;
+            node->Size.y *= ratio;
+            node->SizeRef.x *= ratio;
+            node->SizeRef.y *= ratio;
+
+            ScaleNodeSizesRecursive(node->ChildNodes[0], ratio);
+            ScaleNodeSizesRecursive(node->ChildNodes[1], ratio);
+        }
+    }
+
+    bool ImGuiDockLayout::ScaleForUIScaleChange(unsigned int dockSpaceId, float ratio)
+    {
+        if (dockSpaceId == 0 || ratio <= 0.0f)
+        {
+            Logger::Error(
+                "ImGuiDockLayout",
+                "レイアウトの拡縮に失敗しました(引数が不正: dockSpaceId=" + std::to_string(dockSpaceId) +
+                    ", ratio=" + std::to_string(ratio) + ")");
+            return false;
+        }
+
+        ImGuiContext* context = ImGui::GetCurrentContext();
+        auto* viewport = static_cast<ImGuiViewportP*>(ImGui::GetMainViewport());
+        if (context == nullptr || viewport == nullptr)
+        {
+            Logger::Error("ImGuiDockLayout", "ImGuiのコンテキストまたはメインビューポートを取得できません");
+            return false;
+        }
+
+        // (2) 各ウィンドウ側。
+        //
+        // ImGuiにはDPI変更用のScaleWindowsInViewportがあるが、ここでは使わない。
+        // あちらはPos / Size / SizeFullを無条件に拡縮するため、ドッキング中のウィンドウでは
+        // ドックノードが決めるサイズと一時的に食い違う(実測: 拡縮直後にSize=279x426、
+        // Begin後にノードが決めた280x278へ上書き)。浮いているウィンドウだけを対象にする。
+        for (ImGuiWindow* window : context->Windows)
+        {
+            if (window == nullptr || window->Viewport != viewport)
+            {
+                continue;
+            }
+
+            // ドッキングしていないウィンドウは自分でサイズを持つので拡縮する。
+            // ドッキング中はドックノードが毎フレーム決めるため触らない
+            if (window->DockNode == nullptr)
+            {
+                const ImVec2 origin = viewport->Pos;
+                window->Pos.x = origin.x + (window->Pos.x - origin.x) * ratio;
+                window->Pos.y = origin.y + (window->Pos.y - origin.y) * ratio;
+                window->Size.x *= ratio;
+                window->Size.y *= ratio;
+                window->SizeFull.x *= ratio;
+                window->SizeFull.y *= ratio;
+            }
+
+            // スクロール位置。これをしないとスクロール済みのパネルで表示位置がずれる
+            window->Scroll.x *= ratio;
+            window->Scroll.y *= ratio;
+
+            // スクロールバーの有無と長さは、Begin()内で「前フレームの利用可能サイズ」
+            //   avail_size_from_last_frame = window->InnerRect.GetSize() + scrollbar_sizes_from_last_frame
+            // を使って決まる(imgui.cpp)。この2つを拡縮しないと、拡大率が変わったフレームだけ
+            // 古いサイズで判定され、スクロールバーの位置・長さが1フレーム乱れる。
+            // InnerRectは絶対座標だがここで効くのは大きさだけなので、原点を保って幅・高さに掛ける
+            const ImVec2 innerSize = window->InnerRect.GetSize();
+            window->InnerRect.Max.x = window->InnerRect.Min.x + innerSize.x * ratio;
+            window->InnerRect.Max.y = window->InnerRect.Min.y + innerSize.y * ratio;
+            window->ScrollbarSizes.x *= ratio;
+            window->ScrollbarSizes.y *= ratio;
+
+            // 内容サイズ。ContentSizeはBegin()の冒頭でCalcWindowContentSizesにより
+            //   ContentSize      = CursorMaxPos - CursorStartPos
+            //   ContentSizeIdeal = max(CursorMaxPos, IdealMaxPos) - CursorStartPos
+            // と再計算されて上書きされるため、ContentSizeを直しても効かない。
+            // 元になるDC側を拡縮する。CursorStartPosは内容の起点(絶対座標)で、
+            // 効くのはそこからの差分だけなので、起点を保ったまま差分に掛ける
+            const ImVec2 start = window->DC.CursorStartPos;
+            window->DC.CursorMaxPos.x = start.x + (window->DC.CursorMaxPos.x - start.x) * ratio;
+            window->DC.CursorMaxPos.y = start.y + (window->DC.CursorMaxPos.y - start.y) * ratio;
+            window->DC.IdealMaxPos.x = start.x + (window->DC.IdealMaxPos.x - start.x) * ratio;
+            window->DC.IdealMaxPos.y = start.y + (window->DC.IdealMaxPos.y - start.y) * ratio;
+        }
+
+        // (1) ドックノードの寸法
+        ImGuiDockNode* root = ImGui::DockBuilderGetNode(static_cast<ImGuiID>(dockSpaceId));
+        if (root == nullptr)
+        {
+            // 初回起動でまだレイアウトが組まれていない。BuildDefaultが現在の拡大率で組むので
+            // ここで何もしなくてよい
+            return false;
+        }
+
+        ScaleNodeSizesRecursive(root, ratio);
+        return true;
+    }
+
     bool ImGuiDockLayout::HasNode(unsigned int dockSpaceId)
     {
         if (dockSpaceId == 0)

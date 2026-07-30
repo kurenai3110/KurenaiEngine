@@ -5,6 +5,9 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
+
+#include "Core/Logger.h"
 
 // imgui_impl_win32.hは<windows.h>への依存を避けるためこの宣言を#if 0でコメントアウトしており、
 // 呼び出し側でこの1行をコピーして前方宣言することが公式に案内されている
@@ -15,6 +18,7 @@ namespace Kurenai::Core
     namespace
     {
         const wchar_t* kWindowClassName = L"KurenaiEngineWindowClass";
+
     }
 
     Window::Window(const std::wstring& title, uint32_t width, uint32_t height)
@@ -64,6 +68,21 @@ namespace Kurenai::Core
         m_MouseLeaveSuppressionEnabled =
             GetEnvironmentVariableW(L"KURENAI_INPUT_AUTOMATION", automationFlag, static_cast<DWORD>(sizeof(automationFlag) / sizeof(automationFlag[0]))) > 0
             && automationFlag[0] == L'1';
+
+        // 初期のDPIスケールを取得する。プロセスがDPI非対応の場合はGetDpiForWindowが常に96を
+        // 返す仕様のため1.0になる
+        const UINT dpi = GetDpiForWindow(m_Handle);
+        if (dpi == 0)
+        {
+            Logger::Warning(
+                "Window",
+                "GetDpiForWindowに失敗したためDPIスケールを1.0として扱います (GetLastError: " +
+                    std::to_string(GetLastError()) + ")");
+        }
+        else
+        {
+            m_DpiScale.store(static_cast<float>(dpi) / 96.0f, std::memory_order_relaxed);
+        }
 
         ShowWindow(m_Handle, SW_SHOW);
     }
@@ -211,6 +230,30 @@ namespace Kurenai::Core
                 }
             }
             return 0;
+
+        case WM_DPICHANGED:
+        {
+            // ウィンドウの伸縮そのものはWindowsの既定の挙動に任せ、ここでは何もしない。
+            // Per-Monitor V2では、DPIの違うモニタへ移る直前にWindowsがWM_GETDPISCALEDSIZEで
+            // 「新しいDPIでのウィンドウの希望サイズ」を尋ねてくる(Windows 10 1703以降)。
+            // これを未処理のままにしておくとWindowsがDPIの比率で線形に伸縮させた値をそのまま
+            // 適用するので、一般的なWindowsアプリと同じ挙動になる。
+            //
+            // ここで更新するのはUIの拡大率に使う値だけ。ウィンドウのドラッグ中はアプリが
+            // 1フレームも描画しないため、この値が実際にUIへ反映されるのはマウスを離した後になる。
+            // Windowsの拡大率(=ドラッグ中の引き伸ばしと同じ比)を使っているのはそのためで、
+            // 違う比にすると離した瞬間に見た目が飛ぶ(GetDpiScaleのコメント参照)
+            const UINT newDpi = HIWORD(wParam);
+            if (newDpi == 0)
+            {
+                Logger::Warning("Window", "WM_DPICHANGEDのDPIが0だったため無視します");
+                return 0;
+            }
+
+            m_DpiScale.store(static_cast<float>(newDpi) / 96.0f, std::memory_order_relaxed);
+            Logger::Info("Window", "モニタのDPIが変わりました (DPI: " + std::to_string(newDpi) + ")");
+            return 0;
+        }
 
         case WM_MOUSEMOVE:
             m_MousePosition.x = GET_X_LPARAM(lParam);

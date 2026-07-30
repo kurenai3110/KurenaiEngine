@@ -38,6 +38,22 @@ namespace Kurenai::Core
         uint32_t GetWidth() const { return m_Width; }
         uint32_t GetHeight() const { return m_Height; }
 
+        // Windowsのディスプレイ設定で指定されている拡大率(96 DPIを1.0とする倍率)。
+        // UIの拡大率はこの値に追従させる。
+        //
+        // モニタの物理サイズから求めた「実際のピクセル密度」に合わせた方が、モニタ間で文字の
+        // 実寸はきれいに揃う(実測: 27インチ4Kの実DPIは163だがWindowsの割り当ては150%=144で、
+        // 24インチFHD(実DPI 92, 100%)との間で実寸が15%ずれる)。それでもWindowsの拡大率を
+        // 使っているのは、**ウィンドウのドラッグ中はアプリが1フレームも描画しない**ため。
+        // その間ウィンドウはWindowsの拡大率の比でリサイズされ、画面には直前のフレームが
+        // 同じ比で引き伸ばされて表示される。UIの拡大率をそれと違う比にすると、マウスを離して
+        // 描画が再開した瞬間に見た目が飛ぶ(実測で18%のジャンプ)。
+        // 引き伸ばしと同じ比にしておけば、離してもUIの大きさが変わらない。
+        //
+        // WM_DPICHANGED(Updateスレッド)が書き、UIのスタイル再適用(Renderスレッド)が読むためatomic。
+        // プロセスがDPI非対応の場合はGetDpiForWindowが常に96を返す仕様のため1.0になる
+        float GetDpiScale() const { return m_DpiScale.load(std::memory_order_relaxed); }
+
         void SetResizeCallback(ResizeCallback callback) { m_ResizeCallback = std::move(callback); }
         void SetTitle(const std::wstring& title);
 
@@ -84,6 +100,8 @@ namespace Kurenai::Core
         // GetWidth/GetHeight(描画スレッドからの読み取り)が同時に発生し得るためatomicにしておく
         std::atomic<uint32_t> m_Width;
         std::atomic<uint32_t> m_Height;
+        // GetDpiScale()参照。WM_DPICHANGEDを処理するUpdateスレッドが書き、Renderスレッドが読む
+        std::atomic<float> m_DpiScale{ 1.0f };
         bool m_ShouldClose = false;
         ResizeCallback m_ResizeCallback;
 

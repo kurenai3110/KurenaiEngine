@@ -36,10 +36,17 @@ namespace Kurenai::UI
         // 両方から同じものを出すためここに置く
         void DrawPanelVisibilityControls();
 
+        // UIの拡大率が変わったときにスタイルを再適用する。Renderスレッドから毎フレーム
+        // 呼んでよい(値が変わっていなければ何もしない)。
+        // UITheme::Applyは冪等なので、何度呼び直しても寸法が累積しない
+        void OnUIScaleChanged(float uiScale);
+
     private:
-        void DrawMainMenuBar();
+        // メインメニューバーを出し、その高さを返す(出せなかった場合は0)。
+        // 戻り値はドックスペースの位置決めに使う(DrawDockSpaceAndLayoutのコメント参照)
+        float DrawMainMenuBar();
         // ドックスペースを張り、必要なら既定レイアウトを組む。各パネルのImGui::Beginより前に呼ぶこと
-        void DrawDockSpaceAndLayout();
+        void DrawDockSpaceAndLayout(float menuBarHeight);
 
         KurenaiEngine3D& m_Engine;
         std::vector<std::unique_ptr<IPanel>> m_Panels;
@@ -49,5 +56,7 @@ namespace Kurenai::UI
         // imgui.iniにドック情報が無い初回起動かどうかの判定を済ませたか
         bool m_LayoutChecked = false;
         bool m_ResetLayoutRequested = false;
+        // 現在スタイルへ適用済みのUI拡大率。冗長な再適用を避けるために持つ
+        float m_AppliedUIScale = 0.0f;
     };
 }

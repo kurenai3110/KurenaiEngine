@@ -32,9 +32,10 @@ namespace Kurenai::UI
         : m_Engine(engine)
     {
         // 見た目とフォントは最初のNewFrame()より前に設定する必要がある。
-        // DPIスケールへの追従は後の段階で入れるため、ここでは等倍で適用しておく
+        // 実際の拡大率はRenderスレッドが毎フレームOnUIScaleChangedへ渡すので、
+        // ここでは等倍で組んでおく(次のフレームで正しい値に置き換わる)
         UITheme::LoadFonts();
-        UITheme::Apply(1.0f);
+        OnUIScaleChanged(1.0f);
 
         // 並び順はメニューバーの「Window」に出る順序であり、既定のドックレイアウトを
         // 組むときの基準にもなる
@@ -63,8 +64,8 @@ namespace Kurenai::UI
             Core::Logger::Warning("UIManager", "ImGuiConfigFlags_ViewportsEnableが有効だったため無効化しました");
         }
 
-        DrawMainMenuBar();
-        DrawDockSpaceAndLayout();
+        const float menuBarHeight = DrawMainMenuBar();
+        DrawDockSpaceAndLayout(menuBarHeight);
 
         for (const std::unique_ptr<IPanel>& panel : m_Panels)
         {
@@ -82,11 +83,15 @@ namespace Kurenai::UI
         }
     }
 
-    void UIManager::DrawMainMenuBar()
+    float UIManager::DrawMainMenuBar()
     {
+        // ImGui::BeginMainMenuBarが内部で使う高さと同じ計算(imgui_widgets.cppのBeginMainMenuBar)。
+        // 現在のスタイルから求まるので、拡大率を変えたそのフレームでも正しい値になる
+        const float menuBarHeight = ImGui::GetFrameHeight();
+
         if (!ImGui::BeginMainMenuBar())
         {
-            return;
+            return 0.0f;
         }
 
         if (ImGui::BeginMenu("ウィンドウ"))
@@ -121,6 +126,35 @@ namespace Kurenai::UI
             m_Engine.m_GraphicsAPI == GraphicsAPI::DX12 ? "Graphics API: DX12" : "Graphics API: DX11");
 
         ImGui::EndMainMenuBar();
+        return menuBarHeight;
+    }
+
+    void UIManager::OnUIScaleChanged(float uiScale)
+    {
+        if (uiScale <= 0.0f || uiScale == m_AppliedUIScale)
+        {
+            return;
+        }
+
+        const float previousScale = m_AppliedUIScale;
+        m_AppliedUIScale = uiScale;
+
+        // UITheme::ApplyはImGuiStyleを既定へ戻してから組み直す冪等な実装なので、
+        // 何度呼んでも寸法が累積しない。フォントの再ベイクはimgui 1.92の動的アトラスが
+        // 自動で行うため、明示的なBuild()は不要
+        UITheme::Apply(uiScale);
+
+        // ImGuiがピクセル単位で保持しているレイアウト情報(ドックのパネル幅・高さ、各ウィンドウの
+        // サイズと内容サイズ・スクロール量)も同じ比率で拡縮する。これをしないと文字だけが
+        // 大きくなってパネルの幅が据え置きになったり、スクロールバーの表示が1フレーム乱れたりする
+        // (詳細はImGuiDockLayout::ScaleForUIScaleChangeのコメント)。
+        // previousScaleが0のときは起動直後の初回適用で、まだ拡縮すべきものが無いので何もしない
+        if (previousScale > 0.0f)
+        {
+            Core::ImGuiDockLayout::ScaleForUIScaleChange(kDockSpaceId, uiScale / previousScale);
+        }
+
+        Core::Logger::Info("UITheme", "UI拡大率を " + std::to_string(uiScale) + " へ更新しました");
     }
 
     void UIManager::DrawPanelVisibilityControls()
@@ -134,13 +168,12 @@ namespace Kurenai::UI
         }
     }
 
-    void UIManager::DrawDockSpaceAndLayout()
+    void UIManager::DrawDockSpaceAndLayout(float menuBarHeight)
     {
-        // ドックスペースのIDは固定値にする。DockSpaceOverViewportに0を渡すと内部で
-        // GetID("DockSpace")が使われるが、その値はホストウィンドウのIDスタックに依存するため
-        // 呼び出し前には求められない。「初回起動かどうか」の判定はDockSpaceOverViewportより前に
-        // 行う必要がある(DockSpaceは呼ばれた時点でノードを作ってしまうので、後から
-        // HasNodeを見ても常にtrueになる)
+        // ドックスペースのIDは固定値にする。DockSpaceに0を渡すと内部でGetID("DockSpace")が
+        // 使われるが、その値はホストウィンドウのIDスタックに依存するため呼び出し前には求められない。
+        // 「初回起動かどうか」の判定はDockSpaceより前に行う必要がある
+        // (DockSpaceは呼ばれた時点でノードを作ってしまうので、後からHasNodeを見ても常にtrueになる)
         m_DockSpaceId = kDockSpaceId;
 
         // 初回起動(imgui.iniにドック情報が無い)の判定は一度だけ行う。2回目以降の起動では
@@ -161,7 +194,45 @@ namespace Kurenai::UI
         // 中央へパネルをドロップし、3D映像が完全に隠れてしまう
         const ImGuiDockNodeFlags dockFlags =
             ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_NoDockingOverCentralNode;
-        ImGui::DockSpaceOverViewport(m_DockSpaceId, nullptr, dockFlags);
+
+        // ImGui::DockSpaceOverViewportと同等の処理を自前で行う。
+        //
+        // あちらはドックスペースの位置・サイズにviewport->WorkPos / WorkSize(メニューバーの
+        // 高さを差し引いた領域)を使うが、この値は**1フレーム遅れる**。メニューバーの高さを
+        // 作業領域へ反映する処理がimgui_widgets.cppのBeginViewportSideBarにあり、
+        // 「Report our size into work area (for next frame)」というコメントのとおり
+        // 次フレーム用のBuildWorkInsetMinへ足し込む仕様のため。
+        // UIの拡大率が変わったフレームでは、メニューバーは新しい高さで描かれるのに
+        // WorkPosは古い高さのままとなり、ドックスペース全体が1フレームだけ縦にずれる
+        // (実際にディスプレイ間の移動で発生した)。
+        // ここではメニューバーの高さを現在のスタイルから直接求めて使うことで、そのずれを防ぐ
+        const ImGuiViewport* mainViewport = ImGui::GetMainViewport();
+        if (mainViewport == nullptr)
+        {
+            Core::Logger::Error("UIManager", "メインビューポートを取得できないためドックスペースを出せません");
+            return;
+        }
+
+        ImGui::SetNextWindowPos(ImVec2(mainViewport->Pos.x, mainViewport->Pos.y + menuBarHeight));
+        ImGui::SetNextWindowSize(ImVec2(mainViewport->Size.x, mainViewport->Size.y - menuBarHeight));
+        ImGui::SetNextWindowViewport(mainViewport->ID);
+
+        // ドックスペースを載せるだけのホストウィンドウ。フラグはDockSpaceOverViewportと同じ。
+        // PassthruCentralNode指定時はホストの背景を描かない(中央を透過させるため)
+        ImGuiWindowFlags hostWindowFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                                           ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                           ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                           ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoBackground;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::Begin("KurenaiDockSpaceHost", nullptr, hostWindowFlags);
+        ImGui::PopStyleVar(3);
+
+        ImGui::DockSpace(m_DockSpaceId, ImVec2(0.0f, 0.0f), dockFlags);
+
+        ImGui::End();
 
         if (!m_ResetLayoutRequested)
         {

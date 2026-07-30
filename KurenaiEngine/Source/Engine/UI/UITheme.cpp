@@ -32,19 +32,19 @@ namespace Kurenai::UI
         };
     }
 
-    void UITheme::Apply(float dpiScale)
+    void UITheme::Apply(float uiScale)
     {
-        if (dpiScale <= 0.0f)
+        if (uiScale <= 0.0f)
         {
             Core::Logger::Warning(
-                "UITheme", "DPIスケールが不正な値(" + std::to_string(dpiScale) + ")だったため1.0として扱います");
-            dpiScale = 1.0f;
+                "UITheme", "UI拡大率が不正な値(" + std::to_string(uiScale) + ")だったため1.0として扱います");
+            uiScale = 1.0f;
         }
 
         ImGuiStyle& style = ImGui::GetStyle();
 
         // ScaleAllSizesは現在値に対する乗算なので、呼ぶたびに寸法が累積する。
-        // DPIが変わるたびにこの関数を呼び直せるよう、まずImGuiStyleを既定へ完全に戻してから
+        // 拡大率を変えて呼び直せるよう、まずImGuiStyleを既定へ完全に戻してから
         // 組み立て直す(この関数を冪等にするための要)
         style = ImGuiStyle();
         ImGui::StyleColorsDark(&style);
@@ -92,15 +92,18 @@ namespace Kurenai::UI
         // パネルの背景をわずかに透かし、下の3D映像が見えるようにする
         style.Colors[ImGuiCol_WindowBg].w = 0.94f;
 
-        // --- DPI ---
+        // --- 拡大率 ---
         // 余白・角丸・スクロールバー幅などの「寸法」はこれで一括拡大する
-        style.ScaleAllSizes(dpiScale);
+        style.ScaleAllSizes(uiScale);
         // フォントは寸法とは別系統。1.92ではGetFontSize()が
         // FontSizeBase * FontScaleMain * FontScaleDpi になる。
+        // モニタのDPIには追従させないのでFontScaleDpiは1.0のままにし、
+        // アプリが決める倍率という意味が明確なFontScaleMainの方を使う。
         // io.ConfigDpiScaleFonts / ConfigDpiScaleViewportsはimgui.hで[EXPERIMENTAL]と
-        // 明記されているため使わず、ここで自前でFontScaleDpiを設定する
+        // 明記されているため使わない
         style.FontSizeBase = kBaseFontSizePixels;
-        style.FontScaleDpi = dpiScale;
+        style.FontScaleMain = uiScale;
+        style.FontScaleDpi = 1.0f;
     }
 
     bool UITheme::LoadFonts()
