@@ -22,6 +22,19 @@ namespace Kurenai
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
 
+        // モデル描画(G-Bufferパス)の頂点入力レイアウト。PSOの作り直し
+        // (CreatePrecisionDependentPipelineStates)からも使うため関数にしてある
+        std::vector<RHI::InputElementDesc> GetModelInputLayout()
+        {
+            return
+            {
+                { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+                { "NORMAL", 0, RHI::Format::R32G32B32_Float, 12 },
+                { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
+                { "TANGENT", 0, RHI::Format::R32G32B32A32_Float, 32 },
+            };
+        }
+
         struct alignas(16) FrameConstants
         {
             DirectX::XMFLOAT4X4 ViewProj;
@@ -474,13 +487,7 @@ namespace Kurenai
         const std::wstring dataRoot = GetModuleDirectory();
         const std::wstring shaderDirectory = dataRoot + L"Shaders\\";
 
-        const std::vector<RHI::InputElementDesc> modelInputLayout =
-        {
-            { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
-            { "NORMAL", 0, RHI::Format::R32G32B32_Float, 12 },
-            { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
-            { "TANGENT", 0, RHI::Format::R32G32B32A32_Float, 32 },
-        };
+        const std::vector<RHI::InputElementDesc> modelInputLayout = GetModelInputLayout();
 
         // ジオメトリパス(G-Buffer書き込み)
         RHI::ShaderDesc gbufferVsDesc;
@@ -495,27 +502,8 @@ namespace Kurenai
         gbufferPsDesc.EntryPoint = "PSMain";
         m_GBufferPixelShader = m_Device->CreateShader(gbufferPsDesc);
 
-        RHI::PipelineStateDesc gbufferPipelineDesc;
-        gbufferPipelineDesc.InputLayout = modelInputLayout;
-        gbufferPipelineDesc.VertexShader = m_GBufferVertexShader.get();
-        gbufferPipelineDesc.PixelShader = m_GBufferPixelShader.get();
-        gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        gbufferPipelineDesc.RenderTargetFormats =
-        {
-            RHI::Format::R8G8B8A8_UNorm, // Albedo
-            RHI::Format::R16G16_Float,   // Normal(オクタヘドラルエンコード)
-            RHI::Format::R8G8B8A8_UNorm, // Material(R=Metallic, G=Roughness)
-            RHI::Format::R8G8B8A8_UNorm, // Emissive
-        };
-        gbufferPipelineDesc.HasDepthStencil = true;
-        gbufferPipelineDesc.ReverseZ = true;
-        m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
-
-        // ミラーリングされたインスタンス用に、表裏判定だけを入れ替えた同じパイプラインを用意する。
-        // DX12はラスタライザステートがPSOに焼き込まれ描画中に差し替えられないため、DX11/DX12で
-        // 同じ構成にできるよう両バックエンドともPSOを2本持つ方式にしている
-        gbufferPipelineDesc.FrontCounterClockwise = true;
-        m_GBufferPipelineStateMirrored = m_Device->CreatePipelineState(gbufferPipelineDesc);
+        // G-BufferのPSOはEmissiveのフォーマットがバッファ精度に依存するため、
+        // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
 
         // 直接光パス(頂点バッファなしのフルスクリーン三角形。G-Buffer+シャドウマップからPBRの
         // 直接光を計算しHDRで書き出す)
@@ -553,12 +541,8 @@ namespace Kurenai
         ssaoPsDesc.EntryPoint = "PSMain";
         m_SSAOPixelShader = m_Device->CreateShader(ssaoPsDesc);
 
-        RHI::PipelineStateDesc ssaoPipelineDesc;
-        ssaoPipelineDesc.VertexShader = m_AOVertexShader.get();
-        ssaoPipelineDesc.PixelShader = m_SSAOPixelShader.get();
-        ssaoPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        ssaoPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
-        m_SSAOPipelineState = m_Device->CreatePipelineState(ssaoPipelineDesc);
+        // SSAO/SSIL/AOブラーのPSOは出力先(AO/GIバッファ)のフォーマットがバッファ精度に依存するため、
+        // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
 
         m_SSAOKernel = GenerateSSAOKernel(kSSAOKernelSize);
 
@@ -574,13 +558,6 @@ namespace Kurenai
         ssilPsDesc.EntryPoint = "PSMain";
         m_SSILPixelShader = m_Device->CreateShader(ssilPsDesc);
 
-        RHI::PipelineStateDesc ssilPipelineDesc;
-        ssilPipelineDesc.VertexShader = m_AOVertexShader.get();
-        ssilPipelineDesc.PixelShader = m_SSILPixelShader.get();
-        ssilPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        ssilPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
-        m_SSILPipelineState = m_Device->CreatePipelineState(ssilPipelineDesc);
-
         RHI::BufferDesc ssilConstantBufferDesc;
         ssilConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         ssilConstantBufferDesc.SizeInBytes = sizeof(SSILConstants);
@@ -592,13 +569,6 @@ namespace Kurenai
         aoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
         aoBlurPsDesc.EntryPoint = "PSMainBlur";
         m_AOBlurPixelShader = m_Device->CreateShader(aoBlurPsDesc);
-
-        RHI::PipelineStateDesc aoBlurPipelineDesc;
-        aoBlurPipelineDesc.VertexShader = m_AOVertexShader.get();
-        aoBlurPipelineDesc.PixelShader = m_AOBlurPixelShader.get();
-        aoBlurPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        aoBlurPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
-        m_AOBlurPipelineState = m_Device->CreatePipelineState(aoBlurPipelineDesc);
 
         // AO/GI無効時はこの常に黒・不透明(遮蔽なし=a:1、間接光なし=rgb:0)のテクスチャをライティングパスに渡す
         m_AODisabledTexture = m_Device->CreateSolidColorTexture(0, 0, 0, 255);
@@ -928,10 +898,96 @@ namespace Kurenai
         presentConstantBufferDesc.SizeInBytes = sizeof(PresentConstants);
         m_PresentConstantBuffer = m_Device->CreateBuffer(presentConstantBufferDesc);
 
+        // レンダーターゲットを先に作る。CreateRenderTargetsはHDRフォーマットの作成に失敗した場合に
+        // m_BufferPrecisionをLegacy8bitへ落とすフォールバックを持つため、PSOはその結果が
+        // 確定した後に作らなければフォーマットがずれる
         CreateRenderTargets(m_RenderWidth, m_RenderHeight);
+        CreatePrecisionDependentPipelineStates();
 
         DiscoverScenes();
         LoadScene(0);
+    }
+
+    RHI::Format KurenaiEngine3D::GetEmissiveFormat() const
+    {
+        // Emissive: 1.0でクリップされると照明器具がHDRな輝度を持てず、ブルームが成立しない。
+        // アルファを使わないためR11G11B10_Floatで足りる(帯域はR16G16B16A16_Floatの半分)
+        return m_BufferPrecision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
+                                                                : RHI::Format::R11G11B10_Float;
+    }
+
+    RHI::Format KurenaiEngine3D::GetAOFormat() const
+    {
+        // AO/GIバッファ: rgb=間接拡散光(HDR)、a=遮蔽率。間接光は暗い室内では0.02〜0.1に収まり、
+        // UNorm8ではコード5〜26の約20階調しか使えずポスタリゼーションする。
+        // aに遮蔽率を持つためアルファ付きのR16G16B16A16_Floatを使う
+        return m_BufferPrecision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
+                                                                : RHI::Format::R16G16B16A16_Float;
+    }
+
+    void KurenaiEngine3D::CreatePrecisionDependentPipelineStates()
+    {
+        const RHI::Format emissiveFormat = GetEmissiveFormat();
+        const RHI::Format aoFormat = GetAOFormat();
+
+        try
+        {
+            // ジオメトリパス(G-Buffer書き込み)
+            RHI::PipelineStateDesc gbufferPipelineDesc;
+            gbufferPipelineDesc.InputLayout = GetModelInputLayout();
+            gbufferPipelineDesc.VertexShader = m_GBufferVertexShader.get();
+            gbufferPipelineDesc.PixelShader = m_GBufferPixelShader.get();
+            gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            gbufferPipelineDesc.RenderTargetFormats =
+            {
+                RHI::Format::R8G8B8A8_UNorm, // Albedo
+                RHI::Format::R16G16_Float,   // Normal(オクタヘドラルエンコード)
+                RHI::Format::R8G8B8A8_UNorm, // Material(R=Metallic, G=Roughness)
+                emissiveFormat,              // Emissive(バッファ精度に依存)
+            };
+            gbufferPipelineDesc.HasDepthStencil = true;
+            gbufferPipelineDesc.ReverseZ = true;
+            m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
+
+            // ミラーリングされたインスタンス用に、表裏判定だけを入れ替えた同じパイプラインを用意する。
+            // DX12はラスタライザステートがPSOに焼き込まれ描画中に差し替えられないため、DX11/DX12で
+            // 同じ構成にできるよう両バックエンドともPSOを2本持つ方式にしている
+            gbufferPipelineDesc.FrontCounterClockwise = true;
+            m_GBufferPipelineStateMirrored = m_Device->CreatePipelineState(gbufferPipelineDesc);
+
+            // SSAOパス
+            RHI::PipelineStateDesc ssaoPipelineDesc;
+            ssaoPipelineDesc.VertexShader = m_AOVertexShader.get();
+            ssaoPipelineDesc.PixelShader = m_SSAOPixelShader.get();
+            ssaoPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            ssaoPipelineDesc.RenderTargetFormats = { aoFormat };
+            m_SSAOPipelineState = m_Device->CreatePipelineState(ssaoPipelineDesc);
+
+            // SSILパス(Visibility Bitmask)
+            RHI::PipelineStateDesc ssilPipelineDesc;
+            ssilPipelineDesc.VertexShader = m_AOVertexShader.get();
+            ssilPipelineDesc.PixelShader = m_SSILPixelShader.get();
+            ssilPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            ssilPipelineDesc.RenderTargetFormats = { aoFormat };
+            m_SSILPipelineState = m_Device->CreatePipelineState(ssilPipelineDesc);
+
+            // AO/GI共通のブラーパス(SSAO/SSILのどちらの出力にも同じフォーマットで書き戻す)
+            RHI::PipelineStateDesc aoBlurPipelineDesc;
+            aoBlurPipelineDesc.VertexShader = m_AOVertexShader.get();
+            aoBlurPipelineDesc.PixelShader = m_AOBlurPixelShader.get();
+            aoBlurPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            aoBlurPipelineDesc.RenderTargetFormats = { aoFormat };
+            m_AOBlurPipelineState = m_Device->CreatePipelineState(aoBlurPipelineDesc);
+        }
+        catch (const std::exception& e)
+        {
+            // ここで失敗するとG-Buffer/AOパスが描けず復旧手段が無いため、ログを残して投げ直す
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                std::string("バッファ精度に依存するパイプラインステートの作成に失敗しました (バッファ精度=") +
+                    (m_BufferPrecision == BufferPrecision::Legacy8bit ? "Legacy8bit" : "HDR") + "): " + e.what());
+            throw;
+        }
     }
 
     void KurenaiEngine3D::DiscoverScenes()
@@ -1035,15 +1091,11 @@ namespace Kurenai
         // そもそも効かない。加えてL>0.244では逆に粗くなり、金属はアルベドバッファの値を
         // F0として使う(DeferredLighting.hlsl)ぶん確実にその領域へ入るため、
         // 利点が確認できないまま欠点だけを抱えることになる。詳細はArchitecture.html 17.4節
-        // Emissive: 1.0でクリップされると照明器具がHDRな輝度を持てず、ブルームが成立しない。
-        // アルファを使わないためR11G11B10_Floatで足りる(帯域はR16G16B16A16_Floatの半分)
-        const RHI::Format emissiveFormat =
-            legacyPrecision ? RHI::Format::R8G8B8A8_UNorm : RHI::Format::R11G11B10_Float;
-        // AO/GIバッファ: rgb=間接拡散光(HDR)、a=遮蔽率。間接光はこの暗い室内では0.02〜0.1に
-        // 収まり、UNorm8ではコード5〜26の約20階調しか使えずポスタリゼーションする。
-        // aに遮蔽率を持つためアルファ付きのR16G16B16A16_Floatを使う
-        const RHI::Format aoFormat =
-            legacyPrecision ? RHI::Format::R8G8B8A8_UNorm : RHI::Format::R16G16B16A16_Float;
+        // フォーマットの決定はGetEmissiveFormat/GetAOFormatに一本化している。ここへ直接書くと
+        // 同じ値を宣言するPSO側(CreatePrecisionDependentPipelineStates)とずれ、
+        // D3D12では仕様違反になる(実際にそれで発生していた)
+        const RHI::Format emissiveFormat = GetEmissiveFormat();
+        const RHI::Format aoFormat = GetAOFormat();
 
         try
         {
@@ -2128,6 +2180,10 @@ namespace Kurenai
             m_BufferPrecisionDirty = false;
             m_Device->WaitForGPUIdle();
             CreateRenderTargets(m_RenderWidth, m_RenderHeight);
+            // G-Buffer(Emissive)とAO/GIのフォーマットが変わるため、それらへ描くPSOも作り直す。
+            // 作り直さないとPSOが宣言するRenderTargetFormatsと実際のRTVがずれ、D3D12では
+            // 仕様違反になる(DX11は検証しないため露見しない)
+            CreatePrecisionDependentPipelineStates();
         }
 
         auto* commandList = m_Device->GetImmediateCommandList();

@@ -55,6 +55,17 @@ namespace Kurenai
         };
 
         void CreateSceneResources();
+        // 中間バッファの精度構成(m_BufferPrecision)によって変わるフォーマット。
+        // レンダーターゲットの作成(CreateRenderTargets)と、そこへ描くPSOのRenderTargetFormats
+        // 宣言の両方がこれを使う。両者がずれるとD3D12では仕様違反(デバッグレイヤーがID 613を出す)
+        // になるため、値の出所をこの2関数に一本化している
+        RHI::Format GetEmissiveFormat() const;
+        RHI::Format GetAOFormat() const;
+        // 上記のフォーマットに依存するPSOを作る(G-Buffer・SSAO・SSIL・AOブラー)。
+        // 初回はCreateSceneResourcesの末尾から、以降はバッファ精度が切り替わるたびに
+        // Render()から呼び直す。GPUがまだ参照しているPSOを壊さないよう、呼び出し側で
+        // WaitForGPUIdleを済ませておくこと
+        void CreatePrecisionDependentPipelineStates();
         // パス用途ごとのサンプラーセット(m_MaterialSamplers / m_ScreenSpaceSamplers)を作る。
         // セットの中身は作成後に書き換えないことが前提のAPIなので、描画を始める前に一度だけ呼ぶ
         // (理由はRHI/IRHISamplerSet.h)
