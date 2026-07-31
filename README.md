@@ -214,9 +214,9 @@ Sample3D.exe -dx12
 
 画面左上に表示される5つのImGuiパネルから各種設定を変更できます(F1キーで表示/非表示を切り替え可能)。
 
-- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Furnace Test(スペキュラBRDFのエネルギー保存を目視で検証するシーン)、Material Test(粗さ0〜1の球体列+半透明ガラス球)、Light Test(ポイント/スポット/平行光の検証用シーン)、Multi Model Test(TRS配置の確認用))
-- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能。拡散イラディアンスは既定でプリフィルタ済み鏡面の最終ミップから得ますが、検証用に専用のイラディアンスマップへ切り替えることもできます)。スペキュラBRDFのマルチスキャッタリング・エネルギー補正もここでON/OFFできます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
-- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / IBL(プリフィルタ済み鏡面・BRDF LUT・検証用の拡散イラディアンス) 等、各パス中間結果のデバッグ表示)
+- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Furnace Test(スペキュラBRDFのエネルギー保存を目視で検証するシーン)、Material Test(粗さ0〜1の球体列+半透明ガラス球)、Light Test(ポイント/スポット/平行光の検証用シーン)、Multi Model Test(TRS配置の確認用)、Energy Compare - White Furnace / Sun Only(スペキュラのエネルギー補正の方式を比較するシーン。粗さ×F0の55球グリッドを、一様白環境と「環境光0+太陽光のみ」の2条件で見る))
+- **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能。拡散イラディアンスは既定でプリフィルタ済み鏡面の最終ミップから得ますが、検証用に専用のイラディアンスマップへ切り替えることもできます)。スペキュラBRDFのマルチスキャッタリング・エネルギー補正の方式もここで選択できます(Off / Linear / Series / Kulla-Conty。既定はLinear)。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
+- **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / IBL(プリフィルタ済み鏡面・BRDF LUT・検証用の拡散イラディアンス) / Scene Color (Raw HDR, No Tonemap)(トーンマップ前のリニア値をそのまま表示。値の実測用) 等、各パス中間結果のデバッグ表示)
 - **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)・
   EV100(実在の写真露出値。太陽/環境光/ポイント・スポットライトすべてに一様にかかるシーン全体の
   露出)を調整するほか、ポイント/スポットライトの一覧・追加・削除・型切替・パラメータ編集(強度は
@@ -259,6 +259,10 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
 - `Assets/Source/FurnaceTest/` — White Furnace Test用の金属球列(`metallic=1.0`、粗さ0.0〜1.0の11個)。
   一様な放射輝度のキューブマップ(`Assets/Packed/Skybox/UniformWhite.dds`)と合わせて
   `Tools/generate_furnace_test.py` で再生成できる
+- `Assets/Source/EnergyCompareTest/` — スペキュラのエネルギー補正の方式比較用グリッド。
+  粗さ0.0〜1.0の11段 × `metallicFactor` 1.00/0.75/0.50/0.25/0.00 の5段(= F0 1.00〜0.04)の55球。
+  環境光0のテストに使う真っ黒なキューブマップ(`Assets/Packed/Skybox/UniformBlack.dds`)と合わせて
+  `Tools/generate_energy_compare.py` で再生成できる
 - `Assets/Source/MaterialTest/` — PBRライティング検証用の球体列。粗さ0.0〜1.0の白色球11個と、
   半透明描画(`alphaMode=BLEND`)検証用の赤いガラス球1個。参照するテクスチャ(`GlassRed.png`)も含めて
   `Tools/generate_material_test.py` で再生成できる

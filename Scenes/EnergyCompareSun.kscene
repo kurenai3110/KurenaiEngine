@@ -1,0 +1,38 @@
+# KurenaiEngine シーンファイル - スペキュラ・エネルギー補正の3方式比較(環境光0 + 太陽光)
+#
+# 3方式の本質的な差は「補正で戻したエネルギーをどの方向へ返すか」であり、
+# White Furnace Test(半球積分)では見えない。方向分布の差を見るためのシーン。
+#   ・乗算型(Linear / Series) … GGXローブ全体を一様に持ち上げるのでローブの形は変わらない
+#   ・Kulla-Conty            … 広い加算ローブを足すのでハイライト中心が暗く裾が明るくなる
+#
+# 【環境光0の作り方】IBLIntensity = 0 にしてはいけない。ShadowParams.z <= 0 は
+# DeferredLighting.hlsl 側で定数色アンビエントのフォールバックへ落ちるため環境光が0にならない。
+# 真っ黒な一様スカイボックス + IBLIntensity = 1.0 が唯一の正しい方法。
+#
+# 【測定時の注意】生HDR表示(Render Targets > Scene Color (Raw HDR, No Tonemap))で読むこと。
+# 既定 EV100=15 では太陽の露出済み放射輝度が約2.54になり8bitバックバッファでクリップするため、
+# EV100を17前後まで上げてピークが1.0未満に収まるようにしてから読む。
+# 詳細は docs/Architecture.html 14.9節 参照
+
+[Scene]
+Name = Energy Compare - Sun Only (No Ambient)
+Skybox = Skybox/UniformBlack.dds
+IBLIntensity = 1.0
+AmbientOcclusion = false
+ScreenSpaceReflection = false
+
+[Model]
+Path = EnergyCompareTest/EnergyCompareTest.kmodel
+
+# EnergyCompareFurnace.ksceneと同一のカメラ(2シーンの画像を直接比較できるように揃える)
+[Camera]
+Position = 0.0, 38.0, -38.0
+Yaw = 0.0
+Pitch = -0.79
+
+[Sun]
+Enabled = true
+TimeOfDay = 15.0
+AzimuthDegrees = 45.0
+# 自己遮蔽の影が測定へ混ざらないように切る
+Shadow = false

@@ -51,44 +51,149 @@ float GeometrySmith(float NdotV, float NdotL, float roughness)
 // 測るとラフネス1.0では0.307まで落ちる(=7割が消える)。結果として粗い金属が本来より暗く、
 // 多重反射のたびに金属色が乗るはずの彩度も低く見える。
 //
-// Kulla & Conty, "Revisiting Physically Based Shading at Imageworks"(SIGGRAPH 2017)の
-// multiple-scattering energy compensationの実時間近似を使う:
-//
-//   Ess  = brdf.x + brdf.y
-//   comp = 1 + F0 * (1 / Ess - 1)
-//   specular *= comp
-//
-// 補正後の方向アルベドは Ess * comp = Ess + F0 * (1 - Ess) となり、「失われたぶんを
-// F0で1回だけ跳ね返して戻す」形(等比級数の第1項近似)になる。F0=1(完全な金属)なら
-// 厳密に1でエネルギー保存し、F0=0.04(誘電体)なら失われたぶんの4%しか戻さない ――
-// これも正しく、誘電体は残りを透過・吸収するため。
-//
-// EssがBRDF積分LUTから追加チャンネル無しで得られる理由: BRDFLUT.hlslはSchlickのフレネル
+// EssがBRDF積分LUTから得られる理由: BRDFLUT.hlslはSchlickのフレネル
 // F = F0*(1-Fc) + Fc を括り出して A = ∫(1-Fc)*Gvis、B = ∫Fc*Gvis を焼いている。
 // F0*A + B はそのF0における方向アルベドそのものなので、F0=1を代入した A + B が
-// ここで必要な「F=1のときの方向アルベド」に一致する。LUTのフォーマット変更は不要。
+// ここで必要な「F=1のときの方向アルベド」に一致する。
 //
-// 既知の近似: 本来のKulla-ContyはE(NdotV)・E(NdotL)・Eavg(全方向平均)の3つを使うが、
-// この実時間近似はE(NdotV)のみで済ませているため、視線方向と光源方向の非対称性(相反性)は
-// 厳密には再現されない。
+// ------------------------------------------------------------------------------------
+// 3つの方式を切り替えられるようにしてある(FrameConstants.ShadowParams.w = モード番号)。
+// C++側 KurenaiEngine3D::SpecularCompensationMode と値を一致させること。
 //
-// F0         : スペキュラの垂直入射反射率(lerp(0.04, albedo, metallic))
-// brdf       : BRDF積分LUTのサンプル値(x=スケールA, y=バイアスB)
-// enableFlag : ImGuiトグル。FrameConstants.ShadowParams.wを渡す(0以下で補正を無効化)
-float3 SpecularEnergyCompensation(float3 F0, float2 brdf, float enableFlag)
-{
-    if (enableFlag <= 0.0f)
-    {
-        // A/B比較用のトグル。適用箇所が5つあり呼び出し側で分岐を書くと直し忘れが起きるため、
-        // 無効時は恒等元の1を返して呼び出し側は常に無条件で乗算できるようにする
-        // (enableFlagは定数バッファ由来で波面内で一様のため、分岐コストは実質ゼロ)
-        return float3(1.0f, 1.0f, 1.0f);
-    }
+//   1 Linear : comp = 1 + F0(1/Ess - 1)          補正後アルベド = Ess + F0(1-Ess)
+//              失われたぶんをF0で「1回だけ」跳ね返して戻す等比級数の第1項近似。
+//   2 Series : comp = 1 / (1 - F0(1-Ess))        補正後アルベド = Ess / (1 - F0(1-Ess))
+//              同じ等比級数を全項足したもの。
+//   3 Kulla-Conty: 乗算ではなく、広い加算ローブを足す本来の形
+//              (Kulla & Conty, "Revisiting Physically Based Shading at Imageworks",
+//               SIGGRAPH 2017)。E(NdotV)・E(NdotL)・Eavgの3つを使うためµo/µi対称で、
+//              相反性を満たす。IBL側はそのsplit-sum版
+//              (Fdez-Agüera, "A Multiple-Scattering Microfacet Model for Real-Time
+//                Image-Based Lighting", JCGT 2019)。
+//
+// 【重要な性質】F0=1 では Linear と Series は代数的に同一(どちらも 1/Ess)になり、
+// さらに3方式とも補正後アルベドが厳密に1.0になる。つまりWhite Furnace Testは
+// 3方式を区別できない。区別できるのは (a) F0<1、(b) 方向分布(点光源・太陽光での
+// ローブ形状)の2つだけである(詳細と実測はdocs/Architecture.html 14.9節)。
+// ------------------------------------------------------------------------------------
 
+#define KURENAI_SPEC_COMP_OFF        0
+#define KURENAI_SPEC_COMP_LINEAR     1
+#define KURENAI_SPEC_COMP_SERIES     2
+#define KURENAI_SPEC_COMP_KULLACONTY 3
+
+// SchlickフレネルF(µ)の半球平均。Favg = 2∫F(µ)µdµ = F0 + (1-F0)/21
+// (∫(1-µ)^5 µ dµ = B(2,6) = 1/42 より)
+float3 FresnelAverage(float3 F0)
+{
+    return F0 + (1.0f - F0) / 21.0f;
+}
+
+// 乗算型(モード1・2)の補正倍率。モード0とモード3では恒等元の1を返す。
+//
+// 適用箇所が複数あり呼び出し側で分岐を書くと直し忘れが起きるため、無効時も1を返して
+// 呼び出し側は常に無条件で乗算できるようにしてある
+// (modeは定数バッファ由来で波面内で一様のため、分岐コストは実質ゼロ)。
+//
+// F0   : スペキュラの垂直入射反射率(lerp(0.04, albedo, metallic))
+// brdf : BRDF積分LUTのサンプル値(x=スケールA, y=バイアスB, z=Eavg)
+// mode : FrameConstants.ShadowParams.w を int 化したもの
+float3 SpecularEnergyCompensation(float3 F0, float3 brdf, int mode)
+{
     // Essの実測レンジはおおむね[0.31, 1.0](ラフネス1.0・NdotV=1.0で最小)。
     // LUTの生成が壊れた場合にNaN/Infがシーン全体へ伝播しないよう下限をクランプしておく
     const float Ess = max(brdf.x + brdf.y, 1e-3f);
-    return 1.0f + F0 * (1.0f / Ess - 1.0f);
+
+    if (mode == KURENAI_SPEC_COMP_LINEAR)
+    {
+        return 1.0f + F0 * (1.0f / Ess - 1.0f);
+    }
+    if (mode == KURENAI_SPEC_COMP_SERIES)
+    {
+        return 1.0f / max(1.0f - F0 * (1.0f - Ess), 1e-3f);
+    }
+    return float3(1.0f, 1.0f, 1.0f);
+}
+
+// Kulla-Contyのマルチスキャッタ加算ローブ(直接光用)。モード3以外では0を返す。
+//
+//   Fms  = Favg^2 * Eavg / (1 - Favg(1 - Eavg))
+//   f_ms = (1 - E(NdotV))(1 - E(NdotL)) / (π (1 - Eavg))
+//   戻り値 = Fms * f_ms   (呼び出し側で単一散乱項へ加算し、NdotLを掛ける)
+//
+// 乗算型と違いE(NdotL)を要るため、ライトごとにLUTのフェッチが1回増える。
+// F0=1・一様環境では Ess + Fms(1-Ess) = 1 に厳密に一致する。
+//
+// EssV/EssL : それぞれ NdotV / NdotL での A+B
+// Eavg      : LUTの第3成分(ラフネスだけの関数)
+float3 SpecularMultiScatterLobe(float3 F0, float EssV, float EssL, float Eavg, int mode)
+{
+    if (mode != KURENAI_SPEC_COMP_KULLACONTY)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    const float3 Favg = FresnelAverage(F0);
+    // ラフネス0ではEavg→1で分母が0へ落ちる。分子の(1-EssV)(1-EssL)も同時に0へ向かうため
+    // 値としては0に収束するが、0除算でNaNを出さないよう下限を入れる
+    const float3 Fms = Favg * Favg * Eavg / max(1.0f - Favg * (1.0f - Eavg), 1e-4f);
+    const float fms = (1.0f - EssV) * (1.0f - EssL) / max(3.14159265359f * (1.0f - Eavg), 1e-4f);
+    return Fms * fms;
+}
+
+// Kulla-ContyのIBL版(Fdez-Agüera 2019 のsplit-sum形)。モード3以外では0を返す。
+//
+//   Ems = 1 - Ess
+//   Fms = FssEss * Favg / (1 - Ems * Favg)
+//   戻り値 = Fms * Ems   (呼び出し側で拡散イラディアンスを掛けて鏡面IBLへ加算する)
+//
+// 直接光側がEavgを使うのに対しこちらがEssで閉じているのは、split-sum近似がすでに
+// 環境を方向で平均した形になっているため。F0=1・一様環境では FssEss + Fms*Ems = 1 に厳密。
+//
+// FssEss : F0 * brdf.x + brdf.y(単一散乱ぶんの方向アルベド)
+// Ess    : brdf.x + brdf.y
+float3 SpecularMultiScatterIBL(float3 F0, float3 FssEss, float Ess, int mode)
+{
+    if (mode != KURENAI_SPEC_COMP_KULLACONTY)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    const float3 Favg = FresnelAverage(F0);
+    const float Ems = 1.0f - Ess;
+    const float3 Fms = FssEss * Favg / max(1.0f - Ems * Favg, 1e-4f);
+    return Fms * Ems;
+}
+
+// 直接光パス(DirectLighting.hlsl / Transparent.hlsl)で、ピクセル内で一定な量をまとめたもの。
+// Ess(NdotV)・Eavgは(NdotV, ラフネス)だけの関数なので、ライトのループへ入る前に1度だけ求める
+// (ループ内でLUTを引くとライト数ぶんテクスチャフェッチが増えてしまう)。
+//
+// Kulla-Conty方式だけは E(NdotL) も必要で、これはライト方向に依存するためループ内で引かざるを
+// 得ない。そのフェッチは各シェーダーのEvaluateDirectBRDF内にある(BRDFLUTTextureのレジスタが
+// シェーダーごとに違うため、共有ヘッダーには置けない)
+struct SpecularEnergyContext
+{
+    int Mode;             // KURENAI_SPEC_COMP_*
+    float3 Compensation;  // 乗算型(モード1・2)の倍率。それ以外は1
+    float EssV;           // NdotVでの A+B
+    float Eavg;           // LUT第3成分(ラフネスだけの関数)
+    float Roughness;      // E(NdotL)を引き直すのに必要
+};
+
+// brdf       : BRDF積分LUTのサンプル値(x=A, y=B, z=Eavg)
+// modeParam  : FrameConstants.ShadowParams.w をそのまま渡す
+SpecularEnergyContext MakeSpecularEnergyContext(float3 F0, float3 brdf, float roughness, float modeParam)
+{
+    const int mode = (int)(modeParam + 0.5f);
+
+    SpecularEnergyContext context;
+    context.Mode = mode;
+    context.Compensation = SpecularEnergyCompensation(F0, brdf, mode);
+    context.EssV = brdf.x + brdf.y;
+    context.Eavg = brdf.z;
+    context.Roughness = roughness;
+    return context;
 }
 
 #endif // KURENAI_SPECULAR_ENERGY_HLSLI

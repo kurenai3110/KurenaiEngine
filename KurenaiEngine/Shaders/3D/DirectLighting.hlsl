@@ -106,14 +106,14 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
     return F0 + (1.0f - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
 }
 
+// SpecularEnergyContext(スペキュラのエネルギー補正のうちピクセル内で一定な量)は
+// SpecularEnergy.hlsliの共有定義を使う。
+
 // Cook-Torrance を1灯ぶん評価する(シャドウ・ライト色・減衰は呼び出し側で乗算する)。
 // 太陽(b0)とポイント/スポットライト(t8)の両方から共通で呼ばれる。
-// energyCompensationはスペキュラのエネルギー補正倍率(14.9節)。Ess=(NdotV, ラフネス)だけの
-// 関数でピクセル内では一定なので、ライトのループへ入る前にPSMainで1度だけ求めて渡す
-// (ここでLUTを引くとライト数ぶんテクスチャフェッチが増えてしまう)
 float3 EvaluateDirectBRDF(
     float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness,
-    float3 energyCompensation)
+    SpecularEnergyContext energy)
 {
     float3 H = normalize(V + L);
     float NdotL = saturate(dot(N, L));
@@ -126,7 +126,16 @@ float3 EvaluateDirectBRDF(
     float3 F = FresnelSchlick(VdotH, F0);
 
     // 補正は鏡面項にのみ掛ける(拡散項kdは変更しない。理由は14.9節)
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energyCompensation;
+    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energy.Compensation;
+
+    if (energy.Mode == KURENAI_SPEC_COMP_KULLACONTY)
+    {
+        // 加算ローブはE(NdotL)を要る。ライトのループ内から呼ばれるため、勾配に依存しない
+        // SampleLevelを使う(Sampleは動的な分岐・ループ内で勾配が未定義になり得る)
+        const float2 brdfL = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotL, energy.Roughness), 0).rg;
+        specular += SpecularMultiScatterLobe(F0, energy.EssV, brdfL.x + brdfL.y, energy.Eavg, energy.Mode);
+    }
+
     float3 kd = (1.0f - F) * (1.0f - metallic);
     float3 diffuse = kd * albedo / PI;
 
@@ -157,7 +166,7 @@ float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float an
 // t8のライトリストを1灯ぶん評価する(影なし)。early-outは効きの強い順(距離→減衰→スポット円錐→NdotL)に並べる
 float3 EvaluateLight(
     GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
-    float3 energyCompensation)
+    SpecularEnergyContext energy)
 {
     uint lightType = (uint)light.PositionType.w;
     float range = light.ColorRange.w;
@@ -202,7 +211,7 @@ float3 EvaluateLight(
         return float3(0.0f, 0.0f, 0.0f);
     }
 
-    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energyCompensation) * light.ColorRange.rgb * atten;
+    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy) * light.ColorRange.rgb * atten;
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
@@ -230,8 +239,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     // F0のlerpはEvaluateDirectBRDF内と同じ式(この式はコードベース内の複数箇所に登場するため
     // ここだけ引数化して特別扱いはしない)
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
-    const float3 energyCompensation = SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
+    const SpecularEnergyContext energy = MakeSpecularEnergyContext(F0, brdf, roughness, ShadowParams.w);
 
     float3 directLight = float3(0.0f, 0.0f, 0.0f);
 
@@ -244,14 +253,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         float viewDepth = mul(float4(worldPos, 1.0f), View).z;
         float shadow = ComputeCascadedShadowFactor(worldPos, viewDepth, sunNdotL);
-        directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energyCompensation) * LightColor.rgb * shadow;
+        directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energy) * LightColor.rgb * shadow;
     }
 
     // --- t8のライトリスト(影なし) ---
     [loop]
     for (uint i = 0; i < LightCount.x; ++i)
     {
-        directLight += EvaluateLight(Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness, energyCompensation);
+        directLight += EvaluateLight(Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness, energy);
     }
 
     return float4(directLight, 1.0f);

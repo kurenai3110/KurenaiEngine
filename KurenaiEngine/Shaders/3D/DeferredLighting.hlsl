@@ -94,11 +94,17 @@ float3 EvaluateIBL(float3 N, float3 V, float3 albedo, float metallic, float roug
     // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(ミップ数-1、KurenaiEngine3D側で設定)
     const float mipLevel = roughness * ShadowParams.y;
     const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)。
-    // ShadowParams.w = ImGuiトグル(0で無効=倍率1.0)
+    // ShadowParams.w = 方式の選択(0=無効, 1=Linear, 2=Series, 3=Kulla-Conty)。
+    // 乗算型(1・2)は単一散乱項へ倍率として掛かり、Kulla-Conty(3)は倍率1のまま
+    // 別のローブを加算する。加算ぶんはほぼ拡散なので拡散イラディアンスを掛ける
+    const int compensationMode = (int)(ShadowParams.w + 0.5f);
+    const float3 FssEss = F0 * brdf.x + brdf.y;
+    const float Ess = brdf.x + brdf.y;
     const float3 specularIBL =
-        prefiltered * (F0 * brdf.x + brdf.y) * SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
+        prefiltered * FssEss * SpecularEnergyCompensation(F0, brdf, compensationMode)
+        + SpecularMultiScatterIBL(F0, FssEss, Ess, compensationMode) * irradiance;
 
     // スペキュラオクルージョン(Lagarde & de Rousiers, "Moving Frostbite to Physically Based
     // Rendering 3.0", 2014)。ラフネスが高いほど指数を1に近づけ、AOの効きを弱める
