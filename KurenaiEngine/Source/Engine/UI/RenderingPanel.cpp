@@ -29,6 +29,10 @@ namespace Kurenai::UI
         {
             DrawShadowSection();
         }
+        if (ImGui::CollapsingHeader("スクリーンスペースシャドウ###ScreenSpaceShadow"))
+        {
+            DrawScreenSpaceShadowSection();
+        }
         if (ImGui::CollapsingHeader("IBL / 環境光###IBL"))
         {
             DrawIBLSection();
@@ -37,8 +41,82 @@ namespace Kurenai::UI
         {
             DrawSSRSection();
         }
+        if (ImGui::CollapsingHeader("タイルドライトカリング###LightCulling"))
+        {
+            DrawLightCullingSection();
+        }
 
         ImGui::End();
+    }
+
+    void RenderingPanel::DrawScreenSpaceShadowSection()
+    {
+        ImGui::TextWrapped(
+            "シャドウマップを使わずにポイント/スポットライトの影を出す。深度バッファをライトへ向かって"
+            "レイマーチするため、画面に写っていない遮蔽物(画面外や手前の面に隠れたもの)は影を落とさない。"
+            "得られるのは完全な影ではなく接触影・中距離の遮蔽。どのライトが影を落とすかは"
+            "ライティングパネルのライトごとの「影を落とす」で決める");
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "スクリーンスペースシャドウを有効にする###EnableSSS", &m_Engine.m_ScreenSpaceShadowEnabled,
+            Defaults::ScreenSpaceShadowEnabled, "無効にするとポイント/スポットライトの影が一切出なくなる");
+
+        ImGui::BeginDisabled(!m_Engine.m_ScreenSpaceShadowEnabled);
+        // 上限はScreenSpaceShadow.hlsliのkSSSMaxStepCountと揃える
+        SliderIntEx(
+            "レイのステップ数###SSSSteps", &m_Engine.m_ScreenSpaceShadowStepCount, 1, 64,
+            Defaults::ScreenSpaceShadowStepCount,
+            "1本のレイを何回に分けて進めるか。多いほど細い遮蔽物を拾えるが負荷が上がる");
+        SliderFloatEx(
+            "レイの最大長###SSSMaxRayLength", &m_Engine.m_ScreenSpaceShadowMaxRayLength, 0.05f, 20.0f,
+            Defaults::ScreenSpaceShadowMaxRayLength, "%.2f", ImGuiSliderFlags_Logarithmic,
+            "レイを飛ばすワールド距離の上限。長くすると遠くの遮蔽も拾えるが、"
+            "同じステップ数ではサンプル間隔が粗くなる");
+        SliderFloatEx(
+            "厚み###SSSThickness", &m_Engine.m_ScreenSpaceShadowThickness, 0.01f, 5.0f,
+            Defaults::ScreenSpaceShadowThickness, "%.3f", ImGuiSliderFlags_Logarithmic,
+            "深度バッファの面をどれだけの厚みを持つ物体とみなすか。深度しか無いため厚みは推定するしかない");
+        SliderFloatEx(
+            "法線バイアス###SSSNormalBias", &m_Engine.m_ScreenSpaceShadowNormalBias, 0.0f, 0.02f,
+            Defaults::ScreenSpaceShadowNormalBias, "%.4f", 0,
+            "レイの始点を法線方向へずらす量。自分自身を遮蔽物と誤検出するアクネを防ぐ");
+        SliderFloatEx(
+            "画面端のフェード###SSSEdgeFade", &m_Engine.m_ScreenSpaceShadowEdgeFade, 0.01f, 0.5f,
+            Defaults::ScreenSpaceShadowEdgeFade, "%.3f", 0,
+            "レイが画面外へ出る手前で影を薄くする幅。情報が無くなる境界で影が唐突に切れるのを防ぐ");
+        // 0にすると全ライトで影が消える。ライトを増やしたときのコスト上限を決めるつまみ
+        SliderIntEx(
+            "影を落とすライト数の上限###SSSMaxLights", &m_Engine.m_ScreenSpaceShadowMaxLightsPerPixel, 0, 16,
+            Defaults::ScreenSpaceShadowMaxLightsPerPixel,
+            "1ピクセルあたり何灯までシャドウレイを飛ばすか。0にすると影が出なくなる。"
+            "ライトを増やしたときの負荷の上限を決めるつまみ");
+        ImGui::EndDisabled();
+
+        EndParamGroup();
+    }
+
+    void RenderingPanel::DrawLightCullingSection()
+    {
+        ImGui::TextWrapped(
+            "画面を16x16ピクセルのタイルに分け、タイルへ届くライトの一覧をあらかじめ作る。"
+            "ライティングパスはシーン全体ではなくタイル内のライトだけをループする。"
+            "純粋な最適化であり、有効/無効で最終画像が変わってはならない。"
+            "グリッドの中身はデバッグ表示の「ライトタイル」で確認できる");
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "タイルドライトカリングを有効にする###EnableLightCulling", &m_Engine.m_LightCullingEnabled,
+            Defaults::LightCullingEnabled,
+            "無効にすると各ピクセルがシーン中の全ライトをループする。画は変わらず負荷だけが変わる");
+
+        EndParamGroup();
+
+        ImGui::Text(
+            "タイル: %u x %u (1タイルあたり最大%uライト)", m_Engine.m_LightTileCountX, m_Engine.m_LightTileCountY,
+            KurenaiEngine3D::kLightTileCapacity);
     }
 
     void RenderingPanel::DrawAOSection()

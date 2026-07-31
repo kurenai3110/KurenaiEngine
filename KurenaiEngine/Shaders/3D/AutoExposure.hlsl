@@ -39,7 +39,30 @@ cbuffer AutoExposureConstants : register(b1)
     float HighPercentile;
     // 露出補正(EV)。測定結果に対してユーザーが意図的に足すオフセット
     float ExposureCompensation;
-    float AutoExposurePadding;
+
+    // --- 暗いシーンをわざと暗いまま写すための補正カーブ ---
+    // 自動露出は「測ったものを中庸なグレーへ持ち上げる」ので、そのままだと夜が昼と同じ
+    // 明るさで出てしまう(実測: 補正を入れる前は22時と12時の空の明度がほぼ一致していた)。
+    // 実写でも夜景はわざと露出を切り詰めて撮るので、測定EV100が低いほど正のオフセットを
+    // 足して(=表示を暗くして)「暗いシーンは暗いまま」にする。
+    // Unreal Engine の Exposure Compensation Curve と同じ考え方の、2点線形版
+    float NightRolloffEV;
+    float NightRolloffDarkEV100;
+    float NightRolloffBrightEV100;
+
+    // --- 測光値の上側クランプ(構図依存を抑える) ---
+    // 自動露出は画面に写っているものを測るので、空が画面に占める割合で結果が変わる。
+    // 実測では同じ時刻・同じ壁面でも、空が画面の約40%を占める構図と空が入らない構図とで
+    // 露出が2〜3.5段ずれた(夜だけでなく昼も同様)。測光範囲が50〜95パーセンタイル、つまり
+    // ヒストグラムの明るい側の半分だけを平均しているため、空が測光を支配してしまう。
+    //
+    // そこでCPU側が持つキー照度(太陽・月・空の照度[lx]。画面に何が写っていようと変わらない)
+    // から求めた基準EVを上限の足がかりにし、測光値がそこから KeyCeilingEV 段より上へ
+    // 行かないようにする。上側だけを止めるのは、屋内のように実際の輝度が屋外のキー照度より
+    // ずっと低いシーンでは測光値が下へ振れるのが正しいから(両側を締めると屋内が真っ暗になる)。
+    // 下側は MinEV100 が絶対的な下限として効く
+    float KeyReferenceEV100;
+    float KeyCeilingEV;
 };
 
 // 256ビンの輝度ヒストグラム
@@ -51,6 +74,9 @@ RWStructuredBuffer<uint> Histogram : register(u0);
 RWTexture2D<float> ExposureOutput : register(u1);
 
 Texture2D SceneColorTexture : register(t0);
+// G-Bufferの深度。空(=何も描かれなかった背景)を測光から外すために読む。
+// Reverse-Zのため遠平面(=背景)はNDC z=0.0付近になる
+Texture2D DepthTexture : register(t1);
 
 groupshared uint gHistogram[HISTOGRAM_BINS];
 
@@ -103,13 +129,26 @@ void CSHistogram(uint3 dispatchThreadID : SV_DispatchThreadID, uint groupIndex :
 
     if (dispatchThreadID.x < InputSize.x && dispatchThreadID.y < InputSize.y)
     {
-        const float3 preExposed = max(SceneColorTexture[dispatchThreadID.xy].rgb, 0.0f);
-        // プリ露出を外して絶対輝度へ戻す(冒頭のコメント参照)
-        const float luminance = Luminance(preExposed) / PreExposureScale();
-        // 完全な黒(背景など)はlog2が-infになるうえ露出を不当に下へ引くので数えない
-        if (luminance > 1e-6f)
+        // === 空は測光から外す ===
+        // 空は「被写体」ではなく「光源」である。写真でも露出は被写体に合わせるもので、
+        // 空にカメラを向けたぶんだけ地上が暗く写るのは逆光の露出失敗にあたる。
+        //
+        // これを数えていたために、同じ時刻・同じ壁面でも空が画面に占める割合で
+        // 露出が2〜3.5段ずれていた(21.9.6節)。空を外せば測光値は画面に写る
+        // **地物だけ**で決まるので、構図依存はその場で消える。
+        //
+        // Reverse-Zなので背景(何も描かれなかった画素)は深度0付近になる
+        const float depth = DepthTexture[dispatchThreadID.xy].r;
+        if (depth > 0.0f)
         {
-            InterlockedAdd(gHistogram[EV100ToBin(LuminanceToEV100(luminance))], 1);
+            const float3 preExposed = max(SceneColorTexture[dispatchThreadID.xy].rgb, 0.0f);
+            // プリ露出を外して絶対輝度へ戻す(冒頭のコメント参照)
+            const float luminance = Luminance(preExposed) / PreExposureScale();
+            // 完全な黒はlog2が-infになるうえ露出を不当に下へ引くので数えない
+            if (luminance > 1e-6f)
+            {
+                InterlockedAdd(gHistogram[EV100ToBin(LuminanceToEV100(luminance))], 1);
+            }
         }
     }
 
@@ -129,7 +168,9 @@ void CSResolve(uint3 dispatchThreadID : SV_DispatchThreadID)
         total += Histogram[i];
     }
 
-    const float fallbackEV = 0.5f * (MinEV100 + MaxEV100);
+    // 空以外が1画素も写っていない(カメラが空だけを向いている)ときの退避値。
+    // レンジの中点では昼夜を問わず的外れな露出になるので、シーンの基準EVを使う
+    const float fallbackEV = KeyReferenceEV100;
     float targetEV = fallbackEV;
 
     if (total > 0)
@@ -166,7 +207,19 @@ void CSResolve(uint3 dispatchThreadID : SV_DispatchThreadID)
         targetEV = (weightTotal > 0.0f) ? (weightedSum / weightTotal) : fallbackEV;
     }
 
-    targetEV = clamp(targetEV + ExposureCompensation, MinEV100, MaxEV100);
+    // 測光値の上側だけをキー照度の基準EVでクランプする(構図依存を抑える。宣言部のコメント参照)。
+    // **夜の露出切り詰めより前に行うこと**。切り詰めは意図した演出のオフセットなので、
+    // クランプの対象は「測った値」だけにする
+    targetEV = min(targetEV, KeyReferenceEV100 + KeyCeilingEV);
+
+    // 測定値が暗いほど正のオフセットを足す(EV100が大きい=表示が暗い)。
+    // 補正はクランプ後の測定値から決めること。切り詰め後の値から決めると自己参照になって
+    // 明るさが振動する
+    const float rolloffT = saturate(
+        (targetEV - NightRolloffDarkEV100) / max(NightRolloffBrightEV100 - NightRolloffDarkEV100, 1e-3f));
+    const float nightRolloff = lerp(NightRolloffEV, 0.0f, rolloffT);
+
+    targetEV = clamp(targetEV + ExposureCompensation + nightRolloff, MinEV100, MaxEV100);
 
     const float previousEV = ExposureOutput[uint2(0, 0)];
     const float initialized = ExposureOutput[uint2(1, 0)];

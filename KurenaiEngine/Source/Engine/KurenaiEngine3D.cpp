@@ -1,4 +1,4 @@
-#include "KurenaiEngine3D.h"
+﻿#include "KurenaiEngine3D.h"
 
 #include <imgui.h>
 
@@ -74,8 +74,13 @@ namespace Kurenai
             // x: 0(既定)=プリフィルタ済み鏡面の最終ミップ(roughness=1)、1=従来の専用
             // イラディアンスマップ(t8。検証用に残している経路)。CSPrefilterはV=R=Nを仮定して
             // いるため、roughness=1(α=1)ではGGXインポータンスサンプリングの実効カーネルが
-            // コサイン畳み込みへ厳密に退化し、格納値もCSIrradianceと同じE(N)/πになる(14.10節)
+            // コサイン畳み込みへ厳密に退化し、格納値もCSIrradianceと同じE(N)/πになる(14.10節)。
+            // 反射プローブの拡散イラディアンスにもまったく同じ規則を適用する(19.7節)
             DirectX::XMFLOAT4 IBLParams;
+            // 反射プローブ用(末尾に追加)。x=有効プローブ数(0ならプローブを使わずグローバルIBLのみ)、
+            // y=影響範囲のデバッグ表示フラグ、z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
+            // DeferredLighting.hlslとSSR.hlslが読む
+            DirectX::XMFLOAT4 ProbeParams;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -93,19 +98,314 @@ namespace Kurenai
             DirectX::XMFLOAT2 Padding{};
         };
 
+        // DeferredLighting.hlsl側のstruct GPUReflectionProbeと並び・ストライド(48バイト)を
+        // 一致させる必要がある
+        struct alignas(16) GPUReflectionProbe
+        {
+            DirectX::XMFLOAT4 PositionRadius; // xyz=ワールド座標(Box形状では箱の中心), w=Sphere形状の影響半径
+            DirectX::XMFLOAT4 BoxExtents;     // xyz=Box形状の各軸の半径(ハーフエクステント), w=ブレンド距離
+            DirectX::XMFLOAT4 ShapeParams;    // x=形状(0=Sphere,1=Box), y=sin(Yaw), z=cos(Yaw), w=未使用
+        };
+
+        // キューブマップの1面を撮るためのビュー行列(左手系)。前方向・上方向の組は
+        // IBLConvolve.hlslのCubeFaceDirectionが定める面→方向の対応と一致していなければならない
+        // (ずれると焼いた面が回転・反転する)。D3Dのキューブマップ標準順(+X,-X,+Y,-Y,+Z,-Z)
+        DirectX::XMMATRIX ComputeCubeFaceView(const DirectX::XMFLOAT3& position, uint32_t face)
+        {
+            using namespace DirectX;
+
+            static const XMFLOAT3 kForward[6] =
+            {
+                {  1.0f,  0.0f,  0.0f }, // +X
+                { -1.0f,  0.0f,  0.0f }, // -X
+                {  0.0f,  1.0f,  0.0f }, // +Y
+                {  0.0f, -1.0f,  0.0f }, // -Y
+                {  0.0f,  0.0f,  1.0f }, // +Z
+                {  0.0f,  0.0f, -1.0f }, // -Z
+            };
+            static const XMFLOAT3 kUp[6] =
+            {
+                { 0.0f, 1.0f,  0.0f },
+                { 0.0f, 1.0f,  0.0f },
+                { 0.0f, 0.0f, -1.0f },
+                { 0.0f, 0.0f,  1.0f },
+                { 0.0f, 1.0f,  0.0f },
+                { 0.0f, 1.0f,  0.0f },
+            };
+
+            return XMMatrixLookToLH(XMLoadFloat3(&position), XMLoadFloat3(&kForward[face]), XMLoadFloat3(&kUp[face]));
+        }
+
+        // プローブのキャプチャ用プロジェクション(画角90度・アスペクト1)。Core::Cameraの
+        // 遠近投影と同じReverse-Z(近平面=NDC z=1.0、遠平面=NDC z=0.0)で作る必要がある
+        // (深度クリア値・PipelineStateDesc::ReverseZが同じ前提で組まれているため)
+        DirectX::XMMATRIX ComputeCubeFaceProjection(float nearZ, float farZ)
+        {
+            // 画角90度なのでtan(45度)=1、すなわちw=h=1になる
+            const float a = nearZ / (nearZ - farZ);
+            const float b = -a * farZ;
+
+            return DirectX::XMMatrixSet(
+                1.0f, 0.0f, 0.0f, 0.0f,
+                0.0f, 1.0f, 0.0f, 0.0f,
+                0.0f, 0.0f, a, 1.0f,
+                0.0f, 0.0f, b, 0.0f);
+        }
+
         // 太陽光の向き・色・環境光を時刻(0〜24時)から計算する
         struct SunLighting
         {
-            DirectX::XMFLOAT3 Direction; // 光が進む向き(サーフェスに当たる方向)
+            // 支配ライト(太陽 or 月)の、光が進む向き(サーフェスに当たる方向)。
+            // カスケードシャドウの行列もこの向きから作ること
+            DirectX::XMFLOAT3 Direction;
             DirectX::XMFLOAT4 Color;
             DirectX::XMFLOAT4 Ambient; // rgb=環境光の色, a=昼度(0=夜,1=昼)
+            // 支配ライトが太陽か月か(ImGuiの表示とデバッグ用)
+            bool DominantIsSun;
+            // 手続き空の天頂輝度を正規化する際の目標照度[lx]。薄明係数と月明かりで変調済み
+            float SkyIlluminanceLux;
+            // 薄明係数(仰角[-15°,+15°] = 時刻でちょうど5-7時/17-19時)
+            float TwilightFactor;
+            // 太陽が「ある」向き。手続き空(SkyGenerate.hlsl)がPerez分布のcircumsolar項の
+            // 基準に使う。月が支配的なときも**常に太陽の位置**であることに注意
+            DirectX::XMFLOAT3 SunPosition;
+            // このフレームのキーとなる照度[lx]。可変プリ露出の基準になる
+            float KeyIlluminanceLux;
         };
+
+        // 直射日光(正午・快晴)の照度[lx]。Lagarde & de Rousiers 2014の照度参照テーブルに
+        // 掲載される代表値
+        constexpr float kSunIlluminanceLux = 100000.0f;
+        // 空光(直射日光を除いた間接照度)の照度[lx]。同テーブルの曇天相当値を、直射日光に対する
+        // 空光の比率(おおむね1〜2割)としても妥当な範囲であることの根拠として採用する。
+        // 手続き空の天頂輝度の正規化目標にもなるためRender()からも参照する
+        constexpr float kSkylightIlluminanceLux = 20000.0f;
+        // 満月が地表へ与える照度[lx]。太陽(10万lx)の約40万分の1という実測値。
+        // 満ち欠けは未実装(常に満月)。位置は時刻に連動せず、ImGuiで手動指定する
+        constexpr float kMoonIlluminanceLux = 0.25f;
+        // 満月時に夜空全体が散乱で持つ照度[lx]。地表照度0.25lxのうち空由来の寄与にあたる概算値。
+        //
+        // 【月と夜空の比が夜の影の見え方を決める】影の濃さは「平行光(月) : 環境光(夜空)」の比で
+        // 決まる。物理値の0.25:0.05は5:1で、影は十分な濃さを持つ。この比を保ったまま
+        // 表示上の明るさだけを調整したい場合は、照度ではなく自動露出の
+        // m_AutoExposureNightRolloffEV(夜の露出切り詰め量)を動かすこと
+        constexpr float kMoonSkyIlluminanceLux = 0.05f;
+        // 星明かりだけの夜空の照度[lx]。月が地平線下にあるときの下限になる。
+        // 月の位置が手動指定になったことで「月の出ていない夜」がスライダー一つで作れるように
+        // なったが、そこで夜空の目標照度が厳密に0になると空が真っ黒になり、
+        // 自動露出が持ち上げようのない画になる。星明かりは実在する量(約0.001lx)なので、
+        // アート的な下駄ではなく物理値としてここに置く
+        constexpr float kStarlightIlluminanceLux = 0.001f;
 
         // edge0とedge1の間をなめらかに0→1で補間する(edge0以下は0、edge1以上は1)
         float Smoothstep(float edge0, float edge1, float x)
         {
             const float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
             return t * t * (3.0f - 2.0f * t);
+        }
+
+        // --- 手続き空(SkyGenerate.hlsl)と厳密に一致させる必要がある定数・式 ---
+        // ここを変えるときは SkyGenerate.hlsl と Tools/generate_sky_cubemap.py も同時に直すこと。
+        // 3者がずれると、空の見た目・IBLの明るさ・オフライン参照実装が食い違う
+        //
+        // 【フロアを0.45から下げた理由】CIE快晴空の相対輝度は反太陽側の水平線で天頂の0.2倍程度まで
+        // 落ちる。これは実際の快晴空の姿だが、以前はここを0.45まで底上げしていたため輝度の勾配が
+        // ほぼ消え、空全体が一様なスレートグレーになっていた(実測: 空の彩度0.26、時刻を問わず一定)。
+        // 多重散乱で暗部が持ち上がるのは事実なので0にはしないが、勾配が残る値まで下げる
+        constexpr float kSkyRelativeLuminanceFloor = 0.12f;
+
+        // 空の色味セット。太陽高度から選んでCPUで1度だけ決め、cbufferでシェーダーへ配る。
+        //
+        // 【なぜCPUで決めるのか】この色味は
+        //   (1) SkyGenerate.hlsl のキューブマップ生成
+        //   (2) ComputeSkyZenithScale の照度正規化(積分の重みに色味の輝度成分が入る)
+        // の両方で完全に一致していなければならない。CPUで決めて配れば両者がずれることが
+        // 構造的に起きなくなる(以前は定数を2箇所に複製していた)。
+        // Tools/generate_sky_cubemap.py だけは独立した実装なので手で合わせる必要が残る
+        struct SkyTintSet
+        {
+            DirectX::XMFLOAT3 Zenith;
+            DirectX::XMFLOAT3 Horizon;
+            DirectX::XMFLOAT3 Ground;
+            // 太陽方向まわりに乗せる暖色(夕焼け・朝焼け)
+            DirectX::XMFLOAT3 SunGlow;
+            float SunGlowStrength;
+        };
+
+        DirectX::XMFLOAT3 LerpColor(const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b, float t)
+        {
+            return { a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t };
+        }
+
+        // 太陽高度(のサイン)から空の色味を決める。
+        //
+        // 【物理ではなくアート的な近似であることの明示】本来の夕焼けは、太陽光が大気を長く通る
+        // ことで短波長がRayleigh散乱により失われる波長依存の消散で生じる。それを解くには
+        // Preetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。本エンジンは
+        // Perez分布(輝度の分布のみを与え、色は与えない)を使っているため、色は昼・薄明・夜の
+        // 3セットを高度で補間して作る。物理的な導出ではない。
+        //
+        // 【重要】ここで色味を暗くしても空が暗くなるわけではない。ComputeSkyZenithScaleが
+        // 「色味の輝度成分込みで積分して目標照度に合わせる」ため、色味は最終的な明るさではなく
+        // 色相・彩度だけを決める。明るさはSunLighting::SkyIlluminanceLuxが持つ
+        SkyTintSet ComputeSkyTint(float sunElevationSin)
+        {
+            using namespace DirectX;
+
+            // 昼(仰角15度以上)。従来からの値
+            const XMFLOAT3 kDayZenith{ 0.22f, 0.45f, 1.0f };
+            const XMFLOAT3 kDayHorizon{ 0.55f, 0.74f, 1.0f };
+            const XMFLOAT3 kDayGround{ 0.10f, 0.09f, 0.08f };
+            // 薄明(仰角0度)。天頂は青を残したまま暗く、水平線は夕焼けの橙へ
+            const XMFLOAT3 kDuskZenith{ 0.13f, 0.22f, 0.60f };
+            const XMFLOAT3 kDuskHorizon{ 0.95f, 0.50f, 0.28f };
+            const XMFLOAT3 kDuskGround{ 0.06f, 0.05f, 0.05f };
+            // 夜(仰角-15度以下)。月光で散乱した深い青。ここを昼と同じ色にしていたため
+            // 「夜なのに昼と同じ空色」になっていた。
+            // 月光は分光的にはほぼ太陽光そのもので、夜空が青く見えるのは暗所視の
+            // プルキンエ現象による知覚的なもの。したがって青へ寄せるのは正しいが、
+            // 寄せすぎるとネオンブルーになる(R比7倍まで振ったときは実測B/R=13になった)ので
+            // 昼空(B/R約4.5)と同程度の彩度に留める
+            const XMFLOAT3 kNightZenith{ 0.09f, 0.15f, 0.40f };
+            const XMFLOAT3 kNightHorizon{ 0.16f, 0.24f, 0.50f };
+            const XMFLOAT3 kNightGround{ 0.02f, 0.02f, 0.03f };
+            // 太陽方向の暖色(夕焼けの芯)
+            const XMFLOAT3 kSunGlow{ 1.0f, 0.38f, 0.12f };
+
+            const float kSin15Deg = std::sin(XMConvertToRadians(15.0f));
+            // 仰角0度→15度で薄明から昼へ
+            const float dayBlend = Smoothstep(0.0f, kSin15Deg, sunElevationSin);
+            // 仰角0度→-15度で薄明から夜へ
+            const float nightBlend = Smoothstep(0.0f, kSin15Deg, -sunElevationSin);
+
+            SkyTintSet result{};
+            result.Zenith = LerpColor(LerpColor(kDuskZenith, kNightZenith, nightBlend), kDayZenith, dayBlend);
+            result.Horizon = LerpColor(LerpColor(kDuskHorizon, kNightHorizon, nightBlend), kDayHorizon, dayBlend);
+            result.Ground = LerpColor(LerpColor(kDuskGround, kNightGround, nightBlend), kDayGround, dayBlend);
+            result.SunGlow = kSunGlow;
+            // 暖色は仰角0度で最大、±15度で0になる三角窓。
+            // dayBlendもnightBlendも仰角0度で0・±15度で1なので、両方の補数の積がそのまま窓になる
+            result.SunGlowStrength = (1.0f - dayBlend) * (1.0f - nightBlend);
+            return result;
+        }
+
+        // Perezの5係数関数(CIE快晴空、Perez et al. 1993 / Preetham et al. 1999 Table 1)
+        float PerezF(float cosTheta, float gamma)
+        {
+            constexpr float a = -1.0f;
+            constexpr float b = -0.32f;
+            constexpr float c = 10.0f;
+            constexpr float d = -3.0f;
+            constexpr float e = 0.45f;
+            const float cosGamma = std::cos(gamma);
+            return (1.0f + a * std::exp(b / cosTheta)) * (1.0f + c * std::exp(d * gamma) + e * cosGamma * cosGamma);
+        }
+
+        // 天頂輝度を1としたときの相対輝度。SkyGenerate.hlsl の PerezRelativeLuminance +
+        // kRelativeLuminanceFloor の適用と同じ結果になること
+        float SkyRelativeLuminance(float cosTheta, float gamma, float cosThetaSun, float thetaSun)
+        {
+            const float relative = std::max(PerezF(cosTheta, gamma) / PerezF(cosThetaSun, thetaSun), 0.0f);
+            return kSkyRelativeLuminanceFloor + (1.0f - kSkyRelativeLuminanceFloor) * relative;
+        }
+
+        // 太陽の暖色を混ぜる重み。SkyGenerate.hlsl の SunGlowWeight と同じ式であること。
+        // 太陽から離れるほど急に落ちる4乗カーブ。太陽が地平線下にあっても、その方位の
+        // 低空はまだ暖色が残る(実際の夕焼けの残光と同じ構造)
+        float SunGlowWeight(float cosGamma, float glowStrength)
+        {
+            const float proximity = std::clamp(cosGamma, 0.0f, 1.0f);
+            const float falloff = proximity * proximity * proximity * proximity;
+            return std::clamp(glowStrength * falloff, 0.0f, 1.0f);
+        }
+
+        // 方向(天頂角と太陽との離角)に対する空の色味。
+        // SkyGenerate.hlsl の SkyTint と同じ式であること
+        DirectX::XMFLOAT3 SkyTint(float cosTheta, float cosGamma, const SkyTintSet& tintSet)
+        {
+            // 水平線側への寄せを3乗カーブにして、高度があるうちは天頂色をほぼ保つ
+            const float horizonBlend = std::pow(1.0f - std::clamp(cosTheta, 0.0f, 1.0f), 3.0f);
+            const DirectX::XMFLOAT3 base = LerpColor(tintSet.Zenith, tintSet.Horizon, horizonBlend);
+            return LerpColor(base, tintSet.SunGlow, SunGlowWeight(cosGamma, tintSet.SunGlowStrength));
+        }
+
+        // 空の天頂輝度スケールを、上半球の余弦重み積分が目標照度に一致するよう正規化して求める。
+        //
+        // 【なぜ必要か】従来は zenith_luminance = 空光の照度[lx] をそのまま天頂輝度として
+        // 使っていた。照度E[lx]と輝度L[cd/m^2]は E = ∫L·cosθ dω の関係にあるので、この扱いだと
+        // 実際に届く照度は「積分値の分だけ」ずれる。しかも Perez 分布の形は太陽高度で変わるため、
+        // そのずれ自体が時刻とともに動く。
+        //
+        // 正規化前は、Perez分布の形が太陽高度で変わるぶんだけ空光の照度が1.8倍も勝手に変動して
+        // いた(輝度フロア0.45・旧ティストでの実測。太陽高度90度で積分1.080、45度で1.898)。
+        // ここで正規化すると常に目標値ちょうどになり、時刻による空の明るさは薄明係数のように
+        // 意図した係数だけで制御できるようになる。
+        // 積分値そのものはフロアとティントを変えると当然変わるが、正規化しているので
+        // 最終的な照度は変わらない(だから上の実測値は現在の設定のものではない)。
+        //
+        // 補足: 「一様な空なら L = E/π なので従来はπ倍明るかった」という説明は誤り。
+        // 積分にはティントの輝度成分(Rec.709)も入るため、単位球の積分はπ(3.14)には遠く
+        // 及ばない。正午での補正は数%〜十数%の範囲にとどまる。
+        //
+        // 積分は θ64分割 × φ256分割の中点則。1.6万回の評価で数十μs程度であり、
+        // 空を焼き直すタイミングでしか呼ばれないため負荷は問題にならない
+        float ComputeSkyZenithScale(
+            const DirectX::XMFLOAT3& sunPosition, float targetIlluminanceLux, const SkyTintSet& tintSet)
+        {
+            using namespace DirectX;
+
+            constexpr uint32_t kThetaSteps = 64;
+            constexpr uint32_t kPhiSteps = 256;
+
+            const float thetaSun = std::acos(std::clamp(sunPosition.y, -1.0f, 1.0f));
+            const float cosThetaSun = std::max(std::cos(thetaSun), 1e-3f);
+
+            const float dTheta = (XM_PIDIV2) / static_cast<float>(kThetaSteps);
+            const float dPhi = (XM_2PI) / static_cast<float>(kPhiSteps);
+
+            double integral = 0.0;
+            for (uint32_t ti = 0; ti < kThetaSteps; ++ti)
+            {
+                // 中点則
+                const float theta = (static_cast<float>(ti) + 0.5f) * dTheta;
+                const float cosThetaRaw = std::cos(theta);
+                const float sinTheta = std::sin(theta);
+                // SkyGenerate.hlsl と同じクランプ(水平線でPerezが発散するため)
+                const float cosTheta = std::clamp(
+                    std::max(cosThetaRaw, std::cos(XMConvertToRadians(89.5f))), 1e-3f, 1.0f);
+
+                for (uint32_t pi = 0; pi < kPhiSteps; ++pi)
+                {
+                    const float phi = (static_cast<float>(pi) + 0.5f) * dPhi;
+                    const XMFLOAT3 dir{ sinTheta * std::cos(phi), cosThetaRaw, sinTheta * std::sin(phi) };
+                    const float cosGamma = std::clamp(
+                        dir.x * sunPosition.x + dir.y * sunPosition.y + dir.z * sunPosition.z, -1.0f, 1.0f);
+                    const float gamma = std::acos(cosGamma);
+
+                    // 色味の評価はφループの内側で行う。夕焼けの暖色が太陽の方位にだけ乗るように
+                    // なったため、色味が天頂角だけの関数ではなくなった(以前はθループの外で
+                    // 1回だけ求めていた)。Perezの評価が既に1.6万回あるので追加コストは誤差。
+                    // 照度は測光的な輝度で測るので、ティントの輝度成分(Rec.709)を重みに掛ける
+                    const XMFLOAT3 tint = SkyTint(cosTheta, cosGamma, tintSet);
+                    const float tintLuminance = 0.2126f * tint.x + 0.7152f * tint.y + 0.0722f * tint.z;
+
+                    const float relative = SkyRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun);
+                    // dω = sinθ dθ dφ、余弦重みは cosθ
+                    integral += static_cast<double>(relative) * tintLuminance * cosThetaRaw * sinTheta * dTheta * dPhi;
+                }
+            }
+
+            // 積分がゼロ近傍になることは無い想定だが、ゼロ除算だけは防いでおく
+            if (integral < 1e-6)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "空の余弦重み積分が異常に小さいため天頂輝度の正規化をスキップします(積分値=" +
+                        std::to_string(integral) + ")");
+                return targetIlluminanceLux;
+            }
+
+            return targetIlluminanceLux / static_cast<float>(integral);
         }
 
         // 実在の写真露出値(EV100)から露出係数を求める。絞り値・シャッター速度・ISO感度から一意に
@@ -119,7 +419,30 @@ namespace Kurenai
             return 1.0f / (1.2f * std::pow(2.0f, ev100));
         }
 
-        SunLighting ComputeSunLighting(float timeOfDayHours, float sunAzimuthDegrees, float exposureEV100)
+        // 環境の照度[lx]から「そのシーンの基準EV100」を求める。
+        //
+        // 自動露出のヒストグラムと違い、これは**画面に何が写っているかに一切依存しない**。
+        // 測光値が構図で振れる(空が画面に占める割合で2〜3.5段動く)のを抑えるための
+        // 足がかりとして使う(AutoExposure.hlsl の KeyReferenceEV100 参照)。
+        //
+        // 導出: 反射率ρのLambertian面が照度Eを受けたときの輝度は L = E·ρ/π。
+        // EV100と輝度の関係は L = 2^EV100 · K/S(反射光式露出計の標準、K=12.5・S=100)
+        // すなわち EV100 = log2(8L)。ρには中庸なグレーの18%を使う。
+        // 検算: E=100,000lx(直射日光) → EV100=15.5、E=0.3lx(満月の夜) → EV100=-2.9。
+        // どちらも実写の露出値と一致する
+        float ComputeReferenceEV100(float illuminanceLux)
+        {
+            constexpr float kMiddleGreyReflectance = 0.18f;
+            const float luminance =
+                std::max(illuminanceLux, 1e-6f) * kMiddleGreyReflectance / DirectX::XM_PI;
+            return std::log2(8.0f * luminance);
+        }
+
+        // 太陽・月・空の状態を時刻から求める。
+        // **露出は一切掛けない**(すべて絶対的な測光量[lx]のまま返す)。露出はこの結果から
+        // 決まる実効EV100を使ってRender()側で掛ける(可変プリ露出。KurenaiEngine3D.h参照)
+        SunLighting ComputeSunLighting(
+            float timeOfDayHours, float sunAzimuthDegrees, float moonAzimuthDegrees, float moonElevationDegrees)
         {
             using namespace DirectX;
 
@@ -138,39 +461,133 @@ namespace Kurenai
             const XMFLOAT3 sunDirection{ kSunriseHorizontal.x * cosHour, sinHour, kSunriseHorizontal.z * cosHour };
 
             SunLighting result{};
-            result.Direction = { -sunDirection.x, -sunDirection.y, -sunDirection.z };
 
-            // 6時〜7時でなめらかに夜→昼、17時〜18時でなめらかに昼→夜へ切り替える。
-            // この遷移カーブ自体は物理的な大気散乱シミュレーションではなく既存のアート的な遷移のまま
-            const float dayFactor = Smoothstep(6.0f, 7.0f, timeOfDayHours) * (1.0f - Smoothstep(17.0f, 18.0f, timeOfDayHours));
+            // === 昼夜の遷移係数を「時刻」ではなく「太陽の仰角」で決める ===
+            // sinHour がそのまま太陽仰角のサインになる(軌道が単位円のため)。
+            //
+            // 【なぜ時刻ベースをやめたか】従来は Smoothstep(6,7) * (1 - Smoothstep(17,18)) と
+            // 時刻で遷移させていた。この窓は仰角0度〜15度にちょうど一致しており偶然うまく
+            // 成立していたが、遷移を長くしようと窓を5-7時/17-19時へ広げると
+            // 5.5時(仰角-7.5度)で dayFactor≈0.156 となり、**地平線下の太陽が15,600 lx で照らす**
+            // ことになる。LightDirection.y > 0 となってカスケードシャドウが地面の下から
+            // 影を焼き、物体の裏側が照らされる。
+            //
+            // そこで遷移を2本に分ける:
+            //   SunFactor      … 直接光と影。仰角[0°,15°]。地平線下では厳密に0
+            //   TwilightFactor … 空の輝度と環境光。仰角[-15°,+15°] = 時刻でちょうど5-7時/17-19時
+            // 「2時間かけて遷移する」という見た目の要求は TwilightFactor が満たし、
+            // 直接光は物理的に成立する範囲(地平線より上)に留まる。
+            // 実際の市民薄明(太陽が地平線下0〜-6度)もこの構造になっている。
+            const float sunElevationSin = sinHour;
+            const float kSin15Deg = std::sin(XMConvertToRadians(15.0f));
+            const float sunFactor = Smoothstep(0.0f, kSin15Deg, sunElevationSin);
+            const float twilightFactor = Smoothstep(-kSin15Deg, kSin15Deg, sunElevationSin);
 
-            // 太陽の色味(ティント)。ピーク照度はkSunIlluminanceLuxが持つので、ここは相対比のみ
-            const XMFLOAT3 kSunColorTint{ 1.0f, 0.967f, 0.9f };
-            // 直射日光(正午・快晴)の照度[lx]。Lagarde & de Rousiers 2014の照度参照テーブルに
-            // 掲載される代表値
-            constexpr float kSunIlluminanceLux = 100000.0f;
-            // 空光(直射日光を除いた間接照度)の照度[lx]。同テーブルの曇天相当値を、直射日光に対する
-            // 空光の比率(おおむね1〜2割)としても妥当な範囲であることの根拠として採用する
-            constexpr float kSkylightIlluminanceLux = 20000.0f;
+            // === 月は時刻に連動せず、方位角と仰角で手動指定する ===
+            // 実際の月は太陽とは独立した周期(朔望月)で動くため、反太陽方向に固定するのは
+            // 「常に満月かつ常に真夜中に南中する」という二重の簡略化だった。
+            // 位置を手動指定にすることで、任意の月齢・任意の時刻の見え方を作れるようにする。
+            // 方位角の規約は太陽と同じ(X軸が0度、Z軸(+方向)が90度)
+            const float moonAzimuthRadians = XMConvertToRadians(moonAzimuthDegrees);
+            const float moonElevationRadians = XMConvertToRadians(moonElevationDegrees);
+            const float moonCosElevation = std::cos(moonElevationRadians);
+            const XMFLOAT3 moonDirection{
+                moonCosElevation * std::cos(moonAzimuthRadians),
+                std::sin(moonElevationRadians),
+                moonCosElevation * std::sin(moonAzimuthRadians),
+            };
+
+            // 月が地平線より上にあるかどうか(太陽と同じく仰角[0°,15°]で立ち上げる)
+            const float moonElevationFactor = Smoothstep(0.0f, kSin15Deg, moonDirection.y);
+            // 【なぜ太陽の高度でも月を絞るのか】平行光源の枠は1つしかないので、
+            // 太陽と月は「支配的な方」を選んで切り替える。月を反太陽方向に固定していたときは
+            // 切替点(太陽の仰角0度)で月の係数もちょうど0になり、向きが反転しても
+            // 何も見えないためポップが原理的に起きなかった。
+            // 月の位置が独立になるとこの保証が失われ、太陽が沈む瞬間に月が高く昇っていると
+            // 0.25lxの直接光が向きだけ突然入れ替わる(夜の影が見える明るさなので実際に目に付く)。
+            // そこで月の立ち上がりを太陽の仰角0°→-5°に遅らせ、
+            // **切替点では太陽も月も厳密に0**という元の性質を取り戻す
+            const float kSin5Deg = std::sin(XMConvertToRadians(5.0f));
+            const float moonNightGate = Smoothstep(0.0f, kSin5Deg, -sunElevationSin);
+            const float moonFactor = moonElevationFactor * moonNightGate;
+
+            // 太陽の色味(ティント)。ピーク照度はkSunIlluminanceLuxが持つので、ここは相対比のみ。
+            // 仰角が低いほど暖色へ寄せる(大気の光路長が伸びて短波長が散乱で失われる現象の
+            // アート的な近似。朝焼け・夕焼けの赤みはこれで出る)
+            const XMFLOAT3 kSunColorTintHigh{ 1.0f, 0.967f, 0.9f };
+            const XMFLOAT3 kSunColorTintHorizon{ 1.0f, 0.55f, 0.30f };
+            const float warmth = 1.0f - sunFactor; // 仰角15度以上で0、地平線で1
+            const XMFLOAT3 kSunColorTint{
+                kSunColorTintHigh.x + (kSunColorTintHorizon.x - kSunColorTintHigh.x) * warmth,
+                kSunColorTintHigh.y + (kSunColorTintHorizon.y - kSunColorTintHigh.y) * warmth,
+                kSunColorTintHigh.z + (kSunColorTintHorizon.z - kSunColorTintHigh.z) * warmth,
+            };
+            // 満月の照度[lx]。太陽(10万lx)の40万分の1という実測値。
+            // 月光は分光的には太陽光とほぼ同じだが、暗所視で青く感じられる(プルキンエ現象)ため
+            // 慣例に従って寒色のティントを当てる(物理ではなくアート的な選択)
+            const XMFLOAT3 kMoonColorTint{ 0.75f, 0.85f, 1.0f };
             // 夜間の環境光は天文学的な実測値(星明かり~0.001lx、満月~0.1〜0.3lx)をそのまま使うと
             // ほぼ完全な黒になり視認性が失われるため、視認性確保のためのアート的な下限値のまま残す
             // (物理値ではないことを明記した上での意図的な妥協)
             const XMFLOAT3 kNightAmbientArt{ 0.006f, 0.008f, 0.015f };
 
-            const float exposure = ComputeExposure(exposureEV100);
+            // === 平行光源1枠を太陽と月で共有し、支配的な方を選ぶ ===
+            // 太陽10万lx と満月0.25lx は40万倍違うので、両者の照度が入れ替わるのは
+            // 実質的に太陽の仰角0度ちょうどの一点だけ。そこでは SunFactor も MoonFactor も
+            // 厳密に0(=どちらの色もゼロ)になるよう moonNightGate で仕込んであるので、
+            // 光源の向きが突然変わっても直接光も影も一切見えず、ポップは原理的に発生しない。
+            // このためヒステリシスのような追加の対策は要らない
+            const float sunIlluminance = kSunIlluminanceLux * sunFactor;
+            const float moonIlluminance = kMoonIlluminanceLux * moonFactor;
+            result.DominantIsSun = (sunIlluminance >= moonIlluminance);
 
-            const float sunPeak = kSunIlluminanceLux * dayFactor * exposure;
-            result.Color = { kSunColorTint.x * sunPeak, kSunColorTint.y * sunPeak, kSunColorTint.z * sunPeak, 0.0f };
+            const float dominantPeak = result.DominantIsSun ? sunIlluminance : moonIlluminance;
+            const XMFLOAT3& dominantTint = result.DominantIsSun ? kSunColorTint : kMoonColorTint;
+            result.Color = {
+                dominantTint.x * dominantPeak, dominantTint.y * dominantPeak, dominantTint.z * dominantPeak, 0.0f
+            };
+            // 支配ライトの向き(光が進む向き)。天体が「ある」向きの符号を反転したもの。
+            // **カスケードシャドウの行列もこの向きから作ること**(LightColorだけ切り替えると
+            // 月夜に太陽方向の影が残ってしまう)
+            result.Direction = result.DominantIsSun
+                ? XMFLOAT3{ -sunDirection.x, -sunDirection.y, -sunDirection.z }
+                : XMFLOAT3{ -moonDirection.x, -moonDirection.y, -moonDirection.z };
 
-            const float skyPeak = kSkylightIlluminanceLux * exposure;
+            // 非IBLフォールバック用の定数色アンビエント(Enable IBL 無効時のみ使われる)。
+            // 昼度は薄明係数をそのまま使う
+            const float dayFactor = twilightFactor;
+            const float skyPeak = kSkylightIlluminanceLux;
             const XMFLOAT3 dayAmbient{ kSunColorTint.x * skyPeak, kSunColorTint.y * skyPeak, kSunColorTint.z * skyPeak };
+            // 夜間の下限値もここでは絶対値のまま持つ(露出はRender()側で掛ける)
+            const float kNightAmbientScale = kMoonSkyIlluminanceLux;
             result.Ambient =
             {
-                kNightAmbientArt.x + (dayAmbient.x - kNightAmbientArt.x) * dayFactor,
-                kNightAmbientArt.y + (dayAmbient.y - kNightAmbientArt.y) * dayFactor,
-                kNightAmbientArt.z + (dayAmbient.z - kNightAmbientArt.z) * dayFactor,
+                kNightAmbientArt.x * kNightAmbientScale + (dayAmbient.x - kNightAmbientArt.x * kNightAmbientScale) * dayFactor,
+                kNightAmbientArt.y * kNightAmbientScale + (dayAmbient.y - kNightAmbientArt.y * kNightAmbientScale) * dayFactor,
+                kNightAmbientArt.z * kNightAmbientScale + (dayAmbient.z - kNightAmbientArt.z * kNightAmbientScale) * dayFactor,
                 dayFactor,
             };
+
+            // === 手続き空(SkyGenerate.hlsl)へ渡す値 ===
+            // 空が届ける照度は薄明係数で変調する。正規化(ComputeSkyZenithScale)により
+            // 「目標照度ちょうど」が保証されるようになったので、時刻による空の明るさは
+            // ここの係数だけで素直に制御できる。
+            // 夜側は月明かりで散乱する空の照度を足す(満月時の夜空はおよそ0.05lx相当)。
+            // 月が地平線下でも星明かりぶんは残る(月の位置を手動指定にしたことで
+            // 「月の出ていない夜」が作れるようになったため、そこで0にしない)
+            const float nightFactor = 1.0f - twilightFactor;
+            result.SkyIlluminanceLux = kSkylightIlluminanceLux * twilightFactor +
+                                       kMoonSkyIlluminanceLux * moonFactor +
+                                       kStarlightIlluminanceLux * nightFactor;
+            result.TwilightFactor = twilightFactor;
+            // 空生成が使うのは**常に太陽の位置**(月が支配的でもPerez分布の基準は太陽のまま)。
+            // result.Direction は支配ライトの向きなので、そこから逆算してはいけない
+            result.SunPosition = sunDirection;
+
+            // このフレームの「キーとなる照度」。可変プリ露出の基準にする(Render()参照)。
+            // 支配ライトと空の両方を足すのは、太陽が沈んだ直後のように
+            // 直接光がほぼ0でも空がまだ明るい時間帯を正しく拾うため
+            result.KeyIlluminanceLux = std::max(sunIlluminance, moonIlluminance) + result.SkyIlluminanceLux;
 
             return result;
         }
@@ -229,9 +646,16 @@ namespace Kurenai
         {
             int32_t Mode;
             float MipLevel; // Mode==6(Hi-Z)でSampleLevelに渡すミップレベル
-            float ArraySlice; // Mode==10(シャドウマップ配列)で表示する配列スライス(=カスケード番号)
+            // Mode==10(シャドウマップ配列)ではカスケード番号、
+            // Mode==12(反射プローブのキューブマップ配列)では表示するプローブ番号として使う
+            float ArraySlice;
             // デバッグ表示の輝度倍率(m_DebugViewGain)。色として表示するMode 0/3/4にだけ効く
             float Gain;
+            // Mode==11(タイルライトカリングのヒートマップ)専用。
+            // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数
+            DirectX::XMFLOAT4 TileParams;
+            // Mode==11専用。xy=レンダー解像度(UVからタイル座標を求めるのに使う), zw=未使用
+            DirectX::XMFLOAT4 TileRenderSize;
         };
 
         // Tonemap.hlsl側のcbuffer TonemapConstantsと一致させる必要がある
@@ -239,7 +663,8 @@ namespace Kurenai
         {
             // KurenaiEngine3D::TonemapCurve(0=Reinhard, 1=ACES, 2=AgX)
             int32_t Curve;
-            // 露出倍率。プリ露出方式(露出はCPU側でライト強度へ事前乗算済み)のため現状は常に1.0
+            // 手動露出時に掛ける倍率。プリ露出は時刻連動で変動するため、ユーザー設定EV100との
+            // 差分 2^(実効EV100 - 設定EV100) を割り戻して固定露出の絵に戻す(1.0固定ではない)
             float ExposureScale;
             // ディザの強さ(0=無効、1=±1LSB)
             float DitherStrength;
@@ -249,7 +674,28 @@ namespace Kurenai
             float PreExposureEV100;
             // ブルームの合成比(0で無効)
             float BloomStrength;
-            float Padding[2];
+            // 薄明視の適用量(0で無効、1で完全適用)
+            float MesopicStrength;
+            // 目が順応している明るさ(EV100)。構図にも露出設定にも依存しない
+            float MesopicAdaptationEV100;
+        };
+
+        // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
+        struct alignas(16) SkyBakeConstants
+        {
+            // 処理対象の面(D3D標準順: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5)
+            uint32_t Face;
+            // 天頂輝度のスケール
+            float ZenithLuminance;
+            float Padding0[2];
+            // 太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)
+            DirectX::XMFLOAT4 SunDirection;
+            // 色味セット(ComputeSkyTintがCPUで決めた値)。xyzのみ使う
+            DirectX::XMFLOAT4 ZenithTint;
+            DirectX::XMFLOAT4 HorizonTint;
+            DirectX::XMFLOAT4 GroundTint;
+            // xyz=夕焼けの暖色、w=その強さ(仰角0度で1、±15度で0)
+            DirectX::XMFLOAT4 SunGlowTint;
         };
 
         // Bloom.hlsl側のcbuffer BloomConstantsと一致させる必要がある
@@ -267,7 +713,9 @@ namespace Kurenai
 
             // CPU側でライト強度へ事前乗算済みのEV100(プリ露出)
             float PreExposureEV100;
-            float Padding[3];
+            // 手動露出時に掛ける倍率(TonemapConstants::ExposureScaleと同じ値)
+            float ExposureScale;
+            float Padding[2];
         };
 
         // AutoExposure.hlsl側のcbuffer AutoExposureConstantsと一致させる必要がある
@@ -285,7 +733,15 @@ namespace Kurenai
             float LowPercentile;
             float HighPercentile;
             float ExposureCompensation;
-            float Padding;
+
+            // 暗いシーンをわざと暗いまま写すための補正カーブ(AutoExposure.hlsl参照)
+            float NightRolloffEV;
+            float NightRolloffDarkEV100;
+            float NightRolloffBrightEV100;
+
+            // 測光値の上側クランプ(構図依存を抑える。AutoExposure.hlsl参照)
+            float KeyReferenceEV100;
+            float KeyCeilingEV;
         };
 
         // HiZ.hlsl側のcbuffer HiZConstantsと一致させる必要がある
@@ -337,7 +793,9 @@ namespace Kurenai
             DirectX::XMFLOAT4 PositionType;   // xyz=ワールド座標, w=LightType
             DirectX::XMFLOAT4 ColorRange;     // rgb=露出済み放射輝度, w=Range
             DirectX::XMFLOAT4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
-            DirectX::XMFLOAT4 Params;         // x=spotAngleOffset, yzw=未使用(エリアライト用に予約)
+            // x=spotAngleOffset, y=CastShadow(1でスクリーンスペースシャドウを撃つ / 0で撃たない),
+            // zw=未使用(エリアライト用に予約)
+            DirectX::XMFLOAT4 Params;
         };
         static_assert(sizeof(GPULight) == 64, "GPULightはDirectLighting.hlsl側と64バイトで一致させる必要がある");
 
@@ -346,10 +804,38 @@ namespace Kurenai
         // (シェーダはLightCount.xまでしかループしないため)
         constexpr uint32_t kMaxLights = 1024;
 
-        // DirectLighting.hlsl側のcbuffer LightingConstantsと一致させる必要がある
+        // DirectLighting.hlsl側のcbuffer LightingConstantsと一致させる必要がある。
+        // b0はFrameConstantsが使っており定数バッファスロットは2本しか無いため、
+        // 直接光パス固有のパラメータはすべてここへ足していく
         struct alignas(16) LightingConstants
         {
-            DirectX::XMUINT4 LightCount; // x=有効ライト数, yzw=未使用
+            // x=有効ライト数, y=ピクセルあたりに撃つスクリーンスペースシャドウのレイ数の上限, zw=未使用
+            DirectX::XMUINT4 LightCount;
+            // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)のパラメータ。
+            // x=レイマーチのステップ数, y=最大レイ長(ワールド単位), z=遮蔽とみなす深度差の上限(thickness),
+            // w=有効フラグ(0で無効)
+            DirectX::XMFLOAT4 SSSParams0;
+            // x=深度リニアライズ定数a, y=同b(viewZ = b / (depth - a))、
+            // z=レイ始点の法線方向への押し出し量(View空間深度に比例させる係数)、w=画面端フェード幅(UV)
+            DirectX::XMFLOAT4 SSSParams1;
+            // タイルライトカリング(LightCulling.hlsl)のパラメータ。
+            // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=カリング有効フラグ
+            DirectX::XMUINT4 TileParams;
+        };
+
+        // kLightTileSize / kLightTileCapacity / kLightTileStride はKurenaiEngine3Dのstatic constexprへ
+        // 移した(DebugViewPanelがヒートマップの上限として参照するため)。定義はKurenaiEngine3D.h
+
+        // LightCulling.hlsl側のcbuffer LightCullingConstantsと一致させる必要がある
+        struct alignas(16) LightCullingConstants
+        {
+            DirectX::XMFLOAT4X4 View;
+            // x=タイル数X, y=タイル数Y, z=有効ライト数, w=1タイルあたりの容量
+            DirectX::XMUINT4 TileParams;
+            // x=レンダー解像度の幅, y=同 高さ, zw=未使用
+            DirectX::XMUINT4 RenderSize;
+            // x=射影行列の(0,0)成分, y=同(1,1)成分, z=深度リニアライズ定数a, w=同b
+            DirectX::XMFLOAT4 ProjParams;
         };
 
         // Assets::LightをGPU側のGPULightへ変換する。カンデラ/ルクスの測光量にEV100露出を直接掛けて
@@ -375,7 +861,10 @@ namespace Kurenai
                 angleOffset = -cosOuter * angleScale;
             }
             gpuLight.DirectionAngle = { light.Direction[0], light.Direction[1], light.Direction[2], angleScale };
-            gpuLight.Params = { angleOffset, 0.0f, 0.0f, 0.0f };
+            // Params.y = このライトがスクリーンスペースシャドウを落とすか。ライトごとに切れるようにしてあるのは、
+            // ピクセルあたりのシャドウレイ数に上限(LightingConstants.LightCount.y)があり、
+            // 「影を出したいライト」に予算を回せるようにするため
+            gpuLight.Params = { angleOffset, light.CastShadow ? 1.0f : 0.0f, 0.0f, 0.0f };
             return gpuLight;
         }
 
@@ -638,6 +1127,20 @@ namespace Kurenai
         hizConstantBufferDesc.SizeInBytes = sizeof(HiZConstants);
         m_HiZConstantBuffer = m_Device->CreateBuffer(hizConstantBufferDesc);
 
+        // タイルライトカリングパス(コンピュートシェーダー)。タイルごとに届くライトのインデックスリストを作る。
+        // ライトグリッド本体(m_LightTileBuffer)は解像度に依存するためCreateRenderTargetsで作る
+        RHI::ShaderDesc lightCullingCsDesc;
+        lightCullingCsDesc.Stage = RHI::ShaderStage::Compute;
+        lightCullingCsDesc.FilePath = shaderDirectory + L"LightCulling.hlsl";
+        lightCullingCsDesc.EntryPoint = "CSMain";
+        m_LightCullingComputeShader = m_Device->CreateShader(lightCullingCsDesc);
+        m_LightCullingPipelineState = m_Device->CreateComputePipelineState({ m_LightCullingComputeShader.get() });
+
+        RHI::BufferDesc lightCullingConstantBufferDesc;
+        lightCullingConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        lightCullingConstantBufferDesc.SizeInBytes = sizeof(LightCullingConstants);
+        m_LightCullingConstantBuffer = m_Device->CreateBuffer(lightCullingConstantBufferDesc);
+
         // SSRパス(頂点バッファなしのフルスクリーン三角形。SceneColorとG-Bufferから鏡面反射を計算し加算する)
         RHI::ShaderDesc ssrVsDesc;
         ssrVsDesc.Stage = RHI::ShaderStage::Vertex;
@@ -846,10 +1349,85 @@ namespace Kurenai
         m_PrefilterComputeShader = m_Device->CreateShader(prefilterCsDesc);
         m_PrefilterPipelineState = m_Device->CreateComputePipelineState({ m_PrefilterComputeShader.get() });
 
+        // 手続き空(SkyGenerate.hlsl)。太陽が動くたびに焼き直すため、IBLのプリフィルタと同じく
+        // 面ごとに1回ずつディスパッチする。プリフィルタの入力にしかならないので解像度は
+        // オフラインDDS(512)より小さい256で足りる(生成コストが1/4になる)
+        m_ProceduralSkyTexture =
+            m_Device->CreateUAVTextureCube(kProceduralSkySize, RHI::Format::R16G16B16A16_Float);
+
+        RHI::ShaderDesc skyGenerateCsDesc;
+        skyGenerateCsDesc.Stage = RHI::ShaderStage::Compute;
+        skyGenerateCsDesc.FilePath = shaderDirectory + L"SkyGenerate.hlsl";
+        skyGenerateCsDesc.EntryPoint = "CSGenerateSky";
+        m_SkyGenerateComputeShader = m_Device->CreateShader(skyGenerateCsDesc);
+        m_SkyGeneratePipelineState = m_Device->CreateComputePipelineState({ m_SkyGenerateComputeShader.get() });
+
+        RHI::BufferDesc skyBakeConstantBufferDesc;
+        skyBakeConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        skyBakeConstantBufferDesc.SizeInBytes = sizeof(SkyBakeConstants);
+        m_SkyBakeConstantBuffer = m_Device->CreateBuffer(skyBakeConstantBufferDesc);
+
         RHI::BufferDesc iblPrefilterConstantBufferDesc;
         iblPrefilterConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         iblPrefilterConstantBufferDesc.SizeInBytes = sizeof(IBLFaceConstants);
         m_IBLPrefilterConstantBuffer = m_Device->CreateBuffer(iblPrefilterConstantBufferDesc);
+
+        // --- 反射プローブ(19章) ---
+        // キャプチャ先(1面ぶんを6面で使い回す)。キューブへ写す前のHDR値を保つためFloatにする
+        m_ProbeCaptureColor = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
+        // Reverse-Zのため遠平面側(0.0)でクリアする(G-Buffer深度と同じ)
+        m_ProbeCaptureDepth = m_Device->CreateDepthTexture(kProbeCaptureSize, kProbeCaptureSize, 0.0f);
+        // 畳み込みの入力になるスクラッチのキューブマップ(TextureCubeとして読めること
+        // = 配列ではないことが必須。理由はヘッダのm_ProbeRadianceCubeのコメント参照)
+        m_ProbeRadianceCube = m_Device->CreateUAVTextureCube(kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
+        // 畳み込み結果はプローブごとに保持するためキューブマップ配列で確保する
+        m_ProbeIrradianceArray = m_Device->CreateMippedUAVTextureCubeArray(
+            kIBLIrradianceSize, RHI::Format::R16G16B16A16_Float, 1, kMaxReflectionProbes);
+        m_ProbePrefilteredArray = m_Device->CreateMippedUAVTextureCubeArray(
+            kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels, kMaxReflectionProbes);
+
+        RHI::ShaderDesc probeCaptureVsDesc;
+        probeCaptureVsDesc.Stage = RHI::ShaderStage::Vertex;
+        probeCaptureVsDesc.FilePath = shaderDirectory + L"ProbeCapture.hlsl";
+        probeCaptureVsDesc.EntryPoint = "VSMain";
+        m_ProbeCaptureVertexShader = m_Device->CreateShader(probeCaptureVsDesc);
+
+        RHI::ShaderDesc probeCapturePsDesc;
+        probeCapturePsDesc.Stage = RHI::ShaderStage::Pixel;
+        probeCapturePsDesc.FilePath = shaderDirectory + L"ProbeCapture.hlsl";
+        probeCapturePsDesc.EntryPoint = "PSMain";
+        m_ProbeCapturePixelShader = m_Device->CreateShader(probeCapturePsDesc);
+
+        RHI::PipelineStateDesc probeCapturePipelineDesc;
+        probeCapturePipelineDesc.InputLayout = modelInputLayout;
+        probeCapturePipelineDesc.VertexShader = m_ProbeCaptureVertexShader.get();
+        probeCapturePipelineDesc.PixelShader = m_ProbeCapturePixelShader.get();
+        probeCapturePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        probeCapturePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        probeCapturePipelineDesc.HasDepthStencil = true;
+        probeCapturePipelineDesc.ReverseZ = true;
+        m_ProbeCapturePipelineState = m_Device->CreatePipelineState(probeCapturePipelineDesc);
+
+        RHI::ShaderDesc probeCubeCopyCsDesc;
+        probeCubeCopyCsDesc.Stage = RHI::ShaderStage::Compute;
+        probeCubeCopyCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        probeCubeCopyCsDesc.EntryPoint = "CSCopyCaptureToCubeFace";
+        m_ProbeCubeCopyComputeShader = m_Device->CreateShader(probeCubeCopyCsDesc);
+        m_ProbeCubeCopyPipelineState = m_Device->CreateComputePipelineState({ m_ProbeCubeCopyComputeShader.get() });
+
+        // プローブの影響範囲(位置・半径)を渡すStructuredBuffer(t13)。ライトリストと同じく
+        // ピクセルシェーダからは読み取り専用でよい
+        RHI::BufferDesc probeBufferDesc;
+        probeBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+        probeBufferDesc.SizeInBytes = sizeof(GPUReflectionProbe) * kMaxReflectionProbes;
+        probeBufferDesc.StrideInBytes = sizeof(GPUReflectionProbe);
+        m_ProbeBuffer = m_Device->CreateBuffer(probeBufferDesc);
+
+        // キャプチャの面ごとに更新するFrameConstants(共有のm_FrameConstantBufferとは別インスタンス)
+        RHI::BufferDesc probeCaptureConstantBufferDesc;
+        probeCaptureConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        probeCaptureConstantBufferDesc.SizeInBytes = sizeof(FrameConstants);
+        m_ProbeCaptureConstantBuffer = m_Device->CreateBuffer(probeCaptureConstantBufferDesc);
 
         RHI::BufferDesc constantBufferDesc;
         constantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -1060,6 +1638,15 @@ namespace Kurenai
         m_ScreenSpaceSamplers = m_Device->CreateSamplerSet(screenSpaceSet, static_cast<uint32_t>(std::size(screenSpaceSet)));
     }
 
+    RHI::IRHITexture* KurenaiEngine3D::ActiveSkyTexture() const
+    {
+        // .ksceneが[Scene]Skyboxを明示しているシーンは、そのDDSでなければ意味を成さない
+        // (White Furnace Testの一様放射輝度キューブマップが該当する)。手続き空で
+        // 上書きしてしまうと検証そのものが壊れるため、明示指定があるときは必ずDDSを使う
+        const bool useProcedural = m_ProceduralSkyEnabled && m_Scene.SkyboxPath.empty();
+        return useProcedural ? m_ProceduralSkyTexture.get() : m_SkyboxTexture.get();
+    }
+
     void KurenaiEngine3D::CreateRenderTargets(uint32_t width, uint32_t height)
     {
         if (width == 0 || height == 0)
@@ -1105,6 +1692,18 @@ namespace Kurenai
             m_HiZMipLevels = ComputeMipLevelCount(width, height);
             m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
             m_HiZDebugMipLevel = 0;
+
+            // タイルライトカリングのライトグリッド。タイル数は解像度に依存するためここで作り直す。
+            // 端のタイルは部分的にしか埋まらないので切り上げる
+            m_LightTileCountX = (width + kLightTileSize - 1) / kLightTileSize;
+            m_LightTileCountY = (height + kLightTileSize - 1) / kLightTileSize;
+            RHI::BufferDesc lightTileBufferDesc;
+            lightTileBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+            lightTileBufferDesc.SizeInBytes =
+                static_cast<uint32_t>(sizeof(uint32_t)) * kLightTileStride * m_LightTileCountX * m_LightTileCountY;
+            lightTileBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+            m_LightTileBuffer = m_Device->CreateBuffer(lightTileBufferDesc);
+            m_LightTileOverflowLogged = false;
 
             // ブルームのピラミッド。第0段が半解像度で、以降1段ごとに半分になる。
             // 1x1まで落とさず段数を固定しているのは、これ以上小さくしても裾の広がりが
@@ -1242,10 +1841,81 @@ namespace Kurenai
         m_SelectedLightIndex = m_Lights.empty() ? -1 : 0;
         m_LightOverflowLogged = false;
 
+        // 反射プローブもライトと同じ方針でユーザー編集用のコピーへ複製する。
+        // プローブの中身(キューブマップ)はシーンのジオメトリ・ライトに依存するため、
+        // シーンを読み込んだら必ず焼き直す必要がある
+        m_ReflectionProbes = m_Scene.ReflectionProbes;
+        if (m_ReflectionProbes.size() > kMaxReflectionProbes)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "反射プローブ数が上限(" + std::to_string(kMaxReflectionProbes) + ")を超えたため、先頭から" +
+                    std::to_string(kMaxReflectionProbes) + "個のみ使用します: " + std::to_string(m_ReflectionProbes.size()) + "個");
+            m_ReflectionProbes.resize(kMaxReflectionProbes);
+        }
+        m_SelectedProbeIndex = m_ReflectionProbes.empty() ? -1 : 0;
+        m_ProbeDebugIndex = 0;
+        m_ProbeBaked = false;
+        m_ProbeBakeRequested = !m_ReflectionProbes.empty();
+        // Realtimeのラウンドロビンは先頭から仕切り直す(シーンが変わればプローブの数も並びも変わる)
+        m_ProbeRealtimeProbeIndex = 0;
+        m_ProbeRealtimeFace = 0;
+
         FrameCameraToModel();
 
         const wchar_t* apiName = (m_GraphicsAPI == GraphicsAPI::DX12) ? L"DX12" : L"DX11";
         m_Window->SetTitle(std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name);
+    }
+
+    uint64_t KurenaiEngine3D::ComputeProbeBakeSignature() const
+    {
+        // FNV-1a(64bit)。焼き上がりに影響する値だけを順に混ぜる。衝突しても起きるのは
+        // 「本来必要な焼き直しを1回取りこぼす」だけで破綻はしないため、この程度の強度で足りる
+        uint64_t hash = 1469598103934665603ull;
+        const auto mixBytes = [&hash](const void* data, size_t size)
+        {
+            const auto* bytes = static_cast<const unsigned char*>(data);
+            for (size_t i = 0; i < size; ++i)
+            {
+                hash ^= bytes[i];
+                hash *= 1099511628211ull;
+            }
+        };
+        const auto mixFloat = [&mixBytes](float value) { mixBytes(&value, sizeof(value)); };
+        const auto mixBool = [&mixBytes](bool value) { const unsigned char v = value ? 1u : 0u; mixBytes(&v, sizeof(v)); };
+
+        // 太陽と昼夜サイクル。ProbeCapture.hlslは共有のFrameConstantsから太陽の向き・色を読むため、
+        // 時刻を動かすと焼き上がりが変わる
+        mixFloat(m_TimeOfDay);
+        mixFloat(m_SunAzimuthDegrees);
+        mixBool(m_SunEnabled);
+        mixBool(m_ShadowEnabled);
+        // キャプチャ内の環境項はグローバルIBLを引くため、その強度も焼き上がりに影響する
+        mixFloat(m_IBLEnabled ? m_IBLIntensity : 0.0f);
+
+        // ライトは構造体ごとダンプすると詰め物(padding)の未初期化バイトを拾い得るため、
+        // 使うフィールドだけを明示的に混ぜる
+        for (const Assets::Light& light : m_Lights)
+        {
+            mixBytes(&light.Type, sizeof(light.Type));
+            for (int i = 0; i < 3; ++i) mixFloat(light.Position[i]);
+            for (int i = 0; i < 3; ++i) mixFloat(light.Direction[i]);
+            for (int i = 0; i < 3; ++i) mixFloat(light.Color[i]);
+            mixFloat(light.Intensity);
+            mixFloat(light.Range);
+            mixFloat(light.SpotInnerConeAngle);
+            mixFloat(light.SpotOuterConeAngle);
+            mixBool(light.Enabled);
+        }
+
+        // プローブの位置はキャプチャ地点そのものなので含める(影響範囲は含めない。
+        // 形状・半径・ブレンド距離を変えてもどこから撮るかは変わらないため)
+        for (const Assets::ReflectionProbe& probe : m_ReflectionProbes)
+        {
+            for (int i = 0; i < 3; ++i) mixFloat(probe.Position[i]);
+        }
+
+        return hash;
     }
 
     void KurenaiEngine3D::ResetSceneDependentParams()
@@ -1461,7 +2131,6 @@ namespace Kurenai
     {
         return m_Window->GetDpiScale();
     }
-
 
     void KurenaiEngine3D::Run()
     {
@@ -1802,7 +2471,51 @@ namespace Kurenai
         m_GPUProfiler->BeginFrame();
         m_CPUProfiler.BeginFrame();
 
-        const SunLighting sunLighting = ComputeSunLighting(m_TimeOfDay, m_SunAzimuthDegrees, m_SceneExposureEV100);
+        // 太陽・月・空の状態を求める(すべて絶対的な測光量[lx]。露出はまだ掛かっていない)
+        const SunLighting sunLighting = ComputeSunLighting(
+            m_TimeOfDay, m_SunAzimuthDegrees, m_MoonAzimuthDegrees, m_MoonElevationDegrees);
+
+        // === 可変プリ露出の決定 ===
+        // 昼(直射日光10万lx)を基準0として、そのフレームのキー照度が何段暗いかを求め、
+        // ユーザー設定のEV100へ足す。これによりHDRバッファへ流れる値のレンジが
+        // 昼でも夜でもおおむね一定に保たれ、夜がfp16でつぶれなくなる
+        // (詳細な理由はm_EffectiveExposureEV100の宣言コメント)。
+        // 露出はTonemap/Bloom/AutoExposureが同じ値で割り戻すため、これを動かしても絵は変わらない
+        {
+            const float keyIlluminance = std::max(sunLighting.KeyIlluminanceLux, 1e-6f);
+            const float autoBias = std::log2(keyIlluminance / kSunIlluminanceLux);
+            // 下限-18段は満月の夜(キー照度0.3lx前後)がちょうど収まる範囲。
+            // 上限0段は「昼より明るくはしない」の意味
+            const float targetEV100 = m_SceneExposureEV100 + std::clamp(autoBias, -18.0f, 0.0f);
+
+            if (!m_EffectiveExposureInitialized)
+            {
+                // 起動直後・シーン切り替え直後は平滑化せず即座に合わせる
+                m_EffectiveExposureEV100 = targetEV100;
+                m_EffectiveExposureInitialized = true;
+            }
+            else
+            {
+                // 一時停止や巨大なdtで飛ばないよう上限を設ける
+                const float deltaTime = std::clamp(m_RenderDeltaTime, 0.0f, 0.1f);
+                const float t = std::clamp(1.0f - std::exp(-deltaTime * m_EffectiveExposureAdaptSpeed), 0.0f, 1.0f);
+                m_EffectiveExposureEV100 += (targetEV100 - m_EffectiveExposureEV100) * t;
+            }
+        }
+        const float effectiveExposure = ComputeExposure(m_EffectiveExposureEV100);
+
+        // 手動露出時にTonemap/Bloomが掛ける倍率。
+        // HDRバッファには「実効EV100」でプリ露出された値が入っているが、ユーザーが見たいのは
+        // 「設定EV100で撮った絵」なので、その差分を割り戻す。
+        // 実効EV100は夜に最大18段下がる(=バッファ上の値が26万倍明るくなる)ため、
+        // ここを1.0に固定していると夜が昼と同じ明るさで出てしまい、
+        // 自動露出をオフにしても露出が時刻に追従し続ける状態になる
+        const float manualExposureScale = std::exp2(m_EffectiveExposureEV100 - m_SceneExposureEV100);
+
+        // 自動露出の測光値を上側で止めるための、構図に依存しない基準EV。
+        // キー照度は画面に何が写っていようと変わらないので、
+        // 「空が画面のどれだけを占めるか」で露出が振れるのを抑えられる
+        const float keyReferenceEV100 = ComputeReferenceEV100(sunLighting.KeyIlluminanceLux);
 
         // カスケードシャドウマップ: カメラ視錐台をkCascadeCount個の深度範囲に分割し、
         // それぞれ専用のライト正射影ビュー・プロジェクション行列を求める
@@ -1831,7 +2544,7 @@ namespace Kurenai
             {
                 continue;
             }
-            gpuLights.push_back(MakeGPULight(light, m_SceneExposureEV100));
+            gpuLights.push_back(MakeGPULight(light, m_EffectiveExposureEV100));
         }
 
         // 容量(kMaxLights)を超える場合は、カメラに近い順に先頭kMaxLights灯のみ採用する。
@@ -1862,6 +2575,22 @@ namespace Kurenai
             }
         }
 
+        // タイルライトカリングの1タイルあたりの容量超過の可能性を早めに知らせる。
+        // 実際に超過したかどうかはGPU側にしか無く(バッファのリードバック経路がRHIに無い)、
+        // ここで分かるのは「シーンのライト数が容量を超えているので、1つのタイルに集中すれば
+        // 超過し得る」という条件までである。実際の超過はデバッグ表示(DebugView::LightTiles)の
+        // マゼンタで確認する
+        if (m_LightCullingEnabled && gpuLights.size() > kLightTileCapacity && !m_LightTileOverflowLogged)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "有効ライト数(" + std::to_string(gpuLights.size()) + ")がタイルの容量(" +
+                    std::to_string(kLightTileCapacity) +
+                    ")を超えています。1タイルへ集中した場合そのタイルではライトが欠落します"
+                    "(Render TargetsのLight Tiles表示でマゼンタのタイルとして確認できます)");
+            m_LightTileOverflowLogged = true;
+        }
+
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = frameState.Camera.GetViewMatrix() * frameState.Camera.GetProjectionMatrix();
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
@@ -1877,7 +2606,14 @@ namespace Kurenai
         // 太陽を無効にする場合は色をゼロにするだけでよい(シェーダー側は太陽の寄与に
         // LightColor.rgbを乗算するため、これで完全に消える)。TimeOfDayを夜にする方法と違い
         // 昼度(AmbientColor.a)は下がらないので、環境光だけで照らす状態を作れる
-        constants.LightColor = m_SunEnabled ? sunLighting.Color : DirectX::XMFLOAT4{ 0.0f, 0.0f, 0.0f, 0.0f };
+        // sunLighting.Color は絶対的な測光量[lx]なので、ここで実効プリ露出を掛けて表示レンジへ移す
+        constants.LightColor = m_SunEnabled
+            ? DirectX::XMFLOAT4{
+                  sunLighting.Color.x * effectiveExposure,
+                  sunLighting.Color.y * effectiveExposure,
+                  sunLighting.Color.z * effectiveExposure,
+                  0.0f }
+            : DirectX::XMFLOAT4{ 0.0f, 0.0f, 0.0f, 0.0f };
         DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameState.Camera.GetViewMatrix()));
         DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameState.Camera.GetProjectionMatrix()));
         // rgb(環境光の色)にm_AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
@@ -1885,9 +2621,9 @@ namespace Kurenai
         // 昼夜ブレンドに使う)には掛けない
         constants.AmbientColor =
         {
-            sunLighting.Ambient.x * m_AmbientScale,
-            sunLighting.Ambient.y * m_AmbientScale,
-            sunLighting.Ambient.z * m_AmbientScale,
+            sunLighting.Ambient.x * m_AmbientScale * effectiveExposure,
+            sunLighting.Ambient.y * m_AmbientScale * effectiveExposure,
+            sunLighting.Ambient.z * m_AmbientScale * effectiveExposure,
             sunLighting.Ambient.w,
         };
         constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
@@ -1901,32 +2637,218 @@ namespace Kurenai
         };
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
         constants.IBLParams = { m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+
+        // 反射プローブの影響範囲をt13のStructuredBufferへ渡す。まだ一度も焼けていない場合
+        // (m_ProbeBaked=false)や機能を無効にしている場合はプローブ数を0にして、シェーダー側の
+        // 選択ループ自体を回さない=中身が未定義のキューブマップを引かせないようにする
+        std::vector<GPUReflectionProbe> gpuProbes;
+        if (m_ReflectionProbeEnabled && m_ProbeBaked)
+        {
+            gpuProbes.reserve(m_ReflectionProbes.size());
+            for (const Assets::ReflectionProbe& probe : m_ReflectionProbes)
+            {
+                // Yawはシェーダー側で毎ピクセル三角関数を回さずに済むよう、ここでsin/cosへ展開しておく
+                const float yawRadians = DirectX::XMConvertToRadians(probe.YawDegrees);
+                const bool isBox = probe.Shape == Assets::ReflectionProbeShape::Box;
+
+                GPUReflectionProbe gpuProbe{};
+                gpuProbe.PositionRadius = { probe.Position[0], probe.Position[1], probe.Position[2], probe.Radius };
+                gpuProbe.BoxExtents = {
+                    probe.BoxExtents[0], probe.BoxExtents[1], probe.BoxExtents[2], probe.BlendDistance
+                };
+                gpuProbe.ShapeParams = {
+                    isBox ? 1.0f : 0.0f, std::sin(yawRadians), std::cos(yawRadians), 0.0f
+                };
+                gpuProbes.push_back(gpuProbe);
+            }
+        }
+        if (!gpuProbes.empty())
+        {
+            commandList->UpdateBuffer(m_ProbeBuffer.get(), gpuProbes.data(), sizeof(GPUReflectionProbe) * gpuProbes.size());
+        }
+
+        const float probeInfluenceDebug = (m_DebugView == DebugView::ProbeInfluence) ? 1.0f : 0.0f;
+        constants.ProbeParams = {
+            static_cast<float>(gpuProbes.size()),
+            probeInfluenceDebug,
+            m_ProbeParallaxCorrectionEnabled ? 1.0f : 0.0f,
+            m_ProbeBlendingEnabled ? 1.0f : 0.0f,
+        };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
+
+        // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
+        // 復元するための定数。Camera::GetProjectionMatrixの射影行列(行ベクトル規約)は
+        // clip.z = viewZ * a + b、clip.w = viewZ なので depth = a + b / viewZ となり、
+        // 逆に解いて viewZ = b / (depth - a)。近平面・遠平面から直接組み立てず射影行列の要素を
+        // 読むのは、Reverse-Zの組み方が変わっても自動的に追従させるため
+        // (XMFLOAT4X4の_rcは1始まりの行・列なので、_33が行2列2=a、_43が行3列2=b)
+        DirectX::XMFLOAT4X4 projectionForDepthLinearize;
+        DirectX::XMStoreFloat4x4(&projectionForDepthLinearize, frameState.Camera.GetProjectionMatrix());
+        const float depthLinearizeA = projectionForDepthLinearize._33;
+        const float depthLinearizeB = projectionForDepthLinearize._43;
+
+        // 直接光パスのb1へ渡すスクリーンスペースシャドウのパラメータ。パスのラムダから
+        // 値キャプチャできるようここで組み立てておく
+        LightingConstants lightingConstants{};
+        lightingConstants.LightCount =
+        {
+            static_cast<uint32_t>(gpuLights.size()),
+            static_cast<uint32_t>(std::max(0, m_ScreenSpaceShadowMaxLightsPerPixel)),
+            0u,
+            0u,
+        };
+        lightingConstants.SSSParams0 =
+        {
+            static_cast<float>(m_ScreenSpaceShadowStepCount),
+            m_ScreenSpaceShadowMaxRayLength,
+            m_ScreenSpaceShadowThickness,
+            m_ScreenSpaceShadowEnabled ? 1.0f : 0.0f,
+        };
+        lightingConstants.SSSParams1 =
+        {
+            depthLinearizeA,
+            depthLinearizeB,
+            m_ScreenSpaceShadowNormalBias,
+            m_ScreenSpaceShadowEdgeFade,
+        };
+        lightingConstants.TileParams =
+        {
+            m_LightTileCountX,
+            kLightTileSize,
+            kLightTileCapacity,
+            m_LightCullingEnabled ? 1u : 0u,
+        };
+
+        // ライトリストの中身の更新。以前は直接光パスと半透明パスの中でそれぞれ呼んでいたが、
+        // タイルライトカリングパスが両者より先にこのバッファを読むようになったため、
+        // グラフを組み立てる前に1箇所でまとめて済ませる(2回の更新が1回に減る副次的な効果もある)。
+        // 0灯のフレームでは更新自体を省略してよい(シェーダはライト数までしかループしないため)
+        if (!gpuLights.empty())
+        {
+            commandList->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
+        }
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
         // トランジェントリソースの確保は行わず、既存の永続確保済みテクスチャ(G-Buffer・SceneColor等)を
         // そのまま読み書きする(詳細はRenderGraph.h参照)
         Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
 
-        // --- IBL畳み込みパス: スカイボックスは実行時に変化しない静的アセットのため、
-        //     起動後最初のフレームでのみ実行し、以降は焼き直さない(m_IBLBaked) ---
-        if (!m_IBLBaked)
+        // このフレームで空として使うキューブマップ。手続き空(SkyGenerate)か.ksceneのDDSかが
+        // ここで確定する。**RenderGraphのReads宣言と実際のバインドの両方でこのローカルを使うこと**
+        // (ActiveSkyTexture()を都度呼ぶと両者が食い違って依存解決が壊れる)
+        RHI::IRHITexture* const skyTexture = ActiveSkyTexture();
+        const bool usingProceduralSky = (skyTexture == m_ProceduralSkyTexture.get());
+
+        // 太陽が閾値以上動いていたら手続き空を焼き直す。毎フレーム焼くと
+        // 空生成6回+プリフィルタ36回のディスパッチが常時走って無駄になる。
+        // 空はプリ露出済みの値で焼かれるため、実効プリ露出が動いたときも焼き直す必要がある
+        // (焼き直さないと空だけ古い露出のまま取り残される)
+        if (usingProceduralSky && !m_SkyBakeDirty)
+        {
+            const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
+            const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_LastBakedSunPosition);
+            const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
+            const bool sunMoved =
+                cosAngle < std::cos(DirectX::XMConvertToRadians(m_SkyBakeAngleThresholdDegrees));
+            // 露出が0.05段(約3.5%)以上動いたら焼き直す。時刻変化に伴う露出の追従でも
+            // 動くため、太陽の角度閾値とあわせて実質的に連続した更新になる
+            const bool exposureMoved =
+                std::abs(m_EffectiveExposureEV100 - m_LastBakedExposureEV100) > 0.05f;
+            if (sunMoved || exposureMoved)
+            {
+                m_SkyBakeDirty = true;
+            }
+        }
+
+        // --- 手続き空の生成パス: Perez分布をGPUで評価してキューブマップを焼く。
+        //     太陽が動くと空の輝度分布の形も変わるため、オフラインDDSと違い焼き直しが要る
+        //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否はm_SkyBakeDirtyで判定する ---
+        if (usingProceduralSky && m_SkyBakeDirty)
+        {
+            // 空の色味(昼・薄明・夜の補間と夕焼けの暖色)を先に決める。
+            // 生成シェーダーと下の照度正規化の両方がこの同じ値を使う
+            const SkyTintSet skyTintSet = ComputeSkyTint(sunLighting.SunPosition.y);
+
+            // 上半球の余弦重み積分が空光の照度に一致するよう天頂輝度を正規化する。
+            // 1.6万回の評価になるため、実際に焼くこのタイミングでだけ計算する
+            // (詳細と「なぜπ倍誤差が生じていたか」はComputeSkyZenithScaleのコメント参照)
+            const float skyZenithLuminance =
+                ComputeSkyZenithScale(sunLighting.SunPosition, sunLighting.SkyIlluminanceLux, skyTintSet) *
+                effectiveExposure;
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "SkyGenerate",
+                .Writes = { m_ProceduralSkyTexture.get() },
+                .Execute = [this, &sunLighting, skyZenithLuminance, skyTintSet](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_SkyGeneratePipelineState.get());
+                    for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                    {
+                        SkyBakeConstants skyConstants{};
+                        skyConstants.Face = face;
+                        skyConstants.ZenithLuminance = skyZenithLuminance;
+                        skyConstants.SunDirection = {
+                            sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+                        };
+                        skyConstants.ZenithTint = {
+                            skyTintSet.Zenith.x, skyTintSet.Zenith.y, skyTintSet.Zenith.z, 0.0f
+                        };
+                        skyConstants.HorizonTint = {
+                            skyTintSet.Horizon.x, skyTintSet.Horizon.y, skyTintSet.Horizon.z, 0.0f
+                        };
+                        skyConstants.GroundTint = {
+                            skyTintSet.Ground.x, skyTintSet.Ground.y, skyTintSet.Ground.z, 0.0f
+                        };
+                        skyConstants.SunGlowTint = {
+                            skyTintSet.SunGlow.x, skyTintSet.SunGlow.y, skyTintSet.SunGlow.z,
+                            skyTintSet.SunGlowStrength
+                        };
+                        cmd->UpdateBuffer(m_SkyBakeConstantBuffer.get(), &skyConstants, sizeof(skyConstants));
+                        cmd->SetComputeConstantBuffer(0, m_SkyBakeConstantBuffer.get());
+                        cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProceduralSkyTexture.get(), face, 0);
+                        cmd->Dispatch((kProceduralSkySize + 7) / 8, (kProceduralSkySize + 7) / 8, 1);
+                    }
+                },
+            });
+            // 空が変わったのでプリフィルタ済み鏡面も焼き直す必要がある
+            m_SkyBakeDirty = false;
+            m_LastBakedSunPosition = sunLighting.SunPosition;
+            m_LastBakedExposureEV100 = m_EffectiveExposureEV100;
+            m_IBLBaked = false;
+            m_IBLIrradianceBaked = false;
+        }
+
+        // --- BRDF積分LUTのベイクパス: (NdotV, ラフネス)の2Dテーブルで、スカイボックスにも
+        //     太陽の位置にも一切依存しないため起動後に一度だけ焼く。
+        //     プリフィルタ済み鏡面(下記)が空の変化へ追従して焼き直されるようになっても、
+        //     こちらが巻き込まれないよう別パス・別フラグに分離してある(m_BRDFLUTBaked参照) ---
+        if (!m_BRDFLUTBaked)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "IBLBake",
-                .Reads = { m_SkyboxTexture.get() },
-                .Writes = { m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get() },
+                .Name = "BRDFLUTBake",
+                .Writes = { m_BRDFLUTTexture.get() },
                 .Execute = [this](RHI::IRHICommandList* cmd)
                 {
-                    // BRDF積分LUT(スカイボックスに依存しない、NdotV×ラフネスの128x128グリッド)
                     cmd->SetComputePipelineState(m_BRDFLUTPipelineState.get());
                     cmd->SetComputeUnorderedAccessTexture(0, m_BRDFLUTTexture.get(), 0);
                     cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
+                },
+            });
+            m_BRDFLUTBaked = true;
+        }
 
-                    // プリフィルタ済み鏡面(本物のTextureCube、ミップごとに異なるラフネスで畳み込む)。
-                    // 面×ミップの組み合わせごとに1回ずつディスパッチする
+        // --- プリフィルタ済み鏡面の畳み込みパス: スカイボックスを入力に、ミップごとに異なる
+        //     ラフネスで畳み込む(面×ミップの組み合わせごとに1回ずつディスパッチ) ---
+        if (!m_IBLBaked)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "IBLPrefilter",
+                .Reads = { skyTexture },
+                .Writes = { m_PrefilteredEnvTexture.get() },
+                .Execute = [this, skyTexture](RHI::IRHICommandList* cmd)
+                {
                     cmd->SetComputePipelineState(m_PrefilterPipelineState.get());
-                    cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+                    cmd->SetComputeTexture(0, skyTexture);
                     cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                     for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
                     {
@@ -1963,14 +2885,14 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "IBLIrradianceBake",
-                .Reads = { m_SkyboxTexture.get() },
+                .Reads = { skyTexture },
                 .Writes = { m_IrradianceTexture.get() },
-                .Execute = [this](RHI::IRHICommandList* cmd)
+                .Execute = [this, skyTexture](RHI::IRHICommandList* cmd)
                 {
                     // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
                     // スライス選択できないため、面ごとに1回ずつディスパッチする
                     cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
-                    cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+                    cmd->SetComputeTexture(0, skyTexture);
                     cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                     for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                     {
@@ -2056,6 +2978,239 @@ namespace Kurenai
                     }
                 },
             });
+        }
+
+        // --- 反射プローブの更新(19章・19.10節) ---
+        // 更新モードに応じて「フルベイク(全プローブの全面を1フレームで焼く)」か
+        // 「時間分割(1フレームに1面だけ焼く)」のどちらかを実行する。両者はスクラッチの
+        // キューブマップ(m_ProbeRadianceCube)を共有するため、同じフレームで両方を走らせてはならない
+
+        const DirectX::XMMATRIX probeFaceProjection =
+            ComputeCubeFaceProjection(frameState.Camera.GetNearZ(), frameState.Camera.GetFarZ());
+
+        // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
+        // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
+        const auto captureProbeFace =
+            [this, &constants, probeFaceProjection](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+        {
+            const Assets::ReflectionProbe& probe = m_ReflectionProbes[probeIndex];
+            const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
+
+            RHI::Viewport probeViewport;
+            probeViewport.Width = static_cast<float>(kProbeCaptureSize);
+            probeViewport.Height = static_cast<float>(kProbeCaptureSize);
+            RHI::IRHITexture* const captureTargets[] = { m_ProbeCaptureColor.get() };
+
+            // 太陽・カスケード・ライト数・IBL設定は共有のFrameConstantsをそのまま使い、
+            // 視点に関わる2つだけをプローブのものへ差し替える(ProbeCapture.hlsl冒頭参照)。
+            // Viewはカメラのまま残す(カスケード選択の深度がカメラ視錐台基準のため)
+            FrameConstants captureConstants = constants;
+            const DirectX::XMMATRIX faceViewProj = ComputeCubeFaceView(probePosition, face) * probeFaceProjection;
+            DirectX::XMStoreFloat4x4(&captureConstants.ViewProj, DirectX::XMMatrixTranspose(faceViewProj));
+            captureConstants.CameraPosition = { probePosition.x, probePosition.y, probePosition.z, 0.0f };
+            cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
+
+            cmd->SetRenderTargets(captureTargets, 1, m_ProbeCaptureDepth.get());
+            cmd->SetViewport(probeViewport);
+            cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
+            // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする。コピー側はこの0を
+            // 「何も描かれなかった=スカイ」の判定に使う
+            cmd->ClearDepth(0.0f);
+
+            cmd->SetPipelineState(m_ProbeCapturePipelineState.get());
+            cmd->SetConstantBuffer(0, m_ProbeCaptureConstantBuffer.get());
+            cmd->SetSamplerSet(m_MaterialSamplers.get());
+
+            // メッシュによらず共通のバインドはループの外で1回だけ行う。テクスチャのバインドは
+            // 上書きするまで維持される(IRHICommandList::SetTexture参照)。以前のDX12は
+            // SetTexture(0, ...)のたびにSRVテーブルのブロックを割り当て直していたため、
+            // ここで先にバインドしても描画には引き継がれず、プローブが真っ黒に焼ける不具合が出ていた。
+            // DX12側がバインド状態のシャドウコピーを持つようになり寿命がDX11と揃ったため解消済み
+            cmd->SetTexture(4, m_ShadowCascadeArray.get());
+            cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+            cmd->SetTexture(9, m_IrradianceTexture.get());
+            cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
+            cmd->SetTexture(11, m_BRDFLUTTexture.get());
+
+            for (const auto& instance : m_Scene.Instances)
+            {
+                for (const auto& mesh : instance.Model.Meshes)
+                {
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity);
+                    cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                    cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                    cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                    cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+
+                    // メッシュごとに変わるマテリアルのテクスチャだけをここでバインドする
+                    cmd->SetTexture(0, mesh.BaseColorTexture);
+                    cmd->SetTexture(1, mesh.NormalTexture);
+                    cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
+                    cmd->SetTexture(3, mesh.EmissiveTexture);
+
+                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                }
+            }
+
+            // 描き終えたカラー/深度をコンピュートシェーダーからSRVとして読むため、
+            // 先にレンダーターゲットのバインドを外す(D3D11は同一リソースの
+            // RTV/DSVとSRVの同時バインドを許さず、SRV側がnullに落とされる)
+            cmd->SetRenderTargets(nullptr, 0, nullptr);
+
+            IBLFaceConstants faceConstants{};
+            faceConstants.Face = face;
+            cmd->SetComputePipelineState(m_ProbeCubeCopyPipelineState.get());
+            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+            cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+            cmd->SetComputeTexture(1, m_ProbeCaptureColor.get());
+            cmd->SetComputeTexture(2, m_ProbeCaptureDepth.get());
+            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeRadianceCube.get(), face, 0, 0);
+            cmd->Dispatch((kProbeCaptureSize + 7) / 8, (kProbeCaptureSize + 7) / 8, 1);
+        };
+
+        // 組み上がったスクラッチのキューブマップを、IBLとまったく同じ手順で畳み込んで
+        // プローブのスライスへ書き込む。入力が違うだけでシェーダーはIBLBakeパスと共通
+        const auto convolveProbe = [this](RHI::IRHICommandList* cmd, size_t probeIndex)
+        {
+            const uint32_t cubeIndex = static_cast<uint32_t>(probeIndex);
+
+            cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
+            cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
+            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+            for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+            {
+                IBLFaceConstants faceConstants{};
+                faceConstants.Face = face;
+                cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeIrradianceArray.get(), face, 0, cubeIndex);
+                cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
+            }
+
+            cmd->SetComputePipelineState(m_PrefilterPipelineState.get());
+            cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
+            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+            for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
+            {
+                const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
+                const float roughness = static_cast<float>(mip) / static_cast<float>(kIBLPrefilterMipLevels - 1);
+                for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                {
+                    IBLFaceConstants faceConstants{};
+                    faceConstants.Face = face;
+                    faceConstants.Roughness = roughness;
+                    cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                    cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                    cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbePrefilteredArray.get(), face, mip, cubeIndex);
+                    cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
+                }
+            }
+        };
+
+        // キャプチャパスがReadsにシャドウマップとグローバルの畳み込み結果を挙げることで、
+        // レンダーグラフがこれらをシャドウパス・IBLBakeパスより後ろへ順序付ける
+        const std::vector<RHI::IRHITexture*> probeCaptureReads = {
+            m_ShadowCascadeArray.get(),
+            m_SkyboxTexture.get(), m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
+        };
+        const size_t probeCount = m_ReflectionProbes.size();
+
+        // OnDemandは、焼き上がりに影響する状態(時刻・太陽・ライト)が変わったフレームだけ焼き直す。
+        // 一度も焼けていない間はシーン読み込み時の要求が既に立っているのでここでは何もしない
+        if (m_ProbeUpdateMode == ProbeUpdateMode::OnDemand && probeCount > 0 && m_ProbeBaked &&
+            ComputeProbeBakeSignature() != m_ProbeBakeSignature)
+        {
+            m_ProbeBakeRequested = true;
+        }
+
+        if (m_ProbeBakeRequested && probeCount > 0)
+        {
+            // --- フルベイク: 全プローブの6面を1フレームで焼く ---
+            // プローブごとに別パスへ分けることで、GPUプロファイラで1プローブぶんのコストを読める。
+            // 各パスがm_ProbeRadianceCubeへ書くため、レンダーグラフのWrite-after-Write依存で
+            // 登録順に直列化される(スクラッチを共有しても取り違えは起きない)
+            for (size_t probeIndex = 0; probeIndex < probeCount; ++probeIndex)
+            {
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "ProbeBake" + std::to_string(probeIndex),
+                    .Reads = probeCaptureReads,
+                    .Writes = {
+                        m_ProbeCaptureColor.get(), m_ProbeCaptureDepth.get(), m_ProbeRadianceCube.get(),
+                        m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(),
+                    },
+                    .Execute = [&captureProbeFace, &convolveProbe, probeIndex](RHI::IRHICommandList* cmd)
+                    {
+                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                        {
+                            captureProbeFace(cmd, probeIndex, face);
+                        }
+                        convolveProbe(cmd, probeIndex);
+                    },
+                });
+            }
+
+            m_ProbeBakeRequested = false;
+            // このフレームの描画時点ではまだ焼き上がっていない(同じコマンドリスト内でこの後の
+            // Lightingパスが読むのは問題ないが、gpuProbesは既に確定済み)。次フレームから
+            // プローブが有効になるよう、ここでフラグだけ立てる
+            m_ProbeBaked = true;
+            m_ProbeBakeSignature = ComputeProbeBakeSignature();
+            // 全プローブが今焼けたので、時間分割は先頭から仕切り直す
+            m_ProbeRealtimeProbeIndex = 0;
+            m_ProbeRealtimeFace = 0;
+        }
+        else if (m_ProbeUpdateMode == ProbeUpdateMode::Realtime && probeCount > 0 && m_ProbeBaked)
+        {
+            // --- 時間分割: 1フレームにつき1面だけ焼き、6面揃った時点で畳み込んで次のプローブへ回る ---
+            // 畳み込みは6面が揃うまで走らないため、その間プローブのスライスは前回の内容のまま
+            // 表示され続ける(描きかけのキューブが映り込むことはない)。
+            // m_ProbeBakedがtrueであること、つまり最低1回フルベイクが済んでいることが前提
+            if (m_ProbeRealtimeProbeIndex >= probeCount)
+            {
+                m_ProbeRealtimeProbeIndex = 0;
+                m_ProbeRealtimeFace = 0;
+            }
+            const size_t realtimeProbe = m_ProbeRealtimeProbeIndex;
+            const uint32_t realtimeFace = m_ProbeRealtimeFace;
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "ProbeRealtimeCapture",
+                .Reads = probeCaptureReads,
+                .Writes = { m_ProbeCaptureColor.get(), m_ProbeCaptureDepth.get(), m_ProbeRadianceCube.get() },
+                .Execute = [&captureProbeFace, realtimeProbe, realtimeFace](RHI::IRHICommandList* cmd)
+                {
+                    captureProbeFace(cmd, realtimeProbe, realtimeFace);
+                },
+            });
+
+            if (realtimeFace + 1 == kCubeFaceCount)
+            {
+                // 畳み込みだけを別パスにしてあるのは、6フレームに1回だけ乗るこのコストを
+                // 毎フレームのキャプチャと分けて計測できるようにするため。
+                // Readsにスクラッチのキューブマップがあるのでキャプチャパスのあとに順序付けられる
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "ProbeRealtimeConvolve",
+                    .Reads = { m_ProbeRadianceCube.get() },
+                    .Writes = { m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get() },
+                    .Execute = [&convolveProbe, realtimeProbe](RHI::IRHICommandList* cmd)
+                    {
+                        convolveProbe(cmd, realtimeProbe);
+                    },
+                });
+            }
+
+            m_ProbeRealtimeFace = realtimeFace + 1;
+            if (m_ProbeRealtimeFace >= kCubeFaceCount)
+            {
+                m_ProbeRealtimeFace = 0;
+                m_ProbeRealtimeProbeIndex = static_cast<uint32_t>((realtimeProbe + 1) % probeCount);
+            }
+            // 常に焼き直しているのでOnDemandの署名も追随させておく。こうしておかないと
+            // Realtimeから切り替えた直後に不要なフルベイクが1回走る
+            m_ProbeBakeSignature = ComputeProbeBakeSignature();
         }
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
@@ -2166,6 +3321,55 @@ namespace Kurenai
             },
         });
 
+        // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
+        //     インデックスリストをコンピュートシェーダーで作る。直接光パスはそのリストだけをループする。
+        //     BufferReads/BufferWritesを宣言しているのは、このパスと直接光パスがどちらもm_GBufferDepthを
+        //     Readsするだけの「読み手同士」で、テクスチャの依存だけでは両者の間に順序が張られないため ---
+        if (m_LightCullingEnabled)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "LightCull",
+                .Reads = { m_GBufferDepth.get() },
+                .BufferReads = { m_LightBuffer.get() },
+                .BufferWrites = { m_LightTileBuffer.get() },
+                .Execute = [this, &gpuLights, &frameState](RHI::IRHICommandList* cmd)
+                {
+                    LightCullingConstants cullingConstants{};
+                    DirectX::XMStoreFloat4x4(
+                        &cullingConstants.View, DirectX::XMMatrixTranspose(frameState.Camera.GetViewMatrix()));
+                    cullingConstants.TileParams =
+                    {
+                        m_LightTileCountX,
+                        m_LightTileCountY,
+                        static_cast<uint32_t>(gpuLights.size()),
+                        kLightTileCapacity,
+                    };
+                    cullingConstants.RenderSize = { m_RenderWidth, m_RenderHeight, 0u, 0u };
+
+                    // タイル錐台の側面を組み立てるのに射影行列の(0,0)/(1,1)成分が要る。
+                    // 深度リニアライズ定数(z/w)は直接光パスへ渡しているものと同じ
+                    DirectX::XMFLOAT4X4 projection;
+                    DirectX::XMStoreFloat4x4(&projection, frameState.Camera.GetProjectionMatrix());
+                    cullingConstants.ProjParams =
+                    {
+                        projection._11,
+                        projection._22,
+                        projection._33,
+                        projection._43,
+                    };
+
+                    cmd->UpdateBuffer(m_LightCullingConstantBuffer.get(), &cullingConstants, sizeof(cullingConstants));
+
+                    cmd->SetComputePipelineState(m_LightCullingPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_LightCullingConstantBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(0, m_LightBuffer.get());
+                    cmd->SetComputeTexture(1, m_GBufferDepth.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_LightTileBuffer.get());
+                    cmd->Dispatch(m_LightTileCountX, m_LightTileCountY, 1);
+                },
+            });
+        }
+
         // --- 直接光パス: G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         //     計算しHDRで書き出す(常に指定した内部解像度)。DeferredLighting/SSILの両方から読まれる ---
         graph.AddPass(Core::RenderGraphPassDesc{
@@ -2175,19 +3379,17 @@ namespace Kurenai
                 m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                 m_ShadowCascadeArray.get(),
                 // スペキュラのエネルギー補正(14.9節)でEss=brdf.x+brdf.yを引くためBRDF積分LUTを読む。
-                // Readsに挙げることでRenderGraphがIBLBakeパス(このLUTのWriter)より後に順序付ける
+                // Readsに挙げることでRenderGraphがBRDFLUTBakeパス(このLUTのWriter)より後に順序付ける
                 m_BRDFLUTTexture.get(),
             },
             .RenderTargets = { m_DirectLightTexture.get() },
-            .Execute = [this, &gbufferViewport, &gpuLights](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, &gpuLights, &lightingConstants](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
                 cmd->SetPipelineState(m_DirectLightPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
 
-                LightingConstants lightingConstants{};
-                lightingConstants.LightCount = { static_cast<uint32_t>(gpuLights.size()), 0u, 0u, 0u };
                 // UpdateBufferはSetConstantBufferより前に呼ぶ必要がある。DX12の定数バッファは
                 // リングバッファで、GetGPUVirtualAddress()が現在のリングスロットのアドレスを返すため
                 cmd->UpdateBuffer(m_LightingConstantBuffer.get(), &lightingConstants, sizeof(lightingConstants));
@@ -2202,12 +3404,11 @@ namespace Kurenai
 
                 // ライトが1つも無いフレームでもSetShaderResourceBufferは必ず呼ぶ(SetPipelineStateが
                 // 毎回ルート引数を無効化するため、シェーダが宣言しているリソースを未バインドのまま
-                // Drawすることになってしまう)。UpdateBuffer自体は0灯なら省略してよい
-                if (!gpuLights.empty())
-                {
-                    cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
-                }
+                // Drawすることになってしまう)。バッファの中身の更新はグラフ構築前に1回だけ済ませてある
                 cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+                // タイルライトカリングが書いたライトグリッド。カリング無効時もシェーダが宣言している
+                // リソースは必ずバインドする(上と同じ理由)
+                cmd->SetShaderResourceBuffer(5, m_LightTileBuffer.get());
                 // スペキュラのエネルギー補正(14.9節)用のBRDF積分LUT。t8はライトリスト
                 // (StructuredBuffer)が占有しているためt9に置く
                 cmd->SetTexture(9, m_BRDFLUTTexture.get());
@@ -2298,11 +3499,13 @@ namespace Kurenai
             .Name = "Lighting",
             .Reads = {
                 m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
-                m_SkyboxTexture.get(), activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
+                skyTexture, activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
                 m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
+                // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)
+                m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
-            .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, activeAOTexture, skyTexture](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // 深度テストに失敗した(=何も描かれていない)ピクセル用の背景色。discardされた箇所に前フレームのデータが
@@ -2316,13 +3519,19 @@ namespace Kurenai
                 cmd->SetTexture(1, m_DirectLightTexture.get());
                 cmd->SetTexture(2, m_GBufferMaterial.get());
                 cmd->SetTexture(3, m_GBufferDepth.get());
-                cmd->SetTexture(4, m_SkyboxTexture.get());
+                cmd->SetTexture(4, skyTexture);
                 cmd->SetTexture(5, activeAOTexture);
                 cmd->SetTexture(6, m_GBufferEmissive.get());
                 cmd->SetTexture(7, m_GBufferNormal.get());
                 cmd->SetTexture(8, m_IrradianceTexture.get());
                 cmd->SetTexture(9, m_PrefilteredEnvTexture.get());
                 cmd->SetTexture(10, m_BRDFLUTTexture.get());
+                // 反射プローブ(19章)。FrameConstants.ProbeParams.xが0のとき(未ベイク・無効時)は
+                // シェーダー側が選択ループを回さないため中身は参照されないが、DX12は
+                // ディスクリプタテーブルに未初期化のスロットが残ると動作が未定義になるため常にバインドする
+                cmd->SetTexture(11, m_ProbeIrradianceArray.get());
+                cmd->SetTexture(12, m_ProbePrefilteredArray.get());
+                cmd->SetShaderResourceBuffer(13, m_ProbeBuffer.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -2377,10 +3586,8 @@ namespace Kurenai
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetSamplerSet(m_MaterialSamplers.get());
 
-                if (!gpuLights.empty())
-                {
-                    cmd->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
-                }
+                // ライトバッファの中身の更新はグラフ構築前に1回だけ済ませてある
+                // (タイルライトカリングパスがこのパスより先に読むため、パス内で更新できない)
 
                 // メッシュによらずパス全体で共通のテクスチャはここで一度だけバインドする。
                 // テクスチャのバインドは上書きするまで維持されるため(IRHICommandList::SetTexture参照)、
@@ -2439,9 +3646,18 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SSR",
-                .Reads = { m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(), m_SkyboxTexture.get(), m_GBufferAlbedo.get() },
+                // SSRはLightingパスが適用した鏡面IBLを「差し替える」ため、そのとき使ったものと
+                // 同じ環境ソース(プローブ配列・グローバルのプリフィルタ済み鏡面)とBRDF LUT・AOを
+                // 読む必要がある(20章)。
+                // 手続き空はm_PrefilteredEnvTextureの焼き込み経由で入ってくるため、
+                // 空のキューブマップをここで直接バインドする必要はない
+                .Reads = {
+                    m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                    m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
+                    m_ProbePrefilteredArray.get(),
+                },
                 .RenderTargets = { m_SSRTexture.get() },
-                .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
                 {
                     SSRConstants ssrConstants{};
                     ssrConstants.Params0 = { m_SSRMaxDistance, m_SSRThickness, m_SSRRoughnessCutoff, 0.0f };
@@ -2456,8 +3672,12 @@ namespace Kurenai
                     cmd->SetTexture(1, m_GBufferNormal.get());
                     cmd->SetTexture(2, m_GBufferMaterial.get());
                     cmd->SetTexture(3, m_GBufferDepth.get());
-                    cmd->SetTexture(4, m_SkyboxTexture.get());
-                    cmd->SetTexture(5, m_GBufferAlbedo.get());
+                    cmd->SetTexture(4, m_GBufferAlbedo.get());
+                    cmd->SetTexture(5, activeAOTexture);
+                    cmd->SetTexture(6, m_BRDFLUTTexture.get());
+                    cmd->SetTexture(7, m_PrefilteredEnvTexture.get());
+                    cmd->SetTexture(8, m_ProbePrefilteredArray.get());
+                    cmd->SetShaderResourceBuffer(9, m_ProbeBuffer.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -2473,16 +3693,16 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AutoExposure",
-                .Reads = { hdrSceneColor },
+                .Reads = { hdrSceneColor, m_GBufferDepth.get() },
                 .Writes = { m_ExposureTexture.get() },
-                .Execute = [this, hdrSceneColor](RHI::IRHICommandList* cmd)
+                .Execute = [this, hdrSceneColor, keyReferenceEV100, usingProceduralSky](RHI::IRHICommandList* cmd)
                 {
                     AutoExposureConstants autoExposureConstants{};
                     autoExposureConstants.InputSize = { m_RenderWidth, m_RenderHeight };
                     // Min>Maxのような不正な範囲だとヒストグラムのビン割りが破綻するため順序を保証する
                     autoExposureConstants.MinEV100 = std::min(m_AutoExposureMinEV100, m_AutoExposureMaxEV100);
                     autoExposureConstants.MaxEV100 = std::max(m_AutoExposureMinEV100, m_AutoExposureMaxEV100);
-                    autoExposureConstants.PreExposureEV100 = m_SceneExposureEV100;
+                    autoExposureConstants.PreExposureEV100 = m_EffectiveExposureEV100;
                     // 一時停止やシーン読み込み直後の巨大なdtで順応が飛ばないよう上限を設ける
                     autoExposureConstants.DeltaTime = std::clamp(m_RenderDeltaTime, 0.0f, 0.1f);
                     autoExposureConstants.AdaptationSpeedUp = m_AutoExposureSpeedUp;
@@ -2490,6 +3710,24 @@ namespace Kurenai
                     autoExposureConstants.LowPercentile = std::min(m_AutoExposureLowPercentile, m_AutoExposureHighPercentile);
                     autoExposureConstants.HighPercentile = std::max(m_AutoExposureLowPercentile, m_AutoExposureHighPercentile);
                     autoExposureConstants.ExposureCompensation = m_AutoExposureCompensation;
+                    autoExposureConstants.NightRolloffEV = m_AutoExposureNightRolloffEV;
+                    // 折れ点は必ずDark < Brightにする(逆転すると補正が不連続になる)
+                    autoExposureConstants.NightRolloffDarkEV100 =
+                        std::min(m_AutoExposureNightRolloffDarkEV100, m_AutoExposureNightRolloffBrightEV100);
+                    autoExposureConstants.NightRolloffBrightEV100 =
+                        std::max(m_AutoExposureNightRolloffDarkEV100, m_AutoExposureNightRolloffBrightEV100);
+                    // 構図に依存しないシーンの基準EV。測光値の上限の足がかりになる。
+                    //
+                    // **手続き空を使っていないシーンではクランプを無効にする**。
+                    // 基準EVはこのエンジンの太陽・月・空モデルが出す照度から求めているので、
+                    // .ksceneが独自のスカイボックスを指定しているシーン(White Furnace Testなど)
+                    // では、そのシーンを実際に照らしている光と無関係な値になってしまう。
+                    // 実際、無効化前はWhite Furnace Testの一様グレーが107から208まで持ち上がり、
+                    // 白飛びまで余裕が無くなっていた(一様性そのものは保たれていたが、
+                    // 飽和させてしまうとエネルギー保存の検証が成立しなくなる)
+                    autoExposureConstants.KeyReferenceEV100 = keyReferenceEV100;
+                    autoExposureConstants.KeyCeilingEV =
+                        usingProceduralSky ? m_AutoExposureKeyCeilingEV : 1.0e4f;
                     cmd->UpdateBuffer(m_AutoExposureConstantBuffer.get(), &autoExposureConstants, sizeof(autoExposureConstants));
 
                     // 1) ヒストグラムをゼロクリア
@@ -2503,6 +3741,8 @@ namespace Kurenai
                     cmd->SetComputePipelineState(m_AutoExposureHistogramPipelineState.get());
                     cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
                     cmd->SetComputeTexture(0, hdrSceneColor);
+                    // 空(背景)を測光から外すために深度を読む(AutoExposure.hlsl参照)
+                    cmd->SetComputeTexture(1, m_GBufferDepth.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
                     cmd->Dispatch((m_RenderWidth + 15) / 16, (m_RenderHeight + 15) / 16, 1);
 
@@ -2535,7 +3775,7 @@ namespace Kurenai
                 .Name = "Bloom",
                 .Reads = { hdrSceneColor, m_ExposureTexture.get() },
                 .Writes = std::move(bloomWrites),
-                .Execute = [this, hdrSceneColor](RHI::IRHICommandList* cmd)
+                .Execute = [this, hdrSceneColor, manualExposureScale](RHI::IRHICommandList* cmd)
                 {
                     const uint32_t levelCount = static_cast<uint32_t>(m_BloomDownTextures.size());
 
@@ -2543,9 +3783,11 @@ namespace Kurenai
                     bloomConstants.Threshold = m_BloomThreshold;
                     bloomConstants.SoftKnee = m_BloomSoftKnee;
                     // しきい値を「表示上の白」基準の直感的な値のままにするため、
-                    // ピラミッドの入力段で露出を反映する(Bloom.hlsl ExposureScale()参照)
+                    // ピラミッドの入力段で露出を反映する(Bloom.hlsl ExposureScale()参照)。
+                    // Tonemapと同じ倍率でなければ、ブルームだけ露出がずれて合成比が狂う
                     bloomConstants.UseAutoExposure = m_AutoExposureEnabled ? 1.0f : 0.0f;
-                    bloomConstants.PreExposureEV100 = m_SceneExposureEV100;
+                    bloomConstants.PreExposureEV100 = m_EffectiveExposureEV100;
+                    bloomConstants.ExposureScale = manualExposureScale;
 
                     // --- ダウンサンプル: SceneColor -> down[0] -> down[1] -> ... ---
                     cmd->SetComputePipelineState(m_BloomDownsamplePipelineState.get());
@@ -2612,18 +3854,23 @@ namespace Kurenai
             .Name = "Tonemap",
             .Reads = { hdrSceneColor, m_ExposureTexture.get(), bloomResultTexture },
             .RenderTargets = { m_TonemapTexture.get() },
-            .Execute = [this, &gbufferViewport, hdrSceneColor, bloomResultTexture](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale,
+                        keyReferenceEV100](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
                 tonemapConstants.Curve = static_cast<int32_t>(m_TonemapCurve);
-                // 手動露出時: 露出はComputeSunLighting/MakeGPULightがライト強度へ事前乗算済みの
-                // ため、ここで追加の露出は掛けない
-                tonemapConstants.ExposureScale = 1.0f;
+                // 手動露出時: プリ露出は時刻連動で変動するので、設定EV100との差分を割り戻して
+                // 「設定EV100で固定した絵」へ戻す(manualExposureScaleの算出箇所のコメント参照)
+                tonemapConstants.ExposureScale = manualExposureScale;
                 tonemapConstants.DitherStrength = m_DitherEnabled ? 1.0f : 0.0f;
                 tonemapConstants.UseAutoExposure = m_AutoExposureEnabled ? 1.0f : 0.0f;
-                tonemapConstants.PreExposureEV100 = m_SceneExposureEV100;
+                tonemapConstants.PreExposureEV100 = m_EffectiveExposureEV100;
                 tonemapConstants.BloomStrength =
                     (m_BloomEnabled && !m_BloomUpTextures.empty()) ? m_BloomStrength : 0.0f;
+                tonemapConstants.MesopicStrength = m_MesopicStrength;
+                // 目の順応は画面の構図ではなくシーンの明るさで決まるので、
+                // 自動露出の測光値ではなくキー照度から求めた基準EVを使う
+                tonemapConstants.MesopicAdaptationEV100 = keyReferenceEV100;
                 cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
 
                 cmd->SetViewport(gbufferViewport);
@@ -2646,10 +3893,13 @@ namespace Kurenai
         RHI::IRHITexture* presentSourceTexture = m_TonemapTexture.get();
         // Mode 9(IBL Irradiance/Prefilterのキューブマップ表示)専用。他のModeでは使われないが、
         // t1には常に何らかの有効なTextureCubeをバインドしておく必要があるため既定値を持たせる
-        RHI::IRHITexture* presentDebugCubeTexture = m_SkyboxTexture.get();
+        RHI::IRHITexture* presentDebugCubeTexture = skyTexture;
         // Mode 10(シャドウマップのカスケード表示)専用。t1と同じ理由で、t2にも常に有効な
         // Texture2DArrayをバインドしておく必要があるためシャドウマップ配列自身を既定値にする
         RHI::IRHITexture* presentDebugArrayTexture = m_ShadowCascadeArray.get();
+        // Mode 12(反射プローブのキューブマップ配列)専用。TextureCube(t1)ともTexture2DArray(t2)とも
+        // 型が違うためさらに別スロット(t4)が要る。こちらも常に有効なテクスチャをバインドしておく
+        RHI::IRHITexture* presentDebugCubeArrayTexture = m_ProbeIrradianceArray.get();
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = m_RenderWidth;
         uint32_t presentSourceHeight = m_RenderHeight;
@@ -2734,6 +3984,20 @@ namespace Kurenai
             presentSourceWidth = m_RenderWidth;
             presentSourceHeight = m_RenderHeight;
             break;
+        case DebugView::ProbeIrradiance:
+            // キューブマップ配列のためMode 9(TextureCube)ではなくMode 12(TextureCubeArray)を使う
+            presentDebugCubeArrayTexture = m_ProbeIrradianceArray.get();
+            presentMode = 12;
+            break;
+        case DebugView::ProbePrefilter:
+            presentDebugCubeArrayTexture = m_ProbePrefilteredArray.get();
+            presentMode = 12;
+            break;
+        case DebugView::ProbeInfluence:
+            // 塗り分けはDeferredLighting.hlsl側(FrameConstants.ProbeParams.y)で行うため、
+            // Presentは通常どおり最終結果を表示するだけでよい
+            presentSourceTexture = m_TonemapTexture.get();
+            break;
         case DebugView::IBLBRDFLUT:
             presentSourceTexture = m_BRDFLUTTexture.get();
             presentMode = 0; // (scale, bias)の生値をそのままRGとして表示(値域はおおむね[0,1])
@@ -2750,24 +4014,61 @@ namespace Kurenai
                 presentSourceHeight = m_BloomLevelSizes[0].y;
             }
             break;
+        case DebugView::LightTiles:
+            // ライトグリッドは構造化バッファなのでSourceTexture(t0)では受け取れず、専用のt3から読む
+            // (Present.hlsl Mode 11)。t0には何かをバインドしておく必要があるため、
+            // 解像度だけ合わせてm_TonemapTextureをそのまま渡す(Mode 11では読まれない)
+            presentSourceTexture = m_TonemapTexture.get();
+            presentMode = 11;
+            break;
         }
 
         PresentConstants presentConstants{};
         presentConstants.Mode = presentMode;
+        presentConstants.TileParams =
+        {
+            static_cast<float>(m_LightTileCountX),
+            static_cast<float>(kLightTileSize),
+            static_cast<float>(kLightTileCapacity),
+            // ヒートマップで赤に振り切る基準のライト数。容量そのものを基準にすると
+            // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
+            static_cast<float>(std::max(1, m_LightTileHeatmapMax)),
+        };
+        presentConstants.TileRenderSize =
+        {
+            static_cast<float>(m_RenderWidth),
+            static_cast<float>(m_RenderHeight),
+            0.0f,
+            0.0f,
+        };
         if (m_DebugView == DebugView::IBLPrefilter)
         {
             presentConstants.MipLevel = static_cast<float>(m_IBLPrefilterDebugMipLevel);
         }
-        else if (m_DebugView == DebugView::IBLIrradiance)
+        else if (m_DebugView == DebugView::IBLIrradiance || m_DebugView == DebugView::ProbeIrradiance)
         {
             presentConstants.MipLevel = 0.0f; // イラディアンスマップは常に1ミップのみ
+        }
+        else if (m_DebugView == DebugView::ProbePrefilter)
+        {
+            presentConstants.MipLevel = static_cast<float>(m_ProbePrefilterDebugMipLevel);
         }
         else
         {
             presentConstants.MipLevel = static_cast<float>(m_HiZDebugMipLevel);
         }
-        presentConstants.ArraySlice =
-            static_cast<float>(std::clamp(m_ShadowDebugCascade, 0, static_cast<int32_t>(kCascadeCount) - 1));
+        // ArraySliceはMode 10ではカスケード番号、Mode 12ではプローブ番号として使う。
+        // プローブが1つも無い場合でも配列の範囲外を引かないようクランプする
+        if (m_DebugView == DebugView::ProbeIrradiance || m_DebugView == DebugView::ProbePrefilter)
+        {
+            presentConstants.ArraySlice = static_cast<float>(
+                std::clamp(m_ProbeDebugIndex, 0, std::max(0, static_cast<int32_t>(m_ReflectionProbes.size()) - 1)));
+        }
+        else
+        {
+            presentConstants.ArraySlice =
+                static_cast<float>(std::clamp(m_ShadowDebugCascade, 0, static_cast<int32_t>(kCascadeCount) - 1));
+        }
         // Finalの見た目は倍率の影響を受けてはならないため、デバッグ表示のときだけ倍率を掛ける
         // (Gainはゼロ初期化のままだと0倍=真っ黒になるので、必ず明示的に設定すること)
         presentConstants.Gain = (m_DebugView == DebugView::Final) ? 1.0f : m_DebugViewGain;
@@ -2779,10 +4080,12 @@ namespace Kurenai
 
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Present",
-            .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture },
+            .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture, presentDebugCubeArrayTexture },
+            // DebugView::LightTilesでライトグリッドを読むため、カリングパスより後に順序付ける
+            .BufferReads = { m_LightTileBuffer.get() },
             .SwapChainTarget = m_SwapChain.get(),
             .Execute = [this, &letterboxViewport, presentSourceTexture, presentDebugCubeTexture,
-                        presentDebugArrayTexture](RHI::IRHICommandList* cmd)
+                        presentDebugArrayTexture, presentDebugCubeArrayTexture](RHI::IRHICommandList* cmd)
             {
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
                 cmd->ClearDepth(1.0f);
@@ -2795,6 +4098,10 @@ namespace Kurenai
                 cmd->SetTexture(0, presentSourceTexture);
                 cmd->SetTexture(1, presentDebugCubeTexture);
                 cmd->SetTexture(2, presentDebugArrayTexture);
+                // Mode 11(ライトグリッドのヒートマップ)以外でも、シェーダが宣言しているリソースは
+                // 必ずバインドする(SetPipelineStateが毎回ルート引数を無効化するため)
+                cmd->SetShaderResourceBuffer(3, m_LightTileBuffer.get());
+                cmd->SetTexture(4, presentDebugCubeArrayTexture);
                 cmd->Draw(3, 0);
             },
         });

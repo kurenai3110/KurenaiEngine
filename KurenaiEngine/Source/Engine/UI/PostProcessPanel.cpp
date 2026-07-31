@@ -53,6 +53,13 @@ namespace Kurenai::UI
             m_Engine.m_TonemapCurve = static_cast<TonemapCurve>(curveIndex);
         }
 
+        SliderFloatEx(
+            "薄明視###MesopicVision", &m_Engine.m_MesopicStrength, 0.0f, 1.0f, Defaults::MesopicStrength, "%.2f", 0,
+            "暗所視の再現量。0で無効。実際の輝度が0.01cd/m^2を下回ると桿体だけの視覚になり色が"
+            "判別できなくなる(3cd/m^2以上は通常の錐体視のまま。間は対数で補間)。"
+            "桿体の分光感度が短波長寄りなので、赤は沈み青は明るく見える(プルキンエ現象)。"
+            "露出を下げるだけでは「暗いが色鮮やかな夜」になり肉眼の見え方と合わない");
+
         CheckboxEx(
             "出力ディザリング###OutputDithering", &m_Engine.m_DitherEnabled, Defaults::DitherEnabled,
             "最終的な8bit量子化の直前に微小なノイズを加え、暗部グラデーションのバンディングを解消する。"
@@ -109,6 +116,27 @@ namespace Kurenai::UI
                 Defaults::AutoExposureCompensation, "%.2f EV", 0,
                 "自動で決まった露出へ加えるオフセット。写真の露出補正と同じ意味で、"
                 "+1で1段(2倍)明るくなる");
+            SliderFloatEx(
+                "測光上限(基準EVから)###AEKeyCeiling", &m_Engine.m_AutoExposureKeyCeilingEV, -4.0f, 16.0f,
+                Defaults::AutoExposureKeyCeilingEV, "%.2f EV", 0,
+                "測光値が「シーンの基準EV」から何段上まで行くのを許すか。基準EVは太陽・月・空の照度から"
+                "求めるため画面の構図に依存しない。小さくするほど、空が画面に占める割合で露出が振れるのを"
+                "抑えられる。16まで上げるとヒストグラムだけで決まる挙動に戻る。屋内が暗くならないよう、"
+                "止めるのは上側だけ(下限はEV100 下限が効く)");
+            SliderFloatEx(
+                "夜のロールオフ###AENightRolloff", &m_Engine.m_AutoExposureNightRolloffEV, 0.0f, 8.0f,
+                Defaults::AutoExposureNightRolloffEV, "%.2f EV", 0,
+                "暗いシーンをわざと暗いまま写す量。自動露出は測ったものを中庸なグレーへ持ち上げるため、"
+                "0にすると夜が昼と同じ明るさで出る。測定EV100が下側の折れ点以下で最大、"
+                "上側の折れ点以上で0、間は線形。薄明視とセットで意味を持つ");
+            SliderFloatEx(
+                "ロールオフ 暗側の折れ点###AENightRolloffDark", &m_Engine.m_AutoExposureNightRolloffDarkEV100, -8.0f,
+                8.0f, Defaults::AutoExposureNightRolloffDarkEV100, "%.1f", 0,
+                "測定EV100がこれ以下なら夜のロールオフが最大量かかる。既定の-2は満月の夜の地表のすぐ上");
+            SliderFloatEx(
+                "ロールオフ 明側の折れ点###AENightRolloffBright", &m_Engine.m_AutoExposureNightRolloffBrightEV100,
+                -8.0f, 20.0f, Defaults::AutoExposureNightRolloffBrightEV100, "%.1f", 0,
+                "測定EV100がこれ以上なら夜のロールオフは掛からない。既定の10は曇天の屋外あたり");
             SliderFloatEx(
                 "明順応の速さ###AESpeedUp", &m_Engine.m_AutoExposureSpeedUp, 0.1f, 10.0f, Defaults::AutoExposureSpeedUp,
                 "%.2f", 0, "暗い場所から明るい場所へ移ったときに露出が追従する速さ");

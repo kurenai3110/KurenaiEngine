@@ -10,7 +10,8 @@ namespace Kurenai
 namespace Kurenai::UI
 {
     // 「シーンをどう照らすか」に属する品質設定。
-    // AO/間接光・シャドウ・IBL/環境光・SSRをCollapsingHeaderで節に分けて扱う
+    // AO/間接光・シャドウ・スクリーンスペースシャドウ・IBL/環境光・SSR・
+    // タイルドライトカリングをCollapsingHeaderで節に分けて扱う
     class RenderingPanel final : public IPanel
     {
     public:
@@ -25,8 +26,10 @@ namespace Kurenai::UI
     private:
         void DrawAOSection();
         void DrawShadowSection();
+        void DrawScreenSpaceShadowSection();
         void DrawIBLSection();
         void DrawSSRSection();
+        void DrawLightCullingSection();
 
         KurenaiEngine3D& m_Engine;
     };

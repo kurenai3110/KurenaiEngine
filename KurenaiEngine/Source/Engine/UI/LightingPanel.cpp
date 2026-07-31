@@ -77,11 +77,38 @@ namespace Kurenai::UI
         SliderFloatEx(
             "方位角###SunAzimuth", &m_Engine.m_SunAzimuthDegrees, 0.0f, 360.0f, Defaults::SunAzimuthDegrees, "%.1f deg",
             0, "太陽が昇る方位。時刻と組み合わせて太陽の向きが決まる");
+        // 月の位置は時刻に連動しない(実際の月は太陽と独立した周期で動くため)。平行光源の枠は
+        // 太陽と共有しており、太陽が沈むと支配ライトが月へ切り替わる。
+        // 月を動かすと夜空の目標照度が変わるため、空を焼き直す必要がある
+        bool moonMoved = SliderFloatEx(
+            "月の方位角###MoonAzimuth", &m_Engine.m_MoonAzimuthDegrees, 0.0f, 360.0f, Defaults::MoonAzimuthDegrees,
+            "%.1f deg", 0, "月の方位。時刻に連動しないため、任意の月齢・任意の時刻の見え方を作れる");
+        moonMoved |= SliderFloatEx(
+            "月の仰角###MoonElevation", &m_Engine.m_MoonElevationDegrees, -90.0f, 90.0f,
+            Defaults::MoonElevationDegrees, "%.1f deg", 0, "月の高さ。0度以下なら地平線下にあり月光は出ない");
+        if (moonMoved)
+        {
+            m_Engine.m_SkyBakeDirty = true;
+        }
+
         // 太陽だけを消して環境光のみで照らす状態を作る(White Furnace Testが使う)。
         // 時刻を夜にする方法と違い、環境光の明るさは下がらない
         CheckboxEx(
             "太陽光を有効にする###EnableSun", &m_Engine.m_SunEnabled, Defaults::SunEnabled,
             "無効にすると環境光だけで照らした状態になる。時刻を夜にする方法と違い、環境光の明るさは下がらない");
+
+        // 手続き空(Perez分布をGPUで評価)。無効にするとオフラインで焼いたSky.ddsへ戻る。
+        // .ksceneがスカイボックスを明示しているシーン(White Furnace Test)では、
+        // このトグルに関わらず常にそのDDSが使われる
+        if (CheckboxEx(
+                "手続き空###ProceduralSky", &m_Engine.m_ProceduralSkyEnabled, Defaults::ProceduralSkyEnabled,
+                "空をGPU上で毎回生成する。無効にするとオフラインで焼いたSky.ddsを使う。"
+                "スカイボックスを明示しているシーンでは、この設定に関わらずそのテクスチャが使われる"))
+        {
+            m_Engine.m_SkyBakeDirty = true;
+            m_Engine.m_IBLBaked = false;
+            m_Engine.m_IBLIrradianceBaked = false;
+        }
         SliderFloatEx(
             "EV100###SceneExposure", &m_Engine.m_SceneExposureEV100, -8.0f, 20.0f, Defaults::SceneExposureEV100, "%.2f",
             0,
@@ -266,6 +293,14 @@ namespace Kurenai::UI
             light.SpotInnerConeAngle = DirectX::XMConvertToRadians(innerDegrees);
             light.SpotOuterConeAngle = DirectX::XMConvertToRadians(outerDegrees);
         }
+
+        // このライトがスクリーンスペースシャドウを落とすか。ピクセルあたりのシャドウレイ数には
+        // 上限(レンダリングパネルの「影を落とすライト数の上限」)があるため、
+        // 影を出したいライトへ予算を回すのに使う
+        ImGui::Checkbox("影を落とす###LightCastShadow", &light.CastShadow);
+        ItemHelp(
+            "このライトにスクリーンスペースシャドウを適用する。ピクセルあたりのレイ本数には上限があるため、"
+            "影を出したいライトだけに絞ると負荷を抑えられる");
 
         EndParamGroup();
     }

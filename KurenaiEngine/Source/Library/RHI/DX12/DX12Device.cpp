@@ -8,6 +8,8 @@
 #include <chrono>
 #include <cstring>
 #include <cwchar>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "DX12Buffer.h"
@@ -28,7 +30,9 @@ namespace Kurenai::RHI
     namespace
     {
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
-        constexpr uint32_t kTextureSlotCount = 12; // t0〜t11 (Transparent.hlslのマテリアル4枚+シャドウ4枚+ライトリスト+IBL(Irradiance/Prefilter/BRDFLUT)が最大)
+        // t0〜t13。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
+        // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer)
+        constexpr uint32_t kTextureSlotCount = 14;
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
         // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler(役割の定義はShaders/Samplers.hlsli)。
         // どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。
@@ -42,7 +46,7 @@ namespace Kurenai::RHI
         // シェーダ可視Samplerヒープの上限はD3D12の仕様で2048ディスクリプタ
         // (D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE)なので、この程度なら十分収まる
         constexpr uint32_t kMaxSamplerSets = 8;
-        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t10のkTextureSlotCount個ひと組)の最大数。
+        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t13のkTextureSlotCount個ひと組)の最大数。
         // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく。実際に確保するヒープ容量は
         // これのkFrameCount倍(CPUがGPU完了を待たずに次フレームを記録し始めるため、直近kFrameCount
         // フレームぶんのブロックがまだGPUに読まれている可能性がある)
@@ -56,8 +60,10 @@ namespace Kurenai::RHI
         constexpr uint32_t kComputeSrvSlotCount = 4;
         constexpr uint32_t kComputeUavSlotCount = 4;
         constexpr uint32_t kComputeTableSlotCount = kComputeSrvSlotCount + kComputeUavSlotCount;
-        // 1フレームあたりに払い出せるコンピュートSRV+UAVテーブルブロックの最大数(Dispatch呼び出し回数の上限)
-        constexpr uint32_t kMaxComputeDispatchesPerFrame = 256;
+        // 1フレームあたりに払い出せるコンピュートSRV+UAVテーブルブロックの最大数(Dispatch呼び出し回数の上限)。
+        // 反射プローブのベイクは1プローブあたり6(面コピー)+6(イラディアンス)+36(プリフィルタ6ミップ×6面)=48回
+        // ディスパッチし、複数プローブを同一フレームでまとめて焼くため、プローブ数ぶんの余裕が要る
+        constexpr uint32_t kMaxComputeDispatchesPerFrame = 1024;
         // グラフィックス用SRVテーブル領域の1フレームあたりのディスクリプタ数。m_ShaderVisibleSrvHeap内では
         // 先頭からこの数×kFrameCountぶんをグラフィックス用が占有し、コンピュートシェーダー用のSRV+UAVテーブルは
         // それより後ろの区画に別リングとして確保する(kFrameCountはDX12Deviceのprivateメンバのため、
@@ -649,6 +655,51 @@ namespace Kurenai::RHI
             return std::make_unique<DX12Buffer>(this, resource, uavIndex, desc.SizeInBytes, desc.StrideInBytes);
         }
 
+        // コンピュートがUAVで書き、ピクセルシェーダがSRVで読む構造化バッファ。CPUからは書き込まないため
+        // 初期データもステージングリングも持たず、DEFAULTヒープにUAV+SRVの2つのディスクリプタを作る。
+        // BufferUsage::Structuredと同じく、作成時点で直接UNORDERED_ACCESS状態にしておく
+        // (m_UploadCommandListはInitialDataがある呼び出しでしかSubmitされないため、
+        //  ここでバリアだけ積むと未実行のまま参照される可能性がある)
+        if (desc.Usage == BufferUsage::StructuredRW)
+        {
+            if (desc.StrideInBytes == 0)
+            {
+                Core::Logger::Error("DX12", "StructuredRWバッファのStrideInBytesが0です。作成を中止します");
+                throw std::runtime_error("StructuredRWバッファのStrideInBytesが0です");
+            }
+
+            const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+            const CD3DX12_RESOURCE_DESC resourceDesc =
+                CD3DX12_RESOURCE_DESC::Buffer(desc.SizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+            ThrowIfFailed(
+                m_Device->CreateCommittedResource(
+                    &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
+                "読み書き構造化バッファ(StructuredRW)の作成に失敗しました");
+
+            const uint32_t elementCount = desc.SizeInBytes / desc.StrideInBytes;
+
+            const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+            uavDesc.Buffer.NumElements = elementCount;
+            uavDesc.Buffer.StructureByteStride = desc.StrideInBytes;
+            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+
+            const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDesc.Buffer.NumElements = elementCount;
+            srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
+            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+            return std::make_unique<DX12Buffer>(this, resource, uavIndex, srvIndex, desc.SizeInBytes, desc.StrideInBytes);
+        }
+
         // 読み取り専用の構造化バッファ(StructuredBuffer<T>)。ピクセルシェーダが毎フレーム読むため
         // 本体はDEFAULTヒープに置く(UPLOADヒープはCPUから見える代わりにGPU読み取りが低速なため、
         // ピクセルごとに読まれる用途には向かない。頂点/インデックスバッファをDEFAULTヒープに
@@ -1165,11 +1216,46 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHITexture> DX12Device::CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels)
     {
+        // cubeCount=1のときはSRVをTextureCubeArrayではなくTextureCubeとして張る(HLSL側の
+        // TextureCube宣言と一致させるため。IBLConvolve.hlsl等)
+        return CreateCubeTextureInternal(size, format, mipLevels, 1, false);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateMippedUAVTextureCubeArray(
+        uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount)
+    {
+        return CreateCubeTextureInternal(size, format, mipLevels, cubeCount, true);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateCubeTextureInternal(
+        uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray)
+    {
+        if (size == 0 || mipLevels == 0 || cubeCount == 0)
+        {
+            const std::string message =
+                "キューブマップUAVテクスチャの作成に失敗しました: サイズ・ミップ数・キューブ数はいずれも1以上である必要があります (size=" +
+                std::to_string(size) + ", mipLevels=" + std::to_string(mipLevels) + ", cubeCount=" + std::to_string(cubeCount) + ")";
+            Core::Logger::Error("DX12", message);
+            throw std::runtime_error(message);
+        }
+
+        // D3D12のTexture2D配列は最大2048スライス。キューブマップは1枚あたり6スライス消費する
+        const uint32_t arraySize = cubeCount * DX12Texture::kCubeFaceCount;
+        if (arraySize > D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION)
+        {
+            const std::string message =
+                "キューブマップUAVテクスチャの作成に失敗しました: 配列スライス数が上限を超えています (cubeCount=" +
+                std::to_string(cubeCount) + ", 必要スライス数=" + std::to_string(arraySize) +
+                ", 上限=" + std::to_string(D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) + ")";
+            Core::Logger::Error("DX12", message);
+            throw std::runtime_error(message);
+        }
+
         const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);
 
         const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
         const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Tex2D(
-            dxgiFormat, size, size, static_cast<UINT16>(DX12Texture::kCubeFaceCount), static_cast<UINT16>(mipLevels),
+            dxgiFormat, size, size, static_cast<UINT16>(arraySize), static_cast<UINT16>(mipLevels),
             1, 0, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
 
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
@@ -1177,41 +1263,57 @@ namespace Kurenai::RHI
             m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
             "キューブマップUAVテクスチャの作成に失敗しました");
 
-        // 全6面・全ミップを1枚のTextureCubeとして読むSRV(サンプリング側、DeferredLighting.hlsl等)
+        // 全6面・全ミップを1枚のTextureCube(配列版はTextureCubeArray)として読むSRV
+        // (サンプリング側、DeferredLighting.hlsl等)
         const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.TextureCube.MostDetailedMip = 0;
-        srvDesc.TextureCube.MipLevels = mipLevels;
+        if (asArray)
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+            srvDesc.TextureCubeArray.MostDetailedMip = 0;
+            srvDesc.TextureCubeArray.MipLevels = mipLevels;
+            srvDesc.TextureCubeArray.First2DArrayFace = 0;
+            srvDesc.TextureCubeArray.NumCubes = cubeCount;
+        }
+        else
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            srvDesc.TextureCube.MostDetailedMip = 0;
+            srvDesc.TextureCube.MipLevels = mipLevels;
+        }
         m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
 
-        // 面×ミップの組み合わせごとに単一配列スライス・単一ミップのUAV(Texture2DArray、要素数1)を張り、
-        // コンピュートシェーダーが面ごとに1回ずつディスパッチして書き込めるようにする(HLSL側は
-        // RWTexture2DArrayとして宣言する必要がある。IBLConvolve.hlsl参照)。mip*kCubeFaceCount+face の
-        // 順でフラットに格納する(DX12Texture::GetCubeUavCpuHandle参照)
+        // キューブ×面×ミップの組み合わせごとに単一配列スライス・単一ミップのUAV(Texture2DArray、要素数1)を
+        // 張り、コンピュートシェーダーが面ごとに1回ずつディスパッチして書き込めるようにする(HLSL側は
+        // RWTexture2DArrayとして宣言する必要がある。IBLConvolve.hlsl参照)。
+        // (mip*cubeCount + cubeIndex)*kCubeFaceCount + face の順でフラットに格納する
+        // (DX12Texture::GetCubeUavCpuHandle参照)
         std::vector<uint32_t> mipUavIndices;
-        mipUavIndices.reserve(mipLevels * DX12Texture::kCubeFaceCount);
+        mipUavIndices.reserve(static_cast<size_t>(mipLevels) * arraySize);
         for (uint32_t mip = 0; mip < mipLevels; ++mip)
         {
-            for (uint32_t face = 0; face < DX12Texture::kCubeFaceCount; ++face)
+            for (uint32_t cube = 0; cube < cubeCount; ++cube)
             {
-                const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
-                D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-                uavDesc.Format = dxgiFormat;
-                uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-                uavDesc.Texture2DArray.MipSlice = mip;
-                uavDesc.Texture2DArray.FirstArraySlice = face;
-                uavDesc.Texture2DArray.ArraySize = 1;
-                m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
-                mipUavIndices.push_back(uavIndex);
+                for (uint32_t face = 0; face < DX12Texture::kCubeFaceCount; ++face)
+                {
+                    const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+                    uavDesc.Format = dxgiFormat;
+                    uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+                    uavDesc.Texture2DArray.MipSlice = mip;
+                    uavDesc.Texture2DArray.FirstArraySlice = cube * DX12Texture::kCubeFaceCount + face;
+                    uavDesc.Texture2DArray.ArraySize = 1;
+                    m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+                    mipUavIndices.push_back(uavIndex);
+                }
             }
         }
 
         return std::make_unique<DX12Texture>(
             this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
-            DX12Texture::kInvalid, std::move(mipUavIndices));
+            DX12Texture::kInvalid, std::move(mipUavIndices), std::vector<uint32_t>{}, cubeCount);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth)

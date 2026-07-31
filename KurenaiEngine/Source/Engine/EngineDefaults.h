@@ -42,8 +42,27 @@ namespace Kurenai::Defaults
     inline constexpr float SSRThickness = 0.1f;
     inline constexpr float SSRRoughnessCutoff = 0.6f;
 
+    // --- シャドウ(スクリーンスペース) ---
+    inline constexpr bool ScreenSpaceShadowEnabled = true;
+    inline constexpr int ScreenSpaceShadowStepCount = 16;
+    inline constexpr float ScreenSpaceShadowMaxRayLength = 1.5f;
+    inline constexpr float ScreenSpaceShadowThickness = 0.5f;
+    inline constexpr float ScreenSpaceShadowNormalBias = 0.002f;
+    inline constexpr float ScreenSpaceShadowEdgeFade = 0.1f;
+    inline constexpr int ScreenSpaceShadowMaxLightsPerPixel = 4;
+
+    // --- タイルドライトカリング ---
+    inline constexpr bool LightCullingEnabled = true;
+    inline constexpr int LightTileHeatmapMax = 8;
+
+    // --- 反射プローブ ---
+    inline constexpr bool ReflectionProbeEnabled = true;
+    inline constexpr bool ProbeParallaxCorrectionEnabled = true;
+    inline constexpr bool ProbeBlendingEnabled = true;
+
     // --- トーンマップ / ディザ ---
     inline constexpr bool DitherEnabled = true;
+    inline constexpr float MesopicStrength = 0.0f;
 
     // --- ブルーム ---
     inline constexpr bool BloomEnabled = true;
@@ -53,13 +72,17 @@ namespace Kurenai::Defaults
 
     // --- 自動露出 ---
     inline constexpr bool AutoExposureEnabled = true;
-    inline constexpr float AutoExposureMinEV100 = 0.0f;
-    inline constexpr float AutoExposureMaxEV100 = 16.0f;
+    inline constexpr float AutoExposureMinEV100 = -6.0f;
+    inline constexpr float AutoExposureMaxEV100 = 18.0f;
     inline constexpr float AutoExposureSpeedUp = 3.0f;
     inline constexpr float AutoExposureSpeedDown = 1.0f;
     inline constexpr float AutoExposureLowPercentile = 0.5f;
     inline constexpr float AutoExposureHighPercentile = 0.95f;
     inline constexpr float AutoExposureCompensation = 0.0f;
+    inline constexpr float AutoExposureNightRolloffEV = 4.5f;
+    inline constexpr float AutoExposureNightRolloffDarkEV100 = -2.0f;
+    inline constexpr float AutoExposureNightRolloffBrightEV100 = 10.0f;
+    inline constexpr float AutoExposureKeyCeilingEV = 2.0f;
 
     // --- 同期 ---
     inline constexpr bool VSyncEnabled = false;
@@ -75,6 +98,10 @@ namespace Kurenai::Defaults
     inline constexpr bool TimeAutoAdvance = false;
     inline constexpr float TimeAdvanceSpeed = 1.0f;
     inline constexpr float SunAzimuthDegrees = 126.87f;
+    // 月は時刻に連動しない独立した向き。ここを変えると夜空の目標照度が変わるため空の焼き直しが要る
+    inline constexpr float MoonAzimuthDegrees = 306.87f;
+    inline constexpr float MoonElevationDegrees = 45.0f;
+    inline constexpr bool ProceduralSkyEnabled = true;
     inline constexpr float SceneExposureEV100 = 15.0f;
     inline constexpr float EmissiveIntensity = 1.0f;
 }

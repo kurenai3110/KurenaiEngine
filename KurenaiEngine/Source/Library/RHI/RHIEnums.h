@@ -21,6 +21,18 @@ namespace Kurenai::RHI
         // ライトリストのような「要素数が可変で定数バッファに収めるには大きい配列」を
         // グラフィックスパイプラインのピクセルシェーダへSRVとしてバインドする用途向け
         StructuredReadOnly,
+        // コンピュートシェーダーがUAVで書き、ピクセルシェーダがSRVで読む構造化バッファ。
+        // CPUからは書き込まない(GPUだけで完結する中間データ)。タイルライトカリングの
+        // ライトグリッドがこれにあたる。
+        //
+        // 既存の2種はどちらも片側しか持たないためこの用途に使えない:
+        //   Structured         … UAVのみ。SRVディスクリプタが無くPSから読めない
+        //   StructuredReadOnly … SRVのみ。UPLOADヒープ経由のCPU書き込み専用でUAVが無い
+        // DX12ではUNORDERED_ACCESSとPIXEL_SHADER_RESOURCEの間を明示的に遷移させる
+        // (DX12Buffer::TransitionTo。バインド時に暗黙に発行される)。
+        // DX11はUAVとSRVを同時にバインドできないが、DX11CommandList::DispatchがDispatch直後に
+        // UAVを全解除しているため追加の対処は要らない
+        StructuredRW,
     };
 
     enum class PrimitiveTopology

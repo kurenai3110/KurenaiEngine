@@ -33,6 +33,7 @@ namespace Kurenai::UI
     class LightingPanel;
     class SystemPanel;
     class ProfilerPanel;
+    class ReflectionProbePanel;
 }
 
 namespace Kurenai
@@ -74,6 +75,7 @@ namespace Kurenai
         friend class UI::LightingPanel;
         friend class UI::SystemPanel;
         friend class UI::ProfilerPanel;
+        friend class UI::ReflectionProbePanel;
 
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
         // スナップショット。m_TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
@@ -101,6 +103,14 @@ namespace Kurenai
         // (理由はRHI/IRHISamplerSet.h)
         void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
+        // このフレームで空として使うキューブマップを返す。手続き空が有効で、かつ.ksceneが
+        // スカイボックスを明示していないときだけ手続き空を使う(明示しているシーンは
+        // そのDDSでなければ意味を成さないため。White Furnace Testが該当する)。
+        //
+        // 【重要】Render()の冒頭で一度だけ呼んでローカル変数へ保持し、RenderGraphの
+        // Reads宣言と実際のバインドの両方で同じポインタを使うこと。
+        // 呼び出しごとに評価すると両者が食い違い、依存解決が壊れる
+        RHI::IRHITexture* ActiveSkyTexture() const;
         // <DLLフォルダ>/Assets/Scenes/*.ksceneを列挙し、m_SceneFilePaths/m_SceneDisplayNamesを構築する。
         // 個々のファイルの[Scene]Name読み取りに失敗した場合はそのファイルを警告ログとともに
         // スキップする(1ファイルの不備でアプリ全体が起動できなくなるのを避けるため)
@@ -321,6 +331,16 @@ namespace Kurenai
         // AgXはハイライトが色相を保ったまま白へ脱色するため、この用途では素直な絵になる
         TonemapCurve m_TonemapCurve = TonemapCurve::AgX;
 
+        // 薄明視(mesopic vision)の適用量。0で無効、1で完全適用。
+        //
+        // 暗所では錐体が働かなくなり桿体だけの視覚に移る。桿体は1種類しか無いので色を
+        // 判別できず、実際の月明かりの下では「形は見えるのに色がほとんど無い」見え方になる。
+        // 露出を下げるだけでは「暗いが色鮮やかな夜」にしかならず、肉眼で見た夜と一致しない。
+        // 桿体の分光感度が短波長寄り(507nm)であることから来るプルキンエ現象も同時に入る
+        // (詳細はTonemap.hlsl の ApplyMesopicVision)。
+        // 既定は無効。効果が強く画作りの好みが分かれるため、使うときに明示的に上げる
+        float m_MesopicStrength = Defaults::MesopicStrength;
+
         // 出力8bit量子化の直前に加えるディザリング。実測(Bistro Interior)では走査線上に
         // 同一色が24px連続しており、これは中間バッファをHDR化しても変わらなかった。
         // つまり暗部のバンディングの主因は最終8bit量子化であり、ここでしか直せない。
@@ -354,6 +374,10 @@ namespace Kurenai
         bool m_AutoExposureEnabled = Defaults::AutoExposureEnabled;
         // 露出のクランプ範囲(EV100)。ヒストグラムのビン割りもこの範囲で行うため、
         // 実シーンの輝度がこの外に出ると端に張り付く
+        // 下限-6は月夜の地表(反射率0.2の面で約0.016 cd/m^2 = EV100約-3)を余裕をもって含む値。
+        // 星明かりだけの夜まで追うならさらに下げる必要があるが、実写の夜景もEV -3〜-5程度で
+        // 撮るのが普通なので実用上はここで足りる。
+        // 上限18は、正規化後の昼の空(約6400 cd/m^2 = EV100約15.6)に余裕を持たせた値
         float m_AutoExposureMinEV100 = Defaults::AutoExposureMinEV100;
         float m_AutoExposureMaxEV100 = Defaults::AutoExposureMaxEV100;
         // 明順応(暗→明)と暗順応(明→暗)の速度。人間の目は暗順応のほうが遅いため既定値も分けている
@@ -365,6 +389,51 @@ namespace Kurenai
         float m_AutoExposureHighPercentile = Defaults::AutoExposureHighPercentile;
         // 測定結果に対してユーザーが意図的に足すオフセット(EV)
         float m_AutoExposureCompensation = Defaults::AutoExposureCompensation;
+        // 暗いシーンをわざと暗いまま写すための補正量[EV]。
+        // 自動露出は測ったものを中庸なグレーへ持ち上げるので、これが0だと夜が昼と同じ明るさで
+        // 出てしまう(実測: 補正なしでは22時と12時の空の明度がほぼ一致していた)。
+        // 実写でも夜景はわざと露出を切り詰めて撮るため、既定で4.5段暗くする。
+        // 既定値は「肉眼で見た月明かりの夜」に合わせて実測で決めた
+        // (m_MesopicStrength=1のときの、月光を受ける壁 / 夜空の8bitコード):
+        //   3.5段 … 壁19 / 空70  形も質感もはっきり読め、夜というより夕暮れ寄り
+        //   4.5段 … 壁 6 / 空44  空が一番明るく、建物は輪郭と影がかろうじて読める ← 既定
+        //   5.5段 … 壁 2 / 空23  建物がほぼ完全に沈み、空しか見えない
+        //
+        // **m_MesopicStrengthとセットで意味を持つ**点に注意。露出を下げるだけでは
+        // 「暗いが色鮮やかな夜」にしかならず、肉眼で見た夜と一致しない。
+        //
+        // 参考: 旧既定(薄明視を入れる前)は次の値だった。
+        // 満月に照らされた石壁を、空が画面の約40%を占める屋上視点と、空が入らない構図の
+        // 両方で測った8bitコード(m_AutoExposureKeyCeilingEV=-1のとき):
+        //   3.0段 … 壁22   / 3.5段 … 壁15/13 / 4.0段 … 壁9/8
+        // 0にすると従来どおり「常に中庸なグレーへ合わせる」挙動に戻る。
+        //
+        // **m_AutoExposureKeyCeilingEVとセットで意味を持つ値**である点に注意。
+        // 上のクランプが無いと測光値が構図で2〜3.5段振れるので、この値をいくつにしても
+        // カメラの向きで夜の明るさが変わってしまう
+        float m_AutoExposureNightRolloffEV = Defaults::AutoExposureNightRolloffEV;
+        // 補正カーブの折れ点[EV100]。測定値がDark以下で補正量が最大、Bright以上で0、間は線形。
+        // Darkの-2は満月の夜の地表(反射率0.2の面で約0.016 cd/m^2 = EV100約-3)のすぐ上、
+        // Brightの10は曇天の屋外あたりで、日中は補正が掛からない値にしてある
+        float m_AutoExposureNightRolloffDarkEV100 = Defaults::AutoExposureNightRolloffDarkEV100;
+        float m_AutoExposureNightRolloffBrightEV100 = Defaults::AutoExposureNightRolloffBrightEV100;
+        // 測光値がキー照度の基準EV(ComputeReferenceEV100。構図に依存しない)から
+        // 何段上まで行くのを許すか[EV]。十分大きな値(16など)で無効になる。
+        //
+        // 【位置づけ】構図で露出が振れる問題そのものは、AutoExposure.hlslで
+        // **空を測光から外した**ことで根本的に解決している(21.9.8節)。
+        // こちらは残った病的なケースへの保険で、通常は発動しない:
+        // 夜の街で明るい看板が画面の大半を占めるようなとき、明るい側に寄った測光範囲
+        // (50〜95パーセンタイル)がその看板に支配され、街並みが黒く沈むのを防ぐ。
+        //
+        // **上側だけを止める**のは、屋内のように実際の輝度が屋外のキー照度よりずっと低い
+        // シーンでは測光値が下へ振れるのが正しいため(両側を締めると屋内が真っ暗になる)。
+        // 下側はm_AutoExposureMinEV100が絶対的な下限として効く。
+        //
+        // 既定の+2は「通常のシーンでは発動しないが、極端なケースは止まる」余裕を見た値。
+        // 空除外の前は-1にしていたが、空を外した今それでは締めすぎになる
+        // (夜の壁が3.8から4.7へ持ち上がってしまう)
+        float m_AutoExposureKeyCeilingEV = Defaults::AutoExposureKeyCeilingEV;
 
         // ブルームパス(Bloom.hlsl): 半解像度から始まるピラミッドを段階的にダウンサンプルし、
         // 3x3テントで戻しながら加算することで広く滑らかな光の裾を作る。
@@ -436,6 +505,10 @@ namespace Kurenai
             IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLPrefilterDebugMipLevel、TextureCube)
             IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス)
             Bloom,              // ブルームのピラミッド最上段(半解像度、HDR)をトーンマッピングして表示
+            LightTiles,         // タイルライトカリングのライトグリッド(タイルあたりのライト数)をヒートマップ表示
+            ProbeIrradiance,    // 反射プローブの拡散イラディアンス(m_ProbeDebugIndex番のプローブ)
+            ProbePrefilter,     // 反射プローブのプリフィルタ済み鏡面(ミップ0がキャプチャ結果そのもの)
+            ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -501,7 +574,41 @@ namespace Kurenai
         // [0, kIBLPrefilterMipLevels-1]のミップ番号へ線形マッピングする(DeferredLighting.hlsl参照)
         static constexpr uint32_t kIBLPrefilterMipLevels = 6;
         static constexpr uint32_t kIBLBRDFLUTSize = 128;
+        // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
+        // オフラインで焼いたDDS(Sky.dds)と違い、太陽が動くと空の輝度分布の「形」も追従する
+        // (circumsolarの明るい領域が太陽と一緒に動く)。詳細はSkyGenerate.hlsl冒頭。
+        //
+        // .ksceneで[Scene]Skyboxを明示しているシーン(White Furnace TestのUniformWhite.dds)は
+        // 従来どおりDDSを使う必要があるため、手続き空は別テクスチャに持ち、
+        // ActiveSkyTexture()がフレームごとにどちらを使うか決める
+        static constexpr uint32_t kProceduralSkySize = 256;
+        std::unique_ptr<RHI::IRHITexture> m_ProceduralSkyTexture;
+        std::unique_ptr<RHI::IRHIShader> m_SkyGenerateComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SkyGeneratePipelineState;
+        // SkyGenerate用の専用定数バッファ。m_IBLPrefilterConstantBufferと共用しないこと
+        // (UpdateBuffer→SetComputeConstantBufferの順序制約があり、共用すると事故りやすい。
+        //  詳細はRHI/IRHICommandList.hのSetConstantBufferのコメント)
+        std::unique_ptr<RHI::IRHIBuffer> m_SkyBakeConstantBuffer;
+        bool m_ProceduralSkyEnabled = Defaults::ProceduralSkyEnabled;
+        // 手続き空を焼き直す必要があるか。太陽が動いたとき等に立てる
+        bool m_SkyBakeDirty = true;
+        // 最後に焼いたときの太陽の向き。これと現在の向きの角度差が閾値を超えたら焼き直す。
+        // 毎フレーム焼くと空生成6回+プリフィルタ36回が常時走って無駄なため
+        DirectX::XMFLOAT3 m_LastBakedSunPosition{ 0.0f, 0.0f, 0.0f };
+        // 最後に焼いたときの実効プリ露出。空はプリ露出済みの値で焼かれるため、
+        // 露出が動いたときも焼き直さないと空だけ古い露出のまま取り残される
+        float m_LastBakedExposureEV100 = 0.0f;
+        // 焼き直しの角度閾値(度)。Auto Advance既定(1h/s)では太陽は15度/秒動くので、
+        // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
+        float m_SkyBakeAngleThresholdDegrees = 1.0f;
+
         bool m_IBLBaked = false;
+        // BRDF積分LUTを焼き終えたか(m_IBLBakedとは別管理)。このLUTは(NdotV, ラフネス)の
+        // 2Dテーブルでスカイボックスにも太陽の位置にも一切依存しないため、起動後に一度焼けば
+        // 二度と焼き直す必要がない。プリフィルタ済み鏡面が空の変化に追従して再ベイクされるように
+        // なった以降も巻き込まれて焼き直されないよう、専用のフラグとパスに分離してある
+        // (128x128 x 1024サンプル = 約1,680万イテレーションあり、毎回焼くと丸損になる)
+        bool m_BRDFLUTBaked = false;
         // 検証用の拡散イラディアンスマップを焼き終えたか(m_IBLBakedとは別管理)。既定の描画経路は
         // プリフィルタ済み鏡面の最終ミップなので、こちらは検証を有効にしたときにだけ焼く
         bool m_IBLIrradianceBaked = false;
@@ -555,6 +662,87 @@ namespace Kurenai
         // (KHR_materials_emissive_strengthをインポータが読むようになれば本来はそちらが正しい)
         float m_EmissiveIntensity = Defaults::EmissiveIntensity;
 
+        // 反射プローブ(19章): プローブ位置から6方向をProbeCapture.hlslで2Dレンダーターゲットへ描き、
+        // IBLConvolve.hlsl CSCopyCaptureToCubeFaceでスクラッチのキューブマップへ組み上げてから、
+        // IBLと同じCSIrradiance/CSPrefilterで畳み込んでプローブごとのキューブマップ配列へ書き込む。
+        // 環境ソースを差し替えるだけなので、シェーダー側の評価式(EvaluateIBL)はIBLと完全に共通。
+        //
+        // キューブマップ配列の枚数上限。TextureCubeArrayは実行時に伸縮できないため固定容量で確保し、
+        // これを超えるプローブが置かれたシーンは先頭からこの数だけを採用する(警告ログを出す)
+        static constexpr uint32_t kMaxReflectionProbes = 8;
+        // キャプチャ解像度。プリフィルタ済み鏡面のベース解像度(kIBLPrefilterBaseSize)と揃えることで、
+        // ミップ0が「畳み込み無しのキャプチャそのもの」になりデバッグ表示で生の映り込みを確認できる
+        static constexpr uint32_t kProbeCaptureSize = kIBLPrefilterBaseSize;
+        std::unique_ptr<RHI::IRHIShader> m_ProbeCaptureVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_ProbeCapturePixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCapturePipelineState;
+        // 1面ぶんのキャプチャ先(6面で使い回す)。HDRのままキューブへ写すためG-Bufferと違いFloat
+        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureColor;
+        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDepth;
+        std::unique_ptr<RHI::IRHIShader> m_ProbeCubeCopyComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCubeCopyPipelineState;
+        // キャプチャした6面を組み上げるスクラッチのキューブマップ(単一キューブ)。畳み込みの入力に
+        // なるためTextureCubeArrayではなくTextureCubeである必要がある(IBLConvolve.hlslのSourceSkyboxは
+        // TextureCube宣言のまま。これによりIBLの畳み込みシェーダーを一切変更せず再利用できる)。
+        // プローブは1つずつ順に焼くため1枚で足りる
+        std::unique_ptr<RHI::IRHITexture> m_ProbeRadianceCube;
+        // 畳み込み結果(プローブごと)。DeferredLighting.hlslがTextureCubeArrayとして読む
+        std::unique_ptr<RHI::IRHITexture> m_ProbeIrradianceArray;
+        std::unique_ptr<RHI::IRHITexture> m_ProbePrefilteredArray;
+        // プローブの影響範囲(位置・半径)をシェーダーへ渡すStructuredBuffer(t13)
+        std::unique_ptr<RHI::IRHIBuffer> m_ProbeBuffer;
+        // キャプチャの面ごとに値を更新して使い回すFrameConstants(共有のm_FrameConstantBufferとは別。
+        // ViewProj/CameraPositionだけをプローブのものへ差し替える。詳細はProbeCapture.hlsl冒頭)
+        std::unique_ptr<RHI::IRHIBuffer> m_ProbeCaptureConstantBuffer;
+        // LoadSceneがm_Scene.ReflectionProbesからコピーし、以降ImGuiが編集する(m_Lightsと同じ方針)。
+        // m_SceneMutexで保護される
+        std::vector<Assets::ReflectionProbe> m_ReflectionProbes;
+        int m_SelectedProbeIndex = -1;
+        // 次のRender()でプローブを焼き直す要求。シーン読み込み時とImGuiのBakeボタンで立てる。
+        // スカイボックス由来のIBLと違いシーンのジオメトリ・ライトに依存するため、
+        // 「一度焼いたら二度と焼かない」ではなく明示的な要求ベースにしている
+        bool m_ProbeBakeRequested = false;
+        // 一度でも焼けたか。焼く前のプローブは中身が未定義なので、それまでは影響を無効にして
+        // グローバルIBLのまま描く(未初期化のキューブマップが映り込むのを防ぐ)
+        bool m_ProbeBaked = false;
+        bool m_ReflectionProbeEnabled = Defaults::ReflectionProbeEnabled;
+        // 視差補正(box projection)を行うか。Box形状のプローブにのみ効く。無効にすると
+        // 反射ベクトルをそのまま引くPhase 1相当の挙動になり、壁際で反射位置がずれるのを確認できる
+        bool m_ProbeParallaxCorrectionEnabled = Defaults::ProbeParallaxCorrectionEnabled;
+        // プローブ間・プローブとグローバルIBLの重み付きブレンドを行うか。無効にすると
+        // 「影響範囲に入る最も近い1つだけを使う」Phase 1相当の挙動になり、境界の継ぎ目を確認できる
+        bool m_ProbeBlendingEnabled = Defaults::ProbeBlendingEnabled;
+        // デバッグ表示(Render Targets)で確認するプローブ番号とプリフィルタのミップレベル
+        int32_t m_ProbeDebugIndex = 0;
+        int32_t m_ProbePrefilterDebugMipLevel = 0;
+
+        // プローブの更新モード。焼き直しのコストと「シーンの変化への追従」のどちらを取るかの選択で、
+        // ImGuiで切り替えて負荷と品質を比較できるようにしてある(19.10節)
+        enum class ProbeUpdateMode
+        {
+            // シーン読み込み時とImGuiのBakeボタンのときだけ焼く。実行時コストはゼロだが、
+            // ライトや時刻を動かしても反射は焼いた時点のまま止まる
+            Baked,
+            // 上に加えて、焼き上がりに影響する状態(時刻・太陽・ライト)の変化を検出して自動で焼き直す。
+            // 変化していないフレームのコストはゼロだが、変化したフレームは全プローブぶんの
+            // フルベイクが1フレームに集中する
+            OnDemand,
+            // 上に加えて、毎フレーム1面ずつ焼き直す。6面揃った時点でそのプローブを畳み込み、
+            // 次のプローブへ回る(ラウンドロビン)。全プローブを毎フレーム焼くとドローコールが
+            // プローブ数×6倍になり非現実的なため、時間分割を既定の実装方式にしている
+            Realtime,
+        };
+        ProbeUpdateMode m_ProbeUpdateMode = ProbeUpdateMode::Baked;
+        // Realtimeの進行状態。次に焼くプローブ番号と面番号
+        uint32_t m_ProbeRealtimeProbeIndex = 0;
+        uint32_t m_ProbeRealtimeFace = 0;
+        // OnDemandの変化検出用。最後にフルベイクを発行した時点の状態の署名。
+        // 毎フレームの署名と突き合わせ、変わっていれば焼き直しを要求する
+        uint64_t m_ProbeBakeSignature = 0;
+        // 焼き上がりに影響する状態(時刻・太陽・シャドウ・IBL強度・全ライト)から署名を作る。
+        // 影響範囲(形状・半径・ブレンド距離)はキャプチャ内容を変えないため含めない
+        uint64_t ComputeProbeBakeSignature() const;
+
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = Defaults::TimeOfDay;
         bool m_TimeAutoAdvance = Defaults::TimeAutoAdvance;
@@ -563,6 +751,16 @@ namespace Kurenai
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)
         float m_SunAzimuthDegrees = Defaults::SunAzimuthDegrees;
+
+        // 月の位置。**時刻には連動せず、ここで指定した固定位置に居続ける**。
+        // 実際の月は太陽とは独立した周期(朔望月)で動くので、反太陽方向に固定するのは
+        // 「常に満月かつ常に真夜中に南中する」という二重の簡略化になってしまう。
+        // 任意の月齢・任意の時刻の見え方を作れるよう、位置は手動指定にしている。
+        // 方位角の規約は太陽と同じ(X軸が0度、Z軸(+方向)が90度)。
+        // 仰角が0度以下なら月は地平線下にあり、月光は出ない。
+        // シーンを切り替えても引き継がれる(.ksceneのキーは持たない)
+        float m_MoonAzimuthDegrees = Defaults::MoonAzimuthDegrees;
+        float m_MoonElevationDegrees = Defaults::MoonElevationDegrees;
 
         // パスごとにバインドするサンプラーの組。スロットの役割(s0=MaterialSampler、
         // s1=ColorSampler、s2=DataSampler)はShaders/3D/Samplers.hlsliで定義しており、
@@ -586,8 +784,63 @@ namespace Kurenai
         // 容量(kMaxLights)超過を検出した最初のフレームだけ警告ログを出すためのフラグ
         bool m_LightOverflowLogged = false;
 
+        // ポイント/スポットライトのスクリーンスペースシャドウ(接触影)の設定。
+        // シャドウマップを増やさず、G-Bufferの深度バッファをライト方向へレイマーチして影を出す
+        // (Shaders/3D/ScreenSpaceShadow.hlsli、docs/Architecture.html 18章)
+        bool m_ScreenSpaceShadowEnabled = Defaults::ScreenSpaceShadowEnabled;
+        // レイマーチのステップ数。ScreenSpaceShadow.hlsliのkSSSMaxStepCount(64)が上限
+        int m_ScreenSpaceShadowStepCount = Defaults::ScreenSpaceShadowStepCount;
+        // 1本のレイが伸びる最大のワールド距離。ライトまでの距離がこれより短ければそちらが優先される。
+        // 短いほど「接触影」寄りになり、コストも下がる
+        float m_ScreenSpaceShadowMaxRayLength = Defaults::ScreenSpaceShadowMaxRayLength;
+        // 遮蔽と判定する深度差の上限。深度バッファがサーフェスの厚みを持たないための近似で、
+        // 大きすぎると遠景が無限に厚い遮蔽物として振る舞い、小さすぎると薄い物体を貫通する
+        float m_ScreenSpaceShadowThickness = Defaults::ScreenSpaceShadowThickness;
+        // レイ始点を法線方向へ押し出す量(View空間深度に比例させる係数)。自己遮蔽(シャドウアクネ)対策
+        float m_ScreenSpaceShadowNormalBias = Defaults::ScreenSpaceShadowNormalBias;
+        // ヒット位置が画面端に近いときに影を弱める幅(UV単位)。SSRのkSSREdgeFadeDistanceと同じ役割
+        float m_ScreenSpaceShadowEdgeFade = Defaults::ScreenSpaceShadowEdgeFade;
+        // 1ピクセルが撃てるシャドウレイ数の上限。ライトを増やしてもレイマーチのコストが
+        // 線形に伸び続けないようにするための予算
+        int m_ScreenSpaceShadowMaxLightsPerPixel = Defaults::ScreenSpaceShadowMaxLightsPerPixel;
+
+        // タイルライトカリング(Shaders/3D/LightCulling.hlsl)。画面を16x16ピクセルのタイルに分け、
+        // タイルごとに「そのタイルに届くライト」のインデックスリストをコンピュートシェーダーで作る。
+        // 直接光パスはそのリストだけをループするため、ピクセルあたりのコストが
+        // シーン全体のライト数ではなくタイル内のライト数になる。
+        // これは純粋な最適化であり、有効/無効で最終画像が変わってはならない
+        // タイルライトカリングのタイルサイズ(1辺のピクセル数)。
+        // LightCulling.hlsl の kTileSize および numthreads と必ず一致させること
+        static constexpr uint32_t kLightTileSize = 16;
+        // 1タイルが保持できるライト数の上限。LightCulling.hlsl の kMaxLightsPerTile および
+        // DirectLighting.hlsl の同名の定数と必ず一致させること(バッファのストライドがこの値で決まる)。
+        // HLSL側はgroupshared配列のサイズに使うためコンパイル時定数である必要があり、
+        // C++からの受け渡しでは代用できないので、3箇所で同じ値を書く形になっている。
+        // .cppの無名名前空間ではなくここに置いてあるのは、DebugViewPanelがヒートマップの
+        // 上限としてこの値を使うため(UIパネルはfriendなのでprivateのまま参照できる)
+        static constexpr uint32_t kLightTileCapacity = 64;
+        // ライトグリッド1タイルぶんの要素数(先頭1個がライト数、残りがライトインデックス)
+        static constexpr uint32_t kLightTileStride = 1 + kLightTileCapacity;
+
+        std::unique_ptr<RHI::IRHIShader> m_LightCullingComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_LightCullingPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_LightCullingConstantBuffer;
+        // ライトグリッド本体(BufferUsage::StructuredRW)。コンピュートがUAVで書き、
+        // 直接光パスのピクセルシェーダがSRVで読む。解像度に依存するためCreateRenderTargetsで作り直す
+        std::unique_ptr<RHI::IRHIBuffer> m_LightTileBuffer;
+        uint32_t m_LightTileCountX = 0;
+        uint32_t m_LightTileCountY = 0;
+        bool m_LightCullingEnabled = Defaults::LightCullingEnabled;
+        // タイル容量の超過"条件"(シーンのライト数が容量を超えている)を検出した最初のフレームだけ
+        // 警告ログを出すためのフラグ(m_LightOverflowLoggedと同じ作法)。
+        // 実際に超過したかはGPU側にしか無いため、確認はDebugView::LightTilesのマゼンタで行う
+        bool m_LightTileOverflowLogged = false;
+        // DebugView::LightTilesのヒートマップで赤に振り切る基準のライト数。容量(64)を基準にすると
+        // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
+        int m_LightTileHeatmapMax = Defaults::LightTileHeatmapMax;
+
         // LoadScene(Updateスレッド。UpdateSceneSwitch経由で呼ばれる)が書き込み、Render()(Renderスレッド。
-        // 描画そのものに加えRenderPostProcessUI等のImGuiスライダーがm_SSAORadius等を直接書き換える)が
+        // 描画そのものに加えUIパネルのスライダーがm_SSAORadius等を直接書き換える)が
         // 読み書きする「シーン状態」一式をこのミューテックスで保護する。LoadScene呼び出し全体と
         // Render()呼び出し全体をそれぞれこのミューテックスで包むため、この2つは同時に走らない
         // (=個々のメンバに追加のロックは不要)。対象はm_Scene/m_CurrentSceneIndex/m_Cameraと、
@@ -614,6 +867,25 @@ namespace Kurenai
         // 実在の写真露出値(EV100)。太陽・環境光・ポイント/スポットライトすべてに同じ値がかかる、
         // シーン全体で単一の露出設定(詳細はdocs/Architecture.html参照)
         float m_SceneExposureEV100 = Defaults::SceneExposureEV100;
+
+        // 実際にライト強度へ事前乗算される「実効プリ露出」。m_SceneExposureEV100(ユーザー設定)に
+        // 時刻由来のバイアスを足したもので、Renderスレッドのみが読み書きする。
+        //
+        // 【なぜ可変にする必要があるか】
+        // プリ露出をEV100=15固定のままだと夜がfp16でつぶれる。満月の照度は0.25lxで、
+        // 反射率0.2の面の輝度は 0.25*0.2/π = 0.016 cd/m^2。これに ComputeExposure(15)=2.54e-5 を
+        // 掛けると 4.0e-7 となり、SceneColor(R16G16B16A16_Float、最小正規化数6.1e-5)の
+        // 非正規化域へ落ちて情報が失われる。AutoExposure.hlsl も輝度1e-6未満の画素は
+        // ヒストグラムに数えないため、露出計にも乗らず復元できない。
+        //
+        // M7で導入したプリ露出方式は Tonemap・Bloom・AutoExposure がすべて同じ値を受け取って
+        // 割り戻す構造になっているため、**フレーム単位で変えても最終的な絵は変わらない**。
+        // その性質をそのまま利用して、バッファの数値レンジだけを健全に保つ
+        float m_EffectiveExposureEV100 = 15.0f;
+        // 実効プリ露出が初期化済みか(初回フレームは平滑化せず即座に合わせる)
+        bool m_EffectiveExposureInitialized = false;
+        // 実効プリ露出の時間平滑化の速さ[1/秒]。段付きを防ぐために指数追従させる
+        float m_EffectiveExposureAdaptSpeed = 2.0f;
 
         // RenderSceneSwitchUI(Renderスレッド)でシーン切り替えボタンが押されたときに書き込まれ、
         // UpdateSceneSwitch(Updateスレッド)が毎フレーム読み取って消費する1要素の受け渡し用。

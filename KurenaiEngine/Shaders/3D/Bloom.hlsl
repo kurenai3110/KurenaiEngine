@@ -40,7 +40,9 @@ cbuffer BloomConstants : register(b1)
 
     // CPU側でライト強度へ事前乗算済みのEV100(プリ露出)
     float PreExposureEV100;
-    float3 BloomPadding;
+    // 手動露出時に掛ける倍率(Tonemap.hlslのExposureScaleと同じ値)
+    float ExposureScale;
+    float2 BloomPadding;
 };
 
 // ダウンサンプル: 読み出し元(1段上の解像度、または最初はSceneColor)
@@ -49,7 +51,7 @@ Texture2D SourceTexture : register(t0);
 // アップサンプル時のみ使う、1段下(低解像度側)の累積結果
 Texture2D LowerTexture : register(t1);
 // AutoExposure.hlslが書いた露出(texel(0,0)=EV100)。最初のダウンサンプルでしきい値を
-// 適用する前に露出を反映させるために読む(ExposureScale()のコメント参照)
+// 適用する前に露出を反映させるために読む(ResolveExposureScale()のコメント参照)
 Texture2D<float> ExposureTexture : register(t2);
 RWTexture2D<float4> DestTexture : register(u0);
 
@@ -57,13 +59,15 @@ RWTexture2D<float4> DestTexture : register(u0);
 // 事実上「何も通さない」設定になってしまう。しきい値を「表示上の白」を基準にした直感的な
 // 値のままにするため、ピラミッドの入力段で露出を先に反映しておく。
 // 露出はTonemap.hlslと同じ式(プリ露出EVと自動露出EVの差)で求める
-float ExposureScale()
+float ResolveExposureScale()
 {
     if (UseAutoExposure > 0.0f)
     {
         return exp2(PreExposureEV100 - ExposureTexture.Load(int3(0, 0, 0)));
     }
-    return 1.0f;
+    // 手動露出でも1.0ではない。プリ露出EV100は時刻連動で変動するため、
+    // CPU側が 2^(実効EV100 - 設定EV100) を入れてくる
+    return ExposureScale;
 }
 
 float Luminance(float3 color)
@@ -142,7 +146,7 @@ void CSDownsample(uint3 dispatchThreadID : SV_DispatchThreadID)
         result = (block0 * w0 + block1 * w1 + block2 * w2 + block3 * w3 + block4 * w4) / max(totalWeight, 1e-6f);
         // しきい値の前に露出を反映する。以降のピラミッドとTonemapでの合成はすべて
         // この「露出適用後」のスケールで揃う(Tonemap.hlslは露出を掛けたあとにブルームを混ぜる)
-        result *= ExposureScale();
+        result *= ResolveExposureScale();
         result = ApplyThreshold(result);
     }
     else

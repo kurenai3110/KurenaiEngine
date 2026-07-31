@@ -201,11 +201,11 @@ void EvaluateIBLSplit(
     const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
     const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
 
-    // 夜間の減衰はDeferredLighting.hlslと同じくAmbientColor.aで行う(プリフィルタマップ・
-    // イラディアンスマップは昼固定のスカイボックスから焼いたものなので、これが唯一の減光手段)
-    outDiffuse = kd * albedo * irradiance * AmbientColor.a;
+    // 昼度による減衰はしない(DeferredLighting.hlsl の EvaluateIBL と同じ理由)。
+    // 手続き空が太陽高度に応じて自分で暗くなるため、ここで掛けると二重に暗くなる
+    outDiffuse = kd * albedo * irradiance;
     outSpecular = prefiltered * (F0 * brdf.x + brdf.y)
-        * SpecularEnergyCompensation(F0, brdf, ShadowParams.w) * AmbientColor.a;
+        * SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
 }
 
 float DistanceAttenuation(float distSq, float range)

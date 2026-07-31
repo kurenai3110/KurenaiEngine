@@ -42,10 +42,14 @@ namespace Kurenai::UI
             "IBL - プリフィルタ済み鏡面 (キューブマップ・ミップチェーン)",
             "IBL - BRDF LUT (X=NdotV, Y=粗さ)",
             "ブルーム (ピラミッド最上段・半解像度)",
+            "ライトタイル (タイルあたりのライト数ヒートマップ)",
+            "プローブ - イラディアンス (キューブマップ配列)",
+            "プローブ - プリフィルタ済み鏡面 (ミップ0=キャプチャ結果)",
+            "プローブ - 影響範囲 (プローブごとの色分け)",
         };
         static_assert(
-            static_cast<int>(DebugView::Bloom) == 18,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はBloom)");
+            static_cast<int>(DebugView::ProbeInfluence) == 22,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はProbeInfluence)");
 
         DrawUsageHint();
         BeginParamGroup();
@@ -80,6 +84,41 @@ namespace Kurenai::UI
                 "プリフィルタ ミップレベル###PrefilterMip", &m_Engine.m_IBLPrefilterDebugMipLevel, 0,
                 static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
                 "表示するミップの段。段が進むほど粗い面向けにぼかされている");
+        }
+
+        if (m_Engine.m_DebugView == DebugView::ProbeIrradiance || m_Engine.m_DebugView == DebugView::ProbePrefilter)
+        {
+            // プローブが1つも無いシーンでもスライダーの範囲が壊れないよう下限を0に保つ
+            const int maxProbeIndex =
+                m_Engine.m_ReflectionProbes.empty() ? 0 : static_cast<int>(m_Engine.m_ReflectionProbes.size()) - 1;
+            SliderIntEx(
+                "プローブ番号###ProbeIndex", &m_Engine.m_ProbeDebugIndex, 0, maxProbeIndex, 0,
+                "表示する反射プローブの番号。反射プローブパネルの一覧と同じ並び");
+
+            if (m_Engine.m_DebugView == DebugView::ProbePrefilter)
+            {
+                SliderIntEx(
+                    "プローブ プリフィルタ ミップ###ProbePrefilterMip", &m_Engine.m_ProbePrefilterDebugMipLevel, 0,
+                    static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
+                    "表示するミップの段。ミップ0はぼかす前のキャプチャ結果そのもの");
+            }
+        }
+
+        if (m_Engine.m_DebugView == DebugView::LightTiles)
+        {
+            // ヒートマップの色: 黒=0灯、青=少ない、緑、赤=上限以上、マゼンタ=タイル容量超過
+            ImGui::TextWrapped(
+                "黒=0灯 / 青→緑→赤=ライトが多い / マゼンタ=タイル容量(%uライト)を超過",
+                KurenaiEngine3D::kLightTileCapacity);
+            SliderIntEx(
+                "ヒートマップの上限###HeatmapMax", &m_Engine.m_LightTileHeatmapMax, 1,
+                static_cast<int>(KurenaiEngine3D::kLightTileCapacity), Defaults::LightTileHeatmapMax,
+                "この灯数で赤になるようヒートマップを正規化する。ライトが少ないシーンでは下げると差が見える");
+
+            if (!m_Engine.m_LightCullingEnabled)
+            {
+                ImGui::TextWrapped("タイルドライトカリングが無効のため、ライトグリッドは更新されていません");
+            }
         }
 
         // AO/GIバッファの間接拡散光のように値が小さいバッファ(暗い室内では0.02〜0.1程度)は
