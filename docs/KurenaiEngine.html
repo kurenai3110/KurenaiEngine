@@ -1036,11 +1036,12 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 補正がかえってずれます)。
 </p>
 <p>
-ImGuiの「Reflection Probes」パネルにある<strong>「Use Depth Cube」</strong>(既定で有効)を入れると、
+ImGuiの「Reflection Probes」パネルにある<strong>「Use Depth Cube」</strong>を入れると、
 箱ではなく<strong>キャプチャ時に一緒に焼いた実際の距離</strong>を辿って反射を当てます。部屋が
-直方体から外れている場合や、球のように強く曲がった鏡面で反射像が二重に割れる場合に効きます。
-このとき箱は「探索範囲の上限」としてのみ使われるため、<code>BoxExtents</code>を部屋に合わせる
-重要度は下がります。
+直方体から外れている場合や、球のように強く曲がった鏡面で反射像が二重に割れる場合に効きます
+(このとき箱は「探索範囲の上限」としてのみ使われるため、<code>BoxExtents</code>を部屋に合わせる
+重要度は下がります)。ただし引き換えに、焼いた距離の解像度に由来する<strong>階段状のエッジ</strong>が
+反射像に乗るため、<strong>既定では無効</strong>にしてあります。
 </p>
 <p>
 同じパネルの<strong>「Occlusion (Reduce Light Leak)」</strong>も同じ距離を使い、プローブから見えない

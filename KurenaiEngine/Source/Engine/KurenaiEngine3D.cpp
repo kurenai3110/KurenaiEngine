@@ -2189,7 +2189,7 @@ namespace Kurenai
         ImGui::Checkbox("Use Depth Cube", &m_ProbeDepthParallaxEnabled);
         if (ImGui::IsItemHovered())
         {
-            ImGui::SetTooltip("Ray-marches the captured distance cube instead of assuming the\nroom is exactly the box. Falls back to the box hit when no\nintersection is found.");
+            ImGui::SetTooltip("Ray-marches the captured distance cube instead of assuming the\nroom is exactly the box. Falls back to the box hit when no\nintersection is found. Reduces the doubled image on curved mirrors\nbut adds stair-stepping from the cube's texels. Off by default.");
         }
         ImGui::Unindent();
         ImGui::EndDisabled();
