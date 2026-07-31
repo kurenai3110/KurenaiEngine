@@ -45,6 +45,7 @@ namespace Kurenai::RHI
         void SetComputeUnorderedAccessTextureCubeFace(
             uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0, uint32_t cubeIndex = 0) override;
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
+        void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
     private:
@@ -115,7 +116,10 @@ namespace Kurenai::RHI
         // CopyDescriptors・ルートテーブルの再バインドを行う。
         // SRVはDX11と同じく上書きするまで維持され、UAVはDX11がDispatch直後に
         // CSSetUnorderedAccessViewsでnullを張るのに合わせてDispatch直後にnullへ戻す
-        static constexpr uint32_t kComputeSrvSlotCount = 4;
+        // SRVが16あるのはレイトレーシングのパスがTLAS・G-Buffer・シーンジオメトリを
+        // 1回のディスパッチで同時に読むため。DX12Device.cpp側の同名の定数
+        // (ルートシグネチャのSRVレンジ幅)と必ず一致させること
+        static constexpr uint32_t kComputeSrvSlotCount = 16;
         static constexpr uint32_t kComputeUavSlotCount = 4;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeSrvHandles[kComputeSrvSlotCount]{};
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeUavHandles[kComputeUavSlotCount]{};

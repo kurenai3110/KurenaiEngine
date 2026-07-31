@@ -1861,6 +1861,19 @@ namespace Kurenai
         m_ProbeRealtimeProbeIndex = 0;
         m_ProbeRealtimeFace = 0;
 
+        // レイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの統合バッファを構築する。
+        // 直前のWaitForGPUIdleでGPUは旧シーンを参照していないため、旧構造の破棄も安全。
+        // 非対応環境(DX11、Tier 1.1未満のアダプタ)では何も作らず、描画側は従来の
+        // スクリーンスペース手法のまま動く。構築に失敗しても描画は継続する
+        if (m_Device->SupportsRaytracing())
+        {
+            m_RaytracingScene.Build(*m_Device, m_Scene);
+        }
+        else
+        {
+            m_RaytracingScene.Reset();
+        }
+
         FrameCameraToModel();
 
         const wchar_t* apiName = (m_GraphicsAPI == GraphicsAPI::DX12) ? L"DX12" : L"DX11";

@@ -555,7 +555,11 @@ std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTextureArray(uint32_t width, uin
 std::unique_ptr&lt;IRHITexture&gt;   CreateUAVTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels);
 std::unique_ptr&lt;IRHISamplerSet&gt; CreateSamplerSet(const SamplerDesc* descs, uint32_t count);
-IRHICommandList*                GetImmediateCommandList();</code></pre>
+IRHICommandList*                GetImmediateCommandList();
+
+bool SupportsRaytracing() const;
+std::unique_ptr&lt;IRHIAccelerationStructure&gt; CreateBottomLevelAS(const BottomLevelASDesc&amp; desc);
+std::unique_ptr&lt;IRHIAccelerationStructure&gt; CreateTopLevelAS(const TopLevelASDesc&amp; desc);</code></pre>
 <p>
 <code>CreateTextureFromFile</code> は拡張子(<code>.dds</code>/<code>.tga</code>/その他はWIC経由で
 png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベースカラー等「見た目の色」を持つ
@@ -610,6 +614,63 @@ DX12実装はシェーダ可視ディスクリプタヒープへ直接書き込�
 並列プリフェッチが実例)。
 </p>
 
+<h4>4.2.1 レイトレーシング</h4>
+<p>
+レイトレーシングは<b>DX12かつDXR Tier 1.1対応のアダプタでのみ</b>使える。
+使う前に必ず<code>SupportsRaytracing()</code>で分岐すること。DX11は常に<code>false</code>を返す。
+</p>
+<pre><code>if (device-&gt;SupportsRaytracing())
+{
+    // モデル1つ分のジオメトリからBLASを作る
+    RHI::BottomLevelASDesc blasDesc;
+    for (const auto&amp; mesh : model.Meshes)
+    {
+        RHI::ASGeometryDesc geometry;
+        geometry.VertexBuffer = mesh.VertexBuffer.get();
+        geometry.VertexCount = mesh.VertexCount;
+        geometry.VertexStrideInBytes = sizeof(Assets::Vertex);
+        geometry.IndexBuffer = mesh.IndexBuffer.get();
+        geometry.IndexCount = mesh.IndexCount;
+        blasDesc.Geometries.push_back(geometry);
+    }
+    auto blas = device-&gt;CreateBottomLevelAS(blasDesc);
+
+    // BLASへの参照とワールド変換からTLASを作る
+    RHI::TopLevelASDesc tlasDesc;
+    RHI::ASInstanceDesc instance;
+    instance.BottomLevel = blas.get();
+    instance.InstanceID = 0;   // シェーダがCommittedInstanceID()で受け取る値
+    // instance.Transform は行優先3x4(平行移動はTransform[*][3])
+    tlasDesc.Instances.push_back(instance);
+    auto tlas = device-&gt;CreateTopLevelAS(tlasDesc);
+
+    // コンピュートシェーダへバインドする(RaytracingAccelerationStructureとして読める)
+    cmd-&gt;SetComputeAccelerationStructure(0, tlas.get());
+}</code></pre>
+<p>
+<code>CreateBottomLevelAS</code> / <code>CreateTopLevelAS</code> は関数を抜けた時点でGPU上の構築が
+完了している(内部で同期する)ため、戻り値をそのまま次の入力に使ってよい。
+非対応環境や構築失敗時は<b>例外を投げずログを出して<code>nullptr</code>を返す</b>。
+レイトレーシングは従来手法へフォールバックできる機能なので、失敗してもアプリを止めない設計にしてある。
+</p>
+<p>
+シェーダへバインドできるのは<b>TLASのみ</b>(BLASを渡すとログを出して無視される)。
+また<code>desc.Instances</code>が参照するBLASは、TLASより長く生存させること
+(理由は<code>Architecture.html</code> 22.3節)。
+</p>
+<p>
+頂点は<b>モデルのローカル空間のまま</b>BLASへ登録し、ワールドへの配置は
+<code>ASInstanceDesc::Transform</code>で行う。<code>Assets::ModelInstance::World</code>は
+HLSLへそのまま渡せるよう転置済みで保持されているため、その先頭3行をコピーすれば
+<code>Transform</code>の行優先3x4と一致する。
+</p>
+<p class="note">
+レイを実際に飛ばすHLSLの<code>RayQuery</code>はシェーダーモデル6.5以上を要求するが、
+現在このエンジンのシェーダーは<code>d3dcompiler</code>のSM 5.0でコンパイルしている。
+そのため現状のAPIで作れるのは高速化構造までで、レイトレーシングを行うシェーダーは
+まだ書けない(dxcへの移行が別途必要)。
+</p>
+
 <h3>4.3 <code>RHI::IRHICommandList</code></h3>
 <pre><code>void SetRenderTarget(IRHISwapChain* swapChain);
 void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture,
@@ -635,6 +696,7 @@ void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer);
 void SetComputeTexture(uint32_t slot, IRHITexture* texture);
 void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0); // mipLevelはCreateHiZTexture用(4.3.2参照)
 void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer);
+void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* as); // TLASをtスロットへ(4.2.1参照)
 void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ);</code></pre>
 <p>
 <code>SetShaderResourceBuffer</code>は<code>BufferUsage::StructuredReadOnly</code>で作成した
@@ -1266,6 +1328,8 @@ assimp・DirectXTexに加え<code>KurenaiEngineLibrary.vcxproj</code>への依�
 <tr><td>ビルド設定の一致</td><td>3つのDLL(KurenaiEngineLibrary/KurenaiEngine3D/KurenaiEngine2D)とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
 <tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
 <tr><td>アセットの事前変換が必須</td><td><code>Assets::LoadModel</code>は<code>.kmodel</code>のみを受け付ける。<code>.gltf</code>/<code>.fbx</code>等のソースモデルは、実行前に<code>KurenaiPacker.exe</code>で変換しておく必要がある(7章参照)</td></tr>
+<tr><td>レイトレーシングはDX12専用</td><td>DXRはD3D12の機能のため、DX11バックエンドでは使えない(<code>IRHIDevice::SupportsRaytracing()</code>が常に<code>false</code>を返し、<code>CreateBottomLevelAS</code>/<code>CreateTopLevelAS</code>は<code>nullptr</code>を返す)。DX12でもアダプタがDXR Tier 1.1に達していない場合は同様に<code>false</code>になる。使う前に必ずこの関数で分岐すること(4.2.1参照)</td></tr>
+<tr><td>レイトレーシングのシェーダー</td><td>高速化構造(BLAS/TLAS)は作れるが、レイを飛ばすシェーダーはまだ書けない。HLSLの<code>RayQuery</code>はシェーダーモデル6.5以上を要求する一方、現在シェーダーは<code>d3dcompiler</code>のSM 5.0でコンパイルしているため(4.2.1参照)</td></tr>
 <tr><td>ポイント/スポットライトの影</td><td>影を落とさない(シャドウマップは平行光1灯のみ対応)</td></tr>
 <tr><td>ライトの同時描画数</td><td>最大1024灯まで(実データでの想定はせいぜい数灯〜十数灯)。超過分はカメラに近い順に採用される</td></tr>
 <tr><td>エリアライト</td><td>未対応(4.6.1参照)。球・チューブ・矩形のライトはモデルからもImGuiからも作成できない</td></tr>

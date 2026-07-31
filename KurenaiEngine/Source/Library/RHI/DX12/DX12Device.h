@@ -118,7 +118,22 @@ namespace Kurenai::RHI
         // リサイズやシャットダウンなど、パイプライン化の恩恵が不要な箇所でのみ使う
         void WaitForGPUIdle() override;
 
+        bool SupportsRaytracing() const override { return m_SupportsRaytracing; }
+        std::unique_ptr<IRHIAccelerationStructure> CreateBottomLevelAS(const BottomLevelASDesc& desc) override;
+        std::unique_ptr<IRHIAccelerationStructure> CreateTopLevelAS(const TopLevelASDesc& desc) override;
+
     private:
+        // CreateBottomLevelAS/CreateTopLevelASの共通部分。組み立て済みの構築入力を受け取り、
+        // 必要なサイズを問い合わせてASバッファとスクラッチバッファを確保し、
+        // m_UploadCommandList4へ構築コマンドを積んで完了を同期的に待つ。
+        // createSrvがtrueの場合はTLAS用のSRVも作る。失敗時はログを出してnullptrを返す
+        std::unique_ptr<IRHIAccelerationStructure> BuildAccelerationStructure(
+            const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, bool createSrv, const char* debugName);
+        // ID3D12Device5 / ID3D12GraphicsCommandList4の取得とレイトレーシングティアの判定を行い、
+        // 結果をm_SupportsRaytracingへ記録する。判定結果は必ずログへ残す
+        // (非対応環境では上位層が黙って従来手法へフォールバックするため、ログが唯一の手がかりになる)
+        void DetectRaytracingSupport();
+
         void CreateRootSignature();
         void CreateComputeRootSignature();
         // CreateMippedUAVTextureCube(単一キューブ、SRVはTextureCube)と
@@ -142,6 +157,20 @@ namespace Kurenai::RHI
         void UploadSubmitAndWait();
 
         Microsoft::WRL::ComPtr<ID3D12Device> m_Device;
+        // DXR用のインタフェース。m_DeviceからQueryInterfaceで取得する。
+        // GetRaytracingAccelerationStructurePrebuildInfoを呼ぶのに必要で、
+        // 取得に失敗する(＝OS/ドライバがDXR世代でない)場合はm_SupportsRaytracingもfalseになる
+        Microsoft::WRL::ComPtr<ID3D12Device5> m_Device5;
+        // AS構築コマンド(BuildRaytracingAccelerationStructure)を積むためのインタフェース。
+        // m_UploadCommandList(リソースアップロード専用)からQueryInterfaceで取得する。
+        // 毎フレーム用のm_CommandListではなくこちらを使うのは、AS構築がLoadScene(Renderスレッド外)から
+        // 呼ばれるため。m_CommandListを触るとRender()が記録中のコマンドリストを壊す
+        // (m_UploadCommandListのコメント参照)
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> m_UploadCommandList4;
+        // D3D12_FEATURE_D3D12_OPTIONS5のRaytracingTierがTier 1.1以上か。
+        // インラインレイトレーシング(HLSLのRayQuery)はTier 1.1で追加された機能のため、
+        // Tier 1.0止まりのアダプタではfalseにする
+        bool m_SupportsRaytracing = false;
         // デバッグビルドでのみ取得する(リリースビルドではnullptrのままDrainDebugMessagesが即座に返る)
         Microsoft::WRL::ComPtr<ID3D12InfoQueue> m_InfoQueue;
         Microsoft::WRL::ComPtr<IDXGIFactory2> m_Factory;

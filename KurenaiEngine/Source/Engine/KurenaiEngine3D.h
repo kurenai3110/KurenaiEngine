@@ -16,6 +16,7 @@
 #include "KurenaiEngineBase.h"
 #include "KurenaiTypes.h"
 
+#include "Assets/RaytracingScene.h"
 #include "Assets/Scene.h"
 #include "Core/Camera.h"
 #include "Core/CPUProfiler.h"
@@ -849,6 +850,15 @@ namespace Kurenai
         // (宣言はそれぞれの節にあるが、書き込み元がLoadScene/ImGuiスライダーの2スレッドにまたがる点は共通)
         std::mutex m_SceneMutex;
         Assets::Scene m_Scene;
+        // m_Sceneに対応するレイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの
+        // 統合バッファ。LoadSceneがm_Sceneを読み込んだ直後に構築し、シーン切り替えのたびに
+        // 作り直す。デバイスがレイトレーシング非対応(DX11、またはDXR Tier 1.1未満のアダプタ)の
+        // 場合は空のまま(IsValid()==false)で、描画側は従来のスクリーンスペース手法を使う。
+        // m_Sceneと同じくm_SceneMutexで保護される(構築はUpdateスレッド、参照はRenderスレッド)。
+        //
+        // 【破棄順】m_Sceneより後に宣言することで、メンバ破棄順(宣言の逆順)により
+        // m_Sceneの頂点/インデックスバッファより先に破棄される
+        Assets::RaytracingScene m_RaytracingScene;
         size_t m_CurrentSceneIndex = 0;
         Core::Camera m_Camera;
 

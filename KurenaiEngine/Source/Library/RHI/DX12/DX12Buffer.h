@@ -69,6 +69,18 @@ namespace Kurenai::RHI
             uint32_t strideInBytes,
             uint32_t uploadRingCapacity);
 
+        // BufferUsage::StructuredImmutable用: DEFAULTヒープの本体とSRVだけを持つ。
+        // 作成時の初期データから変化しないためCPU書き込み経路(ステージングリング)を一切持たず、
+        // 上のStructuredReadOnly用コンストラクタとは別に用意している。
+        // initialStateは作成直後の実状態(GENERIC_READ)を渡す。以後遷移しない
+        DX12Buffer(
+            DX12Device* device,
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+            uint32_t srvIndex,
+            uint32_t sizeInBytes,
+            uint32_t strideInBytes,
+            D3D12_RESOURCE_STATES initialState);
+
         ~DX12Buffer() override;
 
         ID3D12Resource* GetResource() const { return m_Resource.Get(); }
@@ -89,6 +101,9 @@ namespace Kurenai::RHI
         // UpdateBufferのStructuredReadOnly経路へ入り、nullptrのUPLOADリソースを触ってしまう)。
         // Usageを直接保持して判定する
         bool IsStructuredReadOnly() const { return m_Usage == BufferUsage::StructuredReadOnly; }
+        // BufferUsage::StructuredImmutableで作成されたか。CPU書き込み経路を持たないため、
+        // UpdateBufferはこれを見て早期に弾く
+        bool IsStructuredImmutable() const { return m_Usage == BufferUsage::StructuredImmutable; }
         // 現在のリソース状態と異なる場合のみバリアを発行して遷移する(DX12Texture::TransitionToと同じパターン)。
         // BufferUsage::StructuredReadOnly / StructuredRWで使う
         void TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState);

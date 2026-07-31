@@ -103,6 +103,25 @@ namespace Kurenai::RHI
         (void)strideInBytes;
     }
 
+    DX12Buffer::DX12Buffer(
+        DX12Device* device,
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+        uint32_t srvIndex,
+        uint32_t sizeInBytes,
+        uint32_t strideInBytes,
+        D3D12_RESOURCE_STATES initialState)
+        : m_Device(device)
+        , m_Resource(std::move(resource))
+        , m_MappedPtr(nullptr)
+        , m_SlotSizeInBytes(sizeInBytes)
+        , m_RingCapacity(1)
+        , m_Usage(BufferUsage::StructuredImmutable)
+        , m_CurrentState(initialState)
+        , m_SrvIndex(srvIndex)
+    {
+        (void)strideInBytes;
+    }
+
     DX12Buffer::~DX12Buffer()
     {
         if (m_UavIndex != kInvalid)

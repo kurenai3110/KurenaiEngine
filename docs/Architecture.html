@@ -222,6 +222,7 @@
     <li><a href="#reflectionprobe">19. 反射プローブ(リフレクションプローブ)</a></li>
     <li><a href="#ssrprobe">20. SSRとプローブの合成(加算から差し替えへ)</a></li>
     <li><a href="#procedural-sky">21. 手続き空・月光・昼夜遷移</a></li>
+    <li><a href="#raytracing">22. レイトレーシング基盤(DXR)</a></li>
   </ol>
 </nav>
 
@@ -4354,6 +4355,205 @@ sRGBの原色付近でのV'(λ)の比 (0.024, 0.368, 0.608) をRGBの重みに�
 あわせて<code>AE Night Rolloff</code>は4.5段を維持した(壁3.8 / 空27.9)。
 実際の夜も空が一番明るく地上は沈むので、この関係が肉眼の見え方に近い。
 </p>
+</section>
+
+<section id="raytracing">
+<h2>22. レイトレーシング基盤(DXR)</h2>
+
+<p>
+反射(7章 SSR)・影(4章 CSM)・AO/GI(6章)はいずれもスクリーンスペース手法で、
+画面外や遮蔽物の裏にある情報を原理的に持てない。この制約を外すためのレイトレーシングを
+段階的に導入する。本章はその第1段である<strong>高速化構造(Acceleration Structure)と
+RHI抽象化の整備</strong>を扱う。この段階では描画結果は一切変わらない
+(レイを飛ばすシェーダーはまだ無く、構造だけを作って保持する)。
+</p>
+
+<h3>22.1 インラインレイトレーシング(DXR 1.1)を選んだ理由</h3>
+
+<p>DXRには2つの使い方がある。</p>
+<ul>
+<li><strong>フルパイプライン(DXR 1.0)</strong> — <code>ID3D12StateObject</code>にRayGen/Miss/ClosestHit
+シェーダーを束ね、シェーダーテーブルとローカルルートシグネチャを用意して<code>DispatchRays</code>で起動する。
+マテリアルごとのヒットシェーダー分岐や再帰レイが自然に書ける</li>
+<li><strong>インライン(DXR 1.1)</strong> — 通常のコンピュートシェーダーの中で<code>RayQuery&lt;&gt;</code>を
+使い、レイの走査を呼び出し側のループとして書く。State Object・シェーダーテーブル・専用の
+ルートシグネチャがいずれも不要</li>
+</ul>
+
+<p>
+このエンジンは<code>SetComputePipelineState</code>/<code>Dispatch</code>というコンピュートの抽象を
+既に持っているため、インライン方式なら<strong>RHIへの追加が「TLASを1つバインドするAPI」1本で済む</strong>。
+フルパイプラインを採ると、State Object・シェーダーテーブル・ヒットグループ・ローカルルートシグネチャという
+新しい概念をまとめてRHIの抽象へ持ち込む必要があり、DX11側に対応物が無いぶん抽象化の設計も重くなる。
+まず動くものを最短で作るためインライン方式から始めた。
+</p>
+<p class="note">
+将来フルパイプラインへ移る余地は残してある。<code>IRHIAccelerationStructure</code>と
+シーンジオメトリの統合バッファ(22.4節)は<strong>どちらの方式でも同じものが要る</strong>ため、
+移行時に追加が必要なのはState Object・シェーダーテーブル・<code>DispatchRays</code>の抽象だけになる。
+<code>RayQuery</code>のヒット属性展開もClosestHitシェーダーへほぼそのまま移せる。
+</p>
+<p>
+インラインレイトレーシングは<strong>DXR Tier 1.1</strong>で追加された機能のため、
+Tier 1.0止まりのアダプタは「レイトレーシング非対応」として扱う
+(<code>DX12Device::DetectRaytracingSupport</code>)。
+</p>
+
+<h3>22.2 DX11をどう扱うか</h3>
+
+<p>
+DXRはD3D12の機能で、DX11には対応するAPIが存在しない。プロジェクトはDX11とDX12の
+両方を対象とするため、<code>IRHIDevice::SupportsRaytracing()</code>という機能問い合わせを設けて
+上位層が分岐する形にした。DX11実装は常に<code>false</code>を返し、
+<code>CreateBottomLevelAS</code>/<code>CreateTopLevelAS</code>/
+<code>SetComputeAccelerationStructure</code>はエラーログを出して何もしない。
+</p>
+<p>
+「呼ばれないのが正常」な関数をあえて実装してログを仕込んでいるのは、
+上位層が<code>SupportsRaytracing()</code>での分岐を忘れた場合に静かに壊れるのではなく、
+ログという形で必ず気付けるようにするため。DX11側の初期化でも
+「レイトレーシング非対応」を必ず記録するようにしてあり、
+<strong>「なぜレイトレーシングが効いていないのか」がログだけで追える</strong>状態を保っている。
+</p>
+
+<h3>22.3 BLAS/TLASの構築とスレッド安全性</h3>
+
+<p>構造の持ち方は次のとおり。</p>
+<ul>
+<li><strong>BLAS</strong> — <code>Assets::ModelInstance</code>ごとに1つ。そのモデルの全メッシュを
+ジオメトリとしてまとめて持つ(シェーダーが受け取る<code>GeometryIndex</code>がメッシュ番号になる)。
+頂点はモデルのローカル空間のまま登録する</li>
+<li><strong>TLAS</strong> — インスタンスごとに<code>ModelInstance::World</code>を変換行列として登録する。
+<code>InstanceID</code>にはインスタンスの配列添字を入れ、シェーダーが索引に使えるようにする</li>
+</ul>
+<p>
+頂点/インデックスバッファは既にDEFAULTヒープに置いてあるため(9章)、
+BLASの入力にはそのGPU仮想アドレスをそのまま渡せる。<strong>RT用に頂点位置を複製する必要はない</strong>。
+</p>
+<p>
+構築コマンドを積むのは<strong>アップロード専用コマンドリスト</strong>
+(<code>DX12Device::m_UploadCommandList</code>、13章)であって、毎フレームの<code>m_CommandList</code>ではない。
+AS構築は<code>LoadScene</code>から呼ばれ、<code>LoadScene</code>はRenderスレッド以外(Updateスレッド)で走るため、
+毎フレーム用のコマンドリストへ記録するとRender()が記録中の内容を壊してしまう
+(これはテクスチャ/バッファの初期データアップロードが専用コマンドリストへ分離されているのと同じ理由)。
+<code>m_UploadMutex</code>で直列化し、スクラッチバッファがローカル変数のままなので構築完了まで同期的に待つ。
+</p>
+<p class="note">
+<code>DX12Device::CreateBuffer</code>は<strong>関数の先頭で既に<code>m_UploadMutex</code>を確保している</strong>。
+<code>std::mutex</code>は再帰ロックできないため、この関数の中で新しいUsageを追加する際に
+ミューテックスを取り直してはいけない(実際に<code>StructuredImmutable</code>の追加時に取り直してしまい、
+<code>device_or_resource_busy</code>でバッファ作成が失敗した)。
+</p>
+<p>
+ASバッファは<code>D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE</code>状態で作成し、
+以後いっさい遷移しない(D3D12の仕様上、他の状態へ移せない)。そのため
+<code>DX12Texture</code>/<code>DX12Buffer</code>が持つような<code>TransitionTo</code>を持たない。
+TLASのSRVも作法が特殊で、<code>pResource</code>に<code>nullptr</code>を渡し
+<code>RaytracingAccelerationStructure.Location</code>へGPU仮想アドレスを直接書く
+(ディスクリプタがリソースではなくアドレスを指す)。この結果
+<strong>「リソースを破棄してもディスクリプタはアドレスを指したまま」</strong>になるため、
+BLASをTLASより長く生存させる責任は呼び出し側にある
+(<code>Assets::RaytracingScene</code>が両方を保持し、<code>Reset()</code>でTLAS→BLASの順に解放する)。
+</p>
+
+<h3>22.4 シーンジオメトリの統合バッファ ― なぜ必要か</h3>
+
+<p>
+<code>RayQuery</code>がヒット時に返すのは<code>InstanceID</code> / <code>GeometryIndex</code> /
+<code>PrimitiveIndex</code> / 重心座標だけで、<strong>ヒット面の法線もUVもマテリアルも返らない</strong>。
+これらは自分で引きにいく必要があるが、このエンジンはメッシュごとに個別の頂点/インデックス
+バッファを持っており、HLSLはリソースを動的に添字選択できない(bindlessが要る。19章の
+反射プローブをTextureCubeArrayへまとめたのと同じ制約)。
+</p>
+<p>
+そこで<strong>シーン全体を1本ずつの構造化バッファへ連結し、オフセット表で引く</strong>方式を採った
+(<code>Assets::RaytracingScene</code>)。引き方は次のとおり。
+</p>
+<pre><code>グローバルメッシュ番号 = InstanceInfo[InstanceID].MeshInfoOffset + GeometryIndex
+MeshInfo               = MeshInfoBuffer[グローバルメッシュ番号]
+三角形のi番目の頂点     = IndexBuffer[MeshInfo.IndexOffset + PrimitiveIndex * 3 + i]
+その頂点属性            = AttributeBuffer[MeshInfo.AttributeOffset + 上のインデックス]
+マテリアル              = MaterialBuffer[MeshInfo.MaterialIndex]</code></pre>
+
+<h4>頂点属性が「位置を持たない」理由</h4>
+<p>
+ヒット点のワールド座標は<code>WorldRayOrigin() + CommittedRayT() * WorldRayDirection()</code>で
+復元できるため、描画用の<code>Assets::Vertex</code>(48バイト)をそのまま複製する必要はない。
+実際に読む必要があるのは法線とUVだけなので、1頂点<strong>16バイト</strong>に抑えている
+(法線はG-Bufferと同じオクタヘドラル+half2で4バイト、UVがfloat2で8バイト、残り4バイトは
+将来ノーマルマップ用の接線を入れるための予約)。
+Bistro Exteriorの実測で統合バッファ全体が79MB、48バイトの複製なら数倍に膨れる。
+</p>
+<p class="note">
+法線のオクタヘドラルエンコードは<code>Shaders/3D/NormalEncoding.hlsli</code>の
+<code>OctEncode</code>と同じ式をCPU側(<code>Assets::OctEncodeNormal</code>)で行う。
+<strong>片方だけ式を変えると法線が静かに壊れる</strong>ため、両方を必ず同時に直すこと。
+</p>
+
+<h4>CPU側コピーの寿命</h4>
+<p>
+描画用の頂点バッファはGPU上にしか無く、シェーダーからは頂点バッファとして以外に読めない
+(SRVを持たない)。そのため<code>ModelLoader</code>が<code>.kgeom</code>の読み込み中
+(<code>geometryPayload</code>が生存している間)に圧縮属性を作り、<code>Model</code>へ持たせる。
+これは<code>RaytracingScene::Build</code>がシーン全体へ連結してGPUへ送った時点で用済みになるため、
+そこで<code>shrink_to_fit</code>まで含めて解放する。数百万頂点のシーンでは100MB規模になるため、
+使い終わったCPU側コピーを抱え続けない。
+デバイスがレイトレーシング非対応の場合はそもそも構築しない。
+</p>
+
+<h3>22.5 <code>BufferUsage::StructuredImmutable</code>を足した理由</h3>
+
+<p>
+統合バッファは「作成時に一度書いたら二度と変わらない、シェーダーからは読むだけ」のデータである。
+既存の<code>StructuredReadOnly</code>は毎フレームの<code>UpdateBuffer</code>に備えて
+<strong>本体サイズ×リング段数(9段)のUPLOADヒープ</strong>を常時確保するため、
+79MBの統合バッファに使うと700MB近い使いもしないステージング領域を占有してしまう。
+</p>
+<p>
+そこでDEFAULTヒープにSRVだけを持ち、ステージングリングを一切持たないUsageを追加した。
+<code>UpdateBuffer</code>はこのUsageを検出したらログを出して弾く
+(そのまま進むとDX12では<code>nullptr</code>のマップ済みポインタへ書き込み、
+DX11では<code>D3D11_USAGE_IMMUTABLE</code>に対する更新でデバッグレイヤーのエラーになる)。
+</p>
+
+<h3>22.6 コンピュートルートシグネチャのSRV枠拡張(4 → 16)</h3>
+
+<p>
+レイトレーシングのパスは1回のディスパッチで、TLAS・G-Buffer 4枚・SceneColor・スカイボックス・
+統合バッファ5本を同時に読む。従来のコンピュート用SRV枠は<code>t0〜t3</code>の4つしか無かったため、
+<code>t0〜t15</code>へ広げた。
+</p>
+<p class="note">
+この定数は<code>DX12Device.cpp</code>(ルートシグネチャのSRVレンジ幅)と
+<code>DX12CommandList.h</code>(バインド状態のシャドウ配列)の<strong>2箇所に同名で存在する</strong>。
+片方だけ変えるとディスクリプタテーブルの幅と書き込み範囲がずれるため、必ず同時に更新すること
+(グラフィックス側の<code>kTextureSlotCount</code>も同じ構造になっている)。
+</p>
+
+<h3>22.7 この段階での制約</h3>
+<ul>
+<li><strong>テクスチャを読めない</strong> — ヒット面のアルベド/法線テクスチャをサンプルするには
+bindless(SM 6.6の<code>ResourceDescriptorHeap</code>)が要る。そこまでは踏み込んでいないため、
+マテリアルは定数値(<code>BaseColorFactor</code>・metallic・roughness・emissive)のみを持つ。
+反射やGIに映る色はこの段階ではやや平板になる</li>
+<li><strong>レイを飛ばすシェーダーがまだ無い</strong> — DXRの<code>RayQuery</code>はSM 6.5以上を要求するが、
+シェーダーは現在<code>d3dcompiler</code>のSM 5.0でコンパイルしている。実際にレイを飛ばすには
+dxc(DXIL)への移行が別途必要になる</li>
+<li><strong>シーンは静的前提</strong> — BLAS/TLASとも<code>PREFER_FAST_TRACE</code>で焼き、
+<code>ALLOW_UPDATE</code>を付けていない。動く物体を入れる場合はTLASの再構築が要る</li>
+</ul>
+
+<h4>検証</h4>
+<ul>
+<li><strong>DX12</strong> — 起動ログに「レイトレーシング対応: DXR Tier 1.1」。Bistro Exteriorで
+インスタンス1 / メッシュ132 / 三角形2,837,209 / 統合バッファ79MB / 構築246ms</li>
+<li><strong>シーン切り替え</strong> — Exterior → Interior → Exterior → White Furnace Testと
+4回読み込んで毎回再構築(132メッシュ / 66 / 132 / 11)。リーク・クラッシュなし</li>
+<li><strong>D3D12デバッグレイヤー</strong> — 上記の一連の操作で警告・エラーとも0件</li>
+<li><strong>DX11</strong> — 起動ログに「レイトレーシング非対応: DXRはD3D12の機能です」。
+描画結果・シーン切り替えとも従来どおり</li>
+<li><strong>描画結果</strong> — DX12/DX11とも本変更の前後で変化なし(この段階ではレイを飛ばさないため)</li>
+</ul>
 </section>
 
 </main>

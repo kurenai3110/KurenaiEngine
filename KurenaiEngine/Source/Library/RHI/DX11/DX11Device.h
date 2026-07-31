@@ -58,6 +58,13 @@ namespace Kurenai::RHI
         // 直前まで参照されていたリソースを破棄する前に安全マージンを確保する
         void WaitForGPUIdle() override;
 
+        // DX11にはレイトレーシングAPIそのものが存在しない(DXRはD3D12の機能)。
+        // 上位層はSupportsRaytracing()を見て従来のスクリーンスペース手法へフォールバックする設計のため、
+        // 下の2つは呼ばれないのが正常。呼ばれた場合はエラーログを残してnullptrを返す
+        bool SupportsRaytracing() const override { return false; }
+        std::unique_ptr<IRHIAccelerationStructure> CreateBottomLevelAS(const BottomLevelASDesc& desc) override;
+        std::unique_ptr<IRHIAccelerationStructure> CreateTopLevelAS(const TopLevelASDesc& desc) override;
+
     private:
         // CreateMippedUAVTextureCube(単一キューブ、SRVはTextureCube)と
         // CreateMippedUAVTextureCubeArray(配列、SRVはTextureCubeArray)の共通実装。

@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "DX12AccelerationStructure.h"
 #include "DX12Buffer.h"
 #include "DX12CommandList.h"
 #include "DX12ComputePipelineState.h"
@@ -56,8 +57,12 @@ namespace Kurenai::RHI
         // 十分上回る値にしておく
         constexpr uint32_t kConstantBufferRingCapacity = 8192;
 
-        // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t3, u0〜u3)
-        constexpr uint32_t kComputeSrvSlotCount = 4;
+        // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t15, u0〜u3)。
+        // SRVが16必要なのはレイトレーシングのパスで、TLAS + G-Buffer(Albedo/Normal/Material/Depth) +
+        // SceneColor + スカイボックス + シーンジオメトリ4本(頂点属性・インデックス・メッシュ情報・
+        // マテリアル) + インスタンス情報 を1回のディスパッチで同時に読むため。
+        // DX12CommandList.h側の同名の定数と必ず一致させること
+        constexpr uint32_t kComputeSrvSlotCount = 16;
         constexpr uint32_t kComputeUavSlotCount = 4;
         constexpr uint32_t kComputeTableSlotCount = kComputeSrvSlotCount + kComputeUavSlotCount;
         // 1フレームあたりに払い出せるコンピュートSRV+UAVテーブルブロックの最大数(Dispatch呼び出し回数の上限)。
@@ -225,6 +230,8 @@ namespace Kurenai::RHI
         {
             throw std::runtime_error("アップロード用フェンスイベントの作成に失敗しました");
         }
+
+        DetectRaytracingSupport();
 
         // RTVの内訳: スワップチェーンのバックバッファ2 + オフスクリーンのレンダーテクスチャ12 = 常時14。
         // DSVと同じくCreateRenderTargetsのリサイズ処理は「新しいテクスチャを作ってから古いunique_ptrを
@@ -698,6 +705,72 @@ namespace Kurenai::RHI
             m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
 
             return std::make_unique<DX12Buffer>(this, resource, uavIndex, srvIndex, desc.SizeInBytes, desc.StrideInBytes);
+        }
+
+        // 作成時の初期データから変化しない読み取り専用の構造化バッファ。DEFAULTヒープにSRVだけを持ち、
+        // CPU書き込み用のステージングリングは持たない(下のStructuredReadOnlyとの違いはそこだけ)。
+        // レイトレーシングのシーンジオメトリのように数十MB規模かつシーン読み込み時にしか書かない
+        // データで、ステージングリングぶんのUPLOADヒープを浪費しないためのUsage
+        if (desc.Usage == BufferUsage::StructuredImmutable)
+        {
+            if (desc.StrideInBytes == 0)
+            {
+                Core::Logger::Error("DX12", "StructuredImmutableバッファのStrideInBytesが0です。作成を中止します");
+                throw std::runtime_error("StructuredImmutableバッファのStrideInBytesが0です");
+            }
+            if (!desc.InitialData)
+            {
+                // 後から書き込む手段が無いUsageのため、初期データが無いと永久に0のままになる
+                Core::Logger::Error("DX12", "StructuredImmutableバッファにInitialDataが指定されていません。作成を中止します");
+                throw std::runtime_error("StructuredImmutableバッファにInitialDataが指定されていません");
+            }
+
+            const CD3DX12_HEAP_PROPERTIES defaultHeapProps(D3D12_HEAP_TYPE_DEFAULT);
+            const CD3DX12_RESOURCE_DESC defaultResourceDesc = CD3DX12_RESOURCE_DESC::Buffer(desc.SizeInBytes);
+
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+            ThrowIfFailed(
+                m_Device->CreateCommittedResource(
+                    &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &defaultResourceDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&resource)),
+                "不変構造化バッファ(StructuredImmutable)の作成に失敗しました");
+
+            {
+                // 頂点/インデックスバッファの初期データアップロードと同じ手順
+                // (UPLOADヒープの一時バッファ経由でDEFAULTヒープへコピーし、完了を同期的に待つ)。
+                // m_UploadMutexはこの関数の先頭で既に確保済みのため、ここでは取り直さない
+                // (std::mutexは再帰ロックできず、取り直すとdevice_or_resource_busyで失敗する)
+                Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer = CreateUploadBuffer(desc.SizeInBytes);
+                void* mappedPtr = nullptr;
+                const D3D12_RANGE readRange{ 0, 0 };
+                ThrowIfFailed(uploadBuffer->Map(0, &readRange, &mappedPtr), "不変構造化バッファのステージングマップに失敗しました");
+                std::memcpy(mappedPtr, desc.InitialData, desc.SizeInBytes);
+                uploadBuffer->Unmap(0, nullptr);
+
+                m_UploadCommandList->CopyBufferRegion(resource.Get(), 0, uploadBuffer.Get(), 0, desc.SizeInBytes);
+
+                // 以後このバッファは読み取り専用。コンピュート/ピクセル双方から読めるようGENERIC_READへ移す
+                // (DX12BufferのTransitionToは使わず、ここで一度だけ遷移させて固定する)
+                const D3D12_RESOURCE_BARRIER toReadBarrier =
+                    CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+                m_UploadCommandList->ResourceBarrier(1, &toReadBarrier);
+
+                // アップロードバッファはこのスコープを抜けるまで生存させる必要があるため同期的に待つ
+                UploadSubmitAndWait();
+            }
+
+            const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
+            srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
+            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+
+            // ステージングリングを持たない(uploadResource=nullptr、uploadRingCapacity=1)構成で作る。
+            // GENERIC_READはPIXEL_SHADER_RESOURCE/NON_PIXEL_SHADER_RESOURCEを含むため、
+            // DX12Buffer::TransitionToが呼ばれても余計なバリアが積まれないよう初期状態を合わせておく
+            return std::make_unique<DX12Buffer>(this, resource, srvIndex, desc.SizeInBytes, desc.StrideInBytes, D3D12_RESOURCE_STATE_GENERIC_READ);
         }
 
         // 読み取り専用の構造化バッファ(StructuredBuffer<T>)。ピクセルシェーダが毎フレーム読むため
@@ -1534,6 +1607,270 @@ namespace Kurenai::RHI
     std::unique_ptr<IRHIGPUProfiler> DX12Device::CreateGPUProfiler()
     {
         return std::make_unique<DX12GPUProfiler>(this);
+    }
+
+    // --- レイトレーシング -------------------------------------------------------------------
+
+    void DX12Device::DetectRaytracingSupport()
+    {
+        m_SupportsRaytracing = false;
+
+        // ID3D12Device5はWindows 10 1809(RS5)で追加されたインタフェース。取得できない場合は
+        // OS/ドライバがDXR世代に達していないため、それ以上の判定は行えない
+        if (FAILED(m_Device.As(&m_Device5)))
+        {
+            Core::Logger::Info("DX12", "レイトレーシング非対応: ID3D12Device5を取得できませんでした(OS/ドライバがDXR未対応)");
+            return;
+        }
+
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5{};
+        if (FAILED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5))))
+        {
+            Core::Logger::Warning("DX12", "レイトレーシング非対応: D3D12_FEATURE_D3D12_OPTIONS5の問い合わせに失敗しました");
+            m_Device5.Reset();
+            return;
+        }
+
+        // インラインレイトレーシング(HLSLのRayQuery)はTier 1.1で追加された機能。
+        // Tier 1.0はDispatchRaysによるフルパイプラインのみ対応しており、このエンジンが採る
+        // インライン方式では使えないため非対応として扱う
+        if (options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_1)
+        {
+            Core::Logger::Info(
+                "DX12",
+                "レイトレーシング非対応: RaytracingTierが" + std::to_string(static_cast<int>(options5.RaytracingTier)) +
+                    "でTier 1.1(値11)に達していません(インラインレイトレーシングにはTier 1.1が必要)");
+            m_Device5.Reset();
+            return;
+        }
+
+        // AS構築コマンドを積むのはアップロード専用コマンドリスト(Renderスレッド外から呼ばれる
+        // LoadSceneと安全に共存させるため)。そちらのList4も取れないと構築できない
+        if (FAILED(m_UploadCommandList.As(&m_UploadCommandList4)))
+        {
+            Core::Logger::Warning(
+                "DX12", "レイトレーシング非対応: ID3D12GraphicsCommandList4を取得できませんでした");
+            m_Device5.Reset();
+            return;
+        }
+
+        m_SupportsRaytracing = true;
+        Core::Logger::Info("DX12", "レイトレーシング対応: DXR Tier 1.1(インラインレイトレーシングが利用できます)");
+    }
+
+    std::unique_ptr<IRHIAccelerationStructure> DX12Device::BuildAccelerationStructure(
+        const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, bool createSrv, const char* debugName)
+    {
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuildInfo{};
+        m_Device5->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuildInfo);
+        if (prebuildInfo.ResultDataMaxSizeInBytes == 0)
+        {
+            Core::Logger::Error(
+                "DX12", std::string(debugName) + "の必要サイズ問い合わせが0を返しました(入力が空の可能性があります)");
+            return nullptr;
+        }
+
+        const CD3DX12_HEAP_PROPERTIES defaultHeapProps(D3D12_HEAP_TYPE_DEFAULT);
+
+        // 構築の一時領域。構築完了を同期的に待ってからこの関数を抜けるため、ローカルで持てばよい
+        const CD3DX12_RESOURCE_DESC scratchDesc =
+            CD3DX12_RESOURCE_DESC::Buffer(prebuildInfo.ScratchDataSizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        Microsoft::WRL::ComPtr<ID3D12Resource> scratch;
+        if (FAILED(m_Device->CreateCommittedResource(
+                &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &scratchDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&scratch))))
+        {
+            Core::Logger::Error("DX12", std::string(debugName) + "のスクラッチバッファ作成に失敗しました");
+            return nullptr;
+        }
+
+        // AS本体。RAYTRACING_ACCELERATION_STRUCTURE状態で作り、以後この状態のまま遷移しない
+        // (D3D12の仕様上、ASバッファを他の状態へ移すことはできない)
+        const CD3DX12_RESOURCE_DESC resultDesc =
+            CD3DX12_RESOURCE_DESC::Buffer(prebuildInfo.ResultDataMaxSizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        Microsoft::WRL::ComPtr<ID3D12Resource> result;
+        if (FAILED(m_Device->CreateCommittedResource(
+                &defaultHeapProps,
+                D3D12_HEAP_FLAG_NONE,
+                &resultDesc,
+                D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                nullptr,
+                IID_PPV_ARGS(&result))))
+        {
+            Core::Logger::Error("DX12", std::string(debugName) + "の本体バッファ作成に失敗しました");
+            return nullptr;
+        }
+
+        {
+            // m_UploadCommandListへの記録は複数スレッドから同時に来うるため、
+            // CreateBuffer/CreateTextureFromImageと同じミューテックスで直列化する
+            std::lock_guard<std::mutex> lock(m_UploadMutex);
+
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc{};
+            buildDesc.Inputs = inputs;
+            buildDesc.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+            buildDesc.DestAccelerationStructureData = result->GetGPUVirtualAddress();
+            m_UploadCommandList4->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+
+            // TLASの構築はBLASの構築完了を前提とするため、UAVバリアで順序を保証する。
+            // このエンジンではBLASを1本ずつ同期的に構築するため実際には不要だが、
+            // 将来まとめて構築するよう変えたときに落とし穴にならないよう入れておく
+            const D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(result.Get());
+            m_UploadCommandList4->ResourceBarrier(1, &uavBarrier);
+
+            // スクラッチバッファ(ローカル変数)がこの関数を抜けるまでに解放されないよう、
+            // 構築の完了をここで同期的に待つ。CreateBufferの初期データアップロードと同じ扱い
+            UploadSubmitAndWait();
+        }
+
+        uint32_t srvIndex = DX12AccelerationStructure::kInvalid;
+        if (createSrv)
+        {
+            // DXRのAS用SRVは他のSRVと作法が異なり、pResourceにnullptrを渡して
+            // RaytracingAccelerationStructure.Locationへ「GPU仮想アドレス」を直接書く
+            // (ディスクリプタがリソースではなくアドレスを指す)
+            srvIndex = m_SrvCpuHeap->Allocate();
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDesc.RaytracingAccelerationStructure.Location = result->GetGPUVirtualAddress();
+            m_Device->CreateShaderResourceView(nullptr, &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        }
+
+        return std::make_unique<DX12AccelerationStructure>(this, result, srvIndex);
+    }
+
+    std::unique_ptr<IRHIAccelerationStructure> DX12Device::CreateBottomLevelAS(const BottomLevelASDesc& desc)
+    {
+        if (!m_SupportsRaytracing)
+        {
+            Core::Logger::Error("DX12", "CreateBottomLevelAS: レイトレーシング非対応の環境です。SupportsRaytracing()で分岐してください");
+            return nullptr;
+        }
+        if (desc.Geometries.empty())
+        {
+            Core::Logger::Error("DX12", "CreateBottomLevelAS: ジオメトリが1つも指定されていません");
+            return nullptr;
+        }
+
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometryDescs;
+        geometryDescs.reserve(desc.Geometries.size());
+        for (const auto& geometry : desc.Geometries)
+        {
+            if (!geometry.VertexBuffer || !geometry.IndexBuffer || geometry.VertexCount == 0 || geometry.IndexCount == 0)
+            {
+                Core::Logger::Error("DX12", "CreateBottomLevelAS: 頂点/インデックスバッファが不正なジオメトリをスキップします");
+                continue;
+            }
+
+            auto* vertexBuffer = static_cast<DX12Buffer*>(geometry.VertexBuffer);
+            auto* indexBuffer = static_cast<DX12Buffer*>(geometry.IndexBuffer);
+
+            D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc{};
+            geometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            // 不透明ジオメトリはAnyHit相当の判定を省ける(レイ側のRAY_FLAG_CULL_NON_OPAQUEも効く)。
+            // アルファカットアウトのマテリアルはこのフラグを外し、呼び出し側がRayQuery::Proceed()の
+            // ループで自前に抜き判定を行う
+            geometryDesc.Flags = geometry.IsOpaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+            geometryDesc.Triangles.VertexBuffer.StartAddress =
+                vertexBuffer->GetGPUVirtualAddress() + geometry.VertexPositionOffsetInBytes;
+            geometryDesc.Triangles.VertexBuffer.StrideInBytes = geometry.VertexStrideInBytes;
+            geometryDesc.Triangles.VertexCount = geometry.VertexCount;
+            geometryDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            geometryDesc.Triangles.IndexBuffer = indexBuffer->GetGPUVirtualAddress();
+            geometryDesc.Triangles.IndexCount = geometry.IndexCount;
+            geometryDesc.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+            // 頂点はモデルのローカル空間のまま登録し、ワールドへの配置はTLASのインスタンス変換で行う
+            geometryDesc.Triangles.Transform3x4 = 0;
+            geometryDescs.push_back(geometryDesc);
+        }
+
+        if (geometryDescs.empty())
+        {
+            Core::Logger::Error("DX12", "CreateBottomLevelAS: 有効なジオメトリが1つも残りませんでした");
+            return nullptr;
+        }
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        // シーンは読み込み後に変形しない前提のため、更新(ALLOW_UPDATE)ではなくトレース速度を優先する
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = static_cast<UINT>(geometryDescs.size());
+        inputs.pGeometryDescs = geometryDescs.data();
+
+        return BuildAccelerationStructure(inputs, /*createSrv=*/false, "BLAS");
+    }
+
+    std::unique_ptr<IRHIAccelerationStructure> DX12Device::CreateTopLevelAS(const TopLevelASDesc& desc)
+    {
+        if (!m_SupportsRaytracing)
+        {
+            Core::Logger::Error("DX12", "CreateTopLevelAS: レイトレーシング非対応の環境です。SupportsRaytracing()で分岐してください");
+            return nullptr;
+        }
+        if (desc.Instances.empty())
+        {
+            Core::Logger::Error("DX12", "CreateTopLevelAS: インスタンスが1つも指定されていません");
+            return nullptr;
+        }
+
+        std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instanceDescs;
+        instanceDescs.reserve(desc.Instances.size());
+        for (const auto& instance : desc.Instances)
+        {
+            auto* bottomLevel = static_cast<DX12AccelerationStructure*>(instance.BottomLevel);
+            if (!bottomLevel)
+            {
+                Core::Logger::Error("DX12", "CreateTopLevelAS: BLASがnullptrのインスタンスをスキップします");
+                continue;
+            }
+
+            D3D12_RAYTRACING_INSTANCE_DESC instanceDesc{};
+            std::memcpy(instanceDesc.Transform, instance.Transform, sizeof(instanceDesc.Transform));
+            // InstanceIDは24bitのビットフィールド。上位層が範囲外を渡した場合は静かに切り詰めず検出する
+            if (instance.InstanceID > 0x00FFFFFFu)
+            {
+                Core::Logger::Error(
+                    "DX12", "CreateTopLevelAS: InstanceIDが24bitの上限を超えています。このインスタンスをスキップします");
+                continue;
+            }
+            instanceDesc.InstanceID = instance.InstanceID;
+            instanceDesc.InstanceMask = 0xFF;
+            instanceDesc.InstanceContributionToHitGroupIndex = 0;
+            instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+            instanceDesc.AccelerationStructure = bottomLevel->GetGPUVirtualAddress();
+            instanceDescs.push_back(instanceDesc);
+        }
+
+        if (instanceDescs.empty())
+        {
+            Core::Logger::Error("DX12", "CreateTopLevelAS: 有効なインスタンスが1つも残りませんでした");
+            return nullptr;
+        }
+
+        // インスタンス記述子の配列はGPUから読まれるためUPLOADヒープへ置く。
+        // 構築完了を同期的に待ってから解放するので、この関数のローカルで持てばよい
+        const uint64_t instanceBufferSize = sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instanceDescs.size();
+        Microsoft::WRL::ComPtr<ID3D12Resource> instanceBuffer = CreateUploadBuffer(instanceBufferSize);
+        void* mappedPtr = nullptr;
+        const D3D12_RANGE readRange{ 0, 0 };
+        if (FAILED(instanceBuffer->Map(0, &readRange, &mappedPtr)))
+        {
+            Core::Logger::Error("DX12", "CreateTopLevelAS: インスタンス記述子バッファのマップに失敗しました");
+            return nullptr;
+        }
+        std::memcpy(mappedPtr, instanceDescs.data(), static_cast<size_t>(instanceBufferSize));
+        instanceBuffer->Unmap(0, nullptr);
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = static_cast<UINT>(instanceDescs.size());
+        inputs.InstanceDescs = instanceBuffer->GetGPUVirtualAddress();
+
+        return BuildAccelerationStructure(inputs, /*createSrv=*/true, "TLAS");
     }
 
     std::unique_ptr<IRHIDevice> CreateDX12Device()

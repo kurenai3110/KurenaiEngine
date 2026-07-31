@@ -106,6 +106,9 @@
     <ClInclude Include="Source\Library\Assets\SceneLoader.h" />
     <ClInclude Include="Source\Library\RHI\RHIEnums.h" />
     <ClInclude Include="Source\Library\RHI\RHIDesc.h" />
+    <ClInclude Include="Source\Library\Assets\RaytracingGeometry.h" />
+    <ClInclude Include="Source\Library\Assets\RaytracingScene.h" />
+    <ClInclude Include="Source\Library\RHI\IRHIAccelerationStructure.h" />
     <ClInclude Include="Source\Library\RHI\IRHIBuffer.h" />
     <ClInclude Include="Source\Library\RHI\IRHIShader.h" />
     <ClInclude Include="Source\Library\RHI\IRHIPipelineState.h" />
@@ -132,6 +135,7 @@
     <ClInclude Include="Source\Library\RHI\DX11\DX11Util.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Util.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12DescriptorHeap.h" />
+    <ClInclude Include="Source\Library\RHI\DX12\DX12AccelerationStructure.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Buffer.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Shader.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12PipelineState.h" />
@@ -165,6 +169,7 @@
     <ClCompile Include="Source\Library\Core\Logger.cpp" />
     <ClCompile Include="Source\Library\Core\RenderGraph.cpp" />
     <ClCompile Include="Source\Library\Assets\ModelLoader.cpp" />
+    <ClCompile Include="Source\Library\Assets\RaytracingScene.cpp" />
     <ClCompile Include="Source\Library\Assets\SceneLoader.cpp" />
     <ClCompile Include="Source\Library\RHI\TextureImage.cpp" />
     <ClCompile Include="Source\Library\RHI\ImGuiContextSetup.cpp" />
@@ -180,6 +185,7 @@
     <ClCompile Include="Source\Library\RHI\DX11\DX11Texture.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11SamplerSet.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12DescriptorHeap.cpp" />
+    <ClCompile Include="Source\Library\RHI\DX12\DX12AccelerationStructure.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Buffer.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Shader.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12PipelineState.cpp" />

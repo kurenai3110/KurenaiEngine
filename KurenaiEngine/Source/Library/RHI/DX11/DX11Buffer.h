@@ -17,12 +17,15 @@ namespace Kurenai::RHI
             Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = nullptr);
 
         // BufferUsage::StructuredReadOnly用: D3D11_USAGE_DYNAMICで作成し、UpdateBufferがMap/Unmap経由で
-        // 書き込む。srvは読み取り専用バインド(PSSetShaderResources)用
+        // 書き込む。srvは読み取り専用バインド(PSSetShaderResources)用。
+        // isImmutableはBufferUsage::StructuredImmutable(D3D11_USAGE_IMMUTABLE)で作った場合にtrue。
+        // このUsageはMapもUpdateSubresourceも受け付けないため、UpdateBufferが弾くのに使う
         DX11Buffer(
             Microsoft::WRL::ComPtr<ID3D11Buffer> buffer,
             uint32_t strideInBytes,
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv,
-            bool isDynamic);
+            bool isDynamic,
+            bool isImmutable = false);
 
         // BufferUsage::StructuredRW用: コンピュートがUAVで書き、ピクセルシェーダがSRVで読むため
         // 両方のビューを持つ。CPUからは書き込まないのでD3D11_USAGE_DEFAULT(isDynamicはfalse)
@@ -40,6 +43,8 @@ namespace Kurenai::RHI
         ID3D11ShaderResourceView* GetShaderResourceView() const { return m_Srv.Get(); }
         // D3D11_USAGE_DYNAMICで作成されたか(UpdateBufferの分岐に使う)
         bool IsDynamic() const { return m_IsDynamic; }
+        // D3D11_USAGE_IMMUTABLEで作成されたか(UpdateBufferが更新を弾くのに使う)
+        bool IsImmutable() const { return m_IsImmutable; }
 
     private:
         Microsoft::WRL::ComPtr<ID3D11Buffer> m_Buffer;
@@ -47,5 +52,6 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> m_Uav;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_Srv;
         bool m_IsDynamic = false;
+        bool m_IsImmutable = false;
     };
 }
