@@ -324,10 +324,14 @@ ImGuiパネル経由</strong>):
     <li><code>WASD</code> で移動、<code>E</code>/<code>Q</code> で上下移動、<code>Shift</code> で高速移動</li>
     <li>右クリックを押しながらマウス移動でカメラ回転</li>
     <li><code>F1</code> でImGuiパネルの表示/非表示切り替え</li>
-    <li>画面左上のImGuiパネル(Scenes / Post Processing / Render Targets / Lighting / Reflection Probes / Profiler)で
-    表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/SSRのON・OFFやパラメータ調整、デバッグ表示
-    バッファの選択、時刻(昼夜サイクル)とEV100(露出)の調整、ポイント/スポットライトの
-    一覧・追加・削除・編集、FPS/CPU/GPUの計測値確認ができる</li>
+    <li>8つのImGuiパネル(シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ /
+    デバッグ表示 / システム / プロファイラ)で表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/
+    スクリーンスペースシャドウ/SSR/タイルドライトカリングのON・OFFやパラメータ調整、
+    トーンマップ・ブルーム・自動露出の調整、デバッグ表示バッファの選択、
+    時刻(昼夜サイクル)・月の位置・手続き空・EV100(露出)の調整、
+    ポイント/スポットライトの一覧・追加・複製・削除・編集、反射プローブの編集と焼き直し、
+    FPS/CPU/GPUの計測値確認ができる。パネルはドッキングに対応しており、配置とサイズは
+    実行ファイルと同じフォルダの<code>imgui.ini</code>へ自動保存される</li>
   </ul>
 </li>
 <li>表示できるシーンはビルド済みバイナリに組み込み済み(Sponza / Bistro (McGuire) Exterior /
@@ -961,7 +965,7 @@ std::wstring ReadSceneName(const std::wstring&amp; sceneFilePath);</code></pre>
 <code>.kscene</code>は複数モデルの配置(平行移動・回転・スケール)とカメラ・太陽光の初期値を
 1ファイルにまとめる、UTF-8のテキスト形式。バイナリ変換を経ずランタイムが直接パースするため、
 配置や太陽の向きをKurenaiPackerの再実行なしに即座に調整できる。<code>Assets::KurenaiEngine3D</code>は
-起動時に<code>&lt;DLLフォルダ&gt;/Assets/Scenes/*.kscene</code>を列挙し、ImGuiの「Scenes」パネルへ
+起動時に<code>&lt;DLLフォルダ&gt;/Assets/Scenes/*.kscene</code>を列挙し、ImGuiの「シーン」パネルへ
 ファイル名の昇順で並べる(表示名は<code>ReadSceneName</code>が読む<code>[Scene] Name</code>、
 省略時はファイル名)。
 </p>
@@ -1161,6 +1165,35 @@ POINT GetClientMousePosition() const;               // クライアント座標(
 3メッセージを間隔を空けずに送ることで、この上書きが発生する前に同一フレーム(またはごく近い
 フレーム)内でクリック判定を完了させられる。</li>
 </ul>
+
+<h3>5.1 ImGuiがマウス・キーボードを掴んでいる間の入力抑止</h3>
+<p>
+<code>KurenaiEngine3D::Run()</code>は、ImGuiのパネルが入力を掴んでいる間はカメラ操作を止めます。
+ライトの名前をテキスト入力欄で編集している最中に、WやDがカメラ移動として解釈されてしまうのを
+防ぐためです。判定にはImGuiが提供する<code>io.WantCaptureKeyboard</code>/
+<code>io.WantCaptureMouse</code>を使います。
+</p>
+<ul>
+<li><strong>キーボード</strong>: <code>WantCaptureKeyboard</code>が真の間はWASD/E/Qによる移動を
+処理しない。<strong>F1(ImGuiパネルの表示/非表示)だけは意図的に抑止しない</strong>。ここも
+止めてしまうと、入力中にパネルを畳んで元へ戻す手段が無くなり、入力欄からフォーカスを外す方法
+(Esc / 別の場所をクリック)を知らないと操作不能になるため。ImGuiの<code>InputText</code>は
+F1を消費しないので、通しても入力内容には影響しない。</li>
+<li><strong>マウス</strong>: <code>WantCaptureMouse</code>が真のときは視点回転を<strong>開始しない</strong>
+(パネル上での右クリックメニュー操作と衝突するため)。一度回転を始めた後はカーソルが画面中央へ
+固定され続けてImGui側の判定が変わりうるので、この判定は開始時にだけ行う。</li>
+<li>ImGuiの状態を読めるのは描画スレッドだけで、移動・視点回転を処理するのは呼び出し元スレッド
+(<code>Run()</code>を呼んだスレッド)のため、この2つの真偽値は<code>std::atomic&lt;bool&gt;</code>で
+描画スレッドから受け渡される。描画は1フレーム遅れて行われるためこの値も1フレーム遅れるが、
+<code>WantCaptureKeyboard</code>は入力欄がアクティブな間ずっと真であり続けるので、実用上ずれるのは
+押し始めの1フレームだけになる。</li>
+<li>この抑止は<strong>ImGuiパネルが表示されているときだけ</strong>働く。F1で非表示にしている間は
+どちらの値も偽として扱われ、カメラ操作は常に効く。</li>
+</ul>
+<p>
+<code>PostMessage</code>による自動化でカメラ操作を確かめる場合、テキスト入力欄にフォーカスが
+残っていると意図した移動が起きない点に注意してください。
+</p>
 </section>
 
 <section id="sound">

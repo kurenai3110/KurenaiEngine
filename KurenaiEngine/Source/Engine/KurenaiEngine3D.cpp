@@ -14,6 +14,8 @@
 #include "Core/Logger.h"
 #include "Core/RenderGraph.h"
 #include "Core/StringUtil.h"
+#include "UI/UIManager.h"
+#include "UI/UITheme.h"
 
 namespace Kurenai
 {
@@ -21,6 +23,19 @@ namespace Kurenai
     {
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
+
+        // モデル描画(G-Bufferパス)の頂点入力レイアウト。PSOの作り直し
+        // (CreatePrecisionDependentPipelineStates)からも使うため関数にしてある
+        std::vector<RHI::InputElementDesc> GetModelInputLayout()
+        {
+            return
+            {
+                { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+                { "NORMAL", 0, RHI::Format::R32G32B32_Float, 12 },
+                { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
+                { "TANGENT", 0, RHI::Format::R32G32B32A32_Float, 32 },
+            };
+        }
 
         struct alignas(16) FrameConstants
         {
@@ -808,18 +823,8 @@ namespace Kurenai
             DirectX::XMUINT4 TileParams;
         };
 
-        // タイルライトカリングのタイルサイズ(1辺のピクセル数)。
-        // LightCulling.hlsl の kTileSize および numthreads と必ず一致させること
-        constexpr uint32_t kLightTileSize = 16;
-
-        // 1タイルが保持できるライト数の上限。LightCulling.hlsl の kMaxLightsPerTile および
-        // DirectLighting.hlsl の同名の定数と必ず一致させること(バッファのストライドがこの値で決まる)。
-        // HLSL側はgroupshared配列のサイズに使うためコンパイル時定数である必要があり、
-        // C++からの受け渡しでは代用できないので、3箇所で同じ値を書く形になっている
-        constexpr uint32_t kLightTileCapacity = 64;
-
-        // ライトグリッド1タイルぶんの要素数(先頭1個がライト数、残りがライトインデックス)
-        constexpr uint32_t kLightTileStride = 1 + kLightTileCapacity;
+        // kLightTileSize / kLightTileCapacity / kLightTileStride はKurenaiEngine3Dのstatic constexprへ
+        // 移した(DebugViewPanelがヒートマップの上限として参照するため)。定義はKurenaiEngine3D.h
 
         // LightCulling.hlsl側のcbuffer LightCullingConstantsと一致させる必要がある
         struct alignas(16) LightCullingConstants
@@ -861,24 +866,6 @@ namespace Kurenai
             // 「影を出したいライト」に予算を回せるようにするため
             gpuLight.Params = { angleOffset, light.CastShadow ? 1.0f : 0.0f, 0.0f, 0.0f };
             return gpuLight;
-        }
-
-        // ImGuiでのライト方向編集用。正規化済み方向ベクトルをYaw/Pitch(度)に変換する。
-        // DragFloat3で直接編集すると正規化のたびに値が跳ねて操作しづらいため、角度で編集する。
-        // Yawは水平面内の角度(X軸を0度、Z軸を90度)、Pitchは水平面からの仰角(下向きが負)
-        void DirectionToYawPitch(const float direction[3], float& outYawDegrees, float& outPitchDegrees)
-        {
-            outYawDegrees = DirectX::XMConvertToDegrees(std::atan2(direction[2], direction[0]));
-            outPitchDegrees = DirectX::XMConvertToDegrees(std::asin(std::clamp(direction[1], -1.0f, 1.0f)));
-        }
-
-        void YawPitchToDirection(float yawDegrees, float pitchDegrees, float outDirection[3])
-        {
-            const float yaw = DirectX::XMConvertToRadians(yawDegrees);
-            const float pitch = DirectX::XMConvertToRadians(pitchDegrees);
-            outDirection[0] = std::cos(pitch) * std::cos(yaw);
-            outDirection[1] = std::sin(pitch);
-            outDirection[2] = std::cos(pitch) * std::sin(yaw);
         }
 
         // タンジェント空間(Z軸=法線方向)の半球状にランダムなカーネルサンプルを生成する。
@@ -958,6 +945,10 @@ namespace Kurenai
         m_ImGuiIniPath = WideToUtf8(GetModuleDirectory() + L"imgui.ini");
         ImGui::GetIO().IniFilename = m_ImGuiIniPath.c_str();
 
+        // UIパネル群はImGuiコンテキストの生成後に作る(パネルの構築自体はImGuiを呼ばないが、
+        // 以降の段階でスタイル・フォント設定をここへ足す前提で順序を固定しておく)
+        m_UIManager = std::make_unique<UI::UIManager>(*this);
+
         m_Camera.SetAspectRatio(static_cast<float>(m_RenderWidth) / static_cast<float>(m_RenderHeight));
 
         CreateSceneResources();
@@ -973,13 +964,7 @@ namespace Kurenai
         const std::wstring dataRoot = GetModuleDirectory();
         const std::wstring shaderDirectory = dataRoot + L"Shaders\\";
 
-        const std::vector<RHI::InputElementDesc> modelInputLayout =
-        {
-            { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
-            { "NORMAL", 0, RHI::Format::R32G32B32_Float, 12 },
-            { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
-            { "TANGENT", 0, RHI::Format::R32G32B32A32_Float, 32 },
-        };
+        const std::vector<RHI::InputElementDesc> modelInputLayout = GetModelInputLayout();
 
         // ジオメトリパス(G-Buffer書き込み)
         RHI::ShaderDesc gbufferVsDesc;
@@ -994,27 +979,8 @@ namespace Kurenai
         gbufferPsDesc.EntryPoint = "PSMain";
         m_GBufferPixelShader = m_Device->CreateShader(gbufferPsDesc);
 
-        RHI::PipelineStateDesc gbufferPipelineDesc;
-        gbufferPipelineDesc.InputLayout = modelInputLayout;
-        gbufferPipelineDesc.VertexShader = m_GBufferVertexShader.get();
-        gbufferPipelineDesc.PixelShader = m_GBufferPixelShader.get();
-        gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        gbufferPipelineDesc.RenderTargetFormats =
-        {
-            RHI::Format::R8G8B8A8_UNorm, // Albedo
-            RHI::Format::R16G16_Float,   // Normal(オクタヘドラルエンコード)
-            RHI::Format::R8G8B8A8_UNorm, // Material(R=Metallic, G=Roughness)
-            RHI::Format::R8G8B8A8_UNorm, // Emissive
-        };
-        gbufferPipelineDesc.HasDepthStencil = true;
-        gbufferPipelineDesc.ReverseZ = true;
-        m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
-
-        // ミラーリングされたインスタンス用に、表裏判定だけを入れ替えた同じパイプラインを用意する。
-        // DX12はラスタライザステートがPSOに焼き込まれ描画中に差し替えられないため、DX11/DX12で
-        // 同じ構成にできるよう両バックエンドともPSOを2本持つ方式にしている
-        gbufferPipelineDesc.FrontCounterClockwise = true;
-        m_GBufferPipelineStateMirrored = m_Device->CreatePipelineState(gbufferPipelineDesc);
+        // G-BufferのPSOはEmissiveのフォーマットがバッファ精度に依存するため、
+        // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
 
         // 直接光パス(頂点バッファなしのフルスクリーン三角形。G-Buffer+シャドウマップからPBRの
         // 直接光を計算しHDRで書き出す)
@@ -1052,12 +1018,8 @@ namespace Kurenai
         ssaoPsDesc.EntryPoint = "PSMain";
         m_SSAOPixelShader = m_Device->CreateShader(ssaoPsDesc);
 
-        RHI::PipelineStateDesc ssaoPipelineDesc;
-        ssaoPipelineDesc.VertexShader = m_AOVertexShader.get();
-        ssaoPipelineDesc.PixelShader = m_SSAOPixelShader.get();
-        ssaoPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        ssaoPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
-        m_SSAOPipelineState = m_Device->CreatePipelineState(ssaoPipelineDesc);
+        // SSAO/SSIL/AOブラーのPSOは出力先(AO/GIバッファ)のフォーマットがバッファ精度に依存するため、
+        // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
 
         m_SSAOKernel = GenerateSSAOKernel(kSSAOKernelSize);
 
@@ -1073,13 +1035,6 @@ namespace Kurenai
         ssilPsDesc.EntryPoint = "PSMain";
         m_SSILPixelShader = m_Device->CreateShader(ssilPsDesc);
 
-        RHI::PipelineStateDesc ssilPipelineDesc;
-        ssilPipelineDesc.VertexShader = m_AOVertexShader.get();
-        ssilPipelineDesc.PixelShader = m_SSILPixelShader.get();
-        ssilPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        ssilPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
-        m_SSILPipelineState = m_Device->CreatePipelineState(ssilPipelineDesc);
-
         RHI::BufferDesc ssilConstantBufferDesc;
         ssilConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         ssilConstantBufferDesc.SizeInBytes = sizeof(SSILConstants);
@@ -1091,13 +1046,6 @@ namespace Kurenai
         aoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
         aoBlurPsDesc.EntryPoint = "PSMainBlur";
         m_AOBlurPixelShader = m_Device->CreateShader(aoBlurPsDesc);
-
-        RHI::PipelineStateDesc aoBlurPipelineDesc;
-        aoBlurPipelineDesc.VertexShader = m_AOVertexShader.get();
-        aoBlurPipelineDesc.PixelShader = m_AOBlurPixelShader.get();
-        aoBlurPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        aoBlurPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
-        m_AOBlurPipelineState = m_Device->CreatePipelineState(aoBlurPipelineDesc);
 
         // AO/GI無効時はこの常に黒・不透明(遮蔽なし=a:1、間接光なし=rgb:0)のテクスチャをライティングパスに渡す
         m_AODisabledTexture = m_Device->CreateSolidColorTexture(0, 0, 0, 255);
@@ -1516,10 +1464,96 @@ namespace Kurenai
         presentConstantBufferDesc.SizeInBytes = sizeof(PresentConstants);
         m_PresentConstantBuffer = m_Device->CreateBuffer(presentConstantBufferDesc);
 
+        // レンダーターゲットを先に作る。CreateRenderTargetsはHDRフォーマットの作成に失敗した場合に
+        // m_BufferPrecisionをLegacy8bitへ落とすフォールバックを持つため、PSOはその結果が
+        // 確定した後に作らなければフォーマットがずれる
         CreateRenderTargets(m_RenderWidth, m_RenderHeight);
+        CreatePrecisionDependentPipelineStates();
 
         DiscoverScenes();
         LoadScene(0);
+    }
+
+    RHI::Format KurenaiEngine3D::GetEmissiveFormat() const
+    {
+        // Emissive: 1.0でクリップされると照明器具がHDRな輝度を持てず、ブルームが成立しない。
+        // アルファを使わないためR11G11B10_Floatで足りる(帯域はR16G16B16A16_Floatの半分)
+        return m_BufferPrecision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
+                                                                : RHI::Format::R11G11B10_Float;
+    }
+
+    RHI::Format KurenaiEngine3D::GetAOFormat() const
+    {
+        // AO/GIバッファ: rgb=間接拡散光(HDR)、a=遮蔽率。間接光は暗い室内では0.02〜0.1に収まり、
+        // UNorm8ではコード5〜26の約20階調しか使えずポスタリゼーションする。
+        // aに遮蔽率を持つためアルファ付きのR16G16B16A16_Floatを使う
+        return m_BufferPrecision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
+                                                                : RHI::Format::R16G16B16A16_Float;
+    }
+
+    void KurenaiEngine3D::CreatePrecisionDependentPipelineStates()
+    {
+        const RHI::Format emissiveFormat = GetEmissiveFormat();
+        const RHI::Format aoFormat = GetAOFormat();
+
+        try
+        {
+            // ジオメトリパス(G-Buffer書き込み)
+            RHI::PipelineStateDesc gbufferPipelineDesc;
+            gbufferPipelineDesc.InputLayout = GetModelInputLayout();
+            gbufferPipelineDesc.VertexShader = m_GBufferVertexShader.get();
+            gbufferPipelineDesc.PixelShader = m_GBufferPixelShader.get();
+            gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            gbufferPipelineDesc.RenderTargetFormats =
+            {
+                RHI::Format::R8G8B8A8_UNorm, // Albedo
+                RHI::Format::R16G16_Float,   // Normal(オクタヘドラルエンコード)
+                RHI::Format::R8G8B8A8_UNorm, // Material(R=Metallic, G=Roughness)
+                emissiveFormat,              // Emissive(バッファ精度に依存)
+            };
+            gbufferPipelineDesc.HasDepthStencil = true;
+            gbufferPipelineDesc.ReverseZ = true;
+            m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
+
+            // ミラーリングされたインスタンス用に、表裏判定だけを入れ替えた同じパイプラインを用意する。
+            // DX12はラスタライザステートがPSOに焼き込まれ描画中に差し替えられないため、DX11/DX12で
+            // 同じ構成にできるよう両バックエンドともPSOを2本持つ方式にしている
+            gbufferPipelineDesc.FrontCounterClockwise = true;
+            m_GBufferPipelineStateMirrored = m_Device->CreatePipelineState(gbufferPipelineDesc);
+
+            // SSAOパス
+            RHI::PipelineStateDesc ssaoPipelineDesc;
+            ssaoPipelineDesc.VertexShader = m_AOVertexShader.get();
+            ssaoPipelineDesc.PixelShader = m_SSAOPixelShader.get();
+            ssaoPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            ssaoPipelineDesc.RenderTargetFormats = { aoFormat };
+            m_SSAOPipelineState = m_Device->CreatePipelineState(ssaoPipelineDesc);
+
+            // SSILパス(Visibility Bitmask)
+            RHI::PipelineStateDesc ssilPipelineDesc;
+            ssilPipelineDesc.VertexShader = m_AOVertexShader.get();
+            ssilPipelineDesc.PixelShader = m_SSILPixelShader.get();
+            ssilPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            ssilPipelineDesc.RenderTargetFormats = { aoFormat };
+            m_SSILPipelineState = m_Device->CreatePipelineState(ssilPipelineDesc);
+
+            // AO/GI共通のブラーパス(SSAO/SSILのどちらの出力にも同じフォーマットで書き戻す)
+            RHI::PipelineStateDesc aoBlurPipelineDesc;
+            aoBlurPipelineDesc.VertexShader = m_AOVertexShader.get();
+            aoBlurPipelineDesc.PixelShader = m_AOBlurPixelShader.get();
+            aoBlurPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            aoBlurPipelineDesc.RenderTargetFormats = { aoFormat };
+            m_AOBlurPipelineState = m_Device->CreatePipelineState(aoBlurPipelineDesc);
+        }
+        catch (const std::exception& e)
+        {
+            // ここで失敗するとG-Buffer/AOパスが描けず復旧手段が無いため、ログを残して投げ直す
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                std::string("バッファ精度に依存するパイプラインステートの作成に失敗しました (バッファ精度=") +
+                    (m_BufferPrecision == BufferPrecision::Legacy8bit ? "Legacy8bit" : "HDR") + "): " + e.what());
+            throw;
+        }
     }
 
     void KurenaiEngine3D::DiscoverScenes()
@@ -1632,15 +1666,11 @@ namespace Kurenai
         // そもそも効かない。加えてL>0.244では逆に粗くなり、金属はアルベドバッファの値を
         // F0として使う(DeferredLighting.hlsl)ぶん確実にその領域へ入るため、
         // 利点が確認できないまま欠点だけを抱えることになる。詳細はArchitecture.html 17.4節
-        // Emissive: 1.0でクリップされると照明器具がHDRな輝度を持てず、ブルームが成立しない。
-        // アルファを使わないためR11G11B10_Floatで足りる(帯域はR16G16B16A16_Floatの半分)
-        const RHI::Format emissiveFormat =
-            legacyPrecision ? RHI::Format::R8G8B8A8_UNorm : RHI::Format::R11G11B10_Float;
-        // AO/GIバッファ: rgb=間接拡散光(HDR)、a=遮蔽率。間接光はこの暗い室内では0.02〜0.1に
-        // 収まり、UNorm8ではコード5〜26の約20階調しか使えずポスタリゼーションする。
-        // aに遮蔽率を持つためアルファ付きのR16G16B16A16_Floatを使う
-        const RHI::Format aoFormat =
-            legacyPrecision ? RHI::Format::R8G8B8A8_UNorm : RHI::Format::R16G16B16A16_Float;
+        // フォーマットの決定はGetEmissiveFormat/GetAOFormatに一本化している。ここへ直接書くと
+        // 同じ値を宣言するPSO側(CreatePrecisionDependentPipelineStates)とずれ、
+        // D3D12では仕様違反になる(実際にそれで発生していた)
+        const RHI::Format emissiveFormat = GetEmissiveFormat();
+        const RHI::Format aoFormat = GetAOFormat();
 
         try
         {
@@ -1888,7 +1918,7 @@ namespace Kurenai
         return hash;
     }
 
-    void KurenaiEngine3D::FrameCameraToModel()
+    void KurenaiEngine3D::ResetSceneDependentParams()
     {
         const float sizeY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
         const float dx = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
@@ -1905,6 +1935,16 @@ namespace Kurenai
         // ヒット判定の厚みはSSAO/SSILと同様、遮蔽・接触判定として妥当な小さい値にする
         m_SSRMaxDistance = std::clamp(diagonal * 0.5f, 1.0f, 100.0f);
         m_SSRThickness = m_SSAORadius * 0.2f;
+    }
+
+    void KurenaiEngine3D::FrameCameraToModel()
+    {
+        const float sizeY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
+        const float dx = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
+        const float dz = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
+        const float diagonal = std::sqrt(dx * dx + sizeY * sizeY + dz * dz);
+
+        ResetSceneDependentParams();
 
         if (m_Scene.HasCameraOverride)
         {
@@ -2082,734 +2122,14 @@ namespace Kurenai
         return lightView * lightProj;
     }
 
-    void KurenaiEngine3D::RenderSceneSwitchUI()
+    float KurenaiEngine3D::GetLastFrameGPUWaitTimeMs() const
     {
-        ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Scenes");
-
-        ImGui::TextUnformatted(m_GraphicsAPI == GraphicsAPI::DX12 ? "Graphics API: DX12" : "Graphics API: DX11");
-        ImGui::Separator();
-
-        for (size_t i = 0; i < m_SceneDisplayNames.size(); ++i)
-        {
-            const bool isCurrent = (i == m_CurrentSceneIndex);
-            if (isCurrent)
-            {
-                ImGui::BeginDisabled();
-            }
-
-            const std::string label = WideToUtf8(m_SceneDisplayNames[i]);
-            if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0.0f)))
-            {
-                // LoadScene自体はUpdateスレッドから呼ぶ必要があるため、ここでは要求を書き込むだけにする
-                // (UpdateSceneSwitch参照)
-                m_PendingSceneIndex.store(static_cast<int>(i));
-            }
-
-            if (isCurrent)
-            {
-                ImGui::EndDisabled();
-            }
-        }
-
-        ImGui::End();
+        return m_Device->GetLastFrameGPUWaitTimeMs();
     }
 
-    void KurenaiEngine3D::RenderPostProcessUI()
+    float KurenaiEngine3D::GetMonitorDpiScale() const
     {
-        ImGui::SetNextWindowPos(ImVec2(10.0f, 280.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Post Processing");
-
-        ImGui::Checkbox("Enable AO / Indirect Light", &m_AOEnabled);
-        if (m_AOEnabled)
-        {
-            static const char* kAOTechniqueNames[] = { "SSAO", "SSIL (Visibility Bitmask)" };
-            int techniqueIndex = static_cast<int>(m_AOTechnique);
-            if (ImGui::Combo("Technique", &techniqueIndex, kAOTechniqueNames, IM_ARRAYSIZE(kAOTechniqueNames)))
-            {
-                m_AOTechnique = static_cast<AOTechnique>(techniqueIndex);
-            }
-
-            if (m_AOTechnique == AOTechnique::SSAO)
-            {
-                ImGui::SliderFloat("SSAO Radius", &m_SSAORadius, 0.01f, 5.0f);
-                ImGui::SliderFloat("SSAO Power", &m_SSAOPower, 0.1f, 4.0f);
-            }
-            else
-            {
-                ImGui::SliderFloat("SSIL Radius", &m_SSILRadius, 0.01f, 5.0f);
-                ImGui::SliderFloat("SSIL Thickness", &m_SSILThickness, 0.01f, 2.0f);
-                ImGui::SliderFloat("SSIL Intensity", &m_SSILIntensity, 0.0f, 8.0f);
-                ImGui::SliderFloat("SSIL AO Power", &m_SSILPower, 0.1f, 4.0f);
-
-                int sliceCount = static_cast<int>(m_SSILSliceCount);
-                if (ImGui::SliderInt("SSIL Slices", &sliceCount, 1, 8))
-                {
-                    m_SSILSliceCount = static_cast<uint32_t>(sliceCount);
-                }
-
-                int stepCount = static_cast<int>(m_SSILStepCount);
-                if (ImGui::SliderInt("SSIL Steps", &stepCount, 1, 16))
-                {
-                    m_SSILStepCount = static_cast<uint32_t>(stepCount);
-                }
-            }
-        }
-
-        ImGui::Checkbox("Enable Shadow", &m_ShadowEnabled);
-        if (m_ShadowEnabled)
-        {
-            ImGui::SliderFloat("Shadow Light Size", &m_ShadowLightSize, 0.001f, 0.05f, "%.4f");
-        }
-
-        ImGui::Checkbox("Enable IBL", &m_IBLEnabled);
-        if (m_IBLEnabled)
-        {
-            ImGui::SliderFloat("IBL Intensity", &m_IBLIntensity, 0.0f, 2.0f);
-            // 既定はプリフィルタ済み鏡面の最終ミップ(roughness=1)による拡散イラディアンス。
-            // これをONにすると従来の専用イラディアンスマップをその場で焼いて切り替える(14.10節)
-            ImGui::Checkbox("Use Dedicated Irradiance Map", &m_IBLUseDedicatedIrradiance);
-        }
-        else
-        {
-            ImGui::SliderFloat("Ambient Scale", &m_AmbientScale, 0.0f, 3.0f);
-        }
-
-        // スペキュラのマルチスキャッタリング・エネルギー補正(14.9節)。IBL鏡面・直接光鏡面の
-        // 両方に効くため、Enable IBLのブロックの内側ではなく独立したチェックボックスにする
-        ImGui::Checkbox("Specular Energy Compensation", &m_SpecularEnergyCompensationEnabled);
-
-        ImGui::Checkbox("Enable VSync", &m_VSyncEnabled);
-
-        ImGui::Checkbox("Fixed FPS", &m_FixedFPSEnabled);
-        if (m_FixedFPSEnabled)
-        {
-            static const char* kTargetFPSNames[] = { "30", "60", "120" };
-            static const float kTargetFPSValues[] = { 30.0f, 60.0f, 120.0f };
-            int targetFPSIndex = 1; // 見つからない場合は60fps相当の位置にしておく
-            for (int i = 0; i < IM_ARRAYSIZE(kTargetFPSValues); ++i)
-            {
-                if (kTargetFPSValues[i] == m_TargetFPS)
-                {
-                    targetFPSIndex = i;
-                    break;
-                }
-            }
-            if (ImGui::Combo("Target FPS", &targetFPSIndex, kTargetFPSNames, IM_ARRAYSIZE(kTargetFPSNames)))
-            {
-                m_TargetFPS = kTargetFPSValues[targetFPSIndex];
-            }
-        }
-
-        ImGui::Checkbox("Enable SSR", &m_SSREnabled);
-        if (m_SSREnabled)
-        {
-            ImGui::SliderFloat("SSR Max Distance", &m_SSRMaxDistance, 0.1f, 100.0f);
-            ImGui::SliderFloat("SSR Thickness", &m_SSRThickness, 0.01f, 2.0f);
-            ImGui::SliderFloat("SSR Roughness Cutoff", &m_SSRRoughnessCutoff, 0.05f, 1.0f);
-        }
-
-        ImGui::Separator();
-
-        // トーンマッピングカーブ。既定のAgXは、飽和した明るい色でACESに出る色相シフト
-        // (赤→オレンジ)を避けられる。Reinhardは比較用リファレンスとして残してある
-        static const char* kTonemapCurveNames[] = { "Reinhard", "ACES", "AgX" };
-        int curveIndex = static_cast<int>(m_TonemapCurve);
-        if (ImGui::Combo("Tonemap Curve", &curveIndex, kTonemapCurveNames, IM_ARRAYSIZE(kTonemapCurveNames)))
-        {
-            m_TonemapCurve = static_cast<TonemapCurve>(curveIndex);
-        }
-
-        // 薄明視。暗所で錐体が働かなくなり色が判別できなくなる現象の再現
-        ImGui::SliderFloat("Mesopic Vision", &m_MesopicStrength, 0.0f, 1.0f, "%.2f");
-        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-        {
-            ImGui::SetTooltip(
-                "暗所視の再現量。0で無効。\n"
-                "実際の輝度が0.01cd/m^2を下回ると桿体だけの視覚になり色が判別できなくなる\n"
-                "(3cd/m^2以上は通常の錐体視のまま。間は対数で補間)。\n"
-                "桿体の分光感度が短波長寄りなので、赤は沈み青は明るく見える(プルキンエ現象)。\n"
-                "露出を下げるだけでは「暗いが色鮮やかな夜」になり肉眼の見え方と合わない。");
-        }
-
-        // 暗部グラデーションのバンディングは中間バッファの精度ではなく最終8bit量子化が主因
-        // (実測で確認済み)。ここでON/OFFして効果をA/B比較できるようにしている
-        ImGui::Checkbox("Output Dithering", &m_DitherEnabled);
-
-        // ブルーム。しきい値は既定で低め(物理的にはレンズ散乱なので全輝度に掛かるのが正しい)
-        ImGui::Checkbox("Enable Bloom", &m_BloomEnabled);
-        if (m_BloomEnabled)
-        {
-            ImGui::SliderFloat("Bloom Strength", &m_BloomStrength, 0.0f, 0.5f, "%.3f");
-            ImGui::SliderFloat("Bloom Threshold", &m_BloomThreshold, 0.0f, 8.0f, "%.2f");
-            ImGui::SliderFloat("Bloom Soft Knee", &m_BloomSoftKnee, 0.0f, 1.0f, "%.2f");
-        }
-
-        // 自動露出。無効にするとLightingパネルのEV100スライダーがそのまま最終露出になる
-        ImGui::Checkbox("Auto Exposure", &m_AutoExposureEnabled);
-        if (m_AutoExposureEnabled)
-        {
-            ImGui::SliderFloat("AE Min EV100", &m_AutoExposureMinEV100, -8.0f, 20.0f, "%.1f");
-            ImGui::SliderFloat("AE Max EV100", &m_AutoExposureMaxEV100, -8.0f, 20.0f, "%.1f");
-            ImGui::SliderFloat("AE Compensation", &m_AutoExposureCompensation, -4.0f, 4.0f, "%.2f EV");
-            ImGui::SliderFloat("AE Key Ceiling", &m_AutoExposureKeyCeilingEV, -4.0f, 16.0f, "%.2f EV");
-            if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-            {
-                ImGui::SetTooltip(
-                    "測光値が「シーンの基準EV」から何段上まで行くのを許すか。\n"
-                    "基準EVは太陽・月・空の照度から求めるので画面の構図に依存しない。\n"
-                    "小さくするほど、空が画面に占める割合で露出が振れるのを抑えられる。\n"
-                    "16まで上げると従来どおりヒストグラムだけで決まる挙動に戻る。\n"
-                    "屋内が暗くならないよう、止めるのは上側だけ(下限はAE Min EV100)。");
-            }
-            ImGui::SliderFloat("AE Night Rolloff", &m_AutoExposureNightRolloffEV, 0.0f, 8.0f, "%.2f EV");
-            if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-            {
-                ImGui::SetTooltip(
-                    "暗いシーンをわざと暗いまま写す量。\n"
-                    "自動露出は測ったものを中庸なグレーへ持ち上げるため、\n"
-                    "0にすると夜が昼と同じ明るさで出る。\n"
-                    "測定EV100が %.1f 以下で最大、%.1f 以上で0、間は線形。",
-                    m_AutoExposureNightRolloffDarkEV100, m_AutoExposureNightRolloffBrightEV100);
-            }
-            ImGui::SliderFloat("AE Speed (to bright)", &m_AutoExposureSpeedUp, 0.1f, 10.0f, "%.2f");
-            ImGui::SliderFloat("AE Speed (to dark)", &m_AutoExposureSpeedDown, 0.1f, 10.0f, "%.2f");
-            ImGui::SliderFloat("AE Low Percentile", &m_AutoExposureLowPercentile, 0.0f, 1.0f, "%.2f");
-            ImGui::SliderFloat("AE High Percentile", &m_AutoExposureHighPercentile, 0.0f, 1.0f, "%.2f");
-        }
-
-        ImGui::Separator();
-
-        // 中間バッファの精度構成のA/B比較(BufferPrecision参照)。切り替えるとレンダーターゲットを
-        // 作り直す必要があるが、ここで直接作り直すとGPUがまだ読んでいるテクスチャを壊すため、
-        // フラグだけ立ててRender()側で(WaitForGPUIdleを挟んで)処理する
-        ImGui::TextUnformatted("Buffer Precision");
-        int precisionIndex = static_cast<int>(m_BufferPrecision);
-        bool precisionChanged = ImGui::RadioButton("HDR", &precisionIndex, static_cast<int>(BufferPrecision::HDR));
-        ImGui::SameLine();
-        precisionChanged |= ImGui::RadioButton("Legacy 8bit", &precisionIndex, static_cast<int>(BufferPrecision::Legacy8bit));
-        if (precisionChanged && precisionIndex != static_cast<int>(m_BufferPrecision))
-        {
-            m_BufferPrecision = static_cast<BufferPrecision>(precisionIndex);
-            m_BufferPrecisionDirty = true;
-        }
-        if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-        {
-            ImGui::SetTooltip(
-                "HDR: Emissive=R11G11B10F, AO/GI=RGBA16F\n"
-                "Legacy 8bit: すべてRGBA8_UNorm (M7以前の構成)\n"
-                "(Albedoはどちらもリニアの8bit。sRGB格納は効果が測定限界以下だったため不採用)");
-        }
-
-        ImGui::End();
-    }
-
-    void KurenaiEngine3D::RenderDebugViewUI()
-    {
-        // Post Processingパネル(Shadow Light Size追加分含む)が伸びた際に重ならないよう、
-        // 十分な余白を空けた位置を既定にする
-        ImGui::SetNextWindowPos(ImVec2(10.0f, 620.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(260.0f, 0.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Render Targets");
-
-        static const char* kDebugViewNames[] =
-        {
-            "Final (Lit)",
-            "Albedo",
-            "Normal",
-            "Material (R=Metallic, G=Roughness)",
-            "Emissive",
-            "Depth",
-            "Depth (Raw)",
-            "Direct Light",
-            "AO/GI - Indirect Light (RGB)",
-            "AO/GI - Indirect Light (RGB, Before Blur)",
-            "AO/GI - Occlusion (Alpha)",
-            "AO/GI - Occlusion (Alpha, Before Blur)",
-            "Shadow Map",
-            "SSR (Final + Reflections)",
-            "Hi-Z (Depth Mip Chain)",
-            "IBL - Irradiance (Cubemap, Look Around)",
-            "IBL - Prefiltered Specular (Cubemap Mip Chain, Look Around)",
-            "IBL - BRDF LUT (X=NdotV, Y=Roughness)",
-            "Bloom (Pyramid Top, Half Res)",
-            "Light Tiles (Lights per Tile Heatmap)",
-            "Probe - Irradiance (Cubemap Array, Look Around)",
-            "Probe - Prefiltered Specular (Mip 0 = Raw Capture)",
-            "Probe - Influence (Color per Probe)",
-        };
-        // DebugView enumと並びが一致していないと表示と実際のバッファがずれる
-        static_assert(
-            static_cast<int>(DebugView::ProbeInfluence) == 22,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はProbeInfluence)");
-
-        int currentIndex = static_cast<int>(m_DebugView);
-        if (ImGui::Combo("View", &currentIndex, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames)))
-        {
-            m_DebugView = static_cast<DebugView>(currentIndex);
-        }
-
-        if (m_DebugView == DebugView::HiZ)
-        {
-            ImGui::SliderInt("Hi-Z Mip Level", &m_HiZDebugMipLevel, 0, static_cast<int>(m_HiZMipLevels) - 1);
-        }
-
-        if (m_DebugView == DebugView::ShadowMap)
-        {
-            ImGui::SliderInt("Shadow Cascade", &m_ShadowDebugCascade, 0, static_cast<int>(kCascadeCount) - 1);
-        }
-
-        if (m_DebugView == DebugView::IBLPrefilter)
-        {
-            ImGui::SliderInt("Prefilter Mip Level", &m_IBLPrefilterDebugMipLevel, 0, static_cast<int>(kIBLPrefilterMipLevels) - 1);
-        }
-
-        if (m_DebugView == DebugView::ProbeIrradiance || m_DebugView == DebugView::ProbePrefilter)
-        {
-            // プローブが1つも無いシーンでもスライダーの範囲が壊れないよう下限を0に保つ
-            const int maxProbeIndex = m_ReflectionProbes.empty() ? 0 : static_cast<int>(m_ReflectionProbes.size()) - 1;
-            ImGui::SliderInt("Probe Index", &m_ProbeDebugIndex, 0, maxProbeIndex);
-            if (m_DebugView == DebugView::ProbePrefilter)
-            {
-                ImGui::SliderInt(
-                    "Probe Prefilter Mip", &m_ProbePrefilterDebugMipLevel, 0, static_cast<int>(kIBLPrefilterMipLevels) - 1);
-            }
-        }
-
-        if (m_DebugView == DebugView::LightTiles)
-        {
-            // ヒートマップの色: 黒=0灯、青=少ない、緑、赤=Heatmap Max以上、マゼンタ=タイル容量超過。
-            // ImGuiのフォントはASCIIのみなので英語で書く
-            ImGui::TextWrapped("black=0, blue -> green -> red = more lights, magenta = tile capacity exceeded");
-            ImGui::SliderInt("Heatmap Max Lights", &m_LightTileHeatmapMax, 1, static_cast<int>(kLightTileCapacity));
-            if (!m_LightCullingEnabled)
-            {
-                ImGui::TextWrapped("Tiled Light Culling is disabled - the grid is not being updated.");
-            }
-        }
-
-        // AO/GIバッファの間接拡散光のように値が小さいバッファ(暗い室内では0.02〜0.1程度)は
-        // 等倍表示だとほぼ真っ黒で階調の粗さが判別できない。持ち上げて表示することで、
-        // 8bit格納時のポスタリゼーションが何段あるかを目視で比較できる(Buffer Precisionと併用する)。
-        // Finalは見た目そのものを確認する表示なので倍率を適用しない(Render()側で1.0固定)
-        if (m_DebugView != DebugView::Final)
-        {
-            ImGui::SliderFloat("Debug View Gain", &m_DebugViewGain, 1.0f, 64.0f, "%.1fx", ImGuiSliderFlags_Logarithmic);
-        }
-
-        ImGui::End();
-    }
-
-    void KurenaiEngine3D::RenderLightingUI(const FrameState& frameState)
-    {
-        // ライトを選択して全項目を開くと縦に長くなるため、Profiler(280,490に移動済み)と
-        // 重ならないよう十分な高さを確保しておく
-        ImGui::SetNextWindowPos(ImVec2(280.0f, 10.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(300.0f, 470.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Lighting");
-
-        if (ImGui::CollapsingHeader("Sun", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-            ImGui::SliderFloat("Time of Day", &m_TimeOfDay, 0.0f, 24.0f, "%.2f h");
-            ImGui::Checkbox("Auto Advance", &m_TimeAutoAdvance);
-            if (m_TimeAutoAdvance)
-            {
-                ImGui::SliderFloat("Speed", &m_TimeAdvanceSpeed, 0.1f, 10.0f, "%.1f h/s");
-            }
-            ImGui::SliderFloat("Sun Azimuth", &m_SunAzimuthDegrees, 0.0f, 360.0f, "%.1f deg");
-            // 月の位置。**時刻には連動しない**(実際の月は太陽と独立した周期で動くため)。
-            // 平行光源の枠は太陽と共有しており、太陽が沈むと支配ライトが月へ切り替わる
-            // 月を動かすと夜空の目標照度(SkyIlluminanceLux)が変わるため、空を焼き直す必要がある
-            bool moonMoved = ImGui::SliderFloat("Moon Azimuth", &m_MoonAzimuthDegrees, 0.0f, 360.0f, "%.1f deg");
-            moonMoved |= ImGui::SliderFloat("Moon Elevation", &m_MoonElevationDegrees, -90.0f, 90.0f, "%.1f deg");
-            if (moonMoved)
-            {
-                m_SkyBakeDirty = true;
-            }
-            if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-            {
-                ImGui::SetTooltip(
-                    "月の仰角。0度以下なら地平線下にあり月光は出ない。\n"
-                    "時刻に連動しないため、任意の月齢・任意の時刻の見え方を作れる。");
-            }
-            // 太陽だけを消して環境光のみで照らす状態を作る(White Furnace Testが使う)。
-            // TimeOfDayを夜にする方法と違い、昼度(環境光の明るさ)は下がらない
-            ImGui::Checkbox("Enable Sun", &m_SunEnabled);
-            // 手続き空(Perez分布をGPUで評価)。無効にするとオフラインで焼いたSky.ddsへ戻る。
-            // .ksceneがスカイボックスを明示しているシーン(White Furnace Test)では
-            // このトグルに関わらず常にそのDDSが使われる(ActiveSkyTexture参照)
-            if (ImGui::Checkbox("Procedural Sky", &m_ProceduralSkyEnabled))
-            {
-                m_SkyBakeDirty = true;
-                m_IBLBaked = false;
-                m_IBLIrradianceBaked = false;
-            }
-            // 太陽・環境光・下記ポイント/スポットライトすべてに一様にかかるシーン全体の露出
-            // (実在の写真露出値EV100)。屋内シーンでは実カメラと同様に下げて調整する運用になる
-            ImGui::SliderFloat("EV100", &m_SceneExposureEV100, -8.0f, 20.0f, "%.2f");
-            // シーン全体の自発光の強度倍率。glTFのemissiveFactorは通常1.0以下に収まるため、
-            // G-BufferのエミッシブをHDR化(Buffer Precision=HDR)しただけでは照明器具の輝度が
-            // 1.0を超えられない。アセットを再オーサリングせずにHDRな自発光を作るための倍率
-            ImGui::SliderFloat("Emissive Intensity", &m_EmissiveIntensity, 0.0f, 64.0f, "%.2fx", ImGuiSliderFlags_Logarithmic);
-        }
-
-        if (ImGui::CollapsingHeader("Lights", ImGuiTreeNodeFlags_DefaultOpen))
-        {
-            uint32_t activeCount = 0;
-            for (const Assets::Light& light : m_Lights)
-            {
-                if (light.Enabled)
-                {
-                    ++activeCount;
-                }
-            }
-            ImGui::Text("Active: %u / %zu", activeCount, m_Lights.size());
-
-            ImGui::BeginChild("LightList", ImVec2(0.0f, 90.0f), true);
-            for (size_t i = 0; i < m_Lights.size(); ++i)
-            {
-                ImGui::PushID(static_cast<int>(i));
-                ImGui::Checkbox("##enabled", &m_Lights[i].Enabled);
-                ImGui::SameLine();
-                const char* typeLabel = m_Lights[i].Type == Assets::LightType::Directional ? "Directional"
-                                       : m_Lights[i].Type == Assets::LightType::Spot ? "Spot" : "Point";
-                char label[192];
-                std::snprintf(
-                    label, sizeof(label), "[%s] %s", typeLabel, m_Lights[i].Name.empty() ? "(no name)" : m_Lights[i].Name.c_str());
-                if (ImGui::Selectable(label, m_SelectedLightIndex == static_cast<int>(i)))
-                {
-                    m_SelectedLightIndex = static_cast<int>(i);
-                }
-                ImGui::PopID();
-            }
-            ImGui::EndChild();
-
-            if (ImGui::Button("Add"))
-            {
-                Assets::Light newLight;
-                const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
-                newLight.Position[0] = cameraPosition.x;
-                newLight.Position[1] = cameraPosition.y;
-                newLight.Position[2] = cameraPosition.z;
-                newLight.Name = "New Light";
-                m_Lights.push_back(newLight);
-                m_SelectedLightIndex = static_cast<int>(m_Lights.size()) - 1;
-            }
-
-            const bool hasSelection = m_SelectedLightIndex >= 0 && m_SelectedLightIndex < static_cast<int>(m_Lights.size());
-
-            ImGui::SameLine();
-            ImGui::BeginDisabled(!hasSelection);
-            if (ImGui::Button("Duplicate") && hasSelection)
-            {
-                Assets::Light duplicated = m_Lights[static_cast<size_t>(m_SelectedLightIndex)];
-                duplicated.Name += " (Copy)";
-                m_Lights.push_back(duplicated);
-                m_SelectedLightIndex = static_cast<int>(m_Lights.size()) - 1;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Remove") && hasSelection)
-            {
-                m_Lights.erase(m_Lights.begin() + m_SelectedLightIndex);
-                m_SelectedLightIndex =
-                    m_Lights.empty() ? -1 : std::min(m_SelectedLightIndex, static_cast<int>(m_Lights.size()) - 1);
-            }
-            ImGui::EndDisabled();
-
-            if (hasSelection)
-            {
-                Assets::Light& light = m_Lights[static_cast<size_t>(m_SelectedLightIndex)];
-
-                char nameBuffer[128];
-                std::snprintf(nameBuffer, sizeof(nameBuffer), "%s", light.Name.c_str());
-                if (ImGui::InputText("Name", nameBuffer, sizeof(nameBuffer)))
-                {
-                    light.Name = nameBuffer;
-                }
-
-                int typeIndex = static_cast<int>(light.Type);
-                const char* typeItems[] = { "Directional", "Point", "Spot" };
-                if (ImGui::Combo("Type", &typeIndex, typeItems, IM_ARRAYSIZE(typeItems)))
-                {
-                    light.Type = static_cast<Assets::LightType>(typeIndex);
-                }
-
-                ImGui::ColorEdit3("Color", light.Color);
-                ImGui::SliderFloat(
-                    "Intensity (cd/lx)", &light.Intensity, 0.01f, 1000000.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-
-                if (light.Type != Assets::LightType::Directional)
-                {
-                    ImGui::DragFloat3("Position", light.Position, 0.1f);
-                    ImGui::SliderFloat("Range", &light.Range, 0.1f, 500.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-                }
-
-                if (light.Type != Assets::LightType::Point)
-                {
-                    float yawDegrees = 0.0f;
-                    float pitchDegrees = 0.0f;
-                    DirectionToYawPitch(light.Direction, yawDegrees, pitchDegrees);
-                    bool directionChanged = false;
-                    directionChanged |= ImGui::SliderFloat("Direction Yaw", &yawDegrees, -180.0f, 180.0f, "%.1f deg");
-                    directionChanged |= ImGui::SliderFloat("Direction Pitch", &pitchDegrees, -89.0f, 89.0f, "%.1f deg");
-                    if (directionChanged)
-                    {
-                        YawPitchToDirection(yawDegrees, pitchDegrees, light.Direction);
-                    }
-                }
-
-                if (light.Type == Assets::LightType::Spot)
-                {
-                    float innerDegrees = DirectX::XMConvertToDegrees(light.SpotInnerConeAngle);
-                    float outerDegrees = DirectX::XMConvertToDegrees(light.SpotOuterConeAngle);
-                    ImGui::SliderFloat("Inner Cone", &innerDegrees, 0.0f, 89.0f, "%.1f deg");
-                    ImGui::SliderFloat("Outer Cone", &outerDegrees, 0.0f, 90.0f, "%.1f deg");
-                    if (innerDegrees > outerDegrees)
-                    {
-                        innerDegrees = outerDegrees;
-                    }
-                    light.SpotInnerConeAngle = DirectX::XMConvertToRadians(innerDegrees);
-                    light.SpotOuterConeAngle = DirectX::XMConvertToRadians(outerDegrees);
-                }
-
-                // このライトがスクリーンスペースシャドウを落とすか。ピクセルあたりのシャドウレイ数には
-                // 上限(Max Shadowed Lights)があるため、影を出したいライトへ予算を回すのに使う
-                ImGui::Checkbox("Cast Shadow", &light.CastShadow);
-            }
-        }
-
-        if (ImGui::CollapsingHeader("Screen-Space Shadows"))
-        {
-            // ImGuiのフォントは既定のProggyClean(ASCIIのみ)で日本語グリフを持たないため、
-            // 画面に出す文字列はASCIIで書く(日本語を渡すと "????" に化ける。実機で確認済み)
-            ImGui::TextWrapped(
-                "Shadows for point / spot lights, without shadow maps. Rays are marched through the "
-                "depth buffer toward each light, so occluders that are not visible on screen "
-                "(off-screen, or hidden behind a closer surface) cast no shadow. "
-                "The result is contact / mid-range occlusion rather than full shadowing.");
-            ImGui::Checkbox("Enable##SSS", &m_ScreenSpaceShadowEnabled);
-            ImGui::BeginDisabled(!m_ScreenSpaceShadowEnabled);
-            // 上限はScreenSpaceShadow.hlsliのkSSSMaxStepCountと揃える
-            ImGui::SliderInt("Steps", &m_ScreenSpaceShadowStepCount, 1, 64);
-            ImGui::SliderFloat(
-                "Max Ray Length", &m_ScreenSpaceShadowMaxRayLength, 0.05f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SliderFloat(
-                "Thickness##SSS", &m_ScreenSpaceShadowThickness, 0.01f, 5.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SliderFloat(
-                "Normal Bias##SSS", &m_ScreenSpaceShadowNormalBias, 0.0f, 0.02f, "%.4f");
-            ImGui::SliderFloat("Edge Fade##SSS", &m_ScreenSpaceShadowEdgeFade, 0.01f, 0.5f, "%.3f");
-            // 0にすると全ライトで影が消える。ライトを増やしたときのコスト上限を決めるつまみ
-            ImGui::SliderInt("Max Shadowed Lights", &m_ScreenSpaceShadowMaxLightsPerPixel, 0, 16);
-            ImGui::EndDisabled();
-        }
-
-        if (ImGui::CollapsingHeader("Tiled Light Culling"))
-        {
-            ImGui::TextWrapped(
-                "Splits the screen into 16x16 pixel tiles and builds a per-tile list of the lights that "
-                "reach it, so the lighting pass loops over the lights in the tile instead of every light "
-                "in the scene. This is a pure optimization: the image must not change when it is toggled. "
-                "Use the Light Tiles debug view to inspect the grid.");
-            ImGui::Checkbox("Enable##LightCulling", &m_LightCullingEnabled);
-            ImGui::Text("Tiles: %u x %u (%u per tile max)", m_LightTileCountX, m_LightTileCountY, kLightTileCapacity);
-        }
-
-        ImGui::End();
-    }
-
-    void KurenaiEngine3D::RenderReflectionProbeUI()
-    {
-        ImGui::SetNextWindowPos(ImVec2(590.0f, 10.0f), ImGuiCond_FirstUseEver);
-        // Box形状を選ぶとBox Extents/Yawが増えるため、それでもスクロール無しで収まる高さにしておく
-        ImGui::SetNextWindowSize(ImVec2(300.0f, 430.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Reflection Probes");
-
-        ImGui::Checkbox("Enable Reflection Probes", &m_ReflectionProbeEnabled);
-        // 以下2つはPhase 1(球形・単一選択・視差補正なし)との見比べ用。どちらも焼き直し不要で、
-        // 環境ソースの引き方だけが変わる
-        ImGui::Checkbox("Parallax Correction", &m_ProbeParallaxCorrectionEnabled);
-        if (ImGui::IsItemHovered())
-        {
-            // ImGuiの既定フォント(ProggyClean)はASCIIしか持たないため、UI文言は他と同様に英語で書く
-            ImGui::SetTooltip("Box shape only. Intersects the reflection vector with the box\nso reflections line up away from the probe center.");
-        }
-        ImGui::Checkbox("Probe Blending", &m_ProbeBlendingEnabled);
-        if (ImGui::IsItemHovered())
-        {
-            ImGui::SetTooltip("Fades weights over Blend Distance inward from the volume border.\nOff: uses only the nearest probe, leaving a seam at the border.");
-        }
-        // 更新モード(19.10節)。焼き直しのコストとシーンの変化への追従はトレードオフの関係にあり、
-        // Profilerパネルの ProbeBakeN / ProbeRealtimeCapture / ProbeRealtimeConvolve と
-        // 見比べながら選べるようにしてある
-        int updateModeIndex = static_cast<int>(m_ProbeUpdateMode);
-        const char* const updateModeNames[] = { "Baked", "On Demand", "Realtime (time-sliced)" };
-        if (ImGui::Combo("Update Mode", &updateModeIndex, updateModeNames, IM_ARRAYSIZE(updateModeNames)))
-        {
-            m_ProbeUpdateMode = static_cast<ProbeUpdateMode>(updateModeIndex);
-        }
-        if (ImGui::IsItemHovered())
-        {
-            ImGui::SetTooltip(
-                "Baked:     bake on scene load and the Bake button only.\n"
-                "On Demand: also re-bake when the sun, time of day or lights change.\n"
-                "Realtime:  also bake one cube face per frame, round-robin over probes.");
-        }
-
-        ImGui::Text("Probes: %zu / %u", m_ReflectionProbes.size(), kMaxReflectionProbes);
-        if (!m_ProbeBaked && !m_ReflectionProbes.empty())
-        {
-            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "Not baked yet");
-        }
-        else if (m_ProbeUpdateMode == ProbeUpdateMode::Realtime && !m_ReflectionProbes.empty())
-        {
-            // 今どのプローブの何面目を焼いているか。1周にプローブ数×6フレームかかるので、
-            // 「変化が反射へ現れるまでの遅れ」がこの進行から読める
-            ImGui::Text(
-                "Updating probe %u, face %u / %u", m_ProbeRealtimeProbeIndex, m_ProbeRealtimeFace + 1, kCubeFaceCount);
-        }
-
-        ImGui::BeginChild("ProbeList", ImVec2(0.0f, 90.0f), true);
-        for (size_t i = 0; i < m_ReflectionProbes.size(); ++i)
-        {
-            ImGui::PushID(static_cast<int>(i));
-            char label[192];
-            std::snprintf(
-                label, sizeof(label), "[%zu] %s", i,
-                m_ReflectionProbes[i].Name.empty() ? "(no name)" : m_ReflectionProbes[i].Name.c_str());
-            if (ImGui::Selectable(label, m_SelectedProbeIndex == static_cast<int>(i)))
-            {
-                m_SelectedProbeIndex = static_cast<int>(i);
-            }
-            ImGui::PopID();
-        }
-        ImGui::EndChild();
-
-        // キューブマップ配列は固定容量のため、上限に達したら追加できない
-        ImGui::BeginDisabled(m_ReflectionProbes.size() >= kMaxReflectionProbes);
-        if (ImGui::Button("Add"))
-        {
-            // 追加位置はプローブ一覧の中心ではなくシーンAABBの中心にする(カメラ位置だと
-            // 壁や地面へめり込んだ位置に置かれやすく、そのまま焼くと真っ暗なプローブになるため)
-            Assets::ReflectionProbe newProbe;
-            newProbe.Position[0] = (m_Scene.BoundsMin[0] + m_Scene.BoundsMax[0]) * 0.5f;
-            newProbe.Position[1] = (m_Scene.BoundsMin[1] + m_Scene.BoundsMax[1]) * 0.5f;
-            newProbe.Position[2] = (m_Scene.BoundsMin[2] + m_Scene.BoundsMax[2]) * 0.5f;
-            newProbe.Name = "New Probe";
-            m_ReflectionProbes.push_back(newProbe);
-            m_SelectedProbeIndex = static_cast<int>(m_ReflectionProbes.size()) - 1;
-            m_ProbeBakeRequested = true;
-        }
-        ImGui::EndDisabled();
-
-        const bool hasSelection =
-            m_SelectedProbeIndex >= 0 && m_SelectedProbeIndex < static_cast<int>(m_ReflectionProbes.size());
-
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!hasSelection);
-        if (ImGui::Button("Remove") && hasSelection)
-        {
-            m_ReflectionProbes.erase(m_ReflectionProbes.begin() + m_SelectedProbeIndex);
-            m_SelectedProbeIndex = m_ReflectionProbes.empty()
-                ? -1
-                : std::min(m_SelectedProbeIndex, static_cast<int>(m_ReflectionProbes.size()) - 1);
-            // 番号がずれるため残り全部を焼き直す
-            m_ProbeBakeRequested = !m_ReflectionProbes.empty();
-            m_ProbeBaked = m_ProbeBaked && !m_ReflectionProbes.empty();
-        }
-        ImGui::EndDisabled();
-
-        ImGui::SameLine();
-        ImGui::BeginDisabled(m_ReflectionProbes.empty());
-        if (ImGui::Button("Bake"))
-        {
-            m_ProbeBakeRequested = true;
-        }
-        ImGui::EndDisabled();
-
-        if (hasSelection)
-        {
-            Assets::ReflectionProbe& probe = m_ReflectionProbes[static_cast<size_t>(m_SelectedProbeIndex)];
-
-            char nameBuffer[128];
-            std::snprintf(nameBuffer, sizeof(nameBuffer), "%s", probe.Name.c_str());
-            if (ImGui::InputText("Name", nameBuffer, sizeof(nameBuffer)))
-            {
-                probe.Name = nameBuffer;
-            }
-
-            // 位置・半径はキャプチャ内容そのものを変えるため、動かしたら焼き直す必要がある
-            if (ImGui::DragFloat3("Position", probe.Position, 0.1f))
-            {
-                m_ProbeBakeRequested = true;
-            }
-            // 以下の影響範囲パラメータはどれもキャプチャ内容には影響しない(どこから撮るかは
-            // Positionだけで決まる)ため、変更しても焼き直しは不要
-            int shapeIndex = (probe.Shape == Assets::ReflectionProbeShape::Box) ? 1 : 0;
-            const char* const shapeNames[] = { "Sphere", "Box" };
-            if (ImGui::Combo("Shape", &shapeIndex, shapeNames, IM_ARRAYSIZE(shapeNames)))
-            {
-                probe.Shape = (shapeIndex == 1)
-                    ? Assets::ReflectionProbeShape::Box
-                    : Assets::ReflectionProbeShape::Sphere;
-            }
-
-            if (probe.Shape == Assets::ReflectionProbeShape::Box)
-            {
-                // 各軸の半径。0以下だと箱が潰れて交差計算が成り立たないため下限を与える
-                if (ImGui::DragFloat3("Box Extents", probe.BoxExtents, 0.1f, 0.1f, 1000.0f, "%.2f"))
-                {
-                    for (float& extent : probe.BoxExtents)
-                    {
-                        extent = std::max(extent, 0.1f);
-                    }
-                }
-                ImGui::DragFloat("Yaw", &probe.YawDegrees, 0.5f, -180.0f, 180.0f, "%.1f deg");
-            }
-            else
-            {
-                ImGui::DragFloat("Radius", &probe.Radius, 0.1f, 0.1f, 1000.0f, "%.2f");
-            }
-
-            ImGui::DragFloat("Blend Distance", &probe.BlendDistance, 0.05f, 0.0f, 100.0f, "%.2f");
-            if (ImGui::IsItemHovered())
-            {
-                ImGui::SetTooltip("Distance inward from the volume border over which this probe's\nweight ramps up to 1. Zero makes the border a hard cut.");
-            }
-        }
-
-        ImGui::End();
-    }
-
-    void KurenaiEngine3D::RenderProfilerUI()
-    {
-        // Lightingパネル(280,10)がライト編集項目を全部開くと縦に480px近く必要になるため、
-        // それより下(490)に配置して重ならないようにする
-        ImGui::SetNextWindowPos(ImVec2(280.0f, 490.0f), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(280.0f, 460.0f), ImGuiCond_FirstUseEver);
-        ImGui::Begin("Profiler");
-
-        ImGui::Text("FPS: %.1f", m_FPS);
-        ImGui::Text("CPU Frame Time: %.3f ms", m_CPUFrameTimeMs);
-        ImGui::Text("GPU Frame Time: %.3f ms", m_GPUProfiler->GetTotalFrameTimeMs());
-        // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)。CPU Frame Timeや
-        // PresentSubmitの計測値からは既に除外済みなので、参考情報として別枠で表示する
-        ImGui::Text("GPU Wait: %.3f ms", m_Device->GetLastFrameGPUWaitTimeMs());
-        ImGui::Separator();
-        ImGui::TextUnformatted("CPU Pass Breakdown:");
-        for (const auto& result : m_CPUProfiler.GetResults())
-        {
-            ImGui::Text("  %s: %.3f ms", result.Name.c_str(), result.TimeMs);
-        }
-        ImGui::Separator();
-        ImGui::TextUnformatted("GPU Pass Breakdown:");
-        for (const auto& result : m_GPUProfiler->GetResults())
-        {
-            ImGui::Text("  %s: %.3f ms", result.Name.c_str(), result.TimeMs);
-        }
-
-        ImGui::End();
+        return m_Window->GetDpiScale();
     }
 
     void KurenaiEngine3D::Run()
@@ -2818,6 +2138,10 @@ namespace Kurenai
         // 呼び出し元スレッド(以下Updateスレッド)はPumpMessages/Updateに専念する
         m_RenderThread = std::thread(&KurenaiEngine3D::RenderThreadMain, this);
 
+        // 注意: ウィンドウのドラッグ中(移動・リサイズ)はWindowsが自前のモーダルループを回すため、
+        // このループのPumpMessages()は戻ってこない。その間は1フレームも進まず画面が固まる
+        // (ドラッグ中は描画不要という方針のためこのままにしている)。
+        // その結果、モニタをまたいだときのUI拡大率の変化はマウスを離した時点でまとめて反映される
         while (!m_Window->ShouldClose())
         {
             m_Window->PumpMessages();
@@ -2826,30 +2150,7 @@ namespace Kurenai
                 break;
             }
 
-            const auto now = std::chrono::steady_clock::now();
-            const float deltaTime = std::chrono::duration<float>(now - m_LastFrameTime).count();
-            m_LastFrameTime = now;
-
-            Update(deltaTime);
-
-            // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/LoadScene経由のFrameCameraToModel)
-            // のみが書き込み、Render()はframeStateのスナップショット経由でしか読まないため、
-            // ここでの読み取りに追加のロックは不要
-            FrameState newFrameState;
-            newFrameState.Camera = m_Camera;
-            newFrameState.ImGuiVisible = m_ImGuiVisible;
-
-            // Renderスレッドが直前フレーム分を取り込み終えるまで待つ(キュー深度1)。
-            // 取り込み自体はスナップショットのコピーだけなので即座に完了し、その後の重いGPU発行は
-            // このUpdateスレッドの次フレーム処理と並行して進む
-            {
-                std::unique_lock<std::mutex> lock(m_FrameStateMutex);
-                m_FrameStateCV.wait(lock, [this] { return m_FrameStateTaken; });
-                m_FrameState = newFrameState;
-                m_FrameStateReady = true;
-                m_FrameStateTaken = false;
-            }
-            m_FrameStateCV.notify_one();
+            TickFrame();
         }
 
         {
@@ -2858,6 +2159,34 @@ namespace Kurenai
         }
         m_FrameStateCV.notify_one();
         m_RenderThread.join();
+    }
+
+    void KurenaiEngine3D::TickFrame()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const float deltaTime = std::chrono::duration<float>(now - m_LastFrameTime).count();
+        m_LastFrameTime = now;
+
+        Update(deltaTime);
+
+        // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/LoadScene経由のFrameCameraToModel)
+        // のみが書き込み、Render()はframeStateのスナップショット経由でしか読まないため、
+        // ここでの読み取りに追加のロックは不要
+        FrameState newFrameState;
+        newFrameState.Camera = m_Camera;
+        newFrameState.ImGuiVisible = m_ImGuiVisible;
+
+        // Renderスレッドが直前フレーム分を取り込み終えるまで待つ(キュー深度1)。
+        // 取り込み自体はスナップショットのコピーだけなので即座に完了し、その後の重いGPU発行は
+        // このUpdateスレッドの次フレーム処理と並行して進む
+        {
+            std::unique_lock<std::mutex> lock(m_FrameStateMutex);
+            m_FrameStateCV.wait(lock, [this] { return m_FrameStateTaken; });
+            m_FrameState = newFrameState;
+            m_FrameStateReady = true;
+            m_FrameStateTaken = false;
+        }
+        m_FrameStateCV.notify_one();
     }
 
     void KurenaiEngine3D::RenderThreadMain()
@@ -2949,7 +2278,7 @@ namespace Kurenai
         }
     }
 
-    void KurenaiEngine3D::UpdateMouseLook()
+    void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
     {
         // このメソッドだけは意図的にGetAsyncKeyState/GetCursorPos/SetCursorPosを使い続けている。
         // カーソルを画面中央へ強制的に固定し続ける(SetCursorPos)ことで無限ドラッグを実現しており、
@@ -2968,6 +2297,15 @@ namespace Kurenai
         {
             if (!m_MouseCaptured)
             {
+                // ImGuiパネルの上で右ボタンを押し始めた場合は視点回転を開始しない
+                // (ウィジェットの右クリックメニューと衝突するため)。
+                // 一度キャプチャに入った後はカーソルが画面中央へ固定され続けてImGui側の判定が
+                // 変わりうるため、この判定は開始時にだけ行う
+                if (imguiWantsMouse)
+                {
+                    return;
+                }
+
                 m_MouseCaptured = true;
                 ShowCursor(FALSE);
 
@@ -3056,8 +2394,24 @@ namespace Kurenai
 
     void KurenaiEngine3D::Update(float deltaTime)
     {
-        UpdateMouseLook();
-        UpdateMovement(deltaTime);
+        // ImGui(Renderスレッド)が入力を掴んでいるかを読む。Renderは1フレーム遅れて描くため
+        // この値も1フレーム遅れるが、WantCaptureKeyboardはInputTextがアクティブな間ずっと
+        // trueであり続けるため、実用上ずれるのは押し始めの1フレームだけ
+        const bool imguiWantsKeyboard = m_ImGuiWantCaptureKeyboard.load(std::memory_order_relaxed);
+        const bool imguiWantsMouse = m_ImGuiWantCaptureMouse.load(std::memory_order_relaxed);
+
+        UpdateMouseLook(imguiWantsMouse);
+
+        // ライト名のInputTextを編集中にWASDがカメラ移動として解釈されるのを防ぐ
+        if (!imguiWantsKeyboard)
+        {
+            UpdateMovement(deltaTime);
+        }
+
+        // F1(ImGuiパネルの表示/非表示)はWantCaptureKeyboardに関係なく常に効かせる。
+        // ここも抑止すると、テキスト入力中にパネルを畳んで戻す手段が無くなり、入力欄から
+        // フォーカスを外す方法(Esc / 別の場所をクリック)を知らないと詰むため。
+        // ImGuiのInputTextはF1を消費しないので、通しても入力内容には影響しない
         UpdateImGuiToggle();
         UpdateSceneSwitch();
         // 昼夜サイクルの自動進行(m_TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
@@ -3075,15 +2429,26 @@ namespace Kurenai
         // 行うことで、このフレームのNewFrame()が最新のマウス/キーボード状態を反映できる
         m_Window->ForwardQueuedMessagesToImGui();
 
+        // モニタの拡大率に合わせてUIの大きさを揃える。ImGuiの状態を触るのはこのRenderスレッド
+        // だけという不変条件を守るため、Window側は値をatomicへ置くだけにし、
+        // 実際のスタイル再適用はここで行う
+        m_UIManager->OnUIScaleChanged(m_Window->GetDpiScale() * UI::UITheme::kUIScaleMultiplier);
+
         m_ImGuiBackend->NewFrame();
         if (frameState.ImGuiVisible)
         {
-            RenderSceneSwitchUI();
-            RenderPostProcessUI();
-            RenderDebugViewUI();
-            RenderLightingUI(frameState);
-            RenderReflectionProbeUI();
-            RenderProfilerUI();
+            UI::PanelDrawContext panelContext;
+            panelContext.Camera = &frameState.Camera;
+            m_UIManager->Draw(panelContext);
+        }
+
+        // ImGuiがマウス/キーボードを掴んでいるかをUpdateスレッドへ返す(Update()が読む)。
+        // パネル非表示のときは掴んでいないので明示的にfalseを書く
+        {
+            const ImGuiIO& io = ImGui::GetIO();
+            m_ImGuiWantCaptureKeyboard.store(
+                frameState.ImGuiVisible && io.WantCaptureKeyboard, std::memory_order_relaxed);
+            m_ImGuiWantCaptureMouse.store(frameState.ImGuiVisible && io.WantCaptureMouse, std::memory_order_relaxed);
         }
 
         // バッファ精度の切り替え要求(RenderPostProcessUIのラジオボタン)をここで処理する。
@@ -3096,6 +2461,10 @@ namespace Kurenai
             m_BufferPrecisionDirty = false;
             m_Device->WaitForGPUIdle();
             CreateRenderTargets(m_RenderWidth, m_RenderHeight);
+            // G-Buffer(Emissive)とAO/GIのフォーマットが変わるため、それらへ描くPSOも作り直す。
+            // 作り直さないとPSOが宣言するRenderTargetFormatsと実際のRTVがずれ、D3D12では
+            // 仕様違反になる(DX11は検証しないため露見しない)
+            CreatePrecisionDependentPipelineStates();
         }
 
         auto* commandList = m_Device->GetImmediateCommandList();

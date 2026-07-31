@@ -1141,9 +1141,11 @@ DLL境界を跨ぐ以上<code>KURENAI_LIB_API</code>を新たに付与した。
 
 <h3>12.2 ImGuiをDLL境界越しに使う仕組み</h3>
 <p>
-ImGuiのコンテキスト生成(<code>ImGui::CreateContext()</code>)は<code>DX11ImGuiBackend</code>/
-<code>DX12ImGuiBackend</code>(Library側)で行われる一方、<code>KurenaiEngine3D.cpp</code>は
-ImGuiパネル描画のために<code>ImGui::*</code>関数を直接、約80箇所で呼び出している。ImGui本体
+ImGuiのコンテキスト生成(<code>ImGui::CreateContext()</code>)はLibrary側
+(<code>RHI::Detail::CreateImGuiContextCommon()</code>。<code>DX11ImGuiBackend</code>/
+<code>DX12ImGuiBackend</code>の両方から呼ぶ)で行われる一方、KurenaiEngine3D.dll側の
+UIパネル群(<code>Source/Engine/UI/</code>)はパネル描画のために<code>ImGui::*</code>関数を
+直接呼び出している。ImGui本体
 (<code>imgui.cpp</code>等)はKurenaiEngineLibrary.dllにのみコンパイルし、KurenaiEngine3D.dllからは
 その関数群をdllimportする形にした。具体的には<code>imgui.h</code>が参照する<code>IMGUI_API</code>マクロを
 プリプロセッサ定義で外側から与える。
@@ -1156,11 +1158,46 @@ KurenaiEngine2D.vcxproj:      (imgui を一切includeしないため定義不要
 代替案として「imguiをKurenaiEngine3D側にも重複コンパイルし、<code>SetCurrentContext</code>/
 <code>SetAllocatorFunctions</code>でコンテキストを受け渡す」方式も検討したが、その場合
 <code>IRHIImGuiBackend</code>に新しい公開APIを追加する必要があり、かつImGuiのコード・グローバル状態
-(<code>GImGui</code>等)が2つのDLLに二重化してしまう。今回使用しているimgui(1.92.9 WIP)は
+(<code>GImGui</code>等)が2つのDLLに二重化してしまう。今回使用しているimgui(1.92.9 docking)は
 <code>imgui.h</code>内で構造体単位に<code>IMGUI_API</code>を付けている箇所が無く(個々の関数・一部の
 静的データメンバのみ)、構造体単位でdllexportされる型は<code>imgui_internal.h</code>側にしか無い。
 <code>imgui_internal.h</code>はLibraryしかincludeしないため、<code>IMGUI_API</code>定義による
 問題は生じない。
+</p>
+<p>
+<strong>この「<code>imgui_internal.h</code>はLibraryしかincludeしない」という前提が、
+ドックレイアウトの構築をLibrary側へ代理させている理由である。</strong>
+既定レイアウトを組む<code>DockBuilderSplitNode</code>/<code>DockBuilderDockWindow</code>等は
+<code>imgui_internal.h</code>にあり、同ヘッダには<code>struct IMGUI_API</code>と宣言された型が
+19個含まれる(<code>ImRect</code>/<code>ImGuiWindow</code>/<code>ImGuiDockNode</code>等)。
+KurenaiEngine3D.dll側でこれをincludeするとそれらがすべてdllimportクラスになり、上記の前提が崩れる。
+そこで<code>Core::ImGuiDockLayout</code>(Library側)へ<code>HasNode</code>/<code>BuildDefault</code>の
+2つだけを持つ狭いAPIを置き、KurenaiEngine3D側はそれを呼ぶ。
+このクラスのヘッダは<code>imgui.h</code>にも依存させず、<code>ImGuiID</code>は素の
+<code>unsigned int</code>で受け渡す。
+</p>
+<p>
+<code>IRHIImGuiBackend</code>へ足さなかったのは、<code>DockBuilder</code>系がコアimguiの機能で
+DX11/DX12に一切依存しないため。純粋仮想インタフェースへ足すと同一の実装が両バックエンドに
+2重に必要になり、まさに<code>CreateImGuiContextCommon()</code>で解消した重複を増やすことになる。
+</p>
+<p>
+対比として、ドックスペース自体を張る<code>ImGui::DockSpace</code>は<code>imgui.h</code>の公開APIなので、
+KurenaiEngine3D側から直接呼んでいる。
+</p>
+<p>
+なお<code>ImGui::DockSpaceOverViewport</code>は使わず、<code>UIManager::DrawDockSpaceAndLayout</code>で
+同等の処理を自前で書いている。あちらはドックスペースの位置・サイズに
+<code>viewport-&gt;WorkPos</code>/<code>WorkSize</code>(メニューバーの高さを差し引いた領域)を使うが、
+<strong>この値は1フレーム遅れる</strong>。メニューバーの高さを作業領域へ反映する処理が
+<code>imgui_widgets.cpp</code>の<code>BeginViewportSideBar</code>にあり、
+「Report our size into work area (for next frame)」というコメントのとおり
+次フレーム用の<code>BuildWorkInsetMin</code>へ足し込む仕様のためである。
+UIの拡大率が変わったフレームでは、メニューバーは新しい高さで描かれるのに<code>WorkPos</code>は
+古い高さのままとなり、<strong>ドックスペース全体が1フレームだけ縦にずれてすぐ戻る</strong>
+(ディスプレイ間の移動で実際に発生した)。
+メニューバーの高さを<code>ImGui::GetFrameHeight()</code>で現在のスタイルから直接求めて使えば、
+このずれは起きない。
 </p>
 
 <h3>12.3 DLLを経由したProjectReferenceはリンクを推移しない</h3>
@@ -1199,6 +1236,269 @@ Sample2Dの出力フォルダには<code>KurenaiEngineLibrary.dll</code>・<code
 3D側は一切ビルドされない)。<code>dumpbin /dependents KurenaiEngine2D.dll</code>で確認すると、依存は
 <code>KurenaiEngineLibrary.dll</code>とkernel32/user32/gdi32のみで、d3d11.dll/d3d12.dll/dxgi.dllへの
 依存は無い(RHIの実装がLibrary側に完全に隠蔽されているため)。
+</p>
+
+<h3>12.6 UIモジュールの分割とKurenaiEngine3Dのfriend化</h3>
+<p>
+UIは当初<code>KurenaiEngine3D.cpp</code>に<code>RenderPostProcessUI()</code>等の5つのメンバ関数
+(計442行)として直に書かれていた。最大の<code>RenderPostProcessUI()</code>は10セクションが
+<code>ImGui::Separator()</code>だけで平坦に並び、パネルが伸びるたびに
+<code>SetNextWindowPos</code>のY座標を手で調整して重なりを避けていた。これを
+<code>Source/Engine/UI/</code>配下の<code>IPanel</code>実装クラスへ分割し、
+<code>UI::UIManager</code>が所有・描画する構成に変えた(現在8クラス:
+シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ / デバッグ表示 /
+システム / プロファイラ)。
+</p>
+<p>
+機能を1つ足すときに触るのは原則「そのパネルの<code>.cpp</code>」だけになる。新しいパネルを
+足す場合だけ、<code>UIManager</code>のコンストラクタへの追加・既定ドックスロットへの追加・
+<code>KurenaiEngine3D.h</code>の前方宣言とfriend宣言・<code>kDockSpaceId</code>の世代繰り上げが
+セットで必要になる(いずれか1つでも漏れると、パネルが出ない/privateに触れない/
+既存の<code>imgui.ini</code>のせいで宙に浮く、のいずれかが起きる)。
+</p>
+<p>
+各パネルは<code>KurenaiEngine3D</code>のパラメータメンバ(<code>m_SSAORadius</code>等)を
+ImGuiウィジェットへアドレスで直接渡すため、<code>KurenaiEngine3D</code>のprivateへアクセスする
+必要がある。ここは<strong>friend宣言</strong>で解決した。
+</p>
+<table>
+<tr><th>案</th><th>内容</th><th>判断</th></tr>
+<tr><td>friend</td><td>パネルクラスをfriendにする</td><td><strong>採用。</strong>ヘッダへの追加は前方宣言とfriend宣言だけで、既存メンバの宣言・使用箇所を一切動かさない</td></tr>
+<tr><td>パラメータ構造体へ切り出す</td><td><code>PostProcessParams</code>等へメンバを物理移動</td><td>却下。<code>Render()</code>内の参照が約200箇所あり、書き換えの過程で1箇所間違えてもコンパイルが通ったまま静かに壊れる。<code>m_SceneMutex</code>の保護対象を説明するコメントも全面的に書き換えになる</td></tr>
+<tr><td>アクセサを生やす</td><td>getter/setterを約60対追加</td><td>却下。ImGuiは<code>&amp;value</code>を直接要求するため結局<code>float* GetSSAORadiusPtr()</code>のような穴あきアクセサになり、friendと実質同じ露出でコードだけ増える</td></tr>
+</table>
+<p>
+元々「UI関数がメンバ関数だからprivateに触れていた」構造を「UIがfriendだから触れる」へ
+平行移動しただけなので、振る舞いの差分は無い。<code>m_SceneMutex</code>の保護対象も変わらない
+(UIの描画はRenderスレッドから、<code>LoadScene</code>はUpdateスレッドから同じメンバを触るという
+関係がそのまま維持される)。ただしfriendは全privateメンバを見せてしまうため、
+「UIから触ってよいのはパラメータ用メンバだけで、RHIリソース(<code>m_GBufferAlbedo</code>等)には
+触らない」という規約は各パネルの実装側で守る必要がある。
+</p>
+<p>
+ウィンドウ名は<code>"日本語表示###ASCII_ID"</code>形式にしている。<code>ImHashStr</code>は文字列中に
+<code>###</code>を見つけるとそこでハッシュをリセットするため、表示名を変えても
+ウィンドウID(=<code>imgui.ini</code>のキー、およびドックレイアウトの割り当て先)は変わらない。
+</p>
+<p>
+ドックスペースのID(<code>UIManager.cpp</code>の<code>kDockSpaceId</code>)の末尾1バイトは
+レイアウトの世代を表す。パネルを追加・削除してレイアウト構成そのものを変えたときにここを進めると、
+既存の<code>imgui.ini</code>があっても<code>HasNode</code>がfalseになり既定レイアウトが1回だけ
+組み直される。進めないと、新しく増えたパネルだけがドックに割り当てられず宙に浮いた状態で
+ユーザーに見えてしまう。
+</p>
+<p>
+なお「初回起動かどうか」の判定は<code>DockSpaceOverViewport</code>を呼ぶ<strong>前</strong>に
+行わなければならない。<code>DockSpace</code>は呼ばれた時点でノードを作るため、後から
+<code>HasNode</code>を見ても常にtrueになる(実際にこれで既定レイアウトが一度も組まれなかった)。
+そのためドックスペースIDは<code>0</code>を渡して内部の<code>GetID("DockSpace")</code>に任せるのではなく、
+固定値を明示している。
+</p>
+
+<h3>12.7 UpdateスレッドとRenderスレッドの双方向ハンドオフ</h3>
+<p>
+カメラとImGuiの表示状態はUpdate→Renderへ<code>FrameState</code>のスナップショットで渡している
+(<code>RenderThreadMain</code>参照)。これに加えて、逆方向に
+<code>io.WantCaptureKeyboard</code>/<code>io.WantCaptureMouse</code>を返す経路を追加した。
+ImGuiの状態を読めるのはRenderスレッドだけだが、WASD移動と視点回転を処理するのは
+Updateスレッドだからである。
+</p>
+<p>
+渡す値がboolを2つだけなので、<code>FrameState</code>のような構造体とミューテックスは用意せず
+<code>std::atomic&lt;bool&gt;</code>2本(<code>m_ImGuiWantCaptureKeyboard</code>/
+<code>m_ImGuiWantCaptureMouse</code>)にしている。Renderは1フレーム遅れて描くためこの値も
+1フレーム遅れるが、<code>WantCaptureKeyboard</code>は<code>InputText</code>がアクティブな間
+ずっとtrueであり続けるため、実用上ずれるのは押し始めの1フレームだけになる。
+</p>
+<p>
+F1(パネルの表示/非表示)は意図的に抑止していない。ここも抑止すると、テキスト入力中に
+パネルを畳んで元へ戻す手段が無くなり、入力欄からフォーカスを外す方法(Esc / 別の場所をクリック)を
+知らないユーザーが詰む。ImGuiの<code>InputText</code>はF1を消費しないので、通しても入力内容には
+影響しない。
+</p>
+<p>
+視点回転(<code>UpdateMouseLook</code>)は<code>GetAsyncKeyState(VK_RBUTTON)</code>を使う設計を
+維持している(理由は同関数のコメント)。ただし<code>imguiWantsMouse</code>を見て
+<strong>キャプチャ開始時にだけ</strong>回転の開始を抑止する。一度キャプチャに入るとカーソルが
+画面中央へ固定され続けてImGui側の判定が変わりうるため、継続中は判定しない。
+</p>
+
+<h3>12.8 DPI対応と動作確認の自動化への影響</h3>
+<p>
+<code>ImGui_ImplWin32_GetDpiScaleForHwnd</code>が内部で使う<code>GetDpiForMonitor</code>
+(<code>MDT_EFFECTIVE_DPI</code>)や<code>GetDpiForWindow</code>は、<strong>呼び出し元プロセスの
+DPI認識状態に依存する</strong>。DPI非対応プロセスからは常に96(=1.0倍)が返るため、プロセスを
+DPI対応にしない限りUI側でモニタの拡大率に合わせることはできない。
+</p>
+<p>
+DPI認識状態はプロセス単位の設定で、最初のウィンドウ生成より前に確定していなければならない。
+ウィンドウ生成は<code>KurenaiEngineBase</code>のコンストラクタで行われるため
+<code>KurenaiEngine3D</code>側から<code>SetProcessDpiAwarenessContext</code>を呼んだのでは手遅れになる。
+またDLL(エンジン)がプロセス全体の方針を書き換えるのは、KurenaiEngineを組み込む側にとって
+予期しない副作用になる。そのため実行ファイル側のマニフェスト
+(<code>Samples/Sample3D/Sample3D.manifest</code>)で<code>PerMonitorV2</code>を宣言する方式にした。
+</p>
+<p>
+<strong>UIとウィンドウの拡大率は、Windowsのディスプレイ設定の拡大率ではなく
+Windowsのディスプレイ設定の拡大率に追従させている。</strong>
+</p>
+<p>
+<strong>実DPIに追従させた方が実寸はきれいに揃うが、あえてそうしていない。</strong>
+本開発機の3台での実測:
+</p>
+<table>
+<tr><th>モニタ</th><th>解像度</th><th>物理サイズ</th><th>実DPI</th><th>Windowsの拡大率</th></tr>
+<tr><td>4K 27インチ</td><td>3840x2160</td><td>596x335mm</td><td><strong>163</strong></td><td>150%(=144)</td></tr>
+<tr><td>FHD 24インチ</td><td>1920x1080</td><td>527x296mm</td><td>92</td><td>100%(=96)</td></tr>
+<tr><td>縦置き</td><td>1080x1920</td><td>268x477mm</td><td>102</td><td>100%(=96)</td></tr>
+</table>
+<p>
+4Kモニタの実DPIは163で、実寸を揃えるには本来170%が必要だがWindowsは150%しか割り当てていない。
+16pxの文字の実寸で比較すると、Windowsの拡大率に従うと4Kで3.72mm・FHDで4.39mmと15%ずれ、
+実DPIに従えば全モニタで約4.2mmに揃う(実測。実DPI追従を実装して確認済み)。
+</p>
+<p>
+<strong>それでもWindowsの拡大率を採っているのは、ウィンドウのドラッグ中はアプリが
+1フレームも描画しないためである。</strong>
+ウィンドウの移動・リサイズ中はWindowsが自前のモーダルループを回すので、
+<code>Run()</code>の<code>PumpMessages()</code>が戻ってこず、描画スレッドへフレームが渡らない。
+その間、ウィンドウはWindowsの拡大率の比でリサイズされ、画面には直前のフレームが同じ比で
+引き伸ばされて表示される。UIの拡大率をそれと違う比にすると、マウスを離して描画が再開した
+瞬間に見た目が飛ぶ。実測では次のようになった。
+</p>
+<table>
+<tr><th>時点</th><th>UIの見かけの倍率</th></tr>
+<tr><td>ドラッグ中(引き伸ばされた古いフレーム)</td><td>0.9639 x 1.5 = 1.446</td></tr>
+<tr><td>離した後(実DPI基準で描き直したフレーム)</td><td>1.7047</td></tr>
+<tr><td colspan="2">差 1.7047 / 1.446 = <strong>1.18倍のジャンプ</strong></td></tr>
+</table>
+<p>
+引き伸ばしは必ずWindowsの拡大率で起こるため、UIの拡大率を同じ比にしておけば
+離してもUIの大きさは変わらない。<strong>「モニタ間で実寸を揃える」と
+「離した瞬間にジャンプしない」は、ドラッグ中に描画しない限り両立しない。</strong>
+ここでは後者を優先している。前者へ切り替える場合は
+<code>KurenaiEngine3D::Render</code>が<code>UIManager::OnUIScaleChanged</code>へ渡す値を、
+モニタの物理サイズ(EDID由来。<code>CreateDCW(L"DISPLAY", &lt;デバイス名&gt;)</code>した上での
+<code>GetDeviceCaps(HORZSIZE)</code>と<code>GetDeviceCaps(HORZRES)</code>)から求めた実DPI基準の
+倍率に差し替えればよい。その際は<code>WM_DPICHANGED</code>だけでなく
+<code>WM_WINDOWPOSCHANGED</code>でモニタの変化を監視する必要がある
+(上表のFHDと縦置きのように、Windowsの拡大率が同じで実DPIが違うモニタ同士の移動では
+<code>WM_DPICHANGED</code>が飛んでこないため)。
+</p>
+<p>
+<strong>ウィンドウのピクセル寸法にはエンジン側から一切手を出さない。</strong>
+モニタをまたいだときの伸縮はWindowsの既定の挙動にそのまま任せ、一般的なWindowsアプリと同じ
+振る舞いにしている。具体的には次の2つを「やらない」。
+</p>
+<ul>
+<li><code>WM_DPICHANGED</code>が提示する推奨サイズへ<code>SetWindowPos</code>しない</li>
+<li><code>WM_GETDPISCALEDSIZE</code>を処理しない。Per-Monitor V2では、DPIの違うモニタへ移る直前に
+Windowsが「新しいDPIでのウィンドウの希望サイズ」をこのメッセージで尋ねてくる
+(Windows 10 1703以降)。<code>lParam</code>にはDPIの比率で線形に伸縮させた値があらかじめ
+入っており、処理せずに済ませるとWindowsがその値を使う。
+現在のサイズを書き戻して<code>TRUE</code>を返せばOS側の伸縮を止められるが、あえてそうしない</li>
+</ul>
+<p>
+なお一時期はウィンドウも実DPIへ追従させていたが、モーダルループ中はWindowsがドラッグ開始時の
+サイズでウィンドウを動かし続けるため、こちらの<code>SetWindowPos</code>が即座に打ち消され、
+その結果ウィンドウの位置が揺れてモニタ判定が行き来し
+<strong>ウィンドウが伸縮を繰り返した(発振した)</strong>。
+ウィンドウ側を自前で制御する方針へ変える場合は、この点に注意すること。
+</p>
+<p>
+UI全体をもう少し大きく/小さくしたい場合は<code>UITheme::kUIScaleMultiplier</code>を変える
+(全モニタに一律で掛かる)。
+</p>
+<p>
+<strong>拡大率を変えるときは、ドックのパネル幅・高さも同じ比率で拡縮する必要がある。</strong>
+ImGuiは<strong>中央ノードを含む側と分割されたノードの寸法を「絶対ピクセル値」として保持し、
+ドックスペースが広がっても維持して増分を中央ノードへ全部渡す</strong>
+(<code>imgui.cpp</code>の<code>DockNodeTreeUpdatePosSize</code>、サイズ配分ポリシーの3番)。
+</p>
+<pre><code>// 3) If one window is the central node (~ use remaining space, should be made explicit!),
+//    use explicit size from the other, and remainder for the central node
+else if (child_0-&gt;SizeRef[axis] != 0.0f &amp;&amp; child_1-&gt;HasCentralNodeChild)
+{
+    child_0_size[axis] = ImMin(size_avail - size_min_each, child_0-&gt;SizeRef[axis]);
+    child_1_size[axis] = (size_avail - child_0_size[axis]);
+}</code></pre>
+<p>
+このエンジンのレイアウトは左右・下のパネルと中央のパススルーノードという構成なので、
+まさにこの分岐に当たる。拡大率だけ変えると文字は大きくなるのにパネルの幅は据え置きとなり、
+マウスを離した瞬間にパネルの幅・高さが変わって見える。
+</p>
+<p>
+同じ理由で<strong>スクロールバーも1フレームだけ表示が乱れる</strong>。
+その有無と長さは前フレームの内容サイズ(<code>ImGuiWindow::ContentSize</code>)から決まるため、
+拡大率が変わったフレームでは古い内容サイズで判定されてしまう。
+</p>
+<p>
+そこで<code>Core::ImGuiDockLayout::ScaleForUIScaleChange</code>でまとめて追従させている。
+<code>ImGuiDockNode</code>も<code>ImGuiWindow</code>も<code>imgui_internal.h</code>の型なので、
+この処理はLibrary側にしか置けない(12.2節参照)。
+</p>
+<p>
+<strong>ImGuiがDPI変更用に持っている<code>ScaleWindowsInViewport</code>は使っていない。</strong>
+あちらは<code>Pos</code>/<code>Size</code>/<code>SizeFull</code>を無条件に拡縮するため、
+ドッキング中のウィンドウではドックノードが決めるサイズと一時的に食い違う
+(実測: 拡縮直後に<code>Size=279x426</code>、<code>Begin()</code>後にノードが決めた
+<code>280x278</code>へ上書き)。位置・サイズを拡縮するのは浮いているウィンドウだけにしている。
+</p>
+<p>
+拡縮が必要な値は、実際にログへ出して特定した。<strong>スクロールバーの有無・長さ・位置は
+<code>Begin()</code>内で「前フレームの利用可能サイズ」から決まる</strong>ためである。
+</p>
+<pre><code>ImVec2 avail_size_from_last_frame = window-&gt;InnerRect.GetSize() + scrollbar_sizes_from_last_frame;
+ImVec2 needed_size_from_last_frame = window-&gt;ContentSize + window-&gt;WindowPadding * 2.0f;</code></pre>
+<table>
+<tr><th>値</th><th>拡縮しないと起きること</th></tr>
+<tr><td><code>ImGuiDockNode::Size</code> / <code>SizeRef</code></td><td>パネルの幅・高さが据え置きになる</td></tr>
+<tr><td><code>ImGuiWindow::InnerRect</code></td><td>前フレームの幅で判定され、スクロールバーの位置が横にずれる(実測: 拡大率を1.5→1.0にした直後に右端が259のまま。正しくは約172)</td></tr>
+<tr><td><code>ImGuiWindow::ScrollbarSizes</code></td><td>同上(実測: 21のまま。正しくは14)</td></tr>
+<tr><td><code>ImGuiWindow::DC::CursorMaxPos</code> / <code>IdealMaxPos</code></td><td>内容サイズが古いままになり、スクロールバーの有無・長さが乱れる</td></tr>
+<tr><td><code>ImGuiWindow::Scroll</code></td><td>スクロール済みのパネルで表示位置がずれる</td></tr>
+</table>
+<p>
+<strong><code>ImGuiWindow::ContentSize</code>を直接拡縮しても効かない</strong>点に注意。
+この値は<code>Begin()</code>の冒頭で<code>CalcWindowContentSizes</code>により
+</p>
+<pre><code>ContentSize      = CursorMaxPos - CursorStartPos
+ContentSizeIdeal = max(CursorMaxPos, IdealMaxPos) - CursorStartPos</code></pre>
+<p>
+と毎フレーム再計算されて上書きされるため、元になる<code>DC</code>側を拡縮する必要がある。
+<code>CursorStartPos</code>は内容の起点(絶対座標)で効くのはそこからの差分だけなので、
+起点を保ったまま差分に比率を掛ける。<code>InnerRect</code>も同様に、効くのは大きさだけなので
+原点を保って幅・高さに掛ける。
+</p>
+<p>
+実測: 拡大率1.0→1.5で左パネル幅が197→294px(比1.49)、下パネル高さが133→203px(比1.53)。
+1.5→1.0→1.5と往復させても左パネル幅は294pxへ正確に戻り、丸め誤差が蓄積しないことも確認した。
+</p>
+<p>
+拡大率は<code>ScaleAllSizes</code>(余白・角丸・スクロールバー幅などの寸法)と
+<code>style.FontScaleMain</code>(フォント)の両方へ掛ける。フォント側に
+<code>FontScaleDpi</code>ではなく<code>FontScaleMain</code>を使うのは、前者が
+「モニタ由来のスケール」を表すフィールドであり、アプリが決めた固定倍率という意味と合わないため。
+<code>UITheme::Apply</code>は<code>ImGuiStyle</code>を既定へ戻してから組み立て直す冪等な実装に
+してある。<code>ScaleAllSizes</code>は現在値への乗算なので、これをしないと呼び直すたびに
+寸法が累積する(追従をやめた現在は起動時の1回しか呼ばないが、倍率を実行時に変えられるように
+する余地を残すためこの性質は維持している)。
+</p>
+<p>
+<strong>自動化への影響。</strong>DPI非対応だった頃は、<code>PrintWindow</code>がウィンドウを論理サイズで
+描画する一方ビットマップは<code>DWMWA_EXTENDED_FRAME_BOUNDS</code>の物理サイズで確保されるため、
+撮影したPNGは「左上に内容・右と下は黒い余白」という構造になっていた。PMv2化すると両者が一致して
+余白は出なくなる。さらに、自動化スクリプト側のプロセスがDPI非対応のままだと
+<code>GetClientRect</code>がDPI仮想化され、150%環境で3840x2054のクライアントが2560x1369に
+見える(実測)。<code>PostMessage</code>の<code>lParam</code>は仮想化されず素通しなので、
+送る座標は物理クライアント座標でなければならない。そのため
+<code>Claude/Tools/WinAutomation.ps1</code>(リポジトリ管理外)側もPMv2へ揃えている。
+</p>
+<p>
+なお<code>WM_DPICHANGED</code>はプロセスを跨いだ<code>PostMessage</code>が拒否される(戻り値false)ため、
+DPI変更時の挙動を自動化から注入して確かめることはできない。確認するには拡大率の異なるモニタ間で
+ウィンドウを実際にドラッグするか、ディスプレイ設定の拡大率を変更すること
+(この方法で<code>WM_DPICHANGED</code>が届き、ウィンドウサイズが追従することは確認済み)。
 </p>
 </section>
 
