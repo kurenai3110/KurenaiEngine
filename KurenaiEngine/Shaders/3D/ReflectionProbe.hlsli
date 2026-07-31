@@ -23,8 +23,8 @@
 // 20章の前提なので、この2つは必ず同じ条件でコンパイルすること(片方だけ距離キューブを使うと、
 // SSRが自分の足した覚えのない値を引き算することになる)。
 //
-// このヘッダーはFrameConstants(b0)の ProbeParams / ProbeParams2 / ShadowParams / AmbientColor /
-// IBLParams を参照する(IBLParamsは拡散側のマクロを定義した場合のみ)。インクルードする側はこれらを
+// このヘッダーはFrameConstants(b0)の ProbeParams / ProbeParams2 / ShadowParams / IBLParams を
+// 参照する(IBLParamsは拡散側のマクロを定義した場合のみ)。インクルードする側はこれらを
 // 含む形でFrameConstantsを宣言しておく必要がある。cbufferのレイアウトは宣言順で決まるため、
 // 途中のフィールドを飛ばさずC++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること。
 #ifndef KURENAI_REFLECTION_PROBE_HLSLI
@@ -436,10 +436,13 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 //
 //   brdf                       BRDF積分LUT(split-sum近似の第2項)の値
 //   energyCompensationEnabled  ShadowParams.w(マルチスキャッタリング補正のトグル)
-//   dayFactor                  AmbientColor.a(夜間の減衰)
 //   iblIntensity               ShadowParams.z(IBL強度倍率。0ならIBL自体が無効)
+//
+// かつてはここで昼度(AmbientColor.a)による夜間減衰も掛けていたが、手続き空の導入で
+// 空自体が太陽高度に応じて暗くなるようになったため撤廃した(21.4節)。
+// 掛けたままだと夜が二重に暗くなる
 float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, float2 brdf,
-                         float energyCompensationEnabled, float dayFactor, float iblIntensity)
+                         float energyCompensationEnabled, float iblIntensity)
 {
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)
     const float3 splitSum = (F0 * brdf.x + brdf.y) * SpecularEnergyCompensation(F0, brdf, energyCompensationEnabled);
@@ -449,7 +452,7 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, floa
     const float specularOcclusionExponent = exp2(-16.0f * roughness - 1.0f);
     const float specularOcclusion = saturate(pow(NdotV + ao, specularOcclusionExponent) - 1.0f + ao);
 
-    return splitSum * specularOcclusion * dayFactor * iblIntensity;
+    return splitSum * specularOcclusion * iblIntensity;
 }
 
 #endif // KURENAI_REFLECTION_PROBE_HLSLI

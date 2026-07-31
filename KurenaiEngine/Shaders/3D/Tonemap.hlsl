@@ -20,7 +20,8 @@ cbuffer TonemapConstants : register(b1)
     // トーンマッピングカーブの選択(KurenaiEngine3D.h の TonemapCurve と一致させること)。
     // 0=Reinhard, 1=ACES, 2=AgX
     int Curve;
-    // 手動露出時に使う固定の露出倍率(常に1.0。露出はCPU側でライト強度へ事前乗算済み)
+    // 手動露出時に使う露出倍率。プリ露出は時刻連動で変動するため、CPU側が
+    // 2^(実効EV100 - ユーザー設定EV100) を入れてくる(1.0固定ではない)
     float ExposureScale;
     // 出力8bit量子化の直前に加えるディザの強さ(0=無効、1=±1LSB)。
     // 暗部の滑らかなグラデーションが数十コードにしか乗らないことによるバンディングは、
@@ -35,7 +36,11 @@ cbuffer TonemapConstants : register(b1)
     // ブルームの合成比(0で無効)。加算ではなくlerpで混ぜることでエネルギーを保存する
     // (加算だと画面全体が明るくなり、露出を上げたのと区別がつかなくなる)
     float BloomStrength;
-    float2 TonemapPadding;
+    // 薄明視(mesopic vision)の適用量。0で無効、1で完全適用
+    float MesopicStrength;
+    // 目が順応している明るさをEV100で表したもの。太陽・月・空の照度から求めるので
+    // 画面の構図にも露出設定にも依存しない(ApplyMesopicVisionのコメント参照)
+    float MesopicAdaptationEV100;
 };
 
 struct PSInput
@@ -163,15 +168,75 @@ float InterleavedGradientNoise(float2 position)
     return frac(52.9829189f * frac(dot(position, float2(0.06711056f, 0.00583715f))));
 }
 
+// === 薄明視(mesopic vision) ===
+// 暗所では錐体(色を見る細胞)が働かなくなり、桿体だけの視覚に移る。桿体は1種類しか無いので
+// **色を判別できない**。実際の月明かりの下では、露出さえ合っていれば形は見えるのに
+// 色がほとんど無い、という見え方になる。露出を下げるだけでは「暗いが色鮮やかな夜」に
+// なってしまい、肉眼で見た夜と一致しない。
+//
+// 分岐点の輝度[cd/m^2]。CIEが薄明視の範囲としておよそ0.005〜5 cd/m^2を挙げており、
+// その内側の代表値を採る。この下では完全な桿体視、上では完全な錐体視、間は対数で補間する。
+// 参考: 満月に照らされた反射率0.2の面は 0.25*0.2/pi = 0.016 cd/m^2 で、ほぼ桿体視の側にある
+static const float kScotopicMaxLuminance = 0.01f;
+static const float kPhotopicMinLuminance = 3.0f;
+
+// 桿体の分光感度V'(λ)は507nmにピークがあり、錐体のV(λ)(555nm)より短波長側へ寄っている。
+// sRGBの原色付近でのV'(λ)の比をRGBの重みにしたもの。青が重く赤が軽いのがプルキンエ現象で、
+// 「暗所では赤い花が黒く沈み、青い花が明るく見える」という実際の現象がこれで出る
+static const float3 kScotopicWeights = float3(0.024f, 0.368f, 0.608f);
+// 桿体視は本来まったくの無彩色である。映像表現では慣例的に強い青を当てるが、
+// ここは「肉眼で見た感じ」に寄せるのが目的なので、青みはごくわずかに留める
+// (色相のずれは kScotopicWeights によるプルキンエ現象の側で既に付いている)。
+// 輝度が変わらないよう成分の加重和が1になるよう正規化してある
+// (0.2126*0.92 + 0.7152*1.00 + 0.0722*1.18 = 0.996)
+static const float3 kNightVisionTint = float3(0.92f, 1.00f, 1.18f);
+
+// 【重要】桿体視へ移るかどうかは**目が順応している明るさ**で決まる。画素ごとの輝度で
+// 判定してはいけない。昼間の日陰は輝度だけ見れば薄明視の範囲に入ることがあるが、
+// 目はシーン全体の明るさに順応しているので錐体は働いており、日陰の色はちゃんと見える。
+// 画素ごとに判定した実装では実際に昼の日陰が脱色された(壁の彩度0.235→0.136)。
+//
+// 順応輝度にはCPU側が渡すMesopicAdaptationEV100(太陽・月・空の照度から求めた
+// シーンの基準EV。画面の構図にも露出設定にも依存しない)を使う。
+// EV100と輝度の関係 EV100 = log2(8L) から L = 2^EV100 / 8
+float3 ApplyMesopicVision(float3 preExposedColor)
+{
+    if (MesopicStrength <= 0.0f)
+    {
+        return preExposedColor;
+    }
+
+    const float adaptationLuminance = exp2(MesopicAdaptationEV100) / 8.0f;
+
+    // 桿体視0〜錐体視1の混合率。輝度は桁で効くので対数で補間する。
+    // 画面全体で1つの値になるので分岐もテクスチャ読みも増えない
+    const float photopicT = saturate(
+        (log2(max(adaptationLuminance, 1e-8f)) - log2(kScotopicMaxLuminance)) /
+        (log2(kPhotopicMinLuminance) - log2(kScotopicMaxLuminance)));
+
+    // 桿体だけの見え方: 分光感度で1つの値へ潰し、無彩色(わずかに青)へ置き換える
+    const float3 rodColor = dot(preExposedColor, kScotopicWeights) * kNightVisionTint;
+
+    // photopicT=1(明所)では元の色のまま。MesopicStrengthで効果の強さを調整できる
+    const float3 mesopicColor = lerp(rodColor, preExposedColor, photopicT);
+    return lerp(preExposedColor, mesopicColor, saturate(MesopicStrength));
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float3 color = SceneColorTexture.Sample(ColorSampler, input.UV).rgb;
+
+    // 薄明視は**露出を掛ける前**に適用する。桿体視へ移るかどうかはシーンの実際の
+    // 明るさで決まるものであって、表示の露出設定とは無関係だから。
+    // (ブルームはこの後で合成されるため脱色されないが、ブルームが拾うのは
+    //  しきい値を超える明るい領域だけなので、そこは元々錐体視の側にある)
+    color = ApplyMesopicVision(color);
 
     // 露出。SceneColorにはプリ露出(PreExposureEV100)が既に乗っているので、
     // 自動露出が求めたEV100との「差」だけを掛け直せばよい:
     //   exposure(ev) = 1/(1.2 * 2^ev) より
     //   exposure(auto) / exposure(pre) = 2^(pre - auto)
-    // 自動露出が無効なら手動のExposureScale(=1.0)をそのまま使う
+    // 自動露出が無効なら手動のExposureScaleをそのまま使う
     float exposureScale = ExposureScale;
     if (UseAutoExposure > 0.0f)
     {

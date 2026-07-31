@@ -6,13 +6,15 @@
 
 #include <stdexcept>
 
+#include "RHI/ImGuiContextSetup.h"
+
 namespace Kurenai::RHI
 {
     DX11ImGuiBackend::DX11ImGuiBackend(ID3D11Device* device, ID3D11DeviceContext* context, void* windowHandle)
     {
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGui::StyleColorsDark();
+        // コンテキスト生成と共通設定(ドッキング有効化等)はDX12側と共通のためImGuiContextSetupへ集約した。
+        // スタイル・フォントはRHIの責務ではないためここでは設定せず、KurenaiEngine3D側が行う
+        Detail::CreateImGuiContextCommon();
 
         if (!ImGui_ImplWin32_Init(windowHandle) || !ImGui_ImplDX11_Init(device, context))
         {

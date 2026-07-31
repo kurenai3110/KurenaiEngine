@@ -48,7 +48,8 @@ cbuffer FrameConstants : register(b0)
     float4 LightColor;
     float4x4 View;
     float4x4 Proj;
-    // a=昼度。鏡面IBLの重みに含まれるためSpecularIBLWeightへ渡す
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)。
+    // a=昼度はかつて鏡面IBLの重みに含めていたが、手続き空の導入で不要になった(21.4節)
     float4 AmbientColor;
     // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
     float4 CascadeSplits;
@@ -186,7 +187,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     const float ao = AOTexture.Sample(ColorSampler, input.UV).a;
     const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, AmbientColor.a, ShadowParams.z);
+        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
 
     const float mipLevel = roughness * ShadowParams.y;
     float3 unusedIrradiance;

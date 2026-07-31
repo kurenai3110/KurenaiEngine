@@ -220,8 +220,8 @@ float3 EvaluateLight(
 
 // スカイボックス由来のグローバルIBL(DeferredLighting.hlslのEvaluateIBLと同じ式。
 // キャプチャ時にはAO/GIバッファが無いため常にao=1として扱い、スペキュラオクルージョンも省く)。
-// 夜間減衰(AmbientColor.a)をここで掛けないのは、プローブを使う側のEvaluateIBLが実行時に
-// 改めて掛けるため。焼き込み時にも掛けると二重に暗くなる
+// 昼度(AmbientColor.a)による夜間減衰は、手続き空の導入でどこでも掛けなくなった(21.4節)。
+// 空のキューブマップ自体が太陽高度に応じて暗くなるため、焼き込み時にも使用時にも不要
 float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, float2 brdf, float3 energyCompensation)
 {
     const float NdotV = saturate(dot(N, V));

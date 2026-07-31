@@ -69,6 +69,10 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <!-- Per-Monitor V2のDPI対応を宣言する(理由はSample3D.manifest内のコメント) -->
+    <Manifest>
+      <AdditionalManifestFiles>Sample3D.manifest</AdditionalManifestFiles>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -88,6 +92,10 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
+    <!-- Per-Monitor V2のDPI対応を宣言する(理由はSample3D.manifest内のコメント) -->
+    <Manifest>
+      <AdditionalManifestFiles>Sample3D.manifest</AdditionalManifestFiles>
+    </Manifest>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
     <!-- KurenaiEngineLibrary.dll/KurenaiEngine3D.dllとそれが参照するShaders・Assetsを、
@@ -106,6 +114,9 @@ exit /b 0</Command>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Source\Main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <Manifest Include="Sample3D.manifest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\KurenaiEngine\KurenaiEngineLibrary.vcxproj">

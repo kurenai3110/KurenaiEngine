@@ -196,7 +196,7 @@ void EvaluateDirectBRDF(
 // 環境ソース(拡散イラディアンス・プリフィルタ済み鏡面)は不透明側とまったく同じSampleEnvironmentで
 // 求める。これにより反射プローブ・視差補正・ブレンド・イラディアンスの取得元切り替えの規則が
 // 半透明と不透明で食い違うことがなくなる。
-// IBL強度倍率(ShadowParams.z)と夜間減衰(AmbientColor.a)もこの関数の中で掛け切る
+// IBL強度倍率(ShadowParams.z)はこの関数の中で掛け切る(呼び出し側では掛けない)
 void EvaluateIBLSplit(
     float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness,
     out float3 outDiffuse, out float3 outSpecular)
@@ -225,12 +225,13 @@ void EvaluateIBLSplit(
     // 必ず1へ飽和する。つまり不透明側と同じ関数をそのまま使っても式は変わらない
     // (以前ここでスペキュラオクルージョンの計算を省いていたのと結果は同じ)
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, 1.0f, brdf, ShadowParams.w, AmbientColor.a, ShadowParams.z);
+        SpecularIBLWeight(F0, NdotV, roughness, 1.0f, brdf, ShadowParams.w, ShadowParams.z);
 
-    // 夜間の減衰はDeferredLighting.hlslと同じくAmbientColor.aで行う(プリフィルタマップ・
-    // イラディアンスマップは昼固定のスカイボックスから焼いたものなので、これが唯一の減光手段)。
-    // 鏡面側のAmbientColor.a・ShadowParams.zはspecularWeightに含まれている
-    outDiffuse = kd * albedo * irradiance * AmbientColor.a * ShadowParams.z;
+    // 【昼度(AmbientColor.a)による減衰はしない】DeferredLighting.hlslのEvaluateIBLと同じ理由で、
+    // 手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなるため、ここで掛けると
+    // 二重に暗くなる(21.4節)。
+    // 鏡面側のShadowParams.z(IBL強度倍率)はspecularWeightに含まれている
+    outDiffuse = kd * albedo * irradiance * ShadowParams.z;
     outSpecular = prefiltered * specularWeight;
 }
 
