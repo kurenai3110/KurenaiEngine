@@ -44,9 +44,14 @@ namespace Kurenai::RHI
         static constexpr uint32_t kMaxRenderTargets = 8;
         // SetComputeUnorderedAccessTexture/Bufferで使えるUAVスロット数(u0〜u3)
         static constexpr uint32_t kComputeUavSlotCount = 4;
-        // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t11)。
-        // DX12側のDX12CommandList::kTextureSlotCountと同じ値にしておくこと
-        static constexpr uint32_t kTextureSlotCount = 12;
+        // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t13)。
+        // DX12側のDX12CommandList::kTextureSlotCountと同じ値にしておくこと。
+        //
+        // ここが12のままだと、反射プローブ(19章)がt12/t13へ張るキューブマップ配列と
+        // 影響範囲バッファが下のm_BoundPixelSrvsの追跡から漏れる。そうなると
+        // UnbindPixelSrvForResourceがこれらを外せず、プローブのベイクがUAVで書き込む際の
+        // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう
+        static constexpr uint32_t kTextureSlotCount = 14;
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
         // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。

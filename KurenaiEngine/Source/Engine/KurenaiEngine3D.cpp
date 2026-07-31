@@ -3046,6 +3046,16 @@ namespace Kurenai
             {
                 for (const auto& mesh : instance.Model.Meshes)
                 {
+                    // 半透明メッシュはプローブへ焼かない。ProbeCapture.hlslは不透明として描くため、
+                    // ガラスを焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに
+                    // 残り、その裏にある本来映るべき景色が欠ける。半透明を正しく焼くには
+                    // キャプチャ側にも奥から手前への描画順とブレンドが要り、コストに見合わない
+                    // (プローブへ半透明を含めないのは一般的な割り切り)
+                    if (mesh.IsTransparent)
+                    {
+                        continue;
+                    }
+
                     const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
@@ -3554,6 +3564,10 @@ namespace Kurenai
         //     ClearRenderTarget/ClearDepthは呼ばないため、Lightingパスが書いた内容の上に描き足す形になる ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Transparent",
+            // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)。
+            // 半透明パスもLightingパスと同じ環境ソース(反射プローブ+グローバルIBL)を使うため、
+            // 焼き上がる前のプローブを読まないようにする必要がある
+            .Reads = { m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get() },
             .RenderTargets = { m_SceneColor.get() },
             .DepthTarget = m_GBufferDepth.get(),
             .Execute = [this, &gbufferViewport, &gpuLights, &cameraPosition](RHI::IRHICommandList* cmd)
@@ -3605,10 +3619,17 @@ namespace Kurenai
                 cmd->SetTexture(4, m_ShadowCascadeArray.get());
                 cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
                 // IBL(14章)。このパスにはSSRが適用されないため、半透明サーフェスの環境の
-                // 映り込みはこの3枚だけが担う
+                // 映り込みはこの環境ソースだけが担う
                 cmd->SetTexture(9, m_IrradianceTexture.get());
                 cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
                 cmd->SetTexture(11, m_BRDFLUTTexture.get());
+                // 反射プローブ(19章)。Lightingパスと同じReflectionProbe.hlsliを共有しており、
+                // 半透明サーフェスも室内なら室内の環境が映るようになる。t0〜t4とt8〜t11が
+                // 埋まっているため、このパスではt5〜t7を割り当てている(Transparent.hlsl冒頭)。
+                // ProbeParams.xが0でも常にバインドするのはLightingパスと同じ理由
+                cmd->SetTexture(5, m_ProbePrefilteredArray.get());
+                cmd->SetTexture(6, m_ProbeIrradianceArray.get());
+                cmd->SetShaderResourceBuffer(7, m_ProbeBuffer.get());
 
                 // 半透明は奥から手前への描画順そのものが正しさの前提なので並べ替えられない。
                 // そのため必要になった時点でパイプラインを切り替える(GBufferパスと同じ方式)

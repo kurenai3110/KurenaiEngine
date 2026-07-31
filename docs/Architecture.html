@@ -2243,6 +2243,13 @@ BRDF積分LUT)をこのパスにもバインドし(<code>t9</code>/<code>t10</co
 <code>EvaluateIBL</code>側のスペキュラオクルージョンは常に1になり、計算そのものを省いている。
 </p>
 <p>
+<b>【後日更新】</b>環境ソースはその後<a href="#reflectionprobe">19章</a>11節で
+<code>ReflectionProbe.hlsli</code>の<code>SampleEnvironment</code>へ寄せ、反射プローブに対応させた。
+上記のグローバルIBL固定は、密閉された室内のガラスにも空が映るという形で実際に破綻していた。
+省いていたスペキュラオクルージョンは<code>ao=1</code>のとき<b>厳密に1</b>になることが確認できたため、
+不透明側と同じ<code>SpecularIBLWeight</code>をそのまま呼ぶ形に統一してある(19.11節)。
+</p>
+<p>
 このバインドにより半透明パスが使うSRVスロットはマテリアル4枚 + シャドウ4枚 + ライトリスト +
 IBL 3枚の計12個になったため、DX12のルートシグネチャの
 <code>kTextureSlotCount</code>を11から12へ引き上げた
@@ -3087,8 +3094,13 @@ SSRが判定できなかった領域(画面外・最大距離まで判定不能)
 位置のプローブを焼くとシャドウマップの範囲外になり影が落ちない。プローブは視界内で焼く前提</li>
 <li>プローブ数の上限は8(<code>kMaxReflectionProbes</code>)。<code>TextureCubeArray</code>は実行時に
 伸縮できないため固定容量で確保している。超過分は警告ログを出して切り捨てる</li>
-<li>半透明フォワードパス(<a href="#transparent">15章</a>)はプローブに対応しておらず、
-グローバルIBLのみを使う</li>
+<li>半透明フォワードパス(<a href="#transparent">15章</a>)も19.11節でプローブへ対応させた。ただし
+<strong>半透明メッシュ自体はプローブへ焼かない</strong>(19.11節)ため、ガラス越しの景色は
+プローブのキューブマップには残らない</li>
+<li>屈折は非対応。<code>refract()</code>でプローブを引くこと自体は容易だが、半透明パスは
+事前乗算アルファで背景と合成しており背景は既にブレンドで透けて見えている。そこへ透過色を足すと
+同じ景色が二重に映る。正しく扱うには不透明描画後の<code>SceneColor</code>をコピーして歪めて
+サンプルするスクリーンスペース屈折が必要で、パス構成そのものの変更になる</li>
 </ul>
 
 <h3>19.9 検証シーン(Reflection Probe Test)</h3>
@@ -3107,8 +3119,8 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
     │   西室(密閉)     ▓  東室     │
     │   暖色の壁+ポイント▓ 寒色の壁  │
     │   ライト+エミッシブ▓ +太陽光   │
-    │  ●   ●   ●   ●   ●   ●   ●  │  ← 金属球列(metallic=1.0, roughness=0.05)
-    └───────────────────┴───────────┘  y=0
+    │  ●   ●  ▨ ●   ●   ● ▨ ●   ●  │  ← ● 金属球列(metallic=1.0, roughness=0.05)
+    └───────────────────┴───────────┘  y=0     ▨ 半透明のガラス板(alphaMode=BLEND)
    x=-12                x=0        x=+12
             床 = 磨いた石(非金属, roughness=0.06)</code></pre>
 
@@ -3119,6 +3131,11 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 <td>Enable Reflection Probes を切る</td>
 <td>密閉の西室にいるはずの金属球が<strong>一様な空色</strong>になり、床に映っていたエミッシブ帯も消える</td>
 <td>環境ソースがプローブからグローバルIBLへ落ちること(19.1節)</td>
+</tr>
+<tr>
+<td>同上。<strong>ガラス板</strong>を見る</td>
+<td>暖色の壁とエミッシブ帯を映していたガラスが<strong>一様な空色</strong>になる</td>
+<td>半透明フォワードパスへのプローブ適用(19.11節)</td>
 </tr>
 <tr>
 <td>Probe Blending を切る</td>
@@ -3170,6 +3187,11 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 読み取れなくなる</li>
 <li><code>ScreenSpaceReflection = false</code>をシーン側で指定している。SSRもプローブと同じく
 「環境の反射」を足すため、両方効いていると差の切り分けができない</li>
+<li><strong>ガラス板の向きは初期カメラからの入射角がおよそ60度になるように決めてある</strong>。
+非金属のフレネル反射は正面(入射角0度)ではF0=0.04と弱く映り込みがほとんど読めない一方、
+真横に近づけると反射は最も強くなるが画面上ではただの細い線にしかならない。実際、最初は板を
+壁と平行に置いて入射角79度になり、効果は出ているのに<strong>数ピクセル幅のスリット</strong>としてしか
+見えなかった。60度前後が「面として見えて、かつ映り込みが読める」両立点になる</li>
 </ul>
 
 <h4>面の巻き順を機械的に決めている理由</h4>
@@ -3260,6 +3282,69 @@ GPUプロファイラで1プローブぶんのコストが読める。各パス�
 <code>CSPrefilter</code>(ミップごとの重要度サンプリング)を、6面×(1+5ミップ)ぶん素直に回しているため。
 実用的な改善方向は、時間分割の粒度を「面」ではなく「畳み込みのディスパッチ」まで細かくするか、
 畳み込み自体のサンプル数・解像度を下げることになる。現時点では未実装。
+</p>
+
+<h3>19.11 半透明フォワードパスへの適用</h3>
+<p>
+プローブを入れた当初、<a href="#transparent">15章</a>の半透明フォワードパスは
+グローバルIBL(<code>IrradianceTexture</code> / <code>PrefilteredEnvTexture</code>)を直接引いたままだった。
+これは不透明面より問題が大きい。半透明パスには<strong>SSRが適用されない</strong>ため、
+ガラスにとっては環境ソースが<strong>唯一の映り込み</strong>だからである。実際、Reflection Probe Testの
+密閉された西室にガラス板を置くと、屋内なのに一様な空色を映していた。
+</p>
+<p>
+対処は<code>Transparent.hlsl</code>を<code>ReflectionProbe.hlsli</code>へ寄せて、不透明側
+(<code>DeferredLighting.hlsl</code>)とまったく同じ<code>SampleEnvironment</code>を呼ぶようにするだけである。
+これでプローブの選択・視差補正・ブレンド・イラディアンスの取得元切り替えの規則が、
+半透明と不透明で食い違わなくなる。
+</p>
+
+<h4>レジスタの割り当て</h4>
+<p>
+共有ヘッダーのレジスタ番号はインクルードする側がマクロで与える方式なので(19.7節)、
+このパスで空いているスロットをそのまま使える。半透明パスは<code>t0</code>&ndash;<code>t4</code>と
+<code>t8</code>&ndash;<code>t11</code>を使っているため、<strong><code>t5</code>&ndash;<code>t7</code>が空いていた</strong>。
+DX12のルートシグネチャは<code>t0</code>&ndash;<code>t13</code>を張っているので、RHIの拡張は不要だった。
+</p>
+<table>
+<tr><th>スロット</th><th>Lightingパス</th><th>半透明パス</th></tr>
+<tr><td>グローバルIBL(イラディアンス / プリフィルタ)</td><td>t8 / t9</td><td>t9 / t10</td></tr>
+<tr><td>プローブ(プリフィルタ / イラディアンス)</td><td>t12 / t11</td><td>t5 / t6</td></tr>
+<tr><td>プローブの影響範囲バッファ</td><td>t13</td><td>t7</td></tr>
+</table>
+
+<h4>スペキュラオクルージョンは省略ではなく等価</h4>
+<p>
+以前の<code>EvaluateIBLSplit</code>は「半透明パスはAO/GIバッファを持たないので
+スペキュラオクルージョンは常に1になる」として計算を省いていた。共有ヘッダーの
+<code>SpecularIBLWeight</code>へ寄せるにあたってこれを確認したところ、<strong>省略ではなく厳密に等価</strong>だった。
+</p>
+<pre><code>specularOcclusion = saturate(pow(NdotV + ao, e) - 1 + ao)   // e = exp2(-16 * roughness - 1) &gt; 0
+ao = 1 のとき → saturate(pow(NdotV + 1, e))
+NdotV + 1 ∈ [1, 2] かつ e &gt; 0 なので pow(...) ≥ 1 → saturate で必ず 1</code></pre>
+<p>
+したがって<code>ao=1</code>を渡して同じ関数を呼べば式は変わらない。分岐やコピーを残す理由がないので、
+係数の定義は<a href="#ssrprobe">20章</a>のとおり1か所のままにできた。
+</p>
+
+<h4>半透明メッシュはプローブへ焼かない</h4>
+<p>
+<code>ProbeCapture.hlsl</code>は全メッシュを<strong>不透明として</strong>描く。半透明メッシュをそのまま
+焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに残り、その裏にある本来映るべき
+景色が欠ける。半透明を正しく焼くにはキャプチャ側にも奥から手前への描画順とブレンドが必要で、
+コストに見合わない。そのためキャプチャのループで<code>mesh.IsTransparent</code>のメッシュを飛ばしている
+(プローブに半透明を含めないのは一般的な割り切り)。
+</p>
+
+<h4>副産物: DX11のSRVスロット追跡数がDX12と食い違っていた</h4>
+<p>
+<code>DX11CommandList::kTextureSlotCount</code>が12のまま(DX12は14)になっていた。この値は
+<code>m_BoundPixelSrvs</code>(<a href="#rhi-binding">16章</a>)の要素数で、
+<code>UnbindPixelSrvForResource</code>が「UAVで書く直前に同じリソースのSRVを明示的に外す」ために使う。
+12のままだと<strong>プローブが張る<code>t12</code>/<code>t13</code>が追跡から漏れ</strong>、
+プローブのベイクがUAVで書き込む際のSRVアンバインドがドライバ任せ(警告付きの自動アンバインド)に
+なっていた。<code>SetTexture</code>自体は範囲外スロットも素通しするため描画結果には現れず、
+コメントが「DX12と同じ値にしておくこと」と明記していたにもかかわらず見落とされていたもの。14へ揃えた。
 </p>
 
 </section>
