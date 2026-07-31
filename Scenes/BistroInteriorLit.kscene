@@ -1,0 +1,258 @@
+# KurenaiEngine シーンファイル - Bistro内装に照明と反射プローブを配置したもの
+#
+# BistroInterior.kscene は素の読み込み確認用でライトもプローブも持たない。こちらは
+#   ・屋内なのにグローバルIBL(空のキューブマップ)しか無く、バーのクロム・真鍮・磨いた床に
+#     「空」が映り込んでしまう問題を反射プローブで解く
+#   ・Interior.kmodel は埋め込みライトを1灯も持たない(PackageHeader.LightCount = 0)ため、
+#     照明器具のジオメトリはあるのに光っていない状態を、実際の器具位置へライトを置いて解く
+# の2つを行った、実シーンでの確認・デモ用シーン。
+#
+# 下の座標はすべて Assets/Packed/BistroMcGuire/Interior.kmodel と Interior.kgeom を直接読んで
+# 実測した値で、目分量の数値は入っていない。求め方は docs/Architecture.html 19.11節を参照。
+#
+# 確認手順:
+#   1. Reflection Probes の Enable Reflection Probes を切る
+#      → 床・椅子・テーブルに空の青が一気に乗る(屋内なのに空が映っている状態)。
+#        戻すと暖色の店内に戻る。これがプローブを置く動機そのもの
+#   2. Parallax Correction を切る、または Yaw を 0 にする
+#      → 床とカウンターに映る像の位置がずれる
+#   3. Lighting > Screen-Space Shadows の Enable を切り替える
+#      → 椅子の脚・テーブル脚・バーの瓶の接地部の影が出入りする
+#   4. Render Targets の View を Light Tiles にする
+#      → 器具の分布がヒートマップに出る。15灯はタイル容量64に対して十分小さいので
+#        マゼンタ(容量超過)は出ない。値が小さく暗いため Debug View Gain を上げて見る
+
+[Scene]
+Name = Bistro (McGuire) - Interior (Lit)
+# 既定値と同じ0.5だが、明示しておく。プローブの寄与もグローバルIBLと同じこの倍率で
+# スケールされるため、ここを下げるとプローブごと薄まって上記1.の比較が成立しなくなる
+IBLIntensity = 0.5
+
+[Model]
+Path = BistroMcGuire/Interior.kmodel
+
+# 客席側の手前からカウンターの方向を見る位置。左手に客席と奥の間、右手にバックバーが入る。
+# シーン読み込み直後にプローブが自動ベイクされるため、その時点で3つのプローブの領域が
+# なるべく視界に入るようにしてある(カスケードシャドウマップがカメラ視錐台にフィットするので、
+# 見えていない領域はベイク時に影が乗らない)。
+#
+# Yaw/Pitchは度(ドキュメント4.7節)。ラジアンで書くと約57分の1の角度になるので注意。
+# またYawは+Z軸を0度、+X軸を90度として測る(Camera::GetForwardが
+# forward=(cos(pitch)sin(yaw), sin(pitch), cos(pitch)cos(yaw)))。
+# atan2(dz,dx)ではなくatan2(dx,dz)である点に注意
+[Camera]
+Position = 1.12, 1.75, -0.02
+Yaw = 50.0
+Pitch = -4.0
+
+# 部屋は天井(y=4.20)で閉じており窓の開口も小さいため、太陽光が直接床へ差し込むことはほぼ無い。
+# TimeOfDayが実質決めているのは「空のIBL経由の環境光の強さ」で、KurenaiEngine3D.cppの
+#   dayFactor = Smoothstep(6,7,t) * (1 - Smoothstep(17,18,t))
+# がその倍率になる。つまり17時までは昼のまま(dayFactor=1)、18時ちょうどで完全に0になり、
+# 夕方の遷移はこの17〜18時の1時間に全部詰まっている。
+#
+# 17.9 を選んだのは、この2つを同時に満たす必要があるため:
+#   ・照明器具15灯が主役に見えること   → 空が明るいと器具の寄与が埋もれる
+#   ・反射プローブの効果が見えること   → 空が完全に0(18.0以降)だとプローブと
+#                                        グローバルIBLの差が消え、ON/OFFで絵が1画素も変わらない
+# 17.9 は dayFactor ≈ 0.028。空はわずかに残るだけなので店内は暖色の器具光が支配し、
+# それでいてプローブを切ると床と椅子に空の青が乗る(=違いがはっきり見える)。
+# 18.0にすると見た目は近いままプローブの検証だけができなくなるので、下げないこと
+[Sun]
+TimeOfDay = 17.9
+Shadow = true
+
+# ------------------------------------------------------------------------------------------
+# 照明器具(15灯)
+#
+# 位置は Interior.kgeom の頂点をメッシュ単位でクラスタリングして求めた器具の重心。
+# 電球がシェードのジオメトリに埋まらないよう、吊り下げ・ランタンはシェード重心より少し下げ、
+# 壁付けは部屋の内側へ0.25だけオフセットしてある。
+#
+# CastShadowの振り分けは意図的なもの。ピクセルあたりのシャドウレイ数には上限があり
+# (Lighting > Max Shadowed Lights per Pixel、既定4本)、全灯をtrueにすると予算が先着順に
+# 食い潰されてどの影も安定しない。そこで「接触影が絵に効く器具」(椅子・テーブル・瓶を
+# 上から照らす吊り下げとランタン)だけtrueにし、壁を舐めるだけで接触影がほぼ見えない
+# 壁付け照明はfalseにしている
+# ------------------------------------------------------------------------------------------
+
+# --- 吊り下げランプ 4灯(メッシュ Paris_Ceiling_Lamp_01。シェード重心 y=3.54) ---
+# 部屋の主光源。ここだけRangeを広めに取り、隣の器具と重ねて全体の下地を作る
+
+[Light]
+Type = Point
+Position = 7.98, 3.35, -1.00
+Color = 1.00, 0.72, 0.45
+Intensity = 2500.0
+Range = 9.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 5.00, 3.35, 0.50
+Color = 1.00, 0.72, 0.45
+Intensity = 2500.0
+Range = 9.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 4.25, 3.35, 4.93
+Color = 1.00, 0.72, 0.45
+Intensity = 2500.0
+Range = 9.0
+CastShadow = true
+
+# 奥の間の1灯だけシェードが低い(重心y=3.39)ため、電球も同じだけ下げる
+[Light]
+Type = Point
+Position = 6.11, 3.20, 8.49
+Color = 1.00, 0.72, 0.45
+Intensity = 2500.0
+Range = 9.0
+CastShadow = true
+
+# --- バーのランタン 4灯(メッシュ Paris_Lantern_01A。重心 y=2.92) ---
+# カウンター(天板 y=1.72)の直上1m強にあるアクセント光。距離が近いぶんIntensityは低くてよく、
+# Rangeを狭めてカウンター周りに光だまりを作る。瓶とグラスの接触影がここで出る
+
+[Light]
+Type = Point
+Position = 10.37, 2.80, 1.05
+Color = 1.00, 0.62, 0.32
+Intensity = 700.0
+Range = 6.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 8.80, 2.80, 1.92
+Color = 1.00, 0.62, 0.32
+Intensity = 700.0
+Range = 6.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 7.22, 2.80, 2.79
+Color = 1.00, 0.62, 0.32
+Intensity = 700.0
+Range = 6.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 6.62, 2.80, 4.21
+Color = 1.00, 0.62, 0.32
+Intensity = 700.0
+Range = 6.0
+CastShadow = true
+
+# --- 壁付け照明 7灯(エミッシブの電球メッシュ。y=2.55) ---
+# 前3灯は正面側の壁、次の3灯(-0.73 / 0.72 / 2.14)はカーテンのある側の壁に並ぶ。
+# 残り1灯(7.57)はカウンター奥のブラケットランタン
+
+[Light]
+Type = Point
+Position = 6.29, 2.55, -2.83
+Color = 1.00, 0.70, 0.42
+Intensity = 800.0
+Range = 7.0
+CastShadow = false
+
+[Light]
+Type = Point
+Position = 3.48, 2.55, -1.72
+Color = 1.00, 0.70, 0.42
+Intensity = 800.0
+Range = 7.0
+CastShadow = false
+
+[Light]
+Type = Point
+Position = 0.53, 2.55, -0.33
+Color = 1.00, 0.70, 0.42
+Intensity = 800.0
+Range = 7.0
+CastShadow = false
+
+[Light]
+Type = Point
+Position = -0.73, 2.55, 2.73
+Color = 1.00, 0.70, 0.42
+Intensity = 800.0
+Range = 7.0
+CastShadow = false
+
+[Light]
+Type = Point
+Position = 7.57, 2.47, 4.43
+Color = 1.00, 0.70, 0.42
+Intensity = 800.0
+Range = 7.0
+CastShadow = false
+
+[Light]
+Type = Point
+Position = 0.72, 2.55, 5.40
+Color = 1.00, 0.70, 0.42
+Intensity = 800.0
+Range = 7.0
+CastShadow = false
+
+[Light]
+Type = Point
+Position = 2.14, 2.55, 8.00
+Color = 1.00, 0.70, 0.42
+Intensity = 800.0
+Range = 7.0
+CastShadow = false
+
+# ------------------------------------------------------------------------------------------
+# 反射プローブ(3個)
+#
+# この部屋は世界座標に対して回転している。垂直面の法線の向きを集計すると 62.5度 と 152.5度 の
+# ちょうど90度差の二峰になり、部屋の軸は世界XZで -27.5度 と +62.5度 を向いていることが分かる。
+# ReflectionProbe.hlsli の WorldToProbeLocal は world→local が +Yaw 回転なので、箱のローカルX軸は
+# 世界の -Yaw 方向を指す。したがって壁に合わせるには Yaw = 27.5 が正しい(-27.5 ではない)。
+#
+# 部屋の形は、この回転フレーム(u = -27.5度方向, w = +62.5度方向)へ射影するとL字になる:
+#   メインの部屋 : u∈[-2.45, 10.65]  w∈[0, 9]
+#   奥の間       : u∈[-2.40,  3.00]  w∈[9, 14.2]
+#   床 y=0.40 / 天井 y=4.20
+# メインをカウンター側と客席側の2つに割り、奥の間を加えた3個構成にしている。
+#
+# 箱の張り方(ProbeTest.ksceneと同じ規約):
+#   ・実際の壁・床・天井と重なる面だけ BlendDistance ぶん外側へ出す。境界で重みが0になるため、
+#     壁面ちょうどに面を置くと壁自体が空のIBLへ薄まってしまう。
+#     y は床0.40/天井4.20に対して箱を y∈[-0.50, 5.50] としてあり、0.9内側でちょうど重み1.0に達する
+#   ・プローブ同士の継ぎ目は外へ出さない。カウンター側↔客席側はu方向に3.0、
+#     奥の間↔メインはw方向に2.0の重なりがあり、どちらもBlendDistance(0.9)の2倍以上ある
+#
+# Position は箱の中心であると同時にキャプチャ位置でもある。y=2.50 は椅子の背(最大2.48)より上、
+# 吊り下げランプの下端(2.95)より下に取ってあり、キャプチャ点がジオメトリに埋まらない
+# ------------------------------------------------------------------------------------------
+
+[ReflectionProbe]
+Name = Counter Side
+Position = 7.88, 2.50, 0.46
+Shape = Box
+BoxExtents = 4.78, 3.00, 4.95
+Yaw = 27.5
+BlendDistance = 0.9
+
+[ReflectionProbe]
+Name = Dining Side
+Position = 2.60, 2.50, 3.21
+Shape = Box
+BoxExtents = 4.18, 3.00, 4.95
+Yaw = 27.5
+BlendDistance = 0.9
+
+[ReflectionProbe]
+Name = Back Room
+Position = 5.37, 2.50, 9.66
+Shape = Box
+BoxExtents = 3.60, 3.00, 4.05
+Yaw = 27.5
+BlendDistance = 0.9

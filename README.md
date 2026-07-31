@@ -261,7 +261,7 @@ Sample3D.exe -dx12
 
 パネルはドッキングに対応しています。タイトルバーをドラッグすると画面端へ吸着したり、別のパネルへ重ねてタブにまとめたりできます。配置とサイズは実行ファイルと同じフォルダの`imgui.ini`へ自動保存され、次回起動時に復元されます。元に戻したいときはメニューバーの「ウィンドウ」→「レイアウトを初期化」、または「システム」パネルの同名のボタンを使います(閉じたパネルも一緒に戻ります)。中央の何も置かれていない領域には3D映像がそのまま表示されます。
 
-- **シーン** — シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Furnace Test(スペキュラBRDFのエネルギー保存を目視で検証するシーン)、Material Test(粗さ0〜1の球体列+半透明ガラス球)、Light Test(ポイント/スポット/平行光の検証用シーン)、Reflection Probe Test(反射プローブの効果を目視で確認するシーン)、Multi Model Test(TRS配置の確認用))。使用中のグラフィックスAPI(DX11/DX12)はメニューバーに常時表示されます
+- **シーン** — シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、Bistro (McGuire) - Interior (Lit)(内装に照明15灯と反射プローブ3個を配置し、反射プローブ・スクリーンスペースシャドウ・タイルライトカリングを実際のモデルの上で確認できるシーン)、White Furnace Test(スペキュラBRDFのエネルギー保存を目視で検証するシーン)、Material Test(粗さ0〜1の球体列+半透明ガラス球)、Light Test(ポイント/スポット/平行光の検証用シーン)、Reflection Probe Test(反射プローブの効果を目視で確認するシーン)、Multi Model Test(TRS配置の確認用))。使用中のグラフィックスAPI(DX11/DX12)はメニューバーに常時表示されます
 - **レンダリング** — シーンをどう照らすかに関わる品質設定を、次の6つの節に分けて調整します
   - **AO / 間接光** — ON/OFFと手法(SSAO / SSIL)、各パラメータ
   - **シャドウ** — 平行光のシャドウマップのON/OFFとPCSSのライトサイズ
@@ -289,7 +289,6 @@ Sample3D.exe -dx12
 **UIの大きさはWindowsのディスプレイ設定の拡大率に追従します。** ウィンドウ自体の大きさも、ディスプレイを移動したときのWindowsの既定の挙動に任せているため、両者が同じ比率で変化します。現在のUIスケールとWindowsの拡大率は「システム」パネルで確認できます。
 
 UI全体をもう少し大きく/小さくしたい場合は`KurenaiEngine/Source/Engine/UI/UITheme.h`の`kUIScaleMultiplier`を変更してビルドし直してください。
-
 ## サンプルプログラム
 
 `Samples/` 以下に、`docs/KurenaiEngine.html` で説明している公開API(`KurenaiEngine3D` /
@@ -337,7 +336,14 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   各室には半透明のガラス板(`alphaMode=BLEND`)も1枚ずつ立ててあり、半透明にはSSRが効かないため
   プローブの有無がそのまま映り込みの違いとして現れる。
   `Tools/generate_probe_test.py` で再生成できる
-- `Scenes/` — 手書きの`.kscene`(シーンファイル)。`Assets/`の外にあり**Git管理対象**
+- `Scenes/` — `.kscene`(シーンファイル)。`Assets/`の外にあり**Git管理対象**。
+  このうち`BistroInteriorLit.kscene`は、Bistro内装の照明器具の実際の位置に合わせてポイントライトを15灯置き、
+  部屋の形に合わせた反射プローブを3個置いたシーンです。反射プローブ・スクリーンスペースシャドウ・
+  タイルライトカリングを、テスト用の合成シーンではなく実際のモデルの上で確認できます
+  (`BistroInterior.kscene`はライトもプローブも持たない素の読み込み確認用として残してあります)。
+  `ScreenSpaceShadowTest.kscene`(接触影の目視確認用)と`ManyLightsTest.kscene`(タイルライトカリング用に
+  ポイントライトを格子状に64灯配置)の2つだけは手書きではなく`Tools/generate_shadow_test_scenes.py`で
+  生成します(ジオメトリは`LightTest.kmodel`を流用するため、生成されるのは`.kscene`だけです)
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
 - `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる。既定では空をGPUで手続き生成するため通常は使われず、Procedural Skyを無効にしたときのフォールバックと、`[Scene]Skybox`を明示するシーン向けのアセットとして残っている
 
