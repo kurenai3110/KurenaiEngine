@@ -253,7 +253,7 @@ Sample3D.exe -dx12
 
 画面左上に表示される6つのImGuiパネルから各種設定を変更できます(F1キーで表示/非表示を切り替え可能)。
 
-- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、White Furnace Test(スペキュラBRDFのエネルギー保存を目視で検証するシーン)、Material Test(粗さ0〜1の球体列+半透明ガラス球)、Light Test(ポイント/スポット/平行光の検証用シーン)、Reflection Probe Test(反射プローブの効果を目視で確認するシーン)、Multi Model Test(TRS配置の確認用))
+- **Scenes** — 現在使用中のグラフィックスAPI(DX11/DX12)を表示するほか、シーンの切り替えを行います。ボタンをクリックするとそのシーン(`.kscene`)を読み込みます。一覧は`Assets\Packed\Scenes\*.kscene`から自動的に構築されるため、`.kscene`を追加するだけで一覧に増えます(付属のシーンはSponza、Bistro (McGuire) - Exterior / Interior、Bistro (McGuire) - Interior (Lit)(内装に照明15灯と反射プローブ3個を配置し、反射プローブ・スクリーンスペースシャドウ・タイルライトカリングを実際のモデルの上で確認できるシーン)、White Furnace Test(スペキュラBRDFのエネルギー保存を目視で検証するシーン)、Material Test(粗さ0〜1の球体列+半透明ガラス球)、Light Test(ポイント/スポット/平行光の検証用シーン)、Reflection Probe Test(反射プローブの効果を目視で確認するシーン)、Multi Model Test(TRS配置の確認用))
 - **Post Processing** — AO/間接光のON/OFFと手法(SSAO / SSIL)、各パラメータを調整。シャドウ・IBL・SSRのON/OFFと各パラメータもここで調整できます(IBLはON/OFFに加えて強度も調整可能。拡散イラディアンスは既定でプリフィルタ済み鏡面の最終ミップから得ますが、検証用に専用のイラディアンスマップへ切り替えることもできます)。SSRは画面内で反射先が見つかった場合にその色で反射を差し替えます。見つからなかった場合は反射プローブ(またはスカイボックス由来のIBL)の結果がそのまま残るため、SSRのON/OFFで全体の明るさは変わらず、反射の鮮明さだけが変わります。スペキュラBRDFのマルチスキャッタリング・エネルギー補正もここでON/OFFできます。トーンマッピングカーブ(AgX / ACES / Reinhard。既定はAgX)、出力ディザリング、ブルーム(強度・しきい値・ソフトニー)、自動露出(EV100の上下限・露出補正・明順応/暗順応の速度・測光に使うパーセンタイル範囲)もここで調整します。中間バッファの精度構成(HDR / Legacy 8bit)を切り替えて画質を比較することもできます。VSync、固定FPSモード(既定でON・60fps。30/60/120から選択可能)もここで切り替えられます
 - **Render Targets** — Presentパスで表示する内容をドロップダウンで選択(Final (Lit) / Albedo / Normal / Material / Depth / IBL(プリフィルタ済み鏡面・BRDF LUT・検証用の拡散イラディアンス) / Bloom / Light Tiles(タイルごとのライト数のヒートマップ) / 反射プローブ(キャプチャ結果・影響範囲の色分け)等、各パス中間結果のデバッグ表示)。間接光のように値が小さいバッファを見るための輝度倍率(Debug View Gain)も指定できます
 - **Lighting** — 太陽光の時刻(Time of Day)・自動進行(Auto Advance)・方位角(Sun Azimuth)・
@@ -328,7 +328,11 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   「天井が開いた東室(寒色・太陽光)」に分かれたホールと、その間を貫く金属球列(`metallic=1.0`、
   粗さ0.05)。床は磨いた石(粗さ0.06)で、壁のエミッシブ帯の映り込みから視差補正の効きを読み取る。
   `Tools/generate_probe_test.py` で再生成できる
-- `Scenes/` — 手書きの`.kscene`(シーンファイル)。`Assets/`の外にあり**Git管理対象**
+- `Scenes/` — 手書きの`.kscene`(シーンファイル)。`Assets/`の外にあり**Git管理対象**。
+  このうち`BistroInteriorLit.kscene`は、Bistro内装の照明器具の実際の位置に合わせてポイントライトを15灯置き、
+  部屋の形に合わせた反射プローブを3個置いたシーンです。反射プローブ・スクリーンスペースシャドウ・
+  タイルライトカリングを、テスト用の合成シーンではなく実際のモデルの上で確認できます
+  (`BistroInterior.kscene`はライトもプローブも持たない素の読み込み確認用として残してあります)
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
 - `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる
 

@@ -3262,6 +3262,107 @@ GPUプロファイラで1プローブぶんのコストが読める。各パス�
 畳み込み自体のサンプル数・解像度を下げることになる。現時点では未実装。
 </p>
 
+<h3>19.11 実シーンへのプローブ配置: 配置数値をパック済みアセットから求める</h3>
+<p>
+19.9節の<code>ProbeTest</code>は、こちらでジオメトリを生成しているため部屋の寸法も照明の位置も
+最初から分かっている。しかし<strong>既製のモデルへプローブとライトを置くときは、そのどちらも分からない</strong>。
+<code>Scenes/BistroInteriorLit.kscene</code>(Bistro内装に照明15灯と反射プローブ3個を配置したシーン)は、
+その数値を<b>目分量ではなくパック済みアセットを直接読んで</b>決めた。同じことを他のモデルでもやる
+ことになるので、手順と落とし穴をここに残す。
+</p>
+
+<h4>まず確認すべきこと: モデルが埋め込みライトを持つか</h4>
+<p>
+<code>PackageHeader</code>(<code>ModelPackage.h</code>、64バイト固定)の<code>LightCount</code>を見る。
+Bistro内装は<strong>0灯</strong>だった。照明器具のジオメトリ(ランプシェード・エミッシブの電球)は
+あるのに光源が1つも無い状態で、<code>.kscene</code>の<code>[Light]</code>で全部置く必要がある。
+glTFの<code>KHR_lights_punctual</code>を持つモデルとは前提が違うので、最初に確認しておく。
+</p>
+
+<h4>部屋の向きは「垂直面の法線のヒストグラム」で測る</h4>
+<p>
+Bistro内装は<strong>世界座標に対して回転している</strong>。床のAABBを見ても回転量は分からないし、
+頂点雲のPCAも頂点密度に引きずられて当てにならない。確実なのは<b>法線</b>である。
+<code>.kgeom</code>の頂点から「壁の高さにあって、法線がほぼ水平」なものだけを集め、
+法線の水平角<code>atan2(n.z, n.x)</code>を180度周期でヒストグラムにすると、
+<strong>62.5度と152.5度にちょうど90度差の二峰</strong>が立った。これが部屋の2つの壁面の向きである。
+床のAABBを回転フレームへ射影し直すと、輪郭が素直な矩形(正確にはL字)になって寸法が読める。
+</p>
+
+<h4><code>Yaw</code>の符号は<code>WorldToProbeLocal</code>から導く(推測しない)</h4>
+<p>
+<code>ReflectionProbe.hlsli</code>の
+<code>WorldToProbeLocal(v, s, c) = (v.x*c - v.z*s, v.y, v.x*s + v.z*c)</code>は、
+world&rarr;localが<strong>+Yaw回転</strong>である。したがってlocal&rarr;worldは&minus;Yaw回転で、
+<strong>箱のローカルX軸は世界のXZ平面で角度&minus;Yawの向きを指す</strong>。
+部屋の軸が&minus;27.5度と+62.5度なら、指定すべきは<code>Yaw = 27.5</code>であって&minus;27.5ではない。
+ここを取り違えると箱が逆向きに傾き、影響範囲は一見それらしく見えるのに視差補正だけが壁から外れる
+(壁際で反射位置がずれる)という、原因の分かりにくい壊れ方をする。
+</p>
+
+<h4>照明器具の位置は頂点のクラスタリングで取れる</h4>
+<p>
+<code>MeshEntry</code>の<code>BaseColorTextureIndex</code>からテクスチャ名を引けば、どのメッシュが
+どの器具かは名前で分かる(<code>Paris_Ceiling_Lamp_01</code>、<code>Paris_Lantern_01A</code>など)。
+ただし同じ器具の複数インスタンスは1メッシュへマージされているため、メッシュのAABBでは
+「4個の吊り下げランプ全体を包む箱」しか得られない。<strong>頂点を近傍でクラスタリングして
+重心を取る</strong>と、インスタンスごとの位置がそのまま出てくる。Bistro内装では
+吊り下げランプ4・バーのランタン4・壁付け照明7の計15個が、それぞれ同じ頂点数のクラスタとして
+きれいに分離した。エミッシブの電球メッシュ(<code>EmissiveFactor</code>が非ゼロのもの)は
+特に薄く小さいので、電球そのものの位置がほぼ点で得られる。
+</p>
+
+<h4>箱の面は「実際の壁と重なる面だけ」外側へ出す</h4>
+<p>
+19.7節の重みは境界でちょうど0になるため、箱の面を壁面ぴったりに置くと<strong>壁自体が重み0になり、
+グローバルIBLへ薄まる</strong>。そこで<b>実際の壁・床・天井と重なる面だけ<code>BlendDistance</code>ぶん
+外へ出し、プローブ同士の継ぎ目は出さない</b>。継ぎ目を出すと重なりが減ってブレンド帯が痩せる。
+<code>BistroInteriorLit</code>は<code>BlendDistance = 0.9</code>に対し、
+プローブ同士の重なりをカウンター側&harr;客席側で3.0、奥の間&harr;メインで2.0取ってある。
+</p>
+
+<h4><code>Position</code>はキャプチャ位置でもある</h4>
+<p>
+Box形状の<code>Position</code>は箱の中心であると同時に<strong>6面を撮る視点</strong>でもあり、
+両者を分離できない。家具の中に埋まると、そのプローブだけ内部の面だらけの環境が焼けてしまう。
+<code>BistroInteriorLit</code>では、椅子の背の最高点(y=2.48)より上・吊り下げランプの下端(y&asymp;2.95)より下の
+<code>y = 2.50</code>に3つとも揃えてある。この2つの数字もクラスタリングで実測した値である。
+</p>
+
+<h4>落とし穴: 夜にするとプローブの検証ができなくなる</h4>
+<p>
+このシーンで最も時間を取られたのがこれで、記録しておく価値がある。
+<code>ComputeSunLighting</code>の昼度は
+<code>dayFactor = Smoothstep(6,7,t) * (1 - Smoothstep(17,18,t))</code>で、
+<strong>18時ちょうどで厳密に0</strong>になる。<code>TimeOfDay</code>を18.0以降にすると
+グローバルIBLがゼロになるため、<b>プローブのON/OFFで最終画像が1画素も変わらなくなる</b>
+(実測: 226,845画素中0画素、最大チャンネル差0)。プローブが壊れているように見えるが、
+「差し替える対象が無い」だけである。
+</p>
+<p>
+同様に、<code>[Scene] IBLIntensity</code>を下げてもプローブの寄与が同じ倍率でスケールされるため、
+「環境光を落として器具光を目立たせる」つもりでこれを下げると、やはりプローブの差が消える。
+<strong>屋内シーンで「照明器具を主役にしたい」動機と「プローブの効果を見せたい」動機は正面から
+衝突する</strong>ということで、<code>BistroInteriorLit</code>は夕方の遷移の終わり際
+(<code>TimeOfDay = 17.9</code>、<code>dayFactor &asymp; 0.028</code>)に置いて両立させている。
+この設定では器具光が支配的なまま、プローブを切ると床と椅子にはっきり空の青が乗る
+(実測: 226,844画素が変化、最大チャンネル差102)。
+</p>
+
+<h4>検証結果(<code>BistroInteriorLit</code>、1280x720・Debug)</h4>
+<table>
+<tr><th>切り替え</th><th>変化した画素数 / 226,845</th><th>最大チャンネル差</th></tr>
+<tr><td>Enable Reflection Probes</td><td>226,844</td><td>102</td></tr>
+<tr><td>Parallax Correction</td><td>179,855</td><td>40</td></tr>
+<tr><td>Screen-Space Shadows</td><td>224,790</td><td>169</td></tr>
+<tr><td>DX11 と DX12 の差</td><td>5,809</td><td>23</td></tr>
+</table>
+<p>
+DX11/DX12の差は鏡面のちらつきと出力ディザの範囲で、他のシーンでの差と同程度。
+Light Tilesのヒートマップにマゼンタ(タイル容量64の超過)は出ない ―― 15灯なので当然だが、
+実シーンでタイルあたりのライト数が容量に対してどれくらい余裕があるかを目で確認する用途には使える。
+</p>
+
 </section>
 
 <section id="ssrprobe">
