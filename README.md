@@ -328,11 +328,14 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   「天井が開いた東室(寒色・太陽光)」に分かれたホールと、その間を貫く金属球列(`metallic=1.0`、
   粗さ0.05)。床は磨いた石(粗さ0.06)で、壁のエミッシブ帯の映り込みから視差補正の効きを読み取る。
   `Tools/generate_probe_test.py` で再生成できる
-- `Scenes/` — 手書きの`.kscene`(シーンファイル)。`Assets/`の外にあり**Git管理対象**。
+- `Scenes/` — `.kscene`(シーンファイル)。`Assets/`の外にあり**Git管理対象**。
   このうち`BistroInteriorLit.kscene`は、Bistro内装の照明器具の実際の位置に合わせてポイントライトを15灯置き、
   部屋の形に合わせた反射プローブを3個置いたシーンです。反射プローブ・スクリーンスペースシャドウ・
   タイルライトカリングを、テスト用の合成シーンではなく実際のモデルの上で確認できます
-  (`BistroInterior.kscene`はライトもプローブも持たない素の読み込み確認用として残してあります)
+  (`BistroInterior.kscene`はライトもプローブも持たない素の読み込み確認用として残してあります)。
+  `ScreenSpaceShadowTest.kscene`(接触影の目視確認用)と`ManyLightsTest.kscene`(タイルライトカリング用に
+  ポイントライトを格子状に64灯配置)の2つだけは手書きではなく`Tools/generate_shadow_test_scenes.py`で
+  生成します(ジオメトリは`LightTest.kmodel`を流用するため、生成されるのは`.kscene`だけです)
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
 - `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる
 
