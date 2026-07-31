@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 
 #include "DX12DescriptorHeap.h"
+#include "DX12ShaderCompiler.h"
 #include "RHI/IRHIDevice.h"
 
 namespace DirectX
@@ -143,6 +144,9 @@ namespace Kurenai::RHI
         // 結果をm_SupportsRaytracingへ記録する。判定結果は必ずログへ残す
         // (非対応環境では上位層が黙って従来手法へフォールバックするため、ログが唯一の手がかりになる)
         void DetectRaytracingSupport();
+        // デバイスが対応する最上位のシェーダーモデルを実測してm_HighestShaderModelへ記録し、
+        // dxc(DX12ShaderCompiler)の初期化まで行う。CreateShaderより前に呼ぶ必要がある
+        void DetectShaderModelAndInitCompiler();
 
         void CreateRootSignature();
         void CreateComputeRootSignature();
@@ -179,8 +183,15 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> m_UploadCommandList4;
         // D3D12_FEATURE_D3D12_OPTIONS5のRaytracingTierがTier 1.1以上か。
         // インラインレイトレーシング(HLSLのRayQuery)はTier 1.1で追加された機能のため、
-        // Tier 1.0止まりのアダプタではfalseにする
+        // Tier 1.0止まりのアダプタではfalseにする。
+        // 加えてRayQueryを含むシェーダーはSM 6.5でしかコンパイルできないため、
+        // dxcが使えない/シェーダーモデルが6.5未満の環境でもfalseにする
         bool m_SupportsRaytracing = false;
+        // D3D12_FEATURE_SHADER_MODELで実測した、このデバイスが対応する最上位のシェーダーモデル。
+        // 取得できなかった場合はD3D_SHADER_MODEL_5_1相当として扱う(0のまま)
+        D3D_SHADER_MODEL m_HighestShaderModel = static_cast<D3D_SHADER_MODEL>(0);
+        // HLSL→DXILのコンパイラ。IsAvailable()がfalseの場合はd3dcompiler/SM 5.0へフォールバックする
+        DX12ShaderCompiler m_ShaderCompiler;
         // デバッグビルドでのみ取得する(リリースビルドではnullptrのままDrainDebugMessagesが即座に返る)
         Microsoft::WRL::ComPtr<ID3D12InfoQueue> m_InfoQueue;
         Microsoft::WRL::ComPtr<IDXGIFactory2> m_Factory;

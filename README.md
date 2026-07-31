@@ -72,11 +72,19 @@ KurenaiEngine3D.dll/KurenaiEngine2D.dllが実行時に参照するShadersは、�
 Sample3Dはさらに`Assets\Packed\`もコピーしますが、Sample2Dは`KurenaiEngine3D.dll`・Assetsのどちらも
 必要としないため同梱しません。
 
+DX12バックエンドはシェーダーをdxc(DirectX Shader Compiler)でコンパイルするため、
+Windows SDKに含まれる`dxcompiler.dll`と`dxil.dll`も同じ仕組みで実行ファイルの隣へコピーされます
+(`KurenaiEngineLibrary`のPostBuildEventがWindows SDKの`bin\<SDKバージョン>\x64`から取得)。
+この2つのDLLが無い場合はログに警告を出したうえで従来のd3dcompiler(シェーダーモデル5.0)で
+動作しますが、レイトレーシング機能は無効になります。DX11バックエンドは常にd3dcompilerを使うため
+これらのDLLを必要としません。
+
 ## 必要環境
 
 - Windows 10 / 11
 - Visual Studio 2022 (「C++によるデスクトップ開発」ワークロード、Windows 10 SDK)
 - CMake (Visual Studio付属のもので可)
+- DX12バックエンドのレイトレーシングを使う場合: DXR Tier 1.1 / シェーダーモデル6.5に対応したGPUとドライバ
 
 ## セットアップ手順
 

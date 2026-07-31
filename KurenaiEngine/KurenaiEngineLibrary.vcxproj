@@ -87,6 +87,24 @@
       <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup>
+    <!-- dxc(DirectX Shader Compiler)のランタイムをOutDirへコピーする。
+         DX12バックエンドはシェーダーをDXIL(SM 6.x)へコンパイルするためdxcompiler.dllを
+         実行時にLoadLibraryWで開く(DX12ShaderCompiler)。dxil.dllはdxcompiler.dllが
+         自分と同じフォルダから読み込む署名用ライブラリで、無いとDXILが未署名になり
+         開発者モードでない環境でパイプラインステートの作成が失敗する。
+         このDLLはKurenaiEngineLibrary.dllと同じフォルダに置くだけでよく、
+         サンプル側のPostBuildEventが "*.dll" でまとめて実行ファイルの隣へ持っていく。
+         見つからない場合もビルドは止めない(実行時にログを出してd3dcompiler/SM 5.0へ
+         フォールバックする。その場合レイトレーシングは無効になる) -->
+    <PostBuildEvent>
+      <Command>set DXC_BIN=$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64
+if exist "%DXC_BIN%\dxcompiler.dll" (xcopy /Y /D "%DXC_BIN%\dxcompiler.dll" "$(OutDir)") else (echo [警告] dxcompiler.dll が "%DXC_BIN%" に見つかりません。DX12はd3dcompiler/SM 5.0で動作しレイトレーシングは無効になります)
+if exist "%DXC_BIN%\dxil.dll" (xcopy /Y /D "%DXC_BIN%\dxil.dll" "$(OutDir)") else (echo [警告] dxil.dll が "%DXC_BIN%" に見つかりません。DXILが未署名になります)
+exit /b 0</Command>
+      <Message>dxcランタイム(dxcompiler.dll/dxil.dll)をOutDirへコピー</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="Source\Engine\KurenaiTypes.h" />
     <ClInclude Include="Source\Engine\KurenaiEngineBase.h" />
@@ -138,6 +156,7 @@
     <ClInclude Include="Source\Library\RHI\DX12\DX12AccelerationStructure.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Buffer.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Shader.h" />
+    <ClInclude Include="Source\Library\RHI\DX12\DX12ShaderCompiler.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12PipelineState.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12ComputePipelineState.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12SwapChain.h" />
@@ -188,6 +207,7 @@
     <ClCompile Include="Source\Library\RHI\DX12\DX12AccelerationStructure.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Buffer.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Shader.cpp" />
+    <ClCompile Include="Source\Library\RHI\DX12\DX12ShaderCompiler.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12PipelineState.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12ComputePipelineState.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12SwapChain.cpp" />

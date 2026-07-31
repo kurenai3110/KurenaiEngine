@@ -224,6 +224,7 @@
     <li><a href="#procedural-sky">21. 手続き空・月光・昼夜遷移</a></li>
     <li><a href="#raytracing">22. レイトレーシング基盤(DXR)</a></li>
     <li><a href="#sceneloading">23. シーン読み込みのスレッド分割</a></li>
+    <li><a href="#dxc">24. dxcへの移行(DX12のシェーダーモデル6.x化)</a></li>
   </ol>
 </nav>
 
@@ -3161,6 +3162,7 @@ SSSもカリングも不透明パスのみに適用される。半透明パス�
 ライティングパスが実際にボトルネックになるシーン(高解像度・Rangeの大きいライトを多数重ねる)が要る。
 現時点で言えるのは<strong>正しさ(見た目が変わらない)を確認済みで、速度の利得は未計測</strong>という状態である。
 </p>
+</section>
 
 <section id="reflectionprobe">
 <h2>19. 反射プローブ(リフレクションプローブ)</h2>
@@ -3713,6 +3715,8 @@ SSRを有効にして計測したところ、<strong>3Dシーンの画素は1つ
 <li><code>roughnessCutoff</code>(既定0.6)より粗い面ではSSRを一切使わない。この領域は
 プローブ/グローバルIBLに委ねられる</li>
 </ul>
+</section>
+
 <section id="procedural-sky">
 <h2>21. 手続き空・月光・昼夜遷移</h2>
 
@@ -4537,9 +4541,9 @@ DX11では<code>D3D11_USAGE_IMMUTABLE</code>に対する更新でデバッグレ
 bindless(SM 6.6の<code>ResourceDescriptorHeap</code>)が要る。そこまでは踏み込んでいないため、
 マテリアルは定数値(<code>BaseColorFactor</code>・metallic・roughness・emissive)のみを持つ。
 反射やGIに映る色はこの段階ではやや平板になる</li>
-<li><strong>レイを飛ばすシェーダーがまだ無い</strong> — DXRの<code>RayQuery</code>はSM 6.5以上を要求するが、
-シェーダーは現在<code>d3dcompiler</code>のSM 5.0でコンパイルしている。実際にレイを飛ばすには
-dxc(DXIL)への移行が別途必要になる</li>
+<li><strong>レイを飛ばすシェーダーがまだ無い</strong> — DXRの<code>RayQuery</code>はSM 6.5以上を要求する。
+この章の時点ではシェーダーを<code>d3dcompiler</code>のSM 5.0でコンパイルしていたため実際にレイを
+飛ばせなかった。<strong>24章のdxc移行でこの制約は解消済み</strong>(トレースするパス自体の実装は別途)</li>
 <li><strong>シーンは静的前提</strong> — BLAS/TLASとも<code>PREFER_FAST_TRACE</code>で焼き、
 <code>ALLOW_UPDATE</code>を付けていない。動く物体を入れる場合はTLASの再構築が要る</li>
 </ul>
@@ -4752,6 +4756,125 @@ DX11も<code>D3D11_CREATE_DEVICE_SINGLETHREADED</code>を指定しておらず
 <li><strong>ログ</strong> — 上記すべてを通してError/Warning・D3D12デバッグレイヤーの指摘とも0件</li>
 <li><strong>DX11</strong> — シーン切り替え・連打とも同様に動作(Error/Warning 0件)</li>
 <li><strong>Sample2D</strong> — <code>ApplyPendingResize</code>経由のリサイズが従来どおり動作</li>
+</ul>
+</section>
+
+<section id="dxc">
+<h2>24. dxcへの移行(DX12のシェーダーモデル6.x化)</h2>
+
+<p>
+22章で高速化構造(BLAS/TLAS)までは作れるようになったが、レイを飛ばすHLSLの<code>RayQuery</code>は
+<strong>シェーダーモデル6.5以上</strong>を要求する。<code>d3dcompiler</code>(fxc相当)が出力できるのは
+SM 5.1までで、SM 6.x以降のDXILを吐けるのはdxc(DirectX Shader Compiler)だけのため、
+DX12バックエンドのシェーダーコンパイルをdxcへ移した。
+</p>
+<p>
+<strong>DX11はd3dcompiler / SM 5.0のまま</strong>にしている。DX11はDXILを受け取れず、
+SM 6.x固有の機能を使う予定も無いため、切り替えても得るものが無いという判断。
+</p>
+
+<h3>24.1 どこを差し替えたか</h3>
+<p>
+新設した<code>DX12ShaderCompiler</code>(<code>Source/Library/RHI/DX12/</code>)が
+dxcのラッパーで、<code>DX12Device::CreateShader</code>がまずこちらを試す。
+シェーダーのソースコード・エントリポイント名・RHIの公開APIはいずれも無変更で、
+変わったのはコンパイラとターゲットプロファイルだけ。
+</p>
+<table>
+<thead><tr><th></th><th>移行前</th><th>移行後(DX12)</th></tr></thead>
+<tbody>
+<tr><td>コンパイラ</td><td><code>D3DCompileFromFile</code></td><td><code>IDxcCompiler::Compile</code></td></tr>
+<tr><td>ターゲット</td><td><code>vs_5_0</code> / <code>ps_5_0</code> / <code>cs_5_0</code></td><td><code>vs_6_5</code> / <code>ps_6_5</code> / <code>cs_6_5</code></td></tr>
+<tr><td>中間表現</td><td>DXBC</td><td>DXIL(<code>dxil.dll</code>で署名)</td></tr>
+<tr><td>デバッグ情報</td><td><code>D3DCOMPILE_DEBUG</code> + <code>SKIP_OPTIMIZATION</code></td><td><code>-Zi -Qembed_debug -Od</code></td></tr>
+<tr><td>最適化(Release)</td><td>既定</td><td><code>-O3</code></td></tr>
+</tbody>
+</table>
+
+<h3>24.2 dxcompiler.dllを動的ロードにした理由</h3>
+<p>
+<code>dxcompiler.lib</code>で静的にインポートすると、DLLが1つ無いだけでプロセスが起動できなくなる。
+このDLLはOSに標準では入っておらず実行ファイルの隣へ配布する必要があるため、
+<code>LoadLibraryW</code>で動的にロードし、失敗したら<strong>ログを残してd3dcompiler / SM 5.0へ
+フォールバックする</strong>縮退運転を選んだ。フォールバック時は
+<code>SupportsRaytracing()</code>が<code>false</code>になり、上位層は従来のスクリーンスペース手法で描く。
+</p>
+<p>
+使うシェーダーモデルは決め打ちにせず、<code>D3D12_FEATURE_SHADER_MODEL</code>で
+デバイスの対応上限を実測して6.5で頭打ちにしている。このAPIはランタイムが知らない列挙値を渡すと
+<code>E_INVALIDARG</code>を返すため、6.5から6.0へ順に下げながら問い合わせる。
+</p>
+
+<h3>24.3 dxil.dllが要る(署名)</h3>
+<p>
+dxcは<code>dxcompiler.dll</code>と<strong>同じフォルダにある</strong><code>dxil.dll</code>を使ってDXILへ署名する。
+これが無いとコンパイル自体は通るが未署名のDXILになり、開発者モードが有効でない環境では
+<code>CreateGraphicsPipelineState</code>が<code>E_INVALIDARG</code>で失敗する。
+</p>
+<p class="note">
+この失敗は「シェーダーは通ったのにPSOだけ落ちる」という分かりにくい形で出るため、
+<code>DX12ShaderCompiler::Initialize</code>で<code>dxcompiler.dll</code>の隣に<code>dxil.dll</code>が
+あるかを確認して警告を出している。加えてdxc自身が出す
+「DXIL.dll not found. Resulting DXIL will not be signed...」という警告も、
+コンパイル成功時でもエラーバッファを読んでログへ載せるようにしてある。
+</p>
+<p>
+両DLLは<code>KurenaiEngineLibrary</code>のPostBuildEventがWindows SDKの
+<code>bin\$(TargetPlatformVersion)\x64</code>からOutDirへコピーし、
+サンプル側の既存の<code>*.dll</code>コピーが実行ファイルの隣まで運ぶ。
+</p>
+<p class="note">
+MSBuildの<code>$(WindowsSDKVersion)</code>はこのプロジェクト構成
+(<code>WindowsTargetPlatformVersion</code>が<code>10.0</code>)では空になり、
+コピー元が<code>bin\x64</code>という存在しないパスになる。実際に解決済みのバージョンが入るのは
+<code>$(TargetPlatformVersion)</code>の方(実測で<code>10.0.19041.0</code>)。
+</p>
+
+<h3>24.4 文字コード: BOM無しUTF-8をdxcに読ませる</h3>
+<p>
+このエンジンのシェーダーは<strong>BOM無しUTF-8</strong>で、日本語コメントを含む。
+dxcの既定のファイル読み込み(<code>IDxcLibrary::CreateIncludeHandler</code>や
+<code>dxc.exe</code>のCLI)は<strong>BOMが無いファイルをシステムのANSIコードページとして解釈する</strong>ため、
+日本語環境(CP932)ではUTF-8のバイト列が不正なCP932列になり、
+コンパイル以前に<code>0x80070459</code>(<code>ERROR_NO_UNICODE_TRANSLATION</code>)で失敗する。
+<strong>全40エントリポイントが1つも通らない</strong>という形で実際に発生した。
+</p>
+<p>
+対策として、メインのソースもインクルードファイルも<strong>自前で読み込んで
+<code>CP_UTF8</code>を明示したブロブを渡す</strong>ようにした
+(<code>DX12ShaderCompiler.cpp</code>の<code>Utf8IncludeHandler</code>)。
+シェーダーファイルにBOMを付ける案は、同じファイルを読むDX11のd3dcompiler経路にも影響が及ぶため採らなかった。
+</p>
+
+<h3>24.5 <code>ThrowIfFailed</code>のODR違反(ついでに修正)</h3>
+<p>
+<code>DX11Util.h</code>と<code>DX12Util.h</code>が<code>Kurenai::RHI::ThrowIfFailed</code>を
+<strong>同じシグネチャの<code>inline</code>関数として二重に定義していた</strong>。
+中身はログのタグ(<code>"DX11"</code> / <code>"DX12"</code>)だけが違う。
+これはODR違反で、リンカが一方の実体に統一してしまう。実際にDX12側の呼び出しがDX11の実体に
+差し替えられており、<strong>DX12のエラーがすべて<code>[DX11]</code>タグでログに出ていた</strong>
+(24.3のPSO失敗を調べていて発覚)。両方を<code>static inline</code>にして翻訳単位ごとに
+別の実体を持たせ、includeしたヘッダ側のタグが必ず使われるようにした。
+</p>
+
+<h4>検証</h4>
+<ul>
+<li><strong>事前確認</strong> — <code>dxc.exe</code>で全40エントリポイント(19ファイル)を
+<code>-HV 2018</code> + SM 6.5でコンパイルし、エラー・警告とも0件を確認してから実装に入った</li>
+<li><strong>DX12</strong> — 起動ログに「dxcでシェーダーをコンパイルします(シェーダーモデル 6_5)」と
+「レイトレーシング対応: DXR Tier 1.1」。Bistro Exteriorの描画・シーン切り替えとも正常、
+Error/Warning 0件</li>
+<li><strong>描画結果の一致</strong> — DX12(dxc / SM 6.5)とDX11(d3dcompiler / SM 5.0)の
+同一視点スクリーンショットを3Dビューポート全域(79,919サンプル)で比較し、
+チャンネル差の平均0.002 / <strong>最大1</strong>(8bit値)。DXIL化による描画の変化は無い</li>
+<li><strong>フォールバック</strong> — <code>dxcompiler.dll</code>を退避して起動すると、
+警告2件(ロード失敗・レイトレーシング無効)を出したうえでSM 5.0で従来どおり描画</li>
+<li><strong>未署名DXIL</strong> — <code>dxil.dll</code>を退避して起動すると、
+自前の警告とdxcの「not be signed」警告が出たうえでPSO作成が<code>0x80070057</code>で失敗し、
+<code>[DX12]</code>タグでログに残ることを確認(24.5の修正前は<code>[DX11]</code>タグだった)</li>
+<li><strong>ビルド</strong> — KurenaiEngine.sln / Sample3D.sln / Sample2D.slnをDebug・Release x64で
+警告0件。Releaseの実機動作も確認</li>
+<li><strong>Sample2D</strong> — DX12/DX11とも従来どおり描画(2Dシェーダーもdxc経由になる)</li>
 </ul>
 </section>
 

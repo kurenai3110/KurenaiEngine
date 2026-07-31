@@ -665,10 +665,32 @@ HLSLへそのまま渡せるよう転置済みで保持されているため、�
 <code>Transform</code>の行優先3x4と一致する。
 </p>
 <p class="note">
-レイを実際に飛ばすHLSLの<code>RayQuery</code>はシェーダーモデル6.5以上を要求するが、
-現在このエンジンのシェーダーは<code>d3dcompiler</code>のSM 5.0でコンパイルしている。
-そのため現状のAPIで作れるのは高速化構造までで、レイトレーシングを行うシェーダーは
-まだ書けない(dxcへの移行が別途必要)。
+レイを実際に飛ばすHLSLの<code>RayQuery</code>はシェーダーモデル6.5以上を要求する。
+DX12バックエンドのシェーダーはdxc(DirectX Shader Compiler)でSM 6.5へコンパイルするため、
+この要件は満たしている。DX11バックエンドは従来どおり<code>d3dcompiler</code>のSM 5.0のままで、
+レイトレーシングにも対応しない(下記「シェーダーのコンパイル」参照)。
+</p>
+
+<h4>4.2.2 シェーダーのコンパイル</h4>
+<p>
+<code>IRHIDevice::CreateShader</code>に渡すHLSLは、バックエンドによって異なるコンパイラで処理される。
+書き方の違いを意識する必要はないが、使えるシェーダーモデルが変わる。
+</p>
+<table>
+<tr><th>バックエンド</th><th>コンパイラ</th><th>ターゲット</th></tr>
+<tr><td>DX12</td><td>dxc(<code>dxcompiler.dll</code>)</td><td><code>vs_6_5</code> / <code>ps_6_5</code> / <code>cs_6_5</code>(デバイスの対応上限が6.5未満ならそこまで下げる)</td></tr>
+<tr><td>DX11</td><td>d3dcompiler</td><td><code>vs_5_0</code> / <code>ps_5_0</code> / <code>cs_5_0</code></td></tr>
+</table>
+<p>
+DX12でdxcを使うには<code>dxcompiler.dll</code>と<code>dxil.dll</code>が実行ファイルと同じフォルダに必要で、
+ビルド時に自動でコピーされる(README.md参照)。<code>dxcompiler.dll</code>が見つからない場合は、
+ログに警告を残したうえでDX12も<code>d3dcompiler</code>のSM 5.0へフォールバックする
+(その場合<code>SupportsRaytracing()</code>は<code>false</code>になる)。
+</p>
+<p>
+HLSLの言語バージョンは<code>-HV 2018</code>で固定しているため、dxcのバージョンが上がっても
+既存シェーダーの意味は変わらない。シェーダーファイルは<b>BOM無しUTF-8</b>で保存すること
+(日本語コメントを含む場合、BOMもUTF-16も使わない)。
 </p>
 
 <h3>4.3 <code>RHI::IRHICommandList</code></h3>
@@ -1304,6 +1326,11 @@ KurenaiEngineのいずれのDLLにもリンクされていない</strong>(モデ
 インポートライブラリがリンクされる。DLLを経由した参照は推移的にリンクされないため、
 Libraryへの参照だけを省略することはできない)</li>
 <li>実行時に上記2つのDLLが実行ファイルと同じフォルダに存在すること</li>
+<li>DX12バックエンドを使う場合は、加えてWindows SDK同梱の<code>dxcompiler.dll</code>と
+<code>dxil.dll</code>が実行ファイルと同じフォルダに存在すること
+(<code>KurenaiEngineLibrary</code>のPostBuildEventがWindows SDKからコピーするため、
+プロジェクト参照の構成であれば自動的に揃う)。DX12のシェーダーはこのdxcで
+シェーダーモデル6.5へコンパイルされる(4.2.2節参照)</li>
 </ul>
 <p>
 一方<strong><code>KurenaiPacker.exe</code>(<code>Tools\KurenaiPacker\KurenaiPacker.vcxproj</code>)は
@@ -1328,8 +1355,9 @@ assimp・DirectXTexに加え<code>KurenaiEngineLibrary.vcxproj</code>への依�
 <tr><td>ビルド設定の一致</td><td>3つのDLL(KurenaiEngineLibrary/KurenaiEngine3D/KurenaiEngine2D)とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
 <tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
 <tr><td>アセットの事前変換が必須</td><td><code>Assets::LoadModel</code>は<code>.kmodel</code>のみを受け付ける。<code>.gltf</code>/<code>.fbx</code>等のソースモデルは、実行前に<code>KurenaiPacker.exe</code>で変換しておく必要がある(7章参照)</td></tr>
-<tr><td>レイトレーシングはDX12専用</td><td>DXRはD3D12の機能のため、DX11バックエンドでは使えない(<code>IRHIDevice::SupportsRaytracing()</code>が常に<code>false</code>を返し、<code>CreateBottomLevelAS</code>/<code>CreateTopLevelAS</code>は<code>nullptr</code>を返す)。DX12でもアダプタがDXR Tier 1.1に達していない場合は同様に<code>false</code>になる。使う前に必ずこの関数で分岐すること(4.2.1参照)</td></tr>
-<tr><td>レイトレーシングのシェーダー</td><td>高速化構造(BLAS/TLAS)は作れるが、レイを飛ばすシェーダーはまだ書けない。HLSLの<code>RayQuery</code>はシェーダーモデル6.5以上を要求する一方、現在シェーダーは<code>d3dcompiler</code>のSM 5.0でコンパイルしているため(4.2.1参照)</td></tr>
+<tr><td>レイトレーシングはDX12専用</td><td>DXRはD3D12の機能のため、DX11バックエンドでは使えない(<code>IRHIDevice::SupportsRaytracing()</code>が常に<code>false</code>を返し、<code>CreateBottomLevelAS</code>/<code>CreateTopLevelAS</code>は<code>nullptr</code>を返す)。DX12でもアダプタがDXR Tier 1.1に達していない場合、あるいはdxcでシェーダーモデル6.5をコンパイルできない場合は同様に<code>false</code>になる。使う前に必ずこの関数で分岐すること(4.2.1参照)</td></tr>
+<tr><td>シェーダーモデルがバックエンドで異なる</td><td>DX12はdxcでSM 6.5、DX11はd3dcompilerでSM 5.0へコンパイルする。SM 6.x固有の機能(<code>RayQuery</code>、wave intrinsicsなど)を使ったシェーダーはDX11では動かないため、両バックエンドで使うシェーダーはSM 5.0の範囲で書くこと(4.2.2参照)</td></tr>
+<tr><td>DX12はdxcのDLLを必要とする</td><td><code>dxcompiler.dll</code>と<code>dxil.dll</code>が実行ファイルの隣に必要(ビルド時に自動コピー)。無い場合はログに警告を出してSM 5.0へフォールバックし、レイトレーシングは無効になる(4.2.2参照)</td></tr>
 <tr><td>ポイント/スポットライトの影</td><td>影を落とさない(シャドウマップは平行光1灯のみ対応)</td></tr>
 <tr><td>ライトの同時描画数</td><td>最大1024灯まで(実データでの想定はせいぜい数灯〜十数灯)。超過分はカメラに近い順に採用される</td></tr>
 <tr><td>エリアライト</td><td>未対応(4.6.1参照)。球・チューブ・矩形のライトはモデルからもImGuiからも作成できない</td></tr>

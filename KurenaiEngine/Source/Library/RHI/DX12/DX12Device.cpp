@@ -236,6 +236,10 @@ namespace Kurenai::RHI
             throw std::runtime_error("アップロード用フェンスイベントの作成に失敗しました");
         }
 
+        // シェーダーモデルの判定とdxcの初期化はレイトレーシング判定より先に行う。
+        // RayQueryを含むシェーダーはSM 6.5でしかコンパイルできないため、
+        // DetectRaytracingSupportがこの結果を参照する
+        DetectShaderModelAndInitCompiler();
         DetectRaytracingSupport();
 
         // RTVの内訳: スワップチェーンのバックバッファ2 + オフスクリーンのレンダーテクスチャ12 = 常時14。
@@ -915,6 +919,22 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHIShader> DX12Device::CreateShader(const ShaderDesc& desc)
     {
+        // 通常経路: dxcでDXIL(SM 6.x)へコンパイルする。
+        // SM 6.5でしか使えないインラインレイトレーシング(RayQuery)を扱えるようにするため
+        if (m_ShaderCompiler.IsAvailable())
+        {
+            Microsoft::WRL::ComPtr<ID3DBlob> dxil = m_ShaderCompiler.Compile(desc.FilePath, desc.EntryPoint, desc.Stage);
+            if (!dxil)
+            {
+                // 失敗の詳細はDX12ShaderCompiler::Compileがログ済み。
+                // シェーダが1つでも作れなければ描画は成立しないため、従来どおり例外で止める
+                throw std::runtime_error("シェーダのコンパイルに失敗しました(dxc)");
+            }
+            return std::make_unique<DX12Shader>(desc.Stage, dxil);
+        }
+
+        // フォールバック経路: dxcompiler.dllが無い/デバイスがSM 6.0未満の場合。
+        // レイトレーシングは無効(DetectRaytracingSupport)だが、それ以外は従来どおり動作する
         const char* target =
             desc.Stage == ShaderStage::Vertex ? "vs_5_0" : desc.Stage == ShaderStage::Compute ? "cs_5_0" : "ps_5_0";
 
@@ -1624,6 +1644,39 @@ namespace Kurenai::RHI
 
     // --- レイトレーシング -------------------------------------------------------------------
 
+    void DX12Device::DetectShaderModelAndInitCompiler()
+    {
+        // D3D12_FEATURE_SHADER_MODELは「HighestShaderModelへ聞きたい上限を入れて呼ぶと、
+        // 対応している値まで引き下げて返す」APIだが、ランタイムが知らない列挙値を渡すと
+        // E_INVALIDARGを返す。そのため上から順に下げながら問い合わせる
+        static constexpr D3D_SHADER_MODEL kCandidates[] = {
+            D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_4, D3D_SHADER_MODEL_6_3,
+            D3D_SHADER_MODEL_6_2, D3D_SHADER_MODEL_6_1, D3D_SHADER_MODEL_6_0,
+        };
+
+        m_HighestShaderModel = static_cast<D3D_SHADER_MODEL>(0);
+        for (const D3D_SHADER_MODEL candidate : kCandidates)
+        {
+            D3D12_FEATURE_DATA_SHADER_MODEL shaderModel{ candidate };
+            if (SUCCEEDED(m_Device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel))))
+            {
+                m_HighestShaderModel = shaderModel.HighestShaderModel;
+                break;
+            }
+        }
+
+        if (m_HighestShaderModel == static_cast<D3D_SHADER_MODEL>(0))
+        {
+            Core::Logger::Warning(
+                "DX12", "対応シェーダーモデルを判定できませんでした。d3dcompiler/SM 5.0で動作します");
+            return;
+        }
+
+        // Initializeは失敗しても例外を投げない(理由はログへ出る)。
+        // 戻り値がfalseの場合はCreateShaderがd3dcompiler/SM 5.0へフォールバックする
+        m_ShaderCompiler.Initialize(m_HighestShaderModel);
+    }
+
     void DX12Device::DetectRaytracingSupport()
     {
         m_SupportsRaytracing = false;
@@ -1653,6 +1706,20 @@ namespace Kurenai::RHI
                 "DX12",
                 "レイトレーシング非対応: RaytracingTierが" + std::to_string(static_cast<int>(options5.RaytracingTier)) +
                     "でTier 1.1(値11)に達していません(インラインレイトレーシングにはTier 1.1が必要)");
+            m_Device5.Reset();
+            return;
+        }
+
+        // インラインレイトレーシングのRayQueryはシェーダーモデル6.5で追加された機能で、
+        // DXILを出力できるdxcでしかコンパイルできない。ハードウェアがTier 1.1でも
+        // ここが満たせなければトレースするシェーダーを作れないため非対応として扱う
+        // (Phase 0でdxc/SM 6.xへ移行した理由そのもの)
+        if (!m_ShaderCompiler.IsAvailable() || m_ShaderCompiler.GetShaderModel() < D3D_SHADER_MODEL_6_5)
+        {
+            Core::Logger::Warning(
+                "DX12",
+                "レイトレーシング非対応: シェーダーモデル6.5でのコンパイルができません"
+                "(RayQueryにはdxcとSM 6.5が必要です。dxcompiler.dllの配置とデバイスの対応状況を確認してください)");
             m_Device5.Reset();
             return;
         }

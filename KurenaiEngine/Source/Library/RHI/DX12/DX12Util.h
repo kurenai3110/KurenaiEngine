@@ -10,8 +10,9 @@
 
 namespace Kurenai::RHI
 {
-    // HRESULTが失敗の場合、メッセージ付きの例外を送出する
-    inline void ThrowIfFailed(HRESULT hr, const std::string& message)
+    // HRESULTが失敗の場合、メッセージ付きの例外を送出する。
+    // staticにしている理由はDX11Util.hの同名関数のコメントを参照
+    static inline void ThrowIfFailed(HRESULT hr, const std::string& message)
     {
         if (FAILED(hr))
         {
