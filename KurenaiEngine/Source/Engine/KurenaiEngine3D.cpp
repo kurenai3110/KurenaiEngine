@@ -66,6 +66,11 @@ namespace Kurenai
             // y=影響範囲のデバッグ表示フラグ、z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
             // DeferredLighting.hlslとSSR.hlslが読む
             DirectX::XMFLOAT4 ProbeParams;
+            // 反射プローブの距離キューブ用(末尾に追加、19.12節)。x=視差補正に距離キューブを使うフラグ、
+            // y=距離キューブによる遮蔽判定(光漏れ抑制)の有効フラグ、z=距離キューブの1面の解像度
+            // (テクセル。ReflectionProbe.hlsliのProbeDistanceBiasが1テクセル幅の見積もりに使う。
+            // ハードコードせずここから渡すのは、kProbeCaptureSizeを変えたときに黙ってずれないため)、w=未使用
+            DirectX::XMFLOAT4 ProbeParams2;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -1019,6 +1024,9 @@ namespace Kurenai
         // --- 反射プローブ(19章) ---
         // キャプチャ先(1面ぶんを6面で使い回す)。キューブへ写す前のHDR値を保つためFloatにする
         m_ProbeCaptureColor = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
+        // 同じキャプチャの2枚目(SV_TARGET1)。プローブからのワールド距離をそのまま入れるため、
+        // [0,1]に収まらず精度も必要になる。R32_Floatなら室内スケールでも十分な絶対精度がある
+        m_ProbeCaptureDistance = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R32_Float);
         // Reverse-Zのため遠平面側(0.0)でクリアする(G-Buffer深度と同じ)
         m_ProbeCaptureDepth = m_Device->CreateDepthTexture(kProbeCaptureSize, kProbeCaptureSize, 0.0f);
         // 畳み込みの入力になるスクラッチのキューブマップ(TextureCubeとして読めること
@@ -1029,6 +1037,11 @@ namespace Kurenai
             kIBLIrradianceSize, RHI::Format::R16G16B16A16_Float, 1, kMaxReflectionProbes);
         m_ProbePrefilteredArray = m_Device->CreateMippedUAVTextureCubeArray(
             kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels, kMaxReflectionProbes);
+        // 距離キューブ(19.12節)。畳み込まないためミップは1段だけでよく、スクラッチのキューブも要らない
+        // (キャプチャからこの配列のスライスへ直接書き込む)。
+        // 128²×6面×8枚×4バイト = 3.1MB
+        m_ProbeDistanceArray = m_Device->CreateMippedUAVTextureCubeArray(
+            kProbeCaptureSize, RHI::Format::R32_Float, 1, kMaxReflectionProbes);
 
         RHI::ShaderDesc probeCaptureVsDesc;
         probeCaptureVsDesc.Stage = RHI::ShaderStage::Vertex;
@@ -1047,7 +1060,8 @@ namespace Kurenai
         probeCapturePipelineDesc.VertexShader = m_ProbeCaptureVertexShader.get();
         probeCapturePipelineDesc.PixelShader = m_ProbeCapturePixelShader.get();
         probeCapturePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        probeCapturePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        // レンダーターゲットは2枚(放射輝度と距離)。ProbeCapture.hlslのPSOutputと並びを一致させること
+        probeCapturePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float, RHI::Format::R32_Float };
         probeCapturePipelineDesc.HasDepthStencil = true;
         probeCapturePipelineDesc.ReverseZ = true;
         m_ProbeCapturePipelineState = m_Device->CreatePipelineState(probeCapturePipelineDesc);
@@ -1890,11 +1904,12 @@ namespace Kurenai
             "Probe - Irradiance (Cubemap Array, Look Around)",
             "Probe - Prefiltered Specular (Mip 0 = Raw Capture)",
             "Probe - Influence (Color per Probe)",
+            "Probe - Distance (Cubemap Array, Look Around)",
         };
         // DebugView enumと並びが一致していないと表示と実際のバッファがずれる
         static_assert(
-            static_cast<int>(DebugView::ProbeInfluence) == 22,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はProbeInfluence)");
+            static_cast<int>(DebugView::ProbeDistance) == 23,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はProbeDistance)");
 
         int currentIndex = static_cast<int>(m_DebugView);
         if (ImGui::Combo("View", &currentIndex, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames)))
@@ -1917,7 +1932,8 @@ namespace Kurenai
             ImGui::SliderInt("Prefilter Mip Level", &m_IBLPrefilterDebugMipLevel, 0, static_cast<int>(kIBLPrefilterMipLevels) - 1);
         }
 
-        if (m_DebugView == DebugView::ProbeIrradiance || m_DebugView == DebugView::ProbePrefilter)
+        if (m_DebugView == DebugView::ProbeIrradiance || m_DebugView == DebugView::ProbePrefilter ||
+            m_DebugView == DebugView::ProbeDistance)
         {
             // プローブが1つも無いシーンでもスライダーの範囲が壊れないよう下限を0に保つ
             const int maxProbeIndex = m_ReflectionProbes.empty() ? 0 : static_cast<int>(m_ReflectionProbes.size()) - 1;
@@ -1926,6 +1942,11 @@ namespace Kurenai
             {
                 ImGui::SliderInt(
                     "Probe Prefilter Mip", &m_ProbePrefilterDebugMipLevel, 0, static_cast<int>(kIBLPrefilterMipLevels) - 1);
+            }
+            if (m_DebugView == DebugView::ProbeDistance)
+            {
+                // 距離は色ではないため、Debug View Gain(1倍以上)ではなく「白になる距離」で正規化する
+                ImGui::SliderFloat("Distance Range", &m_ProbeDistanceDebugRange, 1.0f, 200.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
             }
         }
 
@@ -2162,10 +2183,25 @@ namespace Kurenai
             // ImGuiの既定フォント(ProggyClean)はASCIIしか持たないため、UI文言は他と同様に英語で書く
             ImGui::SetTooltip("Box shape only. Intersects the reflection vector with the box\nso reflections line up away from the probe center.");
         }
+        // 視差補正の方式(19.12節)。Parallax Correctionが有効なときだけ意味を持つ
+        ImGui::BeginDisabled(!m_ProbeParallaxCorrectionEnabled);
+        ImGui::Indent();
+        ImGui::Checkbox("Use Depth Cube", &m_ProbeDepthParallaxEnabled);
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Ray-marches the captured distance cube instead of assuming the\nroom is exactly the box. Falls back to the box hit when no\nintersection is found.");
+        }
+        ImGui::Unindent();
+        ImGui::EndDisabled();
         ImGui::Checkbox("Probe Blending", &m_ProbeBlendingEnabled);
         if (ImGui::IsItemHovered())
         {
             ImGui::SetTooltip("Fades weights over Blend Distance inward from the volume border.\nOff: uses only the nearest probe, leaving a seam at the border.");
+        }
+        ImGui::Checkbox("Occlusion (Reduce Light Leak)", &m_ProbeOcclusionEnabled);
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Drops the weight of a probe for pixels that sit behind the surface\nthe probe recorded in that direction, i.e. pixels the probe cannot see.\nStops one room's environment leaking through a wall, but with few\nprobes the lost weight falls back to the global (sky) IBL, so the\nfloor under an object can end up brighter. Off by default.");
         }
         // 更新モード(19.10節)。焼き直しのコストとシーンの変化への追従はトレードオフの関係にあり、
         // Profilerパネルの ProbeBakeN / ProbeRealtimeCapture / ProbeRealtimeConvolve と
@@ -2781,6 +2817,12 @@ namespace Kurenai
             m_ProbeParallaxCorrectionEnabled ? 1.0f : 0.0f,
             m_ProbeBlendingEnabled ? 1.0f : 0.0f,
         };
+        constants.ProbeParams2 = {
+            m_ProbeDepthParallaxEnabled ? 1.0f : 0.0f,
+            m_ProbeOcclusionEnabled ? 1.0f : 0.0f,
+            static_cast<float>(kProbeCaptureSize),
+            0.0f,
+        };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
@@ -3009,7 +3051,8 @@ namespace Kurenai
             RHI::Viewport probeViewport;
             probeViewport.Width = static_cast<float>(kProbeCaptureSize);
             probeViewport.Height = static_cast<float>(kProbeCaptureSize);
-            RHI::IRHITexture* const captureTargets[] = { m_ProbeCaptureColor.get() };
+            // 2枚目は距離(19.12節)。ProbeCapture.hlslのPSOutputと並びを一致させること
+            RHI::IRHITexture* const captureTargets[] = { m_ProbeCaptureColor.get(), m_ProbeCaptureDistance.get() };
 
             // 太陽・カスケード・ライト数・IBL設定は共有のFrameConstantsをそのまま使い、
             // 視点に関わる2つだけをプローブのものへ差し替える(ProbeCapture.hlsl冒頭参照)。
@@ -3020,8 +3063,10 @@ namespace Kurenai
             captureConstants.CameraPosition = { probePosition.x, probePosition.y, probePosition.z, 0.0f };
             cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
-            cmd->SetRenderTargets(captureTargets, 1, m_ProbeCaptureDepth.get());
+            cmd->SetRenderTargets(captureTargets, 2, m_ProbeCaptureDepth.get());
             cmd->SetViewport(probeViewport);
+            // 両方のレンダーターゲットが0でクリアされる。距離側の0は「ジオメトリ無し」を意味しないが、
+            // コピー側は深度が書かれたかどうかで判定するためこれで問題ない
             cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
             // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする。コピー側はこの0を
             // 「何も描かれなかった=スカイ」の判定に使う
@@ -3087,7 +3132,11 @@ namespace Kurenai
             cmd->SetComputeTexture(0, m_SkyboxTexture.get());
             cmd->SetComputeTexture(1, m_ProbeCaptureColor.get());
             cmd->SetComputeTexture(2, m_ProbeCaptureDepth.get());
+            cmd->SetComputeTexture(3, m_ProbeCaptureDistance.get());
             cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeRadianceCube.get(), face, 0, 0);
+            // 距離は畳み込まないため、スクラッチのキューブを経由せずプローブのスライスへ直接書く
+            cmd->SetComputeUnorderedAccessTextureCubeFace(
+                1, m_ProbeDistanceArray.get(), face, 0, static_cast<uint32_t>(probeIndex));
             cmd->Dispatch((kProbeCaptureSize + 7) / 8, (kProbeCaptureSize + 7) / 8, 1);
         };
 
@@ -3158,8 +3207,9 @@ namespace Kurenai
                     .Name = "ProbeBake" + std::to_string(probeIndex),
                     .Reads = probeCaptureReads,
                     .Writes = {
-                        m_ProbeCaptureColor.get(), m_ProbeCaptureDepth.get(), m_ProbeRadianceCube.get(),
-                        m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(),
+                        m_ProbeCaptureColor.get(), m_ProbeCaptureDistance.get(), m_ProbeCaptureDepth.get(),
+                        m_ProbeRadianceCube.get(),
+                        m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
                     },
                     .Execute = [&captureProbeFace, &convolveProbe, probeIndex](RHI::IRHICommandList* cmd)
                     {
@@ -3199,7 +3249,10 @@ namespace Kurenai
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "ProbeRealtimeCapture",
                 .Reads = probeCaptureReads,
-                .Writes = { m_ProbeCaptureColor.get(), m_ProbeCaptureDepth.get(), m_ProbeRadianceCube.get() },
+                .Writes = {
+                    m_ProbeCaptureColor.get(), m_ProbeCaptureDistance.get(), m_ProbeCaptureDepth.get(),
+                    m_ProbeRadianceCube.get(), m_ProbeDistanceArray.get(),
+                },
                 .Execute = [&captureProbeFace, realtimeProbe, realtimeFace](RHI::IRHICommandList* cmd)
                 {
                     captureProbeFace(cmd, realtimeProbe, realtimeFace);
@@ -3522,7 +3575,7 @@ namespace Kurenai
                 m_SkyboxTexture.get(), activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
                 m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
                 // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)
-                m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(),
+                m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
             .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
@@ -3552,6 +3605,7 @@ namespace Kurenai
                 cmd->SetTexture(11, m_ProbeIrradianceArray.get());
                 cmd->SetTexture(12, m_ProbePrefilteredArray.get());
                 cmd->SetShaderResourceBuffer(13, m_ProbeBuffer.get());
+                cmd->SetTexture(14, m_ProbeDistanceArray.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -3567,7 +3621,7 @@ namespace Kurenai
             // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)。
             // 半透明パスもLightingパスと同じ環境ソース(反射プローブ+グローバルIBL)を使うため、
             // 焼き上がる前のプローブを読まないようにする必要がある
-            .Reads = { m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get() },
+            .Reads = { m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get() },
             .RenderTargets = { m_SceneColor.get() },
             .DepthTarget = m_GBufferDepth.get(),
             .Execute = [this, &gbufferViewport, &gpuLights, &cameraPosition](RHI::IRHICommandList* cmd)
@@ -3630,6 +3684,7 @@ namespace Kurenai
                 cmd->SetTexture(5, m_ProbePrefilteredArray.get());
                 cmd->SetTexture(6, m_ProbeIrradianceArray.get());
                 cmd->SetShaderResourceBuffer(7, m_ProbeBuffer.get());
+                cmd->SetTexture(12, m_ProbeDistanceArray.get());
 
                 // 半透明は奥から手前への描画順そのものが正しさの前提なので並べ替えられない。
                 // そのため必要になった時点でパイプラインを切り替える(GBufferパスと同じ方式)
@@ -3683,7 +3738,7 @@ namespace Kurenai
                 .Reads = {
                     m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                     m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
-                    m_ProbePrefilteredArray.get(),
+                    m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
                 },
                 .RenderTargets = { m_SSRTexture.get() },
                 .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
@@ -3707,6 +3762,7 @@ namespace Kurenai
                     cmd->SetTexture(7, m_PrefilteredEnvTexture.get());
                     cmd->SetTexture(8, m_ProbePrefilteredArray.get());
                     cmd->SetShaderResourceBuffer(9, m_ProbeBuffer.get());
+                    cmd->SetTexture(10, m_ProbeDistanceArray.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -4000,6 +4056,12 @@ namespace Kurenai
             // Presentは通常どおり最終結果を表示するだけでよい
             presentSourceTexture = m_TonemapTexture.get();
             break;
+        case DebugView::ProbeDistance:
+            // 距離キューブ(19.12節)。格納値はワールド距離なので専用のMode 13でGain倍して
+            // グレースケール表示する(Mode 12でそのまま出すと数メートルで白飛びする)
+            presentDebugCubeArrayTexture = m_ProbeDistanceArray.get();
+            presentMode = 13;
+            break;
         case DebugView::IBLBRDFLUT:
             presentSourceTexture = m_BRDFLUTTexture.get();
             presentMode = 0; // (scale, bias)の生値をそのままRGとして表示(値域はおおむね[0,1])
@@ -4061,7 +4123,8 @@ namespace Kurenai
         }
         // ArraySliceはMode 10ではカスケード番号、Mode 12ではプローブ番号として使う。
         // プローブが1つも無い場合でも配列の範囲外を引かないようクランプする
-        if (m_DebugView == DebugView::ProbeIrradiance || m_DebugView == DebugView::ProbePrefilter)
+        if (m_DebugView == DebugView::ProbeIrradiance || m_DebugView == DebugView::ProbePrefilter ||
+            m_DebugView == DebugView::ProbeDistance)
         {
             presentConstants.ArraySlice = static_cast<float>(
                 std::clamp(m_ProbeDebugIndex, 0, std::max(0, static_cast<int32_t>(m_ReflectionProbes.size()) - 1)));
@@ -4073,7 +4136,16 @@ namespace Kurenai
         }
         // Finalの見た目は倍率の影響を受けてはならないため、デバッグ表示のときだけ倍率を掛ける
         // (Gainはゼロ初期化のままだと0倍=真っ黒になるので、必ず明示的に設定すること)
-        presentConstants.Gain = (m_DebugView == DebugView::Final) ? 1.0f : m_DebugViewGain;
+        if (m_DebugView == DebugView::ProbeDistance)
+        {
+            // 距離キューブは色ではなくワールド距離なので、Debug View Gain(1倍以上)ではなく
+            // 「白になる距離」の逆数を渡す。Present.hlsl Mode 13の式は他と同じ「値×Gain」のまま
+            presentConstants.Gain = 1.0f / std::max(m_ProbeDistanceDebugRange, 0.01f);
+        }
+        else
+        {
+            presentConstants.Gain = (m_DebugView == DebugView::Final) ? 1.0f : m_DebugViewGain;
+        }
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
         // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する

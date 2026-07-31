@@ -33,6 +33,7 @@ static const float PI = 3.14159265359f;
 #define KURENAI_PROBE_PREFILTERED_REGISTER t5
 #define KURENAI_PROBE_IRRADIANCE_REGISTER t6
 #define KURENAI_PROBE_BUFFER_REGISTER t7
+#define KURENAI_PROBE_DISTANCE_REGISTER t12
 
 cbuffer FrameConstants : register(b0)
 {
@@ -57,6 +58,8 @@ cbuffer FrameConstants : register(b0)
     // z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
     // DeferredLighting.hlslと同じ値が入っているため、半透明と不透明で環境ソースが食い違うことはない
     float4 ProbeParams;
+    // 距離キューブ用(19.12節)。意味はDeferredLighting.hlslと同じ
+    float4 ProbeParams2;
 };
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で

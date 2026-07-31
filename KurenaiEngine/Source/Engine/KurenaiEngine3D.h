@@ -378,6 +378,7 @@ namespace Kurenai
             ProbeIrradiance,    // 反射プローブの拡散イラディアンス(m_ProbeDebugIndex番のプローブ)
             ProbePrefilter,     // 反射プローブのプリフィルタ済み鏡面(ミップ0がキャプチャ結果そのもの)
             ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
+            ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -513,6 +514,10 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCapturePipelineState;
         // 1面ぶんのキャプチャ先(6面で使い回す)。HDRのままキューブへ写すためG-Bufferと違いFloat
         std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureColor;
+        // 同じキャプチャの2枚目のレンダーターゲット(SV_TARGET1)。プローブ位置から描画点までの
+        // ワールド距離をそのまま書く。深度バッファから逆算せずMRTで直に出しているのは、
+        // 面ごとの逆投影を組む必要がなくキャプチャシェーダーの1行で済むため(19.12節)
+        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDistance;
         std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDepth;
         std::unique_ptr<RHI::IRHIShader> m_ProbeCubeCopyComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCubeCopyPipelineState;
@@ -524,6 +529,12 @@ namespace Kurenai
         // 畳み込み結果(プローブごと)。DeferredLighting.hlslがTextureCubeArrayとして読む
         std::unique_ptr<RHI::IRHITexture> m_ProbeIrradianceArray;
         std::unique_ptr<RHI::IRHITexture> m_ProbePrefilteredArray;
+        // 距離キューブ(プローブごと、19.12節)。プローブ位置から各方向の被写体までのワールド距離。
+        // 放射輝度と違い畳み込まないため、キャプチャからキューブ配列へ直接書き込む
+        // (スクラッチのキューブマップを経由しない)。用途は2つ:
+        //   1. 視差補正を「箱との交差」から「実際に記録された形状との交差」へ精密化する
+        //   2. プローブから見えない位置(壁の向こう)のピクセルで重みを落とし、光漏れを抑える
+        std::unique_ptr<RHI::IRHITexture> m_ProbeDistanceArray;
         // プローブの影響範囲(位置・半径)をシェーダーへ渡すStructuredBuffer(t13)
         std::unique_ptr<RHI::IRHIBuffer> m_ProbeBuffer;
         // キャプチャの面ごとに値を更新して使い回すFrameConstants(共有のm_FrameConstantBufferとは別。
@@ -547,9 +558,25 @@ namespace Kurenai
         // プローブ間・プローブとグローバルIBLの重み付きブレンドを行うか。無効にすると
         // 「影響範囲に入る最も近い1つだけを使う」Phase 1相当の挙動になり、境界の継ぎ目を確認できる
         bool m_ProbeBlendingEnabled = true;
+        // 視差補正に距離キューブを使うか(19.12節)。無効にすると箱との交差だけで補正する
+        // 従来の挙動になる。有効時も、箱との交点を探索範囲の上限として使う点は変わらない
+        bool m_ProbeDepthParallaxEnabled = true;
+        // 距離キューブによる遮蔽判定で、プローブから見えない位置のピクセルの重みを落とすか
+        // (光漏れの抑制)。無効にすると影響範囲に入っているだけで重みが立つ従来の挙動になる。
+        //
+        // 既定でfalseなのは、プローブが疎な現状では副作用のほうが大きいため(19.12節)。
+        // 重みを落とした分はグローバルIBL(=空)が埋めるので、「プローブから見えない」だけの
+        // 場所——例えば球の真下の床——が空の色で明るくなり、影のはずの位置に白いハローが出る。
+        // 落ちた重みを別のプローブが引き取れる密度になって初めて素直に使える機能なので、
+        // 効果と副作用を見比べられるトグルとして残し、既定は従来の挙動にしてある
+        bool m_ProbeOcclusionEnabled = false;
         // デバッグ表示(Render Targets)で確認するプローブ番号とプリフィルタのミップレベル
         int32_t m_ProbeDebugIndex = 0;
         int32_t m_ProbePrefilterDebugMipLevel = 0;
+        // 距離キューブのデバッグ表示で白になる距離(メートル相当)。距離は色ではないので
+        // Debug View Gain(1〜64倍)ではなくこちらで正規化する(Present.hlsl Mode 13へは
+        // 逆数をGainとして渡す)。既定値はProbeTestのホール(24×12)が収まる程度
+        float m_ProbeDistanceDebugRange = 20.0f;
 
         // プローブの更新モード。焼き直しのコストと「シーンの変化への追従」のどちらを取るかの選択で、
         // ImGuiで切り替えて負荷と品質を比較できるようにしてある(19.10節)

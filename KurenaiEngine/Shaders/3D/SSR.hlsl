@@ -33,6 +33,9 @@ static const float kSSREdgeFadeDistance = 0.1f;
 #define KURENAI_GLOBAL_PREFILTERED_REGISTER t7
 #define KURENAI_PROBE_PREFILTERED_REGISTER t8
 #define KURENAI_PROBE_BUFFER_REGISTER t9
+// 距離キューブ(19.12節)。DeferredLighting.hlslと同じ条件でコンパイルしないと、
+// SSRが「Lightingが使ったのとは違う放射輝度」を引き算することになるため必ず定義する
+#define KURENAI_PROBE_DISTANCE_REGISTER t10
 
 cbuffer FrameConstants : register(b0)
 {
@@ -59,6 +62,8 @@ cbuffer FrameConstants : register(b0)
     float4 IBLParams;
     // 反射プローブ用。ReflectionProbe.hlsliのプローブ選択・ブレンドが読む
     float4 ProbeParams;
+    // 距離キューブ用(19.12節)。同じくReflectionProbe.hlsliが読む
+    float4 ProbeParams2;
 };
 
 cbuffer SSRConstants : register(b1)
@@ -77,8 +82,9 @@ Texture2D AOTexture : register(t5);
 // split-sum近似の第2項、BRDF積分LUT
 Texture2D BRDFLUTTexture : register(t6);
 
-// プリフィルタ済み鏡面(t7)・プローブのキューブマップ配列(t8)・プローブの影響範囲バッファ(t9)の
-// 宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みはReflectionProbe.hlsliが持つ
+// プリフィルタ済み鏡面(t7)・プローブのキューブマップ配列(t8)・プローブの影響範囲バッファ(t9)・
+// プローブの距離キューブ(t10)の宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みは
+// ReflectionProbe.hlsliが持つ
 #include "ReflectionProbe.hlsli"
 
 struct PSInput
