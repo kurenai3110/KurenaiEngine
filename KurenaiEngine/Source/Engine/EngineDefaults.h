@@ -59,6 +59,12 @@ namespace Kurenai::Defaults
     inline constexpr bool ReflectionProbeEnabled = true;
     inline constexpr bool ProbeParallaxCorrectionEnabled = true;
     inline constexpr bool ProbeBlendingEnabled = true;
+    // 距離キューブを使う2つの機能(19.12節)。どちらも実装・検証は済んでいるが、プローブが疎な
+    // 現状では副作用のほうが大きいため既定は無効。理由はKurenaiEngine3D.hの各メンバのコメント参照
+    inline constexpr bool ProbeDepthParallaxEnabled = false;
+    inline constexpr bool ProbeOcclusionEnabled = false;
+    // 距離キューブのデバッグ表示で白飽和する距離。ProbeTestのホール(24×12)が収まる程度
+    inline constexpr float ProbeDistanceDebugRange = 20.0f;
 
     // --- トーンマップ / ディザ ---
     inline constexpr bool DitherEnabled = true;

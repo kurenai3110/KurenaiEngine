@@ -56,10 +56,30 @@ namespace Kurenai::UI
             Defaults::ProbeParallaxCorrectionEnabled,
             "Box形状のときのみ有効。反射ベクトルを箱と交差させることで、プローブの中心から離れた"
             "場所でも反射の位置が合うようにする");
+
+        // 視差補正の方式(19.12節)。上のトグルが有効なときだけ意味を持つ
+        ImGui::BeginDisabled(!m_Engine.m_ProbeParallaxCorrectionEnabled);
+        ImGui::Indent();
+        CheckboxEx(
+            "距離キューブを使う###ProbeDepthParallax", &m_Engine.m_ProbeDepthParallaxEnabled,
+            Defaults::ProbeDepthParallaxEnabled,
+            "部屋を直方体とみなす代わりに、キャプチャ時に一緒に焼いた距離を辿って実際の形状へ"
+            "反射を当てる。交差が見つからなければ箱の交点へフォールバックする。\n"
+            "強く曲がった鏡面で反射像が二重に割れるのが軽減される一方、距離の解像度に由来する"
+            "階段状のエッジが乗るため既定は無効");
+        ImGui::Unindent();
+        ImGui::EndDisabled();
+
         CheckboxEx(
             "プローブのブレンド###ProbeBlending", &m_Engine.m_ProbeBlendingEnabled, Defaults::ProbeBlendingEnabled,
             "影響範囲の境界から内側へブレンド距離ぶんかけて重みを立ち上げる。"
             "無効にすると最も近いプローブだけを使うため、境界に継ぎ目が出る");
+        CheckboxEx(
+            "遮蔽判定(光漏れの抑制)###ProbeOcclusion", &m_Engine.m_ProbeOcclusionEnabled,
+            Defaults::ProbeOcclusionEnabled,
+            "プローブから見て記録面より奥にあるピクセル(=壁の向こう)で、そのプローブの重みを落とす。\n"
+            "ただしプローブが少ないうちは落ちた重みをより明るい空由来のIBLが埋めるため、"
+            "物体の真下が逆に明るくなることがあり既定は無効");
 
         // 更新モード。焼き直しのコストとシーンの変化への追従はトレードオフの関係にあり、
         // プロファイラの ProbeBakeN / ProbeRealtimeCapture / ProbeRealtimeConvolve と

@@ -23,6 +23,9 @@ Sponzaは非金属・中〜高ラフネスのマテリアルばかりで鏡面�
   そこに硬い継ぎ目が出る
 - 視差補正: 鏡面の床に壁のエミッシブ帯が映る。補正が効いていれば帯の反射は帯の真下へ接地し、
   切ると壁から浮いてずれる
+- 半透明パスのプローブ適用(19.11節): 各室に立てたガラス板は半透明フォワードパスで描かれ、
+  SSRが適用されないため環境ソースが唯一の映り込みになる。金属球と同様、プローブを切ると
+  密閉された西室のガラスにも空が映る
 
 ライトとプローブ自体はモデルではなくScenes/ProbeTest.kscene側で配置する(数値を触りながら
 確認しやすくするため)。このスクリプトが吐くのはジオメトリとマテリアルだけ。
@@ -62,6 +65,20 @@ LON_SEGMENTS = 32
 SPHERE_RADIUS = 0.7
 SPHERE_X = [-9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0]
 SPHERE_ROUGHNESS = 0.05
+
+# --- 半透明のガラス板 ---
+# 板の向き(法線のXZ平面上の方位)は、初期カメラからの入射角がおよそ60度になるように選んである。
+# 正面(入射角0度)だと非金属のフレネル反射はF0=0.04と弱く映り込みがほとんど読めず、逆に
+# 真横(90度近く)だと反射は最も強くなるが画面上ではただの細い線にしかならない。
+# 60度前後が「面として見えて、かつ映り込みが読める」両立点になる
+GLASS_YAW_DEG = 70.0
+GLASS_HALF_LENGTH = 2.5
+GLASS_MIN_Y = 0.6
+GLASS_MAX_Y = 4.6
+GLASS_ROUGHNESS = 0.05
+GLASS_ALPHA = 0.18
+# 西室・東室で同じ向き・同じ大きさの板を、ホール中心から等距離の位置へ置く
+GLASS_CENTERS = {"West": (-7.0, -3.0), "East": (7.0, -3.0)}
 
 # --- エミッシブ帯(視差補正の基準線を兼ねる) ---
 STRIPE_HALF_WIDTH = 0.5
@@ -215,7 +232,7 @@ def main():
         })
         return mesh_index
 
-    def add_material(name, roughness, metallic, base_color, emissive=None):
+    def add_material(name, roughness, metallic, base_color, emissive=None, alpha_mode=None):
         index = len(materials)
         material = {
             "name": name,
@@ -225,6 +242,10 @@ def main():
                 "roughnessFactor": roughness,
             },
         }
+        if alpha_mode is not None:
+            # "BLEND"を指定したマテリアルはパッカーがIsTransparent=trueで出力し、
+            # エンジン側で半透明フォワードパス(Transparent.hlsl)へ回る
+            material["alphaMode"] = alpha_mode
         if emissive is not None:
             # G-BufferのエミッシブバッファがR8G8B8A8_UNorm(KurenaiEngine3D.cpp)で[0,1]に
             # クランプされるため、1.0を超える値は指定しない。ここでのエミッシブは室内を照らす
@@ -258,6 +279,12 @@ def main():
     cool_stripe_material = add_material(
         "StripeCool", 0.9, 0.0, [0.01, 0.01, 0.02, 1.0], emissive=[0.15, 0.65, 1.0])
     sphere_material = add_material("SphereMetal", SPHERE_ROUGHNESS, 1.0, [0.95, 0.95, 0.95, 1.0])
+    # 半透明のガラス板(19.11節)。半透明フォワードパスにはSSRが適用されないため、ガラスにとっては
+    # 環境ソースが唯一の映り込みになる。ほぼ無色透明(alpha=0.18)にしてあるので、見えるものの
+    # 大半は「反射している環境そのもの」になり、プローブの有無が最も素直に現れる。
+    # 金属球と同じく西室・東室で同一マテリアルを使い、見た目の違いがプローブ由来だけになるようにする
+    glass_material = add_material(
+        "Glass", GLASS_ROUGHNESS, 0.0, [0.85, 0.90, 0.92, GLASS_ALPHA], alpha_mode="BLEND")
 
     x0, x1 = HALL_MIN_X, HALL_MAX_X
     z0, z1 = HALL_MIN_Z, HALL_MAX_Z
@@ -348,6 +375,20 @@ def main():
             "translation": [x, SPHERE_RADIUS + 0.1, 0.0],
         })
 
+    # ==== 半透明のガラス板 ====
+    # generate_quad_double_sidedが裏面も張るため、反対側から見ても消えない
+    glass_yaw = math.radians(GLASS_YAW_DEG)
+    glass_normal = (math.cos(glass_yaw), 0.0, math.sin(glass_yaw))
+    # 板が伸びる向きは、法線とXZ平面上で直交する向き
+    along_x = math.sin(glass_yaw) * GLASS_HALF_LENGTH
+    along_z = -math.cos(glass_yaw) * GLASS_HALF_LENGTH
+    for label, (gcx, gcz) in GLASS_CENTERS.items():
+        add_quad(
+            f"Glass{label}",
+            [(gcx - along_x, GLASS_MIN_Y, gcz - along_z), (gcx + along_x, GLASS_MIN_Y, gcz + along_z),
+             (gcx + along_x, GLASS_MAX_Y, gcz + along_z), (gcx - along_x, GLASS_MAX_Y, gcz - along_z)],
+            glass_normal, glass_material)
+
     total_length = len(buffer_bytes)
     bin_path = os.path.join(OUT_DIR, BIN_NAME)
     with open(bin_path, "wb") as bin_file:
@@ -372,6 +413,7 @@ def main():
     print(f"nodes={len(nodes)} meshes={len(meshes)} materials={len(materials)} buffer_bytes={total_length}")
     print(f"hall = x[{x0}, {x1}] y[0, {h}] z[{z0}, {z1}], partition at x={PARTITION_X}")
     print(f"spheres={len(SPHERE_X)} (metallic=1.0, roughness={SPHERE_ROUGHNESS})")
+    print(f"glass panes={len(GLASS_CENTERS)} (alphaMode=BLEND, alpha={GLASS_ALPHA}, roughness={GLASS_ROUGHNESS}, yaw={GLASS_YAW_DEG}deg)")
     print(f"wrote {gltf_path}")
     print(f"wrote {bin_path}")
 

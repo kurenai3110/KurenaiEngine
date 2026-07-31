@@ -24,6 +24,17 @@
 
 static const float PI = 3.14159265359f;
 
+// 反射プローブ(19章)の環境ソースと鏡面IBLの重み。DeferredLighting.hlsl・SSR.hlslと同じ定義を
+// 共有する。空きスロットが違うだけでレジスタ番号は各シェーダーが決める(ReflectionProbe.hlsli冒頭)。
+// このパスはt0〜t4とt8〜t11を既に使っているため、空いているt5〜t7を割り当てる。
+// #include自体はFrameConstantsとSamplers.hlsliの宣言より後で行う必要があるため下にある
+#define KURENAI_GLOBAL_IRRADIANCE_REGISTER t9
+#define KURENAI_GLOBAL_PREFILTERED_REGISTER t10
+#define KURENAI_PROBE_PREFILTERED_REGISTER t5
+#define KURENAI_PROBE_IRRADIANCE_REGISTER t6
+#define KURENAI_PROBE_BUFFER_REGISTER t7
+#define KURENAI_PROBE_DISTANCE_REGISTER t12
+
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProj;
@@ -40,9 +51,15 @@ cbuffer FrameConstants : register(b0)
     // 半透明パス専用。x=t8のライトリストの有効数(DirectLighting.hlsl側のLightingConstants.LightCount.xと
     // 同じ値)。他のシェーダーはこのフィールドを宣言していないため、末尾に追加してもオフセットは変わらない
     float4 ActiveLightCount;
-    // x: 拡散イラディアンスの取得元(0=専用イラディアンスマップ(t9)、1=プリフィルタ済み鏡面の
-    // 最終ミップ)。EvaluateIBLSplit参照。yzwは未使用
+    // x: 拡散イラディアンスの取得元(0=プリフィルタ済み鏡面の最終ミップ、1=専用イラディアンスマップ)。
+    // ReflectionProbe.hlsliのSampleGlobalIrradiance/SampleProbeIrradiance参照。yzwは未使用
     float4 IBLParams;
+    // 反射プローブ用(19章)。x=有効プローブ数、y=影響範囲のデバッグ表示フラグ(このパスでは未使用)、
+    // z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
+    // DeferredLighting.hlslと同じ値が入っているため、半透明と不透明で環境ソースが食い違うことはない
+    float4 ProbeParams;
+    // 距離キューブ用(19.12節)。意味はDeferredLighting.hlslと同じ
+    float4 ProbeParams2;
 };
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で
@@ -82,10 +99,13 @@ Texture2D EmissiveTexture : register(t3);
 // FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)とDataSamplerを参照するため、
 // それらの宣言より後でインクルードする必要がある
 #include "ShadowSampling.hlsli"
-// IBL(14章)。DeferredLighting.hlslと同じ3枚をこのパスにもバインドする。半透明パスにはSSRが
-// 適用されないため、ガラスにとってはこのIBLが唯一の環境の映り込みになる
-TextureCube IrradianceTexture : register(t9);
-TextureCube PrefilteredEnvTexture : register(t10);
+// IBL(14章)と反射プローブ(19章)。グローバルIBLのイラディアンス(t9)/プリフィルタ済み鏡面(t10)と、
+// プローブのキューブマップ配列(t5/t6)・影響範囲バッファ(t7)の宣言、およびプローブの選択・
+// 視差補正・ブレンドはReflectionProbe.hlsliが持つ(DeferredLighting.hlslと共有)。
+//
+// 半透明パスにはSSRが適用されないため、ガラスにとっては環境ソースが唯一の映り込みになる。
+// 以前はここがグローバルIBL固定で、密閉された室内のガラスにも空が映っていた
+#include "ReflectionProbe.hlsli"
 Texture2D BRDFLUTTexture : register(t11);
 
 struct VSInput
@@ -172,40 +192,47 @@ void EvaluateDirectBRDF(
 
 // DeferredLighting.hlslのEvaluateIBLと同じ式(split-sum近似、Karis 2013)。ただし事前乗算済み
 // アルファ出力(PSMain末尾のコメント参照)のために拡散項と鏡面項を分けて返す。
-// 半透明パスはAO/GIバッファを持たない(常にao=1)ため、EvaluateIBL側のスペキュラオクルージョンは
-// 常に1になり、ここでは計算そのものを省いている
+//
+// 環境ソース(拡散イラディアンス・プリフィルタ済み鏡面)は不透明側とまったく同じSampleEnvironmentで
+// 求める。これにより反射プローブ・視差補正・ブレンド・イラディアンスの取得元切り替えの規則が
+// 半透明と不透明で食い違うことがなくなる。
+// IBL強度倍率(ShadowParams.z)はこの関数の中で掛け切る(呼び出し側では掛けない)
 void EvaluateIBLSplit(
-    float3 N, float3 V, float3 albedo, float metallic, float roughness,
+    float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness,
     out float3 outDiffuse, out float3 outSpecular)
 {
     const float NdotV = saturate(dot(N, V));
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
 
+    const float3 R = reflect(-V, N);
+    // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(KurenaiEngine3D側で設定)
+    const float mipLevel = roughness * ShadowParams.y;
+
+    float3 irradiance;
+    float3 prefiltered;
+    SampleEnvironment(worldPos, N, R, mipLevel, irradiance, prefiltered);
+
     // --- 拡散IBL ---
-    // 既定はプリフィルタ済み鏡面の最終ミップ(roughness=1)。IBLParams.x=1のときだけ従来の
-    // 専用イラディアンスマップを引く(検証用に残している経路)。詳細な根拠は
-    // DeferredLighting.hlslのEvaluateIBLの同じ箇所を参照(14.10節)。半透明だけ取得元が
-    // 食い違わないよう、必ず不透明側と同じ切り替えを行う
-    const float3 irradiance = (IBLParams.x > 0.5f)
-        ? IrradianceTexture.Sample(MaterialSampler, N).rgb
-        : PrefilteredEnvTexture.SampleLevel(MaterialSampler, N, ShadowParams.y).rgb;
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")
     const float3 fresnelRoughness =
         F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
     const float3 kd = (1.0f - fresnelRoughness) * (1.0f - metallic);
 
     // --- 鏡面IBL(split-sum近似) ---
-    const float3 R = reflect(-V, N);
-    // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(KurenaiEngine3D側で設定)
-    const float mipLevel = roughness * ShadowParams.y;
-    const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
     const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
+    // 半透明パスはAO/GIバッファを持たないため常にao=1。このときSpecularIBLWeight内の
+    // スペキュラオクルージョンは saturate(pow(NdotV + 1, e)) となり、底が1以上・指数が正なので
+    // 必ず1へ飽和する。つまり不透明側と同じ関数をそのまま使っても式は変わらない
+    // (以前ここでスペキュラオクルージョンの計算を省いていたのと結果は同じ)
+    const float3 specularWeight =
+        SpecularIBLWeight(F0, NdotV, roughness, 1.0f, brdf, ShadowParams.w, ShadowParams.z);
 
-    // 昼度による減衰はしない(DeferredLighting.hlsl の EvaluateIBL と同じ理由)。
-    // 手続き空が太陽高度に応じて自分で暗くなるため、ここで掛けると二重に暗くなる
-    outDiffuse = kd * albedo * irradiance;
-    outSpecular = prefiltered * (F0 * brdf.x + brdf.y)
-        * SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
+    // 【昼度(AmbientColor.a)による減衰はしない】DeferredLighting.hlslのEvaluateIBLと同じ理由で、
+    // 手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなるため、ここで掛けると
+    // 二重に暗くなる(21.4節)。
+    // 鏡面側のShadowParams.z(IBL強度倍率)はspecularWeightに含まれている
+    outDiffuse = kd * albedo * irradiance * ShadowParams.z;
+    outSpecular = prefiltered * specularWeight;
 }
 
 float DistanceAttenuation(float distSq, float range)
@@ -348,7 +375,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         directSpecular += lightSpecular;
     }
 
-    // 環境光。半透明パスにはSSRが適用されないため、ガラスにとってはこのIBLが唯一の
+    // 環境光。半透明パスにはSSRが適用されないため、ガラスにとってはこの環境ソースが唯一の
     // 「環境の映り込み」になる。デルタ光源(太陽・ポイント/スポット)のスペキュラだけでは、
     // 低ラフネスのガラスは正反射条件を満たす極めて狭い帯にしかハイライトが出ず、
     // 透明なだけの面に見えてしまう。
@@ -359,9 +386,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 ambientSpecular;
     if (ShadowParams.z > 0.0f)
     {
-        EvaluateIBLSplit(N, V, albedo, metallic, roughness, ambientDiffuse, ambientSpecular);
-        ambientDiffuse *= ShadowParams.z;
-        ambientSpecular *= ShadowParams.z;
+        // ShadowParams.zはEvaluateIBLSplitの中で拡散・鏡面それぞれに掛かっている
+        EvaluateIBLSplit(N, V, input.WorldPos, albedo, metallic, roughness, ambientDiffuse, ambientSpecular);
     }
     else
     {

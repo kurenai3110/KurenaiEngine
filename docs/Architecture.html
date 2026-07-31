@@ -2557,6 +2557,13 @@ BRDF積分LUT)をこのパスにもバインドし(<code>t9</code>/<code>t10</co
 <code>EvaluateIBL</code>側のスペキュラオクルージョンは常に1になり、計算そのものを省いている。
 </p>
 <p>
+<b>【後日更新】</b>環境ソースはその後<a href="#reflectionprobe">19章</a>11節で
+<code>ReflectionProbe.hlsli</code>の<code>SampleEnvironment</code>へ寄せ、反射プローブに対応させた。
+上記のグローバルIBL固定は、密閉された室内のガラスにも空が映るという形で実際に破綻していた。
+省いていたスペキュラオクルージョンは<code>ao=1</code>のとき<b>厳密に1</b>になることが確認できたため、
+不透明側と同じ<code>SpecularIBLWeight</code>をそのまま呼ぶ形に統一してある(19.11節)。
+</p>
+<p>
 このバインドにより半透明パスが使うSRVスロットはマテリアル4枚 + シャドウ4枚 + ライトリスト +
 IBL 3枚の計12個になったため、DX12のルートシグネチャの
 <code>kTextureSlotCount</code>を11から12へ引き上げた
@@ -3243,6 +3250,16 @@ RHIへの追加(<code>CreateMippedUAVTextureCubeArray</code>、
 定数バッファは<strong><code>FrameConstants</code>の宣言を一切変えずに</strong>、このパス専用のバッファへ
 視点に関わる値だけを差し替えて渡している。
 </p>
+<p>
+<strong>空は「このフレームで実際に使う空」を渡すこと。</strong>ジオメトリが描かれなかったテクセルは
+<code>CSCopyCaptureToCubeFace</code>が空で埋める(19.2節)が、その入力を
+<code>m_SkyboxTexture</code>(<code>.kscene</code>のDDS)に固定すると、手続き空
+(<a href="#procedural-sky">21章</a>)が有効なシーンで<strong>プローブにだけ古い空が焼き込まれ</strong>、
+本編の背景と食い違う。<code>ActiveSkyTexture()</code>がフレーム冒頭に確定させた
+<code>skyTexture</code>を使う。これはレンダーグラフの依存としても正しく、手続き空のときは
+<code>SkyGenerate</code>パスがそのテクスチャのWriterになるため、ベイクが空の焼き直しより
+自動的に後ろへ順序付けられる(<code>probeCaptureReads</code>にも同じものを挙げてある)。
+</p>
 <table>
 <tr><th>フィールド</th><th>渡す値</th><th>理由</th></tr>
 <tr><td><code>ViewProj</code></td><td>プローブのその面のビュー・プロジェクション</td><td>ラスタライズ用</td></tr>
@@ -3396,7 +3413,9 @@ ImGuiの「Parallax Correction」「Probe Blending」(<code>ProbeParams.z</code>
 <ul>
 <li>Boxの回転は<strong>Y軸まわりのみ</strong>。傾いた床・天井を持つ空間は想定していない</li>
 <li><strong>影響範囲の箱と視差補正の投影ボックスを分離できない</strong>(19.7節)。
-壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある</li>
+壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある。
+ただし19.12節の距離キューブを使う設定では、箱は「探索範囲の上限」にしか使われなくなるため
+この制約の影響は小さくなる</li>
 <li>更新モードはBaked / OnDemand / Realtimeの3種(19.10節)。ただし<strong>時間分割できているのは
 キャプチャだけで、畳み込みは分散できていない</strong>。キャプチャが0.02 msなのに対し畳み込みは
 約14 msあるため、Realtimeでも6フレームに1回そのスパイクが乗る</li>
@@ -3410,8 +3429,13 @@ SSRが判定できなかった領域(画面外・最大距離まで判定不能)
 位置のプローブを焼くとシャドウマップの範囲外になり影が落ちない。プローブは視界内で焼く前提</li>
 <li>プローブ数の上限は8(<code>kMaxReflectionProbes</code>)。<code>TextureCubeArray</code>は実行時に
 伸縮できないため固定容量で確保している。超過分は警告ログを出して切り捨てる</li>
-<li>半透明フォワードパス(<a href="#transparent">15章</a>)はプローブに対応しておらず、
-グローバルIBLのみを使う</li>
+<li>半透明フォワードパス(<a href="#transparent">15章</a>)も19.11節でプローブへ対応させた。ただし
+<strong>半透明メッシュ自体はプローブへ焼かない</strong>(19.11節)ため、ガラス越しの景色は
+プローブのキューブマップには残らない</li>
+<li>屈折は非対応。<code>refract()</code>でプローブを引くこと自体は容易だが、半透明パスは
+事前乗算アルファで背景と合成しており背景は既にブレンドで透けて見えている。そこへ透過色を足すと
+同じ景色が二重に映る。正しく扱うには不透明描画後の<code>SceneColor</code>をコピーして歪めて
+サンプルするスクリーンスペース屈折が必要で、パス構成そのものの変更になる</li>
 </ul>
 
 <h3>19.9 検証シーン(Reflection Probe Test)</h3>
@@ -3430,8 +3454,8 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
     │   西室(密閉)     ▓  東室     │
     │   暖色の壁+ポイント▓ 寒色の壁  │
     │   ライト+エミッシブ▓ +太陽光   │
-    │  ●   ●   ●   ●   ●   ●   ●  │  ← 金属球列(metallic=1.0, roughness=0.05)
-    └───────────────────┴───────────┘  y=0
+    │  ●   ●  ▨ ●   ●   ● ▨ ●   ●  │  ← ● 金属球列(metallic=1.0, roughness=0.05)
+    └───────────────────┴───────────┘  y=0     ▨ 半透明のガラス板(alphaMode=BLEND)
    x=-12                x=0        x=+12
             床 = 磨いた石(非金属, roughness=0.06)</code></pre>
 
@@ -3444,6 +3468,11 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 <td>環境ソースがプローブからグローバルIBLへ落ちること(19.1節)</td>
 </tr>
 <tr>
+<td>同上。<strong>ガラス板</strong>を見る</td>
+<td>暖色の壁とエミッシブ帯を映していたガラスが<strong>一様な空色</strong>になる</td>
+<td>半透明フォワードパスへのプローブ適用(19.11節)</td>
+</tr>
+<tr>
 <td>Probe Blending を切る</td>
 <td>開口部付近で反射色が<strong>不連続に切り替わる</strong></td>
 <td><code>SelectNearestProbe</code>経路と重み付き合成の差(19.7節)</td>
@@ -3452,6 +3481,22 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 <td>Parallax Correction を切る</td>
 <td>床に映るエミッシブ帯が、個々の帯ではなく<strong>連続した滲みになって壁の接地点からずれる</strong></td>
 <td><code>ParallaxCorrectDirection</code>(19.7節)</td>
+</tr>
+<tr>
+<td>Use Depth Cube を入れる(既定は無効)</td>
+<td>開口部付近の球で、二重に割れていた暖色の弧が<strong>1本にまとまる</strong>。
+代わりに反射像へ<strong>テクセルの階段状のエッジ</strong>が乗る</td>
+<td><code>ParallaxCorrectDirectionDepth</code>(19.12節)</td>
+</tr>
+<tr>
+<td>Occlusion (Reduce Light Leak) を入れる</td>
+<td>球の真下の床が<strong>逆に明るくなる</strong>(重みが落ちた分をより明るい空IBLが埋めるため)</td>
+<td>プローブが疎なときの遮蔽判定の副作用(19.12節)</td>
+</tr>
+<tr>
+<td>Render Targets &rarr; Probe - Distance</td>
+<td>プローブから見た距離のグレースケール。真下の床が最も暗く、妻壁が中間調</td>
+<td>距離キューブのキャプチャ(19.12節)</td>
 </tr>
 <tr>
 <td>Render Targets &rarr; Probe - Influence</td>
@@ -3493,6 +3538,11 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 読み取れなくなる</li>
 <li><code>ScreenSpaceReflection = false</code>をシーン側で指定している。SSRもプローブと同じく
 「環境の反射」を足すため、両方効いていると差の切り分けができない</li>
+<li><strong>ガラス板の向きは初期カメラからの入射角がおよそ60度になるように決めてある</strong>。
+非金属のフレネル反射は正面(入射角0度)ではF0=0.04と弱く映り込みがほとんど読めない一方、
+真横に近づけると反射は最も強くなるが画面上ではただの細い線にしかならない。実際、最初は板を
+壁と平行に置いて入射角79度になり、効果は出ているのに<strong>数ピクセル幅のスリット</strong>としてしか
+見えなかった。60度前後が「面として見えて、かつ映り込みが読める」両立点になる</li>
 </ul>
 
 <h4>面の巻き順を機械的に決めている理由</h4>
@@ -3534,11 +3584,19 @@ ImGuiの「Update Mode」で3方式を切り替えて比較できるようにし
 <h4>OnDemandの変化検出</h4>
 <p>
 <code>ComputeProbeBakeSignature</code>が、焼き上がりに影響する値
-(時刻・太陽の方位角・太陽/シャドウの有効フラグ・IBL強度・全ライトのパラメータ・プローブ位置)から
+(時刻・太陽の方位角・太陽/シャドウの有効フラグ・月の方位角/仰角・IBL強度・手続き空の有効フラグ・
+自発光の強度倍率・全ライトのパラメータ・プローブ位置)から
 FNV-1aの64bitハッシュを作る。毎フレームの署名と、最後にフルベイクした時点の署名を突き合わせる。
 影響範囲(形状・半径・<code>BoxExtents</code>・<code>BlendDistance</code>)は<strong>含めない</strong> ――
 どこから撮るかを変えないため焼き直しが不要だからである(19.6節)。
 衝突しても起きるのは「本来必要な焼き直しを1回取りこぼす」だけなので、この程度の強度で足りる。
+</p>
+<p>
+<strong>月と手続き空(<a href="#procedural-sky">21章</a>)を後から取り込んだ際、この署名へ追加が要った。</strong>
+月の方位角・仰角は<strong>時刻に連動せず手動指定</strong>なので、太陽の値をいくら混ぜても検出できない。
+太陽が沈むと平行光源1枠が月へ切り替わり(21.4節)、キャプチャの直接光がそのまま変わるため、
+月を動かしたら焼き直す必要がある。手続き空の有効フラグも、切り替えると空そのものが
+<code>.kscene</code>のDDSと入れ替わるので同様である。
 </p>
 
 <h4>時間分割の状態機械</h4>
@@ -3584,6 +3642,225 @@ GPUプロファイラで1プローブぶんのコストが読める。各パス�
 実用的な改善方向は、時間分割の粒度を「面」ではなく「畳み込みのディスパッチ」まで細かくするか、
 畳み込み自体のサンプル数・解像度を下げることになる。現時点では未実装。
 </p>
+
+<h3>19.11 半透明フォワードパスへの適用</h3>
+<p>
+プローブを入れた当初、<a href="#transparent">15章</a>の半透明フォワードパスは
+グローバルIBL(<code>IrradianceTexture</code> / <code>PrefilteredEnvTexture</code>)を直接引いたままだった。
+これは不透明面より問題が大きい。半透明パスには<strong>SSRが適用されない</strong>ため、
+ガラスにとっては環境ソースが<strong>唯一の映り込み</strong>だからである。実際、Reflection Probe Testの
+密閉された西室にガラス板を置くと、屋内なのに一様な空色を映していた。
+</p>
+<p>
+対処は<code>Transparent.hlsl</code>を<code>ReflectionProbe.hlsli</code>へ寄せて、不透明側
+(<code>DeferredLighting.hlsl</code>)とまったく同じ<code>SampleEnvironment</code>を呼ぶようにするだけである。
+これでプローブの選択・視差補正・ブレンド・イラディアンスの取得元切り替えの規則が、
+半透明と不透明で食い違わなくなる。
+</p>
+
+<h4>レジスタの割り当て</h4>
+<p>
+共有ヘッダーのレジスタ番号はインクルードする側がマクロで与える方式なので(19.7節)、
+このパスで空いているスロットをそのまま使える。半透明パスは<code>t0</code>&ndash;<code>t4</code>と
+<code>t8</code>&ndash;<code>t11</code>を使っているため、<strong><code>t5</code>&ndash;<code>t7</code>が空いていた</strong>。
+DX12のルートシグネチャは<code>t0</code>&ndash;<code>t13</code>を張っているので、RHIの拡張は不要だった。
+</p>
+<table>
+<tr><th>スロット</th><th>Lightingパス</th><th>半透明パス</th></tr>
+<tr><td>グローバルIBL(イラディアンス / プリフィルタ)</td><td>t8 / t9</td><td>t9 / t10</td></tr>
+<tr><td>プローブ(プリフィルタ / イラディアンス)</td><td>t12 / t11</td><td>t5 / t6</td></tr>
+<tr><td>プローブの影響範囲バッファ</td><td>t13</td><td>t7</td></tr>
+</table>
+
+<h4>スペキュラオクルージョンは省略ではなく等価</h4>
+<p>
+以前の<code>EvaluateIBLSplit</code>は「半透明パスはAO/GIバッファを持たないので
+スペキュラオクルージョンは常に1になる」として計算を省いていた。共有ヘッダーの
+<code>SpecularIBLWeight</code>へ寄せるにあたってこれを確認したところ、<strong>省略ではなく厳密に等価</strong>だった。
+</p>
+<pre><code>specularOcclusion = saturate(pow(NdotV + ao, e) - 1 + ao)   // e = exp2(-16 * roughness - 1) &gt; 0
+ao = 1 のとき → saturate(pow(NdotV + 1, e))
+NdotV + 1 ∈ [1, 2] かつ e &gt; 0 なので pow(...) ≥ 1 → saturate で必ず 1</code></pre>
+<p>
+したがって<code>ao=1</code>を渡して同じ関数を呼べば式は変わらない。分岐やコピーを残す理由がないので、
+係数の定義は<a href="#ssrprobe">20章</a>のとおり1か所のままにできた。
+</p>
+
+<h4>半透明メッシュはプローブへ焼かない</h4>
+<p>
+<code>ProbeCapture.hlsl</code>は全メッシュを<strong>不透明として</strong>描く。半透明メッシュをそのまま
+焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに残り、その裏にある本来映るべき
+景色が欠ける。半透明を正しく焼くにはキャプチャ側にも奥から手前への描画順とブレンドが必要で、
+コストに見合わない。そのためキャプチャのループで<code>mesh.IsTransparent</code>のメッシュを飛ばしている
+(プローブに半透明を含めないのは一般的な割り切り)。
+</p>
+
+<h4>副産物: DX11のSRVスロット追跡数がDX12と食い違っていた</h4>
+<p>
+<code>DX11CommandList::kTextureSlotCount</code>が12のまま(DX12は14)になっていた。この値は
+<code>m_BoundPixelSrvs</code>(<a href="#rhi-binding">16章</a>)の要素数で、
+<code>UnbindPixelSrvForResource</code>が「UAVで書く直前に同じリソースのSRVを明示的に外す」ために使う。
+12のままだと<strong>プローブが張る<code>t12</code>/<code>t13</code>が追跡から漏れ</strong>、
+プローブのベイクがUAVで書き込む際のSRVアンバインドがドライバ任せ(警告付きの自動アンバインド)に
+なっていた。<code>SetTexture</code>自体は範囲外スロットも素通しするため描画結果には現れず、
+コメントが「DX12と同じ値にしておくこと」と明記していたにもかかわらず見落とされていたもの。14へ揃えた。
+</p>
+
+<h3>19.12 距離キューブ(視差補正の精密化と遮蔽判定)</h3>
+<p>
+19.7節の視差補正は<strong>「部屋が直方体である」という仮定</strong>に立っている。実際の形状が箱から
+ずれているほど反射像がずれ、強く曲がった鏡面(Reflection Probe Testの金属球)では
+<strong>同じ景色が二重に映る</strong>形で現れる。これを実形状に当てられるようにするため、
+キャプチャ時に色だけでなく<strong>プローブから各方向の被写体までの距離</strong>も焼く。
+</p>
+
+<h4>何をどう格納するか</h4>
+<p>
+キャプチャパスを<strong>MRT 2枚</strong>にし、<code>SV_TARGET1</code>へ
+<code>length(input.WorldPos - CameraPosition.xyz)</code>を出す
+(<code>ProbeCapture.hlsl</code>の<code>CameraPosition</code>にはプローブのワールド座標が入っている
+ため、これがそのまま求める距離になる)。深度バッファから逆算せずMRTで直に出しているのは、
+面ごとの逆投影を組む必要がなく1行で済むためである。
+</p>
+<p>
+格納先は<code>R32_Float</code>の<code>TextureCubeArray</code>(128&sup2; &times; 6面 &times; 8枚 = <strong>3.1 MB</strong>)。
+放射輝度と違い<strong>畳み込まない</strong>ので、スクラッチのキューブマップ(19.2節)を経由せず、
+<code>CSCopyCaptureToCubeFace</code>が<code>u1</code>へプローブのスライスへ直接書き込む。
+ジオメトリが無かった方向には十分大きな値(<code>kProbeSkyDistance = 1e6</code>)を入れておくことで、
+「その向きには何も無い」が交差判定にも遮蔽判定にも自然に効く。
+</p>
+<p>
+サンプラーは<strong><code>DataSampler</code>(Point)</strong>を使う。これは色ではなく<b>データ</b>だからで、
+補間するとシルエットを跨いだタップが実在しない中間距離を作り、そこから求めた交点も遮蔽判定も
+どのジオメトリにも対応しない偽の値になる(<code>Samplers.hlsli</code>の区分に従う)。
+</p>
+
+<h4>視差補正: キューブマップ版のリリーフマッピング</h4>
+<p>
+反射ベクトルRに沿って点を進めながら、<strong>「プローブからその点までの距離」</strong>と
+<strong>「その方向にプローブが記録している距離」</strong>を比べ、後者を追い越した区間を二分探索で詰める
+(等間隔8ステップ + 二分探索4回 = 12タップ)。
+</p>
+<p>
+探索範囲の上限には<strong>箱との交点をそのまま使う</strong>。箱は部屋に合わせて置かれているので
+その外側まで探しても意味が無いうえ、<strong>交差が見つからなかったときのフォールバックが
+自動的に「従来の箱による補正」になる</strong>という利点がある。そのため
+<code>ProbeBoxExitDistance</code>を切り出し、箱版と深度版が同じ交点計算を共有する形にしてある。
+</p>
+<p>
+コストが要るのは低ラフネス面だけだが、実測では<strong>GPUフレーム時間が有効/無効で区別できなかった</strong>
+(3.767 ms / 3.772 ms、1280&times;720・プローブ2個)。
+</p>
+<p>
+<strong>ただしこれも既定では無効にしてある。</strong>二重像は確かに軽減される(下の検証参照)が、
+引き換えにレイマーチの結果へ<strong>距離キューブのテクセルの階段状のエッジ</strong>が乗る。
+実機で見比べた結果「全体として良くなったとは言えない」という判断になったため、
+既定は従来の箱による補正のままにし、比較用のトグルとして残してある。
+式そのものは正しく動いており(距離キューブの値は幾何的な距離と一致している)、
+解像度を上げるか2次モーメントを持って確率的に扱えば伸ばせる余地はある。
+</p>
+
+<h4>遮蔽判定(光漏れの抑制)と、それが既定で無効な理由</h4>
+<p>
+同じ距離キューブで<strong>「そのピクセルはプローブから見えているか」</strong>も判定できる。
+プローブから見て記録面より奥にあるピクセル(=壁の向こう)は影響範囲の重みを落とし、
+落ちた分をグローバルIBLと他のプローブが埋める。
+</p>
+<p>
+判定点は面の法線方向へ<code>bias</code>ぶん浮かせる(DDGIのnormal bias、Majercik et al. 2019)。
+これが無いと<strong>プローブから見えている面が自分自身に遮蔽される</strong>誤判定が起きる。
+記録距離はテクセル中心方向の値なので、そのテクセルが張る幅のぶんだけ手前へずれ得るためで、
+実測では<b>画面全体がわずかに暗くなる</b>という形で現れた(平均差分7.50 &rarr; 5.90/765)。
+</p>
+<p>
+<strong>それでもこの機能は既定で無効にしてある。</strong>差分画像を取ると、変化が集中していたのは
+仕切り壁ではなく<strong>金属球の真下の床</strong>だった。球の下の床はプローブから見て球に隠れているので
+判定としては正しいのだが、落ちた重みを埋めるのが<strong>より明るいグローバルIBL(空)</strong>であるため、
+影であるべき位置に白いハローが出てしまう。
+</p>
+<p>
+これは<strong>プローブが疎であることに起因する構造的な問題</strong>で、
+「落ちた重みを別のプローブが引き取れる密度」があって初めて素直に使える。
+DDGIがプローブをグリッド状に数百個置くのは、まさにこの重みの引き継ぎを成立させるためである。
+効果と副作用を見比べられるトグルとして残し、既定は従来の挙動(遮蔽判定なし)にしてある。
+</p>
+
+<h4>許容誤差の決め方</h4>
+<pre><code>bias = max(0.1, distanceFromProbe * (4 / faceSize))</code></pre>
+<p>
+キューブの1面は<code>faceSize</code>テクセルで[-1,1]をカバーするので、プローブから距離dの位置での
+1テクセルの幅はおよそ<code>2d / faceSize</code>になる。シルエットを跨いだテクセルや量子化で記録距離が
+わずかにずれるぶんを吸収するため<strong>2テクセルぶん</strong>を許容量とする。下限があるのは、
+プローブのすぐ近く(d&rarr;0)で許容量が0に潰れて自己交差してしまうのを防ぐため。
+</p>
+<p>
+<code>faceSize</code>をシェーダーへハードコードせず<code>FrameConstants.ProbeParams2.z</code>で渡しているのは、
+<code>kProbeCaptureSize</code>を変えたときに黙ってずれないようにするため。
+</p>
+
+<h4>LightingパスとSSRパスは必ず同じ条件でコンパイルする</h4>
+<p>
+<a href="#ssrprobe">20章</a>の前提は「SSRが差し引く放射輝度は、Lightingパスが適用したものと定義上一致する」
+ことである。したがって<code>KURENAI_PROBE_DISTANCE_REGISTER</code>は
+<code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>・<code>Transparent.hlsl</code>の3つすべてで定義する。
+片方だけ距離キューブを使うと、SSRが自分の足した覚えのない値を引き算することになる。
+</p>
+<p>
+これにより<code>DeferredLighting.hlsl</code>のSRVスロットが<code>t14</code>まで伸びたため、
+DX11/DX12の<code>kTextureSlotCount</code>とDX12のルートシグネチャのSRVレンジ幅を15へ揃えた
+(3か所で同じ値を持っている。19.11節の食い違いと同じ轍を踏まないよう、いずれのコメントにも
+相互参照を書いてある)。
+</p>
+
+<h4>検証</h4>
+<table>
+<tr><th>確認したこと</th><th>結果</th></tr>
+<tr>
+<td>距離キューブが正しい値で焼けているか(Render Targets &rarr; Probe - Distance)</td>
+<td>プローブ0(<code>x = -5</code>)から西の妻壁(<code>x = -12</code>)方向を読むと<strong>7.06</strong>。
+幾何的な距離7.0と一致する。真下の床(プローブ高さ3.5)は斜めのぶんを含めて4.16</td>
+</tr>
+<tr>
+<td>視差補正が実際に効いているか</td>
+<td>ON/OFFで3D描画領域264,600ピクセル中<strong>68,099(25.7%)が変化</strong>、最大差376/765</td>
+</tr>
+<tr>
+<td>二重像(19.9節の既知の制約)</td>
+<td>開口部付近の球で<strong>二重に見えていた暖色の弧が1本にまとまった</strong>。
+ただし完全には消えない(下の制約参照)</td>
+</tr>
+<tr>
+<td>DX11 / DX12の一致</td>
+<td>3D描画領域264,600ピクセル中<strong>4ピクセル</strong>が最大差3/255で相違(ImGuiパネルの境界)</td>
+</tr>
+<tr>
+<td>White Furnace Test(プローブ0個)の回帰</td>
+<td>球と背景のグレーが171〜172で一様。プローブ数0では距離キューブに一切触れないため期待どおり</td>
+</tr>
+<tr>
+<td>コスト</td>
+<td>GPUフレーム時間3.767 ms(有効) / 3.772 ms(無効)。差は測定ノイズに埋もれる</td>
+</tr>
+</table>
+
+<h4>既知の制約</h4>
+<ul>
+<li><strong>二重像は軽減されるが消えない。</strong>根本原因は「プローブが1点からしか見ていない」ことで、
+視差を正確に補正しても、その1点から見えなかった面の情報はそもそもキューブに無い</li>
+<li>距離キューブをPointでサンプルしているため、レイマーチの結果に<strong>テクセルの階段状のエッジ</strong>が出る。
+補間すればなめらかになるが、それは実在しない中間距離を作ることになるので採らない
+(なめらかにしたいなら解像度を上げるか、DDGIのように距離の2次モーメントを持って
+Chebyshev不等式で確率的に扱う必要がある)。
+<strong>この階段状のエッジと二重像の軽減が釣り合わないため、深度版の視差補正は既定無効</strong></li>
+<li>遮蔽判定も既定無効。プローブが疎なうちは実用にならない</li>
+<li><strong>結果として、距離キューブを使う2つの機能はどちらも既定で無効になっている。</strong>
+現時点でこの3.1 MBは「実装と検証は済んでおり、いつでも比較できる状態で置いてある」ものであって、
+既定の描画には効いていない。実用になるのは、解像度・2次モーメント・プローブ密度のいずれかを
+上げた後になる(いずれもPhase C=DDGIで必要になるものと同じ)</li>
+<li>距離キューブは畳み込んでいないため、<strong>高ラフネス面向けの「ぼけた距離」が無い</strong>。
+視差補正を低ラフネス面に限って使うぶんには問題にならないが、DDGI(Phase C)へ進む際は
+2次モーメント付きの畳み込みが必要になる</li>
+</ul>
 
 </section>
 

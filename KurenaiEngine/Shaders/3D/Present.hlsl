@@ -25,6 +25,8 @@
 //         色は「数が読める」ことより「異常が目立つ」ことを優先している
 //      12=反射プローブのキューブマップ配列(DebugCubeArrayTexture、t4)のデバッグ表示。
 //         Mode 9と同じ見回し方で、ArraySliceで指定した番号のプローブをサンプルする
+//      13=反射プローブの距離キューブ(同じくt4)。格納値はワールド距離なのでGainで縮めて
+//         グレースケール表示する(19.12節)
 //         (TextureCubeArrayはMode 10のTexture2DArrayとも別の型のため、さらにスロットを分ける)
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
@@ -124,6 +126,20 @@ float4 PSMain(PSInput input) : SV_TARGET
         color = color / (color + 1.0f);
         color = pow(color, 1.0f / 2.2f);
         return float4(color, 1.0f);
+    }
+
+    if (Mode == 13)
+    {
+        // 反射プローブの距離キューブ(19.12節)。Mode 12と同じ見回し方だが、格納されているのは
+        // 色ではなくワールド距離(メートル相当)なので、そのまま表示すると数メートルで白飛びする。
+        // Debug View Gainで割った値をグレースケール表示し、遠いほど明るく見せる。
+        // 空(ジオメトリ無し)には巨大な値が入っているため常に白になる。
+        // サンプラーがDataSampler(Point)なのはReflectionProbe.hlsliと同じ理由(データの補間を避ける)
+        float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
+        float3 rayDir = normalize(farPoint - CameraPosition.xyz);
+        float distance = DebugCubeArrayTexture.SampleLevel(DataSampler, float4(rayDir, ArraySlice), 0.0f).r;
+        float gray = saturate(distance * Gain);
+        return float4(gray, gray, gray, 1.0f);
     }
 
     if (Mode == 9)

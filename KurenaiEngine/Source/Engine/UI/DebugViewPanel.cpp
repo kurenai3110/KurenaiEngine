@@ -46,10 +46,11 @@ namespace Kurenai::UI
             "プローブ - イラディアンス (キューブマップ配列)",
             "プローブ - プリフィルタ済み鏡面 (ミップ0=キャプチャ結果)",
             "プローブ - 影響範囲 (プローブごとの色分け)",
+            "プローブ - 距離 (キューブマップ配列)",
         };
         static_assert(
-            static_cast<int>(DebugView::ProbeInfluence) == 22,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はProbeInfluence)");
+            static_cast<int>(DebugView::ProbeDistance) == 23,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はProbeDistance)");
 
         DrawUsageHint();
         BeginParamGroup();
@@ -86,7 +87,8 @@ namespace Kurenai::UI
                 "表示するミップの段。段が進むほど粗い面向けにぼかされている");
         }
 
-        if (m_Engine.m_DebugView == DebugView::ProbeIrradiance || m_Engine.m_DebugView == DebugView::ProbePrefilter)
+        if (m_Engine.m_DebugView == DebugView::ProbeIrradiance || m_Engine.m_DebugView == DebugView::ProbePrefilter ||
+            m_Engine.m_DebugView == DebugView::ProbeDistance)
         {
             // プローブが1つも無いシーンでもスライダーの範囲が壊れないよう下限を0に保つ
             const int maxProbeIndex =
@@ -101,6 +103,16 @@ namespace Kurenai::UI
                     "プローブ プリフィルタ ミップ###ProbePrefilterMip", &m_Engine.m_ProbePrefilterDebugMipLevel, 0,
                     static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
                     "表示するミップの段。ミップ0はぼかす前のキャプチャ結果そのもの");
+            }
+
+            if (m_Engine.m_DebugView == DebugView::ProbeDistance)
+            {
+                // 距離キューブに入っているのは色ではなくワールド距離なので、表示輝度の倍率(1倍以上)
+                // ではなく「白になる距離」で正規化する(Render()側でこの逆数をGainとして渡す)
+                SliderFloatEx(
+                    "白になる距離###ProbeDistanceRange", &m_Engine.m_ProbeDistanceDebugRange, 1.0f, 200.0f,
+                    Defaults::ProbeDistanceDebugRange, "%.1f", ImGuiSliderFlags_Logarithmic,
+                    "この距離で白飽和するようグレースケール化する。部屋の大きさに合わせると形が読める");
             }
         }
 

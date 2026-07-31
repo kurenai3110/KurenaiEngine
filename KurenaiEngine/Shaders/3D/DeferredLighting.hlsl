@@ -19,6 +19,7 @@ static const float PI = 3.14159265359f;
 #define KURENAI_PROBE_IRRADIANCE_REGISTER t11
 #define KURENAI_PROBE_PREFILTERED_REGISTER t12
 #define KURENAI_PROBE_BUFFER_REGISTER t13
+#define KURENAI_PROBE_DISTANCE_REGISTER t14
 
 cbuffer FrameConstants : register(b0)
 {
@@ -56,6 +57,9 @@ cbuffer FrameConstants : register(b0)
     // y=影響範囲のデバッグ表示フラグ(1以上でプローブごとの色分け表示に切り替える)、
     // z=視差補正(box projection)の有効フラグ、w=プローブ間ブレンドの有効フラグ
     float4 ProbeParams;
+    // 反射プローブの距離キューブ用(19.12節)。x=視差補正に距離キューブを使うフラグ、
+    // y=距離キューブによる遮蔽判定(光漏れ抑制)の有効フラグ、z=距離キューブの1面の解像度、w=未使用
+    float4 ProbeParams2;
 };
 
 Texture2D AlbedoTexture : register(t0);
