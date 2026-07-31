@@ -15,13 +15,13 @@ ScreenSpaceReflection = false
 [Model]
 Path = EnergyCompareTest/EnergyCompareTest.kmodel
 
-# 4行x11列のグリッド(X=-12.5〜12.5, Z=-9〜9)を俯瞰して全球が入る位置。
-# 手前から順に WhiteMetal / Gold / HalfMetal / BlackDielectric の行が並ぶ。
-# Yaw/Pitchはラジアン(Pitch=-0.79で約-45度の見下ろし)
+# 5行x11列のグリッド(X=-12.5〜12.5, Z=-12〜12)を俯瞰して全球が入る位置。
+# 手前の行ほどF0が高い(1.00 / 0.76 / 0.52 / 0.28 / 0.04)。
+# Yaw/Pitchは度数
 [Camera]
 Position = 0.0, 38.0, -38.0
 Yaw = 0.0
-Pitch = -0.79
+Pitch = -45.0
 
 [Sun]
 Enabled = false

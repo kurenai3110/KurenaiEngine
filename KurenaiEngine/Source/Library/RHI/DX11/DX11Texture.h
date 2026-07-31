@@ -17,7 +17,8 @@ namespace Kurenai::RHI
             Microsoft::WRL::ComPtr<ID3D11DepthStencilView> dsv = nullptr,
             Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = nullptr,
             std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>> mipUavs = {},
-            std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>> sliceDsvs = {});
+            std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>> sliceDsvs = {},
+            uint32_t cubeCount = 1);
 
         ID3D11ShaderResourceView* GetShaderResourceView() const { return m_Srv.Get(); }
         ID3D11RenderTargetView* GetRenderTargetView() const { return m_Rtv.Get(); }
@@ -42,14 +43,13 @@ namespace Kurenai::RHI
             return m_MipUavs.empty() ? m_Uav.Get() : m_MipUavs[mipLevel].Get();
         }
 
-        // キューブマップ(CreateUAVTextureCube/CreateMippedUAVTextureCube)専用。m_MipUavsに
-        // mip*kCubeFaceCount+face の順でフラットに格納しているため、この2引数版で個別の面・
-        // ミップのUAVを取り出す
+        // キューブマップ(CreateUAVTextureCube/CreateMippedUAVTextureCube/
+        // CreateMippedUAVTextureCubeArray)専用。m_MipUavsに (mip*cubeCount + cubeIndex)*kCubeFaceCount + face
+        // の順でフラットに格納しているため、この3引数版で個別のキューブ・面・ミップのUAVを取り出す。
+        // 範囲外を指定した場合はログを出してnullptrを返す(不正なUAVをバインドしてGPU側の
+        // 未定義動作を招くより、バインドを空にして描画結果の異常として現れる方が原因を追いやすい)
         static constexpr uint32_t kCubeFaceCount = 6;
-        ID3D11UnorderedAccessView* GetCubeUnorderedAccessView(uint32_t face, uint32_t mipLevel = 0) const
-        {
-            return m_MipUavs[mipLevel * kCubeFaceCount + face].Get();
-        }
+        ID3D11UnorderedAccessView* GetCubeUnorderedAccessView(uint32_t face, uint32_t mipLevel = 0, uint32_t cubeIndex = 0) const;
 
     private:
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_Srv;
@@ -58,5 +58,7 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> m_Uav;
         std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>> m_MipUavs;
         std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>> m_SliceDsvs;
+        // キューブマップ配列の枚数(非キューブマップ・単一キューブは1)。m_MipUavsのフラット添字計算に使う
+        uint32_t m_CubeCount = 1;
     };
 }

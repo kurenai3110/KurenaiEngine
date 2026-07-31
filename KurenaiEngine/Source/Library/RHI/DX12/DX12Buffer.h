@@ -41,6 +41,16 @@ namespace Kurenai::RHI
         static constexpr uint32_t kInvalid = 0xFFFFFFFFu;
         DX12Buffer(DX12Device* device, Microsoft::WRL::ComPtr<ID3D12Resource> resource, uint32_t uavIndex, uint32_t sizeInBytes, uint32_t strideInBytes);
 
+        // BufferUsage::StructuredRW用: コンピュートがUAVで書き、ピクセルシェーダがSRVで読むため
+        // ディスクリプタを両方持つ。CPUからは書き込まないのでステージングリングは持たない
+        DX12Buffer(
+            DX12Device* device,
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+            uint32_t uavIndex,
+            uint32_t srvIndex,
+            uint32_t sizeInBytes,
+            uint32_t strideInBytes);
+
         // BufferUsage::StructuredReadOnly(StructuredBuffer<T>、読み取り専用)用:
         // ピクセルシェーダが読むSRV本体(DEFAULTヒープ、resource/initialState/srvIndex)と、
         // CPUが毎フレームUpdateBufferで書き込むUPLOADヒープのステージングリング
@@ -69,13 +79,18 @@ namespace Kurenai::RHI
         const D3D12_INDEX_BUFFER_VIEW& GetIndexBufferView() const { return m_IndexBufferView; }
         // BufferUsage::Structuredで作成した場合のみ有効なUAVハンドル(コンピュートシェーダーからのRW用)
         D3D12_CPU_DESCRIPTOR_HANDLE GetUavCpuHandle() const;
-        // BufferUsage::StructuredReadOnlyで作成した場合のみ有効なSRVハンドル(ピクセルシェーダからの読み取り用)
+        // BufferUsage::StructuredReadOnly / StructuredRWで作成した場合のみ有効なSRVハンドル
+        // (ピクセルシェーダからの読み取り用)
         D3D12_CPU_DESCRIPTOR_HANDLE GetSrvCpuHandle() const;
         // BufferUsage::StructuredReadOnlyで作成されたか(UpdateBufferの分岐に使う)。
-        // このバッファ種別だけがm_SrvIndexを有効値で持つことを利用して判定する
-        bool IsStructuredReadOnly() const { return m_SrvIndex != kInvalid; }
+        //
+        // 以前は「m_SrvIndexが有効値かどうか」で判定していたが、StructuredRWもSRVを持つように
+        // なったためその判定では両者を区別できない(StructuredRWがステージングリングを持たないまま
+        // UpdateBufferのStructuredReadOnly経路へ入り、nullptrのUPLOADリソースを触ってしまう)。
+        // Usageを直接保持して判定する
+        bool IsStructuredReadOnly() const { return m_Usage == BufferUsage::StructuredReadOnly; }
         // 現在のリソース状態と異なる場合のみバリアを発行して遷移する(DX12Texture::TransitionToと同じパターン)。
-        // BufferUsage::StructuredReadOnlyでのみ使う
+        // BufferUsage::StructuredReadOnly / StructuredRWで使う
         void TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState);
         // UpdateBuffer用: ステージングリングの次のスロットへ書き込み位置を進め、そのCPUマップ済みポインタを返す。
         // BufferUsage::StructuredReadOnlyでのみ使う
@@ -91,6 +106,9 @@ namespace Kurenai::RHI
         uint32_t m_RingCapacity;
         uint32_t m_CurrentRingIndex = 0;
         uint32_t m_UavIndex = kInvalid;
+        // このバッファがどのUsageで作られたか。SRV/UAVディスクリプタの有無だけでは
+        // StructuredReadOnlyとStructuredRWを区別できないため保持する
+        BufferUsage m_Usage = BufferUsage::Vertex;
         D3D12_VERTEX_BUFFER_VIEW m_VertexBufferView{};
         D3D12_INDEX_BUFFER_VIEW m_IndexBufferView{};
 

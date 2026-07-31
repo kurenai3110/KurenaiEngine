@@ -216,11 +216,12 @@ void EvaluateIBLSplit(
     const float3 FssEss = F0 * brdf.x + brdf.y;
     const float Ess = brdf.x + brdf.y;
 
-    // 夜間の減衰はDeferredLighting.hlslと同じくAmbientColor.aで行う(プリフィルタマップ・
-    // イラディアンスマップは昼固定のスカイボックスから焼いたものなので、これが唯一の減光手段)
-    outDiffuse = kd * albedo * irradiance * AmbientColor.a;
-    outSpecular = (prefiltered * FssEss * SpecularEnergyCompensation(F0, brdf, compensationMode)
-        + SpecularMultiScatterIBL(F0, FssEss, Ess, compensationMode) * irradiance) * AmbientColor.a;
+    // 昼度による減衰はしない(DeferredLighting.hlsl の EvaluateIBL と同じ理由)。
+    // 手続き空が太陽高度に応じて自分で暗くなるため、ここで掛けると二重に暗くなる。
+    // 半透明パスはAO/GIバッファを持たない(常にao=1)ためスペキュラオクルージョンは掛けない
+    outDiffuse = kd * albedo * irradiance;
+    outSpecular = prefiltered * FssEss * SpecularEnergyCompensation(F0, brdf, compensationMode)
+        + SpecularMultiScatterIBL(F0, FssEss, Ess, compensationMode) * irradiance;
 }
 
 float DistanceAttenuation(float distSq, float range)

@@ -24,11 +24,12 @@ ScreenSpaceReflection = false
 [Model]
 Path = EnergyCompareTest/EnergyCompareTest.kmodel
 
-# EnergyCompareFurnace.ksceneと同一のカメラ(2シーンの画像を直接比較できるように揃える)
+# EnergyCompareFurnace.ksceneと同一のカメラ(2シーンの画像を直接比較できるように揃える)。
+# Yaw/Pitchは度数
 [Camera]
 Position = 0.0, 38.0, -38.0
 Yaw = 0.0
-Pitch = -0.79
+Pitch = -45.0
 
 [Sun]
 Enabled = true

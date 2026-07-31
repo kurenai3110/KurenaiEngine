@@ -1,0 +1,172 @@
+#include "UI/DebugViewPanel.h"
+
+#include <imgui.h>
+
+#include "EngineDefaults.h"
+#include "KurenaiEngine3D.h"
+#include "UI/UIWidgets.h"
+
+namespace Kurenai::UI
+{
+    void DebugViewPanel::Draw(const PanelDrawContext& context)
+    {
+        (void)context;
+
+        if (!ImGui::Begin(GetWindowName(), GetVisiblePtr()))
+        {
+            ImGui::End();
+            return;
+        }
+
+        using DebugView = KurenaiEngine3D::DebugView;
+
+        // 並びはDebugView enumと一致していなければならない(下のstatic_assert参照)
+        static const char* kDebugViewNames[] =
+        {
+            "最終結果 (Final)",
+            "アルベド",
+            "法線",
+            "マテリアル (R=金属度, G=粗さ)",
+            "自発光",
+            "深度",
+            "深度 (生値)",
+            "直接光",
+            "AO/GI - 間接光 (RGB)",
+            "AO/GI - 間接光 (RGB, ブラー前)",
+            "AO/GI - 遮蔽率 (アルファ)",
+            "AO/GI - 遮蔽率 (アルファ, ブラー前)",
+            "シャドウマップ",
+            "SSR (最終結果 + 反射)",
+            "Hi-Z (深度ミップチェーン)",
+            "IBL - イラディアンス (キューブマップ)",
+            "IBL - プリフィルタ済み鏡面 (キューブマップ・ミップチェーン)",
+            "IBL - BRDF LUT (X=NdotV, Y=粗さ, RGB=A/B/Eavg)",
+            "ブルーム (ピラミッド最上段・半解像度)",
+            "ライトタイル (タイルあたりのライト数ヒートマップ)",
+            "プローブ - イラディアンス (キューブマップ配列)",
+            "プローブ - プリフィルタ済み鏡面 (ミップ0=キャプチャ結果)",
+            "プローブ - 影響範囲 (プローブごとの色分け)",
+            "シーンカラー (生HDR・トーンマップなし)",
+        };
+        static_assert(
+            static_cast<int>(DebugView::SceneColorRaw) == 23,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はSceneColorRaw)");
+
+        DrawUsageHint();
+        BeginParamGroup();
+
+        int currentIndex = static_cast<int>(m_Engine.m_DebugView);
+        if (ComboEx(
+                "表示するバッファ###View", &currentIndex, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames),
+                static_cast<int>(DebugView::Final),
+                "Presentパスで画面に出す内容。最終結果以外を選ぶと各パスの中間結果をそのまま表示する"))
+        {
+            m_Engine.m_DebugView = static_cast<DebugView>(currentIndex);
+        }
+
+        if (m_Engine.m_DebugView == DebugView::HiZ)
+        {
+            SliderIntEx(
+                "Hi-Z ミップレベル###HiZMip", &m_Engine.m_HiZDebugMipLevel, 0,
+                static_cast<int>(m_Engine.m_HiZMipLevels) - 1, 0, "表示する深度ミップチェーンの段");
+        }
+
+        if (m_Engine.m_DebugView == DebugView::ShadowMap)
+        {
+            SliderIntEx(
+                "シャドウカスケード###ShadowCascade", &m_Engine.m_ShadowDebugCascade, 0,
+                static_cast<int>(KurenaiEngine3D::kCascadeCount) - 1, 0,
+                "表示するカスケードの番号。0がカメラに最も近い範囲");
+        }
+
+        if (m_Engine.m_DebugView == DebugView::IBLPrefilter)
+        {
+            SliderIntEx(
+                "プリフィルタ ミップレベル###PrefilterMip", &m_Engine.m_IBLPrefilterDebugMipLevel, 0,
+                static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
+                "表示するミップの段。段が進むほど粗い面向けにぼかされている");
+        }
+
+        if (m_Engine.m_DebugView == DebugView::ProbeIrradiance || m_Engine.m_DebugView == DebugView::ProbePrefilter)
+        {
+            // プローブが1つも無いシーンでもスライダーの範囲が壊れないよう下限を0に保つ
+            const int maxProbeIndex =
+                m_Engine.m_ReflectionProbes.empty() ? 0 : static_cast<int>(m_Engine.m_ReflectionProbes.size()) - 1;
+            SliderIntEx(
+                "プローブ番号###ProbeIndex", &m_Engine.m_ProbeDebugIndex, 0, maxProbeIndex, 0,
+                "表示する反射プローブの番号。反射プローブパネルの一覧と同じ並び");
+
+            if (m_Engine.m_DebugView == DebugView::ProbePrefilter)
+            {
+                SliderIntEx(
+                    "プローブ プリフィルタ ミップ###ProbePrefilterMip", &m_Engine.m_ProbePrefilterDebugMipLevel, 0,
+                    static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
+                    "表示するミップの段。ミップ0はぼかす前のキャプチャ結果そのもの");
+            }
+        }
+
+        if (m_Engine.m_DebugView == DebugView::LightTiles)
+        {
+            // ヒートマップの色: 黒=0灯、青=少ない、緑、赤=上限以上、マゼンタ=タイル容量超過
+            ImGui::TextWrapped(
+                "黒=0灯 / 青→緑→赤=ライトが多い / マゼンタ=タイル容量(%uライト)を超過",
+                KurenaiEngine3D::kLightTileCapacity);
+            SliderIntEx(
+                "ヒートマップの上限###HeatmapMax", &m_Engine.m_LightTileHeatmapMax, 1,
+                static_cast<int>(KurenaiEngine3D::kLightTileCapacity), Defaults::LightTileHeatmapMax,
+                "この灯数で赤になるようヒートマップを正規化する。ライトが少ないシーンでは下げると差が見える");
+
+            if (!m_Engine.m_LightCullingEnabled)
+            {
+                ImGui::TextWrapped("タイルドライトカリングが無効のため、ライトグリッドは更新されていません");
+            }
+        }
+
+        // AO/GIバッファの間接拡散光のように値が小さいバッファ(暗い室内では0.02〜0.1程度)は
+        // 等倍表示だとほぼ真っ黒で階調の粗さが判別できない。持ち上げて表示することで、
+        // 8bit格納時のポスタリゼーションが何段あるかを目視で比較できる。
+        // 最終結果は見た目そのものを確認する表示なので倍率を適用しない(Render()側で1.0固定)
+        if (m_Engine.m_DebugView != DebugView::Final)
+        {
+            SliderFloatEx(
+                "表示輝度の倍率###DebugViewGain", &m_Engine.m_DebugViewGain, 1.0f, 64.0f, Defaults::DebugViewGain,
+                "%.1fx", ImGuiSliderFlags_Logarithmic,
+                "暗いバッファを持ち上げて表示する倍率。バッファ精度の比較と併用して"
+                "ポスタリゼーションの段数を目視で確認する。最終結果には適用されない");
+        }
+
+        EndParamGroup();
+
+        if (ImGui::CollapsingHeader("バッファ精度 (A/B比較)###BufferPrecision"))
+        {
+            DrawBufferPrecisionSection();
+        }
+
+        ImGui::End();
+    }
+
+    void DebugViewPanel::DrawBufferPrecisionSection()
+    {
+        using BufferPrecision = KurenaiEngine3D::BufferPrecision;
+
+        // 切り替えるとレンダーターゲットとPSOを作り直す必要があるが、ここで直接作り直すと
+        // GPUがまだ読んでいるテクスチャを壊すため、フラグだけ立ててRender()側で
+        // (WaitForGPUIdleを挟んで)処理する
+        int precisionIndex = static_cast<int>(m_Engine.m_BufferPrecision);
+        bool precisionChanged = ImGui::RadioButton("HDR", &precisionIndex, static_cast<int>(BufferPrecision::HDR));
+        ItemHelp("自発光=R11G11B10F、AO/GI=RGBA16F。本来採用したい構成");
+        ImGui::SameLine();
+        precisionChanged |=
+            ImGui::RadioButton("Legacy 8bit", &precisionIndex, static_cast<int>(BufferPrecision::Legacy8bit));
+        ItemHelp("中間バッファをすべてRGBA8_UNormにする(M7以前の構成)。暗部の階調が粗くなるのを比較するための経路");
+
+        if (precisionChanged && precisionIndex != static_cast<int>(m_Engine.m_BufferPrecision))
+        {
+            m_Engine.m_BufferPrecision = static_cast<BufferPrecision>(precisionIndex);
+            m_Engine.m_BufferPrecisionDirty = true;
+        }
+
+        ImGui::TextWrapped(
+            "アルベドはどちらの構成でもリニアの8bit。sRGB格納は最終画像への寄与が測定限界以下だったため不採用");
+    }
+}

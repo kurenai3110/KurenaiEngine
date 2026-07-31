@@ -5,6 +5,8 @@
 #include <DirectXTex.h>
 
 #include <cwchar>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "DX11Buffer.h"
@@ -40,6 +42,8 @@ namespace Kurenai::RHI
                 return DXGI_FORMAT_R16G16_FLOAT;
             case Format::R16G16B16A16_Float:
                 return DXGI_FORMAT_R16G16B16A16_FLOAT;
+            case Format::R11G11B10_Float:
+                return DXGI_FORMAT_R11G11B10_FLOAT;
             case Format::R32G32B32A32_Float:
             default:
                 return DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -186,6 +190,56 @@ namespace Kurenai::RHI
                 "読み取り専用構造化バッファのシェーダリソースビュー作成に失敗しました");
 
             return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, srv, /*isDynamic=*/true);
+        }
+
+        // コンピュートがUAVで書き、ピクセルシェーダがSRVで読む構造化バッファ。CPUからは書き込まないので
+        // D3D11_USAGE_DEFAULT(CPUAccessFlagsなし)。DX11は同じリソースをUAVとSRVに同時バインドできないが、
+        // DX11CommandList::DispatchがDispatch直後にUAVを全解除しているため追加の対処は要らない
+        if (desc.Usage == BufferUsage::StructuredRW)
+        {
+            if (desc.StrideInBytes == 0)
+            {
+                Core::Logger::Error("DX11", "StructuredRWバッファのStrideInBytesが0です。作成を中止します");
+                throw std::runtime_error("StructuredRWバッファのStrideInBytesが0です");
+            }
+
+            D3D11_BUFFER_DESC structuredDesc{};
+            structuredDesc.ByteWidth = desc.SizeInBytes;
+            structuredDesc.Usage = D3D11_USAGE_DEFAULT;
+            structuredDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+            structuredDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            structuredDesc.StructureByteStride = desc.StrideInBytes;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> structuredBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&structuredDesc, nullptr, &structuredBuffer),
+                "読み書き構造化バッファ(StructuredRW)の作成に失敗しました");
+
+            const UINT elementCount = desc.SizeInBytes / desc.StrideInBytes;
+
+            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            uavDesc.Buffer.FirstElement = 0;
+            uavDesc.Buffer.NumElements = elementCount;
+
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+            ThrowIfFailed(
+                m_Device->CreateUnorderedAccessView(structuredBuffer.Get(), &uavDesc, &uav),
+                "読み書き構造化バッファのアンオーダードアクセスビュー作成に失敗しました");
+
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            srvDesc.Buffer.FirstElement = 0;
+            srvDesc.Buffer.NumElements = elementCount;
+
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+            ThrowIfFailed(
+                m_Device->CreateShaderResourceView(structuredBuffer.Get(), &srvDesc, &srv),
+                "読み書き構造化バッファのシェーダリソースビュー作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, uav, srv);
         }
 
         D3D11_BUFFER_DESC bufferDesc{};
@@ -549,13 +603,48 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHITexture> DX11Device::CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels)
     {
+        // cubeCount=1のときはSRVをTextureCubeArrayではなくTextureCubeとして張る(HLSL側の
+        // TextureCube宣言と一致させるため。IBLConvolve.hlsl等)
+        return CreateCubeTextureInternal(size, format, mipLevels, 1, false);
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateMippedUAVTextureCubeArray(
+        uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount)
+    {
+        return CreateCubeTextureInternal(size, format, mipLevels, cubeCount, true);
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateCubeTextureInternal(
+        uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray)
+    {
+        if (size == 0 || mipLevels == 0 || cubeCount == 0)
+        {
+            const std::string message =
+                "キューブマップUAVテクスチャの作成に失敗しました: サイズ・ミップ数・キューブ数はいずれも1以上である必要があります (size=" +
+                std::to_string(size) + ", mipLevels=" + std::to_string(mipLevels) + ", cubeCount=" + std::to_string(cubeCount) + ")";
+            Core::Logger::Error("DX11", message);
+            throw std::runtime_error(message);
+        }
+
+        // D3D11のTexture2D配列は最大2048スライス。キューブマップは1枚あたり6スライス消費する
+        const uint32_t arraySize = cubeCount * DX11Texture::kCubeFaceCount;
+        if (arraySize > D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION)
+        {
+            const std::string message =
+                "キューブマップUAVテクスチャの作成に失敗しました: 配列スライス数が上限を超えています (cubeCount=" +
+                std::to_string(cubeCount) + ", 必要スライス数=" + std::to_string(arraySize) +
+                ", 上限=" + std::to_string(D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) + ")";
+            Core::Logger::Error("DX11", message);
+            throw std::runtime_error(message);
+        }
+
         const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);
 
         D3D11_TEXTURE2D_DESC textureDesc{};
         textureDesc.Width = size;
         textureDesc.Height = size;
         textureDesc.MipLevels = mipLevels;
-        textureDesc.ArraySize = DX11Texture::kCubeFaceCount;
+        textureDesc.ArraySize = arraySize;
         textureDesc.Format = dxgiFormat;
         textureDesc.SampleDesc.Count = 1;
         textureDesc.Usage = D3D11_USAGE_DEFAULT;
@@ -565,41 +654,59 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
         ThrowIfFailed(m_Device->CreateTexture2D(&textureDesc, nullptr, &texture), "キューブマップUAVテクスチャの作成に失敗しました");
 
-        // 全6面・全ミップを1枚のTextureCubeとして読むSRV(サンプリング側、DeferredLighting.hlsl等)
+        // 全6面・全ミップを1枚のTextureCube(配列版はTextureCubeArray)として読むSRV
+        // (サンプリング側、DeferredLighting.hlsl等)
         D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
-        srvDesc.TextureCube.MostDetailedMip = 0;
-        srvDesc.TextureCube.MipLevels = mipLevels;
+        if (asArray)
+        {
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBEARRAY;
+            srvDesc.TextureCubeArray.MostDetailedMip = 0;
+            srvDesc.TextureCubeArray.MipLevels = mipLevels;
+            srvDesc.TextureCubeArray.First2DArrayFace = 0;
+            srvDesc.TextureCubeArray.NumCubes = cubeCount;
+        }
+        else
+        {
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+            srvDesc.TextureCube.MostDetailedMip = 0;
+            srvDesc.TextureCube.MipLevels = mipLevels;
+        }
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
         ThrowIfFailed(m_Device->CreateShaderResourceView(texture.Get(), &srvDesc, &srv), "キューブマップシェーダリソースビューの作成に失敗しました");
 
-        // 面×ミップの組み合わせごとに単一配列スライス・単一ミップのUAV(Texture2DArray、要素数1)を張り、
-        // コンピュートシェーダーが面ごとに1回ずつディスパッチして書き込めるようにする(HLSL側は
-        // RWTexture2DArrayとして宣言する必要がある。IBLConvolve.hlsl参照)。mip*kCubeFaceCount+face の
-        // 順でフラットに格納する(DX11Texture::GetCubeUnorderedAccessView参照)
+        // キューブ×面×ミップの組み合わせごとに単一配列スライス・単一ミップのUAV(Texture2DArray、要素数1)を
+        // 張り、コンピュートシェーダーが面ごとに1回ずつディスパッチして書き込めるようにする(HLSL側は
+        // RWTexture2DArrayとして宣言する必要がある。IBLConvolve.hlsl参照)。
+        // (mip*cubeCount + cubeIndex)*kCubeFaceCount + face の順でフラットに格納する
+        // (DX11Texture::GetCubeUnorderedAccessView参照)
         std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>> mipUavs;
-        mipUavs.reserve(mipLevels * DX11Texture::kCubeFaceCount);
+        mipUavs.reserve(static_cast<size_t>(mipLevels) * arraySize);
         for (uint32_t mip = 0; mip < mipLevels; ++mip)
         {
-            for (uint32_t face = 0; face < DX11Texture::kCubeFaceCount; ++face)
+            for (uint32_t cube = 0; cube < cubeCount; ++cube)
             {
-                D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-                uavDesc.Format = dxgiFormat;
-                uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
-                uavDesc.Texture2DArray.MipSlice = mip;
-                uavDesc.Texture2DArray.FirstArraySlice = face;
-                uavDesc.Texture2DArray.ArraySize = 1;
+                for (uint32_t face = 0; face < DX11Texture::kCubeFaceCount; ++face)
+                {
+                    D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+                    uavDesc.Format = dxgiFormat;
+                    uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
+                    uavDesc.Texture2DArray.MipSlice = mip;
+                    uavDesc.Texture2DArray.FirstArraySlice = cube * DX11Texture::kCubeFaceCount + face;
+                    uavDesc.Texture2DArray.ArraySize = 1;
 
-                Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
-                ThrowIfFailed(
-                    m_Device->CreateUnorderedAccessView(texture.Get(), &uavDesc, &uav),
-                    "キューブマップアンオーダードアクセスビューの作成に失敗しました");
-                mipUavs.push_back(std::move(uav));
+                    Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+                    ThrowIfFailed(
+                        m_Device->CreateUnorderedAccessView(texture.Get(), &uavDesc, &uav),
+                        "キューブマップアンオーダードアクセスビューの作成に失敗しました");
+                    mipUavs.push_back(std::move(uav));
+                }
             }
         }
 
-        return std::make_unique<DX11Texture>(srv, nullptr, nullptr, nullptr, std::move(mipUavs));
+        return std::make_unique<DX11Texture>(
+            srv, nullptr, nullptr, nullptr, std::move(mipUavs),
+            std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>>{}, cubeCount);
     }
 
     std::unique_ptr<IRHITexture> DX11Device::CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth)

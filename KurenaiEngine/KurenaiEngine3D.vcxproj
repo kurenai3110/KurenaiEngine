@@ -96,24 +96,53 @@ exit /b 0</Command>
   <ItemGroup>
     <ClInclude Include="Source\Engine\KurenaiTypes.h" />
     <ClInclude Include="Source\Engine\KurenaiEngine3D.h" />
+    <ClInclude Include="Source\Engine\EngineDefaults.h" />
+    <ClInclude Include="Source\Engine\UI\IPanel.h" />
+    <ClInclude Include="Source\Engine\UI\UIManager.h" />
+    <ClInclude Include="Source\Engine\UI\UITheme.h" />
+    <ClInclude Include="Source\Engine\UI\UIWidgets.h" />
+    <ClInclude Include="Source\Engine\UI\RenderingPanel.h" />
+    <ClInclude Include="Source\Engine\UI\SystemPanel.h" />
+    <ClInclude Include="Source\Engine\UI\ScenePanel.h" />
+    <ClInclude Include="Source\Engine\UI\PostProcessPanel.h" />
+    <ClInclude Include="Source\Engine\UI\DebugViewPanel.h" />
+    <ClInclude Include="Source\Engine\UI\LightingPanel.h" />
+    <ClInclude Include="Source\Engine\UI\ProfilerPanel.h" />
+    <ClInclude Include="Source\Engine\UI\ReflectionProbePanel.h" />
     <ClInclude Include="..\ThirdParty\imgui\imgui.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Source\Engine\KurenaiEngine3D.cpp" />
+    <ClCompile Include="Source\Engine\UI\UIManager.cpp" />
+    <ClCompile Include="Source\Engine\UI\UITheme.cpp" />
+    <ClCompile Include="Source\Engine\UI\UIWidgets.cpp" />
+    <ClCompile Include="Source\Engine\UI\RenderingPanel.cpp" />
+    <ClCompile Include="Source\Engine\UI\SystemPanel.cpp" />
+    <ClCompile Include="Source\Engine\UI\ScenePanel.cpp" />
+    <ClCompile Include="Source\Engine\UI\PostProcessPanel.cpp" />
+    <ClCompile Include="Source\Engine\UI\DebugViewPanel.cpp" />
+    <ClCompile Include="Source\Engine\UI\LightingPanel.cpp" />
+    <ClCompile Include="Source\Engine\UI\ProfilerPanel.cpp" />
+    <ClCompile Include="Source\Engine\UI\ReflectionProbePanel.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Shaders\3D\GBuffer.hlsl" />
     <None Include="Shaders\3D\DirectLighting.hlsl" />
     <None Include="Shaders\3D\DeferredLighting.hlsl" />
     <None Include="Shaders\3D\HiZ.hlsl" />
+    <None Include="Shaders\3D\LightCulling.hlsl" />
     <None Include="Shaders\3D\NormalEncoding.hlsli" />
     <None Include="Shaders\3D\SpecularEnergy.hlsli" />
+    <None Include="Shaders\3D\ScreenSpaceShadow.hlsli" />
     <None Include="Shaders\3D\Present.hlsl" />
     <None Include="Shaders\3D\SSAO.hlsl" />
     <None Include="Shaders\3D\SSIL_VisibilityBitmask.hlsl" />
     <None Include="Shaders\3D\SSR.hlsl" />
     <None Include="Shaders\3D\Shadow.hlsl" />
     <None Include="Shaders\3D\Tonemap.hlsl" />
+    <None Include="Shaders\3D\SkyGenerate.hlsl" />
+    <None Include="Shaders\3D\AutoExposure.hlsl" />
+    <None Include="Shaders\3D\Bloom.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="KurenaiEngineLibrary.vcxproj">
