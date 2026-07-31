@@ -116,22 +116,81 @@ namespace Kurenai
         // 個々のファイルの[Scene]Name読み取りに失敗した場合はそのファイルを警告ログとともに
         // スキップする(1ファイルの不備でアプリ全体が起動できなくなるのを避けるため)
         void DiscoverScenes();
-        void LoadScene(size_t sceneIndex);
+
+        // --- シーン読み込みのスレッド分担 -----------------------------------------------------
+        //
+        // シーンの読み込みは「重いファイルI/O・デコード・GPUリソース作成」と「一瞬で終わる
+        // エンジン状態への反映」に分かれる。以前は両方をUpdateスレッドで行い、Render()全体と
+        // ミューテックスで排他していたため、読み込みの間フレームが1枚も進まなかった
+        // (Bistro Exteriorで約1.3秒)。
+        //
+        // そこで前者を専用のLoaderスレッドへ、後者をRenderスレッドのフレーム境界へ分けた。
+        // 読み込み中もフレームが進み続け、排他は受け渡しの一瞬だけで済む
+        // (詳細はdocs/Architecture.html 23章)。
+
+        // Renderスレッドが不要になったアセット由来のGPUリソースをまとめてLoaderスレッドへ渡すための箱。
+        //
+        // 【なぜRenderスレッドで破棄しないのか】アセット由来のリソースのディスクリプタは
+        // アセット用のディスクリプタヒープから確保されており、そのヒープはロックを持たない
+        // (DX12Device::GetAssetSrvCpuHeap参照)。確保するのがLoaderスレッドなので、
+        // 解放も同じスレッドに寄せることでロックなしのまま安全にする
+        struct RetiredAssets
+        {
+            Assets::Scene Scene;
+            Assets::RaytracingScene RaytracingScene;
+            std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
+        };
+
+        // Loaderスレッドが作り、Renderスレッドが受け取る「差し替えられる状態まで仕上がったシーン」
+        struct LoadedScene
+        {
+            Assets::Scene Scene;
+            Assets::RaytracingScene RaytracingScene;
+            size_t SceneIndex = 0;
+            // シーンの[Scene]Skyboxが読み込み済みのものと異なる場合のみ非nullptr。
+            // nullptrなら現在のスカイボックスを維持する
+            std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
+            std::wstring SkyboxPath;
+            // ComputeInitialCameraの結果(Updateスレッドが所有するm_Cameraへ後で反映される)
+            Core::Camera Camera;
+        };
+
+        // シーン切り替えを要求する(ScenePanel = Renderスレッドから呼ばれる)。
+        // 実際の読み込みはLoaderスレッドが行うため即座に戻る。
+        // 読み込み中に再度要求された場合は新しい要求で上書きされる(最後の要求が勝つ)
+        void RequestSceneLoad(size_t sceneIndex);
+        // Renderスレッドがフレーム先頭で呼ぶ。保留中の切り替え要求の発注と、
+        // 出来上がったシーンの取り込みを行う
+        void UpdateSceneStreaming();
+        // Loaderスレッドの本体。要求を待ち、旧シーンを破棄し、新シーンを読み込んで publish する
+        void LoaderThreadMain();
+        // Loaderスレッドで実行する読み込み本体。エンジンの状態は一切書き換えない。
+        // 失敗した場合はログを出してnullptrを返す
+        std::unique_ptr<LoadedScene> LoadSceneOnLoaderThread(size_t sceneIndex);
+        // Renderスレッドで実行する反映。出来上がったシーンを現在のシーンと差し替え、
+        // シーン由来の設定(太陽・影・AO・SSR・ライト・反射プローブ・ベイクフラグ等)を適用する
+        void ApplyLoadedScene(LoadedScene& loaded);
+        // 不要になったアセット由来のリソースをLoaderスレッドへ破棄依頼として積む。
+        // 【重要】呼ぶ前にIRHIDevice::WaitForGPUIdle()でGPUの参照が終わっていることを保証すること
+        void RetireAssets(RetiredAssets&& retired);
+        // シーンのAABBから初期カメラ(位置・向き・near/far)を決める。エンジンの状態を読まない
+        // 純粋な計算なのでLoaderスレッドから呼べる([Camera]セクションがあればそれを優先する)
+        static Core::Camera ComputeInitialCamera(const Assets::Scene& scene);
+
         // SSAO/SSILの半径・厚みとSSRの距離・厚みを、現在のシーンの対角長から決め直す。
         // これらは固定の既定値を持たないため、UIの「既定値に戻す」ではなくこれを呼ぶ
-        // (シーン読み込み時はFrameCameraToModelの先頭から呼ばれる)
+        // (シーン読み込み時はApplyLoadedSceneから呼ばれる)
         void ResetSceneDependentParams();
-        void FrameCameraToModel();
         // imguiWantsMouseはImGuiがマウス入力を掴んでいるか(Renderスレッドから
         // m_ImGuiWantCaptureMouse経由で受け取る)。パネルの上で右ドラッグを始めても
         // 視点回転が始まらないようにするために使う
         void UpdateMouseLook(bool imguiWantsMouse);
         void UpdateMovement(float deltaTime);
         void UpdateImGuiToggle();
-        // ScenePanel(Renderスレッド)がm_PendingSceneIndexへ書き込んだシーン切り替え要求を
-        // 見て、あればこのUpdateスレッドからLoadSceneを呼ぶ(LoadSceneをUpdateスレッド上で実行するための
-        // ハンドオフ。詳細はm_PendingSceneIndexのコメント参照)
-        void UpdateSceneSwitch();
+        // ApplyLoadedScene(Renderスレッド)が公開した初期カメラ・ウィンドウタイトルを、
+        // まだ適用していなければ適用する。m_Cameraの書き込み手をUpdateスレッド1つに保ち、
+        // ウィンドウタイトルの変更もウィンドウを所有するこのスレッドから行うためのハンドオフ
+        void UpdateAppliedSceneHandoff();
         void Update(float deltaTime);
         // 1フレーム分のUpdateと、Renderスレッドへのフレーム状態の受け渡しを行う。
         // 通常はRun()のループから、ウィンドウのドラッグ中(Windowsのモーダルループ中で
@@ -695,8 +754,8 @@ namespace Kurenai
         // キャプチャの面ごとに値を更新して使い回すFrameConstants(共有のm_FrameConstantBufferとは別。
         // ViewProj/CameraPositionだけをプローブのものへ差し替える。詳細はProbeCapture.hlsl冒頭)
         std::unique_ptr<RHI::IRHIBuffer> m_ProbeCaptureConstantBuffer;
-        // LoadSceneがm_Scene.ReflectionProbesからコピーし、以降ImGuiが編集する(m_Lightsと同じ方針)。
-        // m_SceneMutexで保護される
+        // ApplyLoadedSceneがm_Scene.ReflectionProbesからコピーし、以降ImGuiが編集する(m_Lightsと同じ方針)。
+        // どちらもRenderスレッド専有のためロックは不要
         std::vector<Assets::ReflectionProbe> m_ReflectionProbes;
         int m_SelectedProbeIndex = -1;
         // 次のRender()でプローブを焼き直す要求。シーン読み込み時とImGuiのBakeボタンで立てる。
@@ -840,38 +899,76 @@ namespace Kurenai
         // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
         int m_LightTileHeatmapMax = Defaults::LightTileHeatmapMax;
 
-        // LoadScene(Updateスレッド。UpdateSceneSwitch経由で呼ばれる)が書き込み、Render()(Renderスレッド。
-        // 描画そのものに加えUIパネルのスライダーがm_SSAORadius等を直接書き換える)が
-        // 読み書きする「シーン状態」一式をこのミューテックスで保護する。LoadScene呼び出し全体と
-        // Render()呼び出し全体をそれぞれこのミューテックスで包むため、この2つは同時に走らない
-        // (=個々のメンバに追加のロックは不要)。対象はm_Scene/m_CurrentSceneIndex/m_Cameraと、
-        // FrameCameraToModelが書き換えるm_SSAORadius等のPost Processingパラメータ、および
-        // m_Lights/m_SelectedLightIndex/m_SceneExposureEV100
-        // (宣言はそれぞれの節にあるが、書き込み元がLoadScene/ImGuiスライダーの2スレッドにまたがる点は共通)
-        std::mutex m_SceneMutex;
+        // 現在描画しているシーン。ApplyLoadedScene(Renderスレッド)だけが差し替え、
+        // Render()とUIパネル(いずれもRenderスレッド)だけが読む。つまりRenderスレッド専有の状態で、
+        // ミューテックスによる保護は不要(以前はLoadSceneがUpdateスレッドから直接書き換えていたため
+        // m_SceneMutexが要った。経緯はdocs/Architecture.html 23章)。
+        //
+        // 【読み込み中は空になる】シーン切り替えを開始した時点で旧シーンを手放すため
+        // (VRAMの二重常駐を避けるため)、読み込みが終わるまでInstancesが空のまま描画される
         Assets::Scene m_Scene;
         // m_Sceneに対応するレイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの
-        // 統合バッファ。LoadSceneがm_Sceneを読み込んだ直後に構築し、シーン切り替えのたびに
-        // 作り直す。デバイスがレイトレーシング非対応(DX11、またはDXR Tier 1.1未満のアダプタ)の
+        // 統合バッファ。Loaderスレッドがm_Sceneと一緒に構築し、ApplyLoadedSceneが差し替える。
+        // デバイスがレイトレーシング非対応(DX11、またはDXR Tier 1.1未満のアダプタ)の
         // 場合は空のまま(IsValid()==false)で、描画側は従来のスクリーンスペース手法を使う。
-        // m_Sceneと同じくm_SceneMutexで保護される(構築はUpdateスレッド、参照はRenderスレッド)。
         //
         // 【破棄順】m_Sceneより後に宣言することで、メンバ破棄順(宣言の逆順)により
         // m_Sceneの頂点/インデックスバッファより先に破棄される
         Assets::RaytracingScene m_RaytracingScene;
+        // m_Sceneと同じくRenderスレッド専有(ScenePanelが選択中のシーンの表示に読む)
         size_t m_CurrentSceneIndex = 0;
+        // Updateスレッド専有。UpdateMouseLook/UpdateMovementが書き換え、TickFrameがFrameStateへ
+        // スナップショットしてRenderスレッドへ渡す。シーン読み込み時の初期カメラも
+        // (Renderスレッドではなく)UpdateAppliedSceneHandoff経由でこのスレッドが適用することで、
+        // 書き込み手を1スレッドに保っている
         Core::Camera m_Camera;
+
+        // --- シーン読み込みのハンドオフ -------------------------------------------------------
+
+        std::thread m_LoaderThread;
+
+        // Renderスレッド専有。ScenePanelが押されたときに積まれ、UpdateSceneStreamingが消費する。
+        // -1は「要求なし」。UIもRenderスレッドで動くため、これはatomicである必要がない
+        int m_PendingSceneRequest = -1;
+        // Renderスレッド専有。Loaderスレッドへ発注してから完成品を受け取るまでtrue。
+        // 多重発注を防ぐために見る
+        bool m_SceneLoadInFlight = false;
+
+        // Render → Loader の要求。-1は「要求なし」
+        std::mutex m_LoadRequestMutex;
+        std::condition_variable m_LoadRequestCV;
+        int m_LoadRequestSceneIndex = -1;
+        bool m_StopLoaderThread = false;
+
+        // Render → Loader の破棄依頼(RetiredAssetsのコメント参照)
+        std::mutex m_RetiredAssetsMutex;
+        std::vector<RetiredAssets> m_RetiredAssets;
+
+        // Loader → Render の完成品
+        std::mutex m_LoadedSceneMutex;
+        std::unique_ptr<LoadedScene> m_LoadedScene;
+
+        // Render → Update の初期カメラ・ウィンドウタイトル。
+        // 毎フレームのロックを避けるため、まずatomicで有無を判定してから中身を取りにいく
+        std::atomic<bool> m_AppliedScenePending{ false };
+        std::mutex m_AppliedSceneMutex;
+        Core::Camera m_AppliedSceneCamera;
+        std::wstring m_AppliedSceneTitle;
+
+        // Loaderスレッド専有。「今どのスカイボックスを読み込み済みか」の真実。
+        // スカイボックスを読むのがこのスレッドだけなので、ここで持つのが最も素直になる
+        std::wstring m_LoaderSkyboxPath;
 
         // DiscoverScenesが起動時に一度だけ列挙する.ksceneの一覧。要素の並びがImGuiのシーン
         // 一覧・LoadSceneのインデックスに対応する(ファイル名の昇順)
         std::vector<std::wstring> m_SceneFilePaths;
         std::vector<std::wstring> m_SceneDisplayNames;
 
-        // LoadSceneがm_Scene.Lights(SceneLoaderが各ModelInstanceのModel::Lightsをワールド空間へ
+        // ApplyLoadedSceneがm_Scene.Lights(SceneLoaderが各ModelInstanceのModel::Lightsをワールド空間へ
         // 変換し、.kscene自身の[Light]セクションのライトと合成済みのシーン全体のライト一覧)から
         // コピーし、以降ImGui(Lightingパネル)が編集する。アセット由来のデータとユーザー編集を
-        // 分離するため(シーンを再読み込みすればアセット既定値に戻る)。m_SceneMutexで保護される
-        // (m_Sceneと同じ理由)
+        // 分離するため(シーンを再読み込みすればアセット既定値に戻る)。
+        // m_Sceneと同じくRenderスレッド専有のためロックは不要
         std::vector<Assets::Light> m_Lights;
         int m_SelectedLightIndex = -1;
         // 実在の写真露出値(EV100)。太陽・環境光・ポイント/スポットライトすべてに同じ値がかかる、
@@ -896,12 +993,6 @@ namespace Kurenai
         bool m_EffectiveExposureInitialized = false;
         // 実効プリ露出の時間平滑化の速さ[1/秒]。段付きを防ぐために指数追従させる
         float m_EffectiveExposureAdaptSpeed = 2.0f;
-
-        // RenderSceneSwitchUI(Renderスレッド)でシーン切り替えボタンが押されたときに書き込まれ、
-        // UpdateSceneSwitch(Updateスレッド)が毎フレーム読み取って消費する1要素の受け渡し用。
-        // LoadScene自体はUpdateスレッドから(m_SceneMutexで保護して)呼ぶ必要があるため、
-        // クリック検出(Renderスレッド)と実際の呼び出し(Updateスレッド)をこれで分離する
-        std::atomic<int> m_PendingSceneIndex{ -1 };
 
         std::chrono::steady_clock::time_point m_LastFrameTime;
 

@@ -11,6 +11,7 @@ namespace Kurenai::RHI
 {
     DX12Texture::DX12Texture(
         DX12Device* device,
+        DX12DescriptorHeap* srvUavHeap,
         Microsoft::WRL::ComPtr<ID3D12Resource> resource,
         D3D12_RESOURCE_STATES initialState,
         uint32_t srvIndex,
@@ -21,6 +22,7 @@ namespace Kurenai::RHI
         std::vector<uint32_t> sliceDsvIndices,
         uint32_t cubeCount)
         : m_Device(device)
+        , m_SrvUavHeap(srvUavHeap)
         , m_Resource(std::move(resource))
         , m_CurrentState(initialState)
         , m_SrvIndex(srvIndex)
@@ -37,7 +39,7 @@ namespace Kurenai::RHI
     {
         if (m_SrvIndex != kInvalid)
         {
-            m_Device->GetSrvCpuHeap()->Free(m_SrvIndex);
+            m_SrvUavHeap->Free(m_SrvIndex);
         }
         if (m_RtvIndex != kInvalid)
         {
@@ -49,11 +51,11 @@ namespace Kurenai::RHI
         }
         if (m_UavIndex != kInvalid)
         {
-            m_Device->GetSrvCpuHeap()->Free(m_UavIndex);
+            m_SrvUavHeap->Free(m_UavIndex);
         }
         for (const uint32_t mipUavIndex : m_MipUavIndices)
         {
-            m_Device->GetSrvCpuHeap()->Free(mipUavIndex);
+            m_SrvUavHeap->Free(mipUavIndex);
         }
         // スライスごとのDSVはSRVヒープではなくDSVヒープから確保しているため、解放先も分ける
         // (CreateDepthTextureArrayで作成した場合はm_DsvIndexをkInvalidのままにしてあるので、
@@ -74,7 +76,7 @@ namespace Kurenai::RHI
             Core::Logger::Error("DX12", "GetSrvCpuHandle: SRVを持たないテクスチャが参照されました。nullディスクリプタで代替します");
             return m_Device->GetNullSrvCpuHandle();
         }
-        return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_SrvIndex);
+        return m_SrvUavHeap->GetCpuHandle(m_SrvIndex);
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetRtvCpuHandle() const
@@ -124,7 +126,7 @@ namespace Kurenai::RHI
                         std::to_string(m_MipUavIndices.size()) + ")。nullディスクリプタで代替します");
                 return m_Device->GetNullUavCpuHandle();
             }
-            return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_MipUavIndices[mipLevel]);
+            return m_SrvUavHeap->GetCpuHandle(m_MipUavIndices[mipLevel]);
         }
 
         if (m_UavIndex == kInvalid)
@@ -132,7 +134,7 @@ namespace Kurenai::RHI
             Core::Logger::Error("DX12", "GetUavCpuHandle: UAVを持たないテクスチャが参照されました。nullディスクリプタで代替します");
             return m_Device->GetNullUavCpuHandle();
         }
-        return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_UavIndex);
+        return m_SrvUavHeap->GetCpuHandle(m_UavIndex);
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Texture::GetCubeUavCpuHandle(uint32_t face, uint32_t mipLevel, uint32_t cubeIndex) const
@@ -149,7 +151,7 @@ namespace Kurenai::RHI
                     ", UAV数: " + std::to_string(m_MipUavIndices.size()) + ")。nullディスクリプタで代替します");
             return m_Device->GetNullUavCpuHandle();
         }
-        return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_MipUavIndices[index]);
+        return m_SrvUavHeap->GetCpuHandle(m_MipUavIndices[index]);
     }
 
     void DX12Texture::TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState)

@@ -18,12 +18,12 @@ namespace Kurenai::RHI
     {
         if (m_SrvIndex != kInvalid && m_Device)
         {
-            m_Device->GetSrvCpuHeap()->Free(m_SrvIndex);
+            m_Device->GetAssetSrvCpuHeap()->Free(m_SrvIndex);
         }
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12AccelerationStructure::GetSrvCpuHandle() const
     {
-        return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_SrvIndex);
+        return m_Device->GetAssetSrvCpuHeap()->GetCpuHandle(m_SrvIndex);
     }
 }

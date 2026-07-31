@@ -37,7 +37,10 @@ namespace Kurenai::UI
         virtual const char* GetMenuLabel() const = 0;
 
         // ImGui::Begin / Endも含めてこの中で完結させる。
-        // 呼び出し元(Renderスレッド)はm_SceneMutexを保持済み
+        // 呼び出し元はRenderスレッドで、シーン状態(m_Scene・ライト・反射プローブ・ポストプロセスの
+        // パラメータ)もRenderスレッド専有のため、パネルからそのまま読み書きしてよい
+        // (シーンの読み込みは専用のLoaderスレッドで走るが、エンジン状態への反映は
+        //  Renderスレッドのフレーム境界でのみ行われる。docs/Architecture.html 23章)
         virtual void Draw(const PanelDrawContext& context) = 0;
 
         bool IsVisible() const { return m_Visible; }

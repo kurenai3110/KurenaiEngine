@@ -36,9 +36,9 @@ namespace Kurenai::UI
             const std::string label = Core::WideToUtf8(m_Engine.m_SceneDisplayNames[i]);
             if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0.0f)))
             {
-                // LoadScene自体はUpdateスレッドから呼ぶ必要があるため、ここでは要求を書き込むだけにする
-                // (KurenaiEngine3D::UpdateSceneSwitch参照)
-                m_Engine.m_PendingSceneIndex.store(static_cast<int>(i));
+                // 実際の読み込みはLoaderスレッドが行うため、ここは要求を出すだけで即座に戻る
+                // (KurenaiEngine3D::RequestSceneLoad参照)
+                m_Engine.RequestSceneLoad(i);
             }
 
             if (isCurrent)

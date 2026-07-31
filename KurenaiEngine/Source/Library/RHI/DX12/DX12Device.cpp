@@ -76,14 +76,19 @@ namespace Kurenai::RHI
         constexpr uint32_t kGraphicsSrvHeapCapacityPerFrame = kTextureSlotCount * kMaxSrvTableBlocksPerFrame;
         constexpr uint32_t kComputeSrvHeapCapacityPerFrame = kComputeTableSlotCount * kMaxComputeDispatchesPerFrame;
 
-        // m_SrvCpuHeap(非シェーダー可視。テクスチャ/構造化バッファ作成時にCreateShaderResourceView等の
-        // 恒久的なビューを1つずつ確保する)の総容量。LoadSceneはm_Model = Assets::LoadModel(...)のように
-        // 新シーンのテクスチャを先にすべて作成してから旧シーンのテクスチャを解放する(右辺の評価が先に
-        // 終わってから代入される)ため、切り替え中は旧シーン+新シーンのテクスチャが一時的に同時に
-        // 確保された状態になる。Bistro Exteriorのような大規模シーンではこの一時的な二重確保だけで
-        // 数百ディスクリプタに達するため、余裕を持った値にしておく(非シェーダー可視ヒープでCPUメモリの
-        // みを消費するため、大きめにしても実害はない)
-        constexpr uint32_t kSrvCpuHeapCapacity = 4096;
+        // 非シェーダー可視のCBV_SRV_UAVヒープ(テクスチャ/構造化バッファ作成時に
+        // CreateShaderResourceView等の恒久的なビューを1つずつ確保する)の容量。
+        //
+        // DX12DescriptorHeapはロックを持たないため、確保・解放するスレッドごとに別のヒープへ
+        // 分けてある(DX12Device.hのGetAssetSrvCpuHeap/GetRenderSrvCpuHeapのコメント参照)。
+        //
+        // アセット側: Bistro Exteriorでテクスチャ182枚 + RT統合バッファ5本 + TLAS 1本。
+        // シーン切り替え時は旧シーンを先に破棄してから新シーンを読むため二重確保は起きない。
+        // レンダー側: レンダーターゲットのSRV/UAVに加え、Hi-Zとブルームのミップ別UAV、
+        // IBL・反射プローブのキューブマップ(プローブ数×6面×ミップ数のUAV)が効く。
+        // どちらも非シェーダー可視ヒープでCPUメモリのみを消費するため、余裕を持った値にしておく
+        constexpr uint32_t kAssetSrvCpuHeapCapacity = 2048;
+        constexpr uint32_t kRenderSrvCpuHeapCapacity = 2048;
 
         DXGI_FORMAT ToDXGIFormat(Format format)
         {
@@ -243,7 +248,10 @@ namespace Kurenai::RHI
         // 順になるため、リサイズ中は一時的に7本必要になる。余裕を持たせて16本確保する(DSVヒープは
         // CPU側のみでGPUメモリを消費しないため、多めに取っても実害がない)
         m_DsvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false);
-        m_SrvCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvCpuHeapCapacity, false);
+        m_AssetSrvCpuHeap =
+            std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kAssetSrvCpuHeapCapacity, false);
+        m_RenderSrvCpuHeap =
+            std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRenderSrvCpuHeapCapacity, false);
         // 1フレーム分のコマンドをまとめて記録してから1回だけ実行する設計のため、描画のたびに
         // 新しいkTextureSlotCount個のブロックを払い出せるよう、1フレームに必要な最大数を見込んで確保する。
         // さらにCPUがGPU完了を待たずに次フレームを記録し始めるため、kFrameCountフレームぶんの容量を持たせる
@@ -264,7 +272,8 @@ namespace Kurenai::RHI
         // (名前が無いと"Unnamed ID3D12DescriptorHeap Object"としか出ず、アドレスから推測するしかない)
         m_RtvHeap->GetHeap()->SetName(L"KurenaiEngine RTV Heap");
         m_DsvHeap->GetHeap()->SetName(L"KurenaiEngine DSV Heap");
-        m_SrvCpuHeap->GetHeap()->SetName(L"KurenaiEngine SRV CPU Heap");
+        m_AssetSrvCpuHeap->GetHeap()->SetName(L"KurenaiEngine Asset SRV CPU Heap");
+        m_RenderSrvCpuHeap->GetHeap()->SetName(L"KurenaiEngine Render SRV CPU Heap");
         m_ShaderVisibleSrvHeap->GetHeap()->SetName(L"KurenaiEngine Shader Visible SRV Heap");
         m_ShaderVisibleSamplerHeap->GetHeap()->SetName(L"KurenaiEngine Shader Visible Sampler Heap");
 
@@ -293,19 +302,19 @@ namespace Kurenai::RHI
         // (=DX11の未バインドスロットと同じ挙動)。これをDX12CommandListのシャドウ配列の初期値にすることで、
         // ディスクリプタテーブルのブロックに未初期化のまま残る領域が構造的に無くなる
         {
-            m_NullSrvIndex = m_SrvCpuHeap->Allocate();
+            m_NullSrvIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvDesc{};
             nullSrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             nullSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             nullSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             nullSrvDesc.Texture2D.MipLevels = 1;
-            m_Device->CreateShaderResourceView(nullptr, &nullSrvDesc, m_SrvCpuHeap->GetCpuHandle(m_NullSrvIndex));
+            m_Device->CreateShaderResourceView(nullptr, &nullSrvDesc, m_RenderSrvCpuHeap->GetCpuHandle(m_NullSrvIndex));
 
-            m_NullUavIndex = m_SrvCpuHeap->Allocate();
+            m_NullUavIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_UNORDERED_ACCESS_VIEW_DESC nullUavDesc{};
             nullUavDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             nullUavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-            m_Device->CreateUnorderedAccessView(nullptr, nullptr, &nullUavDesc, m_SrvCpuHeap->GetCpuHandle(m_NullUavIndex));
+            m_Device->CreateUnorderedAccessView(nullptr, nullptr, &nullUavDesc, m_RenderSrvCpuHeap->GetCpuHandle(m_NullUavIndex));
         }
 
         CreateRootSignature();
@@ -651,15 +660,15 @@ namespace Kurenai::RHI
                     "構造化バッファの作成に失敗しました");
             }
 
-            const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+            const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
             uavDesc.Format = DXGI_FORMAT_UNKNOWN;
             uavDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
             uavDesc.Buffer.StructureByteStride = desc.StrideInBytes;
-            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
 
-            return std::make_unique<DX12Buffer>(this, resource, uavIndex, desc.SizeInBytes, desc.StrideInBytes);
+            return std::make_unique<DX12Buffer>(this, m_RenderSrvCpuHeap.get(), resource, uavIndex, desc.SizeInBytes, desc.StrideInBytes);
         }
 
         // コンピュートがUAVで書き、ピクセルシェーダがSRVで読む構造化バッファ。CPUからは書き込まないため
@@ -687,24 +696,24 @@ namespace Kurenai::RHI
 
             const uint32_t elementCount = desc.SizeInBytes / desc.StrideInBytes;
 
-            const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+            const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
             uavDesc.Format = DXGI_FORMAT_UNKNOWN;
             uavDesc.Buffer.NumElements = elementCount;
             uavDesc.Buffer.StructureByteStride = desc.StrideInBytes;
-            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
 
-            const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+            const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
             srvDesc.Format = DXGI_FORMAT_UNKNOWN;
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srvDesc.Buffer.NumElements = elementCount;
             srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
-            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
-            return std::make_unique<DX12Buffer>(this, resource, uavIndex, srvIndex, desc.SizeInBytes, desc.StrideInBytes);
+            return std::make_unique<DX12Buffer>(this, m_RenderSrvCpuHeap.get(), resource, uavIndex, srvIndex, desc.SizeInBytes, desc.StrideInBytes);
         }
 
         // 作成時の初期データから変化しない読み取り専用の構造化バッファ。DEFAULTヒープにSRVだけを持ち、
@@ -758,19 +767,20 @@ namespace Kurenai::RHI
                 UploadSubmitAndWait();
             }
 
-            const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+            // レイトレーシングのシーンジオメトリ用。アセット由来なのでアセット側のヒープから確保する
+            const uint32_t srvIndex = m_AssetSrvCpuHeap->Allocate();
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
             srvDesc.Format = DXGI_FORMAT_UNKNOWN;
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srvDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
             srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
-            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
 
             // ステージングリングを持たない(uploadResource=nullptr、uploadRingCapacity=1)構成で作る。
             // GENERIC_READはPIXEL_SHADER_RESOURCE/NON_PIXEL_SHADER_RESOURCEを含むため、
             // DX12Buffer::TransitionToが呼ばれても余計なバリアが積まれないよう初期状態を合わせておく
-            return std::make_unique<DX12Buffer>(this, resource, srvIndex, desc.SizeInBytes, desc.StrideInBytes, D3D12_RESOURCE_STATE_GENERIC_READ);
+            return std::make_unique<DX12Buffer>(this, m_AssetSrvCpuHeap.get(), resource, srvIndex, desc.SizeInBytes, desc.StrideInBytes, D3D12_RESOURCE_STATE_GENERIC_READ);
         }
 
         // 読み取り専用の構造化バッファ(StructuredBuffer<T>)。ピクセルシェーダが毎フレーム読むため
@@ -792,14 +802,14 @@ namespace Kurenai::RHI
                     &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&resource)),
                 "読み取り専用構造化バッファの作成に失敗しました");
 
-            const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+            const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
             srvDesc.Format = DXGI_FORMAT_UNKNOWN;
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srvDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
             srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
-            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
             // CPUはGPU完了を待たずに次フレームの記録を始める(kFrameCount)ため、直近フレームぶんの
             // 書き込みが同時に生存できるだけのステージングリングを持たせる。
@@ -818,6 +828,7 @@ namespace Kurenai::RHI
 
             return std::make_unique<DX12Buffer>(
                 this,
+                m_RenderSrvCpuHeap.get(),
                 resource,
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                 srvIndex,
@@ -1090,7 +1101,9 @@ namespace Kurenai::RHI
             CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         m_UploadCommandList->ResourceBarrier(1, &toSrvBarrier);
 
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        // ファイル/デコード済み画像から作るテクスチャ(マテリアル・スカイボックス・プレースホルダ)は
+        // すべてアセット由来。シーン読み込み専用スレッドが確保・解放するためアセット側のヒープを使う
+        const uint32_t srvIndex = m_AssetSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = metadata.format;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1104,10 +1117,10 @@ namespace Kurenai::RHI
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
         }
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
 
         auto texture = std::make_unique<DX12Texture>(
-            this, resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid);
+            this, m_AssetSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid);
 
         // アップロードバッファはこの関数を抜けるまで生存させる必要があるため、ここで同期的に実行完了を待つ
         UploadSubmitAndWait();
@@ -1189,18 +1202,18 @@ namespace Kurenai::RHI
             m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_RENDER_TARGET, &clearValue, IID_PPV_ARGS(&resource)),
             "レンダーテクスチャの作成に失敗しました");
 
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MipLevels = 1;
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
         const uint32_t rtvIndex = m_RtvHeap->Allocate();
         m_Device->CreateRenderTargetView(resource.Get(), nullptr, m_RtvHeap->GetCpuHandle(rtvIndex));
 
-        return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_RENDER_TARGET, srvIndex, rtvIndex, DX12Texture::kInvalid);
+        return std::make_unique<DX12Texture>(this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_RENDER_TARGET, srvIndex, rtvIndex, DX12Texture::kInvalid);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateUAVTexture(uint32_t width, uint32_t height, Format format)
@@ -1216,22 +1229,22 @@ namespace Kurenai::RHI
             m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
             "UAVテクスチャの作成に失敗しました");
 
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MipLevels = 1;
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
-        const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
         uavDesc.Format = dxgiFormat;
         uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+        m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
 
         return std::make_unique<DX12Texture>(
-            this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid, uavIndex);
+            this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid, uavIndex);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels)
@@ -1253,13 +1266,13 @@ namespace Kurenai::RHI
             "ミップ付きUAVテクスチャの作成に失敗しました");
 
         // 全ミップを見るSRV(MipLevels=全指定)。デバッグ表示などでSampleLevelにより任意のミップを読む用
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MipLevels = mipLevels;
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
         // ミップごとに単一ミップのUAVを張り、コンピュートシェーダーがミップ単位で書き込めるようにする
         // (Hi-Zの「前段ミップを読んで次段へ書く」ダウンサンプルだけでなく、IBLプリフィルタ済み鏡面マップの
@@ -1268,17 +1281,17 @@ namespace Kurenai::RHI
         mipUavIndices.reserve(mipLevels);
         for (uint32_t mip = 0; mip < mipLevels; ++mip)
         {
-            const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+            const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
             uavDesc.Format = dxgiFormat;
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             uavDesc.Texture2D.MipSlice = mip;
-            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
             mipUavIndices.push_back(uavIndex);
         }
 
         return std::make_unique<DX12Texture>(
-            this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
+            this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
             DX12Texture::kInvalid, std::move(mipUavIndices));
     }
 
@@ -1338,7 +1351,7 @@ namespace Kurenai::RHI
 
         // 全6面・全ミップを1枚のTextureCube(配列版はTextureCubeArray)として読むSRV
         // (サンプリング側、DeferredLighting.hlsl等)
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1356,7 +1369,7 @@ namespace Kurenai::RHI
             srvDesc.TextureCube.MostDetailedMip = 0;
             srvDesc.TextureCube.MipLevels = mipLevels;
         }
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
         // キューブ×面×ミップの組み合わせごとに単一配列スライス・単一ミップのUAV(Texture2DArray、要素数1)を
         // 張り、コンピュートシェーダーが面ごとに1回ずつディスパッチして書き込めるようにする(HLSL側は
@@ -1371,21 +1384,21 @@ namespace Kurenai::RHI
             {
                 for (uint32_t face = 0; face < DX12Texture::kCubeFaceCount; ++face)
                 {
-                    const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+                    const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
                     D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
                     uavDesc.Format = dxgiFormat;
                     uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
                     uavDesc.Texture2DArray.MipSlice = mip;
                     uavDesc.Texture2DArray.FirstArraySlice = cube * DX12Texture::kCubeFaceCount + face;
                     uavDesc.Texture2DArray.ArraySize = 1;
-                    m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+                    m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
                     mipUavIndices.push_back(uavIndex);
                 }
             }
         }
 
         return std::make_unique<DX12Texture>(
-            this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
+            this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
             DX12Texture::kInvalid, std::move(mipUavIndices), std::vector<uint32_t>{}, cubeCount);
     }
 
@@ -1415,15 +1428,15 @@ namespace Kurenai::RHI
         dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
         m_Device->CreateDepthStencilView(resource.Get(), &dsvDesc, m_DsvHeap->GetCpuHandle(dsvIndex));
 
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MipLevels = 1;
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
-        return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, dsvIndex);
+        return std::make_unique<DX12Texture>(this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, dsvIndex);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateDepthTextureArray(
@@ -1467,7 +1480,7 @@ namespace Kurenai::RHI
             "深度テクスチャ配列の作成に失敗しました");
 
         // 全スライスを1枚のTexture2DArrayとして読むSRV(サンプリング側。ShadowSampling.hlsli等)
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -1476,7 +1489,7 @@ namespace Kurenai::RHI
         srvDesc.Texture2DArray.MipLevels = 1;
         srvDesc.Texture2DArray.FirstArraySlice = 0;
         srvDesc.Texture2DArray.ArraySize = arraySize;
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
         // スライスごとに単一配列スライスのDSVを張り、パスごとに1スライスずつ描き込めるようにする
         // (CreateMippedUAVTextureCubeが面ごとのUAVを張るのと同じ考え方)
@@ -1497,7 +1510,7 @@ namespace Kurenai::RHI
 
         // dsvIndexはkInvalidにする(スライスごとのDSVで代替するため。~DX12Textureでの二重解放も防ぐ)
         return std::make_unique<DX12Texture>(
-            this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
+            this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
             DX12Texture::kInvalid, std::vector<uint32_t>{}, std::move(sliceDsvIndices));
     }
 
@@ -1728,13 +1741,14 @@ namespace Kurenai::RHI
             // DXRのAS用SRVは他のSRVと作法が異なり、pResourceにnullptrを渡して
             // RaytracingAccelerationStructure.Locationへ「GPU仮想アドレス」を直接書く
             // (ディスクリプタがリソースではなくアドレスを指す)
-            srvIndex = m_SrvCpuHeap->Allocate();
+            // TLASはシーンのジオメトリから作られるアセット由来のリソース
+            srvIndex = m_AssetSrvCpuHeap->Allocate();
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
             srvDesc.Format = DXGI_FORMAT_UNKNOWN;
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srvDesc.RaytracingAccelerationStructure.Location = result->GetGPUVirtualAddress();
-            m_Device->CreateShaderResourceView(nullptr, &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+            m_Device->CreateShaderResourceView(nullptr, &srvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
         }
 
         return std::make_unique<DX12AccelerationStructure>(this, result, srvIndex);

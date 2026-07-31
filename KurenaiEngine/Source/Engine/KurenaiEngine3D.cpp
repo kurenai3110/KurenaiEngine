@@ -1471,7 +1471,19 @@ namespace Kurenai
         CreatePrecisionDependentPipelineStates();
 
         DiscoverScenes();
-        LoadScene(0);
+
+        // 起動時の1シーン目だけは同期的に読み込む。この時点ではRender/Loaderのどちらのスレッドも
+        // まだ動いていないため、通常のハンドオフを経由せず直接読み込んで反映してよい
+        // (初回フレームより前にシーンが揃う従来の挙動を保つ)。
+        // m_LoaderSkyboxPathはCreateSceneResourcesが読み込んだ既定スカイボックスに合わせておく
+        m_LoaderSkyboxPath = m_CurrentSkyboxPath;
+        if (std::unique_ptr<LoadedScene> initialScene = LoadSceneOnLoaderThread(0))
+        {
+            ApplyLoadedScene(*initialScene);
+            // ApplyLoadedSceneはUpdateスレッドへの引き渡しとして公開するだけなので、
+            // まだUpdateスレッドが回っていないここでは自分で取り込む
+            UpdateAppliedSceneHandoff();
+        }
     }
 
     RHI::Format KurenaiEngine3D::GetEmissiveFormat() const
@@ -1761,37 +1773,213 @@ namespace Kurenai
                 ", バッファ精度=" + (legacyPrecision ? "Legacy8bit" : "HDR") + ")");
     }
 
-    void KurenaiEngine3D::LoadScene(size_t sceneIndex)
+    void KurenaiEngine3D::RequestSceneLoad(size_t sceneIndex)
     {
         if (sceneIndex >= m_SceneFilePaths.size())
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "RequestSceneLoad: シーン番号" + std::to_string(sceneIndex) + "が範囲外です(シーン数: " +
+                    std::to_string(m_SceneFilePaths.size()) + ")。要求を無視します");
+            return;
+        }
+
+        // UIパネルもRenderスレッドで動くため、ここは単なるRenderスレッド内の受け渡しでよい。
+        // 実際の発注はUpdateSceneStreaming(フレーム先頭)がまとめて行う
+        m_PendingSceneRequest = static_cast<int>(sceneIndex);
+    }
+
+    void KurenaiEngine3D::UpdateSceneStreaming()
+    {
+        // --- 出来上がったシーンがあれば取り込む ---
+        std::unique_ptr<LoadedScene> loaded;
+        {
+            std::lock_guard<std::mutex> lock(m_LoadedSceneMutex);
+            loaded = std::move(m_LoadedScene);
+        }
+        if (loaded)
+        {
+            ApplyLoadedScene(*loaded);
+            m_SceneLoadInFlight = false;
+        }
+
+        // --- 保留中の切り替え要求をLoaderスレッドへ発注する ---
+        // 読み込み中は発注しない(最後の要求はm_PendingSceneRequestに残るので取りこぼさない)
+        if (m_PendingSceneRequest < 0 || m_SceneLoadInFlight)
         {
             return;
         }
 
-        // m_Scene/m_Camera/Post ProcessingパラメータはRender()(Renderスレッド)も読み書きするため、
-        // この関数全体をm_SceneMutexで保護する(詳細はm_SceneMutexのコメント参照)。UpdateSceneSwitch
-        // (Updateスレッド)からのみ呼ばれる前提のため、Renderスレッドとの競合はこれで排他できる
-        std::lock_guard<std::mutex> sceneLock(m_SceneMutex);
+        const size_t sceneIndex = static_cast<size_t>(m_PendingSceneRequest);
+        m_PendingSceneRequest = -1;
+
+        // 旧シーンのGPUリソースを手放す前に、GPUが旧シーンを参照するコマンド(直前まで提出されていた
+        // 描画コマンド)の実行を終えるまで待つ。特にDX12はCPUがGPU完了を待たずに次フレームの記録を
+        // 始める多重バッファリング設計のため、これを省くとGPUがまだ読んでいるバッファ/テクスチャを
+        // 解放してしまう(詳細はIRHIDevice::WaitForGPUIdleのコメント参照)。
+        // このフレームのGPUコマンドはまだ1つも積んでいないため、待ち時間は前フレームぶんだけで済む
+        m_Device->WaitForGPUIdle();
+
+        // 読み込み開始と同時に旧シーンを手放す。読み込み完了まで待ってから捨てると新旧の
+        // GPUリソースが同時に載ってVRAMがほぼ2倍になるため、先に空にする方を選んでいる。
+        // その代わり読み込み中はシーンが描かれない(UIとスカイボックスのみになる)
+        RetiredAssets retired;
+        retired.Scene = std::move(m_Scene);
+        retired.RaytracingScene = std::move(m_RaytracingScene);
+        m_Scene = Assets::Scene{};
+        m_RaytracingScene = Assets::RaytracingScene{};
+        RetireAssets(std::move(retired));
+
+        {
+            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
+            m_LoadRequestSceneIndex = static_cast<int>(sceneIndex);
+        }
+        m_LoadRequestCV.notify_one();
+        m_SceneLoadInFlight = true;
+    }
+
+    void KurenaiEngine3D::RetireAssets(RetiredAssets&& retired)
+    {
+        std::lock_guard<std::mutex> lock(m_RetiredAssetsMutex);
+        m_RetiredAssets.push_back(std::move(retired));
+    }
+
+    void KurenaiEngine3D::LoaderThreadMain()
+    {
+        // TextureImage::LoadFromFileがWICを使う経路(.dds/.tga以外)に備えてCOMを初期化しておく。
+        // COMはスレッドごとに初期化が必要で、未初期化のままWICを呼ぶとハングする
+        // (packedアセットは.ktex=DDSなので通常この経路には入らないが、保険として揃えておく)
+        const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        // 破棄依頼を引き取って実際に解放する。アセット用ディスクリプタヒープを触るのは
+        // このスレッドだけ、という不変条件を保つための処理(RetiredAssetsのコメント参照)
+        const auto destroyRetiredAssets = [this]()
+        {
+            std::vector<RetiredAssets> retired;
+            {
+                std::lock_guard<std::mutex> lock(m_RetiredAssetsMutex);
+                retired.swap(m_RetiredAssets);
+            }
+            // retiredのデストラクタでGPUリソースが解放される
+        };
+
+        for (;;)
+        {
+            int sceneIndex = -1;
+            {
+                std::unique_lock<std::mutex> lock(m_LoadRequestMutex);
+                m_LoadRequestCV.wait(lock, [this] { return m_LoadRequestSceneIndex >= 0 || m_StopLoaderThread; });
+                if (m_StopLoaderThread && m_LoadRequestSceneIndex < 0)
+                {
+                    break;
+                }
+                sceneIndex = m_LoadRequestSceneIndex;
+                m_LoadRequestSceneIndex = -1;
+            }
+
+            // 先に破棄を済ませてから読み込む(Renderスレッドは手放す前にWaitForGPUIdle済み)。
+            // 新シーンを作る前に旧シーンを解放することで、VRAMの二重常駐を避ける
+            destroyRetiredAssets();
+
+            if (sceneIndex < 0)
+            {
+                continue;
+            }
+
+            std::unique_ptr<LoadedScene> loaded = LoadSceneOnLoaderThread(static_cast<size_t>(sceneIndex));
+            if (!loaded)
+            {
+                // 読み込みに失敗した場合も「読み込み中」状態を解除しないとUIが固まるため、
+                // 空の完成品を渡してRenderスレッドに終了を知らせる(シーンは空のままになる)
+                loaded = std::make_unique<LoadedScene>();
+                loaded->SceneIndex = static_cast<size_t>(sceneIndex);
+                loaded->Camera = ComputeInitialCamera(loaded->Scene);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(m_LoadedSceneMutex);
+                m_LoadedScene = std::move(loaded);
+            }
+        }
+
+        // 停止時に残っている破棄依頼をこのスレッドで片付ける
+        destroyRetiredAssets();
+
+        if (SUCCEEDED(comResult))
+        {
+            CoUninitialize();
+        }
+    }
+
+    std::unique_ptr<KurenaiEngine3D::LoadedScene> KurenaiEngine3D::LoadSceneOnLoaderThread(size_t sceneIndex)
+    {
+        if (sceneIndex >= m_SceneFilePaths.size())
+        {
+            Core::Logger::Error("KurenaiEngine3D", "LoadSceneOnLoaderThread: シーン番号が範囲外です");
+            return nullptr;
+        }
 
         // [Model]Pathの基準ディレクトリ(Assetsルート)。.kmodel自身の内部パス(.kmodelがある
         // ディレクトリからの相対)とは基準が異なる点に注意(SceneLoader.h参照)
         const std::wstring assetRootDirectory = GetModuleDirectory() + L"Assets\\";
 
-        // 旧シーン(m_Scene)のバッファ/テクスチャを破棄する前に、GPUが旧シーンを参照する
-        // コマンド(直前まで提出されていた描画コマンド)の実行を終えるまで待つ。特にDX12は
-        // CPUがGPU完了を待たずに次フレームの記録を始める多重バッファリング設計のため、
-        // これを省くとGPUがまだ読んでいるバッファ/テクスチャを解放してしまい、
-        // ヒープ破損によるクラッシュを引き起こす(詳細はIRHIDevice::WaitForGPUIdleのコメント参照)
-        m_Device->WaitForGPUIdle();
+        auto loaded = std::make_unique<LoadedScene>();
+        loaded->SceneIndex = sceneIndex;
 
-        // Assets::LoadSceneの戻り値(新シーンの全テクスチャ/バッファ)を作り終えてから代入すると、
-        // 代入演算子が旧m_Sceneを破棄するまでの間、新旧シーンのGPUリソース(特にDX12の
-        // 非シェーダー可視SRVディスクリプタ)が同時に確保された状態になり、大規模シーンでは
-        // ディスクリプタヒープを圧迫する。先に空のSceneで置き換えて旧シーンを解放しておく
-        // (直前のWaitForGPUIdleによりGPUはもう旧シーンを参照していないため安全)
-        m_Scene = Assets::Scene{};
-        m_Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory);
-        m_CurrentSceneIndex = sceneIndex;
+        try
+        {
+            loaded->Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory);
+        }
+        catch (const std::exception& e)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "シーンの読み込みに失敗しました: " + WideToUtf8(m_SceneFilePaths[sceneIndex]) + " : " + e.what());
+            return nullptr;
+        }
+
+        // [Scene]Skyboxでスカイボックスを差し替える(指定が無ければ既定へ戻す)。
+        // 「今どのスカイボックスを読み込み済みか」を知っているのはこのスレッドだけなので、
+        // 差し替えが要るかの判定もここで行う(不要ならSkyboxTextureをnullptrのままにして
+        // Renderスレッドへ「現状維持」を伝える)
+        const std::wstring desiredSkyboxPath =
+            loaded->Scene.SkyboxPath.empty() ? m_DefaultSkyboxPath : loaded->Scene.SkyboxPath;
+        if (desiredSkyboxPath != m_LoaderSkyboxPath)
+        {
+            try
+            {
+                loaded->SkyboxTexture = m_Device->CreateTextureFromFile(desiredSkyboxPath, false);
+                loaded->SkyboxPath = desiredSkyboxPath;
+                m_LoaderSkyboxPath = desiredSkyboxPath;
+                Core::Logger::Info("KurenaiEngine3D", "スカイボックスを差し替えました: " + WideToUtf8(desiredSkyboxPath));
+            }
+            catch (const std::exception& e)
+            {
+                // 読み込みに失敗しても現在のスカイボックスのまま描画を続ける(シーン切り替え自体は成立させる)
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "スカイボックスの読み込みに失敗しました。現在のスカイボックスを維持します: " +
+                        WideToUtf8(desiredSkyboxPath) + " : " + e.what());
+            }
+        }
+
+        // レイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの統合バッファを構築する。
+        // 非対応環境(DX11、Tier 1.1未満のアダプタ)では何も作らず、描画側は従来の
+        // スクリーンスペース手法のまま動く。構築に失敗しても描画は継続する
+        if (m_Device->SupportsRaytracing())
+        {
+            loaded->RaytracingScene.Build(*m_Device, loaded->Scene);
+        }
+
+        loaded->Camera = ComputeInitialCamera(loaded->Scene);
+        return loaded;
+    }
+
+    void KurenaiEngine3D::ApplyLoadedScene(LoadedScene& loaded)
+    {
+        m_Scene = std::move(loaded.Scene);
+        m_RaytracingScene = std::move(loaded.RaytracingScene);
+        m_CurrentSceneIndex = loaded.SceneIndex;
 
         // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
@@ -1806,31 +1994,22 @@ namespace Kurenai
             m_IBLIntensity = m_Scene.IBLIntensity;
         }
 
-        // [Scene]Skyboxでスカイボックスを差し替える(指定が無ければ既定へ戻す)。
-        // IBLの拡散イラディアンス・プリフィルタ済み鏡面はスカイボックスから焼かれるため、
-        // 差し替えたらm_IBLBakedを倒して次フレームで焼き直させる必要がある。
-        // 直前にWaitForGPUIdle済みなので旧テクスチャを解放しても安全
-        const std::wstring desiredSkyboxPath = m_Scene.SkyboxPath.empty() ? m_DefaultSkyboxPath : m_Scene.SkyboxPath;
-        if (desiredSkyboxPath != m_CurrentSkyboxPath)
+        // スカイボックスが差し替わった場合のみ非nullptr。IBLの拡散イラディアンス・プリフィルタ済み
+        // 鏡面はスカイボックスから焼かれるため、差し替えたらm_IBLBakedを倒して焼き直させる
+        if (loaded.SkyboxTexture)
         {
-            try
-            {
-                m_SkyboxTexture = m_Device->CreateTextureFromFile(desiredSkyboxPath, false);
-                m_CurrentSkyboxPath = desiredSkyboxPath;
-                m_IBLBaked = false;
-                // 検証用の拡散イラディアンスマップも古いスカイボックス由来のものになるため倒す
-                // (実際に焼き直すのは検証トグル・デバッグ表示が有効なときだけ)
-                m_IBLIrradianceBaked = false;
-                Core::Logger::Info("KurenaiEngine3D", "スカイボックスを差し替えました: " + WideToUtf8(desiredSkyboxPath));
-            }
-            catch (const std::exception& e)
-            {
-                // 読み込みに失敗しても現在のスカイボックスのまま描画を続ける(シーン切り替え自体は成立させる)
-                Core::Logger::Error(
-                    "KurenaiEngine3D",
-                    "スカイボックスの読み込みに失敗しました。現在のスカイボックスを維持します: " +
-                        WideToUtf8(desiredSkyboxPath) + " : " + e.what());
-            }
+            // 旧スカイボックスもアセット由来なのでLoaderスレッドへ破棄を委ねる。
+            // 直前(UpdateSceneStreaming)のWaitForGPUIdleによりGPUはもう参照していない
+            RetiredAssets retiredSkybox;
+            retiredSkybox.SkyboxTexture = std::move(m_SkyboxTexture);
+            RetireAssets(std::move(retiredSkybox));
+
+            m_SkyboxTexture = std::move(loaded.SkyboxTexture);
+            m_CurrentSkyboxPath = loaded.SkyboxPath;
+            m_IBLBaked = false;
+            // 検証用の拡散イラディアンスマップも古いスカイボックス由来のものになるため倒す
+            // (実際に焼き直すのは検証トグル・デバッグ表示が有効なときだけ)
+            m_IBLIrradianceBaked = false;
         }
 
         // アセット由来のライトをユーザー編集用のコピーへ複製する(m_Scene.Lightsは直接編集しない。
@@ -1861,23 +2040,19 @@ namespace Kurenai
         m_ProbeRealtimeProbeIndex = 0;
         m_ProbeRealtimeFace = 0;
 
-        // レイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの統合バッファを構築する。
-        // 直前のWaitForGPUIdleでGPUは旧シーンを参照していないため、旧構造の破棄も安全。
-        // 非対応環境(DX11、Tier 1.1未満のアダプタ)では何も作らず、描画側は従来の
-        // スクリーンスペース手法のまま動く。構築に失敗しても描画は継続する
-        if (m_Device->SupportsRaytracing())
-        {
-            m_RaytracingScene.Build(*m_Device, m_Scene);
-        }
-        else
-        {
-            m_RaytracingScene.Reset();
-        }
+        // SSAO/SSILの半径やSSRの距離はシーンの規模から決まるため、差し替え後のm_Sceneで計算し直す
+        ResetSceneDependentParams();
 
-        FrameCameraToModel();
-
-        const wchar_t* apiName = (m_GraphicsAPI == GraphicsAPI::DX12) ? L"DX12" : L"DX11";
-        m_Window->SetTitle(std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name);
+        // 初期カメラとウィンドウタイトルはUpdateスレッドが適用する。m_Cameraの書き込み手を
+        // 1スレッドに保ち、ウィンドウタイトルもウィンドウを所有するスレッドから設定するため
+        // (UpdateAppliedSceneHandoff参照)
+        {
+            const wchar_t* apiName = (m_GraphicsAPI == GraphicsAPI::DX12) ? L"DX12" : L"DX11";
+            std::lock_guard<std::mutex> lock(m_AppliedSceneMutex);
+            m_AppliedSceneCamera = loaded.Camera;
+            m_AppliedSceneTitle = std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name;
+        }
+        m_AppliedScenePending.store(true, std::memory_order_release);
     }
 
     uint64_t KurenaiEngine3D::ComputeProbeBakeSignature() const
@@ -1950,27 +2125,26 @@ namespace Kurenai
         m_SSRThickness = m_SSAORadius * 0.2f;
     }
 
-    void KurenaiEngine3D::FrameCameraToModel()
+    Core::Camera KurenaiEngine3D::ComputeInitialCamera(const Assets::Scene& scene)
     {
-        const float sizeY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
-        const float dx = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
-        const float dz = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
+        Core::Camera camera;
+        const float sizeY = scene.BoundsMax[1] - scene.BoundsMin[1];
+        const float dx = scene.BoundsMax[0] - scene.BoundsMin[0];
+        const float dz = scene.BoundsMax[2] - scene.BoundsMin[2];
         const float diagonal = std::sqrt(dx * dx + sizeY * sizeY + dz * dz);
 
-        ResetSceneDependentParams();
-
-        if (m_Scene.HasCameraOverride)
+        if (scene.HasCameraOverride)
         {
-            m_Camera.SetPosition({ m_Scene.CameraPosition[0], m_Scene.CameraPosition[1], m_Scene.CameraPosition[2] });
-            m_Camera.SetYawPitch(m_Scene.CameraYaw, m_Scene.CameraPitch);
-            m_Camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
-            return;
+            camera.SetPosition({ scene.CameraPosition[0], scene.CameraPosition[1], scene.CameraPosition[2] });
+            camera.SetYawPitch(scene.CameraYaw, scene.CameraPitch);
+            camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
+            return camera;
         }
 
-        const float centerX = (m_Scene.BoundsMin[0] + m_Scene.BoundsMax[0]) * 0.5f;
-        const float centerY = (m_Scene.BoundsMin[1] + m_Scene.BoundsMax[1]) * 0.5f;
-        const float centerZ = (m_Scene.BoundsMin[2] + m_Scene.BoundsMax[2]) * 0.5f;
-        const float eyeHeight = m_Scene.BoundsMin[1] + sizeY * 0.15f;
+        const float centerX = (scene.BoundsMin[0] + scene.BoundsMax[0]) * 0.5f;
+        const float centerY = (scene.BoundsMin[1] + scene.BoundsMax[1]) * 0.5f;
+        const float centerZ = (scene.BoundsMin[2] + scene.BoundsMax[2]) * 0.5f;
+        const float eyeHeight = scene.BoundsMin[1] + sizeY * 0.15f;
 
         const float longAxis = std::max(dx, dz);
         const float shortAxis = std::min(dx, dz);
@@ -2004,7 +2178,7 @@ namespace Kurenai
         else if (dx >= dz)
         {
             // ホールの長辺方向の端寄りから中心を見る位置を初期視点にする(中央の装飾物や壁に埋まらないように)
-            posX = m_Scene.BoundsMin[0] + dx * 0.2f;
+            posX = scene.BoundsMin[0] + dx * 0.2f;
             posY = eyeHeight;
             posZ = centerZ;
             yaw = DirectX::XM_PIDIV2;
@@ -2014,14 +2188,15 @@ namespace Kurenai
         {
             posX = centerX;
             posY = eyeHeight;
-            posZ = m_Scene.BoundsMin[2] + dz * 0.2f;
+            posZ = scene.BoundsMin[2] + dz * 0.2f;
             yaw = 0.0f;
             nearZ = std::max(0.01f, diagonal * 0.0005f);
         }
 
-        m_Camera.SetPosition({ posX, posY, posZ });
-        m_Camera.SetYawPitch(yaw, 0.0f);
-        m_Camera.SetLens(DirectX::XM_PIDIV4, nearZ, farZ);
+        camera.SetPosition({ posX, posY, posZ });
+        camera.SetYawPitch(yaw, 0.0f);
+        camera.SetLens(DirectX::XM_PIDIV4, nearZ, farZ);
+        return camera;
     }
 
     // カメラ視錐台をkCascadeCount個の深度範囲に分割する境界(View空間でのカメラからの距離)を求める。
@@ -2147,6 +2322,10 @@ namespace Kurenai
 
     void KurenaiEngine3D::Run()
     {
+        // シーン読み込み専用スレッドを起動する。ファイルI/O・デコード・アセット由来のGPUリソースの
+        // 作成と破棄をこのスレッドが担い、読み込み中もRenderスレッドがフレームを進められるようにする
+        m_LoaderThread = std::thread(&KurenaiEngine3D::LoaderThreadMain, this);
+
         // 描画専用スレッドを起動する。以後このスレッドがRender()の呼び出しとPresentを担当し、
         // 呼び出し元スレッド(以下Updateスレッド)はPumpMessages/Updateに専念する
         m_RenderThread = std::thread(&KurenaiEngine3D::RenderThreadMain, this);
@@ -2172,6 +2351,23 @@ namespace Kurenai
         }
         m_FrameStateCV.notify_one();
         m_RenderThread.join();
+
+        // Renderスレッドが止まった後にLoaderスレッドを止める。この順序により、Loaderの停止後に
+        // 新しい破棄依頼が積まれることはない。Loaderは終了前に残った破棄依頼を片付けるため、
+        // アセット用ディスクリプタヒープを触るのはこのスレッドだけ、という不変条件が保たれる
+        {
+            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
+            m_StopLoaderThread = true;
+        }
+        m_LoadRequestCV.notify_one();
+        m_LoaderThread.join();
+
+        // Loaderが作り終えていたが取り込まれなかったシーンをここで解放する。
+        // この時点で動いているのはこのスレッドだけなので、どのヒープを触っても競合しない
+        {
+            std::lock_guard<std::mutex> lock(m_LoadedSceneMutex);
+            m_LoadedScene.reset();
+        }
     }
 
     void KurenaiEngine3D::TickFrame()
@@ -2182,7 +2378,7 @@ namespace Kurenai
 
         Update(deltaTime);
 
-        // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/LoadScene経由のFrameCameraToModel)
+        // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/UpdateAppliedSceneHandoff)
         // のみが書き込み、Render()はframeStateのスナップショット経由でしか読まないため、
         // ここでの読み取りに追加のロックは不要
         FrameState newFrameState;
@@ -2247,16 +2443,11 @@ namespace Kurenai
                 }
             }
 
+            // m_Scene・ポストプロセスのパラメータ・UIの状態はすべてこのRenderスレッド専有に
+            // なったため、以前あったm_SceneMutexによる保護は不要になっている
+            // (経緯はdocs/Architecture.html 23章)
             const auto cpuStart = std::chrono::steady_clock::now();
-            {
-                // WM_SIZEによるスワップチェーンのリサイズ、およびLoadScene(Updateスレッド、
-                // UpdateSceneSwitch経由)によるm_Scene/m_Camera/Post Processingパラメータの書き換えと
-                // 同時に走らないよう、Render()全体をこれらのミューテックスで保護する。この2つの
-                // ミューテックスをこの組み合わせ・この順序でロックするのはここだけなので、
-                // std::scoped_lockでなくてもデッドロックの心配はないが、明示的にまとめて扱っておく
-                std::scoped_lock renderLock(m_SwapChainMutex, m_SceneMutex);
-                Render(frameState);
-            }
+            Render(frameState);
             const auto cpuEnd = std::chrono::steady_clock::now();
             // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく
             // GPU側の処理時間の反映なので差し引く(DX11は常に0が返るため影響しない)
@@ -2394,15 +2585,28 @@ namespace Kurenai
         }
     }
 
-    void KurenaiEngine3D::UpdateSceneSwitch()
+    void KurenaiEngine3D::UpdateAppliedSceneHandoff()
     {
-        // -1は「切り替え要求なし」を表す番兵値。exchangeで読み取りと同時に-1へ戻すことで、
-        // 同じ要求を二重に処理しない
-        const int pendingIndex = m_PendingSceneIndex.exchange(-1);
-        if (pendingIndex >= 0)
+        // ロックを取る前にatomicで有無を判定する(publishされるのはシーン切り替え時だけなので、
+        // ほとんどのフレームはここで抜ける)
+        if (!m_AppliedScenePending.load(std::memory_order_acquire))
         {
-            LoadScene(static_cast<size_t>(pendingIndex));
+            return;
         }
+
+        Core::Camera camera;
+        std::wstring title;
+        {
+            std::lock_guard<std::mutex> lock(m_AppliedSceneMutex);
+            camera = m_AppliedSceneCamera;
+            title = m_AppliedSceneTitle;
+        }
+        m_AppliedScenePending.store(false, std::memory_order_relaxed);
+
+        // m_Cameraの書き込み手はこのUpdateスレッド1つに保つ(Renderスレッドは触らない)
+        m_Camera = camera;
+        // ウィンドウタイトルの変更もウィンドウを所有するこのスレッドから行う
+        m_Window->SetTitle(title);
     }
 
     void KurenaiEngine3D::Update(float deltaTime)
@@ -2426,12 +2630,24 @@ namespace Kurenai
         // フォーカスを外す方法(Esc / 別の場所をクリック)を知らないと詰むため。
         // ImGuiのInputTextはF1を消費しないので、通しても入力内容には影響しない
         UpdateImGuiToggle();
-        UpdateSceneSwitch();
+        // 新しいシーンが反映されていれば、その初期カメラとウィンドウタイトルをここで取り込む
+        UpdateAppliedSceneHandoff();
         // 昼夜サイクルの自動進行(m_TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
     }
 
     void KurenaiEngine3D::Render(const FrameState& frameState)
     {
+        // WM_SIZE(Updateスレッド)が記録しておいたリサイズ要求を、スワップチェーンを実際に使う
+        // このスレッドで反映する。このフレームのGPUコマンドをまだ1つも積んでいないこの位置で
+        // 呼ぶこと(DX12SwapChain::Resizeは内部でWaitForGPUIdleを呼び、コマンドリストが
+        // 記録待ちの状態であることを前提としているため)
+        ApplyPendingResize();
+
+        // Loaderスレッドが出来上がったシーンを置いていれば取り込み、保留中の切り替え要求があれば発注する。
+        // 旧シーンの破棄(WaitForGPUIdleを伴う)もここで行うため、このフレームのGPUコマンドを
+        // まだ1つも積んでいないこの位置で呼ぶこと
+        UpdateSceneStreaming();
+
         if (m_Window->GetWidth() == 0 || m_Window->GetHeight() == 0)
         {
             return;

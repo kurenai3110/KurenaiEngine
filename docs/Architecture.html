@@ -223,6 +223,7 @@
     <li><a href="#ssrprobe">20. SSRとプローブの合成(加算から差し替えへ)</a></li>
     <li><a href="#procedural-sky">21. 手続き空・月光・昼夜遷移</a></li>
     <li><a href="#raytracing">22. レイトレーシング基盤(DXR)</a></li>
+    <li><a href="#sceneloading">23. シーン読み込みのスレッド分割</a></li>
   </ol>
 </nav>
 
@@ -4553,6 +4554,204 @@ dxc(DXIL)への移行が別途必要になる</li>
 <li><strong>DX11</strong> — 起動ログに「レイトレーシング非対応: DXRはD3D12の機能です」。
 描画結果・シーン切り替えとも従来どおり</li>
 <li><strong>描画結果</strong> — DX12/DX11とも本変更の前後で変化なし(この段階ではレイを飛ばさないため)</li>
+</ul>
+</section>
+
+<section id="sceneloading">
+<h2>23. シーン読み込みのスレッド分割</h2>
+
+<p>
+以前の<code>KurenaiEngine3D::LoadScene</code>は関数全体を<code>m_SceneMutex</code>で保護しており、
+<code>Render()</code>も同じミューテックスを丸ごと取っていた。つまり
+<strong>シーン読み込み中は1フレームも描画されず、アプリが完全に固まっていた</strong>。
+</p>
+
+<table>
+<thead><tr><th>内訳(Bistro Exterior / Debug)</th><th>時間</th></tr></thead>
+<tbody>
+<tr><td>マニフェスト</td><td>0ms</td></tr>
+<tr><td>ジオメトリ(.kgeom読み込み + GPUバッファ作成)</td><td>138ms</td></tr>
+<tr><td>テクスチャ149枚(CPUデコード(並列) + GPU作成(直列))</td><td>896ms</td></tr>
+<tr><td>レイトレーシング高速化構造の構築(22章)</td><td>246ms</td></tr>
+<tr><td><strong>合計</strong></td><td><strong>約1.3秒</strong></td></tr>
+</tbody>
+</table>
+
+<p>
+<code>LoadScene</code>の中身は「重い読み込み処理」と「一瞬で終わるエンジン状態への反映」が
+混ざっていた。前者を専用スレッドへ出し、後者をRenderスレッドのフレーム境界へ置くことで、
+読み込み中もフレームが進み続けるようにした。
+</p>
+
+<h3>23.1 スレッド構成</h3>
+
+<table>
+<thead><tr><th>スレッド</th><th>担当</th><th>RHI</th></tr></thead>
+<tbody>
+<tr><td><strong>Update</strong>(メイン)</td><td><code>PumpMessages</code> / <code>Update</code> / <code>m_Camera</code> / <code>FrameState</code>のpublish / ウィンドウタイトル</td><td>触らない</td></tr>
+<tr><td><strong>Render</strong></td><td><code>Render()</code>と全UIパネル / シーン状態の所有 / スワップチェーンのリサイズ適用 / <code>WaitForGPUIdle</code></td><td>描画・スワップチェーン・レンダーターゲット</td></tr>
+<tr><td><strong>Loader</strong>(本章で追加)</td><td>ファイルI/O / .ktexの並列デコード / <strong>アセット由来のGPUリソースの作成と破棄</strong> / 高速化構造の構築 / 初期カメラの算出</td><td>アセット由来のリソースのみ</td></tr>
+</tbody>
+</table>
+
+<p>
+Loaderスレッドは既存の<code>Assets::LoadScene(*m_Device, ...)</code>をそのまま呼ぶ。その内部の
+<code>TextureLoader::Prefetch</code>は今までどおりデコード用のワーカースレッドを立て、GPU化は
+呼び出しスレッド(= Loader)で直列に行うため、<strong>デコード済み画像を溜め込まないための背圧
+(ワーカー数×2件 / 1GB)もそのまま効く</strong>。デコードとGPU化を別スレッドへ分けなかったのは、
+分けると両者をつなぐキューの上限がそのままメモリのピークになるためで、Bistroの<code>.ktex</code>は
+合計1,053MB(Exteriorが使う149枚で約850MB)に達する。
+</p>
+
+<h3>23.2 どのリソースをどちらのスレッドが作るか</h3>
+
+<p>
+Loaderスレッドが作る・壊すのは<strong>アセット由来のリソースだけ</strong>で、レンダーグラフの
+ノードが使う画面解像度依存のリソースは従来どおりRenderスレッドが持つ。
+</p>
+
+<table>
+<thead><tr><th>Loaderスレッド(アセット由来)</th><th>Renderスレッド(レンダーノード・その他)</th></tr></thead>
+<tbody>
+<tr><td>頂点/インデックスバッファ</td><td>G-Buffer・SceneColor・SSAO/SSIL・SSR・Tonemap等(<code>CreateRenderTexture</code>)</td></tr>
+<tr><td>マテリアルテクスチャ(<code>CreateTextureFromImage</code>)</td><td>深度・シャドウマップ配列(<code>CreateDepthTexture</code>系)</td></tr>
+<tr><td>スカイボックス(<code>CreateTextureFromFile</code>)</td><td>Hi-Z・ブルームチェーン(<code>CreateHiZTexture</code> / <code>CreateMippedUAVTexture</code>)</td></tr>
+<tr><td>RT統合ジオメトリバッファ(<code>StructuredImmutable</code>)</td><td>IBL・反射プローブのキューブマップ(<code>CreateUAVTextureCube</code>系)</td></tr>
+<tr><td>BLAS / TLAS</td><td>ライトタイルバッファ・サンプラーセット・PSO・スワップチェーンのリサイズ</td></tr>
+</tbody>
+</table>
+
+<h3>23.3 ディスクリプタヒープを2本に分けた理由</h3>
+
+<p>
+<code>DX12DescriptorHeap</code>はフリーリストと次インデックスを無防備に持つ(ロックが無い)。
+1本のヒープをLoaderとRenderの両方から確保・解放するとこれが壊れる。
+そこで<strong>非シェーダー可視のCBV_SRV_UAVヒープを用途別に2本へ分割</strong>し、
+各ヒープを触るスレッドを1本に固定した。
+</p>
+
+<pre><code>m_AssetSrvCpuHeap   … CreateTextureFromFile / FromImage / SolidColor / FromMemory /
+                        CreateBuffer(StructuredImmutable) / CreateTopLevelAS  → Loaderのみ
+m_RenderSrvCpuHeap  … CreateRenderTexture / CreateUAVTexture / CreateHiZTexture /
+                        CreateMippedUAVTexture / CreateUAVTextureCube系 /
+                        CreateDepthTexture系 / CreateBuffer(Structured系) /
+                        nullディスクリプタ                                    → Renderのみ</code></pre>
+
+<p>
+このヒープは<strong>非シェーダー可視のCPU専用</strong>で、描画時には<code>CopyDescriptorsSimple</code>で
+シェーダー可視ヒープへコピーされる。コピー元が同じヒープである必要はない(型が
+<code>CBV_SRV_UAV</code>で一致していればよい)ため、分割しても描画側の仕組みは無変更で済む。
+</p>
+<p>
+振り分けは<strong>リソースの種別だけで機械的に決まり、呼び出しスレッドを見る必要がない</strong>。
+アセット系の生成関数が呼ばれるのは初期化時(スレッド起動前)かLoaderスレッドからだけであることを
+確認済みである。RTV/DSVヒープはアセット由来のリソースが使わないため、Renderスレッド専有のまま。
+</p>
+<p class="note">
+<strong>破棄側にも同じ制約がある。</strong><code>DX12Texture</code>/<code>DX12Buffer</code>/
+<code>DX12AccelerationStructure</code>はデストラクタでディスクリプタを返すため、
+インデックスと一緒に<strong>確保元の<code>DX12DescriptorHeap*</code>を保持する</strong>ようにした。
+そして<strong>旧シーンの破棄もRenderスレッドではなくLoaderスレッドが行う</strong>
+(Renderスレッドは所有権を渡すだけ)。これでアセット用ヒープを触るのはLoaderだけになる。
+</p>
+
+<h3>23.4 読み込みの流れ</h3>
+
+<ol>
+<li><strong>Render</strong>: UIでシーン切り替えが押される(<code>RequestSceneLoad</code>)。UIパネルもRenderスレッドで動くため、ここは単なるスレッド内の受け渡し</li>
+<li><strong>Render</strong>: フレーム先頭の<code>UpdateSceneStreaming()</code>が<code>WaitForGPUIdle()</code>を行い、旧シーン一式をメンバから外してLoaderへ要求として渡す</li>
+<li><strong>Loader</strong>: 受け取った旧シーンを破棄 → <code>Assets::LoadScene</code> → 必要ならスカイボックス差し替え → <code>RaytracingScene::Build</code> → <code>ComputeInitialCamera</code> → 完成品をpublish</li>
+<li><strong>Render</strong>: <code>ApplyLoadedScene()</code>が差し替えとシーン設定の反映を行い、初期カメラとタイトルをUpdateスレッドへpublish</li>
+<li><strong>Update</strong>: <code>UpdateAppliedSceneHandoff()</code>が<code>m_Camera</code>へ適用し<code>SetTitle</code>を呼ぶ</li>
+</ol>
+
+<p>
+手順2で<strong>読み込み開始と同時に旧シーンを手放している</strong>のがポイント。完了まで待ってから
+捨てると新旧のGPUリソースが同時に載ってVRAMがほぼ2倍(Bistroで約2.3GB)になるため、
+先に空にする方を選んだ。その代わり<strong>読み込み中はシーンが描かれない</strong>(空・UI・
+スカイボックスのみ)。フレーム・UI・カメラ操作はその間も動き続ける。
+</p>
+
+<h4>ハンドオフ(3本)</h4>
+<table>
+<thead><tr><th>方向</th><th>機構</th></tr></thead>
+<tbody>
+<tr><td>Render → Loader(要求 + 旧シーンの破棄)</td><td>ミューテックス + 条件変数。旧シーンの破棄依頼は要求と同じ経路に相乗りさせる</td></tr>
+<tr><td>Loader → Render(完成品)</td><td>ミューテックス + <code>std::unique_ptr&lt;LoadedScene&gt;</code>。Renderはフレーム先頭でmoveして取り出すだけ</td></tr>
+<tr><td>Render → Update(初期カメラ・タイトル)</td><td><code>std::atomic&lt;bool&gt;</code>で有無を判定してから小さなミューテックス。毎フレームのロックを避ける</td></tr>
+</tbody>
+</table>
+
+<p>
+<code>m_Camera</code>の書き込み手をUpdateスレッド1つに保つため、初期カメラだけはRenderスレッドが
+直接書かずUpdateスレッドへ渡している。ウィンドウタイトルも、ウィンドウを所有するUpdateスレッドから
+設定する。
+</p>
+
+<h4>切り替えの連打</h4>
+<p>
+要求スロットは1つで<strong>最後の要求が勝つ</strong>。読み込み中の中断は行わず、Loaderは現在の
+読み込みを完了させてから次の要求を処理する(<code>Assets::LoadScene</code>の内部にキャンセル判定を
+通す改造が必要になるため見送った)。連打しても最終的に最後に選んだシーンへ落ち着く。
+</p>
+
+<h4>スカイボックスの扱い</h4>
+<p>
+「今どのスカイボックスを読み込み済みか」の真実は<strong>Loaderスレッドが持つ</strong>
+(読むのがこのスレッドだけのため)。要求されたシーンの<code>SkyboxPath</code>が現在のものと同じなら
+差し替えを行わず、完成品に含めないことでRender側へ「現状維持」を伝える。
+</p>
+
+<h3>23.5 スワップチェーンのリサイズ(pending resize)</h3>
+
+<p>
+<code>WM_SIZE</code>は<code>PumpEvents()</code>を呼んだUpdateスレッドで同期的に発生するため、
+そこで<code>m_SwapChain-&gt;Resize()</code>を呼ぶとRenderスレッドが描画に使っている最中の
+スワップチェーンを別スレッドから作り替えることになる。以前は<code>m_SwapChainMutex</code>で
+排他していたが、「RHIの呼び出しは描画を所有するスレッドに閉じる」方針に合わせ、
+<strong>コールバックは幅・高さを記録するだけ</strong>にして、
+<code>KurenaiEngineBase::ApplyPendingResize()</code>を描画所有スレッドがフレーム先頭で呼ぶ形にした。
+</p>
+<ul>
+<li><code>KurenaiEngine3D</code> → Renderスレッドの<code>Render()</code>冒頭</li>
+<li><code>KurenaiEngine2D</code> → レンダースレッドを持たない単一スレッド構成なので<code>BeginFrame()</code>から</li>
+</ul>
+<p>
+<code>DX12SwapChain::Resize</code>は内部で<code>WaitForGPUIdle()</code>を呼び、「コマンドリストが
+前フレームのPresent後で記録待ちの状態」であることを前提としている。フレーム先頭で呼ぶこの方式は
+その前提をむしろ厳密に満たす。副作用として反映が最大1フレーム遅れるが、Presentパスは元々
+アスペクト比を保つレターボックス処理を持つため見た目には出ない。
+</p>
+<p>これにより<code>m_SwapChainMutex</code>も撤廃でき、<strong>エンジンからシーン関連のミューテックスが無くなった</strong>。</p>
+
+<h3>23.6 この設計で守るべき不変条件</h3>
+<ul>
+<li><strong><code>WaitForGPUIdle</code>はRenderスレッドから呼ぶ</strong> — DX11はイミディエイトコンテキストを使い、DX12は<code>m_FenceValue</code>を<code>SignalFrame</code>と共有するため</li>
+<li><strong>アセット用ディスクリプタヒープを触るのはLoaderスレッドだけ</strong> — 破棄も含む(23.3節)</li>
+<li><strong>レンダーターゲット関連を触るのはRenderスレッドだけ</strong></li>
+<li><strong><code>m_Camera</code>を書くのはUpdateスレッドだけ</strong></li>
+<li><strong>シーン状態(<code>m_Scene</code>・ライト・反射プローブ・ポストプロセスのパラメータ)を触るのはRenderスレッドだけ</strong> — UIパネルもRenderスレッドで動くのでそのまま読み書きしてよい</li>
+</ul>
+<p class="note">
+DX12側の下地はもともとこの分割を見越した作りになっていた。リソース作成が使う
+<code>m_UploadCommandList</code> + <code>m_UploadMutex</code>は「<code>LoadScene</code>を
+Renderスレッド外から呼べるように」設計されたもので、今回そのまま活きている。
+<code>ID3D12CommandQueue</code>はフリースレッドで、Loaderは<code>m_UploadFence</code>・
+Renderは<code>m_Fence</code>と別フェンスを使うため競合しない。
+DX11も<code>D3D11_CREATE_DEVICE_SINGLETHREADED</code>を指定しておらず
+<code>ID3D11Device</code>はフリースレッドで、リソース生成は初期データ指定のみで
+イミディエイトコンテキストを使わない。
+</p>
+
+<h4>検証</h4>
+<ul>
+<li><strong>読み込み中も描画が進む(本命)</strong> — Bistro Exterior ⇔ Interiorの切り替え中もFPS 56を維持し、UI・カメラ操作とも応答した(従来は約1.3秒の完全停止)</li>
+<li><strong>空シーン期間</strong> — 読み込み中はスカイボックスとUIのみが描かれる。NaN由来の破綻やクラッシュは無し</li>
+<li><strong>連打</strong> — 6回連続クリックが4回の読み込みへ合流し、最後に選んだシーンへ落ち着いた</li>
+<li><strong>リサイズ</strong> — 900x600 / 1400x900 / 1100x700と連続で変えても破綻なし</li>
+<li><strong>ログ</strong> — 上記すべてを通してError/Warning・D3D12デバッグレイヤーの指摘とも0件</li>
+<li><strong>DX11</strong> — シーン切り替え・連打とも同様に動作(Error/Warning 0件)</li>
+<li><strong>Sample2D</strong> — <code>ApplyPendingResize</code>経由のリサイズが従来どおり動作</li>
 </ul>
 </section>
 
