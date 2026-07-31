@@ -221,6 +221,7 @@
     <li><a href="#sss-tiled-lights">18. スクリーンスペースシャドウとタイルライトカリング</a></li>
     <li><a href="#reflectionprobe">19. 反射プローブ(リフレクションプローブ)</a></li>
     <li><a href="#ssrprobe">20. SSRとプローブの合成(加算から差し替えへ)</a></li>
+    <li><a href="#procedural-sky">21. 手続き空・月光・昼夜遷移</a></li>
   </ol>
 </nav>
 
@@ -1140,9 +1141,11 @@ DLL境界を跨ぐ以上<code>KURENAI_LIB_API</code>を新たに付与した。
 
 <h3>12.2 ImGuiをDLL境界越しに使う仕組み</h3>
 <p>
-ImGuiのコンテキスト生成(<code>ImGui::CreateContext()</code>)は<code>DX11ImGuiBackend</code>/
-<code>DX12ImGuiBackend</code>(Library側)で行われる一方、<code>KurenaiEngine3D.cpp</code>は
-ImGuiパネル描画のために<code>ImGui::*</code>関数を直接、約80箇所で呼び出している。ImGui本体
+ImGuiのコンテキスト生成(<code>ImGui::CreateContext()</code>)はLibrary側
+(<code>RHI::Detail::CreateImGuiContextCommon()</code>。<code>DX11ImGuiBackend</code>/
+<code>DX12ImGuiBackend</code>の両方から呼ぶ)で行われる一方、KurenaiEngine3D.dll側の
+UIパネル群(<code>Source/Engine/UI/</code>)はパネル描画のために<code>ImGui::*</code>関数を
+直接呼び出している。ImGui本体
 (<code>imgui.cpp</code>等)はKurenaiEngineLibrary.dllにのみコンパイルし、KurenaiEngine3D.dllからは
 その関数群をdllimportする形にした。具体的には<code>imgui.h</code>が参照する<code>IMGUI_API</code>マクロを
 プリプロセッサ定義で外側から与える。
@@ -1155,11 +1158,46 @@ KurenaiEngine2D.vcxproj:      (imgui を一切includeしないため定義不要
 代替案として「imguiをKurenaiEngine3D側にも重複コンパイルし、<code>SetCurrentContext</code>/
 <code>SetAllocatorFunctions</code>でコンテキストを受け渡す」方式も検討したが、その場合
 <code>IRHIImGuiBackend</code>に新しい公開APIを追加する必要があり、かつImGuiのコード・グローバル状態
-(<code>GImGui</code>等)が2つのDLLに二重化してしまう。今回使用しているimgui(1.92.9 WIP)は
+(<code>GImGui</code>等)が2つのDLLに二重化してしまう。今回使用しているimgui(1.92.9 docking)は
 <code>imgui.h</code>内で構造体単位に<code>IMGUI_API</code>を付けている箇所が無く(個々の関数・一部の
 静的データメンバのみ)、構造体単位でdllexportされる型は<code>imgui_internal.h</code>側にしか無い。
 <code>imgui_internal.h</code>はLibraryしかincludeしないため、<code>IMGUI_API</code>定義による
 問題は生じない。
+</p>
+<p>
+<strong>この「<code>imgui_internal.h</code>はLibraryしかincludeしない」という前提が、
+ドックレイアウトの構築をLibrary側へ代理させている理由である。</strong>
+既定レイアウトを組む<code>DockBuilderSplitNode</code>/<code>DockBuilderDockWindow</code>等は
+<code>imgui_internal.h</code>にあり、同ヘッダには<code>struct IMGUI_API</code>と宣言された型が
+19個含まれる(<code>ImRect</code>/<code>ImGuiWindow</code>/<code>ImGuiDockNode</code>等)。
+KurenaiEngine3D.dll側でこれをincludeするとそれらがすべてdllimportクラスになり、上記の前提が崩れる。
+そこで<code>Core::ImGuiDockLayout</code>(Library側)へ<code>HasNode</code>/<code>BuildDefault</code>の
+2つだけを持つ狭いAPIを置き、KurenaiEngine3D側はそれを呼ぶ。
+このクラスのヘッダは<code>imgui.h</code>にも依存させず、<code>ImGuiID</code>は素の
+<code>unsigned int</code>で受け渡す。
+</p>
+<p>
+<code>IRHIImGuiBackend</code>へ足さなかったのは、<code>DockBuilder</code>系がコアimguiの機能で
+DX11/DX12に一切依存しないため。純粋仮想インタフェースへ足すと同一の実装が両バックエンドに
+2重に必要になり、まさに<code>CreateImGuiContextCommon()</code>で解消した重複を増やすことになる。
+</p>
+<p>
+対比として、ドックスペース自体を張る<code>ImGui::DockSpace</code>は<code>imgui.h</code>の公開APIなので、
+KurenaiEngine3D側から直接呼んでいる。
+</p>
+<p>
+なお<code>ImGui::DockSpaceOverViewport</code>は使わず、<code>UIManager::DrawDockSpaceAndLayout</code>で
+同等の処理を自前で書いている。あちらはドックスペースの位置・サイズに
+<code>viewport-&gt;WorkPos</code>/<code>WorkSize</code>(メニューバーの高さを差し引いた領域)を使うが、
+<strong>この値は1フレーム遅れる</strong>。メニューバーの高さを作業領域へ反映する処理が
+<code>imgui_widgets.cpp</code>の<code>BeginViewportSideBar</code>にあり、
+「Report our size into work area (for next frame)」というコメントのとおり
+次フレーム用の<code>BuildWorkInsetMin</code>へ足し込む仕様のためである。
+UIの拡大率が変わったフレームでは、メニューバーは新しい高さで描かれるのに<code>WorkPos</code>は
+古い高さのままとなり、<strong>ドックスペース全体が1フレームだけ縦にずれてすぐ戻る</strong>
+(ディスプレイ間の移動で実際に発生した)。
+メニューバーの高さを<code>ImGui::GetFrameHeight()</code>で現在のスタイルから直接求めて使えば、
+このずれは起きない。
 </p>
 
 <h3>12.3 DLLを経由したProjectReferenceはリンクを推移しない</h3>
@@ -1198,6 +1236,269 @@ Sample2Dの出力フォルダには<code>KurenaiEngineLibrary.dll</code>・<code
 3D側は一切ビルドされない)。<code>dumpbin /dependents KurenaiEngine2D.dll</code>で確認すると、依存は
 <code>KurenaiEngineLibrary.dll</code>とkernel32/user32/gdi32のみで、d3d11.dll/d3d12.dll/dxgi.dllへの
 依存は無い(RHIの実装がLibrary側に完全に隠蔽されているため)。
+</p>
+
+<h3>12.6 UIモジュールの分割とKurenaiEngine3Dのfriend化</h3>
+<p>
+UIは当初<code>KurenaiEngine3D.cpp</code>に<code>RenderPostProcessUI()</code>等の5つのメンバ関数
+(計442行)として直に書かれていた。最大の<code>RenderPostProcessUI()</code>は10セクションが
+<code>ImGui::Separator()</code>だけで平坦に並び、パネルが伸びるたびに
+<code>SetNextWindowPos</code>のY座標を手で調整して重なりを避けていた。これを
+<code>Source/Engine/UI/</code>配下の<code>IPanel</code>実装クラスへ分割し、
+<code>UI::UIManager</code>が所有・描画する構成に変えた(現在8クラス:
+シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ / デバッグ表示 /
+システム / プロファイラ)。
+</p>
+<p>
+機能を1つ足すときに触るのは原則「そのパネルの<code>.cpp</code>」だけになる。新しいパネルを
+足す場合だけ、<code>UIManager</code>のコンストラクタへの追加・既定ドックスロットへの追加・
+<code>KurenaiEngine3D.h</code>の前方宣言とfriend宣言・<code>kDockSpaceId</code>の世代繰り上げが
+セットで必要になる(いずれか1つでも漏れると、パネルが出ない/privateに触れない/
+既存の<code>imgui.ini</code>のせいで宙に浮く、のいずれかが起きる)。
+</p>
+<p>
+各パネルは<code>KurenaiEngine3D</code>のパラメータメンバ(<code>m_SSAORadius</code>等)を
+ImGuiウィジェットへアドレスで直接渡すため、<code>KurenaiEngine3D</code>のprivateへアクセスする
+必要がある。ここは<strong>friend宣言</strong>で解決した。
+</p>
+<table>
+<tr><th>案</th><th>内容</th><th>判断</th></tr>
+<tr><td>friend</td><td>パネルクラスをfriendにする</td><td><strong>採用。</strong>ヘッダへの追加は前方宣言とfriend宣言だけで、既存メンバの宣言・使用箇所を一切動かさない</td></tr>
+<tr><td>パラメータ構造体へ切り出す</td><td><code>PostProcessParams</code>等へメンバを物理移動</td><td>却下。<code>Render()</code>内の参照が約200箇所あり、書き換えの過程で1箇所間違えてもコンパイルが通ったまま静かに壊れる。<code>m_SceneMutex</code>の保護対象を説明するコメントも全面的に書き換えになる</td></tr>
+<tr><td>アクセサを生やす</td><td>getter/setterを約60対追加</td><td>却下。ImGuiは<code>&amp;value</code>を直接要求するため結局<code>float* GetSSAORadiusPtr()</code>のような穴あきアクセサになり、friendと実質同じ露出でコードだけ増える</td></tr>
+</table>
+<p>
+元々「UI関数がメンバ関数だからprivateに触れていた」構造を「UIがfriendだから触れる」へ
+平行移動しただけなので、振る舞いの差分は無い。<code>m_SceneMutex</code>の保護対象も変わらない
+(UIの描画はRenderスレッドから、<code>LoadScene</code>はUpdateスレッドから同じメンバを触るという
+関係がそのまま維持される)。ただしfriendは全privateメンバを見せてしまうため、
+「UIから触ってよいのはパラメータ用メンバだけで、RHIリソース(<code>m_GBufferAlbedo</code>等)には
+触らない」という規約は各パネルの実装側で守る必要がある。
+</p>
+<p>
+ウィンドウ名は<code>"日本語表示###ASCII_ID"</code>形式にしている。<code>ImHashStr</code>は文字列中に
+<code>###</code>を見つけるとそこでハッシュをリセットするため、表示名を変えても
+ウィンドウID(=<code>imgui.ini</code>のキー、およびドックレイアウトの割り当て先)は変わらない。
+</p>
+<p>
+ドックスペースのID(<code>UIManager.cpp</code>の<code>kDockSpaceId</code>)の末尾1バイトは
+レイアウトの世代を表す。パネルを追加・削除してレイアウト構成そのものを変えたときにここを進めると、
+既存の<code>imgui.ini</code>があっても<code>HasNode</code>がfalseになり既定レイアウトが1回だけ
+組み直される。進めないと、新しく増えたパネルだけがドックに割り当てられず宙に浮いた状態で
+ユーザーに見えてしまう。
+</p>
+<p>
+なお「初回起動かどうか」の判定は<code>DockSpaceOverViewport</code>を呼ぶ<strong>前</strong>に
+行わなければならない。<code>DockSpace</code>は呼ばれた時点でノードを作るため、後から
+<code>HasNode</code>を見ても常にtrueになる(実際にこれで既定レイアウトが一度も組まれなかった)。
+そのためドックスペースIDは<code>0</code>を渡して内部の<code>GetID("DockSpace")</code>に任せるのではなく、
+固定値を明示している。
+</p>
+
+<h3>12.7 UpdateスレッドとRenderスレッドの双方向ハンドオフ</h3>
+<p>
+カメラとImGuiの表示状態はUpdate→Renderへ<code>FrameState</code>のスナップショットで渡している
+(<code>RenderThreadMain</code>参照)。これに加えて、逆方向に
+<code>io.WantCaptureKeyboard</code>/<code>io.WantCaptureMouse</code>を返す経路を追加した。
+ImGuiの状態を読めるのはRenderスレッドだけだが、WASD移動と視点回転を処理するのは
+Updateスレッドだからである。
+</p>
+<p>
+渡す値がboolを2つだけなので、<code>FrameState</code>のような構造体とミューテックスは用意せず
+<code>std::atomic&lt;bool&gt;</code>2本(<code>m_ImGuiWantCaptureKeyboard</code>/
+<code>m_ImGuiWantCaptureMouse</code>)にしている。Renderは1フレーム遅れて描くためこの値も
+1フレーム遅れるが、<code>WantCaptureKeyboard</code>は<code>InputText</code>がアクティブな間
+ずっとtrueであり続けるため、実用上ずれるのは押し始めの1フレームだけになる。
+</p>
+<p>
+F1(パネルの表示/非表示)は意図的に抑止していない。ここも抑止すると、テキスト入力中に
+パネルを畳んで元へ戻す手段が無くなり、入力欄からフォーカスを外す方法(Esc / 別の場所をクリック)を
+知らないユーザーが詰む。ImGuiの<code>InputText</code>はF1を消費しないので、通しても入力内容には
+影響しない。
+</p>
+<p>
+視点回転(<code>UpdateMouseLook</code>)は<code>GetAsyncKeyState(VK_RBUTTON)</code>を使う設計を
+維持している(理由は同関数のコメント)。ただし<code>imguiWantsMouse</code>を見て
+<strong>キャプチャ開始時にだけ</strong>回転の開始を抑止する。一度キャプチャに入るとカーソルが
+画面中央へ固定され続けてImGui側の判定が変わりうるため、継続中は判定しない。
+</p>
+
+<h3>12.8 DPI対応と動作確認の自動化への影響</h3>
+<p>
+<code>ImGui_ImplWin32_GetDpiScaleForHwnd</code>が内部で使う<code>GetDpiForMonitor</code>
+(<code>MDT_EFFECTIVE_DPI</code>)や<code>GetDpiForWindow</code>は、<strong>呼び出し元プロセスの
+DPI認識状態に依存する</strong>。DPI非対応プロセスからは常に96(=1.0倍)が返るため、プロセスを
+DPI対応にしない限りUI側でモニタの拡大率に合わせることはできない。
+</p>
+<p>
+DPI認識状態はプロセス単位の設定で、最初のウィンドウ生成より前に確定していなければならない。
+ウィンドウ生成は<code>KurenaiEngineBase</code>のコンストラクタで行われるため
+<code>KurenaiEngine3D</code>側から<code>SetProcessDpiAwarenessContext</code>を呼んだのでは手遅れになる。
+またDLL(エンジン)がプロセス全体の方針を書き換えるのは、KurenaiEngineを組み込む側にとって
+予期しない副作用になる。そのため実行ファイル側のマニフェスト
+(<code>Samples/Sample3D/Sample3D.manifest</code>)で<code>PerMonitorV2</code>を宣言する方式にした。
+</p>
+<p>
+<strong>UIとウィンドウの拡大率は、Windowsのディスプレイ設定の拡大率ではなく
+Windowsのディスプレイ設定の拡大率に追従させている。</strong>
+</p>
+<p>
+<strong>実DPIに追従させた方が実寸はきれいに揃うが、あえてそうしていない。</strong>
+本開発機の3台での実測:
+</p>
+<table>
+<tr><th>モニタ</th><th>解像度</th><th>物理サイズ</th><th>実DPI</th><th>Windowsの拡大率</th></tr>
+<tr><td>4K 27インチ</td><td>3840x2160</td><td>596x335mm</td><td><strong>163</strong></td><td>150%(=144)</td></tr>
+<tr><td>FHD 24インチ</td><td>1920x1080</td><td>527x296mm</td><td>92</td><td>100%(=96)</td></tr>
+<tr><td>縦置き</td><td>1080x1920</td><td>268x477mm</td><td>102</td><td>100%(=96)</td></tr>
+</table>
+<p>
+4Kモニタの実DPIは163で、実寸を揃えるには本来170%が必要だがWindowsは150%しか割り当てていない。
+16pxの文字の実寸で比較すると、Windowsの拡大率に従うと4Kで3.72mm・FHDで4.39mmと15%ずれ、
+実DPIに従えば全モニタで約4.2mmに揃う(実測。実DPI追従を実装して確認済み)。
+</p>
+<p>
+<strong>それでもWindowsの拡大率を採っているのは、ウィンドウのドラッグ中はアプリが
+1フレームも描画しないためである。</strong>
+ウィンドウの移動・リサイズ中はWindowsが自前のモーダルループを回すので、
+<code>Run()</code>の<code>PumpMessages()</code>が戻ってこず、描画スレッドへフレームが渡らない。
+その間、ウィンドウはWindowsの拡大率の比でリサイズされ、画面には直前のフレームが同じ比で
+引き伸ばされて表示される。UIの拡大率をそれと違う比にすると、マウスを離して描画が再開した
+瞬間に見た目が飛ぶ。実測では次のようになった。
+</p>
+<table>
+<tr><th>時点</th><th>UIの見かけの倍率</th></tr>
+<tr><td>ドラッグ中(引き伸ばされた古いフレーム)</td><td>0.9639 x 1.5 = 1.446</td></tr>
+<tr><td>離した後(実DPI基準で描き直したフレーム)</td><td>1.7047</td></tr>
+<tr><td colspan="2">差 1.7047 / 1.446 = <strong>1.18倍のジャンプ</strong></td></tr>
+</table>
+<p>
+引き伸ばしは必ずWindowsの拡大率で起こるため、UIの拡大率を同じ比にしておけば
+離してもUIの大きさは変わらない。<strong>「モニタ間で実寸を揃える」と
+「離した瞬間にジャンプしない」は、ドラッグ中に描画しない限り両立しない。</strong>
+ここでは後者を優先している。前者へ切り替える場合は
+<code>KurenaiEngine3D::Render</code>が<code>UIManager::OnUIScaleChanged</code>へ渡す値を、
+モニタの物理サイズ(EDID由来。<code>CreateDCW(L"DISPLAY", &lt;デバイス名&gt;)</code>した上での
+<code>GetDeviceCaps(HORZSIZE)</code>と<code>GetDeviceCaps(HORZRES)</code>)から求めた実DPI基準の
+倍率に差し替えればよい。その際は<code>WM_DPICHANGED</code>だけでなく
+<code>WM_WINDOWPOSCHANGED</code>でモニタの変化を監視する必要がある
+(上表のFHDと縦置きのように、Windowsの拡大率が同じで実DPIが違うモニタ同士の移動では
+<code>WM_DPICHANGED</code>が飛んでこないため)。
+</p>
+<p>
+<strong>ウィンドウのピクセル寸法にはエンジン側から一切手を出さない。</strong>
+モニタをまたいだときの伸縮はWindowsの既定の挙動にそのまま任せ、一般的なWindowsアプリと同じ
+振る舞いにしている。具体的には次の2つを「やらない」。
+</p>
+<ul>
+<li><code>WM_DPICHANGED</code>が提示する推奨サイズへ<code>SetWindowPos</code>しない</li>
+<li><code>WM_GETDPISCALEDSIZE</code>を処理しない。Per-Monitor V2では、DPIの違うモニタへ移る直前に
+Windowsが「新しいDPIでのウィンドウの希望サイズ」をこのメッセージで尋ねてくる
+(Windows 10 1703以降)。<code>lParam</code>にはDPIの比率で線形に伸縮させた値があらかじめ
+入っており、処理せずに済ませるとWindowsがその値を使う。
+現在のサイズを書き戻して<code>TRUE</code>を返せばOS側の伸縮を止められるが、あえてそうしない</li>
+</ul>
+<p>
+なお一時期はウィンドウも実DPIへ追従させていたが、モーダルループ中はWindowsがドラッグ開始時の
+サイズでウィンドウを動かし続けるため、こちらの<code>SetWindowPos</code>が即座に打ち消され、
+その結果ウィンドウの位置が揺れてモニタ判定が行き来し
+<strong>ウィンドウが伸縮を繰り返した(発振した)</strong>。
+ウィンドウ側を自前で制御する方針へ変える場合は、この点に注意すること。
+</p>
+<p>
+UI全体をもう少し大きく/小さくしたい場合は<code>UITheme::kUIScaleMultiplier</code>を変える
+(全モニタに一律で掛かる)。
+</p>
+<p>
+<strong>拡大率を変えるときは、ドックのパネル幅・高さも同じ比率で拡縮する必要がある。</strong>
+ImGuiは<strong>中央ノードを含む側と分割されたノードの寸法を「絶対ピクセル値」として保持し、
+ドックスペースが広がっても維持して増分を中央ノードへ全部渡す</strong>
+(<code>imgui.cpp</code>の<code>DockNodeTreeUpdatePosSize</code>、サイズ配分ポリシーの3番)。
+</p>
+<pre><code>// 3) If one window is the central node (~ use remaining space, should be made explicit!),
+//    use explicit size from the other, and remainder for the central node
+else if (child_0-&gt;SizeRef[axis] != 0.0f &amp;&amp; child_1-&gt;HasCentralNodeChild)
+{
+    child_0_size[axis] = ImMin(size_avail - size_min_each, child_0-&gt;SizeRef[axis]);
+    child_1_size[axis] = (size_avail - child_0_size[axis]);
+}</code></pre>
+<p>
+このエンジンのレイアウトは左右・下のパネルと中央のパススルーノードという構成なので、
+まさにこの分岐に当たる。拡大率だけ変えると文字は大きくなるのにパネルの幅は据え置きとなり、
+マウスを離した瞬間にパネルの幅・高さが変わって見える。
+</p>
+<p>
+同じ理由で<strong>スクロールバーも1フレームだけ表示が乱れる</strong>。
+その有無と長さは前フレームの内容サイズ(<code>ImGuiWindow::ContentSize</code>)から決まるため、
+拡大率が変わったフレームでは古い内容サイズで判定されてしまう。
+</p>
+<p>
+そこで<code>Core::ImGuiDockLayout::ScaleForUIScaleChange</code>でまとめて追従させている。
+<code>ImGuiDockNode</code>も<code>ImGuiWindow</code>も<code>imgui_internal.h</code>の型なので、
+この処理はLibrary側にしか置けない(12.2節参照)。
+</p>
+<p>
+<strong>ImGuiがDPI変更用に持っている<code>ScaleWindowsInViewport</code>は使っていない。</strong>
+あちらは<code>Pos</code>/<code>Size</code>/<code>SizeFull</code>を無条件に拡縮するため、
+ドッキング中のウィンドウではドックノードが決めるサイズと一時的に食い違う
+(実測: 拡縮直後に<code>Size=279x426</code>、<code>Begin()</code>後にノードが決めた
+<code>280x278</code>へ上書き)。位置・サイズを拡縮するのは浮いているウィンドウだけにしている。
+</p>
+<p>
+拡縮が必要な値は、実際にログへ出して特定した。<strong>スクロールバーの有無・長さ・位置は
+<code>Begin()</code>内で「前フレームの利用可能サイズ」から決まる</strong>ためである。
+</p>
+<pre><code>ImVec2 avail_size_from_last_frame = window-&gt;InnerRect.GetSize() + scrollbar_sizes_from_last_frame;
+ImVec2 needed_size_from_last_frame = window-&gt;ContentSize + window-&gt;WindowPadding * 2.0f;</code></pre>
+<table>
+<tr><th>値</th><th>拡縮しないと起きること</th></tr>
+<tr><td><code>ImGuiDockNode::Size</code> / <code>SizeRef</code></td><td>パネルの幅・高さが据え置きになる</td></tr>
+<tr><td><code>ImGuiWindow::InnerRect</code></td><td>前フレームの幅で判定され、スクロールバーの位置が横にずれる(実測: 拡大率を1.5→1.0にした直後に右端が259のまま。正しくは約172)</td></tr>
+<tr><td><code>ImGuiWindow::ScrollbarSizes</code></td><td>同上(実測: 21のまま。正しくは14)</td></tr>
+<tr><td><code>ImGuiWindow::DC::CursorMaxPos</code> / <code>IdealMaxPos</code></td><td>内容サイズが古いままになり、スクロールバーの有無・長さが乱れる</td></tr>
+<tr><td><code>ImGuiWindow::Scroll</code></td><td>スクロール済みのパネルで表示位置がずれる</td></tr>
+</table>
+<p>
+<strong><code>ImGuiWindow::ContentSize</code>を直接拡縮しても効かない</strong>点に注意。
+この値は<code>Begin()</code>の冒頭で<code>CalcWindowContentSizes</code>により
+</p>
+<pre><code>ContentSize      = CursorMaxPos - CursorStartPos
+ContentSizeIdeal = max(CursorMaxPos, IdealMaxPos) - CursorStartPos</code></pre>
+<p>
+と毎フレーム再計算されて上書きされるため、元になる<code>DC</code>側を拡縮する必要がある。
+<code>CursorStartPos</code>は内容の起点(絶対座標)で効くのはそこからの差分だけなので、
+起点を保ったまま差分に比率を掛ける。<code>InnerRect</code>も同様に、効くのは大きさだけなので
+原点を保って幅・高さに掛ける。
+</p>
+<p>
+実測: 拡大率1.0→1.5で左パネル幅が197→294px(比1.49)、下パネル高さが133→203px(比1.53)。
+1.5→1.0→1.5と往復させても左パネル幅は294pxへ正確に戻り、丸め誤差が蓄積しないことも確認した。
+</p>
+<p>
+拡大率は<code>ScaleAllSizes</code>(余白・角丸・スクロールバー幅などの寸法)と
+<code>style.FontScaleMain</code>(フォント)の両方へ掛ける。フォント側に
+<code>FontScaleDpi</code>ではなく<code>FontScaleMain</code>を使うのは、前者が
+「モニタ由来のスケール」を表すフィールドであり、アプリが決めた固定倍率という意味と合わないため。
+<code>UITheme::Apply</code>は<code>ImGuiStyle</code>を既定へ戻してから組み立て直す冪等な実装に
+してある。<code>ScaleAllSizes</code>は現在値への乗算なので、これをしないと呼び直すたびに
+寸法が累積する(追従をやめた現在は起動時の1回しか呼ばないが、倍率を実行時に変えられるように
+する余地を残すためこの性質は維持している)。
+</p>
+<p>
+<strong>自動化への影響。</strong>DPI非対応だった頃は、<code>PrintWindow</code>がウィンドウを論理サイズで
+描画する一方ビットマップは<code>DWMWA_EXTENDED_FRAME_BOUNDS</code>の物理サイズで確保されるため、
+撮影したPNGは「左上に内容・右と下は黒い余白」という構造になっていた。PMv2化すると両者が一致して
+余白は出なくなる。さらに、自動化スクリプト側のプロセスがDPI非対応のままだと
+<code>GetClientRect</code>がDPI仮想化され、150%環境で3840x2054のクライアントが2560x1369に
+見える(実測)。<code>PostMessage</code>の<code>lParam</code>は仮想化されず素通しなので、
+送る座標は物理クライアント座標でなければならない。そのため
+<code>Claude/Tools/WinAutomation.ps1</code>(リポジトリ管理外)側もPMv2へ揃えている。
+</p>
+<p>
+なお<code>WM_DPICHANGED</code>はプロセスを跨いだ<code>PostMessage</code>が拒否される(戻り値false)ため、
+DPI変更時の挙動を自動化から注入して確かめることはできない。確認するには拡大率の異なるモニタ間で
+ウィンドウを実際にドラッグするか、ディスプレイ設定の拡大率を変更すること
+(この方法で<code>WM_DPICHANGED</code>が届き、ウィンドウサイズが追従することは確認済み)。
 </p>
 </section>
 
@@ -1531,11 +1832,13 @@ SSAO/SSILのAO率を拡散IBLにそのまま乗算するのは妥当だが、鏡
 ことで、ラフネスが高いほどAOの効きを弱める。
 </p>
 <p>
-拡散イラディアンス・プリフィルタ済み鏡面はいずれも昼固定のスカイボックスから焼いたものなので、
-夜間はこれらのマップ自体は変化しない。既存の背景スカイ表示(<code>AmbientColor.a</code>で
-夜色へlerp)と一貫性を保つため、IBL全体の寄与に<code>AmbientColor.a</code>(昼度)を乗算する形で
-近似している。太陽が沈むとIBLの寄与も比例して弱まるが、厳密には不正確(本来は空自体の色が
-変化するべき)である点は既知の制約として残る。
+夜間の扱いは<strong>18章で全面的に作り直した</strong>。かつては拡散イラディアンス・プリフィルタ済み鏡面が
+いずれも昼固定のスカイボックスから焼かれていたため、夜を表現する手段が
+「IBL全体の寄与に<code>AmbientColor.a</code>(昼度)を乗算して0倍へ落とす」ことしか無かった。
+その結果、<strong>IBLを有効にすると無効時よりも夜が暗くなる</strong>という逆転が起きていた
+(IBL無効時のフォールバックには視認性確保のための夜間下限値が入っていたのに対し、
+IBL有効時は厳密にゼロになるため)。実測でも建物がコード0の真っ黒な影絵になることを確認している。
+現在は手続き空が太陽高度に応じて自分で暗くなるため、この乗算は撤廃した(21.4節)。
 </p>
 
 <h3>14.6 HDRスカイボックス生成(<code>Tools/generate_sky_cubemap.py</code>)</h3>
@@ -1569,10 +1872,16 @@ Preetham, Shirley &amp; Smits, "A Practical Analytic Model for Daylight"(SIGGRAP
 太陽の可視円盤は描かない(ユーザー指示。「空だけでよい」)。太陽の方向(<code>sun_direction</code>、
 <code>ComputeSunLighting</code>と同じ式・同じ既定値: Time of Day=12時、Sun Azimuth=126.87度)は
 Perez分布のcircumsolar項(太陽に近い方向ほど散乱で明るくなるという、空自体の輝度分布の形)を
-決めるためだけに使う。このスカイボックス自体は起動時に一度だけ焼くオフラインアセットのため、
-<strong>実行中にImGuiの太陽スライダーを動かしても空の輝度分布の形自体は追従しない</strong>
-(14.5節の夜間近似と同種の、静的アセットゆえの既知の制約)。地面より下方向は空のモデルの
-適用範囲外のため、水平線のプラトー色から暗い接地色(アート的な近似値)へなだらかにフェードさせている。
+決めるためだけに使う。地面より下方向は空のモデルの適用範囲外のため、水平線のプラトー色から
+暗い接地色(アート的な近似値)へなだらかにフェードさせている。
+</p>
+<p>
+かつてはこのスカイボックスが起動時に一度だけ焼くオフラインアセットだったため、
+<strong>実行中に太陽スライダーを動かしても空の輝度分布の形自体は追従しない</strong>という制約があった。
+<strong>18章で同じPerez分布をGPUのコンピュートシェーダーへ移植し、この制約を解消した。</strong>
+現在このスクリプトは (a) 手続き空のオフライン参照実装(同じ絵を出すことでHLSL側の移植の
+正しさを担保する)、(b) 手続き空を無効にしたときのフォールバック、(c) <code>.kscene</code>で
+スカイボックスを明示するシーン向けのアセット生成、の3つの役割を持つ。
 </p>
 
 <h3>14.7 実装時に見つかった不具合と修正の経緯</h3>
@@ -1581,7 +1890,8 @@ Perez分布のcircumsolar項(太陽に近い方向ほど散乱で明るくなる
 かつ地平線色をほぼ白(0.92, 0.94, 1.0)にしていたため、ゲームカメラが実際に見る典型的な低めの
 仰角(建物越しに覗く空など)では既に大きく地平線色側へ寄ってしまい、彩度がほぼ失われて灰色に
 見えた(実機で確認された不具合)。天頂色・地平線色そのものをより彩度の高い青に変更
-(天頂: (0.30, 0.55, 0.95)、地平線: (0.65, 0.80, 1.0))した上で、補間カーブを線形から3乗
+(天頂: (0.30, 0.55, 0.95)、地平線: (0.65, 0.80, 1.0)。この2値は後に21.9.3節で
+太陽高度に応じた3セットの補間へ置き換えた)した上で、補間カーブを線形から3乗
 (<code>(1-cosθ)³</code>)に変更し、実際の快晴の空と同様に「高い仰角ではほぼ天頂色を保ち、
 水平線ぎわの最後の範囲だけ急速に白っぽくなる」挙動に直した。
 </p>
@@ -1590,8 +1900,12 @@ Perez分布のcircumsolar項(太陽に近い方向ほど散乱で明るくなる
 離れると輝度が天頂の1/4程度まで急激に落ち込む(単一散乱のみを仮定した理想的な快晴空のモデルの
 ため)。実際の大気は多重散乱・エアロゾルにより太陽から離れた領域もある程度明るく保たれるため、
 そのままだと典型的なカメラ視点(太陽の真下ではない方向)で暗く見えた(実機で指摘された見た目の
-問題)。<code>RELATIVE_LUMINANCE_FLOOR</code>(0.45)で最低輝度を底上げし、多重散乱を簡略化して
+問題)。<code>RELATIVE_LUMINANCE_FLOOR</code>で最低輝度を底上げし、多重散乱を簡略化して
 表現した。
+</p>
+<p class="note">
+この底上げは当初0.45にしていたが、それでは輝度の勾配がほぼ消えて空全体が一様なスレートグレーに
+なることが後の実測で判明したため、0.12へ下げた(21.9.4節)。
 </p>
 <p>
 <strong>(3) 太陽の可視円盤を追加した後、削除した。</strong>一時的に太陽本体(実際の平均角直径
@@ -2243,6 +2557,13 @@ BRDF積分LUT)をこのパスにもバインドし(<code>t9</code>/<code>t10</co
 <code>EvaluateIBL</code>側のスペキュラオクルージョンは常に1になり、計算そのものを省いている。
 </p>
 <p>
+<b>【後日更新】</b>環境ソースはその後<a href="#reflectionprobe">19章</a>11節で
+<code>ReflectionProbe.hlsli</code>の<code>SampleEnvironment</code>へ寄せ、反射プローブに対応させた。
+上記のグローバルIBL固定は、密閉された室内のガラスにも空が映るという形で実際に破綻していた。
+省いていたスペキュラオクルージョンは<code>ao=1</code>のとき<b>厳密に1</b>になることが確認できたため、
+不透明側と同じ<code>SpecularIBLWeight</code>をそのまま呼ぶ形に統一してある(19.11節)。
+</p>
+<p>
 このバインドにより半透明パスが使うSRVスロットはマテリアル4枚 + シャドウ4枚 + ライトリスト +
 IBL 3枚の計12個になったため、DX12のルートシグネチャの
 <code>kTextureSlotCount</code>を11から12へ引き上げた
@@ -2455,6 +2776,15 @@ CPU側でライト強度へ直接乗算していた。自動露出を入れる�
 <code>exposure(ev) = 1/(1.2·2^ev)</code>なので<code>exposure(auto)/exposure(pre) = 2^(pre−auto)</code>となり、
 1回の<code>exp2</code>で済む。結果はCPUを経由せず1x2の<code>R32_Float</code>テクスチャに置き、
 トーンマップとブルームが直接読む。リードバックは一切発生しない。</p>
+
+<p class="note">
+<strong>手動露出時も1.0ではない。</strong>M7時点ではプリ露出が固定値だったため、手動露出のときは
+「露出はCPU側でライト強度へ乗算済み」として倍率1.0でよかった。しかし21.5節で
+プリ露出を時刻連動の可変値にした時点でこれは成立しなくなり、
+<code>2^(実効EV100 − ユーザー設定EV100)</code>を割り戻す必要がある。
+この割り戻しの欠落が実機で「夜が明るすぎる」「自動露出が無効化できない」として現れた
+(21.9.1節)。<strong>Tonemapと同じ倍率をBloomにも渡すこと</strong>。違う値にすると
+ブルームだけ露出がずれて合成比が狂う。</p>
 
 <p>露出の保存先を<code>float4</code>1テクセルではなく<code>R32_Float</code>を2テクセル並べた形にしているのは、
 <code>RWTexture2D</code>からの<strong>型付き読み出しが保証されているのはR32系だけ</strong>だからである
@@ -2920,6 +3250,16 @@ RHIへの追加(<code>CreateMippedUAVTextureCubeArray</code>、
 定数バッファは<strong><code>FrameConstants</code>の宣言を一切変えずに</strong>、このパス専用のバッファへ
 視点に関わる値だけを差し替えて渡している。
 </p>
+<p>
+<strong>空は「このフレームで実際に使う空」を渡すこと。</strong>ジオメトリが描かれなかったテクセルは
+<code>CSCopyCaptureToCubeFace</code>が空で埋める(19.2節)が、その入力を
+<code>m_SkyboxTexture</code>(<code>.kscene</code>のDDS)に固定すると、手続き空
+(<a href="#procedural-sky">21章</a>)が有効なシーンで<strong>プローブにだけ古い空が焼き込まれ</strong>、
+本編の背景と食い違う。<code>ActiveSkyTexture()</code>がフレーム冒頭に確定させた
+<code>skyTexture</code>を使う。これはレンダーグラフの依存としても正しく、手続き空のときは
+<code>SkyGenerate</code>パスがそのテクスチャのWriterになるため、ベイクが空の焼き直しより
+自動的に後ろへ順序付けられる(<code>probeCaptureReads</code>にも同じものを挙げてある)。
+</p>
 <table>
 <tr><th>フィールド</th><th>渡す値</th><th>理由</th></tr>
 <tr><td><code>ViewProj</code></td><td>プローブのその面のビュー・プロジェクション</td><td>ラスタライズ用</td></tr>
@@ -3073,7 +3413,9 @@ ImGuiの「Parallax Correction」「Probe Blending」(<code>ProbeParams.z</code>
 <ul>
 <li>Boxの回転は<strong>Y軸まわりのみ</strong>。傾いた床・天井を持つ空間は想定していない</li>
 <li><strong>影響範囲の箱と視差補正の投影ボックスを分離できない</strong>(19.7節)。
-壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある</li>
+壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある。
+ただし19.12節の距離キューブを使う設定では、箱は「探索範囲の上限」にしか使われなくなるため
+この制約の影響は小さくなる</li>
 <li>更新モードはBaked / OnDemand / Realtimeの3種(19.10節)。ただし<strong>時間分割できているのは
 キャプチャだけで、畳み込みは分散できていない</strong>。キャプチャが0.02 msなのに対し畳み込みは
 約14 msあるため、Realtimeでも6フレームに1回そのスパイクが乗る</li>
@@ -3087,8 +3429,13 @@ SSRが判定できなかった領域(画面外・最大距離まで判定不能)
 位置のプローブを焼くとシャドウマップの範囲外になり影が落ちない。プローブは視界内で焼く前提</li>
 <li>プローブ数の上限は8(<code>kMaxReflectionProbes</code>)。<code>TextureCubeArray</code>は実行時に
 伸縮できないため固定容量で確保している。超過分は警告ログを出して切り捨てる</li>
-<li>半透明フォワードパス(<a href="#transparent">15章</a>)はプローブに対応しておらず、
-グローバルIBLのみを使う</li>
+<li>半透明フォワードパス(<a href="#transparent">15章</a>)も19.11節でプローブへ対応させた。ただし
+<strong>半透明メッシュ自体はプローブへ焼かない</strong>(19.11節)ため、ガラス越しの景色は
+プローブのキューブマップには残らない</li>
+<li>屈折は非対応。<code>refract()</code>でプローブを引くこと自体は容易だが、半透明パスは
+事前乗算アルファで背景と合成しており背景は既にブレンドで透けて見えている。そこへ透過色を足すと
+同じ景色が二重に映る。正しく扱うには不透明描画後の<code>SceneColor</code>をコピーして歪めて
+サンプルするスクリーンスペース屈折が必要で、パス構成そのものの変更になる</li>
 </ul>
 
 <h3>19.9 検証シーン(Reflection Probe Test)</h3>
@@ -3107,8 +3454,8 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
     │   西室(密閉)     ▓  東室     │
     │   暖色の壁+ポイント▓ 寒色の壁  │
     │   ライト+エミッシブ▓ +太陽光   │
-    │  ●   ●   ●   ●   ●   ●   ●  │  ← 金属球列(metallic=1.0, roughness=0.05)
-    └───────────────────┴───────────┘  y=0
+    │  ●   ●  ▨ ●   ●   ● ▨ ●   ●  │  ← ● 金属球列(metallic=1.0, roughness=0.05)
+    └───────────────────┴───────────┘  y=0     ▨ 半透明のガラス板(alphaMode=BLEND)
    x=-12                x=0        x=+12
             床 = 磨いた石(非金属, roughness=0.06)</code></pre>
 
@@ -3121,6 +3468,11 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 <td>環境ソースがプローブからグローバルIBLへ落ちること(19.1節)</td>
 </tr>
 <tr>
+<td>同上。<strong>ガラス板</strong>を見る</td>
+<td>暖色の壁とエミッシブ帯を映していたガラスが<strong>一様な空色</strong>になる</td>
+<td>半透明フォワードパスへのプローブ適用(19.11節)</td>
+</tr>
+<tr>
 <td>Probe Blending を切る</td>
 <td>開口部付近で反射色が<strong>不連続に切り替わる</strong></td>
 <td><code>SelectNearestProbe</code>経路と重み付き合成の差(19.7節)</td>
@@ -3129,6 +3481,22 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 <td>Parallax Correction を切る</td>
 <td>床に映るエミッシブ帯が、個々の帯ではなく<strong>連続した滲みになって壁の接地点からずれる</strong></td>
 <td><code>ParallaxCorrectDirection</code>(19.7節)</td>
+</tr>
+<tr>
+<td>Use Depth Cube を入れる(既定は無効)</td>
+<td>開口部付近の球で、二重に割れていた暖色の弧が<strong>1本にまとまる</strong>。
+代わりに反射像へ<strong>テクセルの階段状のエッジ</strong>が乗る</td>
+<td><code>ParallaxCorrectDirectionDepth</code>(19.12節)</td>
+</tr>
+<tr>
+<td>Occlusion (Reduce Light Leak) を入れる</td>
+<td>球の真下の床が<strong>逆に明るくなる</strong>(重みが落ちた分をより明るい空IBLが埋めるため)</td>
+<td>プローブが疎なときの遮蔽判定の副作用(19.12節)</td>
+</tr>
+<tr>
+<td>Render Targets &rarr; Probe - Distance</td>
+<td>プローブから見た距離のグレースケール。真下の床が最も暗く、妻壁が中間調</td>
+<td>距離キューブのキャプチャ(19.12節)</td>
 </tr>
 <tr>
 <td>Render Targets &rarr; Probe - Influence</td>
@@ -3170,6 +3538,11 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 読み取れなくなる</li>
 <li><code>ScreenSpaceReflection = false</code>をシーン側で指定している。SSRもプローブと同じく
 「環境の反射」を足すため、両方効いていると差の切り分けができない</li>
+<li><strong>ガラス板の向きは初期カメラからの入射角がおよそ60度になるように決めてある</strong>。
+非金属のフレネル反射は正面(入射角0度)ではF0=0.04と弱く映り込みがほとんど読めない一方、
+真横に近づけると反射は最も強くなるが画面上ではただの細い線にしかならない。実際、最初は板を
+壁と平行に置いて入射角79度になり、効果は出ているのに<strong>数ピクセル幅のスリット</strong>としてしか
+見えなかった。60度前後が「面として見えて、かつ映り込みが読める」両立点になる</li>
 </ul>
 
 <h4>面の巻き順を機械的に決めている理由</h4>
@@ -3211,11 +3584,19 @@ ImGuiの「Update Mode」で3方式を切り替えて比較できるようにし
 <h4>OnDemandの変化検出</h4>
 <p>
 <code>ComputeProbeBakeSignature</code>が、焼き上がりに影響する値
-(時刻・太陽の方位角・太陽/シャドウの有効フラグ・IBL強度・全ライトのパラメータ・プローブ位置)から
+(時刻・太陽の方位角・太陽/シャドウの有効フラグ・月の方位角/仰角・IBL強度・手続き空の有効フラグ・
+自発光の強度倍率・全ライトのパラメータ・プローブ位置)から
 FNV-1aの64bitハッシュを作る。毎フレームの署名と、最後にフルベイクした時点の署名を突き合わせる。
 影響範囲(形状・半径・<code>BoxExtents</code>・<code>BlendDistance</code>)は<strong>含めない</strong> ――
 どこから撮るかを変えないため焼き直しが不要だからである(19.6節)。
 衝突しても起きるのは「本来必要な焼き直しを1回取りこぼす」だけなので、この程度の強度で足りる。
+</p>
+<p>
+<strong>月と手続き空(<a href="#procedural-sky">21章</a>)を後から取り込んだ際、この署名へ追加が要った。</strong>
+月の方位角・仰角は<strong>時刻に連動せず手動指定</strong>なので、太陽の値をいくら混ぜても検出できない。
+太陽が沈むと平行光源1枠が月へ切り替わり(21.4節)、キャプチャの直接光がそのまま変わるため、
+月を動かしたら焼き直す必要がある。手続き空の有効フラグも、切り替えると空そのものが
+<code>.kscene</code>のDDSと入れ替わるので同様である。
 </p>
 
 <h4>時間分割の状態機械</h4>
@@ -3262,7 +3643,226 @@ GPUプロファイラで1プローブぶんのコストが読める。各パス�
 畳み込み自体のサンプル数・解像度を下げることになる。現時点では未実装。
 </p>
 
-<h3>19.11 実シーンへのプローブ配置: 配置数値をパック済みアセットから求める</h3>
+<h3>19.11 半透明フォワードパスへの適用</h3>
+<p>
+プローブを入れた当初、<a href="#transparent">15章</a>の半透明フォワードパスは
+グローバルIBL(<code>IrradianceTexture</code> / <code>PrefilteredEnvTexture</code>)を直接引いたままだった。
+これは不透明面より問題が大きい。半透明パスには<strong>SSRが適用されない</strong>ため、
+ガラスにとっては環境ソースが<strong>唯一の映り込み</strong>だからである。実際、Reflection Probe Testの
+密閉された西室にガラス板を置くと、屋内なのに一様な空色を映していた。
+</p>
+<p>
+対処は<code>Transparent.hlsl</code>を<code>ReflectionProbe.hlsli</code>へ寄せて、不透明側
+(<code>DeferredLighting.hlsl</code>)とまったく同じ<code>SampleEnvironment</code>を呼ぶようにするだけである。
+これでプローブの選択・視差補正・ブレンド・イラディアンスの取得元切り替えの規則が、
+半透明と不透明で食い違わなくなる。
+</p>
+
+<h4>レジスタの割り当て</h4>
+<p>
+共有ヘッダーのレジスタ番号はインクルードする側がマクロで与える方式なので(19.7節)、
+このパスで空いているスロットをそのまま使える。半透明パスは<code>t0</code>&ndash;<code>t4</code>と
+<code>t8</code>&ndash;<code>t11</code>を使っているため、<strong><code>t5</code>&ndash;<code>t7</code>が空いていた</strong>。
+DX12のルートシグネチャは<code>t0</code>&ndash;<code>t13</code>を張っているので、RHIの拡張は不要だった。
+</p>
+<table>
+<tr><th>スロット</th><th>Lightingパス</th><th>半透明パス</th></tr>
+<tr><td>グローバルIBL(イラディアンス / プリフィルタ)</td><td>t8 / t9</td><td>t9 / t10</td></tr>
+<tr><td>プローブ(プリフィルタ / イラディアンス)</td><td>t12 / t11</td><td>t5 / t6</td></tr>
+<tr><td>プローブの影響範囲バッファ</td><td>t13</td><td>t7</td></tr>
+</table>
+
+<h4>スペキュラオクルージョンは省略ではなく等価</h4>
+<p>
+以前の<code>EvaluateIBLSplit</code>は「半透明パスはAO/GIバッファを持たないので
+スペキュラオクルージョンは常に1になる」として計算を省いていた。共有ヘッダーの
+<code>SpecularIBLWeight</code>へ寄せるにあたってこれを確認したところ、<strong>省略ではなく厳密に等価</strong>だった。
+</p>
+<pre><code>specularOcclusion = saturate(pow(NdotV + ao, e) - 1 + ao)   // e = exp2(-16 * roughness - 1) &gt; 0
+ao = 1 のとき → saturate(pow(NdotV + 1, e))
+NdotV + 1 ∈ [1, 2] かつ e &gt; 0 なので pow(...) ≥ 1 → saturate で必ず 1</code></pre>
+<p>
+したがって<code>ao=1</code>を渡して同じ関数を呼べば式は変わらない。分岐やコピーを残す理由がないので、
+係数の定義は<a href="#ssrprobe">20章</a>のとおり1か所のままにできた。
+</p>
+
+<h4>半透明メッシュはプローブへ焼かない</h4>
+<p>
+<code>ProbeCapture.hlsl</code>は全メッシュを<strong>不透明として</strong>描く。半透明メッシュをそのまま
+焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに残り、その裏にある本来映るべき
+景色が欠ける。半透明を正しく焼くにはキャプチャ側にも奥から手前への描画順とブレンドが必要で、
+コストに見合わない。そのためキャプチャのループで<code>mesh.IsTransparent</code>のメッシュを飛ばしている
+(プローブに半透明を含めないのは一般的な割り切り)。
+</p>
+
+<h4>副産物: DX11のSRVスロット追跡数がDX12と食い違っていた</h4>
+<p>
+<code>DX11CommandList::kTextureSlotCount</code>が12のまま(DX12は14)になっていた。この値は
+<code>m_BoundPixelSrvs</code>(<a href="#rhi-binding">16章</a>)の要素数で、
+<code>UnbindPixelSrvForResource</code>が「UAVで書く直前に同じリソースのSRVを明示的に外す」ために使う。
+12のままだと<strong>プローブが張る<code>t12</code>/<code>t13</code>が追跡から漏れ</strong>、
+プローブのベイクがUAVで書き込む際のSRVアンバインドがドライバ任せ(警告付きの自動アンバインド)に
+なっていた。<code>SetTexture</code>自体は範囲外スロットも素通しするため描画結果には現れず、
+コメントが「DX12と同じ値にしておくこと」と明記していたにもかかわらず見落とされていたもの。14へ揃えた。
+</p>
+
+<h3>19.12 距離キューブ(視差補正の精密化と遮蔽判定)</h3>
+<p>
+19.7節の視差補正は<strong>「部屋が直方体である」という仮定</strong>に立っている。実際の形状が箱から
+ずれているほど反射像がずれ、強く曲がった鏡面(Reflection Probe Testの金属球)では
+<strong>同じ景色が二重に映る</strong>形で現れる。これを実形状に当てられるようにするため、
+キャプチャ時に色だけでなく<strong>プローブから各方向の被写体までの距離</strong>も焼く。
+</p>
+
+<h4>何をどう格納するか</h4>
+<p>
+キャプチャパスを<strong>MRT 2枚</strong>にし、<code>SV_TARGET1</code>へ
+<code>length(input.WorldPos - CameraPosition.xyz)</code>を出す
+(<code>ProbeCapture.hlsl</code>の<code>CameraPosition</code>にはプローブのワールド座標が入っている
+ため、これがそのまま求める距離になる)。深度バッファから逆算せずMRTで直に出しているのは、
+面ごとの逆投影を組む必要がなく1行で済むためである。
+</p>
+<p>
+格納先は<code>R32_Float</code>の<code>TextureCubeArray</code>(128&sup2; &times; 6面 &times; 8枚 = <strong>3.1 MB</strong>)。
+放射輝度と違い<strong>畳み込まない</strong>ので、スクラッチのキューブマップ(19.2節)を経由せず、
+<code>CSCopyCaptureToCubeFace</code>が<code>u1</code>へプローブのスライスへ直接書き込む。
+ジオメトリが無かった方向には十分大きな値(<code>kProbeSkyDistance = 1e6</code>)を入れておくことで、
+「その向きには何も無い」が交差判定にも遮蔽判定にも自然に効く。
+</p>
+<p>
+サンプラーは<strong><code>DataSampler</code>(Point)</strong>を使う。これは色ではなく<b>データ</b>だからで、
+補間するとシルエットを跨いだタップが実在しない中間距離を作り、そこから求めた交点も遮蔽判定も
+どのジオメトリにも対応しない偽の値になる(<code>Samplers.hlsli</code>の区分に従う)。
+</p>
+
+<h4>視差補正: キューブマップ版のリリーフマッピング</h4>
+<p>
+反射ベクトルRに沿って点を進めながら、<strong>「プローブからその点までの距離」</strong>と
+<strong>「その方向にプローブが記録している距離」</strong>を比べ、後者を追い越した区間を二分探索で詰める
+(等間隔8ステップ + 二分探索4回 = 12タップ)。
+</p>
+<p>
+探索範囲の上限には<strong>箱との交点をそのまま使う</strong>。箱は部屋に合わせて置かれているので
+その外側まで探しても意味が無いうえ、<strong>交差が見つからなかったときのフォールバックが
+自動的に「従来の箱による補正」になる</strong>という利点がある。そのため
+<code>ProbeBoxExitDistance</code>を切り出し、箱版と深度版が同じ交点計算を共有する形にしてある。
+</p>
+<p>
+コストが要るのは低ラフネス面だけだが、実測では<strong>GPUフレーム時間が有効/無効で区別できなかった</strong>
+(3.767 ms / 3.772 ms、1280&times;720・プローブ2個)。
+</p>
+<p>
+<strong>ただしこれも既定では無効にしてある。</strong>二重像は確かに軽減される(下の検証参照)が、
+引き換えにレイマーチの結果へ<strong>距離キューブのテクセルの階段状のエッジ</strong>が乗る。
+実機で見比べた結果「全体として良くなったとは言えない」という判断になったため、
+既定は従来の箱による補正のままにし、比較用のトグルとして残してある。
+式そのものは正しく動いており(距離キューブの値は幾何的な距離と一致している)、
+解像度を上げるか2次モーメントを持って確率的に扱えば伸ばせる余地はある。
+</p>
+
+<h4>遮蔽判定(光漏れの抑制)と、それが既定で無効な理由</h4>
+<p>
+同じ距離キューブで<strong>「そのピクセルはプローブから見えているか」</strong>も判定できる。
+プローブから見て記録面より奥にあるピクセル(=壁の向こう)は影響範囲の重みを落とし、
+落ちた分をグローバルIBLと他のプローブが埋める。
+</p>
+<p>
+判定点は面の法線方向へ<code>bias</code>ぶん浮かせる(DDGIのnormal bias、Majercik et al. 2019)。
+これが無いと<strong>プローブから見えている面が自分自身に遮蔽される</strong>誤判定が起きる。
+記録距離はテクセル中心方向の値なので、そのテクセルが張る幅のぶんだけ手前へずれ得るためで、
+実測では<b>画面全体がわずかに暗くなる</b>という形で現れた(平均差分7.50 &rarr; 5.90/765)。
+</p>
+<p>
+<strong>それでもこの機能は既定で無効にしてある。</strong>差分画像を取ると、変化が集中していたのは
+仕切り壁ではなく<strong>金属球の真下の床</strong>だった。球の下の床はプローブから見て球に隠れているので
+判定としては正しいのだが、落ちた重みを埋めるのが<strong>より明るいグローバルIBL(空)</strong>であるため、
+影であるべき位置に白いハローが出てしまう。
+</p>
+<p>
+これは<strong>プローブが疎であることに起因する構造的な問題</strong>で、
+「落ちた重みを別のプローブが引き取れる密度」があって初めて素直に使える。
+DDGIがプローブをグリッド状に数百個置くのは、まさにこの重みの引き継ぎを成立させるためである。
+効果と副作用を見比べられるトグルとして残し、既定は従来の挙動(遮蔽判定なし)にしてある。
+</p>
+
+<h4>許容誤差の決め方</h4>
+<pre><code>bias = max(0.1, distanceFromProbe * (4 / faceSize))</code></pre>
+<p>
+キューブの1面は<code>faceSize</code>テクセルで[-1,1]をカバーするので、プローブから距離dの位置での
+1テクセルの幅はおよそ<code>2d / faceSize</code>になる。シルエットを跨いだテクセルや量子化で記録距離が
+わずかにずれるぶんを吸収するため<strong>2テクセルぶん</strong>を許容量とする。下限があるのは、
+プローブのすぐ近く(d&rarr;0)で許容量が0に潰れて自己交差してしまうのを防ぐため。
+</p>
+<p>
+<code>faceSize</code>をシェーダーへハードコードせず<code>FrameConstants.ProbeParams2.z</code>で渡しているのは、
+<code>kProbeCaptureSize</code>を変えたときに黙ってずれないようにするため。
+</p>
+
+<h4>LightingパスとSSRパスは必ず同じ条件でコンパイルする</h4>
+<p>
+<a href="#ssrprobe">20章</a>の前提は「SSRが差し引く放射輝度は、Lightingパスが適用したものと定義上一致する」
+ことである。したがって<code>KURENAI_PROBE_DISTANCE_REGISTER</code>は
+<code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>・<code>Transparent.hlsl</code>の3つすべてで定義する。
+片方だけ距離キューブを使うと、SSRが自分の足した覚えのない値を引き算することになる。
+</p>
+<p>
+これにより<code>DeferredLighting.hlsl</code>のSRVスロットが<code>t14</code>まで伸びたため、
+DX11/DX12の<code>kTextureSlotCount</code>とDX12のルートシグネチャのSRVレンジ幅を15へ揃えた
+(3か所で同じ値を持っている。19.11節の食い違いと同じ轍を踏まないよう、いずれのコメントにも
+相互参照を書いてある)。
+</p>
+
+<h4>検証</h4>
+<table>
+<tr><th>確認したこと</th><th>結果</th></tr>
+<tr>
+<td>距離キューブが正しい値で焼けているか(Render Targets &rarr; Probe - Distance)</td>
+<td>プローブ0(<code>x = -5</code>)から西の妻壁(<code>x = -12</code>)方向を読むと<strong>7.06</strong>。
+幾何的な距離7.0と一致する。真下の床(プローブ高さ3.5)は斜めのぶんを含めて4.16</td>
+</tr>
+<tr>
+<td>視差補正が実際に効いているか</td>
+<td>ON/OFFで3D描画領域264,600ピクセル中<strong>68,099(25.7%)が変化</strong>、最大差376/765</td>
+</tr>
+<tr>
+<td>二重像(19.9節の既知の制約)</td>
+<td>開口部付近の球で<strong>二重に見えていた暖色の弧が1本にまとまった</strong>。
+ただし完全には消えない(下の制約参照)</td>
+</tr>
+<tr>
+<td>DX11 / DX12の一致</td>
+<td>3D描画領域264,600ピクセル中<strong>4ピクセル</strong>が最大差3/255で相違(ImGuiパネルの境界)</td>
+</tr>
+<tr>
+<td>White Furnace Test(プローブ0個)の回帰</td>
+<td>球と背景のグレーが171〜172で一様。プローブ数0では距離キューブに一切触れないため期待どおり</td>
+</tr>
+<tr>
+<td>コスト</td>
+<td>GPUフレーム時間3.767 ms(有効) / 3.772 ms(無効)。差は測定ノイズに埋もれる</td>
+</tr>
+</table>
+
+<h4>既知の制約</h4>
+<ul>
+<li><strong>二重像は軽減されるが消えない。</strong>根本原因は「プローブが1点からしか見ていない」ことで、
+視差を正確に補正しても、その1点から見えなかった面の情報はそもそもキューブに無い</li>
+<li>距離キューブをPointでサンプルしているため、レイマーチの結果に<strong>テクセルの階段状のエッジ</strong>が出る。
+補間すればなめらかになるが、それは実在しない中間距離を作ることになるので採らない
+(なめらかにしたいなら解像度を上げるか、DDGIのように距離の2次モーメントを持って
+Chebyshev不等式で確率的に扱う必要がある)。
+<strong>この階段状のエッジと二重像の軽減が釣り合わないため、深度版の視差補正は既定無効</strong></li>
+<li>遮蔽判定も既定無効。プローブが疎なうちは実用にならない</li>
+<li><strong>結果として、距離キューブを使う2つの機能はどちらも既定で無効になっている。</strong>
+現時点でこの3.1 MBは「実装と検証は済んでおり、いつでも比較できる状態で置いてある」ものであって、
+既定の描画には効いていない。実用になるのは、解像度・2次モーメント・プローブ密度のいずれかを
+上げた後になる(いずれもPhase C=DDGIで必要になるものと同じ)</li>
+<li>距離キューブは畳み込んでいないため、<strong>高ラフネス面向けの「ぼけた距離」が無い</strong>。
+視差補正を低ラフネス面に限って使うぶんには問題にならないが、DDGI(Phase C)へ進む際は
+2次モーメント付きの畳み込みが必要になる</li>
+</ul>
+
+<h3>19.13 実シーンへのプローブ配置: 配置数値をパック済みアセットから求める</h3>
 <p>
 19.9節の<code>ProbeTest</code>は、こちらでジオメトリを生成しているため部屋の寸法も照明の位置も
 最初から分かっている。しかし<strong>既製のモデルへプローブとライトを置くときは、そのどちらも分からない</strong>。
@@ -3362,7 +3962,6 @@ DX11/DX12の差は鏡面のちらつきと出力ディザの範囲で、他の�
 Light Tilesのヒートマップにマゼンタ(タイル容量64の超過)は出ない ―― 15灯なので当然だが、
 実シーンでタイルあたりのライト数が容量に対してどれくらい余裕があるかを目で確認する用途には使える。
 </p>
-
 </section>
 
 <section id="ssrprobe">
@@ -3489,6 +4088,649 @@ SSRを有効にして計測したところ、<strong>3Dシーンの画素は1つ
 <li><code>roughnessCutoff</code>(既定0.6)より粗い面ではSSRを一切使わない。この領域は
 プローブ/グローバルIBLに委ねられる</li>
 </ul>
+<section id="procedural-sky">
+<h2>21. 手続き空・月光・昼夜遷移</h2>
+
+<p>「IBLを有効にすると夜がとても暗い」という指摘の調査から始まった一連の変更。
+原因は14.5節に書いたとおり、空が昼固定のスカイボックスから焼かれているために
+夜を表現する手段が「IBL全体を昼度で0倍する」ことしか無かったことにある。
+本章はその根治と、それに伴って必要になった月光・昼夜遷移の作り直しを扱う。</p>
+
+<h3>21.1 なぜ「昼夜2枚のDDSをブレンド」ではなくGPUの手続き生成なのか</h3>
+
+<p>畳み込みは線形演算である。したがって</p>
+<pre><code>prefilter(lerp(昼, 夜, t)) == lerp(prefilter(昼), prefilter(夜), t)</code></pre>
+<p>
+が厳密に成立する。つまり<strong>昼夜2枚の線形補間で表せる範囲なら、動的な再ベイクは純粋な無駄</strong>で、
+プリフィルタ済みキューブを2セット持ってサンプル時に混ぜれば同じ絵が再ベイクなしで得られる。
+</p>
+<p>
+再ベイクが意味を持つのは、空が2枚の固定画像の線形補間では表せない変化をするときだけである。
+Perez分布は太陽の位置に依存するので、時刻が変わるとcircumsolarの明るい領域が空の上を移動する。
+これは非線形な変化であり、動的な再ベイクでしか追えない。
+そこで<code>Tools/generate_sky_cubemap.py</code>のPerez分布・色味補間・地面フェードを
+そのまま<code>Shaders/3D/SkyGenerate.hlsl</code>へ移植し、256×256×6面をGPUで生成する構成にした。
+</p>
+<p>
+移植の正しさは、オフラインDDSと手続き空で同じ絵が出ることで担保する。
+実測では平均輝度が 52.48/61.40/69.75 対 52.49/61.41/69.76 と<strong>0.01/255の差</strong>で一致した
+(残差は256²生成 vs 512² fp16 DDSの差)。面→方向マッピングは
+<code>IBLConvolve.hlsl</code>の<code>CubeFaceDirection</code>と完全に同一でなければならない
+(ずれると空とIBLで方向が食い違う)。
+</p>
+<p>
+<code>.kscene</code>が<code>[Scene]Skybox</code>を明示しているシーンでは、そのDDSでなければ
+意味を成さない(White Furnace Testの一様放射輝度キューブマップが該当する)。
+<code>ActiveSkyTexture()</code>がフレームごとにどちらを使うか決めており、明示指定があるときは
+手続き空のトグルに関わらず必ずDDSを使う。<strong>新しい<code>.kscene</code>キーは不要</strong>。
+</p>
+
+<h3>21.2 空の天頂輝度を「届く照度」で正規化する</h3>
+
+<p>
+従来は空光の照度[lx]をそのまま天頂輝度[cd/m²]として使っていた。照度と輝度は
+E = ∫L·cosθ dω の関係にあるので、この扱いだと実際に届く照度は積分値の分だけずれる。
+しかもPerez分布の形は太陽高度で変わるため、そのずれ自体が時刻とともに動いていた。
+</p>
+<table>
+<tr><th>太陽高度</th><th>余弦重み積分</th><th>実際に届く照度</th></tr>
+<tr><td>90度(正午)</td><td>1.080</td><td>21,600 lx</td></tr>
+<tr><td>45度</td><td>1.898</td><td>37,960 lx</td></tr>
+<tr><td>15度</td><td>1.636</td><td>32,720 lx</td></tr>
+</table>
+<p>
+つまり空光の照度が時刻によって<strong>1.8倍も勝手に変動していた</strong>。
+上半球の余弦重み積分が目標照度に一致するよう天頂輝度を正規化することでこれを固定し、
+時刻による空の明るさを意図した係数(21.3節の薄明係数)だけで制御できるようにした。
+積分はθ64分割×φ256分割の中点則で、1.6万回の評価になるため毎フレームではなく
+実際に空を焼くフレームでだけ計算する。
+</p>
+<p>
+なお当初は「一様な空ならL=E/πなので従来はπ倍明るく、<code>m_IBLIntensity</code>の既定0.5は
+その誤差を経験的に打ち消していたのではないか」と見立てたが、<strong>これは実測により否定された</strong>。
+積分にはティントの輝度成分(Rec.709でZENITH=0.526、HORIZON=0.783)も入るため、単位球の積分は
+π(3.14)ではなく1.08にしかならず、正午での補正は8%にすぎない。
+<code>m_IBLIntensity</code>の既定は変更していない。
+</p>
+
+<h3>21.3 昼夜遷移を「時刻」ではなく「太陽の仰角」で決める</h3>
+
+<p>
+遷移窓を5-7時/17-19時へ広げたいという要求があったが、素直に広げると破綻する。
+軌道式 <code>hourAngle = (t/24)·2π − π/2</code> から求まる太陽仰角は次のとおりで、
+<strong>現行の6-7時/17-18時という窓は仰角0度〜15度にちょうど一致していた</strong>(偶然ではなく正しい設計)。
+</p>
+<table>
+<tr><th>時刻</th><th>5h</th><th>6h</th><th>7h</th><th>17h</th><th>18h</th><th>19h</th></tr>
+<tr><td>仰角</td><td><strong>−15°</strong></td><td>0°</td><td>+15°</td><td>+15°</td><td>0°</td><td><strong>−15°</strong></td></tr>
+</table>
+<p>
+5-7時へ広げると5.5時(仰角−7.5度)で係数が0.156となり、
+<strong>地平線下の太陽が15,600 lxで照らす</strong>ことになる。<code>LightDirection.y &gt; 0</code>となって
+<code>ComputeCascadeLightViewProj</code>が地面の下から影を焼き、物体の裏側が照らされてしまう。
+</p>
+<p>そこで遷移係数を2本に分けた。</p>
+<ul>
+<li><strong>SunFactor</strong> … 直接光と影。仰角[0°, +15°]。<strong>地平線下では厳密に0</strong></li>
+<li><strong>TwilightFactor</strong> … 空の輝度と環境光。仰角[−15°, +15°] = 時刻でちょうど5-7時/17-19時</li>
+</ul>
+<p>
+「2時間かけて遷移する」という見た目の要求はTwilightFactorが満たし、直接光は物理的に成立する
+範囲(地平線より上)に留まる。実際の市民薄明(太陽が地平線下0〜−6度)もこの構造になっている。
+あわせて太陽のティントを仰角で暖色へ補間し(仰角15度以上で(1.0, 0.967, 0.9)、
+地平線で(1.0, 0.55, 0.30))、朝焼け・夕焼けの赤みが出るようにした。
+</p>
+
+<h3>21.4 月光と、平行光源1枠の共有</h3>
+
+<p>
+照度は満月の実測値0.25 lx、色は暗所視で青く感じられる現象(プルキンエ効果)に合わせた
+寒色ティント(0.75, 0.85, 1.0)を当てている(物理ではなくアート的な選択)。
+満ち欠けは未実装で、常に満月として扱う。
+</p>
+<p>
+月の位置は<strong>時刻に連動せず、方位角と仰角をImGuiで手動指定する</strong>
+(<code>Moon Azimuth</code> / <code>Moon Elevation</code>)。当初は反太陽方向に固定していたが、
+それは「常に満月」に加えて「常に真夜中に南中する」という二重の簡略化になる。
+実際の月は太陽とは独立した周期(朔望月)で動くため、位置を手動指定にして
+任意の月齢・任意の時刻の見え方を作れるようにした。仰角が0度以下なら月は地平線下にあり月光は出ない。
+方位角の規約は太陽と同じ(X軸が0度、Z軸(+方向)が90度)。シーンを切り替えても引き継がれる
+(<code>.kscene</code>のキーは持たない)。
+</p>
+<p>
+平行光源の枠は<strong>太陽と月で共有し、照度が支配的な方を選ぶ</strong>。
+枠を増やさないのでカスケードシャドウがそのまま使え、月の影が追加コストなしで手に入る。
+</p>
+<p class="note">
+<strong>月の位置を独立させるとポップ防止の前提が崩れる。</strong>
+月を反太陽方向に固定していたときは、切替点(太陽の仰角0度)で月の係数もちょうど0になり、
+向きが180度反転しても何も見えないためポップが原理的に起きなかった。
+月の位置が独立になるとこの保証が失われ、太陽が沈む瞬間に月が高く昇っていると
+<strong>0.25 lxの直接光が向きだけ突然入れ替わる</strong>。21.9.2節で夜の露出を切り詰めて
+月光の影が見える明るさにしたので、これは実際に目に付く。
+そこで月の立ち上がりを<strong>太陽の仰角0°→−5°</strong>に遅らせるゲートを掛け、
+切替点では太陽も月も厳密に0という元の性質を取り戻している
+(<code>moonNightGate</code>)。実測でも17.9時→18.0時→18.1時→18.5時で
+月光を受ける壁面が51.3→49.4→49.0→42.6と単調に推移し、跳びは出ない。
+</p>
+<p>
+月が地平線下にある「月の出ていない夜」がスライダー一つで作れるようになったため、
+夜空の目標照度に<strong>星明かり(約0.001 lx)を下限として置いている</strong>。
+ここが厳密に0になると空が真っ黒になり、自動露出が持ち上げようのない画になるためで、
+アート的な下駄ではなく実在する測光量として入れている。
+</p>
+<p>
+<strong>カスケードシャドウの行列も支配ライトの向きから作ること。</strong>
+<code>LightColor</code>だけ切り替えると月夜に太陽方向の影が残る。
+一方、手続き空が使うのは<strong>常に太陽の位置</strong>である(月が支配的でもPerez分布の基準は太陽のまま)。
+支配ライトの向きから逆算してはいけない。
+</p>
+
+<h3>21.5 プリ露出を時刻連動の可変値にする(fp16アンダーフローの回避)</h3>
+
+<p>
+月光を物理値で入れると、プリ露出をEV100=15固定のままでは夜がHDRバッファでつぶれる。
+反射率0.2の面が満月に照らされたときの輝度は 0.25×0.2/π = 0.016 cd/m² で、
+<code>ComputeExposure(15)</code>=2.54e-5 を掛けると4.0e-7となり、
+<code>SceneColor</code>(<code>R16G16B16A16_Float</code>、最小正規化数6.1e-5)の非正規化域へ落ちる。
+<code>AutoExposure.hlsl</code>も輝度1e-6未満の画素をヒストグラムに数えないため、
+自動露出の下限を下げるだけでは復元できない。
+</p>
+<p>
+そこで<code>ComputeSunLighting</code>は露出を一切掛けず絶対的な測光量[lx]で返すようにし、
+<code>Render()</code>がそのフレームのキー照度から
+<code>autoBias = log2(keyIlluminance / 100000)</code> を求めて
+ユーザー設定のEV100へ <code>clamp(autoBias, -18, 0)</code> を足す構成にした。
+昼を基準0とするので昼の挙動は従来どおりで、夜は約18段ぶん持ち上がる。
+</p>
+<p>
+これが成立するのは、17.1節のプリ露出方式がTonemap・Bloom・AutoExposureのすべてに
+同じ値を渡して割り戻す構造になっているためで、<strong>フレーム単位で値を変えても最終的な絵は変わらない</strong>。
+その性質を利用してバッファの数値レンジだけを健全に保っている。
+プリ露出を渡している箇所は5つ(直接光/環境光、<code>MakeGPULight</code>、
+<code>AutoExposureConstants</code>、<code>BloomConstants</code>、<code>TonemapConstants</code>)あり、
+<strong>1箇所でも漏らすと露出が二重または欠落する</strong>。
+あわせて自動露出の既定レンジをMin 0→−6、Max 16→18へ拡げた(月夜の地表はEV100約−3、
+正規化後の昼の空はEV100約15.6で、従来のレンジでは両端とも収まらなかった)。
+</p>
+<p>
+空もプリ露出済みの値で焼かれるため、<strong>実効プリ露出が動いたときも焼き直す必要がある</strong>
+(0.05段=約3.5%を閾値にしている)。焼き直さないと空だけ古い露出のまま取り残される。
+</p>
+
+<h3>21.6 当初計画から外れた点: 絶対輝度への移行は不要だった</h3>
+
+<p>
+当初は「空を絶対輝度で格納し、サンプル時にプリ露出を掛ける」大きな移行を計画していた。
+しかし21.5節の可変プリ露出を入れた結果、空のベイクもライトも同じ実効プリ露出を使うようになり、
+<strong>全体が既に一つの整合した空間に乗っている</strong>ことが分かった。絶対輝度への移行は不要になり、
+それに伴って必要だった<code>SSR.hlsl</code>のcbuffer拡張
+(このシェーダーだけ<code>AmbientColor</code>までしか宣言しておらず、
+<code>IBLParams</code>を読むには4つのfloat4を末尾追加する必要があった)も行わずに済んだ。
+</p>
+<p>
+副次的に、<strong>SSRの空反射だけ夜間減衰が掛かっていなかった</strong>という既存の非対称も解消した。
+空のキューブマップ自体が夜に暗くなるため、特別扱いが要らなくなったためである。
+</p>
+
+<h3>21.7 再ベイクのコストと閾値</h3>
+
+<p>1回の焼き直しの内訳は次のとおり。</p>
+<table>
+<tr><th>対象</th><th>ディスパッチ数</th><th>サンプル数</th></tr>
+<tr><td>空生成(256²×6面)</td><td>6</td><td>393K</td></tr>
+<tr><td>CSPrefilter mip0(直コピー)</td><td>6</td><td>98K</td></tr>
+<tr><td>CSPrefilter mip1(64²)</td><td>6</td><td><strong>6.29M</strong>(全体の約75%)</td></tr>
+<tr><td>CSPrefilter mip2〜5</td><td>24</td><td>2.09M</td></tr>
+<tr><td>合計</td><td>42</td><td>約8.5M</td></tr>
+</table>
+<p>
+BRDF積分LUTは(NdotV, ラフネス)の2Dテーブルで空にも太陽にも依存しないため、
+<strong>専用パス(<code>BRDFLUTBake</code>)へ分離して起動時に一度だけ焼く</strong>。
+128×128×1024サンプル ≒ 1,680万イテレーションあり、空の再ベイクに巻き込まれると丸損になる。
+</p>
+<p>
+焼き直しの判定は太陽方向1.0度の閾値(および実効プリ露出0.05段)。Auto Advance既定(1h/s)では
+太陽が15度/秒動くので毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える。
+毎フレーム焼くと空生成6回+プリフィルタ36回が常時走って無駄になる。
+なおmip1だけで全体の75%を占めるため、さらに削るならラフネスに応じてサンプル数を可変にする
+(mip1=64、mip2=128、mip3以降=256)のが効く。
+</p>
+
+<h3>21.8 検証</h3>
+
+<p>Bistro Exteriorで撮影し、相異なる色数・走査線上の階調数・同一色の最大連長(バンド幅)で比較した。</p>
+<table>
+<tr><th>構成</th><th>色数</th><th>走査線の階調</th><th>バンド幅</th></tr>
+<tr><td>M7時点の夜(IBL有効、EV100=15固定)</td><td>202</td><td>6</td><td>54px</td></tr>
+<tr><td>+ 月光・仰角ベース遷移</td><td>240</td><td>16</td><td>54px</td></tr>
+<tr><td>+ 可変プリ露出</td><td>240</td><td>16</td><td>54px</td></tr>
+<tr><td>+ IBLの夜間減衰を撤廃(最終)</td><td>169</td><td><strong>35</strong></td><td><strong>13px</strong></td></tr>
+</table>
+<p>
+最終形で色数が減っているのは、環境光で黒が持ち上がりコントラストが下がったためで、
+階調数とバンド幅の改善が実質的な指標になる。M7時点では建物がコード0の真っ黒な影絵だったのに対し、
+最終形では石壁・建物のファサード・店先・植栽まで読み取れる夜景になっている。
+</p>
+<p>個別の検証:</p>
+<ul>
+<li><strong>空が太陽に追従するか</strong> — 太陽を消して空とIBLの寄与だけにし、9時と15時で比較。
+182色/平均72.93 対 159色/平均66.50と明確に異なる。従来の固定Sky.ddsでは一致していたはず</li>
+<li><strong>地平線下の太陽が照らさないか</strong> — 5.5時(仰角−7.5度)のDirect Light表示が
+0とウィンドウ枠の243の2値のみ = 直接光は厳密にゼロ</li>
+<li><strong>月光が正しい向きから来るか</strong> — 22時(月の仰角+60度)をゲイン20000倍で表示すると
+81階調。月に面した屋根の上面だけが照らされ自己遮蔽の影も出ており、CSMが月の向きに
+追従していることを確認</li>
+<li><strong>DX11/DX12の一致</strong> — 正午で相異なる色数・平均輝度・バンド幅が完全一致</li>
+<li><strong>White Furnace Test</strong> — 描画領域全体が107/108(ディザによる隣接コード)の
+一様グレーのままで、エネルギー保存は崩れていない</li>
+</ul>
+
+<h3>21.9 実機で残った4つの見た目の問題と、その原因</h3>
+
+<p>
+21.8までの実装を実機で確認した結果、次の4点が指摘された。
+<strong>4点のうち2点は同一のバグに由来し、残る2点は空のモデルの構造的な限界だった。</strong>
+</p>
+
+<h4>21.9.1 「自動露出が無効化できない」「夜が明るすぎる」— 割り戻しの欠落</h4>
+
+<p>
+どちらも原因は1つで、<strong>手動露出時にTonemapが可変プリ露出を割り戻していなかった</strong>ことによる。
+<code>Tonemap.hlsl</code>は自動露出が有効なときだけ <code>exp2(プリ露出EV − 自動露出EV)</code> を掛け、
+無効なときはCPU側が渡す<code>ExposureScale</code>をそのまま使う。ところがCPU側は
+これを<strong>1.0固定</strong>で渡していた。17.1節のプリ露出方式では正しい値だったが、
+21.5節で可変プリ露出を入れた時点で成立しなくなっていた。
+</p>
+<p>
+実効プリ露出は夜に最大18段下がる。つまりHDRバッファ上の夜の値は約26万倍明るく積まれており、
+それを割り戻さないまま表示していたので、
+</p>
+<ul>
+<li>夜が昼と同じ明るさで出る(「夜が明るすぎる」)</li>
+<li>自動露出のチェックを外しても、時刻に追従する露出補正が残り続ける(「無効化できない」)</li>
+</ul>
+<p>
+修正はCPU側で <code>ExposureScale = exp2(実効EV100 − ユーザー設定EV100)</code> を渡すだけである。
+<code>Bloom.hlsl</code>も同じ構造の分岐を持っていたため同時に直した
+(<strong>Tonemapと違う倍率にするとブルームだけ露出がずれて合成比が狂う</strong>)。
+修正後、EV100=15固定・22時のBistro Exteriorは全面が真っ黒になる。
+昼のカメラ設定で夜を撮れば真っ黒になるのが正しい挙動であり、これが「手動露出が効いている」ことの証拠になる。
+</p>
+
+<h4>21.9.2 「夜が明るすぎる」の残り — 自動露出そのものの性質</h4>
+
+<p>
+自動露出は「測ったものを中庸なグレーへ持ち上げる」機能なので、正しく動くほど夜は昼と同じ明るさになる。
+実測でも、22時と12時の空の平均コードが1コード以内で一致していた。
+</p>
+<p>
+そこで<strong>測定EV100が低いほど正のオフセットを足す補正カーブ</strong>を入れた
+(Unreal Engineの Exposure Compensation Curve と同じ考え方の2点線形版)。
+測定EV100が−2以下で最大、+10以上で0、間は線形に補間する。
+</p>
+<p>
+既定値は「月明かりの影が見えるか見えないかぐらい」を狙って実測で決めた
+(21.9.6節のクランプを入れた状態での値。満月に照らされた石壁の8bitコードを、
+空が画面の約40%を占める屋上視点と空が入らない構図の両方で測っている)。
+</p>
+<table>
+<tr><th>補正量</th><th>屋上視点</th><th>空が入らない構図</th><th>見え方</th></tr>
+<tr><td>0段(補正なし)</td><td>—</td><td>—</td><td>昼と同じ明るさ</td></tr>
+<tr><td>3.0段</td><td>—</td><td>22</td><td>まだ明るく、影がはっきり見える</td></tr>
+<tr><td><strong>3.5段(既定)</strong></td><td><strong>15</strong></td><td><strong>13</strong></td><td><strong>壁の質感と影の境目がかろうじて分かる</strong></td></tr>
+<tr><td>4.0段</td><td>9</td><td>8</td><td>影の存在は分かるが壁の質感までは読めない</td></tr>
+</table>
+<p>
+0にすると従来どおりの「常に中庸なグレーへ合わせる」挙動に戻る。ImGuiの
+<code>AE Night Rolloff</code>で調整できる。
+</p>
+<p class="note">
+<strong>この値は21.9.6節のクランプとセットでしか意味を持たない。</strong>
+クランプが無いと測光値が構図で2〜3.5段振れるため、ここをいくつにしても
+カメラの向きで夜の明るさが変わってしまう。
+</p>
+<p class="note">
+<strong>夜の影の濃さは照度ではなくここで調整する。</strong>影の濃さは
+「平行光(月0.25 lx) : 環境光(夜空0.05 lx)」の比で決まり、物理値の5:1で十分な濃さがある。
+この比を保ったまま表示上の明るさだけを動かしたいなら、照度定数ではなくこの補正量を触ること。
+照度側を触ると空の明るさやIBLの寄与まで一緒に動いてしまう。
+</p>
+
+<h4>21.9.3 「スカイボックスの色が夕方や夜に合わない」— 色味が時刻に依存していなかった</h4>
+
+<p>
+Perez分布が与えるのは<strong>輝度の分布だけ</strong>で、色は与えない。21.8までの実装は色味を
+天頂・地平線の2定数で固定していたため、<strong>太陽高度が変わっても空の色相は一切変わらなかった</strong>。
+実測でも12/17/18/19/22時の空の色が1コード以内で完全に一致していた。
+</p>
+<p>
+本来の夕焼けは、太陽光が大気を長く通ることで短波長がRayleigh散乱により失われる波長依存の消散で生じる。
+それを解くにはPreetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。
+本エンジンはPerez分布を使う以上その情報を持たないので、
+<strong>昼・薄明・夜の3セットを太陽高度で補間する</strong>アート的な近似を採った
+(物理的な導出ではないことを明記する)。あわせて太陽の方位まわりに暖色を乗せる項
+(<code>cosγ</code>の4乗フォールオフ)を追加した。
+</p>
+<p>
+暖色の強さは<strong>太陽仰角0度で最大、±15度で0になる三角窓</strong>にしている。
+21.3節の<code>dayBlend</code>・<code>nightBlend</code>がどちらも仰角0度で0・±15度で1になるので、
+両者の補数の積がそのまま窓になる。太陽が地平線下にあってもその方位の低空には暖色が残るため、
+実際の夕焼けの残光と同じ構造になる。
+</p>
+<p class="note">
+<strong>色味をCPUで決めてcbufferで配る設計にした理由。</strong>
+この色味は(a)<code>SkyGenerate.hlsl</code>のキューブマップ生成と、
+(b)<code>ComputeSkyZenithScale</code>の照度正規化(積分の重みに色味の輝度成分が入る)の
+両方で完全に一致していなければならない。従来は定数を2箇所に複製していたが、
+CPUで1度決めて配れば<strong>両者がずれることが構造的に起きなくなる</strong>。
+なお暖色が太陽の方位にだけ乗るようになったため色味が天頂角だけの関数ではなくなり、
+正規化の積分でも色味の評価をφループの内側へ移した。
+</p>
+<p class="note">
+<strong>色味を暗くしても空は暗くならない。</strong><code>ComputeSkyZenithScale</code>が
+「色味の輝度成分込みで積分して目標照度に合わせる」ため、色味が決めるのは色相と彩度だけである。
+明るさは<code>SunLighting::SkyIlluminanceLux</code>が持つ。夜のティントを深い青にしても
+照度は変わらない。
+</p>
+
+<h4>21.9.4 「空がまだくすんで見える」— 輝度フロアが勾配を潰していた</h4>
+
+<p>
+21.2節(2)で入れた<code>RELATIVE_LUMINANCE_FLOOR</code>=0.45が主因だった。
+CIE快晴空の相対輝度は反太陽側の水平線で天頂の0.2倍程度まで落ちる。これは実際の快晴空の姿だが、
+0.45まで底上げすると<strong>輝度の勾配がほぼ消えて空全体が一様なスレートグレーになる</strong>。
+実測で空の彩度が0.26しかなく、しかも時刻を問わず一定だった。
+多重散乱で暗部が持ち上がるのは事実なのでゼロにはせず、勾配が残る0.12へ下げた。
+</p>
+<p>
+21.9.3の色味変更とあわせた効果と、残る要因は次のとおり。
+</p>
+<table>
+<tr><th>構成</th><th>正午の空の彩度</th><th>B/R(8bitコード比)</th></tr>
+<tr><td>21.8時点(フロア0.45・固定ティント)</td><td>0.261</td><td>1.35</td></tr>
+<tr><td>フロア0.12・時刻依存ティント</td><td><strong>0.328</strong></td><td><strong>1.49</strong></td></tr>
+</table>
+<p>
+残る脱色はトーンマップ側の性質である。同じ空を3カーブで比較すると、
+Reinhard 0.333 / <strong>ACES 0.450</strong> / <strong>AgX 0.328</strong> で、
+AgXがACESより0.12ぶん彩度を落としている。これはAgXの設計どおりの挙動で
+(insetマトリクスで意図的に脱色し、色相のシフトを避ける)、Blenderが
+AgXに"Punchy"ルック(コントラストと彩度を戻すASC-CDL相当の後段)を重ねているのはこのためである。
+本エンジンが既定をAgXにしているのは17章のとおりBistro Interiorの赤い壁で
+ACESの色相シフトを避けるためなので、<strong>ここを変えるのは空だけでなく全シーンのルックを変える判断になる</strong>。
+したがって今回は空側の要因(フロアとティント)のみを直し、ルック変換の追加は保留した。
+</p>
+
+<h4>21.9.5 検証</h4>
+
+<p>Bistro Exterior・自動露出有効で、開けた空の領域(260×200px)の平均RGBを時刻ごとに測った。</p>
+<table>
+<tr><th>時刻</th><th>太陽仰角</th><th>R</th><th>G</th><th>B</th><th>彩度</th></tr>
+<tr><td>5時</td><td>−15°</td><td>15.1</td><td>30.4</td><td>54.9</td><td>0.724</td></tr>
+<tr><td>6時(日の出)</td><td>0°</td><td><strong>100.7</strong></td><td>83.1</td><td>88.1</td><td>0.174</td></tr>
+<tr><td>7時</td><td>+15°</td><td>73.5</td><td>92.8</td><td>114.5</td><td>0.358</td></tr>
+<tr><td>12時</td><td>+90°</td><td>86.3</td><td>106.2</td><td>128.4</td><td>0.328</td></tr>
+<tr><td>17時</td><td>+15°</td><td>81.3</td><td>100.9</td><td>123.0</td><td>0.339</td></tr>
+<tr><td>18時(日の入り)</td><td>0°</td><td><strong>114.0</strong></td><td>97.0</td><td>103.1</td><td>0.149</td></tr>
+<tr><td>18.75時</td><td>−11°</td><td>92.9</td><td>103.3</td><td>133.3</td><td>0.303</td></tr>
+<tr><td>19時</td><td>−15°</td><td>20.2</td><td>36.6</td><td>62.9</td><td>0.679</td></tr>
+<tr><td>22時</td><td>−87°</td><td>21.3</td><td>37.8</td><td>64.5</td><td>0.671</td></tr>
+</table>
+<p>
+日の出・日の入りだけR&gt;Bになり(暖色)、夜は深い青になる。21.8時点ではこの列が
+全時刻で一致していた。
+</p>
+<ul>
+<li><strong>DX11/DX12の一致</strong> — 18時・22時とも平均RGBが完全一致</li>
+<li><strong>White Furnace Test</strong> — 球の中心・背景ともに(107.7, 107.7, 107.7)、彩度0。
+自動露出の補正カーブは一様な画面では一様にしか効かないため、エネルギー保存の検証は崩れない</li>
+<li><strong>手動露出</strong> — EV100=15固定で12時は通常の絵、22時は全面が黒。
+時刻に追従する露出補正が残っていないことを確認</li>
+<li><strong>遷移の連続性</strong> — 18.5→18.75→19時が (105,100,118)→(93,103,133)→(20,37,63)と
+単調に推移する。18.75→19時の落差は大きいが、これは薄明係数が仰角−15度で0に達し
+月明かりだけになるモデルどおりの挙動で、跳び(不連続)ではない</li>
+<li><strong>太陽→月の切替でポップが出ないか</strong> — 17.9→18.0→18.1→18.5時で
+月光を受ける壁面が51.3→49.4→49.0→42.6と単調推移。支配ライトが入れ替わる瞬間に跳びは無い</li>
+<li><strong>月の位置が効くか</strong> — 22時で月の方位角を306.87度と120度に振ると、
+同じ壁面が (8.4, 12.0, 16.5) と (0.6, 1.7, 4.8) に変わる。仰角を−10度(地平線下)にすると
+(0.1, 0.2, 0.4) となり月光は消え、星明かりの空だけが残る</li>
+</ul>
+
+<h3>21.9.6 実機で発覚した続き: 夜の明るさが構図で3.5段振れる</h3>
+
+<p>
+21.9.2節の補正カーブを入れた後、街路視点で<code>AE Night Rolloff</code>を3.5段にしても
+まだ明るい、という指摘を受けた。調べた結果<strong>実装は正しく動いており、
+表に載せた数字が特定の構図に紐づいていた</strong>ことが原因だった。
+</p>
+<p>
+同じ時刻・同じ月・同じ壁面を、構図だけ変えて測った値がこれである。
+</p>
+<table>
+<tr><th>構図</th><th>夜 rolloff 2.0</th><th>夜 rolloff 3.5</th><th>昼(参考)</th></tr>
+<tr><td>屋上視点(画面の約40%が空)</td><td><strong>12.0</strong></td><td>1.7</td><td>22.7</td></tr>
+<tr><td>空が入らない構図</td><td>42.1</td><td><strong>14.1</strong></td><td>96.9</td></tr>
+</table>
+<p>
+太字の2つがほぼ同じ明るさになっている。つまり街路視点の3.5段は、
+既定値を決めた屋上視点の2.0段とほぼ同じ絵で、指摘は実装の挙動と完全に整合していた。
+</p>
+
+<h4>原因: 測光範囲が明るい側に寄っている</h4>
+
+<p>
+自動露出は画面に写っているものを測るので、空が画面に占める割合で結果が変わる。
+しかも測光範囲は既定で<strong>50〜95パーセンタイル</strong>、つまりヒストグラムの明るい側の
+半分だけを平均している。空が入るとその空が測光を支配し、画面全体が2〜3.5段暗く振られる。
+夜だけの話ではなく、昼でも同じ壁が22.7対96.9(2.1段差)になっていた。
+写真でいう逆光の露出問題そのもので、自動露出としては正常な動作である。
+</p>
+<p>
+ただし「夜は影が見えるか見えないかぐらい」のような<strong>画作りの目標</strong>を、
+構図で3.5段も振れる測光値の上に載せることはできない。カメラを向ける先で夜の明るさが変わってしまう。
+</p>
+
+<h4>対処: キー照度の基準EVで測光値の上側だけをクランプする</h4>
+
+<p>
+エンジンはすでにCPU側で<code>KeyIlluminanceLux</code>(太陽・月・空の照度[lx])を毎フレーム
+計算している。これは<strong>画面に何が写っていようと変わらない</strong>。ここから
+<code>ComputeReferenceEV100</code>で「このシーンの基準EV」を求め、測光値がそこから
+<code>AE Key Ceiling</code>段より上へ行かないようにする。
+</p>
+<pre><code>L = E·ρ/π            (照度Eを受ける反射率ρのLambertian面の輝度)
+EV100 = log2(8L)      (反射光式露出計の標準、K=12.5・S=100)
+ρ = 0.18              (中庸なグレー)</code></pre>
+<p>
+検算すると E=100,000 lx(直射日光)でEV100=15.5、E=0.3 lx(満月の夜)でEV100=−2.9となり、
+どちらも実写の露出値と一致する。
+</p>
+<p class="note">
+<strong>止めるのは上側だけである。</strong>屋内のように実際の輝度が屋外のキー照度より
+ずっと低いシーンでは、測光値が下へ振れるのが正しい。両側を締めるとBistro Interiorのような
+シーンが真っ暗になる。下側は<code>AE Min EV100</code>が絶対的な下限として効く。
+</p>
+<p>
+既定値が<strong>−1.0段</strong>と負なのは、実際に測光される値が基準EVより約1段下に来るため。
+基準EVは「光源に正対する面」の照度から求めるが、実際の面は傾いていて cosθ&lt;1 の照度しか
+受けず、画面には影の領域も混ざるので平均は下がる。実測で振ると次のようになる。
+</p>
+<table>
+<tr><th>AE Key Ceiling</th><th>屋上視点</th><th>空が入らない構図</th><th>判定</th></tr>
+<tr><td>+1(発動せず)</td><td>12.0</td><td>42.1</td><td>1.8段差</td></tr>
+<tr><td>0</td><td>23.4</td><td>42.1</td><td>0.85段差</td></tr>
+<tr><td><strong>−1(既定)</strong></td><td><strong>43.9</strong></td><td><strong>40.5</strong></td><td><strong>ほぼ一致</strong></td></tr>
+<tr><td>−2</td><td>69.8</td><td>42.1</td><td>締めすぎで屋上が明るすぎる</td></tr>
+</table>
+<p>
+昼にも効き、屋上視点の同じ壁が22.7→44.8へ持ち上がって構図差が2.1段→1.1段に縮む
+(空は141で白飛びしていない)。M7以降「昼の屋外がなぜか暗い」という印象があったのは、
+空が測光を支配して全体を沈めていたためだった。
+</p>
+<p class="note">
+<strong>手続き空を使っていないシーンではクランプを無効にすること。</strong>
+基準EVはこのエンジンの太陽・月・空モデルが出す照度から求めているので、
+<code>.kscene</code>が独自のスカイボックスを指定しているシーンでは、
+そのシーンを実際に照らしている光と無関係な値になる。実際、無効化する前は
+White Furnace Testの一様グレーが107から208まで持ち上がり、白飛びまで余裕が無くなっていた
+(一様性そのものは保たれていたが、飽和させてしまうとエネルギー保存の検証が成立しなくなる)。
+</p>
+
+<h4>検証</h4>
+<ul>
+<li><strong>構図依存が消えたか</strong> — 夜22時の同じ月光の壁が、屋上視点15.4 / 空が入らない構図12.9。
+クランプ前は12.0対42.1(1.8段差)だった</li>
+<li><strong>White Furnace Test</strong> — 球の中心・背景ともに(107.7, 107.7, 107.7)、彩度0。
+クランプ無効化により変更前の値へ完全に戻っている</li>
+<li><strong>Bistro Interior</strong> — 屋外のキー照度より実際の輝度がずっと低いシーンだが、
+上側だけのクランプなので露出は変わらず、従来どおり適正に写る</li>
+<li><strong>DX11/DX12</strong> — 夜22時で完全一致</li>
+</ul>
+
+<h3>21.9.7 「肉眼で見た夜」に合わせる — 薄明視(mesopic vision)</h3>
+
+<p>
+21.9.6のクランプを入れてもまだ夜が明るい、肉眼で見た感じに合わせたい、という指摘を受けた。
+ここで効いていたのは明るさの数字ではなく<strong>暗所での色の見え方</strong>だった。
+</p>
+<p>
+人の目には錐体(色を見る細胞、3種類)と桿体(明暗だけを見る細胞、1種類)があり、
+暗くなると錐体が働かなくなって桿体だけの視覚へ移る。桿体は1種類しか無いので
+<strong>色を判別できない</strong>。実際の月明かりの下では、露出さえ合っていれば形は見えるのに
+色がほとんど無い、という見え方になる。露出を下げるだけでは
+<strong>「暗いが色鮮やかな夜」</strong>にしかならず、肉眼で見た夜と一致しない。
+</p>
+
+<h4>実装</h4>
+<p>
+分岐点の輝度はCIEが薄明視の範囲として挙げるおよそ0.005〜5 cd/m²の内側を採り、
+0.01 cd/m²以下で完全な桿体視、3 cd/m²以上で完全な錐体視、間は対数で補間する。
+満月に照らされた反射率0.2の面は 0.25×0.2/π = 0.016 cd/m² で、ほぼ桿体視の側に入る。
+</p>
+<p>
+桿体の分光感度V'(λ)は507nmにピークがあり、錐体のV(λ)(555nm)より短波長側へ寄っている。
+sRGBの原色付近でのV'(λ)の比 (0.024, 0.368, 0.608) をRGBの重みにすることで、
+<strong>赤が沈み青が明るく見えるプルキンエ現象</strong>が自然に出る。
+そのうえで、輝度が変わらないよう正規化したごく薄い青のティント (0.92, 1.00, 1.18) を当てる
+(桿体視は本来まったくの無彩色で、映像表現の慣例では強い青を当てるが、
+ここは「肉眼で見た感じ」が目的なので青みは最小限にした)。
+</p>
+
+<p class="note">
+<strong>画素ごとの輝度で判定してはいけない。</strong>
+最初の実装は画素ごとの絶対輝度で桿体視/錐体視を切り替えていたが、これは誤りである。
+桿体視へ移るかどうかは<strong>目が順応している明るさ</strong>で決まる。昼間の日陰は輝度だけ見れば
+薄明視の範囲に入ることがあるが、目はシーン全体の明るさに順応しているので錐体は働いており、
+日陰の色はちゃんと見える。実際、画素ごとに判定した実装では
+<strong>昼の日陰が脱色された</strong>(壁の彩度0.235→0.136)。
+順応輝度には21.9.6節の<code>ComputeReferenceEV100</code>(構図にも露出設定にも依存しない)を使う。
+画面全体で1つの値になるので、分岐もテクスチャ読みも増えない。
+</p>
+
+<h4>効果と、あわせて決め直した夜の露出</h4>
+<table>
+<tr><th>対象</th><th>薄明視OFF</th><th>薄明視ON</th></tr>
+<tr><td>夜空の彩度</td><td>0.584</td><td><strong>0.257</strong></td></tr>
+<tr><td>夜空のB/R</td><td>2.40</td><td><strong>1.35</strong></td></tr>
+<tr><td>昼の空</td><td colspan="2">(121.1, 141.1, 163.3) — 完全に不変</td></tr>
+</table>
+<p>
+色が抜けたぶん夜の絵の性格が変わるため、<code>AE Night Rolloff</code>も決め直した
+(月光を受ける壁 / 夜空の8bitコード)。
+</p>
+<table>
+<tr><th>補正量</th><th>壁</th><th>空</th><th>見え方</th></tr>
+<tr><td>3.5段</td><td>19</td><td>70</td><td>形も質感もはっきり読め、夜というより夕暮れ寄り</td></tr>
+<tr><td><strong>4.5段(既定)</strong></td><td><strong>6</strong></td><td><strong>44</strong></td><td><strong>空が一番明るく、建物は輪郭と影がかろうじて読める</strong></td></tr>
+<tr><td>5.5段</td><td>2</td><td>23</td><td>建物がほぼ完全に沈み、空しか見えない</td></tr>
+</table>
+<p>
+実際の夜も空が一番明るく地上は沈むので、4.5段の関係が肉眼の見え方に最も近い。
+</p>
+
+<h4>検証</h4>
+<ul>
+<li><strong>昼に影響しないこと</strong> — 昼の壁が (83.3, 96.9, 109.0)、屋上視点が (35.5, 44.8, 52.9)。
+薄明視を入れる前の値と完全一致</li>
+<li><strong>Bistro Interior</strong> — 昼光の屋内は錐体視の範囲なので赤い壁がそのまま赤い。脱色されない</li>
+<li><strong>White Furnace Test</strong> — 球・背景ともに (107.7, 107.7, 107.7)、彩度0</li>
+<li><strong>DX11/DX12</strong> — 夜22時で壁 (4.9, 6.0, 8.0)・空 (41.0, 45.0, 51.9) が完全一致</li>
+</ul>
+<p class="note">
+まだ入れていない要素として<strong>暗所での視力低下</strong>がある。桿体は空間分解能が低いため
+実際の夜景は細部がぼやける。ぼかしパスが1つ増えるので今回は見送った。
+</p>
+<p class="note">
+薄明視の<strong>既定は無効(0)</strong>にしてある。効果が強く画作りの好みが分かれるため、
+使うときにImGuiの<code>Mesopic Vision</code>で明示的に上げる。
+</p>
+
+<h3>21.9.8 根治: 自動露出の測光から空を外す</h3>
+
+<p>
+21.9.6でキー照度によるクランプを入れてもまだ夜が明るく、
+<strong>「自動露出の輝度計算に空の明るさは必要なのか」</strong>という指摘を受けた。これが本質だった。
+</p>
+<p>
+<strong>空は「被写体」ではなく「光源」である。</strong>写真でも露出は被写体に合わせるものであって、
+空にカメラを向けたぶんだけ地上が暗く写るのは逆光の露出失敗にあたる。
+21.9.6で見つけた「構図で露出が2〜3.5段振れる」現象は、空を測光に数えていたことが原因そのもので、
+キー照度によるクランプはその症状を外から押さえていたにすぎなかった。
+</p>
+<p>
+<code>AutoExposure.hlsl</code>のヒストグラム構築でG-Bufferの深度を読み、
+背景画素(Reverse-Zなので深度0付近)を数えないようにする。これだけで測光値は
+<strong>画面に写る地物だけ</strong>で決まるようになる。
+</p>
+
+<h4>効果</h4>
+<table>
+<tr><th>構図</th><th>クランプで対処(21.9.6)</th><th>空を測光から外す(クランプ無効)</th></tr>
+<tr><td>夜・屋上視点</td><td>15.4</td><td><strong>3.8</strong></td></tr>
+<tr><td>夜・空が入らない構図</td><td>12.9</td><td><strong>4.2</strong></td></tr>
+<tr><td>昼・屋上視点</td><td>44.8</td><td><strong>93.9</strong></td></tr>
+<tr><td>昼・空が入らない構図</td><td>96.9</td><td><strong>96.9</strong></td></tr>
+</table>
+<p>
+夜も昼も構図差がほぼ消えている(昼は2.1段差→0.05段差)。しかも
+<strong>クランプを無効にした状態でこの一致</strong>なので、クランプは役目を終えている。
+</p>
+<p>
+夜が暗くなったのは、空を外すと測光値が下がり、21.9.2節の補正カーブが
+「より暗いシーン」と判定してより多く切り詰めるため。狙いどおりの方向である。
+</p>
+<p>
+昼は逆に大きく明るくなった。M7以降「昼の屋外がなぜか暗い」という印象が続いていたのは、
+明るい空が測光を支配して地上を2段沈めていたためで、ここで解消している。
+昼の空は198まで上がるが白飛び(255)には達しておらず、実際の空が地上よりずっと明るい
+という関係が正しく出るようになった。
+</p>
+
+<h4>クランプの位置づけを変更</h4>
+<p>
+<code>AE Key Ceiling</code>は削除せず、<strong>既定を−1から+2へ緩めて保険として残す</strong>。
+通常のシーンでは発動しないが、夜の街で明るい看板が画面の大半を占めるようなとき、
+明るい側に寄った測光範囲(50〜95パーセンタイル)がその看板に支配されて
+街並みが黒く沈むのを防ぐ。空を外した状態で−1のままにすると締めすぎになる
+(夜の壁が3.8から4.7へ持ち上がる)。
+</p>
+<p class="note">
+空以外が1画素も写っていない(カメラが空だけを向いている)場合の退避値も
+レンジの中点から<code>ComputeReferenceEV100</code>へ変えた。中点は昼夜を問わず的外れな露出になる。
+</p>
+
+<h4>検証</h4>
+<ul>
+<li><strong>構図依存</strong> — 上表のとおり夜3.8対4.2、昼93.9対96.9</li>
+<li><strong>White Furnace Test</strong> — 球・背景ともに (107.7, 107.7, 107.7)、彩度0で不変</li>
+<li><strong>Bistro Interior</strong> — 屋内には空が写らないため測光は変わらず、従来どおり適正</li>
+<li><strong>DX11/DX12</strong> — 夜22時の壁が (2.6, 3.8, 5.8) で完全一致</li>
+</ul>
+<p>
+あわせて<code>AE Night Rolloff</code>は4.5段を維持した(壁3.8 / 空27.9)。
+実際の夜も空が一番明るく地上は沈むので、この関係が肉眼の見え方に近い。
+</p>
 </section>
 
 </main>

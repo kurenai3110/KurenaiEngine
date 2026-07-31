@@ -33,6 +33,9 @@ static const float kSSREdgeFadeDistance = 0.1f;
 #define KURENAI_GLOBAL_PREFILTERED_REGISTER t7
 #define KURENAI_PROBE_PREFILTERED_REGISTER t8
 #define KURENAI_PROBE_BUFFER_REGISTER t9
+// 距離キューブ(19.12節)。DeferredLighting.hlslと同じ条件でコンパイルしないと、
+// SSRが「Lightingが使ったのとは違う放射輝度」を引き算することになるため必ず定義する
+#define KURENAI_PROBE_DISTANCE_REGISTER t10
 
 cbuffer FrameConstants : register(b0)
 {
@@ -45,7 +48,8 @@ cbuffer FrameConstants : register(b0)
     float4 LightColor;
     float4x4 View;
     float4x4 Proj;
-    // a=昼度。鏡面IBLの重みに含まれるためSpecularIBLWeightへ渡す
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)。
+    // a=昼度はかつて鏡面IBLの重みに含めていたが、手続き空の導入で不要になった(21.4節)
     float4 AmbientColor;
     // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
     float4 CascadeSplits;
@@ -59,6 +63,8 @@ cbuffer FrameConstants : register(b0)
     float4 IBLParams;
     // 反射プローブ用。ReflectionProbe.hlsliのプローブ選択・ブレンドが読む
     float4 ProbeParams;
+    // 距離キューブ用(19.12節)。同じくReflectionProbe.hlsliが読む
+    float4 ProbeParams2;
 };
 
 cbuffer SSRConstants : register(b1)
@@ -77,8 +83,9 @@ Texture2D AOTexture : register(t5);
 // split-sum近似の第2項、BRDF積分LUT
 Texture2D BRDFLUTTexture : register(t6);
 
-// プリフィルタ済み鏡面(t7)・プローブのキューブマップ配列(t8)・プローブの影響範囲バッファ(t9)の
-// 宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みはReflectionProbe.hlsliが持つ
+// プリフィルタ済み鏡面(t7)・プローブのキューブマップ配列(t8)・プローブの影響範囲バッファ(t9)・
+// プローブの距離キューブ(t10)の宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みは
+// ReflectionProbe.hlsliが持つ
 #include "ReflectionProbe.hlsli"
 
 struct PSInput
@@ -180,7 +187,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     const float ao = AOTexture.Sample(ColorSampler, input.UV).a;
     const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, AmbientColor.a, ShadowParams.z);
+        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
 
     const float mipLevel = roughness * ShadowParams.y;
     float3 unusedIrradiance;

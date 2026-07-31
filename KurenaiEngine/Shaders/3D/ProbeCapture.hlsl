@@ -1,5 +1,6 @@
 // 反射プローブのキャプチャパス(フォワード)。プローブ位置から6方向を1面ずつ2Dレンダーターゲットへ
 // 描画し、その結果をIBLConvolve.hlslのCSCopyCaptureToCubeFaceがキューブマップの該当面へ書き写す。
+// レンダーターゲットは2枚(放射輝度と距離)。詳細はPSOutputのコメント参照。
 // キューブマップへ直接描画(面ごとのRTV)はRHIが持っていないため、この「2Dへ描いてUAVでコピー」
 // という経路を採っている(既に実績のある面ごとUAV書き込みの仕組みをそのまま再利用できる)。
 //
@@ -219,8 +220,8 @@ float3 EvaluateLight(
 
 // スカイボックス由来のグローバルIBL(DeferredLighting.hlslのEvaluateIBLと同じ式。
 // キャプチャ時にはAO/GIバッファが無いため常にao=1として扱い、スペキュラオクルージョンも省く)。
-// 夜間減衰(AmbientColor.a)をここで掛けないのは、プローブを使う側のEvaluateIBLが実行時に
-// 改めて掛けるため。焼き込み時にも掛けると二重に暗くなる
+// 昼度(AmbientColor.a)による夜間減衰は、手続き空の導入でどこでも掛けなくなった(21.4節)。
+// 空のキューブマップ自体が太陽高度に応じて暗くなるため、焼き込み時にも使用時にも不要
 float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, float2 brdf, float3 energyCompensation)
 {
     const float NdotV = saturate(dot(N, V));
@@ -240,7 +241,18 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, floa
     return diffuseIBL + specularIBL;
 }
 
-float4 PSMain(PSInput input) : SV_TARGET
+// キャプチャは2枚のレンダーターゲットへ書く。
+//   SV_TARGET0 … 放射輝度(HDR)。畳み込んでプローブのイラディアンス/プリフィルタ済み鏡面になる
+//   SV_TARGET1 … プローブ位置から描画点までのワールド距離(19.12節)。視差補正の精密化と
+//                 光漏れの抑制に使う。深度バッファから逆算せずここで直に出しているのは、
+//                 面ごとの逆投影を組む必要がなく1行で済むため
+struct PSOutput
+{
+    float4 Radiance : SV_TARGET0;
+    float Distance : SV_TARGET1;
+};
+
+PSOutput PSMain(PSInput input)
 {
     float4 baseColorSample = BaseColorTexture.Sample(MaterialSampler, input.UV) * BaseColorFactor;
 
@@ -307,5 +319,10 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     color += emissive;
 
-    return float4(color, 1.0f);
+    PSOutput output;
+    output.Radiance = float4(color, 1.0f);
+    // CameraPositionにはプローブのワールド座標が入っている(ファイル冒頭参照)ため、
+    // これがそのまま「プローブから見たこの方向の被写体までの距離」になる
+    output.Distance = length(input.WorldPos - CameraPosition.xyz);
+    return output;
 }

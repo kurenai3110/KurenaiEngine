@@ -13,13 +13,19 @@
 //   KURENAI_PROBE_BUFFER_REGISTER         必須。プローブの影響範囲(StructuredBuffer)
 //   KURENAI_GLOBAL_IRRADIANCE_REGISTER    任意。拡散イラディアンスも要る場合のみ
 //   KURENAI_PROBE_IRRADIANCE_REGISTER     任意。同上(プローブ側)
+//   KURENAI_PROBE_DISTANCE_REGISTER       任意。距離キューブ(19.12節)を使う場合のみ
 //
 // 拡散側の2つを定義しなければ拡散イラディアンスのサンプルはコンパイルされず、
 // SampleEnvironmentは常にirradiance=0を返す(SSRは鏡面しか要らないためこちらを使う)。
 //
-// このヘッダーはFrameConstants(b0)の ProbeParams / ShadowParams / AmbientColor / IBLParams を
-// 参照する(IBLParamsは拡散側のマクロを定義した場合のみ)。インクルードする側はこれらを含む形で
-// FrameConstantsを宣言しておく必要がある。cbufferのレイアウトは宣言順で決まるため、
+// KURENAI_PROBE_DISTANCE_REGISTERを定義しない場合、視差補正は箱との交差のみ、遮蔽判定は無しで
+// コンパイルされる。ただし「LightingパスとSSRパスがまったく同じ環境ソースを見る」ことが
+// 20章の前提なので、この2つは必ず同じ条件でコンパイルすること(片方だけ距離キューブを使うと、
+// SSRが自分の足した覚えのない値を引き算することになる)。
+//
+// このヘッダーはFrameConstants(b0)の ProbeParams / ProbeParams2 / ShadowParams / IBLParams を
+// 参照する(IBLParamsは拡散側のマクロを定義した場合のみ)。インクルードする側はこれらを
+// 含む形でFrameConstantsを宣言しておく必要がある。cbufferのレイアウトは宣言順で決まるため、
 // 途中のフィールドを飛ばさずC++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること。
 #ifndef KURENAI_REFLECTION_PROBE_HLSLI
 #define KURENAI_REFLECTION_PROBE_HLSLI
@@ -35,6 +41,14 @@ TextureCube IrradianceTexture : register(KURENAI_GLOBAL_IRRADIANCE_REGISTER);
 #endif
 #ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
 TextureCubeArray ProbeIrradianceTexture : register(KURENAI_PROBE_IRRADIANCE_REGISTER);
+#endif
+#ifdef KURENAI_PROBE_DISTANCE_REGISTER
+// プローブ位置から各方向の被写体までのワールド距離(19.12節)。ジオメトリが無かった方向には
+// 十分大きな値(IBLConvolve.hlslのkProbeSkyDistance)が入っている。
+// サンプラーがDataSampler(Point)なのは、これが「色」ではなく「データ」だからである。
+// 補間するとシルエットを跨いだタップが実在しない中間距離を作り、そこから求めた交点も遮蔽判定も
+// どのジオメトリにも対応しない偽の値になる(Samplers.hlsliの区分に従う)
+TextureCubeArray ProbeDistanceTexture : register(KURENAI_PROBE_DISTANCE_REGISTER);
 #endif
 
 // プローブ1つぶんの影響範囲。C++側 KurenaiEngine3D.cpp の GPUReflectionProbe と
@@ -100,12 +114,9 @@ int SelectNearestProbe(float3 worldPos)
     return selected;
 }
 
-// 視差補正(box projection)。プローブのキューブマップは「プローブ位置1点から見た景色」なので、
-// プローブ位置から離れたピクセルで反射ベクトルRをそのまま引くと、映る像の位置が実際の反射位置と
-// ずれる(壁際なのに部屋の反対側が映る等)。Rをプローブの箱(部屋の壁に合わせて置く)と交差させ、
-// その交点をプローブ中心から見た方向へ引き直すことでずれを打ち消す。
-// Sphere形状には交差させる箱が無いため適用しない(Box形状にする動機のひとつ)
-float3 ParallaxCorrectDirection(GPUReflectionProbe probe, float3 worldPos, float3 R)
+// worldPosからR方向へ進んだとき、プローブの箱から抜け出るまでの距離(スラブ法)。
+// 箱による視差補正の交点そのものであり、距離キューブ版(下)の探索範囲の上限にもなる
+float ProbeBoxExitDistance(GPUReflectionProbe probe, float3 worldPos, float3 R)
 {
     const float sinYaw = probe.ShapeParams.y;
     const float cosYaw = probe.ShapeParams.z;
@@ -120,10 +131,134 @@ float3 ParallaxCorrectDirection(GPUReflectionProbe probe, float3 worldPos, float
     const float3 planePositive = (probe.BoxExtents.xyz - localPos) * invR;
     // 軸ごとに「Rの進む向きにある面」までの距離を取り、その最小値が箱から抜け出る点になる
     const float3 exitDistance = max(planeNegative, planePositive);
-    const float hitDistance = min(min(exitDistance.x, exitDistance.y), exitDistance.z);
+    return max(min(min(exitDistance.x, exitDistance.y), exitDistance.z), 0.0f);
+}
 
+// 視差補正(box projection)。プローブのキューブマップは「プローブ位置1点から見た景色」なので、
+// プローブ位置から離れたピクセルで反射ベクトルRをそのまま引くと、映る像の位置が実際の反射位置と
+// ずれる(壁際なのに部屋の反対側が映る等)。Rをプローブの箱(部屋の壁に合わせて置く)と交差させ、
+// その交点をプローブ中心から見た方向へ引き直すことでずれを打ち消す。
+// Sphere形状には交差させる箱が無いため適用しない(Box形状にする動機のひとつ)
+float3 ParallaxCorrectDirection(GPUReflectionProbe probe, float3 worldPos, float3 R)
+{
     // 交点をプローブ中心から見た方向。キューブマップはワールド軸で焼かれているのでワールド空間で返す
-    return (worldPos + R * max(hitDistance, 0.0f)) - probe.PositionRadius.xyz;
+    return (worldPos + R * ProbeBoxExitDistance(probe, worldPos, R)) - probe.PositionRadius.xyz;
+}
+
+#ifdef KURENAI_PROBE_DISTANCE_REGISTER
+// 距離キューブを比較するときの許容誤差(19.12節)。
+// キューブの1面はProbeParams2.zテクセルで[-1,1]をカバーするので、プローブから距離dの位置での
+// 1テクセルの幅はおよそ 2d / size になる。シルエットを跨いだテクセルや量子化で記録距離が
+// わずかに手前/奥へずれるぶんを吸収するため、2テクセルぶんを許容量とする。
+// 下限があるのは、プローブのすぐ近く(d→0)で許容量が0に潰れて自己交差してしまうのを防ぐため
+float ProbeDistanceBias(float distanceFromProbe)
+{
+    const float faceSize = max(ProbeParams2.z, 1.0f);
+    return max(0.1f, distanceFromProbe * (4.0f / faceSize));
+}
+
+// worldPosがプローブから見て「記録された面より奥」にあるなら真。つまりそのピクセルは
+// プローブの位置からは見えない(壁の向こう側にある)
+bool ProbeIsBehindRecordedSurface(float3 toPoint, uint probeIndex)
+{
+    const float distanceFromProbe = length(toPoint);
+    const float recorded = ProbeDistanceTexture.SampleLevel(DataSampler, float4(toPoint, probeIndex), 0.0f).r;
+    return distanceFromProbe > recorded + ProbeDistanceBias(distanceFromProbe);
+}
+
+// 距離キューブを使った視差補正(19.12節)。
+//
+// 箱による視差補正(ParallaxCorrectDirection)は「部屋が直方体である」という仮定に立っているため、
+// 実際の形状が箱からずれているほど反射像がずれる。距離キューブがあれば実形状と当てられる。
+//
+// 反射ベクトルRに沿って点を進めながら「プローブからその点までの距離」と「その方向にプローブが
+// 記録している距離」を比べ、後者を追い越した区間を二分探索で詰める(キューブマップ版の
+// リリーフマッピング)。探索範囲の上限には箱との交点をそのまま使う。箱は部屋に合わせて
+// 置かれているので、その外側まで探しても意味が無いうえ、交差が見つからなかったときの
+// フォールバックが自然に「従来の箱による補正」になるという利点がある
+float3 ParallaxCorrectDirectionDepth(GPUReflectionProbe probe, float3 worldPos, float3 R, uint probeIndex)
+{
+    const float3 probeCenter = probe.PositionRadius.xyz;
+    const float boxExitDistance = ProbeBoxExitDistance(probe, worldPos, R);
+
+    const int kLinearSteps = 8;
+    const int kRefineSteps = 4;
+    const float stepSize = boxExitDistance / (float)kLinearSteps;
+
+    float tNear = 0.0f;             // まだ記録面より手前だと分かっている位置
+    float tFar = boxExitDistance;   // 交差が見つからなければ箱の交点をそのまま使う
+    bool hit = false;
+
+    [loop]
+    for (int i = 1; i <= kLinearSteps; ++i)
+    {
+        const float t = stepSize * (float)i;
+        if (ProbeIsBehindRecordedSurface((worldPos + R * t) - probeCenter, probeIndex))
+        {
+            tFar = t;
+            hit = true;
+            break;
+        }
+        tNear = t;
+    }
+
+    if (hit)
+    {
+        [loop]
+        for (int j = 0; j < kRefineSteps; ++j)
+        {
+            const float tMid = 0.5f * (tNear + tFar);
+            if (ProbeIsBehindRecordedSurface((worldPos + R * tMid) - probeCenter, probeIndex))
+            {
+                tFar = tMid;
+            }
+            else
+            {
+                tNear = tMid;
+            }
+        }
+    }
+
+    return (worldPos + R * tFar) - probeCenter;
+}
+
+// プローブから見てそのピクセルが見えているか(0=完全に隠れている、1=見えている)。
+// 影響範囲の重みへ乗算することで、仕切り壁の向こう側の明るさが漏れてくるのを抑える。
+// 硬い0/1ではなく1テクセルぶんの幅で滑らかに落とすのは、記録距離の量子化がそのまま
+// 遮蔽の輪郭のちらつきになるのを防ぐため。
+//
+// 判定点は面の法線方向へbiasぶん浮かせる(DDGIのnormal biasと同じ考え方、Majercik et al. 2019)。
+// これが無いと「プローブから見えている面が自分自身に遮蔽される」誤判定が起きる:
+// 記録距離はテクセル中心の方向の値なので、そのテクセルが張る幅のぶんだけ手前へずれ得るためで、
+// 実測ではこれが画面全体をわずかに暗くする形で現れた。
+// 法線方向へ浮かせるとプローブ側から見て手前へ動くので、この誤判定だけが解消される
+// (プローブが面の裏側にある場合は逆に遠ざかり、遮蔽が強まる。これは正しい挙動)
+float ProbeVisibility(GPUReflectionProbe probe, float3 worldPos, float3 N, uint probeIndex)
+{
+    const float rawDistance = length(worldPos - probe.PositionRadius.xyz);
+    const float bias = ProbeDistanceBias(rawDistance);
+
+    const float3 toPoint = (worldPos + N * bias) - probe.PositionRadius.xyz;
+    const float distanceFromProbe = length(toPoint);
+    const float recorded = ProbeDistanceTexture.SampleLevel(DataSampler, float4(toPoint, probeIndex), 0.0f).r;
+
+    // 記録面より手前(bias以内も含む)なら1。そこからbiasぶん奥へ行くまでに0へ落とす
+    const float depthBehind = distanceFromProbe - recorded;
+    return saturate(1.0f - (depthBehind - bias) / bias);
+}
+#endif // KURENAI_PROBE_DISTANCE_REGISTER
+
+// 視差補正の入口。距離キューブが使える場合はProbeParams2.xで箱版と深度版を切り替える
+// (ImGuiの Parallax: Box / Box + Depth に対応)。使えない場合は箱版だけがコンパイルされる
+float3 ProbeParallaxDirection(GPUReflectionProbe probe, float3 worldPos, float3 R, uint probeIndex)
+{
+#ifdef KURENAI_PROBE_DISTANCE_REGISTER
+    if (ProbeParams2.x > 0.5f)
+    {
+        return ParallaxCorrectDirectionDepth(probe, worldPos, R, probeIndex);
+    }
+#endif
+    return ParallaxCorrectDirection(probe, worldPos, R);
 }
 
 // 拡散イラディアンスの取得元。既定(IBLParams.x = 0)ではプリフィルタ済み鏡面の最終ミップ
@@ -172,13 +307,23 @@ void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
         for (uint i = 0; i < probeCount; ++i)
         {
             const GPUReflectionProbe probe = ReflectionProbes[i];
-            const float weight = ProbeInfluenceWeight(probe, worldPos);
+            float weight = ProbeInfluenceWeight(probe, worldPos);
             if (weight <= 0.0f) continue;
+
+#ifdef KURENAI_PROBE_DISTANCE_REGISTER
+            // プローブから見えない位置(壁の向こう)のピクセルは重みを落とす(19.12節)。
+            // 落ちたぶんは他のプローブとグローバルIBLが埋める
+            if (ProbeParams2.y > 0.5f)
+            {
+                weight *= ProbeVisibility(probe, worldPos, N, i);
+                if (weight <= 0.0f) continue;
+            }
+#endif
 
             // 拡散イラディアンスは低周波で位置による差が小さく、視差補正しても得られるものが
             // ほとんど無い一方で交差計算のコストは掛かるため、鏡面の反射ベクトルにのみ適用する
             const float3 sampleR = (parallaxEnabled && probe.ShapeParams.x > 0.5f)
-                ? ParallaxCorrectDirection(probe, worldPos, R)
+                ? ProbeParallaxDirection(probe, worldPos, R, i)
                 : R;
 
 #ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
@@ -205,14 +350,23 @@ void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
         {
             const GPUReflectionProbe probe = ReflectionProbes[nearest];
             const float3 sampleR = (parallaxEnabled && probe.ShapeParams.x > 0.5f)
-                ? ParallaxCorrectDirection(probe, worldPos, R)
+                ? ProbeParallaxDirection(probe, worldPos, R, (uint)nearest)
                 : R;
 
-#ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
-            accumulatedIrradiance = SampleProbeIrradiance(N, (uint)nearest);
+            float weight = 1.0f;
+#ifdef KURENAI_PROBE_DISTANCE_REGISTER
+            // ブレンド無効でも遮蔽は効かせる。落ちたぶんはグローバルIBLが埋める
+            if (ProbeParams2.y > 0.5f)
+            {
+                weight = ProbeVisibility(probe, worldPos, N, (uint)nearest);
+            }
 #endif
-            accumulatedPrefiltered = ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(sampleR, nearest), mipLevel).rgb;
-            totalWeight = 1.0f;
+
+#ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
+            accumulatedIrradiance = SampleProbeIrradiance(N, (uint)nearest) * weight;
+#endif
+            accumulatedPrefiltered = ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(sampleR, nearest), mipLevel).rgb * weight;
+            totalWeight = weight;
         }
     }
 
@@ -282,10 +436,13 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 //
 //   brdf                       BRDF積分LUT(split-sum近似の第2項)の値
 //   energyCompensationEnabled  ShadowParams.w(マルチスキャッタリング補正のトグル)
-//   dayFactor                  AmbientColor.a(夜間の減衰)
 //   iblIntensity               ShadowParams.z(IBL強度倍率。0ならIBL自体が無効)
+//
+// かつてはここで昼度(AmbientColor.a)による夜間減衰も掛けていたが、手続き空の導入で
+// 空自体が太陽高度に応じて暗くなるようになったため撤廃した(21.4節)。
+// 掛けたままだと夜が二重に暗くなる
 float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, float2 brdf,
-                         float energyCompensationEnabled, float dayFactor, float iblIntensity)
+                         float energyCompensationEnabled, float iblIntensity)
 {
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)
     const float3 splitSum = (F0 * brdf.x + brdf.y) * SpecularEnergyCompensation(F0, brdf, energyCompensationEnabled);
@@ -295,7 +452,7 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, floa
     const float specularOcclusionExponent = exp2(-16.0f * roughness - 1.0f);
     const float specularOcclusion = saturate(pow(NdotV + ao, specularOcclusionExponent) - 1.0f + ao);
 
-    return splitSum * specularOcclusion * dayFactor * iblIntensity;
+    return splitSum * specularOcclusion * iblIntensity;
 }
 
 #endif // KURENAI_REFLECTION_PROBE_HLSLI

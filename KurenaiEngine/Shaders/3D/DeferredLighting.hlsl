@@ -19,6 +19,7 @@ static const float PI = 3.14159265359f;
 #define KURENAI_PROBE_IRRADIANCE_REGISTER t11
 #define KURENAI_PROBE_PREFILTERED_REGISTER t12
 #define KURENAI_PROBE_BUFFER_REGISTER t13
+#define KURENAI_PROBE_DISTANCE_REGISTER t14
 
 cbuffer FrameConstants : register(b0)
 {
@@ -32,9 +33,10 @@ cbuffer FrameConstants : register(b0)
     float4x4 View;
     float4x4 Proj;
     // 昼夜サイクル用。rgb=環境光の色(m_AmbientScale乗算済み、KurenaiEngine3D::Render側の
-    // constants.AmbientColor代入部を参照)、a=昼度(0=夜,1=昼)。IBLプリフィルタマップ自体は
-    // スカイボックス(昼固定のテクスチャ)から焼いたものなので、夜の減光は背景スカイの表示と
-    // 同様にAmbientColor.aでIBL全体を減衰させて近似する(KurenaiEngine3D::EvaluateIBL呼び出し側)。
+    // constants.AmbientColor代入部を参照)、a=昼度(0=夜,1=昼)。
+    // **昼度はIBLの減衰にはもう使わない**。かつては空が昼固定のスカイボックスから焼かれていた
+    // ためこれが唯一の減光手段だったが、手続き空(SkyGenerate.hlsl)の導入で空自体が
+    // 太陽高度に応じて暗くなるようになり不要になった(21.4節。掛けると二重に暗くなる)。
     // Enable IBL無効時はIBL導入以前と同じ、rgbをそのまま定数色アンビエントとして使う(PSMain参照)
     float4 AmbientColor;
     // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
@@ -55,6 +57,9 @@ cbuffer FrameConstants : register(b0)
     // y=影響範囲のデバッグ表示フラグ(1以上でプローブごとの色分け表示に切り替える)、
     // z=視差補正(box projection)の有効フラグ、w=プローブ間ブレンドの有効フラグ
     float4 ProbeParams;
+    // 反射プローブの距離キューブ用(19.12節)。x=視差補正に距離キューブを使うフラグ、
+    // y=距離キューブによる遮蔽判定(光漏れ抑制)の有効フラグ、z=距離キューブの1面の解像度、w=未使用
+    float4 ProbeParams2;
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -109,13 +114,15 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // 係数の定義はReflectionProbe.hlsliのSpecularIBLWeightに1か所だけ置いている(20章)
     const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, AmbientColor.a, ShadowParams.z);
+        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
 
-    // 夜は空を暗い紺色へ落とし込む(背景スカイと同じ扱い)ため、IBL全体もAmbientColor.aで減衰させる。
-    // プリフィルタマップ・イラディアンスマップ自体は昼固定のスカイボックスから焼いたものなので、
-    // 夜間はこの係数だけが唯一の減光手段になる。
-    // 鏡面側のAmbientColor.a・ShadowParams.z(IBL強度倍率)はspecularWeightに含まれている
-    return diffuseIBL * ao * AmbientColor.a * ShadowParams.z + prefiltered * specularWeight;
+    // 【昼度(AmbientColor.a)による減衰はしない】かつては空が昼固定のスカイボックスから
+    // 焼かれていたため、夜を表現する手段が「IBL全体を昼度で0倍する」ことしか無かった。
+    // その結果、IBLを有効にすると夜の環境光が厳密にゼロになり、建物が真っ黒な影絵になっていた。
+    // 現在は手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなり、夜は月明かりの
+    // 空になるため、ここで追加の減衰を掛ける必要がない(掛けると二重に暗くなる。21.4節)。
+    // 鏡面側のShadowParams.z(IBL強度倍率)はspecularWeightに含まれている
+    return diffuseIBL * ao * ShadowParams.z + prefiltered * specularWeight;
 }
 
 struct PSInput
@@ -151,10 +158,9 @@ float4 PSMain(PSInput input) : SV_TARGET
         // Reverse-Zのため遠平面(=背景)はNDC z=0.0付近になる
         float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
         float3 rayDir = normalize(farPoint - CameraPosition.xyz);
-        float3 skyColor = SkyboxTexture.Sample(MaterialSampler, rayDir).rgb;
-        // 夜は空を暗い紺色へ落とし込む(スカイボックス自体は昼のテクスチャ固定のため)
-        const float3 kNightSkyColor = float3(0.01f, 0.012f, 0.02f);
-        skyColor = lerp(kNightSkyColor, skyColor, AmbientColor.a);
+        // 手続き空は太陽高度に応じた明るさで焼かれている(夜は月明かりの空になる)ため、
+        // かつてここで行っていた「夜は暗い紺色へlerpする」補正は不要になった
+        const float3 skyColor = SkyboxTexture.Sample(MaterialSampler, rayDir).rgb;
         return float4(skyColor, 1.0f);
     }
 
