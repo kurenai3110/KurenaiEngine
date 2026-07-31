@@ -2,6 +2,10 @@
 // BRDF積分ルックアップテーブルの生成。スカイボックスに依存しないため、エンジン起動時に一度だけ
 // (NdotV, ラフネス)の128x128グリッドをコンピュートシェーダーで焼く。実行時はDeferredLighting.hlsl側で
 // このテーブルの(x=スケール, y=バイアス)を F0*x + y として鏡面フレネル項に適用する。
+//
+// 最終LUTは float4(A, B, Eavg, 0)。第3成分Eavgはスペキュラのエネルギー補正のうち
+// Kulla-Conty(加算ローブ)方式だけが必要とする半球平均で、下のCSCombineEavgが2パス目で足す。
+// 2パスに分けている理由と、追加のSRVスロットを使わずに済ませている理由はCSCombineEavgのコメント参照。
 // 可視性項は実行時の直接光BRDF(DirectLighting.hlsl / Transparent.hlsl)と必ず同じものを
 // 使う必要があるため、SpecularEnergy.hlsliの共有定義を用いる(そこにkの選定理由を記載)
 #include "SpecularEnergy.hlsli"
@@ -9,6 +13,7 @@
 static const float PI = 3.14159265359f;
 static const uint kSampleCount = 1024;
 
+// パス1(CSMain)の出力先。A(スケール)とB(バイアス)だけを持つ中間テクスチャ
 RWTexture2D<float2> BRDFLUT : register(u0);
 
 // Hammersley点列(低不一致列)。GGXインポータンスサンプリングの2次元サンプル座標に使う
@@ -97,4 +102,48 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float roughness = (float(dispatchThreadID.y) + 0.5f) / float(height);
 
     BRDFLUT[dispatchThreadID.xy] = IntegrateBRDF(max(NdotV, 1e-3f), roughness);
+}
+
+// ------------------------------------------------------------------------------------
+// パス2: パス1が焼いた(A, B)へ、Kulla-Contyの加算ローブが必要とする
+//        Eavg(ラフネスだけの関数、方向アルベドの半球平均)を足して最終LUTを作る。
+//
+//   Eavg(α) = 2∫E(µ)µdµ ≒ Σ 2·(A+B)·µ_k·(1/width),  µ_k = (k+0.5)/width
+//
+// 同一リソースをSRVとUAVへ同時にバインドできないため、パス1の出力を別テクスチャ(SRV)
+// として読み、最終LUT(RGBA、UAV)へ書き出す2パス構成にしている。RGBA16Fのtyped UAV load
+// はハードウェア機能(Typed UAV Load Additional Formats)依存なので、UAVの読み戻しは使わない。
+//
+// Eavgは行(ラフネス)ごとに1つの値だが、実行時に追加のテクスチャフェッチを増やしたくないので
+// 行内の全テクセルへ同じ値を複製し、既存の1回のサンプルから.bとして読めるようにする。
+// これにより実行時のSRVスロットは1つも増えない。
+// ------------------------------------------------------------------------------------
+
+Texture2D<float2> ScratchLUT : register(t0);
+RWTexture2D<float4> BRDFLUTCombined : register(u0);
+
+[numthreads(8, 8, 1)]
+void CSCombineEavg(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    uint width, height;
+    BRDFLUTCombined.GetDimensions(width, height);
+    if (dispatchThreadID.x >= width || dispatchThreadID.y >= height)
+    {
+        return;
+    }
+
+    // 自分の行(同じラフネス)をµ方向に走査して半球平均を取る。
+    // パス1と同じµの刻みで積分するため、LUTが持つEとEavgが必ず整合する
+    float eavg = 0.0f;
+    const float invWidth = 1.0f / float(width);
+    [loop]
+    for (uint k = 0; k < width; ++k)
+    {
+        const float2 ab = ScratchLUT.Load(int3(int(k), int(dispatchThreadID.y), 0));
+        const float mu = (float(k) + 0.5f) * invWidth;
+        eavg += 2.0f * (ab.x + ab.y) * mu * invWidth;
+    }
+
+    const float2 ab = ScratchLUT.Load(int3(dispatchThreadID.xy, 0));
+    BRDFLUTCombined[dispatchThreadID.xy] = float4(ab.x, ab.y, eavg, 0.0f);
 }

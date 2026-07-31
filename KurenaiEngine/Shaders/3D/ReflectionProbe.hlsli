@@ -271,6 +271,15 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
     return accumulated + noProbeColor * (1.0f - totalWeight);
 }
 
+// スペキュラオクルージョン(Lagarde & de Rousiers, "Moving Frostbite to Physically Based
+// Rendering 3.0", 2014)。ラフネスが高いほど指数を1に近づけ、AOの効きを弱める。
+// 下の2つの係数が同じ遮蔽を使うよう、定義はここ1か所に置く
+float SpecularOcclusion(float NdotV, float roughness, float ao)
+{
+    const float specularOcclusionExponent = exp2(-16.0f * roughness - 1.0f);
+    return saturate(pow(NdotV + ao, specularOcclusionExponent) - 1.0f + ao);
+}
+
 // 鏡面IBLの「放射輝度に掛かる係数」をまとめて返す。
 //
 //   鏡面IBL = 環境の放射輝度 * SpecularIBLWeight(...)
@@ -280,25 +289,45 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 // と書ける。DeferredLightingが適用した量とSSRが引き算する量が定義上必ず一致するように、
 // この係数の定義はここ1か所しか持たない(20章)。
 //
-//   brdf                       BRDF積分LUT(split-sum近似の第2項)の値
-//   energyCompensationEnabled  ShadowParams.w(マルチスキャッタリング補正のトグル)
-//   iblIntensity               ShadowParams.z(IBL強度倍率。0ならIBL自体が無効)
+//   brdf              BRDF積分LUTの値(x=A, y=B, z=Eavg)
+//   compensationMode  ShadowParams.w(エネルギー補正の方式。0=無効/1=Linear/2=Series/3=Kulla-Conty)
+//   iblIntensity      ShadowParams.z(IBL強度倍率。0ならIBL自体が無効)
+//
+// 【この係数が受け持つのは単一散乱(鏡面)ローブだけ】Kulla-Conty方式が足す加算ローブは
+// プリフィルタ済み鏡面ではなく拡散イラディアンスに掛かるうえ、ほぼ拡散に近い広がりを持つため
+// スクリーンスペース反射で差し替える対象ではない。よってそちらは
+// SpecularIBLMultiScatterWeightとして分けてあり、SSRは触らない(14.9節)。
+// 乗算型(Linear/Series)ではSpecularEnergyCompensationが倍率を返し加算項は0になるので、
+// 従来どおりこの係数だけで完結する。
 //
 // かつてはここで昼度(AmbientColor.a)による夜間減衰も掛けていたが、手続き空の導入で
 // 空自体が太陽高度に応じて暗くなるようになったため撤廃した(21.4節)。
 // 掛けたままだと夜が二重に暗くなる
-float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, float2 brdf,
-                         float energyCompensationEnabled, float iblIntensity)
+float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, float3 brdf,
+                         float compensationMode, float iblIntensity)
 {
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)
-    const float3 splitSum = (F0 * brdf.x + brdf.y) * SpecularEnergyCompensation(F0, brdf, energyCompensationEnabled);
+    const int mode = (int)(compensationMode + 0.5f);
+    const float3 splitSum = (F0 * brdf.x + brdf.y) * SpecularEnergyCompensation(F0, brdf, mode);
 
-    // スペキュラオクルージョン(Lagarde & de Rousiers, "Moving Frostbite to Physically Based
-    // Rendering 3.0", 2014)。ラフネスが高いほど指数を1に近づけ、AOの効きを弱める
-    const float specularOcclusionExponent = exp2(-16.0f * roughness - 1.0f);
-    const float specularOcclusion = saturate(pow(NdotV + ao, specularOcclusionExponent) - 1.0f + ao);
+    return splitSum * SpecularOcclusion(NdotV, roughness, ao) * iblIntensity;
+}
 
-    return splitSum * specularOcclusion * iblIntensity;
+// Kulla-Conty方式の加算ローブに掛かる係数。呼び出し側で拡散イラディアンスを乗算する:
+//
+//   マルチスキャッタぶん = 拡散イラディアンス * SpecularIBLMultiScatterWeight(...)
+//
+// 方式0/1/2ではSpecularMultiScatterIBLが0を返すため、この項は完全に消える。
+// SSRはこの項を差し替えない(上のSpecularIBLWeightのコメント参照)
+float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness, float ao, float3 brdf,
+                                     float compensationMode, float iblIntensity)
+{
+    const int mode = (int)(compensationMode + 0.5f);
+    const float3 FssEss = F0 * brdf.x + brdf.y;
+    const float Ess = brdf.x + brdf.y;
+    const float3 multiScatter = SpecularMultiScatterIBL(F0, FssEss, Ess, mode);
+
+    return multiScatter * SpecularOcclusion(NdotV, roughness, ao) * iblIntensity;
 }
 
 #endif // KURENAI_REFLECTION_PROBE_HLSLI

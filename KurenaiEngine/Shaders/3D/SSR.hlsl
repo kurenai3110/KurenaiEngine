@@ -179,9 +179,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 環境の放射輝度と、それに掛かる係数。どちらもReflectionProbe.hlsliの定義を共有しているため、
     // ここで求めた値はLightingパスがSceneColorへ足したものと定義上一致する
     const float ao = AOTexture.Sample(ColorSampler, input.UV).a;
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     const float3 specularWeight =
         SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+    // Kulla-Conty方式の加算ローブ(SpecularIBLMultiScatterWeight)はここでは扱わない。
+    // あれは拡散イラディアンスに掛かるほぼ拡散のローブで、鏡面反射として差し替える対象では
+    // ないため、Lightingパスが足したまま残す(14.9節)
 
     const float mipLevel = roughness * ShadowParams.y;
     float3 unusedIrradiance;

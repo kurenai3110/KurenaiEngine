@@ -34,7 +34,12 @@ namespace Kurenai::Defaults
     inline constexpr float IBLIntensity = 0.5f;
     inline constexpr bool IBLUseDedicatedIrradiance = false;
     inline constexpr float AmbientScale = 0.2f;
-    inline constexpr bool SpecularEnergyCompensationEnabled = true;
+    // スペキュラのマルチスキャッタリング・エネルギー補正の方式。
+    // KurenaiEngine3D::SpecularCompensationMode と HLSL の KURENAI_SPEC_COMP_* に対応する
+    // (0=Off / 1=Linear / 2=Series / 3=Kulla-Conty)。ここを型付きにするには enum を
+    // このヘッダーへ持ち込む必要があるが、EngineDefaults.hは値だけを置く方針なのでintで持つ。
+    // 既定のLinearは、実使用域で3方式のうち最も真値に近いことを実測で確認した結果(14.9.8節)
+    inline constexpr int SpecularCompensationMode = 1;
 
     // --- SSR ---
     inline constexpr bool SSREnabled = true;

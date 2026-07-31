@@ -62,9 +62,9 @@ namespace Kurenai
             // 最大ミップレベル(kIBLPrefilterMipLevels-1、DeferredLighting.hlslがラフネス→ミップの
             // 変換に使う)。z: IBL強度倍率(m_IBLEnabled=falseの場合は0.0fを渡し、シェーダ側で
             // EvaluateIBLの代わりに定数色アンビエント(AmbientColor.rgb)へフォールバックする)。
-            // w: スペキュラのマルチスキャッタリング・エネルギー補正の有効フラグ
-            // (m_SpecularEnergyCompensationEnabled、1.0f=有効/0.0f=無効。共有ヘッダー
-            // SpecularEnergy.hlsliのSpecularEnergyCompensationが読む。14.9節)
+            // w: スペキュラのマルチスキャッタリング・エネルギー補正の方式
+            // (m_SpecularCompensationMode。0=Off / 1=Linear / 2=Series / 3=Kulla-Conty。
+            // 共有ヘッダーSpecularEnergy.hlsliのKURENAI_SPEC_COMP_*と一致させること。14.9節)
             DirectX::XMFLOAT4 ShadowParams;
             // 半透明パス(Transparent.hlsl)専用。x=t8のライトリストの有効数。DirectLighting.hlslは
             // 専用のLightingConstants(b1)で受け取るためこのフィールドを使わない(末尾に追加のため
@@ -1326,7 +1326,16 @@ namespace Kurenai
         m_IrradianceTexture = m_Device->CreateUAVTextureCube(kIBLIrradianceSize, RHI::Format::R16G16B16A16_Float);
         m_PrefilteredEnvTexture = m_Device->CreateMippedUAVTextureCube(
             kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels);
-        m_BRDFLUTTexture = m_Device->CreateUAVTexture(kIBLBRDFLUTSize, kIBLBRDFLUTSize, RHI::Format::R16G16_Float);
+        // BRDF積分LUTは2パスで焼く。パス1(CSMain)が(A, B)をスクラッチへ書き、
+        // パス2(CSCombineEavg)がそれを読んでEavgを足した float4(A, B, Eavg, 0) を最終LUTへ書く。
+        // 同一リソースをSRVとUAVへ同時バインドできないためスクラッチが要る(BRDFLUT.hlsl参照)
+        m_BRDFLUTScratchTexture = m_Device->CreateUAVTexture(kIBLBRDFLUTSize, kIBLBRDFLUTSize, RHI::Format::R16G16_Float);
+        m_BRDFLUTTexture = m_Device->CreateUAVTexture(kIBLBRDFLUTSize, kIBLBRDFLUTSize, RHI::Format::R16G16B16A16_Float);
+        if (!m_BRDFLUTScratchTexture || !m_BRDFLUTTexture)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "BRDF積分LUTのテクスチャ作成に失敗しました(スペキュラのエネルギー補正が正しく動作しません)");
+        }
 
         RHI::ShaderDesc brdfLutCsDesc;
         brdfLutCsDesc.Stage = RHI::ShaderStage::Compute;
@@ -1334,6 +1343,20 @@ namespace Kurenai
         brdfLutCsDesc.EntryPoint = "CSMain";
         m_BRDFLUTComputeShader = m_Device->CreateShader(brdfLutCsDesc);
         m_BRDFLUTPipelineState = m_Device->CreateComputePipelineState({ m_BRDFLUTComputeShader.get() });
+
+        RHI::ShaderDesc brdfLutCombineCsDesc;
+        brdfLutCombineCsDesc.Stage = RHI::ShaderStage::Compute;
+        brdfLutCombineCsDesc.FilePath = shaderDirectory + L"BRDFLUT.hlsl";
+        brdfLutCombineCsDesc.EntryPoint = "CSCombineEavg";
+        m_BRDFLUTCombineComputeShader = m_Device->CreateShader(brdfLutCombineCsDesc);
+        if (!m_BRDFLUTCombineComputeShader)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "BRDFLUT.hlsl CSCombineEavg のコンパイルに失敗しました"
+                "(Kulla-Conty方式が必要とするEavgが焼かれず、同方式が正しく動作しません)");
+        }
+        m_BRDFLUTCombinePipelineState =
+            m_Device->CreateComputePipelineState({ m_BRDFLUTCombineComputeShader.get() });
 
         RHI::ShaderDesc irradianceCsDesc;
         irradianceCsDesc.Stage = RHI::ShaderStage::Compute;
@@ -2628,7 +2651,7 @@ namespace Kurenai
         };
         constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
         const float iblIntensity = m_IBLEnabled ? m_IBLIntensity : 0.0f;
-        const float specularEnergyCompensation = m_SpecularEnergyCompensationEnabled ? 1.0f : 0.0f;
+        const float specularEnergyCompensation = static_cast<float>(m_SpecularCompensationMode);
         constants.ShadowParams = {
             m_ShadowLightSize,
             static_cast<float>(kIBLPrefilterMipLevels - 1),
@@ -2826,10 +2849,21 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "BRDFLUTBake",
-                .Writes = { m_BRDFLUTTexture.get() },
+                // 2パス構成のためスクラッチも書き込み対象として挙げる(RenderGraphが
+                // パス内の依存を追えるように)。中身の説明はBRDFLUT.hlsl参照
+                .Writes = { m_BRDFLUTTexture.get(), m_BRDFLUTScratchTexture.get() },
                 .Execute = [this](RHI::IRHICommandList* cmd)
                 {
+                    // パス1: (A, B)をスクラッチへ焼く
                     cmd->SetComputePipelineState(m_BRDFLUTPipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_BRDFLUTScratchTexture.get(), 0);
+                    cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
+
+                    // パス2: スクラッチをSRVで読み、Eavgを足した float4(A, B, Eavg, 0) を最終LUTへ。
+                    // UAVはDispatch直後に自動で解除されるため、ここで張り直す必要がある
+                    // (IRHICommandList.hのバインド寿命の説明を参照)
+                    cmd->SetComputePipelineState(m_BRDFLUTCombinePipelineState.get());
+                    cmd->SetComputeTexture(0, m_BRDFLUTScratchTexture.get());
                     cmd->SetComputeUnorderedAccessTexture(0, m_BRDFLUTTexture.get(), 0);
                     cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
                 },
@@ -4000,7 +4034,7 @@ namespace Kurenai
             break;
         case DebugView::IBLBRDFLUT:
             presentSourceTexture = m_BRDFLUTTexture.get();
-            presentMode = 0; // (scale, bias)の生値をそのままRGとして表示(値域はおおむね[0,1])
+            presentMode = 0; // (A, B, Eavg)の生値をそのままRGBとして表示(値域はおおむね[0,1])
             presentSourceWidth = kIBLBRDFLUTSize;
             presentSourceHeight = kIBLBRDFLUTSize;
             break;
@@ -4020,6 +4054,14 @@ namespace Kurenai
             // 解像度だけ合わせてm_TonemapTextureをそのまま渡す(Mode 11では読まれない)
             presentSourceTexture = m_TonemapTexture.get();
             presentMode = 11;
+            break;
+        case DebugView::SceneColorRaw:
+            // トーンマップもガンマも通さないリニア値をそのまま出す。スペキュラのエネルギー補正の
+            // 各方式を数値で突き合わせるための測定用(14.9.9節)。
+            // バックバッファが8bit UNormのため1.0を超える値はクリップする ―― 測定時は
+            // EV100を上げてピークが1.0未満に収まるようにしてから読むこと
+            presentSourceTexture = hdrSceneColor;
+            presentMode = 0;
             break;
         }
 
