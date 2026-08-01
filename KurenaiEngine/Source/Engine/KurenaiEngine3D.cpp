@@ -719,6 +719,17 @@ namespace Kurenai
             float MesopicStrength;
             // 目が順応している明るさ(EV100)。構図にも露出設定にも依存しない
             float MesopicAdaptationEV100;
+            // TAAの蓄積で失われた高域を戻すシャープネス(0で無効)。TAAが無効のときは常に0。
+            //
+            // 【なぜTAAではなくここなのか】以前はTAAの入力へ掛けていたが、アンシャープマスクが
+            // 増幅する高域は「ジッターで毎フレーム変動する成分」そのもので、静止時のちらつきを
+            // 実測で約53%増やしていた。ここはトーンマップ後のLDR値に対して掛かるだけで
+            // どこへもフィードバックされないため、ちらつきにもリンギングの累積にも寄与しない
+            float Sharpness;
+            // シャープネスの近傍タップに使う1テクセルぶんのUV(1/レンダー解像度)
+            float InvRenderWidth;
+            float InvRenderHeight;
+            float TonemapPadding;
         };
 
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
@@ -839,10 +850,13 @@ namespace Kurenai
             DirectX::XMFLOAT4 JitterUv;       // xy=今フレームのジッター(UV単位), zw=前フレーム
             DirectX::XMFLOAT4 ScreenParams;   // xy=レンダー解像度, zw=その逆数
             // x: 今フレームの色を混ぜる割合(m_TAABlendWeight)
-            // y: シャープネス(m_TAASharpness)
+            // y: 近傍クリップのボックス幅(標準偏差の何倍か。m_TAAClipGamma)
             // z: 履歴が使えるか(0=使えない。TAA.hlslは履歴をサンプルすらしない)
             // w: プリ露出の変化を打ち消す倍率(今フレームの露出 / 前フレームの露出)
             DirectX::XMFLOAT4 Params0;
+            // x: 近傍クリップの方式(TAAClipMode)
+            // y: 静止時のちらつき抑制の強さ(m_TAAAntiFlicker)。zwは未使用
+            DirectX::XMFLOAT4 Params1;
         };
 
         // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
@@ -2535,6 +2549,7 @@ namespace Kurenai
             UpdateMovement(deltaTime);
         }
 
+
         // F1(ImGuiパネルの表示/非表示)はWantCaptureKeyboardに関係なく常に効かせる。
         // ここも抑止すると、テキスト入力中にパネルを畳んで戻す手段が無くなり、入力欄から
         // フォーカスを外す方法(Esc / 別の場所をクリック)を知らないと詰むため。
@@ -3977,9 +3992,12 @@ namespace Kurenai
 
                     taaConstants.Params0 = {
                         m_TAABlendWeight,
-                        m_TAASharpness,
+                        m_TAAClipGamma,
                         historyValid ? 1.0f : 0.0f,
                         exposureRescale,
+                    };
+                    taaConstants.Params1 = {
+                        static_cast<float>(m_TAAClipMode), m_TAAAntiFlicker, 0.0f, 0.0f
                     };
                     cmd->UpdateBuffer(m_TAAConstantBuffer.get(), &taaConstants, sizeof(taaConstants));
 
@@ -4189,6 +4207,11 @@ namespace Kurenai
                 // 目の順応は画面の構図ではなくシーンの明るさで決まるので、
                 // 自動露出の測光値ではなくキー照度から求めた基準EVを使う
                 tonemapConstants.MesopicAdaptationEV100 = keyReferenceEV100;
+                // シャープネスはTAAの蓄積で失われた高域を戻すためのものなので、TAAが無効なら0。
+                // そうしないとTAA導入前の絵と変わってしまう
+                tonemapConstants.Sharpness = m_TAAEnabled ? m_TAASharpness : 0.0f;
+                tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(m_RenderWidth);
+                tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(m_RenderHeight);
                 cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
 
                 cmd->SetViewport(gbufferViewport);

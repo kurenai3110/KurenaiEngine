@@ -29,10 +29,26 @@ cbuffer TAAConstants : register(b1)
     float4 JitterUv;
     // xy=レンダー解像度、zw=その逆数(1テクセルぶんのUV)
     float4 ScreenParams;
-    // x=今フレームの色を混ぜる割合、y=シャープネス、
+    // x=今フレームの色を混ぜる割合、y=近傍クリップのボックス幅(標準偏差の何倍か)、
     // z=履歴が使えるか(0=使えない)、w=プリ露出の変化を打ち消す倍率
     float4 Params0;
+    // x=近傍クリップの方式(0=クリップしない/1=分散のみ/2=分散と近傍min-maxの積集合)、
+    // y=静止時のちらつき抑制の強さ(0=無効、1=最大)、zw=未使用
+    float4 Params1;
 };
+
+// 静止と判定する速度のしきい値(1フレームあたりの移動画素数)。
+// これを超えると抑制は完全に切れ、動いている間の挙動は抑制なしと完全に同じになる。
+// 0.5画素にしてあるのは、ゆっくりしたパンでもゴースト対策(近傍クリップ)を効かせたいため
+static const float kStaticSpeedPixels = 0.5f;
+// 完全に静止しているときにブレンド率へ掛ける倍率。0.2なら0.10→0.02になる
+static const float kStaticBlendScale = 0.2f;
+// 完全に静止しているときにクリップのボックス幅へ掛ける倍率。
+// 8倍まで広げると標準偏差の10倍相当になり、実質的にクリップしないのと同じになる
+static const float kStaticGammaScale = 8.0f;
+// 完全に静止しているときに、近傍の実在min/maxをその幅の何倍ぶん外側へ開くか。
+// 分散側の箱だけを広げてもここが固定のままでは頭打ちになるため、同じrelaxでこちらも開く
+static const float kStaticMinMaxExpand = 4.0f;
 
 Texture2D CurrentColor : register(t0);    // TAA前のHDR(SSR有効時はSSR適用後)
 Texture2D HistoryColor : register(t1);    // 前フレームのTAA結果
@@ -152,7 +168,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     int3 pixelCoord = int3(input.Position.xy, 0);
     float3 current = CurrentColor.Load(pixelCoord).rgb;
 
-    // --- 3x3近傍の統計を取る(色のAABBと、シャープネス用の低域) ---
+    // --- 3x3近傍の統計を取る(履歴をクリップする色のAABB用) ---
     // 同じループで速度のディレートも行う。ディレートとは「近傍で最も手前にある画素の速度を使う」
     // ことで、物体のシルエットの縁で背景の速度を拾ってゴーストになるのを抑える。
     // Reverse-Zなので「最も手前」は深度値が最大の画素であることに注意(minにすると
@@ -161,7 +177,6 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 moment2 = 0.0f;
     float3 neighborMin = 1e30f;
     float3 neighborMax = -1e30f;
-    float3 lowPass = 0.0f;
     float closestDepth = -1.0f;
     int2 closestOffset = int2(0, 0);
 
@@ -177,7 +192,6 @@ float4 PSMain(PSInput input) : SV_TARGET
             moment2 += tap * tap;
             neighborMin = min(neighborMin, tap);
             neighborMax = max(neighborMax, tap);
-            lowPass += CurrentColor.Load(tapCoord).rgb;
 
             float tapDepth = DepthTexture.Load(tapCoord).r;
             if (tapDepth > closestDepth)
@@ -187,7 +201,6 @@ float4 PSMain(PSInput input) : SV_TARGET
             }
         }
     }
-    lowPass *= (1.0f / 9.0f);
 
     // --- 速度を決める ---
     float2 velocity;
@@ -202,6 +215,25 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float2 historyUv = input.UV - velocity;
+
+    // --- 静止時のちらつき抑制 ---
+    // ちらつきの原因は2つあり、実測(Bistro Exterior、静止カメラ、連続フレーム間の平均画素差)で
+    // 寄与が分かっている:
+    //   ・指数移動平均の残差 … ブレンド率にほぼ比例する(a=0.10で0.128、a=0.05で0.056)
+    //   ・近傍クリップの強制振動 … クリップを切ると0.185→0.128、最大差は64→7まで落ちる。
+    //     AABBは今フレームのジッター済み近傍から作るのでボックス自体が毎フレーム動き、
+    //     収束済みの履歴が毎フレーム境界へ引き戻される。ブレンド率を下げても消えない
+    //
+    // 速度が0の画素では再投影誤差が原理的に発生しない(履歴が同じ画素へそのまま対応する)ため、
+    // クリップは害にしかならない。そこで静止している画素に限ってブレンド率を下げ、
+    // ボックスを実質無効になるまで広げる。動いている画素の扱いは一切変えていないので、
+    // ゴーストの出方はこの抑制を入れる前と完全に同じままになる
+    float speedPixels = length(velocity * ScreenParams.xy);
+    float motion = saturate(speedPixels / kStaticSpeedPixels);
+    float relax = (1.0f - motion) * Params1.y;
+
+    float blendWeight = Params0.x * lerp(1.0f, kStaticBlendScale, relax);
+    float clipGamma = Params0.y * lerp(1.0f, kStaticGammaScale, relax);
 
     // --- 履歴が使えないケースは、履歴を「サンプルすらせず」今フレームの色を返す ---
     // ブレンド率を0にするだけでは不十分。作りたての履歴バッファ(fp16)の中身は未定義で
@@ -225,32 +257,53 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     // --- 近傍クリップ ---
-    // 近傍の平均±標準偏差からAABBを作る(分散クリッピング)。min/maxをそのまま使うより
-    // 外れ値に強く、ちらつきとゴーストのバランスが取りやすい。
-    // 最後に実際のmin/maxとの積集合を取り、AABBが近傍の実在範囲を超えないようにする
-    const float kVarianceGamma = 1.25f;
-    float3 mean = moment1 * (1.0f / 9.0f);
-    float3 variance = max(moment2 * (1.0f / 9.0f) - mean * mean, 0.0f);
-    float3 sigma = sqrt(variance) * kVarianceGamma;
-    float3 boxMin = max(mean - sigma, neighborMin);
-    float3 boxMax = min(mean + sigma, neighborMax);
+    // 近傍の平均±(標準偏差×Params0.y)からAABBを作る(分散クリッピング)。min/maxをそのまま
+    // 使うより外れ値に強く、ちらつきとゴーストのバランスが取りやすい。
+    //
+    // 【ボックスを狭めるとちらつきが増える】AABBは今フレームのジッター済み近傍から作るため、
+    // ボックス自体が毎フレーム動く。収束済みの履歴がボックスの外へ出ると毎フレーム境界へ
+    // 引き戻され、ブレンド率を下げても消えない強制振動になる。特に1画素未満の細い構造
+    // (アンテナ・手すり・窓枠)で起きやすい。逆に緩めるとゴーストが出るので、
+    // Params0.yとParams1.xで両者のバランスを調整できるようにしてある
+    const int clipMode = (int)Params1.x;
+    if (clipMode > 0)
+    {
+        float3 mean = moment1 * (1.0f / 9.0f);
+        float3 variance = max(moment2 * (1.0f / 9.0f) - mean * mean, 0.0f);
+        float3 sigma = sqrt(variance) * clipGamma;
+        float3 boxMin = mean - sigma;
+        float3 boxMax = mean + sigma;
+        if (clipMode > 1)
+        {
+            // 近傍の実在範囲との積集合を取る。ゴーストには強くなるがボックスは狭くなる。
+            //
+            // 【この範囲も静止時には広げること】ここを固定したままにすると、分散側の箱を
+            // いくら広げても[neighborMin, neighborMax]で頭打ちになり、静止画素が結局
+            // ハードに固定されたままになる(実際にそれで、静止時抑制を入れてもなお
+            // 最大差分が下がらないという不具合を出した)。分散側と同じrelaxで外側へ開く
+            float3 neighborSpan = neighborMax - neighborMin;
+            float3 expand = neighborSpan * (relax * kStaticMinMaxExpand);
+            boxMin = max(boxMin, neighborMin - expand);
+            boxMax = min(boxMax, neighborMax + expand);
+        }
 
-    float3 historyYCoCg = ClipToAABB(RgbToYCoCg(history), boxMin, boxMax);
-    history = max(YCoCgToRgb(historyYCoCg), 0.0f);
-
-    // --- シャープネス ---
-    // 蓄積とCatmull-Rom補間で失われる高域を戻す。必ず「今フレームの入力」側へ掛けること。
-    // 出力はそのまま次フレームの履歴になるので、ブレンド後の結果へ掛けるとシャープが
-    // 毎フレーム再適用されて累積し、輪郭が発振してリンギングになる
-    float3 sharpened = current + (current - lowPass) * Params0.y;
-    sharpened = max(sharpened, 0.0f);
+        float3 historyYCoCg = ClipToAABB(RgbToYCoCg(history), boxMin, boxMax);
+        history = max(YCoCgToRgb(historyYCoCg), 0.0f);
+    }
 
     // --- ブレンド ---
     // 単純な重み付き平均だと、1画素だけ極端に明るい点(ファイアフライ)が平均を支配して
-    // 尾を引く。輝度が高いサンプルほど重みを下げることで、HDRのまま安定して平均できる
-    float weightCurrent = Params0.x / (1.0f + Luminance(sharpened));
-    float weightHistory = (1.0f - Params0.x) / (1.0f + Luminance(history));
-    float3 result = (sharpened * weightCurrent + history * weightHistory) / max(weightCurrent + weightHistory, 1e-5f);
+    // 尾を引く。輝度が高いサンプルほど重みを下げることで、HDRのまま安定して平均できる。
+    //
+    // 【シャープネスをここで掛けない理由】かつてはアンシャープマスクを今フレームの入力へ
+    // 掛けてからブレンドしていたが、アンシャープマスクが増幅する高域は「ジッターで
+    // 毎フレーム変動する成分」そのものであり、入力の振れ幅を直接大きくしていた。
+    // 静止カメラでの連続フレーム間差分が0.19から0.29へ、実測で約53%悪化していた。
+    // 蓄積の外(Tonemap.hlsl、トーンマップ後のLDR値)で最終出力にのみ掛けるようにしてある。
+    // あちらは履歴へフィードバックされないので、累積によるリンギング発振も構造的に起きない
+    float weightCurrent = blendWeight / (1.0f + Luminance(current));
+    float weightHistory = (1.0f - blendWeight) / (1.0f + Luminance(history));
+    float3 result = (current * weightCurrent + history * weightHistory) / max(weightCurrent + weightHistory, 1e-5f);
 
     return float4(max(result, 0.0f), 1.0f);
 }

@@ -77,8 +77,13 @@ namespace Kurenai::Defaults
     inline constexpr float TAABlendWeight = 0.1f;
     // ジッターの振れ幅の倍率。1.0でピクセル内いっぱい(±0.5px)に散らす
     inline constexpr float TAAJitterScale = 1.0f;
-    // 蓄積によるボケを補う量。0で無効
+    // 蓄積によるボケを補う量。0で無効。TAAの中ではなくTonemapパスで最終出力にのみ掛ける
     inline constexpr float TAASharpness = 0.35f;
+    // 近傍クリップのボックス幅(近傍の標準偏差の何倍まで履歴を許容するか)。
+    // 小さいほどゴーストに強いがちらつきが増える
+    inline constexpr float TAAClipGamma = 1.25f;
+    // 静止している画素のちらつきを抑える量。0で無効。動いている画素の挙動は変わらない
+    inline constexpr float TAAAntiFlicker = 1.0f;
 
     // --- ブルーム ---
     inline constexpr bool BloomEnabled = true;

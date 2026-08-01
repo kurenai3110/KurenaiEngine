@@ -361,8 +361,29 @@ namespace Kurenai
         // ジッターの振れ幅の倍率(1.0でピクセル内いっぱい)。0にするとジッターが無くなり、
         // 時間方向のスーパーサンプリング効果だけが消える(再投影と蓄積は残る)
         float m_TAAJitterScale = Defaults::TAAJitterScale;
-        // 蓄積によるボケを補うシャープネス。履歴側ではなく入力側へ掛ける(TAA.hlsl参照)
+        // 蓄積によるボケを補うシャープネス。TAAの中ではなくTonemapパスで最終出力にのみ掛ける。
+        // TAAの入力へ掛けるとアンシャープマスクが「ジッターで変動する高域」を増幅し、
+        // ちらつきが実測で約53%増える(Architecture.html 22.7節)
         float m_TAASharpness = Defaults::TAASharpness;
+        // 近傍クリップのボックス幅(近傍の標準偏差の何倍まで履歴を許容するか)。
+        // 小さいほどゴーストに強いがちらつきが増え、大きいほどその逆になる。
+        // これは「動いている画素」に適用される値で、静止した画素ではm_TAAAntiFlickerに応じて広がる
+        float m_TAAClipGamma = Defaults::TAAClipGamma;
+        // 静止している画素に限ってブレンド率を下げ、近傍クリップのボックスを実質無効まで広げる量。
+        // 速度が0の画素では再投影誤差が原理的に起きないためクリップは害にしかならず、
+        // 一方でちらつきはブレンド率とクリップの両方から出る。動いている画素の挙動は
+        // 一切変えないため、ゴーストの出方はこの機能を切ったときと同じままになる。
+        // 0で無効(この機能を入れる前の挙動に戻る)
+        float m_TAAAntiFlicker = Defaults::TAAAntiFlicker;
+        // 近傍クリップの方式。TAA.hlsl側のclipModeと値を一致させること
+        // (TonemapCurveと同じく、列挙の既定値はEngineDefaults.hではなくここへ直接書く)
+        enum class TAAClipMode : int32_t
+        {
+            None = 0,     // クリップしない(切り分け測定用。ゴーストが激しく出るので常用しない)
+            Variance = 1, // 近傍の平均±(標準偏差×ClipGamma)のみ
+            Clamped = 2,  // 上記と近傍の実在min/maxとの積集合(最も狭く、最もゴーストに強い)
+        };
+        TAAClipMode m_TAAClipMode = TAAClipMode::Clamped;
 
         // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
         // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の

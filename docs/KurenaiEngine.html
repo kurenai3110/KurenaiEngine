@@ -1282,6 +1282,7 @@ assimp・DirectXTexに加え<code>KurenaiEngineLibrary.vcxproj</code>への依�
 <tr><td>ビルド設定の一致</td><td>3つのDLL(KurenaiEngineLibrary/KurenaiEngine3D/KurenaiEngine2D)とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
 <tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)。アンチエイリアスは<code>KurenaiEngine3D</code>側のTAA(ポストプロセスパネル)で行う</td></tr>
 <tr><td>TAAと半透明</td><td>半透明メッシュはモーションベクター(速度バッファ)を書かないため、TAAは半透明面をその背後にあるもの(不透明メッシュ、無ければ空)の速度で再投影する。カメラを大きく並進させるとガラス面などに残像が出ることがある</td></tr>
+<tr><td>TAAと細い構造物</td><td>アンテナ・手すり・樹木の葉のように1画素より細いものは、ジッターのたびにその画素を覆ったり覆わなかったりするため、静止していてもちらつきが残る。ポストプロセスパネルの「静止時のちらつき抑制」で面のエッジのちらつきは消えるが、この孤立点は原理上残る</td></tr>
 <tr><td>アセットの事前変換が必須</td><td><code>Assets::LoadModel</code>は<code>.kmodel</code>のみを受け付ける。<code>.gltf</code>/<code>.fbx</code>等のソースモデルは、実行前に<code>KurenaiPacker.exe</code>で変換しておく必要がある(7章参照)</td></tr>
 <tr><td>ポイント/スポットライトの影</td><td>影を落とさない(シャドウマップは平行光1灯のみ対応)</td></tr>
 <tr><td>ライトの同時描画数</td><td>最大1024灯まで(実データでの想定はせいぜい数灯〜十数灯)。超過分はカメラに近い順に採用される</td></tr>

@@ -102,7 +102,38 @@ namespace Kurenai::UI
                 "スーパーサンプリング効果だけが消え、再投影と蓄積によるノイズ低減は残る");
             SliderFloatEx(
                 "シャープネス###TAASharpness", &m_Engine.m_TAASharpness, 0.0f, 1.0f, Defaults::TAASharpness, "%.2f", 0,
-                "蓄積で失われる高域を戻す量。上げすぎると輪郭に白いふちが出る");
+                "蓄積で失われる高域を戻す量。上げすぎると輪郭に白いふちが出る。"
+                "トーンマップ後の最終出力にのみ掛かるため、上げてもちらつきは増えない");
+
+            SliderFloatEx(
+                "静止時のちらつき抑制###TAAAntiFlicker", &m_Engine.m_TAAAntiFlicker, 0.0f, 1.0f,
+                Defaults::TAAAntiFlicker, "%.2f", 0,
+                "止まっている画素に限って履歴ブレンド率を下げ、履歴の棄却判定を緩める。"
+                "速度0の画素では再投影のずれが原理的に起きないため棄却は害にしかならず、"
+                "エッジのちらつきの主な発生源になっている。"
+                "動いている画素の扱いは変わらないので、ゴーストの出方は0にしたときと同じ");
+
+            using TAAClipMode = KurenaiEngine3D::TAAClipMode;
+            static const char* kClipModeNames[] = { "クリップしない (検証用)", "分散のみ", "分散 + 近傍の最小最大" };
+            int clipModeIndex = static_cast<int>(m_Engine.m_TAAClipMode);
+            if (ComboEx(
+                    "履歴の棄却方法###TAAClipMode", &clipModeIndex, kClipModeNames, IM_ARRAYSIZE(kClipModeNames),
+                    static_cast<int>(TAAClipMode::Clamped),
+                    "再投影した履歴が「今このあたりにあり得ない色」だったときに捨てる判定の作り方。"
+                    "狭いほどゴーストに強いが、判定の箱がジッターで毎フレーム動くぶんちらつきが増える。"
+                    "「クリップしない」は原因の切り分け用で、常用するとゴーストが激しく出る"))
+            {
+                m_Engine.m_TAAClipMode = static_cast<TAAClipMode>(clipModeIndex);
+            }
+
+            if (m_Engine.m_TAAClipMode != TAAClipMode::None)
+            {
+                SliderFloatEx(
+                    "履歴の許容幅###TAAClipGamma", &m_Engine.m_TAAClipGamma, 0.5f, 3.0f, Defaults::TAAClipGamma,
+                    "%.2f", 0,
+                    "近傍の標準偏差の何倍まで履歴を許容するか。下げるとゴーストに強くなる代わりに"
+                    "細い構造物(アンテナ・手すり・窓枠)のちらつきが増える");
+            }
         }
 
         EndParamGroup();
