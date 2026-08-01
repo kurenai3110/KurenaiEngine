@@ -224,6 +224,7 @@
     <li><a href="#procedural-sky">21. 手続き空・月光・昼夜遷移</a></li>
     <li><a href="#occlusion-map">22. マテリアルの遮蔽マップ(ベイク済みAO)</a></li>
     <li><a href="#taa">23. モーションベクターとTAA</a></li>
+    <li><a href="#window-placement">24. ウィンドウ配置の保存と復元</a></li>
   </ol>
 </nav>
 
@@ -5522,6 +5523,96 @@ Bistro Exteriorの屋根の稜線では<strong>50.7% → 19.3〜20.0%</strong>�
 その分がグラデーションへ置き換わっている。
 この指標も上記の実行間ばらつきを持ち、同一構成でも1〜2ポイントの幅で振れるため、
 その幅以下の差は意味を持たない。
+</p>
+</section>
+
+<section id="window-placement">
+<h2>24. ウィンドウ配置の保存と復元</h2>
+
+<p>
+<code>Core::Window</code>は、終了時にウィンドウの位置・サイズ・最大化状態を
+<code>KurenaiEngine.dll</code>と同じフォルダの<code>window.ini</code>へ書き出し、
+次回起動時に復元する。ImGuiパネルの配置は<code>imgui.ini</code>が既に保存していたが、
+OSウィンドウ自体は毎回コンストラクタ引数のサイズ・<code>CW_USEDEFAULT</code>の位置で
+作り直されていたため、パネルのドックレイアウトだけが復元されて土台の窓が変わる、
+という食い違いがあった。
+</p>
+
+<h3>24.1 なぜ<code>WINDOWPLACEMENT</code>なのか</h3>
+<p>
+<code>GetWindowRect</code>で矩形だけを保存すると、<strong>最大化した状態で終了した場合に
+「最大化されたサイズの通常ウィンドウ」として復元されてしまい、元のサイズが失われる</strong>。
+<code>WINDOWPLACEMENT</code>は最大化/最小化の状態(<code>showCmd</code>)と、
+それとは独立した「元に戻したときの矩形」(<code>rcNormalPosition</code>)を別々に持つため、
+最大化状態と復元後のサイズを両方保存できる。
+</p>
+<p>
+最小化したまま終了した場合、<code>showCmd</code>をそのまま保存すると次回もアイコン化した状態で
+起動してしまう。<code>WPF_RESTORETOMAXIMIZED</code>フラグを見て「元に戻したときの状態」だけを
+保存し、最小化そのものは保存しない。
+</p>
+
+<h3>24.2 表示前に配置する(<code>showCmd = SW_HIDE</code>)</h3>
+<p>
+<code>SetWindowPlacement</code>に<code>SW_HIDE</code>を指定しても<code>rcNormalPosition</code>は
+反映される。この性質を使い、<strong>ウィンドウを表示する前に位置とサイズだけを適用</strong>してから
+<code>ShowWindow</code>を1回だけ呼ぶ。先に表示してから移動すると、既定サイズのウィンドウが一瞬見えてから
+復元後のサイズへ飛ぶ。
+</p>
+<p>
+復元によってクライアント領域はコンストラクタ引数のサイズと変わるため、
+<code>Window</code>のコンストラクタ末尾で<code>GetClientRect</code>を実測して
+<code>m_Width</code>/<code>m_Height</code>を確定させている。この値が
+<code>KurenaiEngineBase</code>のコンストラクタでそのままスワップチェインの初期サイズになる。
+<code>SetResizeCallback</code>はこの時点ではまだ設定されていないので、
+WM_SIZE経由の更新をあてにできない。
+</p>
+
+<h3>24.3 保存時とディスプレイ拡大率が変わっていた場合</h3>
+<p>
+位置とサイズは物理ピクセルで保存し、あわせて保存時のDPI(<code>GetDpiForWindow</code>)も記録する。
+復元後に実際に載ったモニタのDPIが保存時と違えば、その比でサイズだけを補正する
+(位置は補正しない。マルチモニタでは位置をスケールすると別のモニタへ飛ぶため)。
+UIの拡大率はモニタのDPIに追従する(<code>Window::GetDpiScale</code>)ので、ウィンドウだけ物理ピクセルで
+固定するとUIが窮屈になる。同一環境での通常の再起動では比が1になり、この処理は何もしない。
+</p>
+<p>
+DPIを取得するために<code>GetDpiForMonitor</code>(Shcore.lib)を使うのではなく、
+先に<code>SetWindowPlacement</code>で配置してから<code>GetDpiForWindow</code>を読んでいる。
+ライブラリ依存を増やさずに済み、「実際に載ったモニタ」を確実に得られるため。
+2回目の<code>SetWindowPlacement</code>は保存値から計算した絶対矩形を渡すので、
+1回目の結果に対して累積しない。
+</p>
+
+<h3>24.4 画面外になる場合の扱い(実測)</h3>
+<p>
+モニタを外した後などに備えて、適用後の<code>GetWindowRect</code>(スクリーン座標)を
+<code>MonitorFromRect(MONITOR_DEFAULTTONULL)</code>にかけ、どのモニタにも掛からなければ
+生成直後の位置・サイズへ戻す。判定に<code>rcNormalPosition</code>を直接使わないのは、
+これがワークスペース座標(タスクバーを除いた領域が基準)でスクリーン座標と一致しないことがあるため。
+</p>
+<p>
+ただし<strong>実測では、この分岐はほとんど動かない</strong>。
+<code>Left=-30000, Top=-30000</code>を書き込んで起動したところ、Windows側の
+<code>SetWindowPlacement</code>が位置を(0,0)へクランプし、サイズは指定どおりで表示された。
+つまり画面外の防止は主にWindowsが行っており、この判定は最後の保険である。
+</p>
+
+<h3>24.5 ファイル形式と壊れた値への耐性</h3>
+<p>
+<code>window.ini</code>は<code>Left/Top/Width/Height/Maximized/Dpi</code>のkey=value形式。
+手で編集されうるため、数値として読めない値・200px未満や32767pxを超えるサイズ・
+範囲外のDPIはすべて棄却し、警告ログを残して既定サイズで起動する
+(実測: <code>Width=abc</code> → 「数値でない値があるため既定のサイズで起動します (Width)」、
+<code>10x10</code> → 「サイズが不正なため既定のサイズで起動します (10x10)」)。
+初回起動でファイルが無いのは正常なので、これだけは警告ではなく情報ログにしている。
+</p>
+<p>
+保存先を<code>GetModuleDirectory()</code>基準にしているのは<code>imgui.ini</code>と同じ理由
+(起動時の作業ディレクトリに依存させないため)で、サンプルごとに出力フォルダが分かれるため
+Sample2DとSample3Dで記録が混ざることもない。書き込みは<code>DestroyWindow</code>より前、
+つまり<code>~Window</code>の先頭で行う。<code>WM_CLOSE</code>は<code>m_ShouldClose</code>を立てるだけで
+<code>DefWindowProc</code>へ渡さない実装なので、ウィンドウはデストラクタまで生きている。
 </p>
 </section>
 

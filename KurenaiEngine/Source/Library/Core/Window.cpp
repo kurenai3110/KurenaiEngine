@@ -4,10 +4,13 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cctype>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 
 #include "Core/Logger.h"
+#include "Core/StringUtil.h"
 
 // imgui_impl_win32.hは<windows.h>への依存を避けるためこの宣言を#if 0でコメントアウトしており、
 // 呼び出し側でこの1行をコピーして前方宣言することが公式に案内されている
@@ -19,6 +22,141 @@ namespace Kurenai::Core
     {
         const wchar_t* kWindowClassName = L"KurenaiEngineWindowClass";
 
+        // ウィンドウ配置の保存先。imgui.iniと同じく、起動時の作業ディレクトリに依存させず
+        // KurenaiEngine.dllと同じフォルダに固定する(サンプルごとに出力フォルダが分かれるため、
+        // Sample2DとSample3Dで記録が混ざることもない)
+        std::wstring GetPlacementFilePath()
+        {
+            return GetModuleDirectory() + L"window.ini";
+        }
+
+        // window.iniの内容。位置とサイズは物理ピクセル(復元後の通常状態の枠を含む矩形)で、
+        // Dpiは保存した時点でウィンドウが載っていたモニタのDPI
+        struct SavedPlacement
+        {
+            int Left = 0;
+            int Top = 0;
+            int Width = 0;
+            int Height = 0;
+            bool Maximized = false;
+            unsigned int Dpi = 96;
+        };
+
+        // 「数値だけが書かれている」ことを確かめたうえで整数へ変換する。
+        // 末尾の空白と改行(CRLFで書かれたファイルのCR)は許容する
+        bool ParseInt(const std::string& text, int& outValue)
+        {
+            try
+            {
+                size_t consumed = 0;
+                const int parsed = std::stoi(text, &consumed);
+                for (size_t i = consumed; i < text.size(); ++i)
+                {
+                    if (!std::isspace(static_cast<unsigned char>(text[i])))
+                    {
+                        return false;
+                    }
+                }
+                outValue = parsed;
+                return true;
+            }
+            catch (const std::exception&)
+            {
+                // 数値として読めない(std::invalid_argument)・範囲外(std::out_of_range)
+                return false;
+            }
+        }
+
+        bool ReadSavedPlacement(SavedPlacement& outPlacement)
+        {
+            const std::wstring path = GetPlacementFilePath();
+
+            // MSVCのfstreamはwchar_t*のパスを受け付ける(日本語や記号を含むパスでも開ける)
+            std::ifstream file(path.c_str());
+            if (!file)
+            {
+                // 初回起動時はファイルが無いのが正常なので、エラーではなく情報として記録する
+                Logger::Info(
+                    "Window",
+                    "ウィンドウ配置の記録が無いため既定のサイズで起動します (" + WideToUtf8(path) + ")");
+                return false;
+            }
+
+            SavedPlacement parsed{};
+            bool hasLeft = false;
+            bool hasTop = false;
+            bool hasWidth = false;
+            bool hasHeight = false;
+
+            std::string line;
+            while (std::getline(file, line))
+            {
+                if (line.empty() || line[0] == '#')
+                {
+                    continue;
+                }
+
+                const size_t separator = line.find('=');
+                if (separator == std::string::npos)
+                {
+                    continue;
+                }
+
+                const std::string key = line.substr(0, separator);
+                const std::string valueText = line.substr(separator + 1);
+
+                int value = 0;
+                if (!ParseInt(valueText, value))
+                {
+                    Logger::Warning(
+                        "Window",
+                        "ウィンドウ配置の記録に数値でない値があるため既定のサイズで起動します (" + key + ")");
+                    return false;
+                }
+
+                if (key == "Left") { parsed.Left = value; hasLeft = true; }
+                else if (key == "Top") { parsed.Top = value; hasTop = true; }
+                else if (key == "Width") { parsed.Width = value; hasWidth = true; }
+                else if (key == "Height") { parsed.Height = value; hasHeight = true; }
+                else if (key == "Maximized") { parsed.Maximized = value != 0; }
+                else if (key == "Dpi") { parsed.Dpi = static_cast<unsigned int>(value); }
+            }
+
+            if (!hasLeft || !hasTop || !hasWidth || !hasHeight)
+            {
+                Logger::Warning("Window", "ウィンドウ配置の記録に必要な項目が足りないため既定のサイズで起動します");
+                return false;
+            }
+
+            // 手で編集された場合や書き込みが途中で切れた場合に備えて妥当性を確認する。
+            // 200px未満だとタイトルバーすら掴めなくなるため壊れた値として扱う
+            constexpr int kMinSize = 200;
+            constexpr int kMaxSize = 32767;
+            if (parsed.Width < kMinSize || parsed.Height < kMinSize ||
+                parsed.Width > kMaxSize || parsed.Height > kMaxSize)
+            {
+                Logger::Warning(
+                    "Window",
+                    "ウィンドウ配置の記録のサイズが不正なため既定のサイズで起動します (" +
+                        std::to_string(parsed.Width) + "x" + std::to_string(parsed.Height) + ")");
+                return false;
+            }
+
+            // Windowsのディスプレイ拡大率は100%〜500%(96〜480 DPI)。多少の余裕を持たせて判定する
+            constexpr unsigned int kMinDpi = 48;
+            constexpr unsigned int kMaxDpi = 960;
+            if (parsed.Dpi < kMinDpi || parsed.Dpi > kMaxDpi)
+            {
+                Logger::Warning(
+                    "Window",
+                    "ウィンドウ配置の記録のDPIが不正なため既定のサイズで起動します (" +
+                        std::to_string(parsed.Dpi) + ")");
+                return false;
+            }
+
+            outPlacement = parsed;
+            return true;
+        }
     }
 
     Window::Window(const std::wstring& title, uint32_t width, uint32_t height)
@@ -84,15 +222,214 @@ namespace Kurenai::Core
             m_DpiScale.store(static_cast<float>(dpi) / 96.0f, std::memory_order_relaxed);
         }
 
-        ShowWindow(m_Handle, SW_SHOW);
+        // 前回終了時の位置・サイズ・最大化状態を復元してから表示する。
+        // 表示前に配置を済ませることで、既定サイズのウィンドウが一瞬見えてから
+        // 復元後のサイズへ飛ぶのを避ける
+        const int showCommand = ApplySavedPlacement();
+        ShowWindow(m_Handle, showCommand);
+
+        // 復元や最大化でクライアント領域はコンストラクタ引数のサイズと変わるため、
+        // WM_SIZE経由の更新を待たずここで実測して確定させる。この値がそのまま
+        // スワップチェインの初期サイズになる(KurenaiEngineBaseのコンストラクタ)
+        RECT clientRect{};
+        if (GetClientRect(m_Handle, &clientRect))
+        {
+            const LONG clientWidth = clientRect.right - clientRect.left;
+            const LONG clientHeight = clientRect.bottom - clientRect.top;
+            if (clientWidth > 0 && clientHeight > 0)
+            {
+                m_Width.store(static_cast<uint32_t>(clientWidth), std::memory_order_relaxed);
+                m_Height.store(static_cast<uint32_t>(clientHeight), std::memory_order_relaxed);
+            }
+        }
+        else
+        {
+            Logger::Warning(
+                "Window",
+                "GetClientRectに失敗したため要求サイズをそのまま使います (GetLastError: " +
+                    std::to_string(GetLastError()) + ")");
+        }
     }
 
     Window::~Window()
     {
         if (m_Handle)
         {
+            // DestroyWindow後はGetWindowPlacementが使えなくなるため、破棄する前に保存する
+            SaveCurrentPlacement();
             DestroyWindow(m_Handle);
         }
+    }
+
+    int Window::ApplySavedPlacement()
+    {
+        SavedPlacement saved{};
+        if (!ReadSavedPlacement(saved))
+        {
+            return SW_SHOW;
+        }
+
+        // 復元した位置が使えなかったときに戻せるよう、CreateWindowExW直後の配置を控えておく
+        RECT originalRect{};
+        if (!GetWindowRect(m_Handle, &originalRect))
+        {
+            Logger::Warning(
+                "Window",
+                "GetWindowRectに失敗したため保存されたウィンドウ配置を復元しません (GetLastError: " +
+                    std::to_string(GetLastError()) + ")");
+            return SW_SHOW;
+        }
+
+        // showCmdにSW_HIDEを指定しても復元後の矩形(rcNormalPosition)は反映されるため、
+        // ここでは位置とサイズだけを適用し、表示は呼び出し元のShowWindowに任せる
+        WINDOWPLACEMENT placement{};
+        placement.length = sizeof(placement);
+        placement.showCmd = SW_HIDE;
+        placement.rcNormalPosition = {
+            saved.Left,
+            saved.Top,
+            saved.Left + saved.Width,
+            saved.Top + saved.Height,
+        };
+
+        if (!SetWindowPlacement(m_Handle, &placement))
+        {
+            Logger::Warning(
+                "Window",
+                "SetWindowPlacementに失敗したため既定の位置・サイズで起動します (GetLastError: " +
+                    std::to_string(GetLastError()) + ")");
+            return SW_SHOW;
+        }
+
+        // 保存時からディスプレイの拡大率が変わっている場合、物理ピクセルのまま復元すると
+        // 見かけの大きさが変わってしまう。UIの拡大率はDPIに追従する(GetDpiScale参照)ため、
+        // ウィンドウだけ取り残されるとUIが窮屈になる。実際に載ったモニタのDPIとの比で補正する
+        const UINT currentDpi = GetDpiForWindow(m_Handle);
+        if (currentDpi != 0 && currentDpi != saved.Dpi)
+        {
+            const double ratio = static_cast<double>(currentDpi) / static_cast<double>(saved.Dpi);
+            placement.rcNormalPosition.right = saved.Left + static_cast<LONG>(saved.Width * ratio + 0.5);
+            placement.rcNormalPosition.bottom = saved.Top + static_cast<LONG>(saved.Height * ratio + 0.5);
+
+            if (SetWindowPlacement(m_Handle, &placement))
+            {
+                Logger::Info(
+                    "Window",
+                    "保存時からディスプレイの拡大率が変わったためウィンドウサイズを補正しました (DPI: " +
+                        std::to_string(saved.Dpi) + " -> " + std::to_string(currentDpi) + ")");
+            }
+            else
+            {
+                // 補正前の配置は適用済みなので、そのまま続行する
+                Logger::Warning(
+                    "Window",
+                    "DPI補正後のSetWindowPlacementに失敗したため保存時のサイズのまま起動します (GetLastError: " +
+                        std::to_string(GetLastError()) + ")");
+            }
+        }
+        else if (currentDpi == 0)
+        {
+            Logger::Warning("Window", "GetDpiForWindowに失敗したためウィンドウサイズのDPI補正を行いません");
+        }
+
+        // モニタを外す・配置を変えるなどで、保存された位置が画面外になっていないか確認する。
+        // rcNormalPositionはワークスペース座標(タスクバーを除いた領域が基準)でスクリーン座標と
+        // 一致しないことがあるため、適用後のGetWindowRect(スクリーン座標)で判定する
+        RECT appliedRect{};
+        if (!GetWindowRect(m_Handle, &appliedRect))
+        {
+            Logger::Warning(
+                "Window",
+                "復元後のGetWindowRectに失敗したため画面外かどうかを確認できません (GetLastError: " +
+                    std::to_string(GetLastError()) + ")");
+            return saved.Maximized ? SW_SHOWMAXIMIZED : SW_SHOW;
+        }
+
+        if (MonitorFromRect(&appliedRect, MONITOR_DEFAULTTONULL) == nullptr)
+        {
+            Logger::Warning(
+                "Window",
+                "保存されたウィンドウ位置がどのモニタにも掛からないため既定の位置・サイズで起動します (" +
+                    std::to_string(saved.Left) + ", " + std::to_string(saved.Top) + ")");
+
+            SetWindowPos(
+                m_Handle,
+                nullptr,
+                originalRect.left,
+                originalRect.top,
+                originalRect.right - originalRect.left,
+                originalRect.bottom - originalRect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+            return SW_SHOW;
+        }
+
+        return saved.Maximized ? SW_SHOWMAXIMIZED : SW_SHOW;
+    }
+
+    void Window::SaveCurrentPlacement() const
+    {
+        WINDOWPLACEMENT placement{};
+        placement.length = sizeof(placement);
+        if (!GetWindowPlacement(m_Handle, &placement))
+        {
+            Logger::Error(
+                "Window",
+                "GetWindowPlacementに失敗したためウィンドウ配置を保存できません (GetLastError: " +
+                    std::to_string(GetLastError()) + ")");
+            return;
+        }
+
+        SavedPlacement saved{};
+        saved.Left = static_cast<int>(placement.rcNormalPosition.left);
+        saved.Top = static_cast<int>(placement.rcNormalPosition.top);
+        saved.Width = static_cast<int>(placement.rcNormalPosition.right - placement.rcNormalPosition.left);
+        saved.Height = static_cast<int>(placement.rcNormalPosition.bottom - placement.rcNormalPosition.top);
+
+        // 最小化したまま終了した場合、最小化状態そのものを保存すると次回もアイコン化した状態で
+        // 起動してしまう。WPF_RESTORETOMAXIMIZEDを見て「元に戻したときの状態」を保存する
+        saved.Maximized = placement.showCmd == SW_SHOWMAXIMIZED ||
+            (placement.showCmd == SW_SHOWMINIMIZED && (placement.flags & WPF_RESTORETOMAXIMIZED) != 0);
+
+        const UINT dpi = GetDpiForWindow(m_Handle);
+        if (dpi == 0)
+        {
+            Logger::Warning(
+                "Window",
+                "GetDpiForWindowに失敗したためウィンドウ配置のDPIを96として保存します (GetLastError: " +
+                    std::to_string(GetLastError()) + ")");
+        }
+        saved.Dpi = dpi != 0 ? dpi : 96;
+
+        const std::wstring path = GetPlacementFilePath();
+        std::ofstream file(path.c_str(), std::ios::trunc);
+        if (!file)
+        {
+            Logger::Warning(
+                "Window", "ウィンドウ配置の保存ファイルを開けませんでした (" + WideToUtf8(path) + ")");
+            return;
+        }
+
+        file << "# KurenaiEngineが終了時に自動生成するウィンドウ配置の記録。\n";
+        file << "# 削除すると次回は既定のサイズで起動する。位置とサイズは物理ピクセル。\n";
+        file << "Left=" << saved.Left << "\n";
+        file << "Top=" << saved.Top << "\n";
+        file << "Width=" << saved.Width << "\n";
+        file << "Height=" << saved.Height << "\n";
+        file << "Maximized=" << (saved.Maximized ? 1 : 0) << "\n";
+        file << "Dpi=" << saved.Dpi << "\n";
+        file.flush();
+
+        if (!file)
+        {
+            Logger::Warning(
+                "Window", "ウィンドウ配置の書き込みに失敗しました (" + WideToUtf8(path) + ")");
+            return;
+        }
+
+        Logger::Info(
+            "Window",
+            "ウィンドウ配置を保存しました (" + std::to_string(saved.Width) + "x" + std::to_string(saved.Height) +
+                ", 最大化: " + (saved.Maximized ? "はい" : "いいえ") + ")");
     }
 
     void Window::SetTitle(const std::wstring& title)

@@ -95,6 +95,14 @@ namespace Kurenai::Core
         static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
         LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
 
+        // 前回終了時のウィンドウ位置・サイズ・最大化状態(KurenaiEngine.dllと同じフォルダの
+        // window.ini)を復元する。読み込めなかった場合や保存された位置が現在のモニタ構成では
+        // 画面外になる場合は、CreateWindowExW直後の位置・サイズのままにする。
+        // 戻り値は最初の表示に使うShowWindowのコマンド(最大化を保存していればSW_SHOWMAXIMIZED)
+        int ApplySavedPlacement();
+        // 現在のウィンドウ配置をwindow.iniへ書き出す。デストラクタでDestroyWindowする前に呼ぶ
+        void SaveCurrentPlacement() const;
+
         HWND m_Handle = nullptr;
         // Render()を別スレッドで動かす場合、WM_SIZE(PumpMessages呼び出し元スレッド)による書き込みと
         // GetWidth/GetHeight(描画スレッドからの読み取り)が同時に発生し得るためatomicにしておく
