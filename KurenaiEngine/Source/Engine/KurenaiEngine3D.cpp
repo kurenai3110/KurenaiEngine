@@ -154,10 +154,32 @@ namespace Kurenai
             // R32で確保してある(22.6節)ので、夜の小さな値でもfp32の範囲に余裕がある
             DirectX::XMFLOAT4 DDGIParams4;
             // 水面用(さらに末尾に追加、P2: 水面マテリアル基盤)。x=水面法線マップのスクロール
-            // オフセット(0〜1、CPU側で既にfmod済み)、yzw=未使用。Water.hlslのPSMainが読む。
+            // オフセット(0〜1、CPU側で既にfmod済み)、y=波のスケール倍率(m_WaterWaveScale)、
+            // z=波の強さ(m_WaterWaveStrength、0〜1)、w=未使用。Water.hlslのPSMainが読む。
             // 末尾に足す限り、既に宣言済みのシェーダのcbufferオフセットは1バイトも動かない
             // (DDGIParams0〜4を末尾に追加したときと同じ規約)
             DirectX::XMFLOAT4 TimeParams;
+            // 空の解析評価用(さらに末尾に追加、P3)。DeferredLighting.hlslが背景画素で
+            // Sky.hlsliのSkyColorを画面解像度で評価するために使う。値は手続き空のベイク
+            // (SkyGenerate)へ渡しているものと同一で、両者が同じ空を描くことを保証する
+            // (Render()側でm_ActiveSky*キャッシュから代入する。詳細はそのメンバのコメント参照)。
+            // SkySunDirection: xyz=太陽が「ある」向き、w=未使用。
+            //   【正規化はシェーダ側で行う】sunLighting.SunPositionは解析的にはほぼ単位長だが、
+            //   SkyGenerate.hlsl側の慣習(呼び出し側=SkyParameters組み立て時にnormalizeする)に
+            //   合わせ、C++側では正規化せずそのまま渡す(DeferredLighting.hlslのMakeSkyParameters参照)。
+            //   **LightDirectionでは代用できない**——あちらは支配ライトの向きで、月が支配的な
+            //   夜には月の向きになる。Perez分布のcircumsolar項は常に太陽を基準にする
+            DirectX::XMFLOAT4 SkySunDirection;
+            // SkyParams: x=天頂輝度(実効プリ露出済み)、y=背景を解析評価するかのフラグ
+            //   (1=解析、0=キューブマップをサンプル)、zw=未使用。
+            //   yは手続き空が無効(.ksceneのDDSスカイボックス使用時)は常に0にする
+            //   (DDSは任意の絵でPerezモデルとは無関係なため、解析評価してはいけない)
+            DirectX::XMFLOAT4 SkyParams;
+            DirectX::XMFLOAT4 SkyZenithTint;
+            DirectX::XMFLOAT4 SkyHorizonTint;
+            DirectX::XMFLOAT4 SkyGroundTint;
+            // w=太陽の暖色の強さ(SunGlowStrength)
+            DirectX::XMFLOAT4 SkySunGlowTint;
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -3631,6 +3653,74 @@ namespace Kurenai
             m_LightTileOverflowLogged = true;
         }
 
+        // このフレームで空として使うキューブマップ。手続き空(SkyGenerate)か.ksceneのDDSかが
+        // ここで確定する。**RenderGraphのReads宣言と実際のバインドの両方でこのローカルを使うこと**
+        // (ActiveSkyTexture()を都度呼ぶと両者が食い違って依存解決が壊れる)。
+        // 【P3で前倒しした理由】この下のFrameConstants(constants.SkyParams.y)が
+        // usingProceduralSkyを必要とするため、FrameConstantsを埋めるより前に確定させる
+        RHI::IRHITexture* const skyTexture = ActiveSkyTexture();
+        const bool usingProceduralSky = (skyTexture == m_ProceduralSkyTexture.get());
+
+        // 太陽が閾値以上動いていたら手続き空を焼き直す。毎フレーム焼くと
+        // 空生成6回+プリフィルタ36回のディスパッチが常時走って無駄になる。
+        // 空はプリ露出済みの値で焼かれるため、実効プリ露出が動いたときも焼き直す必要がある
+        // (焼き直さないと空だけ古い露出のまま取り残される)
+        if (usingProceduralSky && !m_SkyBakeDirty)
+        {
+            const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
+            const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_LastBakedSunPosition);
+            const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
+            const bool sunMoved =
+                cosAngle < std::cos(DirectX::XMConvertToRadians(m_SkyBakeAngleThresholdDegrees));
+            // 露出が0.05段(約3.5%)以上動いたら焼き直す。時刻変化に伴う露出の追従でも
+            // 動くため、太陽の角度閾値とあわせて実質的に連続した更新になる
+            const bool exposureMoved =
+                std::abs(m_EffectiveExposureEV100 - m_LastBakedExposureEV100) > 0.05f;
+            if (sunMoved || exposureMoved)
+            {
+                m_SkyBakeDirty = true;
+            }
+        }
+
+        // このフレームで手続き空を焼くかどうか。下のSkyGenerateパス登録とキャッシュ更新の
+        // 両方をこのフラグで判定する
+        const bool bakeSkyThisFrame = usingProceduralSky && m_SkyBakeDirty;
+
+        // --- 空パラメータ(tintと天頂輝度)をベイクと同じタイミングで確定させ、メンバへキャッシュする(P3) ---
+        // 【なぜここでキャッシュするのか】背景の解析評価(DeferredLighting.hlsl)は、下のFrameConstants
+        // 経由でこのキャッシュ値をそのまま使う。ベイク時の値をそのまま使うことで、背景とキューブマップ
+        // (IBL・反射)が常に同一の空パラメータを見る。毎フレーム作り直すと、太陽の角度閾値でベイクを
+        // 間引いている間だけ背景とIBLの空がずれてしまう。加えてComputeSkyZenithScaleは16,384サンプルの
+        // 積分なので、背景の解析評価のためだけに毎フレーム走らせるのは無駄が大きい
+        if (bakeSkyThisFrame)
+        {
+            // 空の色味(昼・薄明・夜の補間と夕焼けの暖色)を先に決める。
+            // 生成シェーダーと下の照度正規化の両方がこの同じ値を使う
+            const SkyTintSet skyTintSet = ComputeSkyTint(sunLighting.SunPosition.y);
+
+            // 上半球の余弦重み積分が空光の照度に一致するよう天頂輝度を正規化する。
+            // 1.6万回の評価になるため、実際に焼くこのタイミングでだけ計算する
+            // (詳細と「なぜπ倍誤差が生じていたか」はComputeSkyZenithScaleのコメント参照)
+            m_ActiveSkyZenithLuminance =
+                ComputeSkyZenithScale(sunLighting.SunPosition, sunLighting.SkyIlluminanceLux, skyTintSet) *
+                effectiveExposure;
+            m_ActiveSkyZenithTint = { skyTintSet.Zenith.x, skyTintSet.Zenith.y, skyTintSet.Zenith.z, 0.0f };
+            m_ActiveSkyHorizonTint = { skyTintSet.Horizon.x, skyTintSet.Horizon.y, skyTintSet.Horizon.z, 0.0f };
+            m_ActiveSkyGroundTint = { skyTintSet.Ground.x, skyTintSet.Ground.y, skyTintSet.Ground.z, 0.0f };
+            m_ActiveSkySunGlowTint = {
+                skyTintSet.SunGlow.x, skyTintSet.SunGlow.y, skyTintSet.SunGlow.z, skyTintSet.SunGlowStrength
+            };
+
+            // 空が変わったのでプリフィルタ済み鏡面も焼き直す必要がある。
+            // 焼き直し要否のフラグ更新はここ(キャッシュを書いた場所)に一本化し、
+            // 下のSkyGenerateパス登録側では行わない(二重更新・更新漏れを避けるため)
+            m_SkyBakeDirty = false;
+            m_LastBakedSunPosition = sunLighting.SunPosition;
+            m_LastBakedExposureEV100 = m_EffectiveExposureEV100;
+            m_IBLBaked = false;
+            m_IBLIrradianceBaked = false;
+        }
+
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
@@ -3679,6 +3769,31 @@ namespace Kurenai
         };
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
         constants.IBLParams = { m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+
+        // 空の解析評価用(P3)。DeferredLighting.hlslが背景画素でSky.hlsliのSkyColorを画面解像度で
+        // 評価するために使う。tintと天頂輝度はm_ActiveSky*キャッシュ(直近の手続き空ベイクの値。
+        // 上のbakeSkyThisFrameブロック参照)をそのまま渡し、背景とキューブマップが同じ空を見るようにする。
+        // SunDirectionだけはキャッシュせず、ここで毎フレーム最新のsunLightingから渡す
+        // (太陽は角度閾値以下でも連続的に動くため。天頂輝度・色味と違い積分を伴わず、
+        // 毎フレーム渡してもコストが無い)。
+        // 正規化はSkyGenerate.hlsl側の慣習(呼び出し側=シェーダのSkyParameters組み立て時に
+        // normalizeする)に合わせ、C++側では正規化しない(DeferredLighting.hlsl側で行う)
+        constants.SkySunDirection = {
+            sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+        };
+        constants.SkyParams = {
+            m_ActiveSkyZenithLuminance,
+            // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらず
+            // 常にキューブマップを使う。DDSは任意の絵でPerezモデルとは無関係なため、
+            // 解析評価してはいけない
+            (m_SkyAnalyticBackground && usingProceduralSky) ? 1.0f : 0.0f,
+            0.0f,
+            0.0f,
+        };
+        constants.SkyZenithTint = m_ActiveSkyZenithTint;
+        constants.SkyHorizonTint = m_ActiveSkyHorizonTint;
+        constants.SkyGroundTint = m_ActiveSkyGroundTint;
+        constants.SkySunGlowTint = m_ActiveSkySunGlowTint;
 
         // === 実効プリ露出が大きく動いたら、更新モードに関わらずプローブを焼き直す(19.14節) ===
         // 下のProbeParams2.wは「焼いた時点の露出→現在の露出」の換算倍率で、これだけでも
@@ -3865,76 +3980,31 @@ namespace Kurenai
         // そのまま読み書きする(詳細はRenderGraph.h参照)
         Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
 
-        // このフレームで空として使うキューブマップ。手続き空(SkyGenerate)か.ksceneのDDSかが
-        // ここで確定する。**RenderGraphのReads宣言と実際のバインドの両方でこのローカルを使うこと**
-        // (ActiveSkyTexture()を都度呼ぶと両者が食い違って依存解決が壊れる)
-        RHI::IRHITexture* const skyTexture = ActiveSkyTexture();
-        const bool usingProceduralSky = (skyTexture == m_ProceduralSkyTexture.get());
-
-        // 太陽が閾値以上動いていたら手続き空を焼き直す。毎フレーム焼くと
-        // 空生成6回+プリフィルタ36回のディスパッチが常時走って無駄になる。
-        // 空はプリ露出済みの値で焼かれるため、実効プリ露出が動いたときも焼き直す必要がある
-        // (焼き直さないと空だけ古い露出のまま取り残される)
-        if (usingProceduralSky && !m_SkyBakeDirty)
-        {
-            const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
-            const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_LastBakedSunPosition);
-            const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
-            const bool sunMoved =
-                cosAngle < std::cos(DirectX::XMConvertToRadians(m_SkyBakeAngleThresholdDegrees));
-            // 露出が0.05段(約3.5%)以上動いたら焼き直す。時刻変化に伴う露出の追従でも
-            // 動くため、太陽の角度閾値とあわせて実質的に連続した更新になる
-            const bool exposureMoved =
-                std::abs(m_EffectiveExposureEV100 - m_LastBakedExposureEV100) > 0.05f;
-            if (sunMoved || exposureMoved)
-            {
-                m_SkyBakeDirty = true;
-            }
-        }
-
         // --- 手続き空の生成パス: Perez分布をGPUで評価してキューブマップを焼く。
         //     太陽が動くと空の輝度分布の形も変わるため、オフラインDDSと違い焼き直しが要る
-        //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否はm_SkyBakeDirtyで判定する ---
-        if (usingProceduralSky && m_SkyBakeDirty)
+        //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否・空パラメータのキャッシュ・
+        //     m_SkyBakeDirty等のフラグ更新はすべて上のbakeSkyThisFrameブロックで済ませてあるため、
+        //     ここではそのキャッシュ(m_ActiveSky*)を使ってパスを登録するだけでよい(P3で前倒し) ---
+        if (bakeSkyThisFrame)
         {
-            // 空の色味(昼・薄明・夜の補間と夕焼けの暖色)を先に決める。
-            // 生成シェーダーと下の照度正規化の両方がこの同じ値を使う
-            const SkyTintSet skyTintSet = ComputeSkyTint(sunLighting.SunPosition.y);
-
-            // 上半球の余弦重み積分が空光の照度に一致するよう天頂輝度を正規化する。
-            // 1.6万回の評価になるため、実際に焼くこのタイミングでだけ計算する
-            // (詳細と「なぜπ倍誤差が生じていたか」はComputeSkyZenithScaleのコメント参照)
-            const float skyZenithLuminance =
-                ComputeSkyZenithScale(sunLighting.SunPosition, sunLighting.SkyIlluminanceLux, skyTintSet) *
-                effectiveExposure;
-
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyGenerate",
                 .Writes = { m_ProceduralSkyTexture.get() },
-                .Execute = [this, &sunLighting, skyZenithLuminance, skyTintSet](RHI::IRHICommandList* cmd)
+                .Execute = [this, &sunLighting](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_SkyGeneratePipelineState.get());
                     for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                     {
                         SkyBakeConstants skyConstants{};
                         skyConstants.Face = face;
-                        skyConstants.ZenithLuminance = skyZenithLuminance;
+                        skyConstants.ZenithLuminance = m_ActiveSkyZenithLuminance;
                         skyConstants.SunDirection = {
                             sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
                         };
-                        skyConstants.ZenithTint = {
-                            skyTintSet.Zenith.x, skyTintSet.Zenith.y, skyTintSet.Zenith.z, 0.0f
-                        };
-                        skyConstants.HorizonTint = {
-                            skyTintSet.Horizon.x, skyTintSet.Horizon.y, skyTintSet.Horizon.z, 0.0f
-                        };
-                        skyConstants.GroundTint = {
-                            skyTintSet.Ground.x, skyTintSet.Ground.y, skyTintSet.Ground.z, 0.0f
-                        };
-                        skyConstants.SunGlowTint = {
-                            skyTintSet.SunGlow.x, skyTintSet.SunGlow.y, skyTintSet.SunGlow.z,
-                            skyTintSet.SunGlowStrength
-                        };
+                        skyConstants.ZenithTint = m_ActiveSkyZenithTint;
+                        skyConstants.HorizonTint = m_ActiveSkyHorizonTint;
+                        skyConstants.GroundTint = m_ActiveSkyGroundTint;
+                        skyConstants.SunGlowTint = m_ActiveSkySunGlowTint;
                         cmd->UpdateBuffer(m_SkyBakeConstantBuffer.get(), &skyConstants, sizeof(skyConstants));
                         cmd->SetComputeConstantBuffer(0, m_SkyBakeConstantBuffer.get());
                         cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProceduralSkyTexture.get(), face, 0);
@@ -3942,12 +4012,6 @@ namespace Kurenai
                     }
                 },
             });
-            // 空が変わったのでプリフィルタ済み鏡面も焼き直す必要がある
-            m_SkyBakeDirty = false;
-            m_LastBakedSunPosition = sunLighting.SunPosition;
-            m_LastBakedExposureEV100 = m_EffectiveExposureEV100;
-            m_IBLBaked = false;
-            m_IBLIrradianceBaked = false;
         }
 
         // --- BRDF積分LUTのベイクパス: (NdotV, ラフネス)の2Dテーブルで、スカイボックスにも

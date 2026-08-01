@@ -5195,6 +5195,39 @@ sRGBの原色付近でのV'(λ)の比 (0.024, 0.368, 0.608) をRGBの重みに�
 あわせて<code>AE Night Rolloff</code>は4.5段を維持した(壁3.8 / 空27.9)。
 実際の夜も空が一番明るく地上は沈むので、この関係が肉眼の見え方に近い。
 </p>
+
+<h3>21.10 空モデルの共有ヘッダー化と、背景の解析評価(P3)</h3>
+<p>
+これまで空モデル本体(Perez分布・色味補間・地面フェード)は<code>SkyGenerate.hlsl</code>だけが持ち、
+背景(深度が書かれていない画素)は<code>SkyGenerate</code>が焼いた256px/面のキューブマップを
+サンプルして描いていた。この256pxは<strong>IBL(拡散イラディアンス・鏡面反射)としては十分だが、
+背景として直接表示するには解像度が足りない</strong>。1面90度視野のキューブマップは
+256 / 90 ≈ <strong>2.84 px/度</strong>しか持たないのに対し、3840px・水平画角68度のカメラは
+約<strong>56 px/度</strong>で表示するため、背景として引くと約20倍に拡大表示され輪郭がぼける
+(将来ここへ雲を載せる計画があり、ぼけたままでは輪郭が保てない)。
+</p>
+<p>
+そこで空モデルの関数群(<code>PerezF</code> / <code>PerezRelativeLuminance</code> /
+<code>SunGlowWeight</code> / <code>SkyTint</code> / <code>SkyColorUpper</code> / <code>SkyColor</code>)を
+<code>Shaders/3D/Sky.hlsli</code>へ切り出した。キューブマップのベイク(<code>SkyGenerate.hlsl</code>、
+IBL用)と背景の解析評価(<code>DeferredLighting.hlsl</code>、画面解像度)の2つの利用者がこの1つの
+定義を共有し、どちらも同じ空を描くことが構造的に保証される。cbufferには依存せず、呼び出し側が
+自分のcbuffer(<code>SkyBakeConstants</code>または<code>FrameConstants</code>)から
+<code>SkyParameters</code>構造体を組み立てて渡す形にしてある。
+</p>
+<p>
+背景は深度が無い画素でのみ<code>DeferredLighting.hlsl</code>が<code>SkyColor</code>を直接評価する
+(手続き空のベイクと同じ太陽位置・色味・天頂輝度を使うため、キューブマップと解析評価は常に一致する)。
+<strong>キューブマップ(IBL用)自体は解像度・用途とも変更していない</strong>。反射プローブ・拡散
+イラディアンスは畳み込み済みの低周波量のため、256px/面のままで正しい。
+</p>
+<p class="note">
+<strong>手続き空が無効(<code>.kscene</code>で[Scene]Skyboxを明示しているシーン)なときは、
+この設定に関わらず背景もキューブマップに戻る。</strong>DDSは任意の絵でPerezモデルとは無関係のため、
+解析評価してはいけない。UIの「空の背景を解析評価する」トグルはキューブマップの中身
+(<code>SkyGenerate</code>のベイク結果)には影響しないため、既存の「手続き空」トグルと違い
+再ベイクのフラグは立てない。
+</p>
 </section>
 
 <section id="occlusion-map">

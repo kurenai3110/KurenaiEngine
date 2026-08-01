@@ -109,6 +109,17 @@ namespace Kurenai::UI
             m_Engine.m_IBLBaked = false;
             m_Engine.m_IBLIrradianceBaked = false;
         }
+        // 背景の解析評価(P3)。キューブマップの中身(SkyGenerateのベイク結果)には一切影響しない
+        // 表示の切り替えでしかないため、上の「手続き空」トグルと違ってm_SkyBakeDirty等の
+        // ベイク用フラグは立てない
+        CheckboxEx(
+            "空の背景を解析評価する###AnalyticSkyBackground", &m_Engine.m_SkyAnalyticBackground,
+            Defaults::SkyAnalyticBackground,
+            "背景(深度が無い画素)をキューブマップのサンプルではなく、Perez分布を画面解像度で"
+            "直接評価して描く。キューブマップは256px/面しかなく背景としては拡大表示されるため、"
+            "こちらのほうが空の輪郭がシャープになる。IBL(反射プローブ・拡散イラディアンス)は"
+            "常にキューブマップのままで、この設定の影響を受けない。手続き空が無効なときは、"
+            "この設定に関わらず常にキューブマップが使われる");
         SliderFloatEx(
             "EV100###SceneExposure", &m_Engine.m_SceneExposureEV100, -8.0f, 20.0f, Defaults::SceneExposureEV100, "%.2f",
             0,

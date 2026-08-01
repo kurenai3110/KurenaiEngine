@@ -8,6 +8,10 @@
 #include "NormalEncoding.hlsli"
 // スペキュラのマルチスキャッタリング・エネルギー補正(14.9節)
 #include "SpecularEnergy.hlsli"
+// 空モデル(Perez分布)の共有ヘッダー(P3)。背景画素をSkyGenerate.hlslのキューブマップと
+// 同じ関数・同じパラメータで画面解像度評価するために使う。PIを定義しないため、
+// このファイルのPI定義(直後)より前でも後でもインクルード順は問題ない
+#include "Sky.hlsli"
 
 static const float PI = 3.14159265359f;
 
@@ -76,6 +80,26 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams3;
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
+    // 水面(P2)用。このシェーダでは未使用だが、C++側でSkySunDirection等より手前に置かれているため
+    // オフセット合わせのためだけに宣言する
+    float4 TimeParams;
+    // 空の解析評価用(P3、末尾に追加)。背景(深度が無い画素)を、キューブマップのサンプルではなく
+    // Sky.hlsliのSkyColorを画面解像度で直接評価するために使う。キューブマップは256px/面・
+    // ミップ無しで、3840px・水平画角68度のカメラでは約20倍に拡大表示されるため、画面解像度で
+    // 評価したほうが背景の輪郭がシャープになる(IBLは畳み込むため低解像度のままで正しい)。
+    // 値はSkyGenerate.hlslが焼くキューブマップに使ったものと同一
+    // (KurenaiEngine3D::Render()のm_ActiveSky*キャッシュ参照)。
+    // xyz=太陽が「ある」向き(未正規化のまま渡ってくる。PSMain側でnormalizeする。
+    // SkyGenerate.hlsl側の慣習=呼び出し側でnormalizeする、に合わせてある)、w=未使用
+    float4 SkySunDirection;
+    // x=天頂輝度(実効プリ露出済み)、y=背景を解析評価するかのフラグ(1=解析、0=キューブマップを
+    // サンプル。手続き空が無効なときは常に0)、zw=未使用
+    float4 SkyParams;
+    float4 SkyZenithTint;
+    float4 SkyHorizonTint;
+    float4 SkyGroundTint;
+    // w=太陽の暖色の強さ(SunGlowStrength)
+    float4 SkySunGlowTint;
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -185,19 +209,49 @@ float3 ReconstructWorldPos(float2 uv, float depth)
     return worldPos.xyz / worldPos.w;
 }
 
+// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる(P3)。
+// SunDirectionの正規化はここで行う(SkyGenerate.hlsl側の慣習=呼び出し側でnormalizeする、に揃える)
+SkyParameters MakeSkyParameters()
+{
+    SkyParameters params;
+    params.SunDirection = normalize(SkySunDirection.xyz);
+    params.ZenithLuminance = SkyParams.x;
+    params.ZenithTint = SkyZenithTint.rgb;
+    params.HorizonTint = SkyHorizonTint.rgb;
+    params.GroundTint = SkyGroundTint.rgb;
+    params.SunGlowTint = SkySunGlowTint.rgb;
+    params.SunGlowStrength = SkySunGlowTint.w;
+    return params;
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float depth = DepthTexture.Sample(DataSampler, input.UV).r;
     if (depth <= 0.0f)
     {
-        // 何も描かれなかった背景ピクセル: カメラからそのピクセル方向への視線ベクトルで
-        // 空のキューブマップをサンプリングする
+        // 何も描かれなかった背景ピクセル: カメラからそのピクセル方向への視線ベクトルを求める
         // Reverse-Zのため遠平面(=背景)はNDC z=0.0付近になる
         float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
         float3 rayDir = normalize(farPoint - CameraPosition.xyz);
-        // 手続き空は太陽高度に応じた明るさで焼かれている(夜は月明かりの空になる)ため、
-        // かつてここで行っていた「夜は暗い紺色へlerpする」補正は不要になった
-        const float3 skyColor = SkyboxTexture.Sample(MaterialSampler, rayDir).rgb;
+
+        // SkyParams.y > 0.5fなら、キューブマップをサンプルする代わりにSky.hlsliのSkyColorを
+        // 画面解像度で直接評価する。キューブマップは256px/面・ミップ無しのため、
+        // 3840px・水平画角68度のカメラでは約20倍に拡大表示され、背景としては輪郭がぼける
+        // (IBLとして使うぶんには畳み込むため低解像度のままで正しく、この解析評価は背景専用)。
+        // 手続き空が無効(.ksceneのDDSスカイボックス使用時)はC++側でSkyParams.yを0にしてあるため、
+        // ここでは値を見るだけでよい
+        float3 skyColor;
+        if (SkyParams.y > 0.5f)
+        {
+            const SkyParameters skyParams = MakeSkyParameters();
+            skyColor = SkyColor(rayDir, skyParams);
+        }
+        else
+        {
+            // 手続き空は太陽高度に応じた明るさで焼かれている(夜は月明かりの空になる)ため、
+            // かつてここで行っていた「夜は暗い紺色へlerpする」補正は不要になった
+            skyColor = SkyboxTexture.Sample(MaterialSampler, rayDir).rgb;
+        }
         return float4(skyColor, 1.0f);
     }
 

@@ -208,6 +208,10 @@ namespace Kurenai::Defaults
     inline constexpr float MoonAzimuthDegrees = 306.87f;
     inline constexpr float MoonElevationDegrees = 45.0f;
     inline constexpr bool ProceduralSkyEnabled = true;
+    // 背景(深度が無い画素)をキューブマップのサンプルではなく、Sky.hlsliのSkyColorを画面解像度で
+    // 直接評価するか(P3)。キューブマップは256px/面しかなく背景としては拡大表示されるため、
+    // 既定でON。手続き空が無効なときはこの設定に関わらずキューブマップが使われる
+    inline constexpr bool SkyAnalyticBackground = true;
     inline constexpr float SceneExposureEV100 = 15.0f;
     inline constexpr float EmissiveIntensity = 1.0f;
 }

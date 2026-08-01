@@ -950,6 +950,26 @@ namespace Kurenai
         // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
         float m_SkyBakeAngleThresholdDegrees = 1.0f;
 
+        // 背景(深度が書かれていない画素)をキューブマップのサンプルではなく、Sky.hlsliの
+        // SkyColorを画面解像度で直接評価するか(P3)。キューブマップは256px/面しかなく
+        // 3840px・水平画角68度のカメラでは約20倍に拡大表示されるため、既定で有効にしてある。
+        // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらずキューブマップを使う
+        // (DeferredLighting.hlslへ渡すSkyParams.yはActiveSkyTexture()の結果とのANDで決める)
+        bool m_SkyAnalyticBackground = Defaults::SkyAnalyticBackground;
+        // 直近の手続き空ベイクで使った空パラメータのキャッシュ(P3)。背景の解析評価
+        // (DeferredLighting.hlsl)はこれをFrameConstants経由でそのまま使う。
+        // 【なぜ毎フレーム作り直さないのか】ベイク時の値をそのまま使うことで、背景とキューブマップ
+        // (IBL・反射)が常に同一の空パラメータを見る。毎フレーム作り直すと、太陽の角度閾値で
+        // ベイクを間引いている間だけ背景とIBLの空がずれてしまう。加えてComputeSkyZenithScaleは
+        // 16,384サンプルの積分なので、背景評価のためだけに毎フレーム走らせるのは無駄が大きい。
+        // 【なぜSkyTintSetを直接持たないのか】SkyTintSetは.cppの無名名前空間内の型でヘッダから
+        // 参照できないため、XMFLOAT4へばらして持つ(SunGlowTint.wにSunGlowStrengthを入れる)
+        float m_ActiveSkyZenithLuminance = 0.0f;
+        DirectX::XMFLOAT4 m_ActiveSkyZenithTint{ 0.0f, 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT4 m_ActiveSkyHorizonTint{ 0.0f, 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT4 m_ActiveSkyGroundTint{ 0.0f, 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT4 m_ActiveSkySunGlowTint{ 0.0f, 0.0f, 0.0f, 0.0f };
+
         bool m_IBLBaked = false;
         // BRDF積分LUTを焼き終えたか(m_IBLBakedとは別管理)。このLUTは(NdotV, ラフネス)の
         // 2Dテーブルでスカイボックスにも太陽の位置にも一切依存しないため、起動後に一度焼けば
