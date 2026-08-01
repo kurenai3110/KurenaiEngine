@@ -844,6 +844,29 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 未使用
         };
 
+        // RTReflection.hlsl側のcbuffer RTReflectionConstantsと一致させる必要がある
+        struct alignas(16) RTReflectionConstants
+        {
+            DirectX::XMFLOAT4 Params0; // xy: 出力サイズ(ピクセル), z: 最大レイ距離, w: ラフネスカットオフ
+            DirectX::XMFLOAT4 Params1; // x: 影レイを撃つか(1で撃つ), yzw: 未使用
+        };
+
+        // RTShadow.hlsl側のcbuffer RTShadowConstantsと一致させる必要がある
+        struct alignas(16) RTShadowConstants
+        {
+            // xy: 出力サイズ(ピクセル), z: 太陽の見かけの半径(ラジアン), w: 1ピクセルあたりのレイ本数
+            DirectX::XMFLOAT4 Params0;
+        };
+
+        // RTAO.hlsl側のcbuffer RTAOConstantsと一致させる必要がある
+        struct alignas(16) RTAOConstants
+        {
+            // xy: 出力サイズ(ピクセル), z: レイの最大距離, w: 遮蔽率のコントラスト(べき乗)
+            DirectX::XMFLOAT4 Params0;
+            // x: レイ本数, y: 間接光の強さ, z: バウンス面へ影レイを撃つか, w: 未使用
+            DirectX::XMFLOAT4 Params1;
+        };
+
         // TAA.hlsl側のcbuffer TAAConstants(register b1)と並びを一致させる必要がある。
         // TAAパスはb0(FrameConstants)を使わず、必要な行列もすべてこちらへ入れている。
         // FrameConstantsは末尾追加を重ねて700バイトを超えており、cbufferは途中のフィールドを
@@ -1243,6 +1266,61 @@ namespace Kurenai
         ssrConstantBufferDesc.SizeInBytes = sizeof(SSRConstants);
         m_SSRConstantBuffer = m_Device->CreateBuffer(ssrConstantBufferDesc);
 
+        // RT反射パス(コンピュートシェーダー。TLASへ鏡面レイを撃ち反射色を求める)。
+        // RTReflection.hlslはRayQueryを含むためシェーダーモデル6.5でしかコンパイルできない。
+        // 非対応環境ではシェーダー自体を作らず、UIからもRaytracedを選べないようにする
+        m_RaytracingAvailable = m_Device->SupportsRaytracing();
+        if (m_RaytracingAvailable)
+        {
+            RHI::ShaderDesc rtReflectionCsDesc;
+            rtReflectionCsDesc.Stage = RHI::ShaderStage::Compute;
+            rtReflectionCsDesc.FilePath = shaderDirectory + L"RTReflection.hlsl";
+            rtReflectionCsDesc.EntryPoint = "CSMain";
+            m_RTReflectionComputeShader = m_Device->CreateShader(rtReflectionCsDesc);
+            m_RTReflectionPipelineState = m_Device->CreateComputePipelineState({ m_RTReflectionComputeShader.get() });
+
+            RHI::BufferDesc rtReflectionConstantBufferDesc;
+            rtReflectionConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+            rtReflectionConstantBufferDesc.SizeInBytes = sizeof(RTReflectionConstants);
+            m_RTReflectionConstantBuffer = m_Device->CreateBuffer(rtReflectionConstantBufferDesc);
+
+            // RTシャドウパス(コンピュートシェーダー。TLASへ太陽の円盤方向の影レイを撃ち可視率を求める)。
+            // RTReflectionと同じくRayQueryを含むためシェーダーモデル6.5が必要
+            RHI::ShaderDesc rtShadowCsDesc;
+            rtShadowCsDesc.Stage = RHI::ShaderStage::Compute;
+            rtShadowCsDesc.FilePath = shaderDirectory + L"RTShadow.hlsl";
+            rtShadowCsDesc.EntryPoint = "CSMain";
+            m_RTShadowComputeShader = m_Device->CreateShader(rtShadowCsDesc);
+            m_RTShadowPipelineState = m_Device->CreateComputePipelineState({ m_RTShadowComputeShader.get() });
+
+            RHI::BufferDesc rtShadowConstantBufferDesc;
+            rtShadowConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+            rtShadowConstantBufferDesc.SizeInBytes = sizeof(RTShadowConstants);
+            m_RTShadowConstantBuffer = m_Device->CreateBuffer(rtShadowConstantBufferDesc);
+
+            // RTAOパス(コンピュートシェーダー。半球へレイを撃ち遮蔽率と間接拡散光を求める)
+            RHI::ShaderDesc rtAOCsDesc;
+            rtAOCsDesc.Stage = RHI::ShaderStage::Compute;
+            rtAOCsDesc.FilePath = shaderDirectory + L"RTAO.hlsl";
+            rtAOCsDesc.EntryPoint = "CSMain";
+            m_RTAOComputeShader = m_Device->CreateShader(rtAOCsDesc);
+            m_RTAOPipelineState = m_Device->CreateComputePipelineState({ m_RTAOComputeShader.get() });
+
+            RHI::BufferDesc rtAOConstantBufferDesc;
+            rtAOConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+            rtAOConstantBufferDesc.SizeInBytes = sizeof(RTAOConstants);
+            m_RTAOConstantBuffer = m_Device->CreateBuffer(rtAOConstantBufferDesc);
+
+            Core::Logger::Info(
+                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウ・AO/GIでRaytracedを選択可能)");
+        }
+        else
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "レイトレーシングは利用できません(反射・シャドウ・AO/GIはいずれもスクリーンスペース手法のみ)");
+        }
+
         // TAAパス(頂点バッファなしのフルスクリーン三角形。前フレームの結果をモーションベクターで
         // 再投影して蓄積する)。出力は履歴バッファ(常にfp16)で、バッファ精度の設定に依存しないため
         // CreatePrecisionDependentPipelineStatesではなくここで一度だけ作ればよい
@@ -1607,7 +1685,19 @@ namespace Kurenai
         CreatePrecisionDependentPipelineStates();
 
         DiscoverScenes();
-        LoadScene(0);
+
+        // 起動時の1シーン目だけは同期的に読み込む。この時点ではRender/Loaderのどちらのスレッドも
+        // まだ動いていないため、通常のハンドオフを経由せず直接読み込んで反映してよい
+        // (初回フレームより前にシーンが揃う従来の挙動を保つ)。
+        // m_LoaderSkyboxPathはCreateSceneResourcesが読み込んだ既定スカイボックスに合わせておく
+        m_LoaderSkyboxPath = m_CurrentSkyboxPath;
+        if (std::unique_ptr<LoadedScene> initialScene = LoadSceneOnLoaderThread(0))
+        {
+            ApplyLoadedScene(*initialScene);
+            // ApplyLoadedSceneはUpdateスレッドへの引き渡しとして公開するだけなので、
+            // まだUpdateスレッドが回っていないここでは自分で取り込む
+            UpdateAppliedSceneHandoff();
+        }
     }
 
     RHI::Format KurenaiEngine3D::GetEmissiveFormat() const
@@ -1625,6 +1715,73 @@ namespace Kurenai
         // aに遮蔽率を持つためアルファ付きのR16G16B16A16_Floatを使う
         return m_BufferPrecision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
                                                                 : RHI::Format::R16G16B16A16_Float;
+    }
+
+    bool KurenaiEngine3D::ShouldRunRaytracedReflection() const
+    {
+        return m_ReflectionMode == ReflectionMode::Raytraced && m_RaytracingScene.IsValid() &&
+               m_RTReflectionPipelineState != nullptr && m_RTReflectionTexture != nullptr;
+    }
+
+    bool KurenaiEngine3D::ShouldRunRaytracedShadow() const
+    {
+        return m_ShadowMode == ShadowMode::Raytraced && m_RaytracingScene.IsValid() &&
+               m_RTShadowPipelineState != nullptr && m_RTShadowTexture != nullptr;
+    }
+
+    bool KurenaiEngine3D::ShouldRunRaytracedAO() const
+    {
+        return m_AOTechnique == AOTechnique::Raytraced && m_RaytracingScene.IsValid() &&
+               m_RTAOPipelineState != nullptr && m_RTAORawTexture != nullptr && m_RTAOTexture != nullptr;
+    }
+
+    RHI::IRHITexture* KurenaiEngine3D::GetActiveAOTexture() const
+    {
+        if (!m_AOEnabled)
+        {
+            return m_AODisabledTexture.get();
+        }
+        if (ShouldRunRaytracedAO())
+        {
+            return m_RTAOTexture.get();
+        }
+        if (m_AOTechnique == AOTechnique::SSILVisibilityBitmask)
+        {
+            return m_SSILTexture.get();
+        }
+        // SSAO、およびRaytracedを選んでいても実行できないフレーム(高速化構造が無い等)
+        return m_SSAOTexture.get();
+    }
+
+    RHI::IRHITexture* KurenaiEngine3D::GetActiveAORawTexture() const
+    {
+        if (!m_AOEnabled)
+        {
+            return m_AODisabledTexture.get();
+        }
+        if (ShouldRunRaytracedAO())
+        {
+            return m_RTAORawTexture.get();
+        }
+        if (m_AOTechnique == AOTechnique::SSILVisibilityBitmask)
+        {
+            return m_SSILRawTexture.get();
+        }
+        return m_SSAORawTexture.get();
+    }
+
+    RHI::IRHITexture* KurenaiEngine3D::GetActiveReflectionOutput() const
+    {
+        if (m_ReflectionMode == ReflectionMode::ScreenSpace)
+        {
+            return m_SSRTexture.get();
+        }
+        if (ShouldRunRaytracedReflection())
+        {
+            return m_RTReflectionTexture.get();
+        }
+        // 反射なし、またはRT反射を実行しなかった場合はLightingパスの結果をそのまま後段へ渡す
+        return m_SceneColor.get();
     }
 
     void KurenaiEngine3D::CreatePrecisionDependentPipelineStates()
@@ -1824,6 +1981,20 @@ namespace Kurenai
             m_SSILTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
             m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
             m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            // RT反射はコンピュートシェーダーがUAVで書くため、レンダーターゲットではなくUAVテクスチャを作る。
+            // 非対応環境ではパス自体が実行されないので確保しない
+            if (m_RaytracingAvailable)
+            {
+                m_RTReflectionTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);
+                // RTシャドウの可視率(0〜1のスカラー)。RWTexture2D<float>として書くため単チャンネルの
+                // R32_Floatにする(型付きUAVの読み書きが保証されているのはR32系のみ。AutoExposure.hlsl参照)
+                m_RTShadowTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R32_Float);
+                // RTAOの生バッファはコンピュートがUAVで書くためUAVテクスチャ、ブラー後は
+                // 従来どおりピクセルシェーダーが書くレンダーターゲット。
+                // フォーマットはSSAO/SSILと同じaoFormat(バッファ精度の設定に追従する)
+                m_RTAORawTexture = m_Device->CreateUAVTexture(width, height, aoFormat);
+                m_RTAOTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
+            }
             m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
 
             // モーションベクター(速度バッファ)。G-Bufferの5枚目として、GBuffer.hlslが
@@ -1917,66 +2088,184 @@ namespace Kurenai
                 ", バッファ精度=" + (legacyPrecision ? "Legacy8bit" : "HDR") + ")");
     }
 
-    void KurenaiEngine3D::LoadScene(size_t sceneIndex)
+    void KurenaiEngine3D::RequestSceneLoad(size_t sceneIndex)
     {
         if (sceneIndex >= m_SceneFilePaths.size())
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "RequestSceneLoad: シーン番号" + std::to_string(sceneIndex) + "が範囲外です(シーン数: " +
+                    std::to_string(m_SceneFilePaths.size()) + ")。要求を無視します");
+            return;
+        }
+
+        // UIパネルもRenderスレッドで動くため、ここは単なるRenderスレッド内の受け渡しでよい。
+        // 実際の発注はUpdateSceneStreaming(フレーム先頭)がまとめて行う
+        m_PendingSceneRequest = static_cast<int>(sceneIndex);
+    }
+
+    void KurenaiEngine3D::UpdateSceneStreaming()
+    {
+        // --- 出来上がったシーンがあれば取り込む ---
+        std::unique_ptr<LoadedScene> loaded;
+        {
+            std::lock_guard<std::mutex> lock(m_LoadedSceneMutex);
+            loaded = std::move(m_LoadedScene);
+        }
+        if (loaded)
+        {
+            ApplyLoadedScene(*loaded);
+            m_SceneLoadInFlight = false;
+        }
+
+        // --- 保留中の切り替え要求をLoaderスレッドへ発注する ---
+        // 読み込み中は発注しない(最後の要求はm_PendingSceneRequestに残るので取りこぼさない)
+        if (m_PendingSceneRequest < 0 || m_SceneLoadInFlight)
         {
             return;
         }
 
-        // m_Scene/m_Camera/Post ProcessingパラメータはRender()(Renderスレッド)も読み書きするため、
-        // この関数全体をm_SceneMutexで保護する(詳細はm_SceneMutexのコメント参照)。UpdateSceneSwitch
-        // (Updateスレッド)からのみ呼ばれる前提のため、Renderスレッドとの競合はこれで排他できる
-        std::lock_guard<std::mutex> sceneLock(m_SceneMutex);
+        const size_t sceneIndex = static_cast<size_t>(m_PendingSceneRequest);
+        m_PendingSceneRequest = -1;
+
+        // 旧シーンのGPUリソースを手放す前に、GPUが旧シーンを参照するコマンド(直前まで提出されていた
+        // 描画コマンド)の実行を終えるまで待つ。特にDX12はCPUがGPU完了を待たずに次フレームの記録を
+        // 始める多重バッファリング設計のため、これを省くとGPUがまだ読んでいるバッファ/テクスチャを
+        // 解放してしまう(詳細はIRHIDevice::WaitForGPUIdleのコメント参照)。
+        // このフレームのGPUコマンドはまだ1つも積んでいないため、待ち時間は前フレームぶんだけで済む
+        m_Device->WaitForGPUIdle();
+
+        // 読み込み開始と同時に旧シーンを手放す。読み込み完了まで待ってから捨てると新旧の
+        // GPUリソースが同時に載ってVRAMがほぼ2倍になるため、先に空にする方を選んでいる。
+        // その代わり読み込み中はシーンが描かれない(UIとスカイボックスのみになる)
+        RetiredAssets retired;
+        retired.Scene = std::move(m_Scene);
+        retired.RaytracingScene = std::move(m_RaytracingScene);
+        m_Scene = Assets::Scene{};
+        m_RaytracingScene = Assets::RaytracingScene{};
+        RetireAssets(std::move(retired));
+
+        {
+            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
+            m_LoadRequestSceneIndex = static_cast<int>(sceneIndex);
+        }
+        m_LoadRequestCV.notify_one();
+        m_SceneLoadInFlight = true;
+    }
+
+    void KurenaiEngine3D::RetireAssets(RetiredAssets&& retired)
+    {
+        std::lock_guard<std::mutex> lock(m_RetiredAssetsMutex);
+        m_RetiredAssets.push_back(std::move(retired));
+    }
+
+    void KurenaiEngine3D::LoaderThreadMain()
+    {
+        // TextureImage::LoadFromFileがWICを使う経路(.dds/.tga以外)に備えてCOMを初期化しておく。
+        // COMはスレッドごとに初期化が必要で、未初期化のままWICを呼ぶとハングする
+        // (packedアセットは.ktex=DDSなので通常この経路には入らないが、保険として揃えておく)
+        const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+        // 破棄依頼を引き取って実際に解放する。アセット用ディスクリプタヒープを触るのは
+        // このスレッドだけ、という不変条件を保つための処理(RetiredAssetsのコメント参照)
+        const auto destroyRetiredAssets = [this]()
+        {
+            std::vector<RetiredAssets> retired;
+            {
+                std::lock_guard<std::mutex> lock(m_RetiredAssetsMutex);
+                retired.swap(m_RetiredAssets);
+            }
+            // retiredのデストラクタでGPUリソースが解放される
+        };
+
+        for (;;)
+        {
+            int sceneIndex = -1;
+            {
+                std::unique_lock<std::mutex> lock(m_LoadRequestMutex);
+                m_LoadRequestCV.wait(lock, [this] { return m_LoadRequestSceneIndex >= 0 || m_StopLoaderThread; });
+                if (m_StopLoaderThread && m_LoadRequestSceneIndex < 0)
+                {
+                    break;
+                }
+                sceneIndex = m_LoadRequestSceneIndex;
+                m_LoadRequestSceneIndex = -1;
+            }
+
+            // 先に破棄を済ませてから読み込む(Renderスレッドは手放す前にWaitForGPUIdle済み)。
+            // 新シーンを作る前に旧シーンを解放することで、VRAMの二重常駐を避ける
+            destroyRetiredAssets();
+
+            if (sceneIndex < 0)
+            {
+                continue;
+            }
+
+            std::unique_ptr<LoadedScene> loaded = LoadSceneOnLoaderThread(static_cast<size_t>(sceneIndex));
+            if (!loaded)
+            {
+                // 読み込みに失敗した場合も「読み込み中」状態を解除しないとUIが固まるため、
+                // 空の完成品を渡してRenderスレッドに終了を知らせる(シーンは空のままになる)
+                loaded = std::make_unique<LoadedScene>();
+                loaded->SceneIndex = static_cast<size_t>(sceneIndex);
+                loaded->Camera = ComputeInitialCamera(loaded->Scene);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(m_LoadedSceneMutex);
+                m_LoadedScene = std::move(loaded);
+            }
+        }
+
+        // 停止時に残っている破棄依頼をこのスレッドで片付ける
+        destroyRetiredAssets();
+
+        if (SUCCEEDED(comResult))
+        {
+            CoUninitialize();
+        }
+    }
+
+    std::unique_ptr<KurenaiEngine3D::LoadedScene> KurenaiEngine3D::LoadSceneOnLoaderThread(size_t sceneIndex)
+    {
+        if (sceneIndex >= m_SceneFilePaths.size())
+        {
+            Core::Logger::Error("KurenaiEngine3D", "LoadSceneOnLoaderThread: シーン番号が範囲外です");
+            return nullptr;
+        }
 
         // [Model]Pathの基準ディレクトリ(Assetsルート)。.kmodel自身の内部パス(.kmodelがある
         // ディレクトリからの相対)とは基準が異なる点に注意(SceneLoader.h参照)
         const std::wstring assetRootDirectory = GetModuleDirectory() + L"Assets\\";
 
-        // 旧シーン(m_Scene)のバッファ/テクスチャを破棄する前に、GPUが旧シーンを参照する
-        // コマンド(直前まで提出されていた描画コマンド)の実行を終えるまで待つ。特にDX12は
-        // CPUがGPU完了を待たずに次フレームの記録を始める多重バッファリング設計のため、
-        // これを省くとGPUがまだ読んでいるバッファ/テクスチャを解放してしまい、
-        // ヒープ破損によるクラッシュを引き起こす(詳細はIRHIDevice::WaitForGPUIdleのコメント参照)
-        m_Device->WaitForGPUIdle();
+        auto loaded = std::make_unique<LoadedScene>();
+        loaded->SceneIndex = sceneIndex;
 
-        // Assets::LoadSceneの戻り値(新シーンの全テクスチャ/バッファ)を作り終えてから代入すると、
-        // 代入演算子が旧m_Sceneを破棄するまでの間、新旧シーンのGPUリソース(特にDX12の
-        // 非シェーダー可視SRVディスクリプタ)が同時に確保された状態になり、大規模シーンでは
-        // ディスクリプタヒープを圧迫する。先に空のSceneで置き換えて旧シーンを解放しておく
-        // (直前のWaitForGPUIdleによりGPUはもう旧シーンを参照していないため安全)
-        m_Scene = Assets::Scene{};
-        m_Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory);
-        m_CurrentSceneIndex = sceneIndex;
-
-        // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
-        // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
-        m_TimeOfDay = m_Scene.SunTimeOfDay;
-        m_SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
-        m_ShadowEnabled = m_Scene.ShadowEnabled;
-        m_SunEnabled = m_Scene.SunEnabled;
-        m_AOEnabled = m_Scene.AOEnabled;
-        m_SSREnabled = m_Scene.SSREnabled;
-        if (m_Scene.HasIBLIntensityOverride)
+        try
         {
-            m_IBLIntensity = m_Scene.IBLIntensity;
+            loaded->Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory);
+        }
+        catch (const std::exception& e)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "シーンの読み込みに失敗しました: " + WideToUtf8(m_SceneFilePaths[sceneIndex]) + " : " + e.what());
+            return nullptr;
         }
 
         // [Scene]Skyboxでスカイボックスを差し替える(指定が無ければ既定へ戻す)。
-        // IBLの拡散イラディアンス・プリフィルタ済み鏡面はスカイボックスから焼かれるため、
-        // 差し替えたらm_IBLBakedを倒して次フレームで焼き直させる必要がある。
-        // 直前にWaitForGPUIdle済みなので旧テクスチャを解放しても安全
-        const std::wstring desiredSkyboxPath = m_Scene.SkyboxPath.empty() ? m_DefaultSkyboxPath : m_Scene.SkyboxPath;
-        if (desiredSkyboxPath != m_CurrentSkyboxPath)
+        // 「今どのスカイボックスを読み込み済みか」を知っているのはこのスレッドだけなので、
+        // 差し替えが要るかの判定もここで行う(不要ならSkyboxTextureをnullptrのままにして
+        // Renderスレッドへ「現状維持」を伝える)
+        const std::wstring desiredSkyboxPath =
+            loaded->Scene.SkyboxPath.empty() ? m_DefaultSkyboxPath : loaded->Scene.SkyboxPath;
+        if (desiredSkyboxPath != m_LoaderSkyboxPath)
         {
             try
             {
-                m_SkyboxTexture = m_Device->CreateTextureFromFile(desiredSkyboxPath, false);
-                m_CurrentSkyboxPath = desiredSkyboxPath;
-                m_IBLBaked = false;
-                // 検証用の拡散イラディアンスマップも古いスカイボックス由来のものになるため倒す
-                // (実際に焼き直すのは検証トグル・デバッグ表示が有効なときだけ)
-                m_IBLIrradianceBaked = false;
+                loaded->SkyboxTexture = m_Device->CreateTextureFromFile(desiredSkyboxPath, false);
+                loaded->SkyboxPath = desiredSkyboxPath;
+                m_LoaderSkyboxPath = desiredSkyboxPath;
                 Core::Logger::Info("KurenaiEngine3D", "スカイボックスを差し替えました: " + WideToUtf8(desiredSkyboxPath));
             }
             catch (const std::exception& e)
@@ -1987,6 +2276,63 @@ namespace Kurenai
                     "スカイボックスの読み込みに失敗しました。現在のスカイボックスを維持します: " +
                         WideToUtf8(desiredSkyboxPath) + " : " + e.what());
             }
+        }
+
+        // レイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの統合バッファを構築する。
+        // 非対応環境(DX11、Tier 1.1未満のアダプタ)では何も作らず、描画側は従来の
+        // スクリーンスペース手法のまま動く。構築に失敗しても描画は継続する
+        if (m_Device->SupportsRaytracing())
+        {
+            loaded->RaytracingScene.Build(*m_Device, loaded->Scene);
+        }
+
+        loaded->Camera = ComputeInitialCamera(loaded->Scene);
+        return loaded;
+    }
+
+    void KurenaiEngine3D::ApplyLoadedScene(LoadedScene& loaded)
+    {
+        m_Scene = std::move(loaded.Scene);
+        m_RaytracingScene = std::move(loaded.RaytracingScene);
+        m_CurrentSceneIndex = loaded.SceneIndex;
+
+        // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
+        // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
+        m_TimeOfDay = m_Scene.SunTimeOfDay;
+        m_SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
+        // .ksceneが持つのは「影を出すか」の真偽値だけなので、手法の選択はエンジン側で決める
+        // (反射のm_ReflectionModeと同じ扱い)。レイトレーシングが使える環境ならそちらを既定にする
+        m_ShadowMode = m_Scene.ShadowEnabled
+            ? (m_RaytracingAvailable ? ShadowMode::Raytraced : ShadowMode::CascadedShadowMap)
+            : ShadowMode::Off;
+        m_SunEnabled = m_Scene.SunEnabled;
+        m_AOEnabled = m_Scene.AOEnabled;
+        // .ksceneが持つのは「反射を使うか」の真偽値だけなので、手法の選択はエンジン側で決める。
+        // レイトレーシングが使える環境ならそちらを既定にする(画面外も反射に映るぶん確実に上位のため)
+        m_ReflectionMode = m_Scene.SSREnabled
+            ? (m_RaytracingAvailable ? ReflectionMode::Raytraced : ReflectionMode::ScreenSpace)
+            : ReflectionMode::Off;
+        if (m_Scene.HasIBLIntensityOverride)
+        {
+            m_IBLIntensity = m_Scene.IBLIntensity;
+        }
+
+        // スカイボックスが差し替わった場合のみ非nullptr。IBLの拡散イラディアンス・プリフィルタ済み
+        // 鏡面はスカイボックスから焼かれるため、差し替えたらm_IBLBakedを倒して焼き直させる
+        if (loaded.SkyboxTexture)
+        {
+            // 旧スカイボックスもアセット由来なのでLoaderスレッドへ破棄を委ねる。
+            // 直前(UpdateSceneStreaming)のWaitForGPUIdleによりGPUはもう参照していない
+            RetiredAssets retiredSkybox;
+            retiredSkybox.SkyboxTexture = std::move(m_SkyboxTexture);
+            RetireAssets(std::move(retiredSkybox));
+
+            m_SkyboxTexture = std::move(loaded.SkyboxTexture);
+            m_CurrentSkyboxPath = loaded.SkyboxPath;
+            m_IBLBaked = false;
+            // 検証用の拡散イラディアンスマップも古いスカイボックス由来のものになるため倒す
+            // (実際に焼き直すのは検証トグル・デバッグ表示が有効なときだけ)
+            m_IBLIrradianceBaked = false;
         }
 
         // アセット由来のライトをユーザー編集用のコピーへ複製する(m_Scene.Lightsは直接編集しない。
@@ -2017,15 +2363,25 @@ namespace Kurenai
         m_ProbeRealtimeProbeIndex = 0;
         m_ProbeRealtimeFace = 0;
 
-        // TAAの履歴には前のシーンの絵が入っており、この後のFrameCameraToModelでカメラも飛ぶため、
+        // SSAO/SSILの半径やSSRの距離はシーンの規模から決まるため、差し替え後のm_Sceneで計算し直す
+        ResetSceneDependentParams();
+
+        // TAAの履歴には前のシーンの絵が入っており、この後カメラも新シーンの初期位置へ飛ぶため、
         // 再投影しても対応する画素が存在しない。捨てて今フレームの色から積み直す。
-        // この関数はUpdateスレッドから呼ばれるためatomicで書く(Renderスレッドが読む)
+        // ApplyLoadedSceneはLoaderスレッドから呼ばれるため、m_Cameraは直接書けないがatomicなら書ける
+        // (Renderスレッドが読む。カメラ自体はこの後m_AppliedSceneCamera経由でUpdateスレッドへ渡す)
         m_TAAHistoryValid.store(false, std::memory_order_relaxed);
 
-        FrameCameraToModel();
-
-        const wchar_t* apiName = (m_GraphicsAPI == GraphicsAPI::DX12) ? L"DX12" : L"DX11";
-        m_Window->SetTitle(std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name);
+        // 初期カメラとウィンドウタイトルはUpdateスレッドが適用する。m_Cameraの書き込み手を
+        // 1スレッドに保ち、ウィンドウタイトルもウィンドウを所有するスレッドから設定するため
+        // (UpdateAppliedSceneHandoff参照)
+        {
+            const wchar_t* apiName = (m_GraphicsAPI == GraphicsAPI::DX12) ? L"DX12" : L"DX11";
+            std::lock_guard<std::mutex> lock(m_AppliedSceneMutex);
+            m_AppliedSceneCamera = loaded.Camera;
+            m_AppliedSceneTitle = std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name;
+        }
+        m_AppliedScenePending.store(true, std::memory_order_release);
     }
 
     uint64_t KurenaiEngine3D::ComputeProbeBakeSignature() const
@@ -2050,7 +2406,10 @@ namespace Kurenai
         mixFloat(m_TimeOfDay);
         mixFloat(m_SunAzimuthDegrees);
         mixBool(m_SunEnabled);
-        mixBool(m_ShadowEnabled);
+        // 影の手法ではなく「影を落とすかどうか」だけを混ぜる。ProbeCapture.hlslが読むのは
+        // 常にカスケードシャドウマップで、そのシャドウマップはRTシャドウ選択時も同じように
+        // 描かれるため、CascadedShadowMapとRaytracedでプローブの焼き上がりは変わらない
+        mixBool(m_ShadowMode != ShadowMode::Off);
         // 月は時刻に連動せず手動指定なので、太陽とは別に混ぜる必要がある。太陽が沈むと
         // 平行光源の枠が月へ切り替わり、キャプチャの直接光がそのまま変わる
         mixFloat(m_MoonAzimuthDegrees);
@@ -2104,29 +2463,38 @@ namespace Kurenai
         // ヒット判定の厚みはSSAO/SSILと同様、遮蔽・接触判定として妥当な小さい値にする
         m_SSRMaxDistance = std::clamp(diagonal * 0.5f, 1.0f, 100.0f);
         m_SSRThickness = m_SSAORadius * 0.2f;
+
+        // RT反射のレイ距離はSSRより長く取る。SSRは「画面外へ出たら打ち切り」で早々に確信度0へ
+        // 落ちるためシーン対角の半分でも十分だったが、RTは画面外も追えるので短く切ると
+        // 本来映るはずの建物を通り越して空が映ってしまう。シーン対角そのものを上限にする
+        m_RTReflectionMaxDistance = std::clamp(diagonal, 1.0f, 500.0f);
+
+        // RTAOのレイ距離はSSAO/SSILの半径より長く取る。スクリーンスペース手法は
+        // 半径を伸ばすほど画面上のサンプル間隔が粗くなって破綻するが、RTには
+        // その制約が無く、部屋の広さ程度まで伸ばしたほうがバウンス光が正しく回る
+        m_RTAOMaxDistance = std::clamp(diagonal * 0.03f, 0.1f, 10.0f);
     }
 
-    void KurenaiEngine3D::FrameCameraToModel()
+    Core::Camera KurenaiEngine3D::ComputeInitialCamera(const Assets::Scene& scene)
     {
-        const float sizeY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
-        const float dx = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
-        const float dz = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
+        Core::Camera camera;
+        const float sizeY = scene.BoundsMax[1] - scene.BoundsMin[1];
+        const float dx = scene.BoundsMax[0] - scene.BoundsMin[0];
+        const float dz = scene.BoundsMax[2] - scene.BoundsMin[2];
         const float diagonal = std::sqrt(dx * dx + sizeY * sizeY + dz * dz);
 
-        ResetSceneDependentParams();
-
-        if (m_Scene.HasCameraOverride)
+        if (scene.HasCameraOverride)
         {
-            m_Camera.SetPosition({ m_Scene.CameraPosition[0], m_Scene.CameraPosition[1], m_Scene.CameraPosition[2] });
-            m_Camera.SetYawPitch(m_Scene.CameraYaw, m_Scene.CameraPitch);
-            m_Camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
-            return;
+            camera.SetPosition({ scene.CameraPosition[0], scene.CameraPosition[1], scene.CameraPosition[2] });
+            camera.SetYawPitch(scene.CameraYaw, scene.CameraPitch);
+            camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
+            return camera;
         }
 
-        const float centerX = (m_Scene.BoundsMin[0] + m_Scene.BoundsMax[0]) * 0.5f;
-        const float centerY = (m_Scene.BoundsMin[1] + m_Scene.BoundsMax[1]) * 0.5f;
-        const float centerZ = (m_Scene.BoundsMin[2] + m_Scene.BoundsMax[2]) * 0.5f;
-        const float eyeHeight = m_Scene.BoundsMin[1] + sizeY * 0.15f;
+        const float centerX = (scene.BoundsMin[0] + scene.BoundsMax[0]) * 0.5f;
+        const float centerY = (scene.BoundsMin[1] + scene.BoundsMax[1]) * 0.5f;
+        const float centerZ = (scene.BoundsMin[2] + scene.BoundsMax[2]) * 0.5f;
+        const float eyeHeight = scene.BoundsMin[1] + sizeY * 0.15f;
 
         const float longAxis = std::max(dx, dz);
         const float shortAxis = std::min(dx, dz);
@@ -2160,7 +2528,7 @@ namespace Kurenai
         else if (dx >= dz)
         {
             // ホールの長辺方向の端寄りから中心を見る位置を初期視点にする(中央の装飾物や壁に埋まらないように)
-            posX = m_Scene.BoundsMin[0] + dx * 0.2f;
+            posX = scene.BoundsMin[0] + dx * 0.2f;
             posY = eyeHeight;
             posZ = centerZ;
             yaw = DirectX::XM_PIDIV2;
@@ -2170,14 +2538,15 @@ namespace Kurenai
         {
             posX = centerX;
             posY = eyeHeight;
-            posZ = m_Scene.BoundsMin[2] + dz * 0.2f;
+            posZ = scene.BoundsMin[2] + dz * 0.2f;
             yaw = 0.0f;
             nearZ = std::max(0.01f, diagonal * 0.0005f);
         }
 
-        m_Camera.SetPosition({ posX, posY, posZ });
-        m_Camera.SetYawPitch(yaw, 0.0f);
-        m_Camera.SetLens(DirectX::XM_PIDIV4, nearZ, farZ);
+        camera.SetPosition({ posX, posY, posZ });
+        camera.SetYawPitch(yaw, 0.0f);
+        camera.SetLens(DirectX::XM_PIDIV4, nearZ, farZ);
+        return camera;
     }
 
     // カメラ視錐台をkCascadeCount個の深度範囲に分割する境界(View空間でのカメラからの距離)を求める。
@@ -2303,6 +2672,10 @@ namespace Kurenai
 
     void KurenaiEngine3D::Run()
     {
+        // シーン読み込み専用スレッドを起動する。ファイルI/O・デコード・アセット由来のGPUリソースの
+        // 作成と破棄をこのスレッドが担い、読み込み中もRenderスレッドがフレームを進められるようにする
+        m_LoaderThread = std::thread(&KurenaiEngine3D::LoaderThreadMain, this);
+
         // 描画専用スレッドを起動する。以後このスレッドがRender()の呼び出しとPresentを担当し、
         // 呼び出し元スレッド(以下Updateスレッド)はPumpMessages/Updateに専念する
         m_RenderThread = std::thread(&KurenaiEngine3D::RenderThreadMain, this);
@@ -2328,6 +2701,23 @@ namespace Kurenai
         }
         m_FrameStateCV.notify_one();
         m_RenderThread.join();
+
+        // Renderスレッドが止まった後にLoaderスレッドを止める。この順序により、Loaderの停止後に
+        // 新しい破棄依頼が積まれることはない。Loaderは終了前に残った破棄依頼を片付けるため、
+        // アセット用ディスクリプタヒープを触るのはこのスレッドだけ、という不変条件が保たれる
+        {
+            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
+            m_StopLoaderThread = true;
+        }
+        m_LoadRequestCV.notify_one();
+        m_LoaderThread.join();
+
+        // Loaderが作り終えていたが取り込まれなかったシーンをここで解放する。
+        // この時点で動いているのはこのスレッドだけなので、どのヒープを触っても競合しない
+        {
+            std::lock_guard<std::mutex> lock(m_LoadedSceneMutex);
+            m_LoadedScene.reset();
+        }
     }
 
     void KurenaiEngine3D::TickFrame()
@@ -2338,7 +2728,7 @@ namespace Kurenai
 
         Update(deltaTime);
 
-        // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/LoadScene経由のFrameCameraToModel)
+        // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/UpdateAppliedSceneHandoff)
         // のみが書き込み、Render()はframeStateのスナップショット経由でしか読まないため、
         // ここでの読み取りに追加のロックは不要
         FrameState newFrameState;
@@ -2403,16 +2793,11 @@ namespace Kurenai
                 }
             }
 
+            // m_Scene・ポストプロセスのパラメータ・UIの状態はすべてこのRenderスレッド専有に
+            // なったため、以前あったm_SceneMutexによる保護は不要になっている
+            // (経緯はdocs/Architecture.html 23章)
             const auto cpuStart = std::chrono::steady_clock::now();
-            {
-                // WM_SIZEによるスワップチェーンのリサイズ、およびLoadScene(Updateスレッド、
-                // UpdateSceneSwitch経由)によるm_Scene/m_Camera/Post Processingパラメータの書き換えと
-                // 同時に走らないよう、Render()全体をこれらのミューテックスで保護する。この2つの
-                // ミューテックスをこの組み合わせ・この順序でロックするのはここだけなので、
-                // std::scoped_lockでなくてもデッドロックの心配はないが、明示的にまとめて扱っておく
-                std::scoped_lock renderLock(m_SwapChainMutex, m_SceneMutex);
-                Render(frameState);
-            }
+            Render(frameState);
             const auto cpuEnd = std::chrono::steady_clock::now();
             // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく
             // GPU側の処理時間の反映なので差し引く(DX11は常に0が返るため影響しない)
@@ -2550,15 +2935,28 @@ namespace Kurenai
         }
     }
 
-    void KurenaiEngine3D::UpdateSceneSwitch()
+    void KurenaiEngine3D::UpdateAppliedSceneHandoff()
     {
-        // -1は「切り替え要求なし」を表す番兵値。exchangeで読み取りと同時に-1へ戻すことで、
-        // 同じ要求を二重に処理しない
-        const int pendingIndex = m_PendingSceneIndex.exchange(-1);
-        if (pendingIndex >= 0)
+        // ロックを取る前にatomicで有無を判定する(publishされるのはシーン切り替え時だけなので、
+        // ほとんどのフレームはここで抜ける)
+        if (!m_AppliedScenePending.load(std::memory_order_acquire))
         {
-            LoadScene(static_cast<size_t>(pendingIndex));
+            return;
         }
+
+        Core::Camera camera;
+        std::wstring title;
+        {
+            std::lock_guard<std::mutex> lock(m_AppliedSceneMutex);
+            camera = m_AppliedSceneCamera;
+            title = m_AppliedSceneTitle;
+        }
+        m_AppliedScenePending.store(false, std::memory_order_relaxed);
+
+        // m_Cameraの書き込み手はこのUpdateスレッド1つに保つ(Renderスレッドは触らない)
+        m_Camera = camera;
+        // ウィンドウタイトルの変更もウィンドウを所有するこのスレッドから行う
+        m_Window->SetTitle(title);
     }
 
     void KurenaiEngine3D::Update(float deltaTime)
@@ -2583,12 +2981,24 @@ namespace Kurenai
         // フォーカスを外す方法(Esc / 別の場所をクリック)を知らないと詰むため。
         // ImGuiのInputTextはF1を消費しないので、通しても入力内容には影響しない
         UpdateImGuiToggle();
-        UpdateSceneSwitch();
+        // 新しいシーンが反映されていれば、その初期カメラとウィンドウタイトルをここで取り込む
+        UpdateAppliedSceneHandoff();
         // 昼夜サイクルの自動進行(m_TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
     }
 
     void KurenaiEngine3D::Render(const FrameState& frameState)
     {
+        // WM_SIZE(Updateスレッド)が記録しておいたリサイズ要求を、スワップチェーンを実際に使う
+        // このスレッドで反映する。このフレームのGPUコマンドをまだ1つも積んでいないこの位置で
+        // 呼ぶこと(DX12SwapChain::Resizeは内部でWaitForGPUIdleを呼び、コマンドリストが
+        // 記録待ちの状態であることを前提としているため)
+        ApplyPendingResize();
+
+        // Loaderスレッドが出来上がったシーンを置いていれば取り込み、保留中の切り替え要求があれば発注する。
+        // 旧シーンの破棄(WaitForGPUIdleを伴う)もここで行うため、このフレームのGPUコマンドを
+        // まだ1つも積んでいないこの位置で呼ぶこと
+        UpdateSceneStreaming();
+
         if (m_Window->GetWidth() == 0 || m_Window->GetHeight() == 0)
         {
             return;
@@ -2928,12 +3338,20 @@ namespace Kurenai
 
         // 直接光パスのb1へ渡すスクリーンスペースシャドウのパラメータ。パスのラムダから
         // 値キャプチャできるようここで組み立てておく
+        // 太陽の影の手法。RTシャドウを選んでいてもパスを実行できない状況(高速化構造が無い等)では
+        // カスケードシャドウマップへ落とす。シャドウマップは手法によらず描いてあるため、
+        // 落ちても影が消えることはない
+        const ShadowMode effectiveShadowMode =
+            (m_ShadowMode == ShadowMode::Raytraced && !ShouldRunRaytracedShadow())
+                ? ShadowMode::CascadedShadowMap
+                : m_ShadowMode;
+
         LightingConstants lightingConstants{};
         lightingConstants.LightCount =
         {
             static_cast<uint32_t>(gpuLights.size()),
             static_cast<uint32_t>(std::max(0, m_ScreenSpaceShadowMaxLightsPerPixel)),
-            0u,
+            static_cast<uint32_t>(effectiveShadowMode),
             0u,
         };
         lightingConstants.SSSParams0 =
@@ -3182,7 +3600,10 @@ namespace Kurenai
                     // シェーダー側は深度比較で常に「影なし」と判定する(ComputeShadowFactor参照)
                     cmd->ClearDepth(1.0f);
 
-                    if (m_ShadowEnabled)
+                    // RTシャドウ選択時もここは描く。半透明(Transparent.hlsl)と反射プローブの
+                    // キャプチャ(ProbeCapture.hlsl)はカメラ視点の可視率テクスチャを使えず、
+                    // カスケードシャドウマップを必要とするため(26章)
+                    if (m_ShadowMode != ShadowMode::Off)
                     {
                         CascadeConstants cascadeConstants{};
                         DirectX::XMStoreFloat4x4(&cascadeConstants.ViewProj, DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
@@ -3662,20 +4083,70 @@ namespace Kurenai
             });
         }
 
-        // --- 直接光パス: G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
-        //     計算しHDRで書き出す(常に指定した内部解像度)。DeferredLighting/SSILの両方から読まれる ---
+        // --- RTシャドウパス: TLASへ太陽の見かけの円盤方向へ影レイを撃ち、可視率(0〜1)を
+        //     単チャンネルのテクスチャへ書く。直後の直接光パスがt6でこれを読む ---
+        if (ShouldRunRaytracedShadow())
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "RTShadow",
+                .Reads = { m_GBufferNormal.get(), m_GBufferDepth.get() },
+                .Writes = { m_RTShadowTexture.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    RTShadowConstants rtShadowConstants{};
+                    rtShadowConstants.Params0 =
+                    {
+                        static_cast<float>(m_RenderWidth),
+                        static_cast<float>(m_RenderHeight),
+                        DirectX::XMConvertToRadians(m_RTShadowSunAngularRadiusDegrees),
+                        static_cast<float>(std::max(1, m_RTShadowSampleCount)),
+                    };
+                    cmd->UpdateBuffer(m_RTShadowConstantBuffer.get(), &rtShadowConstants, sizeof(rtShadowConstants));
+
+                    cmd->SetComputePipelineState(m_RTShadowPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(1, m_RTShadowConstantBuffer.get());
+
+                    // レジスタ割り当てはRTShadow.hlsl側の宣言と一致させること。
+                    // このシェーダはLoad(整数座標)しか使わないためサンプラーはバインドしない
+                    cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeTexture(1, m_GBufferNormal.get());
+                    cmd->SetComputeTexture(2, m_GBufferDepth.get());
+
+                    // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+                    cmd->SetComputeUnorderedAccessTexture(0, m_RTShadowTexture.get());
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                },
+            });
+        }
+
+        // 直接光パスがt6へバインドする可視率テクスチャ。DirectLighting.hlslは
+        // LightCount.zがRaytracedのときしか読まないが、DX12はSetPipelineStateのたびに
+        // ルート引数が無効化されるため、シェーダが宣言しているリソースは必ず何かをバインドする
+        // 必要がある(nullptrはSetTextureが受け付けない)。非対応環境では読まれないダミーとして
+        // 深度テクスチャを張る(Presentのデバッグ用t1/t2/t4に既定値を持たせているのと同じ理由)
+        RHI::IRHITexture* const rtShadowTextureForBinding =
+            m_RTShadowTexture ? m_RTShadowTexture.get() : m_GBufferDepth.get();
+
+        // --- 直接光パス: G-Buffer+シャドウマップ(またはRTシャドウの可視率)からPBRの直接光
+        //     (拡散+鏡面反射、シャドウ適用済み)を計算しHDRで書き出す(常に指定した内部解像度)。
+        //     DeferredLighting/SSILの両方から読まれる ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "DirectLight",
             .Reads =
             {
                 m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                 m_ShadowCascadeArray.get(),
+                // RTシャドウの可視率。RTシャドウパスを実行しないフレームではm_GBufferDepthと
+                // 同じポインタになるが、RenderGraphは同じ書き手への多重エッジを弾くため無害
+                rtShadowTextureForBinding,
                 // スペキュラのエネルギー補正(14.9節)でEss=brdf.x+brdf.yを引くためBRDF積分LUTを読む。
                 // Readsに挙げることでRenderGraphがBRDFLUTBakeパス(このLUTのWriter)より後に順序付ける
                 m_BRDFLUTTexture.get(),
             },
             .RenderTargets = { m_DirectLightTexture.get() },
-            .Execute = [this, &gbufferViewport, &gpuLights, &lightingConstants](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding](
+                           RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
@@ -3693,6 +4164,8 @@ namespace Kurenai
                 cmd->SetTexture(2, m_GBufferMaterial.get());
                 cmd->SetTexture(3, m_GBufferDepth.get());
                 cmd->SetTexture(4, m_ShadowCascadeArray.get());
+                // RTシャドウの可視率。LightCount.zがRaytracedのときだけ読まれる
+                cmd->SetTexture(6, rtShadowTextureForBinding);
 
                 // ライトが1つも無いフレームでもSetShaderResourceBufferは必ず呼ぶ(SetPipelineStateが
                 // 毎回ルート引数を無効化するため、シェーダが宣言しているリソースを未バインドのまま
@@ -3709,54 +4182,101 @@ namespace Kurenai
             },
         });
 
-        // --- AO/GIパス: 選択中の手法(SSAO or SSIL)でG-Bufferから遮蔽率(・間接拡散光)を計算し、
-        //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどちらもrgb=間接拡散光, a=遮蔽率で共通 ---
+        // --- AO/GIパス: 選択中の手法(SSAO / SSIL / RTAO)で遮蔽率(・間接拡散光)を計算し、
+        //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどれもrgb=間接拡散光, a=遮蔽率で共通 ---
         if (m_AOEnabled)
         {
-            RHI::IRHITexture* aoRawTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAORawTexture.get() : m_SSILRawTexture.get();
-            RHI::IRHITexture* aoBlurredTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAOTexture.get() : m_SSILTexture.get();
+            RHI::IRHITexture* const aoRawTexture = GetActiveAORawTexture();
+            RHI::IRHITexture* const aoBlurredTexture = GetActiveAOTexture();
+            const bool useSSIL = !ShouldRunRaytracedAO() && m_AOTechnique == AOTechnique::SSILVisibilityBitmask;
 
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "AO",
-                .Reads = (m_AOTechnique == AOTechnique::SSAO)
-                    ? std::vector<RHI::IRHITexture*>{ m_GBufferNormal.get(), m_GBufferDepth.get() }
-                    : std::vector<RHI::IRHITexture*>{ m_GBufferNormal.get(), m_GBufferDepth.get(), m_DirectLightTexture.get() },
-                .RenderTargets = { aoRawTexture },
-                .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
-                {
-                    cmd->SetViewport(gbufferViewport);
-                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
-
-                    if (m_AOTechnique == AOTechnique::SSAO)
+            if (ShouldRunRaytracedAO())
+            {
+                // RTAOパス。SSAO/SSILと違いコンピュートでUAVへ書くため、レンダーターゲットではなく
+                // Writesで宣言する。レジスタ割り当てはRTAO.hlsl側の宣言と一致させること
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "RTAO",
+                    // 直接光バッファは、バウンス面が画面に映っているときの再放射の放射輝度として読む
+                    // (SSILと同じ理由でDirectLightパスより後に順序付けられる。RTAO.hlsl参照)
+                    .Reads = { m_GBufferNormal.get(), m_GBufferDepth.get(), m_DirectLightTexture.get() },
+                    .Writes = { aoRawTexture },
+                    .Execute = [this](RHI::IRHICommandList* cmd)
                     {
-                        SSAOConstants ssaoConstants{};
-                        std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
-                        ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
-                        cmd->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
+                        RTAOConstants rtAOConstants{};
+                        rtAOConstants.Params0 = {
+                            static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight),
+                            m_RTAOMaxDistance, m_RTAOPower
+                        };
+                        rtAOConstants.Params1 = {
+                            static_cast<float>(std::max(1, m_RTAOSampleCount)), m_RTAOIntensity,
+                            m_RTAOBounceShadowRayEnabled ? 1.0f : 0.0f, 0.0f
+                        };
+                        cmd->UpdateBuffer(m_RTAOConstantBuffer.get(), &rtAOConstants, sizeof(rtAOConstants));
 
-                        cmd->SetPipelineState(m_SSAOPipelineState.get());
-                        cmd->SetConstantBuffer(1, m_SSAOConstantBuffer.get());
-                        cmd->SetTexture(0, m_GBufferNormal.get());
-                        cmd->SetTexture(1, m_GBufferDepth.get());
-                        cmd->Draw(3, 0);
-                    }
-                    else
+                        cmd->SetComputePipelineState(m_RTAOPipelineState.get());
+                        cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(1, m_RTAOConstantBuffer.get());
+
+                        cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+                        cmd->SetComputeTexture(1, m_GBufferNormal.get());
+                        cmd->SetComputeTexture(2, m_GBufferDepth.get());
+                        cmd->SetComputeShaderResourceBuffer(3, m_RaytracingScene.GetVertexAttributeBuffer());
+                        cmd->SetComputeShaderResourceBuffer(4, m_RaytracingScene.GetIndexBuffer());
+                        cmd->SetComputeShaderResourceBuffer(5, m_RaytracingScene.GetMeshInfoBuffer());
+                        cmd->SetComputeShaderResourceBuffer(6, m_RaytracingScene.GetInstanceInfoBuffer());
+                        cmd->SetComputeShaderResourceBuffer(7, m_RaytracingScene.GetMaterialBuffer());
+                        cmd->SetComputeTexture(8, m_DirectLightTexture.get());
+
+                        // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+                        cmd->SetComputeUnorderedAccessTexture(0, m_RTAORawTexture.get());
+                        cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                    },
+                });
+            }
+            else
+            {
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "AO",
+                    .Reads = useSSIL
+                        ? std::vector<RHI::IRHITexture*>{ m_GBufferNormal.get(), m_GBufferDepth.get(), m_DirectLightTexture.get() }
+                        : std::vector<RHI::IRHITexture*>{ m_GBufferNormal.get(), m_GBufferDepth.get() },
+                    .RenderTargets = { aoRawTexture },
+                    .Execute = [this, &gbufferViewport, useSSIL](RHI::IRHICommandList* cmd)
                     {
-                        SSILConstants ssilConstants{};
-                        ssilConstants.Params0 = { m_SSILRadius, m_SSILThickness, m_SSILIntensity, m_SSILPower };
-                        ssilConstants.Params1 = { m_SSILSliceCount, m_SSILStepCount, 0u, 0u };
-                        cmd->UpdateBuffer(m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
+                        cmd->SetViewport(gbufferViewport);
+                        cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                        cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
 
-                        cmd->SetPipelineState(m_SSILPipelineState.get());
-                        cmd->SetConstantBuffer(1, m_SSILConstantBuffer.get());
-                        cmd->SetTexture(0, m_GBufferNormal.get());
-                        cmd->SetTexture(1, m_GBufferDepth.get());
-                        cmd->SetTexture(2, m_DirectLightTexture.get());
-                        cmd->Draw(3, 0);
-                    }
-                },
-            });
+                        if (useSSIL)
+                        {
+                            SSILConstants ssilConstants{};
+                            ssilConstants.Params0 = { m_SSILRadius, m_SSILThickness, m_SSILIntensity, m_SSILPower };
+                            ssilConstants.Params1 = { m_SSILSliceCount, m_SSILStepCount, 0u, 0u };
+                            cmd->UpdateBuffer(m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
+
+                            cmd->SetPipelineState(m_SSILPipelineState.get());
+                            cmd->SetConstantBuffer(1, m_SSILConstantBuffer.get());
+                            cmd->SetTexture(0, m_GBufferNormal.get());
+                            cmd->SetTexture(1, m_GBufferDepth.get());
+                            cmd->SetTexture(2, m_DirectLightTexture.get());
+                            cmd->Draw(3, 0);
+                        }
+                        else
+                        {
+                            SSAOConstants ssaoConstants{};
+                            std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
+                            ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
+                            cmd->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
+
+                            cmd->SetPipelineState(m_SSAOPipelineState.get());
+                            cmd->SetConstantBuffer(1, m_SSAOConstantBuffer.get());
+                            cmd->SetTexture(0, m_GBufferNormal.get());
+                            cmd->SetTexture(1, m_GBufferDepth.get());
+                            cmd->Draw(3, 0);
+                        }
+                    },
+                });
+            }
 
             // ブラーパス: 遮蔽率・間接拡散光のタイル状ノイズをボックスブラーで均す(SSAO/SSIL共通シェーダ)
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -3777,14 +4297,10 @@ namespace Kurenai
             });
         }
 
-        // デバッグ表示(ブラー前確認用)のため、ブラー前の生バッファへの参照も別途保持しておく
-        RHI::IRHITexture* activeAOTexture = m_AODisabledTexture.get();
-        RHI::IRHITexture* activeAORawTexture = m_AODisabledTexture.get();
-        if (m_AOEnabled)
-        {
-            activeAOTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAOTexture.get() : m_SSILTexture.get();
-            activeAORawTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAORawTexture.get() : m_SSILRawTexture.get();
-        }
+        // デバッグ表示(ブラー前確認用)のため、ブラー前の生バッファへの参照も別途保持しておく。
+        // 上のパスが書いた先と必ず一致させるため、どちらも同じアクセサから取る
+        RHI::IRHITexture* const activeAOTexture = GetActiveAOTexture();
+        RHI::IRHITexture* const activeAORawTexture = GetActiveAORawTexture();
 
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
@@ -3948,9 +4464,10 @@ namespace Kurenai
             },
         });
 
-        // --- SSRパス: LightingパスのSceneColorとG-Bufferから鏡面反射を計算し加算する。
-        //     無効時はスキップし、Presentが直接m_SceneColorを参照する ---
-        if (m_SSREnabled)
+        // --- 反射パス: Lightingパスが適用した鏡面IBLを、実際に追跡した反射で差し替える(20章)。
+        //     ScreenSpaceならSSR(レイマーチ)、RaytracedならRT反射(RayQuery)。
+        //     Offならスキップし、後段のTonemapが直接m_SceneColorを読む ---
+        if (m_ReflectionMode == ReflectionMode::ScreenSpace)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SSR",
@@ -3991,12 +4508,65 @@ namespace Kurenai
                 },
             });
         }
+        else if (ShouldRunRaytracedReflection())
+        {
+            // RT反射パス。読むものはSSRとほぼ同じ(同じ鏡面IBLを差し替えるため)で、
+            // これに加えてTLASとシーンジオメトリの統合バッファを読む。
+            // レジスタ割り当てはRTReflection.hlsl側の宣言と一致させること
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "RTReflection",
+                .Reads = {
+                    m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                    m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
+                    m_ProbePrefilteredArray.get(),
+                },
+                .Writes = { m_RTReflectionTexture.get() },
+                .Execute = [this, activeAOTexture](RHI::IRHICommandList* cmd)
+                {
+                    RTReflectionConstants rtConstants{};
+                    rtConstants.Params0 = {
+                        static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight),
+                        m_RTReflectionMaxDistance, m_RTReflectionRoughnessCutoff
+                    };
+                    rtConstants.Params1 = { m_RTReflectionShadowRayEnabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+                    cmd->UpdateBuffer(m_RTReflectionConstantBuffer.get(), &rtConstants, sizeof(rtConstants));
+
+                    cmd->SetComputePipelineState(m_RTReflectionPipelineState.get());
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(1, m_RTReflectionConstantBuffer.get());
+
+                    cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeTexture(1, m_SceneColor.get());
+                    cmd->SetComputeTexture(2, m_GBufferNormal.get());
+                    cmd->SetComputeTexture(3, m_GBufferMaterial.get());
+                    cmd->SetComputeTexture(4, m_GBufferDepth.get());
+                    cmd->SetComputeTexture(5, m_GBufferAlbedo.get());
+                    cmd->SetComputeTexture(6, activeAOTexture);
+                    cmd->SetComputeTexture(7, m_BRDFLUTTexture.get());
+                    cmd->SetComputeTexture(8, m_PrefilteredEnvTexture.get());
+                    cmd->SetComputeTexture(9, m_ProbePrefilteredArray.get());
+                    cmd->SetComputeShaderResourceBuffer(10, m_ProbeBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(11, m_RaytracingScene.GetVertexAttributeBuffer());
+                    cmd->SetComputeShaderResourceBuffer(12, m_RaytracingScene.GetIndexBuffer());
+                    cmd->SetComputeShaderResourceBuffer(13, m_RaytracingScene.GetMeshInfoBuffer());
+                    cmd->SetComputeShaderResourceBuffer(14, m_RaytracingScene.GetInstanceInfoBuffer());
+                    cmd->SetComputeShaderResourceBuffer(15, m_RaytracingScene.GetMaterialBuffer());
+
+                    // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+                    cmd->SetComputeUnorderedAccessTexture(0, m_RTReflectionTexture.get());
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                },
+            });
+        }
 
         // --- TAAパス: 前フレームのTAA結果をモーションベクターで再投影し、今フレームの色へ蓄積する。
         //     ジッターで散らしたサンプルがここで平均され、実質的なスーパーサンプリングになる。
         //     トーンマップ前のHDRの段階で行うのは、露出・ブルームがTAAで安定した絵を入力に
-        //     できるようにするため(逆順にするとブルームがフレームごとのちらつきを拾う) ---
-        RHI::IRHITexture* const taaInputColor = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
+        //     できるようにするため(逆順にするとブルームがフレームごとのちらつきを拾う)。
+        //     入力はGetActiveReflectionOutput()(反射Off/SSR/RT反射のいずれか)で、SSRだけを見ていた
+        //     従来の判定ではRT反射有効時にTAAが古いSceneColorを拾ってしまうため、ここも合わせて直す ---
+        RHI::IRHITexture* const taaInputColor = GetActiveReflectionOutput();
         if (m_TAAEnabled)
         {
             // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる
@@ -4061,8 +4631,8 @@ namespace Kurenai
             });
         }
 
-        // --- Tonemapパス: HDRのSceneColor(SSR有効時はSSR適用後、TAA有効時はさらにTAA適用後)を
-        //     LDRへ変換する。SSR等のHDR演算がすべて完了した後、Present直前の独立したステージとして
+        // --- Tonemapパス: HDRのSceneColor(反射パス有効時はその出力、TAA有効時はさらにTAA適用後)を
+        //     LDRへ変換する。反射等のHDR演算がすべて完了した後、Present直前の独立したステージとして
         //     常に実行する ---
         // この行はTAAパスのAddPassより後に置くこと。ラムダは値キャプチャなので、先に差し替えると
         // TAAが自分の出力を入力として読む形になる(RenderGraphが循環を検出して例外を投げる)
@@ -4345,9 +4915,19 @@ namespace Kurenai
             presentSourceWidth = kShadowMapSize;
             presentSourceHeight = kShadowMapSize;
             break;
+        case DebugView::RTShadow:
+            // 可視率(0〜1のスカラー)をそのままグレースケール表示する。RTシャドウを実行していない
+            // フレーム(非対応環境・手法がRaytraced以外)はテクスチャの中身が意味を持たないため、
+            // 最終結果のまま何も切り替えない
+            if (ShouldRunRaytracedShadow())
+            {
+                presentSourceTexture = m_RTShadowTexture.get();
+                presentMode = 5;
+            }
+            break;
         case DebugView::SSR:
-            // SSR無効時はSSRパスをスキップしているため、Tonemapパスの入力もSceneColorになり
-            // 結果的にFinalと同一表示になる
+            // 反射がOffのときは反射パスをスキップしているため、Tonemapパスの入力もSceneColorになり
+            // 結果的にFinalと同一表示になる(SSR / RT反射のどちらでも同じ扱い)
             presentSourceTexture = m_TonemapTexture.get();
             break;
         case DebugView::HiZ:

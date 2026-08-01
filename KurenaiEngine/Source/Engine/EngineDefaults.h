@@ -47,6 +47,40 @@ namespace Kurenai::Defaults
     inline constexpr float SSRThickness = 0.1f;
     inline constexpr float SSRRoughnessCutoff = 0.6f;
 
+    // --- レイトレーシング反射(DX12かつDXR Tier 1.1対応時のみ選択できる) ---
+    // 最大レイ距離はシーン読み込み時に対角長から決め直す(SSRのMaxDistanceと同じ扱い)。
+    // SSRより長いのは、画面外まで追えるRTでは短く切ると反射が途中で空へ抜けてしまうため
+    inline constexpr float RTReflectionMaxDistance = 50.0f;
+    // SSRと同じく1本の鏡面レイしか撃たないため、粗い面ではプローブ/グローバルIBLへ戻す。
+    // SSRより高めなのは、RTには「画面外に外れて打ち切り」という破綻要因が無く、
+    // 中程度の粗さでも結果が安定しているため
+    inline constexpr float RTReflectionRoughnessCutoff = 0.8f;
+    // ヒット面から太陽へ影レイを撃つか。切ると反射に映る面の影が消えるが、その分速い
+    inline constexpr bool RTReflectionShadowRayEnabled = true;
+
+    // --- レイトレーシングシャドウ(DX12かつDXR Tier 1.1対応時のみ選択できる) ---
+    // 1ピクセルあたりに撃つ影レイの本数。デノイザ(時間方向の蓄積)を持たないため、
+    // 太陽を大きくする(角半径を上げる)ほどここを増やさないと半影にノイズが出る
+    inline constexpr int RTShadowSampleCount = 4;
+    // 太陽の見かけの半径(度)。実際の太陽は視直径約0.53度なので既定値はその半分。
+    // 大きくすると半影が広く柔らかくなる(が、同じサンプル数ならノイズも増える)
+    inline constexpr float RTShadowSunAngularRadiusDegrees = 0.27f;
+
+    // --- レイトレーシングAO/GI(DX12かつDXR Tier 1.1対応時のみ選択できる) ---
+    // 半球へ余弦重みで撃つレイの本数。デノイザを持たずAOBlurのボックスブラーだけで均すため、
+    // 少なすぎるとブラー後もノイズが残る
+    inline constexpr int RTAOSampleCount = 8;
+    // レイの最大距離はシーン読み込み時に対角長から決め直す(SSAO/SSILの半径と同じ扱い)。
+    // スクリーンスペース手法より長く取れる(画面外の遮蔽物も追えるため)
+    inline constexpr float RTAOMaxDistance = 2.0f;
+    // 遮蔽率にかける指数。SSAO/SSILと同じ意味・同じ既定値
+    inline constexpr float RTAOPower = 1.5f;
+    // 間接拡散光の強さ。物理的に正しい値が1.0になるためSSILの2.0より小さい
+    // (SSILの重み付けはヒューリスティックで、1.0では暗すぎた)
+    inline constexpr float RTAOIntensity = 1.0f;
+    // バウンス面から太陽へ影レイを撃つか。切ると間接光に日陰が反映されなくなるが、その分速い
+    inline constexpr bool RTAOBounceShadowRayEnabled = true;
+
     // --- シャドウ(スクリーンスペース) ---
     inline constexpr bool ScreenSpaceShadowEnabled = true;
     inline constexpr int ScreenSpaceShadowStepCount = 16;

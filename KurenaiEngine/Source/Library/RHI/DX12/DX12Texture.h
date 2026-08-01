@@ -10,6 +10,7 @@
 namespace Kurenai::RHI
 {
     class DX12Device;
+    class DX12DescriptorHeap;
 
     // リソース本体に加え、現在のリソース状態(バリア用)とSRV/RTV/DSVの各ディスクリプタインデックスを保持する。
     // RTV/DSVを持たない場合はkInvalidを格納する
@@ -18,8 +19,13 @@ namespace Kurenai::RHI
     public:
         static constexpr uint32_t kInvalid = 0xFFFFFFFFu;
 
+        // srvUavHeapは、srvIndex/uavIndex/mipUavIndicesを確保した非シェーダー可視ヒープ。
+        // このヒープはアセット用と描画用の2本に分かれており(DX12Device::GetAssetSrvCpuHeap参照)、
+        // どちらから確保したかを覚えておかないとデストラクタで別のヒープへ返してしまうため保持する。
+        // rtvIndex/dsvIndex/sliceDsvIndicesは常にデバイスのRTV/DSVヒープなので保持不要
         DX12Texture(
             DX12Device* device,
+            DX12DescriptorHeap* srvUavHeap,
             Microsoft::WRL::ComPtr<ID3D12Resource> resource,
             D3D12_RESOURCE_STATES initialState,
             uint32_t srvIndex,
@@ -66,6 +72,8 @@ namespace Kurenai::RHI
 
     private:
         DX12Device* m_Device;
+        // m_SrvIndex / m_UavIndex / m_MipUavIndices の確保元(コンストラクタのコメント参照)
+        DX12DescriptorHeap* m_SrvUavHeap;
         Microsoft::WRL::ComPtr<ID3D12Resource> m_Resource;
         D3D12_RESOURCE_STATES m_CurrentState;
         uint32_t m_SrvIndex;

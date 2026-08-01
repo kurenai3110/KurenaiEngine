@@ -195,6 +195,16 @@ namespace Kurenai::RHI
     {
         auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
 
+        // BufferUsage::StructuredImmutable(D3D11_USAGE_IMMUTABLE)はMapもUpdateSubresourceも
+        // 受け付けない(作成時の初期データから変えられない)。そのまま進めるとD3D11デバッグレイヤーの
+        // エラーになるため、ここで弾く
+        if (dx11Buffer->IsImmutable())
+        {
+            Core::Logger::Error(
+                "DX11", "UpdateBuffer: BufferUsage::StructuredImmutableのバッファは更新できません。更新をスキップします");
+            return;
+        }
+
         // BufferUsage::StructuredReadOnly(D3D11_USAGE_DYNAMIC)はUpdateSubresourceが使えないため
         // Map(WRITE_DISCARD)経由で書き込む。有効なライト数ぶんだけ書けばよく、残りは未定義のままで
         // 構わない(シェーダ側はLightCount.xまでしかループしないため読まれない)
@@ -320,6 +330,16 @@ namespace Kurenai::RHI
         ID3D11UnorderedAccessView* uavs[] = { dx11Buffer->GetUnorderedAccessView() };
         m_Context->CSSetUnorderedAccessViews(slot, 1, uavs, nullptr);
         m_BoundComputeUavSlotMask |= (1u << slot);
+    }
+
+    void DX11CommandList::SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure)
+    {
+        // DX11にはレイトレーシングAPIが無いため、そもそもTLASを作れない(DX11Device::CreateTopLevelASは
+        // 常にnullptrを返す)。上位層がSupportsRaytracing()での分岐を忘れた場合にだけここへ来る
+        (void)slot;
+        (void)accelerationStructure;
+        Core::Logger::Error(
+            "DX11", "SetComputeAccelerationStructure: DX11はレイトレーシングに対応していません。バインドをスキップします");
     }
 
     void DX11CommandList::Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)

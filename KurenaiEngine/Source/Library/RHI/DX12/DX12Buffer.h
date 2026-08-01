@@ -10,6 +10,7 @@
 namespace Kurenai::RHI
 {
     class DX12Device;
+    class DX12DescriptorHeap;
 
     // 頂点/インデックス/定数バッファすべてこの1種類で扱うが、ヒープの配置はUsageによって異なる
     // (DX12Device::CreateBuffer参照)。
@@ -36,15 +37,26 @@ namespace Kurenai::RHI
             BufferUsage usage,
             uint32_t ringCapacity = 1);
 
+        // 以降のコンストラクタが受け取るsrvUavHeapは、srvIndex/uavIndexを確保した非シェーダー可視ヒープ。
+        // このヒープはアセット用と描画用の2本に分かれており(DX12Device::GetAssetSrvCpuHeap参照)、
+        // どちらから確保したかを覚えておかないとデストラクタで別のヒープへ返してしまうため保持する
+
         // BufferUsage::Structured(RWStructuredBuffer)用: UAVディスクリプタのインデックスを保持し、
         // 破棄時にDX12Deviceのディスクリプタヒープへ返却する
         static constexpr uint32_t kInvalid = 0xFFFFFFFFu;
-        DX12Buffer(DX12Device* device, Microsoft::WRL::ComPtr<ID3D12Resource> resource, uint32_t uavIndex, uint32_t sizeInBytes, uint32_t strideInBytes);
+        DX12Buffer(
+            DX12Device* device,
+            DX12DescriptorHeap* srvUavHeap,
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+            uint32_t uavIndex,
+            uint32_t sizeInBytes,
+            uint32_t strideInBytes);
 
         // BufferUsage::StructuredRW用: コンピュートがUAVで書き、ピクセルシェーダがSRVで読むため
         // ディスクリプタを両方持つ。CPUからは書き込まないのでステージングリングは持たない
         DX12Buffer(
             DX12Device* device,
+            DX12DescriptorHeap* srvUavHeap,
             Microsoft::WRL::ComPtr<ID3D12Resource> resource,
             uint32_t uavIndex,
             uint32_t srvIndex,
@@ -60,6 +72,7 @@ namespace Kurenai::RHI
         // CopyBufferRegion(コマンドリスト経由)でしか書けないため、ステージング用の中間バッファが要る
         DX12Buffer(
             DX12Device* device,
+            DX12DescriptorHeap* srvUavHeap,
             Microsoft::WRL::ComPtr<ID3D12Resource> resource,
             D3D12_RESOURCE_STATES initialState,
             uint32_t srvIndex,
@@ -68,6 +81,19 @@ namespace Kurenai::RHI
             uint32_t sizeInBytes,
             uint32_t strideInBytes,
             uint32_t uploadRingCapacity);
+
+        // BufferUsage::StructuredImmutable用: DEFAULTヒープの本体とSRVだけを持つ。
+        // 作成時の初期データから変化しないためCPU書き込み経路(ステージングリング)を一切持たず、
+        // 上のStructuredReadOnly用コンストラクタとは別に用意している。
+        // initialStateは作成直後の実状態(GENERIC_READ)を渡す。以後遷移しない
+        DX12Buffer(
+            DX12Device* device,
+            DX12DescriptorHeap* srvUavHeap,
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+            uint32_t srvIndex,
+            uint32_t sizeInBytes,
+            uint32_t strideInBytes,
+            D3D12_RESOURCE_STATES initialState);
 
         ~DX12Buffer() override;
 
@@ -89,6 +115,9 @@ namespace Kurenai::RHI
         // UpdateBufferのStructuredReadOnly経路へ入り、nullptrのUPLOADリソースを触ってしまう)。
         // Usageを直接保持して判定する
         bool IsStructuredReadOnly() const { return m_Usage == BufferUsage::StructuredReadOnly; }
+        // BufferUsage::StructuredImmutableで作成されたか。CPU書き込み経路を持たないため、
+        // UpdateBufferはこれを見て早期に弾く
+        bool IsStructuredImmutable() const { return m_Usage == BufferUsage::StructuredImmutable; }
         // 現在のリソース状態と異なる場合のみバリアを発行して遷移する(DX12Texture::TransitionToと同じパターン)。
         // BufferUsage::StructuredReadOnly / StructuredRWで使う
         void TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState);
@@ -100,6 +129,9 @@ namespace Kurenai::RHI
 
     private:
         DX12Device* m_Device = nullptr;
+        // m_SrvIndex / m_UavIndex の確保元。頂点/インデックス/定数バッファは
+        // ディスクリプタを持たないためnullptrのまま(デストラクタはkInvalid判定で触らない)
+        DX12DescriptorHeap* m_SrvUavHeap = nullptr;
         Microsoft::WRL::ComPtr<ID3D12Resource> m_Resource;
         void* m_MappedPtr;
         uint32_t m_SlotSizeInBytes;

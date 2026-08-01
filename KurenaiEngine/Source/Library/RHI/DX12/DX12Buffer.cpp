@@ -40,8 +40,15 @@ namespace Kurenai::RHI
         }
     }
 
-    DX12Buffer::DX12Buffer(DX12Device* device, Microsoft::WRL::ComPtr<ID3D12Resource> resource, uint32_t uavIndex, uint32_t sizeInBytes, uint32_t strideInBytes)
+    DX12Buffer::DX12Buffer(
+        DX12Device* device,
+        DX12DescriptorHeap* srvUavHeap,
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+        uint32_t uavIndex,
+        uint32_t sizeInBytes,
+        uint32_t strideInBytes)
         : m_Device(device)
+        , m_SrvUavHeap(srvUavHeap)
         , m_Resource(std::move(resource))
         , m_MappedPtr(nullptr)
         , m_SlotSizeInBytes(sizeInBytes)
@@ -57,12 +64,14 @@ namespace Kurenai::RHI
 
     DX12Buffer::DX12Buffer(
         DX12Device* device,
+        DX12DescriptorHeap* srvUavHeap,
         Microsoft::WRL::ComPtr<ID3D12Resource> resource,
         uint32_t uavIndex,
         uint32_t srvIndex,
         uint32_t sizeInBytes,
         uint32_t strideInBytes)
         : m_Device(device)
+        , m_SrvUavHeap(srvUavHeap)
         , m_Resource(std::move(resource))
         , m_MappedPtr(nullptr)
         , m_SlotSizeInBytes(sizeInBytes)
@@ -80,6 +89,7 @@ namespace Kurenai::RHI
 
     DX12Buffer::DX12Buffer(
         DX12Device* device,
+        DX12DescriptorHeap* srvUavHeap,
         Microsoft::WRL::ComPtr<ID3D12Resource> resource,
         D3D12_RESOURCE_STATES initialState,
         uint32_t srvIndex,
@@ -89,6 +99,7 @@ namespace Kurenai::RHI
         uint32_t strideInBytes,
         uint32_t uploadRingCapacity)
         : m_Device(device)
+        , m_SrvUavHeap(srvUavHeap)
         , m_Resource(std::move(resource))
         , m_MappedPtr(nullptr)
         , m_SlotSizeInBytes(sizeInBytes)
@@ -103,15 +114,36 @@ namespace Kurenai::RHI
         (void)strideInBytes;
     }
 
+    DX12Buffer::DX12Buffer(
+        DX12Device* device,
+        DX12DescriptorHeap* srvUavHeap,
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+        uint32_t srvIndex,
+        uint32_t sizeInBytes,
+        uint32_t strideInBytes,
+        D3D12_RESOURCE_STATES initialState)
+        : m_Device(device)
+        , m_SrvUavHeap(srvUavHeap)
+        , m_Resource(std::move(resource))
+        , m_MappedPtr(nullptr)
+        , m_SlotSizeInBytes(sizeInBytes)
+        , m_RingCapacity(1)
+        , m_Usage(BufferUsage::StructuredImmutable)
+        , m_CurrentState(initialState)
+        , m_SrvIndex(srvIndex)
+    {
+        (void)strideInBytes;
+    }
+
     DX12Buffer::~DX12Buffer()
     {
         if (m_UavIndex != kInvalid)
         {
-            m_Device->GetSrvCpuHeap()->Free(m_UavIndex);
+            m_SrvUavHeap->Free(m_UavIndex);
         }
         if (m_SrvIndex != kInvalid)
         {
-            m_Device->GetSrvCpuHeap()->Free(m_SrvIndex);
+            m_SrvUavHeap->Free(m_SrvIndex);
         }
     }
 
@@ -163,12 +195,12 @@ namespace Kurenai::RHI
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Buffer::GetUavCpuHandle() const
     {
-        return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_UavIndex);
+        return m_SrvUavHeap->GetCpuHandle(m_UavIndex);
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Buffer::GetSrvCpuHandle() const
     {
-        return m_Device->GetSrvCpuHeap()->GetCpuHandle(m_SrvIndex);
+        return m_SrvUavHeap->GetCpuHandle(m_SrvIndex);
     }
 
     void DX12Buffer::TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState)

@@ -33,6 +33,16 @@ namespace Kurenai::RHI
         // DX11はUAVとSRVを同時にバインドできないが、DX11CommandList::DispatchがDispatch直後に
         // UAVを全解除しているため追加の対処は要らない
         StructuredRW,
+        // 作成時に初期データを与えたあと二度と書き換えない、読み取り専用の構造化バッファ。
+        // DEFAULTヒープにSRVだけを持ち、CPU書き込み用のステージングリングを一切持たない。
+        //
+        // StructuredReadOnlyとの違いはこのステージングリングの有無で、あちらは毎フレームの
+        // UpdateBufferに備えて「本体サイズ×リング段数」ぶんのUPLOADヒープを常時確保する。
+        // レイトレーシングのシーンジオメトリ(頂点属性・インデックス)は本体だけで数十MBに達し、
+        // かつシーン読み込み時に一度書いたら変わらないため、あちらを使うと使いもしない
+        // ステージング領域が本体の数倍のUPLOADヒープを占有してしまう。
+        // このUsageはUpdateBufferを受け付けない(呼ぶとログを出して無視される)
+        StructuredImmutable,
     };
 
     enum class PrimitiveTopology

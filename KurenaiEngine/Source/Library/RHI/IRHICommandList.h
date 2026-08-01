@@ -5,6 +5,7 @@
 
 #include "KurenaiTypes.h"
 
+#include "IRHIAccelerationStructure.h"
 #include "IRHIBuffer.h"
 #include "IRHIPipelineState.h"
 #include "IRHISamplerSet.h"
@@ -117,6 +118,14 @@ namespace Kurenai::RHI
         virtual void SetComputeUnorderedAccessTextureCubeFace(
             uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0, uint32_t cubeIndex = 0) = 0;
         virtual void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
+        // TLASをRaytracingAccelerationStructureとしてt(slot)へバインドする。
+        // スロット空間・バインドの寿命はSetComputeTextureと共通なので、同じディスパッチ内で
+        // 衝突しないよう呼び出し側で調整すること。
+        //
+        // 渡せるのはIRHIDevice::CreateTopLevelASで作ったTLASのみ(BLASはSRVを持たないため、
+        // 渡すとログを出して無視される)。DX11はレイトレーシング非対応のため、
+        // 呼ぶとログを出して何もしない
+        virtual void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) = 0;
         virtual void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) = 0;
     };
 }

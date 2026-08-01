@@ -36,6 +36,7 @@ namespace Kurenai::UI
             "AO/GI - 遮蔽率 (アルファ)",
             "AO/GI - 遮蔽率 (アルファ, ブラー前)",
             "シャドウマップ",
+            "RTシャドウ (太陽の可視率)",
             "SSR (最終結果 + 反射)",
             "Hi-Z (深度ミップチェーン)",
             "IBL - イラディアンス (キューブマップ)",
@@ -51,7 +52,7 @@ namespace Kurenai::UI
             "シーンカラー (生HDR・トーンマップなし)",
         };
         static_assert(
-            static_cast<int>(DebugView::SceneColorRaw) == 25,
+            static_cast<int>(DebugView::SceneColorRaw) == 26,
             "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はSceneColorRaw)");
 
         DrawUsageHint();
