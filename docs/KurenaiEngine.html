@@ -284,7 +284,8 @@ DLLは実行ファイルと同じフォルダに置かれていないと起動�
 
 <p>
 <code>KurenaiEngine3D</code> は、Deferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness+
-深度)によるPBRレンダリング、シャドウマッピング、IBL(環境光)、SSAO/SSIL(間接光)、SSR(反射)、
+深度)によるPBRレンダリング、シャドウマッピング、IBL(環境光)、DDGI(プローブ格子による位置ごとの
+拡散グローバルイルミネーション)、SSAO/SSIL(間接光)、SSR(反射)、
 複数シーンの切り替え、ImGuiによる設定パネル一式までを内包した<strong>完結型の3Dレンダラー</strong>です。
 構築して <code>Run()</code> を呼ぶだけでウィンドウが開き、ユーザーが閉じるまでブロックします。
 </p>
@@ -1019,6 +1020,14 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>Yaw</code></td><td>float</td><td>-</td><td>0.0</td><td><code>Box</code>のY軸まわりの回転(度)</td></tr>
 <tr><td><code>BlendDistance</code></td><td>float</td><td>-</td><td>2.0</td><td>影響範囲の境界から内側へこの距離をかけて重みが1まで立ち上がる。負値はエラー</td></tr>
 <tr><td><code>Name</code></td><td>string</td><td>-</td><td><code>Probe N</code></td><td>ImGuiの一覧に表示される名前</td></tr>
+<tr><td rowspan="8"><code>[GIVolume]</code></td><td rowspan="8">0〜1</td><td><code>Origin</code></td><td>float3</td><td><strong>必須</strong></td><td>-</td><td>ボリュームの<strong>最小コーナー</strong>(中心ではない)。プローブは <code>Origin + (i,j,k) * ProbeSpacing</code> に置かれる</td></tr>
+<tr><td><code>ProbeCounts</code></td><td>uint3</td><td><strong>必須</strong></td><td>-</td><td>各軸のプローブ数。トライリニア補間に周囲8個が要るため<strong>各軸2以上</strong>。総数が4096を超えるとDDGIを無効にする</td></tr>
+<tr><td><code>ProbeSpacing</code></td><td>float3</td><td>-</td><td>2,2,2</td><td>各軸のプローブ間隔。0以下の軸があればエラー</td></tr>
+<tr><td><code>NormalBias</code></td><td>float</td><td>-</td><td>0.25</td><td>遮蔽判定の照会点を面の法線方向へ浮かせる量。負値はエラー</td></tr>
+<tr><td><code>ViewBias</code></td><td>float</td><td>-</td><td>0.10</td><td>同じく視線方向へ寄せる量。負値はエラー</td></tr>
+<tr><td><code>Hysteresis</code></td><td>float</td><td>-</td><td>0.97</td><td>履歴とのブレンド率。0以上1未満(1では新しい値が一切入らない)</td></tr>
+<tr><td><code>MaxRayDistance</code></td><td>float</td><td>-</td><td>8.0</td><td>記録する距離の上限。0より大きく200以下(それ以上は分散の計算が桁落ちで潰れる)</td></tr>
+<tr><td><code>Name</code></td><td>string</td><td>-</td><td><code>GI Volume N</code></td><td>ImGuiに表示される名前</td></tr>
 </tbody>
 </table>
 <p>
@@ -1080,6 +1089,30 @@ ImGuiの「Reflection Probes」パネルにある<strong>「Use Depth Cube」</s
 出してスキップします。現時点では箱の回転はY軸まわりのみで、影響範囲の箱がそのまま視差補正の
 投影ボックスを兼ねます(両者を別々に指定することはできません)。内部実装は
 <a href="Architecture.html#reflectionprobe">実装者向けドキュメント 19章「反射プローブ」</a>を参照してください。
+</p>
+<p>
+<code>[GIVolume]</code>は<strong>DDGI(拡散グローバルイルミネーション)</strong>のプローブ格子を置きます。
+反射プローブが鏡面の映り込みを担うのに対し、こちらは<strong>拡散の間接光</strong>を担当し、
+「壁の色が床へ回り込む」ようなカラーブリーディングを出します。これが無いと、密閉された室内の壁にも
+遮られていない空の環境光がそのまま乗ります。有効な間はDDGIが拡散の環境ソースを
+<strong>差し替えます</strong>(グローバルIBL/反射プローブのイラディアンスへ加算するのではありません)。
+鏡面には一切影響しません。
+</p>
+<p>
+プローブは格子状に自動配置されるため、位置を1個ずつ指定する必要はありません。壁の内側に
+プローブが1個も入らないとそこだけ間接光が外挿になるので、<code>Origin</code>は壁から少し内側へ
+置いてください。<code>NormalBias</code>を0に近づけると画面全体が一様に暗くなります
+(面が、自分を照らしているプローブから見えていないと誤判定するためで、強度で持ち上げるのではなく
+このバイアスで直します)。
+</p>
+<p>
+明るさは<strong>時間をかけて収束します</strong>。バウンスが1フレームに1回ずつ積み上がり、さらに
+1フレームあたり一定数のプローブしか焼き直さないためで、455プローブの既定設定ではおよそ数十秒かかります。
+ImGuiの「レンダリング」パネルの「DDGI (拡散グローバルイルミネーション)」でON/OFF・強度・
+1フレームに更新するプローブ数を変えられます。「デバッグ表示」ではイラディアンスと距離モーメントの
+アトラスを直接確認できます。ボリュームは現状<strong>1個だけ</strong>使われ、2つ目以降は警告を出して
+無視します。内部実装は
+<a href="Architecture.html#ddgi">実装者向けドキュメント 22章「DDGI」</a>を参照してください。
 </p>
 <p>
 <code>[Light]</code>で指定したライトはワールド空間の値として扱われ、モデル埋め込みのライト

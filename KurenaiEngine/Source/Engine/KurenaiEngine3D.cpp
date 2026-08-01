@@ -3244,6 +3244,12 @@ namespace Kurenai
             cmd->SetTexture(9, m_IrradianceTexture.get());
             cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
             cmd->SetTexture(11, m_BRDFLUTTexture.get());
+            // DDGI(22章)の多重バウンス。ProbeCapture.hlslは拡散の環境光をここから引く。
+            // 参照するのは「前フレームまでに焼けているアトラス」で、同じフレームの中でも
+            // 既に更新済みのプローブぶんは新しい値になる。DDGIは元々ヒステリシスで
+            // 時間収束させる手法なので、この程度の混在は問題にならない
+            cmd->SetTexture(12, m_DDGIIrradianceAtlas.get());
+            cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
 
             for (const auto& instance : m_Scene.Instances)
             {
@@ -3491,6 +3497,12 @@ namespace Kurenai
             cmd->SetTexture(9, m_IrradianceTexture.get());
             cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
             cmd->SetTexture(11, m_BRDFLUTTexture.get());
+            // DDGI(22章)の多重バウンス。ProbeCapture.hlslは拡散の環境光をここから引く。
+            // 参照するのは「前フレームまでに焼けているアトラス」で、同じフレームの中でも
+            // 既に更新済みのプローブぶんは新しい値になる。DDGIは元々ヒステリシスで
+            // 時間収束させる手法なので、この程度の混在は問題にならない
+            cmd->SetTexture(12, m_DDGIIrradianceAtlas.get());
+            cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
 
             for (const auto& instance : m_Scene.Instances)
             {
