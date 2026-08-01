@@ -1,0 +1,59 @@
+# KurenaiEngine シーンファイル - モン・サン=ミシェル風景検証(P1: シーン一式の手続き生成)
+#
+# 実写のモン・サン=ミシェル(干潟の鏡面反射に城が映り込む構図)に寄せた検証用シーン。
+# 3つのモデルはすべて Tools/generate_*.py の手続き生成スクリプトが吐く
+# (Assets/Source/MontSaintMichelStudy/ → KurenaiPacker.exeで Assets/Packed/MontSaintMichelStudy/ へ変換):
+#   TidalFlat.kmodel … Tools/generate_tidal_flat.py (干潟、6000m四方)
+#   Island.kmodel    … Tools/generate_msm_proxy.py  (岩・城壁・修道院・尖塔のシルエットプロキシ)
+#   Water.kmodel     … Tools/generate_water_plane.py (水面、4000m四方)
+#
+# このフェーズ(P1)では[Water]セクション(水面の特殊シェーディング指定)はまだ
+# SceneLoader.cpp(SectionFromName)に実装されていないため書かない。Waterモデルは今のところ
+# 通常の不透明ジオメトリとして描画される(P2で波・反射専用の扱いを追加する予定)。
+#
+# --- 座標系の約束 ---
+# 島(Island)の底面中心をワールド原点(0,0,0)とする(1単位=1メートル)。将来、実物の
+# モン・サン=ミシェルのモデルへ差し替える際は、下の[Model]Pathを1行差し替えるだけで済む。
+#
+# --- なぜTidalFlat/WaterだけZ=-800なのか ---
+# TidalFlat・Waterはどちらも自分自身のローカル原点を中心にメッシュを生成している
+# (Tools/generate_tidal_flat.py、Tools/generate_water_plane.py)。干潟の「エプロン」
+# (島の足元を持ち上げる地形)はgenerate_tidal_flat.py内でローカル座標(0, 800)を中心に
+# 作られており、ここへTranslation.z=-800を与えることでワールド原点(島の位置)と
+# ちょうど一致する(詳細はgenerate_tidal_flat.pyのモジュールdocstring参照)。Waterは
+# TidalFlatと同じZオフセットを与えて位置関係を保ち、水面が干潟の上に正しく重なるようにしている。
+[Scene]
+Name = Mont Saint-Michel Study
+
+[Model]
+Path = MontSaintMichelStudy/TidalFlat.kmodel
+Translation = 0, 0, -800
+
+[Model]
+Path = MontSaintMichelStudy/Island.kmodel
+Translation = 0, 0, 0
+
+# 干潟のノイズ振幅(±0.5m程度)に対して0.15mだけ高くする。干潟の低い場所(谷)は水没して
+# 水路になり、高い場所(尾根)は水面から顔を出して砂州になる。写真と同じ「干潟の一部が
+# 水を被り、一部が乾いている」構造を再現するための値
+[Model]
+Path = MontSaintMichelStudy/Water.kmodel
+Translation = 0, 0.15, -800
+
+# カメラは島の手前(-Z側)、水面のすぐ上に置く。Yaw=0で+Z方向を向く
+# (Source/Library/Core/Camera.cpp Camera::GetForward: forward = (cos(pitch)sin(yaw), sin(pitch), cos(pitch)cos(yaw))。
+#  yaw=0, pitch=0を代入すると forward=(0,0,1) になるため、Yaw=0がそのまま+Z方向)。
+# Pitchは水平よりわずかに上(2度)にして、y=165付近まで伸びる尖塔の先端が画角に収まるようにしてある
+[Camera]
+Position = 0, 1.6, -600
+Yaw = 0
+Pitch = 2
+
+# 昼(TimeOfDay=11.0、ほぼ南中に近い高い太陽)。AzimuthDegreesは暫定値。
+# 11時では太陽の仰角が高く(方位角の水平成分自体の影響は小さい)、真正面(90度、カメラの
+# 視線+Zと同じ向き)だと島の外周がほぼ均一に照らされて段差(岩→城壁→修道院→尖塔)の
+# 陰影が付きにくく、真横(0度、+X)だと影が画面奥行きの軸と直交する向きになりやすいため、
+# その中間である45度を暫定的に選んだ。実機の見え方を見ながら次フェーズ以降で追い込む
+[Sun]
+TimeOfDay = 11.0
+AzimuthDegrees = 45.0
