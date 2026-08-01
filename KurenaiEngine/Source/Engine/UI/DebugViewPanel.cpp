@@ -47,10 +47,11 @@ namespace Kurenai::UI
             "プローブ - プリフィルタ済み鏡面 (ミップ0=キャプチャ結果)",
             "プローブ - 影響範囲 (プローブごとの色分け)",
             "プローブ - 距離 (キューブマップ配列)",
+            "モーションベクター (速度バッファ)",
         };
         static_assert(
-            static_cast<int>(DebugView::ProbeDistance) == 23,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はProbeDistance)");
+            static_cast<int>(DebugView::MotionVector) == 24,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はMotionVector)");
 
         DrawUsageHint();
         BeginParamGroup();
@@ -130,6 +131,18 @@ namespace Kurenai::UI
             if (!m_Engine.m_LightCullingEnabled)
             {
                 ImGui::TextWrapped("タイルドライトカリングが無効のため、ライトグリッドは更新されていません");
+            }
+        }
+
+        if (m_Engine.m_DebugView == DebugView::MotionVector)
+        {
+            ImGui::TextWrapped(
+                "灰色=動いていない / 赤が濃い=画面内容が右へ / 薄い=左へ / 緑が濃い=下へ / 薄い=上へ。"
+                "静止していれば全面が均一な灰色になり、色が付いていたら速度バッファが壊れている。"
+                "下の表示輝度の倍率で感度を変えられる(既定は約20画素/フレームで飽和)");
+            if (!m_Engine.m_TAAEnabled)
+            {
+                ImGui::TextWrapped("TAAが無効でも速度バッファは常に更新されるため、この表示はそのまま確認できます");
             }
         }
 

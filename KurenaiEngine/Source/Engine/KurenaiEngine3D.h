@@ -217,6 +217,14 @@ namespace Kurenai
         // 自発光(エミッシブ)。AO/シャドウの影響を受けずライティングパスで常に加算される
         std::unique_ptr<RHI::IRHITexture> m_GBufferEmissive;
         std::unique_ptr<RHI::IRHITexture> m_GBufferDepth;
+        // モーションベクター(速度バッファ)。「この画素に映っているものが前フレームでは画面の
+        // どこにいたか」をUV単位の2Dベクトルで持ち、TAAが履歴を引く位置の決定に使う。
+        // 現在のシーンは全インスタンスが静的(ModelInstance::Worldは読み込み時に確定し以降
+        // 変わらない)なので、速度の発生源はカメラの移動・回転だけである。そのためGBuffer.hlslは
+        // 同じワールド座標を今フレームと前フレームのビュー射影行列で投影して差を取るだけでよく、
+        // インスタンスごとの前フレームのワールド行列(PrevWorld)を持つ必要がない。
+        // 動的オブジェクトを入れる際はObjectConstantsへPrevWorldを追加すること
+        std::unique_ptr<RHI::IRHITexture> m_GBufferVelocity;
 
         // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         // 計算しHDRで書き出す。DeferredLightingパスとSSIL_VisibilityBitmask.hlslの両方から
@@ -308,6 +316,53 @@ namespace Kurenai
         float m_SSRMaxDistance = Defaults::SSRMaxDistance;
         float m_SSRThickness = Defaults::SSRThickness;
         float m_SSRRoughnessCutoff = Defaults::SSRRoughnessCutoff;
+
+        // TAA(Temporal Anti-Aliasing)パス: SSRの後、露出/ブルーム/トーンマップの前に置く。
+        // 毎フレーム投影行列を1ピクセル未満だけずらして(ジッター)サンプル位置を散らし、
+        // モーションベクターで前フレームの結果を今フレームの画素へ再投影して蓄積する。
+        // 静止していれば十数フレームで収束し、実質的なスーパーサンプリングになる。
+        // 詳細な原理と各工夫の理由はArchitecture.htmlのTAAの章を参照
+        std::unique_ptr<RHI::IRHIShader> m_TAAVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_TAAPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_TAAPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_TAAConstantBuffer;
+        // 履歴バッファ2枚。読みながら同じテクスチャへ書けないため役割を毎フレーム入れ替える。
+        // m_TAAHistoryIndexが今フレームの書き込み先で、もう一方が前フレームの結果(=履歴)。
+        // このパスの出力がそのまま後段(自動露出/ブルーム/トーンマップ)の入力にもなる
+        std::unique_ptr<RHI::IRHITexture> m_TAAHistory[2];
+        uint32_t m_TAAHistoryIndex = 0;
+        // 履歴の内容が信用できるか。falseの間、TAAは履歴を「サンプルすらせず」今フレームの色を返す。
+        // ブレンド率を0にするだけでは不十分で、未初期化fp16のNaNはlerp(NaN, x, 1.0)でもNaNのまま
+        // 伝播し、一度混入すると履歴に固着し続ける。
+        // 落とすのは (1)履歴バッファ作成直後(初回・バッファ精度変更) (2)シーン切り替え
+        // (3)TAAのON/OFFトグル。(2)はUpdateスレッドのLoadSceneから書くためatomicにする
+        std::atomic<bool> m_TAAHistoryValid{ false };
+        // ジッターのサンプル列を進めるフレーム番号(Halton列の添字に使う)
+        uint32_t m_TAAFrameIndex = 0;
+        // 前フレームのビュー射影行列(ジッター済み・転置済み=シェーダへ渡す形のまま)。
+        // Renderスレッドのみが読み書きするため追加の排他は不要。
+        // 履歴テクスチャの有効性(m_TAAHistoryValid)とは意図的に別管理にしている。シーン切り替えや
+        // バッファ精度変更では履歴の中身は捨てるが、カメラ行列そのものは前フレームのものが正しく
+        // 残っているため、速度バッファまで0に潰す必要がない
+        DirectX::XMFLOAT4X4 m_TAAPrevViewProj{};
+        // m_TAAPrevViewProj / m_TAAPrevJitterUv に実際の前フレームの値が入っているか。
+        // 初回のRender()でのみfalseで、以降はずっとtrue
+        bool m_TAAPrevViewProjValid = false;
+        // 前フレームのジッター量(UV単位)。速度からジッター差分を取り除くのに使う
+        DirectX::XMFLOAT2 m_TAAPrevJitterUv{ 0.0f, 0.0f };
+        // 前フレームの実効プリ露出EV100。このエンジンはSceneColorへプリ露出を掛け込んでおり、
+        // その値が時間順応で毎フレーム変わる(m_EffectiveExposureEV100)。補正しないと
+        // 露出が動いている間ずっと履歴が古い明るさを引きずり、明るさの尾を引く
+        float m_TAAPrevEffectiveExposureEV100 = 0.0f;
+        bool m_TAAEnabled = Defaults::TAAEnabled;
+        // 今フレームの色を履歴へ混ぜる割合。小さいほど収束後は滑らかだが、
+        // 遮蔽が変わったときの追従が遅くなる
+        float m_TAABlendWeight = Defaults::TAABlendWeight;
+        // ジッターの振れ幅の倍率(1.0でピクセル内いっぱい)。0にするとジッターが無くなり、
+        // 時間方向のスーパーサンプリング効果だけが消える(再投影と蓄積は残る)
+        float m_TAAJitterScale = Defaults::TAAJitterScale;
+        // 蓄積によるボケを補うシャープネス。履歴側ではなく入力側へ掛ける(TAA.hlsl参照)
+        float m_TAASharpness = Defaults::TAASharpness;
 
         // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
         // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
@@ -510,6 +565,7 @@ namespace Kurenai
             ProbePrefilter,     // 反射プローブのプリフィルタ済み鏡面(ミップ0がキャプチャ結果そのもの)
             ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
             ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
+            MotionVector,       // モーションベクター(速度バッファ)。静止で灰色、動くと移動方向に応じて色が付く
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように

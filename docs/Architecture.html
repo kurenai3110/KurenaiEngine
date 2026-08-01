@@ -222,6 +222,7 @@
     <li><a href="#reflectionprobe">19. 反射プローブ(リフレクションプローブ)</a></li>
     <li><a href="#ssrprobe">20. SSRとプローブの合成(加算から差し替えへ)</a></li>
     <li><a href="#procedural-sky">21. 手続き空・月光・昼夜遷移</a></li>
+    <li><a href="#taa">22. モーションベクターとTAA</a></li>
   </ol>
 </nav>
 
@@ -2983,18 +2984,24 @@ Reverse-Zの組み方を変えても自動的に追随させるため)。
 <code>clipEnd.w</code>が最小値を下回る場合はレイを切り詰めている。
 </p>
 
-<h3>18.4 ジッタにフレーム番号を混ぜてはいけない</h3>
+<h3>18.4 ジッタにフレーム番号を混ぜていない理由</h3>
 <p>
 等間隔サンプリングは縞状のバンディングを出すため、ステップ位置をピクセルごとにずらして
 高周波のディザへ変換する(インターリーブド・グラディエント・ノイズ、Jimenez 2014)。
 </p>
 <p>
-<strong>ここでフレーム番号を混ぜてはいけない</strong>。このエンジンにはTAAが無く、
-時間方向に平均化する後段が存在しないため、フレームごとにパターンを変えると
-平均化されないまま画面全体がちらつき続けることになる。ピクセル座標だけの関数にしておけば、
-カメラが止まっている限りノイズも完全に静止し「わずかにディザが乗った静止画」で済む。
-<code>SSIL_VisibilityBitmask.hlsl</code>の<code>stepJitter</code>が同じ理由で
-ピクセル座標のみの関数になっているのと同じ判断である。
+このジッタは<strong>ピクセル座標だけの関数にしてあり、フレーム番号を混ぜていない</strong>。
+こうしておけばカメラが止まっている限りノイズも完全に静止し、
+「わずかにディザが乗った静止画」で済む。
+</p>
+<p>
+22章のTAAを導入した現在は時間方向に平均化する後段が存在するため、フレームごとにパターンを変えて
+実効サンプル数を増やす選択肢自体は生まれている。それでもここを据え置いているのは、
+TAAの近傍クリップ(22.6節)が「今フレームの近傍にあり得ない色を捨てる」仕組みだからである。
+時間変動ノイズはその判定に毎フレーム引っかかって捨てられ、平均化されないままちらつきとして
+残りやすい。実用にするにはスクリーンスペースシャドウ専用の空間デノイザを別途用意する必要があり、
+TAAを入れただけでは成立しない。<code>SSIL_VisibilityBitmask.hlsl</code>の
+<code>stepJitter</code>も同じ判断でピクセル座標のみの関数のままにしている。
 </p>
 
 <h3>18.5 バイアスと厚みの上限</h3>
@@ -4730,6 +4737,259 @@ sRGBの原色付近でのV'(λ)の比 (0.024, 0.368, 0.608) をRGBの重みに�
 <p>
 あわせて<code>AE Night Rolloff</code>は4.5段を維持した(壁3.8 / 空27.9)。
 実際の夜も空が一番明るく地上は沈むので、この関係が肉眼の見え方に近い。
+</p>
+</section>
+
+<section id="taa">
+<h2>22. モーションベクターとTAA</h2>
+
+<p>
+1ピクセルにつき1サンプルしか撮らないため、斜めのエッジは「その画素に物があるか無いか」の2値になり
+階段状のジャギーになる。MSAAはジオメトリのエッジにしか効かず(シェーディングのエイリアスや
+スペキュラのちらつきは消えない)、ディファードではG-Buffer全体をマルチサンプル化することになって
+帯域が現実的でない。そこで<strong>時間方向にサンプルを蓄積するTAA</strong>を入れた。
+</p>
+
+<h3>22.1 全体の流れ</h3>
+<p>
+毎フレーム投影行列を1ピクセル未満だけずらす(ジッター)と、同じ画素が毎回わずかに違う位置を
+サンプルする。TAAパスが過去の結果を蓄積することで、静止していれば十数フレームで収束し、
+実質的なスーパーサンプリングになる。パスの位置はSSRの直後、自動露出/ブルーム/トーンマップの前:
+</p>
+<pre><code>Lighting → Transparent → SSR → [TAA] → AutoExposure → Bloom → Tonemap → Present</code></pre>
+<p>
+トーンマップ前のHDRの段階で行うのは、露出とブルームがTAAで安定した絵を入力にできるようにするため。
+逆順にするとブルームがフレームごとのちらつきを拾って増幅する。
+</p>
+
+<h3>22.2 速度(モーションベクター)の定義</h3>
+<p>
+<code>m_GBufferVelocity</code>(<code>R16G16_Float</code>、G-Bufferの5枚目)に、
+<strong>UV単位・デジッター済み・カメラ由来のみ</strong>の2Dベクトルとして書く。
+定義は「この画素に映っているものが、前フレームでは画面のどこにいたか」からの変位である。
+</p>
+<pre><code>ClipToUv(c) = (c.xy / c.w) * float2(0.5, -0.5) + 0.5   // NDCのyは上が+1、UVのvは上が0
+
+currentUv  = ClipToUv(mul(worldPos, ViewProj))     - TAAParams.xy   // 今フレームのジッター
+previousUv = ClipToUv(mul(worldPos, PrevViewProj)) - TAAParams.zw   // 前フレームのジッター
+velocity   = currentUv - previousUv</code></pre>
+<p>
+TAA側は <code>historyUv = uv - velocity</code> で履歴を引く。
+</p>
+<p>
+<strong>ジッターを引く理由</strong>: 投影行列にジッターが入っているので、単純に差を取ると
+ジッターの差まで混ざる。しかしジッターは「同じ面のどこをサンプルしたか」の違いであって
+「ものが動いた量」ではない。引かないと履歴を引く位置が毎フレーム±0.5px揺れ、
+<strong>永久に収束しない</strong>。TAAで最も出やすいバグなので、静止時に速度バッファが
+完全に0になることを必ず確認すること(デバッグ表示「モーションベクター」で全面が均一な灰色になる)。
+</p>
+<p>
+<strong>カメラ由来のみでよい理由</strong>: 現在のシーンは全インスタンスが静的で、
+<code>Assets::ModelInstance::World</code> は<code>SceneLoader</code>が読み込み時に計算したあと
+どこからも書き換わらない。したがって前フレームのワールド座標は今と同じでよく、
+違うのはカメラ由来のビュー射影行列だけになる。<code>GBuffer.hlsl</code>の頂点シェーダは
+同じ<code>worldPos</code>を2つの行列で変換するだけで済み、インスタンスごとの
+<code>PrevWorld</code>を持つ必要がない。<strong>動的オブジェクトを入れる場合は
+<code>ObjectConstants</code>に<code>PrevWorld</code>を追加し、
+<code>input.Position</code>をそちらで変換した結果を<code>PrevClip</code>へ渡すこと。</strong>
+</p>
+
+<h3>22.3 ジッターの入れ方(行ベクトル規約での導出)</h3>
+<p>
+Halton(2,3)列の8サンプルを使い、<code>offsetPx = (halton - 0.5) * m_TAAJitterScale</code> を
+NDCへ直して投影行列へ入れる。Halton列の添字は1から始める(添字0はradical inverseの定義上
+どの基数でも0となり、オフセットがピクセルの角へ偏る)。
+</p>
+<pre><code>jitterNdc = float2( 2*offsetPx.x / renderW, -2*offsetPx.y / renderH )
+jitteredProj = Camera::GetProjectionMatrix() * XMMatrixTranslation(jitterNdc.x, jitterNdc.y, 0)</code></pre>
+<p>
+なぜこの掛け算でよいか。<code>Camera::GetProjectionMatrix</code>は行ベクトル規約
+(<code>clip = view * P</code>)で第3列が<code>(0,0,1,0)</code>、すなわち
+<code>clip.w = viewZ</code> である。<code>XMMatrixTranslation</code>は行ベクトル規約では
+第3行が<code>(jx, jy, 0, 1)</code>になるので、<code>P * T</code>を展開すると変化するのは
+要素<code>[2][0]</code>と<code>[2][1]</code>だけ、つまり
+<code>clip.xy += jitterNdc * clip.w</code> になる。w除算後には
+<code>ndc.xy += jitterNdc</code> という定数オフセットとして効く。
+</p>
+<p>
+<strong>ジッター済み行列は全パスで統一すること。</strong> 深度バッファはこの行列でラスタライズ
+されるため、深度から位置を復元する側(SSAO/SSIL/SSR/スクリーンスペースシャドウ)が
+ジッター前の行列を使うと再構成位置がサブピクセルずれる。
+<code>Render()</code>で<code>viewMatrix</code>/<code>jitteredProj</code>を一度だけ確定させ、
+<code>ViewProj</code>/<code>InvViewProj</code>/<code>Proj</code>/深度リニアライズ定数/
+LightCullのProjParamsをすべてそこから導いている。
+なお射影行列の<code>_33</code>/<code>_43</code>(深度リニアライズ係数)と
+<code>_11</code>/<code>_22</code>はジッターでは変化しないため、それらだけを読む箇所は
+値としては影響を受けない。それでも同じ行列から導くようにしてあるのは、
+将来ジッターの入れ方を変えたときに黙ってずれないようにするため。
+</p>
+<p>
+カスケードシャドウ行列とプローブキャプチャはジッターしない。プローブキャプチャは
+<code>FrameConstants</code>をコピーして視点だけ差し替える構造なので、
+<code>PrevViewProj</code>と<code>TAAParams</code>も明示的に潰してある。
+</p>
+
+<h3>22.4 定数バッファの配置</h3>
+<p>
+<code>FrameConstants</code>(b0)の末尾に<code>PrevViewProj</code>(前フレームのジッター済みVP)と
+<code>TAAParams</code>(xy=今フレームのジッターUV、zw=前フレーム)を追加した。
+末尾追加なので既存シェーダのオフセットは変わらないが、<strong><code>GBuffer.hlsl</code>は
+<code>LightColor</code>までしか宣言していなかったため、間の全フィールドを追加宣言する必要があった</strong>
+(cbufferは宣言順でレイアウトが決まり、途中のフィールドを飛ばせない)。
+</p>
+<p>
+一方<strong>TAAパスはb0を使わず、必要な行列も含めて専用の<code>TAAConstants</code>(b1)に全部詰めている</strong>。
+<code>FrameConstants</code>は末尾追加を重ねて700バイトを超えており、末尾の2つを読むためだけに
+全フィールドをもう1本宣言する羽目になるのを避けるため。
+DX12のルートシグネチャはCBVをb0/b1の2枠しか持たないので、b1を使い切らない設計にしておく意味もある。
+</p>
+
+<h3>22.5 空(背景)の速度</h3>
+<p>
+空はG-Bufferに描かれず、ライティングパスがキューブマップから作る。したがって速度バッファは
+0のまま残るが、カメラを回せば空も動く。0のままにすると空だけ収束せず、地平線を境に画質が変わる。
+そこで<code>TAA.hlsl</code>側で深度が遠平面(Reverse-Zなので0)の画素を検出し、
+遠平面上の点を<code>InvViewProj</code>で復元して<code>PrevViewProj</code>で再投影する。
+<strong>このフォールバックにもジオメトリとまったく同じデジッターが必要</strong>で、
+省くと空だけ収束しない。
+</p>
+<p>
+<code>Camera::GetProjectionMatrix</code>は有限の遠平面を持つ(<code>a = n/(n-f) ≠ 0</code>)ため
+深度0の点を復元できる。無限遠のreverse-Zへ変更するとw=0でゼロ除算になるので、
+そのときはここを方向ベクトルの再投影へ書き換えること。
+</p>
+
+<h3>22.6 近傍クリップ(ここで品質が決まる)</h3>
+<p>
+再投影しただけの履歴をそのまま混ぜてはいけない。前フレームでは物陰で見えなかった画素
+(遮蔽の変化)や、速度で表現できないもの(影・反射の移動)では、まったく別の色が返ってくる。
+これがゴーストの正体である。
+</p>
+<p>
+対策として、今フレームの3x3近傍の平均±1.25σからAABBを作り(分散クリッピング)、
+実際のmin/maxとの積集合を取ったうえで、履歴の色をその内側へ引き戻す。
+色空間はYCoCg——RGBのまま行うと色相ごと動いてしまうため、輝度と色差を別軸として扱う。
+引き戻しは各軸独立の<code>clamp</code>ではなく、<strong>中心から履歴へ向かう線分とAABBの交点まで
+縮める</strong>方式にしている。<code>clamp</code>だとAABBの角へ寄った不自然な色になり色ずれが目立つ。
+</p>
+
+<h3>22.7 細かいが効く工夫</h3>
+<table>
+<tr><th>工夫</th><th>理由</th></tr>
+<tr><td>履歴サンプルはCatmull-Rom 5タップ</td>
+<td>バイリニアだと「補間した結果をまた補間する」ことになり、ボケが際限なく累積する。
+負のローブでこれを打ち消す。負ローブのぶん結果が負に振れうるので<code>max(.,0)</code>で潰す</td></tr>
+<tr><td>速度は3x3で<strong>最も手前</strong>の画素のものを使う(ディレート)</td>
+<td>物体のシルエットの縁で背景の速度を拾ってゴーストになるのを抑える。
+<strong>Reverse-Zなので「最も手前」は深度値が最大</strong>。minにすると最も遠い
+(多くの場合は空)の速度を拾ってかえって悪化する</td></tr>
+<tr><td>輝度で重み付けしてブレンド</td>
+<td>1画素だけ極端に明るい点(ファイアフライ)が平均を支配して尾を引くのを防ぐ。
+<code>w = 1/(1+輝度)</code></td></tr>
+<tr><td>シャープネスは履歴側でなく<strong>入力側</strong>へ掛ける</td>
+<td>このパスの出力はそのまま次フレームの履歴になる。ブレンド後の結果へ掛けると
+毎フレーム再適用されて累積し、輪郭が発振してリンギングになる</td></tr>
+<tr><td>プリ露出の変化で履歴をスケールし直す</td>
+<td><code>m_EffectiveExposureEV100</code>は時間順応で毎フレーム変わり、SceneColorの
+スケール自体がフレーム間で変わる。補正しないと露出が動いている間ずっと明るさの尾を引く</td></tr>
+<tr><td>履歴が無効なときは<strong>サンプルすらしない</strong></td>
+<td>作りたてのfp16バッファはNaNを含みうる。<code>lerp(NaN, x, 1.0)</code>もNaNなので、
+ブレンド率を0にするだけでは足りない。一度混入すると以後ずっとその画素に固着する</td></tr>
+</table>
+
+<h3>22.8 履歴のピンポンとリセット条件</h3>
+<p>
+読みながら同じテクスチャへ書けないため、<code>m_TAAHistory[2]</code>を毎フレーム入れ替える
+(<code>m_TAAHistoryIndex</code>が今フレームの書き込み先)。バッファ精度を<code>Legacy8bit</code>に
+落としても<strong>履歴は常にfp16のまま</strong>にしている。履歴は何十フレームぶんもの蓄積結果であり、
+ここを8bitにすると量子化誤差が積み上がってバンディングになるため。
+</p>
+<p>
+<code>m_TAAHistoryValid</code>を落とすのは (1) 履歴バッファ作成直後(初回起動・バッファ精度変更)
+(2) シーン切り替え (3) TAAのON/OFFトグル、の3つ。(2)は<code>LoadScene</code>=Updateスレッドから
+書くため<code>std::atomic&lt;bool&gt;</code>にしてある。
+</p>
+<p>
+<code>m_TAAPrevViewProjValid</code>は履歴の有効性とは<strong>別管理</strong>にしている。
+シーン切り替えやバッファ精度変更では履歴の中身は捨てるが、カメラ行列そのものは前フレームのものが
+正しく残っているため、速度バッファまで0に潰す必要がない。
+</p>
+<p>
+次フレーム用の状態更新(<code>m_TAAPrevViewProj</code>・<code>m_TAAPrevJitterUv</code>・
+<code>m_TAAPrevEffectiveExposureEV100</code>・履歴インデックスの入れ替え)は
+<code>Render()</code>の末尾、早期returnより後で行う。こうすることで描画しなかったフレームでは
+前フレームの状態が保たれ、履歴テクスチャの中身と行列の対応が1フレームずれない。
+</p>
+
+<h3>22.9 RenderGraphでの順序付け</h3>
+<p>
+<code>RenderGraph</code>はReads/Writesから<strong>RAW(Read-after-Write)とWAW(Write-after-Write)の
+辺だけ</strong>を張る。TAAでは「SSR/Lightingが<code>taaInput</code>を書く → TAAが読む」と
+「TAAが履歴[cur]を書く → AutoExposure/Bloom/Tonemapが読む」のRAW辺だけで正しく並ぶ。
+履歴[prev]は今フレーム誰も書かないので辺は不要。
+</p>
+<p>
+<strong>WAR(Write-after-Read)の辺は張られない。</strong>「あるパスが読んでいるテクスチャを、
+後から登録した別パスが書き潰す」形は保護されない。現在の構成はその形にならないが、
+<code>hdrSceneColor</code>をTAA出力へ差し替えたあとで別パスが<code>m_SceneColor</code>へ
+書き足すような変更を加えると静かに壊れる。
+</p>
+<p>
+また<code>hdrSceneColor</code>の再代入はTAAの<code>AddPass</code>より<strong>後</strong>に書くこと。
+ラムダは値キャプチャなので、順序を間違えるとTAAが自分の出力を読む形になる
+(RenderGraphが循環を検出して例外を投げる)。
+</p>
+
+<h3>22.10 既知の制約</h3>
+<p>
+<strong>半透明メッシュは速度を書かない。</strong> 半透明フォワードパスは
+<code>DepthWriteEnabled=false</code>でSceneColorへ直接合成するため、速度バッファには寄与しない。
+結果として:
+</p>
+<ul>
+<li>半透明が不透明の手前にある画素 → 深度は奥の不透明のものなので、<strong>背後の物体の速度で
+再投影される</strong></li>
+<li>半透明が空の手前にある画素 → 深度0で空のフォールバックが発火し、<strong>遠平面の速度で
+再投影される</strong></li>
+</ul>
+<p>
+現在のシーンは静的で、カメラ回転が主体なら目立たないが、並進時にはずれる。
+正しく扱うには半透明パスにも速度の書き込みを追加する必要がある。
+</p>
+<p>
+また空のフォールバックは有限の遠平面(FarZ)上の点として再投影するため、カメラ並進時に
+空がわずかに視差移動する。厳密には空は方向のみで再投影すべきだが、FarZが十分遠いため
+実害は出ていない。
+</p>
+
+<h3>22.11 検証時に見るべき値</h3>
+<p>
+デバッグ表示「モーションベクター」(Present.hlsl Mode 14)は、UV単位の速度をピクセル単位へ
+換算してから中間灰色を「動いていない」として色付けする。等倍のUV値では1画素の移動が
+0.0005程度で、そのまま色にしても何も見えないため。
+</p>
+<table>
+<tr><th>操作</th><th>正しい見え方</th><th>実測値(Bistro Exterior、平均R/G。128が中立)</th></tr>
+<tr><td>静止</td><td>全面が均一な灰色</td><td>R=127.0 / G=127.0(非中立画素0%)</td></tr>
+<tr><td>右へパン(+yaw)</td><td>内容が左へ流れるのでR&lt;中立</td><td>R=117.7</td></tr>
+<tr><td>左へパン(-yaw)</td><td>R&gt;中立</td><td>R=134.8</td></tr>
+<tr><td>下を向く(-pitch)</td><td>内容が上へ流れるのでG&lt;中立、Rは動かない</td><td>G=115.3 / R=127.0</td></tr>
+<tr><td>前進</td><td>中心から外へ発散する放射状</td><td>左R=118/右R=130、上G=121/下G=133</td></tr>
+</table>
+<p>
+<strong>ジッターを有効にしたまま静止時に完全な中立になること</strong>が、デジッターが正しいことの証明になる。
+</p>
+<p>
+TAA本体の切り分けには、ジッター強度を0にした状態での安定性を見るのが有効である。
+入力が毎フレーム同一になるため、履歴の読み書き・ピンポン・ブレンドが正しければ
+出力は完全に静止する(実測: 連続フレーム間の最大差1〜2/255)。
+ジッターを1.0に戻すと高コントラストのエッジに周期8の残留リップルが出るが、
+これは指数移動平均が周期入力に対して持つ本質的な残差であり不具合ではない。
+</p>
+<p>
+アンチエイリアス効果そのものは、シルエットのエッジで「1行で完全に切り替わる列」の割合で測れる。
+Bistro Exteriorの屋根の稜線では<strong>50.7% → 27.3%</strong>(DX11)、
+<strong>50.7% → 30.7%</strong>(DX12)へ減り、その分がグラデーションへ置き換わっている。
 </p>
 </section>
 

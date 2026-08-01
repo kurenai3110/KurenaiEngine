@@ -24,6 +24,10 @@ namespace Kurenai::UI
         {
             DrawTonemapSection();
         }
+        if (ImGui::CollapsingHeader("TAA###TAA"))
+        {
+            DrawTAASection();
+        }
         if (ImGui::CollapsingHeader("ブルーム###Bloom"))
         {
             DrawBloomSection();
@@ -64,6 +68,42 @@ namespace Kurenai::UI
             "出力ディザリング###OutputDithering", &m_Engine.m_DitherEnabled, Defaults::DitherEnabled,
             "最終的な8bit量子化の直前に微小なノイズを加え、暗部グラデーションのバンディングを解消する。"
             "暗部のバンディングは中間バッファの精度ではなくこの8bit量子化が主因であることを実測で確認済み");
+
+        EndParamGroup();
+    }
+
+    void PostProcessPanel::DrawTAASection()
+    {
+        BeginParamGroup();
+
+        if (CheckboxEx(
+                "TAAを有効にする###EnableTAA", &m_Engine.m_TAAEnabled, Defaults::TAAEnabled,
+                "毎フレーム投影行列を1ピクセル未満だけずらし、モーションベクターで前フレームの結果を"
+                "再投影して蓄積する。斜めエッジのジャギーと、スクリーンスペース系パスの"
+                "サンプリングノイズが時間方向に平均されて消える"))
+        {
+            // 切り替えた瞬間に履歴を捨てる。無効の間は履歴が更新されないため、
+            // 落とさずに再度有効化すると数フレーム前の古い絵が一度だけ混ざる
+            m_Engine.m_TAAHistoryValid.store(false, std::memory_order_relaxed);
+        }
+
+        if (m_Engine.m_TAAEnabled)
+        {
+            SliderFloatEx(
+                "履歴ブレンド率###TAABlendWeight", &m_Engine.m_TAABlendWeight, 0.02f, 0.5f, Defaults::TAABlendWeight,
+                "%.3f", 0,
+                "今フレームの色を混ぜる割合。小さいほど多くのフレームが平均されて滑らかになるが、"
+                "遮蔽が変わったときの追従が遅くなり残像が出やすくなる。"
+                "フレームレートに対して固定の割合なので、fpsが変わると残像の長さも変わる");
+            SliderFloatEx(
+                "ジッター強度###TAAJitterScale", &m_Engine.m_TAAJitterScale, 0.0f, 1.5f, Defaults::TAAJitterScale,
+                "%.2f", 0,
+                "サンプル位置を散らす幅の倍率(1.0でピクセル内いっぱい)。0にすると時間方向の"
+                "スーパーサンプリング効果だけが消え、再投影と蓄積によるノイズ低減は残る");
+            SliderFloatEx(
+                "シャープネス###TAASharpness", &m_Engine.m_TAASharpness, 0.0f, 1.0f, Defaults::TAASharpness, "%.2f", 0,
+                "蓄積で失われる高域を戻す量。上げすぎると輪郭に白いふちが出る");
+        }
 
         EndParamGroup();
     }

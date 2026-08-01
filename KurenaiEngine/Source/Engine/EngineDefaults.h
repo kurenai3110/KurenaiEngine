@@ -70,6 +70,16 @@ namespace Kurenai::Defaults
     inline constexpr bool DitherEnabled = true;
     inline constexpr float MesopicStrength = 0.0f;
 
+    // --- TAA(Temporal Anti-Aliasing) ---
+    inline constexpr bool TAAEnabled = true;
+    // 今フレームの色を履歴へ混ぜる割合。0.1なら毎フレーム1割ずつ入れ替わるので、
+    // 静止していれば十数フレームで収束する。上げるとゴーストに強くなる代わりにちらつきが残る
+    inline constexpr float TAABlendWeight = 0.1f;
+    // ジッターの振れ幅の倍率。1.0でピクセル内いっぱい(±0.5px)に散らす
+    inline constexpr float TAAJitterScale = 1.0f;
+    // 蓄積によるボケを補う量。0で無効
+    inline constexpr float TAASharpness = 0.35f;
+
     // --- ブルーム ---
     inline constexpr bool BloomEnabled = true;
     inline constexpr float BloomStrength = 0.06f;

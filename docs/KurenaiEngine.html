@@ -327,7 +327,7 @@ ImGuiパネル経由</strong>):
     <li>8つのImGuiパネル(シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ /
     デバッグ表示 / システム / プロファイラ)で表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/
     スクリーンスペースシャドウ/SSR/タイルドライトカリングのON・OFFやパラメータ調整、
-    トーンマップ・ブルーム・自動露出の調整、デバッグ表示バッファの選択、
+    トーンマップ・TAA・ブルーム・自動露出の調整、デバッグ表示バッファの選択、
     時刻(昼夜サイクル)・月の位置・手続き空・EV100(露出)の調整、
     ポイント/スポットライトの一覧・追加・複製・削除・編集、反射プローブの編集と焼き直し、
     FPS/CPU/GPUの計測値確認ができる。パネルはドッキングに対応しており、配置とサイズは
@@ -1280,7 +1280,8 @@ assimp・DirectXTexに加え<code>KurenaiEngineLibrary.vcxproj</code>への依�
 <tr><td>DrawTextの新規文字追加</td><td>ASCII以外(かな漢字等)の文字を初めて<code>DrawText</code>に渡すと、その文字はその1フレームだけ表示されず、次の<code>BeginFrame()</code>でアトラスへ追加されてから表示される(3.2節参照)</td></tr>
 <tr><td>DrawRoundedRectの角丸半径</td><td><code>cornerRadiusPixels</code>が<code>width</code>/<code>height</code>の半分より大きい値の場合、ピクセルシェーダー側で半幅・半高さの小さい方に自動的にクランプされる(矩形からはみ出す角丸にはならない)</td></tr>
 <tr><td>ビルド設定の一致</td><td>3つのDLL(KurenaiEngineLibrary/KurenaiEngine3D/KurenaiEngine2D)とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
-<tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
+<tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)。アンチエイリアスは<code>KurenaiEngine3D</code>側のTAA(ポストプロセスパネル)で行う</td></tr>
+<tr><td>TAAと半透明</td><td>半透明メッシュはモーションベクター(速度バッファ)を書かないため、TAAは半透明面をその背後にあるもの(不透明メッシュ、無ければ空)の速度で再投影する。カメラを大きく並進させるとガラス面などに残像が出ることがある</td></tr>
 <tr><td>アセットの事前変換が必須</td><td><code>Assets::LoadModel</code>は<code>.kmodel</code>のみを受け付ける。<code>.gltf</code>/<code>.fbx</code>等のソースモデルは、実行前に<code>KurenaiPacker.exe</code>で変換しておく必要がある(7章参照)</td></tr>
 <tr><td>ポイント/スポットライトの影</td><td>影を落とさない(シャドウマップは平行光1灯のみ対応)</td></tr>
 <tr><td>ライトの同時描画数</td><td>最大1024灯まで(実データでの想定はせいぜい数灯〜十数灯)。超過分はカメラに近い順に採用される</td></tr>
