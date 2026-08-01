@@ -2,6 +2,8 @@
 
 #include <Windows.h>
 
+#include "Core/Logger.h"
+
 namespace Kurenai
 {
     namespace
@@ -10,10 +12,23 @@ namespace Kurenai
         {
             return api == GraphicsAPI::DX12 ? RHI::GraphicsAPI::DX12 : RHI::GraphicsAPI::DX11;
         }
+
+        // ログファイル名に付ける接尾辞。DX11とDX12は同じexeを引数で切り替えて起動する
+        // 同一バイナリなので、同時に起動すると1つのKurenaiEngine.logを奪い合って
+        // 双方のログが壊れる。バックエンドごとにファイルを分けてこれを避ける
+        const char* ToLogFileSuffix(GraphicsAPI api)
+        {
+            return api == GraphicsAPI::DX12 ? "_DX12" : "_DX11";
+        }
     }
 
     KurenaiEngineBase::KurenaiEngineBase(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api)
     {
+        // ログファイルは最初の出力時に開かれるため、必ず最初のログ出力より前に設定する。
+        // 直後のCore::Windowのコンストラクタが既にログを出す(window.iniが無い場合など)ので、
+        // この行はコンストラクタ本体の先頭から動かさないこと
+        Core::Logger::SetFileSuffix(ToLogFileSuffix(api));
+
         m_Window = std::make_unique<Core::Window>(title, width, height);
         m_Window->SetResizeCallback(
             [this](uint32_t newWidth, uint32_t newHeight)

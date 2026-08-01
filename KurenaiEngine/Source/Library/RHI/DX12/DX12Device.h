@@ -157,7 +157,8 @@ namespace Kurenai::RHI
             uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray);
         // 現在のフレームスロット(m_FrameIndex)のコマンドアロケータ/リストを開き直す
         void ResetCommandList();
-        // デバッグレイヤーが溜めたメッセージを引き取ってKurenaiEngine.logへ出す(デバッグビルドのみ有効)。
+        // デバッグレイヤーが溜めたメッセージを引き取ってエンジンのログ(KurenaiEngine_DX12.log)へ
+        // 出す(デバッグビルドのみ有効)。
         // そのままではデバッガの出力ウィンドウにしか出ず、デバッガを繋がない実行で気付けないため
         void DrainDebugMessages();
         Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(uint64_t sizeInBytes);

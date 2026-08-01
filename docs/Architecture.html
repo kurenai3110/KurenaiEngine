@@ -231,6 +231,7 @@
     <li><a href="#rtreflection">28. レイトレーシング反射</a></li>
     <li><a href="#rtshadow">29. レイトレーシングシャドウ</a></li>
     <li><a href="#rtao">30. レイトレーシングAO / GI</a></li>
+    <li><a href="#launchscripts">31. 起動スクリプト(Run.bat)</a></li>
   </ol>
 </nav>
 
@@ -2944,7 +2945,7 @@ DX11はイミディエイト実行のためこの制約がないが、両バッ�
 
 <p>D3D12デバッグレイヤーの指摘はそのままではデバッガの出力ウィンドウにしか出ず、デバッガを繋がずに
 実行すると気付けない。<code>DX12Device</code>が<code>ID3D12InfoQueue</code>に溜まったメッセージを
-毎フレーム引き取り、<code>KurenaiEngine.log</code>へ警告以上を書き出す(デバッグビルドのみ)。
+毎フレーム引き取り、<code>KurenaiEngine_DX12.log</code>へ警告以上を書き出す(デバッグビルドのみ)。
 上記の不具合はいずれもこの仕組みを入れて初めて可視化できたもの。</p>
 
 <p>ログ行にはメッセージIDを併記してあり、除外したい指摘が出たら<code>DX12Device::Initialize</code>の
@@ -2977,10 +2978,19 @@ read+writeが同一パスでできない制約はそのまま(Hi-Zダウンサ�
 
 <p>DX11とDX12を同時に起動して同じ操作を行い、スクリーンショットをピクセル単位で比較する。
 <code>Sample3D.exe</code>(既定でDX11)と<code>Sample3D.exe -dx12</code>を別プロセスで立ち上げ、
-「Scenes」パネルから各シーンへ切り替えながら撮り比べる。統一後は
+「Scenes」パネルから各シーンへ切り替えながら撮り比べる(<code>Samples\Sample3D\RunDX11.bat</code>と
+<code>RunDX12.bat</code>をそれぞれ実行してもよい)。統一後は
 Bistro Exterior / Interior / Light Test / White Furnace Test / Material Test の全シーンと、
 「Render Targets」のAO/GI表示、ウィンドウリサイズ前後のいずれもピクセル単位で完全一致し、
-<code>KurenaiEngine.log</code>にデバッグレイヤーの指摘が1件も出ないことを確認している。</p>
+<code>KurenaiEngine_DX12.log</code>にデバッグレイヤーの指摘が1件も出ないことを確認している。</p>
+
+<p>この「2プロセス同時起動」は、DX11とDX12が同一の実行ファイル・同一の出力フォルダで動くため、
+かつては<code>KurenaiEngine.log</code>を奪い合って両者のログが壊れていた。現在はバックエンドごとに
+<code>KurenaiEngine_DX11.log</code> / <code>KurenaiEngine_DX12.log</code>へ分けている(24.6節参照)。
+ただし<strong><code>window.ini</code>と<code>imgui.ini</code>は分けておらず両バックエンドで共有する</strong>ため、
+2つを同時に起動すると後に終了した側のウィンドウ配置・パネルレイアウトが勝つ。ログと違って
+ファイルが壊れることはなく、「両方を同じ配置で並べたい」使い方もあるため意図的にそのままにしている。
+なお<strong>同じバックエンドを2重に起動した場合はログも競合する</strong>(接尾辞が同じになるため)。</p>
 </section>
 
 <section id="tonemap-exposure-bloom">
@@ -5719,6 +5729,51 @@ Sample2DとSample3Dで記録が混ざることもない。書き込みは<code>D
 つまり<code>~Window</code>の先頭で行う。<code>WM_CLOSE</code>は<code>m_ShouldClose</code>を立てるだけで
 <code>DefWindowProc</code>へ渡さない実装なので、ウィンドウはデストラクタまで生きている。
 </p>
+
+<h3>24.6 ログファイルだけをバックエンドごとに分ける</h3>
+<p>
+DX11とDX12は同一の<code>Sample3D.exe</code>を<code>-dx12</code>引数で切り替えて起動する同一バイナリで、
+出力フォルダも同じ。そのため2つを同時に起動すると<code>KurenaiEngine.log</code>を奪い合い、
+<strong>両方のログが壊れる</strong>。<code>Logger</code>のストリームは最初の出力時に
+<code>std::ios::trunc</code>で開いてプロセス終了まで保持し続けるため、後から起動した側が先発のログを
+消したうえで、双方が各自のファイルオフセットへ書き込むことになるため。16.9節が推奨する
+「2プロセス同時起動で撮り比べる」検証手順が、実際には成立していなかった。
+</p>
+<p>
+対策として<code>Core::Logger::SetFileSuffix()</code>を追加し、
+<code>KurenaiEngine_DX11.log</code> / <code>KurenaiEngine_DX12.log</code>へ分けている。
+分けたのは<strong>ログだけ</strong>で、<code>window.ini</code>と<code>imgui.ini</code>は共有のまま
+(理由は16.9節末尾)。
+</p>
+<p>
+<strong>呼び出し順序に制約がある。</strong>ログファイルは最初の出力時に開かれて名前が確定するため、
+<code>SetFileSuffix()</code>は最初のログ出力より前に呼ぶ必要がある。呼び出しは
+<code>KurenaiEngineBase</code>のコンストラクタ本体の先頭に置いてある。直後に生成する
+<code>Core::Window</code>のコンストラクタが既にログを出す(<code>window.ini</code>が無い場合の情報ログなど)
+ためで、この位置から動かしてはいけない。リポジトリに<code>DllMain</code>は無く、静的初期化から
+<code>Logger</code>を呼ぶ箇所も無いので、Sample3D/Sample2Dのプロセスではここが最初の
+<code>Logger</code>呼び出しになる。
+</p>
+<p>
+順序を守れなかった場合(既にログを開いた後で接尾辞が指定された場合)は、
+<strong>旧ファイル名のまま書き続けずに開き直す</strong>。旧名のまま続けると競合が残り、
+今回直した不具合がそのまま再発するため。切り替えを追えるよう、旧ファイルには
+「以降は新ファイルへ出力する」、新ファイルには「この行より前のログは旧ファイルにある」という
+警告を両方に残す。<strong>この警告が出ていたら呼び出し位置が誤っている</strong>と判断してよい。
+</p>
+<p>
+接尾辞を設定しない利用者は従来どおり<code>KurenaiEngine.log</code>のまま。
+<code>KurenaiPacker</code>は<code>KurenaiEngineLibrary.dll</code>をリンクしているが
+エンジン(<code>KurenaiEngineBase</code>)を作らないため、これに該当して無改修で従来名を保つ。
+Sample2Dは<code>GraphicsAPI::DX11</code>固定なのでコードは無改修のまま
+<code>KurenaiEngine_DX11.log</code>になる(出力フォルダが別なので元から競合はしない)。
+</p>
+<p>
+あわせて、<code>is_open()</code>がfalseのときにログ行を黙って捨てていた既存の欠陥も直した。
+ログファイルを開けなかったことを<code>OutputDebugStringA</code>で直接記録する
+(ここで<code>Logger::Error</code>を呼ぶと<code>LogMutex</code>の再帰ロックでデッドロックするため、
+<code>std::mutex</code>を保持したまま呼べる<code>WriteLocked()</code>と使い分けている)。
+</p>
 </section>
 
 <section id="raytracing">
@@ -6690,6 +6745,63 @@ SSILはほぼ0だった</li>
 <li><strong>DX11</strong> — 手法が「SSAO / SSIL (Visibility Bitmask)」の2択になり、
 レイトレーシングの選択肢が出ないことを確認</li>
 <li><strong>ビルド</strong> — 3ソリューション×Debug/Releaseで警告0件</li>
+</ul>
+</section>
+
+<section id="launchscripts">
+<h2>31. 起動スクリプト(Run.bat)</h2>
+
+<p>
+DX11とDX12は同一の<code>Sample3D.exe</code>で、切り替え手段は<code>-dx12</code>引数だけ。
+付け忘れると<strong>黙ってDX11で起動する</strong>ため気付きにくく、エクスプローラーから
+ダブルクリックすると必ずDX11になっていた。<code>Samples\Sample3D\</code>に
+<code>RunDX12.bat</code> / <code>RunDX11.bat</code>(ダブルクリック用の薄いラッパ)と
+<code>Run.bat</code>(共通実装)を置いてこれを解消した。
+</p>
+
+<p>
+<code>Run.bat</code>は構成の選択(Release優先、無ければDebugへフォールバック)、事前チェック、
+ログ出力を行う。事前チェックは「exeがあるか」「<code>.kscene</code>が配置されているか」の2点で、
+足りなければ<strong>起動せずにコピペ可能なMSBuild/KurenaiPackerのコマンドを表示して止まる</strong>。
+自動ビルドは実装していない(エクスプローラーからの起動ではMSBuildがPATHに無く、
+<code>vswhere</code>経由の解決が必要になるうえ、DX11/DX12の比較検証では「同じバイナリを2回起動」が
+前提なので、片方が勝手に再ビルドすると邪魔になるため)。
+</p>
+
+<h3>31.1 シーンの参照先は2か所ある</h3>
+<p>
+実行時にエンジンが列挙するのは<code>GetModuleDirectory() + "Assets\Scenes\"</code>、つまり
+<strong>出力フォルダ側</strong>の<code>Assets\Scenes\</code>。リポジトリ側の
+<code>Assets\Packed\Scenes\</code>とは別物で、両者はビルド後イベントの<code>xcopy</code>で繋がっている。
+そのため事前チェックは両方を見て、「どちらにも無い(＝KurenaiPackerが必要)」と
+「リポジトリ側にはある(＝再ビルドすればコピーされる)」を区別して案内する。
+</p>
+
+<h3>31.2 バッチファイル特有の落とし穴(いずれも実際に踏んだ)</h3>
+<ul>
+<li><strong>改行はCRLF必須。</strong>LFのみだと<code>cmd.exe</code>の読み取り位置が1バイトずつずれ、
+以降の行が単語の途中で切れて実行される(<code>echo</code>が<code>cho</code>、<code>goto</code>が
+<code>oto</code>として実行され、引数解析が最後まで到達しなかった)。日本語の有無に関係なく壊れる。
+<code>core.autocrlf=false</code>でcloneされても保たれるよう、<code>.gitattributes</code>に
+<code>*.bat text eol=crlf</code>を明示している</li>
+<li><strong>文字コードはCP932。</strong><code>cmd.exe</code>は読み込んだバイト列をコンソールの
+コードページ(日本語版Windowsの既定は932)として解釈するため、UTF-8で保存すると日本語が化ける。
+BOMも付けない(先頭の<code>@echo off</code>より前にBOMが現れて「'?' は認識されていません」になる)</li>
+<li><strong><code>chcp</code>は日本語を含むファイルの中で実行しない。</strong>コードページの固定は、
+ASCIIしか含まない<code>RunDX11.bat</code> / <code>RunDX12.bat</code>側で行ってから
+<code>Run.bat</code>を<code>call</code>している</li>
+<li><strong>メッセージ中の<code>&lt;</code><code>&gt;</code>はリダイレクトとして解釈される。</strong>
+ダブルクォートで囲んでも効かない。<code>&lt;構成&gt;</code>と書いた箇所が
+「指定されたファイルが見つかりません」を2回出したうえでメッセージ自体が消えたため、
+<code>[構成]</code>へ置き換えた</li>
+<li><strong><code>echo ...%VAR%&gt;&gt;"file"</code>は値が数字で終わると末尾の数字を食う。</strong>
+<code>1&gt;&gt;</code>が標準出力のリダイレクト指定として解釈されるため(「終了コード 1」→「終了コード 」)。
+リダイレクトを先に書く<code>&gt;&gt;"file" echo ...</code>の形にしている</li>
+<li><strong>exeはフルパスで起動する。</strong>環境変数
+<code>NoDefaultCurrentDirectoryInExePath</code>が設定された環境では、<code>cmd.exe</code>が
+実行ファイルをカレントディレクトリから探さず「'Sample3D.exe' は認識されていません」になる。
+カレントディレクトリ自体は出力フォルダへ移しておく(初期化失敗時の<code>error.log</code>が
+cwd相対で書かれるため、エンジンのログと同じ場所に集まる)</li>
 </ul>
 </section>
 

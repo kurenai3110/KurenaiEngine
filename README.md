@@ -153,6 +153,9 @@ KurenaiEngine2D.dllとSprite2D.hlslのみが自動でコピーされるため、
 動作します。**この時点では`Assets\Packed\`が空のため、次の「アセットの準備」を行うまでSample3Dは
 表示するモデルがありません。**
 
+ビルドとアセットの準備が済んだら、`Samples\Sample3D\RunDX12.bat`(DX12)または
+`RunDX11.bat`(DX11)をダブルクリックすれば起動できます(「[実行(Sample3D)](#実行sample3d)」参照)。
+
 ### 5. アセットの準備(KurenaiPacker)
 
 `KurenaiEngine3D`が読み込めるのは`.kmodel`(KurenaiEngine専用モデルパッケージ)のみです。
@@ -271,11 +274,36 @@ BlendDistance = 1.0
 **起動確認・動作検証には `Sample3D.exe` を使用します。**起動時に`Assets\Packed\Scenes\`内の
 `.kscene`をファイル名の昇順で列挙し、先頭のシーンを読み込んで表示します。
 
+### 起動スクリプト
+
+`Samples\Sample3D\`にある次のバッチファイルをダブルクリックするだけで起動できます。
+
+| ファイル | 起動するバックエンド |
+| --- | --- |
+| `RunDX12.bat` | DX12 |
+| `RunDX11.bat` | DX11 |
+
+構成は`Release`を優先し、無ければ`Debug`へ自動的にフォールバックします。明示したい場合は
+`-debug` / `-release`を付けてください(それ以外の引数は`Sample3D.exe`へそのまま渡されます)。
+
+```
+Samples\Sample3D\RunDX12.bat -debug
+```
+
+ビルドが済んでいない場合やシーン(`.kscene`)が用意できていない場合は、起動せずに必要な
+コマンドを表示して止まります。起動の記録は`Samples\Sample3D\Run.log`に残ります。
+
+### コマンドラインから直接起動する
+
 既定ではDX11バックエンドで起動します。`-dx12` 引数を付けて起動するとDX12バックエンドを使用します(再ビルド不要でDX11/DX12を比較できます)。現在どちらのバックエンドで動作しているかはウィンドウタイトル(例: `Kurenai Engine [DX12] - Sponza`)とImGuiのメニューバーの表示で確認できます。
 
 ```
 Sample3D.exe -dx12
 ```
+
+ログは実行ファイルと同じフォルダに、バックエンドごとに分けて出力されます
+(DX11は`KurenaiEngine_DX11.log`、DX12は`KurenaiEngine_DX12.log`)。DX11版とDX12版は同じ
+実行ファイルなので、この2つを同時に起動して見比べてもログが混ざりません。
 
 ウィンドウの位置・サイズ・最大化状態は終了時に実行ファイルと同じフォルダの`window.ini`へ保存され、次回起動時に復元されます。既定のサイズで起動し直したいときは`window.ini`を削除してください。
 

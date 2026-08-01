@@ -157,7 +157,8 @@ namespace Kurenai::RHI
 #if defined(_DEBUG)
         // デバッグレイヤーの指摘はそのままではデバッガの出力ウィンドウにしか出ず、
         // デバッガを繋がずに実行した場合に気付けない。ID3D12InfoQueueに溜まったメッセージを
-        // 毎フレーム引き取ってKurenaiEngine.logへ出すことで、通常の実行でも検出できるようにする
+        // 毎フレーム引き取ってエンジンのログ(KurenaiEngine_DX12.log)へ出すことで、
+        // 通常の実行でも検出できるようにする
         if (SUCCEEDED(m_Device.As(&m_InfoQueue)))
         {
             // 情報レベルの通知は量が多く実害もないため保存しない(警告以上のみ残す)
@@ -190,7 +191,7 @@ namespace Kurenai::RHI
 
             // 以降このログにD3D12DebugLayerの行が出なければ「指摘が無い」と判断してよいことを
             // はっきりさせるため、引き取りが有効になったこと自体を記録しておく
-            Core::Logger::Info("DX12", "デバッグレイヤーの指摘をKurenaiEngine.logへ出力します(警告以上のみ)");
+            Core::Logger::Info("DX12", "デバッグレイヤーの指摘をこのログファイルへ出力します(警告以上のみ)");
         }
         else
         {
