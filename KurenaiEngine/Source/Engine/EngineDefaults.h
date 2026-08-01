@@ -53,6 +53,14 @@ namespace Kurenai::Defaults
     // ヒット面から太陽へ影レイを撃つか。切ると反射に映る面の影が消えるが、その分速い
     inline constexpr bool RTReflectionShadowRayEnabled = true;
 
+    // --- レイトレーシングシャドウ(DX12かつDXR Tier 1.1対応時のみ選択できる) ---
+    // 1ピクセルあたりに撃つ影レイの本数。デノイザ(時間方向の蓄積)を持たないため、
+    // 太陽を大きくする(角半径を上げる)ほどここを増やさないと半影にノイズが出る
+    inline constexpr int RTShadowSampleCount = 4;
+    // 太陽の見かけの半径(度)。実際の太陽は視直径約0.53度なので既定値はその半分。
+    // 大きくすると半影が広く柔らかくなる(が、同じサンプル数ならノイズも増える)
+    inline constexpr float RTShadowSunAngularRadiusDegrees = 0.27f;
+
     // --- シャドウ(スクリーンスペース) ---
     inline constexpr bool ScreenSpaceShadowEnabled = true;
     inline constexpr int ScreenSpaceShadowStepCount = 16;

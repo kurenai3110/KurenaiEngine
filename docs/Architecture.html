@@ -226,6 +226,7 @@
     <li><a href="#sceneloading">23. シーン読み込みのスレッド分割</a></li>
     <li><a href="#dxc">24. dxcへの移行(DX12のシェーダーモデル6.x化)</a></li>
     <li><a href="#rtreflection">25. レイトレーシング反射</a></li>
+    <li><a href="#rtshadow">26. レイトレーシングシャドウ</a></li>
   </ol>
 </nav>
 
@@ -5008,6 +5009,188 @@ Exterior 0.081ms・Interior 0.108ms(プロファイラのパス別計測)。
 <li><strong>DX11</strong> — 反射モードがスクリーンスペースに落ち、UIにレイトレーシングの選択肢が出ないことを確認。
 ログに「レイトレーシング反射は利用できません」</li>
 <li><strong>ビルド</strong> — 3ソリューション×Debug/Releaseで警告0件。Sample2Dも両バックエンドで動作</li>
+</ul>
+</section>
+
+<section id="rtshadow">
+<h2>26. レイトレーシングシャドウ</h2>
+
+<p>
+25章の反射に続く2つ目のレイトレーシングパス。カスケードシャドウマップ(CSM、9章)の代わりに
+太陽の可視率を求め、単チャンネルのテクスチャへ書き出す。<code>Shaders/3D/RTShadow.hlsl</code>
+(<code>cs_6_5</code>)。反射と同じく<code>ShadowMode { Off, CascadedShadowMap, Raytraced }</code>の
+3択にしてUIから切り替えられるようにしてある。
+</p>
+
+<h3>26.1 「可視率テクスチャ」という形にした理由</h3>
+<p>
+RTシャドウの出力は<strong>影の付いた絵</strong>ではなく<strong>太陽がどれだけ見えているかの比率</strong>
+(0=完全に影 〜 1=完全に光が当たる)だけにした。これは<code>ShadowSampling.hlsli</code>の
+<code>ComputeCascadedShadowFactor</code>の戻り値とまったく同じ意味を持つ量なので、
+<code>DirectLighting.hlsl</code>側の変更は「その1行をテクスチャの読み取りに差し替える」だけで済む。
+</p>
+<pre><code>float shadow;
+if (LightCount.z == 2u) // Raytraced
+{
+    shadow = RTShadowTexture.Load(int3((int2)input.Position.xy, 0)).r;
+}
+else
+{
+    float viewDepth = mul(float4(worldPos, 1.0f), View).z;
+    shadow = ComputeCascadedShadowFactor(worldPos, viewDepth, sunNdotL);
+}
+directLight += EvaluateDirectBRDF(...) * LightColor.rgb * shadow;</code></pre>
+<p>
+BRDFの評価もライトの色も手法によらず共通なので、「CSMとRTで陰影のつき方が違う」という
+食い違いが構造的に起きない。20章の反射で採った「差し替え係数を1箇所に集約する」考え方と同じ方針である。
+</p>
+<p>
+テクスチャは<code>R32_Float</code>のUAV(<code>RWTexture2D&lt;float&gt;</code>)。単チャンネルで足りるうえ、
+型付きUAVの読み書きが保証されているのはR32系だけという事情もある(<code>AutoExposure.hlsl</code>冒頭参照)。
+解像度はレンダー解像度と1対1で、読み出しは常に<code>Load</code>(フィルタなし)。
+</p>
+
+<h3>26.2 Raytracedを選んでもシャドウマップは描き続ける</h3>
+<p>
+一見無駄に見えるが、これは必要な措置である。CSMのシャドウマップを読むのは
+<code>DirectLighting.hlsl</code>だけではない:
+</p>
+<ul>
+<li><code>Transparent.hlsl</code>(半透明のフォワード描画) — 半透明面はG-Bufferに載らないため、
+カメラ視点の可視率テクスチャには「ガラスの奥にある不透明面」の値しか入っていない。ガラス自身の影を
+その値で代用することはできない</li>
+<li><code>ProbeCapture.hlsl</code>(反射プローブのキャプチャ) — カメラではなくプローブ位置から
+6面を描くパスなので、カメラ視点の画面空間バッファはそもそも使えない</li>
+</ul>
+<p>
+どちらもピクセルシェーダーであり、このエンジンで高速化構造をバインドできるのは
+コンピュート用ルートシグネチャだけ(25章)なので、自前でレイを撃つこともできない。
+そのため<strong>RTシャドウは不透明サーフェスの直接光パスだけを置き換える</strong>という位置づけにし、
+シャドウパスは<code>m_ShadowMode != ShadowMode::Off</code>の条件で従来どおり実行している。
+結果としてRTシャドウは描画コストを減らす機能ではなく、<strong>品質だけを上げる機能</strong>になる。
+</p>
+<p>
+この割り切りの副作用として、反射プローブの焼き直しハッシュ(<code>ComputeProbeBakeHash</code>)に
+混ぜるのは手法ではなく<code>m_ShadowMode != ShadowMode::Off</code>の真偽値にしてある。
+CSMとRaytracedでプローブの焼き上がりは変わらないため、手法を切り替えるたびに
+全プローブを焼き直すのは無駄だからである。
+</p>
+
+<h3>26.3 太陽の見かけの大きさを直接サンプルする</h3>
+<p>
+CSMのPCSSは「正射影のシャドウマップの深度差から半影の広さを推定する」近似だったが、
+RTでは太陽を<strong>角半径をもつ円盤</strong>として扱い、その上の点へ向かうレイを複数本撃つだけで
+物理的に正しい半影が出る。円盤上の点は、太陽方向に直交する接平面上で半径
+<code>angularRadius</code>の円板を面積一様にサンプルし、方向へ足してから正規化する近似で作る
+(<code>tan(r) ≒ r</code>。角半径5度でも誤差0.3%未満)。
+</p>
+<p>
+サンプルの散らし方は、半径方向を層化(サンプル<code>i</code>に<code>[i/N, (i+1)/N)</code>を割り当て)し、
+方位角を黄金比で回すRank-1格子。オフセットはピクセル座標のハッシュから作る。
+<strong>フレーム番号は混ぜていない</strong> — デノイザ(時間方向の蓄積)を持たない今の構成では、
+時間ジッタを入れるとノイズが毎フレーム動いてちらつくため、静止画としては粗くても
+安定するほうを選んだ。
+</p>
+<p>
+既定値は<strong>4サンプル / 角半径0.27度</strong>。0.27度は実際の太陽の視半径(視直径約0.53度)である。
+</p>
+
+<h3>26.4 バイアスと、それでも消えないノイズ</h3>
+<p>
+レイの始点は法線方向へ押し出す。押し出し量は
+<code>(0.01 + カメラからの距離 × 1e-4) / max(NdotL, 0.1)</code>。
+距離に比例する項は深度バッファから復元したワールド座標の誤差が遠方ほど大きいため(25章と同じ)、
+<code>1/NdotL</code>は斜入射ほど自己交差しやすいためである(法線方向へ<code>d</code>持ち上げても、
+太陽方向へ進む間に元の面から離れる距離は<code>d·NdotL</code>しか稼げない)。
+</p>
+<p>
+それでも<strong>太陽がほぼ真横から当たる面では可視率がピクセル単位で激しくばらつく</strong>。
+Bistroの石壁(水平の目地が何段も入っている)で実際に発生した。原因は自己交差ではなく、
+レイが面とほぼ平行に長距離を進むため、目地や庇のわずかな凹凸で当たる/当たらないが
+決まってしまうことにある。次の2つを試して確認した:
+</p>
+<ul>
+<li>押し出し量を<code>1/NdotL</code>でスケールする(最大10倍) — <strong>変化なし</strong></li>
+<li>G-Bufferの法線(法線マップ適用後)ではなく深度バッファから復元した幾何法線を使う —
+<strong>ノイズの模様が変わるだけで量は同じ</strong>。そのうえ浅い視線角では±1テクセルのどちらを
+拾うかが不安定になり、幾何法線自体がばらつく</li>
+</ul>
+<p>
+どちらも効かなかったため、押し出し量のスケールだけを残して幾何法線の復元は取り下げた。
+G-Bufferの法線をそのまま使うほうが、<code>DirectLighting.hlsl</code>の太陽の打ち切り
+(<code>sunNdotL &lt;= 0</code>)と「照らされていると判定するピクセル」が完全に一致するという利点もある。
+</p>
+<p>
+<strong>この領域は最終的な絵には出ない。</strong>太陽の寄与は<code>NdotL</code>倍されるため、
+ノイズが出る条件(<code>NdotL ≒ 0</code>)ではその寄与自体がほぼ0だからである。実際、同じ壁を
+最終結果で見るとノイズは見えず、CSMより目地の接触影がはっきり出た絵になっている。
+デバッグ表示「RTシャドウ (太陽の可視率)」を選ぶとこのノイズを直接観察できる。
+</p>
+
+<h3>26.5 ディスクリプタの割り当て</h3>
+<p>
+RTシャドウパスが使う枠は少ない。サンプラーは<code>Load</code>しか使わないためバインドしていない。
+</p>
+<table>
+<thead><tr><th>レジスタ</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>b0</code></td><td>共有の<code>FrameConstants</code>(<code>InvViewProj</code> / <code>CameraPosition</code> / <code>LightDirection</code>を使う)</td></tr>
+<tr><td><code>b1</code></td><td><code>RTShadowConstants</code>(出力サイズ・太陽の角半径(ラジアン)・レイ本数)</td></tr>
+<tr><td><code>t0</code></td><td>TLAS</td></tr>
+<tr><td><code>t1</code> / <code>t2</code></td><td>G-Bufferの法線 / 深度</td></tr>
+<tr><td><code>u0</code></td><td>可視率の出力(<code>R32_Float</code>)</td></tr>
+</tbody>
+</table>
+<p>
+読み手側の<code>DirectLighting.hlsl</code>では<code>t6</code>を使う(<code>t4</code>=シャドウマップ配列、
+<code>t5</code>=ライトグリッド、<code>t8</code>=ライトリスト、<code>t9</code>=BRDF LUTが埋まっているため)。
+このテクスチャは<strong>手法によらず必ずバインドする</strong>。DX12は<code>SetPipelineState</code>の
+たびにルート引数を無効化するため、シェーダーが宣言しているリソースを未バインドのまま
+<code>Draw</code>することはできず、<code>SetTexture</code>は<code>nullptr</code>も受け付けないからである。
+RTシャドウが使えない環境では、読まれないダミーとして深度テクスチャを張っている。
+</p>
+
+<h3>26.6 この段階の制約</h3>
+<ul>
+<li><strong>太陽(平行光)のみ</strong> — ポイント/スポットライトの影は従来どおり
+スクリーンスペースシャドウ(<code>ScreenSpaceShadow.hlsli</code>、16章)が担当する。
+ライトごとにレイを撃つとピクセルあたりのコストがライト数に比例するため、
+予算の切り方を含めて別途設計が要る</li>
+<li><strong>不透明サーフェスのみ</strong> — 26.2のとおり</li>
+<li><strong>すべての三角形を不透明として扱う</strong>(<code>RAY_FLAG_FORCE_OPAQUE</code>)—
+アルファテスト付きのジオメトリを正しく抜くにはbindlessが要る(25章と同じ制約)。
+木の葉は板ポリのまま影を落とす</li>
+<li><strong>デノイザが無い</strong> — 角半径を上げて柔らかい影にするほど、サンプル数を増やさないと
+半影にノイズが出る</li>
+<li><strong>浅い入射角でのノイズ</strong> — 26.4のとおり。最終的な絵には出ない</li>
+<li><strong>シーンは静的前提</strong> — 22章のTLASをそのまま使う</li>
+</ul>
+
+<h4>検証</h4>
+<ul>
+<li><strong>CSMとの比較(本命)</strong> — Bistro Exteriorの同一視点でRTとCSMを撮り比べたところ、
+差分は<strong>石壁の目地(水平の段差)と縁石・庇の接触影に集中</strong>した
+(8bit値で差8超のピクセルが2.98%、最大117)。拡大するとRT側は各段の下に細く濃い接触影が入り、
+CSM側は2048x2048の解像度に埋もれてPCSSのぼかしで薄く広がっているだけだった。
+シャドウマップの解像度に縛られないという狙いどおりの差になっている</li>
+<li><strong>可視率バッファの直視</strong> — デバッグ表示「RTシャドウ (太陽の可視率)」で、
+太陽に向いた面が白・背を向けた面と遮蔽された領域が黒、街路樹の影が地面に落ちていることを確認。
+太陽がほぼ真横から当たる壁面のノイズもここで確認した(26.4)</li>
+<li><strong>Bistro Interior</strong> — RTとCSMの差は8bit値で差8超が176ピクセル(0.01%)しかなかった。
+この屋内シーンは照明がポイントライトと環境光中心で太陽の直接光がほとんど届かないため、
+手法を変えても変わらないのが正しい</li>
+<li><strong>コスト</strong> — Release / Bistro Exterior / レンダー解像度1280x720 / 4サンプルで、
+GPUフレーム時間はCSM 3.69ms → RT 4.60ms(フレームレート制限を切って各5サンプルの平均)。
+RTシャドウ選択時もシャドウマップは描き続けるため、この差はまるごと追加コストになる</li>
+<li><strong>シーン往復</strong> — 8シーン(Bistro Exterior/Interior、White Furnace Test、Light Test、
+Material Test、Multi Model Test、Reflection Probe Test、Sponza)を一巡し、
+AS再構築9回(初期読み込み+8回)、Error/Warning・D3D12デバッグレイヤーの指摘とも0件</li>
+<li><strong>リサイズ</strong> — 900x600 / 1500x950 / 1100x700 / 2400x1500と変えても破綻なし
+(可視率テクスチャの再作成経路)</li>
+<li><strong>DX11</strong> — 影の手法が「なし / カスケードシャドウマップ (CSM)」の2択になり、
+レイトレーシングの選択肢が出ないことを確認。ログに
+「レイトレーシングは利用できません(反射はOff/スクリーンスペース、シャドウはOff/カスケードシャドウマップのみ)」</li>
+<li><strong>ビルド</strong> — 3ソリューション×Debug/Releaseで警告0件。Sample2Dも動作</li>
 </ul>
 </section>
 

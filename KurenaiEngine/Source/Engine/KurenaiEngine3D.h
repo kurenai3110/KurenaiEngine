@@ -109,6 +109,10 @@ namespace Kurenai
         // 「パスを追加する条件」と「後段がその出力を読む条件」がずれると、
         // 実行していないパスの出力(前フレームの残骸)を読むことになるため、判定はこの1か所に置く
         bool ShouldRunRaytracedReflection() const;
+        // このフレームでRTシャドウパスを実行するか。ShouldRunRaytracedReflectionと同じ理由で
+        // 判定を1か所に集約している(パスを追加する条件とDirectLightingがその出力を読む条件が
+        // ずれると、実行していないパスの残骸を影として使ってしまう)
+        bool ShouldRunRaytracedShadow() const;
         // このフレームでHDRのシーン色として後段(自動露出・ブルーム・トーンマップ)が読むべき
         // テクスチャを返す。反射パスを実行したならその出力、していなければm_SceneColor
         RHI::IRHITexture* GetActiveReflectionOutput() const;
@@ -405,6 +409,17 @@ namespace Kurenai
         float m_RTReflectionRoughnessCutoff = Defaults::RTReflectionRoughnessCutoff;
         bool m_RTReflectionShadowRayEnabled = Defaults::RTReflectionShadowRayEnabled;
 
+        // RTシャドウパス: TLASへ太陽の見かけの円盤に向けて影レイを撃ち、可視率(0〜1)を
+        // 単チャンネルのテクスチャへ書くコンピュートパス。DirectLighting.hlslがt6で読み、
+        // CSMのComputeCascadedShadowFactorの戻り値と同じ位置で使う(26章)。
+        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る
+        std::unique_ptr<RHI::IRHIShader> m_RTShadowComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_RTShadowPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_RTShadowTexture;
+        std::unique_ptr<RHI::IRHIBuffer> m_RTShadowConstantBuffer;
+        int32_t m_RTShadowSampleCount = Defaults::RTShadowSampleCount;
+        float m_RTShadowSunAngularRadiusDegrees = Defaults::RTShadowSunAngularRadiusDegrees;
+
         // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
         // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
         // 独立したステージとして置くことで、反射や将来のブルーム/露出制御(M7)がトーンマップの
@@ -595,6 +610,7 @@ namespace Kurenai
             AOOcclusion,        // AO/GIバッファのa(遮蔽率、ブラー後)をグレースケール表示
             AOOcclusionRaw,     // AO/GIバッファのa(遮蔽率、ブラー前の生値)
             ShadowMap,          // m_ShadowDebugCascadeで選択したカスケードのシャドウマップを表示
+            RTShadow,           // RTシャドウの可視率(0=影, 1=光)をグレースケール表示。RTシャドウ未実行時は最終結果
             SSR,                // 反射パスの出力(SceneColor+反射)。反射がOffのときはSceneColorと同一
             HiZ,                // Hi-Zミップチェーンの指定ミップ(m_HiZDebugMipLevel)をグレースケール表示
             IBLIrradiance,      // IBL拡散イラディアンスマップ(TextureCube。現在の視線方向で球面を見回す表示)
@@ -631,7 +647,23 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_ShadowCascadeArray;
         // シャドウパスの各カスケード描画で使う専用の定数バッファ(カスケードごとに値を更新して使い回す)
         std::unique_ptr<RHI::IRHIBuffer> m_ShadowCascadeConstantBuffer;
-        bool m_ShadowEnabled = Defaults::ShadowEnabled;
+
+        // 太陽(平行光)の影の手法。値はDirectLighting.hlslのLightingConstants.LightCount.zへ
+        // そのまま渡すため、シェーダ側の分岐と番号を一致させること
+        enum class ShadowMode
+        {
+            Off,                // 影を落とさない
+            CascadedShadowMap,  // カスケードシャドウマップ+PCSS(ShadowSampling.hlsli)
+            Raytraced,          // RTシャドウ(RTShadow.hlsl)。DX12かつDXR Tier 1.1が要る
+        };
+        // 現在の手法。RaytracedはSupportsRaytracing()がtrueの環境でしか選べない
+        // (UI側で選択不可にし、シーン読み込み時にも非対応ならCascadedShadowMapへ落とす)。
+        //
+        // 【重要】Raytracedでもシャドウパス(CSMの描画)はスキップしない。半透明
+        // (Transparent.hlsl)と反射プローブのキャプチャ(ProbeCapture.hlsl)は
+        // カメラ視点の画面空間テクスチャを使えず、CSMのシャドウマップを必要とするため
+        // (RTシャドウは不透明サーフェスの直接光パスだけを置き換える。26章)
+        ShadowMode m_ShadowMode = Defaults::ShadowEnabled ? ShadowMode::CascadedShadowMap : ShadowMode::Off;
         // PCSS(Percentage Closer Soft Shadows)のライトサイズ。シャドウマップUV空間での
         // ブロッカーサーチ・半影の広さを決める係数(値が大きいほど半影が広く柔らかくなる)
         float m_ShadowLightSize = Defaults::ShadowLightSize;

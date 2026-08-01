@@ -196,18 +196,58 @@ namespace Kurenai::UI
 
     void RenderingPanel::DrawShadowSection()
     {
+        using ShadowMode = KurenaiEngine3D::ShadowMode;
+
         BeginParamGroup();
 
-        CheckboxEx(
-            "シャドウを有効にする###EnableShadow", &m_Engine.m_ShadowEnabled, Defaults::ShadowEnabled,
-            "平行光(太陽)のカスケードシャドウマップを描画する");
+        // 手法の選択。反射(DrawSSRSection)とまったく同じ方針で、レイトレーシング非対応の環境では
+        // 選択肢そのものを出さない
+        static const char* kModeNamesWithRT[] =
+        {
+            "なし", "カスケードシャドウマップ (CSM)", "レイトレーシング (RT)"
+        };
+        static const char* kModeNamesWithoutRT[] = { "なし", "カスケードシャドウマップ (CSM)" };
 
-        if (m_Engine.m_ShadowEnabled)
+        const bool rtAvailable = m_Engine.m_RaytracingAvailable;
+        const char* const* modeNames = rtAvailable ? kModeNamesWithRT : kModeNamesWithoutRT;
+        const int modeCount = rtAvailable ? IM_ARRAYSIZE(kModeNamesWithRT) : IM_ARRAYSIZE(kModeNamesWithoutRT);
+
+        int modeIndex = static_cast<int>(m_Engine.m_ShadowMode);
+        if (ComboEx(
+                "影の手法###ShadowMode", &modeIndex, modeNames, modeCount,
+                static_cast<int>(Defaults::ShadowEnabled ? ShadowMode::CascadedShadowMap : ShadowMode::Off),
+                "平行光(太陽)の影の求め方。CSMはライト視点の深度バッファを4枚描いて深度比較する。"
+                "レイトレーシングはピクセルごとに太陽へ影レイを撃つため、カスケードの境界も"
+                "ピーターパン(接地部の浮き)もアクネも出ない"))
+        {
+            m_Engine.m_ShadowMode = static_cast<ShadowMode>(modeIndex);
+        }
+
+        if (!rtAvailable)
+        {
+            ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
+        }
+
+        if (m_Engine.m_ShadowMode == ShadowMode::CascadedShadowMap)
         {
             SliderFloatEx(
                 "PCSS ライトサイズ###ShadowLightSize", &m_Engine.m_ShadowLightSize, 0.001f, 0.05f,
                 Defaults::ShadowLightSize, "%.4f", 0,
                 "シャドウマップUV空間でのブロッカーサーチ半径。大きいほど半影が広く柔らかくなる");
+        }
+        else if (m_Engine.m_ShadowMode == ShadowMode::Raytraced)
+        {
+            SliderIntEx(
+                "RT サンプル数###RTShadowSampleCount", &m_Engine.m_RTShadowSampleCount, 1, 16,
+                Defaults::RTShadowSampleCount,
+                "1ピクセルあたりに撃つ影レイの本数。デノイザを持たないため、太陽を大きくするほど"
+                "ここを増やさないと半影にノイズが出る");
+            SliderFloatEx(
+                "RT 太陽の角半径###RTShadowSunAngularRadius", &m_Engine.m_RTShadowSunAngularRadiusDegrees,
+                0.0f, 5.0f, Defaults::RTShadowSunAngularRadiusDegrees, "%.3f度", 0,
+                "太陽の見かけの半径。実際の太陽は視直径約0.53度なので既定値はその半分。"
+                "大きくすると半影が広く柔らかくなる");
+            ImGui::TextDisabled("半透明と反射プローブの影は常にCSMを使います");
         }
 
         EndParamGroup();

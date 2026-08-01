@@ -284,8 +284,8 @@ DLLは実行ファイルと同じフォルダに置かれていないと起動�
 
 <p>
 <code>KurenaiEngine3D</code> は、Deferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness+
-深度)によるPBRレンダリング、シャドウマッピング、IBL(環境光)、SSAO/SSIL(間接光)、
-鏡面反射(スクリーンスペース(SSR)またはレイトレーシング)、
+深度)によるPBRレンダリング、平行光の影(カスケードシャドウマップまたはレイトレーシング)、
+IBL(環境光)、SSAO/SSIL(間接光)、鏡面反射(スクリーンスペース(SSR)またはレイトレーシング)、
 複数シーンの切り替え、ImGuiによる設定パネル一式までを内包した<strong>完結型の3Dレンダラー</strong>です。
 構築して <code>Run()</code> を呼ぶだけでウィンドウが開き、ユーザーが閉じるまでブロックします。
 </p>
@@ -326,8 +326,9 @@ ImGuiパネル経由</strong>):
     <li>右クリックを押しながらマウス移動でカメラ回転</li>
     <li><code>F1</code> でImGuiパネルの表示/非表示切り替え</li>
     <li>8つのImGuiパネル(シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ /
-    デバッグ表示 / システム / プロファイラ)で表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/
+    デバッグ表示 / システム / プロファイラ)で表示アセットの切り替え、AO(SSAO・SSIL)/
     スクリーンスペースシャドウ/タイルドライトカリングのON・OFFやパラメータ調整、
+    平行光の影の手法(なし / カスケードシャドウマップ / レイトレーシング)と
     反射の手法(なし / スクリーンスペース / レイトレーシング)の切り替え、
     トーンマップ・ブルーム・自動露出の調整、デバッグ表示バッファの選択、
     時刻(昼夜サイクル)・月の位置・手続き空・EV100(露出)の調整、
@@ -1089,7 +1090,7 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>Yaw</code> / <code>Pitch</code></td><td>float</td><td>-</td><td>0.0</td><td>度</td></tr>
 <tr><td rowspan="4"><code>[Sun]</code></td><td rowspan="4">0〜1</td><td><code>TimeOfDay</code></td><td>float</td><td>-</td><td>12.0</td><td>0〜24。範囲外はエラー</td></tr>
 <tr><td><code>AzimuthDegrees</code></td><td>float</td><td>-</td><td>126.87</td><td>太陽が昇る方位角</td></tr>
-<tr><td><code>Shadow</code></td><td>bool</td><td>-</td><td>true</td><td>シャドウマップの有効/無効</td></tr>
+<tr><td><code>Shadow</code></td><td>bool</td><td>-</td><td>true</td><td>太陽の影の有効/無効。手法(カスケードシャドウマップ / レイトレーシング)は<code>.kscene</code>では指定せず、エンジンが環境に応じて選ぶ(レイトレーシングが使えるならそちら。読み込み後にレンダリングパネルの「影の手法」で切り替えられる)</td></tr>
 <tr><td><code>Enabled</code></td><td>bool</td><td>-</td><td>true</td><td>太陽(平行光)そのものの有効/無効。<code>TimeOfDay</code>を夜にすると環境光の明るさも一緒に落ちるが、こちらは太陽だけを消す</td></tr>
 <tr><td rowspan="8"><code>[Light]</code></td><td rowspan="8">0以上</td><td><code>Type</code></td><td>enum</td><td><strong>必須</strong></td><td>-</td><td><code>Point</code> / <code>Spot</code></td></tr>
 <tr><td><code>Position</code></td><td>float3</td><td><strong>必須</strong></td><td>-</td><td>-</td></tr>
@@ -1360,7 +1361,8 @@ assimp・DirectXTexに加え<code>KurenaiEngineLibrary.vcxproj</code>への依�
 <tr><td>レイトレーシングはDX12専用</td><td>DXRはD3D12の機能のため、DX11バックエンドでは使えない(<code>IRHIDevice::SupportsRaytracing()</code>が常に<code>false</code>を返し、<code>CreateBottomLevelAS</code>/<code>CreateTopLevelAS</code>は<code>nullptr</code>を返す)。DX12でもアダプタがDXR Tier 1.1に達していない場合、あるいはdxcでシェーダーモデル6.5をコンパイルできない場合は同様に<code>false</code>になる。使う前に必ずこの関数で分岐すること(4.2.1参照)</td></tr>
 <tr><td>シェーダーモデルがバックエンドで異なる</td><td>DX12はdxcでSM 6.5、DX11はd3dcompilerでSM 5.0へコンパイルする。SM 6.x固有の機能(<code>RayQuery</code>、wave intrinsicsなど)を使ったシェーダーはDX11では動かないため、両バックエンドで使うシェーダーはSM 5.0の範囲で書くこと(4.2.2参照)</td></tr>
 <tr><td>DX12はdxcのDLLを必要とする</td><td><code>dxcompiler.dll</code>と<code>dxil.dll</code>が実行ファイルの隣に必要(ビルド時に自動コピー)。無い場合はログに警告を出してSM 5.0へフォールバックし、レイトレーシングは無効になる(4.2.2参照)</td></tr>
-<tr><td>ポイント/スポットライトの影</td><td>影を落とさない(シャドウマップは平行光1灯のみ対応)</td></tr>
+<tr><td>ポイント/スポットライトの影</td><td>シャドウマップもレイトレーシングも平行光1灯のみ対応。ポイント/スポットライトの影はスクリーンスペースシャドウ(深度バッファのレイマーチ)でのみ得られる</td></tr>
+<tr><td>レイトレーシングシャドウの適用範囲</td><td>不透明サーフェス(G-Buffer)の直接光パスだけを置き換える。半透明の描画と反射プローブのキャプチャはカメラ視点の画面空間バッファを使えないため、レイトレーシングを選んでいる間もカスケードシャドウマップを描き続けてそちらを使う</td></tr>
 <tr><td>ライトの同時描画数</td><td>最大1024灯まで(実データでの想定はせいぜい数灯〜十数灯)。超過分はカメラに近い順に採用される</td></tr>
 <tr><td>エリアライト</td><td>未対応(4.6.1参照)。球・チューブ・矩形のライトはモデルからもImGuiからも作成できない</td></tr>
 <tr><td>EV100と屋内シーン</td><td>太陽・環境光・ポイント/スポットライトすべてに同じEV100が一様にかかるため、屋外の直射日光を基準にした既定値(EV100=15)のままだと屋内照明だけのシーンは暗くなる。EV100は値が大きいほど明るいシーンを表す実在の写真用語のため、値を上げると描画は暗くなる(実カメラの露出と同様の向き)。シーンに応じてEV100を下げて調整する(自動露出は無い)</td></tr>

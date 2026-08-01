@@ -794,6 +794,13 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params1; // x: 影レイを撃つか(1で撃つ), yzw: 未使用
         };
 
+        // RTShadow.hlsl側のcbuffer RTShadowConstantsと一致させる必要がある
+        struct alignas(16) RTShadowConstants
+        {
+            // xy: 出力サイズ(ピクセル), z: 太陽の見かけの半径(ラジアン), w: 1ピクセルあたりのレイ本数
+            DirectX::XMFLOAT4 Params0;
+        };
+
         // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
         struct alignas(16) GPULight
         {
@@ -1191,12 +1198,28 @@ namespace Kurenai
             rtReflectionConstantBufferDesc.SizeInBytes = sizeof(RTReflectionConstants);
             m_RTReflectionConstantBuffer = m_Device->CreateBuffer(rtReflectionConstantBufferDesc);
 
-            Core::Logger::Info("KurenaiEngine3D", "レイトレーシング反射を利用できます(反射モードでRaytracedを選択可能)");
+            // RTシャドウパス(コンピュートシェーダー。TLASへ太陽の円盤方向の影レイを撃ち可視率を求める)。
+            // RTReflectionと同じくRayQueryを含むためシェーダーモデル6.5が必要
+            RHI::ShaderDesc rtShadowCsDesc;
+            rtShadowCsDesc.Stage = RHI::ShaderStage::Compute;
+            rtShadowCsDesc.FilePath = shaderDirectory + L"RTShadow.hlsl";
+            rtShadowCsDesc.EntryPoint = "CSMain";
+            m_RTShadowComputeShader = m_Device->CreateShader(rtShadowCsDesc);
+            m_RTShadowPipelineState = m_Device->CreateComputePipelineState({ m_RTShadowComputeShader.get() });
+
+            RHI::BufferDesc rtShadowConstantBufferDesc;
+            rtShadowConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+            rtShadowConstantBufferDesc.SizeInBytes = sizeof(RTShadowConstants);
+            m_RTShadowConstantBuffer = m_Device->CreateBuffer(rtShadowConstantBufferDesc);
+
+            Core::Logger::Info(
+                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウでRaytracedを選択可能)");
         }
         else
         {
             Core::Logger::Info(
-                "KurenaiEngine3D", "レイトレーシング反射は利用できません(反射モードはOff/スクリーンスペースのみ)");
+                "KurenaiEngine3D",
+                "レイトレーシングは利用できません(反射はOff/スクリーンスペース、シャドウはOff/カスケードシャドウマップのみ)");
         }
 
         // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
@@ -1542,6 +1565,12 @@ namespace Kurenai
                m_RTReflectionPipelineState != nullptr && m_RTReflectionTexture != nullptr;
     }
 
+    bool KurenaiEngine3D::ShouldRunRaytracedShadow() const
+    {
+        return m_ShadowMode == ShadowMode::Raytraced && m_RaytracingScene.IsValid() &&
+               m_RTShadowPipelineState != nullptr && m_RTShadowTexture != nullptr;
+    }
+
     RHI::IRHITexture* KurenaiEngine3D::GetActiveReflectionOutput() const
     {
         if (m_ReflectionMode == ReflectionMode::ScreenSpace)
@@ -1757,6 +1786,9 @@ namespace Kurenai
             if (m_RaytracingAvailable)
             {
                 m_RTReflectionTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);
+                // RTシャドウの可視率(0〜1のスカラー)。RWTexture2D<float>として書くため単チャンネルの
+                // R32_Floatにする(型付きUAVの読み書きが保証されているのはR32系のみ。AutoExposure.hlsl参照)
+                m_RTShadowTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R32_Float);
             }
             m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
 
@@ -2044,7 +2076,11 @@ namespace Kurenai
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
         m_TimeOfDay = m_Scene.SunTimeOfDay;
         m_SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
-        m_ShadowEnabled = m_Scene.ShadowEnabled;
+        // .ksceneが持つのは「影を出すか」の真偽値だけなので、手法の選択はエンジン側で決める
+        // (反射のm_ReflectionModeと同じ扱い)。レイトレーシングが使える環境ならそちらを既定にする
+        m_ShadowMode = m_Scene.ShadowEnabled
+            ? (m_RaytracingAvailable ? ShadowMode::Raytraced : ShadowMode::CascadedShadowMap)
+            : ShadowMode::Off;
         m_SunEnabled = m_Scene.SunEnabled;
         m_AOEnabled = m_Scene.AOEnabled;
         // .ksceneが持つのは「反射を使うか」の真偽値だけなので、手法の選択はエンジン側で決める。
@@ -2140,7 +2176,10 @@ namespace Kurenai
         mixFloat(m_TimeOfDay);
         mixFloat(m_SunAzimuthDegrees);
         mixBool(m_SunEnabled);
-        mixBool(m_ShadowEnabled);
+        // 影の手法ではなく「影を落とすかどうか」だけを混ぜる。ProbeCapture.hlslが読むのは
+        // 常にカスケードシャドウマップで、そのシャドウマップはRTシャドウ選択時も同じように
+        // 描かれるため、CascadedShadowMapとRaytracedでプローブの焼き上がりは変わらない
+        mixBool(m_ShadowMode != ShadowMode::Off);
         // キャプチャ内の環境項はグローバルIBLを引くため、その強度も焼き上がりに影響する
         mixFloat(m_IBLEnabled ? m_IBLIntensity : 0.0f);
 
@@ -2986,12 +3025,20 @@ namespace Kurenai
 
         // 直接光パスのb1へ渡すスクリーンスペースシャドウのパラメータ。パスのラムダから
         // 値キャプチャできるようここで組み立てておく
+        // 太陽の影の手法。RTシャドウを選んでいてもパスを実行できない状況(高速化構造が無い等)では
+        // カスケードシャドウマップへ落とす。シャドウマップは手法によらず描いてあるため、
+        // 落ちても影が消えることはない
+        const ShadowMode effectiveShadowMode =
+            (m_ShadowMode == ShadowMode::Raytraced && !ShouldRunRaytracedShadow())
+                ? ShadowMode::CascadedShadowMap
+                : m_ShadowMode;
+
         LightingConstants lightingConstants{};
         lightingConstants.LightCount =
         {
             static_cast<uint32_t>(gpuLights.size()),
             static_cast<uint32_t>(std::max(0, m_ScreenSpaceShadowMaxLightsPerPixel)),
-            0u,
+            static_cast<uint32_t>(effectiveShadowMode),
             0u,
         };
         lightingConstants.SSSParams0 =
@@ -3229,7 +3276,10 @@ namespace Kurenai
                     // シェーダー側は深度比較で常に「影なし」と判定する(ComputeShadowFactor参照)
                     cmd->ClearDepth(1.0f);
 
-                    if (m_ShadowEnabled)
+                    // RTシャドウ選択時もここは描く。半透明(Transparent.hlsl)と反射プローブの
+                    // キャプチャ(ProbeCapture.hlsl)はカメラ視点の可視率テクスチャを使えず、
+                    // カスケードシャドウマップを必要とするため(26章)
+                    if (m_ShadowMode != ShadowMode::Off)
                     {
                         CascadeConstants cascadeConstants{};
                         DirectX::XMStoreFloat4x4(&cascadeConstants.ViewProj, DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
@@ -3667,20 +3717,70 @@ namespace Kurenai
             });
         }
 
-        // --- 直接光パス: G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
-        //     計算しHDRで書き出す(常に指定した内部解像度)。DeferredLighting/SSILの両方から読まれる ---
+        // --- RTシャドウパス: TLASへ太陽の見かけの円盤方向へ影レイを撃ち、可視率(0〜1)を
+        //     単チャンネルのテクスチャへ書く。直後の直接光パスがt6でこれを読む ---
+        if (ShouldRunRaytracedShadow())
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "RTShadow",
+                .Reads = { m_GBufferNormal.get(), m_GBufferDepth.get() },
+                .Writes = { m_RTShadowTexture.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    RTShadowConstants rtShadowConstants{};
+                    rtShadowConstants.Params0 =
+                    {
+                        static_cast<float>(m_RenderWidth),
+                        static_cast<float>(m_RenderHeight),
+                        DirectX::XMConvertToRadians(m_RTShadowSunAngularRadiusDegrees),
+                        static_cast<float>(std::max(1, m_RTShadowSampleCount)),
+                    };
+                    cmd->UpdateBuffer(m_RTShadowConstantBuffer.get(), &rtShadowConstants, sizeof(rtShadowConstants));
+
+                    cmd->SetComputePipelineState(m_RTShadowPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(1, m_RTShadowConstantBuffer.get());
+
+                    // レジスタ割り当てはRTShadow.hlsl側の宣言と一致させること。
+                    // このシェーダはLoad(整数座標)しか使わないためサンプラーはバインドしない
+                    cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeTexture(1, m_GBufferNormal.get());
+                    cmd->SetComputeTexture(2, m_GBufferDepth.get());
+
+                    // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+                    cmd->SetComputeUnorderedAccessTexture(0, m_RTShadowTexture.get());
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                },
+            });
+        }
+
+        // 直接光パスがt6へバインドする可視率テクスチャ。DirectLighting.hlslは
+        // LightCount.zがRaytracedのときしか読まないが、DX12はSetPipelineStateのたびに
+        // ルート引数が無効化されるため、シェーダが宣言しているリソースは必ず何かをバインドする
+        // 必要がある(nullptrはSetTextureが受け付けない)。非対応環境では読まれないダミーとして
+        // 深度テクスチャを張る(Presentのデバッグ用t1/t2/t4に既定値を持たせているのと同じ理由)
+        RHI::IRHITexture* const rtShadowTextureForBinding =
+            m_RTShadowTexture ? m_RTShadowTexture.get() : m_GBufferDepth.get();
+
+        // --- 直接光パス: G-Buffer+シャドウマップ(またはRTシャドウの可視率)からPBRの直接光
+        //     (拡散+鏡面反射、シャドウ適用済み)を計算しHDRで書き出す(常に指定した内部解像度)。
+        //     DeferredLighting/SSILの両方から読まれる ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "DirectLight",
             .Reads =
             {
                 m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                 m_ShadowCascadeArray.get(),
+                // RTシャドウの可視率。RTシャドウパスを実行しないフレームではm_GBufferDepthと
+                // 同じポインタになるが、RenderGraphは同じ書き手への多重エッジを弾くため無害
+                rtShadowTextureForBinding,
                 // スペキュラのエネルギー補正(14.9節)でEss=brdf.x+brdf.yを引くためBRDF積分LUTを読む。
                 // Readsに挙げることでRenderGraphがBRDFLUTBakeパス(このLUTのWriter)より後に順序付ける
                 m_BRDFLUTTexture.get(),
             },
             .RenderTargets = { m_DirectLightTexture.get() },
-            .Execute = [this, &gbufferViewport, &gpuLights, &lightingConstants](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding](
+                           RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
@@ -3698,6 +3798,8 @@ namespace Kurenai
                 cmd->SetTexture(2, m_GBufferMaterial.get());
                 cmd->SetTexture(3, m_GBufferDepth.get());
                 cmd->SetTexture(4, m_ShadowCascadeArray.get());
+                // RTシャドウの可視率。LightCount.zがRaytracedのときだけ読まれる
+                cmd->SetTexture(6, rtShadowTextureForBinding);
 
                 // ライトが1つも無いフレームでもSetShaderResourceBufferは必ず呼ぶ(SetPipelineStateが
                 // 毎回ルート引数を無効化するため、シェーダが宣言しているリソースを未バインドのまま
@@ -4307,6 +4409,16 @@ namespace Kurenai
             presentMode = 10;
             presentSourceWidth = kShadowMapSize;
             presentSourceHeight = kShadowMapSize;
+            break;
+        case DebugView::RTShadow:
+            // 可視率(0〜1のスカラー)をそのままグレースケール表示する。RTシャドウを実行していない
+            // フレーム(非対応環境・手法がRaytraced以外)はテクスチャの中身が意味を持たないため、
+            // 最終結果のまま何も切り替えない
+            if (ShouldRunRaytracedShadow())
+            {
+                presentSourceTexture = m_RTShadowTexture.get();
+                presentMode = 5;
+            }
             break;
         case DebugView::SSR:
             // 反射がOffのときは反射パスをスキップしているため、Tonemapパスの入力もSceneColorになり
