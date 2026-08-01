@@ -58,9 +58,19 @@ float3 CubeFaceDirection(uint face, float2 uv)
 // ジオメトリが描かれなかった(深度が書き込まれなかった)ピクセルは、その面・そのテクセルが
 // 表す方向でスカイボックスを引いて埋める。夜間の減衰はここでは掛けない
 // (プローブを使う側のEvaluateIBLが実行時に改めて掛けるため、焼き込み時にも掛けると二重になる)
+// 同時に、キャプチャの2枚目のレンダーターゲット(プローブからの距離)を距離キューブ配列の
+// 該当面へも書き写す(19.12節)。こちらは畳み込まないのでスクラッチのキューブマップを経由せず、
+// プローブごとのスライスへ直接書く。ジオメトリが無かった方向にはkProbeSkyDistanceを入れ、
+// 「その向きには何も無い」ことを表す
 Texture2D CaptureColor : register(t1);
 Texture2D CaptureDepth : register(t2);
+Texture2D CaptureDistance : register(t3);
 RWTexture2DArray<float4> ProbeRadianceOut : register(u0);
+RWTexture2DArray<float> ProbeDistanceOut : register(u1);
+
+// 空(ジオメトリ無し)を表す距離。ReflectionProbe.hlsli側はこの値そのものを判定に使わず、
+// 「十分に遠いので交差もしないし遮蔽もしない」として自然に扱えるだけの大きさがあればよい
+static const float kProbeSkyDistance = 1.0e6f;
 
 [numthreads(8, 8, 1)]
 void CSCopyCaptureToCubeFace(uint3 dispatchThreadID : SV_DispatchThreadID)
@@ -78,19 +88,23 @@ void CSCopyCaptureToCubeFace(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float depth = CaptureDepth.Load(texel).r;
 
     float3 radiance;
+    float distance;
     if (depth <= 0.0f)
     {
         // Reverse-Zのため、何も描かれなかった背景はNDC z=0.0のまま
         const float2 uv = (float2(dispatchThreadID.xy) + 0.5f) / float2(width, height);
         const float3 direction = CubeFaceDirection(Face, uv);
         radiance = SourceSkybox.SampleLevel(MaterialSampler, direction, 0.0f).rgb;
+        distance = kProbeSkyDistance;
     }
     else
     {
         radiance = CaptureColor.Load(texel).rgb;
+        distance = CaptureDistance.Load(texel).r;
     }
 
     ProbeRadianceOut[uint3(dispatchThreadID.xy, 0)] = float4(radiance, 1.0f);
+    ProbeDistanceOut[uint3(dispatchThreadID.xy, 0)] = distance;
 }
 
 RWTexture2DArray<float4> IrradianceOut : register(u0);

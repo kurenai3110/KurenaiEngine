@@ -64,10 +64,31 @@ namespace Kurenai::Defaults
     inline constexpr bool ReflectionProbeEnabled = true;
     inline constexpr bool ProbeParallaxCorrectionEnabled = true;
     inline constexpr bool ProbeBlendingEnabled = true;
+    // 距離キューブを使う2つの機能(19.12節)。どちらも実装・検証は済んでいるが、プローブが疎な
+    // 現状では副作用のほうが大きいため既定は無効。理由はKurenaiEngine3D.hの各メンバのコメント参照
+    inline constexpr bool ProbeDepthParallaxEnabled = false;
+    inline constexpr bool ProbeOcclusionEnabled = false;
+    // 距離キューブのデバッグ表示で白飽和する距離。ProbeTestのホール(24×12)が収まる程度
+    inline constexpr float ProbeDistanceDebugRange = 20.0f;
 
     // --- トーンマップ / ディザ ---
     inline constexpr bool DitherEnabled = true;
     inline constexpr float MesopicStrength = 0.0f;
+
+    // --- TAA(Temporal Anti-Aliasing) ---
+    inline constexpr bool TAAEnabled = true;
+    // 今フレームの色を履歴へ混ぜる割合。0.1なら毎フレーム1割ずつ入れ替わるので、
+    // 静止していれば十数フレームで収束する。上げるとゴーストに強くなる代わりにちらつきが残る
+    inline constexpr float TAABlendWeight = 0.1f;
+    // ジッターの振れ幅の倍率。1.0でピクセル内いっぱい(±0.5px)に散らす
+    inline constexpr float TAAJitterScale = 1.0f;
+    // 蓄積によるボケを補う量。0で無効。TAAの中ではなくTonemapパスで最終出力にのみ掛ける
+    inline constexpr float TAASharpness = 0.35f;
+    // 近傍クリップのボックス幅(近傍の標準偏差の何倍まで履歴を許容するか)。
+    // 小さいほどゴーストに強いがちらつきが増える
+    inline constexpr float TAAClipGamma = 1.25f;
+    // 静止している画素のちらつきを抑える量。0で無効。動いている画素の挙動は変わらない
+    inline constexpr float TAAAntiFlicker = 1.0f;
 
     // --- ブルーム ---
     inline constexpr bool BloomEnabled = true;

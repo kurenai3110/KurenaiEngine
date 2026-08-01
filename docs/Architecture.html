@@ -223,6 +223,7 @@
     <li><a href="#ssrprobe">20. SSRとプローブの合成(加算から差し替えへ)</a></li>
     <li><a href="#procedural-sky">21. 手続き空・月光・昼夜遷移</a></li>
     <li><a href="#occlusion-map">22. マテリアルの遮蔽マップ(ベイク済みAO)</a></li>
+    <li><a href="#taa">23. モーションベクターとTAA</a></li>
   </ol>
 </nav>
 
@@ -2780,6 +2781,13 @@ BRDF積分LUT)をこのパスにもバインドし(<code>t9</code>/<code>t10</co
 <code>EvaluateIBL</code>側のスペキュラオクルージョンは常に1になり、計算そのものを省いている。
 </p>
 <p>
+<b>【後日更新】</b>環境ソースはその後<a href="#reflectionprobe">19章</a>11節で
+<code>ReflectionProbe.hlsli</code>の<code>SampleEnvironment</code>へ寄せ、反射プローブに対応させた。
+上記のグローバルIBL固定は、密閉された室内のガラスにも空が映るという形で実際に破綻していた。
+省いていたスペキュラオクルージョンは<code>ao=1</code>のとき<b>厳密に1</b>になることが確認できたため、
+不透明側と同じ<code>SpecularIBLWeight</code>をそのまま呼ぶ形に統一してある(19.11節)。
+</p>
+<p>
 このバインドにより半透明パスが使うSRVスロットはマテリアル4枚 + シャドウ4枚 + ライトリスト +
 IBL 3枚の計12個になったため、DX12のルートシグネチャの
 <code>kTextureSlotCount</code>を11から12へ引き上げた
@@ -3199,18 +3207,24 @@ Reverse-Zの組み方を変えても自動的に追随させるため)。
 <code>clipEnd.w</code>が最小値を下回る場合はレイを切り詰めている。
 </p>
 
-<h3>18.4 ジッタにフレーム番号を混ぜてはいけない</h3>
+<h3>18.4 ジッタにフレーム番号を混ぜていない理由</h3>
 <p>
 等間隔サンプリングは縞状のバンディングを出すため、ステップ位置をピクセルごとにずらして
 高周波のディザへ変換する(インターリーブド・グラディエント・ノイズ、Jimenez 2014)。
 </p>
 <p>
-<strong>ここでフレーム番号を混ぜてはいけない</strong>。このエンジンにはTAAが無く、
-時間方向に平均化する後段が存在しないため、フレームごとにパターンを変えると
-平均化されないまま画面全体がちらつき続けることになる。ピクセル座標だけの関数にしておけば、
-カメラが止まっている限りノイズも完全に静止し「わずかにディザが乗った静止画」で済む。
-<code>SSIL_VisibilityBitmask.hlsl</code>の<code>stepJitter</code>が同じ理由で
-ピクセル座標のみの関数になっているのと同じ判断である。
+このジッタは<strong>ピクセル座標だけの関数にしてあり、フレーム番号を混ぜていない</strong>。
+こうしておけばカメラが止まっている限りノイズも完全に静止し、
+「わずかにディザが乗った静止画」で済む。
+</p>
+<p>
+23章のTAAを導入した現在は時間方向に平均化する後段が存在するため、フレームごとにパターンを変えて
+実効サンプル数を増やす選択肢自体は生まれている。それでもここを据え置いているのは、
+TAAの近傍クリップ(23.6節)が「今フレームの近傍にあり得ない色を捨てる」仕組みだからである。
+時間変動ノイズはその判定に毎フレーム引っかかって捨てられ、平均化されないままちらつきとして
+残りやすい。実用にするにはスクリーンスペースシャドウ専用の空間デノイザを別途用意する必要があり、
+TAAを入れただけでは成立しない。<code>SSIL_VisibilityBitmask.hlsl</code>の
+<code>stepJitter</code>も同じ判断でピクセル座標のみの関数のままにしている。
 </p>
 
 <h3>18.5 バイアスと厚みの上限</h3>
@@ -3466,6 +3480,16 @@ RHIへの追加(<code>CreateMippedUAVTextureCubeArray</code>、
 定数バッファは<strong><code>FrameConstants</code>の宣言を一切変えずに</strong>、このパス専用のバッファへ
 視点に関わる値だけを差し替えて渡している。
 </p>
+<p>
+<strong>空は「このフレームで実際に使う空」を渡すこと。</strong>ジオメトリが描かれなかったテクセルは
+<code>CSCopyCaptureToCubeFace</code>が空で埋める(19.2節)が、その入力を
+<code>m_SkyboxTexture</code>(<code>.kscene</code>のDDS)に固定すると、手続き空
+(<a href="#procedural-sky">21章</a>)が有効なシーンで<strong>プローブにだけ古い空が焼き込まれ</strong>、
+本編の背景と食い違う。<code>ActiveSkyTexture()</code>がフレーム冒頭に確定させた
+<code>skyTexture</code>を使う。これはレンダーグラフの依存としても正しく、手続き空のときは
+<code>SkyGenerate</code>パスがそのテクスチャのWriterになるため、ベイクが空の焼き直しより
+自動的に後ろへ順序付けられる(<code>probeCaptureReads</code>にも同じものを挙げてある)。
+</p>
 <table>
 <tr><th>フィールド</th><th>渡す値</th><th>理由</th></tr>
 <tr><td><code>ViewProj</code></td><td>プローブのその面のビュー・プロジェクション</td><td>ラスタライズ用</td></tr>
@@ -3619,7 +3643,9 @@ ImGuiの「Parallax Correction」「Probe Blending」(<code>ProbeParams.z</code>
 <ul>
 <li>Boxの回転は<strong>Y軸まわりのみ</strong>。傾いた床・天井を持つ空間は想定していない</li>
 <li><strong>影響範囲の箱と視差補正の投影ボックスを分離できない</strong>(19.7節)。
-壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある</li>
+壁面自体を影響下に入れつつ補正も正確にしたい場合、両者を別々に指定できる必要がある。
+ただし19.12節の距離キューブを使う設定では、箱は「探索範囲の上限」にしか使われなくなるため
+この制約の影響は小さくなる</li>
 <li>更新モードはBaked / OnDemand / Realtimeの3種(19.10節)。ただし<strong>時間分割できているのは
 キャプチャだけで、畳み込みは分散できていない</strong>。キャプチャが0.02 msなのに対し畳み込みは
 約14 msあるため、Realtimeでも6フレームに1回そのスパイクが乗る</li>
@@ -3633,8 +3659,13 @@ SSRが判定できなかった領域(画面外・最大距離まで判定不能)
 位置のプローブを焼くとシャドウマップの範囲外になり影が落ちない。プローブは視界内で焼く前提</li>
 <li>プローブ数の上限は8(<code>kMaxReflectionProbes</code>)。<code>TextureCubeArray</code>は実行時に
 伸縮できないため固定容量で確保している。超過分は警告ログを出して切り捨てる</li>
-<li>半透明フォワードパス(<a href="#transparent">15章</a>)はプローブに対応しておらず、
-グローバルIBLのみを使う</li>
+<li>半透明フォワードパス(<a href="#transparent">15章</a>)も19.11節でプローブへ対応させた。ただし
+<strong>半透明メッシュ自体はプローブへ焼かない</strong>(19.11節)ため、ガラス越しの景色は
+プローブのキューブマップには残らない</li>
+<li>屈折は非対応。<code>refract()</code>でプローブを引くこと自体は容易だが、半透明パスは
+事前乗算アルファで背景と合成しており背景は既にブレンドで透けて見えている。そこへ透過色を足すと
+同じ景色が二重に映る。正しく扱うには不透明描画後の<code>SceneColor</code>をコピーして歪めて
+サンプルするスクリーンスペース屈折が必要で、パス構成そのものの変更になる</li>
 </ul>
 
 <h3>19.9 検証シーン(Reflection Probe Test)</h3>
@@ -3653,8 +3684,8 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
     │   西室(密閉)     ▓  東室     │
     │   暖色の壁+ポイント▓ 寒色の壁  │
     │   ライト+エミッシブ▓ +太陽光   │
-    │  ●   ●   ●   ●   ●   ●   ●  │  ← 金属球列(metallic=1.0, roughness=0.05)
-    └───────────────────┴───────────┘  y=0
+    │  ●   ●  ▨ ●   ●   ● ▨ ●   ●  │  ← ● 金属球列(metallic=1.0, roughness=0.05)
+    └───────────────────┴───────────┘  y=0     ▨ 半透明のガラス板(alphaMode=BLEND)
    x=-12                x=0        x=+12
             床 = 磨いた石(非金属, roughness=0.06)</code></pre>
 
@@ -3667,6 +3698,11 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 <td>環境ソースがプローブからグローバルIBLへ落ちること(19.1節)</td>
 </tr>
 <tr>
+<td>同上。<strong>ガラス板</strong>を見る</td>
+<td>暖色の壁とエミッシブ帯を映していたガラスが<strong>一様な空色</strong>になる</td>
+<td>半透明フォワードパスへのプローブ適用(19.11節)</td>
+</tr>
+<tr>
 <td>Probe Blending を切る</td>
 <td>開口部付近で反射色が<strong>不連続に切り替わる</strong></td>
 <td><code>SelectNearestProbe</code>経路と重み付き合成の差(19.7節)</td>
@@ -3675,6 +3711,22 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 <td>Parallax Correction を切る</td>
 <td>床に映るエミッシブ帯が、個々の帯ではなく<strong>連続した滲みになって壁の接地点からずれる</strong></td>
 <td><code>ParallaxCorrectDirection</code>(19.7節)</td>
+</tr>
+<tr>
+<td>Use Depth Cube を入れる(既定は無効)</td>
+<td>開口部付近の球で、二重に割れていた暖色の弧が<strong>1本にまとまる</strong>。
+代わりに反射像へ<strong>テクセルの階段状のエッジ</strong>が乗る</td>
+<td><code>ParallaxCorrectDirectionDepth</code>(19.12節)</td>
+</tr>
+<tr>
+<td>Occlusion (Reduce Light Leak) を入れる</td>
+<td>球の真下の床が<strong>逆に明るくなる</strong>(重みが落ちた分をより明るい空IBLが埋めるため)</td>
+<td>プローブが疎なときの遮蔽判定の副作用(19.12節)</td>
+</tr>
+<tr>
+<td>Render Targets &rarr; Probe - Distance</td>
+<td>プローブから見た距離のグレースケール。真下の床が最も暗く、妻壁が中間調</td>
+<td>距離キューブのキャプチャ(19.12節)</td>
 </tr>
 <tr>
 <td>Render Targets &rarr; Probe - Influence</td>
@@ -3716,6 +3768,11 @@ glTFを組み立ててKurenaiPackerへ渡す方式)。配置は<code>Scenes/Prob
 読み取れなくなる</li>
 <li><code>ScreenSpaceReflection = false</code>をシーン側で指定している。SSRもプローブと同じく
 「環境の反射」を足すため、両方効いていると差の切り分けができない</li>
+<li><strong>ガラス板の向きは初期カメラからの入射角がおよそ60度になるように決めてある</strong>。
+非金属のフレネル反射は正面(入射角0度)ではF0=0.04と弱く映り込みがほとんど読めない一方、
+真横に近づけると反射は最も強くなるが画面上ではただの細い線にしかならない。実際、最初は板を
+壁と平行に置いて入射角79度になり、効果は出ているのに<strong>数ピクセル幅のスリット</strong>としてしか
+見えなかった。60度前後が「面として見えて、かつ映り込みが読める」両立点になる</li>
 </ul>
 
 <h4>面の巻き順を機械的に決めている理由</h4>
@@ -3757,11 +3814,19 @@ ImGuiの「Update Mode」で3方式を切り替えて比較できるようにし
 <h4>OnDemandの変化検出</h4>
 <p>
 <code>ComputeProbeBakeSignature</code>が、焼き上がりに影響する値
-(時刻・太陽の方位角・太陽/シャドウの有効フラグ・IBL強度・全ライトのパラメータ・プローブ位置)から
+(時刻・太陽の方位角・太陽/シャドウの有効フラグ・月の方位角/仰角・IBL強度・手続き空の有効フラグ・
+自発光の強度倍率・全ライトのパラメータ・プローブ位置)から
 FNV-1aの64bitハッシュを作る。毎フレームの署名と、最後にフルベイクした時点の署名を突き合わせる。
 影響範囲(形状・半径・<code>BoxExtents</code>・<code>BlendDistance</code>)は<strong>含めない</strong> ――
 どこから撮るかを変えないため焼き直しが不要だからである(19.6節)。
 衝突しても起きるのは「本来必要な焼き直しを1回取りこぼす」だけなので、この程度の強度で足りる。
+</p>
+<p>
+<strong>月と手続き空(<a href="#procedural-sky">21章</a>)を後から取り込んだ際、この署名へ追加が要った。</strong>
+月の方位角・仰角は<strong>時刻に連動せず手動指定</strong>なので、太陽の値をいくら混ぜても検出できない。
+太陽が沈むと平行光源1枠が月へ切り替わり(21.4節)、キャプチャの直接光がそのまま変わるため、
+月を動かしたら焼き直す必要がある。手続き空の有効フラグも、切り替えると空そのものが
+<code>.kscene</code>のDDSと入れ替わるので同様である。
 </p>
 
 <h4>時間分割の状態機械</h4>
@@ -3808,6 +3873,325 @@ GPUプロファイラで1プローブぶんのコストが読める。各パス�
 畳み込み自体のサンプル数・解像度を下げることになる。現時点では未実装。
 </p>
 
+<h3>19.11 半透明フォワードパスへの適用</h3>
+<p>
+プローブを入れた当初、<a href="#transparent">15章</a>の半透明フォワードパスは
+グローバルIBL(<code>IrradianceTexture</code> / <code>PrefilteredEnvTexture</code>)を直接引いたままだった。
+これは不透明面より問題が大きい。半透明パスには<strong>SSRが適用されない</strong>ため、
+ガラスにとっては環境ソースが<strong>唯一の映り込み</strong>だからである。実際、Reflection Probe Testの
+密閉された西室にガラス板を置くと、屋内なのに一様な空色を映していた。
+</p>
+<p>
+対処は<code>Transparent.hlsl</code>を<code>ReflectionProbe.hlsli</code>へ寄せて、不透明側
+(<code>DeferredLighting.hlsl</code>)とまったく同じ<code>SampleEnvironment</code>を呼ぶようにするだけである。
+これでプローブの選択・視差補正・ブレンド・イラディアンスの取得元切り替えの規則が、
+半透明と不透明で食い違わなくなる。
+</p>
+
+<h4>レジスタの割り当て</h4>
+<p>
+共有ヘッダーのレジスタ番号はインクルードする側がマクロで与える方式なので(19.7節)、
+このパスで空いているスロットをそのまま使える。半透明パスは<code>t0</code>&ndash;<code>t4</code>と
+<code>t8</code>&ndash;<code>t11</code>を使っているため、<strong><code>t5</code>&ndash;<code>t7</code>が空いていた</strong>。
+DX12のルートシグネチャは<code>t0</code>&ndash;<code>t13</code>を張っているので、RHIの拡張は不要だった。
+</p>
+<table>
+<tr><th>スロット</th><th>Lightingパス</th><th>半透明パス</th></tr>
+<tr><td>グローバルIBL(イラディアンス / プリフィルタ)</td><td>t8 / t9</td><td>t9 / t10</td></tr>
+<tr><td>プローブ(プリフィルタ / イラディアンス)</td><td>t12 / t11</td><td>t5 / t6</td></tr>
+<tr><td>プローブの影響範囲バッファ</td><td>t13</td><td>t7</td></tr>
+</table>
+
+<h4>スペキュラオクルージョンは省略ではなく等価</h4>
+<p>
+以前の<code>EvaluateIBLSplit</code>は「半透明パスはAO/GIバッファを持たないので
+スペキュラオクルージョンは常に1になる」として計算を省いていた。共有ヘッダーの
+<code>SpecularIBLWeight</code>へ寄せるにあたってこれを確認したところ、<strong>省略ではなく厳密に等価</strong>だった。
+</p>
+<pre><code>specularOcclusion = saturate(pow(NdotV + ao, e) - 1 + ao)   // e = exp2(-16 * roughness - 1) &gt; 0
+ao = 1 のとき → saturate(pow(NdotV + 1, e))
+NdotV + 1 ∈ [1, 2] かつ e &gt; 0 なので pow(...) ≥ 1 → saturate で必ず 1</code></pre>
+<p>
+したがって<code>ao=1</code>を渡して同じ関数を呼べば式は変わらない。分岐やコピーを残す理由がないので、
+係数の定義は<a href="#ssrprobe">20章</a>のとおり1か所のままにできた。
+</p>
+
+<h4>半透明メッシュはプローブへ焼かない</h4>
+<p>
+<code>ProbeCapture.hlsl</code>は全メッシュを<strong>不透明として</strong>描く。半透明メッシュをそのまま
+焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに残り、その裏にある本来映るべき
+景色が欠ける。半透明を正しく焼くにはキャプチャ側にも奥から手前への描画順とブレンドが必要で、
+コストに見合わない。そのためキャプチャのループで<code>mesh.IsTransparent</code>のメッシュを飛ばしている
+(プローブに半透明を含めないのは一般的な割り切り)。
+</p>
+
+<h4>副産物: DX11のSRVスロット追跡数がDX12と食い違っていた</h4>
+<p>
+<code>DX11CommandList::kTextureSlotCount</code>が12のまま(DX12は14)になっていた。この値は
+<code>m_BoundPixelSrvs</code>(<a href="#rhi-binding">16章</a>)の要素数で、
+<code>UnbindPixelSrvForResource</code>が「UAVで書く直前に同じリソースのSRVを明示的に外す」ために使う。
+12のままだと<strong>プローブが張る<code>t12</code>/<code>t13</code>が追跡から漏れ</strong>、
+プローブのベイクがUAVで書き込む際のSRVアンバインドがドライバ任せ(警告付きの自動アンバインド)に
+なっていた。<code>SetTexture</code>自体は範囲外スロットも素通しするため描画結果には現れず、
+コメントが「DX12と同じ値にしておくこと」と明記していたにもかかわらず見落とされていたもの。14へ揃えた。
+</p>
+
+<h3>19.12 距離キューブ(視差補正の精密化と遮蔽判定)</h3>
+<p>
+19.7節の視差補正は<strong>「部屋が直方体である」という仮定</strong>に立っている。実際の形状が箱から
+ずれているほど反射像がずれ、強く曲がった鏡面(Reflection Probe Testの金属球)では
+<strong>同じ景色が二重に映る</strong>形で現れる。これを実形状に当てられるようにするため、
+キャプチャ時に色だけでなく<strong>プローブから各方向の被写体までの距離</strong>も焼く。
+</p>
+
+<h4>何をどう格納するか</h4>
+<p>
+キャプチャパスを<strong>MRT 2枚</strong>にし、<code>SV_TARGET1</code>へ
+<code>length(input.WorldPos - CameraPosition.xyz)</code>を出す
+(<code>ProbeCapture.hlsl</code>の<code>CameraPosition</code>にはプローブのワールド座標が入っている
+ため、これがそのまま求める距離になる)。深度バッファから逆算せずMRTで直に出しているのは、
+面ごとの逆投影を組む必要がなく1行で済むためである。
+</p>
+<p>
+格納先は<code>R32_Float</code>の<code>TextureCubeArray</code>(128&sup2; &times; 6面 &times; 8枚 = <strong>3.1 MB</strong>)。
+放射輝度と違い<strong>畳み込まない</strong>ので、スクラッチのキューブマップ(19.2節)を経由せず、
+<code>CSCopyCaptureToCubeFace</code>が<code>u1</code>へプローブのスライスへ直接書き込む。
+ジオメトリが無かった方向には十分大きな値(<code>kProbeSkyDistance = 1e6</code>)を入れておくことで、
+「その向きには何も無い」が交差判定にも遮蔽判定にも自然に効く。
+</p>
+<p>
+サンプラーは<strong><code>DataSampler</code>(Point)</strong>を使う。これは色ではなく<b>データ</b>だからで、
+補間するとシルエットを跨いだタップが実在しない中間距離を作り、そこから求めた交点も遮蔽判定も
+どのジオメトリにも対応しない偽の値になる(<code>Samplers.hlsli</code>の区分に従う)。
+</p>
+
+<h4>視差補正: キューブマップ版のリリーフマッピング</h4>
+<p>
+反射ベクトルRに沿って点を進めながら、<strong>「プローブからその点までの距離」</strong>と
+<strong>「その方向にプローブが記録している距離」</strong>を比べ、後者を追い越した区間を二分探索で詰める
+(等間隔8ステップ + 二分探索4回 = 12タップ)。
+</p>
+<p>
+探索範囲の上限には<strong>箱との交点をそのまま使う</strong>。箱は部屋に合わせて置かれているので
+その外側まで探しても意味が無いうえ、<strong>交差が見つからなかったときのフォールバックが
+自動的に「従来の箱による補正」になる</strong>という利点がある。そのため
+<code>ProbeBoxExitDistance</code>を切り出し、箱版と深度版が同じ交点計算を共有する形にしてある。
+</p>
+<p>
+コストが要るのは低ラフネス面だけだが、実測では<strong>GPUフレーム時間が有効/無効で区別できなかった</strong>
+(3.767 ms / 3.772 ms、1280&times;720・プローブ2個)。
+</p>
+<p>
+<strong>ただしこれも既定では無効にしてある。</strong>二重像は確かに軽減される(下の検証参照)が、
+引き換えにレイマーチの結果へ<strong>距離キューブのテクセルの階段状のエッジ</strong>が乗る。
+実機で見比べた結果「全体として良くなったとは言えない」という判断になったため、
+既定は従来の箱による補正のままにし、比較用のトグルとして残してある。
+式そのものは正しく動いており(距離キューブの値は幾何的な距離と一致している)、
+解像度を上げるか2次モーメントを持って確率的に扱えば伸ばせる余地はある。
+</p>
+
+<h4>遮蔽判定(光漏れの抑制)と、それが既定で無効な理由</h4>
+<p>
+同じ距離キューブで<strong>「そのピクセルはプローブから見えているか」</strong>も判定できる。
+プローブから見て記録面より奥にあるピクセル(=壁の向こう)は影響範囲の重みを落とし、
+落ちた分をグローバルIBLと他のプローブが埋める。
+</p>
+<p>
+判定点は面の法線方向へ<code>bias</code>ぶん浮かせる(DDGIのnormal bias、Majercik et al. 2019)。
+これが無いと<strong>プローブから見えている面が自分自身に遮蔽される</strong>誤判定が起きる。
+記録距離はテクセル中心方向の値なので、そのテクセルが張る幅のぶんだけ手前へずれ得るためで、
+実測では<b>画面全体がわずかに暗くなる</b>という形で現れた(平均差分7.50 &rarr; 5.90/765)。
+</p>
+<p>
+<strong>それでもこの機能は既定で無効にしてある。</strong>差分画像を取ると、変化が集中していたのは
+仕切り壁ではなく<strong>金属球の真下の床</strong>だった。球の下の床はプローブから見て球に隠れているので
+判定としては正しいのだが、落ちた重みを埋めるのが<strong>より明るいグローバルIBL(空)</strong>であるため、
+影であるべき位置に白いハローが出てしまう。
+</p>
+<p>
+これは<strong>プローブが疎であることに起因する構造的な問題</strong>で、
+「落ちた重みを別のプローブが引き取れる密度」があって初めて素直に使える。
+DDGIがプローブをグリッド状に数百個置くのは、まさにこの重みの引き継ぎを成立させるためである。
+効果と副作用を見比べられるトグルとして残し、既定は従来の挙動(遮蔽判定なし)にしてある。
+</p>
+
+<h4>許容誤差の決め方</h4>
+<pre><code>bias = max(0.1, distanceFromProbe * (4 / faceSize))</code></pre>
+<p>
+キューブの1面は<code>faceSize</code>テクセルで[-1,1]をカバーするので、プローブから距離dの位置での
+1テクセルの幅はおよそ<code>2d / faceSize</code>になる。シルエットを跨いだテクセルや量子化で記録距離が
+わずかにずれるぶんを吸収するため<strong>2テクセルぶん</strong>を許容量とする。下限があるのは、
+プローブのすぐ近く(d&rarr;0)で許容量が0に潰れて自己交差してしまうのを防ぐため。
+</p>
+<p>
+<code>faceSize</code>をシェーダーへハードコードせず<code>FrameConstants.ProbeParams2.z</code>で渡しているのは、
+<code>kProbeCaptureSize</code>を変えたときに黙ってずれないようにするため。
+</p>
+
+<h4>LightingパスとSSRパスは必ず同じ条件でコンパイルする</h4>
+<p>
+<a href="#ssrprobe">20章</a>の前提は「SSRが差し引く放射輝度は、Lightingパスが適用したものと定義上一致する」
+ことである。したがって<code>KURENAI_PROBE_DISTANCE_REGISTER</code>は
+<code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>・<code>Transparent.hlsl</code>の3つすべてで定義する。
+片方だけ距離キューブを使うと、SSRが自分の足した覚えのない値を引き算することになる。
+</p>
+<p>
+これにより<code>DeferredLighting.hlsl</code>のSRVスロットが<code>t14</code>まで伸びたため、
+DX11/DX12の<code>kTextureSlotCount</code>とDX12のルートシグネチャのSRVレンジ幅を15へ揃えた
+(3か所で同じ値を持っている。19.11節の食い違いと同じ轍を踏まないよう、いずれのコメントにも
+相互参照を書いてある)。
+</p>
+
+<h4>検証</h4>
+<table>
+<tr><th>確認したこと</th><th>結果</th></tr>
+<tr>
+<td>距離キューブが正しい値で焼けているか(Render Targets &rarr; Probe - Distance)</td>
+<td>プローブ0(<code>x = -5</code>)から西の妻壁(<code>x = -12</code>)方向を読むと<strong>7.06</strong>。
+幾何的な距離7.0と一致する。真下の床(プローブ高さ3.5)は斜めのぶんを含めて4.16</td>
+</tr>
+<tr>
+<td>視差補正が実際に効いているか</td>
+<td>ON/OFFで3D描画領域264,600ピクセル中<strong>68,099(25.7%)が変化</strong>、最大差376/765</td>
+</tr>
+<tr>
+<td>二重像(19.9節の既知の制約)</td>
+<td>開口部付近の球で<strong>二重に見えていた暖色の弧が1本にまとまった</strong>。
+ただし完全には消えない(下の制約参照)</td>
+</tr>
+<tr>
+<td>DX11 / DX12の一致</td>
+<td>3D描画領域264,600ピクセル中<strong>4ピクセル</strong>が最大差3/255で相違(ImGuiパネルの境界)</td>
+</tr>
+<tr>
+<td>White Furnace Test(プローブ0個)の回帰</td>
+<td>球と背景のグレーが171〜172で一様。プローブ数0では距離キューブに一切触れないため期待どおり</td>
+</tr>
+<tr>
+<td>コスト</td>
+<td>GPUフレーム時間3.767 ms(有効) / 3.772 ms(無効)。差は測定ノイズに埋もれる</td>
+</tr>
+</table>
+
+<h4>既知の制約</h4>
+<ul>
+<li><strong>二重像は軽減されるが消えない。</strong>根本原因は「プローブが1点からしか見ていない」ことで、
+視差を正確に補正しても、その1点から見えなかった面の情報はそもそもキューブに無い</li>
+<li>距離キューブをPointでサンプルしているため、レイマーチの結果に<strong>テクセルの階段状のエッジ</strong>が出る。
+補間すればなめらかになるが、それは実在しない中間距離を作ることになるので採らない
+(なめらかにしたいなら解像度を上げるか、DDGIのように距離の2次モーメントを持って
+Chebyshev不等式で確率的に扱う必要がある)。
+<strong>この階段状のエッジと二重像の軽減が釣り合わないため、深度版の視差補正は既定無効</strong></li>
+<li>遮蔽判定も既定無効。プローブが疎なうちは実用にならない</li>
+<li><strong>結果として、距離キューブを使う2つの機能はどちらも既定で無効になっている。</strong>
+現時点でこの3.1 MBは「実装と検証は済んでおり、いつでも比較できる状態で置いてある」ものであって、
+既定の描画には効いていない。実用になるのは、解像度・2次モーメント・プローブ密度のいずれかを
+上げた後になる(いずれもPhase C=DDGIで必要になるものと同じ)</li>
+<li>距離キューブは畳み込んでいないため、<strong>高ラフネス面向けの「ぼけた距離」が無い</strong>。
+視差補正を低ラフネス面に限って使うぶんには問題にならないが、DDGI(Phase C)へ進む際は
+2次モーメント付きの畳み込みが必要になる</li>
+</ul>
+
+<h3>19.13 実シーンへのプローブ配置: 配置数値をパック済みアセットから求める</h3>
+<p>
+19.9節の<code>ProbeTest</code>は、こちらでジオメトリを生成しているため部屋の寸法も照明の位置も
+最初から分かっている。しかし<strong>既製のモデルへプローブとライトを置くときは、そのどちらも分からない</strong>。
+<code>Scenes/BistroInteriorLit.kscene</code>(Bistro内装に照明15灯と反射プローブ3個を配置したシーン)は、
+その数値を<b>目分量ではなくパック済みアセットを直接読んで</b>決めた。同じことを他のモデルでもやる
+ことになるので、手順と落とし穴をここに残す。
+</p>
+
+<h4>まず確認すべきこと: モデルが埋め込みライトを持つか</h4>
+<p>
+<code>PackageHeader</code>(<code>ModelPackage.h</code>、64バイト固定)の<code>LightCount</code>を見る。
+Bistro内装は<strong>0灯</strong>だった。照明器具のジオメトリ(ランプシェード・エミッシブの電球)は
+あるのに光源が1つも無い状態で、<code>.kscene</code>の<code>[Light]</code>で全部置く必要がある。
+glTFの<code>KHR_lights_punctual</code>を持つモデルとは前提が違うので、最初に確認しておく。
+</p>
+
+<h4>部屋の向きは「垂直面の法線のヒストグラム」で測る</h4>
+<p>
+Bistro内装は<strong>世界座標に対して回転している</strong>。床のAABBを見ても回転量は分からないし、
+頂点雲のPCAも頂点密度に引きずられて当てにならない。確実なのは<b>法線</b>である。
+<code>.kgeom</code>の頂点から「壁の高さにあって、法線がほぼ水平」なものだけを集め、
+法線の水平角<code>atan2(n.z, n.x)</code>を180度周期でヒストグラムにすると、
+<strong>62.5度と152.5度にちょうど90度差の二峰</strong>が立った。これが部屋の2つの壁面の向きである。
+床のAABBを回転フレームへ射影し直すと、輪郭が素直な矩形(正確にはL字)になって寸法が読める。
+</p>
+
+<h4><code>Yaw</code>の符号は<code>WorldToProbeLocal</code>から導く(推測しない)</h4>
+<p>
+<code>ReflectionProbe.hlsli</code>の
+<code>WorldToProbeLocal(v, s, c) = (v.x*c - v.z*s, v.y, v.x*s + v.z*c)</code>は、
+world&rarr;localが<strong>+Yaw回転</strong>である。したがってlocal&rarr;worldは&minus;Yaw回転で、
+<strong>箱のローカルX軸は世界のXZ平面で角度&minus;Yawの向きを指す</strong>。
+部屋の軸が&minus;27.5度と+62.5度なら、指定すべきは<code>Yaw = 27.5</code>であって&minus;27.5ではない。
+ここを取り違えると箱が逆向きに傾き、影響範囲は一見それらしく見えるのに視差補正だけが壁から外れる
+(壁際で反射位置がずれる)という、原因の分かりにくい壊れ方をする。
+</p>
+
+<h4>照明器具の位置は頂点のクラスタリングで取れる</h4>
+<p>
+<code>MeshEntry</code>の<code>BaseColorTextureIndex</code>からテクスチャ名を引けば、どのメッシュが
+どの器具かは名前で分かる(<code>Paris_Ceiling_Lamp_01</code>、<code>Paris_Lantern_01A</code>など)。
+ただし同じ器具の複数インスタンスは1メッシュへマージされているため、メッシュのAABBでは
+「4個の吊り下げランプ全体を包む箱」しか得られない。<strong>頂点を近傍でクラスタリングして
+重心を取る</strong>と、インスタンスごとの位置がそのまま出てくる。Bistro内装では
+吊り下げランプ4・バーのランタン4・壁付け照明7の計15個が、それぞれ同じ頂点数のクラスタとして
+きれいに分離した。エミッシブの電球メッシュ(<code>EmissiveFactor</code>が非ゼロのもの)は
+特に薄く小さいので、電球そのものの位置がほぼ点で得られる。
+</p>
+
+<h4>箱の面は「実際の壁と重なる面だけ」外側へ出す</h4>
+<p>
+19.7節の重みは境界でちょうど0になるため、箱の面を壁面ぴったりに置くと<strong>壁自体が重み0になり、
+グローバルIBLへ薄まる</strong>。そこで<b>実際の壁・床・天井と重なる面だけ<code>BlendDistance</code>ぶん
+外へ出し、プローブ同士の継ぎ目は出さない</b>。継ぎ目を出すと重なりが減ってブレンド帯が痩せる。
+<code>BistroInteriorLit</code>は<code>BlendDistance = 0.9</code>に対し、
+プローブ同士の重なりをカウンター側&harr;客席側で3.0、奥の間&harr;メインで2.0取ってある。
+</p>
+
+<h4><code>Position</code>はキャプチャ位置でもある</h4>
+<p>
+Box形状の<code>Position</code>は箱の中心であると同時に<strong>6面を撮る視点</strong>でもあり、
+両者を分離できない。家具の中に埋まると、そのプローブだけ内部の面だらけの環境が焼けてしまう。
+<code>BistroInteriorLit</code>では、椅子の背の最高点(y=2.48)より上・吊り下げランプの下端(y&asymp;2.95)より下の
+<code>y = 2.50</code>に3つとも揃えてある。この2つの数字もクラスタリングで実測した値である。
+</p>
+
+<h4>落とし穴: 夜にするとプローブの検証ができなくなる</h4>
+<p>
+このシーンで最も時間を取られたのがこれで、記録しておく価値がある。
+<code>ComputeSunLighting</code>の昼度は
+<code>dayFactor = Smoothstep(6,7,t) * (1 - Smoothstep(17,18,t))</code>で、
+<strong>18時ちょうどで厳密に0</strong>になる。<code>TimeOfDay</code>を18.0以降にすると
+グローバルIBLがゼロになるため、<b>プローブのON/OFFで最終画像が1画素も変わらなくなる</b>
+(実測: 226,845画素中0画素、最大チャンネル差0)。プローブが壊れているように見えるが、
+「差し替える対象が無い」だけである。
+</p>
+<p>
+同様に、<code>[Scene] IBLIntensity</code>を下げてもプローブの寄与が同じ倍率でスケールされるため、
+「環境光を落として器具光を目立たせる」つもりでこれを下げると、やはりプローブの差が消える。
+<strong>屋内シーンで「照明器具を主役にしたい」動機と「プローブの効果を見せたい」動機は正面から
+衝突する</strong>ということで、<code>BistroInteriorLit</code>は夕方の遷移の終わり際
+(<code>TimeOfDay = 17.9</code>、<code>dayFactor &asymp; 0.028</code>)に置いて両立させている。
+この設定では器具光が支配的なまま、プローブを切ると床と椅子にはっきり空の青が乗る
+(実測: 226,844画素が変化、最大チャンネル差102)。
+</p>
+
+<h4>検証結果(<code>BistroInteriorLit</code>、1280x720・Debug)</h4>
+<table>
+<tr><th>切り替え</th><th>変化した画素数 / 226,845</th><th>最大チャンネル差</th></tr>
+<tr><td>Enable Reflection Probes</td><td>226,844</td><td>102</td></tr>
+<tr><td>Parallax Correction</td><td>179,855</td><td>40</td></tr>
+<tr><td>Screen-Space Shadows</td><td>224,790</td><td>169</td></tr>
+<tr><td>DX11 と DX12 の差</td><td>5,809</td><td>23</td></tr>
+</table>
+<p>
+DX11/DX12の差は鏡面のちらつきと出力ディザの範囲で、他のシーンでの差と同程度。
+Light Tilesのヒートマップにマゼンタ(タイル容量64の超過)は出ない ―― 15灯なので当然だが、
+実シーンでタイルあたりのライト数が容量に対してどれくらい余裕があるかを目で確認する用途には使える。
+</p>
 </section>
 
 <section id="ssrprobe">
@@ -4763,6 +5147,382 @@ TEXCOORD0はレンガや石畳をタイリングして貼るためのUVであり
       ルートシグネチャ・ディスクリプタヒープの変更は不要だった</li>
 </ul>
 
+</section>
+
+<section id="taa">
+<h2>23. モーションベクターとTAA</h2>
+
+<p>
+1ピクセルにつき1サンプルしか撮らないため、斜めのエッジは「その画素に物があるか無いか」の2値になり
+階段状のジャギーになる。MSAAはジオメトリのエッジにしか効かず(シェーディングのエイリアスや
+スペキュラのちらつきは消えない)、ディファードではG-Buffer全体をマルチサンプル化することになって
+帯域が現実的でない。そこで<strong>時間方向にサンプルを蓄積するTAA</strong>を入れた。
+</p>
+
+<h3>23.1 全体の流れ</h3>
+<p>
+毎フレーム投影行列を1ピクセル未満だけずらす(ジッター)と、同じ画素が毎回わずかに違う位置を
+サンプルする。TAAパスが過去の結果を蓄積することで、静止していれば十数フレームで収束し、
+実質的なスーパーサンプリングになる。パスの位置はSSRの直後、自動露出/ブルーム/トーンマップの前:
+</p>
+<pre><code>Lighting → Transparent → SSR → [TAA] → AutoExposure → Bloom → Tonemap → Present</code></pre>
+<p>
+トーンマップ前のHDRの段階で行うのは、露出とブルームがTAAで安定した絵を入力にできるようにするため。
+逆順にするとブルームがフレームごとのちらつきを拾って増幅する。
+</p>
+
+<h3>23.2 速度(モーションベクター)の定義</h3>
+<p>
+<code>m_GBufferVelocity</code>(<code>R16G16_Float</code>、G-Bufferの5枚目)に、
+<strong>UV単位・デジッター済み・カメラ由来のみ</strong>の2Dベクトルとして書く。
+定義は「この画素に映っているものが、前フレームでは画面のどこにいたか」からの変位である。
+</p>
+<pre><code>ClipToUv(c) = (c.xy / c.w) * float2(0.5, -0.5) + 0.5   // NDCのyは上が+1、UVのvは上が0
+
+currentUv  = ClipToUv(mul(worldPos, ViewProj))     - TAAParams.xy   // 今フレームのジッター
+previousUv = ClipToUv(mul(worldPos, PrevViewProj)) - TAAParams.zw   // 前フレームのジッター
+velocity   = currentUv - previousUv</code></pre>
+<p>
+TAA側は <code>historyUv = uv - velocity</code> で履歴を引く。
+</p>
+<p>
+<strong>ジッターを引く理由</strong>: 投影行列にジッターが入っているので、単純に差を取ると
+ジッターの差まで混ざる。しかしジッターは「同じ面のどこをサンプルしたか」の違いであって
+「ものが動いた量」ではない。引かないと履歴を引く位置が毎フレーム±0.5px揺れ、
+<strong>永久に収束しない</strong>。TAAで最も出やすいバグなので、静止時に速度バッファが
+完全に0になることを必ず確認すること(デバッグ表示「モーションベクター」で全面が均一な灰色になる)。
+</p>
+<p>
+<strong>カメラ由来のみでよい理由</strong>: 現在のシーンは全インスタンスが静的で、
+<code>Assets::ModelInstance::World</code> は<code>SceneLoader</code>が読み込み時に計算したあと
+どこからも書き換わらない。したがって前フレームのワールド座標は今と同じでよく、
+違うのはカメラ由来のビュー射影行列だけになる。<code>GBuffer.hlsl</code>の頂点シェーダは
+同じ<code>worldPos</code>を2つの行列で変換するだけで済み、インスタンスごとの
+<code>PrevWorld</code>を持つ必要がない。<strong>動的オブジェクトを入れる場合は
+<code>ObjectConstants</code>に<code>PrevWorld</code>を追加し、
+<code>input.Position</code>をそちらで変換した結果を<code>PrevClip</code>へ渡すこと。</strong>
+</p>
+
+<h3>23.3 ジッターの入れ方(行ベクトル規約での導出)</h3>
+<p>
+Halton(2,3)列の8サンプルを使い、<code>offsetPx = (halton - 0.5) * m_TAAJitterScale</code> を
+NDCへ直して投影行列へ入れる。Halton列の添字は1から始める(添字0はradical inverseの定義上
+どの基数でも0となり、オフセットがピクセルの角へ偏る)。
+</p>
+<pre><code>jitterNdc = float2( 2*offsetPx.x / renderW, -2*offsetPx.y / renderH )
+jitteredProj = Camera::GetProjectionMatrix() * XMMatrixTranslation(jitterNdc.x, jitterNdc.y, 0)</code></pre>
+<p>
+なぜこの掛け算でよいか。<code>Camera::GetProjectionMatrix</code>は行ベクトル規約
+(<code>clip = view * P</code>)で第3列が<code>(0,0,1,0)</code>、すなわち
+<code>clip.w = viewZ</code> である。<code>XMMatrixTranslation</code>は行ベクトル規約では
+第3行が<code>(jx, jy, 0, 1)</code>になるので、<code>P * T</code>を展開すると変化するのは
+要素<code>[2][0]</code>と<code>[2][1]</code>だけ、つまり
+<code>clip.xy += jitterNdc * clip.w</code> になる。w除算後には
+<code>ndc.xy += jitterNdc</code> という定数オフセットとして効く。
+</p>
+<p>
+<strong>ジッター済み行列は全パスで統一すること。</strong> 深度バッファはこの行列でラスタライズ
+されるため、深度から位置を復元する側(SSAO/SSIL/SSR/スクリーンスペースシャドウ)が
+ジッター前の行列を使うと再構成位置がサブピクセルずれる。
+<code>Render()</code>で<code>viewMatrix</code>/<code>jitteredProj</code>を一度だけ確定させ、
+<code>ViewProj</code>/<code>InvViewProj</code>/<code>Proj</code>/深度リニアライズ定数/
+LightCullのProjParamsをすべてそこから導いている。
+なお射影行列の<code>_33</code>/<code>_43</code>(深度リニアライズ係数)と
+<code>_11</code>/<code>_22</code>はジッターでは変化しないため、それらだけを読む箇所は
+値としては影響を受けない。それでも同じ行列から導くようにしてあるのは、
+将来ジッターの入れ方を変えたときに黙ってずれないようにするため。
+</p>
+<p>
+カスケードシャドウ行列とプローブキャプチャはジッターしない。プローブキャプチャは
+<code>FrameConstants</code>をコピーして視点だけ差し替える構造なので、
+<code>PrevViewProj</code>と<code>TAAParams</code>も明示的に潰してある。
+</p>
+
+<h3>23.4 定数バッファの配置</h3>
+<p>
+<code>FrameConstants</code>(b0)の末尾に<code>PrevViewProj</code>(前フレームのジッター済みVP)と
+<code>TAAParams</code>(xy=今フレームのジッターUV、zw=前フレーム)を追加した。
+末尾追加なので既存シェーダのオフセットは変わらないが、<strong><code>GBuffer.hlsl</code>は
+<code>LightColor</code>までしか宣言していなかったため、間の全フィールドを追加宣言する必要があった</strong>
+(cbufferは宣言順でレイアウトが決まり、途中のフィールドを飛ばせない)。
+</p>
+<p>
+一方<strong>TAAパスはb0を使わず、必要な行列も含めて専用の<code>TAAConstants</code>(b1)に全部詰めている</strong>。
+<code>FrameConstants</code>は末尾追加を重ねて700バイトを超えており、末尾の2つを読むためだけに
+全フィールドをもう1本宣言する羽目になるのを避けるため。
+DX12のルートシグネチャはCBVをb0/b1の2枠しか持たないので、b1を使い切らない設計にしておく意味もある。
+</p>
+
+<h3>23.5 空(背景)の速度</h3>
+<p>
+空はG-Bufferに描かれず、ライティングパスがキューブマップから作る。したがって速度バッファは
+0のまま残るが、カメラを回せば空も動く。0のままにすると空だけ収束せず、地平線を境に画質が変わる。
+そこで<code>TAA.hlsl</code>側で深度が遠平面(Reverse-Zなので0)の画素を検出し、
+遠平面上の点を<code>InvViewProj</code>で復元して<code>PrevViewProj</code>で再投影する。
+<strong>このフォールバックにもジオメトリとまったく同じデジッターが必要</strong>で、
+省くと空だけ収束しない。
+</p>
+<p>
+<code>Camera::GetProjectionMatrix</code>は有限の遠平面を持つ(<code>a = n/(n-f) ≠ 0</code>)ため
+深度0の点を復元できる。無限遠のreverse-Zへ変更するとw=0でゼロ除算になるので、
+そのときはここを方向ベクトルの再投影へ書き換えること。
+</p>
+
+<h3>23.6 近傍クリップ(ここで品質が決まる)</h3>
+<p>
+再投影しただけの履歴をそのまま混ぜてはいけない。前フレームでは物陰で見えなかった画素
+(遮蔽の変化)や、速度で表現できないもの(影・反射の移動)では、まったく別の色が返ってくる。
+これがゴーストの正体である。
+</p>
+<p>
+対策として、今フレームの3x3近傍の平均±γσからAABBを作り(分散クリッピング)、
+実際のmin/maxとの積集合を取ったうえで、履歴の色をその内側へ引き戻す。
+色空間はYCoCg——RGBのまま行うと色相ごと動いてしまうため、輝度と色差を別軸として扱う。
+引き戻しは各軸独立の<code>clamp</code>ではなく、<strong>中心から履歴へ向かう線分とAABBの交点まで
+縮める</strong>方式にしている。<code>clamp</code>だとAABBの角へ寄った不自然な色になり色ずれが目立つ。
+γ(<code>m_TAAClipGamma</code>、既定1.25)と積集合を取るかどうか(<code>m_TAAClipMode</code>)は
+UIから変更でき、ゴーストとちらつきのトレードオフを比較できる。
+</p>
+
+<h3>23.6.1 静止時のちらつき抑制</h3>
+<p>
+上記のクリップには副作用がある。<strong>AABBは今フレームの「ジッター済み」近傍から作るので、
+ボックス自体が毎フレーム動く。</strong> 収束済みの履歴がボックスの外へ出ると毎フレーム境界へ
+引き戻され、ブレンド率を下げても消えない強制振動になる。
+</p>
+<p>
+実測(Bistro Exterior、静止カメラ、自動露出オフ、連続フレーム間の平均画素差)で寄与を切り分けた:
+</p>
+<table>
+<tr><th>クリップ</th><th>ブレンド率 α</th><th>平均差分</th><th>最大差分</th></tr>
+<tr><td>分散+min/max</td><td>0.10</td><td>0.185</td><td>64</td></tr>
+<tr><td><strong>無効</strong></td><td>0.10</td><td><strong>0.128</strong></td><td>—</td></tr>
+<tr><td>分散+min/max</td><td>0.05</td><td>0.103</td><td>—</td></tr>
+<tr><td><strong>無効</strong></td><td>0.05</td><td><strong>0.056</strong></td><td>—</td></tr>
+<tr><td>無効</td><td>0.03</td><td>0.036</td><td><strong>7</strong></td></tr>
+</table>
+<p>
+読み取れることは2つある。
+<strong>(1) ちらつきはαにほぼ比例する</strong>——指数移動平均が周期入力に対して持つ残差であり、
+これが主因(約69%)。
+<strong>(2) クリップの寄与はαを下げてもほとんど減らない</strong>(0.057→0.047)——
+上に書いた強制振動なので性質が違う。特に<strong>最大差分はクリップを切ると64から7へ落ちる</strong>ので、
+最悪画素のちらつきはほぼクリップ由来である。
+</p>
+<p>
+そこで<strong>速度が0の画素に限って両方を緩める</strong>。速度0の画素は履歴が同じ画素へそのまま
+対応するので<strong>再投影誤差が原理的に発生せず、クリップは害にしかならない</strong>という理屈である。
+</p>
+<pre><code>speedPixels = length(velocity * レンダー解像度)
+motion      = saturate(speedPixels / 0.5)        // 0.5画素/フレームで完全に「動いている」
+relax       = (1 - motion) * m_TAAAntiFlicker
+
+blendWeight = m_TAABlendWeight * lerp(1, 0.2, relax)   // 静止時は 0.10 → 0.02
+clipGamma   = m_TAAClipGamma   * lerp(1, 8.0, relax)   // 静止時は 1.25 → 10
+
+// 近傍の実在min/maxとの積集合も同じrelaxで外側へ開く
+expand = (neighborMax - neighborMin) * (relax * 4.0)
+boxMin = max(boxMin, neighborMin - expand)
+boxMax = min(boxMax, neighborMax + expand)</code></pre>
+<p>
+<strong>最後の3行を忘れてはいけない。</strong> 実際にこれを落とした実装を一度作ってしまった。
+分散側の箱をいくら広げても、既定の棄却方法(<code>Clamped</code>)は
+<code>[neighborMin, neighborMax]</code>との積集合を取るため<strong>そこで頭打ちになり、
+静止画素は結局ハードに固定されたまま</strong>になる。
+平均差分は下がるのに<strong>最大差分だけが下がらない</strong>(85のまま)という症状で現れ、
+棄却方法を「クリップしない」に切り替えると消える、という切り分けで判明した。
+</p>
+<p>
+しきい値を0.5画素と小さめにしてあるのは、ゆっくりしたパンでもゴースト対策を効かせるため。
+<strong>動いている画素では <code>relax = 0</code> となり、この機能の導入前と計算が完全に一致する。
+したがってゴーストの出方は一切変わらない</strong>(実機でも前進中の輪郭に尾引きが出ないことを確認済み)。
+</p>
+<p>
+なお前進時は画面中心付近(拡大の中心)の速度がほぼ0になるため、そこは静止扱いで緩められる。
+そこは実際に画面上で動いていない領域なので、ゴーストの危険も無い。
+</p>
+
+<h3>23.7 細かいが効く工夫</h3>
+<table>
+<tr><th>工夫</th><th>理由</th></tr>
+<tr><td>履歴サンプルはCatmull-Rom 5タップ</td>
+<td>バイリニアだと「補間した結果をまた補間する」ことになり、ボケが際限なく累積する。
+負のローブでこれを打ち消す。負ローブのぶん結果が負に振れうるので<code>max(.,0)</code>で潰す</td></tr>
+<tr><td>速度は3x3で<strong>最も手前</strong>の画素のものを使う(ディレート)</td>
+<td>物体のシルエットの縁で背景の速度を拾ってゴーストになるのを抑える。
+<strong>Reverse-Zなので「最も手前」は深度値が最大</strong>。minにすると最も遠い
+(多くの場合は空)の速度を拾ってかえって悪化する</td></tr>
+<tr><td>輝度で重み付けしてブレンド</td>
+<td>1画素だけ極端に明るい点(ファイアフライ)が平均を支配して尾を引くのを防ぐ。
+<code>w = 1/(1+輝度)</code></td></tr>
+<tr><td>シャープネスは<strong>TAAの中では一切掛けず、Tonemapパスへ出す</strong></td>
+<td>当初はTAAの入力側へ掛けていた(出力へ掛けると次フレームの履歴に焼き込まれて累積し、
+輪郭が発振するため)。しかしそれも誤りだった。<strong>アンシャープマスクが増幅する高域は、
+ジッターで毎フレーム変動する成分そのもの</strong>で、入力の振れ幅を直接大きくする。
+実測でちらつきが 0.19 → 0.29 と約53%悪化していた。
+Tonemapパスのトーンマップ後のLDR値に対して掛けるようにすれば、どこへもフィードバック
+されないので累積もせず、蓄積の入力も汚さない(23.7.1節)</td></tr>
+<tr><td>プリ露出の変化で履歴をスケールし直す</td>
+<td><code>m_EffectiveExposureEV100</code>は時間順応で毎フレーム変わり、SceneColorの
+スケール自体がフレーム間で変わる。補正しないと露出が動いている間ずっと明るさの尾を引く</td></tr>
+<tr><td>履歴が無効なときは<strong>サンプルすらしない</strong></td>
+<td>作りたてのfp16バッファはNaNを含みうる。<code>lerp(NaN, x, 1.0)</code>もNaNなので、
+ブレンド率を0にするだけでは足りない。一度混入すると以後ずっとその画素に固着する</td></tr>
+</table>
+
+<h3>23.7.1 シャープネスをTonemapパスへ置いた理由</h3>
+<p>
+TAAは蓄積とCatmull-Rom補間でどうしても高域を失うため、アンシャープマスクで戻したい。
+問題はどこで掛けるかで、3案とも欠点が違う。
+</p>
+<table>
+<tr><th>掛ける場所</th><th>結果</th></tr>
+<tr><td>TAAの出力(ブレンド後)</td><td><strong>不可</strong>。出力がそのまま次フレームの履歴になるので
+毎フレーム再適用されて累積し、輪郭が発振してリンギングになる</td></tr>
+<tr><td>TAAの入力(当初の実装)</td><td><strong>不可</strong>。増幅する高域がジッターで変動する成分
+そのものなので、ちらつきが実測で約53%増える(0.19→0.29)</td></tr>
+<tr><td><strong>Tonemapパス(採用)</strong></td><td>蓄積の外なのでどちらの問題も起きない。
+<code>m_TonemapTexture</code>へ出るだけでフィードバック経路が存在しない</td></tr>
+</table>
+<p>
+掛けるのは<strong>トーンマップカーブ適用後のsRGB値</strong>に対してで、HDR値のまま掛けると
+明るいエッジで極端なオーバーシュートが出るため。表示レンジで掛けるのはFidelityFX CAS等と同じ位置である。
+</p>
+<p>
+近傍タップは中心画素とまったく同じ変換を通す必要があるので、
+「SceneColorの1点 → 表示色」の全体(薄明視・露出・ブルーム合成・カーブ・sRGB)を
+<code>ResolveDisplayColor()</code>へ切り出して十字4タップぶん呼んでいる。
+露出やブルームのどれかがタップ側で抜けると高域の推定がずれ、輪郭に色が付く。
+</p>
+<p>
+TAAが無効なときはCPU側が<code>Sharpness = 0</code>を渡し、この分岐ごと素通りする。
+シャープネスはTAAの蓄積で失われた高域を戻すためのものなので、TAAが無ければ掛ける理由が無く、
+またTAA導入前の絵と一致させるためでもある。
+</p>
+
+<h3>23.8 履歴のピンポンとリセット条件</h3>
+<p>
+読みながら同じテクスチャへ書けないため、<code>m_TAAHistory[2]</code>を毎フレーム入れ替える
+(<code>m_TAAHistoryIndex</code>が今フレームの書き込み先)。バッファ精度を<code>Legacy8bit</code>に
+落としても<strong>履歴は常にfp16のまま</strong>にしている。履歴は何十フレームぶんもの蓄積結果であり、
+ここを8bitにすると量子化誤差が積み上がってバンディングになるため。
+</p>
+<p>
+<code>m_TAAHistoryValid</code>を落とすのは (1) 履歴バッファ作成直後(初回起動・バッファ精度変更)
+(2) シーン切り替え (3) TAAのON/OFFトグル、の3つ。(2)は<code>LoadScene</code>=Updateスレッドから
+書くため<code>std::atomic&lt;bool&gt;</code>にしてある。
+</p>
+<p>
+<code>m_TAAPrevViewProjValid</code>は履歴の有効性とは<strong>別管理</strong>にしている。
+シーン切り替えやバッファ精度変更では履歴の中身は捨てるが、カメラ行列そのものは前フレームのものが
+正しく残っているため、速度バッファまで0に潰す必要がない。
+</p>
+<p>
+次フレーム用の状態更新(<code>m_TAAPrevViewProj</code>・<code>m_TAAPrevJitterUv</code>・
+<code>m_TAAPrevEffectiveExposureEV100</code>・履歴インデックスの入れ替え)は
+<code>Render()</code>の末尾、早期returnより後で行う。こうすることで描画しなかったフレームでは
+前フレームの状態が保たれ、履歴テクスチャの中身と行列の対応が1フレームずれない。
+</p>
+
+<h3>23.9 RenderGraphでの順序付け</h3>
+<p>
+<code>RenderGraph</code>はReads/Writesから<strong>RAW(Read-after-Write)とWAW(Write-after-Write)の
+辺だけ</strong>を張る。TAAでは「SSR/Lightingが<code>taaInput</code>を書く → TAAが読む」と
+「TAAが履歴[cur]を書く → AutoExposure/Bloom/Tonemapが読む」のRAW辺だけで正しく並ぶ。
+履歴[prev]は今フレーム誰も書かないので辺は不要。
+</p>
+<p>
+<strong>WAR(Write-after-Read)の辺は張られない。</strong>「あるパスが読んでいるテクスチャを、
+後から登録した別パスが書き潰す」形は保護されない。現在の構成はその形にならないが、
+<code>hdrSceneColor</code>をTAA出力へ差し替えたあとで別パスが<code>m_SceneColor</code>へ
+書き足すような変更を加えると静かに壊れる。
+</p>
+<p>
+また<code>hdrSceneColor</code>の再代入はTAAの<code>AddPass</code>より<strong>後</strong>に書くこと。
+ラムダは値キャプチャなので、順序を間違えるとTAAが自分の出力を読む形になる
+(RenderGraphが循環を検出して例外を投げる)。
+</p>
+
+<h3>23.10 既知の制約</h3>
+<p>
+<strong>半透明メッシュは速度を書かない。</strong> 半透明フォワードパスは
+<code>DepthWriteEnabled=false</code>でSceneColorへ直接合成するため、速度バッファには寄与しない。
+結果として:
+</p>
+<ul>
+<li>半透明が不透明の手前にある画素 → 深度は奥の不透明のものなので、<strong>背後の物体の速度で
+再投影される</strong></li>
+<li>半透明が空の手前にある画素 → 深度0で空のフォールバックが発火し、<strong>遠平面の速度で
+再投影される</strong></li>
+</ul>
+<p>
+現在のシーンは静的で、カメラ回転が主体なら目立たないが、並進時にはずれる。
+正しく扱うには半透明パスにも速度の書き込みを追加する必要がある。
+</p>
+<p>
+また空のフォールバックは有限の遠平面(FarZ)上の点として再投影するため、カメラ並進時に
+空がわずかに視差移動する。厳密には空は方向のみで再投影すべきだが、FarZが十分遠いため
+実害は出ていない。
+</p>
+
+<h3>23.11 検証時に見るべき値</h3>
+<p>
+デバッグ表示「モーションベクター」(Present.hlsl Mode 14)は、UV単位の速度をピクセル単位へ
+換算してから中間灰色を「動いていない」として色付けする。等倍のUV値では1画素の移動が
+0.0005程度で、そのまま色にしても何も見えないため。
+</p>
+<table>
+<tr><th>操作</th><th>正しい見え方</th><th>実測値(Bistro Exterior、平均R/G。128が中立)</th></tr>
+<tr><td>静止</td><td>全面が均一な灰色</td><td>R=127.0 / G=127.0(非中立画素0%)</td></tr>
+<tr><td>右へパン(+yaw)</td><td>内容が左へ流れるのでR&lt;中立</td><td>R=117.7</td></tr>
+<tr><td>左へパン(-yaw)</td><td>R&gt;中立</td><td>R=134.8</td></tr>
+<tr><td>下を向く(-pitch)</td><td>内容が上へ流れるのでG&lt;中立、Rは動かない</td><td>G=115.3 / R=127.0</td></tr>
+<tr><td>前進</td><td>中心から外へ発散する放射状</td><td>左R=118/右R=130、上G=121/下G=133</td></tr>
+</table>
+<p>
+<strong>ジッターを有効にしたまま静止時に完全な中立になること</strong>が、デジッターが正しいことの証明になる。
+</p>
+<p>
+TAA本体の切り分けには、ジッター強度を0にした状態での安定性を見るのが有効である。
+入力が毎フレーム同一になるため、履歴の読み書き・ピンポン・ブレンドが正しければ
+出力は完全に静止する(実測: 連続フレーム間の最大差1〜2/255)。
+ジッターを1.0に戻すと高コントラストのエッジに周期8の残留リップルが出る。
+その内訳と対策は23.6.1節のとおり。
+</p>
+<p>
+静止時のちらつきの推移(Bistro Exterior、静止カメラ、自動露出オフ、連続フレーム間):
+</p>
+<table>
+<tr><th>構成</th><th>平均差分</th><th>最大差分</th><th>差>2 の画素</th></tr>
+<tr><td>当初(シャープをTAA入力へ、抑制なし)</td><td>0.29</td><td>61</td><td>3.5%</td></tr>
+<tr><td>シャープをTonemapへ移動(抑制なし)</td><td>0.235</td><td>77</td><td>2.28%</td></tr>
+<tr><td>+ 静止時抑制(min/maxの開放を忘れた版)</td><td>0.075</td><td>85</td><td>0.31%</td></tr>
+<tr><td><strong>+ min/maxも開放(現在)</strong></td><td><strong>0.047</strong></td><td><strong>15</strong></td><td><strong>0.10%</strong></td></tr>
+</table>
+<p>
+当初比で平均約84%、最大約75%、目に付く画素数で約97%の低減。DX12でも同一(0.046 / 18 / 0.09%)。
+残った差分は<strong>アンテナ・窓枠・樹木の葉といった1画素未満の細い構造の孤立点</strong>に集中しており、
+差分画像で見ると面のエッジからは完全に消えている。
+</p>
+<p>
+副次的に<strong>アンチエイリアス効果自体も上がっている</strong>。静止したエッジで履歴が
+クランプされなくなったぶん実効サンプル数が増えるためで、屋根の稜線の指標は
+50.7%(TAAオフ)→ 約29%(抑制のみ)→ <strong>19.3〜20.0%</strong>(min/max開放後)と改善した。
+</p>
+<p>
+<strong>計測時の注意</strong>: このシーンは反射プローブのリアルタイム更新の位相により、
+<strong>まったく同じ設定でもプロセスを起動し直すと平均差分0.726・最大243・0.42%程度の差が出る</strong>
+(TAAを無効にしても同じだけ出る)。したがって<strong>プロセスを跨いだ画像比較はこの値が下限ノイズ</strong>で、
+それ以下の差を議論してはいけない。ちらつきの計測が意味を持つのは、
+上記のように<strong>同一プロセス内の連続フレーム間</strong>で比較しているためである。
+</p>
+<p>
+アンチエイリアス効果そのものは、シルエットのエッジで「1行で完全に切り替わる列」の割合で測れる。
+Bistro Exteriorの屋根の稜線では<strong>50.7% → 19.3〜20.0%</strong>へ減り、
+その分がグラデーションへ置き換わっている。
+この指標も上記の実行間ばらつきを持ち、同一構成でも1〜2ポイントの幅で振れるため、
+その幅以下の差は意味を持たない。
+</p>
 </section>
 
 </main>

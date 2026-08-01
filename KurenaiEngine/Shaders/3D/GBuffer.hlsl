@@ -11,6 +11,22 @@ cbuffer FrameConstants : register(b0)
     float4 CameraPosition;
     float4 LightDirection;
     float4 LightColor;
+    // ここから下はこのシェーダでは PrevViewProj / TAAParams しか使わない。cbufferのレイアウトは
+    // 宣言順で決まり途中のフィールドを飛ばせないため、末尾の2つのオフセットを合わせる目的で
+    // 間のフィールドも宣言だけしている(C++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること)
+    float4x4 View;
+    float4x4 Proj;
+    float4 AmbientColor;
+    float4 CascadeSplits;
+    float4 ShadowParams;
+    float4 ActiveLightCount;
+    float4 IBLParams;
+    float4 ProbeParams;
+    float4 ProbeParams2;
+    // 前フレームのビュー射影行列(ジッターを含んだまま)。モーションベクターの算出に使う
+    float4x4 PrevViewProj;
+    // TAAのサブピクセルジッター量(UV単位)。xy=今フレーム、zw=前フレーム
+    float4 TAAParams;
 };
 
 // メッシュ単位(将来的にはシーン上のモデルインスタンス単位)の情報。
@@ -64,6 +80,12 @@ struct PSInput
     float2 UV : TEXCOORD0;
     float4 Tangent : TANGENT;
     float2 LightmapUV : TEXCOORD2;
+    // モーションベクター用のクリップ空間座標。SV_POSITIONはラスタライザがw除算と
+    // ビューポート変換を済ませた値になってしまい元のwが取れないため、別途そのまま渡す。
+    // w除算は必ずPS側で行うこと(VS側で割ってから補間すると、遠近補正が効かず
+    // 三角形の内側でずれる)
+    float4 CurClip : TEXCOORD3;
+    float4 PrevClip : TEXCOORD4;
 };
 
 struct PSOutput
@@ -72,7 +94,16 @@ struct PSOutput
     float2 Normal : SV_TARGET1;
     float4 Material : SV_TARGET2;
     float4 Emissive : SV_TARGET3;
+    // モーションベクター(この画素の中身が前フレームから今フレームまでに動いた量、UV単位)
+    float2 Velocity : SV_TARGET4;
 };
+
+// クリップ空間座標を画面UV([0,1]、左上原点)へ変換する。
+// NDCのyは上が+1・下が-1なのに対しUVのvは上が0・下が1なので、yだけ符号を反転する
+float2 ClipToUv(float4 clipPos)
+{
+    return (clipPos.xy / clipPos.w) * float2(0.5f, -0.5f) + 0.5f;
+}
 
 PSInput VSMain(VSInput input)
 {
@@ -86,6 +117,13 @@ PSInput VSMain(VSInput input)
     // 接線は面上の方向ベクトルなので、法線と異なりinverse-transposeではなく
     // Worldの3x3部分そのままで変換する(位置と同じ変換)
     output.Tangent = float4(mul(input.Tangent.xyz, (float3x3)World), input.Tangent.w * TangentSignFlip);
+
+    output.CurClip = output.Position;
+    // 前フレームの投影位置。現在のシーンは全インスタンスが静的(ModelInstance::Worldは
+    // 読み込み時に確定し以降変わらない)なので、前フレームのワールド座標は今と同じでよく、
+    // 違うのはカメラ由来のビュー射影行列だけになる。動的オブジェクトを入れる場合は
+    // ObjectConstantsへPrevWorldを追加し、input.Positionをそちらで変換してからここへ渡すこと
+    output.PrevClip = mul(float4(worldPos, 1.0f), PrevViewProj);
     return output;
 }
 
@@ -130,6 +168,15 @@ PSOutput PSMain(PSInput input)
 
     float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor;
 
+    // モーションベクター。今フレームと前フレームの投影位置をどちらも画面UVへ直し、その差を取る。
+    //
+    // 【ジッターを引く理由】投影行列にはTAAのサブピクセルジッターが入っている。単純に差を取ると
+    // 「ジッターが前フレームからどれだけ変わったか」まで混ざるが、ジッターは同じ面のどこを
+    // サンプルしたかの違いであって、ものが動いた量ではない。両フレームぶんを引いて純粋な移動量に
+    // 戻しておかないと、TAAが履歴を引く位置が毎フレーム±0.5px揺れて永久に収束しない
+    float2 currentUv = ClipToUv(input.CurClip) - TAAParams.xy;
+    float2 previousUv = ClipToUv(input.PrevClip) - TAAParams.zw;
+
     // ベイク済みアンビエントオクルージョン。glTF仕様どおり赤チャンネルを遮蔽率として読み、
     // occlusionTexture.strengthをここで適用してしまう(下流のライティングパスは単に乗算するだけで
     // 済み、strengthの解釈が1か所に閉じる)。遮蔽マップを持たないマテリアルは白1x1が
@@ -150,5 +197,6 @@ PSOutput PSMain(PSInput input)
     // 乗算して使う(専用のG-Bufferを増やさずに済むよう、未使用だった枠を使っている)
     output.Material = float4(metallic, roughness, ao, 0.0f);
     output.Emissive = float4(emissive, 1.0f);
+    output.Velocity = currentUv - previousUv;
     return output;
 }

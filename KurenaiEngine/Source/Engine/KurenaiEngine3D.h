@@ -217,6 +217,14 @@ namespace Kurenai
         // 自発光(エミッシブ)。AO/シャドウの影響を受けずライティングパスで常に加算される
         std::unique_ptr<RHI::IRHITexture> m_GBufferEmissive;
         std::unique_ptr<RHI::IRHITexture> m_GBufferDepth;
+        // モーションベクター(速度バッファ)。「この画素に映っているものが前フレームでは画面の
+        // どこにいたか」をUV単位の2Dベクトルで持ち、TAAが履歴を引く位置の決定に使う。
+        // 現在のシーンは全インスタンスが静的(ModelInstance::Worldは読み込み時に確定し以降
+        // 変わらない)なので、速度の発生源はカメラの移動・回転だけである。そのためGBuffer.hlslは
+        // 同じワールド座標を今フレームと前フレームのビュー射影行列で投影して差を取るだけでよく、
+        // インスタンスごとの前フレームのワールド行列(PrevWorld)を持つ必要がない。
+        // 動的オブジェクトを入れる際はObjectConstantsへPrevWorldを追加すること
+        std::unique_ptr<RHI::IRHITexture> m_GBufferVelocity;
 
         // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         // 計算しHDRで書き出す。DeferredLightingパスとSSIL_VisibilityBitmask.hlslの両方から
@@ -308,6 +316,74 @@ namespace Kurenai
         float m_SSRMaxDistance = Defaults::SSRMaxDistance;
         float m_SSRThickness = Defaults::SSRThickness;
         float m_SSRRoughnessCutoff = Defaults::SSRRoughnessCutoff;
+
+        // TAA(Temporal Anti-Aliasing)パス: SSRの後、露出/ブルーム/トーンマップの前に置く。
+        // 毎フレーム投影行列を1ピクセル未満だけずらして(ジッター)サンプル位置を散らし、
+        // モーションベクターで前フレームの結果を今フレームの画素へ再投影して蓄積する。
+        // 静止していれば十数フレームで収束し、実質的なスーパーサンプリングになる。
+        // 詳細な原理と各工夫の理由はArchitecture.htmlのTAAの章を参照
+        std::unique_ptr<RHI::IRHIShader> m_TAAVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_TAAPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_TAAPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_TAAConstantBuffer;
+        // 履歴バッファ2枚。読みながら同じテクスチャへ書けないため役割を毎フレーム入れ替える。
+        // m_TAAHistoryIndexが今フレームの書き込み先で、もう一方が前フレームの結果(=履歴)。
+        // このパスの出力がそのまま後段(自動露出/ブルーム/トーンマップ)の入力にもなる
+        std::unique_ptr<RHI::IRHITexture> m_TAAHistory[2];
+        uint32_t m_TAAHistoryIndex = 0;
+        // 履歴の内容が信用できるか。falseの間、TAAは履歴を「サンプルすらせず」今フレームの色を返す。
+        // ブレンド率を0にするだけでは不十分で、未初期化fp16のNaNはlerp(NaN, x, 1.0)でもNaNのまま
+        // 伝播し、一度混入すると履歴に固着し続ける。
+        // 落とすのは (1)履歴バッファ作成直後(初回・バッファ精度変更) (2)シーン切り替え
+        // (3)TAAのON/OFFトグル。(2)はUpdateスレッドのLoadSceneから書くためatomicにする
+        std::atomic<bool> m_TAAHistoryValid{ false };
+        // ジッターのサンプル列を進めるフレーム番号(Halton列の添字に使う)
+        uint32_t m_TAAFrameIndex = 0;
+        // 前フレームのビュー射影行列(ジッター済み・転置済み=シェーダへ渡す形のまま)。
+        // Renderスレッドのみが読み書きするため追加の排他は不要。
+        // 履歴テクスチャの有効性(m_TAAHistoryValid)とは意図的に別管理にしている。シーン切り替えや
+        // バッファ精度変更では履歴の中身は捨てるが、カメラ行列そのものは前フレームのものが正しく
+        // 残っているため、速度バッファまで0に潰す必要がない
+        DirectX::XMFLOAT4X4 m_TAAPrevViewProj{};
+        // m_TAAPrevViewProj / m_TAAPrevJitterUv に実際の前フレームの値が入っているか。
+        // 初回のRender()でのみfalseで、以降はずっとtrue
+        bool m_TAAPrevViewProjValid = false;
+        // 前フレームのジッター量(UV単位)。速度からジッター差分を取り除くのに使う
+        DirectX::XMFLOAT2 m_TAAPrevJitterUv{ 0.0f, 0.0f };
+        // 前フレームの実効プリ露出EV100。このエンジンはSceneColorへプリ露出を掛け込んでおり、
+        // その値が時間順応で毎フレーム変わる(m_EffectiveExposureEV100)。補正しないと
+        // 露出が動いている間ずっと履歴が古い明るさを引きずり、明るさの尾を引く
+        float m_TAAPrevEffectiveExposureEV100 = 0.0f;
+        bool m_TAAEnabled = Defaults::TAAEnabled;
+        // 今フレームの色を履歴へ混ぜる割合。小さいほど収束後は滑らかだが、
+        // 遮蔽が変わったときの追従が遅くなる
+        float m_TAABlendWeight = Defaults::TAABlendWeight;
+        // ジッターの振れ幅の倍率(1.0でピクセル内いっぱい)。0にするとジッターが無くなり、
+        // 時間方向のスーパーサンプリング効果だけが消える(再投影と蓄積は残る)
+        float m_TAAJitterScale = Defaults::TAAJitterScale;
+        // 蓄積によるボケを補うシャープネス。TAAの中ではなくTonemapパスで最終出力にのみ掛ける。
+        // TAAの入力へ掛けるとアンシャープマスクが「ジッターで変動する高域」を増幅し、
+        // ちらつきが実測で約53%増える(Architecture.html 23.7節)
+        float m_TAASharpness = Defaults::TAASharpness;
+        // 近傍クリップのボックス幅(近傍の標準偏差の何倍まで履歴を許容するか)。
+        // 小さいほどゴーストに強いがちらつきが増え、大きいほどその逆になる。
+        // これは「動いている画素」に適用される値で、静止した画素ではm_TAAAntiFlickerに応じて広がる
+        float m_TAAClipGamma = Defaults::TAAClipGamma;
+        // 静止している画素に限ってブレンド率を下げ、近傍クリップのボックスを実質無効まで広げる量。
+        // 速度が0の画素では再投影誤差が原理的に起きないためクリップは害にしかならず、
+        // 一方でちらつきはブレンド率とクリップの両方から出る。動いている画素の挙動は
+        // 一切変えないため、ゴーストの出方はこの機能を切ったときと同じままになる。
+        // 0で無効(この機能を入れる前の挙動に戻る)
+        float m_TAAAntiFlicker = Defaults::TAAAntiFlicker;
+        // 近傍クリップの方式。TAA.hlsl側のclipModeと値を一致させること
+        // (TonemapCurveと同じく、列挙の既定値はEngineDefaults.hではなくここへ直接書く)
+        enum class TAAClipMode : int32_t
+        {
+            None = 0,     // クリップしない(切り分け測定用。ゴーストが激しく出るので常用しない)
+            Variance = 1, // 近傍の平均±(標準偏差×ClipGamma)のみ
+            Clamped = 2,  // 上記と近傍の実在min/maxとの積集合(最も狭く、最もゴーストに強い)
+        };
+        TAAClipMode m_TAAClipMode = TAAClipMode::Clamped;
 
         // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
         // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
@@ -509,6 +585,8 @@ namespace Kurenai
             ProbeIrradiance,    // 反射プローブの拡散イラディアンス(m_ProbeDebugIndex番のプローブ)
             ProbePrefilter,     // 反射プローブのプリフィルタ済み鏡面(ミップ0がキャプチャ結果そのもの)
             ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
+            ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
+            MotionVector,       // モーションベクター(速度バッファ)。静止で灰色、動くと移動方向に応じて色が付く
             SceneColorRaw,      // トーンマップ前のHDRシーンカラーをリニアのまま無加工で表示(測定用)
         };
         DebugView m_DebugView = DebugView::Final;
@@ -697,6 +775,10 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCapturePipelineState;
         // 1面ぶんのキャプチャ先(6面で使い回す)。HDRのままキューブへ写すためG-Bufferと違いFloat
         std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureColor;
+        // 同じキャプチャの2枚目のレンダーターゲット(SV_TARGET1)。プローブ位置から描画点までの
+        // ワールド距離をそのまま書く。深度バッファから逆算せずMRTで直に出しているのは、
+        // 面ごとの逆投影を組む必要がなくキャプチャシェーダーの1行で済むため(19.12節)
+        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDistance;
         std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDepth;
         std::unique_ptr<RHI::IRHIShader> m_ProbeCubeCopyComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCubeCopyPipelineState;
@@ -708,6 +790,12 @@ namespace Kurenai
         // 畳み込み結果(プローブごと)。DeferredLighting.hlslがTextureCubeArrayとして読む
         std::unique_ptr<RHI::IRHITexture> m_ProbeIrradianceArray;
         std::unique_ptr<RHI::IRHITexture> m_ProbePrefilteredArray;
+        // 距離キューブ(プローブごと、19.12節)。プローブ位置から各方向の被写体までのワールド距離。
+        // 放射輝度と違い畳み込まないため、キャプチャからキューブ配列へ直接書き込む
+        // (スクラッチのキューブマップを経由しない)。用途は2つ:
+        //   1. 視差補正を「箱との交差」から「実際に記録された形状との交差」へ精密化する
+        //   2. プローブから見えない位置(壁の向こう)のピクセルで重みを落とし、光漏れを抑える
+        std::unique_ptr<RHI::IRHITexture> m_ProbeDistanceArray;
         // プローブの影響範囲(位置・半径)をシェーダーへ渡すStructuredBuffer(t13)
         std::unique_ptr<RHI::IRHIBuffer> m_ProbeBuffer;
         // キャプチャの面ごとに値を更新して使い回すFrameConstants(共有のm_FrameConstantBufferとは別。
@@ -731,9 +819,31 @@ namespace Kurenai
         // プローブ間・プローブとグローバルIBLの重み付きブレンドを行うか。無効にすると
         // 「影響範囲に入る最も近い1つだけを使う」Phase 1相当の挙動になり、境界の継ぎ目を確認できる
         bool m_ProbeBlendingEnabled = Defaults::ProbeBlendingEnabled;
+        // 視差補正に距離キューブを使うか(19.12節)。無効にすると箱との交差だけで補正する
+        // 従来の挙動になる。有効時も、箱との交点を探索範囲の上限として使う点は変わらない。
+        //
+        // 既定でfalseなのは、二重像が軽減される代わりにレイマーチの結果へ距離キューブの
+        // テクセルの階段状のエッジが乗るためで、実機で見比べた結果「全体としては良くなった
+        // とは言えない」という判断になった。式としては正しく動いており(19.12節の検証参照)、
+        // 距離キューブの解像度を上げるか2次モーメントを持って確率的に扱えば伸ばせる余地が
+        // あるので、比較用のトグルとして残してある
+        bool m_ProbeDepthParallaxEnabled = Defaults::ProbeDepthParallaxEnabled;
+        // 距離キューブによる遮蔽判定で、プローブから見えない位置のピクセルの重みを落とすか
+        // (光漏れの抑制)。無効にすると影響範囲に入っているだけで重みが立つ従来の挙動になる。
+        //
+        // 既定でfalseなのは、プローブが疎な現状では副作用のほうが大きいため(19.12節)。
+        // 重みを落とした分はグローバルIBL(=空)が埋めるので、「プローブから見えない」だけの
+        // 場所——例えば球の真下の床——が空の色で明るくなり、影のはずの位置に白いハローが出る。
+        // 落ちた重みを別のプローブが引き取れる密度になって初めて素直に使える機能なので、
+        // 効果と副作用を見比べられるトグルとして残し、既定は従来の挙動にしてある
+        bool m_ProbeOcclusionEnabled = Defaults::ProbeOcclusionEnabled;
         // デバッグ表示(Render Targets)で確認するプローブ番号とプリフィルタのミップレベル
         int32_t m_ProbeDebugIndex = 0;
         int32_t m_ProbePrefilterDebugMipLevel = 0;
+        // 距離キューブのデバッグ表示で白になる距離(メートル相当)。距離は色ではないので
+        // 表示輝度の倍率(1〜64倍)ではなくこちらで正規化する(Present.hlsl Mode 13へは
+        // 逆数をGainとして渡す)
+        float m_ProbeDistanceDebugRange = Defaults::ProbeDistanceDebugRange;
 
         // プローブの更新モード。焼き直しのコストと「シーンの変化への追従」のどちらを取るかの選択で、
         // ImGuiで切り替えて負荷と品質を比較できるようにしてある(19.10節)

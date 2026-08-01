@@ -24,6 +24,10 @@ namespace Kurenai::UI
         {
             DrawTonemapSection();
         }
+        if (ImGui::CollapsingHeader("TAA###TAA"))
+        {
+            DrawTAASection();
+        }
         if (ImGui::CollapsingHeader("ブルーム###Bloom"))
         {
             DrawBloomSection();
@@ -64,6 +68,73 @@ namespace Kurenai::UI
             "出力ディザリング###OutputDithering", &m_Engine.m_DitherEnabled, Defaults::DitherEnabled,
             "最終的な8bit量子化の直前に微小なノイズを加え、暗部グラデーションのバンディングを解消する。"
             "暗部のバンディングは中間バッファの精度ではなくこの8bit量子化が主因であることを実測で確認済み");
+
+        EndParamGroup();
+    }
+
+    void PostProcessPanel::DrawTAASection()
+    {
+        BeginParamGroup();
+
+        if (CheckboxEx(
+                "TAAを有効にする###EnableTAA", &m_Engine.m_TAAEnabled, Defaults::TAAEnabled,
+                "毎フレーム投影行列を1ピクセル未満だけずらし、モーションベクターで前フレームの結果を"
+                "再投影して蓄積する。斜めエッジのジャギーと、スクリーンスペース系パスの"
+                "サンプリングノイズが時間方向に平均されて消える"))
+        {
+            // 切り替えた瞬間に履歴を捨てる。無効の間は履歴が更新されないため、
+            // 落とさずに再度有効化すると数フレーム前の古い絵が一度だけ混ざる
+            m_Engine.m_TAAHistoryValid.store(false, std::memory_order_relaxed);
+        }
+
+        if (m_Engine.m_TAAEnabled)
+        {
+            SliderFloatEx(
+                "履歴ブレンド率###TAABlendWeight", &m_Engine.m_TAABlendWeight, 0.02f, 0.5f, Defaults::TAABlendWeight,
+                "%.3f", 0,
+                "今フレームの色を混ぜる割合。小さいほど多くのフレームが平均されて滑らかになるが、"
+                "遮蔽が変わったときの追従が遅くなり残像が出やすくなる。"
+                "フレームレートに対して固定の割合なので、fpsが変わると残像の長さも変わる");
+            SliderFloatEx(
+                "ジッター強度###TAAJitterScale", &m_Engine.m_TAAJitterScale, 0.0f, 1.5f, Defaults::TAAJitterScale,
+                "%.2f", 0,
+                "サンプル位置を散らす幅の倍率(1.0でピクセル内いっぱい)。0にすると時間方向の"
+                "スーパーサンプリング効果だけが消え、再投影と蓄積によるノイズ低減は残る");
+            SliderFloatEx(
+                "シャープネス###TAASharpness", &m_Engine.m_TAASharpness, 0.0f, 1.0f, Defaults::TAASharpness, "%.2f", 0,
+                "蓄積で失われる高域を戻す量。上げすぎると輪郭に白いふちが出る。"
+                "トーンマップ後の最終出力にのみ掛かるため、上げてもちらつきは増えない");
+
+            SliderFloatEx(
+                "静止時のちらつき抑制###TAAAntiFlicker", &m_Engine.m_TAAAntiFlicker, 0.0f, 1.0f,
+                Defaults::TAAAntiFlicker, "%.2f", 0,
+                "止まっている画素に限って履歴ブレンド率を下げ、履歴の棄却判定を緩める。"
+                "速度0の画素では再投影のずれが原理的に起きないため棄却は害にしかならず、"
+                "エッジのちらつきの主な発生源になっている。"
+                "動いている画素の扱いは変わらないので、ゴーストの出方は0にしたときと同じ");
+
+            using TAAClipMode = KurenaiEngine3D::TAAClipMode;
+            static const char* kClipModeNames[] = { "クリップしない (検証用)", "分散のみ", "分散 + 近傍の最小最大" };
+            int clipModeIndex = static_cast<int>(m_Engine.m_TAAClipMode);
+            if (ComboEx(
+                    "履歴の棄却方法###TAAClipMode", &clipModeIndex, kClipModeNames, IM_ARRAYSIZE(kClipModeNames),
+                    static_cast<int>(TAAClipMode::Clamped),
+                    "再投影した履歴が「今このあたりにあり得ない色」だったときに捨てる判定の作り方。"
+                    "狭いほどゴーストに強いが、判定の箱がジッターで毎フレーム動くぶんちらつきが増える。"
+                    "「クリップしない」は原因の切り分け用で、常用するとゴーストが激しく出る"))
+            {
+                m_Engine.m_TAAClipMode = static_cast<TAAClipMode>(clipModeIndex);
+            }
+
+            if (m_Engine.m_TAAClipMode != TAAClipMode::None)
+            {
+                SliderFloatEx(
+                    "履歴の許容幅###TAAClipGamma", &m_Engine.m_TAAClipGamma, 0.5f, 3.0f, Defaults::TAAClipGamma,
+                    "%.2f", 0,
+                    "近傍の標準偏差の何倍まで履歴を許容するか。下げるとゴーストに強くなる代わりに"
+                    "細い構造物(アンテナ・手すり・窓枠)のちらつきが増える");
+            }
+        }
 
         EndParamGroup();
     }

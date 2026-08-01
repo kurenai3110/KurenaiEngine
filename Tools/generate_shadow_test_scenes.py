@@ -2,7 +2,12 @@
 #
 # ジオメトリは generate_light_test.py が作る LightTest.kmodel(床20x20 + 後ろ壁 + 粗さ違いの球4個)を
 # そのまま流用し、このスクリプトはカメラとライトの配置だけを書いた .kscene を出力する。
-# .kscene はテキスト形式なので KurenaiPacker を通す必要はなく、生成したらそのまま一覧に出る。
+#
+# 出力先は Git 管理下の Scenes/ で、他の手書き .kscene と同じ扱いになる(README「Assetsフォルダに
+# ついて」/ docs/Architecture.html 10.1節)。ランタイムが読むのは Assets/Packed/Scenes/ 側なので、
+# 生成後に KurenaiPacker を通す必要がある:
+#   KurenaiPacker.exe --scene Scenes\ScreenSpaceShadowTest.kscene -o Assets\Packed\Scenes\ScreenSpaceShadowTest.kscene
+#   KurenaiPacker.exe --scene Scenes\ManyLightsTest.kscene        -o Assets\Packed\Scenes\ManyLightsTest.kscene
 #
 # 生成されるシーン:
 #   ScreenSpaceShadowTest.kscene … 接触影が出ているかを目視する用。太陽を切り、
@@ -17,7 +22,7 @@ import argparse
 import os
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(SCRIPT_DIR, "..", "Assets", "Packed", "Scenes")
+OUT_DIR = os.path.join(SCRIPT_DIR, "..", "Scenes")
 
 MODEL_PATH = "LightTest/LightTest.kmodel"
 
@@ -54,9 +59,10 @@ def generate_screen_space_shadow_test():
         "[Camera]",
         "# 球(エンジン座標で z=+4、半径1)を手前から見下ろす",
         "Position = 0.0, 3.5, -3.0",
-        "# ラジアン。Yaw = 0 で +Z 方向、Pitch = -0.25 で約14度見下ろす",
+        "# Yaw/Pitch は度(ドキュメント4.7節)。Yaw は +Z 軸を 0 度・+X 軸を 90 度として測るので、",
+        "# Yaw = 0 で +Z 方向を向く。Pitch = -14.3 で約14度見下ろす",
         "Yaw = 0.0",
-        "Pitch = -0.25",
+        "Pitch = -14.3",
         "",
         "[Sun]",
         "# 太陽のカスケードシャドウを切り、ポイント/スポットの影だけを見る",
@@ -88,8 +94,9 @@ def generate_many_lights_test(grid, intensity, light_range, height):
         "[Camera]",
         "# 床全体を俯瞰し、多数のライトが画面内に収まる位置",
         "Position = 0.0, 6.0, -12.0",
+        "# Yaw/Pitch は度(ドキュメント4.7節)。Pitch = -20.1 で約20度見下ろす",
         "Yaw = 0.0",
-        "Pitch = -0.35",
+        "Pitch = -20.1",
         "",
         "[Sun]",
         "Shadow = false",
