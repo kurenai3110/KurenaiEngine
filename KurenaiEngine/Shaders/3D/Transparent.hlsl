@@ -95,9 +95,10 @@ Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
 Texture2D EmissiveTexture : register(t3);
-// ベイク済みアンビエントオクルージョン(遮蔽マップ)。t4はカスケードシャドウマップ配列が
-// 使っているためt5を使う(GBuffer.hlsl/ProbeCapture.hlslと共通)
-Texture2D OcclusionTexture : register(t5);
+// ベイク済みアンビエントオクルージョン(遮蔽マップ)。GBuffer.hlsl/ProbeCapture.hlslではt5だが、
+// このシェーダーはt5〜t7を反射プローブ(KURENAI_PROBE_PREFILTERED/IRRADIANCE/BUFFER_REGISTER、
+// 上記マクロ参照)に、t11をBRDFLUTTexture(下記)に割り当てて衝突するため、空いているt13を使う
+Texture2D OcclusionTexture : register(t13);
 // カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
 // DirectLighting.hlslと同じ実装を共有しているため、半透明と不透明で影がずれることはない。
 // FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)とDataSamplerを参照するため、
@@ -240,7 +241,9 @@ void EvaluateIBLSplit(
     const float3 kd = (1.0f - fresnelRoughness) * (1.0f - metallic);
 
     // --- 鏡面IBL(split-sum近似) ---
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
+    // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(DeferredLighting.hlslの
+    // EvaluateIBLと同じ。SpecularIBLWeightはfloat3のbrdfを受け取る)
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     // スペキュラオクルージョン・エネルギー補正・IBL強度倍率をまとめて掛ける係数。
     // 半透明パスはスクリーンスペースのAO/GIバッファを持たないが、マテリアルの遮蔽マップは
     // テクスチャなので使えるため、不透明側と同じ関数へそのままaoを渡している

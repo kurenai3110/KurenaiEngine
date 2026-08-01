@@ -3899,6 +3899,7 @@ namespace Kurenai
                 // 反射プローブ(19章)。Lightingパスと同じReflectionProbe.hlsliを共有しており、
                 // 半透明サーフェスも室内なら室内の環境が映るようになる。t0〜t4とt8〜t11が
                 // 埋まっているため、このパスではt5〜t7を割り当てている(Transparent.hlsl冒頭)。
+                // マテリアルの遮蔽マップ(OcclusionTexture)はt5〜t7と衝突するためt13を使う
                 // ProbeParams.xが0でも常にバインドするのはLightingパスと同じ理由
                 cmd->SetTexture(5, m_ProbePrefilteredArray.get());
                 cmd->SetTexture(6, m_ProbeIrradianceArray.get());
@@ -3935,12 +3936,12 @@ namespace Kurenai
                     cmd->SetIndexBuffer(draw.Mesh->IndexBuffer.get());
                     // メッシュごとに変わるマテリアルテクスチャのみ差し替える
                     // (t4のシャドウとt8以降のライト/IBLはループ前に一度バインドしたものがそのまま残る。
-                    // t5だけはマテリアルの遮蔽マップなのでメッシュごとに差し替える)
+                    // t13だけはマテリアルの遮蔽マップなのでメッシュごとに差し替える)
                     cmd->SetTexture(0, draw.Mesh->BaseColorTexture);
                     cmd->SetTexture(1, draw.Mesh->NormalTexture);
                     cmd->SetTexture(2, draw.Mesh->MetallicRoughnessTexture);
                     cmd->SetTexture(3, draw.Mesh->EmissiveTexture);
-                    cmd->SetTexture(5, draw.Mesh->OcclusionTexture);
+                    cmd->SetTexture(13, draw.Mesh->OcclusionTexture);
 
                     cmd->DrawIndexed(draw.Mesh->IndexCount, 0, 0);
                 }

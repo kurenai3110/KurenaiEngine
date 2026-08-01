@@ -396,10 +396,12 @@ Shadows、Fernando 2005)を組み合わせています(<code>DirectLighting.hlsl
 <code>PIXEL_SHADER_RESOURCE</code>へ移せばよくなります)。
 </p>
 <p>
-空いた<code>t5</code>〜<code>t7</code>は意図的に穴のまま残しています。詰めて振り直すと
+空いた<code>t5</code>〜<code>t7</code>は当時は意図的に穴のまま残していました(詰めて振り直すと
 <code>Transparent.hlsl</code>の<code>t8</code>〜<code>t11</code>とそのC++側バインドまで
-同時に書き換える必要があり、ずれると「黙って別のテクスチャを読む」不具合になるためです。
-現状スロット数(<code>kTextureSlotCount = 12</code>)は不足していないため、実利のない変更は避けています。
+同時に書き換える必要があり、ずれると「黙って別のテクスチャを読む」不具合になるため)。
+その後反射プローブ(19.11節)がこのt5〜t7を使うようになり、遮蔽マップ(22.7節)がさらに
+t13を使うようになったため、現在この穴は埋まっています。スロット数も反射プローブ対応で
+<code>kTextureSlotCount = 15</code>まで拡張済みです(<code>DX12CommandList.h</code>参照)。
 </p>
 <p>
 なお、PCSSのサンプリング実装は<code>DirectLighting.hlsl</code>(ディファード)と
@@ -3368,8 +3370,10 @@ UAVバインドの直前に同一リソースのSRVスロットを明示的に�
 <p>
 <code>Transparent.hlsl</code>はb1が<code>ObjectConstants</code>で埋まっておりタイル定数を渡せないため、
 <code>FrameConstants.ActiveLightCount</code>経由で全ライトをループする現状のままとした(15.6節の設計)。
-SSSもカリングも不透明パスのみに適用される。半透明パスはt5〜t7が空いているので、
-深度バッファを追加バインドして同じ共有ヘッダーをincludeすれば追い足せる。
+SSSもカリングも不透明パスのみに適用される。追加するとしたら深度バッファのバインド先が要るが、
+半透明パスは反射プローブ(19章、t5〜t7)・BRDFLUT(t11)・遮蔽マップ(22章、t13)まで埋まっており、
+空いているのはt14のみ(<code>kTextureSlotCount</code>=15。DX12CommandList.h参照)。追加するなら
+t14を使うか、この機能自体の要否を見直す必要がある。
 </p>
 
 <h3>18.14 検証</h3>
@@ -5144,11 +5148,16 @@ TEXCOORD0はレンガや石畳をタイリングして貼るためのUVであり
   <li>ライトマップUVは<b>メッシュ(=マテリアル)ごとに1枚のアトラス</b>。1枚に収まらないメッシュは
       チャートを縮めて詰め直すため、面積の大きなメッシュほどテクセル密度が落ちる</li>
   <li>マテリアルG-Bufferが<code>R8G8B8A8_UNorm</code>のため、遮蔽率は<b>8bitに量子化</b>される</li>
-  <li>テクスチャスロットは<code>t5</code>を使う。マテリアルテクスチャを読む3パス
-      (GBuffer / Transparent / ProbeCapture)で共通して空いている最初のスロットがここで、
-      <code>t4</code>はTransparent/ProbeCaptureがカスケードシャドウマップ配列に使っている。
-      <code>t5</code>はDX11の12スロット・DX12の14スロットいずれの範囲内でもあるため、
-      ルートシグネチャ・ディスクリプタヒープの変更は不要だった</li>
+  <li>テクスチャスロットは<code>GBuffer.hlsl</code>/<code>ProbeCapture.hlsl</code>では<code>t5</code>を使う
+      (<code>t4</code>はカスケードシャドウマップ配列が使っているため)。<code>Transparent.hlsl</code>だけは
+      <code>t5</code>〜<code>t7</code>を反射プローブ(19.11節)、<code>t11</code>をBRDFLUT(20章)が
+      既に使っているため、<b>空いている<code>t13</code>を使う</b>(異なる値になっているのは事故ではなく、
+      パスごとに使用中のスロットが違うため)。<code>t13</code>はDX12の15スロット
+      (<code>kTextureSlotCount</code>、<code>DX12CommandList.h</code>参照)の範囲内のため、
+      ルートシグネチャ・ディスクリプタヒープの変更は不要だった。
+      なお導入時は<code>Transparent.hlsl</code>側の割り当てをt5と誤って重複させており、
+      DX12のデバッグレイヤーが毎フレーム<code>X4500</code>(レジスタ重複)でシェーダコンパイルに
+      失敗する不具合になっていた(t13へ変更して解消)</li>
 </ul>
 
 </section>
