@@ -181,6 +181,8 @@ namespace Kurenai
             Assets::Scene Scene;
             Assets::RaytracingScene RaytracingScene;
             std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
+            // 水面法線マップ版(P2)。SkyboxTextureとまったく同じ扱い
+            std::unique_ptr<RHI::IRHITexture> WaterNormalMapTexture;
         };
 
         // Loaderスレッドが作り、Renderスレッドが受け取る「差し替えられる状態まで仕上がったシーン」
@@ -193,6 +195,10 @@ namespace Kurenai
             // nullptrなら現在のスカイボックスを維持する
             std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
             std::wstring SkyboxPath;
+            // シーンの[Water]NormalMapが読み込み済みのものと異なる場合のみ非nullptr(P2)。
+            // nullptrなら現在の水面法線マップ(またはフラット法線フォールバック)を維持する
+            std::unique_ptr<RHI::IRHITexture> WaterNormalMapTexture;
+            std::wstring WaterNormalMapPath;
             // ComputeInitialCameraの結果(Updateスレッドが所有するm_Cameraへ後で反映される)
             Core::Camera Camera;
         };
@@ -341,6 +347,13 @@ namespace Kurenai
         // ミラーリング(Worldの行列式が負)されたインスタンス用。表裏判定を入れ替えただけで
         // 他は上と同一(ModelInstance::IsMirrored、docs/Architecture.html 10.2節)
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferPipelineStateMirrored;
+        // 水面(ModelInstance::IsWater)専用のピクセルシェーダー・PSO(P2: 水面マテリアル基盤)。
+        // 頂点シェーダーはm_GBufferVertexShaderをそのまま共有する(Water.hlslもGBufferCommon.hlsli
+        // 由来の同じVSMainを使うため)。ミラーリングとの組み合わせ(4値)はGBufferパスの
+        // bindPipelineStateラムダが選ぶ
+        std::unique_ptr<RHI::IRHIShader> m_GBufferWaterPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineStateMirrored;
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
@@ -807,6 +820,7 @@ namespace Kurenai
             SceneColorRaw,      // トーンマップ前のHDRシーンカラーをリニアのまま無加工で表示(測定用)
             DDGIIrradiance,     // DDGIのイラディアンスアトラス(オクタヘドラル2D、22章)
             DDGIDistance,       // DDGIの距離モーメントアトラス(R=平均距離、G=平均二乗距離)
+            WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示(P2)
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -883,6 +897,14 @@ namespace Kurenai
         // 現在m_SkyboxTextureへ読み込んでいるファイルの絶対パス。シーン切り替えのたびに
         // 読み直さずに済むよう比較に使う
         std::wstring m_CurrentSkyboxPath;
+
+        // 水面法線マップ(P2: 水面マテリアル基盤)。m_SkyboxTextureとまったく同じ方針で、
+        // .ksceneの[Water]NormalMapで差し替えられる。空文字列のシーン(NormalMap未指定)では
+        // 1x1のフラット法線(128,128,255,255、CreateSolidColorTexture)へフォールバックする
+        std::unique_ptr<RHI::IRHITexture> m_WaterNormalMapTexture;
+        // 現在m_WaterNormalMapTextureへ読み込んでいる絶対パス。空文字列ならフラット法線
+        // フォールバックを使用中であることを表す(m_CurrentSkyboxPathと同じ比較用途)
+        std::wstring m_CurrentWaterNormalMapPath;
 
         // IBL(Image Based Lighting): m_SkyboxTextureから拡散イラディアンス・プリフィルタ済み鏡面・
         // BRDF積分LUTの3つをコンピュートシェーダーで畳み込む(split-sum近似、Karis 2013)。
@@ -1246,6 +1268,22 @@ namespace Kurenai
         bool m_TimeAutoAdvance = Defaults::TimeAutoAdvance;
         float m_TimeAdvanceSpeed = Defaults::TimeAdvanceSpeed; // 自動進行時、1秒あたりに進む時間(時)
 
+        // 水面(P2: 水面マテリアル基盤)。m_TimeOfDayの自動進行とまったく同じ方針
+        // (RenderThreadMainが同じ場所・同じ条件分岐の形で進める)で、水面法線マップの
+        // スクロール位相を[0,1)で持つ。FrameConstants.TimeParams.xとしてWater.hlslへ渡る
+        float m_WaterScrollOffset = 0.0f;
+        // trueにすると波のスクロールが止まる(m_TimeAutoAdvanceの水面版に近いが、
+        // 「動かす/止める」の2値なので速度ではなくフラグにしている)
+        bool m_WaterTimeFrozen = Defaults::WaterTimeFrozen;
+        // シーン読み込み時にScene::WaterWaveScale等から初期化され、以降はUIで実行時上書きできる
+        // (m_ReflectionModeがScene.SSREnabledから初期化されるのと同じ設計、ApplyLoadedScene参照)。
+        // m_WaterWaveSpeedはm_WaterScrollOffsetの進行速度に使われる。m_WaterWaveScale/
+        // m_WaterWaveStrengthはFrameConstants.TimeParams.y/zとしてWater.hlslへ渡り、層のUV
+        // スケール(kWaterLayerAUvScale等への倍率)・波の振幅(距離減衰のweightへの倍率)に効く
+        float m_WaterWaveScale = Defaults::WaterWaveScale;
+        float m_WaterWaveSpeed = Defaults::WaterWaveSpeed;
+        float m_WaterWaveStrength = Defaults::WaterWaveStrength;
+
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)
         float m_SunAzimuthDegrees = Defaults::SunAzimuthDegrees;
@@ -1396,6 +1434,9 @@ namespace Kurenai
         // Loaderスレッド専有。「今どのスカイボックスを読み込み済みか」の真実。
         // スカイボックスを読むのがこのスレッドだけなので、ここで持つのが最も素直になる
         std::wstring m_LoaderSkyboxPath;
+        // 水面法線マップ版(P2)。m_LoaderSkyboxPathと同じ扱いで、空文字列なら
+        // フラット法線フォールバックを読み込み済みであることを表す
+        std::wstring m_LoaderWaterNormalMapPath;
 
         // DiscoverScenesが起動時に一度だけ列挙する.ksceneの一覧。要素の並びがImGuiのシーン
         // 一覧・LoadSceneのインデックスに対応する(ファイル名の昇順)

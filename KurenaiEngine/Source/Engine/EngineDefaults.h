@@ -58,6 +58,16 @@ namespace Kurenai::Defaults
     inline constexpr float SSRThickness = 0.1f;
     inline constexpr float SSRRoughnessCutoff = 0.6f;
 
+    // --- 水面(P2: 水面マテリアル基盤) ---
+    // .ksceneの[Water]セクションが無い場合の既定値。[Water]がある場合はScene::WaterWaveScale等が
+    // これらの値をリテラル複製した既定値で初期化され、そちらがKurenaiEngine3D::m_WaterWaveScale等を
+    // 上書きする(Scene.hのコメント参照)。ここの値自体は.kscene側のコメントに残した暫定値の流用
+    inline constexpr float WaterWaveScale = 12.0f;
+    inline constexpr float WaterWaveSpeed = 0.03f;
+    inline constexpr float WaterWaveStrength = 0.25f;
+    // シーンに依存しないUIつまみ(Scene::WaterWaveScale等と違い.ksceneのキーを持たない)
+    inline constexpr bool WaterTimeFrozen = false;
+
     // --- レイトレーシング反射(DX12かつDXR Tier 1.1対応時のみ選択できる) ---
     // 最大レイ距離はシーン読み込み時に対角長から決め直す(SSRのMaxDistanceと同じ扱い)。
     // SSRより長いのは、画面外まで追えるRTでは短く切ると反射が途中で空へ抜けてしまうため

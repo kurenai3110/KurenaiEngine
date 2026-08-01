@@ -153,6 +153,11 @@ namespace Kurenai
             // アトラスの中身を露出に依存しない物理量に保つ。
             // R32で確保してある(22.6節)ので、夜の小さな値でもfp32の範囲に余裕がある
             DirectX::XMFLOAT4 DDGIParams4;
+            // 水面用(さらに末尾に追加、P2: 水面マテリアル基盤)。x=水面法線マップのスクロール
+            // オフセット(0〜1、CPU側で既にfmod済み)、yzw=未使用。Water.hlslのPSMainが読む。
+            // 末尾に足す限り、既に宣言済みのシェーダのcbufferオフセットは1バイトも動かない
+            // (DDGIParams0〜4を末尾に追加したときと同じ規約)
+            DirectX::XMFLOAT4 TimeParams;
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -706,6 +711,12 @@ namespace Kurenai
             // が同じ位置で宣言している。Shadow.hlslは深度しか書かないため先頭までしか宣言していないが、
             // 定数バッファの末尾を読まないだけなのでレイアウトの不一致にはならない(14章参照)
             float BaseColorFactor[4];
+            // マテリアル種別ID(末尾に追加、P2: 水面マテリアル基盤)。0=通常マテリアル、
+            // 1=水面(kMaterialIDWater、Shaders/3D/GBufferCommon.hlsliの値と一致させること)。
+            // 末尾に足す限り、既に宣言済みのシェーダのcbufferオフセットは1バイトも動かない
+            // (Shadow.hlsl等が先頭までしか宣言していなくても影響しない、という上のBaseColorFactorの
+            // コメントと同じ理由)
+            float MaterialID;
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -736,6 +747,9 @@ namespace Kurenai
             constants.BaseColorFactor[1] = mesh.BaseColorFactor[1];
             constants.BaseColorFactor[2] = mesh.BaseColorFactor[2];
             constants.BaseColorFactor[3] = mesh.BaseColorFactor[3];
+            // 水面(kMaterialIDWater、Shaders/3D/GBufferCommon.hlsliと一致させること)。
+            // 水面以外は0.0f(通常マテリアル)のまま
+            constants.MaterialID = instance.IsWater ? 1.0f : 0.0f;
             return constants;
         }
 
@@ -1141,6 +1155,15 @@ namespace Kurenai
         gbufferPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
         gbufferPsDesc.EntryPoint = "PSMain";
         m_GBufferPixelShader = m_Device->CreateShader(gbufferPsDesc);
+
+        // 水面(ModelInstance::IsWater)専用のピクセルシェーダー(P2: 水面マテリアル基盤)。
+        // 頂点シェーダーはWater.hlslもGBufferCommon.hlsli由来の同じVSMainを使うため、
+        // m_GBufferVertexShaderをそのまま共有する(専用のVSは作らない)
+        RHI::ShaderDesc gbufferWaterPsDesc;
+        gbufferWaterPsDesc.Stage = RHI::ShaderStage::Pixel;
+        gbufferWaterPsDesc.FilePath = shaderDirectory + L"Water.hlsl";
+        gbufferWaterPsDesc.EntryPoint = "PSMain";
+        m_GBufferWaterPixelShader = m_Device->CreateShader(gbufferWaterPsDesc);
 
         // G-BufferのPSOはEmissiveのフォーマットがバッファ精度に依存するため、
         // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
@@ -1563,6 +1586,12 @@ namespace Kurenai
         m_CurrentSkyboxPath = m_DefaultSkyboxPath;
         m_SkyboxTexture = m_Device->CreateTextureFromFile(m_CurrentSkyboxPath, false);
 
+        // 水面法線マップの既定(P2)。.ksceneに[Water]NormalMapが無いシーンではこのフラット法線
+        // (128,128,255,255=接線空間で真上を向く法線)がWater.hlslのt6へバインドされ続ける。
+        // ModelLoader.cppが法線マップ未指定のマテリアルに使うプレースホルダーと同じ値
+        m_CurrentWaterNormalMapPath.clear();
+        m_WaterNormalMapTexture = m_Device->CreateSolidColorTexture(128, 128, 255, 255);
+
         CreateSamplerSets();
 
         // IBL(Image Based Lighting)の3つの畳み込み結果を保持するテクスチャと、それを生成する
@@ -1792,6 +1821,9 @@ namespace Kurenai
         // (初回フレームより前にシーンが揃う従来の挙動を保つ)。
         // m_LoaderSkyboxPathはCreateSceneResourcesが読み込んだ既定スカイボックスに合わせておく
         m_LoaderSkyboxPath = m_CurrentSkyboxPath;
+        // m_LoaderWaterNormalMapPathも同様(P2)。CreateSceneResourcesはフラット法線フォールバック
+        // (m_CurrentWaterNormalMapPath = 空文字列)から始めるため、ここも空文字列で揃える
+        m_LoaderWaterNormalMapPath = m_CurrentWaterNormalMapPath;
         // 通常は0(ファイル名昇順の先頭)。グラフィックスAPIの切り替えで作り直された場合だけ、
         // 呼び出し側が切り替え前のシーン番号を渡してくる。範囲外なら先頭へ落とす
         // (シーン一覧はDiscoverScenesが空でないことを保証済み)
@@ -1926,6 +1958,15 @@ namespace Kurenai
             // 同じ構成にできるよう両バックエンドともPSOを2本持つ方式にしている
             gbufferPipelineDesc.FrontCounterClockwise = true;
             m_GBufferPipelineStateMirrored = m_Device->CreatePipelineState(gbufferPipelineDesc);
+
+            // 水面(ModelInstance::IsWater)用。頂点シェーダー・入力レイアウト・レンダーターゲット
+            // フォーマットは通常のG-Bufferとまったく同じで、ピクセルシェーダーだけをWater.hlslへ
+            // 差し替える。ミラーリングとの組み合わせも通常PSOと同じ方式で2本持つ
+            gbufferPipelineDesc.FrontCounterClockwise = false;
+            gbufferPipelineDesc.PixelShader = m_GBufferWaterPixelShader.get();
+            m_GBufferWaterPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
+            gbufferPipelineDesc.FrontCounterClockwise = true;
+            m_GBufferWaterPipelineStateMirrored = m_Device->CreatePipelineState(gbufferPipelineDesc);
 
             // SSAOパス
             RHI::PipelineStateDesc ssaoPipelineDesc;
@@ -2417,6 +2458,44 @@ namespace Kurenai
             }
         }
 
+        // [Water]NormalMapで水面法線マップを差し替える(P2: 水面マテリアル基盤)。
+        // スカイボックスと同じ「このスレッドだけが現在の読み込み済みパスを知っている」方式だが、
+        // 空文字列が「1x1のフラット法線フォールバックを使う」という有効な指定である点が異なる
+        // (スカイボックスの空文字列は「既定のSky.ddsを使う」という意味で、常に何らかのファイルを
+        // 読む。水面はファイルを読まない状態そのものが正しいシーンがあるため、ここは分岐が要る)
+        const std::wstring& desiredWaterNormalMapPath = loaded->Scene.WaterNormalMapPath;
+        if (desiredWaterNormalMapPath != m_LoaderWaterNormalMapPath)
+        {
+            if (desiredWaterNormalMapPath.empty())
+            {
+                // フラット法線(128,128,255,255=接線空間で真上を向く法線)へ戻す。
+                // ModelLoader.cppが法線マップ未指定のマテリアルに使うプレースホルダーと同じ値
+                loaded->WaterNormalMapTexture = m_Device->CreateSolidColorTexture(128, 128, 255, 255);
+                loaded->WaterNormalMapPath.clear();
+                m_LoaderWaterNormalMapPath.clear();
+                Core::Logger::Info("KurenaiEngine3D", "水面法線マップをフラットへ戻しました(NormalMap未指定)");
+            }
+            else
+            {
+                try
+                {
+                    loaded->WaterNormalMapTexture = m_Device->CreateTextureFromFile(desiredWaterNormalMapPath, false);
+                    loaded->WaterNormalMapPath = desiredWaterNormalMapPath;
+                    m_LoaderWaterNormalMapPath = desiredWaterNormalMapPath;
+                    Core::Logger::Info(
+                        "KurenaiEngine3D", "水面法線マップを差し替えました: " + WideToUtf8(desiredWaterNormalMapPath));
+                }
+                catch (const std::exception& e)
+                {
+                    // 読み込みに失敗しても現在の水面法線マップ(またはフラット法線)のまま描画を続ける
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "水面法線マップの読み込みに失敗しました。現在の状態を維持します: " +
+                            WideToUtf8(desiredWaterNormalMapPath) + " : " + e.what());
+                }
+            }
+        }
+
         // レイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの統合バッファを構築する。
         // 非対応環境(DX11、Tier 1.1未満のアダプタ)では何も作らず、描画側は従来の
         // スクリーンスペース手法のまま動く。構築に失敗しても描画は継続する
@@ -2451,6 +2530,12 @@ namespace Kurenai
         {
             m_IBLIntensity = m_Scene.IBLIntensity;
         }
+        // 水面(P2)。[Water]が無いシーンでもScene::WaterWaveScale等はリテラル既定値
+        // (EngineDefaults.hを複製したもの、Scene.h参照)を持っているため、常にそのまま反映してよい
+        // (m_TimeOfDay/m_SunAzimuthDegreesと同じ扱い)
+        m_WaterWaveScale = m_Scene.WaterWaveScale;
+        m_WaterWaveSpeed = m_Scene.WaterWaveSpeed;
+        m_WaterWaveStrength = m_Scene.WaterWaveStrength;
 
         // スカイボックスが差し替わった場合のみ非nullptr。IBLの拡散イラディアンス・プリフィルタ済み
         // 鏡面はスカイボックスから焼かれるため、差し替えたらm_IBLBakedを倒して焼き直させる
@@ -2468,6 +2553,18 @@ namespace Kurenai
             // 検証用の拡散イラディアンスマップも古いスカイボックス由来のものになるため倒す
             // (実際に焼き直すのは検証トグル・デバッグ表示が有効なときだけ)
             m_IBLIrradianceBaked = false;
+        }
+
+        // 水面法線マップが差し替わった場合のみ非nullptr(P2)。スカイボックスとまったく同じ方式で
+        // 旧テクスチャをLoaderスレッドへ破棄依頼する
+        if (loaded.WaterNormalMapTexture)
+        {
+            RetiredAssets retiredWaterNormalMap;
+            retiredWaterNormalMap.WaterNormalMapTexture = std::move(m_WaterNormalMapTexture);
+            RetireAssets(std::move(retiredWaterNormalMap));
+
+            m_WaterNormalMapTexture = std::move(loaded.WaterNormalMapTexture);
+            m_CurrentWaterNormalMapPath = loaded.WaterNormalMapPath;
         }
 
         // アセット由来のライトをユーザー編集用のコピーへ複製する(m_Scene.Lightsは直接編集しない。
@@ -3055,6 +3152,14 @@ namespace Kurenai
                 {
                     m_TimeOfDay += 24.0f;
                 }
+            }
+
+            // 水面のスクロール位相(P2)。太陽の自動進行とまったく同じ場所・同じ理由
+            // (m_TimeAutoAdvance/m_WaterTimeFrozenがRenderingパネル(Renderスレッドから描画)でも
+            // 書き換えられるため、両方をRenderスレッド専有にすることで追加の排他制御なしに済ませる)
+            if (!m_WaterTimeFrozen)
+            {
+                m_WaterScrollOffset = std::fmod(m_WaterScrollOffset + renderDeltaTime * m_WaterWaveSpeed, 1.0f);
             }
 
             // m_Scene・ポストプロセスのパラメータ・UIの状態はすべてこのRenderスレッド専有に
@@ -3684,6 +3789,11 @@ namespace Kurenai
             static_cast<float>(kDDGIProbeBorder),
         };
         constants.DDGIParams4 = { effectiveExposure, 0.0f, 0.0f, 0.0f };
+        // 水面(P2)。スクロール位相はRenderThreadMainがm_WaterTimeFrozen/m_WaterWaveSpeedに
+        // 応じて毎フレーム進める(m_TimeOfDayの自動進行と同じ場所・同じ方式)。
+        // y=波のスケール倍率(m_WaterWaveScale)、z=波の強さ(m_WaterWaveStrength、0〜1)を
+        // Water.hlslへ渡す(UIのスライダーが見た目へ反映されるようにするため)
+        constants.TimeParams = { m_WaterScrollOffset, m_WaterWaveScale, m_WaterWaveStrength, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
@@ -4526,17 +4636,18 @@ namespace Kurenai
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetSamplerSet(m_MaterialSamplers.get());
 
-                // ミラーリング(Worldの行列式が負)されたインスタンスだけ、表裏判定を入れ替えた
-                // パイプラインへ切り替える。上で通常のパイプラインを先にバインドしてあるため、
-                // ミラーリングを含まないシーンでは以下のラムダは一度も切り替えを行わず、
-                // 発行されるコマンド列はこの機能の追加前と完全に同一になる。
+                // ミラーリング(Worldの行列式が負)されたインスタンス・水面(ModelInstance::IsWater)
+                // インスタンスの組み合わせ(4通り)に応じてパイプラインを切り替える。上で通常の
+                // パイプラインを先にバインドしてあるため、どちらも含まないシーンでは以下のラムダは
+                // 一度も切り替えを行わず、発行されるコマンド列はこの機能の追加前と完全に同一になる。
                 // DX12のSetPipelineStateはルートシグネチャを張り直して既存のバインドを
                 // 無効化するので、切り替えたときはパス共通のバインドもやり直す
                 RHI::IRHIPipelineState* currentPipelineState = m_GBufferPipelineState.get();
-                const auto bindPipelineState = [&](bool mirrored)
+                const auto bindPipelineState = [&](bool mirrored, bool water)
                 {
-                    RHI::IRHIPipelineState* const wanted =
-                        mirrored ? m_GBufferPipelineStateMirrored.get() : m_GBufferPipelineState.get();
+                    RHI::IRHIPipelineState* const wanted = water
+                        ? (mirrored ? m_GBufferWaterPipelineStateMirrored.get() : m_GBufferWaterPipelineState.get())
+                        : (mirrored ? m_GBufferPipelineStateMirrored.get() : m_GBufferPipelineState.get());
                     if (wanted == currentPipelineState)
                     {
                         return;
@@ -4558,7 +4669,7 @@ namespace Kurenai
                             continue;
                         }
 
-                        bindPipelineState(instance.IsMirrored);
+                        bindPipelineState(instance.IsMirrored, instance.IsWater);
 
                         const ObjectConstants objectConstants =
                             MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
@@ -4572,6 +4683,12 @@ namespace Kurenai
                         cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                         cmd->SetTexture(3, mesh.EmissiveTexture);
                         cmd->SetTexture(5, mesh.OcclusionTexture);
+                        if (instance.IsWater)
+                        {
+                            // Water.hlslのPSMainだけが読むt6。通常のGBuffer PSOはt6を宣言していないため
+                            // 水面以外のインスタンスではバインドしない
+                            cmd->SetTexture(6, m_WaterNormalMapTexture.get());
+                        }
                         cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                     }
                 }
@@ -5630,6 +5747,12 @@ namespace Kurenai
             presentSourceHeight = m_HasGIVolume ? rows * cell : cell;
             break;
         }
+        case DebugView::WaterMask:
+            // G-BufferのMaterial.a(水面のマテリアルID)をそのままグレースケール表示する(P2)。
+            // 0/1の二値なのでMode 3(Gain倍する遮蔽率表示)ではなく専用のMode 17を使う
+            presentSourceTexture = m_GBufferMaterial.get();
+            presentMode = 17;
+            break;
         }
 
         PresentConstants presentConstants{};

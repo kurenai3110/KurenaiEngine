@@ -7,9 +7,10 @@
 #   Island.kmodel    … Tools/generate_msm_proxy.py  (岩・城壁・修道院・尖塔のシルエットプロキシ)
 #   Water.kmodel     … Tools/generate_water_plane.py (水面、4000m四方)
 #
-# このフェーズ(P1)では[Water]セクション(水面の特殊シェーディング指定)はまだ
-# SceneLoader.cpp(SectionFromName)に実装されていないため書かない。Waterモデルは今のところ
-# 通常の不透明ジオメトリとして描画される(P2で波・反射専用の扱いを追加する予定)。
+# P2(水面マテリアル基盤)でWaterモデルに[Model]Water=trueと[Water]セクションを追加した。
+# Waterインスタンスは通常のG-BufferパイプラインではなくWater.hlsl専用PSOで描画され、
+# G-BufferのMaterial.aへ水面のマテリアルID(kMaterialIDWater)が書き込まれる。
+# 反射(SSR統合)はまだ行わない(それはP4)。
 #
 # --- 座標系の約束 ---
 # 島(Island)の底面中心をワールド原点(0,0,0)とする(1単位=1メートル)。将来、実物の
@@ -39,6 +40,15 @@ Translation = 0, 0, 0
 [Model]
 Path = MontSaintMichelStudy/Water.kmodel
 Translation = 0, 0.15, -800
+Water = true
+
+# 水面(P2: 水面マテリアル基盤)。NormalMapはAssetsルートからの相対パス([Scene]Skyboxと同じ規則)。
+# WaveScale/WaveSpeed/WaveStrengthはP1の時点でこのファイルのコメントに残していた暫定値をそのまま使う
+[Water]
+NormalMap = MontSaintMichelStudy/WaterNormal.png
+WaveScale = 12.0
+WaveSpeed = 0.03
+WaveStrength = 0.25
 
 # カメラは島の手前(-Z側)、水面のすぐ上に置く。Yaw=0で+Z方向を向く
 # (Source/Library/Core/Camera.cpp Camera::GetForward: forward = (cos(pitch)sin(yaw), sin(pitch), cos(pitch)cos(yaw))。

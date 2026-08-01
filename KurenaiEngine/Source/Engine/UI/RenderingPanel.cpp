@@ -50,6 +50,10 @@ namespace Kurenai::UI
         {
             DrawLightCullingSection();
         }
+        if (ImGui::CollapsingHeader("水面###Water"))
+        {
+            DrawWaterSection();
+        }
 
         ImGui::End();
     }
@@ -469,6 +473,35 @@ namespace Kurenai::UI
         {
             m_Engine.ResetSceneDependentParams();
         }
+
+        EndParamGroup();
+    }
+
+    void RenderingPanel::DrawWaterSection()
+    {
+        ImGui::TextWrapped(
+            "水面(.ksceneの[Model]Water=trueで指定されたインスタンス)の波の見た目。"
+            "反射(SSR統合)はまだ行わない。デバッグ表示の「水面マスク」で対象インスタンスを確認できる");
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "水面アニメを止める###FreezeWaterTime", &m_Engine.m_WaterTimeFrozen, Defaults::WaterTimeFrozen,
+            "水面法線マップのスクロールを止める。A/B比較などスクロールが揺れると困る場面で使う");
+
+        // WaveScale/WaveStrengthはFrameConstants.TimeParams.y/zとしてWater.hlslへ渡っている
+        // (KurenaiEngine3D::RenderThreadMainのTimeParams構築箇所、Water.hlslのPSMain参照)。
+        // つまみ自体はScene::WaterWaveScale等から読み込める値をUIで確認・上書きできるよう用意してある
+        SliderFloatEx(
+            "波のスケール###WaterWaveScale", &m_Engine.m_WaterWaveScale, 1.0f, 64.0f, Defaults::WaterWaveScale,
+            "%.2f", ImGuiSliderFlags_Logarithmic,
+            "水面法線マップのタイリングスケール。値が大きいほど波紋の繰り返しが細かくなる");
+        SliderFloatEx(
+            "波の速度###WaterWaveSpeed", &m_Engine.m_WaterWaveSpeed, 0.0f, 1.0f, Defaults::WaterWaveSpeed, "%.3f", 0,
+            "水面法線マップのスクロール速度。m_WaterScrollOffsetの進行速度に直接効く");
+        SliderFloatEx(
+            "波の強さ###WaterWaveStrength", &m_Engine.m_WaterWaveStrength, 0.0f, 1.0f, Defaults::WaterWaveStrength,
+            "%.3f", 0, "波打ちの振幅。0で波が完全に消え平坦な鏡面、1で最大の揺らぎになる");
 
         EndParamGroup();
     }

@@ -182,6 +182,24 @@ namespace Kurenai::Assets
             return false;
         }
 
+        // [Scene]Skybox・[Water]NormalMapなど、Assetsルートからの相対パスを取るキーに共通の解決処理。
+        // パス区切りの正規化→IsPathEscapingによるルート外脱出チェック→assetRootDirectoryとの結合を
+        // まとめて行う。検証に失敗した場合はstd::runtime_error(フィールド名・元のパス・シーンファイル名
+        // つき)を投げる。fieldLabelはエラーメッセージにそのまま出す表示名("[Scene]Skybox"等)
+        std::wstring ResolveAssetRelativePath(
+            const std::wstring& relativePath, const std::wstring& assetRootDirectory,
+            const std::wstring& fieldLabel, const std::wstring& sceneFilePath)
+        {
+            const std::wstring normalizedPath = NormalizePathSeparators(relativePath);
+            if (IsPathEscaping(normalizedPath))
+            {
+                throw std::runtime_error(
+                    WideToUtf8(fieldLabel) + "がルート外を指しています(絶対パスまたは'..'は使用できません): " +
+                    WideToUtf8(relativePath) + " (" + WideToUtf8(sceneFilePath) + ")");
+            }
+            return assetRootDirectory + normalizedPath;
+        }
+
         // ==== パース結果の中間表現(モデルの実読み込み前) ====
 
         struct ParsedModelEntry
@@ -191,6 +209,9 @@ namespace Kurenai::Assets
             float Translation[3] = { 0.0f, 0.0f, 0.0f };
             float RotationEulerDegrees[3] = { 0.0f, 0.0f, 0.0f };
             float Scale[3] = { 1.0f, 1.0f, 1.0f };
+            // .kscene [Model]Water(P2: 水面マテリアル基盤)。trueならScene構築時に
+            // ModelInstance::IsWaterへそのまま反映する
+            bool Water = false;
         };
 
         struct ParsedLightEntry
@@ -260,6 +281,14 @@ namespace Kurenai::Assets
             bool AOEnabled = true;
             bool SSREnabled = true;
 
+            // [Water]セクション(P2: 水面マテリアル基盤)。NormalMapは[Scene]Skyboxと同じく
+            // Assetsルートからの相対パスで、LoadScene側でルート外チェックのうえ絶対パスへ解決する。
+            // 空文字列のままなら「法線マップ無しのフラット水面」を意味する
+            std::wstring WaterNormalMapPath;
+            float WaterWaveScale = 12.0f;
+            float WaterWaveSpeed = 0.03f;
+            float WaterWaveStrength = 0.25f;
+
             std::vector<ParsedLightEntry> Lights;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
             std::vector<ParsedGIVolumeEntry> GIVolumes;
@@ -275,6 +304,7 @@ namespace Kurenai::Assets
             Light,
             ReflectionProbe,
             GIVolume,
+            Water,
             Unknown,
         };
 
@@ -287,6 +317,7 @@ namespace Kurenai::Assets
             if (CaseInsensitiveEquals(name, L"Light")) return Section::Light;
             if (CaseInsensitiveEquals(name, L"ReflectionProbe")) return Section::ReflectionProbe;
             if (CaseInsensitiveEquals(name, L"GIVolume")) return Section::GIVolume;
+            if (CaseInsensitiveEquals(name, L"Water")) return Section::Water;
             return Section::Unknown;
         }
 
@@ -473,6 +504,14 @@ namespace Kurenai::Assets
                     else if (CaseInsensitiveEquals(key, L"Scale"))
                     {
                         if (!ParseFloat3(value, entry.Scale)) errorAt(lineNumber, rawLine, "Scaleの値が不正です(x, y, zの3要素が必要)");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Water"))
+                    {
+                        // P2: 水面マテリアル基盤。trueにするとこのインスタンスがWater.hlslで
+                        // 描画され、G-BufferのMaterial.aへ水面のマテリアルIDが書かれるようになる
+                        const std::optional<bool> parsed = ParseBoolToken(value);
+                        if (!parsed) errorAt(lineNumber, rawLine, "Waterの値はtrue/falseで指定してください");
+                        entry.Water = *parsed;
                     }
                     else
                     {
@@ -697,6 +736,32 @@ namespace Kurenai::Assets
                     break;
                 }
 
+                case Section::Water:
+                    // P2: 水面マテリアル基盤。NormalMapのパス解決(ルート外チェック・絶対パス化)は
+                    // ここでは行わず、[Scene]Skyboxと同じくLoadScene側でまとめて行う
+                    // (ParseSceneFileは純粋なテキスト解析でファイルシステムに触れない方針のため)
+                    if (CaseInsensitiveEquals(key, L"NormalMap"))
+                    {
+                        result.WaterNormalMapPath = value;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"WaveScale"))
+                    {
+                        if (!ParseFloatToken(value, result.WaterWaveScale)) errorAt(lineNumber, rawLine, "WaveScaleの値が不正です");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"WaveSpeed"))
+                    {
+                        if (!ParseFloatToken(value, result.WaterWaveSpeed)) errorAt(lineNumber, rawLine, "WaveSpeedの値が不正です");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"WaveStrength"))
+                    {
+                        if (!ParseFloatToken(value, result.WaterWaveStrength)) errorAt(lineNumber, rawLine, "WaveStrengthの値が不正です");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+
                 default:
                     break;
                 }
@@ -800,15 +865,20 @@ namespace Kurenai::Assets
         // 同じルート外チェックを適用したうえで絶対パスへ解決してから返す
         if (!parsed.SkyboxPath.empty())
         {
-            const std::wstring normalizedSkyboxPath = NormalizePathSeparators(parsed.SkyboxPath);
-            if (IsPathEscaping(normalizedSkyboxPath))
-            {
-                throw std::runtime_error(
-                    "[Scene]Skyboxがルート外を指しています(絶対パスまたは'..'は使用できません): " +
-                    WideToUtf8(parsed.SkyboxPath) + " (" + WideToUtf8(sceneFilePath) + ")");
-            }
-            scene.SkyboxPath = assetRootDirectory + normalizedSkyboxPath;
+            scene.SkyboxPath = ResolveAssetRelativePath(parsed.SkyboxPath, assetRootDirectory, L"[Scene]Skybox", sceneFilePath);
         }
+
+        // [Water]NormalMapも同じ規則(Assetsルートからの相対パス、ルート外チェックあり)で解決する。
+        // 空文字列のままなら「法線マップ無しのフラット水面」を意味し、C++側(KurenaiEngine3D)が
+        // 1x1のフラット法線テクスチャへフォールバックするためエラーにはしない
+        if (!parsed.WaterNormalMapPath.empty())
+        {
+            scene.WaterNormalMapPath =
+                ResolveAssetRelativePath(parsed.WaterNormalMapPath, assetRootDirectory, L"[Water]NormalMap", sceneFilePath);
+        }
+        scene.WaterWaveScale = parsed.WaterWaveScale;
+        scene.WaterWaveSpeed = parsed.WaterWaveSpeed;
+        scene.WaterWaveStrength = parsed.WaterWaveStrength;
 
         // .kscene自身の[Light]で直接指定されたライトは、既にワールド空間の値として書かれているため
         // 変換不要でそのままScene::Lightsへ入れる(モデル埋め込みライトは下のモデルループ内で
@@ -881,6 +951,7 @@ namespace Kurenai::Assets
 
             ModelInstance instance;
             instance.Model = LoadModel(device, fullModelPath);
+            instance.IsWater = parsedModel.Water;
 
             using namespace DirectX;
             const XMMATRIX scaleMatrix = XMMatrixScaling(parsedModel.Scale[0], parsedModel.Scale[1], parsedModel.Scale[2]);

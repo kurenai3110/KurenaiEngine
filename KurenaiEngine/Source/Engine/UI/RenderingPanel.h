@@ -31,6 +31,7 @@ namespace Kurenai::UI
         void DrawDDGISection();
         void DrawSSRSection();
         void DrawLightCullingSection();
+        void DrawWaterSection();
 
         KurenaiEngine3D& m_Engine;
     };

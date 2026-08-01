@@ -37,6 +37,10 @@
 //         「1プローブぶんのセル」の切れ目が見えなくなり、境界の複製が効いているかを確認できない
 //      16=DDGIの距離モーメントアトラス(t0)。R=平均距離をGainで縮めてグレースケール表示する。
 //         Gが平均二乗距離だが、そのまま出しても読めないためRのみを見る
+//      17=G-BufferのMaterial.a(水面のマテリアルID、kMaterialIDWater。P2: 水面マテリアル基盤)を
+//         そのままグレースケール表示する(水面=白、それ以外=黒)。0/1の二値でジオメトリの縁を
+//         跨いで補間されると意味のない中間値になるため、Mode 1/2/5/7/14と同じくDataSamplerで
+//         生値のまま読む
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
@@ -229,10 +233,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     // これらだけDataSamplerで引く。それ以外は色バッファなので、レターボックスの拡縮で
     // ブロック状にならないようColorSamplerで引く。
     // Modeは定数バッファ由来で波面内で一様のため、この分岐のコストは実質ゼロ
-    const bool readsRawData = (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14);
+    const bool readsRawData = (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14 || Mode == 17);
     float4 sourceColor = readsRawData
         ? SourceTexture.Sample(DataSampler, input.UV)
         : SourceTexture.Sample(ColorSampler, input.UV);
+
+    if (Mode == 17)
+    {
+        // 水面マスク。G-BufferのMaterial.aは水面で1.0、それ以外で0.0の二値なのでGainは適用しない
+        float waterMask = sourceColor.a;
+        return float4(waterMask, waterMask, waterMask, 1.0f);
+    }
 
     if (Mode == 7)
     {

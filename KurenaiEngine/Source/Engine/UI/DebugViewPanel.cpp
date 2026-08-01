@@ -52,10 +52,11 @@ namespace Kurenai::UI
             "シーンカラー (生HDR・トーンマップなし)",
             "DDGI - イラディアンス (オクタヘドラルアトラス)",
             "DDGI - 距離モーメント (R=平均距離)",
+            "水面マスク (A=水面フラグ)",
         };
         static_assert(
-            static_cast<int>(DebugView::DDGIDistance) == 28,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はDDGIDistance)");
+            static_cast<int>(DebugView::WaterMask) == 29,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はWaterMask)");
 
         DrawUsageHint();
         BeginParamGroup();

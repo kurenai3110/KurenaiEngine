@@ -25,6 +25,11 @@ namespace Kurenai::Assets
         // TangentSignFlipは接線の向きを補正するためにシェーダーへ渡す係数で、こちらは三角形の
         // ワインディングが反転することへの対処(表裏判定を入れ替えたパイプラインで描く)に使う
         bool IsMirrored = false;
+
+        // .ksceneの[Model]Waterで指定される。trueの場合、KurenaiEngine3DはこのインスタンスをG-Bufferパスの
+        // 通常PSOではなく水面専用PSO(Water.hlsl)で描画し、G-BufferのMaterial.aへ水面のマテリアルID
+        // (kMaterialIDWater、Shaders/3D/GBufferCommon.hlsli)を書き込む(P2: 水面マテリアル基盤)
+        bool IsWater = false;
     };
 
     // 反射プローブ(リフレクションプローブ)。この位置から周囲をキューブマップへキャプチャし、
@@ -175,5 +180,21 @@ namespace Kurenai::Assets
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
+        // .ksceneの[Water]セクション(P2: 水面マテリアル基盤)。水面(ModelInstance::IsWater)専用の
+        // シェーディングパラメータで、[Water]が無いシーンでは既定値のまま(水面インスタンス自体も
+        // 存在しないため未使用)。NormalMapはAssetsルートからの相対パスで、[Scene]Skyboxと同じ
+        // ルート外チェックを通したうえで絶対パスへ解決してからここへ入る。空文字列なら
+        // 「法線マップ無しのフラット水面」を意味し、エラーではない(C++側は1x1のフラット法線
+        // テクスチャへフォールバックする)
+        std::wstring WaterNormalMapPath;
+        // 波の見た目に関する3つの既定値。SunTimeOfDay等と同じ方針で、EngineDefaults.h
+        // ([--- 水面 ---]セクション)の値をリテラルとして複製している(Source/Libraryは
+        // Source/Engineに依存できないため、Defaults::を直接参照できない)。
+        // シーン読み込み時にKurenaiEngine3D::m_WaterWaveScale等へコピーされ、以降はUIで
+        // 実行時上書きできる(m_ReflectionModeがScene.SSREnabledから初期化されるのと同じ設計)
+        float WaterWaveScale = 12.0f;
+        float WaterWaveSpeed = 0.03f;
+        float WaterWaveStrength = 0.25f;
     };
 }
