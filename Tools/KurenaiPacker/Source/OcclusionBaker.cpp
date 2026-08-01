@@ -257,13 +257,178 @@ namespace KurenaiPacker
             return 0;
         }
 
+        // === UV展開のためのメッシュ内部分割 ====================================
+        //
+        // 巨大な単一メッシュをそのままxatlasへ渡すと極端に遅くなるため、空間的に
+        // 分割して複数回AddMeshする。効くのは次の2点(詳細は22.6.6節):
+        //   - ComputeChartsは「メッシュごとに1タスク」で並列化される。1メッシュ1AddMeshでは
+        //     コア数ぶんの並列化が丸ごと死ぬ
+        //   - チャート統合と種まきがチャートグループ内で2乗に効く。グループが小さく
+        //     分かれていれば表面化しない
+        //
+        // 分割してもPackChartsは全チャンクを1枚の共有アトラスへ詰めるため、
+        // 遮蔽マップの粒度(メッシュあたり1枚)は変わらない。代償は分割面に沿って
+        // チャートが必ず切れること(継ぎ目が増える)。
+
+        struct UnwrapChunk
+        {
+            std::vector<Vertex> Vertices;    // チャンク内のローカル頂点(元メッシュからの複製)
+            std::vector<uint32_t> Indices;   // ローカル頂点番号によるインデックス
+            std::vector<uint32_t> VertexMap; // ローカル頂点番号 -> 元メッシュの頂点番号
+        };
+
+        struct TriangleRange
+        {
+            uint32_t First = 0;
+            uint32_t Count = 0;
+        };
+
+        // 三角形番号の並び(order)を重心の中央値で再帰的に分割し、
+        // targetTriangles以下になった区間をoutRangesへ積む。
+        // BuildBvhRecursiveと同じ中央値分割だが、ノードを作らず葉の区間だけを集める。
+        // 分割は必ず両側を1個以上に減らすため、重心が全て同一でも必ず停止する
+        void PartitionTrianglesRecursive(
+            const std::vector<Float3>& centroids,
+            std::vector<uint32_t>& order,
+            uint32_t first,
+            uint32_t count,
+            uint32_t targetTriangles,
+            std::vector<TriangleRange>& outRanges)
+        {
+            if (count <= targetTriangles)
+            {
+                outRanges.push_back({ first, count });
+                return;
+            }
+
+            Float3 bmin{ FLT_MAX, FLT_MAX, FLT_MAX };
+            Float3 bmax{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const Float3& c = centroids[order[first + i]];
+                bmin = Min3(bmin, c);
+                bmax = Max3(bmax, c);
+            }
+
+            // 最も広がっている軸で中央値分割する
+            const Float3 extent = Sub(bmax, bmin);
+            int axis = 0;
+            if (extent.y > extent.x) { axis = 1; }
+            if (extent.z > (axis == 0 ? extent.x : extent.y)) { axis = 2; }
+
+            const auto centroidAxis = [&](uint32_t triIndex) -> float
+            {
+                const Float3& c = centroids[triIndex];
+                return axis == 0 ? c.x : (axis == 1 ? c.y : c.z);
+            };
+
+            const uint32_t mid = count / 2;
+            std::nth_element(
+                order.begin() + first,
+                order.begin() + first + mid,
+                order.begin() + first + count,
+                [&](uint32_t a, uint32_t b) { return centroidAxis(a) < centroidAxis(b); });
+
+            PartitionTrianglesRecursive(centroids, order, first, mid, targetTriangles, outRanges);
+            PartitionTrianglesRecursive(centroids, order, first + mid, count - mid, targetTriangles, outRanges);
+        }
+
+        // メッシュをUV展開用のチャンクへ分割する。
+        // 分割しない条件(閾値0・三角形数が閾値以下・目標が0)ではメッシュ全体を
+        // 1チャンクとして返す。その場合VertexMapは恒等写像になり、
+        // 呼び出し側の処理は分割前とまったく同じ結果になる
+        std::vector<UnwrapChunk> SplitMeshForUnwrap(
+            const SourceMesh& mesh, uint32_t splitThreshold, uint32_t targetTriangles)
+        {
+            const uint32_t triangleCount = static_cast<uint32_t>(mesh.Indices.size() / 3);
+
+            std::vector<uint32_t> order(triangleCount);
+            std::iota(order.begin(), order.end(), 0u);
+
+            std::vector<TriangleRange> ranges;
+            if (splitThreshold == 0 || targetTriangles == 0 || triangleCount <= splitThreshold)
+            {
+                ranges.push_back({ 0u, triangleCount });
+            }
+            else
+            {
+                std::vector<Float3> centroids(triangleCount);
+                for (uint32_t t = 0; t < triangleCount; ++t)
+                {
+                    const Vertex& a = mesh.Vertices[mesh.Indices[static_cast<size_t>(t) * 3 + 0]];
+                    const Vertex& b = mesh.Vertices[mesh.Indices[static_cast<size_t>(t) * 3 + 1]];
+                    const Vertex& c = mesh.Vertices[mesh.Indices[static_cast<size_t>(t) * 3 + 2]];
+                    centroids[t] = {
+                        (a.Position[0] + b.Position[0] + c.Position[0]) / 3.0f,
+                        (a.Position[1] + b.Position[1] + c.Position[1]) / 3.0f,
+                        (a.Position[2] + b.Position[2] + c.Position[2]) / 3.0f };
+                }
+                PartitionTrianglesRecursive(centroids, order, 0, triangleCount, targetTriangles, ranges);
+            }
+
+            // 区間ごとに、使われている元頂点だけを詰め直してローカル配列を作る。
+            // 分割境界に跨る頂点は複数のチャンクへ複製される(これがチャート境界になる)
+            std::vector<UnwrapChunk> chunks(ranges.size());
+            std::vector<uint32_t> remap(mesh.Vertices.size(), UINT32_MAX);
+            for (size_t k = 0; k < ranges.size(); ++k)
+            {
+                UnwrapChunk& chunk = chunks[k];
+                chunk.Indices.reserve(static_cast<size_t>(ranges[k].Count) * 3);
+
+                for (uint32_t i = 0; i < ranges[k].Count; ++i)
+                {
+                    const uint32_t triangle = order[ranges[k].First + i];
+                    for (uint32_t corner = 0; corner < 3; ++corner)
+                    {
+                        const uint32_t source = mesh.Indices[static_cast<size_t>(triangle) * 3 + corner];
+                        if (remap[source] == UINT32_MAX)
+                        {
+                            remap[source] = static_cast<uint32_t>(chunk.Vertices.size());
+                            chunk.Vertices.push_back(mesh.Vertices[source]);
+                            chunk.VertexMap.push_back(source);
+                        }
+                        chunk.Indices.push_back(remap[source]);
+                    }
+                }
+
+                // 次のチャンクのためにスクラッチを戻す。全体をクリアすると
+                // 「頂点数 × チャンク数」のコストになるため、触った分だけ戻す
+                for (const uint32_t source : chunk.VertexMap)
+                {
+                    remap[source] = UINT32_MAX;
+                }
+            }
+            return chunks;
+        }
+
         // メッシュ1つを展開し、Vertices/IndicesをUV1付きで置き換える。
         // 展開できなかった場合はfalseを返し、メッシュは元のまま(UV1=UVのコピー)で残す
-        bool UnwrapMesh(SourceMesh& mesh, uint32_t resolution)
+        bool UnwrapMesh(SourceMesh& mesh, const OcclusionBakeOptions& options)
         {
             if (mesh.Indices.empty() || mesh.Vertices.empty())
             {
                 return false;
+            }
+            // 分割はインデックスを三角形単位で組み替えるため、3の倍数でないと末尾が
+            // 黙って捨てられる。分割前はxatlasがInvalidIndexCountで弾いていた経路なので、
+            // ここで同じように弾いてログを残す
+            if (mesh.Indices.size() % 3 != 0)
+            {
+                Warn("メッシュのインデックス数(" + std::to_string(mesh.Indices.size())
+                    + ")が3の倍数ではありません。UV展開をスキップします");
+                return false;
+            }
+            // 分割は頂点番号でスクラッチ配列を引くため、範囲外インデックスがあると
+            // xatlasへ渡す前に壊れる。分割前はxatlasがIndexOutOfRangeで弾いていた経路
+            for (const uint32_t index : mesh.Indices)
+            {
+                if (index >= mesh.Vertices.size())
+                {
+                    Warn("メッシュに範囲外の頂点インデックス(" + std::to_string(index)
+                        + " / 頂点数 " + std::to_string(mesh.Vertices.size())
+                        + ")があります。UV展開をスキップします");
+                    return false;
+                }
             }
 
             xatlas::Atlas* atlas = xatlas::Create();
@@ -278,24 +443,44 @@ namespace KurenaiPacker
                 ~AtlasGuard() { xatlas::Destroy(A); }
             } guard{ atlas };
 
-            xatlas::MeshDecl decl;
-            decl.vertexCount = static_cast<uint32_t>(mesh.Vertices.size());
-            decl.vertexPositionData = mesh.Vertices.data()->Position;
-            decl.vertexPositionStride = sizeof(Vertex);
-            decl.vertexNormalData = mesh.Vertices.data()->Normal;
-            decl.vertexNormalStride = sizeof(Vertex);
-            // 元のUVはチャート分割のヒントとしてのみ渡す(useInputMeshUvsは立てない。
-            // タイリングされたUVをそのままチャートに使うと重なりが残ってしまうため)
-            decl.vertexUvData = mesh.Vertices.data()->UV;
-            decl.vertexUvStride = sizeof(Vertex);
-            decl.indexCount = static_cast<uint32_t>(mesh.Indices.size());
-            decl.indexData = mesh.Indices.data();
-            decl.indexFormat = xatlas::IndexFormat::UInt32;
-
-            const Clock::time_point addMeshStart = Clock::now();
-            if (xatlas::AddMesh(atlas, decl) != xatlas::AddMeshError::Success)
+            // 巨大メッシュはここで空間分割される。閾値以下なら要素1個(恒等写像)の
+            // チャンク列が返り、以降の処理は分割前とまったく同じ経路になる
+            const std::vector<UnwrapChunk> chunks = SplitMeshForUnwrap(
+                mesh, options.UnwrapSplitThreshold, options.UnwrapChunkTriangles);
+            if (chunks.empty())
             {
                 return false;
+            }
+
+            const Clock::time_point addMeshStart = Clock::now();
+            for (const UnwrapChunk& chunk : chunks)
+            {
+                if (chunk.Vertices.empty() || chunk.Indices.empty())
+                {
+                    Warn("UV展開のチャンクが空になりました(分割の不具合)。このメッシュはスキップします");
+                    return false;
+                }
+
+                xatlas::MeshDecl decl;
+                decl.vertexCount = static_cast<uint32_t>(chunk.Vertices.size());
+                decl.vertexPositionData = chunk.Vertices.data()->Position;
+                decl.vertexPositionStride = sizeof(Vertex);
+                decl.vertexNormalData = chunk.Vertices.data()->Normal;
+                decl.vertexNormalStride = sizeof(Vertex);
+                // 元のUVはチャート分割のヒントとしてのみ渡す(useInputMeshUvsは立てない。
+                // タイリングされたUVをそのままチャートに使うと重なりが残ってしまうため)
+                decl.vertexUvData = chunk.Vertices.data()->UV;
+                decl.vertexUvStride = sizeof(Vertex);
+                decl.indexCount = static_cast<uint32_t>(chunk.Indices.size());
+                decl.indexData = chunk.Indices.data();
+                decl.indexFormat = xatlas::IndexFormat::UInt32;
+
+                // 第3引数はメッシュ総数のヒント。xatlas側の進捗・確保の見積もりに使われる
+                if (xatlas::AddMesh(atlas, decl, static_cast<uint32_t>(chunks.size()))
+                    != xatlas::AddMeshError::Success)
+                {
+                    return false;
+                }
             }
             // AddMeshは非同期。ここで待たないと、続くComputeChartsの計測へ
             // AddMeshぶんの時間が混ざって切り分けにならない
@@ -311,7 +496,7 @@ namespace KurenaiPacker
 
             const Clock::time_point packStart = Clock::now();
             xatlas::PackOptions packOptions;
-            packOptions.resolution = resolution;
+            packOptions.resolution = options.Resolution;
             packOptions.padding = 2;        // バイリニア補間で隣のチャートを拾わないための余白
             packOptions.bilinear = true;
             packOptions.blockAlign = true;  // BC4の4x4ブロックとチャート境界を揃える
@@ -332,7 +517,8 @@ namespace KurenaiPacker
                 + " / ComputeCharts " + FormatSeconds(computeSeconds)
                 + " / PackCharts " + FormatSeconds(packSeconds)
                 + " (" + std::to_string(packAttempts) + "回)"
-                + " / チャート数 " + std::to_string(atlas->chartCount));
+                + " / チャート数 " + std::to_string(atlas->chartCount)
+                + " / チャンク数 " + std::to_string(chunks.size()));
             if (atlas->atlasCount > 1)
             {
                 return false;
@@ -342,20 +528,64 @@ namespace KurenaiPacker
                 return false;
             }
 
-            const xatlas::Mesh& out = atlas->meshes[0];
-
-            std::vector<Vertex> newVertices(out.vertexCount);
-            for (uint32_t i = 0; i < out.vertexCount; ++i)
+            // 出力メッシュはAddMeshの呼び出しごとに1つ。全チャンクを1つの頂点配列へ
+            // 連結し直す(UVはすべて共有アトラスの座標なので、そのまま繋げてよい)
+            if (atlas->meshCount != chunks.size())
             {
-                const xatlas::Vertex& ov = out.vertexArray[i];
-                // xrefは展開前の頂点番号。位置・法線・UV・接線はそこからそのまま引き継ぐ
-                newVertices[i] = mesh.Vertices[ov.xref];
-                newVertices[i].UV1[0] = ov.uv[0] / static_cast<float>(atlas->width);
-                newVertices[i].UV1[1] = ov.uv[1] / static_cast<float>(atlas->height);
+                Warn("UV展開の出力メッシュ数(" + std::to_string(atlas->meshCount)
+                    + ")がチャンク数(" + std::to_string(chunks.size())
+                    + ")と一致しません。このメッシュはスキップします");
+                return false;
             }
 
-            std::vector<uint32_t> newIndices(out.indexCount);
-            std::memcpy(newIndices.data(), out.indexArray, out.indexCount * sizeof(uint32_t));
+            std::vector<Vertex> newVertices;
+            std::vector<uint32_t> newIndices;
+            newVertices.reserve(mesh.Vertices.size());
+            newIndices.reserve(mesh.Indices.size());
+
+            for (uint32_t k = 0; k < atlas->meshCount; ++k)
+            {
+                const xatlas::Mesh& out = atlas->meshes[k];
+                const std::vector<uint32_t>& vertexMap = chunks[k].VertexMap;
+                const uint32_t base = static_cast<uint32_t>(newVertices.size());
+
+                for (uint32_t i = 0; i < out.vertexCount; ++i)
+                {
+                    const xatlas::Vertex& ov = out.vertexArray[i];
+                    // xrefは「そのAddMeshへ渡した頂点配列」の添字。VertexMapで元メッシュの
+                    // 頂点番号へ戻す(分割していない場合は恒等写像)。位置・法線・UV・接線は
+                    // そこからそのまま引き継ぐ
+                    if (ov.xref >= vertexMap.size())
+                    {
+                        Warn("UV展開の出力が範囲外の入力頂点(" + std::to_string(ov.xref)
+                            + ")を参照しました。このメッシュはスキップします");
+                        return false;
+                    }
+                    Vertex vertex = mesh.Vertices[vertexMap[ov.xref]];
+                    vertex.UV1[0] = ov.uv[0] / static_cast<float>(atlas->width);
+                    vertex.UV1[1] = ov.uv[1] / static_cast<float>(atlas->height);
+                    newVertices.push_back(vertex);
+                }
+
+                for (uint32_t i = 0; i < out.indexCount; ++i)
+                {
+                    newIndices.push_back(base + out.indexArray[i]);
+                }
+            }
+
+            // xatlasは退化面(ゼロ面積・長さゼロの辺)を無視し、どのチャートにも入らなかった
+            // 面は出力から消える。分割の有無にかかわらず起こりうるが、黙って三角形が減ると
+            // 描画に穴が開くため必ず件数を出す
+            const size_t inputTriangles = mesh.Indices.size() / 3;
+            const size_t outputTriangles = newIndices.size() / 3;
+            if (outputTriangles < inputTriangles)
+            {
+                const size_t dropped = inputTriangles - outputTriangles;
+                Warn("UV展開で三角形が" + std::to_string(dropped) + "個脱落しました("
+                    + std::to_string(inputTriangles) + "個中 "
+                    + Format2(100.0 * static_cast<double>(dropped) / static_cast<double>(inputTriangles))
+                    + "%)。xatlasが退化面を無視したか、チャートに入らなかった面があります");
+            }
 
             mesh.Vertices = std::move(newVertices);
             mesh.Indices = std::move(newIndices);
@@ -833,7 +1063,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         std::vector<uint8_t> unwrapped(sourceModel.Meshes.size(), 0);
         for (size_t i = 0; i < sourceModel.Meshes.size(); ++i)
         {
-            unwrapped[i] = UnwrapMesh(sourceModel.Meshes[i], options.Resolution) ? 1 : 0;
+            unwrapped[i] = UnwrapMesh(sourceModel.Meshes[i], options) ? 1 : 0;
             if (!unwrapped[i])
             {
                 Warn("メッシュ[" + std::to_string(i) + "]のライトマップUVを生成できなかったため、遮蔽マップのベイクをスキップします");
