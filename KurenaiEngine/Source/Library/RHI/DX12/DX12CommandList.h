@@ -45,6 +45,7 @@ namespace Kurenai::RHI
         void SetComputeUnorderedAccessTextureCubeFace(
             uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0, uint32_t cubeIndex = 0) override;
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
+        void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
     private:
@@ -78,10 +79,11 @@ namespace Kurenai::RHI
         // ディスクリプタを指す。そのため「どのスロットが設定済みか」を区別する必要がなく、
         // 未バインドのスロットを読むと0が返るというDX11と同じ挙動になる。
         // 反射プローブ(19章)がDeferredLighting.hlslでt11〜t14(イラディアンス配列・プリフィルタ配列・
-        // 影響範囲バッファ・距離キューブ配列)を使い、さらにbent normalのG-Buffer(25章)がt15を
-        // 使うため16スロット必要。DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)
+        // 影響範囲バッファ・距離キューブ配列)を、DDGI(22章)がt15〜t16(イラディアンスアトラス・
+        // 距離モーメントアトラス)を使い、さらにbent normalのG-Buffer(25章)がt17を
+        // 使うため18スロット必要。DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)
         // およびDX11CommandList側の同名の定数と必ず一致させること
-        static constexpr uint32_t kTextureSlotCount = 16;
+        static constexpr uint32_t kTextureSlotCount = 18;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;
@@ -116,7 +118,10 @@ namespace Kurenai::RHI
         // CopyDescriptors・ルートテーブルの再バインドを行う。
         // SRVはDX11と同じく上書きするまで維持され、UAVはDX11がDispatch直後に
         // CSSetUnorderedAccessViewsでnullを張るのに合わせてDispatch直後にnullへ戻す
-        static constexpr uint32_t kComputeSrvSlotCount = 4;
+        // SRVが16あるのはレイトレーシングのパスがTLAS・G-Buffer・シーンジオメトリを
+        // 1回のディスパッチで同時に読むため。DX12Device.cpp側の同名の定数
+        // (ルートシグネチャのSRVレンジ幅)と必ず一致させること
+        static constexpr uint32_t kComputeSrvSlotCount = 16;
         static constexpr uint32_t kComputeUavSlotCount = 4;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeSrvHandles[kComputeSrvSlotCount]{};
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeUavHandles[kComputeUavSlotCount]{};

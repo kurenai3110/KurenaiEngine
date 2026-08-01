@@ -9,6 +9,7 @@
 
 #include "Core/Logger.h"
 
+#include "DX12AccelerationStructure.h"
 #include "DX12Buffer.h"
 #include "DX12ComputePipelineState.h"
 #include "DX12Device.h"
@@ -358,6 +359,16 @@ namespace Kurenai::RHI
     {
         auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
 
+        // BufferUsage::StructuredImmutableは作成時の初期データから書き換えない前提のUsageで、
+        // CPU書き込み経路(マップ済みポインタ・ステージングリング)を一切持たない。
+        // そのまま下の経路へ進むとnullptrへ書き込んでしまうため、ここで弾く
+        if (dx12Buffer->IsStructuredImmutable())
+        {
+            Core::Logger::Error(
+                "DX12", "UpdateBuffer: BufferUsage::StructuredImmutableのバッファは更新できません。更新をスキップします");
+            return;
+        }
+
         // BufferUsage::StructuredReadOnlyはUPLOADヒープに直接マップされていない(ピクセルごとに
         // 読まれるためDEFAULTヒープに本体を置いている)。ステージングリングへ書き込んでから
         // コマンドリスト上でCopyBufferRegionによりDEFAULTヒープ本体へコピーする
@@ -541,6 +552,37 @@ namespace Kurenai::RHI
 
         m_PendingComputeUavHandles[slot] = dx12Buffer->GetUavCpuHandle();
         m_BoundComputeUavResources[slot] = dx12Buffer->GetResource();
+    }
+
+    void DX12CommandList::SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure)
+    {
+        if (slot >= kComputeSrvSlotCount)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "SetComputeAccelerationStructure: スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0〜t" +
+                    std::to_string(kComputeSrvSlotCount - 1) + ")。バインドをスキップします");
+            return;
+        }
+        if (!accelerationStructure)
+        {
+            Core::Logger::Error("DX12", "SetComputeAccelerationStructure: TLASがnullptrです。バインドをスキップします");
+            return;
+        }
+
+        auto* dx12As = static_cast<DX12AccelerationStructure*>(accelerationStructure);
+        if (!dx12As->IsTopLevel())
+        {
+            // SRVを持つのはTLASだけ。BLASを渡すと未初期化のディスクリプタを指してしまう
+            Core::Logger::Error(
+                "DX12", "SetComputeAccelerationStructure: BLASはシェーダーへバインドできません(TLASを渡してください)。バインドをスキップします");
+            return;
+        }
+
+        // ASバッファはD3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE状態のまま遷移しないため、
+        // 他のSRVバインドと違ってTransitionToに相当する処理は不要。
+        // コピー元の記録だけ行い、実際の反映はDispatch直前のFlushPendingComputeWritesでまとめて行う
+        m_PendingComputeSrvHandles[slot] = dx12As->GetSrvCpuHandle();
     }
 
     void DX12CommandList::FlushPendingComputeWrites()

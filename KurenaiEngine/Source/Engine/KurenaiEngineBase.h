@@ -96,16 +96,36 @@ namespace Kurenai
 
         RHI::IRHICommandList* GetCommandList() const;
 
+        // WM_SIZEで記録しておいたリサイズ要求があれば、スワップチェーンへ反映する。
+        //
+        // 【呼び出し規約】描画を所有するスレッドが、フレームの先頭(そのフレームのGPUコマンドを
+        // まだ1つも積んでいない時点)で呼ぶこと。KurenaiEngine3DはRenderスレッドのRender()冒頭から、
+        // レンダースレッドを持たないKurenaiEngine2Dはメインループから呼ぶ。
+        //
+        // 【なぜコールバックで直接リサイズしないのか】WM_SIZEはPumpEvents()を呼んだスレッド
+        // (KurenaiEngine3DではUpdateスレッド)で同期的に発生するため、そこでResize()を呼ぶと
+        // Renderスレッドが描画に使っている最中のスワップチェーンをRHI経由で作り替えることになる。
+        // 以前はミューテックスで排他していたが、「RHIの呼び出しは描画を所有するスレッドに閉じる」
+        // という方針に合わせ、要求だけ記録して所有スレッドが適用する方式にした
+        // (詳細はdocs/Architecture.html 23章)。
+        //
+        // 副作用として反映が最大1フレーム遅れるが、Presentパスはアスペクト比を保つ
+        // レターボックス処理を持つため見た目には出ない
+        void ApplyPendingResize();
+
         std::unique_ptr<Core::Window> m_Window;
         std::unique_ptr<RHI::IRHIDevice> m_Device;
         std::unique_ptr<RHI::IRHISwapChain> m_SwapChain;
         std::unique_ptr<Core::AudioEngine> m_AudioEngine;
 
-        // WM_SIZEによるスワップチェーンのリサイズ(PumpEvents呼び出し元スレッドで同期的に発生)と、
-        // 描画専用スレッドによるスワップチェーンへの描画・Presentが同時に走らないようにするための
-        // 排他制御。派生クラスがRender()を別スレッドで実行する場合、Render()の呼び出し全体を
-        // このミューテックスでロックすること
-        std::mutex m_SwapChainMutex;
+    private:
+        // WM_SIZEのコールバック(PumpEvents呼び出し元スレッド)が書き込み、
+        // ApplyPendingResize(描画を所有するスレッド)が読み取って消費する。
+        // 保持するのは最新の1件だけでよい(途中のサイズへ合わせる必要はないため)
+        std::mutex m_PendingResizeMutex;
+        uint32_t m_PendingResizeWidth = 0;
+        uint32_t m_PendingResizeHeight = 0;
+        bool m_HasPendingResize = false;
     };
 }
 

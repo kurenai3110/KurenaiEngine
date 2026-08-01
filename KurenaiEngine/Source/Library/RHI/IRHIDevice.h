@@ -5,6 +5,7 @@
 
 #include "KurenaiTypes.h"
 
+#include "IRHIAccelerationStructure.h"
 #include "IRHIBuffer.h"
 #include "IRHICommandList.h"
 #include "IRHIGPUProfiler.h"
@@ -119,6 +120,29 @@ namespace Kurenai::RHI
         // 参照しているメモリを解放してしまい、ヒープ破損やクラッシュを引き起こし得る。
         // DX11は同期的なリソース管理のため実質的に即座に返る
         virtual void WaitForGPUIdle() = 0;
+
+        // --- レイトレーシング -----------------------------------------------------------------
+
+        // インラインレイトレーシング(HLSLのRayQuery、DXR 1.1)が使えるか。
+        // DX11にはレイトレーシングAPIが存在しないため常にfalse。DX12でも、アダプタが
+        // D3D12_RAYTRACING_TIER_1_1に満たない場合はfalseになる。
+        //
+        // 上位層はレイトレーシングを使う経路へ入る前に必ずこれを確認し、falseなら
+        // 従来のスクリーンスペース手法(SSR・CSM・SSAO)へフォールバックすること。
+        // 下のCreate*ASもfalseの環境では常にnullptrを返す
+        virtual bool SupportsRaytracing() const = 0;
+
+        // モデル1つ分のジオメトリからBLAS(Bottom Level AS)を構築する。
+        // 構築はGPU上で行われるが、この関数を抜けた時点で完了が保証される(内部で同期する)ため、
+        // 戻り値をそのままTLASの入力として使ってよい。
+        // 非対応環境・構築失敗時はログを出してnullptrを返す(例外は投げない)
+        virtual std::unique_ptr<IRHIAccelerationStructure> CreateBottomLevelAS(const BottomLevelASDesc& desc) = 0;
+
+        // BLASへの参照とワールド変換の一覧からTLAS(Top Level AS)を構築する。
+        // シェーダーへバインドできるのはこちらだけ(IRHICommandList::SetComputeAccelerationStructure)。
+        // desc.Instancesの各要素が指すBLASは、TLASより長く生存させること。
+        // 非対応環境・構築失敗時はログを出してnullptrを返す
+        virtual std::unique_ptr<IRHIAccelerationStructure> CreateTopLevelAS(const TopLevelASDesc& desc) = 0;
     };
 
     KURENAI_LIB_API std::unique_ptr<IRHIDevice> CreateDX11Device();

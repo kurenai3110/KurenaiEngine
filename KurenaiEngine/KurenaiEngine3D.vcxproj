@@ -138,6 +138,10 @@ exit /b 0</Command>
     <None Include="Shaders\3D\SSAO.hlsl" />
     <None Include="Shaders\3D\SSIL_VisibilityBitmask.hlsl" />
     <None Include="Shaders\3D\SSR.hlsl" />
+    <None Include="Shaders\3D\RTReflection.hlsl" />
+    <None Include="Shaders\3D\RTShadow.hlsl" />
+    <None Include="Shaders\3D\RTAO.hlsl" />
+    <None Include="Shaders\3D\RaytracingScene.hlsli" />
     <None Include="Shaders\3D\Shadow.hlsl" />
     <None Include="Shaders\3D\TAA.hlsl" />
     <None Include="Shaders\3D\Tonemap.hlsl" />

@@ -483,6 +483,22 @@ namespace Kurenai::Assets
             return texture ? texture : textureLoader.GetBlack();
         };
 
+        // レイトレーシング用の頂点属性・インデックスを作るか。デバイスが非対応なら作らない
+        // (Bistro級では100MB規模になるため、使わない環境で確保しない)
+        const bool buildRaytracingGeometry = device.SupportsRaytracing();
+        if (buildRaytracingGeometry)
+        {
+            size_t totalVertexCount = 0;
+            size_t totalIndexCount = 0;
+            for (const MeshEntry& mesh : meshEntries)
+            {
+                totalVertexCount += mesh.VertexCount;
+                totalIndexCount += mesh.IndexCount;
+            }
+            model.RaytracingAttributes.reserve(totalVertexCount);
+            model.RaytracingIndices.reserve(totalIndexCount);
+        }
+
         model.Meshes.reserve(meshEntries.size());
         for (const MeshEntry& mesh : meshEntries)
         {
@@ -502,6 +518,25 @@ namespace Kurenai::Assets
             indexBufferDesc.InitialData = geometryPayload.data() + mesh.IndexOffset;
             outMesh.IndexBuffer = device.CreateBuffer(indexBufferDesc);
             outMesh.IndexCount = mesh.IndexCount;
+            outMesh.VertexCount = mesh.VertexCount;
+
+            if (buildRaytracingGeometry)
+            {
+                // geometryPayloadがまだ生存しているこの場でしか元データを読めないため、
+                // ここでレイトレーシング用の圧縮属性を作っておく(位置は持たない。理由は
+                // RaytracingGeometry.hのコメント参照)
+                outMesh.RaytracingAttributeOffset = static_cast<uint32_t>(model.RaytracingAttributes.size());
+                outMesh.RaytracingIndexOffset = static_cast<uint32_t>(model.RaytracingIndices.size());
+
+                const auto* vertices = reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset);
+                for (uint32_t v = 0; v < mesh.VertexCount; ++v)
+                {
+                    model.RaytracingAttributes.push_back(PackRaytracingVertexAttribute(vertices[v].Normal, vertices[v].UV));
+                }
+
+                const auto* indices = reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset);
+                model.RaytracingIndices.insert(model.RaytracingIndices.end(), indices, indices + mesh.IndexCount);
+            }
 
             outMesh.BaseColorTexture = resolveBaseColorOrMetallicRoughness(mesh.BaseColorTextureIndex);
             outMesh.NormalTexture = resolveNormal(mesh.NormalTextureIndex);

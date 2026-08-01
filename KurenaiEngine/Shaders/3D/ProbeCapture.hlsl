@@ -42,16 +42,23 @@ cbuffer FrameConstants : register(b0)
     // x=t8のライトリストの有効数(Transparent.hlslと同じくFrameConstants末尾で受け取る。
     // b1はObjectConstantsが占有していてLightingConstantsを置けないため)
     float4 ActiveLightCount;
-    // y=環境光の拡散倍率、z=同じく鏡面倍率。xの拡散イラディアンス取得元切り替えはこのパスでは
-    // 使わないが、cbufferのレイアウトは宣言順で決まりフィールドを飛ばせないため丸ごと宣言する
+    // ここから下はこのシェーダーでは使わないが、cbufferのレイアウトは宣言順で決まり
+    // 途中のフィールドを飛ばせないため、後続のDDGIParams/OcclusionParamsのオフセットを合わせる目的で
+    // 宣言する(C++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること)
     float4 IBLParams;
-    // 【以下3つはこのシェーダーでは使わないが宣言だけ必要】同じ理由で、
-    // 末尾のOcclusionParamsを正しいオフセットで読むには途中のフィールドを飛ばせない。
-    // C++側のFrameConstantsと並びを必ず一致させること
     float4 ProbeParams;
     float4 ProbeParams2;
+    // TAA(23章)用。このシェーダーでは未使用だが、C++側でDDGIParamsより手前に置かれているため
+    // オフセット合わせのためだけに宣言する
     float4x4 PrevViewProj;
     float4 TAAParams;
+    // DDGI(22章)。多重バウンスのために前フレームのイラディアンスを引くのに使う
+    float4 DDGIParams0;
+    float4 DDGIParams1;
+    float4 DDGIParams2;
+    float4 DDGIParams3;
+    // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
+    float4 DDGIParams4;
     // bent normalによる遮蔽(25章)。プローブの中身も不透明パスと同じ規則で焼かないと、
     // つまみを動かしたときにプローブだけ古い見た目のまま残る。
     // KurenaiEngine3D側の再ベイク署名にもこの値を混ぜてあること
@@ -101,6 +108,15 @@ Texture2D BentNormalTexture : register(t6);
 TextureCube IrradianceTexture : register(t9);
 TextureCube PrefilteredEnvTexture : register(t10);
 Texture2D BRDFLUTTexture : register(t11);
+// DDGI(22章)の多重バウンス用。前フレームのイラディアンスを拡散の環境光として使う
+#define KURENAI_DDGI_IRRADIANCE_REGISTER t12
+#define KURENAI_DDGI_DISTANCE_REGISTER t13
+#include "DDGI.hlsli"
+
+// 多重バウンスの減衰。1未満でなければならない(理由はEvaluateGlobalIBLのコメント参照)。
+// 0.95は「1バウンスあたり5%のエネルギーを捨てる」という意味で、反射率1の白い部屋でも
+// 等比級数 1 + 0.95 + 0.95² + ... = 20 で必ず収束する
+static const float kDDGIBounceAttenuation = 0.95f;
 
 struct VSInput
 {
@@ -255,13 +271,29 @@ float3 EvaluateLight(
 // テクスチャなので使える。焼いた絵とメインパスの絵が食い違わないよう、aoにはそれを渡す)。
 // 昼度(AmbientColor.a)による夜間減衰は、手続き空の導入でどこでも掛けなくなった(21.4節)。
 // 空のキューブマップ自体が太陽高度に応じて暗くなるため、焼き込み時にも使用時にも不要
-float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness,
+float3 EvaluateGlobalIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness,
                          float materialAO, BentOcclusion bent, float3 brdf, int compensationMode)
 {
     const float NdotV = saturate(dot(N, V));
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
 
-    const float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
+    // 【多重バウンス(22章)】DDGIが有効なら、拡散の環境光を前フレームのDDGIイラディアンスにする。
+    //
+    // これが無いとプローブへ焼かれるのは「直接光 + 空」までの1バウンスで、壁に当たった光が
+    // 床を照らすところまでしか出ない(その床の照り返しが天井を照らす分は出ない)。
+    // 前フレームの結果を入力に回すと
+    //   フレーム1: 直接光のみ → E1(1バウンス)
+    //   フレーム2: E1を環境光として使う → E2(2バウンス)
+    //   フレーム3: E2を使う → E3(3バウンス) ...
+    // と毎フレーム1バウンスずつ積み上がる。「Nバウンスまで計算する」のではなく
+    // フィードバックループが勝手に収束するのがDDGIのinfinite bouncesの意味である。
+    //
+    // 減衰(kDDGIBounceAttenuation)は発散対策。反射率が1に近い白い部屋では
+    // E(n+1) ≈ E(n)·ρ で ρ→1 のとき収束が遅く、数値誤差で1を超えると発散する。
+    // 1未満を掛けて等比級数が必ず収束するようにしている(エネルギーを少し捨てて安定を買う)
+    const float3 irradiance = (DDGIParams0.w > 0.5f)
+        ? SampleDDGIIrradiance(worldPos, N, V) * kDDGIBounceAttenuation
+        : IrradianceTexture.Sample(MaterialSampler, N).rgb;
     const float3 fresnelRoughness =
         F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
     const float3 kd = (1.0f - fresnelRoughness) * (1.0f - metallic);
@@ -371,14 +403,28 @@ PSOutput PSMain(PSInput input)
     // 定数色アンビエントへフォールバックし、プローブが真っ黒に焼けるのを防ぐ
     if (ShadowParams.z > 0.0f)
     {
-        color += EvaluateGlobalIBL(N, V, albedo, metallic, roughness, materialAO, bent, brdf, energy.Mode) * ShadowParams.z;
+        color += EvaluateGlobalIBL(N, V, input.WorldPos, albedo, metallic, roughness, materialAO, bent, brdf, energy.Mode) * ShadowParams.z;
     }
     else
     {
-        // DeferredLighting.hlslのフォールバックと同じく拡散項しか持たないので、
-        // 掛かるのは拡散倍率だけ
-        color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb
-               * ((OcclusionParams.x > 0.5f) ? bent.aoN : materialAO) * IBLParams.y;
+        // AmbientColor.rgbは一様な環境のイラディアンスE相当なので、その環境の放射輝度はL = E / PI。
+        // 拡散項の値は従来と厳密に一致する(DeferredLighting.hlslの同じ分岐と揃えてある)
+        const float3 ambientRadiance = AmbientColor.rgb / PI;
+
+        // 鏡面項を落とすと金属(拡散項が0)が真っ黒に焼き込まれ、そのプローブを引く面の
+        // 反射まで黒くなるため必ず計算する。F0/brdf/energyはPSMain冒頭で既に求めてある
+        const float3 fallbackFssEss = F0 * brdf.x + brdf.y;
+        const float fallbackEss = brdf.x + brdf.y;
+
+        // 拡散項の遮蔽はディフューズAOの出所切り替え(OcclusionParams.x)に従う。鏡面項は
+        // DeferredLighting.hlslの同じ分岐と同様、方向を持たない一様環境の近似のため
+        // bent normalのコーン交差ではなく従来どおりmaterialAOのSpecularOcclusionのままでよい
+        const float diffuseAO = (OcclusionParams.x > 0.5f) ? bent.aoN : materialAO;
+        color += albedo * (1.0f - metallic) * ambientRadiance * diffuseAO
+            + ambientRadiance
+                * (fallbackFssEss * energy.Compensation
+                   + SpecularMultiScatterIBL(F0, fallbackFssEss, fallbackEss, energy.Mode))
+                * SpecularOcclusion(NdotV, roughness, materialAO);
     }
 
     color += emissive;

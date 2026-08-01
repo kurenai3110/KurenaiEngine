@@ -32,6 +32,55 @@ namespace Kurenai::RHI
     };
 
     class IRHIShader;
+    class IRHIBuffer;
+    class IRHIAccelerationStructure;
+
+    // --- レイトレーシングの高速化構造(Acceleration Structure) --------------------------------
+
+    // BLAS(Bottom Level AS)を構成する三角形ジオメトリ1つ分。Assets::Meshが持つ頂点/インデックス
+    // バッファをそのまま渡せるようにしてある(RT専用に複製する必要はない)
+    struct ASGeometryDesc
+    {
+        IRHIBuffer* VertexBuffer = nullptr;
+        uint32_t VertexCount = 0;
+        uint32_t VertexStrideInBytes = 0;
+        // 頂点構造体の先頭から位置(float3)までのバイトオフセット。Assets::Vertexは位置が
+        // 先頭にあるため0でよい
+        uint32_t VertexPositionOffsetInBytes = 0;
+        // インデックスは32bit(uint32_t)固定。このエンジンのインデックスバッファは
+        // Assets::GeometryHeader::IndexStrideの通りすべてuint32_tのため
+        IRHIBuffer* IndexBuffer = nullptr;
+        uint32_t IndexCount = 0;
+        // 不透明(アルファテスト・半透明を持たない)か。falseのジオメトリは、レイ側が
+        // RAY_FLAG_CULL_NON_OPAQUEを指定した場合にトレース対象から外れる。
+        // アルファカットアウトのマテリアルを正しく抜くにはAnyHit相当の処理が要るが、
+        // インラインレイトレーシングではRayQuery::Proceed()のループで呼び出し側が判定する
+        bool IsOpaque = true;
+    };
+
+    struct BottomLevelASDesc
+    {
+        // 1つのモデル(Assets::Model)に含まれる全メッシュをまとめて1つのBLASにする想定。
+        // シェーダー側はRayQuery::CommittedGeometryIndex()でこの配列の何番目に当たったかを受け取る
+        std::vector<ASGeometryDesc> Geometries;
+    };
+
+    // TLAS(Top Level AS)に登録する1インスタンス
+    struct ASInstanceDesc
+    {
+        IRHIAccelerationStructure* BottomLevel = nullptr;
+        // 行優先3x4のワールド変換(Transform[行][列]、平行移動はTransform[*][3])。
+        // Assets::ModelInstance::WorldはHLSLへそのまま渡せるよう転置済みで保持されているため、
+        // その先頭3行をそのままコピーすればこの並びになる
+        float Transform[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f } };
+        // シェーダーがRayQuery::CommittedInstanceID()で受け取る値。D3D12の仕様上24bitまで
+        uint32_t InstanceID = 0;
+    };
+
+    struct TopLevelASDesc
+    {
+        std::vector<ASInstanceDesc> Instances;
+    };
 
     struct PipelineStateDesc
     {

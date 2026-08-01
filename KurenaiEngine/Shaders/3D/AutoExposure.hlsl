@@ -63,6 +63,16 @@ cbuffer AutoExposureConstants : register(b1)
     // 下側は MinEV100 が絶対的な下限として効く
     float KeyReferenceEV100;
     float KeyCeilingEV;
+
+    // --- シーン切り替え時の順応リセット ---
+    // 順応の状態(前フレームのEVと初期化済みフラグ)はExposureOutputに入っているため、
+    // CPU側からは「初回に戻す」手段が無い。シーンを切り替えても前のシーンの露出から
+    // 順応が続いてしまうので、その1フレームだけこのフラグで順応を飛ばす。
+    // 場面の切り替わりであって視点の移動ではないため、目の順応を模す理由が無い
+    float ResetAdaptation;
+    // 詰め物はfloat3で置くこと。HLSLのcbuffer内の配列は要素ごとに16バイト境界へ揃えられるため、
+    // float ResetPadding[3] と書くと12バイトではなく48バイトを占め、C++側と大きさが食い違う
+    float3 ResetPadding;
 };
 
 // 256ビンの輝度ヒストグラム
@@ -225,10 +235,10 @@ void CSResolve(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float initialized = ExposureOutput[uint2(1, 0)];
 
     float ev;
-    if (initialized < 0.5f)
+    if (initialized < 0.5f || ResetAdaptation > 0.5f)
     {
-        // 起動直後・シーン切り替え直後は順応させずいきなり合わせる
-        // (UAVテクスチャはゼロ初期化されるので、このフラグで初回を判定できる)
+        // 起動直後(UAVテクスチャはゼロ初期化されるので、initializedで初回を判定できる)と
+        // シーン切り替え直後(CPU側がResetAdaptationを立てる)は順応させずいきなり合わせる
         ev = targetEV;
     }
     else

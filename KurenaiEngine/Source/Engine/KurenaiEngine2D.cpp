@@ -152,6 +152,11 @@ namespace Kurenai
 
     void KurenaiEngine2D::BeginFrame(float clearR, float clearG, float clearB, float clearA)
     {
+        // WM_SIZEが記録しておいたリサイズ要求をここで反映する。2Dはレンダースレッドを持たず
+        // このスレッドがそのままスワップチェーンを使うため、描画コマンドを何も積んでいない
+        // フレーム先頭のこの位置で呼べばよい(ApplyPendingResizeのコメント参照)
+        ApplyPendingResize();
+
         // 前フレームのDrawText/MeasureTextで未収録の文字が見つかっていれば、まだ描画コマンドを
         // 何も積んでいないこのタイミングでアトラスを再構築する(BuildFontAtlasのコメント参照)
         RebuildFontAtlasIfPending(false);

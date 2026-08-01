@@ -20,6 +20,10 @@ static const float PI = 3.14159265359f;
 #define KURENAI_PROBE_PREFILTERED_REGISTER t12
 #define KURENAI_PROBE_BUFFER_REGISTER t13
 #define KURENAI_PROBE_DISTANCE_REGISTER t14
+// DDGI(22章)のオクタヘドラルアトラス。拡散イラディアンスだけを差し替えるため、
+// 鏡面を担うReflectionProbe.hlsli側とはレジスタも役割も完全に分かれている
+#define KURENAI_DDGI_IRRADIANCE_REGISTER t15
+#define KURENAI_DDGI_DISTANCE_REGISTER t16
 
 cbuffer FrameConstants : register(b0)
 {
@@ -60,11 +64,18 @@ cbuffer FrameConstants : register(b0)
     // 反射プローブの距離キューブ用(19.12節)。x=視差補正に距離キューブを使うフラグ、
     // y=距離キューブによる遮蔽判定(光漏れ抑制)の有効フラグ、z=距離キューブの1面の解像度、w=未使用
     float4 ProbeParams2;
-    // 【以下2つはこのシェーダーでは使わないが宣言だけ必要】cbufferは宣言順レイアウトなので、
-    // 末尾のOcclusionParamsを正しいオフセットで読むには途中のフィールドを飛ばせない。
-    // C++側のFrameConstantsと並びを必ず一致させること
+    // TAA(23章)用。このシェーダーでは未使用だが、C++側でDDGIParamsより手前に置かれているため
+    // オフセット合わせのためだけに宣言する
     float4x4 PrevViewProj;
     float4 TAAParams;
+    // DDGI用(22章)。レイアウトはC++側 KurenaiEngine3D.cpp の FrameConstants のコメント参照。
+    // DDGI.hlsliがこの4本を読む
+    float4 DDGIParams0;
+    float4 DDGIParams1;
+    float4 DDGIParams2;
+    float4 DDGIParams3;
+    // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
+    float4 DDGIParams4;
     // bent normalによる遮蔽(25章)。x=ディフューズAOの出所、y=スペキュラ遮蔽の方式、
     // z=multi-bounce AO、w=未使用。cbufferは宣言順レイアウトなので、
     // 使わないシェーダーは末尾のこのフィールドを宣言しなくてよい
@@ -84,8 +95,9 @@ Texture2D EmissiveTexture : register(t6);
 // 鏡面の反射方向)を求めるのに必要
 Texture2D NormalTexture : register(t7);
 // bent normal(GBuffer.hlslがSV_TARGET5へ書いたワールド空間のbRaw)。
-// t0〜t14が埋まっているためt15。DX12のkTextureSlotCountを15→16へ上げてある(25章)
-Texture2D BentNormalTexture : register(t15);
+// t0〜t14はG-Buffer/BRDFLUT/反射プローブ、t15・t16はDDGI(22章)が使用中のためt17。
+// DX12のkTextureSlotCountを17→18へ上げてある(25章)
+Texture2D BentNormalTexture : register(t17);
 // split-sum近似の第2項、BRDF積分LUT(x=NdotV, y=ラフネス。BRDFLUT.hlslで生成、方向性を持たない
 // (NdotV, ラフネス)の2Dルックアップテーブルのため、これだけは通常のTexture2Dのまま)
 Texture2D BRDFLUTTexture : register(t10);
@@ -94,6 +106,9 @@ Texture2D BRDFLUTTexture : register(t10);
 // プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みは
 // ReflectionProbe.hlsliが持つ(SSR.hlslと共有するため。レジスタ番号は上のマクロで与えている)
 #include "ReflectionProbe.hlsli"
+// DDGI(22章)。拡散イラディアンスだけを差し替える。鏡面には一切触れないため、
+// SSRとの「足した量と引く量が一致する」不変条件(20章)には影響しない
+#include "DDGI.hlsli"
 
 // 環境ソース(プローブとグローバルIBLの重み付き合成)はSampleEnvironmentが返す。プローブと
 // グローバルIBLはどちらも同じ手順で焼かれており(IBLConvolve.hlslを共有している)、解像度・
@@ -116,6 +131,16 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // 鏡面のRは変えない ―― あちらは反射方向そのものが物理的に決まっているため
     const float3 irradianceDir = (OcclusionParams.x > 0.5f) ? bent.axis : N;
     SampleEnvironment(worldPos, irradianceDir, R, mipLevel, irradiance, prefiltered);
+
+    // DDGI(22章)が有効なら、拡散の環境ソースだけをプローブ格子由来のものへ差し替える。
+    // 【加算ではなく差し替えである】DDGIのイラディアンスは「その位置に来ている光」そのもので、
+    // グローバルIBL/反射プローブのイラディアンスと同じ量の別の推定値である。足すと二重計上になる。
+    // 鏡面(prefiltered)は差し替えない——反射プローブのほうが方向解像度が桁違いに高く、
+    // DDGIのオクタヘドラル6x6では鏡面の映り込みを表現できないため
+    if (DDGIParams0.w > 0.5f)
+    {
+        irradiance = SampleDDGIIrradiance(worldPos, N, V);
+    }
 
     // --- 拡散IBL ---
     // irradianceの取得元(専用マップ or プリフィルタ済み鏡面の最終ミップ)の切り替えは
@@ -258,9 +283,37 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
     else
     {
-        // このフォールバックは拡散項しか持たないため、掛かるのは拡散倍率だけ。
-        // 鏡面倍率(IBLParams.z)にはここで掛ける相手がいない
-        ambient = (diffuseColor / PI) * AmbientColor.rgb * diffuseAO * IBLParams.y;
+        // IBL無効時のフォールバック。AmbientColor.rgbを「方向依存を持たない一様な環境」とみなす。
+        // 一様な放射輝度Lの環境から受けるイラディアンスはE = PI * Lなので、上のコメントどおり
+        // AmbientColor.rgbをイラディアンスE相当として扱うなら、環境の放射輝度はL = E / PIになる。
+        // 拡散側の/PIと同じ量であり、拡散項の値は従来と厳密に一致する
+        const float3 ambientRadiance = AmbientColor.rgb / PI;
+
+        // 【鏡面項を0にしてはいけない】diffuseColor = albedo * (1 - metallic)のため、
+        // 拡散だけにすると金属(metallic=1)の環境光が厳密に0になり真っ黒な影絵になる。
+        // 低ラフネスの誘電体も環境のハイライトを完全に失う。
+        // そこで一様な環境放射輝度に対してsplit-sum近似の第2項(BRDF積分LUT。方向性を持たない
+        // (NdotV, ラフネス)のテーブルなのでIBLの有効/無効に関わらず使える)を掛けた鏡面を足す。
+        // 半透明パス(Transparent.hlsl)は以前からこの形のフォールバックを持っており、
+        // 不透明パスとプローブ焼き込みパスにだけ無かったものを揃えたもの
+        const float NdotV = saturate(dot(N, V));
+        const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
+        // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(EvaluateIBLと同じ)
+        const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
+        const SpecularEnergyContext energy = MakeSpecularEnergyContext(F0, brdf, roughness, ShadowParams.w);
+        const float3 fallbackFssEss = F0 * brdf.x + brdf.y;
+        const float fallbackEss = brdf.x + brdf.y;
+
+        // 定数色アンビエントはプリフィルタ済み鏡面・拡散イラディアンスの両方の代わりを兼ねるため、
+        // Kulla-Contyの加算ローブにも同じambientRadianceを掛ける。
+        // 拡散項の遮蔽はdiffuseAO(bent normal有効時はaoN)を使う。鏡面項はこのフォールバックが
+        // 方向を持たない一様環境を仮定しているため、bent normalのコーン交差ではなく
+        // 従来どおりの非方向性SpecularOcclusion(ao)のままでよい(半透明パスと同じ扱い)
+        ambient = diffuseColor * ambientRadiance * diffuseAO
+            + ambientRadiance
+                * (fallbackFssEss * energy.Compensation
+                   + SpecularMultiScatterIBL(F0, fallbackFssEss, fallbackEss, energy.Mode))
+                * SpecularOcclusion(NdotV, roughness, ao);
     }
 
     // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する。SSILの間接拡散光も

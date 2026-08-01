@@ -258,6 +258,17 @@ namespace Kurenai::Core
             // DestroyWindow後はGetWindowPlacementが使えなくなるため、破棄する前に保存する
             SaveCurrentPlacement();
             DestroyWindow(m_Handle);
+
+            // 【重要】DestroyWindowが同期的に送るWM_DESTROYの中でPostQuitMessage(0)を呼んでいるため、
+            // この時点で「ウィンドウではなくスレッド」のメッセージキューにWM_QUITが1件積まれている。
+            // 1プロセスの中でWindowを作り直す場合(グラフィックスAPIの実行時切り替え)、この残骸を
+            // 次のWindowのPumpMessages()が拾ってm_ShouldCloseを立ててしまい、新しいウィンドウが
+            // 開いた直後に終了する(実際に発生: DX12へ切り替えるとシーン読み込み完了の直後に落ちた)。
+            // WM_QUITはウィンドウに紐づかずスレッドに属するため、破棄したウィンドウの後始末として
+            // ここで取り除いておく。プロセスを終了する通常の経路では、この後もう誰も
+            // メッセージを汲まないので取り除いても影響しない
+            MSG quitMessage{};
+            PeekMessageW(&quitMessage, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE);
         }
     }
 

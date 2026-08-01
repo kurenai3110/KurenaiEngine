@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 
 #include "DX12DescriptorHeap.h"
+#include "DX12ShaderCompiler.h"
 #include "RHI/IRHIDevice.h"
 
 namespace DirectX
@@ -69,7 +70,17 @@ namespace Kurenai::RHI
         ID3D12RootSignature* GetComputeRootSignature() const { return m_ComputeRootSignature.Get(); }
         DX12DescriptorHeap* GetRtvHeap() const { return m_RtvHeap.get(); }
         DX12DescriptorHeap* GetDsvHeap() const { return m_DsvHeap.get(); }
-        DX12DescriptorHeap* GetSrvCpuHeap() const { return m_SrvCpuHeap.get(); }
+        // 非シェーダー可視のCBV_SRV_UAVヒープは、確保するスレッドで2本に分けてある。
+        // DX12DescriptorHeapはロックを持たないため、1本を複数スレッドから確保・解放すると
+        // フリーリストが壊れる。スレッドごとに別のヒープを使うことで、ロックなしのまま安全にする
+        // (詳細はdocs/Architecture.html 23章)。
+        //
+        // アセット由来(モデル・テクスチャ・シーンジオメトリ)のリソース用。シーン読み込み専用の
+        // Loaderスレッドだけが確保・解放する(初期化時を除く)
+        DX12DescriptorHeap* GetAssetSrvCpuHeap() const { return m_AssetSrvCpuHeap.get(); }
+        // レンダーターゲット・コンピュート用中間バッファなど、描画側のリソース用。
+        // Renderスレッドだけが確保・解放する(初期化時を除く)
+        DX12DescriptorHeap* GetRenderSrvCpuHeap() const { return m_RenderSrvCpuHeap.get(); }
         DX12DescriptorHeap* GetShaderVisibleSrvHeap() const { return m_ShaderVisibleSrvHeap.get(); }
         DX12DescriptorHeap* GetShaderVisibleSamplerHeap() const { return m_ShaderVisibleSamplerHeap.get(); }
         // 上位層が一度もSetSamplerSetを呼ばないままDrawした場合に使う、既定サンプラーで埋めたブロックの先頭。
@@ -82,8 +93,8 @@ namespace Kurenai::RHI
         // そのままではシェーダが破棄済みリソースのディスクリプタを読みうる。
         // DX12CommandListはシャドウ配列の全スロットをこれで初期化しておくことで、
         // 「未バインドのスロットは0を返す」というDX11と同じ挙動を構造的に保証する
-        D3D12_CPU_DESCRIPTOR_HANDLE GetNullSrvCpuHandle() const { return m_SrvCpuHeap->GetCpuHandle(m_NullSrvIndex); }
-        D3D12_CPU_DESCRIPTOR_HANDLE GetNullUavCpuHandle() const { return m_SrvCpuHeap->GetCpuHandle(m_NullUavIndex); }
+        D3D12_CPU_DESCRIPTOR_HANDLE GetNullSrvCpuHandle() const { return m_RenderSrvCpuHeap->GetCpuHandle(m_NullSrvIndex); }
+        D3D12_CPU_DESCRIPTOR_HANDLE GetNullUavCpuHandle() const { return m_RenderSrvCpuHeap->GetCpuHandle(m_NullUavIndex); }
 
         // フレームごとに1ずつ増える通し番号。DX12Bufferがリングへの書き込み回数を
         // 「同一フレーム内で何回目か」として数えるために参照する(ResetCommandList()で進む)
@@ -118,7 +129,25 @@ namespace Kurenai::RHI
         // リサイズやシャットダウンなど、パイプライン化の恩恵が不要な箇所でのみ使う
         void WaitForGPUIdle() override;
 
+        bool SupportsRaytracing() const override { return m_SupportsRaytracing; }
+        std::unique_ptr<IRHIAccelerationStructure> CreateBottomLevelAS(const BottomLevelASDesc& desc) override;
+        std::unique_ptr<IRHIAccelerationStructure> CreateTopLevelAS(const TopLevelASDesc& desc) override;
+
     private:
+        // CreateBottomLevelAS/CreateTopLevelASの共通部分。組み立て済みの構築入力を受け取り、
+        // 必要なサイズを問い合わせてASバッファとスクラッチバッファを確保し、
+        // m_UploadCommandList4へ構築コマンドを積んで完了を同期的に待つ。
+        // createSrvがtrueの場合はTLAS用のSRVも作る。失敗時はログを出してnullptrを返す
+        std::unique_ptr<IRHIAccelerationStructure> BuildAccelerationStructure(
+            const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, bool createSrv, const char* debugName);
+        // ID3D12Device5 / ID3D12GraphicsCommandList4の取得とレイトレーシングティアの判定を行い、
+        // 結果をm_SupportsRaytracingへ記録する。判定結果は必ずログへ残す
+        // (非対応環境では上位層が黙って従来手法へフォールバックするため、ログが唯一の手がかりになる)
+        void DetectRaytracingSupport();
+        // デバイスが対応する最上位のシェーダーモデルを実測してm_HighestShaderModelへ記録し、
+        // dxc(DX12ShaderCompiler)の初期化まで行う。CreateShaderより前に呼ぶ必要がある
+        void DetectShaderModelAndInitCompiler();
+
         void CreateRootSignature();
         void CreateComputeRootSignature();
         // CreateMippedUAVTextureCube(単一キューブ、SRVはTextureCube)と
@@ -128,7 +157,8 @@ namespace Kurenai::RHI
             uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray);
         // 現在のフレームスロット(m_FrameIndex)のコマンドアロケータ/リストを開き直す
         void ResetCommandList();
-        // デバッグレイヤーが溜めたメッセージを引き取ってKurenaiEngine.logへ出す(デバッグビルドのみ有効)。
+        // デバッグレイヤーが溜めたメッセージを引き取ってエンジンのログ(KurenaiEngine_DX12.log)へ
+        // 出す(デバッグビルドのみ有効)。
         // そのままではデバッガの出力ウィンドウにしか出ず、デバッガを繋がない実行で気付けないため
         void DrainDebugMessages();
         Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(uint64_t sizeInBytes);
@@ -142,6 +172,27 @@ namespace Kurenai::RHI
         void UploadSubmitAndWait();
 
         Microsoft::WRL::ComPtr<ID3D12Device> m_Device;
+        // DXR用のインタフェース。m_DeviceからQueryInterfaceで取得する。
+        // GetRaytracingAccelerationStructurePrebuildInfoを呼ぶのに必要で、
+        // 取得に失敗する(＝OS/ドライバがDXR世代でない)場合はm_SupportsRaytracingもfalseになる
+        Microsoft::WRL::ComPtr<ID3D12Device5> m_Device5;
+        // AS構築コマンド(BuildRaytracingAccelerationStructure)を積むためのインタフェース。
+        // m_UploadCommandList(リソースアップロード専用)からQueryInterfaceで取得する。
+        // 毎フレーム用のm_CommandListではなくこちらを使うのは、AS構築がLoadScene(Renderスレッド外)から
+        // 呼ばれるため。m_CommandListを触るとRender()が記録中のコマンドリストを壊す
+        // (m_UploadCommandListのコメント参照)
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> m_UploadCommandList4;
+        // D3D12_FEATURE_D3D12_OPTIONS5のRaytracingTierがTier 1.1以上か。
+        // インラインレイトレーシング(HLSLのRayQuery)はTier 1.1で追加された機能のため、
+        // Tier 1.0止まりのアダプタではfalseにする。
+        // 加えてRayQueryを含むシェーダーはSM 6.5でしかコンパイルできないため、
+        // dxcが使えない/シェーダーモデルが6.5未満の環境でもfalseにする
+        bool m_SupportsRaytracing = false;
+        // D3D12_FEATURE_SHADER_MODELで実測した、このデバイスが対応する最上位のシェーダーモデル。
+        // 取得できなかった場合はD3D_SHADER_MODEL_5_1相当として扱う(0のまま)
+        D3D_SHADER_MODEL m_HighestShaderModel = static_cast<D3D_SHADER_MODEL>(0);
+        // HLSL→DXILのコンパイラ。IsAvailable()がfalseの場合はd3dcompiler/SM 5.0へフォールバックする
+        DX12ShaderCompiler m_ShaderCompiler;
         // デバッグビルドでのみ取得する(リリースビルドではnullptrのままDrainDebugMessagesが即座に返る)
         Microsoft::WRL::ComPtr<ID3D12InfoQueue> m_InfoQueue;
         Microsoft::WRL::ComPtr<IDXGIFactory2> m_Factory;
@@ -180,11 +231,14 @@ namespace Kurenai::RHI
 
         std::unique_ptr<DX12DescriptorHeap> m_RtvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_DsvHeap;
-        std::unique_ptr<DX12DescriptorHeap> m_SrvCpuHeap;
+        // 非シェーダー可視のCBV_SRV_UAVヒープ。触るスレッドで2本に分けてある
+        // (GetAssetSrvCpuHeap/GetRenderSrvCpuHeapのコメント参照)
+        std::unique_ptr<DX12DescriptorHeap> m_AssetSrvCpuHeap;
+        std::unique_ptr<DX12DescriptorHeap> m_RenderSrvCpuHeap;
         std::unique_ptr<DX12DescriptorHeap> m_ShaderVisibleSrvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_ShaderVisibleSamplerHeap;
         uint32_t m_FallbackSamplerSetBase = 0;
-        // 未バインドスロット埋め用のnullディスクリプタ(m_SrvCpuHeap上に1個ずつ確保する)。
+        // 未バインドスロット埋め用のnullディスクリプタ(m_RenderSrvCpuHeap上に1個ずつ確保する)。
         // デバイスと寿命を共にするため解放は行わない
         uint32_t m_NullSrvIndex = 0;
         uint32_t m_NullUavIndex = 0;

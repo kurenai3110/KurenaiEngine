@@ -51,6 +51,13 @@ cbuffer ObjectConstants : register(b1)
     // 調整する。かつて純粋な詰め物(ObjectPadding)だった枠をそのまま使っているため、
     // 定数バッファのサイズ・オフセットは変わっていない
     float OcclusionStrength;
+    // glTFのpbrMetallicRoughness.baseColorFactor(既定[1,1,1,1])。glTF仕様では
+    // baseColor = baseColorTexture * baseColorFactor と定義されており、テクスチャの有無に
+    // 関わらず常に掛ける。半透明パス(Transparent.hlsl)・プローブ焼き込み(ProbeCapture.hlsl)・
+    // レイトレーシング(RaytracingScene.hlsli)は以前から掛けていたが、この不透明パスだけが
+    // 宣言しておらず落としていた。そのため同じメッシュでも「直接見たとき」と
+    // 「反射プローブ/RT反射に映ったとき」で色が食い違っていた(14章参照)
+    float4 BaseColorFactor;
 };
 
 Texture2D BaseColorTexture : register(t0);
@@ -146,7 +153,10 @@ float3x3 ComputeTangentFrame(float3 N, float4 tangent)
 
 PSOutput PSMain(PSInput input)
 {
-    float4 baseColorSample = BaseColorTexture.Sample(MaterialSampler, input.UV);
+    // baseColor = baseColorTexture * baseColorFactor(glTF仕様)。BaseColorTextureIndexが
+    // 無いマテリアルは白1x1のプレースホルダーが差さるため、この乗算だけで
+    // 「テクスチャのみ」「係数のみ」「両方」のすべてを正しく扱える
+    float4 baseColorSample = BaseColorTexture.Sample(MaterialSampler, input.UV) * BaseColorFactor;
 
     // AlphaCutoff<=0(アルファカットアウト無効)の場合、alpha(0〜1)は常にAlphaCutoff以上になるため
     // clipは発火しない。AlphaCutoff>0の場合のみ、alphaがそれを下回るピクセルを破棄する

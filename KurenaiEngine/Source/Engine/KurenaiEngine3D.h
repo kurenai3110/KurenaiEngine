@@ -16,6 +16,7 @@
 #include "KurenaiEngineBase.h"
 #include "KurenaiTypes.h"
 
+#include "Assets/RaytracingScene.h"
 #include "Assets/Scene.h"
 #include "Core/Camera.h"
 #include "Core/CPUProfiler.h"
@@ -45,10 +46,34 @@ namespace Kurenai
     class KURENAI_3D_API KurenaiEngine3D : public KurenaiEngineBase
     {
     public:
-        explicit KurenaiEngine3D(GraphicsAPI api = GraphicsAPI::DX11, uint32_t renderWidth = 1280, uint32_t renderHeight = 720);
+        // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
+        //   実行時に「システム」パネルからも変更できる)。
+        // initialSceneIndex: 起動時に読み込むシーンの番号(Assets/Scenes/*.ksceneをファイル名の
+        //   昇順に並べたときの位置)。範囲外なら0にフォールバックする。
+        //   グラフィックスAPIを切り替える際、呼び出し側が同じシーンで作り直すために使う
+        explicit KurenaiEngine3D(
+            GraphicsAPI api = GraphicsAPI::DX11, uint32_t renderWidth = Defaults::RenderWidth,
+            uint32_t renderHeight = Defaults::RenderHeight, size_t initialSceneIndex = 0);
         ~KurenaiEngine3D();
 
         void Run();
+
+        // --- グラフィックスAPIの実行時切り替え ---
+        // Run()の中でUI(「システム」パネル)からRequestGraphicsAPIChange()が呼ばれると、
+        // Run()はウィンドウを閉じずにループを抜けて戻る。呼び出し側は下の2つを見て、
+        // このオブジェクトを破棄してから新しいAPIで作り直すこと(Samples/Sample3D/Source/Main.cpp)。
+        //
+        // デバイスだけを差し替えるのではなくオブジェクトごと作り直すのは、破棄の順序
+        // (派生クラスの全リソース → スワップチェーン → デバイス → ウィンドウ)を
+        // C++のメンバ破棄順にそのまま任せられるため。手書きの解放関数にすると、
+        // メンバを追加したときに解放漏れが静かに発生する
+        bool HasPendingGraphicsAPIChange() const;
+        GraphicsAPI GetPendingGraphicsAPI() const;
+        // 作り直しへ引き継ぐ状態。上記以外の設定(AO・シャドウ・IBL・ポストプロセス等)は
+        // 新しいインスタンスで既定値に戻る
+        uint32_t GetRenderWidth() const { return m_RenderWidth; }
+        uint32_t GetRenderHeight() const { return m_RenderHeight; }
+        size_t GetCurrentSceneIndex() const { return m_CurrentSceneIndex; }
 
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
         // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
@@ -103,6 +128,24 @@ namespace Kurenai
         // (理由はRHI/IRHISamplerSet.h)
         void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
+        // このフレームでRT反射パスを実行するか。手法がRaytracedでも、高速化構造が無ければ
+        // (非対応環境・シーン読み込み中の空シーン・構築失敗)撃つ相手がいないため実行しない。
+        // 「パスを追加する条件」と「後段がその出力を読む条件」がずれると、
+        // 実行していないパスの出力(前フレームの残骸)を読むことになるため、判定はこの1か所に置く
+        bool ShouldRunRaytracedReflection() const;
+        // このフレームでRTシャドウパスを実行するか。ShouldRunRaytracedReflectionと同じ理由で
+        // 判定を1か所に集約している(パスを追加する条件とDirectLightingがその出力を読む条件が
+        // ずれると、実行していないパスの残骸を影として使ってしまう)
+        bool ShouldRunRaytracedShadow() const;
+        // このフレームでRTAOパスを実行するか。上2つと同じ理由で判定を1か所に集約している
+        bool ShouldRunRaytracedAO() const;
+        // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
+        // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
+        RHI::IRHITexture* GetActiveAOTexture() const;
+        RHI::IRHITexture* GetActiveAORawTexture() const;
+        // このフレームでHDRのシーン色として後段(自動露出・ブルーム・トーンマップ)が読むべき
+        // テクスチャを返す。反射パスを実行したならその出力、していなければm_SceneColor
+        RHI::IRHITexture* GetActiveReflectionOutput() const;
         // このフレームで空として使うキューブマップを返す。手続き空が有効で、かつ.ksceneが
         // スカイボックスを明示していないときだけ手続き空を使う(明示しているシーンは
         // そのDDSでなければ意味を成さないため。White Furnace Testが該当する)。
@@ -115,22 +158,85 @@ namespace Kurenai
         // 個々のファイルの[Scene]Name読み取りに失敗した場合はそのファイルを警告ログとともに
         // スキップする(1ファイルの不備でアプリ全体が起動できなくなるのを避けるため)
         void DiscoverScenes();
-        void LoadScene(size_t sceneIndex);
+
+        // --- シーン読み込みのスレッド分担 -----------------------------------------------------
+        //
+        // シーンの読み込みは「重いファイルI/O・デコード・GPUリソース作成」と「一瞬で終わる
+        // エンジン状態への反映」に分かれる。以前は両方をUpdateスレッドで行い、Render()全体と
+        // ミューテックスで排他していたため、読み込みの間フレームが1枚も進まなかった
+        // (Bistro Exteriorで約1.3秒)。
+        //
+        // そこで前者を専用のLoaderスレッドへ、後者をRenderスレッドのフレーム境界へ分けた。
+        // 読み込み中もフレームが進み続け、排他は受け渡しの一瞬だけで済む
+        // (詳細はdocs/Architecture.html 23章)。
+
+        // Renderスレッドが不要になったアセット由来のGPUリソースをまとめてLoaderスレッドへ渡すための箱。
+        //
+        // 【なぜRenderスレッドで破棄しないのか】アセット由来のリソースのディスクリプタは
+        // アセット用のディスクリプタヒープから確保されており、そのヒープはロックを持たない
+        // (DX12Device::GetAssetSrvCpuHeap参照)。確保するのがLoaderスレッドなので、
+        // 解放も同じスレッドに寄せることでロックなしのまま安全にする
+        struct RetiredAssets
+        {
+            Assets::Scene Scene;
+            Assets::RaytracingScene RaytracingScene;
+            std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
+        };
+
+        // Loaderスレッドが作り、Renderスレッドが受け取る「差し替えられる状態まで仕上がったシーン」
+        struct LoadedScene
+        {
+            Assets::Scene Scene;
+            Assets::RaytracingScene RaytracingScene;
+            size_t SceneIndex = 0;
+            // シーンの[Scene]Skyboxが読み込み済みのものと異なる場合のみ非nullptr。
+            // nullptrなら現在のスカイボックスを維持する
+            std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
+            std::wstring SkyboxPath;
+            // ComputeInitialCameraの結果(Updateスレッドが所有するm_Cameraへ後で反映される)
+            Core::Camera Camera;
+        };
+
+        // シーン切り替えを要求する(ScenePanel = Renderスレッドから呼ばれる)。
+        // 実際の読み込みはLoaderスレッドが行うため即座に戻る。
+        // 読み込み中に再度要求された場合は新しい要求で上書きされる(最後の要求が勝つ)
+        void RequestSceneLoad(size_t sceneIndex);
+        // 内部レンダー解像度の変更を要求する(SystemPanel = Renderスレッドから呼ばれる)。
+        // レンダーターゲットの作り直しはGPUがそれらを参照していない状態で行う必要があるため、
+        // ここでは要求を記録するだけにしてRender()の先頭でまとめて反映する
+        void RequestRenderResolution(uint32_t width, uint32_t height);
+        // Renderスレッドがフレーム先頭で呼ぶ。保留中の切り替え要求の発注と、
+        // 出来上がったシーンの取り込みを行う
+        void UpdateSceneStreaming();
+        // Loaderスレッドの本体。要求を待ち、旧シーンを破棄し、新シーンを読み込んで publish する
+        void LoaderThreadMain();
+        // Loaderスレッドで実行する読み込み本体。エンジンの状態は一切書き換えない。
+        // 失敗した場合はログを出してnullptrを返す
+        std::unique_ptr<LoadedScene> LoadSceneOnLoaderThread(size_t sceneIndex);
+        // Renderスレッドで実行する反映。出来上がったシーンを現在のシーンと差し替え、
+        // シーン由来の設定(太陽・影・AO・SSR・ライト・反射プローブ・ベイクフラグ等)を適用する
+        void ApplyLoadedScene(LoadedScene& loaded);
+        // 不要になったアセット由来のリソースをLoaderスレッドへ破棄依頼として積む。
+        // 【重要】呼ぶ前にIRHIDevice::WaitForGPUIdle()でGPUの参照が終わっていることを保証すること
+        void RetireAssets(RetiredAssets&& retired);
+        // シーンのAABBから初期カメラ(位置・向き・near/far)を決める。エンジンの状態を読まない
+        // 純粋な計算なのでLoaderスレッドから呼べる([Camera]セクションがあればそれを優先する)
+        static Core::Camera ComputeInitialCamera(const Assets::Scene& scene);
+
         // SSAO/SSILの半径・厚みとSSRの距離・厚みを、現在のシーンの対角長から決め直す。
         // これらは固定の既定値を持たないため、UIの「既定値に戻す」ではなくこれを呼ぶ
-        // (シーン読み込み時はFrameCameraToModelの先頭から呼ばれる)
+        // (シーン読み込み時はApplyLoadedSceneから呼ばれる)
         void ResetSceneDependentParams();
-        void FrameCameraToModel();
         // imguiWantsMouseはImGuiがマウス入力を掴んでいるか(Renderスレッドから
         // m_ImGuiWantCaptureMouse経由で受け取る)。パネルの上で右ドラッグを始めても
         // 視点回転が始まらないようにするために使う
         void UpdateMouseLook(bool imguiWantsMouse);
         void UpdateMovement(float deltaTime);
         void UpdateImGuiToggle();
-        // ScenePanel(Renderスレッド)がm_PendingSceneIndexへ書き込んだシーン切り替え要求を
-        // 見て、あればこのUpdateスレッドからLoadSceneを呼ぶ(LoadSceneをUpdateスレッド上で実行するための
-        // ハンドオフ。詳細はm_PendingSceneIndexのコメント参照)
-        void UpdateSceneSwitch();
+        // ApplyLoadedScene(Renderスレッド)が公開した初期カメラ・ウィンドウタイトルを、
+        // まだ適用していなければ適用する。m_Cameraの書き込み手をUpdateスレッド1つに保ち、
+        // ウィンドウタイトルの変更もウィンドウを所有するこのスレッドから行うためのハンドオフ
+        void UpdateAppliedSceneHandoff();
         void Update(float deltaTime);
         // 1フレーム分のUpdateと、Renderスレッドへのフレーム状態の受け渡しを行う。
         // 通常はRun()のループから、ウィンドウのドラッグ中(Windowsのモーダルループ中で
@@ -154,6 +260,16 @@ namespace Kurenai
 
         // 起動時に選択されたグラフィックスAPI(タイトルバー・ImGui表示用に保持)
         GraphicsAPI m_GraphicsAPI;
+
+        // 「システム」パネルから要求された切り替え先のAPI。-1なら要求なし。
+        // UI(Renderスレッド)が書き、Run()のループ条件(Updateスレッド)が読むためatomic。
+        // 実際の作り直しはRun()から戻った後に呼び出し側が行う(上のHasPendingGraphicsAPIChange参照)
+        std::atomic<int> m_RequestedGraphicsAPI{ -1 };
+        void RequestGraphicsAPIChange(GraphicsAPI api);
+
+        // 起動時に読み込むシーンの番号。コンストラクタ引数をそのまま保持する
+        // (APIを切り替えても同じシーンで再開できるようにするため)
+        size_t m_InitialSceneIndex = 0;
 
         // ImGuiのIniFilenameはポインタを保持するだけでコピーしないため、文字列の寿命をここで維持する。
         // m_ImGuiBackendのデストラクタ(ImGui::DestroyContextで最終保存)より後に破棄されるよう、
@@ -181,9 +297,23 @@ namespace Kurenai
         // 各パスのコマンド記録にかかるCPU時間の計測(RHIに依存しないためDX11/DX12を直接比較できる)
         Core::CPUProfiler m_CPUProfiler;
 
-        // G-Bufferの内部解像度。ウィンドウサイズとは独立しており、表示時はアスペクト比を保って拡大縮小する
+        // G-Bufferの内部解像度。ウィンドウサイズとは独立しており、表示時はアスペクト比を保って拡大縮小する。
+        // Render()の各所(Dispatchのスレッド数・定数バッファのScreenParams・TAAジッター・
+        // Hi-Zのミップ・レターボックス)から読まれるため、フレームの途中で変えてはならない。
+        // 変更はm_RenderResolutionDirty経由でフレーム先頭にまとめて反映する
         uint32_t m_RenderWidth;
         uint32_t m_RenderHeight;
+        // 「システム」パネルから要求された新しい内部解像度。Render()の先頭で反映する。
+        // m_BufferPrecisionDirtyとまったく同じ扱い(レンダーターゲットの作り直しはGPUがそれらを
+        // 参照していない状態で行う必要があるため、UI関数の中では実行しない)
+        uint32_t m_PendingRenderWidth = 0;
+        uint32_t m_PendingRenderHeight = 0;
+        bool m_RenderResolutionDirty = false;
+        // 内部解像度から決まるカメラのアスペクト比。
+        // m_CameraはUpdateスレッドしか書けない(Render()はFrameStateのスナップショット経由でしか
+        // 読まない)ため、解像度を変えるRenderスレッドからはここへ置くだけにし、
+        // Updateスレッドが毎フレーム読み取ってm_Camera.SetAspectRatio()を呼ぶ
+        std::atomic<float> m_RenderAspect{ 1.0f };
 
         // 中間バッファの精度構成。HDRが本来採用したい構成で、Legacy8bitはM7以前の
         // 「中間バッファはすべてR8G8B8A8_UNorm」だった構成を再現する比較用の経路。
@@ -237,15 +367,24 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_DirectLightTexture;
 
         // AO/GI手法の選択。SSAOは遮蔽率のみ、SSIL(Visibility Bitmask)は遮蔽率に加えて
-        // 近傍サーフェスからの間接拡散光(バウンス光)も計算する。どちらも出力フォーマットは共通
-        // (rgb=間接拡散光, a=遮蔽率)で、ライティングパスは選択中のテクスチャを1枚読むだけでよい
+        // 近傍サーフェスからの間接拡散光(バウンス光)も計算する。Raytracedは同じものを
+        // 深度バッファではなく高速化構造への交差判定で求める(画面外の遮蔽物も効く)。
+        // いずれも出力フォーマットは共通(rgb=間接拡散光, a=遮蔽率)で、
+        // ライティングパスは選択中のテクスチャを1枚読むだけでよい
         enum class AOTechnique
         {
             SSAO,
             SSILVisibilityBitmask,
+            Raytraced,
         };
         bool m_AOEnabled = Defaults::AOEnabled;
         AOTechnique m_AOTechnique = AOTechnique::SSAO;
+        // マテリアルの遮蔽マップ(glTFのocclusionTexture。22章)を使うか。
+        // 上のm_AOEnabled(スクリーンスペースAO/GI)とは完全に別系統で、無効にしても遮蔽マップは
+        // 効き続けるためこのトグルを別に持つ。無効時はObjectConstants.OcclusionStrengthへ0を渡し、
+        // 各パスのlerp(1, occlusionSample, 0) = 1(遮蔽なし)にする方式なのでシェーダー側の変更は不要。
+        // 反射プローブはキャプチャ時の値が焼き込まれるため、切り替えても焼き直すまで反映されない
+        bool m_OcclusionMapEnabled = Defaults::OcclusionMapEnabled;
         std::unique_ptr<RHI::IRHITexture> m_AODisabledTexture; // AO無効時に使う、遮蔽なし・間接光なしのテクスチャ
 
         // AO/GI共通のブラーパス(4x4ボックスブラーでrgba全チャンネルを均す。SSAO/SSIL両方から使い回す)
@@ -275,6 +414,23 @@ namespace Kurenai
         float m_SSILPower = Defaults::SSILPower;
         uint32_t m_SSILSliceCount = Defaults::SSILSliceCount;
         uint32_t m_SSILStepCount = Defaults::SSILStepCount;
+
+        // RTAOパス: 法線周りの半球へ余弦重みでレイを撃ち、遮蔽率と1バウンスの間接拡散光を求める
+        // コンピュートパス。出力はSSAO/SSILとまったく同じ意味・同じフォーマットなので、
+        // 後段のAOBlurパスとライティングパスは無変更で使い回せる(27章)。
+        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る。
+        // 生バッファだけはコンピュートがUAVで書くためCreateUAVTextureで作る(ブラー後は従来どおり
+        // ピクセルシェーダーが書くレンダーターゲット)
+        std::unique_ptr<RHI::IRHIShader> m_RTAOComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_RTAOPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_RTAORawTexture;
+        std::unique_ptr<RHI::IRHITexture> m_RTAOTexture;
+        std::unique_ptr<RHI::IRHIBuffer> m_RTAOConstantBuffer;
+        int32_t m_RTAOSampleCount = Defaults::RTAOSampleCount;
+        float m_RTAOMaxDistance = Defaults::RTAOMaxDistance;
+        float m_RTAOPower = Defaults::RTAOPower;
+        float m_RTAOIntensity = Defaults::RTAOIntensity;
+        bool m_RTAOBounceShadowRayEnabled = Defaults::RTAOBounceShadowRayEnabled;
 
         // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)。
         // SceneColorはHDR(R16G16B16A16_Float)で、トーンマッピングは行わない(Tonemapパス参照)
@@ -306,6 +462,34 @@ namespace Kurenai
         // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベル
         int32_t m_HiZDebugMipLevel = 0;
 
+        // 鏡面反射の手法。どのモードでもLightingパスが適用した鏡面IBLを「差し替える」形で働き、
+        // Offならその差し替えを一切行わない(プローブ/グローバルIBLがそのまま残る。20章)
+        enum class ReflectionMode
+        {
+            Off,         // 反射パスを実行しない
+            ScreenSpace, // SSR(SSR.hlsl)。画面に映っているものだけが反射に映る
+            Raytraced,   // RT反射(RTReflection.hlsl)。画面外も映るが、DX12かつDXR Tier 1.1が要る
+        };
+        // レイトレーシングの可否から反射の既定の手法を決める。
+        // シーン読み込み(ApplyLoadedScene)とUIの「既定値に戻す」が同じ規則でなければ
+        // 「既定へ戻したのに起動直後と違う」ことになるため、規則をここ1か所に置く
+        static constexpr ReflectionMode DefaultReflectionMode(bool raytracingAvailable)
+        {
+            // 画面外も反射に映るRTが使えるなら常にそちら。使えない環境でSSRへ落とすかは既定値で決める
+            return raytracingAvailable
+                ? ReflectionMode::Raytraced
+                : (Defaults::SSREnabled ? ReflectionMode::ScreenSpace : ReflectionMode::Off);
+        }
+        // 現在の手法。RaytracedはSupportsRaytracing()がtrueの環境でしか選べない
+        // (UI側で選択不可にする)。ここの初期値はm_RaytracingAvailableが確定する前の値でしかなく、
+        // 実際の既定はシーン読み込み時にDefaultReflectionModeで決め直される
+        ReflectionMode m_ReflectionMode = DefaultReflectionMode(false);
+        // レイトレーシング反射が使える環境か。デバイスのSupportsRaytracing()を初期化時に控えたもので、
+        // UIの選択可否とシェーダー/パイプラインステートを作るかどうかの両方に使う
+        // (RTReflection.hlslはRayQueryを含むためSM 6.5でしかコンパイルできず、
+        //  非対応環境で作ろうとすると例外になる)
+        bool m_RaytracingAvailable = false;
+
         // SSR(Screen Space Reflections)パス: LightingパスのSceneColorを反射先の環境色として
         // 再利用し、G-Buffer(Normal/Material/Depth)からワールド空間でレイマーチングして
         // 鏡面反射を加算する。無効時はこのパスをスキップし、Presentが直接m_SceneColorを参照する
@@ -314,10 +498,32 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_SSRPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SSRTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSRConstantBuffer;
-        bool m_SSREnabled = Defaults::SSREnabled;
         float m_SSRMaxDistance = Defaults::SSRMaxDistance;
         float m_SSRThickness = Defaults::SSRThickness;
         float m_SSRRoughnessCutoff = Defaults::SSRRoughnessCutoff;
+
+        // RT反射パス: TLASへ鏡面レイを撃ち、ヒット面を陰影計算して反射色を求めるコンピュートパス。
+        // 出力はSSRと同じ「SceneColor + 反射の差し替え」なので、後段(Tonemap)から見ると
+        // m_SSRTextureと完全に等価な入れ替え可能なバッファになる。
+        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る
+        std::unique_ptr<RHI::IRHIShader> m_RTReflectionComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_RTReflectionPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_RTReflectionTexture;
+        std::unique_ptr<RHI::IRHIBuffer> m_RTReflectionConstantBuffer;
+        float m_RTReflectionMaxDistance = Defaults::RTReflectionMaxDistance;
+        float m_RTReflectionRoughnessCutoff = Defaults::RTReflectionRoughnessCutoff;
+        bool m_RTReflectionShadowRayEnabled = Defaults::RTReflectionShadowRayEnabled;
+
+        // RTシャドウパス: TLASへ太陽の見かけの円盤に向けて影レイを撃ち、可視率(0〜1)を
+        // 単チャンネルのテクスチャへ書くコンピュートパス。DirectLighting.hlslがt6で読み、
+        // CSMのComputeCascadedShadowFactorの戻り値と同じ位置で使う(26章)。
+        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る
+        std::unique_ptr<RHI::IRHIShader> m_RTShadowComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_RTShadowPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_RTShadowTexture;
+        std::unique_ptr<RHI::IRHIBuffer> m_RTShadowConstantBuffer;
+        int32_t m_RTShadowSampleCount = Defaults::RTShadowSampleCount;
+        float m_RTShadowSunAngularRadiusDegrees = Defaults::RTShadowSunAngularRadiusDegrees;
 
         // TAA(Temporal Anti-Aliasing)パス: SSRの後、露出/ブルーム/トーンマップの前に置く。
         // 毎フレーム投影行列を1ピクセル未満だけずらして(ジッター)サンプル位置を散らし、
@@ -513,6 +719,16 @@ namespace Kurenai
         // (夜の壁が3.8から4.7へ持ち上がってしまう)
         float m_AutoExposureKeyCeilingEV = Defaults::AutoExposureKeyCeilingEV;
 
+        // 次のAutoExposureパスで順応を飛ばして測光値へ即座に合わせる要求。LoadSceneが立て、
+        // パスを積んだ時点で消費する。
+        //
+        // 順応の状態はGPU側のm_ExposureTexture(2x1)に入っており、初回だけ順応を飛ばすための
+        // フラグもそこのテクセル(1,0)にある(UAVがゼロ初期化されることを利用している)。
+        // つまりCPU側からは「初回に戻す」手段が無く、シーンを切り替えても前のシーンの露出から
+        // 順応が続いてしまう。シーン切り替えは視点の移動ではなく場面の切り替わりなので、
+        // 目の順応を模す理由が無い(AutoExposure.hlslのCSResolveのコメントもそう宣言している)
+        bool m_AutoExposureResetRequested = false;
+
         // ブルームパス(Bloom.hlsl): 半解像度から始まるピラミッドを段階的にダウンサンプルし、
         // 3x3テントで戻しながら加算することで広く滑らかな光の裾を作る。
         //
@@ -577,7 +793,8 @@ namespace Kurenai
             AOOcclusion,        // AO/GIバッファのa(遮蔽率、ブラー後)をグレースケール表示
             AOOcclusionRaw,     // AO/GIバッファのa(遮蔽率、ブラー前の生値)
             ShadowMap,          // m_ShadowDebugCascadeで選択したカスケードのシャドウマップを表示
-            SSR,                // SSRパスの出力(SceneColor+反射)。SSR無効時はSceneColorと同一
+            RTShadow,           // RTシャドウの可視率(0=影, 1=光)をグレースケール表示。RTシャドウ未実行時は最終結果
+            SSR,                // 反射パスの出力(SceneColor+反射)。反射がOffのときはSceneColorと同一
             HiZ,                // Hi-Zミップチェーンの指定ミップ(m_HiZDebugMipLevel)をグレースケール表示
             IBLIrradiance,      // IBL拡散イラディアンスマップ(TextureCube。現在の視線方向で球面を見回す表示)
             IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLPrefilterDebugMipLevel、TextureCube)
@@ -590,6 +807,8 @@ namespace Kurenai
             ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
             MotionVector,       // モーションベクター(速度バッファ)。静止で灰色、動くと移動方向に応じて色が付く
             SceneColorRaw,      // トーンマップ前のHDRシーンカラーをリニアのまま無加工で表示(測定用)
+            DDGIIrradiance,     // DDGIのイラディアンスアトラス(オクタヘドラル2D、22章)
+            DDGIDistance,       // DDGIの距離モーメントアトラス(R=平均距離、G=平均二乗距離)
             BentNormal,         // bent normal(25章)。Debug View Gainが1なら軸を色表示、
                                 // 1.5より大きいと長さ(=aoB)をグレースケール表示。
                                 // データを持たないマテリアルはマゼンタで塗る
@@ -619,7 +838,35 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_ShadowCascadeArray;
         // シャドウパスの各カスケード描画で使う専用の定数バッファ(カスケードごとに値を更新して使い回す)
         std::unique_ptr<RHI::IRHIBuffer> m_ShadowCascadeConstantBuffer;
-        bool m_ShadowEnabled = Defaults::ShadowEnabled;
+
+        // 太陽(平行光)の影の手法。値はDirectLighting.hlslのLightingConstants.LightCount.zへ
+        // そのまま渡すため、シェーダ側の分岐と番号を一致させること
+        enum class ShadowMode
+        {
+            Off,                // 影を落とさない
+            CascadedShadowMap,  // カスケードシャドウマップ+PCSS(ShadowSampling.hlsli)
+            Raytraced,          // RTシャドウ(RTShadow.hlsl)。DX12かつDXR Tier 1.1が要る
+        };
+        // 現在の手法。RaytracedはSupportsRaytracing()がtrueの環境でしか選べない
+        // (UI側で選択不可にし、シーン読み込み時にも非対応ならCascadedShadowMapへ落とす)。
+        //
+        // 【重要】Raytracedでもシャドウパス(CSMの描画)はスキップしない。半透明
+        // (Transparent.hlsl)と反射プローブのキャプチャ(ProbeCapture.hlsl)は
+        // カメラ視点の画面空間テクスチャを使えず、CSMのシャドウマップを必要とするため
+        // (RTシャドウは不透明サーフェスの直接光パスだけを置き換える。26章)
+        //
+        // 既定の手法はDefaultShadowModeが決める(反射のDefaultReflectionModeと同じ理由で1か所に置く)。
+        // ここの初期値はm_RaytracingAvailableが確定する前の値でしかなく、
+        // 実際の既定はシーン読み込み時に決め直される
+        static constexpr ShadowMode DefaultShadowMode(bool raytracingAvailable)
+        {
+            if (!Defaults::ShadowEnabled)
+            {
+                return ShadowMode::Off;
+            }
+            return raytracingAvailable ? ShadowMode::Raytraced : ShadowMode::CascadedShadowMap;
+        }
+        ShadowMode m_ShadowMode = DefaultShadowMode(false);
         // PCSS(Percentage Closer Soft Shadows)のライトサイズ。シャドウマップUV空間での
         // ブロッカーサーチ・半影の広さを決める係数(値が大きいほど半影が広く柔らかくなる)
         float m_ShadowLightSize = Defaults::ShadowLightSize;
@@ -834,8 +1081,8 @@ namespace Kurenai
         // キャプチャの面ごとに値を更新して使い回すFrameConstants(共有のm_FrameConstantBufferとは別。
         // ViewProj/CameraPositionだけをプローブのものへ差し替える。詳細はProbeCapture.hlsl冒頭)
         std::unique_ptr<RHI::IRHIBuffer> m_ProbeCaptureConstantBuffer;
-        // LoadSceneがm_Scene.ReflectionProbesからコピーし、以降ImGuiが編集する(m_Lightsと同じ方針)。
-        // m_SceneMutexで保護される
+        // ApplyLoadedSceneがm_Scene.ReflectionProbesからコピーし、以降ImGuiが編集する(m_Lightsと同じ方針)。
+        // どちらもRenderスレッド専有のためロックは不要
         std::vector<Assets::ReflectionProbe> m_ReflectionProbes;
         int m_SelectedProbeIndex = -1;
         // 次のRender()でプローブを焼き直す要求。シーン読み込み時とImGuiのBakeボタンで立てる。
@@ -904,6 +1151,128 @@ namespace Kurenai
         // 焼き上がりに影響する状態(時刻・太陽・シャドウ・IBL強度・全ライト)から署名を作る。
         // 影響範囲(形状・半径・ブレンド距離)はキャプチャ内容を変えないため含めない
         uint64_t ComputeProbeBakeSignature() const;
+        // 最後にキャプチャしたときの実効プリ露出(m_EffectiveExposureEV100)。
+        //
+        // 【なぜ記録しておく必要があるか】プローブのキューブマップにはプリ露出済みの放射輝度が
+        // 入っている(21.5節)。その倍率は時刻に連動して最大18段(約26万倍)動くのに対し、
+        // Bakedモードのプローブはシーン読み込み時に一度焼いたきり更新されない。そのため
+        // 焼いた時点と現在とで実効プリ露出が食い違うと、プローブの寄与だけが桁違いの明るさで
+        // 合成される。実測では夜のProbeTestからSponzaへ切り替えたとき、EV100=-2.36で焼かれた
+        // プローブをEV100=15.0のフレームが読み、17.4段(約17万倍)過剰になって画面が
+        // 白飛びしたまま戻らなくなっていた。
+        //
+        // 空(手続き空)は実効プリ露出が0.05段動くたびに焼き直して追従しているが、プローブは
+        // 1回のフルベイクが全プローブ×6面の描画になり同じ頻度では焼き直せない。そこで
+        // 焼き直す代わりに、読み出し時へ 2^(焼いたEV - 現在のEV) を掛けて現在の露出へ
+        // 換算する(FrameConstants.ProbeParams2.w、ReflectionProbe.hlsliのSampleEnvironment)。
+        // キューブマップの中身は触らないのでfp16の値域も変わらない
+        float m_ProbeBakedExposureEV100 = 15.0f;
+        // 焼き直しを要求する実効プリ露出の変化量[EV]。1段=明るさ2倍。
+        // 手続き空の0.05段よりずっと粗いのは、フルベイクがプローブ数×6面の描画になるため。
+        // 1日を通した時刻変化(最大18段)なら十数回のフルベイクに収まる
+        static constexpr float kProbeRebakeExposureEV = 1.0f;
+
+        // --- DDGI(Dynamic Diffuse Global Illumination、22章) ---
+        //
+        // 反射プローブ(上)が「少数を手で置き、主に鏡面を担う」のに対し、DDGIは
+        // 「格子状に多数を自動配置し、拡散の間接光だけを担う」。レイの取得には反射プローブと
+        // まったく同じキャプチャ経路(ProbeCapture.hlslの6面MRT)を使い、キャプチャ解像度だけ
+        // 落とす。得られた放射輝度と距離を、キューブではなくオクタヘドラル投影の2Dアトラスへ
+        // 畳み込む(DDGIProbeUpdate.hlsl)。
+        //
+        // 【20章の単一定義規則との関係】DDGIが差し替えるのはReflectionProbe.hlsliの
+        // SampleEnvironmentが返す拡散イラディアンスだけで、鏡面(prefiltered)と
+        // SpecularIBLWeightには一切触れない。したがって「SSRはDeferredLightingが足した
+        // 鏡面IBLと厳密に同じ量を引く」という不変条件はDDGIを入れても保たれる
+
+        // オクタヘドラル1プローブぶんの1辺のテクセル数(境界を含まない)。
+        // 拡散イラディアンスは低周波なのでこの程度で足りる。距離は遮蔽の輪郭を担うので広く取る
+        static constexpr uint32_t kDDGIIrradianceTexels = 6;
+        static constexpr uint32_t kDDGIDistanceTexels = 14;
+        // 各辺に足す境界の幅。オクタヘドラルは正方形の縁が球面上で折り返して繋がるため、
+        // その繋がる先のテクセルを外周へ複製しておかないと、バイリニア補間が縁で破綻する
+        // (隣のプローブのテクセルを拾ってしまうことの防止も兼ねる)
+        static constexpr uint32_t kDDGIProbeBorder = 1;
+        // アトラス上の1プローブぶんのセルの1辺(境界込み)
+        static constexpr uint32_t kDDGIIrradianceCell = kDDGIIrradianceTexels + kDDGIProbeBorder * 2;
+        static constexpr uint32_t kDDGIDistanceCell = kDDGIDistanceTexels + kDDGIProbeBorder * 2;
+        // プローブ数の上限。反射プローブと違いアトラスはシーン読み込み時に確保し直すので
+        // 技術的な固定容量ではないが、.ksceneの書き間違いで数GBのアトラスを作らないための歯止め
+        static constexpr uint32_t kDDGIMaxProbes = 4096;
+        // キャプチャ解像度(1面あたり)。6面ぶんで 16×16×6 = 1536方向がレイの代わりになる。
+        // 反射プローブのkProbeCaptureSize(128)と違い小さくてよいのは、DDGIが必要とするのが
+        // 「低周波の拡散イラディアンス」であって鏡面の映り込みではないため
+        static constexpr uint32_t kDDGICaptureSize = 16;
+
+        // シーンから読み込んだボリューム(先頭の1つだけを使う)。m_HasGIVolumeがfalseの間は
+        // アトラスは1プローブぶんのダミーとして確保され、シェーダー側もDDGIParams0.w=0で無効になる
+        Assets::GIVolume m_GIVolume;
+        bool m_HasGIVolume = false;
+        // ボリュームの総プローブ数(ProbeCountsの3軸の積)。ダミー時は1
+        uint32_t m_DDGIProbeCount = 1;
+
+        // オクタヘドラル2Dアトラス。RGBがイラディアンス、距離側はR=平均距離・G=平均二乗距離。
+        // どちらもR32系で確保する。更新CSがヒステリシスのために「前の値を読んでから書く」ため、
+        // 型付きUAV読み出しがR32系しか保証されていないという制約に従う必要がある
+        // (AutoExposure.hlslの同じ判断を参照)
+        std::unique_ptr<RHI::IRHITexture> m_DDGIIrradianceAtlas;
+        std::unique_ptr<RHI::IRHITexture> m_DDGIDistanceAtlas;
+        std::unique_ptr<RHI::IRHIShader> m_DDGIProbeUpdateComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIProbeUpdatePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_DDGIBorderCopyComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIBorderCopyPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_DDGIUpdateConstantBuffer;
+        // DDGIのキャプチャ先(反射プローブとは解像度が違うため別に持つ)
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureColor;
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistance;
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDepth;
+        // キャプチャした6面を組み上げるスクラッチのキューブ(放射輝度・距離の2本)。
+        // 更新CSは「6面ぶんのレイ」をまとめて走査するため、面ごとの2Dではなくキューブで受ける
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureRadianceCube;
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistanceCube;
+
+        bool m_DDGIEnabled = Defaults::DDGIEnabled;
+        // 拡散間接光の強度倍率。DDGIとSSILは近傍/遠方で寄与が重なるため、実測で決めるための倍率
+        float m_DDGIIntensity = Defaults::DDGIIntensity;
+        // 全プローブが一度でも書かれたか。書かれる前のアトラスは中身が未定義なので、
+        // それまではDDGIを無効にして従来のIBLのまま描く(反射プローブのm_ProbeBakedと同じ方針)
+        bool m_DDGIBaked = false;
+        // 初回の一巡が終わっていないか。
+        //
+        // 【反射プローブと違い「フルベイク」を持たない】反射プローブは8個までなので全プローブを
+        // 1フレームで焼けるが、DDGIは数百個ある。同じことをするとBistroのようなシーンでは
+        // 数百×6回のシーン描画が1フレームに集中して数秒のハングになる。
+        // DDGIはもともとヒステリシスで時間収束させる手法なので、初回も時間分割で埋めるのが素直。
+        // ただし初回だけは「前の値」が存在しないため、一巡目はヒステリシスを使わず上書きする
+        // (未初期化のアトラスと混ぜてはいけない)
+        bool m_DDGIWarmingUp = true;
+        // ヒステリシスを使わず上書きで焼き直す残りプローブ数。
+        //
+        // 【なぜ要るか】実効プリ露出は時刻に連動して最大18段動く(21.5節)。アトラス自体は
+        // 露出非依存の物理量で持っているので数値が壊れることはないが、ヒステリシス0.97と
+        // ラウンドロビンの積で時定数が約17秒あるため、時刻を大きく動かすとその間ずっと
+        // 「前の時刻の間接光」が表示され続ける。露出が急変する時間帯ほど、この遅れが
+        // 露出倍率で拡大されて目に見える(夕方に昼の間接光を夕方の露出で見ることになる)。
+        // そこで露出が一定以上動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる。
+        // m_DDGIWarmingUpと違いDDGI自体は有効なまま(無効にすると従来のIBLとの間でちらつく)
+        uint32_t m_DDGIOverwriteRemaining = 0;
+        // 最後にアトラスを追従させた時点の実効プリ露出EV100
+        float m_DDGILastExposureEV100 = 0.0f;
+        bool m_DDGILastExposureValid = false;
+        // これを超えて実効プリ露出が動いたら追従させる(段)。1段=明るさ2倍ぶん
+        static constexpr float kDDGIExposureRewarmEV = 0.5f;
+        // 時間分割の進行状態。1フレームにm_DDGIProbesPerFrame個ずつ順に焼き直す
+        uint32_t m_DDGIUpdateCursor = 0;
+        int32_t m_DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
+
+        // 格子上のプローブ番号からワールド座標を求める。番号の分解は
+        // index = x + y*Cx + z*Cx*Cy で、シェーダー側の並びと一致させること
+        DirectX::XMFLOAT3 ComputeDDGIProbePosition(uint32_t probeIndex) const;
+
+        // m_GIVolumeのProbeCountsに合わせてアトラス2枚を確保し直す。ボリュームが無いシーンでは
+        // 1プローブぶんのダミーを確保する(SRVは常にバインドできる必要があるため、
+        // 「確保しない」という選択肢は取れない。無効化はDDGIParams0.wで行う)
+        void RecreateDDGIAtlases();
 
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = Defaults::TimeOfDay;
@@ -1001,29 +1370,76 @@ namespace Kurenai
         // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
         int m_LightTileHeatmapMax = Defaults::LightTileHeatmapMax;
 
-        // LoadScene(Updateスレッド。UpdateSceneSwitch経由で呼ばれる)が書き込み、Render()(Renderスレッド。
-        // 描画そのものに加えUIパネルのスライダーがm_SSAORadius等を直接書き換える)が
-        // 読み書きする「シーン状態」一式をこのミューテックスで保護する。LoadScene呼び出し全体と
-        // Render()呼び出し全体をそれぞれこのミューテックスで包むため、この2つは同時に走らない
-        // (=個々のメンバに追加のロックは不要)。対象はm_Scene/m_CurrentSceneIndex/m_Cameraと、
-        // FrameCameraToModelが書き換えるm_SSAORadius等のPost Processingパラメータ、および
-        // m_Lights/m_SelectedLightIndex/m_SceneExposureEV100
-        // (宣言はそれぞれの節にあるが、書き込み元がLoadScene/ImGuiスライダーの2スレッドにまたがる点は共通)
-        std::mutex m_SceneMutex;
+        // 現在描画しているシーン。ApplyLoadedScene(Renderスレッド)だけが差し替え、
+        // Render()とUIパネル(いずれもRenderスレッド)だけが読む。つまりRenderスレッド専有の状態で、
+        // ミューテックスによる保護は不要(以前はLoadSceneがUpdateスレッドから直接書き換えていたため
+        // m_SceneMutexが要った。経緯はdocs/Architecture.html 23章)。
+        //
+        // 【読み込み中は空になる】シーン切り替えを開始した時点で旧シーンを手放すため
+        // (VRAMの二重常駐を避けるため)、読み込みが終わるまでInstancesが空のまま描画される
         Assets::Scene m_Scene;
+        // m_Sceneに対応するレイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの
+        // 統合バッファ。Loaderスレッドがm_Sceneと一緒に構築し、ApplyLoadedSceneが差し替える。
+        // デバイスがレイトレーシング非対応(DX11、またはDXR Tier 1.1未満のアダプタ)の
+        // 場合は空のまま(IsValid()==false)で、描画側は従来のスクリーンスペース手法を使う。
+        //
+        // 【破棄順】m_Sceneより後に宣言することで、メンバ破棄順(宣言の逆順)により
+        // m_Sceneの頂点/インデックスバッファより先に破棄される
+        Assets::RaytracingScene m_RaytracingScene;
+        // m_Sceneと同じくRenderスレッド専有(ScenePanelが選択中のシーンの表示に読む)
         size_t m_CurrentSceneIndex = 0;
+        // Updateスレッド専有。UpdateMouseLook/UpdateMovementが書き換え、TickFrameがFrameStateへ
+        // スナップショットしてRenderスレッドへ渡す。シーン読み込み時の初期カメラも
+        // (Renderスレッドではなく)UpdateAppliedSceneHandoff経由でこのスレッドが適用することで、
+        // 書き込み手を1スレッドに保っている
         Core::Camera m_Camera;
+
+        // --- シーン読み込みのハンドオフ -------------------------------------------------------
+
+        std::thread m_LoaderThread;
+
+        // Renderスレッド専有。ScenePanelが押されたときに積まれ、UpdateSceneStreamingが消費する。
+        // -1は「要求なし」。UIもRenderスレッドで動くため、これはatomicである必要がない
+        int m_PendingSceneRequest = -1;
+        // Renderスレッド専有。Loaderスレッドへ発注してから完成品を受け取るまでtrue。
+        // 多重発注を防ぐために見る
+        bool m_SceneLoadInFlight = false;
+
+        // Render → Loader の要求。-1は「要求なし」
+        std::mutex m_LoadRequestMutex;
+        std::condition_variable m_LoadRequestCV;
+        int m_LoadRequestSceneIndex = -1;
+        bool m_StopLoaderThread = false;
+
+        // Render → Loader の破棄依頼(RetiredAssetsのコメント参照)
+        std::mutex m_RetiredAssetsMutex;
+        std::vector<RetiredAssets> m_RetiredAssets;
+
+        // Loader → Render の完成品
+        std::mutex m_LoadedSceneMutex;
+        std::unique_ptr<LoadedScene> m_LoadedScene;
+
+        // Render → Update の初期カメラ・ウィンドウタイトル。
+        // 毎フレームのロックを避けるため、まずatomicで有無を判定してから中身を取りにいく
+        std::atomic<bool> m_AppliedScenePending{ false };
+        std::mutex m_AppliedSceneMutex;
+        Core::Camera m_AppliedSceneCamera;
+        std::wstring m_AppliedSceneTitle;
+
+        // Loaderスレッド専有。「今どのスカイボックスを読み込み済みか」の真実。
+        // スカイボックスを読むのがこのスレッドだけなので、ここで持つのが最も素直になる
+        std::wstring m_LoaderSkyboxPath;
 
         // DiscoverScenesが起動時に一度だけ列挙する.ksceneの一覧。要素の並びがImGuiのシーン
         // 一覧・LoadSceneのインデックスに対応する(ファイル名の昇順)
         std::vector<std::wstring> m_SceneFilePaths;
         std::vector<std::wstring> m_SceneDisplayNames;
 
-        // LoadSceneがm_Scene.Lights(SceneLoaderが各ModelInstanceのModel::Lightsをワールド空間へ
+        // ApplyLoadedSceneがm_Scene.Lights(SceneLoaderが各ModelInstanceのModel::Lightsをワールド空間へ
         // 変換し、.kscene自身の[Light]セクションのライトと合成済みのシーン全体のライト一覧)から
         // コピーし、以降ImGui(Lightingパネル)が編集する。アセット由来のデータとユーザー編集を
-        // 分離するため(シーンを再読み込みすればアセット既定値に戻る)。m_SceneMutexで保護される
-        // (m_Sceneと同じ理由)
+        // 分離するため(シーンを再読み込みすればアセット既定値に戻る)。
+        // m_Sceneと同じくRenderスレッド専有のためロックは不要
         std::vector<Assets::Light> m_Lights;
         int m_SelectedLightIndex = -1;
         // 実在の写真露出値(EV100)。太陽・環境光・ポイント/スポットライトすべてに同じ値がかかる、
@@ -1044,16 +1460,14 @@ namespace Kurenai
         // 割り戻す構造になっているため、**フレーム単位で変えても最終的な絵は変わらない**。
         // その性質をそのまま利用して、バッファの数値レンジだけを健全に保つ
         float m_EffectiveExposureEV100 = 15.0f;
-        // 実効プリ露出が初期化済みか(初回フレームは平滑化せず即座に合わせる)
+        // 実効プリ露出が初期化済みか(初回フレームは平滑化せず即座に合わせる)。
+        // **シーン読み込み時にLoadSceneがfalseへ戻す**。シーンをまたぐと時刻が入れ替わって
+        // 実効プリ露出が最大18段跳ぶが、そこを平滑化しても得られるものが無い(プリ露出は
+        // Tonemap側で割り戻されるため過渡の絵には現れない)一方で、追従の途中の値で焼かれた
+        // 資産(反射プローブ)が残ってしまう。切り替えは平滑化せず即座に合わせるのが正しい
         bool m_EffectiveExposureInitialized = false;
         // 実効プリ露出の時間平滑化の速さ[1/秒]。段付きを防ぐために指数追従させる
         float m_EffectiveExposureAdaptSpeed = 2.0f;
-
-        // RenderSceneSwitchUI(Renderスレッド)でシーン切り替えボタンが押されたときに書き込まれ、
-        // UpdateSceneSwitch(Updateスレッド)が毎フレーム読み取って消費する1要素の受け渡し用。
-        // LoadScene自体はUpdateスレッドから(m_SceneMutexで保護して)呼ぶ必要があるため、
-        // クリック検出(Renderスレッド)と実際の呼び出し(Updateスレッド)をこれで分離する
-        std::atomic<int> m_PendingSceneIndex{ -1 };
 
         std::chrono::steady_clock::time_point m_LastFrameTime;
 

@@ -38,21 +38,23 @@ namespace Kurenai::RHI
         void SetComputeUnorderedAccessTextureCubeFace(
             uint32_t slot, IRHITexture* texture, uint32_t face, uint32_t mipLevel = 0, uint32_t cubeIndex = 0) override;
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
+        void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
     private:
         static constexpr uint32_t kMaxRenderTargets = 8;
         // SetComputeUnorderedAccessTexture/Bufferで使えるUAVスロット数(u0〜u3)
         static constexpr uint32_t kComputeUavSlotCount = 4;
-        // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t15)。
-        // DX12側のDX12CommandList::kTextureSlotCountと同じ値にしておくこと。
+        // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t17)。
+        // DX12側のDX12CommandList::kTextureSlotCountおよびDX12Device.cppの
+        // ルートシグネチャのSRVレンジと同じ値にしておくこと(3か所)。
         //
         // この値が足りないと、反射プローブ(19章)が張るキューブマップ配列・影響範囲バッファ・
-        // 距離キューブが下のm_BoundPixelSrvsの追跡から漏れる。そうなると
-        // UnbindPixelSrvForResourceがこれらを外せず、プローブのベイクがUAVで書き込む際の
+        // 距離キューブや、DDGI(22章)のアトラス2枚が下のm_BoundPixelSrvsの追跡から漏れる。
+        // そうなるとUnbindPixelSrvForResourceがこれらを外せず、ベイクがUAVで書き込む際の
         // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう
         // (実際に12のまま放置され、t12/t13が漏れていた)
-        static constexpr uint32_t kTextureSlotCount = 16;
+        static constexpr uint32_t kTextureSlotCount = 18;
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
         // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。

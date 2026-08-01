@@ -65,7 +65,9 @@ StructuredBuffer<uint> LightTiles : register(t5);
 // しか無いため、このパス固有のパラメータはすべてこのb1へ足していく
 cbuffer LightingConstants : register(b1)
 {
-    // x=有効ライト数, y=ピクセルあたりに撃つスクリーンスペースシャドウのレイ数の上限, zw=未使用
+    // x=有効ライト数, y=ピクセルあたりに撃つスクリーンスペースシャドウのレイ数の上限,
+    // z=太陽の影の手法(KurenaiEngine3D::ShadowMode。0=なし, 1=カスケードシャドウマップ,
+    //   2=レイトレーシング。2のときだけRTShadowTexture(t6)を読む), w=未使用
     uint4 LightCount;
     // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)のパラメータ。
     // x=レイマーチのステップ数, y=最大レイ長(ワールド単位), z=遮蔽とみなす深度差の上限(thickness),
@@ -87,6 +89,12 @@ Texture2D DepthTexture : register(t3);
 // FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)とDataSamplerを参照するため、
 // それらの宣言より後でインクルードする必要がある
 #include "ShadowSampling.hlsli"
+// レイトレーシングシャドウ(RTShadow.hlsl)が書いた太陽の可視率(0=完全に影, 1=完全に光が当たる)。
+// このパスと同じ解像度・同じピクセル格子なのでフィルタは不要で、常にLoadで1テクセルだけ読む。
+// LightCount.zが2(Raytraced)のときだけ読まれるが、DX12はSetPipelineStateのたびに
+// ルート引数が無効化されるため、シェーダが宣言しているリソースはモードによらず必ず
+// バインドしなければならない(C++側は非対応環境では代わりに深度テクスチャを張る)
+Texture2D RTShadowTexture : register(t6);
 // ポイント/スポットライトのスクリーンスペースシャドウ。FrameConstants(ViewProj)・
 // LightingConstants(SSSParams0/1)・DataSampler・DepthTextureを参照するため、それらより後でインクルードする
 #include "ScreenSpaceShadow.hlsli"
@@ -300,8 +308,20 @@ float4 PSMain(PSInput input) : SV_TARGET
     float sunNdotL = saturate(dot(N, sunL));
     if (sunNdotL > 0.0f)
     {
-        float viewDepth = mul(float4(worldPos, 1.0f), View).z;
-        float shadow = ComputeCascadedShadowFactor(worldPos, viewDepth, sunNdotL);
+        float shadow;
+        if (LightCount.z == 2u) // Raytraced
+        {
+            // RTShadow.hlslが同じ解像度・同じピクセル格子へ書いた可視率をそのまま使う
+            shadow = RTShadowTexture.Load(int3((int2)input.Position.xy, 0)).r;
+        }
+        else
+        {
+            // Off(0)のときもここを通る。シャドウパスがシャドウマップを最遠(深度1.0)へ
+            // クリアしたまま何も描かないため、ComputeShadowFactorの深度比較が常に
+            // 「影なし」と判定して1.0を返す(シャドウパスのClearDepth参照)
+            float viewDepth = mul(float4(worldPos, 1.0f), View).z;
+            shadow = ComputeCascadedShadowFactor(worldPos, viewDepth, sunNdotL);
+        }
         directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energy) * LightColor.rgb * shadow;
     }
 

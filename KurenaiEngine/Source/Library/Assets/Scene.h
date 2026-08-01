@@ -2,6 +2,7 @@
 
 #include <DirectXMath.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -64,6 +65,53 @@ namespace Kurenai::Assets
         std::string Name;
     };
 
+    // DDGI(Dynamic Diffuse Global Illumination、22章)のプローブ格子を張る直方体ボリューム。
+    //
+    // 反射プローブ(上)が「少数を手で置き、主に鏡面の映り込みを担う」のに対し、こちらは
+    // 「格子状に多数を自動配置し、拡散の間接光だけを担う」。両者は目的が違うため併用する。
+    //
+    // 各プローブはオクタヘドラル投影の2Dアトラスへ、方向ごとのイラディアンスと
+    // 「その方向の面までの距離」の2つのモーメントを持つ。後者があることで
+    // 「このプローブからこのピクセルは見えているか」を統計的に判定でき、
+    // 仕切りの向こう側の明るさが漏れてくるのを抑えられる(これがDDGIの要)
+    struct GIVolume
+    {
+        // ボリュームの最小コーナー(ワールド空間)。プローブiは Origin + i * ProbeSpacing に置かれる。
+        // 中心指定ではなく最小コーナー指定なのは、格子の位置を間隔と個数から一意に決めるため
+        float Origin[3] = { 0.0f, 0.0f, 0.0f };
+        // 各軸のプローブ間隔(ワールド単位)。狭いほど間接光の空間解像度が上がるがプローブ数が増える
+        float ProbeSpacing[3] = { 2.0f, 2.0f, 2.0f };
+        // 各軸のプローブ数。トライリニア補間は周囲8個を使うため、各軸2以上でなければならない
+        uint32_t ProbeCounts[3] = { 8u, 4u, 8u };
+
+        // 遮蔽判定の照会点を面の法線方向へ浮かせる量(ワールド単位)。
+        // これが無いと「面が、自分を直接照らしているプローブから見えていない」と誤判定し、
+        // 画面全体が一様に暗くなる(22章の自己遮蔽)
+        float NormalBias = 0.25f;
+        // 同じく視線方向へ寄せる量。深度の量子化が効く浅い角度の面で法線方向だけでは足りないため
+        float ViewBias = 0.10f;
+
+        // 履歴とのブレンド率。1に近いほど滑らかに追従する代わりに、光が変わってからの
+        // 収束が遅くなる。0なら毎回上書き(時間分割と噛み合わず、更新されたプローブだけが
+        // 突然変わってちらつく)
+        float Hysteresis = 0.97f;
+
+        // 距離モーメントを記録する際の上限(ワールド単位)。
+        //
+        // 【必須の値であり、大きくしてはいけない】ジオメトリに当たらなかった方向には
+        // 十分大きな値が入っている(IBLConvolve.hlslのkProbeSkyDistance = 1e6)。これを
+        // そのまま平均すると2つの意味で壊れる:
+        //   1. 分散 σ² = 平均二乗距離 - 平均距離² が桁落ちで潰れる。1e6の二乗は1e12で、
+        //      fp32の有効桁(約7桁)ではこの引き算から意味のある分散が残らない
+        //   2. 空と壁が同じテクセルに混ざったとき、平均が空側に完全に引っ張られ、
+        //      チェビシェフ判定が「どこも遠い(=何にも遮蔽されない)」に倒れる
+        // チェビシェフ判定に必要なのは「近いか遠いか」の区別だけなので、遠方を潰しても
+        // 判定の意味は変わらない。プローブ間隔の数倍を目安にする
+        float MaxRayDistance = 8.0f;
+
+        std::string Name;
+    };
+
     struct Scene
     {
         std::wstring Name;
@@ -79,8 +127,14 @@ namespace Kurenai::Assets
         // ライトと違いモデルファイルへ埋め込む概念が無いため、.ksceneに書かれたものが全て
         std::vector<ReflectionProbe> ReflectionProbes;
 
-        // [Camera]セクションが無い場合はfalseのままで、呼び出し側はFrameCameraToModel相当の
-        // 自動配置ヒューリスティックを使う
+        // .ksceneの[GIVolume]セクションで配置されたDDGIボリュームの一覧(ワールド空間)。
+        // 現状KurenaiEngine3Dが使うのは先頭の1つだけで、2つ目以降は警告を出して切り捨てる
+        // (複数ボリュームの重なりや優先順位を決める仕組みがまだ無いため)。
+        // ここをvectorにしてあるのは、対応した時点で読み込み側を変えずに済ませるため
+        std::vector<GIVolume> GIVolumes;
+
+        // [Camera]セクションが無い場合はfalseのままで、呼び出し側は
+        // KurenaiEngine3D::ComputeInitialCamera相当の自動配置ヒューリスティックを使う
         bool HasCameraOverride = false;
         float CameraPosition[3] = { 0.0f, 0.0f, 0.0f };
         float CameraYaw = 0.0f;
@@ -118,7 +172,7 @@ namespace Kurenai::Assets
         bool SSREnabled = true;
 
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
-        // シーン全体のワールド空間AABB。FrameCameraToModel/ComputeLightViewProjが使う
+        // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
     };

@@ -36,6 +36,7 @@ namespace Kurenai::UI
             "AO/GI - 遮蔽率 (アルファ)",
             "AO/GI - 遮蔽率 (アルファ, ブラー前)",
             "シャドウマップ",
+            "RTシャドウ (太陽の可視率)",
             "SSR (最終結果 + 反射)",
             "Hi-Z (深度ミップチェーン)",
             "IBL - イラディアンス (キューブマップ)",
@@ -49,10 +50,12 @@ namespace Kurenai::UI
             "プローブ - 距離 (キューブマップ配列)",
             "モーションベクター (速度バッファ)",
             "シーンカラー (生HDR・トーンマップなし)",
+            "DDGI - イラディアンス (オクタヘドラルアトラス)",
+            "DDGI - 距離モーメント (R=平均距離)",
             "bent normal (軸=色 / Gain>1.5で長さ=グレー)",
         };
         static_assert(
-            static_cast<int>(DebugView::BentNormal) == 26,
+            static_cast<int>(DebugView::BentNormal) == 29,
             "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はBentNormal)");
 
         DrawUsageHint();
