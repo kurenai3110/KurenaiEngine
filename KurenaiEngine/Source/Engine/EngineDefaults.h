@@ -105,6 +105,14 @@ namespace Kurenai::Defaults
     // 距離キューブのデバッグ表示で白飽和する距離。ProbeTestのホール(24×12)が収まる程度
     inline constexpr float ProbeDistanceDebugRange = 20.0f;
 
+    // --- DDGI(22章) ---
+    // .ksceneに[GIVolume]が無いシーンでは、このフラグに関わらず何も起きない
+    inline constexpr bool DDGIEnabled = true;
+    inline constexpr float DDGIIntensity = 1.0f;
+    // 1フレームに焼き直すプローブ数。DDGIはヒステリシスで時間収束させる手法なので、
+    // 全プローブを毎フレーム焼く必要はない(455個ならこの値で約29フレームで一巡する)
+    inline constexpr int DDGIProbesPerFrame = 16;
+
     // --- トーンマップ / ディザ ---
     inline constexpr bool DitherEnabled = true;
     inline constexpr float MesopicStrength = 0.0f;

@@ -108,7 +108,9 @@ namespace Kurenai
             // 反射プローブの距離キューブ用(末尾に追加、19.12節)。x=視差補正に距離キューブを使うフラグ、
             // y=距離キューブによる遮蔽判定(光漏れ抑制)の有効フラグ、z=距離キューブの1面の解像度
             // (テクセル。ReflectionProbe.hlsliのProbeDistanceBiasが1テクセル幅の見積もりに使う。
-            // ハードコードせずここから渡すのは、kProbeCaptureSizeを変えたときに黙ってずれないため)、w=未使用
+            // ハードコードせずここから渡すのは、kProbeCaptureSizeを変えたときに黙ってずれないため)、
+            // w=焼いた時点の実効プリ露出から現在の実効プリ露出への換算倍率(19.14節。
+            // m_ProbeBakedExposureEV100のコメントに理由がある)
             DirectX::XMFLOAT4 ProbeParams2;
             // TAA用(末尾に追加のため既存シェーダのオフセットは変わらない)。前フレームの
             // ビュー射影行列(TAAのジッターを含んだままのもの)。GBuffer.hlslが頂点をこの行列でも
@@ -124,6 +126,51 @@ namespace Kurenai
             // 「同じ面のどこをサンプルしたか」の違いであって「ものが動いた量」ではない。
             // 引いておかないとTAAが履歴を引く位置が毎フレーム±0.5px揺れ、いつまでも収束しない
             DirectX::XMFLOAT4 TAAParams;
+            // DDGI用(さらに末尾に追加、22章)。サンプリング側(DeferredLighting.hlsl)が必要とする値だけを
+            // 置く。ヒステリシスや最大レイ距離は焼く側にしか要らないのでDDGIUpdateConstantsが持つ。
+            //   DDGIParams0: xyz=ボリュームの最小コーナー(ワールド)、w=有効フラグ(0なら従来のIBLのまま)
+            //   DDGIParams1: xyz=プローブ間隔、w=法線バイアス(遮蔽判定の照会点を面から浮かせる量)
+            //   DDGIParams2: xyz=各軸のプローブ数、w=視線バイアス
+            //   DDGIParams3: x=イラディアンスの1辺のテクセル数(境界を含まない)、
+            //                y=距離モーメントの1辺のテクセル数(同)、z=拡散間接光の強度倍率、w=未使用
+            // テクセル数をハードコードせずここから渡すのは、ProbeParams2.zと同じ理由
+            // (C++側の定数を変えたときにシェーダーとの対応が黙ってずれないため)
+            DirectX::XMFLOAT4 DDGIParams0;
+            DirectX::XMFLOAT4 DDGIParams1;
+            DirectX::XMFLOAT4 DDGIParams2;
+            //                y=距離モーメントの1辺のテクセル数(同)、z=拡散間接光の強度倍率、
+            //                w=境界の幅(テクセル)
+            DirectX::XMFLOAT4 DDGIParams3;
+            // DDGIParams4: x=このフレームの実効プリ露出(m_EffectiveExposureEV100の線形倍率)、yzw=未使用。
+            //
+            // 【アトラスは露出非依存の単位で持つ】ライトの色にはCPU側で実効プリ露出が
+            // 事前乗算されており(21.5節)、その倍率は時刻に連動して最大18段(約26万倍)動く。
+            // アトラスへプリ露出済みの値をそのまま溜めると、時刻が変わった瞬間に
+            // 「古い露出で焼かれた数値」を新しい露出の値として読むことになる。
+            // DDGIは多重バウンスで自分自身へフィードバックするため、このズレが増幅され続け、
+            // 夜を挟んで昼に戻すと画面が数倍明るいまま戻らなくなる(実測で12時の平均輝度が
+            // 45.6→132.9)。そこで書き込み時にこの倍率で割り、読み出し時に掛け直して、
+            // アトラスの中身を露出に依存しない物理量に保つ。
+            // R32で確保してある(22.6節)ので、夜の小さな値でもfp32の範囲に余裕がある
+            DirectX::XMFLOAT4 DDGIParams4;
+        };
+
+        // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
+        // 焼く側にしか要らない値(どのプローブを焼いているか・ヒステリシス・距離のクランプ上限)を持つ
+        struct alignas(16) DDGIUpdateConstants
+        {
+            // x=いま焼いているプローブの通し番号、y=ヒステリシス、z=距離モーメントのクランプ上限、
+            // w=キャプチャキューブの1面の解像度(レイの立体角の重み付けに使う)
+            DirectX::XMFLOAT4 Params0;
+            // x=イラディアンスの1辺のテクセル数(境界を含まない)、y=距離モーメントの1辺のテクセル数、
+            // z=境界の幅、w=履歴を無視して上書きするフラグ(初回ベイク時に1。
+            // ヒステリシスは「前の値」があって初めて意味を持つため、未初期化のアトラスと混ぜてはいけない)
+            DirectX::XMFLOAT4 Params1;
+            // xyz=アトラス上でのプローブ格子の並び(x=各軸のプローブ数)。アトラスの列数は
+            // ProbeCounts.x * ProbeCounts.y、行数はProbeCounts.zになる。
+            // w=このフレームの実効プリ露出。積分した放射輝度をこれで割ってから格納する
+            // (理由はFrameConstants::DDGIParams4のコメント参照)
+            DirectX::XMFLOAT4 Params2;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -799,6 +846,11 @@ namespace Kurenai
             // 測光値の上側クランプ(構図依存を抑える。AutoExposure.hlsl参照)
             float KeyReferenceEV100;
             float KeyCeilingEV;
+
+            // 0以外なら順応を飛ばして測光値へ即座に合わせる(シーン切り替え時。
+            // m_AutoExposureResetRequested参照)
+            float ResetAdaptation;
+            float Padding[3];
         };
 
         // HiZ.hlsl側のcbuffer HiZConstantsと一致させる必要がある
@@ -1643,6 +1695,44 @@ namespace Kurenai
         probeCaptureConstantBufferDesc.SizeInBytes = sizeof(FrameConstants);
         m_ProbeCaptureConstantBuffer = m_Device->CreateBuffer(probeCaptureConstantBufferDesc);
 
+        // --- DDGI(22章) ---
+        // キャプチャ経路は反射プローブとまったく同じ(ProbeCapture.hlslとm_ProbeCapturePipelineStateを
+        // そのまま使う)で、解像度だけkDDGICaptureSizeへ落とす。レンダーターゲットのフォーマットは
+        // PSOと一致していなければならないため、反射プローブ側と同じ組み合わせにする
+        m_DDGICaptureColor = m_Device->CreateRenderTexture(kDDGICaptureSize, kDDGICaptureSize, RHI::Format::R16G16B16A16_Float);
+        m_DDGICaptureDistance = m_Device->CreateRenderTexture(kDDGICaptureSize, kDDGICaptureSize, RHI::Format::R32_Float);
+        m_DDGICaptureDepth = m_Device->CreateDepthTexture(kDDGICaptureSize, kDDGICaptureSize, 0.0f);
+        // 6面を組み上げるスクラッチのキューブ。更新CSは1テクセル(=1つの方向)を出力するのに
+        // 6面ぶん1536本のレイを全て走査するため、面ごとの2Dテクスチャではキューブとして
+        // 引けず具合が悪い。放射輝度と距離で2本要る
+        m_DDGICaptureRadianceCube = m_Device->CreateUAVTextureCube(kDDGICaptureSize, RHI::Format::R16G16B16A16_Float);
+        m_DDGICaptureDistanceCube = m_Device->CreateUAVTextureCube(kDDGICaptureSize, RHI::Format::R32_Float);
+
+        RHI::ShaderDesc ddgiUpdateCsDesc;
+        ddgiUpdateCsDesc.Stage = RHI::ShaderStage::Compute;
+        ddgiUpdateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.hlsl";
+        ddgiUpdateCsDesc.EntryPoint = "CSUpdateProbe";
+        m_DDGIProbeUpdateComputeShader = m_Device->CreateShader(ddgiUpdateCsDesc);
+        m_DDGIProbeUpdatePipelineState = m_Device->CreateComputePipelineState({ m_DDGIProbeUpdateComputeShader.get() });
+
+        // 境界の複製は本体の書き込みが全て終わってからでなければ正しい値を読めないため、
+        // 同じディスパッチ内では行えず別パスになる(オクタヘドラルの縁は対辺へ折り返して繋がるので、
+        // 自分のセルの反対側のテクセルを読む必要がある)
+        RHI::ShaderDesc ddgiBorderCsDesc;
+        ddgiBorderCsDesc.Stage = RHI::ShaderStage::Compute;
+        ddgiBorderCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.hlsl";
+        ddgiBorderCsDesc.EntryPoint = "CSCopyBorder";
+        m_DDGIBorderCopyComputeShader = m_Device->CreateShader(ddgiBorderCsDesc);
+        m_DDGIBorderCopyPipelineState = m_Device->CreateComputePipelineState({ m_DDGIBorderCopyComputeShader.get() });
+
+        RHI::BufferDesc ddgiUpdateConstantBufferDesc;
+        ddgiUpdateConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        ddgiUpdateConstantBufferDesc.SizeInBytes = sizeof(DDGIUpdateConstants);
+        m_DDGIUpdateConstantBuffer = m_Device->CreateBuffer(ddgiUpdateConstantBufferDesc);
+
+        // シーン読み込み前でもSRVをバインドできるよう、この時点で1プローブぶんのダミーを確保しておく
+        RecreateDDGIAtlases();
+
         RHI::BufferDesc constantBufferDesc;
         constantBufferDesc.Usage = RHI::BufferUsage::Constant;
         constantBufferDesc.SizeInBytes = sizeof(FrameConstants);
@@ -2363,12 +2453,48 @@ namespace Kurenai
         m_ProbeRealtimeProbeIndex = 0;
         m_ProbeRealtimeFace = 0;
 
+        // DDGIボリューム(22章)。現状は先頭の1つだけを使う。複数ボリュームは重なりと優先順位を
+        // 決める仕組みがまだ無いため、2つ目以降は警告を出して切り捨てる
+        m_HasGIVolume = !m_Scene.GIVolumes.empty();
+        if (m_Scene.GIVolumes.size() > 1)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "[GIVolume]が複数ありますが、現状は先頭の1つだけを使用します: " +
+                    std::to_string(m_Scene.GIVolumes.size()) + "個");
+        }
+        if (m_HasGIVolume)
+        {
+            m_GIVolume = m_Scene.GIVolumes.front();
+            const uint64_t probeCount =
+                static_cast<uint64_t>(m_GIVolume.ProbeCounts[0]) *
+                static_cast<uint64_t>(m_GIVolume.ProbeCounts[1]) *
+                static_cast<uint64_t>(m_GIVolume.ProbeCounts[2]);
+            if (probeCount > kDDGIMaxProbes)
+            {
+                // 切り捨てでは格子が歪んで意味を成さない(反射プローブのように「先頭N個」で
+                // 済ませられない)ため、ボリュームごと無効にして従来のIBLのまま描く
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "[GIVolume]のプローブ数が上限(" + std::to_string(kDDGIMaxProbes) + ")を超えたためDDGIを無効にします: " +
+                        std::to_string(probeCount) + "個。ProbeCountsを減らすかProbeSpacingを広げてください");
+                m_HasGIVolume = false;
+            }
+        }
+        RecreateDDGIAtlases();
+
         // SSAO/SSILの半径やSSRの距離はシーンの規模から決まるため、差し替え後のm_Sceneで計算し直す
         ResetSceneDependentParams();
 
+        // 露出の追従状態はシーンをまたいで持ち越さない。時刻が入れ替わると実効プリ露出は
+        // 最大18段跳ぶため、追従の途中で反射プローブが焼かれると桁違いの明るさで固定される
+        // (m_ProbeBakedExposureEV100・m_AutoExposureResetRequestedのコメント参照)
+        m_EffectiveExposureInitialized = false;
+        m_AutoExposureResetRequested = true;
+
         // TAAの履歴には前のシーンの絵が入っており、この後カメラも新シーンの初期位置へ飛ぶため、
         // 再投影しても対応する画素が存在しない。捨てて今フレームの色から積み直す。
-        // ApplyLoadedSceneはLoaderスレッドから呼ばれるため、m_Cameraは直接書けないがatomicなら書ける
+        // ApplyLoadedSceneはRenderスレッドから呼ばれるため、m_Cameraは直接書けないがatomicなら書ける
         // (Renderスレッドが読む。カメラ自体はこの後m_AppliedSceneCamera経由でUpdateスレッドへ渡す)
         m_TAAHistoryValid.store(false, std::memory_order_relaxed);
 
@@ -2382,6 +2508,67 @@ namespace Kurenai
             m_AppliedSceneTitle = std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name;
         }
         m_AppliedScenePending.store(true, std::memory_order_release);
+    }
+
+    void KurenaiEngine3D::RecreateDDGIAtlases()
+    {
+        // アトラスの並び: 列 = ProbeCounts.x * ProbeCounts.y、行 = ProbeCounts.z。
+        // XY平面のスライスを横に並べ、Zをそのまま行にする(RTXGIと同じ並び)。
+        // プローブ番号との対応は index = x + y*Cx + z*Cx*Cy で、シェーダー側の
+        // DDGIProbeAtlasCoord()と一致させること
+        const uint32_t countX = m_HasGIVolume ? m_GIVolume.ProbeCounts[0] : 1u;
+        const uint32_t countY = m_HasGIVolume ? m_GIVolume.ProbeCounts[1] : 1u;
+        const uint32_t countZ = m_HasGIVolume ? m_GIVolume.ProbeCounts[2] : 1u;
+
+        m_DDGIProbeCount = countX * countY * countZ;
+
+        const uint32_t columns = countX * countY;
+        const uint32_t rows = countZ;
+
+        // 【R32系である必要がある】更新CSはヒステリシス(前の値と新しい値のlerp)のために
+        // アトラスをRWTexture2Dとして読んでから書く。型付きUAV読み出しはR32系しか保証されておらず、
+        // fp16で読むにはTypedUAVLoadAdditionalFormatsが要る(AutoExposure.hlslが同じ理由で
+        // R32_Floatを2テクセル並べる構成にしている)。
+        // アトラスは455プローブでも合計1.4MB程度と小さいため、精度と可搬性を取って素直にR32にする
+        m_DDGIIrradianceAtlas = m_Device->CreateUAVTexture(
+            columns * kDDGIIrradianceCell, rows * kDDGIIrradianceCell, RHI::Format::R32G32B32A32_Float);
+        // R=平均距離、G=平均二乗距離
+        m_DDGIDistanceAtlas = m_Device->CreateUAVTexture(
+            columns * kDDGIDistanceCell, rows * kDDGIDistanceCell, RHI::Format::R32G32_Float);
+
+        // 確保し直した直後のアトラスは中身が未定義なので、一巡目からやり直す
+        m_DDGIBaked = false;
+        m_DDGIWarmingUp = true;
+        m_DDGIUpdateCursor = 0;
+        m_DDGIOverwriteRemaining = 0;
+        m_DDGILastExposureValid = false;
+
+        if (m_HasGIVolume)
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "DDGIボリューム '" + m_GIVolume.Name + "' を確保しました: " +
+                    std::to_string(countX) + "x" + std::to_string(countY) + "x" + std::to_string(countZ) +
+                    " = " + std::to_string(m_DDGIProbeCount) + "プローブ, アトラス " +
+                    std::to_string(columns * kDDGIIrradianceCell) + "x" + std::to_string(rows * kDDGIIrradianceCell) +
+                    " / " + std::to_string(columns * kDDGIDistanceCell) + "x" + std::to_string(rows * kDDGIDistanceCell));
+        }
+    }
+
+    DirectX::XMFLOAT3 KurenaiEngine3D::ComputeDDGIProbePosition(uint32_t probeIndex) const
+    {
+        const uint32_t countX = m_GIVolume.ProbeCounts[0];
+        const uint32_t countY = m_GIVolume.ProbeCounts[1];
+
+        const uint32_t x = probeIndex % countX;
+        const uint32_t y = (probeIndex / countX) % countY;
+        const uint32_t z = probeIndex / (countX * countY);
+
+        return DirectX::XMFLOAT3{
+            m_GIVolume.Origin[0] + static_cast<float>(x) * m_GIVolume.ProbeSpacing[0],
+            m_GIVolume.Origin[1] + static_cast<float>(y) * m_GIVolume.ProbeSpacing[1],
+            m_GIVolume.Origin[2] + static_cast<float>(z) * m_GIVolume.ProbeSpacing[2],
+        };
     }
 
     uint64_t KurenaiEngine3D::ComputeProbeBakeSignature() const
@@ -3264,6 +3451,28 @@ namespace Kurenai
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
         constants.IBLParams = { m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
 
+        // === 実効プリ露出が大きく動いたら、更新モードに関わらずプローブを焼き直す(19.14節) ===
+        // 下のProbeParams2.wは「焼いた時点の露出→現在の露出」の換算倍率で、これだけでも
+        // プローブの値の解釈は常に正しくなる。ただし換算はあくまで**焼いた時点の環境**を
+        // 正しい明るさで見せるだけなので、昼に焼いたプローブを夜の場面へ持ち込めば
+        // 「夜の部屋に昼の環境が正しい明るさで映り込む」ことになり、換算前より派手に破綻する
+        // (実測: ProbeTestを夜にしたときの平均輝度が213.6→253.9、白飽和78%)。
+        //
+        // 実効プリ露出が大きく動くのは時刻が大きく動いたときなので、そのときは環境そのものが
+        // 古くなっている。Bakedモードが凍結すると宣言しているのはライトやマテリアルの編集に
+        // 対してであって、場面全体の明るさが2倍以上変わってもなお昼の映り込みを保持することでは
+        // ない。手続き空が同じ理由で焼き直しているのと揃える(閾値は空の0.05段よりずっと粗く
+        // 取ってある。フルベイクはプローブ数×6面の描画になるため)。
+        // Realtimeは毎フレーム焼き直しているので対象外
+        if (m_ProbeUpdateMode != ProbeUpdateMode::Realtime && m_ProbeBaked && !m_ReflectionProbes.empty() &&
+            std::abs(m_EffectiveExposureEV100 - m_ProbeBakedExposureEV100) > kProbeRebakeExposureEV)
+        {
+            m_ProbeBakeRequested = true;
+            // このフレームの後半で今の露出で焼かれるため、換算倍率もここで合わせておく。
+            // ここで合わせないと、焼き直したフレームだけ1フレーム古い倍率が掛かって明滅する
+            m_ProbeBakedExposureEV100 = m_EffectiveExposureEV100;
+        }
+
         // 反射プローブの影響範囲をt13のStructuredBufferへ渡す。まだ一度も焼けていない場合
         // (m_ProbeBaked=false)や機能を無効にしている場合はプローブ数を0にして、シェーダー側の
         // 選択ループ自体を回さない=中身が未定義のキューブマップを引かせないようにする
@@ -3304,8 +3513,15 @@ namespace Kurenai
             m_ProbeDepthParallaxEnabled ? 1.0f : 0.0f,
             m_ProbeOcclusionEnabled ? 1.0f : 0.0f,
             static_cast<float>(kProbeCaptureSize),
-            0.0f,
+            // 焼いた時点の実効プリ露出から現在の実効プリ露出への換算倍率
+            // (m_ProbeBakedExposureEV100のコメント参照)。ComputeExposure(ev)=1/(1.2*2^ev)
+            // なので、比は 2^(焼いたEV - 現在のEV) になる。
+            // フルベイクが走るフレームだけは1フレームぶん古い倍率になるが、それが問題になるのは
+            // 「焼き直しと大きな露出変化が同じフレームで起きる」ときだけで、シーン読み込み時は
+            // 上のm_EffectiveExposureInitialized=falseで露出が既に確定しているため起きない
+            std::exp2(m_ProbeBakedExposureEV100 - m_EffectiveExposureEV100),
         };
+
         // モーションベクター用の前フレーム情報。初回フレームは前フレームの行列が未定義なので、
         // 今フレームと同じものを入れて速度を0にしておく。そうしないとゴミの速度が速度バッファへ
         // 焼き込まれ、画面全体が一度だけゴーストする
@@ -3319,6 +3535,31 @@ namespace Kurenai
             constants.PrevViewProj = constants.ViewProj;
             constants.TAAParams = { jitterUv.x, jitterUv.y, jitterUv.x, jitterUv.y };
         }
+
+        // DDGI(22章)。一度も焼けていない間はアトラスの中身が未定義なので無効にしておく
+        // (反射プローブのm_ProbeBakedと同じ方針)
+        const bool ddgiActive = m_DDGIEnabled && m_HasGIVolume && m_DDGIBaked;
+        constants.DDGIParams0 = {
+            m_GIVolume.Origin[0], m_GIVolume.Origin[1], m_GIVolume.Origin[2],
+            ddgiActive ? 1.0f : 0.0f,
+        };
+        constants.DDGIParams1 = {
+            m_GIVolume.ProbeSpacing[0], m_GIVolume.ProbeSpacing[1], m_GIVolume.ProbeSpacing[2],
+            m_GIVolume.NormalBias,
+        };
+        constants.DDGIParams2 = {
+            static_cast<float>(m_GIVolume.ProbeCounts[0]),
+            static_cast<float>(m_GIVolume.ProbeCounts[1]),
+            static_cast<float>(m_GIVolume.ProbeCounts[2]),
+            m_GIVolume.ViewBias,
+        };
+        constants.DDGIParams3 = {
+            static_cast<float>(kDDGIIrradianceTexels),
+            static_cast<float>(kDDGIDistanceTexels),
+            m_DDGIIntensity,
+            static_cast<float>(kDDGIProbeBorder),
+        };
+        constants.DDGIParams4 = { effectiveExposure, 0.0f, 0.0f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
@@ -3710,6 +3951,12 @@ namespace Kurenai
             cmd->SetTexture(9, m_IrradianceTexture.get());
             cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
             cmd->SetTexture(11, m_BRDFLUTTexture.get());
+            // DDGI(22章)の多重バウンス。ProbeCapture.hlslは拡散の環境光をここから引く。
+            // 参照するのは「前フレームまでに焼けているアトラス」で、同じフレームの中でも
+            // 既に更新済みのプローブぶんは新しい値になる。DDGIは元々ヒステリシスで
+            // 時間収束させる手法なので、この程度の混在は問題にならない
+            cmd->SetTexture(12, m_DDGIIrradianceAtlas.get());
+            cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
 
             for (const auto& instance : m_Scene.Instances)
             {
@@ -3859,6 +4106,8 @@ namespace Kurenai
             // プローブが有効になるよう、ここでフラグだけ立てる
             m_ProbeBaked = true;
             m_ProbeBakeSignature = ComputeProbeBakeSignature();
+            // このフレームの実効プリ露出で焼かれるので、読み出し側の換算倍率もここで更新する
+            m_ProbeBakedExposureEV100 = m_EffectiveExposureEV100;
             // 全プローブが今焼けたので、時間分割は先頭から仕切り直す
             m_ProbeRealtimeProbeIndex = 0;
             m_ProbeRealtimeFace = 0;
@@ -3915,6 +4164,220 @@ namespace Kurenai
             // 常に焼き直しているのでOnDemandの署名も追随させておく。こうしておかないと
             // Realtimeから切り替えた直後に不要なフルベイクが1回走る
             m_ProbeBakeSignature = ComputeProbeBakeSignature();
+            // 露出の換算倍率も追随させる。1面ずつ焼くため厳密には面ごとに焼いた露出が違うが、
+            // 実効プリ露出の変化は毎秒2倍程度(m_EffectiveExposureAdaptSpeed)なので
+            // 6フレームぶんのずれは数%にとどまり、常時焼き直している以上すぐ解消する
+            m_ProbeBakedExposureEV100 = m_EffectiveExposureEV100;
+        }
+
+        // --- DDGIのプローブ更新(22章) ---
+        // 反射プローブとまったく同じキャプチャ経路を使い、解像度だけkDDGICaptureSizeへ落とす。
+        // 6面×16×16 = 1536テクセルがそのままDDGIの「1536本のレイ」になる。
+        // フルベイクは持たず、初回も含めて常に1フレームm_DDGIProbesPerFrame個ずつ時間分割で回す
+        // (理由はKurenaiEngine3D.hのm_DDGIWarmingUpのコメント参照)
+
+        // プローブ1面ぶんのキャプチャ → スクラッチのキューブ2本(放射輝度・距離)の該当面へコピー。
+        // コピーCSはIBLConvolve.hlslのCSCopyCaptureToCubeFaceをそのまま使う。u1の宣言が
+        // RWTexture2DArray<float>なので、キューブ配列だけでなく単体のキューブ(=6要素の2D配列)の
+        // 面へもそのまま書ける
+        const auto captureDDGIProbeFace =
+            [this, &constants, probeFaceProjection, skyTexture](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+        {
+            const DirectX::XMFLOAT3 probePosition = ComputeDDGIProbePosition(probeIndex);
+
+            RHI::Viewport ddgiViewport;
+            ddgiViewport.Width = static_cast<float>(kDDGICaptureSize);
+            ddgiViewport.Height = static_cast<float>(kDDGICaptureSize);
+            RHI::IRHITexture* const captureTargets[] = { m_DDGICaptureColor.get(), m_DDGICaptureDistance.get() };
+
+            FrameConstants captureConstants = constants;
+            const DirectX::XMMATRIX faceViewProj = ComputeCubeFaceView(probePosition, face) * probeFaceProjection;
+            DirectX::XMStoreFloat4x4(&captureConstants.ViewProj, DirectX::XMMatrixTranspose(faceViewProj));
+            captureConstants.CameraPosition = { probePosition.x, probePosition.y, probePosition.z, 0.0f };
+            cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
+
+            cmd->SetRenderTargets(captureTargets, 2, m_DDGICaptureDepth.get());
+            cmd->SetViewport(ddgiViewport);
+            cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
+            // Reverse-Zのため遠平面側(NDC z=0.0)。コピー側はこの0を「空」の判定に使う
+            cmd->ClearDepth(0.0f);
+
+            // PSOは反射プローブと共通(同じシェーダー・同じレンダーターゲットフォーマット)
+            cmd->SetPipelineState(m_ProbeCapturePipelineState.get());
+            cmd->SetConstantBuffer(0, m_ProbeCaptureConstantBuffer.get());
+            cmd->SetSamplerSet(m_MaterialSamplers.get());
+
+            cmd->SetTexture(4, m_ShadowCascadeArray.get());
+            cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+            cmd->SetTexture(9, m_IrradianceTexture.get());
+            cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
+            cmd->SetTexture(11, m_BRDFLUTTexture.get());
+            // DDGI(22章)の多重バウンス。ProbeCapture.hlslは拡散の環境光をここから引く。
+            // 参照するのは「前フレームまでに焼けているアトラス」で、同じフレームの中でも
+            // 既に更新済みのプローブぶんは新しい値になる。DDGIは元々ヒステリシスで
+            // 時間収束させる手法なので、この程度の混在は問題にならない
+            cmd->SetTexture(12, m_DDGIIrradianceAtlas.get());
+            cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
+
+            for (const auto& instance : m_Scene.Instances)
+            {
+                for (const auto& mesh : instance.Model.Meshes)
+                {
+                    // 半透明メッシュを焼かない理由は反射プローブと同じ(不透明として描かれるため、
+                    // ガラスが壁になって裏の景色が欠ける)
+                    if (mesh.IsTransparent)
+                    {
+                        continue;
+                    }
+
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity);
+                    cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                    cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                    cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                    cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+
+                    cmd->SetTexture(0, mesh.BaseColorTexture);
+                    cmd->SetTexture(1, mesh.NormalTexture);
+                    cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
+                    cmd->SetTexture(3, mesh.EmissiveTexture);
+
+                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                }
+            }
+
+            // 描いたカラー/深度をコンピュートからSRVで読むため、先にRTVを外す(DX11の制約)
+            cmd->SetRenderTargets(nullptr, 0, nullptr);
+
+            IBLFaceConstants faceConstants{};
+            faceConstants.Face = face;
+            cmd->SetComputePipelineState(m_ProbeCubeCopyPipelineState.get());
+            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+            cmd->SetComputeTexture(0, skyTexture);
+            cmd->SetComputeTexture(1, m_DDGICaptureColor.get());
+            cmd->SetComputeTexture(2, m_DDGICaptureDepth.get());
+            cmd->SetComputeTexture(3, m_DDGICaptureDistance.get());
+            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_DDGICaptureRadianceCube.get(), face, 0, 0);
+            cmd->SetComputeUnorderedAccessTextureCubeFace(1, m_DDGICaptureDistanceCube.get(), face, 0, 0);
+            cmd->Dispatch((kDDGICaptureSize + 7) / 8, (kDDGICaptureSize + 7) / 8, 1);
+        };
+
+        // 組み上がったキューブ2本から、オクタヘドラルアトラスの該当セルを焼き直す。
+        // 境界の複製は本体の書き込みが全て終わってからでないと正しい値を読めないので別ディスパッチ
+        const auto updateDDGIProbe = [this, effectiveExposure](RHI::IRHICommandList* cmd, uint32_t probeIndex, bool overwrite)
+        {
+            DDGIUpdateConstants updateConstants{};
+            updateConstants.Params0 = {
+                static_cast<float>(probeIndex),
+                m_GIVolume.Hysteresis,
+                m_GIVolume.MaxRayDistance,
+                static_cast<float>(kDDGICaptureSize),
+            };
+            updateConstants.Params1 = {
+                static_cast<float>(kDDGIIrradianceTexels),
+                static_cast<float>(kDDGIDistanceTexels),
+                static_cast<float>(kDDGIProbeBorder),
+                overwrite ? 1.0f : 0.0f,
+            };
+            updateConstants.Params2 = {
+                static_cast<float>(m_GIVolume.ProbeCounts[0]),
+                static_cast<float>(m_GIVolume.ProbeCounts[1]),
+                static_cast<float>(m_GIVolume.ProbeCounts[2]),
+                effectiveExposure,
+            };
+            cmd->UpdateBuffer(m_DDGIUpdateConstantBuffer.get(), &updateConstants, sizeof(updateConstants));
+
+            // 本体の書き込み。スレッドは2つの解像度の広いほうに合わせて起動し、
+            // それぞれの範囲外はシェーダー側で弾く
+            constexpr uint32_t kUpdateThreads = (kDDGIIrradianceTexels > kDDGIDistanceTexels)
+                ? kDDGIIrradianceTexels : kDDGIDistanceTexels;
+            cmd->SetComputePipelineState(m_DDGIProbeUpdatePipelineState.get());
+            cmd->SetComputeConstantBuffer(0, m_DDGIUpdateConstantBuffer.get());
+            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+            cmd->SetComputeTexture(0, m_DDGICaptureRadianceCube.get());
+            cmd->SetComputeTexture(1, m_DDGICaptureDistanceCube.get());
+            cmd->SetComputeUnorderedAccessTexture(0, m_DDGIIrradianceAtlas.get());
+            cmd->SetComputeUnorderedAccessTexture(1, m_DDGIDistanceAtlas.get());
+            cmd->Dispatch((kUpdateThreads + 7) / 8, (kUpdateThreads + 7) / 8, 1);
+
+            // 境界の複製。セル全体(境界込み)を走査するので広いほうのセルサイズに合わせる
+            constexpr uint32_t kBorderThreads = (kDDGIIrradianceCell > kDDGIDistanceCell)
+                ? kDDGIIrradianceCell : kDDGIDistanceCell;
+            cmd->SetComputePipelineState(m_DDGIBorderCopyPipelineState.get());
+            cmd->SetComputeConstantBuffer(0, m_DDGIUpdateConstantBuffer.get());
+            cmd->SetComputeUnorderedAccessTexture(0, m_DDGIIrradianceAtlas.get());
+            cmd->SetComputeUnorderedAccessTexture(1, m_DDGIDistanceAtlas.get());
+            cmd->Dispatch((kBorderThreads + 7) / 8, (kBorderThreads + 7) / 8, 1);
+        };
+
+        if (m_DDGIEnabled && m_HasGIVolume && m_DDGIProbeCount > 0)
+        {
+            const uint32_t perFrame = std::min<uint32_t>(
+                static_cast<uint32_t>(std::max(m_DDGIProbesPerFrame, 1)), m_DDGIProbeCount);
+            const bool warmingUp = m_DDGIWarmingUp;
+
+            // 実効プリ露出が大きく動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる
+            // (理由はKurenaiEngine3D.hのm_DDGIOverwriteRemainingのコメント参照)。
+            // 一巡目(warmingUp)は元から上書きなので何もしない
+            if (!warmingUp)
+            {
+                if (!m_DDGILastExposureValid)
+                {
+                    m_DDGILastExposureEV100 = m_EffectiveExposureEV100;
+                    m_DDGILastExposureValid = true;
+                }
+                else if (std::abs(m_EffectiveExposureEV100 - m_DDGILastExposureEV100) > kDDGIExposureRewarmEV)
+                {
+                    m_DDGIOverwriteRemaining = m_DDGIProbeCount;
+                    m_DDGILastExposureEV100 = m_EffectiveExposureEV100;
+                }
+            }
+            // このフレームで上書きするぶんを先に確定させる(ラムダへ値で渡すため)
+            const uint32_t overwriteThisFrame = std::min(m_DDGIOverwriteRemaining, perFrame);
+            m_DDGIOverwriteRemaining -= overwriteThisFrame;
+
+            for (uint32_t i = 0; i < perFrame; ++i)
+            {
+                const uint32_t probeIndex = (m_DDGIUpdateCursor + i) % m_DDGIProbeCount;
+                // 一巡目はヒステリシスを使わず上書きする(混ぜる相手の「前の値」が未初期化のため)。
+                // 露出が急変した直後も同じく上書きで追従させる
+                const bool overwrite = warmingUp || (i < overwriteThisFrame);
+
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "DDGIUpdate" + std::to_string(probeIndex),
+                    .Reads = probeCaptureReads,
+                    .Writes = {
+                        m_DDGICaptureColor.get(), m_DDGICaptureDistance.get(), m_DDGICaptureDepth.get(),
+                        m_DDGICaptureRadianceCube.get(), m_DDGICaptureDistanceCube.get(),
+                        m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
+                    },
+                    .Execute = [&captureDDGIProbeFace, &updateDDGIProbe, probeIndex, overwrite](RHI::IRHICommandList* cmd)
+                    {
+                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                        {
+                            captureDDGIProbeFace(cmd, probeIndex, face);
+                        }
+                        updateDDGIProbe(cmd, probeIndex, overwrite);
+                    },
+                });
+            }
+
+            const uint32_t nextCursor = m_DDGIUpdateCursor + perFrame;
+            if (warmingUp && nextCursor >= m_DDGIProbeCount)
+            {
+                // 全プローブが一度ずつ書かれた。ここから先はヒステリシスで滑らかに追従させ、
+                // 同時にサンプリング側(DDGIParams0.w)を有効にする
+                m_DDGIWarmingUp = false;
+                m_DDGIBaked = true;
+                m_DDGILastExposureEV100 = m_EffectiveExposureEV100;
+                m_DDGILastExposureValid = true;
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "DDGIの初回一巡が完了しました(" + std::to_string(m_DDGIProbeCount) + "プローブ)");
+            }
+            m_DDGIUpdateCursor = nextCursor % m_DDGIProbeCount;
         }
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
@@ -4311,6 +4774,8 @@ namespace Kurenai
                 m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
                 // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)
                 m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
+                // 同じくDDGIUpdateパスより後に順序付けさせるために挙げる(22章)
+                m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
             .Execute = [this, &gbufferViewport, activeAOTexture, skyTexture](RHI::IRHICommandList* cmd)
@@ -4341,6 +4806,9 @@ namespace Kurenai
                 cmd->SetTexture(12, m_ProbePrefilteredArray.get());
                 cmd->SetShaderResourceBuffer(13, m_ProbeBuffer.get());
                 cmd->SetTexture(14, m_ProbeDistanceArray.get());
+                // DDGI(22章)。反射プローブと同じ理由で、無効時も含めて常にバインドする
+                cmd->SetTexture(15, m_DDGIIrradianceAtlas.get());
+                cmd->SetTexture(16, m_DDGIDistanceAtlas.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -4642,11 +5110,17 @@ namespace Kurenai
         //     結果はm_ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
         if (m_AutoExposureEnabled)
         {
+            // シーン切り替え直後の1回だけ順応を飛ばす。パスを積んだ時点で消費しておくことで、
+            // Executeが呼ばれる保証(グラフの枝刈り)に依存せず必ず1回で消える
+            const bool resetAdaptation = m_AutoExposureResetRequested;
+            m_AutoExposureResetRequested = false;
+
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AutoExposure",
                 .Reads = { hdrSceneColor, m_GBufferDepth.get() },
                 .Writes = { m_ExposureTexture.get() },
-                .Execute = [this, hdrSceneColor, keyReferenceEV100, usingProceduralSky](RHI::IRHICommandList* cmd)
+                .Execute = [this, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation](
+                    RHI::IRHICommandList* cmd)
                 {
                     AutoExposureConstants autoExposureConstants{};
                     autoExposureConstants.InputSize = { m_RenderWidth, m_RenderHeight };
@@ -4679,6 +5153,7 @@ namespace Kurenai
                     autoExposureConstants.KeyReferenceEV100 = keyReferenceEV100;
                     autoExposureConstants.KeyCeilingEV =
                         usingProceduralSky ? m_AutoExposureKeyCeilingEV : 1.0e4f;
+                    autoExposureConstants.ResetAdaptation = resetAdaptation ? 1.0f : 0.0f;
                     cmd->UpdateBuffer(m_AutoExposureConstantBuffer.get(), &autoExposureConstants, sizeof(autoExposureConstants));
 
                     // 1) ヒストグラムをゼロクリア
@@ -5011,6 +5486,26 @@ namespace Kurenai
             presentSourceTexture = hdrSceneColor;
             presentMode = 0;
             break;
+        case DebugView::DDGIIrradiance:
+        case DebugView::DDGIDistance:
+        {
+            // アトラスはただのTexture2Dなのでt0でそのまま受け取れる(22章)。
+            // 反射プローブのキューブと違い専用スロットは要らない。
+            // アトラスは横長(列=Cx*Cy、行=Cz)なので、レターボックスがその比率に合うよう
+            // 実寸を渡す。渡さないと画面いっぱいへ引き伸ばされ、セルが正方形に見えなくなる
+            const bool isIrradiance = (m_DebugView == DebugView::DDGIIrradiance);
+            const uint32_t cell = isIrradiance ? kDDGIIrradianceCell : kDDGIDistanceCell;
+            const uint32_t columns = m_GIVolume.ProbeCounts[0] * m_GIVolume.ProbeCounts[1];
+            const uint32_t rows = m_GIVolume.ProbeCounts[2];
+
+            presentSourceTexture = isIrradiance ? m_DDGIIrradianceAtlas.get() : m_DDGIDistanceAtlas.get();
+            // Present.hlslのMode 14はモーションベクター(TAA、23章)が既に使っているため、
+            // DDGIのイラディアンス/距離モーメントはMode 15/16にずらしてある
+            presentMode = isIrradiance ? 15 : 16;
+            presentSourceWidth = m_HasGIVolume ? columns * cell : cell;
+            presentSourceHeight = m_HasGIVolume ? rows * cell : cell;
+            break;
+        }
         }
 
         PresentConstants presentConstants{};
@@ -5062,11 +5557,24 @@ namespace Kurenai
         }
         // Finalの見た目は倍率の影響を受けてはならないため、デバッグ表示のときだけ倍率を掛ける
         // (Gainはゼロ初期化のままだと0倍=真っ黒になるので、必ず明示的に設定すること)
-        if (m_DebugView == DebugView::ProbeDistance)
+        if (m_DebugView == DebugView::ProbeDistance || m_DebugView == DebugView::DDGIDistance)
         {
-            // 距離キューブは色ではなくワールド距離なので、Debug View Gain(1倍以上)ではなく
-            // 「白になる距離」の逆数を渡す。Present.hlsl Mode 13の式は他と同じ「値×Gain」のまま
-            presentConstants.Gain = 1.0f / std::max(m_ProbeDistanceDebugRange, 0.01f);
+            // 距離は色ではなくワールド距離なので、Debug View Gain(1倍以上)ではなく
+            // 「白になる距離」の逆数を渡す。Present.hlsl Mode 13/15の式は他と同じ「値×Gain」のまま。
+            // DDGI側は距離がMaxRayDistanceでクランプされているので、そこを白にすると
+            // 「クランプに当たっている方向」が一目で分かる
+            const float whiteAt = (m_DebugView == DebugView::DDGIDistance)
+                ? m_GIVolume.MaxRayDistance
+                : m_ProbeDistanceDebugRange;
+            presentConstants.Gain = 1.0f / std::max(whiteAt, 0.01f);
+        }
+        else if (m_DebugView == DebugView::DDGIIrradiance)
+        {
+            // アトラスは露出非依存の物理量で持っている(FrameConstants::DDGIParams4 参照)ため、
+            // そのまま出すと昼は数万倍の値になって白飛びする。表示だけ実効プリ露出を掛けて
+            // 他のバッファと同じ表示レンジへ揃える。こうしておくと
+            // 「IBL - イラディアンス」の表示と直接見比べられる(22.9.1節の検証がこれに依存している)
+            presentConstants.Gain = m_DebugViewGain * effectiveExposure;
         }
         else
         {

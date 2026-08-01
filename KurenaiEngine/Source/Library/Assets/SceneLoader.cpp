@@ -5,6 +5,8 @@
 #include <DirectXMath.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <fstream>
@@ -115,6 +117,27 @@ namespace Kurenai::Assets
             return true;
         }
 
+        // "13, 5, 7"のような3要素の正整数([GIVolume]のProbeCounts用)。
+        // 分割処理を二重に持たないようParseFloat3で数値として読んでから整数性を検証する。
+        // 0・負数・小数はここで弾くので、呼び出し側は「1以上の整数である」ことを前提にしてよい
+        bool ParseUint3(const std::wstring& value, uint32_t outXYZ[3])
+        {
+            float parsed[3] = {};
+            if (!ParseFloat3(value, parsed))
+            {
+                return false;
+            }
+            for (int i = 0; i < 3; ++i)
+            {
+                if (!(parsed[i] >= 1.0f) || std::floor(parsed[i]) != parsed[i])
+                {
+                    return false;
+                }
+                outXYZ[i] = static_cast<uint32_t>(parsed[i]);
+            }
+            return true;
+        }
+
         std::optional<bool> ParseBoolToken(const std::wstring& value)
         {
             if (CaseInsensitiveEquals(value, L"true")) return true;
@@ -198,6 +221,20 @@ namespace Kurenai::Assets
             std::wstring Name;
         };
 
+        struct ParsedGIVolumeEntry
+        {
+            bool HasOrigin = false;
+            bool HasProbeCounts = false;
+            float Origin[3] = { 0.0f, 0.0f, 0.0f };
+            float ProbeSpacing[3] = { 2.0f, 2.0f, 2.0f };
+            uint32_t ProbeCounts[3] = { 8u, 4u, 8u };
+            float NormalBias = 0.25f;
+            float ViewBias = 0.10f;
+            float Hysteresis = 0.97f;
+            float MaxRayDistance = 8.0f;
+            std::wstring Name;
+        };
+
         struct ParsedScene
         {
             std::wstring Name;
@@ -225,6 +262,7 @@ namespace Kurenai::Assets
 
             std::vector<ParsedLightEntry> Lights;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
+            std::vector<ParsedGIVolumeEntry> GIVolumes;
         };
 
         enum class Section
@@ -236,6 +274,7 @@ namespace Kurenai::Assets
             Sun,
             Light,
             ReflectionProbe,
+            GIVolume,
             Unknown,
         };
 
@@ -247,6 +286,7 @@ namespace Kurenai::Assets
             if (CaseInsensitiveEquals(name, L"Sun")) return Section::Sun;
             if (CaseInsensitiveEquals(name, L"Light")) return Section::Light;
             if (CaseInsensitiveEquals(name, L"ReflectionProbe")) return Section::ReflectionProbe;
+            if (CaseInsensitiveEquals(name, L"GIVolume")) return Section::GIVolume;
             return Section::Unknown;
         }
 
@@ -332,6 +372,10 @@ namespace Kurenai::Assets
                     else if (currentSection == Section::ReflectionProbe)
                     {
                         result.ReflectionProbes.emplace_back();
+                    }
+                    else if (currentSection == Section::GIVolume)
+                    {
+                        result.GIVolumes.emplace_back();
                     }
                     else if (currentSection == Section::Camera)
                     {
@@ -583,6 +627,76 @@ namespace Kurenai::Assets
                     break;
                 }
 
+                case Section::GIVolume:
+                {
+                    ParsedGIVolumeEntry& entry = result.GIVolumes.back();
+                    if (CaseInsensitiveEquals(key, L"Origin"))
+                    {
+                        if (!ParseFloat3(value, entry.Origin)) errorAt(lineNumber, rawLine, "Originの値が不正です(x, y, zの3要素が必要)");
+                        entry.HasOrigin = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"ProbeSpacing"))
+                    {
+                        if (!ParseFloat3(value, entry.ProbeSpacing)) errorAt(lineNumber, rawLine, "ProbeSpacingの値が不正です(x, y, zの3要素が必要)");
+                        if (entry.ProbeSpacing[0] <= 0.0f || entry.ProbeSpacing[1] <= 0.0f || entry.ProbeSpacing[2] <= 0.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "ProbeSpacingは全ての軸を0より大きい値で指定してください");
+                        }
+                    }
+                    else if (CaseInsensitiveEquals(key, L"ProbeCounts"))
+                    {
+                        if (!ParseUint3(value, entry.ProbeCounts))
+                        {
+                            errorAt(lineNumber, rawLine, "ProbeCountsの値が不正です(x, y, zの3要素、それぞれ1以上の整数)");
+                        }
+                        // トライリニア補間は周囲8個のプローブを使うため、各軸2個以上ないと成立しない
+                        if (entry.ProbeCounts[0] < 2u || entry.ProbeCounts[1] < 2u || entry.ProbeCounts[2] < 2u)
+                        {
+                            errorAt(lineNumber, rawLine, "ProbeCountsは全ての軸を2以上で指定してください(トライリニア補間に周囲8個が必要なため)");
+                        }
+                        entry.HasProbeCounts = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"NormalBias"))
+                    {
+                        if (!ParseFloatToken(value, entry.NormalBias)) errorAt(lineNumber, rawLine, "NormalBiasの値が不正です");
+                        if (entry.NormalBias < 0.0f) errorAt(lineNumber, rawLine, "NormalBiasは0以上の値で指定してください");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"ViewBias"))
+                    {
+                        if (!ParseFloatToken(value, entry.ViewBias)) errorAt(lineNumber, rawLine, "ViewBiasの値が不正です");
+                        if (entry.ViewBias < 0.0f) errorAt(lineNumber, rawLine, "ViewBiasは0以上の値で指定してください");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Hysteresis"))
+                    {
+                        if (!ParseFloatToken(value, entry.Hysteresis)) errorAt(lineNumber, rawLine, "Hysteresisの値が不正です");
+                        if (entry.Hysteresis < 0.0f || entry.Hysteresis >= 1.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "Hysteresisは0以上1未満で指定してください(1では新しい値が一切入らない)");
+                        }
+                    }
+                    else if (CaseInsensitiveEquals(key, L"MaxRayDistance"))
+                    {
+                        if (!ParseFloatToken(value, entry.MaxRayDistance)) errorAt(lineNumber, rawLine, "MaxRayDistanceの値が不正です");
+                        // 距離アトラスは平均距離と平均二乗距離を持ち、その差から分散を求める。
+                        // 距離が大きいほどこの引き算の桁落ちが効くため上限を設ける
+                        // (r=200なら r²=40000 で、fp32の有効桁に対し分散を0.01程度の分解能で
+                        //  残せる。詳細はScene.hのGIVolume::MaxRayDistance参照)
+                        if (entry.MaxRayDistance <= 0.0f || entry.MaxRayDistance > 200.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "MaxRayDistanceは0より大きく200以下で指定してください(分散の計算が桁落ちで潰れるため)");
+                        }
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Name"))
+                    {
+                        entry.Name = value;
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
                 default:
                     break;
                 }
@@ -623,6 +737,21 @@ namespace Kurenai::Assets
                 if (!result.ReflectionProbes[i].HasPosition)
                 {
                     throw std::runtime_error("[ReflectionProbe]の" + std::to_string(i + 1) + "番目にPositionが指定されていません: " + WideToUtf8(filePath));
+                }
+            }
+            for (size_t i = 0; i < result.GIVolumes.size(); ++i)
+            {
+                const ParsedGIVolumeEntry& volume = result.GIVolumes[i];
+                // OriginとProbeCountsは既定値で代用できない。前者は格子の位置そのもので、
+                // 後者はボリュームの大きさを決める(ProbeSpacingとの積が範囲になる)ため、
+                // 書き忘れると意図と無関係な場所へ静かに格子が張られる
+                if (!volume.HasOrigin)
+                {
+                    throw std::runtime_error("[GIVolume]の" + std::to_string(i + 1) + "番目にOriginが指定されていません: " + WideToUtf8(filePath));
+                }
+                if (!volume.HasProbeCounts)
+                {
+                    throw std::runtime_error("[GIVolume]の" + std::to_string(i + 1) + "番目にProbeCountsが指定されていません: " + WideToUtf8(filePath));
                 }
             }
             if (result.HasCamera && !result.CameraPositionSet)
@@ -717,6 +846,23 @@ namespace Kurenai::Assets
                 ? ("Probe " + std::to_string(scene.ReflectionProbes.size()))
                 : WideToUtf8(parsedProbe.Name);
             scene.ReflectionProbes.push_back(probe);
+        }
+
+        // [GIVolume]も同様にワールド空間のまま渡す
+        for (const ParsedGIVolumeEntry& parsedVolume : parsed.GIVolumes)
+        {
+            GIVolume volume;
+            std::memcpy(volume.Origin, parsedVolume.Origin, sizeof(volume.Origin));
+            std::memcpy(volume.ProbeSpacing, parsedVolume.ProbeSpacing, sizeof(volume.ProbeSpacing));
+            std::memcpy(volume.ProbeCounts, parsedVolume.ProbeCounts, sizeof(volume.ProbeCounts));
+            volume.NormalBias = parsedVolume.NormalBias;
+            volume.ViewBias = parsedVolume.ViewBias;
+            volume.Hysteresis = parsedVolume.Hysteresis;
+            volume.MaxRayDistance = parsedVolume.MaxRayDistance;
+            volume.Name = parsedVolume.Name.empty()
+                ? ("GI Volume " + std::to_string(scene.GIVolumes.size()))
+                : WideToUtf8(parsedVolume.Name);
+            scene.GIVolumes.push_back(volume);
         }
 
         bool boundsInitialized = false;

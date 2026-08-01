@@ -37,6 +37,10 @@ namespace Kurenai::UI
         {
             DrawIBLSection();
         }
+        if (ImGui::CollapsingHeader("DDGI (拡散グローバルイルミネーション)###DDGI"))
+        {
+            DrawDDGISection();
+        }
         // ###以降のIDはimgui.iniのキーになるため、表示名だけ変えてIDはSSRのまま据え置く
         if (ImGui::CollapsingHeader("反射###SSR"))
         {
@@ -344,6 +348,44 @@ namespace Kurenai::UI
                     static_cast<KurenaiEngine3D::SpecularCompensationMode>(mode);
             }
         }
+
+        EndParamGroup();
+    }
+
+    void RenderingPanel::DrawDDGISection()
+    {
+        ImGui::TextWrapped(
+            "プローブを格子状に敷き詰めて、位置ごとに違う拡散の間接光を与える(22章)。"
+            "反射プローブが鏡面を担うのに対し、こちらは「壁の色が床へ回り込む」ような"
+            "間接拡散光を担当する。有効にすると拡散の環境光がグローバルIBL/反射プローブから"
+            "この格子由来のものへ差し替わる(加算ではない)");
+
+        if (!m_Engine.m_HasGIVolume)
+        {
+            ImGui::TextWrapped("このシーンには[GIVolume]が無いため、DDGIは動作しない");
+            return;
+        }
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "DDGIを有効にする###EnableDDGI", &m_Engine.m_DDGIEnabled, Defaults::DDGIEnabled,
+            "無効にすると拡散の環境光が従来どおりグローバルIBL/反射プローブのイラディアンスに戻る");
+
+        ImGui::BeginDisabled(!m_Engine.m_DDGIEnabled);
+        SliderFloatEx(
+            "DDGI 強度###DDGIIntensity", &m_Engine.m_DDGIIntensity, 0.0f, 2.0f, Defaults::DDGIIntensity, "%.3f", 0,
+            "拡散間接光の倍率。SSILと寄与が重なるぶんを実測で調整するためのつまみ");
+        SliderIntEx(
+            "1フレームの更新プローブ数###DDGIProbesPerFrame", &m_Engine.m_DDGIProbesPerFrame, 1, 64,
+            Defaults::DDGIProbesPerFrame,
+            "多いほど光の変化への追従が速くなるが、1プローブにつきシーンを6回描くため負荷も比例して上がる");
+        ImGui::EndDisabled();
+
+        ImGui::Text(
+            "プローブ数: %u (%u x %u x %u)", m_Engine.m_DDGIProbeCount,
+            m_Engine.m_GIVolume.ProbeCounts[0], m_Engine.m_GIVolume.ProbeCounts[1], m_Engine.m_GIVolume.ProbeCounts[2]);
+        ImGui::Text(m_Engine.m_DDGIWarmingUp ? "初回の一巡を実行中" : "初回の一巡は完了");
 
         EndParamGroup();
     }
