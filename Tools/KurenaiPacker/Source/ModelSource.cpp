@@ -319,7 +319,7 @@ namespace KurenaiPacker
         }
     }
 
-    SourceModel LoadSourceModel(const std::wstring& filePath, float scale)
+    SourceModel LoadSourceModel(const std::wstring& filePath, float scale, const MaterialOverride& materialOverride)
     {
         Assimp::Importer importer;
         // GenSmoothNormalsは対象アセットは全メッシュが法線を持つため実質ノーオップであり、
@@ -501,6 +501,12 @@ namespace KurenaiPacker
                     vertex.UV[0] = 0.0f;
                     vertex.UV[1] = 0.0f;
                 }
+                // ライトマップUVの既定値はマテリアルUVの複製にする。--bake-occlusionで
+                // xatlasの展開結果に差し替えられるまではこの値が使われ、glTFの
+                // occlusionTextureのように元からTEXCOORD0の空間で作られた遮蔽マップが
+                // そのまま正しく引ける(Vertex.hのUV1のコメント参照)
+                vertex.UV1[0] = vertex.UV[0];
+                vertex.UV1[1] = vertex.UV[1];
                 vertices.push_back(vertex);
 
                 if (!boundsInitialized)
@@ -584,6 +590,44 @@ namespace KurenaiPacker
             if (material->GetTexture(aiTextureType_EMISSIVE, 0, &texPath) == AI_SUCCESS)
             {
                 outMesh.EmissivePath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
+            }
+
+            // ベイク済みアンビエントオクルージョン(遮蔽マップ)。
+            // assimpはglTFのocclusionTextureをaiTextureType_LIGHTMAPへマップする
+            // (ThirdParty/assimp/code/AssetLib/glTF2/glTF2Importer.cpp参照)。明示的な
+            // AMBIENT_OCCLUSIONスロットを持つ形式もあるため、そちらもフォールバックとして見る。
+            //
+            // 【aiTextureType_AMBIENT(OBJのmap_Ka)は意図的に見ない】法線マップのNORMALS→HEIGHT
+            // フォールバックと同じ発想で最初は含めていたが、WavefrontMTLのmap_Kaは「アンビエント色の
+            // マップ」であって遮蔽率ではなく、実際にはmap_Kdと同じ拡散テクスチャを指す慣習になっている。
+            // 同梱のBistro(exterior.mtl/interior.mtl)も全マテリアルのmap_Kaが*_diff.pngを指していた。
+            // これを遮蔽率として採用すると、アルベドがそのまま環境光の減衰係数として掛かり、
+            // 色付きで極端に暗くなってしまう
+            if (material->GetTexture(aiTextureType_LIGHTMAP, 0, &texPath) == AI_SUCCESS ||
+                material->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texPath) == AI_SUCCESS)
+            {
+                outMesh.OcclusionPath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
+            }
+
+            // glTFのocclusionTexture.strength。ラフネス係数と異なり既定値がglTF仕様で1.0と
+            // 明記されているため、取得できない場合は無効値ではなくその既定値を採用する
+            // (assimpはLIGHTMAPスロットのプロパティとして格納する)
+            outMesh.OcclusionStrength = Kurenai::Assets::kDefaultOcclusionStrength;
+
+            float occlusionStrength = 0.0f;
+            if (material->Get(AI_MATKEY_GLTF_TEXTURE_STRENGTH(aiTextureType_LIGHTMAP, 0), occlusionStrength) == AI_SUCCESS)
+            {
+                // 遮蔽の強度は[0,1]が仕様上の値域。範囲外は壊れたデータとみなし既定値へ戻す
+                if (occlusionStrength >= 0.0f && occlusionStrength <= 1.0f)
+                {
+                    outMesh.OcclusionStrength = occlusionStrength;
+                }
+                else
+                {
+                    Kurenai::Core::Logger::Warning(
+                        "ModelSource",
+                        "遮蔽の強度が[0,1]の範囲外のため既定値1.0として扱います: " + std::to_string(occlusionStrength));
+                }
             }
 
             // FBXなどPBRメタリック係数を持たない形式では既定値(非金属)のままになる
@@ -732,6 +776,27 @@ namespace KurenaiPacker
         if (scene->mNumLights > 0)
         {
             ImportLights(scene, filePath, model.Lights);
+        }
+
+        // マテリアル係数の上書き(--metallic/--roughness/--base-color)。
+        // ソースが持っていた値を無条件で置き換えるため、解析の最後にまとめて適用する
+        for (SourceMesh& mesh : model.Meshes)
+        {
+            if (materialOverride.MetallicFactor)
+            {
+                mesh.MetallicFactor = *materialOverride.MetallicFactor;
+            }
+            if (materialOverride.RoughnessFactor)
+            {
+                mesh.RoughnessFactor = *materialOverride.RoughnessFactor;
+            }
+            if (materialOverride.BaseColor)
+            {
+                mesh.BaseColorFactor[0] = (*materialOverride.BaseColor)[0];
+                mesh.BaseColorFactor[1] = (*materialOverride.BaseColor)[1];
+                mesh.BaseColorFactor[2] = (*materialOverride.BaseColor)[2];
+                // アルファは上書きしない(不透明度はalphaMode/Tf由来の判定を尊重する)
+            }
         }
 
         return model;

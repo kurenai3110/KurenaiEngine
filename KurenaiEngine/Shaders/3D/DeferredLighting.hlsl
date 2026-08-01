@@ -169,9 +169,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 albedo = AlbedoTexture.Sample(ColorSampler, input.UV).rgb;
-    float2 material = MaterialTexture.Sample(DataSampler, input.UV).rg;
+    float3 material = MaterialTexture.Sample(DataSampler, input.UV).rgb;
     float metallic = material.r;
     float roughness = material.g;
+    // b = マテリアルの遮蔽マップ(GBuffer.hlslでstrength適用済み。遮蔽マップを持たない
+    // マテリアルは1.0)。ベイク済みAOはスクリーンスペース手法が拾えない細部の遮蔽を持つ
+    float materialAO = material.b;
     float3 diffuseColor = albedo * (1.0f - metallic);
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
@@ -179,7 +182,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 V = normalize(CameraPosition.xyz - worldPos);
 
     float4 aoSample = AOTexture.Sample(ColorSampler, input.UV);
-    float ao = aoSample.a;
+    // スクリーンスペースの遮蔽(SSAO/SSIL)とマテリアルの遮蔽マップを乗算して合成する。
+    // 両者は由来が独立(前者は実行時の周辺ジオメトリ、後者はアセットに焼かれた細部)なので、
+    // 片方だけを採用するmin合成ではなく素直に積を取る。
+    // 【重要】SSR.hlslは「Lightingパスが適用した鏡面IBLをまったく同じ式で再現する」設計のため、
+    // この合成式を変える場合はSSR.hlsl側も必ず同時に合わせること(ズレると鏡面が二重計上/引きすぎになる)
+    float ao = aoSample.a * materialAO;
     float3 indirectLight = aoSample.rgb; // SSIL(Visibility Bitmask)使用時のみ非ゼロ。周囲のサーフェスからの間接拡散光
     float3 directLight = DirectLightTexture.Sample(ColorSampler, input.UV).rgb; // DirectLighting.hlslで計算済み(シャドウ適用済み)
     float3 emissive = EmissiveTexture.Sample(ColorSampler, input.UV).rgb;
@@ -213,8 +221,11 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する。SSILの間接拡散光も
-    // 受光面のランバート反射(diffuseColor/PI、非金属分)として正規化してから加算する
-    float3 color = ambient + (diffuseColor / PI) * indirectLight + directLight + emissive;
+    // 受光面のランバート反射(diffuseColor/PI、非金属分)として正規化してから加算する。
+    // SSILの間接拡散光にはマテリアルの遮蔽マップを掛ける(これも間接光のため)。SSIL自身の
+    // 遮蔽はaoSample.rgbの算出時点で織り込み済みなので、ここで掛けるのはmaterialAOだけでよい。
+    // directLightとemissiveには掛けない(遮蔽マップは間接光にのみ効かせる方針。glTF仕様も同様)
+    float3 color = ambient + (diffuseColor / PI) * indirectLight * materialAO + directLight + emissive;
 
     return float4(color, 1.0f);
 }

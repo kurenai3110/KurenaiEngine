@@ -222,6 +222,7 @@
     <li><a href="#reflectionprobe">19. 反射プローブ(リフレクションプローブ)</a></li>
     <li><a href="#ssrprobe">20. SSRとプローブの合成(加算から差し替えへ)</a></li>
     <li><a href="#procedural-sky">21. 手続き空・月光・昼夜遷移</a></li>
+    <li><a href="#occlusion-map">22. マテリアルの遮蔽マップ(ベイク済みAO)</a></li>
   </ol>
 </nav>
 
@@ -522,21 +523,27 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 <table>
 <thead><tr><th>ファイル</th><th>役割</th><th>マジック/バージョン</th></tr></thead>
 <tbody>
-<tr><td><code>.kmodel</code></td><td>マニフェスト(<code>PackageHeader</code> + <code>TextureEntry[]</code> + <code>MeshEntry[]</code> + <code>LightEntry[]</code> + StringPool)。ジオメトリ・テクスチャの実体は持たず、パスとオフセットだけを持つ</td><td><code>'K','M','D','L'</code> / 4</td></tr>
+<tr><td><code>.kmodel</code></td><td>マニフェスト(<code>PackageHeader</code> + <code>TextureEntry[]</code> + <code>MeshEntry[]</code> + <code>LightEntry[]</code> + StringPool)。ジオメトリ・テクスチャの実体は持たず、パスとオフセットだけを持つ</td><td><code>'K','M','D','L'</code> / 5</td></tr>
 <tr><td><code>.kgeom</code></td><td>ジオメトリ実体。頂点(<code>Assets::Vertex</code>そのまま)/インデックス(<code>uint32_t</code>そのまま)ブロックをメッシュ順に16バイト境界で連結しただけで、読み込み後の加工が一切不要</td><td><code>'K','G','E','O'</code> / 1</td></tr>
 <tr><td><code>.ktex</code></td><td>テクスチャ実体。<code>DirectX::SaveToDDSMemory</code>が出力したDDSファイル全体(BC7圧縮・ミップ生成済み)をそのまま格納</td><td><code>'K','T','E','X'</code> / 1</td></tr>
 </tbody>
 </table>
 <p>
 <code>MeshEntry</code>は<code>BaseColorTextureIndex</code>/<code>NormalTextureIndex</code>/
-<code>MetallicRoughnessTextureIndex</code>/<code>EmissiveTextureIndex</code>という4つの
+<code>MetallicRoughnessTextureIndex</code>/<code>EmissiveTextureIndex</code>/
+<code>OcclusionTextureIndex</code>(v5で追加。遮蔽マップ。22章参照)という5つの
 <code>int32_t</code>(-1=指定なし)で<code>TextureEntry</code>を参照するほか、<code>AlphaCutoff</code>
 (0以下ならアルファカットアウト無効。glTFの<code>alphaMode=MASK</code>のマテリアルのみ設定される)と
 <code>EmissiveFactor[3]</code>を持つ。v3で追加した<code>Flags</code>(bit0=<code>kMeshEntryFlagTransparent</code>)は
 glTFの<code>alphaMode=BLEND</code>を表し、<code>AlphaCutoff</code>とは排他(glTF仕様上alphaModeは
 OPAQUE/MASK/BLENDのいずれか1つ)。<code>uint64_t</code>メンバを含む都合上構造体全体が8バイト境界に
 アラインされるため、<code>Flags</code>単体では暗黙のパディングが生じてしまい、明示的な
-<code>Reserved</code>を追加して72バイトに揃えている(詳細は14章参照)。旧実装のようなパス文字列ベースの重複排除キャッシュは、
+<code>Reserved</code>を追加して72バイトに揃えている(詳細は14章参照)。v4で<code>BaseColorFactor[4]</code>、
+v5で<code>OcclusionTextureIndex</code>+<code>OcclusionStrength</code>を<b>末尾に追加</b>しており、
+現在のサイズは96バイト(<code>static_assert</code>で固定)。末尾追加にしているのは既存フィールドの
+オフセットを動かさないためだが、それでも<code>Version</code>は必ず上げる ―― ランタイムは
+バージョン不一致の<code>.kmodel</code>を読み込み拒否するので、古いパッケージが新しいレイアウトとして
+解釈される事故が構造的に起きない。旧実装のようなパス文字列ベースの重複排除キャッシュは、
 KurenaiPacker側で(パス, sRGB)ごとに<code>TextureEntry</code>を1件へ集約する時点で完結しており、
 ランタイムの<code>ModelLoader.cpp</code>は添字だけで解決できる。読み込み後は
 <code>ModelLoader.cpp</code>内で各<code>MeshEntry</code>のオフセット/カウントが<code>.kgeom</code>の
@@ -4570,6 +4577,192 @@ sRGBの原色付近でのV'(λ)の比 (0.024, 0.368, 0.608) をRGBの重みに�
 あわせて<code>AE Night Rolloff</code>は4.5段を維持した(壁3.8 / 空27.9)。
 実際の夜も空が一番明るく地上は沈むので、この関係が肉眼の見え方に近い。
 </p>
+</section>
+
+<section id="occlusion-map">
+<h2>22. マテリアルの遮蔽マップ(ベイク済みAO)</h2>
+
+<p>マテリアルが持つテクスチャは長らくベースカラー・法線・メタリック/ラフネス・自発光の4枚固定で、
+glTFの<code>occlusionTexture</code>を読む経路がパッカーにもパッケージ形式にもランタイムにも
+存在しなかった。遮蔽と名の付くものはすべてスクリーンスペース由来(6章のSSAO/SSIL)であり、
+布の折り目や狭い隙間のように<b>ジオメトリの実解像度を下回る遮蔽</b>はまったく表現されていない。
+本章はそこへ第5のマテリアルテクスチャとして遮蔽マップを追加したときの設計判断を扱う。</p>
+
+<h3>22.1 適用先を間接光に限定する</h3>
+
+<p>遮蔽マップは<b>間接光にのみ</b>掛ける ―― 具体的にはIBLの拡散項、スペキュラオクルージョン、
+SSILの間接拡散光の3つで、直接光(<code>DirectLighting.hlsl</code>)と自発光には掛けない。
+これはglTF仕様の定義に沿った扱いであり、ベイク済みAOがそもそも「周囲の環境光がどれだけ届くか」を
+焼いたものである以上、指向性を持つデルタ光源へ掛ければ二重に暗くなるためでもある。
+<code>DirectLighting.hlsl</code>がG-Bufferのマテリアルを<code>.rg</code>しか読まないのは
+この方針の現れで、遮蔽マップの追加後も変更していない。</p>
+
+<h3>22.2 G-Bufferの空きチャンネルへ載せる</h3>
+
+<p>Deferredの不透明パスでは、マテリアル固有の値をライティングパスへ運ぶ経路がG-Bufferしかない。
+マテリアルG-Buffer(<code>R8G8B8A8_UNorm</code>)は<code>float4(metallic, roughness, 0, 0)</code>で
+<b>b/aの2チャンネルが未使用</b>だったため、新しいレンダーターゲットを増やさず<code>b</code>へ焼いている。
+帯域も増えない。読み手は<code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>の2つ。</p>
+
+<p><code>occlusionTexture.strength</code>は<b><code>GBuffer.hlsl</code>の時点で適用済み</b>にする
+(<code>lerp(1, ao, strength)</code>)。下流は単に乗算するだけになり、strengthの解釈が1か所に閉じる。
+strengthを運ぶ定数は<code>ObjectConstants</code>(b1)にあった純粋な詰め物<code>ObjectPadding</code>を
+そのまま名前だけ<code>OcclusionStrength</code>へ変えて使っているので、<b>定数バッファのサイズも
+オフセットも変わっていない</b>。</p>
+
+<div class="note">
+<p><b><code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>のao合成式は必ず一致させること。</b>
+20章のとおりSSRは「Lightingパスが適用した鏡面IBLをまったく同じ式で再現して差し替える」設計なので、
+片方だけが遮蔽マップを掛けると、SSRが適用される領域とされない領域の境界に段差が出る。
+どちらも <code>ao = AOTexture.a * material.b</code> で統一している。</p>
+</div>
+
+<h3>22.3 スペキュラオクルージョンの定義を共有ヘッダーへ移した</h3>
+
+<p>Lagarde &amp; de Rousiers (2014)のスペキュラオクルージョンは、これまで
+<code>ReflectionProbe.hlsli</code>の<code>SpecularIBLWeight</code>の中にだけ書かれていた。
+不透明パスとSSRしかAOを持たなかったため、それで足りていたからである。</p>
+
+<p>遮蔽マップはテクスチャなので、AO/GIバッファを持たない<b>半透明フォワードパス
+(<code>Transparent.hlsl</code>)とプローブ焼き込み(<code>ProbeCapture.hlsl</code>)でも使える</b>。
+そこで式そのものを<code>SpecularEnergy.hlsli</code>の<code>SpecularOcclusion(NdotV, roughness, ao)</code>へ
+切り出し、<code>SpecularIBLWeight</code>もそれを呼ぶようにした。エネルギー補正を同じヘッダーに
+置いているのと同じ理由 ―― 不透明と半透明で鏡面の遮蔽量がずれると、同じマテリアルが描画パスによって
+違う明るさになるためである。</p>
+
+<p><code>ao = 1</code>のときこの関数が厳密に1を返すことは重要で、遮蔽マップを持たないマテリアルや
+AOを持たないパスへ無条件に掛けても見た目が変わらないことを保証する。底<code>NdotV + 1</code>は
+常に1以上、指数は常に正なので<code>pow(NdotV + 1, e) &gt;= 1</code>となり、
+<code>saturate(... - 1 + ao)</code>が1に飽和する。</p>
+
+<h3>22.4 OBJの<code>map_Ka</code>を遮蔽マップとして読んではいけない</h3>
+
+<p>assimpはglTFの<code>occlusionTexture</code>を<code>aiTextureType_LIGHTMAP</code>へマップする
+(<code>glTF2Importer.cpp</code>)。当初は法線マップの<code>NORMALS</code>→<code>HEIGHT</code>
+フォールバックと同じ発想で<code>LIGHTMAP</code>→<code>AMBIENT_OCCLUSION</code>→<code>AMBIENT</code>と
+段階的に見るつもりだったが、<b><code>AMBIENT</code>(WavefrontMTLの<code>map_Ka</code>)は外した</b>。</p>
+
+<p><code>map_Ka</code>は「アンビエント色のマップ」であって遮蔽率ではなく、実際には
+<code>map_Kd</code>と同じ拡散テクスチャを指す慣習になっている。同梱のBistro
+(<code>exterior.mtl</code> / <code>interior.mtl</code>)を確認したところ、全マテリアルの
+<code>map_Ka</code>が<code>*_diff.png</code>を指していた。これを遮蔽率として採用すると、
+アルベドがそのまま環境光の減衰係数として掛かり、色付きで極端に暗い絵になる。</p>
+
+<h3>22.5 検証</h3>
+
+<p>Sponza・Bistroなど同梱のアセットはいずれも遮蔽マップを持たないため、検証には
+<code>MaterialTest</code>の球体列をもとに<code>occlusionTexture</code>を付けたglTFを別途生成した。
+縦縞(黒=遮蔽1.0 / 白=遮蔽なし)のAOテクスチャを、strengthを<code>1.0 / 0.5 / 0.0</code>と
+変えた球へ割り当て、遮蔽マップを持たない対照群と並べている。</p>
+
+<ul>
+  <li><b>strengthの効き</b>: strength=1.0の球ははっきりした縞、0.5は薄い縞、
+      <b>0.0は縞なし</b>(<code>lerp(1, ao, 0) = 1</code>)。対照群は変化なし</li>
+  <li><b>間接光限定であること</b>: 縞は太陽の直接光が当たる球の上部にはほとんど出ず、
+      環境光が支配的な下部で強く出る</li>
+  <li><b>半透明パス</b>: <code>alphaMode=BLEND</code>のガラス球にも薄く縞が出る</li>
+  <li><b>DX11 / DX12の一致</b>: 両バックエンドで同一の結果</li>
+  <li><b>回帰</b>: 遮蔽マップを持たないSponzaを、本変更の前後(SSAO・SSR有効)で撮り比べたところ
+      3Dビューポート内の<b>画素差分は0</b>だった。遮蔽マップ未指定時は白1x1が bind されて
+      <code>ao = 1.0</code>となり、<code>R8G8B8A8_UNorm</code>を往復しても1.0が厳密に保たれるため、
+      乗算が恒等変換になる</li>
+</ul>
+
+<h3>22.6 遮蔽マップをジオメトリから焼く(<code>--bake-occlusion</code>)</h3>
+
+<p>同梱アセットはいずれも<code>occlusionTexture</code>を持たないため、遮蔽マップを
+<b>モデルのジオメトリから生成する</b>経路をKurenaiPackerへ入れた。実装は
+<code>Tools/KurenaiPacker/Source/OcclusionBaker.cpp</code>。</p>
+
+<h4>22.6.1 なぜ専用のUVが要るのか(TEXCOORD0は使えない)</h4>
+
+<p>AOをテクスチャへ焼くには「面ごとに固有の場所を持つUV」が要る。ところがソースモデルの
+TEXCOORD0はレンガや石畳をタイリングして貼るためのUVであり、その条件を満たさない。
+同梱アセットで実測した結果:</p>
+
+<table>
+<thead><tr><th>Sponza(全25メッシュ)</th><th>数</th><th>判定根拠</th></tr></thead>
+<tbody>
+<tr><td>UVが[0,1]をはみ出す</td><td>14</td><td>タイリングしている。焼くと一点の遮蔽がタイル全面に出る</td></tr>
+<tr><td>UV三角形の面積の総和が1.0超</td><td>10</td><td>鳩の巣原理でチャートが必ず重なる(最大65.9)</td></tr>
+<tr><td>ベイク候補</td><td><b>1</b></td><td></td></tr>
+</tbody>
+</table>
+
+<p>Bistro Interiorも66メッシュ中39がタイリングしていた。そのため
+<b>xatlas(MIT)で重なりの無いライトマップUVを自動生成し、頂点フォーマットへ
+2つ目のUV(<code>Vertex::UV1</code>、TEXCOORD1)として持たせる</b>方針を取った。
+頂点は48→56バイトになり、<code>.kgeom</code>はv2、<code>.kmodel</code>はv6へ上がっている。</p>
+
+<div class="note">
+<p><b>ベイクしない場合、UV1にはUVがそのまま複製される。</b>glTFの<code>occlusionTexture</code>のように
+元から遮蔽マップを持つアセットは、その画像がTEXCOORD0の空間で作られている。UV1を0で埋めると
+それらが引けなくなるため、既定を「UVの複製」にした。おかげでシェーダー側は
+<b>「遮蔽マップは常にUV1で引く」と1通りに書ける</b>(分岐もフラグも要らない)。</p>
+</div>
+
+<h4>22.6.2 ベイクの手順</h4>
+
+<ol>
+  <li><b>UV展開</b>: メッシュごとにxatlasで<code>ComputeCharts</code> + <code>PackCharts</code>。
+      複数アトラスへ分かれるとUVだけでは表現できないため、1枚に収まるまで
+      <code>texelsPerUnit</code>を下げて詰め直す。チャート境界で頂点が複製されるので、
+      展開結果でVertices/Indicesを丸ごと置き換える</li>
+  <li><b>BVH構築</b>: <b>モデル全体</b>の三角形から作る。メッシュ単位では床のAOに壁の遮蔽が
+      入らないため。中央値分割の単純なBVHで、SAHは使っていない ―― 1アセットにつき数回しか
+      走らないオフライン処理なので、構築時間より実装の単純さを優先した</li>
+  <li><b>UV空間のラスタライズ</b>: CPUで行い、テクセルごとの面上の位置と法線を求める。
+      重いのは次のレイキャストなのでここはCPUで十分速く、レンダーターゲットの往復が要らない</li>
+  <li><b>レイキャスト</b>: GPUのコンピュートシェーダー。テクセルごとにコサイン重点サンプリングで
+      半球へレイを飛ばし、BVHを非再帰トラバースして可視率を求める。方向にはHammersley列を使う
+      (低食い違い量列なので同じ本数でも一様乱数よりノイズが少ない)</li>
+  <li><b>ダイレーション</b>: チャート外のテクセルは初期値が黒なので、そのままではバイリニア補間や
+      ミップ生成でチャートの縁が沈む。有効テクセルの値を外側へ数ピクセル広げ、
+      最後まで埋まらなかった領域は「遮蔽なし」(255)にしておく</li>
+</ol>
+
+<p>レイの長さはモデルのバウンズ対角の10%を既定とする。無限長にすると屋外モデルで
+空を向いた地面まで一様に暗くなるため、近傍の遮蔽だけを拾うよう打ち切っている。</p>
+
+<h4>22.6.3 出力はBC4</h4>
+
+<p>焼いた遮蔽マップは<b>BC4_UNORM</b>(1チャンネル、4bpp)で<code>.ktex</code>へ書く。
+他のテクスチャが使うBC7は3〜4チャンネル向けで、遮蔽率のような単一チャンネルには容量も品質も
+無駄が大きい。BC4はCPU圧縮でも十分速いため、BC7で必要だったGPU圧縮デバイスも要らない。</p>
+
+<p>なお<code>DirectX::GenerateMipMaps</code>には<b><code>TEX_FILTER_FORCE_NON_WIC</code>が必須</b>。
+既定のWIC経由の縮小は<code>R8_UNORM</code>のような単一チャンネル形式を扱えずE_FAILで落ちる
+(実際に発生した)。</p>
+
+<h4>22.6.4 検証</h4>
+
+<ul>
+  <li><b>LightTest(床・壁・球4個)でベイク有無を撮り比べ</b>、差分を8倍に増幅して確認した。
+      壁は床との入隅で最も暗くなり上へ向かって薄れ、球は<b>下半球(床に面した側)</b>が暗くなり、
+      各球の接地点まわりに影が出る。それ以外は完全に無変化 ―― ジオメトリ由来のAOとして正しい形</li>
+  <li><b>Sponza</b>: 26万三角形・25メッシュを全数ベイクして<b>約13秒</b>(解像度512、レイ128本)。
+      継ぎ目・黒抜け・UV破綻はいずれも出ていない</li>
+</ul>
+
+<h3>22.7 既知の制約</h3>
+
+<ul>
+  <li>glTFは<code>occlusionTexture</code>に<code>TEXCOORD_1</code>を指定できるが、
+      エンジンのUV1は<b>ライトマップUV専用</b>に使っており、ソースモデルの2つ目のUVセットは
+      読み込んでいない。そのようなアセットは<code>TEXCOORD_0</code>で引かれるため正しい結果に
+      ならない(<code>--bake-occlusion</code>で焼き直せば解決する)</li>
+  <li>ベイクは<b>モデル単位</b>で行う。<code>.kscene</code>で複数モデルを並べても、
+      別モデル同士の遮蔽(隣の建物が落とす影など)は入らない。パック時点では配置が未確定のため</li>
+  <li>ライトマップUVは<b>メッシュ(=マテリアル)ごとに1枚のアトラス</b>。1枚に収まらないメッシュは
+      チャートを縮めて詰め直すため、面積の大きなメッシュほどテクセル密度が落ちる</li>
+  <li>マテリアルG-Bufferが<code>R8G8B8A8_UNorm</code>のため、遮蔽率は<b>8bitに量子化</b>される</li>
+  <li>テクスチャスロットは<code>t5</code>を使う。マテリアルテクスチャを読む3パス
+      (GBuffer / Transparent / ProbeCapture)で共通して空いている最初のスロットがここで、
+      <code>t4</code>はTransparent/ProbeCaptureがカスケードシャドウマップ配列に使っている。
+      <code>t5</code>はDX11の12スロット・DX12の14スロットいずれの範囲内でもあるため、
+      ルートシグネチャ・ディスクリプタヒープの変更は不要だった</li>
+</ul>
+
 </section>
 
 </main>

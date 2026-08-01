@@ -271,15 +271,6 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
     return accumulated + noProbeColor * (1.0f - totalWeight);
 }
 
-// スペキュラオクルージョン(Lagarde & de Rousiers, "Moving Frostbite to Physically Based
-// Rendering 3.0", 2014)。ラフネスが高いほど指数を1に近づけ、AOの効きを弱める。
-// 下の2つの係数が同じ遮蔽を使うよう、定義はここ1か所に置く
-float SpecularOcclusion(float NdotV, float roughness, float ao)
-{
-    const float specularOcclusionExponent = exp2(-16.0f * roughness - 1.0f);
-    return saturate(pow(NdotV + ao, specularOcclusionExponent) - 1.0f + ao);
-}
-
 // 鏡面IBLの「放射輝度に掛かる係数」をまとめて返す。
 //
 //   鏡面IBL = 環境の放射輝度 * SpecularIBLWeight(...)
@@ -310,6 +301,8 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, floa
     const int mode = (int)(compensationMode + 0.5f);
     const float3 splitSum = (F0 * brdf.x + brdf.y) * SpecularEnergyCompensation(F0, brdf, mode);
 
+    // スペキュラオクルージョン。式はSpecularEnergy.hlsliに1つだけ置いてある
+    // (半透明パス・プローブ焼き込みからも同じものを使うため)
     return splitSum * SpecularOcclusion(NdotV, roughness, ao) * iblIntensity;
 }
 
