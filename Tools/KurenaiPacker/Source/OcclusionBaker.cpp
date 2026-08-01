@@ -61,6 +61,14 @@ namespace KurenaiPacker
             return buffer;
         }
 
+        // 検証用。誤差やベクトル長は2桁だと丸めで潰れるため4桁で出す
+        std::string Format4(double value)
+        {
+            char buffer[64];
+            sprintf_s(buffer, "%.4f", value);
+            return buffer;
+        }
+
         std::string FormatSeconds(double seconds)
         {
             return Format2(seconds) + "秒";
@@ -527,6 +535,162 @@ namespace KurenaiPacker
             }
         }
 
+        // bent normal用のダイレーション。上のR8版と同じ走査だが、平均する対象がベクトルになる。
+        //
+        // 【必ずベクトルのまま平均すること】length()は凸関数なので、Jensenの不等式より
+        //   E[|b|] >= |E[b]|
+        // が常に成り立つ。テクセルごとに長さを出してから平均すると必ず真値より大きくなり、
+        // 遮蔽コーンが実際より細く見積もられてスペキュラが明るくなりすぎる。
+        // length()を取るのは消費側(シェーダー)だけにする。
+        // ミップ生成のボックスフィルタとサンプリング時のバイリニア補間も同じ理由で
+        // ベクトルを補間しており、順序は自動的に正しくなる
+        void DilateBentNormal(std::vector<float>& values, std::vector<uint8_t> valid, uint32_t resolution, uint32_t pixels)
+        {
+            const int res = static_cast<int>(resolution);
+            for (uint32_t pass = 0; pass < pixels; ++pass)
+            {
+                std::vector<uint8_t> nextValid = valid;
+                std::vector<float> nextValues = values;
+                bool changed = false;
+
+                for (int y = 0; y < res; ++y)
+                {
+                    for (int x = 0; x < res; ++x)
+                    {
+                        const size_t index = static_cast<size_t>(y) * res + x;
+                        if (valid[index])
+                        {
+                            continue;
+                        }
+                        float sum[3] = { 0.0f, 0.0f, 0.0f };
+                        int count = 0;
+                        for (int dy = -1; dy <= 1; ++dy)
+                        {
+                            for (int dx = -1; dx <= 1; ++dx)
+                            {
+                                const int nx = x + dx, ny = y + dy;
+                                if (nx < 0 || ny < 0 || nx >= res || ny >= res)
+                                {
+                                    continue;
+                                }
+                                const size_t n = static_cast<size_t>(ny) * res + nx;
+                                if (valid[n])
+                                {
+                                    for (int k = 0; k < 3; ++k)
+                                    {
+                                        sum[k] += values[n * 4 + k];
+                                    }
+                                    ++count;
+                                }
+                            }
+                        }
+                        if (count > 0)
+                        {
+                            for (int k = 0; k < 3; ++k)
+                            {
+                                nextValues[index * 4 + k] = sum[k] / static_cast<float>(count);
+                            }
+                            nextValues[index * 4 + 3] = 1.0f;   // 埋めたテクセルは有効にする
+                            nextValid[index] = 1;
+                            changed = true;
+                        }
+                    }
+                }
+
+                values.swap(nextValues);
+                valid.swap(nextValid);
+                if (!changed)
+                {
+                    break;
+                }
+            }
+
+            // 最後まで埋まらなかったテクセルは有効フラグ0のまま残す。
+            // R8版は「遮蔽なし(255)」で埋めるが、bent normalは遮蔽なしを定数で表せないため
+            // (方向がテクセルごとに違う)、消費側でNへ落とさせる
+        }
+
+        // === bent normalの検証(仕様書§7のチェックリスト) ======================
+        //
+        // 量子化前のfloat32で集計する。ここを通しておけば、後段で見つけた異常が
+        // ベイクのバグなのかfp16量子化なのかを切り分けられる
+        struct BentStats
+        {
+            double MaxLength = 0.0;          // max|bRaw|。1を超えてはいけない
+            double MaxAoNMinusAoB = -1.0e9;  // max(aoN - aoB)。0以下でなければいけない
+            double SumSqError = 0.0;         // aoNと既存AOの二乗誤差の総和
+            double MaxError = 0.0;           // 同、最大誤差
+            uint64_t SampleCount = 0;
+            uint64_t FullyOccludedCount = 0; // |bRaw| < 1e-3(完全遮蔽)
+            uint64_t NanCount = 0;
+            uint64_t OverOneCount = 0;       // |bRaw| > 1.05(明らかな異常)
+        };
+
+        void AccumulateBentStats(
+            const float* bent,
+            const float* ao,
+            const std::vector<BakeTexel>& texels,
+            const std::vector<uint8_t>& valid,
+            uint32_t texelCount,
+            size_t meshIndex,
+            BentStats& stats)
+        {
+            uint64_t meshNan = 0;
+            uint64_t meshOverOne = 0;
+
+            for (uint32_t i = 0; i < texelCount; ++i)
+            {
+                if (!valid[i])
+                {
+                    continue;   // チャート外はダイレーションで埋まるので対象外
+                }
+
+                const float bx = bent[i * 4 + 0];
+                const float by = bent[i * 4 + 1];
+                const float bz = bent[i * 4 + 2];
+
+                if (std::isnan(bx) || std::isnan(by) || std::isnan(bz) ||
+                    std::isinf(bx) || std::isinf(by) || std::isinf(bz))
+                {
+                    ++meshNan;
+                    continue;
+                }
+
+                const double aoB = std::sqrt(static_cast<double>(bx) * bx + static_cast<double>(by) * by + static_cast<double>(bz) * bz);
+                const BakeTexel& texel = texels[i];
+                const double aoN =
+                    static_cast<double>(texel.Normal[0]) * bx +
+                    static_cast<double>(texel.Normal[1]) * by +
+                    static_cast<double>(texel.Normal[2]) * bz;
+
+                stats.MaxLength = std::max(stats.MaxLength, aoB);
+                stats.MaxAoNMinusAoB = std::max(stats.MaxAoNMinusAoB, aoN - aoB);
+
+                // 既存AOとの一致。同じ積分の別推定量なので、モンテカルロ誤差ぶんしかズレないはず
+                const double diff = aoN - static_cast<double>(ao[i]);
+                stats.SumSqError += diff * diff;
+                stats.MaxError = std::max(stats.MaxError, std::abs(diff));
+                ++stats.SampleCount;
+
+                if (aoB < 1e-3) { ++stats.FullyOccludedCount; }
+                if (aoB > 1.05) { ++meshOverOne; }
+            }
+
+            stats.NanCount += meshNan;
+            stats.OverOneCount += meshOverOne;
+
+            if (meshNan > 0)
+            {
+                Warn("メッシュ[" + std::to_string(meshIndex) + "]のbent normalにNaN/Infが "
+                    + std::to_string(meshNan) + "テクセルありました");
+            }
+            if (meshOverOne > 0)
+            {
+                Warn("メッシュ[" + std::to_string(meshIndex) + "]のbent normalで長さが1.05を超えたテクセルが "
+                    + std::to_string(meshOverOne) + "個ありました(サンプリングか正規化係数の誤り)");
+            }
+        }
+
         // === GPU(DirectCompute)によるレイキャスト ==============================
 
         const char* kBakeComputeShader = R"(
@@ -539,6 +703,9 @@ StructuredBuffer<BvhNode>  Nodes     : register(t1);
 StructuredBuffer<Texel>    Texels    : register(t2);
 StructuredBuffer<uint>     Valid     : register(t3);
 RWStructuredBuffer<float>  Result    : register(u0);
+// bent normal(正規化しない)。.xyz = bRaw、.w = 有効フラグ。
+// 正規化して長さを捨てないのは、消費側が長さ(=aoB)を錐体の広がりとして使うため
+RWStructuredBuffer<float4> BentResult : register(u1);
 
 cbuffer BakeConstants : register(b0)
 {
@@ -546,6 +713,8 @@ cbuffer BakeConstants : register(b0)
     uint RayCount;
     float RayLength;
     float NormalOffset;
+    uint BentRayCount;
+    uint3 Padding;
 };
 
 // Möller–Trumbore。遮蔽の有無だけが要るので交差位置は返さない
@@ -633,6 +802,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (Valid[index] == 0)
     {
         Result[index] = 1.0f; // チャート外は遮蔽なし扱い(ダイレーションで上書きされる)
+        // bent normalは「遮蔽なし」を定数で表現できない(遮蔽なしのbRawはNそのもので
+        // テクセルごとに違う)。有効フラグを0にして消費側でNへ落とさせる
+        BentResult[index] = float4(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
 
@@ -665,6 +837,37 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     }
 
     Result[index] = 1.0f - float(occluded) / float(RayCount);
+
+    // --- bent normal(正規化しない可視方向の平均) ---
+    //
+    //   bRaw = (1/π) ∫ V(ω) ω dω
+    //
+    // 消費側はこれを軸 normalize(bRaw)、aoB = length(bRaw)、aoN = dot(N, bRaw) の3つへ分解する。
+    // aoNは上のResultとまったく同じ量の別推定量なので、両者の一致がそのまま検証になる。
+    //
+    // 【コサイン重点サンプリングは使えない】上のAOと違い被積分関数にコサイン項が無いため、
+    // 重みが打ち消し合わずπ/cosθになる。グレージング(cosθ→0)で重みが発散し分散が爆発する。
+    // そのため一様半球サンプリング(pdf = 1/2π)を使う
+    float3 bRaw = float3(0.0f, 0.0f, 0.0f);
+    for (uint j = 0; j < BentRayCount; ++j)
+    {
+        const float2 xj = Hammersley(j, BentRayCount);
+        // cosθに一様 = 立体角に一様
+        const float cosT = xj.x;
+        const float sinT = sqrt(max(0.0f, 1.0f - cosT * cosT));
+        const float phiB = 6.2831853f * xj.y;
+        const float3 dirB = normalize(T * (sinT * cos(phiB)) + B * (sinT * sin(phiB)) + N * cosT);
+
+        if (!Occluded(origin, dirB, RayLength))
+        {
+            bRaw += dirB;
+        }
+    }
+    // (1/π) ÷ pdf(=1/2π) ÷ 本数 = 2/本数。
+    // 遮蔽が無ければ ∫ω dω = πN なので bRaw = N となり、長さがちょうど1になる
+    bRaw *= 2.0f / float(BentRayCount);
+
+    BentResult[index] = float4(bRaw, 1.0f);
 }
 )";
 
@@ -674,7 +877,10 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             uint32_t RayCount;
             float RayLength;
             float NormalOffset;
+            uint32_t BentRayCount;
+            uint32_t Padding[3];   // 定数バッファは16バイト単位。HLSL側のuint3 Paddingと対応する
         };
+        static_assert(sizeof(BakeConstants) == 32, "BakeConstantsはHLSL側のcbufferと32バイトで一致させること");
 
         void ThrowIfFailed(HRESULT hr, const char* what)
         {
@@ -815,6 +1021,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         OcclusionBakeResult result;
         result.Resolution = options.Resolution;
         result.MeshTextures.resize(sourceModel.Meshes.size());
+        result.MeshBentNormals.resize(sourceModel.Meshes.size());
 
         if (sourceModel.Meshes.empty())
         {
@@ -824,6 +1031,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         xatlas::SetPrint(SilentPrint, false);
 
         BakeTimings timings;
+        BentStats stats;
         const Clock::time_point bakeStart = Clock::now();
 
         // === 1. 全メッシュのライトマップUVを生成する ===
@@ -874,7 +1082,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         Info("遮蔽マップをベイクします (三角形 " + std::to_string(bvh.Triangles.size())
             + " / BVHノード " + std::to_string(bvh.Nodes.size())
             + " / 解像度 " + std::to_string(options.Resolution)
-            + " / レイ " + std::to_string(options.RayCount) + "本)");
+            + " / レイ " + std::to_string(options.RayCount) + "本"
+            + " / bent normal " + (options.BentNormalRayCount > 0
+                ? std::to_string(options.BentNormalRayCount) + "本"
+                : std::string("なし"))
+            + ")");
 
         const uint32_t texelCount = options.Resolution * options.Resolution;
 
@@ -902,7 +1114,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
             // 有効テクセルだけがレイを飛ばす(無効テクセルはシェーダー冒頭で即returnする)。
             // スループットの分母はこちらでなければならない
-            timings.TotalRays += static_cast<uint64_t>(validCount) * options.RayCount;
+            timings.TotalRays +=
+                static_cast<uint64_t>(validCount) * (options.RayCount + options.BentNormalRayCount);
 
             // UV展開の品質指標(22.6.4)。
             //   被覆率      = 有効テクセル / 全テクセル。アトラスをどれだけ使えているか
@@ -944,9 +1157,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             ComPtr<ID3D11UnorderedAccessView> resultUav;
             ThrowIfFailed(device.Device()->CreateUnorderedAccessView(resultBuffer.Get(), &uavDesc, &resultUav), "UAVの作成に失敗しました");
 
+            // bent normal用の結果バッファ(float4)。シェーダーは常にu1へ書くため、
+            // ベイクしない設定でもバッファ自体は作ってバインドする
+            D3D11_BUFFER_DESC bentDesc = resultDesc;
+            bentDesc.ByteWidth = texelCount * sizeof(float) * 4;
+            bentDesc.StructureByteStride = sizeof(float) * 4;
+            ComPtr<ID3D11Buffer> bentBuffer;
+            ThrowIfFailed(device.Device()->CreateBuffer(&bentDesc, nullptr, &bentBuffer), "bent normalの結果バッファの作成に失敗しました");
+            ComPtr<ID3D11UnorderedAccessView> bentUav;
+            ThrowIfFailed(device.Device()->CreateUnorderedAccessView(bentBuffer.Get(), &uavDesc, &bentUav), "bent normalのUAVの作成に失敗しました");
+
             BakeConstants constants{};
             constants.TexelCount = texelCount;
             constants.RayCount = options.RayCount;
+            constants.BentRayCount = options.BentNormalRayCount;
             constants.RayLength = rayLength;
             // 自己交差を避ける浮かせ量。レイ長に比例させ、スケールの異なるモデルでも同じ挙動にする
             constants.NormalOffset = rayLength * 1e-3f;
@@ -957,20 +1181,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             device.Context()->Unmap(device.Constants(), 0);
 
             ID3D11ShaderResourceView* srvs[] = { triangleSrv.Get(), nodeSrv.Get(), texelSrv.Get(), validSrv.Get() };
-            ID3D11UnorderedAccessView* uavs[] = { resultUav.Get() };
+            ID3D11UnorderedAccessView* uavs[] = { resultUav.Get(), bentUav.Get() };
             ID3D11Buffer* cbs[] = { device.Constants() };
 
             device.Context()->CSSetShader(device.Shader(), nullptr, 0);
             device.Context()->CSSetShaderResources(0, 4, srvs);
-            device.Context()->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+            device.Context()->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
             device.Context()->CSSetConstantBuffers(0, 1, cbs);
             device.Context()->Dispatch((texelCount + 63) / 64, 1, 1);
 
             // バインドを外してからリードバックする(次のメッシュで同じスロットを使い回すため)
             ID3D11ShaderResourceView* nullSrvs[4] = {};
-            ID3D11UnorderedAccessView* nullUavs[1] = {};
+            ID3D11UnorderedAccessView* nullUavs[2] = {};
             device.Context()->CSSetShaderResources(0, 4, nullSrvs);
-            device.Context()->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
+            device.Context()->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
 
             D3D11_BUFFER_DESC stagingDesc = resultDesc;
             stagingDesc.Usage = D3D11_USAGE_STAGING;
@@ -990,11 +1214,45 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 const float clamped = std::clamp(ao[i], 0.0f, 1.0f);
                 texture[i] = static_cast<uint8_t>(clamped * 255.0f + 0.5f);
             }
+
+            // bent normalのリードバック。AO(float)とは別バッファなのでステージングも別に要る
+            std::vector<float> bentTexture;
+            if (options.BentNormalRayCount > 0)
+            {
+                D3D11_BUFFER_DESC bentStagingDesc = bentDesc;
+                bentStagingDesc.Usage = D3D11_USAGE_STAGING;
+                bentStagingDesc.BindFlags = 0;
+                bentStagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                ComPtr<ID3D11Buffer> bentStaging;
+                ThrowIfFailed(device.Device()->CreateBuffer(&bentStagingDesc, nullptr, &bentStaging),
+                    "bent normalのリードバック用バッファの作成に失敗しました");
+                device.Context()->CopyResource(bentStaging.Get(), bentBuffer.Get());
+
+                D3D11_MAPPED_SUBRESOURCE bentReadback{};
+                ThrowIfFailed(device.Context()->Map(bentStaging.Get(), 0, D3D11_MAP_READ, 0, &bentReadback),
+                    "bent normalのリードバックのMapに失敗しました");
+                const float* bent = static_cast<const float*>(bentReadback.pData);
+
+                bentTexture.assign(bent, bent + static_cast<size_t>(texelCount) * 4);
+
+                // 仕様書§7のチェックリストを量子化前のfloat32で集計する。
+                // ここで既存AOとの一致を見ておかないと、後段で見つけた誤差が
+                // ベイクのバグなのかfp16量子化なのか切り分けられない
+                AccumulateBentStats(bent, ao, texels, valid, texelCount, meshIndex, stats);
+
+                device.Context()->Unmap(bentStaging.Get(), 0);
+            }
+
             device.Context()->Unmap(staging.Get(), 0);
             timings.DispatchSeconds += SecondsSince(dispatchStart);
 
             const Clock::time_point dilateStart = Clock::now();
             Dilate(texture, valid, options.Resolution, options.DilationPixels);
+            if (!bentTexture.empty())
+            {
+                DilateBentNormal(bentTexture, valid, options.Resolution, options.DilationPixels);
+                result.MeshBentNormals[meshIndex] = std::move(bentTexture);
+            }
             timings.DilateSeconds += SecondsSince(dilateStart);
 
             result.MeshTextures[meshIndex] = std::move(texture);
@@ -1018,6 +1276,44 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 static_cast<double>(timings.TotalRays) / timings.DispatchSeconds / 1.0e6;
             Info("  レイ " + std::to_string(timings.TotalRays) + "本 / "
                 + Format2(raysPerSecondM) + " 百万レイ毎秒");
+        }
+
+        // === 5. bent normalの検証(仕様書§7) ===
+        //
+        // 上から2項目が通れば地平線の二重計上が無いこと、
+        // 「既存AOとの一致」が通ればサンプリングと正規化係数が正しいことが確認できる
+        if (stats.SampleCount > 0)
+        {
+            const double rms = std::sqrt(stats.SumSqError / static_cast<double>(stats.SampleCount));
+            const double occludedRatio =
+                static_cast<double>(stats.FullyOccludedCount) / static_cast<double>(stats.SampleCount) * 100.0;
+
+            Info("bent normalの検証 (量子化前のfloat32、有効テクセル " + std::to_string(stats.SampleCount) + "個):");
+            Info("  max|bRaw|         " + Format4(stats.MaxLength) + " (1.0以下であること)");
+            Info("  max(aoN - aoB)    " + Format4(stats.MaxAoNMinusAoB) + " (0.0以下であること)");
+            Info("  既存AOとの誤差    RMS " + Format4(rms) + " / 最大 " + Format4(stats.MaxError));
+            Info("  完全遮蔽の割合    " + Format2(occludedRatio) + "%");
+
+            // 一致していないということは、同じ積分の別推定量になっていないということ。
+            // 0.05はモンテカルロ誤差(256本で数%)に安全側の余裕を見た値
+            if (rms > 0.05)
+            {
+                Warn("bent normalのaoN(= dot(N,bRaw))が既存AOと一致していません (RMS " + Format4(rms)
+                    + ")。一様半球サンプリングの正規化係数(2/本数)かレイの基底を確認してください");
+            }
+            if (stats.MaxLength > 1.05)
+            {
+                Warn("bent normalの長さが1を大きく超えています (max " + Format4(stats.MaxLength) + ")");
+            }
+            if (stats.MaxAoNMinusAoB > 0.05)
+            {
+                Warn("aoNがaoBを上回っています (max " + Format4(stats.MaxAoNMinusAoB)
+                    + ")。コーシー・シュワルツの不等式に反するため、どちらかの計算が誤っています");
+            }
+            if (stats.NanCount > 0)
+            {
+                Warn("bent normalにNaN/Infが合計 " + std::to_string(stats.NanCount) + "テクセルありました");
+            }
         }
 
         return result;

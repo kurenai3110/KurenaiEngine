@@ -225,6 +225,8 @@ namespace Kurenai
         // インスタンスごとの前フレームのワールド行列(PrevWorld)を持つ必要がない。
         // 動的オブジェクトを入れる際はObjectConstantsへPrevWorldを追加すること
         std::unique_ptr<RHI::IRHITexture> m_GBufferVelocity;
+        // bent normal(ワールド空間の正規化しない可視方向の平均)。.rgb = bRaw、.a = 有効フラグ
+        std::unique_ptr<RHI::IRHITexture> m_GBufferBentNormal;
 
         // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         // 計算しHDRで書き出す。DeferredLightingパスとSSIL_VisibilityBitmask.hlslの両方から
@@ -588,6 +590,9 @@ namespace Kurenai
             ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
             MotionVector,       // モーションベクター(速度バッファ)。静止で灰色、動くと移動方向に応じて色が付く
             SceneColorRaw,      // トーンマップ前のHDRシーンカラーをリニアのまま無加工で表示(測定用)
+            BentNormal,         // bent normal(25章)。Debug View Gainが1なら軸を色表示、
+                                // 1.5より大きいと長さ(=aoB)をグレースケール表示。
+                                // データを持たないマテリアルはマゼンタで塗る
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -728,6 +733,10 @@ namespace Kurenai
         // 畳み込み処理自体はいつでも検証できるよう残してあり、このトグルをONにすると
         // その場で焼いて(m_IBLIrradianceBaked)従来経路に切り替わる
         bool m_IBLUseDedicatedIrradiance = Defaults::IBLUseDedicatedIrradiance;
+        // bent normalによる遮蔽(25章)。FrameConstants::OcclusionParamsへ載る
+        bool m_BentNormalAOSource = Defaults::BentNormalAOSource;
+        bool m_BentNormalSpecularOcclusion = Defaults::BentNormalSpecularOcclusion;
+        bool m_MultiBounceAOEnabled = Defaults::MultiBounceAOEnabled;
         // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)の方式。
         // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立した選択肢にしている。
         // FrameConstants.ShadowParams.wへ数値として渡し、共有ヘッダーSpecularEnergy.hlsliを

@@ -214,4 +214,135 @@ float SpecularOcclusion(float NdotV, float roughness, float ao)
     return saturate(pow(NdotV + ao, specularOcclusionExponent) - 1.0f + ao);
 }
 
+// === bent normal による遮蔽(25章) =========================================
+//
+// ベイクした「正規化しない可視方向の平均」bRaw を3つの量へ分解して使う。
+//
+//   軸  axis = normalize(bRaw)   遮蔽コーンの向き
+//   aoB = length(bRaw)           コーンの広がり(= sin²αv)。スペキュラ用
+//   aoN = dot(N, bRaw)           コサイン重み付きAOの定義そのもの。ディフューズ用
+//
+// 従来の「AOスカラー + 正規化済みbent normal」構成ではコーンの広がりの情報が失われ、
+// スペキュラ遮蔽の錐体交差の構成に誤差が入る。だから正規化せずに焼いている
+struct BentOcclusion
+{
+    float3 axis;
+    float  aoB;
+    float  aoN;
+};
+
+// bentSample: G-Buffer(または材質テクスチャ)から読んだ float4。.xyz = bRaw、.a = 有効フラグ
+BentOcclusion DecodeBentOcclusion(float4 bentSample, float3 N)
+{
+    BentOcclusion o;
+
+    // 【長さではなくフラグで判定する】bent normalを持たないマテリアルは黒1x1が
+    // バインドされる。長さ0を「遮蔽なし」と解釈すると完全遮蔽(SO=0)と区別がつかないため、
+    // .aを明示的な有効フラグにして曖昧さを消してある
+    if (bentSample.a < 0.5f)
+    {
+        o.axis = N;
+        o.aoB = 1.0f;
+        o.aoN = 1.0f;
+        return o;
+    }
+
+    o.aoB = saturate(length(bentSample.xyz));
+    // 縮退時は必ずNへ落とす。bRaw / max(aoB, 1e-4) は単位ベクトルにならず、
+    // 完全遮蔽ではゼロベクトルになって dot(axis, R) = 0 が帯の中途半端な位置に落ち、
+    // SOを誤って持ち上げてしまう
+    o.axis = (o.aoB > 1e-3f) ? bentSample.xyz / o.aoB : N;
+    o.aoN = saturate(dot(N, bentSample.xyz));
+    return o;
+}
+
+// bent normalによるスペキュラ遮蔽。可視コーン(軸axis・広がりaoB)と鏡面反射ローブ
+// (軸R・ラフネス由来の広がり)を球冠どうしの交差として解き、その面積比を返す。
+//
+// Frostbite近似(上のSpecularOcclusion)との決定的な違いは方向を見ること ――
+// 壁際で壁を向いた反射だけが暗くなり、壁と反対を向いた反射は暗くならない。
+//
+// 【tRefによる正規化(ratio estimator)が要る理由】DFG LUTは既に半球で積分済みなので、
+// 素の錐体交差比をそのまま掛けると「反射コーンのうち地平線より上の割合」を二重に数えてしまう。
+// 同じ地平線クリップを含む基準値tRefで割ると打ち消され、aoB = 1 で厳密にSO = 1になる
+// (手で指数を調整する必要が無くなる)
+// 2つの球冠(半頂角a1・a2、中心間角d)が重なる立体角の近似
+// (Oat & Sander, "Ambient Aperture Lighting", 2007)。
+// 厳密な球面二角形の面積は分岐が多く高価で、遮蔽の重みという用途には過剰なので、
+// 「完全に含む」「交差なし」の2つの境界の間をsmoothstepで繋ぐ
+float SphericalCapIntersectionArea(float a1, float a2, float d)
+{
+    const float amin = min(a1, a2);
+    const float amax = max(a1, a2);
+    // 小さいほうの球冠の立体角。完全に含まれる場合の上限になる。
+    // amin = 0(完全遮蔽でコーンが潰れた場合)ならここが0になり、正しく遮蔽率0が返る
+    const float capMin = 6.2831853f * (1.0f - cos(amin));
+
+    if (d <= amax - amin) { return capMin; }  // 一方が他方を完全に含む
+    if (d >= a1 + a2)     { return 0.0f; }    // まったく交差しない
+
+    const float inner = amax - amin;
+    const float t = 1.0f - saturate((d - inner) / max(a1 + a2 - inner, 1e-4f));
+    return capMin * smoothstep(0.0f, 1.0f, t);
+}
+
+float SpecularOcclusionBand(float3 axis, float3 N, float3 R, float aoB, float roughness)
+{
+    // 可視コーンの半頂角。aoB = sin²αv の定義から αv = asin(sqrt(aoB))。
+    // aoB = 1 で π/2(半球 = 遮蔽なし)、aoB = 0 で 0(コーンが潰れる = 完全遮蔽)
+    const float kHalfPi = 1.5707963267948966f;
+    const float av = min(asin(sqrt(saturate(aoB))), kHalfPi);
+
+    // 鏡面ローブの半頂角。ラフネスが上がるほど広がる。
+    // GBuffer.hlslでroughnessは[0.045, 1]にクランプされているため、
+    // 仕様書が触れているroughness > 1.5でのcosAsの縮退はこのエンジンでは起きない
+    const float as = acos(saturate(1.0f - roughness * roughness));
+
+    const float d    = acos(clamp(dot(axis, R), -1.0f, 1.0f));
+    const float dRef = acos(clamp(dot(N, R), -1.0f, 1.0f));
+
+    const float inter = SphericalCapIntersectionArea(av, as, d);
+    // 基準値: 遮蔽が無い場合(可視コーン = 半球)の重なり。
+    // これで割ることでDFG LUTの半球積分との二重計上が打ち消され、
+    // aoB = 1(このときaxis = Nなのでd = dRef)で厳密にSO = 1になる
+    const float ref = SphericalCapIntersectionArea(kHalfPi, as, dRef);
+
+    return ref > 1e-6f ? saturate(inter / ref) : 0.0f;
+}
+
+// スペキュラ遮蔽の合成。
+//
+// ベイク由来(bent normal、方向を持つ)とスクリーンスペース由来(SSAO/SSIL、方向を持たない)は
+// 独立した情報なので積を取る。どちらも「遮蔽なし」のとき厳密に1を返すため、
+// 片方しか持たないパス(半透明・プローブ焼き込み)へ無条件に掛けてよい。
+//
+// 【useBent = false の経路は従来と完全に同じ式であること】materialAOとssaoを掛けてから
+// 1回だけFrostbite近似へ通す。ここを「それぞれ通してから掛ける」に変えると
+// pow()が非線形なため結果が変わり、回帰確認で見た目が変わってしまう
+float ComposeSpecularOcclusion(bool useBent, BentOcclusion bent, float3 N, float3 R,
+                               float NdotV, float roughness, float materialAO, float ssao)
+{
+    if (!useBent)
+    {
+        return SpecularOcclusion(NdotV, roughness, materialAO * ssao);
+    }
+
+    // bent normal経路ではmaterialAO(遮蔽マップのスカラー)を使わない。
+    // 同じベイクの方向付きの表現であるbent normalへ役割ごと置き換わるため、
+    // 両方掛けると同じ遮蔽を二重に数えることになる
+    return SpecularOcclusionBand(bent.axis, N, R, bent.aoB, roughness)
+         * SpecularOcclusion(NdotV, roughness, ssao);
+}
+
+// multi-bounce AO(Jimenez et al., "Practical Realtime Strategies for Accurate Indirect
+// Occlusion", SIGGRAPH 2016)。アルベドが明るいほど、遮蔽された場所でも光が跳ね返って
+// 戻ってくるぶんAOを弱める。見た目を大きく変えるためUIで独立して切り替えられるようにしてある
+float3 GTAOMultiBounce(float ao, float3 albedo)
+{
+    const float3 a = 2.0404f * albedo - 0.3324f;
+    const float3 b = -4.7951f * albedo + 0.6417f;
+    const float3 c = 2.7552f * albedo + 0.6903f;
+    return saturate(ao * (ao * (ao * a + b) + c));
+}
+
 #endif // KURENAI_SPECULAR_ENERGY_HLSLI

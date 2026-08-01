@@ -60,6 +60,15 @@ cbuffer FrameConstants : register(b0)
     // 反射プローブの距離キューブ用(19.12節)。x=視差補正に距離キューブを使うフラグ、
     // y=距離キューブによる遮蔽判定(光漏れ抑制)の有効フラグ、z=距離キューブの1面の解像度、w=未使用
     float4 ProbeParams2;
+    // 【以下2つはこのシェーダーでは使わないが宣言だけ必要】cbufferは宣言順レイアウトなので、
+    // 末尾のOcclusionParamsを正しいオフセットで読むには途中のフィールドを飛ばせない。
+    // C++側のFrameConstantsと並びを必ず一致させること
+    float4x4 PrevViewProj;
+    float4 TAAParams;
+    // bent normalによる遮蔽(25章)。x=ディフューズAOの出所、y=スペキュラ遮蔽の方式、
+    // z=multi-bounce AO、w=未使用。cbufferは宣言順レイアウトなので、
+    // 使わないシェーダーは末尾のこのフィールドを宣言しなくてよい
+    float4 OcclusionParams;
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -74,6 +83,9 @@ Texture2D EmissiveTexture : register(t6);
 // G-Bufferの法線(オクタヘドラルエンコード)。IBLの方向依存項(拡散イラディアンスのサンプル方向、
 // 鏡面の反射方向)を求めるのに必要
 Texture2D NormalTexture : register(t7);
+// bent normal(GBuffer.hlslがSV_TARGET5へ書いたワールド空間のbRaw)。
+// t0〜t14が埋まっているためt15。DX12のkTextureSlotCountを15→16へ上げてある(25章)
+Texture2D BentNormalTexture : register(t15);
 // split-sum近似の第2項、BRDF積分LUT(x=NdotV, y=ラフネス。BRDFLUT.hlslで生成、方向性を持たない
 // (NdotV, ラフネス)の2Dルックアップテーブルのため、これだけは通常のTexture2Dのまま)
 Texture2D BRDFLUTTexture : register(t10);
@@ -86,7 +98,8 @@ Texture2D BRDFLUTTexture : register(t10);
 // 環境ソース(プローブとグローバルIBLの重み付き合成)はSampleEnvironmentが返す。プローブと
 // グローバルIBLはどちらも同じ手順で焼かれており(IBLConvolve.hlslを共有している)、解像度・
 // ミップ構成も揃えてあるため、式そのものは同一で引くキューブマップだけが変わる
-float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness, float ao)
+float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness,
+                   float materialAO, float ssao, float diffuseAO, BentOcclusion bent)
 {
     const float NdotV = saturate(dot(N, V));
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
@@ -97,7 +110,12 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
 
     float3 irradiance;
     float3 prefiltered;
-    SampleEnvironment(worldPos, N, R, mipLevel, irradiance, prefiltered);
+    // 【イラディアンスはNではなくbent normalの軸で評価する】遮蔽されている方向からは
+    // どのみち光が来ないので、開いている方向の環境を引くほうが正しい。壁際・窓際で
+    // 「壁の側の空の色まで平均してしまう」方向バイアスがこれで解消される(仕様書§5)。
+    // 鏡面のRは変えない ―― あちらは反射方向そのものが物理的に決まっているため
+    const float3 irradianceDir = (OcclusionParams.x > 0.5f) ? bent.axis : N;
+    SampleEnvironment(worldPos, irradianceDir, R, mipLevel, irradiance, prefiltered);
 
     // --- 拡散IBL ---
     // irradianceの取得元(専用マップ or プリフィルタ済み鏡面の最終ミップ)の切り替えは
@@ -114,13 +132,16 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // 係数の定義はReflectionProbe.hlsliのSpecularIBLWeightに1か所だけ置いている(20章)。
     // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(14.9.2.1節)
     const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
+    const bool useBent = OcclusionParams.y > 0.5f;
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+        SpecularIBLWeight(F0, NdotV, roughness, useBent, bent, N, R, materialAO, ssao, brdf,
+                          ShadowParams.w, ShadowParams.z);
     // Kulla-Conty方式(ShadowParams.w = 3)が足す加算ローブ。プリフィルタ済み鏡面ではなく
     // 拡散イラディアンスに掛かるため、上の「放射輝度 × 係数」とは別の項として持つ。
     // 乗算型(1・2)と無効(0)ではこの係数が0になり、項ごと消える
     const float3 multiScatterWeight =
-        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, useBent, bent, N, R, materialAO, ssao, brdf,
+                                      ShadowParams.w, ShadowParams.z);
 
     // 【昼度(AmbientColor.a)による減衰はしない】かつては空が昼固定のスカイボックスから
     // 焼かれていたため、夜を表現する手段が「IBL全体を昼度で0倍する」ことしか無かった。
@@ -128,7 +149,13 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // 現在は手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなり、夜は月明かりの
     // 空になるため、ここで追加の減衰を掛ける必要がない(掛けると二重に暗くなる。21.4節)。
     // 鏡面側のShadowParams.z(IBL強度倍率)はspecularWeightに含まれている
-    return diffuseIBL * ao * ShadowParams.z
+    // multi-bounce AO(Jimenez 2016)。アルベドが明るいほどAOを弱める補正。
+    // 見た目を大きく変えるためUIで独立して切り替えられるようにしてある(既定は無効)
+    const float3 diffuseOcclusion = (OcclusionParams.z > 0.5f)
+        ? GTAOMultiBounce(diffuseAO, albedo)
+        : float3(diffuseAO, diffuseAO, diffuseAO);
+
+    return diffuseIBL * diffuseOcclusion * ShadowParams.z
          + prefiltered * specularWeight
          + irradiance * multiScatterWeight;
 }
@@ -192,6 +219,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 【重要】SSR.hlslは「Lightingパスが適用した鏡面IBLをまったく同じ式で再現する」設計のため、
     // この合成式を変える場合はSSR.hlsl側も必ず同時に合わせること(ズレると鏡面が二重計上/引きすぎになる)
     float ao = aoSample.a * materialAO;
+    // bent normal(25章)。持たないマテリアルは黒1x1がバインドされ、
+    // DecodeBentOcclusionがaxis = N・aoB = 1(遮蔽なし)へ落とす
+    const BentOcclusion bent = DecodeBentOcclusion(BentNormalTexture.Sample(DataSampler, input.UV), N);
+    // ディフューズAOの出所。従来のベイクAO(materialAO)と aoN = dot(N, bRaw) は
+    // 同じ積分の別推定量なので、切り替えても見た目はほぼ変わらないはず(変わったらどちらかがバグ)
+    const float diffuseAO = (OcclusionParams.x > 0.5f) ? (aoSample.a * bent.aoN) : ao;
     float3 indirectLight = aoSample.rgb; // SSIL(Visibility Bitmask)使用時のみ非ゼロ。周囲のサーフェスからの間接拡散光
     float3 directLight = DirectLightTexture.Sample(ColorSampler, input.UV).rgb; // DirectLighting.hlslで計算済み(シャドウ適用済み)
     float3 emissive = EmissiveTexture.Sample(ColorSampler, input.UV).rgb;
@@ -217,11 +250,11 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 反射プローブ(19章)はEvaluateIBL内のSampleEnvironmentで環境ソースへ合成される。
         // プローブが1つも効いていない位置では従来どおりスカイボックス由来のグローバルIBLになる。
         // IBL強度倍率(ShadowParams.z)はEvaluateIBLの中で拡散・鏡面それぞれに掛かっている
-        ambient = EvaluateIBL(N, V, worldPos, albedo, metallic, roughness, ao);
+        ambient = EvaluateIBL(N, V, worldPos, albedo, metallic, roughness, materialAO, aoSample.a, diffuseAO, bent);
     }
     else
     {
-        ambient = (diffuseColor / PI) * AmbientColor.rgb * ao;
+        ambient = (diffuseColor / PI) * AmbientColor.rgb * diffuseAO;
     }
 
     // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する。SSILの間接拡散光も

@@ -49,10 +49,11 @@ namespace Kurenai::UI
             "プローブ - 距離 (キューブマップ配列)",
             "モーションベクター (速度バッファ)",
             "シーンカラー (生HDR・トーンマップなし)",
+            "bent normal (軸=色 / Gain>1.5で長さ=グレー)",
         };
         static_assert(
-            static_cast<int>(DebugView::SceneColorRaw) == 25,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はSceneColorRaw)");
+            static_cast<int>(DebugView::BentNormal) == 26,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はBentNormal)");
 
         DrawUsageHint();
         BeginParamGroup();

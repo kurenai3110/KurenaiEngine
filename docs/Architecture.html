@@ -225,6 +225,7 @@
     <li><a href="#occlusion-map">22. マテリアルの遮蔽マップ(ベイク済みAO)</a></li>
     <li><a href="#taa">23. モーションベクターとTAA</a></li>
     <li><a href="#window-placement">24. ウィンドウ配置の保存と復元</a></li>
+    <li><a href="#bent-normal">25. Bent Normalによる遮蔽(ディフューズ / スペキュラ)</a></li>
   </ol>
 </nav>
 
@@ -5713,6 +5714,299 @@ Sample2DとSample3Dで記録が混ざることもない。書き込みは<code>D
 つまり<code>~Window</code>の先頭で行う。<code>WM_CLOSE</code>は<code>m_ShouldClose</code>を立てるだけで
 <code>DefWindowProc</code>へ渡さない実装なので、ウィンドウはデストラクタまで生きている。
 </p>
+</section>
+
+<section id="bent-normal">
+<h2>25. Bent Normalによる遮蔽(ディフューズ / スペキュラ)</h2>
+
+<p>
+22章の遮蔽マップは<strong>スカラーの遮蔽率しか持っていない</strong>。「どれだけ隠れているか」は
+分かるが「<strong>どの方向が開いているか</strong>」を捨てている。そのためスペキュラ遮蔽は
+Frostbiteの近似(<code>pow(NdotV + ao, exp2(-16r-1)) - 1 + ao</code>)に頼るしかなく、
+これは反射ベクトルRがどちらを向いていても同じ値を返す &mdash;&mdash;
+壁際で壁を向いた反射も、壁と反対を向いた反射も、同じだけ暗くなる。
+</p>
+
+<p>
+そこで<strong>正規化しないbent normalベクトル</strong><code>bRaw</code>をベイクし、消費側で3つへ分解する。
+</p>
+
+<table>
+<tr><th>量</th><th>式</th><th>用途</th></tr>
+<tr><td>軸 <code>axis</code></td><td><code>normalize(bRaw)</code></td><td>遮蔽コーンの向き</td></tr>
+<tr><td><code>aoB</code></td><td><code>length(bRaw)</code> = sin&sup2;&alpha;v</td><td>スペキュラ遮蔽の錐体の広がり</td></tr>
+<tr><td><code>aoN</code></td><td><code>dot(N, bRaw)</code></td><td>ディフューズAO(<strong>定義そのもの</strong>、厳密)</td></tr>
+</table>
+
+<p>
+定義は次のとおり。<code>V(&omega;)</code>は可視関数(遮られていなければ1)。
+</p>
+
+<pre><code>bRaw = (1/&pi;) &int; V(&omega;) &omega; d&omega;</code></pre>
+
+<p>
+遮蔽が無ければ<code>&int;&omega;d&omega; = &pi;N</code>なので<code>bRaw = N</code>となり、長さがちょうど1になる。
+また<code>dot(N, bRaw) = (1/&pi;)&int;V(&omega;)cos&theta;d&omega;</code>はコサイン重み付きAOの定義そのもので、
+22章のベイク済みAOと<strong>同じ量の別推定量</strong>になる。この一致がそのまま実装の検証になる。
+</p>
+
+<p>
+<strong>従来の「AOスカラー + 正規化済みbent normal」構成では不十分</strong>である点に注意。
+正規化するとコーンの広がり(<code>aoB</code>)の情報が失われ、スペキュラ遮蔽の錐体交差を
+構成できなくなる。だから正規化せずに焼く。
+</p>
+
+<h3>25.1 ベイク &mdash;&mdash; なぜコサイン重点サンプリングを使えないのか</h3>
+
+<p>
+22章のAOのループは<strong>コサイン重点サンプリング</strong>でヒット数を数えている。これはAOの被積分関数が
+コサイン項を持つため重みが打ち消し合い、「ヒット数を数えるだけ」で正しい推定量になるからである。
+</p>
+
+<p>
+<strong><code>bRaw</code>にはこれが使えない。</strong>被積分関数<code>V(&omega;)&omega;</code>にはコサイン項が無いため、
+コサイン重点サンプリング(pdf = cos&theta;/&pi;)を使うと重みが<code>&pi;/cos&theta;</code>になる。
+グレージング(<code>cos&theta;&rarr;0</code>)で重みが発散し、分散が爆発する。
+</p>
+
+<p>
+そのため<strong>一様半球サンプリング</strong>(pdf = 1/2&pi;、cos&theta;に一様)を使う。
+正規化係数は<code>(1/&pi;) &divide; (1/2&pi;) &divide; N = 2/N</code>となる。
+</p>
+
+<pre><code>float3 bRaw = 0;
+for (uint j = 0; j &lt; BentRayCount; ++j)
+{
+    const float2 xj  = Hammersley(j, BentRayCount);
+    const float cosT = xj.x;                       // cos&theta;に一様 = 立体角に一様
+    const float sinT = sqrt(max(0, 1 - cosT * cosT));
+    const float phi  = 6.2831853f * xj.y;
+    const float3 dir = normalize(T * (sinT * cos(phi)) + B * (sinT * sin(phi)) + N * cosT);
+
+    if (!Occluded(origin, dir, RayLength)) { bRaw += dir; }
+}
+bRaw *= 2.0f / float(BentRayCount);</code></pre>
+
+<p>
+レイ本数の既定は<strong>256</strong>(AO側の128より多い)。スカラーの平均よりベクトル和のほうが
+収束が遅いため。<code>--bent-rays</code>で変更でき、0で生成を無効にできる。
+</p>
+
+<p>
+<strong>ベイク時間への影響はほぼ無い。</strong>22.6.5節のとおりベイク時間の99%以上はxatlasのUV展開で、
+レイキャストは全体の0.1%に満たない。
+</p>
+
+<p>
+Chinese Dragon(871306三角形・2048&sup2;)の実測では、bent normalの256本を加えてもレイキャストは
+<strong>1.38秒</strong>(5.1億レイ、毎秒3.7億レイ)にしかならず、UV展開の476.00秒に対して
+総時間478.20秒の0.3%である。<strong>bent normalの追加コストは約1.1秒</strong>にとどまる。
+</p>
+
+<h3>25.2 ダイレーションとミップは「ベクトルのまま」行う</h3>
+
+<p>
+<code>length()</code>は凸関数なので、Jensenの不等式より次が<strong>常に</strong>成り立つ。
+</p>
+
+<pre><code>E[|b|] &ge; |E[b]|</code></pre>
+
+<p>
+つまりテクセルごとに長さを出してから平均すると、<strong>必ず真値より大きく</strong>出る。
+遮蔽コーンが実際より細く見積もられ、スペキュラが明るくなりすぎる。
+</p>
+
+<p>
+そのため<code>length()</code>を取るのは<strong>消費側(シェーダー)だけ</strong>に限る。
+ダイレーション(<code>DilateBentNormal</code>)はベクトルを平均し、ミップ生成のボックスフィルタも
+fp32のベクトルのまま行ってから一括でfp16へ落とす。サンプリング時のバイリニア補間も
+ベクトルを補間してから消費側で長さを取るので、順序は自動的に正しくなる。
+</p>
+
+<h3>25.3 なぜ「有効フラグ」が要るのか</h3>
+
+<p>
+bent normalは<strong>「遮蔽なし」を定数テクスチャで表現できない</strong>。遮蔽なしの<code>bRaw</code>は
+法線<code>N</code>そのもので、ピクセルごとに違うからである。
+</p>
+
+<p>
+かといって<code>length(bRaw) &rarr; 0</code>を「遮蔽なし」と解釈すると、
+<strong>完全遮蔽(SO=0)と区別がつかなくなる</strong> &mdash;&mdash; 両者は正反対なのに同じ値になる。
+</p>
+
+<p>
+そこで<code>.a</code>を明示的な有効フラグにして曖昧さを消した。bent normalを持たないマテリアルには
+<strong>黒1x1</strong>(他のテクスチャの白1x1とは違う)をバインドし、消費側の
+<code>DecodeBentOcclusion</code>が<code>axis = N</code>・<code>aoB = 1</code>・<code>aoN = 1</code>(遮蔽なし)へ落とす。
+</p>
+
+<h3>25.4 スペキュラ遮蔽 &mdash;&mdash; 錐体交差とratio estimator</h3>
+
+<p>
+可視コーン(軸<code>axis</code>・半頂角&alpha;v)と鏡面反射ローブ(軸<code>R</code>・ラフネス由来の半頂角&alpha;s)の
+<strong>球冠どうしの交差</strong>を解き、その面積比を遮蔽率とする(Oat &amp; Sander,
+"Ambient Aperture Lighting", 2007)。<code>aoB = sin&sup2;&alpha;v</code>の定義から
+&alpha;v = <code>asin(sqrt(aoB))</code>。
+</p>
+
+<p>
+<strong>ここで素の交差比をそのまま使ってはいけない。</strong>DFG LUTは既に半球で積分済みなので、
+交差比は「反射コーンのうち地平線より上の割合」を<strong>二重に</strong>数えてしまう。
+</p>
+
+<p>
+そこで同じ地平線クリップを含む基準値<code>ref</code>(可視コーンを半球=遮蔽なしとした場合の交差)で
+割る(<strong>ratio estimator</strong>)。これで二重計上が打ち消され、
+<code>aoB = 1</code>のとき<code>axis = N</code>なので分子と分母が同一式になり、
+<strong><code>SO = 1</code>が厳密に保証される</strong>。手で指数を調整する必要がない。
+</p>
+
+<pre><code>const float inter = SphericalCapIntersectionArea(av,      as, acos(dot(axis, R)));
+const float ref   = SphericalCapIntersectionArea(kHalfPi, as, acos(dot(N,    R)));
+return ref &gt; 1e-6f ? saturate(inter / ref) : 0.0f;</code></pre>
+
+<p>
+逆端も正しい: 完全遮蔽では&alpha;v = 0となり、交差面積の上限である
+「小さいほうの球冠の立体角」<code>2&pi;(1 - cos 0) = 0</code>が0になるため、<code>SO = 0</code>になる。
+</p>
+
+<p>
+なお仕様書が触れている<code>roughness &gt; 1.5</code>での&alpha;sの縮退は<strong>このエンジンでは起きない</strong>。
+GBuffer.hlslがroughnessを[0.045, 1.0]にクランプしているため。
+</p>
+
+<h4>25.4.1 スクリーンスペース由来の遮蔽との合成</h4>
+
+<p>
+ベイクしたbent normalは方向を持つが、SSAO/SSILは持たない。両者は由来が独立なので積を取る。
+どちらも「遮蔽なし」で厳密に1を返すため、片方しか持たないパス(半透明・プローブ焼き込み)へ
+無条件に掛けてよい。
+</p>
+
+<pre><code>SO = SpecularOcclusionBand(axis, N, R, aoB, roughness)  // ベイク由来(方向あり)
+   * SpecularOcclusion(NdotV, roughness, ssao);          // スクリーンスペース由来(方向なし)</code></pre>
+
+<p>
+<strong>bent normal経路ではmaterialAO(遮蔽マップのスカラー)を掛けない。</strong>
+同じベイクの方向付きの表現であるbent normalへ役割ごと置き換わるため、両方掛けると
+同じ遮蔽を二重に数えることになる。
+</p>
+
+<p>
+トグルを切った従来経路は<code>SpecularOcclusion(NdotV, roughness, materialAO * ssao)</code>と、
+<strong>以前とまったく同じ式</strong>にしてある。<code>pow()</code>は非線形なので
+「それぞれ通してから掛ける」に変えると結果が変わり、回帰確認にならないため。
+</p>
+
+<h3>25.5 ディフューズ側 &mdash;&mdash; 方向バイアスの解消</h3>
+
+<p>
+拡散側は<code>aoN</code>を使い、さらに<strong>イラディアンスを<code>N</code>ではなく<code>axis</code>方向で評価する</strong>。
+遮蔽されている方向からはどのみち光が来ないので、開いている方向の環境を引くほうが正しい。
+壁際・窓際で「壁の側の空の色まで平均してしまう」方向バイアスがこれで解消される。
+鏡面の<code>R</code>は変えない &mdash;&mdash; あちらは反射方向そのものが物理的に決まっているため。
+</p>
+
+<p>
+あわせて<strong>multi-bounce AO</strong>(Jimenez et al., SIGGRAPH 2016)も入れた。アルベドが明るいほど
+AOを弱める補正で、物理的にはより正しいが<strong>見た目を大きく変える</strong>。
+bent normal自体の検証を汚さないよう独立したトグルにし、<strong>既定は無効</strong>にしてある。
+</p>
+
+<h3>25.6 スロット割り当てとRHIの上限引き上げ</h3>
+
+<p>
+bent normalはライトマップUV空間のテクスチャなので、ライティング時にはUV1が無く直接引けない。
+そのため<strong>G-Bufferを1枚増やす</strong>(<code>SV_TARGET5</code>、<code>R16G16B16A16_Float</code>)。
+<code>R11G11B10_Float</code>は<strong>使えない</strong> &mdash;&mdash; 符号なしのため負の成分が落ち、半球の半分の方向を失う。
+</p>
+
+<table>
+<tr><th>パス</th><th>スロット</th><th>備考</th></tr>
+<tr><td>GBuffer / ProbeCapture</td><td>t6</td><td>t4=シャドウ配列、t5=遮蔽マップ</td></tr>
+<tr><td>Transparent</td><td>t14</td><td>t6はプローブのイラディアンス</td></tr>
+<tr><td>SSR</td><td>t11</td><td></td></tr>
+<tr><td>DeferredLighting</td><td><strong>t15</strong></td><td>t0〜t14が満杯 &rarr; 上限引き上げが必要</td></tr>
+</table>
+
+<p>
+DeferredLightingがt14まで使い切っていたため、<code>kTextureSlotCount</code>を<strong>15 &rarr; 16</strong>へ上げた。
+定数は3か所にあり、すべて揃える必要がある:
+<code>DX12CommandList.h</code>(追跡配列)、<code>DX12Device.cpp</code>(ルートシグネチャのSRVレンジ幅)、
+<code>DX11CommandList.h</code>(UAV衝突回避の追跡配列)。
+</p>
+
+<p>
+<strong>cbufferの落とし穴</strong>: <code>FrameConstants</code>末尾へ<code>OcclusionParams</code>を足したが、
+cbufferは宣言順レイアウトなので、途中のフィールドを宣言していないシェーダーでは
+オフセットがずれる。SSR/Transparent/ProbeCaptureは<code>PrevViewProj</code>・<code>TAAParams</code>を
+使わないが、<strong>宣言だけは必要</strong>である。
+</p>
+
+<h3>25.7 検証</h3>
+
+<p>
+仕様書のチェックリストは<strong>すべてベイカー内のfloat32(量子化前)で測れる</strong>。
+ここを通しておけば、後段で見つけた異常がベイクのバグなのかfp16量子化なのかを切り分けられる。
+</p>
+
+<table>
+<tr>
+  <th>項目</th><th>期待</th>
+  <th>OcclusionTest<br>(256&sup2; / AO 128本)</th>
+  <th>Chinese Dragon<br>(2048&sup2; / AO 64本、有効テクセル159万)</th>
+</tr>
+<tr><td><code>max|bRaw|</code></td><td>&le; 1.0</td><td>0.9961</td><td>0.9961</td></tr>
+<tr><td><code>max(aoN - aoB)</code></td><td>&le; 0</td><td>-0.0000</td><td>0.0000</td></tr>
+<tr><td><strong>既存AOとの誤差</strong></td><td>MC誤差の範囲</td>
+    <td><strong>RMS 0.0083 / 最大 0.0467</strong></td>
+    <td><strong>RMS 0.0175 / 最大 0.1080</strong></td></tr>
+<tr><td>完全遮蔽の割合</td><td>&mdash;</td><td>0.00%</td><td>0.18%</td></tr>
+</table>
+
+<p>
+Dragon側の誤差が倍あるのは<strong>AO側のレイが64本しかない</strong>ため。比較相手である22章のAOの
+推定量そのものがノイジーで、bent normalの精度が落ちているわけではない
+(bent normalは両方とも256本)。どちらもWarnのしきい値0.05を大きく下回る。
+</p>
+
+<p>
+<strong>3つ目が最も重要</strong>である。<code>aoN = dot(N, bRaw)</code>と22章のベイク済みAOは
+同じ積分の別推定量なので、ここがズレたらサンプリングか正規化係数(2/N)のバグを意味する。
+RMSが0.05を超えると<code>Warn()</code>を出すようにしてある。
+</p>
+
+<p>
+なお両者が<strong>MCノイズより一桁良く一致する</strong>のは、どちらもHammersley列(低食い違い量列)を
+使っており、乱数由来のノイズではなく決定的な低い誤差になるため。
+</p>
+
+<p>
+実機側では、White Furnace Testの球が背景へ完全に溶けて見えなくなること
+(= <code>SO</code>が厳密に1で、エネルギーが保存していること)、
+DX11とDX12で最大チャンネル差が2/255に収まること(ディザ由来)を確認した。
+</p>
+
+<h3>25.8 既知の制約</h3>
+
+<ul>
+<li><strong>容量が大きい</strong>。符号付きベクトルのためBC4/BC7で圧縮できず無圧縮のfp16で書き出す。
+512&sup2;でミップ込み1メッシュあたり約2.7MB、数百メッシュのモデルでは合計がGB級になる。
+圧縮(BC6H_SF16)と接空間オクタヘドラル化は第2段階へ回した</li>
+<li><strong>&gamma; + &alpha;v &gt; 90&deg; で過大評価</strong>になる。球冠交差の近似が
+2つの境界をsmoothstepで繋ぐ形のため、厳密な球面二角形の面積とはずれる</li>
+<li><strong>非対称な遮蔽では軸が正しくない</strong>。複数の方向から別々に遮られている場合、
+それらの平均方向は「開いている方向」を代表しない</li>
+<li><strong><code>SO</code>は立体角の比であってBRDF重み付き積分ではない</strong>。
+コーン内でのBRDFの分布は考慮していない</li>
+<li><strong>生成はオフラインベイカーのみ</strong>。スクリーンスペース(SSIL)側は未対応。
+将来やる場合、このエンジンは2本の地平線角ではなく32セクタのビットマスク
+(<code>SSIL_VisibilityBitmask.hlsl</code>)なので、可視セクタごとに積算する形へ読み替える必要がある。
+さらにSSILの現在のAO出力は<code>1 - countbits(mask)/32</code>(角度に一様なセクタ比)であって
+コサイン重み付きではないため、<code>dot(N, bRaw)</code>とは一致しない</li>
+</ul>
+
 </section>
 
 </main>

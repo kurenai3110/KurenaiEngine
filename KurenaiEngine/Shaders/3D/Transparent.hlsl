@@ -60,6 +60,13 @@ cbuffer FrameConstants : register(b0)
     float4 ProbeParams;
     // 距離キューブ用(19.12節)。意味はDeferredLighting.hlslと同じ
     float4 ProbeParams2;
+    // 【以下2つはこのシェーダーでは使わないが宣言だけ必要】cbufferは宣言順レイアウトなので、
+    // 末尾のOcclusionParamsを正しいオフセットで読むには途中のフィールドを飛ばせない。
+    // C++側のFrameConstantsと並びを必ず一致させること
+    float4x4 PrevViewProj;
+    float4 TAAParams;
+    // bent normalによる遮蔽(25章)。DeferredLighting.hlslと同じ規則を適用する
+    float4 OcclusionParams;
 };
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で
@@ -99,6 +106,9 @@ Texture2D EmissiveTexture : register(t3);
 // このシェーダーはt5〜t7を反射プローブ(KURENAI_PROBE_PREFILTERED/IRRADIANCE/BUFFER_REGISTER、
 // 上記マクロ参照)に、t11をBRDFLUTTexture(下記)に割り当てて衝突するため、空いているt13を使う
 Texture2D OcclusionTexture : register(t13);
+// bent normal(遮蔽マップと同じライトマップUV空間)。このパスはt0〜t13を使い切っているためt14。
+// 不透明側はG-Bufferから読むが、フォワードの半透明はここでテクスチャを直接引く(25章)
+Texture2D BentNormalTexture : register(t14);
 // カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
 // DirectLighting.hlslと同じ実装を共有しているため、半透明と不透明で影がずれることはない。
 // FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)とDataSamplerを参照するため、
@@ -220,7 +230,8 @@ void EvaluateDirectBRDF(
 // 遮蔽マップ(ベイク済みAO)はテクスチャなのでこのパスでも使える。aoにはそれを渡す
 // (遮蔽マップを持たないマテリアルは白1x1でao=1となり、従来と同じ結果になる)
 void EvaluateIBLSplit(
-    float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness, float ao,
+    float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness,
+    float materialAO, BentOcclusion bent,
     out float3 outDiffuse, out float3 outSpecular)
 {
     const float NdotV = saturate(dot(N, V));
@@ -232,7 +243,10 @@ void EvaluateIBLSplit(
 
     float3 irradiance;
     float3 prefiltered;
-    SampleEnvironment(worldPos, N, R, mipLevel, irradiance, prefiltered);
+    // 不透明側(DeferredLighting.hlslのEvaluateIBL)と同じく、開いている方向で
+    // イラディアンスを引く。鏡面のRは変えない
+    const float3 irradianceDir = (OcclusionParams.x > 0.5f) ? bent.axis : N;
+    SampleEnvironment(worldPos, irradianceDir, R, mipLevel, irradiance, prefiltered);
 
     // --- 拡散IBL ---
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")
@@ -245,22 +259,31 @@ void EvaluateIBLSplit(
     // EvaluateIBLと同じ。SpecularIBLWeightはfloat3のbrdfを受け取る)
     const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     // スペキュラオクルージョン・エネルギー補正・IBL強度倍率をまとめて掛ける係数。
-    // 半透明パスはスクリーンスペースのAO/GIバッファを持たないが、マテリアルの遮蔽マップは
-    // テクスチャなので使えるため、不透明側と同じ関数へそのままaoを渡している
-    // (遮蔽マップを持たないマテリアルはao=1となり、以前と同じ結果になる)
+    // 半透明パスはスクリーンスペースのAO/GIバッファを持たないため、そちらは1.0を渡す。
+    // ComposeSpecularOcclusionはどちらの経路も「遮蔽なしで厳密に1」なので、
+    // 片方が無くても結果は歪まない(遮蔽マップもbent normalも無ければ以前と同じ結果になる)
+    const bool useBent = OcclusionParams.y > 0.5f;
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+        SpecularIBLWeight(F0, NdotV, roughness, useBent, bent, N, R, materialAO, 1.0f, brdf,
+                          ShadowParams.w, ShadowParams.z);
     // Kulla-Conty方式(ShadowParams.w = 3)が足す加算ローブ。DeferredLighting.hlslの
     // EvaluateIBLと同じ形にしておかないと、同じマテリアルが不透明と半透明で違う明るさになる。
     // 乗算型(1・2)と無効(0)ではこの係数が0になり、項ごと消える
     const float3 multiScatterWeight =
-        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, useBent, bent, N, R, materialAO, 1.0f, brdf,
+                                      ShadowParams.w, ShadowParams.z);
 
     // 【昼度(AmbientColor.a)による減衰はしない】DeferredLighting.hlslのEvaluateIBLと同じ理由で、
     // 手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなるため、ここで掛けると
     // 二重に暗くなる(21.4節)。
-    // 鏡面側のShadowParams.z(IBL強度倍率)とaoはspecularWeightに含まれている
-    outDiffuse = kd * albedo * irradiance * ao * ShadowParams.z;
+    // 鏡面側のShadowParams.z(IBL強度倍率)と遮蔽はspecularWeightに含まれている。
+    // 拡散側のAOの出所と multi-bounce AO も不透明側(DeferredLighting.hlslのEvaluateIBL)と
+    // 同じ規則にしないと、同じマテリアルが不透明と半透明で違う明るさになる
+    const float diffuseAO = (OcclusionParams.x > 0.5f) ? bent.aoN : materialAO;
+    const float3 diffuseOcclusion = (OcclusionParams.z > 0.5f)
+        ? GTAOMultiBounce(diffuseAO, albedo)
+        : float3(diffuseAO, diffuseAO, diffuseAO);
+    outDiffuse = kd * albedo * irradiance * diffuseOcclusion * ShadowParams.z;
     outSpecular = prefiltered * specularWeight + irradiance * multiScatterWeight;
 }
 
@@ -422,7 +445,19 @@ float4 PSMain(PSInput input) : SV_TARGET
     if (ShadowParams.z > 0.0f)
     {
         // ShadowParams.zはEvaluateIBLSplitの中で拡散・鏡面それぞれに掛かっている
-        EvaluateIBLSplit(N, V, input.WorldPos, albedo, metallic, roughness, materialAO, ambientDiffuse, ambientSpecular);
+        // bent normalも遮蔽マップと同じLightmapUVで引く。持たないマテリアルは黒1x1が
+        // バインドされ、DecodeBentOcclusionがaxis = N・aoB = 1(遮蔽なし)へ落とす。
+        // 【不透明側と違いモデル空間のまま使えない】ベイカーはモデル空間で焼いており、
+        // ここはワールド空間で計算しているためNormalMatrixで移す(GBuffer.hlslと同じ扱い)
+        const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
+        const float bentLength = length(bentSample.xyz);
+        const float3 bentWorld = bentLength > 1e-6f
+            ? normalize(mul(bentSample.xyz, (float3x3)NormalMatrix)) * bentLength
+            : float3(0.0f, 0.0f, 0.0f);
+        const BentOcclusion bent = DecodeBentOcclusion(float4(bentWorld, bentSample.a), N);
+
+        EvaluateIBLSplit(N, V, input.WorldPos, albedo, metallic, roughness, materialAO, bent,
+                         ambientDiffuse, ambientSpecular);
     }
     else
     {

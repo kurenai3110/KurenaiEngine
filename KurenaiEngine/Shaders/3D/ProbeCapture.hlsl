@@ -42,6 +42,18 @@ cbuffer FrameConstants : register(b0)
     // x=t8のライトリストの有効数(Transparent.hlslと同じくFrameConstants末尾で受け取る。
     // b1はObjectConstantsが占有していてLightingConstantsを置けないため)
     float4 ActiveLightCount;
+    // 【以下4つはこのシェーダーでは使わないが宣言だけ必要】cbufferは宣言順レイアウトなので、
+    // 末尾のOcclusionParamsを正しいオフセットで読むには途中のフィールドを飛ばせない。
+    // C++側のFrameConstantsと並びを必ず一致させること
+    float4 IBLParams;
+    float4 ProbeParams;
+    float4 ProbeParams2;
+    float4x4 PrevViewProj;
+    float4 TAAParams;
+    // bent normalによる遮蔽(25章)。プローブの中身も不透明パスと同じ規則で焼かないと、
+    // つまみを動かしたときにプローブだけ古い見た目のまま残る。
+    // KurenaiEngine3D側の再ベイク署名にもこの値を混ぜてあること
+    float4 OcclusionParams;
 };
 
 // GBuffer.hlsl/Transparent.hlslのObjectConstantsと同じレイアウト
@@ -76,6 +88,8 @@ Texture2D EmissiveTexture : register(t3);
 // ベイク済みアンビエントオクルージョン(遮蔽マップ)。t4はカスケードシャドウマップ配列が
 // 使っているためt5を使う(GBuffer.hlsl/Transparent.hlslと共通)
 Texture2D OcclusionTexture : register(t5);
+// bent normal(遮蔽マップと同じライトマップUV空間)。GBuffer.hlslと同じくt6(25章)
+Texture2D BentNormalTexture : register(t6);
 // カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
 // DirectLighting.hlsl/Transparent.hlslと同じ実装を共有しているため、プローブに焼かれる影と
 // 本編の影が食い違うことはない。FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)と
@@ -239,7 +253,8 @@ float3 EvaluateLight(
 // テクスチャなので使える。焼いた絵とメインパスの絵が食い違わないよう、aoにはそれを渡す)。
 // 昼度(AmbientColor.a)による夜間減衰は、手続き空の導入でどこでも掛けなくなった(21.4節)。
 // 空のキューブマップ自体が太陽高度に応じて暗くなるため、焼き込み時にも使用時にも不要
-float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, float ao, float3 brdf, int compensationMode)
+float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness,
+                         float materialAO, BentOcclusion bent, float3 brdf, int compensationMode)
 {
     const float NdotV = saturate(dot(N, V));
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
@@ -248,7 +263,12 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, floa
     const float3 fresnelRoughness =
         F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
     const float3 kd = (1.0f - fresnelRoughness) * (1.0f - metallic);
-    const float3 diffuseIBL = kd * albedo * irradiance * ao;
+    // 拡散側のAOの出所とmulti-bounce AOは不透明パスと同じ規則にする
+    const float diffuseAO = (OcclusionParams.x > 0.5f) ? bent.aoN : materialAO;
+    const float3 diffuseOcclusion = (OcclusionParams.z > 0.5f)
+        ? GTAOMultiBounce(diffuseAO, albedo)
+        : float3(diffuseAO, diffuseAO, diffuseAO);
+    const float3 diffuseIBL = kd * albedo * irradiance * diffuseOcclusion;
 
     const float3 R = reflect(-V, N);
     const float mipLevel = roughness * ShadowParams.y;
@@ -262,7 +282,7 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, floa
     const float3 specularIBL =
         (prefiltered * FssEss * SpecularEnergyCompensation(F0, brdf, compensationMode)
          + SpecularMultiScatterIBL(F0, FssEss, Ess, compensationMode) * irradiance)
-        * SpecularOcclusion(NdotV, roughness, ao);
+        * ComposeSpecularOcclusion(OcclusionParams.y > 0.5f, bent, N, R, NdotV, roughness, materialAO, 1.0f);
 
     return diffuseIBL + specularIBL;
 }
@@ -305,6 +325,14 @@ PSOutput PSMain(PSInput input)
     // 引くUVは専用のライトマップUV(TEXCOORD1)。理由はGBuffer.hlslの同じ箇所を参照
     float occlusionSample = OcclusionTexture.Sample(MaterialSampler, input.LightmapUV).r;
     float materialAO = lerp(1.0f, occlusionSample, OcclusionStrength);
+    // bent normalも同じライトマップUVで引き、モデル空間からワールド空間へ移す
+    // (長さ=遮蔽の強さは変えてはいけないので方向だけ回す。GBuffer.hlslと同じ扱い)
+    const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
+    const float bentLength = length(bentSample.xyz);
+    const float3 bentWorld = bentLength > 1e-6f
+        ? normalize(mul(bentSample.xyz, (float3x3)NormalMatrix)) * bentLength
+        : float3(0.0f, 0.0f, 0.0f);
+    const BentOcclusion bent = DecodeBentOcclusion(float4(bentWorld, bentSample.a), N);
 
     float3 albedo = baseColorSample.rgb;
     // CameraPositionにはプローブのワールド座標が入っている(ファイル冒頭参照)
@@ -342,11 +370,12 @@ PSOutput PSMain(PSInput input)
     // 定数色アンビエントへフォールバックし、プローブが真っ黒に焼けるのを防ぐ
     if (ShadowParams.z > 0.0f)
     {
-        color += EvaluateGlobalIBL(N, V, albedo, metallic, roughness, materialAO, brdf, energy.Mode) * ShadowParams.z;
+        color += EvaluateGlobalIBL(N, V, albedo, metallic, roughness, materialAO, bent, brdf, energy.Mode) * ShadowParams.z;
     }
     else
     {
-        color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb * materialAO;
+        color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb
+               * ((OcclusionParams.x > 0.5f) ? bent.aoN : materialAO);
     }
 
     color += emissive;

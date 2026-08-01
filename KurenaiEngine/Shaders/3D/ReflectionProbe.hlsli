@@ -448,7 +448,16 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 // かつてはここで昼度(AmbientColor.a)による夜間減衰も掛けていたが、手続き空の導入で
 // 空自体が太陽高度に応じて暗くなるようになったため撤廃した(21.4節)。
 // 掛けたままだと夜が二重に暗くなる
-float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, float3 brdf,
+//
+// 【遮蔽の引数について】materialAO(遮蔽マップのスカラー)とssao(スクリーンスペース側)を
+// 分けて受け取り、bentとあわせてSpecularEnergy.hlsliのComposeSpecularOcclusionで合成する。
+// useBentがfalseなら従来どおりmaterialAO * ssaoを1回Frostbite近似へ通すだけになる。
+//
+// 【DeferredLightingとSSRへは必ず同じ値を渡すこと】この2つが定義上一致することが
+// この関数の存在理由で、ズレるとSSRの適用領域と非適用領域の境界に段差が出る
+float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness,
+                         bool useBent, BentOcclusion bent, float3 N, float3 R,
+                         float materialAO, float ssao, float3 brdf,
                          float compensationMode, float iblIntensity)
 {
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)
@@ -457,7 +466,8 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, floa
 
     // スペキュラオクルージョン。式はSpecularEnergy.hlsliに1つだけ置いてある
     // (半透明パス・プローブ焼き込みからも同じものを使うため)
-    return splitSum * SpecularOcclusion(NdotV, roughness, ao) * iblIntensity;
+    const float so = ComposeSpecularOcclusion(useBent, bent, N, R, NdotV, roughness, materialAO, ssao);
+    return splitSum * so * iblIntensity;
 }
 
 // Kulla-Conty方式の加算ローブに掛かる係数。呼び出し側で拡散イラディアンスを乗算する:
@@ -466,7 +476,9 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, floa
 //
 // 方式0/1/2ではSpecularMultiScatterIBLが0を返すため、この項は完全に消える。
 // SSRはこの項を差し替えない(上のSpecularIBLWeightのコメント参照)
-float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness, float ao, float3 brdf,
+float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness,
+                                     bool useBent, BentOcclusion bent, float3 N, float3 R,
+                                     float materialAO, float ssao, float3 brdf,
                                      float compensationMode, float iblIntensity)
 {
     const int mode = (int)(compensationMode + 0.5f);
@@ -474,7 +486,8 @@ float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness, fl
     const float Ess = brdf.x + brdf.y;
     const float3 multiScatter = SpecularMultiScatterIBL(F0, FssEss, Ess, mode);
 
-    return multiScatter * SpecularOcclusion(NdotV, roughness, ao) * iblIntensity;
+    const float so = ComposeSpecularOcclusion(useBent, bent, N, R, NdotV, roughness, materialAO, ssao);
+    return multiScatter * so * iblIntensity;
 }
 
 #endif // KURENAI_REFLECTION_PROBE_HLSLI

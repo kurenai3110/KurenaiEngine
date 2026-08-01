@@ -29,6 +29,11 @@ namespace KurenaiPacker
         // テクセルあたりのレイ本数。多いほどノイズが減るが線形に遅くなる
         uint32_t RayCount = 128;
 
+        // bent normal用のテクセルあたりのレイ本数。
+        // AO側(RayCount)より多いのは、スカラーの平均よりベクトル和のほうが収束が遅いため。
+        // 0にするとbent normalを焼かない(従来どおり遮蔽マップだけを出力する)
+        uint32_t BentNormalRayCount = 256;
+
         // レイの最大長。0 = 自動(モデルのバウンズ対角の10%)。
         // 無限長にすると屋外モデルで地面が空を向いた面まで一様に暗くなるため、
         // 「近傍の遮蔽だけを拾う」ようにこの距離で打ち切る
@@ -43,6 +48,16 @@ namespace KurenaiPacker
         // メッシュごとの遮蔽マップ(R8、Resolution x Resolution、行優先)。
         // 空のvector = そのメッシュはUV展開に失敗して焼けなかった(遮蔽マップ無しとして扱う)
         std::vector<std::vector<uint8_t>> MeshTextures;
+
+        // メッシュごとのbent normal(RGBA float32、Resolution x Resolution、行優先)。
+        // 1テクセルあたり4要素で、.xyz = bRaw(正規化しない)、.w = 有効フラグ(0または1)。
+        //
+        // 【float32で持つ理由】書き出しはfp16だが、途中のダイレーションと検証をfp32で行う。
+        // 量子化前の値でチェックリスト(length <= 1、aoB >= aoN、既存AOとの一致)を確認しないと、
+        // 見つけた誤差がベイクのバグなのか量子化なのか切り分けられない。
+        // テクセルあたり16バイトになるため、遮蔽マップ(1バイト)の16倍のメモリを使う
+        std::vector<std::vector<float>> MeshBentNormals;
+
         uint32_t Resolution = 0;
         size_t BakedMeshCount = 0;
         size_t SkippedMeshCount = 0;

@@ -61,6 +61,9 @@ Texture2D EmissiveTexture : register(t3);
 // t4はTransparent.hlsl/ProbeCapture.hlslがカスケードシャドウマップ配列に使っているため、
 // マテリアルテクスチャを読む3パスで共通して空いている最初のスロットがt5になる
 Texture2D OcclusionTexture : register(t5);
+// bent normal(RGBA16F)。遮蔽マップと同じライトマップUV空間へ焼かれている。
+// t4はカスケードシャドウ配列、t5は遮蔽マップが使っているためt6を割り当てる
+Texture2D BentNormalTexture : register(t6);
 
 struct VSInput
 {
@@ -96,6 +99,9 @@ struct PSOutput
     float4 Emissive : SV_TARGET3;
     // モーションベクター(この画素の中身が前フレームから今フレームまでに動いた量、UV単位)
     float2 Velocity : SV_TARGET4;
+    // bent normal(正規化しない可視方向の平均、ワールド空間)。.rgb = bRaw、.a = 有効フラグ。
+    // R11G11B10_Floatは使えない ―― 符号なしのため負の成分が落ちる(25章)
+    float4 BentNormal : SV_TARGET5;
 };
 
 // クリップ空間座標を画面UV([0,1]、左上原点)へ変換する。
@@ -198,5 +204,20 @@ PSOutput PSMain(PSInput input)
     output.Material = float4(metallic, roughness, ao, 0.0f);
     output.Emissive = float4(emissive, 1.0f);
     output.Velocity = currentUv - previousUv;
+
+    // bent normalも遮蔽マップと同じLightmapUVで引く(焼かれている空間が同じ)。
+    // ベイカーはモデル空間で焼いているため、頂点法線とまったく同じNormalMatrixで
+    // ワールド空間へ移す。
+    //
+    // 【長さを保つこと】長さ(=aoB)は遮蔽の強さであって座標変換で変わってはいけない。
+    // NormalMatrixは非一様スケールを含みうるので、方向だけ回してから元の長さを掛け直す。
+    // そのまま行列を掛けると長さが歪み、スペキュラ遮蔽が明るくなったり暗くなったりする
+    const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
+    const float bentLength = length(bentSample.xyz);
+    const float3 bentWorld = bentLength > 1e-6f
+        ? normalize(mul(bentSample.xyz, (float3x3)NormalMatrix)) * bentLength
+        : float3(0.0f, 0.0f, 0.0f);
+    output.BentNormal = float4(bentWorld, bentSample.a);
+
     return output;
 }

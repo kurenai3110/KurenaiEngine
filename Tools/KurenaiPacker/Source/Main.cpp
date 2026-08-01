@@ -69,6 +69,8 @@ namespace
             "                        持っていても、焼けたメッシュはこちらを優先する\n"
             "      --occlusion-resolution <N>  遮蔽マップの一辺(既定512)\n"
             "      --occlusion-rays <N>        テクセルあたりのレイ本数(既定128)。多いほど滑らかで遅い\n"
+            "      --bent-rays <N>             bent normal用のレイ本数(既定256)。ベクトル和は収束が\n"
+            "                                  遅いためAO側より多めにとる\n"
             "      --metallic <V>              全マテリアルのメタリック値を上書きする(0〜1)\n"
             "      --roughness <V>             全マテリアルのラフネス値を上書きする(0〜1)\n"
             "      --base-color <R,G,B>        全マテリアルのベースカラー係数を上書きする(各0〜1)\n"
@@ -94,6 +96,7 @@ namespace
         bool BakeOcclusion = false;
         unsigned int OcclusionResolution = 512;
         unsigned int OcclusionRays = 128;
+        unsigned int BentNormalRays = 256;
         KurenaiPacker::MaterialOverride MaterialOverride;
     };
 
@@ -151,13 +154,14 @@ namespace
         return true;
     }
 
-    // --jobs/--occlusion-* 共通の符号なし整数パース。失敗時はfalseを返す
-    bool ParseUnsigned(const std::wstring& option, const std::wstring& value, unsigned int& out)
+    // --jobs/--occlusion-*/--bent-rays 共通の符号なし整数パース。失敗時はfalseを返す。
+    // allowZeroは--bent-rays用。0を「bent normalを焼かない」の意味で受け付けるため
+    bool ParseUnsigned(const std::wstring& option, const std::wstring& value, unsigned int& out, bool allowZero = false)
     {
         try
         {
             const unsigned long parsed = std::stoul(value);
-            if (parsed == 0)
+            if (parsed == 0 && !allowZero)
             {
                 PrintError(WideToUtf8(option) + " には1以上の値を指定してください");
                 return false;
@@ -227,15 +231,18 @@ namespace
             {
                 args.BakeOcclusion = true;
             }
-            else if (arg == L"--occlusion-resolution" || arg == L"--occlusion-rays")
+            else if (arg == L"--occlusion-resolution" || arg == L"--occlusion-rays" || arg == L"--bent-rays")
             {
                 if (i + 1 >= argc)
                 {
                     PrintError(WideToUtf8(arg) + " には値が必要です");
                     return std::nullopt;
                 }
-                unsigned int& target = (arg == L"--occlusion-resolution") ? args.OcclusionResolution : args.OcclusionRays;
-                if (!ParseUnsigned(arg, argv[++i], target))
+                unsigned int* target = &args.OcclusionRays;
+                if (arg == L"--occlusion-resolution") { target = &args.OcclusionResolution; }
+                else if (arg == L"--bent-rays")       { target = &args.BentNormalRays; }
+                // --bent-raysだけは0(bent normalを焼かない)を許す
+                if (!ParseUnsigned(arg, argv[++i], *target, arg == L"--bent-rays"))
                 {
                     return std::nullopt;
                 }
@@ -447,6 +454,7 @@ int wmain(int argc, wchar_t** argv)
         KurenaiPacker::OcclusionBakeOptions bakeOptions;
         bakeOptions.Resolution = args.OcclusionResolution;
         bakeOptions.RayCount = args.OcclusionRays;
+        bakeOptions.BentNormalRayCount = args.BentNormalRays;
         try
         {
             bakeResult = KurenaiPacker::BakeOcclusion(sourceModel, bakeOptions);
@@ -494,7 +502,9 @@ int wmain(int argc, wchar_t** argv)
             << " / スキップ " << bakeResult.SkippedMeshCount
             << " / 書き出し " << result.OcclusionBaked
             << " (解像度 " << args.OcclusionResolution
-            << " / レイ " << args.OcclusionRays << "本)\n";
+            << " / レイ " << args.OcclusionRays << "本)\n"
+            << "  bent normal: 書き出し " << result.BentNormalBaked
+            << " (レイ " << args.BentNormalRays << "本)\n";
     }
 
     std::cout

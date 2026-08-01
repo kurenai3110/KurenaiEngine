@@ -33,6 +33,17 @@ namespace Kurenai::Defaults
     inline constexpr bool IBLEnabled = true;
     inline constexpr float IBLIntensity = 0.5f;
     inline constexpr bool IBLUseDedicatedIrradiance = false;
+
+    // bent normalによる遮蔽(25章)。
+    // BentNormalAOSource: ディフューズAOを aoN = dot(N, bRaw) から取るか(false = 従来のベイクAO)。
+    // BentNormalSpecularOcclusion: スペキュラ遮蔽に錐体交差を使うか(false = Frostbite近似)。
+    //   どちらも既定でbent normal側を使う。同じ積分の別推定量なので見た目は大きく変わらず、
+    //   スペキュラだけは方向を見るぶん壁際の映り込みが正しくなる。
+    // MultiBounceAOEnabled: multi-bounce AO(Jimenez 2016)。アルベドが明るいほどAOを弱める補正で、
+    //   見た目を大きく変えるためbent normal自体の検証を汚さないよう既定は無効
+    inline constexpr bool BentNormalAOSource = true;
+    inline constexpr bool BentNormalSpecularOcclusion = true;
+    inline constexpr bool MultiBounceAOEnabled = false;
     inline constexpr float AmbientScale = 0.2f;
     // スペキュラのマルチスキャッタリング・エネルギー補正の方式。
     // KurenaiEngine3D::SpecularCompensationMode と HLSL の KURENAI_SPEC_COMP_* に対応する

@@ -124,6 +124,15 @@ namespace Kurenai
             // 「同じ面のどこをサンプルしたか」の違いであって「ものが動いた量」ではない。
             // 引いておかないとTAAが履歴を引く位置が毎フレーム±0.5px揺れ、いつまでも収束しない
             DirectX::XMFLOAT4 TAAParams;
+            // bent normalによる遮蔽用(末尾に追加のため既存シェーダのオフセットは変わらない、25章)。
+            // x=ディフューズAOの出所   0=従来のベイクAO(Material.b) / 1=aoN = dot(N, bRaw)
+            // y=スペキュラ遮蔽の方式   0=Frostbite近似(従来)      / 1=bent normalの錐体交差
+            // z=multi-bounce AO       0=無効(既定)                / 1=有効
+            // w=未使用
+            //
+            // xとyは同じ積分の別推定量どうしの切り替えなので、0と1で見た目がほぼ変わらないことが
+            // そのまま検証になる。zだけは見た目を大きく変えるため既定を無効にしてある
+            DirectX::XMFLOAT4 OcclusionParams;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -1647,6 +1656,7 @@ namespace Kurenai
                 RHI::Format::R8G8B8A8_UNorm, // Material(R=Metallic, G=Roughness)
                 emissiveFormat,              // Emissive(バッファ精度に依存)
                 RHI::Format::R16G16_Float,   // Velocity(モーションベクター。UV単位の2Dベクトル)
+                RHI::Format::R16G16B16A16_Float, // BentNormal(.rgb = bRaw、.a = 有効フラグ)
             };
             gbufferPipelineDesc.HasDepthStencil = true;
             gbufferPipelineDesc.ReverseZ = true;
@@ -1831,6 +1841,13 @@ namespace Kurenai
             // 2成分しか要らないのでR16G16_Float。1画素ぶんの移動量が1/解像度(1920幅なら約0.00052)と
             // 小さいため、絶対精度ではなく相対精度で効く浮動小数点フォーマットが適している
             m_GBufferVelocity = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16_Float);
+
+            // bent normal(正規化しない可視方向の平均、ワールド空間)。G-Bufferの6枚目。
+            // .rgb = bRaw、.a = 有効フラグ。
+            //
+            // R11G11B10_Floatにはできない ―― 符号なしのため負の成分が落ち、
+            // 半球の半分の方向を表現できなくなる。1080pで約16MB増える(25章)
+            m_GBufferBentNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
 
             // TAAの履歴バッファ2枚。読みながら同じテクスチャへ書けないので、毎フレーム役割を入れ替える
             // (m_TAAHistoryIndexが今フレームの書き込み先)。バッファ精度をLegacy8bitに落としても
@@ -2061,6 +2078,12 @@ namespace Kurenai
         mixBool(m_ProceduralSkyEnabled);
         // 自発光の強度倍率はキャプチャのエミッシブ項へそのまま乗る
         mixFloat(m_EmissiveIntensity);
+
+        // bent normalによる遮蔽(25章)。ProbeCapture.hlslが同じ分岐を持つため、
+        // 含め忘れるとつまみを動かしてもプローブの中身だけ古いまま残る
+        mixBool(m_BentNormalAOSource);
+        mixBool(m_BentNormalSpecularOcclusion);
+        mixBool(m_MultiBounceAOEnabled);
 
         // ライトは構造体ごとダンプすると詰め物(padding)の未初期化バイトを拾い得るため、
         // 使うフィールドだけを明示的に混ぜる
@@ -2853,6 +2876,11 @@ namespace Kurenai
         };
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
         constants.IBLParams = { m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+        constants.OcclusionParams = {
+            m_BentNormalAOSource ? 1.0f : 0.0f,
+            m_BentNormalSpecularOcclusion ? 1.0f : 0.0f,
+            m_MultiBounceAOEnabled ? 1.0f : 0.0f,
+            0.0f };
 
         // 反射プローブの影響範囲をt13のStructuredBufferへ渡す。まだ一度も焼けていない場合
         // (m_ProbeBaked=false)や機能を無効にしている場合はプローブ数を0にして、シェーダー側の
@@ -3316,8 +3344,10 @@ namespace Kurenai
                     cmd->SetTexture(1, mesh.NormalTexture);
                     cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                     cmd->SetTexture(3, mesh.EmissiveTexture);
-                    // t4はカスケードシャドウマップ配列が占めているため遮蔽マップはt5
+                    // t4はカスケードシャドウマップ配列が占めているため遮蔽マップはt5、
+                    // bent normalはその次のt6(GBuffer.hlsl/ProbeCapture.hlslで共通)
                     cmd->SetTexture(5, mesh.OcclusionTexture);
+                    cmd->SetTexture(6, mesh.BentNormalTexture);
 
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                 }
@@ -3499,10 +3529,10 @@ namespace Kurenai
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "GBuffer",
-            // 5枚目の速度(モーションベクター)まで含め、並びはGBuffer.hlslのPSOutputおよび
+            // 6枚目のbent normalまで含め、並びはGBuffer.hlslのPSOutputおよび
             // CreatePrecisionDependentPipelineStatesのRenderTargetFormatsと一致させること
             .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
-                               m_GBufferEmissive.get(), m_GBufferVelocity.get() },
+                               m_GBufferEmissive.get(), m_GBufferVelocity.get(), m_GBufferBentNormal.get() },
             .DepthTarget = m_GBufferDepth.get(),
             .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
             {
@@ -3564,6 +3594,7 @@ namespace Kurenai
                         cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                         cmd->SetTexture(3, mesh.EmissiveTexture);
                         cmd->SetTexture(5, mesh.OcclusionTexture);
+                        cmd->SetTexture(6, mesh.BentNormalTexture);
                         cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                     }
                 }
@@ -3793,6 +3824,7 @@ namespace Kurenai
                 m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                 skyTexture, activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
                 m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
+                m_GBufferBentNormal.get(),
                 // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)
                 m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
             },
@@ -3825,6 +3857,9 @@ namespace Kurenai
                 cmd->SetTexture(12, m_ProbePrefilteredArray.get());
                 cmd->SetShaderResourceBuffer(13, m_ProbeBuffer.get());
                 cmd->SetTexture(14, m_ProbeDistanceArray.get());
+                // bent normal(25章)。t0〜t14が埋まっているためt15。
+                // これに合わせてkTextureSlotCountを15→16へ上げてある
+                cmd->SetTexture(15, m_GBufferBentNormal.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -3942,6 +3977,8 @@ namespace Kurenai
                     cmd->SetTexture(2, draw.Mesh->MetallicRoughnessTexture);
                     cmd->SetTexture(3, draw.Mesh->EmissiveTexture);
                     cmd->SetTexture(13, draw.Mesh->OcclusionTexture);
+                    // bent normal(25章)。このパスはt0〜t13を使い切っているためt14
+                    cmd->SetTexture(14, draw.Mesh->BentNormalTexture);
 
                     cmd->DrawIndexed(draw.Mesh->IndexCount, 0, 0);
                 }
@@ -3963,6 +4000,7 @@ namespace Kurenai
                     m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                     m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
                     m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
+                    m_GBufferBentNormal.get(),
                 },
                 .RenderTargets = { m_SSRTexture.get() },
                 .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
@@ -3987,6 +4025,9 @@ namespace Kurenai
                     cmd->SetTexture(8, m_ProbePrefilteredArray.get());
                     cmd->SetShaderResourceBuffer(9, m_ProbeBuffer.get());
                     cmd->SetTexture(10, m_ProbeDistanceArray.get());
+                    // bent normal(25章)。Lightingパスとまったく同じものを読まないと、
+                    // SSRが適用される領域とされない領域の境界に段差が出る
+                    cmd->SetTexture(11, m_GBufferBentNormal.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -4412,6 +4453,12 @@ namespace Kurenai
             // 解像度だけ合わせてm_TonemapTextureをそのまま渡す(Mode 11では読まれない)
             presentSourceTexture = m_TonemapTexture.get();
             presentMode = 11;
+            break;
+        case DebugView::BentNormal:
+            // bent normal(25章)。正規化しないベクトルなので、法線表示(Mode 7)のような
+            // オクタヘドラルのデコードは通さず専用のMode 15で扱う
+            presentSourceTexture = m_GBufferBentNormal.get();
+            presentMode = 15;
             break;
         case DebugView::MotionVector:
             // 速度バッファ。格納値はUV単位(1画素ぶんの移動で1/解像度、1920幅なら約0.0005)と
