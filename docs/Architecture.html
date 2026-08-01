@@ -5000,7 +5000,8 @@ SSILの間接拡散光の3つで、直接光(<code>DirectLighting.hlsl</code>)�
 <p>Deferredの不透明パスでは、マテリアル固有の値をライティングパスへ運ぶ経路がG-Bufferしかない。
 マテリアルG-Buffer(<code>R8G8B8A8_UNorm</code>)は<code>float4(metallic, roughness, 0, 0)</code>で
 <b>b/aの2チャンネルが未使用</b>だったため、新しいレンダーターゲットを増やさず<code>b</code>へ焼いている。
-帯域も増えない。読み手は<code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>の2つ。</p>
+帯域も増えない。読み手は<code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>・
+<code>RTReflection.hlsl</code>(28章)の3つ。</p>
 
 <p><code>occlusionTexture.strength</code>は<b><code>GBuffer.hlsl</code>の時点で適用済み</b>にする
 (<code>lerp(1, ao, strength)</code>)。下流は単に乗算するだけになり、strengthの解釈が1か所に閉じる。
@@ -5009,10 +5010,26 @@ strengthを運ぶ定数は<code>ObjectConstants</code>(b1)にあった純粋な�
 オフセットも変わっていない</b>。</p>
 
 <div class="note">
-<p><b><code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>のao合成式は必ず一致させること。</b>
-20章のとおりSSRは「Lightingパスが適用した鏡面IBLをまったく同じ式で再現して差し替える」設計なので、
-片方だけが遮蔽マップを掛けると、SSRが適用される領域とされない領域の境界に段差が出る。
-どちらも <code>ao = AOTexture.a * material.b</code> で統一している。</p>
+<p><b><code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>・<code>RTReflection.hlsl</code>の
+ao合成式は必ず一致させること。</b>
+20章のとおりSSRは「Lightingパスが適用した鏡面IBLをまったく同じ式で再現して差し替える」設計で、
+28章のRT反射もまったく同じ構造に乗っている。そのため一部だけが遮蔽マップを掛けると、
+反射が適用される領域とされない領域の境界に段差が出る。
+3つとも <code>ao = AOTexture.a * material.b</code> で統一している。</p>
+
+<p><b>実際に取りこぼした。</b>この章(遮蔽マップ)と28章(RT反射)は別ブランチで並行して実装され、
+マージ時に<code>RTReflection.hlsl</code>だけ<code>materialAO</code>の乗算が入らないまま残っていた。
+ここが「読み手は2つ」と書かれていたことが、3つ目の読み手が増えたことに気付けなかった一因でもある。
+<b>G-Bufferのチャンネルに新しい読み手が増えたときは、この節の一覧も必ず更新すること。</b></p>
+
+<p><b>実測(Sponza / DX12 / レンダー解像度1280x720 / RT反射・SSAO有効 / TAAは切って比較)</b>:
+<code>materialAO</code>の乗算だけを入れ替えて撮り比べたところ、<b>8bit値で差2超が59.4%・最大63</b>。
+差は<b>ベイク済みAOが強く効く箇所に集中</b>した(壁の円形レリーフ、金属の吊り下げランプ、
+装飾帯、植栽)。<b>掛けていない側ではそれらが黒く潰れて模様が消える</b> ――
+Lightingパスが<code>ao * material.b</code>で足した鏡面IBLを、RT反射が<code>ao</code>だけで
+引いていたため引きすぎになっていた(28.2節でいう「足した覚えのない値を引く」)。
+なお同一シェーダで2回撮った対照は<b>差2超が0ピクセル・最大差1</b>で、
+自動露出まで含めて実行間で完全に再現するため、上の差はすべてこの1箇所に由来する。</p>
 </div>
 
 <h3>22.3 スペキュラオクルージョンの定義を共有ヘッダーへ移した</h3>
@@ -6270,6 +6287,13 @@ Lightingパスが適用した鏡面IBLを差し引く部分は完全に共通:
 係数<code>SpecularIBLWeight</code>と環境の放射輝度<code>SampleEnvironment</code>は
 <code>ReflectionProbe.hlsli</code>の定義をそのまま共有しているため、
 「足した覚えのない値を引く」ことが構造的に起きない。
+</p>
+<p>
+<b>ただし共有ヘッダーに入っていない引数は自分で揃える必要がある。</b>
+<code>SpecularIBLWeight</code>へ渡す<code>ao</code>がそれで、
+<code>ao = AOTexture.a * material.b</code>(実行時の遮蔽 × マテリアルの遮蔽マップ)と
+<code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>に揃えなければならない(22.2節)。
+実際にこれを取りこぼし、RT反射だけ<code>material.b</code>を掛けていない状態でマージされていた。
 </p>
 <p>
 確信度の扱いだけがSSRと違う。SSRには「レイが画面外へ外れて判定がつかない」という状態があり

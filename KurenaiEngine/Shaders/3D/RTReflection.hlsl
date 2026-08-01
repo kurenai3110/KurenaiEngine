@@ -193,9 +193,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
-    const float2 materialSample = MaterialTexture[pixel].rg;
+    const float3 materialSample = MaterialTexture[pixel].rgb;
     const float metallic = materialSample.r;
     const float roughness = materialSample.g;
+    // b = マテリアルの遮蔽マップ(GBuffer.hlslでstrength適用済み。遮蔽マップを持たない
+    // マテリアルは1.0)。下のaoの合成で使う
+    const float materialAO = materialSample.b;
 
     const float maxRayDistance = Params0.z;
     const float roughnessCutoff = Params0.w;
@@ -218,7 +221,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float3 reflectDir = normalize(reflect(-V, N));
 
     // --- Lightingパスが適用した鏡面IBLを、そのときとまったく同じ式で再現する ---
-    const float ao = AOTexture[pixel].a;
+    // aoの合成式はDeferredLighting.hlslのPSMain・SSR.hlslとまったく同じでなければならない
+    // (実行時の遮蔽 × マテリアルの遮蔽マップ)。ズレるとRT反射が適用される領域と
+    // されない領域の境界に段差が出る(22章の遮蔽マップ、28.2節の差し替え構造)
+    const float ao = AOTexture[pixel].a * materialAO;
     // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(DeferredLighting.hlslの
     // EvaluateIBLと同じ。SpecularIBLWeightはfloat3のbrdfを受け取る)
     const float3 brdf = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotV, roughness), 0.0f).rgb;
