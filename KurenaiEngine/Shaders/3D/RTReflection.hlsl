@@ -219,7 +219,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // --- Lightingパスが適用した鏡面IBLを、そのときとまったく同じ式で再現する ---
     const float ao = AOTexture[pixel].a;
-    const float2 brdf = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotV, roughness), 0.0f).rg;
+    // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(DeferredLighting.hlslの
+    // EvaluateIBLと同じ。SpecularIBLWeightはfloat3のbrdfを受け取る)
+    const float3 brdf = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotV, roughness), 0.0f).rgb;
     const float3 specularWeight =
         SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
 
