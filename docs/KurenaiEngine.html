@@ -332,6 +332,9 @@ ImGuiパネル経由</strong>):
     ポイント/スポットライトの一覧・追加・複製・削除・編集、反射プローブの編集と焼き直し、
     FPS/CPU/GPUの計測値確認ができる。パネルはドッキングに対応しており、配置とサイズは
     実行ファイルと同じフォルダの<code>imgui.ini</code>へ自動保存される</li>
+    <li>ウィンドウの位置・サイズ・最大化状態は終了時に実行ファイルと同じフォルダの
+    <code>window.ini</code>へ保存され、次回起動時に復元される
+    (<code>window.ini</code>を削除すると既定のサイズで起動する)</li>
   </ul>
 </li>
 <li>表示できるシーンはビルド済みバイナリに組み込み済み(Sponza / Bistro (McGuire) Exterior /
@@ -823,6 +826,14 @@ uint32_t GetWidth() const;
 uint32_t GetHeight() const;
 void SetResizeCallback(std::function&lt;void(uint32_t,uint32_t)&gt; callback);
 void SetTitle(const std::wstring&amp; title);</code></pre>
+<p>
+コンストラクタに渡した<code>width</code>/<code>height</code>は<strong>初回起動時のクライアント領域のサイズ</strong>で、
+2回目以降は前回終了時の位置・サイズ・最大化状態が復元される(<code>KurenaiEngine.dll</code>と同じ
+フォルダの<code>window.ini</code>に自動保存される。削除すれば既定のサイズに戻る)。
+そのため<code>GetWidth()</code>/<code>GetHeight()</code>はコンストラクタ直後の時点で
+引数と異なる値を返すことがある。スワップチェインの作成など解像度に依存する処理では、
+引数ではなくこれらの取得関数を使うこと。
+</p>
 <p>
 キーボード/マウス入力のAPIは提供されない(5章参照)。<code>Camera</code>は透視投影
 (<code>SetLens</code>、既定でReverse-Z)と正射影(<code>SetOrthographic</code>、2D/UI向け)の

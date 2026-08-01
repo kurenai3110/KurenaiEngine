@@ -26,19 +26,11 @@ static const float PI = 3.14159265359f;
 
 // 反射プローブ(19章)の環境ソースと鏡面IBLの重み。DeferredLighting.hlsl・SSR.hlslと同じ定義を
 // 共有する。空きスロットが違うだけでレジスタ番号は各シェーダーが決める(ReflectionProbe.hlsli冒頭)。
-//
-// このパスが使っているスロット: t0〜t3(マテリアル)/ t4(カスケードシャドウ配列)/
-// t5(遮蔽マップ)/ t8(ライト)/ t11(BRDF LUT)。プローブ用にはそれ以外を割り当てる。
-//
-// 【t5は使えない】かつてプリフィルタ済み鏡面をt5に置いていたが、t5は遮蔽マップが
-// GBuffer/Transparent/ProbeCaptureの3パス共通で使うスロットで、衝突していた
-// (fxcは overlapping register semantics 't5' でコンパイルを拒否する)。t13へ移した。
-// C++側 KurenaiEngine3D.cpp の半透明パスのSetTextureとも必ず一致させること
-//
+// このパスはt0〜t4とt8〜t11を既に使っているため、空いているt5〜t7を割り当てる。
 // #include自体はFrameConstantsとSamplers.hlsliの宣言より後で行う必要があるため下にある
 #define KURENAI_GLOBAL_IRRADIANCE_REGISTER t9
 #define KURENAI_GLOBAL_PREFILTERED_REGISTER t10
-#define KURENAI_PROBE_PREFILTERED_REGISTER t13
+#define KURENAI_PROBE_PREFILTERED_REGISTER t5
 #define KURENAI_PROBE_IRRADIANCE_REGISTER t6
 #define KURENAI_PROBE_BUFFER_REGISTER t7
 #define KURENAI_PROBE_DISTANCE_REGISTER t12
@@ -103,17 +95,18 @@ Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
 Texture2D EmissiveTexture : register(t3);
-// ベイク済みアンビエントオクルージョン(遮蔽マップ)。t4はカスケードシャドウマップ配列が
-// 使っているためt5を使う(GBuffer.hlsl/ProbeCapture.hlslと共通)
-Texture2D OcclusionTexture : register(t5);
+// ベイク済みアンビエントオクルージョン(遮蔽マップ)。GBuffer.hlsl/ProbeCapture.hlslではt5だが、
+// このシェーダーはt5〜t7を反射プローブ(KURENAI_PROBE_PREFILTERED/IRRADIANCE/BUFFER_REGISTER、
+// 上記マクロ参照)に、t11をBRDFLUTTexture(下記)に割り当てて衝突するため、空いているt13を使う
+Texture2D OcclusionTexture : register(t13);
 // カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
 // DirectLighting.hlslと同じ実装を共有しているため、半透明と不透明で影がずれることはない。
 // FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)とDataSamplerを参照するため、
 // それらの宣言より後でインクルードする必要がある
 #include "ShadowSampling.hlsli"
 // IBL(14章)と反射プローブ(19章)。グローバルIBLのイラディアンス(t9)/プリフィルタ済み鏡面(t10)と、
-// プローブのキューブマップ配列(t13/t6)・影響範囲バッファ(t7)・距離キューブ(t12)の宣言、
-// およびプローブの選択・視差補正・ブレンドはReflectionProbe.hlsliが持つ(DeferredLighting.hlslと共有)。
+// プローブのキューブマップ配列(t5/t6)・影響範囲バッファ(t7)の宣言、およびプローブの選択・
+// 視差補正・ブレンドはReflectionProbe.hlsliが持つ(DeferredLighting.hlslと共有)。
 //
 // 半透明パスにはSSRが適用されないため、ガラスにとっては環境ソースが唯一の映り込みになる。
 // 以前はここがグローバルIBL固定で、密閉された室内のガラスにも空が映っていた
@@ -248,9 +241,8 @@ void EvaluateIBLSplit(
     const float3 kd = (1.0f - fresnelRoughness) * (1.0f - metallic);
 
     // --- 鏡面IBL(split-sum近似) ---
-    // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(14.9.2.1節)。
-    // SpecularIBLWeight/SpecularIBLMultiScatterWeightがfloat3で受けるため、
-    // .rgの2成分だけを渡すことはできない
+    // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(DeferredLighting.hlslの
+    // EvaluateIBLと同じ。SpecularIBLWeightはfloat3のbrdfを受け取る)
     const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     // スペキュラオクルージョン・エネルギー補正・IBL強度倍率をまとめて掛ける係数。
     // 半透明パスはスクリーンスペースのAO/GIバッファを持たないが、マテリアルの遮蔽マップは
