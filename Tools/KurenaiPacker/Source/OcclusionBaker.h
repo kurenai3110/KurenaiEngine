@@ -41,6 +41,23 @@ namespace KurenaiPacker
 
         // チャート境界のにじみを防ぐために、有効テクセルの外側へ色を広げる幅(テクセル)
         uint32_t DilationPixels = 4;
+
+        // 【UV展開の内部分割】三角形数がこの閾値を超えたメッシュだけ、xatlasへ渡す前に
+        // 空間分割して複数回AddMeshする。0 = 分割しない(従来どおり1メッシュ=1AddMesh)。
+        //
+        // 分割されるのは「xatlasに見せるトポロジー」だけで、遮蔽マップの粒度は変わらない
+        // ―― 分割した全チャンクは1枚の共有アトラスへ詰められるため、出力は従来どおり
+        // メッシュあたり遮蔽マップ1枚(MeshTextures[meshIndex])のままである。
+        //
+        // 【なぜ分割するか】xatlasのComputeChartsはメッシュごとに1タスクで並列化され、
+        // かつチャート統合(mergeCharts)と種まき(Place seeds)がチャートグループ内で
+        // 2乗に効く。連結した単一の巨大メッシュはこの両方を踏み抜き、Chinese Dragon
+        // (871306三角形・1メッシュ)で394秒かかる一方、Sponza(26万三角形・25メッシュ)は
+        // 13秒で終わる。分割すると2乗が表面化せず、コア数ぶんの並列化も効く(22.6.6節)
+        uint32_t UnwrapSplitThreshold = 50000;
+
+        // 分割後の1チャンクあたりの目標三角形数(22.6.6節)
+        uint32_t UnwrapChunkTriangles = 100000;
     };
 
     struct OcclusionBakeResult

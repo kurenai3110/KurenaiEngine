@@ -71,6 +71,10 @@ namespace
             "      --occlusion-rays <N>        テクセルあたりのレイ本数(既定128)。多いほど滑らかで遅い\n"
             "      --bent-rays <N>             bent normal用のレイ本数(既定256)。ベクトル和は収束が\n"
             "                                  遅いためAO側より多めにとる\n"
+            "      --unwrap-split-threshold <N>  UV展開時にメッシュを内部分割する三角形数の閾値\n"
+            "                                  (既定50000、0で分割しない)。巨大な単一メッシュの\n"
+            "                                  UV展開が極端に遅くなるのを防ぐ\n"
+            "      --unwrap-chunk-triangles <N>  分割後の1チャンクあたりの目標三角形数(既定100000)\n"
             "      --metallic <V>              全マテリアルのメタリック値を上書きする(0〜1)\n"
             "      --roughness <V>             全マテリアルのラフネス値を上書きする(0〜1)\n"
             "      --base-color <R,G,B>        全マテリアルのベースカラー係数を上書きする(各0〜1)\n"
@@ -97,6 +101,9 @@ namespace
         unsigned int OcclusionResolution = 512;
         unsigned int OcclusionRays = 128;
         unsigned int BentNormalRays = 256;
+        // 既定値はOcclusionBakeOptionsと合わせること
+        unsigned int UnwrapSplitThreshold = 50000;
+        unsigned int UnwrapChunkTriangles = 100000;
         KurenaiPacker::MaterialOverride MaterialOverride;
     };
 
@@ -154,8 +161,10 @@ namespace
         return true;
     }
 
-    // --jobs/--occlusion-*/--bent-rays 共通の符号なし整数パース。失敗時はfalseを返す。
-    // allowZeroは--bent-rays用。0を「bent normalを焼かない」の意味で受け付けるため
+    // --jobs/--occlusion-*/--bent-rays/--unwrap-* 共通の符号なし整数パース。失敗時はfalseを返す。
+    // allowZero: 0を「機能を無効にする」意味で受け付けるオプション用
+    // (--bent-raysは0で「bent normalを焼かない」、--unwrap-split-thresholdは0で「分割しない」。
+    //  他は0だと解像度0・レイ0本になり無意味なので拒否する)
     bool ParseUnsigned(const std::wstring& option, const std::wstring& value, unsigned int& out, bool allowZero = false)
     {
         try
@@ -243,6 +252,21 @@ namespace
                 else if (arg == L"--bent-rays")       { target = &args.BentNormalRays; }
                 // --bent-raysだけは0(bent normalを焼かない)を許す
                 if (!ParseUnsigned(arg, argv[++i], *target, arg == L"--bent-rays"))
+                {
+                    return std::nullopt;
+                }
+            }
+            else if (arg == L"--unwrap-split-threshold" || arg == L"--unwrap-chunk-triangles")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError(WideToUtf8(arg) + " には値が必要です");
+                    return std::nullopt;
+                }
+                const bool isThreshold = (arg == L"--unwrap-split-threshold");
+                unsigned int& target = isThreshold ? args.UnwrapSplitThreshold : args.UnwrapChunkTriangles;
+                // 閾値だけは0(=分割しない)を許可する。チャンクの目標三角形数に0は意味が無い
+                if (!ParseUnsigned(arg, argv[++i], target, isThreshold))
                 {
                     return std::nullopt;
                 }
@@ -466,6 +490,8 @@ int wmain(int argc, wchar_t** argv)
         bakeOptions.Resolution = args.OcclusionResolution;
         bakeOptions.RayCount = args.OcclusionRays;
         bakeOptions.BentNormalRayCount = args.BentNormalRays;
+        bakeOptions.UnwrapSplitThreshold = args.UnwrapSplitThreshold;
+        bakeOptions.UnwrapChunkTriangles = args.UnwrapChunkTriangles;
         try
         {
             bakeResult = KurenaiPacker::BakeOcclusion(sourceModel, bakeOptions);
