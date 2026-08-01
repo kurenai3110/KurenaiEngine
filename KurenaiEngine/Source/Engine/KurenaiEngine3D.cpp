@@ -801,6 +801,15 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params0;
         };
 
+        // RTAO.hlsl側のcbuffer RTAOConstantsと一致させる必要がある
+        struct alignas(16) RTAOConstants
+        {
+            // xy: 出力サイズ(ピクセル), z: レイの最大距離, w: 遮蔽率のコントラスト(べき乗)
+            DirectX::XMFLOAT4 Params0;
+            // x: レイ本数, y: 間接光の強さ, z: バウンス面へ影レイを撃つか, w: 未使用
+            DirectX::XMFLOAT4 Params1;
+        };
+
         // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
         struct alignas(16) GPULight
         {
@@ -1212,14 +1221,27 @@ namespace Kurenai
             rtShadowConstantBufferDesc.SizeInBytes = sizeof(RTShadowConstants);
             m_RTShadowConstantBuffer = m_Device->CreateBuffer(rtShadowConstantBufferDesc);
 
+            // RTAOパス(コンピュートシェーダー。半球へレイを撃ち遮蔽率と間接拡散光を求める)
+            RHI::ShaderDesc rtAOCsDesc;
+            rtAOCsDesc.Stage = RHI::ShaderStage::Compute;
+            rtAOCsDesc.FilePath = shaderDirectory + L"RTAO.hlsl";
+            rtAOCsDesc.EntryPoint = "CSMain";
+            m_RTAOComputeShader = m_Device->CreateShader(rtAOCsDesc);
+            m_RTAOPipelineState = m_Device->CreateComputePipelineState({ m_RTAOComputeShader.get() });
+
+            RHI::BufferDesc rtAOConstantBufferDesc;
+            rtAOConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+            rtAOConstantBufferDesc.SizeInBytes = sizeof(RTAOConstants);
+            m_RTAOConstantBuffer = m_Device->CreateBuffer(rtAOConstantBufferDesc);
+
             Core::Logger::Info(
-                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウでRaytracedを選択可能)");
+                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウ・AO/GIでRaytracedを選択可能)");
         }
         else
         {
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                "レイトレーシングは利用できません(反射はOff/スクリーンスペース、シャドウはOff/カスケードシャドウマップのみ)");
+                "レイトレーシングは利用できません(反射・シャドウ・AO/GIはいずれもスクリーンスペース手法のみ)");
         }
 
         // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
@@ -1571,6 +1593,47 @@ namespace Kurenai
                m_RTShadowPipelineState != nullptr && m_RTShadowTexture != nullptr;
     }
 
+    bool KurenaiEngine3D::ShouldRunRaytracedAO() const
+    {
+        return m_AOTechnique == AOTechnique::Raytraced && m_RaytracingScene.IsValid() &&
+               m_RTAOPipelineState != nullptr && m_RTAORawTexture != nullptr && m_RTAOTexture != nullptr;
+    }
+
+    RHI::IRHITexture* KurenaiEngine3D::GetActiveAOTexture() const
+    {
+        if (!m_AOEnabled)
+        {
+            return m_AODisabledTexture.get();
+        }
+        if (ShouldRunRaytracedAO())
+        {
+            return m_RTAOTexture.get();
+        }
+        if (m_AOTechnique == AOTechnique::SSILVisibilityBitmask)
+        {
+            return m_SSILTexture.get();
+        }
+        // SSAO、およびRaytracedを選んでいても実行できないフレーム(高速化構造が無い等)
+        return m_SSAOTexture.get();
+    }
+
+    RHI::IRHITexture* KurenaiEngine3D::GetActiveAORawTexture() const
+    {
+        if (!m_AOEnabled)
+        {
+            return m_AODisabledTexture.get();
+        }
+        if (ShouldRunRaytracedAO())
+        {
+            return m_RTAORawTexture.get();
+        }
+        if (m_AOTechnique == AOTechnique::SSILVisibilityBitmask)
+        {
+            return m_SSILRawTexture.get();
+        }
+        return m_SSAORawTexture.get();
+    }
+
     RHI::IRHITexture* KurenaiEngine3D::GetActiveReflectionOutput() const
     {
         if (m_ReflectionMode == ReflectionMode::ScreenSpace)
@@ -1789,6 +1852,11 @@ namespace Kurenai
                 // RTシャドウの可視率(0〜1のスカラー)。RWTexture2D<float>として書くため単チャンネルの
                 // R32_Floatにする(型付きUAVの読み書きが保証されているのはR32系のみ。AutoExposure.hlsl参照)
                 m_RTShadowTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R32_Float);
+                // RTAOの生バッファはコンピュートがUAVで書くためUAVテクスチャ、ブラー後は
+                // 従来どおりピクセルシェーダーが書くレンダーターゲット。
+                // フォーマットはSSAO/SSILと同じaoFormat(バッファ精度の設定に追従する)
+                m_RTAORawTexture = m_Device->CreateUAVTexture(width, height, aoFormat);
+                m_RTAOTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
             }
             m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
 
@@ -2230,6 +2298,11 @@ namespace Kurenai
         // 落ちるためシーン対角の半分でも十分だったが、RTは画面外も追えるので短く切ると
         // 本来映るはずの建物を通り越して空が映ってしまう。シーン対角そのものを上限にする
         m_RTReflectionMaxDistance = std::clamp(diagonal, 1.0f, 500.0f);
+
+        // RTAOのレイ距離はSSAO/SSILの半径より長く取る。スクリーンスペース手法は
+        // 半径を伸ばすほど画面上のサンプル間隔が粗くなって破綻するが、RTには
+        // その制約が無く、部屋の広さ程度まで伸ばしたほうがバウンス光が正しく回る
+        m_RTAOMaxDistance = std::clamp(diagonal * 0.03f, 0.1f, 10.0f);
     }
 
     Core::Camera KurenaiEngine3D::ComputeInitialCamera(const Assets::Scene& scene)
@@ -3816,54 +3889,101 @@ namespace Kurenai
             },
         });
 
-        // --- AO/GIパス: 選択中の手法(SSAO or SSIL)でG-Bufferから遮蔽率(・間接拡散光)を計算し、
-        //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどちらもrgb=間接拡散光, a=遮蔽率で共通 ---
+        // --- AO/GIパス: 選択中の手法(SSAO / SSIL / RTAO)で遮蔽率(・間接拡散光)を計算し、
+        //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどれもrgb=間接拡散光, a=遮蔽率で共通 ---
         if (m_AOEnabled)
         {
-            RHI::IRHITexture* aoRawTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAORawTexture.get() : m_SSILRawTexture.get();
-            RHI::IRHITexture* aoBlurredTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAOTexture.get() : m_SSILTexture.get();
+            RHI::IRHITexture* const aoRawTexture = GetActiveAORawTexture();
+            RHI::IRHITexture* const aoBlurredTexture = GetActiveAOTexture();
+            const bool useSSIL = !ShouldRunRaytracedAO() && m_AOTechnique == AOTechnique::SSILVisibilityBitmask;
 
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "AO",
-                .Reads = (m_AOTechnique == AOTechnique::SSAO)
-                    ? std::vector<RHI::IRHITexture*>{ m_GBufferNormal.get(), m_GBufferDepth.get() }
-                    : std::vector<RHI::IRHITexture*>{ m_GBufferNormal.get(), m_GBufferDepth.get(), m_DirectLightTexture.get() },
-                .RenderTargets = { aoRawTexture },
-                .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
-                {
-                    cmd->SetViewport(gbufferViewport);
-                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
-
-                    if (m_AOTechnique == AOTechnique::SSAO)
+            if (ShouldRunRaytracedAO())
+            {
+                // RTAOパス。SSAO/SSILと違いコンピュートでUAVへ書くため、レンダーターゲットではなく
+                // Writesで宣言する。レジスタ割り当てはRTAO.hlsl側の宣言と一致させること
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "RTAO",
+                    // 直接光バッファは、バウンス面が画面に映っているときの再放射の放射輝度として読む
+                    // (SSILと同じ理由でDirectLightパスより後に順序付けられる。RTAO.hlsl参照)
+                    .Reads = { m_GBufferNormal.get(), m_GBufferDepth.get(), m_DirectLightTexture.get() },
+                    .Writes = { aoRawTexture },
+                    .Execute = [this](RHI::IRHICommandList* cmd)
                     {
-                        SSAOConstants ssaoConstants{};
-                        std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
-                        ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
-                        cmd->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
+                        RTAOConstants rtAOConstants{};
+                        rtAOConstants.Params0 = {
+                            static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight),
+                            m_RTAOMaxDistance, m_RTAOPower
+                        };
+                        rtAOConstants.Params1 = {
+                            static_cast<float>(std::max(1, m_RTAOSampleCount)), m_RTAOIntensity,
+                            m_RTAOBounceShadowRayEnabled ? 1.0f : 0.0f, 0.0f
+                        };
+                        cmd->UpdateBuffer(m_RTAOConstantBuffer.get(), &rtAOConstants, sizeof(rtAOConstants));
 
-                        cmd->SetPipelineState(m_SSAOPipelineState.get());
-                        cmd->SetConstantBuffer(1, m_SSAOConstantBuffer.get());
-                        cmd->SetTexture(0, m_GBufferNormal.get());
-                        cmd->SetTexture(1, m_GBufferDepth.get());
-                        cmd->Draw(3, 0);
-                    }
-                    else
+                        cmd->SetComputePipelineState(m_RTAOPipelineState.get());
+                        cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(1, m_RTAOConstantBuffer.get());
+
+                        cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+                        cmd->SetComputeTexture(1, m_GBufferNormal.get());
+                        cmd->SetComputeTexture(2, m_GBufferDepth.get());
+                        cmd->SetComputeShaderResourceBuffer(3, m_RaytracingScene.GetVertexAttributeBuffer());
+                        cmd->SetComputeShaderResourceBuffer(4, m_RaytracingScene.GetIndexBuffer());
+                        cmd->SetComputeShaderResourceBuffer(5, m_RaytracingScene.GetMeshInfoBuffer());
+                        cmd->SetComputeShaderResourceBuffer(6, m_RaytracingScene.GetInstanceInfoBuffer());
+                        cmd->SetComputeShaderResourceBuffer(7, m_RaytracingScene.GetMaterialBuffer());
+                        cmd->SetComputeTexture(8, m_DirectLightTexture.get());
+
+                        // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+                        cmd->SetComputeUnorderedAccessTexture(0, m_RTAORawTexture.get());
+                        cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                    },
+                });
+            }
+            else
+            {
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "AO",
+                    .Reads = useSSIL
+                        ? std::vector<RHI::IRHITexture*>{ m_GBufferNormal.get(), m_GBufferDepth.get(), m_DirectLightTexture.get() }
+                        : std::vector<RHI::IRHITexture*>{ m_GBufferNormal.get(), m_GBufferDepth.get() },
+                    .RenderTargets = { aoRawTexture },
+                    .Execute = [this, &gbufferViewport, useSSIL](RHI::IRHICommandList* cmd)
                     {
-                        SSILConstants ssilConstants{};
-                        ssilConstants.Params0 = { m_SSILRadius, m_SSILThickness, m_SSILIntensity, m_SSILPower };
-                        ssilConstants.Params1 = { m_SSILSliceCount, m_SSILStepCount, 0u, 0u };
-                        cmd->UpdateBuffer(m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
+                        cmd->SetViewport(gbufferViewport);
+                        cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                        cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
 
-                        cmd->SetPipelineState(m_SSILPipelineState.get());
-                        cmd->SetConstantBuffer(1, m_SSILConstantBuffer.get());
-                        cmd->SetTexture(0, m_GBufferNormal.get());
-                        cmd->SetTexture(1, m_GBufferDepth.get());
-                        cmd->SetTexture(2, m_DirectLightTexture.get());
-                        cmd->Draw(3, 0);
-                    }
-                },
-            });
+                        if (useSSIL)
+                        {
+                            SSILConstants ssilConstants{};
+                            ssilConstants.Params0 = { m_SSILRadius, m_SSILThickness, m_SSILIntensity, m_SSILPower };
+                            ssilConstants.Params1 = { m_SSILSliceCount, m_SSILStepCount, 0u, 0u };
+                            cmd->UpdateBuffer(m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
+
+                            cmd->SetPipelineState(m_SSILPipelineState.get());
+                            cmd->SetConstantBuffer(1, m_SSILConstantBuffer.get());
+                            cmd->SetTexture(0, m_GBufferNormal.get());
+                            cmd->SetTexture(1, m_GBufferDepth.get());
+                            cmd->SetTexture(2, m_DirectLightTexture.get());
+                            cmd->Draw(3, 0);
+                        }
+                        else
+                        {
+                            SSAOConstants ssaoConstants{};
+                            std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
+                            ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
+                            cmd->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
+
+                            cmd->SetPipelineState(m_SSAOPipelineState.get());
+                            cmd->SetConstantBuffer(1, m_SSAOConstantBuffer.get());
+                            cmd->SetTexture(0, m_GBufferNormal.get());
+                            cmd->SetTexture(1, m_GBufferDepth.get());
+                            cmd->Draw(3, 0);
+                        }
+                    },
+                });
+            }
 
             // ブラーパス: 遮蔽率・間接拡散光のタイル状ノイズをボックスブラーで均す(SSAO/SSIL共通シェーダ)
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -3884,14 +4004,10 @@ namespace Kurenai
             });
         }
 
-        // デバッグ表示(ブラー前確認用)のため、ブラー前の生バッファへの参照も別途保持しておく
-        RHI::IRHITexture* activeAOTexture = m_AODisabledTexture.get();
-        RHI::IRHITexture* activeAORawTexture = m_AODisabledTexture.get();
-        if (m_AOEnabled)
-        {
-            activeAOTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAOTexture.get() : m_SSILTexture.get();
-            activeAORawTexture = (m_AOTechnique == AOTechnique::SSAO) ? m_SSAORawTexture.get() : m_SSILRawTexture.get();
-        }
+        // デバッグ表示(ブラー前確認用)のため、ブラー前の生バッファへの参照も別途保持しておく。
+        // 上のパスが書いた先と必ず一致させるため、どちらも同じアクセサから取る
+        RHI::IRHITexture* const activeAOTexture = GetActiveAOTexture();
+        RHI::IRHITexture* const activeAORawTexture = GetActiveAORawTexture();
 
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{

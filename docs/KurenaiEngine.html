@@ -285,7 +285,7 @@ DLLは実行ファイルと同じフォルダに置かれていないと起動�
 <p>
 <code>KurenaiEngine3D</code> は、Deferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness+
 深度)によるPBRレンダリング、平行光の影(カスケードシャドウマップまたはレイトレーシング)、
-IBL(環境光)、SSAO/SSIL(間接光)、鏡面反射(スクリーンスペース(SSR)またはレイトレーシング)、
+IBL(環境光)、AO/間接光(SSAO/SSILまたはレイトレーシング)、鏡面反射(スクリーンスペース(SSR)またはレイトレーシング)、
 複数シーンの切り替え、ImGuiによる設定パネル一式までを内包した<strong>完結型の3Dレンダラー</strong>です。
 構築して <code>Run()</code> を呼ぶだけでウィンドウが開き、ユーザーが閉じるまでブロックします。
 </p>
@@ -326,9 +326,10 @@ ImGuiパネル経由</strong>):
     <li>右クリックを押しながらマウス移動でカメラ回転</li>
     <li><code>F1</code> でImGuiパネルの表示/非表示切り替え</li>
     <li>8つのImGuiパネル(シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ /
-    デバッグ表示 / システム / プロファイラ)で表示アセットの切り替え、AO(SSAO・SSIL)/
-    スクリーンスペースシャドウ/タイルドライトカリングのON・OFFやパラメータ調整、
-    平行光の影の手法(なし / カスケードシャドウマップ / レイトレーシング)と
+    デバッグ表示 / システム / プロファイラ)で表示アセットの切り替え、AO/間接光・
+    スクリーンスペースシャドウ・タイルドライトカリングのON・OFFやパラメータ調整、
+    AO/間接光の手法(SSAO / SSIL / レイトレーシング)・平行光の影の手法
+    (なし / カスケードシャドウマップ / レイトレーシング)・
     反射の手法(なし / スクリーンスペース / レイトレーシング)の切り替え、
     トーンマップ・ブルーム・自動露出の調整、デバッグ表示バッファの選択、
     時刻(昼夜サイクル)・月の位置・手続き空・EV100(露出)の調整、
@@ -1081,7 +1082,7 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td rowspan="5"><code>[Scene]</code></td><td rowspan="5">0〜1</td><td><code>Name</code></td><td>string</td><td>-</td><td>ファイル名</td><td>ImGuiのシーン一覧に出る表示名</td></tr>
 <tr><td><code>Skybox</code></td><td>path</td><td>-</td><td>Skybox/Sky.dds</td><td>Assetsルートからのキューブマップ<code>.dds</code>相対パス。IBLの環境光もこれから焼かれる</td></tr>
 <tr><td><code>IBLIntensity</code></td><td>float</td><td>-</td><td>変更しない</td><td>IBLの強度倍率。0以上</td></tr>
-<tr><td><code>AmbientOcclusion</code></td><td>bool</td><td>-</td><td>true</td><td>AO/間接光(SSAO・SSIL)の有効/無効</td></tr>
+<tr><td><code>AmbientOcclusion</code></td><td>bool</td><td>-</td><td>true</td><td>AO/間接光の有効/無効。手法(SSAO / SSIL / レイトレーシング)は<code>.kscene</code>では指定せず、レンダリングパネルで切り替える</td></tr>
 <tr><td><code>ScreenSpaceReflection</code></td><td>bool</td><td>-</td><td>true</td><td>鏡面反射の有効/無効。反射は反射先の色で反射を<strong>差し替える</strong>(加算ではない)ため、ON/OFFで全体の明るさは変わらず反射の鮮明さだけが変わる。<strong>手法(スクリーンスペース / レイトレーシング)は<code>.kscene</code>では選べず</strong>、実行環境がDXR Tier 1.1に対応していればレイトレーシング、していなければスクリーンスペースが選ばれる(実行中にUIから切り替えられる)。キー名はSSRしか無かった頃の名残でそのまま据え置いている</td></tr>
 <tr><td rowspan="3"><code>[Model]</code></td><td rowspan="3">1以上</td><td><code>Path</code></td><td>path</td><td><strong>必須</strong></td><td>-</td><td>Assetsルートからの<code>.kmodel</code>相対パス</td></tr>
 <tr><td><code>Translation</code></td><td>float3</td><td>-</td><td>0,0,0</td><td>平行移動</td></tr>
@@ -1362,6 +1363,7 @@ assimp・DirectXTexに加え<code>KurenaiEngineLibrary.vcxproj</code>への依�
 <tr><td>シェーダーモデルがバックエンドで異なる</td><td>DX12はdxcでSM 6.5、DX11はd3dcompilerでSM 5.0へコンパイルする。SM 6.x固有の機能(<code>RayQuery</code>、wave intrinsicsなど)を使ったシェーダーはDX11では動かないため、両バックエンドで使うシェーダーはSM 5.0の範囲で書くこと(4.2.2参照)</td></tr>
 <tr><td>DX12はdxcのDLLを必要とする</td><td><code>dxcompiler.dll</code>と<code>dxil.dll</code>が実行ファイルの隣に必要(ビルド時に自動コピー)。無い場合はログに警告を出してSM 5.0へフォールバックし、レイトレーシングは無効になる(4.2.2参照)</td></tr>
 <tr><td>ポイント/スポットライトの影</td><td>シャドウマップもレイトレーシングも平行光1灯のみ対応。ポイント/スポットライトの影はスクリーンスペースシャドウ(深度バッファのレイマーチ)でのみ得られる</td></tr>
+<tr><td>レイトレーシングAO/GIの間接光</td><td>バウンス面が画面に映っていればすべてのライトの寄与(影付き)を拾えるが、画面外・手前の面に隠れた面では太陽の直接光だけの簡略計算になり、色もマテリアルの定数値になる。またレイの最大距離より遠い面は遮蔽物にも間接光の光源にもならない</td></tr>
 <tr><td>レイトレーシングシャドウの適用範囲</td><td>不透明サーフェス(G-Buffer)の直接光パスだけを置き換える。半透明の描画と反射プローブのキャプチャはカメラ視点の画面空間バッファを使えないため、レイトレーシングを選んでいる間もカスケードシャドウマップを描き続けてそちらを使う</td></tr>
 <tr><td>ライトの同時描画数</td><td>最大1024灯まで(実データでの想定はせいぜい数灯〜十数灯)。超過分はカメラに近い順に採用される</td></tr>
 <tr><td>エリアライト</td><td>未対応(4.6.1参照)。球・チューブ・矩形のライトはモデルからもImGuiからも作成できない</td></tr>

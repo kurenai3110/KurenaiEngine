@@ -227,6 +227,7 @@
     <li><a href="#dxc">24. dxcへの移行(DX12のシェーダーモデル6.x化)</a></li>
     <li><a href="#rtreflection">25. レイトレーシング反射</a></li>
     <li><a href="#rtshadow">26. レイトレーシングシャドウ</a></li>
+    <li><a href="#rtao">27. レイトレーシングAO / GI</a></li>
   </ol>
 </nav>
 
@@ -5191,6 +5192,148 @@ AS再構築9回(初期読み込み+8回)、Error/Warning・D3D12デバッグレ�
 レイトレーシングの選択肢が出ないことを確認。ログに
 「レイトレーシングは利用できません(反射はOff/スクリーンスペース、シャドウはOff/カスケードシャドウマップのみ)」</li>
 <li><strong>ビルド</strong> — 3ソリューション×Debug/Releaseで警告0件。Sample2Dも動作</li>
+</ul>
+</section>
+
+<section id="rtao">
+<h2>27. レイトレーシングAO / GI</h2>
+
+<p>
+反射(25章)・シャドウ(26章)に続く3つ目のレイトレーシングパス。SSAO(13章)/
+SSIL(21章)の代わりに、法線周りの半球へレイを飛ばして遮蔽率と1バウンスの間接拡散光を求める。
+<code>Shaders/3D/RTAO.hlsl</code>(<code>cs_6_5</code>)。
+<code>AOTechnique { SSAO, SSILVisibilityBitmask, Raytraced }</code>の3択にしてUIから切り替えられる。
+</p>
+
+<h3>27.1 既存のAO/GIバッファの規約にそのまま乗せた</h3>
+<p>
+SSAOとSSILは既に<strong>rgb=間接拡散光 / a=遮蔽率</strong>という共通フォーマットを持ち、
+ライティングパスは選択中のテクスチャを1枚読むだけになっていた(21章)。RTAOも同じものを書くので、
+<code>DeferredLighting.hlsl</code>も後段のブラーパス(<code>AOBlur</code>)も<strong>一切変更していない</strong>。
+</p>
+<p>
+違いは書き方だけである。SSAO/SSILはピクセルシェーダーがレンダーターゲットへ書くのに対し、
+RTAOはコンピュートシェーダーがUAVへ書く(高速化構造をバインドできるのがコンピュート用
+ルートシグネチャだけという25章の事情による)。そのため<strong>生バッファだけ</strong>を
+<code>CreateUAVTexture</code>で作り、ブラー後は従来どおりレンダーターゲットにしてある。
+フォーマットはSSAO/SSILと同じ<code>aoFormat</code>で、バッファ精度の設定(HDR / Legacy 8bit)にも追従する。
+</p>
+<p>
+「どのバッファを使うか」の判定は<code>GetActiveAOTexture()</code> /
+<code>GetActiveAORawTexture()</code>の2つのアクセサに集約した。以前は
+「パスが書き込む先」と「ライティングとデバッグ表示が読む先」を別々の式で決めており、
+手法が増えるたびに両方を直す必要があった。Raytracedを選んでいても実行できないフレーム
+(高速化構造が無い等)にSSAOへ落とす処理も、この2つの中だけで完結する。
+</p>
+
+<h3>27.2 余弦重みの半球サンプリング</h3>
+<p>
+レイの向きは法線周りの半球を<strong>余弦重み(cosθ/π)</strong>でサンプルする。この重みで撃つと、
+</p>
+<ul>
+<li><strong>遮蔽率</strong>は「遮蔽されたレイの割合」がそのまま余弦重み付き遮蔽率の推定値になる
+(重み付けの計算が要らない)</li>
+<li><strong>間接光</strong>は <code>E = π/N × ΣL</code> が放射照度(イラディアンス)の推定値になる。
+<code>DeferredLighting.hlsl</code>が<code>(diffuseColor / PI) × indirectLight</code>で受けるので、
+ここでイラディアンスを返せばランバート反射として正しく合成される</li>
+</ul>
+<p>
+サンプルの散らし方はRTShadow(26.3)と同じで、半径方向を層化し方位角を黄金比で回すRank-1格子。
+フレーム番号は混ぜない(デノイザが無い構成では時間ジッタがちらつきになるため)。
+既定は<strong>8サンプル</strong>で、後段の<code>AOBlur</code>(4x4ボックスブラー)が残ったノイズを均す。
+</p>
+
+<h3>27.3 バウンス面の放射輝度は「まず画面を見る」</h3>
+<p>
+最初の実装では、バウンス面の放射輝度を太陽の直接光(影レイ付き)だけから解析的に求めていた。
+これは<strong>Bistro Interiorで間接光が完全に0になる</strong>という形で破綻した。この屋内シーンは
+太陽光がほとんど届かず、光源は環境光とポイントライトだからである。
+</p>
+<p>
+そこで、バウンス面をワールド空間のレイで見つけたあと、<strong>その点をスクリーンへ投影して
+<code>DirectLighting</code>パスの結果を引く</strong>ように変えた。この値には太陽もポイント/スポットも
+影付きで入っているので、映ってさえいれば最も正確で最も安い。SSILがサンプル地点の直接光を
+拾っているのと同じ考え方だが、SSILが<strong>面を見つけること自体を画面に頼っている</strong>のに対し、
+こちらは面の発見はワールド空間で行い、画面は放射輝度の取得にしか使わない。
+</p>
+<p>
+一致判定は深度値の比較ではなく、<strong>その画素の深度から復元したワールド座標とヒット点の距離</strong>で行う。
+深度はReverse-Zで非線形なため、値の差に一定のしきい値を置くと遠近で意味が変わってしまうからである。
+しきい値はカメラからの距離の2%とした(1画素が覆うワールド空間の大きさが遠いほど大きくなるため)。
+画面外・カメラの背後・手前の面に隠れている場合は、太陽の直接光だけの簡略計算へフォールバックする。
+</p>
+<p>
+バウンス面の<strong>環境光は足さない</strong>。<code>DeferredLighting.hlsl</code>は受光面へ別途アンビエントを
+加えており、バウンス面のアンビエントまで拾うと環境光を二重に数えることになる(SSILと同じ方針)。
+</p>
+
+<h3>27.4 ディスクリプタの割り当て</h3>
+<table>
+<thead><tr><th>レジスタ</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>b0</code> / <code>b1</code></td><td>共有の<code>FrameConstants</code> / <code>RTAOConstants</code>(出力サイズ・レイ距離・遮蔽のべき乗・レイ本数・間接光の強さ・影レイの有無)</td></tr>
+<tr><td><code>t0</code></td><td>TLAS</td></tr>
+<tr><td><code>t1</code> / <code>t2</code></td><td>G-Bufferの法線 / 深度</td></tr>
+<tr><td><code>t3</code>〜<code>t7</code></td><td>シーンジオメトリの統合バッファ(頂点属性 / インデックス / メッシュ情報 / インスタンス情報 / マテリアル)</td></tr>
+<tr><td><code>t8</code></td><td><code>DirectLighting</code>パスの結果(27.3)</td></tr>
+<tr><td><code>u0</code></td><td>AO/GIの生バッファ(rgb=間接拡散光, a=遮蔽率)</td></tr>
+</tbody>
+</table>
+<p>
+<code>t3</code>〜<code>t7</code>の構造体定義と索引の辿り方(<code>FetchHitSurface</code>)は、
+RT反射とまったく同じでなければならない(ずれると別の三角形の法線やマテリアルを読む)。
+そこで<strong><code>RaytracingScene.hlsli</code>を新設して共有</strong>し、<code>RTReflection.hlsl</code>からも
+そちらを使うようにした(<code>ShadowSampling.hlsli</code> / <code>ReflectionProbe.hlsli</code>と同じ方針)。
+レジスタ番号はシェーダーごとに空きが違うため、インクルード側がマクロで指定する。
+</p>
+
+<h3>27.5 あわせて直したRT反射の拡散バウンスのスケール</h3>
+<p>
+この共通化の作業中に、<code>RTReflection.hlsl</code>の<code>ShadeHitSurface</code>で
+太陽の拡散反射に<strong>ランバートBRDFの正規化<code>1/π</code>が抜けていた</strong>ことが分かった
+(アンビエント側は<code>irradiance = E/π</code>を引いているため正しかった)。
+<code>DirectLighting.hlsl</code>の<code>kd·albedo/PI</code>とスケールが揃っておらず、
+反射に映る日向の拡散面だけがπ倍(約3.14倍)明るくなっていたため、この機会に直した。
+</p>
+
+<h3>27.6 この段階の制約</h3>
+<ul>
+<li><strong>バウンス面が画面外だと簡略計算になる</strong> — 27.3のフォールバック。太陽の直接光のみで、
+色もマテリアルの定数値(bindlessが無いためテクスチャを読めない。25章と同じ制約)</li>
+<li><strong>1バウンスのみ</strong> — バウンス面が受ける環境光は足さない(27.3)</li>
+<li><strong>レイの最大距離で打ち切る</strong> — これより遠い面は遮蔽物にも間接光の光源にもならない。
+AOの半径という意味では自然だが、GIとしては部屋の広さ程度まで伸ばしたほうが正しく回る。
+既定はシーン対角の3%(0.1〜10でクランプ)で、UIから10まで上げられる</li>
+<li><strong>すべての三角形を不透明として扱う</strong>(<code>RAY_FLAG_FORCE_OPAQUE</code>)</li>
+<li><strong>デノイザが無い</strong> — 8サンプル+4x4ボックスブラーではまだ粒状のノイズが残る。
+遮蔽率のデバッグ表示で直接確認できる</li>
+<li><strong>シーンは静的前提</strong> — 22章のTLASをそのまま使う</li>
+</ul>
+
+<h4>検証</h4>
+<ul>
+<li><strong>SSILとの比較(本命)</strong> — Sponzaの同一視点でRTAOとSSILを撮り比べたところ、
+<strong>日陰の柱・垂れ幕がRTAO側でだけ日なたの床からの暖色のバウンス光を受けていた</strong>
+(SSIL側はほぼ黒に落ちる)。8bit値で差8超のピクセルは25.88%、最大84。
+間接光バッファ(rgb)を直接見ても、RTAOは柱とプランターに暖色+植栽の緑がのった値が入るのに対し、
+SSILはほぼ0だった</li>
+<li><strong>SSAOとの比較</strong> — Bistro Interiorで比べると、RTAO側は梁の下・壁板の入隅・椅子の脚まわりに
+はっきりした接触影が出るのに対し、SSAO側は平坦で明るい。遮蔽率バッファ(a)を直接見ても
+形状に沿った妥当な暗がりになっている</li>
+<li><strong>間接光が0になる不具合の修正確認</strong> — 27.3の変更前はBistro Interiorで間接光バッファが
+完全に真っ黒だった。変更後、Sponzaでは非ゼロのバウンス光が入ることを確認した
+(Bistro Interiorは光源が無く太陽も届かないシーンのため、変更後も0のままが正しい)</li>
+<li><strong>コスト</strong> — Release / Sponza / レンダー解像度1280x720 / 8サンプルで、AO/GIパスのGPU時間は
+<strong>SSAO 0.073ms・SSIL 0.542ms・RTAO 0.564ms</strong>(同一インスタンス・同一視点・
+フレームレート制限オフ。同時に測ったRTShadowが0.157〜0.160msで一定なことでGPUの状態が揃っていることを確認)。
+<strong>SSILとほぼ同じコストで、間接光の品質は大きく上回る</strong></li>
+<li><strong>バッファ精度</strong> — Legacy 8bit(<code>R8G8B8A8_UNorm</code>)へ切り替えても
+生バッファの型付きUAV書き込みが正しく動き、描画も破綻しないことを確認</li>
+<li><strong>シーン往復・リサイズ</strong> — RTAOを有効にしたまま8シーンを一巡(AS再構築11回)し、
+900x600 / 1500x950 / 1100x700 / 2400x1500とリサイズ。Error/Warningとも0件</li>
+<li><strong>DX11</strong> — 手法が「SSAO / SSIL (Visibility Bitmask)」の2択になり、
+レイトレーシングの選択肢が出ないことを確認</li>
+<li><strong>ビルド</strong> — 3ソリューション×Debug/Releaseで警告0件</li>
 </ul>
 </section>
 

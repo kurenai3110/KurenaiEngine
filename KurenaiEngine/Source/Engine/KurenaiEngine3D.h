@@ -113,6 +113,12 @@ namespace Kurenai
         // 判定を1か所に集約している(パスを追加する条件とDirectLightingがその出力を読む条件が
         // ずれると、実行していないパスの残骸を影として使ってしまう)
         bool ShouldRunRaytracedShadow() const;
+        // このフレームでRTAOパスを実行するか。上2つと同じ理由で判定を1か所に集約している
+        bool ShouldRunRaytracedAO() const;
+        // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
+        // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
+        RHI::IRHITexture* GetActiveAOTexture() const;
+        RHI::IRHITexture* GetActiveAORawTexture() const;
         // このフレームでHDRのシーン色として後段(自動露出・ブルーム・トーンマップ)が読むべき
         // テクスチャを返す。反射パスを実行したならその出力、していなければm_SceneColor
         RHI::IRHITexture* GetActiveReflectionOutput() const;
@@ -299,12 +305,15 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_DirectLightTexture;
 
         // AO/GI手法の選択。SSAOは遮蔽率のみ、SSIL(Visibility Bitmask)は遮蔽率に加えて
-        // 近傍サーフェスからの間接拡散光(バウンス光)も計算する。どちらも出力フォーマットは共通
-        // (rgb=間接拡散光, a=遮蔽率)で、ライティングパスは選択中のテクスチャを1枚読むだけでよい
+        // 近傍サーフェスからの間接拡散光(バウンス光)も計算する。Raytracedは同じものを
+        // 深度バッファではなく高速化構造への交差判定で求める(画面外の遮蔽物も効く)。
+        // いずれも出力フォーマットは共通(rgb=間接拡散光, a=遮蔽率)で、
+        // ライティングパスは選択中のテクスチャを1枚読むだけでよい
         enum class AOTechnique
         {
             SSAO,
             SSILVisibilityBitmask,
+            Raytraced,
         };
         bool m_AOEnabled = Defaults::AOEnabled;
         AOTechnique m_AOTechnique = AOTechnique::SSAO;
@@ -337,6 +346,23 @@ namespace Kurenai
         float m_SSILPower = Defaults::SSILPower;
         uint32_t m_SSILSliceCount = Defaults::SSILSliceCount;
         uint32_t m_SSILStepCount = Defaults::SSILStepCount;
+
+        // RTAOパス: 法線周りの半球へ余弦重みでレイを撃ち、遮蔽率と1バウンスの間接拡散光を求める
+        // コンピュートパス。出力はSSAO/SSILとまったく同じ意味・同じフォーマットなので、
+        // 後段のAOBlurパスとライティングパスは無変更で使い回せる(27章)。
+        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る。
+        // 生バッファだけはコンピュートがUAVで書くためCreateUAVTextureで作る(ブラー後は従来どおり
+        // ピクセルシェーダーが書くレンダーターゲット)
+        std::unique_ptr<RHI::IRHIShader> m_RTAOComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_RTAOPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_RTAORawTexture;
+        std::unique_ptr<RHI::IRHITexture> m_RTAOTexture;
+        std::unique_ptr<RHI::IRHIBuffer> m_RTAOConstantBuffer;
+        int32_t m_RTAOSampleCount = Defaults::RTAOSampleCount;
+        float m_RTAOMaxDistance = Defaults::RTAOMaxDistance;
+        float m_RTAOPower = Defaults::RTAOPower;
+        float m_RTAOIntensity = Defaults::RTAOIntensity;
+        bool m_RTAOBounceShadowRayEnabled = Defaults::RTAOBounceShadowRayEnabled;
 
         // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)。
         // SceneColorはHDR(R16G16B16A16_Float)で、トーンマッピングは行わない(Tonemapパス参照)

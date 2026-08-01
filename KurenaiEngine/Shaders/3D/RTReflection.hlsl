@@ -30,6 +30,8 @@ static const float kRayOriginBiasSlope = 1e-4f;
 // シーン外まで飛ばしても当たるものは無いので上限を設ける
 static const float kShadowRayMaxDistance = 1.0e4f;
 
+static const float kPI = 3.14159265359f;
+
 // 反射プローブの環境ソースと鏡面IBLの重み(DeferredLighting.hlsl / SSR.hlslと共有)。
 // 拡散イラディアンスは専用マップ経路を使わないため、拡散側のレジスタは定義しない
 // (ヒット面のアンビエントはプリフィルタ済み鏡面の最終ミップを直接引く。後述)
@@ -92,52 +94,14 @@ Texture2D BRDFLUTTexture : register(t7);
 #include "ReflectionProbe.hlsli"
 
 // --- シーンジオメトリの統合バッファ(Assets::RaytracingScene) ---
-// RayQueryが返すのはInstanceID / GeometryIndex / PrimitiveIndex / 重心座標だけなので、
-// そこから法線・マテリアルへたどり着くための索引をここから引く
-// (引き方の全体像はSource/Library/Assets/RaytracingScene.hの冒頭コメント)。
-
-// Assets::RaytracingVertexAttribute(16バイト)と1対1で対応
-struct RTVertexAttribute
-{
-    float2 UV;
-    uint PackedNormal; // オクタヘドラル+half2。NormalEncoding.hlsliのOctEncodeと同じ方式
-    uint Padding;
-};
-
-// Assets::RaytracingMeshInfo(16バイト)
-struct RTMeshInfo
-{
-    uint AttributeOffset;
-    uint IndexOffset;
-    uint MaterialIndex;
-    uint Padding;
-};
-
-// Assets::RaytracingInstanceInfo(80バイト)
-struct RTInstanceInfo
-{
-    float4x4 NormalMatrix; // モデルのローカル空間の法線 → ワールド空間
-    uint MeshInfoOffset;
-    uint3 Padding;
-};
-
-// Assets::RaytracingMaterial(48バイト)
-struct RTMaterial
-{
-    float4 BaseColorFactor;
-    float3 EmissiveFactor;
-    float MetallicFactor;
-    float RoughnessFactor;
-    float AlphaCutoff;
-    uint Flags;
-    uint Padding;
-};
-
-StructuredBuffer<RTVertexAttribute> RTAttributes : register(t11);
-StructuredBuffer<uint> RTIndices : register(t12);
-StructuredBuffer<RTMeshInfo> RTMeshInfos : register(t13);
-StructuredBuffer<RTInstanceInfo> RTInstanceInfos : register(t14);
-StructuredBuffer<RTMaterial> RTMaterials : register(t15);
+// 構造体の写し・索引の辿り方(FetchHitSurface)・遮蔽レイはRaytracingScene.hlsliが持つ。
+// RTAO.hlslとまったく同じ辿り方でなければならないため共有している
+#define KURENAI_RT_ATTRIBUTE_REGISTER t11
+#define KURENAI_RT_INDEX_REGISTER t12
+#define KURENAI_RT_MESHINFO_REGISTER t13
+#define KURENAI_RT_INSTANCEINFO_REGISTER t14
+#define KURENAI_RT_MATERIAL_REGISTER t15
+#include "RaytracingScene.hlsli"
 
 RWTexture2D<float4> OutputTexture : register(u0);
 
@@ -148,41 +112,7 @@ float3 ReconstructWorldPos(float2 uv, float depth)
     return worldPos.xyz / worldPos.w;
 }
 
-// half2へ詰めたオクタヘドラル法線を復元する。CPU側のAssets::OctEncodeNormalの逆変換
-float3 UnpackNormal(uint packed)
-{
-    return OctDecode(float2(f16tof32(packed & 0xFFFFu), f16tof32(packed >> 16)));
-}
-
-// ヒットした三角形の法線(ワールド空間)とマテリアルを取り出す。
-// 法線は3頂点を重心座標で補間したもの(スムーズシェーディング)
-void FetchHitSurface(uint instanceID, uint geometryIndex, uint primitiveIndex, float2 barycentrics,
-                     out float3 worldNormal, out RTMaterial material)
-{
-    const RTInstanceInfo instanceInfo = RTInstanceInfos[instanceID];
-    const RTMeshInfo meshInfo = RTMeshInfos[instanceInfo.MeshInfoOffset + geometryIndex];
-
-    const uint indexBase = meshInfo.IndexOffset + primitiveIndex * 3u;
-    const uint i0 = RTIndices[indexBase + 0u];
-    const uint i1 = RTIndices[indexBase + 1u];
-    const uint i2 = RTIndices[indexBase + 2u];
-
-    const float3 n0 = UnpackNormal(RTAttributes[meshInfo.AttributeOffset + i0].PackedNormal);
-    const float3 n1 = UnpackNormal(RTAttributes[meshInfo.AttributeOffset + i1].PackedNormal);
-    const float3 n2 = UnpackNormal(RTAttributes[meshInfo.AttributeOffset + i2].PackedNormal);
-
-    // RayQueryが返す重心座標は2成分(1つ目の頂点の重みは 1 - x - y)
-    const float3 weights = float3(1.0f - barycentrics.x - barycentrics.y, barycentrics.x, barycentrics.y);
-    const float3 localNormal = n0 * weights.x + n1 * weights.y + n2 * weights.z;
-
-    // BLASの頂点はモデルのローカル空間のまま登録してあるため、法線もワールドへ移す必要がある。
-    // NormalMatrixは転置済みでHLSLへ渡ってくるのでmul(vector, matrix)の順で掛ける
-    worldNormal = normalize(mul(float4(localNormal, 0.0f), instanceInfo.NormalMatrix).xyz);
-    material = RTMaterials[meshInfo.MaterialIndex];
-}
-
-// 指定位置から太陽へ影レイを撃ち、遮られていなければ1、遮られていれば0を返す。
-// 最初のヒットで打ち切ってよいので ACCEPT_FIRST_HIT_AND_END_SEARCH を付ける
+// 指定位置から太陽へ影レイを撃ち、遮られていなければ1、遮られていれば0を返す
 float TraceSunShadow(float3 position, float3 normal, float3 toSun)
 {
     if (Params1.x <= 0.5f)
@@ -190,17 +120,9 @@ float TraceSunShadow(float3 position, float3 normal, float3 toSun)
         return 1.0f;
     }
 
-    RayDesc ray;
-    ray.Origin = position + normal * kRayOriginBias;
-    ray.Direction = toSun;
-    ray.TMin = kRayOriginBias;
-    ray.TMax = kShadowRayMaxDistance;
-
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
-    query.TraceRayInline(SceneTLAS, RAY_FLAG_NONE, 0xFFu, ray);
-    query.Proceed();
-
-    return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;
+    const bool occluded = TraceOcclusionRay(
+        SceneTLAS, position + normal * kRayOriginBias, toSun, kRayOriginBias, kShadowRayMaxDistance);
+    return occluded ? 0.0f : 1.0f;
 }
 
 // ヒット面の陰影を求める。1バウンス目の反射に映る色なので、太陽の直接光(影レイ付き)と
@@ -217,13 +139,15 @@ float3 ShadeHitSurface(float3 hitPosition, float3 hitNormal, RTMaterial material
     const float3 diffuseAlbedo = baseColor * (1.0f - material.MetallicFactor);
 
     // --- 太陽の直接光(Lambert拡散) ---
+    // 1/PIはランバートBRDFの正規化。DirectLighting.hlslのEvaluateDirectBRDF(kd*albedo/PI)と
+    // スケールを揃えるために必要で、これが抜けていると反射に映る日向の面だけがπ倍明るくなる
     float3 radiance = float3(0.0f, 0.0f, 0.0f);
     const float3 toSun = normalize(-LightDirection.xyz);
     const float NdotL = saturate(dot(N, toSun));
     if (NdotL > 0.0f)
     {
         const float shadow = TraceSunShadow(hitPosition, N, toSun);
-        radiance += diffuseAlbedo * LightColor.rgb * NdotL * shadow;
+        radiance += (diffuseAlbedo / kPI) * LightColor.rgb * NdotL * shadow;
     }
 
     // --- アンビエント ---

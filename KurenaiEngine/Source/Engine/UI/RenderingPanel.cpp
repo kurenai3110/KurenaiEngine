@@ -137,15 +137,34 @@ namespace Kurenai::UI
             return;
         }
 
-        static const char* kTechniqueNames[] = { "SSAO", "SSIL (Visibility Bitmask)" };
+        // レイトレーシングは非対応の環境(DX11、あるいはDXR Tier 1.1に達していないDX12)では
+        // 選択肢そのものを出さない(影・反射の手法選択と同じ方針)
+        static const char* kTechniqueNamesWithRT[] =
+        {
+            "SSAO", "SSIL (Visibility Bitmask)", "レイトレーシング (RTAO/RTGI)"
+        };
+        static const char* kTechniqueNamesWithoutRT[] = { "SSAO", "SSIL (Visibility Bitmask)" };
+
+        const bool rtAvailable = m_Engine.m_RaytracingAvailable;
+        const char* const* techniqueNames = rtAvailable ? kTechniqueNamesWithRT : kTechniqueNamesWithoutRT;
+        const int techniqueCount =
+            rtAvailable ? IM_ARRAYSIZE(kTechniqueNamesWithRT) : IM_ARRAYSIZE(kTechniqueNamesWithoutRT);
+
         int techniqueIndex = static_cast<int>(m_Engine.m_AOTechnique);
         if (ComboEx(
-                "手法###Technique", &techniqueIndex, kTechniqueNames, IM_ARRAYSIZE(kTechniqueNames),
+                "手法###Technique", &techniqueIndex, techniqueNames, techniqueCount,
                 static_cast<int>(AOTechnique::SSAO),
                 "SSAOは遮蔽率だけを求める。SSILは遮蔽率に加えて近傍サーフェスからの"
-                "間接拡散光(バウンス光)も計算するため重いが、暗部の色づきが自然になる"))
+                "間接拡散光(バウンス光)も計算するため重いが、暗部の色づきが自然になる。"
+                "レイトレーシングは同じものを深度バッファではなくシーン全体への交差判定で求めるため、"
+                "画面に映っていない遮蔽物・反射面も効く"))
         {
             m_Engine.m_AOTechnique = static_cast<AOTechnique>(techniqueIndex);
+        }
+
+        if (!rtAvailable)
+        {
+            ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
         }
 
         // 半径・厚みはシーン読み込み時に対角長から決まるため固定の既定値を持たない。
@@ -161,6 +180,29 @@ namespace Kurenai::UI
             SliderFloatEx(
                 "SSAO 強度###SSAOPower", &m_Engine.m_SSAOPower, 0.1f, 4.0f, Defaults::SSAOPower, "%.3f", 0,
                 "遮蔽率にかける指数。大きいほど陰影が濃くなる");
+        }
+        else if (m_Engine.m_AOTechnique == AOTechnique::Raytraced)
+        {
+            SliderFloatSceneDependent(
+                "RT 最大距離###RTAOMaxDistance", &m_Engine.m_RTAOMaxDistance, 0.05f, 10.0f, recalcRequested, "%.3f",
+                "遮蔽とバウンス光を探すレイの最大距離(ワールド単位)。シーン読み込み時に"
+                "シーンの対角長から自動設定される。これより遠くにある面は遮蔽物にならず、"
+                "間接光の光源にもならない");
+            SliderIntEx(
+                "RT サンプル数###RTAOSampleCount", &m_Engine.m_RTAOSampleCount, 1, 32, Defaults::RTAOSampleCount,
+                "1ピクセルあたりに半球へ撃つレイの本数。デノイザを持たずブラーだけで均すため、"
+                "少なすぎるとブラー後もノイズが残る");
+            SliderFloatEx(
+                "RT 間接光の強さ###RTAOIntensity", &m_Engine.m_RTAOIntensity, 0.0f, 8.0f, Defaults::RTAOIntensity,
+                "%.3f", 0,
+                "バウンス面から拾った間接拡散光にかける倍率。1.0が物理的に正しい値");
+            SliderFloatEx(
+                "RT 遮蔽の強さ###RTAOPower", &m_Engine.m_RTAOPower, 0.1f, 4.0f, Defaults::RTAOPower, "%.3f", 0,
+                "遮蔽率にかける指数。大きいほど陰影が濃くなる");
+            CheckboxEx(
+                "バウンス面に影を落とす###RTAOBounceShadowRay", &m_Engine.m_RTAOBounceShadowRayEnabled,
+                Defaults::RTAOBounceShadowRayEnabled,
+                "バウンス面から太陽へ影レイを撃つ。切ると日陰の面まで間接光を放つようになるが、その分速い");
         }
         else
         {
