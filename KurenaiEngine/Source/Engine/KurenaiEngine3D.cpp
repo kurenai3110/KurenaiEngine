@@ -155,7 +155,7 @@ namespace Kurenai
             // アトラスの中身を露出に依存しない物理量に保つ。
             // R32で確保してある(22.6節)ので、夜の小さな値でもfp32の範囲に余裕がある
             DirectX::XMFLOAT4 DDGIParams4;
-            // bent normalによる遮蔽用(末尾に追加のため既存シェーダのオフセットは変わらない、25章)。
+            // bent normalによる遮蔽用(末尾に追加のため既存シェーダのオフセットは変わらない、34章)。
             // x=ディフューズAOの出所   0=従来のベイクAO(Material.b) / 1=aoN = dot(N, bRaw)
             // y=スペキュラ遮蔽の方式   0=Frostbite近似(従来)      / 1=bent normalの錐体交差
             // z=multi-bounce AO       0=無効(既定)                / 1=有効
@@ -2131,7 +2131,7 @@ namespace Kurenai
             // .rgb = bRaw、.a = 有効フラグ。
             //
             // R11G11B10_Floatにはできない ―― 符号なしのため負の成分が落ち、
-            // 半球の半分の方向を表現できなくなる。1080pで約16MB増える(25章)
+            // 半球の半分の方向を表現できなくなる。1080pで約16MB増える(34章)
             m_GBufferBentNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
 
             // TAAの履歴バッファ2枚。読みながら同じテクスチャへ書けないので、毎フレーム役割を入れ替える
@@ -2676,7 +2676,7 @@ namespace Kurenai
         // 自発光の強度倍率はキャプチャのエミッシブ項へそのまま乗る
         mixFloat(m_EmissiveIntensity);
 
-        // bent normalによる遮蔽(25章)。ProbeCapture.hlslが同じ分岐を持つため、
+        // bent normalによる遮蔽(34章)。ProbeCapture.hlslが同じ分岐を持つため、
         // 含め忘れるとつまみを動かしてもプローブの中身だけ古いまま残る
         mixBool(m_BentNormalAOSource);
         mixFloat(static_cast<float>(m_SpecularOcclusionMode));
@@ -4976,7 +4976,7 @@ namespace Kurenai
                 // DDGI(22章)。反射プローブと同じ理由で、無効時も含めて常にバインドする
                 cmd->SetTexture(15, m_DDGIIrradianceAtlas.get());
                 cmd->SetTexture(16, m_DDGIDistanceAtlas.get());
-                // bent normal(25章)。t0〜t16が埋まっているためt17。
+                // bent normal(34章)。t0〜t16が埋まっているためt17。
                 // これに合わせてkTextureSlotCountを17→18へ上げてある
                 cmd->SetTexture(17, m_GBufferBentNormal.get());
                 cmd->Draw(3, 0);
@@ -5096,7 +5096,7 @@ namespace Kurenai
                     cmd->SetTexture(2, draw.Mesh->MetallicRoughnessTexture);
                     cmd->SetTexture(3, draw.Mesh->EmissiveTexture);
                     cmd->SetTexture(13, draw.Mesh->OcclusionTexture);
-                    // bent normal(25章)。このパスはt0〜t13を使い切っているためt14
+                    // bent normal(34章)。このパスはt0〜t13を使い切っているためt14
                     cmd->SetTexture(14, draw.Mesh->BentNormalTexture);
 
                     cmd->DrawIndexed(draw.Mesh->IndexCount, 0, 0);
@@ -5145,7 +5145,7 @@ namespace Kurenai
                     cmd->SetTexture(8, m_ProbePrefilteredArray.get());
                     cmd->SetShaderResourceBuffer(9, m_ProbeBuffer.get());
                     cmd->SetTexture(10, m_ProbeDistanceArray.get());
-                    // bent normal(25章)。Lightingパスとまったく同じものを読まないと、
+                    // bent normal(34章)。Lightingパスとまったく同じものを読まないと、
                     // SSRが適用される領域とされない領域の境界に段差が出る
                     cmd->SetTexture(11, m_GBufferBentNormal.get());
                     cmd->Draw(3, 0);
@@ -5162,7 +5162,7 @@ namespace Kurenai
                 .Reads = {
                     m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                     m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
-                    m_ProbePrefilteredArray.get(),
+                    m_ProbePrefilteredArray.get(), m_GBufferBentNormal.get(),
                 },
                 .Writes = { m_RTReflectionTexture.get() },
                 .Execute = [this, activeAOTexture](RHI::IRHICommandList* cmd)
@@ -5196,6 +5196,9 @@ namespace Kurenai
                     cmd->SetComputeShaderResourceBuffer(13, m_RaytracingScene.GetMeshInfoBuffer());
                     cmd->SetComputeShaderResourceBuffer(14, m_RaytracingScene.GetInstanceInfoBuffer());
                     cmd->SetComputeShaderResourceBuffer(15, m_RaytracingScene.GetMaterialBuffer());
+                    // bent normal(34章)。t0〜t15が埋まっているためt16。
+                    // SSR.hlslと同じくスペキュラ遮蔽の方向依存を再現するために要る
+                    cmd->SetComputeTexture(16, m_GBufferBentNormal.get());
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                     cmd->SetComputeUnorderedAccessTexture(0, m_RTReflectionTexture.get());
@@ -5645,7 +5648,7 @@ namespace Kurenai
             presentMode = 11;
             break;
         case DebugView::BentNormal:
-            // bent normal(25章)。正規化しないベクトルなので、法線表示(Mode 7)のような
+            // bent normal(34章)。正規化しないベクトルなので、法線表示(Mode 7)のような
             // オクタヘドラルのデコードは通さず専用のMode 15で扱う
             presentSourceTexture = m_GBufferBentNormal.get();
             presentMode = 15;

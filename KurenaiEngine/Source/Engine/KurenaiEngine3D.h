@@ -809,7 +809,7 @@ namespace Kurenai
             SceneColorRaw,      // トーンマップ前のHDRシーンカラーをリニアのまま無加工で表示(測定用)
             DDGIIrradiance,     // DDGIのイラディアンスアトラス(オクタヘドラル2D、22章)
             DDGIDistance,       // DDGIの距離モーメントアトラス(R=平均距離、G=平均二乗距離)
-            BentNormal,         // bent normal(25章)。Debug View Gainが1なら軸を色表示、
+            BentNormal,         // bent normal(34章)。Debug View Gainが1なら軸を色表示、
                                 // 1.5より大きいと長さ(=aoB)をグレースケール表示。
                                 // データを持たないマテリアルはマゼンタで塗る
         };
@@ -980,7 +980,7 @@ namespace Kurenai
         // 畳み込み処理自体はいつでも検証できるよう残してあり、このトグルをONにすると
         // その場で焼いて(m_IBLIrradianceBaked)従来経路に切り替わる
         bool m_IBLUseDedicatedIrradiance = Defaults::IBLUseDedicatedIrradiance;
-        // bent normalによる遮蔽(25章)。FrameConstants::OcclusionParamsへ載る
+        // bent normalによる遮蔽(34章)。FrameConstants::OcclusionParamsへ載る
         bool m_BentNormalAOSource = Defaults::BentNormalAOSource;
         // スペキュラ遮蔽の方式。FrameConstants.OcclusionParams.yへ数値として渡し、
         // SpecularEnergy.hlsliのComposeSpecularOcclusionが切り替える。
@@ -989,7 +989,7 @@ namespace Kurenai
         {
             Legacy = 0,  // Frostbite近似(方向を見ない従来近似)
             Cone = 1,    // 球冠交差(SpecularOcclusionBand。d >= av+as で厳密に0になる)
-            SG = 2,      // 球面ガウス(SpecularOcclusionSG、25.11節。常に正なので凹部が純黒へ潰れない)
+            SG = 2,      // 球面ガウス(SpecularOcclusionSG、34.11節。常に正なので凹部が純黒へ潰れない)
         };
         SpecularOcclusionMode m_SpecularOcclusionMode =
             static_cast<SpecularOcclusionMode>(Defaults::SpecularOcclusionMode);

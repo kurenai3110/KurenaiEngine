@@ -485,7 +485,7 @@ namespace KurenaiPacker
                 {
                     // ミップはfp32のまま生成してから一括でfp16へ落とす。
                     // ボックスフィルタが「ベクトルの平均」になる順序であることが重要で、
-                    // 長さを取ってから平均するとJensenの不等式より必ず過大評価になる(25章)
+                    // 長さを取ってから平均するとJensenの不等式より必ず過大評価になる(34章)
                     DirectX::ScratchImage source;
                     HRESULT hr = source.Initialize2D(DXGI_FORMAT_R32G32B32A32_FLOAT, resolution, resolution, 1, 1);
                     if (FAILED(hr))

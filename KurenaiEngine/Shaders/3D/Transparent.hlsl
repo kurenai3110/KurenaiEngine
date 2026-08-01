@@ -65,7 +65,7 @@ cbuffer FrameConstants : register(b0)
     // C++側のFrameConstantsと並びを必ず一致させること
     float4x4 PrevViewProj;
     float4 TAAParams;
-    // bent normalによる遮蔽(25章)。DeferredLighting.hlslと同じ規則を適用する
+    // bent normalによる遮蔽(34章)。DeferredLighting.hlslと同じ規則を適用する
     float4 OcclusionParams;
 };
 
@@ -108,7 +108,7 @@ Texture2D EmissiveTexture : register(t3);
 // 上記マクロ参照)に、t11をBRDFLUTTexture(下記)に割り当てて衝突するため、空いているt13を使う
 Texture2D OcclusionTexture : register(t13);
 // bent normal(遮蔽マップと同じライトマップUV空間)。このパスはt0〜t13を使い切っているためt14。
-// 不透明側はG-Bufferから読むが、フォワードの半透明はここでテクスチャを直接引く(25章)
+// 不透明側はG-Bufferから読むが、フォワードの半透明はここでテクスチャを直接引く(34章)
 Texture2D BentNormalTexture : register(t14);
 // カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
 // DirectLighting.hlslと同じ実装を共有しているため、半透明と不透明で影がずれることはない。
@@ -263,7 +263,7 @@ void EvaluateIBLSplit(
     // 半透明パスはスクリーンスペースのAO/GIバッファを持たないため、そちらは1.0を渡す。
     // ComposeSpecularOcclusionはどちらの経路も「遮蔽なしで厳密に1」なので、
     // 片方が無くても結果は歪まない(遮蔽マップもbent normalも無ければ以前と同じ結果になる)
-    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(25.11節)
+    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(34.11節)
     const int soMode = (int)(OcclusionParams.y + 0.5f);
     const float3 specularWeight =
         SpecularIBLWeight(F0, NdotV, roughness, soMode, bent, N, R, materialAO, 1.0f, brdf,

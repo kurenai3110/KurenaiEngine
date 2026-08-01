@@ -214,7 +214,7 @@ float SpecularOcclusion(float NdotV, float roughness, float ao)
     return saturate(pow(NdotV + ao, specularOcclusionExponent) - 1.0f + ao);
 }
 
-// === bent normal による遮蔽(25章) =========================================
+// === bent normal による遮蔽(34章) =========================================
 //
 // ベイクした「正規化しない可視方向の平均」bRaw を3つの量へ分解して使う。
 //
@@ -315,17 +315,17 @@ float SpecularOcclusionBand(float3 axis, float3 N, float3 R, float aoB, float ro
     //   return lerp(saturate(aoB), 1.0f, band);
     // を入れたが、これは誤りなので戻した。aoBはスカラーで方向を持たないため、
     // 下限に置くと「どの方向でもこれ以上暗くなれない」という方向非依存の床になる。
-    // 25章の目的は「壁を向いた反射だけ暗くする」ことなので、暗くする側だけが潰れて
+    // 34章の目的は「壁を向いた反射だけ暗くする」ことなので、暗くする側だけが潰れて
     // 方向情報が明るくする側にしか効かなくなる。実測でも下限を入れると
-    // 「従来近似より暗い画素が0%」になり、方向による減光が消えていた(25.10.2)
+    // 「従来近似より暗い画素が0%」になり、方向による減光が消えていた(34.10.2)
     return ref > 1e-6f ? saturate(inter / ref) : 0.0f;
 }
 
-// === 可視性を球面ガウス(SG)へ ―― 25.11節 ==================================
+// === 可視性を球面ガウス(SG)へ ―― 34.11節 ==================================
 //
 // 上のSphericalCapIntersectionAreaは可視性を二値の球冠として近似しているため、
 // d >= av + as で交差面積が厳密に0になる。金属(拡散成分なし)の凹部ではこれが
-// そのまま純黒へ直結する。aoBを下限に置く対策は方向性を破壊するため使えない(25.10.2)。
+// そのまま純黒へ直結する。aoBを下限に置く対策は方向性を破壊するため使えない(34.10.2)。
 //
 // 直すべきは近似そのもの ―― 球冠を球面ガウス(SG)に置き換える。2つのSGの球面内積は
 // 閉形式で常に正なので、遮蔽側にもd依存の小さな残りが出て、方向性を保ったまま
@@ -355,13 +355,13 @@ float SGInnerProduct(float lambda1, float lambda2, float cosD)
 
 // 球冠の半頂角αとSGの鋭さλの対応づけ。球冠の立体角 2π(1-cosα) とSGの立体角 ≈2π/λ を
 // 揃えると λ = k/(1-cosα)。三角関数を経由しないのが利点(asin(sqrt(x))はx→1で微分が
-// 発散し、aoBのわずかな誤差が角度の大きな誤差になる。25.10節)
+// 発散し、aoBのわずかな誤差が角度の大きな誤差になる。34.10節)
 //
 // 【k = 1 は導出値であって調整値ではない】上の立体角の一致からそのまま出てくる値がk = 1。
 // kを上げるとSGが尖って硬い球冠へ近づき、下げると広がる。
 //
 // 実機(Occlusion Bake Compareのmetallicドラゴン、110214画素)で振って測った結果、
-// 導出値の1.0以外は使えない(25.11.4節。「潰れ画素」= Frostbite近似では輝度15以上
+// 導出値の1.0以外は使えない(34.11.4節。「潰れ画素」= Frostbite近似では輝度15以上
 // あるのにそのモードで5未満になった画素。ノイズ床は±1画素):
 //
 //   方式      最小輝度  潰れ画素  球冠が黒く潰した画素での中央輝度  Frostbiteより暗い画素
@@ -373,7 +373,7 @@ float SGInnerProduct(float lambda1, float lambda2, float cosD)
 // k = 3 では減衰が急すぎて、球冠交差が黒く潰していた場所をまったく救えないまま全体を
 // 暗くするだけになり、潰れ画素がかえって増える。逆に k = 0.5 では純黒はほぼ消えるが
 // 方向による減光が1.5%まで落ち、aoB下限版で却下したのと同じ「方向性が消える」失敗
-// (25.10.2節)へ向かう。k = 1.0 は純黒をほぼ解消しつつ方向性を保つ
+// (34.10.2節)へ向かう。k = 1.0 は純黒をほぼ解消しつつ方向性を保つ
 static const float kSGVisibility = 1.0f;
 static const float kSGSpecular = 1.0f;
 
@@ -409,7 +409,7 @@ float SpecularOcclusionSG(float3 axis, float3 N, float3 R, float aoB, float roug
 // pow()が非線形なため結果が変わり、回帰確認で見た目が変わってしまう
 //
 // soMode: 0 = Frostbite近似(方向を見ない) / 1 = 球冠交差(SpecularOcclusionBand、
-// d >= av+as で厳密に0になる) / 2 = 球面ガウス(SpecularOcclusionSG、25.11節。
+// d >= av+as で厳密に0になる) / 2 = 球面ガウス(SpecularOcclusionSG、34.11節。
 // 常に正なので凹部が純黒へ潰れない)
 float ComposeSpecularOcclusion(int soMode, BentOcclusion bent, float3 N, float3 R,
                                float NdotV, float roughness, float materialAO, float ssao)

@@ -70,7 +70,7 @@ cbuffer FrameConstants : register(b0)
     // C++側のFrameConstantsと並びを必ず一致させること
     float4x4 PrevViewProj;
     float4 TAAParams;
-    // bent normalによる遮蔽(25章)。DeferredLighting.hlslと必ず同じ値を読むこと
+    // bent normalによる遮蔽(34章)。DeferredLighting.hlslと必ず同じ値を読むこと
     float4 OcclusionParams;
 };
 
@@ -90,7 +90,7 @@ Texture2D AOTexture : register(t5);
 // split-sum近似の第2項、BRDF積分LUT
 Texture2D BRDFLUTTexture : register(t6);
 // bent normal(GBuffer.hlslがSV_TARGET5へ書いたワールド空間のbRaw)。
-// このパスはt0〜t10を使っているためt11(25章)
+// このパスはt0〜t10を使っているためt11(34章)
 Texture2D BentNormalTexture : register(t11);
 
 // プリフィルタ済み鏡面(t7)・プローブのキューブマップ配列(t8)・プローブの影響範囲バッファ(t9)・
@@ -203,7 +203,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 反射ベクトルも同じものを渡す。あちらはreflect(-V, N)でnormalizeを挟まないが、
     // VとNが単位ベクトルならreflectは長さを保つので同じ向き・同じ長さになる
     const BentOcclusion bent = DecodeBentOcclusion(BentNormalTexture.Sample(DataSampler, input.UV), N);
-    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(25.11節)。
+    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(34.11節)。
     // DeferredLighting.hlslとまったく同じ読み方をすること(段差防止)
     const int soMode = (int)(OcclusionParams.y + 0.5f);
     const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;

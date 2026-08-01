@@ -288,7 +288,7 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     if (Mode == 15)
     {
-        // bent normal(25章)。.rgb = 正規化しないbRaw、.a = 有効フラグ。
+        // bent normal(34章)。.rgb = 正規化しないbRaw、.a = 有効フラグ。
         // 有効フラグが立っていないテクセル(bent normalを持たないマテリアル)は
         // 「データ無し」がひと目で分かるようマゼンタで塗る。
         // 軸は方向なので *0.5+0.5 で色にし、Gainで長さ(=aoB)の表示へ切り替える:

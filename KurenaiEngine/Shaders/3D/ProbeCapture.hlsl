@@ -59,7 +59,7 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams3;
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
-    // bent normalによる遮蔽(25章)。プローブの中身も不透明パスと同じ規則で焼かないと、
+    // bent normalによる遮蔽(34章)。プローブの中身も不透明パスと同じ規則で焼かないと、
     // つまみを動かしたときにプローブだけ古い見た目のまま残る。
     // KurenaiEngine3D側の再ベイク署名にもこの値を混ぜてあること
     float4 OcclusionParams;
@@ -97,7 +97,7 @@ Texture2D EmissiveTexture : register(t3);
 // ベイク済みアンビエントオクルージョン(遮蔽マップ)。t4はカスケードシャドウマップ配列が
 // 使っているためt5を使う(GBuffer.hlsl/Transparent.hlslと共通)
 Texture2D OcclusionTexture : register(t5);
-// bent normal(遮蔽マップと同じライトマップUV空間)。GBuffer.hlslと同じくt6(25章)
+// bent normal(遮蔽マップと同じライトマップUV空間)。GBuffer.hlslと同じくt6(34章)
 Texture2D BentNormalTexture : register(t6);
 // カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
 // DirectLighting.hlsl/Transparent.hlslと同じ実装を共有しているため、プローブに焼かれる影と

@@ -348,7 +348,7 @@ namespace Kurenai::UI
             "環境光(間接光)の鏡面成分だけに掛かる倍率。金属やガラスの映り込みの強さを、"
             "環境からの照り返しを保ったまま増減できる。SSRと反射プローブにも同じ倍率が効く");
 
-        // bent normalによる遮蔽(25章)。ベイク済みのbent normalを持つモデルでのみ効く
+        // bent normalによる遮蔽(34章)。ベイク済みのbent normalを持つモデルでのみ効く
         // (持たないマテリアルは黒1x1へフォールバックし、どのトグルでも見た目が変わらない)
         CheckboxEx(
             "ディフューズAOにbent normalを使う###BentNormalAOSource", &m_Engine.m_BentNormalAOSource,
@@ -367,8 +367,8 @@ namespace Kurenai::UI
                     IM_ARRAYSIZE(kSpecularOcclusionModes), Defaults::SpecularOcclusionMode,
                     "鏡面の遮蔽方式。壁際で、壁を向いた反射だけが暗くなるのが「Frostbite近似」以外の"
                     "共通の挙動。「球冠交差」は可視性を二値の球冠として扱うため、遮蔽が強い金属の凹部が"
-                    "純黒へ潰れることがある(25.10節)。「球面ガウス」は同じ交差を柔らかい分布に"
-                    "置き換えたもので、方向性を保ったまま潰れを避ける(25.11節)。既定は球面ガウス"))
+                    "純黒へ潰れることがある(34.10節)。「球面ガウス」は同じ交差を柔らかい分布に"
+                    "置き換えたもので、方向性を保ったまま潰れを避ける(34.11節)。既定は球面ガウス"))
             {
                 m_Engine.m_SpecularOcclusionMode =
                     static_cast<KurenaiEngine3D::SpecularOcclusionMode>(mode);

@@ -40,7 +40,7 @@ namespace Kurenai::Assets
         // 遮蔽マップが「どれだけ隠れているか」しか持たないのに対し、こちらは
         // 「どの方向が開いているか」を持つ。消費側が軸 normalize(bRaw)・aoB = length(bRaw)・
         // aoN = dot(N, bRaw) の3つへ分解し、スペキュラ遮蔽の方向依存(壁を向いた反射だけを
-        // 暗くする)とディフューズの方向バイアスを扱う(25章)
+        // 暗くする)とディフューズの方向バイアスを扱う(34章)
         RHI::IRHITexture* BentNormalTexture = nullptr;
         float MetallicFactor = 0.0f;
         // ソースデータに値が無い場合はkInvalidMaterialFactor(負値)が入る。シェーダー側は

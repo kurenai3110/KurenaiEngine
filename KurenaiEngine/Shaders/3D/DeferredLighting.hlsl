@@ -76,7 +76,7 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams3;
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
-    // bent normalによる遮蔽(25章)。x=ディフューズAOの出所、y=スペキュラ遮蔽の方式、
+    // bent normalによる遮蔽(34章)。x=ディフューズAOの出所、y=スペキュラ遮蔽の方式、
     // z=multi-bounce AO、w=未使用。cbufferは宣言順レイアウトなので、
     // 使わないシェーダーは末尾のこのフィールドを宣言しなくてよい
     float4 OcclusionParams;
@@ -96,7 +96,7 @@ Texture2D EmissiveTexture : register(t6);
 Texture2D NormalTexture : register(t7);
 // bent normal(GBuffer.hlslがSV_TARGET5へ書いたワールド空間のbRaw)。
 // t0〜t14はG-Buffer/BRDFLUT/反射プローブ、t15・t16はDDGI(22章)が使用中のためt17。
-// DX12のkTextureSlotCountを17→18へ上げてある(25章)
+// DX12のkTextureSlotCountを17→18へ上げてある(34章)
 Texture2D BentNormalTexture : register(t17);
 // split-sum近似の第2項、BRDF積分LUT(x=NdotV, y=ラフネス。BRDFLUT.hlslで生成、方向性を持たない
 // (NdotV, ラフネス)の2Dルックアップテーブルのため、これだけは通常のTexture2Dのまま)
@@ -157,7 +157,7 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // 係数の定義はReflectionProbe.hlsliのSpecularIBLWeightに1か所だけ置いている(20章)。
     // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(14.9.2.1節)
     const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
-    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(25.11節)
+    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(34.11節)
     const int soMode = (int)(OcclusionParams.y + 0.5f);
     const float3 specularWeight =
         SpecularIBLWeight(F0, NdotV, roughness, soMode, bent, N, R, materialAO, ssao, brdf,
@@ -248,7 +248,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 【重要】SSR.hlslは「Lightingパスが適用した鏡面IBLをまったく同じ式で再現する」設計のため、
     // この合成式を変える場合はSSR.hlsl側も必ず同時に合わせること(ズレると鏡面が二重計上/引きすぎになる)
     float ao = aoSample.a * materialAO;
-    // bent normal(25章)。持たないマテリアルは黒1x1がバインドされ、
+    // bent normal(34章)。持たないマテリアルは黒1x1がバインドされ、
     // DecodeBentOcclusionがaxis = N・aoB = 1(遮蔽なし)へ落とす
     const BentOcclusion bent = DecodeBentOcclusion(BentNormalTexture.Sample(DataSampler, input.UV), N);
     // ディフューズAOの出所。従来のベイクAO(materialAO)と aoN = dot(N, bRaw) は
