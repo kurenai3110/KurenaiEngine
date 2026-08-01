@@ -234,6 +234,7 @@
     <li><a href="#ddgi">31. DDGI(拡散グローバルイルミネーション)</a></li>
     <li><a href="#launchscripts">32. 起動スクリプト(Run.bat)</a></li>
     <li><a href="#runtimeswitch">33. 内部レンダー解像度とグラフィックスAPIの実行時切り替え</a></li>
+    <li><a href="#clouds">34. 雲(レイヤーモデル、P5)</a></li>
   </ol>
 </nav>
 
@@ -7739,6 +7740,143 @@ DX11 → DX12 → DX11 と切り替えると<code>Logger::SetFileSuffix</code>�
 1回目のDX11のログが消えていた。「そのプロセスで初めて開く接尾辞なら<code>trunc</code>、
 2回目以降は<code>app</code>」になるよう、開いた接尾辞の集合を持って分岐させている。
 起動ごとにログを作り直す従来の挙動はそのまま保たれる。
+</p>
+</section>
+
+<section id="clouds">
+<h2>34. 雲(レイヤーモデル、P5)</h2>
+
+<p>
+<a href="#procedural-sky">21章</a>で導入した手続き空(Perez分布)へ、積雲1層を足した。
+<code>Shaders/3D/Sky.hlsli</code>は既に背景(<code>DeferredLighting.hlsl</code>)・水面反射
+(<code>SSR.hlsl</code>、20.6節)・IBL用キューブマップのベイク(<code>SkyGenerate.hlsl</code>、
+21.10節)の3者が共有する空モデルの単一定義であるため、雲もここへ足すだけで背景と水面の
+映り込みの両方に自動で行き渡る。これが21.10節でこの共有ヘッダー構造を先に作った理由の1つでもある。
+</p>
+
+<h3>34.1 フルボリュメトリックではなくレイヤーモデルを選んだ理由</h3>
+<p>
+雲の表現としては、3Dテクスチャ(または複数スライスのボリューム)へ密度場を持ち、視線をその中で
+レイマーチングするフルボリュメトリック手法が写実性では上回る。しかし本エンジンの<code>RHI::
+IRHIDevice</code>にはそもそも3Dテクスチャを生成する手段が無い
+(<code>Source/Library/RHI/IRHIDevice.h</code>のテクスチャ生成APIは<code>CreateRenderTexture</code>
+(2D)・<code>CreateUAVTexture</code>(UAV付き2D)・<code>CreateMippedUAVTexture</code>
+(ミップ付きUAV2D)・<code>CreateUAVTextureCube</code>/<code>CreateMippedUAVTextureCube</code>
+(キューブ)・<code>CreateMippedUAVTextureCubeArray</code>(キューブ配列)・
+<code>CreateDepthTexture</code>/<code>CreateDepthTextureArray</code>(深度)のみで、2D系・キューブ系・
+深度系の3Dテクスチャに相当するものは無い)。DX11/DX12の両バックエンドへ3Dテクスチャ対応を
+新設するのはRHI全体に関わる変更で、この段階ではコストに見合わない。
+</p>
+<p>
+そこで、雲底の高度<code>h</code>にある水平な無限平面と視線ベクトルの交点からUVを作り、
+そのUV上で2次元のノイズ(fBm)を評価する<strong>レイヤーモデル</strong>を採った。ボリューム
+レイマーチングの「奥行き方向に何度もサンプルする」コストを、1回の平面交点計算+数段の
+自己影サンプリングまで落とせる。代わりに雲の内部構造(立体的な起伏、下から見上げたときの
+奥行き感)は表現できないが、遠景の空としては許容範囲と判断した。
+</p>
+
+<h3>34.2 解析式であることの副次的な利点 ― 背景と水面反射が自動的に一致する</h3>
+<p>
+レイヤーモデルは<code>SkyColor(dir, params)</code>という「方向を渡すと色が返る」純粋関数のまま
+実装できるため、<a href="#ssrprobe">20章</a>で確立した「背景が足した値とSSRが差し替える値の
+定義が一致する」という設計にそのまま乗る。背景(<code>DeferredLighting.hlsl</code>)と水面反射
+(<code>SSR.hlsl</code>)は同じ<code>SkyParameters</code>を組み立てて同じ<code>SkyColor</code>を
+呼ぶだけで、雲を含めて同じ空を見る。もしフルボリュメトリックだった場合、水面に映る雲を
+出すには反射方向へもう1回レイマーチングを行う必要があり、コストが単純に2倍になっていた。
+</p>
+
+<h3>34.3 判断A ― IBL用キューブマップには雲を焼かない</h3>
+<p>
+<code>SkyGenerate.hlsl</code>(21.10節、IBL専用の256px/面キューブマップをベイクする)は、
+<code>SkyParameters</code>を組み立てる際に雲のフィールドを明示的にすべて無効
+(<code>CloudCoverage = 0.0f</code>等)で埋めて<code>SkyColor</code>を呼ぶ。理由は2つ:
+</p>
+<ul>
+<li>雲を焼き込むと、雲が風で動くたびにキューブの焼き直し(空生成6回+プリフィルタ36回の
+ディスパッチ、21章参照)が必要になる。上半球の余弦重み積分(拡散イラディアンスとして畳み込まれる量)
+は雲の位置が変わってもほぼ不変なため、この再ベイク連鎖は純粋な無駄になる。</li>
+<li>CPU側の照度正規化(<code>ComputeSkyZenithScale</code>、θ64分割×φ256分割=16,384サンプルの
+積分。21.10節で導入)は雲を知らない。雲を焼き込むと「正規化の目標(空光の照度)」と
+「実際に焼かれた明るさ」が食い違う。CPUに雲のfBmを実装して同期させる手も検討したが、
+Sky.hlsli側のノイズ実装(周期性・オクターブ数)が変わるたびにCPU側も追従させる負債のほうが、
+「IBLの雲は焼かない」という割り切りより大きいと判断した。</li>
+</ul>
+
+<h3>34.4 判断B ― 被覆率による減光はキューブのベイク時にだけ掛ける</h3>
+<p>
+判断Aの結果、IBLは常に雲の無い晴天基準の明るさで焼かれる。しかし被覆率50%の曇り空で
+シーンが晴天と同じ明るさに照らされるのは明らかに不自然なため、<code>KurenaiEngine3D::Render()</code>
+の<code>bakeSkyThisFrame</code>ブロックが被覆率から求めた全天の平均透過率
+(<code>ComputeCloudAverageTransmittance</code>。被覆率0で1.0、被覆率1で
+<code>kCloudOvercastTransmittance</code>(0.35)まで線形に落ちる近似で、物理的な導出ではない)を、
+キューブへ焼く<code>SkyBakeConstants::ZenithLuminance</code>にだけ掛ける
+(<code>m_ActiveSkyZenithLuminance * m_ActiveCloudTransmittance</code>)。
+</p>
+<p class="note">
+<strong>背景・水面反射へ渡る<code>FrameConstants.SkyParams.x</code>
+(<code>m_ActiveSkyZenithLuminance</code>)自体は減光しない。</strong>
+ここも減光すると、<code>Sky.hlsli</code>の<code>SkyColor</code>が雲の隙間から見える青空
+(晴天色 × 透過率の「透過率」が1に近い部分)まで暗くしたうえへ、そこへさらに雲の散乱光を
+重ねることになり、二重に暗くなってしまう。晴天色そのものは常に「雲を考慮しない基準の明るさ」の
+まま保ち、雲の効果は<code>SkyColor</code>内の合成(34.6節)だけで表現する。
+</p>
+
+<h3>34.5 太陽の直接光は減光しない</h3>
+<p>
+<code>ComputeSunLighting</code>・<code>SunLighting::SkyIlluminanceLux</code>/
+<code>KeyIlluminanceLux</code>は雲の追加にあたって一切変更していない。被覆率は「空全体の
+どれだけが雲で覆われているか」という平均的な量であって、「太陽そのものが雲に隠れているか」を
+表す量ではない。後者は本質的に二値的な現象(太陽が雲の裏にあるか無いか)であり、平均量である
+被覆率からは表現できない。中途半端に太陽光を被覆率で減光すると、雲が無い方向を向いていても
+(=太陽が実際には見えているのに)光が弱まるという矛盾が生じるため、直接光・カスケードシャドウ・
+自動露出の基準は雲の影響を受けないままにしてある。
+</p>
+
+<h3>34.6 密度・自己影・合成</h3>
+<p>
+雲のUVは視線と雲底平面の交点から作るため、視線がほぼ水平に近づくほどワールド座標に比例して
+無限に大きくなる。風のスクロールオフセット(<code>m_CloudScrollOffset</code>)をCPU側で
+有限に保つため、ノイズの格子セル番号を周期<code>kCloudNoisePeriod</code>(256、
+<code>Sky.hlsli</code>とC++側<code>RenderThreadMain</code>の両方に同じ値でハードコードしてあり、
+ずれると風で雲がジャンプする)で剰余を取ってからハッシュする周期的な値ノイズを使う。
+fBmはオクターブ数<code>kCloudOctaves</code>(既定4)段で、オクターブごとに周波数と周期を
+同時に2倍にすることで各オクターブの周期性を揃えている。
+</p>
+<p>
+密度は<code>remap(fBm出力, 1-被覆率, 1.0)</code>を<code>saturate</code>したもので、
+被覆率0では常に0になる(34.7節の判断Cの根拠)。光路長は<code>1/max(dir.y, ε)</code>に比例させ、
+上限をクランプする(クランプしないと地平線際で1画素あたりの雲セル数が発散しエイリアシングになる)。
+自己影は雲底のUVから太陽方向(XZへ投影)へ数ステップ進めながら密度を積分し、ビアの法則
+(<code>exp(-density * 消散係数 * 経路長)</code>)で求める。前方散乱はHenyey-Greenstein位相関数で
+表現し、太陽を直視する方向に近いほど雲の縁が明るくなる(半逆光のシルバーライニング)。
+</p>
+<p>
+合成は<code>最終色 = 晴天色 * 透過率 + 雲の散乱光</code>という形にしてあり、単純な
+<code>lerp(晴天色, 雲色, 被覆率)</code>ではない。lerpだと被覆率に応じて画面全体が一様に
+雲色へ寄ってしまい、雲の隙間からのぞく青空まで色が濁る。上の式なら透過率が1に近い(=雲が薄い)
+方向では晴天色がそのまま残り、透過率が0に近い(=雲が濃い)方向でのみ雲の散乱光が支配的になる。
+</p>
+<p class="note">
+地平線より下(<code>Sky.hlsli</code>の<code>kGroundFadeStartY</code>未満、地面フェードの分岐)
+には雲を一切掛けない。地面フェードは「プラトー色から接地色への遷移」という別の合成をすでに
+持っており、そこへ雲を重ねる意味のある絵にならないため。
+</p>
+
+<h3>34.7 判断C ― 被覆率0のときP4完了時点と画素まで一致させる</h3>
+<p>
+<code>Sky.hlsli</code>の<code>SkyColor</code>は晴天色(<code>SkyColorUpper</code>の結果)を
+求めた直後、<code>CloudCoverage &lt;= 0.0f || dir.y &lt;= 0.0f</code>なら雲の計算
+(<code>EvaluateCloudLayer</code>、ノイズ・自己影・位相関数のすべて)を一切呼ばずその晴天色を
+そのまま返す。返す値は雲を追加する前の実装と数値として同一になる。<code>SkyGenerate.hlsl</code>は
+常にこの早期脱出経路を通るため、IBL用キューブマップの中身は雲追加の前後で変わらない。
+</p>
+
+<h3>34.8 このフェーズの範囲</h3>
+<p>
+計画には積雲+高層の巻雲という多層化も含まれるが、P5では積雲1層に絞った。コストとリスクを
+抑え、1層をきちんと動かすことを優先する判断による。<code>SkyParameters</code>の雲用フィールドは
+将来2層目を足す際に素直に並べられるよう、あえて配列化せず層ごとに独立した名前のスカラー/
+ベクトルのまま持たせてある。
 </p>
 </section>
 

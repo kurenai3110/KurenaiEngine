@@ -180,6 +180,17 @@ namespace Kurenai
             DirectX::XMFLOAT4 SkyGroundTint;
             // w=太陽の暖色の強さ(SunGlowStrength)
             DirectX::XMFLOAT4 SkySunGlowTint;
+            // 雲(さらに末尾に追加、P5)。DeferredLighting.hlsl/SSR.hlslのFrameConstants宣言と
+            // 同じ順・同じ型であること(2つのシェーダーが背景と水面反射で同じ雲を描くための前提。
+            // Sky.hlsli冒頭のコメント・各シェーダーのMakeSkyParametersのコメント参照)。
+            // CloudParams0: x=被覆率(0で雲なし。Sky.hlsliのSkyColorが早期脱出する)、
+            //               y=雲底の高度[m](カメラのワールドY基準)、
+            //               z=UVスケール[ノイズ空間の距離/m]、w=消散係数
+            DirectX::XMFLOAT4 CloudParams0;
+            // CloudParams1: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
+            //               同じ周期でstd::fmod済み。m_CloudScrollOffset参照)、
+            //               z=Henyey-Greensteinの非対称パラメータ、w=未使用
+            DirectX::XMFLOAT4 CloudParams1;
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -523,6 +534,33 @@ namespace Kurenai
             }
 
             return targetIlluminanceLux / static_cast<float>(integral);
+        }
+
+        // Sky.hlsliのkCloudNoisePeriodと同じ値であること(P5)。CPU側(RenderThreadMainの
+        // m_CloudScrollOffset更新)がこの値でstd::fmodして風のスクロール位相を巻き戻しており、
+        // ずれるとCPU側で巻き戻した位置とシェーダー側の周期境界が食い違い、風が吹くたびに
+        // 雲がジャンプする
+        constexpr float kCloudNoisePeriod = 256.0f;
+
+        // 被覆率から求める全天の平均透過率(判断B)。IBL用キューブマップには雲を焼き込まない
+        // (Sky.hlsliの雲セクション、判断Aのコメント参照)ため、被覆率が上がってもキューブの
+        // 明るさが晴天のまま据え置かれてしまう。これを補うため、キューブへ焼く天頂輝度にだけ
+        // この平均透過率を掛けて全体を暗くする。
+        // 【物理的な導出ではない】実際の曇天は多重散乱・雲の厚みで複雑に減光するが、ここでは
+        // 「被覆率0で1.0(無変化)、被覆率1でkCloudOvercastTransmittanceまで直線的に落ちる」という
+        // 単純な線形補間で済ませている。目的はIBLの明るさが被覆率に応じて定性的に下がることであり、
+        // 精密な値は求めていない(実測で調整可能)
+        constexpr float kCloudOvercastTransmittance = 0.35f;
+
+        float ComputeCloudAverageTransmittance(bool cloudEnabled, float coverage)
+        {
+            if (!cloudEnabled)
+            {
+                return 1.0f;
+            }
+            const float clampedCoverage = std::clamp(coverage, 0.0f, 1.0f);
+            // lerp(1.0f, kCloudOvercastTransmittance, clampedCoverage)と同じ
+            return 1.0f + (kCloudOvercastTransmittance - 1.0f) * clampedCoverage;
         }
 
         // 実在の写真露出値(EV100)から露出係数を求める。絞り値・シャッター速度・ISO感度から一意に
@@ -3188,6 +3226,29 @@ namespace Kurenai
                 m_WaterScrollOffset = std::fmod(m_WaterScrollOffset + renderDeltaTime * m_WaterWaveSpeed, 1.0f);
             }
 
+            // 雲のスクロール位相(P5)。水面とまったく同じ場所・同じ理由でRenderスレッド専有のまま進める。
+            // 【風速の単位について】m_CloudWindSpeedは実世界の速度[m/s]として持つ(UIで直感的に
+            // 扱えるようにするため)。Sky.hlsliのノイズ空間はワールド距離にCloudUvScaleを掛けた
+            // ものなので、ノイズ空間上の移動量へ換算するにはここでCloudUvScaleを掛ける必要がある。
+            // 【なぜベイクをdirtyにしないのか】風のスクロールはIBLキューブの明るさに一切影響しない
+            // (判断A: キューブには雲を焼かない)。ここでm_SkyBakeDirtyを立てると、風が吹くたびに
+            // 毎フレーム空生成6回+プリフィルタ36回のディスパッチが走ってしまい、判断Aの利点が
+            // 丸ごと消える。被覆率のような「キューブの明るさに効く」パラメータだけがdirtyを立てる
+            // (RenderingPanel::DrawCloudSection参照)
+            if (!m_CloudTimeFrozen)
+            {
+                const float windRadians = DirectX::XMConvertToRadians(m_CloudWindDirectionDegrees);
+                const float windDirX = std::cos(windRadians);
+                const float windDirZ = std::sin(windRadians);
+                const float advanceNoiseSpace = m_CloudWindSpeed * m_CloudUvScale * renderDeltaTime;
+                // Sky.hlsliのkCloudNoisePeriodと同じ値でwrapする(このファイル冒頭近くの
+                // kCloudNoisePeriod定数のコメント参照)
+                m_CloudScrollOffset.x =
+                    std::fmod(m_CloudScrollOffset.x + windDirX * advanceNoiseSpace, kCloudNoisePeriod);
+                m_CloudScrollOffset.y =
+                    std::fmod(m_CloudScrollOffset.y + windDirZ * advanceNoiseSpace, kCloudNoisePeriod);
+            }
+
             // m_Scene・ポストプロセスのパラメータ・UIの状態はすべてこのRenderスレッド専有に
             // なったため、以前あったm_SceneMutexによる保護は不要になっている
             // (経緯はdocs/Architecture.html 23章)
@@ -3715,6 +3776,13 @@ namespace Kurenai
                 skyTintSet.SunGlow.x, skyTintSet.SunGlow.y, skyTintSet.SunGlow.z, skyTintSet.SunGlowStrength
             };
 
+            // 雲(P5、判断B)による平均透過率もベイクと同じタイミングで確定させ、m_ActiveSky*と
+            // 同じ理由でメンバへキャッシュする。**この値はm_ActiveSkyZenithLuminanceには掛けない**
+            // ——キューブへ焼くSkyBakeConstants::ZenithLuminance(下のSkyGenerateパス参照)にだけ
+            // 掛ける。m_ActiveSkyZenithLuminanceを減光すると、雲の隙間から見える青空まで暗くなり、
+            // Sky.hlsli側のSkyColorがそこへさらに雲を重ねることで二重に暗くなってしまう
+            m_ActiveCloudTransmittance = ComputeCloudAverageTransmittance(m_CloudEnabled, m_CloudCoverage);
+
             // 空が変わったのでプリフィルタ済み鏡面も焼き直す必要がある。
             // 焼き直し要否のフラグ更新はここ(キャッシュを書いた場所)に一本化し、
             // 下のSkyGenerateパス登録側では行わない(二重更新・更新漏れを避けるため)
@@ -3913,6 +3981,17 @@ namespace Kurenai
         // y=波のスケール倍率(m_WaterWaveScale)、z=波の強さ(m_WaterWaveStrength、0〜1)を
         // Water.hlslへ渡す(UIのスライダーが見た目へ反映されるようにするため)
         constants.TimeParams = { m_WaterScrollOffset, m_WaterWaveScale, m_WaterWaveStrength, 0.0f };
+
+        // 雲(P5)。DeferredLighting.hlsl(背景)とSSR.hlsl(水面反射)の両方が同じ値を読むため、
+        // ここで一度だけ組み立てる。m_CloudEnabled=falseのときはCloudParams0.xへ0を渡し、
+        // Sky.hlsli側のSkyColorが早期脱出する経路(判断C)を通す
+        constants.CloudParams0 = {
+            m_CloudEnabled ? m_CloudCoverage : 0.0f,
+            m_CloudAltitude,
+            m_CloudUvScale,
+            m_CloudDensity,
+        };
+        constants.CloudParams1 = { m_CloudScrollOffset.x, m_CloudScrollOffset.y, m_CloudForwardG, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
@@ -4001,7 +4080,11 @@ namespace Kurenai
                     {
                         SkyBakeConstants skyConstants{};
                         skyConstants.Face = face;
-                        skyConstants.ZenithLuminance = m_ActiveSkyZenithLuminance;
+                        // 雲(P5、判断B)。m_ActiveSkyZenithLuminance自体は雲を考慮しない晴天の値の
+                        // ままで、キューブへ焼く値にだけm_ActiveCloudTransmittance(被覆率が
+                        // 変わらない限り1.0)を掛ける。理由はm_ActiveCloudTransmittanceの
+                        // 代入元(上のbakeSkyThisFrameブロック)のコメント参照
+                        skyConstants.ZenithLuminance = m_ActiveSkyZenithLuminance * m_ActiveCloudTransmittance;
                         skyConstants.SunDirection = {
                             sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
                         };

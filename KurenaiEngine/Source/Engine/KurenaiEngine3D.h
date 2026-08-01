@@ -1311,6 +1311,36 @@ namespace Kurenai
         // シーンでは常に無効化される(SSRパスのExecute内、usingProceduralSkyとのAND判定)
         bool m_WaterAnalyticSkyReflection = Defaults::WaterAnalyticSkyReflection;
 
+        // --- 雲(P5) ---
+        // このフェーズでは積雲1層のみ(計画にある巻雲の多層化はP5の対象外)。
+        // 無効時はFrameConstants.CloudParams0.xへ被覆率0を渡し、Sky.hlsli側の早期脱出
+        // (SkyColor)を通す。CloudCoverageスライダー自体は動かせるが効果が出ない状態になる
+        bool m_CloudEnabled = Defaults::CloudEnabled;
+        // 被覆率。0.45は写真の見た目に寄せて選んだ値であり、物理的な導出ではない
+        // (実測で調整可能。EngineDefaults.h参照)
+        float m_CloudCoverage = Defaults::CloudCoverage;
+        // 雲底の高度[m](カメラのワールドY基準。Sky.hlsli EvaluateCloudLayerが視線との交点を
+        // 求めるのに使う)
+        float m_CloudAltitude = Defaults::CloudAltitude;
+        float m_CloudUvScale = Defaults::CloudUvScale;
+        float m_CloudDensity = Defaults::CloudDensity;
+        // 風速[m/s]。実世界の速度としてUIで直感的に扱えるようにしてあり、ノイズ空間の移動量への
+        // 換算(CloudUvScaleを掛ける)はRenderThreadMainのm_CloudScrollOffset更新側で行う
+        float m_CloudWindSpeed = Defaults::CloudWindSpeed;
+        // 風向き(度)。太陽方位角(m_SunAzimuthDegrees)と同じ規約(X軸0度、Z軸(+方向)90度)
+        float m_CloudWindDirectionDegrees = Defaults::CloudWindDirectionDegrees;
+        float m_CloudForwardG = Defaults::CloudForwardG;
+        // trueにすると雲のスクロールが止まる(m_WaterTimeFrozenの雲版。A/B比較などスクロールが
+        // 揺れると困る場面で使う)
+        bool m_CloudTimeFrozen = Defaults::CloudTimeFrozen;
+        // 風によるノイズ空間の移動量。m_WaterScrollOffsetと同じくUIつまみではなく内部状態で、
+        // RenderThreadMainがSky.hlsliのkCloudNoisePeriodと同じ周期でstd::fmodしながら進める
+        DirectX::XMFLOAT2 m_CloudScrollOffset{ 0.0f, 0.0f };
+        // 判断B(被覆率による平均透過率をIBLキューブのベイク時にだけ掛ける)のキャッシュ。
+        // m_ActiveSkyZenithLuminance等と同じ設計(bakeSkyThisFrameブロックで確定させ、
+        // ベイクとFrameConstantsが同じタイミングの値を見るようにする)に揃えてある
+        float m_ActiveCloudTransmittance = 1.0f;
+
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)
         float m_SunAzimuthDegrees = Defaults::SunAzimuthDegrees;

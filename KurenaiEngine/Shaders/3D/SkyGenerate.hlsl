@@ -87,6 +87,20 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     params.SunGlowTint = SunGlowTint.rgb;
     params.SunGlowStrength = SunGlowTint.w;
 
+    // 雲(P5)は明示的に無効(CloudCoverage=0)で埋める。IBL用キューブマップには雲を焼き込まない
+    // (判断A、詳細はSky.hlsliの雲セクションのコメント参照)。雲が風で動くたびにキューブの
+    // 焼き直し(空生成6回+プリフィルタ36回のディスパッチ)が必要になるのを避けるためで、
+    // 被覆率による減光(判断B)はキューブへ焼く直前にCPU側(KurenaiEngine3D.cpp)が
+    // ZenithLuminanceへ平均透過率を掛けることで表現する。CloudCoverage=0ならSky.hlsli側の
+    // 早期脱出でこの下の残りのフィールドは一切参照されないが、意図を読めるようにするため
+    // 他のフィールドも明示的に0で埋めておく
+    params.CloudCoverage = 0.0f;
+    params.CloudAltitude = 0.0f;
+    params.CloudUvScale = 0.0f;
+    params.CloudDensity = 0.0f;
+    params.CloudScrollOffset = float2(0.0f, 0.0f);
+    params.CloudForwardG = 0.0f;
+
     const float3 color = SkyColor(dir, params);
 
     // 面ごとに要素数1のUAVを張るためスライスは常に0

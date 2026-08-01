@@ -78,6 +78,31 @@ namespace Kurenai::Defaults
     // (KurenaiEngine3D::m_WaterAnalyticSkyReflectionのコメント参照)
     inline constexpr bool WaterAnalyticSkyReflection = true;
 
+    // --- 雲(P5: 積雲1層のレイヤーモデル) ---
+    inline constexpr bool CloudEnabled = true;
+    // 被覆率。0.45は「晴れ間と雲がおよそ半々」という写真の見た目に寄せた値であり、
+    // 物理的な導出ではない(実測で調整可能)
+    inline constexpr float CloudCoverage = 0.45f;
+    // 雲底の高度[m]。積雲の雲底高度として一般に言われる目安(だいたい1,000〜2,000m)の
+    // 中間を採った値(精密な気象観測値ではなく目安からの採用)
+    inline constexpr float CloudAltitude = 1500.0f;
+    // ノイズ空間のUVスケール[ノイズ空間の距離/m]。積雲1個(ノイズの1セル)がおよそ2kmになるよう
+    // 逆算した値(1/2000)。実測ではなく見た目からの調整値
+    inline constexpr float CloudUvScale = 1.0f / 2000.0f;
+    // 消散係数。既定の光路長(地平線際でクランプ後の最大約20倍)でも雲の芯が十分不透明に見え、
+    // かつ薄い箇所では下の空が透けるバランスを見た目で探った調整値(実測で調整可能)
+    inline constexpr float CloudDensity = 8.0f;
+    // 風速[m/s]。そよ風〜軟風程度(ビューフォート風力階級2〜3相当)の値を感覚的に採用した
+    // 調整値であり、実測値ではない
+    inline constexpr float CloudWindSpeed = 5.0f;
+    // 風向き(度)。太陽方位角の既定値と特に関係を持たせる理由が無いため、東(0度)を既定にした
+    inline constexpr float CloudWindDirectionDegrees = 0.0f;
+    // Henyey-Greensteinの非対称パラメータ。前方散乱が強すぎると太陽周辺だけが不自然に
+    // 明るい点になるため、縁が仄かに光る程度に留めた調整値(実測で調整可能)
+    inline constexpr float CloudForwardG = 0.6f;
+    // シーンに依存しないUIつまみ(m_WaterTimeFrozenと同じ位置づけ)
+    inline constexpr bool CloudTimeFrozen = false;
+
     // --- レイトレーシング反射(DX12かつDXR Tier 1.1対応時のみ選択できる) ---
     // 最大レイ距離はシーン読み込み時に対角長から決め直す(SSRのMaxDistanceと同じ扱い)。
     // SSRより長いのは、画面外まで追えるRTでは短く切ると反射が途中で空へ抜けてしまうため

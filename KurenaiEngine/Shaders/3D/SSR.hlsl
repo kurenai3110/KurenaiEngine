@@ -100,6 +100,15 @@ cbuffer FrameConstants : register(b0)
     float4 SkyGroundTint;
     // w=太陽の暖色の強さ(SunGlowStrength)
     float4 SkySunGlowTint;
+    // 雲(P5、さらに末尾に追加)。DeferredLighting.hlslの同名フィールドと完全に同じ順・同じ型
+    // であること(C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams0/1 と揃える。
+    // ずれると背景に見える雲と水面に映る雲が食い違う)。
+    // CloudParams0: x=被覆率(0で雲なし。Sky.hlsliのSkyColorが早期脱出する)、
+    //               y=雲底の高度[m](カメラ基準)、z=UVスケール[ノイズ空間/m]、w=消散係数
+    float4 CloudParams0;
+    // CloudParams1: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
+    //               同じ周期でwrap済み)、z=Henyey-Greensteinの非対称パラメータ、w=未使用
+    float4 CloudParams1;
 };
 
 cbuffer SSRConstants : register(b1)
@@ -165,6 +174,14 @@ SkyParameters MakeSkyParameters()
     params.GroundTint = SkyGroundTint.rgb;
     params.SunGlowTint = SkySunGlowTint.rgb;
     params.SunGlowStrength = SkySunGlowTint.w;
+    // 雲(P5)。DeferredLighting.hlslのMakeSkyParametersと完全に同一の内容であること
+    // (このファイル冒頭のコメントと同じ理由。背景に見える雲と水面に映る雲が食い違ってはいけない)
+    params.CloudCoverage = CloudParams0.x;
+    params.CloudAltitude = CloudParams0.y;
+    params.CloudUvScale = CloudParams0.z;
+    params.CloudDensity = CloudParams0.w;
+    params.CloudScrollOffset = CloudParams1.xy;
+    params.CloudForwardG = CloudParams1.z;
     return params;
 }
 

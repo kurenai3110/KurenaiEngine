@@ -54,6 +54,10 @@ namespace Kurenai::UI
         {
             DrawWaterSection();
         }
+        if (ImGui::CollapsingHeader("雲###Clouds"))
+        {
+            DrawCloudSection();
+        }
 
         ImGui::End();
     }
@@ -518,6 +522,76 @@ namespace Kurenai::UI
         SliderFloatEx(
             "波の強さ###WaterWaveStrength", &m_Engine.m_WaterWaveStrength, 0.0f, 1.0f, Defaults::WaterWaveStrength,
             "%.3f", 0, "波打ちの振幅。0で波が完全に消え平坦な鏡面、1で最大の揺らぎになる");
+
+        EndParamGroup();
+    }
+
+    void RenderingPanel::DrawCloudSection()
+    {
+        ImGui::TextWrapped(
+            "積雲1層のレイヤーモデル(Sky.hlsliが背景・水面反射・IBLベイクの3者で共有する空モデルへ"
+            "足したもの)。背景と水面の映り込みの両方にそのまま出る一方、"
+            "IBL(反射プローブ・拡散イラディアンス)には焼き込まれない。雲は風で動くたびに"
+            "キューブマップを焼き直すと無駄が大きいためで、代わりに被覆率から求めた"
+            "全天の平均透過率でキューブ全体の明るさを一括して暗くするだけに留めている"
+            "(そのためIBLに映る雲の「形」は無い)。太陽の直接光やシャドウは雲による減光の対象外");
+
+        BeginParamGroup();
+
+        // このトグルはCloudCoverageスライダーと同じくIBLキューブの明るさ(平均透過率)に効く
+        // (m_CloudEnabled=falseのときComputeCloudAverageTransmittanceは常に1.0を返す)。
+        // 立てないと、無効にした直後もIBLが「有効だったときの暗さ」のまま次の自然な再ベイク
+        // (太陽が動く・露出が変わる等)まで取り残されてしまうため、被覆率スライダーと同じ扱いにする
+        if (CheckboxEx(
+                "雲を有効にする###CloudEnabled", &m_Engine.m_CloudEnabled, Defaults::CloudEnabled,
+                "無効にすると被覆率0と同じ扱いになり、Sky.hlsli側の雲の計算(密度・自己影・位相関数)を"
+                "一切行わない"))
+        {
+            m_Engine.m_SkyBakeDirty = true;
+        }
+        CheckboxEx(
+            "雲を止める(凍結)###FreezeCloudTime", &m_Engine.m_CloudTimeFrozen, Defaults::CloudTimeFrozen,
+            "風によるノイズのスクロールを止める。A/B比較などスクロールが揺れると困る場面で使う"
+            "(水面の「水面アニメを止める」と同じ位置づけ)");
+
+        // 被覆率(と上の有効トグル)だけがIBLキューブの明るさ(平均透過率)に効くため、これが
+        // 変わったときだけ手続き空の再ベイクを要求する。他のつまみ(高度・UVスケール・密度・風・
+        // 位相関数)は背景・水面反射の見た目にしか影響せずキューブの中身(IBLベイク結果)には
+        // 影響しないため、ここでm_SkyBakeDirtyを立てると無関係な再ベイク(空生成6回+
+        // プリフィルタ36回のディスパッチ)が余計に走ってしまう(m_ProceduralSkyEnabledトグルと
+        // 同じ判断基準)
+        if (SliderFloatEx(
+                "被覆率###CloudCoverage", &m_Engine.m_CloudCoverage, 0.0f, 1.0f, Defaults::CloudCoverage, "%.2f", 0,
+                "0=雲なし、1=全天が雲。IBLキューブへ焼く天頂輝度にだけ、この値から求めた平均透過率を"
+                "掛けて全体を暗くする(背景・水面反射に見える空自体は減光しない。二重に暗くなるのを"
+                "避けるため)"))
+        {
+            m_Engine.m_SkyBakeDirty = true;
+        }
+
+        SliderFloatEx(
+            "雲底の高度###CloudAltitude", &m_Engine.m_CloudAltitude, 200.0f, 5000.0f, Defaults::CloudAltitude,
+            "%.0f m", 0, "雲底の高さ(カメラのワールドY基準)。視線とこの高さの平面との交点から雲のUVを"
+            "作るレイヤーモデルのため、値を大きくすると地平線際の雲がより遠くに、小さくすると近くに見える");
+        SliderFloatEx(
+            "UVスケール###CloudUvScale", &m_Engine.m_CloudUvScale, 1.0f / 8000.0f, 1.0f / 500.0f,
+            Defaults::CloudUvScale, "%.6f", ImGuiSliderFlags_Logarithmic,
+            "ワールド1mあたりのノイズ空間の距離。大きいほど雲の塊(1個あたり)が小さく見える");
+        SliderFloatEx(
+            "密度###CloudDensity", &m_Engine.m_CloudDensity, 0.0f, 30.0f, Defaults::CloudDensity, "%.2f", 0,
+            "消散係数。ビアの法則(exp(-density*経路長))で透過率を決める。大きいほど雲が不透明になり"
+            "自己影も濃くなる");
+        SliderFloatEx(
+            "風速###CloudWindSpeed", &m_Engine.m_CloudWindSpeed, 0.0f, 30.0f, Defaults::CloudWindSpeed, "%.2f m/s",
+            0, "雲のノイズを流す速度。実世界の速度[m/s]として扱える");
+        SliderFloatEx(
+            "風向###CloudWindDirection", &m_Engine.m_CloudWindDirectionDegrees, 0.0f, 360.0f,
+            Defaults::CloudWindDirectionDegrees, "%.1f deg", 0,
+            "風が吹いていく向き。太陽の方位角と同じ規約(X軸0度、Z軸(+方向)90度)");
+        SliderFloatEx(
+            "前方散乱g###CloudForwardG", &m_Engine.m_CloudForwardG, 0.0f, 0.95f, Defaults::CloudForwardG, "%.2f", 0,
+            "Henyey-Greensteinの非対称パラメータ。大きいほど太陽を直視する方向で雲の縁が強く光る"
+            "(半逆光のシルバーライニング効果)");
 
         EndParamGroup();
     }
