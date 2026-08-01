@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "DX12AccelerationStructure.h"
 #include "DX12Buffer.h"
 #include "DX12CommandList.h"
 #include "DX12ComputePipelineState.h"
@@ -58,8 +59,12 @@ namespace Kurenai::RHI
         // 十分上回る値にしておく
         constexpr uint32_t kConstantBufferRingCapacity = 8192;
 
-        // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t3, u0〜u3)
-        constexpr uint32_t kComputeSrvSlotCount = 4;
+        // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t15, u0〜u3)。
+        // SRVが16必要なのはレイトレーシングのパスで、TLAS + G-Buffer(Albedo/Normal/Material/Depth) +
+        // SceneColor + スカイボックス + シーンジオメトリ4本(頂点属性・インデックス・メッシュ情報・
+        // マテリアル) + インスタンス情報 を1回のディスパッチで同時に読むため。
+        // DX12CommandList.h側の同名の定数と必ず一致させること
+        constexpr uint32_t kComputeSrvSlotCount = 16;
         constexpr uint32_t kComputeUavSlotCount = 4;
         constexpr uint32_t kComputeTableSlotCount = kComputeSrvSlotCount + kComputeUavSlotCount;
         // 1フレームあたりに払い出せるコンピュートSRV+UAVテーブルブロックの最大数(Dispatch呼び出し回数の上限)。
@@ -73,14 +78,19 @@ namespace Kurenai::RHI
         constexpr uint32_t kGraphicsSrvHeapCapacityPerFrame = kTextureSlotCount * kMaxSrvTableBlocksPerFrame;
         constexpr uint32_t kComputeSrvHeapCapacityPerFrame = kComputeTableSlotCount * kMaxComputeDispatchesPerFrame;
 
-        // m_SrvCpuHeap(非シェーダー可視。テクスチャ/構造化バッファ作成時にCreateShaderResourceView等の
-        // 恒久的なビューを1つずつ確保する)の総容量。LoadSceneはm_Model = Assets::LoadModel(...)のように
-        // 新シーンのテクスチャを先にすべて作成してから旧シーンのテクスチャを解放する(右辺の評価が先に
-        // 終わってから代入される)ため、切り替え中は旧シーン+新シーンのテクスチャが一時的に同時に
-        // 確保された状態になる。Bistro Exteriorのような大規模シーンではこの一時的な二重確保だけで
-        // 数百ディスクリプタに達するため、余裕を持った値にしておく(非シェーダー可視ヒープでCPUメモリの
-        // みを消費するため、大きめにしても実害はない)
-        constexpr uint32_t kSrvCpuHeapCapacity = 4096;
+        // 非シェーダー可視のCBV_SRV_UAVヒープ(テクスチャ/構造化バッファ作成時に
+        // CreateShaderResourceView等の恒久的なビューを1つずつ確保する)の容量。
+        //
+        // DX12DescriptorHeapはロックを持たないため、確保・解放するスレッドごとに別のヒープへ
+        // 分けてある(DX12Device.hのGetAssetSrvCpuHeap/GetRenderSrvCpuHeapのコメント参照)。
+        //
+        // アセット側: Bistro Exteriorでテクスチャ182枚 + RT統合バッファ5本 + TLAS 1本。
+        // シーン切り替え時は旧シーンを先に破棄してから新シーンを読むため二重確保は起きない。
+        // レンダー側: レンダーターゲットのSRV/UAVに加え、Hi-Zとブルームのミップ別UAV、
+        // IBL・反射プローブのキューブマップ(プローブ数×6面×ミップ数のUAV)が効く。
+        // どちらも非シェーダー可視ヒープでCPUメモリのみを消費するため、余裕を持った値にしておく
+        constexpr uint32_t kAssetSrvCpuHeapCapacity = 2048;
+        constexpr uint32_t kRenderSrvCpuHeapCapacity = 2048;
 
         DXGI_FORMAT ToDXGIFormat(Format format)
         {
@@ -228,6 +238,12 @@ namespace Kurenai::RHI
             throw std::runtime_error("アップロード用フェンスイベントの作成に失敗しました");
         }
 
+        // シェーダーモデルの判定とdxcの初期化はレイトレーシング判定より先に行う。
+        // RayQueryを含むシェーダーはSM 6.5でしかコンパイルできないため、
+        // DetectRaytracingSupportがこの結果を参照する
+        DetectShaderModelAndInitCompiler();
+        DetectRaytracingSupport();
+
         // RTVの内訳: スワップチェーンのバックバッファ2 + オフスクリーンのレンダーテクスチャ12 = 常時14。
         // DSVと同じくCreateRenderTargetsのリサイズ処理は「新しいテクスチャを作ってから古いunique_ptrを
         // 解放する」順になるため、リサイズ中はほぼ倍のRTVが同時に生存する。余裕を持たせて32本確保する
@@ -238,7 +254,10 @@ namespace Kurenai::RHI
         // 順になるため、リサイズ中は一時的に7本必要になる。余裕を持たせて16本確保する(DSVヒープは
         // CPU側のみでGPUメモリを消費しないため、多めに取っても実害がない)
         m_DsvHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 16, false);
-        m_SrvCpuHeap = std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kSrvCpuHeapCapacity, false);
+        m_AssetSrvCpuHeap =
+            std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kAssetSrvCpuHeapCapacity, false);
+        m_RenderSrvCpuHeap =
+            std::make_unique<DX12DescriptorHeap>(m_Device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRenderSrvCpuHeapCapacity, false);
         // 1フレーム分のコマンドをまとめて記録してから1回だけ実行する設計のため、描画のたびに
         // 新しいkTextureSlotCount個のブロックを払い出せるよう、1フレームに必要な最大数を見込んで確保する。
         // さらにCPUがGPU完了を待たずに次フレームを記録し始めるため、kFrameCountフレームぶんの容量を持たせる
@@ -259,7 +278,8 @@ namespace Kurenai::RHI
         // (名前が無いと"Unnamed ID3D12DescriptorHeap Object"としか出ず、アドレスから推測するしかない)
         m_RtvHeap->GetHeap()->SetName(L"KurenaiEngine RTV Heap");
         m_DsvHeap->GetHeap()->SetName(L"KurenaiEngine DSV Heap");
-        m_SrvCpuHeap->GetHeap()->SetName(L"KurenaiEngine SRV CPU Heap");
+        m_AssetSrvCpuHeap->GetHeap()->SetName(L"KurenaiEngine Asset SRV CPU Heap");
+        m_RenderSrvCpuHeap->GetHeap()->SetName(L"KurenaiEngine Render SRV CPU Heap");
         m_ShaderVisibleSrvHeap->GetHeap()->SetName(L"KurenaiEngine Shader Visible SRV Heap");
         m_ShaderVisibleSamplerHeap->GetHeap()->SetName(L"KurenaiEngine Shader Visible Sampler Heap");
 
@@ -288,19 +308,19 @@ namespace Kurenai::RHI
         // (=DX11の未バインドスロットと同じ挙動)。これをDX12CommandListのシャドウ配列の初期値にすることで、
         // ディスクリプタテーブルのブロックに未初期化のまま残る領域が構造的に無くなる
         {
-            m_NullSrvIndex = m_SrvCpuHeap->Allocate();
+            m_NullSrvIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvDesc{};
             nullSrvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             nullSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             nullSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             nullSrvDesc.Texture2D.MipLevels = 1;
-            m_Device->CreateShaderResourceView(nullptr, &nullSrvDesc, m_SrvCpuHeap->GetCpuHandle(m_NullSrvIndex));
+            m_Device->CreateShaderResourceView(nullptr, &nullSrvDesc, m_RenderSrvCpuHeap->GetCpuHandle(m_NullSrvIndex));
 
-            m_NullUavIndex = m_SrvCpuHeap->Allocate();
+            m_NullUavIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_UNORDERED_ACCESS_VIEW_DESC nullUavDesc{};
             nullUavDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             nullUavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-            m_Device->CreateUnorderedAccessView(nullptr, nullptr, &nullUavDesc, m_SrvCpuHeap->GetCpuHandle(m_NullUavIndex));
+            m_Device->CreateUnorderedAccessView(nullptr, nullptr, &nullUavDesc, m_RenderSrvCpuHeap->GetCpuHandle(m_NullUavIndex));
         }
 
         CreateRootSignature();
@@ -646,15 +666,15 @@ namespace Kurenai::RHI
                     "構造化バッファの作成に失敗しました");
             }
 
-            const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+            const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
             uavDesc.Format = DXGI_FORMAT_UNKNOWN;
             uavDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
             uavDesc.Buffer.StructureByteStride = desc.StrideInBytes;
-            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
 
-            return std::make_unique<DX12Buffer>(this, resource, uavIndex, desc.SizeInBytes, desc.StrideInBytes);
+            return std::make_unique<DX12Buffer>(this, m_RenderSrvCpuHeap.get(), resource, uavIndex, desc.SizeInBytes, desc.StrideInBytes);
         }
 
         // コンピュートがUAVで書き、ピクセルシェーダがSRVで読む構造化バッファ。CPUからは書き込まないため
@@ -682,24 +702,91 @@ namespace Kurenai::RHI
 
             const uint32_t elementCount = desc.SizeInBytes / desc.StrideInBytes;
 
-            const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+            const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
             uavDesc.Format = DXGI_FORMAT_UNKNOWN;
             uavDesc.Buffer.NumElements = elementCount;
             uavDesc.Buffer.StructureByteStride = desc.StrideInBytes;
-            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
 
-            const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+            const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
             srvDesc.Format = DXGI_FORMAT_UNKNOWN;
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srvDesc.Buffer.NumElements = elementCount;
             srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
-            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
-            return std::make_unique<DX12Buffer>(this, resource, uavIndex, srvIndex, desc.SizeInBytes, desc.StrideInBytes);
+            return std::make_unique<DX12Buffer>(this, m_RenderSrvCpuHeap.get(), resource, uavIndex, srvIndex, desc.SizeInBytes, desc.StrideInBytes);
+        }
+
+        // 作成時の初期データから変化しない読み取り専用の構造化バッファ。DEFAULTヒープにSRVだけを持ち、
+        // CPU書き込み用のステージングリングは持たない(下のStructuredReadOnlyとの違いはそこだけ)。
+        // レイトレーシングのシーンジオメトリのように数十MB規模かつシーン読み込み時にしか書かない
+        // データで、ステージングリングぶんのUPLOADヒープを浪費しないためのUsage
+        if (desc.Usage == BufferUsage::StructuredImmutable)
+        {
+            if (desc.StrideInBytes == 0)
+            {
+                Core::Logger::Error("DX12", "StructuredImmutableバッファのStrideInBytesが0です。作成を中止します");
+                throw std::runtime_error("StructuredImmutableバッファのStrideInBytesが0です");
+            }
+            if (!desc.InitialData)
+            {
+                // 後から書き込む手段が無いUsageのため、初期データが無いと永久に0のままになる
+                Core::Logger::Error("DX12", "StructuredImmutableバッファにInitialDataが指定されていません。作成を中止します");
+                throw std::runtime_error("StructuredImmutableバッファにInitialDataが指定されていません");
+            }
+
+            const CD3DX12_HEAP_PROPERTIES defaultHeapProps(D3D12_HEAP_TYPE_DEFAULT);
+            const CD3DX12_RESOURCE_DESC defaultResourceDesc = CD3DX12_RESOURCE_DESC::Buffer(desc.SizeInBytes);
+
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+            ThrowIfFailed(
+                m_Device->CreateCommittedResource(
+                    &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &defaultResourceDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&resource)),
+                "不変構造化バッファ(StructuredImmutable)の作成に失敗しました");
+
+            {
+                // 頂点/インデックスバッファの初期データアップロードと同じ手順
+                // (UPLOADヒープの一時バッファ経由でDEFAULTヒープへコピーし、完了を同期的に待つ)。
+                // m_UploadMutexはこの関数の先頭で既に確保済みのため、ここでは取り直さない
+                // (std::mutexは再帰ロックできず、取り直すとdevice_or_resource_busyで失敗する)
+                Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer = CreateUploadBuffer(desc.SizeInBytes);
+                void* mappedPtr = nullptr;
+                const D3D12_RANGE readRange{ 0, 0 };
+                ThrowIfFailed(uploadBuffer->Map(0, &readRange, &mappedPtr), "不変構造化バッファのステージングマップに失敗しました");
+                std::memcpy(mappedPtr, desc.InitialData, desc.SizeInBytes);
+                uploadBuffer->Unmap(0, nullptr);
+
+                m_UploadCommandList->CopyBufferRegion(resource.Get(), 0, uploadBuffer.Get(), 0, desc.SizeInBytes);
+
+                // 以後このバッファは読み取り専用。コンピュート/ピクセル双方から読めるようGENERIC_READへ移す
+                // (DX12BufferのTransitionToは使わず、ここで一度だけ遷移させて固定する)
+                const D3D12_RESOURCE_BARRIER toReadBarrier =
+                    CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ);
+                m_UploadCommandList->ResourceBarrier(1, &toReadBarrier);
+
+                // アップロードバッファはこのスコープを抜けるまで生存させる必要があるため同期的に待つ
+                UploadSubmitAndWait();
+            }
+
+            // レイトレーシングのシーンジオメトリ用。アセット由来なのでアセット側のヒープから確保する
+            const uint32_t srvIndex = m_AssetSrvCpuHeap->Allocate();
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
+            srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
+            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
+
+            // ステージングリングを持たない(uploadResource=nullptr、uploadRingCapacity=1)構成で作る。
+            // GENERIC_READはPIXEL_SHADER_RESOURCE/NON_PIXEL_SHADER_RESOURCEを含むため、
+            // DX12Buffer::TransitionToが呼ばれても余計なバリアが積まれないよう初期状態を合わせておく
+            return std::make_unique<DX12Buffer>(this, m_AssetSrvCpuHeap.get(), resource, srvIndex, desc.SizeInBytes, desc.StrideInBytes, D3D12_RESOURCE_STATE_GENERIC_READ);
         }
 
         // 読み取り専用の構造化バッファ(StructuredBuffer<T>)。ピクセルシェーダが毎フレーム読むため
@@ -721,14 +808,14 @@ namespace Kurenai::RHI
                     &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&resource)),
                 "読み取り専用構造化バッファの作成に失敗しました");
 
-            const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+            const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
             srvDesc.Format = DXGI_FORMAT_UNKNOWN;
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
             srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srvDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
             srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
-            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+            m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
             // CPUはGPU完了を待たずに次フレームの記録を始める(kFrameCount)ため、直近フレームぶんの
             // 書き込みが同時に生存できるだけのステージングリングを持たせる。
@@ -747,6 +834,7 @@ namespace Kurenai::RHI
 
             return std::make_unique<DX12Buffer>(
                 this,
+                m_RenderSrvCpuHeap.get(),
                 resource,
                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                 srvIndex,
@@ -833,6 +921,22 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHIShader> DX12Device::CreateShader(const ShaderDesc& desc)
     {
+        // 通常経路: dxcでDXIL(SM 6.x)へコンパイルする。
+        // SM 6.5でしか使えないインラインレイトレーシング(RayQuery)を扱えるようにするため
+        if (m_ShaderCompiler.IsAvailable())
+        {
+            Microsoft::WRL::ComPtr<ID3DBlob> dxil = m_ShaderCompiler.Compile(desc.FilePath, desc.EntryPoint, desc.Stage);
+            if (!dxil)
+            {
+                // 失敗の詳細はDX12ShaderCompiler::Compileがログ済み。
+                // シェーダが1つでも作れなければ描画は成立しないため、従来どおり例外で止める
+                throw std::runtime_error("シェーダのコンパイルに失敗しました(dxc)");
+            }
+            return std::make_unique<DX12Shader>(desc.Stage, dxil);
+        }
+
+        // フォールバック経路: dxcompiler.dllが無い/デバイスがSM 6.0未満の場合。
+        // レイトレーシングは無効(DetectRaytracingSupport)だが、それ以外は従来どおり動作する
         const char* target =
             desc.Stage == ShaderStage::Vertex ? "vs_5_0" : desc.Stage == ShaderStage::Compute ? "cs_5_0" : "ps_5_0";
 
@@ -1019,7 +1123,9 @@ namespace Kurenai::RHI
             CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         m_UploadCommandList->ResourceBarrier(1, &toSrvBarrier);
 
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        // ファイル/デコード済み画像から作るテクスチャ(マテリアル・スカイボックス・プレースホルダ)は
+        // すべてアセット由来。シーン読み込み専用スレッドが確保・解放するためアセット側のヒープを使う
+        const uint32_t srvIndex = m_AssetSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = metadata.format;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1033,10 +1139,10 @@ namespace Kurenai::RHI
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
         }
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
 
         auto texture = std::make_unique<DX12Texture>(
-            this, resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid);
+            this, m_AssetSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid);
 
         // アップロードバッファはこの関数を抜けるまで生存させる必要があるため、ここで同期的に実行完了を待つ
         UploadSubmitAndWait();
@@ -1118,18 +1224,18 @@ namespace Kurenai::RHI
             m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_RENDER_TARGET, &clearValue, IID_PPV_ARGS(&resource)),
             "レンダーテクスチャの作成に失敗しました");
 
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MipLevels = 1;
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
         const uint32_t rtvIndex = m_RtvHeap->Allocate();
         m_Device->CreateRenderTargetView(resource.Get(), nullptr, m_RtvHeap->GetCpuHandle(rtvIndex));
 
-        return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_RENDER_TARGET, srvIndex, rtvIndex, DX12Texture::kInvalid);
+        return std::make_unique<DX12Texture>(this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_RENDER_TARGET, srvIndex, rtvIndex, DX12Texture::kInvalid);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateUAVTexture(uint32_t width, uint32_t height, Format format)
@@ -1145,22 +1251,22 @@ namespace Kurenai::RHI
             m_Device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
             "UAVテクスチャの作成に失敗しました");
 
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MipLevels = 1;
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
-        const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
         uavDesc.Format = dxgiFormat;
         uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+        m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
 
         return std::make_unique<DX12Texture>(
-            this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid, uavIndex);
+            this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid, uavIndex);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels)
@@ -1182,13 +1288,13 @@ namespace Kurenai::RHI
             "ミップ付きUAVテクスチャの作成に失敗しました");
 
         // 全ミップを見るSRV(MipLevels=全指定)。デバッグ表示などでSampleLevelにより任意のミップを読む用
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MipLevels = mipLevels;
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
         // ミップごとに単一ミップのUAVを張り、コンピュートシェーダーがミップ単位で書き込めるようにする
         // (Hi-Zの「前段ミップを読んで次段へ書く」ダウンサンプルだけでなく、IBLプリフィルタ済み鏡面マップの
@@ -1197,17 +1303,17 @@ namespace Kurenai::RHI
         mipUavIndices.reserve(mipLevels);
         for (uint32_t mip = 0; mip < mipLevels; ++mip)
         {
-            const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+            const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
             D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
             uavDesc.Format = dxgiFormat;
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             uavDesc.Texture2D.MipSlice = mip;
-            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
             mipUavIndices.push_back(uavIndex);
         }
 
         return std::make_unique<DX12Texture>(
-            this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
+            this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
             DX12Texture::kInvalid, std::move(mipUavIndices));
     }
 
@@ -1267,7 +1373,7 @@ namespace Kurenai::RHI
 
         // 全6面・全ミップを1枚のTextureCube(配列版はTextureCubeArray)として読むSRV
         // (サンプリング側、DeferredLighting.hlsl等)
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = dxgiFormat;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1285,7 +1391,7 @@ namespace Kurenai::RHI
             srvDesc.TextureCube.MostDetailedMip = 0;
             srvDesc.TextureCube.MipLevels = mipLevels;
         }
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
         // キューブ×面×ミップの組み合わせごとに単一配列スライス・単一ミップのUAV(Texture2DArray、要素数1)を
         // 張り、コンピュートシェーダーが面ごとに1回ずつディスパッチして書き込めるようにする(HLSL側は
@@ -1300,21 +1406,21 @@ namespace Kurenai::RHI
             {
                 for (uint32_t face = 0; face < DX12Texture::kCubeFaceCount; ++face)
                 {
-                    const uint32_t uavIndex = m_SrvCpuHeap->Allocate();
+                    const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
                     D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
                     uavDesc.Format = dxgiFormat;
                     uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
                     uavDesc.Texture2DArray.MipSlice = mip;
                     uavDesc.Texture2DArray.FirstArraySlice = cube * DX12Texture::kCubeFaceCount + face;
                     uavDesc.Texture2DArray.ArraySize = 1;
-                    m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_SrvCpuHeap->GetCpuHandle(uavIndex));
+                    m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
                     mipUavIndices.push_back(uavIndex);
                 }
             }
         }
 
         return std::make_unique<DX12Texture>(
-            this, resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
+            this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
             DX12Texture::kInvalid, std::move(mipUavIndices), std::vector<uint32_t>{}, cubeCount);
     }
 
@@ -1344,15 +1450,15 @@ namespace Kurenai::RHI
         dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
         m_Device->CreateDepthStencilView(resource.Get(), &dsvDesc, m_DsvHeap->GetCpuHandle(dsvIndex));
 
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Texture2D.MipLevels = 1;
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
-        return std::make_unique<DX12Texture>(this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, dsvIndex);
+        return std::make_unique<DX12Texture>(this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, dsvIndex);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateDepthTextureArray(
@@ -1396,7 +1502,7 @@ namespace Kurenai::RHI
             "深度テクスチャ配列の作成に失敗しました");
 
         // 全スライスを1枚のTexture2DArrayとして読むSRV(サンプリング側。ShadowSampling.hlsli等)
-        const uint32_t srvIndex = m_SrvCpuHeap->Allocate();
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
         srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -1405,7 +1511,7 @@ namespace Kurenai::RHI
         srvDesc.Texture2DArray.MipLevels = 1;
         srvDesc.Texture2DArray.FirstArraySlice = 0;
         srvDesc.Texture2DArray.ArraySize = arraySize;
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_SrvCpuHeap->GetCpuHandle(srvIndex));
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
 
         // スライスごとに単一配列スライスのDSVを張り、パスごとに1スライスずつ描き込めるようにする
         // (CreateMippedUAVTextureCubeが面ごとのUAVを張るのと同じ考え方)
@@ -1426,7 +1532,7 @@ namespace Kurenai::RHI
 
         // dsvIndexはkInvalidにする(スライスごとのDSVで代替するため。~DX12Textureでの二重解放も防ぐ)
         return std::make_unique<DX12Texture>(
-            this, resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
+            this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
             DX12Texture::kInvalid, std::vector<uint32_t>{}, std::move(sliceDsvIndices));
     }
 
@@ -1536,6 +1642,318 @@ namespace Kurenai::RHI
     std::unique_ptr<IRHIGPUProfiler> DX12Device::CreateGPUProfiler()
     {
         return std::make_unique<DX12GPUProfiler>(this);
+    }
+
+    // --- レイトレーシング -------------------------------------------------------------------
+
+    void DX12Device::DetectShaderModelAndInitCompiler()
+    {
+        // D3D12_FEATURE_SHADER_MODELは「HighestShaderModelへ聞きたい上限を入れて呼ぶと、
+        // 対応している値まで引き下げて返す」APIだが、ランタイムが知らない列挙値を渡すと
+        // E_INVALIDARGを返す。そのため上から順に下げながら問い合わせる
+        static constexpr D3D_SHADER_MODEL kCandidates[] = {
+            D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_4, D3D_SHADER_MODEL_6_3,
+            D3D_SHADER_MODEL_6_2, D3D_SHADER_MODEL_6_1, D3D_SHADER_MODEL_6_0,
+        };
+
+        m_HighestShaderModel = static_cast<D3D_SHADER_MODEL>(0);
+        for (const D3D_SHADER_MODEL candidate : kCandidates)
+        {
+            D3D12_FEATURE_DATA_SHADER_MODEL shaderModel{ candidate };
+            if (SUCCEEDED(m_Device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel))))
+            {
+                m_HighestShaderModel = shaderModel.HighestShaderModel;
+                break;
+            }
+        }
+
+        if (m_HighestShaderModel == static_cast<D3D_SHADER_MODEL>(0))
+        {
+            Core::Logger::Warning(
+                "DX12", "対応シェーダーモデルを判定できませんでした。d3dcompiler/SM 5.0で動作します");
+            return;
+        }
+
+        // Initializeは失敗しても例外を投げない(理由はログへ出る)。
+        // 戻り値がfalseの場合はCreateShaderがd3dcompiler/SM 5.0へフォールバックする
+        m_ShaderCompiler.Initialize(m_HighestShaderModel);
+    }
+
+    void DX12Device::DetectRaytracingSupport()
+    {
+        m_SupportsRaytracing = false;
+
+        // ID3D12Device5はWindows 10 1809(RS5)で追加されたインタフェース。取得できない場合は
+        // OS/ドライバがDXR世代に達していないため、それ以上の判定は行えない
+        if (FAILED(m_Device.As(&m_Device5)))
+        {
+            Core::Logger::Info("DX12", "レイトレーシング非対応: ID3D12Device5を取得できませんでした(OS/ドライバがDXR未対応)");
+            return;
+        }
+
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5{};
+        if (FAILED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5))))
+        {
+            Core::Logger::Warning("DX12", "レイトレーシング非対応: D3D12_FEATURE_D3D12_OPTIONS5の問い合わせに失敗しました");
+            m_Device5.Reset();
+            return;
+        }
+
+        // インラインレイトレーシング(HLSLのRayQuery)はTier 1.1で追加された機能。
+        // Tier 1.0はDispatchRaysによるフルパイプラインのみ対応しており、このエンジンが採る
+        // インライン方式では使えないため非対応として扱う
+        if (options5.RaytracingTier < D3D12_RAYTRACING_TIER_1_1)
+        {
+            Core::Logger::Info(
+                "DX12",
+                "レイトレーシング非対応: RaytracingTierが" + std::to_string(static_cast<int>(options5.RaytracingTier)) +
+                    "でTier 1.1(値11)に達していません(インラインレイトレーシングにはTier 1.1が必要)");
+            m_Device5.Reset();
+            return;
+        }
+
+        // インラインレイトレーシングのRayQueryはシェーダーモデル6.5で追加された機能で、
+        // DXILを出力できるdxcでしかコンパイルできない。ハードウェアがTier 1.1でも
+        // ここが満たせなければトレースするシェーダーを作れないため非対応として扱う
+        // (Phase 0でdxc/SM 6.xへ移行した理由そのもの)
+        if (!m_ShaderCompiler.IsAvailable() || m_ShaderCompiler.GetShaderModel() < D3D_SHADER_MODEL_6_5)
+        {
+            Core::Logger::Warning(
+                "DX12",
+                "レイトレーシング非対応: シェーダーモデル6.5でのコンパイルができません"
+                "(RayQueryにはdxcとSM 6.5が必要です。dxcompiler.dllの配置とデバイスの対応状況を確認してください)");
+            m_Device5.Reset();
+            return;
+        }
+
+        // AS構築コマンドを積むのはアップロード専用コマンドリスト(Renderスレッド外から呼ばれる
+        // LoadSceneと安全に共存させるため)。そちらのList4も取れないと構築できない
+        if (FAILED(m_UploadCommandList.As(&m_UploadCommandList4)))
+        {
+            Core::Logger::Warning(
+                "DX12", "レイトレーシング非対応: ID3D12GraphicsCommandList4を取得できませんでした");
+            m_Device5.Reset();
+            return;
+        }
+
+        m_SupportsRaytracing = true;
+        Core::Logger::Info("DX12", "レイトレーシング対応: DXR Tier 1.1(インラインレイトレーシングが利用できます)");
+    }
+
+    std::unique_ptr<IRHIAccelerationStructure> DX12Device::BuildAccelerationStructure(
+        const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, bool createSrv, const char* debugName)
+    {
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuildInfo{};
+        m_Device5->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuildInfo);
+        if (prebuildInfo.ResultDataMaxSizeInBytes == 0)
+        {
+            Core::Logger::Error(
+                "DX12", std::string(debugName) + "の必要サイズ問い合わせが0を返しました(入力が空の可能性があります)");
+            return nullptr;
+        }
+
+        const CD3DX12_HEAP_PROPERTIES defaultHeapProps(D3D12_HEAP_TYPE_DEFAULT);
+
+        // 構築の一時領域。構築完了を同期的に待ってからこの関数を抜けるため、ローカルで持てばよい
+        const CD3DX12_RESOURCE_DESC scratchDesc =
+            CD3DX12_RESOURCE_DESC::Buffer(prebuildInfo.ScratchDataSizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        Microsoft::WRL::ComPtr<ID3D12Resource> scratch;
+        if (FAILED(m_Device->CreateCommittedResource(
+                &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &scratchDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&scratch))))
+        {
+            Core::Logger::Error("DX12", std::string(debugName) + "のスクラッチバッファ作成に失敗しました");
+            return nullptr;
+        }
+
+        // AS本体。RAYTRACING_ACCELERATION_STRUCTURE状態で作り、以後この状態のまま遷移しない
+        // (D3D12の仕様上、ASバッファを他の状態へ移すことはできない)
+        const CD3DX12_RESOURCE_DESC resultDesc =
+            CD3DX12_RESOURCE_DESC::Buffer(prebuildInfo.ResultDataMaxSizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        Microsoft::WRL::ComPtr<ID3D12Resource> result;
+        if (FAILED(m_Device->CreateCommittedResource(
+                &defaultHeapProps,
+                D3D12_HEAP_FLAG_NONE,
+                &resultDesc,
+                D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                nullptr,
+                IID_PPV_ARGS(&result))))
+        {
+            Core::Logger::Error("DX12", std::string(debugName) + "の本体バッファ作成に失敗しました");
+            return nullptr;
+        }
+
+        {
+            // m_UploadCommandListへの記録は複数スレッドから同時に来うるため、
+            // CreateBuffer/CreateTextureFromImageと同じミューテックスで直列化する
+            std::lock_guard<std::mutex> lock(m_UploadMutex);
+
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC buildDesc{};
+            buildDesc.Inputs = inputs;
+            buildDesc.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+            buildDesc.DestAccelerationStructureData = result->GetGPUVirtualAddress();
+            m_UploadCommandList4->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+
+            // TLASの構築はBLASの構築完了を前提とするため、UAVバリアで順序を保証する。
+            // このエンジンではBLASを1本ずつ同期的に構築するため実際には不要だが、
+            // 将来まとめて構築するよう変えたときに落とし穴にならないよう入れておく
+            const D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(result.Get());
+            m_UploadCommandList4->ResourceBarrier(1, &uavBarrier);
+
+            // スクラッチバッファ(ローカル変数)がこの関数を抜けるまでに解放されないよう、
+            // 構築の完了をここで同期的に待つ。CreateBufferの初期データアップロードと同じ扱い
+            UploadSubmitAndWait();
+        }
+
+        uint32_t srvIndex = DX12AccelerationStructure::kInvalid;
+        if (createSrv)
+        {
+            // DXRのAS用SRVは他のSRVと作法が異なり、pResourceにnullptrを渡して
+            // RaytracingAccelerationStructure.Locationへ「GPU仮想アドレス」を直接書く
+            // (ディスクリプタがリソースではなくアドレスを指す)
+            // TLASはシーンのジオメトリから作られるアセット由来のリソース
+            srvIndex = m_AssetSrvCpuHeap->Allocate();
+            D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+            srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srvDesc.RaytracingAccelerationStructure.Location = result->GetGPUVirtualAddress();
+            m_Device->CreateShaderResourceView(nullptr, &srvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
+        }
+
+        return std::make_unique<DX12AccelerationStructure>(this, result, srvIndex);
+    }
+
+    std::unique_ptr<IRHIAccelerationStructure> DX12Device::CreateBottomLevelAS(const BottomLevelASDesc& desc)
+    {
+        if (!m_SupportsRaytracing)
+        {
+            Core::Logger::Error("DX12", "CreateBottomLevelAS: レイトレーシング非対応の環境です。SupportsRaytracing()で分岐してください");
+            return nullptr;
+        }
+        if (desc.Geometries.empty())
+        {
+            Core::Logger::Error("DX12", "CreateBottomLevelAS: ジオメトリが1つも指定されていません");
+            return nullptr;
+        }
+
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometryDescs;
+        geometryDescs.reserve(desc.Geometries.size());
+        for (const auto& geometry : desc.Geometries)
+        {
+            if (!geometry.VertexBuffer || !geometry.IndexBuffer || geometry.VertexCount == 0 || geometry.IndexCount == 0)
+            {
+                Core::Logger::Error("DX12", "CreateBottomLevelAS: 頂点/インデックスバッファが不正なジオメトリをスキップします");
+                continue;
+            }
+
+            auto* vertexBuffer = static_cast<DX12Buffer*>(geometry.VertexBuffer);
+            auto* indexBuffer = static_cast<DX12Buffer*>(geometry.IndexBuffer);
+
+            D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc{};
+            geometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            // 不透明ジオメトリはAnyHit相当の判定を省ける(レイ側のRAY_FLAG_CULL_NON_OPAQUEも効く)。
+            // アルファカットアウトのマテリアルはこのフラグを外し、呼び出し側がRayQuery::Proceed()の
+            // ループで自前に抜き判定を行う
+            geometryDesc.Flags = geometry.IsOpaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+            geometryDesc.Triangles.VertexBuffer.StartAddress =
+                vertexBuffer->GetGPUVirtualAddress() + geometry.VertexPositionOffsetInBytes;
+            geometryDesc.Triangles.VertexBuffer.StrideInBytes = geometry.VertexStrideInBytes;
+            geometryDesc.Triangles.VertexCount = geometry.VertexCount;
+            geometryDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            geometryDesc.Triangles.IndexBuffer = indexBuffer->GetGPUVirtualAddress();
+            geometryDesc.Triangles.IndexCount = geometry.IndexCount;
+            geometryDesc.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+            // 頂点はモデルのローカル空間のまま登録し、ワールドへの配置はTLASのインスタンス変換で行う
+            geometryDesc.Triangles.Transform3x4 = 0;
+            geometryDescs.push_back(geometryDesc);
+        }
+
+        if (geometryDescs.empty())
+        {
+            Core::Logger::Error("DX12", "CreateBottomLevelAS: 有効なジオメトリが1つも残りませんでした");
+            return nullptr;
+        }
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        // シーンは読み込み後に変形しない前提のため、更新(ALLOW_UPDATE)ではなくトレース速度を優先する
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = static_cast<UINT>(geometryDescs.size());
+        inputs.pGeometryDescs = geometryDescs.data();
+
+        return BuildAccelerationStructure(inputs, /*createSrv=*/false, "BLAS");
+    }
+
+    std::unique_ptr<IRHIAccelerationStructure> DX12Device::CreateTopLevelAS(const TopLevelASDesc& desc)
+    {
+        if (!m_SupportsRaytracing)
+        {
+            Core::Logger::Error("DX12", "CreateTopLevelAS: レイトレーシング非対応の環境です。SupportsRaytracing()で分岐してください");
+            return nullptr;
+        }
+        if (desc.Instances.empty())
+        {
+            Core::Logger::Error("DX12", "CreateTopLevelAS: インスタンスが1つも指定されていません");
+            return nullptr;
+        }
+
+        std::vector<D3D12_RAYTRACING_INSTANCE_DESC> instanceDescs;
+        instanceDescs.reserve(desc.Instances.size());
+        for (const auto& instance : desc.Instances)
+        {
+            auto* bottomLevel = static_cast<DX12AccelerationStructure*>(instance.BottomLevel);
+            if (!bottomLevel)
+            {
+                Core::Logger::Error("DX12", "CreateTopLevelAS: BLASがnullptrのインスタンスをスキップします");
+                continue;
+            }
+
+            D3D12_RAYTRACING_INSTANCE_DESC instanceDesc{};
+            std::memcpy(instanceDesc.Transform, instance.Transform, sizeof(instanceDesc.Transform));
+            // InstanceIDは24bitのビットフィールド。上位層が範囲外を渡した場合は静かに切り詰めず検出する
+            if (instance.InstanceID > 0x00FFFFFFu)
+            {
+                Core::Logger::Error(
+                    "DX12", "CreateTopLevelAS: InstanceIDが24bitの上限を超えています。このインスタンスをスキップします");
+                continue;
+            }
+            instanceDesc.InstanceID = instance.InstanceID;
+            instanceDesc.InstanceMask = 0xFF;
+            instanceDesc.InstanceContributionToHitGroupIndex = 0;
+            instanceDesc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+            instanceDesc.AccelerationStructure = bottomLevel->GetGPUVirtualAddress();
+            instanceDescs.push_back(instanceDesc);
+        }
+
+        if (instanceDescs.empty())
+        {
+            Core::Logger::Error("DX12", "CreateTopLevelAS: 有効なインスタンスが1つも残りませんでした");
+            return nullptr;
+        }
+
+        // インスタンス記述子の配列はGPUから読まれるためUPLOADヒープへ置く。
+        // 構築完了を同期的に待ってから解放するので、この関数のローカルで持てばよい
+        const uint64_t instanceBufferSize = sizeof(D3D12_RAYTRACING_INSTANCE_DESC) * instanceDescs.size();
+        Microsoft::WRL::ComPtr<ID3D12Resource> instanceBuffer = CreateUploadBuffer(instanceBufferSize);
+        void* mappedPtr = nullptr;
+        const D3D12_RANGE readRange{ 0, 0 };
+        if (FAILED(instanceBuffer->Map(0, &readRange, &mappedPtr)))
+        {
+            Core::Logger::Error("DX12", "CreateTopLevelAS: インスタンス記述子バッファのマップに失敗しました");
+            return nullptr;
+        }
+        std::memcpy(mappedPtr, instanceDescs.data(), static_cast<size_t>(instanceBufferSize));
+        instanceBuffer->Unmap(0, nullptr);
+
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = static_cast<UINT>(instanceDescs.size());
+        inputs.InstanceDescs = instanceBuffer->GetGPUVirtualAddress();
+
+        return BuildAccelerationStructure(inputs, /*createSrv=*/true, "TLAS");
     }
 
     std::unique_ptr<IRHIDevice> CreateDX12Device()

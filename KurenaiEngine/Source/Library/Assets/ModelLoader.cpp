@@ -247,7 +247,11 @@ namespace Kurenai::Assets
                     {
                         return less(a.NormalTexture, b.NormalTexture);
                     }
-                    return less(a.MetallicRoughnessTexture, b.MetallicRoughnessTexture);
+                    if (a.MetallicRoughnessTexture != b.MetallicRoughnessTexture)
+                    {
+                        return less(a.MetallicRoughnessTexture, b.MetallicRoughnessTexture);
+                    }
+                    return less(a.OcclusionTexture, b.OcclusionTexture);
                 });
         }
     }
@@ -399,7 +403,8 @@ namespace Kurenai::Assets
             if (mesh.BaseColorTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
                 mesh.NormalTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
                 mesh.MetallicRoughnessTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                mesh.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()))
+                mesh.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                mesh.OcclusionTextureIndex >= static_cast<int32_t>(textureEntries.size()))
             {
                 throw std::runtime_error("メッシュ[" + std::to_string(i) + "]が範囲外のテクスチャを参照しています: " + WideToUtf8(filePath));
             }
@@ -443,6 +448,22 @@ namespace Kurenai::Assets
             return texture ? texture : textureLoader.GetFlatNormal();
         };
 
+        // レイトレーシング用の頂点属性・インデックスを作るか。デバイスが非対応なら作らない
+        // (Bistro級では100MB規模になるため、使わない環境で確保しない)
+        const bool buildRaytracingGeometry = device.SupportsRaytracing();
+        if (buildRaytracingGeometry)
+        {
+            size_t totalVertexCount = 0;
+            size_t totalIndexCount = 0;
+            for (const MeshEntry& mesh : meshEntries)
+            {
+                totalVertexCount += mesh.VertexCount;
+                totalIndexCount += mesh.IndexCount;
+            }
+            model.RaytracingAttributes.reserve(totalVertexCount);
+            model.RaytracingIndices.reserve(totalIndexCount);
+        }
+
         model.Meshes.reserve(meshEntries.size());
         for (const MeshEntry& mesh : meshEntries)
         {
@@ -462,11 +483,34 @@ namespace Kurenai::Assets
             indexBufferDesc.InitialData = geometryPayload.data() + mesh.IndexOffset;
             outMesh.IndexBuffer = device.CreateBuffer(indexBufferDesc);
             outMesh.IndexCount = mesh.IndexCount;
+            outMesh.VertexCount = mesh.VertexCount;
+
+            if (buildRaytracingGeometry)
+            {
+                // geometryPayloadがまだ生存しているこの場でしか元データを読めないため、
+                // ここでレイトレーシング用の圧縮属性を作っておく(位置は持たない。理由は
+                // RaytracingGeometry.hのコメント参照)
+                outMesh.RaytracingAttributeOffset = static_cast<uint32_t>(model.RaytracingAttributes.size());
+                outMesh.RaytracingIndexOffset = static_cast<uint32_t>(model.RaytracingIndices.size());
+
+                const auto* vertices = reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset);
+                for (uint32_t v = 0; v < mesh.VertexCount; ++v)
+                {
+                    model.RaytracingAttributes.push_back(PackRaytracingVertexAttribute(vertices[v].Normal, vertices[v].UV));
+                }
+
+                const auto* indices = reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset);
+                model.RaytracingIndices.insert(model.RaytracingIndices.end(), indices, indices + mesh.IndexCount);
+            }
 
             outMesh.BaseColorTexture = resolveBaseColorOrMetallicRoughness(mesh.BaseColorTextureIndex);
             outMesh.NormalTexture = resolveNormal(mesh.NormalTextureIndex);
             outMesh.MetallicRoughnessTexture = resolveBaseColorOrMetallicRoughness(mesh.MetallicRoughnessTextureIndex);
             outMesh.EmissiveTexture = resolveBaseColorOrMetallicRoughness(mesh.EmissiveTextureIndex);
+            // 遮蔽マップも未指定なら白1x1(=遮蔽なし)へフォールバックさせればよいので、
+            // BaseColor/MetallicRoughnessと同じ解決を再利用する
+            outMesh.OcclusionTexture = resolveBaseColorOrMetallicRoughness(mesh.OcclusionTextureIndex);
+            outMesh.OcclusionStrength = mesh.OcclusionStrength;
             outMesh.MetallicFactor = mesh.MetallicFactor;
             outMesh.RoughnessFactor = mesh.RoughnessFactor;
             outMesh.AlphaCutoff = mesh.AlphaCutoff;

@@ -28,11 +28,14 @@
 //      13=反射プローブの距離キューブ(同じくt4)。格納値はワールド距離なのでGainで縮めて
 //         グレースケール表示する(19.12節)
 //         (TextureCubeArrayはMode 10のTexture2DArrayとも別の型のため、さらにスロットを分ける)
-//      14=DDGIのイラディアンスアトラス(t0、22章)。Mode 4と同じくトーンマッピングして表示するが、
+//      14=モーションベクター(速度バッファ)。格納値はUV単位で1画素ぶんの移動が1/解像度と極端に
+//         小さいため、ピクセル単位へ換算してから中間灰色(0.5)を「動いていない」として色付けする。
+//         R>0.5=右へ、R<0.5=左へ、G>0.5=下へ、G<0.5=上へ画面内容が動いたことを表す
+//      15=DDGIのイラディアンスアトラス(t0、22章)。Mode 4と同じくトーンマッピングして表示するが、
 //         DataSampler(Point)で読む点が違う。アトラスは1プローブ8x8テクセルと極端に小さく、
 //         画面いっぱいへ引き伸ばされる。バイリニアで読むとプローブ同士が溶け合って
 //         「1プローブぶんのセル」の切れ目が見えなくなり、境界の複製が効いているかを確認できない
-//      15=DDGIの距離モーメントアトラス(t0)。R=平均距離をGainで縮めてグレースケール表示する。
+//      16=DDGIの距離モーメントアトラス(t0)。R=平均距離をGainで縮めてグレースケール表示する。
 //         Gが平均二乗距離だが、そのまま出しても読めないためRのみを見る
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
@@ -64,7 +67,8 @@ cbuffer PresentConstants : register(b1)
     // Mode 11(タイルライトカリングのヒートマップ)専用。
     // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数
     float4 TileParams;
-    // Mode 11専用。xy=レンダー解像度(UVからタイル座標を求めるのに使う), zw=未使用
+    // Mode 11/14が使う。xy=レンダー解像度(Mode 11はUVからタイル座標を求めるのに、
+    // Mode 14はUV単位の速度をピクセル単位へ換算するのに使う), zw=未使用
     float4 TileRenderSize;
 };
 
@@ -148,7 +152,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(gray, gray, gray, 1.0f);
     }
 
-    if (Mode == 14)
+    if (Mode == 15)
     {
         // DDGIのイラディアンスアトラス(22章)。HDRなのでMode 4と同じくReinhard+ガンマで表示する。
         // DataSampler(Point)で読むのは、1プローブ8x8テクセルのセルが画面いっぱいへ
@@ -160,7 +164,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(color, 1.0f);
     }
 
-    if (Mode == 15)
+    if (Mode == 16)
     {
         // DDGIの距離モーメントアトラス(22章)。R=平均距離、G=平均二乗距離のうち、
         // 読めるのは平均距離だけなのでRのみをGainで縮めてグレースケール表示する
@@ -225,7 +229,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // これらだけDataSamplerで引く。それ以外は色バッファなので、レターボックスの拡縮で
     // ブロック状にならないようColorSamplerで引く。
     // Modeは定数バッファ由来で波面内で一様のため、この分岐のコストは実質ゼロ
-    const bool readsRawData = (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7);
+    const bool readsRawData = (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14);
     float4 sourceColor = readsRawData
         ? SourceTexture.Sample(DataSampler, input.UV)
         : SourceTexture.Sample(ColorSampler, input.UV);
@@ -270,6 +274,16 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         float depth = sourceColor.r;
         return float4(depth, depth, depth, 1.0f);
+    }
+
+    if (Mode == 14)
+    {
+        // UV単位の速度をピクセル単位(1フレームあたり何画素動いたか)へ直す
+        float2 velocityPixels = sourceColor.rg * TileRenderSize.xy;
+        // 20画素の移動でGain=1のとき±0.5、つまり赤/緑が飽和する目安にする。
+        // 速い動きを見たいときはGainを下げ、静止に近い微小な速度を見たいときは上げる
+        float2 encoded = 0.5f + velocityPixels * (Gain / 20.0f);
+        return float4(saturate(encoded), 0.5f, 1.0f);
     }
 
     return float4(sourceColor.rgb * Gain, 1.0f);

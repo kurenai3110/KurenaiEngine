@@ -7,6 +7,8 @@
 #include "RHI/IRHIBuffer.h"
 #include "RHI/IRHITexture.h"
 
+#include "RaytracingGeometry.h"
+
 namespace Kurenai::Assets
 {
     struct Mesh
@@ -14,10 +16,24 @@ namespace Kurenai::Assets
         std::unique_ptr<RHI::IRHIBuffer> VertexBuffer;
         std::unique_ptr<RHI::IRHIBuffer> IndexBuffer;
         uint32_t IndexCount = 0;
+        // VertexBufferに入っている頂点数。描画はインデックス経由なので不要だが、
+        // BLASの構築(D3D12_RAYTRACING_GEOMETRY_DESC::Triangles.VertexCount)に必要
+        uint32_t VertexCount = 0;
+        // レイトレーシング用: Model::RaytracingAttributes / RaytracingIndices の中で
+        // このメッシュのデータが始まる位置。RaytracingSceneがシーン全体の統合バッファを
+        // 組み立てる際の連結元として使う。
+        // デバイスがレイトレーシング非対応の場合は両配列とも空で、この値は意味を持たない
+        uint32_t RaytracingAttributeOffset = 0;
+        uint32_t RaytracingIndexOffset = 0;
         RHI::IRHITexture* BaseColorTexture = nullptr;
         RHI::IRHITexture* NormalTexture = nullptr;
         RHI::IRHITexture* MetallicRoughnessTexture = nullptr;
         RHI::IRHITexture* EmissiveTexture = nullptr;
+        // ベイク済みアンビエントオクルージョン(遮蔽マップ)。glTFのocclusionTexture由来で、
+        // 赤チャンネルを遮蔽率(1=遮蔽なし、0=完全遮蔽)として読む。未指定時は白1x1(=遮蔽なし)。
+        // SSAO/SSILがスクリーンスペースの制約で拾えない、布の折り目や狭い隙間のような
+        // 細部の遮蔽を補う。間接光(IBL・SSILの間接拡散光)にのみ効き、直接光と自発光には掛からない
+        RHI::IRHITexture* OcclusionTexture = nullptr;
         float MetallicFactor = 0.0f;
         // ソースデータに値が無い場合はkInvalidMaterialFactor(負値)が入る。シェーダー側は
         // 負値を「係数の指定なし」とみなし1.0(テクスチャの値をそのまま使う)として扱う
@@ -37,6 +53,10 @@ namespace Kurenai::Assets
         // 現状このフォールバック乗算はTransparentパス(Transparent.hlsl)のみが行い、GBufferパス
         // (不透明・MASK)は既存動作を変えないため引き続きテクスチャの色をそのまま使う
         float BaseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        // glTFのocclusionTexture.strength(既定1.0)。シェーダーはlerp(1, ao, strength)で適用する。
+        // 既定値はModelPackage.hのkDefaultOcclusionStrengthと同じ1.0だが、このヘッダーは
+        // ディスク形式の定義に依存させたくないため定数を参照せず直接書いている
+        float OcclusionStrength = 1.0f;
     };
 
     enum class LightType : uint32_t
@@ -79,6 +99,22 @@ namespace Kurenai::Assets
         std::vector<Mesh> Meshes;
         std::vector<std::unique_ptr<RHI::IRHITexture>> Textures;
         std::vector<Light> Lights;
+
+        // レイトレーシングでヒット面の陰影を計算するための、このモデル全メッシュ分の
+        // 頂点属性とインデックス(Mesh::RaytracingAttributeOffset / RaytracingIndexOffsetが
+        // メッシュごとの開始位置を指す)。
+        //
+        // 描画用の頂点/インデックスバッファはGPU上にしか無く、シェーダーからは
+        // 頂点バッファとして以外に読めない(SRVを持たない)ため、レイトレーシング側が
+        // 参照できる形のコピーをModelLoaderが.kgeomの読み込み中に作る。
+        //
+        // 【寿命】RaytracingScene::Buildがシーン全体の統合バッファへ連結してGPUへ送った時点で
+        // 用済みになるため、そこで解放される(数百万頂点のシーンでは100MB規模になるため、
+        // 使い終わったCPU側コピーを抱え続けない)。
+        // デバイスがレイトレーシング非対応の場合はそもそも構築されず空のまま
+        std::vector<RaytracingVertexAttribute> RaytracingAttributes;
+        std::vector<uint32_t> RaytracingIndices;
+
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
     };

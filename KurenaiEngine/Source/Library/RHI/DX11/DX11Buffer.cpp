@@ -18,11 +18,13 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11Buffer> buffer,
         uint32_t strideInBytes,
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv,
-        bool isDynamic)
+        bool isDynamic,
+        bool isImmutable)
         : m_Buffer(std::move(buffer))
         , m_StrideInBytes(strideInBytes)
         , m_Srv(std::move(srv))
         , m_IsDynamic(isDynamic)
+        , m_IsImmutable(isImmutable)
     {
     }
 

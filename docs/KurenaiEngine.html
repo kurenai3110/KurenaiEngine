@@ -284,8 +284,9 @@ DLLは実行ファイルと同じフォルダに置かれていないと起動�
 
 <p>
 <code>KurenaiEngine3D</code> は、Deferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness+
-深度)によるPBRレンダリング、シャドウマッピング、IBL(環境光)、DDGI(プローブ格子による位置ごとの
-拡散グローバルイルミネーション)、SSAO/SSIL(間接光)、SSR(反射)、
+深度)によるPBRレンダリング、平行光の影(カスケードシャドウマップまたはレイトレーシング)、
+IBL(環境光)、DDGI(プローブ格子による位置ごとの拡散グローバルイルミネーション)、
+AO/間接光(SSAO/SSILまたはレイトレーシング)、鏡面反射(スクリーンスペース(SSR)またはレイトレーシング)、
 複数シーンの切り替え、ImGuiによる設定パネル一式までを内包した<strong>完結型の3Dレンダラー</strong>です。
 構築して <code>Run()</code> を呼ぶだけでウィンドウが開き、ユーザーが閉じるまでブロックします。
 </p>
@@ -326,13 +327,19 @@ ImGuiパネル経由</strong>):
     <li>右クリックを押しながらマウス移動でカメラ回転</li>
     <li><code>F1</code> でImGuiパネルの表示/非表示切り替え</li>
     <li>8つのImGuiパネル(シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ /
-    デバッグ表示 / システム / プロファイラ)で表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/
-    スクリーンスペースシャドウ/SSR/タイルドライトカリングのON・OFFやパラメータ調整、
-    トーンマップ・ブルーム・自動露出の調整、デバッグ表示バッファの選択、
+    デバッグ表示 / システム / プロファイラ)で表示アセットの切り替え、AO/間接光・
+    スクリーンスペースシャドウ・タイルドライトカリングのON・OFFやパラメータ調整、
+    AO/間接光の手法(SSAO / SSIL / レイトレーシング)・平行光の影の手法
+    (なし / カスケードシャドウマップ / レイトレーシング)・
+    反射の手法(なし / スクリーンスペース / レイトレーシング)の切り替え、
+    トーンマップ・TAA・ブルーム・自動露出の調整、デバッグ表示バッファの選択、
     時刻(昼夜サイクル)・月の位置・手続き空・EV100(露出)の調整、
     ポイント/スポットライトの一覧・追加・複製・削除・編集、反射プローブの編集と焼き直し、
     FPS/CPU/GPUの計測値確認ができる。パネルはドッキングに対応しており、配置とサイズは
     実行ファイルと同じフォルダの<code>imgui.ini</code>へ自動保存される</li>
+    <li>ウィンドウの位置・サイズ・最大化状態は終了時に実行ファイルと同じフォルダの
+    <code>window.ini</code>へ保存され、次回起動時に復元される
+    (<code>window.ini</code>を削除すると既定のサイズで起動する)</li>
   </ul>
 </li>
 <li>表示できるシーンはビルド済みバイナリに組み込み済み(Sponza / Bistro (McGuire) Exterior /
@@ -556,7 +563,11 @@ std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTextureArray(uint32_t width, uin
 std::unique_ptr&lt;IRHITexture&gt;   CreateUAVTexture(uint32_t width, uint32_t height, Format format);
 std::unique_ptr&lt;IRHITexture&gt;   CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels);
 std::unique_ptr&lt;IRHISamplerSet&gt; CreateSamplerSet(const SamplerDesc* descs, uint32_t count);
-IRHICommandList*                GetImmediateCommandList();</code></pre>
+IRHICommandList*                GetImmediateCommandList();
+
+bool SupportsRaytracing() const;
+std::unique_ptr&lt;IRHIAccelerationStructure&gt; CreateBottomLevelAS(const BottomLevelASDesc&amp; desc);
+std::unique_ptr&lt;IRHIAccelerationStructure&gt; CreateTopLevelAS(const TopLevelASDesc&amp; desc);</code></pre>
 <p>
 <code>CreateTextureFromFile</code> は拡張子(<code>.dds</code>/<code>.tga</code>/その他はWIC経由で
 png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベースカラー等「見た目の色」を持つ
@@ -611,6 +622,85 @@ DX12実装はシェーダ可視ディスクリプタヒープへ直接書き込�
 並列プリフェッチが実例)。
 </p>
 
+<h4>4.2.1 レイトレーシング</h4>
+<p>
+レイトレーシングは<b>DX12かつDXR Tier 1.1対応のアダプタでのみ</b>使える。
+使う前に必ず<code>SupportsRaytracing()</code>で分岐すること。DX11は常に<code>false</code>を返す。
+</p>
+<pre><code>if (device-&gt;SupportsRaytracing())
+{
+    // モデル1つ分のジオメトリからBLASを作る
+    RHI::BottomLevelASDesc blasDesc;
+    for (const auto&amp; mesh : model.Meshes)
+    {
+        RHI::ASGeometryDesc geometry;
+        geometry.VertexBuffer = mesh.VertexBuffer.get();
+        geometry.VertexCount = mesh.VertexCount;
+        geometry.VertexStrideInBytes = sizeof(Assets::Vertex);
+        geometry.IndexBuffer = mesh.IndexBuffer.get();
+        geometry.IndexCount = mesh.IndexCount;
+        blasDesc.Geometries.push_back(geometry);
+    }
+    auto blas = device-&gt;CreateBottomLevelAS(blasDesc);
+
+    // BLASへの参照とワールド変換からTLASを作る
+    RHI::TopLevelASDesc tlasDesc;
+    RHI::ASInstanceDesc instance;
+    instance.BottomLevel = blas.get();
+    instance.InstanceID = 0;   // シェーダがCommittedInstanceID()で受け取る値
+    // instance.Transform は行優先3x4(平行移動はTransform[*][3])
+    tlasDesc.Instances.push_back(instance);
+    auto tlas = device-&gt;CreateTopLevelAS(tlasDesc);
+
+    // コンピュートシェーダへバインドする(RaytracingAccelerationStructureとして読める)
+    cmd-&gt;SetComputeAccelerationStructure(0, tlas.get());
+}</code></pre>
+<p>
+<code>CreateBottomLevelAS</code> / <code>CreateTopLevelAS</code> は関数を抜けた時点でGPU上の構築が
+完了している(内部で同期する)ため、戻り値をそのまま次の入力に使ってよい。
+非対応環境や構築失敗時は<b>例外を投げずログを出して<code>nullptr</code>を返す</b>。
+レイトレーシングは従来手法へフォールバックできる機能なので、失敗してもアプリを止めない設計にしてある。
+</p>
+<p>
+シェーダへバインドできるのは<b>TLASのみ</b>(BLASを渡すとログを出して無視される)。
+また<code>desc.Instances</code>が参照するBLASは、TLASより長く生存させること
+(理由は<code>Architecture.html</code> 22.3節)。
+</p>
+<p>
+頂点は<b>モデルのローカル空間のまま</b>BLASへ登録し、ワールドへの配置は
+<code>ASInstanceDesc::Transform</code>で行う。<code>Assets::ModelInstance::World</code>は
+HLSLへそのまま渡せるよう転置済みで保持されているため、その先頭3行をコピーすれば
+<code>Transform</code>の行優先3x4と一致する。
+</p>
+<p class="note">
+レイを実際に飛ばすHLSLの<code>RayQuery</code>はシェーダーモデル6.5以上を要求する。
+DX12バックエンドのシェーダーはdxc(DirectX Shader Compiler)でSM 6.5へコンパイルするため、
+この要件は満たしている。DX11バックエンドは従来どおり<code>d3dcompiler</code>のSM 5.0のままで、
+レイトレーシングにも対応しない(下記「シェーダーのコンパイル」参照)。
+</p>
+
+<h4>4.2.2 シェーダーのコンパイル</h4>
+<p>
+<code>IRHIDevice::CreateShader</code>に渡すHLSLは、バックエンドによって異なるコンパイラで処理される。
+書き方の違いを意識する必要はないが、使えるシェーダーモデルが変わる。
+</p>
+<table>
+<tr><th>バックエンド</th><th>コンパイラ</th><th>ターゲット</th></tr>
+<tr><td>DX12</td><td>dxc(<code>dxcompiler.dll</code>)</td><td><code>vs_6_5</code> / <code>ps_6_5</code> / <code>cs_6_5</code>(デバイスの対応上限が6.5未満ならそこまで下げる)</td></tr>
+<tr><td>DX11</td><td>d3dcompiler</td><td><code>vs_5_0</code> / <code>ps_5_0</code> / <code>cs_5_0</code></td></tr>
+</table>
+<p>
+DX12でdxcを使うには<code>dxcompiler.dll</code>と<code>dxil.dll</code>が実行ファイルと同じフォルダに必要で、
+ビルド時に自動でコピーされる(README.md参照)。<code>dxcompiler.dll</code>が見つからない場合は、
+ログに警告を残したうえでDX12も<code>d3dcompiler</code>のSM 5.0へフォールバックする
+(その場合<code>SupportsRaytracing()</code>は<code>false</code>になる)。
+</p>
+<p>
+HLSLの言語バージョンは<code>-HV 2018</code>で固定しているため、dxcのバージョンが上がっても
+既存シェーダーの意味は変わらない。シェーダーファイルは<b>BOM無しUTF-8</b>で保存すること
+(日本語コメントを含む場合、BOMもUTF-16も使わない)。
+</p>
+
 <h3>4.3 <code>RHI::IRHICommandList</code></h3>
 <pre><code>void SetRenderTarget(IRHISwapChain* swapChain);
 void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture,
@@ -636,6 +726,7 @@ void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer);
 void SetComputeTexture(uint32_t slot, IRHITexture* texture);
 void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0); // mipLevelはCreateHiZTexture用(4.3.2参照)
 void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer);
+void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* as); // TLASをtスロットへ(4.2.1参照)
 void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ);</code></pre>
 <p>
 <code>SetShaderResourceBuffer</code>は<code>BufferUsage::StructuredReadOnly</code>で作成した
@@ -825,6 +916,14 @@ uint32_t GetHeight() const;
 void SetResizeCallback(std::function&lt;void(uint32_t,uint32_t)&gt; callback);
 void SetTitle(const std::wstring&amp; title);</code></pre>
 <p>
+コンストラクタに渡した<code>width</code>/<code>height</code>は<strong>初回起動時のクライアント領域のサイズ</strong>で、
+2回目以降は前回終了時の位置・サイズ・最大化状態が復元される(<code>KurenaiEngine.dll</code>と同じ
+フォルダの<code>window.ini</code>に自動保存される。削除すれば既定のサイズに戻る)。
+そのため<code>GetWidth()</code>/<code>GetHeight()</code>はコンストラクタ直後の時点で
+引数と異なる値を返すことがある。スワップチェインの作成など解像度に依存する処理では、
+引数ではなくこれらの取得関数を使うこと。
+</p>
+<p>
 キーボード/マウス入力のAPIは提供されない(5章参照)。<code>Camera</code>は透視投影
 (<code>SetLens</code>、既定でReverse-Z)と正射影(<code>SetOrthographic</code>、2D/UI向け)の
 両方に対応し、<code>GetViewMatrix()</code>/<code>GetProjectionMatrix()</code>で行列を取得する。
@@ -995,8 +1094,8 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td rowspan="5"><code>[Scene]</code></td><td rowspan="5">0〜1</td><td><code>Name</code></td><td>string</td><td>-</td><td>ファイル名</td><td>ImGuiのシーン一覧に出る表示名</td></tr>
 <tr><td><code>Skybox</code></td><td>path</td><td>-</td><td>Skybox/Sky.dds</td><td>Assetsルートからのキューブマップ<code>.dds</code>相対パス。IBLの環境光もこれから焼かれる</td></tr>
 <tr><td><code>IBLIntensity</code></td><td>float</td><td>-</td><td>変更しない</td><td>IBLの強度倍率。0以上</td></tr>
-<tr><td><code>AmbientOcclusion</code></td><td>bool</td><td>-</td><td>true</td><td>AO/間接光(SSAO・SSIL)の有効/無効</td></tr>
-<tr><td><code>ScreenSpaceReflection</code></td><td>bool</td><td>-</td><td>true</td><td>SSRの有効/無効。SSRは画面内で反射先が見つかった場合にその色で反射を<strong>差し替える</strong>(加算ではない)。見つからなかった場合は反射プローブ由来の反射がそのまま残るため、ON/OFFで全体の明るさは変わらず反射の鮮明さだけが変わる</td></tr>
+<tr><td><code>AmbientOcclusion</code></td><td>bool</td><td>-</td><td>true</td><td>AO/間接光の有効/無効。手法(SSAO / SSIL / レイトレーシング)は<code>.kscene</code>では指定せず、レンダリングパネルで切り替える</td></tr>
+<tr><td><code>ScreenSpaceReflection</code></td><td>bool</td><td>-</td><td>true</td><td>鏡面反射の有効/無効。反射は反射先の色で反射を<strong>差し替える</strong>(加算ではない)ため、ON/OFFで全体の明るさは変わらず反射の鮮明さだけが変わる。<strong>手法(スクリーンスペース / レイトレーシング)は<code>.kscene</code>では選べず</strong>、実行環境がDXR Tier 1.1に対応していればレイトレーシング、していなければスクリーンスペースが選ばれる(実行中にUIから切り替えられる)。キー名はSSRしか無かった頃の名残でそのまま据え置いている</td></tr>
 <tr><td rowspan="3"><code>[Model]</code></td><td rowspan="3">1以上</td><td><code>Path</code></td><td>path</td><td><strong>必須</strong></td><td>-</td><td>Assetsルートからの<code>.kmodel</code>相対パス</td></tr>
 <tr><td><code>Translation</code></td><td>float3</td><td>-</td><td>0,0,0</td><td>平行移動</td></tr>
 <tr><td><code>RotationEuler</code>/<code>Scale</code></td><td>float3</td><td>-</td><td>0,0,0 / 1,1,1</td><td>回転(度、pitch/yaw/roll)・スケール(負値も可)</td></tr>
@@ -1004,7 +1103,7 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>Yaw</code> / <code>Pitch</code></td><td>float</td><td>-</td><td>0.0</td><td>度</td></tr>
 <tr><td rowspan="4"><code>[Sun]</code></td><td rowspan="4">0〜1</td><td><code>TimeOfDay</code></td><td>float</td><td>-</td><td>12.0</td><td>0〜24。範囲外はエラー</td></tr>
 <tr><td><code>AzimuthDegrees</code></td><td>float</td><td>-</td><td>126.87</td><td>太陽が昇る方位角</td></tr>
-<tr><td><code>Shadow</code></td><td>bool</td><td>-</td><td>true</td><td>シャドウマップの有効/無効</td></tr>
+<tr><td><code>Shadow</code></td><td>bool</td><td>-</td><td>true</td><td>太陽の影の有効/無効。手法(カスケードシャドウマップ / レイトレーシング)は<code>.kscene</code>では指定せず、エンジンが環境に応じて選ぶ(レイトレーシングが使えるならそちら。読み込み後にレンダリングパネルの「影の手法」で切り替えられる)</td></tr>
 <tr><td><code>Enabled</code></td><td>bool</td><td>-</td><td>true</td><td>太陽(平行光)そのものの有効/無効。<code>TimeOfDay</code>を夜にすると環境光の明るさも一緒に落ちるが、こちらは太陽だけを消す</td></tr>
 <tr><td rowspan="8"><code>[Light]</code></td><td rowspan="8">0以上</td><td><code>Type</code></td><td>enum</td><td><strong>必須</strong></td><td>-</td><td><code>Point</code> / <code>Spot</code></td></tr>
 <tr><td><code>Position</code></td><td>float3</td><td><strong>必須</strong></td><td>-</td><td>-</td></tr>
@@ -1294,6 +1393,11 @@ KurenaiEngineのいずれのDLLにもリンクされていない</strong>(モデ
 インポートライブラリがリンクされる。DLLを経由した参照は推移的にリンクされないため、
 Libraryへの参照だけを省略することはできない)</li>
 <li>実行時に上記2つのDLLが実行ファイルと同じフォルダに存在すること</li>
+<li>DX12バックエンドを使う場合は、加えてWindows SDK同梱の<code>dxcompiler.dll</code>と
+<code>dxil.dll</code>が実行ファイルと同じフォルダに存在すること
+(<code>KurenaiEngineLibrary</code>のPostBuildEventがWindows SDKからコピーするため、
+プロジェクト参照の構成であれば自動的に揃う)。DX12のシェーダーはこのdxcで
+シェーダーモデル6.5へコンパイルされる(4.2.2節参照)</li>
 </ul>
 <p>
 一方<strong><code>KurenaiPacker.exe</code>(<code>Tools\KurenaiPacker\KurenaiPacker.vcxproj</code>)は
@@ -1316,9 +1420,16 @@ assimp・DirectXTexに加え<code>KurenaiEngineLibrary.vcxproj</code>への依�
 <tr><td>DrawTextの新規文字追加</td><td>ASCII以外(かな漢字等)の文字を初めて<code>DrawText</code>に渡すと、その文字はその1フレームだけ表示されず、次の<code>BeginFrame()</code>でアトラスへ追加されてから表示される(3.2節参照)</td></tr>
 <tr><td>DrawRoundedRectの角丸半径</td><td><code>cornerRadiusPixels</code>が<code>width</code>/<code>height</code>の半分より大きい値の場合、ピクセルシェーダー側で半幅・半高さの小さい方に自動的にクランプされる(矩形からはみ出す角丸にはならない)</td></tr>
 <tr><td>ビルド設定の一致</td><td>3つのDLL(KurenaiEngineLibrary/KurenaiEngine3D/KurenaiEngine2D)とサンプル実行ファイルは同一コンパイラ・同一ランタイムライブラリ設定(Debug/Releaseを一致)でビルドすること。本リポジトリの <code>.vcxproj</code> はこの前提で統一されている</td></tr>
-<tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)</td></tr>
+<tr><td>Library使用時のプリミティブ</td><td><code>RHI::PrimitiveTopology</code>は<code>TriangleList</code>のみ、インデックスは常に32bit固定。インスタンス描画・MSAAは未対応(4章参照)。アンチエイリアスは<code>KurenaiEngine3D</code>側のTAA(ポストプロセスパネル)で行う</td></tr>
+<tr><td>TAAと半透明</td><td>半透明メッシュはモーションベクター(速度バッファ)を書かないため、TAAは半透明面をその背後にあるもの(不透明メッシュ、無ければ空)の速度で再投影する。カメラを大きく並進させるとガラス面などに残像が出ることがある</td></tr>
+<tr><td>TAAと細い構造物</td><td>アンテナ・手すり・樹木の葉のように1画素より細いものは、ジッターのたびにその画素を覆ったり覆わなかったりするため、静止していてもちらつきが残る。ポストプロセスパネルの「静止時のちらつき抑制」で面のエッジのちらつきは消えるが、この孤立点は原理上残る</td></tr>
 <tr><td>アセットの事前変換が必須</td><td><code>Assets::LoadModel</code>は<code>.kmodel</code>のみを受け付ける。<code>.gltf</code>/<code>.fbx</code>等のソースモデルは、実行前に<code>KurenaiPacker.exe</code>で変換しておく必要がある(7章参照)</td></tr>
-<tr><td>ポイント/スポットライトの影</td><td>影を落とさない(シャドウマップは平行光1灯のみ対応)</td></tr>
+<tr><td>レイトレーシングはDX12専用</td><td>DXRはD3D12の機能のため、DX11バックエンドでは使えない(<code>IRHIDevice::SupportsRaytracing()</code>が常に<code>false</code>を返し、<code>CreateBottomLevelAS</code>/<code>CreateTopLevelAS</code>は<code>nullptr</code>を返す)。DX12でもアダプタがDXR Tier 1.1に達していない場合、あるいはdxcでシェーダーモデル6.5をコンパイルできない場合は同様に<code>false</code>になる。使う前に必ずこの関数で分岐すること(4.2.1参照)</td></tr>
+<tr><td>シェーダーモデルがバックエンドで異なる</td><td>DX12はdxcでSM 6.5、DX11はd3dcompilerでSM 5.0へコンパイルする。SM 6.x固有の機能(<code>RayQuery</code>、wave intrinsicsなど)を使ったシェーダーはDX11では動かないため、両バックエンドで使うシェーダーはSM 5.0の範囲で書くこと(4.2.2参照)</td></tr>
+<tr><td>DX12はdxcのDLLを必要とする</td><td><code>dxcompiler.dll</code>と<code>dxil.dll</code>が実行ファイルの隣に必要(ビルド時に自動コピー)。無い場合はログに警告を出してSM 5.0へフォールバックし、レイトレーシングは無効になる(4.2.2参照)</td></tr>
+<tr><td>ポイント/スポットライトの影</td><td>シャドウマップもレイトレーシングも平行光1灯のみ対応。ポイント/スポットライトの影はスクリーンスペースシャドウ(深度バッファのレイマーチ)でのみ得られる</td></tr>
+<tr><td>レイトレーシングAO/GIの間接光</td><td>バウンス面が画面に映っていればすべてのライトの寄与(影付き)を拾えるが、画面外・手前の面に隠れた面では太陽の直接光だけの簡略計算になり、色もマテリアルの定数値になる。またレイの最大距離より遠い面は遮蔽物にも間接光の光源にもならない</td></tr>
+<tr><td>レイトレーシングシャドウの適用範囲</td><td>不透明サーフェス(G-Buffer)の直接光パスだけを置き換える。半透明の描画と反射プローブのキャプチャはカメラ視点の画面空間バッファを使えないため、レイトレーシングを選んでいる間もカスケードシャドウマップを描き続けてそちらを使う</td></tr>
 <tr><td>ライトの同時描画数</td><td>最大1024灯まで(実データでの想定はせいぜい数灯〜十数灯)。超過分はカメラに近い順に採用される</td></tr>
 <tr><td>エリアライト</td><td>未対応(4.6.1参照)。球・チューブ・矩形のライトはモデルからもImGuiからも作成できない</td></tr>
 <tr><td>EV100と屋内シーン</td><td>太陽・環境光・ポイント/スポットライトすべてに同じEV100が一様にかかるため、屋外の直射日光を基準にした既定値(EV100=15)のままだと屋内照明だけのシーンは暗くなる。EV100は値が大きいほど明るいシーンを表す実在の写真用語のため、値を上げると描画は暗くなる(実カメラの露出と同様の向き)。シーンに応じてEV100を下げて調整する(自動露出は無い)</td></tr>

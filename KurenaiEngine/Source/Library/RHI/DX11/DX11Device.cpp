@@ -101,6 +101,12 @@ namespace Kurenai::RHI
         ThrowIfFailed(adapter->GetParent(IID_PPV_ARGS(&m_Factory)), "DXGIファクトリの取得に失敗しました");
 
         m_ImmediateCommandList = std::make_unique<DX11CommandList>(m_Context);
+
+        // レイトレーシング(DXR)はD3D12の機能でDX11には存在しない。上位層はこの後
+        // SupportsRaytracing()を見て従来のスクリーンスペース手法へ静かにフォールバックするため、
+        // 「なぜレイトレーシングが効いていないのか」を追える手がかりをここで残しておく
+        Core::Logger::Info(
+            "DX11", "レイトレーシング非対応: DXRはD3D12の機能です(スクリーンスペース手法で描画します)");
     }
 
     std::unique_ptr<IRHISwapChain> DX11Device::CreateSwapChain(void* windowHandle, uint32_t width, uint32_t height)
@@ -190,6 +196,51 @@ namespace Kurenai::RHI
                 "読み取り専用構造化バッファのシェーダリソースビュー作成に失敗しました");
 
             return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, srv, /*isDynamic=*/true);
+        }
+
+        // 作成時の初期データから変化しない読み取り専用の構造化バッファ。CPUからの書き換えが無いため
+        // D3D11_USAGE_IMMUTABLE(CPUAccessFlagsなし)で作る。レイトレーシングのシーンジオメトリ用
+        if (desc.Usage == BufferUsage::StructuredImmutable)
+        {
+            if (desc.StrideInBytes == 0)
+            {
+                Core::Logger::Error("DX11", "StructuredImmutableバッファのStrideInBytesが0です。作成を中止します");
+                throw std::runtime_error("StructuredImmutableバッファのStrideInBytesが0です");
+            }
+            if (!desc.InitialData)
+            {
+                // D3D11_USAGE_IMMUTABLEは初期データが必須(後から書き込む手段が無い)
+                Core::Logger::Error("DX11", "StructuredImmutableバッファにInitialDataが指定されていません。作成を中止します");
+                throw std::runtime_error("StructuredImmutableバッファにInitialDataが指定されていません");
+            }
+
+            D3D11_BUFFER_DESC structuredDesc{};
+            structuredDesc.ByteWidth = desc.SizeInBytes;
+            structuredDesc.Usage = D3D11_USAGE_IMMUTABLE;
+            structuredDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            structuredDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            structuredDesc.StructureByteStride = desc.StrideInBytes;
+
+            D3D11_SUBRESOURCE_DATA initData{};
+            initData.pSysMem = desc.InitialData;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> structuredBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&structuredDesc, &initData, &structuredBuffer),
+                "不変構造化バッファ(StructuredImmutable)の作成に失敗しました");
+
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+            srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+            srvDesc.Buffer.FirstElement = 0;
+            srvDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
+
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+            ThrowIfFailed(
+                m_Device->CreateShaderResourceView(structuredBuffer.Get(), &srvDesc, &srv),
+                "不変構造化バッファのシェーダリソースビュー作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, srv, /*isDynamic=*/false, /*isImmutable=*/true);
         }
 
         // コンピュートがUAVで書き、ピクセルシェーダがSRVで読む構造化バッファ。CPUからは書き込まないので
@@ -917,6 +968,23 @@ namespace Kurenai::RHI
         {
             Sleep(0);
         }
+    }
+
+    std::unique_ptr<IRHIAccelerationStructure> DX11Device::CreateBottomLevelAS(const BottomLevelASDesc& desc)
+    {
+        // 引数は使わないが、シグネチャはIRHIDeviceの契約通りに保つ
+        (void)desc;
+        Core::Logger::Error(
+            "DX11", "CreateBottomLevelAS: DX11はレイトレーシングに対応していません。SupportsRaytracing()で分岐してください");
+        return nullptr;
+    }
+
+    std::unique_ptr<IRHIAccelerationStructure> DX11Device::CreateTopLevelAS(const TopLevelASDesc& desc)
+    {
+        (void)desc;
+        Core::Logger::Error(
+            "DX11", "CreateTopLevelAS: DX11はレイトレーシングに対応していません。SupportsRaytracing()で分岐してください");
+        return nullptr;
     }
 
     std::unique_ptr<IRHIImGuiBackend> DX11Device::CreateImGuiBackend(void* windowHandle)

@@ -133,8 +133,8 @@ namespace Kurenai::Assets
         // ここをvectorにしてあるのは、対応した時点で読み込み側を変えずに済ませるため
         std::vector<GIVolume> GIVolumes;
 
-        // [Camera]セクションが無い場合はfalseのままで、呼び出し側はFrameCameraToModel相当の
-        // 自動配置ヒューリスティックを使う
+        // [Camera]セクションが無い場合はfalseのままで、呼び出し側は
+        // KurenaiEngine3D::ComputeInitialCamera相当の自動配置ヒューリスティックを使う
         bool HasCameraOverride = false;
         float CameraPosition[3] = { 0.0f, 0.0f, 0.0f };
         float CameraYaw = 0.0f;
@@ -172,7 +172,7 @@ namespace Kurenai::Assets
         bool SSREnabled = true;
 
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
-        // シーン全体のワールド空間AABB。FrameCameraToModel/ComputeLightViewProjが使う
+        // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
     };

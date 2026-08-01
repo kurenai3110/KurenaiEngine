@@ -41,6 +41,13 @@ cbuffer TonemapConstants : register(b1)
     // 目が順応している明るさをEV100で表したもの。太陽・月・空の照度から求めるので
     // 画面の構図にも露出設定にも依存しない(ApplyMesopicVisionのコメント参照)
     float MesopicAdaptationEV100;
+    // TAAの蓄積で失われた高域を戻すシャープネス(0で無効)。TAAが無効ならCPU側が0を渡す。
+    // TAAの中ではなくここで掛ける理由はPSMainのコメント参照
+    float Sharpness;
+    // シャープネスの近傍タップに使う1テクセルぶんのUV(1/レンダー解像度)
+    float InvRenderWidth;
+    float InvRenderHeight;
+    float TonemapPadding;
 };
 
 struct PSInput
@@ -222,9 +229,12 @@ float3 ApplyMesopicVision(float3 preExposedColor)
     return lerp(preExposedColor, mesopicColor, saturate(MesopicStrength));
 }
 
-float4 PSMain(PSInput input) : SV_TARGET
+// SceneColorの1点を、そのまま画面へ出せるsRGBエンコード済みの表示色へ変換する。
+// シャープネスの近傍タップが中心画素とまったく同じ変換を通るよう関数へ切り出してある
+// (露出・ブルーム・カーブのどれかがタップ側で抜けると、高域の推定がずれて輪郭に色が付く)
+float3 ResolveDisplayColor(float2 uv, float exposureScale)
 {
-    float3 color = SceneColorTexture.Sample(ColorSampler, input.UV).rgb;
+    float3 color = SceneColorTexture.Sample(ColorSampler, uv).rgb;
 
     // 薄明視は**露出を掛ける前**に適用する。桿体視へ移るかどうかはシーンの実際の
     // 明るさで決まるものであって、表示の露出設定とは無関係だから。
@@ -232,17 +242,6 @@ float4 PSMain(PSInput input) : SV_TARGET
     //  しきい値を超える明るい領域だけなので、そこは元々錐体視の側にある)
     color = ApplyMesopicVision(color);
 
-    // 露出。SceneColorにはプリ露出(PreExposureEV100)が既に乗っているので、
-    // 自動露出が求めたEV100との「差」だけを掛け直せばよい:
-    //   exposure(ev) = 1/(1.2 * 2^ev) より
-    //   exposure(auto) / exposure(pre) = 2^(pre - auto)
-    // 自動露出が無効なら手動のExposureScaleをそのまま使う
-    float exposureScale = ExposureScale;
-    if (UseAutoExposure > 0.0f)
-    {
-        const float autoEV100 = ExposureTexture.Load(int3(0, 0, 0));
-        exposureScale = exp2(PreExposureEV100 - autoEV100);
-    }
     color *= exposureScale;
     // NaN/負値がここまで来ると以降の多項式で破綻するので落としておく
     color = max(color, 0.0f);
@@ -253,7 +252,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 露出を上げたのと区別がつかなくなる)
     if (BloomStrength > 0.0f)
     {
-        const float3 bloom = BloomTexture.Sample(ColorSampler, input.UV).rgb;
+        const float3 bloom = BloomTexture.Sample(ColorSampler, uv).rgb;
         color = lerp(color, bloom, saturate(BloomStrength));
     }
 
@@ -270,7 +269,47 @@ float4 PSMain(PSInput input) : SV_TARGET
         color = TonemapReinhard(color);
     }
 
-    color = LinearToSRGB(color);
+    return LinearToSRGB(color);
+}
+
+float4 PSMain(PSInput input) : SV_TARGET
+{
+    // 露出。SceneColorにはプリ露出(PreExposureEV100)が既に乗っているので、
+    // 自動露出が求めたEV100との「差」だけを掛け直せばよい:
+    //   exposure(ev) = 1/(1.2 * 2^ev) より
+    //   exposure(auto) / exposure(pre) = 2^(pre - auto)
+    // 自動露出が無効なら手動のExposureScaleをそのまま使う
+    float exposureScale = ExposureScale;
+    if (UseAutoExposure > 0.0f)
+    {
+        const float autoEV100 = ExposureTexture.Load(int3(0, 0, 0));
+        exposureScale = exp2(PreExposureEV100 - autoEV100);
+    }
+
+    float3 color = ResolveDisplayColor(input.UV, exposureScale);
+
+    // --- シャープネス(TAAの蓄積で失われた高域を戻す) ---
+    // 十字4タップの平均を低域として引くアンシャープマスク。
+    //
+    // 【なぜTAAの中ではなくここなのか】アンシャープマスクが増幅する高域は、ジッターによって
+    // 毎フレーム変動する成分そのものである。TAAの入力へ掛けると入力の振れ幅が直接大きくなり、
+    // 静止カメラでのちらつきが実測で約53%増えていた(平均差分0.19→0.29)。
+    // ここは最終出力にしか掛からずどこへもフィードバックされないので、ちらつきにも
+    // リンギングの累積にも寄与しない。
+    //
+    // トーンマップ後のsRGB値に対して掛けているのは、HDR値のまま掛けると明るいエッジで
+    // 極端なオーバーシュートが出るため(表示レンジで掛けるのはFidelityFX CAS等と同じ位置)。
+    // TAAが無効のときはCPU側がSharpness=0を渡すので、この分岐ごと素通りする
+    if (Sharpness > 0.0f)
+    {
+        const float2 dx = float2(InvRenderWidth, 0.0f);
+        const float2 dy = float2(0.0f, InvRenderHeight);
+        const float3 lowPass = 0.25f * (ResolveDisplayColor(input.UV - dx, exposureScale) +
+                                        ResolveDisplayColor(input.UV + dx, exposureScale) +
+                                        ResolveDisplayColor(input.UV - dy, exposureScale) +
+                                        ResolveDisplayColor(input.UV + dy, exposureScale));
+        color = saturate(color + (color - lowPass) * Sharpness);
+    }
 
     // 8bit量子化の直前に三角分布ノイズ(±1LSB)を加える。一様分布より三角分布のほうが
     // 量子化誤差と入力値の相関が切れ、バンドの縁が残りにくい。
