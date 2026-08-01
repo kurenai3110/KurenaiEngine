@@ -24,6 +24,28 @@ namespace Kurenai
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
 
+        // TAAのジッターに使う低食い違い量列(Halton列)。基数baseのradical inverse、
+        // すなわちindexを基数base表記にして小数点の左右を反転した値を返す([0,1)に収まる)。
+        // 乱数と違い、少ない点数でも区間内へ均等に散らばるのが要点で、8フレームぶん取れば
+        // ピクセル内に8点が偏りなく配置される
+        float RadicalInverse(uint32_t index, uint32_t base)
+        {
+            float result = 0.0f;
+            float fraction = 1.0f / static_cast<float>(base);
+            while (index > 0)
+            {
+                result += static_cast<float>(index % base) * fraction;
+                index /= base;
+                fraction /= static_cast<float>(base);
+            }
+            return result;
+        }
+
+        // TAAのジッター周期(フレーム数)。長いほど多くのサンプル位置を踏めるが、
+        // その分だけ収束に時間がかかり、カメラが動いている間の見た目が不安定になる。
+        // 8はUnreal Engine等でも使われる実用的な妥協点
+        constexpr uint32_t kTAAJitterSampleCount = 8;
+
         // モデル描画(G-Bufferパス)の頂点入力レイアウト。PSOの作り直し
         // (CreatePrecisionDependentPipelineStates)からも使うため関数にしてある
         std::vector<RHI::InputElementDesc> GetModelInputLayout()
@@ -34,6 +56,8 @@ namespace Kurenai
                 { "NORMAL", 0, RHI::Format::R32G32B32_Float, 12 },
                 { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
                 { "TANGENT", 0, RHI::Format::R32G32B32A32_Float, 32 },
+                // ライトマップUV(遮蔽マップ専用)。Assets::Vertex::UV1
+                { "TEXCOORD", 1, RHI::Format::R32G32_Float, 48 },
             };
         }
 
@@ -62,9 +86,9 @@ namespace Kurenai
             // 最大ミップレベル(kIBLPrefilterMipLevels-1、DeferredLighting.hlslがラフネス→ミップの
             // 変換に使う)。z: IBL強度倍率(m_IBLEnabled=falseの場合は0.0fを渡し、シェーダ側で
             // EvaluateIBLの代わりに定数色アンビエント(AmbientColor.rgb)へフォールバックする)。
-            // w: スペキュラのマルチスキャッタリング・エネルギー補正の有効フラグ
-            // (m_SpecularEnergyCompensationEnabled、1.0f=有効/0.0f=無効。共有ヘッダー
-            // SpecularEnergy.hlsliのSpecularEnergyCompensationが読む。14.9節)
+            // w: スペキュラのマルチスキャッタリング・エネルギー補正の方式
+            // (m_SpecularCompensationMode。0=Off / 1=Linear / 2=Series / 3=Kulla-Conty。
+            // 共有ヘッダーSpecularEnergy.hlsliのKURENAI_SPEC_COMP_*と一致させること。14.9節)
             DirectX::XMFLOAT4 ShadowParams;
             // 半透明パス(Transparent.hlsl)専用。x=t8のライトリストの有効数。DirectLighting.hlslは
             // 専用のLightingConstants(b1)で受け取るためこのフィールドを使わない(末尾に追加のため
@@ -81,6 +105,25 @@ namespace Kurenai
             // y=影響範囲のデバッグ表示フラグ、z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
             // DeferredLighting.hlslとSSR.hlslが読む
             DirectX::XMFLOAT4 ProbeParams;
+            // 反射プローブの距離キューブ用(末尾に追加、19.12節)。x=視差補正に距離キューブを使うフラグ、
+            // y=距離キューブによる遮蔽判定(光漏れ抑制)の有効フラグ、z=距離キューブの1面の解像度
+            // (テクセル。ReflectionProbe.hlsliのProbeDistanceBiasが1テクセル幅の見積もりに使う。
+            // ハードコードせずここから渡すのは、kProbeCaptureSizeを変えたときに黙ってずれないため)、w=未使用
+            DirectX::XMFLOAT4 ProbeParams2;
+            // TAA用(末尾に追加のため既存シェーダのオフセットは変わらない)。前フレームの
+            // ビュー射影行列(TAAのジッターを含んだままのもの)。GBuffer.hlslが頂点をこの行列でも
+            // 変換し、今フレームの投影位置との差からモーションベクター(速度)を求める。
+            // 初回フレームとTAAの履歴リセット時は今フレームのViewProjと同じ値を入れる
+            // (未定義値が速度バッファへ焼き込まれるのを防ぐため)
+            DirectX::XMFLOAT4X4 PrevViewProj;
+            // TAAのサブピクセルジッター量(末尾に追加)。xy=今フレーム、zw=前フレーム。
+            // 単位はUV(=ピクセルオフセット / レンダー解像度)。
+            //
+            // 【なぜ速度からジッターを引くのか】ジッターは投影行列に入れてあるので、ViewProjと
+            // PrevViewProjで投影した位置の差にはジッターの差も混ざる。しかしジッターは
+            // 「同じ面のどこをサンプルしたか」の違いであって「ものが動いた量」ではない。
+            // 引いておかないとTAAが履歴を引く位置が毎フレーム±0.5px揺れ、いつまでも収束しない
+            DirectX::XMFLOAT4 TAAParams;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -597,7 +640,7 @@ namespace Kurenai
         // 持たないため、モデル行列もマテリアル係数(Emissive/AlphaCutoff含む)と同居させている
         // (Architecture.html参照)。float3(EmissiveFactor)以降が16バイト境界をまたがないよう、
         // 直前のMetallicFactor/RoughnessFactor/TangentSignFlip/AlphaCutoffで先に16バイトを
-        // 埋めてからEmissiveFactor+Paddingで次の16バイトを埋める配置にしている
+        // 埋めてからEmissiveFactor+OcclusionStrengthで次の16バイトを埋める配置にしている
         struct alignas(16) ObjectConstants
         {
             DirectX::XMFLOAT4X4 World;
@@ -608,7 +651,9 @@ namespace Kurenai
             // 0以下ならアルファカットアウト無効
             float AlphaCutoff;
             float EmissiveFactor[3];
-            float Padding;
+            // glTFのocclusionTexture.strength(既定1.0)。かつては純粋な詰め物(Padding)だった枠を
+            // そのまま使っているため、定数バッファのサイズ・オフセットは一切変わっていない
+            float OcclusionStrength;
             // glTFのbaseColorFactor(既定[1,1,1,1])。GBuffer.hlsl/Shadow.hlslはこのフィールドを
             // 宣言していない(=読まない)ため、末尾に追加してもオフセットへの影響は無い。
             // Transparent.hlsl(半透明フォワードパス)のみがBaseColorTextureと乗算して使う(14章参照)
@@ -634,6 +679,7 @@ namespace Kurenai
             constants.EmissiveFactor[0] = mesh.EmissiveFactor[0] * emissiveIntensity;
             constants.EmissiveFactor[1] = mesh.EmissiveFactor[1] * emissiveIntensity;
             constants.EmissiveFactor[2] = mesh.EmissiveFactor[2] * emissiveIntensity;
+            constants.OcclusionStrength = mesh.OcclusionStrength;
             constants.BaseColorFactor[0] = mesh.BaseColorFactor[0];
             constants.BaseColorFactor[1] = mesh.BaseColorFactor[1];
             constants.BaseColorFactor[2] = mesh.BaseColorFactor[2];
@@ -678,6 +724,17 @@ namespace Kurenai
             float MesopicStrength;
             // 目が順応している明るさ(EV100)。構図にも露出設定にも依存しない
             float MesopicAdaptationEV100;
+            // TAAの蓄積で失われた高域を戻すシャープネス(0で無効)。TAAが無効のときは常に0。
+            //
+            // 【なぜTAAではなくここなのか】以前はTAAの入力へ掛けていたが、アンシャープマスクが
+            // 増幅する高域は「ジッターで毎フレーム変動する成分」そのもので、静止時のちらつきを
+            // 実測で約53%増やしていた。ここはトーンマップ後のLDR値に対して掛かるだけで
+            // どこへもフィードバックされないため、ちらつきにもリンギングの累積にも寄与しない
+            float Sharpness;
+            // シャープネスの近傍タップに使う1テクセルぶんのUV(1/レンダー解像度)
+            float InvRenderWidth;
+            float InvRenderHeight;
+            float TonemapPadding;
         };
 
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
@@ -807,6 +864,26 @@ namespace Kurenai
             // xy: 出力サイズ(ピクセル), z: レイの最大距離, w: 遮蔽率のコントラスト(べき乗)
             DirectX::XMFLOAT4 Params0;
             // x: レイ本数, y: 間接光の強さ, z: バウンス面へ影レイを撃つか, w: 未使用
+            DirectX::XMFLOAT4 Params1;
+        };
+
+        // TAA.hlsl側のcbuffer TAAConstants(register b1)と並びを一致させる必要がある。
+        // TAAパスはb0(FrameConstants)を使わず、必要な行列もすべてこちらへ入れている。
+        // FrameConstantsは末尾追加を重ねて700バイトを超えており、cbufferは途中のフィールドを
+        // 飛ばせないため、末尾の2つを読むためだけに全フィールドを宣言する羽目になるのを避けている
+        struct alignas(16) TAAConstants
+        {
+            DirectX::XMFLOAT4X4 InvViewProj;  // 今フレームのジッター済み逆VP(空の速度の補完に使う)
+            DirectX::XMFLOAT4X4 PrevViewProj; // 前フレームのジッター済みVP
+            DirectX::XMFLOAT4 JitterUv;       // xy=今フレームのジッター(UV単位), zw=前フレーム
+            DirectX::XMFLOAT4 ScreenParams;   // xy=レンダー解像度, zw=その逆数
+            // x: 今フレームの色を混ぜる割合(m_TAABlendWeight)
+            // y: 近傍クリップのボックス幅(標準偏差の何倍か。m_TAAClipGamma)
+            // z: 履歴が使えるか(0=使えない。TAA.hlslは履歴をサンプルすらしない)
+            // w: プリ露出の変化を打ち消す倍率(今フレームの露出 / 前フレームの露出)
+            DirectX::XMFLOAT4 Params0;
+            // x: 近傍クリップの方式(TAAClipMode)
+            // y: 静止時のちらつき抑制の強さ(m_TAAAntiFlicker)。zwは未使用
             DirectX::XMFLOAT4 Params1;
         };
 
@@ -1244,6 +1321,33 @@ namespace Kurenai
                 "レイトレーシングは利用できません(反射・シャドウ・AO/GIはいずれもスクリーンスペース手法のみ)");
         }
 
+        // TAAパス(頂点バッファなしのフルスクリーン三角形。前フレームの結果をモーションベクターで
+        // 再投影して蓄積する)。出力は履歴バッファ(常にfp16)で、バッファ精度の設定に依存しないため
+        // CreatePrecisionDependentPipelineStatesではなくここで一度だけ作ればよい
+        RHI::ShaderDesc taaVsDesc;
+        taaVsDesc.Stage = RHI::ShaderStage::Vertex;
+        taaVsDesc.FilePath = shaderDirectory + L"TAA.hlsl";
+        taaVsDesc.EntryPoint = "VSMain";
+        m_TAAVertexShader = m_Device->CreateShader(taaVsDesc);
+
+        RHI::ShaderDesc taaPsDesc;
+        taaPsDesc.Stage = RHI::ShaderStage::Pixel;
+        taaPsDesc.FilePath = shaderDirectory + L"TAA.hlsl";
+        taaPsDesc.EntryPoint = "PSMain";
+        m_TAAPixelShader = m_Device->CreateShader(taaPsDesc);
+
+        RHI::PipelineStateDesc taaPipelineDesc;
+        taaPipelineDesc.VertexShader = m_TAAVertexShader.get();
+        taaPipelineDesc.PixelShader = m_TAAPixelShader.get();
+        taaPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        taaPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        m_TAAPipelineState = m_Device->CreatePipelineState(taaPipelineDesc);
+
+        RHI::BufferDesc taaConstantBufferDesc;
+        taaConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        taaConstantBufferDesc.SizeInBytes = sizeof(TAAConstants);
+        m_TAAConstantBuffer = m_Device->CreateBuffer(taaConstantBufferDesc);
+
         // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
         RHI::ShaderDesc tonemapVsDesc;
         tonemapVsDesc.Stage = RHI::ShaderStage::Vertex;
@@ -1404,7 +1508,16 @@ namespace Kurenai
         m_IrradianceTexture = m_Device->CreateUAVTextureCube(kIBLIrradianceSize, RHI::Format::R16G16B16A16_Float);
         m_PrefilteredEnvTexture = m_Device->CreateMippedUAVTextureCube(
             kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels);
-        m_BRDFLUTTexture = m_Device->CreateUAVTexture(kIBLBRDFLUTSize, kIBLBRDFLUTSize, RHI::Format::R16G16_Float);
+        // BRDF積分LUTは2パスで焼く。パス1(CSMain)が(A, B)をスクラッチへ書き、
+        // パス2(CSCombineEavg)がそれを読んでEavgを足した float4(A, B, Eavg, 0) を最終LUTへ書く。
+        // 同一リソースをSRVとUAVへ同時バインドできないためスクラッチが要る(BRDFLUT.hlsl参照)
+        m_BRDFLUTScratchTexture = m_Device->CreateUAVTexture(kIBLBRDFLUTSize, kIBLBRDFLUTSize, RHI::Format::R16G16_Float);
+        m_BRDFLUTTexture = m_Device->CreateUAVTexture(kIBLBRDFLUTSize, kIBLBRDFLUTSize, RHI::Format::R16G16B16A16_Float);
+        if (!m_BRDFLUTScratchTexture || !m_BRDFLUTTexture)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "BRDF積分LUTのテクスチャ作成に失敗しました(スペキュラのエネルギー補正が正しく動作しません)");
+        }
 
         RHI::ShaderDesc brdfLutCsDesc;
         brdfLutCsDesc.Stage = RHI::ShaderStage::Compute;
@@ -1412,6 +1525,20 @@ namespace Kurenai
         brdfLutCsDesc.EntryPoint = "CSMain";
         m_BRDFLUTComputeShader = m_Device->CreateShader(brdfLutCsDesc);
         m_BRDFLUTPipelineState = m_Device->CreateComputePipelineState({ m_BRDFLUTComputeShader.get() });
+
+        RHI::ShaderDesc brdfLutCombineCsDesc;
+        brdfLutCombineCsDesc.Stage = RHI::ShaderStage::Compute;
+        brdfLutCombineCsDesc.FilePath = shaderDirectory + L"BRDFLUT.hlsl";
+        brdfLutCombineCsDesc.EntryPoint = "CSCombineEavg";
+        m_BRDFLUTCombineComputeShader = m_Device->CreateShader(brdfLutCombineCsDesc);
+        if (!m_BRDFLUTCombineComputeShader)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "BRDFLUT.hlsl CSCombineEavg のコンパイルに失敗しました"
+                "(Kulla-Conty方式が必要とするEavgが焼かれず、同方式が正しく動作しません)");
+        }
+        m_BRDFLUTCombinePipelineState =
+            m_Device->CreateComputePipelineState({ m_BRDFLUTCombineComputeShader.get() });
 
         RHI::ShaderDesc irradianceCsDesc;
         irradianceCsDesc.Stage = RHI::ShaderStage::Compute;
@@ -1453,6 +1580,9 @@ namespace Kurenai
         // --- 反射プローブ(19章) ---
         // キャプチャ先(1面ぶんを6面で使い回す)。キューブへ写す前のHDR値を保つためFloatにする
         m_ProbeCaptureColor = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
+        // 同じキャプチャの2枚目(SV_TARGET1)。プローブからのワールド距離をそのまま入れるため、
+        // [0,1]に収まらず精度も必要になる。R32_Floatなら室内スケールでも十分な絶対精度がある
+        m_ProbeCaptureDistance = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R32_Float);
         // Reverse-Zのため遠平面側(0.0)でクリアする(G-Buffer深度と同じ)
         m_ProbeCaptureDepth = m_Device->CreateDepthTexture(kProbeCaptureSize, kProbeCaptureSize, 0.0f);
         // 畳み込みの入力になるスクラッチのキューブマップ(TextureCubeとして読めること
@@ -1463,6 +1593,11 @@ namespace Kurenai
             kIBLIrradianceSize, RHI::Format::R16G16B16A16_Float, 1, kMaxReflectionProbes);
         m_ProbePrefilteredArray = m_Device->CreateMippedUAVTextureCubeArray(
             kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels, kMaxReflectionProbes);
+        // 距離キューブ(19.12節)。畳み込まないためミップは1段だけでよく、スクラッチのキューブも要らない
+        // (キャプチャからこの配列のスライスへ直接書き込む)。
+        // 128²×6面×8枚×4バイト = 3.1MB
+        m_ProbeDistanceArray = m_Device->CreateMippedUAVTextureCubeArray(
+            kProbeCaptureSize, RHI::Format::R32_Float, 1, kMaxReflectionProbes);
 
         RHI::ShaderDesc probeCaptureVsDesc;
         probeCaptureVsDesc.Stage = RHI::ShaderStage::Vertex;
@@ -1481,7 +1616,8 @@ namespace Kurenai
         probeCapturePipelineDesc.VertexShader = m_ProbeCaptureVertexShader.get();
         probeCapturePipelineDesc.PixelShader = m_ProbeCapturePixelShader.get();
         probeCapturePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        probeCapturePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        // レンダーターゲットは2枚(放射輝度と距離)。ProbeCapture.hlslのPSOutputと並びを一致させること
+        probeCapturePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float, RHI::Format::R32_Float };
         probeCapturePipelineDesc.HasDepthStencil = true;
         probeCapturePipelineDesc.ReverseZ = true;
         m_ProbeCapturePipelineState = m_Device->CreatePipelineState(probeCapturePipelineDesc);
@@ -1667,6 +1803,7 @@ namespace Kurenai
                 RHI::Format::R16G16_Float,   // Normal(オクタヘドラルエンコード)
                 RHI::Format::R8G8B8A8_UNorm, // Material(R=Metallic, G=Roughness)
                 emissiveFormat,              // Emissive(バッファ精度に依存)
+                RHI::Format::R16G16_Float,   // Velocity(モーションベクター。UV単位の2Dベクトル)
             };
             gbufferPipelineDesc.HasDepthStencil = true;
             gbufferPipelineDesc.ReverseZ = true;
@@ -1860,6 +1997,19 @@ namespace Kurenai
             }
             m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
 
+            // モーションベクター(速度バッファ)。G-Bufferの5枚目として、GBuffer.hlslが
+            // 「この画素に映っているものが前フレームでは画面のどこにいたか」をUV単位の2Dベクトルで書く。
+            // 2成分しか要らないのでR16G16_Float。1画素ぶんの移動量が1/解像度(1920幅なら約0.00052)と
+            // 小さいため、絶対精度ではなく相対精度で効く浮動小数点フォーマットが適している
+            m_GBufferVelocity = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16_Float);
+
+            // TAAの履歴バッファ2枚。読みながら同じテクスチャへ書けないので、毎フレーム役割を入れ替える
+            // (m_TAAHistoryIndexが今フレームの書き込み先)。バッファ精度をLegacy8bitに落としても
+            // m_SceneColorと同じく常にfp16のままにする。履歴は何十フレームぶんもの蓄積結果であり、
+            // ここを8bitにすると量子化誤差が積み上がってバンディングになるため
+            m_TAAHistory[0] = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            m_TAAHistory[1] = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+
             m_HiZMipLevels = ComputeMipLevelCount(width, height);
             m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
             m_HiZDebugMipLevel = 0;
@@ -1924,6 +2074,12 @@ namespace Kurenai
             CreateRenderTargets(width, height);
             return;
         }
+
+        // 履歴バッファを作り直した直後は中身が未定義なので、TAAへ「今フレームは履歴を使うな」と伝える。
+        // fp16の未初期化領域はNaNのことがあり、lerp(NaN, x, 1.0)もNaNになるため、
+        // ブレンド率を0にするだけでは足りず「サンプルそのものを行わない」必要がある(TAA.hlsl参照)
+        m_TAAHistoryValid = false;
+        m_TAAHistoryIndex = 0;
 
         // A/B比較の記録用。どちらの構成で描かれたスクリーンショットなのかをログから追えるようにする
         Core::Logger::Info(
@@ -2210,6 +2366,12 @@ namespace Kurenai
         // SSAO/SSILの半径やSSRの距離はシーンの規模から決まるため、差し替え後のm_Sceneで計算し直す
         ResetSceneDependentParams();
 
+        // TAAの履歴には前のシーンの絵が入っており、この後カメラも新シーンの初期位置へ飛ぶため、
+        // 再投影しても対応する画素が存在しない。捨てて今フレームの色から積み直す。
+        // ApplyLoadedSceneはLoaderスレッドから呼ばれるため、m_Cameraは直接書けないがatomicなら書ける
+        // (Renderスレッドが読む。カメラ自体はこの後m_AppliedSceneCamera経由でUpdateスレッドへ渡す)
+        m_TAAHistoryValid.store(false, std::memory_order_relaxed);
+
         // 初期カメラとウィンドウタイトルはUpdateスレッドが適用する。m_Cameraの書き込み手を
         // 1スレッドに保ち、ウィンドウタイトルもウィンドウを所有するスレッドから設定するため
         // (UpdateAppliedSceneHandoff参照)
@@ -2248,8 +2410,16 @@ namespace Kurenai
         // 常にカスケードシャドウマップで、そのシャドウマップはRTシャドウ選択時も同じように
         // 描かれるため、CascadedShadowMapとRaytracedでプローブの焼き上がりは変わらない
         mixBool(m_ShadowMode != ShadowMode::Off);
-        // キャプチャ内の環境項はグローバルIBLを引くため、その強度も焼き上がりに影響する
+        // 月は時刻に連動せず手動指定なので、太陽とは別に混ぜる必要がある。太陽が沈むと
+        // 平行光源の枠が月へ切り替わり、キャプチャの直接光がそのまま変わる
+        mixFloat(m_MoonAzimuthDegrees);
+        mixFloat(m_MoonElevationDegrees);
+        // キャプチャ内の環境項はグローバルIBLを引くため、その強度も焼き上がりに影響する。
+        // 手続き空か.ksceneのDDSかで空そのものが変わるため、その切り替えも含める
         mixFloat(m_IBLEnabled ? m_IBLIntensity : 0.0f);
+        mixBool(m_ProceduralSkyEnabled);
+        // 自発光の強度倍率はキャプチャのエミッシブ項へそのまま乗る
+        mixFloat(m_EmissiveIntensity);
 
         // ライトは構造体ごとダンプすると詰め物(padding)の未初期化バイトを拾い得るため、
         // 使うフィールドだけを明示的に混ぜる
@@ -2805,6 +2975,7 @@ namespace Kurenai
             UpdateMovement(deltaTime);
         }
 
+
         // F1(ImGuiパネルの表示/非表示)はWantCaptureKeyboardに関係なく常に効かせる。
         // ここも抑止すると、テキスト入力中にパネルを畳んで戻す手段が無くなり、入力欄から
         // フォーカスを外す方法(Esc / 別の場所をクリック)を知らないと詰むため。
@@ -2941,6 +3112,50 @@ namespace Kurenai
 
         const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
 
+        // --- TAAのサブピクセルジッター ---
+        // 投影行列を1ピクセル未満だけずらして、同じ画素が毎フレームわずかに違う位置をサンプルする
+        // ようにする。TAAが複数フレームぶんを蓄積することで実質的なスーパーサンプリングになる。
+        // TAA無効時はジッターも必ず0にすること(ジッターだけ残ると画面が振動するだけになる)
+        ++m_TAAFrameIndex;
+        DirectX::XMFLOAT2 jitterOffsetPixels{ 0.0f, 0.0f };
+        if (m_TAAEnabled)
+        {
+            // Halton列の添字は1から始める。添字0はradical inverseの定義上どの基数でも0となり、
+            // オフセットがピクセルの角(-0.5, -0.5)へ偏ってしまう
+            const uint32_t haltonIndex = (m_TAAFrameIndex % kTAAJitterSampleCount) + 1;
+            jitterOffsetPixels.x = (RadicalInverse(haltonIndex, 2) - 0.5f) * m_TAAJitterScale;
+            jitterOffsetPixels.y = (RadicalInverse(haltonIndex, 3) - 0.5f) * m_TAAJitterScale;
+        }
+        // ピクセル単位のオフセットをNDCとUVの2つの単位へ直す。
+        // ピクセル座標は右が+x・下が+yなのに対しNDCは上が+yなので、yだけ符号が反転する
+        // (この符号を落とすと縦方向のジッターと速度が逆向きになる)
+        const DirectX::XMFLOAT2 jitterNdc{
+            2.0f * jitterOffsetPixels.x / static_cast<float>(m_RenderWidth),
+            -2.0f * jitterOffsetPixels.y / static_cast<float>(m_RenderHeight),
+        };
+        // NDC→UVは xy * (0.5, -0.5) + 0.5 なので、ジッターのUV換算はピクセル数/解像度そのものになる
+        const DirectX::XMFLOAT2 jitterUv{
+            jitterOffsetPixels.x / static_cast<float>(m_RenderWidth),
+            jitterOffsetPixels.y / static_cast<float>(m_RenderHeight),
+        };
+
+        // ビュー行列と「ジッター済み」射影行列をここで一度だけ確定させ、以降のカメラ由来の行列は
+        // すべてこれらから作る。
+        //
+        // 【なぜ行列の掛け算でジッターを入れられるのか】Camera::GetProjectionMatrixは行ベクトル規約
+        // (clip = view * P)で、第3列が(0,0,1,0)すなわち clip.w = viewZ である。
+        // XMMatrixTranslationは行ベクトル規約では第3行が(jx, jy, 0, 1)になるので、P * T を展開すると
+        // 変化するのは要素[2][0]と[2][1]、つまり clip.xy += jitterNdc * clip.w だけになる。
+        // w除算後には ndc.xy += jitterNdc という定数オフセットになり、狙いどおり平行移動として効く。
+        //
+        // 【なぜ全パスで統一するのか】深度バッファはこのジッター済み行列でラスタライズされる。
+        // 深度から位置を復元する側(SSAO/SSIL/SSR/スクリーンスペースシャドウ)がジッター前の行列を
+        // 使うと、再構成した位置がサブピクセルぶんずれて自己遮蔽やハローの原因になる。
+        // なお射影行列の_33/_43(深度のリニアライズ係数)はジッターでは変化しない
+        const DirectX::XMMATRIX viewMatrix = frameState.Camera.GetViewMatrix();
+        const DirectX::XMMATRIX jitteredProj =
+            frameState.Camera.GetProjectionMatrix() * DirectX::XMMatrixTranslation(jitterNdc.x, jitterNdc.y, 0.0f);
+
         // 有効なライトだけを詰めてt8のライトリストへ渡す。シェーダはLightCount(・ActiveLightCount)の
         // 数までしかループしないため、無効なライトはそもそもGPUへ送らない。DirectLight/Transparentの
         // 両パスがこの1つのリストを共有する(FrameConstants.ActiveLightCountに人数を書き込むため、
@@ -3001,7 +3216,7 @@ namespace Kurenai
         }
 
         FrameConstants constants;
-        const DirectX::XMMATRIX viewProj = frameState.Camera.GetViewMatrix() * frameState.Camera.GetProjectionMatrix();
+        const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
         DirectX::XMVECTOR determinant;
         const DirectX::XMMATRIX invViewProj = DirectX::XMMatrixInverse(&determinant, viewProj);
@@ -3023,8 +3238,10 @@ namespace Kurenai
                   sunLighting.Color.z * effectiveExposure,
                   0.0f }
             : DirectX::XMFLOAT4{ 0.0f, 0.0f, 0.0f, 0.0f };
-        DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameState.Camera.GetViewMatrix()));
-        DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameState.Camera.GetProjectionMatrix()));
+        DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(viewMatrix));
+        // ジッター済みの射影行列を渡す。SSAO/SSILはこの行列でView空間の点を画面へ投影して
+        // 深度バッファと突き合わせるため、深度を描いたときと同じ行列でなければサブピクセルぶんずれる
+        DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(jitteredProj));
         // rgb(環境光の色)にm_AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
         // (DeferredLighting.hlsl)の強度調整用で、alpha(dayFactor、IBLの夜間減光・背景スカイの
         // 昼夜ブレンドに使う)には掛けない
@@ -3037,7 +3254,7 @@ namespace Kurenai
         };
         constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
         const float iblIntensity = m_IBLEnabled ? m_IBLIntensity : 0.0f;
-        const float specularEnergyCompensation = m_SpecularEnergyCompensationEnabled ? 1.0f : 0.0f;
+        const float specularEnergyCompensation = static_cast<float>(m_SpecularCompensationMode);
         constants.ShadowParams = {
             m_ShadowLightSize,
             static_cast<float>(kIBLPrefilterMipLevels - 1),
@@ -3083,6 +3300,25 @@ namespace Kurenai
             m_ProbeParallaxCorrectionEnabled ? 1.0f : 0.0f,
             m_ProbeBlendingEnabled ? 1.0f : 0.0f,
         };
+        constants.ProbeParams2 = {
+            m_ProbeDepthParallaxEnabled ? 1.0f : 0.0f,
+            m_ProbeOcclusionEnabled ? 1.0f : 0.0f,
+            static_cast<float>(kProbeCaptureSize),
+            0.0f,
+        };
+        // モーションベクター用の前フレーム情報。初回フレームは前フレームの行列が未定義なので、
+        // 今フレームと同じものを入れて速度を0にしておく。そうしないとゴミの速度が速度バッファへ
+        // 焼き込まれ、画面全体が一度だけゴーストする
+        if (m_TAAPrevViewProjValid)
+        {
+            constants.PrevViewProj = m_TAAPrevViewProj;
+            constants.TAAParams = { jitterUv.x, jitterUv.y, m_TAAPrevJitterUv.x, m_TAAPrevJitterUv.y };
+        }
+        else
+        {
+            constants.PrevViewProj = constants.ViewProj;
+            constants.TAAParams = { jitterUv.x, jitterUv.y, jitterUv.x, jitterUv.y };
+        }
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
@@ -3090,9 +3326,13 @@ namespace Kurenai
         // clip.z = viewZ * a + b、clip.w = viewZ なので depth = a + b / viewZ となり、
         // 逆に解いて viewZ = b / (depth - a)。近平面・遠平面から直接組み立てず射影行列の要素を
         // 読むのは、Reverse-Zの組み方が変わっても自動的に追従させるため
-        // (XMFLOAT4X4の_rcは1始まりの行・列なので、_33が行2列2=a、_43が行3列2=b)
+        // (XMFLOAT4X4の_rcは1始まりの行・列なので、_33が行2列2=a、_43が行3列2=b)。
+        // ジッター済みの行列から読むが、TAAのジッターが書き換えるのは_31/_32だけなので
+        // _33/_43の値そのものはジッターの有無で変わらない。それでもジッター済みを使うのは、
+        // 「深度バッファに関わる計算はすべて深度を描いたときと同じ行列から導く」という
+        // 不変条件を1箇所も破らないため(将来ジッターの入れ方を変えたときに黙ってずれない)
         DirectX::XMFLOAT4X4 projectionForDepthLinearize;
-        DirectX::XMStoreFloat4x4(&projectionForDepthLinearize, frameState.Camera.GetProjectionMatrix());
+        DirectX::XMStoreFloat4x4(&projectionForDepthLinearize, jitteredProj);
         const float depthLinearizeA = projectionForDepthLinearize._33;
         const float depthLinearizeB = projectionForDepthLinearize._43;
 
@@ -3243,10 +3483,21 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "BRDFLUTBake",
-                .Writes = { m_BRDFLUTTexture.get() },
+                // 2パス構成のためスクラッチも書き込み対象として挙げる(RenderGraphが
+                // パス内の依存を追えるように)。中身の説明はBRDFLUT.hlsl参照
+                .Writes = { m_BRDFLUTTexture.get(), m_BRDFLUTScratchTexture.get() },
                 .Execute = [this](RHI::IRHICommandList* cmd)
                 {
+                    // パス1: (A, B)をスクラッチへ焼く
                     cmd->SetComputePipelineState(m_BRDFLUTPipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_BRDFLUTScratchTexture.get(), 0);
+                    cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
+
+                    // パス2: スクラッチをSRVで読み、Eavgを足した float4(A, B, Eavg, 0) を最終LUTへ。
+                    // UAVはDispatch直後に自動で解除されるため、ここで張り直す必要がある
+                    // (IRHICommandList.hのバインド寿命の説明を参照)
+                    cmd->SetComputePipelineState(m_BRDFLUTCombinePipelineState.get());
+                    cmd->SetComputeTexture(0, m_BRDFLUTScratchTexture.get());
                     cmd->SetComputeUnorderedAccessTexture(0, m_BRDFLUTTexture.get(), 0);
                     cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
                 },
@@ -3411,7 +3662,7 @@ namespace Kurenai
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
         const auto captureProbeFace =
-            [this, &constants, probeFaceProjection](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+            [this, &constants, probeFaceProjection, skyTexture](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
             const Assets::ReflectionProbe& probe = m_ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
@@ -3419,7 +3670,8 @@ namespace Kurenai
             RHI::Viewport probeViewport;
             probeViewport.Width = static_cast<float>(kProbeCaptureSize);
             probeViewport.Height = static_cast<float>(kProbeCaptureSize);
-            RHI::IRHITexture* const captureTargets[] = { m_ProbeCaptureColor.get() };
+            // 2枚目は距離(19.12節)。ProbeCapture.hlslのPSOutputと並びを一致させること
+            RHI::IRHITexture* const captureTargets[] = { m_ProbeCaptureColor.get(), m_ProbeCaptureDistance.get() };
 
             // 太陽・カスケード・ライト数・IBL設定は共有のFrameConstantsをそのまま使い、
             // 視点に関わる2つだけをプローブのものへ差し替える(ProbeCapture.hlsl冒頭参照)。
@@ -3428,10 +3680,17 @@ namespace Kurenai
             const DirectX::XMMATRIX faceViewProj = ComputeCubeFaceView(probePosition, face) * probeFaceProjection;
             DirectX::XMStoreFloat4x4(&captureConstants.ViewProj, DirectX::XMMatrixTranspose(faceViewProj));
             captureConstants.CameraPosition = { probePosition.x, probePosition.y, probePosition.z, 0.0f };
+            // TAA関連のフィールドはカメラ視点のものが入ったままなので、プローブ視点として意味を成すよう
+            // 明示的に潰しておく(前フレーム=今フレーム、ジッター無し=速度0)。ProbeCapture.hlslは
+            // 現状これらを読まないが、将来読んだときに黙ってカメラの値を拾うのを防ぐため
+            captureConstants.PrevViewProj = captureConstants.ViewProj;
+            captureConstants.TAAParams = { 0.0f, 0.0f, 0.0f, 0.0f };
             cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
-            cmd->SetRenderTargets(captureTargets, 1, m_ProbeCaptureDepth.get());
+            cmd->SetRenderTargets(captureTargets, 2, m_ProbeCaptureDepth.get());
             cmd->SetViewport(probeViewport);
+            // 両方のレンダーターゲットが0でクリアされる。距離側の0は「ジオメトリ無し」を意味しないが、
+            // コピー側は深度が書かれたかどうかで判定するためこれで問題ない
             cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
             // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする。コピー側はこの0を
             // 「何も描かれなかった=スカイ」の判定に使う
@@ -3456,6 +3715,16 @@ namespace Kurenai
             {
                 for (const auto& mesh : instance.Model.Meshes)
                 {
+                    // 半透明メッシュはプローブへ焼かない。ProbeCapture.hlslは不透明として描くため、
+                    // ガラスを焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに
+                    // 残り、その裏にある本来映るべき景色が欠ける。半透明を正しく焼くには
+                    // キャプチャ側にも奥から手前への描画順とブレンドが要り、コストに見合わない
+                    // (プローブへ半透明を含めないのは一般的な割り切り)
+                    if (mesh.IsTransparent)
+                    {
+                        continue;
+                    }
+
                     const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
@@ -3468,6 +3737,8 @@ namespace Kurenai
                     cmd->SetTexture(1, mesh.NormalTexture);
                     cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                     cmd->SetTexture(3, mesh.EmissiveTexture);
+                    // t4はカスケードシャドウマップ配列が占めているため遮蔽マップはt5
+                    cmd->SetTexture(5, mesh.OcclusionTexture);
 
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                 }
@@ -3484,10 +3755,17 @@ namespace Kurenai
             cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
             cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
             cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
-            cmd->SetComputeTexture(0, m_SkyboxTexture.get());
+            // ジオメトリが描かれなかったテクセルを埋める空。手続き空が有効なフレームでは
+            // そちらを使わないと、プローブにだけ古いDDSの空が焼き込まれて本編と食い違う
+            // (このフレームで使う空はRender冒頭のskyTextureに確定させてある)
+            cmd->SetComputeTexture(0, skyTexture);
             cmd->SetComputeTexture(1, m_ProbeCaptureColor.get());
             cmd->SetComputeTexture(2, m_ProbeCaptureDepth.get());
+            cmd->SetComputeTexture(3, m_ProbeCaptureDistance.get());
             cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeRadianceCube.get(), face, 0, 0);
+            // 距離は畳み込まないため、スクラッチのキューブを経由せずプローブのスライスへ直接書く
+            cmd->SetComputeUnorderedAccessTextureCubeFace(
+                1, m_ProbeDistanceArray.get(), face, 0, static_cast<uint32_t>(probeIndex));
             cmd->Dispatch((kProbeCaptureSize + 7) / 8, (kProbeCaptureSize + 7) / 8, 1);
         };
 
@@ -3531,10 +3809,12 @@ namespace Kurenai
         };
 
         // キャプチャパスがReadsにシャドウマップとグローバルの畳み込み結果を挙げることで、
-        // レンダーグラフがこれらをシャドウパス・IBLBakeパスより後ろへ順序付ける
+        // レンダーグラフがこれらをシャドウパス・IBLBakeパスより後ろへ順序付ける。
+        // 空はm_SkyboxTextureではなくこのフレームで実際に使うskyTextureを挙げる。手続き空のときは
+        // SkyGenerateパスがそれのWriterなので、これによりベイクが空の焼き直しより後ろへ順序付けられる
         const std::vector<RHI::IRHITexture*> probeCaptureReads = {
             m_ShadowCascadeArray.get(),
-            m_SkyboxTexture.get(), m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
+            skyTexture, m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
         };
         const size_t probeCount = m_ReflectionProbes.size();
 
@@ -3558,8 +3838,9 @@ namespace Kurenai
                     .Name = "ProbeBake" + std::to_string(probeIndex),
                     .Reads = probeCaptureReads,
                     .Writes = {
-                        m_ProbeCaptureColor.get(), m_ProbeCaptureDepth.get(), m_ProbeRadianceCube.get(),
-                        m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(),
+                        m_ProbeCaptureColor.get(), m_ProbeCaptureDistance.get(), m_ProbeCaptureDepth.get(),
+                        m_ProbeRadianceCube.get(),
+                        m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
                     },
                     .Execute = [&captureProbeFace, &convolveProbe, probeIndex](RHI::IRHICommandList* cmd)
                     {
@@ -3599,7 +3880,10 @@ namespace Kurenai
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "ProbeRealtimeCapture",
                 .Reads = probeCaptureReads,
-                .Writes = { m_ProbeCaptureColor.get(), m_ProbeCaptureDepth.get(), m_ProbeRadianceCube.get() },
+                .Writes = {
+                    m_ProbeCaptureColor.get(), m_ProbeCaptureDistance.get(), m_ProbeCaptureDepth.get(),
+                    m_ProbeRadianceCube.get(), m_ProbeDistanceArray.get(),
+                },
                 .Execute = [&captureProbeFace, realtimeProbe, realtimeFace](RHI::IRHICommandList* cmd)
                 {
                     captureProbeFace(cmd, realtimeProbe, realtimeFace);
@@ -3636,11 +3920,17 @@ namespace Kurenai
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "GBuffer",
-            .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferEmissive.get() },
+            // 5枚目の速度(モーションベクター)まで含め、並びはGBuffer.hlslのPSOutputおよび
+            // CreatePrecisionDependentPipelineStatesのRenderTargetFormatsと一致させること
+            .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
+                               m_GBufferEmissive.get(), m_GBufferVelocity.get() },
             .DepthTarget = m_GBufferDepth.get(),
             .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
+                // ClearRenderTargetはバインド済みの全レンダーターゲットを同じ色でクリアするため、
+                // 速度バッファもここで0(=動いていない)になる。ジオメトリが描かれない画素
+                // (空)の速度は0のまま残るが、空はカメラ回転で動くのでTAA側で別途補う(TAA.hlsl参照)
                 cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
                 // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(GBuffer.hlsl参照)
                 cmd->ClearDepth(0.0f);
@@ -3694,6 +3984,7 @@ namespace Kurenai
                         cmd->SetTexture(1, mesh.NormalTexture);
                         cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                         cmd->SetTexture(3, mesh.EmissiveTexture);
+                        cmd->SetTexture(5, mesh.OcclusionTexture);
                         cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                     }
                 }
@@ -3752,11 +4043,11 @@ namespace Kurenai
                 .Reads = { m_GBufferDepth.get() },
                 .BufferReads = { m_LightBuffer.get() },
                 .BufferWrites = { m_LightTileBuffer.get() },
-                .Execute = [this, &gpuLights, &frameState](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gpuLights, viewMatrix, jitteredProj](RHI::IRHICommandList* cmd)
                 {
                     LightCullingConstants cullingConstants{};
                     DirectX::XMStoreFloat4x4(
-                        &cullingConstants.View, DirectX::XMMatrixTranspose(frameState.Camera.GetViewMatrix()));
+                        &cullingConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
                     cullingConstants.TileParams =
                     {
                         m_LightTileCountX,
@@ -3767,9 +4058,11 @@ namespace Kurenai
                     cullingConstants.RenderSize = { m_RenderWidth, m_RenderHeight, 0u, 0u };
 
                     // タイル錐台の側面を組み立てるのに射影行列の(0,0)/(1,1)成分が要る。
-                    // 深度リニアライズ定数(z/w)は直接光パスへ渡しているものと同じ
+                    // 深度リニアライズ定数(z/w)は直接光パスへ渡しているものと同じ。
+                    // ここで読む_11/_22/_33/_43はいずれもTAAのジッター(_31/_32のみを書き換える)では
+                    // 変化しないが、深度バッファを描いたときと同じ行列から導くという規約に揃えている
                     DirectX::XMFLOAT4X4 projection;
-                    DirectX::XMStoreFloat4x4(&projection, frameState.Camera.GetProjectionMatrix());
+                    DirectX::XMStoreFloat4x4(&projection, jitteredProj);
                     cullingConstants.ProjParams =
                     {
                         projection._11,
@@ -4017,7 +4310,7 @@ namespace Kurenai
                 skyTexture, activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
                 m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
                 // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)
-                m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(),
+                m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
             .Execute = [this, &gbufferViewport, activeAOTexture, skyTexture](RHI::IRHICommandList* cmd)
@@ -4047,6 +4340,7 @@ namespace Kurenai
                 cmd->SetTexture(11, m_ProbeIrradianceArray.get());
                 cmd->SetTexture(12, m_ProbePrefilteredArray.get());
                 cmd->SetShaderResourceBuffer(13, m_ProbeBuffer.get());
+                cmd->SetTexture(14, m_ProbeDistanceArray.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -4059,6 +4353,10 @@ namespace Kurenai
         //     ClearRenderTarget/ClearDepthは呼ばないため、Lightingパスが書いた内容の上に描き足す形になる ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Transparent",
+            // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)。
+            // 半透明パスもLightingパスと同じ環境ソース(反射プローブ+グローバルIBL)を使うため、
+            // 焼き上がる前のプローブを読まないようにする必要がある
+            .Reads = { m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get() },
             .RenderTargets = { m_SceneColor.get() },
             .DepthTarget = m_GBufferDepth.get(),
             .Execute = [this, &gbufferViewport, &gpuLights, &cameraPosition](RHI::IRHICommandList* cmd)
@@ -4110,10 +4408,19 @@ namespace Kurenai
                 cmd->SetTexture(4, m_ShadowCascadeArray.get());
                 cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
                 // IBL(14章)。このパスにはSSRが適用されないため、半透明サーフェスの環境の
-                // 映り込みはこの3枚だけが担う
+                // 映り込みはこの環境ソースだけが担う
                 cmd->SetTexture(9, m_IrradianceTexture.get());
                 cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
                 cmd->SetTexture(11, m_BRDFLUTTexture.get());
+                // 反射プローブ(19章)。Lightingパスと同じReflectionProbe.hlsliを共有しており、
+                // 半透明サーフェスも室内なら室内の環境が映るようになる。t0〜t4とt8〜t11が
+                // 埋まっているため、このパスではt5〜t7を割り当てている(Transparent.hlsl冒頭)。
+                // マテリアルの遮蔽マップ(OcclusionTexture)はt5〜t7と衝突するためt13を使う
+                // ProbeParams.xが0でも常にバインドするのはLightingパスと同じ理由
+                cmd->SetTexture(5, m_ProbePrefilteredArray.get());
+                cmd->SetTexture(6, m_ProbeIrradianceArray.get());
+                cmd->SetShaderResourceBuffer(7, m_ProbeBuffer.get());
+                cmd->SetTexture(12, m_ProbeDistanceArray.get());
 
                 // 半透明は奥から手前への描画順そのものが正しさの前提なので並べ替えられない。
                 // そのため必要になった時点でパイプラインを切り替える(GBufferパスと同じ方式)
@@ -4144,11 +4451,13 @@ namespace Kurenai
                     cmd->SetVertexBuffer(draw.Mesh->VertexBuffer.get());
                     cmd->SetIndexBuffer(draw.Mesh->IndexBuffer.get());
                     // メッシュごとに変わるマテリアルテクスチャのみ差し替える
-                    // (t4以降のシャドウ/ライト/IBLはループ前に一度バインドしたものがそのまま残る)
+                    // (t4のシャドウとt8以降のライト/IBLはループ前に一度バインドしたものがそのまま残る。
+                    // t13だけはマテリアルの遮蔽マップなのでメッシュごとに差し替える)
                     cmd->SetTexture(0, draw.Mesh->BaseColorTexture);
                     cmd->SetTexture(1, draw.Mesh->NormalTexture);
                     cmd->SetTexture(2, draw.Mesh->MetallicRoughnessTexture);
                     cmd->SetTexture(3, draw.Mesh->EmissiveTexture);
+                    cmd->SetTexture(13, draw.Mesh->OcclusionTexture);
 
                     cmd->DrawIndexed(draw.Mesh->IndexCount, 0, 0);
                 }
@@ -4170,7 +4479,7 @@ namespace Kurenai
                 .Reads = {
                     m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                     m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
-                    m_ProbePrefilteredArray.get(),
+                    m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
                 },
                 .RenderTargets = { m_SSRTexture.get() },
                 .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
@@ -4194,6 +4503,7 @@ namespace Kurenai
                     cmd->SetTexture(7, m_PrefilteredEnvTexture.get());
                     cmd->SetTexture(8, m_ProbePrefilteredArray.get());
                     cmd->SetShaderResourceBuffer(9, m_ProbeBuffer.get());
+                    cmd->SetTexture(10, m_ProbeDistanceArray.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -4250,9 +4560,83 @@ namespace Kurenai
             });
         }
 
-        // --- Tonemapパス: HDRのSceneColor(反射パス有効時はその出力)をLDRへ変換する。
-        //     反射等のHDR演算がすべて完了した後、Present直前の独立したステージとして常に実行する ---
-        RHI::IRHITexture* hdrSceneColor = GetActiveReflectionOutput();
+        // --- TAAパス: 前フレームのTAA結果をモーションベクターで再投影し、今フレームの色へ蓄積する。
+        //     ジッターで散らしたサンプルがここで平均され、実質的なスーパーサンプリングになる。
+        //     トーンマップ前のHDRの段階で行うのは、露出・ブルームがTAAで安定した絵を入力に
+        //     できるようにするため(逆順にするとブルームがフレームごとのちらつきを拾う)。
+        //     入力はGetActiveReflectionOutput()(反射Off/SSR/RT反射のいずれか)で、SSRだけを見ていた
+        //     従来の判定ではRT反射有効時にTAAが古いSceneColorを拾ってしまうため、ここも合わせて直す ---
+        RHI::IRHITexture* const taaInputColor = GetActiveReflectionOutput();
+        if (m_TAAEnabled)
+        {
+            // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる
+            const uint32_t historyWriteIndex = m_TAAHistoryIndex;
+            const uint32_t historyReadIndex = 1u - historyWriteIndex;
+            RHI::IRHITexture* const historyTexture = m_TAAHistory[historyReadIndex].get();
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "TAA",
+                // 履歴(historyTexture)は今フレーム誰も書かないので依存の辺は張られないが、
+                // 実際にバインドするテクスチャはReadsにも宣言しておくというRenderGraphの規約に従う
+                .Reads = { taaInputColor, historyTexture, m_GBufferVelocity.get(), m_GBufferDepth.get() },
+                .RenderTargets = { m_TAAHistory[historyWriteIndex].get() },
+                .Execute = [this, &gbufferViewport, taaInputColor, historyTexture, invViewProj, jitterUv,
+                            effectiveExposure](RHI::IRHICommandList* cmd)
+                {
+                    TAAConstants taaConstants{};
+                    DirectX::XMStoreFloat4x4(&taaConstants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
+                    taaConstants.PrevViewProj = m_TAAPrevViewProjValid ? m_TAAPrevViewProj : DirectX::XMFLOAT4X4{};
+                    taaConstants.JitterUv = { jitterUv.x, jitterUv.y, m_TAAPrevJitterUv.x, m_TAAPrevJitterUv.y };
+                    taaConstants.ScreenParams = {
+                        static_cast<float>(m_RenderWidth),
+                        static_cast<float>(m_RenderHeight),
+                        1.0f / static_cast<float>(m_RenderWidth),
+                        1.0f / static_cast<float>(m_RenderHeight),
+                    };
+
+                    // 履歴が無効な間は「サンプルすらするな」をシェーダへ伝える(TAA.hlsl参照)。
+                    // 作りたてのfp16バッファはNaNを含みうるため、混ぜる割合を0にするだけでは足りない
+                    const bool historyValid = m_TAAHistoryValid.load(std::memory_order_relaxed);
+
+                    // プリ露出はm_EffectiveExposureEV100の時間順応で毎フレーム変わる。履歴は前フレームの
+                    // 露出で焼かれた明るさのままなので、比率を掛けて今の露出へ揃える。
+                    // 揃えないと露出が動いている間ずっと明るさの尾を引く
+                    const float previousExposure = ComputeExposure(m_TAAPrevEffectiveExposureEV100);
+                    const float exposureRescale =
+                        (historyValid && previousExposure > 0.0f) ? (effectiveExposure / previousExposure) : 1.0f;
+
+                    taaConstants.Params0 = {
+                        m_TAABlendWeight,
+                        m_TAAClipGamma,
+                        historyValid ? 1.0f : 0.0f,
+                        exposureRescale,
+                    };
+                    taaConstants.Params1 = {
+                        static_cast<float>(m_TAAClipMode), m_TAAAntiFlicker, 0.0f, 0.0f
+                    };
+                    cmd->UpdateBuffer(m_TAAConstantBuffer.get(), &taaConstants, sizeof(taaConstants));
+
+                    cmd->SetViewport(gbufferViewport);
+                    cmd->SetPipelineState(m_TAAPipelineState.get());
+                    cmd->SetConstantBuffer(1, m_TAAConstantBuffer.get());
+                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
+                    // t0〜t3はすべて必ずバインドすること。SRVのバインドは上書きするまで維持されるため、
+                    // 省くと直前のパスが張ったテクスチャを読んでしまう(Tonemapのt2で実際に不具合を出した)
+                    cmd->SetTexture(0, taaInputColor);
+                    cmd->SetTexture(1, historyTexture);
+                    cmd->SetTexture(2, m_GBufferVelocity.get());
+                    cmd->SetTexture(3, m_GBufferDepth.get());
+                    cmd->Draw(3, 0);
+                },
+            });
+        }
+
+        // --- Tonemapパス: HDRのSceneColor(反射パス有効時はその出力、TAA有効時はさらにTAA適用後)を
+        //     LDRへ変換する。反射等のHDR演算がすべて完了した後、Present直前の独立したステージとして
+        //     常に実行する ---
+        // この行はTAAパスのAddPassより後に置くこと。ラムダは値キャプチャなので、先に差し替えると
+        // TAAが自分の出力を入力として読む形になる(RenderGraphが循環を検出して例外を投げる)
+        RHI::IRHITexture* hdrSceneColor = m_TAAEnabled ? m_TAAHistory[m_TAAHistoryIndex].get() : taaInputColor;
 
         // --- 自動露出パス: SceneColorの輝度ヒストグラムから目標EV100を求め、時間方向に順応させる。
         //     結果はm_ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
@@ -4438,6 +4822,11 @@ namespace Kurenai
                 // 目の順応は画面の構図ではなくシーンの明るさで決まるので、
                 // 自動露出の測光値ではなくキー照度から求めた基準EVを使う
                 tonemapConstants.MesopicAdaptationEV100 = keyReferenceEV100;
+                // シャープネスはTAAの蓄積で失われた高域を戻すためのものなので、TAAが無効なら0。
+                // そうしないとTAA導入前の絵と変わってしまう
+                tonemapConstants.Sharpness = m_TAAEnabled ? m_TAASharpness : 0.0f;
+                tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(m_RenderWidth);
+                tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(m_RenderHeight);
                 cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
 
                 cmd->SetViewport(gbufferViewport);
@@ -4575,9 +4964,15 @@ namespace Kurenai
             // Presentは通常どおり最終結果を表示するだけでよい
             presentSourceTexture = m_TonemapTexture.get();
             break;
+        case DebugView::ProbeDistance:
+            // 距離キューブ(19.12節)。格納値はワールド距離なので専用のMode 13でGain倍して
+            // グレースケール表示する(Mode 12でそのまま出すと数メートルで白飛びする)
+            presentDebugCubeArrayTexture = m_ProbeDistanceArray.get();
+            presentMode = 13;
+            break;
         case DebugView::IBLBRDFLUT:
             presentSourceTexture = m_BRDFLUTTexture.get();
-            presentMode = 0; // (scale, bias)の生値をそのままRGとして表示(値域はおおむね[0,1])
+            presentMode = 0; // (A, B, Eavg)の生値をそのままRGBとして表示(値域はおおむね[0,1])
             presentSourceWidth = kIBLBRDFLUTSize;
             presentSourceHeight = kIBLBRDFLUTSize;
             break;
@@ -4597,6 +4992,24 @@ namespace Kurenai
             // 解像度だけ合わせてm_TonemapTextureをそのまま渡す(Mode 11では読まれない)
             presentSourceTexture = m_TonemapTexture.get();
             presentMode = 11;
+            break;
+        case DebugView::MotionVector:
+            // 速度バッファ。格納値はUV単位(1画素ぶんの移動で1/解像度、1920幅なら約0.0005)と
+            // 極端に小さく、そのまま色として出しても真っ黒にしか見えない。専用のMode 14で
+            // ピクセル単位へ換算してから中間灰色を原点に色付けする
+            presentSourceTexture = m_GBufferVelocity.get();
+            presentMode = 14;
+            break;
+        case DebugView::SceneColorRaw:
+            // トーンマップもガンマも通さないリニア値をそのまま出す。スペキュラのエネルギー補正の
+            // 各方式を数値で突き合わせるための測定用(14.9.9節)。
+            // バックバッファが8bit UNormのため1.0を超える値はクリップする ―― 測定時は
+            // EV100を上げてピークが1.0未満に収まるようにしてから読むこと。
+            // TAAが有効な場合、hdrSceneColorはTAAの蓄積結果(23章)を指す。静止して収束させれば
+            // ジッターの平均が取れたぶん単フレームより安定した値が読めるが、カメラを動かした
+            // 直後の数フレームは履歴が混ざっているため、値を読むのは静止させてから
+            presentSourceTexture = hdrSceneColor;
+            presentMode = 0;
             break;
         }
 
@@ -4636,7 +5049,8 @@ namespace Kurenai
         }
         // ArraySliceはMode 10ではカスケード番号、Mode 12ではプローブ番号として使う。
         // プローブが1つも無い場合でも配列の範囲外を引かないようクランプする
-        if (m_DebugView == DebugView::ProbeIrradiance || m_DebugView == DebugView::ProbePrefilter)
+        if (m_DebugView == DebugView::ProbeIrradiance || m_DebugView == DebugView::ProbePrefilter ||
+            m_DebugView == DebugView::ProbeDistance)
         {
             presentConstants.ArraySlice = static_cast<float>(
                 std::clamp(m_ProbeDebugIndex, 0, std::max(0, static_cast<int32_t>(m_ReflectionProbes.size()) - 1)));
@@ -4648,7 +5062,16 @@ namespace Kurenai
         }
         // Finalの見た目は倍率の影響を受けてはならないため、デバッグ表示のときだけ倍率を掛ける
         // (Gainはゼロ初期化のままだと0倍=真っ黒になるので、必ず明示的に設定すること)
-        presentConstants.Gain = (m_DebugView == DebugView::Final) ? 1.0f : m_DebugViewGain;
+        if (m_DebugView == DebugView::ProbeDistance)
+        {
+            // 距離キューブは色ではなくワールド距離なので、Debug View Gain(1倍以上)ではなく
+            // 「白になる距離」の逆数を渡す。Present.hlsl Mode 13の式は他と同じ「値×Gain」のまま
+            presentConstants.Gain = 1.0f / std::max(m_ProbeDistanceDebugRange, 0.01f);
+        }
+        else
+        {
+            presentConstants.Gain = (m_DebugView == DebugView::Final) ? 1.0f : m_DebugViewGain;
+        }
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
         // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する
@@ -4706,5 +5129,24 @@ namespace Kurenai
         // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく
         // GPU側の処理時間の反映なので、PresentSubmitの計測値からは除外しておく
         m_CPUProfiler.SubtractFromScope("PresentSubmit", m_Device->GetLastFrameGPUWaitTimeMs());
+
+        // --- 次フレームがこのフレームを「前フレーム」として参照するための状態を確定させる ---
+        // 早期returnより後のここで行うことで、描画を行わなかったフレームでは前フレームの状態が
+        // そのまま保たれ、履歴テクスチャの中身と行列の対応が1フレームずれない
+        m_TAAPrevViewProj = constants.ViewProj;
+        m_TAAPrevJitterUv = jitterUv;
+        m_TAAPrevViewProjValid = true;
+        m_TAAPrevEffectiveExposureEV100 = m_EffectiveExposureEV100;
+        if (m_TAAEnabled)
+        {
+            // 今フレームの書き込み先が、次フレームでは履歴(読み込み元)になる
+            m_TAAHistoryIndex ^= 1u;
+            m_TAAHistoryValid.store(true, std::memory_order_relaxed);
+        }
+        else
+        {
+            // 無効の間は履歴を更新していないので、再度有効化されたときに古い絵が混ざらないよう落としておく
+            m_TAAHistoryValid.store(false, std::memory_order_relaxed);
+        }
     }
 }

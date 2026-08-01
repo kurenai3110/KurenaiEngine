@@ -23,6 +23,7 @@ namespace Kurenai::UI
 
     private:
         void DrawTonemapSection();
+        void DrawTAASection();
         void DrawBloomSection();
         void DrawAutoExposureSection();
 

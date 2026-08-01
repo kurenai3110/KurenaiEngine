@@ -26,7 +26,7 @@ namespace Kurenai::UI
             "最終結果 (Final)",
             "アルベド",
             "法線",
-            "マテリアル (R=金属度, G=粗さ)",
+            "マテリアル (R=金属度, G=粗さ, B=遮蔽マップ)",
             "自発光",
             "深度",
             "深度 (生値)",
@@ -41,16 +41,19 @@ namespace Kurenai::UI
             "Hi-Z (深度ミップチェーン)",
             "IBL - イラディアンス (キューブマップ)",
             "IBL - プリフィルタ済み鏡面 (キューブマップ・ミップチェーン)",
-            "IBL - BRDF LUT (X=NdotV, Y=粗さ)",
+            "IBL - BRDF LUT (X=NdotV, Y=粗さ, RGB=A/B/Eavg)",
             "ブルーム (ピラミッド最上段・半解像度)",
             "ライトタイル (タイルあたりのライト数ヒートマップ)",
             "プローブ - イラディアンス (キューブマップ配列)",
             "プローブ - プリフィルタ済み鏡面 (ミップ0=キャプチャ結果)",
             "プローブ - 影響範囲 (プローブごとの色分け)",
+            "プローブ - 距離 (キューブマップ配列)",
+            "モーションベクター (速度バッファ)",
+            "シーンカラー (生HDR・トーンマップなし)",
         };
         static_assert(
-            static_cast<int>(DebugView::ProbeInfluence) == 23,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はProbeInfluence)");
+            static_cast<int>(DebugView::SceneColorRaw) == 26,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はSceneColorRaw)");
 
         DrawUsageHint();
         BeginParamGroup();
@@ -87,7 +90,8 @@ namespace Kurenai::UI
                 "表示するミップの段。段が進むほど粗い面向けにぼかされている");
         }
 
-        if (m_Engine.m_DebugView == DebugView::ProbeIrradiance || m_Engine.m_DebugView == DebugView::ProbePrefilter)
+        if (m_Engine.m_DebugView == DebugView::ProbeIrradiance || m_Engine.m_DebugView == DebugView::ProbePrefilter ||
+            m_Engine.m_DebugView == DebugView::ProbeDistance)
         {
             // プローブが1つも無いシーンでもスライダーの範囲が壊れないよう下限を0に保つ
             const int maxProbeIndex =
@@ -102,6 +106,16 @@ namespace Kurenai::UI
                     "プローブ プリフィルタ ミップ###ProbePrefilterMip", &m_Engine.m_ProbePrefilterDebugMipLevel, 0,
                     static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
                     "表示するミップの段。ミップ0はぼかす前のキャプチャ結果そのもの");
+            }
+
+            if (m_Engine.m_DebugView == DebugView::ProbeDistance)
+            {
+                // 距離キューブに入っているのは色ではなくワールド距離なので、表示輝度の倍率(1倍以上)
+                // ではなく「白になる距離」で正規化する(Render()側でこの逆数をGainとして渡す)
+                SliderFloatEx(
+                    "白になる距離###ProbeDistanceRange", &m_Engine.m_ProbeDistanceDebugRange, 1.0f, 200.0f,
+                    Defaults::ProbeDistanceDebugRange, "%.1f", ImGuiSliderFlags_Logarithmic,
+                    "この距離で白飽和するようグレースケール化する。部屋の大きさに合わせると形が読める");
             }
         }
 
@@ -119,6 +133,18 @@ namespace Kurenai::UI
             if (!m_Engine.m_LightCullingEnabled)
             {
                 ImGui::TextWrapped("タイルドライトカリングが無効のため、ライトグリッドは更新されていません");
+            }
+        }
+
+        if (m_Engine.m_DebugView == DebugView::MotionVector)
+        {
+            ImGui::TextWrapped(
+                "灰色=動いていない / 赤が濃い=画面内容が右へ / 薄い=左へ / 緑が濃い=下へ / 薄い=上へ。"
+                "静止していれば全面が均一な灰色になり、色が付いていたら速度バッファが壊れている。"
+                "下の表示輝度の倍率で感度を変えられる(既定は約20画素/フレームで飽和)");
+            if (!m_Engine.m_TAAEnabled)
+            {
+                ImGui::TextWrapped("TAAが無効でも速度バッファは常に更新されるため、この表示はそのまま確認できます");
             }
         }
 

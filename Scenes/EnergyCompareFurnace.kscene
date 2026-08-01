@@ -1,0 +1,27 @@
+# KurenaiEngine シーンファイル - スペキュラ・エネルギー補正の3方式比較(White Furnace)
+#
+# FurnaceTest.kscene と同じ一様白環境だが、モデルが F0 も振った2次元グリッドになっている。
+# 3方式(Linear / Series / Kulla-Conty)は F0=1 では数学的に一致するため、
+# 最前列(白金属)だけを見ても区別できない。奥のF0<1の行を併せて見ること。
+# 検証の成立条件は docs/Architecture.html 14.9節 参照
+
+[Scene]
+Name = Energy Compare - White Furnace
+Skybox = Skybox/UniformWhite.dds
+IBLIntensity = 1.0
+AmbientOcclusion = false
+ScreenSpaceReflection = false
+
+[Model]
+Path = EnergyCompareTest/EnergyCompareTest.kmodel
+
+# 5行x11列のグリッド(X=-12.5〜12.5, Z=-12〜12)を俯瞰して全球が入る位置。
+# 手前の行ほどF0が高い(1.00 / 0.76 / 0.52 / 0.28 / 0.04)。
+# Yaw/Pitchは度数
+[Camera]
+Position = 0.0, 38.0, -38.0
+Yaw = 0.0
+Pitch = -45.0
+
+[Sun]
+Enabled = false

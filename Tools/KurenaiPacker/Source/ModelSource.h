@@ -1,6 +1,8 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,14 +34,17 @@ namespace KurenaiPacker
         // glTFのpbrMetallicRoughness.baseColorFactor(RGBA、既定[1,1,1,1])。BaseColorTextureが
         // 無いマテリアル(色/不透明度をbaseColorFactorのみで表現するガラス等)を正しく再現するため
         float BaseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        // glTFのocclusionTexture.strength。ソースが値を持たない場合はglTF仕様の既定値1.0
+        float OcclusionStrength = Kurenai::Assets::kDefaultOcclusionStrength;
 
         // 解決済みのフルパス(存在確認まで済んでいるとは限らない)。空 = 指定なし。
-        // sRGBの要否はスロットで決まる(BaseColor/Emissive=true、Normal/MetallicRoughness=false)ため
-        // ここでは保持しない
+        // sRGBの要否はスロットで決まる(BaseColor/Emissive=true、Normal/MetallicRoughness/
+        // Occlusion=false)ためここでは保持しない
         std::wstring BaseColorPath;
         std::wstring NormalPath;
         std::wstring MetallicRoughnessPath;
         std::wstring EmissivePath;
+        std::wstring OcclusionPath;
     };
 
     enum class SourceLightType : uint32_t
@@ -73,10 +78,27 @@ namespace KurenaiPacker
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
     };
 
+    // 解析後に全マテリアルへ強制的に適用する係数の上書き。
+    //
+    // 生のOBJ(3Dスキャン配布物など)はPBRのマテリアル係数を表現できない
+    // ―― WavefrontMTLのPBR拡張(Pm/Pr)をassimpはテクスチャ指定としてしか読まないため、
+    // メタリック値をファイル側から与える手段が無い。検証用にそうしたモデルへ
+    // 「リフレクタンス=1(baseColor=1かつmetallic=1、F0=1の完全反射)」のような
+    // マテリアルを与えられるようにする。std::nulloptなら上書きしない
+    struct MaterialOverride
+    {
+        std::optional<float> MetallicFactor;
+        std::optional<float> RoughnessFactor;
+        std::optional<std::array<float, 3>> BaseColor;
+    };
+
     // モデルファイルをassimpで解析する。失敗時はstd::runtime_errorを投げる。
     // scale: 頂点位置・バウンズに乗算する係数(既定1.0)。OBJ等、ファイル自体に単位情報を
     // 持たない形式では、センチメートル単位で作成されたアセットを
     // そのまま読み込むと本来の100倍のスケールになってしまうことがあるため、呼び出し側
     // (KurenaiPacker.exeの--scaleオプション)が既知の単位変換係数を明示的に渡す
-    SourceModel LoadSourceModel(const std::wstring& filePath, float scale = 1.0f);
+    SourceModel LoadSourceModel(
+        const std::wstring& filePath,
+        float scale = 1.0f,
+        const MaterialOverride& materialOverride = {});
 }

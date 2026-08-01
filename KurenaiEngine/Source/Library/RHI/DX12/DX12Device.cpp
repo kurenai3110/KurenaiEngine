@@ -31,9 +31,9 @@ namespace Kurenai::RHI
     namespace
     {
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
-        // t0〜t13。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
-        // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer)
-        constexpr uint32_t kTextureSlotCount = 14;
+        // t0〜t14。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
+        // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer+距離キューブ配列)
+        constexpr uint32_t kTextureSlotCount = 15;
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
         // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler(役割の定義はShaders/Samplers.hlsli)。
         // どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。
@@ -47,7 +47,7 @@ namespace Kurenai::RHI
         // シェーダ可視Samplerヒープの上限はD3D12の仕様で2048ディスクリプタ
         // (D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE)なので、この程度なら十分収まる
         constexpr uint32_t kMaxSamplerSets = 8;
-        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t13のkTextureSlotCount個ひと組)の最大数。
+        // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t14のkTextureSlotCount個ひと組)の最大数。
         // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく。実際に確保するヒープ容量は
         // これのkFrameCount倍(CPUがGPU完了を待たずに次フレームを記録し始めるため、直近kFrameCount
         // フレームぶんのブロックがまだGPUに読まれている可能性がある)

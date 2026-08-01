@@ -33,6 +33,9 @@ static const float kSSREdgeFadeDistance = 0.1f;
 #define KURENAI_GLOBAL_PREFILTERED_REGISTER t7
 #define KURENAI_PROBE_PREFILTERED_REGISTER t8
 #define KURENAI_PROBE_BUFFER_REGISTER t9
+// 距離キューブ(19.12節)。DeferredLighting.hlslと同じ条件でコンパイルしないと、
+// SSRが「Lightingが使ったのとは違う放射輝度」を引き算することになるため必ず定義する
+#define KURENAI_PROBE_DISTANCE_REGISTER t10
 
 cbuffer FrameConstants : register(b0)
 {
@@ -60,6 +63,8 @@ cbuffer FrameConstants : register(b0)
     float4 IBLParams;
     // 反射プローブ用。ReflectionProbe.hlsliのプローブ選択・ブレンドが読む
     float4 ProbeParams;
+    // 距離キューブ用(19.12節)。同じくReflectionProbe.hlsliが読む
+    float4 ProbeParams2;
 };
 
 cbuffer SSRConstants : register(b1)
@@ -78,8 +83,9 @@ Texture2D AOTexture : register(t5);
 // split-sum近似の第2項、BRDF積分LUT
 Texture2D BRDFLUTTexture : register(t6);
 
-// プリフィルタ済み鏡面(t7)・プローブのキューブマップ配列(t8)・プローブの影響範囲バッファ(t9)の
-// 宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みはReflectionProbe.hlsliが持つ
+// プリフィルタ済み鏡面(t7)・プローブのキューブマップ配列(t8)・プローブの影響範囲バッファ(t9)・
+// プローブの距離キューブ(t10)の宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みは
+// ReflectionProbe.hlsliが持つ
 #include "ReflectionProbe.hlsli"
 
 struct PSInput
@@ -150,9 +156,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 albedo = AlbedoTexture.Sample(ColorSampler, input.UV).rgb;
-    float2 material = MaterialTexture.Sample(DataSampler, input.UV).rg;
+    float3 material = MaterialTexture.Sample(DataSampler, input.UV).rgb;
     float metallic = material.r;
     float roughness = material.g;
+    float materialAO = material.b; // マテリアルの遮蔽マップ(GBuffer.hlslでstrength適用済み)
 
     const float maxDistance = Params0.x;
     const float thickness = Params0.y;
@@ -178,10 +185,16 @@ float4 PSMain(PSInput input) : SV_TARGET
     // --- Lightingパスが適用した鏡面IBLを、そのときとまったく同じ式で再現する ---
     // 環境の放射輝度と、それに掛かる係数。どちらもReflectionProbe.hlsliの定義を共有しているため、
     // ここで求めた値はLightingパスがSceneColorへ足したものと定義上一致する
-    const float ao = AOTexture.Sample(ColorSampler, input.UV).a;
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
+    // aoの合成式はDeferredLighting.hlslのPSMainとまったく同じでなければならない
+    // (スクリーンスペースの遮蔽 × マテリアルの遮蔽マップ)。ズレるとSSRが適用される領域と
+    // されない領域の境界に段差が出る
+    const float ao = AOTexture.Sample(ColorSampler, input.UV).a * materialAO;
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     const float3 specularWeight =
         SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+    // Kulla-Conty方式の加算ローブ(SpecularIBLMultiScatterWeight)はここでは扱わない。
+    // あれは拡散イラディアンスに掛かるほぼ拡散のローブで、鏡面反射として差し替える対象では
+    // ないため、Lightingパスが足したまま残す(14.9節)
 
     const float mipLevel = roughness * ShadowParams.y;
     float3 unusedIrradiance;
