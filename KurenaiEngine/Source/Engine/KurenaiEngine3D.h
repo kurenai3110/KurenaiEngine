@@ -852,6 +852,21 @@ namespace Kurenai
         // ただし初回だけは「前の値」が存在しないため、一巡目はヒステリシスを使わず上書きする
         // (未初期化のアトラスと混ぜてはいけない)
         bool m_DDGIWarmingUp = true;
+        // ヒステリシスを使わず上書きで焼き直す残りプローブ数。
+        //
+        // 【なぜ要るか】実効プリ露出は時刻に連動して最大18段動く(21.5節)。アトラス自体は
+        // 露出非依存の物理量で持っているので数値が壊れることはないが、ヒステリシス0.97と
+        // ラウンドロビンの積で時定数が約17秒あるため、時刻を大きく動かすとその間ずっと
+        // 「前の時刻の間接光」が表示され続ける。露出が急変する時間帯ほど、この遅れが
+        // 露出倍率で拡大されて目に見える(夕方に昼の間接光を夕方の露出で見ることになる)。
+        // そこで露出が一定以上動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる。
+        // m_DDGIWarmingUpと違いDDGI自体は有効なまま(無効にすると従来のIBLとの間でちらつく)
+        uint32_t m_DDGIOverwriteRemaining = 0;
+        // 最後にアトラスを追従させた時点の実効プリ露出EV100
+        float m_DDGILastExposureEV100 = 0.0f;
+        bool m_DDGILastExposureValid = false;
+        // これを超えて実効プリ露出が動いたら追従させる(段)。1段=明るさ2倍ぶん
+        static constexpr float kDDGIExposureRewarmEV = 0.5f;
         // 時間分割の進行状態。1フレームにm_DDGIProbesPerFrame個ずつ順に焼き直す
         uint32_t m_DDGIUpdateCursor = 0;
         int32_t m_DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;

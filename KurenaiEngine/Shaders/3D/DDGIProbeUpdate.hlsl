@@ -31,7 +31,7 @@ cbuffer DDGIUpdateConstants : register(b0)
     // x=イラディアンスの1辺のテクセル数(境界を含まない)、y=距離モーメントの1辺のテクセル数、
     // z=境界の幅、w=履歴を無視して上書きするフラグ
     float4 Params1;
-    // xyz=各軸のプローブ数
+    // xyz=各軸のプローブ数、w=このフレームの実効プリ露出
     float4 Params2;
 };
 
@@ -212,6 +212,7 @@ void CSUpdateProbe(uint3 dispatchThreadID : SV_DispatchThreadID)
     const bool overwrite = Params1.w > 0.5f;
 
     const uint3 probeCounts = uint3((uint)Params2.x, (uint)Params2.y, (uint)Params2.z);
+    const float preExposure = Params2.w;
 
     const uint2 texel = dispatchThreadID.xy;
 
@@ -224,6 +225,14 @@ void CSUpdateProbe(uint3 dispatchThreadID : SV_DispatchThreadID)
         float3 irradiance;
         float2 unusedMoments;
         IntegrateRays(direction, captureSize, maxRayDistance, irradiance, unusedMoments);
+
+        // 【露出非依存の単位で格納する】キャプチャした放射輝度にはCPU側で実効プリ露出が
+        // 事前乗算されている(21.5節)。その倍率は時刻に連動して最大18段(約26万倍)動くため、
+        // 掛かったまま溜めると「古い露出で焼かれた数値」を新しい露出の値として読むことになる。
+        // DDGIは多重バウンスで自分自身へフィードバックするのでこのズレが増幅され、
+        // 夜を挟んで昼に戻すと画面が数倍明るいまま戻らなくなる。
+        // ここで割っておけば、ヒステリシスのブレンドも露出をまたいで整合する
+        irradiance /= max(preExposure, 1e-12f);
 
         const uint2 writeAt = ProbeAtlasOrigin(probeIndex, probeCounts, irradianceTexels, border) + border + texel;
         const float3 previous = IrradianceAtlas[writeAt].rgb;

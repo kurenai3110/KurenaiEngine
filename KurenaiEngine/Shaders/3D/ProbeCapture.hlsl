@@ -53,6 +53,8 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams1;
     float4 DDGIParams2;
     float4 DDGIParams3;
+    // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
+    float4 DDGIParams4;
 };
 
 // GBuffer.hlsl/Transparent.hlslのObjectConstantsと同じレイアウト

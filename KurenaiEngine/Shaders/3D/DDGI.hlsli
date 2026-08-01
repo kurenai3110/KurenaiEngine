@@ -168,8 +168,10 @@ float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V)
         return float3(0.0f, 0.0f, 0.0f);
     }
 
-    // DDGIParams3.z = 強度倍率
-    return (accumulated / totalWeight) * DDGIParams3.z;
+    // アトラスは露出非依存の物理量で持っている(理由はC++側 FrameConstants::DDGIParams4 の
+    // コメント参照)。ここでこのフレームの実効プリ露出を掛けて、他のライティングと同じ
+    // 表示レンジへ戻す。DDGIParams3.z は強度倍率
+    return (accumulated / totalWeight) * DDGIParams3.z * DDGIParams4.x;
 }
 
 #endif // KURENAI_DDGI_HLSLI

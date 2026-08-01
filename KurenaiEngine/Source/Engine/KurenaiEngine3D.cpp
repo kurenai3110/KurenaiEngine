@@ -101,6 +101,18 @@ namespace Kurenai
             //                y=距離モーメントの1辺のテクセル数(同)、z=拡散間接光の強度倍率、
             //                w=境界の幅(テクセル)
             DirectX::XMFLOAT4 DDGIParams3;
+            // DDGIParams4: x=このフレームの実効プリ露出(m_EffectiveExposureEV100の線形倍率)、yzw=未使用。
+            //
+            // 【アトラスは露出非依存の単位で持つ】ライトの色にはCPU側で実効プリ露出が
+            // 事前乗算されており(21.5節)、その倍率は時刻に連動して最大18段(約26万倍)動く。
+            // アトラスへプリ露出済みの値をそのまま溜めると、時刻が変わった瞬間に
+            // 「古い露出で焼かれた数値」を新しい露出の値として読むことになる。
+            // DDGIは多重バウンスで自分自身へフィードバックするため、このズレが増幅され続け、
+            // 夜を挟んで昼に戻すと画面が数倍明るいまま戻らなくなる(実測で12時の平均輝度が
+            // 45.6→132.9)。そこで書き込み時にこの倍率で割り、読み出し時に掛け直して、
+            // アトラスの中身を露出に依存しない物理量に保つ。
+            // R32で確保してある(22.6節)ので、夜の小さな値でもfp32の範囲に余裕がある
+            DirectX::XMFLOAT4 DDGIParams4;
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -115,7 +127,9 @@ namespace Kurenai
             // ヒステリシスは「前の値」があって初めて意味を持つため、未初期化のアトラスと混ぜてはいけない)
             DirectX::XMFLOAT4 Params1;
             // xyz=アトラス上でのプローブ格子の並び(x=各軸のプローブ数)。アトラスの列数は
-            // ProbeCounts.x * ProbeCounts.y、行数はProbeCounts.zになる
+            // ProbeCounts.x * ProbeCounts.y、行数はProbeCounts.zになる。
+            // w=このフレームの実効プリ露出。積分した放射輝度をこれで割ってから格納する
+            // (理由はFrameConstants::DDGIParams4のコメント参照)
             DirectX::XMFLOAT4 Params2;
         };
 
@@ -2010,6 +2024,8 @@ namespace Kurenai
         m_DDGIBaked = false;
         m_DDGIWarmingUp = true;
         m_DDGIUpdateCursor = 0;
+        m_DDGIOverwriteRemaining = 0;
+        m_DDGILastExposureValid = false;
 
         if (m_HasGIVolume)
         {
@@ -2884,6 +2900,7 @@ namespace Kurenai
             m_DDGIIntensity,
             static_cast<float>(kDDGIProbeBorder),
         };
+        constants.DDGIParams4 = { effectiveExposure, 0.0f, 0.0f, 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
@@ -3551,7 +3568,7 @@ namespace Kurenai
 
         // 組み上がったキューブ2本から、オクタヘドラルアトラスの該当セルを焼き直す。
         // 境界の複製は本体の書き込みが全て終わってからでないと正しい値を読めないので別ディスパッチ
-        const auto updateDDGIProbe = [this](RHI::IRHICommandList* cmd, uint32_t probeIndex, bool overwrite)
+        const auto updateDDGIProbe = [this, effectiveExposure](RHI::IRHICommandList* cmd, uint32_t probeIndex, bool overwrite)
         {
             DDGIUpdateConstants updateConstants{};
             updateConstants.Params0 = {
@@ -3570,7 +3587,7 @@ namespace Kurenai
                 static_cast<float>(m_GIVolume.ProbeCounts[0]),
                 static_cast<float>(m_GIVolume.ProbeCounts[1]),
                 static_cast<float>(m_GIVolume.ProbeCounts[2]),
-                0.0f,
+                effectiveExposure,
             };
             cmd->UpdateBuffer(m_DDGIUpdateConstantBuffer.get(), &updateConstants, sizeof(updateConstants));
 
@@ -3603,11 +3620,32 @@ namespace Kurenai
                 static_cast<uint32_t>(std::max(m_DDGIProbesPerFrame, 1)), m_DDGIProbeCount);
             const bool warmingUp = m_DDGIWarmingUp;
 
+            // 実効プリ露出が大きく動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる
+            // (理由はKurenaiEngine3D.hのm_DDGIOverwriteRemainingのコメント参照)。
+            // 一巡目(warmingUp)は元から上書きなので何もしない
+            if (!warmingUp)
+            {
+                if (!m_DDGILastExposureValid)
+                {
+                    m_DDGILastExposureEV100 = m_EffectiveExposureEV100;
+                    m_DDGILastExposureValid = true;
+                }
+                else if (std::abs(m_EffectiveExposureEV100 - m_DDGILastExposureEV100) > kDDGIExposureRewarmEV)
+                {
+                    m_DDGIOverwriteRemaining = m_DDGIProbeCount;
+                    m_DDGILastExposureEV100 = m_EffectiveExposureEV100;
+                }
+            }
+            // このフレームで上書きするぶんを先に確定させる(ラムダへ値で渡すため)
+            const uint32_t overwriteThisFrame = std::min(m_DDGIOverwriteRemaining, perFrame);
+            m_DDGIOverwriteRemaining -= overwriteThisFrame;
+
             for (uint32_t i = 0; i < perFrame; ++i)
             {
                 const uint32_t probeIndex = (m_DDGIUpdateCursor + i) % m_DDGIProbeCount;
-                // 一巡目はヒステリシスを使わず上書きする(混ぜる相手の「前の値」が未初期化のため)
-                const bool overwrite = warmingUp;
+                // 一巡目はヒステリシスを使わず上書きする(混ぜる相手の「前の値」が未初期化のため)。
+                // 露出が急変した直後も同じく上書きで追従させる
+                const bool overwrite = warmingUp || (i < overwriteThisFrame);
 
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "DDGIUpdate" + std::to_string(probeIndex),
@@ -3635,6 +3673,8 @@ namespace Kurenai
                 // 同時にサンプリング側(DDGIParams0.w)を有効にする
                 m_DDGIWarmingUp = false;
                 m_DDGIBaked = true;
+                m_DDGILastExposureEV100 = m_EffectiveExposureEV100;
+                m_DDGILastExposureValid = true;
                 Core::Logger::Info(
                     "KurenaiEngine3D",
                     "DDGIの初回一巡が完了しました(" + std::to_string(m_DDGIProbeCount) + "プローブ)");
@@ -4554,6 +4594,14 @@ namespace Kurenai
                 ? m_GIVolume.MaxRayDistance
                 : m_ProbeDistanceDebugRange;
             presentConstants.Gain = 1.0f / std::max(whiteAt, 0.01f);
+        }
+        else if (m_DebugView == DebugView::DDGIIrradiance)
+        {
+            // アトラスは露出非依存の物理量で持っている(FrameConstants::DDGIParams4 参照)ため、
+            // そのまま出すと昼は数万倍の値になって白飛びする。表示だけ実効プリ露出を掛けて
+            // 他のバッファと同じ表示レンジへ揃える。こうしておくと
+            // 「IBL - イラディアンス」の表示と直接見比べられる(22.9.1節の検証がこれに依存している)
+            presentConstants.Gain = m_DebugViewGain * effectiveExposure;
         }
         else
         {
