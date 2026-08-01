@@ -4,12 +4,15 @@
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <dxgi1_2.h>
 #include <wrl/client.h>
 
 #include <xatlas.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <numeric>
@@ -35,11 +38,54 @@ namespace KurenaiPacker
             std::cout << "[KurenaiPacker] " << message << "\n";
         }
 
+        // === 計測 ==============================================================
+        //
+        // どのフェーズで時間が溶けているかを推測しないための計装。
+        // ベイクは分単位で掛かるため、計測自体のオーバーヘッドは無視できる。
+
+        using Clock = std::chrono::steady_clock;
+
+        double SecondsSince(const Clock::time_point& start)
+        {
+            return std::chrono::duration<double>(Clock::now() - start).count();
+        }
+
+        // 数値を固定小数2桁の文字列にする(std::to_stringは常に6桁出て読みにくい)。
+        // 単位はここに含めず呼び出し側で連結する ―― sprintf_sの書式文字列へ日本語を入れると
+        // C4819(現在のコードページで表現できない文字)が出るため、既存コードと同じく
+        // 書式文字列はASCIIに限り、日本語はstd::stringの連結側へ置く
+        std::string Format2(double value)
+        {
+            char buffer[64];
+            sprintf_s(buffer, "%.2f", value);
+            return buffer;
+        }
+
+        std::string FormatSeconds(double seconds)
+        {
+            return Format2(seconds) + "秒";
+        }
+
+        // フェーズごとの累計時間。メッシュをまたいで積算する
+        struct BakeTimings
+        {
+            double UnwrapSeconds = 0.0;
+            double BvhSeconds = 0.0;
+            double RasterizeSeconds = 0.0;
+            double DispatchSeconds = 0.0;   // Dispatch発行〜リードバック完了(GPU待ちを含む)
+            double DilateSeconds = 0.0;
+            uint64_t TotalRays = 0;         // 実際に飛ばしたレイの総数(有効テクセル × レイ本数)
+        };
+
         // === BVH ===============================================================
         //
         // 中央値分割の単純なBVH。SAHは使わない ―― ベイクは1アセットにつき数回しか走らない
         // オフライン処理で、構築時間よりも実装の単純さ(=検証しやすさ)を優先したため。
-        // レイあたりの交差判定回数は実測でも問題にならなかった。
+        //
+        // 【SAHへ変える必要は無い(実測)】Chinese Dragon(871306三角形、2048² / 64レイ)で
+        // レイキャストは0.30秒・毎秒3〜4億レイ、BVH構築は0.31秒。ベイク全体394秒のうち
+        // 合わせて0.16%しかない。残り99%はxatlasのUV展開(22.6.5節)。
+        // ここを速くしても総時間はまったく変わらないので、単純なまま維持してよい。
 
         struct Float3
         {
@@ -200,7 +246,12 @@ namespace KurenaiPacker
 
         // === ライトマップUVの生成(xatlas) =====================================
 
-        // xatlasの進捗・ログはこのツールの出力形式に合わせて捨てる(既定ではstdoutへ出る)
+        // xatlasの進捗・ログはこのツールの出力形式に合わせて捨てる(既定ではstdoutへ出る)。
+        //
+        // なお、この関数を素通し(vprintf)にしたうえでxatlas.cppの XA_PROFILE を1にし、
+        // SetPrintの第2引数(verbose)をtrueにすると、xatlas内蔵のプロファイラが
+        // ComputeChartsの内訳(Place seeds / Grow / Merge / Parameterize ...)を出力する。
+        // UV展開が遅い原因を追うときはこれが一番早い(22.6.5節)
         int SilentPrint(const char*, ...)
         {
             return 0;
@@ -241,13 +292,24 @@ namespace KurenaiPacker
             decl.indexData = mesh.Indices.data();
             decl.indexFormat = xatlas::IndexFormat::UInt32;
 
+            const Clock::time_point addMeshStart = Clock::now();
             if (xatlas::AddMesh(atlas, decl) != xatlas::AddMeshError::Success)
             {
                 return false;
             }
+            // AddMeshは非同期。ここで待たないと、続くComputeChartsの計測へ
+            // AddMeshぶんの時間が混ざって切り分けにならない
+            xatlas::AddMeshJoin(atlas);
+            const double addMeshSeconds = SecondsSince(addMeshStart);
 
+            // ベイク時間のほぼ全部(実測で99%)がこの1行に入る。既定のChartOptionsのまま
+            // 使っているのは、maxCostを4/8/16と振っても時間がまったく変わらなかったため
+            // (378秒/379秒/399秒。詳細と原因は22.6.5節)
+            const Clock::time_point computeStart = Clock::now();
             xatlas::ComputeCharts(atlas);
+            const double computeSeconds = SecondsSince(computeStart);
 
+            const Clock::time_point packStart = Clock::now();
             xatlas::PackOptions packOptions;
             packOptions.resolution = resolution;
             packOptions.padding = 2;        // バイリニア補間で隣のチャートを拾わないための余白
@@ -257,11 +319,20 @@ namespace KurenaiPacker
 
             // 1枚に収まらず複数アトラスへ分かれた場合、UVだけではどのアトラスかを表現できない。
             // texelsPerUnitを下げて(=チャートを小さくして)1枚に収まるまで詰め直す
+            int packAttempts = 1;
             for (int attempt = 0; attempt < 4 && atlas->atlasCount > 1; ++attempt)
             {
                 packOptions.texelsPerUnit = atlas->texelsPerUnit * 0.7f;
                 xatlas::PackCharts(atlas, packOptions);
+                ++packAttempts;
             }
+            const double packSeconds = SecondsSince(packStart);
+
+            Info("  UV展開の内訳: AddMesh " + FormatSeconds(addMeshSeconds)
+                + " / ComputeCharts " + FormatSeconds(computeSeconds)
+                + " / PackCharts " + FormatSeconds(packSeconds)
+                + " (" + std::to_string(packAttempts) + "回)"
+                + " / チャート数 " + std::to_string(atlas->chartCount));
             if (atlas->atlasCount > 1)
             {
                 return false;
@@ -638,6 +709,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 }
                 ThrowIfFailed(hr, "遮蔽マップのベイク用D3D11デバイスの作成に失敗しました");
 
+                LogAdapter();
+
                 ComPtr<ID3DBlob> code;
                 ComPtr<ID3DBlob> errors;
                 hr = D3DCompile(
@@ -668,6 +741,44 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             ID3D11Buffer* Constants() const { return m_Constants.Get(); }
 
         private:
+            // 実際に使われているアダプタをログへ出す。
+            //
+            // D3D11CreateDeviceの第1引数がnullptrのときDXGIの既定アダプタが選ばれるが、
+            // それがどれなのかは記録されていなかった。ハイブリッドグラフィックス機で
+            // 統合GPUを掴んでいないかを、憶測ではなくログで確認できるようにしておく。
+            //
+            // (実測では正しくディスクリートGPUが選ばれており、レイキャストは
+            //  毎秒3〜4億レイ出ていた。ベイクが遅いのはGPU側ではなくUV展開が原因 ―― 22.6.5節)
+            void LogAdapter()
+            {
+                ComPtr<IDXGIDevice> dxgiDevice;
+                if (FAILED(m_Device.As(&dxgiDevice)))
+                {
+                    Warn("ベイク用デバイスからIDXGIDeviceを取得できなかったため、アダプタ名を記録できません");
+                    return;
+                }
+
+                ComPtr<IDXGIAdapter> adapter;
+                if (FAILED(dxgiDevice->GetAdapter(&adapter)))
+                {
+                    Warn("ベイク用デバイスからIDXGIAdapterを取得できなかったため、アダプタ名を記録できません");
+                    return;
+                }
+
+                DXGI_ADAPTER_DESC desc{};
+                if (FAILED(adapter->GetDesc(&desc)))
+                {
+                    Warn("アダプタの情報を取得できなかったため、アダプタ名を記録できません");
+                    return;
+                }
+
+                // 専用VRAMが極端に小さいものは統合GPU(またはWARP)とみなせる。
+                // 判別そのものはしないが、値を出しておけば人間が見て分かる
+                const uint64_t dedicatedMB = static_cast<uint64_t>(desc.DedicatedVideoMemory) / (1024ull * 1024ull);
+                Info("ベイクに使うGPU: " + WideToUtf8(desc.Description)
+                    + " (専用VRAM " + std::to_string(dedicatedMB) + "MB)");
+            }
+
             ComPtr<ID3D11Device> m_Device;
             ComPtr<ID3D11DeviceContext> m_Context;
             ComPtr<ID3D11ComputeShader> m_Shader;
@@ -712,9 +823,13 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
         xatlas::SetPrint(SilentPrint, false);
 
+        BakeTimings timings;
+        const Clock::time_point bakeStart = Clock::now();
+
         // === 1. 全メッシュのライトマップUVを生成する ===
         // BVHは展開後の頂点で組む(展開は頂点を複製するだけで形状は変えないが、
         // 同じ配列を使うほうが対応関係を追いやすい)
+        const Clock::time_point unwrapStart = Clock::now();
         std::vector<uint8_t> unwrapped(sourceModel.Meshes.size(), 0);
         for (size_t i = 0; i < sourceModel.Meshes.size(); ++i)
         {
@@ -725,9 +840,12 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 ++result.SkippedMeshCount;
             }
         }
+        timings.UnwrapSeconds = SecondsSince(unwrapStart);
 
         // === 2. モデル全体のBVHを構築する ===
+        const Clock::time_point bvhStart = Clock::now();
         const Bvh bvh = BuildBvh(sourceModel);
+        timings.BvhSeconds = SecondsSince(bvhStart);
         if (bvh.Triangles.empty())
         {
             return result;
@@ -768,9 +886,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 continue;
             }
 
+            const Clock::time_point rasterizeStart = Clock::now();
             std::vector<BakeTexel> texels;
             std::vector<uint8_t> valid;
             RasterizeLightmapSpace(sourceModel.Meshes[meshIndex], options.Resolution, texels, valid);
+            timings.RasterizeSeconds += SecondsSince(rasterizeStart);
 
             const size_t validCount = std::count(valid.begin(), valid.end(), static_cast<uint8_t>(1));
             if (validCount == 0)
@@ -779,6 +899,24 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 ++result.SkippedMeshCount;
                 continue;
             }
+
+            // 有効テクセルだけがレイを飛ばす(無効テクセルはシェーダー冒頭で即returnする)。
+            // スループットの分母はこちらでなければならない
+            timings.TotalRays += static_cast<uint64_t>(validCount) * options.RayCount;
+
+            // UV展開の品質指標(22.6.4)。
+            //   被覆率      = 有効テクセル / 全テクセル。アトラスをどれだけ使えているか
+            //   テクセル/三角形 = 三角形あたり何テクセル割り当てられたか。1を切ると斑点が出る
+            // チャートが小さく数が多いほど、パディングとバイリニアの余白が食ってこの2つが下がる
+            const size_t meshTriangleCount = sourceModel.Meshes[meshIndex].Indices.size() / 3;
+            const double coverage = static_cast<double>(validCount) / static_cast<double>(texelCount);
+            const double texelsPerTriangle = meshTriangleCount > 0
+                ? static_cast<double>(validCount) / static_cast<double>(meshTriangleCount)
+                : 0.0;
+            Info("  メッシュ[" + std::to_string(meshIndex) + "] 被覆率 " + Format2(coverage * 100.0)
+                + "% / テクセル毎三角形 " + Format2(texelsPerTriangle));
+
+            const Clock::time_point dispatchStart = Clock::now();
 
             // HLSL側のStructuredBuffer<uint>に合わせて4バイトへ展開する
             std::vector<uint32_t> validU32(valid.begin(), valid.end());
@@ -853,11 +991,33 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 texture[i] = static_cast<uint8_t>(clamped * 255.0f + 0.5f);
             }
             device.Context()->Unmap(staging.Get(), 0);
+            timings.DispatchSeconds += SecondsSince(dispatchStart);
 
+            const Clock::time_point dilateStart = Clock::now();
             Dilate(texture, valid, options.Resolution, options.DilationPixels);
+            timings.DilateSeconds += SecondsSince(dilateStart);
 
             result.MeshTextures[meshIndex] = std::move(texture);
             ++result.BakedMeshCount;
+        }
+
+        // === 4. 計測結果 ===
+        //
+        // フェーズ別に出すのは「どこを速くすべきか」を推測せずに決めるため。
+        // レイ/秒はGPUトラバーサルの改善を評価する唯一の指標なので、必ず残すこと
+        const double totalSeconds = SecondsSince(bakeStart);
+        Info("ベイク完了 (合計 " + FormatSeconds(totalSeconds) + ")");
+        Info("  UV展開       " + FormatSeconds(timings.UnwrapSeconds));
+        Info("  BVH構築      " + FormatSeconds(timings.BvhSeconds));
+        Info("  ラスタライズ " + FormatSeconds(timings.RasterizeSeconds));
+        Info("  レイキャスト " + FormatSeconds(timings.DispatchSeconds) + " (GPU待ちを含む)");
+        Info("  ダイレーション " + FormatSeconds(timings.DilateSeconds));
+        if (timings.DispatchSeconds > 0.0 && timings.TotalRays > 0)
+        {
+            const double raysPerSecondM =
+                static_cast<double>(timings.TotalRays) / timings.DispatchSeconds / 1.0e6;
+            Info("  レイ " + std::to_string(timings.TotalRays) + "本 / "
+                + Format2(raysPerSecondM) + " 百万レイ毎秒");
         }
 
         return result;
