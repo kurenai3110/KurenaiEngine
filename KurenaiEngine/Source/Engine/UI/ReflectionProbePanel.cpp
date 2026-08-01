@@ -82,16 +82,17 @@ namespace Kurenai::UI
             "物体の真下が逆に明るくなることがあり既定は無効");
 
         // 更新モード。焼き直しのコストとシーンの変化への追従はトレードオフの関係にあり、
-        // プロファイラの ProbeBakeN / ProbeRealtimeCapture / ProbeRealtimeConvolve と
-        // 見比べながら選べるようにしてある
-        static const char* kUpdateModeNames[] = { "焼き込み", "変化を検出して焼き直す", "毎フレーム1面ずつ" };
+        // プロファイラの ProbeBakeCaptureN / ProbeBakeConvolvePrefilterN /
+        // ProbeRealtimeCapture / ProbeRealtimeConvolvePrefilterStep と見比べながら選べるようにしてある
+        static const char* kUpdateModeNames[] = { "焼き込み", "変化を検出して焼き直す", "毎フレーム少しずつ" };
         int updateModeIndex = static_cast<int>(m_Engine.m_ProbeUpdateMode);
         if (ComboEx(
                 "更新モード###ProbeUpdateMode", &updateModeIndex, kUpdateModeNames, IM_ARRAYSIZE(kUpdateModeNames),
                 static_cast<int>(ProbeUpdateMode::Baked),
                 "焼き込み: シーン読み込み時と「焼き直す」ボタンのときだけ焼く。\n"
                 "変化を検出して焼き直す: 太陽・時刻・ライトが変わったときにも焼き直す。\n"
-                "毎フレーム1面ずつ: さらに毎フレーム1面ずつ焼き、プローブをラウンドロビンで回る"))
+                "毎フレーム少しずつ: さらに1プローブを12フレームかけて焼き直し(6フレームで6面を\n"
+                "キャプチャ→6フレームで畳み込み)、プローブをラウンドロビンで回る"))
         {
             m_Engine.m_ProbeUpdateMode = static_cast<ProbeUpdateMode>(updateModeIndex);
         }

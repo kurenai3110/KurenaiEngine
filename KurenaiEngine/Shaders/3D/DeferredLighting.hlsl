@@ -16,7 +16,8 @@ static const float PI = 3.14159265359f;
 // ProbeParams/ShadowParams/AmbientColorを参照するため、それらの宣言より後でインクルードする
 #define KURENAI_GLOBAL_IRRADIANCE_REGISTER t8
 #define KURENAI_GLOBAL_PREFILTERED_REGISTER t9
-#define KURENAI_PROBE_IRRADIANCE_REGISTER t11
+// t11は反射プローブのイラディアンスに使っていたが、M11 Stage 3で廃止した
+// (反射プローブは鏡面専任になった。ReflectionProbe.hlsli冒頭のコメント参照)。空いたまま残す
 #define KURENAI_PROBE_PREFILTERED_REGISTER t12
 #define KURENAI_PROBE_BUFFER_REGISTER t13
 #define KURENAI_PROBE_DISTANCE_REGISTER t14
@@ -94,9 +95,11 @@ Texture2D NormalTexture : register(t7);
 // (NdotV, ラフネス)の2Dルックアップテーブルのため、これだけは通常のTexture2Dのまま)
 Texture2D BRDFLUTTexture : register(t10);
 
-// 拡散イラディアンス(t8)・プリフィルタ済み鏡面(t9)・プローブのキューブマップ配列(t11/t12)・
-// プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みは
-// ReflectionProbe.hlsliが持つ(SSR.hlslと共有するため。レジスタ番号は上のマクロで与えている)
+// グローバルIBLの拡散イラディアンス(t8)・プリフィルタ済み鏡面(t9)・プローブのプリフィルタ済み
+// 鏡面キューブマップ配列(t12)・プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・
+// 視差補正・ブレンド・鏡面IBLの重みはReflectionProbe.hlsliが持つ(SSR.hlslと共有するため。
+// レジスタ番号は上のマクロで与えている)。反射プローブは鏡面専任(M11 Stage 3)なので、
+// プローブ側の拡散イラディアンスは無い
 #include "ReflectionProbe.hlsli"
 // DDGI(22章)。拡散イラディアンスだけを差し替える。鏡面には一切触れないため、
 // SSRとの「足した量と引く量が一致する」不変条件(20章)には影響しない
@@ -123,9 +126,16 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // グローバルIBL/反射プローブのイラディアンスと同じ量の別の推定値である。足すと二重計上になる。
     // 鏡面(prefiltered)は差し替えない——反射プローブのほうが方向解像度が桁違いに高く、
     // DDGIのオクタヘドラル6x6では鏡面の映り込みを表現できないため
+    //
+    // 【M11 Stage 1: 無条件の差し替えから、ボリューム内外で重み付けするlerpへ変更】
+    // ボリュームは1個しか持てず(22.10節)、以前は外側でも境界のプローブを外挿し続けたため、
+    // ボリュームの外が「1部屋ぶんの間接光」で照らされていた。insideWeightが0の点(ボリューム外)は
+    // irradianceがSampleEnvironmentの返した値(グローバルIBL/反射プローブ)のまま残る
     if (DDGIParams0.w > 0.5f)
     {
-        irradiance = SampleDDGIIrradiance(worldPos, N, V);
+        float ddgiInsideWeight;
+        const float3 ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight);
+        irradiance = lerp(irradiance, ddgiIrradiance, ddgiInsideWeight);
     }
 
     // --- 拡散IBL ---

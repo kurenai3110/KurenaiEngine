@@ -44,7 +44,8 @@ namespace Kurenai::UI
             "IBL - BRDF LUT (X=NdotV, Y=粗さ, RGB=A/B/Eavg)",
             "ブルーム (ピラミッド最上段・半解像度)",
             "ライトタイル (タイルあたりのライト数ヒートマップ)",
-            "プローブ - イラディアンス (キューブマップ配列)",
+            // 「プローブ - イラディアンス」はM11 Stage 3で廃止した(反射プローブは鏡面専任になった。
+            // 拡散はDDGIへ一本化。「DDGI - イラディアンス」で見る)
             "プローブ - プリフィルタ済み鏡面 (ミップ0=キャプチャ結果)",
             "プローブ - 影響範囲 (プローブごとの色分け)",
             "プローブ - 距離 (キューブマップ配列)",
@@ -54,7 +55,7 @@ namespace Kurenai::UI
             "DDGI - 距離モーメント (R=平均距離)",
         };
         static_assert(
-            static_cast<int>(DebugView::DDGIDistance) == 28,
+            static_cast<int>(DebugView::DDGIDistance) == 27,
             "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はDDGIDistance)");
 
         DrawUsageHint();
@@ -92,8 +93,7 @@ namespace Kurenai::UI
                 "表示するミップの段。段が進むほど粗い面向けにぼかされている");
         }
 
-        if (m_Engine.m_DebugView == DebugView::ProbeIrradiance || m_Engine.m_DebugView == DebugView::ProbePrefilter ||
-            m_Engine.m_DebugView == DebugView::ProbeDistance)
+        if (m_Engine.m_DebugView == DebugView::ProbePrefilter || m_Engine.m_DebugView == DebugView::ProbeDistance)
         {
             // プローブが1つも無いシーンでもスライダーの範囲が壊れないよう下限を0に保つ
             const int maxProbeIndex =

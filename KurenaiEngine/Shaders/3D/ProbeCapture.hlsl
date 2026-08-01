@@ -283,10 +283,19 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 worldPos, float3 albedo, flo
     //
     // 減衰(kDDGIBounceAttenuation)は発散対策。反射率が1に近い白い部屋では
     // E(n+1) ≈ E(n)·ρ で ρ→1 のとき収束が遅く、数値誤差で1を超えると発散する。
-    // 1未満を掛けて等比級数が必ず収束するようにしている(エネルギーを少し捨てて安定を買う)
-    const float3 irradiance = (DDGIParams0.w > 0.5f)
-        ? SampleDDGIIrradiance(worldPos, N, V) * kDDGIBounceAttenuation
-        : IrradianceTexture.Sample(MaterialSampler, N).rgb;
+    // 1未満を掛けて等比級数が必ず収束するようにしている(エネルギーを少し捨てて安定を買う)。
+    //
+    // 【M11 Stage 1】焼いているプローブがDDGIボリュームの外にある場合(19.13節のシーンは
+    // ボリュームを1個しか置けないため、Sponza/BistroのようにプローブがDDGI格子の外に
+    // 立つことがある)はDDGIIrradianceのinsideWeightが0になるので、グローバルIBL側へ
+    // フォールバックする。DeferredLighting.hlslのEvaluateIBLと同じ規則
+    float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
+    if (DDGIParams0.w > 0.5f)
+    {
+        float ddgiInsideWeight;
+        const float3 ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight) * kDDGIBounceAttenuation;
+        irradiance = lerp(irradiance, ddgiIrradiance, ddgiInsideWeight);
+    }
     const float3 fresnelRoughness =
         F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
     const float3 kd = (1.0f - fresnelRoughness) * (1.0f - metallic);

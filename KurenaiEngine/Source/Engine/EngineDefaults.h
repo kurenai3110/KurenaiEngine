@@ -40,6 +40,11 @@ namespace Kurenai::Defaults
     inline constexpr bool IBLEnabled = true;
     inline constexpr float IBLIntensity = 0.5f;
     inline constexpr bool IBLUseDedicatedIrradiance = false;
+    // 拡散イラディアンスの球面調和関数(SH L2)経路(M11 Stage 4a)。CSIrradianceの高速な代替。
+    // 既定はfalse(旧来の総当たり積分)。IBLUseDedicatedIrradianceが有効な場面でのみ意味を持つ
+    inline constexpr bool IBLUseSHIrradiance = false;
+    // SHのウィンドウ関数(Sloan)の強さ。0=無効(既定)。リンギングが実測で出た場合のつまみ
+    inline constexpr float SHWindowLambda = 0.0f;
     inline constexpr float AmbientScale = 0.2f;
     // スペキュラのマルチスキャッタリング・エネルギー補正の方式。
     // KurenaiEngine3D::SpecularCompensationMode と HLSL の KURENAI_SPEC_COMP_* に対応する

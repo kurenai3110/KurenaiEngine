@@ -327,6 +327,39 @@ namespace Kurenai::UI
                 Defaults::IBLUseDedicatedIrradiance,
                 "既定では拡散イラディアンスをプリフィルタ済み鏡面の最終ミップ(粗さ1)から得る。"
                 "これを有効にすると従来の専用イラディアンスマップをその場で焼いて切り替える(検証用)");
+
+            if (m_Engine.m_IBLUseDedicatedIrradiance)
+            {
+                // M11 Stage 4a: 専用イラディアンスマップを焼く2つの経路(旧: 総当たり積分/
+                // 新: 球面調和関数L2)をA/B比較できるようにする。既定は旧経路(false)。
+                //
+                // 【値が変わったら焼き直しを要求すること】イラディアンスマップは空が焼き直された
+                // ときにしか作り直されない(KurenaiEngine3D::Render の m_IBLIrradianceBaked 参照)。
+                // ここでフラグを倒さないと、トグルを切り替えても画面はまったく変わらず、
+                // 別の理由で空が焼き直されるまで切り替え前の経路の結果が出続ける
+                // ——つまりA/B比較のために付けたつまみが機能しない(実機で確認した)
+                if (CheckboxEx(
+                        "球面調和関数(SH)で焼く###UseSHIrradiance", &m_Engine.m_IBLUseSHIrradiance,
+                        Defaults::IBLUseSHIrradiance,
+                        "拡散イラディアンスを球面調和関数L2(9項)で焼く高速な経路。理論上どんな照明でも"
+                        "数%以内の誤差に収まるが、エミッシブ帯のような小さく明るい光源では暗部が"
+                        "わずかに負へオーバーシュートする(リンギング)ことがある。"
+                        "無効なら従来の総当たり積分(1テクセルあたり15,876サンプル)を使う"))
+                {
+                    m_Engine.m_IBLIrradianceBaked = false;
+                }
+                if (m_Engine.m_IBLUseSHIrradiance)
+                {
+                    if (SliderFloatEx(
+                            "SHウィンドウ強度###SHWindowLambda", &m_Engine.m_SHWindowLambda, 0.0f, 0.1f,
+                            Defaults::SHWindowLambda, "%.4f", 0,
+                            "リンギング対策。大きくするほど高次バンドを減衰させ、ボケと引き換えに"
+                            "暗部の負のオーバーシュートを抑える。0=無効"))
+                    {
+                        m_Engine.m_IBLIrradianceBaked = false;
+                    }
+                }
+            }
         }
         else
         {

@@ -3929,7 +3929,7 @@ ImGuiの「Update Mode」で3方式を切り替えて比較できるようにし
 <tr><td colspan="3"><strong>モードによらず</strong>、実効プリ露出が1段(明るさ2倍)以上動いたら焼き直す
 (<code>Realtime</code>は常時焼き直しているので対象外)。プローブには<b>プリ露出済みの数値</b>が
 入っており、これを放置すると桁違いの明るさで合成されるため(19.14節)</td></tr>
-<tr><td><code>Realtime</code></td><td>毎フレーム1面ずつ(6面揃うごとに畳み込み、プローブはラウンドロビン)</td><td>キャプチャは毎フレーム、畳み込みは6フレームに1回</td></tr>
+<tr><td><code>Realtime</code></td><td>1プローブを12フレームで更新(6フレームで1面ずつキャプチャ→6フレームで1面ぶんのミップチェーンずつ畳み込み。プローブはラウンドロビン)</td><td>どちらのフェーズも毎フレーム同程度。畳み込みの割り当ての根拠と実測は19.15節</td></tr>
 </table>
 
 <h4>OnDemandの変化検出</h4>
@@ -4424,6 +4424,245 @@ Frame:     EV100=14.999988  TimeOfDay=12.000000   ← その後の定常値</cod
 時刻を自動進行させた1日80秒のスイープでも、開始時刻へ戻ったときの値が
 修正前46.7→55.0(+17.8%)に対し修正後51.2→56.6(+10.5%)と改善し、全時刻で白飽和は0%だった。
 </p>
+
+<h3>19.15 M11: 拡散をDDGIへ一本化し、反射プローブを鏡面専任にする</h3>
+<p>
+本節の数値は<strong>実機(DX11・DX12、内部レンダー解像度1280x720)での実測</strong>である。
+比較対象の「master」は本変更の分岐元コミットを同一手順で走らせたものを指す。
+</p>
+
+<h4>背景: 同じ物理量を2通りに持っていた</h4>
+<p>
+DDGI(<a href="#ddgi">31章</a>)が入ったことで、ある点Xの法線N方向へ来る間接拡散光
+<code>E(X,N)</code>を、反射プローブ(位置によらずプローブ中心の1値)とDDGI(格子8点の
+トライリニア+Chebyshev可視性、連続的に位置へ依存)の2通りで持つ状態になっていた。
+DDGIは反射プローブの拡散の上位互換であり、
+<code>DeferredLighting.hlsl</code>の<code>EvaluateIBL</code>はDDGI有効時、拡散を
+無条件でDDGI由来の値へ差し替えていた。つまり<strong>反射プローブのイラディアンス畳み込み
+(<code>CSIrradiance</code>、プローブ1個あたり最大の重さを占める処理)は、DDGI有効時は
+不透明面では一切使われず捨てられていた</strong>。読んでいたのは半透明パス
+(<code>Transparent.hlsl</code>)だけで、しかもそちらはDDGIに未接続だったため、同じ画面の中で
+不透明面と半透明面が別々の間接拡散光を受けるという矛盾もあった。
+</p>
+<p>
+加えてDDGIボリュームは1個しか持てず(31.10節)、外側では境界のプローブを外挿し続けるだけで
+戻る経路が無かった。プローブを持つシーン(<code>Sponza</code>・<code>BistroInteriorLit</code>)には
+<code>[GIVolume]</code>が置かれていなかったため、この2点を先に閉じないまま反射プローブの
+イラディアンスを削ると、これらのシーンは位置依存の拡散を丸ごと失う。
+</p>
+
+<h4>行った変更</h4>
+<ol>
+<li><strong>半透明パスをDDGIへ接続</strong>し、DDGIボリュームの外では
+グローバルIBLへ戻るフェード(境界の1グリッドセル分で線形に0まで落とす)を
+<code>DDGI.hlsli</code>の<code>SampleDDGIIrradiance</code>に追加した(<code>insideWeight</code>
+出力引数)。<code>DeferredLighting.hlsl</code>・<code>ProbeCapture.hlsl</code>(多重バウンスの
+フィードバック元)もこの重みでlerpするよう改めた</li>
+<li><code>Sponza.kscene</code>・<code>BistroInteriorLit.kscene</code>へ<code>[GIVolume]</code>を追加した。
+既存の<code>[ReflectionProbe]</code>ボックスのAABB(和集合)から機械的に求めた値で、
+19.13節のような幾何を直接測る手順は踏んでいない。特に<code>BistroInteriorLit</code>は3つの
+プローブがYaw=27.5度回転しており、GIVolumeは軸整列の直方体しか持てないため
+(31.10節)、外接直方体には無駄な余白が生じ、部屋の外(壁の中)に落ちるプローブも出うる
+(プローブ分類は未実装。19.13節の続きとして今後の課題)</li>
+<li><strong>反射プローブのイラディアンス畳み込みそのものを廃止</strong>した。
+<code>ReflectionProbe.hlsli</code>から<code>SampleProbeIrradiance</code>と
+<code>KURENAI_PROBE_IRRADIANCE_REGISTER</code>を削除し、<code>SampleEnvironment</code>の
+<code>irradiance</code>出力は「グローバルIBLの値そのもの」(プローブ由来の重み付けは受けない)
+になった。DDGIが有効な点はこの値がさらに呼び出し側でDDGI由来の値へlerpされ、DDGI無効・
+ボリューム外の点はグローバルIBLがそのまま最終値になる。プローブ用の専用配列
+(旧<code>m_ProbeIrradianceArray</code>、32²×6面×8、fp16)は削除した。
+<strong>反射プローブはこの時点で鏡面専任になった</strong>(19章冒頭の位置づけを実質的に変更)</li>
+</ol>
+<p>
+<strong>受け入れた代償</strong>: DDGI無効時、位置依存の拡散は完全に無くなりグローバルIBLのみになる。
+DDGIは比較用トグルの位置づけから、拡散の唯一の位置依存経路へ格上げされた。
+</p>
+
+<h4>明るさの変化(実測)</h4>
+<p>
+ビューポート領域の平均RGB(8bit、sRGB出力)。カメラはシーン定義のまま、
+<code>Sponza</code>はアトリウム、<code>BistroInteriorLit</code>は店内。
+</p>
+<table>
+<tr><th>シーン</th><th>master(プローブのイラディアンス)</th><th>M11 + DDGI</th><th>M11・DDGI無効</th></tr>
+<tr><td>Sponza</td><td>15.16 / 13.85 / 11.95</td><td>15.66 / 14.08 / 12.10(+1.3〜3.3%)</td><td>—</td></tr>
+<tr><td>BistroInteriorLit</td><td>5.16 / 1.19 / 0.47</td><td>3.83 / 0.90 / 0.33(<strong>−26%</strong>)</td><td>27.07 / 9.21 / 6.26(+424%)</td></tr>
+</table>
+<p>
+<code>BistroInteriorLit</code>は<strong>ロードマップが掲げた「明るさが現状より落ちない」を満たしていない</strong>。
+ただし切り分けの結果、これは配置ミスでも実装バグでもないことが分かった。
+</p>
+<ul>
+<li><strong>ボリュームが室外を覆っているせいではない</strong>。DDGIイラディアンスアトラスを見ると
+室外へ落ちたプローブは<em>空を見て明るい</em>。それが混ざるなら室内は明るくなる方向であって、
+暗化の説明にならない</li>
+<li><strong>自己遮蔽バイアス(19.14節)のせいでもない</strong>。<code>NormalBias</code>を0.25→0.70、
+<code>ViewBias</code>を0.10→0.35へ上げると平均は3.83→<strong>3.38とさらに暗くなった</strong>。
+バイアスは既に十分で、測っている遮蔽は実在のジオメトリによるものである</li>
+<li><strong>格子を細かくするとさらに暗くなる</strong>。間隔を半分(480→3840プローブ)にすると
+3.83→<strong>2.88</strong>。遮蔽の解像度が上がるほど暗くなる=収束方向が下向きである</li>
+</ul>
+<p>
+4つの数値は<code>27.07</code>(遮蔽を一切考えないグローバルIBL)&gt;<code>5.16</code>(可視性判定を持たない
+部屋平均=master)&gt;<code>3.83</code>(粗いDDGI)&gt;<code>2.88</code>(細かいDDGI)と単調に並ぶ。
+<strong>遮蔽をまじめに解くほど暗くなる</strong>という順序であり、masterの値は
+「壁や家具を透過して回り込んでいた光漏れ」を含んでいたと解釈するのが自然である。
+つまり<strong>「明るさが落ちないこと」は、この変更に対しては受け入れ基準として不適切だった</strong>
+——測っていたのは正しさではなく光漏れの量である。今後は
+<code>BistroInteriorLit</code>が暗いこと自体(17章)を露出・ライト側で扱うべき問題として切り分ける。
+</p>
+
+<h4>拡散イラディアンスの高速化(球面調和関数 L2)</h4>
+<p>
+<code>CSIrradiance</code>(総当たり積分、出力1テクセルあたり15,876サンプル)を、
+球面調和関数L2(9項)による経路(<code>CSProjectSH</code> → <code>CSProjectSHFinal</code> →
+<code>CSEvaluateSH</code>、いずれも<code>IBLConvolve.hlsl</code>)で置き換えられるようにした。
+コサインローブによる畳み込みは9項でどんな照明でも数%以内の誤差に収まる
+(Ramamoorthi &amp; Hanrahan 2001)。White Furnace Test(一様環境の入出力一致)で
+規約・立体角重み・畳み込み係数の正しさを検算できる形にしてある。
+</p>
+<p>
+射影の離散化解像度は<strong>ソーススカイボックスの実解像度とは独立</strong>にしてある
+(<code>SHProjectionSize</code>、既定64)。理由は実装上の制約で、<code>IRHITexture</code>に
+解像度を問い合わせる手段が無く、スカイボックスはシーンごとに任意解像度のDDSや手続き空(256)を
+とりうるため、射影側のバッファをそれに合わせて動的に確保できない。方向ベクトルでの
+<code>SampleLevel</code>参照は解像度に依存しないため、固定の離散化解像度で問題なく成立する。
+</p>
+<p>
+<strong>この最適化の実際の効果は限定的である。</strong><code>CSIrradiance</code>は
+「専用イラディアンスマップを使う」トグル(既定OFF)を有効にしたときと、Render Targetsで
+IBL Irradianceを表示したときにしか実行されない検証用の経路であり、既定の描画経路は
+プリフィルタ済み鏡面の最終ミップ(roughness=1)を使う(14.10節。両者は数学的に等価)。
+つまりSH化は<strong>通常のゲームプレイのフレーム時間には効かない</strong>。
+リンギング対策のウィンドウ関数(<code>SHWindowLambda</code>、既定0=無効)も含め、
+効果があるのは検証時と将来この経路を再利用する場面に限られる。
+</p>
+<p>
+<strong>精度の実測</strong>。イラディアンスマップをRender Targetsで直接表示し、
+ビューポートの平均RGBと標準偏差で比較した。
+</p>
+<ul>
+<li><strong>White Furnace Test(一様環境)</strong>: SH経路・総当たり積分とも
+(186, 186, 186)・標準偏差0で<strong>完全一致</strong>。DX11・DX12いずれも同値。
+規約(1/πの相殺)・立体角重み・畳み込み係数<code>Â₀</code>がすべて正しいことの確認になる</li>
+<li><strong>手続き空(Sponza、太陽12.49h)</strong>: 太陽位置を揃えて両経路で焼き直したところ
+<strong>最大絶対差0</strong>(8bit精度)。L2の打ち切り誤差は、なめらかな空に対しては
+出力の量子化幅より小さい</li>
+<li><strong>SH経路が実際に走っていることの確認</strong>: 上の「差が出ない」という結果は
+「片方が実行されていない」でも成立してしまうため、対照実験としてウィンドウ強度
+<code>λ=0.0993</code>を与えた。平均90.66→89.00・標準偏差0.475→0.000と
+<strong>高次バンドが減衰した形で変化する</strong>ことを確認している</li>
+</ul>
+<p>
+<strong>実装時に踏んだ罠</strong>: このトグルとウィンドウ強度は当初、切り替えても画面が
+まったく変わらなかった。イラディアンスマップは空が焼き直されたときにしか作り直されない
+(<code>m_IBLIrradianceBaked</code>)ため、値を変えただけでは古い経路の結果が出続けていたためである。
+A/B比較のために付けたつまみが機能しないという、<strong>効果がゼロに見えるので気づきにくい</strong>
+型の不具合で、値が変わったらフラグを倒すよう<code>RenderingPanel.cpp</code>側で明示的に要求している。
+</p>
+<p>
+一方、反射プローブの畳み込み(<code>ProbeBakeConvolvePrefilter</code>/
+<code>ProbeRealtimeConvolvePrefilterStep</code>)は<strong>無条件に実行される実コスト</strong>である。
+イラディアンス側の削除(上記)がこちらの最大の実削減であり、SH化はプリフィルタ側には
+適用していない(鏡面は畳み込みのローブが鋭く高周波が残るため、SHのような低次項への
+圧縮が効かない。詳細はコード内コメント参照)。
+</p>
+
+<h4>Realtimeモードの時間分割</h4>
+<p>
+19.10節が指摘していた「6フレームに1回のスパイク」(6面キャプチャ後にプリフィルタの
+6ミップ×6面=36ディスパッチを1フレームへ集中させていた)を、
+<code>kProbeRealtimePrefilterStepsPerFrame</code>ずつ複数フレームへ分けるよう改めた。
+キャプチャフェーズ(6フレーム)→プリフィルタフェーズ(6フレーム)を交互に繰り返す
+対称なデューティ比にしてあり、プリフィルタ中は次のプローブのキャプチャを止める
+(同じ<code>m_ProbeRadianceCube</code>を読み続ける必要があるため)。
+1プローブの一巡が7フレームから12フレームへ伸びるトレードオフを受け入れている。
+</p>
+<p>
+<strong>ステップ番号の割り当てが結果を決める</strong>。36ステップを(ミップ, 面)へ対応づける方法は
+2通りあり、最初の実装は<code>mip = step/6, face = step%6</code>としていた。これだと
+1フレーム目がミップ0の6面をまとめて引き受ける。ミップの解像度は段ごとに1/4になるため
+1面ぶん21,840テクセルのうちミップ0だけで16,384(<strong>75%</strong>)を占めており、
+<strong>個数を6ステップずつ均等に割ってもコストは均等にならない</strong>。
+面を外側・ミップを内側(<code>face = step/6, mip = step%6</code>)にすると
+1フレーム=1面ぶんのミップチェーン全部となり、6フレームすべてが厳密に同じテクセル数になる。
+</p>
+<p>
+実測(ProbeTest・DDGI無効・Realtimeモード、プロファイラのパス単位の値)。
+</p>
+<table>
+<tr><th></th><th>プローブ畳み込みパスの1フレーム最大</th><th>キャプチャパス</th></tr>
+<tr><td>master(<code>ProbeRealtimeConvolve</code>)</td><td><strong>19.96〜21.62 ms</strong>(6フレームに1回)</td><td>0.03〜0.05 ms</td></tr>
+<tr><td>M11・割り当て転置前</td><td>(フレーム全体で9.4 ms)</td><td>—</td></tr>
+<tr><td>M11(<code>ProbeRealtimeConvolvePrefilterStep</code>)</td><td><strong>0.97〜3.07 ms</strong></td><td>0.03〜0.06 ms</td></tr>
+</table>
+<p>
+ピークは<strong>約7分の1</strong>になった。ロードマップの完了条件「どのフレームもプローブ関連が
+1msを超えない」は、0.97〜3.07msという結果なので<strong>厳密には未達成</strong>である。
+残りの下限は「ミップ0の1面」(128²テクセル×256サンプル)で、これ以上細かくするには
+1つの面をさらに矩形へ分割するか、Karisのミップチェーンサンプリングで
+サンプル数自体を256から減らす(ロードマップのStage 4b、本M11では見送り)必要がある。
+時間分割だけでは1msには届かない。
+</p>
+<p>
+<code>kMaxReflectionProbes</code>(8)の見直しは行っていない。「1フレーム予算内に何個入るか」を
+決めるには実測が要り、憶測で数値を動かすのは<a href="#occlusion-map">22章</a>6節の遮蔽ベイクで
+見積もりを560倍外した教訓に反するため、意図的に見送っている。
+</p>
+
+<h4><code>[GIVolume]</code>追加のフレームコスト(実測)</h4>
+<p>
+Stage 2で<code>Sponza</code>・<code>BistroInteriorLit</code>にボリュームを置いたことで、
+これらのシーンでDDGIの更新が常時走るようになった。GPUフレーム時間は次のとおり。
+</p>
+<table>
+<tr><th>シーン</th><th>master(GIVolume無し)</th><th>M11(GIVolume有り)</th></tr>
+<tr><td>Sponza(1152プローブ)</td><td>1.44 ms</td><td><strong>9.65 ms</strong></td></tr>
+<tr><td>BistroInteriorLit(480プローブ)</td><td>1.71 ms</td><td><strong>14.26 ms</strong></td></tr>
+</table>
+<p>
+DDGIは1フレームあたり16プローブを更新する。1プローブあたりの実測は
+ProbeTest(メッシュ9個)で約0.74ms、BistroInteriorLit(メッシュ多数)で約0.79msと
+<strong>シーンの重さがまったく違うのにほぼ同じ</strong>である。したがってこのコストは
+ジオメトリ量でもピクセル量(16×16と極小)でもなく、
+<strong>プローブ1個につき6面ぶんのレンダーターゲット切り替え・クリア・定数更新・
+コピーCSという固定オーバーヘッド</strong>が支配していると読める
+(<code>captureDDGIProbeFace</code>。1フレームで96回)。
+これはM11のコードではなくDDGI(31章)の実装方式の問題であり、
+31.10節が挙げている「段階B: レイ取得のDXR化」が正面から効く箇所である。
+<strong>Stage 3で削ったプローブ畳み込みの節約(ピーク約18ms減)を、
+Stage 2で足したDDGIのコストが桁で上回っている</strong>ことは記録しておく。
+</p>
+
+<h4>半透明パスのDDGI接続と20章の不変条件(実測)</h4>
+<p>
+ProbeTestでDDGIのON/OFFだけを切り替えた2枚の差分を取ると、
+<strong>ガラス板が背後の壁とは独立に変化する</strong>——半透明パスがDDGIを読んでいることの直接の確認になる。
+同じ差分画像で<strong>金属球は完全に無変化</strong>(拡散成分を持たないため)であり、
+DDGIが鏡面に一切触れていないこと、すなわち20章の「足した量と引く量が一致する」不変条件が
+保たれていることも同時に確認できる。
+</p>
+
+<h4>検証の状況</h4>
+<p>確認できたこと:</p>
+<ul>
+<li>Release/Debugビルド 0警告0エラー、fxc(DX11、SM5.0)で全エントリポイントのコンパイル成功</li>
+<li><strong>DX12(dxc、SM6.5)の実行時コンパイルも成功</strong>。新規の3つのSHシェーダーと
+改造した<code>Transparent.hlsl</code>を含めて<code>KurenaiEngine.log</code>にError/Warningは0件。
+SH経路の構造化バッファUAV/SRVという、DX12のディスクリプタテーブルで最も壊れやすい箇所も
+White Furnace TestでDX11と同値であることを確認している</li>
+<li>DX11とDX12の描画結果の一致(ProbeTestで平均絶対差0.617/255)</li>
+</ul>
+<p>確認していないこと:</p>
+<ul>
+<li>DX12でのRealtimeスパイク測定、DX12での<code>Sponza</code>/<code>BistroInteriorLit</code></li>
+<li>OnDemandモードの挙動</li>
+<li>SHのリンギング(エミッシブ帯の周りで暗部が負へ振れる現象)。上記のとおり
+なめらかな空では総当たり積分と差が出ないため、リンギングが出る条件そのものを
+再現できていない。ウィンドウ関数<code>SHWindowLambda</code>の既定値0はこのため未検証のままである</li>
+<li><code>[GIVolume]</code>の配置は既存ボックスからの機械的な計算のままで、視覚的な調整は行っていない
+(境界の不連続は目視では確認できていない)</li>
+</ul>
 </section>
 
 <section id="ssrprobe">
@@ -7448,7 +7687,10 @@ DDGIと併用するのが正しい。
 <h3>31.10 現時点の実装範囲と既知の制約</h3>
 <ul>
 <li><strong>ボリュームは1個だけ</strong>。<code>.kscene</code>に複数書けるが2つ目以降は警告を出して切り捨てる
-(重なりと優先順位を決める仕組みがまだ無い)</li>
+(重なりと優先順位を決める仕組みがまだ無い)。<strong>【M11で追記】</strong>以前はボリュームの外側でも
+境界のプローブを外挿し続け、戻る経路が無かった(19.15節)。この段階で
+境界の1グリッドセル分でグローバルIBLへフェードする対処は入れたが、
+ボリューム自体が1個しか置けない制約そのものは残っている</li>
 <li><strong>格子は軸に平行な直方体のみ</strong>。回転・不均一な密度は持たない</li>
 <li><strong>プローブの分類を持たない</strong>。壁の内部に入ってしまったプローブ(周囲が全て裏面)を検出して
 無効化する仕組み(RTXGIのプローブ分類に相当)が無いため、格子の置き方は<code>.kscene</code>側で
@@ -7462,6 +7704,9 @@ BLAS/TLASとRHI抽象化が完成済み)へ載せ替えれば1ディスパッチ
 露出が動かないまま光源だけが変わった場合(ライトの色を変える等)は時定数どおり遅い</li>
 <li><strong>半透明メッシュはプローブへ焼かない</strong>(19.11節と同じ理由)。ガラス越しの間接光は出ない</li>
 <li>拡散のみ。鏡面は反射プローブの担当で、DDGIは<code>prefiltered</code>に触れない(31.2節)</li>
+<li><strong>【M11で追記】</strong>半透明パス(<code>Transparent.hlsl</code>)の拡散サンプル元がDDGIへ
+つながった(19.15節)。上の「半透明メッシュはプローブへ焼かない」はDDGIのキャプチャ(焼き込み)側の
+制約で、これとは別の話である。焼き込み側にガラスが映らない制約は変わっていない</li>
 </ul>
 </section>
 

@@ -185,7 +185,11 @@ namespace Kurenai
         {
             uint32_t Face = 0;
             float Roughness = 0.0f;
-            DirectX::XMFLOAT2 Padding{};
+            // M11 Stage 4a。IBLConvolve.hlslのIBLFaceConstantsコメント参照。
+            // 旧CSIrradiance/CSPrefilterはどちらも参照しないため、この2つを設定しなくても
+            // 既存の呼び出し(既定の値初期化=0)は今までどおり動く
+            float SHWindowLambda = 0.0f;
+            float SHProjectionSize = 0.0f;
         };
 
         // DeferredLighting.hlsl側のstruct GPUReflectionProbeと並び・ストライド(48バイト)を
@@ -1617,6 +1621,49 @@ namespace Kurenai
         m_PrefilterComputeShader = m_Device->CreateShader(prefilterCsDesc);
         m_PrefilterPipelineState = m_Device->CreateComputePipelineState({ m_PrefilterComputeShader.get() });
 
+        // 拡散イラディアンスの球面調和関数(SH L2)経路(M11 Stage 4a)。CSIrradianceの
+        // 高速な代替で、A/B比較用にトグルで切り替える(m_IBLUseSHIrradiance、既定false)。
+        // 詳細はIBLConvolve.hlsl冒頭のコメント参照
+        RHI::ShaderDesc projectShCsDesc;
+        projectShCsDesc.Stage = RHI::ShaderStage::Compute;
+        projectShCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        projectShCsDesc.EntryPoint = "CSProjectSH";
+        m_ProjectSHComputeShader = m_Device->CreateShader(projectShCsDesc);
+        m_ProjectSHPipelineState = m_Device->CreateComputePipelineState({ m_ProjectSHComputeShader.get() });
+
+        RHI::ShaderDesc projectShFinalCsDesc;
+        projectShFinalCsDesc.Stage = RHI::ShaderStage::Compute;
+        projectShFinalCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        projectShFinalCsDesc.EntryPoint = "CSProjectSHFinal";
+        m_ProjectSHFinalComputeShader = m_Device->CreateShader(projectShFinalCsDesc);
+        m_ProjectSHFinalPipelineState = m_Device->CreateComputePipelineState({ m_ProjectSHFinalComputeShader.get() });
+
+        RHI::ShaderDesc evaluateShCsDesc;
+        evaluateShCsDesc.Stage = RHI::ShaderStage::Compute;
+        evaluateShCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        evaluateShCsDesc.EntryPoint = "CSEvaluateSH";
+        m_EvaluateSHComputeShader = m_Device->CreateShader(evaluateShCsDesc);
+        m_EvaluateSHPipelineState = m_Device->CreateComputePipelineState({ m_EvaluateSHComputeShader.get() });
+
+        // SHの部分和(CSProjectSHのグループごとの出力)と最終係数(CSProjectSHFinalの出力)。
+        // グループ数は (kSHProjectionSize/8)² × 6面で固定(射影解像度はSourceSkyboxの実解像度と
+        // 無関係な固定値。kSHProjectionSizeのコメント参照)
+        {
+            const uint32_t groupsPerSide = (kSHProjectionSize + 7) / 8;
+            const uint32_t maxSHGroups = groupsPerSide * groupsPerSide * kCubeFaceCount;
+            RHI::BufferDesc shPartialSumsDesc;
+            shPartialSumsDesc.Usage = RHI::BufferUsage::StructuredRW;
+            shPartialSumsDesc.StrideInBytes = static_cast<uint32_t>(sizeof(DirectX::XMFLOAT4));
+            shPartialSumsDesc.SizeInBytes = shPartialSumsDesc.StrideInBytes * maxSHGroups * kSHCoeffCount;
+            m_SHPartialSumsBuffer = m_Device->CreateBuffer(shPartialSumsDesc);
+
+            RHI::BufferDesc shCoefficientsDesc;
+            shCoefficientsDesc.Usage = RHI::BufferUsage::StructuredRW;
+            shCoefficientsDesc.StrideInBytes = static_cast<uint32_t>(sizeof(DirectX::XMFLOAT4));
+            shCoefficientsDesc.SizeInBytes = shCoefficientsDesc.StrideInBytes * kSHCoeffCount;
+            m_SHCoefficientsBuffer = m_Device->CreateBuffer(shCoefficientsDesc);
+        }
+
         // 手続き空(SkyGenerate.hlsl)。太陽が動くたびに焼き直すため、IBLのプリフィルタと同じく
         // 面ごとに1回ずつディスパッチする。プリフィルタの入力にしかならないので解像度は
         // オフラインDDS(512)より小さい256で足りる(生成コストが1/4になる)
@@ -1651,9 +1698,9 @@ namespace Kurenai
         // 畳み込みの入力になるスクラッチのキューブマップ(TextureCubeとして読めること
         // = 配列ではないことが必須。理由はヘッダのm_ProbeRadianceCubeのコメント参照)
         m_ProbeRadianceCube = m_Device->CreateUAVTextureCube(kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
-        // 畳み込み結果はプローブごとに保持するためキューブマップ配列で確保する
-        m_ProbeIrradianceArray = m_Device->CreateMippedUAVTextureCubeArray(
-            kIBLIrradianceSize, RHI::Format::R16G16B16A16_Float, 1, kMaxReflectionProbes);
+        // 畳み込み結果はプローブごとに保持するためキューブマップ配列で確保する。
+        // 拡散イラディアンス側の配列(旧m_ProbeIrradianceArray)はM11 Stage 3で廃止した
+        // (反射プローブは鏡面専任になった。拡散はDDGIへ一本化。ReflectionProbe.hlsli冒頭のコメント参照)
         m_ProbePrefilteredArray = m_Device->CreateMippedUAVTextureCubeArray(
             kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels, kMaxReflectionProbes);
         // 距離キューブ(19.12節)。畳み込まないためミップは1段だけでよく、スクラッチのキューブも要らない
@@ -3923,18 +3970,65 @@ namespace Kurenai
                 .Execute = [this, skyTexture](RHI::IRHICommandList* cmd)
                 {
                     // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
-                    // スライス選択できないため、面ごとに1回ずつディスパッチする
-                    cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
-                    cmd->SetComputeTexture(0, skyTexture);
-                    cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
-                    for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                    // スライス選択できないため、面ごとに1回ずつディスパッチする。
+                    //
+                    // M11 Stage 4a: m_IBLUseSHIrradianceでCSIrradiance(総当たり積分、約9,750万
+                    // サンプル)とSH L2経路(CSProjectSH→CSProjectSHFinal→CSEvaluateSH、
+                    // 射影は24,576テクセルを1回ずつ読むだけ)を切り替えられる。
+                    // 出力(m_IrradianceTexture)の形・規約はどちらの経路でも完全に同一
+                    if (m_IBLUseSHIrradiance)
                     {
-                        IBLFaceConstants faceConstants{};
-                        faceConstants.Face = face;
-                        cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                        IBLFaceConstants shConstants{};
+                        shConstants.SHProjectionSize = static_cast<float>(kSHProjectionSize);
+                        shConstants.SHWindowLambda = m_SHWindowLambda;
+
+                        // --- 1. 射影: ソースキューブ全体を1回だけ読んで9個の係数(RGB)へ集約する ---
+                        cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &shConstants, sizeof(shConstants));
                         cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
-                        cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_IrradianceTexture.get(), face, 0);
-                        cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
+                        cmd->SetComputePipelineState(m_ProjectSHPipelineState.get());
+                        cmd->SetComputeTexture(0, skyTexture);
+                        cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+                        cmd->SetComputeUnorderedAccessBuffer(0, m_SHPartialSumsBuffer.get());
+                        const uint32_t groupsPerSide = (kSHProjectionSize + 7) / 8;
+                        cmd->Dispatch(groupsPerSide, groupsPerSide, kCubeFaceCount);
+
+                        // --- 2. 最終合算: 全グループぶんの部分和を1ディスパッチでまとめる ---
+                        // (SHProjectionSizeはCSProjectSHと同じ値でなければグループ番号の対応がずれる)
+                        cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &shConstants, sizeof(shConstants));
+                        cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                        cmd->SetComputePipelineState(m_ProjectSHFinalPipelineState.get());
+                        cmd->SetComputeShaderResourceBuffer(1, m_SHPartialSumsBuffer.get());
+                        cmd->SetComputeUnorderedAccessBuffer(0, m_SHCoefficientsBuffer.get());
+                        cmd->Dispatch(1, 1, 1);
+
+                        // --- 3. 評価: 9個の係数から出力テクセルごとのirradianceを求める ---
+                        cmd->SetComputePipelineState(m_EvaluateSHPipelineState.get());
+                        cmd->SetComputeShaderResourceBuffer(1, m_SHCoefficientsBuffer.get());
+                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                        {
+                            IBLFaceConstants faceConstants{};
+                            faceConstants.Face = face;
+                            faceConstants.SHWindowLambda = m_SHWindowLambda;
+                            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_IrradianceTexture.get(), face, 0);
+                            cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
+                        }
+                    }
+                    else
+                    {
+                        cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
+                        cmd->SetComputeTexture(0, skyTexture);
+                        cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
+                        {
+                            IBLFaceConstants faceConstants{};
+                            faceConstants.Face = face;
+                            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_IrradianceTexture.get(), face, 0);
+                            cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
+                        }
                     }
                 },
             });
@@ -4142,39 +4236,44 @@ namespace Kurenai
 
         // 組み上がったスクラッチのキューブマップを、IBLとまったく同じ手順で畳み込んで
         // プローブのスライスへ書き込む。入力が違うだけでシェーダーはIBLBakeパスと共通
-        const auto convolveProbe = [this](RHI::IRHICommandList* cmd, size_t probeIndex)
+        // プローブのプリフィルタ済み鏡面の畳み込み。
+        // 以前は拡散イラディアンス側(convolveProbeIrradiance)もここにあったが、M11 Stage 3で
+        // プローブの拡散イラディアンスそのものを廃止したため無くなった(反射プローブは鏡面専任に
+        // なった。DDGIが拡散を担う。ReflectionProbe.hlsli冒頭のコメント参照)。
+        // 【TODO】この廃止はM11計画のStage 0(19.10節の実測でイラディアンス側が支配的だと確認して
+        // からStage 3へ進む、というゲート)を実測せずに先取りして行っている。実装のみで実機検証は
+        // 別セッションが行う運用のため、この判断が正しかったかどうかは19.10節の表を実測して確認すること
+        // (mip, face)1組ぶんだけディスパッチする。SetComputePipelineState/SetComputeTexture/
+        // SetComputeSamplerSetは呼び出し側が先に1回済ませておくこと(同じプローブの複数ステップを
+        // 1パスにまとめて呼ぶ場合、毎回張り直す必要が無いため。M11 Stage 5のRealtime時間分割参照)
+        const auto convolveProbePrefilterStep =
+            [this](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t mip, uint32_t face)
         {
             const uint32_t cubeIndex = static_cast<uint32_t>(probeIndex);
+            const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
+            const float roughness = static_cast<float>(mip) / static_cast<float>(kIBLPrefilterMipLevels - 1);
 
-            cmd->SetComputePipelineState(m_IrradiancePipelineState.get());
-            cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
-            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
-            for (uint32_t face = 0; face < kCubeFaceCount; ++face)
-            {
-                IBLFaceConstants faceConstants{};
-                faceConstants.Face = face;
-                cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-                cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
-                cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbeIrradianceArray.get(), face, 0, cubeIndex);
-                cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
-            }
+            IBLFaceConstants faceConstants{};
+            faceConstants.Face = face;
+            faceConstants.Roughness = roughness;
+            cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+            cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
+            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbePrefilteredArray.get(), face, mip, cubeIndex);
+            cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
+        };
 
+        // 6ミップ×6面ぶん全部を1回で焼く(フルベイク用。Realtimeの時間分割はconvolveProbePrefilterStepを
+        // 直接、複数フレームに分けて呼ぶ。下のRealtimeブロック参照)
+        const auto convolveProbePrefilter = [this, &convolveProbePrefilterStep](RHI::IRHICommandList* cmd, size_t probeIndex)
+        {
             cmd->SetComputePipelineState(m_PrefilterPipelineState.get());
             cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
             cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
             for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
             {
-                const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
-                const float roughness = static_cast<float>(mip) / static_cast<float>(kIBLPrefilterMipLevels - 1);
                 for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                 {
-                    IBLFaceConstants faceConstants{};
-                    faceConstants.Face = face;
-                    faceConstants.Roughness = roughness;
-                    cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-                    cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
-                    cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProbePrefilteredArray.get(), face, mip, cubeIndex);
-                    cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
+                    convolveProbePrefilterStep(cmd, probeIndex, mip, face);
                 }
             }
         };
@@ -4200,26 +4299,34 @@ namespace Kurenai
         if (m_ProbeBakeRequested && probeCount > 0)
         {
             // --- フルベイク: 全プローブの6面を1フレームで焼く ---
-            // プローブごとに別パスへ分けることで、GPUプロファイラで1プローブぶんのコストを読める。
-            // 各パスがm_ProbeRadianceCubeへ書くため、レンダーグラフのWrite-after-Write依存で
-            // 登録順に直列化される(スクラッチを共有しても取り違えは起きない)
+            // プローブごとに、さらにキャプチャ/プリフィルタ畳み込みで別パスへ分けることで、
+            // GPUプロファイラでそれぞれのコストを個別に読める(19.10節の実測)。
+            // 各パスがm_ProbeRadianceCubeを読み書きするため、レンダーグラフのWrite-after-Write /
+            // Read-after-Write依存で登録順に直列化される(スクラッチを共有しても取り違えは起きない)
             for (size_t probeIndex = 0; probeIndex < probeCount; ++probeIndex)
             {
                 graph.AddPass(Core::RenderGraphPassDesc{
-                    .Name = "ProbeBake" + std::to_string(probeIndex),
+                    .Name = "ProbeBakeCapture" + std::to_string(probeIndex),
                     .Reads = probeCaptureReads,
                     .Writes = {
                         m_ProbeCaptureColor.get(), m_ProbeCaptureDistance.get(), m_ProbeCaptureDepth.get(),
-                        m_ProbeRadianceCube.get(),
-                        m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
+                        m_ProbeRadianceCube.get(), m_ProbeDistanceArray.get(),
                     },
-                    .Execute = [&captureProbeFace, &convolveProbe, probeIndex](RHI::IRHICommandList* cmd)
+                    .Execute = [&captureProbeFace, probeIndex](RHI::IRHICommandList* cmd)
                     {
                         for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                         {
                             captureProbeFace(cmd, probeIndex, face);
                         }
-                        convolveProbe(cmd, probeIndex);
+                    },
+                });
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "ProbeBakeConvolvePrefilter" + std::to_string(probeIndex),
+                    .Reads = { m_ProbeRadianceCube.get() },
+                    .Writes = { m_ProbePrefilteredArray.get() },
+                    .Execute = [&convolveProbePrefilter, probeIndex](RHI::IRHICommandList* cmd)
+                    {
+                        convolveProbePrefilter(cmd, probeIndex);
                     },
                 });
             }
@@ -4235,62 +4342,118 @@ namespace Kurenai
             // 全プローブが今焼けたので、時間分割は先頭から仕切り直す
             m_ProbeRealtimeProbeIndex = 0;
             m_ProbeRealtimeFace = 0;
+            m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
         }
         else if (m_ProbeUpdateMode == ProbeUpdateMode::Realtime && probeCount > 0 && m_ProbeBaked)
         {
-            // --- 時間分割: 1フレームにつき1面だけ焼き、6面揃った時点で畳み込んで次のプローブへ回る ---
-            // 畳み込みは6面が揃うまで走らないため、その間プローブのスライスは前回の内容のまま
-            // 表示され続ける(描きかけのキューブが映り込むことはない)。
-            // m_ProbeBakedがtrueであること、つまり最低1回フルベイクが済んでいることが前提
+            // --- 時間分割: キャプチャフェーズ(1フレーム1面、6フレーム)→ プリフィルタフェーズ
+            //     (1フレームkProbeRealtimePrefilterStepsPerFrame個の(mip,face)、6フレーム)を
+            //     交互に繰り返す(M11 Stage 5)。
+            //
+            // 以前はプリフィルタを6面揃った瞬間に36ディスパッチまとめて発行しており、これが
+            // 19.8/19.10節が指摘していた「6フレームに1回のスパイク」の正体だった
+            // (拡散イラディアンス側を廃止した今もプリフィルタ単体でこの問題は残っていた)。
+            // プリフィルタも1フレームあたり数ステップへ分割することで、どのフレームも
+            // ほぼ均等なコストになる。
+            //
+            // プリフィルタフェーズの間はキャプチャを止める(m_ProbeRadianceCubeがそのプローブの
+            // ぶんのまま変わらないことを保証するため)。そのプローブのスライスは、旧キャプチャ→
+            // 旧キューブ→新スライスの畳み込みが終わるまで前回の内容のまま表示され続ける
+            // (描きかけの中間状態が映り込むことはない)
             if (m_ProbeRealtimeProbeIndex >= probeCount)
             {
                 m_ProbeRealtimeProbeIndex = 0;
                 m_ProbeRealtimeFace = 0;
+                m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
             }
-            const size_t realtimeProbe = m_ProbeRealtimeProbeIndex;
-            const uint32_t realtimeFace = m_ProbeRealtimeFace;
 
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "ProbeRealtimeCapture",
-                .Reads = probeCaptureReads,
-                .Writes = {
-                    m_ProbeCaptureColor.get(), m_ProbeCaptureDistance.get(), m_ProbeCaptureDepth.get(),
-                    m_ProbeRadianceCube.get(), m_ProbeDistanceArray.get(),
-                },
-                .Execute = [&captureProbeFace, realtimeProbe, realtimeFace](RHI::IRHICommandList* cmd)
-                {
-                    captureProbeFace(cmd, realtimeProbe, realtimeFace);
-                },
-            });
-
-            if (realtimeFace + 1 == kCubeFaceCount)
+            if (m_ProbeRealtimePrefilterStep < kProbePrefilterStepCount)
             {
-                // 畳み込みだけを別パスにしてあるのは、6フレームに1回だけ乗るこのコストを
-                // 毎フレームのキャプチャと分けて計測できるようにするため。
-                // Readsにスクラッチのキューブマップがあるのでキャプチャパスのあとに順序付けられる
+                // --- プリフィルタフェーズ ---
+                const size_t realtimeProbe = m_ProbeRealtimeProbeIndex;
+                const uint32_t startStep = m_ProbeRealtimePrefilterStep;
+                const uint32_t stepsThisFrame =
+                    std::min(kProbeRealtimePrefilterStepsPerFrame, kProbePrefilterStepCount - startStep);
+
                 graph.AddPass(Core::RenderGraphPassDesc{
-                    .Name = "ProbeRealtimeConvolve",
+                    .Name = "ProbeRealtimeConvolvePrefilterStep",
                     .Reads = { m_ProbeRadianceCube.get() },
-                    .Writes = { m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get() },
-                    .Execute = [&convolveProbe, realtimeProbe](RHI::IRHICommandList* cmd)
+                    .Writes = { m_ProbePrefilteredArray.get() },
+                    .Execute = [this, &convolveProbePrefilterStep, realtimeProbe, startStep, stepsThisFrame](
+                        RHI::IRHICommandList* cmd)
                     {
-                        convolveProbe(cmd, realtimeProbe);
+                        cmd->SetComputePipelineState(m_PrefilterPipelineState.get());
+                        cmd->SetComputeTexture(0, m_ProbeRadianceCube.get());
+                        cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+                        for (uint32_t s = 0; s < stepsThisFrame; ++s)
+                        {
+                            const uint32_t step = startStep + s;
+                            // 【ステップ番号→(面, ミップ)の割り当て】面を外側・ミップを内側にする。
+                            // ミップの解像度は段ごとに1/4になるので、テクセル数は
+                            //   ミップ0: 128² / 1:64² / 2:32² / 3:16² / 4:8² / 5:4²
+                            // で、1面ぶん21,840テクセルのうちミップ0だけで16,384(75%)を占める。
+                            //
+                            // これを mip=step/6, face=step%6 と割り当てると「1フレーム目が
+                            // ミップ0の6面をまとめて引き受ける」ことになり、畳み込み全体の75%が
+                            // 1フレームへ集中する。個数は6ステップずつ均等でもコストは均等にならない
+                            // (実測: この割り当てでは9.4msのスパイクが残っていた)。
+                            //
+                            // 面を外側にすると1フレーム = 1面ぶんの全ミップ = 21,840テクセルとなり、
+                            // 6フレームすべてが厳密に同じ量になる。ピークは16,384+残り → 21,840、
+                            // つまりミップ0の6面ぶんに対して約1/4.5になる。
+                            // なお1フレームの下限は「ミップ0の1面」であり、これ以上細かくするには
+                            // 1つの面をさらに矩形へ分割する必要がある(そこまではやっていない)
+                            const uint32_t face = step / kIBLPrefilterMipLevels;
+                            const uint32_t mip = step % kIBLPrefilterMipLevels;
+                            convolveProbePrefilterStep(cmd, realtimeProbe, mip, face);
+                        }
                     },
                 });
+
+                m_ProbeRealtimePrefilterStep = startStep + stepsThisFrame;
+                if (m_ProbeRealtimePrefilterStep >= kProbePrefilterStepCount)
+                {
+                    // このプローブの畳み込みが完了。次のプローブのキャプチャへ進む
+                    m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
+                    m_ProbeRealtimeProbeIndex = static_cast<uint32_t>((realtimeProbe + 1) % probeCount);
+                    m_ProbeRealtimeFace = 0;
+                }
+            }
+            else
+            {
+                // --- キャプチャフェーズ ---
+                const size_t realtimeProbe = m_ProbeRealtimeProbeIndex;
+                const uint32_t realtimeFace = m_ProbeRealtimeFace;
+
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "ProbeRealtimeCapture",
+                    .Reads = probeCaptureReads,
+                    .Writes = {
+                        m_ProbeCaptureColor.get(), m_ProbeCaptureDistance.get(), m_ProbeCaptureDepth.get(),
+                        m_ProbeRadianceCube.get(), m_ProbeDistanceArray.get(),
+                    },
+                    .Execute = [&captureProbeFace, realtimeProbe, realtimeFace](RHI::IRHICommandList* cmd)
+                    {
+                        captureProbeFace(cmd, realtimeProbe, realtimeFace);
+                    },
+                });
+
+                m_ProbeRealtimeFace = realtimeFace + 1;
+                if (m_ProbeRealtimeFace >= kCubeFaceCount)
+                {
+                    // 6面揃った。次フレームからこのプローブのプリフィルタフェーズへ入る
+                    // (プローブ番号はプリフィルタが完了するまで進めない。上のプリフィルタフェーズ参照)
+                    m_ProbeRealtimeFace = 0;
+                    m_ProbeRealtimePrefilterStep = 0;
+                }
             }
 
-            m_ProbeRealtimeFace = realtimeFace + 1;
-            if (m_ProbeRealtimeFace >= kCubeFaceCount)
-            {
-                m_ProbeRealtimeFace = 0;
-                m_ProbeRealtimeProbeIndex = static_cast<uint32_t>((realtimeProbe + 1) % probeCount);
-            }
             // 常に焼き直しているのでOnDemandの署名も追随させておく。こうしておかないと
             // Realtimeから切り替えた直後に不要なフルベイクが1回走る
             m_ProbeBakeSignature = ComputeProbeBakeSignature();
-            // 露出の換算倍率も追随させる。1面ずつ焼くため厳密には面ごとに焼いた露出が違うが、
-            // 実効プリ露出の変化は毎秒2倍程度(m_EffectiveExposureAdaptSpeed)なので
-            // 6フレームぶんのずれは数%にとどまり、常時焼き直している以上すぐ解消する
+            // 露出の換算倍率も追随させる。1ステップずつ焼くため厳密には面・ミップごとに焼いた
+            // 露出が違うが、実効プリ露出の変化は毎秒2倍程度(m_EffectiveExposureAdaptSpeed)なので
+            // 1周(最大12フレーム)ぶんのずれは数%にとどまり、常時焼き直している以上すぐ解消する
             m_ProbeBakedExposureEV100 = m_EffectiveExposureEV100;
         }
 
@@ -4896,8 +5059,9 @@ namespace Kurenai
                 m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                 skyTexture, activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
                 m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
-                // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)
-                m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
+                // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)。
+                // 拡散イラディアンス側の配列はM11 Stage 3で廃止した(反射プローブは鏡面専任)
+                m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
                 // 同じくDDGIUpdateパスより後に順序付けさせるために挙げる(22章)
                 m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
             },
@@ -4923,10 +5087,10 @@ namespace Kurenai
                 cmd->SetTexture(8, m_IrradianceTexture.get());
                 cmd->SetTexture(9, m_PrefilteredEnvTexture.get());
                 cmd->SetTexture(10, m_BRDFLUTTexture.get());
-                // 反射プローブ(19章)。FrameConstants.ProbeParams.xが0のとき(未ベイク・無効時)は
-                // シェーダー側が選択ループを回さないため中身は参照されないが、DX12は
-                // ディスクリプタテーブルに未初期化のスロットが残ると動作が未定義になるため常にバインドする
-                cmd->SetTexture(11, m_ProbeIrradianceArray.get());
+                // 反射プローブ(19章、鏡面専任。M11 Stage 3で拡散イラディアンス側のt11は廃止した)。
+                // FrameConstants.ProbeParams.xが0のとき(未ベイク・無効時)はシェーダー側が
+                // 選択ループを回さないため中身は参照されないが、DX12はディスクリプタテーブルに
+                // 未初期化のスロットが残ると動作が未定義になるため常にバインドする
                 cmd->SetTexture(12, m_ProbePrefilteredArray.get());
                 cmd->SetShaderResourceBuffer(13, m_ProbeBuffer.get());
                 cmd->SetTexture(14, m_ProbeDistanceArray.get());
@@ -4947,8 +5111,12 @@ namespace Kurenai
             .Name = "Transparent",
             // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)。
             // 半透明パスもLightingパスと同じ環境ソース(反射プローブ+グローバルIBL)を使うため、
-            // 焼き上がる前のプローブを読まないようにする必要がある
-            .Reads = { m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get() },
+            // 焼き上がる前のプローブを読まないようにする必要がある。
+            // DDGIアトラス(M11 Stage 1)もReadsへ挙げ、DDGIProbeUpdateパスより後ろへ順序付ける
+            .Reads = {
+                m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
+                m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
+            },
             .RenderTargets = { m_SceneColor.get() },
             .DepthTarget = m_GBufferDepth.get(),
             .Execute = [this, &gbufferViewport, &gpuLights, &cameraPosition](RHI::IRHICommandList* cmd)
@@ -5004,15 +5172,19 @@ namespace Kurenai
                 cmd->SetTexture(9, m_IrradianceTexture.get());
                 cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
                 cmd->SetTexture(11, m_BRDFLUTTexture.get());
-                // 反射プローブ(19章)。Lightingパスと同じReflectionProbe.hlsliを共有しており、
-                // 半透明サーフェスも室内なら室内の環境が映るようになる。t0〜t4とt8〜t11が
-                // 埋まっているため、このパスではt5〜t7を割り当てている(Transparent.hlsl冒頭)。
+                // 反射プローブ(19章、鏡面専任)。Lightingパスと同じReflectionProbe.hlsliを
+                // 共有しており、半透明サーフェスも室内なら室内の環境が映るようになる。
+                // t0〜t4とt8〜t11が埋まっているため、このパスではt5・t7を割り当てている
+                // (Transparent.hlsl冒頭。t6は拡散イラディアンス用だったがM11 Stage 3で廃止)。
                 // マテリアルの遮蔽マップ(OcclusionTexture)はt5〜t7と衝突するためt13を使う
                 // ProbeParams.xが0でも常にバインドするのはLightingパスと同じ理由
                 cmd->SetTexture(5, m_ProbePrefilteredArray.get());
-                cmd->SetTexture(6, m_ProbeIrradianceArray.get());
                 cmd->SetShaderResourceBuffer(7, m_ProbeBuffer.get());
                 cmd->SetTexture(12, m_ProbeDistanceArray.get());
+                // DDGI(22章、M11 Stage 1)。Lighting/ProbeCaptureパスと同じアトラスを共有する。
+                // ProbeParams同様、DDGIParams0.wが0でも常にバインドする
+                cmd->SetTexture(14, m_DDGIIrradianceAtlas.get());
+                cmd->SetTexture(15, m_DDGIDistanceAtlas.get());
 
                 // 半透明は奥から手前への描画順そのものが正しさの前提なので並べ替えられない。
                 // そのため必要になった時点でパイプラインを切り替える(GBufferパスと同じ方式)
@@ -5454,7 +5626,7 @@ namespace Kurenai
         RHI::IRHITexture* presentDebugArrayTexture = m_ShadowCascadeArray.get();
         // Mode 12(反射プローブのキューブマップ配列)専用。TextureCube(t1)ともTexture2DArray(t2)とも
         // 型が違うためさらに別スロット(t4)が要る。こちらも常に有効なテクスチャをバインドしておく
-        RHI::IRHITexture* presentDebugCubeArrayTexture = m_ProbeIrradianceArray.get();
+        RHI::IRHITexture* presentDebugCubeArrayTexture = m_ProbePrefilteredArray.get();
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = m_RenderWidth;
         uint32_t presentSourceHeight = m_RenderHeight;
@@ -5548,11 +5720,6 @@ namespace Kurenai
             presentMode = 9;
             presentSourceWidth = m_RenderWidth;
             presentSourceHeight = m_RenderHeight;
-            break;
-        case DebugView::ProbeIrradiance:
-            // キューブマップ配列のためMode 9(TextureCube)ではなくMode 12(TextureCubeArray)を使う
-            presentDebugCubeArrayTexture = m_ProbeIrradianceArray.get();
-            presentMode = 12;
             break;
         case DebugView::ProbePrefilter:
             presentDebugCubeArrayTexture = m_ProbePrefilteredArray.get();
@@ -5654,7 +5821,7 @@ namespace Kurenai
         {
             presentConstants.MipLevel = static_cast<float>(m_IBLPrefilterDebugMipLevel);
         }
-        else if (m_DebugView == DebugView::IBLIrradiance || m_DebugView == DebugView::ProbeIrradiance)
+        else if (m_DebugView == DebugView::IBLIrradiance)
         {
             presentConstants.MipLevel = 0.0f; // イラディアンスマップは常に1ミップのみ
         }
@@ -5668,8 +5835,7 @@ namespace Kurenai
         }
         // ArraySliceはMode 10ではカスケード番号、Mode 12ではプローブ番号として使う。
         // プローブが1つも無い場合でも配列の範囲外を引かないようクランプする
-        if (m_DebugView == DebugView::ProbeIrradiance || m_DebugView == DebugView::ProbePrefilter ||
-            m_DebugView == DebugView::ProbeDistance)
+        if (m_DebugView == DebugView::ProbePrefilter || m_DebugView == DebugView::ProbeDistance)
         {
             presentConstants.ArraySlice = static_cast<float>(
                 std::clamp(m_ProbeDebugIndex, 0, std::max(0, static_cast<int32_t>(m_ReflectionProbes.size()) - 1)));

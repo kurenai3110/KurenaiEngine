@@ -26,14 +26,17 @@ static const float PI = 3.14159265359f;
 
 // 反射プローブ(19章)の環境ソースと鏡面IBLの重み。DeferredLighting.hlsl・SSR.hlslと同じ定義を
 // 共有する。空きスロットが違うだけでレジスタ番号は各シェーダーが決める(ReflectionProbe.hlsli冒頭)。
-// このパスはt0〜t4とt8〜t11を既に使っているため、空いているt5〜t7を割り当てる。
+// このパスはt0〜t4とt8〜t11を既に使っているため、空いているt5〜t7を割り当てる
+// (t6は反射プローブのイラディアンスに使っていたが、M11 Stage 3で廃止し空いたまま残す)。
 // #include自体はFrameConstantsとSamplers.hlsliの宣言より後で行う必要があるため下にある
 #define KURENAI_GLOBAL_IRRADIANCE_REGISTER t9
 #define KURENAI_GLOBAL_PREFILTERED_REGISTER t10
 #define KURENAI_PROBE_PREFILTERED_REGISTER t5
-#define KURENAI_PROBE_IRRADIANCE_REGISTER t6
 #define KURENAI_PROBE_BUFFER_REGISTER t7
 #define KURENAI_PROBE_DISTANCE_REGISTER t12
+// DDGI(22章)。t0-t3,t5-t13を既に使っているため、空いているt14/t15を割り当てる
+#define KURENAI_DDGI_IRRADIANCE_REGISTER t14
+#define KURENAI_DDGI_DISTANCE_REGISTER t15
 
 cbuffer FrameConstants : register(b0)
 {
@@ -51,8 +54,8 @@ cbuffer FrameConstants : register(b0)
     // 半透明パス専用。x=t8のライトリストの有効数(DirectLighting.hlsl側のLightingConstants.LightCount.xと
     // 同じ値)。他のシェーダーはこのフィールドを宣言していないため、末尾に追加してもオフセットは変わらない
     float4 ActiveLightCount;
-    // x: 拡散イラディアンスの取得元(0=プリフィルタ済み鏡面の最終ミップ、1=専用イラディアンスマップ)。
-    // ReflectionProbe.hlsliのSampleGlobalIrradiance/SampleProbeIrradiance参照。yzwは未使用
+    // x: 拡散イラディアンス(グローバルIBL)の取得元(0=プリフィルタ済み鏡面の最終ミップ、
+    // 1=専用イラディアンスマップ)。ReflectionProbe.hlsliのSampleGlobalIrradiance参照。yzwは未使用
     float4 IBLParams;
     // 反射プローブ用(19章)。x=有効プローブ数、y=影響範囲のデバッグ表示フラグ(このパスでは未使用)、
     // z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
@@ -60,6 +63,17 @@ cbuffer FrameConstants : register(b0)
     float4 ProbeParams;
     // 距離キューブ用(19.12節)。意味はDeferredLighting.hlslと同じ
     float4 ProbeParams2;
+    // TAA(23章)用。このシェーダーでは未使用だが、C++側でDDGIParamsより手前に置かれているため
+    // オフセット合わせのためだけに宣言する(DeferredLighting.hlslの同じ箇所を参照)
+    float4x4 PrevViewProj;
+    float4 TAAParams;
+    // DDGI用(22章、M11 Stage 1)。レイアウトはC++側 KurenaiEngine3D.cpp の FrameConstants の
+    // コメント参照。DDGI.hlsliがこの5本を読む
+    float4 DDGIParams0;
+    float4 DDGIParams1;
+    float4 DDGIParams2;
+    float4 DDGIParams3;
+    float4 DDGIParams4;
 };
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で
@@ -106,12 +120,19 @@ Texture2D OcclusionTexture : register(t13);
 // それらの宣言より後でインクルードする必要がある
 #include "ShadowSampling.hlsli"
 // IBL(14章)と反射プローブ(19章)。グローバルIBLのイラディアンス(t9)/プリフィルタ済み鏡面(t10)と、
-// プローブのキューブマップ配列(t5/t6)・影響範囲バッファ(t7)の宣言、およびプローブの選択・
-// 視差補正・ブレンドはReflectionProbe.hlsliが持つ(DeferredLighting.hlslと共有)。
+// プローブのプリフィルタ済み鏡面キューブマップ配列(t5)・影響範囲バッファ(t7)の宣言、および
+// プローブの選択・視差補正・ブレンドはReflectionProbe.hlsliが持つ(DeferredLighting.hlslと共有)。
+// 反射プローブは鏡面専任(M11 Stage 3)なので、このパスもプローブ側の拡散イラディアンスは持たない。
 //
 // 半透明パスにはSSRが適用されないため、ガラスにとっては環境ソースが唯一の映り込みになる。
 // 以前はここがグローバルIBL固定で、密閉された室内のガラスにも空が映っていた
 #include "ReflectionProbe.hlsli"
+// DDGI(22章、M11 Stage 1)。拡散イラディアンスだけを差し替える。半透明パスにはSSRが無いため
+// 20章の不変条件には関与しない(不透明側のDeferredLighting.hlslと同じ理由)。
+// 【重要】プローブの専用イラディアンスマップを読んでいたのはこのパスだけだった(M11 Context参照)。
+// それをStage 3で廃止したうえで、DDGIが有効な点は不透明側と同じくDDGIへ寄せることで、
+// 同じ画面の中で不透明面と半透明面が別々の間接拡散光を受けるという矛盾を解消している
+#include "DDGI.hlsli"
 Texture2D BRDFLUTTexture : register(t11);
 
 struct VSInput
@@ -234,6 +255,17 @@ void EvaluateIBLSplit(
     float3 irradiance;
     float3 prefiltered;
     SampleEnvironment(worldPos, N, R, mipLevel, irradiance, prefiltered);
+
+    // DDGI(22章、M11 Stage 1)が有効なら拡散だけをDDGI由来へ差し替える。DeferredLighting.hlslの
+    // EvaluateIBLとまったく同じ規則(鏡面prefilteredには触れない、ボリューム外はlerpの重み0で
+    // SampleEnvironmentの値が残る)。半透明もこの規則に合わせないと、不透明面はDDGI・
+    // 半透明面は反射プローブという食い違った間接拡散光になる
+    if (DDGIParams0.w > 0.5f)
+    {
+        float ddgiInsideWeight;
+        const float3 ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight);
+        irradiance = lerp(irradiance, ddgiIrradiance, ddgiInsideWeight);
+    }
 
     // --- 拡散IBL ---
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")
