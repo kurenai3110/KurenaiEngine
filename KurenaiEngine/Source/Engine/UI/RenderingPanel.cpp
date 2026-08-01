@@ -238,6 +238,19 @@ namespace Kurenai::UI
                 "IBLを使わないときの、方向を持たない一様な環境光の強さ");
         }
 
+        // IBLの有効/無効どちらでも効くため、上の分岐の外に置く。
+        // 「IBL 強度」が拡散と鏡面へ一様に掛かるのに対し、この2つは両者の比率を崩すためのもの
+        SliderFloatEx(
+            "環境光の拡散倍率###AmbientDiffuseScale", &m_Engine.m_AmbientDiffuseScale, 0.0f, 2.0f,
+            Defaults::AmbientDiffuseScale, "%.3f", 0,
+            "環境光(間接光)の拡散成分だけに掛かる倍率。0にすると環境からの照り返しが消え、"
+            "映り込みだけが残る。直接光・自発光・SSILの間接光には掛からない");
+        SliderFloatEx(
+            "環境光の鏡面倍率###AmbientSpecularScale", &m_Engine.m_AmbientSpecularScale, 0.0f, 2.0f,
+            Defaults::AmbientSpecularScale, "%.3f", 0,
+            "環境光(間接光)の鏡面成分だけに掛かる倍率。金属やガラスの映り込みの強さを、"
+            "環境からの照り返しを保ったまま増減できる。SSRと反射プローブにも同じ倍率が効く");
+
         // bent normalによる遮蔽(25章)。ベイク済みのbent normalを持つモデルでのみ効く
         // (持たないマテリアルは黒1x1へフォールバックし、どのトグルでも見た目が変わらない)
         CheckboxEx(

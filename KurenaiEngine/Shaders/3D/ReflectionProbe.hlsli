@@ -23,9 +23,10 @@
 // 20章の前提なので、この2つは必ず同じ条件でコンパイルすること(片方だけ距離キューブを使うと、
 // SSRが自分の足した覚えのない値を引き算することになる)。
 //
-// このヘッダーはFrameConstants(b0)の ProbeParams / ProbeParams2 / ShadowParams / IBLParams を
-// 参照する(IBLParamsは拡散側のマクロを定義した場合のみ)。インクルードする側はこれらを
-// 含む形でFrameConstantsを宣言しておく必要がある。cbufferのレイアウトは宣言順で決まるため、
+// このヘッダーはFrameConstants(b0)の ProbeParams / ProbeParams2 / ShadowParams / AmbientColor /
+// IBLParams を参照する(IBLParams.xは拡散側のマクロを定義した場合のみ。.zは常に参照する)。
+// インクルードする側はこれらを含む形でFrameConstantsを宣言しておく必要がある。
+// cbufferのレイアウトは宣言順で決まるため、
 // 途中のフィールドを飛ばさずC++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること。
 #ifndef KURENAI_REFLECTION_PROBE_HLSLI
 #define KURENAI_REFLECTION_PROBE_HLSLI
@@ -438,6 +439,10 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 //   compensationMode  ShadowParams.w(エネルギー補正の方式。0=無効/1=Linear/2=Series/3=Kulla-Conty)
 //   iblIntensity      ShadowParams.z(IBL強度倍率。0ならIBL自体が無効)
 //
+// 【環境光の鏡面倍率(IBLParams.z)は引数で受けずここで直接読む】iblIntensityのように引数に
+// すると、DeferredLightingとSSRが別々の値を渡してしまう余地が残る。この係数は上記のとおり
+// 「両者が定義上必ず一致する」ことが存在理由なので、外から差し込める口を増やさない
+//
 // 【この係数が受け持つのは単一散乱(鏡面)ローブだけ】Kulla-Conty方式が足す加算ローブは
 // プリフィルタ済み鏡面ではなく拡散イラディアンスに掛かるうえ、ほぼ拡散に近い広がりを持つため
 // スクリーンスペース反射で差し替える対象ではない。よってそちらは
@@ -467,7 +472,7 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness,
     // スペキュラオクルージョン。式はSpecularEnergy.hlsliに1つだけ置いてある
     // (半透明パス・プローブ焼き込みからも同じものを使うため)
     const float so = ComposeSpecularOcclusion(useBent, bent, N, R, NdotV, roughness, materialAO, ssao);
-    return splitSum * so * iblIntensity;
+    return splitSum * so * iblIntensity * IBLParams.z;
 }
 
 // Kulla-Conty方式の加算ローブに掛かる係数。呼び出し側で拡散イラディアンスを乗算する:
@@ -475,7 +480,11 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness,
 //   マルチスキャッタぶん = 拡散イラディアンス * SpecularIBLMultiScatterWeight(...)
 //
 // 方式0/1/2ではSpecularMultiScatterIBLが0を返すため、この項は完全に消える。
-// SSRはこの項を差し替えない(上のSpecularIBLWeightのコメント参照)
+// SSRはこの項を差し替えない(上のSpecularIBLWeightのコメント参照)。
+//
+// 【この加算ローブは鏡面倍率(IBLParams.z)の側に入れる】掛かる相手が拡散イラディアンスなので
+// 拡散側に見えるが、これは鏡面BRDFが単散乱で取りこぼしたエネルギーを戻す項であって
+// 拡散反射ではない。拡散側に入れると、鏡面倍率を0にしても鏡面由来の光が残ってしまう
 float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness,
                                      bool useBent, BentOcclusion bent, float3 N, float3 R,
                                      float materialAO, float ssao, float3 brdf,
@@ -487,7 +496,7 @@ float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness,
     const float3 multiScatter = SpecularMultiScatterIBL(F0, FssEss, Ess, mode);
 
     const float so = ComposeSpecularOcclusion(useBent, bent, N, R, NdotV, roughness, materialAO, ssao);
-    return multiScatter * so * iblIntensity;
+    return multiScatter * so * iblIntensity * IBLParams.z;
 }
 
 #endif // KURENAI_REFLECTION_PROBE_HLSLI

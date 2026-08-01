@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <cstdint>
 
@@ -45,6 +45,12 @@ namespace Kurenai::Defaults
     inline constexpr bool BentNormalSpecularOcclusion = true;
     inline constexpr bool MultiBounceAOEnabled = false;
     inline constexpr float AmbientScale = 0.2f;
+    // 環境光(間接光)の拡散・鏡面それぞれに掛かる倍率。既定の1.0は「何も変えない」値で、
+    // IBL強度(IBLIntensity)が拡散と鏡面へ一様に掛かるのに対し、こちらは両者の比率を崩す
+    // ための画作り用のつまみ。IBLの有効/無効に関わらず効く(無効時の定数色アンビエントにも
+    // 同じ倍率が掛かる)ので、切り替えても意味が変わらない
+    inline constexpr float AmbientDiffuseScale = 1.0f;
+    inline constexpr float AmbientSpecularScale = 1.0f;
     // スペキュラのマルチスキャッタリング・エネルギー補正の方式。
     // KurenaiEngine3D::SpecularCompensationMode と HLSL の KURENAI_SPEC_COMP_* に対応する
     // (0=Off / 1=Linear / 2=Series / 3=Kulla-Conty)。ここを型付きにするには enum を

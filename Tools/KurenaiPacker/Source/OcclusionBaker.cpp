@@ -92,7 +92,7 @@ namespace KurenaiPacker
         //
         // 【SAHへ変える必要は無い(実測)】Chinese Dragon(871306三角形、2048² / 64レイ)で
         // レイキャストは0.30秒・毎秒3〜4億レイ、BVH構築は0.31秒。ベイク全体394秒のうち
-        // 合わせて0.16%しかない。残り99%はxatlasのUV展開(22.6.5節)。
+        // 合わせて0.16%しかない。残り99%はxatlasのUV展開(22.6.6節)。
         // ここを速くしても総時間はまったく変わらないので、単純なまま維持してよい。
 
         struct Float3
@@ -259,7 +259,7 @@ namespace KurenaiPacker
         // なお、この関数を素通し(vprintf)にしたうえでxatlas.cppの XA_PROFILE を1にし、
         // SetPrintの第2引数(verbose)をtrueにすると、xatlas内蔵のプロファイラが
         // ComputeChartsの内訳(Place seeds / Grow / Merge / Parameterize ...)を出力する。
-        // UV展開が遅い原因を追うときはこれが一番早い(22.6.5節)
+        // UV展開が遅い原因を追うときはこれが一番早い(22.6.6節)
         int SilentPrint(const char*, ...)
         {
             return 0;
@@ -312,7 +312,7 @@ namespace KurenaiPacker
 
             // ベイク時間のほぼ全部(実測で99%)がこの1行に入る。既定のChartOptionsのまま
             // 使っているのは、maxCostを4/8/16と振っても時間がまったく変わらなかったため
-            // (378秒/379秒/399秒。詳細と原因は22.6.5節)
+            // (378秒/379秒/399秒。詳細と原因は22.6.6節)
             const Clock::time_point computeStart = Clock::now();
             xatlas::ComputeCharts(atlas);
             const double computeSeconds = SecondsSince(computeStart);
@@ -954,7 +954,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             // 統合GPUを掴んでいないかを、憶測ではなくログで確認できるようにしておく。
             //
             // (実測では正しくディスクリートGPUが選ばれており、レイキャストは
-            //  毎秒3〜4億レイ出ていた。ベイクが遅いのはGPU側ではなくUV展開が原因 ―― 22.6.5節)
+            //  毎秒3〜4億レイ出ていた。ベイクが遅いのはGPU側ではなくUV展開が原因 ―― 22.6.6節)
             void LogAdapter()
             {
                 ComPtr<IDXGIDevice> dxgiDevice;

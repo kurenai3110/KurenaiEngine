@@ -42,10 +42,12 @@ cbuffer FrameConstants : register(b0)
     // x=t8のライトリストの有効数(Transparent.hlslと同じくFrameConstants末尾で受け取る。
     // b1はObjectConstantsが占有していてLightingConstantsを置けないため)
     float4 ActiveLightCount;
-    // 【以下4つはこのシェーダーでは使わないが宣言だけ必要】cbufferは宣言順レイアウトなので、
+    // y=環境光の拡散倍率、z=同じく鏡面倍率。xの拡散イラディアンス取得元切り替えはこのパスでは
+    // 使わないが、cbufferのレイアウトは宣言順で決まりフィールドを飛ばせないため丸ごと宣言する
+    float4 IBLParams;
+    // 【以下3つはこのシェーダーでは使わないが宣言だけ必要】同じ理由で、
     // 末尾のOcclusionParamsを正しいオフセットで読むには途中のフィールドを飛ばせない。
     // C++側のFrameConstantsと並びを必ず一致させること
-    float4 IBLParams;
     float4 ProbeParams;
     float4 ProbeParams2;
     float4x4 PrevViewProj;
@@ -284,7 +286,10 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, floa
          + SpecularMultiScatterIBL(F0, FssEss, Ess, compensationMode) * irradiance)
         * ComposeSpecularOcclusion(OcclusionParams.y > 0.5f, bent, N, R, NdotV, roughness, materialAO, 1.0f);
 
-    return diffuseIBL + specularIBL;
+    // 環境光の拡散・鏡面倍率(IBLParams.y / .z)。メインパスと同じ倍率を焼き込み時にも掛けないと、
+    // プローブの中身だけつまみを動かす前の明るさで残ってしまう。
+    // これを焼き上がりへ反映させるため、C++側の再ベイク署名にも両方を混ぜてある
+    return diffuseIBL * IBLParams.y + specularIBL * IBLParams.z;
 }
 
 // キャプチャは2枚のレンダーターゲットへ書く。
@@ -374,8 +379,10 @@ PSOutput PSMain(PSInput input)
     }
     else
     {
+        // DeferredLighting.hlslのフォールバックと同じく拡散項しか持たないので、
+        // 掛かるのは拡散倍率だけ
         color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb
-               * ((OcclusionParams.x > 0.5f) ? bent.aoN : materialAO);
+               * ((OcclusionParams.x > 0.5f) ? bent.aoN : materialAO) * IBLParams.y;
     }
 
     color += emissive;
