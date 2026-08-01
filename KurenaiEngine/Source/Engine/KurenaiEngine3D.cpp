@@ -3897,10 +3897,16 @@ namespace Kurenai
                 cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
                 cmd->SetTexture(11, m_BRDFLUTTexture.get());
                 // 反射プローブ(19章)。Lightingパスと同じReflectionProbe.hlsliを共有しており、
-                // 半透明サーフェスも室内なら室内の環境が映るようになる。t0〜t4とt8〜t11が
-                // 埋まっているため、このパスではt5〜t7を割り当てている(Transparent.hlsl冒頭)。
+                // 半透明サーフェスも室内なら室内の環境が映るようになる。
+                // 割り当ては Transparent.hlsl 冒頭のマクロと必ず一致させること。
+                //
+                // 【t5へ置いてはいけない】t5はマテリアルの遮蔽マップ用で、下のメッシュごとの
+                // ループがdraw.Mesh->OcclusionTextureで上書きしてしまう。
+                // 以前プリフィルタ済み鏡面をt5に置いており、シェーダー側のレジスタ衝突と
+                // 合わせて半透明パスが壊れていた
+                //
                 // ProbeParams.xが0でも常にバインドするのはLightingパスと同じ理由
-                cmd->SetTexture(5, m_ProbePrefilteredArray.get());
+                cmd->SetTexture(13, m_ProbePrefilteredArray.get());
                 cmd->SetTexture(6, m_ProbeIrradianceArray.get());
                 cmd->SetShaderResourceBuffer(7, m_ProbeBuffer.get());
                 cmd->SetTexture(12, m_ProbeDistanceArray.get());
