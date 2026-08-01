@@ -284,7 +284,8 @@ DLLは実行ファイルと同じフォルダに置かれていないと起動�
 
 <p>
 <code>KurenaiEngine3D</code> は、Deferred Shading(G-Buffer: Albedo/Normal/Metallic-Roughness+
-深度)によるPBRレンダリング、シャドウマッピング、IBL(環境光)、SSAO/SSIL(間接光)、SSR(反射)、
+深度)によるPBRレンダリング、シャドウマッピング、IBL(環境光)、SSAO/SSIL(間接光)、
+鏡面反射(スクリーンスペース(SSR)またはレイトレーシング)、
 複数シーンの切り替え、ImGuiによる設定パネル一式までを内包した<strong>完結型の3Dレンダラー</strong>です。
 構築して <code>Run()</code> を呼ぶだけでウィンドウが開き、ユーザーが閉じるまでブロックします。
 </p>
@@ -326,7 +327,8 @@ ImGuiパネル経由</strong>):
     <li><code>F1</code> でImGuiパネルの表示/非表示切り替え</li>
     <li>8つのImGuiパネル(シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ /
     デバッグ表示 / システム / プロファイラ)で表示アセットの切り替え、シャドウ/AO(SSAO・SSIL)/
-    スクリーンスペースシャドウ/SSR/タイルドライトカリングのON・OFFやパラメータ調整、
+    スクリーンスペースシャドウ/タイルドライトカリングのON・OFFやパラメータ調整、
+    反射の手法(なし / スクリーンスペース / レイトレーシング)の切り替え、
     トーンマップ・ブルーム・自動露出の調整、デバッグ表示バッファの選択、
     時刻(昼夜サイクル)・月の位置・手続き空・EV100(露出)の調整、
     ポイント/スポットライトの一覧・追加・複製・削除・編集、反射プローブの編集と焼き直し、
@@ -1079,7 +1081,7 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>Skybox</code></td><td>path</td><td>-</td><td>Skybox/Sky.dds</td><td>Assetsルートからのキューブマップ<code>.dds</code>相対パス。IBLの環境光もこれから焼かれる</td></tr>
 <tr><td><code>IBLIntensity</code></td><td>float</td><td>-</td><td>変更しない</td><td>IBLの強度倍率。0以上</td></tr>
 <tr><td><code>AmbientOcclusion</code></td><td>bool</td><td>-</td><td>true</td><td>AO/間接光(SSAO・SSIL)の有効/無効</td></tr>
-<tr><td><code>ScreenSpaceReflection</code></td><td>bool</td><td>-</td><td>true</td><td>SSRの有効/無効。SSRは画面内で反射先が見つかった場合にその色で反射を<strong>差し替える</strong>(加算ではない)。見つからなかった場合は反射プローブ由来の反射がそのまま残るため、ON/OFFで全体の明るさは変わらず反射の鮮明さだけが変わる</td></tr>
+<tr><td><code>ScreenSpaceReflection</code></td><td>bool</td><td>-</td><td>true</td><td>鏡面反射の有効/無効。反射は反射先の色で反射を<strong>差し替える</strong>(加算ではない)ため、ON/OFFで全体の明るさは変わらず反射の鮮明さだけが変わる。<strong>手法(スクリーンスペース / レイトレーシング)は<code>.kscene</code>では選べず</strong>、実行環境がDXR Tier 1.1に対応していればレイトレーシング、していなければスクリーンスペースが選ばれる(実行中にUIから切り替えられる)。キー名はSSRしか無かった頃の名残でそのまま据え置いている</td></tr>
 <tr><td rowspan="3"><code>[Model]</code></td><td rowspan="3">1以上</td><td><code>Path</code></td><td>path</td><td><strong>必須</strong></td><td>-</td><td>Assetsルートからの<code>.kmodel</code>相対パス</td></tr>
 <tr><td><code>Translation</code></td><td>float3</td><td>-</td><td>0,0,0</td><td>平行移動</td></tr>
 <tr><td><code>RotationEuler</code>/<code>Scale</code></td><td>float3</td><td>-</td><td>0,0,0 / 1,1,1</td><td>回転(度、pitch/yaw/roll)・スケール(負値も可)</td></tr>

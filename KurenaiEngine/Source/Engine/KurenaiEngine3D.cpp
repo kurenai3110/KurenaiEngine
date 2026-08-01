@@ -787,6 +787,13 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 未使用
         };
 
+        // RTReflection.hlsl側のcbuffer RTReflectionConstantsと一致させる必要がある
+        struct alignas(16) RTReflectionConstants
+        {
+            DirectX::XMFLOAT4 Params0; // xy: 出力サイズ(ピクセル), z: 最大レイ距離, w: ラフネスカットオフ
+            DirectX::XMFLOAT4 Params1; // x: 影レイを撃つか(1で撃つ), yzw: 未使用
+        };
+
         // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
         struct alignas(16) GPULight
         {
@@ -1166,6 +1173,32 @@ namespace Kurenai
         ssrConstantBufferDesc.SizeInBytes = sizeof(SSRConstants);
         m_SSRConstantBuffer = m_Device->CreateBuffer(ssrConstantBufferDesc);
 
+        // RT反射パス(コンピュートシェーダー。TLASへ鏡面レイを撃ち反射色を求める)。
+        // RTReflection.hlslはRayQueryを含むためシェーダーモデル6.5でしかコンパイルできない。
+        // 非対応環境ではシェーダー自体を作らず、UIからもRaytracedを選べないようにする
+        m_RaytracingAvailable = m_Device->SupportsRaytracing();
+        if (m_RaytracingAvailable)
+        {
+            RHI::ShaderDesc rtReflectionCsDesc;
+            rtReflectionCsDesc.Stage = RHI::ShaderStage::Compute;
+            rtReflectionCsDesc.FilePath = shaderDirectory + L"RTReflection.hlsl";
+            rtReflectionCsDesc.EntryPoint = "CSMain";
+            m_RTReflectionComputeShader = m_Device->CreateShader(rtReflectionCsDesc);
+            m_RTReflectionPipelineState = m_Device->CreateComputePipelineState({ m_RTReflectionComputeShader.get() });
+
+            RHI::BufferDesc rtReflectionConstantBufferDesc;
+            rtReflectionConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+            rtReflectionConstantBufferDesc.SizeInBytes = sizeof(RTReflectionConstants);
+            m_RTReflectionConstantBuffer = m_Device->CreateBuffer(rtReflectionConstantBufferDesc);
+
+            Core::Logger::Info("KurenaiEngine3D", "レイトレーシング反射を利用できます(反射モードでRaytracedを選択可能)");
+        }
+        else
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D", "レイトレーシング反射は利用できません(反射モードはOff/スクリーンスペースのみ)");
+        }
+
         // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
         RHI::ShaderDesc tonemapVsDesc;
         tonemapVsDesc.Stage = RHI::ShaderStage::Vertex;
@@ -1503,6 +1536,26 @@ namespace Kurenai
                                                                 : RHI::Format::R16G16B16A16_Float;
     }
 
+    bool KurenaiEngine3D::ShouldRunRaytracedReflection() const
+    {
+        return m_ReflectionMode == ReflectionMode::Raytraced && m_RaytracingScene.IsValid() &&
+               m_RTReflectionPipelineState != nullptr && m_RTReflectionTexture != nullptr;
+    }
+
+    RHI::IRHITexture* KurenaiEngine3D::GetActiveReflectionOutput() const
+    {
+        if (m_ReflectionMode == ReflectionMode::ScreenSpace)
+        {
+            return m_SSRTexture.get();
+        }
+        if (ShouldRunRaytracedReflection())
+        {
+            return m_RTReflectionTexture.get();
+        }
+        // 反射なし、またはRT反射を実行しなかった場合はLightingパスの結果をそのまま後段へ渡す
+        return m_SceneColor.get();
+    }
+
     void KurenaiEngine3D::CreatePrecisionDependentPipelineStates()
     {
         const RHI::Format emissiveFormat = GetEmissiveFormat();
@@ -1699,6 +1752,12 @@ namespace Kurenai
             m_SSILTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
             m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
             m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            // RT反射はコンピュートシェーダーがUAVで書くため、レンダーターゲットではなくUAVテクスチャを作る。
+            // 非対応環境ではパス自体が実行されないので確保しない
+            if (m_RaytracingAvailable)
+            {
+                m_RTReflectionTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            }
             m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
 
             m_HiZMipLevels = ComputeMipLevelCount(width, height);
@@ -1988,7 +2047,11 @@ namespace Kurenai
         m_ShadowEnabled = m_Scene.ShadowEnabled;
         m_SunEnabled = m_Scene.SunEnabled;
         m_AOEnabled = m_Scene.AOEnabled;
-        m_SSREnabled = m_Scene.SSREnabled;
+        // .ksceneが持つのは「反射を使うか」の真偽値だけなので、手法の選択はエンジン側で決める。
+        // レイトレーシングが使える環境ならそちらを既定にする(画面外も反射に映るぶん確実に上位のため)
+        m_ReflectionMode = m_Scene.SSREnabled
+            ? (m_RaytracingAvailable ? ReflectionMode::Raytraced : ReflectionMode::ScreenSpace)
+            : ReflectionMode::Off;
         if (m_Scene.HasIBLIntensityOverride)
         {
             m_IBLIntensity = m_Scene.IBLIntensity;
@@ -2123,6 +2186,11 @@ namespace Kurenai
         // ヒット判定の厚みはSSAO/SSILと同様、遮蔽・接触判定として妥当な小さい値にする
         m_SSRMaxDistance = std::clamp(diagonal * 0.5f, 1.0f, 100.0f);
         m_SSRThickness = m_SSAORadius * 0.2f;
+
+        // RT反射のレイ距離はSSRより長く取る。SSRは「画面外へ出たら打ち切り」で早々に確信度0へ
+        // 落ちるためシーン対角の半分でも十分だったが、RTは画面外も追えるので短く切ると
+        // 本来映るはずの建物を通り越して空が映ってしまう。シーン対角そのものを上限にする
+        m_RTReflectionMaxDistance = std::clamp(diagonal, 1.0f, 500.0f);
     }
 
     Core::Camera KurenaiEngine3D::ComputeInitialCamera(const Assets::Scene& scene)
@@ -3869,9 +3937,10 @@ namespace Kurenai
             },
         });
 
-        // --- SSRパス: LightingパスのSceneColorとG-Bufferから鏡面反射を計算し加算する。
-        //     無効時はスキップし、Presentが直接m_SceneColorを参照する ---
-        if (m_SSREnabled)
+        // --- 反射パス: Lightingパスが適用した鏡面IBLを、実際に追跡した反射で差し替える(20章)。
+        //     ScreenSpaceならSSR(レイマーチ)、RaytracedならRT反射(RayQuery)。
+        //     Offならスキップし、後段のTonemapが直接m_SceneColorを読む ---
+        if (m_ReflectionMode == ReflectionMode::ScreenSpace)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SSR",
@@ -3911,10 +3980,61 @@ namespace Kurenai
                 },
             });
         }
+        else if (ShouldRunRaytracedReflection())
+        {
+            // RT反射パス。読むものはSSRとほぼ同じ(同じ鏡面IBLを差し替えるため)で、
+            // これに加えてTLASとシーンジオメトリの統合バッファを読む。
+            // レジスタ割り当てはRTReflection.hlsl側の宣言と一致させること
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "RTReflection",
+                .Reads = {
+                    m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                    m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
+                    m_ProbePrefilteredArray.get(),
+                },
+                .Writes = { m_RTReflectionTexture.get() },
+                .Execute = [this, activeAOTexture](RHI::IRHICommandList* cmd)
+                {
+                    RTReflectionConstants rtConstants{};
+                    rtConstants.Params0 = {
+                        static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight),
+                        m_RTReflectionMaxDistance, m_RTReflectionRoughnessCutoff
+                    };
+                    rtConstants.Params1 = { m_RTReflectionShadowRayEnabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+                    cmd->UpdateBuffer(m_RTReflectionConstantBuffer.get(), &rtConstants, sizeof(rtConstants));
 
-        // --- Tonemapパス: HDRのSceneColor(SSR有効時はSSR適用後)をLDRへ変換する。
-        //     SSR等のHDR演算がすべて完了した後、Present直前の独立したステージとして常に実行する ---
-        RHI::IRHITexture* hdrSceneColor = m_SSREnabled ? m_SSRTexture.get() : m_SceneColor.get();
+                    cmd->SetComputePipelineState(m_RTReflectionPipelineState.get());
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(1, m_RTReflectionConstantBuffer.get());
+
+                    cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeTexture(1, m_SceneColor.get());
+                    cmd->SetComputeTexture(2, m_GBufferNormal.get());
+                    cmd->SetComputeTexture(3, m_GBufferMaterial.get());
+                    cmd->SetComputeTexture(4, m_GBufferDepth.get());
+                    cmd->SetComputeTexture(5, m_GBufferAlbedo.get());
+                    cmd->SetComputeTexture(6, activeAOTexture);
+                    cmd->SetComputeTexture(7, m_BRDFLUTTexture.get());
+                    cmd->SetComputeTexture(8, m_PrefilteredEnvTexture.get());
+                    cmd->SetComputeTexture(9, m_ProbePrefilteredArray.get());
+                    cmd->SetComputeShaderResourceBuffer(10, m_ProbeBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(11, m_RaytracingScene.GetVertexAttributeBuffer());
+                    cmd->SetComputeShaderResourceBuffer(12, m_RaytracingScene.GetIndexBuffer());
+                    cmd->SetComputeShaderResourceBuffer(13, m_RaytracingScene.GetMeshInfoBuffer());
+                    cmd->SetComputeShaderResourceBuffer(14, m_RaytracingScene.GetInstanceInfoBuffer());
+                    cmd->SetComputeShaderResourceBuffer(15, m_RaytracingScene.GetMaterialBuffer());
+
+                    // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+                    cmd->SetComputeUnorderedAccessTexture(0, m_RTReflectionTexture.get());
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                },
+            });
+        }
+
+        // --- Tonemapパス: HDRのSceneColor(反射パス有効時はその出力)をLDRへ変換する。
+        //     反射等のHDR演算がすべて完了した後、Present直前の独立したステージとして常に実行する ---
+        RHI::IRHITexture* hdrSceneColor = GetActiveReflectionOutput();
 
         // --- 自動露出パス: SceneColorの輝度ヒストグラムから目標EV100を求め、時間方向に順応させる。
         //     結果はm_ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
@@ -4189,8 +4309,8 @@ namespace Kurenai
             presentSourceHeight = kShadowMapSize;
             break;
         case DebugView::SSR:
-            // SSR無効時はSSRパスをスキップしているため、Tonemapパスの入力もSceneColorになり
-            // 結果的にFinalと同一表示になる
+            // 反射がOffのときは反射パスをスキップしているため、Tonemapパスの入力もSceneColorになり
+            // 結果的にFinalと同一表示になる(SSR / RT反射のどちらでも同じ扱い)
             presentSourceTexture = m_TonemapTexture.get();
             break;
         case DebugView::HiZ:

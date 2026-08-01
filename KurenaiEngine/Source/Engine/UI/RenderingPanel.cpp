@@ -37,7 +37,8 @@ namespace Kurenai::UI
         {
             DrawIBLSection();
         }
-        if (ImGui::CollapsingHeader("スクリーンスペース反射###SSR"))
+        // ###以降のIDはimgui.iniのキーになるため、表示名だけ変えてIDはSSRのまま据え置く
+        if (ImGui::CollapsingHeader("反射###SSR"))
         {
             DrawSSRSection();
         }
@@ -249,15 +250,40 @@ namespace Kurenai::UI
 
     void RenderingPanel::DrawSSRSection()
     {
+        using ReflectionMode = KurenaiEngine3D::ReflectionMode;
+
         BeginParamGroup();
 
-        CheckboxEx(
-            "SSRを有効にする###EnableSSR", &m_Engine.m_SSREnabled, Defaults::SSREnabled,
-            "スクリーンスペースで反射をレイマーチする。画面外のものは反射に映らない");
+        // 手法の選択。Raytracedはレイトレーシング非対応の環境(DX11、あるいはDXR Tier 1.1に
+        // 達していないDX12)では選べないため、選択肢そのものを出さない。
+        // 「出ているのに選ぶと何も起きない」より「出ていない」ほうが誤解が少ない
+        static const char* kModeNamesWithRT[] = { "なし", "スクリーンスペース (SSR)", "レイトレーシング (RT)" };
+        static const char* kModeNamesWithoutRT[] = { "なし", "スクリーンスペース (SSR)" };
 
-        if (m_Engine.m_SSREnabled)
+        const bool rtAvailable = m_Engine.m_RaytracingAvailable;
+        const char* const* modeNames = rtAvailable ? kModeNamesWithRT : kModeNamesWithoutRT;
+        const int modeCount = rtAvailable ? IM_ARRAYSIZE(kModeNamesWithRT) : IM_ARRAYSIZE(kModeNamesWithoutRT);
+
+        int modeIndex = static_cast<int>(m_Engine.m_ReflectionMode);
+        if (ComboEx(
+                "反射の手法###ReflectionMode", &modeIndex, modeNames, modeCount,
+                static_cast<int>(Defaults::SSREnabled ? ReflectionMode::ScreenSpace : ReflectionMode::Off),
+                "SSRは画面に映っているものだけを反射に映す(画面外は反射プローブ/IBLに任せる)。"
+                "レイトレーシングはシーン全体へレイを飛ばすため画面外のものも映るが、"
+                "ヒット面のテクスチャは読めないためマテリアルの定数色になる"))
         {
-            bool recalcRequested = false;
+            m_Engine.m_ReflectionMode = static_cast<ReflectionMode>(modeIndex);
+        }
+
+        if (!rtAvailable)
+        {
+            ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
+        }
+
+        bool recalcRequested = false;
+
+        if (m_Engine.m_ReflectionMode == ReflectionMode::ScreenSpace)
+        {
             SliderFloatSceneDependent(
                 "SSR 最大距離###SSRMaxDistance", &m_Engine.m_SSRMaxDistance, 0.1f, 100.0f, recalcRequested, "%.3f",
                 "反射レイを追跡する最大距離(ワールド単位)。シーン読み込み時に対角長から自動設定される");
@@ -268,11 +294,28 @@ namespace Kurenai::UI
                 "SSR 粗さのしきい値###SSRRoughnessCutoff", &m_Engine.m_SSRRoughnessCutoff, 0.05f, 1.0f,
                 Defaults::SSRRoughnessCutoff, "%.3f", 0,
                 "この粗さを超えるマテリアルではSSRを行わない。粗い面ではノイズが目立ち負荷に見合わないため");
+        }
+        else if (m_Engine.m_ReflectionMode == ReflectionMode::Raytraced)
+        {
+            SliderFloatSceneDependent(
+                "RT 最大距離###RTReflectionMaxDistance", &m_Engine.m_RTReflectionMaxDistance, 1.0f, 500.0f,
+                recalcRequested, "%.3f",
+                "反射レイを追跡する最大距離(ワールド単位)。シーン読み込み時に対角長から自動設定される。"
+                "短くすると速くなるが、本来映るはずの遠景が空に置き換わる");
+            SliderFloatEx(
+                "RT 粗さのしきい値###RTReflectionRoughnessCutoff", &m_Engine.m_RTReflectionRoughnessCutoff,
+                0.05f, 1.0f, Defaults::RTReflectionRoughnessCutoff, "%.3f", 0,
+                "この粗さを超えるマテリアルではレイを撃たない。鏡面レイ1本しか撃たないため、"
+                "粗い面では反射プローブ/IBLに任せたほうが正しい");
+            CheckboxEx(
+                "反射先に影を落とす###RTReflectionShadowRay", &m_Engine.m_RTReflectionShadowRayEnabled,
+                Defaults::RTReflectionShadowRayEnabled,
+                "反射に映る面から太陽へ影レイを撃つ。切ると反射の中だけ影が消えるが、その分速い");
+        }
 
-            if (recalcRequested)
-            {
-                m_Engine.ResetSceneDependentParams();
-            }
+        if (recalcRequested)
+        {
+            m_Engine.ResetSceneDependentParams();
         }
 
         EndParamGroup();

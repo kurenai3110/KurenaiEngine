@@ -225,6 +225,7 @@
     <li><a href="#raytracing">22. レイトレーシング基盤(DXR)</a></li>
     <li><a href="#sceneloading">23. シーン読み込みのスレッド分割</a></li>
     <li><a href="#dxc">24. dxcへの移行(DX12のシェーダーモデル6.x化)</a></li>
+    <li><a href="#rtreflection">25. レイトレーシング反射</a></li>
   </ol>
 </nav>
 
@@ -4875,6 +4876,138 @@ Error/Warning 0件</li>
 <li><strong>ビルド</strong> — KurenaiEngine.sln / Sample3D.sln / Sample2D.slnをDebug・Release x64で
 警告0件。Releaseの実機動作も確認</li>
 <li><strong>Sample2D</strong> — DX12/DX11とも従来どおり描画(2Dシェーダーもdxc経由になる)</li>
+</ul>
+</section>
+
+<section id="rtreflection">
+<h2>25. レイトレーシング反射</h2>
+
+<p>
+22章で作った高速化構造(BLAS/TLAS)と24章のSM 6.5対応が揃ったので、実際にレイを飛ばす最初のパスとして
+鏡面反射を実装した。<code>Shaders/3D/RTReflection.hlsl</code>(<code>cs_6_5</code>)。
+</p>
+
+<h3>25.1 SSRの置き換えではなく「もう1つの手法」にした</h3>
+<p>
+反射の手法を<code>ReflectionMode { Off, ScreenSpace, Raytraced }</code>の3択にし、
+従来の<code>m_SSREnabled</code>(bool)を置き換えた。SSRを消さずに残しているのは、
+DX11バックエンドとDXR非対応のDX12アダプタでは<strong>SSRが唯一の選択肢</strong>だから。
+UIではレイトレーシングが使えない環境で<code>Raytraced</code>の項目自体を出さない
+(出したうえで無反応にするより、無いほうが誤解が少ない)。
+</p>
+<p>
+シーン読み込み時は<code>.kscene</code>の<code>ScreenSpaceReflection</code>がtrueなら、
+レイトレーシングが使える環境ではRaytraced、使えなければScreenSpaceを選ぶ。
+<code>.kscene</code>側に手法を書かせていないのは、同じシーンファイルをどちらの環境でも
+そのまま開けるようにするため。
+</p>
+
+<h3>25.2 SSRとまったく同じ「差し替え」構造に乗せた</h3>
+<p>
+20章で決めた合成式をそのまま使う。SSRとRT反射の違いは<strong>「反射先の放射輝度をどう求めるか」だけ</strong>で、
+Lightingパスが適用した鏡面IBLを差し引く部分は完全に共通:
+</p>
+<pre><code>出力 = SceneColor + (反射で得た放射輝度 - Lightingが使った放射輝度) * SpecularIBLWeight(...) * 確信度</code></pre>
+<p>
+係数<code>SpecularIBLWeight</code>と環境の放射輝度<code>SampleEnvironment</code>は
+<code>ReflectionProbe.hlsli</code>の定義をそのまま共有しているため、
+「足した覚えのない値を引く」ことが構造的に起きない。
+</p>
+<p>
+確信度の扱いだけがSSRと違う。SSRには「レイが画面外へ外れて判定がつかない」という状態があり
+その場合は確信度0(=プローブ/IBLに任せる)としていたが、
+<strong>RTのレイは必ずヒットするか空へ抜けるかのどちらかに決着する</strong>ため、
+確信度はラフネスによるフェードだけになる。
+</p>
+
+<h3>25.3 ヒット面から陰影へたどり着く経路</h3>
+<p>
+<code>RayQuery</code>がヒット時に返すのは<code>InstanceID</code> / <code>GeometryIndex</code> /
+<code>PrimitiveIndex</code> / 重心座標だけ。ここから法線とマテリアルを引くのに、
+22章で用意した統合バッファを使う(引き方の全体像は<code>Assets/RaytracingScene.h</code>の冒頭)。
+</p>
+<pre><code>グローバルメッシュ番号 = InstanceInfo[InstanceID].MeshInfoOffset + GeometryIndex
+三角形のi番目の頂点     = IndexBuffer[MeshInfo.IndexOffset + PrimitiveIndex * 3 + i]
+その頂点属性            = AttributeBuffer[MeshInfo.AttributeOffset + 上のインデックス]
+マテリアル              = MaterialBuffer[MeshInfo.MaterialIndex]</code></pre>
+<p>
+法線は3頂点を重心座標で補間したうえで<code>InstanceInfo.NormalMatrix</code>でワールドへ移す
+(BLASの頂点はモデルのローカル空間のまま登録してあるため)。
+</p>
+<p>
+陰影は1バウンス目に映る色として、<strong>太陽の直接光(Lambert拡散 + 影レイ)+ アンビエント + エミッシブ</strong>に
+絞っている。ヒット面からさらに鏡面レイを撃つ(2バウンス目)ことはしない。
+アンビエントはプリフィルタ済み鏡面の最終ミップを法線方向で引いたもの(=イラディアンス、14.10節)で、
+ヒット面では反射プローブの選択・視差補正までは行わずグローバルIBLだけを使う
+(レイ1本ごとにプローブ選択のループを回すコストに見合わないため)。
+</p>
+
+<h3>25.4 ディスクリプタの割り当て</h3>
+<p>
+22.6節でコンピュート用SRV枠を<code>t0〜t15</code>へ広げたのはこのパスのため。実際にちょうど16本使う:
+</p>
+<table>
+<thead><tr><th>レジスタ</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>t0</code></td><td>TLAS(<code>SetComputeAccelerationStructure</code>)</td></tr>
+<tr><td><code>t1〜t6</code></td><td>SceneColor / G-Buffer(Normal・Material・Depth・Albedo)/ AO</td></tr>
+<tr><td><code>t7〜t10</code></td><td>BRDF積分LUT / プリフィルタ済み鏡面 / プローブのキューブ配列 / プローブの影響範囲</td></tr>
+<tr><td><code>t11〜t15</code></td><td>シーンジオメトリの統合バッファ5本(頂点属性・インデックス・メッシュ情報・インスタンス情報・マテリアル)</td></tr>
+<tr><td><code>u0</code></td><td>出力(<code>RWTexture2D&lt;float4&gt;</code>)</td></tr>
+</tbody>
+</table>
+<p class="note">
+出力はレンダーターゲットではなく<strong>UAVテクスチャ</strong>(<code>CreateUAVTexture</code>)。
+コンピュートシェーダーにしたのは、このエンジンで高速化構造をバインドできるのが
+<code>SetComputeAccelerationStructure</code>(コンピュート用ルートシグネチャのt枠)だけのため。
+<code>RayQuery</code>自体はピクセルシェーダーでも使える。
+</p>
+<p class="note">
+「反射パスを実行する条件」と「後段(自動露出・ブルーム・トーンマップ)がその出力を読む条件」が
+ずれると、実行していないパスの出力(前フレームの残骸)を読むことになる。
+判定は<code>KurenaiEngine3D::ShouldRunRaytracedReflection()</code>1か所に置き、
+レンダーグラフのパス追加と<code>GetActiveReflectionOutput()</code>の両方がそれを呼ぶ。
+</p>
+
+<h3>25.5 この段階の制約</h3>
+<ul>
+<li><strong>ヒット面のテクスチャを読めない</strong> — bindless(SM 6.6の<code>ResourceDescriptorHeap</code>)が要る。
+反射に映る面の色はマテリアルの定数値(<code>BaseColorFactor</code>・metallic・roughness・emissive)のみで決まり、
+テクスチャの模様は出ない。22章から続く制約で、これが解けるまでは反射像がやや平板になる</li>
+<li><strong>鏡面レイを1本しか撃たない</strong> — 粗い面に必要な円錐状のぼかしを持たないため、
+SSRと同じくラフネスでフェードしてプローブ/IBLへ戻す。
+グレー(中程度に粗い)な反射を正しく出すにはGGXのインポータンスサンプリングと
+デノイズが要る。しきい値の既定はSSRの0.6に対して0.8
+(RTには「画面外に外れて打ち切り」という破綻要因が無く、中程度の粗さでも結果が安定するため)</li>
+<li><strong>すべての三角形を不透明として扱う</strong>(<code>RAY_FLAG_FORCE_OPAQUE</code>)—
+アルファテスト付きのジオメトリ(木の葉など)を正しく抜くには、ヒット候補ごとに
+ベースカラーテクスチャをサンプルする必要があり、これも bindless が要る。
+葉が板ポリのまま映るほうが、葉をすり抜けて背景が映るより破綻が小さいと判断した</li>
+<li><strong>ヒット面での2バウンス目は無し</strong> — 反射の中に映る鏡は反射しない</li>
+<li><strong>シーンは静的前提</strong> — 22章のTLASをそのまま使うため、動く物体には追随しない</li>
+</ul>
+
+<h4>検証</h4>
+<ul>
+<li><strong>SSRとの比較(本命)</strong> — Bistro Interiorの同一視点でSSRとRTを撮り比べたところ、
+差分は<strong>金属の椅子の脚と手すり・棚の金属部分に集中</strong>し(8bit値で差8超のピクセルが3.41%、最大31)、
+それ以外の粗い誘電体面ではほぼ0だった。低ラフネスの金属だけが変わるという、
+狙いどおりの分布になっている。拡大して見ると、RT側はその金属が周囲の暗い内装を実際に拾って
+コントラストが付いており、SSR側は反射レイが画面外へ出るためプローブ/IBLの平坦な色に戻っている</li>
+<li><strong>Bistro Exterior</strong> — 同じ比較で差8超が3ピクセルのみ。この視点は粗い石材・屋根が大半で
+両手法ともラフネスカットオフに掛かるため、変わらないのが正しい</li>
+<li><strong>SSR経路の非退行</strong> — <code>ReflectionMode</code>への置き換えでSSRの挙動が変わっていないことを、
+DX11(SSR)とリファクタ前相当のDX12(SSR)の同一視点比較で確認(平均差0.004 / 最大1)</li>
+<li><strong>コスト</strong> — Release / Bistroで<code>RTReflection</code>パスのGPU時間は
+Exterior 0.081ms・Interior 0.108ms(プロファイラのパス別計測)。
+ラフネスカットオフで大半のピクセルがレイを撃たずに抜けるため安い。
+鏡面的な面が画面を占める構図では当然これより伸びる</li>
+<li><strong>シーン往復</strong> — Exterior → Interior → Interior (Lit) → White Furnace Test → Exteriorと
+5回読み込み、毎回AS再構築。Error/Warning・D3D12デバッグレイヤーの指摘とも0件</li>
+<li><strong>リサイズ</strong> — 900x600 / 1500x950 / 1100x700と変えても破綻なし(出力UAVテクスチャの再作成経路)</li>
+<li><strong>DX11</strong> — 反射モードがスクリーンスペースに落ち、UIにレイトレーシングの選択肢が出ないことを確認。
+ログに「レイトレーシング反射は利用できません」</li>
+<li><strong>ビルド</strong> — 3ソリューション×Debug/Releaseで警告0件。Sample2Dも両バックエンドで動作</li>
 </ul>
 </section>
 

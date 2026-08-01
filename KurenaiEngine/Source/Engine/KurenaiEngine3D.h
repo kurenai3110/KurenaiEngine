@@ -104,6 +104,14 @@ namespace Kurenai
         // (理由はRHI/IRHISamplerSet.h)
         void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
+        // このフレームでRT反射パスを実行するか。手法がRaytracedでも、高速化構造が無ければ
+        // (非対応環境・シーン読み込み中の空シーン・構築失敗)撃つ相手がいないため実行しない。
+        // 「パスを追加する条件」と「後段がその出力を読む条件」がずれると、
+        // 実行していないパスの出力(前フレームの残骸)を読むことになるため、判定はこの1か所に置く
+        bool ShouldRunRaytracedReflection() const;
+        // このフレームでHDRのシーン色として後段(自動露出・ブルーム・トーンマップ)が読むべき
+        // テクスチャを返す。反射パスを実行したならその出力、していなければm_SceneColor
+        RHI::IRHITexture* GetActiveReflectionOutput() const;
         // このフレームで空として使うキューブマップを返す。手続き空が有効で、かつ.ksceneが
         // スカイボックスを明示していないときだけ手続き空を使う(明示しているシーンは
         // そのDDSでなければ意味を成さないため。White Furnace Testが該当する)。
@@ -356,6 +364,23 @@ namespace Kurenai
         // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベル
         int32_t m_HiZDebugMipLevel = 0;
 
+        // 鏡面反射の手法。どのモードでもLightingパスが適用した鏡面IBLを「差し替える」形で働き、
+        // Offならその差し替えを一切行わない(プローブ/グローバルIBLがそのまま残る。20章)
+        enum class ReflectionMode
+        {
+            Off,         // 反射パスを実行しない
+            ScreenSpace, // SSR(SSR.hlsl)。画面に映っているものだけが反射に映る
+            Raytraced,   // RT反射(RTReflection.hlsl)。画面外も映るが、DX12かつDXR Tier 1.1が要る
+        };
+        // 現在の手法。RaytracedはSupportsRaytracing()がtrueの環境でしか選べない
+        // (UI側で選択不可にし、シーン読み込み時にも非対応ならScreenSpaceへ落とす)
+        ReflectionMode m_ReflectionMode = Defaults::SSREnabled ? ReflectionMode::ScreenSpace : ReflectionMode::Off;
+        // レイトレーシング反射が使える環境か。デバイスのSupportsRaytracing()を初期化時に控えたもので、
+        // UIの選択可否とシェーダー/パイプラインステートを作るかどうかの両方に使う
+        // (RTReflection.hlslはRayQueryを含むためSM 6.5でしかコンパイルできず、
+        //  非対応環境で作ろうとすると例外になる)
+        bool m_RaytracingAvailable = false;
+
         // SSR(Screen Space Reflections)パス: LightingパスのSceneColorを反射先の環境色として
         // 再利用し、G-Buffer(Normal/Material/Depth)からワールド空間でレイマーチングして
         // 鏡面反射を加算する。無効時はこのパスをスキップし、Presentが直接m_SceneColorを参照する
@@ -364,10 +389,21 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_SSRPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SSRTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSRConstantBuffer;
-        bool m_SSREnabled = Defaults::SSREnabled;
         float m_SSRMaxDistance = Defaults::SSRMaxDistance;
         float m_SSRThickness = Defaults::SSRThickness;
         float m_SSRRoughnessCutoff = Defaults::SSRRoughnessCutoff;
+
+        // RT反射パス: TLASへ鏡面レイを撃ち、ヒット面を陰影計算して反射色を求めるコンピュートパス。
+        // 出力はSSRと同じ「SceneColor + 反射の差し替え」なので、後段(Tonemap)から見ると
+        // m_SSRTextureと完全に等価な入れ替え可能なバッファになる。
+        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る
+        std::unique_ptr<RHI::IRHIShader> m_RTReflectionComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_RTReflectionPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_RTReflectionTexture;
+        std::unique_ptr<RHI::IRHIBuffer> m_RTReflectionConstantBuffer;
+        float m_RTReflectionMaxDistance = Defaults::RTReflectionMaxDistance;
+        float m_RTReflectionRoughnessCutoff = Defaults::RTReflectionRoughnessCutoff;
+        bool m_RTReflectionShadowRayEnabled = Defaults::RTReflectionShadowRayEnabled;
 
         // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
         // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
@@ -559,7 +595,7 @@ namespace Kurenai
             AOOcclusion,        // AO/GIバッファのa(遮蔽率、ブラー後)をグレースケール表示
             AOOcclusionRaw,     // AO/GIバッファのa(遮蔽率、ブラー前の生値)
             ShadowMap,          // m_ShadowDebugCascadeで選択したカスケードのシャドウマップを表示
-            SSR,                // SSRパスの出力(SceneColor+反射)。SSR無効時はSceneColorと同一
+            SSR,                // 反射パスの出力(SceneColor+反射)。反射がOffのときはSceneColorと同一
             HiZ,                // Hi-Zミップチェーンの指定ミップ(m_HiZDebugMipLevel)をグレースケール表示
             IBLIrradiance,      // IBL拡散イラディアンスマップ(TextureCube。現在の視線方向で球面を見回す表示)
             IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLPrefilterDebugMipLevel、TextureCube)
