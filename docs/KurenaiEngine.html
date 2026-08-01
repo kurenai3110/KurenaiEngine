@@ -298,6 +298,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // WICテクスチャ読み込みに必要
 
+    // 実行中にグラフィックスAPIを切り替えたい場合は2.1節のループ形にする
     Kurenai::KurenaiEngine3D engine(Kurenai::GraphicsAPI::DX11); // またはDX12
     engine.Run();
 
@@ -310,16 +311,30 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     class KurenaiEngine3D : public KurenaiEngineBase
     {
     public:
-        explicit KurenaiEngine3D(GraphicsAPI api = GraphicsAPI::DX11, uint32_t renderWidth = 1280, uint32_t renderHeight = 720);
+        explicit KurenaiEngine3D(
+            GraphicsAPI api = GraphicsAPI::DX11,
+            uint32_t renderWidth = Defaults::RenderWidth,    // 1280
+            uint32_t renderHeight = Defaults::RenderHeight,  // 720
+            size_t initialSceneIndex = 0);
         ~KurenaiEngine3D();
         void Run();
+
+        // グラフィックスAPIの実行時切り替え(下記参照)
+        bool HasPendingGraphicsAPIChange() const;
+        GraphicsAPI GetPendingGraphicsAPI() const;
+        uint32_t GetRenderWidth() const;
+        uint32_t GetRenderHeight() const;
+        size_t GetCurrentSceneIndex() const;
     };
 }</code></pre>
 
 <ul>
 <li><code>renderWidth</code>/<code>renderHeight</code> はG-Bufferなどの内部レンダリング解像度
 (ウィンドウサイズとは独立)。ウィンドウは常に1280x720で開始し、リサイズ可能。表示時はアスペクト比を
-保ってレターボックス/ピラーボックス表示される。</li>
+保ってレターボックス/ピラーボックス表示される。<strong>実行時に「システム」パネルからも変更できる</strong>。</li>
+<li><code>initialSceneIndex</code> は起動時に読み込むシーンの番号
+(<code>Assets/Scenes/*.kscene</code>をファイル名の昇順に並べたときの位置。範囲外なら0へフォールバック)。
+グラフィックスAPIを切り替える際に、同じシーンで作り直すために使う。</li>
 <li><code>Run()</code> を呼ぶと以下を自動的に行う(<strong>設定変更やシーン読み込みはすべて
 ImGuiパネル経由</strong>):
   <ul>
@@ -348,7 +363,47 @@ Reflection Probe Test)。カスタムモデルの追加や、
 シーン一覧の外部からのカスタマイズは現状の公開APIではサポートしていない(<code>Run()</code> を
 呼ぶ以外のカスタマイズ余地がないのが <code>KurenaiEngine3D</code> の設計上の割り切り)。</li>
 <li>コンストラクタに渡した <code>GraphicsAPI</code> に応じてDX11/DX12いずれかのバックエンドで
-動作する。</li>
+動作する。<strong>実行中に「システム」パネルからAPIを切り替えられる</strong>(下記)。</li>
+</ul>
+
+<h3>2.1 グラフィックスAPIの実行時切り替え</h3>
+
+<p>
+「システム」パネルでグラフィックスAPIを変更すると、<code>Run()</code> は<strong>ウィンドウを閉じずに
+戻ります</strong>。呼び出し側はこのオブジェクトを破棄し、新しいAPIで作り直してください
+(デバイスに紐づくリソースをすべて作り直す必要があるため、オブジェクトごと作り直す方式です)。
+</p>
+
+<pre><code>Kurenai::GraphicsAPI api = Kurenai::GraphicsAPI::DX11;
+uint32_t renderWidth = Kurenai::Defaults::RenderWidth;
+uint32_t renderHeight = Kurenai::Defaults::RenderHeight;
+size_t sceneIndex = 0;
+
+for (;;)
+{
+    Kurenai::KurenaiEngine3D engine(api, renderWidth, renderHeight, sceneIndex);
+    engine.Run();
+
+    if (!engine.HasPendingGraphicsAPIChange())
+    {
+        break; // ウィンドウが閉じられた
+    }
+
+    // 作り直しても保ちたい状態を引き継ぐ
+    api = engine.GetPendingGraphicsAPI();
+    renderWidth = engine.GetRenderWidth();
+    renderHeight = engine.GetRenderHeight();
+    sceneIndex = engine.GetCurrentSceneIndex();
+}</code></pre>
+
+<ul>
+<li>ウィンドウは作り直されますが、位置・サイズは <code>window.ini</code> を介して復元されます。</li>
+<li>引き継がれるのは上記3つ(API・内部レンダー解像度・シーン)だけです。
+<strong>AO・シャドウ・IBL・ポストプロセスなどの設定は新しいインスタンスで既定値へ戻ります。</strong></li>
+<li>ログの出力先も切り替わります(<code>KurenaiEngine_DX11.log</code> ⇔
+<code>KurenaiEngine_DX12.log</code>)。同じAPIへ戻ったときは前半のログを消さずに追記します。</li>
+<li>この分岐を実装しない(<code>Run()</code> を1回呼ぶだけの)アプリケーションでは、
+APIを切り替えると<code>Run()</code>が戻ってそのまま終了します。</li>
 </ul>
 </section>
 

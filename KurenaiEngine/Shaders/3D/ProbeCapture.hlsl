@@ -388,7 +388,20 @@ PSOutput PSMain(PSInput input)
     }
     else
     {
-        color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb * materialAO;
+        // AmbientColor.rgbは一様な環境のイラディアンスE相当なので、その環境の放射輝度はL = E / PI。
+        // 拡散項の値は従来と厳密に一致する(DeferredLighting.hlslの同じ分岐と揃えてある)
+        const float3 ambientRadiance = AmbientColor.rgb / PI;
+
+        // 鏡面項を落とすと金属(拡散項が0)が真っ黒に焼き込まれ、そのプローブを引く面の
+        // 反射まで黒くなるため必ず計算する。F0/brdf/energyはPSMain冒頭で既に求めてある
+        const float3 fallbackFssEss = F0 * brdf.x + brdf.y;
+        const float fallbackEss = brdf.x + brdf.y;
+
+        color += albedo * (1.0f - metallic) * ambientRadiance * materialAO
+            + ambientRadiance
+                * (fallbackFssEss * energy.Compensation
+                   + SpecularMultiScatterIBL(F0, fallbackFssEss, fallbackEss, energy.Mode))
+                * SpecularOcclusion(NdotV, roughness, materialAO);
     }
 
     color += emissive;

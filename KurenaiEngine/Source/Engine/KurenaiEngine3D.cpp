@@ -701,9 +701,10 @@ namespace Kurenai
             // glTFのocclusionTexture.strength(既定1.0)。かつては純粋な詰め物(Padding)だった枠を
             // そのまま使っているため、定数バッファのサイズ・オフセットは一切変わっていない
             float OcclusionStrength;
-            // glTFのbaseColorFactor(既定[1,1,1,1])。GBuffer.hlsl/Shadow.hlslはこのフィールドを
-            // 宣言していない(=読まない)ため、末尾に追加してもオフセットへの影響は無い。
-            // Transparent.hlsl(半透明フォワードパス)のみがBaseColorTextureと乗算して使う(14章参照)
+            // glTFのbaseColorFactor(既定[1,1,1,1])。BaseColorTextureと乗算して使う。
+            // GBuffer.hlsl(不透明)・Transparent.hlsl(半透明)・ProbeCapture.hlsl(プローブ焼き込み)
+            // が同じ位置で宣言している。Shadow.hlslは深度しか書かないため先頭までしか宣言していないが、
+            // 定数バッファの末尾を読まないだけなのでレイアウトの不一致にはならない(14章参照)
             float BaseColorFactor[4];
         };
 
@@ -713,8 +714,12 @@ namespace Kurenai
         // emissiveIntensity: シーン全体の自発光の強度倍率(m_EmissiveIntensity)。glTFの
         // emissiveFactorは通常1.0以下に収まるため、これを掛けないとG-Bufferのエミッシブを
         // HDR化しても照明器具の輝度が1.0を超えず、ブルームが効かない
+        // occlusionMapEnabled: マテリアルの遮蔽マップを使うか(m_OcclusionMapEnabled)。
+        // 各パスは lerp(1, occlusionSample, OcclusionStrength) で遮蔽率を求めるため、
+        // ここで0を渡せばシェーダー側に手を入れずに遮蔽マップの寄与だけを消せる
         ObjectConstants MakeObjectConstants(
-            const Assets::ModelInstance& instance, const Assets::Mesh& mesh, float emissiveIntensity)
+            const Assets::ModelInstance& instance, const Assets::Mesh& mesh, float emissiveIntensity,
+            bool occlusionMapEnabled)
         {
             ObjectConstants constants{};
             constants.World = instance.World;
@@ -726,7 +731,7 @@ namespace Kurenai
             constants.EmissiveFactor[0] = mesh.EmissiveFactor[0] * emissiveIntensity;
             constants.EmissiveFactor[1] = mesh.EmissiveFactor[1] * emissiveIntensity;
             constants.EmissiveFactor[2] = mesh.EmissiveFactor[2] * emissiveIntensity;
-            constants.OcclusionStrength = mesh.OcclusionStrength;
+            constants.OcclusionStrength = occlusionMapEnabled ? mesh.OcclusionStrength : 0.0f;
             constants.BaseColorFactor[0] = mesh.BaseColorFactor[0];
             constants.BaseColorFactor[1] = mesh.BaseColorFactor[1];
             constants.BaseColorFactor[2] = mesh.BaseColorFactor[2];
@@ -1083,11 +1088,13 @@ namespace Kurenai
         }
     }
 
-    KurenaiEngine3D::KurenaiEngine3D(GraphicsAPI api, uint32_t renderWidth, uint32_t renderHeight)
+    KurenaiEngine3D::KurenaiEngine3D(
+        GraphicsAPI api, uint32_t renderWidth, uint32_t renderHeight, size_t initialSceneIndex)
         : KurenaiEngineBase(L"Kurenai Engine", 1280, 720, api)
         , m_GraphicsAPI(api)
-        , m_RenderWidth(renderWidth)
-        , m_RenderHeight(renderHeight)
+        , m_InitialSceneIndex(initialSceneIndex)
+        , m_RenderWidth(std::max(1u, renderWidth))
+        , m_RenderHeight(std::max(1u, renderHeight))
     {
         m_ImGuiBackend = m_Device->CreateImGuiBackend(m_Window->GetHandle());
         m_GPUProfiler = m_Device->CreateGPUProfiler();
@@ -1101,7 +1108,11 @@ namespace Kurenai
         // 以降の段階でスタイル・フォント設定をここへ足す前提で順序を固定しておく)
         m_UIManager = std::make_unique<UI::UIManager>(*this);
 
-        m_Camera.SetAspectRatio(static_cast<float>(m_RenderWidth) / static_cast<float>(m_RenderHeight));
+        // アスペクト比はm_RenderAspectを唯一の出所にする(解像度は実行時に変わるため)。
+        // ここではまだUpdateスレッドが動いていないのでm_Cameraへ直接書いてよい
+        m_RenderAspect.store(
+            static_cast<float>(m_RenderWidth) / static_cast<float>(m_RenderHeight), std::memory_order_relaxed);
+        m_Camera.SetAspectRatio(m_RenderAspect.load(std::memory_order_relaxed));
 
         CreateSceneResources();
 
@@ -1781,7 +1792,18 @@ namespace Kurenai
         // (初回フレームより前にシーンが揃う従来の挙動を保つ)。
         // m_LoaderSkyboxPathはCreateSceneResourcesが読み込んだ既定スカイボックスに合わせておく
         m_LoaderSkyboxPath = m_CurrentSkyboxPath;
-        if (std::unique_ptr<LoadedScene> initialScene = LoadSceneOnLoaderThread(0))
+        // 通常は0(ファイル名昇順の先頭)。グラフィックスAPIの切り替えで作り直された場合だけ、
+        // 呼び出し側が切り替え前のシーン番号を渡してくる。範囲外なら先頭へ落とす
+        // (シーン一覧はDiscoverScenesが空でないことを保証済み)
+        if (m_InitialSceneIndex >= m_SceneFilePaths.size())
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "指定された起動シーン番号" + std::to_string(m_InitialSceneIndex) + "が範囲外(シーン数: " +
+                    std::to_string(m_SceneFilePaths.size()) + ")のため先頭のシーンを読み込みます");
+            m_InitialSceneIndex = 0;
+        }
+        if (std::unique_ptr<LoadedScene> initialScene = LoadSceneOnLoaderThread(m_InitialSceneIndex))
         {
             ApplyLoadedScene(*initialScene);
             // ApplyLoadedSceneはUpdateスレッドへの引き渡しとして公開するだけなので、
@@ -2178,6 +2200,33 @@ namespace Kurenai
                 ", バッファ精度=" + (legacyPrecision ? "Legacy8bit" : "HDR") + ")");
     }
 
+    void KurenaiEngine3D::RequestRenderResolution(uint32_t width, uint32_t height)
+    {
+        // 上限はHi-Zのミップ構築・ライトタイル・ブルームピラミッドがいずれも
+        // D3Dのテクスチャ上限(16384)以内で完結することを保証するための保険。
+        // 実際にはそのはるか手前でVRAMが尽きるが、その場合はRender()側が元の解像度へ戻す
+        constexpr uint32_t kMaxRenderSize = 16384;
+        if (width == 0 || height == 0 || width > kMaxRenderSize || height > kMaxRenderSize)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "RequestRenderResolution: 解像度" + std::to_string(width) + "x" + std::to_string(height) +
+                    "が範囲外です(1〜" + std::to_string(kMaxRenderSize) + ")。要求を無視します");
+            return;
+        }
+
+        if (width == m_RenderWidth && height == m_RenderHeight)
+        {
+            // 同じ解像度への要求はレンダーターゲットの作り直し(とTAA履歴の破棄)を伴うだけで
+            // 何も変わらないため無視する
+            return;
+        }
+
+        m_PendingRenderWidth = width;
+        m_PendingRenderHeight = height;
+        m_RenderResolutionDirty = true;
+    }
+
     void KurenaiEngine3D::RequestSceneLoad(size_t sceneIndex)
     {
         if (sceneIndex >= m_SceneFilePaths.size())
@@ -2391,17 +2440,13 @@ namespace Kurenai
         m_TimeOfDay = m_Scene.SunTimeOfDay;
         m_SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
         // .ksceneが持つのは「影を出すか」の真偽値だけなので、手法の選択はエンジン側で決める
-        // (反射のm_ReflectionModeと同じ扱い)。レイトレーシングが使える環境ならそちらを既定にする
-        m_ShadowMode = m_Scene.ShadowEnabled
-            ? (m_RaytracingAvailable ? ShadowMode::Raytraced : ShadowMode::CascadedShadowMap)
-            : ShadowMode::Off;
+        // (反射のm_ReflectionModeと同じ扱い)。規則はDefaultShadowModeに1か所だけ置いてある
+        m_ShadowMode = m_Scene.ShadowEnabled ? DefaultShadowMode(m_RaytracingAvailable) : ShadowMode::Off;
         m_SunEnabled = m_Scene.SunEnabled;
         m_AOEnabled = m_Scene.AOEnabled;
         // .ksceneが持つのは「反射を使うか」の真偽値だけなので、手法の選択はエンジン側で決める。
-        // レイトレーシングが使える環境ならそちらを既定にする(画面外も反射に映るぶん確実に上位のため)
-        m_ReflectionMode = m_Scene.SSREnabled
-            ? (m_RaytracingAvailable ? ReflectionMode::Raytraced : ReflectionMode::ScreenSpace)
-            : ReflectionMode::Off;
+        // 規則はDefaultReflectionModeに1か所だけ置いてある
+        m_ReflectionMode = m_Scene.SSREnabled ? DefaultReflectionMode(m_RaytracingAvailable) : ReflectionMode::Off;
         if (m_Scene.HasIBLIntensityOverride)
         {
             m_IBLIntensity = m_Scene.IBLIntensity;
@@ -2870,8 +2915,11 @@ namespace Kurenai
         // 注意: ウィンドウのドラッグ中(移動・リサイズ)はWindowsが自前のモーダルループを回すため、
         // このループのPumpMessages()は戻ってこない。その間は1フレームも進まず画面が固まる
         // (ドラッグ中は描画不要という方針のためこのままにしている)。
-        // その結果、モニタをまたいだときのUI拡大率の変化はマウスを離した時点でまとめて反映される
-        while (!m_Window->ShouldClose())
+        // その結果、モニタをまたいだときのUI拡大率の変化はマウスを離した時点でまとめて反映される。
+        //
+        // HasPendingGraphicsAPIChange()でも抜ける。この場合ウィンドウは閉じられておらず、
+        // 呼び出し側がこのオブジェクトを破棄して別のAPIで作り直す(ヘッダのコメント参照)
+        while (!m_Window->ShouldClose() && !HasPendingGraphicsAPIChange())
         {
             m_Window->PumpMessages();
             if (m_Window->ShouldClose())
@@ -2905,6 +2953,35 @@ namespace Kurenai
             std::lock_guard<std::mutex> lock(m_LoadedSceneMutex);
             m_LoadedScene.reset();
         }
+    }
+
+    void KurenaiEngine3D::RequestGraphicsAPIChange(GraphicsAPI api)
+    {
+        if (api == m_GraphicsAPI)
+        {
+            return;
+        }
+
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("グラフィックスAPIの切り替えが要求されました: ") +
+                (m_GraphicsAPI == GraphicsAPI::DX12 ? "DX12" : "DX11") + " -> " +
+                (api == GraphicsAPI::DX12 ? "DX12" : "DX11"));
+
+        m_RequestedGraphicsAPI.store(static_cast<int>(api), std::memory_order_relaxed);
+    }
+
+    bool KurenaiEngine3D::HasPendingGraphicsAPIChange() const
+    {
+        return m_RequestedGraphicsAPI.load(std::memory_order_relaxed) >= 0;
+    }
+
+    GraphicsAPI KurenaiEngine3D::GetPendingGraphicsAPI() const
+    {
+        const int requested = m_RequestedGraphicsAPI.load(std::memory_order_relaxed);
+        // 要求が無いときは現在のAPIを返す(呼び出し側がHasPendingGraphicsAPIChangeを
+        // 見ずに呼んでも、少なくとも同じAPIで作り直すだけで済むようにする)
+        return requested < 0 ? m_GraphicsAPI : static_cast<GraphicsAPI>(requested);
     }
 
     void KurenaiEngine3D::TickFrame()
@@ -3154,6 +3231,11 @@ namespace Kurenai
         const bool imguiWantsKeyboard = m_ImGuiWantCaptureKeyboard.load(std::memory_order_relaxed);
         const bool imguiWantsMouse = m_ImGuiWantCaptureMouse.load(std::memory_order_relaxed);
 
+        // 内部レンダー解像度が変わったときのアスペクト比の反映。m_CameraはこのUpdateスレッドしか
+        // 書けないため、解像度を変えるRenderスレッドはm_RenderAspectへ置くだけにしてある
+        // (m_RenderAspectの宣言のコメント参照)。同じ値なら再設定しても副作用は無いので毎フレーム呼ぶ
+        m_Camera.SetAspectRatio(m_RenderAspect.load(std::memory_order_relaxed));
+
         UpdateMouseLook(imguiWantsMouse);
 
         // ライト名のInputTextを編集中にWASDがカメラ移動として解釈されるのを防ぐ
@@ -3218,20 +3300,62 @@ namespace Kurenai
             m_ImGuiWantCaptureMouse.store(frameState.ImGuiVisible && io.WantCaptureMouse, std::memory_order_relaxed);
         }
 
-        // バッファ精度の切り替え要求(RenderPostProcessUIのラジオボタン)をここで処理する。
+        // バッファ精度(デバッグ表示パネルのラジオボタン)と内部レンダー解像度(システムパネル)の
+        // 切り替え要求をここで処理する。
         // レンダーターゲットを破棄する前に、DX12がまだ実行中かもしれない直前数フレームの
         // 描画コマンドを完了させる必要がある(LoadSceneがGPUリソースを破棄する前に
         // WaitForGPUIdleを呼ぶのと同じ理由)。このフレームのGPUコマンドはまだ1つも
-        // 積んでいないため、ここで待っても待ち時間は前フレームぶんだけで済む
-        if (m_BufferPrecisionDirty)
+        // 積んでいないため、ここで待っても待ち時間は前フレームぶんだけで済む。
+        //
+        // ここはApplyPendingResizeの後、かつこのフレームでm_RenderWidth/m_RenderHeightを
+        // 読み始めるより前(最初の読み取りはTAAジッター)なので、解像度をまとめて差し替えてよい
+        if (m_BufferPrecisionDirty || m_RenderResolutionDirty)
         {
+            const bool precisionChanged = m_BufferPrecisionDirty;
             m_BufferPrecisionDirty = false;
+
+            const uint32_t previousWidth = m_RenderWidth;
+            const uint32_t previousHeight = m_RenderHeight;
+            if (m_RenderResolutionDirty)
+            {
+                m_RenderResolutionDirty = false;
+                m_RenderWidth = m_PendingRenderWidth;
+                m_RenderHeight = m_PendingRenderHeight;
+            }
+
             m_Device->WaitForGPUIdle();
-            CreateRenderTargets(m_RenderWidth, m_RenderHeight);
+            try
+            {
+                CreateRenderTargets(m_RenderWidth, m_RenderHeight);
+            }
+            catch (const std::exception& e)
+            {
+                // CreateRenderTargets自身がHDR→Legacy8bitのフォールバックを持つため、ここへ来るのは
+                // 要求した解像度そのものが確保できない場合(高解像度でのVRAM不足など)。
+                // 元の解像度へ戻して作り直す。それも失敗するなら復旧手段が無いのでそのまま送出する
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "内部レンダー解像度" + std::to_string(m_RenderWidth) + "x" + std::to_string(m_RenderHeight) +
+                        "のレンダーターゲット作成に失敗したため、" + std::to_string(previousWidth) + "x" +
+                        std::to_string(previousHeight) + "へ戻します: " + e.what());
+                m_RenderWidth = previousWidth;
+                m_RenderHeight = previousHeight;
+                CreateRenderTargets(m_RenderWidth, m_RenderHeight);
+            }
+
+            // カメラのアスペクト比はUpdateスレッドが読み取って反映する(m_RenderAspectの宣言参照)
+            m_RenderAspect.store(
+                static_cast<float>(m_RenderWidth) / static_cast<float>(m_RenderHeight), std::memory_order_relaxed);
+
+            // PSOはレンダーターゲットのフォーマットだけに依存し解像度には依存しないため、
+            // 作り直すのは精度が変わったときだけでよい。
             // G-Buffer(Emissive)とAO/GIのフォーマットが変わるため、それらへ描くPSOも作り直す。
             // 作り直さないとPSOが宣言するRenderTargetFormatsと実際のRTVがずれ、D3D12では
             // 仕様違反になる(DX11は検証しないため露見しない)
-            CreatePrecisionDependentPipelineStates();
+            if (precisionChanged)
+            {
+                CreatePrecisionDependentPipelineStates();
+            }
         }
 
         auto* commandList = m_Device->GetImmediateCommandList();
@@ -3878,7 +4002,7 @@ namespace Kurenai
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
                                 const ObjectConstants objectConstants =
-                                    MakeObjectConstants(instance, mesh, m_EmissiveIntensity);
+                                    MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -3972,7 +4096,7 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -4230,7 +4354,7 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -4437,7 +4561,7 @@ namespace Kurenai
                         bindPipelineState(instance.IsMirrored);
 
                         const ObjectConstants objectConstants =
-                            MakeObjectConstants(instance, mesh, m_EmissiveIntensity);
+                            MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -4912,7 +5036,7 @@ namespace Kurenai
                     bindPipelineState(draw.Instance->IsMirrored);
 
                     const ObjectConstants objectConstants =
-                        MakeObjectConstants(*draw.Instance, *draw.Mesh, m_EmissiveIntensity);
+                        MakeObjectConstants(*draw.Instance, *draw.Mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 

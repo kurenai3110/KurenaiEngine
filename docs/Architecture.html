@@ -233,6 +233,7 @@
     <li><a href="#rtao">30. レイトレーシングAO / GI</a></li>
     <li><a href="#ddgi">31. DDGI(拡散グローバルイルミネーション)</a></li>
     <li><a href="#launchscripts">32. 起動スクリプト(Run.bat)</a></li>
+    <li><a href="#runtimeswitch">33. 内部レンダー解像度とグラフィックスAPIの実行時切り替え</a></li>
   </ol>
 </nav>
 
@@ -270,6 +271,7 @@ PBR(メタリック/ラフネス)計算を行います。
 シャドウ・AO/GI・SSRはそれぞれON/OFF可能で、OFF時は該当パスをスキップします。
 G-Buffer/SceneColorの解像度はウィンドウサイズから独立しており(<code>KurenaiEngine3D</code>のコンストラクタ引数、既定は1280x720)、
 Presentパスでアスペクト比を保ったままウィンドウに収まるよう拡大縮小します(レターボックス/ピラーボックス)。
+この内部解像度は実行時に「システム」パネルから変更できます(33章)。
 </p>
 <p>
 直接光(太陽光のCook-Torrance PBR、シャドウ適用済み)は専用の直接光パスでHDR(R32G32B32A32_Float)のレンダーターゲットへ書き出し、
@@ -1956,6 +1958,56 @@ IBL全体の寄与が強すぎたため(実機でON/OFF比較したところ、I
 IBLが支配的だったことから、既定強度を下げて調整可能にした)。
 </p>
 
+<h4>14.8.1 フォールバックにも鏡面項を持たせる(金属が真っ黒になる問題)</h4>
+<p>
+当初このフォールバックは<b>拡散項しか持っていなかった</b>。
+<code>diffuseColor = albedo * (1 - metallic)</code>であるため、
+<b>金属(metallic=1)の環境光成分が厳密に0</b>になり、直接光のハイライトだけを残して真っ黒な
+影絵になっていた。ラフネスの低い誘電体も環境のハイライトを完全に失っていた。
+</p>
+<p>
+IBLの有効/無効がGPUへ<code>ShadowParams.z</code>(IBL強度倍率)としてしか伝わらない設計上、
+このフォールバック経路にはプリフィルタ済み鏡面マップが使えない。そこで
+<b><code>AmbientColor</code>を「方向依存を持たない一様な環境」とみなして</b>split-sum近似の第2項
+(BRDF積分LUT。<code>(NdotV, ラフネス)</code>のテーブルであって方向性を持たないため、
+IBLの有効/無効に関わらず使える)を掛けた鏡面を足す。BRDF LUTはエネルギー補正用に
+直接光パスが常時バインドしているため、追加のリソースは要らない。
+</p>
+<p>
+<b>放射輝度への換算に<code>/PI</code>が要る。</b>一様な放射輝度<code>L</code>の環境から受ける
+イラディアンスは<code>E = &pi;L</code>なので、<code>AmbientColor.rgb</code>をイラディアンス相当として
+扱うなら環境の放射輝度は<code>L = AmbientColor.rgb / PI</code>になる。これは拡散項に既に入っている
+<code>/PI</code>と同じ量であり、<b>拡散項の値は従来と数値的に一致する</b>(実測でも背景・地面には
+一切差が出ず、差分は照らされている面にだけ現れた)。
+</p>
+<p>
+同じフォールバックは<code>ProbeCapture.hlsl</code>にも要る。プローブに真っ黒な金属が焼き込まれると、
+そのプローブを引く面の反射まで黒くなるため。<b>不透明パス(<code>DeferredLighting.hlsl</code>)・
+プローブ焼き込み・半透明パスの3つで同じ式を使う</b>こと。
+</p>
+<p>
+なお<code>Transparent.hlsl</code>のフォールバックだけは以前から鏡面項を持っていたが、
+<b><code>/PI</code>が抜けており拡散・鏡面ともに&pi;倍明るかった</b>。3パスで式を揃える際に修正した
+(<code>DeferredLighting.hlsl</code>の拡散側では過去に同じ抜けを修正済みで、同種の取りこぼしである)。
+</p>
+<p>
+このフォールバックは<code>AmbientColor</code>を<b>方向依存を持たない一様な環境</b>とみなすため、
+一様環境では白い完全鏡面(<code>F0=1</code>)と白い完全拡散(アルベド1)がどちらも入射放射輝度を
+そのまま返し、区別が付かなくなる。これはWhite Furnace Testと同じ理屈で、フォールバックの構造上の
+限界であり不具合ではない(映り込むべき環境の模様そのものが存在しないため)。実際、
+<code>OcclusionBakeCompare.kscene</code>でIBLを切ると金属ドラゴンが平坦に見えるが、これは正しい
+挙動である。ただし15.7節の不具合(不透明パスが<code>baseColorFactor</code>を落としていた)が
+重なっていた間は、本来アルベド0.6であるべき隣の誘電体ドラゴンまでアルベド1.0で描かれ、
+<b>金属と誘電体が同じ明るさになって</b>いた。
+</p>
+<p>
+<b>この修正の範囲外</b>: <code>SpecularIBLWeight</code>(<code>ReflectionProbe.hlsli</code>)は末尾で
+<code>iblIntensity</code>を掛けるため、IBLを無効にすると<b>SSR / RT反射の寄与も同時に0になる</b>。
+これを解消するには「IBL有効フラグ」と「IBL強度倍率」をシェーダー定数として分離し、
+20章の「足した量と引く量が一致する」不変条件をIBL無効経路でも張り直す必要がある。
+既定では<code>IBLEnabled = true</code>のため通常利用では表面化しない。
+</p>
+
 <h3>14.9 スペキュラのエネルギー整合(Disney再マップ除去 + マルチスキャッタリング補正)</h3>
 <p>
 Cook-Torrance(GGX)のスペキュラ項<code>f = D&middot;G&middot;F / (4(n&middot;l)(n&middot;v))</code>は、
@@ -2364,15 +2416,20 @@ projectedArea(w) = w.z (1 + &Lambda;(w))     // w.z &lt; 0 でも正になる(&L
 <code>EnergyCompareSun.kscene</code>(環境光0 + 太陽光)。
 </p>
 <p class="note">
-<b><code>F0</code>を<code>metallic</code>だけで振っている理由</b>: 不透明パスは
-<code>baseColorFactor</code>を意図的に適用しない(<code>GBuffer.hlsl</code>はベースカラー
-<b>テクスチャ</b>のみを読み、factorとして<code>ObjectConstants</code>に載っているのは
-<code>metallic</code>と<code>roughness</code>だけ)。そのため<code>baseColorFactor</code>で
-色や黒を指定してもアルベドは常に<code>(1,1,1)</code>になり、有色金属の行や
-「拡散0の黒誘電体」の行はテクスチャを用意しない限り作れない。
-<code>F0 = lerp(0.04, albedo, metallic)</code>なので<code>metallic</code>を振れば
-<code>F0</code>は0.04〜1.0を掃引できる。副作用として<code>metallic</code>が小さい行には
+<b><code>F0</code>を<code>metallic</code>だけで振っている理由</b>: このアセットを作った当時、
+不透明パスは<code>baseColorFactor</code>を適用していなかった(<code>GBuffer.hlsl</code>は
+ベースカラー<b>テクスチャ</b>のみを読み、factorとして<code>ObjectConstants</code>に
+載っているのは<code>metallic</code>と<code>roughness</code>だけだった)。そのため
+<code>baseColorFactor</code>で色や黒を指定してもアルベドは常に<code>(1,1,1)</code>になり、
+有色金属の行や「拡散0の黒誘電体」の行はテクスチャを用意しない限り作れなかった。そこで
+<code>metallic</code>を振って<code>F0</code>を掃引する構成にした
+(<code>F0 = lerp(0.04, albedo, metallic)</code>なので<code>metallic</code>を振れば
+<code>F0</code>は0.04〜1.0を掃引できる)。副作用として<code>metallic</code>が小さい行には
 白い拡散項が乗るが、拡散項は3方式で全く同じなので方式間の差を見る目的には影響しない。
+15.7節の修正で不透明パスも<code>baseColorFactor</code>を適用するようになったため、
+現在は<code>baseColorFactor</code>で有色金属の行も作れる。ただしこのアセットは
+<code>baseColorFactor = [1,1,1,1]</code>のままなので、以下に掲載している測定値は
+修正の前後で変わらない。
 </p>
 <p>
 <b>White Furnace Test(球中心の生HDR値。背景 = 1.0000)</b>
@@ -2732,12 +2789,52 @@ Smith可視性項とスペキュラのエネルギー補正を持ち、<code>Dir
 (glTF仕様どおりの式)でベースカラー/アルファの両方を求める。
 </p>
 <p>
-この反映は<strong>半透明フォワードパスのみ</strong>に限定しており、<code>GBuffer.hlsl</code>
+当初この反映は<strong>半透明フォワードパスのみ</strong>に限定していた。<code>GBuffer.hlsl</code>
 (不透明・MASKカットアウト)は<code>ObjectConstants</code>に<code>BaseColorFactor</code>を
-宣言・使用しておらず、既存の見た目を変えない。オフセットは末尾追加のみのため
-<code>Shadow.hlsl</code>を含む既存シェーダーへの影響も無い(14.6節と同じ「末尾にのみ追加する」
-規約)。不透明マテリアル全般への<code>baseColorFactor</code>適用は、既存シーンの見た目を
-広範囲に変える可能性がある独立した変更と考え、今回のスコープ(半透明描画)には含めていない。
+宣言・使用しておらず、不透明マテリアル全般への<code>baseColorFactor</code>適用は、既存シーンの
+見た目を広範囲に変える可能性がある独立した変更と考えて、当時のスコープ(半透明描画)からは
+外していた。
+</p>
+<p>
+その後、<code>OcclusionBakeCompare.kscene</code>(Chinese Dragon 4体)でIBLを無効にすると、
+右2体の「リフレクタンス=1」の金属ドラゴン(<code>metallic=1</code>・<code>baseColorFactor=(1,1,1,1)</code>)
+と左2体の「ソースのマテリアルのまま」の誘電体ドラゴン(<code>metallic=0</code>・
+<code>baseColorFactor=(0.6,0.6,0.6,1)</code>)がまったく同じ明るさに見える症状が見つかった。
+デバッグ表示の「アルベド」バッファを確認したところ4体すべてが<code>(255,255,255)</code>
+= 1.0になっており、「マテリアル」バッファ側は<code>metallic</code> 0/1・<code>roughness</code>
+1.0/0.251を正しく示していた。つまりG-Bufferのアルベドだけが<code>baseColorFactor</code>を
+落としていた。調べると<b>不透明パスだけがglTF仕様の
+<code>baseColor = baseColorTexture * baseColorFactor</code>を満たしておらず</b>、半透明・
+プローブ焼き込み(<code>ProbeCapture.hlsl</code>)・レイトレーシング
+(<code>RaytracingScene.hlsli</code>経由の<code>RTReflection.hlsl</code>/<code>RTAO.hlsl</code>)の
+各パスとは同じメッシュでも色が食い違う内部不整合になっていた。これを受けて
+<code>GBuffer.hlsl</code>にも<code>BaseColorFactor</code>を追加し、
+<code>baseColorSample = BaseColorTexture.Sample(MaterialSampler, input.UV) * BaseColorFactor</code>
+とした。<code>BaseColorTextureIndex</code>が無いマテリアルには白1x1のプレースホルダーが
+差さるため、この乗算1回で「テクスチャのみ」「係数のみ」「両方」のすべてのケースが正しく
+扱える。<code>Shadow.hlsl</code>は深度しか書かず<code>ObjectConstants</code>を途中までしか
+宣言していないため変更不要(定数バッファの末尾を読まないだけで、レイアウト不一致にはならない)。
+</p>
+<p>
+影響は実測で確認した。<b>Sponza</b>はglTFの全25マテリアルが<code>baseColorFactor = [0.588, 0.588, 0.588, 1]</code>
+を宣言しており、修正前はアルベドが約1.7倍明るく描画されていた(平均輝度31.45→23.18、比0.737。
+差が2を超えた画素は84.9%、最大差27)。<b>Bistro Interior</b>は66メッシュのうち
+<code>baseColorFactor</code>が<code>(1,1,1,1)</code>でない不透明メッシュが2つしか無いため影響はごく小さい
+(平均輝度10.74→10.73、比0.999。差が2を超えた画素は0.2%、最大差14)。
+<b>Chinese Dragon</b>の比較シーンでは金属ドラゴン2体(<code>baseColorFactor=(1,1,1,1)</code>)は
+修正前後で数値が完全に一致し、誘電体ドラゴン2体はアルベド0.6相当に暗くなって
+(52.40→35.52、50.40→33.83)金属との差が明確になった。
+<b>White Furnace Test・Energy Compare Test・Material Test・Occlusion Test・Probe Test</b>の
+アセットは<code>baseColorFactor</code>がすべて<code>[1,1,1,1]</code>のため、これらの検証シーンの
+過去の測定値はこの修正の影響を受けない。
+</p>
+<p class="note">
+<b>既知の副作用</b>: Bistro Interiorに<code>Kd = 0,0,0</code>かつ拡散テクスチャ
+(<code>Metal_Chrome_01_Diff</code>)を持つ不透明メッシュが1つあり、これは真っ黒になる。
+WavefrontMTL(OBJ)の<code>Kd</code>と<code>map_Kd</code>の意味づけの曖昧さ(多くのレンダラは
+<code>map_Kd</code>があるとき<code>Kd</code>を無視する)に由来するもので、KurenaiPackerがOBJの
+<code>AI_MATKEY_COLOR_DIFFUSE</code>を<code>BaseColorFactor</code>へ入れている仕様側の問題。
+glTFにはこの曖昧さは無い。
 </p>
 <h3>15.8 鏡面反射を減衰させない合成(事前乗算済みアルファ)</h3>
 <p>
@@ -2810,12 +2907,10 @@ IBL 3枚の計12個になったため、DX12のルートシグネチャの
 </p>
 <p>
 <b>Enable IBL無効時のフォールバック</b>: <code>DeferredLighting.hlsl</code>と同じく
-<code>ShadowParams.z</code>(IBL強度倍率、無効なら0)で分岐する。拡散はIBL導入以前と同じ
-定数色アンビエントに戻すが、<b>鏡面項は0にせず</b>、同じ定数色を「方向依存を持たない一様な
-環境radiance」とみなしてsplit-sum近似の第2項(BRDF積分LUT。方向性を持たない
-(NdotV, ラフネス)のテーブルなのでIBLの有効/無効に関わらず使える)を掛けた値を使う。
+<code>ShadowParams.z</code>(IBL強度倍率、無効なら0)で分岐し、拡散・鏡面とも
+「<code>AmbientColor.rgb / PI</code>を一様な環境放射輝度とみなす」同一の式を使う(14.8.1節)。
 鏡面項を0にしてしまうと、金属(拡散項が0になる)が環境光の下で真っ黒になり、
-ラフネスの低いガラスもハイライトを完全に失うため。
+ラフネスの低いガラスもハイライトを完全に失うため必ず計算する。
 </p>
 <h3>15.10 既知の制約</h3>
 <ul>
@@ -5171,6 +5266,33 @@ AOを持たないパスへ無条件に掛けても見た目が変わらないこ
 <code>map_Ka</code>が<code>*_diff.png</code>を指していた。これを遮蔽率として採用すると、
 アルベドがそのまま環境光の減衰係数として掛かり、色付きで極端に暗い絵になる。</p>
 
+<h3>22.4.1 実行時に遮蔽マップだけを切るトグル</h3>
+
+<p>
+「レンダリング」パネルの<b>AO / 間接光を有効にする</b>(<code>m_AOEnabled</code>)は
+スクリーンスペースAO/GI(SSAO / SSIL / RTAO)専用で、無効にしても
+<code>m_AODisabledTexture</code>(遮蔽なし・間接光なし)が差し替わるだけであり、
+G-Bufferの<code>material.b</code>に載った<b>遮蔽マップは素通しで効き続ける</b>。
+遮蔽マップの寄与だけを切って見比べる手段が無かったため、
+<code>m_OcclusionMapEnabled</code>(既定ON)を別系統のトグルとして追加した。
+</p>
+
+<p>
+実装は<b>シェーダー側に一切手を入れていない</b>。各パスは
+<code>lerp(1, occlusionSample, OcclusionStrength)</code>で遮蔽率を求めるので、
+<code>OcclusionStrength</code>に0を渡せば<code>lerp(1, ao, 0) = 1</code>(遮蔽なし)になる。
+<code>ObjectConstants</code>を組み立てるのは<code>MakeObjectConstants()</code>の1箇所だけなので、
+ここで<code>occlusionMapEnabled ? mesh.OcclusionStrength : 0.0f</code>とするだけで
+G-Buffer・シャドウ・プローブ焼き込み・半透明の全パスへ同時に効く。
+<code>FrameConstants</code>へフラグを足して3つのシェーダーを書き換えるより変更が小さく、
+定数バッファのレイアウトも動かさずに済む。
+</p>
+
+<p>
+<b>反射プローブには即座に反映されない。</b>プローブにはキャプチャ時点の値が焼き込まれているため、
+反射へ反映するには「焼き直す」が要る。UIのツールチップにも明記してある。
+</p>
+
 <h3>22.5 検証</h3>
 
 <p>Sponza・Bistroなど同梱のアセットはいずれも遮蔽マップを持たないため、検証には
@@ -7398,6 +7520,141 @@ ASCIIしか含まない<code>RunDX11.bat</code> / <code>RunDX12.bat</code>側で
 カレントディレクトリ自体は出力フォルダへ移しておく(初期化失敗時の<code>error.log</code>が
 cwd相対で書かれるため、エンジンのログと同じ場所に集まる)</li>
 </ul>
+</section>
+
+<section id="runtimeswitch">
+<h2>33. 内部レンダー解像度とグラフィックスAPIの実行時切り替え</h2>
+
+<h3>33.1 内部レンダー解像度</h3>
+
+<p>
+内部レンダー解像度(<code>m_RenderWidth</code> / <code>m_RenderHeight</code>)はコンストラクタでしか
+設定されず、Sample3Dが引数を渡していなかったため事実上1280x720固定だった。ウィンドウをいくら
+広げても内部解像度は変わらず、Presentパスが拡大表示するだけである(1章)。
+</p>
+
+<p>
+反映は<strong>既存のバッファ精度切り替えとまったく同じ枠</strong>に乗せた。UI(Renderスレッド)は
+<code>RequestRenderResolution()</code>で要求を記録するだけにし、実際の作り直しは<code>Render()</code>の
+先頭で<code>m_Device-&gt;WaitForGPUIdle()</code>を挟んで行う。レンダーターゲットを破棄する前に、
+DX12がまだ実行中かもしれない直前数フレームの描画コマンドを完了させる必要があるためで、
+これは<code>LoadScene</code>がGPUリソースを破棄する前に待つのと同じ理由である。
+</p>
+
+<p>
+この位置は<code>ApplyPendingResize()</code>の後、かつそのフレームで<code>m_RenderWidth</code>を
+読み始めるより前(最初の読み取りはTAAジッター)にある。<strong>フレームの途中で解像度を
+変えてはならない</strong>——<code>Render()</code>の中では、コンピュートシェーダーのスレッド数計算・
+定数バッファの<code>ScreenParams</code>・TAAジッター・Hi-Zのミップ段数・レターボックスの計算と
+20箇所ほどから読まれるため、途中で値が変わると同一フレーム内で食い違う。
+</p>
+
+<p>
+解像度に依存するリソースは<code>CreateRenderTargets()</code>が<strong>すべて</strong>作り直す
+(G-Buffer一式・DirectLight・SSAO/SSIL・SceneColor・SSR・RT系・Tonemap・TAA履歴・
+Hi-Zミップチェーン・タイルライトカリングのライトグリッド・ブルームピラミッド)。
+TAA履歴の破棄(<code>m_TAAHistoryValid = false</code>)も同関数の中で行われるため、
+呼び出し側で追加の後始末は要らない。一方<strong>PSOは作り直さない</strong>——PSOが宣言するのは
+レンダーターゲットの<em>フォーマット</em>だけで解像度に依存しないため、
+<code>CreatePrecisionDependentPipelineStates()</code>はバッファ精度が変わったときだけ呼ぶ。
+</p>
+
+<p>
+確保に失敗した場合(高解像度でのVRAM不足など)は例外を捕まえて<strong>元の解像度で作り直し</strong>、
+<code>Logger::Error</code>を残して要求を捨てる。<code>CreateRenderTargets</code>自身が持つ
+HDR→Legacy8bitのフォールバックと同じ「起動できなくなるよりはよい」方針である。
+</p>
+
+<p>
+<strong>カメラのアスペクト比だけはRenderスレッドから直接書けない。</strong><code>m_Camera</code>は
+Updateスレッドだけが書き、<code>Render()</code>は<code>FrameState</code>のスナップショット経由でしか
+読まないという不変条件があるため(26章)。そこで<code>std::atomic&lt;float&gt; m_RenderAspect</code>を
+置き、解像度を変えたRenderスレッドはここへ書くだけにして、Updateスレッドが毎フレーム読み取って
+<code>m_Camera.SetAspectRatio()</code>を呼ぶ。<code>ApplyLoadedScene</code>が初期カメラを
+atomic経由で渡しているのと同じ作法である。
+</p>
+
+<h3>33.2 グラフィックスAPIの切り替え——デバイスではなくエンジンごと作り直す</h3>
+
+<p>
+DX11/DX12の切り替えは、<code>m_Device</code>だけを差し替えるのではなく
+<strong><code>KurenaiEngine3D</code>オブジェクトごと破棄して作り直す</strong>方式にした。
+</p>
+
+<p>
+デバイスだけを差し替える案を採らなかったのは、<code>KurenaiEngine3D</code>がデバイス由来の
+<code>unique_ptr</code>を150個以上(テクスチャ・シェーダー・PSO・バッファ)と<code>m_Scene</code> /
+<code>m_RaytracingScene</code>を抱えているためである。<code>ReleaseDeviceResources()</code>のような
+解放関数を手書きすると、以後メンバを1つ足すたびにそこへ追記しなければならず、
+<strong>忘れても何もエラーが出ないまま壊れる</strong>二重管理になる。
+</p>
+
+<p>
+オブジェクトごと破棄すれば、必要な破棄順序が<strong>C++のメンバ破棄順そのもの</strong>として
+言語に保証される——派生クラスのメンバ(全リソース・シーン・ImGuiバックエンド・GPUプロファイラ)
+→ 基底の<code>m_SwapChain</code> → <code>m_Device</code> → <code>m_Window</code>。
+DX12のリソースは破棄時にデバイスのディスクリプタヒープへハンドルを返すため、
+「リソースより先にデバイスを壊さない」というこの順序が守られていなければならない。
+</p>
+
+<p>
+呼び出し側(<code>Samples/Sample3D/Source/Main.cpp</code>)はループで作り直す。
+<code>Run()</code>はループ条件に<code>!HasPendingGraphicsAPIChange()</code>を足してあり、
+UIから<code>RequestGraphicsAPIChange()</code>が呼ばれるとウィンドウを閉じずに戻る。
+引き継ぐのは切り替え先のAPI・内部レンダー解像度・シーン番号の3つだけで、
+それ以外の設定は新しいインスタンスで既定値へ戻る(全設定を保つには設定のシリアライズが要る)。
+</p>
+
+<p>
+再生成に耐える前提は元から揃っていた。ウィンドウクラスの登録は
+<code>ERROR_CLASS_ALREADY_EXISTS</code>を許容済みで、ウィンドウ配置はデストラクタで
+<code>window.ini</code>へ保存され次のコンストラクタが復元し(24章)、ImGuiコンテキストは
+各バックエンドのデストラクタで<code>DestroyContext()</code>される。
+<code>Run()</code>もRender/Loaderスレッドをjoinしてから戻る(26章)。
+</p>
+
+<h3>33.3 WM_QUITの残骸で新しいウィンドウが即座に閉じた</h3>
+
+<p>
+実装直後、<strong>DX12へ切り替えるとデバイス生成もシーン読み込みも成功した直後にプロセスが
+終了する</strong>という現象が出た。ログには初期化が最後まで通り、高速化構造の構築まで終わってから
+「ウィンドウ配置を保存しました」が続いていた——つまりクラッシュではなく<em>正常終了</em>していた。
+</p>
+
+<p>
+原因は<code>WM_QUIT</code>が<strong>ウィンドウではなくスレッドのメッセージキューに属する</strong>ことである。
+</p>
+
+<ol>
+<li>古い<code>Window</code>のデストラクタが<code>DestroyWindow()</code>を呼ぶ</li>
+<li><code>DestroyWindow()</code>は<code>WM_DESTROY</code>を<strong>同期的に</strong>WndProcへ送る</li>
+<li>WndProcの<code>WM_DESTROY</code>ハンドラが<code>PostQuitMessage(0)</code>を呼び、
+<code>WM_QUIT</code>が<strong>スレッドの</strong>キューへ積まれる</li>
+<li>新しい<code>Window</code>を作って<code>Run()</code>を始めると、最初の
+<code>PumpMessages()</code>がその<code>WM_QUIT</code>を拾って<code>m_ShouldClose = true</code>にする</li>
+</ol>
+
+<p>
+プロセスが1つのウィンドウしか作らない前提では、この<code>WM_QUIT</code>は誰にも読まれないまま
+プロセスが終わるので無害だった。ウィンドウを作り直す経路ができて初めて表面化した。
+</p>
+
+<p>
+対処は<code>Window::~Window()</code>で<code>DestroyWindow()</code>の直後に
+<code>PeekMessageW(&amp;msg, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE)</code>を1回呼び、
+自分の破棄が生んだ<code>WM_QUIT</code>を取り除くこと。通常の終了経路ではこの後もう誰も
+メッセージを汲まないため、取り除いても影響はない。
+</p>
+
+<h3>33.4 ログファイルの追記</h3>
+
+<p>
+<code>Logger</code>はログファイルを常に<code>std::ios::trunc</code>で開いていたため、
+DX11 → DX12 → DX11 と切り替えると<code>Logger::SetFileSuffix</code>が同じ接尾辞で開き直し、
+1回目のDX11のログが消えていた。「そのプロセスで初めて開く接尾辞なら<code>trunc</code>、
+2回目以降は<code>app</code>」になるよう、開いた接尾辞の集合を持って分岐させている。
+起動ごとにログを作り直す従来の挙動はそのまま保たれる。
+</p>
 </section>
 
 </main>
