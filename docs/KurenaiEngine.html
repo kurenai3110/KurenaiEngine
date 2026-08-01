@@ -1083,6 +1083,9 @@ ImGuiの「Reflection Probes」パネルにある<strong>「Use Depth Cube」</s
 焼き直しが集中します)。
 <strong>Realtime</strong>は毎フレーム1面ずつ焼き直し、6面揃った時点で次のプローブへ回ります
 (パネルに現在どのプローブの何面目を焼いているかが表示されます)。
+なお<strong>時刻を大きく動かして場面全体の明るさが2倍以上変わったときだけは、<code>Baked</code>でも
+自動で焼き直します</strong>。プローブには焼いた時点の明るさの数値が入っているため、これを持ち越すと
+反射だけが桁違いの明るさになってしまうためです。
 各方式のコストはImGuiの「Profiler」パネルで<code>ProbeBake0</code>/<code>ProbeBake1</code>、
 <code>ProbeRealtimeCapture</code>、<code>ProbeRealtimeConvolve</code>として比較できます。同パネルの「Parallax Correction」「Probe Blending」で
 視差補正・ブレンドの有無を切り替えて見比べることもできます。上限は8個で、超えた分は警告ログを

@@ -84,7 +84,9 @@ namespace Kurenai
             // 反射プローブの距離キューブ用(末尾に追加、19.12節)。x=視差補正に距離キューブを使うフラグ、
             // y=距離キューブによる遮蔽判定(光漏れ抑制)の有効フラグ、z=距離キューブの1面の解像度
             // (テクセル。ReflectionProbe.hlsliのProbeDistanceBiasが1テクセル幅の見積もりに使う。
-            // ハードコードせずここから渡すのは、kProbeCaptureSizeを変えたときに黙ってずれないため)、w=未使用
+            // ハードコードせずここから渡すのは、kProbeCaptureSizeを変えたときに黙ってずれないため)、
+            // w=焼いた時点の実効プリ露出から現在の実効プリ露出への換算倍率(19.14節。
+            // m_ProbeBakedExposureEV100のコメントに理由がある)
             DirectX::XMFLOAT4 ProbeParams2;
             // DDGI用(末尾に追加、22章)。サンプリング側(DeferredLighting.hlsl)が必要とする値だけを
             // 置く。ヒステリシスや最大レイ距離は焼く側にしか要らないのでDDGIUpdateConstantsが持つ。
@@ -792,6 +794,11 @@ namespace Kurenai
             // 測光値の上側クランプ(構図依存を抑える。AutoExposure.hlsl参照)
             float KeyReferenceEV100;
             float KeyCeilingEV;
+
+            // 0以外なら順応を飛ばして測光値へ即座に合わせる(シーン切り替え時。
+            // m_AutoExposureResetRequested参照)
+            float ResetAdaptation;
+            float Padding[3];
         };
 
         // HiZ.hlsl側のcbuffer HiZConstantsと一致させる必要がある
@@ -1894,6 +1901,11 @@ namespace Kurenai
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
         m_TimeOfDay = m_Scene.SunTimeOfDay;
         m_SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
+        // 露出の追従状態はシーンをまたいで持ち越さない。時刻が入れ替わると実効プリ露出は
+        // 最大18段跳ぶため、追従の途中で反射プローブが焼かれると桁違いの明るさで固定される
+        // (m_ProbeBakedExposureEV100・m_AutoExposureResetRequestedのコメント参照)
+        m_EffectiveExposureInitialized = false;
+        m_AutoExposureResetRequested = true;
         m_ShadowEnabled = m_Scene.ShadowEnabled;
         m_SunEnabled = m_Scene.SunEnabled;
         m_AOEnabled = m_Scene.AOEnabled;
@@ -2834,6 +2846,28 @@ namespace Kurenai
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
         constants.IBLParams = { m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
 
+        // === 実効プリ露出が大きく動いたら、更新モードに関わらずプローブを焼き直す(19.14節) ===
+        // 下のProbeParams2.wは「焼いた時点の露出→現在の露出」の換算倍率で、これだけでも
+        // プローブの値の解釈は常に正しくなる。ただし換算はあくまで**焼いた時点の環境**を
+        // 正しい明るさで見せるだけなので、昼に焼いたプローブを夜の場面へ持ち込めば
+        // 「夜の部屋に昼の環境が正しい明るさで映り込む」ことになり、換算前より派手に破綻する
+        // (実測: ProbeTestを夜にしたときの平均輝度が213.6→253.9、白飽和78%)。
+        //
+        // 実効プリ露出が大きく動くのは時刻が大きく動いたときなので、そのときは環境そのものが
+        // 古くなっている。Bakedモードが凍結すると宣言しているのはライトやマテリアルの編集に
+        // 対してであって、場面全体の明るさが2倍以上変わってもなお昼の映り込みを保持することでは
+        // ない。手続き空が同じ理由で焼き直しているのと揃える(閾値は空の0.05段よりずっと粗く
+        // 取ってある。フルベイクはプローブ数×6面の描画になるため)。
+        // Realtimeは毎フレーム焼き直しているので対象外
+        if (m_ProbeUpdateMode != ProbeUpdateMode::Realtime && m_ProbeBaked && !m_ReflectionProbes.empty() &&
+            std::abs(m_EffectiveExposureEV100 - m_ProbeBakedExposureEV100) > kProbeRebakeExposureEV)
+        {
+            m_ProbeBakeRequested = true;
+            // このフレームの後半で今の露出で焼かれるため、換算倍率もここで合わせておく。
+            // ここで合わせないと、焼き直したフレームだけ1フレーム古い倍率が掛かって明滅する
+            m_ProbeBakedExposureEV100 = m_EffectiveExposureEV100;
+        }
+
         // 反射プローブの影響範囲をt13のStructuredBufferへ渡す。まだ一度も焼けていない場合
         // (m_ProbeBaked=false)や機能を無効にしている場合はプローブ数を0にして、シェーダー側の
         // 選択ループ自体を回さない=中身が未定義のキューブマップを引かせないようにする
@@ -2874,7 +2908,13 @@ namespace Kurenai
             m_ProbeDepthParallaxEnabled ? 1.0f : 0.0f,
             m_ProbeOcclusionEnabled ? 1.0f : 0.0f,
             static_cast<float>(kProbeCaptureSize),
-            0.0f,
+            // 焼いた時点の実効プリ露出から現在の実効プリ露出への換算倍率
+            // (m_ProbeBakedExposureEV100のコメント参照)。ComputeExposure(ev)=1/(1.2*2^ev)
+            // なので、比は 2^(焼いたEV - 現在のEV) になる。
+            // フルベイクが走るフレームだけは1フレームぶん古い倍率になるが、それが問題になるのは
+            // 「焼き直しと大きな露出変化が同じフレームで起きる」ときだけで、シーン読み込み時は
+            // 上のm_EffectiveExposureInitialized=falseで露出が既に確定しているため起きない
+            std::exp2(m_ProbeBakedExposureEV100 - m_EffectiveExposureEV100),
         };
 
         // DDGI(22章)。一度も焼けていない間はアトラスの中身が未定義なので無効にしておく
@@ -3414,6 +3454,8 @@ namespace Kurenai
             // プローブが有効になるよう、ここでフラグだけ立てる
             m_ProbeBaked = true;
             m_ProbeBakeSignature = ComputeProbeBakeSignature();
+            // このフレームの実効プリ露出で焼かれるので、読み出し側の換算倍率もここで更新する
+            m_ProbeBakedExposureEV100 = m_EffectiveExposureEV100;
             // 全プローブが今焼けたので、時間分割は先頭から仕切り直す
             m_ProbeRealtimeProbeIndex = 0;
             m_ProbeRealtimeFace = 0;
@@ -3470,6 +3512,10 @@ namespace Kurenai
             // 常に焼き直しているのでOnDemandの署名も追随させておく。こうしておかないと
             // Realtimeから切り替えた直後に不要なフルベイクが1回走る
             m_ProbeBakeSignature = ComputeProbeBakeSignature();
+            // 露出の換算倍率も追随させる。1面ずつ焼くため厳密には面ごとに焼いた露出が違うが、
+            // 実効プリ露出の変化は毎秒2倍程度(m_EffectiveExposureAdaptSpeed)なので
+            // 6フレームぶんのずれは数%にとどまり、常時焼き直している以上すぐ解消する
+            m_ProbeBakedExposureEV100 = m_EffectiveExposureEV100;
         }
 
         // --- DDGIのプローブ更新(22章) ---
@@ -4179,11 +4225,17 @@ namespace Kurenai
         //     結果はm_ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
         if (m_AutoExposureEnabled)
         {
+            // シーン切り替え直後の1回だけ順応を飛ばす。パスを積んだ時点で消費しておくことで、
+            // Executeが呼ばれる保証(グラフの枝刈り)に依存せず必ず1回で消える
+            const bool resetAdaptation = m_AutoExposureResetRequested;
+            m_AutoExposureResetRequested = false;
+
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AutoExposure",
                 .Reads = { hdrSceneColor, m_GBufferDepth.get() },
                 .Writes = { m_ExposureTexture.get() },
-                .Execute = [this, hdrSceneColor, keyReferenceEV100, usingProceduralSky](RHI::IRHICommandList* cmd)
+                .Execute = [this, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation](
+                    RHI::IRHICommandList* cmd)
                 {
                     AutoExposureConstants autoExposureConstants{};
                     autoExposureConstants.InputSize = { m_RenderWidth, m_RenderHeight };
@@ -4216,6 +4268,7 @@ namespace Kurenai
                     autoExposureConstants.KeyReferenceEV100 = keyReferenceEV100;
                     autoExposureConstants.KeyCeilingEV =
                         usingProceduralSky ? m_AutoExposureKeyCeilingEV : 1.0e4f;
+                    autoExposureConstants.ResetAdaptation = resetAdaptation ? 1.0f : 0.0f;
                     cmd->UpdateBuffer(m_AutoExposureConstantBuffer.get(), &autoExposureConstants, sizeof(autoExposureConstants));
 
                     // 1) ヒストグラムをゼロクリア
