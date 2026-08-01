@@ -46,10 +46,34 @@ namespace Kurenai
     class KURENAI_3D_API KurenaiEngine3D : public KurenaiEngineBase
     {
     public:
-        explicit KurenaiEngine3D(GraphicsAPI api = GraphicsAPI::DX11, uint32_t renderWidth = 1280, uint32_t renderHeight = 720);
+        // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
+        //   実行時に「システム」パネルからも変更できる)。
+        // initialSceneIndex: 起動時に読み込むシーンの番号(Assets/Scenes/*.ksceneをファイル名の
+        //   昇順に並べたときの位置)。範囲外なら0にフォールバックする。
+        //   グラフィックスAPIを切り替える際、呼び出し側が同じシーンで作り直すために使う
+        explicit KurenaiEngine3D(
+            GraphicsAPI api = GraphicsAPI::DX11, uint32_t renderWidth = Defaults::RenderWidth,
+            uint32_t renderHeight = Defaults::RenderHeight, size_t initialSceneIndex = 0);
         ~KurenaiEngine3D();
 
         void Run();
+
+        // --- グラフィックスAPIの実行時切り替え ---
+        // Run()の中でUI(「システム」パネル)からRequestGraphicsAPIChange()が呼ばれると、
+        // Run()はウィンドウを閉じずにループを抜けて戻る。呼び出し側は下の2つを見て、
+        // このオブジェクトを破棄してから新しいAPIで作り直すこと(Samples/Sample3D/Source/Main.cpp)。
+        //
+        // デバイスだけを差し替えるのではなくオブジェクトごと作り直すのは、破棄の順序
+        // (派生クラスの全リソース → スワップチェーン → デバイス → ウィンドウ)を
+        // C++のメンバ破棄順にそのまま任せられるため。手書きの解放関数にすると、
+        // メンバを追加したときに解放漏れが静かに発生する
+        bool HasPendingGraphicsAPIChange() const;
+        GraphicsAPI GetPendingGraphicsAPI() const;
+        // 作り直しへ引き継ぐ状態。上記以外の設定(AO・シャドウ・IBL・ポストプロセス等)は
+        // 新しいインスタンスで既定値に戻る
+        uint32_t GetRenderWidth() const { return m_RenderWidth; }
+        uint32_t GetRenderHeight() const { return m_RenderHeight; }
+        size_t GetCurrentSceneIndex() const { return m_CurrentSceneIndex; }
 
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
         // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
@@ -177,6 +201,10 @@ namespace Kurenai
         // 実際の読み込みはLoaderスレッドが行うため即座に戻る。
         // 読み込み中に再度要求された場合は新しい要求で上書きされる(最後の要求が勝つ)
         void RequestSceneLoad(size_t sceneIndex);
+        // 内部レンダー解像度の変更を要求する(SystemPanel = Renderスレッドから呼ばれる)。
+        // レンダーターゲットの作り直しはGPUがそれらを参照していない状態で行う必要があるため、
+        // ここでは要求を記録するだけにしてRender()の先頭でまとめて反映する
+        void RequestRenderResolution(uint32_t width, uint32_t height);
         // Renderスレッドがフレーム先頭で呼ぶ。保留中の切り替え要求の発注と、
         // 出来上がったシーンの取り込みを行う
         void UpdateSceneStreaming();
@@ -233,6 +261,16 @@ namespace Kurenai
         // 起動時に選択されたグラフィックスAPI(タイトルバー・ImGui表示用に保持)
         GraphicsAPI m_GraphicsAPI;
 
+        // 「システム」パネルから要求された切り替え先のAPI。-1なら要求なし。
+        // UI(Renderスレッド)が書き、Run()のループ条件(Updateスレッド)が読むためatomic。
+        // 実際の作り直しはRun()から戻った後に呼び出し側が行う(上のHasPendingGraphicsAPIChange参照)
+        std::atomic<int> m_RequestedGraphicsAPI{ -1 };
+        void RequestGraphicsAPIChange(GraphicsAPI api);
+
+        // 起動時に読み込むシーンの番号。コンストラクタ引数をそのまま保持する
+        // (APIを切り替えても同じシーンで再開できるようにするため)
+        size_t m_InitialSceneIndex = 0;
+
         // ImGuiのIniFilenameはポインタを保持するだけでコピーしないため、文字列の寿命をここで維持する。
         // m_ImGuiBackendのデストラクタ(ImGui::DestroyContextで最終保存)より後に破棄されるよう、
         // メンバ破棄順(宣言の逆順)に従いm_ImGuiBackendより前で宣言する
@@ -259,9 +297,23 @@ namespace Kurenai
         // 各パスのコマンド記録にかかるCPU時間の計測(RHIに依存しないためDX11/DX12を直接比較できる)
         Core::CPUProfiler m_CPUProfiler;
 
-        // G-Bufferの内部解像度。ウィンドウサイズとは独立しており、表示時はアスペクト比を保って拡大縮小する
+        // G-Bufferの内部解像度。ウィンドウサイズとは独立しており、表示時はアスペクト比を保って拡大縮小する。
+        // Render()の各所(Dispatchのスレッド数・定数バッファのScreenParams・TAAジッター・
+        // Hi-Zのミップ・レターボックス)から読まれるため、フレームの途中で変えてはならない。
+        // 変更はm_RenderResolutionDirty経由でフレーム先頭にまとめて反映する
         uint32_t m_RenderWidth;
         uint32_t m_RenderHeight;
+        // 「システム」パネルから要求された新しい内部解像度。Render()の先頭で反映する。
+        // m_BufferPrecisionDirtyとまったく同じ扱い(レンダーターゲットの作り直しはGPUがそれらを
+        // 参照していない状態で行う必要があるため、UI関数の中では実行しない)
+        uint32_t m_PendingRenderWidth = 0;
+        uint32_t m_PendingRenderHeight = 0;
+        bool m_RenderResolutionDirty = false;
+        // 内部解像度から決まるカメラのアスペクト比。
+        // m_CameraはUpdateスレッドしか書けない(Render()はFrameStateのスナップショット経由でしか
+        // 読まない)ため、解像度を変えるRenderスレッドからはここへ置くだけにし、
+        // Updateスレッドが毎フレーム読み取ってm_Camera.SetAspectRatio()を呼ぶ
+        std::atomic<float> m_RenderAspect{ 1.0f };
 
         // 中間バッファの精度構成。HDRが本来採用したい構成で、Legacy8bitはM7以前の
         // 「中間バッファはすべてR8G8B8A8_UNorm」だった構成を再現する比較用の経路。
@@ -325,6 +377,12 @@ namespace Kurenai
         };
         bool m_AOEnabled = Defaults::AOEnabled;
         AOTechnique m_AOTechnique = AOTechnique::SSAO;
+        // マテリアルの遮蔽マップ(glTFのocclusionTexture。22章)を使うか。
+        // 上のm_AOEnabled(スクリーンスペースAO/GI)とは完全に別系統で、無効にしても遮蔽マップは
+        // 効き続けるためこのトグルを別に持つ。無効時はObjectConstants.OcclusionStrengthへ0を渡し、
+        // 各パスのlerp(1, occlusionSample, 0) = 1(遮蔽なし)にする方式なのでシェーダー側の変更は不要。
+        // 反射プローブはキャプチャ時の値が焼き込まれるため、切り替えても焼き直すまで反映されない
+        bool m_OcclusionMapEnabled = Defaults::OcclusionMapEnabled;
         std::unique_ptr<RHI::IRHITexture> m_AODisabledTexture; // AO無効時に使う、遮蔽なし・間接光なしのテクスチャ
 
         // AO/GI共通のブラーパス(4x4ボックスブラーでrgba全チャンネルを均す。SSAO/SSIL両方から使い回す)
@@ -410,9 +468,20 @@ namespace Kurenai
             ScreenSpace, // SSR(SSR.hlsl)。画面に映っているものだけが反射に映る
             Raytraced,   // RT反射(RTReflection.hlsl)。画面外も映るが、DX12かつDXR Tier 1.1が要る
         };
+        // レイトレーシングの可否から反射の既定の手法を決める。
+        // シーン読み込み(ApplyLoadedScene)とUIの「既定値に戻す」が同じ規則でなければ
+        // 「既定へ戻したのに起動直後と違う」ことになるため、規則をここ1か所に置く
+        static constexpr ReflectionMode DefaultReflectionMode(bool raytracingAvailable)
+        {
+            // 画面外も反射に映るRTが使えるなら常にそちら。使えない環境でSSRへ落とすかは既定値で決める
+            return raytracingAvailable
+                ? ReflectionMode::Raytraced
+                : (Defaults::SSREnabled ? ReflectionMode::ScreenSpace : ReflectionMode::Off);
+        }
         // 現在の手法。RaytracedはSupportsRaytracing()がtrueの環境でしか選べない
-        // (UI側で選択不可にし、シーン読み込み時にも非対応ならScreenSpaceへ落とす)
-        ReflectionMode m_ReflectionMode = Defaults::SSREnabled ? ReflectionMode::ScreenSpace : ReflectionMode::Off;
+        // (UI側で選択不可にする)。ここの初期値はm_RaytracingAvailableが確定する前の値でしかなく、
+        // 実際の既定はシーン読み込み時にDefaultReflectionModeで決め直される
+        ReflectionMode m_ReflectionMode = DefaultReflectionMode(false);
         // レイトレーシング反射が使える環境か。デバイスのSupportsRaytracing()を初期化時に控えたもので、
         // UIの選択可否とシェーダー/パイプラインステートを作るかどうかの両方に使う
         // (RTReflection.hlslはRayQueryを含むためSM 6.5でしかコンパイルできず、
@@ -780,7 +849,19 @@ namespace Kurenai
         // (Transparent.hlsl)と反射プローブのキャプチャ(ProbeCapture.hlsl)は
         // カメラ視点の画面空間テクスチャを使えず、CSMのシャドウマップを必要とするため
         // (RTシャドウは不透明サーフェスの直接光パスだけを置き換える。26章)
-        ShadowMode m_ShadowMode = Defaults::ShadowEnabled ? ShadowMode::CascadedShadowMap : ShadowMode::Off;
+        //
+        // 既定の手法はDefaultShadowModeが決める(反射のDefaultReflectionModeと同じ理由で1か所に置く)。
+        // ここの初期値はm_RaytracingAvailableが確定する前の値でしかなく、
+        // 実際の既定はシーン読み込み時に決め直される
+        static constexpr ShadowMode DefaultShadowMode(bool raytracingAvailable)
+        {
+            if (!Defaults::ShadowEnabled)
+            {
+                return ShadowMode::Off;
+            }
+            return raytracingAvailable ? ShadowMode::Raytraced : ShadowMode::CascadedShadowMap;
+        }
+        ShadowMode m_ShadowMode = DefaultShadowMode(false);
         // PCSS(Percentage Closer Soft Shadows)のライトサイズ。シャドウマップUV空間での
         // ブロッカーサーチ・半影の広さを決める係数(値が大きいほど半影が広く柔らかくなる)
         float m_ShadowLightSize = Defaults::ShadowLightSize;

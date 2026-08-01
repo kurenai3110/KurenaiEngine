@@ -3,10 +3,12 @@
 #include <objbase.h>
 #include <shellapi.h>
 
+#include <cstdint>
 #include <exception>
 #include <fstream>
 #include <string>
 
+#include "EngineDefaults.h"
 #include "KurenaiEngine3D.h"
 #include "KurenaiTypes.h"
 
@@ -58,8 +60,35 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
     int exitCode = 0;
     try
     {
-        Kurenai::KurenaiEngine3D engine(ParseGraphicsAPI());
-        engine.Run();
+        // ImGuiの「システム」パネルからグラフィックスAPIを切り替えると、Run()はウィンドウを
+        // 閉じずに戻ってくる。その場合はエンジンを破棄して新しいAPIで作り直す。
+        //
+        // デバイスだけを差し替えるのではなくオブジェクトごと作り直しているのは、破棄の順序
+        // (全リソース → スワップチェーン → デバイス → ウィンドウ)をC++のメンバ破棄順に
+        // 任せられるため(KurenaiEngine3D.hのHasPendingGraphicsAPIChange付近のコメント参照)。
+        // ウィンドウは作り直されるが、位置・サイズはwindow.iniを介して復元される
+        Kurenai::GraphicsAPI api = ParseGraphicsAPI();
+        uint32_t renderWidth = Kurenai::Defaults::RenderWidth;
+        uint32_t renderHeight = Kurenai::Defaults::RenderHeight;
+        size_t sceneIndex = 0;
+
+        for (;;)
+        {
+            Kurenai::KurenaiEngine3D engine(api, renderWidth, renderHeight, sceneIndex);
+            engine.Run();
+
+            if (!engine.HasPendingGraphicsAPIChange())
+            {
+                break;
+            }
+
+            // 切り替え先のAPIと、作り直しても保ちたい状態(内部レンダー解像度・シーン)を引き継ぐ。
+            // それ以外の設定は新しいインスタンスで既定値に戻る
+            api = engine.GetPendingGraphicsAPI();
+            renderWidth = engine.GetRenderWidth();
+            renderHeight = engine.GetRenderHeight();
+            sceneIndex = engine.GetCurrentSceneIndex();
+        }
     }
     catch (const std::exception& e)
     {

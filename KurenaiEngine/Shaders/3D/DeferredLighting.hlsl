@@ -250,7 +250,34 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
     else
     {
-        ambient = (diffuseColor / PI) * AmbientColor.rgb * ao;
+        // IBL無効時のフォールバック。AmbientColor.rgbを「方向依存を持たない一様な環境」とみなす。
+        // 一様な放射輝度Lの環境から受けるイラディアンスはE = PI * Lなので、上のコメントどおり
+        // AmbientColor.rgbをイラディアンスE相当として扱うなら、環境の放射輝度はL = E / PIになる。
+        // 拡散側の/PIと同じ量であり、拡散項の値は従来と厳密に一致する
+        const float3 ambientRadiance = AmbientColor.rgb / PI;
+
+        // 【鏡面項を0にしてはいけない】diffuseColor = albedo * (1 - metallic)のため、
+        // 拡散だけにすると金属(metallic=1)の環境光が厳密に0になり真っ黒な影絵になる。
+        // 低ラフネスの誘電体も環境のハイライトを完全に失う。
+        // そこで一様な環境放射輝度に対してsplit-sum近似の第2項(BRDF積分LUT。方向性を持たない
+        // (NdotV, ラフネス)のテーブルなのでIBLの有効/無効に関わらず使える)を掛けた鏡面を足す。
+        // 半透明パス(Transparent.hlsl)は以前からこの形のフォールバックを持っており、
+        // 不透明パスとプローブ焼き込みパスにだけ無かったものを揃えたもの
+        const float NdotV = saturate(dot(N, V));
+        const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
+        // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(EvaluateIBLと同じ)
+        const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
+        const SpecularEnergyContext energy = MakeSpecularEnergyContext(F0, brdf, roughness, ShadowParams.w);
+        const float3 fallbackFssEss = F0 * brdf.x + brdf.y;
+        const float fallbackEss = brdf.x + brdf.y;
+
+        // 定数色アンビエントはプリフィルタ済み鏡面・拡散イラディアンスの両方の代わりを兼ねるため、
+        // Kulla-Contyの加算ローブにも同じambientRadianceを掛ける
+        ambient = diffuseColor * ambientRadiance * ao
+            + ambientRadiance
+                * (fallbackFssEss * energy.Compensation
+                   + SpecularMultiScatterIBL(F0, fallbackFssEss, fallbackEss, energy.Mode))
+                * SpecularOcclusion(NdotV, roughness, ao);
     }
 
     // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する。SSILの間接拡散光も

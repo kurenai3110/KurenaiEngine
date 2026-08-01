@@ -6,6 +6,7 @@
 #include <ctime>
 #include <fstream>
 #include <mutex>
+#include <set>
 #include <sstream>
 
 namespace Kurenai::Core
@@ -86,6 +87,16 @@ namespace Kurenai::Core
             return suffix;
         }
 
+        // このプロセスで既に一度開いた接尾辞の集合。
+        // グラフィックスAPIを実行時に切り替えると同じ接尾辞へ戻ってくることがあり
+        // (DX11 -> DX12 -> DX11)、そのたびにtruncで開き直すと1回目のログが消えてしまう。
+        // 「そのプロセスで初めて開く接尾辞ならtrunc、2回目以降は追記」にするために持つ
+        std::set<std::string>& OpenedLogFileSuffixes()
+        {
+            static std::set<std::string> suffixes;
+            return suffixes;
+        }
+
         std::mutex& LogMutex()
         {
             static std::mutex mutex;
@@ -103,7 +114,9 @@ namespace Kurenai::Core
             LogFileOpened() = true;
 
             const std::string path = LogFilePath(LogFileSuffix());
-            LogFileStream().open(path, std::ios::out | std::ios::trunc);
+            // 起動ごとにログを作り直す挙動は保ちつつ、同一プロセス内で開き直す場合だけ追記にする
+            const bool firstOpenForThisSuffix = OpenedLogFileSuffixes().insert(LogFileSuffix()).second;
+            LogFileStream().open(path, std::ios::out | (firstOpenForThisSuffix ? std::ios::trunc : std::ios::app));
             if (!LogFileStream().is_open())
             {
                 // ここでLogger::Errorを呼ぶとLogMutex()の再帰ロックでデッドロックするため、

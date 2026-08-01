@@ -135,6 +135,16 @@ namespace Kurenai::UI
             "遮蔽(アンビエントオクルージョン)と、手法によっては近傍サーフェスからの間接拡散光を計算する。"
             "無効にすると遮蔽なし・間接光なしのテクスチャがライティングパスへ渡る");
 
+        // 遮蔽マップは上のAO/間接光とは別系統(アセットに焼き込まれた遮蔽)なので、
+        // AOを切っていても操作できるよう早期returnより前に置く
+        CheckboxEx(
+            "マテリアルの遮蔽マップを使う###UseOcclusionMap", &m_Engine.m_OcclusionMapEnabled,
+            Defaults::OcclusionMapEnabled,
+            "アセットに焼き込まれた遮蔽(glTFのocclusionTexture)を間接光へ掛けるか。"
+            "上のAO / 間接光とは独立した別系統で、そちらを無効にしても遮蔽マップは効き続ける。"
+            "内容はデバッグ表示の「マテリアル」のBチャンネルで確認できる。"
+            "反射プローブへ反映するにはプローブの焼き直しが必要(焼いた時点の値が入っているため)");
+
         if (!m_Engine.m_AOEnabled)
         {
             EndParamGroup();
@@ -261,7 +271,7 @@ namespace Kurenai::UI
         int modeIndex = static_cast<int>(m_Engine.m_ShadowMode);
         if (ComboEx(
                 "影の手法###ShadowMode", &modeIndex, modeNames, modeCount,
-                static_cast<int>(Defaults::ShadowEnabled ? ShadowMode::CascadedShadowMap : ShadowMode::Off),
+                static_cast<int>(KurenaiEngine3D::DefaultShadowMode(rtAvailable)),
                 "平行光(太陽)の影の求め方。CSMはライト視点の深度バッファを4枚描いて深度比較する。"
                 "レイトレーシングはピクセルごとに太陽へ影レイを撃つため、カスケードの境界も"
                 "ピーターパン(接地部の浮き)もアクネも出ない"))
@@ -409,7 +419,7 @@ namespace Kurenai::UI
         int modeIndex = static_cast<int>(m_Engine.m_ReflectionMode);
         if (ComboEx(
                 "反射の手法###ReflectionMode", &modeIndex, modeNames, modeCount,
-                static_cast<int>(Defaults::SSREnabled ? ReflectionMode::ScreenSpace : ReflectionMode::Off),
+                static_cast<int>(KurenaiEngine3D::DefaultReflectionMode(rtAvailable)),
                 "SSRは画面に映っているものだけを反射に映す(画面外は反射プローブ/IBLに任せる)。"
                 "レイトレーシングはシーン全体へレイを飛ばすため画面外のものも映るが、"
                 "ヒット面のテクスチャは読めないためマテリアルの定数色になる"))

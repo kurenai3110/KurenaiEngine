@@ -11,7 +11,8 @@ namespace Kurenai::UI
 {
     class UIManager;
 
-    // 画質ではなく動作・表示に関わる設定(垂直同期・フレームレート制限)と、UI自体の操作
+    // 画質ではなく動作・表示に関わる設定(垂直同期・フレームレート制限・内部レンダー解像度・
+    // グラフィックスAPI)と、UI自体の操作
     class SystemPanel final : public IPanel
     {
     public:
@@ -25,6 +26,8 @@ namespace Kurenai::UI
 
     private:
         void DrawDisplaySection();
+        void DrawResolutionSection();
+        void DrawGraphicsAPISection();
         void DrawUISection();
 
         KurenaiEngine3D& m_Engine;

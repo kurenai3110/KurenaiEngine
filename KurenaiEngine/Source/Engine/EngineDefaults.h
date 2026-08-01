@@ -16,12 +16,19 @@ namespace Kurenai::Defaults
 
     // --- AO / 間接光 ---
     inline constexpr bool AOEnabled = true;
+    // マテリアルの遮蔽マップ(glTFのocclusionTexture。22章)を間接光へ掛けるか。
+    // 上のAOEnabled(スクリーンスペースAO/GI)とは独立した別系統で、
+    // 無効にするとObjectConstants.OcclusionStrengthへ0が渡り遮蔽マップの寄与が消える
+    inline constexpr bool OcclusionMapEnabled = true;
     inline constexpr float SSAORadius = 0.5f;
-    inline constexpr float SSAOPower = 1.5f;
+    // 遮蔽率にかける指数。1.0は「求めた遮蔽率をそのまま使う」で、上げるほど遮蔽が濃くなる。
+    // 素の遮蔽率を基準にしたいため既定は1.0(かつては1.5で、既定のまま濃く付いていた)
+    inline constexpr float SSAOPower = 1.0f;
     inline constexpr float SSILRadius = 0.5f;
     inline constexpr float SSILThickness = 0.01f;
     inline constexpr float SSILIntensity = 2.0f;
-    inline constexpr float SSILPower = 1.5f;
+    // SSAOPowerと同じ意味・同じ理由で1.0
+    inline constexpr float SSILPower = 1.0f;
     inline constexpr uint32_t SSILSliceCount = 4;
     inline constexpr uint32_t SSILStepCount = 6;
 
@@ -42,7 +49,11 @@ namespace Kurenai::Defaults
     inline constexpr int SpecularCompensationMode = 1;
 
     // --- SSR ---
-    inline constexpr bool SSREnabled = true;
+    // レイトレーシング反射に非対応な環境で、SSRを反射の既定の手法にするか。
+    // SSRは画面に映っているものしか反射に映せず、画面端で反射が途切れる破綻が目立つため既定は無効
+    // (=「反射なし」で起動する)。DXR Tier 1.1対応環境では従来どおりRT反射が既定になる
+    // (手法の決定はKurenaiEngine3D::ApplyLoadedScene。EngineDefaults.h冒頭の注意も参照)
+    inline constexpr bool SSREnabled = false;
     inline constexpr float SSRMaxDistance = 5.0f;
     inline constexpr float SSRThickness = 0.1f;
     inline constexpr float SSRRoughnessCutoff = 0.6f;
@@ -82,7 +93,10 @@ namespace Kurenai::Defaults
     inline constexpr bool RTAOBounceShadowRayEnabled = true;
 
     // --- シャドウ(スクリーンスペース) ---
-    inline constexpr bool ScreenSpaceShadowEnabled = true;
+    // ポイント/スポットライトの影。深度バッファに写っている面しか遮蔽物にできず、
+    // 得られるのは接触影・中距離の遮蔽に限られる(画面外の物は影を落とさない)。
+    // 効果の範囲が限定的な割に全ライトぶんのレイマーチを毎フレーム走らせるため既定は無効
+    inline constexpr bool ScreenSpaceShadowEnabled = false;
     inline constexpr int ScreenSpaceShadowStepCount = 16;
     inline constexpr float ScreenSpaceShadowMaxRayLength = 1.5f;
     inline constexpr float ScreenSpaceShadowThickness = 0.5f;
@@ -114,11 +128,15 @@ namespace Kurenai::Defaults
     inline constexpr int DDGIProbesPerFrame = 16;
 
     // --- トーンマップ / ディザ ---
-    inline constexpr bool DitherEnabled = true;
+    // 8bit出力時のバンディングを散らすディザ。最終出力へノイズを載せる処理であり、
+    // スクリーンショットの画素差を取るA/B比較では差分の下限を押し上げてしまうため既定は無効
+    inline constexpr bool DitherEnabled = false;
     inline constexpr float MesopicStrength = 0.0f;
 
     // --- TAA(Temporal Anti-Aliasing) ---
-    inline constexpr bool TAAEnabled = true;
+    // 時間方向に蓄積するため、フレームレートの揺れがそのまま画素差になりA/B比較の妨げになる。
+    // 残像・半透明メッシュのゴーストといった副作用もあるため既定は無効
+    inline constexpr bool TAAEnabled = false;
     // 今フレームの色を履歴へ混ぜる割合。0.1なら毎フレーム1割ずつ入れ替わるので、
     // 静止していれば十数フレームで収束する。上げるとゴーストに強くなる代わりにちらつきが残る
     inline constexpr float TAABlendWeight = 0.1f;
@@ -133,13 +151,16 @@ namespace Kurenai::Defaults
     inline constexpr float TAAAntiFlicker = 1.0f;
 
     // --- ブルーム ---
-    inline constexpr bool BloomEnabled = true;
+    // 明部の滲みを足す画作りの処理で、素の輝度分布を確認したいときには邪魔になるため既定は無効
+    inline constexpr bool BloomEnabled = false;
     inline constexpr float BloomStrength = 0.06f;
     inline constexpr float BloomThreshold = 1.0f;
     inline constexpr float BloomSoftKnee = 0.5f;
 
     // --- 自動露出 ---
-    inline constexpr bool AutoExposureEnabled = true;
+    // 画面の内容に応じて露出が動くため、カメラを動かすだけで明るさが変わりA/B比較の基準にならない。
+    // 無効時はSceneExposureEV100(シーン全体の露出)がそのまま効く固定露出になるため既定は無効
+    inline constexpr bool AutoExposureEnabled = false;
     inline constexpr float AutoExposureMinEV100 = -6.0f;
     inline constexpr float AutoExposureMaxEV100 = 18.0f;
     inline constexpr float AutoExposureSpeedUp = 3.0f;
@@ -151,6 +172,13 @@ namespace Kurenai::Defaults
     inline constexpr float AutoExposureNightRolloffDarkEV100 = -2.0f;
     inline constexpr float AutoExposureNightRolloffBrightEV100 = 10.0f;
     inline constexpr float AutoExposureKeyCeilingEV = 2.0f;
+
+    // --- 内部レンダー解像度 ---
+    // G-Buffer以降すべての中間バッファの解像度。ウィンドウサイズとは独立しており、
+    // Presentパスでアスペクト比を保ったままウィンドウへ拡大縮小する(レターボックス/ピラーボックス)。
+    // 実行時に「システム」パネルから変更できる
+    inline constexpr uint32_t RenderWidth = 1280;
+    inline constexpr uint32_t RenderHeight = 720;
 
     // --- 同期 ---
     inline constexpr bool VSyncEnabled = false;
