@@ -258,11 +258,25 @@ namespace Kurenai::UI
             Defaults::BentNormalAOSource,
             "拡散光の遮蔽を aoN = dot(N, bRaw) から求める。無効にすると従来のベイク済みAOを使う。"
             "どちらも同じ積分の別推定量なので、切り替えても見た目はほとんど変わらないのが正常");
-        CheckboxEx(
-            "スペキュラ遮蔽にbent normalを使う###BentNormalSpecularOcclusion", &m_Engine.m_BentNormalSpecularOcclusion,
-            Defaults::BentNormalSpecularOcclusion,
-            "鏡面の遮蔽を可視コーンと反射ローブの錐体交差で求める。無効にすると方向を見ない"
-            "従来の近似になる。壁際で、壁を向いた反射だけが暗くなるのが有効時の挙動");
+        {
+            static const char* const kSpecularOcclusionModes[] = {
+                "Frostbite近似(方向を見ない)",
+                "球冠交差",
+                "球面ガウス(推奨)",
+            };
+            int mode = static_cast<int>(m_Engine.m_SpecularOcclusionMode);
+            if (ComboEx(
+                    "スペキュラ遮蔽の方式###SpecularOcclusionMode", &mode, kSpecularOcclusionModes,
+                    IM_ARRAYSIZE(kSpecularOcclusionModes), Defaults::SpecularOcclusionMode,
+                    "鏡面の遮蔽方式。壁際で、壁を向いた反射だけが暗くなるのが「Frostbite近似」以外の"
+                    "共通の挙動。「球冠交差」は可視性を二値の球冠として扱うため、遮蔽が強い金属の凹部が"
+                    "純黒へ潰れることがある(25.10節)。「球面ガウス」は同じ交差を柔らかい分布に"
+                    "置き換えたもので、方向性を保ったまま潰れを避ける(25.11節)。既定は球面ガウス"))
+            {
+                m_Engine.m_SpecularOcclusionMode =
+                    static_cast<KurenaiEngine3D::SpecularOcclusionMode>(mode);
+            }
+        }
         CheckboxEx(
             "multi-bounce AO###MultiBounceAO", &m_Engine.m_MultiBounceAOEnabled,
             Defaults::MultiBounceAOEnabled,

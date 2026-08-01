@@ -238,7 +238,11 @@ BentOcclusion DecodeBentOcclusion(float4 bentSample, float3 N)
 
     // 【長さではなくフラグで判定する】bent normalを持たないマテリアルは黒1x1が
     // バインドされる。長さ0を「遮蔽なし」と解釈すると完全遮蔽(SO=0)と区別がつかないため、
-    // .aを明示的な有効フラグにして曖昧さを消してある
+    // .aを明示的な有効フラグにして曖昧さを消してある。
+    //
+    // フラグを取るマップ側は全テクセルが1(ベイカーがチャート外も接空間の遮蔽なし
+    // (0,0,1)で埋めて有効にしている)なので、ここのしきい値がミップやバイリニア補間で
+    // 中間値を踏むことはない。1x1のフォールバックと本物のマップを区別するためだけに使う
     if (bentSample.a < 0.5f)
     {
         o.axis = N;
@@ -307,7 +311,91 @@ float SpecularOcclusionBand(float3 axis, float3 N, float3 R, float aoB, float ro
     // aoB = 1(このときaxis = Nなのでd = dRef)で厳密にSO = 1になる
     const float ref = SphericalCapIntersectionArea(kHalfPi, as, dRef);
 
+    // 【aoBを下限に置いてはいけない】凹部が純黒へ潰れる対策として一度
+    //   return lerp(saturate(aoB), 1.0f, band);
+    // を入れたが、これは誤りなので戻した。aoBはスカラーで方向を持たないため、
+    // 下限に置くと「どの方向でもこれ以上暗くなれない」という方向非依存の床になる。
+    // 25章の目的は「壁を向いた反射だけ暗くする」ことなので、暗くする側だけが潰れて
+    // 方向情報が明るくする側にしか効かなくなる。実測でも下限を入れると
+    // 「従来近似より暗い画素が0%」になり、方向による減光が消えていた(25.10.2)
     return ref > 1e-6f ? saturate(inter / ref) : 0.0f;
+}
+
+// === 可視性を球面ガウス(SG)へ ―― 25.11節 ==================================
+//
+// 上のSphericalCapIntersectionAreaは可視性を二値の球冠として近似しているため、
+// d >= av + as で交差面積が厳密に0になる。金属(拡散成分なし)の凹部ではこれが
+// そのまま純黒へ直結する。aoBを下限に置く対策は方向性を破壊するため使えない(25.10.2)。
+//
+// 直すべきは近似そのもの ―― 球冠を球面ガウス(SG)に置き換える。2つのSGの球面内積は
+// 閉形式で常に正なので、遮蔽側にもd依存の小さな残りが出て、方向性を保ったまま
+// 純黒が消える。振幅1・軸p・鋭さλのSGを G(w) = exp(λ(w・p - 1)) とすると
+// (Wang et al., "All-Frequency Rendering of Dynamic, Spatially-Varying Reflectance", 2009):
+//
+//   ∫G1 G2 dw = 4π exp(-λ1-λ2) sinh(dm)/dm ,  dm = |λ1 p1 + λ2 p2|
+//
+// sinhは0でしか0にならないため、この量は常に正
+float SGInnerProduct(float lambda1, float lambda2, float cosD)
+{
+    // dm^2 = |l1*p1 + l2*p2|^2 = l1^2 + l2^2 + 2*l1*l2*cosD
+    const float dm = sqrt(max(lambda1 * lambda1 + lambda2 * lambda2 + 2.0f * lambda1 * lambda2 * cosD, 0.0f));
+
+    // exp(-l1-l2)*sinh(dm) = 0.5*(exp(dm-l1-l2) - exp(-dm-l1-l2))。
+    // dm-l1-l2をそのまま引くとlambdaが大きいとき(粗さが低いとき)fp32で桁落ちするため、
+    // 差の形へ変形して常に0以下の指数だけを扱う:
+    //   dm-l1-l2 = (dm^2-(l1+l2)^2)/(dm+l1+l2) = -2*l1*l2*(1-cosD)/(dm+l1+l2)
+    const float sum = lambda1 + lambda2;
+    const float a = (dm > 1e-6f) ? (-2.0f * lambda1 * lambda2 * (1.0f - cosD) / (dm + sum)) : -sum;
+    const float b = -dm - sum;
+    const float val = 0.5f * (exp(a) - exp(b));
+    const float fourPi = 12.566370614359172f;
+    // dm->0の極限は 4π*exp(-l1-l2) (Taylor展開の0次)。dmで割る前にここへ分岐する
+    return (dm > 1e-6f) ? (fourPi * val / dm) : (fourPi * exp(-sum));
+}
+
+// 球冠の半頂角αとSGの鋭さλの対応づけ。球冠の立体角 2π(1-cosα) とSGの立体角 ≈2π/λ を
+// 揃えると λ = k/(1-cosα)。三角関数を経由しないのが利点(asin(sqrt(x))はx→1で微分が
+// 発散し、aoBのわずかな誤差が角度の大きな誤差になる。25.10節)
+//
+// 【k = 1 は導出値であって調整値ではない】上の立体角の一致からそのまま出てくる値がk = 1。
+// kを上げるとSGが尖って硬い球冠へ近づき、下げると広がる。
+//
+// 実機(Occlusion Bake Compareのmetallicドラゴン、110214画素)で振って測った結果、
+// 導出値の1.0以外は使えない(25.11.4節。「潰れ画素」= Frostbite近似では輝度15以上
+// あるのにそのモードで5未満になった画素。ノイズ床は±1画素):
+//
+//   方式      最小輝度  潰れ画素  球冠が黒く潰した画素での中央輝度  Frostbiteより暗い画素
+//   球冠交差     0.00     464              0.00                  4.1% (平均 -21.2)
+//   SG k=3.0     0.00     572 ←悪化        0.00 ←救えていない      8.3% (平均 -20.5)
+//   SG k=1.0     0.00      81             14.00                  4.9% (平均 - 9.8)
+//   SG k=0.5     2.67       2             37.67                  1.5% (平均 - 5.1)
+//
+// k = 3 では減衰が急すぎて、球冠交差が黒く潰していた場所をまったく救えないまま全体を
+// 暗くするだけになり、潰れ画素がかえって増える。逆に k = 0.5 では純黒はほぼ消えるが
+// 方向による減光が1.5%まで落ち、aoB下限版で却下したのと同じ「方向性が消える」失敗
+// (25.10.2節)へ向かう。k = 1.0 は純黒をほぼ解消しつつ方向性を保つ
+static const float kSGVisibility = 1.0f;
+static const float kSGSpecular = 1.0f;
+
+float SpecularOcclusionSG(float3 axis, float3 N, float3 R, float aoB, float roughness)
+{
+    // 1 - cosα の形を直接作る。asin(sqrt(aoB))を経由しないため、aoB→1での微分発散を踏まない
+    const float oneMinusCosV = max(1.0f - sqrt(saturate(1.0f - saturate(aoB))), 1e-6f);
+    const float oneMinusCosS = max(roughness * roughness, 1e-6f);
+
+    const float lambdaV = min(kSGVisibility / oneMinusCosV, 1e4f);
+    const float lambdaS = min(kSGSpecular / oneMinusCosS, 1e4f);
+    // 基準値(遮蔽なし = aoB=1、1-cos(90°)=1)のλ。aoB=1では axis=N なので
+    // inter/ref の式が厳密に同一になり SO=1 が保証される
+    const float lambdaRef = min(kSGVisibility / 1.0f, 1e4f);
+
+    const float cosD = clamp(dot(axis, R), -1.0f, 1.0f);
+    const float cosDRef = clamp(dot(N, R), -1.0f, 1.0f);
+
+    const float inter = SGInnerProduct(lambdaV, lambdaS, cosD);
+    const float ref = SGInnerProduct(lambdaRef, lambdaS, cosDRef);
+
+    return ref > 1e-9f ? saturate(inter / ref) : 0.0f;
 }
 
 // スペキュラ遮蔽の合成。
@@ -316,22 +404,28 @@ float SpecularOcclusionBand(float3 axis, float3 N, float3 R, float aoB, float ro
 // 独立した情報なので積を取る。どちらも「遮蔽なし」のとき厳密に1を返すため、
 // 片方しか持たないパス(半透明・プローブ焼き込み)へ無条件に掛けてよい。
 //
-// 【useBent = false の経路は従来と完全に同じ式であること】materialAOとssaoを掛けてから
+// 【soMode = 0(従来)の経路は元の式と完全に同じであること】materialAOとssaoを掛けてから
 // 1回だけFrostbite近似へ通す。ここを「それぞれ通してから掛ける」に変えると
 // pow()が非線形なため結果が変わり、回帰確認で見た目が変わってしまう
-float ComposeSpecularOcclusion(bool useBent, BentOcclusion bent, float3 N, float3 R,
+//
+// soMode: 0 = Frostbite近似(方向を見ない) / 1 = 球冠交差(SpecularOcclusionBand、
+// d >= av+as で厳密に0になる) / 2 = 球面ガウス(SpecularOcclusionSG、25.11節。
+// 常に正なので凹部が純黒へ潰れない)
+float ComposeSpecularOcclusion(int soMode, BentOcclusion bent, float3 N, float3 R,
                                float NdotV, float roughness, float materialAO, float ssao)
 {
-    if (!useBent)
+    if (soMode == 0)
     {
         return SpecularOcclusion(NdotV, roughness, materialAO * ssao);
     }
 
-    // bent normal経路ではmaterialAO(遮蔽マップのスカラー)を使わない。
+    // bent normal経路(soMode 1・2)ではmaterialAO(遮蔽マップのスカラー)を使わない。
     // 同じベイクの方向付きの表現であるbent normalへ役割ごと置き換わるため、
     // 両方掛けると同じ遮蔽を二重に数えることになる
-    return SpecularOcclusionBand(bent.axis, N, R, bent.aoB, roughness)
-         * SpecularOcclusion(NdotV, roughness, ssao);
+    const float band = (soMode == 2)
+        ? SpecularOcclusionSG(bent.axis, N, R, bent.aoB, roughness)
+        : SpecularOcclusionBand(bent.axis, N, R, bent.aoB, roughness);
+    return band * SpecularOcclusion(NdotV, roughness, ssao);
 }
 
 // multi-bounce AO(Jimenez et al., "Practical Realtime Strategies for Accurate Indirect

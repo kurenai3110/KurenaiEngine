@@ -284,7 +284,7 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, floa
     const float3 specularIBL =
         (prefiltered * FssEss * SpecularEnergyCompensation(F0, brdf, compensationMode)
          + SpecularMultiScatterIBL(F0, FssEss, Ess, compensationMode) * irradiance)
-        * ComposeSpecularOcclusion(OcclusionParams.y > 0.5f, bent, N, R, NdotV, roughness, materialAO, 1.0f);
+        * ComposeSpecularOcclusion((int)(OcclusionParams.y + 0.5f), bent, N, R, NdotV, roughness, materialAO, 1.0f);
 
     // 環境光の拡散・鏡面倍率(IBLParams.y / .z)。メインパスと同じ倍率を焼き込み時にも掛けないと、
     // プローブの中身だけつまみを動かす前の明るさで残ってしまう。
@@ -330,14 +330,10 @@ PSOutput PSMain(PSInput input)
     // 引くUVは専用のライトマップUV(TEXCOORD1)。理由はGBuffer.hlslの同じ箇所を参照
     float occlusionSample = OcclusionTexture.Sample(MaterialSampler, input.LightmapUV).r;
     float materialAO = lerp(1.0f, occlusionSample, OcclusionStrength);
-    // bent normalも同じライトマップUVで引き、モデル空間からワールド空間へ移す
-    // (長さ=遮蔽の強さは変えてはいけないので方向だけ回す。GBuffer.hlslと同じ扱い)
+    // bent normalも同じライトマップUVで引く。接空間で焼かれているのでtbnでワールドへ移す
+    // (直交行列なので長さ=遮蔽の強さは保たれる。理由はGBuffer.hlslの同じ箇所を参照)
     const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
-    const float bentLength = length(bentSample.xyz);
-    const float3 bentWorld = bentLength > 1e-6f
-        ? normalize(mul(bentSample.xyz, (float3x3)NormalMatrix)) * bentLength
-        : float3(0.0f, 0.0f, 0.0f);
-    const BentOcclusion bent = DecodeBentOcclusion(float4(bentWorld, bentSample.a), N);
+    const BentOcclusion bent = DecodeBentOcclusion(float4(mul(bentSample.xyz, tbn), bentSample.a), N);
 
     float3 albedo = baseColorSample.rgb;
     // CameraPositionにはプローブのワールド座標が入っている(ファイル冒頭参照)

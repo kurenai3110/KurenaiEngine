@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <cstdint>
 
@@ -36,13 +36,16 @@ namespace Kurenai::Defaults
 
     // bent normalによる遮蔽(25章)。
     // BentNormalAOSource: ディフューズAOを aoN = dot(N, bRaw) から取るか(false = 従来のベイクAO)。
-    // BentNormalSpecularOcclusion: スペキュラ遮蔽に錐体交差を使うか(false = Frostbite近似)。
-    //   どちらも既定でbent normal側を使う。同じ積分の別推定量なので見た目は大きく変わらず、
-    //   スペキュラだけは方向を見るぶん壁際の映り込みが正しくなる。
+    //   既定でbent normal側を使う。同じ積分の別推定量なので見た目は大きく変わらない。
+    // SpecularOcclusionMode: スペキュラ遮蔽の方式。KurenaiEngine3D::SpecularOcclusionMode と
+    //   HLSLのComposeSpecularOcclusionのsoModeに対応する(0=Frostbite近似 / 1=球冠交差 /
+    //   2=球面ガウス)。SpecularCompensationModeと同じ理由でintで持つ。
+    //   既定は2(SG) ―― 球冠交差(1)は d >= av+as で厳密に0になり、金属の凹部が純黒へ
+    //   潰れる(25.10節)。SGは常に正なので方向性を保ったまま潰れない(25.11節)
     // MultiBounceAOEnabled: multi-bounce AO(Jimenez 2016)。アルベドが明るいほどAOを弱める補正で、
     //   見た目を大きく変えるためbent normal自体の検証を汚さないよう既定は無効
     inline constexpr bool BentNormalAOSource = true;
-    inline constexpr bool BentNormalSpecularOcclusion = true;
+    inline constexpr int SpecularOcclusionMode = 2;
     inline constexpr bool MultiBounceAOEnabled = false;
     inline constexpr float AmbientScale = 0.2f;
     // 環境光(間接光)の拡散・鏡面それぞれに掛かる倍率。既定の1.0は「何も変えない」値で、

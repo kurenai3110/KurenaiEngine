@@ -381,6 +381,10 @@ namespace KurenaiPacker
         {
             float Position[3];
             float Normal[3];
+            // 頂点接線(xyz)と従法線の向き(w = +1/-1)。bent normalを接空間へ落とすために使う。
+            // GBuffer.hlslのComputeTangentFrameとまったく同じ手順で基底を組む必要があるため、
+            // ここでもGram-Schmidt再直交化前の生の補間値を持ち回る
+            float Tangent[4];
         };
 
         // 有効なテクセルはvalidに1が入る
@@ -451,7 +455,13 @@ namespace KurenaiPacker
                         {
                             texel.Position[k] = a.Position[k] * w0 + b.Position[k] * w1 + c.Position[k] * w2;
                             texel.Normal[k] = a.Normal[k] * w0 + b.Normal[k] * w1 + c.Normal[k] * w2;
+                            texel.Tangent[k] = a.Tangent[k] * w0 + b.Tangent[k] * w1 + c.Tangent[k] * w2;
                         }
+                        // 従法線の向きは+1/-1の二値なので補間に意味が無い。重みが最大の頂点から取る
+                        // (ミラーUVの継ぎ目でのみ頂点間で食い違い、そこは法線マップでも同じ扱い)
+                        texel.Tangent[3] = (w0 >= w1 && w0 >= w2) ? a.Tangent[3]
+                                         : (w1 >= w2)             ? b.Tangent[3]
+                                                                  : c.Tangent[3];
                         const float len = std::sqrt(
                             texel.Normal[0] * texel.Normal[0] +
                             texel.Normal[1] * texel.Normal[1] +
@@ -605,9 +615,24 @@ namespace KurenaiPacker
                 }
             }
 
-            // 最後まで埋まらなかったテクセルは有効フラグ0のまま残す。
-            // R8版は「遮蔽なし(255)」で埋めるが、bent normalは遮蔽なしを定数で表せないため
-            // (方向がテクセルごとに違う)、消費側でNへ落とさせる
+            // 最後まで埋まらなかったテクセルは接空間の「遮蔽なし」= (0,0,1) で埋め、
+            // 有効フラグも1にする。R8版が255で埋めるのとまったく同じ扱い。
+            //
+            // 【フラグを補間対象に残してはいけない】ここを0のままにすると、ミップ生成の
+            // ボックスフィルタが有効テクセルとの間で .a を中間値へ均してしまい、消費側の
+            // a < 0.5 というしきい値がテクセル単位で反転する(実測でmip5の6.25%が中間値)。
+            // 縁が「遮蔽なし」と「ほぼ完全遮蔽」の間で跳ねて細かい点になる。
+            // 接空間なら遮蔽なしを定数で表せるので、この曖昧さ自体を消せる
+            for (size_t i = 0; i < valid.size(); ++i)
+            {
+                if (!valid[i])
+                {
+                    values[i * 4 + 0] = 0.0f;
+                    values[i * 4 + 1] = 0.0f;
+                    values[i * 4 + 2] = 1.0f;
+                }
+                values[i * 4 + 3] = 1.0f;
+            }
         }
 
         // === bent normalの検証(仕様書§7のチェックリスト) ======================
@@ -624,12 +649,101 @@ namespace KurenaiPacker
             uint64_t FullyOccludedCount = 0; // |bRaw| < 1e-3(完全遮蔽)
             uint64_t NanCount = 0;
             uint64_t OverOneCount = 0;       // |bRaw| > 1.05(明らかな異常)
+            // ミップ耐性。詳細はAccumulateMipStabilityを参照
+            double WorstMipRatio = 1.0;
+            uint32_t WorstMipLevel = 0;
         };
+
+        // === ミップ耐性の検証 ====================================================
+        //
+        // ベイク結果そのものが正しくても、ミップ生成で長さが崩れると消費側は縮小するほど
+        // 暗くなる。これは接空間化する前に実際に起きた退行で、上のチェックリスト
+        // (すべてmip 0だけを見る)は素通りしてしまった。
+        //
+        // ボックスフィルタを自前で回し、各段で
+        //   |E[b]| … 実際にテクスチャへ格納される値の長さ
+        //   E[|b|] … 本来あるべき遮蔽率(長さの平均)
+        // を比べる。方向がばらついているほど前者だけが小さくなるので、比が1から離れたら
+        // 「格納しているベクトルが法線の向きに引きずられている」ことを意味する。
+        //
+        // 【浅い段だけを見ること】深い段では1テクセルが広い曲面を覆い、接線基底そのものが
+        // 回るため、正しく実装していても比は下がる ―― Sponzaの実測で8x8まで測ると0.7958まで
+        // 落ちるが、mip1〜3では0.932以上ある。これは正当な劣化なので、そこで警告を出すと
+        // 「いつも鳴っている警告」になって用をなさない。
+        // 一方、狙っている不具合(法線の向きに引きずられる)は浅い段から出る ――
+        // モデル空間で焼いていたときのドラゴンはmip3で既に0.816だった。
+        // 両者はmip1〜3でしきい値0.85を挟んで明確に分かれるので、そこだけを見る
+        void AccumulateMipStability(
+            const std::vector<float>& values, uint32_t resolution, BentStats& stats)
+        {
+            std::vector<float> level(values);
+            std::vector<double> lengthMean(static_cast<size_t>(resolution) * resolution);
+            for (size_t i = 0; i < lengthMean.size(); ++i)
+            {
+                const float x = values[i * 4 + 0], y = values[i * 4 + 1], z = values[i * 4 + 2];
+                lengthMean[i] = std::sqrt(static_cast<double>(x) * x + static_cast<double>(y) * y + static_cast<double>(z) * z);
+            }
+
+            // 上記の理由で先頭3段のみ。解像度に依らず同じ段数を見るので、
+            // 512²と2048²を同じ基準で比べられる(8x8で打ち切ると解像度ごとに
+            // 「1テクセルが覆う面積」が変わってしまい比較にならない)
+            constexpr uint32_t kMaxLevel = 3;
+            uint32_t res = resolution;
+            for (uint32_t lv = 1; lv <= kMaxLevel && res > 1u; ++lv)
+            {
+                const uint32_t half = res / 2;
+                std::vector<float> next(static_cast<size_t>(half) * half * 4);
+                std::vector<double> nextLen(static_cast<size_t>(half) * half);
+
+                for (uint32_t y = 0; y < half; ++y)
+                {
+                    for (uint32_t x = 0; x < half; ++x)
+                    {
+                        const size_t src[4] = {
+                            (static_cast<size_t>(y) * 2 + 0) * res + x * 2 + 0,
+                            (static_cast<size_t>(y) * 2 + 0) * res + x * 2 + 1,
+                            (static_cast<size_t>(y) * 2 + 1) * res + x * 2 + 0,
+                            (static_cast<size_t>(y) * 2 + 1) * res + x * 2 + 1,
+                        };
+                        const size_t dst = static_cast<size_t>(y) * half + x;
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            float sum = 0.0f;
+                            for (int s = 0; s < 4; ++s) { sum += level[src[s] * 4 + k]; }
+                            next[dst * 4 + k] = sum * 0.25f;
+                        }
+                        double lsum = 0.0;
+                        for (int s = 0; s < 4; ++s) { lsum += lengthMean[src[s]]; }
+                        nextLen[dst] = lsum * 0.25;
+                    }
+                }
+
+                double sumStored = 0.0, sumTrue = 0.0;
+                for (size_t i = 0; i < nextLen.size(); ++i)
+                {
+                    const float x = next[i * 4 + 0], y = next[i * 4 + 1], z = next[i * 4 + 2];
+                    sumStored += std::sqrt(static_cast<double>(x) * x + static_cast<double>(y) * y + static_cast<double>(z) * z);
+                    sumTrue += nextLen[i];
+                }
+                if (sumTrue > 1e-9)
+                {
+                    const double ratio = sumStored / sumTrue;
+                    if (ratio < stats.WorstMipRatio)
+                    {
+                        stats.WorstMipRatio = ratio;
+                        stats.WorstMipLevel = lv;
+                    }
+                }
+
+                level.swap(next);
+                lengthMean.swap(nextLen);
+                res = half;
+            }
+        }
 
         void AccumulateBentStats(
             const float* bent,
             const float* ao,
-            const std::vector<BakeTexel>& texels,
             const std::vector<uint8_t>& valid,
             uint32_t texelCount,
             size_t meshIndex,
@@ -657,11 +771,9 @@ namespace KurenaiPacker
                 }
 
                 const double aoB = std::sqrt(static_cast<double>(bx) * bx + static_cast<double>(by) * by + static_cast<double>(bz) * bz);
-                const BakeTexel& texel = texels[i];
-                const double aoN =
-                    static_cast<double>(texel.Normal[0]) * bx +
-                    static_cast<double>(texel.Normal[1]) * by +
-                    static_cast<double>(texel.Normal[2]) * bz;
+                // bRawは接空間なので、法線成分 dot(N, bRaw) はz成分そのもの。
+                // 基底(T,B,N)は正規直交なので長さも接空間で不変
+                const double aoN = static_cast<double>(bz);
 
                 stats.MaxLength = std::max(stats.MaxLength, aoB);
                 stats.MaxAoNMinusAoB = std::max(stats.MaxAoNMinusAoB, aoN - aoB);
@@ -696,14 +808,14 @@ namespace KurenaiPacker
         const char* kBakeComputeShader = R"(
 struct Triangle { float3 V0; float3 E1; float3 E2; };
 struct BvhNode  { float3 BoundsMin; uint LeftFirst; float3 BoundsMax; uint Count; };
-struct Texel    { float3 Position; float3 Normal; };
+struct Texel    { float3 Position; float3 Normal; float4 Tangent; };
 
 StructuredBuffer<Triangle> Triangles : register(t0);
 StructuredBuffer<BvhNode>  Nodes     : register(t1);
 StructuredBuffer<Texel>    Texels    : register(t2);
 StructuredBuffer<uint>     Valid     : register(t3);
 RWStructuredBuffer<float>  Result    : register(u0);
-// bent normal(正規化しない)。.xyz = bRaw、.w = 有効フラグ。
+// bent normal(正規化しない)。.xyz = 接空間のbRaw、.w = 有効フラグ。
 // 正規化して長さを捨てないのは、消費側が長さ(=aoB)を錐体の広がりとして使うため
 RWStructuredBuffer<float4> BentResult : register(u1);
 
@@ -802,9 +914,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (Valid[index] == 0)
     {
         Result[index] = 1.0f; // チャート外は遮蔽なし扱い(ダイレーションで上書きされる)
-        // bent normalは「遮蔽なし」を定数で表現できない(遮蔽なしのbRawはNそのもので
-        // テクセルごとに違う)。有効フラグを0にして消費側でNへ落とさせる
-        BentResult[index] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        // 接空間では「遮蔽なし」が曲率によらず常に(0,0,1)になるので、チャート外もこれで埋める。
+        // 有効フラグは0にしておき、ダイレーションで届かなかったぶんだけCPU側が1へ立て直す
+        BentResult[index] = float4(0.0f, 0.0f, 1.0f, 0.0f);
         return;
     }
 
@@ -849,6 +961,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // 重みが打ち消し合わずπ/cosθになる。グレージング(cosθ→0)で重みが発散し分散が爆発する。
     // そのため一様半球サンプリング(pdf = 1/2π)を使う
     float3 bRaw = float3(0.0f, 0.0f, 0.0f);
+    float3 bAll = float3(0.0f, 0.0f, 0.0f);
     for (uint j = 0; j < BentRayCount; ++j)
     {
         const float2 xj = Hammersley(j, BentRayCount);
@@ -858,16 +971,51 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         const float phiB = 6.2831853f * xj.y;
         const float3 dirB = normalize(T * (sinT * cos(phiB)) + B * (sinT * sin(phiB)) + N * cosT);
 
+        bAll += dirB;
         if (!Occluded(origin, dirB, RayLength))
         {
             bRaw += dirB;
         }
     }
-    // (1/π) ÷ pdf(=1/2π) ÷ 本数 = 2/本数。
-    // 遮蔽が無ければ ∫ω dω = πN なので bRaw = N となり、長さがちょうど1になる
-    bRaw *= 2.0f / float(BentRayCount);
 
-    BentResult[index] = float4(bRaw, 1.0f);
+    // 【理論値 2/本数 で割ってはいけない】
+    //
+    //   (1/π) ÷ pdf(=1/2π) ÷ 本数 = 2/本数
+    //
+    // は本数→∞での係数であって、有限本数では求積誤差が残る。実際256本のHammersley列では
+    // 遮蔽ゼロでも長さが 1.0 ではなく 0.9961 にしかならず、これはテクセルの内容に依らない定数
+    // (列だけで決まる)なので全モデルでぴったり同じ値が出ていた。
+    //
+    // わずか0.39%だが無害ではない。消費側は aoB = length(bRaw) から可視コーンの半頂角を
+    //   αv = asin(sqrt(aoB))
+    // で復元しており、この写像は aoB → 1 で微分が発散する。0.39%の不足が 3.58° の角度誤差になり、
+    // ラフネス0.045の鏡面ローブ(半頂角3.65°)とほぼ同じ大きさになってしまう。その結果、
+    // 遮蔽がまったく無い面でもグレージング(NdotV→0)でスペキュラ遮蔽が0に落ちて真っ黒になる。
+    //
+    // そこで同じ列で求めた「全方向の和」の長さで割る。遮蔽ゼロなら bRaw == bAll なので
+    // 長さがちょうど1になり、求積誤差が定義上打ち消される
+    const float allLength = length(bAll);
+    bRaw *= (allLength > 1e-6f) ? (1.0f / allLength) : (2.0f / float(BentRayCount));
+
+    // --- 接空間へ落とす ---
+    //
+    // 【なぜモデル空間のまま焼かないか】モデル空間のbRawは「遮蔽なし = N」なので、
+    // 曲面上で隣り合うテクセルは遮蔽が無くても向きが違う。ミップ生成やバイリニア補間で
+    // 平均すると打ち消し合って長さが縮み、消費側がそれをaoB(遮蔽率)として読むため
+    // 縮小するほど暗くなる ―― 実測でドラゴンの|E[b]|はmip7で0.816→0.205まで落ちた。
+    // 接空間なら遮蔽なしは曲率によらず常に(0,0,1)なので、平均しても長さ1のままになる。
+    //
+    // 基底はGBuffer.hlslのComputeTangentFrameと同一の手順で組むこと。ずれると
+    // コーンの軸が法線まわりに回ってしまう(aoN = z成分 と aoB = 長さ は基底の回転で
+    // 不変なので影響を受けない)
+    // 頂点接線はModelSource.cppが必ず非退化なものを入れるが、補間の結果Nと平行に
+    // なりうる。normalizeがNaNを返すとfp16でも生き残って画面が壊れるため、
+    // 上のサンプリング基底Tへ落とす(Nまわりの方位がずれるだけで、aoN/aoBは変わらない)
+    const float3 rawTf = texel.Tangent.xyz - N * dot(N, texel.Tangent.xyz);
+    const float3 Tf = dot(rawTf, rawTf) > 1e-12f ? normalize(rawTf) : T;
+    const float3 Bf = cross(N, Tf) * texel.Tangent.w;
+
+    BentResult[index] = float4(dot(bRaw, Tf), dot(bRaw, Bf), dot(bRaw, N), 1.0f);
 }
 )";
 
@@ -1238,7 +1386,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 // 仕様書§7のチェックリストを量子化前のfloat32で集計する。
                 // ここで既存AOとの一致を見ておかないと、後段で見つけた誤差が
                 // ベイクのバグなのかfp16量子化なのか切り分けられない
-                AccumulateBentStats(bent, ao, texels, valid, texelCount, meshIndex, stats);
+                AccumulateBentStats(bent, ao, valid, texelCount, meshIndex, stats);
 
                 device.Context()->Unmap(bentStaging.Get(), 0);
             }
@@ -1251,6 +1399,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             if (!bentTexture.empty())
             {
                 DilateBentNormal(bentTexture, valid, options.Resolution, options.DilationPixels);
+                // ダイレーション後(=実際にミップ生成へ渡す状態)で測る
+                AccumulateMipStability(bentTexture, options.Resolution, stats);
                 result.MeshBentNormals[meshIndex] = std::move(bentTexture);
             }
             timings.DilateSeconds += SecondsSince(dilateStart);
@@ -1293,6 +1443,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             Info("  max(aoN - aoB)    " + Format4(stats.MaxAoNMinusAoB) + " (0.0以下であること)");
             Info("  既存AOとの誤差    RMS " + Format4(rms) + " / 最大 " + Format4(stats.MaxError));
             Info("  完全遮蔽の割合    " + Format2(occludedRatio) + "%");
+            Info("  ミップ耐性        " + Format4(stats.WorstMipRatio)
+                + " (mip " + std::to_string(stats.WorstMipLevel) + "、0.85以上であること)");
 
             // 一致していないということは、同じ積分の別推定量になっていないということ。
             // 0.05はモンテカルロ誤差(256本で数%)に安全側の余裕を見た値
@@ -1313,6 +1465,14 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             if (stats.NanCount > 0)
             {
                 Warn("bent normalにNaN/Infが合計 " + std::to_string(stats.NanCount) + "テクセルありました");
+            }
+            // 浅い段で0.85を下回るということは、格納しているベクトルが法線の向きに
+            // 引きずられていてミップで打ち消し合っているということ。消費側は縮小するほど暗くなる
+            if (stats.WorstMipRatio < 0.85)
+            {
+                Warn("bent normalのミップ耐性が不足しています (mip " + std::to_string(stats.WorstMipLevel)
+                    + " で " + Format4(stats.WorstMipRatio)
+                    + ")。接空間への変換(基底がGBuffer.hlslのComputeTangentFrameと一致しているか)を確認してください");
             }
         }
 

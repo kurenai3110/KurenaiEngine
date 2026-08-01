@@ -5917,7 +5917,7 @@ Chinese Dragon(871306三角形・2048&sup2;)の実測では、bent normalの256�
 総時間478.20秒の0.3%である。<strong>bent normalの追加コストは約1.1秒</strong>にとどまる。
 </p>
 
-<h3>25.2 ダイレーションとミップは「ベクトルのまま」行う</h3>
+<h3 id="ch25-2">25.2 ダイレーションとミップは「ベクトルのまま」行う</h3>
 
 <p>
 <code>length()</code>は凸関数なので、Jensenの不等式より次が<strong>常に</strong>成り立つ。
@@ -5937,7 +5937,16 @@ fp32のベクトルのまま行ってから一括でfp16へ落とす。サンプ
 ベクトルを補間してから消費側で長さを取るので、順序は自動的に正しくなる。
 </p>
 
-<h3>25.3 なぜ「有効フラグ」が要るのか</h3>
+<p>
+<strong>ただしこれだけでは足りない。</strong>Jensenの不等式は「長さを先に取ってはいけない」ことしか
+言っておらず、<em>ベクトルを平均したときに長さが縮む</em>ぶんが正しいかどうかは、
+何を格納しているかで決まる。同じ向きを向いた平面の中で平均するぶんには正しい
+(それは本当に広い面積の可視率を積分し直しているだけ)が、<strong>曲面をまたぐと
+「遮蔽が無いのに向きが違うので打ち消し合う」</strong>という別の縮みが混ざる。
+これを見落として実際に退行を出した &mdash;&mdash; 詳細と対処は<a href="#ch25-9">25.9</a>。
+</p>
+
+<h3 id="ch25-3">25.3 なぜ「有効フラグ」が要るのか</h3>
 
 <p>
 bent normalは<strong>「遮蔽なし」を定数テクスチャで表現できない</strong>。遮蔽なしの<code>bRaw</code>は
@@ -5953,6 +5962,18 @@ bent normalは<strong>「遮蔽なし」を定数テクスチャで表現でき�
 そこで<code>.a</code>を明示的な有効フラグにして曖昧さを消した。bent normalを持たないマテリアルには
 <strong>黒1x1</strong>(他のテクスチャの白1x1とは違う)をバインドし、消費側の
 <code>DecodeBentOcclusion</code>が<code>axis = N</code>・<code>aoB = 1</code>・<code>aoN = 1</code>(遮蔽なし)へ落とす。
+</p>
+
+<p>
+<strong>フラグをフィルタ対象に残してはいけない。</strong>当初はチャート外のテクセルを
+<code>(0,0,0,0)</code>のままにしていたが、ミップ生成のボックスフィルタが有効テクセルとの間で
+<code>.a</code>を中間値へ均してしまい、<code>a &lt; 0.5</code>というしきい値がテクセル単位で反転していた
+(実測でmip5の<strong>6.25%</strong>が中間値)。「遮蔽なし」と「ほぼ完全遮蔽」の間で跳ねるため
+細かい点になる。<a href="#ch25-9">25.9</a>で接空間へ移したことで<em>遮蔽なしを定数
+<code>(0,0,1)</code>で表せるようになった</em>ので、ダイレーションで届かなかったテクセルも
+これで埋めて<code>.a = 1</code>にしている &mdash;&mdash; 遮蔽マップ(R8)が余りを255で埋めるのと同じ扱い。
+結果、実マップ内の<code>.a</code>は全テクセル1になり、しきい値は
+<strong>1x1のフォールバックと本物のマップを区別するためだけ</strong>に使われる。
 </p>
 
 <h3>25.4 スペキュラ遮蔽 &mdash;&mdash; 錐体交差とratio estimator</h3>
@@ -5988,6 +6009,13 @@ return ref &gt; 1e-6f ? saturate(inter / ref) : 0.0f;</code></pre>
 <p>
 なお仕様書が触れている<code>roughness &gt; 1.5</code>での&alpha;sの縮退は<strong>このエンジンでは起きない</strong>。
 GBuffer.hlslがroughnessを[0.045, 1.0]にクランプしているため。
+</p>
+
+<p>
+この球冠交差モデルには<a href="#ch25-10">25.10</a>で見つかった構造的な穴がある
+(<code>d &ge; &alpha;v + &alpha;s</code>で交差面積が厳密に0になり、金属の凹部が純黒へ潰れる)。
+<a href="#ch25-11">25.11</a>で球面ガウスへ置き換えたものを既定にしたが、この球冠交差モデル自体は
+UIの3値切替(Frostbite近似 / 球冠交差 / 球面ガウス)に残してあり、比較用に選択できる。
 </p>
 
 <h4>25.4.1 スクリーンスペース由来の遮蔽との合成</h4>
@@ -6058,7 +6086,7 @@ cbufferは宣言順レイアウトなので、途中のフィールドを宣言�
 使わないが、<strong>宣言だけは必要</strong>である。
 </p>
 
-<h3>25.7 検証</h3>
+<h3 id="ch25-7">25.7 検証</h3>
 
 <p>
 仕様書のチェックリストは<strong>すべてベイカー内のfloat32(量子化前)で測れる</strong>。
@@ -6071,11 +6099,11 @@ cbufferは宣言順レイアウトなので、途中のフィールドを宣言�
   <th>OcclusionTest<br>(256&sup2; / AO 128本)</th>
   <th>Chinese Dragon<br>(2048&sup2; / AO 64本、有効テクセル159万)</th>
 </tr>
-<tr><td><code>max|bRaw|</code></td><td>&le; 1.0</td><td>0.9961</td><td>0.9961</td></tr>
+<tr><td><code>max|bRaw|</code></td><td>&le; 1.0</td><td>1.0000</td><td>1.0000</td></tr>
 <tr><td><code>max(aoN - aoB)</code></td><td>&le; 0</td><td>-0.0000</td><td>0.0000</td></tr>
 <tr><td><strong>既存AOとの誤差</strong></td><td>MC誤差の範囲</td>
-    <td><strong>RMS 0.0083 / 最大 0.0467</strong></td>
-    <td><strong>RMS 0.0175 / 最大 0.1080</strong></td></tr>
+    <td><strong>RMS 0.0076 / 最大 0.0485</strong></td>
+    <td><strong>RMS 0.0166 / 最大 0.1059</strong></td></tr>
 <tr><td>完全遮蔽の割合</td><td>&mdash;</td><td>0.00%</td><td>0.18%</td></tr>
 </table>
 
@@ -6083,6 +6111,12 @@ cbufferは宣言順レイアウトなので、途中のフィールドを宣言�
 Dragon側の誤差が倍あるのは<strong>AO側のレイが64本しかない</strong>ため。比較相手である22章のAOの
 推定量そのものがノイジーで、bent normalの精度が落ちているわけではない
 (bent normalは両方とも256本)。どちらもWarnのしきい値0.05を大きく下回る。
+</p>
+
+<p>
+<code>max|bRaw|</code>が<strong>ぴったり1.0000</strong>になっているのは偶然ではなく、
+<a href="#ch25-10">25.10</a>で正規化係数を実測値へ直した結果である。以前は求積誤差のぶんだけ
+0.9961で頭打ちになっており、それがグレージングでスペキュラを黒くしていた。
 </p>
 
 <p>
@@ -6102,12 +6136,22 @@ RMSが0.05を超えると<code>Warn()</code>を出すようにしてある。
 DX11とDX12で最大チャンネル差が2/255に収まること(ディザ由来)を確認した。
 </p>
 
+<p>
+<strong>この表の項目はすべてmip 0しか見ていない。</strong>そのためミップ生成で壊れる種類の
+不具合を1つ取り逃がした &mdash;&mdash; <a href="#ch25-9">25.9</a>。以後は
+<code>AccumulateMipStability</code>による<strong>ミップ耐性</strong>を併せて測っている。
+</p>
+
 <h3>25.8 既知の制約</h3>
 
 <ul>
 <li><strong>容量が大きい</strong>。符号付きベクトルのためBC4/BC7で圧縮できず無圧縮のfp16で書き出す。
 512&sup2;でミップ込み1メッシュあたり約2.7MB、数百メッシュのモデルでは合計がGB級になる。
-圧縮(BC6H_SF16)と接空間オクタヘドラル化は第2段階へ回した</li>
+圧縮(BC6H_SF16)とオクタヘドラル化は第2段階へ回した</li>
+<li><strong>非一様スケールでコーンの方位がわずかにずれる</strong>。シェーダーのGram-Schmidt
+再直交化はワールド空間で行われるが、ベイカーはモデル空間で行うため、非一様スケールが
+入ると両者の基底が法線まわりにわずかに回る。<code>aoN</code>(=z成分)と<code>aoB</code>(=長さ)は
+基底の回転で不変なので影響を受けず、ずれるのはコーンの方位だけ</li>
 <li><strong>&gamma; + &alpha;v &gt; 90&deg; で過大評価</strong>になる。球冠交差の近似が
 2つの境界をsmoothstepで繋ぐ形のため、厳密な球面二角形の面積とはずれる</li>
 <li><strong>非対称な遮蔽では軸が正しくない</strong>。複数の方向から別々に遮られている場合、
@@ -6120,6 +6164,492 @@ DX11とDX12で最大チャンネル差が2/255に収まること(ディザ由来
 さらにSSILの現在のAO出力は<code>1 - countbits(mask)/32</code>(角度に一様なセクタ比)であって
 コサイン重み付きではないため、<code>dot(N, bRaw)</code>とは一致しない</li>
 </ul>
+
+<h3 id="ch25-9">25.9 退行 &mdash;&mdash; ミップで長さが崩壊し、細かい黒い点が出た</h3>
+
+<p>
+初版は<code>bRaw</code>を<strong>モデル空間のまま</strong>格納していた。仕様書どおりであり、
+<a href="#ch25-7">25.7</a>のチェックリスト(<code>max|bRaw|</code>・<code>aoN &le; aoB</code>・既存AOとの一致)も
+すべて通っていた。それでも実機で<strong>細かい黒い点</strong>が出た。
+</p>
+
+<h4>25.9.1 原因</h4>
+
+<p>
+チェックリストは<strong>すべてmip 0だけを見ていた</strong>。壊れていたのはミップである。
+</p>
+
+<p>
+モデル空間の<code>bRaw</code>は「遮蔽なし = <code>N</code>」なので、<strong>曲面上で隣り合うテクセルは
+遮蔽が無くても向きが違う</strong>。ミップ生成のボックスフィルタやバイリニア補間でこれを平均すると
+打ち消し合って長さが縮む。消費側はその長さを<code>aoB</code>(遮蔽率)として読むため、
+<strong>縮小されるほど暗くなる</strong>。ミップが切り替わる細部でこれが点として見える。
+</p>
+
+<p>
+ガター(チャート外)が原因ではないことを切り分けるため、<strong>4テクセルすべてが有効な
+ブロックだけ</strong>を対象にボックスフィルタを回して計測した(Chinese Dragon、2048&sup2;):
+</p>
+
+<table>
+<tr>
+  <th>mip</th>
+  <th><code>|E[b]|</code><br>実際に格納される値の長さ</th>
+  <th><code>E[|b|]</code><br>本来あるべき遮蔽率</th>
+  <th>比</th>
+</tr>
+<tr><td>0</td><td>0.816</td><td>0.816</td><td>1.000</td></tr>
+<tr><td>3</td><td>0.665</td><td>0.815</td><td>0.816</td></tr>
+<tr><td>5</td><td>0.417</td><td>0.814</td><td>0.512</td></tr>
+<tr><td>7</td><td><strong>0.205</strong></td><td>0.814</td><td><strong>0.252</strong></td></tr>
+</table>
+
+<p>
+<code>E[|b|]</code>が0.814で一定なのに<code>|E[b]|</code>だけが落ちている。差はすべて
+<strong>方向のばらつき由来</strong>で、ガターとは無関係だと確定できた。
+最下段(1&times;1)では<code>max|bRaw| = 0.012</code>、つまり<em>ほぼ完全遮蔽</em>になっていた。
+</p>
+
+<p>
+副次的にもう1つあった。チャート外を<code>(0,0,0,0)</code>のままにしていたため、
+<strong>有効フラグ<code>.a</code>までボックスフィルタの対象になっていた</strong>
+(実測でmip5の6.25%が中間値)。<code>a &lt; 0.5</code>というしきい値がテクセル単位で反転し、
+縁が「遮蔽なし」と「ほぼ完全遮蔽」の間で跳ねる。<a href="#ch25-3">25.3</a>。
+</p>
+
+<h4>25.9.2 対処 &mdash;&mdash; 接空間で格納する</h4>
+
+<p>
+<code>bRaw</code>を頂点接線基底へ射影して格納する。
+</p>
+
+<pre><code>bTS = (dot(bRaw, T), dot(bRaw, B), dot(bRaw, N))</code></pre>
+
+<p>
+こうすると<strong>遮蔽なしは曲率によらず常に<code>(0,0,1)</code></strong>になる。曲面をまたいで平均しても
+長さは1のまま保たれ、縮むのは<em>本当に遮蔽の量が違うとき</em>だけになる &mdash;&mdash;
+<a href="#ch25-2">25.2</a>で意図していた挙動がここで初めて成立する。
+基底は正規直交なので<code>aoB</code>(長さ)も<code>aoN</code>(<code>N</code>成分 = <code>bTS.z</code>)も
+変換で厳密に保たれる。実際、既存AOとの誤差RMSは変更の前後で完全に同じ値になった。
+</p>
+
+<p>
+おまけに「遮蔽なし」が定数で書けるようになったので、ダイレーションで届かなかったテクセルも
+<code>(0,0,1)</code>で埋めて<code>.a = 1</code>にできる。これで<code>.a</code>がフィルタ対象から外れ、
+上の副次的な不具合も消える。遮蔽マップ(R8)が余りを255で埋めるのとまったく同じ扱い。
+</p>
+
+<p>
+基底は<code>GBuffer.hlsl</code>の<code>ComputeTangentFrame</code>と<strong>まったく同じ手順</strong>で組む必要がある。
+頂点接線はパッカー自身(<code>ModelSource.cpp</code>)が計算していてエンジンと同一なので、
+ベイカー側で同じGram-Schmidt再直交化を行えば一致する。消費側は
+<code>mul(bentSample.xyz, tbn)</code>でワールドへ戻すだけになり、初版の
+「<code>NormalMatrix</code>で回してから長さを掛け直す」という扱いは不要になった。
+</p>
+
+<p>
+ミラーされたインスタンスも正しく動く。<code>TangentSignFlip</code>(ワールド行列の行列式が負なら-1)が
+<code>B = cross(N,T) * tangent.w</code>へ効くため、ワールド空間の基底はモデル空間の基底の
+正しい像になる &mdash;&mdash; 法線マップがミラーで破綻しないのとまったく同じ理屈。
+</p>
+
+<p>
+レイアウトは変わらないが<strong>テクスチャの中身の意味が変わる</strong>ため、
+<code>.kmodel</code>を<strong>v7 &rarr; v8</strong>へ上げた。構造体サイズが同じでVersionでしか判別できず、
+上げないと古いアセットを黙って誤って解釈することになる。
+</p>
+
+<h4>25.9.3 再発防止 &mdash;&mdash; ミップ耐性の検証を足した</h4>
+
+<p>
+このバグが素通りしたのは、検証がすべてmip 0で完結していたからである。
+ベイカーへ<code>AccumulateMipStability</code>を追加し、<strong>ダイレーション後(実際にミップ生成へ渡す状態)</strong>で
+ボックスフィルタを自前で回して<code>|E[b]| / E[|b|]</code>を測るようにした。0.85を下回ったら<code>Warn</code>を出す。
+</p>
+
+<p>
+<strong>見るのは先頭3段だけ</strong>にしてある。深い段では1テクセルが広い曲面を覆い、接線基底そのものが
+回るため、正しく実装していても比は下がる &mdash;&mdash; Sponzaは8&times;8まで測ると0.7958まで落ちるが、
+mip 1〜3では0.932以上ある。これは正当な劣化なので、そこで警告を出すと
+「いつも鳴っている警告」になって用をなさない。一方で狙っている不具合は浅い段から出る
+(モデル空間版のドラゴンはmip 3で既に0.816)。両者はmip 1〜3のしきい値0.85で明確に分かれる。
+また段数を固定することで、512&sup2;と2048&sup2;を同じ基準で比べられる。
+</p>
+
+<p>
+接空間化後の実測。<code>.a</code>が中間値になるテクセルも全段で0%になった:
+</p>
+
+<table>
+<tr><th>モデル</th><th>ミップ耐性(mip 1〜3の最悪値)</th><th>既存AOとの誤差 RMS</th></tr>
+<tr><td>OcclusionTest (256&sup2; / AO 128本)</td><td>0.9989</td><td>0.0076</td></tr>
+<tr><td>LightTest (512&sup2; / AO 128本)</td><td>0.9947</td><td>0.0088</td></tr>
+<tr><td>Sponza (512&sup2; / AO 128本、25メッシュ)</td><td>0.9320</td><td>0.0140</td></tr>
+<tr><td>Chinese Dragon (2048&sup2; / AO 64本)</td><td>0.9836</td><td>0.0166</td></tr>
+</table>
+
+<p>
+修正前のドラゴンは同じ指標で<strong>0.816</strong>(mip 3)だったので、しきい値0.85で確実に捕まる。
+</p>
+
+<p>
+実機では、Bistro(bent normalを持たない回帰ケース)・Sponza(25メッシュすべてが持つ)・
+Chinese Dragonのベイク有無4体比較・White Furnace Testを描画し、
+いずれも黒い点が出ないこと、エラー・警告0件であることを確認した。
+とくにドラゴン比較シーンは画面上でモデルが小さく<strong>深いミップを引く</strong>ため、
+この不具合がもっとも強く出る条件になっている。
+</p>
+
+<h3 id="ch25-10">25.10 求積バイアス &mdash;&mdash; NdotV&rarr;0でスペキュラが黒くなる</h3>
+
+<p>
+25.9を直した後、<strong>グレージング(NdotV&rarr;0)でスペキュラが黒くなる</strong>という別の症状が残っていた。
+原因は<code>bRaw</code>の正規化係数である。
+</p>
+
+<pre><code>(1/&pi;) &divide; pdf(=1/2&pi;) &divide; 本数 = 2/本数</code></pre>
+
+<p>
+これは本数&rarr;&infin;での係数であって、有限本数では求積誤差が残る。実際256本のHammersley列では
+<strong>遮蔽ゼロでも長さが1.0ではなく0.9961</strong>にしかならない。テクセルの内容に依らず列だけで
+決まる定数なので、<code>max|bRaw|</code>がどのモデルでもぴったり同じ値になっていたのがその証拠である。
+</p>
+
+<p>
+<strong>わずか0.39%だが無害ではない。</strong>消費側は<code>aoB</code>から可視コーンの半頂角を
+</p>
+
+<pre><code>&alpha;v = asin(sqrt(aoB))</code></pre>
+
+<p>
+で復元するが、<strong>この写像は<code>aoB &rarr; 1</code>で微分が発散する</strong>。0.39%の不足が
+<strong>3.58&deg;</strong>の角度誤差になり、ラフネス0.045の鏡面ローブ(半頂角3.65&deg;)と
+ほぼ同じ大きさになってしまう。数値で追うと:
+</p>
+
+<table>
+<tr><th><code>aoB</code></th><th>&alpha;v</th><th>&pi;/2との差</th>
+    <th>SO (r=0.045, NdotV=0.001)</th><th>SO (r=0.045, NdotV=0.05)</th></tr>
+<tr><td>1.0000(あるべき値)</td><td>90.00&deg;</td><td>0.00&deg;</td><td>1.0000</td><td>1.0000</td></tr>
+<tr><td>0.9961(実際の値)</td><td>86.42&deg;</td><td>3.58&deg;</td><td><strong>0.0017</strong></td><td><strong>0.3667</strong></td></tr>
+</table>
+
+<p>
+つまり<strong>遮蔽がまったく無い面でも</strong>グレージングでスペキュラ遮蔽が0に落ちていた。
+</p>
+
+<p>
+対処は、理論値ではなく<strong>同じ列で求めた「全方向の和」の長さ</strong>で割ること。
+</p>
+
+<pre><code>bAll += dirB;                      // 遮蔽判定に関わらず必ず積算
+if (!Occluded(...)) bRaw += dirB;
+...
+bRaw /= length(bAll);</code></pre>
+
+<p>
+遮蔽ゼロなら<code>bRaw == bAll</code>なので長さがちょうど1になり、求積誤差が定義上打ち消される。
+本数を変えても自動で追従する。実測で<code>max|bRaw|</code>は0.9961&rarr;<strong>1.0000</strong>になり、
+既存AOとの誤差RMSも改善した(OcclusionTest 0.0083&rarr;0.0076、LightTest 0.0095&rarr;0.0088)。
+<code>aoN</code>側も同じ量だけ過小評価していたので、AOとの一致が良くなるのは筋が通っている。
+</p>
+
+<h4>25.10.1 錐体モデルは地平線の遮蔽を過大に見積もる</h4>
+
+<p>
+バイアスを消しても、<strong>遮蔽が実際にあるテクセル</strong>(<code>aoB &lt; 1</code>)では
+グレージングでスペキュラ遮蔽が強く効く。これは実装の誤りではなく錐体モデルの性質である。
+</p>
+
+<p>
+理由: 地平線付近のリング状の遮蔽は<strong>立体角を大きく塞ぐのに<code>|bRaw|</code>をほとんど減らさない</strong>
+(水平に近い方向は互いに打ち消し合うため)。半頂角84.3&deg;のコープは立体角の約10%を塞ぐが、
+<code>aoB</code>は0.99にしかならない。この関係を逆に辿るため、<code>aoB</code>のわずかな低下が
+<strong>「地平線に幅の広い遮蔽リングがある」</strong>と解釈される。グレージングの反射ベクトルは
+まさにそのリングを向いているので、強く暗くなる。
+</p>
+
+<p>
+実測(OcclusionTest、バイアス修正後。<code>aoB</code>中央値0.994、軸の傾き&gamma;の中央値3.5&deg;):
+</p>
+
+<table>
+<tr><th>ラフネス</th><th>NdotV=0.02</th><th>NdotV=0.05</th><th>NdotV=0.1</th><th>NdotV=0.3</th></tr>
+<tr><td>0.045</td><td>平均SO 0.531 / SO&lt;0.5が59.3%</td><td>0.590 / 53.9%</td><td>0.678 / 21.5%</td><td>0.809 / 4.3%</td></tr>
+<tr><td>0.15</td><td>0.632 / 47.2%</td><td>0.649 / 44.7%</td><td>0.677 / 40.1%</td><td>0.805 / 11.0%</td></tr>
+<tr><td>0.5</td><td>0.767 / 17.3%</td><td>0.774 / 16.4%</td><td>0.785 / 14.8%</td><td>0.829 / 9.0%</td></tr>
+</table>
+
+<p>
+なお<strong>軸が傾いている場合(&gamma; &gt; 0)は意図どおり動いている</strong> ――
+開いた側を向いた反射はSO=1のまま、遮蔽側を向いた反射だけが0に落ちる。これが本機能の目的そのものである。
+問題が出るのは&gamma;&asymp;0、すなわちベイクが「遮蔽は方向を持たない」と言っている場合に限られる。
+</p>
+
+<h4 id="ch25-10-2">25.10.2 凹部が純黒へ潰れる &mdash;&mdash; <code>aoB</code>を下限に置くのは誤り</h4>
+
+<p>
+上の過大評価がもっとも露骨に出るのが<strong>拡散成分を持たないマテリアル(metallic = 1)</strong>である。
+スペキュラが見た目のすべてなので、<code>SpecularOcclusionBand</code>が
+<code>d &ge; &alpha;v + &alpha;s</code>(可視コーンと反射ローブが交差しない)で<strong>厳密に0を返す</strong>と、
+そのまま<strong>純黒</strong>に潰れる。Chinese Dragon(metallic = 1 / roughness = 0.25)の実測:
+</p>
+
+<table>
+<tr><th></th><th>bent normal(素のband)</th><th>従来近似</th><th><code>aoB</code>下限あり</th></tr>
+<tr><td>平均輝度</td><td>129.45</td><td>131.70</td><td>132.66</td></tr>
+<tr><td><strong>最小輝度</strong></td><td><strong>0.00</strong></td><td>11.33</td><td><strong>27.33</strong></td></tr>
+<tr><td>輝度 &lt; 5 の割合</td><td>1.45%</td><td>0.00%</td><td>0.00%</td></tr>
+<tr><td>従来近似で輝度15以上あったのに5未満へ潰れた画素</td><td>1965 (1.45%)</td><td>&mdash;</td><td><strong>0</strong></td></tr>
+</table>
+
+<p>
+平均輝度の差は1.7%しかない &mdash;&mdash; <strong>全体が暗いのではなく、凹部だけが局所的に潰れていた</strong>。
+潰れた画素の従来近似での輝度は平均49.5・最大101.3で、中間調がそのまま黒へ落ちていた。
+</p>
+
+<p>
+物理的にも0は行き過ぎに見える。空洞の中でも壁で跳ね返った光は返ってくる &mdash;&mdash;
+ディフューズ側でmulti-bounce AO(<code>GTAOMultiBounce</code>)が扱っているのと同じ話が、
+スペキュラ側には無い。そこで一度、平均可視率<code>aoB</code>を下限に置いてみた:
+</p>
+
+<pre><code>// 試したが誤りだったので採用していない
+return lerp(saturate(aoB), 1.0f, band);</code></pre>
+
+<p>
+黒潰れ自体は消える(最小輝度 0.00 &rarr; 27.33、輝度5未満の画素 1.45% &rarr; 0.00%)。
+2つの端点も壊れない &mdash;&mdash; <code>aoB = 1</code>なら<code>band</code>によらず1、
+<code>aoB = 0</code>なら<code>&alpha;v = 0</code>より<code>band = 0</code>で0になる。
+</p>
+
+<p>
+<strong>それでもこれは誤りである。</strong><code>aoB</code>は<strong>スカラーで方向を持たない</strong>ため、
+下限に置くと「どの方向でもこれ以上暗くなれない」という<strong>方向非依存の床</strong>を敷くことになる。
+25章の目的は「壁を向いた反射<em>だけ</em>を暗くする」ことなので、
+床は<strong>まさにその暗くする側だけを潰す</strong>。方向情報が明るくする側にしか効かなくなり、
+機能そのものが実質的に無効化される。
+</p>
+
+<p>
+実測(&gamma; = 20&deg;、same = 開いた側を向いた反射 / opp = 遮蔽側を向いた反射):
+</p>
+
+<table>
+<tr><th><code>aoB</code></th><th>roughness</th><th>NdotV</th>
+    <th>素のband<br>same / opp</th><th>コントラスト</th>
+    <th><code>aoB</code>下限あり<br>same / opp</th><th>コントラスト</th></tr>
+<tr><td>0.85</td><td>0.35</td><td>0.3</td><td>0.945 / 0.011</td><td><strong>87.4倍</strong></td>
+    <td>0.992 / 0.852</td><td>1.2倍</td></tr>
+<tr><td>0.70</td><td>0.15</td><td>0.7</td><td>1.000 / 0.053</td><td><strong>18.9倍</strong></td>
+    <td>1.000 / 0.716</td><td>1.4倍</td></tr>
+<tr><td>0.95</td><td>0.35</td><td>0.3</td><td>1.000 / 0.149</td><td><strong>6.7倍</strong></td>
+    <td>1.000 / 0.957</td><td>1.0倍</td></tr>
+</table>
+
+<p>
+全ケースで<strong>1.0〜1.4倍</strong>まで落ちる。画面全体でも「下限版が従来近似より暗い画素は0%」
+という結果になっており、方向による減光が完全に消えていた。
+</p>
+
+<p>
+したがって<strong>下限は入れず、素の錐体交差比のまま</strong>としている。
+凹部の純黒潰れは<a href="#ch25-10-3">25.10.3</a>の未解決課題として残す。
+</p>
+
+<h4 id="ch25-10-3">25.10.3 方向性を保ったまま純黒を避ける</h4>
+
+<p>
+残っている問題は「<strong>方向依存性を壊さずに</strong>、拡散成分を持たないマテリアルの凹部が
+純黒へ潰れるのを避ける」ことである。<code>aoB</code>下限が使えない以上、
+下限や<code>max()</code>のような<strong>方向を持たない量による底上げは原理的にすべて同じ理由で失格</strong>になる。
+検討した筋は次の2つ:
+</p>
+
+<ul>
+<li><strong>可視コーンを「硬い蓋」から柔らかい分布へ変える</strong>。
+    純黒は<code>d &ge; &alpha;v + &alpha;s</code>で交差面積が厳密に0になる、
+    <em>二値の球冠で可視性を近似したこと</em>の副作用である。滑らかな分布(vMF等)へ替えれば
+    遮蔽側にも<code>d</code>に応じた小さな残りが出るので、<strong>方向依存性は完全に保たれる</strong>。
+    ただし<code>(axis, aoB)</code>の2パラメータから分布を決める導出と、閉形式かLUTが要る</li>
+<li><strong>跳ね返り光を加算項として足す</strong>。
+    空洞を満たしているのは<em>壁で反射して戻ってきた光</em>であり、これは遮蔽率を弱める話ではなく
+    <code>prefiltered * SO + bounce</code>という加算の話である。<code>SO</code>は0まで落ちてよい。
+    ディフューズ側のmulti-bounce AOのスペキュラ版にあたる。
+    なお<code>GTAOMultiBounce(SO, F0)</code>のような<em>乗算</em>の形では
+    <code>SO = 0</code>が0のままなので純黒は解消しない</li>
+</ul>
+
+<p>
+<a href="#ch25-11">25.11</a>で1つめの筋(柔らかい分布 &mdash; 球面ガウス)を採用した。
+2つめ(跳ね返り光の加算)は見た目への影響がより広範囲(遮蔽の弱い場所にも常時足される項になる)
+かつ別途バウンス量の推定が要るため、今回は入れていない。将来の課題として残す。
+</p>
+
+<h3 id="ch25-11">25.11 可視性を球面ガウスへ &mdash;&mdash; 純黒の解消</h3>
+
+<h4>25.11.1 球冠を球面ガウス(SG)に置き換える</h4>
+
+<p>
+<a href="#ch25-10-3">25.10.3</a>で挙げた1つめの筋を実装した。振幅1・軸<code>p</code>・鋭さ&lambda;の
+SGを<code>G(&omega;) = exp(&lambda;(&omega;&middot;p - 1))</code>とすると、2つのSGの球面内積は
+閉形式で書ける(Wang et al., "All-Frequency Rendering of Dynamic, Spatially-Varying Reflectance", 2009):
+</p>
+
+<pre><code>integral(G1 * G2) domega = 4*pi * exp(-l1-l2) * sinh(dm) / dm ,   dm = |l1*p1 + l2*p2|</code></pre>
+
+<p>
+<code>sinh</code>は0でしか0にならないため、<strong>この量は常に正</strong>になる。
+球冠交差の<code>SphericalCapIntersectionArea</code>が<code>d &ge; a1+a2</code>で厳密に0を
+返していたのに対し、SGは遮蔽側にも<code>d</code>に応じた小さな残りを持つ。これが純黒が消える理由。
+</p>
+
+<h4 id="ch25-11-2">25.11.2 球冠の半頂角とSGの鋭さの対応づけ</h4>
+
+<p>
+半頂角&alpha;の球冠の立体角は<code>2&pi;(1 - cos&alpha;)</code>、鋭さ&lambda;のSGの立体角は
+おおむね<code>2&pi;/&lambda;</code>。両者を揃えると<code>&lambda; = 1 / (1 - cos&alpha;)</code>。
+一般化して<code>&lambda; = k / (1 - cos&alpha;)</code>と書くと、<code>k</code>は
+「球冠をどれだけ柔らかくするか」の係数になり、大きいほど硬い球冠に近づく。
+<strong>立体角の一致からそのまま出てくる値は<code>k = 1</code>で、実測でもこれが採用値になった</strong>
+(<a href="#ch25-11-4">25.11.4</a>)。この対応づけにより三角関数がすべて消える:
+</p>
+
+<table>
+<tr><th>量</th><th>球冠交差(25.4節)</th><th>SG</th></tr>
+<tr><td>可視コーン</td><td><code>&alpha;v = asin(sqrt(aoB))</code></td><td><code>1 - cos&alpha;v = 1 - sqrt(1 - aoB)</code></td></tr>
+<tr><td>鏡面ローブ</td><td><code>&alpha;s = acos(1 - r&sup2;)</code></td><td><code>1 - cos&alpha;s = r&sup2;</code></td></tr>
+<tr><td>交差の角度</td><td><code>d = acos(dot(axis, R))</code></td><td><code>dot(axis, R)</code>をそのまま使う</td></tr>
+</table>
+
+<p>
+<code>asin(sqrt(x))</code>は<code>x&rarr;1</code>で微分が発散する(<a href="#ch25-10">25.10</a>で
+<code>aoB</code>の0.39%の誤差が&alpha;vの3.58&deg;になった原因)。SG版はこの経路を踏まない。
+transcendentalは<code>exp</code>2回+<code>sqrt</code>に減り、球冠交差より安い。
+</p>
+
+<h4>25.11.3 白炉テストが厳密に保たれる理由</h4>
+
+<p>
+基準値<code>ref</code>は「遮蔽なし = &alpha;v 90&deg;」のSG。<code>1 - cos90&deg; = 1</code>なので
+<code>&lambda;_ref = k</code>。<code>aoB = 1</code>のとき<code>1 - sqrt(1-1) = 1</code>より
+<code>&lambda;v = k = &lambda;_ref</code>、かつ<code>axis = N</code>なので
+<code>dot(axis,R) = dot(N,R)</code> &mdash;&mdash; <code>inter</code>と<code>ref</code>が同一の式になり
+<strong><code>SO = 1</code>が厳密</strong>になる。<code>.a</code>フラグが0(bent normalを持たない
+マテリアル)の経路も<code>axis = N, aoB = 1</code>へ落ちるため同様に厳密に1で、
+<strong>bent normalを持たないモデルの見た目は一切変わらない</strong>。
+</p>
+
+<p>
+桁落ち対策: roughnessの下限0.045で<code>&lambda;s</code>は数万のオーダーまで大きくなる。
+<code>dm - &lambda;1 - &lambda;2</code>をそのまま引くとfp32で桁落ちするため、次の形へ
+変形して常に0以下の指数だけを扱う:
+</p>
+
+<pre><code>dm - l1 - l2 = (dm^2 - (l1+l2)^2) / (dm + l1 + l2) = -2*l1*l2*(1 - cosd) / (dm + l1 + l2)</code></pre>
+
+<h4 id="ch25-11-4">25.11.4 係数kは1(導出値) &mdash;&mdash; 合成形状のフィットでは決められない</h4>
+
+<p>
+まずオフラインの検証スクリプト(リポジトリには含めない)で決めようとした。
+壁1枚・90&deg;隅の点・対称な溝という、<strong>単一の球冠では表せない形状</strong>で可視性
+<code>V(&omega;)</code>を半球グリッド上に直接構成し、同じ形状から<code>bRaw</code>を数値積分して
+<code>axis</code>・<code>aoB</code>を求め、GGX重み付きの真値
+<code>SO_true = integral(V*L) / integral(L)</code>(<code>L</code>はUE4のsplit-sum近似と同じ
+<code>N=V=R</code>前提でRを中心に置いたGGX NDF)と比較した。
+</p>
+
+<p>
+<strong>ここで直感に反する結果が出た。</strong>二値可視性の真値だけへ素直にRMSE最小化でフィットすると、
+<code>k &rarr; &infin;</code>(=球冠交差そのもの)が最良になってしまう。
+単一平面や2平面による遮蔽では、遮蔽側の真値も実際にほぼ0になる &mdash;&mdash;
+単一コーンでも正しく表現できる単純な形状だからである。
+</p>
+
+<p>
+つまりSGへ替える動機は「真値への当てはまりを良くすること」ではない。<code>(axis, aoB)</code>という
+2パラメータへ還元する時点で、<strong>複雑な凹形状(鱗の隙間・爪の間)が持つわずかな回り込みの情報は
+そもそも失われている</strong>。ソフト化はこの情報損失を、真の値ではなく「潰さない」という
+安全側の振る舞いへ変換するための意図的な正則化である。
+</p>
+
+<p>
+<strong>そのため<code>k</code>は合成形状のオフライン評価では決められない。</strong>
+決めたのは実機の実測である &mdash;&mdash; Occlusion Bake Compareシーンのmetallicドラゴンを
+3方式 &times; <code>k</code>を振って同一カメラで撮り(カメラは<code>.kscene</code>由来なので毎回同一)、
+遮蔽が効いている110214画素で集計した。「潰れ画素」はFrostbite近似では輝度15以上あるのに
+そのモードで5未満になった画素で、これが今回直そうとしている症状そのものにあたる。
+同一モードを2回撮って求めたノイズ床は&plusmn;1画素:
+</p>
+
+<table>
+<tr><th>方式</th><th>最小輝度</th><th>潰れ画素</th><th>球冠交差が黒く潰した389画素での中央輝度</th><th>Frostbiteより暗い画素(平均減光)</th></tr>
+<tr><td>Frostbite近似</td><td>13.33</td><td>0</td><td>46.00</td><td>&mdash;</td></tr>
+<tr><td>球冠交差</td><td>0.00</td><td>464</td><td>0.00</td><td>4.1% (-21.2)</td></tr>
+<tr><td>SG <code>k=3.0</code></td><td>0.00</td><td><strong>572</strong></td><td><strong>0.00</strong></td><td>8.3% (-20.5)</td></tr>
+<tr><td><strong>SG <code>k=1.0</code>(採用)</strong></td><td>0.00</td><td><strong>81</strong></td><td><strong>14.00</strong></td><td>4.9% (- 9.8)</td></tr>
+<tr><td>SG <code>k=0.5</code></td><td>2.67</td><td>2</td><td>37.67</td><td>1.5% (- 5.1)</td></tr>
+</table>
+
+<p>
+<strong><code>k=3</code>は失敗する。</strong>減衰が急すぎて、球冠交差が黒く潰していた場所を
+まったく救えない(中央輝度0.00のまま)にもかかわらず全体を暗くするため、
+潰れ画素はかえって464&rarr;572へ<strong>増える</strong>。硬い球冠を柔らかくしたつもりで、
+実際には「球冠交差を全体的に暗くしただけ」になっていた。
+</p>
+
+<p>
+逆に<code>k=0.5</code>まで下げると純黒はほぼ消えるが、Frostbiteより暗い画素が1.5%・
+平均減光5.1輝度まで落ちる。これは<code>aoB</code>下限版で却下したのと
+<strong>同じ「方向性が消える」失敗</strong>(<a href="#ch25-10-2">25.10.2</a>)へ向かう挙動である。
+</p>
+
+<p>
+採用した<code>k=1.0</code>は、<a href="#ch25-11-2">25.11.2</a>の立体角の一致から
+<strong>そのまま出てくる導出値</strong>であって調整値ではない。潰れ画素を464&rarr;81へ、
+球冠交差が黒く潰した画素の中央輝度を0.00&rarr;14.00へ戻しつつ、方向による減光は
+4.9%・平均9.8輝度を保つ。減光の深さは球冠交差(4.1%・平均21.2)より浅いが、
+これは<strong>狭い領域を純黒まで落とす代わりに、広い領域を穏やかに暗くする</strong>という
+分布の違いであって、方向性が失われたわけではない(暗くなる画素の割合はむしろ増えている)。
+</p>
+
+<h4>25.11.5 UIの3値切替</h4>
+
+<p>
+<code>OcclusionParams.y</code>(<code>KurenaiEngine3D::SpecularOcclusionMode</code>)を
+0=Frostbite近似 / 1=球冠交差 / 2=球面ガウスの3値にした。<strong>既定は2(球面ガウス)</strong>。
+<code>ComposeSpecularOcclusion</code>の第1引数が<code>bool useBent</code>から<code>int soMode</code>へ
+変わったため、<code>SpecularIBLWeight</code> / <code>SpecularIBLMultiScatterWeight</code>
+(ReflectionProbe.hlsli)の該当引数も揃えて変更した。反射プローブの再ベイク署名にも
+<code>SpecularOcclusionMode</code>を混ぜてある(値として。旧来の<code>mixBool</code>ではなく
+<code>mixFloat</code>) &mdash;&mdash; ProbeCaptureが同じ分岐を持つため、含め忘れるとつまみを
+動かしてもプローブの中身だけ古いままになる。
+</p>
+
+<p>
+<strong>再パックは不要。</strong>この変更は<code>.kmodel</code>の形式にもベイク結果にも触れない、
+シェーダーとC++側の消費ロジックだけの変更である。
+</p>
+
+<h4>25.11.6 残る近似と、解消しきれていないもの</h4>
+
+<p>
+<strong>純黒は「ほぼ」解消であって完全ではない。</strong><code>k=1.0</code>でも最小輝度は0.00で、
+潰れ画素は464&rarr;81に減っただけである(25.11.4の表)。残っているのは
+<code>aoB</code>がほぼ0のテクセル &mdash;&mdash; つまり<em>本当にほぼ完全に遮蔽されている</em>場所で、
+そこが暗いこと自体は正しい。加えて<code>&lambda;</code>が大きい領域では
+<code>exp()</code>の引数が-87を下回ってfp32でアンダーフローし、厳密に0になる場合もある
+(実データのテクセル分布では、roughnessが低い側で0.5%程度)。
+</p>
+
+<p>
+SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積分ではない」という25.4節と同じ近似を
+引き継いでいる。また<code>k</code>の選定(25.11.4)が示すとおり、<code>(axis, aoB)</code>という
+単一コーンへの還元そのものが複雑な凹形状の情報を失っており、SGはそれを「潰さない」方向へ
+緩和する正則化であって真の可視性分布の再現ではない。
+残りを埋めるには跳ね返り光の加算(<a href="#ch25-10-3">25.10.3</a>)が要る &mdash;&mdash;
+引き続き将来の課題として残る。
+</p>
 
 </section>
 

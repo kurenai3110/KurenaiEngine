@@ -735,7 +735,17 @@ namespace Kurenai
         bool m_IBLUseDedicatedIrradiance = Defaults::IBLUseDedicatedIrradiance;
         // bent normalによる遮蔽(25章)。FrameConstants::OcclusionParamsへ載る
         bool m_BentNormalAOSource = Defaults::BentNormalAOSource;
-        bool m_BentNormalSpecularOcclusion = Defaults::BentNormalSpecularOcclusion;
+        // スペキュラ遮蔽の方式。FrameConstants.OcclusionParams.yへ数値として渡し、
+        // SpecularEnergy.hlsliのComposeSpecularOcclusionが切り替える。
+        // 値はComposeSpecularOcclusionのsoModeと一致させること
+        enum class SpecularOcclusionMode
+        {
+            Legacy = 0,  // Frostbite近似(方向を見ない従来近似)
+            Cone = 1,    // 球冠交差(SpecularOcclusionBand。d >= av+as で厳密に0になる)
+            SG = 2,      // 球面ガウス(SpecularOcclusionSG、25.11節。常に正なので凹部が純黒へ潰れない)
+        };
+        SpecularOcclusionMode m_SpecularOcclusionMode =
+            static_cast<SpecularOcclusionMode>(Defaults::SpecularOcclusionMode);
         bool m_MultiBounceAOEnabled = Defaults::MultiBounceAOEnabled;
         // 環境光(間接光)の拡散・鏡面それぞれの倍率。FrameConstants.IBLParams.y / .z として渡す。
         //

@@ -456,12 +456,12 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 //
 // 【遮蔽の引数について】materialAO(遮蔽マップのスカラー)とssao(スクリーンスペース側)を
 // 分けて受け取り、bentとあわせてSpecularEnergy.hlsliのComposeSpecularOcclusionで合成する。
-// useBentがfalseなら従来どおりmaterialAO * ssaoを1回Frostbite近似へ通すだけになる。
+// soMode = 0なら従来どおりmaterialAO * ssaoを1回Frostbite近似へ通すだけになる。
 //
 // 【DeferredLightingとSSRへは必ず同じ値を渡すこと】この2つが定義上一致することが
 // この関数の存在理由で、ズレるとSSRの適用領域と非適用領域の境界に段差が出る
 float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness,
-                         bool useBent, BentOcclusion bent, float3 N, float3 R,
+                         int soMode, BentOcclusion bent, float3 N, float3 R,
                          float materialAO, float ssao, float3 brdf,
                          float compensationMode, float iblIntensity)
 {
@@ -471,7 +471,7 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness,
 
     // スペキュラオクルージョン。式はSpecularEnergy.hlsliに1つだけ置いてある
     // (半透明パス・プローブ焼き込みからも同じものを使うため)
-    const float so = ComposeSpecularOcclusion(useBent, bent, N, R, NdotV, roughness, materialAO, ssao);
+    const float so = ComposeSpecularOcclusion(soMode, bent, N, R, NdotV, roughness, materialAO, ssao);
     return splitSum * so * iblIntensity * IBLParams.z;
 }
 
@@ -486,7 +486,7 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness,
 // 拡散側に見えるが、これは鏡面BRDFが単散乱で取りこぼしたエネルギーを戻す項であって
 // 拡散反射ではない。拡散側に入れると、鏡面倍率を0にしても鏡面由来の光が残ってしまう
 float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness,
-                                     bool useBent, BentOcclusion bent, float3 N, float3 R,
+                                     int soMode, BentOcclusion bent, float3 N, float3 R,
                                      float materialAO, float ssao, float3 brdf,
                                      float compensationMode, float iblIntensity)
 {
@@ -495,7 +495,7 @@ float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness,
     const float Ess = brdf.x + brdf.y;
     const float3 multiScatter = SpecularMultiScatterIBL(F0, FssEss, Ess, mode);
 
-    const float so = ComposeSpecularOcclusion(useBent, bent, N, R, NdotV, roughness, materialAO, ssao);
+    const float so = ComposeSpecularOcclusion(soMode, bent, N, R, NdotV, roughness, materialAO, ssao);
     return multiScatter * so * iblIntensity * IBLParams.z;
 }
 

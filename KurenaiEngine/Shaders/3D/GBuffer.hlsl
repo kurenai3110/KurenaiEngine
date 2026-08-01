@@ -206,18 +206,18 @@ PSOutput PSMain(PSInput input)
     output.Velocity = currentUv - previousUv;
 
     // bent normalも遮蔽マップと同じLightmapUVで引く(焼かれている空間が同じ)。
-    // ベイカーはモデル空間で焼いているため、頂点法線とまったく同じNormalMatrixで
-    // ワールド空間へ移す。
     //
-    // 【長さを保つこと】長さ(=aoB)は遮蔽の強さであって座標変換で変わってはいけない。
-    // NormalMatrixは非一様スケールを含みうるので、方向だけ回してから元の長さを掛け直す。
-    // そのまま行列を掛けると長さが歪み、スペキュラ遮蔽が明るくなったり暗くなったりする
+    // 【接空間で焼かれている】ワールド(モデル)空間で焼くと「遮蔽なし = N」になるため、
+    // 曲面では遮蔽が無くても隣り合うテクセルの向きが違い、ミップ生成やバイリニア補間で
+    // 平均したときに打ち消し合って長さが縮む。消費側はその長さをaoB(遮蔽率)として
+    // 読むので、縮小するほど暗くなり細かい黒い点になる。接空間なら遮蔽なしは曲率に
+    // よらず常に(0,0,1)なので、平均しても長さ1のまま保たれる(25章)。
+    //
+    // ベイカーが使う基底は上のComputeTangentFrameとまったく同じ手順で組まれている。
+    // ここでmul(bentTS, tbn)と書けるのは、tbnの行が順にT/B/Nだから。
+    // 直交行列なので長さ(=aoB)は変換で保たれる ―― 遮蔽の強さが座標変換で変わってはいけない
     const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
-    const float bentLength = length(bentSample.xyz);
-    const float3 bentWorld = bentLength > 1e-6f
-        ? normalize(mul(bentSample.xyz, (float3x3)NormalMatrix)) * bentLength
-        : float3(0.0f, 0.0f, 0.0f);
-    output.BentNormal = float4(bentWorld, bentSample.a);
+    output.BentNormal = float4(mul(bentSample.xyz, tbn), bentSample.a);
 
     return output;
 }

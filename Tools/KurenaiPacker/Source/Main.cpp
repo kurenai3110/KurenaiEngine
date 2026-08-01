@@ -393,6 +393,17 @@ int wmain(int argc, wchar_t** argv)
     // 問題なく動作する)
     SetConsoleOutputCP(CP_UTF8);
 
+    // coutを1挿入ごとにフラッシュする。
+    //
+    // これを入れないと、cout(ブロックバッファ)とcerr(unitbuf)を同じ出力先へ束ねたとき
+    // ―― つまり "KurenaiPacker.exe ... > log 2>&1" という最も自然な取り方をしたとき ――
+    // 双方が独立したバッファで同じファイルへ書き込み、出力が途中で失われる。
+    // 実際にSponza(出力が長くメッシュごとのログが出る)で再現し、
+    // ログが4131バイトでUTF-8シーケンスの途中から丸ごと欠落した。
+    // 消えるのは後半なので、遮蔽ベイクの検証結果とWarn()がまとめて落ちる ―― 最悪の失われ方をする。
+    // CLIツールなので1行ごとのフラッシュによる速度低下は問題にならない
+    std::cout << std::unitbuf;
+
     const std::optional<CommandLineArgs> parsedArgs = ParseArgs(argc, argv);
     if (!parsedArgs)
     {

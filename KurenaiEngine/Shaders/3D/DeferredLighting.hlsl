@@ -132,15 +132,16 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // 係数の定義はReflectionProbe.hlsliのSpecularIBLWeightに1か所だけ置いている(20章)。
     // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(14.9.2.1節)
     const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
-    const bool useBent = OcclusionParams.y > 0.5f;
+    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(25.11節)
+    const int soMode = (int)(OcclusionParams.y + 0.5f);
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, useBent, bent, N, R, materialAO, ssao, brdf,
+        SpecularIBLWeight(F0, NdotV, roughness, soMode, bent, N, R, materialAO, ssao, brdf,
                           ShadowParams.w, ShadowParams.z);
     // Kulla-Conty方式(ShadowParams.w = 3)が足す加算ローブ。プリフィルタ済み鏡面ではなく
     // 拡散イラディアンスに掛かるため、上の「放射輝度 × 係数」とは別の項として持つ。
     // 乗算型(1・2)と無効(0)ではこの係数が0になり、項ごと消える
     const float3 multiScatterWeight =
-        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, useBent, bent, N, R, materialAO, ssao, brdf,
+        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, soMode, bent, N, R, materialAO, ssao, brdf,
                                       ShadowParams.w, ShadowParams.z);
 
     // 【昼度(AmbientColor.a)による減衰はしない】かつては空が昼固定のスカイボックスから

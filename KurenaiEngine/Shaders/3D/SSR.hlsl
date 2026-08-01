@@ -203,10 +203,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 反射ベクトルも同じものを渡す。あちらはreflect(-V, N)でnormalizeを挟まないが、
     // VとNが単位ベクトルならreflectは長さを保つので同じ向き・同じ長さになる
     const BentOcclusion bent = DecodeBentOcclusion(BentNormalTexture.Sample(DataSampler, input.UV), N);
-    const bool useBent = OcclusionParams.y > 0.5f;
+    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(25.11節)。
+    // DeferredLighting.hlslとまったく同じ読み方をすること(段差防止)
+    const int soMode = (int)(OcclusionParams.y + 0.5f);
     const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, useBent, bent, N, reflectDir, materialAO, ssao, brdf,
+        SpecularIBLWeight(F0, NdotV, roughness, soMode, bent, N, reflectDir, materialAO, ssao, brdf,
                           ShadowParams.w, ShadowParams.z);
     // Kulla-Conty方式の加算ローブ(SpecularIBLMultiScatterWeight)はここでは扱わない。
     // あれは拡散イラディアンスに掛かるほぼ拡散のローブで、鏡面反射として差し替える対象では

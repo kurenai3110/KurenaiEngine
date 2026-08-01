@@ -262,15 +262,16 @@ void EvaluateIBLSplit(
     // 半透明パスはスクリーンスペースのAO/GIバッファを持たないため、そちらは1.0を渡す。
     // ComposeSpecularOcclusionはどちらの経路も「遮蔽なしで厳密に1」なので、
     // 片方が無くても結果は歪まない(遮蔽マップもbent normalも無ければ以前と同じ結果になる)
-    const bool useBent = OcclusionParams.y > 0.5f;
+    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(25.11節)
+    const int soMode = (int)(OcclusionParams.y + 0.5f);
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, useBent, bent, N, R, materialAO, 1.0f, brdf,
+        SpecularIBLWeight(F0, NdotV, roughness, soMode, bent, N, R, materialAO, 1.0f, brdf,
                           ShadowParams.w, ShadowParams.z);
     // Kulla-Conty方式(ShadowParams.w = 3)が足す加算ローブ。DeferredLighting.hlslの
     // EvaluateIBLと同じ形にしておかないと、同じマテリアルが不透明と半透明で違う明るさになる。
     // 乗算型(1・2)と無効(0)ではこの係数が0になり、項ごと消える
     const float3 multiScatterWeight =
-        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, useBent, bent, N, R, materialAO, 1.0f, brdf,
+        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, soMode, bent, N, R, materialAO, 1.0f, brdf,
                                       ShadowParams.w, ShadowParams.z);
 
     // 【昼度(AmbientColor.a)による減衰はしない】DeferredLighting.hlslのEvaluateIBLと同じ理由で、
@@ -447,14 +448,10 @@ float4 PSMain(PSInput input) : SV_TARGET
         // ShadowParams.zはEvaluateIBLSplitの中で拡散・鏡面それぞれに掛かっている
         // bent normalも遮蔽マップと同じLightmapUVで引く。持たないマテリアルは黒1x1が
         // バインドされ、DecodeBentOcclusionがaxis = N・aoB = 1(遮蔽なし)へ落とす。
-        // 【不透明側と違いモデル空間のまま使えない】ベイカーはモデル空間で焼いており、
-        // ここはワールド空間で計算しているためNormalMatrixで移す(GBuffer.hlslと同じ扱い)
+        // 接空間で焼かれているのでtbnでワールドへ移す(直交行列なので長さは保たれる。
+        // 理由はGBuffer.hlslの同じ箇所を参照)
         const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
-        const float bentLength = length(bentSample.xyz);
-        const float3 bentWorld = bentLength > 1e-6f
-            ? normalize(mul(bentSample.xyz, (float3x3)NormalMatrix)) * bentLength
-            : float3(0.0f, 0.0f, 0.0f);
-        const BentOcclusion bent = DecodeBentOcclusion(float4(bentWorld, bentSample.a), N);
+        const BentOcclusion bent = DecodeBentOcclusion(float4(mul(bentSample.xyz, tbn), bentSample.a), N);
 
         EvaluateIBLSplit(N, V, input.WorldPos, albedo, metallic, roughness, materialAO, bent,
                          ambientDiffuse, ambientSpecular);

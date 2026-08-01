@@ -2088,7 +2088,7 @@ namespace Kurenai
         // bent normalによる遮蔽(25章)。ProbeCapture.hlslが同じ分岐を持つため、
         // 含め忘れるとつまみを動かしてもプローブの中身だけ古いまま残る
         mixBool(m_BentNormalAOSource);
-        mixBool(m_BentNormalSpecularOcclusion);
+        mixFloat(static_cast<float>(m_SpecularOcclusionMode));
         mixBool(m_MultiBounceAOEnabled);
 
         // ライトは構造体ごとダンプすると詰め物(padding)の未初期化バイトを拾い得るため、
@@ -2889,7 +2889,7 @@ namespace Kurenai
         };
         constants.OcclusionParams = {
             m_BentNormalAOSource ? 1.0f : 0.0f,
-            m_BentNormalSpecularOcclusion ? 1.0f : 0.0f,
+            static_cast<float>(m_SpecularOcclusionMode),
             m_MultiBounceAOEnabled ? 1.0f : 0.0f,
             0.0f };
 
