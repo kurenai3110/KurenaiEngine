@@ -64,7 +64,8 @@ cbuffer FrameConstants : register(b0)
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で
 // 実質未使用だが、同じルートシグネチャ/定数バッファを共有するため並び順を合わせる)。
-// 末尾のBaseColorFactorはこのシェーダーのみが使う(GBuffer.hlsl/Shadow.hlslは宣言していない)
+// 末尾のBaseColorFactorはGBuffer.hlsl/ProbeCapture.hlslも同じ位置で宣言して使う
+// (Shadow.hlslは深度しか書かないため先頭のWorldまでしか宣言していない)
 cbuffer ObjectConstants : register(b1)
 {
     float4x4 World;

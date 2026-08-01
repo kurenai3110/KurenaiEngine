@@ -1991,6 +1991,16 @@ IBLの有効/無効に関わらず使える)を掛けた鏡面を足す。BRDF L
 (<code>DeferredLighting.hlsl</code>の拡散側では過去に同じ抜けを修正済みで、同種の取りこぼしである)。
 </p>
 <p>
+このフォールバックは<code>AmbientColor</code>を<b>方向依存を持たない一様な環境</b>とみなすため、
+一様環境では白い完全鏡面(<code>F0=1</code>)と白い完全拡散(アルベド1)がどちらも入射放射輝度を
+そのまま返し、区別が付かなくなる。これはWhite Furnace Testと同じ理屈で、フォールバックの構造上の
+限界であり不具合ではない(映り込むべき環境の模様そのものが存在しないため)。実際、
+<code>OcclusionBakeCompare.kscene</code>でIBLを切ると金属ドラゴンが平坦に見えるが、これは正しい
+挙動である。ただし15.7節の不具合(不透明パスが<code>baseColorFactor</code>を落としていた)が
+重なっていた間は、本来アルベド0.6であるべき隣の誘電体ドラゴンまでアルベド1.0で描かれ、
+<b>金属と誘電体が同じ明るさになって</b>いた。
+</p>
+<p>
 <b>この修正の範囲外</b>: <code>SpecularIBLWeight</code>(<code>ReflectionProbe.hlsli</code>)は末尾で
 <code>iblIntensity</code>を掛けるため、IBLを無効にすると<b>SSR / RT反射の寄与も同時に0になる</b>。
 これを解消するには「IBL有効フラグ」と「IBL強度倍率」をシェーダー定数として分離し、
@@ -2406,15 +2416,20 @@ projectedArea(w) = w.z (1 + &Lambda;(w))     // w.z &lt; 0 でも正になる(&L
 <code>EnergyCompareSun.kscene</code>(環境光0 + 太陽光)。
 </p>
 <p class="note">
-<b><code>F0</code>を<code>metallic</code>だけで振っている理由</b>: 不透明パスは
-<code>baseColorFactor</code>を意図的に適用しない(<code>GBuffer.hlsl</code>はベースカラー
-<b>テクスチャ</b>のみを読み、factorとして<code>ObjectConstants</code>に載っているのは
-<code>metallic</code>と<code>roughness</code>だけ)。そのため<code>baseColorFactor</code>で
-色や黒を指定してもアルベドは常に<code>(1,1,1)</code>になり、有色金属の行や
-「拡散0の黒誘電体」の行はテクスチャを用意しない限り作れない。
-<code>F0 = lerp(0.04, albedo, metallic)</code>なので<code>metallic</code>を振れば
-<code>F0</code>は0.04〜1.0を掃引できる。副作用として<code>metallic</code>が小さい行には
+<b><code>F0</code>を<code>metallic</code>だけで振っている理由</b>: このアセットを作った当時、
+不透明パスは<code>baseColorFactor</code>を適用していなかった(<code>GBuffer.hlsl</code>は
+ベースカラー<b>テクスチャ</b>のみを読み、factorとして<code>ObjectConstants</code>に
+載っているのは<code>metallic</code>と<code>roughness</code>だけだった)。そのため
+<code>baseColorFactor</code>で色や黒を指定してもアルベドは常に<code>(1,1,1)</code>になり、
+有色金属の行や「拡散0の黒誘電体」の行はテクスチャを用意しない限り作れなかった。そこで
+<code>metallic</code>を振って<code>F0</code>を掃引する構成にした
+(<code>F0 = lerp(0.04, albedo, metallic)</code>なので<code>metallic</code>を振れば
+<code>F0</code>は0.04〜1.0を掃引できる)。副作用として<code>metallic</code>が小さい行には
 白い拡散項が乗るが、拡散項は3方式で全く同じなので方式間の差を見る目的には影響しない。
+15.7節の修正で不透明パスも<code>baseColorFactor</code>を適用するようになったため、
+現在は<code>baseColorFactor</code>で有色金属の行も作れる。ただしこのアセットは
+<code>baseColorFactor = [1,1,1,1]</code>のままなので、以下に掲載している測定値は
+修正の前後で変わらない。
 </p>
 <p>
 <b>White Furnace Test(球中心の生HDR値。背景 = 1.0000)</b>
@@ -2774,12 +2789,52 @@ Smith可視性項とスペキュラのエネルギー補正を持ち、<code>Dir
 (glTF仕様どおりの式)でベースカラー/アルファの両方を求める。
 </p>
 <p>
-この反映は<strong>半透明フォワードパスのみ</strong>に限定しており、<code>GBuffer.hlsl</code>
+当初この反映は<strong>半透明フォワードパスのみ</strong>に限定していた。<code>GBuffer.hlsl</code>
 (不透明・MASKカットアウト)は<code>ObjectConstants</code>に<code>BaseColorFactor</code>を
-宣言・使用しておらず、既存の見た目を変えない。オフセットは末尾追加のみのため
-<code>Shadow.hlsl</code>を含む既存シェーダーへの影響も無い(14.6節と同じ「末尾にのみ追加する」
-規約)。不透明マテリアル全般への<code>baseColorFactor</code>適用は、既存シーンの見た目を
-広範囲に変える可能性がある独立した変更と考え、今回のスコープ(半透明描画)には含めていない。
+宣言・使用しておらず、不透明マテリアル全般への<code>baseColorFactor</code>適用は、既存シーンの
+見た目を広範囲に変える可能性がある独立した変更と考えて、当時のスコープ(半透明描画)からは
+外していた。
+</p>
+<p>
+その後、<code>OcclusionBakeCompare.kscene</code>(Chinese Dragon 4体)でIBLを無効にすると、
+右2体の「リフレクタンス=1」の金属ドラゴン(<code>metallic=1</code>・<code>baseColorFactor=(1,1,1,1)</code>)
+と左2体の「ソースのマテリアルのまま」の誘電体ドラゴン(<code>metallic=0</code>・
+<code>baseColorFactor=(0.6,0.6,0.6,1)</code>)がまったく同じ明るさに見える症状が見つかった。
+デバッグ表示の「アルベド」バッファを確認したところ4体すべてが<code>(255,255,255)</code>
+= 1.0になっており、「マテリアル」バッファ側は<code>metallic</code> 0/1・<code>roughness</code>
+1.0/0.251を正しく示していた。つまりG-Bufferのアルベドだけが<code>baseColorFactor</code>を
+落としていた。調べると<b>不透明パスだけがglTF仕様の
+<code>baseColor = baseColorTexture * baseColorFactor</code>を満たしておらず</b>、半透明・
+プローブ焼き込み(<code>ProbeCapture.hlsl</code>)・レイトレーシング
+(<code>RaytracingScene.hlsli</code>経由の<code>RTReflection.hlsl</code>/<code>RTAO.hlsl</code>)の
+各パスとは同じメッシュでも色が食い違う内部不整合になっていた。これを受けて
+<code>GBuffer.hlsl</code>にも<code>BaseColorFactor</code>を追加し、
+<code>baseColorSample = BaseColorTexture.Sample(MaterialSampler, input.UV) * BaseColorFactor</code>
+とした。<code>BaseColorTextureIndex</code>が無いマテリアルには白1x1のプレースホルダーが
+差さるため、この乗算1回で「テクスチャのみ」「係数のみ」「両方」のすべてのケースが正しく
+扱える。<code>Shadow.hlsl</code>は深度しか書かず<code>ObjectConstants</code>を途中までしか
+宣言していないため変更不要(定数バッファの末尾を読まないだけで、レイアウト不一致にはならない)。
+</p>
+<p>
+影響は実測で確認した。<b>Sponza</b>はglTFの全25マテリアルが<code>baseColorFactor = [0.588, 0.588, 0.588, 1]</code>
+を宣言しており、修正前はアルベドが約1.7倍明るく描画されていた(平均輝度31.45→23.18、比0.737。
+差が2を超えた画素は84.9%、最大差27)。<b>Bistro Interior</b>は66メッシュのうち
+<code>baseColorFactor</code>が<code>(1,1,1,1)</code>でない不透明メッシュが2つしか無いため影響はごく小さい
+(平均輝度10.74→10.73、比0.999。差が2を超えた画素は0.2%、最大差14)。
+<b>Chinese Dragon</b>の比較シーンでは金属ドラゴン2体(<code>baseColorFactor=(1,1,1,1)</code>)は
+修正前後で数値が完全に一致し、誘電体ドラゴン2体はアルベド0.6相当に暗くなって
+(52.40→35.52、50.40→33.83)金属との差が明確になった。
+<b>White Furnace Test・Energy Compare Test・Material Test・Occlusion Test・Probe Test</b>の
+アセットは<code>baseColorFactor</code>がすべて<code>[1,1,1,1]</code>のため、これらの検証シーンの
+過去の測定値はこの修正の影響を受けない。
+</p>
+<p class="note">
+<b>既知の副作用</b>: Bistro Interiorに<code>Kd = 0,0,0</code>かつ拡散テクスチャ
+(<code>Metal_Chrome_01_Diff</code>)を持つ不透明メッシュが1つあり、これは真っ黒になる。
+WavefrontMTL(OBJ)の<code>Kd</code>と<code>map_Kd</code>の意味づけの曖昧さ(多くのレンダラは
+<code>map_Kd</code>があるとき<code>Kd</code>を無視する)に由来するもので、KurenaiPackerがOBJの
+<code>AI_MATKEY_COLOR_DIFFUSE</code>を<code>BaseColorFactor</code>へ入れている仕様側の問題。
+glTFにはこの曖昧さは無い。
 </p>
 <h3>15.8 鏡面反射を減衰させない合成(事前乗算済みアルファ)</h3>
 <p>

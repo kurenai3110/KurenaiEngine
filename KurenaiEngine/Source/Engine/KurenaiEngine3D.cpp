@@ -701,9 +701,10 @@ namespace Kurenai
             // glTFのocclusionTexture.strength(既定1.0)。かつては純粋な詰め物(Padding)だった枠を
             // そのまま使っているため、定数バッファのサイズ・オフセットは一切変わっていない
             float OcclusionStrength;
-            // glTFのbaseColorFactor(既定[1,1,1,1])。GBuffer.hlsl/Shadow.hlslはこのフィールドを
-            // 宣言していない(=読まない)ため、末尾に追加してもオフセットへの影響は無い。
-            // Transparent.hlsl(半透明フォワードパス)のみがBaseColorTextureと乗算して使う(14章参照)
+            // glTFのbaseColorFactor(既定[1,1,1,1])。BaseColorTextureと乗算して使う。
+            // GBuffer.hlsl(不透明)・Transparent.hlsl(半透明)・ProbeCapture.hlsl(プローブ焼き込み)
+            // が同じ位置で宣言している。Shadow.hlslは深度しか書かないため先頭までしか宣言していないが、
+            // 定数バッファの末尾を読まないだけなのでレイアウトの不一致にはならない(14章参照)
             float BaseColorFactor[4];
         };
 
