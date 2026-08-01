@@ -414,7 +414,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 低ラフネスのガラスは正反射条件を満たす極めて狭い帯にしかハイライトが出ず、
     // 透明なだけの面に見えてしまう。
     // ShadowParams.z = IBL強度倍率(Enable IBL無効なら0)。無効時はDeferredLighting.hlslと同じく
-    // IBL導入以前の定数色アンビエント(拡散のみ)へフォールバックする。
+    // 定数色アンビエント(拡散+鏡面)へフォールバックする。
     // SSAO/SSILによる遮蔽・間接拡散光は非対応(常にao=1・間接光=0として扱う既知の制約)。
     // ただしマテリアルの遮蔽マップ(ベイク済みAO)はテクスチャなのでこのパスでも効く
     float3 ambientDiffuse;
@@ -434,11 +434,17 @@ float4 PSMain(PSInput input) : SV_TARGET
         // F0とbrdfはPSMain冒頭でエネルギー補正用に既に求めてあるため再サンプルしない。
         // 定数色アンビエントはプリフィルタ済み鏡面・拡散イラディアンスの両方の代わりを兼ねるため、
         // Kulla-Contyの加算ローブにも同じAmbientColor.rgbを掛ける。
-        // 遮蔽マップはIBLの有無に関わらず環境光に効かせる(IBL有効時のEvaluateIBLSplitと同じ扱い)
+        // 遮蔽マップはIBLの有無に関わらず環境光に効かせる(IBL有効時のEvaluateIBLSplitと同じ扱い)。
+        //
+        // AmbientColor.rgbは一様な環境のイラディアンスE相当(IBLConvolve.hlslが行っている
+        // 1/πと積分のπの相殺を受けていない)なので、環境の放射輝度はL = E / PIになる。
+        // 以前はここだけ/PIが抜けており、拡散・鏡面ともπ倍明るかった
+        // (DeferredLighting.hlslは同じ抜けを先に修正済みで、3パスで式を揃えたもの)
+        const float3 ambientRadiance = AmbientColor.rgb / PI;
         const float3 fallbackFssEss = F0 * brdf.x + brdf.y;
         const float fallbackEss = brdf.x + brdf.y;
-        ambientDiffuse = albedo * (1.0f - metallic) * AmbientColor.rgb * materialAO;
-        ambientSpecular = AmbientColor.rgb
+        ambientDiffuse = albedo * (1.0f - metallic) * ambientRadiance * materialAO;
+        ambientSpecular = ambientRadiance
             * (fallbackFssEss * energy.Compensation
                + SpecularMultiScatterIBL(F0, fallbackFssEss, fallbackEss, energy.Mode))
             * SpecularOcclusion(NdotV, roughness, materialAO);
