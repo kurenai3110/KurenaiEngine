@@ -40,16 +40,17 @@ namespace Kurenai::UI
             "Hi-Z (深度ミップチェーン)",
             "IBL - イラディアンス (キューブマップ)",
             "IBL - プリフィルタ済み鏡面 (キューブマップ・ミップチェーン)",
-            "IBL - BRDF LUT (X=NdotV, Y=粗さ)",
+            "IBL - BRDF LUT (X=NdotV, Y=粗さ, RGB=A/B/Eavg)",
             "ブルーム (ピラミッド最上段・半解像度)",
             "ライトタイル (タイルあたりのライト数ヒートマップ)",
             "プローブ - イラディアンス (キューブマップ配列)",
             "プローブ - プリフィルタ済み鏡面 (ミップ0=キャプチャ結果)",
             "プローブ - 影響範囲 (プローブごとの色分け)",
+            "シーンカラー (生HDR・トーンマップなし)",
         };
         static_assert(
-            static_cast<int>(DebugView::ProbeInfluence) == 22,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はProbeInfluence)");
+            static_cast<int>(DebugView::SceneColorRaw) == 23,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はSceneColorRaw)");
 
         DrawUsageHint();
         BeginParamGroup();

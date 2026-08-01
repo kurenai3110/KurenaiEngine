@@ -107,10 +107,16 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
 
     // --- 鏡面IBL(split-sum近似) ---
     // 「環境の放射輝度 × 係数」の形に分解しておく。SSRはこの放射輝度だけを差し替えるため、
-    // 係数の定義はReflectionProbe.hlsliのSpecularIBLWeightに1か所だけ置いている(20章)
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
+    // 係数の定義はReflectionProbe.hlsliのSpecularIBLWeightに1か所だけ置いている(20章)。
+    // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(14.9.2.1節)
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     const float3 specularWeight =
         SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+    // Kulla-Conty方式(ShadowParams.w = 3)が足す加算ローブ。プリフィルタ済み鏡面ではなく
+    // 拡散イラディアンスに掛かるため、上の「放射輝度 × 係数」とは別の項として持つ。
+    // 乗算型(1・2)と無効(0)ではこの係数が0になり、項ごと消える
+    const float3 multiScatterWeight =
+        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
 
     // 【昼度(AmbientColor.a)による減衰はしない】かつては空が昼固定のスカイボックスから
     // 焼かれていたため、夜を表現する手段が「IBL全体を昼度で0倍する」ことしか無かった。
@@ -118,7 +124,9 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // 現在は手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなり、夜は月明かりの
     // 空になるため、ここで追加の減衰を掛ける必要がない(掛けると二重に暗くなる。21.4節)。
     // 鏡面側のShadowParams.z(IBL強度倍率)はspecularWeightに含まれている
-    return diffuseIBL * ao * ShadowParams.z + prefiltered * specularWeight;
+    return diffuseIBL * ao * ShadowParams.z
+         + prefiltered * specularWeight
+         + irradiance * multiScatterWeight;
 }
 
 struct PSInput

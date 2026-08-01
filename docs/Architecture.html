@@ -2009,57 +2009,109 @@ LUT生成(<code>BRDFLUT.hlsl</code>)・直接光(<code>DirectLighting.hlsl</code
 <h4>14.9.2 補正式とBRDF LUTの再利用</h4>
 <p>
 Kulla &amp; Conty, "Revisiting Physically Based Shading at Imageworks"(SIGGRAPH 2017)の
-multiple-scattering energy compensationの実時間近似を使う。
+multiple-scattering energy compensationを実装する。既定は下記の<b>方式B(Linear)</b>で、
+比較用に3方式を切り替えられるようにしてある(選定根拠は14.9.8節)。
 </p>
-<pre><code>Ess  = brdf.x + brdf.y
-comp = 1 + F0 * (1 / Ess - 1)
-specular *= comp</code></pre>
+<pre><code>Ess = brdf.x + brdf.y          // F = 1 のときの単一散乱の方向アルベド
+
+方式B Linear      comp = 1 + F0 (1/Ess - 1)      specular *= comp
+方式C Series      comp = 1 / (1 - F0 (1 - Ess))   specular *= comp
+方式A Kulla-Conty specular += Fms * f_ms          // 乗算せず広い加算ローブを足す
+                  Fms  = Favg^2 Eavg / (1 - Favg (1 - Eavg))
+                  f_ms = (1 - E(N&middot;V))(1 - E(N&middot;L)) / (&pi; (1 - Eavg))</code></pre>
 <p>
-補正後の方向アルベドは<code>Ess &middot; comp = Ess + F0(1 - Ess)</code>となり、
+方式Bの補正後の方向アルベドは<code>Ess &middot; comp = Ess + F0(1 - Ess)</code>となり、
 「失われたぶんを<code>F0</code>で1回だけ跳ね返して戻す」形(等比級数の第1項近似)になる。
-<code>F0 = 1</code>(完全な金属)なら厳密に1でエネルギー保存し、<code>F0 = 0.04</code>(誘電体)なら
-失われたぶんの4%しか戻さない ―― これも正しく、誘電体は残りを透過・吸収するため。
+方式Cは同じ等比級数を全項足した形、方式Aは乗算ではなく<b>別のローブを加算</b>する本来の形で、
+<code>E(N&middot;V)</code>・<code>E(N&middot;L)</code>・<code>Eavg</code>の3つを使うため
+&mu;o/&mu;i対称(相反性を満たす)。<code>Favg = F0 + (1-F0)/21</code>はSchlickフレネルの半球平均。
+</p>
+<p class="note">
+<b>3方式の関係で最も重要な性質: <code>F0 = 1</code>では方式Bと方式Cは代数的に同一になる。</b>
+Bは<code>1 + 1&middot;(1/Ess - 1) = 1/Ess</code>、Cは<code>1/(1 - 1&middot;(1-Ess)) = 1/Ess</code>。
+さらに<code>F0 = 1</code>では方式Aも<code>Favg = 1</code>より<code>Fms = 1</code>となり、
+3方式とも補正後アルベドが<b>厳密に1.0</b>になる。つまり<b>White Furnace Testは3方式を区別できない</b>。
+区別できるのは<b>(a) <code>F0 &lt; 1</code></b>と<b>(b) 方向分布(点光源・太陽光でのローブ形状)</b>の
+2つだけである(実測は14.9.9節)。
 </p>
 <p>
-<b><code>Ess</code>は既存のBRDF積分LUTから追加チャンネル無しで得られる。</b>
+<b><code>Ess</code>は既存のBRDF積分LUTからそのまま得られる。</b>
 <code>BRDFLUT.hlsl</code>はSchlickのフレネル<code>F = F0(1-Fc) + Fc</code>を括り出して
 <code>A = &int;(1-Fc)Gvis</code>、<code>B = &int;Fc&middot;Gvis</code>を焼いており、
 <code>F0&middot;A + B</code>はそのF0における方向アルベドそのものである。よって<code>F0 = 1</code>を
 代入した<code>A + B</code>が、ここで必要な「<code>F = 1</code>のときの方向アルベド」に一致する。
-LUTのフォーマット(R16G16_Float / 128x128)変更もチャンネル追加も不要だった。
+</p>
+
+<h4>14.9.2.1 Eavgを同じLUTへ載せる(2パスベイク)</h4>
+<p>
+方式Aだけは<code>Eavg</code>(方向アルベドの半球平均、ラフネスのみの関数)を追加で必要とする。
+実行時のSRVスロットを1つも増やさないため、<b>既存のBRDF積分LUTを<code>R16G16_Float</code>から
+<code>R16G16B16A16_Float</code>へ広げ、第3成分に<code>Eavg</code>を格納する</b>。
+<code>Eavg</code>は行(ラフネス)内では同じ値を複製するので、実行時は既存の1回のサンプルから
+<code>.b</code>として読めばよい(128&times;128&times;8B = 128KB)。
 </p>
 <p>
-<b>残る近似</b>: 本来のKulla-Contyは<code>E(N&middot;V)</code>・<code>E(N&middot;L)</code>・
-<code>Eavg</code>(全方向平均)の3つを使うが、この実時間近似は<code>E(N&middot;V)</code>のみで
-済ませているため、視線方向と光源方向の非対称性(相反性)は厳密には再現されない。
+ベイクは2パスに分けている。<b>同一リソースをSRVとUAVへ同時にバインドできない</b>ためで、
+<code>R16G16B16A16_Float</code>のtyped UAV loadはハードウェア機能(Typed UAV Load Additional
+Formats)依存なのでUAVの読み戻しにも頼れない。
+</p>
+<table>
+<tr><th>パス</th><th>入出力</th><th>内容</th></tr>
+<tr><td><code>CSMain</code></td><td>→ スクラッチ(<code>R16G16_Float</code>)</td><td>従来どおり<code>(A, B)</code>を焼く。シェーダは無変更</td></tr>
+<tr><td><code>CSCombineEavg</code></td><td>スクラッチ(SRV) → 最終LUT(UAV)</td><td>自分の行を128テクセル<code>Load</code>して<code>Eavg = &Sigma; 2(A+B)&mu;<sub>k</sub>/128</code>を求め、<code>float4(A, B, Eavg, 0)</code>を書く</td></tr>
+</table>
+<p>
+パス1と同じ&mu;の刻みで積分するため、LUTが持つ<code>E</code>と<code>Eavg</code>は必ず整合する。
+2M テクセルロードで起動時1回のみなのでコストは無視できる。UAVは<code>Dispatch</code>直後に
+自動解除されるため、パス2で張り直す必要がある(<code>IRHICommandList.h</code>のバインド寿命)。
 </p>
 
 <h4>14.9.3 適用箇所とトグル</h4>
 <p>
-補正は<b>鏡面項にのみ</b>掛ける。適用は5箇所:
+補正は<b>鏡面項にのみ</b>掛ける。適用箇所は次のとおり:
 </p>
 <table>
 <tr><th>ファイル</th><th>対象</th></tr>
-<tr><td><code>DeferredLighting.hlsl</code></td><td><code>EvaluateIBL</code>の<code>specularIBL</code></td></tr>
+<tr><td><code>ReflectionProbe.hlsli</code></td><td><code>SpecularIBLWeight</code>(鏡面IBLの係数。<b>DeferredLightingとSSRが共有する定義</b>。20章)と、Kulla-Conty方式の加算ローブ用の<code>SpecularIBLMultiScatterWeight</code></td></tr>
+<tr><td><code>DeferredLighting.hlsl</code></td><td><code>EvaluateIBL</code>。上の2つの係数に、それぞれプリフィルタ済み鏡面と拡散イラディアンスを掛けて足す</td></tr>
 <tr><td><code>DirectLighting.hlsl</code></td><td><code>EvaluateDirectBRDF</code>の<code>specular</code>(太陽・ライトリストの両方から呼ばれる)</td></tr>
 <tr><td><code>Transparent.hlsl</code></td><td><code>EvaluateDirectBRDF</code>の<code>outSpecular</code> / <code>EvaluateIBLSplit</code>の<code>outSpecular</code> / IBL無効時フォールバックの<code>ambientSpecular</code></td></tr>
+<tr><td><code>ProbeCapture.hlsl</code></td><td><code>EvaluateDirectBRDF</code>の<code>specular</code> / <code>EvaluateGlobalIBL</code>の<code>specularIBL</code>(プローブに焼き込む絵も本編と同じ補正を通す)</td></tr>
 </table>
+<p class="note">
+<b>SSRが差し替えるのは単一散乱(鏡面)ローブだけ。</b>Kulla-Conty方式が足す加算ローブは
+プリフィルタ済み鏡面ではなく<b>拡散イラディアンス</b>に掛かるうえ、ほぼ拡散に近い広がりを持つため、
+スクリーンスペース反射で置き換える対象ではない。そこで係数を
+<code>SpecularIBLWeight</code>(SSRが差し替える)と
+<code>SpecularIBLMultiScatterWeight</code>(SSRは触らない)の2つに分けてある。
+乗算型(Linear / Series)では後者が0を返すため、従来どおり前者だけで完結し、
+「DeferredLightingが足した量とSSRが引く量が定義上一致する」という20章の不変条件も保たれる。
+</p>
 <p>
 <code>Ess</code>は<code>(N&middot;V, roughness)</code>だけの関数でピクセル内では一定なので、
 LUTのサンプルと補正倍率の計算はPSMainで1度だけ行い、ライトのループへは
-<code>float3 energyCompensation</code>を引数で渡している(ループ内でLUTを引くとライト数ぶん
-テクスチャフェッチが増えてしまう)。追加コストはピクセルあたり1サンプルのみ。
+<code>SpecularEnergyContext</code>(モード・乗算倍率・<code>EssV</code>・<code>Eavg</code>・
+ラフネスをまとめた構造体)を引数で渡している(ループ内でLUTを引くとライト数ぶん
+テクスチャフェッチが増えてしまう)。
 <code>Transparent.hlsl</code>の<code>EvaluateDirectBRDF</code>は事前乗算済みアルファ出力(15.8節)の
 ために拡散/鏡面を分離して返す構造になっているため、<b>補正が鏡面側にだけ掛かることがコード上で
 自明</b>になっている。
 </p>
+<p class="note">
+<b>方式Aだけは直接光のコストが上がる。</b><code>f_ms</code>が<code>E(N&middot;L)</code>を要り、
+これは光源方向に依存するためライトのループ内でLUTを引かざるを得ない
+(<b>ライト1灯あたりテクスチャフェッチ+1</b>)。乗算型の方式B・Cはピクセルあたり1サンプルのままである。
+ループ内のフェッチは動的分岐の中に入るため、勾配に依存しない<code>SampleLevel</code>を使っている。
+</p>
 <p>
-ImGuiのPost Processingパネルに<code>Specular Energy Compensation</code>チェックボックスを追加した。
+ImGuiのPost Processingパネルの<code>Specular Energy Compensation</code>を、
+Off / Linear / Series / Kulla-Conty の4項目のコンボボックスにした。
 IBL鏡面・直接光鏡面の両方に効くため、<code>Enable IBL</code>のネストの<b>外</b>に置いている。
-値は未使用だった<code>FrameConstants.ShadowParams.w</code>へ1.0f/0.0fとして渡すため、
-<code>FrameConstants</code>のレイアウト(末尾追加規約)に手を入れる必要はなかった。
-無効時は共有ヘッダーの<code>SpecularEnergyCompensation</code>が恒等元の1を返すので、
-呼び出し側5箇所はすべて無条件に乗算するだけでよく、分岐の書き忘れが起きない。
+値は未使用だった<code>FrameConstants.ShadowParams.w</code>へ<b>モード番号</b>として渡すため、
+<code>FrameConstants</code>のレイアウト(末尾追加規約)に手を入れる必要はなかった
+(C++側<code>SpecularCompensationMode</code>とHLSL側<code>KURENAI_SPEC_COMP_*</code>で値を一致させる)。
+無効時と非該当モードでは共有ヘッダーの各関数が恒等元(乗算側は1、加算側は0)を返すので、
+呼び出し側はすべて無条件に乗算・加算するだけでよく、分岐の書き忘れが起きない。
 </p>
 
 <h4>14.9.4 拡散項<code>kd</code>を変更しない判断</h4>
@@ -2204,6 +2256,170 @@ Furnace Testは「球と背景の明るさが厳密に一致するか」を見�
 エネルギー補正は物理的な正しさの底上げにとどまる。効果が最大化する「粗い金属」を現行のアセットは
 一つも持っていないため、将来<code>metallicFactor = 1.0</code>のマテリアルを追加した時点で
 初めて視覚的に意味を持つ。
+</p>
+
+<h4>14.9.8 3方式の比較 ―― 多重散乱の真値との突き合わせ</h4>
+<p>
+14.9.2節の3方式のうちどれを採用すべきかを、<b>近似ではない真値</b>と突き合わせて決めた。
+真値はSmithマイクロサーフェス上の多重散乱ランダムウォーク
+(Heitz, Hanika, d'Eon, Dachsbacher, "Multiple-Scattering Microfacet BSDFs with the Smith Model",
+SIGGRAPH 2016)で求める。エンジン内では計測できないためオフラインで実施した。
+</p>
+<p>
+ウォーク実装の妥当性は4点で自己検証している。<b>(1)</b> <code>F0 = 1</code>ではエネルギー保存より
+アルベドが厳密に1.0になるはずで、roughness 0.3〜4.0・&mu;o 0.3/0.8のすべてで
+<code>1.00000</code>(打ち切られた経路0%、roughness 4.0では平均反射回数29.6)を得た。
+<b>(2)</b> 1回反射だけで出ていった経路の割合<code>P(n=1)</code>は単一散乱アルベドに一致するはずで、
+これが<b>高さ相関Smith</b>の<code>E(&mu;)</code>と0.1%以内で一致した(分離形Smithとは一致しない)。
+つまりこのウォークが再現しているのは高さ相関Smithである。
+<b>(3)</b> 方向分布の推定を単一散乱のみ(<code>max_bounces = 1</code>)に制限すると
+高さ相関Smithの解析BRDFに一致するはずで、最大相対差0.24%・中央0.02〜0.19%だった。
+<b>(4)</b> 方向分布を半球全体で積分した値が、まったく別の推定器である
+スループット方式のアルベドと0.02%/0.28%で一致した。
+</p>
+<p class="note">
+<b>方向分布の推定はnext event estimationで行う。</b>当初は出射方向をヒストグラムへ
+離散化していたが、入射面の断面を取り出すと&phi;ビンのうち1本しか使えず(64本なら経路の1/64)、
+さらに<code>1/cos&theta;o</code>の正規化で浅い角度の分散が増幅されて真値が数%の幅で波打った。
+そこでHeitzの<code>eval()</code>と同じ方式へ変更し、各バウンスで
+「目標方向<code>wo</code>へ散乱してその高さから上へ抜け出す確率」を解析的に評価して足し込む:
+</p>
+<pre><code>eval(wi&rarr;wo) = &Sigma;<sub>bounces</sub> throughput &middot; p(w&rarr;wo) &middot; F(w, wh) &middot; G1(wo, hr)
+p(w&rarr;wo)     = D_wi(w, wh) / (4 &lt;w, wh&gt;),  wh = normalize(w + wo)
+D_wi(w, wm)   = max(0, &lt;w, wm&gt;) D(wm) / projectedArea(w)
+projectedArea(w) = w.z (1 + &Lambda;(w))     // w.z &lt; 0 でも正になる(&Lambda;(w) = -1 - &Lambda;(-w) より)</code></pre>
+<p>
+全経路が全方向へ寄与するためビン化が不要になり(評価したい方向をそのまま指定できる)、
+経路数を1/10に減らしても<b>真値の相対標準誤差が数%から0.15〜0.25%へ改善した</b>。
+<code>eval</code>は<code>f &middot; cos&theta;o</code>に一致する量なので、BRDFにするには<code>cos&theta;o</code>で割る。
+</p>
+<p>
+比較では誤差要因を2つに分離した。<b>engineG</b>はエンジンが実際に使うSchlick近似
+(<code>k = &alpha;/2</code>)の<code>Ess</code>を式へ入れた場合 = 今のエンジンで実際に出る絵の誤差、
+<b>exactG</b>は厳密なSmithの<code>Ess</code>を入れた場合 = 補正式そのものの誤差である。
+</p>
+<table>
+<tr><th>真値に対する平均絶対誤差(<code>F0 &lt; 1</code>のみ)</th><th>補正なし</th><th>方式A Kulla-Conty</th><th>方式B Linear(現行)</th><th>方式C Series</th></tr>
+<tr><td><b>roughness &le; 1.0(エンジンの実使用域)</b> engineG</td><td>0.0665</td><td>0.0206</td><td><b>0.0152</b></td><td>0.0237</td></tr>
+<tr><td><b>roughness &le; 1.0</b> exactG</td><td>0.0414</td><td>0.0058</td><td><b>0.0045</b></td><td>0.0082</td></tr>
+<tr><td>roughness &gt; 1.0(参考・外挿域) engineG</td><td>0.0536</td><td><b>0.0354</b></td><td>0.1417</td><td>0.0361</td></tr>
+<tr><td>roughness &gt; 1.0(参考・外挿域) exactG</td><td>0.0490</td><td><b>0.0261</b></td><td>0.1435</td><td>0.0280</td></tr>
+</table>
+<p>
+<b>結論: エンジンの実使用域(ラフネスは<code>[0.045, 1.0]</code>にクランプされる)では、
+現行の方式Bが3方式のうち最も真値に近い。</b>本来のKulla-Conty(方式A)へ移行しても精度は向上しない。
+方向分布についても同じ結論で、入射方向を固定したBRDF断面の平均相対誤差は次のとおり
+(4条件のうち3条件で方式Bが最小):
+</p>
+<table>
+<tr><th>条件(&mu;i = 0.6 固定)</th><th>補正なし</th><th>方式A Kulla-Conty</th><th>方式B Linear(現行)</th><th>方式C Series</th></tr>
+<tr><td>roughness 0.5 / <code>F0</code> 1.0</td><td>18.0%</td><td>14.1%</td><td><b>8.5%</b></td><td><b>8.5%</b></td></tr>
+<tr><td>roughness 1.0 / <code>F0</code> 1.0</td><td>57.9%</td><td><b>1.3%</b></td><td>1.8%</td><td>1.8%</td></tr>
+<tr><td>roughness 0.5 / <code>F0</code> 0.5</td><td>16.3%</td><td>14.4%</td><td><b>3.3%</b></td><td>5.3%</td></tr>
+<tr><td>roughness 1.0 / <code>F0</code> 0.5</td><td>39.7%</td><td>13.8%</td><td><b>6.6%</b></td><td>14.7%</td></tr>
+</table>
+<p>
+方式Aが勝つのはroughness 1.0・<code>F0</code> 1.0の 1.3% 対 1.8% のみで、実質同等である。
+<code>F0 = 1</code>の行で方式Bと方式Cの値が一致しているのは14.9.2節の代数的な同一性のとおり。
+</p>
+<p>
+理由は<code>&alpha; = 1</code>付近ではGGXの単一散乱ローブが<b>すでにほぼ平坦</b>で、
+加算ローブを足すことと全体を一様にスケールすることがほとんど同じ操作になるためである。
+実測でもroughness 1.0では方式Aと方式Bの断面がどの角度でも約2%以内に収まっていた。
+方式Bが破綻するのは<code>Ess &rarr; 0</code>となるroughness &gt; 1の領域で、
+補正後アルベドが<code>F0&middot;(Ess<sub>F</sub>/Ess)</code>へ<b>飽和して減衰しなくなる</b>
+(<code>F0 = 0.5</code>・roughness 2.0で 0.257 に張り付くのに対し真値は 0.065)。
+エンジンはそこへ到達しないため実害はない。
+</p>
+<p class="note">
+<b>副産物として見つかった別の誤差要因</b>: 可視性項のSchlick近似(<code>k = &alpha;/2</code>)自体が
+<code>Ess</code>を厳密なSmithより系統的に低く見積もる(&mu;o = 0.6で roughness 0.4 で -8.3%、
+0.8 で -10.0%、1.0 で -6.8%)。ただしLUTを焼くBRDFと実行時のBRDFが同一である限り
+(<code>SpecularEnergy.hlsli</code>が構造的に保証している)<code>Ess &middot; comp = 1</code>は成立するので、
+<b>エネルギー保存そのものは崩れない</b>。崩れるのは単一散乱ローブの形であり、
+補正はその歪んだローブを1.0へ戻している。上表のengineGとexactGの差がこの寄与にあたる。
+</p>
+
+<h4>14.9.9 実機での3方式の検証</h4>
+<p>
+オフラインの結論をエンジン上でも確認した。測定には<code>Render Targets</code>パネルへ追加した
+<b><code>Scene Color (Raw HDR, No Tonemap)</code></b>(Present Mode 0)を使い、
+トーンマップもガンマも通さないリニア値を直接読む。
+アセットは<code>Tools/generate_energy_compare.py</code>が生成する
+ラフネス11段 &times; <code>F0</code> 5段(<code>metallic</code> 1.00/0.75/0.50/0.25/0.00 &rarr;
+<code>F0</code> = 1.00/0.76/0.52/0.28/0.04)の55球グリッドで、
+シーンは<code>EnergyCompareFurnace.kscene</code>(一様白環境)と
+<code>EnergyCompareSun.kscene</code>(環境光0 + 太陽光)。
+</p>
+<p class="note">
+<b><code>F0</code>を<code>metallic</code>だけで振っている理由</b>: 不透明パスは
+<code>baseColorFactor</code>を意図的に適用しない(<code>GBuffer.hlsl</code>はベースカラー
+<b>テクスチャ</b>のみを読み、factorとして<code>ObjectConstants</code>に載っているのは
+<code>metallic</code>と<code>roughness</code>だけ)。そのため<code>baseColorFactor</code>で
+色や黒を指定してもアルベドは常に<code>(1,1,1)</code>になり、有色金属の行や
+「拡散0の黒誘電体」の行はテクスチャを用意しない限り作れない。
+<code>F0 = lerp(0.04, albedo, metallic)</code>なので<code>metallic</code>を振れば
+<code>F0</code>は0.04〜1.0を掃引できる。副作用として<code>metallic</code>が小さい行には
+白い拡散項が乗るが、拡散項は3方式で全く同じなので方式間の差を見る目的には影響しない。
+</p>
+<p>
+<b>White Furnace Test(球中心の生HDR値。背景 = 1.0000)</b>
+</p>
+<table>
+<tr><th>行</th><th>方式</th><th>r 0.0</th><th>r 0.2</th><th>r 0.4</th><th>r 0.6</th><th>r 0.8</th><th>r 1.0</th></tr>
+<tr><td rowspan="4"><code>F0</code> = 1.00</td><td>Off</td><td>0.996</td><td>0.997</td><td>0.956</td><td>0.794</td><td>0.537</td><td>0.312</td></tr>
+<tr><td>B Linear</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td><td><b>1.000</b></td></tr>
+<tr><td>C Series</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td><td><b>1.000</b></td></tr>
+<tr><td>A Kulla-Conty</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td><td>1.000</td><td><b>1.000</b></td></tr>
+<tr><td rowspan="4"><code>F0</code> = 0.76</td><td>Off</td><td>0.816</td><td>0.817</td><td>0.785</td><td>0.663</td><td>0.467</td><td>0.298</td></tr>
+<tr><td>B Linear</td><td>0.820</td><td>0.820</td><td>0.812</td><td>0.780</td><td>0.733</td><td>0.694</td></tr>
+<tr><td>C Series</td><td>0.820</td><td>0.820</td><td>0.812</td><td>0.775</td><td>0.690</td><td>0.557</td></tr>
+<tr><td>A Kulla-Conty</td><td>0.820</td><td>0.820</td><td>0.812</td><td>0.776</td><td>0.694</td><td>0.565</td></tr>
+<tr><td rowspan="4"><code>F0</code> = 0.52</td><td>Off</td><td>0.757</td><td>0.757</td><td>0.737</td><td>0.653</td><td>0.518</td><td>0.404</td></tr>
+<tr><td>B Linear</td><td>0.757</td><td>0.761</td><td>0.749</td><td>0.710</td><td>0.643</td><td>0.588</td></tr>
+<tr><td>C Series</td><td>0.757</td><td>0.761</td><td>0.749</td><td>0.702</td><td>0.608</td><td>0.494</td></tr>
+<tr><td>A Kulla-Conty</td><td>0.757</td><td>0.761</td><td>0.749</td><td>0.706</td><td>0.612</td><td>0.498</td></tr>
+</table>
+<p>
+<code>F0 = 1.00</code>の行では3方式とも全ラフネスで<b>厳密に1.000</b>(=背景と同一)になり、
+14.9.2節の代数的な予測どおり<b>区別できない</b>。補正なしはroughness 1.0で0.312まで落ち、
+オフラインの<code>Ess = 0.31</code>と一致する。
+</p>
+<p>
+方式Bと方式Cが<code>F0 = 1</code>で同一になることは、<b>全画素が<code>F0 = 1</code>である
+既存の<code>FurnaceTest.kscene</code>で両モードの画像を差分して確認した</b>:
+1922&times;1128の全域で<b>差のある画素0個・最大差0</b>。対照として<code>F0</code>を振った
+グリッドでは同じ比較で17,827画素・最大差35/255の差が出ており、比較そのものは機能している。
+</p>
+<p>
+<b>環境光0 + 太陽光(方向分布)</b>。<code>F0 = 1.00</code>・roughness 1.0の球を横切る断面
+(負のオフセットが太陽側、EV100 = 17で1.0超のクリップを回避):
+</p>
+<table>
+<tr><th>オフセット [px]</th><th>-11</th><th>-9</th><th>-5</th><th>-1</th><th>+5</th><th>+9</th><th>+11</th></tr>
+<tr><td>Off</td><td>0.054</td><td>0.052</td><td>0.050</td><td>0.046</td><td>0.042</td><td>0.037</td><td>0.030</td></tr>
+<tr><td>B Linear</td><td>0.140</td><td>0.149</td><td>0.153</td><td>0.150</td><td>0.132</td><td>0.105</td><td>0.080</td></tr>
+<tr><td>C Series</td><td>0.140</td><td>0.149</td><td>0.153</td><td>0.150</td><td>0.132</td><td>0.105</td><td>0.080</td></tr>
+<tr><td>A Kulla-Conty</td><td><b>0.158</b></td><td><b>0.175</b></td><td><b>0.188</b></td><td><b>0.183</b></td><td>0.145</td><td>0.099</td><td>0.067</td></tr>
+</table>
+<p>
+乗算型(B・C)は単一散乱ローブの形を変えずに全体を持ち上げるだけなのに対し、
+方式Aは加算ローブのぶん<b>太陽側の裾が明るく(-5pxで0.188 対 0.153)、反対側の縁では逆に暗い</b>
+(+11pxで0.067 対 0.080)。球全体の平均は方式Aが0.177、乗算型が0.147で、
+戻したエネルギーをハイライトに集めるか球全体へ広げるかの差がそのまま出ている。
+ここでも方式Bと方式Cは全オフセットで一致している。
+</p>
+<p>
+DX11とDX12は<b>クライアント領域の全画素が完全一致</b>した(差分で0画素。
+タイトルバーの<code>[DX11]</code>/<code>[DX12]</code>の文字だけが42画素分異なる)。
+新設した2パスベイクの<code>Eavg</code>も両バックエンドでビット一致し、
+行内で完全に一定(標準偏差0.00000)、ラフネスに対して単調減少(0.996 &rarr; 0.416)、
+オフライン計算との差は最大0.006(8bit表示の量子化幅0.0039と同程度)だった。
+</p>
+<p>
+<b>採用</b>: 既定は<b>方式B(Linear)</b>を維持する。方式A・方式Cは比較用に実装を残し、
+ImGuiのコンボボックスで切り替えられる。方式Aは直接光でライト1灯あたりLUTフェッチが1回増える
+コスト(14.9.3節)を払って精度が向上しないため、既定にする理由がない。
 </p>
 
 <h3>14.10 拡散イラディアンスをプリフィルタ済み鏡面の最終ミップで代替する</h3>

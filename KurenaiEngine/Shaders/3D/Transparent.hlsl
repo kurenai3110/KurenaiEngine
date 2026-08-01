@@ -154,7 +154,7 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
 // 鏡面反射は不透明度で減衰させず背景の上へ加算するため。PSMain末尾のコメント参照)
 void EvaluateDirectBRDF(
     float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness,
-    float3 energyCompensation,
+    SpecularEnergyContext energy,
     out float3 outDiffuse, out float3 outSpecular)
 {
     float3 H = normalize(V + L);
@@ -167,10 +167,19 @@ void EvaluateDirectBRDF(
     float G = GeometrySmith(NdotV, NdotL, roughness);
     float3 F = FresnelSchlick(VdotH, F0);
 
-    // energyCompensationはPSMainで1度だけ計算して渡される(SpecularEnergy.hlsli、14.9節)。
+    // energyはPSMainで1度だけ計算して渡される(SpecularEnergy.hlsli、14.9節)。
     // このシェーダーは拡散/鏡面を別々に返すため、補正が鏡面側にだけ掛かることがコード上で自明になる
     // (拡散項kdは変更しない。理由は14.9節)
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energyCompensation;
+    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energy.Compensation;
+
+    if (energy.Mode == KURENAI_SPEC_COMP_KULLACONTY)
+    {
+        // 加算ローブはE(NdotL)を要る。ライトのループ内から呼ばれるため勾配に依存しない
+        // SampleLevelを使う(DirectLighting.hlslの同じ箇所と同一の処理)
+        const float2 brdfL = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotL, energy.Roughness), 0).rg;
+        specular += SpecularMultiScatterLobe(F0, energy.EssV, brdfL.x + brdfL.y, energy.Eavg, energy.Mode);
+    }
+
     float3 kd = (1.0f - F) * (1.0f - metallic);
     float3 diffuse = kd * albedo / PI;
 
@@ -208,13 +217,21 @@ void EvaluateIBLSplit(
     // ShadowParams.y = プリフィルタ済み鏡面マップの最大ミップレベル(KurenaiEngine3D側で設定)
     const float mipLevel = roughness * ShadowParams.y;
     const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
+
+    // マルチスキャッタリング・エネルギー補正はDeferredLighting.hlslのEvaluateIBLと同じ形。
+    // 乗算型(モード1・2)は単一散乱項へ倍率として掛かり、Kulla-Conty(3)は別ローブを加算する
+    const int compensationMode = (int)(ShadowParams.w + 0.5f);
+    const float3 FssEss = F0 * brdf.x + brdf.y;
+    const float Ess = brdf.x + brdf.y;
 
     // 昼度による減衰はしない(DeferredLighting.hlsl の EvaluateIBL と同じ理由)。
-    // 手続き空が太陽高度に応じて自分で暗くなるため、ここで掛けると二重に暗くなる
+    // 手続き空が太陽高度に応じて自分で暗くなるため、ここで掛けると二重に暗くなる。
+    // 半透明パスはスクリーンスペースのAO/GIバッファを持たないが、マテリアルの遮蔽マップは
+    // テクスチャなので使える。aoにはそれが入っている(遮蔽マップが無ければ1)
     outDiffuse = kd * albedo * irradiance * ao;
-    outSpecular = prefiltered * (F0 * brdf.x + brdf.y)
-        * SpecularEnergyCompensation(F0, brdf, ShadowParams.w)
+    outSpecular = (prefiltered * FssEss * SpecularEnergyCompensation(F0, brdf, compensationMode)
+        + SpecularMultiScatterIBL(F0, FssEss, Ess, compensationMode) * irradiance)
         * SpecularOcclusion(NdotV, roughness, ao);
 }
 
@@ -233,7 +250,7 @@ float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float an
 
 void EvaluateLight(
     GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
-    float3 energyCompensation,
+    SpecularEnergyContext energy,
     out float3 outDiffuse, out float3 outSpecular)
 {
     outDiffuse = float3(0.0f, 0.0f, 0.0f);
@@ -284,7 +301,7 @@ void EvaluateLight(
 
     float3 diffuse;
     float3 specular;
-    EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energyCompensation, diffuse, specular);
+    EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy, diffuse, specular);
 
     float3 radiance = light.ColorRange.rgb * atten;
     outDiffuse = diffuse * radiance;
@@ -328,8 +345,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 関数でピクセル内では一定なので、ライトのループへ入る前に1度だけ求める。
     // 下のIBL無効時フォールバックもこのF0/brdfをそのまま再利用する
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
-    const float3 energyCompensation = SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
+    const SpecularEnergyContext energy = MakeSpecularEnergyContext(F0, brdf, roughness, ShadowParams.w);
 
     float3 directDiffuse = float3(0.0f, 0.0f, 0.0f);
     float3 directSpecular = float3(0.0f, 0.0f, 0.0f);
@@ -344,7 +361,7 @@ float4 PSMain(PSInput input) : SV_TARGET
 
         float3 sunDiffuse;
         float3 sunSpecular;
-        EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energyCompensation, sunDiffuse, sunSpecular);
+        EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energy, sunDiffuse, sunSpecular);
 
         float3 sunRadiance = LightColor.rgb * shadow;
         directDiffuse += sunDiffuse * sunRadiance;
@@ -358,7 +375,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         float3 lightDiffuse;
         float3 lightSpecular;
-        EvaluateLight(Lights[i], input.WorldPos, N, V, NdotV, albedo, metallic, roughness, energyCompensation, lightDiffuse, lightSpecular);
+        EvaluateLight(Lights[i], input.WorldPos, N, V, NdotV, albedo, metallic, roughness, energy, lightDiffuse, lightSpecular);
         directDiffuse += lightDiffuse;
         directSpecular += lightSpecular;
     }
@@ -387,9 +404,15 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 鏡面項を0にしてしまうと、金属(拡散項が0になる)が環境光の下で真っ黒になり、
         // 低ラフネスのガラスもハイライトを完全に失うため、必ず計算する
         // F0とbrdfはPSMain冒頭でエネルギー補正用に既に求めてあるため再サンプルしない。
+        // 定数色アンビエントはプリフィルタ済み鏡面・拡散イラディアンスの両方の代わりを兼ねるため、
+        // Kulla-Contyの加算ローブにも同じAmbientColor.rgbを掛ける。
         // 遮蔽マップはIBLの有無に関わらず環境光に効かせる(IBL有効時のEvaluateIBLSplitと同じ扱い)
+        const float3 fallbackFssEss = F0 * brdf.x + brdf.y;
+        const float fallbackEss = brdf.x + brdf.y;
         ambientDiffuse = albedo * (1.0f - metallic) * AmbientColor.rgb * materialAO;
-        ambientSpecular = AmbientColor.rgb * (F0 * brdf.x + brdf.y) * energyCompensation
+        ambientSpecular = AmbientColor.rgb
+            * (fallbackFssEss * energy.Compensation
+               + SpecularMultiScatterIBL(F0, fallbackFssEss, fallbackEss, energy.Mode))
             * SpecularOcclusion(NdotV, roughness, materialAO);
     }
 

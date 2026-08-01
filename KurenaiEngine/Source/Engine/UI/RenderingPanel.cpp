@@ -238,11 +238,29 @@ namespace Kurenai::UI
                 "IBLを使わないときの、方向を持たない一様な環境光の強さ");
         }
 
-        // IBL鏡面・直接光鏡面の両方に効くため、IBLのON/OFFの内側ではなく独立した項目にする
-        CheckboxEx(
-            "スペキュラのエネルギー補正###SpecularEnergyCompensation", &m_Engine.m_SpecularEnergyCompensationEnabled,
-            Defaults::SpecularEnergyCompensationEnabled,
-            "粗い金属で単散乱のみのBRDFが失うエネルギーを補う。IBL鏡面と直接光鏡面の両方に効く");
+        // IBL鏡面・直接光鏡面の両方に効くため、IBLのON/OFFの内側ではなく独立した項目にする。
+        // 並びはKurenaiEngine3D::SpecularCompensationModeの値と一致させること
+        {
+            static const char* const kCompensationModes[] = {
+                "補正なし",
+                "Linear  1+F0(1/Ess-1)",
+                "Series  1/(1-F0(1-Ess))",
+                "Kulla-Conty(加算ローブ)",
+            };
+            int mode = static_cast<int>(m_Engine.m_SpecularCompensationMode);
+            if (ComboEx(
+                    "スペキュラのエネルギー補正###SpecularEnergyCompensation", &mode, kCompensationModes,
+                    IM_ARRAYSIZE(kCompensationModes), Defaults::SpecularCompensationMode,
+                    "粗い金属で単散乱のみのBRDFが失うエネルギーを補う。IBL鏡面と直接光鏡面の両方に効く。\n"
+                    "LinearとSeriesは失われた分を「1回だけ」跳ね返すか「無限回」跳ね返すかの違いで、"
+                    "F0=1では数学的に一致する。Kulla-Contyは乗算ではなく広い加算ローブを足す本来の形で、"
+                    "相反性を満たす代わりに直接光でライト1灯あたりLUTフェッチが1回増える。\n"
+                    "既定のLinearは実使用域で最も真値に近い(14.9.8節)"))
+            {
+                m_Engine.m_SpecularCompensationMode =
+                    static_cast<KurenaiEngine3D::SpecularCompensationMode>(mode);
+            }
+        }
 
         EndParamGroup();
     }
