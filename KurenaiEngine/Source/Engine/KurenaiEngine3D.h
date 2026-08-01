@@ -1303,6 +1303,13 @@ namespace Kurenai
         float m_WaterWaveScale = Defaults::WaterWaveScale;
         float m_WaterWaveSpeed = Defaults::WaterWaveSpeed;
         float m_WaterWaveStrength = Defaults::WaterWaveStrength;
+        // 水面の反射に解析空フォールバックを使うか(P4: SSRの水面分岐)。SSRレイが画面外へ抜けた・
+        // 最大距離まで判定がつかなかった水面画素で、プリフィルタ済み鏡面IBL(128pxベースの
+        // キューブマップをラフネス由来のミップで引くため広い水面ではにじむ)の代わりに
+        // Sky.hlsliのSkyColorを画面解像度で直接評価する(SSR.hlslのPSMain参照)。
+        // 効果が出るのはm_ReflectionMode==ScreenSpaceのときだけで、かつ手続き空が無効な
+        // シーンでは常に無効化される(SSRパスのExecute内、usingProceduralSkyとのAND判定)
+        bool m_WaterAnalyticSkyReflection = Defaults::WaterAnalyticSkyReflection;
 
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)

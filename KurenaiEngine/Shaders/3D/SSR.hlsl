@@ -23,10 +23,18 @@
 // フルスクリーン三角形+ピクセルシェーダーのパターンで実装し、合成もこのシェーダー内で直接行う。
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
+// 水面の解析空フォールバック用(P4)。DeferredLighting.hlslが背景の解析評価に使っている
+// のと同じ空モデル定義を共有する。cbufferに依存しないヘッダーで、PIも定義しないため
+// (Sky.hlsli冒頭のコメント参照)、このファイルがPIを定義していない現状と衝突しない
+#include "Sky.hlsli"
 
 static const int kSSRStepCount = 32;
 static const int kSSRBinaryStepCount = 6;
 static const float kSSREdgeFadeDistance = 0.1f;
+// 水面のマテリアルID(G-BufferのMaterial.a)。GBufferCommon.hlsliのkMaterialIDWaterと
+// **同じ値でなければならない**。GBufferCommon.hlsliはcbuffer/テクスチャの宣言を含み
+// このパスへはインクルードできないため、値をここに複製している
+static const float kSSRWaterMaterialID = 1.0f;
 
 // 反射プローブの環境ソースと鏡面IBLの重み(DeferredLighting.hlslと共有)。
 // 拡散イラディアンスは使わないため、拡散側のレジスタは定義しない
@@ -65,11 +73,42 @@ cbuffer FrameConstants : register(b0)
     float4 ProbeParams;
     // 距離キューブ用(19.12節)。同じくReflectionProbe.hlsliが読む
     float4 ProbeParams2;
+    // ここから下、TAA(23章)・DDGI(22章)・水面の波(P2)用の8本はこのシェーダでは未使用。
+    // cbufferのレイアウトは宣言順で決まり途中のフィールドを飛ばせないため、末尾のSky*
+    // フィールドのオフセットをC++側 KurenaiEngine3D.cpp の FrameConstants と合わせる
+    // 目的だけで宣言している(DeferredLighting.hlslの同名フィールドと同じ扱い)
+    float4x4 PrevViewProj;
+    float4 TAAParams;
+    float4 DDGIParams0;
+    float4 DDGIParams1;
+    float4 DDGIParams2;
+    float4 DDGIParams3;
+    float4 DDGIParams4;
+    float4 TimeParams;
+    // 空の解析評価用(P3で追加)。水面の解析空フォールバック(P4、下記MakeSkyParameters参照)が
+    // 読む。DeferredLighting.hlslのFrameConstants宣言と同じ意味を持つ値なのでそちらのコメントも
+    // 参照。xyz=太陽が「ある」向き(未正規化のまま渡ってくる。呼び出し側でnormalizeする。
+    // SkyGenerate.hlsl側の慣習に合わせてある)、w=未使用
+    float4 SkySunDirection;
+    // x=天頂輝度(実効プリ露出済み)。y=背景(深度なし画素)を解析評価するかのフラグだが、
+    // このシェーダは背景を描かないため未使用(水面フォールバックの有効/無効はDeferredLighting.hlsl
+    // と共有せず、SSRConstants.Params0.wで別途持つ。C++側Render()が手続き空の有効/無効を含めて
+    // 一本化して決める。KurenaiEngine3D.cppのExecute内コメント参照)。zw=未使用
+    float4 SkyParams;
+    float4 SkyZenithTint;
+    float4 SkyHorizonTint;
+    float4 SkyGroundTint;
+    // w=太陽の暖色の強さ(SunGlowStrength)
+    float4 SkySunGlowTint;
 };
 
 cbuffer SSRConstants : register(b1)
 {
-    float4 Params0; // x: 最大レイ距離(ワールド単位), y: ヒット判定の厚み, z: ラフネスカットオフ, w: 未使用
+    // w: 水面の解析空フォールバックを使うか(1=使う、P4)。C++側で
+    // m_WaterAnalyticSkyReflection && usingProceduralSky の両方が立っているときだけ1になる
+    // (手続き空が無効=.ksceneがDDSスカイボックスを明示するシーンでは、このトグルの値に
+    // 関わらず必ず0にする。DDSは任意の絵でPerezモデルとは無関係なため解析評価できない)
+    float4 Params0; // x: 最大レイ距離(ワールド単位), y: ヒット判定の厚み, z: ラフネスカットオフ, w: 水面の解析空フォールバック
 };
 
 Texture2D SceneColorTexture : register(t0);
@@ -111,6 +150,23 @@ float3 ReconstructWorldPos(float2 uv, float depth)
     return worldPos.xyz / worldPos.w;
 }
 
+// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる(P4)。
+// DeferredLighting.hlslのMakeSkyParametersと完全に同一の内容(正規化の扱いを含む)。
+// 2つのシェーダーはcbufferをそれぞれ別に宣言しているため関数そのものは共有できず複製しているが、
+// 中身がずれると「背景の空」と「水面に映る空」の色が食い違ってしまうため、
+// 中身を変える場合は必ず両方を同時に直すこと
+SkyParameters MakeSkyParameters()
+{
+    SkyParameters params;
+    params.SunDirection = normalize(SkySunDirection.xyz);
+    params.ZenithLuminance = SkyParams.x;
+    params.ZenithTint = SkyZenithTint.rgb;
+    params.HorizonTint = SkyHorizonTint.rgb;
+    params.GroundTint = SkyGroundTint.rgb;
+    params.SunGlowTint = SkySunGlowTint.rgb;
+    params.SunGlowStrength = SkySunGlowTint.w;
+    return params;
+}
 
 // ワールド座標を画面UVとView空間Z(カメラからの距離。値が大きいほど遠い)へ投影する。
 // カメラ背後、または画面外に出た場合はfalseを返す
@@ -156,21 +212,40 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 albedo = AlbedoTexture.Sample(ColorSampler, input.UV).rgb;
-    float3 material = MaterialTexture.Sample(DataSampler, input.UV).rgb;
+    // P4: .aに水面のマテリアルID(kMaterialIDWater)が入っているため、rgbとaを1回のサンプルで
+    // まとめて読む(以前は.rgbしか読んでいなかった)
+    float4 materialSample = MaterialTexture.Sample(DataSampler, input.UV);
+    float3 material = materialSample.rgb;
     float metallic = material.r;
     float roughness = material.g;
     float materialAO = material.b; // マテリアルの遮蔽マップ(GBuffer.hlslでstrength適用済み)
+    // DataSamplerはPoint+Clamp(Samplers.hlsli参照)なので、水面と通常マテリアルの境界でIDが
+    // バイリニア補間により中間値化することは無い。それでも==ではなく閾値で比較しているのは、
+    // 浮動小数点の等値比較そのものを避ける一般的な安全策のため(実際に出現する値は0.0か1.0のみ)。
+    // kSSRWaterMaterialIDの半分をしきい値にしているのは、0.5fと決め打つよりIDの値と連動させておき、
+    // 将来kMaterialIDWater/kSSRWaterMaterialIDが1.0f以外に変わってもここを直し忘れないようにするため
+    const bool isWater = materialSample.a > kSSRWaterMaterialID * 0.5f;
 
     const float maxDistance = Params0.x;
     const float thickness = Params0.y;
     const float roughnessCutoff = Params0.z;
+    // 水面の解析空フォールバック(P4)が有効か。水面タグ(isWater)とC++側のフラグの両方が
+    // 立っているときだけtrueになる。非水面画素では常にfalseになるため、以降の分岐は
+    // このフィールドが存在しなかったときとまったく同じコードパスを通る
+    const bool useWaterAnalyticSky = isWater && (Params0.w > 0.5f);
 
     // スクリーンスペースのレイマーチはヒット色を1点サンプルするだけで、粗い面に必要な
     // 円錐状のぼかしを持たない。そのため粗い面ほどSSRの結果を信用しない
     float roughnessFade = 1.0f - smoothstep(0.0f, roughnessCutoff, roughness);
     if (roughnessFade <= 0.0f)
     {
-        // SSRを信用しない=Lightingパスが適用したプローブ/グローバルIBLをそのまま残す
+        // SSRを信用しない=Lightingパスが適用したプローブ/グローバルIBLをそのまま残す。
+        // このシーンの水面メッシュはroughnessFactor=0.03(Tools/generate_water_plane.pyの
+        // WATER_ROUGHNESS)で焼かれており、Water.hlslのPSMainが下限0.045へクランプするため
+        // G-Bufferには0.045が入る。既定のroughnessCutoff(0.6)より十分低いのでここを通過するが、
+        // ユーザーがroughnessCutoffをそれ以下まで下げると水面もここで弾かれ、
+        // 下の解析空フォールバックも一緒に無効になる。
+        // 「粗すぎる面ではSSRを信用しない」という設計は水面かどうかで変えていない
         return float4(baseColor, 1.0f);
     }
 
@@ -284,12 +359,45 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         // 画面内で実際にスカイへ到達したことが確定した場合。プローブは屋内の壁を返しうるが、
         // このレイは確かに外へ抜けているので、空のほうが正しい答えになる。
-        // 生のスカイボックスではなくプリフィルタ済み鏡面をラフネス→ミップで引く
-        // (以前は生のスカイボックスを引いていたため、粗い面でも鮮鋭な鏡像が返っていた)
-        newRadiance = PrefilteredEnvTexture.SampleLevel(MaterialSampler, reflectDir, mipLevel).rgb;
+        if (useWaterAnalyticSky)
+        {
+            // 水面(P4): プリフィルタ済み鏡面(128pxベースのキューブマップをラフネス由来の
+            // ミップで引く)の代わりに、Perez分布を画面解像度でそのまま評価した解析空を使う。
+            // 水面はroughnessが低く(このroughnessCutoffのゲートを通過している時点でそう)、
+            // 低ミップの128pxを直接引くと空に映る太陽・地平線の勾配が色斑としてにじむため、
+            // 解析評価のほうが実際の見え方に近い。
+            // reflectDirが水平線より下を向く場合(強い波で反射ベクトルが下向きになったとき)は
+            // SkyColorが持つ地平線下の接地色へのフェード(Sky.hlsli kGroundFadeStartY/EndY)で
+            // そのまま処理でき、ここで別扱いする必要はない
+            newRadiance = SkyColor(reflectDir, MakeSkyParameters());
+        }
+        else
+        {
+            // 生のスカイボックスではなくプリフィルタ済み鏡面をラフネス→ミップで引く
+            // (以前は生のスカイボックスを引いていたため、粗い面でも鮮鋭な鏡像が返っていた)
+            newRadiance = PrefilteredEnvTexture.SampleLevel(MaterialSampler, reflectDir, mipLevel).rgb;
+        }
         confidence = roughnessFade;
     }
-    // 画面外に外れた、または最大距離まで判定がつかなかった場合は confidence = 0 のまま。
+    else if (useWaterAnalyticSky)
+    {
+        // 画面外に外れた、または最大距離まで判定がつかなかった場合。非水面はこの分岐が無く
+        // confidence = 0 のまま(Lightingパスが適用したプローブ/グローバルIBLをそのまま残す。
+        // プローブが画面外を知っているため、20.3節のとおりこれが正しい答え)。
+        //
+        // 水面だけここで解析空を使う理由: このシーンの水面は4000m四方あり、かつ
+        // SSRMaxDistance(既定5.0m)に対して反射レイはほぼ確実に数ステップで画面外へ抜けるか
+        // 最大距離まで判定がつかない。つまり水面ではこの分岐が「レアケース」ではなく
+        // ほぼ常時通る経路になり、confidence=0のままだと水面の映り込みが実質いつも死んで
+        // プリフィルタ済み鏡面IBL(低解像度でにじむ)しか見えなくなる。
+        // 水平な水面を上から見たとき反射ベクトルは必ず上向き(空側)を向くため、
+        // 空で埋めるのは常に妥当な近似になる(上のskyHit分岐と同じ理由)。
+        // 屋根の下の水たまりのような反例は、.kscene側で[Model]Water=trueと明示的にタグ付けした
+        // 面にしかこの経路が適用されない(オプトイン)ため、影響範囲がそこに閉じている
+        newRadiance = SkyColor(reflectDir, MakeSkyParameters());
+        confidence = roughnessFade;
+    }
+    // 非水面が画面外に外れた、または最大距離まで判定がつかなかった場合は confidence = 0 のまま。
     // Lightingパスが適用したプローブ/グローバルIBLをそのまま残す(プローブが画面外を知っている)
 
     const float3 composited = baseColor + (newRadiance - envRadiance) * specularWeight * confidence;

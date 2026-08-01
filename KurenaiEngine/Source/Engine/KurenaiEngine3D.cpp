@@ -934,7 +934,11 @@ namespace Kurenai
         // SSR.hlsl側のcbuffer SSRConstantsと一致させる必要がある
         struct alignas(16) SSRConstants
         {
-            DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 未使用
+            // w: 水面の解析空フォールバックを使うか(1=使う、P4)。Render()側で
+            // m_WaterAnalyticSkyReflection && usingProceduralSky の両方が立っているときだけ1にする
+            // (手続き空が無効なシーンではDDSは任意の絵でPerezモデルとは無関係なため、
+            // このトグルの値に関わらず必ず0にする)
+            DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 水面の解析空フォールバック
         };
 
         // RTReflection.hlsl側のcbuffer RTReflectionConstantsと一致させる必要がある
@@ -5255,10 +5259,19 @@ namespace Kurenai
                     m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
                 },
                 .RenderTargets = { m_SSRTexture.get() },
-                .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gbufferViewport, activeAOTexture, usingProceduralSky](RHI::IRHICommandList* cmd)
                 {
+                    // 水面の解析空フォールバック(P4)。手続き空が無効(.ksceneがDDSスカイボックスを
+                    // 明示するシーン)なときは、m_WaterAnalyticSkyReflectionの値に関わらず必ず0にする
+                    // ――DDSは任意の絵でPerezモデルとは無関係なため、SSR.hlsl側のSkyColorで
+                    // 解析評価してはいけない(usingProceduralSkyはRender()前半で既に確定済み。
+                    // DeferredLighting.hlsl向けのconstants.SkyParams.y代入と同じ判断)
+                    const float waterAnalyticSkyFlag =
+                        (m_WaterAnalyticSkyReflection && usingProceduralSky) ? 1.0f : 0.0f;
+
                     SSRConstants ssrConstants{};
-                    ssrConstants.Params0 = { m_SSRMaxDistance, m_SSRThickness, m_SSRRoughnessCutoff, 0.0f };
+                    ssrConstants.Params0 =
+                        { m_SSRMaxDistance, m_SSRThickness, m_SSRRoughnessCutoff, waterAnalyticSkyFlag };
                     cmd->UpdateBuffer(m_SSRConstantBuffer.get(), &ssrConstants, sizeof(ssrConstants));
 
                     cmd->SetViewport(gbufferViewport);

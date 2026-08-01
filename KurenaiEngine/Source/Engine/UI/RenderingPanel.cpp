@@ -481,13 +481,29 @@ namespace Kurenai::UI
     {
         ImGui::TextWrapped(
             "水面(.ksceneの[Model]Water=trueで指定されたインスタンス)の波の見た目。"
-            "反射(SSR統合)はまだ行わない。デバッグ表示の「水面マスク」で対象インスタンスを確認できる");
+            "反射自体は他の不透明マテリアルと同じSSR/RTレイトレーシング反射パスがそのまま適用される"
+            "(下の「水面の反射に解析的な空を使う」は、SSRが画面外へ抜けた・判定がつかなかった"
+            "水面画素だけを対象にしたフォールバック先の差し替え)。"
+            "デバッグ表示の「水面マスク」で対象インスタンスを確認できる");
 
         BeginParamGroup();
 
         CheckboxEx(
             "水面アニメを止める###FreezeWaterTime", &m_Engine.m_WaterTimeFrozen, Defaults::WaterTimeFrozen,
             "水面法線マップのスクロールを止める。A/B比較などスクロールが揺れると困る場面で使う");
+
+        CheckboxEx(
+            "水面の反射に解析的な空を使う###WaterAnalyticSkyReflection",
+            &m_Engine.m_WaterAnalyticSkyReflection, Defaults::WaterAnalyticSkyReflection,
+            "水面のSSRレイが画面外へ抜けた、または最大距離まで判定がつかなかったとき、"
+            "プリフィルタ済み鏡面IBL(128pxベースのキューブマップをラフネス由来のミップで引く)の"
+            "代わりに、Perez分布(手続き空)を画面解像度で直接評価した空を映す。"
+            "空が滑らかな勾配しか持たない間は両者の差はごくわずかで、差が出るのは空に"
+            "雲のような高周波の要素が入ってから。効果が出るのは「反射の手法」がSSRのときだけ"
+            "(レイトレーシング反射・反射なしのときは何も起きない)。既定でSSRは無効なので、"
+            "このトグルの効果を確認するには上の「反射」セクションの「反射の手法」でSSRを"
+            "選ぶ必要がある。手続き空が無効(.ksceneでスカイボックス画像を明示したシーン)なときは、"
+            "このトグルの値に関わらず従来どおりプリフィルタ済み鏡面のままになる");
 
         // WaveScale/WaveStrengthはFrameConstants.TimeParams.y/zとしてWater.hlslへ渡っている
         // (KurenaiEngine3D::RenderThreadMainのTimeParams構築箇所、Water.hlslのPSMain参照)。

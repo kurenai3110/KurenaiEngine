@@ -67,6 +67,16 @@ namespace Kurenai::Defaults
     inline constexpr float WaterWaveStrength = 0.25f;
     // シーンに依存しないUIつまみ(Scene::WaterWaveScale等と違い.ksceneのキーを持たない)
     inline constexpr bool WaterTimeFrozen = false;
+    // 水面のSSR反射で、レイが画面外へ抜けた・最大距離まで判定がつかなかったときに解析空
+    // (Sky.hlsli)へフォールバックするか(P4: SSRの水面分岐)。既定ON。
+    // 【現状の効果は小さい】空が滑らかな勾配しか持たない間は、プリフィルタ済み鏡面を
+    // 低ミップで引いた値と解析評価した値がほぼ一致する(実測: 8bitで最大1、平均0.67)。
+    // 差が大きくなるのは空に高周波の要素(雲)が入ってからで、そのとき128pxベースの
+    // プリフィルタでは雲の輪郭が色斑に潰れる。既定でONにしてあるのは、
+    // 解析評価のほうが情報を落とさない上位互換だから。
+    // 手続き空が無効なシーンでは実際には効かない
+    // (KurenaiEngine3D::m_WaterAnalyticSkyReflectionのコメント参照)
+    inline constexpr bool WaterAnalyticSkyReflection = true;
 
     // --- レイトレーシング反射(DX12かつDXR Tier 1.1対応時のみ選択できる) ---
     // 最大レイ距離はシーン読み込み時に対角長から決め直す(SSRのMaxDistanceと同じ扱い)。
