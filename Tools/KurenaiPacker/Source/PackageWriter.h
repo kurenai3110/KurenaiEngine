@@ -4,6 +4,7 @@
 #include <string>
 
 #include "ModelSource.h"
+#include "OcclusionBaker.h"
 
 // SourceModel(assimp解析結果)を.kmodel/.kgeom/.ktexとして書き出す。
 // テクスチャのデコード・ミップ生成・GPU BC7圧縮はKurenaiEngine.dllのRHI::TextureImageを
@@ -20,6 +21,11 @@ namespace KurenaiPacker
 
         // テクスチャ処理のワーカースレッド数。0 = 自動(論理コア数、上限8)
         unsigned int JobCount = 0;
+
+        // BakeOcclusion()の結果。nullptrならベイクしていない(遮蔽マップはソースモデルが
+        // 持っているものだけを使う)。非nullptrの場合、焼けたメッシュについては
+        // ソースモデル側のocclusionTextureより焼いた結果を優先する
+        const OcclusionBakeResult* BakedOcclusion = nullptr;
     };
 
     struct PackResult
@@ -31,6 +37,7 @@ namespace KurenaiPacker
         size_t TextureGenerated = 0;   // 新規にBC7圧縮して.ktexを書いた数
         size_t TextureSkippedExisting = 0; // 既存の.ktexをそのまま使った数(Force=false時)
         size_t TextureFailed = 0;      // 読み込み失敗でフォールバック(-1)になった数
+        size_t OcclusionBaked = 0;     // ベイクした遮蔽マップを.ktexとして書いた数
     };
 
     // sourceModelを指定した.kmodelパスへ書き出す。

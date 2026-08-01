@@ -91,4 +91,22 @@ float3 SpecularEnergyCompensation(float3 F0, float2 brdf, float enableFlag)
     return 1.0f + F0 * (1.0f / Ess - 1.0f);
 }
 
+// スペキュラオクルージョン(Lagarde & de Rousiers, "Moving Frostbite to Physically Based
+// Rendering 3.0", 2014)。拡散光用に求めたAOをそのまま鏡面へ掛けると粗い面で暗くなりすぎるため、
+// ラフネスが高いほど指数を1に近づけてAOの効きを弱める。
+//
+// ao = 1(遮蔽なし)のときは必ず1を返す: 底 NdotV + 1 は1以上、指数は常に正なので
+// pow(NdotV + 1, e) >= 1 となり、saturate(... - 1 + 1) が1に飽和する。
+// そのためAOを持たないパス・マテリアルへ無条件に掛けても見た目は変わらない。
+//
+// この関数はReflectionProbe.hlsliのSpecularIBLWeight(不透明パス+SSR)と
+// Transparent.hlsl・ProbeCapture.hlslの両方から呼ばれる。不透明と半透明で鏡面の
+// 遮蔽量がずれると同じマテリアルが描画パスによって違う明るさになるため、
+// エネルギー補正と同じくここに定義を1つだけ置く
+float SpecularOcclusion(float NdotV, float roughness, float ao)
+{
+    const float specularOcclusionExponent = exp2(-16.0f * roughness - 1.0f);
+    return saturate(pow(NdotV + ao, specularOcclusionExponent) - 1.0f + ao);
+}
+
 #endif // KURENAI_SPECULAR_ENERGY_HLSLI

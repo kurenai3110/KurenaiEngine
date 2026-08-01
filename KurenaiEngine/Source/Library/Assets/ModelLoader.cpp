@@ -247,7 +247,11 @@ namespace Kurenai::Assets
                     {
                         return less(a.NormalTexture, b.NormalTexture);
                     }
-                    return less(a.MetallicRoughnessTexture, b.MetallicRoughnessTexture);
+                    if (a.MetallicRoughnessTexture != b.MetallicRoughnessTexture)
+                    {
+                        return less(a.MetallicRoughnessTexture, b.MetallicRoughnessTexture);
+                    }
+                    return less(a.OcclusionTexture, b.OcclusionTexture);
                 });
         }
     }
@@ -399,7 +403,8 @@ namespace Kurenai::Assets
             if (mesh.BaseColorTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
                 mesh.NormalTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
                 mesh.MetallicRoughnessTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                mesh.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()))
+                mesh.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                mesh.OcclusionTextureIndex >= static_cast<int32_t>(textureEntries.size()))
             {
                 throw std::runtime_error("メッシュ[" + std::to_string(i) + "]が範囲外のテクスチャを参照しています: " + WideToUtf8(filePath));
             }
@@ -467,6 +472,10 @@ namespace Kurenai::Assets
             outMesh.NormalTexture = resolveNormal(mesh.NormalTextureIndex);
             outMesh.MetallicRoughnessTexture = resolveBaseColorOrMetallicRoughness(mesh.MetallicRoughnessTextureIndex);
             outMesh.EmissiveTexture = resolveBaseColorOrMetallicRoughness(mesh.EmissiveTextureIndex);
+            // 遮蔽マップも未指定なら白1x1(=遮蔽なし)へフォールバックさせればよいので、
+            // BaseColor/MetallicRoughnessと同じ解決を再利用する
+            outMesh.OcclusionTexture = resolveBaseColorOrMetallicRoughness(mesh.OcclusionTextureIndex);
+            outMesh.OcclusionStrength = mesh.OcclusionStrength;
             outMesh.MetallicFactor = mesh.MetallicFactor;
             outMesh.RoughnessFactor = mesh.RoughnessFactor;
             outMesh.AlphaCutoff = mesh.AlphaCutoff;

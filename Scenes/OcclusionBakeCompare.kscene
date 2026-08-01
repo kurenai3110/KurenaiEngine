@@ -1,0 +1,77 @@
+# KurenaiEngine シーンファイル
+#
+# 遮蔽マップ(ベイク済みAO)の効きを見るための比較シーン。
+# McGuireのChinese Dragonを4体並べ、左2体が「ソースのマテリアルのまま」、
+# 右2体が「リフレクタンス=1(baseColor=1かつmetallic=1、F0=1の完全反射)」。
+# 各ペアの左が遮蔽マップ無し、右がベイク済みになっている。
+#
+#   -1.8  マテリアルそのまま / 遮蔽マップ無し
+#   -0.6  マテリアルそのまま / ベイク済み
+#   +0.6  リフレクタンス=1  / 遮蔽マップ無し
+#   +1.8  リフレクタンス=1  / ベイク済み
+#
+# 【リフレクタンス=1を並べる理由】F0=1の完全反射は入射した放射輝度をそのまま返すため、
+# 単体では環境の明るさと同じ値になり陰影が付かない(White Furnace Testと同じ理屈。
+# docs/Architecture.html 14.9.7節)。そこへ遮蔽マップだけが減衰要因として乗るので、
+# 見えている暗さがそのまま遮蔽マップの寄与になる。アルベドの陰影が混ざらないぶん、
+# 左のペアより効きを読み取りやすい。
+#
+# 【太陽を切ってある】遮蔽マップは間接光にのみ効く(22.1節)。太陽光を入れると直接光が
+# 支配的になって差が埋もれるため、環境光だけの条件にしている。
+#
+# 生成手順(Assets/Source/ChineseDragon/dragon.objから。dragon.objは
+# ThirdParty/SourceModels/.../McGuire/Chinese Dragon/dragon.zip を展開したもの):
+#
+#   KurenaiPacker.exe Assets\Source\ChineseDragon\dragon.obj ^
+#     -o Assets\Packed\ChineseDragon\DragonPlain.kmodel
+#   KurenaiPacker.exe Assets\Source\ChineseDragon\dragon.obj ^
+#     -o Assets\Packed\ChineseDragon\DragonBaked.kmodel ^
+#     --bake-occlusion --occlusion-resolution 2048 --occlusion-rays 64
+#   KurenaiPacker.exe Assets\Source\ChineseDragon\dragon.obj ^
+#     -o Assets\Packed\ChineseDragon\DragonR1Plain.kmodel ^
+#     --metallic 1.0 --roughness 0.25 --base-color 1,1,1
+#   KurenaiPacker.exe Assets\Source\ChineseDragon\dragon.obj ^
+#     -o Assets\Packed\ChineseDragon\DragonR1Baked.kmodel ^
+#     --bake-occlusion --occlusion-resolution 2048 --occlusion-rays 64 ^
+#     --metallic 1.0 --roughness 0.25 --base-color 1,1,1
+#
+# 【解像度を優先している理由】このモデルは87万三角形の3Dスキャンで、UV空間のテクセル密度が
+# 品質を決める支配要因になる。1024x1024だと1三角形あたり約1.2テクセルしか無く、xatlasが
+# 数テクセル四方の極小チャートを大量に作るため、パディングとバイリニア余白がチャートの
+# 大半を占めて斑点状のノイズになる(実測で確認済み)。総レイ数を揃えたまま解像度を2048へ上げ、
+# 代わりにレイ本数を64へ落とすほうが結果が良い。
+
+[Scene]
+Name = Occlusion Bake Compare (Chinese Dragon)
+
+# --- マテリアルはソースのまま ---
+[Model]
+Path = ChineseDragon/DragonPlain.kmodel
+Translation = -1.8, 0.0, 0.0
+RotationEuler = 0.0, 180.0, 0.0
+
+[Model]
+Path = ChineseDragon/DragonBaked.kmodel
+Translation = -0.6, 0.0, 0.0
+RotationEuler = 0.0, 180.0, 0.0
+
+# --- リフレクタンス=1(F0=1の完全反射) ---
+[Model]
+Path = ChineseDragon/DragonR1Plain.kmodel
+Translation = 0.6, 0.0, 0.0
+RotationEuler = 0.0, 180.0, 0.0
+
+[Model]
+Path = ChineseDragon/DragonR1Baked.kmodel
+Translation = 1.8, 0.0, 0.0
+RotationEuler = 0.0, 180.0, 0.0
+
+# 4体を並べるぶん十分後ろへ引く。近すぎると左右端で見る角度が変わり、
+# 遮蔽マップ以外の差(シルエットの違い)が混ざる
+[Camera]
+Position = 0.0, 0.15, -5.6
+Yaw = 0.0
+Pitch = -1.5
+
+[Sun]
+Enabled = false

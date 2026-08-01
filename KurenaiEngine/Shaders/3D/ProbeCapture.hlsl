@@ -53,7 +53,8 @@ cbuffer ObjectConstants : register(b1)
     float TangentSignFlip;
     float AlphaCutoff;
     float3 EmissiveFactor;
-    float ObjectPadding;
+    // glTFのocclusionTexture.strength(既定1.0)。GBuffer.hlslと同じ枠
+    float OcclusionStrength;
     float4 BaseColorFactor;
 };
 
@@ -71,6 +72,9 @@ Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
 Texture2D EmissiveTexture : register(t3);
+// ベイク済みアンビエントオクルージョン(遮蔽マップ)。t4はカスケードシャドウマップ配列が
+// 使っているためt5を使う(GBuffer.hlsl/Transparent.hlslと共通)
+Texture2D OcclusionTexture : register(t5);
 // カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
 // DirectLighting.hlsl/Transparent.hlslと同じ実装を共有しているため、プローブに焼かれる影と
 // 本編の影が食い違うことはない。FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)と
@@ -87,6 +91,8 @@ struct VSInput
     float3 Normal : NORMAL;
     float2 UV : TEXCOORD0;
     float4 Tangent : TANGENT;
+    // ライトマップUV(Assets::Vertex::UV1)。遮蔽マップ専用(GBuffer.hlslと同じ)
+    float2 LightmapUV : TEXCOORD1;
 };
 
 struct PSInput
@@ -96,6 +102,7 @@ struct PSInput
     float3 WorldPos : TEXCOORD1;
     float2 UV : TEXCOORD0;
     float4 Tangent : TANGENT;
+    float2 LightmapUV : TEXCOORD2;
 };
 
 PSInput VSMain(VSInput input)
@@ -106,6 +113,7 @@ PSInput VSMain(VSInput input)
     output.Normal = mul(input.Normal, (float3x3)NormalMatrix);
     output.WorldPos = worldPos;
     output.UV = input.UV;
+    output.LightmapUV = input.LightmapUV;
     output.Tangent = float4(mul(input.Tangent.xyz, (float3x3)World), input.Tangent.w * TangentSignFlip);
     return output;
 }
@@ -218,10 +226,11 @@ float3 EvaluateLight(
 }
 
 // スカイボックス由来のグローバルIBL(DeferredLighting.hlslのEvaluateIBLと同じ式。
-// キャプチャ時にはAO/GIバッファが無いため常にao=1として扱い、スペキュラオクルージョンも省く)。
+// キャプチャ時にはスクリーンスペースのAO/GIバッファが無いが、マテリアルの遮蔽マップは
+// テクスチャなので使える。焼いた絵とメインパスの絵が食い違わないよう、aoにはそれを渡す)。
 // 昼度(AmbientColor.a)による夜間減衰は、手続き空の導入でどこでも掛けなくなった(21.4節)。
 // 空のキューブマップ自体が太陽高度に応じて暗くなるため、焼き込み時にも使用時にも不要
-float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, float2 brdf, float3 energyCompensation)
+float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, float ao, float2 brdf, float3 energyCompensation)
 {
     const float NdotV = saturate(dot(N, V));
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
@@ -230,12 +239,13 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, floa
     const float3 fresnelRoughness =
         F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
     const float3 kd = (1.0f - fresnelRoughness) * (1.0f - metallic);
-    const float3 diffuseIBL = kd * albedo * irradiance;
+    const float3 diffuseIBL = kd * albedo * irradiance * ao;
 
     const float3 R = reflect(-V, N);
     const float mipLevel = roughness * ShadowParams.y;
     const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
-    const float3 specularIBL = prefiltered * (F0 * brdf.x + brdf.y) * energyCompensation;
+    const float3 specularIBL = prefiltered * (F0 * brdf.x + brdf.y) * energyCompensation
+        * SpecularOcclusion(NdotV, roughness, ao);
 
     return diffuseIBL + specularIBL;
 }
@@ -262,6 +272,11 @@ float4 PSMain(PSInput input) : SV_TARGET
     float roughness = clamp(roughnessFactor * metallicRoughnessSample.g, 0.045f, 1.0f);
 
     float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor;
+
+    // マテリアルの遮蔽マップ(ベイク済みAO)。GBuffer.hlslと同じ解釈・同じstrength適用を行う。
+    // 引くUVは専用のライトマップUV(TEXCOORD1)。理由はGBuffer.hlslの同じ箇所を参照
+    float occlusionSample = OcclusionTexture.Sample(MaterialSampler, input.LightmapUV).r;
+    float materialAO = lerp(1.0f, occlusionSample, OcclusionStrength);
 
     float3 albedo = baseColorSample.rgb;
     // CameraPositionにはプローブのワールド座標が入っている(ファイル冒頭参照)
@@ -298,11 +313,11 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 定数色アンビエントへフォールバックし、プローブが真っ黒に焼けるのを防ぐ
     if (ShadowParams.z > 0.0f)
     {
-        color += EvaluateGlobalIBL(N, V, albedo, metallic, roughness, brdf, energyCompensation) * ShadowParams.z;
+        color += EvaluateGlobalIBL(N, V, albedo, metallic, roughness, materialAO, brdf, energyCompensation) * ShadowParams.z;
     }
     else
     {
-        color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb;
+        color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb * materialAO;
     }
 
     color += emissive;

@@ -97,6 +97,7 @@ namespace KurenaiPacker
             size_t Normal = kNoRequest;
             size_t MetallicRoughness = kNoRequest;
             size_t Emissive = kNoRequest;
+            size_t Occlusion = kNoRequest;
         };
 
         // texturePathをsourceModelDirectoryからの相対パスとしてoutputDirectory配下へ
@@ -208,6 +209,8 @@ namespace KurenaiPacker
             meshTextureRefs[i].Normal = registerRequest(mesh.NormalPath, false);
             meshTextureRefs[i].MetallicRoughness = registerRequest(mesh.MetallicRoughnessPath, false);
             meshTextureRefs[i].Emissive = registerRequest(mesh.EmissivePath, true);
+            // 遮蔽マップは色ではなく遮蔽率(スカラー)なのでリニア(sRGB=false)で扱う
+            meshTextureRefs[i].Occlusion = registerRequest(mesh.OcclusionPath, false);
         }
 
         // === 2. テクスチャをワーカースレッドで並列処理する ===
@@ -350,6 +353,112 @@ namespace KurenaiPacker
             return requestIndex == kNoRequest ? kNoTextureIndex : finalIndexByRequest[requestIndex];
         };
 
+        // === 3.5 ベイクした遮蔽マップを.ktexとして書き出す ===
+        //
+        // 元画像を持たない生成物なので、TextureRequest経由(TextureImage::LoadFromFile)の
+        // 経路には乗らない。R8のグレースケールからDirectXTexで直接ミップ生成+圧縮する。
+        //
+        // 圧縮形式はBC4_UNORM(1チャンネル、4bpp)。他のテクスチャが使うBC7は3〜4チャンネル
+        // 向けで、遮蔽率のような単一チャンネルには容量も品質も無駄が大きい。BC4ならCPU圧縮でも
+        // 十分速いため、BC7で必要だったGPU圧縮デバイスも要らない
+        std::vector<int32_t> bakedOcclusionIndexByMesh(sourceModel.Meshes.size(), kNoTextureIndex);
+        if (options.BakedOcclusion != nullptr && options.BakedOcclusion->Resolution > 0)
+        {
+            const OcclusionBakeResult& baked = *options.BakedOcclusion;
+            const uint32_t resolution = baked.Resolution;
+            const fs::path occlusionDirectory = outputDirectory / L"_Occlusion";
+
+            for (size_t meshIndex = 0; meshIndex < sourceModel.Meshes.size(); ++meshIndex)
+            {
+                if (meshIndex >= baked.MeshTextures.size() || baked.MeshTextures[meshIndex].empty())
+                {
+                    continue;
+                }
+                const std::vector<uint8_t>& pixels = baked.MeshTextures[meshIndex];
+
+                try
+                {
+                    DirectX::ScratchImage source;
+                    HRESULT hr = source.Initialize2D(DXGI_FORMAT_R8_UNORM, resolution, resolution, 1, 1);
+                    if (FAILED(hr))
+                    {
+                        throw std::runtime_error("遮蔽マップの画像確保に失敗しました");
+                    }
+                    // 行ピッチは要求した幅と一致するとは限らないため、必ず行単位でコピーする
+                    const DirectX::Image* destImage = source.GetImage(0, 0, 0);
+                    for (uint32_t y = 0; y < resolution; ++y)
+                    {
+                        std::memcpy(destImage->pixels + y * destImage->rowPitch, pixels.data() + static_cast<size_t>(y) * resolution, resolution);
+                    }
+
+                    // TEX_FILTER_FORCE_NON_WIC を必ず付ける。既定のWIC経由の縮小は
+                    // R8_UNORMのような単一チャンネル形式を扱えず、E_FAILで落ちる(実際に発生)。
+                    // 非WICのボックスフィルタなら同じ形式のまま縮小できる
+                    DirectX::ScratchImage mipChain;
+                    hr = DirectX::GenerateMipMaps(
+                        *destImage, DirectX::TEX_FILTER_DEFAULT | DirectX::TEX_FILTER_FORCE_NON_WIC, 0, mipChain);
+                    if (FAILED(hr))
+                    {
+                        throw std::runtime_error("遮蔽マップのミップ生成に失敗しました");
+                    }
+
+                    DirectX::ScratchImage compressed;
+                    hr = DirectX::Compress(
+                        mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(),
+                        DXGI_FORMAT_BC4_UNORM, DirectX::TEX_COMPRESS_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, compressed);
+                    if (FAILED(hr))
+                    {
+                        throw std::runtime_error("遮蔽マップのBC4圧縮に失敗しました");
+                    }
+
+                    DirectX::Blob blob;
+                    hr = DirectX::SaveToDDSMemory(
+                        compressed.GetImages(), compressed.GetImageCount(), compressed.GetMetadata(),
+                        DirectX::DDS_FLAGS_NONE, blob);
+                    if (FAILED(hr))
+                    {
+                        throw std::runtime_error("遮蔽マップのDDSエンコードに失敗しました");
+                    }
+
+                    PackedTextureHeader texHeader{};
+                    std::memcpy(texHeader.Magic, kPackedTextureMagic, sizeof(kPackedTextureMagic));
+                    texHeader.Version = kPackedTextureVersion;
+                    texHeader.Flags = 0u; // 遮蔽率は色ではないのでリニア
+                    texHeader.PayloadSize = blob.GetBufferSize();
+
+                    // 出力する.kmodelの名前を接頭辞に入れる。同じディレクトリへ複数のモデルを
+                    // パックする(同一ジオメトリのマテリアル違いを並べる検証シーンなど)と、
+                    // メッシュ番号だけでは互いの遮蔽マップを上書きしてしまうため
+                    const fs::path ktexPath = occlusionDirectory /
+                        (fs::path(outputKModelPath).stem().wstring() + L"_Mesh" + std::to_wstring(meshIndex) + L".ktex");
+                    fs::create_directories(occlusionDirectory, ec);
+
+                    std::vector<uint8_t> fileBytes(sizeof(texHeader) + blob.GetBufferSize());
+                    std::memcpy(fileBytes.data(), &texHeader, sizeof(texHeader));
+                    std::memcpy(fileBytes.data() + sizeof(texHeader), blob.GetBufferPointer(), blob.GetBufferSize());
+                    WriteFileAtomic(ktexPath, fileBytes.data(), fileBytes.size());
+
+                    const fs::path relativeToModel = fs::relative(ktexPath, outputDirectory, ec);
+                    if (ec)
+                    {
+                        throw std::runtime_error("遮蔽マップの相対パス計算に失敗しました");
+                    }
+
+                    TextureEntry entry{};
+                    entry.Flags = 0u;
+                    texturePathStrings.push_back(ToPackagePathString(relativeToModel));
+                    bakedOcclusionIndexByMesh[meshIndex] = static_cast<int32_t>(textureEntries.size());
+                    textureEntries.push_back(entry);
+                    ++result.OcclusionBaked;
+                }
+                catch (const std::exception& e)
+                {
+                    std::cerr << "[KurenaiPacker][Warning] 遮蔽マップの書き出しに失敗しました(遮蔽なしとして扱います) メッシュ["
+                        << meshIndex << "]: " << e.what() << "\n";
+                }
+            }
+        }
+
         // === 4. .kgeomを書き出す(メッシュ順に頂点/インデックスブロックを16バイト境界で連結) ===
         std::vector<uint8_t> geometryPayload;
         std::vector<MeshEntry> meshEntries(sourceModel.Meshes.size());
@@ -394,6 +503,21 @@ namespace KurenaiPacker
             entry.BaseColorFactor[1] = mesh.BaseColorFactor[1];
             entry.BaseColorFactor[2] = mesh.BaseColorFactor[2];
             entry.BaseColorFactor[3] = mesh.BaseColorFactor[3];
+            // ベイクした遮蔽マップがあればそちらを優先する(ソースモデル由来の
+            // occlusionTextureはTEXCOORD0の空間にあり、ベイク時に生成したライトマップUVとは
+            // 座標系が違うため併用できない。--bake-occlusionを指定した時点で
+            // 「AOはこちらで作る」という意思表示とみなす)
+            if (bakedOcclusionIndexByMesh[i] != kNoTextureIndex)
+            {
+                entry.OcclusionTextureIndex = bakedOcclusionIndexByMesh[i];
+                // ベイク結果はそのまま使ってほしいので強度は1.0固定にする
+                entry.OcclusionStrength = Kurenai::Assets::kDefaultOcclusionStrength;
+            }
+            else
+            {
+                entry.OcclusionTextureIndex = resolveTextureIndex(meshTextureRefs[i].Occlusion);
+                entry.OcclusionStrength = mesh.OcclusionStrength;
+            }
 
             result.VertexCount += mesh.Vertices.size();
             result.IndexCount += mesh.Indices.size();

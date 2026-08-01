@@ -293,12 +293,9 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, floa
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)
     const float3 splitSum = (F0 * brdf.x + brdf.y) * SpecularEnergyCompensation(F0, brdf, energyCompensationEnabled);
 
-    // スペキュラオクルージョン(Lagarde & de Rousiers, "Moving Frostbite to Physically Based
-    // Rendering 3.0", 2014)。ラフネスが高いほど指数を1に近づけ、AOの効きを弱める
-    const float specularOcclusionExponent = exp2(-16.0f * roughness - 1.0f);
-    const float specularOcclusion = saturate(pow(NdotV + ao, specularOcclusionExponent) - 1.0f + ao);
-
-    return splitSum * specularOcclusion * iblIntensity;
+    // スペキュラオクルージョン。式はSpecularEnergy.hlsliに1つだけ置いてある
+    // (半透明パス・プローブ焼き込みからも同じものを使うため)
+    return splitSum * SpecularOcclusion(NdotV, roughness, ao) * iblIntensity;
 }
 
 #endif // KURENAI_REFLECTION_PROBE_HLSLI

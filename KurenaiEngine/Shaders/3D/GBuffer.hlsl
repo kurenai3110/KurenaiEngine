@@ -31,13 +31,20 @@ cbuffer ObjectConstants : register(b1)
     // マテリアルのみalphaCutoff(既定0.5)が設定される
     float AlphaCutoff;
     float3 EmissiveFactor;
-    float ObjectPadding;
+    // glTFのocclusionTexture.strength(既定1.0)。遮蔽マップの効き具合をlerp(1, ao, strength)で
+    // 調整する。かつて純粋な詰め物(ObjectPadding)だった枠をそのまま使っているため、
+    // 定数バッファのサイズ・オフセットは変わっていない
+    float OcclusionStrength;
 };
 
 Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
 Texture2D EmissiveTexture : register(t3);
+// ベイク済みアンビエントオクルージョン(遮蔽マップ)。赤チャンネルが遮蔽率(1=遮蔽なし)。
+// t4はTransparent.hlsl/ProbeCapture.hlslがカスケードシャドウマップ配列に使っているため、
+// マテリアルテクスチャを読む3パスで共通して空いている最初のスロットがt5になる
+Texture2D OcclusionTexture : register(t5);
 
 struct VSInput
 {
@@ -45,6 +52,8 @@ struct VSInput
     float3 Normal : NORMAL;
     float2 UV : TEXCOORD0;
     float4 Tangent : TANGENT;
+    // ライトマップUV(Assets::Vertex::UV1)。遮蔽マップ専用で、重なりが無く[0,1]に収まる
+    float2 LightmapUV : TEXCOORD1;
 };
 
 struct PSInput
@@ -54,6 +63,7 @@ struct PSInput
     float3 WorldPos : TEXCOORD1;
     float2 UV : TEXCOORD0;
     float4 Tangent : TANGENT;
+    float2 LightmapUV : TEXCOORD2;
 };
 
 struct PSOutput
@@ -72,6 +82,7 @@ PSInput VSMain(VSInput input)
     output.Normal = mul(input.Normal, (float3x3)NormalMatrix);
     output.WorldPos = worldPos;
     output.UV = input.UV;
+    output.LightmapUV = input.LightmapUV;
     // 接線は面上の方向ベクトルなので、法線と異なりinverse-transposeではなく
     // Worldの3x3部分そのままで変換する(位置と同じ変換)
     output.Tangent = float4(mul(input.Tangent.xyz, (float3x3)World), input.Tangent.w * TangentSignFlip);
@@ -119,10 +130,25 @@ PSOutput PSMain(PSInput input)
 
     float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor;
 
+    // ベイク済みアンビエントオクルージョン。glTF仕様どおり赤チャンネルを遮蔽率として読み、
+    // occlusionTexture.strengthをここで適用してしまう(下流のライティングパスは単に乗算するだけで
+    // 済み、strengthの解釈が1か所に閉じる)。遮蔽マップを持たないマテリアルは白1x1が
+    // バインドされるためao=1となり、strengthに関わらず見た目は変わらない。
+    //
+    // 【引くUVがLightmapUV(TEXCOORD1)である理由】遮蔽マップはKurenaiPackerがxatlasで生成した
+    // 重なりの無い専用UV空間へ焼かれている。マテリアル用のUV(TEXCOORD0)はタイリング前提で
+    // 面ごとに固有の場所を持たないため、そちらで引くと別の場所の遮蔽を読んでしまう(22章)。
+    // glTFのocclusionTextureのように元から遮蔽マップを持つアセットもこのUV1側へ寄せてある
+    // (パッカーが未ベイク時はUV1をUVと同じ値で埋める)ので、シェーダー側の分岐は不要
+    float occlusionSample = OcclusionTexture.Sample(MaterialSampler, input.LightmapUV).r;
+    float ao = lerp(1.0f, occlusionSample, OcclusionStrength);
+
     PSOutput output;
     output.Albedo = float4(baseColorSample.rgb, 1.0f);
     output.Normal = OctEncode(N);
-    output.Material = float4(metallic, roughness, 0.0f, 0.0f);
+    // bチャンネルはマテリアルの遮蔽率。DeferredLighting.hlslとSSR.hlslがSSAO/SSILの遮蔽と
+    // 乗算して使う(専用のG-Bufferを増やさずに済むよう、未使用だった枠を使っている)
+    output.Material = float4(metallic, roughness, ao, 0.0f);
     output.Emissive = float4(emissive, 1.0f);
     return output;
 }

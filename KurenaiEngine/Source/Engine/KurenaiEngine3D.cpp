@@ -34,6 +34,8 @@ namespace Kurenai
                 { "NORMAL", 0, RHI::Format::R32G32B32_Float, 12 },
                 { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
                 { "TANGENT", 0, RHI::Format::R32G32B32A32_Float, 32 },
+                // ライトマップUV(遮蔽マップ専用)。Assets::Vertex::UV1
+                { "TEXCOORD", 1, RHI::Format::R32G32_Float, 48 },
             };
         }
 
@@ -597,7 +599,7 @@ namespace Kurenai
         // 持たないため、モデル行列もマテリアル係数(Emissive/AlphaCutoff含む)と同居させている
         // (Architecture.html参照)。float3(EmissiveFactor)以降が16バイト境界をまたがないよう、
         // 直前のMetallicFactor/RoughnessFactor/TangentSignFlip/AlphaCutoffで先に16バイトを
-        // 埋めてからEmissiveFactor+Paddingで次の16バイトを埋める配置にしている
+        // 埋めてからEmissiveFactor+OcclusionStrengthで次の16バイトを埋める配置にしている
         struct alignas(16) ObjectConstants
         {
             DirectX::XMFLOAT4X4 World;
@@ -608,7 +610,9 @@ namespace Kurenai
             // 0以下ならアルファカットアウト無効
             float AlphaCutoff;
             float EmissiveFactor[3];
-            float Padding;
+            // glTFのocclusionTexture.strength(既定1.0)。かつては純粋な詰め物(Padding)だった枠を
+            // そのまま使っているため、定数バッファのサイズ・オフセットは一切変わっていない
+            float OcclusionStrength;
             // glTFのbaseColorFactor(既定[1,1,1,1])。GBuffer.hlsl/Shadow.hlslはこのフィールドを
             // 宣言していない(=読まない)ため、末尾に追加してもオフセットへの影響は無い。
             // Transparent.hlsl(半透明フォワードパス)のみがBaseColorTextureと乗算して使う(14章参照)
@@ -634,6 +638,7 @@ namespace Kurenai
             constants.EmissiveFactor[0] = mesh.EmissiveFactor[0] * emissiveIntensity;
             constants.EmissiveFactor[1] = mesh.EmissiveFactor[1] * emissiveIntensity;
             constants.EmissiveFactor[2] = mesh.EmissiveFactor[2] * emissiveIntensity;
+            constants.OcclusionStrength = mesh.OcclusionStrength;
             constants.BaseColorFactor[0] = mesh.BaseColorFactor[0];
             constants.BaseColorFactor[1] = mesh.BaseColorFactor[1];
             constants.BaseColorFactor[2] = mesh.BaseColorFactor[2];
@@ -3048,6 +3053,8 @@ namespace Kurenai
                     cmd->SetTexture(1, mesh.NormalTexture);
                     cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                     cmd->SetTexture(3, mesh.EmissiveTexture);
+                    // t4はカスケードシャドウマップ配列が占めているため遮蔽マップはt5
+                    cmd->SetTexture(5, mesh.OcclusionTexture);
 
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                 }
@@ -3274,6 +3281,7 @@ namespace Kurenai
                         cmd->SetTexture(1, mesh.NormalTexture);
                         cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                         cmd->SetTexture(3, mesh.EmissiveTexture);
+                        cmd->SetTexture(5, mesh.OcclusionTexture);
                         cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                     }
                 }
@@ -3629,11 +3637,13 @@ namespace Kurenai
                     cmd->SetVertexBuffer(draw.Mesh->VertexBuffer.get());
                     cmd->SetIndexBuffer(draw.Mesh->IndexBuffer.get());
                     // メッシュごとに変わるマテリアルテクスチャのみ差し替える
-                    // (t4以降のシャドウ/ライト/IBLはループ前に一度バインドしたものがそのまま残る)
+                    // (t4のシャドウとt8以降のライト/IBLはループ前に一度バインドしたものがそのまま残る。
+                    // t5だけはマテリアルの遮蔽マップなのでメッシュごとに差し替える)
                     cmd->SetTexture(0, draw.Mesh->BaseColorTexture);
                     cmd->SetTexture(1, draw.Mesh->NormalTexture);
                     cmd->SetTexture(2, draw.Mesh->MetallicRoughnessTexture);
                     cmd->SetTexture(3, draw.Mesh->EmissiveTexture);
+                    cmd->SetTexture(5, draw.Mesh->OcclusionTexture);
 
                     cmd->DrawIndexed(draw.Mesh->IndexCount, 0, 0);
                 }

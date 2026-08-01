@@ -63,6 +63,17 @@ namespace
             "      --scale <S>       頂点位置・バウンズに乗算する係数(既定1.0、モデルモードのみ)。\n"
             "                        OBJ等ファイル自体に単位情報を持たない形式で、センチメートル単位の\n"
             "                        アセットをメートル単位として読み込みたい場合は0.01を指定する\n"
+            "      --bake-occlusion  遮蔽マップ(ベイク済みAO)を生成する(モデルモードのみ)。\n"
+            "                        xatlasで重なりの無いライトマップUVを作り、GPUのレイキャストで\n"
+            "                        メッシュごとに遮蔽率を焼く。ソースモデルがocclusionTextureを\n"
+            "                        持っていても、焼けたメッシュはこちらを優先する\n"
+            "      --occlusion-resolution <N>  遮蔽マップの一辺(既定512)\n"
+            "      --occlusion-rays <N>        テクセルあたりのレイ本数(既定128)。多いほど滑らかで遅い\n"
+            "      --metallic <V>              全マテリアルのメタリック値を上書きする(0〜1)\n"
+            "      --roughness <V>             全マテリアルのラフネス値を上書きする(0〜1)\n"
+            "      --base-color <R,G,B>        全マテリアルのベースカラー係数を上書きする(各0〜1)\n"
+            "                                  生のOBJ等、PBR係数を表現できない形式へ検証用の\n"
+            "                                  マテリアルを与えるためのもの\n"
             "  -h, --help            このヘルプを表示する\n";
     }
 
@@ -80,7 +91,86 @@ namespace
         float Scale = 1.0f;
         bool ShowHelp = false;
         bool SceneMode = false;
+        bool BakeOcclusion = false;
+        unsigned int OcclusionResolution = 512;
+        unsigned int OcclusionRays = 128;
+        KurenaiPacker::MaterialOverride MaterialOverride;
     };
+
+    // [0,1]のスカラーをパースする。失敗時はfalseを返す
+    bool ParseUnitScalar(const std::wstring& option, const std::wstring& value, std::optional<float>& out)
+    {
+        try
+        {
+            const float parsed = std::stof(value);
+            if (parsed < 0.0f || parsed > 1.0f)
+            {
+                PrintError(WideToUtf8(option) + " は0〜1の範囲で指定してください: " + WideToUtf8(value));
+                return false;
+            }
+            out = parsed;
+            return true;
+        }
+        catch (const std::exception&)
+        {
+            PrintError(WideToUtf8(option) + " の値が不正です: " + WideToUtf8(value));
+            return false;
+        }
+    }
+
+    // "R,G,B" 形式をパースする。失敗時はfalseを返す
+    bool ParseBaseColor(const std::wstring& value, std::optional<std::array<float, 3>>& out)
+    {
+        std::array<float, 3> color{};
+        size_t start = 0;
+        for (int i = 0; i < 3; ++i)
+        {
+            const size_t comma = value.find(L',', start);
+            if ((i < 2 && comma == std::wstring::npos) || (i == 2 && comma != std::wstring::npos))
+            {
+                PrintError("--base-color は R,G,B の3要素で指定してください: " + WideToUtf8(value));
+                return false;
+            }
+            try
+            {
+                color[i] = std::stof(value.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start));
+            }
+            catch (const std::exception&)
+            {
+                PrintError("--base-color の値が不正です: " + WideToUtf8(value));
+                return false;
+            }
+            if (color[i] < 0.0f || color[i] > 1.0f)
+            {
+                PrintError("--base-color の各成分は0〜1の範囲で指定してください: " + WideToUtf8(value));
+                return false;
+            }
+            start = comma + 1;
+        }
+        out = color;
+        return true;
+    }
+
+    // --jobs/--occlusion-* 共通の符号なし整数パース。失敗時はfalseを返す
+    bool ParseUnsigned(const std::wstring& option, const std::wstring& value, unsigned int& out)
+    {
+        try
+        {
+            const unsigned long parsed = std::stoul(value);
+            if (parsed == 0)
+            {
+                PrintError(WideToUtf8(option) + " には1以上の値を指定してください");
+                return false;
+            }
+            out = static_cast<unsigned int>(parsed);
+            return true;
+        }
+        catch (const std::exception&)
+        {
+            PrintError(WideToUtf8(option) + " の値が不正です: " + WideToUtf8(value));
+            return false;
+        }
+    }
 
     // 失敗時はstd::nulloptを返し、呼び出し側でエラーメッセージ表示・終了コード1とする
     std::optional<CommandLineArgs> ParseArgs(int argc, wchar_t** argv)
@@ -130,6 +220,50 @@ namespace
                 catch (const std::exception&)
                 {
                     PrintError("--jobs の値が不正です: " + WideToUtf8(argv[i]));
+                    return std::nullopt;
+                }
+            }
+            else if (arg == L"--bake-occlusion")
+            {
+                args.BakeOcclusion = true;
+            }
+            else if (arg == L"--occlusion-resolution" || arg == L"--occlusion-rays")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError(WideToUtf8(arg) + " には値が必要です");
+                    return std::nullopt;
+                }
+                unsigned int& target = (arg == L"--occlusion-resolution") ? args.OcclusionResolution : args.OcclusionRays;
+                if (!ParseUnsigned(arg, argv[++i], target))
+                {
+                    return std::nullopt;
+                }
+            }
+            else if (arg == L"--metallic" || arg == L"--roughness")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError(WideToUtf8(arg) + " には値が必要です");
+                    return std::nullopt;
+                }
+                std::optional<float>& target = (arg == L"--metallic")
+                    ? args.MaterialOverride.MetallicFactor
+                    : args.MaterialOverride.RoughnessFactor;
+                if (!ParseUnitScalar(arg, argv[++i], target))
+                {
+                    return std::nullopt;
+                }
+            }
+            else if (arg == L"--base-color")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--base-color には値が必要です");
+                    return std::nullopt;
+                }
+                if (!ParseBaseColor(argv[++i], args.MaterialOverride.BaseColor))
+                {
                     return std::nullopt;
                 }
             }
@@ -295,7 +429,7 @@ int wmain(int argc, wchar_t** argv)
     KurenaiPacker::SourceModel sourceModel;
     try
     {
-        sourceModel = KurenaiPacker::LoadSourceModel(inputAbsolute.wstring(), args.Scale);
+        sourceModel = KurenaiPacker::LoadSourceModel(inputAbsolute.wstring(), args.Scale, args.MaterialOverride);
     }
     catch (const std::exception& e)
     {
@@ -305,9 +439,30 @@ int wmain(int argc, wchar_t** argv)
 
     const auto parseTime = std::chrono::steady_clock::now();
 
+    // 遮蔽マップのベイク。sourceModelのジオメトリをライトマップUV付きへ置き換えるため、
+    // 必ずパッケージ書き出しより前に行う
+    KurenaiPacker::OcclusionBakeResult bakeResult;
+    if (args.BakeOcclusion)
+    {
+        KurenaiPacker::OcclusionBakeOptions bakeOptions;
+        bakeOptions.Resolution = args.OcclusionResolution;
+        bakeOptions.RayCount = args.OcclusionRays;
+        try
+        {
+            bakeResult = KurenaiPacker::BakeOcclusion(sourceModel, bakeOptions);
+        }
+        catch (const std::exception& e)
+        {
+            PrintError("遮蔽マップのベイクに失敗しました: " + std::string(e.what()));
+            return 2;
+        }
+    }
+    const auto bakeTime = std::chrono::steady_clock::now();
+
     KurenaiPacker::PackOptions options;
     options.Force = args.Force;
     options.JobCount = args.JobCount;
+    options.BakedOcclusion = args.BakeOcclusion ? &bakeResult : nullptr;
 
     KurenaiPacker::PackResult result;
     try
@@ -330,9 +485,26 @@ int wmain(int argc, wchar_t** argv)
         << "  テクスチャ要求: " << result.TextureRequested
         << " (新規生成 " << result.TextureGenerated
         << " / 既存スキップ " << result.TextureSkippedExisting
-        << " / 失敗(フォールバック) " << result.TextureFailed << ")\n"
-        << "  所要時間: 解析 " << FormatMs(startTime, parseTime) << "ms"
-        << " / 書き出し " << FormatMs(parseTime, endTime) << "ms"
+        << " / 失敗(フォールバック) " << result.TextureFailed << ")\n";
+
+    if (args.BakeOcclusion)
+    {
+        std::cout
+            << "  遮蔽マップ: ベイク " << bakeResult.BakedMeshCount
+            << " / スキップ " << bakeResult.SkippedMeshCount
+            << " / 書き出し " << result.OcclusionBaked
+            << " (解像度 " << args.OcclusionResolution
+            << " / レイ " << args.OcclusionRays << "本)\n";
+    }
+
+    std::cout
+        << "  所要時間: 解析 " << FormatMs(startTime, parseTime) << "ms";
+    if (args.BakeOcclusion)
+    {
+        std::cout << " / 遮蔽ベイク " << FormatMs(parseTime, bakeTime) << "ms";
+    }
+    std::cout
+        << " / 書き出し " << FormatMs(bakeTime, endTime) << "ms"
         << " / 合計 " << FormatMs(startTime, endTime) << "ms\n";
 
     return 0;
