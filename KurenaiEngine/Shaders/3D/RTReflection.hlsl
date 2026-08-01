@@ -65,6 +65,10 @@ cbuffer FrameConstants : register(b0)
     float4 IBLParams;
     // 反射プローブ用。ReflectionProbe.hlsliのプローブ選択・ブレンドが読む
     float4 ProbeParams;
+    // 反射プローブの距離キューブ用。w=焼いた時点の実効プリ露出から現在の実効プリ露出への
+    // 換算倍率(19.14節)で、ReflectionProbe.hlsliのBlendReflectionProbesが読む。x〜zはこの
+    // シェーダでは未使用(視差補正・遮蔽判定のフラグと距離キューブの解像度)
+    float4 ProbeParams2;
 };
 
 cbuffer RTReflectionConstants : register(b1)

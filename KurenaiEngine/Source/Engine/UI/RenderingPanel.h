@@ -28,6 +28,7 @@ namespace Kurenai::UI
         void DrawShadowSection();
         void DrawScreenSpaceShadowSection();
         void DrawIBLSection();
+        void DrawDDGISection();
         void DrawSSRSection();
         void DrawLightCullingSection();
 

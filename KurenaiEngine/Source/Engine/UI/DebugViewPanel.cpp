@@ -50,10 +50,12 @@ namespace Kurenai::UI
             "プローブ - 距離 (キューブマップ配列)",
             "モーションベクター (速度バッファ)",
             "シーンカラー (生HDR・トーンマップなし)",
+            "DDGI - イラディアンス (オクタヘドラルアトラス)",
+            "DDGI - 距離モーメント (R=平均距離)",
         };
         static_assert(
-            static_cast<int>(DebugView::SceneColorRaw) == 26,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はSceneColorRaw)");
+            static_cast<int>(DebugView::DDGIDistance) == 28,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はDDGIDistance)");
 
         DrawUsageHint();
         BeginParamGroup();

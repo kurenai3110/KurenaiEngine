@@ -20,6 +20,10 @@ static const float PI = 3.14159265359f;
 #define KURENAI_PROBE_PREFILTERED_REGISTER t12
 #define KURENAI_PROBE_BUFFER_REGISTER t13
 #define KURENAI_PROBE_DISTANCE_REGISTER t14
+// DDGI(22章)のオクタヘドラルアトラス。拡散イラディアンスだけを差し替えるため、
+// 鏡面を担うReflectionProbe.hlsli側とはレジスタも役割も完全に分かれている
+#define KURENAI_DDGI_IRRADIANCE_REGISTER t15
+#define KURENAI_DDGI_DISTANCE_REGISTER t16
 
 cbuffer FrameConstants : register(b0)
 {
@@ -60,6 +64,18 @@ cbuffer FrameConstants : register(b0)
     // 反射プローブの距離キューブ用(19.12節)。x=視差補正に距離キューブを使うフラグ、
     // y=距離キューブによる遮蔽判定(光漏れ抑制)の有効フラグ、z=距離キューブの1面の解像度、w=未使用
     float4 ProbeParams2;
+    // TAA(23章)用。このシェーダーでは未使用だが、C++側でDDGIParamsより手前に置かれているため
+    // オフセット合わせのためだけに宣言する
+    float4x4 PrevViewProj;
+    float4 TAAParams;
+    // DDGI用(22章)。レイアウトはC++側 KurenaiEngine3D.cpp の FrameConstants のコメント参照。
+    // DDGI.hlsliがこの4本を読む
+    float4 DDGIParams0;
+    float4 DDGIParams1;
+    float4 DDGIParams2;
+    float4 DDGIParams3;
+    // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
+    float4 DDGIParams4;
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -82,6 +98,9 @@ Texture2D BRDFLUTTexture : register(t10);
 // プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みは
 // ReflectionProbe.hlsliが持つ(SSR.hlslと共有するため。レジスタ番号は上のマクロで与えている)
 #include "ReflectionProbe.hlsli"
+// DDGI(22章)。拡散イラディアンスだけを差し替える。鏡面には一切触れないため、
+// SSRとの「足した量と引く量が一致する」不変条件(20章)には影響しない
+#include "DDGI.hlsli"
 
 // 環境ソース(プローブとグローバルIBLの重み付き合成)はSampleEnvironmentが返す。プローブと
 // グローバルIBLはどちらも同じ手順で焼かれており(IBLConvolve.hlslを共有している)、解像度・
@@ -98,6 +117,16 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     float3 irradiance;
     float3 prefiltered;
     SampleEnvironment(worldPos, N, R, mipLevel, irradiance, prefiltered);
+
+    // DDGI(22章)が有効なら、拡散の環境ソースだけをプローブ格子由来のものへ差し替える。
+    // 【加算ではなく差し替えである】DDGIのイラディアンスは「その位置に来ている光」そのもので、
+    // グローバルIBL/反射プローブのイラディアンスと同じ量の別の推定値である。足すと二重計上になる。
+    // 鏡面(prefiltered)は差し替えない——反射プローブのほうが方向解像度が桁違いに高く、
+    // DDGIのオクタヘドラル6x6では鏡面の映り込みを表現できないため
+    if (DDGIParams0.w > 0.5f)
+    {
+        irradiance = SampleDDGIIrradiance(worldPos, N, V);
+    }
 
     // --- 拡散IBL ---
     // irradianceの取得元(専用マップ or プリフィルタ済み鏡面の最終ミップ)の切り替えは

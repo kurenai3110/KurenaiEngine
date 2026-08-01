@@ -648,6 +648,16 @@ namespace Kurenai
         // (夜の壁が3.8から4.7へ持ち上がってしまう)
         float m_AutoExposureKeyCeilingEV = Defaults::AutoExposureKeyCeilingEV;
 
+        // 次のAutoExposureパスで順応を飛ばして測光値へ即座に合わせる要求。LoadSceneが立て、
+        // パスを積んだ時点で消費する。
+        //
+        // 順応の状態はGPU側のm_ExposureTexture(2x1)に入っており、初回だけ順応を飛ばすための
+        // フラグもそこのテクセル(1,0)にある(UAVがゼロ初期化されることを利用している)。
+        // つまりCPU側からは「初回に戻す」手段が無く、シーンを切り替えても前のシーンの露出から
+        // 順応が続いてしまう。シーン切り替えは視点の移動ではなく場面の切り替わりなので、
+        // 目の順応を模す理由が無い(AutoExposure.hlslのCSResolveのコメントもそう宣言している)
+        bool m_AutoExposureResetRequested = false;
+
         // ブルームパス(Bloom.hlsl): 半解像度から始まるピラミッドを段階的にダウンサンプルし、
         // 3x3テントで戻しながら加算することで広く滑らかな光の裾を作る。
         //
@@ -726,6 +736,8 @@ namespace Kurenai
             ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
             MotionVector,       // モーションベクター(速度バッファ)。静止で灰色、動くと移動方向に応じて色が付く
             SceneColorRaw,      // トーンマップ前のHDRシーンカラーをリニアのまま無加工で表示(測定用)
+            DDGIIrradiance,     // DDGIのイラディアンスアトラス(オクタヘドラル2D、22章)
+            DDGIDistance,       // DDGIの距離モーメントアトラス(R=平均距離、G=平均二乗距離)
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -1025,6 +1037,128 @@ namespace Kurenai
         // 焼き上がりに影響する状態(時刻・太陽・シャドウ・IBL強度・全ライト)から署名を作る。
         // 影響範囲(形状・半径・ブレンド距離)はキャプチャ内容を変えないため含めない
         uint64_t ComputeProbeBakeSignature() const;
+        // 最後にキャプチャしたときの実効プリ露出(m_EffectiveExposureEV100)。
+        //
+        // 【なぜ記録しておく必要があるか】プローブのキューブマップにはプリ露出済みの放射輝度が
+        // 入っている(21.5節)。その倍率は時刻に連動して最大18段(約26万倍)動くのに対し、
+        // Bakedモードのプローブはシーン読み込み時に一度焼いたきり更新されない。そのため
+        // 焼いた時点と現在とで実効プリ露出が食い違うと、プローブの寄与だけが桁違いの明るさで
+        // 合成される。実測では夜のProbeTestからSponzaへ切り替えたとき、EV100=-2.36で焼かれた
+        // プローブをEV100=15.0のフレームが読み、17.4段(約17万倍)過剰になって画面が
+        // 白飛びしたまま戻らなくなっていた。
+        //
+        // 空(手続き空)は実効プリ露出が0.05段動くたびに焼き直して追従しているが、プローブは
+        // 1回のフルベイクが全プローブ×6面の描画になり同じ頻度では焼き直せない。そこで
+        // 焼き直す代わりに、読み出し時へ 2^(焼いたEV - 現在のEV) を掛けて現在の露出へ
+        // 換算する(FrameConstants.ProbeParams2.w、ReflectionProbe.hlsliのSampleEnvironment)。
+        // キューブマップの中身は触らないのでfp16の値域も変わらない
+        float m_ProbeBakedExposureEV100 = 15.0f;
+        // 焼き直しを要求する実効プリ露出の変化量[EV]。1段=明るさ2倍。
+        // 手続き空の0.05段よりずっと粗いのは、フルベイクがプローブ数×6面の描画になるため。
+        // 1日を通した時刻変化(最大18段)なら十数回のフルベイクに収まる
+        static constexpr float kProbeRebakeExposureEV = 1.0f;
+
+        // --- DDGI(Dynamic Diffuse Global Illumination、22章) ---
+        //
+        // 反射プローブ(上)が「少数を手で置き、主に鏡面を担う」のに対し、DDGIは
+        // 「格子状に多数を自動配置し、拡散の間接光だけを担う」。レイの取得には反射プローブと
+        // まったく同じキャプチャ経路(ProbeCapture.hlslの6面MRT)を使い、キャプチャ解像度だけ
+        // 落とす。得られた放射輝度と距離を、キューブではなくオクタヘドラル投影の2Dアトラスへ
+        // 畳み込む(DDGIProbeUpdate.hlsl)。
+        //
+        // 【20章の単一定義規則との関係】DDGIが差し替えるのはReflectionProbe.hlsliの
+        // SampleEnvironmentが返す拡散イラディアンスだけで、鏡面(prefiltered)と
+        // SpecularIBLWeightには一切触れない。したがって「SSRはDeferredLightingが足した
+        // 鏡面IBLと厳密に同じ量を引く」という不変条件はDDGIを入れても保たれる
+
+        // オクタヘドラル1プローブぶんの1辺のテクセル数(境界を含まない)。
+        // 拡散イラディアンスは低周波なのでこの程度で足りる。距離は遮蔽の輪郭を担うので広く取る
+        static constexpr uint32_t kDDGIIrradianceTexels = 6;
+        static constexpr uint32_t kDDGIDistanceTexels = 14;
+        // 各辺に足す境界の幅。オクタヘドラルは正方形の縁が球面上で折り返して繋がるため、
+        // その繋がる先のテクセルを外周へ複製しておかないと、バイリニア補間が縁で破綻する
+        // (隣のプローブのテクセルを拾ってしまうことの防止も兼ねる)
+        static constexpr uint32_t kDDGIProbeBorder = 1;
+        // アトラス上の1プローブぶんのセルの1辺(境界込み)
+        static constexpr uint32_t kDDGIIrradianceCell = kDDGIIrradianceTexels + kDDGIProbeBorder * 2;
+        static constexpr uint32_t kDDGIDistanceCell = kDDGIDistanceTexels + kDDGIProbeBorder * 2;
+        // プローブ数の上限。反射プローブと違いアトラスはシーン読み込み時に確保し直すので
+        // 技術的な固定容量ではないが、.ksceneの書き間違いで数GBのアトラスを作らないための歯止め
+        static constexpr uint32_t kDDGIMaxProbes = 4096;
+        // キャプチャ解像度(1面あたり)。6面ぶんで 16×16×6 = 1536方向がレイの代わりになる。
+        // 反射プローブのkProbeCaptureSize(128)と違い小さくてよいのは、DDGIが必要とするのが
+        // 「低周波の拡散イラディアンス」であって鏡面の映り込みではないため
+        static constexpr uint32_t kDDGICaptureSize = 16;
+
+        // シーンから読み込んだボリューム(先頭の1つだけを使う)。m_HasGIVolumeがfalseの間は
+        // アトラスは1プローブぶんのダミーとして確保され、シェーダー側もDDGIParams0.w=0で無効になる
+        Assets::GIVolume m_GIVolume;
+        bool m_HasGIVolume = false;
+        // ボリュームの総プローブ数(ProbeCountsの3軸の積)。ダミー時は1
+        uint32_t m_DDGIProbeCount = 1;
+
+        // オクタヘドラル2Dアトラス。RGBがイラディアンス、距離側はR=平均距離・G=平均二乗距離。
+        // どちらもR32系で確保する。更新CSがヒステリシスのために「前の値を読んでから書く」ため、
+        // 型付きUAV読み出しがR32系しか保証されていないという制約に従う必要がある
+        // (AutoExposure.hlslの同じ判断を参照)
+        std::unique_ptr<RHI::IRHITexture> m_DDGIIrradianceAtlas;
+        std::unique_ptr<RHI::IRHITexture> m_DDGIDistanceAtlas;
+        std::unique_ptr<RHI::IRHIShader> m_DDGIProbeUpdateComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIProbeUpdatePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_DDGIBorderCopyComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIBorderCopyPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_DDGIUpdateConstantBuffer;
+        // DDGIのキャプチャ先(反射プローブとは解像度が違うため別に持つ)
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureColor;
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistance;
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDepth;
+        // キャプチャした6面を組み上げるスクラッチのキューブ(放射輝度・距離の2本)。
+        // 更新CSは「6面ぶんのレイ」をまとめて走査するため、面ごとの2Dではなくキューブで受ける
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureRadianceCube;
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistanceCube;
+
+        bool m_DDGIEnabled = Defaults::DDGIEnabled;
+        // 拡散間接光の強度倍率。DDGIとSSILは近傍/遠方で寄与が重なるため、実測で決めるための倍率
+        float m_DDGIIntensity = Defaults::DDGIIntensity;
+        // 全プローブが一度でも書かれたか。書かれる前のアトラスは中身が未定義なので、
+        // それまではDDGIを無効にして従来のIBLのまま描く(反射プローブのm_ProbeBakedと同じ方針)
+        bool m_DDGIBaked = false;
+        // 初回の一巡が終わっていないか。
+        //
+        // 【反射プローブと違い「フルベイク」を持たない】反射プローブは8個までなので全プローブを
+        // 1フレームで焼けるが、DDGIは数百個ある。同じことをするとBistroのようなシーンでは
+        // 数百×6回のシーン描画が1フレームに集中して数秒のハングになる。
+        // DDGIはもともとヒステリシスで時間収束させる手法なので、初回も時間分割で埋めるのが素直。
+        // ただし初回だけは「前の値」が存在しないため、一巡目はヒステリシスを使わず上書きする
+        // (未初期化のアトラスと混ぜてはいけない)
+        bool m_DDGIWarmingUp = true;
+        // ヒステリシスを使わず上書きで焼き直す残りプローブ数。
+        //
+        // 【なぜ要るか】実効プリ露出は時刻に連動して最大18段動く(21.5節)。アトラス自体は
+        // 露出非依存の物理量で持っているので数値が壊れることはないが、ヒステリシス0.97と
+        // ラウンドロビンの積で時定数が約17秒あるため、時刻を大きく動かすとその間ずっと
+        // 「前の時刻の間接光」が表示され続ける。露出が急変する時間帯ほど、この遅れが
+        // 露出倍率で拡大されて目に見える(夕方に昼の間接光を夕方の露出で見ることになる)。
+        // そこで露出が一定以上動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる。
+        // m_DDGIWarmingUpと違いDDGI自体は有効なまま(無効にすると従来のIBLとの間でちらつく)
+        uint32_t m_DDGIOverwriteRemaining = 0;
+        // 最後にアトラスを追従させた時点の実効プリ露出EV100
+        float m_DDGILastExposureEV100 = 0.0f;
+        bool m_DDGILastExposureValid = false;
+        // これを超えて実効プリ露出が動いたら追従させる(段)。1段=明るさ2倍ぶん
+        static constexpr float kDDGIExposureRewarmEV = 0.5f;
+        // 時間分割の進行状態。1フレームにm_DDGIProbesPerFrame個ずつ順に焼き直す
+        uint32_t m_DDGIUpdateCursor = 0;
+        int32_t m_DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
+
+        // 格子上のプローブ番号からワールド座標を求める。番号の分解は
+        // index = x + y*Cx + z*Cx*Cy で、シェーダー側の並びと一致させること
+        DirectX::XMFLOAT3 ComputeDDGIProbePosition(uint32_t probeIndex) const;
+
+        // m_GIVolumeのProbeCountsに合わせてアトラス2枚を確保し直す。ボリュームが無いシーンでは
+        // 1プローブぶんのダミーを確保する(SRVは常にバインドできる必要があるため、
+        // 「確保しない」という選択肢は取れない。無効化はDDGIParams0.wで行う)
+        void RecreateDDGIAtlases();
 
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = Defaults::TimeOfDay;
@@ -1212,7 +1346,11 @@ namespace Kurenai
         // 割り戻す構造になっているため、**フレーム単位で変えても最終的な絵は変わらない**。
         // その性質をそのまま利用して、バッファの数値レンジだけを健全に保つ
         float m_EffectiveExposureEV100 = 15.0f;
-        // 実効プリ露出が初期化済みか(初回フレームは平滑化せず即座に合わせる)
+        // 実効プリ露出が初期化済みか(初回フレームは平滑化せず即座に合わせる)。
+        // **シーン読み込み時にLoadSceneがfalseへ戻す**。シーンをまたぐと時刻が入れ替わって
+        // 実効プリ露出が最大18段跳ぶが、そこを平滑化しても得られるものが無い(プリ露出は
+        // Tonemap側で割り戻されるため過渡の絵には現れない)一方で、追従の途中の値で焼かれた
+        // 資産(反射プローブ)が残ってしまう。切り替えは平滑化せず即座に合わせるのが正しい
         bool m_EffectiveExposureInitialized = false;
         // 実効プリ露出の時間平滑化の速さ[1/秒]。段付きを防ぐために指数追従させる
         float m_EffectiveExposureAdaptSpeed = 2.0f;

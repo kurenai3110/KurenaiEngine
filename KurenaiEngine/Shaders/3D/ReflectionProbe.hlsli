@@ -370,6 +370,17 @@ void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
         }
     }
 
+    // === プローブを焼いた時点の露出から現在の露出へ換算する ===
+    // キューブマップにはプリ露出済みの放射輝度が入っている(21.5節)。その倍率は時刻に連動して
+    // 最大18段(約26万倍)動くのに対し、Bakedモードのプローブはシーン読み込み時に一度焼いた
+    // きり更新されない。換算しないと、夜に焼いたプローブを昼のフレームが読んだ瞬間に
+    // プローブの寄与だけが17万倍になり、画面が白飛びしたまま戻らなくなる(19.14節)。
+    //
+    // **グローバルIBLを足す前に掛けること**。手続き空は露出が0.05段動くたびに焼き直されて
+    // 常に現在の露出になっているので、換算が要るのはプローブ由来の項だけである
+    accumulatedIrradiance *= ProbeParams2.w;
+    accumulatedPrefiltered *= ProbeParams2.w;
+
     const float globalWeight = 1.0f - totalWeight;
     if (globalWeight > 0.0f)
     {
