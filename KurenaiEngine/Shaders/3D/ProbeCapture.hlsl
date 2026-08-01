@@ -54,7 +54,8 @@ cbuffer ObjectConstants : register(b1)
     float TangentSignFlip;
     float AlphaCutoff;
     float3 EmissiveFactor;
-    float ObjectPadding;
+    // glTFのocclusionTexture.strength(既定1.0)。GBuffer.hlslと同じ枠
+    float OcclusionStrength;
     float4 BaseColorFactor;
 };
 
@@ -72,6 +73,9 @@ Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
 Texture2D EmissiveTexture : register(t3);
+// ベイク済みアンビエントオクルージョン(遮蔽マップ)。t4はカスケードシャドウマップ配列が
+// 使っているためt5を使う(GBuffer.hlsl/Transparent.hlslと共通)
+Texture2D OcclusionTexture : register(t5);
 // カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
 // DirectLighting.hlsl/Transparent.hlslと同じ実装を共有しているため、プローブに焼かれる影と
 // 本編の影が食い違うことはない。FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)と
@@ -88,6 +92,8 @@ struct VSInput
     float3 Normal : NORMAL;
     float2 UV : TEXCOORD0;
     float4 Tangent : TANGENT;
+    // ライトマップUV(Assets::Vertex::UV1)。遮蔽マップ専用(GBuffer.hlslと同じ)
+    float2 LightmapUV : TEXCOORD1;
 };
 
 struct PSInput
@@ -97,6 +103,7 @@ struct PSInput
     float3 WorldPos : TEXCOORD1;
     float2 UV : TEXCOORD0;
     float4 Tangent : TANGENT;
+    float2 LightmapUV : TEXCOORD2;
 };
 
 PSInput VSMain(VSInput input)
@@ -107,6 +114,7 @@ PSInput VSMain(VSInput input)
     output.Normal = mul(input.Normal, (float3x3)NormalMatrix);
     output.WorldPos = worldPos;
     output.UV = input.UV;
+    output.LightmapUV = input.LightmapUV;
     output.Tangent = float4(mul(input.Tangent.xyz, (float3x3)World), input.Tangent.w * TangentSignFlip);
     return output;
 }
@@ -135,7 +143,7 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
 // DirectLighting.hlslのEvaluateDirectBRDFと同じ(拡散+鏡面を足した1つの値を返す)
 float3 EvaluateDirectBRDF(
     float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness,
-    float3 energyCompensation)
+    SpecularEnergyContext energy)
 {
     float3 H = normalize(V + L);
     float NdotL = saturate(dot(N, L));
@@ -147,7 +155,15 @@ float3 EvaluateDirectBRDF(
     float G = GeometrySmith(NdotV, NdotL, roughness);
     float3 F = FresnelSchlick(VdotH, F0);
 
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energyCompensation;
+    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energy.Compensation;
+
+    if (energy.Mode == KURENAI_SPEC_COMP_KULLACONTY)
+    {
+        // 加算ローブはE(NdotL)を要る(DirectLighting.hlslの同じ箇所と同一の処理)
+        const float2 brdfL = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotL, energy.Roughness), 0).rg;
+        specular += SpecularMultiScatterLobe(F0, energy.EssV, brdfL.x + brdfL.y, energy.Eavg, energy.Mode);
+    }
+
     float3 kd = (1.0f - F) * (1.0f - metallic);
     float3 diffuse = kd * albedo / PI;
 
@@ -170,7 +186,7 @@ float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float an
 // DirectLighting.hlslのEvaluateLightと同じ(影なし)
 float3 EvaluateLight(
     GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
-    float3 energyCompensation)
+    SpecularEnergyContext energy)
 {
     uint lightType = (uint)light.PositionType.w;
     float range = light.ColorRange.w;
@@ -215,14 +231,15 @@ float3 EvaluateLight(
         return float3(0.0f, 0.0f, 0.0f);
     }
 
-    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energyCompensation) * light.ColorRange.rgb * atten;
+    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy) * light.ColorRange.rgb * atten;
 }
 
 // スカイボックス由来のグローバルIBL(DeferredLighting.hlslのEvaluateIBLと同じ式。
-// キャプチャ時にはAO/GIバッファが無いため常にao=1として扱い、スペキュラオクルージョンも省く)。
+// キャプチャ時にはスクリーンスペースのAO/GIバッファが無いが、マテリアルの遮蔽マップは
+// テクスチャなので使える。焼いた絵とメインパスの絵が食い違わないよう、aoにはそれを渡す)。
 // 昼度(AmbientColor.a)による夜間減衰は、手続き空の導入でどこでも掛けなくなった(21.4節)。
 // 空のキューブマップ自体が太陽高度に応じて暗くなるため、焼き込み時にも使用時にも不要
-float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, float2 brdf, float3 energyCompensation)
+float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, float roughness, float ao, float3 brdf, int compensationMode)
 {
     const float NdotV = saturate(dot(N, V));
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
@@ -231,12 +248,21 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, floa
     const float3 fresnelRoughness =
         F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
     const float3 kd = (1.0f - fresnelRoughness) * (1.0f - metallic);
-    const float3 diffuseIBL = kd * albedo * irradiance;
+    const float3 diffuseIBL = kd * albedo * irradiance * ao;
 
     const float3 R = reflect(-V, N);
     const float mipLevel = roughness * ShadowParams.y;
     const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
-    const float3 specularIBL = prefiltered * (F0 * brdf.x + brdf.y) * energyCompensation;
+    // 乗算型(モード1・2)は単一散乱項へ倍率として掛かり、Kulla-Conty(3)は加算ローブを足す
+    // (DeferredLighting.hlslのEvaluateIBLと同じ形。加算ぶんは拡散イラディアンスに掛かる)。
+    // スペキュラオクルージョンは両方の項へ掛ける ―― ReflectionProbe.hlsliのSpecularIBLWeightと
+    // SpecularIBLMultiScatterWeightがどちらも掛けているのと揃えるため
+    const float3 FssEss = F0 * brdf.x + brdf.y;
+    const float Ess = brdf.x + brdf.y;
+    const float3 specularIBL =
+        (prefiltered * FssEss * SpecularEnergyCompensation(F0, brdf, compensationMode)
+         + SpecularMultiScatterIBL(F0, FssEss, Ess, compensationMode) * irradiance)
+        * SpecularOcclusion(NdotV, roughness, ao);
 
     return diffuseIBL + specularIBL;
 }
@@ -275,14 +301,20 @@ PSOutput PSMain(PSInput input)
 
     float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor;
 
+    // マテリアルの遮蔽マップ(ベイク済みAO)。GBuffer.hlslと同じ解釈・同じstrength適用を行う。
+    // 引くUVは専用のライトマップUV(TEXCOORD1)。理由はGBuffer.hlslの同じ箇所を参照
+    float occlusionSample = OcclusionTexture.Sample(MaterialSampler, input.LightmapUV).r;
+    float materialAO = lerp(1.0f, occlusionSample, OcclusionStrength);
+
     float3 albedo = baseColorSample.rgb;
     // CameraPositionにはプローブのワールド座標が入っている(ファイル冒頭参照)
     float3 V = normalize(CameraPosition.xyz - input.WorldPos);
     float NdotV = saturate(dot(N, V)) + 1e-5f;
 
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
-    const float3 energyCompensation = SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
+    // LUTの第3成分(Eavg)はKulla-Conty方式だけが使う(14.9.2.1節)
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
+    const SpecularEnergyContext energy = MakeSpecularEnergyContext(F0, brdf, roughness, ShadowParams.w);
 
     float3 color = float3(0.0f, 0.0f, 0.0f);
 
@@ -294,7 +326,7 @@ PSOutput PSMain(PSInput input)
         // カスケード選択はカメラ視錐台基準(FrameConstants.Viewはカメラのビュー行列)
         float viewDepth = mul(float4(input.WorldPos, 1.0f), View).z;
         float shadow = ComputeCascadedShadowFactor(input.WorldPos, viewDepth, sunNdotL);
-        color += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energyCompensation) * LightColor.rgb * shadow;
+        color += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energy) * LightColor.rgb * shadow;
     }
 
     // --- t8のライトリスト(影なし) ---
@@ -302,7 +334,7 @@ PSOutput PSMain(PSInput input)
     [loop]
     for (uint i = 0; i < lightCount; ++i)
     {
-        color += EvaluateLight(Lights[i], input.WorldPos, N, V, NdotV, albedo, metallic, roughness, energyCompensation);
+        color += EvaluateLight(Lights[i], input.WorldPos, N, V, NdotV, albedo, metallic, roughness, energy);
     }
 
     // --- スカイボックス由来のグローバルIBL(環境光) ---
@@ -310,11 +342,11 @@ PSOutput PSMain(PSInput input)
     // 定数色アンビエントへフォールバックし、プローブが真っ黒に焼けるのを防ぐ
     if (ShadowParams.z > 0.0f)
     {
-        color += EvaluateGlobalIBL(N, V, albedo, metallic, roughness, brdf, energyCompensation) * ShadowParams.z;
+        color += EvaluateGlobalIBL(N, V, albedo, metallic, roughness, materialAO, brdf, energy.Mode) * ShadowParams.z;
     }
     else
     {
-        color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb;
+        color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb * materialAO;
     }
 
     color += emissive;

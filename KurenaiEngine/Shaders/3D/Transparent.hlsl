@@ -74,7 +74,8 @@ cbuffer ObjectConstants : register(b1)
     float TangentSignFlip;
     float AlphaCutoff;
     float3 EmissiveFactor;
-    float ObjectPadding;
+    // glTFのocclusionTexture.strength(既定1.0)。GBuffer.hlslと同じ枠
+    float OcclusionStrength;
     // glTFのbaseColorFactor(既定[1,1,1,1])。BaseColorTextureと乗算する。テクスチャを持たず
     // baseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等)を正しく再現するために使う
     float4 BaseColorFactor;
@@ -94,6 +95,9 @@ Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
 Texture2D EmissiveTexture : register(t3);
+// ベイク済みアンビエントオクルージョン(遮蔽マップ)。t4はカスケードシャドウマップ配列が
+// 使っているためt5を使う(GBuffer.hlsl/ProbeCapture.hlslと共通)
+Texture2D OcclusionTexture : register(t5);
 // カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
 // DirectLighting.hlslと同じ実装を共有しているため、半透明と不透明で影がずれることはない。
 // FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)とDataSamplerを参照するため、
@@ -114,6 +118,8 @@ struct VSInput
     float3 Normal : NORMAL;
     float2 UV : TEXCOORD0;
     float4 Tangent : TANGENT;
+    // ライトマップUV(Assets::Vertex::UV1)。遮蔽マップ専用(GBuffer.hlslと同じ)
+    float2 LightmapUV : TEXCOORD1;
 };
 
 struct PSInput
@@ -123,6 +129,7 @@ struct PSInput
     float3 WorldPos : TEXCOORD1;
     float2 UV : TEXCOORD0;
     float4 Tangent : TANGENT;
+    float2 LightmapUV : TEXCOORD2;
 };
 
 PSInput VSMain(VSInput input)
@@ -133,6 +140,7 @@ PSInput VSMain(VSInput input)
     output.Normal = mul(input.Normal, (float3x3)NormalMatrix);
     output.WorldPos = worldPos;
     output.UV = input.UV;
+    output.LightmapUV = input.LightmapUV;
     output.Tangent = float4(mul(input.Tangent.xyz, (float3x3)World), input.Tangent.w * TangentSignFlip);
     return output;
 }
@@ -166,7 +174,7 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
 // 鏡面反射は不透明度で減衰させず背景の上へ加算するため。PSMain末尾のコメント参照)
 void EvaluateDirectBRDF(
     float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness,
-    float3 energyCompensation,
+    SpecularEnergyContext energy,
     out float3 outDiffuse, out float3 outSpecular)
 {
     float3 H = normalize(V + L);
@@ -179,10 +187,19 @@ void EvaluateDirectBRDF(
     float G = GeometrySmith(NdotV, NdotL, roughness);
     float3 F = FresnelSchlick(VdotH, F0);
 
-    // energyCompensationはPSMainで1度だけ計算して渡される(SpecularEnergy.hlsli、14.9節)。
+    // energyはPSMainで1度だけ計算して渡される(SpecularEnergy.hlsli、14.9節)。
     // このシェーダーは拡散/鏡面を別々に返すため、補正が鏡面側にだけ掛かることがコード上で自明になる
     // (拡散項kdは変更しない。理由は14.9節)
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energyCompensation;
+    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energy.Compensation;
+
+    if (energy.Mode == KURENAI_SPEC_COMP_KULLACONTY)
+    {
+        // 加算ローブはE(NdotL)を要る。ライトのループ内から呼ばれるため勾配に依存しない
+        // SampleLevelを使う(DirectLighting.hlslの同じ箇所と同一の処理)
+        const float2 brdfL = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotL, energy.Roughness), 0).rg;
+        specular += SpecularMultiScatterLobe(F0, energy.EssV, brdfL.x + brdfL.y, energy.Eavg, energy.Mode);
+    }
+
     float3 kd = (1.0f - F) * (1.0f - metallic);
     float3 diffuse = kd * albedo / PI;
 
@@ -196,9 +213,13 @@ void EvaluateDirectBRDF(
 // 環境ソース(拡散イラディアンス・プリフィルタ済み鏡面)は不透明側とまったく同じSampleEnvironmentで
 // 求める。これにより反射プローブ・視差補正・ブレンド・イラディアンスの取得元切り替えの規則が
 // 半透明と不透明で食い違うことがなくなる。
-// IBL強度倍率(ShadowParams.z)はこの関数の中で掛け切る(呼び出し側では掛けない)
+// IBL強度倍率(ShadowParams.z)はこの関数の中で掛け切る(呼び出し側では掛けない)。
+//
+// 半透明パスはスクリーンスペースのAO/GIバッファ(SSAO/SSIL)を持たないが、マテリアルの
+// 遮蔽マップ(ベイク済みAO)はテクスチャなのでこのパスでも使える。aoにはそれを渡す
+// (遮蔽マップを持たないマテリアルは白1x1でao=1となり、従来と同じ結果になる)
 void EvaluateIBLSplit(
-    float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness,
+    float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness, float ao,
     out float3 outDiffuse, out float3 outSpecular)
 {
     const float NdotV = saturate(dot(N, V));
@@ -220,18 +241,18 @@ void EvaluateIBLSplit(
 
     // --- 鏡面IBL(split-sum近似) ---
     const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
-    // 半透明パスはAO/GIバッファを持たないため常にao=1。このときSpecularIBLWeight内の
-    // スペキュラオクルージョンは saturate(pow(NdotV + 1, e)) となり、底が1以上・指数が正なので
-    // 必ず1へ飽和する。つまり不透明側と同じ関数をそのまま使っても式は変わらない
-    // (以前ここでスペキュラオクルージョンの計算を省いていたのと結果は同じ)
+    // スペキュラオクルージョン・エネルギー補正・IBL強度倍率をまとめて掛ける係数。
+    // 半透明パスはスクリーンスペースのAO/GIバッファを持たないが、マテリアルの遮蔽マップは
+    // テクスチャなので使えるため、不透明側と同じ関数へそのままaoを渡している
+    // (遮蔽マップを持たないマテリアルはao=1となり、以前と同じ結果になる)
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, 1.0f, brdf, ShadowParams.w, ShadowParams.z);
+        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
 
     // 【昼度(AmbientColor.a)による減衰はしない】DeferredLighting.hlslのEvaluateIBLと同じ理由で、
     // 手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなるため、ここで掛けると
     // 二重に暗くなる(21.4節)。
-    // 鏡面側のShadowParams.z(IBL強度倍率)はspecularWeightに含まれている
-    outDiffuse = kd * albedo * irradiance * ShadowParams.z;
+    // 鏡面側のShadowParams.z(IBL強度倍率)とaoはspecularWeightに含まれている
+    outDiffuse = kd * albedo * irradiance * ao * ShadowParams.z;
     outSpecular = prefiltered * specularWeight;
 }
 
@@ -250,7 +271,7 @@ float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float an
 
 void EvaluateLight(
     GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
-    float3 energyCompensation,
+    SpecularEnergyContext energy,
     out float3 outDiffuse, out float3 outSpecular)
 {
     outDiffuse = float3(0.0f, 0.0f, 0.0f);
@@ -301,7 +322,7 @@ void EvaluateLight(
 
     float3 diffuse;
     float3 specular;
-    EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energyCompensation, diffuse, specular);
+    EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy, diffuse, specular);
 
     float3 radiance = light.ColorRange.rgb * atten;
     outDiffuse = diffuse * radiance;
@@ -332,6 +353,11 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor;
 
+    // マテリアルの遮蔽マップ(ベイク済みAO)。GBuffer.hlslと同じ解釈・同じstrength適用を行う。
+    // 引くUVは専用のライトマップUV(TEXCOORD1)。理由はGBuffer.hlslの同じ箇所を参照
+    float occlusionSample = OcclusionTexture.Sample(MaterialSampler, input.LightmapUV).r;
+    float materialAO = lerp(1.0f, occlusionSample, OcclusionStrength);
+
     float3 albedo = baseColorSample.rgb;
     float3 V = normalize(CameraPosition.xyz - input.WorldPos);
     float NdotV = saturate(dot(N, V)) + 1e-5f;
@@ -340,8 +366,8 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 関数でピクセル内では一定なので、ライトのループへ入る前に1度だけ求める。
     // 下のIBL無効時フォールバックもこのF0/brdfをそのまま再利用する
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
-    const float3 energyCompensation = SpecularEnergyCompensation(F0, brdf, ShadowParams.w);
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
+    const SpecularEnergyContext energy = MakeSpecularEnergyContext(F0, brdf, roughness, ShadowParams.w);
 
     float3 directDiffuse = float3(0.0f, 0.0f, 0.0f);
     float3 directSpecular = float3(0.0f, 0.0f, 0.0f);
@@ -356,7 +382,7 @@ float4 PSMain(PSInput input) : SV_TARGET
 
         float3 sunDiffuse;
         float3 sunSpecular;
-        EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energyCompensation, sunDiffuse, sunSpecular);
+        EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energy, sunDiffuse, sunSpecular);
 
         float3 sunRadiance = LightColor.rgb * shadow;
         directDiffuse += sunDiffuse * sunRadiance;
@@ -370,7 +396,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         float3 lightDiffuse;
         float3 lightSpecular;
-        EvaluateLight(Lights[i], input.WorldPos, N, V, NdotV, albedo, metallic, roughness, energyCompensation, lightDiffuse, lightSpecular);
+        EvaluateLight(Lights[i], input.WorldPos, N, V, NdotV, albedo, metallic, roughness, energy, lightDiffuse, lightSpecular);
         directDiffuse += lightDiffuse;
         directSpecular += lightSpecular;
     }
@@ -381,13 +407,14 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 透明なだけの面に見えてしまう。
     // ShadowParams.z = IBL強度倍率(Enable IBL無効なら0)。無効時はDeferredLighting.hlslと同じく
     // IBL導入以前の定数色アンビエント(拡散のみ)へフォールバックする。
-    // SSAO/SSILによる遮蔽・間接拡散光は非対応(常にao=1・間接光=0として扱う既知の制約)
+    // SSAO/SSILによる遮蔽・間接拡散光は非対応(常にao=1・間接光=0として扱う既知の制約)。
+    // ただしマテリアルの遮蔽マップ(ベイク済みAO)はテクスチャなのでこのパスでも効く
     float3 ambientDiffuse;
     float3 ambientSpecular;
     if (ShadowParams.z > 0.0f)
     {
         // ShadowParams.zはEvaluateIBLSplitの中で拡散・鏡面それぞれに掛かっている
-        EvaluateIBLSplit(N, V, input.WorldPos, albedo, metallic, roughness, ambientDiffuse, ambientSpecular);
+        EvaluateIBLSplit(N, V, input.WorldPos, albedo, metallic, roughness, materialAO, ambientDiffuse, ambientSpecular);
     }
     else
     {
@@ -396,9 +423,17 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 方向性を持たない(NdotV, ラフネス)のテーブルなのでIBLの有効/無効に関わらず使える)を掛ける。
         // 鏡面項を0にしてしまうと、金属(拡散項が0になる)が環境光の下で真っ黒になり、
         // 低ラフネスのガラスもハイライトを完全に失うため、必ず計算する
-        // F0とbrdfはPSMain冒頭でエネルギー補正用に既に求めてあるため再サンプルしない
-        ambientDiffuse = albedo * (1.0f - metallic) * AmbientColor.rgb;
-        ambientSpecular = AmbientColor.rgb * (F0 * brdf.x + brdf.y) * energyCompensation;
+        // F0とbrdfはPSMain冒頭でエネルギー補正用に既に求めてあるため再サンプルしない。
+        // 定数色アンビエントはプリフィルタ済み鏡面・拡散イラディアンスの両方の代わりを兼ねるため、
+        // Kulla-Contyの加算ローブにも同じAmbientColor.rgbを掛ける。
+        // 遮蔽マップはIBLの有無に関わらず環境光に効かせる(IBL有効時のEvaluateIBLSplitと同じ扱い)
+        const float3 fallbackFssEss = F0 * brdf.x + brdf.y;
+        const float fallbackEss = brdf.x + brdf.y;
+        ambientDiffuse = albedo * (1.0f - metallic) * AmbientColor.rgb * materialAO;
+        ambientSpecular = AmbientColor.rgb
+            * (fallbackFssEss * energy.Compensation
+               + SpecularMultiScatterIBL(F0, fallbackFssEss, fallbackEss, energy.Mode))
+            * SpecularOcclusion(NdotV, roughness, materialAO);
     }
 
     // 事前乗算済みアルファ(BlendMode::PremultipliedAlpha)で出力する。

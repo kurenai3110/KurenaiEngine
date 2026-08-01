@@ -46,8 +46,17 @@ namespace Kurenai::Assets
     // 加算。テクスチャを持たずbaseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等でよくある
     // パターン)がBaseColorTextureIndex=-1(白1x1プレースホルダー、alpha=1)へ機械的にフォールバックし、
     // 意図した色・アルファと異なる見た目になっていたため追加した(14章参照)。
-    // v3以前の.kmodelはVersion不一致で読み込み拒否され、KurenaiPackerの再実行で再生成される
-    constexpr uint32_t kPackageVersion = 4;
+    // v5: MeshEntryへOcclusionTextureIndex(遮蔽マップ)とOcclusionStrength(glTFの
+    // occlusionTexture.strength)を追加したため加算。ベイク済みのアンビエントオクルージョンを
+    // マテリアルの5枚目のテクスチャとして扱えるようにした。SSAO/SSILはスクリーンスペース由来で
+    // ジオメトリの実解像度を下回る遮蔽(布の折り目・狭い隙間など)を拾えないため、それを
+    // アセット側のベイク結果で補う(14章参照)。
+    // v6: 頂点フォーマットへライトマップUV(Vertex::UV1、TEXCOORD1)を追加したため加算。
+    // 遮蔽マップをKurenaiPackerで焼く(--bake-occlusion)には重なりの無い専用UVが必要で、
+    // タイリング前提のTEXCOORD0は流用できないため(22章)。VertexStrideの検証だけでも
+    // 読み込みは拒否されるが、理由を明示するためVersionも上げる。
+    // v5以前の.kmodelはVersion不一致で読み込み拒否され、KurenaiPackerの再実行で再生成される
+    constexpr uint32_t kPackageVersion = 6;
 
     struct PackageHeader
     {
@@ -104,11 +113,23 @@ namespace Kurenai::Assets
         // ことで、テクスチャを持たずbaseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等)を
         // 正しく再現する(14章参照)
         float    BaseColorFactor[4];
+        // ベイク済みアンビエントオクルージョン(遮蔽マップ)。glTFのocclusionTextureに対応し、
+        // 赤チャンネルを遮蔽率(1=遮蔽なし、0=完全遮蔽)として読む。
+        // -1 = 指定なし → 白1x1(=遮蔽なし。他のテクスチャと同様、シェーダー側に分岐を持たせず
+        // プレースホルダーへフォールバックする方式)
+        int32_t  OcclusionTextureIndex;
+        // glTFのocclusionTexture.strength(既定1.0)。シェーダーはlerp(1, ao, strength)で適用する。
+        // strengthはglTF仕様で既定値が1.0と明記されているため、ラフネス係数のような
+        // kInvalidMaterialFactor(負値)方式は取らず、ソースに無ければ1.0を書き出す
+        float    OcclusionStrength;
     };
-    static_assert(sizeof(MeshEntry) == 88, "MeshEntryのレイアウトは88バイト固定");
+    static_assert(sizeof(MeshEntry) == 96, "MeshEntryのレイアウトは96バイト固定");
 
     constexpr int32_t kNoTextureIndex = -1;
     constexpr uint32_t kMeshEntryFlagTransparent = 1u << 0;
+
+    // glTFのocclusionTexture.strengthの既定値。ソースデータが値を持たない場合にパッカーが書き出す
+    constexpr float kDefaultOcclusionStrength = 1.0f;
 
     // マテリアルの係数がソースデータに存在しなかったことを表す無効値。
     // 実在する係数の値域は[0,1]なので、負値であれば「データに無い」と一意に判別できる。
@@ -154,7 +175,9 @@ namespace Kurenai::Assets
     // (memcpy相当でそのままGPUバッファへ渡せる)。圧縮は行わない。
 
     constexpr char kGeometryMagic[4] = { 'K', 'G', 'E', 'O' };
-    constexpr uint32_t kGeometryVersion = 1;
+    // v2: Vertex(Vertex.h)へライトマップUV(UV1)を追加し、頂点ストライドが48→56バイトへ
+    // 変わったため加算
+    constexpr uint32_t kGeometryVersion = 2;
 
     struct GeometryHeader
     {

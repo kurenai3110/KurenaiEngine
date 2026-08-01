@@ -26,7 +26,7 @@ namespace Kurenai::UI
             "最終結果 (Final)",
             "アルベド",
             "法線",
-            "マテリアル (R=金属度, G=粗さ)",
+            "マテリアル (R=金属度, G=粗さ, B=遮蔽マップ)",
             "自発光",
             "深度",
             "深度 (生値)",
@@ -40,7 +40,7 @@ namespace Kurenai::UI
             "Hi-Z (深度ミップチェーン)",
             "IBL - イラディアンス (キューブマップ)",
             "IBL - プリフィルタ済み鏡面 (キューブマップ・ミップチェーン)",
-            "IBL - BRDF LUT (X=NdotV, Y=粗さ)",
+            "IBL - BRDF LUT (X=NdotV, Y=粗さ, RGB=A/B/Eavg)",
             "ブルーム (ピラミッド最上段・半解像度)",
             "ライトタイル (タイルあたりのライト数ヒートマップ)",
             "プローブ - イラディアンス (キューブマップ配列)",
@@ -48,10 +48,11 @@ namespace Kurenai::UI
             "プローブ - 影響範囲 (プローブごとの色分け)",
             "プローブ - 距離 (キューブマップ配列)",
             "モーションベクター (速度バッファ)",
+            "シーンカラー (生HDR・トーンマップなし)",
         };
         static_assert(
-            static_cast<int>(DebugView::MotionVector) == 24,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はMotionVector)");
+            static_cast<int>(DebugView::SceneColorRaw) == 25,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はSceneColorRaw)");
 
         DrawUsageHint();
         BeginParamGroup();

@@ -111,10 +111,16 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
 
     // --- 鏡面IBL(split-sum近似) ---
     // 「環境の放射輝度 × 係数」の形に分解しておく。SSRはこの放射輝度だけを差し替えるため、
-    // 係数の定義はReflectionProbe.hlsliのSpecularIBLWeightに1か所だけ置いている(20章)
-    const float2 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rg;
+    // 係数の定義はReflectionProbe.hlsliのSpecularIBLWeightに1か所だけ置いている(20章)。
+    // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(14.9.2.1節)
+    const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     const float3 specularWeight =
         SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+    // Kulla-Conty方式(ShadowParams.w = 3)が足す加算ローブ。プリフィルタ済み鏡面ではなく
+    // 拡散イラディアンスに掛かるため、上の「放射輝度 × 係数」とは別の項として持つ。
+    // 乗算型(1・2)と無効(0)ではこの係数が0になり、項ごと消える
+    const float3 multiScatterWeight =
+        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
 
     // 【昼度(AmbientColor.a)による減衰はしない】かつては空が昼固定のスカイボックスから
     // 焼かれていたため、夜を表現する手段が「IBL全体を昼度で0倍する」ことしか無かった。
@@ -122,7 +128,9 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // 現在は手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなり、夜は月明かりの
     // 空になるため、ここで追加の減衰を掛ける必要がない(掛けると二重に暗くなる。21.4節)。
     // 鏡面側のShadowParams.z(IBL強度倍率)はspecularWeightに含まれている
-    return diffuseIBL * ao * ShadowParams.z + prefiltered * specularWeight;
+    return diffuseIBL * ao * ShadowParams.z
+         + prefiltered * specularWeight
+         + irradiance * multiScatterWeight;
 }
 
 struct PSInput
@@ -165,9 +173,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 albedo = AlbedoTexture.Sample(ColorSampler, input.UV).rgb;
-    float2 material = MaterialTexture.Sample(DataSampler, input.UV).rg;
+    float3 material = MaterialTexture.Sample(DataSampler, input.UV).rgb;
     float metallic = material.r;
     float roughness = material.g;
+    // b = マテリアルの遮蔽マップ(GBuffer.hlslでstrength適用済み。遮蔽マップを持たない
+    // マテリアルは1.0)。ベイク済みAOはスクリーンスペース手法が拾えない細部の遮蔽を持つ
+    float materialAO = material.b;
     float3 diffuseColor = albedo * (1.0f - metallic);
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
@@ -175,7 +186,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 V = normalize(CameraPosition.xyz - worldPos);
 
     float4 aoSample = AOTexture.Sample(ColorSampler, input.UV);
-    float ao = aoSample.a;
+    // スクリーンスペースの遮蔽(SSAO/SSIL)とマテリアルの遮蔽マップを乗算して合成する。
+    // 両者は由来が独立(前者は実行時の周辺ジオメトリ、後者はアセットに焼かれた細部)なので、
+    // 片方だけを採用するmin合成ではなく素直に積を取る。
+    // 【重要】SSR.hlslは「Lightingパスが適用した鏡面IBLをまったく同じ式で再現する」設計のため、
+    // この合成式を変える場合はSSR.hlsl側も必ず同時に合わせること(ズレると鏡面が二重計上/引きすぎになる)
+    float ao = aoSample.a * materialAO;
     float3 indirectLight = aoSample.rgb; // SSIL(Visibility Bitmask)使用時のみ非ゼロ。周囲のサーフェスからの間接拡散光
     float3 directLight = DirectLightTexture.Sample(ColorSampler, input.UV).rgb; // DirectLighting.hlslで計算済み(シャドウ適用済み)
     float3 emissive = EmissiveTexture.Sample(ColorSampler, input.UV).rgb;
@@ -209,8 +225,11 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する。SSILの間接拡散光も
-    // 受光面のランバート反射(diffuseColor/PI、非金属分)として正規化してから加算する
-    float3 color = ambient + (diffuseColor / PI) * indirectLight + directLight + emissive;
+    // 受光面のランバート反射(diffuseColor/PI、非金属分)として正規化してから加算する。
+    // SSILの間接拡散光にはマテリアルの遮蔽マップを掛ける(これも間接光のため)。SSIL自身の
+    // 遮蔽はaoSample.rgbの算出時点で織り込み済みなので、ここで掛けるのはmaterialAOだけでよい。
+    // directLightとemissiveには掛けない(遮蔽マップは間接光にのみ効かせる方針。glTF仕様も同様)
+    float3 color = ambient + (diffuseColor / PI) * indirectLight * materialAO + directLight + emissive;
 
     return float4(color, 1.0f);
 }

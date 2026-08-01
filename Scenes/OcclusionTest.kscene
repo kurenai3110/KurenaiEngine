@@ -1,0 +1,10 @@
+# KurenaiEngine シーンファイル
+# マテリアルの遮蔽マップ(ベイク済みAO)の検証用。
+# 球ごとにocclusionTexture.strengthを1.0→0.0まで変えてあり、両端は遮蔽マップなしの対照群。
+# 右端は半透明(alphaMode=BLEND)のガラス球。詳細はdocs/Architecture.html 22章
+
+[Scene]
+Name = Occlusion Map Test
+
+[Model]
+Path = OcclusionTest/OcclusionTest.kmodel

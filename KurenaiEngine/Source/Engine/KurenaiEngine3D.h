@@ -363,7 +363,7 @@ namespace Kurenai
         float m_TAAJitterScale = Defaults::TAAJitterScale;
         // 蓄積によるボケを補うシャープネス。TAAの中ではなくTonemapパスで最終出力にのみ掛ける。
         // TAAの入力へ掛けるとアンシャープマスクが「ジッターで変動する高域」を増幅し、
-        // ちらつきが実測で約53%増える(Architecture.html 22.7節)
+        // ちらつきが実測で約53%増える(Architecture.html 23.7節)
         float m_TAASharpness = Defaults::TAASharpness;
         // 近傍クリップのボックス幅(近傍の標準偏差の何倍まで履歴を許容するか)。
         // 小さいほどゴーストに強いがちらつきが増え、大きいほどその逆になる。
@@ -579,7 +579,7 @@ namespace Kurenai
             HiZ,                // Hi-Zミップチェーンの指定ミップ(m_HiZDebugMipLevel)をグレースケール表示
             IBLIrradiance,      // IBL拡散イラディアンスマップ(TextureCube。現在の視線方向で球面を見回す表示)
             IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLPrefilterDebugMipLevel、TextureCube)
-            IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス)
+            IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス。R=A, G=B, B=Eavg)
             Bloom,              // ブルームのピラミッド最上段(半解像度、HDR)をトーンマッピングして表示
             LightTiles,         // タイルライトカリングのライトグリッド(タイルあたりのライト数)をヒートマップ表示
             ProbeIrradiance,    // 反射プローブの拡散イラディアンス(m_ProbeDebugIndex番のプローブ)
@@ -587,6 +587,7 @@ namespace Kurenai
             ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
             ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
             MotionVector,       // モーションベクター(速度バッファ)。静止で灰色、動くと移動方向に応じて色が付く
+            SceneColorRaw,      // トーンマップ前のHDRシーンカラーをリニアのまま無加工で表示(測定用)
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -692,9 +693,16 @@ namespace Kurenai
         bool m_IBLIrradianceBaked = false;
         std::unique_ptr<RHI::IRHITexture> m_IrradianceTexture;
         std::unique_ptr<RHI::IRHITexture> m_PrefilteredEnvTexture;
+        // BRDF積分LUT。float4(A, B, Eavg, 0)。第3成分Eavgはスペキュラのエネルギー補正のうち
+        // Kulla-Conty(加算ローブ)方式だけが使う半球平均で、行(ラフネス)内では同じ値が入る
         std::unique_ptr<RHI::IRHITexture> m_BRDFLUTTexture;
+        // 上のLUTを焼く2パス構成の中間バッファ。パス1が(A, B)をここへ書き、パス2がこれをSRVで
+        // 読んでEavgを足しつつ最終LUTへ書く。同一リソースをSRVとUAVへ同時バインドできないため必要
+        std::unique_ptr<RHI::IRHITexture> m_BRDFLUTScratchTexture;
         std::unique_ptr<RHI::IRHIShader> m_BRDFLUTComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_BRDFLUTCombineComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTCombinePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
@@ -720,14 +728,25 @@ namespace Kurenai
         // 畳み込み処理自体はいつでも検証できるよう残してあり、このトグルをONにすると
         // その場で焼いて(m_IBLIrradianceBaked)従来経路に切り替わる
         bool m_IBLUseDedicatedIrradiance = Defaults::IBLUseDedicatedIrradiance;
-        // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)のON/OFF。
-        // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立したトグルにしている。
-        // FrameConstants.ShadowParams.wへ1.0f/0.0fとして渡し、3つのシェーダー(DirectLighting/
-        // DeferredLighting/Transparent)が共有するSpecularEnergy.hlsliの
-        // SpecularEnergyCompensationがこれを見て倍率1.0へ落とす。
-        // 既定でONにしているのは、補正しない状態がエネルギー的に不正(粗い面ほど暗い)であり、
-        // OFFは実装検証・A/B比較のための選択肢という位置付けのため(14.9節)
-        bool m_SpecularEnergyCompensationEnabled = Defaults::SpecularEnergyCompensationEnabled;
+        // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)の方式。
+        // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立した選択肢にしている。
+        // FrameConstants.ShadowParams.wへ数値として渡し、共有ヘッダーSpecularEnergy.hlsliを
+        // インクルードする各シェーダー(DirectLighting / DeferredLighting / Transparent /
+        // ProbeCapture、および係数を共有するReflectionProbe.hlsli経由のSSR)が方式を切り替える。
+        // 値はSpecularEnergy.hlsliのKURENAI_SPEC_COMP_*と一致させること。
+        //
+        // 既定がLinearなのは、実使用域(エンジンはラフネスを[0.045, 1.0]にクランプする)では
+        // 3方式のうち最も真値に近いことを多重散乱ランダムウォークとの比較で確認したため(14.9.8節)。
+        // Offは補正しない状態がエネルギー的に不正(粗い面ほど暗い)であることを見るための比較用
+        enum class SpecularCompensationMode
+        {
+            Off = 0,         // 補正なし
+            Linear = 1,      // 1 + F0(1/Ess - 1)  等比級数の第1項
+            Series = 2,      // 1 / (1 - F0(1-Ess)) 等比級数の全項
+            KullaConty = 3,  // 加算ローブ(本来のKulla-Conty。IBL側はFdez-Agüera 2019のsplit-sum形)
+        };
+        SpecularCompensationMode m_SpecularCompensationMode =
+            static_cast<SpecularCompensationMode>(Defaults::SpecularCompensationMode);
         // Enable IBL無効時に使う定数色アンビエントフォールバックの強度倍率。シェーダ側ではなく
         // Render()がFrameConstants.AmbientColorへ書き込む時点でrgb(alphaのdayFactorは除く)に
         // 乗算する(HLSL側は素のAmbientColor.rgbを読むだけでよい)
