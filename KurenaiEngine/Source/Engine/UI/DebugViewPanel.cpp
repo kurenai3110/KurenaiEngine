@@ -47,10 +47,12 @@ namespace Kurenai::UI
             "プローブ - プリフィルタ済み鏡面 (ミップ0=キャプチャ結果)",
             "プローブ - 影響範囲 (プローブごとの色分け)",
             "プローブ - 距離 (キューブマップ配列)",
+            "DDGI - イラディアンス (オクタヘドラルアトラス)",
+            "DDGI - 距離モーメント (R=平均距離)",
         };
         static_assert(
-            static_cast<int>(DebugView::ProbeDistance) == 23,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はProbeDistance)");
+            static_cast<int>(DebugView::DDGIDistance) == 25,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はDDGIDistance)");
 
         DrawUsageHint();
         BeginParamGroup();

@@ -78,9 +78,10 @@ namespace Kurenai::RHI
         // ディスクリプタを指す。そのため「どのスロットが設定済みか」を区別する必要がなく、
         // 未バインドのスロットを読むと0が返るというDX11と同じ挙動になる。
         // 反射プローブ(19章)がDeferredLighting.hlslでt11〜t14(イラディアンス配列・プリフィルタ配列・
-        // 影響範囲バッファ・距離キューブ配列)を使うため15スロット必要。DX12Device.cpp側の同名の定数
+        // 影響範囲バッファ・距離キューブ配列)を、DDGI(22章)がt15〜t16(イラディアンスアトラス・
+        // 距離モーメントアトラス)を使うため17スロット必要。DX12Device.cpp側の同名の定数
         // (ルートシグネチャのSRVレンジ幅)およびDX11CommandList側の同名の定数と必ず一致させること
-        static constexpr uint32_t kTextureSlotCount = 15;
+        static constexpr uint32_t kTextureSlotCount = 17;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;

@@ -510,6 +510,8 @@ namespace Kurenai
             ProbePrefilter,     // 反射プローブのプリフィルタ済み鏡面(ミップ0がキャプチャ結果そのもの)
             ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
             ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
+            DDGIIrradiance,     // DDGIのイラディアンスアトラス(オクタヘドラル2D、22章)
+            DDGIDistance,       // DDGIの距離モーメントアトラス(R=平均距離、G=平均二乗距離)
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -775,6 +777,93 @@ namespace Kurenai
         // 焼き上がりに影響する状態(時刻・太陽・シャドウ・IBL強度・全ライト)から署名を作る。
         // 影響範囲(形状・半径・ブレンド距離)はキャプチャ内容を変えないため含めない
         uint64_t ComputeProbeBakeSignature() const;
+
+        // --- DDGI(Dynamic Diffuse Global Illumination、22章) ---
+        //
+        // 反射プローブ(上)が「少数を手で置き、主に鏡面を担う」のに対し、DDGIは
+        // 「格子状に多数を自動配置し、拡散の間接光だけを担う」。レイの取得には反射プローブと
+        // まったく同じキャプチャ経路(ProbeCapture.hlslの6面MRT)を使い、キャプチャ解像度だけ
+        // 落とす。得られた放射輝度と距離を、キューブではなくオクタヘドラル投影の2Dアトラスへ
+        // 畳み込む(DDGIProbeUpdate.hlsl)。
+        //
+        // 【20章の単一定義規則との関係】DDGIが差し替えるのはReflectionProbe.hlsliの
+        // SampleEnvironmentが返す拡散イラディアンスだけで、鏡面(prefiltered)と
+        // SpecularIBLWeightには一切触れない。したがって「SSRはDeferredLightingが足した
+        // 鏡面IBLと厳密に同じ量を引く」という不変条件はDDGIを入れても保たれる
+
+        // オクタヘドラル1プローブぶんの1辺のテクセル数(境界を含まない)。
+        // 拡散イラディアンスは低周波なのでこの程度で足りる。距離は遮蔽の輪郭を担うので広く取る
+        static constexpr uint32_t kDDGIIrradianceTexels = 6;
+        static constexpr uint32_t kDDGIDistanceTexels = 14;
+        // 各辺に足す境界の幅。オクタヘドラルは正方形の縁が球面上で折り返して繋がるため、
+        // その繋がる先のテクセルを外周へ複製しておかないと、バイリニア補間が縁で破綻する
+        // (隣のプローブのテクセルを拾ってしまうことの防止も兼ねる)
+        static constexpr uint32_t kDDGIProbeBorder = 1;
+        // アトラス上の1プローブぶんのセルの1辺(境界込み)
+        static constexpr uint32_t kDDGIIrradianceCell = kDDGIIrradianceTexels + kDDGIProbeBorder * 2;
+        static constexpr uint32_t kDDGIDistanceCell = kDDGIDistanceTexels + kDDGIProbeBorder * 2;
+        // プローブ数の上限。反射プローブと違いアトラスはシーン読み込み時に確保し直すので
+        // 技術的な固定容量ではないが、.ksceneの書き間違いで数GBのアトラスを作らないための歯止め
+        static constexpr uint32_t kDDGIMaxProbes = 4096;
+        // キャプチャ解像度(1面あたり)。6面ぶんで 16×16×6 = 1536方向がレイの代わりになる。
+        // 反射プローブのkProbeCaptureSize(128)と違い小さくてよいのは、DDGIが必要とするのが
+        // 「低周波の拡散イラディアンス」であって鏡面の映り込みではないため
+        static constexpr uint32_t kDDGICaptureSize = 16;
+
+        // シーンから読み込んだボリューム(先頭の1つだけを使う)。m_HasGIVolumeがfalseの間は
+        // アトラスは1プローブぶんのダミーとして確保され、シェーダー側もDDGIParams0.w=0で無効になる
+        Assets::GIVolume m_GIVolume;
+        bool m_HasGIVolume = false;
+        // ボリュームの総プローブ数(ProbeCountsの3軸の積)。ダミー時は1
+        uint32_t m_DDGIProbeCount = 1;
+
+        // オクタヘドラル2Dアトラス。RGBがイラディアンス、距離側はR=平均距離・G=平均二乗距離。
+        // どちらもR32系で確保する。更新CSがヒステリシスのために「前の値を読んでから書く」ため、
+        // 型付きUAV読み出しがR32系しか保証されていないという制約に従う必要がある
+        // (AutoExposure.hlslの同じ判断を参照)
+        std::unique_ptr<RHI::IRHITexture> m_DDGIIrradianceAtlas;
+        std::unique_ptr<RHI::IRHITexture> m_DDGIDistanceAtlas;
+        std::unique_ptr<RHI::IRHIShader> m_DDGIProbeUpdateComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIProbeUpdatePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_DDGIBorderCopyComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIBorderCopyPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_DDGIUpdateConstantBuffer;
+        // DDGIのキャプチャ先(反射プローブとは解像度が違うため別に持つ)
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureColor;
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistance;
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDepth;
+        // キャプチャした6面を組み上げるスクラッチのキューブ(放射輝度・距離の2本)。
+        // 更新CSは「6面ぶんのレイ」をまとめて走査するため、面ごとの2Dではなくキューブで受ける
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureRadianceCube;
+        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistanceCube;
+
+        bool m_DDGIEnabled = Defaults::DDGIEnabled;
+        // 拡散間接光の強度倍率。DDGIとSSILは近傍/遠方で寄与が重なるため、実測で決めるための倍率
+        float m_DDGIIntensity = Defaults::DDGIIntensity;
+        // 全プローブが一度でも書かれたか。書かれる前のアトラスは中身が未定義なので、
+        // それまではDDGIを無効にして従来のIBLのまま描く(反射プローブのm_ProbeBakedと同じ方針)
+        bool m_DDGIBaked = false;
+        // 初回の一巡が終わっていないか。
+        //
+        // 【反射プローブと違い「フルベイク」を持たない】反射プローブは8個までなので全プローブを
+        // 1フレームで焼けるが、DDGIは数百個ある。同じことをするとBistroのようなシーンでは
+        // 数百×6回のシーン描画が1フレームに集中して数秒のハングになる。
+        // DDGIはもともとヒステリシスで時間収束させる手法なので、初回も時間分割で埋めるのが素直。
+        // ただし初回だけは「前の値」が存在しないため、一巡目はヒステリシスを使わず上書きする
+        // (未初期化のアトラスと混ぜてはいけない)
+        bool m_DDGIWarmingUp = true;
+        // 時間分割の進行状態。1フレームにm_DDGIProbesPerFrame個ずつ順に焼き直す
+        uint32_t m_DDGIUpdateCursor = 0;
+        int32_t m_DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
+
+        // 格子上のプローブ番号からワールド座標を求める。番号の分解は
+        // index = x + y*Cx + z*Cx*Cy で、シェーダー側の並びと一致させること
+        DirectX::XMFLOAT3 ComputeDDGIProbePosition(uint32_t probeIndex) const;
+
+        // m_GIVolumeのProbeCountsに合わせてアトラス2枚を確保し直す。ボリュームが無いシーンでは
+        // 1プローブぶんのダミーを確保する(SRVは常にバインドできる必要があるため、
+        // 「確保しない」という選択肢は取れない。無効化はDDGIParams0.wで行う)
+        void RecreateDDGIAtlases();
 
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = Defaults::TimeOfDay;

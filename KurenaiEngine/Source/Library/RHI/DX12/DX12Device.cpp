@@ -30,9 +30,11 @@ namespace Kurenai::RHI
     namespace
     {
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
-        // t0〜t14。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
-        // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer+距離キューブ配列)
-        constexpr uint32_t kTextureSlotCount = 15;
+        // t0〜t16。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
+        // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer+距離キューブ配列
+        // +DDGIのオクタヘドラルアトラス2枚)。
+        // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)
+        constexpr uint32_t kTextureSlotCount = 17;
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
         // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler(役割の定義はShaders/Samplers.hlsli)。
         // どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。

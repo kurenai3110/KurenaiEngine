@@ -28,6 +28,12 @@
 //      13=反射プローブの距離キューブ(同じくt4)。格納値はワールド距離なのでGainで縮めて
 //         グレースケール表示する(19.12節)
 //         (TextureCubeArrayはMode 10のTexture2DArrayとも別の型のため、さらにスロットを分ける)
+//      14=DDGIのイラディアンスアトラス(t0、22章)。Mode 4と同じくトーンマッピングして表示するが、
+//         DataSampler(Point)で読む点が違う。アトラスは1プローブ8x8テクセルと極端に小さく、
+//         画面いっぱいへ引き伸ばされる。バイリニアで読むとプローブ同士が溶け合って
+//         「1プローブぶんのセル」の切れ目が見えなくなり、境界の複製が効いているかを確認できない
+//      15=DDGIの距離モーメントアトラス(t0)。R=平均距離をGainで縮めてグレースケール表示する。
+//         Gが平均二乗距離だが、そのまま出しても読めないためRのみを見る
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
@@ -139,6 +145,27 @@ float4 PSMain(PSInput input) : SV_TARGET
         float3 rayDir = normalize(farPoint - CameraPosition.xyz);
         float distance = DebugCubeArrayTexture.SampleLevel(DataSampler, float4(rayDir, ArraySlice), 0.0f).r;
         float gray = saturate(distance * Gain);
+        return float4(gray, gray, gray, 1.0f);
+    }
+
+    if (Mode == 14)
+    {
+        // DDGIのイラディアンスアトラス(22章)。HDRなのでMode 4と同じくReinhard+ガンマで表示する。
+        // DataSampler(Point)で読むのは、1プローブ8x8テクセルのセルが画面いっぱいへ
+        // 引き伸ばされるため。バイリニアだとプローブ同士が溶け合い、セルの切れ目も
+        // 境界1テクセルの複製も確認できなくなる
+        float3 color = SourceTexture.Sample(DataSampler, input.UV).rgb * Gain;
+        color = color / (color + 1.0f);
+        color = pow(color, 1.0f / 2.2f);
+        return float4(color, 1.0f);
+    }
+
+    if (Mode == 15)
+    {
+        // DDGIの距離モーメントアトラス(22章)。R=平均距離、G=平均二乗距離のうち、
+        // 読めるのは平均距離だけなのでRのみをGainで縮めてグレースケール表示する
+        float meanDistance = SourceTexture.Sample(DataSampler, input.UV).r;
+        float gray = saturate(meanDistance * Gain);
         return float4(gray, gray, gray, 1.0f);
     }
 
