@@ -41,6 +41,9 @@ cbuffer FrameConstants : register(b0)
     // x=t8のライトリストの有効数(Transparent.hlslと同じくFrameConstants末尾で受け取る。
     // b1はObjectConstantsが占有していてLightingConstantsを置けないため)
     float4 ActiveLightCount;
+    // y=環境光の拡散倍率、z=同じく鏡面倍率。xの拡散イラディアンス取得元切り替えはこのパスでは
+    // 使わないが、cbufferのレイアウトは宣言順で決まりフィールドを飛ばせないため丸ごと宣言する
+    float4 IBLParams;
 };
 
 // GBuffer.hlsl/Transparent.hlslのObjectConstantsと同じレイアウト
@@ -263,7 +266,10 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 albedo, float metallic, floa
          + SpecularMultiScatterIBL(F0, FssEss, Ess, compensationMode) * irradiance)
         * SpecularOcclusion(NdotV, roughness, ao);
 
-    return diffuseIBL + specularIBL;
+    // 環境光の拡散・鏡面倍率(IBLParams.y / .z)。メインパスと同じ倍率を焼き込み時にも掛けないと、
+    // プローブの中身だけつまみを動かす前の明るさで残ってしまう。
+    // これを焼き上がりへ反映させるため、C++側の再ベイク署名にも両方を混ぜてある
+    return diffuseIBL * IBLParams.y + specularIBL * IBLParams.z;
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
@@ -334,7 +340,9 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
     else
     {
-        color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb * materialAO;
+        // DeferredLighting.hlslのフォールバックと同じく拡散項しか持たないので、
+        // 掛かるのは拡散倍率だけ
+        color += (albedo * (1.0f - metallic) / PI) * AmbientColor.rgb * materialAO * IBLParams.y;
     }
 
     color += emissive;

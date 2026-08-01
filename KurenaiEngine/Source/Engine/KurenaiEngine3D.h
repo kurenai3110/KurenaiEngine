@@ -650,6 +650,20 @@ namespace Kurenai
         // 畳み込み処理自体はいつでも検証できるよう残してあり、このトグルをONにすると
         // その場で焼いて(m_IBLIrradianceBaked)従来経路に切り替わる
         bool m_IBLUseDedicatedIrradiance = Defaults::IBLUseDedicatedIrradiance;
+        // 環境光(間接光)の拡散・鏡面それぞれの倍率。FrameConstants.IBLParams.y / .z として渡す。
+        //
+        // m_IBLIntensityが拡散と鏡面へ一様に掛かる「環境光全体の明るさ」なのに対し、こちらは
+        // 両者の比率を意図的に崩すための画作り用のつまみ。金属やガラスの映り込みだけを強めたい、
+        // 逆に環境の照り返しを残したまま反射を抑えたい、といった調整がIBL強度単独ではできないため
+        // 分けている。
+        //
+        // 【IBLの有効/無効に関わらず効く】無効時の定数色アンビエントにも同じ倍率を掛ける。
+        // 片方にしか効かないとトグルを切り替えたときにつまみの意味が変わり、比較にならないため。
+        // 【間接光にのみ効く】直接光・自発光には掛けない(遮蔽マップと同じ方針。22.1節)。
+        // SSILの間接拡散光にも掛けない ―― あれはスクリーンスペースで得た周囲のサーフェスからの
+        // 光であって、ここで言う環境(空・プローブ)由来のアンビエントとは別の項のため
+        float m_AmbientDiffuseScale = Defaults::AmbientDiffuseScale;
+        float m_AmbientSpecularScale = Defaults::AmbientSpecularScale;
         // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)の方式。
         // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立した選択肢にしている。
         // FrameConstants.ShadowParams.wへ数値として渡し、共有ヘッダーSpecularEnergy.hlsliを

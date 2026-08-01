@@ -416,6 +416,14 @@ float4 PSMain(PSInput input) : SV_TARGET
             * SpecularOcclusion(NdotV, roughness, materialAO);
     }
 
+    // 環境光の拡散・鏡面倍率。IBLの有効/無効どちらの経路にも同じように効かせたいので、
+    // 分岐の中ではなく合流した後で1か所だけ掛ける。
+    // 不透明パスでは同じ倍率がDeferredLighting.hlslとReflectionProbe.hlsliのSpecularIBLWeightに
+    // 入っており、半透明の鏡面がEvaluateIBLSplitで別計算になっている以上ここに書くしかない。
+    // 【ずらすと同じマテリアルが不透明と半透明で違う明るさになる】必ず両方を同時に直すこと
+    ambientDiffuse *= IBLParams.y;
+    ambientSpecular *= IBLParams.z;
+
     // 事前乗算済みアルファ(BlendMode::PremultipliedAlpha)で出力する。
     // 合成結果は out = src.rgb + dst.rgb * (1 - src.a) となるため、
     //   ・拡散光/環境光: 面が背景を覆う割合ぶんだけ寄与するので不透明度alphaを乗じる

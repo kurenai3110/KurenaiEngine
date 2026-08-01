@@ -2587,6 +2587,81 @@ SRVスロット1本だけで、いずれも実測できる負荷ではない</li
 <code>kTextureSlotCount</code>が12&rarr;11になる(DX12の半透明パスは<code>DrawIndexed</code>ごとに
 全スロットを再設定する設計(16章)のため、ディスクリプタコピーも1本ぶん減る)。
 </p>
+
+<h3>14.11 環境光の拡散倍率・鏡面倍率</h3>
+<p>
+環境光(間接光)の<b>拡散成分と鏡面成分に別々に掛かる倍率</b>を、
+<code>FrameConstants.IBLParams.y</code> / <code>.z</code> として渡している
+(C++側は<code>m_AmbientDiffuseScale</code> / <code>m_AmbientSpecularScale</code>、既定は両方1.0)。
+既存の「IBL 強度」(<code>ShadowParams.z</code>)が拡散と鏡面へ一様に掛かるのに対し、
+こちらは<b>両者の比率を意図的に崩す</b>ための画作り用のつまみである。
+環境の照り返しを保ったまま映り込みだけを増減する、といった調整はIBL強度単独ではできない。
+</p>
+<p>
+既定値の1.0では<code>x * 1.0f</code>がIEEE754で厳密に<code>x</code>となるため、
+このつまみを触らない限り絵はビット単位で変わらない。実測でもBistro Exteriorの
+ビューポート321,950画素中<b>差異は3画素</b>で、いずれも出力ディザリング
+(<code>Tonemap.hlsl</code>、フレーム依存)由来だった。
+</p>
+
+<h4>14.11.1 適用箇所と、外さないための置き場所</h4>
+<table>
+<tr><th>パス</th><th>拡散(<code>IBLParams.y</code>)</th><th>鏡面(<code>IBLParams.z</code>)</th></tr>
+<tr><td>不透明(<code>DeferredLighting.hlsl</code>)</td>
+    <td><code>EvaluateIBL</code>の<code>diffuseIBL</code>、およびIBL無効時のフォールバック</td>
+    <td>&mdash;(下の共有関数の中)</td></tr>
+<tr><td>SSR(<code>SSR.hlsl</code>)</td>
+    <td>&mdash;(拡散を扱わない)</td>
+    <td>&mdash;(下の共有関数の中)</td></tr>
+<tr><td>共有(<code>ReflectionProbe.hlsli</code>)</td>
+    <td>&mdash;</td>
+    <td><code>SpecularIBLWeight</code> / <code>SpecularIBLMultiScatterWeight</code></td></tr>
+<tr><td>半透明(<code>Transparent.hlsl</code>)</td>
+    <td colspan="2"><code>ambientDiffuse</code> / <code>ambientSpecular</code>へ、IBLの有無の分岐が合流した後で1か所だけ</td></tr>
+<tr><td>プローブ焼き込み(<code>ProbeCapture.hlsl</code>)</td>
+    <td colspan="2"><code>EvaluateGlobalIBL</code>の戻り値、およびIBL無効時のフォールバック</td></tr>
+</table>
+<p>
+<b>鏡面側を共有ヘッダーの中で読んでいるのが要点である。</b>
+<code>SpecularIBLWeight</code>は「DeferredLightingが適用した量とSSRが引き算する量が定義上必ず一致する」
+ことを目的に置かれた関数(<a href="#ssrprobe">20章</a>)なので、倍率を引数にすると
+両者が別の値を渡せてしまう余地が残る。そのため<code>iblIntensity</code>のように引数で受けず、
+<code>IBLParams.z</code>を関数内で直接読んでいる。式がずれるとSSRの適用領域と非適用領域の
+境界に段差として現れる。
+</p>
+<p>
+<b>Kulla-Contyの加算ローブは鏡面側に入れている。</b>
+<code>SpecularIBLMultiScatterWeight</code>が掛かる相手は拡散イラディアンスなので拡散に見えるが、
+これは鏡面BRDFが単散乱で取りこぼしたエネルギーを戻す項であって拡散反射ではない(14.9.2節)。
+拡散側に入れると、鏡面倍率を0にしても鏡面由来の光が残ってしまう。
+</p>
+
+<h4>14.11.2 IBLの有効/無効に関わらず効かせる</h4>
+<p>
+IBL無効時の定数色アンビエントにも同じ倍率を掛けている。
+片方にしか効かないと「IBLを有効にする」を切り替えたときにつまみの意味が変わり、
+IBLあり/なしの比較にならないためである。
+なお不透明パスとプローブ焼き込みのフォールバックは<b>拡散項しか持たない</b>ため、
+そこで掛かるのは拡散倍率だけになる(半透明パスのフォールバックは金属が真っ黒に
+ならないよう鏡面項も持っているので、両方が掛かる。<a href="#transparent">15章</a>)。
+</p>
+
+<h4>14.11.3 反射プローブの再ベイク署名へ含める</h4>
+<p>
+<code>ProbeCapture.hlsl</code>が同じ倍率を適用する以上、
+<code>KurenaiEngine3D</code>のプローブ再ベイク署名(焼き上がりに影響する状態のFNV-1aハッシュ、
+<a href="#reflectionprobe">19章</a>)にも両方を混ぜる必要がある。
+含め忘れると、つまみを動かしてもプローブの中身だけ古い倍率のまま残り、
+「壁は変わったのに映り込みだけ変わらない」という分かりにくい不整合になる。
+</p>
+
+<h4>14.11.4 SSILの間接拡散光には掛けない</h4>
+<p>
+<code>DeferredLighting.hlsl</code>の<code>indirectLight</code>(SSIL Visibility Bitmask由来)は
+この倍率の対象外にしている。あれはスクリーンスペースで得た<b>周囲のサーフェスからの光</b>であって、
+ここで言う環境(空・反射プローブ)由来のアンビエントとは別の項だからである。
+直接光・自発光に掛けないのは遮蔽マップと同じ方針(<a href="#occlusion-map">22.1節</a>)。
+</p>
 </section>
 
 <section id="transparent">

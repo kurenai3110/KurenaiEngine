@@ -123,8 +123,10 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // その結果、IBLを有効にすると夜の環境光が厳密にゼロになり、建物が真っ黒な影絵になっていた。
     // 現在は手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなり、夜は月明かりの
     // 空になるため、ここで追加の減衰を掛ける必要がない(掛けると二重に暗くなる。21.4節)。
-    // 鏡面側のShadowParams.z(IBL強度倍率)はspecularWeightに含まれている
-    return diffuseIBL * ao * ShadowParams.z
+    // 鏡面側のShadowParams.z(IBL強度倍率)はspecularWeightに含まれている。
+    // 環境光の鏡面倍率(IBLParams.z)も同様に2つのWeightの中で掛かっているため、
+    // ここで明示的に掛けるのは拡散倍率(IBLParams.y)だけでよい
+    return diffuseIBL * ao * ShadowParams.z * IBLParams.y
          + prefiltered * specularWeight
          + irradiance * multiScatterWeight;
 }
@@ -217,7 +219,9 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
     else
     {
-        ambient = (diffuseColor / PI) * AmbientColor.rgb * ao;
+        // このフォールバックは拡散項しか持たないため、掛かるのは拡散倍率だけ。
+        // 鏡面倍率(IBLParams.z)にはここで掛ける相手がいない
+        ambient = (diffuseColor / PI) * AmbientColor.rgb * ao * IBLParams.y;
     }
 
     // エミッシブは自発光のためAO/シャドウの影響を受けず常に加算する。SSILの間接拡散光も

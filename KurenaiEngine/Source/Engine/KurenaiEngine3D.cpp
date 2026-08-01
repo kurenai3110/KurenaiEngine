@@ -77,7 +77,9 @@ namespace Kurenai
             // イラディアンスマップ(t8。検証用に残している経路)。CSPrefilterはV=R=Nを仮定して
             // いるため、roughness=1(α=1)ではGGXインポータンスサンプリングの実効カーネルが
             // コサイン畳み込みへ厳密に退化し、格納値もCSIrradianceと同じE(N)/πになる(14.10節)。
-            // 反射プローブの拡散イラディアンスにもまったく同じ規則を適用する(19.7節)
+            // 反射プローブの拡散イラディアンスにもまったく同じ規則を適用する(19.7節)。
+            // y: 環境光の拡散倍率(m_AmbientDiffuseScale)、z: 同じく鏡面倍率
+            // (m_AmbientSpecularScale)。どちらもIBLの有効/無効に関わらず効く。w: 未使用
             DirectX::XMFLOAT4 IBLParams;
             // 反射プローブ用(末尾に追加)。x=有効プローブ数(0ならプローブを使わずグローバルIBLのみ)、
             // y=影響範囲のデバッグ表示フラグ、z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
@@ -1918,8 +1920,12 @@ namespace Kurenai
         mixFloat(m_SunAzimuthDegrees);
         mixBool(m_SunEnabled);
         mixBool(m_ShadowEnabled);
-        // キャプチャ内の環境項はグローバルIBLを引くため、その強度も焼き上がりに影響する
+        // キャプチャ内の環境項はグローバルIBLを引くため、その強度も焼き上がりに影響する。
+        // 拡散・鏡面の倍率もProbeCapture.hlslが同じように適用するため署名へ含める
+        // (含め忘れると、つまみを動かしてもプローブの中身だけ古い倍率のまま残る)
         mixFloat(m_IBLEnabled ? m_IBLIntensity : 0.0f);
+        mixFloat(m_AmbientDiffuseScale);
+        mixFloat(m_AmbientSpecularScale);
 
         // ライトは構造体ごとダンプすると詰め物(padding)の未初期化バイトを拾い得るため、
         // 使うフィールドだけを明示的に混ぜる
@@ -2664,7 +2670,12 @@ namespace Kurenai
             specularEnergyCompensation,
         };
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
-        constants.IBLParams = { m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+        constants.IBLParams = {
+            m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f,
+            m_AmbientDiffuseScale,
+            m_AmbientSpecularScale,
+            0.0f,
+        };
 
         // 反射プローブの影響範囲をt13のStructuredBufferへ渡す。まだ一度も焼けていない場合
         // (m_ProbeBaked=false)や機能を無効にしている場合はプローブ数を0にして、シェーダー側の
