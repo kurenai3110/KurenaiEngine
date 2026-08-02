@@ -2914,6 +2914,26 @@ namespace Kurenai
         m_RTAOMaxDistance = std::clamp(diagonal * 0.03f, 0.1f, 10.0f);
     }
 
+    // 歩き回る視点のカメラの近平面を求める。シーン対角に比例させつつ、上限で頭打ちにする。
+    //
+    // 【比例させるだけでは足元が丸ごと消える】diagonal * 0.0005 は「near:far比を一定に保って
+    // 深度精度を確保する」という経験則で、深度をNDCへほぼ1/zで写す従来のZバッファを前提にしている。
+    // このエンジンはReverse-Z + D32_FLOATで、1/zが近平面側へ寄せる分布と浮動小数点の指数が
+    // 0付近で細かくなる性質がちょうど噛み合うため、近平面を小さくしても遠方の精度がほとんど落ちない
+    // (Reverse-Zを採る目的がまさにこれ)。一方で近平面が大きいままだと、その距離より手前の
+    // ジオメトリはラスタライズ前に丸ごと捨てられる。
+    //
+    // 実測: 6000m四方の干潟のシーン(対角約8487m)ではこの式が near = 4.24m を返し、水面の
+    // 1.45m上に置いたカメラを俯角19.9度より下へ向けると水面が画面から丸ごと消えた
+    // (G-Bufferのアルベドも水面マスクも0、つまり「暗く描かれている」のではなく「何も描かれて
+    // いない」状態になり、背景として空モデルの下半球の色が見えていた)。
+    // 上限は視点の高さ(人の目線で1.6m前後)に対して十分小さい値として0.1mを採る。
+    // 対角200m以下のシーンでは元の式が0.1mを下回るため、この上限は効かない(挙動が変わらない)。
+    float ComputeWalkableNearZ(float diagonal)
+    {
+        return std::clamp(diagonal * 0.0005f, 0.01f, 0.1f);
+    }
+
     Core::Camera KurenaiEngine3D::ComputeInitialCamera(const Assets::Scene& scene)
     {
         Core::Camera camera;
@@ -2926,7 +2946,7 @@ namespace Kurenai
         {
             camera.SetPosition({ scene.CameraPosition[0], scene.CameraPosition[1], scene.CameraPosition[2] });
             camera.SetYawPitch(scene.CameraYaw, scene.CameraPitch);
-            camera.SetLens(DirectX::XM_PIDIV4, std::max(0.01f, diagonal * 0.0005f), std::max(100.0f, diagonal * 4.0f));
+            camera.SetLens(DirectX::XM_PIDIV4, ComputeWalkableNearZ(diagonal), std::max(100.0f, diagonal * 4.0f));
             return camera;
         }
 
@@ -2971,7 +2991,7 @@ namespace Kurenai
             posY = eyeHeight;
             posZ = centerZ;
             yaw = DirectX::XM_PIDIV2;
-            nearZ = std::max(0.01f, diagonal * 0.0005f);
+            nearZ = ComputeWalkableNearZ(diagonal);
         }
         else
         {
@@ -2979,7 +2999,7 @@ namespace Kurenai
             posY = eyeHeight;
             posZ = scene.BoundsMin[2] + dz * 0.2f;
             yaw = 0.0f;
-            nearZ = std::max(0.01f, diagonal * 0.0005f);
+            nearZ = ComputeWalkableNearZ(diagonal);
         }
 
         camera.SetPosition({ posX, posY, posZ });
