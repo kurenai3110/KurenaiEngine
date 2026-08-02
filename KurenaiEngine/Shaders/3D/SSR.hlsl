@@ -218,6 +218,15 @@ bool ProjectToScreen(float3 worldPos, out float2 uv, out float viewZ)
 // (roughnessFade)ではなくここで解析空とのlerpとして表現する。confidenceを落とすと
 // Lightingパスが適用したプローブ/グローバルIBLへ戻ってしまい、P4で解決した
 // 「水面にIBLしか映らない」問題が画面端で再発するため
+//
+// 【ジオメトリが無い方向の扱い】平面反射パスは不透明メッシュしか描かないため、
+// 反射先に何も無い方向(=島の鏡像以外のほとんどの向き)のテクセルはクリア値のまま残る。
+// 当初はそこを区別せずlerpしていたため、水面のほぼ全面がクリア色(黒)で塗り潰され、
+// P4で用意した解析空が見えなくなっていた(SSRを有効にすると水面が一様な暗色になる不具合)。
+// レンダーターゲットはアルファ0でクリアされ、PlanarReflection.hlslのPSMainは
+// float4(color, 1.0f)を返すので、アルファがそのまま「ジオメトリが描かれたか」の
+// カバレッジになる(ブレンドはOpaqueなのでアルファは加工されずに書き込まれる)。
+// これを使って、描かれていない方向は解析空へ戻す
 float3 ApplyPlanarReflection(float3 analyticSky, float2 screenUV, float3 N)
 {
     // Params1.x <= 0.5fは「このフレームで平面反射パスを実行していない」ケース
@@ -235,10 +244,18 @@ float3 ApplyPlanarReflection(float3 analyticSky, float2 screenUV, float3 N)
         return analyticSky;
     }
 
-    const float3 planarColor = PlanarReflectionTexture.Sample(ColorSampler, reflUV).rgb;
+    const float4 planarSample = PlanarReflectionTexture.Sample(ColorSampler, reflUV);
     const float2 edgeDist = min(reflUV, float2(1.0f, 1.0f) - reflUV);
     const float edgeFade = saturate(min(edgeDist.x, edgeDist.y) / kSSREdgeFadeDistance);
-    return lerp(analyticSky, planarColor, edgeFade);
+
+    // 事前乗算済みアルファのover合成。
+    // 【なぜlerp(analyticSky, planarSample.rgb, edgeFade * planarSample.a)ではないのか】
+    // クリア値が(0,0,0,0)でジオメトリが(color, 1)を書くため、バイリニア補間された
+    // テクセルのrgbは既にアルファが掛かった値(a * color)になっている。素のlerpだと
+    // ジオメトリの輪郭でアルファがもう一度掛かって二重に暗くなる。
+    // この形なら a=0 で解析空そのもの、a=1 かつ edgeFade=1 で平面反射そのものになり、
+    // 中間でも輪郭に暗い縁が出ない
+    return analyticSky * (1.0f - edgeFade * planarSample.a) + planarSample.rgb * edgeFade;
 }
 
 // UV位置の実際のジオメトリのView空間Zを取得する。背景(深度なし)ならfalseを返す
