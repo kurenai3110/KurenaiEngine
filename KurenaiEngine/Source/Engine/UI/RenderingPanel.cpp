@@ -575,14 +575,18 @@ namespace Kurenai::UI
     void RenderingPanel::DrawCloudSection()
     {
         ImGui::TextWrapped(
-            "積雲1層のレイヤーモデル(Sky.hlsliが背景・水面反射・IBLベイクの3者で共有する空モデルへ"
-            "足したもの)。背景と水面の映り込みの両方にそのまま出る一方、"
+            "積雲(低層)+巻雲(高層)の2層レイヤーモデル(Sky.hlsliが背景・水面反射・IBLベイクの"
+            "3者で共有する空モデルへ足したもの)。背景と水面の映り込みの両方にそのまま出る一方、"
             "IBL(反射プローブ・拡散イラディアンス)には焼き込まれない。雲は風で動くたびに"
-            "キューブマップを焼き直すと無駄が大きいためで、代わりに被覆率から求めた"
+            "キューブマップを焼き直すと無駄が大きいためで、代わりに両層の被覆率から求めた"
             "全天の平均透過率でキューブ全体の明るさを一括して暗くするだけに留めている"
-            "(そのためIBLに映る雲の「形」は無い)。太陽の直接光やシャドウは雲による減光の対象外");
+            "(そのためIBLに映る雲の「形」は無い)。太陽の直接光やシャドウは雲による減光の対象外。"
+            "合成は高い層(巻雲)から手前(積雲)へ行い、巻雲の光は積雲を透過して初めて届く"
+            "(積雲に隠れる巻雲が透けて見えないようにするため)");
 
         BeginParamGroup();
+
+        ImGui::SeparatorText("積雲(低層)");
 
         // このトグルはCloudCoverageスライダーと同じくIBLキューブの明るさ(平均透過率)に効く
         // (m_CloudEnabled=falseのときComputeCloudAverageTransmittanceは常に1.0を返す)。
@@ -597,8 +601,9 @@ namespace Kurenai::UI
         }
         CheckboxEx(
             "雲を止める(凍結)###FreezeCloudTime", &m_Engine.m_CloudTimeFrozen, Defaults::CloudTimeFrozen,
-            "風によるノイズのスクロールを止める。A/B比較などスクロールが揺れると困る場面で使う"
-            "(水面の「水面アニメを止める」と同じ位置づけ)");
+            "風によるノイズのスクロールを止める。積雲・巻雲の両方に効く(片方にしか効かないと"
+            "A/B比較でスクロールが揺れる側だけ残ってしまい対照が取れなくなるため)。"
+            "水面の「水面アニメを止める」と同じ位置づけ");
 
         // 被覆率(と上の有効トグル)だけがIBLキューブの明るさ(平均透過率)に効くため、これが
         // 変わったときだけ手続き空の再ベイクを要求する。他のつまみ(高度・UVスケール・密度・風・
@@ -633,11 +638,54 @@ namespace Kurenai::UI
         SliderFloatEx(
             "風向###CloudWindDirection", &m_Engine.m_CloudWindDirectionDegrees, 0.0f, 360.0f,
             Defaults::CloudWindDirectionDegrees, "%.1f deg", 0,
-            "風が吹いていく向き。太陽の方位角と同じ規約(X軸0度、Z軸(+方向)90度)");
+            "風が吹いていく向き。太陽の方位角と同じ規約(X軸0度、Z軸(+方向)90度)。"
+            "巻雲(下記)も同じ風向を共有する(速度・UVスケールだけ別に持つ)");
         SliderFloatEx(
             "前方散乱g###CloudForwardG", &m_Engine.m_CloudForwardG, 0.0f, 0.95f, Defaults::CloudForwardG, "%.2f", 0,
             "Henyey-Greensteinの非対称パラメータ。大きいほど太陽を直視する方向で雲の縁が強く光る"
             "(半逆光のシルバーライニング効果)");
+
+        ImGui::SeparatorText("巻雲(高層)");
+        ImGui::TextWrapped(
+            "積雲より高い位置にある2層目。光学的に薄いため自己影は計算せず(常に太陽光がそのまま"
+            "透過する扱い)、前方散乱の強さも積雲よりシェーダ内定数で弱めにしてある。"
+            "風向・凍結トグルは積雲と共有する");
+
+        // 巻雲の被覆率もIBLキューブの明るさ(平均透過率)に効くため、積雲のCloudCoverageと同じ判断基準で
+        // 変わったときだけ再ベイクを要求する
+        if (CheckboxEx(
+                "巻雲を有効にする###CirrusEnabled", &m_Engine.m_CirrusEnabled, Defaults::CirrusEnabled,
+                "無効にすると被覆率0と同じ扱いになり、Sky.hlsli側の巻雲の計算を一切行わない"))
+        {
+            m_Engine.m_SkyBakeDirty = true;
+        }
+        if (SliderFloatEx(
+                "被覆率###CirrusCoverage", &m_Engine.m_CirrusCoverage, 0.0f, 1.0f, Defaults::CirrusCoverage, "%.2f",
+                0,
+                "0=巻雲なし、1=全天が巻雲。IBLキューブへ焼く天頂輝度にだけ、この値から求めた"
+                "平均透過率(積雲との積)を掛けて全体を暗くする"))
+        {
+            m_Engine.m_SkyBakeDirty = true;
+        }
+        SliderFloatEx(
+            "雲底の高度###CirrusAltitude", &m_Engine.m_CirrusAltitude, 3000.0f, 15000.0f, Defaults::CirrusAltitude,
+            "%.0f m", 0,
+            "雲底の高さ(カメラのワールドY基準)。巻雲の高度帯として一般に言われる目安"
+            "(だいたい5,000〜13,000m)");
+        SliderFloatEx(
+            "UVスケール###CirrusUvScale", &m_Engine.m_CirrusUvScale, 1.0f / 12000.0f, 1.0f / 1000.0f,
+            Defaults::CirrusUvScale, "%.6f", ImGuiSliderFlags_Logarithmic,
+            "ワールド1mあたりのノイズ空間の距離。積雲より小さめが自然(巻雲は1つ1つの塊が大きく広がるため)");
+        SliderFloatEx(
+            "密度###CirrusDensity", &m_Engine.m_CirrusDensity, 0.0f, 5.0f, Defaults::CirrusDensity, "%.2f", 0,
+            "消散係数。巻雲は光学的に薄いため積雲より1桁小さい値を想定している");
+        SliderFloatEx(
+            "風速###CirrusWindSpeed", &m_Engine.m_CirrusWindSpeed, 0.0f, 60.0f, Defaults::CirrusWindSpeed,
+            "%.2f m/s", 0, "巻雲のノイズを流す速度。高層ほど風が速いという一般的な傾向に合わせ"
+            "積雲より速めにしてある");
+        SliderFloatEx(
+            "異方性(筋状)###CirrusAnisotropy", &m_Engine.m_CirrusAnisotropy, 1.0f, 8.0f, Defaults::CirrusAnisotropy,
+            "%.2f", 0, "fBmのUV(U方向)を伸ばして筋状にする倍率。1.0で積雲と同じ等方形状になる");
 
         EndParamGroup();
     }

@@ -104,6 +104,14 @@ cbuffer FrameConstants : register(b0)
     // CloudParams1: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
     //               同じ周期でwrap済み)、z=Henyey-Greensteinの非対称パラメータ、w=未使用
     float4 CloudParams1;
+    // 巻雲(P11、さらに末尾に追加)。DeferredLighting.hlsl/PlanarReflection.hlslの同名フィールドと
+    // 完全に同じ順・同じ型であること(C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams2/3 と揃える)。
+    // CloudParams2: x=巻雲の被覆率(0で巻雲なし)、y=雲底の高度[m](カメラ基準)、
+    //               z=UVスケール[ノイズ空間/m]、w=消散係数
+    float4 CloudParams2;
+    // CloudParams3: xy=風によるノイズ空間の移動量(積雲と同じくkCloudNoisePeriodでwrap済み)、
+    //               z=fBmのUV(U方向)を伸ばす異方性スケール、w=未使用
+    float4 CloudParams3;
 };
 
 cbuffer SSRConstants : register(b1)
@@ -184,6 +192,13 @@ SkyParameters MakeSkyParameters()
     params.CloudDensity = CloudParams0.w;
     params.CloudScrollOffset = CloudParams1.xy;
     params.CloudForwardG = CloudParams1.z;
+    // 巻雲(P11)。DeferredLighting.hlslのMakeSkyParametersと完全に同一の内容であること
+    params.CirrusCoverage = CloudParams2.x;
+    params.CirrusAltitude = CloudParams2.y;
+    params.CirrusUvScale = CloudParams2.z;
+    params.CirrusDensity = CloudParams2.w;
+    params.CirrusScrollOffset = CloudParams3.xy;
+    params.CirrusAnisotropy = CloudParams3.z;
     return params;
 }
 

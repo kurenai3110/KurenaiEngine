@@ -85,19 +85,26 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     // Luminance.xは雲を考慮しない晴天基準のまま。Sky.hlsli冒頭の雲セクション参照)
     params.ZenithLuminance *= CloudTransmittance;
 
-    // 雲(P5)は明示的に無効(CloudCoverage=0)で埋める。IBL用キューブマップには雲を焼き込まない
-    // (判断A、詳細はSky.hlsliの雲セクションのコメント参照)。雲が風で動くたびにキューブの
-    // 焼き直し(空生成6回+プリフィルタ36回のディスパッチ)が必要になるのを避けるためで、
-    // 被覆率による減光(判断B)はキューブへ焼く直前にCPU側(KurenaiEngine3D.cpp)が
-    // ZenithLuminanceへ平均透過率を掛けることで表現する。CloudCoverage=0ならSky.hlsli側の
-    // 早期脱出でこの下の残りのフィールドは一切参照されないが、意図を読めるようにするため
-    // 他のフィールドも明示的に0で埋めておく
+    // 雲(P5)・巻雲(P11)は明示的に無効(CloudCoverage=CirrusCoverage=0)で埋める。IBL用
+    // キューブマップには雲を焼き込まない(判断A、詳細はSky.hlsliの雲セクションのコメント参照)。
+    // 雲が風で動くたびにキューブの焼き直し(空生成6回+プリフィルタ36回のディスパッチ)が
+    // 必要になるのを避けるためで、被覆率による減光(判断B)はキューブへ焼く直前にCPU側
+    // (KurenaiEngine3D.cpp)がZenithLuminanceへ2層ぶんの平均透過率の積を掛けることで表現する
+    // (ComputeCloudAverageTransmittance参照)。CloudCoverage=0ならSky.hlsli側の早期脱出で
+    // この下の残りのフィールドは一切参照されないが、意図を読めるようにするため他のフィールドも
+    // 明示的に0で埋めておく
     params.CloudCoverage = 0.0f;
     params.CloudAltitude = 0.0f;
     params.CloudUvScale = 0.0f;
     params.CloudDensity = 0.0f;
     params.CloudScrollOffset = float2(0.0f, 0.0f);
     params.CloudForwardG = 0.0f;
+    params.CirrusCoverage = 0.0f;
+    params.CirrusAltitude = 0.0f;
+    params.CirrusUvScale = 0.0f;
+    params.CirrusDensity = 0.0f;
+    params.CirrusScrollOffset = float2(0.0f, 0.0f);
+    params.CirrusAnisotropy = 0.0f;
 
     const float3 color = SkyColor(dir, params);
 

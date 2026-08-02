@@ -1397,8 +1397,28 @@ namespace Kurenai
         DirectX::XMFLOAT2 m_CloudScrollOffset{ 0.0f, 0.0f };
         // 判断B(被覆率による平均透過率をIBLキューブのベイク時にだけ掛ける)のキャッシュ。
         // bakeSkyThisFrameブロックで確定させ、ベイクとFrameConstantsが同じタイミングの
-        // 値を見るようにする(P9でGPU側へ移ったm_SkyParametersBufferと同じ更新タイミング)
+        // 値を見るようにする(P9でGPU側へ移ったm_SkyParametersBufferと同じ更新タイミング)。
+        // P11で巻雲(m_CirrusCoverage)を加味した2層の積になるよう拡張した
+        // (ComputeCloudAverageTransmittance参照)
         float m_ActiveCloudTransmittance = 1.0f;
+
+        // --- 巻雲(P11: 高層のレイヤーを2層目として追加し雲を多層化する) ---
+        // m_CloudEnabled=falseのときと同じく、無効時はFrameConstants.CloudParams2.xへ
+        // 被覆率0を渡し、Sky.hlsli側の早期脱出(SkyColor、判断C)を通す
+        bool m_CirrusEnabled = Defaults::CirrusEnabled;
+        float m_CirrusCoverage = Defaults::CirrusCoverage;
+        float m_CirrusAltitude = Defaults::CirrusAltitude;
+        float m_CirrusUvScale = Defaults::CirrusUvScale;
+        float m_CirrusDensity = Defaults::CirrusDensity;
+        // 風速[m/s]。風向はm_CloudWindDirectionDegreesを積雲と共有する(同じ風系という前提)
+        float m_CirrusWindSpeed = Defaults::CirrusWindSpeed;
+        // fBmのUV(U方向)を伸ばして筋状にする倍率
+        float m_CirrusAnisotropy = Defaults::CirrusAnisotropy;
+        // 風によるノイズ空間の移動量(巻雲側)。m_CloudScrollOffsetとまったく同じ形で
+        // RenderThreadMainがkCloudNoisePeriodの周期でstd::fmodしながら進める。
+        // 凍結トグルはm_CloudTimeFrozenを共有する(片方にしか効かないとA/B比較の対照が
+        // 崩れるため。RenderThreadMainのスクロール更新箇所を参照)
+        DirectX::XMFLOAT2 m_CirrusScrollOffset{ 0.0f, 0.0f };
 
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)

@@ -192,6 +192,17 @@ namespace Kurenai
             //               同じ周期でstd::fmod済み。m_CloudScrollOffset参照)、
             //               z=Henyey-Greensteinの非対称パラメータ、w=未使用
             DirectX::XMFLOAT4 CloudParams1;
+            // 巻雲(P11、さらに末尾に追加)。DeferredLighting.hlsl/SSR.hlsl/PlanarReflection.hlslの
+            // FrameConstants宣言と同じ順・同じ型であること(3シェーダーすべてを更新すること。
+            // 末尾のPlanarReflectionPlaneを含めて1フィールドずつ突き合わせて一致を確認すること)。
+            // CloudParams2: x=巻雲の被覆率(0で巻雲なし。Sky.hlsliのSkyColorが早期脱出する)、
+            //               y=雲底の高度[m](カメラのワールドY基準)、
+            //               z=UVスケール[ノイズ空間の距離/m]、w=消散係数
+            DirectX::XMFLOAT4 CloudParams2;
+            // CloudParams3: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
+            //               同じ周期でstd::fmod済み。m_CirrusScrollOffset参照)、
+            //               z=fBmのUV(U方向)を伸ばす異方性スケール(m_CirrusAnisotropy)、w=未使用
+            DirectX::XMFLOAT4 CloudParams3;
             // 平面反射(P6、さらに末尾に追加)。xyz=水面平面の法線(現状は常に(0,1,0))、
             // w=平面の距離項。PlanarReflection.hlslのVSMainが
             // SV_ClipDistance0 = dot(worldPos, xyz) + w として使い、水面より上で正になるようにする
@@ -362,15 +373,37 @@ namespace Kurenai
         // 精密な値は求めていない(実測で調整可能)
         constexpr float kCloudOvercastTransmittance = 0.35f;
 
-        float ComputeCloudAverageTransmittance(bool cloudEnabled, float coverage)
+        // 巻雲側(P11)の「全天が巻雲のときの透過率」。積雲のkCloudOvercastTransmittance(0.35)より
+        // 1に近い値にしてある。巻雲は光学的に薄く(CirrusDensityが積雲の1桁下)、全天を覆っても
+        // 積雲ほど大きくは減光しないという定性的な近似であり、精密な値は求めていない
+        // (実測で調整可能)
+        constexpr float kCirrusOvercastTransmittance = 0.75f;
+
+        // 1層ぶんの「被覆率→平均透過率」の線形補間。ComputeCloudAverageTransmittanceが
+        // 積雲・巻雲の両方でこの1つの式を共有する
+        float ComputeCloudLayerTransmittance(bool layerEnabled, float coverage, float overcastTransmittance)
         {
-            if (!cloudEnabled)
+            if (!layerEnabled)
             {
                 return 1.0f;
             }
             const float clampedCoverage = std::clamp(coverage, 0.0f, 1.0f);
-            // lerp(1.0f, kCloudOvercastTransmittance, clampedCoverage)と同じ
-            return 1.0f + (kCloudOvercastTransmittance - 1.0f) * clampedCoverage;
+            // lerp(1.0f, overcastTransmittance, clampedCoverage)と同じ
+            return 1.0f + (overcastTransmittance - 1.0f) * clampedCoverage;
+        }
+
+        // 被覆率から求める全天の平均透過率(判断B)。P11で巻雲(2層目)を加味し、
+        // T = T_cumulus(積雲の被覆率) * T_cirrus(巻雲の被覆率) という2層の積の形へ拡張した。
+        // 巻雲を無効化・被覆率0にした場合はT_cirrus=1.0になり、積雲だけだったP5〜P10と
+        // 同じ値に戻る
+        float ComputeCloudAverageTransmittance(
+            bool cloudEnabled, float coverage, bool cirrusEnabled, float cirrusCoverage)
+        {
+            const float cumulusTransmittance =
+                ComputeCloudLayerTransmittance(cloudEnabled, coverage, kCloudOvercastTransmittance);
+            const float cirrusTransmittance =
+                ComputeCloudLayerTransmittance(cirrusEnabled, cirrusCoverage, kCirrusOvercastTransmittance);
+            return cumulusTransmittance * cirrusTransmittance;
         }
 
         // 実在の写真露出値(EV100)から露出係数を求める。絞り値・シャッター速度・ISO感度から一意に
@@ -3224,6 +3257,17 @@ namespace Kurenai
                     std::fmod(m_CloudScrollOffset.x + windDirX * advanceNoiseSpace, kCloudNoisePeriod);
                 m_CloudScrollOffset.y =
                     std::fmod(m_CloudScrollOffset.y + windDirZ * advanceNoiseSpace, kCloudNoisePeriod);
+
+                // 巻雲(P11)。積雲とまったく同じ形(kCloudNoisePeriodでstd::fmod)で進める。
+                // 風向はm_CloudWindDirectionDegreesを積雲と共有し、速度・UVスケールだけ
+                // 巻雲側の値(m_CirrusWindSpeed/m_CirrusUvScale)を使う。凍結トグル
+                // (m_CloudTimeFrozen)も積雲と共有する——片方にしか効かないとA/B比較で
+                // スクロールが揺れる側だけ残ってしまい対照が取れなくなるため
+                const float cirrusAdvanceNoiseSpace = m_CirrusWindSpeed * m_CirrusUvScale * renderDeltaTime;
+                m_CirrusScrollOffset.x =
+                    std::fmod(m_CirrusScrollOffset.x + windDirX * cirrusAdvanceNoiseSpace, kCloudNoisePeriod);
+                m_CirrusScrollOffset.y =
+                    std::fmod(m_CirrusScrollOffset.y + windDirZ * cirrusAdvanceNoiseSpace, kCloudNoisePeriod);
             }
 
             // m_Scene・ポストプロセスのパラメータ・UIの状態はすべてこのRenderスレッド専有に
@@ -3767,7 +3811,8 @@ namespace Kurenai
             // SkyBakeConstants::CloudTransmittance(下のSkyGenerateパス参照)にだけ掛ける。
             // SkyParametersBufferの天頂輝度を減光すると、雲の隙間から見える青空まで暗くなり、
             // Sky.hlsli側のSkyColorがそこへさらに雲を重ねることで二重に暗くなってしまう
-            m_ActiveCloudTransmittance = ComputeCloudAverageTransmittance(m_CloudEnabled, m_CloudCoverage);
+            m_ActiveCloudTransmittance = ComputeCloudAverageTransmittance(
+                m_CloudEnabled, m_CloudCoverage, m_CirrusEnabled, m_CirrusCoverage);
 
             // 空が変わったのでプリフィルタ済み鏡面も焼き直す必要がある。
             // 焼き直し要否のフラグ更新はここ(キャッシュを書いた場所)に一本化し、
@@ -4031,6 +4076,15 @@ namespace Kurenai
             m_CloudDensity,
         };
         constants.CloudParams1 = { m_CloudScrollOffset.x, m_CloudScrollOffset.y, m_CloudForwardG, 0.0f };
+        // 巻雲(P11)。積雲と同じ理由でここで一度だけ組み立てる。m_CirrusEnabled=falseのときは
+        // CloudParams2.xへ0を渡し、Sky.hlsli側のSkyColorが早期脱出する経路(判断C)を通す
+        constants.CloudParams2 = {
+            m_CirrusEnabled ? m_CirrusCoverage : 0.0f,
+            m_CirrusAltitude,
+            m_CirrusUvScale,
+            m_CirrusDensity,
+        };
+        constants.CloudParams3 = { m_CirrusScrollOffset.x, m_CirrusScrollOffset.y, m_CirrusAnisotropy, 0.0f };
         // 平面反射(P6)。このフィールドを参照するのはPlanarReflection.hlslだけで、そちらは
         // 専用のm_PlanarReflectionConstantBufferで明示的に上書きした値を使う(下のPlanarReflection
         // パス登録箇所参照)。共有のm_FrameConstantBufferにも一貫した値を入れておく

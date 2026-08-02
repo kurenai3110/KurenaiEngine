@@ -8000,18 +8000,102 @@ fBmはオクターブ数<code>kCloudOctaves</code>(既定4)段で、オクター
 <h3>34.7 判断C ― 被覆率0のときP4完了時点と画素まで一致させる</h3>
 <p>
 <code>Sky.hlsli</code>の<code>SkyColor</code>は晴天色(<code>SkyColorUpper</code>の結果)を
-求めた直後、<code>CloudCoverage &lt;= 0.0f || dir.y &lt;= 0.0f</code>なら雲の計算
+求めた直後、積雲・巻雲どちらの被覆率も0(<code>CloudCoverage &lt;= 0.0f &amp;&amp;
+CirrusCoverage &lt;= 0.0f</code>)、または<code>dir.y &lt;= 0.0f</code>なら雲の計算
 (<code>EvaluateCloudLayer</code>、ノイズ・自己影・位相関数のすべて)を一切呼ばずその晴天色を
 そのまま返す。返す値は雲を追加する前の実装と数値として同一になる。<code>SkyGenerate.hlsl</code>は
 常にこの早期脱出経路を通るため、IBL用キューブマップの中身は雲追加の前後で変わらない。
 </p>
+<p class="note">
+<strong>P11(34.9節)で巻雲を足した後も、巻雲の被覆率が0のときは積雲だけだったP11着手時点(HEAD)と画素まで
+厳密に一致する。</strong><code>SkyColor</code>は積雲を評価した直後、<code>CirrusCoverage
+&lt;= 0.0f</code>なら巻雲側の<code>EvaluateCloudLayer</code>を一度も呼ばず
+<code>clearColor * T_cumulus + S_cumulus</code>という積雲単体のときと1つも掛け算・足し算が
+増えない式でそのまま返す(34.9節参照)。「T_cirrus=1, S_cirrus=0になるから結果は同じはず」
+という理屈には頼っていない――浮動小数の乗算は単位元(1.0倍)であっても丸め誤差そのものは
+発生しないためこの場合は実害が無いが、余計な演算を式に足すこと自体を避け、
+早期脱出という構造でビット単位の一致を担保している。
+</p>
 
-<h3>34.8 このフェーズの範囲</h3>
+<h3>34.8 このフェーズの範囲(P5時点)</h3>
 <p>
 計画には積雲+高層の巻雲という多層化も含まれるが、P5では積雲1層に絞った。コストとリスクを
 抑え、1層をきちんと動かすことを優先する判断による。<code>SkyParameters</code>の雲用フィールドは
 将来2層目を足す際に素直に並べられるよう、あえて配列化せず層ごとに独立した名前のスカラー/
-ベクトルのまま持たせてある。
+ベクトルのまま持たせてある。巻雲の追加は34.9節(P11)で行った。
+</p>
+
+<h3>34.9 巻雲(P11) ― 2層目を足して雲を多層化する</h3>
+<p>
+P5で積雲1層に絞った雲モデルへ、高層の巻雲を2層目として追加した。積雲(<code>Cloud*</code>)と
+まったく同じレイヤーモデル(視線と雲底平面の交点からUVを作りfBmを評価する)を使うが、
+値は独立に持つ(<code>SkyParameters::Cirrus*</code>)。式を2つに複製しないため、
+<code>EvaluateCloudLayer</code>は層のパラメータ一式をまとめた<code>CloudLayerParams</code>
+(被覆率・高度・UVスケール・消散係数・スクロールオフセット・前方散乱g・異方性スケール・
+自己影ステップ数・アルベド/単散乱/多重散乱の係数)を引数に取る形へ変え、積雲・巻雲どちらの
+呼び出しもこの1つの関数定義を通る。<code>MakeCumulusLayerParams</code>/
+<code>MakeCirrusLayerParams</code>が<code>SkyParameters</code>から<code>CloudLayerParams</code>を
+組み立てる。
+</p>
+
+<h3>34.9.1 巻雲は自己影を計算しない</h3>
+<p>
+<code>CloudLayerParams::ShadowSteps</code>が0の層は、<code>EvaluateCloudLayer</code>内の
+自己影ブロック(太陽方向へ密度を積分してビアの法則で減衰させる部分)を丸ごとスキップし、
+<code>sunTransmittance = 1.0</code>として扱う。巻雲はシェーダ内定数
+<code>kCirrusShadowSteps = 0</code>を渡すため、この経路を通る。巻雲は光学的に薄く
+(<code>CirrusDensity</code>の既定値は積雲の1桁下)自己影がほとんど見た目に効かないため、
+コストを払う意味がないという判断による。ステップ数が<code>CloudLayerParams</code>の実行時の値
+(積雲は5、巻雲は0)になったことで、自己影のfor文は<code>[unroll]</code>(P5時点、トリップ数が
+シェーダ内定数だった)ではなく<code>[loop]</code>(コンパイル時にトリップ数を確定できない)へ
+変えてある。
+</p>
+
+<h3>34.9.2 合成順 ― 高い層から手前へ、巻雲の散乱光には積雲の透過率を掛ける</h3>
+<p>
+2層の合成は次の形にしてある(<code>SkyColor</code>)。
+</p>
+<pre><code>透過率 T = T_cirrus * T_cumulus
+散乱光 S = S_cumulus + S_cirrus * T_cumulus
+結果   = clearColor * T + S</code></pre>
+<p>
+透過率が両層を貫く視線の透過率の積になるのは自然だが、<strong>巻雲の散乱光
+(<code>S_cirrus</code>)に積雲の透過率(<code>T_cumulus</code>)を掛ける</strong>のがこの式の
+要点である。巻雲は積雲より高い位置にあるため、巻雲から届く光は視点までの間にある積雲を
+通過して初めて見える。これを掛けないと、積雲に厚く隠れているはずの方向でも巻雲の散乱光が
+そのまま加算され、積雲の裏側にある巻雲が透けて見えてしまう(積雲が不透明であるほど本来
+巻雲は見えないはずなのに、この項を落とすと被覆率に関わらず一定の明るさで足されてしまう)。
+</p>
+
+<h3>34.9.3 判断A・B・Cは2層目にもそのまま適用する</h3>
+<p>
+判断A(IBL用キューブマップには雲を焼かない、34.3節)・判断C(被覆率0のとき画素まで一致、
+34.7節)は巻雲にもそのまま適用されることを各節に追記した。判断B(被覆率による減光は
+キューブのベイク時にだけ掛ける、34.4節)は<code>ComputeCloudAverageTransmittance</code>
+(<code>KurenaiEngine3D.cpp</code>)を2層の透過率の積
+(<code>T = T_cumulus(積雲の被覆率) * T_cirrus(巻雲の被覆率)</code>)へ拡張する形で適用した。
+巻雲側の「全天が巻雲のときの透過率」(<code>kCirrusOvercastTransmittance</code>)は積雲の
+<code>kCloudOvercastTransmittance</code>(0.35)より1に近い0.75にしてある。巻雲は光学的に薄く
+(<code>CirrusDensity</code>が積雲の1桁下)、全天を覆っても積雲ほど大きくは減光しないという
+定性的な近似であり、精密な値は求めていない。
+</p>
+
+<h3>34.9.4 パラメータの持ち回り</h3>
+<p>
+<code>FrameConstants</code>の末尾へ<code>CloudParams2</code>(x=巻雲の被覆率、y=雲底の高度、
+z=UVスケール、w=消散係数)・<code>CloudParams3</code>(xy=風によるノイズ空間の移動量、
+z=fBmのUVを異方的に伸ばす倍率、w=未使用)を追加した。この構造体を宣言している
+<code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>・<code>PlanarReflection.hlsl</code>
+(3つ目はパディング目的で末尾フィールドを直接は使わない)すべてを同時に更新し、C++側の宣言と
+1フィールドずつ突き合わせて一致を確認した(34.4節・34.9.3節と同じくここがずれると
+全シェーダーが静かに壊れるため)。風のスクロール(<code>m_CirrusScrollOffset</code>)は
+<code>m_CloudScrollOffset</code>とまったく同じ形(<code>kCloudNoisePeriod</code>で
+<code>std::fmod</code>)でCPU側が進める。風向・凍結トグル(<code>m_CloudTimeFrozen</code>)は
+積雲と共有し、速度(<code>m_CirrusWindSpeed</code>)とUVスケール(<code>m_CirrusUvScale</code>)だけ
+巻雲固有の値を持つ。凍結トグルを共有しているのは、片方の層にしか効かないとA/B比較で
+スクロールが揺れる側だけ残ってしまい対照が取れなくなるため。前方散乱の強さ
+(<code>kCirrusForwardG</code>)と自己影ステップ数(<code>kCirrusShadowSteps</code>)はUIつまみを
+持たずシェーダ内定数にしてある(cbufferを増やす価値がないため)。
 </p>
 </section>
 

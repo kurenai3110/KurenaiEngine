@@ -87,6 +87,11 @@ cbuffer FrameConstants : register(b0)
     float4 SkyParams;
     float4 CloudParams0;
     float4 CloudParams1;
+    // 巻雲(P11、さらに末尾に追加)。このシェーダーでは未使用だが、C++側 KurenaiEngine3D.cpp の
+    // FrameConstants::CloudParams2/3 と揃える目的だけで宣言する
+    // (DeferredLighting.hlsl/SSR.hlslの同名フィールドと同じ扱い)
+    float4 CloudParams2;
+    float4 CloudParams3;
     // 平面反射(P6)。xyz=水面平面の法線(現状は常に(0,1,0))、w=平面の距離項
     // (SV_ClipDistance0 = dot(worldPos, xyz) + w が水面より上で正になるように詰める)
     float4 PlanarReflectionPlane;
