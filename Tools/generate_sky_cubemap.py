@@ -199,19 +199,21 @@ def perez_f(cos_theta, gamma, a, b, c, d, e):
     return (1.0 + a * np.exp(b / cos_theta)) * (1.0 + c * np.exp(d * gamma) + e * np.cos(gamma) ** 2)
 
 
-def perez_relative_luminance(cos_theta, gamma, cos_theta_sun, theta_sun):
-    # 【既知の不備、意図的に据え置き】この関数の分母はperez_f(cos_theta_sun, theta_sun, ...)だが、
-    # Preethamの定義(Table 1〜2)に照らすと本来はperez_f(1.0, theta_sun, ...)(天頂方向=cosθ=0での
-    # 評価。gammaのほうはtheta_sunで正しい。天頂は太陽からtheta_sunだけ離れているため)であるべき。
-    # sky_color_upper_unitのPreetham側は正しくperez_f(1.0, theta_sun, ...)へ修正済みだが、この
-    # 関数自体はP7以前(P9まで)から存在する従来のティント方式の輝度分布であり、ここを直すと
-    # 夜・薄明の見た目が変わってSky.hlsli側のP7合格条件(夜の厳密一致)と食い違うため、現状のまま
-    # 残している。これは正しいという意味ではなく意図的な保留である
-    #
+def perez_relative_luminance(cos_theta, gamma, theta_sun):
+    """天頂輝度を1としたときの相対輝度。Sky.hlsliのPerezRelativeLuminanceと同じ式。
+
+    【分母は必ず天頂方向で評価する】Perez分布の正規化は F(theta, gamma) / F(0, theta_s) で、
+    分母の F(0, theta_s) は「天頂方向」での評価を意味する。天頂角は0なので第1引数へは1.0を
+    渡す(gammaのほうはtheta_sunで正しい。天頂は太陽からtheta_sunだけ離れているため)。
+    ここへ cos(theta_s) を渡すと、定義上1.0になるはずの天頂の相対輝度が1.0にならず
+    (実測: 太陽仰角45度で0.763、仰角5度で0.361)、太陽が低いほど誤差が拡大する。
+    輝度の絶対値は照度正規化で吸収されるが、RELATIVE_LUMINANCE_FLOORとの相対関係が
+    変わるため分布の形そのものが歪む。
+    """
     # CIE快晴空の標準係数(Perez et al. 1993 / Preetham et al. 1999, Table 1)
     a, b, c, d, e = -1.0, -0.32, 10.0, -3.0, 0.45
     numerator = perez_f(cos_theta, gamma, a, b, c, d, e)
-    denominator = perez_f(cos_theta_sun, theta_sun, a, b, c, d, e)
+    denominator = perez_f(1.0, theta_sun, a, b, c, d, e)
     return numerator / denominator
 
 
@@ -303,14 +305,15 @@ def sky_color_upper_unit(dirs, sun_dir, tint_set, turbidity):
     clamped_y = np.maximum(dir_y, np.cos(np.radians(89.5)))
     cos_theta = np.clip(clamped_y, 1e-3, 1.0)
 
+    # 分母(F(0, theta_s))は天頂方向で評価するため cos(theta_s) は使わない。
+    # 詳しい理由は perez_relative_luminance のdocstring参照
     theta_sun = np.arccos(np.clip(sun_dir[1], -1.0, 1.0))
-    cos_theta_sun = max(np.cos(theta_sun), 1e-3)
 
     cos_gamma = np.clip(np.tensordot(dirs, sun_dir, axes=([-1], [0])), -1.0, 1.0)
     gamma = np.arccos(cos_gamma)
 
     def legacy_color():
-        relative = perez_relative_luminance(cos_theta, gamma, cos_theta_sun, theta_sun)
+        relative = perez_relative_luminance(cos_theta, gamma, theta_sun)
         relative = np.maximum(relative, 0.0)
         relative = RELATIVE_LUMINANCE_FLOOR + (1.0 - RELATIVE_LUMINANCE_FLOOR) * relative
         tint = sky_tint(cos_theta, cos_gamma, tint_set)

@@ -140,15 +140,18 @@ float PerezF(float cosTheta, float gamma, float a, float b, float c, float d, fl
     return (1.0f + a * exp(b / cosTheta)) * (1.0f + c * exp(d * gamma) + e * cosGamma * cosGamma);
 }
 
-// 【既知の不備、意図的に据え置き】この関数の分母はPerezF(cosThetaSun, thetaSun, ...)だが、
-// Preethamの定義(Table 1〜2)に照らすと本来はPerezF(1.0, thetaSun, ...)(天頂方向=cosθ=0での
-// 評価。gammaのほうはthetaSunで正しい。天頂は太陽からthetaSunだけ離れているため)であるべきである。
-// P7でPreethamのxyYモデルを実装した際にこの分母の誤りが見つかった(SkyColorUpperUnit参照。
-// あちらは正しくPerezF(1.0f, thetaSun, ...)へ修正済み)が、この関数自体はP7以前(P9まで)から
-// 存在する従来のティント方式の輝度分布であり、ここを直すと夜・薄明の見た目が変わって
-// 「PreethamWeight<=0のときP9完了時点と画素まで厳密一致する」というP7の合格条件が壊れる。
-// そのため現状のまま残しているが、これは正しいという意味ではなく意図的な保留である
-float PerezRelativeLuminance(float cosTheta, float gamma, float cosThetaSun, float thetaSun)
+// 天頂輝度を1としたときの相対輝度。
+//
+// 【分母は必ず天頂方向で評価する】Perez分布の正規化は F(theta, gamma) / F(0, theta_s) であり、
+// 分母の F(0, theta_s) は「天頂方向」での評価を意味する。天頂角は0なので第1引数(cosTheta)には
+// 1.0を渡す。gammaのほうはtheta_sで正しい(天頂は太陽からtheta_sだけ離れているため)。
+// ここへ cos(theta_s) を渡すと、定義上1.0になるはずの天頂の相対輝度が1.0にならず
+// (実測: タービディティ2.5相当の係数で太陽仰角45度のとき0.763、仰角5度のとき0.361)、
+// 太陽が低いほど誤差が拡大する。輝度の絶対値はSkyIntegrate.hlslの照度正規化で吸収されるが、
+// 下のkRelativeLuminanceFloorとの相対関係が変わるため分布の形そのものが歪む。
+// この誤りはP7でPreethamのxyYを実装した際に発見し、同じ誤りがあったPreetham側(SkyColorUpperUnit)と
+// あわせて修正した。再発しやすい箇所なので根拠を残す
+float PerezRelativeLuminance(float cosTheta, float gamma, float thetaSun)
 {
     // CIE快晴空の標準係数(Perez et al. 1993 / Preetham et al. 1999, Table 1)
     const float a = -1.0f;
@@ -156,7 +159,7 @@ float PerezRelativeLuminance(float cosTheta, float gamma, float cosThetaSun, flo
     const float c = 10.0f;
     const float d = -3.0f;
     const float e = 0.45f;
-    return PerezF(cosTheta, gamma, a, b, c, d, e) / PerezF(cosThetaSun, thetaSun, a, b, c, d, e);
+    return PerezF(cosTheta, gamma, a, b, c, d, e) / PerezF(1.0f, thetaSun, a, b, c, d, e);
 }
 
 // 太陽の暖色を混ぜる重み。太陽から離れるほど急に落ちる4乗カーブ。
@@ -307,8 +310,9 @@ float3 SkyColorUpperUnit(float3 dir, SkyParameters params)
     const float clampedY = max(dir.y, cos(radians(89.5f)));
     const float cosTheta = clamp(clampedY, 1e-3f, 1.0f);
 
+    // 分母(F(0, theta_s))は天頂方向で評価するため cos(theta_s) は使わない。
+    // 詳しい理由はPerezRelativeLuminanceの直上のコメント参照
     const float thetaSun = acos(clamp(params.SunDirection.y, -1.0f, 1.0f));
-    const float cosThetaSun = max(cos(thetaSun), 1e-3f);
 
     const float cosGamma = clamp(dot(dir, params.SunDirection), -1.0f, 1.0f);
     const float gamma = acos(cosGamma);
@@ -318,7 +322,7 @@ float3 SkyColorUpperUnit(float3 dir, SkyParameters params)
     // この分岐に限ってはP7以前(P9完了時点)と画素まで厳密に一致する
     if (params.PreethamWeight <= 0.0f)
     {
-        float legacyRelative = max(PerezRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun), 0.0f);
+        float legacyRelative = max(PerezRelativeLuminance(cosTheta, gamma, thetaSun), 0.0f);
         legacyRelative = kRelativeLuminanceFloor + (1.0f - kRelativeLuminanceFloor) * legacyRelative;
         return legacyRelative * SkyTint(cosTheta, cosGamma, params);
     }
@@ -386,7 +390,7 @@ float3 SkyColorUpperUnit(float3 dir, SkyParameters params)
     }
 
     // 薄明の遷移域(仰角0〜5度): 従来ティントとPreethamをクロスフェードする
-    float legacyRelative = max(PerezRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun), 0.0f);
+    float legacyRelative = max(PerezRelativeLuminance(cosTheta, gamma, thetaSun), 0.0f);
     legacyRelative = kRelativeLuminanceFloor + (1.0f - kRelativeLuminanceFloor) * legacyRelative;
     const float3 legacyColor = legacyRelative * SkyTint(cosTheta, cosGamma, params);
     return lerp(legacyColor, preethamColor, params.PreethamWeight);
