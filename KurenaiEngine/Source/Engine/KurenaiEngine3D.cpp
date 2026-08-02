@@ -684,6 +684,9 @@ namespace Kurenai
             DirectX::XMFLOAT4 SunGlowTint;   // xyz=色、w=強さ
             DirectX::XMFLOAT4 Luminance;     // x=天頂輝度(実効プリ露出込み、雲の減光は含まない)
                                               // y=余弦重み積分の値(ログ・検証用)、zw=予備
+            // P7: Preetham xyYモデル用のパラメータ。x=タービディティ、y=Preethamの重み
+            // (0=従来ティントのみ、1=Preethamのみ)、zw=予備
+            DirectX::XMFLOAT4 ModelParams;
         };
 
         // SkyIntegrate.hlsl側のcbuffer SkyIntegrateConstantsと一致させる必要がある
@@ -692,7 +695,7 @@ namespace Kurenai
             // xyz=太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)、w=未使用
             DirectX::XMFLOAT4 SunDirection;
             // x=目標照度[lx](SunLighting::SkyIlluminanceLux)、y=実効プリ露出(effectiveExposure)、
-            // zw=未使用
+            // z=タービディティ(P7、m_SkyTurbidity)、w=未使用
             DirectX::XMFLOAT4 IntegrateParams;
         };
 
@@ -3724,7 +3727,10 @@ namespace Kurenai
             // 動くため、太陽の角度閾値とあわせて実質的に連続した更新になる
             const bool exposureMoved =
                 std::abs(m_EffectiveExposureEV100 - m_LastBakedExposureEV100) > 0.05f;
-            if (sunMoved || exposureMoved)
+            // タービディティ(P7)が動いたら焼き直す。PreethamのxyYモデルの形自体が変わるため、
+            // exposureMovedと同じ形の判定をここへ追加する
+            const bool turbidityMoved = std::abs(m_SkyTurbidity - m_LastBakedTurbidity) > 0.01f;
+            if (sunMoved || exposureMoved || turbidityMoved)
             {
                 m_SkyBakeDirty = true;
             }
@@ -3769,6 +3775,7 @@ namespace Kurenai
             m_SkyBakeDirty = false;
             m_LastBakedSunPosition = sunLighting.SunPosition;
             m_LastBakedExposureEV100 = m_EffectiveExposureEV100;
+            m_LastBakedTurbidity = m_SkyTurbidity;
             m_IBLBaked = false;
             m_IBLIrradianceBaked = false;
         }
@@ -4119,7 +4126,7 @@ namespace Kurenai
                         sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
                     };
                     integrateConstants.IntegrateParams = {
-                        sunLighting.SkyIlluminanceLux, effectiveExposure, 0.0f, 0.0f
+                        sunLighting.SkyIlluminanceLux, effectiveExposure, m_SkyTurbidity, 0.0f
                     };
                     cmd->UpdateBuffer(m_SkyIntegrateConstantBuffer.get(), &integrateConstants, sizeof(integrateConstants));
 

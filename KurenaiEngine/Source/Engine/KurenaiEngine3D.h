@@ -956,6 +956,9 @@ namespace Kurenai
         // 最後に焼いたときの実効プリ露出。空はプリ露出済みの値で焼かれるため、
         // 露出が動いたときも焼き直さないと空だけ古い露出のまま取り残される
         float m_LastBakedExposureEV100 = 0.0f;
+        // 最後に焼いたときのタービディティ(P7)。m_SkyTurbidityが動いたときも、Preethamの
+        // xyYモデルの形自体が変わるため焼き直しが要る(exposureMovedと同じ形の判定。Render()参照)
+        float m_LastBakedTurbidity = 0.0f;
         // 焼き直しの角度閾値(度)。Auto Advance既定(1h/s)では太陽は15度/秒動くので、
         // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
         float m_SkyBakeAngleThresholdDegrees = 1.0f;
@@ -1400,6 +1403,11 @@ namespace Kurenai
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)
         float m_SunAzimuthDegrees = Defaults::SunAzimuthDegrees;
+
+        // 大気の濁り具合(P7: Preetham xyYモデルのタービディティ)。値が大きいほど地平線が白く
+        // 霞み、天頂の青が薄くなる。定義域はおおむね1.7〜10(EngineDefaults.h::SkyTurbidity参照)。
+        // 変更すると空の焼き直しが必要(Render()のturbidityMoved判定参照)
+        float m_SkyTurbidity = Defaults::SkyTurbidity;
 
         // 月の位置。**時刻には連動せず、ここで指定した固定位置に居続ける**。
         // 実際の月は太陽とは独立した周期(朔望月)で動くので、反太陽方向に固定するのは

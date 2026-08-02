@@ -248,6 +248,9 @@ namespace Kurenai::Defaults
     inline constexpr bool TimeAutoAdvance = false;
     inline constexpr float TimeAdvanceSpeed = 1.0f;
     inline constexpr float SunAzimuthDegrees = 126.87f;
+    // 大気の濁り具合(P7: Preetham xyYモデルのタービディティ)。Preethamの定義域はおおむね
+    // 1.7〜10で、2.5は「澄んだ晴天」に相当する見た目からの選択であり、実測値ではない
+    inline constexpr float SkyTurbidity = 2.5f;
     // 月は時刻に連動しない独立した向き。ここを変えると夜空の目標照度が変わるため空の焼き直しが要る
     inline constexpr float MoonAzimuthDegrees = 306.87f;
     inline constexpr float MoonElevationDegrees = 45.0f;

@@ -4933,10 +4933,13 @@ Perez分布が与えるのは<strong>輝度の分布だけ</strong>で、色は�
 <p>
 本来の夕焼けは、太陽光が大気を長く通ることで短波長がRayleigh散乱により失われる波長依存の消散で生じる。
 それを解くにはPreetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。
-本エンジンはPerez分布を使う以上その情報を持たないので、
+21.9の時点ではPerez分布(輝度の分布のみを与え、色は与えない)しか持っていなかったため、
 <strong>昼・薄明・夜の3セットを太陽高度で補間する</strong>アート的な近似を採った
 (物理的な導出ではないことを明記する)。あわせて太陽の方位まわりに暖色を乗せる項
 (<code>cosγ</code>の4乗フォールオフ)を追加した。
+<strong>(P7追記)</strong> 日中(太陽仰角5度以上)の色はPreetham et al. 1999のxyYモデルから
+物理的に導出するように変わった。詳細は21.12節を参照。夜・薄明とその間のクロスフェード、
+および地平線より下の接地色は、Preethamの定義域外であるため、このアート的な補間のまま残っている。
 </p>
 <p>
 暖色の強さは<strong>太陽仰角0度で最大、±15度で0になる三角窓</strong>にしている。
@@ -5338,6 +5341,79 @@ initialized」(X3508)としてコンパイルエラーにする(呼び出し側�
 関係なく、この関数単体で全フィールドの代入が無いと判定される)。値渡し+戻り値の形にすることで
 回避した。DX11がfxc/SM5.0固定である以上、この制約は今後も効く(<code>Claude/Tools/check_shaders.ps1</code>で
 fxc/dxc両方のコンパイルを機械的に確認する理由でもある)。
+</p>
+
+<h3>21.12 空の色をPreetham xyYモデルへ置き換え(P7)</h3>
+<p>
+21.9.3節のとおり、日中の空の色は<strong>昼・薄明・夜の3セットを太陽高度で補間するアート的な近似</strong>
+だった。輝度分布(Perez分布)はもともと物理モデルなので、色度(x, y)もPreetham et al. 1999の
+xyYモデルから求めれば、タービディティ1つで正午の深い青から地平線の白い霞みまで連続に出るようになる。
+P7でこれを実装した。
+</p>
+<p>
+<code>Sky.hlsli</code>の<code>SkyColorUpper</code>は従来<code>relative * ZenithLuminance * SkyTint(...)</code>
+という、<code>ZenithLuminance</code>に対して厳密に線形な式だった。この性質を<code>SkyColorUpperUnit</code>
+(天頂輝度を1としたときの色)として切り出し、<code>SkyColorUpper</code>はそれを
+<code>ZenithLuminance</code>倍するだけの薄いラッパーにした。
+</p>
+<p class="note">
+<strong><code>SkyColorUpperUnit</code>は<code>params.ZenithLuminance</code>を絶対に参照しない。</strong>
+<code>ZenithLuminance</code>自体が<code>SkyIntegrate.hlsl</code>の積分(この関数の結果のRec.709輝度を
+重みに使う)から目標照度を逆算して決まる値であるため、参照すると値が決まる前にその値を使うという
+循環定義になる。
+</p>
+<p>
+<strong>積分の重みも変えた。</strong>以前の<code>SkyIntegrate.hlsl</code>の被積分関数は
+「Perez相対輝度 × ティントのRec.709輝度成分」だった。Preethamでは輝度(Y)と色度(x, y)が分離するため
+この重みは意味を失う。そこで被積分関数を<strong>「<code>SkyColorUpperUnit</code>の結果のRec.709輝度」</strong>
+へ変えた。こうすると「実際に画面へ出る色の輝度をそのまま積分する」ことになり、昼(Preetham)・
+夜(従来ティント)・その間のクロスフェードのどの領域でも正規化が定義上正しくなる。
+</p>
+<p>
+<strong>Preethamの絶対天頂輝度(kcd/m^2を返す式)は実装していない。</strong>本エンジンは天頂輝度を
+目標照度から正規化して決めており(21.11節)、絶対輝度をPreethamから取ると二重に決めることになる。
+輝度は従来どおり「Perez比 + <code>kRelativeLuminanceFloor</code>」の形のまま、Y項の5係数だけを
+タービディティ依存のもの(Preetham et al. 1999, Table 1)へ差し替えている。
+<code>kRelativeLuminanceFloor</code>=0.12はそのまま残した——実測で調整した値で、Preethamにしても
+circumsolar項による反太陽側水平線の暗化は同じ構造で起きるためである。
+</p>
+<p>
+xyY→線形sRGB(Rec.709/D65)の変換には、負の成分ぶんだけ全チャンネルに白を混ぜるデサチュレーションを
+入れてある(<code>XyYToLinearSRGB</code>)。ただし<strong>これは保険であって、現状の使用域では
+一度も発動しない</strong>。実装時は「Preethamの色度は色域外を頻繁に生成する」という前提で入れたが、
+実測すると発動しなかった——タービディティ1.7〜8.0 × 太陽仰角5〜60度で上半球を32×64方向に走査し、
+負値が出た方向は0.0%だった。Preethamの色度はCIE図の中央付近(おおむねx=0.2〜0.5、y=0.2〜0.45)に
+収まり、そこはsRGBの三角形の内側だからである。<code>min&gt;=0</code>のとき何もしない実装なので
+残しても害は無く、タービディティの範囲やモデルを変えたときの保険として置いてある。
+単純クランプにしていないのは、万一発動したときに彩度が飛ぶため。デサチュレーションは輝度を
+持ち上げてしまうので、操作後にRec.709輝度が元のYに戻るよう再スケールしている。これをやらないと、
+色域外が出る方向だけ勝手に明るくなり、照度正規化の前提
+(<code>SkyColorUpperUnit</code>の結果の輝度を積分して目標照度に合わせる)が崩れる。
+</p>
+<p class="note">
+<strong>夜はPreethamの定義域外なので、従来のアート的な補間へフォールバックする。</strong>
+太陽が地平線下ではPreethamは定義域外になる。太陽仰角0〜5度でアート的なティント補間から
+Preethamへクロスフェードし、<code>params.PreethamWeight &lt;= 0</code>(仰角0度以下)では
+Preetham側の計算を一切行わず従来の結果をそのまま返す早期脱出を入れている。
+<strong>この早期脱出により、夜(太陽が地平線下)の見た目はP7実装後もP9完了時点と画素まで厳密に一致する。</strong>
+</p>
+<p>
+パラメータは<code>GPUSkyParameters::ModelParams</code>(x=タービディティ、y=Preethamの重み)として
+<code>SkyIntegrate.hlsl</code>が書き、他の3消費側(<code>SkyGenerate.hlsl</code>/
+<code>DeferredLighting.hlsl</code>/<code>SSR.hlsl</code>)は<code>ApplySkyParametersFromBuffer</code>
+経由で読むだけになる(21.11節の設計をそのまま踏襲)。タービディティ(ImGui「太陽」パネル、
+既定2.5)が変わったときの空の焼き直しは、露出(<code>exposureMoved</code>)が動いたときと
+同じ形の判定(<code>turbidityMoved</code>)を<code>Render()</code>へ追加して行っている。
+</p>
+<p class="note">
+<strong>タービディティの既定値2.5は実測値ではない。</strong>Preethamの定義域はおおむね1.7〜10で、
+2.5は「澄んだ晴天」に相当する見た目からの選択である(<code>EngineDefaults.h::SkyTurbidity</code>参照)。
+</p>
+<p>
+<code>Tools/generate_sky_cubemap.py</code>(オフラインの参照実装 兼 手続き空を無効にしたときの
+フォールバック)にも同じ変更(<code>sky_color_upper_unit</code>への分離、Preethamのx/y、
+xyY→sRGB、デサチュレーション、夜のクロスフェード、タービディティ引数)を反映した。雲(P5)は
+21.9.3節時点から変わらず、このスクリプトには実装していない(理由はスクリプト冒頭のコメント参照)。
 </p>
 </section>
 

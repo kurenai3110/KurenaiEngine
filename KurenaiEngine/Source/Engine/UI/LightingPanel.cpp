@@ -109,6 +109,13 @@ namespace Kurenai::UI
             m_Engine.m_IBLBaked = false;
             m_Engine.m_IBLIrradianceBaked = false;
         }
+        // タービディティ(P7: Preetham xyYモデルの大気の濁り具合)。変更時にm_SkyBakeDirtyを
+        // 直接ここで立てず、Render()側のturbidityMoved判定(exposureMovedと同じ形)に任せる
+        SliderFloatEx(
+            "タービディティ###SkyTurbidity", &m_Engine.m_SkyTurbidity, 1.7f, 10.0f, Defaults::SkyTurbidity, "%.2f",
+            0,
+            "Preethamモデルの大気の濁り具合。値が大きいほど地平線が白く霞み、天頂の青が薄くなる。"
+            "1.7が最も澄んだ空、10が霞んだ空に近い");
         // 背景の解析評価(P3)。キューブマップの中身(SkyGenerateのベイク結果)には一切影響しない
         // 表示の切り替えでしかないため、上の「手続き空」トグルと違ってm_SkyBakeDirty等の
         // ベイク用フラグは立てない

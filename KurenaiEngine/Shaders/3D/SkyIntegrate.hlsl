@@ -30,13 +30,21 @@
 // スレッド構成は1グループ×256スレッド、Dispatch(1,1,1)固定。スレッドi(i=0..255)がφ
 // インデックスiを担当し、θを64ステップぶん積む(1スレッドあたり64サンプル、合計16,384で
 // CPU版と厳密に同じサンプル位置)
+//
+// 【P7: 積分の重みをSkyColorUpperUnitのRec.709輝度へ変更】以前の被積分関数は
+// 「Perez相対輝度 × ティントのRec.709輝度成分」だった。P7で日中の色をPreetham xyYモデルへ
+// 置き換えたことで輝度(Y)と色度(x,y)が分離し、「ティントの輝度成分」という重みが意味を
+// 失った。そこで被積分関数を「実際に画面へ出る色(SkyColorUpperUnitの結果)のRec.709輝度」に
+// 変えた。こうすると昼(Preetham)・夜(従来ティント)・その間のクロスフェードのどの領域でも
+// 「画面に出る明るさをそのまま積分する」という定義になり、場合分けが要らなくなる
 #include "Sky.hlsli"
 
 cbuffer SkyIntegrateConstants : register(b0)
 {
     // xyz=太陽が「ある」向き(正規化済み)、w=未使用
     float4 SunDirection;
-    // x=目標照度[lx](SunLighting::SkyIlluminanceLux)、y=実効プリ露出(effectiveExposure)、zw=未使用
+    // x=目標照度[lx](SunLighting::SkyIlluminanceLux)、y=実効プリ露出(effectiveExposure)、
+    // z=タービディティ(P7、KurenaiEngine3D::m_SkyTurbidity)、w=未使用
     float4 IntegrateParams;
 };
 
@@ -54,10 +62,10 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     const uint phiIndex = dispatchThreadID.x;
 
-    // 呼び出し側の慣習(SkyGenerate.hlsl等)に合わせ、受け取った向きはここで正規化する
+    // 呼び出し側の慣習(SkyGenerate.hlsl等)に合わせ、受け取った向きはここで正規化する。
+    // 【P7】太陽天頂角(thetaSun/cosThetaSun)はSkyColorUpperUnit内部で求めるため、
+    // ここでは保持しない
     const float3 sunPosition = normalize(SunDirection.xyz);
-    const float thetaSun = acos(clamp(sunPosition.y, -1.0f, 1.0f));
-    const float cosThetaSun = max(cos(thetaSun), 1e-3f);
 
     const float dTheta = (kSkyIntegratePI * 0.5f) / float(kThetaSteps);
     const float dPhi = (kSkyIntegratePI * 2.0f) / float(kPhiSteps);
@@ -65,6 +73,25 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 色味はθ・φに依存しないため1度だけ求める(CPU版ComputeSkyZenithScaleと同じく
     // 呼び出し元が1度だけ決めてループへ渡す構造)
     const SkyTintSet tintSet = ComputeSkyTintSet(sunPosition.y);
+
+    // タービディティ(P7)。C++側からIntegrateParams.zで渡される
+    const float turbidity = IntegrateParams.z;
+    // Preethamの重み。仰角0度で0(従来ティントのみ)、仰角5度で1(Preethamのみ)。
+    // Sky.hlsli SkyColorUpperUnitの早期脱出/クロスフェードと同じ閾値であること
+    const float preethamWeight = smoothstep(0.0f, sin(radians(5.0f)), sunPosition.y);
+
+    // SkyColorUpperUnitを呼ぶためのSkyParameters。ZenithLuminanceと雲パラメータはこの関数が
+    // 参照しないため0で埋める(SkyColorUpperUnitのコメント参照。ZenithLuminanceを参照すると
+    // 循環定義になるため、この関数は絶対に参照しない設計になっている)
+    SkyParameters unitParams = (SkyParameters)0;
+    unitParams.SunDirection = sunPosition;
+    unitParams.ZenithTint = tintSet.Zenith;
+    unitParams.HorizonTint = tintSet.Horizon;
+    unitParams.GroundTint = tintSet.Ground;
+    unitParams.SunGlowTint = tintSet.SunGlow;
+    unitParams.SunGlowStrength = tintSet.SunGlowStrength;
+    unitParams.Turbidity = turbidity;
+    unitParams.PreethamWeight = preethamWeight;
 
     const float phi = (float(phiIndex) + 0.5f) * dPhi;
 
@@ -76,23 +103,16 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
         const float theta = (float(ti) + 0.5f) * dTheta;
         const float cosThetaRaw = cos(theta);
         const float sinTheta = sin(theta);
-        // SkyColorUpperと同じクランプ(水平線でPerezが発散するため)
-        const float cosTheta = clamp(max(cosThetaRaw, cos(radians(89.5f))), 1e-3f, 1.0f);
 
         const float3 dir = float3(sinTheta * cos(phi), cosThetaRaw, sinTheta * sin(phi));
-        const float cosGamma = clamp(dot(dir, sunPosition), -1.0f, 1.0f);
-        const float gamma = acos(cosGamma);
 
-        // 照度は測光的な輝度で測るので、ティントの輝度成分(Rec.709)を重みに掛ける
-        const float3 tint = SkyTintFromSet(cosTheta, cosGamma, tintSet);
-        const float tintLuminance = 0.2126f * tint.x + 0.7152f * tint.y + 0.0722f * tint.z;
-
-        float relative = max(PerezRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun), 0.0f);
-        // フロア適用後の値(SkyColorUpperと同じ式)
-        relative = kRelativeLuminanceFloor + (1.0f - kRelativeLuminanceFloor) * relative;
+        // 【P7】被積分関数は「SkyColorUpperUnitの結果のRec.709輝度」。SkyColorUpperUnit内部で
+        // SkyColorUpperと同じクランプ(水平線でPerezが発散するため)が行われる
+        const float3 unitColor = SkyColorUpperUnit(dir, unitParams);
+        const float weight = dot(unitColor, float3(0.2126f, 0.7152f, 0.0722f));
 
         // dω = sinθ dθ dφ、余弦重みはcosθ(クランプ前のcosThetaRawを使う。CPU版と同じ)
-        partialSum += relative * tintLuminance * cosThetaRaw * sinTheta * dTheta * dPhi;
+        partialSum += weight * cosThetaRaw * sinTheta * dTheta * dPhi;
     }
 
     s_Partial[phiIndex] = partialSum;
@@ -128,6 +148,9 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
         result.GroundTint = float4(tintSet.Ground, 0.0f);
         result.SunGlowTint = float4(tintSet.SunGlow, tintSet.SunGlowStrength);
         result.Luminance = float4(zenithLuminance, integral, 0.0f, 0.0f);
+        // P7: タービディティとPreethamの重みもここで確定させて配る
+        // (SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslはApplySkyParametersFromBufferで読むだけ)
+        result.ModelParams = float4(turbidity, preethamWeight, 0.0f, 0.0f);
 
         SkyParametersOut[0] = result;
     }

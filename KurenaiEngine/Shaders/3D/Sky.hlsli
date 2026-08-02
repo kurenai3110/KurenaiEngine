@@ -9,9 +9,15 @@
 //       画素の解析空フォールバック(P4)
 // 雲(P5)はこの3者すべてに自動で行き渡るよう、この共有ヘッダーへ足した(下のSkyParameters::Cloud*と
 // SkyColor末尾を参照)。ただしIBL用キューブマップ(SkyGenerate.hlsl)には雲を焼き込まない
-// (理由は下の雲セクションの判断Aコメント参照)。将来Preethamモデルへの置き換え(P7)・
-// 大気遠近(P8)が乗る予定で、それらもこの1つの定義を経由することで背景・IBL・水面反射が
-// 同じ空を見ることを保証する。
+// (理由は下の雲セクションの判断Aコメント参照)。将来大気遠近(P8)が乗る予定で、それも
+// この1つの定義を経由することで背景・IBL・水面反射が同じ空を見ることを保証する。
+//
+// 【P7: 空の色をPreetham xyYモデルへ置き換え】以前は色味を昼・薄明・夜の3セットの
+// アート的な補間(ComputeSkyTintSet/SkyTintFromSet)だけで決めていたが、P7で日中
+// (太陽仰角5度以上)の色度(x, y)をPreetham et al. 1999のxyYモデルから物理的に導出するように
+// 変えた(SkyColorUpperUnit参照)。夜・薄明(Preethamの定義域外)は引き続きComputeSkyTintSetの
+// アート的な補間を使う——ここは変わっていない。ComputeSkyTintSet/SkyTintFromSet自体もそのまま
+// 残っている(夜・薄明のクロスフェードと、地平線より下の接地色GroundTintで必要なため)。
 //
 // このファイルの式は Tools/generate_sky_cubemap.py(オフラインの参照実装 兼 手続き空を
 // 無効にしたときのフォールバック)と一致させる必要がある。係数・定数を変える場合は
@@ -69,6 +75,9 @@ struct GPUSkyParameters
     float4 SunGlowTint;   // xyz=色、w=強さ
     float4 Luminance;     // x=天頂輝度(実効プリ露出込み、雲の減光は含まない)
                            // y=余弦重み積分の値(ログ・検証用)、zw=予備
+    // 【P7】Preetham xyYモデル用のパラメータ。x=タービディティ、y=Preethamの重み
+    // (0=従来ティントのみ、1=Preethamのみ。SkyIntegrate.hlslが太陽仰角から求めて書く)、zw=予備
+    float4 ModelParams;
 };
 
 // 空モデルの評価に必要なパラメータ一式。呼び出し側が自分のcbufferから組み立てて渡す
@@ -82,6 +91,11 @@ struct SkyParameters
     float3 GroundTint;
     float3 SunGlowTint;
     float  SunGlowStrength;  // 太陽の暖色の強さ(仰角0度で1、±15度で0)
+
+    // --- Preetham xyYモデル(P7) ---
+    float  Turbidity;        // 大気の濁り具合。Preethamの定義域はおおむね1.7〜10
+    float  PreethamWeight;   // 0=従来ティントのみ、1=Preethamのみ。太陽仰角0〜5度でクロスフェードする
+                              // (夜・薄明はPreethamの定義域外のため。SkyColorUpperUnit参照)
 
     // --- 雲(P5)。CloudCoverage <= 0 なら雲の計算は一切行わない(判断C、SkyColor参照) ---
     // このフェーズでは積雲1層のみを実装する(計画にある巻雲の多層化はP5の対象外)。
@@ -114,6 +128,8 @@ SkyParameters ApplySkyParametersFromBuffer(SkyParameters params, GPUSkyParameter
     params.GroundTint = data.GroundTint.xyz;
     params.SunGlowTint = data.SunGlowTint.xyz;
     params.SunGlowStrength = data.SunGlowTint.w;
+    params.Turbidity = data.ModelParams.x;
+    params.PreethamWeight = data.ModelParams.y;
     return params;
 }
 
@@ -124,6 +140,14 @@ float PerezF(float cosTheta, float gamma, float a, float b, float c, float d, fl
     return (1.0f + a * exp(b / cosTheta)) * (1.0f + c * exp(d * gamma) + e * cosGamma * cosGamma);
 }
 
+// 【既知の不備、意図的に据え置き】この関数の分母はPerezF(cosThetaSun, thetaSun, ...)だが、
+// Preethamの定義(Table 1〜2)に照らすと本来はPerezF(1.0, thetaSun, ...)(天頂方向=cosθ=0での
+// 評価。gammaのほうはthetaSunで正しい。天頂は太陽からthetaSunだけ離れているため)であるべきである。
+// P7でPreethamのxyYモデルを実装した際にこの分母の誤りが見つかった(SkyColorUpperUnit参照。
+// あちらは正しくPerezF(1.0f, thetaSun, ...)へ修正済み)が、この関数自体はP7以前(P9まで)から
+// 存在する従来のティント方式の輝度分布であり、ここを直すと夜・薄明の見た目が変わって
+// 「PreethamWeight<=0のときP9完了時点と画素まで厳密一致する」というP7の合格条件が壊れる。
+// そのため現状のまま残しているが、これは正しいという意味ではなく意図的な保留である
 float PerezRelativeLuminance(float cosTheta, float gamma, float cosThetaSun, float thetaSun)
 {
     // CIE快晴空の標準係数(Perez et al. 1993 / Preetham et al. 1999, Table 1)
@@ -171,11 +195,13 @@ float3 SkyTint(float cosTheta, float cosGamma, SkyParameters params)
 
 // 太陽高度(のサイン)から空の色味を決める(P9でKurenaiEngine3D.cppのComputeSkyTintから移植)。
 //
-// 【物理ではなくアート的な近似であることの明示】本来の夕焼けは、太陽光が大気を長く通る
+// 【P7時点でも夜・薄明はアート的な近似のまま】本来の夕焼けは、太陽光が大気を長く通る
 // ことで短波長がRayleigh散乱により失われる波長依存の消散で生じる。それを解くには
-// Preetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。本エンジンは
-// Perez分布(輝度の分布のみを与え、色は与えない)を使っているため、色は昼・薄明・夜の
-// 3セットを高度で補間して作る。物理的な導出ではない。
+// Preetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。P7で日中
+// (太陽仰角5度以上)の色度はPreetham xyYモデルから物理的に導出するようになったが(Sky.hlsli
+// 冒頭のP7コメント、SkyColorUpperUnit参照)、Preethamは太陽が地平線下では定義域外のため、
+// 夜・薄明とその間のクロスフェード、および地平線より下の接地色(GroundTint)はこの関数
+// (昼・薄明・夜の3セットを高度で補間するアート的な近似)を使い続ける。
 //
 // 【重要】ここで色味を暗くしても空が暗くなるわけではない。SkyIntegrate.hlslが
 // 「色味の輝度成分込みで積分して目標照度に合わせる」ため、色味は最終的な明るさではなく
@@ -219,8 +245,63 @@ SkyTintSet ComputeSkyTintSet(float sunElevationSin)
     return result;
 }
 
-// 水平線以上を仮定した空の色(呼び出し側で地面フェードと合成する)
-float3 SkyColorUpper(float3 dir, SkyParameters params)
+// ============================================================================
+// Preetham xyYモデル(P7)
+//
+// 従来のSkyColorUpperは「色味(SkyTintFromSet、アート的な4色補間)」と「輝度分布(Perez分布)」を
+// 完全に分離して持っていた。P7では日中(太陽が地平線上、仰角5度以上)の色度(x, y)をPreetham et al.
+// 1999のxyYモデルから求め、輝度(Y)と合成してXYZ→線形sRGBへ変換する。夜・薄明(Preethamの定義域外)
+// は従来どおりSkyTintFromSetによるアート的な補間を使う(SkyColorUpperUnitの早期脱出/クロスフェード
+// 参照)。
+//
+// xyY→線形sRGB(Rec.709/D65)。負成分ぶんだけ全チャンネルへ白を足すデサチュレーションを
+// 入れてあるが、これは保険であって常用される経路ではない。
+//
+// 【実測: この保険は現状の使用域では一度も発動しない】P7の実装時に「Preethamの色度は色域外を
+// 頻繁に生成する」という前提で入れたが、実際に測ると発動しなかった。タービディティ1.7〜8.0 ×
+// 太陽仰角5〜60度で上半球を32×64方向に走査したところ、負値が出た方向は0.0%だった。
+// Preethamの色度はCIE図の中央付近(おおむねx=0.2〜0.5、y=0.2〜0.45)に収まり、そこは
+// sRGBの三角形の内側だからである。min>=0のとき何もしない実装なので残しても害は無く、
+// タービディティの範囲やモデルを変えたときの保険として置いてある。
+//
+// 単純クランプにしていないのは、万一発動したときに彩度が飛ぶため。デサチュレーションは
+// 輝度を持ち上げてしまうので、操作後に元のYへ戻るよう再スケールする
+// (でないと色域外が出る方向だけ勝手に明るくなり、SkyIntegrate.hlslの照度正規化の前提が崩れる)
+float3 XyYToLinearSRGB(float x, float y, float Y)
+{
+    // yが0近傍だとX,Zがゼロ除算で発散するため下限をクランプする
+    const float safeY = max(y, 1e-4f);
+    const float X = (x / safeY) * Y;
+    const float Z = ((1.0f - x - y) / safeY) * Y;
+
+    float3 rgb;
+    rgb.r = 3.2406f * X - 1.5372f * Y - 0.4986f * Z;
+    rgb.g = -0.9689f * X + 1.8758f * Y + 0.0415f * Z;
+    rgb.b = 0.0557f * X - 0.2040f * Y + 1.0570f * Z;
+
+    // 色域外(負値)を白へ寄せるデサチュレーション。全成分に同じ量を足す = 白を混ぜる
+    const float minComponent = min(rgb.r, min(rgb.g, rgb.b));
+    if (minComponent < 0.0f)
+    {
+        rgb -= minComponent;
+    }
+
+    // デサチュレーションで持ち上がった輝度を元のYへ戻す再スケール(Yが0近傍のときのゼロ除算に注意)
+    const float rescaledLuminance = dot(rgb, float3(0.2126f, 0.7152f, 0.0722f));
+    if (rescaledLuminance > 1e-6f)
+    {
+        rgb *= Y / rescaledLuminance;
+    }
+
+    return rgb;
+}
+
+// 天頂輝度を1としたときの空の色(水平線以上)。SkyColorUpperはこれをZenithLuminance倍するだけ。
+//
+// 【重要: params.ZenithLuminanceを絶対に参照しない】ZenithLuminance自体はSkyIntegrate.hlslが
+// 「この関数の結果のRec.709輝度」を積分して目標照度から逆算する値である。ここでZenithLuminanceを
+// 参照すると、値が決まる前にその値を使うという循環定義になってしまう
+float3 SkyColorUpperUnit(float3 dir, SkyParameters params)
 {
     // Perez分布は水平線で不安定になるため天頂角を89.5度までにクランプする
     const float clampedY = max(dir.y, cos(radians(89.5f)));
@@ -232,10 +313,89 @@ float3 SkyColorUpper(float3 dir, SkyParameters params)
     const float cosGamma = clamp(dot(dir, params.SunDirection), -1.0f, 1.0f);
     const float gamma = acos(cosGamma);
 
-    float relative = max(PerezRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun), 0.0f);
-    relative = kRelativeLuminanceFloor + (1.0f - kRelativeLuminanceFloor) * relative;
+    // 【夜の厳密一致を担保する早期脱出】太陽が地平線下(仰角5度未満)ではPreethamは定義域外なので
+    // 従来のアート的なティント補間だけを使う。ここでPreetham側の計算を一切行わずに返すことで、
+    // この分岐に限ってはP7以前(P9完了時点)と画素まで厳密に一致する
+    if (params.PreethamWeight <= 0.0f)
+    {
+        float legacyRelative = max(PerezRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun), 0.0f);
+        legacyRelative = kRelativeLuminanceFloor + (1.0f - kRelativeLuminanceFloor) * legacyRelative;
+        return legacyRelative * SkyTint(cosTheta, cosGamma, params);
+    }
 
-    return relative * params.ZenithLuminance * SkyTint(cosTheta, cosGamma, params);
+    // --- Preetham et al. 1999のxyYモデル(Table 1〜2の係数、タービディティTの1次関数) ---
+    const float T = params.Turbidity;
+
+    // Y(輝度)の5係数。従来の固定係数(a=-1,b=-0.32,c=10,d=-3,e=0.45)をタービディティ依存へ差し替える
+    const float yA = 0.1787f * T - 1.4630f;
+    const float yB = -0.3554f * T + 0.4275f;
+    const float yC = -0.0227f * T + 5.3251f;
+    const float yD = 0.1206f * T - 2.5771f;
+    const float yE = -0.0670f * T + 0.3703f;
+    // 【分母はF(1, thetaSun)、cosThetaSunではない】Preethamの正規化はF(θ,γ)/F(0,θs)で、
+    // 分母は「天頂方向(θ=0、cosθ=1)での評価」。天頂は太陽からthetaSunだけ離れているため
+    // gammaのほうはthetaSunで正しいが、第1引数(cosθの位置)にcos(thetaSun)を渡すと
+    // 天頂での評価(θ=0)ではなく太陽方向での評価になってしまう。この間違いを入れると
+    // 天頂の値がY_z/x_z/y_zに一致しなくなり、太陽が低いほど誤差が拡大する
+    // (実測: タービディティ2.5・仰角5度でxの誤差-22%)
+    float preethamRelative = max(
+        PerezF(cosTheta, gamma, yA, yB, yC, yD, yE) / PerezF(1.0f, thetaSun, yA, yB, yC, yD, yE), 0.0f);
+    // 輝度フロアは実測で調整した値(kRelativeLuminanceFloorのコメント参照)。Preethamにしても
+    // circumsolar項による反太陽側水平線の暗化は同じ構造で起きるため、そのまま適用する
+    preethamRelative = kRelativeLuminanceFloor + (1.0f - kRelativeLuminanceFloor) * preethamRelative;
+
+    // x(色度)の5係数
+    const float xA = -0.0193f * T - 0.2592f;
+    const float xB = -0.0665f * T + 0.0008f;
+    const float xC = -0.0004f * T + 0.2125f;
+    const float xD = -0.0641f * T - 0.8989f;
+    const float xE = -0.0033f * T + 0.0452f;
+
+    // y(色度)の5係数
+    const float cyA = -0.0167f * T - 0.2608f;
+    const float cyB = -0.0950f * T + 0.0092f;
+    const float cyC = -0.0079f * T + 0.2102f;
+    const float cyD = -0.0441f * T - 1.6537f;
+    const float cyE = -0.0109f * T + 0.0529f;
+
+    // 天頂の色度(x_z, y_z)。太陽天頂角thetaSun[ラジアン]の3次式
+    const float thetaSun2 = thetaSun * thetaSun;
+    const float thetaSun3 = thetaSun2 * thetaSun;
+    const float xz =
+        T * T * (0.00166f * thetaSun3 - 0.00375f * thetaSun2 + 0.00209f * thetaSun + 0.0f) +
+        T * (-0.02903f * thetaSun3 + 0.06377f * thetaSun2 - 0.03202f * thetaSun + 0.00394f) +
+        (0.11693f * thetaSun3 - 0.21196f * thetaSun2 + 0.06052f * thetaSun + 0.25885f);
+    const float yz =
+        T * T * (0.00275f * thetaSun3 - 0.00610f * thetaSun2 + 0.00317f * thetaSun + 0.0f) +
+        T * (-0.04214f * thetaSun3 + 0.08970f * thetaSun2 - 0.04153f * thetaSun + 0.00516f) +
+        (0.15346f * thetaSun3 - 0.26756f * thetaSun2 + 0.06669f * thetaSun + 0.26688f);
+
+    // 分母は輝度と同じ理由でF(1, thetaSun)(天頂方向での評価)。これにより天頂方向(theta=0)を
+    // 評価するとchromaX==xz・chromaY==yzに厳密に一致する(定義上そうあるべき値)
+    const float chromaX = xz * (PerezF(cosTheta, gamma, xA, xB, xC, xD, xE) /
+                                 PerezF(1.0f, thetaSun, xA, xB, xC, xD, xE));
+    const float chromaY = yz * (PerezF(cosTheta, gamma, cyA, cyB, cyC, cyD, cyE) /
+                                 PerezF(1.0f, thetaSun, cyA, cyB, cyC, cyD, cyE));
+
+    const float3 preethamColor = XyYToLinearSRGB(chromaX, chromaY, preethamRelative);
+
+    // 完全に昼(仰角5度以上)なら従来ティントの計算は行わずそのまま返す(コスト削減)
+    if (params.PreethamWeight >= 1.0f)
+    {
+        return preethamColor;
+    }
+
+    // 薄明の遷移域(仰角0〜5度): 従来ティントとPreethamをクロスフェードする
+    float legacyRelative = max(PerezRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun), 0.0f);
+    legacyRelative = kRelativeLuminanceFloor + (1.0f - kRelativeLuminanceFloor) * legacyRelative;
+    const float3 legacyColor = legacyRelative * SkyTint(cosTheta, cosGamma, params);
+    return lerp(legacyColor, preethamColor, params.PreethamWeight);
+}
+
+// 水平線以上を仮定した空の色(呼び出し側で地面フェードと合成する)
+float3 SkyColorUpper(float3 dir, SkyParameters params)
+{
+    return params.ZenithLuminance * SkyColorUpperUnit(dir, params);
 }
 
 // ============================================================================
