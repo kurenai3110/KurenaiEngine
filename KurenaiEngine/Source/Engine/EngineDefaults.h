@@ -78,6 +78,15 @@ namespace Kurenai::Defaults
     // (KurenaiEngine3D::m_WaterAnalyticSkyReflectionのコメント参照)
     inline constexpr bool WaterAnalyticSkyReflection = true;
 
+    // --- 平面反射(P6: 水面への鏡像描画) ---
+    inline constexpr bool PlanarReflectionEnabled = true;
+    // 反射解像度の倍率(1/2)。水面はラフネスが低いとはいえ波の法線で画面UVを歪ませて引くため
+    // 等倍の解像度は要らず、フォワードパス(不透明メッシュ全体)をもう1回走らせるコストの方が
+    // 支配的なため、半分に落として負荷を抑える
+    inline constexpr float PlanarReflectionResolutionScale = 0.5f;
+    // 波の法線による画面UVのずらし量(SSR.hlsl参照)。UV空間の小さな値から始め、実測で調整可能
+    inline constexpr float PlanarReflectionDistortion = 0.02f;
+
     // --- 雲(P5: 積雲1層のレイヤーモデル) ---
     inline constexpr bool CloudEnabled = true;
     // 被覆率。0.45は「晴れ間と雲がおよそ半々」という写真の見た目に寄せた値であり、

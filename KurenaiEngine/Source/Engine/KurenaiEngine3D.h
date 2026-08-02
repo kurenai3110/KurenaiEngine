@@ -128,6 +128,12 @@ namespace Kurenai
         // (理由はRHI/IRHISamplerSet.h)
         void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
+        // 平面反射(P6)専用のレンダーターゲット2枚(m_PlanarReflectionColor/Depth)を、
+        // 反射解像度(レンダー解像度 × m_PlanarReflectionResolutionScale)で作り直す。
+        // メインのCreateRenderTargetsとは独立に呼べる(Legacy8bitフォールバックの対象外。
+        // このバッファは常にHDR固定フォーマットのため)。呼び出し箇所はCreateRenderTargetsと
+        // 同じ2か所(Initialize直後、Render()の解像度変更ハンドリング)
+        void CreatePlanarReflectionTargets();
         // このフレームでRT反射パスを実行するか。手法がRaytracedでも、高速化構造が無ければ
         // (非対応環境・シーン読み込み中の空シーン・構築失敗)撃つ相手がいないため実行しない。
         // 「パスを追加する条件」と「後段がその出力を読む条件」がずれると、
@@ -211,6 +217,9 @@ namespace Kurenai
         // レンダーターゲットの作り直しはGPUがそれらを参照していない状態で行う必要があるため、
         // ここでは要求を記録するだけにしてRender()の先頭でまとめて反映する
         void RequestRenderResolution(uint32_t width, uint32_t height);
+        // 平面反射(P6)の反射解像度の倍率変更を要求する(RenderingPanel = Renderスレッドから呼ばれる)。
+        // RequestRenderResolutionと同じ方式(要求を記録するだけにしてRender()の先頭でまとめて反映)
+        void RequestPlanarReflectionResolutionScale(float scale);
         // Renderスレッドがフレーム先頭で呼ぶ。保留中の切り替え要求の発注と、
         // 出来上がったシーンの取り込みを行う
         void UpdateSceneStreaming();
@@ -821,6 +830,7 @@ namespace Kurenai
             DDGIIrradiance,     // DDGIのイラディアンスアトラス(オクタヘドラル2D、22章)
             DDGIDistance,       // DDGIの距離モーメントアトラス(R=平均距離、G=平均二乗距離)
             WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示(P2)
+            PlanarReflection,   // 平面反射パス(P6)の出力(m_PlanarReflectionColor)をトーンマッピングして表示
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -1310,6 +1320,42 @@ namespace Kurenai
         // 効果が出るのはm_ReflectionMode==ScreenSpaceのときだけで、かつ手続き空が無効な
         // シーンでは常に無効化される(SSRパスのExecute内、usingProceduralSkyとのAND判定)
         bool m_WaterAnalyticSkyReflection = Defaults::WaterAnalyticSkyReflection;
+
+        // --- 平面反射(P6) ---
+        // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断の詳細は
+        // Shaders/3D/PlanarReflection.hlsl冒頭のコメントを参照。反射解像度はレンダー解像度に
+        // m_PlanarReflectionResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う
+        std::unique_ptr<RHI::IRHITexture> m_PlanarReflectionColor;
+        std::unique_ptr<RHI::IRHITexture> m_PlanarReflectionDepth;
+        std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_PlanarReflectionPipelineState;
+        // 鏡映カメラで描くとワインディングが全反転するため、m_GBufferPipelineStateMirroredと同じ
+        // 仕組み(FrontCounterClockwiseの反転)で吸収する。ただし選択条件はinstance.IsMirroredの
+        // 否定になる(Render()側のExecute内のbindPipelineStateラムダ参照)
+        std::unique_ptr<RHI::IRHIPipelineState> m_PlanarReflectionPipelineStateMirrored;
+        // captureProbeFaceと同じ役割の専用FrameConstants(共有のm_FrameConstantBufferとは別インスタンス)。
+        // ViewProj/CameraPosition/PlanarReflectionPlaneだけをこのパス用に差し替える
+        std::unique_ptr<RHI::IRHIBuffer> m_PlanarReflectionConstantBuffer;
+        bool m_PlanarReflectionEnabled = Defaults::PlanarReflectionEnabled;
+        // 反射解像度の倍率(レンダー解像度に対する比)。EngineDefaults.hのコメント参照
+        float m_PlanarReflectionResolutionScale = Defaults::PlanarReflectionResolutionScale;
+        // 波の法線による画面UVのずらし量(SSR.hlslが読む)
+        float m_PlanarReflectionDistortion = Defaults::PlanarReflectionDistortion;
+        // 「システム」パネルのm_PendingRenderWidth/Height・m_RenderResolutionDirtyとまったく同じ方式
+        // (要求を記録するだけにしてRender()の先頭でまとめて反映する。理由はCreateRenderTargets/
+        // RequestRenderResolutionのコメント参照。GPUがまだ参照しているテクスチャを
+        // 即座には破棄できないため)
+        float m_PendingPlanarReflectionResolutionScale = Defaults::PlanarReflectionResolutionScale;
+        bool m_PlanarReflectionResolutionDirty = false;
+        // CreatePlanarReflectionTargetsが確保した反射解像度の実値(幅・高さ)。デバッグ表示
+        // (Present.hlslのレターボックス計算)が実寸を必要とするため保持しておく
+        uint32_t m_PlanarReflectionWidth = 0;
+        uint32_t m_PlanarReflectionHeight = 0;
+        // 複数の水面インスタンスが異なる高さで見つかったことを検出した最初のフレームだけ
+        // 警告ログを出すためのフラグ(m_LightTileOverflowLoggedと同じ作法)。平面反射は
+        // 「水面は単一の水平な平面である」という前提に立っており、複数ある場合は最初のものだけを使う
+        bool m_PlanarReflectionMultipleWaterLogged = false;
 
         // --- 雲(P5) ---
         // このフェーズでは積雲1層のみ(計画にある巻雲の多層化はP5の対象外)。

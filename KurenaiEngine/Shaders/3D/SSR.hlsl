@@ -118,6 +118,10 @@ cbuffer SSRConstants : register(b1)
     // (手続き空が無効=.ksceneがDDSスカイボックスを明示するシーンでは、このトグルの値に
     // 関わらず必ず0にする。DDSは任意の絵でPerezモデルとは無関係なため解析評価できない)
     float4 Params0; // x: 最大レイ距離(ワールド単位), y: ヒット判定の厚み, z: ラフネスカットオフ, w: 水面の解析空フォールバック
+    // 平面反射(P6、末尾に追加)。x: このフレームで平面反射パスを実行したか(1=有効。
+    // C++側でm_PlanarReflectionEnabled && 水面インスタンスが存在するときのみ1になる)、
+    // y: 波の法線による画面UVのずらし量(m_PlanarReflectionDistortion)、zw: 未使用
+    float4 Params1;
 };
 
 Texture2D SceneColorTexture : register(t0);
@@ -135,6 +139,10 @@ Texture2D BRDFLUTTexture : register(t6);
 // プローブの距離キューブ(t10)の宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みは
 // ReflectionProbe.hlsliが持つ
 #include "ReflectionProbe.hlsli"
+
+// 平面反射(P6)。KurenaiEngine3D::Renderが鏡映カメラで描いたPlanarReflection.hlslの結果
+// (m_PlanarReflectionColor)。t0〜t10は上ですべて埋まっているためt11を使う
+Texture2D PlanarReflectionTexture : register(t11);
 
 struct PSInput
 {
@@ -201,6 +209,42 @@ bool ProjectToScreen(float3 worldPos, out float2 uv, out float viewZ)
     uv = float2(ndc.x * 0.5f + 0.5f, 1.0f - (ndc.y * 0.5f + 0.5f));
     viewZ = mul(float4(worldPos, 1.0f), View).z;
     return (uv.x >= 0.0f && uv.x <= 1.0f && uv.y >= 0.0f && uv.y <= 1.0f);
+}
+
+// 平面反射(P6)を解析空フォールバック(P4)より優先して使う。呼び出し側(useWaterAnalyticSky
+// が立っている水面画素)からのみ呼ばれる想定。
+//
+// 平面反射はSSRのレイマーチとは完全に別経路――鏡映カメラで景色を描き直したPlanarReflection.hlsl
+// の結果(m_PlanarReflectionColor)を、反射ベクトルを再投影せず同じ画面UV(input.UV)でそのまま
+// サンプルするだけでよい(平面鏡の反射は鏡映カメラで撮り直すことと数学的に等価なため。
+// 詳細はPlanarReflection.hlsl冒頭のコメント参照)。波の法線でその画面UVを少しだけずらすことで、
+// 波打つ水面らしい歪みを付ける。
+//
+// 【画面端の扱い】reflUVが画面端に近いほど平面反射の信頼度を落とすが、confidence
+// (roughnessFade)ではなくここで解析空とのlerpとして表現する。confidenceを落とすと
+// Lightingパスが適用したプローブ/グローバルIBLへ戻ってしまい、P4で解決した
+// 「水面にIBLしか映らない」問題が画面端で再発するため
+float3 ApplyPlanarReflection(float3 analyticSky, float2 screenUV, float3 N)
+{
+    // Params1.x <= 0.5fは「このフレームで平面反射パスを実行していない」ケース
+    // (m_PlanarReflectionEnabled=falseか、シーンに水面インスタンスが無い)。
+    // この分岐に入るとP5完了時点とまったく同じ経路(解析空のみ)を通る
+    if (Params1.x <= 0.5f)
+    {
+        return analyticSky;
+    }
+
+    const float2 reflUV = screenUV + N.xz * Params1.y;
+    if (reflUV.x < 0.0f || reflUV.x > 1.0f || reflUV.y < 0.0f || reflUV.y > 1.0f)
+    {
+        // 画面外に出た場合は平面反射を使わず解析空のみにする
+        return analyticSky;
+    }
+
+    const float3 planarColor = PlanarReflectionTexture.Sample(ColorSampler, reflUV).rgb;
+    const float2 edgeDist = min(reflUV, float2(1.0f, 1.0f) - reflUV);
+    const float edgeFade = saturate(min(edgeDist.x, edgeDist.y) / kSSREdgeFadeDistance);
+    return lerp(analyticSky, planarColor, edgeFade);
 }
 
 // UV位置の実際のジオメトリのView空間Zを取得する。背景(深度なし)ならfalseを返す
@@ -385,8 +429,9 @@ float4 PSMain(PSInput input) : SV_TARGET
             // 解析評価のほうが実際の見え方に近い。
             // reflectDirが水平線より下を向く場合(強い波で反射ベクトルが下向きになったとき)は
             // SkyColorが持つ地平線下の接地色へのフェード(Sky.hlsli kGroundFadeStartY/EndY)で
-            // そのまま処理でき、ここで別扱いする必要はない
-            newRadiance = SkyColor(reflectDir, MakeSkyParameters());
+            // そのまま処理でき、ここで別扱いする必要はない。
+            // 平面反射(P6)はこの解析空よりさらに優先する(ApplyPlanarReflection参照)
+            newRadiance = ApplyPlanarReflection(SkyColor(reflectDir, MakeSkyParameters()), input.UV, N);
         }
         else
         {
@@ -410,8 +455,9 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 水平な水面を上から見たとき反射ベクトルは必ず上向き(空側)を向くため、
         // 空で埋めるのは常に妥当な近似になる(上のskyHit分岐と同じ理由)。
         // 屋根の下の水たまりのような反例は、.kscene側で[Model]Water=trueと明示的にタグ付けした
-        // 面にしかこの経路が適用されない(オプトイン)ため、影響範囲がそこに閉じている
-        newRadiance = SkyColor(reflectDir, MakeSkyParameters());
+        // 面にしかこの経路が適用されない(オプトイン)ため、影響範囲がそこに閉じている。
+        // 平面反射(P6)はこの解析空よりさらに優先する(ApplyPlanarReflection参照)
+        newRadiance = ApplyPlanarReflection(SkyColor(reflectDir, MakeSkyParameters()), input.UV, N);
         confidence = roughnessFade;
     }
     // 非水面が画面外に外れた、または最大距離まで判定がつかなかった場合は confidence = 0 のまま。

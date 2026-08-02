@@ -53,10 +53,11 @@ namespace Kurenai::UI
             "DDGI - イラディアンス (オクタヘドラルアトラス)",
             "DDGI - 距離モーメント (R=平均距離)",
             "水面マスク (A=水面フラグ)",
+            "平面反射 (水面に映る鏡像)",
         };
         static_assert(
-            static_cast<int>(DebugView::WaterMask) == 29,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はWaterMask)");
+            static_cast<int>(DebugView::PlanarReflection) == 30,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はPlanarReflection)");
 
         DrawUsageHint();
         BeginParamGroup();

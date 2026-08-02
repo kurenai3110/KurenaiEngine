@@ -488,7 +488,11 @@ namespace Kurenai::UI
             "反射自体は他の不透明マテリアルと同じSSR/RTレイトレーシング反射パスがそのまま適用される"
             "(下の「水面の反射に解析的な空を使う」は、SSRが画面外へ抜けた・判定がつかなかった"
             "水面画素だけを対象にしたフォールバック先の差し替え)。"
-            "デバッグ表示の「水面マスク」で対象インスタンスを確認できる");
+            "デバッグ表示の「水面マスク」で対象インスタンスを確認できる。"
+            "下の「平面反射」は不透明ジオメトリの鏡像を映す専用パスで、"
+            "反射の手法がSSR(上の「反射」セクション)のときだけ効く"
+            "(SSR.hlslがこのパスの結果を消費するため。レイトレーシング反射・反射なしのときは"
+            "何も起きない)");
 
         BeginParamGroup();
 
@@ -522,6 +526,48 @@ namespace Kurenai::UI
         SliderFloatEx(
             "波の強さ###WaterWaveStrength", &m_Engine.m_WaterWaveStrength, 0.0f, 1.0f, Defaults::WaterWaveStrength,
             "%.3f", 0, "波打ちの振幅。0で波が完全に消え平坦な鏡面、1で最大の揺らぎになる");
+
+        // --- 平面反射(P6) ---
+        CheckboxEx(
+            "平面反射を有効にする###PlanarReflectionEnabled", &m_Engine.m_PlanarReflectionEnabled,
+            Defaults::PlanarReflectionEnabled,
+            "水面に不透明ジオメトリの鏡像を映す専用のフォワードパス(鏡映カメラで景色を描き直す)。"
+            "効果が出るのは上の「反射」セクションで手法にSSRを選んだときだけ"
+            "(SSR.hlslがこのパスの結果を消費するため)。無効時は解析空(有効なら)へフォールバックする");
+
+        {
+            static const char* kPlanarReflectionResolutionNames[] = { "1/1", "1/2", "1/4" };
+            static const float kPlanarReflectionResolutionValues[] = { 1.0f, 0.5f, 0.25f };
+            constexpr int kDefaultResolutionIndex = 1; // Defaults::PlanarReflectionResolutionScale = 0.5f = 1/2
+
+            int resolutionIndex = kDefaultResolutionIndex;
+            for (int i = 0; i < IM_ARRAYSIZE(kPlanarReflectionResolutionValues); ++i)
+            {
+                if (m_Engine.m_PlanarReflectionResolutionScale == kPlanarReflectionResolutionValues[i])
+                {
+                    resolutionIndex = i;
+                    break;
+                }
+            }
+
+            if (ComboEx(
+                    "反射解像度###PlanarReflectionResolution", &resolutionIndex, kPlanarReflectionResolutionNames,
+                    IM_ARRAYSIZE(kPlanarReflectionResolutionNames), kDefaultResolutionIndex,
+                    "平面反射パスの解像度をレンダー解像度に対する倍率で指定する。水面は波で歪むため"
+                    "等倍(1/1)にしても劇的には変わらない一方、フォワードパスをもう1回走らせる"
+                    "コストは解像度の2乗で効く"))
+            {
+                // レンダーターゲットの作り直しはGPUがまだ参照しているかもしれないため、
+                // ここでは要求を記録するだけにする(Render()の先頭でまとめて反映)
+                m_Engine.RequestPlanarReflectionResolutionScale(kPlanarReflectionResolutionValues[resolutionIndex]);
+            }
+        }
+
+        SliderFloatEx(
+            "波による歪み###PlanarReflectionDistortion", &m_Engine.m_PlanarReflectionDistortion, 0.0f, 0.1f,
+            Defaults::PlanarReflectionDistortion, "%.4f", 0,
+            "波の法線ベクトル(N.xz)を画面UVのずらし量に変換する係数。0で歪みなし(完全な鏡)、"
+            "大きいほど波打ちが強く見える");
 
         EndParamGroup();
     }

@@ -235,6 +235,7 @@
     <li><a href="#launchscripts">32. 起動スクリプト(Run.bat)</a></li>
     <li><a href="#runtimeswitch">33. 内部レンダー解像度とグラフィックスAPIの実行時切り替え</a></li>
     <li><a href="#clouds">34. 雲(レイヤーモデル、P5)</a></li>
+    <li><a href="#planarreflection">35. 平面反射(P6)</a></li>
   </ol>
 </nav>
 
@@ -4603,6 +4604,14 @@ SSRを有効にして計測したところ、<strong>3Dシーンの画素は1つ
 シーンでは、トグルの値に関わらずC++側で必ず無効化される――DDSは任意の絵でPerezモデルとは
 無関係なため、21.10節の背景解析評価と同じ理由で解析評価してはいけない。
 </p>
+<p class="note">
+<strong>追記(P6)。</strong><a href="#planarreflection">35章</a>で導入した平面反射が有効な
+水面画素では、この解析空フォールバックよりも平面反射の結果が優先される。平面反射は
+「実際に鏡映カメラで描いた景色」なので、Perez分布の解析評価よりも正確な答えになるため。
+平面反射が無効(パス未実行)な画素、または反射先の画面UVが画面外に出た画素では、
+このセクションで説明した解析空フォールバックがそのまま使われる(<code>SSR.hlsl</code>の
+<code>ApplyPlanarReflection</code>参照)。
+</p>
 </section>
 
 <section id="procedural-sky">
@@ -7877,6 +7886,146 @@ fBmはオクターブ数<code>kCloudOctaves</code>(既定4)段で、オクター
 抑え、1層をきちんと動かすことを優先する判断による。<code>SkyParameters</code>の雲用フィールドは
 将来2層目を足す際に素直に並べられるよう、あえて配列化せず層ごとに独立した名前のスカラー/
 ベクトルのまま持たせてある。
+</p>
+</section>
+
+<section id="planarreflection">
+<h2>35. 平面反射(P6)</h2>
+
+<p>
+水面に不透明ジオメトリ(城など)の鏡像を映すための専用フォワードパス
+(<code>Shaders/3D/PlanarReflection.hlsl</code>)。<a href="#ssr">7章</a>・
+<a href="#ssrprobe">20章</a>で述べたSSRは画面に映っているものしか反射に映せず、水面のように
+広い面では画面外の建物が反射から欠けてしまう。平面反射は「水面平面についてカメラを鏡映し、
+その鏡映カメラでもう一度シーンを描く」ことで、SSRのレイマーチとは別の情報源を水面に与える。
+</p>
+
+<h3>35.1 「同じ画面UVで引ける」ことが平面反射を選ぶ最大の理由</h3>
+<p>
+水面平面についてカメラを鏡映行列<code>R</code>(<code>XMMatrixReflect</code>)で鏡映し、
+反射用ViewProj = <code>R * View * jitteredProj</code>でシーンを描くと、得られる絵は
+「完全な鏡が水面にあったときにその画素に映るはずの像」が、メインカメラで描いたときと
+<strong>まったく同じ画面UVの位置</strong>に来る。平面鏡の反射は、鏡映したカメラで景色を
+撮り直すことと数学的に等価だからである。この対応関係のおかげで、消費側の
+<code>SSR.hlsl</code>は反射ベクトルを再投影する必要がなく、
+<code>input.UV</code>に波の法線由来の小さなずれを足すだけでこのパスの結果を引ける
+(<code>ApplyPlanarReflection</code>、20.6節に追記した優先順位も参照)。
+メインカメラと同じジッター済み<code>Proj</code>を使うのはこの対応関係を保つためで、
+別のジッターを使うとサブピクセル単位で画面UVの対応が崩れる。
+</p>
+
+<h3>35.2 ProbeCaptureと同じ割り切りに乗った</h3>
+<p>
+このシェーダーの土台は<a href="#reflectionprobe">19章</a>の<code>ProbeCapture.hlsl</code>
+(反射プローブのキャプチャパス)で、<code>cbuffer</code>の宣言・ライティングの式は意図的に
+そちらと同一にしてある(式を変えると反射に映る色が本編と食い違うため)。ProbeCaptureと同じく、
+映るのは「直接光 + カスケードシャドウ + スカイボックス由来のグローバルIBL + DDGI(多重バウンス)」
+までで、SSAO/SSIL/SSRのスクリーンスペース手法・他の反射プローブ・半透明メッシュは含まない
+(「反射の中の反射は1バウンスで打ち切る」という、反射プローブで既に文書化済みの割り切りに
+そのまま乗る。ここで新しい判断を増やさない)。
+</p>
+<p>
+ProbeCaptureとの違いは3点だけである。(1) レンダーターゲットは1枚(放射輝度のみ。プローブと違い
+視差補正用の距離は要らない)。(2) <code>View</code>にカメラのビュー行列をそのまま渡す理由が
+ProbeCaptureとは異なる(35.3節)。(3) 水面より下のジオメトリを<code>SV_ClipDistance0</code>で
+落とす(35.4節)。
+</p>
+
+<h3>35.3 <code>View</code>をカメラのままにする理由はProbeCaptureと違う</h3>
+<p>
+ProbeCaptureは「カスケード選択の深度がカメラ視錐台基準だから仕方なく」カメラの
+<code>View</code>を使っていた(プローブ自身の視点とは無関係にカメラ視点でカスケードを選ぶ、
+という妥協)。平面反射パスでは事情が違う――描いているのは鏡像ではなく<strong>実在の
+ジオメトリそのもの</strong>である(カメラを鏡映しただけで世界は動かしていない)。したがって
+カメラの<code>View</code>でカスケードを選ぶことは妥協ではなく、そもそも正しい(影を落とす
+太陽とカスケードの分割は、鏡映されていない現実のカメラ視錐台に対して決まっているべきもの
+だから)。
+</p>
+
+<h3>35.4 <code>SV_ClipDistance0</code>で水面より下を落とす</h3>
+<p>
+反射に映ってはいけない「水面より下にあるもの」を、頂点シェーダーの<code>SV_ClipDistance0</code>で
+落とす。値は水面平面の方程式に<code>worldPos</code>を代入したもの
+(<code>FrameConstants.PlanarReflectionPlane</code>、水面より上が正)。Lengyelの斜め近平面
+(Oblique Near-Plane Clipping)は採らなかった――Reverse-Zの深度精度は近平面・遠平面の配置に
+かなり敏感で、任意の傾いた平面を近平面に差し替える手法はこの設計に手を入れることになる。
+<code>SV_ClipDistance</code>によるクリップはラスタライズ前にプリミティブを切り捨てるだけで
+深度の投影自体は変えないため、Reverse-Zの設計へ触れずに済む。
+<code>SV_ClipDistance</code>はfxc(SM5.0)・dxc(SM6.0)の両方でコンパイルが通ることを
+<code>Claude/Tools/check_shaders.ps1</code>で確認済み(このエンジンはDX11がfxc/SM5.0固定、
+DX12がdxcのため両方で通る必要がある)。
+</p>
+
+<h3>35.5 ワインディングの反転をMirrored PSOの否定で吸収する</h3>
+<p>
+鏡映カメラで描くとワインディングが全反転するため、既存の<code>m_GBufferPipelineStateMirrored</code>
+(10.2節、負のスケールを持つインスタンス用に<code>FrontCounterClockwise</code>を反転したPSO)
+と同じ仕組みをそのまま使い、<code>m_PlanarReflectionPipelineState</code> /
+<code>m_PlanarReflectionPipelineStateMirrored</code>の2本を用意する。ただし選択条件が
+GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定</strong>になる――
+鏡映していないインスタンスはカメラの反射によって1回だけ反転するため
+<code>Mirrored</code>側のPSOが必要になり、逆に元から鏡映されているインスタンス
+(2回反転で元に戻る)には通常側のPSOが必要になる。RHIには新しい機能を一切追加しておらず、
+既存のPSO切り替えの仕組みを別の条件式で呼んでいるだけである。
+</p>
+
+<h3>35.6 水面平面の決定と鏡映カメラの構築</h3>
+<p>
+<code>KurenaiEngine3D::Render()</code>は<code>m_Scene.Instances</code>から
+<code>IsWater</code>が立っている最初のインスタンスを探し、そのワールド変換の平行移動Y
+(水面メッシュはローカルY=0の水平な板、<code>Tools/generate_water_plane.py</code>参照)を
+水面の高さとする。複数の水面インスタンスが異なる高さで見つかった場合は、最初のものだけを
+使い警告ログを1度だけ出す――平面反射は「水面は単一の水平な平面である」という前提に立っている。
+</p>
+<p>
+鏡映行列は<code>XMMatrixReflect(XMVectorSet(0, 1, 0, -waterY))</code>で作る。
+<code>XMMatrixReflect</code>が受け取る平面の規約は「点<code>P</code>が
+<code>Ax+By+Cz+D=0</code>を満たす」形であり、これは<code>SV_ClipDistance0</code>の計算式
+(<code>dot(worldPos, xyz) + w</code>、水面より上で正)とまったく同じ規約なので、
+同じベクトル<code>(0, 1, 0, -waterY)</code>がどちらにもそのまま使える。カメラ位置も
+同じ行列で変換(<code>XMVector3Transform</code>、点として変換するため並進を含む)し、
+<code>CameraPosition</code>へ渡す。
+</p>
+<p>
+このパス専用の定数バッファは<code>captureProbeFace</code>(19.4節)とまったく同じ作法で、
+共有の<code>FrameConstants</code>をコピーして視点に関わるものだけ差し替える:
+<code>ViewProj</code>(反射用ViewProj、転置して格納)・<code>CameraPosition</code>
+(鏡映したカメラ位置)・<code>PlanarReflectionPlane</code>。<code>PrevViewProj</code>/
+<code>TAAParams</code>はcaptureProbeFaceと同じ理由(カメラ視点のものが混入するのを防ぐ)で
+明示的に潰す。<code>View</code>はカメラのものをそのまま残す(35.3節)。
+</p>
+
+<h3>35.7 RenderGraph上の順序付けとSSR.hlslでの消費</h3>
+<p>
+パスの<code>.Reads</code>にシャドウマップ・IBL・DDGIのアトラスを挙げることで、これらを書く
+パスより後ろへ順序付ける。<code>SSR.hlsl</code>側の<code>.Reads</code>に
+<code>m_PlanarReflectionColor</code>を追加することで、SSRパスより前に順序付く。
+<code>SSR.hlsl</code>は<code>Texture2D PlanarReflectionTexture : register(t11)</code>
+(t0〜t10は既存の宣言ですべて埋まっている)として受け取り、35.1節のとおり
+<code>input.UV + N.xz * Params1.y</code>でそのままサンプルする(<code>Params1.y</code>は
+波による歪みの強さ、レンダリングパネルの「波による歪み」スライダーに対応する)。
+</p>
+<p class="note">
+<strong>画面端の扱い。</strong>反射先の画面UV(<code>reflUV</code>)が画面端に近いほど
+平面反射の信頼度を落とすが、<strong>確信度(confidence)は落とさない</strong>。確信度を
+落とすとLightingパスが適用したプローブ/グローバルIBLへ戻ってしまい、20.6節(P4)で解決した
+「水面にIBLしか映らない」問題が画面端で再発する。代わりに、平面反射の色と解析空の色
+(20.6節)を<code>edgeFade</code>で<code>lerp</code>し、確信度は
+<code>roughnessFade</code>のまま変えない。<code>reflUV</code>が完全に
+<code>[0,1]</code>の外に出た場合は平面反射を使わず解析空のみになる。
+</p>
+<p>
+平面反射が無効(<code>m_PlanarReflectionEnabled=false</code>、または水面インスタンスが
+存在しない)なフレームでは、<code>ApplyPlanarReflection</code>は<code>Params1.x</code>が0の
+時点で解析空をそのまま返すため、<code>SSR.hlsl</code>はP5完了時点(20.6節導入時)と
+厳密に同じコードパスを通る。
+</p>
+
+<h3>35.8 このフェーズの範囲</h3>
+<p>
+「画面内の水面画素が0ならパスをスキップする」という最適化はこのフェーズでは行っていない。
+画素数を数える仕組みがRHIに無く、それ自体が新しい機構になるため見送った。パスを登録するか
+どうかの判定は「水面インスタンスが存在するか」という静的な条件だけで行う。
 </p>
 </section>
 

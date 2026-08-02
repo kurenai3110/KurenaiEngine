@@ -191,6 +191,11 @@ namespace Kurenai
             //               同じ周期でstd::fmod済み。m_CloudScrollOffset参照)、
             //               z=Henyey-Greensteinの非対称パラメータ、w=未使用
             DirectX::XMFLOAT4 CloudParams1;
+            // 平面反射(P6、さらに末尾に追加)。xyz=水面平面の法線(現状は常に(0,1,0))、
+            // w=平面の距離項。PlanarReflection.hlslのVSMainが
+            // SV_ClipDistance0 = dot(worldPos, xyz) + w として使い、水面より上で正になるようにする
+            // (水面より下のジオメトリを反射に映さないため)。このシェーダー以外は参照しない
+            DirectX::XMFLOAT4 PlanarReflectionPlane;
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -977,6 +982,10 @@ namespace Kurenai
             // (手続き空が無効なシーンではDDSは任意の絵でPerezモデルとは無関係なため、
             // このトグルの値に関わらず必ず0にする)
             DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 水面の解析空フォールバック
+            // 平面反射(P6、末尾に追加)。x: 平面反射が有効か(1=使う。m_PlanarReflectionEnabled &&
+            // 水面インスタンスが存在するときのみ1)、y: 波の法線による画面UVのずらし量
+            // (m_PlanarReflectionDistortion)、zw: 未使用
+            DirectX::XMFLOAT4 Params1;
         };
 
         // RTReflection.hlsl側のcbuffer RTReflectionConstantsと一致させる必要がある
@@ -1799,6 +1808,47 @@ namespace Kurenai
         probeCaptureConstantBufferDesc.SizeInBytes = sizeof(FrameConstants);
         m_ProbeCaptureConstantBuffer = m_Device->CreateBuffer(probeCaptureConstantBufferDesc);
 
+        // --- 平面反射(P6) ---
+        // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断はPlanarReflection.hlsl
+        // 冒頭のコメントを参照。反射先のテクスチャはレンダー解像度に依存するため、実際の確保は
+        // CreatePlanarReflectionTargets(CreateRenderTargetsと同じ呼び出し箇所)が行う。
+        // ここではProbeCaptureと同様、解像度に依存しないシェーダー・PSO・定数バッファのみ作る
+        RHI::ShaderDesc planarReflectionVsDesc;
+        planarReflectionVsDesc.Stage = RHI::ShaderStage::Vertex;
+        planarReflectionVsDesc.FilePath = shaderDirectory + L"PlanarReflection.hlsl";
+        planarReflectionVsDesc.EntryPoint = "VSMain";
+        m_PlanarReflectionVertexShader = m_Device->CreateShader(planarReflectionVsDesc);
+
+        RHI::ShaderDesc planarReflectionPsDesc;
+        planarReflectionPsDesc.Stage = RHI::ShaderStage::Pixel;
+        planarReflectionPsDesc.FilePath = shaderDirectory + L"PlanarReflection.hlsl";
+        planarReflectionPsDesc.EntryPoint = "PSMain";
+        m_PlanarReflectionPixelShader = m_Device->CreateShader(planarReflectionPsDesc);
+
+        RHI::PipelineStateDesc planarReflectionPipelineDesc;
+        planarReflectionPipelineDesc.InputLayout = modelInputLayout;
+        planarReflectionPipelineDesc.VertexShader = m_PlanarReflectionVertexShader.get();
+        planarReflectionPipelineDesc.PixelShader = m_PlanarReflectionPixelShader.get();
+        planarReflectionPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        // レンダーターゲットは1枚(放射輝度のみ。ProbeCaptureと違い視差補正用の距離は要らない。
+        // PlanarReflection.hlsl冒頭参照)。バッファ精度(Legacy8bit)の対象外にしてあり常にHDR固定
+        planarReflectionPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        planarReflectionPipelineDesc.HasDepthStencil = true;
+        planarReflectionPipelineDesc.ReverseZ = true;
+        m_PlanarReflectionPipelineState = m_Device->CreatePipelineState(planarReflectionPipelineDesc);
+
+        // 鏡映カメラで描くとワインディングが全反転するため、m_GBufferPipelineStateMirroredと
+        // 同じ仕組み(FrontCounterClockwiseの反転)で吸収する。選択条件はinstance.IsMirroredの
+        // 否定になる点がGBufferパスと異なる(Render()側のExecute内参照)
+        planarReflectionPipelineDesc.FrontCounterClockwise = true;
+        m_PlanarReflectionPipelineStateMirrored = m_Device->CreatePipelineState(planarReflectionPipelineDesc);
+
+        // captureProbeFaceと同じ役割の専用FrameConstants
+        RHI::BufferDesc planarReflectionConstantBufferDesc;
+        planarReflectionConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        planarReflectionConstantBufferDesc.SizeInBytes = sizeof(FrameConstants);
+        m_PlanarReflectionConstantBuffer = m_Device->CreateBuffer(planarReflectionConstantBufferDesc);
+
         // --- DDGI(22章) ---
         // キャプチャ経路は反射プローブとまったく同じ(ProbeCapture.hlslとm_ProbeCapturePipelineStateを
         // そのまま使う)で、解像度だけkDDGICaptureSizeへ落とす。レンダーターゲットのフォーマットは
@@ -1876,6 +1926,9 @@ namespace Kurenai
         // m_BufferPrecisionをLegacy8bitへ落とすフォールバックを持つため、PSOはその結果が
         // 確定した後に作らなければフォーマットがずれる
         CreateRenderTargets(m_RenderWidth, m_RenderHeight);
+        // 平面反射(P6)専用のレンダーターゲットも、レンダー解像度が確定したこのタイミングで作る
+        // (呼び出し箇所はCreateRenderTargetsと同じ2か所。もう1か所はRender()の解像度変更ハンドリング)
+        CreatePlanarReflectionTargets();
         CreatePrecisionDependentPipelineStates();
 
         DiscoverScenes();
@@ -2305,6 +2358,46 @@ namespace Kurenai
                 ", バッファ精度=" + (legacyPrecision ? "Legacy8bit" : "HDR") + ")");
     }
 
+    void KurenaiEngine3D::CreatePlanarReflectionTargets()
+    {
+        if (m_RenderWidth == 0 || m_RenderHeight == 0)
+        {
+            return;
+        }
+
+        // 反射解像度 = レンダー解像度 × 倍率。最低でも1x1は確保する
+        // (倍率が非常に小さい・レンダー解像度が非常に小さい場合でもテクスチャ作成自体は失敗させない)
+        const uint32_t width = std::max(
+            1u, static_cast<uint32_t>(static_cast<float>(m_RenderWidth) * m_PlanarReflectionResolutionScale));
+        const uint32_t height = std::max(
+            1u, static_cast<uint32_t>(static_cast<float>(m_RenderHeight) * m_PlanarReflectionResolutionScale));
+
+        try
+        {
+            // SceneColorと同じHDR形式(R16G16B16A16_Float)。水面はラフネスが低く反射がそのまま
+            // 見えるため、CreateRenderTargetsのLegacy8bitフォールバックの対象外にして常にHDR固定にする
+            m_PlanarReflectionColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(G-Buffer/ProbeCapture深度と同じ)
+            m_PlanarReflectionDepth = m_Device->CreateDepthTexture(width, height, 0.0f);
+        }
+        catch (const std::exception& e)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                std::string("平面反射のレンダーターゲット作成に失敗しました (") + std::to_string(width) + "x" +
+                    std::to_string(height) + "): " + e.what());
+            throw;
+        }
+
+        m_PlanarReflectionWidth = width;
+        m_PlanarReflectionHeight = height;
+
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("平面反射のレンダーターゲットを作成しました (") + std::to_string(width) + "x" +
+                std::to_string(height) + ")");
+    }
+
     void KurenaiEngine3D::RequestRenderResolution(uint32_t width, uint32_t height)
     {
         // 上限はHi-Zのミップ構築・ライトタイル・ブルームピラミッドがいずれも
@@ -2330,6 +2423,30 @@ namespace Kurenai
         m_PendingRenderWidth = width;
         m_PendingRenderHeight = height;
         m_RenderResolutionDirty = true;
+    }
+
+    void KurenaiEngine3D::RequestPlanarReflectionResolutionScale(float scale)
+    {
+        // 0以下はテクスチャが確保できない。上限を1.0(等倍)にしているのは、水面はラフネスが
+        // 低くても波の法線で歪むため等倍を超える解像度に意味が無いため(EngineDefaults.h参照)
+        if (scale <= 0.0f || scale > 1.0f)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "RequestPlanarReflectionResolutionScale: 倍率" + std::to_string(scale) +
+                    "が範囲外です(0より大きく1.0以下)。要求を無視します");
+            return;
+        }
+
+        if (scale == m_PlanarReflectionResolutionScale)
+        {
+            return;
+        }
+
+        // レンダーターゲットの作り直しはGPUがまだ参照しているかもしれない状態では行えないため、
+        // RequestRenderResolutionと同じく要求を記録するだけにしてRender()の先頭でまとめて反映する
+        m_PendingPlanarReflectionResolutionScale = scale;
+        m_PlanarReflectionResolutionDirty = true;
     }
 
     void KurenaiEngine3D::RequestSceneLoad(size_t sceneIndex)
@@ -2638,6 +2755,8 @@ namespace Kurenai
         m_Lights = m_Scene.Lights;
         m_SelectedLightIndex = m_Lights.empty() ? -1 : 0;
         m_LightOverflowLogged = false;
+        // 平面反射(P6)。新しいシーンでは水面の構成が変わるため、複数水面高さの警告も仕切り直す
+        m_PlanarReflectionMultipleWaterLogged = false;
 
         // 反射プローブもライトと同じ方針でユーザー編集用のコピーへ複製する。
         // プローブの中身(キューブマップ)はシーンのジオメトリ・ライトに依存するため、
@@ -3501,7 +3620,7 @@ namespace Kurenai
         //
         // ここはApplyPendingResizeの後、かつこのフレームでm_RenderWidth/m_RenderHeightを
         // 読み始めるより前(最初の読み取りはTAAジッター)なので、解像度をまとめて差し替えてよい
-        if (m_BufferPrecisionDirty || m_RenderResolutionDirty)
+        if (m_BufferPrecisionDirty || m_RenderResolutionDirty || m_PlanarReflectionResolutionDirty)
         {
             const bool precisionChanged = m_BufferPrecisionDirty;
             m_BufferPrecisionDirty = false;
@@ -3514,11 +3633,19 @@ namespace Kurenai
                 m_RenderWidth = m_PendingRenderWidth;
                 m_RenderHeight = m_PendingRenderHeight;
             }
+            if (m_PlanarReflectionResolutionDirty)
+            {
+                m_PlanarReflectionResolutionDirty = false;
+                m_PlanarReflectionResolutionScale = m_PendingPlanarReflectionResolutionScale;
+            }
 
             m_Device->WaitForGPUIdle();
             try
             {
                 CreateRenderTargets(m_RenderWidth, m_RenderHeight);
+                // 平面反射(P6)専用のレンダーターゲットも、呼び出し箇所をCreateRenderTargetsと
+                // 揃えてここで作り直す(反射解像度の倍率変更だけの要求でもここを通る)
+                CreatePlanarReflectionTargets();
             }
             catch (const std::exception& e)
             {
@@ -3533,6 +3660,7 @@ namespace Kurenai
                 m_RenderWidth = previousWidth;
                 m_RenderHeight = previousHeight;
                 CreateRenderTargets(m_RenderWidth, m_RenderHeight);
+                CreatePlanarReflectionTargets();
             }
 
             // カメラのアスペクト比はUpdateスレッドが読み取って反映する(m_RenderAspectの宣言参照)
@@ -3793,9 +3921,63 @@ namespace Kurenai
             m_IBLIrradianceBaked = false;
         }
 
+        // 平面反射(P6): 水面インスタンスを探し、その高さ(ワールドY)を水面の平面とする。
+        // 水面メッシュはローカルY=0の水平な板(Tools/generate_water_plane.py参照)なので、
+        // ワールド変換の平行移動Y(instance.World._24。転置済みのため列に入っている。
+        // Transparentパスの距離ソートと同じ規約)がそのまま水面の高さになる。
+        // 複数の水面インスタンスが異なる高さで見つかった場合は最初のものだけを使い、警告を1度だけ出す
+        // (「水面は単一の水平な平面である」という前提を明示する)
+        bool hasWaterInstance = false;
+        float waterPlaneY = 0.0f;
+        for (const auto& instance : m_Scene.Instances)
+        {
+            if (!instance.IsWater)
+            {
+                continue;
+            }
+            const float instanceWaterY = instance.World._24;
+            if (!hasWaterInstance)
+            {
+                hasWaterInstance = true;
+                waterPlaneY = instanceWaterY;
+            }
+            else if (std::abs(instanceWaterY - waterPlaneY) > 0.01f && !m_PlanarReflectionMultipleWaterLogged)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "複数の水面インスタンスが異なる高さ(Y=" + std::to_string(waterPlaneY) + "とY=" +
+                        std::to_string(instanceWaterY) +
+                        ")で見つかりました。平面反射は最初の水面のみを使用します"
+                        "(水面は単一の水平な平面である前提のため)");
+                m_PlanarReflectionMultipleWaterLogged = true;
+            }
+        }
+        // このフレームで平面反射パスを実行するか。
+        // 【反射の手法がSSRのときだけ実行する】このパスの出力(m_PlanarReflectionColor)を読むのは
+        // SSR.hlslだけである。手法がRaytracedやOffのときに走らせても、不透明メッシュ全体を
+        // もう1回フォワードで描いた結果を誰も読まないまま捨てることになる
+        // (DXR対応環境ではDefaultReflectionModeがRaytracedを返すため、この条件が無いと
+        //  DX12では常に丸ごと無駄になる。実測でもDX12起動時に水面へ映っていたのはRT反射の結果で、
+        //  平面反射パスの出力ではなかった)
+        const bool planarReflectionPassRuns =
+            m_PlanarReflectionEnabled && hasWaterInstance && m_ReflectionMode == ReflectionMode::ScreenSpace;
+
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
+
+        // 平面反射用の鏡映カメラ。水面平面 y=waterPlaneY に対する反射行列を、通常のView×Projへ
+        // 左から掛ける(PlanarReflection.hlsl冒頭参照)。XMMatrixReflectが受け取る平面の規約は
+        // 「点PがAx+By+Cz+D=0を満たす」形(ドキュメント準拠)で、これは
+        // FrameConstants.PlanarReflectionPlaneのSV_ClipDistance計算(dot(worldPos, xyz) + w)と
+        // 完全に同じ規約なので、同じベクトル(0,1,0,-waterPlaneY)がどちらにもそのまま使える
+        // (水面より上のworldPosでdot結果が正になることも、この式から導ける)。
+        // 水面が無いシーンでもwaterPlaneY=0で計算はできるが、パスを登録しないため使われない
+        const DirectX::XMMATRIX reflectMatrix =
+            DirectX::XMMatrixReflect(DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, -waterPlaneY));
+        // メインカメラと同じジッター済みProjを使う(PlanarReflection.hlsl冒頭参照。ジッターが
+        // 異なると反射がメインの画面UVとサブピクセル単位でずれてしまう)
+        const DirectX::XMMATRIX reflectedViewProj = reflectMatrix * viewMatrix * jitteredProj;
         DirectX::XMVECTOR determinant;
         const DirectX::XMMATRIX invViewProj = DirectX::XMMatrixInverse(&determinant, viewProj);
         DirectX::XMStoreFloat4x4(&constants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
@@ -3992,6 +4174,10 @@ namespace Kurenai
             m_CloudDensity,
         };
         constants.CloudParams1 = { m_CloudScrollOffset.x, m_CloudScrollOffset.y, m_CloudForwardG, 0.0f };
+        // 平面反射(P6)。このフィールドを参照するのはPlanarReflection.hlslだけで、そちらは
+        // 専用のm_PlanarReflectionConstantBufferで明示的に上書きした値を使う(下のPlanarReflection
+        // パス登録箇所参照)。共有のm_FrameConstantBufferにも一貫した値を入れておく
+        constants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, hasWaterInstance ? -waterPlaneY : 0.0f };
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
@@ -5324,6 +5510,116 @@ namespace Kurenai
             },
         });
 
+        // --- 平面反射パス(P6): 水面に不透明ジオメトリの鏡像を映すフォワードパス ---
+        // 水面が無いシーン・無効化時はパスを登録しない(SSR側のフラグも0になる。下のSSRパス参照)
+        if (planarReflectionPassRuns)
+        {
+            RHI::Viewport planarReflectionViewport;
+            planarReflectionViewport.Width = static_cast<float>(m_PlanarReflectionWidth);
+            planarReflectionViewport.Height = static_cast<float>(m_PlanarReflectionHeight);
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "PlanarReflection",
+                // ProbeCapture/captureProbeFaceと同じ理由でシャドウ・IBL・DDGIを挙げ、
+                // これらを書くパスより後ろへ順序付ける(実際のバインドはExecute内)
+                .Reads = {
+                    m_ShadowCascadeArray.get(), m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(),
+                    m_BRDFLUTTexture.get(), m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
+                },
+                .RenderTargets = { m_PlanarReflectionColor.get() },
+                .DepthTarget = m_PlanarReflectionDepth.get(),
+                .BufferReads = { m_LightBuffer.get() },
+                .Execute = [this, &constants, &planarReflectionViewport, reflectedViewProj, reflectMatrix,
+                            waterPlaneY](RHI::IRHICommandList* cmd)
+                {
+                    // captureProbeFaceとまったく同じ作法(constants.ViewProj/CameraPosition/
+                    // PrevViewProj/TAAParams/PlanarReflectionPlaneだけをこのパス用に差し替える)。
+                    // Viewはカメラのビュー行列のままにする(PlanarReflection.hlsl冒頭の
+                    // 【Viewをカメラのままにする理由】参照。ProbeCaptureとは異なる理由による)
+                    FrameConstants reflectionConstants = constants;
+                    DirectX::XMStoreFloat4x4(&reflectionConstants.ViewProj, DirectX::XMMatrixTranspose(reflectedViewProj));
+                    const DirectX::XMVECTOR reflectedCameraPos =
+                        DirectX::XMVector3Transform(DirectX::XMLoadFloat4(&constants.CameraPosition), reflectMatrix);
+                    DirectX::XMFLOAT4 reflectedCameraPosFloat;
+                    DirectX::XMStoreFloat4(&reflectedCameraPosFloat, reflectedCameraPos);
+                    reflectionConstants.CameraPosition = { reflectedCameraPosFloat.x, reflectedCameraPosFloat.y, reflectedCameraPosFloat.z, 0.0f };
+                    // TAA関連はカメラ視点のものが入ったままなので明示的に潰す(captureProbeFaceと同じ理由)
+                    reflectionConstants.PrevViewProj = reflectionConstants.ViewProj;
+                    reflectionConstants.TAAParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+                    reflectionConstants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, -waterPlaneY };
+                    cmd->UpdateBuffer(m_PlanarReflectionConstantBuffer.get(), &reflectionConstants, sizeof(reflectionConstants));
+
+                    // RenderTargets/DepthTargetはパス宣言(.RenderTargets/.DepthTarget)により
+                    // RenderGraphが自動的にバインド済みのため、ここではビューポート設定と
+                    // クリアだけでよい(GBuffer/Lightingパスと同じ流儀。captureProbeFaceは
+                    // .Writesのみの宣言のため例外的に手動バインドしている)
+                    cmd->SetViewport(planarReflectionViewport);
+                    cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
+                    // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする
+                    cmd->ClearDepth(0.0f);
+
+                    cmd->SetPipelineState(m_PlanarReflectionPipelineState.get());
+                    cmd->SetConstantBuffer(0, m_PlanarReflectionConstantBuffer.get());
+                    cmd->SetSamplerSet(m_MaterialSamplers.get());
+
+                    // captureProbeFaceと同じ順・同じレジスタでバインドする(PlanarReflection.hlsl参照)
+                    cmd->SetTexture(4, m_ShadowCascadeArray.get());
+                    cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
+                    cmd->SetTexture(9, m_IrradianceTexture.get());
+                    cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
+                    cmd->SetTexture(11, m_BRDFLUTTexture.get());
+                    cmd->SetTexture(12, m_DDGIIrradianceAtlas.get());
+                    cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
+
+                    // 鏡映カメラで描くとワインディングが全反転するため、PSOの切り替えは
+                    // instance.IsMirroredの否定で行う(このファイル冒頭のPSO生成箇所のコメント参照)
+                    RHI::IRHIPipelineState* currentPipelineState = m_PlanarReflectionPipelineState.get();
+                    const auto bindPipelineState = [&](bool mirrored)
+                    {
+                        RHI::IRHIPipelineState* const wanted =
+                            mirrored ? m_PlanarReflectionPipelineStateMirrored.get() : m_PlanarReflectionPipelineState.get();
+                        if (wanted == currentPipelineState)
+                        {
+                            return;
+                        }
+                        cmd->SetPipelineState(wanted);
+                        cmd->SetConstantBuffer(0, m_PlanarReflectionConstantBuffer.get());
+                        cmd->SetSamplerSet(m_MaterialSamplers.get());
+                        currentPipelineState = wanted;
+                    };
+
+                    for (const auto& instance : m_Scene.Instances)
+                    {
+                        for (const auto& mesh : instance.Model.Meshes)
+                        {
+                            // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
+                            // PlanarReflection.hlsl冒頭参照)
+                            if (mesh.IsTransparent)
+                            {
+                                continue;
+                            }
+
+                            bindPipelineState(!instance.IsMirrored);
+
+                            const ObjectConstants objectConstants =
+                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                            cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                            cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                            cmd->SetTexture(0, mesh.BaseColorTexture);
+                            cmd->SetTexture(1, mesh.NormalTexture);
+                            cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
+                            cmd->SetTexture(3, mesh.EmissiveTexture);
+                            cmd->SetTexture(5, mesh.OcclusionTexture);
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        }
+                    }
+                },
+            });
+        }
+
         // --- 反射パス: Lightingパスが適用した鏡面IBLを、実際に追跡した反射で差し替える(20章)。
         //     ScreenSpaceならSSR(レイマーチ)、RaytracedならRT反射(RayQuery)。
         //     Offならスキップし、後段のTonemapが直接m_SceneColorを読む ---
@@ -5340,9 +5636,13 @@ namespace Kurenai
                     m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                     m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
                     m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
+                    // 平面反射(P6)。パスが登録されなかったフレームでもこのReadsは無害
+                    // (今フレームのWriterが無いため単に依存辺が張られないだけ)
+                    m_PlanarReflectionColor.get(),
                 },
                 .RenderTargets = { m_SSRTexture.get() },
-                .Execute = [this, &gbufferViewport, activeAOTexture, usingProceduralSky](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gbufferViewport, activeAOTexture, usingProceduralSky,
+                            planarReflectionPassRuns](RHI::IRHICommandList* cmd)
                 {
                     // 水面の解析空フォールバック(P4)。手続き空が無効(.ksceneがDDSスカイボックスを
                     // 明示するシーン)なときは、m_WaterAnalyticSkyReflectionの値に関わらず必ず0にする
@@ -5351,10 +5651,15 @@ namespace Kurenai
                     // DeferredLighting.hlsl向けのconstants.SkyParams.y代入と同じ判断)
                     const float waterAnalyticSkyFlag =
                         (m_WaterAnalyticSkyReflection && usingProceduralSky) ? 1.0f : 0.0f;
+                    // 平面反射(P6)。このフレームでPlanarReflectionパスを実際に実行したときだけ
+                    // 有効にする(登録されなかったフレームにm_PlanarReflectionColorの中身は
+                    // 前フレーム/未定義の残骸なので、フラグをそのままSSR.hlsl側へ渡してはいけない)
+                    const float planarReflectionFlag = planarReflectionPassRuns ? 1.0f : 0.0f;
 
                     SSRConstants ssrConstants{};
                     ssrConstants.Params0 =
                         { m_SSRMaxDistance, m_SSRThickness, m_SSRRoughnessCutoff, waterAnalyticSkyFlag };
+                    ssrConstants.Params1 = { planarReflectionFlag, m_PlanarReflectionDistortion, 0.0f, 0.0f };
                     cmd->UpdateBuffer(m_SSRConstantBuffer.get(), &ssrConstants, sizeof(ssrConstants));
 
                     cmd->SetViewport(gbufferViewport);
@@ -5373,6 +5678,10 @@ namespace Kurenai
                     cmd->SetTexture(8, m_ProbePrefilteredArray.get());
                     cmd->SetShaderResourceBuffer(9, m_ProbeBuffer.get());
                     cmd->SetTexture(10, m_ProbeDistanceArray.get());
+                    // 平面反射(P6)。DX12はディスクリプタテーブルに未初期化のスロットが残ると
+                    // 動作が未定義になるため、パスが無効なフレームでも常にバインドする
+                    // (反射プローブ・DDGIと同じ理由)
+                    cmd->SetTexture(11, m_PlanarReflectionColor.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -5912,6 +6221,20 @@ namespace Kurenai
             // 0/1の二値なのでMode 3(Gain倍する遮蔽率表示)ではなく専用のMode 17を使う
             presentSourceTexture = m_GBufferMaterial.get();
             presentMode = 17;
+            break;
+        case DebugView::PlanarReflection:
+            // 平面反射(P6)パスの出力。パスが今フレーム実行されていない(無効化・水面なし)場合、
+            // m_PlanarReflectionColorの中身は前フレーム/未定義の残骸なので最終結果のまま何も
+            // 切り替えない(RTShadowデバッグ表示と同じ方針)
+            if (planarReflectionPassRuns)
+            {
+                // HDRのためMode 4でReinhardトーンマッピング+ガンマ補正して表示する
+                // (DirectLight/Bloomと同じ扱い)。専用のMode追加は不要でPresent.hlslは無変更のまま使える
+                presentSourceTexture = m_PlanarReflectionColor.get();
+                presentMode = 4;
+                presentSourceWidth = m_PlanarReflectionWidth;
+                presentSourceHeight = m_PlanarReflectionHeight;
+            }
             break;
         }
 
