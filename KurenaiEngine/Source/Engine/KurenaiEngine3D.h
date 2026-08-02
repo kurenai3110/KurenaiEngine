@@ -545,6 +545,32 @@ namespace Kurenai
         int32_t m_RTShadowSampleCount = Defaults::RTShadowSampleCount;
         float m_RTShadowSunAngularRadiusDegrees = Defaults::RTShadowSunAngularRadiusDegrees;
 
+        // --- 大気遠近(P8: height fog / aerial perspective) ---
+        // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
+        // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
+        // 冒頭のコメント参照。無効時(m_FogEnabled=falseまたはm_FogDensity<=0)はパス自体を
+        // 登録せず、GetActiveReflectionOutput()の結果がそのままTAA(またはTonemap)へ渡る
+        std::unique_ptr<RHI::IRHIShader> m_AerialPerspectiveVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_AerialPerspectivePixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_AerialPerspectivePipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_AerialPerspectiveTexture;
+        bool m_FogEnabled = Defaults::FogEnabled;
+        // 基準高度(m_FogRefHeight)での消散係数[1/m]。AerialPerspective.hlsl/PlanarReflection.hlslの
+        // FogParams0.xへ渡る
+        float m_FogDensity = Defaults::FogDensity;
+        // スケールハイト[m]。大きいほど霞が高くまで及ぶ(HeightFog.hlsli参照)
+        float m_FogScaleHeight = Defaults::FogScaleHeight;
+        // 基準高度[m](ワールドY)。既定は水面の高さに合わせている
+        float m_FogRefHeight = Defaults::FogRefHeight;
+        // 不透明度の上限(1.0で遠方が完全に空の色まで行く)
+        float m_FogMaxOpacity = Defaults::FogMaxOpacity;
+        // 水中項(P8)。Water.hlslのPSMainがメッシュ自身のBaseColorFactorの代わりにこの色を
+        // 出力Albedoに使う(見下ろした水面がFresnel最小でほぼ真っ黒になる問題への対処。
+        // 干潟の水の色はシーン側で調整したいパラメータであり、.kmodelを焼き直さずに変えられるようにするため)
+        DirectX::XMFLOAT3 m_WaterBodyColor{
+            Defaults::WaterBodyColorR, Defaults::WaterBodyColorG, Defaults::WaterBodyColorB
+        };
+
         // TAA(Temporal Anti-Aliasing)パス: SSRの後、露出/ブルーム/トーンマップの前に置く。
         // 毎フレーム投影行列を1ピクセル未満だけずらして(ジッター)サンプル位置を散らし、
         // モーションベクターで前フレームの結果を今フレームの画素へ再投影して蓄積する。

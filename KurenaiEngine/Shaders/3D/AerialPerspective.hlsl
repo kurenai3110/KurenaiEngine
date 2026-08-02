@@ -1,0 +1,198 @@
+// 大気遠近(height fog / aerial perspective)パス(P8)。
+//
+// 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
+// Lightingパスの中に入れなかったのは次の2点が実コードの制約として存在するため:
+//   1. SSR(Shaders/3D/SSR.hlsl)はm_SceneColorを「反射先の環境色」としてそのまま読む(t0)。
+//      Lightingの中でフォグを掛けてしまうとSSRがフォグ済みの色を反射に使い、
+//      画面上でフォグが二重に(直接見えている分+反射に映った分)乗ってしまう
+//   2. 半透明パス(Transparent.hlsl)はLightingパスの後にm_SceneColorへ直接描き足す。
+//      Lighting内でフォグを掛けるとその後に描かれる半透明サーフェスだけフォグを免れてしまう
+// TAAより前に置くのは、フォグが深度から決まる純関数で時間方向に揺れないため
+// (TAA自身が時間方向のノイズを均す側に回れる。逆にTAAの後ろへ置くと、フォグが作る
+// 勾配の強い縁がジッターで解決されないままTAAをすり抜けてエイリアシングを残す)。
+//
+// 頂点シェーダー(フルスクリーン三角形)とReconstructWorldPosはSSR.hlslのものと完全に同一の内容を
+// 複製している(SSR.hlslはcbuffer/テクスチャの宣言と一体になっており、この2つだけを
+// 抜き出してヘッダー化すると余計な結合が増えるため、複製のほうを選んだ)。
+#include "Samplers.hlsli"
+// 大気遠近の透過率(cbufferに依存しない純粋関数)。PlanarReflection.hlslと共有する
+#include "HeightFog.hlsli"
+// 空モデル(Perez分布)の共有ヘッダー。in-scatter項(フォグの合成先の色)に、背景と同じ
+// SkyColorをそのまま使うことで、遠方の地物が無限遠で背景の空色へ厳密に収束するようにする
+// (詳細はSky.hlsli冒頭のコメント、および本ファイルPSMain末尾のコメント参照)
+#include "Sky.hlsli"
+
+cbuffer FrameConstants : register(b0)
+{
+    float4x4 ViewProj;
+    float4x4 InvViewProj;
+    // カスケードシャドウマップ用(このシェーダでは未使用。オフセット合わせのためだけに宣言する)
+    float4x4 CascadeViewProj[4];
+    float4 CameraPosition;
+    float4 LightDirection;
+    float4 LightColor;
+    float4x4 View;
+    float4x4 Proj;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 AmbientColor;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 CascadeSplits;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 ShadowParams;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 ActiveLightCount;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 IBLParams;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 ProbeParams;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 ProbeParams2;
+    // ここから下、TAA(23章)・DDGI(22章)・水面の波(P2)用の8本はこのシェーダでは未使用。
+    // cbufferのレイアウトは宣言順で決まり途中のフィールドを飛ばせないため、末尾のSky*・Fog*
+    // フィールドのオフセットをC++側 KurenaiEngine3D.cpp の FrameConstants と合わせる
+    // 目的だけで宣言している(SSR.hlsl/DeferredLighting.hlslの同名フィールドと同じ扱い)
+    float4x4 PrevViewProj;
+    float4 TAAParams;
+    float4 DDGIParams0;
+    float4 DDGIParams1;
+    float4 DDGIParams2;
+    float4 DDGIParams3;
+    float4 DDGIParams4;
+    float4 TimeParams;
+    // 空の解析評価用(P3で追加)。MakeSkyParametersが読む。xyz=太陽が「ある」向き
+    // (未正規化のまま渡ってくる。呼び出し側でnormalizeする)、w=未使用
+    float4 SkySunDirection;
+    // x=未使用、y=このシェーダでは未使用(背景の解析評価トグルはDeferredLighting.hlsl専用)、zw=未使用
+    float4 SkyParams;
+    // 雲(P5、さらに末尾に追加)。DeferredLighting.hlsl/SSR.hlsl/PlanarReflection.hlslの同名フィールドと
+    // 完全に同じ順・同じ型であること(C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams0/1 と
+    // 揃える。ずれるとフォグのin-scatterに使う空の色が背景・水面反射と食い違う)。
+    // CloudParams0: x=被覆率(0で雲なし。Sky.hlsliのSkyColorが早期脱出する)、
+    //               y=雲底の高度[m](カメラ基準)、z=UVスケール[ノイズ空間/m]、w=消散係数
+    float4 CloudParams0;
+    // CloudParams1: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
+    //               同じ周期でwrap済み)、z=Henyey-Greensteinの非対称パラメータ、w=未使用
+    float4 CloudParams1;
+    // 巻雲(P11、さらに末尾に追加)。他シェーダーの同名フィールドと完全に同じ順・同じ型であること
+    // (C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams2/3 と揃える)。
+    // CloudParams2: x=巻雲の被覆率(0で巻雲なし)、y=雲底の高度[m](カメラ基準)、
+    //               z=UVスケール[ノイズ空間/m]、w=消散係数
+    float4 CloudParams2;
+    // CloudParams3: xy=風によるノイズ空間の移動量(積雲と同じくkCloudNoisePeriodでwrap済み)、
+    //               z=fBmのUV(U方向)を伸ばす異方性スケール、w=未使用
+    float4 CloudParams3;
+    // 平面反射(P6)。このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 PlanarReflectionPlane;
+    // 大気遠近(P8、末尾に追加)。x=基準高度での消散係数[1/m]、y=スケールハイト[m]、
+    // z=基準高度[m](ワールドY)、w=有効フラグ(0で無効。UIでオフ、またはシーンが手続き空を
+    // 使っていない場合に0になる。手続き空が無効なシーンでは下のSkyColorによる解析評価が
+    // 意味を持たないため、SSR.hlslのwaterAnalyticSkyFlagと同じ判断をC++側で行う)
+    float4 FogParams0;
+    // x=不透明度の上限(1.0で完全に空の色まで行く)、yzw=未使用
+    float4 FogParams1;
+    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslのPSMainが読む
+    float4 WaterBodyColor;
+};
+
+// t0=入力のSceneColor(反射パスの出力。GetActiveReflectionOutput())、t1=深度、
+// t2=SkyIntegrate.hlslが書いた空パラメータ(SSR.hlsl等と同じStructuredBuffer)
+Texture2D SceneColorTexture : register(t0);
+Texture2D DepthTexture : register(t1);
+StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t2);
+
+struct PSInput
+{
+    float4 Position : SV_POSITION;
+    float2 UV : TEXCOORD0;
+};
+
+// 頂点バッファなしで画面全体を覆う三角形を1枚だけ生成する定番のテクニック(SSR.hlslのVSMainと同一)
+PSInput VSMain(uint vertexID : SV_VertexID)
+{
+    PSInput output;
+    output.UV = float2((vertexID << 1) & 2, vertexID & 2);
+    output.Position = float4(output.UV.x * 2.0f - 1.0f, 1.0f - output.UV.y * 2.0f, 0.0f, 1.0f);
+    return output;
+}
+
+// SSR.hlslのReconstructWorldPosと同一の内容
+float3 ReconstructWorldPos(float2 uv, float depth)
+{
+    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
+    float4 clipPos = float4(ndc, depth, 1.0f);
+    float4 worldPos = mul(clipPos, InvViewProj);
+    return worldPos.xyz / worldPos.w;
+}
+
+// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる。
+// SSR.hlsl/DeferredLighting.hlsl/PlanarReflection.hlslのMakeSkyParametersと完全に同一の内容
+// (正規化の扱いを含む)。4つのシェーダーはcbufferをそれぞれ別に宣言しているため関数そのものは
+// 共有できず複製しているが、中身がずれると「背景の空」「水面に映る空」「フォグの合成先の色」が
+// 互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
+SkyParameters MakeSkyParameters()
+{
+    SkyParameters params;
+    params.SunDirection = normalize(SkySunDirection.xyz);
+    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
+    params.CloudCoverage = CloudParams0.x;
+    params.CloudAltitude = CloudParams0.y;
+    params.CloudUvScale = CloudParams0.z;
+    params.CloudDensity = CloudParams0.w;
+    params.CloudScrollOffset = CloudParams1.xy;
+    params.CloudForwardG = CloudParams1.z;
+    params.CirrusCoverage = CloudParams2.x;
+    params.CirrusAltitude = CloudParams2.y;
+    params.CirrusUvScale = CloudParams2.z;
+    params.CirrusDensity = CloudParams2.w;
+    params.CirrusScrollOffset = CloudParams3.xy;
+    params.CirrusAnisotropy = CloudParams3.z;
+    return params;
+}
+
+float4 PSMain(PSInput input) : SV_TARGET
+{
+    float3 sceneColor = SceneColorTexture.Sample(ColorSampler, input.UV).rgb;
+
+    float depth = DepthTexture.Sample(DataSampler, input.UV).r;
+    if (depth <= 0.0f)
+    {
+        // Reverse-Zのため背景(スカイ)の深度は0.0。背景は既にDeferredLighting.hlslの解析評価
+        // (またはスカイボックス)で正しい値になっており、経路長も定義できないためフォグを掛けない。
+        // ここで1ビットも変えずに素通しすることが、フォグ無効時との差分ゼロを担保する
+        return float4(sceneColor, 1.0f);
+    }
+
+    if (FogParams0.w <= 0.5f)
+    {
+        // 無効(UIでオフ、またはシーンが手続き空を使っていない。FogParams0.wのコメント参照)。
+        // 恒等関数として振る舞い、以降の計算は一切行わない
+        return float4(sceneColor, 1.0f);
+    }
+
+    float3 worldPos = ReconstructWorldPos(input.UV, depth);
+    const float transmittance =
+        HeightFogTransmittance(CameraPosition.xyz, worldPos, FogParams0.x, FogParams0.y, FogParams0.z);
+    const float alpha = saturate(1.0f - transmittance) * saturate(FogParams1.x);
+
+    // in-scatterの方向は視線方向のyを0以上へクランプしたものを使う。水平線より下を向いた画素で
+    // SkyColorをそのまま評価すると下半球のGroundTint(暗い接地色)が返り、遠景が霞むのではなく
+    // 黒ずんでしまう。水平線(viewDir.y==0)では両者が一致するため、クランプしても背景との
+    // 連続性(depth<=0の早期脱出との継ぎ目)は保たれる
+    const float3 viewDir = normalize(worldPos - CameraPosition.xyz);
+    const float3 clampedDir = float3(viewDir.x, max(viewDir.y, 0.0f), viewDir.z);
+    const float clampedLength = length(clampedDir);
+    // 真下をちょうど向いた画素ではclampedDirが零ベクトルになり、normalizeがNaNを返す。
+    // NaNはこの後のTAA・ブルーム・自動露出を経由して画面全体へ伝播するため必ず退避させる。
+    // 該当するのは視線が厳密に真下の1画素だけで、その周囲の画素は既に水平方向を向いている
+    // (x,zがどれだけ小さくても比だけで方向が決まる)ため、退避先も水平方向の任意の1方向でよい
+    const float3 fogDir =
+        (clampedLength > 1e-5f) ? (clampedDir / clampedLength) : float3(0.0f, 0.0f, 1.0f);
+
+    // 【Mie位相関数は掛けない】SkyColorが返す値には既にPerez分布のgamma項(太陽角距離の項)と
+    // SunGlowTintが入っており、太陽方向で明るくなる角度依存性を既に持っている。その上に
+    // 位相関数をさらに掛けると前方散乱を二重に計上することになるため、ここでは掛けない
+    const float3 inScatter = SkyColor(fogDir, MakeSkyParameters());
+
+    const float3 outColor = sceneColor * (1.0f - alpha) + inScatter * alpha;
+    return float4(outColor, 1.0f);
+}

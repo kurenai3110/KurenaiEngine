@@ -145,6 +145,38 @@ namespace Kurenai::Defaults
     // 見た目からの調整値。1.0で積雲と同じ等方的な塊になる
     inline constexpr float CirrusAnisotropy = 3.0f;
 
+    // --- 大気遠近(P8: height fog / aerial perspective) ---
+    // 以下の数値はいずれも見た目からの調整値であり、物理的な導出や実測値ではない
+    // (親セッション側の実機確認で調整可能。KurenaiEngine3D::m_FogDensity等のコメント参照)
+    inline constexpr bool FogEnabled = true;
+    // 基準高度(FogRefHeight)での消散係数[1/m]。
+    // 【この値の根拠】消散係数は気象学的視程Vと Koschmieder の関係 sigma = 3.912 / V で結び付く
+    // (コントラスト閾値2%での定義)。0.0004 は V ≒ 10km に相当し、「晴れているが遠景がわずかに
+    // 霞む」日に当たる。最初に置いていた 0.0015 は V ≒ 2.6km(もや)に相当し、実測すると
+    // 600m先の島でも透過率が0.5を切って絵全体が灰色に潰れた。ここは調整可能なつまみだが、
+    // 動かすときは「どのくらいの視程を想定するか」で決めるのが分かりやすい
+    inline constexpr float FogDensity = 0.0004f;
+    // スケールハイト[m]。大きいほど霞が高くまで及ぶ。エアロゾルのスケールハイトとして
+    // 一般に言われる目安(おおむね1〜1.5km)の下端を採った(精密な観測値ではなく目安からの採用)。
+    // このシーンは地物が最も高い尖塔でも165mしかないため、この値の違いは絵にほとんど出ない
+    inline constexpr float FogScaleHeight = 1000.0f;
+    // 基準高度[m](ワールドY)。水面の高さに合わせている
+    inline constexpr float FogRefHeight = 0.0f;
+    inline constexpr float FogMaxOpacity = 1.0f;
+    // 水体の色(リニア)。水中で拡散的に後方散乱して戻ってくる光の粗い近似で、
+    // 見下ろしたときに水面が何色に見えるかをほぼ一手に決める(すれすれの角度ではFresnelが
+    // 大きくなり鏡面反射が支配的になるため、この色はほとんど効かない)。
+    //
+    // 【値の決め方】Water.kmodelのbaseColorFactorは(0.02, 0.03, 0.04)だったが、この明るさでは
+    // 見下ろしたときの近距離の水面が輝度15/255程度にしかならず「海が見えない」状態だった
+    // (Fresnelが約0.028まで下がるため、見えているもののほぼ全部がこの拡散色になる)。
+    // モン・サン=ミシェル湾は土砂を多く含む濁った海なので、澄んだ海水(反射率数%)ではなく
+    // 濁水の反射率(おおむね8〜15%と言われる帯域)の下寄りを採り、色みも青緑ではなく
+    // 茶灰へ寄せた。物理量の実測ではなく、その帯域を根拠に見た目で決めた値
+    inline constexpr float WaterBodyColorR = 0.085f;
+    inline constexpr float WaterBodyColorG = 0.082f;
+    inline constexpr float WaterBodyColorB = 0.070f;
+
     // --- レイトレーシング反射(DX12かつDXR Tier 1.1対応時のみ選択できる) ---
     // 最大レイ距離はシーン読み込み時に対角長から決め直す(SSRのMaxDistanceと同じ扱い)。
     // SSRより長いのは、画面外まで追えるRTでは短く切ると反射が途中で空へ抜けてしまうため

@@ -60,6 +60,15 @@ cbuffer FrameConstants : register(b0)
     float4 ProbeParams;
     // 距離キューブ用(19.12節)。意味はDeferredLighting.hlslと同じ
     float4 ProbeParams2;
+    // 大気遠近(P8)・水中項(P8)。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で
+    // 決まるため、末尾に追加のみで既存フィールドのオフセットを動かさない(この末尾へ追加する限り、
+    // ここより前のフィールドしか読まないこのシェーダーは今回の変更の影響を受けない)。
+    // 【半透明メッシュにフォグを掛けない理由】AerialPerspective.hlslはこのTransparentパスより
+    // 後のTAA直前に置かれるため、Transparentが描いた色も含めて後段でまとめてフォグが掛かる
+    // (このシェーダー自体でフォグを計算する必要が無い)
+    float4 FogParams0;
+    float4 FogParams1;
+    float4 WaterBodyColor;
 };
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で

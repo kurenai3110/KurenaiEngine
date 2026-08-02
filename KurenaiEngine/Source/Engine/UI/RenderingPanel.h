@@ -33,6 +33,7 @@ namespace Kurenai::UI
         void DrawLightCullingSection();
         void DrawWaterSection();
         void DrawCloudSection();
+        void DrawFogSection();
 
         KurenaiEngine3D& m_Engine;
     };

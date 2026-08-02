@@ -113,6 +113,15 @@ cbuffer FrameConstants : register(b0)
     // CloudParams3: xy=風によるノイズ空間の移動量(積雲と同じくkCloudNoisePeriodでwrap済み)、
     //               z=fBmのUV(U方向)を伸ばす異方性スケール、w=未使用
     float4 CloudParams3;
+    // 平面反射(P6)。このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 PlanarReflectionPlane;
+    // 大気遠近(P8、末尾に追加)。このシェーダでは未使用だが、C++側 KurenaiEngine3D.cpp の
+    // FrameConstantsと並びを一致させる目的だけで宣言する
+    // (AerialPerspective.hlsl/PlanarReflection.hlslが読む)
+    float4 FogParams0;
+    float4 FogParams1;
+    // 水中項(P8)。このシェーダでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
+    float4 WaterBodyColor;
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -226,7 +235,11 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 }
 
 // FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる(P3)。
-// SunDirectionの正規化はここで行う(SkyGenerate.hlsl側の慣習=呼び出し側でnormalizeする、に揃える)
+// SunDirectionの正規化はここで行う(SkyGenerate.hlsl側の慣習=呼び出し側でnormalizeする、に揃える)。
+// SSR.hlsl/AerialPerspective.hlsl/PlanarReflection.hlslのMakeSkyParametersと完全に同一の内容で
+// あること。4つのシェーダーはcbufferをそれぞれ別に宣言しているため関数そのものは共有できず
+// 複製しているが、中身がずれると「背景の空」「水面に映る空」「フォグの合成先の色」が
+// 互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
 SkyParameters MakeSkyParameters()
 {
     SkyParameters params;

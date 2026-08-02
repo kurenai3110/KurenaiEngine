@@ -54,6 +54,24 @@ cbuffer FrameConstants : register(b0)
     // z=波の強さ(m_WaterWaveStrength、0〜1、距離減衰のweightに掛ける)、w=未使用。
     // GBuffer.hlslのPSMainは使わないが、Water.hlslのPSMainが読む
     float4 TimeParams;
+    // 空の解析評価用(P3)・雲(P5)・巻雲(P11)・平面反射(P6)。GBuffer.hlsl/Water.hlslのどちらの
+    // PSMainも使わないが、C++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させる
+    // 目的だけで宣言する(他シェーダーの同名フィールドと同じ扱い)
+    float4 SkySunDirection;
+    float4 SkyParams;
+    float4 CloudParams0;
+    float4 CloudParams1;
+    float4 CloudParams2;
+    float4 CloudParams3;
+    float4 PlanarReflectionPlane;
+    // 大気遠近(P8、末尾に追加)。GBuffer.hlsl/Water.hlslのどちらのPSMainも使わない
+    // (オフセット合わせのためだけに宣言する)
+    float4 FogParams0;
+    float4 FogParams1;
+    // 水中項(P8)。xyz=水体の色(リニア)、w=未使用。GBuffer.hlslのPSMainは使わないが、
+    // Water.hlslのPSMainが「メッシュ自身のBaseColorFactorではなくこの色を出力Albedoに使う」ために読む
+    // (干潟の水の色はシーン側で調整したいパラメータであり、.kmodelを焼き直さずに変えられるようにするため)
+    float4 WaterBodyColor;
 };
 
 // メッシュ単位(将来的にはシーン上のモデルインスタンス単位)の情報。

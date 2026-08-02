@@ -85,7 +85,14 @@ PSOutput PSMain(PSInput input)
     float ao = lerp(1.0f, occlusionSample, OcclusionStrength);
 
     PSOutput output;
-    output.Albedo = float4(baseColorSample.rgb, 1.0f);
+    // 水中項(P8)。メッシュ自身のbaseColorSample.rgb(誘電体でほぼ黒に焼かれている)は使わず、
+    // WaterBodyColor.rgb(FrameConstants、UIから調整可能)を出力Albedoに使う。
+    // これは水体で拡散的に後方散乱して戻ってくる光の粗い近似であり、屈折・水深依存の減衰は
+    // 含んでいない(G-Bufferが水深の情報を持たないため一定色にしている)。
+    // 拡散項として書くことで、Fresnelによる「見下ろすと水の色/すれすれだと鏡」の切り替わりは
+    // 既存のDeferredLighting.hlslの式がそのまま担当する(水面専用の分岐は増やさない)。
+    // baseColorSample.aによるアルファカットアウトはこの置き換えとは無関係にそのまま残す(直前のclip参照)
+    output.Albedo = float4(WaterBodyColor.rgb, 1.0f);
     output.Normal = OctEncode(N);
     // aチャンネルに水面のマテリアルIDを書く(GBuffer.hlslの通常マテリアルは0.0fのまま)。
     // DebugView::WaterMask(Present.hlsl Mode 17)がこの値をそのままグレースケール表示する

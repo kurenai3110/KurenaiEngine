@@ -8044,7 +8044,7 @@ P5で積雲1層に絞った雲モデルへ、高層の巻雲を2層目として�
 自己影ブロック(太陽方向へ密度を積分してビアの法則で減衰させる部分)を丸ごとスキップし、
 <code>sunTransmittance = 1.0</code>として扱う。巻雲はシェーダ内定数
 <code>kCirrusShadowSteps = 0</code>を渡すため、この経路を通る。巻雲は光学的に薄く
-(<code>CirrusDensity</code>の既定値は積雲の1桁下)自己影がほとんど見た目に効かないため、
+(<code>CirrusDensity</code>の既定値2.0は積雲の8.0の1/4)自己影がほとんど見た目に効かないため、
 コストを払う意味がないという判断による。ステップ数が<code>CloudLayerParams</code>の実行時の値
 (積雲は5、巻雲は0)になったことで、自己影のfor文は<code>[unroll]</code>(P5時点、トリップ数が
 シェーダ内定数だった)ではなく<code>[loop]</code>(コンパイル時にトリップ数を確定できない)へ
@@ -8237,6 +8237,226 @@ GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定
 画素数を数える仕組みがRHIに無く、それ自体が新しい機構になるため見送った。パスを登録するか
 どうかの判定は「水面インスタンスが存在するか」という静的な条件だけで行う。
 </p>
+</section>
+
+<section id="aerialperspective">
+<h2>36. 大気遠近(height fog / aerial perspective、P8)</h2>
+
+<p>
+高度で指数減衰する消散係数を持つ均一媒質を光線に沿って解析的に積分した透過率で、遠方の地物ほど
+背景の空の色(<a href="#procedural-sky">21章</a>の<code>Sky.hlsli</code>)へ滲んでいく効果を足した。
+新設した<code>Shaders/3D/AerialPerspective.hlsl</code>が反射パス(<a href="#ssr">7章</a>・
+<a href="#ssrprobe">20章</a>のSSR/RT反射)の直後、<a href="#taa">23章</a>のTAAパスの直前に置く
+フルスクリーン三角形+ピクセルシェーダーとして働く。合わせて、平面反射(<a href="#planarreflection">35章</a>)
+の鏡像にも同じ式を適用し、水面(<a href="#ssrprobe">20.6節</a>)については見下ろしたときに
+Fresnelがほぼ最小になって真っ黒に沈む問題への対処として、水体の拡散反射色を1色足した。
+</p>
+
+<h3>36.1 なぜ独立パスなのか ― Lightingパスの中に入れなかった理由</h3>
+<p>
+フォグの合成は「深度から求めた経路長 → 透過率 → 背景色とのlerp」という単純な式だが、
+Deferredな<code>DeferredLighting.hlsl</code>(<a href="#ssrprobe">20章</a>)の中でこれを行うと、
+実コードの制約により2つの問題が起きる:
+</p>
+<ol>
+<li><strong>SSRが二重にフォグを見てしまう。</strong>SSR(<code>Shaders/3D/SSR.hlsl</code>)は
+Lightingパスが完成させた<code>SceneColor</code>を「反射先の環境色」としてそのまま読む
+(<a href="#ssrprobe">20章</a>)。Lighting内でフォグを掛けてしまうと、SSRはフォグ済みの色を
+反射に使うことになり、画面上では直接見えている分のフォグと反射に映った分のフォグが
+二重に乗ってしまう。</li>
+<li><strong>半透明メッシュだけフォグを免れてしまう。</strong>半透明フォワードパス
+(<a href="#transparent">15章</a>)はLightingパスの<em>後</em>に<code>SceneColor</code>へ
+直接描き足す。Lightingの中でフォグを掛けると、その後に描かれる半透明サーフェスにはフォグが
+一切乗らない。</li>
+</ol>
+<p>
+どちらも「Lightingパスの中で完結させる」という前提が原因で、後段の複数のパスが
+同じ<code>SceneColor</code>を読み書きするこのエンジンの構造そのものに起因する制約である。
+そこでフォグを反射・半透明のすべてが出揃った<em>後</em>の独立パスへ切り出し、
+深度と最終的な色の2枚だけを読む形にした。
+</p>
+
+<h3>36.2 なぜTAAの前なのか</h3>
+<p>
+フォグの透過率は深度だけから決まる純関数で、時間方向に揺れる要素(ノイズ・時間的なサンプリング)を
+一切持たない。<a href="#taa">23章</a>のTAAより前に置けば、フォグが作る勾配の強い縁
+(地物と空の境界)もTAA自身のジッター+再投影で平滑化される側に回る。逆にTAAの<em>後</em>へ
+置くと、フォグの縁がTAAをすり抜けたまま最終出力に現れ、ジッターによる時間的な解決を受けられず
+エイリアシングとして残ってしまう。
+</p>
+
+<h3>36.3 in-scatter項に<code>Sky.hlsli</code>の<code>SkyColor</code>を使う理由</h3>
+<p>
+フォグの合成先の色(in-scatter項)には、専用の定数色ではなく背景と同じ
+<code>SkyColor(fogDir, params)</code>(<a href="#procedural-sky">21章</a>)をそのまま使う。
+理由は単純で、距離が無限大に近づくほど地物の色が<strong>厳密に</strong>背景の空色へ収束させたい
+ためである。専用の定数色を使うと、地平線際で「地物がフォグ色として滲んでいく先」と「背景として
+直接見えている空の色」が一致せず、水平線に沿って継ぎ目が出てしまう。<code>SkyColor</code>を
+共有することで、<a href="#clouds">34.2節</a>で確立した「背景・水面反射・IBLが同じ空モデルの
+単一定義を経由する」という設計へ、大気遠近もそのまま乗る形になった。
+</p>
+<p>
+in-scatter項の方向(<code>fogDir</code>)には、視線方向のyを0以上へクランプしたものを使う。
+水平線より下を向いた画素で<code>SkyColor</code>をそのまま評価すると、下半球の
+<code>GroundTint</code>(暗い接地色、<code>Sky.hlsli</code>)が返り、遠景が霞むのではなく
+黒ずんでしまう。水平線(<code>viewDir.y == 0</code>)ではクランプの有無で値が変わらないため、
+背景(深度が無い画素、下記36.4節)との連続性は保たれる。
+</p>
+<p class="note">
+<strong>Mie位相関数は掛けない。</strong><code>SkyColor</code>が返す値には既にPerez分布の
+gamma項(太陽角距離の項)と<code>SunGlowTint</code>が含まれており、太陽方向で明るくなる
+角度依存性を既に持っている。この上にさらに位相関数を掛けると、前方散乱を二重に計上することに
+なるため、大気遠近側では位相関数を一切導入していない。
+</p>
+
+<h3>36.4 背景画素は1ビットも変えない</h3>
+<p>
+Reverse-Zのため深度を持たない背景(スカイ)画素は<code>depth &lt;= 0.0f</code>になる。
+<code>AerialPerspective.hlsl</code>の<code>PSMain</code>はここで即座に元の色を返し、
+経路長の計算そのものを行わない。背景は既に<code>DeferredLighting.hlsl</code>の解析評価
+(または生のスカイボックス)で正しい値になっており、深度が無いため経路長も定義できない。
+この早期脱出により、フォグを無効化した状態との差分は背景領域について厳密にゼロになる。
+</p>
+
+<h3>36.5 モデルと閉形式の解</h3>
+<p>
+消散係数が高度で指数減衰する均一媒質<code>sigma(h) = Sigma0 * exp(-(h - RefHeight) / ScaleHeight)</code>
+を仮定すると、カメラ位置Aから着目点Bまでの光学的深さは解析的に積分できる
+(Frostbiteのexponential height fogと同型の閉形式)。
+</p>
+<pre><code>float3 rayVec = B - A;
+float  d      = length(rayVec);
+float  dy     = rayVec.y;
+float  baseSigma = Sigma0 * exp(-(A.y - RefHeight) / ScaleHeight);
+float  t      = dy / ScaleHeight;
+float  falloff = (abs(t) > 1e-4f) ? ((1.0f - exp(-t)) / t) : 1.0f;
+float  tau     = baseSigma * d * falloff;
+float  transmittance = exp(-max(tau, 0.0f));</code></pre>
+<p>
+<code>t</code>は光線の高度変化を無次元化した値で、<code>t → 0</code>(ほぼ水平な光線)で
+<code>(1 - exp(-t)) / t → 1</code>に収束するため、分岐で明示的に処理している(<code>t</code>が
+厳密に0だと0/0になる)。<code>exp</code>の引数はカメラが基準高度から極端に離れると大きく振れる
+ため、あらかじめクランプしてinf・NaNへの伝播を防いでいる。
+</p>
+<p>
+この閉形式が正しいことは、同じ媒質を光線に沿って200万分割で数値積分した値と突き合わせて
+確認した。水平(dy=0の分岐)・上り・下り・基準高度が非ゼロの各ケースで<strong>相対誤差は
+最大2.7e-11</strong>で、閉形式と数値積分は倍精度の丸め誤差の範囲で一致する。
+</p>
+<p>
+この関数は<code>Shaders/3D/HeightFog.hlsli</code>として、<code>cbuffer</code>やレジスタに
+一切依存しない純粋関数<code>HeightFogTransmittance</code>に括り出した(<code>Sky.hlsli</code>冒頭の
+「cbufferに依存しない」という作法と同じ)。理由は式が<code>AerialPerspective.hlsl</code>と
+<code>PlanarReflection.hlsl</code>の2箇所に現れるため。空モデルではなく大気遠近固有の値
+(消散係数・スケールハイト)を扱うヘッダーなので、<code>Sky.hlsli</code>には置いていない。
+</p>
+<p>
+最終合成は<code>alpha = (1 - transmittance) * MaxOpacity</code>を不透明度として、
+<code>outColor = sceneColor * (1 - alpha) + inScatter * alpha</code>の単純なlerpで行う。
+<code>MaxOpacity</code>を1.0未満にすると、最遠方でも元の色がうっすら透けて残る。
+</p>
+
+<h3>36.6 平面反射の鏡像にも同じフォグを掛ける</h3>
+<p>
+<a href="#planarreflection">35章</a>の平面反射パスの出力(<code>m_PlanarReflectionColor</code>)は
+<code>AerialPerspective.hlsl</code>の対象範囲(反射パスの出力)には含まれない――
+平面反射の結果はSSR側が<code>input.UV</code>でそのままサンプルして<code>SceneColor</code>へ
+合成されるため、SSRパスの出力(=大気遠近パスの入力)には既に「鏡像込みの水面反射色」が
+1画素の値として混ざり込んだ状態になっている。この時点ではもう「本体」と「鏡像」を区別できず、
+大気遠近パス側でまとめてフォグを掛けると鏡像だけを特別扱いできない。
+</p>
+<p>
+そこで<code>PlanarReflection.hlsl</code>自身の<code>PSMain</code>末尾で、SSRへ渡す<em>前</em>に
+同じ<code>HeightFogTransmittance</code>と<code>SkyColor</code>を使ってフォグを合成しておく。
+掛けないと「霞んだ本体 vs くっきりした鏡像」という不自然な絵になる。光が「物体 → 水面 → 目」の
+順に進む経路長は、鏡映カメラ(<code>CameraPosition</code>、35.3節)から物体までの距離と
+幾何学的に厳密に等しいため(鏡映は「鏡映カメラで景色を撮り直す」ことと数学的に等価という
+35.1節の理屈がそのまま成り立つ)、経路長にはその距離をそのまま使ってよい。
+</p>
+<p>
+<strong>in-scatterの方向にも鏡映カメラからの向きをそのまま使ってよい。</strong>
+水面をy=0の平面、実カメラをC、鏡映カメラをC'、着目点をO、実際の反射点をPとすると
+</p>
+<pre><code>O - C' = (Ox-Cx,  Oy+Cy,  Oz-Cz)
+O - P  = Oy/(Cy+Oy) * (Ox-Cx,  Cy+Oy,  Oz-Cz)</code></pre>
+<p>
+となり、2つは正のスカラー倍の関係にある(Cy&gt;0、Oy&gt;0のとき)。つまり
+<code>normalize(WorldPos - CameraPosition)</code>は「水面から物体へ向かう実際の光路の向き」
+そのもので、近似ではない。無視しているのは「目 → 水面」の短い区間の向きだけで、
+経路長のほうは上記のとおり鏡映カメラからの距離が全区間ぶんを正しく含む。
+</p>
+<p class="note">
+向きを逆(<code>CameraPosition - WorldPos</code>)に取ると、鏡映カメラは水面より下にあるため
+y成分が常に負になり、<code>max(viewDir.y, 0)</code>のクランプで<strong>常に水平線の色</strong>に
+潰れてしまう。実測では既定の消散係数(視程10km相当)での差は最大3/255にとどまるが、
+これは本命の構図で鏡像がほぼ水平線の近くにしか出ないためで、仰角の大きい鏡像を含む構図では
+差が広がる。
+</p>
+
+<h3>36.7 水中項 ― 見下ろした水面が真っ黒になる問題への対処</h3>
+<p>
+現状の水面(<a href="#ssrprobe">20.6節</a>)は誘電体で<code>baseColorFactor</code>がほぼ黒に
+焼かれているため、見下ろす角度(<code>NdotV</code>が大きい)ではFresnelが最小値
+(誘電体のF0、約0.02)まで落ち、反射もほとんど乗らず、結果としてほぼ真っ黒に見える。
+屈折・水中散乱の項が無いことが原因である。
+</p>
+<p>
+対処として、<code>Water.hlsl</code>の<code>PSMain</code>が出力する<code>Albedo</code>を、
+メッシュ自身の<code>baseColorSample.rgb</code>ではなく<code>FrameConstants.WaterBodyColor.rgb</code>
+(UIから調整可能な1色)へ置き換えた。<code>clip(baseColorSample.a - AlphaCutoff)</code>による
+アルファカットアウトはこの置き換えと無関係にそのまま残す。
+</p>
+<p class="note">
+これは水体で拡散的に後方散乱して戻ってくる光の<strong>粗い近似</strong>であり、屈折・水深依存の
+減衰は含んでいない。水深の情報をG-Bufferが持っていないため、一定色で近似している。
+拡散項として書くことで、Fresnelによる「見下ろすと水の色/すれすれだと鏡」という切り替わりは
+既存の<code>DeferredLighting.hlsl</code>の式がそのまま担当し、水面専用の分岐は増やしていない。
+メッシュ自身の<code>BaseColorFactor</code>を使わないのは、干潟の水の色をシーン側のパラメータとして
+調整できるようにするため(<code>.kmodel</code>を焼き直す必要がない)。
+</p>
+<p>
+<strong>置き換えただけでは問題は直らない。</strong><code>Water.kmodel</code>の
+<code>baseColorFactor</code>は<code>(0.02, 0.03, 0.04)</code>で、これと同程度の暗さを
+<code>WaterBodyColor</code>に入れても見え方はまったく変わらない(実測: 本命の構図で最大差7/255)。
+見下ろす角度ではFresnelが約0.028まで落ちて<strong>見えているもののほぼ全部がこの拡散色</strong>に
+なるため、この値そのものを上げる必要がある。既定値はモン・サン=ミシェル湾のような
+土砂を多く含む濁った海を想定し、澄んだ海水(反射率数%)ではなく濁水の反射率として
+一般に言われる帯域(おおむね8〜15%)の下寄りを採って<code>(0.085, 0.082, 0.070)</code>とした。
+物理量の実測ではなく、その帯域を根拠に見た目で決めた値である。
+</p>
+
+<h3>36.8 パラメータと手続き空との関係</h3>
+<p>
+消散係数・スケールハイト・基準高度・不透明度上限は<code>FrameConstants</code>末尾に追加した
+<code>FogParams0</code>/<code>FogParams1</code>として、水体の色は<code>WaterBodyColor</code>として
+渡す。
+</p>
+<p>
+消散係数の既定値は<strong>気象学的視程Vとの関係</strong>から決めている。コントラスト閾値2%で
+定義される視程はKoschmiederの式<code>sigma = 3.912 / V</code>で消散係数と結び付くので、
+「どのくらいの視程の日を想定するか」でこの値を決められる。既定の<code>0.0004</code>は
+V ≒ 10km(晴れているが遠景がわずかに霞む日)に相当する。
+</p>
+<p class="note">
+最初に置いていた<code>0.0015</code>はV ≒ 2.6km(もや)に相当し、実測すると600m先の島でも
+透過率が0.5を切って絵全体が灰色に潰れた。スケールハイトの既定1000mは、エアロゾルの
+スケールハイトとして一般に言われる目安(おおむね1〜1.5km)の下端を採ったもので、
+精密な観測値ではない。このシーンは最も高い尖塔でも165mしかないため、この値の違いは
+絵にほとんど出ない。
+</p>
+<p>
+<code>FrameConstants</code>を宣言している全<code>.hlsl</code>(<code>Sprite2D.hlsl</code>の
+2D専用<code>FrameConstants</code>を除く)にこの3本を末尾追加のみで反映し、既存フィールドの
+オフセットは1バイトも動かしていない。
+</p>
+<p>
+手続き空が無効(<code>.kscene</code>がDDSスカイボックスを明示するシーン)なときは、
+UIの設定に関わらず<code>FogParams0.w</code>(有効フラグ)を0にする。これは
+<a href="#ssrprobe">20.6節</a>のSSRが<code>usingProceduralSky</code>で水面の解析空フォールバックを
+落としているのと同じ判断である――DDSは任意の絵でPerezモデルとは無関係なため、
+<code>SkyColor</code>による解析評価をin-scatter項に使ってはいけない。
+</p>
+
 </section>
 
 </main>

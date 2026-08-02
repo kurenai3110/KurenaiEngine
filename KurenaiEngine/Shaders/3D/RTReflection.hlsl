@@ -69,6 +69,12 @@ cbuffer FrameConstants : register(b0)
     // 換算倍率(19.14節)で、ReflectionProbe.hlsliのBlendReflectionProbesが読む。x〜zはこの
     // シェーダでは未使用(視差補正・遮蔽判定のフラグと距離キューブの解像度)
     float4 ProbeParams2;
+    // 大気遠近(P8)・水中項(P8)。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で
+    // 決まるため、末尾に追加のみで既存フィールドのオフセットを動かさない(この末尾へ追加する限り、
+    // ここより前のフィールドしか読まないこのシェーダーは今回の変更の影響を受けない)
+    float4 FogParams0;
+    float4 FogParams1;
+    float4 WaterBodyColor;
 };
 
 cbuffer RTReflectionConstants : register(b1)

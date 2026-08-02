@@ -41,6 +41,11 @@
 // 確認済み(このエンジンはDX11がfxc/SM5.0固定、DX12がdxcのため両方で通る必要がある)。
 #include "SpecularEnergy.hlsli"
 #include "Samplers.hlsli"
+// 大気遠近(P8)。フォグの透過率を求める純粋関数(cbufferに依存しない)。AerialPerspective.hlslと共有する
+#include "HeightFog.hlsli"
+// 空モデル(Perez分布)の共有ヘッダー。大気遠近のin-scatter項に、背景と同じSkyColorを使うため
+// (Sky.hlsli冒頭のコメント参照)
+#include "Sky.hlsli"
 
 static const float PI = 3.14159265359f;
 
@@ -95,6 +100,14 @@ cbuffer FrameConstants : register(b0)
     // 平面反射(P6)。xyz=水面平面の法線(現状は常に(0,1,0))、w=平面の距離項
     // (SV_ClipDistance0 = dot(worldPos, xyz) + w が水面より上で正になるように詰める)
     float4 PlanarReflectionPlane;
+    // 大気遠近(P8、末尾に追加)。鏡像にも同じフォグを掛けるため、AerialPerspective.hlslと同じ値を読む。
+    // x=基準高度での消散係数[1/m]、y=スケールハイト[m]、z=基準高度[m](ワールドY)、
+    // w=有効フラグ(0で無効。C++側の判断はAerialPerspective.hlslのFogParams0.wコメント参照)
+    float4 FogParams0;
+    // x=不透明度の上限、yzw=未使用
+    float4 FogParams1;
+    // 水中項(P8)。このシェーダーでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
+    float4 WaterBodyColor;
 };
 
 // GBuffer.hlsl/Transparent.hlsl/ProbeCapture.hlslのObjectConstantsと同じレイアウト
@@ -143,6 +156,10 @@ Texture2D BRDFLUTTexture : register(t11);
 #define KURENAI_DDGI_DISTANCE_REGISTER t13
 #include "DDGI.hlsli"
 
+// SkyIntegrate.hlslが書いた空パラメータ(P9)。大気遠近(P8)のin-scatter項(MakeSkyParameters/
+// SkyColor)が読む。t0〜t13が既に使用済みのためt14を使う
+StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t14);
+
 // 多重バウンスの減衰。ProbeCapture.hlslと同じ値・同じ理由(1バウンスあたり5%のエネルギーを
 // 捨てることで、反射率1の白い部屋でも等比級数が必ず収束するようにする)
 static const float kDDGIBounceAttenuation = 0.95f;
@@ -181,6 +198,33 @@ PSInput VSMain(VSInput input)
     output.Tangent = float4(mul(input.Tangent.xyz, (float3x3)World), input.Tangent.w * TangentSignFlip);
     output.ClipDistance = dot(worldPos, PlanarReflectionPlane.xyz) + PlanarReflectionPlane.w;
     return output;
+}
+
+// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる。大気遠近(P8)の
+// in-scatter項にだけ使う(このパス自体のライティングは従来どおりIBLキューブマップを使う。
+// ファイル冒頭のEvaluateGlobalIBL参照)。
+// SSR.hlsl/DeferredLighting.hlsl/AerialPerspective.hlslのMakeSkyParametersと完全に同一の内容で
+// あること(正規化の扱いを含む)。4つのシェーダーはcbufferをそれぞれ別に宣言しているため
+// 関数そのものは共有できず複製しているが、中身がずれると「背景の空」「水面に映る空」
+// 「フォグの合成先の色」が互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
+SkyParameters MakeSkyParameters()
+{
+    SkyParameters params;
+    params.SunDirection = normalize(SkySunDirection.xyz);
+    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
+    params.CloudCoverage = CloudParams0.x;
+    params.CloudAltitude = CloudParams0.y;
+    params.CloudUvScale = CloudParams0.z;
+    params.CloudDensity = CloudParams0.w;
+    params.CloudScrollOffset = CloudParams1.xy;
+    params.CloudForwardG = CloudParams1.z;
+    params.CirrusCoverage = CloudParams2.x;
+    params.CirrusAltitude = CloudParams2.y;
+    params.CirrusUvScale = CloudParams2.z;
+    params.CirrusDensity = CloudParams2.w;
+    params.CirrusScrollOffset = CloudParams3.xy;
+    params.CirrusAnisotropy = CloudParams3.z;
+    return params;
 }
 
 // GBuffer.hlsl/ProbeCapture.hlslのComputeTangentFrameと同じ(ピクセル単位でGram-Schmidt再直交化する)
@@ -415,5 +459,43 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     color += emissive;
 
+    // 大気遠近(P8)を鏡像にも適用する。掛けないと「霞んだ本体 vs くっきりした鏡像」になってしまう
+    // (AerialPerspective.hlslは本編のSceneColorにしかフォグを掛けないため、この平面反射パスの
+    // 出力は素通しだと霞まないまま合成されてしまう)。
+    // 【経路長にCameraPositionをそのまま使ってよい理由】光は「物体→水面→目」の順に進むが、
+    // その経路長は鏡映カメラ(CameraPosition、ファイル冒頭参照)から物体までの距離と
+    // 幾何学的に厳密に等しい(鏡映は「鏡映カメラで景色を撮り直す」ことと数学的に等価なため。
+    // ファイル冒頭の【カメラを鏡映して描くことの意味】と同じ理屈)
+    if (FogParams0.w > 0.5f)
+    {
+        const float transmittance =
+            HeightFogTransmittance(CameraPosition.xyz, input.WorldPos, FogParams0.x, FogParams0.y, FogParams0.z);
+        const float alpha = saturate(1.0f - transmittance) * saturate(FogParams1.x);
+
+        // in-scatterの方向はAerialPerspective.hlslと同じく視線方向(カメラ→着目点)のyを
+        // 0以上へクランプしたものを使う。
+        // 【鏡映カメラからの方向をそのまま使ってよい理由】水面をy=0の平面、実カメラをC、
+        // 鏡映カメラをC'、着目点をO、実際の反射点をPとすると、
+        //   O - C' = (Ox-Cx, Oy+Cy, Oz-Cz)
+        //   O - P  = Oy/(Cy+Oy) * (Ox-Cx, Cy+Oy, Oz-Cz)
+        // となり、2つは正のスカラー倍の関係で向きが厳密に一致する。つまりfogDirは
+        // 「水面から物体へ向かう実際の光路の向き」そのものであって近似ではない
+        // (光路のうち「目→水面」の短い区間だけは無視している。経路長は上のコメントのとおり
+        // 鏡映カメラからの距離が全区間ぶんを正しく含む)
+        const float3 viewDir = normalize(input.WorldPos - CameraPosition.xyz);
+        const float3 clampedDir = float3(viewDir.x, max(viewDir.y, 0.0f), viewDir.z);
+        const float clampedLength = length(clampedDir);
+        // 零ベクトルのnormalizeによるNaNを避ける(理由と退避先の選び方はAerialPerspective.hlsl参照)
+        const float3 fogDir =
+            (clampedLength > 1e-5f) ? (clampedDir / clampedLength) : float3(0.0f, 0.0f, 1.0f);
+
+        // Mie位相関数を掛けない理由はAerialPerspective.hlslと同じ(SkyColorが既に太陽方向の
+        // 角度依存性を持つため、位相関数を掛けると前方散乱を二重に計上することになる)
+        const float3 inScatter = SkyColor(fogDir, MakeSkyParameters());
+
+        color = color * (1.0f - alpha) + inScatter * alpha;
+    }
+
+    // 事前乗算済みアルファの規約(a=1)は崩さない。フォグを掛けた色をrgbに、aは1のまま返す
     return float4(color, 1.0f);
 }

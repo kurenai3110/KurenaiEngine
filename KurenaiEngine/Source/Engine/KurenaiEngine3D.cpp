@@ -208,6 +208,18 @@ namespace Kurenai
             // SV_ClipDistance0 = dot(worldPos, xyz) + w として使い、水面より上で正になるようにする
             // (水面より下のジオメトリを反射に映さないため)。このシェーダー以外は参照しない
             DirectX::XMFLOAT4 PlanarReflectionPlane;
+            // 大気遠近(P8、さらに末尾に追加)。AerialPerspective.hlsl/PlanarReflection.hlslが読む。
+            // x=基準高度での消散係数[1/m]、y=スケールハイト[m]、z=基準高度[m](ワールドY)、
+            // w=有効フラグ(0で無効。UIでオフ、またはシーンが手続き空を使っていない場合に0にする。
+            // 手続き空が無効なシーンでは大気遠近のin-scatter項(SkyColorの解析評価)が意味を持たない
+            // ため、SSR.hlslのwaterAnalyticSkyFlagと同じ判断をRender()側で行う)
+            DirectX::XMFLOAT4 FogParams0;
+            // x=不透明度の上限(1.0で完全に空の色まで行く)、yzw=未使用
+            DirectX::XMFLOAT4 FogParams1;
+            // 水中項(P8、さらに末尾に追加)。xyz=水体の色(リニア)、w=未使用。Water.hlslのPSMainが
+            // メッシュ自身のBaseColorFactorの代わりにこの色を出力Albedoに使う
+            // (見下ろした水面がFresnel最小(約0.02)でほぼ真っ黒になる問題への対処。詳細はWater.hlsl参照)
+            DirectX::XMFLOAT4 WaterBodyColor;
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -1284,6 +1296,28 @@ namespace Kurenai
         ssrConstantBufferDesc.SizeInBytes = sizeof(SSRConstants);
         m_SSRConstantBuffer = m_Device->CreateBuffer(ssrConstantBufferDesc);
 
+        // 大気遠近パス(P8。頂点バッファなしのフルスクリーン三角形。反射パスの出力とG-Buffer深度から
+        // フォグを合成する)。専用のb1定数バッファは持たない(パラメータはFrameConstants末尾の
+        // FogParams0/1に入れているため。AerialPerspective.hlsl冒頭参照)
+        RHI::ShaderDesc aerialPerspectiveVsDesc;
+        aerialPerspectiveVsDesc.Stage = RHI::ShaderStage::Vertex;
+        aerialPerspectiveVsDesc.FilePath = shaderDirectory + L"AerialPerspective.hlsl";
+        aerialPerspectiveVsDesc.EntryPoint = "VSMain";
+        m_AerialPerspectiveVertexShader = m_Device->CreateShader(aerialPerspectiveVsDesc);
+
+        RHI::ShaderDesc aerialPerspectivePsDesc;
+        aerialPerspectivePsDesc.Stage = RHI::ShaderStage::Pixel;
+        aerialPerspectivePsDesc.FilePath = shaderDirectory + L"AerialPerspective.hlsl";
+        aerialPerspectivePsDesc.EntryPoint = "PSMain";
+        m_AerialPerspectivePixelShader = m_Device->CreateShader(aerialPerspectivePsDesc);
+
+        RHI::PipelineStateDesc aerialPerspectivePipelineDesc;
+        aerialPerspectivePipelineDesc.VertexShader = m_AerialPerspectiveVertexShader.get();
+        aerialPerspectivePipelineDesc.PixelShader = m_AerialPerspectivePixelShader.get();
+        aerialPerspectivePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        aerialPerspectivePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        m_AerialPerspectivePipelineState = m_Device->CreatePipelineState(aerialPerspectivePipelineDesc);
+
         // RT反射パス(コンピュートシェーダー。TLASへ鏡面レイを撃ち反射色を求める)。
         // RTReflection.hlslはRayQueryを含むためシェーダーモデル6.5でしかコンパイルできない。
         // 非対応環境ではシェーダー自体を作らず、UIからもRaytracedを選べないようにする
@@ -2142,6 +2176,8 @@ namespace Kurenai
             m_SSILTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
             m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
             m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            // 大気遠近パス(P8)の出力。m_SSRTextureと同じ作法(HDR、R16G16B16A16_Float)で永続確保する
+            m_AerialPerspectiveTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
             // RT反射はコンピュートシェーダーがUAVで書くため、レンダーターゲットではなくUAVテクスチャを作る。
             // 非対応環境ではパス自体が実行されないので確保しない
             if (m_RaytracingAvailable)
@@ -3866,6 +3902,13 @@ namespace Kurenai
         const bool planarReflectionPassRuns =
             m_PlanarReflectionEnabled && hasWaterInstance && m_ReflectionMode == ReflectionMode::ScreenSpace;
 
+        // 大気遠近パス(P8)を実行するか。UIで無効化されているか、密度が0以下(効果が無い)なら
+        // パス自体を登録しない(GetActiveReflectionOutput()の結果がそのままTAA/Tonemapへ渡る)。
+        // 手続き空が無効なシーンかどうかの判断(FogParams0.w)はパスの実行有無とは別に、
+        // 下のconstants.FogParams0組み立て時にusingProceduralSkyを見て決める
+        // (SSRパスのwaterAnalyticSkyFlagと同じ、パスの実行可否とシェーダー内の有効フラグを分ける設計)
+        const bool fogPassRuns = m_FogEnabled && m_FogDensity > 0.0f;
+
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
@@ -4089,6 +4132,17 @@ namespace Kurenai
         // 専用のm_PlanarReflectionConstantBufferで明示的に上書きした値を使う(下のPlanarReflection
         // パス登録箇所参照)。共有のm_FrameConstantBufferにも一貫した値を入れておく
         constants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, hasWaterInstance ? -waterPlaneY : 0.0f };
+
+        // 大気遠近(P8)。AerialPerspective.hlsl/PlanarReflection.hlslの両方が読む。
+        // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、m_FogEnabledの値に関わらず
+        // 常に無効化する――DDSは任意の絵でPerezモデルとは無関係なため、in-scatter項の
+        // 解析評価(SkyColor)をしてはいけない(SSRパスのwaterAnalyticSkyFlagと同じ判断)
+        const float fogEnabledFlag = (m_FogEnabled && m_FogDensity > 0.0f && usingProceduralSky) ? 1.0f : 0.0f;
+        constants.FogParams0 = { m_FogDensity, m_FogScaleHeight, m_FogRefHeight, fogEnabledFlag };
+        constants.FogParams1 = { m_FogMaxOpacity, 0.0f, 0.0f, 0.0f };
+        // 水中項(P8)。Water.hlslのPSMainが読む
+        constants.WaterBodyColor = { m_WaterBodyColor.x, m_WaterBodyColor.y, m_WaterBodyColor.z, 0.0f };
+
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
@@ -5478,7 +5532,9 @@ namespace Kurenai
                 },
                 .RenderTargets = { m_PlanarReflectionColor.get() },
                 .DepthTarget = m_PlanarReflectionDepth.get(),
-                .BufferReads = { m_LightBuffer.get() },
+                // 大気遠近(P8)。空パラメータ(m_SkyParametersBuffer)をSkyIntegrateパスの後へ
+                // 順序付けさせるために挙げる(実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
+                .BufferReads = { m_LightBuffer.get(), m_SkyParametersBuffer.get() },
                 .Execute = [this, &constants, &planarReflectionViewport, reflectedViewProj, reflectMatrix,
                             waterPlaneY](RHI::IRHICommandList* cmd)
                 {
@@ -5520,6 +5576,8 @@ namespace Kurenai
                     cmd->SetTexture(11, m_BRDFLUTTexture.get());
                     cmd->SetTexture(12, m_DDGIIrradianceAtlas.get());
                     cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
+                    // 大気遠近(P8)のin-scatter項が読む空パラメータ(PlanarReflection.hlsl参照)
+                    cmd->SetShaderResourceBuffer(14, m_SkyParametersBuffer.get());
 
                     // 鏡映カメラで描くとワインディングが全反転するため、PSOの切り替えは
                     // instance.IsMirroredの否定で行う(このファイル冒頭のPSO生成箇所のコメント参照)
@@ -5693,13 +5751,42 @@ namespace Kurenai
             });
         }
 
+        // --- 大気遠近パス(P8): 反射パス(SSR/RT反射)の後、TAAパスの直前に置く。
+        //     Lightingパスの中に入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
+        //     冒頭のコメント参照。無効時はパス自体を登録せず、reflectionOutputがそのまま
+        //     TAA(またはTonemap)への入力になる ---
+        RHI::IRHITexture* const reflectionOutput = GetActiveReflectionOutput();
+        if (fogPassRuns)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "AerialPerspective",
+                .Reads = { reflectionOutput, m_GBufferDepth.get() },
+                .RenderTargets = { m_AerialPerspectiveTexture.get() },
+                // 空パラメータ(P9)。SkyIntegrateパスの後へ順序付けさせるために挙げる
+                // (実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
+                .BufferReads = { m_SkyParametersBuffer.get() },
+                .Execute = [this, &gbufferViewport, reflectionOutput](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetViewport(gbufferViewport);
+                    cmd->SetPipelineState(m_AerialPerspectivePipelineState.get());
+                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->SetTexture(0, reflectionOutput);
+                    cmd->SetTexture(1, m_GBufferDepth.get());
+                    cmd->SetShaderResourceBuffer(2, m_SkyParametersBuffer.get());
+                    cmd->Draw(3, 0);
+                },
+            });
+        }
+
         // --- TAAパス: 前フレームのTAA結果をモーションベクターで再投影し、今フレームの色へ蓄積する。
         //     ジッターで散らしたサンプルがここで平均され、実質的なスーパーサンプリングになる。
         //     トーンマップ前のHDRの段階で行うのは、露出・ブルームがTAAで安定した絵を入力に
         //     できるようにするため(逆順にするとブルームがフレームごとのちらつきを拾う)。
-        //     入力はGetActiveReflectionOutput()(反射Off/SSR/RT反射のいずれか)で、SSRだけを見ていた
-        //     従来の判定ではRT反射有効時にTAAが古いSceneColorを拾ってしまうため、ここも合わせて直す ---
-        RHI::IRHITexture* const taaInputColor = GetActiveReflectionOutput();
+        //     入力はGetActiveReflectionOutput()(反射Off/SSR/RT反射のいずれか、または大気遠近が
+        //     有効ならその出力)で、SSRだけを見ていた従来の判定ではRT反射有効時にTAAが古い
+        //     SceneColorを拾ってしまうため、ここも合わせて直す ---
+        RHI::IRHITexture* const taaInputColor = fogPassRuns ? m_AerialPerspectiveTexture.get() : reflectionOutput;
         if (m_TAAEnabled)
         {
             // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる

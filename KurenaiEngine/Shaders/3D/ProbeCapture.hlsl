@@ -59,6 +59,12 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams3;
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
+    // 大気遠近(P8)・水中項(P8)。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で
+    // 決まるため、末尾に追加のみで既存フィールドのオフセットを動かさない(この末尾へ追加する限り、
+    // ここより前のフィールドしか読まないこのシェーダーは今回の変更の影響を受けない)
+    float4 FogParams0;
+    float4 FogParams1;
+    float4 WaterBodyColor;
 };
 
 // GBuffer.hlsl/Transparent.hlslのObjectConstantsと同じレイアウト

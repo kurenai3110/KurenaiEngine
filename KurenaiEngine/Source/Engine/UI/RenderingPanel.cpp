@@ -58,6 +58,10 @@ namespace Kurenai::UI
         {
             DrawCloudSection();
         }
+        if (ImGui::CollapsingHeader("大気遠近###Fog"))
+        {
+            DrawFogSection();
+        }
 
         ImGui::End();
     }
@@ -527,6 +531,23 @@ namespace Kurenai::UI
             "波の強さ###WaterWaveStrength", &m_Engine.m_WaterWaveStrength, 0.0f, 1.0f, Defaults::WaterWaveStrength,
             "%.3f", 0, "波打ちの振幅。0で波が完全に消え平坦な鏡面、1で最大の揺らぎになる");
 
+        // --- 水中項(P8) ---
+        // ColorEdit3系のヘルパはUIWidgets.hに無いため、既存パネルと同じSliderFloatExを3本並べる
+        ImGui::TextWrapped(
+            "水面メッシュのAlbedo(誘電体でほぼ黒に焼かれている)の代わりに使う、水体の拡散反射色"
+            "(リニア)。屈折・水深依存の減衰は含まない粗い近似(G-Bufferが水深の情報を持たないため)。"
+            "見下ろすと水の色、すれすれだと鏡になる切り替わりはFresnelの式(DeferredLighting.hlsl)が"
+            "そのまま担当する");
+        SliderFloatEx(
+            "水体の色 R###WaterBodyColorR", &m_Engine.m_WaterBodyColor.x, 0.0f, 0.5f, Defaults::WaterBodyColorR,
+            "%.4f", 0, "水体の拡散反射色(リニア)の赤成分");
+        SliderFloatEx(
+            "水体の色 G###WaterBodyColorG", &m_Engine.m_WaterBodyColor.y, 0.0f, 0.5f, Defaults::WaterBodyColorG,
+            "%.4f", 0, "水体の拡散反射色(リニア)の緑成分");
+        SliderFloatEx(
+            "水体の色 B###WaterBodyColorB", &m_Engine.m_WaterBodyColor.z, 0.0f, 0.5f, Defaults::WaterBodyColorB,
+            "%.4f", 0, "水体の拡散反射色(リニア)の青成分");
+
         // --- 平面反射(P6) ---
         CheckboxEx(
             "平面反射を有効にする###PlanarReflectionEnabled", &m_Engine.m_PlanarReflectionEnabled,
@@ -686,6 +707,39 @@ namespace Kurenai::UI
         SliderFloatEx(
             "異方性(筋状)###CirrusAnisotropy", &m_Engine.m_CirrusAnisotropy, 1.0f, 8.0f, Defaults::CirrusAnisotropy,
             "%.2f", 0, "fBmのUV(U方向)を伸ばして筋状にする倍率。1.0で積雲と同じ等方形状になる");
+
+        EndParamGroup();
+    }
+
+    void RenderingPanel::DrawFogSection()
+    {
+        ImGui::TextWrapped(
+            "大気遠近(height fog)。高度で指数減衰する消散係数を持つ均一媒質を光線に沿って解析的に"
+            "積分した透過率で、遠方ほど背景の空色(Sky.hlsliのSkyColor)へ滲んでいく。"
+            "反射パス(SSR/RT反射)の後、TAAの直前で1回だけ適用され、半透明メッシュにも及ぶ。"
+            "手続き空が無効(.ksceneでスカイボックス画像を明示したシーン)なときは、"
+            "このセクションの設定に関わらず常に無効になる(合成先の空の色を解析評価できないため)");
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "大気遠近を有効にする###FogEnabled", &m_Engine.m_FogEnabled, Defaults::FogEnabled,
+            "無効にするとパス自体が実行されず、反射パスの出力がそのままTAA(またはトーンマップ)へ渡る"
+            "(密度を0にした場合とも数値上区別が付かないため、切り分け用にトグルを分けている)");
+        SliderFloatEx(
+            "消散係数###FogDensity", &m_Engine.m_FogDensity, 0.0f, 0.01f, Defaults::FogDensity, "%.5f",
+            ImGuiSliderFlags_Logarithmic,
+            "基準高度(下記)での消散係数[1/m]。大きいほど濃い霧になる。1/値が「およそe分の1まで"
+            "減衰する距離[m]」の目安になる");
+        SliderFloatEx(
+            "スケールハイト###FogScaleHeight", &m_Engine.m_FogScaleHeight, 10.0f, 5000.0f, Defaults::FogScaleHeight,
+            "%.0f m", 0, "霧の層の厚み。大きいほど高い高度まで霧が及ぶ");
+        SliderFloatEx(
+            "基準高度###FogRefHeight", &m_Engine.m_FogRefHeight, -500.0f, 500.0f, Defaults::FogRefHeight, "%.0f m",
+            0, "消散係数(上記)を定義する高さ(ワールドY)。既定は水面の高さに合わせている");
+        SliderFloatEx(
+            "不透明度の上限###FogMaxOpacity", &m_Engine.m_FogMaxOpacity, 0.0f, 1.0f, Defaults::FogMaxOpacity, "%.2f",
+            0, "1.0で遠方が完全に空の色まで行く。下げると最遠方でもうっすら元の色が透けて残る");
 
         EndParamGroup();
     }
