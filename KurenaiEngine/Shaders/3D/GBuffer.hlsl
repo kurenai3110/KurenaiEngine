@@ -68,6 +68,9 @@ Texture2D EmissiveTexture : register(t3);
 // t4はTransparent.hlsl/ProbeCapture.hlslがカスケードシャドウマップ配列に使っているため、
 // マテリアルテクスチャを読む3パスで共通して空いている最初のスロットがt5になる
 Texture2D OcclusionTexture : register(t5);
+// bent normal(RGBA16F)。遮蔽マップと同じライトマップUV空間へ焼かれている。
+// t4はカスケードシャドウ配列、t5は遮蔽マップが使っているためt6を割り当てる
+Texture2D BentNormalTexture : register(t6);
 
 struct VSInput
 {
@@ -103,6 +106,9 @@ struct PSOutput
     float4 Emissive : SV_TARGET3;
     // モーションベクター(この画素の中身が前フレームから今フレームまでに動いた量、UV単位)
     float2 Velocity : SV_TARGET4;
+    // bent normal(正規化しない可視方向の平均、ワールド空間)。.rgb = bRaw、.a = 有効フラグ。
+    // R11G11B10_Floatは使えない ―― 符号なしのため負の成分が落ちる(34章)
+    float4 BentNormal : SV_TARGET5;
 };
 
 // クリップ空間座標を画面UV([0,1]、左上原点)へ変換する。
@@ -208,5 +214,20 @@ PSOutput PSMain(PSInput input)
     output.Material = float4(metallic, roughness, ao, 0.0f);
     output.Emissive = float4(emissive, 1.0f);
     output.Velocity = currentUv - previousUv;
+
+    // bent normalも遮蔽マップと同じLightmapUVで引く(焼かれている空間が同じ)。
+    //
+    // 【接空間で焼かれている】ワールド(モデル)空間で焼くと「遮蔽なし = N」になるため、
+    // 曲面では遮蔽が無くても隣り合うテクセルの向きが違い、ミップ生成やバイリニア補間で
+    // 平均したときに打ち消し合って長さが縮む。消費側はその長さをaoB(遮蔽率)として
+    // 読むので、縮小するほど暗くなり細かい黒い点になる。接空間なら遮蔽なしは曲率に
+    // よらず常に(0,0,1)なので、平均しても長さ1のまま保たれる(34章)。
+    //
+    // ベイカーが使う基底は上のComputeTangentFrameとまったく同じ手順で組まれている。
+    // ここでmul(bentTS, tbn)と書けるのは、tbnの行が順にT/B/Nだから。
+    // 直交行列なので長さ(=aoB)は変換で保たれる ―― 遮蔽の強さが座標変換で変わってはいけない
+    const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
+    output.BentNormal = float4(mul(bentSample.xyz, tbn), bentSample.a);
+
     return output;
 }

@@ -27,9 +27,10 @@
 // 20章の前提なので、この2つは必ず同じ条件でコンパイルすること(片方だけ距離キューブを使うと、
 // SSRが自分の足した覚えのない値を引き算することになる)。
 //
-// このヘッダーはFrameConstants(b0)の ProbeParams / ProbeParams2 / ShadowParams / IBLParams を
-// 参照する(IBLParamsは拡散側のマクロを定義した場合のみ)。インクルードする側はこれらを
-// 含む形でFrameConstantsを宣言しておく必要がある。cbufferのレイアウトは宣言順で決まるため、
+// このヘッダーはFrameConstants(b0)の ProbeParams / ProbeParams2 / ShadowParams / AmbientColor /
+// IBLParams を参照する(IBLParams.xは拡散側のマクロを定義した場合のみ。.zは常に参照する)。
+// インクルードする側はこれらを含む形でFrameConstantsを宣言しておく必要がある。
+// cbufferのレイアウトは宣言順で決まるため、
 // 途中のフィールドを飛ばさずC++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること。
 #ifndef KURENAI_REFLECTION_PROBE_HLSLI
 #define KURENAI_REFLECTION_PROBE_HLSLI
@@ -443,6 +444,10 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 //   compensationMode  ShadowParams.w(エネルギー補正の方式。0=無効/1=Linear/2=Series/3=Kulla-Conty)
 //   iblIntensity      ShadowParams.z(IBL強度倍率。0ならIBL自体が無効)
 //
+// 【環境光の鏡面倍率(IBLParams.z)は引数で受けずここで直接読む】iblIntensityのように引数に
+// すると、DeferredLightingとSSRが別々の値を渡してしまう余地が残る。この係数は上記のとおり
+// 「両者が定義上必ず一致する」ことが存在理由なので、外から差し込める口を増やさない
+//
 // 【この係数が受け持つのは単一散乱(鏡面)ローブだけ】Kulla-Conty方式が足す加算ローブは
 // プリフィルタ済み鏡面ではなく拡散イラディアンスに掛かるうえ、ほぼ拡散に近い広がりを持つため
 // スクリーンスペース反射で差し替える対象ではない。よってそちらは
@@ -453,7 +458,16 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 // かつてはここで昼度(AmbientColor.a)による夜間減衰も掛けていたが、手続き空の導入で
 // 空自体が太陽高度に応じて暗くなるようになったため撤廃した(21.4節)。
 // 掛けたままだと夜が二重に暗くなる
-float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, float3 brdf,
+//
+// 【遮蔽の引数について】materialAO(遮蔽マップのスカラー)とssao(スクリーンスペース側)を
+// 分けて受け取り、bentとあわせてSpecularEnergy.hlsliのComposeSpecularOcclusionで合成する。
+// soMode = 0なら従来どおりmaterialAO * ssaoを1回Frostbite近似へ通すだけになる。
+//
+// 【DeferredLightingとSSRへは必ず同じ値を渡すこと】この2つが定義上一致することが
+// この関数の存在理由で、ズレるとSSRの適用領域と非適用領域の境界に段差が出る
+float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness,
+                         int soMode, BentOcclusion bent, float3 N, float3 R,
+                         float materialAO, float ssao, float3 brdf,
                          float compensationMode, float iblIntensity)
 {
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)
@@ -462,7 +476,8 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, floa
 
     // スペキュラオクルージョン。式はSpecularEnergy.hlsliに1つだけ置いてある
     // (半透明パス・プローブ焼き込みからも同じものを使うため)
-    return splitSum * SpecularOcclusion(NdotV, roughness, ao) * iblIntensity;
+    const float so = ComposeSpecularOcclusion(soMode, bent, N, R, NdotV, roughness, materialAO, ssao);
+    return splitSum * so * iblIntensity * IBLParams.z;
 }
 
 // Kulla-Conty方式の加算ローブに掛かる係数。呼び出し側で拡散イラディアンスを乗算する:
@@ -470,8 +485,14 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, floa
 //   マルチスキャッタぶん = 拡散イラディアンス * SpecularIBLMultiScatterWeight(...)
 //
 // 方式0/1/2ではSpecularMultiScatterIBLが0を返すため、この項は完全に消える。
-// SSRはこの項を差し替えない(上のSpecularIBLWeightのコメント参照)
-float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness, float ao, float3 brdf,
+// SSRはこの項を差し替えない(上のSpecularIBLWeightのコメント参照)。
+//
+// 【この加算ローブは鏡面倍率(IBLParams.z)の側に入れる】掛かる相手が拡散イラディアンスなので
+// 拡散側に見えるが、これは鏡面BRDFが単散乱で取りこぼしたエネルギーを戻す項であって
+// 拡散反射ではない。拡散側に入れると、鏡面倍率を0にしても鏡面由来の光が残ってしまう
+float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness,
+                                     int soMode, BentOcclusion bent, float3 N, float3 R,
+                                     float materialAO, float ssao, float3 brdf,
                                      float compensationMode, float iblIntensity)
 {
     const int mode = (int)(compensationMode + 0.5f);
@@ -479,7 +500,8 @@ float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness, fl
     const float Ess = brdf.x + brdf.y;
     const float3 multiScatter = SpecularMultiScatterIBL(F0, FssEss, Ess, mode);
 
-    return multiScatter * SpecularOcclusion(NdotV, roughness, ao) * iblIntensity;
+    const float so = ComposeSpecularOcclusion(soMode, bent, N, R, NdotV, roughness, materialAO, ssao);
+    return multiScatter * so * iblIntensity * IBLParams.z;
 }
 
 #endif // KURENAI_REFLECTION_PROBE_HLSLI

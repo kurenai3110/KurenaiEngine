@@ -61,6 +61,14 @@ namespace KurenaiPacker
             return buffer;
         }
 
+        // 検証用。誤差やベクトル長は2桁だと丸めで潰れるため4桁で出す
+        std::string Format4(double value)
+        {
+            char buffer[64];
+            sprintf_s(buffer, "%.4f", value);
+            return buffer;
+        }
+
         std::string FormatSeconds(double seconds)
         {
             return Format2(seconds) + "秒";
@@ -84,7 +92,7 @@ namespace KurenaiPacker
         //
         // 【SAHへ変える必要は無い(実測)】Chinese Dragon(871306三角形、2048² / 64レイ)で
         // レイキャストは0.30秒・毎秒3〜4億レイ、BVH構築は0.31秒。ベイク全体394秒のうち
-        // 合わせて0.16%しかない。残り99%はxatlasのUV展開(22.6.5節)。
+        // 合わせて0.16%しかない。残り99%はxatlasのUV展開(22.6.6節)。
         // ここを速くしても総時間はまったく変わらないので、単純なまま維持してよい。
 
         struct Float3
@@ -251,19 +259,184 @@ namespace KurenaiPacker
         // なお、この関数を素通し(vprintf)にしたうえでxatlas.cppの XA_PROFILE を1にし、
         // SetPrintの第2引数(verbose)をtrueにすると、xatlas内蔵のプロファイラが
         // ComputeChartsの内訳(Place seeds / Grow / Merge / Parameterize ...)を出力する。
-        // UV展開が遅い原因を追うときはこれが一番早い(22.6.5節)
+        // UV展開が遅い原因を追うときはこれが一番早い(22.6.6節)
         int SilentPrint(const char*, ...)
         {
             return 0;
         }
 
+        // === UV展開のためのメッシュ内部分割 ====================================
+        //
+        // 巨大な単一メッシュをそのままxatlasへ渡すと極端に遅くなるため、空間的に
+        // 分割して複数回AddMeshする。効くのは次の2点(詳細は22.6.6節):
+        //   - ComputeChartsは「メッシュごとに1タスク」で並列化される。1メッシュ1AddMeshでは
+        //     コア数ぶんの並列化が丸ごと死ぬ
+        //   - チャート統合と種まきがチャートグループ内で2乗に効く。グループが小さく
+        //     分かれていれば表面化しない
+        //
+        // 分割してもPackChartsは全チャンクを1枚の共有アトラスへ詰めるため、
+        // 遮蔽マップの粒度(メッシュあたり1枚)は変わらない。代償は分割面に沿って
+        // チャートが必ず切れること(継ぎ目が増える)。
+
+        struct UnwrapChunk
+        {
+            std::vector<Vertex> Vertices;    // チャンク内のローカル頂点(元メッシュからの複製)
+            std::vector<uint32_t> Indices;   // ローカル頂点番号によるインデックス
+            std::vector<uint32_t> VertexMap; // ローカル頂点番号 -> 元メッシュの頂点番号
+        };
+
+        struct TriangleRange
+        {
+            uint32_t First = 0;
+            uint32_t Count = 0;
+        };
+
+        // 三角形番号の並び(order)を重心の中央値で再帰的に分割し、
+        // targetTriangles以下になった区間をoutRangesへ積む。
+        // BuildBvhRecursiveと同じ中央値分割だが、ノードを作らず葉の区間だけを集める。
+        // 分割は必ず両側を1個以上に減らすため、重心が全て同一でも必ず停止する
+        void PartitionTrianglesRecursive(
+            const std::vector<Float3>& centroids,
+            std::vector<uint32_t>& order,
+            uint32_t first,
+            uint32_t count,
+            uint32_t targetTriangles,
+            std::vector<TriangleRange>& outRanges)
+        {
+            if (count <= targetTriangles)
+            {
+                outRanges.push_back({ first, count });
+                return;
+            }
+
+            Float3 bmin{ FLT_MAX, FLT_MAX, FLT_MAX };
+            Float3 bmax{ -FLT_MAX, -FLT_MAX, -FLT_MAX };
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const Float3& c = centroids[order[first + i]];
+                bmin = Min3(bmin, c);
+                bmax = Max3(bmax, c);
+            }
+
+            // 最も広がっている軸で中央値分割する
+            const Float3 extent = Sub(bmax, bmin);
+            int axis = 0;
+            if (extent.y > extent.x) { axis = 1; }
+            if (extent.z > (axis == 0 ? extent.x : extent.y)) { axis = 2; }
+
+            const auto centroidAxis = [&](uint32_t triIndex) -> float
+            {
+                const Float3& c = centroids[triIndex];
+                return axis == 0 ? c.x : (axis == 1 ? c.y : c.z);
+            };
+
+            const uint32_t mid = count / 2;
+            std::nth_element(
+                order.begin() + first,
+                order.begin() + first + mid,
+                order.begin() + first + count,
+                [&](uint32_t a, uint32_t b) { return centroidAxis(a) < centroidAxis(b); });
+
+            PartitionTrianglesRecursive(centroids, order, first, mid, targetTriangles, outRanges);
+            PartitionTrianglesRecursive(centroids, order, first + mid, count - mid, targetTriangles, outRanges);
+        }
+
+        // メッシュをUV展開用のチャンクへ分割する。
+        // 分割しない条件(閾値0・三角形数が閾値以下・目標が0)ではメッシュ全体を
+        // 1チャンクとして返す。その場合VertexMapは恒等写像になり、
+        // 呼び出し側の処理は分割前とまったく同じ結果になる
+        std::vector<UnwrapChunk> SplitMeshForUnwrap(
+            const SourceMesh& mesh, uint32_t splitThreshold, uint32_t targetTriangles)
+        {
+            const uint32_t triangleCount = static_cast<uint32_t>(mesh.Indices.size() / 3);
+
+            std::vector<uint32_t> order(triangleCount);
+            std::iota(order.begin(), order.end(), 0u);
+
+            std::vector<TriangleRange> ranges;
+            if (splitThreshold == 0 || targetTriangles == 0 || triangleCount <= splitThreshold)
+            {
+                ranges.push_back({ 0u, triangleCount });
+            }
+            else
+            {
+                std::vector<Float3> centroids(triangleCount);
+                for (uint32_t t = 0; t < triangleCount; ++t)
+                {
+                    const Vertex& a = mesh.Vertices[mesh.Indices[static_cast<size_t>(t) * 3 + 0]];
+                    const Vertex& b = mesh.Vertices[mesh.Indices[static_cast<size_t>(t) * 3 + 1]];
+                    const Vertex& c = mesh.Vertices[mesh.Indices[static_cast<size_t>(t) * 3 + 2]];
+                    centroids[t] = {
+                        (a.Position[0] + b.Position[0] + c.Position[0]) / 3.0f,
+                        (a.Position[1] + b.Position[1] + c.Position[1]) / 3.0f,
+                        (a.Position[2] + b.Position[2] + c.Position[2]) / 3.0f };
+                }
+                PartitionTrianglesRecursive(centroids, order, 0, triangleCount, targetTriangles, ranges);
+            }
+
+            // 区間ごとに、使われている元頂点だけを詰め直してローカル配列を作る。
+            // 分割境界に跨る頂点は複数のチャンクへ複製される(これがチャート境界になる)
+            std::vector<UnwrapChunk> chunks(ranges.size());
+            std::vector<uint32_t> remap(mesh.Vertices.size(), UINT32_MAX);
+            for (size_t k = 0; k < ranges.size(); ++k)
+            {
+                UnwrapChunk& chunk = chunks[k];
+                chunk.Indices.reserve(static_cast<size_t>(ranges[k].Count) * 3);
+
+                for (uint32_t i = 0; i < ranges[k].Count; ++i)
+                {
+                    const uint32_t triangle = order[ranges[k].First + i];
+                    for (uint32_t corner = 0; corner < 3; ++corner)
+                    {
+                        const uint32_t source = mesh.Indices[static_cast<size_t>(triangle) * 3 + corner];
+                        if (remap[source] == UINT32_MAX)
+                        {
+                            remap[source] = static_cast<uint32_t>(chunk.Vertices.size());
+                            chunk.Vertices.push_back(mesh.Vertices[source]);
+                            chunk.VertexMap.push_back(source);
+                        }
+                        chunk.Indices.push_back(remap[source]);
+                    }
+                }
+
+                // 次のチャンクのためにスクラッチを戻す。全体をクリアすると
+                // 「頂点数 × チャンク数」のコストになるため、触った分だけ戻す
+                for (const uint32_t source : chunk.VertexMap)
+                {
+                    remap[source] = UINT32_MAX;
+                }
+            }
+            return chunks;
+        }
+
         // メッシュ1つを展開し、Vertices/IndicesをUV1付きで置き換える。
         // 展開できなかった場合はfalseを返し、メッシュは元のまま(UV1=UVのコピー)で残す
-        bool UnwrapMesh(SourceMesh& mesh, uint32_t resolution)
+        bool UnwrapMesh(SourceMesh& mesh, const OcclusionBakeOptions& options)
         {
             if (mesh.Indices.empty() || mesh.Vertices.empty())
             {
                 return false;
+            }
+            // 分割はインデックスを三角形単位で組み替えるため、3の倍数でないと末尾が
+            // 黙って捨てられる。分割前はxatlasがInvalidIndexCountで弾いていた経路なので、
+            // ここで同じように弾いてログを残す
+            if (mesh.Indices.size() % 3 != 0)
+            {
+                Warn("メッシュのインデックス数(" + std::to_string(mesh.Indices.size())
+                    + ")が3の倍数ではありません。UV展開をスキップします");
+                return false;
+            }
+            // 分割は頂点番号でスクラッチ配列を引くため、範囲外インデックスがあると
+            // xatlasへ渡す前に壊れる。分割前はxatlasがIndexOutOfRangeで弾いていた経路
+            for (const uint32_t index : mesh.Indices)
+            {
+                if (index >= mesh.Vertices.size())
+                {
+                    Warn("メッシュに範囲外の頂点インデックス(" + std::to_string(index)
+                        + " / 頂点数 " + std::to_string(mesh.Vertices.size())
+                        + ")があります。UV展開をスキップします");
+                    return false;
+                }
             }
 
             xatlas::Atlas* atlas = xatlas::Create();
@@ -278,24 +451,44 @@ namespace KurenaiPacker
                 ~AtlasGuard() { xatlas::Destroy(A); }
             } guard{ atlas };
 
-            xatlas::MeshDecl decl;
-            decl.vertexCount = static_cast<uint32_t>(mesh.Vertices.size());
-            decl.vertexPositionData = mesh.Vertices.data()->Position;
-            decl.vertexPositionStride = sizeof(Vertex);
-            decl.vertexNormalData = mesh.Vertices.data()->Normal;
-            decl.vertexNormalStride = sizeof(Vertex);
-            // 元のUVはチャート分割のヒントとしてのみ渡す(useInputMeshUvsは立てない。
-            // タイリングされたUVをそのままチャートに使うと重なりが残ってしまうため)
-            decl.vertexUvData = mesh.Vertices.data()->UV;
-            decl.vertexUvStride = sizeof(Vertex);
-            decl.indexCount = static_cast<uint32_t>(mesh.Indices.size());
-            decl.indexData = mesh.Indices.data();
-            decl.indexFormat = xatlas::IndexFormat::UInt32;
-
-            const Clock::time_point addMeshStart = Clock::now();
-            if (xatlas::AddMesh(atlas, decl) != xatlas::AddMeshError::Success)
+            // 巨大メッシュはここで空間分割される。閾値以下なら要素1個(恒等写像)の
+            // チャンク列が返り、以降の処理は分割前とまったく同じ経路になる
+            const std::vector<UnwrapChunk> chunks = SplitMeshForUnwrap(
+                mesh, options.UnwrapSplitThreshold, options.UnwrapChunkTriangles);
+            if (chunks.empty())
             {
                 return false;
+            }
+
+            const Clock::time_point addMeshStart = Clock::now();
+            for (const UnwrapChunk& chunk : chunks)
+            {
+                if (chunk.Vertices.empty() || chunk.Indices.empty())
+                {
+                    Warn("UV展開のチャンクが空になりました(分割の不具合)。このメッシュはスキップします");
+                    return false;
+                }
+
+                xatlas::MeshDecl decl;
+                decl.vertexCount = static_cast<uint32_t>(chunk.Vertices.size());
+                decl.vertexPositionData = chunk.Vertices.data()->Position;
+                decl.vertexPositionStride = sizeof(Vertex);
+                decl.vertexNormalData = chunk.Vertices.data()->Normal;
+                decl.vertexNormalStride = sizeof(Vertex);
+                // 元のUVはチャート分割のヒントとしてのみ渡す(useInputMeshUvsは立てない。
+                // タイリングされたUVをそのままチャートに使うと重なりが残ってしまうため)
+                decl.vertexUvData = chunk.Vertices.data()->UV;
+                decl.vertexUvStride = sizeof(Vertex);
+                decl.indexCount = static_cast<uint32_t>(chunk.Indices.size());
+                decl.indexData = chunk.Indices.data();
+                decl.indexFormat = xatlas::IndexFormat::UInt32;
+
+                // 第3引数はメッシュ総数のヒント。xatlas側の進捗・確保の見積もりに使われる
+                if (xatlas::AddMesh(atlas, decl, static_cast<uint32_t>(chunks.size()))
+                    != xatlas::AddMeshError::Success)
+                {
+                    return false;
+                }
             }
             // AddMeshは非同期。ここで待たないと、続くComputeChartsの計測へ
             // AddMeshぶんの時間が混ざって切り分けにならない
@@ -304,14 +497,14 @@ namespace KurenaiPacker
 
             // ベイク時間のほぼ全部(実測で99%)がこの1行に入る。既定のChartOptionsのまま
             // 使っているのは、maxCostを4/8/16と振っても時間がまったく変わらなかったため
-            // (378秒/379秒/399秒。詳細と原因は22.6.5節)
+            // (378秒/379秒/399秒。詳細と原因は22.6.6節)
             const Clock::time_point computeStart = Clock::now();
             xatlas::ComputeCharts(atlas);
             const double computeSeconds = SecondsSince(computeStart);
 
             const Clock::time_point packStart = Clock::now();
             xatlas::PackOptions packOptions;
-            packOptions.resolution = resolution;
+            packOptions.resolution = options.Resolution;
             packOptions.padding = 2;        // バイリニア補間で隣のチャートを拾わないための余白
             packOptions.bilinear = true;
             packOptions.blockAlign = true;  // BC4の4x4ブロックとチャート境界を揃える
@@ -332,7 +525,8 @@ namespace KurenaiPacker
                 + " / ComputeCharts " + FormatSeconds(computeSeconds)
                 + " / PackCharts " + FormatSeconds(packSeconds)
                 + " (" + std::to_string(packAttempts) + "回)"
-                + " / チャート数 " + std::to_string(atlas->chartCount));
+                + " / チャート数 " + std::to_string(atlas->chartCount)
+                + " / チャンク数 " + std::to_string(chunks.size()));
             if (atlas->atlasCount > 1)
             {
                 return false;
@@ -342,20 +536,64 @@ namespace KurenaiPacker
                 return false;
             }
 
-            const xatlas::Mesh& out = atlas->meshes[0];
-
-            std::vector<Vertex> newVertices(out.vertexCount);
-            for (uint32_t i = 0; i < out.vertexCount; ++i)
+            // 出力メッシュはAddMeshの呼び出しごとに1つ。全チャンクを1つの頂点配列へ
+            // 連結し直す(UVはすべて共有アトラスの座標なので、そのまま繋げてよい)
+            if (atlas->meshCount != chunks.size())
             {
-                const xatlas::Vertex& ov = out.vertexArray[i];
-                // xrefは展開前の頂点番号。位置・法線・UV・接線はそこからそのまま引き継ぐ
-                newVertices[i] = mesh.Vertices[ov.xref];
-                newVertices[i].UV1[0] = ov.uv[0] / static_cast<float>(atlas->width);
-                newVertices[i].UV1[1] = ov.uv[1] / static_cast<float>(atlas->height);
+                Warn("UV展開の出力メッシュ数(" + std::to_string(atlas->meshCount)
+                    + ")がチャンク数(" + std::to_string(chunks.size())
+                    + ")と一致しません。このメッシュはスキップします");
+                return false;
             }
 
-            std::vector<uint32_t> newIndices(out.indexCount);
-            std::memcpy(newIndices.data(), out.indexArray, out.indexCount * sizeof(uint32_t));
+            std::vector<Vertex> newVertices;
+            std::vector<uint32_t> newIndices;
+            newVertices.reserve(mesh.Vertices.size());
+            newIndices.reserve(mesh.Indices.size());
+
+            for (uint32_t k = 0; k < atlas->meshCount; ++k)
+            {
+                const xatlas::Mesh& out = atlas->meshes[k];
+                const std::vector<uint32_t>& vertexMap = chunks[k].VertexMap;
+                const uint32_t base = static_cast<uint32_t>(newVertices.size());
+
+                for (uint32_t i = 0; i < out.vertexCount; ++i)
+                {
+                    const xatlas::Vertex& ov = out.vertexArray[i];
+                    // xrefは「そのAddMeshへ渡した頂点配列」の添字。VertexMapで元メッシュの
+                    // 頂点番号へ戻す(分割していない場合は恒等写像)。位置・法線・UV・接線は
+                    // そこからそのまま引き継ぐ
+                    if (ov.xref >= vertexMap.size())
+                    {
+                        Warn("UV展開の出力が範囲外の入力頂点(" + std::to_string(ov.xref)
+                            + ")を参照しました。このメッシュはスキップします");
+                        return false;
+                    }
+                    Vertex vertex = mesh.Vertices[vertexMap[ov.xref]];
+                    vertex.UV1[0] = ov.uv[0] / static_cast<float>(atlas->width);
+                    vertex.UV1[1] = ov.uv[1] / static_cast<float>(atlas->height);
+                    newVertices.push_back(vertex);
+                }
+
+                for (uint32_t i = 0; i < out.indexCount; ++i)
+                {
+                    newIndices.push_back(base + out.indexArray[i]);
+                }
+            }
+
+            // xatlasは退化面(ゼロ面積・長さゼロの辺)を無視し、どのチャートにも入らなかった
+            // 面は出力から消える。分割の有無にかかわらず起こりうるが、黙って三角形が減ると
+            // 描画に穴が開くため必ず件数を出す
+            const size_t inputTriangles = mesh.Indices.size() / 3;
+            const size_t outputTriangles = newIndices.size() / 3;
+            if (outputTriangles < inputTriangles)
+            {
+                const size_t dropped = inputTriangles - outputTriangles;
+                Warn("UV展開で三角形が" + std::to_string(dropped) + "個脱落しました("
+                    + std::to_string(inputTriangles) + "個中 "
+                    + Format2(100.0 * static_cast<double>(dropped) / static_cast<double>(inputTriangles))
+                    + "%)。xatlasが退化面を無視したか、チャートに入らなかった面があります");
+            }
 
             mesh.Vertices = std::move(newVertices);
             mesh.Indices = std::move(newIndices);
@@ -373,6 +611,10 @@ namespace KurenaiPacker
         {
             float Position[3];
             float Normal[3];
+            // 頂点接線(xyz)と従法線の向き(w = +1/-1)。bent normalを接空間へ落とすために使う。
+            // GBuffer.hlslのComputeTangentFrameとまったく同じ手順で基底を組む必要があるため、
+            // ここでもGram-Schmidt再直交化前の生の補間値を持ち回る
+            float Tangent[4];
         };
 
         // 有効なテクセルはvalidに1が入る
@@ -443,7 +685,13 @@ namespace KurenaiPacker
                         {
                             texel.Position[k] = a.Position[k] * w0 + b.Position[k] * w1 + c.Position[k] * w2;
                             texel.Normal[k] = a.Normal[k] * w0 + b.Normal[k] * w1 + c.Normal[k] * w2;
+                            texel.Tangent[k] = a.Tangent[k] * w0 + b.Tangent[k] * w1 + c.Tangent[k] * w2;
                         }
+                        // 従法線の向きは+1/-1の二値なので補間に意味が無い。重みが最大の頂点から取る
+                        // (ミラーUVの継ぎ目でのみ頂点間で食い違い、そこは法線マップでも同じ扱い)
+                        texel.Tangent[3] = (w0 >= w1 && w0 >= w2) ? a.Tangent[3]
+                                         : (w1 >= w2)             ? b.Tangent[3]
+                                                                  : c.Tangent[3];
                         const float len = std::sqrt(
                             texel.Normal[0] * texel.Normal[0] +
                             texel.Normal[1] * texel.Normal[1] +
@@ -527,18 +775,279 @@ namespace KurenaiPacker
             }
         }
 
+        // bent normal用のダイレーション。上のR8版と同じ走査だが、平均する対象がベクトルになる。
+        //
+        // 【必ずベクトルのまま平均すること】length()は凸関数なので、Jensenの不等式より
+        //   E[|b|] >= |E[b]|
+        // が常に成り立つ。テクセルごとに長さを出してから平均すると必ず真値より大きくなり、
+        // 遮蔽コーンが実際より細く見積もられてスペキュラが明るくなりすぎる。
+        // length()を取るのは消費側(シェーダー)だけにする。
+        // ミップ生成のボックスフィルタとサンプリング時のバイリニア補間も同じ理由で
+        // ベクトルを補間しており、順序は自動的に正しくなる
+        void DilateBentNormal(std::vector<float>& values, std::vector<uint8_t> valid, uint32_t resolution, uint32_t pixels)
+        {
+            const int res = static_cast<int>(resolution);
+            for (uint32_t pass = 0; pass < pixels; ++pass)
+            {
+                std::vector<uint8_t> nextValid = valid;
+                std::vector<float> nextValues = values;
+                bool changed = false;
+
+                for (int y = 0; y < res; ++y)
+                {
+                    for (int x = 0; x < res; ++x)
+                    {
+                        const size_t index = static_cast<size_t>(y) * res + x;
+                        if (valid[index])
+                        {
+                            continue;
+                        }
+                        float sum[3] = { 0.0f, 0.0f, 0.0f };
+                        int count = 0;
+                        for (int dy = -1; dy <= 1; ++dy)
+                        {
+                            for (int dx = -1; dx <= 1; ++dx)
+                            {
+                                const int nx = x + dx, ny = y + dy;
+                                if (nx < 0 || ny < 0 || nx >= res || ny >= res)
+                                {
+                                    continue;
+                                }
+                                const size_t n = static_cast<size_t>(ny) * res + nx;
+                                if (valid[n])
+                                {
+                                    for (int k = 0; k < 3; ++k)
+                                    {
+                                        sum[k] += values[n * 4 + k];
+                                    }
+                                    ++count;
+                                }
+                            }
+                        }
+                        if (count > 0)
+                        {
+                            for (int k = 0; k < 3; ++k)
+                            {
+                                nextValues[index * 4 + k] = sum[k] / static_cast<float>(count);
+                            }
+                            nextValues[index * 4 + 3] = 1.0f;   // 埋めたテクセルは有効にする
+                            nextValid[index] = 1;
+                            changed = true;
+                        }
+                    }
+                }
+
+                values.swap(nextValues);
+                valid.swap(nextValid);
+                if (!changed)
+                {
+                    break;
+                }
+            }
+
+            // 最後まで埋まらなかったテクセルは接空間の「遮蔽なし」= (0,0,1) で埋め、
+            // 有効フラグも1にする。R8版が255で埋めるのとまったく同じ扱い。
+            //
+            // 【フラグを補間対象に残してはいけない】ここを0のままにすると、ミップ生成の
+            // ボックスフィルタが有効テクセルとの間で .a を中間値へ均してしまい、消費側の
+            // a < 0.5 というしきい値がテクセル単位で反転する(実測でmip5の6.25%が中間値)。
+            // 縁が「遮蔽なし」と「ほぼ完全遮蔽」の間で跳ねて細かい点になる。
+            // 接空間なら遮蔽なしを定数で表せるので、この曖昧さ自体を消せる
+            for (size_t i = 0; i < valid.size(); ++i)
+            {
+                if (!valid[i])
+                {
+                    values[i * 4 + 0] = 0.0f;
+                    values[i * 4 + 1] = 0.0f;
+                    values[i * 4 + 2] = 1.0f;
+                }
+                values[i * 4 + 3] = 1.0f;
+            }
+        }
+
+        // === bent normalの検証(仕様書§7のチェックリスト) ======================
+        //
+        // 量子化前のfloat32で集計する。ここを通しておけば、後段で見つけた異常が
+        // ベイクのバグなのかfp16量子化なのかを切り分けられる
+        struct BentStats
+        {
+            double MaxLength = 0.0;          // max|bRaw|。1を超えてはいけない
+            double MaxAoNMinusAoB = -1.0e9;  // max(aoN - aoB)。0以下でなければいけない
+            double SumSqError = 0.0;         // aoNと既存AOの二乗誤差の総和
+            double MaxError = 0.0;           // 同、最大誤差
+            uint64_t SampleCount = 0;
+            uint64_t FullyOccludedCount = 0; // |bRaw| < 1e-3(完全遮蔽)
+            uint64_t NanCount = 0;
+            uint64_t OverOneCount = 0;       // |bRaw| > 1.05(明らかな異常)
+            // ミップ耐性。詳細はAccumulateMipStabilityを参照
+            double WorstMipRatio = 1.0;
+            uint32_t WorstMipLevel = 0;
+        };
+
+        // === ミップ耐性の検証 ====================================================
+        //
+        // ベイク結果そのものが正しくても、ミップ生成で長さが崩れると消費側は縮小するほど
+        // 暗くなる。これは接空間化する前に実際に起きた退行で、上のチェックリスト
+        // (すべてmip 0だけを見る)は素通りしてしまった。
+        //
+        // ボックスフィルタを自前で回し、各段で
+        //   |E[b]| … 実際にテクスチャへ格納される値の長さ
+        //   E[|b|] … 本来あるべき遮蔽率(長さの平均)
+        // を比べる。方向がばらついているほど前者だけが小さくなるので、比が1から離れたら
+        // 「格納しているベクトルが法線の向きに引きずられている」ことを意味する。
+        //
+        // 【浅い段だけを見ること】深い段では1テクセルが広い曲面を覆い、接線基底そのものが
+        // 回るため、正しく実装していても比は下がる ―― Sponzaの実測で8x8まで測ると0.7958まで
+        // 落ちるが、mip1〜3では0.932以上ある。これは正当な劣化なので、そこで警告を出すと
+        // 「いつも鳴っている警告」になって用をなさない。
+        // 一方、狙っている不具合(法線の向きに引きずられる)は浅い段から出る ――
+        // モデル空間で焼いていたときのドラゴンはmip3で既に0.816だった。
+        // 両者はmip1〜3でしきい値0.85を挟んで明確に分かれるので、そこだけを見る
+        void AccumulateMipStability(
+            const std::vector<float>& values, uint32_t resolution, BentStats& stats)
+        {
+            std::vector<float> level(values);
+            std::vector<double> lengthMean(static_cast<size_t>(resolution) * resolution);
+            for (size_t i = 0; i < lengthMean.size(); ++i)
+            {
+                const float x = values[i * 4 + 0], y = values[i * 4 + 1], z = values[i * 4 + 2];
+                lengthMean[i] = std::sqrt(static_cast<double>(x) * x + static_cast<double>(y) * y + static_cast<double>(z) * z);
+            }
+
+            // 上記の理由で先頭3段のみ。解像度に依らず同じ段数を見るので、
+            // 512²と2048²を同じ基準で比べられる(8x8で打ち切ると解像度ごとに
+            // 「1テクセルが覆う面積」が変わってしまい比較にならない)
+            constexpr uint32_t kMaxLevel = 3;
+            uint32_t res = resolution;
+            for (uint32_t lv = 1; lv <= kMaxLevel && res > 1u; ++lv)
+            {
+                const uint32_t half = res / 2;
+                std::vector<float> next(static_cast<size_t>(half) * half * 4);
+                std::vector<double> nextLen(static_cast<size_t>(half) * half);
+
+                for (uint32_t y = 0; y < half; ++y)
+                {
+                    for (uint32_t x = 0; x < half; ++x)
+                    {
+                        const size_t src[4] = {
+                            (static_cast<size_t>(y) * 2 + 0) * res + x * 2 + 0,
+                            (static_cast<size_t>(y) * 2 + 0) * res + x * 2 + 1,
+                            (static_cast<size_t>(y) * 2 + 1) * res + x * 2 + 0,
+                            (static_cast<size_t>(y) * 2 + 1) * res + x * 2 + 1,
+                        };
+                        const size_t dst = static_cast<size_t>(y) * half + x;
+                        for (int k = 0; k < 4; ++k)
+                        {
+                            float sum = 0.0f;
+                            for (int s = 0; s < 4; ++s) { sum += level[src[s] * 4 + k]; }
+                            next[dst * 4 + k] = sum * 0.25f;
+                        }
+                        double lsum = 0.0;
+                        for (int s = 0; s < 4; ++s) { lsum += lengthMean[src[s]]; }
+                        nextLen[dst] = lsum * 0.25;
+                    }
+                }
+
+                double sumStored = 0.0, sumTrue = 0.0;
+                for (size_t i = 0; i < nextLen.size(); ++i)
+                {
+                    const float x = next[i * 4 + 0], y = next[i * 4 + 1], z = next[i * 4 + 2];
+                    sumStored += std::sqrt(static_cast<double>(x) * x + static_cast<double>(y) * y + static_cast<double>(z) * z);
+                    sumTrue += nextLen[i];
+                }
+                if (sumTrue > 1e-9)
+                {
+                    const double ratio = sumStored / sumTrue;
+                    if (ratio < stats.WorstMipRatio)
+                    {
+                        stats.WorstMipRatio = ratio;
+                        stats.WorstMipLevel = lv;
+                    }
+                }
+
+                level.swap(next);
+                lengthMean.swap(nextLen);
+                res = half;
+            }
+        }
+
+        void AccumulateBentStats(
+            const float* bent,
+            const float* ao,
+            const std::vector<uint8_t>& valid,
+            uint32_t texelCount,
+            size_t meshIndex,
+            BentStats& stats)
+        {
+            uint64_t meshNan = 0;
+            uint64_t meshOverOne = 0;
+
+            for (uint32_t i = 0; i < texelCount; ++i)
+            {
+                if (!valid[i])
+                {
+                    continue;   // チャート外はダイレーションで埋まるので対象外
+                }
+
+                const float bx = bent[i * 4 + 0];
+                const float by = bent[i * 4 + 1];
+                const float bz = bent[i * 4 + 2];
+
+                if (std::isnan(bx) || std::isnan(by) || std::isnan(bz) ||
+                    std::isinf(bx) || std::isinf(by) || std::isinf(bz))
+                {
+                    ++meshNan;
+                    continue;
+                }
+
+                const double aoB = std::sqrt(static_cast<double>(bx) * bx + static_cast<double>(by) * by + static_cast<double>(bz) * bz);
+                // bRawは接空間なので、法線成分 dot(N, bRaw) はz成分そのもの。
+                // 基底(T,B,N)は正規直交なので長さも接空間で不変
+                const double aoN = static_cast<double>(bz);
+
+                stats.MaxLength = std::max(stats.MaxLength, aoB);
+                stats.MaxAoNMinusAoB = std::max(stats.MaxAoNMinusAoB, aoN - aoB);
+
+                // 既存AOとの一致。同じ積分の別推定量なので、モンテカルロ誤差ぶんしかズレないはず
+                const double diff = aoN - static_cast<double>(ao[i]);
+                stats.SumSqError += diff * diff;
+                stats.MaxError = std::max(stats.MaxError, std::abs(diff));
+                ++stats.SampleCount;
+
+                if (aoB < 1e-3) { ++stats.FullyOccludedCount; }
+                if (aoB > 1.05) { ++meshOverOne; }
+            }
+
+            stats.NanCount += meshNan;
+            stats.OverOneCount += meshOverOne;
+
+            if (meshNan > 0)
+            {
+                Warn("メッシュ[" + std::to_string(meshIndex) + "]のbent normalにNaN/Infが "
+                    + std::to_string(meshNan) + "テクセルありました");
+            }
+            if (meshOverOne > 0)
+            {
+                Warn("メッシュ[" + std::to_string(meshIndex) + "]のbent normalで長さが1.05を超えたテクセルが "
+                    + std::to_string(meshOverOne) + "個ありました(サンプリングか正規化係数の誤り)");
+            }
+        }
+
         // === GPU(DirectCompute)によるレイキャスト ==============================
 
         const char* kBakeComputeShader = R"(
 struct Triangle { float3 V0; float3 E1; float3 E2; };
 struct BvhNode  { float3 BoundsMin; uint LeftFirst; float3 BoundsMax; uint Count; };
-struct Texel    { float3 Position; float3 Normal; };
+struct Texel    { float3 Position; float3 Normal; float4 Tangent; };
 
 StructuredBuffer<Triangle> Triangles : register(t0);
 StructuredBuffer<BvhNode>  Nodes     : register(t1);
 StructuredBuffer<Texel>    Texels    : register(t2);
 StructuredBuffer<uint>     Valid     : register(t3);
 RWStructuredBuffer<float>  Result    : register(u0);
+// bent normal(正規化しない)。.xyz = 接空間のbRaw、.w = 有効フラグ。
+// 正規化して長さを捨てないのは、消費側が長さ(=aoB)を錐体の広がりとして使うため
+RWStructuredBuffer<float4> BentResult : register(u1);
 
 cbuffer BakeConstants : register(b0)
 {
@@ -546,6 +1055,8 @@ cbuffer BakeConstants : register(b0)
     uint RayCount;
     float RayLength;
     float NormalOffset;
+    uint BentRayCount;
+    uint3 Padding;
 };
 
 // Möller–Trumbore。遮蔽の有無だけが要るので交差位置は返さない
@@ -633,6 +1144,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if (Valid[index] == 0)
     {
         Result[index] = 1.0f; // チャート外は遮蔽なし扱い(ダイレーションで上書きされる)
+        // 接空間では「遮蔽なし」が曲率によらず常に(0,0,1)になるので、チャート外もこれで埋める。
+        // 有効フラグは0にしておき、ダイレーションで届かなかったぶんだけCPU側が1へ立て直す
+        BentResult[index] = float4(0.0f, 0.0f, 1.0f, 0.0f);
         return;
     }
 
@@ -665,6 +1179,73 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     }
 
     Result[index] = 1.0f - float(occluded) / float(RayCount);
+
+    // --- bent normal(正規化しない可視方向の平均) ---
+    //
+    //   bRaw = (1/π) ∫ V(ω) ω dω
+    //
+    // 消費側はこれを軸 normalize(bRaw)、aoB = length(bRaw)、aoN = dot(N, bRaw) の3つへ分解する。
+    // aoNは上のResultとまったく同じ量の別推定量なので、両者の一致がそのまま検証になる。
+    //
+    // 【コサイン重点サンプリングは使えない】上のAOと違い被積分関数にコサイン項が無いため、
+    // 重みが打ち消し合わずπ/cosθになる。グレージング(cosθ→0)で重みが発散し分散が爆発する。
+    // そのため一様半球サンプリング(pdf = 1/2π)を使う
+    float3 bRaw = float3(0.0f, 0.0f, 0.0f);
+    float3 bAll = float3(0.0f, 0.0f, 0.0f);
+    for (uint j = 0; j < BentRayCount; ++j)
+    {
+        const float2 xj = Hammersley(j, BentRayCount);
+        // cosθに一様 = 立体角に一様
+        const float cosT = xj.x;
+        const float sinT = sqrt(max(0.0f, 1.0f - cosT * cosT));
+        const float phiB = 6.2831853f * xj.y;
+        const float3 dirB = normalize(T * (sinT * cos(phiB)) + B * (sinT * sin(phiB)) + N * cosT);
+
+        bAll += dirB;
+        if (!Occluded(origin, dirB, RayLength))
+        {
+            bRaw += dirB;
+        }
+    }
+
+    // 【理論値 2/本数 で割ってはいけない】
+    //
+    //   (1/π) ÷ pdf(=1/2π) ÷ 本数 = 2/本数
+    //
+    // は本数→∞での係数であって、有限本数では求積誤差が残る。実際256本のHammersley列では
+    // 遮蔽ゼロでも長さが 1.0 ではなく 0.9961 にしかならず、これはテクセルの内容に依らない定数
+    // (列だけで決まる)なので全モデルでぴったり同じ値が出ていた。
+    //
+    // わずか0.39%だが無害ではない。消費側は aoB = length(bRaw) から可視コーンの半頂角を
+    //   αv = asin(sqrt(aoB))
+    // で復元しており、この写像は aoB → 1 で微分が発散する。0.39%の不足が 3.58° の角度誤差になり、
+    // ラフネス0.045の鏡面ローブ(半頂角3.65°)とほぼ同じ大きさになってしまう。その結果、
+    // 遮蔽がまったく無い面でもグレージング(NdotV→0)でスペキュラ遮蔽が0に落ちて真っ黒になる。
+    //
+    // そこで同じ列で求めた「全方向の和」の長さで割る。遮蔽ゼロなら bRaw == bAll なので
+    // 長さがちょうど1になり、求積誤差が定義上打ち消される
+    const float allLength = length(bAll);
+    bRaw *= (allLength > 1e-6f) ? (1.0f / allLength) : (2.0f / float(BentRayCount));
+
+    // --- 接空間へ落とす ---
+    //
+    // 【なぜモデル空間のまま焼かないか】モデル空間のbRawは「遮蔽なし = N」なので、
+    // 曲面上で隣り合うテクセルは遮蔽が無くても向きが違う。ミップ生成やバイリニア補間で
+    // 平均すると打ち消し合って長さが縮み、消費側がそれをaoB(遮蔽率)として読むため
+    // 縮小するほど暗くなる ―― 実測でドラゴンの|E[b]|はmip7で0.816→0.205まで落ちた。
+    // 接空間なら遮蔽なしは曲率によらず常に(0,0,1)なので、平均しても長さ1のままになる。
+    //
+    // 基底はGBuffer.hlslのComputeTangentFrameと同一の手順で組むこと。ずれると
+    // コーンの軸が法線まわりに回ってしまう(aoN = z成分 と aoB = 長さ は基底の回転で
+    // 不変なので影響を受けない)
+    // 頂点接線はModelSource.cppが必ず非退化なものを入れるが、補間の結果Nと平行に
+    // なりうる。normalizeがNaNを返すとfp16でも生き残って画面が壊れるため、
+    // 上のサンプリング基底Tへ落とす(Nまわりの方位がずれるだけで、aoN/aoBは変わらない)
+    const float3 rawTf = texel.Tangent.xyz - N * dot(N, texel.Tangent.xyz);
+    const float3 Tf = dot(rawTf, rawTf) > 1e-12f ? normalize(rawTf) : T;
+    const float3 Bf = cross(N, Tf) * texel.Tangent.w;
+
+    BentResult[index] = float4(dot(bRaw, Tf), dot(bRaw, Bf), dot(bRaw, N), 1.0f);
 }
 )";
 
@@ -674,7 +1255,10 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             uint32_t RayCount;
             float RayLength;
             float NormalOffset;
+            uint32_t BentRayCount;
+            uint32_t Padding[3];   // 定数バッファは16バイト単位。HLSL側のuint3 Paddingと対応する
         };
+        static_assert(sizeof(BakeConstants) == 32, "BakeConstantsはHLSL側のcbufferと32バイトで一致させること");
 
         void ThrowIfFailed(HRESULT hr, const char* what)
         {
@@ -748,7 +1332,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             // 統合GPUを掴んでいないかを、憶測ではなくログで確認できるようにしておく。
             //
             // (実測では正しくディスクリートGPUが選ばれており、レイキャストは
-            //  毎秒3〜4億レイ出ていた。ベイクが遅いのはGPU側ではなくUV展開が原因 ―― 22.6.5節)
+            //  毎秒3〜4億レイ出ていた。ベイクが遅いのはGPU側ではなくUV展開が原因 ―― 22.6.6節)
             void LogAdapter()
             {
                 ComPtr<IDXGIDevice> dxgiDevice;
@@ -815,6 +1399,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         OcclusionBakeResult result;
         result.Resolution = options.Resolution;
         result.MeshTextures.resize(sourceModel.Meshes.size());
+        result.MeshBentNormals.resize(sourceModel.Meshes.size());
 
         if (sourceModel.Meshes.empty())
         {
@@ -824,6 +1409,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         xatlas::SetPrint(SilentPrint, false);
 
         BakeTimings timings;
+        BentStats stats;
         const Clock::time_point bakeStart = Clock::now();
 
         // === 1. 全メッシュのライトマップUVを生成する ===
@@ -833,7 +1419,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         std::vector<uint8_t> unwrapped(sourceModel.Meshes.size(), 0);
         for (size_t i = 0; i < sourceModel.Meshes.size(); ++i)
         {
-            unwrapped[i] = UnwrapMesh(sourceModel.Meshes[i], options.Resolution) ? 1 : 0;
+            unwrapped[i] = UnwrapMesh(sourceModel.Meshes[i], options) ? 1 : 0;
             if (!unwrapped[i])
             {
                 Warn("メッシュ[" + std::to_string(i) + "]のライトマップUVを生成できなかったため、遮蔽マップのベイクをスキップします");
@@ -874,7 +1460,11 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         Info("遮蔽マップをベイクします (三角形 " + std::to_string(bvh.Triangles.size())
             + " / BVHノード " + std::to_string(bvh.Nodes.size())
             + " / 解像度 " + std::to_string(options.Resolution)
-            + " / レイ " + std::to_string(options.RayCount) + "本)");
+            + " / レイ " + std::to_string(options.RayCount) + "本"
+            + " / bent normal " + (options.BentNormalRayCount > 0
+                ? std::to_string(options.BentNormalRayCount) + "本"
+                : std::string("なし"))
+            + ")");
 
         const uint32_t texelCount = options.Resolution * options.Resolution;
 
@@ -902,7 +1492,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
             // 有効テクセルだけがレイを飛ばす(無効テクセルはシェーダー冒頭で即returnする)。
             // スループットの分母はこちらでなければならない
-            timings.TotalRays += static_cast<uint64_t>(validCount) * options.RayCount;
+            timings.TotalRays +=
+                static_cast<uint64_t>(validCount) * (options.RayCount + options.BentNormalRayCount);
 
             // UV展開の品質指標(22.6.4)。
             //   被覆率      = 有効テクセル / 全テクセル。アトラスをどれだけ使えているか
@@ -944,9 +1535,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             ComPtr<ID3D11UnorderedAccessView> resultUav;
             ThrowIfFailed(device.Device()->CreateUnorderedAccessView(resultBuffer.Get(), &uavDesc, &resultUav), "UAVの作成に失敗しました");
 
+            // bent normal用の結果バッファ(float4)。シェーダーは常にu1へ書くため、
+            // ベイクしない設定でもバッファ自体は作ってバインドする
+            D3D11_BUFFER_DESC bentDesc = resultDesc;
+            bentDesc.ByteWidth = texelCount * sizeof(float) * 4;
+            bentDesc.StructureByteStride = sizeof(float) * 4;
+            ComPtr<ID3D11Buffer> bentBuffer;
+            ThrowIfFailed(device.Device()->CreateBuffer(&bentDesc, nullptr, &bentBuffer), "bent normalの結果バッファの作成に失敗しました");
+            ComPtr<ID3D11UnorderedAccessView> bentUav;
+            ThrowIfFailed(device.Device()->CreateUnorderedAccessView(bentBuffer.Get(), &uavDesc, &bentUav), "bent normalのUAVの作成に失敗しました");
+
             BakeConstants constants{};
             constants.TexelCount = texelCount;
             constants.RayCount = options.RayCount;
+            constants.BentRayCount = options.BentNormalRayCount;
             constants.RayLength = rayLength;
             // 自己交差を避ける浮かせ量。レイ長に比例させ、スケールの異なるモデルでも同じ挙動にする
             constants.NormalOffset = rayLength * 1e-3f;
@@ -957,20 +1559,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             device.Context()->Unmap(device.Constants(), 0);
 
             ID3D11ShaderResourceView* srvs[] = { triangleSrv.Get(), nodeSrv.Get(), texelSrv.Get(), validSrv.Get() };
-            ID3D11UnorderedAccessView* uavs[] = { resultUav.Get() };
+            ID3D11UnorderedAccessView* uavs[] = { resultUav.Get(), bentUav.Get() };
             ID3D11Buffer* cbs[] = { device.Constants() };
 
             device.Context()->CSSetShader(device.Shader(), nullptr, 0);
             device.Context()->CSSetShaderResources(0, 4, srvs);
-            device.Context()->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+            device.Context()->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
             device.Context()->CSSetConstantBuffers(0, 1, cbs);
             device.Context()->Dispatch((texelCount + 63) / 64, 1, 1);
 
             // バインドを外してからリードバックする(次のメッシュで同じスロットを使い回すため)
             ID3D11ShaderResourceView* nullSrvs[4] = {};
-            ID3D11UnorderedAccessView* nullUavs[1] = {};
+            ID3D11UnorderedAccessView* nullUavs[2] = {};
             device.Context()->CSSetShaderResources(0, 4, nullSrvs);
-            device.Context()->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
+            device.Context()->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
 
             D3D11_BUFFER_DESC stagingDesc = resultDesc;
             stagingDesc.Usage = D3D11_USAGE_STAGING;
@@ -990,11 +1592,47 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 const float clamped = std::clamp(ao[i], 0.0f, 1.0f);
                 texture[i] = static_cast<uint8_t>(clamped * 255.0f + 0.5f);
             }
+
+            // bent normalのリードバック。AO(float)とは別バッファなのでステージングも別に要る
+            std::vector<float> bentTexture;
+            if (options.BentNormalRayCount > 0)
+            {
+                D3D11_BUFFER_DESC bentStagingDesc = bentDesc;
+                bentStagingDesc.Usage = D3D11_USAGE_STAGING;
+                bentStagingDesc.BindFlags = 0;
+                bentStagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                ComPtr<ID3D11Buffer> bentStaging;
+                ThrowIfFailed(device.Device()->CreateBuffer(&bentStagingDesc, nullptr, &bentStaging),
+                    "bent normalのリードバック用バッファの作成に失敗しました");
+                device.Context()->CopyResource(bentStaging.Get(), bentBuffer.Get());
+
+                D3D11_MAPPED_SUBRESOURCE bentReadback{};
+                ThrowIfFailed(device.Context()->Map(bentStaging.Get(), 0, D3D11_MAP_READ, 0, &bentReadback),
+                    "bent normalのリードバックのMapに失敗しました");
+                const float* bent = static_cast<const float*>(bentReadback.pData);
+
+                bentTexture.assign(bent, bent + static_cast<size_t>(texelCount) * 4);
+
+                // 仕様書§7のチェックリストを量子化前のfloat32で集計する。
+                // ここで既存AOとの一致を見ておかないと、後段で見つけた誤差が
+                // ベイクのバグなのかfp16量子化なのか切り分けられない
+                AccumulateBentStats(bent, ao, valid, texelCount, meshIndex, stats);
+
+                device.Context()->Unmap(bentStaging.Get(), 0);
+            }
+
             device.Context()->Unmap(staging.Get(), 0);
             timings.DispatchSeconds += SecondsSince(dispatchStart);
 
             const Clock::time_point dilateStart = Clock::now();
             Dilate(texture, valid, options.Resolution, options.DilationPixels);
+            if (!bentTexture.empty())
+            {
+                DilateBentNormal(bentTexture, valid, options.Resolution, options.DilationPixels);
+                // ダイレーション後(=実際にミップ生成へ渡す状態)で測る
+                AccumulateMipStability(bentTexture, options.Resolution, stats);
+                result.MeshBentNormals[meshIndex] = std::move(bentTexture);
+            }
             timings.DilateSeconds += SecondsSince(dilateStart);
 
             result.MeshTextures[meshIndex] = std::move(texture);
@@ -1018,6 +1656,54 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 static_cast<double>(timings.TotalRays) / timings.DispatchSeconds / 1.0e6;
             Info("  レイ " + std::to_string(timings.TotalRays) + "本 / "
                 + Format2(raysPerSecondM) + " 百万レイ毎秒");
+        }
+
+        // === 5. bent normalの検証(仕様書§7) ===
+        //
+        // 上から2項目が通れば地平線の二重計上が無いこと、
+        // 「既存AOとの一致」が通ればサンプリングと正規化係数が正しいことが確認できる
+        if (stats.SampleCount > 0)
+        {
+            const double rms = std::sqrt(stats.SumSqError / static_cast<double>(stats.SampleCount));
+            const double occludedRatio =
+                static_cast<double>(stats.FullyOccludedCount) / static_cast<double>(stats.SampleCount) * 100.0;
+
+            Info("bent normalの検証 (量子化前のfloat32、有効テクセル " + std::to_string(stats.SampleCount) + "個):");
+            Info("  max|bRaw|         " + Format4(stats.MaxLength) + " (1.0以下であること)");
+            Info("  max(aoN - aoB)    " + Format4(stats.MaxAoNMinusAoB) + " (0.0以下であること)");
+            Info("  既存AOとの誤差    RMS " + Format4(rms) + " / 最大 " + Format4(stats.MaxError));
+            Info("  完全遮蔽の割合    " + Format2(occludedRatio) + "%");
+            Info("  ミップ耐性        " + Format4(stats.WorstMipRatio)
+                + " (mip " + std::to_string(stats.WorstMipLevel) + "、0.85以上であること)");
+
+            // 一致していないということは、同じ積分の別推定量になっていないということ。
+            // 0.05はモンテカルロ誤差(256本で数%)に安全側の余裕を見た値
+            if (rms > 0.05)
+            {
+                Warn("bent normalのaoN(= dot(N,bRaw))が既存AOと一致していません (RMS " + Format4(rms)
+                    + ")。一様半球サンプリングの正規化係数(2/本数)かレイの基底を確認してください");
+            }
+            if (stats.MaxLength > 1.05)
+            {
+                Warn("bent normalの長さが1を大きく超えています (max " + Format4(stats.MaxLength) + ")");
+            }
+            if (stats.MaxAoNMinusAoB > 0.05)
+            {
+                Warn("aoNがaoBを上回っています (max " + Format4(stats.MaxAoNMinusAoB)
+                    + ")。コーシー・シュワルツの不等式に反するため、どちらかの計算が誤っています");
+            }
+            if (stats.NanCount > 0)
+            {
+                Warn("bent normalにNaN/Infが合計 " + std::to_string(stats.NanCount) + "テクセルありました");
+            }
+            // 浅い段で0.85を下回るということは、格納しているベクトルが法線の向きに
+            // 引きずられていてミップで打ち消し合っているということ。消費側は縮小するほど暗くなる
+            if (stats.WorstMipRatio < 0.85)
+            {
+                Warn("bent normalのミップ耐性が不足しています (mip " + std::to_string(stats.WorstMipLevel)
+                    + " で " + Format4(stats.WorstMipRatio)
+                    + ")。接空間への変換(基底がGBuffer.hlslのComputeTangentFrameと一致しているか)を確認してください");
+            }
         }
 
         return result;

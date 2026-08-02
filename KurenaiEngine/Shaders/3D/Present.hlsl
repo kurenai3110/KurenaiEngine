@@ -229,7 +229,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // これらだけDataSamplerで引く。それ以外は色バッファなので、レターボックスの拡縮で
     // ブロック状にならないようColorSamplerで引く。
     // Modeは定数バッファ由来で波面内で一様のため、この分岐のコストは実質ゼロ
-    const bool readsRawData = (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14);
+    const bool readsRawData = (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14 || Mode == 15);
     float4 sourceColor = readsRawData
         ? SourceTexture.Sample(DataSampler, input.UV)
         : SourceTexture.Sample(ColorSampler, input.UV);
@@ -284,6 +284,27 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 速い動きを見たいときはGainを下げ、静止に近い微小な速度を見たいときは上げる
         float2 encoded = 0.5f + velocityPixels * (Gain / 20.0f);
         return float4(saturate(encoded), 0.5f, 1.0f);
+    }
+
+    if (Mode == 15)
+    {
+        // bent normal(34章)。.rgb = 正規化しないbRaw、.a = 有効フラグ。
+        // 有効フラグが立っていないテクセル(bent normalを持たないマテリアル)は
+        // 「データ無し」がひと目で分かるようマゼンタで塗る。
+        // 軸は方向なので *0.5+0.5 で色にし、Gainで長さ(=aoB)の表示へ切り替える:
+        //   Gain = 1 … 軸の向きを色で見る(法線表示と同じ読み方)
+        //   Gain > 1 … 長さをグレースケールで見る(遮蔽が強いほど暗い)
+        if (sourceColor.a < 0.5f)
+        {
+            return float4(1.0f, 0.0f, 1.0f, 1.0f);
+        }
+        const float aoB = length(sourceColor.rgb);
+        if (Gain > 1.5f)
+        {
+            return float4(aoB, aoB, aoB, 1.0f);
+        }
+        const float3 axis = aoB > 1e-3f ? sourceColor.rgb / aoB : float3(0.0f, 0.0f, 0.0f);
+        return float4(axis * 0.5f + 0.5f, 1.0f);
     }
 
     return float4(sourceColor.rgb * Gain, 1.0f);

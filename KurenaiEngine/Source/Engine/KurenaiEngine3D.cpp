@@ -99,7 +99,9 @@ namespace Kurenai
             // イラディアンスマップ(t8。検証用に残している経路)。CSPrefilterはV=R=Nを仮定して
             // いるため、roughness=1(α=1)ではGGXインポータンスサンプリングの実効カーネルが
             // コサイン畳み込みへ厳密に退化し、格納値もCSIrradianceと同じE(N)/πになる(14.10節)。
-            // 反射プローブの拡散イラディアンスにもまったく同じ規則を適用する(19.7節)
+            // 反射プローブの拡散イラディアンスにもまったく同じ規則を適用する(19.7節)。
+            // y: 環境光の拡散倍率(m_AmbientDiffuseScale)、z: 同じく鏡面倍率
+            // (m_AmbientSpecularScale)。どちらもIBLの有効/無効に関わらず効く。w: 未使用
             DirectX::XMFLOAT4 IBLParams;
             // 反射プローブ用(末尾に追加)。x=有効プローブ数(0ならプローブを使わずグローバルIBLのみ)、
             // y=影響範囲のデバッグ表示フラグ、z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
@@ -153,6 +155,15 @@ namespace Kurenai
             // アトラスの中身を露出に依存しない物理量に保つ。
             // R32で確保してある(22.6節)ので、夜の小さな値でもfp32の範囲に余裕がある
             DirectX::XMFLOAT4 DDGIParams4;
+            // bent normalによる遮蔽用(末尾に追加のため既存シェーダのオフセットは変わらない、34章)。
+            // x=ディフューズAOの出所   0=従来のベイクAO(Material.b) / 1=aoN = dot(N, bRaw)
+            // y=スペキュラ遮蔽の方式   0=Frostbite近似(従来)      / 1=bent normalの錐体交差
+            // z=multi-bounce AO       0=無効(既定)                / 1=有効
+            // w=未使用
+            //
+            // xとyは同じ積分の別推定量どうしの切り替えなので、0と1で見た目がほぼ変わらないことが
+            // そのまま検証になる。zだけは見た目を大きく変えるため既定を無効にしてある
+            DirectX::XMFLOAT4 OcclusionParams;
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -1963,6 +1974,7 @@ namespace Kurenai
                 RHI::Format::R8G8B8A8_UNorm, // Material(R=Metallic, G=Roughness)
                 emissiveFormat,              // Emissive(バッファ精度に依存)
                 RHI::Format::R16G16_Float,   // Velocity(モーションベクター。UV単位の2Dベクトル)
+                RHI::Format::R16G16B16A16_Float, // BentNormal(.rgb = bRaw、.a = 有効フラグ)
             };
             gbufferPipelineDesc.HasDepthStencil = true;
             gbufferPipelineDesc.ReverseZ = true;
@@ -2161,6 +2173,13 @@ namespace Kurenai
             // 2成分しか要らないのでR16G16_Float。1画素ぶんの移動量が1/解像度(1920幅なら約0.00052)と
             // 小さいため、絶対精度ではなく相対精度で効く浮動小数点フォーマットが適している
             m_GBufferVelocity = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16_Float);
+
+            // bent normal(正規化しない可視方向の平均、ワールド空間)。G-Bufferの6枚目。
+            // .rgb = bRaw、.a = 有効フラグ。
+            //
+            // R11G11B10_Floatにはできない ―― 符号なしのため負の成分が落ち、
+            // 半球の半分の方向を表現できなくなる。1080pで約16MB増える(34章)
+            m_GBufferBentNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
 
             // TAAの履歴バッファ2枚。読みながら同じテクスチャへ書けないので、毎フレーム役割を入れ替える
             // (m_TAAHistoryIndexが今フレームの書き込み先)。バッファ精度をLegacy8bitに落としても
@@ -2694,11 +2713,21 @@ namespace Kurenai
         mixFloat(m_MoonAzimuthDegrees);
         mixFloat(m_MoonElevationDegrees);
         // キャプチャ内の環境項はグローバルIBLを引くため、その強度も焼き上がりに影響する。
-        // 手続き空か.ksceneのDDSかで空そのものが変わるため、その切り替えも含める
+        // 手続き空か.ksceneのDDSかで空そのものが変わるため、その切り替えも含める。
+        // 拡散・鏡面の倍率もProbeCapture.hlslが同じように適用するため署名へ含める
+        // (含め忘れると、つまみを動かしてもプローブの中身だけ古い倍率のまま残る)
         mixFloat(m_IBLEnabled ? m_IBLIntensity : 0.0f);
+        mixFloat(m_AmbientDiffuseScale);
+        mixFloat(m_AmbientSpecularScale);
         mixBool(m_ProceduralSkyEnabled);
         // 自発光の強度倍率はキャプチャのエミッシブ項へそのまま乗る
         mixFloat(m_EmissiveIntensity);
+
+        // bent normalによる遮蔽(34章)。ProbeCapture.hlslが同じ分岐を持つため、
+        // 含め忘れるとつまみを動かしてもプローブの中身だけ古いまま残る
+        mixBool(m_BentNormalAOSource);
+        mixFloat(static_cast<float>(m_SpecularOcclusionMode));
+        mixBool(m_MultiBounceAOEnabled);
 
         // ライトは構造体ごとダンプすると詰め物(padding)の未初期化バイトを拾い得るため、
         // 使うフィールドだけを明示的に混ぜる
@@ -3620,7 +3649,17 @@ namespace Kurenai
             specularEnergyCompensation,
         };
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
-        constants.IBLParams = { m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+        constants.IBLParams = {
+            m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f,
+            m_AmbientDiffuseScale,
+            m_AmbientSpecularScale,
+            0.0f,
+        };
+        constants.OcclusionParams = {
+            m_BentNormalAOSource ? 1.0f : 0.0f,
+            static_cast<float>(m_SpecularOcclusionMode),
+            m_MultiBounceAOEnabled ? 1.0f : 0.0f,
+            0.0f };
 
         // === 実効プリ露出が大きく動いたら、更新モードに関わらずプローブを焼き直す(19.14節) ===
         // 下のProbeParams2.wは「焼いた時点の露出→現在の露出」の換算倍率で、これだけでも
@@ -4202,8 +4241,10 @@ namespace Kurenai
                     cmd->SetTexture(1, mesh.NormalTexture);
                     cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                     cmd->SetTexture(3, mesh.EmissiveTexture);
-                    // t4はカスケードシャドウマップ配列が占めているため遮蔽マップはt5
+                    // t4はカスケードシャドウマップ配列が占めているため遮蔽マップはt5、
+                    // bent normalはその次のt6(GBuffer.hlsl/ProbeCapture.hlslで共通)
                     cmd->SetTexture(5, mesh.OcclusionTexture);
+                    cmd->SetTexture(6, mesh.BentNormalTexture);
 
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                 }
@@ -4670,10 +4711,10 @@ namespace Kurenai
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "GBuffer",
-            // 5枚目の速度(モーションベクター)まで含め、並びはGBuffer.hlslのPSOutputおよび
+            // 6枚目のbent normalまで含め、並びはGBuffer.hlslのPSOutputおよび
             // CreatePrecisionDependentPipelineStatesのRenderTargetFormatsと一致させること
             .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
-                               m_GBufferEmissive.get(), m_GBufferVelocity.get() },
+                               m_GBufferEmissive.get(), m_GBufferVelocity.get(), m_GBufferBentNormal.get() },
             .DepthTarget = m_GBufferDepth.get(),
             .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
             {
@@ -4735,6 +4776,7 @@ namespace Kurenai
                         cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                         cmd->SetTexture(3, mesh.EmissiveTexture);
                         cmd->SetTexture(5, mesh.OcclusionTexture);
+                        cmd->SetTexture(6, mesh.BentNormalTexture);
                         cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                     }
                 }
@@ -5059,6 +5101,7 @@ namespace Kurenai
                 m_GBufferAlbedo.get(), m_DirectLightTexture.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                 skyTexture, activeAOTexture, m_GBufferEmissive.get(), m_GBufferNormal.get(),
                 m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
+                m_GBufferBentNormal.get(),
                 // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)。
                 // 拡散イラディアンス側の配列はM11 Stage 3で廃止した(反射プローブは鏡面専任)
                 m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
@@ -5097,6 +5140,9 @@ namespace Kurenai
                 // DDGI(22章)。反射プローブと同じ理由で、無効時も含めて常にバインドする
                 cmd->SetTexture(15, m_DDGIIrradianceAtlas.get());
                 cmd->SetTexture(16, m_DDGIDistanceAtlas.get());
+                // bent normal(34章)。t0〜t16が埋まっているためt17。
+                // これに合わせてkTextureSlotCountを17→18へ上げてある
+                cmd->SetTexture(17, m_GBufferBentNormal.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -5182,9 +5228,11 @@ namespace Kurenai
                 cmd->SetShaderResourceBuffer(7, m_ProbeBuffer.get());
                 cmd->SetTexture(12, m_ProbeDistanceArray.get());
                 // DDGI(22章、M11 Stage 1)。Lighting/ProbeCaptureパスと同じアトラスを共有する。
-                // ProbeParams同様、DDGIParams0.wが0でも常にバインドする
-                cmd->SetTexture(14, m_DDGIIrradianceAtlas.get());
-                cmd->SetTexture(15, m_DDGIDistanceAtlas.get());
+                // ProbeParams同様、DDGIParams0.wが0でも常にバインドする。
+                // t14はメッシュごとのbent normal(34章)が使うためt15/t16へ置く
+                // ——ここを14/15のままにするとメッシュのループが毎回上書きしてしまう
+                cmd->SetTexture(15, m_DDGIIrradianceAtlas.get());
+                cmd->SetTexture(16, m_DDGIDistanceAtlas.get());
 
                 // 半透明は奥から手前への描画順そのものが正しさの前提なので並べ替えられない。
                 // そのため必要になった時点でパイプラインを切り替える(GBufferパスと同じ方式)
@@ -5222,6 +5270,8 @@ namespace Kurenai
                     cmd->SetTexture(2, draw.Mesh->MetallicRoughnessTexture);
                     cmd->SetTexture(3, draw.Mesh->EmissiveTexture);
                     cmd->SetTexture(13, draw.Mesh->OcclusionTexture);
+                    // bent normal(34章)。このパスはt0〜t13を使い切っているためt14
+                    cmd->SetTexture(14, draw.Mesh->BentNormalTexture);
 
                     cmd->DrawIndexed(draw.Mesh->IndexCount, 0, 0);
                 }
@@ -5244,6 +5294,7 @@ namespace Kurenai
                     m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                     m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
                     m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
+                    m_GBufferBentNormal.get(),
                 },
                 .RenderTargets = { m_SSRTexture.get() },
                 .Execute = [this, &gbufferViewport, activeAOTexture](RHI::IRHICommandList* cmd)
@@ -5268,6 +5319,9 @@ namespace Kurenai
                     cmd->SetTexture(8, m_ProbePrefilteredArray.get());
                     cmd->SetShaderResourceBuffer(9, m_ProbeBuffer.get());
                     cmd->SetTexture(10, m_ProbeDistanceArray.get());
+                    // bent normal(34章)。Lightingパスとまったく同じものを読まないと、
+                    // SSRが適用される領域とされない領域の境界に段差が出る
+                    cmd->SetTexture(11, m_GBufferBentNormal.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -5282,7 +5336,7 @@ namespace Kurenai
                 .Reads = {
                     m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                     m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
-                    m_ProbePrefilteredArray.get(),
+                    m_ProbePrefilteredArray.get(), m_GBufferBentNormal.get(),
                 },
                 .Writes = { m_RTReflectionTexture.get() },
                 .Execute = [this, activeAOTexture](RHI::IRHICommandList* cmd)
@@ -5316,6 +5370,9 @@ namespace Kurenai
                     cmd->SetComputeShaderResourceBuffer(13, m_RaytracingScene.GetMeshInfoBuffer());
                     cmd->SetComputeShaderResourceBuffer(14, m_RaytracingScene.GetInstanceInfoBuffer());
                     cmd->SetComputeShaderResourceBuffer(15, m_RaytracingScene.GetMaterialBuffer());
+                    // bent normal(34章)。t0〜t15が埋まっているためt16。
+                    // SSR.hlslと同じくスペキュラ遮蔽の方向依存を再現するために要る
+                    cmd->SetComputeTexture(16, m_GBufferBentNormal.get());
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                     cmd->SetComputeUnorderedAccessTexture(0, m_RTReflectionTexture.get());
@@ -5758,6 +5815,12 @@ namespace Kurenai
             // 解像度だけ合わせてm_TonemapTextureをそのまま渡す(Mode 11では読まれない)
             presentSourceTexture = m_TonemapTexture.get();
             presentMode = 11;
+            break;
+        case DebugView::BentNormal:
+            // bent normal(34章)。正規化しないベクトルなので、法線表示(Mode 7)のような
+            // オクタヘドラルのデコードは通さず専用のMode 15で扱う
+            presentSourceTexture = m_GBufferBentNormal.get();
+            presentMode = 15;
             break;
         case DebugView::MotionVector:
             // 速度バッファ。格納値はUV単位(1画素ぶんの移動で1/解像度、1920幅なら約0.0005)と

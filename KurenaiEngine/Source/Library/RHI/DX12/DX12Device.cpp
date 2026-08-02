@@ -31,11 +31,11 @@ namespace Kurenai::RHI
     namespace
     {
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
-        // t0〜t16。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
+        // t0〜t17。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
         // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer+距離キューブ配列
-        // +DDGIのオクタヘドラルアトラス2枚)。
+        // +DDGIのオクタヘドラルアトラス2枚+bent normalのG-Buffer)。
         // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)
-        constexpr uint32_t kTextureSlotCount = 17;
+        constexpr uint32_t kTextureSlotCount = 18;
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
         // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler(役割の定義はShaders/Samplers.hlsli)。
         // どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。
@@ -59,12 +59,12 @@ namespace Kurenai::RHI
         // 十分上回る値にしておく
         constexpr uint32_t kConstantBufferRingCapacity = 8192;
 
-        // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t15, u0〜u3)。
-        // SRVが16必要なのはレイトレーシングのパスで、TLAS + G-Buffer(Albedo/Normal/Material/Depth) +
+        // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t16, u0〜u3)。
+        // SRVが17必要なのはレイトレーシングのパス(RT反射)で、TLAS + G-Buffer(Albedo/Normal/Material/Depth) +
         // SceneColor + スカイボックス + シーンジオメトリ4本(頂点属性・インデックス・メッシュ情報・
-        // マテリアル) + インスタンス情報 を1回のディスパッチで同時に読むため。
+        // マテリアル) + インスタンス情報 + bent normal(t16、34章) を1回のディスパッチで同時に読むため。
         // DX12CommandList.h側の同名の定数と必ず一致させること
-        constexpr uint32_t kComputeSrvSlotCount = 16;
+        constexpr uint32_t kComputeSrvSlotCount = 17;
         constexpr uint32_t kComputeUavSlotCount = 4;
         constexpr uint32_t kComputeTableSlotCount = kComputeSrvSlotCount + kComputeUavSlotCount;
         // 1フレームあたりに払い出せるコンピュートSRV+UAVテーブルブロックの最大数(Dispatch呼び出し回数の上限)。

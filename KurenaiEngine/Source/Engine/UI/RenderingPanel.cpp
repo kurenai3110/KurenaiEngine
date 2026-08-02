@@ -368,6 +368,51 @@ namespace Kurenai::UI
                 "IBLを使わないときの、方向を持たない一様な環境光の強さ");
         }
 
+        // IBLの有効/無効どちらでも効くため、上の分岐の外に置く。
+        // 「IBL 強度」が拡散と鏡面へ一様に掛かるのに対し、この2つは両者の比率を崩すためのもの
+        SliderFloatEx(
+            "環境光の拡散倍率###AmbientDiffuseScale", &m_Engine.m_AmbientDiffuseScale, 0.0f, 2.0f,
+            Defaults::AmbientDiffuseScale, "%.3f", 0,
+            "環境光(間接光)の拡散成分だけに掛かる倍率。0にすると環境からの照り返しが消え、"
+            "映り込みだけが残る。直接光・自発光・SSILの間接光には掛からない");
+        SliderFloatEx(
+            "環境光の鏡面倍率###AmbientSpecularScale", &m_Engine.m_AmbientSpecularScale, 0.0f, 2.0f,
+            Defaults::AmbientSpecularScale, "%.3f", 0,
+            "環境光(間接光)の鏡面成分だけに掛かる倍率。金属やガラスの映り込みの強さを、"
+            "環境からの照り返しを保ったまま増減できる。SSRと反射プローブにも同じ倍率が効く");
+
+        // bent normalによる遮蔽(34章)。ベイク済みのbent normalを持つモデルでのみ効く
+        // (持たないマテリアルは黒1x1へフォールバックし、どのトグルでも見た目が変わらない)
+        CheckboxEx(
+            "ディフューズAOにbent normalを使う###BentNormalAOSource", &m_Engine.m_BentNormalAOSource,
+            Defaults::BentNormalAOSource,
+            "拡散光の遮蔽を aoN = dot(N, bRaw) から求める。無効にすると従来のベイク済みAOを使う。"
+            "どちらも同じ積分の別推定量なので、切り替えても見た目はほとんど変わらないのが正常");
+        {
+            static const char* const kSpecularOcclusionModes[] = {
+                "Frostbite近似(方向を見ない)",
+                "球冠交差",
+                "球面ガウス(推奨)",
+            };
+            int mode = static_cast<int>(m_Engine.m_SpecularOcclusionMode);
+            if (ComboEx(
+                    "スペキュラ遮蔽の方式###SpecularOcclusionMode", &mode, kSpecularOcclusionModes,
+                    IM_ARRAYSIZE(kSpecularOcclusionModes), Defaults::SpecularOcclusionMode,
+                    "鏡面の遮蔽方式。壁際で、壁を向いた反射だけが暗くなるのが「Frostbite近似」以外の"
+                    "共通の挙動。「球冠交差」は可視性を二値の球冠として扱うため、遮蔽が強い金属の凹部が"
+                    "純黒へ潰れることがある(34.10節)。「球面ガウス」は同じ交差を柔らかい分布に"
+                    "置き換えたもので、方向性を保ったまま潰れを避ける(34.11節)。既定は球面ガウス"))
+            {
+                m_Engine.m_SpecularOcclusionMode =
+                    static_cast<KurenaiEngine3D::SpecularOcclusionMode>(mode);
+            }
+        }
+        CheckboxEx(
+            "multi-bounce AO###MultiBounceAO", &m_Engine.m_MultiBounceAOEnabled,
+            Defaults::MultiBounceAOEnabled,
+            "アルベドが明るいほどAOを弱める補正(Jimenez 2016)。物理的にはより正しいが"
+            "見た目を大きく変えるため既定では無効");
+
         // IBL鏡面・直接光鏡面の両方に効くため、IBLのON/OFFの内側ではなく独立した項目にする。
         // 並びはKurenaiEngine3D::SpecularCompensationModeの値と一致させること
         {

@@ -53,10 +53,12 @@ namespace Kurenai::UI
             "シーンカラー (生HDR・トーンマップなし)",
             "DDGI - イラディアンス (オクタヘドラルアトラス)",
             "DDGI - 距離モーメント (R=平均距離)",
+            "bent normal (軸=色 / Gain>1.5で長さ=グレー)",
         };
         static_assert(
-            static_cast<int>(DebugView::DDGIDistance) == 27,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はDDGIDistance)");
+            // M11 Stage 3で「プローブ - イラディアンス」を1つ削ったため、masterでの29から28へ下がる
+            static_cast<int>(DebugView::BentNormal) == 28,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はBentNormal)");
 
         DrawUsageHint();
         BeginParamGroup();
