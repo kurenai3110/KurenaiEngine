@@ -14,7 +14,12 @@
 //
 // このシェーダー(とSky.hlsli)は Tools/generate_sky_cubemap.py の移植であり、両者は同じ絵を
 // 出す必要がある(あちらはオフラインの参照実装 兼 手続き空を無効にしたときのフォールバック用)。
-// 係数・定数を変える場合は必ず両方(と KurenaiEngine3D.cpp のCPUミラー)を同時に直すこと。
+// 係数・定数を変える場合は必ず両方を同時に直すこと。
+//
+// 【P9】ティント4本と天頂輝度(雲を考慮しない晴天基準の値)はSkyIntegrate.hlslが求めて
+// SkyParametersBuffer(t0)へ書く。このシェーダーはそれを読むだけで、正規化の積分は行わない。
+// 雲による平均透過率(判断B)だけはCPU(KurenaiEngine3D.cpp)がCloudTransmittanceとして渡し、
+// ここでSkyParametersBufferのZenithLuminanceへ掛けてからキューブへ焼く
 #include "Samplers.hlsli"
 #include "Sky.hlsli"
 
@@ -22,22 +27,17 @@ cbuffer SkyBakeConstants : register(b0)
 {
     // 処理対象の面(D3Dのキューブマップ標準順: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5)
     uint Face;
-    // 天頂輝度のスケール。Perezの相対輝度にこれを掛けたものが最終的な輝度になる
-    float ZenithLuminance;
+    // 雲(P5、判断B)による平均透過率。SkyParametersBuffer[0].Luminance.x
+    // (雲を考慮しない晴天基準の天頂輝度)にこの値を掛けてからキューブへ焼く
+    float CloudTransmittance;
     float2 SkyPadding0;
     // 太陽が「ある」向き(正規化済み)。光が進む向きとは符号が逆なので注意
     // (KurenaiEngine3D.cpp ComputeSunLighting の sunDirection と同じ向き)
     float4 SunDirection;
-    // --- 空の色味。太陽高度に応じてCPU側(ComputeSkyTint)が決めた値。xyzのみ使う ---
-    // 【なぜCPUで決めるのか】この色味は、ここでの描画と CPU 側の照度正規化
-    // (ComputeSkyZenithScale。積分の重みに色味の輝度成分が入る)の両方で完全に一致して
-    // いなければならない。CPUで1度決めて配れば、両者がずれることが構造的に起きなくなる
-    float4 ZenithTint;
-    float4 HorizonTint;
-    float4 GroundTint;
-    // xyz=夕焼け・朝焼けの暖色、w=その強さ(太陽の仰角0度で1、±15度で0)
-    float4 SunGlowTint;
 };
+
+// SkyIntegrate.hlslが書いた空パラメータ(ティント4本+正規化済みの天頂輝度)
+StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t0);
 
 RWTexture2DArray<float4> SkyOut : register(u0);
 
@@ -75,17 +75,15 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float2 uv = (float2(dispatchThreadID.xy) + 0.5f) / float2(width, height);
     const float3 dir = CubeFaceDirection(Face, uv);
 
-    // SkyBakeConstantsからSky.hlsliのSkyParametersを組み立てる。
+    // SkyBakeConstants + SkyParametersBufferからSky.hlsliのSkyParametersを組み立てる。
     // ここでの正規化(normalize)は元の実装(SkyColor呼び出し側でのnormalize(SunDirection.xyz))を
     // そのまま踏襲したもので、Sky.hlsli側では正規化しない(呼び出し側の責務)
     SkyParameters params;
     params.SunDirection = normalize(SunDirection.xyz);
-    params.ZenithLuminance = ZenithLuminance;
-    params.ZenithTint = ZenithTint.rgb;
-    params.HorizonTint = HorizonTint.rgb;
-    params.GroundTint = GroundTint.rgb;
-    params.SunGlowTint = SunGlowTint.rgb;
-    params.SunGlowStrength = SunGlowTint.w;
+    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
+    // 判断B: 雲による平均透過率はキューブへ焼く値にだけ掛ける(SkyParametersBuffer側の
+    // Luminance.xは雲を考慮しない晴天基準のまま。Sky.hlsli冒頭の雲セクション参照)
+    params.ZenithLuminance *= CloudTransmittance;
 
     // 雲(P5)は明示的に無効(CloudCoverage=0)で埋める。IBL用キューブマップには雲を焼き込まない
     // (判断A、詳細はSky.hlsliの雲セクションのコメント参照)。雲が風で動くたびにキューブの

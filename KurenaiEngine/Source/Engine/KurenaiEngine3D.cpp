@@ -160,9 +160,9 @@ namespace Kurenai
             // (DDGIParams0〜4を末尾に追加したときと同じ規約)
             DirectX::XMFLOAT4 TimeParams;
             // 空の解析評価用(さらに末尾に追加、P3)。DeferredLighting.hlslが背景画素で
-            // Sky.hlsliのSkyColorを画面解像度で評価するために使う。値は手続き空のベイク
-            // (SkyGenerate)へ渡しているものと同一で、両者が同じ空を描くことを保証する
-            // (Render()側でm_ActiveSky*キャッシュから代入する。詳細はそのメンバのコメント参照)。
+            // Sky.hlsliのSkyColorを画面解像度で評価するために使う。太陽方向以外の値
+            // (ティント4本・天頂輝度)は手続き空のベイクと同じタイミングでSkyIntegrate.hlslが
+            // m_SkyParametersBufferへ書き、両者が同じ空を描くことを保証する(P9)。
             // SkySunDirection: xyz=太陽が「ある」向き、w=未使用。
             //   【正規化はシェーダ側で行う】sunLighting.SunPositionは解析的にはほぼ単位長だが、
             //   SkyGenerate.hlsl側の慣習(呼び出し側=SkyParameters組み立て時にnormalizeする)に
@@ -170,16 +170,17 @@ namespace Kurenai
             //   **LightDirectionでは代用できない**——あちらは支配ライトの向きで、月が支配的な
             //   夜には月の向きになる。Perez分布のcircumsolar項は常に太陽を基準にする
             DirectX::XMFLOAT4 SkySunDirection;
-            // SkyParams: x=天頂輝度(実効プリ露出済み)、y=背景を解析評価するかのフラグ
-            //   (1=解析、0=キューブマップをサンプル)、zw=未使用。
+            // SkyParams: x=未使用(P9で天頂輝度はSkyParametersBufferへ移動)、
+            //   y=背景を解析評価するかのフラグ(1=解析、0=キューブマップをサンプル)、zw=未使用。
             //   yは手続き空が無効(.ksceneのDDSスカイボックス使用時)は常に0にする
-            //   (DDSは任意の絵でPerezモデルとは無関係なため、解析評価してはいけない)
+            //   (DDSは任意の絵でPerezモデルとは無関係なため、解析評価してはいけない)。
+            //   ティント4本(SkyZenithTint/SkyHorizonTint/SkyGroundTint/SkySunGlowTint)は
+            //   P9でm_SkyParametersBuffer(GPUSkyParameters、SkyIntegrate.hlslが書く)へ移り
+            //   このFrameConstantsからは削除した(DeferredLighting.hlsl/SSR.hlslのFrameConstants
+            //   宣言も同時に更新済み。フィールドを削ると後続のオフセットが全部ずれるため、
+            //   末尾のCloudParams0/1・PlanarReflectionPlaneまで含めて3シェーダーと1フィールドずつ
+            //   突き合わせて一致を確認すること)
             DirectX::XMFLOAT4 SkyParams;
-            DirectX::XMFLOAT4 SkyZenithTint;
-            DirectX::XMFLOAT4 SkyHorizonTint;
-            DirectX::XMFLOAT4 SkyGroundTint;
-            // w=太陽の暖色の強さ(SunGlowStrength)
-            DirectX::XMFLOAT4 SkySunGlowTint;
             // 雲(さらに末尾に追加、P5)。DeferredLighting.hlsl/SSR.hlslのFrameConstants宣言と
             // 同じ順・同じ型であること(2つのシェーダーが背景と水面反射で同じ雲を描くための前提。
             // Sky.hlsli冒頭のコメント・各シェーダーのMakeSkyParametersのコメント参照)。
@@ -337,209 +338,13 @@ namespace Kurenai
             return t * t * (3.0f - 2.0f * t);
         }
 
-        // --- 手続き空(SkyGenerate.hlsl)と厳密に一致させる必要がある定数・式 ---
-        // ここを変えるときは SkyGenerate.hlsl と Tools/generate_sky_cubemap.py も同時に直すこと。
-        // 3者がずれると、空の見た目・IBLの明るさ・オフライン参照実装が食い違う
-        //
-        // 【フロアを0.45から下げた理由】CIE快晴空の相対輝度は反太陽側の水平線で天頂の0.2倍程度まで
-        // 落ちる。これは実際の快晴空の姿だが、以前はここを0.45まで底上げしていたため輝度の勾配が
-        // ほぼ消え、空全体が一様なスレートグレーになっていた(実測: 空の彩度0.26、時刻を問わず一定)。
-        // 多重散乱で暗部が持ち上がるのは事実なので0にはしないが、勾配が残る値まで下げる
-        constexpr float kSkyRelativeLuminanceFloor = 0.12f;
-
-        // 空の色味セット。太陽高度から選んでCPUで1度だけ決め、cbufferでシェーダーへ配る。
-        //
-        // 【なぜCPUで決めるのか】この色味は
-        //   (1) SkyGenerate.hlsl のキューブマップ生成
-        //   (2) ComputeSkyZenithScale の照度正規化(積分の重みに色味の輝度成分が入る)
-        // の両方で完全に一致していなければならない。CPUで決めて配れば両者がずれることが
-        // 構造的に起きなくなる(以前は定数を2箇所に複製していた)。
-        // Tools/generate_sky_cubemap.py だけは独立した実装なので手で合わせる必要が残る
-        struct SkyTintSet
-        {
-            DirectX::XMFLOAT3 Zenith;
-            DirectX::XMFLOAT3 Horizon;
-            DirectX::XMFLOAT3 Ground;
-            // 太陽方向まわりに乗せる暖色(夕焼け・朝焼け)
-            DirectX::XMFLOAT3 SunGlow;
-            float SunGlowStrength;
-        };
-
-        DirectX::XMFLOAT3 LerpColor(const DirectX::XMFLOAT3& a, const DirectX::XMFLOAT3& b, float t)
-        {
-            return { a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t };
-        }
-
-        // 太陽高度(のサイン)から空の色味を決める。
-        //
-        // 【物理ではなくアート的な近似であることの明示】本来の夕焼けは、太陽光が大気を長く通る
-        // ことで短波長がRayleigh散乱により失われる波長依存の消散で生じる。それを解くには
-        // Preetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。本エンジンは
-        // Perez分布(輝度の分布のみを与え、色は与えない)を使っているため、色は昼・薄明・夜の
-        // 3セットを高度で補間して作る。物理的な導出ではない。
-        //
-        // 【重要】ここで色味を暗くしても空が暗くなるわけではない。ComputeSkyZenithScaleが
-        // 「色味の輝度成分込みで積分して目標照度に合わせる」ため、色味は最終的な明るさではなく
-        // 色相・彩度だけを決める。明るさはSunLighting::SkyIlluminanceLuxが持つ
-        SkyTintSet ComputeSkyTint(float sunElevationSin)
-        {
-            using namespace DirectX;
-
-            // 昼(仰角15度以上)。従来からの値
-            const XMFLOAT3 kDayZenith{ 0.22f, 0.45f, 1.0f };
-            const XMFLOAT3 kDayHorizon{ 0.55f, 0.74f, 1.0f };
-            const XMFLOAT3 kDayGround{ 0.10f, 0.09f, 0.08f };
-            // 薄明(仰角0度)。天頂は青を残したまま暗く、水平線は夕焼けの橙へ
-            const XMFLOAT3 kDuskZenith{ 0.13f, 0.22f, 0.60f };
-            const XMFLOAT3 kDuskHorizon{ 0.95f, 0.50f, 0.28f };
-            const XMFLOAT3 kDuskGround{ 0.06f, 0.05f, 0.05f };
-            // 夜(仰角-15度以下)。月光で散乱した深い青。ここを昼と同じ色にしていたため
-            // 「夜なのに昼と同じ空色」になっていた。
-            // 月光は分光的にはほぼ太陽光そのもので、夜空が青く見えるのは暗所視の
-            // プルキンエ現象による知覚的なもの。したがって青へ寄せるのは正しいが、
-            // 寄せすぎるとネオンブルーになる(R比7倍まで振ったときは実測B/R=13になった)ので
-            // 昼空(B/R約4.5)と同程度の彩度に留める
-            const XMFLOAT3 kNightZenith{ 0.09f, 0.15f, 0.40f };
-            const XMFLOAT3 kNightHorizon{ 0.16f, 0.24f, 0.50f };
-            const XMFLOAT3 kNightGround{ 0.02f, 0.02f, 0.03f };
-            // 太陽方向の暖色(夕焼けの芯)
-            const XMFLOAT3 kSunGlow{ 1.0f, 0.38f, 0.12f };
-
-            const float kSin15Deg = std::sin(XMConvertToRadians(15.0f));
-            // 仰角0度→15度で薄明から昼へ
-            const float dayBlend = Smoothstep(0.0f, kSin15Deg, sunElevationSin);
-            // 仰角0度→-15度で薄明から夜へ
-            const float nightBlend = Smoothstep(0.0f, kSin15Deg, -sunElevationSin);
-
-            SkyTintSet result{};
-            result.Zenith = LerpColor(LerpColor(kDuskZenith, kNightZenith, nightBlend), kDayZenith, dayBlend);
-            result.Horizon = LerpColor(LerpColor(kDuskHorizon, kNightHorizon, nightBlend), kDayHorizon, dayBlend);
-            result.Ground = LerpColor(LerpColor(kDuskGround, kNightGround, nightBlend), kDayGround, dayBlend);
-            result.SunGlow = kSunGlow;
-            // 暖色は仰角0度で最大、±15度で0になる三角窓。
-            // dayBlendもnightBlendも仰角0度で0・±15度で1なので、両方の補数の積がそのまま窓になる
-            result.SunGlowStrength = (1.0f - dayBlend) * (1.0f - nightBlend);
-            return result;
-        }
-
-        // Perezの5係数関数(CIE快晴空、Perez et al. 1993 / Preetham et al. 1999 Table 1)
-        float PerezF(float cosTheta, float gamma)
-        {
-            constexpr float a = -1.0f;
-            constexpr float b = -0.32f;
-            constexpr float c = 10.0f;
-            constexpr float d = -3.0f;
-            constexpr float e = 0.45f;
-            const float cosGamma = std::cos(gamma);
-            return (1.0f + a * std::exp(b / cosTheta)) * (1.0f + c * std::exp(d * gamma) + e * cosGamma * cosGamma);
-        }
-
-        // 天頂輝度を1としたときの相対輝度。SkyGenerate.hlsl の PerezRelativeLuminance +
-        // kRelativeLuminanceFloor の適用と同じ結果になること
-        float SkyRelativeLuminance(float cosTheta, float gamma, float cosThetaSun, float thetaSun)
-        {
-            const float relative = std::max(PerezF(cosTheta, gamma) / PerezF(cosThetaSun, thetaSun), 0.0f);
-            return kSkyRelativeLuminanceFloor + (1.0f - kSkyRelativeLuminanceFloor) * relative;
-        }
-
-        // 太陽の暖色を混ぜる重み。SkyGenerate.hlsl の SunGlowWeight と同じ式であること。
-        // 太陽から離れるほど急に落ちる4乗カーブ。太陽が地平線下にあっても、その方位の
-        // 低空はまだ暖色が残る(実際の夕焼けの残光と同じ構造)
-        float SunGlowWeight(float cosGamma, float glowStrength)
-        {
-            const float proximity = std::clamp(cosGamma, 0.0f, 1.0f);
-            const float falloff = proximity * proximity * proximity * proximity;
-            return std::clamp(glowStrength * falloff, 0.0f, 1.0f);
-        }
-
-        // 方向(天頂角と太陽との離角)に対する空の色味。
-        // SkyGenerate.hlsl の SkyTint と同じ式であること
-        DirectX::XMFLOAT3 SkyTint(float cosTheta, float cosGamma, const SkyTintSet& tintSet)
-        {
-            // 水平線側への寄せを3乗カーブにして、高度があるうちは天頂色をほぼ保つ
-            const float horizonBlend = std::pow(1.0f - std::clamp(cosTheta, 0.0f, 1.0f), 3.0f);
-            const DirectX::XMFLOAT3 base = LerpColor(tintSet.Zenith, tintSet.Horizon, horizonBlend);
-            return LerpColor(base, tintSet.SunGlow, SunGlowWeight(cosGamma, tintSet.SunGlowStrength));
-        }
-
-        // 空の天頂輝度スケールを、上半球の余弦重み積分が目標照度に一致するよう正規化して求める。
-        //
-        // 【なぜ必要か】従来は zenith_luminance = 空光の照度[lx] をそのまま天頂輝度として
-        // 使っていた。照度E[lx]と輝度L[cd/m^2]は E = ∫L·cosθ dω の関係にあるので、この扱いだと
-        // 実際に届く照度は「積分値の分だけ」ずれる。しかも Perez 分布の形は太陽高度で変わるため、
-        // そのずれ自体が時刻とともに動く。
-        //
-        // 正規化前は、Perez分布の形が太陽高度で変わるぶんだけ空光の照度が1.8倍も勝手に変動して
-        // いた(輝度フロア0.45・旧ティストでの実測。太陽高度90度で積分1.080、45度で1.898)。
-        // ここで正規化すると常に目標値ちょうどになり、時刻による空の明るさは薄明係数のように
-        // 意図した係数だけで制御できるようになる。
-        // 積分値そのものはフロアとティントを変えると当然変わるが、正規化しているので
-        // 最終的な照度は変わらない(だから上の実測値は現在の設定のものではない)。
-        //
-        // 補足: 「一様な空なら L = E/π なので従来はπ倍明るかった」という説明は誤り。
-        // 積分にはティントの輝度成分(Rec.709)も入るため、単位球の積分はπ(3.14)には遠く
-        // 及ばない。正午での補正は数%〜十数%の範囲にとどまる。
-        //
-        // 積分は θ64分割 × φ256分割の中点則。1.6万回の評価で数十μs程度であり、
-        // 空を焼き直すタイミングでしか呼ばれないため負荷は問題にならない
-        float ComputeSkyZenithScale(
-            const DirectX::XMFLOAT3& sunPosition, float targetIlluminanceLux, const SkyTintSet& tintSet)
-        {
-            using namespace DirectX;
-
-            constexpr uint32_t kThetaSteps = 64;
-            constexpr uint32_t kPhiSteps = 256;
-
-            const float thetaSun = std::acos(std::clamp(sunPosition.y, -1.0f, 1.0f));
-            const float cosThetaSun = std::max(std::cos(thetaSun), 1e-3f);
-
-            const float dTheta = (XM_PIDIV2) / static_cast<float>(kThetaSteps);
-            const float dPhi = (XM_2PI) / static_cast<float>(kPhiSteps);
-
-            double integral = 0.0;
-            for (uint32_t ti = 0; ti < kThetaSteps; ++ti)
-            {
-                // 中点則
-                const float theta = (static_cast<float>(ti) + 0.5f) * dTheta;
-                const float cosThetaRaw = std::cos(theta);
-                const float sinTheta = std::sin(theta);
-                // SkyGenerate.hlsl と同じクランプ(水平線でPerezが発散するため)
-                const float cosTheta = std::clamp(
-                    std::max(cosThetaRaw, std::cos(XMConvertToRadians(89.5f))), 1e-3f, 1.0f);
-
-                for (uint32_t pi = 0; pi < kPhiSteps; ++pi)
-                {
-                    const float phi = (static_cast<float>(pi) + 0.5f) * dPhi;
-                    const XMFLOAT3 dir{ sinTheta * std::cos(phi), cosThetaRaw, sinTheta * std::sin(phi) };
-                    const float cosGamma = std::clamp(
-                        dir.x * sunPosition.x + dir.y * sunPosition.y + dir.z * sunPosition.z, -1.0f, 1.0f);
-                    const float gamma = std::acos(cosGamma);
-
-                    // 色味の評価はφループの内側で行う。夕焼けの暖色が太陽の方位にだけ乗るように
-                    // なったため、色味が天頂角だけの関数ではなくなった(以前はθループの外で
-                    // 1回だけ求めていた)。Perezの評価が既に1.6万回あるので追加コストは誤差。
-                    // 照度は測光的な輝度で測るので、ティントの輝度成分(Rec.709)を重みに掛ける
-                    const XMFLOAT3 tint = SkyTint(cosTheta, cosGamma, tintSet);
-                    const float tintLuminance = 0.2126f * tint.x + 0.7152f * tint.y + 0.0722f * tint.z;
-
-                    const float relative = SkyRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun);
-                    // dω = sinθ dθ dφ、余弦重みは cosθ
-                    integral += static_cast<double>(relative) * tintLuminance * cosThetaRaw * sinTheta * dTheta * dPhi;
-                }
-            }
-
-            // 積分がゼロ近傍になることは無い想定だが、ゼロ除算だけは防いでおく
-            if (integral < 1e-6)
-            {
-                Core::Logger::Warning(
-                    "KurenaiEngine3D",
-                    "空の余弦重み積分が異常に小さいため天頂輝度の正規化をスキップします(積分値=" +
-                        std::to_string(integral) + ")");
-                return targetIlluminanceLux;
-            }
-
-            return targetIlluminanceLux / static_cast<float>(integral);
-        }
+        // --- 手続き空(SkyGenerate.hlsl)の色味・照度正規化はP9でGPU側(SkyIntegrate.hlsl)へ
+        //     一本化した。以前はComputeSkyTint/ComputeSkyZenithScale等としてここにCPUミラーが
+        //     あり、Sky.hlsliの同じ式と「片方を直したら必ずもう片方も直す」規約でしか整合を
+        //     保てなかった。GPUSkyParameters/m_SkyParametersBufferの定義とコメントは
+        //     このファイル内の該当箇所(GPU用構造体の宣言、Render()のbakeSkyThisFrameブロック)を
+        //     参照。式の実体はShaders/3D/Sky.hlsliのComputeSkyTintSet/PerezRelativeLuminance/
+        //     SkyTintFromSetと、それを呼ぶShaders/3D/SkyIntegrate.hlslにある ---
 
         // Sky.hlsliのkCloudNoisePeriodと同じ値であること(P5)。CPU側(RenderThreadMainの
         // m_CloudScrollOffset更新)がこの値でstd::fmodして風のスクロール位相を巻き戻しており、
@@ -729,8 +534,8 @@ namespace Kurenai
             };
 
             // === 手続き空(SkyGenerate.hlsl)へ渡す値 ===
-            // 空が届ける照度は薄明係数で変調する。正規化(ComputeSkyZenithScale)により
-            // 「目標照度ちょうど」が保証されるようになったので、時刻による空の明るさは
+            // 空が届ける照度は薄明係数で変調する。GPU側の照度正規化積分(SkyIntegrate.hlsl、P9)
+            // により「目標照度ちょうど」が保証されるようになったので、時刻による空の明るさは
             // ここの係数だけで素直に制御できる。
             // 夜側は月明かりで散乱する空の照度を足す(満月時の夜空はおよそ0.05lx相当)。
             // 月が地平線下でも星明かりぶんは残る(月の位置を手動指定にしたことで
@@ -869,21 +674,39 @@ namespace Kurenai
         };
 
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
+        // SkyIntegrate.hlsl が書き、SkyGenerate.hlsl / DeferredLighting.hlsl / SSR.hlsl が読む
+        // 構造化バッファ(要素数1)の1要素。Sky.hlsliのGPUSkyParametersと完全に一致させること
+        struct alignas(16) GPUSkyParameters
+        {
+            DirectX::XMFLOAT4 ZenithTint;    // xyz
+            DirectX::XMFLOAT4 HorizonTint;   // xyz
+            DirectX::XMFLOAT4 GroundTint;    // xyz
+            DirectX::XMFLOAT4 SunGlowTint;   // xyz=色、w=強さ
+            DirectX::XMFLOAT4 Luminance;     // x=天頂輝度(実効プリ露出込み、雲の減光は含まない)
+                                              // y=余弦重み積分の値(ログ・検証用)、zw=予備
+        };
+
+        // SkyIntegrate.hlsl側のcbuffer SkyIntegrateConstantsと一致させる必要がある
+        struct alignas(16) SkyIntegrateConstants
+        {
+            // xyz=太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)、w=未使用
+            DirectX::XMFLOAT4 SunDirection;
+            // x=目標照度[lx](SunLighting::SkyIlluminanceLux)、y=実効プリ露出(effectiveExposure)、
+            // zw=未使用
+            DirectX::XMFLOAT4 IntegrateParams;
+        };
+
+        // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
         struct alignas(16) SkyBakeConstants
         {
             // 処理対象の面(D3D標準順: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5)
             uint32_t Face;
-            // 天頂輝度のスケール
-            float ZenithLuminance;
+            // 雲(P5、判断B)による平均透過率。SkyParametersBuffer[0].Luminance.x
+            // (雲を考慮しない晴天基準の天頂輝度)にこの値を掛けてからキューブへ焼く
+            float CloudTransmittance;
             float Padding0[2];
             // 太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)
             DirectX::XMFLOAT4 SunDirection;
-            // 色味セット(ComputeSkyTintがCPUで決めた値)。xyzのみ使う
-            DirectX::XMFLOAT4 ZenithTint;
-            DirectX::XMFLOAT4 HorizonTint;
-            DirectX::XMFLOAT4 GroundTint;
-            // xyz=夕焼けの暖色、w=その強さ(仰角0度で1、±15度で0)
-            DirectX::XMFLOAT4 SunGlowTint;
         };
 
         // Bloom.hlsl側のcbuffer BloomConstantsと一致させる必要がある
@@ -1736,6 +1559,38 @@ namespace Kurenai
         skyBakeConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         skyBakeConstantBufferDesc.SizeInBytes = sizeof(SkyBakeConstants);
         m_SkyBakeConstantBuffer = m_Device->CreateBuffer(skyBakeConstantBufferDesc);
+
+        // 空パラメータ(ティント4本+照度正規化済みの天頂輝度)の積分をGPUで行うコンピュートシェーダー
+        // (P9)。SkyGenerateより前に実行し、結果をm_SkyParametersBufferへ書く
+        RHI::ShaderDesc skyIntegrateCsDesc;
+        skyIntegrateCsDesc.Stage = RHI::ShaderStage::Compute;
+        skyIntegrateCsDesc.FilePath = shaderDirectory + L"SkyIntegrate.hlsl";
+        skyIntegrateCsDesc.EntryPoint = "CSIntegrateSky";
+        m_SkyIntegrateComputeShader = m_Device->CreateShader(skyIntegrateCsDesc);
+        m_SkyIntegratePipelineState = m_Device->CreateComputePipelineState({ m_SkyIntegrateComputeShader.get() });
+
+        RHI::BufferDesc skyIntegrateConstantBufferDesc;
+        skyIntegrateConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        skyIntegrateConstantBufferDesc.SizeInBytes = sizeof(SkyIntegrateConstants);
+        m_SkyIntegrateConstantBuffer = m_Device->CreateBuffer(skyIntegrateConstantBufferDesc);
+
+        // SkyIntegrate.hlslが書き、SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む
+        // 要素数1のStructuredRWバッファ(m_LightTileBufferと同じ作法)。
+        //
+        // 【CPU側からのゼロ初期化はできない】UpdateBuffer(CPU→GPU書き込み)でゼロ埋めする案を
+        // 最初に採ったが、DX12のStructuredRWバッファはUAV/SRVでのGPUアクセス専用にDEFAULTヒープへ
+        // 作成しており(DX12Device::CreateBuffer参照)、CPUから書き込むためのマップ済みポインタ・
+        // ステージングリングを一切持たない。DX12CommandList::UpdateBufferの非対応分岐
+        // (StructuredReadOnly/StructuredImmutable以外の既定経路)はAdvanceRingAndGetWritePtrで
+        // nullptrへ書き込もうとしてクラッシュする。そのため未初期化対策はCPUからのゼロ埋めではなく、
+        // 「SkyIntegrateパスをまだ一度も実行していないフレームでは、手続き空が無効でも1回だけ
+        // 実行する」という形でGPU側から埋める(Render()のskyIntegrateThisFrame・
+        // m_SkyParametersBufferInitialized参照)
+        RHI::BufferDesc skyParametersBufferDesc;
+        skyParametersBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        skyParametersBufferDesc.SizeInBytes = sizeof(GPUSkyParameters);
+        skyParametersBufferDesc.StrideInBytes = sizeof(GPUSkyParameters);
+        m_SkyParametersBuffer = m_Device->CreateBuffer(skyParametersBufferDesc);
 
         RHI::BufferDesc iblPrefilterConstantBufferDesc;
         iblPrefilterConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -3879,35 +3734,32 @@ namespace Kurenai
         // 両方をこのフラグで判定する
         const bool bakeSkyThisFrame = usingProceduralSky && m_SkyBakeDirty;
 
-        // --- 空パラメータ(tintと天頂輝度)をベイクと同じタイミングで確定させ、メンバへキャッシュする(P3) ---
-        // 【なぜここでキャッシュするのか】背景の解析評価(DeferredLighting.hlsl)は、下のFrameConstants
-        // 経由でこのキャッシュ値をそのまま使う。ベイク時の値をそのまま使うことで、背景とキューブマップ
-        // (IBL・反射)が常に同一の空パラメータを見る。毎フレーム作り直すと、太陽の角度閾値でベイクを
-        // 間引いている間だけ背景とIBLの空がずれてしまう。加えてComputeSkyZenithScaleは16,384サンプルの
-        // 積分なので、背景の解析評価のためだけに毎フレーム走らせるのは無駄が大きい
+        // このフレームでSkyIntegrateパス(P9、m_SkyParametersBufferへ書く)を実行するかどうか。
+        // 通常はbakeSkyThisFrameと同じタイミングだが、m_SkyParametersBufferが一度も書かれていない
+        // 場合はusingProceduralSkyがfalse(.ksceneのDDSスカイボックス使用時)でも1回だけ実行する。
+        //
+        // 【なぜCPU側からのゼロ初期化ではなくこの形にしたのか】DX12のStructuredRWバッファは
+        // UAV/SRVでのGPUアクセス専用にDEFAULTヒープへ作成されており、CPUから書き込むための
+        // マップ済みポインタ・ステージングリングを一切持たない(m_SkyParametersBuffer作成箇所の
+        // コメント参照)。そのためUpdateBufferでのゼロ埋めはDX12でクラッシュする。GPU側のパスを
+        // 1回だけ走らせれば、DX11/DX12のどちらでも安全に(積分結果自体は使われないが)未初期化状態を
+        // 解消できる。太陽方向・目標照度はusingProceduralSkyに関わらず既に計算済みのsunLightingを
+        // そのまま使えるため、余分な分岐を増やさずに済む
+        const bool skyIntegrateThisFrame = bakeSkyThisFrame || !m_SkyParametersBufferInitialized;
+
+        // --- 空パラメータ(tintと天頂輝度)の確定はP9でGPU側(SkyIntegrate.hlsl)へ移った ---
+        // 【なぜベイクと同じタイミングか】背景の解析評価(DeferredLighting.hlsl)は、下のFrameConstants
+        // (SkySunDirection)とm_SkyParametersBuffer(SkyIntegrate.hlslの出力)を組み合わせて使う。
+        // ベイクと同じタイミングでSkyIntegrateパスを実行することで、背景とキューブマップ
+        // (IBL・反射)が常に同一の空パラメータを見る。毎フレーム走らせると、太陽の角度閾値で
+        // ベイクを間引いている間だけ背景とIBLの空がずれてしまう。実際のディスパッチとcbuffer更新は
+        // 下のSkyIntegrateパス登録側で行うため、ここではフラグ更新のみ済ませる
         if (bakeSkyThisFrame)
         {
-            // 空の色味(昼・薄明・夜の補間と夕焼けの暖色)を先に決める。
-            // 生成シェーダーと下の照度正規化の両方がこの同じ値を使う
-            const SkyTintSet skyTintSet = ComputeSkyTint(sunLighting.SunPosition.y);
-
-            // 上半球の余弦重み積分が空光の照度に一致するよう天頂輝度を正規化する。
-            // 1.6万回の評価になるため、実際に焼くこのタイミングでだけ計算する
-            // (詳細と「なぜπ倍誤差が生じていたか」はComputeSkyZenithScaleのコメント参照)
-            m_ActiveSkyZenithLuminance =
-                ComputeSkyZenithScale(sunLighting.SunPosition, sunLighting.SkyIlluminanceLux, skyTintSet) *
-                effectiveExposure;
-            m_ActiveSkyZenithTint = { skyTintSet.Zenith.x, skyTintSet.Zenith.y, skyTintSet.Zenith.z, 0.0f };
-            m_ActiveSkyHorizonTint = { skyTintSet.Horizon.x, skyTintSet.Horizon.y, skyTintSet.Horizon.z, 0.0f };
-            m_ActiveSkyGroundTint = { skyTintSet.Ground.x, skyTintSet.Ground.y, skyTintSet.Ground.z, 0.0f };
-            m_ActiveSkySunGlowTint = {
-                skyTintSet.SunGlow.x, skyTintSet.SunGlow.y, skyTintSet.SunGlow.z, skyTintSet.SunGlowStrength
-            };
-
-            // 雲(P5、判断B)による平均透過率もベイクと同じタイミングで確定させ、m_ActiveSky*と
-            // 同じ理由でメンバへキャッシュする。**この値はm_ActiveSkyZenithLuminanceには掛けない**
-            // ——キューブへ焼くSkyBakeConstants::ZenithLuminance(下のSkyGenerateパス参照)にだけ
-            // 掛ける。m_ActiveSkyZenithLuminanceを減光すると、雲の隙間から見える青空まで暗くなり、
+            // 雲(P5、判断B)による平均透過率をベイクと同じタイミングで確定させ、メンバへキャッシュする。
+            // **この値はm_SkyParametersBuffer側の天頂輝度には掛けない**——キューブへ焼く
+            // SkyBakeConstants::CloudTransmittance(下のSkyGenerateパス参照)にだけ掛ける。
+            // SkyParametersBufferの天頂輝度を減光すると、雲の隙間から見える青空まで暗くなり、
             // Sky.hlsli側のSkyColorがそこへさらに雲を重ねることで二重に暗くなってしまう
             m_ActiveCloudTransmittance = ComputeCloudAverageTransmittance(m_CloudEnabled, m_CloudCoverage);
 
@@ -4025,9 +3877,10 @@ namespace Kurenai
         constants.IBLParams = { m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
 
         // 空の解析評価用(P3)。DeferredLighting.hlslが背景画素でSky.hlsliのSkyColorを画面解像度で
-        // 評価するために使う。tintと天頂輝度はm_ActiveSky*キャッシュ(直近の手続き空ベイクの値。
-        // 上のbakeSkyThisFrameブロック参照)をそのまま渡し、背景とキューブマップが同じ空を見るようにする。
-        // SunDirectionだけはキャッシュせず、ここで毎フレーム最新のsunLightingから渡す
+        // 評価するために使う。ティントと天頂輝度はP9でm_SkyParametersBuffer(直近の手続き空ベイクで
+        // SkyIntegrate.hlslが書いた値。上のbakeSkyThisFrameブロック参照)へ移り、DeferredLighting.hlsl/
+        // SSR.hlslがStructuredBufferとして直接読むため、ここでFrameConstantsへ詰める必要は無くなった。
+        // SunDirectionはここで毎フレーム最新のsunLightingから渡す
         // (太陽は角度閾値以下でも連続的に動くため。天頂輝度・色味と違い積分を伴わず、
         // 毎フレーム渡してもコストが無い)。
         // 正規化はSkyGenerate.hlsl側の慣習(呼び出し側=シェーダのSkyParameters組み立て時に
@@ -4036,7 +3889,8 @@ namespace Kurenai
             sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
         };
         constants.SkyParams = {
-            m_ActiveSkyZenithLuminance,
+            // x=未使用(P9で天頂輝度はSkyParametersBufferへ移動)
+            0.0f,
             // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらず
             // 常にキューブマップを使う。DDSは任意の絵でPerezモデルとは無関係なため、
             // 解析評価してはいけない
@@ -4044,10 +3898,6 @@ namespace Kurenai
             0.0f,
             0.0f,
         };
-        constants.SkyZenithTint = m_ActiveSkyZenithTint;
-        constants.SkyHorizonTint = m_ActiveSkyHorizonTint;
-        constants.SkyGroundTint = m_ActiveSkyGroundTint;
-        constants.SkySunGlowTint = m_ActiveSkySunGlowTint;
 
         // === 実効プリ露出が大きく動いたら、更新モードに関わらずプローブを焼き直す(19.14節) ===
         // 下のProbeParams2.wは「焼いた時点の露出→現在の露出」の換算倍率で、これだけでも
@@ -4249,35 +4099,69 @@ namespace Kurenai
         // そのまま読み書きする(詳細はRenderGraph.h参照)
         Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
 
+        // --- 空パラメータの積分パス(P9): 色味の決定とθ64×φ256=16,384サンプルの照度正規化積分を
+        //     GPUで行い、結果(ティント4本+正規化済みの天頂輝度)をm_SkyParametersBufferへ書く。
+        //     以前はKurenaiEngine3D.cpp(ComputeSkyTint/ComputeSkyZenithScale)がCPUで計算していたが、
+        //     Sky.hlsli側の式と二重実装になっていたためGPU側(SkyIntegrate.hlsl)へ一本化した。
+        //     このバッファをSkyGenerate/DeferredLighting/SSRの3者が読むため、下のSkyGenerateパスより
+        //     必ず先に実行する必要がある。実行条件はbakeSkyThisFrameではなくskyIntegrateThisFrame
+        //     (手続き空が無効なシーンでも初回の1回だけは走らせ、未初期化状態を解消する。
+        //     理由はm_SkyParametersBuffer作成箇所とskyIntegrateThisFrame宣言のコメント参照) ---
+        if (skyIntegrateThisFrame)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "SkyIntegrate",
+                .BufferWrites = { m_SkyParametersBuffer.get() },
+                .Execute = [this, &sunLighting, effectiveExposure](RHI::IRHICommandList* cmd)
+                {
+                    SkyIntegrateConstants integrateConstants{};
+                    integrateConstants.SunDirection = {
+                        sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+                    };
+                    integrateConstants.IntegrateParams = {
+                        sunLighting.SkyIlluminanceLux, effectiveExposure, 0.0f, 0.0f
+                    };
+                    cmd->UpdateBuffer(m_SkyIntegrateConstantBuffer.get(), &integrateConstants, sizeof(integrateConstants));
+
+                    cmd->SetComputePipelineState(m_SkyIntegratePipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_SkyIntegrateConstantBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_SkyParametersBuffer.get());
+                    // 1グループ×256スレッド固定(SkyIntegrate.hlsl参照)
+                    cmd->Dispatch(1, 1, 1);
+                },
+            });
+            m_SkyParametersBufferInitialized = true;
+        }
+
         // --- 手続き空の生成パス: Perez分布をGPUで評価してキューブマップを焼く。
         //     太陽が動くと空の輝度分布の形も変わるため、オフラインDDSと違い焼き直しが要る
-        //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否・空パラメータのキャッシュ・
+        //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否・雲の平均透過率のキャッシュ・
         //     m_SkyBakeDirty等のフラグ更新はすべて上のbakeSkyThisFrameブロックで済ませてあるため、
-        //     ここではそのキャッシュ(m_ActiveSky*)を使ってパスを登録するだけでよい(P3で前倒し) ---
+        //     ここではそのキャッシュ(m_ActiveCloudTransmittance)と、直前のSkyIntegrateパスが
+        //     書いたm_SkyParametersBufferを使ってパスを登録するだけでよい(P3で前倒し、P9で
+        //     ティント・天頂輝度の組み立てをSkyIntegrateパスへ切り出した) ---
         if (bakeSkyThisFrame)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyGenerate",
                 .Writes = { m_ProceduralSkyTexture.get() },
+                .BufferReads = { m_SkyParametersBuffer.get() },
                 .Execute = [this, &sunLighting](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_SkyGeneratePipelineState.get());
+                    cmd->SetComputeShaderResourceBuffer(0, m_SkyParametersBuffer.get());
                     for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                     {
                         SkyBakeConstants skyConstants{};
                         skyConstants.Face = face;
-                        // 雲(P5、判断B)。m_ActiveSkyZenithLuminance自体は雲を考慮しない晴天の値の
+                        // 雲(P5、判断B)。SkyParametersBuffer側の天頂輝度は雲を考慮しない晴天の値の
                         // ままで、キューブへ焼く値にだけm_ActiveCloudTransmittance(被覆率が
                         // 変わらない限り1.0)を掛ける。理由はm_ActiveCloudTransmittanceの
                         // 代入元(上のbakeSkyThisFrameブロック)のコメント参照
-                        skyConstants.ZenithLuminance = m_ActiveSkyZenithLuminance * m_ActiveCloudTransmittance;
+                        skyConstants.CloudTransmittance = m_ActiveCloudTransmittance;
                         skyConstants.SunDirection = {
                             sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
                         };
-                        skyConstants.ZenithTint = m_ActiveSkyZenithTint;
-                        skyConstants.HorizonTint = m_ActiveSkyHorizonTint;
-                        skyConstants.GroundTint = m_ActiveSkyGroundTint;
-                        skyConstants.SunGlowTint = m_ActiveSkySunGlowTint;
                         cmd->UpdateBuffer(m_SkyBakeConstantBuffer.get(), &skyConstants, sizeof(skyConstants));
                         cmd->SetComputeConstantBuffer(0, m_SkyBakeConstantBuffer.get());
                         cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_ProceduralSkyTexture.get(), face, 0);
@@ -5356,6 +5240,9 @@ namespace Kurenai
                 m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
+            // 空パラメータ(P9)。SkyIntegrateパスより後に順序付けさせるために挙げる
+            // (実際のバインドはExecute内)
+            .BufferReads = { m_SkyParametersBuffer.get() },
             .Execute = [this, &gbufferViewport, activeAOTexture, skyTexture](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
@@ -5387,6 +5274,8 @@ namespace Kurenai
                 // DDGI(22章)。反射プローブと同じ理由で、無効時も含めて常にバインドする
                 cmd->SetTexture(15, m_DDGIIrradianceAtlas.get());
                 cmd->SetTexture(16, m_DDGIDistanceAtlas.get());
+                // 空パラメータ(P9)。DeferredLighting.hlsl側はt17(t0〜t16が既に使用済み)
+                cmd->SetShaderResourceBuffer(17, m_SkyParametersBuffer.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -5641,6 +5530,9 @@ namespace Kurenai
                     m_PlanarReflectionColor.get(),
                 },
                 .RenderTargets = { m_SSRTexture.get() },
+                // 空パラメータ(P9)。SkyIntegrateパスより後に順序付けさせるために挙げる
+                // (実際のバインドはExecute内)
+                .BufferReads = { m_SkyParametersBuffer.get() },
                 .Execute = [this, &gbufferViewport, activeAOTexture, usingProceduralSky,
                             planarReflectionPassRuns](RHI::IRHICommandList* cmd)
                 {
@@ -5682,6 +5574,8 @@ namespace Kurenai
                     // 動作が未定義になるため、パスが無効なフレームでも常にバインドする
                     // (反射プローブ・DDGIと同じ理由)
                     cmd->SetTexture(11, m_PlanarReflectionColor.get());
+                    // 空パラメータ(P9)。SSR.hlsl側はt12(t0〜t11が既に使用済み)
+                    cmd->SetShaderResourceBuffer(12, m_SkyParametersBuffer.get());
                     cmd->Draw(3, 0);
                 },
             });

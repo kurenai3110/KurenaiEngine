@@ -966,19 +966,29 @@ namespace Kurenai
         // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらずキューブマップを使う
         // (DeferredLighting.hlslへ渡すSkyParams.yはActiveSkyTexture()の結果とのANDで決める)
         bool m_SkyAnalyticBackground = Defaults::SkyAnalyticBackground;
-        // 直近の手続き空ベイクで使った空パラメータのキャッシュ(P3)。背景の解析評価
-        // (DeferredLighting.hlsl)はこれをFrameConstants経由でそのまま使う。
+
+        // 空パラメータ(ティント4本+照度正規化済みの天頂輝度)をGPU側で計算するコンピュートシェーダー
+        // (P9: SkyIntegrate.hlsl)。以前はCPU(ComputeSkyTint/ComputeSkyZenithScale)とHLSL
+        // (Sky.hlsli)に同じ式が二重実装されていたが、GPU側へ一本化しCPUミラーを廃止した。
+        // 結果はm_SkyParametersBuffer(SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む)へ書く
+        std::unique_ptr<RHI::IRHIShader> m_SkyIntegrateComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SkyIntegratePipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_SkyIntegrateConstantBuffer;
+        // SkyIntegrate.hlslが書き、SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む
+        // 要素数1のStructuredRWバッファ(Sky.hlsliのGPUSkyParametersと一致させること)。
         // 【なぜ毎フレーム作り直さないのか】ベイク時の値をそのまま使うことで、背景とキューブマップ
         // (IBL・反射)が常に同一の空パラメータを見る。毎フレーム作り直すと、太陽の角度閾値で
-        // ベイクを間引いている間だけ背景とIBLの空がずれてしまう。加えてComputeSkyZenithScaleは
-        // 16,384サンプルの積分なので、背景評価のためだけに毎フレーム走らせるのは無駄が大きい。
-        // 【なぜSkyTintSetを直接持たないのか】SkyTintSetは.cppの無名名前空間内の型でヘッダから
-        // 参照できないため、XMFLOAT4へばらして持つ(SunGlowTint.wにSunGlowStrengthを入れる)
-        float m_ActiveSkyZenithLuminance = 0.0f;
-        DirectX::XMFLOAT4 m_ActiveSkyZenithTint{ 0.0f, 0.0f, 0.0f, 0.0f };
-        DirectX::XMFLOAT4 m_ActiveSkyHorizonTint{ 0.0f, 0.0f, 0.0f, 0.0f };
-        DirectX::XMFLOAT4 m_ActiveSkyGroundTint{ 0.0f, 0.0f, 0.0f, 0.0f };
-        DirectX::XMFLOAT4 m_ActiveSkySunGlowTint{ 0.0f, 0.0f, 0.0f, 0.0f };
+        // ベイクを間引いている間だけ背景とIBLの空がずれてしまう。加えて積分はθ64×φ256=16,384
+        // サンプルなので、背景評価のためだけに毎フレーム走らせるのは無駄が大きい
+        std::unique_ptr<RHI::IRHIBuffer> m_SkyParametersBuffer;
+        // m_SkyParametersBufferへSkyIntegrateパスが一度でも書き込んだかどうか。手続き空を使わない
+        // シーン(.ksceneのDDSスカイボックス使用時)ではbakeSkyThisFrameが常にfalseになりSkyIntegrate
+        // パスも通常は走らないため、このフラグがfalseの間だけRender()がskyIntegrateThisFrameを
+        // trueにして1回だけ強制的に走らせ、未初期化のまま読まれることを防ぐ。
+        // 【なぜCPU側からのUpdateBufferでゼロ埋めしないのか】DX12のStructuredRWバッファは
+        // GPU専用(UAV/SRV)のDEFAULTヒープに確保しておりCPUから書き込む経路を持たないため、
+        // UpdateBufferを呼ぶとクラッシュする(m_SkyParametersBuffer作成箇所のコメント参照)
+        bool m_SkyParametersBufferInitialized = false;
 
         bool m_IBLBaked = false;
         // BRDF積分LUTを焼き終えたか(m_IBLBakedとは別管理)。このLUTは(NdotV, ラフネス)の
@@ -1383,8 +1393,8 @@ namespace Kurenai
         // RenderThreadMainがSky.hlsliのkCloudNoisePeriodと同じ周期でstd::fmodしながら進める
         DirectX::XMFLOAT2 m_CloudScrollOffset{ 0.0f, 0.0f };
         // 判断B(被覆率による平均透過率をIBLキューブのベイク時にだけ掛ける)のキャッシュ。
-        // m_ActiveSkyZenithLuminance等と同じ設計(bakeSkyThisFrameブロックで確定させ、
-        // ベイクとFrameConstantsが同じタイミングの値を見るようにする)に揃えてある
+        // bakeSkyThisFrameブロックで確定させ、ベイクとFrameConstantsが同じタイミングの
+        // 値を見るようにする(P9でGPU側へ移ったm_SkyParametersBufferと同じ更新タイミング)
         float m_ActiveCloudTransmittance = 1.0f;
 
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、

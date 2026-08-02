@@ -79,14 +79,12 @@ cbuffer FrameConstants : register(b0)
     // 水面(P2)・空の解析評価(P3)・雲(P5)用。このシェーダーでは未使用だが、cbufferのレイアウトは
     // 宣言順で決まり途中のフィールドを飛ばせないため、末尾のPlanarReflectionPlaneのオフセットを
     // C++側 KurenaiEngine3D.cpp の FrameConstants と合わせる目的だけで宣言する
-    // (DeferredLighting.hlsl/SSR.hlslの同名フィールドと同じ扱い)
+    // (DeferredLighting.hlsl/SSR.hlslの同名フィールドと同じ扱い。P9でSkyZenithTint/
+    // SkyHorizonTint/SkyGroundTint/SkySunGlowTintの4本がSkyParametersBufferへ移り
+    // FrameConstantsから消えたため、ここも同時に削ってフィールド数を合わせてある)
     float4 TimeParams;
     float4 SkySunDirection;
     float4 SkyParams;
-    float4 SkyZenithTint;
-    float4 SkyHorizonTint;
-    float4 SkyGroundTint;
-    float4 SkySunGlowTint;
     float4 CloudParams0;
     float4 CloudParams1;
     // 平面反射(P6)。xyz=水面平面の法線(現状は常に(0,1,0))、w=平面の距離項

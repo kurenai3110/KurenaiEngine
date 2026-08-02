@@ -4945,16 +4945,20 @@ Perez分布が与えるのは<strong>輝度の分布だけ</strong>で、色は�
 実際の夕焼けの残光と同じ構造になる。
 </p>
 <p class="note">
-<strong>色味をCPUで決めてcbufferで配る設計にした理由。</strong>
-この色味は(a)<code>SkyGenerate.hlsl</code>のキューブマップ生成と、
-(b)<code>ComputeSkyZenithScale</code>の照度正規化(積分の重みに色味の輝度成分が入る)の
-両方で完全に一致していなければならない。従来は定数を2箇所に複製していたが、
-CPUで1度決めて配れば<strong>両者がずれることが構造的に起きなくなる</strong>。
+<strong>色味を1箇所で決めて配る設計にした理由。</strong>
+この色味は(a)<code>SkyGenerate.hlsl</code>のキューブマップ生成と、(b)照度正規化の積分
+(積分の重みに色味の輝度成分が入る)の両方で完全に一致していなければならない。従来は
+定数を2箇所に複製していたが、1度決めて配れば<strong>両者がずれることが構造的に起きなくなる</strong>。
 なお暖色が太陽の方位にだけ乗るようになったため色味が天頂角だけの関数ではなくなり、
 正規化の積分でも色味の評価をφループの内側へ移した。
+<strong>(P9追記)</strong> この色味決定と照度正規化の積分は当初CPU
+(<code>ComputeSkyTint</code>/<code>ComputeSkyZenithScale</code>)で行いHLSL側と二重実装していたが、
+21.11節のとおりGPU側(<code>SkyIntegrate.hlsl</code>の<code>ComputeSkyTintSet</code>)へ
+一本化し、CPUミラーは削除した。「1箇所で決めて配る」という設計自体は変わっていない
+(決める場所がCPUからGPUへ移っただけ)。
 </p>
 <p class="note">
-<strong>色味を暗くしても空は暗くならない。</strong><code>ComputeSkyZenithScale</code>が
+<strong>色味を暗くしても空は暗くならない。</strong>照度正規化の積分(P9以降は<code>SkyIntegrate.hlsl</code>)が
 「色味の輝度成分込みで積分して目標照度に合わせる」ため、色味が決めるのは色相と彩度だけである。
 明るさは<code>SunLighting::SkyIlluminanceLux</code>が持つ。夜のティントを深い青にしても
 照度は変わらない。
@@ -5289,6 +5293,51 @@ IBL用)と背景の解析評価(<code>DeferredLighting.hlsl</code>、画面解�
 解析評価してはいけない。UIの「空の背景を解析評価する」トグルはキューブマップの中身
 (<code>SkyGenerate</code>のベイク結果)には影響しないため、既存の「手続き空」トグルと違い
 再ベイクのフラグは立てない。
+</p>
+
+<h3>21.11 照度正規化積分のGPU化とCPUミラーの廃止(P9)</h3>
+<p>
+21.10節までの空モデルは、色味の決定(<code>ComputeSkyTint</code>)と照度正規化の積分
+(<code>ComputeSkyZenithScale</code>、θ64分割×φ256分割=16,384サンプルの中点則)が
+<code>KurenaiEngine3D.cpp</code>のCPUミラーとして実装されており、<code>Shaders/3D/Sky.hlsli</code>
+側の同じ式と<strong>「片方を直したら必ずもう片方も直す」という規約でしか整合が保てなかった</strong>。
+P9でこの積分をGPU側(新設の<code>Shaders/3D/SkyIntegrate.hlsl</code>)へ一本化し、
+CPUミラーは削除した。
+</p>
+<p>
+<code>SkyIntegrate.hlsl</code>は1グループ×256スレッドのコンピュートシェーダーで、
+<code>Dispatch(1,1,1)</code>固定。スレッド<code>i</code>(i=0..255)がφインデックス<code>i</code>を
+担当し、θを64ステップぶん積む(1スレッドあたり64サンプル、合計16,384で従来のCPU版と厳密に同じ
+サンプル位置)。HLSLの<code>InterlockedAdd</code>はSM6.6未満では整数専用でfloatを加算できないため、
+各スレッドの部分和を<code>groupshared float[256]</code>へ書き、
+<code>GroupMemoryBarrierWithGroupSync()</code>を挟んだツリー加算(ペアワイズ和、256→128→…→1)で
+集約する。CPU版は<code>double</code>で累積していたが、HLSLにdoubleの実用的な手段はないため
+floatのツリー加算で行う。
+</p>
+<p>
+結果(ティント4本+正規化済みの天頂輝度)は要素数1の構造化バッファ
+(<code>GPUSkyParameters</code>、C++側 <code>m_SkyParametersBuffer</code>)へ書く。
+<code>SkyGenerate.hlsl</code>(IBL用キューブマップのベイク)・<code>DeferredLighting.hlsl</code>
+(背景の解析評価)・<code>SSR.hlsl</code>(水面の解析空フォールバック)の3者はこのバッファを
+<code>Sky.hlsli</code>の<code>ApplySkyParametersFromBuffer</code>で読むだけになり、
+各シェーダーが個別に組み立てていたティント・天頂輝度のcbufferフィールド
+(<code>FrameConstants::SkyZenithTint</code>等)は削除した。
+</p>
+<p class="note">
+<strong>雲による平均透過率(判断B、34.4節)はCPUに残した。</strong>被覆率からの単純な線形補間で
+Perez分布とは無関係であり、二重実装の問題に該当しないため、GPU化の対象外とした。
+<code>SkyBakeConstants::ZenithLuminance</code>(4本のティントとあわせて削除)は
+<code>CloudTransmittance</code>1本に置き換わり、<code>SkyGenerate.hlsl</code>側で
+<code>SkyParametersBuffer[0].Luminance.x * CloudTransmittance</code>として掛ける。
+</p>
+<p class="note">
+<strong>fxc(SM5.0)の制約でヘルパー関数の引数形式を変えた。</strong>
+<code>ApplySkyParametersFromBuffer</code>は当初<code>inout SkyParameters</code>で設計したが、
+fxcは一部フィールドしか書かない<code>inout</code>引数を「output parameter not completely
+initialized」(X3508)としてコンパイルエラーにする(呼び出し側が他のフィールドを既に埋めていても
+関係なく、この関数単体で全フィールドの代入が無いと判定される)。値渡し+戻り値の形にすることで
+回避した。DX11がfxc/SM5.0固定である以上、この制約は今後も効く(<code>Claude/Tools/check_shaders.ps1</code>で
+fxc/dxc両方のコンパイルを機械的に確認する理由でもある)。
 </p>
 </section>
 
@@ -7804,11 +7853,11 @@ IRHIDevice</code>にはそもそも3Dテクスチャを生成する手段が無�
 <li>雲を焼き込むと、雲が風で動くたびにキューブの焼き直し(空生成6回+プリフィルタ36回の
 ディスパッチ、21章参照)が必要になる。上半球の余弦重み積分(拡散イラディアンスとして畳み込まれる量)
 は雲の位置が変わってもほぼ不変なため、この再ベイク連鎖は純粋な無駄になる。</li>
-<li>CPU側の照度正規化(<code>ComputeSkyZenithScale</code>、θ64分割×φ256分割=16,384サンプルの
-積分。21.10節で導入)は雲を知らない。雲を焼き込むと「正規化の目標(空光の照度)」と
-「実際に焼かれた明るさ」が食い違う。CPUに雲のfBmを実装して同期させる手も検討したが、
-Sky.hlsli側のノイズ実装(周期性・オクターブ数)が変わるたびにCPU側も追従させる負債のほうが、
-「IBLの雲は焼かない」という割り切りより大きいと判断した。</li>
+<li>照度正規化の積分(θ64分割×φ256分割=16,384サンプル。21.11節、P9でGPU側の
+<code>SkyIntegrate.hlsl</code>へ一本化)は雲を知らない。雲を焼き込むと「正規化の目標
+(空光の照度)」と「実際に焼かれた明るさ」が食い違う。雲のfBmをこの積分へ足して同期させる手も
+検討したが、<code>Sky.hlsli</code>側のノイズ実装(周期性・オクターブ数)が変わるたびに
+積分側も追従させる負債のほうが、「IBLの雲は焼かない」という割り切りより大きいと判断した。</li>
 </ul>
 
 <h3>34.4 判断B ― 被覆率による減光はキューブのベイク時にだけ掛ける</h3>
@@ -7817,13 +7866,14 @@ Sky.hlsli側のノイズ実装(周期性・オクターブ数)が変わるたび
 シーンが晴天と同じ明るさに照らされるのは明らかに不自然なため、<code>KurenaiEngine3D::Render()</code>
 の<code>bakeSkyThisFrame</code>ブロックが被覆率から求めた全天の平均透過率
 (<code>ComputeCloudAverageTransmittance</code>。被覆率0で1.0、被覆率1で
-<code>kCloudOvercastTransmittance</code>(0.35)まで線形に落ちる近似で、物理的な導出ではない)を、
-キューブへ焼く<code>SkyBakeConstants::ZenithLuminance</code>にだけ掛ける
-(<code>m_ActiveSkyZenithLuminance * m_ActiveCloudTransmittance</code>)。
+<code>kCloudOvercastTransmittance</code>(0.35)まで線形に落ちる近似で、物理的な導出ではない)を
+<code>m_ActiveCloudTransmittance</code>としてキャッシュし、<code>SkyGenerate.hlsl</code>の
+<code>SkyBakeConstants::CloudTransmittance</code>経由でキューブへ焼く値にだけ掛ける
+(<code>SkyParametersBuffer[0].Luminance.x * CloudTransmittance</code>、21.11節参照)。
 </p>
 <p class="note">
-<strong>背景・水面反射へ渡る<code>FrameConstants.SkyParams.x</code>
-(<code>m_ActiveSkyZenithLuminance</code>)自体は減光しない。</strong>
+<strong>背景・水面反射へ渡る<code>GPUSkyParameters::Luminance.x</code>
+(<code>SkyIntegrate.hlsl</code>が書く天頂輝度)自体は減光しない。</strong>
 ここも減光すると、<code>Sky.hlsli</code>の<code>SkyColor</code>が雲の隙間から見える青空
 (晴天色 × 透過率の「透過率」が1に近い部分)まで暗くしたうえへ、そこへさらに雲の散乱光を
 重ねることになり、二重に暗くなってしまう。晴天色そのものは常に「雲を考慮しない基準の明るさ」の

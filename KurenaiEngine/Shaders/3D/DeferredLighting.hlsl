@@ -88,18 +88,14 @@ cbuffer FrameConstants : register(b0)
     // ミップ無しで、3840px・水平画角68度のカメラでは約20倍に拡大表示されるため、画面解像度で
     // 評価したほうが背景の輪郭がシャープになる(IBLは畳み込むため低解像度のままで正しい)。
     // 値はSkyGenerate.hlslが焼くキューブマップに使ったものと同一
-    // (KurenaiEngine3D::Render()のm_ActiveSky*キャッシュ参照)。
+    // (m_SkyParametersBuffer参照。ティント・天頂輝度はP9でこのcbufferから
+    // StructuredBuffer<GPUSkyParameters>(t17)へ移った)。
     // xyz=太陽が「ある」向き(未正規化のまま渡ってくる。PSMain側でnormalizeする。
     // SkyGenerate.hlsl側の慣習=呼び出し側でnormalizeする、に合わせてある)、w=未使用
     float4 SkySunDirection;
-    // x=天頂輝度(実効プリ露出済み)、y=背景を解析評価するかのフラグ(1=解析、0=キューブマップを
-    // サンプル。手続き空が無効なときは常に0)、zw=未使用
+    // x=未使用(P9で天頂輝度はSkyParametersBufferへ移動)、y=背景を解析評価するかのフラグ
+    // (1=解析、0=キューブマップをサンプル。手続き空が無効なときは常に0)、zw=未使用
     float4 SkyParams;
-    float4 SkyZenithTint;
-    float4 SkyHorizonTint;
-    float4 SkyGroundTint;
-    // w=太陽の暖色の強さ(SunGlowStrength)
-    float4 SkySunGlowTint;
     // 雲(P5、さらに末尾に追加)。SSR.hlslの同名フィールドと完全に同じ順・同じ型であること
     // (C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams0/1 と揃える。ずれると
     // 背景に見える雲と水面に映る雲が食い違う)。
@@ -126,6 +122,9 @@ Texture2D NormalTexture : register(t7);
 // split-sum近似の第2項、BRDF積分LUT(x=NdotV, y=ラフネス。BRDFLUT.hlslで生成、方向性を持たない
 // (NdotV, ラフネス)の2Dルックアップテーブルのため、これだけは通常のTexture2Dのまま)
 Texture2D BRDFLUTTexture : register(t10);
+// SkyIntegrate.hlslが書いた空パラメータ(P9)。ティント4本と正規化済みの天頂輝度が入る。
+// t0〜t16が既に使用済みのためt17を使う
+StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t17);
 
 // 拡散イラディアンス(t8)・プリフィルタ済み鏡面(t9)・プローブのキューブマップ配列(t11/t12)・
 // プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みは
@@ -224,12 +223,8 @@ SkyParameters MakeSkyParameters()
 {
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
-    params.ZenithLuminance = SkyParams.x;
-    params.ZenithTint = SkyZenithTint.rgb;
-    params.HorizonTint = SkyHorizonTint.rgb;
-    params.GroundTint = SkyGroundTint.rgb;
-    params.SunGlowTint = SkySunGlowTint.rgb;
-    params.SunGlowStrength = SkySunGlowTint.w;
+    // ティント4本と天頂輝度はP9でSkyParametersBuffer(t17)へ移った(SkyIntegrate.hlslが書く)
+    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
     // 雲(P5)。SSR.hlslのMakeSkyParametersと完全に同一の内容であること(このファイル冒頭の
     // コメントと同じ理由。背景に見える雲と水面に映る雲が食い違ってはいけない)
     params.CloudCoverage = CloudParams0.x;

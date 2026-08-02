@@ -90,16 +90,11 @@ cbuffer FrameConstants : register(b0)
     // 参照。xyz=太陽が「ある」向き(未正規化のまま渡ってくる。呼び出し側でnormalizeする。
     // SkyGenerate.hlsl側の慣習に合わせてある)、w=未使用
     float4 SkySunDirection;
-    // x=天頂輝度(実効プリ露出済み)。y=背景(深度なし画素)を解析評価するかのフラグだが、
-    // このシェーダは背景を描かないため未使用(水面フォールバックの有効/無効はDeferredLighting.hlsl
-    // と共有せず、SSRConstants.Params0.wで別途持つ。C++側Render()が手続き空の有効/無効を含めて
-    // 一本化して決める。KurenaiEngine3D.cppのExecute内コメント参照)。zw=未使用
+    // x=未使用(P9で天頂輝度はSkyParametersBufferへ移動)。y=背景(深度なし画素)を解析評価するか
+    // のフラグだが、このシェーダは背景を描かないため未使用(水面フォールバックの有効/無効は
+    // DeferredLighting.hlslと共有せず、SSRConstants.Params0.wで別途持つ。C++側Render()が
+    // 手続き空の有効/無効を含めて一本化して決める。KurenaiEngine3D.cppのExecute内コメント参照)。zw=未使用
     float4 SkyParams;
-    float4 SkyZenithTint;
-    float4 SkyHorizonTint;
-    float4 SkyGroundTint;
-    // w=太陽の暖色の強さ(SunGlowStrength)
-    float4 SkySunGlowTint;
     // 雲(P5、さらに末尾に追加)。DeferredLighting.hlslの同名フィールドと完全に同じ順・同じ型
     // であること(C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams0/1 と揃える。
     // ずれると背景に見える雲と水面に映る雲が食い違う)。
@@ -143,6 +138,9 @@ Texture2D BRDFLUTTexture : register(t6);
 // 平面反射(P6)。KurenaiEngine3D::Renderが鏡映カメラで描いたPlanarReflection.hlslの結果
 // (m_PlanarReflectionColor)。t0〜t10は上ですべて埋まっているためt11を使う
 Texture2D PlanarReflectionTexture : register(t11);
+// SkyIntegrate.hlslが書いた空パラメータ(P9)。ティント4本と正規化済みの天頂輝度が入る。
+// t0〜t11が既に使用済みのためt12を使う
+StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t12);
 
 struct PSInput
 {
@@ -176,12 +174,8 @@ SkyParameters MakeSkyParameters()
 {
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
-    params.ZenithLuminance = SkyParams.x;
-    params.ZenithTint = SkyZenithTint.rgb;
-    params.HorizonTint = SkyHorizonTint.rgb;
-    params.GroundTint = SkyGroundTint.rgb;
-    params.SunGlowTint = SkySunGlowTint.rgb;
-    params.SunGlowStrength = SkySunGlowTint.w;
+    // ティント4本と天頂輝度はP9でSkyParametersBuffer(t12)へ移った(SkyIntegrate.hlslが書く)
+    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
     // 雲(P5)。DeferredLighting.hlslのMakeSkyParametersと完全に同一の内容であること
     // (このファイル冒頭のコメントと同じ理由。背景に見える雲と水面に映る雲が食い違ってはいけない)
     params.CloudCoverage = CloudParams0.x;

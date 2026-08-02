@@ -14,9 +14,18 @@
 // 同じ空を見ることを保証する。
 //
 // このファイルの式は Tools/generate_sky_cubemap.py(オフラインの参照実装 兼 手続き空を
-// 無効にしたときのフォールバック)と、KurenaiEngine3D.cpp のCPUミラー
-// (ComputeSkyTint / SkyRelativeLuminance / SkyTint / SunGlowWeight / ComputeSkyZenithScale)と
-// 常に一致させる必要がある。係数・定数を変える場合は必ずそれらも同時に直すこと。
+// 無効にしたときのフォールバック)と一致させる必要がある。係数・定数を変える場合は
+// 必ずそちらも同時に直すこと。
+//
+// 【P9: 照度正規化積分のGPU化】以前は色味の決定(ComputeSkyTint)と照度正規化の積分
+// (ComputeSkyZenithScale、θ64分割×φ256分割=16,384サンプル)がKurenaiEngine3D.cppのCPUミラーと
+// このファイルの両方に実装されており、「片方を直したら必ずもう片方も直す」という規約でしか
+// 整合が保たれていなかった。P9でこれをGPU側(SkyIntegrate.hlsl)へ一本化し、CPUミラーは削除した。
+// SkyIntegrate.hlslがこのファイルのComputeSkyTintSet/PerezRelativeLuminance/SkyTintFromSetを
+// 直接呼んで積分し、結果(ティント4本+正規化済みの天頂輝度)をGPUSkyParametersとして
+// 構造化バッファ(KurenaiEngine3D側 m_SkyParametersBuffer)へ書く。SkyGenerate.hlsl/
+// DeferredLighting.hlsl/SSR.hlslはこのバッファをApplySkyParametersFromBufferで読むだけになり、
+// CPU側に式のコピーは存在しない。
 //
 // 【cbufferに依存しない】呼び出し側ごとにcbufferのレイアウトが異なるため
 // (SkyGenerate.hlslはSkyBakeConstantsから、DeferredLighting.hlslはFrameConstantsから)、
@@ -34,8 +43,33 @@ static const float kGroundFadeEndY = -0.6f;
 // CIE快晴空係数(circumsolar項 c=10, d=-3)は反太陽側の水平線で輝度が天頂の0.2倍程度まで落ちる。
 // 実際の大気は多重散乱で暗部が持ち上がるためゼロにはしないが、以前ここを0.45にしていたときは
 // 輝度の勾配がほぼ消えて空全体が一様なスレートグレーになっていた(実測: 彩度0.26で時刻不変)。
-// 勾配が残る値まで下げてある。KurenaiEngine3D.cpp の kSkyRelativeLuminanceFloor と同じ値であること
+// 勾配が残る値まで下げてある
 static const float kRelativeLuminanceFloor = 0.12f;
+
+// 空の色味セット(P9でKurenaiEngine3D.cppから移植)。太陽高度から選び、SkyIntegrate.hlslが
+// GPUSkyParametersへ詰めてバッファへ書く
+struct SkyTintSet
+{
+    float3 Zenith;
+    float3 Horizon;
+    float3 Ground;
+    // 太陽方向まわりに乗せる暖色(夕焼け・朝焼け)
+    float3 SunGlow;
+    float  SunGlowStrength;
+};
+
+// SkyIntegrate.hlslが書き、SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む
+// 構造化バッファの1要素。KurenaiEngine3D.cppのGPUSkyParameters(alignas(16))と
+// 完全に一致させること
+struct GPUSkyParameters
+{
+    float4 ZenithTint;    // xyz
+    float4 HorizonTint;   // xyz
+    float4 GroundTint;    // xyz
+    float4 SunGlowTint;   // xyz=色、w=強さ
+    float4 Luminance;     // x=天頂輝度(実効プリ露出込み、雲の減光は含まない)
+                           // y=余弦重み積分の値(ログ・検証用)、zw=予備
+};
 
 // 空モデルの評価に必要なパラメータ一式。呼び出し側が自分のcbufferから組み立てて渡す
 // (SkyGenerate.hlslはSkyBakeConstantsから、DeferredLighting.hlslはFrameConstantsから)
@@ -64,6 +98,25 @@ struct SkyParameters
     float  CloudForwardG;      // Henyey-Greensteinの非対称パラメータ(前方散乱の強さ)
 };
 
+// バッファの内容をSkyParametersのティント/輝度フィールドへ流し込むヘルパ(P9)。
+// SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslの3つの消費側が同じ詰め替えを
+// 個別に書かないようにするため、ここへ1箇所だけ置く。SunDirection・雲パラメータは
+// このバッファには入っていないため呼び出し側が別途埋めること。
+// 【inoutではなく値渡し+戻り値にしている理由】fxc(SM5.0)はinout引数の一部フィールドしか
+// 書かないと「output parameter not completely initialized」(X3508)を出す
+// (呼び出し側が既に他のフィールドを埋めていても関係なく、この関数単体で全フィールドの
+// 代入が無いと判定される)。値渡し+戻り値ならこの制約に掛からない
+SkyParameters ApplySkyParametersFromBuffer(SkyParameters params, GPUSkyParameters data)
+{
+    params.ZenithLuminance = data.Luminance.x;
+    params.ZenithTint = data.ZenithTint.xyz;
+    params.HorizonTint = data.HorizonTint.xyz;
+    params.GroundTint = data.GroundTint.xyz;
+    params.SunGlowTint = data.SunGlowTint.xyz;
+    params.SunGlowStrength = data.SunGlowTint.w;
+    return params;
+}
+
 // Perezの5係数関数。cosThetaは水平線(cosθ→0)で発散するため呼び出し側でクランプ済みの前提
 float PerezF(float cosTheta, float gamma, float a, float b, float c, float d, float e)
 {
@@ -82,9 +135,8 @@ float PerezRelativeLuminance(float cosTheta, float gamma, float cosThetaSun, flo
     return PerezF(cosTheta, gamma, a, b, c, d, e) / PerezF(cosThetaSun, thetaSun, a, b, c, d, e);
 }
 
-// 太陽の暖色を混ぜる重み。KurenaiEngine3D.cpp の SunGlowWeight と同じ式であること。
-// 太陽から離れるほど急に落ちる4乗カーブ。太陽が地平線下にあっても、その方位の低空には
-// まだ暖色が残る(実際の夕焼けの残光と同じ構造)
+// 太陽の暖色を混ぜる重み。太陽から離れるほど急に落ちる4乗カーブ。
+// 太陽が地平線下にあっても、その方位の低空にはまだ暖色が残る(実際の夕焼けの残光と同じ構造)
 float SunGlowWeight(float cosGamma, float glowStrength)
 {
     const float proximity = saturate(cosGamma);
@@ -92,14 +144,79 @@ float SunGlowWeight(float cosGamma, float glowStrength)
     return saturate(glowStrength * falloff);
 }
 
-// 方向(天頂角と太陽との離角)に対する空の色味。
-// KurenaiEngine3D.cpp の SkyTint と同じ式であること
-float3 SkyTint(float cosTheta, float cosGamma, SkyParameters params)
+// 方向(天頂角と太陽との離角)に対する空の色味。SkyTintSetを直接取るオーバーロード。
+// SkyIntegrate.hlsl側の積分はまだGPUSkyParametersが存在しない(これから求める)段階で
+// 呼ぶ必要があるため、SkyParameters経由ではなくこちらを直接使う。
+// 【式は1箇所だけ】下のSkyTint(SkyParameters)はこの関数を呼ぶだけで、式そのものはここにしかない
+float3 SkyTintFromSet(float cosTheta, float cosGamma, SkyTintSet tintSet)
 {
     // 水平線側への寄せを3乗カーブにして、高度があるうちは天頂色をほぼ保つ
     const float horizonBlend = pow(1.0f - saturate(cosTheta), 3.0f);
-    const float3 base = lerp(params.ZenithTint, params.HorizonTint, horizonBlend);
-    return lerp(base, params.SunGlowTint, SunGlowWeight(cosGamma, params.SunGlowStrength));
+    const float3 base = lerp(tintSet.Zenith, tintSet.Horizon, horizonBlend);
+    return lerp(base, tintSet.SunGlow, SunGlowWeight(cosGamma, tintSet.SunGlowStrength));
+}
+
+// 方向(天頂角と太陽との離角)に対する空の色味。SkyColorUpper等、SkyParametersを持つ
+// 呼び出し側向けの薄いラッパ(式の実体はSkyTintFromSet)
+float3 SkyTint(float cosTheta, float cosGamma, SkyParameters params)
+{
+    SkyTintSet tintSet;
+    tintSet.Zenith = params.ZenithTint;
+    tintSet.Horizon = params.HorizonTint;
+    tintSet.Ground = params.GroundTint;
+    tintSet.SunGlow = params.SunGlowTint;
+    tintSet.SunGlowStrength = params.SunGlowStrength;
+    return SkyTintFromSet(cosTheta, cosGamma, tintSet);
+}
+
+// 太陽高度(のサイン)から空の色味を決める(P9でKurenaiEngine3D.cppのComputeSkyTintから移植)。
+//
+// 【物理ではなくアート的な近似であることの明示】本来の夕焼けは、太陽光が大気を長く通る
+// ことで短波長がRayleigh散乱により失われる波長依存の消散で生じる。それを解くには
+// Preetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。本エンジンは
+// Perez分布(輝度の分布のみを与え、色は与えない)を使っているため、色は昼・薄明・夜の
+// 3セットを高度で補間して作る。物理的な導出ではない。
+//
+// 【重要】ここで色味を暗くしても空が暗くなるわけではない。SkyIntegrate.hlslが
+// 「色味の輝度成分込みで積分して目標照度に合わせる」ため、色味は最終的な明るさではなく
+// 色相・彩度だけを決める。明るさはSunLighting::SkyIlluminanceLux(SkyIntegrateConstants経由)が持つ
+SkyTintSet ComputeSkyTintSet(float sunElevationSin)
+{
+    // 昼(仰角15度以上)。従来からの値
+    const float3 kDayZenith = float3(0.22f, 0.45f, 1.0f);
+    const float3 kDayHorizon = float3(0.55f, 0.74f, 1.0f);
+    const float3 kDayGround = float3(0.10f, 0.09f, 0.08f);
+    // 薄明(仰角0度)。天頂は青を残したまま暗く、水平線は夕焼けの橙へ
+    const float3 kDuskZenith = float3(0.13f, 0.22f, 0.60f);
+    const float3 kDuskHorizon = float3(0.95f, 0.50f, 0.28f);
+    const float3 kDuskGround = float3(0.06f, 0.05f, 0.05f);
+    // 夜(仰角-15度以下)。月光で散乱した深い青。ここを昼と同じ色にしていたため
+    // 「夜なのに昼と同じ空色」になっていた。
+    // 月光は分光的にはほぼ太陽光そのもので、夜空が青く見えるのは暗所視の
+    // プルキンエ現象による知覚的なもの。したがって青へ寄せるのは正しいが、
+    // 寄せすぎるとネオンブルーになる(R比7倍まで振ったときは実測B/R=13になった)ので
+    // 昼空(B/R約4.5)と同程度の彩度に留める
+    const float3 kNightZenith = float3(0.09f, 0.15f, 0.40f);
+    const float3 kNightHorizon = float3(0.16f, 0.24f, 0.50f);
+    const float3 kNightGround = float3(0.02f, 0.02f, 0.03f);
+    // 太陽方向の暖色(夕焼けの芯)
+    const float3 kSunGlow = float3(1.0f, 0.38f, 0.12f);
+
+    const float kSin15Deg = sin(radians(15.0f));
+    // 仰角0度→15度で薄明から昼へ
+    const float dayBlend = smoothstep(0.0f, kSin15Deg, sunElevationSin);
+    // 仰角0度→-15度で薄明から夜へ
+    const float nightBlend = smoothstep(0.0f, kSin15Deg, -sunElevationSin);
+
+    SkyTintSet result;
+    result.Zenith = lerp(lerp(kDuskZenith, kNightZenith, nightBlend), kDayZenith, dayBlend);
+    result.Horizon = lerp(lerp(kDuskHorizon, kNightHorizon, nightBlend), kDayHorizon, dayBlend);
+    result.Ground = lerp(lerp(kDuskGround, kNightGround, nightBlend), kDayGround, dayBlend);
+    result.SunGlow = kSunGlow;
+    // 暖色は仰角0度で最大、±15度で0になる三角窓。
+    // dayBlendもnightBlendも仰角0度で0・±15度で1なので、両方の補数の積がそのまま窓になる
+    result.SunGlowStrength = (1.0f - dayBlend) * (1.0f - nightBlend);
+    return result;
 }
 
 // 水平線以上を仮定した空の色(呼び出し側で地面フェードと合成する)

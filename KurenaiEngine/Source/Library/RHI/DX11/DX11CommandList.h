@@ -45,7 +45,7 @@ namespace Kurenai::RHI
         static constexpr uint32_t kMaxRenderTargets = 8;
         // SetComputeUnorderedAccessTexture/Bufferで使えるUAVスロット数(u0〜u3)
         static constexpr uint32_t kComputeUavSlotCount = 4;
-        // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t16)。
+        // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t17)。
         // DX12側のDX12CommandList::kTextureSlotCountおよびDX12Device.cppの
         // ルートシグネチャのSRVレンジと同じ値にしておくこと(3か所)。
         //
@@ -53,8 +53,11 @@ namespace Kurenai::RHI
         // 距離キューブや、DDGI(22章)のアトラス2枚が下のm_BoundPixelSrvsの追跡から漏れる。
         // そうなるとUnbindPixelSrvForResourceがこれらを外せず、ベイクがUAVで書き込む際の
         // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう
-        // (実際に12のまま放置され、t12/t13が漏れていた)
-        static constexpr uint32_t kTextureSlotCount = 17;
+        // (実際に12のまま放置され、t12/t13が漏れていた)。
+        // 17→18(P9): DeferredLighting.hlslが空パラメータ(GPUSkyParameters、SkyIntegrate.hlslが
+        // 書く構造化バッファ)をt17で追加したため、t0〜t16(17個)で埋まっていたスロットに
+        // もう1つ足す必要が生じた
+        static constexpr uint32_t kTextureSlotCount = 18;
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
         // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。
