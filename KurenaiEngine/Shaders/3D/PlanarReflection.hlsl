@@ -81,16 +81,26 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams3;
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
-    // 水面(P2)・空の解析評価(P3)・雲(P5)用。このシェーダーでは未使用だが、cbufferのレイアウトは
-    // 宣言順で決まり途中のフィールドを飛ばせないため、末尾のPlanarReflectionPlaneのオフセットを
+    // 水面(P2)用。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で決まり
+    // 途中のフィールドを飛ばせないため、末尾のPlanarReflectionPlaneのオフセットを
     // C++側 KurenaiEngine3D.cpp の FrameConstants と合わせる目的だけで宣言する
     // (DeferredLighting.hlsl/SSR.hlslの同名フィールドと同じ扱い。P9でSkyZenithTint/
     // SkyHorizonTint/SkyGroundTint/SkySunGlowTintの4本がSkyParametersBufferへ移り
     // FrameConstantsから消えたため、ここも同時に削ってフィールド数を合わせてある)
     float4 TimeParams;
+    // 空の解析評価用(P3)・雲(P5)。大気遠近(P8)のin-scatter項(下記MakeSkyParameters/SkyColor)が
+    // 読むため、このシェーダーでも実際に使う。xyz=太陽が「ある」向き(未正規化のまま渡ってくる。
+    // MakeSkyParametersでnormalizeする)、w=未使用
     float4 SkySunDirection;
+    // x=未使用、y=このシェーダーでは未使用(背景の解析評価トグルはDeferredLighting.hlsl専用)、
+    // z=太陽照度/空照度比(SunToSkyIlluminanceRatio。MakeSkyParametersが読み、
+    // Sky.hlsliのEvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う)、w=未使用
     float4 SkyParams;
+    // CloudParams0: x=被覆率(0で雲なし)、y=雲底の高度[m](カメラ基準)、
+    //               z=UVスケール[ノイズ空間/m]、w=消散係数。MakeSkyParametersが読む
     float4 CloudParams0;
+    // CloudParams1: xy=風によるノイズ空間の移動量(kCloudNoisePeriodでwrap済み)、
+    //               z=Henyey-Greensteinの非対称パラメータ、w=未使用。MakeSkyParametersが読む
     float4 CloudParams1;
     // 巻雲(P11、さらに末尾に追加)。このシェーダーでは未使用だが、C++側 KurenaiEngine3D.cpp の
     // FrameConstants::CloudParams2/3 と揃える目的だけで宣言する
@@ -212,6 +222,9 @@ SkyParameters MakeSkyParameters()
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
     params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
+    // 太陽照度/空照度比(SkyParams.zに詰めてある。KurenaiEngine3D.cppのSkyParams.zコメント参照)。
+    // EvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う
+    params.SunToSkyIlluminanceRatio = SkyParams.z;
     params.CloudCoverage = CloudParams0.x;
     params.CloudAltitude = CloudParams0.y;
     params.CloudUvScale = CloudParams0.z;
@@ -224,6 +237,9 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
+    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
+    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
+    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
     return params;
 }
 
@@ -489,9 +505,11 @@ float4 PSMain(PSInput input) : SV_TARGET
         const float3 fogDir =
             (clampedLength > 1e-5f) ? (clampedDir / clampedLength) : float3(0.0f, 0.0f, 1.0f);
 
-        // Mie位相関数を掛けない理由はAerialPerspective.hlslと同じ(SkyColorが既に太陽方向の
-        // 角度依存性を持つため、位相関数を掛けると前方散乱を二重に計上することになる)
-        const float3 inScatter = SkyColor(fogDir, MakeSkyParameters());
+        // Mie位相関数を掛けない理由、および雲を含むSkyColorではなく晴天のSkyColorUpperを使う
+        // 理由(雲は高度1,000m以上にあり、カメラと着目点の間の空気には存在しないため、
+        // in-scatterに乗せると雲の模様が地物へ透けて焼き付く)はAerialPerspective.hlslに
+        // 詳しく書いてある。2つのパスで霞の色が食い違わないよう、必ず同時に直すこと
+        const float3 inScatter = SkyColorUpper(fogDir, MakeSkyParameters());
 
         color = color * (1.0f - alpha) + inScatter * alpha;
     }

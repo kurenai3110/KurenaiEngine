@@ -93,7 +93,9 @@ cbuffer FrameConstants : register(b0)
     // x=未使用(P9で天頂輝度はSkyParametersBufferへ移動)。y=背景(深度なし画素)を解析評価するか
     // のフラグだが、このシェーダは背景を描かないため未使用(水面フォールバックの有効/無効は
     // DeferredLighting.hlslと共有せず、SSRConstants.Params0.wで別途持つ。C++側Render()が
-    // 手続き空の有効/無効を含めて一本化して決める。KurenaiEngine3D.cppのExecute内コメント参照)。zw=未使用
+    // 手続き空の有効/無効を含めて一本化して決める。KurenaiEngine3D.cppのExecute内コメント参照)。
+    // z=太陽照度/空照度比(SunToSkyIlluminanceRatio。MakeSkyParametersが読み、
+    // Sky.hlsliのEvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う)、w=未使用
     float4 SkyParams;
     // 雲(P5、さらに末尾に追加)。DeferredLighting.hlslの同名フィールドと完全に同じ順・同じ型
     // であること(C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams0/1 と揃える。
@@ -195,6 +197,9 @@ SkyParameters MakeSkyParameters()
     params.SunDirection = normalize(SkySunDirection.xyz);
     // ティント4本と天頂輝度はP9でSkyParametersBuffer(t12)へ移った(SkyIntegrate.hlslが書く)
     params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
+    // 太陽照度/空照度比(SkyParams.zに詰めてある。KurenaiEngine3D.cppのSkyParams.zコメント参照)。
+    // EvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う
+    params.SunToSkyIlluminanceRatio = SkyParams.z;
     // 雲(P5)。DeferredLighting.hlslのMakeSkyParametersと完全に同一の内容であること
     // (このファイル冒頭のコメントと同じ理由。背景に見える雲と水面に映る雲が食い違ってはいけない)
     params.CloudCoverage = CloudParams0.x;
@@ -210,6 +215,9 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
+    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
+    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
+    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
     return params;
 }
 

@@ -81,6 +81,10 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     SkyParameters params;
     params.SunDirection = normalize(SunDirection.xyz);
     params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
+    // SunToSkyIlluminanceRatioはこの経路では雲が常に無効(下のCloudCoverage=0)なので
+    // EvaluateCloudLayerから参照されることは無いが、未初期化のまま関数呼び出しへ渡さないよう
+    // (SkyBakeConstantsにこの値は存在しないため)明示的に0で埋めておく
+    params.SunToSkyIlluminanceRatio = 0.0f;
     // 判断B: 雲による平均透過率はキューブへ焼く値にだけ掛ける(SkyParametersBuffer側の
     // Luminance.xは雲を考慮しない晴天基準のまま。Sky.hlsli冒頭の雲セクション参照)
     params.ZenithLuminance *= CloudTransmittance;
@@ -105,6 +109,13 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     params.CirrusDensity = 0.0f;
     params.CirrusScrollOffset = float2(0.0f, 0.0f);
     params.CirrusAnisotropy = 0.0f;
+
+    // 雲へ掛ける大気遠近(P12)も明示的に無効で埋める。判断A(上記)により雲そのものを
+    // 焼かないので、このパスではEvaluateCloudLayer自体が一度も呼ばれず実質は無関係だが、
+    // 「IBLキューブは大気遠近を含まない晴天の空」という意図をここで読めるようにしておく。
+    // そもそもこのシェーダーのcbufferはSkyBakeConstantsでありFrameConstants::FogParams0を
+    // 持たないため、値を引いてくる先も無い
+    params = ApplyCloudFogParameters(params, float4(0.0f, 0.0f, 0.0f, 0.0f), 0.0f);
 
     const float3 color = SkyColor(dir, params);
 

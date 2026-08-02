@@ -171,7 +171,12 @@ namespace Kurenai
             //   夜には月の向きになる。Perez分布のcircumsolar項は常に太陽を基準にする
             DirectX::XMFLOAT4 SkySunDirection;
             // SkyParams: x=未使用(P9で天頂輝度はSkyParametersBufferへ移動)、
-            //   y=背景を解析評価するかのフラグ(1=解析、0=キューブマップをサンプル)、zw=未使用。
+            //   y=背景を解析評価するかのフラグ(1=解析、0=キューブマップをサンプル)、
+            //   z=太陽照度/空照度比(SunToSkyIlluminanceRatio。sunLighting.KeyIlluminanceLux /
+            //   sunLighting.SkyIlluminanceLuxから求める。Sky.hlsliのEvaluateCloudLayerが雲の
+            //   明るさの基準を太陽の照度にするために使う。雲を照らしているのは空ではなく
+            //   太陽であるため、天頂輝度基準では雲が原理的に空より暗くしかならなかった
+            //   問題への対処)、w=未使用。
             //   yは手続き空が無効(.ksceneのDDSスカイボックス使用時)は常に0にする
             //   (DDSは任意の絵でPerezモデルとは無関係なため、解析評価してはいけない)。
             //   ティント4本(SkyZenithTint/SkyHorizonTint/SkyGroundTint/SkySunGlowTint)は
@@ -4003,6 +4008,14 @@ namespace Kurenai
         constants.SkySunDirection = {
             sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
         };
+        // 太陽照度と空照度の比。Sky.hlsliのEvaluateCloudLayerが雲の明るさの基準を
+        // 「空の天頂輝度」から「太陽の照度」へ切り替えるために使う(雲を照らしているのは
+        // 空ではなく太陽であるため。詳細はSky.hlsli側のkCumulusSingleScatterScale等のコメント参照)。
+        // SkyIlluminanceLuxが0近傍(理論上は起こらないが)のときのゼロ除算を避けてある
+        const float sunToSkyIlluminanceRatio =
+            (sunLighting.SkyIlluminanceLux > 1e-6f)
+                ? (sunLighting.KeyIlluminanceLux / sunLighting.SkyIlluminanceLux)
+                : 0.0f;
         constants.SkyParams = {
             // x=未使用(P9で天頂輝度はSkyParametersBufferへ移動)
             0.0f,
@@ -4010,7 +4023,8 @@ namespace Kurenai
             // 常にキューブマップを使う。DDSは任意の絵でPerezモデルとは無関係なため、
             // 解析評価してはいけない
             (m_SkyAnalyticBackground && usingProceduralSky) ? 1.0f : 0.0f,
-            0.0f,
+            // z=太陽照度/空照度比(SunToSkyIlluminanceRatio、雲の明るさの基準に使う)
+            sunToSkyIlluminanceRatio,
             0.0f,
         };
 

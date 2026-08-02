@@ -44,6 +44,12 @@
 #ifndef KURENAI_SKY_HLSLI
 #define KURENAI_SKY_HLSLI
 
+// 雲層(有限距離にある)へ大気遠近を掛けるために使う(P12、EvaluateCloudLayerの(f)節)。
+// HeightFog.hlsliはcbuffer/レジスタに一切依存しない純粋関数だけのヘッダーなので、
+// この共有ヘッダーから読んでも利用者5者(冒頭の(a)〜(e))の結合は増えない。
+// 二重includeはHeightFog.hlsli側のインクルードガードで無害
+#include "HeightFog.hlsli"
+
 // --- generate_sky_cubemap.py と一致させる定数 ---
 // 地平線より下は空モデルの適用範囲外。プラトー色から暗い接地色へフェードさせる。
 // ゼロにしないのは、IBLの拡散イラディアンス積分で下半球が完全な暗黒にならないようにするため
@@ -95,6 +101,17 @@ struct SkyParameters
     float3 SunGlowTint;
     float  SunGlowStrength;  // 太陽の暖色の強さ(仰角0度で1、±15度で0)
 
+    // --- 雲の明るさを太陽照度基準にするための係数(EvaluateCloudLayer参照) ---
+    // 空照度に対する天頂輝度の比の逆数(積分値)。SkyIntegrate.hlslがGPUSkyParameters::
+    // Luminance.yへ書いた値をApplySkyParametersFromBufferがそのまま渡す。定義上
+    // 「空の照度 = SkyIlluminanceOverZenith × ZenithLuminance」という無次元量になる
+    float  SkyIlluminanceOverZenith;
+    // 太陽照度/空照度の比。CPU側(KurenaiEngine3D.cpp)のSunLighting::KeyIlluminanceLux /
+    // SkyIlluminanceLuxから求め、FrameConstants::SkyParams.z経由で渡ってくる。
+    // ApplySkyParametersFromBufferでは埋まらないため、呼び出し側(各MakeSkyParameters)が
+    // 別途代入すること
+    float  SunToSkyIlluminanceRatio;
+
     // --- Preetham xyYモデル(P7) ---
     float  Turbidity;        // 大気の濁り具合。Preethamの定義域はおおむね1.7〜10
     float  PreethamWeight;   // 0=従来ティントのみ、1=Preethamのみ。太陽仰角0〜5度でクロスフェードする
@@ -127,12 +144,52 @@ struct SkyParameters
     float2 CirrusScrollOffset; // 風によるノイズ空間の移動量(積雲と同じくkCloudNoisePeriodでwrap済み。
                                 // KurenaiEngine3D.cppのm_CirrusScrollOffset参照)
     float  CirrusAnisotropy;   // fBmのUV(U方向)を伸ばして筋状にする倍率。V方向は1.0固定
+
+    // --- 雲へ掛ける大気遠近(P12)。雲は「深度を持たない背景」として描かれるため
+    // AerialPerspective.hlslの早期脱出(depth <= 0)に入り、フォグを一切受けていなかった。
+    // だが雲は無限遠ではなく高度1,500m(積雲)・8,000m(巻雲)の有限距離にある層で、
+    // 視線が寝るほど斜距離が伸びる(仰角15度で積雲まで5.8km)。掛けないと消散係数を上げたとき
+    // 「地物は溶けたのに雲だけ剃刀のようにくっきり」という絵になる(詳細はEvaluateCloudLayer末尾)。
+    //
+    // 値はFrameConstants::FogParams0とCameraPosition.yから各MakeSkyParametersが埋める。
+    // ApplySkyParametersFromBufferでは埋まらない(空パラメータバッファはフォグを知らない)ため
+    // 呼び出し側が別途代入すること。FogEnabledが0のときEvaluateCloudLayerはフォグの計算を
+    // 一切行わず、P12着手前と厳密に同じ値を返す ---
+    float  FogEnabled;         // 0=フォグ無効(このヘッダーでは何もしない)、1=有効
+    float  FogSigma0;          // 基準高度での消散係数[1/m](FogParams0.x)
+    float  FogScaleHeight;     // スケールハイト[m](FogParams0.y)
+    float  FogRefHeight;       // 基準高度[m](ワールドY。FogParams0.z)
+    float  FogViewerHeight;    // 視点のワールドY。雲底高度がカメラ基準の相対値なので、
+                                // 絶対高度へ戻して消散係数を評価するために要る
 };
+
+// SkyParametersの雲用フォグフィールドを埋めるヘルパ。5つあるMakeSkyParametersが
+// 同じ5行を書き写さないようにここへ1箇所だけ置く(値渡し+戻り値なのは
+// ApplySkyParametersFromBufferと同じ理由=fxcのX3508回避)。
+// fogParams0はFrameConstants::FogParams0(x=消散係数, y=スケールハイト, z=基準高度, w=有効フラグ)。
+//
+// 【viewerHeightは厳密でなくてよい】この値は消散係数を高度で評価するためだけに使う
+// (sigma = sigma0 * exp(-(h - refHeight)/scaleHeight))。スケールハイトは既定1,000mなので、
+// 数メートルのずれは消散係数を0.1%も動かさない。したがって呼び出し側は次のいずれでもよい:
+//   - SSR.hlsl        … 反射レイの起点は水面(y≒0.15m)だがカメラのy(1.6m)を渡している
+//   - PlanarReflection.hlsl … CameraPositionは鏡映後のカメラ位置(yが負になる)だが、そもそも
+//     このシェーダーはSkyColorUpperしか呼ばずEvaluateCloudLayerへ到達しないため影響が無い
+//     (将来SkyColorを呼ぶよう変えるなら、鏡映前のカメラ高さを渡し直すこと)
+SkyParameters ApplyCloudFogParameters(SkyParameters params, float4 fogParams0, float viewerHeight)
+{
+    params.FogEnabled = fogParams0.w;
+    params.FogSigma0 = fogParams0.x;
+    params.FogScaleHeight = fogParams0.y;
+    params.FogRefHeight = fogParams0.z;
+    params.FogViewerHeight = viewerHeight;
+    return params;
+}
 
 // バッファの内容をSkyParametersのティント/輝度フィールドへ流し込むヘルパ(P9)。
 // SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslの3つの消費側が同じ詰め替えを
-// 個別に書かないようにするため、ここへ1箇所だけ置く。SunDirection・雲パラメータは
-// このバッファには入っていないため呼び出し側が別途埋めること。
+// 個別に書かないようにするため、ここへ1箇所だけ置く。SunDirection・雲パラメータ・
+// SunToSkyIlluminanceRatio(CPU側SunLightingから来る値)はこのバッファには入っていないため
+// 呼び出し側が別途埋めること。
 // 【inoutではなく値渡し+戻り値にしている理由】fxc(SM5.0)はinout引数の一部フィールドしか
 // 書かないと「output parameter not completely initialized」(X3508)を出す
 // (呼び出し側が既に他のフィールドを埋めていても関係なく、この関数単体で全フィールドの
@@ -147,6 +204,9 @@ SkyParameters ApplySkyParametersFromBuffer(SkyParameters params, GPUSkyParameter
     params.SunGlowStrength = data.SunGlowTint.w;
     params.Turbidity = data.ModelParams.x;
     params.PreethamWeight = data.ModelParams.y;
+    // 空照度/天頂輝度の積分値(EvaluateCloudLayerが太陽照度を天頂輝度の単位で表すのに使う。
+    // SkyParameters::SkyIlluminanceOverZenithのコメント参照)
+    params.SkyIlluminanceOverZenith = data.Luminance.y;
     return params;
 }
 
@@ -510,10 +570,20 @@ static const float kCloudHorizonFadeStartY = 0.2f;
 // 【P11で層ごとの値へ】これらはCloudLayerParams::Albedo/SingleScatterScale/AmbientTermMin/Max
 // として層ごとに渡すようになった。式(EvaluateCloudLayer)は1箇所のまま、値だけを積雲・巻雲で
 // 変える。積雲側の値は元のP5と同じ(kCumulus接頭辞へ改名しただけで数値は変えていない)
+//
+// 【雲の明るさの基準を太陽照度へ変更】以前はzenithLuminance(青空の天頂輝度)に
+// 0.25〜0.83の係数を掛けていたため、雲は原理的に青空より暗くしかならず、日向の積雲でも
+// 曇り空のような灰色にしかならなかった(実測: 雲のない空の輝度125に対し雲がある所が130、
+// 比1.04倍)。実際の日向の積雲は青空の3〜5倍明るい。これは雲を照らしているのが空ではなく
+// 太陽だからなので、EvaluateCloudLayerを太陽照度基準に組み直した(下記コメント参照)。
+// それに伴い、基準が変わったこの3定数も次の値へ変更した。目標は「太陽から離れた方向で、
+// 完全に照らされた雲(sunTransmittance=1、薄い縁)の輝度が青空の天頂輝度のおよそ3〜4倍に
+// なること」と「厚い芯(sunTransmittance=0)ではその15%程度に留まること」で、
+// この3つの値はその狙いから逆算した出発点であり実測値ではない
 static const float kCumulusAlbedo = 1.0f;
-static const float kCumulusSingleScatterScale = 0.35f;
-static const float kCumulusAmbientTermMin = 0.25f;
-static const float kCumulusAmbientTermMax = 0.75f;
+static const float kCumulusSingleScatterScale = 1.0f;   // 0.35から変更
+static const float kCumulusAmbientTermMin = 0.15f;      // 0.25から変更
+static const float kCumulusAmbientTermMax = 0.75f;      // 据え置き
 
 // 巻雲(P11)側の値。巻雲はkCirrusShadowSteps=0のためsunTransmittanceが常に1.0になり、
 // AmbientTermMin側は事実上使われない(lerp(Min,Max,1.0)=Max)が、式を1箇所に保つため
@@ -529,6 +599,13 @@ static const float kCirrusAmbientTermMax = 0.4f;
 // (ファイル冒頭のコメントのとおりSky.hlsliはPIを再定義しない、という既存の方針を守るため)、
 // インクルード順によらず再定義エラーは起きない
 static const float kCloudPI = 3.14159265359f;
+
+// 雲の日陰側(自己影で太陽光がほとんど届かない雲底)を照らす空明かりの強さ。
+// 雲の明るさの基準を太陽照度へ変えたことで単散乱・多重散乱ともsunTransmittanceに
+// 比例するようになったため、太陽が完全に遮られる(sunTransmittance→0)と光源そのものが
+// 無くなってしまう。実際には空全体からの拡散光が雲底にも回り込むため、この項だけは
+// 従来どおり天頂輝度基準で残す。0.2fは見た目からの調整値であり実測値ではない
+static const float kCloudSkyAmbientTerm = 0.2f;
 
 // 値ノイズ用のハッシュ関数(Dave Hoskinsのhash12。SSAO.hlsl/SSIL_VisibilityBitmask.hlslの
 // Hash12と同じ式)。このハッシュ自体は周期性を持たないため、雲のノイズを周期化するには
@@ -662,9 +739,39 @@ CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
 // 【P11で層のパラメータを引数化】以前はSkyParametersから直接params.Cloud*を読んでいたが、
 // 積雲・巻雲の式を2つに複製しないよう、層ごとの設定をCloudLayerParamsへまとめて渡す形にした。
 // sunDirection/zenithLuminanceは層に依らずSkyParametersの値をそのまま渡すだけなので、
-// CloudLayerParamsへは含めず別引数のままにしてある
+// CloudLayerParamsへは含めず別引数のままにしてある。
+// sunToSkyIlluminanceRatio/skyIlluminanceOverZenithは雲の明るさを太陽照度基準にするための
+// 係数(SkyParameters::SunToSkyIlluminanceRatio/SkyIlluminanceOverZenith参照)。SkyParameters
+// 全体ではなくこの2つだけを個別の引数にしているのは、既存のsunDirection/zenithLuminanceと
+// 同じ「層に依らない値は個別の引数で渡す」規約に揃えるため
+// 雲へ掛ける大気遠近の設定(P12)。SkyParametersの該当5フィールドをそのまま束ねたもの。
+// 【なぜ5つのスカラーを個別に渡さずに束ねるか】既存の規約は「層に依らない値は個別の引数で渡す」
+// (sunDirection/zenithLuminance等)だが、それは1〜2個だから成り立つ書き方で、5つ増やすと
+// 引数列だけで順番を間違えやすくなる。CloudLayerParamsと同じく「意味のまとまりを1つの型にする」
+// 側へ寄せた。層に依らない値である点は変わらないので、SkyColorが1回だけ組み立てて両層へ渡す
+struct CloudFogParams
+{
+    float Enabled;      // 0=無効(EvaluateCloudLayerはフォグの計算を一切行わない)
+    float Sigma0;       // 基準高度での消散係数[1/m]
+    float ScaleHeight;  // スケールハイト[m]
+    float RefHeight;    // 基準高度[m](ワールドY)
+    float ViewerHeight; // 視点のワールドY(SkyParameters::FogViewerHeightのコメント参照)
+};
+
+CloudFogParams MakeCloudFogParams(SkyParameters params)
+{
+    CloudFogParams fog;
+    fog.Enabled = params.FogEnabled;
+    fog.Sigma0 = params.FogSigma0;
+    fog.ScaleHeight = params.FogScaleHeight;
+    fog.RefHeight = params.FogRefHeight;
+    fog.ViewerHeight = params.FogViewerHeight;
+    return fog;
+}
+
 void EvaluateCloudLayer(
     float3 dir, CloudLayerParams layer, float3 sunDirection, float zenithLuminance,
+    float sunToSkyIlluminanceRatio, float skyIlluminanceOverZenith, CloudFogParams fog,
     out float transmittance, out float3 scatteredLight)
 {
     // (d) 光路長。dir.yが小さいほど視線は雲底平面を浅い角度で貫き経路が伸びるため、
@@ -734,16 +841,63 @@ void EvaluateCloudLayer(
     // 下の多重散乱の下限項に対して2桁小さくなり、太陽側の縁が光る効果がまったく見えなくなる
     const float phaseNormalized = phase * 4.0f * kCloudPI;
 
+    // 【雲の明るさの基準は太陽の照度】太陽照度は「太陽照度/空照度」(CPUのSunLightingから、
+    // sunToSkyIlluminanceRatio)と「空照度/天頂輝度」(SkyIntegrate.hlslの積分値、
+    // skyIlluminanceOverZenith)の積で、天頂輝度の単位のまま表せる
+    const float sunIlluminance = sunToSkyIlluminanceRatio * skyIlluminanceOverZenith * zenithLuminance;
+
     // 単散乱の簡易近似: 自己影を通って弱まった太陽光(sunTransmittance)を位相関数で配分する。
     // 多重散乱の項も同じ自己影の透過率で下限〜上限を補間し、厚い芯が暗く薄い縁が明るくなるようにする。
+    // 雲の内部で多重散乱した光も元は太陽光なので、単散乱・多重散乱ともsunIlluminanceを基準にする
+    const float sunLitTerm =
+        sunTransmittance * phaseNormalized * layer.SingleScatterScale
+        + lerp(layer.AmbientTermMin, layer.AmbientTermMax, sunTransmittance);
+
+    // 日陰側(自己影で太陽光が届かない雲底)は空の光だけで照らされる。この項だけは
+    // 従来どおり天頂輝度基準で残す(kCloudSkyAmbientTermのコメント参照)。
+    // 1/PIはランバート面の輝度換算(照度→輝度)。
     // (1-transmittance)は視線の経路のうち実際に散乱へ回った分のスケール(下の行で掛ける)
-    const float multiScatter = lerp(layer.AmbientTermMin, layer.AmbientTermMax, sunTransmittance);
     const float3 inScatter =
-        layer.Albedo * (sunTransmittance * phaseNormalized * layer.SingleScatterScale + multiScatter);
-    scatteredLight = zenithLuminance * inScatter * (1.0f - transmittance);
+        layer.Albedo * (sunLitTerm * sunIlluminance / kCloudPI + kCloudSkyAmbientTerm * zenithLuminance);
+    scatteredLight = inScatter * (1.0f - transmittance);
 
     // (e) 地平線際のフェード。kCloudMinDirYによる経路長クランプと合わせてのエイリアシング対策
-    const float fade = smoothstep(kCloudHorizonFadeEndY, kCloudHorizonFadeStartY, dir.y);
+    float fade = smoothstep(kCloudHorizonFadeEndY, kCloudHorizonFadeStartY, dir.y);
+
+    // (f) 雲へ掛ける大気遠近(P12)。
+    //
+    // 【なぜ要るか】雲は深度を持たない「背景」として描かれるため、AerialPerspective.hlslの
+    // 早期脱出(depth <= 0)に入りフォグを一切受けていなかった。しかし雲は無限遠ではなく
+    // layer.Altitudeの有限距離にある層で、視線と雲底平面の交点までの斜距離は
+    // Altitude/dir.y——仰角が下がるほど急速に伸びる(積雲1,500mなら仰角45度で2.1km、
+    // 15度で5.8km)。既定の消散係数0.0004(視程10km)でも仰角45度で透過率0.65、15度で0.30に
+    // なるはずのものが、素通しで最大コントラストのまま出ていた。結果、消散係数を上げると
+    // 「地物は溶けたのに雲だけ剃刀のようにくっきり」という、霞ではなく地物だけが
+    // 透けたように見える絵になっていた。
+    //
+    // 【なぜ(e)のフェードと同じ形で掛けるか】fadeは「この層の存在感を0〜1で薄める」係数で、
+    //   透過率   = lerp(1, T, fade)   … 薄まるほど背後の空を遮らなくなる
+    //   散乱光   = S * fade           … 薄まるほど自分の輝きが届かなくなる
+    // という構造を既に持つ。フォグの効果もまったく同じ構造で表せる——雲までの透過率をfとすると、
+    // 雲から目へ届く輝きはf倍に減り、雲が背後を遮る度合いも手前の大気光(airlight)で
+    // 薄まってlerp(1, T, f)になる。しかも減った分を埋める大気光の等価輝度は、この関数の
+    // 呼び出し元(SkyColor)が掛けているclearColor(晴天の空色)そのものなので、
+    // 追加の項を持たずに済む。実際、f=0を代入するとT=1・S=0となり
+    // SkyColorの合成式 clearColor * T + S は clearColor に一致する——
+    // 「フォグで雲が完全に消えたら素の空色が見える」という正しい極限になる。
+    //
+    // 【FogEnabled=0なら1命令も走らせない】この分岐に入らなければfadeは(e)の値のままで、
+    // P12着手前と浮動小数の最下位ビットまで一致する
+    if (fog.Enabled > 0.5f)
+    {
+        // 視線と雲底平面の交点までの斜距離。|dir|=1なので Altitude/safeDirY がそのまま距離になる
+        // (上の(d)節でhitXZを求めたときと同じ交点。safeDirYのクランプもそのまま効く)。
+        // 雲底高度はカメラ基準の相対値なので、絶対高度は ViewerHeight + layer.Altitude
+        const float3 rayStart = float3(0.0f, fog.ViewerHeight, 0.0f);
+        const float3 rayEnd = rayStart + dir * (layer.Altitude / safeDirY);
+        fade *= HeightFogTransmittance(rayStart, rayEnd, fog.Sigma0, fog.ScaleHeight, fog.RefHeight);
+    }
+
     transmittance = lerp(1.0f, transmittance, fade);
     scatteredLight *= fade;
 }
@@ -763,6 +917,11 @@ float3 SkyColor(float3 dir, SkyParameters params)
             return clearColor;
         }
 
+        // 雲へ掛ける大気遠近(P12)。層に依らない値なのでここで1回だけ組み立て、両層へ渡す。
+        // 【上の早期脱出より後に置く】判断Cの「雲が無いときは掛け算・足し算を1つも増やさない」に
+        // 揃えるため。被覆率0の画素はここへ到達せず、この組み立て自体が行われない
+        const CloudFogParams fog = MakeCloudFogParams(params);
+
         // 積雲(下層、P5)。被覆率0でもここへ来る場合があるため(巻雲だけの空)、個別に早期脱出する。
         // transmittance=1.0/scatteredLight=0の初期値は「雲が無い」ことを表す中立元(下のclearColor*1+0と
         // 一致する値)であり、CloudCoverage<=0のときEvaluateCloudLayerを呼ばずこの初期値のまま使う
@@ -772,6 +931,7 @@ float3 SkyColor(float3 dir, SkyParameters params)
         {
             EvaluateCloudLayer(
                 dir, MakeCumulusLayerParams(params), params.SunDirection, params.ZenithLuminance,
+                params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith, fog,
                 cumulusTransmittance, cumulusScatter);
         }
 
@@ -790,6 +950,7 @@ float3 SkyColor(float3 dir, SkyParameters params)
         float3 cirrusScatter;
         EvaluateCloudLayer(
             dir, MakeCirrusLayerParams(params), params.SunDirection, params.ZenithLuminance,
+            params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith, fog,
             cirrusTransmittance, cirrusScatter);
 
         // (g) 2層合成: 高い層(巻雲)から手前(積雲)へ。

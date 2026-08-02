@@ -8312,28 +8312,186 @@ Lightingパスが完成させた<code>SceneColor</code>を「反射先の環境�
 エイリアシングとして残ってしまう。
 </p>
 
-<h3>36.3 in-scatter項に<code>Sky.hlsli</code>の<code>SkyColor</code>を使う理由</h3>
+<h3>36.3 in-scatter項に<code>Sky.hlsli</code>の空モデルを使う理由</h3>
 <p>
-フォグの合成先の色(in-scatter項)には、専用の定数色ではなく背景と同じ
-<code>SkyColor(fogDir, params)</code>(<a href="#procedural-sky">21章</a>)をそのまま使う。
+フォグの合成先の色(in-scatter項)には、専用の定数色ではなく背景と同じ空モデル
+(<a href="#procedural-sky">21章</a>)をそのまま使う。
 理由は単純で、距離が無限大に近づくほど地物の色が<strong>厳密に</strong>背景の空色へ収束させたい
 ためである。専用の定数色を使うと、地平線際で「地物がフォグ色として滲んでいく先」と「背景として
-直接見えている空の色」が一致せず、水平線に沿って継ぎ目が出てしまう。<code>SkyColor</code>を
+直接見えている空の色」が一致せず、水平線に沿って継ぎ目が出てしまう。空モデルを
 共有することで、<a href="#clouds">34.2節</a>で確立した「背景・水面反射・IBLが同じ空モデルの
 単一定義を経由する」という設計へ、大気遠近もそのまま乗る形になった。
 </p>
 <p>
 in-scatter項の方向(<code>fogDir</code>)には、視線方向のyを0以上へクランプしたものを使う。
-水平線より下を向いた画素で<code>SkyColor</code>をそのまま評価すると、下半球の
+水平線より下を向いた画素で空色をそのまま評価すると、下半球の
 <code>GroundTint</code>(暗い接地色、<code>Sky.hlsli</code>)が返り、遠景が霞むのではなく
 黒ずんでしまう。水平線(<code>viewDir.y == 0</code>)ではクランプの有無で値が変わらないため、
 背景(深度が無い画素、下記36.4節)との連続性は保たれる。
 </p>
+
+<h4>36.3.1 呼ぶのは<code>SkyColor</code>ではなく<code>SkyColorUpper</code>(雲を含めない)</h4>
+<p>
+in-scatter項が呼ぶのは、雲を合成した<code>SkyColor</code>ではなく、
+<strong>雲を含まない晴天の空色</strong><code>SkyColorUpper(fogDir, params)</code>である。
+当初は<code>SkyColor</code>を呼んでいたが、これは実機で明確な破綻を起こした。
+</p>
+<p>
+理由は物理的なものである。ここで必要なのは<strong>カメラと着目点の間にある空気</strong>が散乱して
+視線へ入れてくる光(airlight)であって、無限遠から届く空の放射輝度そのものではない。
+雲は高度1,000m以上のレイヤーモデル(<a href="#clouds">34章</a>)で、視線が雲底平面と交わるのは
+水平距離にして数km〜数十km先——カメラから数百m先にある地物の<em>手前</em>には存在しない。
+にもかかわらず<code>SkyColor</code>を使うと、そこに無いはずの雲の輝度がin-scatterに乗る。
+雲は青空の3倍以上明るく、しかもfBmで空間的に激しく変動するため、暗い地物ほど
+<strong>雲の模様がそのまま透けて焼き付く</strong>形で破綻した。
+</p>
+<p>
+これは目で見て気付いたのではなく、次の測定で確定させた。水面の波と太陽を止め、雲だけを流した状態で
+6秒あけて2枚撮り、同じ画素の変化量を比べる(雲による全天平均透過率は被覆率だけで決まり
+スクロール位相には依存しない=雲が流れても地物の照明は動かない。よって地物の画素が動けば、
+それは雲の輝度が直接漏れている証拠になる)。
+</p>
+<table>
+<tr><th>領域</th><th>修正前 平均差</th><th>修正前 差&gt;1の画素</th><th>修正後 平均差</th><th>修正後 差&gt;1の画素</th></tr>
+<tr><td>修道院ブロックの内部</td><td>4.30</td><td>35.1%</td><td><strong>0.0000</strong></td><td><strong>0.0%</strong></td></tr>
+<tr><td>尖塔の内部</td><td>7.25</td><td>44.9%</td><td><strong>0.018</strong></td><td>0.16%(輪郭の空画素)</td></tr>
+<tr><td>水面に映る島の鏡像</td><td>—</td><td>—</td><td><strong>0.056</strong></td><td>0.0%</td></tr>
+<tr><td>空(対照: 雲が動いていること自体の確認)</td><td>6.34</td><td>31.5%</td><td>6.32</td><td>31.5%</td></tr>
+</table>
+<p>
+修正前は、地物の画素が<strong>空そのものとほぼ同じ量(平均5.7対6.3)動いていた</strong>——
+つまり雲がほぼ素通しで建物へ焼き付いていた。対照列が修正の前後で変わっていないことが、
+「雲は止まっていない」ことの陽性対照になっている。
+</p>
+<p>
+<strong>水平線での背景との連続性は失われない。</strong>無限遠へ収束するのは視線が水平
+(<code>fogDir.y == 0</code>)のときだけであり、<code>Sky.hlsli</code>の雲の地平線フェードは
+<code>smoothstep(kCloudHorizonFadeEndY = 0, kCloudHorizonFadeStartY = 0.2, dir.y)</code>——
+すなわち<code>dir.y == 0</code>でフェードが厳密に0になり、そこでは<code>SkyColor</code>と
+<code>SkyColorUpper</code>の値が一致する。したがって36.3節冒頭の設計目標はそのまま成立する。
+実測でも、視線がほぼ水平になる岩の斜面の平均輝度は150.09→147.12とほとんど動かず、
+水面(<code>fogDir.y</code>が0にクランプされる領域)は58.72→58.72で不変だった。
+なお<code>fogDir</code>はyを0以上へクランプ済みなので<code>SkyColor</code>の地面フェード分岐
+(<code>dir.y &lt; kGroundFadeStartY = -0.02</code>)には決して入らず、
+<code>SkyColor</code>を<code>SkyColorUpper</code>へ置き換えることは
+「雲の合成を外す」ことと厳密に等価である。
+</p>
 <p class="note">
-<strong>Mie位相関数は掛けない。</strong><code>SkyColor</code>が返す値には既にPerez分布の
+<strong>残している割り切り。</strong>雲に覆われた空の下では、airlightを照らす光そのものが弱まる
+(曇天の霞は晴天より暗く無彩色に寄る)。この全天平均の減光は現状掛けていない。掛けるには
+平均透過率(<code>KurenaiEngine3D.cpp</code>の<code>ComputeCloudAverageTransmittance</code>)を
+<code>FrameConstants</code>へ追加する必要があり、ここで直したかった破綻(雲の模様が地物へ
+焼き付く)とは別の問題なので分けてある。
+</p>
+<p class="note">
+<strong>Mie位相関数は掛けない。</strong><code>SkyColorUpper</code>が返す値には既にPerez分布の
 gamma項(太陽角距離の項)と<code>SunGlowTint</code>が含まれており、太陽方向で明るくなる
 角度依存性を既に持っている。この上にさらに位相関数を掛けると、前方散乱を二重に計上することに
 なるため、大気遠近側では位相関数を一切導入していない。
+</p>
+
+<h4>36.3.2 雲層そのものには逆にフォグを掛ける ― 「背景」扱いのままにしない</h4>
+<p>
+36.3.1が「霞の<em>色</em>に雲を混ぜない」話だったのに対し、こちらは逆向きの話である。
+<strong>雲は大気遠近を受ける側でなければならない。</strong>
+</p>
+<p>
+雲(<a href="#clouds">34章</a>)は深度を書かないため、大気遠近パスから見ると
+<code>depth &lt;= 0</code> の背景画素であり、36.4節の早期脱出でフォグを完全に免れていた。
+しかし雲は無限遠ではなく、積雲なら高度1,500m・巻雲なら8,000mの<strong>有限距離にある層</strong>である。
+視線と雲底平面の交点までの斜距離は<code>Altitude / dir.y</code>で、仰角が下がるほど急速に伸びる。
+既定の消散係数0.0004(視程10km)でも、本来この程度は減衰しているはずだった。
+</p>
+<table>
+<tr><th>視線仰角</th><th>積雲(1,500m)までの斜距離</th><th>σ=0.0004</th><th>σ=0.002</th><th>σ=0.01</th></tr>
+<tr><td>60°</td><td>1,730 m</td><td>0.70</td><td>0.17</td><td>0.00</td></tr>
+<tr><td>45°</td><td>2,119 m</td><td>0.65</td><td>0.11</td><td>0.00</td></tr>
+<tr><td>30°</td><td>2,997 m</td><td>0.54</td><td>0.05</td><td>0.00</td></tr>
+<tr><td>15°</td><td>5,789 m</td><td>0.30</td><td>0.00</td><td>0.00</td></tr>
+<tr><td>8°</td><td>10,766 m</td><td>0.11</td><td>0.00</td><td>0.00</td></tr>
+</table>
+<p>
+掛けないと何が起きるか。消散係数を上げていくと地物だけがどんどん溶けていくのに、雲は
+最後まで最大コントラストのまま残る。結果として画面は「霞んだ風景」ではなく
+<strong>「建物だけが透けた風景」</strong>に見える。実際、UIの消散係数を上限の0.01まで上げると
+島はほぼ消えるのに雲は剃刀のように鋭いままで、これが利用者から
+「大気散乱で建物が透ける」として報告された(36.3.1の雲の焼き付きを直した<em>後</em>も残っていた症状)。
+</p>
+
+<h5>実装: 既存の地平線フェードと同じ形で掛ける</h5>
+<p>
+<code>Sky.hlsli</code>の<code>EvaluateCloudLayer</code>は末尾で既に、地平線際のエイリアシング対策として
+「この層の存在感を0〜1で薄める」係数<code>fade</code>を持っている。
+</p>
+<pre><code>transmittance = lerp(1.0f, transmittance, fade);  // 薄まるほど背後の空を遮らなくなる
+scatteredLight *= fade;                           // 薄まるほど自分の輝きが届かなくなる</code></pre>
+<p>
+フォグの効果はまったく同じ構造で表せる。雲までのフォグ透過率をfとすると、雲から目へ届く輝きは
+f倍に減り、雲が背後を遮る度合いも手前の大気光(airlight)で薄まって<code>lerp(1, T, f)</code>になる。
+そこで<code>fade</code>にfを掛けるだけでよい。
+</p>
+<p>
+<strong>この形が正しいことは極限で確認できる。</strong>f=0を代入すると<code>T=1</code>・<code>S=0</code>となり、
+<code>SkyColor</code>の合成式<code>clearColor * T + S</code>は<code>clearColor</code>そのものに一致する――
+「フォグで雲が完全に消えたら素の空色が見える」という正しい極限になる。しかも減った分を埋める
+大気光の等価輝度は、呼び出し元が既に掛けている<code>clearColor</code>そのものなので、
+<strong>追加の項を1つも持たずに済む</strong>。
+</p>
+<p>
+フォグのパラメータは<code>SkyParameters</code>へ5つのフィールド
+(<code>FogEnabled</code>/<code>FogSigma0</code>/<code>FogScaleHeight</code>/<code>FogRefHeight</code>/<code>FogViewerHeight</code>)
+として持たせ、<code>ApplyCloudFogParameters</code>が<code>FrameConstants::FogParams0</code>と
+<code>CameraPosition.y</code>から埋める。<strong><code>FrameConstants</code>は1バイトも増えていない</strong>
+(必要な値がすべて既存フィールドに揃っていたため)。<code>EvaluateCloudLayer</code>へは
+<code>CloudLayerParams</code>と同じ考え方で<code>CloudFogParams</code>という型に束ねて渡す
+(層に依らない値を5つも引数へ並べると順番を間違えるため)。
+</p>
+
+<h5>検証</h5>
+<p>
+水面の波と雲の両方を凍結し(<code>WaterTimeFrozen</code>/<code>CloudTimeFrozen</code>)、
+同一条件で複数回撮って再現性の下限を先に確定させてから比較した。
+</p>
+<p>
+<strong>(1) 効果 ― 雲のコントラストが地平線へ向かって単調に潰れること。</strong>
+島を避けた空の帯ごとに、Rec.709輝度の90%点(=雲)と10%点(=青空)の比を測った。
+</p>
+<table>
+<tr><th>空の帯(画面y)</th><th>P12前 90%点/10%点</th><th>P12後</th><th>10%点(青空)の変化</th></tr>
+<tr><td>180–280(高い)</td><td>1.70</td><td>1.47</td><td>125.8 → 125.8</td></tr>
+<tr><td>300–400</td><td>1.64</td><td>1.26</td><td>128.0 → 128.0</td></tr>
+<tr><td>420–500</td><td>1.45</td><td><strong>1.04</strong></td><td>128.6 → 128.3</td></tr>
+<tr><td>520–565(地平線際)</td><td>1.14</td><td><strong>1.01</strong></td><td>127.0 → 127.0</td></tr>
+</table>
+<p>
+注目すべきは<strong>10%点(青空)が1階調も動いていない</strong>ことである。動いたのは明るい側(雲)だけで、
+それが青空の値へ向かって降りてきている。「雲が晴天の空色へ収束する」という狙いどおりの挙動で、
+晴天側の経路には一切触れていないことの証拠にもなっている。
+</p>
+<p>
+<strong>(2) 恒等性 ― フォグ無効なら1ビットも変わらないこと。</strong>
+<code>FogEnabled=false</code>でビルドし、P12前後のシェーダーセットを同じバイナリで撮り分けた
+(ビューポート全体902,700画素)。
+</p>
+<table>
+<tr><th>比較</th><th>最大差</th><th>差のある画素</th></tr>
+<tr><td>対照(P12前) vs P12後 ― 6組の総当たりのうち4組</td><td><strong>0</strong></td><td><strong>0</strong></td></tr>
+<tr><td>同 ― 残り2組(いずれも下記の異常な1枚を含む組)</td><td>1</td><td>787</td></tr>
+<tr><td>再現性の下限: 同一シェーダー同士(P12後 vs P12後)</td><td>1</td><td>787</td></tr>
+</table>
+<p>
+5枚撮ったうち1枚だけが、<strong>自分と同じシェーダーで撮った兄弟に対しても</strong>まったく同じ787画素・1階調の
+ずれを示した。つまりこのずれはP12に起因せず、プロセスをまたいだときに稀に出る1LSBの非決定性である
+(残りの組み合わせはすべて最大差0)。陽性対照として、フォグ有効/無効の切り替えでは
+53.6%の画素・最大差66が動くことを確認しており、「フォグのコードが走っていないから差が0」ではない。
+</p>
+<p>
+<strong>(3) 判断A・判断Cは維持。</strong><code>SkyGenerate.hlsl</code>(IBLベイク)は
+<code>ApplyCloudFogParameters</code>へ明示的に無効値を渡す(そもそも判断Aで
+<code>CloudCoverage=0</code>のため<code>EvaluateCloudLayer</code>自体が呼ばれない)。
+<code>CloudFogParams</code>の組み立ては<code>SkyColor</code>の早期脱出<em>より後</em>に置いてあり、
+被覆率0の画素では組み立てすら行われない。fxc(SM5.0)/dxc(SM6.0)で全93エントリポイントの
+コンパイルを確認し、DX11・DX12の両方で起動・描画を確認した。
 </p>
 
 <h3>36.4 背景画素は1ビットも変えない</h3>
@@ -8394,7 +8552,8 @@ float  transmittance = exp(-max(tau, 0.0f));</code></pre>
 </p>
 <p>
 そこで<code>PlanarReflection.hlsl</code>自身の<code>PSMain</code>末尾で、SSRへ渡す<em>前</em>に
-同じ<code>HeightFogTransmittance</code>と<code>SkyColor</code>を使ってフォグを合成しておく。
+同じ<code>HeightFogTransmittance</code>と<code>SkyColorUpper</code>(雲を含めない理由は36.3.1節)を
+使ってフォグを合成しておく。
 掛けないと「霞んだ本体 vs くっきりした鏡像」という不自然な絵になる。光が「物体 → 水面 → 目」の
 順に進む経路長は、鏡映カメラ(<code>CameraPosition</code>、35.3節)から物体までの距離と
 幾何学的に厳密に等しいため(鏡映は「鏡映カメラで景色を撮り直す」ことと数学的に等価という
@@ -8481,7 +8640,7 @@ V ≒ 10km(晴れているが遠景がわずかに霞む日)に相当する。
 UIの設定に関わらず<code>FogParams0.w</code>(有効フラグ)を0にする。これは
 <a href="#ssrprobe">20.6節</a>のSSRが<code>usingProceduralSky</code>で水面の解析空フォールバックを
 落としているのと同じ判断である――DDSは任意の絵でPerezモデルとは無関係なため、
-<code>SkyColor</code>による解析評価をin-scatter項に使ってはいけない。
+<code>SkyColorUpper</code>による解析評価をin-scatter項に使ってはいけない。
 </p>
 
 </section>
