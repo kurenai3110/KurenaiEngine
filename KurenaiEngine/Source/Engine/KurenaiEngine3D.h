@@ -223,6 +223,12 @@ namespace Kurenai
         // Renderスレッドがフレーム先頭で呼ぶ。保留中の切り替え要求の発注と、
         // 出来上がったシーンの取り込みを行う
         void UpdateSceneStreaming();
+        // .ksceneの更新時刻を見て、変わっていれば再読み込みを要求する(P16)。
+        // UpdateSceneStreamingの先頭から呼ぶ。m_SceneAutoReloadEnabledがfalseなら何もしない
+        void UpdateSceneHotReloadWatch();
+        // 現在のシーンの.ksceneの最終更新時刻。取得できなければ0を返す
+        // (ファイルが一時的に開けない、削除された等。0のときは何もしないのが正しい振る舞い)
+        uint64_t GetCurrentSceneFileWriteTime() const;
         // Loaderスレッドの本体。要求を待ち、旧シーンを破棄し、新シーンを読み込んで publish する
         void LoaderThreadMain();
         // Loaderスレッドで実行する読み込み本体。エンジンの状態は一切書き換えない。
@@ -1659,6 +1665,30 @@ namespace Kurenai
         // 多重発注を防ぐために見る
         bool m_SceneLoadInFlight = false;
 
+        // --- .ksceneのホットリロード(P16) -----------------------------------------------------
+        //
+        // 起動し直さずに.ksceneの変更を絵へ出すための仕組み。読み込み自体は上の非同期経路を
+        // そのまま使い(「今のシーンをもう一度読む」だけ)、ここが持つのは「いつ発注するか」だけ。
+        //
+        // 【監視するのは実行ファイルの隣のファイル】エンジンが読むのは<exe>\Assets\Scenes\*.ksceneで、
+        // リポジトリのScenes\*.ksceneからはKurenaiPacker --scene → Assets\Packed → xcopy の
+        // 2ホップで届く。エンジンは自分が実際に読んだファイル(m_SceneFilePaths)だけを見る
+
+        // 自動監視の有効/無効。**既定はオフ**。A/B比較の最中に勝手に再読み込みが走ると
+        // 「同一条件で2回撮る」対照が壊れるため、明示的に入れてもらう
+        bool m_SceneAutoReloadEnabled = false;
+        // リロード時に現在のカメラを保持するか。オフ(既定)ならファイルの[Camera]を適用する。
+        // [Camera]を詰めるときと、飛び回りながら空・水面・露出を詰めるときで要求が逆になる
+        bool m_SceneReloadKeepsCamera = false;
+        // 監視中の.ksceneの更新時刻(FILETIMEを64bitへ詰めたもの)。0は「まだ取得していない」
+        uint64_t m_WatchedSceneWriteTime = 0;
+        // 検証に失敗した更新時刻。同じ内容で警告ログを繰り返さないために覚えておく
+        uint64_t m_SceneReloadRejectedWriteTime = 0;
+        // 次に更新時刻を見る時刻。毎フレーム見る必要は無いので250msに1回へ間引く。
+        // Render()のフレーム時間ではなく自前のsteady_clockで測るのは、この関数が
+        // フレーム時間の更新より前に呼ばれる位置にあり、呼び出し順への依存を作らないため
+        std::chrono::steady_clock::time_point m_NextSceneWatchTime{};
+
         // Render → Loader の要求。-1は「要求なし」
         std::mutex m_LoadRequestMutex;
         std::condition_variable m_LoadRequestCV;
@@ -1677,6 +1707,9 @@ namespace Kurenai
         // 毎フレームのロックを避けるため、まずatomicで有無を判定してから中身を取りにいく
         std::atomic<bool> m_AppliedScenePending{ false };
         std::mutex m_AppliedSceneMutex;
+        // カメラを適用するか(P16)。ホットリロードで「現在のカメラを保持する」を選んでいるときだけ
+        // falseになる。falseでもウィンドウタイトルの更新は行うため、引き渡し自体は毎回発生する
+        bool m_AppliedSceneApplyCamera = true;
         Core::Camera m_AppliedSceneCamera;
         std::wstring m_AppliedSceneTitle;
 

@@ -2544,8 +2544,86 @@ namespace Kurenai
         m_PendingSceneRequest = static_cast<int>(sceneIndex);
     }
 
+    uint64_t KurenaiEngine3D::GetCurrentSceneFileWriteTime() const
+    {
+        if (m_CurrentSceneIndex >= m_SceneFilePaths.size())
+        {
+            return 0;
+        }
+
+        // DiscoverScenesがFindFirstFileWを使っているのと同じWin32の流儀に揃える。
+        // <filesystem>は例外を投げるうえ、このコードベースでは1箇所でしか使っていない
+        WIN32_FILE_ATTRIBUTE_DATA attributes{};
+        if (!GetFileAttributesExW(m_SceneFilePaths[m_CurrentSceneIndex].c_str(), GetFileExInfoStandard, &attributes))
+        {
+            // 保存の瞬間にエディタがファイルを置き換えていると一時的に開けないことがある。
+            // 0を返して「今回は見送る」ことで、次のポーリングが正しい値を拾う
+            return 0;
+        }
+
+        return (static_cast<uint64_t>(attributes.ftLastWriteTime.dwHighDateTime) << 32) |
+               static_cast<uint64_t>(attributes.ftLastWriteTime.dwLowDateTime);
+    }
+
+    void KurenaiEngine3D::UpdateSceneHotReloadWatch()
+    {
+        // 読み込み中・要求が既に積まれている場合は何もしない(多重発注を避ける)
+        if (!m_SceneAutoReloadEnabled || m_SceneLoadInFlight || m_PendingSceneRequest >= 0)
+        {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now < m_NextSceneWatchTime)
+        {
+            return;
+        }
+        m_NextSceneWatchTime = now + std::chrono::milliseconds(250);
+
+        const uint64_t writeTime = GetCurrentSceneFileWriteTime();
+        if (writeTime == 0 || writeTime == m_WatchedSceneWriteTime)
+        {
+            return;
+        }
+
+        // 【書式の検証を門番にする】保存の途中で書きかけのファイルを掴むと、LoadSceneが失敗して
+        // シーンが空のまま残る(UpdateSceneStreamingはVRAMの二重常駐を避けるため、読み込みを
+        // 始める前に旧シーンを手放す設計のため)。ValidateSceneはデバイスもジオメトリも要らない
+        // 軽い検証なので、通ったときだけ発注することでこれを防ぐ。
+        // 失敗した更新時刻は覚えておき、同じ内容で警告を繰り返さない(保存し直せば次の変更で拾う)
+        const std::wstring assetRootDirectory = GetModuleDirectory() + L"Assets\\";
+        try
+        {
+            Assets::ValidateScene(m_SceneFilePaths[m_CurrentSceneIndex], assetRootDirectory);
+        }
+        catch (const std::exception& e)
+        {
+            if (writeTime != m_SceneReloadRejectedWriteTime)
+            {
+                m_SceneReloadRejectedWriteTime = writeTime;
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "シーンファイルの変更を検出しましたが、書式が不正なため再読み込みを見送りました("
+                    "シーンはそのまま残ります): " + WideToUtf8(m_SceneFilePaths[m_CurrentSceneIndex]) + " : " + e.what());
+            }
+            return;
+        }
+
+        // 検証を通った時点で基準時刻を進める。発注が消費されるまでの数フレームで
+        // 同じ変更を何度も拾わないようにするため、ApplyLoadedSceneの取り直しより先に行う
+        m_WatchedSceneWriteTime = writeTime;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "シーンファイルの変更を検出したため再読み込みします: " +
+                WideToUtf8(m_SceneFilePaths[m_CurrentSceneIndex]));
+        RequestSceneLoad(m_CurrentSceneIndex);
+    }
+
     void KurenaiEngine3D::UpdateSceneStreaming()
     {
+        // .ksceneのホットリロード(P16)。実際の読み込みは下の既存の経路にそのまま乗せる
+        UpdateSceneHotReloadWatch();
+
         // --- 出来上がったシーンがあれば取り込む ---
         std::unique_ptr<LoadedScene> loaded;
         {
@@ -2770,6 +2848,12 @@ namespace Kurenai
 
     void KurenaiEngine3D::ApplyLoadedScene(LoadedScene& loaded)
     {
+        // カメラ保持(P16)は「同じシーンをもう一度読む」ときにだけ効かせる。
+        // 別のシーンへ切り替えたときまで前のカメラを引き継ぐと、まったく違う縮尺・位置の
+        // シーンの外へ放り出される(near/farも前のシーンのAABB由来のまま残る)。
+        // m_CurrentSceneIndexはこの直後に上書きされるため、比較はここで済ませておく
+        const bool isSameSceneReload = (loaded.SceneIndex == m_CurrentSceneIndex);
+
         m_Scene = std::move(loaded.Scene);
         m_RaytracingScene = std::move(loaded.RaytracingScene);
         m_CurrentSceneIndex = loaded.SceneIndex;
@@ -2912,12 +2996,22 @@ namespace Kurenai
         // (Renderスレッドが読む。カメラ自体はこの後m_AppliedSceneCamera経由でUpdateスレッドへ渡す)
         m_TAAHistoryValid.store(false, std::memory_order_relaxed);
 
+        // ホットリロード(P16)の基準時刻を、いま読んだファイルの更新時刻で取り直す。
+        // これをしないと (1)シーンを切り替えたあとも前のファイルを見続ける
+        // (2)手動の再読み込み直後に「変更あり」と誤検出して延々と再読み込みし続ける
+        m_WatchedSceneWriteTime = GetCurrentSceneFileWriteTime();
+        m_SceneReloadRejectedWriteTime = 0;
+
         // 初期カメラとウィンドウタイトルはUpdateスレッドが適用する。m_Cameraの書き込み手を
         // 1スレッドに保ち、ウィンドウタイトルもウィンドウを所有するスレッドから設定するため
         // (UpdateAppliedSceneHandoff参照)
         {
             const wchar_t* apiName = (m_GraphicsAPI == GraphicsAPI::DX12) ? L"DX12" : L"DX11";
             std::lock_guard<std::mutex> lock(m_AppliedSceneMutex);
+            // カメラを適用するかどうか(P16)。「現在のカメラを保持する」が入っていても
+            // ウィンドウタイトルは更新したいので、引き渡し自体は毎回行う。
+            // 保持が効くのは同じシーンの読み直しのときだけ(上のisSameSceneReload参照)
+            m_AppliedSceneApplyCamera = !(m_SceneReloadKeepsCamera && isSameSceneReload);
             m_AppliedSceneCamera = loaded.Camera;
             m_AppliedSceneTitle = std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name;
         }
@@ -3641,15 +3735,24 @@ namespace Kurenai
 
         Core::Camera camera;
         std::wstring title;
+        bool applyCamera = true;
         {
             std::lock_guard<std::mutex> lock(m_AppliedSceneMutex);
             camera = m_AppliedSceneCamera;
             title = m_AppliedSceneTitle;
+            applyCamera = m_AppliedSceneApplyCamera;
         }
         m_AppliedScenePending.store(false, std::memory_order_relaxed);
 
-        // m_Cameraの書き込み手はこのUpdateスレッド1つに保つ(Renderスレッドは触らない)
-        m_Camera = camera;
+        // m_Cameraの書き込み手はこのUpdateスレッド1つに保つ(Renderスレッドは触らない)。
+        // 【P16】ホットリロードで「現在のカメラを保持する」が入っているときはここを飛ばす。
+        // このとき位置・向きだけでなくnear/far(ComputeInitialCameraがシーンのAABBから決める)も
+        // 前のまま残る。同じ.ksceneを読み直す用途では[Model]が変わらない限りAABBも変わらないので
+        // 実害は無いが、モデルを差し替えたときはこのトグルを外して読み直すこと
+        if (applyCamera)
+        {
+            m_Camera = camera;
+        }
         // ウィンドウタイトルの変更もウィンドウを所有するこのスレッドから行う
         m_Window->SetTitle(title);
     }
