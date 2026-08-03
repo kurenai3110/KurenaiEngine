@@ -225,6 +225,27 @@ namespace Kurenai::Assets
         bool HasCirrusCoverage = false;
         float CirrusCoverage = 0.5f;        // 高層の巻雲。0で消える
 
+        // --- [Fog]セクション。大気の澄み具合はシーンが持つべき性質なので、[Cloud]と同じく
+        // 指定されたキーだけエンジンの設定を上書きする。
+        //
+        // 【なぜシーンごとに要るのか】消散係数は遠景の霞の濃さだけでなく、**雲がどれだけ空から
+        // 浮き上がって見えるか**を一手に決める。雲底1,500mの層は仰角20度の方向で4.4km先にあり、
+        // エンジンの既定値0.0004(視程9.8km相当)ではそこまでの透過率が0.40しかない——
+        // 雲のコントラストの6割が目に届く前に空の色へ溶ける。実測でも、雲の受光を削っている
+        // 要因はこれがほぼ単独で、自己影(+1.2)や縦方向の勾配(+3.6)に対してこの項だけが
+        // +24.6(雲の90%点と空の中央値の差、255段階)を占めていた。
+        // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        bool HasFogEnabled = false;
+        bool FogEnabled = true;
+        bool HasFogDensity = false;
+        // 基準高度での消散係数[1/m]。気象学的視程Vとは Koschmieder の V = 3.912 / 消散係数
+        // で結び付く(0.0004 で V ≒ 9.8km、0.0002 で V ≒ 19.6km)
+        float FogDensity = 0.0004f;
+        bool HasFogScaleHeight = false;
+        float FogScaleHeight = 1000.0f;     // 霞の層の厚み[m]。大きいほど高い高度まで及ぶ
+        bool HasFogRefHeight = false;
+        float FogRefHeight = 0.0f;          // 消散係数を定義する高さ(ワールドY)
+
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };

@@ -740,10 +740,14 @@ namespace Kurenai::UI
             "無効にするとパス自体が実行されず、反射パスの出力がそのままTAA(またはトーンマップ)へ渡る"
             "(密度を0にした場合とも数値上区別が付かないため、切り分け用にトグルを分けている)");
         SliderFloatEx(
-            "消散係数###FogDensity", &m_Engine.m_FogDensity, 0.0f, 0.01f, Defaults::FogDensity, "%.5f",
+            "消散係数###FogDensity", &m_Engine.m_FogDensity, 0.0f, 0.002f, Defaults::FogDensity, "%.5f",
             ImGuiSliderFlags_Logarithmic,
-            "基準高度(下記)での消散係数[1/m]。大きいほど濃い霧になる。1/値が「およそe分の1まで"
-            "減衰する距離[m]」の目安になる");
+            "基準高度(下記)での消散係数[1/m]。大きいほど濃い霧になる。"
+            "気象学的視程Vとは Koschmieder の V = 3.912 / 消散係数 で結び付くので、"
+            "「どのくらいの視程を想定するか」で決めるのが分かりやすい"
+            "(0.0004 で V ≒ 10km、0.0002 で V ≒ 20km、上限の0.002 で V ≒ 2km のもや)。"
+            "上限は以前0.01(V ≒ 391m)だったが、600m先の島すら見えず屋外の風景として"
+            "成立しない領域だったので下げた");
         SliderFloatEx(
             "スケールハイト###FogScaleHeight", &m_Engine.m_FogScaleHeight, 10.0f, 5000.0f, Defaults::FogScaleHeight,
             "%.0f m", 0, "霧の層の厚み。大きいほど高い高度まで霧が及ぶ");

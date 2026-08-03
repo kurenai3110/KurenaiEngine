@@ -301,6 +301,12 @@ namespace Kurenai::Assets
             bool HasCloudCellSize = false;   float CloudCellSize = 1000.0f;
             bool HasCirrusCoverage = false;  float CirrusCoverage = 0.5f;
 
+            // [Fog]セクション。指定されたキーだけエンジンの設定を上書きする
+            bool HasFogEnabled = false;      bool  FogEnabled = true;
+            bool HasFogDensity = false;      float FogDensity = 0.0004f;
+            bool HasFogScaleHeight = false;  float FogScaleHeight = 1000.0f;
+            bool HasFogRefHeight = false;    float FogRefHeight = 0.0f;
+
             std::vector<ParsedLightEntry> Lights;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
             std::vector<ParsedGIVolumeEntry> GIVolumes;
@@ -318,6 +324,7 @@ namespace Kurenai::Assets
             GIVolume,
             Water,
             Cloud,
+            Fog,
             Unknown,
         };
 
@@ -332,6 +339,7 @@ namespace Kurenai::Assets
             if (CaseInsensitiveEquals(name, L"GIVolume")) return Section::GIVolume;
             if (CaseInsensitiveEquals(name, L"Water")) return Section::Water;
             if (CaseInsensitiveEquals(name, L"Cloud")) return Section::Cloud;
+            if (CaseInsensitiveEquals(name, L"Fog")) return Section::Fog;
             return Section::Unknown;
         }
 
@@ -862,6 +870,50 @@ namespace Kurenai::Assets
                     break;
                 }
 
+                case Section::Fog:
+                {
+                    // [Cloud]と同じ作法。範囲外は打ち間違いとみなしてエラーにする
+                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                    {
+                        if (!ParseFloatToken(value, out))
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                        }
+                        if (out < minValue || out > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        has = true;
+                    };
+
+                    if (CaseInsensitiveEquals(key, L"Enabled"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
+                        result.FogEnabled = *parsedValue;
+                        result.HasFogEnabled = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Density"))
+                    {
+                        // 上限0.002は視程約2km(もや)に相当する。これより濃いと600m先の地物すら
+                        // 見えなくなり屋外の風景として成立しないため、UIのスライダーと同じ上限にしてある
+                        readFloat(result.FogDensity, result.HasFogDensity, 0.0f, 0.002f, L"Density");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"ScaleHeight"))
+                    {
+                        readFloat(result.FogScaleHeight, result.HasFogScaleHeight, 10.0f, 5000.0f, L"ScaleHeight");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"RefHeight"))
+                    {
+                        readFloat(result.FogRefHeight, result.HasFogRefHeight, -500.0f, 500.0f, L"RefHeight");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
                 default:
                     break;
                 }
@@ -967,6 +1019,10 @@ namespace Kurenai::Assets
         scene.HasCloudDensity = parsed.HasCloudDensity;     scene.CloudDensity = parsed.CloudDensity;
         scene.HasCloudCellSize = parsed.HasCloudCellSize;   scene.CloudCellSize = parsed.CloudCellSize;
         scene.HasCirrusCoverage = parsed.HasCirrusCoverage; scene.CirrusCoverage = parsed.CirrusCoverage;
+        scene.HasFogEnabled = parsed.HasFogEnabled;         scene.FogEnabled = parsed.FogEnabled;
+        scene.HasFogDensity = parsed.HasFogDensity;         scene.FogDensity = parsed.FogDensity;
+        scene.HasFogScaleHeight = parsed.HasFogScaleHeight; scene.FogScaleHeight = parsed.FogScaleHeight;
+        scene.HasFogRefHeight = parsed.HasFogRefHeight;     scene.FogRefHeight = parsed.FogRefHeight;
         scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;

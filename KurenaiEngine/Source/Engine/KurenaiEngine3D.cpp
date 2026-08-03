@@ -2900,6 +2900,13 @@ namespace Kurenai
         if (m_Scene.HasCloudDensity)   { m_CloudDensity = m_Scene.CloudDensity; }
         if (m_Scene.HasCloudCellSize)  { m_CloudUvScale = 1.0f / std::max(m_Scene.CloudCellSize, 1.0f); }
         if (m_Scene.HasCirrusCoverage) { m_CirrusCoverage = m_Scene.CirrusCoverage; }
+        // 大気遠近。[Cloud]と同じく指定されたキーだけを上書きする。
+        // 【この値は遠景の霞だけの設定ではない】消散係数は雲がどれだけ空から浮き上がって
+        // 見えるかも一手に決める(Scene.h の HasFogDensity 付近のコメントに実測を残してある)
+        if (m_Scene.HasFogEnabled)     { m_FogEnabled = m_Scene.FogEnabled; }
+        if (m_Scene.HasFogDensity)     { m_FogDensity = m_Scene.FogDensity; }
+        if (m_Scene.HasFogScaleHeight) { m_FogScaleHeight = m_Scene.FogScaleHeight; }
+        if (m_Scene.HasFogRefHeight)   { m_FogRefHeight = m_Scene.FogRefHeight; }
         // 水面(P2)。[Water]が無いシーンでもScene::WaterWaveScale等はリテラル既定値
         // (EngineDefaults.hを複製したもの、Scene.h参照)を持っているため、常にそのまま反映してよい
         // (m_TimeOfDay/m_SunAzimuthDegreesと同じ扱い)
