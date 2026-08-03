@@ -157,9 +157,11 @@ struct SkyParameters
     // 名前のスカラー/ベクトルのまま持たせてある(層ごとに高度・UVスケール等の単位や
     // 意味合いが異なり、配列化してもインデックスの意味を別途覚える必要が生じるため) ---
     float  CloudCoverage;      // 0=雲なし、1=全天が雲
-    float  CloudAltitude;      // 雲底の高度[m](カメラのワールドY基準。SkyColorはカメラの
-                                // ワールド座標を受け取らないため、視線とこの高さの交点は
-                                // カメラを原点とした相対座標になる。EvaluateCloudLayer参照)
+    float  CloudAltitude;      // 雲底の高度[m](**ワールドYの絶対高度**)。
+                                // 【P17で意味が変わった】以前は「カメラのワールドY基準」の
+                                // 相対高度で、層がカメラのYに追従していた(上空へ飛んでも雲の
+                                // 上に出られず、模様もカメラに追従した)。P17でViewerPositionを
+                                // 起点とするレイと層のスラブ交差を解く形になり、絶対高度になった
     float  CloudUvScale;       // ワールド1mあたりのノイズ空間の距離
     float  CloudDensity;       // 消散係数。大きいほど不透明で影が濃い
     float2 CloudScrollOffset;  // 風によるノイズ空間の移動量(CPU側でkCloudNoisePeriodの周期に
@@ -175,7 +177,7 @@ struct SkyParameters
     // 前方散乱の強さと自己影ステップ数はシェーダ内定数(kCirrusForwardG/kCirrusShadowSteps)
     // のため、ここにはフィールドを持たない(cbufferを増やす価値がないため) ---
     float  CirrusCoverage;     // 0=巻雲なし、1=全天が巻雲
-    float  CirrusAltitude;     // 雲底の高度[m](カメラのワールドY基準。積雲と同じ規約)
+    float  CirrusAltitude;     // 雲底の高度[m](**ワールドYの絶対高度**。積雲と同じ規約。P17参照)
     float  CirrusUvScale;      // ワールド1mあたりのノイズ空間の距離
     float  CirrusDensity;      // 消散係数。積雲より1桁小さい値を想定(巻雲は光学的に薄いため)
     float2 CirrusScrollOffset; // 風によるノイズ空間の移動量(積雲と同じくkCloudNoisePeriodでwrap済み。
@@ -196,8 +198,14 @@ struct SkyParameters
     float  FogSigma0;          // 基準高度での消散係数[1/m](FogParams0.x)
     float  FogScaleHeight;     // スケールハイト[m](FogParams0.y)
     float  FogRefHeight;       // 基準高度[m](ワールドY。FogParams0.z)
-    float  FogViewerHeight;    // 視点のワールドY。雲底高度がカメラ基準の相対値なので、
-                                // 絶対高度へ戻して消散係数を評価するために要る
+
+    // --- 視点のワールド座標(P17) ---
+    // 【P17でfloatからfloat3へ広げた】以前はFogViewerHeightという名前でワールドYだけを
+    // 持ち、用途も「雲底までの霞を評価するために絶対高度へ戻す」ことだけだった。雲層が
+    // カメラ相対だったのでXZは要らなかったからである。P17で雲をワールド座標に固定し、
+    // レイと層の交差を解くようになったため、レイの起点としてXZも要る。
+    // SkyColor(dir, params)はこの位置を起点としたレイとして解釈する
+    float3 ViewerPosition;
 };
 
 // SkyParametersの雲用フォグフィールドを埋めるヘルパ。5つあるMakeSkyParametersが
@@ -205,20 +213,26 @@ struct SkyParameters
 // ApplySkyParametersFromBufferと同じ理由=fxcのX3508回避)。
 // fogParams0はFrameConstants::FogParams0(x=消散係数, y=スケールハイト, z=基準高度, w=有効フラグ)。
 //
-// 【viewerHeightは厳密でなくてよい】この値は消散係数を高度で評価するためだけに使う
-// (sigma = sigma0 * exp(-(h - refHeight)/scaleHeight))。スケールハイトは既定1,000mなので、
-// 数メートルのずれは消散係数を0.1%も動かさない。したがって呼び出し側は次のいずれでもよい:
-//   - SSR.hlsl        … 反射レイの起点は水面(y≒0.15m)だがカメラのy(1.6m)を渡している
-//   - PlanarReflection.hlsl … CameraPositionは鏡映後のカメラ位置(yが負になる)だが、そもそも
-//     このシェーダーはSkyColorUpperしか呼ばずEvaluateCloudLayerへ到達しないため影響が無い
-//     (将来SkyColorを呼ぶよう変えるなら、鏡映前のカメラ高さを渡し直すこと)
-SkyParameters ApplyCloudFogParameters(SkyParameters params, float4 fogParams0, float viewerHeight)
+// 【P17でviewerPositionはfloat3になり、意味が「おおよその高さ」から「レイの起点」へ変わった】
+// P17より前、この値は消散係数を高度で評価するためだけに使われており、数メートルのずれは
+// 結果を0.1%も動かさなかった。P17で雲をワールド座標に固定してからは、これが雲との交差を
+// 解くレイの起点そのものになる——**ずれるとその分だけ雲の模様がずれる**。
+// したがって呼び出し側は「そのレイが実際に出る場所」を渡すこと:
+//   - DeferredLighting.hlsl … カメラ位置(背景画素の視線はカメラから出る)
+//   - SSR.hlsl             … カメラ位置。ただし水面の反射だけは起点が水面なので、
+//                             SkyColorWithRayへ水面のワールド座標を明示的に渡して上書きする
+//   - PlanarReflection.hlsl … CameraPositionは鏡映後のカメラ位置(yが負になる)。このシェーダーは
+//                             SkyColorUpperしか呼ばずEvaluateCloudLayerへ到達しないため影響は
+//                             無いが、SkyColorを呼ぶよう変えるなら鏡映前の位置を渡し直すこと
+//   - SkyGenerate.hlsl     … 原点。判断A(IBLキューブに雲を焼かない)により被覆率0で呼ばれ、
+//                             雲の計算自体が走らないため値は使われない
+SkyParameters ApplyCloudFogParameters(SkyParameters params, float4 fogParams0, float3 viewerPosition)
 {
     params.FogEnabled = fogParams0.w;
     params.FogSigma0 = fogParams0.x;
     params.FogScaleHeight = fogParams0.y;
     params.FogRefHeight = fogParams0.z;
-    params.FogViewerHeight = viewerHeight;
+    params.ViewerPosition = viewerPosition;
     return params;
 }
 
@@ -569,11 +583,48 @@ static const float kCloudNoisePeriod = 256.0f;
 // オクターブ数を調整できるようにしてある
 static const int kCloudOctaves = 4;
 
-// 光路長のクランプに使う下限(dir.yがこれを下回ったらこの値で頭打ちにする)。
-// 1/dir.yは水平線(dir.y→0)で発散するため、クランプしないと地平線際で1画素に何百もの
-// 雲セルが入ってエイリアシングになる。0.05は「約2.9度以上の仰角では実質クランプがかからず、
-// それより下では経路長が最大20倍で頭打ちになる」という見た目からの調整値
+// 光路長のクランプに使う下限(方向のyがこれを下回ったらこの値で頭打ちにする)。
+//
+// 【P17で用途が2つから1つへ減った】P17より前、この定数は(1)視線の光路長、(2)視線と雲底
+// 平面の交点の位置、(3)太陽方向の光路長、の3つに使われていた。このうち(2)は「雲層がカメラに
+// 固定されている」という誤ったモデルを地平線際で破綻させないための当て物で、P17でレイと層の
+// スラブ交差を世界座標で解くようになったため不要になった(交差は|dir.y|→0でも発散しない。
+// 層に当たらないか、当たるなら実際の経路長ぶんだけ濃くなる、というどちらかにしかならない)。
+//
+// 残る用途は「**厚みゼロの平面**として扱う層(巻雲)の光路長」と「太陽方向の光路長」の2つ。
+// 厚みゼロのシートを斜めに貫く経路長は原理的に1/|dir.y|で発散するため、これはモデルに
+// 内在する発散であってカメラ固定の副作用ではない。0.05は「約2.9度以上の仰角では実質
+// クランプがかからず、それより下では経路長が最大20倍で頭打ちになる」という見た目からの調整値
 static const float kCloudMinDirY = 0.05f;
+
+// レイが層と平行とみなす|dir.y|のしきい値(P17)。これを下回ったらスラブ交差の
+// t = (境界 - 起点.y)/dir.y が桁あふれするため、「層の中にいるなら最後まで、外なら当たらない」
+// という別扱いに切り替える。1e-4は「1,000m進んで0.1mしか高度が変わらない」に相当し、
+// スラブの厚み(既定1,000m)に対して十分に平行と言える
+static const float kCloudParallelDirY = 1.0e-4f;
+
+// マーチする距離の上限[m](P17)。地平線際で|dir.y|が小さいほどスラブ内の経路は伸び、
+// 固定ステップ数のままでは1ステップがノイズ1セル(約2km)を超えてエイリアシングになる。
+//
+// 【なぜ30kmか】既定の視程(消散係数0.0002 → 約20km)では、雲底1,500mを見込む視線が
+// この距離に達するのは仰角約2度で、そこでの霞の透過率は既に0.006——下の
+// kCloudFogCutoffTransmittanceに掛かって打ち切られる。つまり**霞が有効な限りこの上限は
+// 一度も効かない**。霞を切ったときだけ効く安全弁である
+static const float kCloudMaxSpanMeters = 30000.0f;
+
+// 霞による打ち切りのしきい値(P17)。視点からそのサンプルまでの霞の透過率がこれを
+// 下回ったら、以降のサンプルは絵に出ないものとしてマーチを止める。
+//
+// 【これがP17より前の地平線フェードの置き換え】以前は kCloudHorizonFadeStartY=0.2
+// (仰角約11.5度)より下の雲を見た目として消していたが、これは1/dir.yの発散を隠すための
+// 対症療法で、**水面の反射を殺している当のもの**だった(水面すれすれの反射レイはこの領域へ
+// 丸ごと入る)。正しい交差を解けば発散しないので、代わりに「遠くて霞に埋もれた雲は見えない」
+// という物理そのもので打ち切る。0.02は「元の輝度の2%未満は8bitの1階調にも満たない」から
+static const float kCloudFogCutoffTransmittance = 0.02f;
+
+// 背景(地物に遮られない視線)へ渡すレイ長[m](P17)。無限の代わりに使う有限値。
+// 大気の厚みに対して十分大きく、floatの精度に対して十分小さい値
+static const float kCloudBackgroundRayDistance = 1.0e7f;
 
 // 自己影(太陽方向への密度の積分)のステップ数と、太陽方向へ辿る水平距離[m]。
 // 距離は雲1個(ノイズ1セル≒2km。CloudUvScaleの既定値から)の内側で明暗が付く長さにしてある。
@@ -603,12 +654,12 @@ static const int kCirrusShadowSteps = 0;
 // 内部で多重散乱するぶん実効的な経路が短いという近似としてこの倍率を掛ける
 static const float kCloudSunExtinctionScale = 0.12f;
 
-// 地平線際のフェード開始/終了(dir.yのしきい値)。kCloudMinDirYによる経路長クランプだけでは
-// 「クランプされた雲がべったり空を覆う」領域が地平線際に残ってしまうため、
-// 見た目としても薄れさせてエイリアシング対策を仕上げる。dir.y<=0(地平線より下)は
-// このフェードとは別に、下のSkyColorで雲そのものを無条件に無効化する
-static const float kCloudHorizonFadeEndY = 0.0f;
-static const float kCloudHorizonFadeStartY = 0.2f;
+// 【P17で kCloudHorizonFadeStartY / kCloudHorizonFadeEndY を撤去した】
+// 仰角11.5度以下の雲をフェードで消していた2定数は、1/dir.yの発散を隠すための対症療法であり、
+// 同時に水面への雲の映り込みを殺していた(水面すれすれの反射レイは丸ごとこの領域に入る)。
+// レイと層の交差を正しく解けば発散しないので、代わりに上の kCloudFogCutoffTransmittance
+// (遠くて霞に埋もれた雲は見えない)で打ち切る。同じ物理で経路長とエイリアシングの
+// 両方が同時に有界になる
 
 // 雲の見かけのアルベド(反射率相当)、単散乱の寄与の強さ、多重散乱の下限項。
 // いずれも物理値ではなく白い積雲らしい見た目になるよう調整した係数で、絶対輝度は
@@ -735,7 +786,7 @@ float CloudRemap(float x, float lo, float hi)
 struct CloudLayerParams
 {
     float  Coverage;
-    float  Altitude;         // 雲底の高度[m]
+    float  Altitude;         // 雲底の高度[m](**ワールドYの絶対高度**。P17より前はカメラ相対だった)
     float  UvScale;          // ワールド1mあたりのノイズ空間の距離
     float  Density;          // 消散係数
     float2 ScrollOffset;
@@ -796,7 +847,12 @@ CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
     return layer;
 }
 
-// 雲(1層ぶん)の透過率と散乱光を求める。呼び出し側でdir.y > 0を確認してから呼ぶこと。
+// 雲(1層ぶん)の透過率と散乱光を求める。
+// 【P17でレイベースになった】以前は「dir.y > 0を確認してから呼ぶこと」という前提があり、
+// 呼び出し側(SkyColor)が dir.y <= 0 で早期脱出していた。P17でレイと層のスラブ交差を
+// 世界座標で解くようになったため、その前提は要らなくなった——見上げても見下ろしても、
+// 層の下・中・上のどこに視点があっても、同じ1本の式で解ける。層に当たらないレイは
+// 交差が空になり、透過率1・散乱光0という中立元がそのまま返る。
 // 【P11で層のパラメータを引数化】以前はSkyParametersから直接params.Cloud*を読んでいたが、
 // 積雲・巻雲の式を2つに複製しないよう、層ごとの設定をCloudLayerParamsへまとめて渡す形にした。
 // sunDirection/zenithLuminanceは層に依らずSkyParametersの値をそのまま渡すだけなので、
@@ -982,7 +1038,9 @@ struct CloudFogParams
     float Sigma0;       // 基準高度での消散係数[1/m]
     float ScaleHeight;  // スケールハイト[m]
     float RefHeight;    // 基準高度[m](ワールドY)
-    float ViewerHeight; // 視点のワールドY(SkyParameters::FogViewerHeightのコメント参照)
+    // 【P17でViewerHeightを外した】以前は「視点のワールドY」を持ち、雲底までの霞を
+    // 1回だけ評価するのに使っていた。P17でEvaluateCloudLayerがレイの起点(rayOrigin)を
+    // 引数で受け取り、霞をサンプルごとに評価するようになったため不要になった
 };
 
 CloudFogParams MakeCloudFogParams(SkyParameters params)
@@ -992,35 +1050,85 @@ CloudFogParams MakeCloudFogParams(SkyParameters params)
     fog.Sigma0 = params.FogSigma0;
     fog.ScaleHeight = params.FogScaleHeight;
     fog.RefHeight = params.FogRefHeight;
-    fog.ViewerHeight = params.FogViewerHeight;
     return fog;
 }
 
 void EvaluateCloudLayer(
-    float3 dir, CloudLayerParams layer, float3 sunDirection, float zenithLuminance,
+    float3 rayOrigin, float3 dir, float maxDistance,
+    CloudLayerParams layer, float3 sunDirection, float zenithLuminance,
     float sunToSkyIlluminanceRatio, float skyIlluminanceOverZenith, CloudFogParams fog,
     out float transmittance, out float3 scatteredLight)
 {
-    // (d) 光路長。dir.yが小さいほど視線は雲底平面を浅い角度で貫き経路が伸びるため、
-    // 1/dir.yに比例させる。kCloudMinDirYへのクランプで地平線際の発散を防ぐ
-    const float safeDirY = max(dir.y, kCloudMinDirY);
-    const float pathLengthScale = 1.0f / safeDirY;
+    // 層に当たらないレイが返す中立元。SkyColorの合成式 clearColor * T + S へ入れると
+    // clearColor そのものになる(=この層は視線に何の影響も与えない)
+    transmittance = 1.0f;
+    scatteredLight = float3(0.0f, 0.0f, 0.0f);
 
-    // 視線と雲底平面(高度layer.Altitude)の交点のXZ。SkyColorはカメラのワールド位置を
-    // 受け取らないため、この交点はカメラを原点とした相対座標になる
-    // (Altitudeが「カメラのワールドY基準」である理由。SkyParameters::CloudAltitude参照)
-    const float2 hitXZ = dir.xz * (layer.Altitude / safeDirY);
-    const float2 uv = hitXZ * layer.UvScale + layer.ScrollOffset;
+    // ================= (a) レイと層の交差(P17) =================
+    // 層は**世界座標**のスラブ [Altitude, Altitude + Thickness]。厚みゼロの層(巻雲)だけは
+    // 平面 y = Altitude として別に解く。
+    //
+    // 【なぜこの形にしたか】P17より前は「カメラの真上 Altitude[m] にある無限平面」を仮定し、
+    // 交点を dir.xz * (Altitude / dir.y) で求めていた。層がカメラのYにもXZにも追従するため、
+    //   - 上空へ飛んでも雲の上に出られない(高度差が常に一定)
+    //   - 水平に動いても雲が頭上を通り過ぎない(模様がカメラに追従する)
+    //   - 見下ろすと雲が消える(dir.y <= 0 で早期脱出していた)
+    //   - 水面に雲が映らない(反射レイはほぼ水平で、1/dir.y を隠すためのフェード領域へ丸ごと入る)
+    // という4つがすべてこの1点から派生していた。スラブ交差なら視点が層の下・中・上の
+    // どこにあっても、見上げても見下ろしても、同じ1本の式で解ける
+    const float slabBase = layer.Altitude;
+    const float slabTop = layer.Altitude + max(layer.Thickness, 0.0f);
 
-    // (c) 雲の密度。fBmの出力を被覆率で塊に整形する。Coverage=0ならlo=hi=1になり
-    // remapの分子(n-1)は常に0以下、densityは常に0になる(判断Cの根拠の一部。
-    // ただし実際にはSkyColorの早期脱出でこの関数自体が呼ばれない)。
-    // AnisotropicScaleはここでUVへ掛ける(積雲は(1,1)なので無変化、巻雲はU方向だけ伸びて筋状になる)
-    const float n = CloudFbm(uv * layer.AnisotropicScale);
-    const float density = saturate(CloudRemap(n, 1.0f - layer.Coverage, 1.0f));
+    float tEnter;
+    float tExit;
+    if (layer.Thickness <= 0.0f)
+    {
+        // 厚みゼロの平面(巻雲)。1点で交わる。ほぼ平行なレイは交わらないものとして扱う
+        if (abs(dir.y) < kCloudParallelDirY) { return; }
+        tEnter = (slabBase - rayOrigin.y) / dir.y;
+        // レイの後ろ側(t<0)、またはレイの届く範囲より先なら当たらない
+        if (tEnter < 0.0f || tEnter > maxDistance) { return; }
+        tExit = tEnter;
+    }
+    else if (abs(dir.y) < kCloudParallelDirY)
+    {
+        // レイが層とほぼ平行。t = (境界 - 起点.y)/dir.y が桁あふれするため別扱いにする。
+        // 層の中にいるなら最後まで層の中、外にいるなら永遠に当たらない
+        if (rayOrigin.y < slabBase || rayOrigin.y > slabTop) { return; }
+        tEnter = 0.0f;
+        tExit = maxDistance;
+    }
+    else
+    {
+        // スラブ交差。上下どちらの境界に先に当たるかはdir.yの符号で決まるのでmin/maxで揃える。
+        // tEnterを0で下限クランプするのは、視点が層の中や上にある場合に
+        // 「レイの後ろ側の交点」を拾わないため
+        const float t0 = (slabBase - rayOrigin.y) / dir.y;
+        const float t1 = (slabTop - rayOrigin.y) / dir.y;
+        tEnter = max(min(t0, t1), 0.0f);
+        tExit = min(max(t0, t1), maxDistance);
+        if (tExit <= tEnter) { return; }
+    }
 
-    // 透過率の算出は下の (b) 節で行う(平面かボリュームかで分かれるため)。
-    // ここまでで求めた density / uv は平面の経路がそのまま使う
+    // マーチする距離の上限。霞が有効な限り下の打ち切りが先に効くので一度も掛からない
+    // (kCloudMaxSpanMetersのコメント参照)。霞を切ったときだけ効く安全弁
+    tExit = min(tExit, tEnter + kCloudMaxSpanMeters);
+
+    // ================= (b) 層の入口までの霞(P17の判断3) =================
+    // 入口で既に見えないなら、この層は丸ごと省ける
+    const float3 enterPos = rayOrigin + dir * tEnter;
+    float enterFog = 1.0f;
+    if (fog.Enabled > 0.5f)
+    {
+        enterFog =
+            HeightFogTransmittance(rayOrigin, enterPos, fog.Sigma0, fog.ScaleHeight, fog.RefHeight);
+        if (enterFog < kCloudFogCutoffTransmittance) { return; }
+    }
+
+    // 自己影のマーチと平面経路が使うノイズ空間の位置。**層への入口**を基準にする。
+    // 視点が層より下にある通常の構図では、これは雲底平面との交点そのものであり、
+    // P17より前の hitXZ と厳密に一致する(書き直しの等価性の根拠の1つ)
+    const float2 anchorUv = enterPos.xz * layer.UvScale + layer.ScrollOffset;
 
     // 自己影: 雲底のUVから太陽方向へlayer.ShadowSteps段、densityを積分してビアの法則で
     // 太陽光の減衰(sunTransmittance)を求める。太陽方向はXZへ投影して使う
@@ -1042,7 +1150,7 @@ void EvaluateCloudLayer(
         const float2 shadowStepUv =
             sunDirXZ * (kCloudShadowSpanMeters * layer.UvScale / float(layer.ShadowSteps));
         float shadowDensitySum = 0.0f;
-        float2 shadowUv = uv;
+        float2 shadowUv = anchorUv;
         [loop]
         for (int step = 0; step < layer.ShadowSteps; ++step)
         {
@@ -1085,8 +1193,21 @@ void EvaluateCloudLayer(
 #if KURENAI_CLOUD_VOLUME
     if (layer.Thickness > 0.0f)
     {
-        // --- ボリューム(P13b): 雲底から雲頂まで前から後ろへ積分する ---
+        // --- ボリューム(P13b): 層に入ってから出るまでを前から後ろへ積分する ---
+        // (P17でレイに沿った等間隔マーチになった。スラブを完全に貫くレイでは高さ方向の
+        //  等間隔と一致するため、従来の構図での結果は変わらない)
         const float invSteps = 1.0f / float(kCumulusRaymarchSteps);
+        const float stepLength = (tExit - tEnter) * invSteps;
+
+        // 【1ステップの光学的深さを stepLength/Thickness で測る理由】(P17)
+        // スラブを完全に貫くレイでは全ステップの和が
+        //   density * Density * (経路長 / Thickness) = density * Density / |dir.y|
+        // となり、**P17より前の 1/dir.y の式と厳密に一致する**。したがって
+        // CloudDensity(消散係数)の意味も判断B(被覆率→平均透過率、
+        // kCloudOvercastTransmittance)も再調整せずに済む。
+        // 貫かない場合(層の中から始まる・地物で打ち切られる)は、実際に通った長さのぶんだけ
+        // 薄くなる——これがそのまま正しい振る舞いになる
+        const float stepDepthScale = stepLength / layer.Thickness;
 
         // 【縦方向の影は勾配であって減光ではない】下の aboveTransmittance は
         // exp(-(1-hf) * k) で雲底ほど暗くなる係数だが、これをそのまま掛けるとスラブ内の平均が
@@ -1100,20 +1221,43 @@ void EvaluateCloudLayer(
             : 1.0f;
         const float topShadowNormalize = 1.0f / max(topShadowMean, 1e-4f);
 
+        // 【透過率を2本持つ理由】(P17で霞をサンプルごとに掛けるようになったため)
+        //   cloudTransmittance … 雲そのものの透過率。奥のサンプルが手前の雲にどれだけ
+        //                        遮られるかの重みに使う(霞は関係しない)
+        //   accumTransmittance … 呼び出し側へ返す実効の透過率。霞で薄まったぶん、
+        //                        雲は背後の空を遮らなくなる。霞が無ければ両者は一致する
+        float cloudTransmittance = 1.0f;
         float accumTransmittance = 1.0f;
         float3 accumScatter = float3(0.0f, 0.0f, 0.0f);
 
         [loop]
         for (int marchStep = 0; marchStep < kCumulusRaymarchSteps; ++marchStep)
         {
-            // 中点サンプリング。hf=0が雲底、hf=1が雲頂
-            const float hf = (float(marchStep) + 0.5f) * invSteps;
+            // レイに沿った中点サンプリング。**サンプル位置がワールド座標で決まるのがP17の要**で、
+            // 高さとともに横へずれるのが視差の源になる(仰角45度・厚み1,000mなら雲頂は雲底より
+            // 1,000m=ウェザーマップの1セルぶん横へ動く)
+            const float t = tEnter + (float(marchStep) + 0.5f) * stepLength;
+            const float3 samplePos = rayOrigin + dir * t;
+            // スラブ内の高さ(0=雲底、1=雲頂)
+            const float hf = saturate((samplePos.y - slabBase) / layer.Thickness);
 
-            // このサンプルの高度における視線のXZ。**高さとともに横へずれるのが視差の源**で、
-            // 仰角45度・厚み1,000mなら雲頂は雲底より1,000m(=ウェザーマップの1セル)横へ動く。
-            // hf=0を代入すると平面経路の hitXZ と厳密に一致する
-            const float2 sampleXZ = dir.xz * ((layer.Altitude + hf * layer.Thickness) / safeDirY);
-            const float2 sampleNoiseXZ = sampleXZ * layer.UvScale + layer.ScrollOffset;
+            // 【霞をサンプルごとに評価する】(P17の判断3) P17より前は「雲底までの透過率」を
+            // 最後にまとめて掛けていたが、見下ろす視点では Altitude/dir.y が負になり破綻した。
+            // サンプルのワールド座標は既に求まっているので追加コストはexp1回ぶん。
+            // 累積した霞が閾値を下回ったら、以降のサンプルは絵に出ないので打ち切る——
+            // これがP17より前の地平線フェードの置き換えになる
+            float sampleFog = 1.0f;
+            if (fog.Enabled > 0.5f)
+            {
+                sampleFog = HeightFogTransmittance(
+                    rayOrigin, samplePos, fog.Sigma0, fog.ScaleHeight, fog.RefHeight);
+                if (sampleFog < kCloudFogCutoffTransmittance)
+                {
+                    break;
+                }
+            }
+
+            const float2 sampleNoiseXZ = samplePos.xz * layer.UvScale + layer.ScrollOffset;
 
             // ウェザーマップ。ここが0なら3Dテクスチャを1枚も引かずに次のステップへ飛ぶ
             const float weatherN = CloudFbm(sampleNoiseXZ * layer.AnisotropicScale);
@@ -1129,12 +1273,10 @@ void EvaluateCloudLayer(
                 continue;
             }
 
-            // 【1/kCumulusRaymarchStepsを掛ける理由】こうしておくと全ステップの光学的深さの和が
-            // 平面経路の density * Density * pathLengthScale と同じスケールになり、
-            // CloudDensity(消散係数)の意味がP13b前から変わらない。判断B(被覆率→平均透過率)を
-            // 再調整せずに済むのもこのため
-            const float stepOpticalDepth = sampleDensity * layer.Density * pathLengthScale * invSteps;
+            const float stepOpticalDepth = sampleDensity * layer.Density * stepDepthScale;
             const float stepTransmittance = exp(-stepOpticalDepth);
+            // 霞で薄まった実効の遮り。sampleFog=0(完全に霞む)なら1になり背後を遮らなくなる
+            const float effectiveStepTransmittance = lerp(1.0f, stepTransmittance, sampleFog);
 
             // 【雲底が暗く雲頂が明るい勾配】サンプルより上にまだ残っている雲の厚み(1-hf)を
             // 光学的深さとして解析的に扱う。太陽方向へ3次元にマーチすればより正確だが、
@@ -1145,12 +1287,14 @@ void EvaluateCloudLayer(
                 sunTransmittance * aboveTransmittance, phaseNormalized, layer, sunIlluminance,
                 zenithLuminance);
 
-            // 前から後ろへの合成。手前で既に遮られたぶん(accumTransmittance)だけ寄与する
-            accumScatter += accumTransmittance * (1.0f - stepTransmittance) * stepInScatter;
-            accumTransmittance *= stepTransmittance;
+            // 前から後ろへの合成。手前の雲で既に遮られたぶん(cloudTransmittance)だけ寄与し、
+            // さらに視点までの霞(sampleFog)で減る
+            accumScatter += cloudTransmittance * (1.0f - stepTransmittance) * stepInScatter * sampleFog;
+            cloudTransmittance *= stepTransmittance;
+            accumTransmittance *= effectiveStepTransmittance;
 
             // ほぼ不透明になったら以降のステップは絵に出ない
-            if (accumTransmittance < 0.01f)
+            if (cloudTransmittance < 0.01f)
             {
                 break;
             }
@@ -1162,121 +1306,67 @@ void EvaluateCloudLayer(
     else
 #endif
     {
-        // --- 平面(P5〜P12と同一) ---
+        // --- 平面(P5〜P12と同一。巻雲がここを通る) ---
+        // (c) 雲の密度。fBmの出力を被覆率で塊に整形する。Coverage=0ならlo=hi=1になり
+        // remapの分子(n-1)は常に0以下、densityは常に0になる(判断Cの根拠の一部。
+        // ただし実際にはSkyColorの早期脱出でこの関数自体が呼ばれない)。
+        // AnisotropicScaleはここでUVへ掛ける(積雲は(1,1)なので無変化、巻雲はU方向だけ伸びて筋状になる)
+        const float n = CloudFbm(anchorUv * layer.AnisotropicScale);
+        const float density = saturate(CloudRemap(n, 1.0f - layer.Coverage, 1.0f));
+
+        // (d) 光路長。厚みゼロのシートを浅い角度で貫くほど経路が伸びるため 1/|dir.y| に
+        // 比例させる。**この発散はモデルに内在するもの**(厚みゼロの面には交差の解が1点しか
+        // 無く、そこを何メートル通ったかという情報が無い)なので、kCloudMinDirYのクランプは
+        // P17後もここに残る。P17より前と違うのは絶対値を取る点だけで、これは見下ろす視線でも
+        // 経路長が正になるようにするため
+        const float pathLengthScale = 1.0f / max(abs(dir.y), kCloudMinDirY);
+
         // ビアの法則。経路長はメートル、Density(消散係数)はCPU側UIで調整する無次元の強さ
-        const float opticalDepth = density * layer.Density * pathLengthScale;
-        transmittance = exp(-opticalDepth);
-        // (1-transmittance)は視線の経路のうち実際に散乱へ回った分のスケール
+        const float planeTransmittance = exp(-density * layer.Density * pathLengthScale);
+
+        // 視点から平面までの霞(P17)。単一サンプルなので入口の値がそのまま使える。
+        // 【この形はP17より前と厳密に同じ】以前は fade = 霞の透過率 として
+        //   transmittance = lerp(1, T, fade) / scatteredLight = S * fade
+        // を最後に適用していた。ここではそれを展開して書いているだけで、
+        // 巻雲の描画結果は(地平線フェードを外した点を除いて)変わらない
+        transmittance = lerp(1.0f, planeTransmittance, enterFog);
+        // (1-planeTransmittance)は視線の経路のうち実際に散乱へ回った分のスケール
         scatteredLight =
             CloudInScatter(sunTransmittance, phaseNormalized, layer, sunIlluminance, zenithLuminance)
-            * (1.0f - transmittance);
+            * (1.0f - planeTransmittance) * enterFog;
     }
 
-    // (e) 地平線際のフェード。kCloudMinDirYによる経路長クランプと合わせてのエイリアシング対策
-    float fade = smoothstep(kCloudHorizonFadeEndY, kCloudHorizonFadeStartY, dir.y);
-
-    // (f) 雲へ掛ける大気遠近(P12)。
+    // 【(e)の地平線フェードと(f)の一括フォグはP17で無くなった】
     //
-    // 【なぜ要るか】雲は深度を持たない「背景」として描かれるため、AerialPerspective.hlslの
-    // 早期脱出(depth <= 0)に入りフォグを一切受けていなかった。しかし雲は無限遠ではなく
-    // layer.Altitudeの有限距離にある層で、視線と雲底平面の交点までの斜距離は
-    // Altitude/dir.y——仰角が下がるほど急速に伸びる(積雲1,500mなら仰角45度で2.1km、
-    // 15度で5.8km)。既定の消散係数0.0004(視程10km)でも仰角45度で透過率0.65、15度で0.30に
-    // なるはずのものが、素通しで最大コントラストのまま出ていた。結果、消散係数を上げると
-    // 「地物は溶けたのに雲だけ剃刀のようにくっきり」という、霞ではなく地物だけが
-    // 透けたように見える絵になっていた。
+    // (e) 地平線際のフェード(仰角11.5度以下で雲を消す)は 1/dir.y の発散を隠すための
+    // 対症療法で、同時に水面への雲の映り込みを殺していた。(a)でレイと層の交差を正しく
+    // 解くようになったので発散せず、フェードそのものが不要になった。
     //
-    // 【なぜ(e)のフェードと同じ形で掛けるか】fadeは「この層の存在感を0〜1で薄める」係数で、
-    //   透過率   = lerp(1, T, fade)   … 薄まるほど背後の空を遮らなくなる
-    //   散乱光   = S * fade           … 薄まるほど自分の輝きが届かなくなる
-    // という構造を既に持つ。フォグの効果もまったく同じ構造で表せる——雲までの透過率をfとすると、
-    // 雲から目へ届く輝きはf倍に減り、雲が背後を遮る度合いも手前の大気光(airlight)で
-    // 薄まってlerp(1, T, f)になる。しかも減った分を埋める大気光の等価輝度は、この関数の
-    // 呼び出し元(SkyColor)が掛けているclearColor(晴天の空色)そのものなので、
-    // 追加の項を持たずに済む。実際、f=0を代入するとT=1・S=0となり
-    // SkyColorの合成式 clearColor * T + S は clearColor に一致する——
-    // 「フォグで雲が完全に消えたら素の空色が見える」という正しい極限になる。
+    // (f) 雲へ掛ける大気遠近(P12)は、「雲底までの透過率を最後にまとめて掛ける」という
+    // 割り切りだった。見下ろす視点では雲底までの距離 Altitude/dir.y が負になって破綻するため、
+    // P17でマーチのサンプルごとの評価((b)と上のループ内)へ移した。**なぜ要るかという理由**は
+    // P12から変わらない——雲は深度を持たない背景として描かれAerialPerspective.hlslの
+    // 早期脱出(depth <= 0)に入るため、ここで掛けないと「地物は溶けたのに雲だけ剃刀のように
+    // くっきり」という絵になる。
     //
-    // 【FogEnabled=0なら1命令も走らせない】この分岐に入らなければfadeは(e)の値のままで、
-    // P12着手前と浮動小数の最下位ビットまで一致する
-    if (fog.Enabled > 0.5f)
-    {
-        // 視線と雲底平面の交点までの斜距離。|dir|=1なので Altitude/safeDirY がそのまま距離になる
-        // (上の(d)節でhitXZを求めたときと同じ交点。safeDirYのクランプもそのまま効く)。
-        // 雲底高度はカメラ基準の相対値なので、絶対高度は ViewerHeight + layer.Altitude
-        const float3 rayStart = float3(0.0f, fog.ViewerHeight, 0.0f);
-        const float3 rayEnd = rayStart + dir * (layer.Altitude / safeDirY);
-        fade *= HeightFogTransmittance(rayStart, rayEnd, fog.Sigma0, fog.ScaleHeight, fog.RefHeight);
-    }
-
-    transmittance = lerp(1.0f, transmittance, fade);
-    scatteredLight *= fade;
+    // 減った分を埋める大気光(airlight)の等価輝度が、この関数の呼び出し元(SkyColor)の
+    // clearColor(晴天の空色)そのものである、という構造もP12から変わらない。霞の透過率f=0を
+    // 代入すると透過率1・散乱光0になり、合成式 clearColor * T + S が clearColor に一致する
+    // ——「霞で雲が完全に消えたら素の空色が見える」という正しい極限になる
 }
 
-float3 SkyColor(float3 dir, SkyParameters params)
+// 雲の無い素の空の色。地平線より上はSkyColorUpper、下はプラトー色から接地色へのフェード。
+// 【P17でSkyColorから括り出した】雲の合成を「地平線より上のif」の中から外へ出すため
+// (見下ろす視線にも雲が掛かるようにする)、基色を決める部分を独立させた。中身も呼び出し順も
+// P17より前と同じなので、雲が無い画素の値は1ビットも変わらない
+float3 SkyClearColor(float3 dir, SkyParameters params)
 {
     if (dir.y >= kGroundFadeStartY)
     {
-        const float3 clearColor = SkyColorUpper(dir, params);
-
-        // (h) 早期脱出。積雲・巻雲どちらの被覆率も0、または地平線より下(dir.y<=0、(e)節)では
-        // 雲の計算を一切行わずclearColorをそのまま返す。判断C(被覆率0のときP4完了時点=雲を
-        // 追加する前と画素まで一致すること)の担保の1つめはここ——雲側の計算(EvaluateCloudLayer)は
-        // 一度も呼ばれず、返す値もSkyColorUpperの結果そのままなので数値は変わりようがない
-        if ((params.CloudCoverage <= 0.0f && params.CirrusCoverage <= 0.0f) || dir.y <= 0.0f)
-        {
-            return clearColor;
-        }
-
-        // 雲へ掛ける大気遠近(P12)。層に依らない値なのでここで1回だけ組み立て、両層へ渡す。
-        // 【上の早期脱出より後に置く】判断Cの「雲が無いときは掛け算・足し算を1つも増やさない」に
-        // 揃えるため。被覆率0の画素はここへ到達せず、この組み立て自体が行われない
-        const CloudFogParams fog = MakeCloudFogParams(params);
-
-        // 積雲(下層、P5)。被覆率0でもここへ来る場合があるため(巻雲だけの空)、個別に早期脱出する。
-        // transmittance=1.0/scatteredLight=0の初期値は「雲が無い」ことを表す中立元(下のclearColor*1+0と
-        // 一致する値)であり、CloudCoverage<=0のときEvaluateCloudLayerを呼ばずこの初期値のまま使う
-        float cumulusTransmittance = 1.0f;
-        float3 cumulusScatter = float3(0.0f, 0.0f, 0.0f);
-        if (params.CloudCoverage > 0.0f)
-        {
-            EvaluateCloudLayer(
-                dir, MakeCumulusLayerParams(params), params.SunDirection, params.ZenithLuminance,
-                params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith, fog,
-                cumulusTransmittance, cumulusScatter);
-        }
-
-        // 【判断Cの担保の2つめ】巻雲の被覆率が0のとき、EvaluateCloudLayer(巻雲側)を一度も呼ばず、
-        // 積雲だけだったP11着手時点(HEAD)と完全に同一の式(clearColor * T_cumulus + S_cumulus)を
-        // そのまま通す。掛け算・足し算を1つも増やさないことで、浮動小数の最下位ビットまで一致させる
-        if (params.CirrusCoverage <= 0.0f)
-        {
-            return clearColor * cumulusTransmittance + cumulusScatter;
-        }
-
-        // 巻雲(上層、P11)を評価する。巻雲は積雲より高い位置にあるため、巻雲から届く散乱光は
-        // 手前(視点側)にある積雲でさらに減光される——これを表すのが下のcumulusTransmittanceを
-        // 掛ける項。掛けないと積雲に隠れるはずの巻雲が透けて見えてしまう
-        float cirrusTransmittance;
-        float3 cirrusScatter;
-        EvaluateCloudLayer(
-            dir, MakeCirrusLayerParams(params), params.SunDirection, params.ZenithLuminance,
-            params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith, fog,
-            cirrusTransmittance, cirrusScatter);
-
-        // (g) 2層合成: 高い層(巻雲)から手前(積雲)へ。
-        //   透過率 = T_cirrus * T_cumulus (両層を貫く視線の透過率なので積)
-        //   散乱光 = S_cumulus + S_cirrus * T_cumulus (巻雲の光は積雲を透過して初めて届く)
-        // lerpではなくこの形にするのは、雲の隙間からのぞく青空をそのまま残すため
-        // (lerpだと被覆率で単純に混ぜてしまい、隙間の青空まで雲色へ寄ってしまう)。
-        // 地平線より下(この関数の後続のelse分岐)には雲を一切掛けない
-        const float transmittance = cirrusTransmittance * cumulusTransmittance;
-        const float3 scatteredLight = cumulusScatter + cirrusScatter * cumulusTransmittance;
-        return clearColor * transmittance + scatteredLight;
+        return SkyColorUpper(dir, params);
     }
 
-    // 水平線より下: プラトー色(kGroundFadeStartYの高さへ射影した方向の空色)から接地色へフェード。
-    // (g) 雲は掛けない——ここはSkyColorUpperを直接呼ぶだけで、雲を合成する上のif内へは入らない
+    // 水平線より下: プラトー色(kGroundFadeStartYの高さへ射影した方向の空色)から接地色へフェード
     float3 plateauDir = dir;
     plateauDir.y = kGroundFadeStartY;
     plateauDir = normalize(plateauDir);
@@ -1285,6 +1375,88 @@ float3 SkyColor(float3 dir, SkyParameters params)
     const float3 groundColor = params.ZenithLuminance * params.GroundTint;
     const float groundT = saturate((dir.y - kGroundFadeStartY) / (kGroundFadeEndY - kGroundFadeStartY));
     return lerp(plateauColor, groundColor, groundT);
+}
+
+// 起点と長さを持つ1本のレイに沿って空と雲を評価する(P17)。
+//   rayOrigin   … レイの起点(ワールド)。背景画素ならカメラ位置、水面の反射なら水面の位置
+//   dir         … 正規化済みの向き
+//   maxDistance … レイの長さ[m]。地物に遮られる場合はそこまでの距離、背景なら
+//                 kCloudBackgroundRayDistance
+//
+// 【なぜ起点が要るのか】P17より前のSkyColor(dir, params)は方向しか受け取らず、雲層を
+// 「カメラの真上にある無限平面」として扱っていた。そのため水面の反射レイも起点がカメラ扱いに
+// なり、**水面に雲が映らない直接の原因**になっていた(EvaluateCloudLayerの(a)節に4つの症状を
+// まとめてある)
+float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParameters params)
+{
+    const float3 clearColor = SkyClearColor(dir, params);
+
+    // (h) 早期脱出。積雲・巻雲どちらの被覆率も0なら雲の計算を一切行わずclearColorをそのまま返す。
+    // 判断C(被覆率0のときP4完了時点=雲を追加する前と画素まで一致すること)の担保の1つめはここ
+    // ——雲側の計算(EvaluateCloudLayer)は一度も呼ばれず、返す値もSkyClearColorの結果そのまま
+    // なので数値は変わりようがない。
+    // 【P17で dir.y <= 0 の早期脱出を外した】地平線より下を見る視線にも雲を評価させるため
+    // (上空から雲を見下ろせるようにするのが目的)。地上のカメラが見下ろす通常の構図では、
+    // 雲層は視点より上にあるのでスラブ交差が空になり、雲は掛からないまま——
+    // つまり結果は変わらず、変わるのは「視点が雲より上にあるとき」だけになる
+    if (params.CloudCoverage <= 0.0f && params.CirrusCoverage <= 0.0f)
+    {
+        return clearColor;
+    }
+
+    // 雲へ掛ける大気遠近(P12)。層に依らない値なのでここで1回だけ組み立て、両層へ渡す。
+    // 【上の早期脱出より後に置く】判断Cの「雲が無いときは掛け算・足し算を1つも増やさない」に
+    // 揃えるため。被覆率0の画素はここへ到達せず、この組み立て自体が行われない
+    const CloudFogParams fog = MakeCloudFogParams(params);
+
+    // 積雲(下層、P5)。被覆率0でもここへ来る場合があるため(巻雲だけの空)、個別に早期脱出する。
+    // transmittance=1.0/scatteredLight=0の初期値は「雲が無い」ことを表す中立元(下のclearColor*1+0と
+    // 一致する値)であり、CloudCoverage<=0のときEvaluateCloudLayerを呼ばずこの初期値のまま使う
+    float cumulusTransmittance = 1.0f;
+    float3 cumulusScatter = float3(0.0f, 0.0f, 0.0f);
+    if (params.CloudCoverage > 0.0f)
+    {
+        EvaluateCloudLayer(
+            rayOrigin, dir, maxDistance, MakeCumulusLayerParams(params), params.SunDirection,
+            params.ZenithLuminance, params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith,
+            fog, cumulusTransmittance, cumulusScatter);
+    }
+
+    // 【判断Cの担保の2つめ】巻雲の被覆率が0のとき、EvaluateCloudLayer(巻雲側)を一度も呼ばず、
+    // 積雲だけだったP11着手時点(HEAD)と完全に同一の式(clearColor * T_cumulus + S_cumulus)を
+    // そのまま通す。掛け算・足し算を1つも増やさないことで、浮動小数の最下位ビットまで一致させる
+    if (params.CirrusCoverage <= 0.0f)
+    {
+        return clearColor * cumulusTransmittance + cumulusScatter;
+    }
+
+    // 巻雲(上層、P11)を評価する。巻雲は積雲より高い位置にあるため、巻雲から届く散乱光は
+    // 手前(視点側)にある積雲でさらに減光される——これを表すのが下のcumulusTransmittanceを
+    // 掛ける項。掛けないと積雲に隠れるはずの巻雲が透けて見えてしまう。
+    // 【視点が積雲と巻雲の間にある場合】積雲は視線に掛からずスラブ交差が空になるため
+    // cumulusTransmittance=1となり、この項は自動的に無効になる(場合分けは要らない)
+    float cirrusTransmittance;
+    float3 cirrusScatter;
+    EvaluateCloudLayer(
+        rayOrigin, dir, maxDistance, MakeCirrusLayerParams(params), params.SunDirection,
+        params.ZenithLuminance, params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith,
+        fog, cirrusTransmittance, cirrusScatter);
+
+    // (g) 2層合成: 高い層(巻雲)から手前(積雲)へ。
+    //   透過率 = T_cirrus * T_cumulus (両層を貫く視線の透過率なので積)
+    //   散乱光 = S_cumulus + S_cirrus * T_cumulus (巻雲の光は積雲を透過して初めて届く)
+    // lerpではなくこの形にするのは、雲の隙間からのぞく青空をそのまま残すため
+    // (lerpだと被覆率で単純に混ぜてしまい、隙間の青空まで雲色へ寄ってしまう)
+    const float transmittance = cirrusTransmittance * cumulusTransmittance;
+    const float3 scatteredLight = cumulusScatter + cirrusScatter * cumulusTransmittance;
+    return clearColor * transmittance + scatteredLight;
+}
+
+// 背景(地物に遮られない視線)用の薄いラッパー。起点は視点、レイ長は実質無限。
+// 呼び出し側(DeferredLighting.hlsl / SkyGenerate.hlsl)の記述をP17より前のまま保つためにある
+float3 SkyColor(float3 dir, SkyParameters params)
+{
+    return SkyColorWithRay(params.ViewerPosition, dir, kCloudBackgroundRayDistance, params);
 }
 
 #endif // KURENAI_SKY_HLSLI

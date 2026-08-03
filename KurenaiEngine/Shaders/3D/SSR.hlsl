@@ -240,7 +240,7 @@ SkyParameters MakeSkyParameters()
     params.CirrusAnisotropy = CloudParams3.z;
     // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
     // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
+    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
     return params;
 }
 
@@ -504,10 +504,19 @@ float4 PSMain(PSInput input) : SV_TARGET
             // 低ミップの128pxを直接引くと空に映る太陽・地平線の勾配が色斑としてにじむため、
             // 解析評価のほうが実際の見え方に近い。
             // reflectDirが水平線より下を向く場合(強い波で反射ベクトルが下向きになったとき)は
-            // SkyColorが持つ地平線下の接地色へのフェード(Sky.hlsli kGroundFadeStartY/EndY)で
-            // そのまま処理でき、ここで別扱いする必要はない。
-            // 平面反射(P6)はこの解析空よりさらに優先する(ApplyPlanarReflection参照)
-            newRadiance = ApplyPlanarReflection(SkyColor(reflectDir, MakeSkyParameters()), input.UV, N);
+            // 地平線下の接地色へのフェード(Sky.hlsli kGroundFadeStartY/EndY)でそのまま処理でき、
+            // ここで別扱いする必要はない。
+            // 平面反射(P6)はこの解析空よりさらに優先する(ApplyPlanarReflection参照)。
+            //
+            // 【P17: レイの起点を水面にする】SkyColor(dir, params)は起点を視点(カメラ)と
+            // みなすため、反射レイまでカメラから出ているものとして雲を評価していた。これが
+            // **水面に雲が映らなかった直接の原因**で、水面すれすれの反射レイは
+            // 「カメラの真上にある雲層」の地平線際——撤去前のフェードで消される領域——へ
+            // 丸ごと入っていた。起点を水面のワールド座標にすることで、水面から空を見上げる
+            // 本来のレイとして雲層との交差が解ける
+            newRadiance = ApplyPlanarReflection(
+                SkyColorWithRay(worldPos, reflectDir, kCloudBackgroundRayDistance, MakeSkyParameters()),
+                input.UV, N);
         }
         else
         {
@@ -532,8 +541,13 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 空で埋めるのは常に妥当な近似になる(上のskyHit分岐と同じ理由)。
         // 屋根の下の水たまりのような反例は、.kscene側で[Model]Water=trueと明示的にタグ付けした
         // 面にしかこの経路が適用されない(オプトイン)ため、影響範囲がそこに閉じている。
-        // 平面反射(P6)はこの解析空よりさらに優先する(ApplyPlanarReflection参照)
-        newRadiance = ApplyPlanarReflection(SkyColor(reflectDir, MakeSkyParameters()), input.UV, N);
+        // 平面反射(P6)はこの解析空よりさらに優先する(ApplyPlanarReflection参照)。
+        // 【P17】起点を水面にする理由は上のskyHit分岐と同じ。**水面の大半はこちらの分岐を
+        // 通る**(SSRMaxDistance 5.0mに対し4,000m四方の水面では、ほぼ常に画面外へ抜けるか
+        // 最大距離まで判定がつかない)ため、水面へ雲が映るかどうかは実質ここで決まる
+        newRadiance = ApplyPlanarReflection(
+            SkyColorWithRay(worldPos, reflectDir, kCloudBackgroundRayDistance, MakeSkyParameters()),
+            input.UV, N);
         confidence = roughnessFade;
     }
     // 非水面が画面外に外れた、または最大距離まで判定がつかなかった場合は confidence = 0 のまま。

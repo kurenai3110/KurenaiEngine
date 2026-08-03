@@ -1581,8 +1581,11 @@ namespace Kurenai
         // 被覆率。0.45は写真の見た目に寄せて選んだ値であり、物理的な導出ではない
         // (実測で調整可能。EngineDefaults.h参照)
         float m_CloudCoverage = Defaults::CloudCoverage;
-        // 雲底の高度[m](カメラのワールドY基準。Sky.hlsli EvaluateCloudLayerが視線との交点を
-        // 求めるのに使う)
+        // 雲底の高度[m](**ワールドYの絶対高度**。Sky.hlsli EvaluateCloudLayerがレイと
+        // 雲層スラブの交差を解くのに使う)。
+        // 【P17で意味が変わった】以前は「カメラのワールドY基準」の相対高度で、雲層がカメラの
+        // Yに追従していた(上空へ飛んでも雲の上に出られなかった)。渡す値そのものは変えていない
+        // ため、カメラが地表付近にいる従来の構図では見た目は実質変わらない
         float m_CloudAltitude = Defaults::CloudAltitude;
         float m_CloudUvScale = Defaults::CloudUvScale;
         float m_CloudDensity = Defaults::CloudDensity;
@@ -1615,6 +1618,7 @@ namespace Kurenai
         // 被覆率0を渡し、Sky.hlsli側の早期脱出(SkyColor、判断C)を通す
         bool m_CirrusEnabled = Defaults::CirrusEnabled;
         float m_CirrusCoverage = Defaults::CirrusCoverage;
+        // 雲底の高度[m](**ワールドYの絶対高度**。積雲と同じ規約。m_CloudAltitude参照)
         float m_CirrusAltitude = Defaults::CirrusAltitude;
         float m_CirrusUvScale = Defaults::CirrusUvScale;
         float m_CirrusDensity = Defaults::CirrusDensity;

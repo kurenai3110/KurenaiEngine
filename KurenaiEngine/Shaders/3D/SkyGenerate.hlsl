@@ -119,7 +119,9 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 「IBLキューブは大気遠近を含まない晴天の空」という意図をここで読めるようにしておく。
     // そもそもこのシェーダーのcbufferはSkyBakeConstantsでありFrameConstants::FogParams0を
     // 持たないため、値を引いてくる先も無い
-    params = ApplyCloudFogParameters(params, float4(0.0f, 0.0f, 0.0f, 0.0f), 0.0f);
+    // 【P17】第3引数はレイの起点(ワールド)になった。ここは原点を渡す——判断Aにより
+    // 被覆率0で呼ばれ、SkyColorWithRayの早期脱出で雲の計算が一度も走らないため値は使われない
+    params = ApplyCloudFogParameters(params, float4(0.0f, 0.0f, 0.0f, 0.0f), float3(0.0f, 0.0f, 0.0f));
 
     const float3 color = SkyColor(dir, params);
 

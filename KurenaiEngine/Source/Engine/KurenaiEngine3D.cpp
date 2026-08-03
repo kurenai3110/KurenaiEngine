@@ -1,4 +1,4 @@
-﻿#include "KurenaiEngine3D.h"
+#include "KurenaiEngine3D.h"
 
 #include <imgui.h>
 
@@ -229,7 +229,7 @@ namespace Kurenai
             // 同じ順・同じ型であること(2つのシェーダーが背景と水面反射で同じ雲を描くための前提。
             // Sky.hlsli冒頭のコメント・各シェーダーのMakeSkyParametersのコメント参照)。
             // CloudParams0: x=被覆率(0で雲なし。Sky.hlsliのSkyColorが早期脱出する)、
-            //               y=雲底の高度[m](カメラのワールドY基準)、
+            //               y=雲底の高度[m](**ワールドYの絶対高度**。P17より前はカメラ相対だった)、
             //               z=UVスケール[ノイズ空間の距離/m]、w=消散係数
             DirectX::XMFLOAT4 CloudParams0;
             // CloudParams1: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
@@ -240,7 +240,7 @@ namespace Kurenai
             // FrameConstants宣言と同じ順・同じ型であること(3シェーダーすべてを更新すること。
             // 末尾のPlanarReflectionPlaneを含めて1フィールドずつ突き合わせて一致を確認すること)。
             // CloudParams2: x=巻雲の被覆率(0で巻雲なし。Sky.hlsliのSkyColorが早期脱出する)、
-            //               y=雲底の高度[m](カメラのワールドY基準)、
+            //               y=雲底の高度[m](**ワールドYの絶対高度**。P17より前はカメラ相対だった)、
             //               z=UVスケール[ノイズ空間の距離/m]、w=消散係数
             DirectX::XMFLOAT4 CloudParams2;
             // CloudParams3: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと

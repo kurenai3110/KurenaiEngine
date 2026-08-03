@@ -723,8 +723,9 @@ namespace Kurenai::UI
 
         SliderFloatEx(
             "雲底の高度###CloudAltitude", &m_Engine.m_CloudAltitude, 200.0f, 5000.0f, Defaults::CloudAltitude,
-            "%.0f m", 0, "雲底の高さ(カメラのワールドY基準)。視線とこの高さの平面との交点から雲のUVを"
-            "作るレイヤーモデルのため、値を大きくすると地平線際の雲がより遠くに、小さくすると近くに見える");
+            "%.0f m", 0, "雲底の高さ(ワールドYの絶対高度)。雲層は世界に固定されており、カメラを"
+            "上下させると雲との高度差が実際に変わる。値を大きくすると地平線際の雲がより遠くに、"
+            "小さくすると近くに見える");
         SliderFloatEx(
             "UVスケール###CloudUvScale", &m_Engine.m_CloudUvScale, 1.0f / 8000.0f, 1.0f / 500.0f,
             Defaults::CloudUvScale, "%.6f", ImGuiSliderFlags_Logarithmic,
@@ -784,7 +785,7 @@ namespace Kurenai::UI
         SliderFloatEx(
             "雲底の高度###CirrusAltitude", &m_Engine.m_CirrusAltitude, 3000.0f, 15000.0f, Defaults::CirrusAltitude,
             "%.0f m", 0,
-            "雲底の高さ(カメラのワールドY基準)。巻雲の高度帯として一般に言われる目安"
+            "雲底の高さ(ワールドYの絶対高度。積雲と同じ規約)。巻雲の高度帯として一般に言われる目安"
             "(だいたい5,000〜13,000m)");
         SliderFloatEx(
             "UVスケール###CirrusUvScale", &m_Engine.m_CirrusUvScale, 1.0f / 12000.0f, 1.0f / 1000.0f,

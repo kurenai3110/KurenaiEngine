@@ -248,9 +248,12 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
-    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
-    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
+    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer参照)。
+    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける。
+    // 【このCameraPositionは鏡映後のカメラ位置(yが負になる)】このシェーダーはSkyColorUpperしか
+    // 呼ばずEvaluateCloudLayerへ到達しないため影響は無いが、P17でこの引数はレイの起点そのものに
+    // なった。SkyColor/SkyColorWithRayを呼ぶよう変えるなら、鏡映前のカメラ位置を渡し直すこと
+    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
     return params;
 }
 

@@ -162,7 +162,7 @@ SkyParameters MakeSkyParameters()
     params.CirrusAnisotropy = CloudParams3.z;
     // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
     // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
+    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
     return params;
 }
 
