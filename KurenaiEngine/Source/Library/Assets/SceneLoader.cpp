@@ -282,6 +282,8 @@ namespace Kurenai::Assets
             bool SSREnabled = true;
             Scene::TonemapCurveSetting Tonemap = Scene::TonemapCurveSetting::AgX;
             float SkySaturation = 1.0f;
+            bool HasExposure = false;
+            float ExposureEV100 = 15.0f;
 
             // [Water]セクション(P2: 水面マテリアル基盤)。NormalMapは[Scene]Skyboxと同じく
             // Assetsルートからの相対パスで、LoadScene側でルート外チェックのうえ絶対パスへ解決する。
@@ -500,6 +502,18 @@ namespace Kurenai::Assets
                     {
                         if (!ParseFloatToken(value, result.SkySaturation)) errorAt(lineNumber, rawLine, "SkySaturationの値が不正です");
                         if (result.SkySaturation < 0.0f) errorAt(lineNumber, rawLine, "SkySaturationは0以上で指定してください");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Exposure"))
+                    {
+                        if (!ParseFloatToken(value, result.ExposureEV100)) errorAt(lineNumber, rawLine, "Exposureの値が不正です");
+                        // EV100の実用域(暗い室内-6 〜 直射日光下17程度)を大きく外れた値は
+                        // 打ち間違いとみなす。自動露出の範囲(EngineDefaults.hのAutoExposure
+                        // Min/MaxEV100)と同じ-6〜18に合わせてある
+                        if (result.ExposureEV100 < -6.0f || result.ExposureEV100 > 18.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "Exposureは-6〜18(EV100)の範囲で指定してください");
+                        }
+                        result.HasExposure = true;
                     }
                     else if (CaseInsensitiveEquals(key, L"ScreenSpaceReflection"))
                     {
@@ -888,6 +902,8 @@ namespace Kurenai::Assets
         scene.SSREnabled = parsed.SSREnabled;
         scene.Tonemap = parsed.Tonemap;
         scene.SkySaturation = parsed.SkySaturation;
+        scene.HasExposureOverride = parsed.HasExposure;
+        scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;
 

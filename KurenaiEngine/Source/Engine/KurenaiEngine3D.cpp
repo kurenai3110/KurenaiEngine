@@ -2884,6 +2884,13 @@ namespace Kurenai
         {
             m_IBLIntensity = m_Scene.IBLIntensity;
         }
+        // シーン全体の露出(P10)。IBLIntensityと同じく指定されたときだけ上書きする。
+        // 屋外の風景と屋内では被写体の輝度が桁で違うため、エンジンの既定値(屋内基準)を
+        // 動かさずにシーン側で持てるようにしてある(Scene.h の HasExposureOverride 参照)
+        if (m_Scene.HasExposureOverride)
+        {
+            m_SceneExposureEV100 = m_Scene.ExposureEV100;
+        }
         // 水面(P2)。[Water]が無いシーンでもScene::WaterWaveScale等はリテラル既定値
         // (EngineDefaults.hを複製したもの、Scene.h参照)を持っているため、常にそのまま反映してよい
         // (m_TimeOfDay/m_SunAzimuthDegreesと同じ扱い)

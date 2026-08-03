@@ -190,10 +190,22 @@ namespace Kurenai::Assets
         };
         TonemapCurveSetting Tonemap = TonemapCurveSetting::AgX;
 
-        // 空の彩度(アート指定)。既定1.0はPreethamの色度そのまま。色度図上で白色点から
+        // 空の彩度(アート指定)。既定1.0は物理モデルの色度そのまま。色度図上で白色点から
         // 遠ざける倍率で、色相は変えずに鮮やかさだけを変える。物理量ではないので
         // 「写真に寄せたい」シーンだけが明示的に上げる
         float SkySaturation = 1.0f;
+
+        // シーン全体の露出(EV100)。**指定されたときだけ**エンジンの設定を上書きする
+        // (IBLIntensityと同じ扱い)。Tonemap/SkySaturationのような無条件の反映にしないのは、
+        // 露出はUIでも頻繁に触る値で、Exposureを持たないシーンを読み直すたびに
+        // ユーザーの調整を既定値へ戻してしまうため。
+        //
+        // 【なぜシーンが持つのか】屋外の風景と屋内では被写体の輝度が桁で違う。エンジンの
+        // 既定値(EngineDefaults.h の SceneExposureEV100 = 15)は屋内基準で決まっており、
+        // 物理的に正しい空(地平線際が天頂の8倍明るい)を入れると屋外ではトーンカーブの肩に
+        // 乗って彩度が落ちる。既定値を動かすと他のシーンを巻き込むので、シーン側に持たせる
+        bool HasExposureOverride = false;
+        float ExposureEV100 = 15.0f;   // EngineDefaults.h の SceneExposureEV100 と同じ値にすること
 
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う
