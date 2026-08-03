@@ -463,11 +463,24 @@ def _extract_island_skyline_manual(arr, island_x_range, horizon_y):
     for x in range(left, right):
         skyline[x] = _find_first_run_row(below_threshold[:, x], min_run)
 
-    valid = skyline >= 0
+    # 修正パス(平滑化の非対称を直した後にtrace_ref.pngで顕在化): 自動検出
+    # (_extract_island_skyline)は「水平線より画像高さのHORIZON_MARGIN_FRACTION以上上」
+    # という条件で島を絞っているが、手動指定にはこの番人が無かった。
+    # c_south_elevation_hazy.jpgは霞んだ空(輝度0.60)と日向の城壁(同程度)がほぼ同じ
+    # 明るさで、城壁の上に暗い屋根が無い西端の十数列では走査が島を素通りし、
+    # **画面下端の暗い干潟まで落ちて**深い谷を作っていた(以前は幅5%の中央値フィルタが
+    # この谷を潰していたため見えなかった)。正規化後の高さで見ると巨大な負の突出になり
+    # skyline_rmsを直接汚す。
+    # 自動検出と同じ番人を入れ、水平線に近すぎる検出は「検出できなかった列」と同じ扱いに
+    # して両隣から補間させる
+    horizon_margin_px = HORIZON_MARGIN_FRACTION * height
+    valid = (skyline >= 0) & (skyline.astype(np.float64) <= horizon_row - horizon_margin_px)
     run_valid = valid[left:right]
     if not np.any(run_valid):
         raise ValueError(
-            f"手動指定範囲[{left},{right})内でスカイラインが1本も検出できませんでした"
+            f"手動指定範囲[{left},{right})内で、水平線(row={horizon_row:.1f})より"
+            f"画像高さの{HORIZON_MARGIN_FRACTION * 100:.0f}%以上上にあるスカイラインが"
+            f"1本も検出できませんでした"
             f"(threshold={threshold:.4f}, sky_lum={sky_lum:.4f}, sky_std={sky_std:.4f}, min_run={min_run})"
         )
 
@@ -482,8 +495,7 @@ def _extract_island_skyline_manual(arr, island_x_range, horizon_y):
         local_values[~run_valid] = interpolated[~run_valid]
         skyline_filled[run_indices] = local_values
 
-    smooth_window = max(SKYLINE_SMOOTH_MIN_PX, int(round((right - left) * SKYLINE_SMOOTH_FRACTION)))
-    skyline_filled[left:right] = _median_smooth_1d(skyline_filled[left:right], smooth_window)
+    _smooth_skyline(skyline_filled, left, right)
 
     return left, right, skyline_filled, horizon_row, threshold, sky_lum, sky_std
 
