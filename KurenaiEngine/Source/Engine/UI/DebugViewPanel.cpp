@@ -55,10 +55,11 @@ namespace Kurenai::UI
             "水面マスク (A=水面フラグ)",
             "平面反射 (水面に映る鏡像)",
             "雲の3Dノイズ (スライス表示・2x2タイル)",
+            "大気散乱LUT (Transmittance / MultiScattering)",
         };
         static_assert(
-            static_cast<int>(DebugView::CloudNoiseSlice) == 31,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はCloudNoiseSlice)");
+            static_cast<int>(DebugView::AtmosphereLUT) == 32,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はAtmosphereLUT)");
 
         DrawUsageHint();
         BeginParamGroup();
@@ -134,6 +135,17 @@ namespace Kurenai::UI
             SliderFloatEx(
                 "スライス位置###CloudNoiseSlice", &m_Engine.m_CloudNoiseDebugSlice, 0.0f, 1.0f, 0.0f, "%.3f", 0,
                 "3Dテクスチャのどの断面を見るか(W座標)。動かして中身が変わらなければ焼けていない");
+        }
+
+        if (m_Engine.m_DebugView == DebugView::AtmosphereLUT)
+        {
+            ImGui::TextWrapped(
+                "Transmittance: 横=視線天頂角、縦=高度。地表(下端)から天頂(右端)を見た値が "
+                "(0.940, 0.868, 0.762) になるのが解析解との一致条件");
+            CheckboxEx(
+                "MultiScatteringを見る###AtmosphereLUTMulti", &m_Engine.m_AtmosphereLUTDebugMulti, false,
+                "オフでTransmittance(256x64)、オンでMultiScattering(32x32)。"
+                "MultiScatteringは値が小さいので表示輝度の倍率を上げて見る");
         }
 
         if (m_Engine.m_DebugView == DebugView::LightTiles)

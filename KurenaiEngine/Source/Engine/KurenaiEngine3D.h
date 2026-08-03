@@ -858,6 +858,7 @@ namespace Kurenai
             WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示(P2)
             PlanarReflection,   // 平面反射パス(P6)の出力(m_PlanarReflectionColor)をトーンマッピングして表示
             CloudNoiseSlice,    // 雲の3Dノイズ(P13a)の任意スライス。m_CloudNoiseDebugSlice/Detailで選ぶ
+            AtmosphereLUT,      // 大気散乱のLUT(P14a)。m_AtmosphereLUTDebugMultiで2枚を切り替える
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -871,6 +872,8 @@ namespace Kurenai
         // 目と数値の両方で確認するために用意してある(P13aの合格条件)
         float m_CloudNoiseDebugSlice = 0.0f;
         bool m_CloudNoiseDebugShowDetail = false;
+        // DebugView::AtmosphereLUT で表示するLUT(false=Transmittance、true=MultiScattering)
+        bool m_AtmosphereLUTDebugMulti = false;
 
         // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
         // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
@@ -969,6 +972,12 @@ namespace Kurenai
         // Shapeを128にしているのは、雲1つが画面上で数百画素に広がるため塊の形にはこの程度の
         // 解像度が要る一方、これ以上上げるとメモリが4倍(256^3で64MB)に跳ねるため。
         // Detailは縁を削るだけで低周波成分を持たないので32で足りる
+        // 大気散乱のLUT(P14a、Hillaire 2020)。解像度は論文の推奨値。
+        // Transmittanceは高度×視線天頂角、MultiScatteringは高度×太陽天頂角で、
+        // どちらも大気パラメータだけで決まるためカメラにも時刻にも依存しない
+        static constexpr uint32_t kTransmittanceLUTWidth = 256;
+        static constexpr uint32_t kTransmittanceLUTHeight = 64;
+        static constexpr uint32_t kMultiScatteringLUTSize = 32;
         static constexpr uint32_t kCloudShapeNoiseSize = 128;
         static constexpr uint32_t kCloudDetailNoiseSize = 32;
         // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
@@ -1072,6 +1081,23 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_CloudDetailNoiseComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudDetailNoisePipelineState;
         bool m_CloudNoiseBaked = false;
+
+        // --- 大気散乱のLUT(P14a: Hillaire 2020) ---
+        //
+        // どちらも大気パラメータ(AtmosphereLUT.hlsl冒頭の定数)だけで決まり、カメラにも
+        // 太陽にも時刻にも依存しないため、BRDF積分LUT・雲の3Dノイズとまったく同じ理由で
+        // 起動後に一度だけ焼く。大気パラメータを実行時に変えられるようにする場合は
+        // このフラグを落として焼き直すこと。
+        //
+        // 【P14aの時点ではまだ誰も読まない】空の色をLUT参照へ差し替えるのはP14b。
+        // したがってP14aでは空の見た目が1ビットも変わらないのが正解になる
+        std::unique_ptr<RHI::IRHITexture> m_TransmittanceLUT;
+        std::unique_ptr<RHI::IRHITexture> m_MultiScatteringLUT;
+        std::unique_ptr<RHI::IRHIShader> m_TransmittanceComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_TransmittancePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_MultiScatteringComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MultiScatteringPipelineState;
+        bool m_AtmosphereLUTBaked = false;
         std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;

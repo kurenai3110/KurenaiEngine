@@ -1644,6 +1644,45 @@ namespace Kurenai
         m_CloudDetailNoisePipelineState =
             m_Device->CreateComputePipelineState({ m_CloudDetailNoiseComputeShader.get() });
 
+        // 大気散乱のLUT(P14a: Hillaire 2020)。カメラにも太陽にも依存しない純粋な大気パラメータの
+        // 関数なので、雲の3Dノイズ・BRDF積分LUTと同じく起動後に一度だけ焼く(m_AtmosphereLUTBaked)。
+        // HDRの放射輝度を格納するためR16G16B16A16_Float
+        m_TransmittanceLUT = m_Device->CreateUAVTexture(
+            kTransmittanceLUTWidth, kTransmittanceLUTHeight, RHI::Format::R16G16B16A16_Float);
+        m_MultiScatteringLUT = m_Device->CreateUAVTexture(
+            kMultiScatteringLUTSize, kMultiScatteringLUTSize, RHI::Format::R16G16B16A16_Float);
+        if (!m_TransmittanceLUT || !m_MultiScatteringLUT)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "大気散乱のLUTテクスチャの作成に失敗しました(P14b以降で空の色が正しく出ません)");
+        }
+
+        RHI::ShaderDesc transmittanceCsDesc;
+        transmittanceCsDesc.Stage = RHI::ShaderStage::Compute;
+        transmittanceCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.hlsl";
+        transmittanceCsDesc.EntryPoint = "CSTransmittance";
+        m_TransmittanceComputeShader = m_Device->CreateShader(transmittanceCsDesc);
+        if (!m_TransmittanceComputeShader)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "AtmosphereLUT.hlsl CSTransmittance のコンパイルに失敗しました");
+        }
+        m_TransmittancePipelineState =
+            m_Device->CreateComputePipelineState({ m_TransmittanceComputeShader.get() });
+
+        RHI::ShaderDesc multiScatteringCsDesc;
+        multiScatteringCsDesc.Stage = RHI::ShaderStage::Compute;
+        multiScatteringCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.hlsl";
+        multiScatteringCsDesc.EntryPoint = "CSMultiScattering";
+        m_MultiScatteringComputeShader = m_Device->CreateShader(multiScatteringCsDesc);
+        if (!m_MultiScatteringComputeShader)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "AtmosphereLUT.hlsl CSMultiScattering のコンパイルに失敗しました");
+        }
+        m_MultiScatteringPipelineState =
+            m_Device->CreateComputePipelineState({ m_MultiScatteringComputeShader.get() });
+
         RHI::ShaderDesc irradianceCsDesc;
         irradianceCsDesc.Stage = RHI::ShaderStage::Compute;
         irradianceCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
@@ -4452,6 +4491,33 @@ namespace Kurenai
             m_CloudNoiseBaked = true;
         }
 
+        // --- 大気散乱のLUTのベイクパス(P14a): Transmittance → MultiScattering の順に1回だけ。
+        //     MultiScatteringはTransmittanceをSRVで読むため順序が意味を持つ(BRDF積分LUTの
+        //     2パス構成と同じ形)。どちらも大気パラメータだけの関数なので焼き直さない ---
+        if (!m_AtmosphereLUTBaked && m_TransmittancePipelineState && m_MultiScatteringPipelineState)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "AtmosphereLUTBake",
+                .Writes = { m_TransmittanceLUT.get(), m_MultiScatteringLUT.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_TransmittancePipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_TransmittanceLUT.get(), 0);
+                    cmd->Dispatch((kTransmittanceLUTWidth + 7) / 8, (kTransmittanceLUTHeight + 7) / 8, 1);
+
+                    // UAVはDispatch直後に自動で解除されるため張り直す。
+                    // ここでTransmittanceをSRV(t0)として読むので、上のDispatchより後でなければならない
+                    cmd->SetComputePipelineState(m_MultiScatteringPipelineState.get());
+                    cmd->SetComputeTexture(0, m_TransmittanceLUT.get());
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_MultiScatteringLUT.get(), 0);
+                    const uint32_t groups = (kMultiScatteringLUTSize + 7) / 8;
+                    cmd->Dispatch(groups, groups, 1);
+                },
+            });
+            m_AtmosphereLUTBaked = true;
+        }
+
         // --- プリフィルタ済み鏡面の畳み込みパス: スカイボックスを入力に、ミップごとに異なる
         //     ラフネスで畳み込む(面×ミップの組み合わせごとに1回ずつディスパッチ) ---
         if (!m_IBLBaked)
@@ -6425,6 +6491,15 @@ namespace Kurenai
                 presentSourceWidth = m_PlanarReflectionWidth;
                 presentSourceHeight = m_PlanarReflectionHeight;
             }
+            break;
+        case DebugView::AtmosphereLUT:
+            // 大気散乱のLUT(P14a)。HDRなのでMode 4(Reinhard+ガンマ)で表示する。
+            // Transmittanceは0〜1なのでそのままでも読めるが、MultiScatteringは値が小さいので
+            // 表示輝度の倍率と併用する
+            presentSourceTexture = m_AtmosphereLUTDebugMulti ? m_MultiScatteringLUT.get() : m_TransmittanceLUT.get();
+            presentMode = 4;
+            presentSourceWidth = m_AtmosphereLUTDebugMulti ? kMultiScatteringLUTSize : kTransmittanceLUTWidth;
+            presentSourceHeight = m_AtmosphereLUTDebugMulti ? kMultiScatteringLUTSize : kTransmittanceLUTHeight;
             break;
         case DebugView::CloudNoiseSlice:
         {
