@@ -84,7 +84,7 @@ namespace Kurenai::RHI
         // (GPUSkyParameters、SkyIntegrate.hlslが書く構造化バッファ)がt17を使うため18スロットへ
         // 増やした。DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)およびDX11CommandList
         // 側の同名の定数と必ず一致させること
-        static constexpr uint32_t kTextureSlotCount = 20; // 18→20(P13b): ボリュメトリック積雲の3Dノイズ2枚ぶん
+        static constexpr uint32_t kTextureSlotCount = 21; // 20→21(P14b): 大気散乱のSkyView LUT 1枚ぶん
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;

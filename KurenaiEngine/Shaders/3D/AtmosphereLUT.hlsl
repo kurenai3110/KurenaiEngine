@@ -13,14 +13,26 @@
 //   CSTransmittance   … 256x64。高度×視線天頂角。大気圏上端までの消散(Rayleigh+Mie+オゾン)
 //   CSMultiScattering …  32x32。高度×太陽天頂角。多重散乱を等方近似で1枚に畳んだもの
 //                        (これがHillaireの中核。地平線の白さはこの項が作る)
-//   CSSkyView         … 192x108。カメラ周りの空。太陽が動くたびに焼き直す
+//   CSSkyView         … 192x108。空そのもの。太陽が動くと変わるので毎フレーム焼く
 //
-// TransmittanceとMultiScatteringは大気パラメータだけで決まるので起動後に一度だけ焼く
-// (BRDF積分LUT・雲の3Dノイズと同じ「一度だけ焼く」作法)。
+// TransmittanceとMultiScatteringは大気パラメータだけで決まるので、濁り(Turbidity)が
+// 変わらない限り焼き直さない(BRDF積分LUT・雲の3Dノイズと同じ「一度だけ焼く」作法に
+// 濁りの再ベイクだけを足した形。KurenaiEngine3D::m_AtmosphereLUTBakedTurbidity参照)。
 //
 // 【単位はkm】Hillaireの参照実装と同じくkmで統一する。散乱係数もkm^-1。
 // メートルで書くと地球半径6360000のような値が出てfloat32の桁が苦しくなる。
 #include "Samplers.hlsli"
+#include "AtmosphereCommon.hlsli"
+
+// 3つのエントリポイントすべてが同じ定数を読む(濁りは3枚すべてに効くため)
+cbuffer AtmosphereConstants : register(b0)
+{
+    // 太陽が「ある」向き(正規化済み)。光が進む向きとは符号が逆。CSSkyViewのみが使う
+    float4 AtmosphereSunDirection;
+    // x = Mie(エアロゾル)密度の倍率。濁りのスライダーから来る。1.0で標準大気
+    // y/z/w = 予備
+    float4 AtmosphereParams0;
+};
 
 // ============================================================================
 // 大気パラメータ
@@ -30,8 +42,8 @@
 // (KurenaiEngine3D::m_AtmosphereLUTBaked)。
 // ============================================================================
 
-static const float kBottomRadiusKm = 6360.0f;   // 地表
-static const float kTopRadiusKm = 6460.0f;      // 大気圏上端(厚さ100km)
+// 地表と大気圏上端の半径はAtmosphereCommon.hlsli(kBottomRadiusKm / kTopRadiusKm)にある。
+// SkyView LUTのパラメータ化がSky.hlsli側でも同じ値を要るため、そちらへ置いてある
 
 // Rayleigh散乱。λ^-4に比例するのでB/R = 33.100/5.802 = 5.70。
 // **空が青い理由そのもの**で、Preethamのフィットが再現しきれていなかったのがこの比
@@ -55,29 +67,40 @@ static const float kOzoneHalfWidthKm = 15.0f;
 // 地表のアルベド。多重散乱LUTで地面からの照り返しを見込むのに使う
 static const float3 kGroundAlbedo = float3(0.3f, 0.3f, 0.3f);
 
-static const float kPI = 3.14159265359f;
+static const float kPI = kAtmospherePI;
 
 // ============================================================================
 // 媒質
 // ============================================================================
 
-// 高度[km]における散乱係数と消散係数
-void SampleMedium(float altitudeKm, out float3 scattering, out float3 extinction)
+// 高度[km]における散乱係数。RayleighとMieを分けて返すのは、CSSkyViewが位相関数を
+// それぞれ別に掛けるため(Rayleighは(1+cos^2)、MieはHenyey-Greenstein)。
+// 濁り(AtmosphereParams0.x)はMieの密度だけを倍する
+void SampleMediumSplit(float altitudeKm, out float3 rayleighScattering,
+                       out float3 mieScattering, out float3 extinction)
 {
     const float rayleighDensity = exp(-max(altitudeKm, 0.0f) / kRayleighScaleHeightKm);
-    const float mieDensity = exp(-max(altitudeKm, 0.0f) / kMieScaleHeightKm);
+    const float mieDensity =
+        exp(-max(altitudeKm, 0.0f) / kMieScaleHeightKm) * AtmosphereParams0.x;
     // テント形。中心から半幅ぶん離れると0になる
     const float ozoneDensity =
         max(0.0f, 1.0f - abs(altitudeKm - kOzoneCenterKm) / kOzoneHalfWidthKm);
 
-    const float3 rayleighS = kRayleighScattering * rayleighDensity;
-    const float mieS = kMieScattering * mieDensity;
+    rayleighScattering = kRayleighScattering * rayleighDensity;
+    mieScattering = kMieScattering * mieDensity;
     const float mieE = kMieExtinction * mieDensity;
     const float3 ozoneA = kOzoneAbsorption * ozoneDensity;
 
-    scattering = rayleighS + mieS;
     // オゾンは吸収のみ(散乱しない)なので消散にだけ入る
-    extinction = rayleighS + mieE + ozoneA;
+    extinction = rayleighScattering + mieE + ozoneA;
+}
+
+// 散乱の内訳が要らない呼び出し側(TransmittanceとMultiScattering)向けの薄い包み
+void SampleMedium(float altitudeKm, out float3 scattering, out float3 extinction)
+{
+    float3 rayleighS, mieS;
+    SampleMediumSplit(altitudeKm, rayleighS, mieS, extinction);
+    scattering = rayleighS + mieS;
 }
 
 // 原点からdir方向のレイと、中心が原点・半径radiusの球との交点までの距離。
@@ -301,10 +324,15 @@ void CSMultiScattering(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     const float invDirections = 1.0f / float(kMultiScatteringDirections);
-    // 球面全体の立体角4πを掛け戻す(一様サンプルの平均 × 4π)。
-    // uniformPhase(=1/4π)と打ち消し合うので、ここは平均だけでよい
-    secondOrder *= invDirections * 4.0f * kPI * uniformPhase;
-    multiScatterAs1 *= invDirections * 4.0f * kPI * uniformPhase;
+    // 球面上の一様サンプルの平均に立体角4πを掛け戻して球面積分にする。
+    //
+    // 【uniformPhaseと打ち消させてはいけない】secondOrder側にはループ内で既にuniformPhase
+    // (=1/4π)が掛かっているが、それは「その点へ等方的に散乱してくる光」の位相関数であって、
+    // 球面積分の測度とは別物である。ここでさらにuniformPhaseを掛けると多重散乱が4π倍
+    // (約12.6倍)弱くなり、地平線の白さが出ずに空が過剰に彩度の高い暗い青になる。
+    // multiScatterAs1側は位相関数を掛けない定義なので、こちらも4πを掛けるのが正しい
+    secondOrder *= invDirections * 4.0f * kPI;
+    multiScatterAs1 *= invDirections * 4.0f * kPI;
 
     // 無限次までの等比級数。公比が1に達することは物理的に無いが、
     // 数値誤差で1を超えると発散するのでクランプする
@@ -312,4 +340,152 @@ void CSMultiScattering(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float3 multiScattering = secondOrder / (1.0f - ratio);
 
     MultiScatteringOut[dispatchThreadID.xy] = float4(multiScattering, 1.0f);
+}
+
+// ============================================================================
+// SkyView LUT
+//
+// 上の2枚を使って空そのものを焼く。太陽の位置で変わるので毎フレーム焼き直す
+// (192x108 = 20,736テクセル × 32段の可視レイ + 32段の天頂レイなので実質的な負荷は無い)。
+//
+// 【天頂の輝度が1になるよう正規化して焼く】これを省くと空だけが正しくなって雲と地面が
+// 明暗する。理由: このエンジンの空は「単位空 × ZenithLuminance」という構造で、
+// ZenithLuminanceはSkyIntegrate.hlslが単位空の半球積分から目標照度を満たすよう逆算する。
+// 単位空の絶対スケールがk倍ずれるとZenithLuminanceは1/k倍になって空の見た目は保たれるが、
+// **雲の明るさと地面ティントはZenithLuminanceに直接掛かっている**(Sky.hlsliの雲セクション/
+// groundColor参照)ため、そちらだけが1/k倍で暗く(明るく)なってしまう。
+// Preethamは定義上そのまま天頂で相対輝度1を返していたので、ここで同じ規約へ揃える。
+// 割る量はRec.709輝度で、天頂の色度はそのまま保たれる
+// ============================================================================
+
+static const int kSkyViewSteps = 32;
+
+Texture2D<float4> MultiScatteringIn : register(t1);
+RWTexture2D<float4> SkyViewOut : register(u0);
+
+float3 SampleMultiScattering(float r, float sunCosZenith)
+{
+    const float2 uv = float2(
+        saturate(sunCosZenith * 0.5f + 0.5f),
+        saturate((r - kBottomRadiusKm) / max(kTopRadiusKm - kBottomRadiusKm, 1e-6f)));
+    return MultiScatteringIn.SampleLevel(ColorSampler, uv, 0.0f).rgb;
+}
+
+// Rayleighの位相関数。分子の散乱は前後対称で、真横が最も暗い
+float RayleighPhase(float cosTheta)
+{
+    return (3.0f / (16.0f * kPI)) * (1.0f + cosTheta * cosTheta);
+}
+
+// Mieの位相関数(Henyey-Greenstein)。g=0.8の強い前方散乱が太陽まわりの光冠を作る
+float MiePhase(float cosTheta, float g)
+{
+    const float g2 = g * g;
+    const float denom = 1.0f + g2 - 2.0f * g * cosTheta;
+    return (1.0f - g2) / (4.0f * kPI * max(denom, 1e-6f) * sqrt(max(denom, 1e-6f)));
+}
+
+// posからdir方向へ大気を積分して得られる放射輝度(太陽の放射照度を1としたときの値)
+float3 IntegrateSkyLuminance(float3 pos, float3 dir, float3 sunDir)
+{
+    float tMax = RaySphereNearest(pos, dir, kTopRadiusKm);
+    const float tGround = RaySphereNearest(pos, dir, kBottomRadiusKm);
+    bool hitGround = false;
+    if (tGround > 0.0f)
+    {
+        tMax = min(tMax, tGround);
+        hitGround = true;
+    }
+    if (tMax <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    const float cosTheta = dot(dir, sunDir);
+    const float phaseRayleigh = RayleighPhase(cosTheta);
+    const float phaseMie = MiePhase(cosTheta, kMiePhaseG);
+
+    const float dt = tMax / float(kSkyViewSteps);
+    float3 throughput = float3(1.0f, 1.0f, 1.0f);
+    float3 luminance = float3(0.0f, 0.0f, 0.0f);
+
+    [loop]
+    for (int i = 0; i < kSkyViewSteps; ++i)
+    {
+        // 中点則
+        const float t = (float(i) + 0.5f) * dt;
+        const float3 samplePos = pos + dir * t;
+        const float sampleR = length(samplePos);
+        const float altitude = sampleR - kBottomRadiusKm;
+
+        float3 rayleighS, mieS, extinction;
+        SampleMediumSplit(altitude, rayleighS, mieS, extinction);
+
+        const float3 stepTransmittance = exp(-extinction * dt);
+        const float3 up = samplePos / max(sampleR, 1e-6f);
+        const float sunCos = dot(up, sunDir);
+
+        // 地球自身の影。この点から太陽へ向かうレイが地面を貫くなら日陰
+        // (夕方に地平線側の低い空だけが暗くなるのはこの項)
+        const float planetShadow = (RaySphereNearest(samplePos, sunDir, kBottomRadiusKm) > 0.0f)
+                                       ? 0.0f : 1.0f;
+        const float3 sunTransmittance = SampleTransmittance(sampleR, sunCos);
+
+        // 1次散乱: 位相関数をRayleigh/Mieそれぞれに掛ける
+        const float3 singleScattering =
+            (rayleighS * phaseRayleigh + mieS * phaseMie) * sunTransmittance * planetShadow;
+        // 多重散乱: 等方なので位相関数は掛けない(MultiScattering LUTの定義)
+        const float3 multiScattering = (rayleighS + mieS) * SampleMultiScattering(sampleR, sunCos);
+
+        // 1ステップぶんの ∫T(t)σs dt を閉形式で積む(MultiScatteringと同じ形)
+        const float3 safeExtinction = max(extinction, 1e-7f);
+        const float3 integrated =
+            (singleScattering + multiScattering) * (1.0f - stepTransmittance) / safeExtinction;
+
+        luminance += throughput * integrated;
+        throughput *= stepTransmittance;
+    }
+
+    if (hitGround)
+    {
+        // 地面での反射(ランバート面なので cos/π)。この分岐へ入るのは地平線より下の
+        // テクセルだけで、エンジンの空(SkyColorUpper)は水平線以上しか引かないため
+        // 実際には読まれない。LUTを単独でデバッグ表示したときに地面が黒く抜けないよう入れてある
+        const float3 hitPos = pos + dir * tMax;
+        const float3 up = hitPos / max(length(hitPos), 1e-6f);
+        const float sunCos = saturate(dot(up, sunDir));
+        luminance += throughput * kGroundAlbedo * sunCos *
+                     SampleTransmittance(kBottomRadiusKm, sunCos) / kPI;
+    }
+
+    return luminance;
+}
+
+[numthreads(8, 8, 1)]
+void CSSkyView(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    uint width, height;
+    SkyViewOut.GetDimensions(width, height);
+    if (dispatchThreadID.x >= width || dispatchThreadID.y >= height)
+    {
+        return;
+    }
+
+    const float2 uv = (float2(dispatchThreadID.xy) + 0.5f) / float2(width, height);
+    const float3 sunDir = normalize(AtmosphereSunDirection.xyz);
+    const float3 pos = float3(0.0f, kSkyViewHeightKm, 0.0f);
+    const float3 dir = SkyViewUvToDirection(uv, sunDir);
+
+    const float3 luminance = IntegrateSkyLuminance(pos, dir, sunDir);
+
+    // 天頂を1にする正規化(このセクション冒頭の説明参照)。天頂レイをもう1本撃つだけで、
+    // 全スレッドが同一の入力から同一の値を得るので分母は厳密に一致する
+    const float3 zenith = IntegrateSkyLuminance(pos, float3(0.0f, 1.0f, 0.0f), sunDir);
+    const float zenithLuminance = dot(zenith, float3(0.2126f, 0.7152f, 0.0722f));
+
+    // 太陽が地平線の下へ十分沈むと天頂の輝度が0へ落ちる。0除算を避けるため下限を入れるが、
+    // その領域は従来ティント経路(Sky.hlsliのPhysicalSkyWeight<=0)が担当するので絵には出ない
+    const float3 normalized = luminance / max(zenithLuminance, 1e-6f);
+
+    SkyViewOut[dispatchThreadID.xy] = float4(normalized, 1.0f);
 }

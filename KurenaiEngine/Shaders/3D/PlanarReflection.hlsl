@@ -45,6 +45,9 @@
 #include "HeightFog.hlsli"
 // 空モデル(Perez分布)の共有ヘッダー。大気遠近のin-scatter項に、背景と同じSkyColorを使うため
 // (Sky.hlsli冒頭のコメント参照)
+// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
+#define KURENAI_SKYVIEW_REGISTER t15
 #include "Sky.hlsli"
 
 static const float PI = 3.14159265359f;

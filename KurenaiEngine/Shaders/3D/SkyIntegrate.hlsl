@@ -37,6 +37,9 @@
 // 失った。そこで被積分関数を「実際に画面へ出る色(SkyColorUpperUnitの結果)のRec.709輝度」に
 // 変えた。こうすると昼(Preetham)・夜(従来ティント)・その間のクロスフェードのどの領域でも
 // 「画面に出る明るさをそのまま積分する」という定義になり、場合分けが要らなくなる
+// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
+#define KURENAI_SKYVIEW_REGISTER t0
 #include "Sky.hlsli"
 
 cbuffer SkyIntegrateConstants : register(b0)
@@ -75,12 +78,15 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 呼び出し元が1度だけ決めてループへ渡す構造)
     const SkyTintSet tintSet = ComputeSkyTintSet(sunPosition.y);
 
-    // タービディティ(P7)。C++側からIntegrateParams.zで渡される
+    // タービディティ(P7)。C++側からIntegrateParams.zで渡される。
+    // P14b以降SkyColorUpperUnitはこれを読まない(濁りはSkyView LUTへ焼き込み済み)が、
+    // GPUSkyParametersへそのまま載せてログ・デバッグから見えるようにしている
     const float turbidity = IntegrateParams.z;
     const float skySaturation = IntegrateParams.w;
-    // Preethamの重み。仰角0度で0(従来ティントのみ)、仰角5度で1(Preethamのみ)。
-    // Sky.hlsli SkyColorUpperUnitの早期脱出/クロスフェードと同じ閾値であること
-    const float preethamWeight = smoothstep(0.0f, sin(radians(5.0f)), sunPosition.y);
+    // 物理モデル(P14b以降はHillaire)の重み。仰角0度で0(従来ティントのみ)、
+    // 仰角5度で1(物理モデルのみ)。Sky.hlsli SkyColorUpperUnitの早期脱出/クロスフェードと
+    // 同じ閾値であること
+    const float physicalSkyWeight = smoothstep(0.0f, sin(radians(5.0f)), sunPosition.y);
 
     // SkyColorUpperUnitを呼ぶためのSkyParameters。ZenithLuminanceと雲パラメータはこの関数が
     // 参照しないため0で埋める(SkyColorUpperUnitのコメント参照。ZenithLuminanceを参照すると
@@ -94,7 +100,7 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     unitParams.SunGlowStrength = tintSet.SunGlowStrength;
     unitParams.Turbidity = turbidity;
     unitParams.SkySaturation = skySaturation;
-    unitParams.PreethamWeight = preethamWeight;
+    unitParams.PhysicalSkyWeight = physicalSkyWeight;
 
     const float phi = (float(phiIndex) + 0.5f) * dPhi;
 
@@ -110,7 +116,9 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
         const float3 dir = float3(sinTheta * cos(phi), cosThetaRaw, sinTheta * sin(phi));
 
         // 【P7】被積分関数は「SkyColorUpperUnitの結果のRec.709輝度」。SkyColorUpperUnit内部で
-        // SkyColorUpperと同じクランプ(水平線でPerezが発散するため)が行われる
+        // SkyColorUpperと同じ地平線のクランプが行われる。
+        // 【P14b】日中はSkyView LUTを引くため、このパスもLUTをSRVで読む。したがって
+        // SkyViewBakeパスより後に実行されなければならない(レンダーグラフの依存で保証)
         const float3 unitColor = SkyColorUpperUnit(dir, unitParams);
         const float weight = dot(unitColor, float3(0.2126f, 0.7152f, 0.0722f));
 
@@ -153,7 +161,7 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
         result.Luminance = float4(zenithLuminance, integral, 0.0f, 0.0f);
         // P7: タービディティとPreethamの重みもここで確定させて配る
         // (SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslはApplySkyParametersFromBufferで読むだけ)
-        result.ModelParams = float4(turbidity, preethamWeight, skySaturation, 0.0f);
+        result.ModelParams = float4(turbidity, physicalSkyWeight, skySaturation, 0.0f);
 
         SkyParametersOut[0] = result;
     }

@@ -21,6 +21,9 @@
 // 雲による平均透過率(判断B)だけはCPU(KurenaiEngine3D.cpp)がCloudTransmittanceとして渡し、
 // ここでSkyParametersBufferのZenithLuminanceへ掛けてからキューブへ焼く
 #include "Samplers.hlsli"
+// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
+#define KURENAI_SKYVIEW_REGISTER t1
 #include "Sky.hlsli"
 
 cbuffer SkyBakeConstants : register(b0)

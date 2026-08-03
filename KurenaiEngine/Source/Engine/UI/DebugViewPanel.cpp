@@ -20,6 +20,15 @@ namespace Kurenai::UI
 
         using DebugView = KurenaiEngine3D::DebugView;
 
+        // DebugView::AtmosphereLUTで表示するLUTの選択肢。
+        // 並びはKurenaiEngine3D::m_AtmosphereLUTDebugIndexの意味と一致させること
+        static const char* kAtmosphereLUTNames[] =
+        {
+            "Transmittance (256x64)",
+            "MultiScattering (32x32)",
+            "SkyView (192x108)",
+        };
+
         // 並びはDebugView enumと一致していなければならない(下のstatic_assert参照)
         static const char* kDebugViewNames[] =
         {
@@ -55,7 +64,7 @@ namespace Kurenai::UI
             "水面マスク (A=水面フラグ)",
             "平面反射 (水面に映る鏡像)",
             "雲の3Dノイズ (スライス表示・2x2タイル)",
-            "大気散乱LUT (Transmittance / MultiScattering)",
+            "大気散乱LUT (Transmittance / MultiScattering / SkyView)",
         };
         static_assert(
             static_cast<int>(DebugView::AtmosphereLUT) == 32,
@@ -141,10 +150,12 @@ namespace Kurenai::UI
         {
             ImGui::TextWrapped(
                 "Transmittance: 横=視線天頂角、縦=高度。地表(下端)から天頂(右端)を見た値が "
-                "(0.940, 0.868, 0.762) になるのが解析解との一致条件");
-            CheckboxEx(
-                "MultiScatteringを見る###AtmosphereLUTMulti", &m_Engine.m_AtmosphereLUTDebugMulti, false,
-                "オフでTransmittance(256x64)、オンでMultiScattering(32x32)。"
+                "(0.940, 0.868, 0.762) になるのが解析解との一致条件。"
+                "SkyView: 横=太陽の子午線からの方位(左端が太陽側)、"
+                "縦=天頂角(上端が天頂、中央が地平線)");
+            ComboEx(
+                "表示するLUT###AtmosphereLUTIndex", &m_Engine.m_AtmosphereLUTDebugIndex,
+                kAtmosphereLUTNames, IM_ARRAYSIZE(kAtmosphereLUTNames), 0,
                 "MultiScatteringは値が小さいので表示輝度の倍率を上げて見る");
         }
 

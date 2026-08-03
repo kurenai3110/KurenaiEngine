@@ -24,6 +24,26 @@ namespace Kurenai
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
 
+        // 濁り(タービディティ)からMie(エアロゾル)密度の倍率を求める(P14b)。
+        //
+        // 【Preethamの定義をそのまま持ち込んではいけない】Preethamのタービディティは
+        // 「エアロゾルを含む全光学的厚さ / 分子だけの光学的厚さ」と定義されており、
+        // その定義で現在の既定値2.5を換算すると τ_Mie = 1.5 × τ_Rayleigh となる。
+        // Hillaireの標準大気の垂直Mie光学的厚さは 0.003996 × 1.2 = 0.0048、
+        // Rayleigh(550nm)は 0.013558 × 8 = 0.1085 なので、比は0.044(タービディティ換算で1.04)。
+        // つまり定義どおり換算するとエアロゾルが約34倍になり、空が白く霞んでHillaireへ
+        // 移った意味そのものが消える。
+        //
+        // そこでここでのタービディティは**Preethamの定義とは別物**として扱い、
+        // 「既定値2.5をHillaireの標準大気とする相対的な濁り」と定義し直す。
+        // スライダーを上げれば霞み、下げれば澄むという操作の意味は保たれる
+        float ComputeAtmosphereMieDensityScale(float turbidity)
+        {
+            // この値でMie密度の倍率がちょうど1.0(=Hillaireの標準大気)になる
+            constexpr float kReferenceTurbidity = 2.5f;
+            return std::max(turbidity, 0.0f) / kReferenceTurbidity;
+        }
+
         // TAAのジッターに使う低食い違い量列(Halton列)。基数baseのradical inverse、
         // すなわちindexを基数base表記にして小数点の左右を反転した値を返す([0,1)に収まる)。
         // 乱数と違い、少ない点数でも区間内へ均等に散らばるのが要点で、8フレームぶん取れば
@@ -747,6 +767,16 @@ namespace Kurenai
             // x=目標照度[lx](SunLighting::SkyIlluminanceLux)、y=実効プリ露出(effectiveExposure)、
             // z=タービディティ(P7、m_SkyTurbidity)、w=未使用
             DirectX::XMFLOAT4 IntegrateParams;
+        };
+
+        // AtmosphereLUT.hlsl側のcbuffer AtmosphereConstantsと一致させる必要がある(P14b)。
+        // 3つのエントリポイント(Transmittance/MultiScattering/SkyView)が共通で読む
+        struct alignas(16) AtmosphereConstants
+        {
+            // xyz=太陽が「ある」向き(正規化済み)、w=未使用。CSSkyViewのみが使う
+            DirectX::XMFLOAT4 SunDirection;
+            // x=Mie(エアロゾル)密度の倍率(濁りのスライダー由来)、yzw=未使用
+            DirectX::XMFLOAT4 Params0;
         };
 
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
@@ -1644,17 +1674,30 @@ namespace Kurenai
         m_CloudDetailNoisePipelineState =
             m_Device->CreateComputePipelineState({ m_CloudDetailNoiseComputeShader.get() });
 
-        // 大気散乱のLUT(P14a: Hillaire 2020)。カメラにも太陽にも依存しない純粋な大気パラメータの
-        // 関数なので、雲の3Dノイズ・BRDF積分LUTと同じく起動後に一度だけ焼く(m_AtmosphereLUTBaked)。
+        // 大気散乱のLUT(P14a: Hillaire 2020)。TransmittanceとMultiScatteringはカメラにも太陽にも
+        // 依存せず、大気パラメータ(濁りを含む)だけの関数なので、濁りが変わらない限り焼き直さない
+        // (m_AtmosphereLUTBakedTurbidity)。SkyViewは太陽の位置で変わるため毎フレーム焼く。
         // HDRの放射輝度を格納するためR16G16B16A16_Float
         m_TransmittanceLUT = m_Device->CreateUAVTexture(
             kTransmittanceLUTWidth, kTransmittanceLUTHeight, RHI::Format::R16G16B16A16_Float);
         m_MultiScatteringLUT = m_Device->CreateUAVTexture(
             kMultiScatteringLUTSize, kMultiScatteringLUTSize, RHI::Format::R16G16B16A16_Float);
-        if (!m_TransmittanceLUT || !m_MultiScatteringLUT)
+        m_SkyViewLUT = m_Device->CreateUAVTexture(
+            kSkyViewLUTWidth, kSkyViewLUTHeight, RHI::Format::R16G16B16A16_Float);
+        if (!m_TransmittanceLUT || !m_MultiScatteringLUT || !m_SkyViewLUT)
         {
             Core::Logger::Error("KurenaiEngine3D",
-                "大気散乱のLUTテクスチャの作成に失敗しました(P14b以降で空の色が正しく出ません)");
+                "大気散乱のLUTテクスチャの作成に失敗しました(日中の空が黒くなります)");
+        }
+
+        RHI::BufferDesc atmosphereConstantBufferDesc;
+        atmosphereConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        atmosphereConstantBufferDesc.SizeInBytes = sizeof(AtmosphereConstants);
+        m_AtmosphereConstantBuffer = m_Device->CreateBuffer(atmosphereConstantBufferDesc);
+        if (!m_AtmosphereConstantBuffer)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "大気散乱の定数バッファの作成に失敗しました(日中の空が黒くなります)");
         }
 
         RHI::ShaderDesc transmittanceCsDesc;
@@ -1682,6 +1725,19 @@ namespace Kurenai
         }
         m_MultiScatteringPipelineState =
             m_Device->CreateComputePipelineState({ m_MultiScatteringComputeShader.get() });
+
+        RHI::ShaderDesc skyViewCsDesc;
+        skyViewCsDesc.Stage = RHI::ShaderStage::Compute;
+        skyViewCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.hlsl";
+        skyViewCsDesc.EntryPoint = "CSSkyView";
+        m_SkyViewComputeShader = m_Device->CreateShader(skyViewCsDesc);
+        if (!m_SkyViewComputeShader)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "AtmosphereLUT.hlsl CSSkyView のコンパイルに失敗しました(日中の空が黒くなります)");
+        }
+        m_SkyViewPipelineState =
+            m_Device->CreateComputePipelineState({ m_SkyViewComputeShader.get() });
 
         RHI::ShaderDesc irradianceCsDesc;
         irradianceCsDesc.Stage = RHI::ShaderStage::Compute;
@@ -4357,6 +4413,85 @@ namespace Kurenai
         // そのまま読み書きする(詳細はRenderGraph.h参照)
         Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
 
+        // --- 大気散乱のLUTのベイクパス(P14a/P14b) ---
+        //
+        //     AtmosphereLUTBake: Transmittance → MultiScattering の順。MultiScatteringは
+        //     TransmittanceをSRVで読むため順序が意味を持つ(BRDF積分LUTの2パス構成と同じ形)。
+        //     どちらも大気パラメータだけの関数なので、濁りが変わったときだけ焼き直す。
+        //
+        //     SkyViewBake: 空そのもの。太陽が動くと変わるので毎フレーム焼く。
+        //
+        //     【この2つは必ずSkyIntegrateより前に「登録」すること】RenderGraphの依存解決は
+        //     登録順に1回だけ舐める前方走査で、あるパスのReadsは**自分より前に登録された
+        //     書き手**しか見つけられない(RenderGraph::ResolveExecutionOrderのlastWriter)。
+        //     つまりグラフはパスを後ろへ遅らせることはできても前へ動かすことはできない。
+        //     この2つをSkyIntegrateより後ろに置くと、SkyIntegrateが.Reads = { m_SkyViewLUT }を
+        //     宣言していても辺が張られず、**未初期化のLUTを積分してしまう**。
+        //     太陽が静止したシーンではSkyIntegrateは起動直後の1回しか走らないため、
+        //     壊れた天頂輝度がそのまま最後まで残る(実測: 積分値が5.29ではなく1.58になり、
+        //     空が3.3倍明るくなって青が白く飛んでいた)。
+        //
+        //     【定数バッファは3つのエントリポイント共通】濁りはMieの密度としてTransmittanceにも
+        //     MultiScatteringにも効くため、AtmosphereConstantsを3者で共有している
+        const float atmosphereMieDensityScale = ComputeAtmosphereMieDensityScale(m_SkyTurbidity);
+        const auto updateAtmosphereConstants = [this, &sunLighting, atmosphereMieDensityScale]
+            (RHI::IRHICommandList* cmd)
+        {
+            AtmosphereConstants atmosphereConstants{};
+            atmosphereConstants.SunDirection = {
+                sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+            };
+            atmosphereConstants.Params0 = { atmosphereMieDensityScale, 0.0f, 0.0f, 0.0f };
+            cmd->UpdateBuffer(m_AtmosphereConstantBuffer.get(), &atmosphereConstants, sizeof(atmosphereConstants));
+            cmd->SetComputeConstantBuffer(0, m_AtmosphereConstantBuffer.get());
+        };
+
+        if (m_AtmosphereLUTBakedTurbidity != m_SkyTurbidity &&
+            m_TransmittancePipelineState && m_MultiScatteringPipelineState)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "AtmosphereLUTBake",
+                .Writes = { m_TransmittanceLUT.get(), m_MultiScatteringLUT.get() },
+                .Execute = [this, updateAtmosphereConstants](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_TransmittancePipelineState.get());
+                    updateAtmosphereConstants(cmd);
+                    cmd->SetComputeUnorderedAccessTexture(0, m_TransmittanceLUT.get(), 0);
+                    cmd->Dispatch((kTransmittanceLUTWidth + 7) / 8, (kTransmittanceLUTHeight + 7) / 8, 1);
+
+                    // UAVはDispatch直後に自動で解除されるため張り直す。
+                    // ここでTransmittanceをSRV(t0)として読むので、上のDispatchより後でなければならない
+                    cmd->SetComputePipelineState(m_MultiScatteringPipelineState.get());
+                    updateAtmosphereConstants(cmd);
+                    cmd->SetComputeTexture(0, m_TransmittanceLUT.get());
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_MultiScatteringLUT.get(), 0);
+                    const uint32_t groups = (kMultiScatteringLUTSize + 7) / 8;
+                    cmd->Dispatch(groups, groups, 1);
+                },
+            });
+            m_AtmosphereLUTBakedTurbidity = m_SkyTurbidity;
+        }
+
+        if (m_SkyViewPipelineState)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "SkyViewBake",
+                .Reads = { m_TransmittanceLUT.get(), m_MultiScatteringLUT.get() },
+                .Writes = { m_SkyViewLUT.get() },
+                .Execute = [this, updateAtmosphereConstants](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_SkyViewPipelineState.get());
+                    updateAtmosphereConstants(cmd);
+                    cmd->SetComputeTexture(0, m_TransmittanceLUT.get());
+                    cmd->SetComputeTexture(1, m_MultiScatteringLUT.get());
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_SkyViewLUT.get(), 0);
+                    cmd->Dispatch((kSkyViewLUTWidth + 7) / 8, (kSkyViewLUTHeight + 7) / 8, 1);
+                },
+            });
+        }
+
         // --- 空パラメータの積分パス(P9): 色味の決定とθ64×φ256=16,384サンプルの照度正規化積分を
         //     GPUで行い、結果(ティント4本+正規化済みの天頂輝度)をm_SkyParametersBufferへ書く。
         //     以前はKurenaiEngine3D.cpp(ComputeSkyTint/ComputeSkyZenithScale)がCPUで計算していたが、
@@ -4369,6 +4504,9 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyIntegrate",
+                // 【P14b】日中の空はSkyView LUTを引くため、このパスもLUTを読む。
+                // これによりレンダーグラフがSkyViewBakeより後へ自動で並べてくれる
+                .Reads = { m_SkyViewLUT.get() },
                 .BufferWrites = { m_SkyParametersBuffer.get() },
                 .Execute = [this, &sunLighting, effectiveExposure](RHI::IRHICommandList* cmd)
                 {
@@ -4383,6 +4521,10 @@ namespace Kurenai
 
                     cmd->SetComputePipelineState(m_SkyIntegratePipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_SkyIntegrateConstantBuffer.get());
+                    // SkyView LUT(t0)とサンプラー(s1 ColorSampler)。P14bで日中の空を
+                    // これから引くようになったため、積分側も同じLUTを読む必要がある
+                    cmd->SetComputeTexture(0, m_SkyViewLUT.get());
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_SkyParametersBuffer.get());
                     // 1グループ×256スレッド固定(SkyIntegrate.hlsl参照)
                     cmd->Dispatch(1, 1, 1);
@@ -4402,12 +4544,18 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyGenerate",
+                // 【P14b】IBLキューブへ焼く空もSkyView LUT経由になったため読み手に加わる
+                .Reads = { m_SkyViewLUT.get() },
                 .Writes = { m_ProceduralSkyTexture.get() },
                 .BufferReads = { m_SkyParametersBuffer.get() },
                 .Execute = [this, &sunLighting](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_SkyGeneratePipelineState.get());
                     cmd->SetComputeShaderResourceBuffer(0, m_SkyParametersBuffer.get());
+                    // SkyView LUT(t1)とサンプラー(s1 ColorSampler)。このパスはP14bまで
+                    // サンプラーを1つも必要としていなかったため、ここでのバインドが初出になる
+                    cmd->SetComputeTexture(1, m_SkyViewLUT.get());
+                    cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                     for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                     {
                         SkyBakeConstants skyConstants{};
@@ -4489,33 +4637,6 @@ namespace Kurenai
                 },
             });
             m_CloudNoiseBaked = true;
-        }
-
-        // --- 大気散乱のLUTのベイクパス(P14a): Transmittance → MultiScattering の順に1回だけ。
-        //     MultiScatteringはTransmittanceをSRVで読むため順序が意味を持つ(BRDF積分LUTの
-        //     2パス構成と同じ形)。どちらも大気パラメータだけの関数なので焼き直さない ---
-        if (!m_AtmosphereLUTBaked && m_TransmittancePipelineState && m_MultiScatteringPipelineState)
-        {
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "AtmosphereLUTBake",
-                .Writes = { m_TransmittanceLUT.get(), m_MultiScatteringLUT.get() },
-                .Execute = [this](RHI::IRHICommandList* cmd)
-                {
-                    cmd->SetComputePipelineState(m_TransmittancePipelineState.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_TransmittanceLUT.get(), 0);
-                    cmd->Dispatch((kTransmittanceLUTWidth + 7) / 8, (kTransmittanceLUTHeight + 7) / 8, 1);
-
-                    // UAVはDispatch直後に自動で解除されるため張り直す。
-                    // ここでTransmittanceをSRV(t0)として読むので、上のDispatchより後でなければならない
-                    cmd->SetComputePipelineState(m_MultiScatteringPipelineState.get());
-                    cmd->SetComputeTexture(0, m_TransmittanceLUT.get());
-                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_MultiScatteringLUT.get(), 0);
-                    const uint32_t groups = (kMultiScatteringLUTSize + 7) / 8;
-                    cmd->Dispatch(groups, groups, 1);
-                },
-            });
-            m_AtmosphereLUTBaked = true;
         }
 
         // --- プリフィルタ済み鏡面の畳み込みパス: スカイボックスを入力に、ミップごとに異なる
@@ -5555,6 +5676,9 @@ namespace Kurenai
                 m_ProbeIrradianceArray.get(), m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
                 // 同じくDDGIUpdateパスより後に順序付けさせるために挙げる(22章)
                 m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
+                // 大気散乱のSkyView LUT(P14b)。背景の空をここから引くため、
+                // SkyViewBakeパスより後に順序付けさせる
+                m_SkyViewLUT.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
             // 空パラメータ(P9)。SkyIntegrateパスより後に順序付けさせるために挙げる
@@ -5598,6 +5722,8 @@ namespace Kurenai
                 // 必ず埋める。SetPipelineStateが毎回ルート引数を無効化するため)
                 cmd->SetTexture(18, m_CloudShapeNoiseTexture.get());
                 cmd->SetTexture(19, m_CloudDetailNoiseTexture.get());
+                // 大気散乱のSkyView LUT(P14b)。日中の空の色はここから引く
+                cmd->SetTexture(20, m_SkyViewLUT.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -5736,6 +5862,7 @@ namespace Kurenai
                 .Reads = {
                     m_ShadowCascadeArray.get(), m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(),
                     m_BRDFLUTTexture.get(), m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
+                    m_SkyViewLUT.get(),
                 },
                 .RenderTargets = { m_PlanarReflectionColor.get() },
                 .DepthTarget = m_PlanarReflectionDepth.get(),
@@ -5785,6 +5912,8 @@ namespace Kurenai
                     cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
                     // 大気遠近(P8)のin-scatter項が読む空パラメータ(PlanarReflection.hlsl参照)
                     cmd->SetShaderResourceBuffer(14, m_SkyParametersBuffer.get());
+                    // 大気散乱のSkyView LUT(P14b)。in-scatter項の空の色はここから引く
+                    cmd->SetTexture(15, m_SkyViewLUT.get());
 
                     // 鏡映カメラで描くとワインディングが全反転するため、PSOの切り替えは
                     // instance.IsMirroredの否定で行う(このファイル冒頭のPSO生成箇所のコメント参照)
@@ -5854,6 +5983,8 @@ namespace Kurenai
                     // 平面反射(P6)。パスが登録されなかったフレームでもこのReadsは無害
                     // (今フレームのWriterが無いため単に依存辺が張られないだけ)
                     m_PlanarReflectionColor.get(),
+                    // 大気散乱のSkyView LUT(P14b)。水面に映る空をここから引く
+                    m_SkyViewLUT.get(),
                 },
                 .RenderTargets = { m_SSRTexture.get() },
                 // 空パラメータ(P9)。SkyIntegrateパスより後に順序付けさせるために挙げる
@@ -5906,6 +6037,9 @@ namespace Kurenai
                     // 立体にならなければ「空の雲と水面の雲が別物」になるため、ここにも同じものを渡す
                     cmd->SetTexture(13, m_CloudShapeNoiseTexture.get());
                     cmd->SetTexture(14, m_CloudDetailNoiseTexture.get());
+                    // 大気散乱のSkyView LUT(P14b)。雲と同じ理由で、水面に映る空も
+                    // 背景とまったく同じものでなければならない
+                    cmd->SetTexture(15, m_SkyViewLUT.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -5971,7 +6105,7 @@ namespace Kurenai
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AerialPerspective",
-                .Reads = { reflectionOutput, m_GBufferDepth.get() },
+                .Reads = { reflectionOutput, m_GBufferDepth.get(), m_SkyViewLUT.get() },
                 .RenderTargets = { m_AerialPerspectiveTexture.get() },
                 // 空パラメータ(P9)。SkyIntegrateパスの後へ順序付けさせるために挙げる
                 // (実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
@@ -5985,6 +6119,9 @@ namespace Kurenai
                     cmd->SetTexture(0, reflectionOutput);
                     cmd->SetTexture(1, m_GBufferDepth.get());
                     cmd->SetShaderResourceBuffer(2, m_SkyParametersBuffer.get());
+                    // 大気散乱のSkyView LUT(P14b)。in-scatter項に背景と同じ空の色を
+                    // 使うのがこのパスの要点なので、当然同じLUTを読む
+                    cmd->SetTexture(3, m_SkyViewLUT.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -6493,13 +6630,28 @@ namespace Kurenai
             }
             break;
         case DebugView::AtmosphereLUT:
-            // 大気散乱のLUT(P14a)。HDRなのでMode 4(Reinhard+ガンマ)で表示する。
+            // 大気散乱のLUT(P14a/P14b)。HDRなのでMode 4(Reinhard+ガンマ)で表示する。
             // Transmittanceは0〜1なのでそのままでも読めるが、MultiScatteringは値が小さいので
             // 表示輝度の倍率と併用する
-            presentSourceTexture = m_AtmosphereLUTDebugMulti ? m_MultiScatteringLUT.get() : m_TransmittanceLUT.get();
+            if (m_AtmosphereLUTDebugIndex == 1)
+            {
+                presentSourceTexture = m_MultiScatteringLUT.get();
+                presentSourceWidth = kMultiScatteringLUTSize;
+                presentSourceHeight = kMultiScatteringLUTSize;
+            }
+            else if (m_AtmosphereLUTDebugIndex == 2)
+            {
+                presentSourceTexture = m_SkyViewLUT.get();
+                presentSourceWidth = kSkyViewLUTWidth;
+                presentSourceHeight = kSkyViewLUTHeight;
+            }
+            else
+            {
+                presentSourceTexture = m_TransmittanceLUT.get();
+                presentSourceWidth = kTransmittanceLUTWidth;
+                presentSourceHeight = kTransmittanceLUTHeight;
+            }
             presentMode = 4;
-            presentSourceWidth = m_AtmosphereLUTDebugMulti ? kMultiScatteringLUTSize : kTransmittanceLUTWidth;
-            presentSourceHeight = m_AtmosphereLUTDebugMulti ? kMultiScatteringLUTSize : kTransmittanceLUTHeight;
             break;
         case DebugView::CloudNoiseSlice:
         {

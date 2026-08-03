@@ -15,6 +15,9 @@
 // 依存しない方針なので、DDGI.hlsliと同じくインクルードする側がマクロで指定する。
 // 定義しないシェーダー(SkyGenerate/AerialPerspective/PlanarReflection)ではボリュームの
 // 経路がコンパイルされず、従来の平面の経路だけが残る
+// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
+#define KURENAI_SKYVIEW_REGISTER t20
 #define KURENAI_CLOUD_SHAPE_REGISTER t18
 #define KURENAI_CLOUD_DETAIL_REGISTER t19
 #include "Sky.hlsli"

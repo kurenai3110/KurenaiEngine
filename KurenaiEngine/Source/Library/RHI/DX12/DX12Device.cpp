@@ -38,7 +38,7 @@ namespace Kurenai::RHI
         // DeferredLighting.hlslがt17で追加したため、それまでt0〜t16(17個)で埋まっていたスロットに
         // もう1つ足す必要が生じた。
         // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)
-        constexpr uint32_t kTextureSlotCount = 20; // 18→20(P13b): ボリュメトリック積雲の3Dノイズ2枚ぶん
+        constexpr uint32_t kTextureSlotCount = 21; // 20→21(P14b): 大気散乱のSkyView LUT 1枚ぶん
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
         // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler、s3 = VolumeSampler
         // (役割の定義はShaders/Samplers.hlsli)。どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。

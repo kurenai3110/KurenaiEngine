@@ -20,6 +20,9 @@
 // 空モデル(Perez分布)の共有ヘッダー。in-scatter項(フォグの合成先の色)に、背景と同じ
 // SkyColorをそのまま使うことで、遠方の地物が無限遠で背景の空色へ厳密に収束するようにする
 // (詳細はSky.hlsli冒頭のコメント、および本ファイルPSMain末尾のコメント参照)
+// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
+#define KURENAI_SKYVIEW_REGISTER t3
 #include "Sky.hlsli"
 
 cbuffer FrameConstants : register(b0)

@@ -872,8 +872,9 @@ namespace Kurenai
         // 目と数値の両方で確認するために用意してある(P13aの合格条件)
         float m_CloudNoiseDebugSlice = 0.0f;
         bool m_CloudNoiseDebugShowDetail = false;
-        // DebugView::AtmosphereLUT で表示するLUT(false=Transmittance、true=MultiScattering)
-        bool m_AtmosphereLUTDebugMulti = false;
+        // DebugView::AtmosphereLUT で表示するLUT
+        // (0=Transmittance、1=MultiScattering、2=SkyView)
+        int m_AtmosphereLUTDebugIndex = 0;
 
         // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
         // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
@@ -972,12 +973,18 @@ namespace Kurenai
         // Shapeを128にしているのは、雲1つが画面上で数百画素に広がるため塊の形にはこの程度の
         // 解像度が要る一方、これ以上上げるとメモリが4倍(256^3で64MB)に跳ねるため。
         // Detailは縁を削るだけで低周波成分を持たないので32で足りる
-        // 大気散乱のLUT(P14a、Hillaire 2020)。解像度は論文の推奨値。
+        // 大気散乱のLUT(P14a/P14b、Hillaire 2020)。解像度は論文の推奨値。
         // Transmittanceは高度×視線天頂角、MultiScatteringは高度×太陽天頂角で、
-        // どちらも大気パラメータだけで決まるためカメラにも時刻にも依存しない
+        // どちらも大気パラメータだけで決まるためカメラにも時刻にも依存しない。
+        // SkyViewは空そのもの(太陽の子午線からの方位×天頂角)で、太陽が動くと変わる。
+        // **kSkyViewLUTWidth/Heightはシェーダ側(AtmosphereCommon.hlsliの
+        // kSkyViewLUTWidthF/kSkyViewLUTHeightF)と一致させること** — UVの半テクセル補正に
+        // 解像度が要るため、焼く側・引く側の両方が同じ値を知っている必要がある
         static constexpr uint32_t kTransmittanceLUTWidth = 256;
         static constexpr uint32_t kTransmittanceLUTHeight = 64;
         static constexpr uint32_t kMultiScatteringLUTSize = 32;
+        static constexpr uint32_t kSkyViewLUTWidth = 192;
+        static constexpr uint32_t kSkyViewLUTHeight = 108;
         static constexpr uint32_t kCloudShapeNoiseSize = 128;
         static constexpr uint32_t kCloudDetailNoiseSize = 32;
         // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
@@ -1082,22 +1089,31 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudDetailNoisePipelineState;
         bool m_CloudNoiseBaked = false;
 
-        // --- 大気散乱のLUT(P14a: Hillaire 2020) ---
+        // --- 大気散乱のLUT(P14a/P14b: Hillaire 2020) ---
         //
-        // どちらも大気パラメータ(AtmosphereLUT.hlsl冒頭の定数)だけで決まり、カメラにも
-        // 太陽にも時刻にも依存しないため、BRDF積分LUT・雲の3Dノイズとまったく同じ理由で
-        // 起動後に一度だけ焼く。大気パラメータを実行時に変えられるようにする場合は
-        // このフラグを落として焼き直すこと。
+        // TransmittanceとMultiScatteringは大気パラメータ(AtmosphereLUT.hlsl冒頭の定数と、
+        // 実行時に動かせる濁り)だけで決まり、カメラにも太陽にも時刻にも依存しない。
+        // そのためBRDF積分LUT・雲の3Dノイズとほぼ同じ「一度だけ焼く」作法に乗せ、
+        // 濁りが変わったときだけ焼き直す(m_AtmosphereLUTBakedTurbidity)。
         //
-        // 【P14aの時点ではまだ誰も読まない】空の色をLUT参照へ差し替えるのはP14b。
-        // したがってP14aでは空の見た目が1ビットも変わらないのが正解になる
+        // SkyViewは空そのもので太陽の位置に依存するため毎フレーム焼く。
+        // 192x108テクセル×(視線32段 + 天頂32段)なので、負荷は実質的に無い。
+        // **このLUTを読むパス(SkyIntegrate/SkyGenerate/Lighting/SSR/AerialPerspective/
+        // PlanarReflection)より前に実行される必要がある**が、順序はレンダーグラフが
+        // Reads/Writesの依存から自動で決めるので、パスの登録順に依存しない
         std::unique_ptr<RHI::IRHITexture> m_TransmittanceLUT;
         std::unique_ptr<RHI::IRHITexture> m_MultiScatteringLUT;
+        std::unique_ptr<RHI::IRHITexture> m_SkyViewLUT;
+        std::unique_ptr<RHI::IRHIBuffer> m_AtmosphereConstantBuffer;
         std::unique_ptr<RHI::IRHIShader> m_TransmittanceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_TransmittancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_MultiScatteringComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MultiScatteringPipelineState;
-        bool m_AtmosphereLUTBaked = false;
+        std::unique_ptr<RHI::IRHIShader> m_SkyViewComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SkyViewPipelineState;
+        // Transmittance/MultiScatteringを焼いたときの濁り。負の値は「まだ一度も焼いていない」。
+        // 濁りが変わるとエアロゾルの量が変わるので、この2枚も焼き直す必要がある
+        float m_AtmosphereLUTBakedTurbidity = -1.0f;
         std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
