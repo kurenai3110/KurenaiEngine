@@ -57,7 +57,7 @@ namespace Kurenai::RHI
         // 17→18(P9): DeferredLighting.hlslが空パラメータ(GPUSkyParameters、SkyIntegrate.hlslが
         // 書く構造化バッファ)をt17で追加したため、t0〜t16(17個)で埋まっていたスロットに
         // もう1つ足す必要が生じた
-        static constexpr uint32_t kTextureSlotCount = 18;
+        static constexpr uint32_t kTextureSlotCount = 20; // 18→20(P13b): ボリュメトリック積雲の3Dノイズ2枚ぶん
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
         // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。

@@ -26,6 +26,12 @@
 // 水面の解析空フォールバック用(P4)。DeferredLighting.hlslが背景の解析評価に使っている
 // のと同じ空モデル定義を共有する。cbufferに依存しないヘッダーで、PIも定義しないため
 // (Sky.hlsli冒頭のコメント参照)、このファイルがPIを定義していない現状と衝突しない
+// ボリュメトリック積雲(P13b)が引く3Dノイズのレジスタ。Sky.hlsliはcbufferにもレジスタにも
+// 依存しない方針なので、DDGI.hlsliと同じくインクルードする側がマクロで指定する。
+// 定義しないシェーダー(SkyGenerate/AerialPerspective/PlanarReflection)ではボリュームの
+// 経路がコンパイルされず、従来の平面の経路だけが残る
+#define KURENAI_CLOUD_SHAPE_REGISTER t13
+#define KURENAI_CLOUD_DETAIL_REGISTER t14
 #include "Sky.hlsli"
 
 static const int kSSRStepCount = 32;
@@ -208,6 +214,9 @@ SkyParameters MakeSkyParameters()
     params.CloudDensity = CloudParams0.w;
     params.CloudScrollOffset = CloudParams1.xy;
     params.CloudForwardG = CloudParams1.z;
+    // 積雲の厚み[m](P13b)。CloudParams1.wは従来ずっと0で未使用だった枠なので、
+    // FrameConstantsは1バイトも増えていない。0ならレイマーチせず従来の平面になる
+    params.CloudThickness = CloudParams1.w;
     // 巻雲(P11)。DeferredLighting.hlslのMakeSkyParametersと完全に同一の内容であること
     params.CirrusCoverage = CloudParams2.x;
     params.CirrusAltitude = CloudParams2.y;

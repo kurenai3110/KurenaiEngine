@@ -2691,6 +2691,16 @@ namespace Kurenai
         // .ksceneが持つのは「反射を使うか」の真偽値だけなので、手法の選択はエンジン側で決める。
         // 規則はDefaultReflectionModeに1か所だけ置いてある
         m_ReflectionMode = m_Scene.SSREnabled ? DefaultReflectionMode(m_RaytracingAvailable) : ReflectionMode::Off;
+        // トーンマップのカーブと空の彩度(アート指定)をシーンから受け取る。
+        // Source/LibraryはSource/Engineに依存できないため、Scene側は同じ並びの独立した列挙を持つ。
+        // 【並びを変えたら両方直すこと】(Assets/Scene.h の TonemapCurveSetting)
+        switch (m_Scene.Tonemap)
+        {
+        case Assets::Scene::TonemapCurveSetting::Reinhard: m_TonemapCurve = TonemapCurve::Reinhard; break;
+        case Assets::Scene::TonemapCurveSetting::ACES:     m_TonemapCurve = TonemapCurve::ACES;     break;
+        case Assets::Scene::TonemapCurveSetting::AgX:      m_TonemapCurve = TonemapCurve::AgX;      break;
+        }
+        m_SkySaturation = m_Scene.SkySaturation;
         if (m_Scene.HasIBLIntensityOverride)
         {
             m_IBLIntensity = m_Scene.IBLIntensity;
@@ -3887,7 +3897,9 @@ namespace Kurenai
             // タービディティ(P7)が動いたら焼き直す。PreethamのxyYモデルの形自体が変わるため、
             // exposureMovedと同じ形の判定をここへ追加する
             const bool turbidityMoved = std::abs(m_SkyTurbidity - m_LastBakedTurbidity) > 0.01f;
-            if (sunMoved || exposureMoved || turbidityMoved)
+            // 空の彩度(アート指定)もPreethamの色度を動かすため、タービディティと同じ扱いで焼き直す
+            const bool saturationMoved = std::abs(m_SkySaturation - m_LastBakedSkySaturation) > 0.005f;
+            if (sunMoved || exposureMoved || turbidityMoved || saturationMoved)
             {
                 m_SkyBakeDirty = true;
             }
@@ -3934,6 +3946,7 @@ namespace Kurenai
             m_LastBakedSunPosition = sunLighting.SunPosition;
             m_LastBakedExposureEV100 = m_EffectiveExposureEV100;
             m_LastBakedTurbidity = m_SkyTurbidity;
+            m_LastBakedSkySaturation = m_SkySaturation;
             m_IBLBaked = false;
             m_IBLIrradianceBaked = false;
         }
@@ -4204,7 +4217,12 @@ namespace Kurenai
             m_CloudUvScale,
             m_CloudDensity,
         };
-        constants.CloudParams1 = { m_CloudScrollOffset.x, m_CloudScrollOffset.y, m_CloudForwardG, 0.0f };
+        // wは長らく未使用(0.0f)だった枠。P13bで積雲の厚み[m]をここへ詰めたので、
+        // FrameConstantsは1バイトも増えていない。0ならシェーダー側はレイマーチせず従来の平面になる
+        constants.CloudParams1 = {
+            m_CloudScrollOffset.x, m_CloudScrollOffset.y, m_CloudForwardG,
+            m_CloudVolumetric ? m_CloudThickness : 0.0f,
+        };
         // 巻雲(P11)。積雲と同じ理由でここで一度だけ組み立てる。m_CirrusEnabled=falseのときは
         // CloudParams2.xへ0を渡し、Sky.hlsli側のSkyColorが早期脱出する経路(判断C)を通す
         constants.CloudParams2 = {
@@ -4320,7 +4338,7 @@ namespace Kurenai
                         sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
                     };
                     integrateConstants.IntegrateParams = {
-                        sunLighting.SkyIlluminanceLux, effectiveExposure, m_SkyTurbidity, 0.0f
+                        sunLighting.SkyIlluminanceLux, effectiveExposure, m_SkyTurbidity, m_SkySaturation
                     };
                     cmd->UpdateBuffer(m_SkyIntegrateConstantBuffer.get(), &integrateConstants, sizeof(integrateConstants));
 
@@ -5509,6 +5527,11 @@ namespace Kurenai
                 cmd->SetTexture(16, m_DDGIDistanceAtlas.get());
                 // 空パラメータ(P9)。DeferredLighting.hlsl側はt17(t0〜t16が既に使用済み)
                 cmd->SetShaderResourceBuffer(17, m_SkyParametersBuffer.get());
+                // ボリュメトリック積雲の3Dノイズ(P13b)。反射プローブ・DDGIと同じ理由で、
+                // 雲が無効なフレームでも常にバインドする(シェーダーが宣言しているリソースは
+                // 必ず埋める。SetPipelineStateが毎回ルート引数を無効化するため)
+                cmd->SetTexture(18, m_CloudShapeNoiseTexture.get());
+                cmd->SetTexture(19, m_CloudDetailNoiseTexture.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -5813,6 +5836,10 @@ namespace Kurenai
                     cmd->SetTexture(11, m_PlanarReflectionColor.get());
                     // 空パラメータ(P9)。SSR.hlsl側はt12(t0〜t11が既に使用済み)
                     cmd->SetShaderResourceBuffer(12, m_SkyParametersBuffer.get());
+                    // ボリュメトリック積雲の3Dノイズ(P13b)。水面に映る雲も背景とまったく同じ
+                    // 立体にならなければ「空の雲と水面の雲が別物」になるため、ここにも同じものを渡す
+                    cmd->SetTexture(13, m_CloudShapeNoiseTexture.get());
+                    cmd->SetTexture(14, m_CloudDetailNoiseTexture.get());
                     cmd->Draw(3, 0);
                 },
             });

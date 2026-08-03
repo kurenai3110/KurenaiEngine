@@ -176,6 +176,25 @@ namespace Kurenai::Assets
         // (同じ反射を二重に計上している。docs/Architecture.html 14.9.5節)。そのため無効にする
         bool SSREnabled = true;
 
+        // トーンマップのカーブ。Source/LibraryはSource/Engineに依存できないため、
+        // KurenaiEngine3D::TonemapCurveと同じ並びの独立した列挙をここに持つ
+        // (KurenaiEngine3D::ApplyLoadedSceneが1対1で対応付ける。並びを変えたら両方直すこと)。
+        // 既定のAgXはハイライトが色相を保ったまま白へ脱色するので赤い内観に強い一方、
+        // 空のような広い面では彩度を落とす(実測: 空の最も青い画素でB/R 1.53→1.34)。
+        // 屋外の風景ではACESのほうが空の青が残るため、シーン単位で選べるようにしてある
+        enum class TonemapCurveSetting
+        {
+            Reinhard,
+            ACES,
+            AgX,
+        };
+        TonemapCurveSetting Tonemap = TonemapCurveSetting::AgX;
+
+        // 空の彩度(アート指定)。既定1.0はPreethamの色度そのまま。色度図上で白色点から
+        // 遠ざける倍率で、色相は変えずに鮮やかさだけを変える。物理量ではないので
+        // 「写真に寄せたい」シーンだけが明示的に上げる
+        float SkySaturation = 1.0f;
+
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };

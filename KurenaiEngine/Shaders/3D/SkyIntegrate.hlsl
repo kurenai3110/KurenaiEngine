@@ -44,7 +44,8 @@ cbuffer SkyIntegrateConstants : register(b0)
     // xyz=太陽が「ある」向き(正規化済み)、w=未使用
     float4 SunDirection;
     // x=目標照度[lx](SunLighting::SkyIlluminanceLux)、y=実効プリ露出(effectiveExposure)、
-    // z=タービディティ(P7、KurenaiEngine3D::m_SkyTurbidity)、w=未使用
+    // z=タービディティ(P7、KurenaiEngine3D::m_SkyTurbidity)、
+    // w=空の彩度(アート指定。KurenaiEngine3D::m_SkySaturation。Sky.hlsliのSkySaturation参照)
     float4 IntegrateParams;
 };
 
@@ -76,6 +77,7 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // タービディティ(P7)。C++側からIntegrateParams.zで渡される
     const float turbidity = IntegrateParams.z;
+    const float skySaturation = IntegrateParams.w;
     // Preethamの重み。仰角0度で0(従来ティントのみ)、仰角5度で1(Preethamのみ)。
     // Sky.hlsli SkyColorUpperUnitの早期脱出/クロスフェードと同じ閾値であること
     const float preethamWeight = smoothstep(0.0f, sin(radians(5.0f)), sunPosition.y);
@@ -91,6 +93,7 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     unitParams.SunGlowTint = tintSet.SunGlow;
     unitParams.SunGlowStrength = tintSet.SunGlowStrength;
     unitParams.Turbidity = turbidity;
+    unitParams.SkySaturation = skySaturation;
     unitParams.PreethamWeight = preethamWeight;
 
     const float phi = (float(phiIndex) + 0.5f) * dPhi;
@@ -150,7 +153,7 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
         result.Luminance = float4(zenithLuminance, integral, 0.0f, 0.0f);
         // P7: タービディティとPreethamの重みもここで確定させて配る
         // (SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslはApplySkyParametersFromBufferで読むだけ)
-        result.ModelParams = float4(turbidity, preethamWeight, 0.0f, 0.0f);
+        result.ModelParams = float4(turbidity, preethamWeight, skySaturation, 0.0f);
 
         SkyParametersOut[0] = result;
     }

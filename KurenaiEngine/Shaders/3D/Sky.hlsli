@@ -116,6 +116,10 @@ struct SkyParameters
     float  Turbidity;        // 大気の濁り具合。Preethamの定義域はおおむね1.7〜10
     float  PreethamWeight;   // 0=従来ティントのみ、1=Preethamのみ。太陽仰角0〜5度でクロスフェードする
                               // (夜・薄明はPreethamの定義域外のため。SkyColorUpperUnit参照)
+    // 空の彩度。**物理量ではなく明示的なアート指定**。1.0でPreethamの色度そのまま。
+    // 色度図上で白色点(D65)から遠ざける倍率で、色相は変えずに鮮やかさだけを変える。
+    // なぜ必要かはSkyColorUpperUnitの該当箇所のコメント参照
+    float  SkySaturation;
 
     // --- 雲(P5: 積雲1層 / P11: 巻雲を2層目として追加)。CloudCoverage <= 0 なら積雲側の計算は
     // 一切行わない(判断C、SkyColor参照)。フィールドはあえて配列化せず層ごとに独立した
@@ -130,6 +134,8 @@ struct SkyParameters
     float2 CloudScrollOffset;  // 風によるノイズ空間の移動量(CPU側でkCloudNoisePeriodの周期に
                                 // wrap済み。KurenaiEngine3D.cppのm_CloudScrollOffset参照)
     float  CloudForwardG;      // Henyey-Greensteinの非対称パラメータ(前方散乱の強さ)
+    float  CloudThickness;     // 雲底から雲頂までの厚み[m](P13b)。0ならレイマーチせず
+                                // 従来の厚みゼロの平面として扱う(巻雲はこちら)
 
     // --- 巻雲(P11)。積雲より高層にある2層目。CirrusCoverage <= 0 なら巻雲側の計算は
     // 一切行わない(判断C、SkyColor参照)。判断A(IBLキューブに雲を焼かない)・判断B
@@ -204,6 +210,7 @@ SkyParameters ApplySkyParametersFromBuffer(SkyParameters params, GPUSkyParameter
     params.SunGlowStrength = data.SunGlowTint.w;
     params.Turbidity = data.ModelParams.x;
     params.PreethamWeight = data.ModelParams.y;
+    params.SkySaturation = data.ModelParams.z;
     // 空照度/天頂輝度の積分値(EvaluateCloudLayerが太陽照度を天頂輝度の単位で表すのに使う。
     // SkyParameters::SkyIlluminanceOverZenithのコメント参照)
     params.SkyIlluminanceOverZenith = data.Luminance.y;
@@ -326,6 +333,11 @@ SkyTintSet ComputeSkyTintSet(float sunElevationSin)
 }
 
 // ============================================================================
+// 空の彩度(アート指定)を効かせ始める高さ。dir.yがこの値以上で指定した彩度が100%効き、
+// 0で1.0(=Preethamのまま)になる。0.25は仰角およそ14.5度に相当する。
+// 地平線際で効かせない理由はSkyColorUpperUnitの該当箇所のコメント参照
+static const float kSkySaturationFadeEndY = 0.25f;
+
 // Preetham xyYモデル(P7)
 //
 // 従来のSkyColorUpperは「色味(SkyTintFromSet、アート的な4色補間)」と「輝度分布(Perez分布)」を
@@ -458,7 +470,35 @@ float3 SkyColorUpperUnit(float3 dir, SkyParameters params)
     const float chromaY = yz * (PerezF(cosTheta, gamma, cyA, cyB, cyC, cyD, cyE) /
                                  PerezF(1.0f, thetaSun, cyA, cyB, cyC, cyD, cyE));
 
-    const float3 preethamColor = XyYToLinearSRGB(chromaX, chromaY, preethamRelative);
+    // 【空の彩度(アート指定)】色度図上で白色点(D65)から遠ざけることで、Preethamが返す色相を
+    // 保ったまま鮮やかさだけを上げ下げする。1.0で無変換(=Preethamそのまま)。
+    //
+    // 【なぜこのつまみが要るのか】参考写真の最も深い空はB/R=4.84(RGB 51,154,247)だったのに対し、
+    // Preethamは論文の係数から独立に計算しても B/R=1.34〜1.74 しか出さない(タービディティを
+    // 1.8まで下げても改善せず、むしろ空が明るくなってトーンマップ上端で圧縮されるぶん下がる)。
+    // 実測でも実装はこの予測範囲の中にあり、モデルに忠実である。つまり両者の差は実装の誤りではなく
+    // Preethamというモデルの性質で、**物理を直しても埋まらない**。そこで物理の外側にある値として
+    // 明示的に分離し、既定は1.0(=物理のまま)、絵作りが要るシーンだけ.ksceneで上げる形にした。
+    //
+    // 【照度正規化を壊さない】xyYのうちYには一切触れないので、SkyIntegrate.hlslが積分する
+    // Rec.709輝度(Rec.709原色系ではYそのもの)は変わらない。色域外へ出た場合も
+    // XyYToLinearSRGBのデサチュレーションが元のYへ再スケールして戻す
+    //
+    // 【地平線際では効かせない】Preethamの色度は仰角が下がるほど緑が落ち込み、sRGBでは
+    // マゼンタ寄りになる。論文の係数から独立に計算しても仰角0.5度で緑の落ち込みが-7.6
+    // (実装の実測も-7.5で一致。色域外れは起きていないのでクリップの副作用でもない)、
+    // つまりモデルそのものの性質である。ここで一律に彩度を上げるとこの偏りまで増幅され、
+    // 遠景の空が紫がかって見える(実測: 彩度1.9で落ち込みが-14.4まで倍増した)。
+    // 一方でモデルが実際に不足しているのは**天頂側の青**なので、上げたいのはそこだけ。
+    // 仰角で重みを付け、地平線際は1.0(=Preethamのまま)へ戻す
+    const float saturationWeight = smoothstep(0.0f, kSkySaturationFadeEndY, dir.y);
+    const float effectiveSaturation = lerp(1.0f, params.SkySaturation, saturationWeight);
+
+    const float2 kWhitePointD65 = float2(0.3127f, 0.3290f);
+    const float saturatedX = kWhitePointD65.x + (chromaX - kWhitePointD65.x) * effectiveSaturation;
+    const float saturatedY = kWhitePointD65.y + (chromaY - kWhitePointD65.y) * effectiveSaturation;
+
+    const float3 preethamColor = XyYToLinearSRGB(saturatedX, saturatedY, preethamRelative);
 
     // 完全に昼(仰角5度以上)なら従来ティントの計算は行わずそのまま返す(コスト削減)
     if (params.PreethamWeight >= 1.0f)
@@ -688,6 +728,9 @@ struct CloudLayerParams
     float  ForwardG;
     float2 AnisotropicScale; // fBmのUVを異方的に伸ばす倍率(積雲は(1,1)、巻雲は筋状にする)
     int    ShadowSteps;      // 自己影の積分ステップ数。0なら自己影を計算しない
+    // 雲底から雲頂までの厚み[m](P13b)。**0なら従来の厚みゼロの平面として扱う**。
+    // 巻雲は0を入れるため、巻雲が通るコードパスはP13b前と1命令も変わらない
+    float  Thickness;
     // アルベド・単散乱強度・多重散乱の下限/上限。式はEvaluateCloudLayerの1箇所だけで、
     // 値だけを層ごとに変える(kCumulusAlbedo等/kCirrusAlbedo等のコメント参照)
     float  Albedo;
@@ -708,6 +751,7 @@ CloudLayerParams MakeCumulusLayerParams(SkyParameters params)
     layer.ForwardG = params.CloudForwardG;
     layer.AnisotropicScale = float2(1.0f, 1.0f); // 積雲は等方(筋状にしない)
     layer.ShadowSteps = kCumulusShadowSteps;
+    layer.Thickness = params.CloudThickness; // 0でなければスラブをレイマーチする(P13b)
     layer.Albedo = kCumulusAlbedo;
     layer.SingleScatterScale = kCumulusSingleScatterScale;
     layer.AmbientTermMin = kCumulusAmbientTermMin;
@@ -726,6 +770,9 @@ CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
     layer.Density = params.CirrusDensity;
     layer.ScrollOffset = params.CirrusScrollOffset;
     layer.ForwardG = kCirrusForwardG;
+    // 【巻雲は厚みゼロのまま】巻雲は光学的に薄いシート状で、レイマーチする値が無い。
+    // 0を入れることで従来の平面の経路をそのまま通り、描画結果はP13b前と厳密に一致する
+    layer.Thickness = 0.0f;
     layer.AnisotropicScale = float2(params.CirrusAnisotropy, 1.0f); // U方向だけ伸ばして筋状にする
     layer.ShadowSteps = kCirrusShadowSteps;
     layer.Albedo = kCirrusAlbedo;
@@ -744,6 +791,172 @@ CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
 // 係数(SkyParameters::SunToSkyIlluminanceRatio/SkyIlluminanceOverZenith参照)。SkyParameters
 // 全体ではなくこの2つだけを個別の引数にしているのは、既存のsunDirection/zenithLuminanceと
 // 同じ「層に依らない値は個別の引数で渡す」規約に揃えるため
+// ============================================================================
+// ボリュメトリック積雲(P13b)
+//
+// 積雲だけを、雲底(Altitude)から雲頂(Altitude + Thickness)までのスラブとしてレイマーチする。
+// Thickness == 0 の層(巻雲)は従来どおり厚みゼロの平面として扱い、下の EvaluateCloudLayer の
+// 平面分岐をそのまま通る(＝巻雲の描画結果はP13b前と厳密に一致する)。
+//
+// 【密度の組み立て】3つを掛け合わせる:
+//   ウェザーマップ … 既存の2次元 CloudFbm。「どこにどれだけ雲があるか」の平面分布。
+//                    P12で決めた CloudUvScale=1/1000・CloudCoverage=0.45 の意味と調整結果が
+//                    そのまま生きるよう、ここは捨てずに残してある
+//   形状(3D)       … CloudNoiseGenerate.hlsl が焼いた 128^3。塊の3次元的な形
+//   高さプロファイル … 積雲の「平らな底・丸い頭」を作る解析的な形状関数
+// さらにディテール(32^3)で縁だけを削り、房状の輪郭にする。
+//
+// 【3Dテクスチャのレジスタはインクルードする側が決める】このヘッダーは cbuffer にも
+// レジスタにも依存しない方針なので、DDGI.hlsli と同じくマクロで受け取る。
+// 定義しなかったシェーダー(SkyGenerate/AerialPerspective/PlanarReflection)では
+// ボリュームの経路がコンパイルされず、平面の経路だけが残る。
+//   KURENAI_CLOUD_SHAPE_REGISTER    形状ノイズ(Texture3D)
+//   KURENAI_CLOUD_DETAIL_REGISTER   ディテールノイズ(Texture3D)
+// ============================================================================
+#ifdef KURENAI_CLOUD_SHAPE_REGISTER
+#include "Samplers.hlsli"
+Texture3D CloudShapeNoiseTexture : register(KURENAI_CLOUD_SHAPE_REGISTER);
+Texture3D CloudDetailNoiseTexture : register(KURENAI_CLOUD_DETAIL_REGISTER);
+#define KURENAI_CLOUD_VOLUME 1
+#endif
+
+// レイマーチのステップ数。**コストの唯一のつまみ**なので、負荷を調整するときはここを動かす
+// (cbufferを増やさないためシェーダ内定数にしてある。kCirrusShadowStepsと同じ扱い)
+static const int kCumulusRaymarchSteps = 12;
+
+// 形状ノイズがワールド空間で1周する距離[m]。雲の塊(ウェザーマップの1セル=1,000m)より
+// 大きくしておくと、同じ模様が隣の雲で繰り返されているのが読み取りにくくなる
+static const float kCloudShapeWorldPeriod = 4000.0f;
+// ディテールノイズが1周する距離[m]。縁を削るための高周波成分なので形状より1桁細かい
+static const float kCloudDetailWorldPeriod = 400.0f;
+// ディテールがスラブの厚み方向に何周するか。横方向と同じ密度の細かさを縦にも持たせる
+static const float kCloudDetailVerticalRepeat = 3.0f;
+// ディテールで縁を削る強さ。0で削らない(形状そのまま)、大きいほど輪郭が房状に痩せる
+static const float kCloudDetailErode = 0.35f;
+// 3Dの変調(形状 × 高さプロファイル × ディテールの浸食)のスラブ内平均を1へ揃える係数。
+// **見た目の調整値ではなく実測から逆算した値**で、CloudNoiseGenerate.hlslと同じ式を
+// オフラインで再現し、スラブ内を一様に40万点サンプルして平均を求めた:
+//   base の平均           = 0.781 (標準偏差 0.055)
+//   高さプロファイルの平均 = 0.676
+//   base × プロファイル    = 0.528
+//   ↑をディテール(浸食0.35)で削った後 = 0.458  → 1/0.458 = 2.183
+// これを掛けることでスラブ全体の光学的深さの平均が平面レイヤーのときと一致し、
+// CloudDensityと判断B(被覆率→平均透過率)の意味がどちらも変わらない。
+// 【kCloudDetailErode・高さプロファイルの形・ノイズの生成方法のいずれかを変えたら測り直すこと】
+static const float kCloudVolumeDensityNormalize = 4.315f;
+// 形状ノイズにコントラストを付ける範囲。**実測した分布から決めた値**で、
+// remap(shape.r, WorleyFbm(gba) - 1, 1) の出力は平均0.784・標準偏差0.055とほとんど定数だった
+// (下限が -0.6 付近になるため [0,1] が [0.375, 1] へ圧縮される)。このままだと3Dの形が
+// ほとんど効かないので、実測の15%点(0.726)〜92%点(0.856)を[0,1]へ引き伸ばす。
+// 変換後は平均0.455・標準偏差0.329となり、雲の芯と隙間がはっきり分かれる。
+// 【この2つを変えたら上のkCloudVolumeDensityNormalizeを測り直すこと】
+static const float kCloudShapeContrastLow = 0.726f;
+static const float kCloudShapeContrastHigh = 0.856f;
+
+// 高さプロファイルの形。積雲は「平らな底・丸い頭」なので、下端は短く立ち上げ、
+// 上端は長くなだらかに落とす。いずれも見た目からの調整値で物理的な導出ではない
+static const float kCloudProfileBaseSoftness = 0.10f;
+static const float kCloudProfileTopStart = 0.45f;
+
+// 雲頂ほど明るく雲底ほど暗いという勾配を作る解析項の強さ(EvaluateCloudLayerの自己影参照)。
+// 「サンプルより上にどれだけ雲が残っているか」を厚みに比例した光学的深さとして扱う係数。
+//
+// 【桁を間違えた記録】最初1.2fにしていたが、この係数はCloudDensity(既定8.0)と
+// 1/sin(太陽仰角)(仰角50度で1.3)に掛かるため、雲底(hf=0)での光学的深さが
+// 8.0 × 1.2 × 1.3 ≒ 12 となり透過率が事実上0、つまり雲底が真っ黒になっていた。
+// 実測でも雲全体が平面レイヤーより暗く(中央輝度157対183)、白い雲として判定できる画素が
+// 空の上側で77,794→2,017まで落ちていた。
+// 視線方向の自己影が同じ理由でkCloudSunExtinctionScale=0.12という小さい係数を使っているのと
+// 同じ桁に揃える
+static const float kCloudTopShadowScale = 0.12f;
+
+// 積雲の高さプロファイル。hf=0が雲底、hf=1が雲頂
+float CloudVerticalProfile(float hf)
+{
+    return smoothstep(0.0f, kCloudProfileBaseSoftness, hf) * (1.0f - smoothstep(kCloudProfileTopStart, 1.0f, hf));
+}
+
+// 3チャンネルのWorleyを1つのfBmへまとめる。重みはCloudNoiseGenerate.hlsl側で
+// オクターブへ与えたのと同じ等比(0.625 : 0.25 : 0.125)にしてある
+float CloudWorleyFbmFromChannels(float3 channels)
+{
+    return dot(channels, float3(0.625f, 0.25f, 0.125f));
+}
+
+#if KURENAI_CLOUD_VOLUME
+// スラブ内の1サンプルの密度。
+//   noiseXZ … 2次元ノイズ空間での位置(= サンプルのXZ * UvScale + ScrollOffset)。
+//              風のスクロールが既に入っているので、3Dテクスチャ側もこれを流用するだけで
+//              同じ速度・同じ向きに流れる
+//   hf      … スラブ内の高さ(0=雲底、1=雲頂)
+//   weather … ウェザーマップの値(既存の2次元 CloudFbm を被覆率で整形したもの)
+//
+// 【設計: 3Dノイズは密度を「作る」のではなく「再分配する」】
+// この関数は weather に 3D の変調を掛けた値を返し、その変調はスラブ内の平均が1になるよう
+// 正規化してある(kCloudVolumeDensityNormalize)。したがってスラブ全体の光学的深さの平均は
+// 平面レイヤーのときと一致し、CloudDensity(消散係数)と判断B(被覆率→平均透過率)の意味が
+// どちらも変わらない。3Dノイズが変えるのは「同じ量の雲が高さ方向にどう分布するか」だけである。
+//
+// 【最初にやって失敗した形】当初は saturate(CloudRemap(base, 1 - weather, 1)) のように
+// 3Dの形をウェザーマップでもう一度しきい値処理していた。しかしこれは二重に閾値を掛ける形で、
+// weather は既に被覆率で整形済み(大半の方向で0に近い)なので 1-weather はほぼ1になり、
+// base(平均0.781・標準偏差0.055とほぼ定数)を上回れず密度が常に0へ落ちた。
+// 実測でも空の上側で「雲」と判定できる画素がほぼ0になっていた。
+float CloudSampleDensity(float2 noiseXZ, float hf, float weather, CloudLayerParams layer)
+{
+    // 3Dテクスチャは Wrap で引くので範囲を気にせず割るだけでよい。
+    // 分母に layer.UvScale を含めるのは、noiseXZ が既に UvScale を掛けた空間にいるため
+    const float shapeScale = 1.0f / max(kCloudShapeWorldPeriod * layer.UvScale, 1e-9f);
+    // W(奥行き)にはスラブ内の高さをそのまま入れる。厚み全体でテクスチャの奥行きを1周ぶん
+    // 使い切るので、雲底から雲頂まで途中で同じ断面が繰り返されない
+    const float3 shapeUvw = float3(noiseXZ * shapeScale, hf);
+    const float4 shape = CloudShapeNoiseTexture.SampleLevel(VolumeSampler, shapeUvw, 0.0f);
+
+    // Perlin-Worley(R)を、周波数を上げたWorley(GBA)を下限として引き伸ばす。
+    // Rだけだと塊が丸すぎ、Worleyを重ねることで綿状の輪郭になる
+    const float shapeFbm = CloudWorleyFbmFromChannels(shape.gba);
+    const float rawBase = saturate(CloudRemap(shape.r, shapeFbm - 1.0f, 1.0f));
+    // rawBase はほとんど定数(実測: 平均0.784・標準偏差0.055)なので、実測した分布の
+    // 15%点〜92%点を[0,1]へ引き伸ばしてコントラストを付ける(定数のコメント参照)
+    const float base = saturate(CloudRemap(rawBase, kCloudShapeContrastLow, kCloudShapeContrastHigh));
+
+    // 高さプロファイルで「平らな底・丸い頭」に整形する
+    const float shaped = base * CloudVerticalProfile(hf);
+    if (shaped <= 0.0f)
+    {
+        // 雲底の直下と雲頂の直上ではプロファイルが0になる。ここで抜けると
+        // ディテール(2枚目のテクスチャフェッチ)を丸ごと省ける
+        return 0.0f;
+    }
+
+    // ディテールで縁だけを削る。密度が高い芯はほとんど削れず、薄い縁だけが房状に痩せる
+    const float detailScale = 1.0f / max(kCloudDetailWorldPeriod * layer.UvScale, 1e-9f);
+    const float3 detailUvw = float3(noiseXZ * detailScale, hf * kCloudDetailVerticalRepeat);
+    const float3 detail = CloudDetailNoiseTexture.SampleLevel(VolumeSampler, detailUvw, 0.0f).rgb;
+    const float detailFbm = CloudWorleyFbmFromChannels(detail);
+    const float modulation = saturate(CloudRemap(shaped, detailFbm * kCloudDetailErode, 1.0f));
+
+    return weather * modulation * kCloudVolumeDensityNormalize;
+}
+#endif
+
+// 1サンプル(または平面1枚)の散乱光。P13bで平面とボリュームの両方から呼ぶために
+// 式を1箇所へ括り出した。中身はP13b前の EvaluateCloudLayer 末尾にあった式と同じ
+float3 CloudInScatter(
+    float sunTransmittance, float phaseNormalized, CloudLayerParams layer, float sunIlluminance,
+    float zenithLuminance)
+{
+    // 単散乱の簡易近似: 自己影を通って弱まった太陽光を位相関数で配分する。
+    // 多重散乱の項も同じ自己影の透過率で下限〜上限を補間し、厚い芯が暗く薄い縁が明るくなるようにする
+    const float sunLitTerm =
+        sunTransmittance * phaseNormalized * layer.SingleScatterScale
+        + lerp(layer.AmbientTermMin, layer.AmbientTermMax, sunTransmittance);
+
+    // 日陰側(自己影で太陽光が届かない雲底)は空の光だけで照らされる。この項だけは
+    // 天頂輝度基準で残す(kCloudSkyAmbientTermのコメント参照)。1/PIはランバート面の輝度換算
+    return layer.Albedo * (sunLitTerm * sunIlluminance / kCloudPI + kCloudSkyAmbientTerm * zenithLuminance);
+}
+
 // 雲へ掛ける大気遠近の設定(P12)。SkyParametersの該当5フィールドをそのまま束ねたもの。
 // 【なぜ5つのスカラーを個別に渡さずに束ねるか】既存の規約は「層に依らない値は個別の引数で渡す」
 // (sunDirection/zenithLuminance等)だが、それは1〜2個だから成り立つ書き方で、5つ増やすと
@@ -792,9 +1005,8 @@ void EvaluateCloudLayer(
     const float n = CloudFbm(uv * layer.AnisotropicScale);
     const float density = saturate(CloudRemap(n, 1.0f - layer.Coverage, 1.0f));
 
-    // ビアの法則。経路長はメートル、Density(消散係数)はCPU側UIで調整する無次元の強さ
-    const float opticalDepth = density * layer.Density * pathLengthScale;
-    transmittance = exp(-opticalDepth);
+    // 透過率の算出は下の (b) 節で行う(平面かボリュームかで分かれるため)。
+    // ここまでで求めた density / uv は平面の経路がそのまま使う
 
     // 自己影: 雲底のUVから太陽方向へlayer.ShadowSteps段、densityを積分してビアの法則で
     // 太陽光の減衰(sunTransmittance)を求める。太陽方向はXZへ投影して使う
@@ -804,6 +1016,11 @@ void EvaluateCloudLayer(
     // 自己影がほとんど効かないため、コストを払う意味がない。ステップ数がCloudLayerParamsの
     // 実行時の値になったため、下のループは[unroll]ではなく[loop]にしてある
     // (トリップ数がシェーダ内定数でなくなり、コンパイル時に展開できないため)
+    // 1/sin(太陽仰角)。従来は自己影のif内で求めていたが、ボリューム経路(P13b)の
+    // 「サンプルより上に残っている雲」の項でも使うため外へ出した。
+    // 自己影を持たない層(巻雲、ShadowSteps=0)ではこの値は使われないままになる
+    const float sunPathLengthScale = 1.0f / max(sunDirection.y, kCloudMinDirY);
+
     float sunTransmittance = 1.0f;
     if (layer.ShadowSteps > 0)
     {
@@ -822,7 +1039,6 @@ void EvaluateCloudLayer(
         // 太陽方向の光学的深さも視線側と同じ無次元量で積む(平均密度 × 消散係数 × 1/sin(太陽仰角))。
         // 単位を揃えないと自己影が飽和して雲が一様な灰色になる(kCloudSunExtinctionScaleのコメント参照)
         const float averageShadowDensity = shadowDensitySum / float(layer.ShadowSteps);
-        const float sunPathLengthScale = 1.0f / max(sunDirection.y, kCloudMinDirY);
         const float sunOpticalDepth =
             averageShadowDensity * layer.Density * kCloudSunExtinctionScale * sunPathLengthScale;
         sunTransmittance = exp(-sunOpticalDepth);
@@ -846,20 +1062,101 @@ void EvaluateCloudLayer(
     // skyIlluminanceOverZenith)の積で、天頂輝度の単位のまま表せる
     const float sunIlluminance = sunToSkyIlluminanceRatio * skyIlluminanceOverZenith * zenithLuminance;
 
-    // 単散乱の簡易近似: 自己影を通って弱まった太陽光(sunTransmittance)を位相関数で配分する。
-    // 多重散乱の項も同じ自己影の透過率で下限〜上限を補間し、厚い芯が暗く薄い縁が明るくなるようにする。
-    // 雲の内部で多重散乱した光も元は太陽光なので、単散乱・多重散乱ともsunIlluminanceを基準にする
-    const float sunLitTerm =
-        sunTransmittance * phaseNormalized * layer.SingleScatterScale
-        + lerp(layer.AmbientTermMin, layer.AmbientTermMax, sunTransmittance);
+    // (b) 透過率と散乱光。厚みを持つ層(積雲)はスラブをレイマーチし、
+    // 厚みゼロの層(巻雲)は従来どおり1枚の平面として扱う。
+    //
+    // 【巻雲のコードパスはP13b前と1命令も変わらない】下の #if が無効なシェーダー、および
+    // Thickness == 0 の層は else 側の平面経路だけを通る。式もP13b前とまったく同じで、
+    // 唯一の違いは散乱光の式を CloudInScatter へ括り出して両経路で共有した点
+#if KURENAI_CLOUD_VOLUME
+    if (layer.Thickness > 0.0f)
+    {
+        // --- ボリューム(P13b): 雲底から雲頂まで前から後ろへ積分する ---
+        const float invSteps = 1.0f / float(kCumulusRaymarchSteps);
 
-    // 日陰側(自己影で太陽光が届かない雲底)は空の光だけで照らされる。この項だけは
-    // 従来どおり天頂輝度基準で残す(kCloudSkyAmbientTermのコメント参照)。
-    // 1/PIはランバート面の輝度換算(照度→輝度)。
-    // (1-transmittance)は視線の経路のうち実際に散乱へ回った分のスケール(下の行で掛ける)
-    const float3 inScatter =
-        layer.Albedo * (sunLitTerm * sunIlluminance / kCloudPI + kCloudSkyAmbientTerm * zenithLuminance);
-    scatteredLight = inScatter * (1.0f - transmittance);
+        // 【縦方向の影は勾配であって減光ではない】下の aboveTransmittance は
+        // exp(-(1-hf) * k) で雲底ほど暗くなる係数だが、これをそのまま掛けるとスラブ内の平均が
+        // (1 - exp(-k)) / k ≒ 0.57 になり、雲全体が平面レイヤーより暗くなってしまう
+        // (実測: 雲画素の中央輝度が 167.5 → 151 まで落ちていた)。
+        // 平均で割って1へ揃えることで、「雲底が暗く雲頂が明るい」という勾配だけを残し、
+        // 雲全体の明るさは平面レイヤーと同じに保つ。kはhfに依らないのでここで1回だけ求める
+        const float topShadowK = layer.Density * kCloudTopShadowScale * sunPathLengthScale;
+        const float topShadowMean = (topShadowK > 1e-4f)
+            ? ((1.0f - exp(-topShadowK)) / topShadowK)
+            : 1.0f;
+        const float topShadowNormalize = 1.0f / max(topShadowMean, 1e-4f);
+
+        float accumTransmittance = 1.0f;
+        float3 accumScatter = float3(0.0f, 0.0f, 0.0f);
+
+        [loop]
+        for (int marchStep = 0; marchStep < kCumulusRaymarchSteps; ++marchStep)
+        {
+            // 中点サンプリング。hf=0が雲底、hf=1が雲頂
+            const float hf = (float(marchStep) + 0.5f) * invSteps;
+
+            // このサンプルの高度における視線のXZ。**高さとともに横へずれるのが視差の源**で、
+            // 仰角45度・厚み1,000mなら雲頂は雲底より1,000m(=ウェザーマップの1セル)横へ動く。
+            // hf=0を代入すると平面経路の hitXZ と厳密に一致する
+            const float2 sampleXZ = dir.xz * ((layer.Altitude + hf * layer.Thickness) / safeDirY);
+            const float2 sampleNoiseXZ = sampleXZ * layer.UvScale + layer.ScrollOffset;
+
+            // ウェザーマップ。ここが0なら3Dテクスチャを1枚も引かずに次のステップへ飛ぶ
+            const float weatherN = CloudFbm(sampleNoiseXZ * layer.AnisotropicScale);
+            const float weather = saturate(CloudRemap(weatherN, 1.0f - layer.Coverage, 1.0f));
+            if (weather <= 0.0f)
+            {
+                continue;
+            }
+
+            const float sampleDensity = CloudSampleDensity(sampleNoiseXZ, hf, weather, layer);
+            if (sampleDensity <= 0.0f)
+            {
+                continue;
+            }
+
+            // 【1/kCumulusRaymarchStepsを掛ける理由】こうしておくと全ステップの光学的深さの和が
+            // 平面経路の density * Density * pathLengthScale と同じスケールになり、
+            // CloudDensity(消散係数)の意味がP13b前から変わらない。判断B(被覆率→平均透過率)を
+            // 再調整せずに済むのもこのため
+            const float stepOpticalDepth = sampleDensity * layer.Density * pathLengthScale * invSteps;
+            const float stepTransmittance = exp(-stepOpticalDepth);
+
+            // 【雲底が暗く雲頂が明るい勾配】サンプルより上にまだ残っている雲の厚み(1-hf)を
+            // 光学的深さとして解析的に扱う。太陽方向へ3次元にマーチすればより正確だが、
+            // 立体感の主要因はこの縦方向の勾配であり、コストを1サンプルあたり0で済ませられる。
+            // 横方向の自己影は上で求めた sunTransmittance(視線1本につき1回)がそのまま担う
+            const float aboveTransmittance = exp(-(1.0f - hf) * topShadowK) * topShadowNormalize;
+            const float3 stepInScatter = CloudInScatter(
+                sunTransmittance * aboveTransmittance, phaseNormalized, layer, sunIlluminance,
+                zenithLuminance);
+
+            // 前から後ろへの合成。手前で既に遮られたぶん(accumTransmittance)だけ寄与する
+            accumScatter += accumTransmittance * (1.0f - stepTransmittance) * stepInScatter;
+            accumTransmittance *= stepTransmittance;
+
+            // ほぼ不透明になったら以降のステップは絵に出ない
+            if (accumTransmittance < 0.01f)
+            {
+                break;
+            }
+        }
+
+        transmittance = accumTransmittance;
+        scatteredLight = accumScatter;
+    }
+    else
+#endif
+    {
+        // --- 平面(P5〜P12と同一) ---
+        // ビアの法則。経路長はメートル、Density(消散係数)はCPU側UIで調整する無次元の強さ
+        const float opticalDepth = density * layer.Density * pathLengthScale;
+        transmittance = exp(-opticalDepth);
+        // (1-transmittance)は視線の経路のうち実際に散乱へ回った分のスケール
+        scatteredLight =
+            CloudInScatter(sunTransmittance, phaseNormalized, layer, sunIlluminance, zenithLuminance)
+            * (1.0f - transmittance);
+    }
 
     // (e) 地平線際のフェード。kCloudMinDirYによる経路長クランプと合わせてのエイリアシング対策
     float fade = smoothstep(kCloudHorizonFadeEndY, kCloudHorizonFadeStartY, dir.y);

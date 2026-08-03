@@ -101,7 +101,7 @@ namespace Kurenai::Defaults
     //   C=0.45 -> 36.1%   C=0.50 -> 49.5%   C=0.60 -> 75.7%
     // 0.4〜0.5の狭い範囲に見た目が集中しているので、ここを動かすときは小刻みに動かすこと。
     // (この換算表はfBmの実装に依存する。CloudFbmのオクターブ数や合成方法を変えたら測り直す)
-    inline constexpr float CloudCoverage = 0.45f;
+    inline constexpr float CloudCoverage = 0.40f;
     // 雲底の高度[m]。積雲の雲底高度として一般に言われる目安(だいたい1,000〜2,000m)の
     // 中間を採った値(精密な気象観測値ではなく目安からの採用)
     inline constexpr float CloudAltitude = 1500.0f;
@@ -141,6 +141,13 @@ namespace Kurenai::Defaults
     // Henyey-Greensteinの非対称パラメータ。前方散乱が強すぎると太陽周辺だけが不自然に
     // 明るい点になるため、縁が仄かに光る程度に留めた調整値(実測で調整可能)
     inline constexpr float CloudForwardG = 0.6f;
+    // 積雲をボリューム(スラブのレイマーチ)として描くか(P13b)。無効にすると従来の
+    // 厚みゼロの平面レイヤーに戻る。負荷と見た目を直接比べるためのA/Bトグルでもある
+    inline constexpr bool CloudVolumetric = true;
+    // 雲底から雲頂までの厚み[m]。1,000mは並雲(cumulus mediocris)の目安で、
+    // 既定の雲底1,500mと合わせると雲頂は2,500mになる。晴天時によく見る「もこもこした綿雲」の
+    // 縦横比(1セル=1,000mに対して縦1,000m)に相当する。精密な気象観測値ではなく目安からの採用
+    inline constexpr float CloudThickness = 400.0f;
     // シーンに依存しないUIつまみ(m_WaterTimeFrozenと同じ位置づけ)。
     // 積雲・巻雲の両方に効く(片方だけ凍結できるとA/B比較の対照が取れなくなるため)
     inline constexpr bool CloudTimeFrozen = false;
@@ -355,6 +362,16 @@ namespace Kurenai::Defaults
     // 大気の濁り具合(P7: Preetham xyYモデルのタービディティ)。Preethamの定義域はおおむね
     // 1.7〜10で、2.5は「澄んだ晴天」に相当する見た目からの選択であり、実測値ではない
     inline constexpr float SkyTurbidity = 2.5f;
+    // 空の彩度。**物理量ではなく明示的なアート指定**で、既定の1.0はPreethamの色度そのまま
+    // (=物理的に導かれた値をいじらない)。色度図上で白色点(D65)から遠ざける倍率なので、
+    // 色相は変えずに鮮やかさだけが変わる。
+    //
+    // 【なぜ物理と分けて持つのか】参考写真の最も深い空はB/R=4.84だったが、Preethamは
+    // 論文の係数から独立に計算しても1.34〜1.74しか出さない(タービディティを1.8まで下げても
+    // 改善しない)。実装はこの予測範囲の中にありモデルに忠実なので、差は実装の誤りではなく
+    // モデルの性質であり、物理側をいじっても埋まらない。絵作りが要るシーンは
+    // .ksceneの[Scene]SkySaturationで上げること
+    inline constexpr float SkySaturation = 1.0f;
     // 月は時刻に連動しない独立した向き。ここを変えると夜空の目標照度が変わるため空の焼き直しが要る
     inline constexpr float MoonAzimuthDegrees = 306.87f;
     inline constexpr float MoonElevationDegrees = 45.0f;

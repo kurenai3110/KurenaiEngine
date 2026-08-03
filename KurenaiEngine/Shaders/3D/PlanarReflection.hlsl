@@ -231,6 +231,9 @@ SkyParameters MakeSkyParameters()
     params.CloudDensity = CloudParams0.w;
     params.CloudScrollOffset = CloudParams1.xy;
     params.CloudForwardG = CloudParams1.z;
+    // 積雲の厚み[m](P13b)。CloudParams1.wは従来ずっと0で未使用だった枠なので、
+    // FrameConstantsは1バイトも増えていない。0ならレイマーチせず従来の平面になる
+    params.CloudThickness = CloudParams1.w;
     params.CirrusCoverage = CloudParams2.x;
     params.CirrusAltitude = CloudParams2.y;
     params.CirrusUvScale = CloudParams2.z;

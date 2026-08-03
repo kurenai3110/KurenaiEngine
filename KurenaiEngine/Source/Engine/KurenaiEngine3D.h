@@ -998,6 +998,8 @@ namespace Kurenai
         // 最後に焼いたときのタービディティ(P7)。m_SkyTurbidityが動いたときも、Preethamの
         // xyYモデルの形自体が変わるため焼き直しが要る(exposureMovedと同じ形の判定。Render()参照)
         float m_LastBakedTurbidity = 0.0f;
+        // 最後に焼いたときの空の彩度。タービディティと同じ理由で、動いたら焼き直す
+        float m_LastBakedSkySaturation = 0.0f;
         // 焼き直しの角度閾値(度)。Auto Advance既定(1h/s)では太陽は15度/秒動くので、
         // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
         float m_SkyBakeAngleThresholdDegrees = 1.0f;
@@ -1444,6 +1446,11 @@ namespace Kurenai
         // 風向き(度)。太陽方位角(m_SunAzimuthDegrees)と同じ規約(X軸0度、Z軸(+方向)90度)
         float m_CloudWindDirectionDegrees = Defaults::CloudWindDirectionDegrees;
         float m_CloudForwardG = Defaults::CloudForwardG;
+        // 積雲をボリューム(スラブのレイマーチ)として描くか(P13b)。falseで従来の平面へ戻る。
+        // シェーダー側へはCloudParams1.wの厚みを0にすることで伝える(専用のフラグは持たない)
+        bool m_CloudVolumetric = Defaults::CloudVolumetric;
+        // 雲底から雲頂までの厚み[m](P13b)。EngineDefaults::CloudThicknessのコメント参照
+        float m_CloudThickness = Defaults::CloudThickness;
         // trueにすると雲のスクロールが止まる(m_WaterTimeFrozenの雲版。A/B比較などスクロールが
         // 揺れると困る場面で使う)
         bool m_CloudTimeFrozen = Defaults::CloudTimeFrozen;
@@ -1483,6 +1490,10 @@ namespace Kurenai
         // 霞み、天頂の青が薄くなる。定義域はおおむね1.7〜10(EngineDefaults.h::SkyTurbidity参照)。
         // 変更すると空の焼き直しが必要(Render()のturbidityMoved判定参照)
         float m_SkyTurbidity = Defaults::SkyTurbidity;
+        // 空の彩度(アート指定)。既定1.0=Preethamそのまま。詳細はEngineDefaults::SkySaturation。
+        // .ksceneの[Scene]SkySaturationで初期化され、以降はUIで上書きできる
+        // (m_ReflectionModeがScene.SSREnabledから初期化されるのと同じ設計)
+        float m_SkySaturation = Defaults::SkySaturation;
 
         // 月の位置。**時刻には連動せず、ここで指定した固定位置に居続ける**。
         // 実際の月は太陽とは独立した周期(朔望月)で動くので、反太陽方向に固定するのは

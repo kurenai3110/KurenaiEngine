@@ -280,6 +280,8 @@ namespace Kurenai::Assets
             float IBLIntensity = 1.0f;
             bool AOEnabled = true;
             bool SSREnabled = true;
+            Scene::TonemapCurveSetting Tonemap = Scene::TonemapCurveSetting::AgX;
+            float SkySaturation = 1.0f;
 
             // [Water]セクション(P2: 水面マテリアル基盤)。NormalMapは[Scene]Skyboxと同じく
             // Assetsルートからの相対パスで、LoadScene側でルート外チェックのうえ絶対パスへ解決する。
@@ -472,6 +474,32 @@ namespace Kurenai::Assets
                         const std::optional<bool> parsedValue = ParseBoolToken(value);
                         if (!parsedValue) errorAt(lineNumber, rawLine, "AmbientOcclusionの値はtrue/falseで指定してください");
                         result.AOEnabled = *parsedValue;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Tonemap"))
+                    {
+                        // トーンマップのカーブをシーン単位で選ぶ。屋外の風景はACESのほうが空の青が残る
+                        // (既定のAgXはハイライトを色相保持のまま白へ脱色するため彩度が落ちる)
+                        if (CaseInsensitiveEquals(value, L"Reinhard"))
+                        {
+                            result.Tonemap = Scene::TonemapCurveSetting::Reinhard;
+                        }
+                        else if (CaseInsensitiveEquals(value, L"ACES"))
+                        {
+                            result.Tonemap = Scene::TonemapCurveSetting::ACES;
+                        }
+                        else if (CaseInsensitiveEquals(value, L"AgX"))
+                        {
+                            result.Tonemap = Scene::TonemapCurveSetting::AgX;
+                        }
+                        else
+                        {
+                            errorAt(lineNumber, rawLine, "Tonemapの値はReinhard/ACES/AgXのいずれかで指定してください");
+                        }
+                    }
+                    else if (CaseInsensitiveEquals(key, L"SkySaturation"))
+                    {
+                        if (!ParseFloatToken(value, result.SkySaturation)) errorAt(lineNumber, rawLine, "SkySaturationの値が不正です");
+                        if (result.SkySaturation < 0.0f) errorAt(lineNumber, rawLine, "SkySaturationは0以上で指定してください");
                     }
                     else if (CaseInsensitiveEquals(key, L"ScreenSpaceReflection"))
                     {
@@ -858,6 +886,8 @@ namespace Kurenai::Assets
         scene.SunEnabled = parsed.SunEnabled;
         scene.AOEnabled = parsed.AOEnabled;
         scene.SSREnabled = parsed.SSREnabled;
+        scene.Tonemap = parsed.Tonemap;
+        scene.SkySaturation = parsed.SkySaturation;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;
 

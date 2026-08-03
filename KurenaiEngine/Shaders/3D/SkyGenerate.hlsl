@@ -103,6 +103,7 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     params.CloudDensity = 0.0f;
     params.CloudScrollOffset = float2(0.0f, 0.0f);
     params.CloudForwardG = 0.0f;
+    params.CloudThickness = 0.0f; // 判断Aにより雲は焼かない。意図を明示するため0を入れる
     params.CirrusCoverage = 0.0f;
     params.CirrusAltitude = 0.0f;
     params.CirrusUvScale = 0.0f;

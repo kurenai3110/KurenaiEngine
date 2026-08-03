@@ -11,6 +11,12 @@
 // 空モデル(Perez分布)の共有ヘッダー(P3)。背景画素をSkyGenerate.hlslのキューブマップと
 // 同じ関数・同じパラメータで画面解像度評価するために使う。PIを定義しないため、
 // このファイルのPI定義(直後)より前でも後でもインクルード順は問題ない
+// ボリュメトリック積雲(P13b)が引く3Dノイズのレジスタ。Sky.hlsliはcbufferにもレジスタにも
+// 依存しない方針なので、DDGI.hlsliと同じくインクルードする側がマクロで指定する。
+// 定義しないシェーダー(SkyGenerate/AerialPerspective/PlanarReflection)ではボリュームの
+// 経路がコンパイルされず、従来の平面の経路だけが残る
+#define KURENAI_CLOUD_SHAPE_REGISTER t18
+#define KURENAI_CLOUD_DETAIL_REGISTER t19
 #include "Sky.hlsli"
 
 static const float PI = 3.14159265359f;
@@ -259,6 +265,9 @@ SkyParameters MakeSkyParameters()
     params.CloudDensity = CloudParams0.w;
     params.CloudScrollOffset = CloudParams1.xy;
     params.CloudForwardG = CloudParams1.z;
+    // 積雲の厚み[m](P13b)。CloudParams1.wは従来ずっと0で未使用だった枠なので、
+    // FrameConstantsは1バイトも増えていない。0ならレイマーチせず従来の平面になる
+    params.CloudThickness = CloudParams1.w;
     // 巻雲(P11)。SSR.hlslのMakeSkyParametersと完全に同一の内容であること
     params.CirrusCoverage = CloudParams2.x;
     params.CirrusAltitude = CloudParams2.y;

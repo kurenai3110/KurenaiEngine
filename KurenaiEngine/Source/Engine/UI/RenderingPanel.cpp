@@ -666,6 +666,19 @@ namespace Kurenai::UI
             "Henyey-Greensteinの非対称パラメータ。大きいほど太陽を直視する方向で雲の縁が強く光る"
             "(半逆光のシルバーライニング効果)");
 
+        CheckboxEx(
+            "ボリュームとして描く###CloudVolumetric", &m_Engine.m_CloudVolumetric, Defaults::CloudVolumetric,
+            "積雲を雲底から雲頂までのスラブとしてレイマーチする(P13b)。切ると従来の厚みゼロの"
+            "平面レイヤーへ戻るので、見た目と負荷をそのまま比べられる");
+        if (m_Engine.m_CloudVolumetric)
+        {
+            SliderFloatEx(
+                "厚み###CloudThickness", &m_Engine.m_CloudThickness, 100.0f, 3000.0f, Defaults::CloudThickness,
+                "%.0f m", 0,
+                "雲底から雲頂までの厚み。目安は扁平雲(humilis)が約400m、並雲(mediocris)が約1000m、"
+                "雄大積雲(congestus)が約2500m。厚いほど縦に伸びた入道雲になる");
+        }
+
         ImGui::SeparatorText("巻雲(高層)");
         ImGui::TextWrapped(
             "積雲より高い位置にある2層目。光学的に薄いため自己影は計算せず(常に太陽光がそのまま"
