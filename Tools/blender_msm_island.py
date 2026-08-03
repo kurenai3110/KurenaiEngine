@@ -589,10 +589,28 @@ VEGETATION_CROWN_TILT_MAX_DEG = 12.0  # 樹冠の軸の傾き(斜面に立つ木
 # これが「球に見える」を一番強く壊す
 VEGETATION_CROWN_NOISE = 0.22
 
-VEGETATION_HEIGHT_MIN = 8.0
-VEGETATION_HEIGHT_MAX = 14.0
-VEGETATION_CROWN_RADIUS_MIN = 3.0  # 樹冠の直径6〜10mの半分
-VEGETATION_CROWN_RADIUS_MAX = 5.0
+# 【注意】この値は木の全高ではなく**幹の高さ**を決める(幹=height×0.3)。樹冠は
+# その上に載るので、実際の木の天端は 0.3*height + 1.7*crown_radius*CROWN_SQUASH。
+# 17〜23なら実際の天端は約8.6〜11.5mで、写真の樹林として妥当な高さになる。
+# 樹冠を写真に合わせて小さくしたとき、樹冠の縦の広がりが減って**樹林の天端が1.4m
+# 下がり**、3組の指標が0.0306→0.0312と揃って悪化した。木の高さは出典が無い値なので、
+# スカイラインに決めさせた(3組平均):
+#   8/14  0.0312 (樹冠を小さくした直後)
+#  11/17  0.0310
+#  14/20  0.0308
+#  17/23  0.0306  ← 採用。樹冠を小さくする前の水準に戻る
+#  20/26  0.0305  (改善は頭打ちで、south_lowは0.0213→0.0215と悪化に転じる)
+# 20/26以上は平均の伸びが止まる一方で主ビューが悪化し、さらに木の頭が修道院基礎の
+# 擁壁を隠す領域(過去にそれで上限を下げた経緯がある)へ入るため、17/23で止める。
+VEGETATION_HEIGHT_MIN = 17.0
+VEGETATION_HEIGHT_MAX = 23.0
+# 【写真から測り直した樹冠の大きさ】旧値は直径6〜10m。c_north_whole_lowtide.jpgの
+# 樹林の斜面を拡大して測ると、島の幅1431px≒340m(4.21px/m)の尺度で個々の樹冠は
+# 19〜30px = **4.4〜7.1m** しかなく、モデルは1.2〜2倍大きかった。
+# 樹冠が大きすぎると、1本1本が絵の上で15〜20pxの塊として分離して見えてしまい、
+# 写真のような「細かい粒が連続した樹林」にならない。
+VEGETATION_CROWN_RADIUS_MIN = 2.2  # 樹冠の直径4.4〜7.2mの半分
+VEGETATION_CROWN_RADIUS_MAX = 3.6
 
 # 修正パス(参考写真c_aerial_se_lowtide.jpg/c_aerial_sw_daylight.jpgの精査): 木を斜面に
 # 等間隔にばらまく方式では「白い斜面の水玉模様」に見えると指摘されたため、塊(クラスタ)
@@ -608,8 +626,12 @@ VEGETATION_CROWN_RADIUS_MAX = 5.0
 # 修正: 上の2つで塊を撒く面積が約1.8倍(角度255/195度 × 高さ0.54/0.40)になったため、
 # 密度を保つよう塊の数も40→70へ増やす
 VEGETATION_CLUSTER_COUNT = 70           # 塊の数
-VEGETATION_TREES_PER_CLUSTER_MIN = 5
-VEGETATION_TREES_PER_CLUSTER_MAX = 11
+# 【樹冠を小さくしたぶん本数を増やす】VEGETATION_CROWN_RADIUS_*を写真に合わせて
+# 平均4.0m→2.9mへ絞ったので、1本が覆う面積は (2.9/4.0)^2 = 0.53倍になる。
+# 同じ被覆を保つだけで1/0.53≒1.9倍、さらに樹冠どうしを重ねて連続した塊に
+# 見せたいので2.2倍にする(下草・中腹の帯・海際の本数も同じ倍率で揃える)
+VEGETATION_TREES_PER_CLUSTER_MIN = 11
+VEGETATION_TREES_PER_CLUSTER_MAX = 24
 # 修正パス(コーディネーター指摘、段階3): thetaの規約はatan2(engine_z, engine_x)
 # (+X=東=0°, +Z=北=90°, -X=西=180°, -Z=南=-90°=270°)。旧範囲(-200.0〜110.0)は
 # 310度分でほぼ全周を覆っていたため、参考写真で樹木が見られる「北→西→南南西」
@@ -667,7 +689,9 @@ VEGETATION_CLUSTER_OUTWARD_OFFSET_MAX = 2.0
 # 60→40へ減らした。出典なしの決め値
 # 修正パス(コーディネーター指摘、副作用の是正): クラスタと同様に量を戻し、40→55にした。
 # 出典なしの決め値
-VEGETATION_UNDERSTORY_COUNT = 55
+# 修正: 樹冠を写真に合わせて小さくしたぶん、クラスタと同じ2.2倍にする
+# (VEGETATION_TREES_PER_CLUSTER_MINのコメント参照)
+VEGETATION_UNDERSTORY_COUNT = 121
 # 修正パス(コーディネーター指摘、副作用の是正): クラスタと同様、集落が退いた中腹の
 # 擁壁・庭の層へ下草も押し上げるため、下限を0.20→0.26・上限を0.52→0.62へ引き上げた。
 # 出典なしの決め値
@@ -683,8 +707,10 @@ VEGETATION_UNDERSTORY_OUTWARD_OFFSET_MAX = 1.0
 # すぐ上に庭と並木の帯が全周にあり、西〜北の樹林(VEGETATION_CLUSTER_*)とは別の層に
 # なっている。角度で絞らないのが既存のクラスタ群との違い(出典なしの決め値)
 VEGETATION_BELT_COUNT = 30              # 帯の中の塊の数
-VEGETATION_BELT_TREES_PER_CLUSTER_MIN = 4
-VEGETATION_BELT_TREES_PER_CLUSTER_MAX = 9
+# 修正: 樹冠を写真に合わせて小さくしたぶん、クラスタと同じ2.2倍にする
+# (VEGETATION_TREES_PER_CLUSTER_MINのコメント参照。海際の樹林もこの値を使う)
+VEGETATION_BELT_TREES_PER_CLUSTER_MIN = 9
+VEGETATION_BELT_TREES_PER_CLUSTER_MAX = 20
 # 修正パス(コーディネーター指摘、参考写真との並置から特定): 木の頭(高さ8〜14m)を足すと
 # 最大70mに達し、修道院基礎の擁壁(天端はCHURCH_FLOOR_Y=80m)の下半分を隠していた。
 # 参考写真では樹木は壁のはるか下で止まり壁の高い明るい面が見えているため、下限を
