@@ -45,6 +45,9 @@ Tools/run_blender.ps1 経由で行うことを想定している。
                         無ければ作成する。突き合わせ自体はTools/compare_reference.pyで行う)。
                         ビューごとに見た目版(<name>.png、青空+地面)とマスク版
                         (<name>_mask.png、マゼンタ背景+地面無し)の2枚を出力する
+  --material-id      : 診断用。ベースカラーをMATERIAL_ID_PALETTEの識別しやすい12色へ
+                        差し替え、テクスチャも接続せずに書き出す。実機のアルベド表示を
+                        撮ると材質ごとの完全な地図が得られる(配置を写真と突き合わせるため)
 複数同時に指定してもよい。いずれも指定しなかった場合は何もせず終了する。
 """
 
@@ -96,6 +99,35 @@ ISLAND_MATERIALS = [
     ("WindowGlass",    (0.020, 0.022, 0.028), 0.35, 0.0),
 ]
 MATERIAL_SLOTS = {name: index for index, (name, _c, _r, _m) in enumerate(ISLAND_MATERIALS)}
+
+# --- 材質IDモード(--material-id)。配置を測るための診断用の書き出し ---
+# 見た目用のアルベドは Rock(0.360,0.295,0.205)/Masonry(0.320,0.253,0.166)/
+# VillageWall(0.270,0.235,0.185) が互いに距離0.065、SlateRoofとLeadRoofに至っては0.018しか
+# 離れておらず、テクスチャのむらがこの差を超える。そのままアルベド表示を色で分類すると
+# 石積を集落の壁と取り違える(実際「集落の壁が画面高さ0.6に24%ある」という誤った値が出た)。
+#
+# --material-id を付けて書き出すと、ベースカラーを下のパレットへ差し替え、テクスチャも
+# 接続しない。実機のPresent Mode 0(アルベド表示)はアルベドをそのまま出す(ガンマを
+# 掛けない)ため、撮った画像を最近傍で当てるだけで材質ごとの完全な地図が得られる。
+#
+# パレットは互いのユークリッド距離が最小0.4になるよう選んだ(8bit量子化やガンマの有無に
+# 影響されない余裕を取るための決め値)。ISLAND_MATERIALSと同じ並び順でなければならない
+MATERIAL_ID_PALETTE = [
+    (0.90, 0.10, 0.10),  # Rock            赤
+    (0.10, 0.90, 0.10),  # Masonry         緑
+    (0.10, 0.10, 0.90),  # VillageWall     青
+    (0.90, 0.90, 0.10),  # VillagePlaster  黄
+    (0.90, 0.10, 0.90),  # VillageTimber   マゼンタ
+    (0.10, 0.90, 0.90),  # SlateRoof       シアン
+    (0.90, 0.50, 0.10),  # TileRoof        橙
+    (0.50, 0.10, 0.90),  # LeadRoof        紫
+    (0.10, 0.50, 0.50),  # Gilt            暗い青緑
+    (0.50, 0.90, 0.10),  # TreeCanopy      黄緑
+    (0.50, 0.25, 0.10),  # TreeTrunk       茶
+    (0.95, 0.95, 0.95),  # WindowGlass     白
+]
+# _create_island_materials()が読む。main()が--material-idを受け取ったときだけTrueになる
+MATERIAL_ID_MODE = False
 
 # --- タイルテクスチャ導入(手続き生成の変動場) ---
 # マテリアルごとの「テクスチャ1タイルが何メートルに相当するか」。参考写真の石積みの段の
@@ -330,8 +362,14 @@ WALL_THICKNESS = 3.0        # Solidifyモディファイアで付与する厚み
 # 表情を再現する目的の決め値)。RAMPART_ARC_SEGMENTS個の頂点ごとにではなく、弧を
 # WALL_HEIGHT_SEGMENTS個の粗い区間に分け、区間境界に固定シードの擬似乱数で高さを割り当てて
 # 区間内は線形補間する(急激な段差を避けるため)
-WALL_HEIGHT_MIN = 8.0
-WALL_HEIGHT_MAX = 16.0
+# 【修正・城壁が画面上で写真の約1.8倍の高さだった】材質IDレンダで城壁の天端を列ごとに
+# 測ると画面の正規化高さ h=0.085〜0.134(中央0.097)。参考写真に正規化格子を描いて
+# 胸壁の上端を読むと h=0.05〜0.06(photo_curve_zoom.pngで描き戻して検証済み)。
+# 換算表(scratchpad/ht_table.py)では裾で地表+15mがh=0.117なので、h=0.06は地表+約7m。
+# 壁の基準面はWALL_BASE_Z_REF=0.92mなので、壁自体の高さは約6m。
+# 旧値(8〜16m、天端8.9〜16.9m)は2倍近く高く、家並みの下半分を隠していた
+WALL_HEIGHT_MIN = 4.5
+WALL_HEIGHT_MAX = 8.0
 WALL_HEIGHT_SEGMENTS = 8
 WALL_HEIGHT_SEED = 20260803  # VILLAGE_SEEDとは独立させた専用シード
 
@@ -474,7 +512,17 @@ VILLAGE_SEED = 20260802
 # 旧値(8段・t=0.04〜0.44)では199棟が斜面の下半分を埋め尽くし、「屋根の絨毯」に見えていた。
 # この関数のdocstringにあるとおり実物は指定建造物で約60棟(出典: French Moments)なので、
 # 199棟は3倍以上多い。段数8→5、範囲もt=0.06〜0.36へ狭めて帯を浅くする(出典なしの決め値)
-VILLAGE_TERRACE_COUNT = 5
+# 【修正・集落が斜面の1/3まで登っていた】材質IDレンダで屋根の上端を列ごとに測り、
+# 参考写真c_south_elevation_sunny.jpgに正規化格子を描いて読んだ値と並べると:
+#   正規化x     0.40-0.55  0.55-0.60  0.60-0.65  0.65-0.80  0.80-0.95  0.95-1.00
+#   写真の屋根   0.15-0.16  0.22       0.24       0.16-0.19  0.11-0.14  0.09
+#   実機の屋根   0.33-0.36  0.33       0.34       0.27-0.34  0.13-0.23  なし
+# t=0.36の地表に棟15mを足すと画面高さh=0.34(scratchpad/ht_table.py)で、実測のp90=0.341と
+# 一致する。家は段の高さちょうどに建つので、樹木と違って換算表をそのまま使ってよい。
+# 写真の中央値0.16と最大0.24のあいだを取ってh=0.20を狙うと t≒0.125。
+# 段数も減らす: t=0.024〜0.125は岩の半径で約170m→150mの20mの帯で、家の奥行き(6〜12m)を
+# 考えると3列でいっぱい。5段のままだと段が2mおきになり家が完全に重なる
+VILLAGE_TERRACE_COUNT = 3
 # 【修正・西側斜面のシルエットが低かった】スカイラインの重ね合わせ(south_low/south_mid)で、
 # 画像左(西)だけ緑(モデル)が赤(写真)より系統的に低い残差が残っていた。
 # 参考写真c_south_elevation_hazy.jpgの西端を拡大すると、実物は城壁の上に建物が西端まで
@@ -482,7 +530,17 @@ VILLAGE_TERRACE_COUNT = 5
 # 樹木(8〜14m)の高さの差が、そのまま残差になっていた。
 # 集落の弧を西南西(-120度)から-150度まで広げて建物を届かせる。
 # 城壁の弧(RAMPART_ARC_START_DEG=-195)の内側なので、城壁の無い区間へは出ない
-VILLAGE_ARC_START_DEG = -150.0
+# 【修正・写真では家が無い区間を家で埋めていた】参考写真の正規化x0.15〜0.40は、下から
+# 順に「城壁 → 露出した花崗岩の崖 → 樹木 → 修道院の基礎」で、家が1軒も無い。
+# 実機はこの区間に屋根の上端が0.21〜0.35で並んでいた。
+# 方位thetaと画面のxの対応(scratchpad/ht_table.py --sweep)は
+#   theta=-150度→x=0.137  -120度→x=0.211  -110度→x=0.288  -100度→x=0.379  -90度→x=0.479
+# なので、開始を-100度にすると家はx=0.38から東だけになり、写真と揃う。
+# 過去のパスがここを-120→-150へ広げたのは「西のスカイラインが低い」ためだったが、
+# 実物のその区間は岩と樹木で、家で埋めるのは誤りだった(写真優先の判断により、
+# skyline_rmsが悪化しても採る)。写真の西端(x0.00〜0.15)の建物群は、この集落ではなく
+# 別に建てているガブリエル塔と棟(WEST_END_TOWER_*/WEST_END_LODGE_*)が担う
+VILLAGE_ARC_START_DEG = -100.0
 VILLAGE_ARC_END_DEG = 0.0
 # 修正パス(コーディネーター指摘、段階2: 岩を細くした段階1に合わせて集落を斜面へ沿わせる):
 # 岩が細くなった分、城壁とのすき間を詰めるため下端を0.16→0.10へ下げ、急斜面になった分
@@ -496,7 +554,7 @@ VILLAGE_ARC_END_DEG = 0.0
 # 家の半径方向の奥行き(VILLAGE_DEPTH_MIN/MAX=6〜12m)の半分を見込むと、外縁が城壁に
 # 届く基準半径は約147.5m。_rock_radius(t, -90度)=147.5 を解くと t≒0.024
 VILLAGE_TERRACE_HEIGHT_T_START = 0.024  # 最下段(城壁の内側の面に接する)
-VILLAGE_TERRACE_HEIGHT_T_END = 0.36    # 最上段(ここから上は植生・修道院)
+VILLAGE_TERRACE_HEIGHT_T_END = 0.125    # 最上段(VILLAGE_TERRACE_COUNTのコメント参照)
 
 # 各段内の角度方向の位置ジッター(機械的すぎない配置にするための決め値)。
 # 修正パス(タスクC): 弧長に沿って家の幅ぶんずつ詰めて置く方式にしたため、ジッターは
@@ -526,10 +584,15 @@ VILLAGE_OUTWARD_OFFSET_MIN = -1.2
 VILLAGE_OUTWARD_OFFSET_MAX = 1.2
 
 # 1棟あたりの寸法の範囲(決め値)。幅=切妻の妻面方向(道と直交)、奥行き=棟線(道に沿う方向)。
-VILLAGE_WIDTH_MIN = 5.0
-VILLAGE_WIDTH_MAX = 9.0
-VILLAGE_DEPTH_MIN = 6.0
-VILLAGE_DEPTH_MAX = 12.0
+# 【修正・1棟が写真の約2倍の幅だった】参考写真と実機の同じ区間(正規化x0.72〜0.92)を
+# 同じ倍率で切り出して家の正面を数えると、写真は約16、実機は約9しか無かった。
+# 正面に見える幅は、妻を通りに向ける棟ではVILLAGE_WIDTH、棟が通りと平行な棟では
+# VILLAGE_DEPTHになる。平均は 0.55*7 + 0.45*9 = 7.9m。実物のグランド・リュの間口は
+# 4〜6m程度なので、幅を絞り、かつ妻を通りに向ける割合を上げて正面幅を小さくする
+VILLAGE_WIDTH_MIN = 4.0
+VILLAGE_WIDTH_MAX = 6.0
+VILLAGE_DEPTH_MIN = 7.0
+VILLAGE_DEPTH_MAX = 11.0
 # 修正パス(タスクC): 振れ幅が大きすぎる(5.0〜14.0)と隣り合う家の高さの差が激しく
 # 「棒グラフ状」に見えてしまうため、範囲を7.0〜13.0へ縮小した
 # 修正パス(参考写真c_village_roofs_walls.jpgの精査): 幅5〜9mの家に壁7〜13mでは壁が
@@ -559,7 +622,10 @@ VILLAGE_HOUSE_GAP = 0.3
 # 空撮c_aerial_se_goldenhour.jpgを真上から読むと、妻を通りに向ける家と、棟が通りと平行に
 # 走る家がおよそ半々に混在している。どちらか一方に揃えると「同じ形の妻が並ぶ群れ」か
 # 「屋根面だけの絨毯」のどちらかになり、実物のばらつきが出ない(出典なしの決め値)
-VILLAGE_GABLE_TO_STREET_RATIO = 0.55
+# 【修正】0.55だと45%の棟が奥行き(7〜11m)を正面に向け、正面幅の平均を押し上げていた。
+# 実物のグランド・リュは細い妻を通りに向ける棟が大半なので0.85へ上げる。
+# これで平均の正面幅は 0.85*5.0 + 0.15*9.0 = 5.6m(旧7.9m)
+VILLAGE_GABLE_TO_STREET_RATIO = 0.85
 
 # --- 植生(vegetation)。600m先では葉の1枚1枚は見えず緑の塊のシルエットとしてしか
 # 視認されないため、木1本のジオメトリは低ポリの円柱(幹)+潰したUV球(樹冠)で済ませる ---
@@ -625,13 +691,28 @@ VEGETATION_CROWN_RADIUS_MAX = 3.6
 # そのままに、塊の数を30→40・下草を40→55へ戻して量を増やした。出典なしの決め値
 # 修正: 上の2つで塊を撒く面積が約1.8倍(角度255/195度 × 高さ0.54/0.40)になったため、
 # 密度を保つよう塊の数も40→70へ増やす
-VEGETATION_CLUSTER_COUNT = 70           # 塊の数
+# 【修正・樹林が写真の2倍濃かった】参考写真の植生を「G>R+2 かつ G>=B」(日陰の樹冠も拾う。
+# photo_green_loose.pngで描き戻して検証済み)で数えると島の13.5%。実機は28.8%だった。
+# 形(x0.1〜0.4に多く、x0.8以東は無い)は合っているので、1塊の濃さは変えずに塊の数を
+# 減らして隙間を作る(写真の樹林は「濃い塊と裸地が交互」で、一様な薄い緑ではない)。
+# あわせて角度範囲を東(-30度)まで広げる。集落の上端を0.125へ下げたので、
+# _theta_deg_in_village_lower_arcが集落の帯だけを避けてくれる。
+# 面積あたりの密度は 45塊/330度 対 70塊/265度 = 0.52倍
+VEGETATION_CLUSTER_COUNT = 45           # 塊の数
 # 【樹冠を小さくしたぶん本数を増やす】VEGETATION_CROWN_RADIUS_*を写真に合わせて
 # 平均4.0m→2.9mへ絞ったので、1本が覆う面積は (2.9/4.0)^2 = 0.53倍になる。
 # 同じ被覆を保つだけで1/0.53≒1.9倍、さらに樹冠どうしを重ねて連続した塊に
 # 見せたいので2.2倍にする(下草・中腹の帯・海際の本数も同じ倍率で揃える)
-VEGETATION_TREES_PER_CLUSTER_MIN = 11
-VEGETATION_TREES_PER_CLUSTER_MAX = 24
+# 【修正・塊が融合して緑の壁になっていた】水平線に沿って樹木の連続長を測ると
+#   参考写真   中央=0.0106(島幅比) p75=0.0190 p95=0.0444
+#   実機veg3   中央=0.0536         p75=0.1467 p95=0.3265
+# で、実機は「島の1/3を横切る連続した緑の塊」になっていた。原因は本数ではなく
+# 1塊の広がり: VEGETATION_CLUSTER_THETA_SPREAD_DEG=7.0は半径140mで約34mあり、
+# 塊どうしの間隔(330度÷45塊=7.3度)と同じだったため必ず隣と融合していた。
+# 1塊の本数も、狭くしたぶん減らす(11〜24本を3度の広がりに詰めると団子になる)
+# 3〜7本にした時点で被覆は0.326→0.183(写真0.135)。もう一段だけ減らす
+VEGETATION_TREES_PER_CLUSTER_MIN = 2
+VEGETATION_TREES_PER_CLUSTER_MAX = 5
 # 修正パス(コーディネーター指摘、段階3): thetaの規約はatan2(engine_z, engine_x)
 # (+X=東=0°, +Z=北=90°, -X=西=180°, -Z=南=-90°=270°)。旧範囲(-200.0〜110.0)は
 # 310度分でほぼ全周を覆っていたため、参考写真で樹木が見られる「北→西→南南西」
@@ -641,8 +722,13 @@ VEGETATION_TREES_PER_CLUSTER_MAX = 24
 # 【修正】集落の弧は-120〜0度(=240〜360度)なので、開始を70度にすると
 # 0〜70度(東〜東北東)が集落にも樹木にも属さない空白の扇形として残っていた
 # (真上からの絵で確認)。集落の弧の終端(0度)に合わせて隙間なく繋げる
+# 【修正】265度(=-95度)で切ると、画面の正規化x0.42より東に木が1本も置けず、
+# 参考写真でx0.4〜0.7に見える「家並みのあいだの木」を中腹の帯(全周)だけで賄うことに
+# なっていた。集落の上端を下げたので、東(-30度=330度)まで広げてよい
 VEGETATION_CLUSTER_THETA_START_DEG = 0.0
-VEGETATION_CLUSTER_THETA_END_DEG = 265.0
+# 330度(=-30度)まで広げたら画面のx0.7〜0.8が0.198になった(写真は0.054)。
+# 集落の東半分の上に木が乗りすぎるので315度(=-45度、x≒0.79)まで戻す
+VEGETATION_CLUSTER_THETA_END_DEG = 315.0
 # 修正パス(修道院の量塊を実測比に合わせる対応): 参考写真では木が修道院の石積みの
 # はるか下で止まっているが、モデルでは木が修道院の足元まで覆って基礎構造を隠して
 # いたため、密な植生帯の上限を0.80→0.66へ下げた(出典なしの決め値)。
@@ -671,14 +757,31 @@ VEGETATION_CLUSTER_THETA_END_DEG = 265.0
 # 修正: 集落を城壁の内側の面まで下ろした(VILLAGE_TERRACE_HEIGHT_T_START参照)のに合わせ、
 # 樹木側も同じ下限へ揃える。0.06のままだと集落の無い北・東で、城壁と樹木のあいだに
 # 同じ幅約12.6mの裸の帯が残ってしまう
+# 【修正・樹冠が写真より0.10〜0.15高い所まで登っていた】材質IDレンダ(--material-id)で
+# 実機の樹木の上端を列ごとに測り、参考写真c_south_elevation_sunny.jpgに正規化格子を
+# 描いて読んだ値と並べると:
+#   正規化x     0.15-0.30  0.30-0.45  0.45-0.60  0.60-0.70
+#   写真の樹冠   0.26       0.30       0.34       0.29
+#   実機の樹冠   0.29-0.41  0.43-0.46  0.43-0.45  0.41
+#   参考写真の樹冠の上端(列ごとの上端の分布) p50=0.311 p90=0.373
+#   上限0.60のとき                            p50=0.393 p90=0.440
+#   上限0.30まで下げたとき(下げすぎ)          p50=0.245 p90=0.274
+# 2点から傾きは約0.55(画面高さ/単位t)。p90=0.373に当たるのはt≒0.48、p50=0.311では
+# t≒0.43なので、あいだを取って0.45にする。
+# 【解析だけでは決められない理由】クラスタの中心は[下限,上限]の一様乱数で、木が上限
+# ちょうどに立つことはめったに無い。「t=0.30の地表に樹高20mを足すとh=0.346」という
+# 換算表の値をそのまま上限にすると、実測は0.274にしかならなかった。上限は実測の
+# 2点から決める(推測で決めない)
 VEGETATION_CLUSTER_HEIGHT_T_MIN = 0.024
-VEGETATION_CLUSTER_HEIGHT_T_MAX = 0.60
+VEGETATION_CLUSTER_HEIGHT_T_MAX = 0.45
 # 修正パス(タスクB): 集落がある南〜東(VILLAGE_ARC_START_DEG〜END_DEG)の下部
 # (height_t < VILLAGE_TERRACE_HEIGHT_T_END)には木を密に生やしたくない(家と重なるため)。
 # クラスタ中心の抽選でその条件に当たった場合、この回数まで引き直す(出典なしの決め値)
 VEGETATION_CLUSTER_VILLAGE_AVOID_MAX_RETRIES = 20
-VEGETATION_CLUSTER_THETA_SPREAD_DEG = 7.0   # 塊の中心からの角度方向のばらつき
-VEGETATION_CLUSTER_HEIGHT_T_SPREAD = 0.05   # 同じく高さ方向のばらつき
+# 塊の中心からのばらつき。塊どうしの間隔より十分小さくないと隣と融合する
+# (VEGETATION_TREES_PER_CLUSTER_MINのコメント参照)
+VEGETATION_CLUSTER_THETA_SPREAD_DEG = 3.0
+VEGETATION_CLUSTER_HEIGHT_T_SPREAD = 0.04
 # 密な植生帯だけ、木同士が重なって見えるよう岩の表面からの張り出しをランダムに振って
 # 奥行きのばらつきを出す(出典なしの決め値。旧VEGETATION_DENSE_OUTWARD_OFFSET_*を流用)
 VEGETATION_CLUSTER_OUTWARD_OFFSET_MIN = -2.0
@@ -691,14 +794,18 @@ VEGETATION_CLUSTER_OUTWARD_OFFSET_MAX = 2.0
 # 出典なしの決め値
 # 修正: 樹冠を写真に合わせて小さくしたぶん、クラスタと同じ2.2倍にする
 # (VEGETATION_TREES_PER_CLUSTER_MINのコメント参照)
-VEGETATION_UNDERSTORY_COUNT = 121
+# 【修正】クラスタと同じ理由(写真の2倍濃かった)で減らす。角度範囲も一緒に広がるので
+# 面積あたりでは 70/330 対 121/265 = 0.46倍
+VEGETATION_UNDERSTORY_COUNT = 35
 # 修正パス(コーディネーター指摘、副作用の是正): クラスタと同様、集落が退いた中腹の
 # 擁壁・庭の層へ下草も押し上げるため、下限を0.20→0.26・上限を0.52→0.62へ引き上げた。
 # 出典なしの決め値
 # 修正パス(コーディネーター指摘、参考写真との並置から特定): クラスタと同じ理由(修道院
 # 基礎の擁壁を隠さないため)で、上限を0.62→0.56へ下げた。出典なしの決め値
-VEGETATION_UNDERSTORY_HEIGHT_T_MIN = 0.26
-VEGETATION_UNDERSTORY_HEIGHT_T_MAX = 0.56
+# 【修正】上のクラスタと同じ割合で下げる(クラスタと一緒に測って上限を決めているので、
+# 3つの層は同じ比率で動かす)
+VEGETATION_UNDERSTORY_HEIGHT_T_MIN = 0.20
+VEGETATION_UNDERSTORY_HEIGHT_T_MAX = 0.40
 VEGETATION_UNDERSTORY_OUTWARD_OFFSET_MIN = -1.0
 VEGETATION_UNDERSTORY_OUTWARD_OFFSET_MAX = 1.0
 
@@ -706,18 +813,26 @@ VEGETATION_UNDERSTORY_OUTWARD_OFFSET_MAX = 1.0
 # (t=0.44)から修道院の基礎の下端までの層に、全方位へ木を配置する。参考写真では集落の
 # すぐ上に庭と並木の帯が全周にあり、西〜北の樹林(VEGETATION_CLUSTER_*)とは別の層に
 # なっている。角度で絞らないのが既存のクラスタ群との違い(出典なしの決め値)
-VEGETATION_BELT_COUNT = 30              # 帯の中の塊の数
+# 【修正】この帯だけが全周(角度を絞らない)なので、画面のx0.7〜0.8(=集落の東側)に
+# 木を置いていたのはこれ。写真のその区間の植生は0.054なのに実機は0.269あった。
+# クラスタの角度範囲を東へ広げてx0.4〜0.7を賄えるようにしたので、帯は大幅に減らす
+VEGETATION_BELT_COUNT = 6               # 帯の中の塊の数
 # 修正: 樹冠を写真に合わせて小さくしたぶん、クラスタと同じ2.2倍にする
 # (VEGETATION_TREES_PER_CLUSTER_MINのコメント参照。海際の樹林もこの値を使う)
-VEGETATION_BELT_TREES_PER_CLUSTER_MIN = 9
-VEGETATION_BELT_TREES_PER_CLUSTER_MAX = 20
+# 【修正】クラスタと同じ理由(塊が融合していた)で減らす。
+# 海際の樹林はこの値を流用していたが、あちらは北面の裸地を埋めるためのもので南面からは
+# 見えず、減らす根拠が無いので専用の定数(VEGETATION_SHORE_TREES_PER_CLUSTER_*)へ分ける
+VEGETATION_BELT_TREES_PER_CLUSTER_MIN = 3
+VEGETATION_BELT_TREES_PER_CLUSTER_MAX = 7
 # 修正パス(コーディネーター指摘、参考写真との並置から特定): 木の頭(高さ8〜14m)を足すと
 # 最大70mに達し、修道院基礎の擁壁(天端はCHURCH_FLOOR_Y=80m)の下半分を隠していた。
 # 参考写真では樹木は壁のはるか下で止まり壁の高い明るい面が見えているため、下限を
 # 0.46→0.44・上限を0.70→0.58へ下げた。出典なしの決め値
-VEGETATION_BELT_HEIGHT_T_MIN = 0.44
-VEGETATION_BELT_HEIGHT_T_MAX = 0.58
-VEGETATION_BELT_THETA_SPREAD_DEG = 6.0  # 塊の中心からの角度方向のばらつき
+# 【修正】この帯がいちばん高い所に居り、h=0.43〜0.46の「緑の壁」の正体だった。
+# 帯を集落の上端のすぐ上に置き直す(クラスタと同じ比率で下げる)
+VEGETATION_BELT_HEIGHT_T_MIN = 0.30
+VEGETATION_BELT_HEIGHT_T_MAX = 0.42
+VEGETATION_BELT_THETA_SPREAD_DEG = 3.0  # 塊の中心からの角度方向のばらつき(クラスタと同じ理由で縮小)
 VEGETATION_BELT_HEIGHT_T_SPREAD = 0.03  # 同じく高さ方向のばらつき
 VEGETATION_BELT_OUTWARD_OFFSET_MIN = -1.5
 VEGETATION_BELT_OUTWARD_OFFSET_MAX = 1.5
@@ -726,6 +841,10 @@ VEGETATION_BELT_OUTWARD_OFFSET_MAX = 1.5
 # 特定した唯一のまとまった裸地(モデル方位120〜150度・t=0.00〜0.30)を埋めるための帯。
 # 範囲は城壁の弧(RAMPART_ARC_START_DEG=-195〜END_DEG=65)から外れる区間、つまり
 # 65〜165度に取る。1塊あたりの本数・角度と高さのばらつき・張り出し量は中腹の帯の値を流用する ---
+# 1塊あたりの本数は、以前は中腹の帯の値を流用していた。帯を南面の見た目に合わせて減らした
+# のに合わせ、北面の裸地を埋めるという目的が変わらないこちらは旧値をそのまま持つ
+VEGETATION_SHORE_TREES_PER_CLUSTER_MIN = 9
+VEGETATION_SHORE_TREES_PER_CLUSTER_MAX = 20
 VEGETATION_SHORE_COUNT = 26
 VEGETATION_SHORE_THETA_START_DEG = 65.0
 VEGETATION_SHORE_THETA_END_DEG = 165.0
@@ -1548,8 +1667,20 @@ def _create_island_materials():
     if _island_materials_cache is not None:
         return _island_materials_cache
 
+    if MATERIAL_ID_MODE and len(MATERIAL_ID_PALETTE) != len(ISLAND_MATERIALS):
+        print(
+            f"[ERROR] MATERIAL_ID_PALETTEの数({len(MATERIAL_ID_PALETTE)})が"
+            f"ISLAND_MATERIALSの数({len(ISLAND_MATERIALS)})と一致しません",
+            file=sys.stderr,
+        )
+        raise ValueError("MATERIAL_ID_PALETTEの数がISLAND_MATERIALSと一致しません")
+
     materials = []
-    for name, color, roughness, metallic in ISLAND_MATERIALS:
+    for slot_index, (name, color, roughness, metallic) in enumerate(ISLAND_MATERIALS):
+        # 材質IDモードでは識別しやすいパレット色の単色にする(テクスチャは接続しない)。
+        # ラフネス・メタリックも一様にして、アルベド以外の要因で色がぶれないようにする
+        if MATERIAL_ID_MODE:
+            color, roughness, metallic = MATERIAL_ID_PALETTE[slot_index], 1.0, 0.0
         try:
             mat = bpy.data.materials.get(name)
             if mat is None:
@@ -1565,7 +1696,7 @@ def _create_island_materials():
                 # MATERIAL_TEXTURE_FIELDSに載っているマテリアルは、手続き生成した変動場の
                 # 画像をShaderNodeTexImageで作りBase Colorへ接続する。default_valueは接続後は
                 # 使われなくなるが、念のためこれまでどおりの値を入れたままにしておく
-                field_name = MATERIAL_TEXTURE_FIELDS.get(name)
+                field_name = None if MATERIAL_ID_MODE else MATERIAL_TEXTURE_FIELDS.get(name)
                 if field_name is not None:
                     field_func = msm_textures.FIELD_FUNCTIONS[field_name]
                     field = field_func()
@@ -2903,7 +3034,7 @@ def build_vegetation():
             )
 
             trees_in_shore_cluster = random.randint(
-                VEGETATION_BELT_TREES_PER_CLUSTER_MIN, VEGETATION_BELT_TREES_PER_CLUSTER_MAX
+                VEGETATION_SHORE_TREES_PER_CLUSTER_MIN, VEGETATION_SHORE_TREES_PER_CLUSTER_MAX
             )
 
             for _ in range(trees_in_shore_cluster):
@@ -5217,6 +5348,7 @@ def _parse_args():
     export_path = None
     preview_dir = None
     compare_dir = None
+    material_id = False
     i = 0
     while i < len(argv):
         token = argv[i]
@@ -5229,15 +5361,24 @@ def _parse_args():
         elif token == "--compare" and i + 1 < len(argv):
             compare_dir = argv[i + 1]
             i += 2
+        elif token == "--material-id":
+            material_id = True
+            i += 1
         else:
             print(f"[WARNING] 未知の引数を無視しました: {token}", file=sys.stderr)
             i += 1
 
-    return export_path, preview_dir, compare_dir
+    return export_path, preview_dir, compare_dir, material_id
 
 
 def main():
-    export_path, preview_dir, compare_dir = _parse_args()
+    global MATERIAL_ID_MODE
+
+    export_path, preview_dir, compare_dir, material_id = _parse_args()
+    # マテリアルを作る前に立てる必要がある(_create_island_materials()は結果をキャッシュする)
+    MATERIAL_ID_MODE = material_id
+    if MATERIAL_ID_MODE:
+        print("[INFO] 材質IDモード: ベースカラーをMATERIAL_ID_PALETTEへ差し替えて書き出します")
 
     if export_path is None and preview_dir is None and compare_dir is None:
         print("--export/--preview/--compareのいずれも指定されなかったため、何も実行せずに終了します")
