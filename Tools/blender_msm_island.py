@@ -574,6 +574,21 @@ VEGETATION_CROWN_V_SEGMENTS = 6
 VEGETATION_CROWN_SQUASH = 0.75  # 樹冠(UV球)の縦方向の潰し率(1.0で真球)
 VEGETATION_CROWN_OVERLAP = 0.3  # 樹冠が幹の上端にめり込む量(接続を自然に見せるための決め値)
 
+# --- 樹冠を1本ごとに崩すためのばらつき(出典なしの決め値) ---
+# 【なぜ要るか】947本すべてが「同じ向きに縦へ潰した真球」だったため、参考写真と並べると
+# 樹林ではなく**球が並んでいる**ように見えた(c_north_whole_lowtide.jpgの樹林は
+# 連続した塊で、個々の樹冠は縁でようやく見分けられる程度)。
+# 1本ごとに変わっていたのは高さと樹冠半径だけで、形も向きも全部同じだった。
+#
+# 【真球のままでは回転しても無駄】縦に潰しただけの回転体は鉛直軸まわりに対称なので、
+# 向きを振っても見た目は1ミリも変わらない。**先に水平断面を楕円にしてから回す**必要がある。
+VEGETATION_CROWN_ASPECT_MIN = 0.72  # 水平方向の2軸の伸縮率(1.0で円)。楕円の扁平さ
+VEGETATION_CROWN_ASPECT_MAX = 1.28
+VEGETATION_CROWN_TILT_MAX_DEG = 12.0  # 樹冠の軸の傾き(斜面に立つ木は真上を向かない)
+# 樹冠の頂点を半径方向へ押し引きする量(半径に対する比)。輪郭をでこぼこにする。
+# これが「球に見える」を一番強く壊す
+VEGETATION_CROWN_NOISE = 0.22
+
 VEGETATION_HEIGHT_MIN = 8.0
 VEGETATION_HEIGHT_MAX = 14.0
 VEGETATION_CROWN_RADIUS_MIN = 3.0  # 樹冠の直径6〜10mの半分
@@ -2560,7 +2575,7 @@ def build_village():
 
 def _add_tree_to_bmesh(bm, base_engine, height, crown_radius,
                         trunk_material="TreeTrunk", crown_material="TreeCanopy"):
-    """1本の木(細い円柱の幹+縦に潰したUV球の樹冠)のジオメトリをbmeshへ追加する。
+    """1本の木(細い円柱の幹+1本ごとに形の違う樹冠)のジオメトリをbmeshへ追加する。
 
     base_engine: 木の根元のエンジン空間座標(X, Y=高さ, Z=奥行き)。600m先のカメラでは
     葉の1枚1枚は視認できないため、幹・樹冠とも低ポリのシルエットのみで表現する
@@ -2568,6 +2583,11 @@ def _add_tree_to_bmesh(bm, base_engine, height, crown_radius,
     height: 木全体のおおよその高さ(m)。幹の高さはこの30%(VEGETATION_TRUNK_HEIGHT_RATIO)
     crown_radius: 樹冠の水平方向の半径(m)。縦方向はVEGETATION_CROWN_SQUASHで潰す
     trunk_material/crown_material: 幹・樹冠にそれぞれ割り当てるマテリアル名。
+
+    樹冠のばらつき(楕円化・向き・傾き・輪郭のノイズ)は**この関数の中で乱数を引く**。
+    呼び出しは4箇所(塊・下草・中腹の帯・海際)あるが、ここで完結させれば呼び出し側を
+    一切変えずに全部へ効く。乱数は呼び出し側と同じrandomモジュール(VEGETATION_SEEDで
+    初期化済み)から引くので再現性は保たれる。
     """
     base_x, base_y, base_z = _engine_to_blender(*base_engine)
     trunk_height = height * VEGETATION_TRUNK_HEIGHT_RATIO
@@ -2589,16 +2609,32 @@ def _add_tree_to_bmesh(bm, base_engine, height, crown_radius,
     )
     _tag_faces_since(bm, faces_before, trunk_material)
 
-    # 樹冠: 真球を作ってからZ方向のみ縮小して縦に潰す(先にスケール、後で平行移動する順で
-    # 行列を合成する。Matrix.__matmul__は右側から順に適用されるため)。幹の上端へ少し
-    # めり込ませて接続を自然に見せる
+    # 樹冠: 真球を作ってから、1本ごとに違う楕円体へ変形する(先にスケール、次に回転、
+    # 最後に平行移動する順で行列を合成する。Matrix.__matmul__は右側から順に適用される)。
+    # 幹の上端へ少しめり込ませて接続を自然に見せる。
+    # 【順序が重要】縦に潰しただけの回転体は鉛直軸まわりに対称なので、先に水平断面を
+    # 楕円にしておかないと、いくら回しても見た目が変わらない
     crown_vertical_radius = crown_radius * VEGETATION_CROWN_SQUASH
     crown_center_z = base_z + trunk_height + crown_vertical_radius * (1.0 - VEGETATION_CROWN_OVERLAP)
-    crown_matrix = Matrix.Translation((base_x, base_y, crown_center_z)) @ Matrix.Diagonal(
-        (1.0, 1.0, VEGETATION_CROWN_SQUASH, 1.0)
+
+    aspect_x = random.uniform(VEGETATION_CROWN_ASPECT_MIN, VEGETATION_CROWN_ASPECT_MAX)
+    aspect_y = random.uniform(VEGETATION_CROWN_ASPECT_MIN, VEGETATION_CROWN_ASPECT_MAX)
+    yaw = random.uniform(0.0, 2.0 * math.pi)
+    tilt_azimuth = random.uniform(0.0, 2.0 * math.pi)
+    tilt = math.radians(random.uniform(0.0, VEGETATION_CROWN_TILT_MAX_DEG))
+    # 輪郭のノイズの位相。木ごとに変えることで、同じ式でも凹凸の出る向きが変わる
+    noise_phase_a = random.uniform(0.0, 2.0 * math.pi)
+    noise_phase_b = random.uniform(0.0, 2.0 * math.pi)
+
+    tilt_axis = Vector((math.cos(tilt_azimuth), math.sin(tilt_azimuth), 0.0))
+    crown_matrix = (
+        Matrix.Translation((base_x, base_y, crown_center_z))
+        @ Matrix.Rotation(tilt, 4, tilt_axis)
+        @ Matrix.Rotation(yaw, 4, 'Z')
+        @ Matrix.Diagonal((aspect_x, aspect_y, VEGETATION_CROWN_SQUASH, 1.0))
     )
     faces_before = set(bm.faces)
-    bmesh.ops.create_uvsphere(
+    crown = bmesh.ops.create_uvsphere(
         bm,
         u_segments=VEGETATION_CROWN_U_SEGMENTS,
         v_segments=VEGETATION_CROWN_V_SEGMENTS,
@@ -2607,6 +2643,22 @@ def _add_tree_to_bmesh(bm, base_engine, height, crown_radius,
         calc_uvs=False,
     )
     _tag_faces_since(bm, faces_before, crown_material)
+
+    # 輪郭をでこぼこにする。中心からの方向で決まる滑らかな関数で半径を押し引きするので、
+    # 頂点ごとに独立な乱数(=とげとげの球になる)ではなく、数個のふくらみになる。
+    # bmesh.ops.create_uvsphereの戻り値に新しい頂点が入っているため、面のタグ付けのような
+    # 集合差を取る必要はない
+    crown_center = Vector((base_x, base_y, crown_center_z))
+    for vert in crown["verts"]:
+        offset = vert.co - crown_center
+        length = offset.length
+        if length < 1.0e-6:
+            continue
+        direction = offset / length
+        theta = math.atan2(direction.y, direction.x)
+        phi = math.acos(max(-1.0, min(1.0, direction.z)))
+        lump = math.sin(3.0 * theta + noise_phase_a) * math.sin(2.0 * phi + noise_phase_b)
+        vert.co = crown_center + offset * (1.0 + VEGETATION_CROWN_NOISE * lump)
 
 
 def _normalize_deg(deg):
