@@ -981,14 +981,17 @@ WINDOW_HORIZONTAL_SPACING = 3.5
 PINNACLE_BASE_SIZE = 1.2
 PINNACLE_HEIGHT = 3.0
 
-# --- 鐘楼の隅の小塔。参考写真village3.jpgで確認した特徴。鐘楼(八角形)の8つの角のうち
-# 4つ(交互)に、細い八角形の小塔を追加する(出典なしの決め値) ---
-BELFRY_TURRET_RADIUS = 1.0
+# --- 鐘楼の隅の小塔。正方形の塔の4隅すべてに、細い多角形の小塔を追加する ---
+# 【寸法を写真に合わせる修正】旧値(半径1.0=直径2.0m、天端より4.0m突き出す)は、
+# c_abbey_south_closeup.jpgと並べると明らかに太く高すぎ、塔の錐屋根の下半分を隠して
+# 屋根を潰れて見せていた。写真では隅の小塔は塔の幅(13.3m)の1/10ほどの細さで、
+# 天端から2〜3m出る程度。半径0.6(直径1.2m=塔幅の1/11)・突き出し2.5mへ改める
+BELFRY_TURRET_RADIUS = 0.6
 BELFRY_TURRET_SIDES = 8
-BELFRY_TURRET_ABOVE_TOP = 4.0  # 鐘楼の天端より高く突き出す量
+BELFRY_TURRET_ABOVE_TOP = 2.5  # 鐘楼の天端より高く突き出す量
 BELFRY_TURRET_EMBED = 3.0      # 鐘楼本体に埋め込む量(接続を自然に見せるための決め値)
-BELFRY_TURRET_ROOF_HEIGHT = 2.0
-BELFRY_WINDOW_FACE_COUNT = 4    # 8面のうち窓を付ける面数(残りの4面の角に小塔を置く)
+BELFRY_TURRET_ROOF_HEIGHT = 1.5
+BELFRY_WINDOW_FACE_COUNT = 4    # 窓を付ける面数(BELFRY_SIDES=4なので4面すべて)
 
 # --- 修道院の垂直基礎構造(教会+ラ・メルヴェイユの平面輪郭を、岩の斜面まで垂直に
 # 落とす花崗岩の壁の塊)。aerial12.jpg/aerial11.jpg/aerial6.jpgのいずれでも、教会は
@@ -1118,19 +1121,74 @@ STATUE_TOP_Y = SPIRE_TOP_Y + 3.50      # =170.00
 # 合わせる対応でNAVE_WALL_HEIGHT 18→24へ変更したため23m→29mに変わった。鐘楼の高さは
 # BELFRY_TOP_Y(114.70)-109=5.7mへ縮むが、build_belfry()内の0以下ガードには掛からない)に
 # 合わせ、隙間なくBELFRY_TOP_Yまで届くようbuild_belfry()内で高さを計算する
-BELFRY_RADIUS = 6.0
-BELFRY_SIDES = 8
-# 鐘楼の頂に載る急勾配のスレート屋根。参考写真c_abbey_south_closeup.jpgでは、交差部の
-# 石造の塔の上に錐形のスレート屋根があり、尖塔はその頂から立ち上がっている。
-# モデルにはこの屋根が無く、尖塔が塔の天端から直接生えていた。
-# 写真で棟線(y=103)から尖塔の先端(SPIRE_TOP_Y=154.5)までを画素で割ると
-# 石造の塔:屋根:尖塔 ≒ 11.5 : 10.5 : 24(m)。出典のあるBELFRY_TOP_Y/SPIRE_TOP_Yは
-# 変えず、そのあいだの内訳としてこの屋根を入れる(高さは出典なしの決め値)
-BELFRY_ROOF_HEIGHT = 10.5
+# 【形を写真に合わせる修正】以前は八角柱(BELFRY_SIDES=8、外接円半径6.0)だったが、
+# 参考写真c_abbey_south_closeup.jpg / c_belfry_spire_detail.jpg のどちらでも、実物の
+# 交差部の塔は**正方形**である(平らな面が縦の稜線で交わり、4隅に小塔が立つ)。
+#
+# 寸法は c_abbey_south_closeup.jpg(望遠のほぼ正投影)から実測した。出典のある
+# SPIRE_TOP_Y - BELFRY_TOP_Y = 39.80m を、写真上の「塔の天端のコーニス(y=355px)から
+# 尖塔の先端(y=10px)」345pxに当てて 0.1154 m/px を得る。この尺度で:
+#   塔の対面幅          115px → 13.3m   (旧モデルは八角形の対面幅で11.1m。細すぎた)
+#   塔の天端→屋根の頂    97px → 11.2m   (旧BELFRY_ROOF_HEIGHT=10.5)
+#   屋根の頂→尖塔の先端 248px → 28.6m   (旧29.3m)
+#   尖塔の底面幅         40px →  4.6m   (旧SPIRE_BASE_RADIUS=2.2、直径4.4m)
+# 高さの配分は元から概ね合っていたので、主に直すのは平面形。
+BELFRY_HALF_WIDTH = 6.65   # 対面幅13.3mの半分(上記の実測値)
+BELFRY_SIDES = 4           # 正方形。面は±X・±Z(教会の身廊はX軸方向)を向く
+# 尖塔は八角錐のまま(写真でも尖塔は八角形)。鐘楼と辺の数が違うので定数を分ける
+SPIRE_SIDES = 8
+# 鐘楼の頂に載る急勾配のスレート屋根(四角錐台)。参考写真では交差部の石造の塔の上に
+# 錐形のスレート屋根があり、尖塔はその頂から立ち上がっている。
+# 高さは上記の実測(11.2m)に合わせた。SPIRE_BASE_Yがこの値で決まるため、尖塔の高さは
+# 自動的に28.6mになり、そちらも実測と一致する。
+# 出典のあるBELFRY_TOP_Y / SPIRE_TOP_Y / STATUE_TOP_Y は動かさない
+BELFRY_ROOF_HEIGHT = 11.2
 # 尖塔の底面。屋根の頂から立ち上がる(以前はBELFRY_TOP_Yから直接立ち上げていた)
-SPIRE_BASE_Y = BELFRY_TOP_Y + BELFRY_ROOF_HEIGHT  # =125.20
-# 尖塔の底面半径。鐘楼の屋根の頂に載るため、鐘楼本体より細くする(出典なしの決め値)
-SPIRE_BASE_RADIUS = 2.2
+SPIRE_BASE_Y = BELFRY_TOP_Y + BELFRY_ROOF_HEIGHT  # =137.90
+# 尖塔の底面半径。c_abbey_south_closeup.jpgの塔まわりを拡大して測り直した値。
+# 最初は「尖塔の底面幅40px→4.6m」と読んだが、拡大して見ると**その40pxは小尖塔の環まで
+# 含んだ幅**で、尖塔そのものは2.8m(半径1.4m)しかない。小尖塔の環の差し渡しは別に
+# 6.1m(SPIRE_PINNACLE_RING_RADIUS参照)。
+# 尖塔が細くなるぶん、鐘楼の錐屋根はほぼ尖った四角錐になる。写真の錐屋根も鋭く尖って
+# いてその頂に小尖塔の環と尖塔が載るので、こちらの方が写真に近い
+SPIRE_BASE_RADIUS = 1.4
+# 尖塔の輪郭のふくらみ。r = R * (1-t)^EXPONENT の指数(t=0で底面、t=1で先端)。
+# 1.0なら直線の円錐。写真では尖塔が根元で急に細くなってから針のように立つ。
+# 中間の高さ(t=0.5)での幅は写真で1.02m、直線の円錐なら1.4mなので
+#   (0.5)^EXPONENT = 1.02/2.8 = 0.364  →  EXPONENT ≒ 1.46
+SPIRE_PROFILE_EXPONENT = 1.46
+SPIRE_PROFILE_SEGMENTS = 6  # 高さ方向の分割数(輪郭のふくらみを出すのに必要な最小限)
+
+# 尖塔の付け根を取り巻く小尖塔の環。c_belfry_spire_detail.jpgで最も目を引く部分で、
+# 尖塔がいったんくびれてから小尖塔で広がり、また細く立ち上がる。これが無いと
+# 「屋根から棒が生えている」ように見える。
+# c_abbey_south_closeup.jpgの塔まわりを拡大して実測: 環の差し渡し6.1m(半径3.05m)、
+# 小尖塔が立ち上がっている範囲の高さ約7.0m。
+# 【太さの修正】最初は半径0.55(直径1.1m)で作ったが、8本を半径3.2mの円周(周長20m、
+# 間隔2.5m)に並べると隙間より本体の方が目立ち、写真の透けた小尖塔群ではなく
+# **金物の首輪**のように見えた。写真の1本は0.4m程度しかないので細くする
+SPIRE_PINNACLE_COUNT = 8
+SPIRE_PINNACLE_RING_RADIUS = 3.05
+SPIRE_PINNACLE_RADIUS = 0.3     # 小尖塔1本の太さ(直径0.6m)
+SPIRE_PINNACLE_SIDES = 6        # 600m先では輪郭しか出ないため辺は少なくてよい
+# 屋根へ埋め込む量。**尖塔を細くして錐屋根がほぼ尖ったあとは、この値が効く**。
+# 埋め込み1.0mで作ったときは、半径3.05mの環が尖った屋根の外側で宙に浮き、
+# 小尖塔の下に影の隙間ができて「浮いた首輪」に見えた。
+# 錐屋根は y=BELFRY_TOP_Y(126.70)で隅半径9.4m、y=SPIRE_BASE_Y(137.90)で1.4mまで
+# 絞られるので、隅半径が3.05mになるのは y≒135.6m。そこまで下ろせば足元が屋根に埋まる
+# (面の中心側は屋根がもっと内側にあるため、余裕を見て2.5mとする)
+SPIRE_PINNACLE_EMBED = 2.5
+# 本体+屋根の高さ。写真では錐屋根の頂から小尖塔群の先端まで約7.7m。
+# 埋め込み2.5mを足して 6.4 + 3.8 = 10.2m とする
+SPIRE_PINNACLE_BODY_HEIGHT = 6.4
+SPIRE_PINNACLE_ROOF_HEIGHT = 3.8
+
+# 鐘楼の隅(頂点)の角度。面の中心が±X・±Zを向くよう、頂点を半面ぶん(π/BELFRY_SIDES)
+# 回した位置に置く。BELFRY_SIDES=4なら隅は45/135/225/315度、面の中心は0/90/180/270度で、
+# 教会の軸(身廊はX軸方向)と平らな面が揃う
+BELFRY_CORNER_ANGLE_OFFSET = math.pi / BELFRY_SIDES
+# 隅までの距離(外接円半径)。対面幅の半分BELFRY_HALF_WIDTHから逆算する
+BELFRY_CORNER_RADIUS = BELFRY_HALF_WIDTH / math.cos(math.pi / BELFRY_SIDES)
 
 # 聖ミカエル像(簡略プレースホルダー)。600m先では2〜3pxにしかならないため、「翼を広げた
 # 輪郭が分かる程度」の簡略形状にする(承認済み計画の方針)。寸法は出典なしの決め値。
@@ -1249,6 +1307,19 @@ COMPARE_VIEWS = [
             {"file": "c_south_elevation_hazy.jpg",
              "island_x_range": [0.035, 0.975], "horizon_y": 0.700},
         ],
+    },
+    {
+        # 交差部の塔の寄り。指標には使わない(島の輪郭ではないので幅で正規化できない)が、
+        # c_abbey_south_closeup.jpgと**並べて見るための唯一のビュー**。
+        # 塔を八角形から正方形に直したとき、隅の小塔が太すぎる・小尖塔の環が首輪に見える・
+        # 環が屋根から浮いている、の3つはどれもこの並置でしか分からなかった
+        # (skyline_rmsは3組とも0.001も動かない)。塔まわりを触るときは必ずこれを見ること。
+        # 距離300m・fov_y16度で、塔の天端(126.7m)から像(170m)までが画面に収まる
+        "name": "tower_zoom",
+        "position": (0.0, 120.0, -300.0),
+        "target": (0.0, 143.0, 0.0),
+        "fov_y": 16.0,
+        "references": [{"file": "c_abbey_south_closeup.jpg", "metrics": False}],
     },
     {
         "name": "south_high",
@@ -4184,14 +4255,20 @@ def _add_octagon_turret_to_bmesh(bm, center_x, center_z, bottom_y, body_height, 
 
 
 def build_belfry():
-    """鐘楼(八角形の基部)。承認済み計画の方針により、教会・翼廊の交差部の屋根の実際の
-    高さ(NAVE_WALL_HEIGHT+NAVE_ROOF_HEIGHT=29m、y=CHURCH_FLOOR_Y+29=109)から
-    塔の頂(BELFRY_TOP_Y=114.70、出典あり)まで隙間なく届くよう、底面をその屋根の高さに
+    """鐘楼(交差部の塔。正方形の基部)。教会・翼廊の交差部の屋根の実際の高さ
+    (NAVE_WALL_HEIGHT+NAVE_ROOF_HEIGHT、y=CHURCH_FLOOR_Y+29=121)から
+    塔の頂(BELFRY_TOP_Y=126.70、出典あり)まで隙間なく届くよう、底面をその屋根の高さに
     合わせて高さを逆算する。
 
-    壁面4面(BELFRY_WINDOW_FACE_COUNT)に窓、8つの角のうち残りの4つに交互に小塔
-    (BELFRY_TURRET_*)を追加するため、primitive_cylinder_addではなくbmeshで直接
-    八角柱を組み立てる(頂点・面の角度を自分で把握して窓・小塔の位置決めに使うため)。
+    平面形は正方形(BELFRY_SIDES=4)。以前は八角形だったが、参考写真
+    c_abbey_south_closeup.jpg / c_belfry_spire_detail.jpg のどちらでも実物は正方形で、
+    平らな面が縦の稜線で交わり4隅すべてに小塔が立つ。寸法の実測値と導出は
+    BELFRY_HALF_WIDTH のコメントを参照。
+
+    壁面(BELFRY_WINDOW_FACE_COUNT)に窓、4隅に小塔(BELFRY_TURRET_*)、屋根の頂に
+    尖塔の付け根を取り巻く小尖塔の環(SPIRE_PINNACLE_*)を追加するため、
+    primitive_cylinder_addではなくbmeshで直接角柱を組み立てる
+    (頂点・面の角度を自分で把握して窓・小塔の位置決めに使うため)。
     """
     base_y = CHURCH_FLOOR_Y + NAVE_WALL_HEIGHT + NAVE_ROOF_HEIGHT  # 教会・翼廊交差部の屋根の高さ
     height = BELFRY_TOP_Y - base_y
@@ -4214,9 +4291,9 @@ def build_belfry():
         bottom_verts = []
         top_verts = []
         for i in range(BELFRY_SIDES):
-            angle = 2.0 * math.pi * i / BELFRY_SIDES
-            x = CROSSING_CENTER_X + BELFRY_RADIUS * math.cos(angle)
-            z = CROSSING_CENTER_Z + BELFRY_RADIUS * math.sin(angle)
+            angle = BELFRY_CORNER_ANGLE_OFFSET + 2.0 * math.pi * i / BELFRY_SIDES
+            x = CROSSING_CENTER_X + BELFRY_CORNER_RADIUS * math.cos(angle)
+            z = CROSSING_CENTER_Z + BELFRY_CORNER_RADIUS * math.sin(angle)
             bottom_verts.append(bm.verts.new(_engine_to_blender(x, base_y, z)))
             top_verts.append(bm.verts.new(_engine_to_blender(x, base_y + height, z)))
 
@@ -4233,16 +4310,20 @@ def build_belfry():
             bm.faces.new((bottom_center, bottom_verts[i_next], bottom_verts[i]))
             bm.faces.new((top_center, top_verts[i], top_verts[i_next]))
 
-        # 鐘楼本体(八角柱+底面・天面キャップ)はMasonry(窓・小塔本体は既定でMasonry、
+        # 鐘楼本体(角柱+底面・天面キャップ)はMasonry(窓・小塔本体は既定でMasonry、
         # 小塔の円錐屋根は既定でSlateRoofになるため、ここでは本体のみタグ付けする)
         _tag_new_faces(bm, 0, "Masonry")
 
-        # 窓: 8面のうちBELFRY_WINDOW_FACE_COUNT面(等間隔)に配置する
-        apothem = BELFRY_RADIUS * math.cos(math.pi / BELFRY_SIDES)  # 面の中心までの距離
+        # 窓: BELFRY_WINDOW_FACE_COUNT面(等間隔)に配置する。BELFRY_SIDES=4なので
+        # 4面すべてに1つずつ入る(実物は面あたり3連のアーチ窓だが、600m先では影絵に
+        # 出ないため1つで代表させる)
+        apothem = BELFRY_HALF_WIDTH  # 面の中心までの距離(=対面幅の半分)
         window_base_y = base_y + height * 0.35
         for k in range(BELFRY_WINDOW_FACE_COUNT):
-            i = (k * BELFRY_SIDES) // BELFRY_WINDOW_FACE_COUNT  # 0,2,4,6(BELFRY_SIDES=8前提)
-            angle = (i + 0.5) * 2.0 * math.pi / BELFRY_SIDES  # 面i(頂点iとi+1の間)の中心角
+            i = (k * BELFRY_SIDES) // BELFRY_WINDOW_FACE_COUNT
+            # 面i(頂点iとi+1の間)の中心角。頂点をBELFRY_CORNER_ANGLE_OFFSETだけ回して
+            # いるので、面の中心はちょうど 2πi/BELFRY_SIDES(=±X・±Z)になる
+            angle = BELFRY_CORNER_ANGLE_OFFSET + (i + 0.5) * 2.0 * math.pi / BELFRY_SIDES
             outward_x, outward_z = math.cos(angle), math.sin(angle)
             along_x, along_z = -math.sin(angle), math.cos(angle)
             window_x = CROSSING_CENTER_X + apothem * outward_x
@@ -4252,34 +4333,36 @@ def build_belfry():
                 along_dir=(along_x, 0.0, along_z), outward_dir=(outward_x, 0.0, outward_z),
             )
 
-        # 小塔: 8つの角のうち、窓を付けた面と重ならない残りBELFRY_SIDES-BELFRY_WINDOW_FACE_COUNT個
-        # (交互)の角に配置する
-        turret_count = BELFRY_SIDES - BELFRY_WINDOW_FACE_COUNT
+        # 小塔: **すべての隅**に1本ずつ立てる。参考写真c_belfry_spire_detail.jpgでは
+        # 正方形の塔の4隅すべてに小塔がある。
+        # (八角形だった頃は「窓を付けていない面の側の角だけ」という数え方をしていたが、
+        #  正方形では窓が4面すべてに入るため、その式では小塔が0本になってしまう)
         turret_bottom_y = base_y + height - BELFRY_TURRET_EMBED
-        turret_body_height = (height + BELFRY_TURRET_ABOVE_TOP) - (height - BELFRY_TURRET_EMBED)
-        for k in range(turret_count):
-            i = (k * BELFRY_SIDES) // turret_count + 1  # BELFRY_SIDES=8,turret_count=4なら1,3,5,7
-            angle = 2.0 * math.pi * i / BELFRY_SIDES  # 角(頂点)iの角度
-            turret_x = CROSSING_CENTER_X + BELFRY_RADIUS * math.cos(angle)
-            turret_z = CROSSING_CENTER_Z + BELFRY_RADIUS * math.sin(angle)
+        turret_body_height = BELFRY_TURRET_EMBED + BELFRY_TURRET_ABOVE_TOP
+        for i in range(BELFRY_SIDES):
+            angle = BELFRY_CORNER_ANGLE_OFFSET + 2.0 * math.pi * i / BELFRY_SIDES
+            turret_x = CROSSING_CENTER_X + BELFRY_CORNER_RADIUS * math.cos(angle)
+            turret_z = CROSSING_CENTER_Z + BELFRY_CORNER_RADIUS * math.sin(angle)
             _add_octagon_turret_to_bmesh(
                 bm, turret_x, turret_z, turret_bottom_y, turret_body_height,
                 BELFRY_TURRET_ROOF_HEIGHT, BELFRY_TURRET_RADIUS, BELFRY_TURRET_SIDES,
             )
 
-        # 塔の頂に載る急勾配のスレート屋根(八角錐台)。参考写真では尖塔はこの屋根の頂から
-        # 立ち上がる。頂は尖らせず、尖塔の底面半径まで絞った錐台にして継ぎ目を無くす
+        # 塔の頂に載る急勾配のスレート屋根(四角錐台)。参考写真では尖塔はこの屋根の頂から
+        # 立ち上がる。頂は尖らせず、尖塔の底面まで絞った錐台にして継ぎ目を無くす。
+        # 天面は隅までSPIRE_BASE_RADIUSの正方形にする。尖塔は同じ外接円半径の八角形なので、
+        # 八角形が正方形を常に覆い、隙間が出ない
         # このbmeshには既に小塔をbmesh.ops.create_coneで足しているため、インデックス基準の
-        # _tag_new_facesは使えない(実測で屋根8面のうち3面が取りこぼされてRockになっていた)
+        # _tag_new_facesは使えない(実測で屋根の面が取りこぼされてRockになっていた)
         roof_faces_before = set(bm.faces)
         roof_top_y = BELFRY_TOP_Y + BELFRY_ROOF_HEIGHT
         roof_bottom_verts = []
         roof_top_verts = []
         for i in range(BELFRY_SIDES):
-            angle = 2.0 * math.pi * i / BELFRY_SIDES
+            angle = BELFRY_CORNER_ANGLE_OFFSET + 2.0 * math.pi * i / BELFRY_SIDES
             cos_a, sin_a = math.cos(angle), math.sin(angle)
-            bx = CROSSING_CENTER_X + BELFRY_RADIUS * cos_a
-            bz = CROSSING_CENTER_Z + BELFRY_RADIUS * sin_a
+            bx = CROSSING_CENTER_X + BELFRY_CORNER_RADIUS * cos_a
+            bz = CROSSING_CENTER_Z + BELFRY_CORNER_RADIUS * sin_a
             tx = CROSSING_CENTER_X + SPIRE_BASE_RADIUS * cos_a
             tz = CROSSING_CENTER_Z + SPIRE_BASE_RADIUS * sin_a
             roof_bottom_verts.append(bm.verts.new(_engine_to_blender(bx, BELFRY_TOP_Y, bz)))
@@ -4291,6 +4374,21 @@ def build_belfry():
                 roof_top_verts[i_next], roof_top_verts[i],
             ))
         _tag_faces_since(bm, roof_faces_before, "SlateRoof")
+
+        # 尖塔の付け根を取り巻く小尖塔の環(SPIRE_PINNACLE_*参照)。屋根の頂へ少し
+        # 埋め込んでから立てる。実物では尖塔がここでいったんくびれ、小尖塔で広がってから
+        # また細く立ち上がる。これが無いと「屋根から棒が生えている」ように見える
+        pinnacle_bottom_y = SPIRE_BASE_Y - SPIRE_PINNACLE_EMBED
+        for i in range(SPIRE_PINNACLE_COUNT):
+            angle = 2.0 * math.pi * i / SPIRE_PINNACLE_COUNT
+            pinnacle_x = CROSSING_CENTER_X + SPIRE_PINNACLE_RING_RADIUS * math.cos(angle)
+            pinnacle_z = CROSSING_CENTER_Z + SPIRE_PINNACLE_RING_RADIUS * math.sin(angle)
+            _add_octagon_turret_to_bmesh(
+                bm, pinnacle_x, pinnacle_z, pinnacle_bottom_y,
+                SPIRE_PINNACLE_BODY_HEIGHT, SPIRE_PINNACLE_ROOF_HEIGHT,
+                SPIRE_PINNACLE_RADIUS, SPIRE_PINNACLE_SIDES,
+                body_material="Masonry", roof_material="LeadRoof",
+            )
     except Exception as error:  # noqa: BLE001
         print(f"[ERROR] 鐘楼の作成に失敗しました: ({error})", file=sys.stderr)
         raise
@@ -4315,32 +4413,71 @@ def build_spire():
     (塔の頂から39.80m、出典あり)。
 
     修正パス(参考写真c_abbey_south_closeup.jpgの実測): 以前は鐘楼の天端(BELFRY_TOP_Y)から
-    鐘楼と同径(BELFRY_RADIUS=6.0)で直接立ち上げていたため、写真にある錐形のスレート屋根が
-    抜け落ち、尖塔も太かった。屋根を鐘楼側へ追加し、尖塔はその頂から細く立ち上げる。
-    出典のあるSPIRE_TOP_Y(154.50)は変えていない。
+    鐘楼と同径で直接立ち上げていたため、写真にある錐形のスレート屋根が抜け落ち、
+    尖塔も太かった。屋根を鐘楼側へ追加し、尖塔はその頂から細く立ち上げる。
+    出典のあるSPIRE_TOP_Yは変えていない。
 
-    鐘楼が八角形になったため、こちらも八角錐にする。primitive_cylinder_add(vertices=8)と
-    primitive_cone_add(vertices=8)は既定で同じ角度基準(頂点の1つがローカルX軸上に来る配置)
-    で円周上に頂点を生成するため、旧実装(四角錐)のような45度回転や半対角線への読み替えは
-    不要で、そのまま鐘楼の辺と一致する(正八角形は180度回転で自分自身に重なる対称性を
-    持つため、方位の対応関係は崩れない)。
+    鐘楼を正方形に直したあとも、**尖塔だけは八角錐のまま**にする(写真でも尖塔は八角形)。
+    そのため辺の数は鐘楼のBELFRY_SIDESではなくSPIRE_SIDESを使う。
+    鐘楼の屋根の天面は隅までSPIRE_BASE_RADIUSの正方形で、この八角錐は同じ外接円半径を
+    持つため常に正方形を覆い、継ぎ目に隙間が出ない。
 
-    このオブジェクトのlocationはbmeshを介さず直接Blender座標で指定しているため、
-    _engine_to_blenderと同じ規則(blender_x=engine_x, blender_y=engine_z)を手で当てている。
-    軸変換の符号を変えるときはここも必ず一緒に直すこと。
+    修正パス(写真との並置): 直線の円錐(primitive_cone_add)では、写真の「根元で急に
+    細くなってから針のように立つ」輪郭にならず、ずんぐりして見えた。高さ方向を
+    SPIRE_PROFILE_SEGMENTSに分け、半径を r = R * (1-t)^SPIRE_PROFILE_EXPONENT で
+    与えて内側へ反った輪郭にする(指数の根拠はSPIRE_PROFILE_EXPONENTのコメント)。
+    このためbmeshで直接組み立てる。
     """
-    bpy.ops.mesh.primitive_cone_add(
-        vertices=BELFRY_SIDES,
-        radius1=SPIRE_BASE_RADIUS,
-        radius2=0.0,
-        depth=SPIRE_TOP_Y - SPIRE_BASE_Y,
-        location=(CROSSING_CENTER_X, CROSSING_CENTER_Z, (SPIRE_BASE_Y + SPIRE_TOP_Y) * 0.5),
-    )
-    obj = bpy.context.active_object
-    obj.name = "Spire"
-    # 尖塔は全面なまり葺き(LeadRoof)
-    for poly in obj.data.polygons:
-        poly.material_index = MATERIAL_SLOTS["LeadRoof"]
+    bm = bmesh.new()
+
+    try:
+        height = SPIRE_TOP_Y - SPIRE_BASE_Y
+        rings = []
+        for j in range(SPIRE_PROFILE_SEGMENTS):
+            t = j / SPIRE_PROFILE_SEGMENTS
+            radius = SPIRE_BASE_RADIUS * ((1.0 - t) ** SPIRE_PROFILE_EXPONENT)
+            y = SPIRE_BASE_Y + height * t
+            ring = []
+            for i in range(SPIRE_SIDES):
+                angle = 2.0 * math.pi * i / SPIRE_SIDES
+                x = CROSSING_CENTER_X + radius * math.cos(angle)
+                z = CROSSING_CENTER_Z + radius * math.sin(angle)
+                ring.append(bm.verts.new(_engine_to_blender(x, y, z)))
+            rings.append(ring)
+
+        apex = bm.verts.new(_engine_to_blender(CROSSING_CENTER_X, SPIRE_TOP_Y, CROSSING_CENTER_Z))
+
+        for j in range(SPIRE_PROFILE_SEGMENTS - 1):
+            for i in range(SPIRE_SIDES):
+                i_next = (i + 1) % SPIRE_SIDES
+                bm.faces.new((rings[j][i], rings[j][i_next], rings[j + 1][i_next], rings[j + 1][i]))
+        # 最上段のリングから先端へ
+        top_ring = rings[-1]
+        for i in range(SPIRE_SIDES):
+            bm.faces.new((top_ring[i], top_ring[(i + 1) % SPIRE_SIDES], apex))
+        # 底面のキャップ(鐘楼の屋根に埋もれて見えないが、閉じたメッシュにするため作る)
+        bottom_center = bm.verts.new(_engine_to_blender(CROSSING_CENTER_X, SPIRE_BASE_Y, CROSSING_CENTER_Z))
+        for i in range(SPIRE_SIDES):
+            i_next = (i + 1) % SPIRE_SIDES
+            bm.faces.new((bottom_center, rings[0][i_next], rings[0][i]))
+
+        # 尖塔は全面なまり葺き(LeadRoof)
+        _tag_new_faces(bm, 0, "LeadRoof")
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] 尖塔の作成に失敗しました: ({error})", file=sys.stderr)
+        raise
+
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+
+    mesh = bpy.data.meshes.new("Spire")
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+
+    obj = bpy.data.objects.new("Spire", mesh)
+    _link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
     return obj
 
 
