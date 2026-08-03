@@ -1,4 +1,4 @@
-"""モン・サン=ミシェル検証シーン(P1)用の島モデルを、Blenderのbpy APIで組み立てて
+﻿"""モン・サン=ミシェル検証シーン(P1)用の島モデルを、Blenderのbpy APIで組み立てて
 glTFへ出力する、あるいはプレビュー画像をレンダリングするスクリプト。
 
 Tools/generate_msm_proxy.py(手書きJSONでglTFを直接生成する版)の後継。岩(rock)は実物の
@@ -191,6 +191,16 @@ ROCK_NORTH_STEEP_EXPONENT = 0.5   # 北側(修道院側, +Z): 急峻(写真と�
 # 中腹が(根元と比べて相対的に)膨らむため、指数を1未満の0.85へ変更し中腹を絞って
 # 円錐に近づける。出典なしの決め値
 ROCK_SOUTH_GENTLE_EXPONENT = 0.85
+# 西側だけ指数を上乗せする量(_rock_profile_exponent参照)。南北の補間だけでは西が
+# 必ず中間値(0.675)になり中腹が痩せる。0.25で西の指数は0.925になり、半径95mでの
+# 岩の高さが28m→37m程度に上がる計算(スカイラインの残差の実測から逆算した値)。
+# 【注意】1.0を大きく超える指数は中腹を膨らませて「平たいパンケーキ」に戻すので上げすぎない
+# (過去にROCK_SOUTH_GENTLE_EXPONENTを1.25から0.85へ下げた経緯がある)
+ROCK_WEST_FULL_EXTRA = 0.35
+# 西の効きを真西に集中させる指数。max(0,-cos)^N のN。
+# N=2で試したとき南2組とne_lowは改善したが北2組が微悪化した(北西へ染み出すため。
+# theta=135度でも重みが0.5残る)。Nを上げるとローブが狭まり真西へ集中する
+ROCK_WEST_FULL_FALLOFF_POWER = 4.0
 
 # 局所的に半径を削り、垂直に近い険しい崖に見せるためのガウシアン減衰項のパラメータ
 # (_rock_profile_exponentによる南北非対称の指数プロファイルはそのままに、_rock_radiusの
@@ -1399,9 +1409,24 @@ def _rock_north_weight(theta):
 
 
 def _rock_profile_exponent(theta):
-    """角度に応じた半径プロファイルの指数(北=急峻・南=緩やかの間を線形補間)。"""
+    """角度に応じた半径プロファイルの指数(北=急峻・南=緩やかの間を線形補間し、西だけ厚くする)。
+
+    南北の補間だけだと西(theta=180度)は必ず北と南のちょうど中間(0.675)になり、
+    中腹が痩せる。実測では半径95mの位置で岩が28mしかなく、南からのスカイライン重ね合わせ
+    (south_low / south_mid)で画像左=西だけ緑が赤より低い残差が系統的に残っていた。
+    北東からの計測ビュー(ne_low)でも、画面右=西北西が急に落ちる形で同じ欠陥が出る。
+
+    ROCK_WEST_FULL_EXTRAで西寄りの指数だけ持ち上げる。指数が大きいほど根元付近の幅を
+    保つ(=同じ半径での高さが上がる)。東側には効かせたくないので max(0, -cos) を使い、
+    二乗して北・南への染み出しを抑える。
+    """
     south_weight = _rock_south_weight(theta)
-    return ROCK_NORTH_STEEP_EXPONENT + (ROCK_SOUTH_GENTLE_EXPONENT - ROCK_NORTH_STEEP_EXPONENT) * south_weight
+    exponent = (
+        ROCK_NORTH_STEEP_EXPONENT
+        + (ROCK_SOUTH_GENTLE_EXPONENT - ROCK_NORTH_STEEP_EXPONENT) * south_weight
+    )
+    west_weight = max(0.0, -math.cos(theta))   # 西で1.0、東・真北・真南で0.0
+    return exponent + ROCK_WEST_FULL_EXTRA * (west_weight ** ROCK_WEST_FULL_FALLOFF_POWER)
 
 
 def _rock_local_carve(theta):
