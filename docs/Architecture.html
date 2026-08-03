@@ -8212,6 +8212,124 @@ z=fBmのUVを異方的に伸ばす倍率、w=未使用)を追加した。この�
 今回は換算表を残すに留めた。この表は<code>CloudFbm</code>の実装に依存するので、
 オクターブ数や合成方法を変えたら測り直すこと。
 </p>
+
+<h3>34.11 ボリュメトリック雲の土台 ― 3Dテクスチャを扱えるようにする(P13a)</h3>
+<p>
+ここまでの雲は厚みゼロの平面レイヤーで、雲の上端と下端で視差が生まれず、雲底が暗く雲頂が明るいという
+積雲らしい明暗の勾配も出ない。本来のボリュメトリック雲へ進むには3Dノイズが要るが、
+<code>IRHIDevice</code>には3Dテクスチャを作る手段が無かった(34.1節でレイヤーモデルを選んだ理由の1つ)。
+P13aはその土台だけを入れる段で、<strong>見た目は1ビットも変えないのが正解</strong>である
+(まだ誰もこのテクスチャを読まないため)。
+</p>
+
+<h4>34.11.1 RHIへの追加は1メソッドで足りた</h4>
+<p>
+着手前に調べた結果、追加が必要なのは<code>IRHIDevice::CreateUAVTexture3D</code>の1つだけだった。
+</p>
+<ul>
+<li><code>DX11Texture</code>/<code>DX12Texture</code>のラッパークラスは<strong>変更不要</strong> ―
+SRVとUAVを持つだけの汎用の作りで、3Dでもそのまま使える</li>
+<li><code>IRHICommandList</code>も<strong>変更不要</strong> ―
+<code>SetComputeUnorderedAccessTexture</code>・<code>SetTexture</code>・3引数の<code>Dispatch</code>が既にある</li>
+<li>実装はDX11が<code>D3D11_TEXTURE3D_DESC</code>+<code>CreateTexture3D</code>、
+DX12が<code>CD3DX12_RESOURCE_DESC::Tex3D</code>と<code>D3D12_{SRV,UAV}_DIMENSION_TEXTURE3D</code>。
+DX12側は<code>uavDesc.Texture3D.WSize</code>の指定を忘れるとUAVが奥行き0枚を指し、
+エラーにならないままテクスチャが黒いままになるので注意</li>
+</ul>
+
+<h4>34.11.2 Wrapサンプラーが無い ― 役割で分けた設計に例外を1つ作る</h4>
+<p>
+<strong>これが着手前の調査で見つかった最大の落とし穴である。</strong>
+<code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>はフルスクリーンパスなので
+<code>ScreenSpaceSamplers</code>を使うが、<strong>このセットにはWrapのサンプラーが1つも無い</strong>
+(s0 = Linear + Clamp)。これは「画面端でUVが反対側へ回り込む不具合を構造的に防ぐ」ための
+意図的な設計である(14.2節と同じ、アドレスモードの取り違えで実際に不具合を出した経験に基づく)。
+</p>
+<p>
+しかしワールド空間で無限にタイリングする3Dノイズは<strong>Wrapでしか正しく引けない</strong>。
+そして<strong>シェーダー側で<code>frac(uvw)</code>して回避することはできない</strong> ――
+u=0.999のテクセルは本来u=0.0のテクセルと補間されるべきだが、Clampでは端のテクセルと補間され、
+補間そのものがテクスチャの端を跨げないため、周期の境界に必ず継ぎ目が出る。
+</p>
+<p>
+そこで<strong>s3に<code>VolumeSampler</code>(Linear + Wrap)を新設し、両方のサンプラーセットへ追加した。</strong>
+既存の設計意図と衝突しない根拠は「このサンプラーは画面UVには決して使わず、ワールド空間の3D座標でのみ使う」
+ことで、回り込む先の「反対側の画面端」がそもそも存在しない。役割で分ける方式を採っている以上、
+役割そのものが違えば同じセットに同居してよい。
+</p>
+<p class="note">
+<strong>DX12側に隠れていた上限。</strong><code>DX12Device.cpp</code>の<code>kSamplerSlotCount</code>が
+3固定で、<code>CreateSamplerSet</code>は超過分を<strong>切り捨てて</strong>いた
+(エラーログは出るが処理は続く)。これを4へ上げないと、DX11では正しく動くのにDX12でだけ
+s3が既定のサンプラーに差し替わる、という片側だけ静かに壊れる形になる。
+この定数は<code>Samplers.hlsli</code>の役割数と必ず一致させること。
+</p>
+
+<h4>34.11.3 焼くノイズ</h4>
+<p>
+<code>CloudNoiseGenerate.hlsl</code>が起動後に一度だけディスパッチして2枚を作る
+(カメラにも太陽にも空の状態にも依存しないため、BRDF積分LUTとまったく同じ「一度だけ焼く」作法に乗る)。
+</p>
+<ul>
+<li><strong>Shape</strong> 128<sup>3</sup> <code>R8G8B8A8_UNorm</code>(8MB)。
+R = 低周波のPerlin-Worley、G/B/A = 周波数を上げたWorley</li>
+<li><strong>Detail</strong> 32<sup>3</sup> <code>R8G8B8A8_UNorm</code>(128KB)。塊の縁を削る高周波Worley 3段</li>
+</ul>
+<p>
+<strong>2Dの<code>CloudFbm</code>は捨てない。</strong>「どこにどれだけ雲があるか」を決める平面分布
+(ウェザーマップ)として残し、3Dテクスチャは「形状と浸食」だけを担当する。
+これにより34.10節で決めた<code>CloudUvScale</code>・<code>CloudCoverage</code>の意味と調整結果が
+そのまま生きる。
+</p>
+<p class="note">
+<strong><code>[unroll]</code>を外した理由(実測)。</strong>Worleyは隣接27セルを調べるので、
+最初<code>[unroll]</code>していた。しかし呼び出し元(3オクターブ×Shapeで4回)まで通すと
+1シェーダーあたり324回ぶんの展開になり、<strong>fxcのコンパイルが実測4.4秒</strong>
+(Shape 2.7秒 + Detail 1.7秒)かかっていた。起動のたびに払うには重すぎる。
+<code>[loop]</code>へ変えたところ<strong>0.35秒</strong>になった。
+このパスは起動後に一度だけ走るベイクなので、動的ループによる実行時のわずかな損は問題にならない。
+</p>
+
+<h4>34.11.4 検証 ― タイル可能性は画面ではなくアルゴリズムで確かめた</h4>
+<p>
+最も壊れやすいのはタイル境界の継ぎ目である。デバッグ表示(<code>DebugView::CloudNoiseSlice</code>)は
+画面に<strong>2x2タイルぶん</strong>を出すようにしてあり、継ぎ目があれば画面中央の十字線として現れる。
+目視では継ぎ目は出ていない。
+</p>
+<p>
+ただし<strong>これを画面の画素で数値化しようとして2度失敗した。</strong>
+1度目はレターボックスの黒帯を「ノイズ領域」に含めてしまい、境界でない列を境界として測っていた。
+2度目は「1タイルぶんずらせば重なるはず」という自己相似の検査を試みたが、
+正方形の表示幅が1009pxと奇数でタイル境界が半画素にかかるため、高周波のノイズでは
+補間誤差に埋もれて判定できなかった。<strong>画面を経由する測り方はスケーリングに弱い。</strong>
+</p>
+<p>
+そこで測る対象を変えた。周期性は<em>アルゴリズムの性質</em>なので、
+<code>WorleyNoise</code>/<code>ValueNoise3D</code>/各fBmをオフラインで厳密に再現し、
+<code>f(u, v, w)</code>と<code>f(u+1, v, w)</code>が一致するかを直接調べた。
+</p>
+<table>
+<tr><th>関数</th><th>u+1</th><th>v+1</th><th>w+1</th><th>負方向(-1,-2,-3)</th></tr>
+<tr><td>WorleyFbm(4セル)</td><td>8.9e-16</td><td>8.9e-16</td><td>8.3e-16</td><td>1.7e-15</td></tr>
+<tr><td>WorleyFbm(6セル)</td><td>3.0e-15</td><td>2.8e-15</td><td>2.8e-15</td><td>4.9e-15</td></tr>
+<tr><td>ValueFbm(4セル)</td><td>6.7e-16</td><td>7.2e-16</td><td>7.8e-16</td><td>1.4e-15</td></tr>
+</table>
+<p>
+いずれも倍精度の丸め誤差の範囲で、3軸とも・負方向でも厳密に周期的である
+(負方向まで見るのは、<code>floor</code>ベースの剰余を使う理由が「素朴な<code>fmod</code>だと
+負のセル座標で巻き戻しが壊れる」ことだから)。
+</p>
+<p>
+<strong>このオフライン再現が実機と一致していることも確かめた</strong>(再現だけを信じない)。
+焼き上がったテクスチャの描画結果とPythonの再現で、チャンネルごとの平均は
+R 167.35 対 167.38、G 115.77 対 116.08、B 117.98 対 116.62 と<strong>差0.0〜1.1%</strong>で一致した。
+</p>
+<p>
+そのほか: 空の見た目はMont-Saint-MichelとSponzaの両方で<strong>ビューポート全体の最大差0</strong>
+(サンプラーセットへの末尾追加が既存パスを壊していないことの証明)。
+DX11とDX12でノイズの内容が一致し(最大差1・平均0.003、fxcとdxcの丸めの差)、
+<strong>DX12のデバッグレイヤーの出力は空</strong>だった。
+</p>
 </section>
 
 <section id="planarreflection">

@@ -44,6 +44,20 @@ namespace Kurenai::RHI
         virtual std::unique_ptr<IRHITexture> CreateRenderTexture(uint32_t width, uint32_t height, Format format) = 0;
         // コンピュートシェーダーから書き込み可能なUAV+SRVテクスチャ(RWTexture2D)
         virtual std::unique_ptr<IRHITexture> CreateUAVTexture(uint32_t width, uint32_t height, Format format) = 0;
+        // CreateUAVTextureの3D版(RWTexture3D / Texture3D、単一ミップ)。ボリュームテクスチャを
+        // コンピュートシェーダーで生成してピクセルシェーダーから読む用途向け
+        // (現在の利用者はボリュメトリック雲の形状ノイズ。Shaders/3D/CloudNoiseGenerate.hlsl)。
+        //
+        // 【サンプラーに注意】この種のテクスチャはワールド空間の座標で無限にタイリングして引くのが
+        // 前提なので、必ずWrapのサンプラー(Shaders/3D/Samplers.hlsliのs3 VolumeSampler)で読むこと。
+        // Clampで読むと周期の境界でトライリニア補間のタップが端のテクセルに張り付き、
+        // 一定間隔で継ぎ目が出る。シェーダー側でfrac()してもこの継ぎ目は消せない
+        // (補間そのものがテクスチャの端を跨げないため)。
+        //
+        // 書き込みは既存のSetComputeUnorderedAccessTexture(mipLevel=0)、読み出しは通常の
+        // SetTexture/SetComputeTextureがそのまま使える(3D専用のバインドAPIは増やしていない)
+        virtual std::unique_ptr<IRHITexture> CreateUAVTexture3D(
+            uint32_t width, uint32_t height, uint32_t depth, Format format) = 0;
         // Hi-Zミップチェーン用のテクスチャ。単チャンネル(R32_Float)でwidth/heightから1x1までの
         // フルミップチェーンを持ち、各ミップに個別のUAV(RWTexture2D、SetComputeUnorderedAccessTextureの
         // mipLevel引数で指定)を張る。コンピュートシェーダーで「ミップNを読んでミップN+1へ2x2ブロックの

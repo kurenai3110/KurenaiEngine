@@ -40,13 +40,19 @@ namespace Kurenai::RHI
         // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)
         constexpr uint32_t kTextureSlotCount = 18;
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
-        // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler(役割の定義はShaders/Samplers.hlsli)。
-        // どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。
-        // 3必要なのはTransparent.hlslが「マテリアル・シャドウマップ・BRDF積分LUT」の3種類を
-        // 1回のピクセルシェーダ実行で同時に使うため。
+        // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler、s3 = VolumeSampler
+        // (役割の定義はShaders/Samplers.hlsli)。どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。
+        // 3必要だったのはTransparent.hlslが「マテリアル・シャドウマップ・BRDF積分LUT」の3種類を
+        // 1回のピクセルシェーダ実行で同時に使うためで、4つ目はボリュームテクスチャ(3Dノイズ)を
+        // Wrapで引くためのVolumeSampler。
         // 一部のスロットしか宣言しないシェーダーでもテーブルはkSamplerSlotCount個ぶんまとめて
-        // バインドされるため、セット生成時に余ったスロットは既定のサンプラーで埋める(CreateSamplerSet参照)
-        constexpr uint32_t kSamplerSlotCount = 3;
+        // バインドされるため、セット生成時に余ったスロットは既定のサンプラーで埋める(CreateSamplerSet参照)。
+        //
+        // 【この値はShaders/3D/Samplers.hlsliの役割数と必ず一致させること】小さいままだと
+        // CreateSamplerSetが超過分を**切り捨てて**しまい(下記のcount = kSamplerSlotCount)、
+        // DX11は正しく動くのにDX12でだけサンプラーが既定のものに差し替わる、という
+        // 片側だけ静かに壊れる形になる
+        constexpr uint32_t kSamplerSlotCount = 4;
         // 作成できるサンプラーセットの最大数。セットは初期化時にだけ作られ解放されないため、
         // 用途の種類数(現状はマテリアル用・スクリーン空間用の2つ)に余裕を持たせた値でよい。
         // シェーダ可視Samplerヒープの上限はD3D12の仕様で2048ディスクリプタ
@@ -1271,6 +1277,47 @@ namespace Kurenai::RHI
 
         return std::make_unique<DX12Texture>(
             this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid, uavIndex);
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateUAVTexture3D(
+        uint32_t width, uint32_t height, uint32_t depth, Format format)
+    {
+        // CreateUAVTexture(上)の3D版。ビューの次元指定をTEXTURE3Dにすることと、
+        // UAVにWSize(書き込み対象の奥行きスライス数)を明示することだけが2Dとの違い。
+        // 【WSizeの指定を忘れないこと】0のままだとUAVが奥行き0枚を指すことになり、
+        // ディスパッチしても何も書き込まれない(エラーにはならず、テクスチャが黒いままになる)
+        const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);
+
+        const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+        const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Tex3D(
+            dxgiFormat, width, height, static_cast<UINT16>(depth), 1, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        ThrowIfFailed(
+            m_Device->CreateCommittedResource(
+                &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                IID_PPV_ARGS(&resource)),
+            "3D UAVテクスチャの作成に失敗しました");
+
+        const uint32_t srvIndex = m_RenderSrvCpuHeap->Allocate();
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = dxgiFormat;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Texture3D.MipLevels = 1;
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_RenderSrvCpuHeap->GetCpuHandle(srvIndex));
+
+        const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.Format = dxgiFormat;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+        uavDesc.Texture3D.WSize = depth;
+        m_Device->CreateUnorderedAccessView(
+            resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
+
+        return std::make_unique<DX12Texture>(
+            this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, srvIndex,
+            DX12Texture::kInvalid, DX12Texture::kInvalid, uavIndex);
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels)

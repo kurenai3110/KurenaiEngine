@@ -54,10 +54,11 @@ namespace Kurenai::UI
             "DDGI - 距離モーメント (R=平均距離)",
             "水面マスク (A=水面フラグ)",
             "平面反射 (水面に映る鏡像)",
+            "雲の3Dノイズ (スライス表示・2x2タイル)",
         };
         static_assert(
-            static_cast<int>(DebugView::PlanarReflection) == 30,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はPlanarReflection)");
+            static_cast<int>(DebugView::CloudNoiseSlice) == 31,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はCloudNoiseSlice)");
 
         DrawUsageHint();
         BeginParamGroup();
@@ -121,6 +122,18 @@ namespace Kurenai::UI
                     Defaults::ProbeDistanceDebugRange, "%.1f", ImGuiSliderFlags_Logarithmic,
                     "この距離で白飽和するようグレースケール化する。部屋の大きさに合わせると形が読める");
             }
+        }
+
+        if (m_Engine.m_DebugView == DebugView::CloudNoiseSlice)
+        {
+            ImGui::TextWrapped(
+                "画面には2x2タイルぶんを表示している。タイル境界に継ぎ目があれば画面中央の十字線として現れる");
+            CheckboxEx(
+                "ディテール(32^3)を見る###CloudNoiseDetail", &m_Engine.m_CloudNoiseDebugShowDetail, false,
+                "オフで形状ノイズ(128^3、RGB=Perlin-Worley/Worley/Worley)、オンで縁を削るディテールノイズ");
+            SliderFloatEx(
+                "スライス位置###CloudNoiseSlice", &m_Engine.m_CloudNoiseDebugSlice, 0.0f, 1.0f, 0.0f, "%.3f", 0,
+                "3Dテクスチャのどの断面を見るか(W座標)。動かして中身が変わらなければ焼けていない");
         }
 
         if (m_Engine.m_DebugView == DebugView::LightTiles)

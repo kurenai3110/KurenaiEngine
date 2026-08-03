@@ -1603,6 +1603,47 @@ namespace Kurenai
         m_BRDFLUTCombinePipelineState =
             m_Device->CreateComputePipelineState({ m_BRDFLUTCombineComputeShader.get() });
 
+        // ボリュメトリック雲の3Dノイズ(P13a)。カメラにも太陽にも空の状態にも依存しない
+        // 純粋な手続き生成なので、BRDF積分LUTと同じく起動後に一度だけ焼く(m_CloudNoiseBaked)。
+        // ここではリソースとパイプラインの作成だけを行う
+        m_CloudShapeNoiseTexture = m_Device->CreateUAVTexture3D(
+            kCloudShapeNoiseSize, kCloudShapeNoiseSize, kCloudShapeNoiseSize, RHI::Format::R8G8B8A8_UNorm);
+        m_CloudDetailNoiseTexture = m_Device->CreateUAVTexture3D(
+            kCloudDetailNoiseSize, kCloudDetailNoiseSize, kCloudDetailNoiseSize, RHI::Format::R8G8B8A8_UNorm);
+        if (!m_CloudShapeNoiseTexture || !m_CloudDetailNoiseTexture)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "雲の3Dノイズテクスチャの作成に失敗しました(ボリュメトリック雲が正しく描画されません)");
+        }
+
+        RHI::ShaderDesc cloudShapeNoiseCsDesc;
+        cloudShapeNoiseCsDesc.Stage = RHI::ShaderStage::Compute;
+        cloudShapeNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.hlsl";
+        cloudShapeNoiseCsDesc.EntryPoint = "CSGenerateShape";
+        m_CloudShapeNoiseComputeShader = m_Device->CreateShader(cloudShapeNoiseCsDesc);
+        if (!m_CloudShapeNoiseComputeShader)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "CloudNoiseGenerate.hlsl CSGenerateShape のコンパイルに失敗しました"
+                "(雲の形状ノイズが焼かれません)");
+        }
+        m_CloudShapeNoisePipelineState =
+            m_Device->CreateComputePipelineState({ m_CloudShapeNoiseComputeShader.get() });
+
+        RHI::ShaderDesc cloudDetailNoiseCsDesc;
+        cloudDetailNoiseCsDesc.Stage = RHI::ShaderStage::Compute;
+        cloudDetailNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.hlsl";
+        cloudDetailNoiseCsDesc.EntryPoint = "CSGenerateDetail";
+        m_CloudDetailNoiseComputeShader = m_Device->CreateShader(cloudDetailNoiseCsDesc);
+        if (!m_CloudDetailNoiseComputeShader)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "CloudNoiseGenerate.hlsl CSGenerateDetail のコンパイルに失敗しました"
+                "(雲のディテールノイズが焼かれません)");
+        }
+        m_CloudDetailNoisePipelineState =
+            m_Device->CreateComputePipelineState({ m_CloudDetailNoiseComputeShader.get() });
+
         RHI::ShaderDesc irradianceCsDesc;
         irradianceCsDesc.Stage = RHI::ShaderStage::Compute;
         irradianceCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
@@ -2103,7 +2144,7 @@ namespace Kurenai
     void KurenaiEngine3D::CreateSamplerSets()
     {
         // スロットの並びはShaders/3D/Samplers.hlsliの役割定義と一致させること
-        // (s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler)。
+        // (s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler、s3 = VolumeSampler)。
 
         // 色バッファ・LUT用。UVの端が定義域の端なのでClamp、拡縮でブロック状にならないようLinear。
         // BRDF積分LUTをWrapで引いて実際に不具合を出した経緯はdocs/Architecture.html 14.2.1節
@@ -2123,12 +2164,23 @@ namespace Kurenai
         materialSampler.Filter = RHI::SamplerFilter::Anisotropic;
         materialSampler.AddressMode = RHI::SamplerAddressMode::Wrap;
 
-        const RHI::SamplerDesc materialSet[] = { materialSampler, colorSampler, dataSampler };
+        // ボリュームテクスチャ(3Dノイズ)用。ワールド空間で無限にタイリングして引くためWrapが必須で、
+        // Clampだと周期の境界でトライリニア補間のタップが端のテクセルに張り付き継ぎ目が出る
+        // (シェーダー側でfrac()しても補間がテクスチャの端を跨げないため消せない)。
+        // レイマーチで等方的に刻んで引くので異方性フィルタは意味を持たずLinearでよい
+        RHI::SamplerDesc volumeSampler{};
+        volumeSampler.Filter = RHI::SamplerFilter::Linear;
+        volumeSampler.AddressMode = RHI::SamplerAddressMode::Wrap;
+
+        const RHI::SamplerDesc materialSet[] = { materialSampler, colorSampler, dataSampler, volumeSampler };
         m_MaterialSamplers = m_Device->CreateSamplerSet(materialSet, static_cast<uint32_t>(std::size(materialSet)));
 
         // スクリーン空間パスは画面内の中間バッファしか読まないため、s0にもWrapを置かない。
-        // 万一シェーダ側で役割を選び違えても、画面端でUVが反対側へ回り込む不具合が起きないようにする
-        const RHI::SamplerDesc screenSpaceSet[] = { colorSampler, colorSampler, dataSampler };
+        // 万一シェーダ側で役割を選び違えても、画面端でUVが反対側へ回り込む不具合が起きないようにする。
+        // 【s3のVolumeSamplerだけはこの原則の例外】引くのは画面UVではなくワールド空間の3D座標から
+        // 作ったUVWなので、回り込む先の「反対側の画面端」がそもそも存在しない。詳細はSamplers.hlsliの
+        // VolumeSamplerの宣言に書いてある
+        const RHI::SamplerDesc screenSpaceSet[] = { colorSampler, colorSampler, dataSampler, volumeSampler };
         m_ScreenSpaceSamplers = m_Device->CreateSamplerSet(screenSpaceSet, static_cast<uint32_t>(std::size(screenSpaceSet)));
     }
 
@@ -4350,6 +4402,38 @@ namespace Kurenai
             m_BRDFLUTBaked = true;
         }
 
+        // --- 雲の3Dノイズのベイクパス(P13a): 形状(128^3)とディテール(32^3)を起動後に一度だけ焼く。
+        //     カメラにも太陽にも空の状態にも依存しない純粋な手続き生成なので、BRDF積分LUTと
+        //     まったく同じ理由で焼き直さない。2枚は互いに独立なので1パスの中で連続して
+        //     ディスパッチしてよい(SRVとして読み合う関係が無く、BRDFLUTの2パス構成のような
+        //     中間バッファも要らない) ---
+        if (!m_CloudNoiseBaked && m_CloudShapeNoisePipelineState && m_CloudDetailNoisePipelineState)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "CloudNoiseBake",
+                .Writes = { m_CloudShapeNoiseTexture.get(), m_CloudDetailNoiseTexture.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    // スレッドグループは4x4x4。3次元なのでグループあたり64スレッドで、
+                    // 2次元パスの8x8(=64)と同じ粒度になる
+                    constexpr uint32_t kGroupSize = 4;
+
+                    cmd->SetComputePipelineState(m_CloudShapeNoisePipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_CloudShapeNoiseTexture.get(), 0);
+                    const uint32_t shapeGroups = (kCloudShapeNoiseSize + kGroupSize - 1) / kGroupSize;
+                    cmd->Dispatch(shapeGroups, shapeGroups, shapeGroups);
+
+                    // UAVはDispatch直後に自動で解除されるため張り直す
+                    // (IRHICommandList.hのバインド寿命の説明を参照)
+                    cmd->SetComputePipelineState(m_CloudDetailNoisePipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_CloudDetailNoiseTexture.get(), 0);
+                    const uint32_t detailGroups = (kCloudDetailNoiseSize + kGroupSize - 1) / kGroupSize;
+                    cmd->Dispatch(detailGroups, detailGroups, detailGroups);
+                },
+            });
+            m_CloudNoiseBaked = true;
+        }
+
         // --- プリフィルタ済み鏡面の畳み込みパス: スカイボックスを入力に、ミップごとに異なる
         //     ラフネスで畳み込む(面×ミップの組み合わせごとに1回ずつディスパッチ) ---
         if (!m_IBLBaked)
@@ -6117,6 +6201,9 @@ namespace Kurenai
         // Mode 12(反射プローブのキューブマップ配列)専用。TextureCube(t1)ともTexture2DArray(t2)とも
         // 型が違うためさらに別スロット(t4)が要る。こちらも常に有効なテクスチャをバインドしておく
         RHI::IRHITexture* presentDebugCubeArrayTexture = m_ProbeIrradianceArray.get();
+        // Mode 18(雲の3Dノイズ、P13a)専用。Texture3Dはここまでのどの型とも別なのでさらに
+        // 別スロット(t5)が要る。他と同じく常に有効なテクスチャをバインドしておく
+        RHI::IRHITexture* presentDebugVolumeTexture = m_CloudShapeNoiseTexture.get();
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = m_RenderWidth;
         uint32_t presentSourceHeight = m_RenderHeight;
@@ -6312,6 +6399,19 @@ namespace Kurenai
                 presentSourceHeight = m_PlanarReflectionHeight;
             }
             break;
+        case DebugView::CloudNoiseSlice:
+        {
+            // 雲の3Dノイズ(P13a)。形状(128^3)とディテール(32^3)を切り替えて任意のスライスを見る。
+            // 正方形のテクスチャなので表示も正方形にする(レターボックスの計算に渡す)
+            const bool showDetail = m_CloudNoiseDebugShowDetail;
+            presentDebugVolumeTexture =
+                showDetail ? m_CloudDetailNoiseTexture.get() : m_CloudShapeNoiseTexture.get();
+            presentMode = 18;
+            const uint32_t size = showDetail ? kCloudDetailNoiseSize : kCloudShapeNoiseSize;
+            presentSourceWidth = size;
+            presentSourceHeight = size;
+            break;
+        }
         }
 
         PresentConstants presentConstants{};
@@ -6356,6 +6456,11 @@ namespace Kurenai
             presentConstants.ArraySlice = static_cast<float>(
                 std::clamp(m_ProbeDebugIndex, 0, std::max(0, static_cast<int32_t>(m_ReflectionProbes.size()) - 1)));
         }
+        else if (m_DebugView == DebugView::CloudNoiseSlice)
+        {
+            // Mode 18ではW座標(0〜1)として使う。3Dテクスチャなので配列番号ではなく連続値
+            presentConstants.ArraySlice = std::clamp(m_CloudNoiseDebugSlice, 0.0f, 1.0f);
+        }
         else
         {
             presentConstants.ArraySlice =
@@ -6394,12 +6499,14 @@ namespace Kurenai
 
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Present",
-            .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture, presentDebugCubeArrayTexture },
+            .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture,
+                       presentDebugCubeArrayTexture, presentDebugVolumeTexture },
             // DebugView::LightTilesでライトグリッドを読むため、カリングパスより後に順序付ける
             .BufferReads = { m_LightTileBuffer.get() },
             .SwapChainTarget = m_SwapChain.get(),
             .Execute = [this, &letterboxViewport, presentSourceTexture, presentDebugCubeTexture,
-                        presentDebugArrayTexture, presentDebugCubeArrayTexture](RHI::IRHICommandList* cmd)
+                        presentDebugArrayTexture, presentDebugCubeArrayTexture,
+                        presentDebugVolumeTexture](RHI::IRHICommandList* cmd)
             {
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
                 cmd->ClearDepth(1.0f);
@@ -6416,6 +6523,7 @@ namespace Kurenai
                 // 必ずバインドする(SetPipelineStateが毎回ルート引数を無効化するため)
                 cmd->SetShaderResourceBuffer(3, m_LightTileBuffer.get());
                 cmd->SetTexture(4, presentDebugCubeArrayTexture);
+                cmd->SetTexture(5, presentDebugVolumeTexture);
                 cmd->Draw(3, 0);
             },
         });

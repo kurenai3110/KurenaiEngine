@@ -857,6 +857,7 @@ namespace Kurenai
             DDGIDistance,       // DDGIの距離モーメントアトラス(R=平均距離、G=平均二乗距離)
             WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示(P2)
             PlanarReflection,   // 平面反射パス(P6)の出力(m_PlanarReflectionColor)をトーンマッピングして表示
+            CloudNoiseSlice,    // 雲の3Dノイズ(P13a)の任意スライス。m_CloudNoiseDebugSlice/Detailで選ぶ
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -865,6 +866,11 @@ namespace Kurenai
         // ポスタリゼーションが何段あるかを目視で確認できるようにする。
         // 色として表示するモード(Present.hlsl Mode 0/3/4)にのみ効く
         float m_DebugViewGain = Defaults::DebugViewGain;
+        // DebugView::CloudNoiseSlice で表示する3Dノイズのスライス位置(0〜1、W方向)と、
+        // 形状(128^3)とディテール(32^3)のどちらを見るか。タイル境界に継ぎ目が出ていないかを
+        // 目と数値の両方で確認するために用意してある(P13aの合格条件)
+        float m_CloudNoiseDebugSlice = 0.0f;
+        bool m_CloudNoiseDebugShowDetail = false;
 
         // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
         // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
@@ -958,6 +964,13 @@ namespace Kurenai
         // [0, kIBLPrefilterMipLevels-1]のミップ番号へ線形マッピングする(DeferredLighting.hlsl参照)
         static constexpr uint32_t kIBLPrefilterMipLevels = 6;
         static constexpr uint32_t kIBLBRDFLUTSize = 128;
+        // ボリュメトリック雲の3Dノイズ(P13a)の1辺のテクセル数。
+        // Shapeは128^3のRGBA8で8MB、Detailは32^3のRGBA8で128KB。合わせて約8.1MB。
+        // Shapeを128にしているのは、雲1つが画面上で数百画素に広がるため塊の形にはこの程度の
+        // 解像度が要る一方、これ以上上げるとメモリが4倍(256^3で64MB)に跳ねるため。
+        // Detailは縁を削るだけで低周波成分を持たないので32で足りる
+        static constexpr uint32_t kCloudShapeNoiseSize = 128;
+        static constexpr uint32_t kCloudDetailNoiseSize = 32;
         // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
         // オフラインで焼いたDDS(Sky.dds)と違い、太陽が動くと空の輝度分布の「形」も追従する
         // (circumsolarの明るい領域が太陽と一緒に動く)。詳細はSkyGenerate.hlsl冒頭。
@@ -1041,6 +1054,22 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTPipelineState;
         std::unique_ptr<RHI::IRHIShader> m_BRDFLUTCombineComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTCombinePipelineState;
+
+        // --- ボリュメトリック雲の3Dノイズ(P13a) ---
+        //
+        // 雲の形状ノイズ。カメラにも太陽にも空の状態にも一切依存しない純粋な手続き生成なので、
+        // BRDF積分LUTとまったく同じ理由で起動後に一度だけ焼き、二度と焼き直さない
+        // (m_CloudNoiseBaked)。生成の中身はShaders/3D/CloudNoiseGenerate.hlsl。
+        //
+        // 【なぜ2枚に分けるか】Shapeは雲の大まかな塊、Detailはその縁を削る高周波成分で、
+        // 必要な解像度が2桁違う。1枚にまとめると細かい側に合わせた巨大なテクスチャが要る
+        std::unique_ptr<RHI::IRHITexture> m_CloudShapeNoiseTexture;
+        std::unique_ptr<RHI::IRHITexture> m_CloudDetailNoiseTexture;
+        std::unique_ptr<RHI::IRHIShader> m_CloudShapeNoiseComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_CloudShapeNoisePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_CloudDetailNoiseComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_CloudDetailNoisePipelineState;
+        bool m_CloudNoiseBaked = false;
         std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
