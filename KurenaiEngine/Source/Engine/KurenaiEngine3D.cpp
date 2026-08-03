@@ -2868,8 +2868,17 @@ namespace Kurenai
         m_SunEnabled = m_Scene.SunEnabled;
         m_AOEnabled = m_Scene.AOEnabled;
         // .ksceneが持つのは「反射を使うか」の真偽値だけなので、手法の選択はエンジン側で決める。
-        // 規則はDefaultReflectionModeに1か所だけ置いてある
-        m_ReflectionMode = m_Scene.SSREnabled ? DefaultReflectionMode(m_RaytracingAvailable) : ReflectionMode::Off;
+        //
+        // 【キーを書いたシーンと書いていないシーンを区別する】書いていなければエンジンの既定
+        // (DefaultReflectionMode。RTが使えない環境では反射なし)に従い、書いてあればその指定を
+        // 優先して手法だけを環境から選ぶ(ReflectionModeForCapability)。
+        // 以前は区別せず、かつ「= true」のときもエンジンの既定へ問い合わせ直していたため、
+        // DX11ではシーンの指定が握り潰されて反射が出なかった(両関数のコメント参照)
+        m_ReflectionMode = m_Scene.HasSSREnabledOverride
+            ? (m_Scene.SSREnabled ? ReflectionModeForCapability(m_RaytracingAvailable) : ReflectionMode::Off)
+            : DefaultReflectionMode(m_RaytracingAvailable);
+        // UIの「既定値に戻す」はエンジンの既定ではなくここへ戻す(m_SceneDefaultReflectionMode参照)
+        m_SceneDefaultReflectionMode = m_ReflectionMode;
         // トーンマップのカーブと空の彩度(アート指定)をシーンから受け取る。
         // Source/LibraryはSource/Engineに依存できないため、Scene側は同じ並びの独立した列挙を持つ。
         // 【並びを変えたら両方直すこと】(Assets/Scene.h の TonemapCurveSetting)

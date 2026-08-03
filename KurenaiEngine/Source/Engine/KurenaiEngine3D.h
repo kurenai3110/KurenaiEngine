@@ -496,20 +496,35 @@ namespace Kurenai
             ScreenSpace, // SSR(SSR.hlsl)。画面に映っているものだけが反射に映る
             Raytraced,   // RT反射(RTReflection.hlsl)。画面外も映るが、DX12かつDXR Tier 1.1が要る
         };
-        // レイトレーシングの可否から反射の既定の手法を決める。
-        // シーン読み込み(ApplyLoadedScene)とUIの「既定値に戻す」が同じ規則でなければ
-        // 「既定へ戻したのに起動直後と違う」ことになるため、規則をここ1か所に置く
+        // 「反射を出す」と決まったあとで、環境から**手法だけ**を選ぶ。出すかどうかはここでは決めない。
+        // 画面外も反射に映るRTが使えるなら常にそちら
+        static constexpr ReflectionMode ReflectionModeForCapability(bool raytracingAvailable)
+        {
+            return raytracingAvailable ? ReflectionMode::Raytraced : ReflectionMode::ScreenSpace;
+        }
+        // シーンが何も言っていないときの既定。「反射を出すか」をここで決める。
+        //
+        // 【この2つを1つの関数が兼ねていたために不具合になっていた】以前はこの関数が
+        // 「出すか」と「どの手法か」の両方を答えており、ApplyLoadedSceneが
+        // 「シーンが反射を要求している。ではどの手法か」を聞くのにも同じ関数を使っていた。
+        // Defaults::SSREnabledはfalse(SSRは画面端で反射が途切れる破綻が目立つため)なので、
+        // RTが使えない環境では**.ksceneがScreenSpaceReflection = trueと明示していても
+        // ReflectionMode::Offが返り、シーンの指定が握り潰されていた**。
+        // DX11でモン・サン=ミシェルの水面に何も映らない、White Furnace TestのSSR回帰テストが
+        // 実は動いていない、という形で現れていた(DX12はDXRが使えてRTが選ばれるため露見しなかった)
         static constexpr ReflectionMode DefaultReflectionMode(bool raytracingAvailable)
         {
-            // 画面外も反射に映るRTが使えるなら常にそちら。使えない環境でSSRへ落とすかは既定値で決める
-            return raytracingAvailable
-                ? ReflectionMode::Raytraced
-                : (Defaults::SSREnabled ? ReflectionMode::ScreenSpace : ReflectionMode::Off);
+            return Defaults::SSREnabled ? ReflectionModeForCapability(raytracingAvailable) : ReflectionMode::Off;
         }
         // 現在の手法。RaytracedはSupportsRaytracing()がtrueの環境でしか選べない
         // (UI側で選択不可にする)。ここの初期値はm_RaytracingAvailableが確定する前の値でしかなく、
         // 実際の既定はシーン読み込み時にDefaultReflectionModeで決め直される
         ReflectionMode m_ReflectionMode = DefaultReflectionMode(false);
+        // UIの「既定値に戻す」(右クリック)が戻る先。シーン読み込み時に決まった手法を控えておく。
+        // 【静的なDefaultReflectionModeを使ってはいけない】.ksceneが指定を持つ場合、
+        // 戻る先はエンジンの既定ではなく**そのシーンを読み込んだ直後の状態**である。
+        // ここを取り違えると「既定へ戻したらシーンが要求した反射が消える」ことになる
+        ReflectionMode m_SceneDefaultReflectionMode = DefaultReflectionMode(false);
         // レイトレーシング反射が使える環境か。デバイスのSupportsRaytracing()を初期化時に控えたもので、
         // UIの選択可否とシェーダー/パイプラインステートを作るかどうかの両方に使う
         // (RTReflection.hlslはRayQueryを含むためSM 6.5でしかコンパイルできず、
@@ -919,6 +934,11 @@ namespace Kurenai
         // 既定の手法はDefaultShadowModeが決める(反射のDefaultReflectionModeと同じ理由で1か所に置く)。
         // ここの初期値はm_RaytracingAvailableが確定する前の値でしかなく、
         // 実際の既定はシーン読み込み時に決め直される
+        // 【反射と違い「出すか」と「どの手法か」を分けていない】Defaults::ShadowEnabledがtrueで
+        // あるため、シーンがShadow = trueと書いたときにこの関数へ問い合わせても
+        // 手法の選択と同じ結果になり、いまは不具合にならない。ただし構造は反射で実際に踏んだ
+        // ものと同じ(DefaultReflectionModeのコメント参照)なので、Defaults::ShadowEnabledを
+        // falseにするなら反射と同じ形(ShadowModeForCapabilityへの分割)へ直すこと
         static constexpr ShadowMode DefaultShadowMode(bool raytracingAvailable)
         {
             if (!Defaults::ShadowEnabled)

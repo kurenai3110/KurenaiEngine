@@ -279,6 +279,7 @@ namespace Kurenai::Assets
             bool HasIBLIntensity = false;
             float IBLIntensity = 1.0f;
             bool AOEnabled = true;
+            bool HasSSREnabled = false;
             bool SSREnabled = true;
             Scene::TonemapCurveSetting Tonemap = Scene::TonemapCurveSetting::AgX;
             float SkySaturation = 1.0f;
@@ -538,6 +539,8 @@ namespace Kurenai::Assets
                         const std::optional<bool> parsedValue = ParseBoolToken(value);
                         if (!parsedValue) errorAt(lineNumber, rawLine, "ScreenSpaceReflectionの値はtrue/falseで指定してください");
                         result.SSREnabled = *parsedValue;
+                        // 「書いた」ことそのものに意味がある(Scene::HasSSREnabledOverride参照)
+                        result.HasSSREnabled = true;
                     }
                     else
                     {
@@ -1009,6 +1012,7 @@ namespace Kurenai::Assets
         scene.ShadowEnabled = parsed.SunShadow;
         scene.SunEnabled = parsed.SunEnabled;
         scene.AOEnabled = parsed.AOEnabled;
+        scene.HasSSREnabledOverride = parsed.HasSSREnabled;
         scene.SSREnabled = parsed.SSREnabled;
         scene.Tonemap = parsed.Tonemap;
         scene.SkySaturation = parsed.SkySaturation;

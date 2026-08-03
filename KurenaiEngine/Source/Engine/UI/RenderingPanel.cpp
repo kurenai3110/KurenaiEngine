@@ -431,7 +431,9 @@ namespace Kurenai::UI
         int modeIndex = static_cast<int>(m_Engine.m_ReflectionMode);
         if (ComboEx(
                 "反射の手法###ReflectionMode", &modeIndex, modeNames, modeCount,
-                static_cast<int>(KurenaiEngine3D::DefaultReflectionMode(rtAvailable)),
+                // 戻る先はエンジンの既定ではなく「このシーンを読み込んだ直後」
+                // (m_SceneDefaultReflectionModeのコメント参照)
+                static_cast<int>(m_Engine.m_SceneDefaultReflectionMode),
                 "SSRは画面に映っているものだけを反射に映す(画面外は反射プローブ/IBLに任せる)。"
                 "レイトレーシングはシーン全体へレイを飛ばすため画面外のものも映るが、"
                 "ヒット面のテクスチャは読めないためマテリアルの定数色になる"))
