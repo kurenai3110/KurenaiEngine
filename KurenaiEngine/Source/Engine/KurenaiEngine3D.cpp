@@ -5942,9 +5942,11 @@ namespace Kurenai
             break;
         case DebugView::BentNormal:
             // bent normal(34章)。正規化しないベクトルなので、法線表示(Mode 7)のような
-            // オクタヘドラルのデコードは通さず専用のMode 15で扱う
+            // オクタヘドラルのデコードは通さず専用のMode 18で扱う。
+            // 【Mode 15ではない】15はDDGIのイラディアンスアトラスが先に使っており、
+            // Present.hlslのそちらのブロックが無条件でreturnするため後ろは実行されない
             presentSourceTexture = m_GBufferBentNormal.get();
-            presentMode = 15;
+            presentMode = 18;
             break;
         case DebugView::MotionVector:
             // 速度バッファ。格納値はUV単位(1画素ぶんの移動で1/解像度、1920幅なら約0.0005)と

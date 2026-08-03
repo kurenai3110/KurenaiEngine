@@ -41,6 +41,9 @@
 //         そのままグレースケール表示する(水面=白、それ以外=黒)。0/1の二値でジオメトリの縁を
 //         跨いで補間されると意味のない中間値になるため、Mode 1/2/5/7/14と同じくDataSamplerで
 //         生値のまま読む
+//      18=bent normal(34章)。有効フラグが立っていない画素はマゼンタ、Gain<=1.5なら軸を色で、
+//         それより大きければ長さ(=aoB)をグレースケールで表示する。
+//         正規化しないベクトルなのでこちらもDataSamplerで生値のまま読む
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
@@ -234,7 +237,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // ブロック状にならないようColorSamplerで引く。
     // Modeは定数バッファ由来で波面内で一様のため、この分岐のコストは実質ゼロ
     const bool readsRawData =
-        (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14 || Mode == 15 || Mode == 17);
+        (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14 || Mode == 17 || Mode == 18);
     float4 sourceColor = readsRawData
         ? SourceTexture.Sample(DataSampler, input.UV)
         : SourceTexture.Sample(ColorSampler, input.UV);
@@ -298,7 +301,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(saturate(encoded), 0.5f, 1.0f);
     }
 
-    if (Mode == 15)
+    if (Mode == 18)
     {
         // bent normal(34章)。.rgb = 正規化しないbRaw、.a = 有効フラグ。
         // 有効フラグが立っていないテクセル(bent normalを持たないマテリアル)は
