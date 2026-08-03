@@ -34,12 +34,11 @@ cbuffer FrameConstants : register(b0)
     // x: PCSS(Percentage Closer Soft Shadows)のライトサイズ(シャドウマップUV空間の係数)。
     // ブロッカーサーチ・半影の広さの基準になる
     float4 ShadowParams;
-    // 大気遠近(P8)・水中項(P8)。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で
-    // 決まるため、末尾に追加のみで既存フィールドのオフセットを動かさない(この末尾へ追加する限り、
-    // ここより前のフィールドしか読まないこのシェーダーは今回の変更の影響を受けない)
-    float4 FogParams0;
-    float4 FogParams1;
-    float4 WaterBodyColor;
+    // 【宣言はここで止めている】このシェーダーが読むのはShadowParamsまでで、それより後ろは使わない。
+    // C++側のFrameConstantsはこの後ろにTimeParams・Sky*・Cloud*・PlanarReflectionPlane・
+    // Fog*・WaterBodyColorを持つが、cbufferは宣言順レイアウトなので、途中を飛ばして末尾だけを
+    // 宣言すると誤ったオフセットを読む。しかもコンパイルは通り絵も「それらしく」出るため気付けない。
+    // これらが必要になったら、C++の並びどおりに間のフィールドをすべて宣言すること
 };
 
 // ポイント/スポットライト1灯ぶんのデータ。C++側 KurenaiEngine3D.cpp の GPULight と
