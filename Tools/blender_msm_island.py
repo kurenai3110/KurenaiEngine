@@ -202,6 +202,35 @@ ROCK_WEST_FULL_EXTRA = 0.35
 # theta=135度でも重みが0.5残る)。Nを上げるとローブが狭まり真西へ集中する
 ROCK_WEST_FULL_FALLOFF_POWER = 4.0
 
+# --- 平面形の伸長(裾の半径を方位で変える) ---
+# 北東からの計測ビュー(ne_low)で、尖塔の水平位置が写真0.6772に対しモデル0.5276と
+# 0.15ずれている。カメラ方位を30/50/70度で較正してもモデル側は0.512〜0.528しか動かず
+# (島が真円に近いため)、方位の誤差では説明できないことを確認済み。
+# 実物は北西が急に落ち、南東側(集落と城壁)へ伸びた平面形をしている。
+# 傍証: 出典の周囲960m・面積7haを楕円に当てはめると軸比およそ1.5:1になる
+# (同じ周囲の円なら7.34haで、面積が4.6%不足する)。ただし出典の値が丸いので決定打ではない。
+#
+# そこで裾の半径に cos の項を足して伸長できるようにし、軸と振幅を振って測った。
+# t=1(頂上台地)では効かないので、岩の頂上と修道院は原点のまま動かない
+# (=修道院が相対的に伸長の反対側へ寄る)。
+#
+# 【軸の決め方】当初は集落のある南東(-40度)を想定したが、それだと南から見た東西の
+# 広がりを直接変えてしまい、south_lowが0.0327→0.0468と大きく悪化した(南のビューの
+# 横軸は東西なので直撃する)。軸を南寄り(-80度)にすると、南のビューでは伸長が
+# 視線方向とほぼ平行になるため横軸をほとんど変えず、一方で北東からは画面左が伸びて
+# 尖塔の相対位置が右へ動く。実測でも北東への効果は同等のまま南を壊さなくなった。
+#
+# 【振幅の決め方】平均は振幅とともに改善し続けるが、その分south_low(実機カメラに
+# 対応する主ビュー)が悪化する。内部最適が無く、主ビューを他とトレードしている状態。
+#   振幅  south_low  5組平均
+#   0.00   0.0327    0.0771
+#   0.10   0.0332    0.0731   ← 採用(south_lowへの影響が誤差の範囲)
+#   0.13   0.0351    0.0722
+#   0.16   0.0429    0.0710
+# 主ビューを犠牲にしない範囲で最大の効果が得られる0.10を採る。
+ROCK_PLAN_ELONGATION = 0.10            # 0.0で真円。裾の半径への相対振幅
+ROCK_PLAN_ELONGATION_AXIS_DEG = -80.0  # 伸ばす方位(ほぼ真南。上のコメント参照)
+
 # 局所的に半径を削り、垂直に近い険しい崖に見せるためのガウシアン減衰項のパラメータ
 # (_rock_profile_exponentによる南北非対称の指数プロファイルはそのままに、_rock_radiusの
 # 計算結果へ複数のガウシアンの和を追加で減算する。出典なしの決め値)。
@@ -1457,11 +1486,28 @@ def _rock_local_carve(theta):
 _rock_local_carve_clamp_count = 0
 
 
+def _rock_base_radius(theta):
+    """裾(t=0)の半径。ROCK_PLAN_ELONGATIONで南東側へ伸ばした平面形にする。
+
+    cosの項なので全周の平均半径は変わらず、面積もほとんど変わらない
+    (相対振幅eに対しておよそ1+e^2/2倍)。理由と根拠は定数のコメント参照。
+    """
+    if ROCK_PLAN_ELONGATION == 0.0:
+        return ROCK_BASE_RADIUS
+    axis = math.radians(ROCK_PLAN_ELONGATION_AXIS_DEG)
+    return ROCK_BASE_RADIUS * (1.0 + ROCK_PLAN_ELONGATION * math.cos(theta - axis))
+
+
 def _rock_radius(t, theta):
-    """高さ方向の割合t(0=底面,1=頂上台地)と角度thetaから、その位置の半径を求める。"""
+    """高さ方向の割合t(0=底面,1=頂上台地)と角度thetaから、その位置の半径を求める。
+
+    t=1では常にROCK_PLATEAU_RADIUSになるので、平面形を伸ばしても岩の頂上と
+    その上の修道院は原点のまま動かない(=修道院が相対的に北西寄りになる)。
+    """
     global _rock_local_carve_clamp_count
     exponent = _rock_profile_exponent(theta)
-    radius = ROCK_BASE_RADIUS + (ROCK_PLATEAU_RADIUS - ROCK_BASE_RADIUS) * (t ** exponent)
+    base = _rock_base_radius(theta)
+    radius = base + (ROCK_PLATEAU_RADIUS - base) * (t ** exponent)
     radius -= _rock_local_carve(theta)
     if radius < ROCK_LOCAL_CARVE_MIN_RADIUS:
         _rock_local_carve_clamp_count += 1
