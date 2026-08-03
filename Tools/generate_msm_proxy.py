@@ -33,10 +33,13 @@ UVは簡易な平面投影(各面をUV空間の正方形[0,1]x[0,1]にそのま�
   - Limestone(石灰岩): 岩・城壁・修道院の壁
   - SlateRoof(スレート屋根): 修道院の屋根(裾側の露出した屋根面のみ)・尖塔
 
-生成物: Assets/Source/MontSaintMichelStudy/Island.gltf + Island.bin
-KurenaiPacker.exeで Assets/Packed/MontSaintMichelStudy/Island.kmodel へ変換して使う
+生成物: Assets/Source/MontSaintMichelStudy/IslandProxy.gltf + IslandProxy.bin
+KurenaiPacker.exeで Assets/Packed/MontSaintMichelStudy/IslandProxy.kmodel へ変換して使う
 (--bake-occlusionは付けない。プロキシ形状にAOを焼いても実物との対応が無く意味が薄く、
 xatlasのUV展開が時間の無駄になるため)。
+
+この形状の本体はTools/blender_msm_island.py(Blender連携)へ移行した。このスクリプトは
+対照比較用に残している。
 """
 
 import json
@@ -47,8 +50,8 @@ import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(SCRIPT_DIR, "..", "Assets", "Source", "MontSaintMichelStudy")
-GLTF_NAME = "Island.gltf"
-BIN_NAME = "Island.bin"
+GLTF_NAME = "IslandProxy.gltf"
+BIN_NAME = "IslandProxy.bin"
 
 # --- 岩(円錐台) ---
 ROCK_BASE_RADIUS = 125.0
