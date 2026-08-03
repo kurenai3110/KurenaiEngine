@@ -293,6 +293,14 @@ namespace Kurenai::Assets
             float WaterWaveSpeed = 0.03f;
             float WaterWaveStrength = 0.25f;
 
+            // [Cloud]セクション(P10)。指定されたキーだけエンジンの設定を上書きする
+            bool HasCloudCoverage = false;   float CloudCoverage = 0.40f;
+            bool HasCloudAltitude = false;   float CloudAltitude = 1500.0f;
+            bool HasCloudThickness = false;  float CloudThickness = 400.0f;
+            bool HasCloudDensity = false;    float CloudDensity = 8.0f;
+            bool HasCloudCellSize = false;   float CloudCellSize = 1000.0f;
+            bool HasCirrusCoverage = false;  float CirrusCoverage = 0.5f;
+
             std::vector<ParsedLightEntry> Lights;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
             std::vector<ParsedGIVolumeEntry> GIVolumes;
@@ -309,6 +317,7 @@ namespace Kurenai::Assets
             ReflectionProbe,
             GIVolume,
             Water,
+            Cloud,
             Unknown,
         };
 
@@ -322,6 +331,7 @@ namespace Kurenai::Assets
             if (CaseInsensitiveEquals(name, L"ReflectionProbe")) return Section::ReflectionProbe;
             if (CaseInsensitiveEquals(name, L"GIVolume")) return Section::GIVolume;
             if (CaseInsensitiveEquals(name, L"Water")) return Section::Water;
+            if (CaseInsensitiveEquals(name, L"Cloud")) return Section::Cloud;
             return Section::Unknown;
         }
 
@@ -804,6 +814,54 @@ namespace Kurenai::Assets
                     }
                     break;
 
+                case Section::Cloud:
+                {
+                    // 数値1つを読んで範囲を確かめ、「指定された」印を立てるだけの処理が続くので
+                    // ラムダにまとめる(範囲外は打ち間違いとみなしてエラーにする)
+                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                    {
+                        if (!ParseFloatToken(value, out))
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                        }
+                        if (out < minValue || out > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        has = true;
+                    };
+
+                    if (CaseInsensitiveEquals(key, L"Coverage"))
+                    {
+                        readFloat(result.CloudCoverage, result.HasCloudCoverage, 0.0f, 1.0f, L"Coverage");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Altitude"))
+                    {
+                        readFloat(result.CloudAltitude, result.HasCloudAltitude, 100.0f, 20000.0f, L"Altitude");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Thickness"))
+                    {
+                        readFloat(result.CloudThickness, result.HasCloudThickness, 0.0f, 5000.0f, L"Thickness");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Density"))
+                    {
+                        readFloat(result.CloudDensity, result.HasCloudDensity, 0.0f, 100.0f, L"Density");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CellSize"))
+                    {
+                        readFloat(result.CloudCellSize, result.HasCloudCellSize, 10.0f, 100000.0f, L"CellSize");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CirrusCoverage"))
+                    {
+                        readFloat(result.CirrusCoverage, result.HasCirrusCoverage, 0.0f, 1.0f, L"CirrusCoverage");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
                 default:
                     break;
                 }
@@ -903,6 +961,12 @@ namespace Kurenai::Assets
         scene.Tonemap = parsed.Tonemap;
         scene.SkySaturation = parsed.SkySaturation;
         scene.HasExposureOverride = parsed.HasExposure;
+        scene.HasCloudCoverage = parsed.HasCloudCoverage;   scene.CloudCoverage = parsed.CloudCoverage;
+        scene.HasCloudAltitude = parsed.HasCloudAltitude;   scene.CloudAltitude = parsed.CloudAltitude;
+        scene.HasCloudThickness = parsed.HasCloudThickness; scene.CloudThickness = parsed.CloudThickness;
+        scene.HasCloudDensity = parsed.HasCloudDensity;     scene.CloudDensity = parsed.CloudDensity;
+        scene.HasCloudCellSize = parsed.HasCloudCellSize;   scene.CloudCellSize = parsed.CloudCellSize;
+        scene.HasCirrusCoverage = parsed.HasCirrusCoverage; scene.CirrusCoverage = parsed.CirrusCoverage;
         scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;

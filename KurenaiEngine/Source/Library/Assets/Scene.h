@@ -207,6 +207,24 @@ namespace Kurenai::Assets
         bool HasExposureOverride = false;
         float ExposureEV100 = 15.0f;   // EngineDefaults.h の SceneExposureEV100 と同じ値にすること
 
+        // --- [Cloud]セクション(P10)。天候はシーンが持つべき性質なので、[Water]と同じく
+        // シーンごとに指定できるようにする。**指定されたキーだけ**エンジンの設定を上書きする
+        // (Exposure/IBLIntensityと同じ扱い)ので、書かなかったキーはエンジンの既定値のまま。
+        // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        bool HasCloudCoverage = false;
+        float CloudCoverage = 0.40f;
+        bool HasCloudAltitude = false;
+        float CloudAltitude = 1500.0f;      // 雲底の高度[m]
+        bool HasCloudThickness = false;
+        float CloudThickness = 400.0f;      // 雲底から雲頂までの厚み[m]
+        bool HasCloudDensity = false;
+        float CloudDensity = 8.0f;          // 光学的な濃さ。上げるほど不透明で白い塊になる
+        bool HasCloudCellSize = false;
+        float CloudCellSize = 1000.0f;      // 雲の塊1つぶんのワールド上の大きさ[m]。
+                                             // エンジン側はこの逆数(UvScale)を持つ
+        bool HasCirrusCoverage = false;
+        float CirrusCoverage = 0.5f;        // 高層の巻雲。0で消える
+
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };

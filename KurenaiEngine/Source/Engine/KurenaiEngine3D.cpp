@@ -2891,6 +2891,15 @@ namespace Kurenai
         {
             m_SceneExposureEV100 = m_Scene.ExposureEV100;
         }
+        // 雲(P10)。天候はシーンの性質なので[Cloud]セクションで持てるようにした。
+        // 露出と同じく指定されたキーだけを上書きする。CellSizeだけは.kscene側が「雲の塊1つの
+        // 大きさ[m]」で持ち、エンジン側はその逆数(UVスケール)を持つので変換する
+        if (m_Scene.HasCloudCoverage)  { m_CloudCoverage = m_Scene.CloudCoverage; }
+        if (m_Scene.HasCloudAltitude)  { m_CloudAltitude = m_Scene.CloudAltitude; }
+        if (m_Scene.HasCloudThickness) { m_CloudThickness = m_Scene.CloudThickness; }
+        if (m_Scene.HasCloudDensity)   { m_CloudDensity = m_Scene.CloudDensity; }
+        if (m_Scene.HasCloudCellSize)  { m_CloudUvScale = 1.0f / std::max(m_Scene.CloudCellSize, 1.0f); }
+        if (m_Scene.HasCirrusCoverage) { m_CirrusCoverage = m_Scene.CirrusCoverage; }
         // 水面(P2)。[Water]が無いシーンでもScene::WaterWaveScale等はリテラル既定値
         // (EngineDefaults.hを複製したもの、Scene.h参照)を持っているため、常にそのまま反映してよい
         // (m_TimeOfDay/m_SunAzimuthDegreesと同じ扱い)
