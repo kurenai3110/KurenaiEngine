@@ -82,9 +82,29 @@ RESAMPLE_POINTS = 128
 # 誤検出ではない(実際にその列の一番手前にある暗い物体を検出できている)が、低ポリゴンの
 # レンダ側にはそこまで細かい凹凸が無く、128点への正規化・比較においては両者のスケールが
 # 合わずノイズにしかならないため、島の区間内で水平方向(列方向)にメディアンフィルタを
-# かけて、1〜数列だけの深い落ち込みを均す(区間幅に対する割合。出典なしの決め値)
-SKYLINE_SMOOTH_FRACTION = 0.05
-SKYLINE_SMOOTH_MIN_PX = 5
+# かけて、1〜数列だけの深い落ち込みを均す。
+#
+# 【重大な修正・非対称の除去】この平滑化は長らく**参考写真側にしか掛かっていなかった**
+# (_extract_island_skyline / _extract_island_skyline_manual だけが呼び、レンダ側の
+# _extract_island_render_mask は呼んでいなかった)。しかも窓幅が区間幅の5%あり、
+# south_lowでは島幅954pxに対して窓49px。メディアンフィルタは窓の半分より細い凸部を
+# 完全に消すため、**モン・サン=ミシェルで最も特徴的な尖塔が参考写真側から丸ごと
+# 消えていた**。実測: south_lowのpeak_height_ratioはref=0.3597/render=0.4574で、
+# refの「頂点」は水平線から343pxの位置=交差部の塔の天端であり、尖塔の先端(480px)
+# ではなかった(モデルの尺度170m/0.4574=372mを当てるとref 0.3597は約134m≒
+# 塔の天端126.70m)。south_midも独立に同じ比1.25を出しており偶然ではない。
+# その結果、(a)peak_height_ratioの1.25はモデルの欠陥ではなく計測の非対称、
+# (b)peak_positionは「写真の屋根の位置」と「モデルの尖塔の位置」という別物の比較、
+# (c)skyline_rmsにはモデルをどう直しても消えない下駄、という三重の汚染が起きていた。
+#
+# 対処は2つ。第一に _smooth_skyline() へ集約して**3つの抽出関数すべてから呼ぶ**
+# (両側に同じ処理が掛かることが本質。ここを揃えないと窓幅をどう調整しても非対称のまま)。
+# 第二に窓幅へ根拠の軸を持たせる。両側とも RESAMPLE_POINTS 点へリサンプルされるので、
+# **リサンプル1ビンより細かい範囲の平滑化なら指標が見ている情報を壊さない**。
+# この基準なら「1ビンより細かい列単位のノイズだけを均す」と言えるため、後から値を
+# 動かしたくなったときに判断の軸が残る(以前の5%は根拠の無い決め値だった)
+SKYLINE_SMOOTH_FRACTION = 1.0 / RESAMPLE_POINTS  # ≒0.0078(島幅954pxで窓7px)
+SKYLINE_SMOOTH_MIN_PX = 3
 
 # レンダ画像専用: 背景色(blender_msm_island.COMPARE_BACKGROUND_COLOR、マゼンタ)からの
 # 色距離がこの値を超えるピクセルを「島」とみなす。背景は単色でノイズがほぼ無いため、
@@ -289,6 +309,21 @@ def _median_smooth_1d(values, window):
     return out
 
 
+def _smooth_skyline(skyline, left, right):
+    """島の区間[left, right)のスカイラインへ列方向のメディアンフィルタをかける(破壊的)。
+
+    **参考写真側とレンダ側の両方から必ずこの関数を通すこと。** 以前は参考写真側だけが
+    平滑化されており、細い尖塔が参考写真からだけ消えて比較が非対称になっていた
+    (SKYLINE_SMOOTH_FRACTIONのコメント参照)。窓幅の決め方も同じ場所に書いてある。
+
+    区間幅が0以下なら何もしない(呼び出し側の検証に任せる)。
+    """
+    if right - left <= 0:
+        return
+    window = max(SKYLINE_SMOOTH_MIN_PX, int(round((right - left) * SKYLINE_SMOOTH_FRACTION)))
+    skyline[left:right] = _median_smooth_1d(skyline[left:right], window)
+
+
 def _close_small_gaps(mask, max_gap):
     """1次元bool配列maskについて、True区間に挟まれた長さmax_gap以下のFalse区間をTrueに埋める。
 
@@ -389,10 +424,9 @@ def _extract_island_skyline(arr):
         local_values[~run_valid] = interpolated[~run_valid]
         skyline_filled[run_indices] = local_values
 
-    # 修正パス(タスクA目視検証): ゴシック建築の細いピナクル群のような、レンダ側には無い
-    # 高周波の凹凸で生じる1〜数列だけの深い落ち込みを、区間内でメディアンフィルタして均す
-    smooth_window = max(SKYLINE_SMOOTH_MIN_PX, int(round((right - left) * SKYLINE_SMOOTH_FRACTION)))
-    skyline_filled[left:right] = _median_smooth_1d(skyline_filled[left:right], smooth_window)
+    # ゴシック建築の細いピナクル群のような高周波の凹凸で生じる1〜数列だけの深い落ち込みを
+    # 均す。レンダ側(_extract_island_render_mask)も同じ関数を通す(非対称にしない)
+    _smooth_skyline(skyline_filled, left, right)
 
     return left, right, skyline_filled, horizon_row, threshold, sky_lum, sky_std
 
@@ -505,6 +539,12 @@ def _extract_island_render_mask(arr, background_color):
         local_values = skyline_filled[run_indices]
         local_values[~run_valid] = interpolated[~run_valid]
         skyline_filled[run_indices] = local_values
+
+    # 参考写真側と同じ平滑化を通す。**ここを省くと比較が非対称になる**
+    # (以前はレンダ側だけ平滑化が無く、細い尖塔が参考写真からだけ消えていた。
+    #  SKYLINE_SMOOTH_FRACTIONのコメント参照)。
+    # 水平線の基準を求める前に掛けることで、実際に比較する曲線と基準面を一致させる
+    _smooth_skyline(skyline_filled, left, right)
 
     # 水平線が存在しないため、島のシルエット自身の最下点(裾野)を高さ0の基準にする
     horizon_row = float(np.max(skyline_filled[left:right]))
