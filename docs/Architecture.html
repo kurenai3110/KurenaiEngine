@@ -235,6 +235,9 @@
     <li><a href="#launchscripts">32. 起動スクリプト(Run.bat)</a></li>
     <li><a href="#runtimeswitch">33. 内部レンダー解像度とグラフィックスAPIの実行時切り替え</a></li>
     <li><a href="#bent-normal">34. Bent Normalによる遮蔽(ディフューズ / スペキュラ)</a></li>
+    <li><a href="#clouds">35. 雲(レイヤーモデル、P5)</a></li>
+    <li><a href="#planarreflection">36. 平面反射(P6)</a></li>
+    <li><a href="#aerialperspective">37. 大気遠近(height fog / aerial perspective、P8)</a></li>
   </ol>
 </nav>
 
@@ -333,6 +336,33 @@ G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_F
 (近平面=0.0/遠平面=1.0)よりも遠方のZ精度を確保してZファイティングを抑えています。
 正射影のシャドウマップは元々Zが線形分布のため対象外で、従来どおりのマッピング
 (D32_FLOAT、近平面=0.0/遠平面=1.0)のままです。
+</p>
+<h3>3.1 近平面の決め方 ― 対角長に比例させるだけにしない</h3>
+<p>
+初期カメラの近平面は<code>ComputeWalkableNearZ</code>が
+<code>clamp(シーン対角 * 0.0005, 0.01, 0.1)</code>[m]で決める。上限のクランプが要る理由は、
+比例部分の<code>対角 * 0.0005</code>が<strong>Reverse-Zを前提としていない経験則</strong>だからである。
+深度をNDCへほぼ1/zで写す従来のZバッファでは、near:far比を一定に保つことが遠方の精度を守る唯一の
+手段だった。Reverse-Z + D32_FLOATでは、1/zが近平面側へ分解能を寄せる分布と、浮動小数点の指数が
+0付近で細かくなる性質がちょうど噛み合うため、近平面を小さくしても遠方の精度がほとんど落ちない
+(Reverse-Zを採る目的がまさにこれ)。
+</p>
+<p class="note">
+<strong>クランプが無いと足元が丸ごと消える。</strong>近平面より手前のジオメトリはラスタライズ前に
+捨てられるため、広い屋外シーンでは「カメラを下に向けると地面や水面が消える」という形で出る。
+実測: 6000m四方の干潟のシーン(対角約8487m)では比例部分が<code>near = 4.24m</code>を返し、
+水面の1.45m上に置いたカメラを俯角19.9度より下へ向けると水面が画面から消えた
+(G-Bufferのアルベドも水面マスクも0、つまり暗く描かれているのではなく何も描かれていない状態で、
+背景として空モデルの下半球の色が見えていた)。実測した消失境界は俯角19.1度・距離4.43mで、
+計算値の4.24mと一致する。
+</p>
+<p>
+上限0.1mは人の目線の高さ(1.6m前後)に対して十分小さい値として選んだ。対角200m以下のシーンでは
+比例部分が0.1mを下回るため、このクランプは効かない(Sponzaでの実測: 修正前後で<strong>最大差0</strong>)。
+クランプが効く広いシーンでは、<code>ComputeCascadeSplits</code>が近平面を基準にカスケードを
+分割するため<strong>影の分割位置がわずかに動く</strong>。実測ではモン・サン=ミシェルのシーンで
+差が出た画素は0.025%(650画素)・平均差0.0075で、いずれも島の輪郭と影の境界に沿った細い線に
+限られ、Zファイティングを示す面的な破綻は出ていない。
 </p>
 </section>
 
@@ -4719,14 +4749,14 @@ DDGIが鏡面に一切触れていないこと、すなわち20章の「足し�
 保たれていることも同時に確認できる。
 </p>
 
-<h4>bent normal(34章)との統合で決めたこと</h4>
+<h4>bent normal(35章)との統合で決めたこと</h4>
 <p>
 M11は<code>master</code>から分岐した後、<code>master</code>側へbent normalによる方向を持つ遮蔽
-(<a href="#ch34">34章</a>)が入った。両者は<strong>同じ拡散の1行を別々に書き換えていた</strong>ため、
+(<a href="#ch34">35章</a>)が入った。両者は<strong>同じ拡散の1行を別々に書き換えていた</strong>ため、
 統合時に次の判断が要った。
 </p>
 <ul>
-<li><strong>DDGIのサンプル方向は<code>N</code>のまま据え置く。</strong> 34章は
+<li><strong>DDGIのサンプル方向は<code>N</code>のまま据え置く。</strong> 35章は
 <code>SampleEnvironment</code>へ渡す方向を<code>N</code>から<code>bent.axis</code>(開いている方向)へ
 変えたが、<code>SampleDDGIIrradiance</code>の<code>N</code>は<strong>オクタヘドラルの方向であると同時に
 プローブの裏面判定・重み付けにも使われる</strong>ため、ここだけ軸へ差し替えると格子の重みまで変わる。
@@ -4751,7 +4781,7 @@ SH経路の構造化バッファUAV/SRVという、DX12のディスクリプタ�
 White Furnace TestでDX11と同値であることを確認している</li>
 <li>DX11とDX12の描画結果の一致(ProbeTestで平均絶対差0.617/255)</li>
 </ul>
-<p><strong>34章を取り込んだ後に測り直した結果</strong>(いずれもDX11・内部解像度1280x720):</p>
+<p><strong>35章を取り込んだ後に測り直した結果</strong>(いずれもDX11・内部解像度1280x720):</p>
 <ul>
 <li>3ソリューションともDebug/Release警告0エラー0。全46エントリポイントをfxcでコンパイル
 (レイトレーシングの3件だけは手元のSDK同梱dxcが古く<code>0x80070459</code>で通らないが、
@@ -4904,6 +4934,66 @@ SSRを有効にして計測したところ、<strong>3Dシーンの画素は1つ
 <li><code>roughnessCutoff</code>(既定0.6)より粗い面ではSSRを一切使わない。この領域は
 プローブ/グローバルIBLに委ねられる</li>
 </ul>
+
+<h3>20.6 水面画素の例外 ― フォールバック先を解析空に差し替える(P4)</h3>
+<p>
+20.3節の表は「画面外へ外れた/最大距離まで判定不能なら確信度0」としていた。ここで
+<strong>確信度0とは「何も映さない」ではなく「Lightingパスが適用済みのプローブ/グローバルIBLを
+そのまま残す」の意である</strong>――合成式<code>出力 = SceneColor + (newRadiance - envRadiance)
+* SpecularIBLWeight(...) * 確信度</code>は確信度0でSceneColorへ厳密に一致するので、20.3節の判断は
+今も変わっていない。
+</p>
+<p>
+水面(G-Bufferの<code>Material.a</code>で<code>kMaterialIDWater</code>とタグ付けされた面。
+<code>.kscene</code>で<code>[Model]Water=true</code>と明示したモデルにだけ付く、オプトインの
+タグである)に限っては、このフォールバック<em>先の品質</em>を上げる。このシーンの水面は
+4000m四方あるのに対し<code>SSRMaxDistance</code>は既定5.0mしかないため、水面の反射レイは
+ほぼ確実に画面外へ抜けるか最大距離まで判定がつかない。つまり水面ではこの「レアケース」が
+実質的な既定経路になり、確信度0のままだとプリフィルタ済み鏡面IBL(19.1節の
+<code>kIBLPrefilterBaseSize</code>=128pxベースのキューブマップをラフネス由来のミップで
+引いたもの)しか映らない。
+</p>
+<p class="note">
+<strong>現時点でこの差し替えによる見た目の変化はごく小さい。</strong>実測では、フォールバックの
+有効/無効で水面領域の差は8bitで最大1・平均0.67しかない(非水面領域は空が完全に0、島が最大1)。
+空が滑らかな勾配しか持たない間は、低ミップのプリフィルタ済み鏡面と解析評価がほぼ同じ値を返すためで、
+これは21.10節で背景の解析評価がキューブマップと最大1で一致したのとまったく同じ理由による。
+差が大きくなるのは空に高周波の要素(雲)が入ってからで、そのとき128pxベースのプリフィルタでは
+雲の輪郭が色斑に潰れる。ここで先に経路を用意しておくのは、雲を入れた時点で背景・水面反射の
+両方が自動的に同じ空を見るようにするためである。
+</p>
+<p>
+そこで水面画素だけ、<b>画面内で背景(スカイ)へ到達した場合</b>と<b>画面外へ外れた/最大距離まで
+判定不能だった場合</b>の両方で、フォールバック先を<a href="#procedural-sky">21.10節</a>で
+共有ヘッダー化した<code>Sky.hlsli</code>の<code>SkyColor</code>(Perez分布の解析評価)に差し替える。
+<code>SSR.hlsl</code>が独自に持つ<code>MakeSkyParameters</code>は
+<code>DeferredLighting.hlsl</code>のものと完全に同一の内容(太陽方向の正規化を含む)にしてあり、
+背景に見える空と水面に映る空が同じ色になることを保証している。<b>画面内でジオメトリに
+ヒットした場合の経路と合成式そのものは一切変えていない</b>――画面内に島などの映り込みがあるなら、
+それはスクリーンスペースの情報としてそのまま正しい答えになるため、捨てて空で塗り替える理由がない。
+</p>
+<p>
+この差し替えが安全な理由は、<strong>水平な水面を上から見たとき、反射ベクトルは必ず上向き
+(空の側)を向く</strong>ことにある。屋根の下の水たまりのように反射ベクトルが上を向いても実際は
+天井が映るべき反例は存在するが、この経路は<code>[Model]Water=true</code>とタグ付けした面にしか
+適用されない完全なオプトインなので、影響範囲はタグ付けした面に閉じている。反射ベクトルが
+波の揺らぎで水平線より下を向いた場合も、<code>SkyColor</code>が地平線下の接地色へのフェードを
+既に持っているためそのまま呼んで問題ない。
+</p>
+<p class="note">
+この機能はUI(レンダリングパネルの水面セクション)の「水面の反射に解析的な空を使う」トグルで
+無効化できる(既定ON)。また手続き空が無効な(<code>.kscene</code>でスカイボックス画像を明示した)
+シーンでは、トグルの値に関わらずC++側で必ず無効化される――DDSは任意の絵でPerezモデルとは
+無関係なため、21.10節の背景解析評価と同じ理由で解析評価してはいけない。
+</p>
+<p class="note">
+<strong>追記(P6)。</strong><a href="#planarreflection">36章</a>で導入した平面反射が有効な
+水面画素では、この解析空フォールバックよりも平面反射の結果が優先される。平面反射は
+「実際に鏡映カメラで描いた景色」なので、Perez分布の解析評価よりも正確な答えになるため。
+平面反射が無効(パス未実行)な画素、または反射先の画面UVが画面外に出た画素では、
+このセクションで説明した解析空フォールバックがそのまま使われる(<code>SSR.hlsl</code>の
+<code>ApplyPlanarReflection</code>参照)。
+</p>
 </section>
 
 <section id="procedural-sky">
@@ -5225,10 +5315,13 @@ Perez分布が与えるのは<strong>輝度の分布だけ</strong>で、色は�
 <p>
 本来の夕焼けは、太陽光が大気を長く通ることで短波長がRayleigh散乱により失われる波長依存の消散で生じる。
 それを解くにはPreetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。
-本エンジンはPerez分布を使う以上その情報を持たないので、
+21.9の時点ではPerez分布(輝度の分布のみを与え、色は与えない)しか持っていなかったため、
 <strong>昼・薄明・夜の3セットを太陽高度で補間する</strong>アート的な近似を採った
 (物理的な導出ではないことを明記する)。あわせて太陽の方位まわりに暖色を乗せる項
 (<code>cosγ</code>の4乗フォールオフ)を追加した。
+<strong>(P7追記)</strong> 日中(太陽仰角5度以上)の色はPreetham et al. 1999のxyYモデルから
+物理的に導出するように変わった。詳細は21.12節を参照。夜・薄明とその間のクロスフェード、
+および地平線より下の接地色は、Preethamの定義域外であるため、このアート的な補間のまま残っている。
 </p>
 <p>
 暖色の強さは<strong>太陽仰角0度で最大、±15度で0になる三角窓</strong>にしている。
@@ -5237,16 +5330,20 @@ Perez分布が与えるのは<strong>輝度の分布だけ</strong>で、色は�
 実際の夕焼けの残光と同じ構造になる。
 </p>
 <p class="note">
-<strong>色味をCPUで決めてcbufferで配る設計にした理由。</strong>
-この色味は(a)<code>SkyGenerate.hlsl</code>のキューブマップ生成と、
-(b)<code>ComputeSkyZenithScale</code>の照度正規化(積分の重みに色味の輝度成分が入る)の
-両方で完全に一致していなければならない。従来は定数を2箇所に複製していたが、
-CPUで1度決めて配れば<strong>両者がずれることが構造的に起きなくなる</strong>。
+<strong>色味を1箇所で決めて配る設計にした理由。</strong>
+この色味は(a)<code>SkyGenerate.hlsl</code>のキューブマップ生成と、(b)照度正規化の積分
+(積分の重みに色味の輝度成分が入る)の両方で完全に一致していなければならない。従来は
+定数を2箇所に複製していたが、1度決めて配れば<strong>両者がずれることが構造的に起きなくなる</strong>。
 なお暖色が太陽の方位にだけ乗るようになったため色味が天頂角だけの関数ではなくなり、
 正規化の積分でも色味の評価をφループの内側へ移した。
+<strong>(P9追記)</strong> この色味決定と照度正規化の積分は当初CPU
+(<code>ComputeSkyTint</code>/<code>ComputeSkyZenithScale</code>)で行いHLSL側と二重実装していたが、
+21.11節のとおりGPU側(<code>SkyIntegrate.hlsl</code>の<code>ComputeSkyTintSet</code>)へ
+一本化し、CPUミラーは削除した。「1箇所で決めて配る」という設計自体は変わっていない
+(決める場所がCPUからGPUへ移っただけ)。
 </p>
 <p class="note">
-<strong>色味を暗くしても空は暗くならない。</strong><code>ComputeSkyZenithScale</code>が
+<strong>色味を暗くしても空は暗くならない。</strong>照度正規化の積分(P9以降は<code>SkyIntegrate.hlsl</code>)が
 「色味の輝度成分込みで積分して目標照度に合わせる」ため、色味が決めるのは色相と彩度だけである。
 明るさは<code>SunLighting::SkyIlluminanceLux</code>が持つ。夜のティントを深い青にしても
 照度は変わらない。
@@ -5548,6 +5645,157 @@ sRGBの原色付近でのV'(λ)の比 (0.024, 0.368, 0.608) をRGBの重みに�
 <p>
 あわせて<code>AE Night Rolloff</code>は4.5段を維持した(壁3.8 / 空27.9)。
 実際の夜も空が一番明るく地上は沈むので、この関係が肉眼の見え方に近い。
+</p>
+
+<h3>21.10 空モデルの共有ヘッダー化と、背景の解析評価(P3)</h3>
+<p>
+これまで空モデル本体(Perez分布・色味補間・地面フェード)は<code>SkyGenerate.hlsl</code>だけが持ち、
+背景(深度が書かれていない画素)は<code>SkyGenerate</code>が焼いた256px/面のキューブマップを
+サンプルして描いていた。この256pxは<strong>IBL(拡散イラディアンス・鏡面反射)としては十分だが、
+背景として直接表示するには解像度が足りない</strong>。1面90度視野のキューブマップは
+256 / 90 ≈ <strong>2.84 px/度</strong>しか持たないのに対し、3840px・水平画角68度のカメラは
+約<strong>56 px/度</strong>で表示するため、背景として引くと約20倍に拡大表示され輪郭がぼける
+(将来ここへ雲を載せる計画があり、ぼけたままでは輪郭が保てない)。
+</p>
+<p>
+そこで空モデルの関数群(<code>PerezF</code> / <code>PerezRelativeLuminance</code> /
+<code>SunGlowWeight</code> / <code>SkyTint</code> / <code>SkyColorUpper</code> / <code>SkyColor</code>)を
+<code>Shaders/3D/Sky.hlsli</code>へ切り出した。キューブマップのベイク(<code>SkyGenerate.hlsl</code>、
+IBL用)と背景の解析評価(<code>DeferredLighting.hlsl</code>、画面解像度)の2つの利用者がこの1つの
+定義を共有し、どちらも同じ空を描くことが構造的に保証される。cbufferには依存せず、呼び出し側が
+自分のcbuffer(<code>SkyBakeConstants</code>または<code>FrameConstants</code>)から
+<code>SkyParameters</code>構造体を組み立てて渡す形にしてある。
+</p>
+<p>
+背景は深度が無い画素でのみ<code>DeferredLighting.hlsl</code>が<code>SkyColor</code>を直接評価する
+(手続き空のベイクと同じ太陽位置・色味・天頂輝度を使うため、キューブマップと解析評価は常に一致する)。
+<strong>キューブマップ(IBL用)自体は解像度・用途とも変更していない</strong>。反射プローブ・拡散
+イラディアンスは畳み込み済みの低周波量のため、256px/面のままで正しい。
+</p>
+<p class="note">
+<strong>手続き空が無効(<code>.kscene</code>で[Scene]Skyboxを明示しているシーン)なときは、
+この設定に関わらず背景もキューブマップに戻る。</strong>DDSは任意の絵でPerezモデルとは無関係のため、
+解析評価してはいけない。UIの「空の背景を解析評価する」トグルはキューブマップの中身
+(<code>SkyGenerate</code>のベイク結果)には影響しないため、既存の「手続き空」トグルと違い
+再ベイクのフラグは立てない。
+</p>
+
+<h3>21.11 照度正規化積分のGPU化とCPUミラーの廃止(P9)</h3>
+<p>
+21.10節までの空モデルは、色味の決定(<code>ComputeSkyTint</code>)と照度正規化の積分
+(<code>ComputeSkyZenithScale</code>、θ64分割×φ256分割=16,384サンプルの中点則)が
+<code>KurenaiEngine3D.cpp</code>のCPUミラーとして実装されており、<code>Shaders/3D/Sky.hlsli</code>
+側の同じ式と<strong>「片方を直したら必ずもう片方も直す」という規約でしか整合が保てなかった</strong>。
+P9でこの積分をGPU側(新設の<code>Shaders/3D/SkyIntegrate.hlsl</code>)へ一本化し、
+CPUミラーは削除した。
+</p>
+<p>
+<code>SkyIntegrate.hlsl</code>は1グループ×256スレッドのコンピュートシェーダーで、
+<code>Dispatch(1,1,1)</code>固定。スレッド<code>i</code>(i=0..255)がφインデックス<code>i</code>を
+担当し、θを64ステップぶん積む(1スレッドあたり64サンプル、合計16,384で従来のCPU版と厳密に同じ
+サンプル位置)。HLSLの<code>InterlockedAdd</code>はSM6.6未満では整数専用でfloatを加算できないため、
+各スレッドの部分和を<code>groupshared float[256]</code>へ書き、
+<code>GroupMemoryBarrierWithGroupSync()</code>を挟んだツリー加算(ペアワイズ和、256→128→…→1)で
+集約する。CPU版は<code>double</code>で累積していたが、HLSLにdoubleの実用的な手段はないため
+floatのツリー加算で行う。
+</p>
+<p>
+結果(ティント4本+正規化済みの天頂輝度)は要素数1の構造化バッファ
+(<code>GPUSkyParameters</code>、C++側 <code>m_SkyParametersBuffer</code>)へ書く。
+<code>SkyGenerate.hlsl</code>(IBL用キューブマップのベイク)・<code>DeferredLighting.hlsl</code>
+(背景の解析評価)・<code>SSR.hlsl</code>(水面の解析空フォールバック)の3者はこのバッファを
+<code>Sky.hlsli</code>の<code>ApplySkyParametersFromBuffer</code>で読むだけになり、
+各シェーダーが個別に組み立てていたティント・天頂輝度のcbufferフィールド
+(<code>FrameConstants::SkyZenithTint</code>等)は削除した。
+</p>
+<p class="note">
+<strong>雲による平均透過率(判断B、35.4節)はCPUに残した。</strong>被覆率からの単純な線形補間で
+Perez分布とは無関係であり、二重実装の問題に該当しないため、GPU化の対象外とした。
+<code>SkyBakeConstants::ZenithLuminance</code>(4本のティントとあわせて削除)は
+<code>CloudTransmittance</code>1本に置き換わり、<code>SkyGenerate.hlsl</code>側で
+<code>SkyParametersBuffer[0].Luminance.x * CloudTransmittance</code>として掛ける。
+</p>
+<p class="note">
+<strong>fxc(SM5.0)の制約でヘルパー関数の引数形式を変えた。</strong>
+<code>ApplySkyParametersFromBuffer</code>は当初<code>inout SkyParameters</code>で設計したが、
+fxcは一部フィールドしか書かない<code>inout</code>引数を「output parameter not completely
+initialized」(X3508)としてコンパイルエラーにする(呼び出し側が他のフィールドを既に埋めていても
+関係なく、この関数単体で全フィールドの代入が無いと判定される)。値渡し+戻り値の形にすることで
+回避した。DX11がfxc/SM5.0固定である以上、この制約は今後も効く(<code>Claude/Tools/check_shaders.ps1</code>で
+fxc/dxc両方のコンパイルを機械的に確認する理由でもある)。
+</p>
+
+<h3>21.12 空の色をPreetham xyYモデルへ置き換え(P7)</h3>
+<p>
+21.9.3節のとおり、日中の空の色は<strong>昼・薄明・夜の3セットを太陽高度で補間するアート的な近似</strong>
+だった。輝度分布(Perez分布)はもともと物理モデルなので、色度(x, y)もPreetham et al. 1999の
+xyYモデルから求めれば、タービディティ1つで正午の深い青から地平線の白い霞みまで連続に出るようになる。
+P7でこれを実装した。
+</p>
+<p>
+<code>Sky.hlsli</code>の<code>SkyColorUpper</code>は従来<code>relative * ZenithLuminance * SkyTint(...)</code>
+という、<code>ZenithLuminance</code>に対して厳密に線形な式だった。この性質を<code>SkyColorUpperUnit</code>
+(天頂輝度を1としたときの色)として切り出し、<code>SkyColorUpper</code>はそれを
+<code>ZenithLuminance</code>倍するだけの薄いラッパーにした。
+</p>
+<p class="note">
+<strong><code>SkyColorUpperUnit</code>は<code>params.ZenithLuminance</code>を絶対に参照しない。</strong>
+<code>ZenithLuminance</code>自体が<code>SkyIntegrate.hlsl</code>の積分(この関数の結果のRec.709輝度を
+重みに使う)から目標照度を逆算して決まる値であるため、参照すると値が決まる前にその値を使うという
+循環定義になる。
+</p>
+<p>
+<strong>積分の重みも変えた。</strong>以前の<code>SkyIntegrate.hlsl</code>の被積分関数は
+「Perez相対輝度 × ティントのRec.709輝度成分」だった。Preethamでは輝度(Y)と色度(x, y)が分離するため
+この重みは意味を失う。そこで被積分関数を<strong>「<code>SkyColorUpperUnit</code>の結果のRec.709輝度」</strong>
+へ変えた。こうすると「実際に画面へ出る色の輝度をそのまま積分する」ことになり、昼(Preetham)・
+夜(従来ティント)・その間のクロスフェードのどの領域でも正規化が定義上正しくなる。
+</p>
+<p>
+<strong>Preethamの絶対天頂輝度(kcd/m^2を返す式)は実装していない。</strong>本エンジンは天頂輝度を
+目標照度から正規化して決めており(21.11節)、絶対輝度をPreethamから取ると二重に決めることになる。
+輝度は従来どおり「Perez比 + <code>kRelativeLuminanceFloor</code>」の形のまま、Y項の5係数だけを
+タービディティ依存のもの(Preetham et al. 1999, Table 1)へ差し替えている。
+<code>kRelativeLuminanceFloor</code>=0.12はそのまま残した——実測で調整した値で、Preethamにしても
+circumsolar項による反太陽側水平線の暗化は同じ構造で起きるためである。
+</p>
+<p>
+xyY→線形sRGB(Rec.709/D65)の変換には、負の成分ぶんだけ全チャンネルに白を混ぜるデサチュレーションを
+入れてある(<code>XyYToLinearSRGB</code>)。ただし<strong>これは保険であって、現状の使用域では
+一度も発動しない</strong>。実装時は「Preethamの色度は色域外を頻繁に生成する」という前提で入れたが、
+実測すると発動しなかった——タービディティ1.7〜8.0 × 太陽仰角5〜60度で上半球を32×64方向に走査し、
+負値が出た方向は0.0%だった。Preethamの色度はCIE図の中央付近(おおむねx=0.2〜0.5、y=0.2〜0.45)に
+収まり、そこはsRGBの三角形の内側だからである。<code>min&gt;=0</code>のとき何もしない実装なので
+残しても害は無く、タービディティの範囲やモデルを変えたときの保険として置いてある。
+単純クランプにしていないのは、万一発動したときに彩度が飛ぶため。デサチュレーションは輝度を
+持ち上げてしまうので、操作後にRec.709輝度が元のYに戻るよう再スケールしている。これをやらないと、
+色域外が出る方向だけ勝手に明るくなり、照度正規化の前提
+(<code>SkyColorUpperUnit</code>の結果の輝度を積分して目標照度に合わせる)が崩れる。
+</p>
+<p class="note">
+<strong>夜はPreethamの定義域外なので、従来のアート的な補間へフォールバックする。</strong>
+太陽が地平線下ではPreethamは定義域外になる。太陽仰角0〜5度でアート的なティント補間から
+Preethamへクロスフェードし、<code>params.PreethamWeight &lt;= 0</code>(仰角0度以下)では
+Preetham側の計算を一切行わず従来の結果をそのまま返す早期脱出を入れている。
+<strong>この早期脱出により、夜(太陽が地平線下)の見た目はP7実装後もP9完了時点と画素まで厳密に一致する。</strong>
+</p>
+<p>
+パラメータは<code>GPUSkyParameters::ModelParams</code>(x=タービディティ、y=Preethamの重み)として
+<code>SkyIntegrate.hlsl</code>が書き、他の3消費側(<code>SkyGenerate.hlsl</code>/
+<code>DeferredLighting.hlsl</code>/<code>SSR.hlsl</code>)は<code>ApplySkyParametersFromBuffer</code>
+経由で読むだけになる(21.11節の設計をそのまま踏襲)。タービディティ(ImGui「太陽」パネル、
+既定2.5)が変わったときの空の焼き直しは、露出(<code>exposureMoved</code>)が動いたときと
+同じ形の判定(<code>turbidityMoved</code>)を<code>Render()</code>へ追加して行っている。
+</p>
+<p class="note">
+<strong>タービディティの既定値2.5は実測値ではない。</strong>Preethamの定義域はおおむね1.7〜10で、
+2.5は「澄んだ晴天」に相当する見た目からの選択である(<code>EngineDefaults.h::SkyTurbidity</code>参照)。
+</p>
+<p>
+<code>Tools/generate_sky_cubemap.py</code>(オフラインの参照実装 兼 手続き空を無効にしたときの
+フォールバック)にも同じ変更(<code>sky_color_upper_unit</code>への分離、Preethamのx/y、
+xyY→sRGB、デサチュレーション、夜のクロスフェード、タービディティ引数)を反映した。雲(P5)は
+21.9.3節時点から変わらず、このスクリプトには実装していない(理由はスクリプト冒頭のコメント参照)。
 </p>
 </section>
 
@@ -8212,6 +8460,953 @@ DX11 → DX12 → DX11 と切り替えると<code>Logger::SetFileSuffix</code>�
 2回目以降は<code>app</code>」になるよう、開いた接尾辞の集合を持って分岐させている。
 起動ごとにログを作り直す従来の挙動はそのまま保たれる。
 </p>
+</section>
+
+<section id="clouds">
+<h2>35. 雲(レイヤーモデル、P5)</h2>
+
+<p>
+<a href="#procedural-sky">21章</a>で導入した手続き空(Perez分布)へ、積雲1層を足した。
+<code>Shaders/3D/Sky.hlsli</code>は既に背景(<code>DeferredLighting.hlsl</code>)・水面反射
+(<code>SSR.hlsl</code>、20.6節)・IBL用キューブマップのベイク(<code>SkyGenerate.hlsl</code>、
+21.10節)の3者が共有する空モデルの単一定義であるため、雲もここへ足すだけで背景と水面の
+映り込みの両方に自動で行き渡る。これが21.10節でこの共有ヘッダー構造を先に作った理由の1つでもある。
+</p>
+
+<h3>35.1 フルボリュメトリックではなくレイヤーモデルを選んだ理由</h3>
+<p>
+雲の表現としては、3Dテクスチャ(または複数スライスのボリューム)へ密度場を持ち、視線をその中で
+レイマーチングするフルボリュメトリック手法が写実性では上回る。しかし本エンジンの<code>RHI::
+IRHIDevice</code>にはそもそも3Dテクスチャを生成する手段が無い
+(<code>Source/Library/RHI/IRHIDevice.h</code>のテクスチャ生成APIは<code>CreateRenderTexture</code>
+(2D)・<code>CreateUAVTexture</code>(UAV付き2D)・<code>CreateMippedUAVTexture</code>
+(ミップ付きUAV2D)・<code>CreateUAVTextureCube</code>/<code>CreateMippedUAVTextureCube</code>
+(キューブ)・<code>CreateMippedUAVTextureCubeArray</code>(キューブ配列)・
+<code>CreateDepthTexture</code>/<code>CreateDepthTextureArray</code>(深度)のみで、2D系・キューブ系・
+深度系の3Dテクスチャに相当するものは無い)。DX11/DX12の両バックエンドへ3Dテクスチャ対応を
+新設するのはRHI全体に関わる変更で、この段階ではコストに見合わない。
+</p>
+<p>
+そこで、雲底の高度<code>h</code>にある水平な無限平面と視線ベクトルの交点からUVを作り、
+そのUV上で2次元のノイズ(fBm)を評価する<strong>レイヤーモデル</strong>を採った。ボリューム
+レイマーチングの「奥行き方向に何度もサンプルする」コストを、1回の平面交点計算+数段の
+自己影サンプリングまで落とせる。代わりに雲の内部構造(立体的な起伏、下から見上げたときの
+奥行き感)は表現できないが、遠景の空としては許容範囲と判断した。
+</p>
+
+<h3>35.2 解析式であることの副次的な利点 ― 背景と水面反射が自動的に一致する</h3>
+<p>
+レイヤーモデルは<code>SkyColor(dir, params)</code>という「方向を渡すと色が返る」純粋関数のまま
+実装できるため、<a href="#ssrprobe">20章</a>で確立した「背景が足した値とSSRが差し替える値の
+定義が一致する」という設計にそのまま乗る。背景(<code>DeferredLighting.hlsl</code>)と水面反射
+(<code>SSR.hlsl</code>)は同じ<code>SkyParameters</code>を組み立てて同じ<code>SkyColor</code>を
+呼ぶだけで、雲を含めて同じ空を見る。もしフルボリュメトリックだった場合、水面に映る雲を
+出すには反射方向へもう1回レイマーチングを行う必要があり、コストが単純に2倍になっていた。
+</p>
+
+<h3>35.3 判断A ― IBL用キューブマップには雲を焼かない</h3>
+<p>
+<code>SkyGenerate.hlsl</code>(21.10節、IBL専用の256px/面キューブマップをベイクする)は、
+<code>SkyParameters</code>を組み立てる際に雲のフィールドを明示的にすべて無効
+(<code>CloudCoverage = 0.0f</code>等)で埋めて<code>SkyColor</code>を呼ぶ。理由は2つ:
+</p>
+<ul>
+<li>雲を焼き込むと、雲が風で動くたびにキューブの焼き直し(空生成6回+プリフィルタ36回の
+ディスパッチ、21章参照)が必要になる。上半球の余弦重み積分(拡散イラディアンスとして畳み込まれる量)
+は雲の位置が変わってもほぼ不変なため、この再ベイク連鎖は純粋な無駄になる。</li>
+<li>照度正規化の積分(θ64分割×φ256分割=16,384サンプル。21.11節、P9でGPU側の
+<code>SkyIntegrate.hlsl</code>へ一本化)は雲を知らない。雲を焼き込むと「正規化の目標
+(空光の照度)」と「実際に焼かれた明るさ」が食い違う。雲のfBmをこの積分へ足して同期させる手も
+検討したが、<code>Sky.hlsli</code>側のノイズ実装(周期性・オクターブ数)が変わるたびに
+積分側も追従させる負債のほうが、「IBLの雲は焼かない」という割り切りより大きいと判断した。</li>
+</ul>
+
+<h3>35.4 判断B ― 被覆率による減光はキューブのベイク時にだけ掛ける</h3>
+<p>
+判断Aの結果、IBLは常に雲の無い晴天基準の明るさで焼かれる。しかし被覆率50%の曇り空で
+シーンが晴天と同じ明るさに照らされるのは明らかに不自然なため、<code>KurenaiEngine3D::Render()</code>
+の<code>bakeSkyThisFrame</code>ブロックが被覆率から求めた全天の平均透過率
+(<code>ComputeCloudAverageTransmittance</code>。被覆率0で1.0、被覆率1で
+<code>kCloudOvercastTransmittance</code>(0.35)まで線形に落ちる近似で、物理的な導出ではない)を
+<code>m_ActiveCloudTransmittance</code>としてキャッシュし、<code>SkyGenerate.hlsl</code>の
+<code>SkyBakeConstants::CloudTransmittance</code>経由でキューブへ焼く値にだけ掛ける
+(<code>SkyParametersBuffer[0].Luminance.x * CloudTransmittance</code>、21.11節参照)。
+</p>
+<p class="note">
+<strong>背景・水面反射へ渡る<code>GPUSkyParameters::Luminance.x</code>
+(<code>SkyIntegrate.hlsl</code>が書く天頂輝度)自体は減光しない。</strong>
+ここも減光すると、<code>Sky.hlsli</code>の<code>SkyColor</code>が雲の隙間から見える青空
+(晴天色 × 透過率の「透過率」が1に近い部分)まで暗くしたうえへ、そこへさらに雲の散乱光を
+重ねることになり、二重に暗くなってしまう。晴天色そのものは常に「雲を考慮しない基準の明るさ」の
+まま保ち、雲の効果は<code>SkyColor</code>内の合成(35.6節)だけで表現する。
+</p>
+
+<h3>35.5 太陽の直接光は減光しない</h3>
+<p>
+<code>ComputeSunLighting</code>・<code>SunLighting::SkyIlluminanceLux</code>/
+<code>KeyIlluminanceLux</code>は雲の追加にあたって一切変更していない。被覆率は「空全体の
+どれだけが雲で覆われているか」という平均的な量であって、「太陽そのものが雲に隠れているか」を
+表す量ではない。後者は本質的に二値的な現象(太陽が雲の裏にあるか無いか)であり、平均量である
+被覆率からは表現できない。中途半端に太陽光を被覆率で減光すると、雲が無い方向を向いていても
+(=太陽が実際には見えているのに)光が弱まるという矛盾が生じるため、直接光・カスケードシャドウ・
+自動露出の基準は雲の影響を受けないままにしてある。
+</p>
+
+<h3>35.6 密度・自己影・合成</h3>
+<p>
+雲のUVは視線と雲底平面の交点から作るため、視線がほぼ水平に近づくほどワールド座標に比例して
+無限に大きくなる。風のスクロールオフセット(<code>m_CloudScrollOffset</code>)をCPU側で
+有限に保つため、ノイズの格子セル番号を周期<code>kCloudNoisePeriod</code>(256、
+<code>Sky.hlsli</code>とC++側<code>RenderThreadMain</code>の両方に同じ値でハードコードしてあり、
+ずれると風で雲がジャンプする)で剰余を取ってからハッシュする周期的な値ノイズを使う。
+fBmはオクターブ数<code>kCloudOctaves</code>(既定4)段で、オクターブごとに周波数と周期を
+同時に2倍にすることで各オクターブの周期性を揃えている。
+</p>
+<p>
+密度は<code>remap(fBm出力, 1-被覆率, 1.0)</code>を<code>saturate</code>したもので、
+被覆率0では常に0になる(35.7節の判断Cの根拠)。光路長は<code>1/max(dir.y, ε)</code>に比例させ、
+上限をクランプする(クランプしないと地平線際で1画素あたりの雲セル数が発散しエイリアシングになる)。
+自己影は雲底のUVから太陽方向(XZへ投影)へ数ステップ進めながら密度を積分し、ビアの法則
+(<code>exp(-density * 消散係数 * 経路長)</code>)で求める。前方散乱はHenyey-Greenstein位相関数で
+表現し、太陽を直視する方向に近いほど雲の縁が明るくなる(半逆光のシルバーライニング)。
+</p>
+<p>
+合成は<code>最終色 = 晴天色 * 透過率 + 雲の散乱光</code>という形にしてあり、単純な
+<code>lerp(晴天色, 雲色, 被覆率)</code>ではない。lerpだと被覆率に応じて画面全体が一様に
+雲色へ寄ってしまい、雲の隙間からのぞく青空まで色が濁る。上の式なら透過率が1に近い(=雲が薄い)
+方向では晴天色がそのまま残り、透過率が0に近い(=雲が濃い)方向でのみ雲の散乱光が支配的になる。
+</p>
+<p class="note">
+地平線より下(<code>Sky.hlsli</code>の<code>kGroundFadeStartY</code>未満、地面フェードの分岐)
+には雲を一切掛けない。地面フェードは「プラトー色から接地色への遷移」という別の合成をすでに
+持っており、そこへ雲を重ねる意味のある絵にならないため。
+</p>
+
+<h3>35.7 判断C ― 被覆率0のときP4完了時点と画素まで一致させる</h3>
+<p>
+<code>Sky.hlsli</code>の<code>SkyColor</code>は晴天色(<code>SkyColorUpper</code>の結果)を
+求めた直後、積雲・巻雲どちらの被覆率も0(<code>CloudCoverage &lt;= 0.0f &amp;&amp;
+CirrusCoverage &lt;= 0.0f</code>)、または<code>dir.y &lt;= 0.0f</code>なら雲の計算
+(<code>EvaluateCloudLayer</code>、ノイズ・自己影・位相関数のすべて)を一切呼ばずその晴天色を
+そのまま返す。返す値は雲を追加する前の実装と数値として同一になる。<code>SkyGenerate.hlsl</code>は
+常にこの早期脱出経路を通るため、IBL用キューブマップの中身は雲追加の前後で変わらない。
+</p>
+<p class="note">
+<strong>P11(35.9節)で巻雲を足した後も、巻雲の被覆率が0のときは積雲だけだったP11着手時点(HEAD)と画素まで
+厳密に一致する。</strong><code>SkyColor</code>は積雲を評価した直後、<code>CirrusCoverage
+&lt;= 0.0f</code>なら巻雲側の<code>EvaluateCloudLayer</code>を一度も呼ばず
+<code>clearColor * T_cumulus + S_cumulus</code>という積雲単体のときと1つも掛け算・足し算が
+増えない式でそのまま返す(35.9節参照)。「T_cirrus=1, S_cirrus=0になるから結果は同じはず」
+という理屈には頼っていない――浮動小数の乗算は単位元(1.0倍)であっても丸め誤差そのものは
+発生しないためこの場合は実害が無いが、余計な演算を式に足すこと自体を避け、
+早期脱出という構造でビット単位の一致を担保している。
+</p>
+
+<h3>35.8 このフェーズの範囲(P5時点)</h3>
+<p>
+計画には積雲+高層の巻雲という多層化も含まれるが、P5では積雲1層に絞った。コストとリスクを
+抑え、1層をきちんと動かすことを優先する判断による。<code>SkyParameters</code>の雲用フィールドは
+将来2層目を足す際に素直に並べられるよう、あえて配列化せず層ごとに独立した名前のスカラー/
+ベクトルのまま持たせてある。巻雲の追加は34.9節(P11)で行った。
+</p>
+
+<h3>35.9 巻雲(P11) ― 2層目を足して雲を多層化する</h3>
+<p>
+P5で積雲1層に絞った雲モデルへ、高層の巻雲を2層目として追加した。積雲(<code>Cloud*</code>)と
+まったく同じレイヤーモデル(視線と雲底平面の交点からUVを作りfBmを評価する)を使うが、
+値は独立に持つ(<code>SkyParameters::Cirrus*</code>)。式を2つに複製しないため、
+<code>EvaluateCloudLayer</code>は層のパラメータ一式をまとめた<code>CloudLayerParams</code>
+(被覆率・高度・UVスケール・消散係数・スクロールオフセット・前方散乱g・異方性スケール・
+自己影ステップ数・アルベド/単散乱/多重散乱の係数)を引数に取る形へ変え、積雲・巻雲どちらの
+呼び出しもこの1つの関数定義を通る。<code>MakeCumulusLayerParams</code>/
+<code>MakeCirrusLayerParams</code>が<code>SkyParameters</code>から<code>CloudLayerParams</code>を
+組み立てる。
+</p>
+
+<h3>35.9.1 巻雲は自己影を計算しない</h3>
+<p>
+<code>CloudLayerParams::ShadowSteps</code>が0の層は、<code>EvaluateCloudLayer</code>内の
+自己影ブロック(太陽方向へ密度を積分してビアの法則で減衰させる部分)を丸ごとスキップし、
+<code>sunTransmittance = 1.0</code>として扱う。巻雲はシェーダ内定数
+<code>kCirrusShadowSteps = 0</code>を渡すため、この経路を通る。巻雲は光学的に薄く
+(<code>CirrusDensity</code>の既定値2.0は積雲の8.0の1/4)自己影がほとんど見た目に効かないため、
+コストを払う意味がないという判断による。ステップ数が<code>CloudLayerParams</code>の実行時の値
+(積雲は5、巻雲は0)になったことで、自己影のfor文は<code>[unroll]</code>(P5時点、トリップ数が
+シェーダ内定数だった)ではなく<code>[loop]</code>(コンパイル時にトリップ数を確定できない)へ
+変えてある。
+</p>
+
+<h3>35.9.2 合成順 ― 高い層から手前へ、巻雲の散乱光には積雲の透過率を掛ける</h3>
+<p>
+2層の合成は次の形にしてある(<code>SkyColor</code>)。
+</p>
+<pre><code>透過率 T = T_cirrus * T_cumulus
+散乱光 S = S_cumulus + S_cirrus * T_cumulus
+結果   = clearColor * T + S</code></pre>
+<p>
+透過率が両層を貫く視線の透過率の積になるのは自然だが、<strong>巻雲の散乱光
+(<code>S_cirrus</code>)に積雲の透過率(<code>T_cumulus</code>)を掛ける</strong>のがこの式の
+要点である。巻雲は積雲より高い位置にあるため、巻雲から届く光は視点までの間にある積雲を
+通過して初めて見える。これを掛けないと、積雲に厚く隠れているはずの方向でも巻雲の散乱光が
+そのまま加算され、積雲の裏側にある巻雲が透けて見えてしまう(積雲が不透明であるほど本来
+巻雲は見えないはずなのに、この項を落とすと被覆率に関わらず一定の明るさで足されてしまう)。
+</p>
+
+<h3>35.9.3 判断A・B・Cは2層目にもそのまま適用する</h3>
+<p>
+判断A(IBL用キューブマップには雲を焼かない、35.3節)・判断C(被覆率0のとき画素まで一致、
+35.7節)は巻雲にもそのまま適用されることを各節に追記した。判断B(被覆率による減光は
+キューブのベイク時にだけ掛ける、35.4節)は<code>ComputeCloudAverageTransmittance</code>
+(<code>KurenaiEngine3D.cpp</code>)を2層の透過率の積
+(<code>T = T_cumulus(積雲の被覆率) * T_cirrus(巻雲の被覆率)</code>)へ拡張する形で適用した。
+巻雲側の「全天が巻雲のときの透過率」(<code>kCirrusOvercastTransmittance</code>)は積雲の
+<code>kCloudOvercastTransmittance</code>(0.35)より1に近い0.75にしてある。巻雲は光学的に薄く
+(<code>CirrusDensity</code>が積雲の1桁下)、全天を覆っても積雲ほど大きくは減光しないという
+定性的な近似であり、精密な値は求めていない。
+</p>
+
+<h3>35.9.4 パラメータの持ち回り</h3>
+<p>
+<code>FrameConstants</code>の末尾へ<code>CloudParams2</code>(x=巻雲の被覆率、y=雲底の高度、
+z=UVスケール、w=消散係数)・<code>CloudParams3</code>(xy=風によるノイズ空間の移動量、
+z=fBmのUVを異方的に伸ばす倍率、w=未使用)を追加した。この構造体を宣言している
+<code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>・<code>PlanarReflection.hlsl</code>
+(3つ目はパディング目的で末尾フィールドを直接は使わない)すべてを同時に更新し、C++側の宣言と
+1フィールドずつ突き合わせて一致を確認した(35.4節・35.9.3節と同じくここがずれると
+全シェーダーが静かに壊れるため)。風のスクロール(<code>m_CirrusScrollOffset</code>)は
+<code>m_CloudScrollOffset</code>とまったく同じ形(<code>kCloudNoisePeriod</code>で
+<code>std::fmod</code>)でCPU側が進める。風向・凍結トグル(<code>m_CloudTimeFrozen</code>)は
+積雲と共有し、速度(<code>m_CirrusWindSpeed</code>)とUVスケール(<code>m_CirrusUvScale</code>)だけ
+巻雲固有の値を持つ。凍結トグルを共有しているのは、片方の層にしか効かないとA/B比較で
+スクロールが揺れる側だけ残ってしまい対照が取れなくなるため。前方散乱の強さ
+(<code>kCirrusForwardG</code>)と自己影ステップ数(<code>kCirrusShadowSteps</code>)はUIつまみを
+持たずシェーダ内定数にしてある(cbufferを増やす価値がないため)。
+</p>
+
+<h3>35.10 「空が全面曇っている」の正体は被覆率ではなく雲の大きさだった</h3>
+<p>
+カメラを15度上げると空がほぼ真っ白になり、青空が画素の1.9%しか残らない状態が続いていた。
+被覆率(<code>CloudCoverage = 0.45</code>)が高すぎるのだろうと考えて下げにいったが、
+<strong>これは誤診だった</strong>。原因は雲1つあたりの大きさで、被覆率の値自体は妥当だった。
+</p>
+
+<h4>34.10.1 切り分け</h4>
+<p>
+まず雲を両層とも無効にした対照を撮り、白いのが雲なのか空なのかを確定させた。
+雲なしではカメラを15度上げた空の<strong>100%</strong>が青(B−Rの中央値43)で、
+白さはすべて雲由来だと分かった。
+</p>
+<p>
+次に実機でパラメータを1つずつ振った(いずれも空の領域のうちB−R≧15の画素の割合)。
+</p>
+<table>
+<tr><th>変更</th><th>本命の構図</th><th>カメラを15度上げる</th></tr>
+<tr><td>既定(積雲0.45 / 巻雲0.50 / 消散8 / 1セル2,000m)</td><td>35.9%</td><td>1.9%</td></tr>
+<tr><td>巻雲の被覆率 0.50 → 0.25</td><td>37.6%</td><td>2.2%</td></tr>
+<tr><td>積雲の被覆率 0.45 → 0.38</td><td>46.5%</td><td>8.5%</td></tr>
+<tr><td>上2つ + 消散係数 8 → 4</td><td>50.2%</td><td>11.7%</td></tr>
+<tr><td><strong>1セル 2,000m → 1,000m(他は既定のまま)</strong></td><td><strong>48.4%</strong></td><td><strong>41.2%</strong></td></tr>
+</table>
+<p>
+被覆率も消散係数も効きが弱く、UVスケール(=雲1つの大きさ)だけが桁違いに効いた。
+</p>
+
+<h4>34.10.2 なぜ大きさが効くのか ― 「画角に何セル入るか」で決まる</h4>
+<p>
+このパラメータが効くのは雲そのものの寸法ではなく、<strong>画角の中に雲と隙間が何回交代して
+現れるか</strong>である。雲底1,500mの平面を仰角θで見ると交点までの水平距離は
+<code>1500/tanθ</code>で、画角の水平半角36.4度(<code>FovY</code>=45度・16:9)から画面が覆う
+横幅が決まる。カメラを15度上げたときの画面上端(仰角37度)では水平距離1,990m・横幅約2,940m
+であり、<strong>1セル2kmだとここに1.5セルしか入らない</strong>。つまり画面上端は
+「1個の雲」か「1個の隙間」のどちらかで埋まり、どちらになるかはノイズの引きだけで決まる。
+</p>
+<p>
+1,000mという値はここから逆算した。雲と隙間の交代が3回以上入る条件から
+<code>2940 / 3 = 980m</code>。参考に800mも測ったが改善しなかった(下表)。
+</p>
+
+<h4>34.10.3 効果は「平均を上げる」ではなく「悪い引きを無くす」</h4>
+<p>
+ここで<strong>当初の見立ての誤りが1つ判明した</strong>。「1.9%」は特定の1枚の値であって、
+この設定の典型値ではない。風でノイズ空間を大きく進めながら8枚撮って分布を取ると次のようになる。
+</p>
+<table>
+<tr><th>設定</th><th colspan="2">本命の構図</th><th colspan="2">カメラを15度上げる</th></tr>
+<tr><th></th><th>最小 / 中央 / 最大</th><th>標準偏差</th><th>最小 / 中央 / 最大</th><th>標準偏差</th></tr>
+<tr><td>1セル2,000m(従来)</td><td>24.1 / 45.7 / 53.1%</td><td>8.7pt</td><td>20.4 / 38.0 / 58.9%</td><td>12.3pt</td></tr>
+<tr><td><strong>1セル1,000m(採用)</strong></td><td>38.5 / <strong>46.7</strong> / 56.0%</td><td><strong>6.1pt</strong></td><td>33.9 / <strong>44.3</strong> / 53.6%</td><td><strong>5.5pt</strong></td></tr>
+<tr><td>1セル800m(不採用)</td><td>41.1 / 50.1 / 52.5%</td><td>3.6pt</td><td>21.2 / 45.9 / 54.1%</td><td>10.3pt</td></tr>
+</table>
+<p>
+<strong>中央値はほとんど動いていない。</strong>変わったのは最小値と散らばりで、カメラを15度上げた
+構図の標準偏差は12.3pt→5.5ptと半分以下になる。つまりこの変更は「空を青くする」ものではなく
+「1個の巨大な雲が空を丸ごと飲み込む引きを無くす」ものである。中央値が動かないことは、
+<strong>被覆率0.45という設定自体は最初から妥当だった</strong>ことの裏付けでもある。
+</p>
+<p class="note">
+<strong>なぜ分布の裾が実害になったか。</strong>風速の既定5m/sとこのUVスケールでは、ノイズ空間は
+毎秒0.005セルしか進まない(1セル進むのに3分以上)。起動時のスクロール量は0なので、
+実用上ほぼ常に「スクロール量0の引き」だけを見ることになる。そしてその引きがたまたま
+極端に悪く、8枚の実測の最小値20.4%をさらに下回る1.9%だった。分布の中央値ではなく
+この1枚が「空が全面曇っている」という体感の正体だった。
+</p>
+
+<h4>34.10.4 被覆率の目盛りは線形ではない(調整時の注意)</h4>
+<p>
+調査の副産物として、被覆率のつまみが直感と大きくずれていることが分かったので記録しておく。
+被覆率Cはシェーダー側で<code>remap(fBm, 1-C, 1)</code>のしきい値として使われるが、
+<code>CloudFbm</code>は4オクターブの平均なので[0,1]に一様ではない
+(実測: 平均0.499・<strong>標準偏差0.132</strong>。ハッシュ単体は平均0.497・標準偏差0.289と
+ほぼ完全な一様分布なので、集中はオクターブ平均によるもの)。結果、Cと「実際に雲になる空の割合」は
+次のように食い違う。
+</p>
+<table>
+<tr><th>指定するC</th><td>0.30</td><td>0.35</td><td>0.40</td><td>0.45</td><td>0.50</td><td>0.60</td></tr>
+<tr><th>実際に雲になる割合</th><td>6.5%</td><td>13.7%</td><td>23.8%</td><td>36.1%</td><td>49.5%</td><td>75.7%</td></tr>
+</table>
+<p>
+0.4〜0.5の狭い範囲に見た目が集中しているので、ここを動かすときは小刻みに動かすこと。
+つまみ自体を線形へ較正し直すことも考えられるが、既存の値の意味が変わって再調整が必要になるため
+今回は換算表を残すに留めた。この表は<code>CloudFbm</code>の実装に依存するので、
+オクターブ数や合成方法を変えたら測り直すこと。
+</p>
+
+<h3>35.11 ボリュメトリック雲の土台 ― 3Dテクスチャを扱えるようにする(P13a)</h3>
+<p>
+ここまでの雲は厚みゼロの平面レイヤーで、雲の上端と下端で視差が生まれず、雲底が暗く雲頂が明るいという
+積雲らしい明暗の勾配も出ない。本来のボリュメトリック雲へ進むには3Dノイズが要るが、
+<code>IRHIDevice</code>には3Dテクスチャを作る手段が無かった(35.1節でレイヤーモデルを選んだ理由の1つ)。
+P13aはその土台だけを入れる段で、<strong>見た目は1ビットも変えないのが正解</strong>である
+(まだ誰もこのテクスチャを読まないため)。
+</p>
+
+<h4>34.11.1 RHIへの追加は1メソッドで足りた</h4>
+<p>
+着手前に調べた結果、追加が必要なのは<code>IRHIDevice::CreateUAVTexture3D</code>の1つだけだった。
+</p>
+<ul>
+<li><code>DX11Texture</code>/<code>DX12Texture</code>のラッパークラスは<strong>変更不要</strong> ―
+SRVとUAVを持つだけの汎用の作りで、3Dでもそのまま使える</li>
+<li><code>IRHICommandList</code>も<strong>変更不要</strong> ―
+<code>SetComputeUnorderedAccessTexture</code>・<code>SetTexture</code>・3引数の<code>Dispatch</code>が既にある</li>
+<li>実装はDX11が<code>D3D11_TEXTURE3D_DESC</code>+<code>CreateTexture3D</code>、
+DX12が<code>CD3DX12_RESOURCE_DESC::Tex3D</code>と<code>D3D12_{SRV,UAV}_DIMENSION_TEXTURE3D</code>。
+DX12側は<code>uavDesc.Texture3D.WSize</code>の指定を忘れるとUAVが奥行き0枚を指し、
+エラーにならないままテクスチャが黒いままになるので注意</li>
+</ul>
+
+<h4>34.11.2 Wrapサンプラーが無い ― 役割で分けた設計に例外を1つ作る</h4>
+<p>
+<strong>これが着手前の調査で見つかった最大の落とし穴である。</strong>
+<code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>はフルスクリーンパスなので
+<code>ScreenSpaceSamplers</code>を使うが、<strong>このセットにはWrapのサンプラーが1つも無い</strong>
+(s0 = Linear + Clamp)。これは「画面端でUVが反対側へ回り込む不具合を構造的に防ぐ」ための
+意図的な設計である(14.2節と同じ、アドレスモードの取り違えで実際に不具合を出した経験に基づく)。
+</p>
+<p>
+しかしワールド空間で無限にタイリングする3Dノイズは<strong>Wrapでしか正しく引けない</strong>。
+そして<strong>シェーダー側で<code>frac(uvw)</code>して回避することはできない</strong> ――
+u=0.999のテクセルは本来u=0.0のテクセルと補間されるべきだが、Clampでは端のテクセルと補間され、
+補間そのものがテクスチャの端を跨げないため、周期の境界に必ず継ぎ目が出る。
+</p>
+<p>
+そこで<strong>s3に<code>VolumeSampler</code>(Linear + Wrap)を新設し、両方のサンプラーセットへ追加した。</strong>
+既存の設計意図と衝突しない根拠は「このサンプラーは画面UVには決して使わず、ワールド空間の3D座標でのみ使う」
+ことで、回り込む先の「反対側の画面端」がそもそも存在しない。役割で分ける方式を採っている以上、
+役割そのものが違えば同じセットに同居してよい。
+</p>
+<p class="note">
+<strong>DX12側に隠れていた上限。</strong><code>DX12Device.cpp</code>の<code>kSamplerSlotCount</code>が
+3固定で、<code>CreateSamplerSet</code>は超過分を<strong>切り捨てて</strong>いた
+(エラーログは出るが処理は続く)。これを4へ上げないと、DX11では正しく動くのにDX12でだけ
+s3が既定のサンプラーに差し替わる、という片側だけ静かに壊れる形になる。
+この定数は<code>Samplers.hlsli</code>の役割数と必ず一致させること。
+</p>
+
+<h4>34.11.3 焼くノイズ</h4>
+<p>
+<code>CloudNoiseGenerate.hlsl</code>が起動後に一度だけディスパッチして2枚を作る
+(カメラにも太陽にも空の状態にも依存しないため、BRDF積分LUTとまったく同じ「一度だけ焼く」作法に乗る)。
+</p>
+<ul>
+<li><strong>Shape</strong> 128<sup>3</sup> <code>R8G8B8A8_UNorm</code>(8MB)。
+R = 低周波のPerlin-Worley、G/B/A = 周波数を上げたWorley</li>
+<li><strong>Detail</strong> 32<sup>3</sup> <code>R8G8B8A8_UNorm</code>(128KB)。塊の縁を削る高周波Worley 3段</li>
+</ul>
+<p>
+<strong>2Dの<code>CloudFbm</code>は捨てない。</strong>「どこにどれだけ雲があるか」を決める平面分布
+(ウェザーマップ)として残し、3Dテクスチャは「形状と浸食」だけを担当する。
+これにより34.10節で決めた<code>CloudUvScale</code>・<code>CloudCoverage</code>の意味と調整結果が
+そのまま生きる。
+</p>
+<p class="note">
+<strong><code>[unroll]</code>を外した理由(実測)。</strong>Worleyは隣接27セルを調べるので、
+最初<code>[unroll]</code>していた。しかし呼び出し元(3オクターブ×Shapeで4回)まで通すと
+1シェーダーあたり324回ぶんの展開になり、<strong>fxcのコンパイルが実測4.4秒</strong>
+(Shape 2.7秒 + Detail 1.7秒)かかっていた。起動のたびに払うには重すぎる。
+<code>[loop]</code>へ変えたところ<strong>0.35秒</strong>になった。
+このパスは起動後に一度だけ走るベイクなので、動的ループによる実行時のわずかな損は問題にならない。
+</p>
+
+<h4>34.11.4 検証 ― タイル可能性は画面ではなくアルゴリズムで確かめた</h4>
+<p>
+最も壊れやすいのはタイル境界の継ぎ目である。デバッグ表示(<code>DebugView::CloudNoiseSlice</code>)は
+画面に<strong>2x2タイルぶん</strong>を出すようにしてあり、継ぎ目があれば画面中央の十字線として現れる。
+目視では継ぎ目は出ていない。
+</p>
+<p>
+ただし<strong>これを画面の画素で数値化しようとして2度失敗した。</strong>
+1度目はレターボックスの黒帯を「ノイズ領域」に含めてしまい、境界でない列を境界として測っていた。
+2度目は「1タイルぶんずらせば重なるはず」という自己相似の検査を試みたが、
+正方形の表示幅が1009pxと奇数でタイル境界が半画素にかかるため、高周波のノイズでは
+補間誤差に埋もれて判定できなかった。<strong>画面を経由する測り方はスケーリングに弱い。</strong>
+</p>
+<p>
+そこで測る対象を変えた。周期性は<em>アルゴリズムの性質</em>なので、
+<code>WorleyNoise</code>/<code>ValueNoise3D</code>/各fBmをオフラインで厳密に再現し、
+<code>f(u, v, w)</code>と<code>f(u+1, v, w)</code>が一致するかを直接調べた。
+</p>
+<table>
+<tr><th>関数</th><th>u+1</th><th>v+1</th><th>w+1</th><th>負方向(-1,-2,-3)</th></tr>
+<tr><td>WorleyFbm(4セル)</td><td>8.9e-16</td><td>8.9e-16</td><td>8.3e-16</td><td>1.7e-15</td></tr>
+<tr><td>WorleyFbm(6セル)</td><td>3.0e-15</td><td>2.8e-15</td><td>2.8e-15</td><td>4.9e-15</td></tr>
+<tr><td>ValueFbm(4セル)</td><td>6.7e-16</td><td>7.2e-16</td><td>7.8e-16</td><td>1.4e-15</td></tr>
+</table>
+<p>
+いずれも倍精度の丸め誤差の範囲で、3軸とも・負方向でも厳密に周期的である
+(負方向まで見るのは、<code>floor</code>ベースの剰余を使う理由が「素朴な<code>fmod</code>だと
+負のセル座標で巻き戻しが壊れる」ことだから)。
+</p>
+<p>
+<strong>このオフライン再現が実機と一致していることも確かめた</strong>(再現だけを信じない)。
+焼き上がったテクスチャの描画結果とPythonの再現で、チャンネルごとの平均は
+R 167.35 対 167.38、G 115.77 対 116.08、B 117.98 対 116.62 と<strong>差0.0〜1.1%</strong>で一致した。
+</p>
+<p>
+そのほか: 空の見た目はMont-Saint-MichelとSponzaの両方で<strong>ビューポート全体の最大差0</strong>
+(サンプラーセットへの末尾追加が既存パスを壊していないことの証明)。
+DX11とDX12でノイズの内容が一致し(最大差1・平均0.003、fxcとdxcの丸めの差)、
+<strong>DX12のデバッグレイヤーの出力は空</strong>だった。
+</p>
+</section>
+
+<section id="planarreflection">
+<h2>36. 平面反射(P6)</h2>
+
+<p>
+水面に不透明ジオメトリ(城など)の鏡像を映すための専用フォワードパス
+(<code>Shaders/3D/PlanarReflection.hlsl</code>)。<a href="#ssr">7章</a>・
+<a href="#ssrprobe">20章</a>で述べたSSRは画面に映っているものしか反射に映せず、水面のように
+広い面では画面外の建物が反射から欠けてしまう。平面反射は「水面平面についてカメラを鏡映し、
+その鏡映カメラでもう一度シーンを描く」ことで、SSRのレイマーチとは別の情報源を水面に与える。
+</p>
+
+<h3>36.1 「同じ画面UVで引ける」ことが平面反射を選ぶ最大の理由</h3>
+<p>
+水面平面についてカメラを鏡映行列<code>R</code>(<code>XMMatrixReflect</code>)で鏡映し、
+反射用ViewProj = <code>R * View * jitteredProj</code>でシーンを描くと、得られる絵は
+「完全な鏡が水面にあったときにその画素に映るはずの像」が、メインカメラで描いたときと
+<strong>まったく同じ画面UVの位置</strong>に来る。平面鏡の反射は、鏡映したカメラで景色を
+撮り直すことと数学的に等価だからである。この対応関係のおかげで、消費側の
+<code>SSR.hlsl</code>は反射ベクトルを再投影する必要がなく、
+<code>input.UV</code>に波の法線由来の小さなずれを足すだけでこのパスの結果を引ける
+(<code>ApplyPlanarReflection</code>、20.6節に追記した優先順位も参照)。
+メインカメラと同じジッター済み<code>Proj</code>を使うのはこの対応関係を保つためで、
+別のジッターを使うとサブピクセル単位で画面UVの対応が崩れる。
+</p>
+
+<h3>36.2 ProbeCaptureと同じ割り切りに乗った</h3>
+<p>
+このシェーダーの土台は<a href="#reflectionprobe">19章</a>の<code>ProbeCapture.hlsl</code>
+(反射プローブのキャプチャパス)で、<code>cbuffer</code>の宣言・ライティングの式は意図的に
+そちらと同一にしてある(式を変えると反射に映る色が本編と食い違うため)。ProbeCaptureと同じく、
+映るのは「直接光 + カスケードシャドウ + スカイボックス由来のグローバルIBL + DDGI(多重バウンス)」
+までで、SSAO/SSIL/SSRのスクリーンスペース手法・他の反射プローブ・半透明メッシュは含まない
+(「反射の中の反射は1バウンスで打ち切る」という、反射プローブで既に文書化済みの割り切りに
+そのまま乗る。ここで新しい判断を増やさない)。
+</p>
+<p>
+ProbeCaptureとの違いは3点だけである。(1) レンダーターゲットは1枚(放射輝度のみ。プローブと違い
+視差補正用の距離は要らない)。(2) <code>View</code>にカメラのビュー行列をそのまま渡す理由が
+ProbeCaptureとは異なる(36.3節)。(3) 水面より下のジオメトリを<code>SV_ClipDistance0</code>で
+落とす(36.4節)。
+</p>
+
+<h3>36.3 <code>View</code>をカメラのままにする理由はProbeCaptureと違う</h3>
+<p>
+ProbeCaptureは「カスケード選択の深度がカメラ視錐台基準だから仕方なく」カメラの
+<code>View</code>を使っていた(プローブ自身の視点とは無関係にカメラ視点でカスケードを選ぶ、
+という妥協)。平面反射パスでは事情が違う――描いているのは鏡像ではなく<strong>実在の
+ジオメトリそのもの</strong>である(カメラを鏡映しただけで世界は動かしていない)。したがって
+カメラの<code>View</code>でカスケードを選ぶことは妥協ではなく、そもそも正しい(影を落とす
+太陽とカスケードの分割は、鏡映されていない現実のカメラ視錐台に対して決まっているべきもの
+だから)。
+</p>
+
+<h3>36.4 <code>SV_ClipDistance0</code>で水面より下を落とす</h3>
+<p>
+反射に映ってはいけない「水面より下にあるもの」を、頂点シェーダーの<code>SV_ClipDistance0</code>で
+落とす。値は水面平面の方程式に<code>worldPos</code>を代入したもの
+(<code>FrameConstants.PlanarReflectionPlane</code>、水面より上が正)。Lengyelの斜め近平面
+(Oblique Near-Plane Clipping)は採らなかった――Reverse-Zの深度精度は近平面・遠平面の配置に
+かなり敏感で、任意の傾いた平面を近平面に差し替える手法はこの設計に手を入れることになる。
+<code>SV_ClipDistance</code>によるクリップはラスタライズ前にプリミティブを切り捨てるだけで
+深度の投影自体は変えないため、Reverse-Zの設計へ触れずに済む。
+<code>SV_ClipDistance</code>はfxc(SM5.0)・dxc(SM6.0)の両方でコンパイルが通ることを
+<code>Claude/Tools/check_shaders.ps1</code>で確認済み(このエンジンはDX11がfxc/SM5.0固定、
+DX12がdxcのため両方で通る必要がある)。
+</p>
+
+<h3>36.5 ワインディングの反転をMirrored PSOの否定で吸収する</h3>
+<p>
+鏡映カメラで描くとワインディングが全反転するため、既存の<code>m_GBufferPipelineStateMirrored</code>
+(10.2節、負のスケールを持つインスタンス用に<code>FrontCounterClockwise</code>を反転したPSO)
+と同じ仕組みをそのまま使い、<code>m_PlanarReflectionPipelineState</code> /
+<code>m_PlanarReflectionPipelineStateMirrored</code>の2本を用意する。ただし選択条件が
+GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定</strong>になる――
+鏡映していないインスタンスはカメラの反射によって1回だけ反転するため
+<code>Mirrored</code>側のPSOが必要になり、逆に元から鏡映されているインスタンス
+(2回反転で元に戻る)には通常側のPSOが必要になる。RHIには新しい機能を一切追加しておらず、
+既存のPSO切り替えの仕組みを別の条件式で呼んでいるだけである。
+</p>
+
+<h3>36.6 水面平面の決定と鏡映カメラの構築</h3>
+<p>
+<code>KurenaiEngine3D::Render()</code>は<code>m_Scene.Instances</code>から
+<code>IsWater</code>が立っている最初のインスタンスを探し、そのワールド変換の平行移動Y
+(水面メッシュはローカルY=0の水平な板、<code>Tools/generate_water_plane.py</code>参照)を
+水面の高さとする。複数の水面インスタンスが異なる高さで見つかった場合は、最初のものだけを
+使い警告ログを1度だけ出す――平面反射は「水面は単一の水平な平面である」という前提に立っている。
+</p>
+<p>
+鏡映行列は<code>XMMatrixReflect(XMVectorSet(0, 1, 0, -waterY))</code>で作る。
+<code>XMMatrixReflect</code>が受け取る平面の規約は「点<code>P</code>が
+<code>Ax+By+Cz+D=0</code>を満たす」形であり、これは<code>SV_ClipDistance0</code>の計算式
+(<code>dot(worldPos, xyz) + w</code>、水面より上で正)とまったく同じ規約なので、
+同じベクトル<code>(0, 1, 0, -waterY)</code>がどちらにもそのまま使える。カメラ位置も
+同じ行列で変換(<code>XMVector3Transform</code>、点として変換するため並進を含む)し、
+<code>CameraPosition</code>へ渡す。
+</p>
+<p>
+このパス専用の定数バッファは<code>captureProbeFace</code>(19.4節)とまったく同じ作法で、
+共有の<code>FrameConstants</code>をコピーして視点に関わるものだけ差し替える:
+<code>ViewProj</code>(反射用ViewProj、転置して格納)・<code>CameraPosition</code>
+(鏡映したカメラ位置)・<code>PlanarReflectionPlane</code>。<code>PrevViewProj</code>/
+<code>TAAParams</code>はcaptureProbeFaceと同じ理由(カメラ視点のものが混入するのを防ぐ)で
+明示的に潰す。<code>View</code>はカメラのものをそのまま残す(36.3節)。
+</p>
+
+<h3>36.7 RenderGraph上の順序付けとSSR.hlslでの消費</h3>
+<p>
+パスの<code>.Reads</code>にシャドウマップ・IBL・DDGIのアトラスを挙げることで、これらを書く
+パスより後ろへ順序付ける。<code>SSR.hlsl</code>側の<code>.Reads</code>に
+<code>m_PlanarReflectionColor</code>を追加することで、SSRパスより前に順序付く。
+<code>SSR.hlsl</code>は<code>Texture2D PlanarReflectionTexture : register(t11)</code>
+(t0〜t10は既存の宣言ですべて埋まっている)として受け取り、36.1節のとおり
+<code>input.UV + N.xz * Params1.y</code>でそのままサンプルする(<code>Params1.y</code>は
+波による歪みの強さ、レンダリングパネルの「波による歪み」スライダーに対応する)。
+</p>
+<p class="note">
+<strong>画面端の扱い。</strong>反射先の画面UV(<code>reflUV</code>)が画面端に近いほど
+平面反射の信頼度を落とすが、<strong>確信度(confidence)は落とさない</strong>。確信度を
+落とすとLightingパスが適用したプローブ/グローバルIBLへ戻ってしまい、20.6節(P4)で解決した
+「水面にIBLしか映らない」問題が画面端で再発する。代わりに、平面反射の色と解析空の色
+(20.6節)を<code>edgeFade</code>で<code>lerp</code>し、確信度は
+<code>roughnessFade</code>のまま変えない。<code>reflUV</code>が完全に
+<code>[0,1]</code>の外に出た場合は平面反射を使わず解析空のみになる。
+</p>
+<p>
+平面反射が無効(<code>m_PlanarReflectionEnabled=false</code>、または水面インスタンスが
+存在しない)なフレームでは、<code>ApplyPlanarReflection</code>は<code>Params1.x</code>が0の
+時点で解析空をそのまま返すため、<code>SSR.hlsl</code>はP5完了時点(20.6節導入時)と
+厳密に同じコードパスを通る。
+</p>
+
+<h3>36.8 このフェーズの範囲</h3>
+<p>
+「画面内の水面画素が0ならパスをスキップする」という最適化はこのフェーズでは行っていない。
+画素数を数える仕組みがRHIに無く、それ自体が新しい機構になるため見送った。パスを登録するか
+どうかの判定は「水面インスタンスが存在するか」という静的な条件だけで行う。
+</p>
+</section>
+
+<section id="aerialperspective">
+<h2>37. 大気遠近(height fog / aerial perspective、P8)</h2>
+
+<p>
+高度で指数減衰する消散係数を持つ均一媒質を光線に沿って解析的に積分した透過率で、遠方の地物ほど
+背景の空の色(<a href="#procedural-sky">21章</a>の<code>Sky.hlsli</code>)へ滲んでいく効果を足した。
+新設した<code>Shaders/3D/AerialPerspective.hlsl</code>が反射パス(<a href="#ssr">7章</a>・
+<a href="#ssrprobe">20章</a>のSSR/RT反射)の直後、<a href="#taa">23章</a>のTAAパスの直前に置く
+フルスクリーン三角形+ピクセルシェーダーとして働く。合わせて、平面反射(<a href="#planarreflection">36章</a>)
+の鏡像にも同じ式を適用し、水面(<a href="#ssrprobe">20.6節</a>)については見下ろしたときに
+Fresnelがほぼ最小になって真っ黒に沈む問題への対処として、水体の拡散反射色を1色足した。
+</p>
+
+<h3>37.1 なぜ独立パスなのか ― Lightingパスの中に入れなかった理由</h3>
+<p>
+フォグの合成は「深度から求めた経路長 → 透過率 → 背景色とのlerp」という単純な式だが、
+Deferredな<code>DeferredLighting.hlsl</code>(<a href="#ssrprobe">20章</a>)の中でこれを行うと、
+実コードの制約により2つの問題が起きる:
+</p>
+<ol>
+<li><strong>SSRが二重にフォグを見てしまう。</strong>SSR(<code>Shaders/3D/SSR.hlsl</code>)は
+Lightingパスが完成させた<code>SceneColor</code>を「反射先の環境色」としてそのまま読む
+(<a href="#ssrprobe">20章</a>)。Lighting内でフォグを掛けてしまうと、SSRはフォグ済みの色を
+反射に使うことになり、画面上では直接見えている分のフォグと反射に映った分のフォグが
+二重に乗ってしまう。</li>
+<li><strong>半透明メッシュだけフォグを免れてしまう。</strong>半透明フォワードパス
+(<a href="#transparent">15章</a>)はLightingパスの<em>後</em>に<code>SceneColor</code>へ
+直接描き足す。Lightingの中でフォグを掛けると、その後に描かれる半透明サーフェスにはフォグが
+一切乗らない。</li>
+</ol>
+<p>
+どちらも「Lightingパスの中で完結させる」という前提が原因で、後段の複数のパスが
+同じ<code>SceneColor</code>を読み書きするこのエンジンの構造そのものに起因する制約である。
+そこでフォグを反射・半透明のすべてが出揃った<em>後</em>の独立パスへ切り出し、
+深度と最終的な色の2枚だけを読む形にした。
+</p>
+
+<h3>37.2 なぜTAAの前なのか</h3>
+<p>
+フォグの透過率は深度だけから決まる純関数で、時間方向に揺れる要素(ノイズ・時間的なサンプリング)を
+一切持たない。<a href="#taa">23章</a>のTAAより前に置けば、フォグが作る勾配の強い縁
+(地物と空の境界)もTAA自身のジッター+再投影で平滑化される側に回る。逆にTAAの<em>後</em>へ
+置くと、フォグの縁がTAAをすり抜けたまま最終出力に現れ、ジッターによる時間的な解決を受けられず
+エイリアシングとして残ってしまう。
+</p>
+
+<h3>37.3 in-scatter項に<code>Sky.hlsli</code>の空モデルを使う理由</h3>
+<p>
+フォグの合成先の色(in-scatter項)には、専用の定数色ではなく背景と同じ空モデル
+(<a href="#procedural-sky">21章</a>)をそのまま使う。
+理由は単純で、距離が無限大に近づくほど地物の色が<strong>厳密に</strong>背景の空色へ収束させたい
+ためである。専用の定数色を使うと、地平線際で「地物がフォグ色として滲んでいく先」と「背景として
+直接見えている空の色」が一致せず、水平線に沿って継ぎ目が出てしまう。空モデルを
+共有することで、<a href="#clouds">35.2節</a>で確立した「背景・水面反射・IBLが同じ空モデルの
+単一定義を経由する」という設計へ、大気遠近もそのまま乗る形になった。
+</p>
+<p>
+in-scatter項の方向(<code>fogDir</code>)には、視線方向のyを0以上へクランプしたものを使う。
+水平線より下を向いた画素で空色をそのまま評価すると、下半球の
+<code>GroundTint</code>(暗い接地色、<code>Sky.hlsli</code>)が返り、遠景が霞むのではなく
+黒ずんでしまう。水平線(<code>viewDir.y == 0</code>)ではクランプの有無で値が変わらないため、
+背景(深度が無い画素、下記36.4節)との連続性は保たれる。
+</p>
+
+<h4>36.3.1 呼ぶのは<code>SkyColor</code>ではなく<code>SkyColorUpper</code>(雲を含めない)</h4>
+<p>
+in-scatter項が呼ぶのは、雲を合成した<code>SkyColor</code>ではなく、
+<strong>雲を含まない晴天の空色</strong><code>SkyColorUpper(fogDir, params)</code>である。
+当初は<code>SkyColor</code>を呼んでいたが、これは実機で明確な破綻を起こした。
+</p>
+<p>
+理由は物理的なものである。ここで必要なのは<strong>カメラと着目点の間にある空気</strong>が散乱して
+視線へ入れてくる光(airlight)であって、無限遠から届く空の放射輝度そのものではない。
+雲は高度1,000m以上のレイヤーモデル(<a href="#clouds">35章</a>)で、視線が雲底平面と交わるのは
+水平距離にして数km〜数十km先——カメラから数百m先にある地物の<em>手前</em>には存在しない。
+にもかかわらず<code>SkyColor</code>を使うと、そこに無いはずの雲の輝度がin-scatterに乗る。
+雲は青空の3倍以上明るく、しかもfBmで空間的に激しく変動するため、暗い地物ほど
+<strong>雲の模様がそのまま透けて焼き付く</strong>形で破綻した。
+</p>
+<p>
+これは目で見て気付いたのではなく、次の測定で確定させた。水面の波と太陽を止め、雲だけを流した状態で
+6秒あけて2枚撮り、同じ画素の変化量を比べる(雲による全天平均透過率は被覆率だけで決まり
+スクロール位相には依存しない=雲が流れても地物の照明は動かない。よって地物の画素が動けば、
+それは雲の輝度が直接漏れている証拠になる)。
+</p>
+<table>
+<tr><th>領域</th><th>修正前 平均差</th><th>修正前 差&gt;1の画素</th><th>修正後 平均差</th><th>修正後 差&gt;1の画素</th></tr>
+<tr><td>修道院ブロックの内部</td><td>4.30</td><td>35.1%</td><td><strong>0.0000</strong></td><td><strong>0.0%</strong></td></tr>
+<tr><td>尖塔の内部</td><td>7.25</td><td>44.9%</td><td><strong>0.018</strong></td><td>0.16%(輪郭の空画素)</td></tr>
+<tr><td>水面に映る島の鏡像</td><td>—</td><td>—</td><td><strong>0.056</strong></td><td>0.0%</td></tr>
+<tr><td>空(対照: 雲が動いていること自体の確認)</td><td>6.34</td><td>31.5%</td><td>6.32</td><td>31.5%</td></tr>
+</table>
+<p>
+修正前は、地物の画素が<strong>空そのものとほぼ同じ量(平均5.7対6.3)動いていた</strong>——
+つまり雲がほぼ素通しで建物へ焼き付いていた。対照列が修正の前後で変わっていないことが、
+「雲は止まっていない」ことの陽性対照になっている。
+</p>
+<p>
+<strong>水平線での背景との連続性は失われない。</strong>無限遠へ収束するのは視線が水平
+(<code>fogDir.y == 0</code>)のときだけであり、<code>Sky.hlsli</code>の雲の地平線フェードは
+<code>smoothstep(kCloudHorizonFadeEndY = 0, kCloudHorizonFadeStartY = 0.2, dir.y)</code>——
+すなわち<code>dir.y == 0</code>でフェードが厳密に0になり、そこでは<code>SkyColor</code>と
+<code>SkyColorUpper</code>の値が一致する。したがって36.3節冒頭の設計目標はそのまま成立する。
+実測でも、視線がほぼ水平になる岩の斜面の平均輝度は150.09→147.12とほとんど動かず、
+水面(<code>fogDir.y</code>が0にクランプされる領域)は58.72→58.72で不変だった。
+なお<code>fogDir</code>はyを0以上へクランプ済みなので<code>SkyColor</code>の地面フェード分岐
+(<code>dir.y &lt; kGroundFadeStartY = -0.02</code>)には決して入らず、
+<code>SkyColor</code>を<code>SkyColorUpper</code>へ置き換えることは
+「雲の合成を外す」ことと厳密に等価である。
+</p>
+<p class="note">
+<strong>残している割り切り。</strong>雲に覆われた空の下では、airlightを照らす光そのものが弱まる
+(曇天の霞は晴天より暗く無彩色に寄る)。この全天平均の減光は現状掛けていない。掛けるには
+平均透過率(<code>KurenaiEngine3D.cpp</code>の<code>ComputeCloudAverageTransmittance</code>)を
+<code>FrameConstants</code>へ追加する必要があり、ここで直したかった破綻(雲の模様が地物へ
+焼き付く)とは別の問題なので分けてある。
+</p>
+<p class="note">
+<strong>Mie位相関数は掛けない。</strong><code>SkyColorUpper</code>が返す値には既にPerez分布の
+gamma項(太陽角距離の項)と<code>SunGlowTint</code>が含まれており、太陽方向で明るくなる
+角度依存性を既に持っている。この上にさらに位相関数を掛けると、前方散乱を二重に計上することに
+なるため、大気遠近側では位相関数を一切導入していない。
+</p>
+
+<h4>36.3.2 雲層そのものには逆にフォグを掛ける ― 「背景」扱いのままにしない</h4>
+<p>
+36.3.1が「霞の<em>色</em>に雲を混ぜない」話だったのに対し、こちらは逆向きの話である。
+<strong>雲は大気遠近を受ける側でなければならない。</strong>
+</p>
+<p>
+雲(<a href="#clouds">35章</a>)は深度を書かないため、大気遠近パスから見ると
+<code>depth &lt;= 0</code> の背景画素であり、37.4節の早期脱出でフォグを完全に免れていた。
+しかし雲は無限遠ではなく、積雲なら高度1,500m・巻雲なら8,000mの<strong>有限距離にある層</strong>である。
+視線と雲底平面の交点までの斜距離は<code>Altitude / dir.y</code>で、仰角が下がるほど急速に伸びる。
+既定の消散係数0.0004(視程10km)でも、本来この程度は減衰しているはずだった。
+</p>
+<table>
+<tr><th>視線仰角</th><th>積雲(1,500m)までの斜距離</th><th>σ=0.0004</th><th>σ=0.002</th><th>σ=0.01</th></tr>
+<tr><td>60°</td><td>1,730 m</td><td>0.70</td><td>0.17</td><td>0.00</td></tr>
+<tr><td>45°</td><td>2,119 m</td><td>0.65</td><td>0.11</td><td>0.00</td></tr>
+<tr><td>30°</td><td>2,997 m</td><td>0.54</td><td>0.05</td><td>0.00</td></tr>
+<tr><td>15°</td><td>5,789 m</td><td>0.30</td><td>0.00</td><td>0.00</td></tr>
+<tr><td>8°</td><td>10,766 m</td><td>0.11</td><td>0.00</td><td>0.00</td></tr>
+</table>
+<p>
+掛けないと何が起きるか。消散係数を上げていくと地物だけがどんどん溶けていくのに、雲は
+最後まで最大コントラストのまま残る。結果として画面は「霞んだ風景」ではなく
+<strong>「建物だけが透けた風景」</strong>に見える。実際、UIの消散係数を上限の0.01まで上げると
+島はほぼ消えるのに雲は剃刀のように鋭いままで、これが利用者から
+「大気散乱で建物が透ける」として報告された(36.3.1の雲の焼き付きを直した<em>後</em>も残っていた症状)。
+</p>
+
+<h5>実装: 既存の地平線フェードと同じ形で掛ける</h5>
+<p>
+<code>Sky.hlsli</code>の<code>EvaluateCloudLayer</code>は末尾で既に、地平線際のエイリアシング対策として
+「この層の存在感を0〜1で薄める」係数<code>fade</code>を持っている。
+</p>
+<pre><code>transmittance = lerp(1.0f, transmittance, fade);  // 薄まるほど背後の空を遮らなくなる
+scatteredLight *= fade;                           // 薄まるほど自分の輝きが届かなくなる</code></pre>
+<p>
+フォグの効果はまったく同じ構造で表せる。雲までのフォグ透過率をfとすると、雲から目へ届く輝きは
+f倍に減り、雲が背後を遮る度合いも手前の大気光(airlight)で薄まって<code>lerp(1, T, f)</code>になる。
+そこで<code>fade</code>にfを掛けるだけでよい。
+</p>
+<p>
+<strong>この形が正しいことは極限で確認できる。</strong>f=0を代入すると<code>T=1</code>・<code>S=0</code>となり、
+<code>SkyColor</code>の合成式<code>clearColor * T + S</code>は<code>clearColor</code>そのものに一致する――
+「フォグで雲が完全に消えたら素の空色が見える」という正しい極限になる。しかも減った分を埋める
+大気光の等価輝度は、呼び出し元が既に掛けている<code>clearColor</code>そのものなので、
+<strong>追加の項を1つも持たずに済む</strong>。
+</p>
+<p>
+フォグのパラメータは<code>SkyParameters</code>へ5つのフィールド
+(<code>FogEnabled</code>/<code>FogSigma0</code>/<code>FogScaleHeight</code>/<code>FogRefHeight</code>/<code>FogViewerHeight</code>)
+として持たせ、<code>ApplyCloudFogParameters</code>が<code>FrameConstants::FogParams0</code>と
+<code>CameraPosition.y</code>から埋める。<strong><code>FrameConstants</code>は1バイトも増えていない</strong>
+(必要な値がすべて既存フィールドに揃っていたため)。<code>EvaluateCloudLayer</code>へは
+<code>CloudLayerParams</code>と同じ考え方で<code>CloudFogParams</code>という型に束ねて渡す
+(層に依らない値を5つも引数へ並べると順番を間違えるため)。
+</p>
+
+<h5>検証</h5>
+<p>
+水面の波と雲の両方を凍結し(<code>WaterTimeFrozen</code>/<code>CloudTimeFrozen</code>)、
+同一条件で複数回撮って再現性の下限を先に確定させてから比較した。
+</p>
+<p>
+<strong>(1) 効果 ― 雲のコントラストが地平線へ向かって単調に潰れること。</strong>
+島を避けた空の帯ごとに、Rec.709輝度の90%点(=雲)と10%点(=青空)の比を測った。
+</p>
+<table>
+<tr><th>空の帯(画面y)</th><th>P12前 90%点/10%点</th><th>P12後</th><th>10%点(青空)の変化</th></tr>
+<tr><td>180–280(高い)</td><td>1.70</td><td>1.47</td><td>125.8 → 125.8</td></tr>
+<tr><td>300–400</td><td>1.64</td><td>1.26</td><td>128.0 → 128.0</td></tr>
+<tr><td>420–500</td><td>1.45</td><td><strong>1.04</strong></td><td>128.6 → 128.3</td></tr>
+<tr><td>520–565(地平線際)</td><td>1.14</td><td><strong>1.01</strong></td><td>127.0 → 127.0</td></tr>
+</table>
+<p>
+注目すべきは<strong>10%点(青空)が1階調も動いていない</strong>ことである。動いたのは明るい側(雲)だけで、
+それが青空の値へ向かって降りてきている。「雲が晴天の空色へ収束する」という狙いどおりの挙動で、
+晴天側の経路には一切触れていないことの証拠にもなっている。
+</p>
+<p>
+<strong>(2) 恒等性 ― フォグ無効なら1ビットも変わらないこと。</strong>
+<code>FogEnabled=false</code>でビルドし、P12前後のシェーダーセットを同じバイナリで撮り分けた
+(ビューポート全体902,700画素)。
+</p>
+<table>
+<tr><th>比較</th><th>最大差</th><th>差のある画素</th></tr>
+<tr><td>対照(P12前) vs P12後 ― 6組の総当たりのうち4組</td><td><strong>0</strong></td><td><strong>0</strong></td></tr>
+<tr><td>同 ― 残り2組(いずれも下記の異常な1枚を含む組)</td><td>1</td><td>787</td></tr>
+<tr><td>再現性の下限: 同一シェーダー同士(P12後 vs P12後)</td><td>1</td><td>787</td></tr>
+</table>
+<p>
+5枚撮ったうち1枚だけが、<strong>自分と同じシェーダーで撮った兄弟に対しても</strong>まったく同じ787画素・1階調の
+ずれを示した。つまりこのずれはP12に起因せず、プロセスをまたいだときに稀に出る1LSBの非決定性である
+(残りの組み合わせはすべて最大差0)。陽性対照として、フォグ有効/無効の切り替えでは
+53.6%の画素・最大差66が動くことを確認しており、「フォグのコードが走っていないから差が0」ではない。
+</p>
+<p>
+<strong>(3) 判断A・判断Cは維持。</strong><code>SkyGenerate.hlsl</code>(IBLベイク)は
+<code>ApplyCloudFogParameters</code>へ明示的に無効値を渡す(そもそも判断Aで
+<code>CloudCoverage=0</code>のため<code>EvaluateCloudLayer</code>自体が呼ばれない)。
+<code>CloudFogParams</code>の組み立ては<code>SkyColor</code>の早期脱出<em>より後</em>に置いてあり、
+被覆率0の画素では組み立てすら行われない。fxc(SM5.0)/dxc(SM6.0)で全93エントリポイントの
+コンパイルを確認し、DX11・DX12の両方で起動・描画を確認した。
+</p>
+
+<h3>37.4 背景画素は1ビットも変えない</h3>
+<p>
+Reverse-Zのため深度を持たない背景(スカイ)画素は<code>depth &lt;= 0.0f</code>になる。
+<code>AerialPerspective.hlsl</code>の<code>PSMain</code>はここで即座に元の色を返し、
+経路長の計算そのものを行わない。背景は既に<code>DeferredLighting.hlsl</code>の解析評価
+(または生のスカイボックス)で正しい値になっており、深度が無いため経路長も定義できない。
+この早期脱出により、フォグを無効化した状態との差分は背景領域について厳密にゼロになる。
+</p>
+
+<h3>37.5 モデルと閉形式の解</h3>
+<p>
+消散係数が高度で指数減衰する均一媒質<code>sigma(h) = Sigma0 * exp(-(h - RefHeight) / ScaleHeight)</code>
+を仮定すると、カメラ位置Aから着目点Bまでの光学的深さは解析的に積分できる
+(Frostbiteのexponential height fogと同型の閉形式)。
+</p>
+<pre><code>float3 rayVec = B - A;
+float  d      = length(rayVec);
+float  dy     = rayVec.y;
+float  baseSigma = Sigma0 * exp(-(A.y - RefHeight) / ScaleHeight);
+float  t      = dy / ScaleHeight;
+float  falloff = (abs(t) > 1e-4f) ? ((1.0f - exp(-t)) / t) : 1.0f;
+float  tau     = baseSigma * d * falloff;
+float  transmittance = exp(-max(tau, 0.0f));</code></pre>
+<p>
+<code>t</code>は光線の高度変化を無次元化した値で、<code>t → 0</code>(ほぼ水平な光線)で
+<code>(1 - exp(-t)) / t → 1</code>に収束するため、分岐で明示的に処理している(<code>t</code>が
+厳密に0だと0/0になる)。<code>exp</code>の引数はカメラが基準高度から極端に離れると大きく振れる
+ため、あらかじめクランプしてinf・NaNへの伝播を防いでいる。
+</p>
+<p>
+この閉形式が正しいことは、同じ媒質を光線に沿って200万分割で数値積分した値と突き合わせて
+確認した。水平(dy=0の分岐)・上り・下り・基準高度が非ゼロの各ケースで<strong>相対誤差は
+最大2.7e-11</strong>で、閉形式と数値積分は倍精度の丸め誤差の範囲で一致する。
+</p>
+<p>
+この関数は<code>Shaders/3D/HeightFog.hlsli</code>として、<code>cbuffer</code>やレジスタに
+一切依存しない純粋関数<code>HeightFogTransmittance</code>に括り出した(<code>Sky.hlsli</code>冒頭の
+「cbufferに依存しない」という作法と同じ)。理由は式が<code>AerialPerspective.hlsl</code>と
+<code>PlanarReflection.hlsl</code>の2箇所に現れるため。空モデルではなく大気遠近固有の値
+(消散係数・スケールハイト)を扱うヘッダーなので、<code>Sky.hlsli</code>には置いていない。
+</p>
+<p>
+最終合成は<code>alpha = (1 - transmittance) * MaxOpacity</code>を不透明度として、
+<code>outColor = sceneColor * (1 - alpha) + inScatter * alpha</code>の単純なlerpで行う。
+<code>MaxOpacity</code>を1.0未満にすると、最遠方でも元の色がうっすら透けて残る。
+</p>
+
+<h3>37.6 平面反射の鏡像にも同じフォグを掛ける</h3>
+<p>
+<a href="#planarreflection">36章</a>の平面反射パスの出力(<code>m_PlanarReflectionColor</code>)は
+<code>AerialPerspective.hlsl</code>の対象範囲(反射パスの出力)には含まれない――
+平面反射の結果はSSR側が<code>input.UV</code>でそのままサンプルして<code>SceneColor</code>へ
+合成されるため、SSRパスの出力(=大気遠近パスの入力)には既に「鏡像込みの水面反射色」が
+1画素の値として混ざり込んだ状態になっている。この時点ではもう「本体」と「鏡像」を区別できず、
+大気遠近パス側でまとめてフォグを掛けると鏡像だけを特別扱いできない。
+</p>
+<p>
+そこで<code>PlanarReflection.hlsl</code>自身の<code>PSMain</code>末尾で、SSRへ渡す<em>前</em>に
+同じ<code>HeightFogTransmittance</code>と<code>SkyColorUpper</code>(雲を含めない理由は36.3.1節)を
+使ってフォグを合成しておく。
+掛けないと「霞んだ本体 vs くっきりした鏡像」という不自然な絵になる。光が「物体 → 水面 → 目」の
+順に進む経路長は、鏡映カメラ(<code>CameraPosition</code>、36.3節)から物体までの距離と
+幾何学的に厳密に等しいため(鏡映は「鏡映カメラで景色を撮り直す」ことと数学的に等価という
+36.1節の理屈がそのまま成り立つ)、経路長にはその距離をそのまま使ってよい。
+</p>
+<p>
+<strong>in-scatterの方向にも鏡映カメラからの向きをそのまま使ってよい。</strong>
+水面をy=0の平面、実カメラをC、鏡映カメラをC'、着目点をO、実際の反射点をPとすると
+</p>
+<pre><code>O - C' = (Ox-Cx,  Oy+Cy,  Oz-Cz)
+O - P  = Oy/(Cy+Oy) * (Ox-Cx,  Cy+Oy,  Oz-Cz)</code></pre>
+<p>
+となり、2つは正のスカラー倍の関係にある(Cy&gt;0、Oy&gt;0のとき)。つまり
+<code>normalize(WorldPos - CameraPosition)</code>は「水面から物体へ向かう実際の光路の向き」
+そのもので、近似ではない。無視しているのは「目 → 水面」の短い区間の向きだけで、
+経路長のほうは上記のとおり鏡映カメラからの距離が全区間ぶんを正しく含む。
+</p>
+<p class="note">
+向きを逆(<code>CameraPosition - WorldPos</code>)に取ると、鏡映カメラは水面より下にあるため
+y成分が常に負になり、<code>max(viewDir.y, 0)</code>のクランプで<strong>常に水平線の色</strong>に
+潰れてしまう。実測では既定の消散係数(視程10km相当)での差は最大3/255にとどまるが、
+これは本命の構図で鏡像がほぼ水平線の近くにしか出ないためで、仰角の大きい鏡像を含む構図では
+差が広がる。
+</p>
+
+<h3>37.7 水中項 ― 見下ろした水面が真っ黒になる問題への対処</h3>
+<p>
+現状の水面(<a href="#ssrprobe">20.6節</a>)は誘電体で<code>baseColorFactor</code>がほぼ黒に
+焼かれているため、見下ろす角度(<code>NdotV</code>が大きい)ではFresnelが最小値
+(誘電体のF0、約0.02)まで落ち、反射もほとんど乗らず、結果としてほぼ真っ黒に見える。
+屈折・水中散乱の項が無いことが原因である。
+</p>
+<p>
+対処として、<code>Water.hlsl</code>の<code>PSMain</code>が出力する<code>Albedo</code>を、
+メッシュ自身の<code>baseColorSample.rgb</code>ではなく<code>FrameConstants.WaterBodyColor.rgb</code>
+(UIから調整可能な1色)へ置き換えた。<code>clip(baseColorSample.a - AlphaCutoff)</code>による
+アルファカットアウトはこの置き換えと無関係にそのまま残す。
+</p>
+<p class="note">
+これは水体で拡散的に後方散乱して戻ってくる光の<strong>粗い近似</strong>であり、屈折・水深依存の
+減衰は含んでいない。水深の情報をG-Bufferが持っていないため、一定色で近似している。
+拡散項として書くことで、Fresnelによる「見下ろすと水の色/すれすれだと鏡」という切り替わりは
+既存の<code>DeferredLighting.hlsl</code>の式がそのまま担当し、水面専用の分岐は増やしていない。
+メッシュ自身の<code>BaseColorFactor</code>を使わないのは、干潟の水の色をシーン側のパラメータとして
+調整できるようにするため(<code>.kmodel</code>を焼き直す必要がない)。
+</p>
+<p>
+<strong>置き換えただけでは問題は直らない。</strong><code>Water.kmodel</code>の
+<code>baseColorFactor</code>は<code>(0.02, 0.03, 0.04)</code>で、これと同程度の暗さを
+<code>WaterBodyColor</code>に入れても見え方はまったく変わらない(実測: 本命の構図で最大差7/255)。
+見下ろす角度ではFresnelが約0.028まで落ちて<strong>見えているもののほぼ全部がこの拡散色</strong>に
+なるため、この値そのものを上げる必要がある。既定値はモン・サン=ミシェル湾のような
+土砂を多く含む濁った海を想定し、澄んだ海水(反射率数%)ではなく濁水の反射率として
+一般に言われる帯域(おおむね8〜15%)の下寄りを採って<code>(0.085, 0.082, 0.070)</code>とした。
+物理量の実測ではなく、その帯域を根拠に見た目で決めた値である。
+</p>
+
+<h3>37.8 パラメータと手続き空との関係</h3>
+<p>
+消散係数・スケールハイト・基準高度・不透明度上限は<code>FrameConstants</code>末尾に追加した
+<code>FogParams0</code>/<code>FogParams1</code>として、水体の色は<code>WaterBodyColor</code>として
+渡す。
+</p>
+<p>
+消散係数の既定値は<strong>気象学的視程Vとの関係</strong>から決めている。コントラスト閾値2%で
+定義される視程はKoschmiederの式<code>sigma = 3.912 / V</code>で消散係数と結び付くので、
+「どのくらいの視程の日を想定するか」でこの値を決められる。既定の<code>0.0004</code>は
+V ≒ 10km(晴れているが遠景がわずかに霞む日)に相当する。
+</p>
+<p class="note">
+最初に置いていた<code>0.0015</code>はV ≒ 2.6km(もや)に相当し、実測すると600m先の島でも
+透過率が0.5を切って絵全体が灰色に潰れた。スケールハイトの既定1000mは、エアロゾルの
+スケールハイトとして一般に言われる目安(おおむね1〜1.5km)の下端を採ったもので、
+精密な観測値ではない。このシーンは最も高い尖塔でも165mしかないため、この値の違いは
+絵にほとんど出ない。
+</p>
+<p>
+<code>FrameConstants</code>を宣言している全<code>.hlsl</code>(<code>Sprite2D.hlsl</code>の
+2D専用<code>FrameConstants</code>を除く)にこの3本を末尾追加のみで反映し、既存フィールドの
+オフセットは1バイトも動かしていない。
+</p>
+<p>
+手続き空が無効(<code>.kscene</code>がDDSスカイボックスを明示するシーン)なときは、
+UIの設定に関わらず<code>FogParams0.w</code>(有効フラグ)を0にする。これは
+<a href="#ssrprobe">20.6節</a>のSSRが<code>usingProceduralSky</code>で水面の解析空フォールバックを
+落としているのと同じ判断である――DDSは任意の絵でPerezモデルとは無関係なため、
+<code>SkyColorUpper</code>による解析評価をin-scatter項に使ってはいけない。
+</p>
+
 </section>
 
 <section id="bent-normal">

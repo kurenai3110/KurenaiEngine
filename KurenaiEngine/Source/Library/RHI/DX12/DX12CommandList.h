@@ -71,7 +71,7 @@ namespace Kurenai::RHI
         D3D12_GPU_VIRTUAL_ADDRESS m_CurrentRootCbv[kConstantBufferSlotCount]{};
         D3D12_GPU_VIRTUAL_ADDRESS m_CurrentComputeRootCbv[kConstantBufferSlotCount]{};
 
-        // SRVスロット(t0〜t13)のシャドウ。SetTexture/SetShaderResourceBufferはCopyDescriptorsを
+        // SRVスロット(t0〜t17)のシャドウ。SetTexture/SetShaderResourceBufferはCopyDescriptorsを
         // その場では呼ばず、コピー元ハンドルをここへ記録するだけにして、Draw直前の
         // FlushPendingSrvWrites()でまとめて1回のCopyDescriptorsに反映する(メッシュごとに
         // テクスチャの数だけCopyDescriptorsSimpleを呼ぶドライバ呼び出しコストの削減)。
@@ -80,10 +80,12 @@ namespace Kurenai::RHI
         // 未バインドのスロットを読むと0が返るというDX11と同じ挙動になる。
         // 反射プローブ(19章)がDeferredLighting.hlslでt11〜t14(イラディアンス配列・プリフィルタ配列・
         // 影響範囲バッファ・距離キューブ配列)を、DDGI(22章)がt15〜t16(イラディアンスアトラス・
-        // 距離モーメントアトラス)を使い、さらにbent normalのG-Buffer(34章)がt17を
-        // 使うため18スロット必要。DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)
-        // およびDX11CommandList側の同名の定数と必ず一致させること
-        static constexpr uint32_t kTextureSlotCount = 18;
+        // 距離モーメントアトラス)を使い、さらに空パラメータの構造化バッファ・bent normalの
+        // G-Buffer(34章)・雲の3Dノイズ2枚・大気散乱のSkyView LUTを使うため21スロット必要。
+        // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
+        // DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)およびDX11CommandList
+        // 側の同名の定数と必ず一致させること
+        static constexpr uint32_t kTextureSlotCount = 21;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;

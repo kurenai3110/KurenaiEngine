@@ -78,6 +78,11 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams4;
     // bent normalによる遮蔽(34章)。DeferredLighting.hlslと同じ規則を適用する
     float4 OcclusionParams;
+    // これ以降(TimeParams / Sky* / Cloud* / PlanarReflectionPlane / Fog* / WaterBodyColor)は
+    // このシェーダーでは一切読まないため宣言しない。
+    // 【半透明メッシュにフォグを掛けない理由】AerialPerspective.hlslはこのTransparentパスより
+    // 後のTAA直前に置かれるため、Transparentが描いた色も含めて後段でまとめてフォグが掛かる
+    // (このシェーダー自体でフォグを計算する必要が無い)
 };
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で

@@ -63,6 +63,9 @@ cbuffer FrameConstants : register(b0)
     // つまみを動かしたときにプローブだけ古い見た目のまま残る。
     // KurenaiEngine3D側の再ベイク署名にもこの値を混ぜてあること
     float4 OcclusionParams;
+    // これ以降(TimeParams / Sky* / Cloud* / PlanarReflectionPlane / Fog* / WaterBodyColor)は
+    // このシェーダーでは一切読まないため宣言しない。読まないフィールドを並べても
+    // オフセットの担保にはならず、実際にずれていても気づけないため
 };
 
 // GBuffer.hlsl/Transparent.hlslのObjectConstantsと同じレイアウト

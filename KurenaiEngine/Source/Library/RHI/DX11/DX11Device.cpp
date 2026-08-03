@@ -601,6 +601,38 @@ namespace Kurenai::RHI
         return std::make_unique<DX11Texture>(srv, nullptr, nullptr, uav);
     }
 
+    std::unique_ptr<IRHITexture> DX11Device::CreateUAVTexture3D(
+        uint32_t width, uint32_t height, uint32_t depth, Format format)
+    {
+        // CreateUAVTexture(上)の3D版。違いはD3D11_TEXTURE3D_DESCとCreateTexture3Dを使うことと、
+        // 奥行き(Depth)がある代わりにArraySizeが無いことだけで、ビューの作成と
+        // DX11Textureへの詰め方は2Dとまったく同じ(記述子nullptrで既定のTexture3Dビューになる)
+        D3D11_TEXTURE3D_DESC textureDesc{};
+        textureDesc.Width = width;
+        textureDesc.Height = height;
+        textureDesc.Depth = depth;
+        textureDesc.MipLevels = 1;
+        textureDesc.Format = ToDXGIFormat(format);
+        textureDesc.Usage = D3D11_USAGE_DEFAULT;
+        textureDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+
+        Microsoft::WRL::ComPtr<ID3D11Texture3D> texture;
+        ThrowIfFailed(
+            m_Device->CreateTexture3D(&textureDesc, nullptr, &texture), "3D UAVテクスチャの作成に失敗しました");
+
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        ThrowIfFailed(
+            m_Device->CreateShaderResourceView(texture.Get(), nullptr, &srv),
+            "3D UAVテクスチャのシェーダリソースビューの作成に失敗しました");
+
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+        ThrowIfFailed(
+            m_Device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav),
+            "3D UAVテクスチャのアンオーダードアクセスビューの作成に失敗しました");
+
+        return std::make_unique<DX11Texture>(srv, nullptr, nullptr, uav);
+    }
+
     std::unique_ptr<IRHITexture> DX11Device::CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels)
     {
         return CreateMippedUAVTexture(width, height, Format::R32_Float, mipLevels);

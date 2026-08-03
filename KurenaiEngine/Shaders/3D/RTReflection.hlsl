@@ -82,6 +82,8 @@ cbuffer FrameConstants : register(b0)
     // bent normalによる遮蔽(34章)。y=スペキュラ遮蔽の方式を読む。
     // DeferredLighting.hlsl・SSR.hlslとまったく同じ読み方をすること(段差防止)
     float4 OcclusionParams;
+    // これ以降(TimeParams / Sky* / Cloud* / PlanarReflectionPlane / Fog* / WaterBodyColor)は
+    // このシェーダーでは一切読まないため宣言しない
 };
 
 cbuffer RTReflectionConstants : register(b1)

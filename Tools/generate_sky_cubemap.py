@@ -29,6 +29,22 @@ import numpy as np
 # 計算は512x512x6面ぶんをnumpyで一括ベクトル化している(Pythonの素朴なピクセルループでは
 # 数秒〜十秒程度かかっていたため)。半精度浮動小数点への変換もnumpyのfloat16キャストに
 # まかせる(自前のビット演算より検証済みで確実)
+#
+# 【雲(P5)は意図的に実装していない】Shaders/3D/Sky.hlsliへ積雲1層のレイヤーモデルを追加したが、
+# このスクリプトへは移植していない。理由は2つ:
+#   (1) このスクリプトは「手続き空を無効にしたとき」のフォールバック用オフライン参照実装であり、
+#       手続き空自体が無効な場面で雲だけ動くのは前提が矛盾する
+#   (2) 手続き空側もIBL用キューブマップには雲を焼き込まない設計にした(判断A。Sky.hlsli
+#       雲セクションのコメント参照)。SkyGenerate.hlslは雲を無効(CloudCoverage=0)にして
+#       Sky.hlsliのSkyColorを呼ぶため、キューブマップの中身自体はこのスクリプトが焼くDDSと
+#       同じく雲の無い晴天のまま。したがって「Sky.hlsliと同期すべき対象」から雲だけは外れる
+# 以降、このファイルは従来どおりPerez分布(青空のグラデーションのみ)の移植を維持すればよい
+#
+# 【P7: 日中の色をPreetham xyYモデルへ置き換え】Shaders/3D/Sky.hlsliのSkyColorUpperUnitと
+# 同じ変更をこのスクリプトへも反映する。日中(太陽仰角5度以上)の色度(x, y)はPreetham et al. 1999の
+# xyYモデルから求め、輝度(Y)はPerez比+RELATIVE_LUMINANCE_FLOORのままタービディティ依存の係数へ
+# 差し替える。夜・薄明(太陽仰角5度未満)は引き続き従来のティント補間(compute_sky_tint/sky_tint)を
+# 使い、その間をクロスフェードする(sky_color_upper_unit参照)。
 
 FACE_SIZE = 512
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -82,9 +98,17 @@ GROUND_FADE_END_Y = -0.6
 # 実際の大気は多重散乱で暗部が持ち上がるためゼロにはしないが、0.45まで底上げしていたときは
 # 輝度の勾配がほぼ消えて空全体が一様なスレートグレーになっていた(実測: 彩度0.26で時刻不変)。
 # 勾配が残る値まで下げてある
-# (sky_color_upper と compute_zenith_scale の両方から参照するのでモジュール定数にしてある。
-#  SkyGenerate.hlsl の kRelativeLuminanceFloor と一致させること)
+# (sky_color_upper_unit と compute_zenith_scale の両方から参照するのでモジュール定数にしてある。
+#  Sky.hlsli の kRelativeLuminanceFloor と一致させること)
 RELATIVE_LUMINANCE_FLOOR = 0.12
+
+# 大気の濁り具合(P7: Preetham xyYモデルのタービディティ)。EngineDefaults.h::SkyTurbidityと
+# 同じ既定値(2.5)。Preethamの定義域はおおむね1.7〜10で、実測値ではなく見た目からの選択
+DEFAULT_TURBIDITY = 2.5
+
+# Preethamの重みを求める仰角の遷移幅(度)。仰角0度で0(従来ティントのみ)、5度で1(Preethamのみ)。
+# Sky.hlsli SkyColorUpperUnitと同じ閾値であること
+PREETHAM_TRANSITION_END_DEGREES = 5.0
 
 
 def smoothstep(edge0, edge1, x):
@@ -175,54 +199,180 @@ def perez_f(cos_theta, gamma, a, b, c, d, e):
     return (1.0 + a * np.exp(b / cos_theta)) * (1.0 + c * np.exp(d * gamma) + e * np.cos(gamma) ** 2)
 
 
-def perez_relative_luminance(cos_theta, gamma, cos_theta_sun, theta_sun):
+def perez_relative_luminance(cos_theta, gamma, theta_sun):
+    """天頂輝度を1としたときの相対輝度。Sky.hlsliのPerezRelativeLuminanceと同じ式。
+
+    【分母は必ず天頂方向で評価する】Perez分布の正規化は F(theta, gamma) / F(0, theta_s) で、
+    分母の F(0, theta_s) は「天頂方向」での評価を意味する。天頂角は0なので第1引数へは1.0を
+    渡す(gammaのほうはtheta_sunで正しい。天頂は太陽からtheta_sunだけ離れているため)。
+    ここへ cos(theta_s) を渡すと、定義上1.0になるはずの天頂の相対輝度が1.0にならず
+    (実測: 太陽仰角45度で0.763、仰角5度で0.361)、太陽が低いほど誤差が拡大する。
+    輝度の絶対値は照度正規化で吸収されるが、RELATIVE_LUMINANCE_FLOORとの相対関係が
+    変わるため分布の形そのものが歪む。
+    """
     # CIE快晴空の標準係数(Perez et al. 1993 / Preetham et al. 1999, Table 1)
     a, b, c, d, e = -1.0, -0.32, 10.0, -3.0, 0.45
     numerator = perez_f(cos_theta, gamma, a, b, c, d, e)
-    denominator = perez_f(cos_theta_sun, theta_sun, a, b, c, d, e)
+    denominator = perez_f(1.0, theta_sun, a, b, c, d, e)
     return numerator / denominator
 
 
-def sky_color_upper(dirs, sun_dir, zenith_luminance, tint_set):
-    # dirsは(...,3)の方向配列。水平線以上(GROUND_FADE_START_Y以上)を仮定した空モデルの色を返す
-    # (呼び出し側でground_fadeと合成する)
+def preetham_luminance_coeffs(turbidity):
+    # Y(輝度)の5係数。従来の固定CIE快晴空係数(a=-1,b=-0.32,c=10,d=-3,e=0.45)を
+    # タービディティ依存(Preetham et al. 1999, Table 1)へ差し替える
+    a = 0.1787 * turbidity - 1.4630
+    b = -0.3554 * turbidity + 0.4275
+    c = -0.0227 * turbidity + 5.3251
+    d = 0.1206 * turbidity - 2.5771
+    e = -0.0670 * turbidity + 0.3703
+    return a, b, c, d, e
+
+
+def preetham_chroma_x_coeffs(turbidity):
+    a = -0.0193 * turbidity - 0.2592
+    b = -0.0665 * turbidity + 0.0008
+    c = -0.0004 * turbidity + 0.2125
+    d = -0.0641 * turbidity - 0.8989
+    e = -0.0033 * turbidity + 0.0452
+    return a, b, c, d, e
+
+
+def preetham_chroma_y_coeffs(turbidity):
+    a = -0.0167 * turbidity - 0.2608
+    b = -0.0950 * turbidity + 0.0092
+    c = -0.0079 * turbidity + 0.2102
+    d = -0.0441 * turbidity - 1.6537
+    e = -0.0109 * turbidity + 0.0529
+    return a, b, c, d, e
+
+
+def preetham_zenith_chromaticity(turbidity, theta_sun):
+    # 天頂の色度(x_z, y_z)。太陽天頂角theta_sun[ラジアン]の3次式(Preetham et al. 1999, Table 2)
+    t2 = turbidity * turbidity
+    ts2 = theta_sun * theta_sun
+    ts3 = ts2 * theta_sun
+    x_z = (t2 * (0.00166 * ts3 - 0.00375 * ts2 + 0.00209 * theta_sun + 0.0)
+           + turbidity * (-0.02903 * ts3 + 0.06377 * ts2 - 0.03202 * theta_sun + 0.00394)
+           + (0.11693 * ts3 - 0.21196 * ts2 + 0.06052 * theta_sun + 0.25885))
+    y_z = (t2 * (0.00275 * ts3 - 0.00610 * ts2 + 0.00317 * theta_sun + 0.0)
+           + turbidity * (-0.04214 * ts3 + 0.08970 * ts2 - 0.04153 * theta_sun + 0.00516)
+           + (0.15346 * ts3 - 0.26756 * ts2 + 0.06669 * theta_sun + 0.26688))
+    return x_z, y_z
+
+
+def xyy_to_linear_srgb(x, y, Y):
+    """xyY色空間から線形sRGB(Rec.709/D65)へ変換する。Sky.hlsliのXyYToLinearSRGBと同じ式。
+
+    負成分ぶんだけ全チャンネルへ白を足すデサチュレーションを入れてあるが、これは保険であって
+    常用される経路ではない。実測(タービディティ1.7〜8.0 × 太陽仰角5〜60度で上半球を32×64方向に
+    走査)では負値が出た方向は0.0%だった。Preethamの色度はCIE図の中央付近に収まり、そこは
+    sRGBの三角形の内側だからである。単純クランプにしていないのは、万一発動したときに彩度が
+    飛ぶため。デサチュレーションは輝度を持ち上げるので、操作後に元のYへ戻るよう再スケールする。
+    """
+    # yが0近傍だとX,Zがゼロ除算で発散するため下限をクランプする
+    safe_y = np.maximum(y, 1e-4)
+    X = (x / safe_y) * Y
+    Z = ((1.0 - x - y) / safe_y) * Y
+
+    r = 3.2406 * X - 1.5372 * Y - 0.4986 * Z
+    g = -0.9689 * X + 1.8758 * Y + 0.0415 * Z
+    b = 0.0557 * X - 0.2040 * Y + 1.0570 * Z
+    rgb = np.stack([r, g, b], axis=-1)
+
+    # 色域外(負値)を白へ寄せるデサチュレーション。全成分に同じ量を足す = 白を混ぜる
+    min_component = np.min(rgb, axis=-1, keepdims=True)
+    rgb = np.where(min_component < 0.0, rgb - min_component, rgb)
+
+    # デサチュレーションで持ち上がった輝度を元のYへ戻す再スケール(Yが0近傍のときのゼロ除算に注意)
+    rescaled_luminance = (rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722)
+    scale = np.where(rescaled_luminance > 1e-6, Y / np.maximum(rescaled_luminance, 1e-6), 1.0)
+    rgb = rgb * scale[..., None]
+
+    return rgb
+
+
+def sky_color_upper_unit(dirs, sun_dir, tint_set, turbidity):
+    """天頂輝度を1としたときの空の色(水平線以上)。Sky.hlsliのSkyColorUpperUnitと同じ式。
+
+    日中(太陽仰角5度以上)はPreetham xyYモデルから色度を求める。夜・薄明(太陽仰角5度未満)は
+    従来のティント補間(compute_sky_tint/sky_tint)を使い、その間(0〜5度)をクロスフェードする。
+    zenith_luminanceを一切参照しない(compute_zenith_scaleがこの関数の結果を積分して
+    zenith_luminanceを逆算するため、参照すると循環定義になる)。
+    """
     dir_y = dirs[..., 1]
 
     # Perez分布は水平線(cosθ→0)で数式が不安定になるため、天頂角を89.5度までにクランプする
     clamped_y = np.maximum(dir_y, np.cos(np.radians(89.5)))
     cos_theta = np.clip(clamped_y, 1e-3, 1.0)
 
+    # 分母(F(0, theta_s))は天頂方向で評価するため cos(theta_s) は使わない。
+    # 詳しい理由は perez_relative_luminance のdocstring参照
     theta_sun = np.arccos(np.clip(sun_dir[1], -1.0, 1.0))
-    cos_theta_sun = max(np.cos(theta_sun), 1e-3)
 
     cos_gamma = np.clip(np.tensordot(dirs, sun_dir, axes=([-1], [0])), -1.0, 1.0)
     gamma = np.arccos(cos_gamma)
 
-    relative = perez_relative_luminance(cos_theta, gamma, cos_theta_sun, theta_sun)
-    relative = np.maximum(relative, 0.0)
-    # CIE快晴空係数(circumsolar項、c=10, d=-3)は反太陽側の水平線で輝度が天頂の0.2倍程度まで
-    # 落ち込む(単一散乱のみを仮定した理想的な快晴空のモデルのため)。実際の大気は多重散乱・
-    # エアロゾルにより暗部が持ち上がるので、RELATIVE_LUMINANCE_FLOORで最低輝度を底上げする
-    # (多重散乱を簡略化して表現するアート的な近似)
-    relative = RELATIVE_LUMINANCE_FLOOR + (1.0 - RELATIVE_LUMINANCE_FLOOR) * relative
+    def legacy_color():
+        relative = perez_relative_luminance(cos_theta, gamma, theta_sun)
+        relative = np.maximum(relative, 0.0)
+        relative = RELATIVE_LUMINANCE_FLOOR + (1.0 - RELATIVE_LUMINANCE_FLOOR) * relative
+        tint = sky_tint(cos_theta, cos_gamma, tint_set)
+        return relative[..., None] * tint
 
-    tint = sky_tint(cos_theta, cos_gamma, tint_set)
-    luminance = relative * zenith_luminance
-    return luminance[..., None] * tint
+    # Preethamの重み。仰角0度で0(従来ティントのみ)、仰角5度で1(Preethamのみ)
+    preetham_weight = smoothstep(0.0, np.sin(np.radians(PREETHAM_TRANSITION_END_DEGREES)), sun_dir[1])
+    if preetham_weight <= 0.0:
+        # 【夜の厳密一致】太陽が地平線下ではPreethamの計算を一切行わず、従来のティント色を返す
+        return legacy_color()
+
+    # --- Preetham et al. 1999のxyYモデル ---
+    # 【分母はperez_f(1, theta_sun)、cos_theta_sunではない】Preethamの正規化はF(θ,γ)/F(0,θs)で、
+    # 分母は「天頂方向(θ=0、cosθ=1)での評価」。天頂は太陽からtheta_sunだけ離れているためgammaの
+    # ほうはtheta_sunで正しいが、第1引数(cosθの位置)にcos(theta_sun)を渡すと天頂での評価(θ=0)
+    # ではなく太陽方向での評価になってしまう。これを入れると天頂の値がy_a/x_z/y_zに一致しなくなり、
+    # 太陽が低いほど誤差が拡大する(実測: タービディティ2.5・仰角5度でxの誤差-22%)
+    y_a, y_b, y_c, y_d, y_e = preetham_luminance_coeffs(turbidity)
+    preetham_relative = perez_f(cos_theta, gamma, y_a, y_b, y_c, y_d, y_e) / perez_f(
+        1.0, theta_sun, y_a, y_b, y_c, y_d, y_e)
+    preetham_relative = np.maximum(preetham_relative, 0.0)
+    preetham_relative = RELATIVE_LUMINANCE_FLOOR + (1.0 - RELATIVE_LUMINANCE_FLOOR) * preetham_relative
+
+    x_a, x_b, x_c, x_d, x_e = preetham_chroma_x_coeffs(turbidity)
+    cy_a, cy_b, cy_c, cy_d, cy_e = preetham_chroma_y_coeffs(turbidity)
+    x_z, y_z = preetham_zenith_chromaticity(turbidity, theta_sun)
+
+    # 分母は輝度と同じ理由でperez_f(1, theta_sun)(天頂方向での評価)。これにより天頂方向
+    # (theta=0)を評価するとchroma_x==x_z・chroma_y==y_zに厳密に一致する(定義上そうあるべき値)
+    chroma_x = x_z * (perez_f(cos_theta, gamma, x_a, x_b, x_c, x_d, x_e)
+                       / perez_f(1.0, theta_sun, x_a, x_b, x_c, x_d, x_e))
+    chroma_y = y_z * (perez_f(cos_theta, gamma, cy_a, cy_b, cy_c, cy_d, cy_e)
+                       / perez_f(1.0, theta_sun, cy_a, cy_b, cy_c, cy_d, cy_e))
+
+    preetham_color = xyy_to_linear_srgb(chroma_x, chroma_y, preetham_relative)
+
+    if preetham_weight >= 1.0:
+        return preetham_color
+
+    return legacy_color() * (1.0 - preetham_weight) + preetham_color * preetham_weight
 
 
-def build_face_array(face, sun_dir, zenith_luminance, tint_set):
+def sky_color_upper(dirs, sun_dir, zenith_luminance, tint_set, turbidity):
+    # 水平線以上を仮定した空の色(呼び出し側でground_fadeと合成する)
+    return zenith_luminance * sky_color_upper_unit(dirs, sun_dir, tint_set, turbidity)
+
+
+def build_face_array(face, sun_dir, zenith_luminance, tint_set, turbidity):
     dirs = face_direction_grid(face)  # (FACE_SIZE, FACE_SIZE, 3)
     dir_y = dirs[..., 1]
 
-    upper_color = sky_color_upper(dirs, sun_dir, zenith_luminance, tint_set)
+    upper_color = sky_color_upper(dirs, sun_dir, zenith_luminance, tint_set, turbidity)
 
     # 水平線より下: プラトー色(GROUND_FADE_START_Yの高さに射影した方向の空色)から
     # 暗い接地色へフェード(地面の物理モデルは持たないアート的近似)
     plateau_dirs = dirs.copy()
     plateau_dirs[..., 1] = GROUND_FADE_START_Y
     plateau_dirs = plateau_dirs / np.linalg.norm(plateau_dirs, axis=-1, keepdims=True)
-    plateau_color = sky_color_upper(plateau_dirs, sun_dir, zenith_luminance, tint_set)
+    plateau_color = sky_color_upper(plateau_dirs, sun_dir, zenith_luminance, tint_set, turbidity)
 
     ground_color = zenith_luminance * tint_set["ground"]
     ground_t = np.clip((dir_y - GROUND_FADE_START_Y) / (GROUND_FADE_END_Y - GROUND_FADE_START_Y), 0.0, 1.0)
@@ -235,7 +385,7 @@ def build_face_array(face, sun_dir, zenith_luminance, tint_set):
     return rgba.astype(np.float16)
 
 
-def compute_zenith_scale(sun_dir, target_illuminance_lux, tint_set):
+def compute_zenith_scale(sun_dir, target_illuminance_lux, tint_set, turbidity):
     # 天頂輝度スケールを、上半球の余弦重み積分が目標照度に一致するよう正規化して求める。
     #
     # 照度E[lx]と輝度L[cd/m^2]は E = ∫L·cosθ dω の関係にあるので、SKY_ILLUMINANCE_LUXを
@@ -248,16 +398,17 @@ def compute_zenith_scale(sun_dir, target_illuminance_lux, tint_set):
     # 正規化すると常に目標値ちょうどになる。
     #
     # 補足: 「一様な空ならL=E/πなので従来はπ倍明るかった」という説明は誤り。積分には
-    # ティントの輝度成分(Rec.709)も入るため、単位球の積分はπ(3.14)には遠く及ばず、
+    # 実際に画面へ出る色のRec.709輝度成分も入るため、単位球の積分はπ(3.14)には遠く及ばず、
     # 正午での補正は数%〜十数%にすぎない。
     #
-    # KurenaiEngine3D.cpp の ComputeSkyZenithScale と同じ結果になること。
+    # KurenaiEngine3D.cpp から移った SkyIntegrate.hlsl の CSIntegrateSky と同じ結果になること。
     # 一方だけ変えると、オフラインで焼いたDDSと手続き空の明るさが食い違う
+    #
+    # 【P7】被積分関数は「sky_color_upper_unit(=SkyColorUpperUnit)の結果のRec.709輝度」。
+    # 以前は「Perez相対輝度 × ティントの輝度成分」だったが、Preethamで輝度(Y)と色度(x,y)が
+    # 分離したためこの形に変えた(Sky.hlsli SkyIntegrate.hlsl冒頭のP7コメントと同じ理由)
     theta_steps = 64
     phi_steps = 256
-
-    theta_sun = np.arccos(np.clip(sun_dir[1], -1.0, 1.0))
-    cos_theta_sun = max(np.cos(theta_sun), 1e-3)
 
     d_theta = (np.pi / 2.0) / theta_steps
     d_phi = (2.0 * np.pi) / phi_steps
@@ -268,26 +419,17 @@ def compute_zenith_scale(sun_dir, target_illuminance_lux, tint_set):
 
     cos_theta_raw = np.cos(theta)[:, None]
     sin_theta = np.sin(theta)[:, None]
-    # SkyGenerate.hlslと同じクランプ(水平線でPerezが発散するため)
-    cos_theta = np.clip(np.maximum(cos_theta_raw, np.cos(np.radians(89.5))), 1e-3, 1.0)
 
     dirs_x = sin_theta * np.cos(phi)[None, :]
     dirs_y = np.broadcast_to(cos_theta_raw, (theta_steps, phi_steps))
     dirs_z = sin_theta * np.sin(phi)[None, :]
-    cos_gamma = np.clip(dirs_x * sun_dir[0] + dirs_y * sun_dir[1] + dirs_z * sun_dir[2], -1.0, 1.0)
-    gamma = np.arccos(cos_gamma)
+    dirs = np.stack([dirs_x, dirs_y, dirs_z], axis=-1)  # (theta_steps, phi_steps, 3)
 
-    relative = perez_relative_luminance(cos_theta, gamma, cos_theta_sun, theta_sun)
-    relative = np.maximum(relative, 0.0)
-    relative = RELATIVE_LUMINANCE_FLOOR + (1.0 - RELATIVE_LUMINANCE_FLOOR) * relative
-
-    # 夕焼けの暖色が太陽の方位にだけ乗るようになったため、色味は天頂角だけの関数ではない。
-    # 照度は測光的な輝度で測るのでティントの輝度成分(Rec.709)を重みに掛ける
-    tint = sky_tint(np.broadcast_to(cos_theta, (theta_steps, phi_steps)), cos_gamma, tint_set)
-    tint_luminance = tint[..., 0] * 0.2126 + tint[..., 1] * 0.7152 + tint[..., 2] * 0.0722
+    unit_color = sky_color_upper_unit(dirs, sun_dir, tint_set, turbidity)
+    weight = unit_color[..., 0] * 0.2126 + unit_color[..., 1] * 0.7152 + unit_color[..., 2] * 0.0722
 
     # dω = sinθ dθ dφ、余弦重みは cosθ
-    integral = np.sum(relative * tint_luminance * cos_theta_raw * sin_theta) * d_theta * d_phi
+    integral = np.sum(weight * cos_theta_raw * sin_theta) * d_theta * d_phi
     if integral < 1e-6:
         return target_illuminance_lux
     return target_illuminance_lux / integral
@@ -298,9 +440,10 @@ def main():
 
     exposure = compute_exposure(DEFAULT_EV100)
     sun_dir = sun_direction(DEFAULT_TIME_OF_DAY_HOURS, DEFAULT_SUN_AZIMUTH_DEGREES)
+    turbidity = DEFAULT_TURBIDITY
     # 空の色味は太陽高度で決まる。生成と照度正規化の両方が同じセットを使う必要がある
     tint_set = compute_sky_tint(sun_dir[1])
-    zenith_luminance = compute_zenith_scale(sun_dir, SKY_ILLUMINANCE_LUX, tint_set) * exposure
+    zenith_luminance = compute_zenith_scale(sun_dir, SKY_ILLUMINANCE_LUX, tint_set, turbidity) * exposure
 
     DDSD_CAPS = 0x1
     DDSD_HEIGHT = 0x2
@@ -372,7 +515,7 @@ def main():
         f.write(header_dxt10)
         # D3Dキューブマップの面順: +X, -X, +Y, -Y, +Z, -Z
         for face in range(6):
-            arr = build_face_array(face, sun_dir, zenith_luminance, tint_set)
+            arr = build_face_array(face, sun_dir, zenith_luminance, tint_set, turbidity)
             f.write(arr.tobytes())
 
     print(f"wrote {OUT_PATH} ({FACE_SIZE}x{FACE_SIZE} x6 faces, R16G16B16A16_Float)")

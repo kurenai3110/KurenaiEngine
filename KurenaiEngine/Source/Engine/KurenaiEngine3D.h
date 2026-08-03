@@ -128,6 +128,12 @@ namespace Kurenai
         // (理由はRHI/IRHISamplerSet.h)
         void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
+        // 平面反射(P6)専用のレンダーターゲット2枚(m_PlanarReflectionColor/Depth)を、
+        // 反射解像度(レンダー解像度 × m_PlanarReflectionResolutionScale)で作り直す。
+        // メインのCreateRenderTargetsとは独立に呼べる(Legacy8bitフォールバックの対象外。
+        // このバッファは常にHDR固定フォーマットのため)。呼び出し箇所はCreateRenderTargetsと
+        // 同じ2か所(Initialize直後、Render()の解像度変更ハンドリング)
+        void CreatePlanarReflectionTargets();
         // このフレームでRT反射パスを実行するか。手法がRaytracedでも、高速化構造が無ければ
         // (非対応環境・シーン読み込み中の空シーン・構築失敗)撃つ相手がいないため実行しない。
         // 「パスを追加する条件」と「後段がその出力を読む条件」がずれると、
@@ -211,9 +217,18 @@ namespace Kurenai
         // レンダーターゲットの作り直しはGPUがそれらを参照していない状態で行う必要があるため、
         // ここでは要求を記録するだけにしてRender()の先頭でまとめて反映する
         void RequestRenderResolution(uint32_t width, uint32_t height);
+        // 平面反射(P6)の反射解像度の倍率変更を要求する(RenderingPanel = Renderスレッドから呼ばれる)。
+        // RequestRenderResolutionと同じ方式(要求を記録するだけにしてRender()の先頭でまとめて反映)
+        void RequestPlanarReflectionResolutionScale(float scale);
         // Renderスレッドがフレーム先頭で呼ぶ。保留中の切り替え要求の発注と、
         // 出来上がったシーンの取り込みを行う
         void UpdateSceneStreaming();
+        // .ksceneの更新時刻を見て、変わっていれば再読み込みを要求する(P16)。
+        // UpdateSceneStreamingの先頭から呼ぶ。m_SceneAutoReloadEnabledがfalseなら何もしない
+        void UpdateSceneHotReloadWatch();
+        // 現在のシーンの.ksceneの最終更新時刻。取得できなければ0を返す
+        // (ファイルが一時的に開けない、削除された等。0のときは何もしないのが正しい振る舞い)
+        uint64_t GetCurrentSceneFileWriteTime() const;
         // Loaderスレッドの本体。要求を待ち、旧シーンを破棄し、新シーンを読み込んで publish する
         void LoaderThreadMain();
         // Loaderスレッドで実行する読み込み本体。エンジンの状態は一切書き換えない。
@@ -483,20 +498,35 @@ namespace Kurenai
             ScreenSpace, // SSR(SSR.hlsl)。画面に映っているものだけが反射に映る
             Raytraced,   // RT反射(RTReflection.hlsl)。画面外も映るが、DX12かつDXR Tier 1.1が要る
         };
-        // レイトレーシングの可否から反射の既定の手法を決める。
-        // シーン読み込み(ApplyLoadedScene)とUIの「既定値に戻す」が同じ規則でなければ
-        // 「既定へ戻したのに起動直後と違う」ことになるため、規則をここ1か所に置く
+        // 「反射を出す」と決まったあとで、環境から**手法だけ**を選ぶ。出すかどうかはここでは決めない。
+        // 画面外も反射に映るRTが使えるなら常にそちら
+        static constexpr ReflectionMode ReflectionModeForCapability(bool raytracingAvailable)
+        {
+            return raytracingAvailable ? ReflectionMode::Raytraced : ReflectionMode::ScreenSpace;
+        }
+        // シーンが何も言っていないときの既定。「反射を出すか」をここで決める。
+        //
+        // 【この2つを1つの関数が兼ねていたために不具合になっていた】以前はこの関数が
+        // 「出すか」と「どの手法か」の両方を答えており、ApplyLoadedSceneが
+        // 「シーンが反射を要求している。ではどの手法か」を聞くのにも同じ関数を使っていた。
+        // Defaults::SSREnabledはfalse(SSRは画面端で反射が途切れる破綻が目立つため)なので、
+        // RTが使えない環境では**.ksceneがScreenSpaceReflection = trueと明示していても
+        // ReflectionMode::Offが返り、シーンの指定が握り潰されていた**。
+        // DX11でモン・サン=ミシェルの水面に何も映らない、White Furnace TestのSSR回帰テストが
+        // 実は動いていない、という形で現れていた(DX12はDXRが使えてRTが選ばれるため露見しなかった)
         static constexpr ReflectionMode DefaultReflectionMode(bool raytracingAvailable)
         {
-            // 画面外も反射に映るRTが使えるなら常にそちら。使えない環境でSSRへ落とすかは既定値で決める
-            return raytracingAvailable
-                ? ReflectionMode::Raytraced
-                : (Defaults::SSREnabled ? ReflectionMode::ScreenSpace : ReflectionMode::Off);
+            return Defaults::SSREnabled ? ReflectionModeForCapability(raytracingAvailable) : ReflectionMode::Off;
         }
         // 現在の手法。RaytracedはSupportsRaytracing()がtrueの環境でしか選べない
         // (UI側で選択不可にする)。ここの初期値はm_RaytracingAvailableが確定する前の値でしかなく、
         // 実際の既定はシーン読み込み時にDefaultReflectionModeで決め直される
         ReflectionMode m_ReflectionMode = DefaultReflectionMode(false);
+        // UIの「既定値に戻す」(右クリック)が戻る先。シーン読み込み時に決まった手法を控えておく。
+        // 【静的なDefaultReflectionModeを使ってはいけない】.ksceneが指定を持つ場合、
+        // 戻る先はエンジンの既定ではなく**そのシーンを読み込んだ直後の状態**である。
+        // ここを取り違えると「既定へ戻したらシーンが要求した反射が消える」ことになる
+        ReflectionMode m_SceneDefaultReflectionMode = DefaultReflectionMode(false);
         // レイトレーシング反射が使える環境か。デバイスのSupportsRaytracing()を初期化時に控えたもので、
         // UIの選択可否とシェーダー/パイプラインステートを作るかどうかの両方に使う
         // (RTReflection.hlslはRayQueryを含むためSM 6.5でしかコンパイルできず、
@@ -537,6 +567,32 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_RTShadowConstantBuffer;
         int32_t m_RTShadowSampleCount = Defaults::RTShadowSampleCount;
         float m_RTShadowSunAngularRadiusDegrees = Defaults::RTShadowSunAngularRadiusDegrees;
+
+        // --- 大気遠近(P8: height fog / aerial perspective) ---
+        // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
+        // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
+        // 冒頭のコメント参照。無効時(m_FogEnabled=falseまたはm_FogDensity<=0)はパス自体を
+        // 登録せず、GetActiveReflectionOutput()の結果がそのままTAA(またはTonemap)へ渡る
+        std::unique_ptr<RHI::IRHIShader> m_AerialPerspectiveVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_AerialPerspectivePixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_AerialPerspectivePipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_AerialPerspectiveTexture;
+        bool m_FogEnabled = Defaults::FogEnabled;
+        // 基準高度(m_FogRefHeight)での消散係数[1/m]。AerialPerspective.hlsl/PlanarReflection.hlslの
+        // FogParams0.xへ渡る
+        float m_FogDensity = Defaults::FogDensity;
+        // スケールハイト[m]。大きいほど霞が高くまで及ぶ(HeightFog.hlsli参照)
+        float m_FogScaleHeight = Defaults::FogScaleHeight;
+        // 基準高度[m](ワールドY)。既定は水面の高さに合わせている
+        float m_FogRefHeight = Defaults::FogRefHeight;
+        // 不透明度の上限(1.0で遠方が完全に空の色まで行く)
+        float m_FogMaxOpacity = Defaults::FogMaxOpacity;
+        // 水中項(P8)。Water.hlslのPSMainがメッシュ自身のBaseColorFactorの代わりにこの色を
+        // 出力Albedoに使う(見下ろした水面がFresnel最小でほぼ真っ黒になる問題への対処。
+        // 干潟の水の色はシーン側で調整したいパラメータであり、.kmodelを焼き直さずに変えられるようにするため)
+        DirectX::XMFLOAT3 m_WaterBodyColor{
+            Defaults::WaterBodyColorR, Defaults::WaterBodyColorG, Defaults::WaterBodyColorB
+        };
 
         // TAA(Temporal Anti-Aliasing)パス: SSRの後、露出/ブルーム/トーンマップの前に置く。
         // 毎フレーム投影行列を1ピクセル未満だけずらして(ジッター)サンプル位置を散らし、
@@ -827,6 +883,9 @@ namespace Kurenai
                                 // 1.5より大きいと長さ(=aoB)をグレースケール表示。
                                 // データを持たないマテリアルはマゼンタで塗る
             WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示(P2)
+            PlanarReflection,   // 平面反射パス(P6)の出力(m_PlanarReflectionColor)をトーンマッピングして表示
+            CloudNoiseSlice,    // 雲の3Dノイズ(P13a)の任意スライス。m_CloudNoiseDebugSlice/Detailで選ぶ
+            AtmosphereLUT,      // 大気散乱のLUT(P14a)。m_AtmosphereLUTDebugMultiで2枚を切り替える
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -835,6 +894,14 @@ namespace Kurenai
         // ポスタリゼーションが何段あるかを目視で確認できるようにする。
         // 色として表示するモード(Present.hlsl Mode 0/3/4)にのみ効く
         float m_DebugViewGain = Defaults::DebugViewGain;
+        // DebugView::CloudNoiseSlice で表示する3Dノイズのスライス位置(0〜1、W方向)と、
+        // 形状(128^3)とディテール(32^3)のどちらを見るか。タイル境界に継ぎ目が出ていないかを
+        // 目と数値の両方で確認するために用意してある(P13aの合格条件)
+        float m_CloudNoiseDebugSlice = 0.0f;
+        bool m_CloudNoiseDebugShowDetail = false;
+        // DebugView::AtmosphereLUT で表示するLUT
+        // (0=Transmittance、1=MultiScattering、2=SkyView)
+        int m_AtmosphereLUTDebugIndex = 0;
 
         // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
         // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
@@ -873,6 +940,11 @@ namespace Kurenai
         // 既定の手法はDefaultShadowModeが決める(反射のDefaultReflectionModeと同じ理由で1か所に置く)。
         // ここの初期値はm_RaytracingAvailableが確定する前の値でしかなく、
         // 実際の既定はシーン読み込み時に決め直される
+        // 【反射と違い「出すか」と「どの手法か」を分けていない】Defaults::ShadowEnabledがtrueで
+        // あるため、シーンがShadow = trueと書いたときにこの関数へ問い合わせても
+        // 手法の選択と同じ結果になり、いまは不具合にならない。ただし構造は反射で実際に踏んだ
+        // ものと同じ(DefaultReflectionModeのコメント参照)なので、Defaults::ShadowEnabledを
+        // falseにするなら反射と同じ形(ShadowModeForCapabilityへの分割)へ直すこと
         static constexpr ShadowMode DefaultShadowMode(bool raytracingAvailable)
         {
             if (!Defaults::ShadowEnabled)
@@ -928,6 +1000,25 @@ namespace Kurenai
         // [0, kIBLPrefilterMipLevels-1]のミップ番号へ線形マッピングする(DeferredLighting.hlsl参照)
         static constexpr uint32_t kIBLPrefilterMipLevels = 6;
         static constexpr uint32_t kIBLBRDFLUTSize = 128;
+        // ボリュメトリック雲の3Dノイズ(P13a)の1辺のテクセル数。
+        // Shapeは128^3のRGBA8で8MB、Detailは32^3のRGBA8で128KB。合わせて約8.1MB。
+        // Shapeを128にしているのは、雲1つが画面上で数百画素に広がるため塊の形にはこの程度の
+        // 解像度が要る一方、これ以上上げるとメモリが4倍(256^3で64MB)に跳ねるため。
+        // Detailは縁を削るだけで低周波成分を持たないので32で足りる
+        // 大気散乱のLUT(P14a/P14b、Hillaire 2020)。解像度は論文の推奨値。
+        // Transmittanceは高度×視線天頂角、MultiScatteringは高度×太陽天頂角で、
+        // どちらも大気パラメータだけで決まるためカメラにも時刻にも依存しない。
+        // SkyViewは空そのもの(太陽の子午線からの方位×天頂角)で、太陽が動くと変わる。
+        // **kSkyViewLUTWidth/Heightはシェーダ側(AtmosphereCommon.hlsliの
+        // kSkyViewLUTWidthF/kSkyViewLUTHeightF)と一致させること** — UVの半テクセル補正に
+        // 解像度が要るため、焼く側・引く側の両方が同じ値を知っている必要がある
+        static constexpr uint32_t kTransmittanceLUTWidth = 256;
+        static constexpr uint32_t kTransmittanceLUTHeight = 64;
+        static constexpr uint32_t kMultiScatteringLUTSize = 32;
+        static constexpr uint32_t kSkyViewLUTWidth = 192;
+        static constexpr uint32_t kSkyViewLUTHeight = 108;
+        static constexpr uint32_t kCloudShapeNoiseSize = 128;
+        static constexpr uint32_t kCloudDetailNoiseSize = 32;
         // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
         // オフラインで焼いたDDS(Sky.dds)と違い、太陽が動くと空の輝度分布の「形」も追従する
         // (circumsolarの明るい領域が太陽と一緒に動く)。詳細はSkyGenerate.hlsl冒頭。
@@ -952,9 +1043,44 @@ namespace Kurenai
         // 最後に焼いたときの実効プリ露出。空はプリ露出済みの値で焼かれるため、
         // 露出が動いたときも焼き直さないと空だけ古い露出のまま取り残される
         float m_LastBakedExposureEV100 = 0.0f;
+        // 最後に焼いたときのタービディティ(P7)。m_SkyTurbidityが動いたときも、Preethamの
+        // xyYモデルの形自体が変わるため焼き直しが要る(exposureMovedと同じ形の判定。Render()参照)
+        float m_LastBakedTurbidity = 0.0f;
+        // 最後に焼いたときの空の彩度。タービディティと同じ理由で、動いたら焼き直す
+        float m_LastBakedSkySaturation = 0.0f;
         // 焼き直しの角度閾値(度)。Auto Advance既定(1h/s)では太陽は15度/秒動くので、
         // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
         float m_SkyBakeAngleThresholdDegrees = 1.0f;
+
+        // 背景(深度が書かれていない画素)をキューブマップのサンプルではなく、Sky.hlsliの
+        // SkyColorを画面解像度で直接評価するか(P3)。キューブマップは256px/面しかなく
+        // 3840px・水平画角68度のカメラでは約20倍に拡大表示されるため、既定で有効にしてある。
+        // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらずキューブマップを使う
+        // (DeferredLighting.hlslへ渡すSkyParams.yはActiveSkyTexture()の結果とのANDで決める)
+        bool m_SkyAnalyticBackground = Defaults::SkyAnalyticBackground;
+
+        // 空パラメータ(ティント4本+照度正規化済みの天頂輝度)をGPU側で計算するコンピュートシェーダー
+        // (P9: SkyIntegrate.hlsl)。以前はCPU(ComputeSkyTint/ComputeSkyZenithScale)とHLSL
+        // (Sky.hlsli)に同じ式が二重実装されていたが、GPU側へ一本化しCPUミラーを廃止した。
+        // 結果はm_SkyParametersBuffer(SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む)へ書く
+        std::unique_ptr<RHI::IRHIShader> m_SkyIntegrateComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SkyIntegratePipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_SkyIntegrateConstantBuffer;
+        // SkyIntegrate.hlslが書き、SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む
+        // 要素数1のStructuredRWバッファ(Sky.hlsliのGPUSkyParametersと一致させること)。
+        // 【なぜ毎フレーム作り直さないのか】ベイク時の値をそのまま使うことで、背景とキューブマップ
+        // (IBL・反射)が常に同一の空パラメータを見る。毎フレーム作り直すと、太陽の角度閾値で
+        // ベイクを間引いている間だけ背景とIBLの空がずれてしまう。加えて積分はθ64×φ256=16,384
+        // サンプルなので、背景評価のためだけに毎フレーム走らせるのは無駄が大きい
+        std::unique_ptr<RHI::IRHIBuffer> m_SkyParametersBuffer;
+        // m_SkyParametersBufferへSkyIntegrateパスが一度でも書き込んだかどうか。手続き空を使わない
+        // シーン(.ksceneのDDSスカイボックス使用時)ではbakeSkyThisFrameが常にfalseになりSkyIntegrate
+        // パスも通常は走らないため、このフラグがfalseの間だけRender()がskyIntegrateThisFrameを
+        // trueにして1回だけ強制的に走らせ、未初期化のまま読まれることを防ぐ。
+        // 【なぜCPU側からのUpdateBufferでゼロ埋めしないのか】DX12のStructuredRWバッファは
+        // GPU専用(UAV/SRV)のDEFAULTヒープに確保しておりCPUから書き込む経路を持たないため、
+        // UpdateBufferを呼ぶとクラッシュする(m_SkyParametersBuffer作成箇所のコメント参照)
+        bool m_SkyParametersBufferInitialized = false;
 
         bool m_IBLBaked = false;
         // BRDF積分LUTを焼き終えたか(m_IBLBakedとは別管理)。このLUTは(NdotV, ラフネス)の
@@ -978,6 +1104,48 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTPipelineState;
         std::unique_ptr<RHI::IRHIShader> m_BRDFLUTCombineComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTCombinePipelineState;
+
+        // --- ボリュメトリック雲の3Dノイズ(P13a) ---
+        //
+        // 雲の形状ノイズ。カメラにも太陽にも空の状態にも一切依存しない純粋な手続き生成なので、
+        // BRDF積分LUTとまったく同じ理由で起動後に一度だけ焼き、二度と焼き直さない
+        // (m_CloudNoiseBaked)。生成の中身はShaders/3D/CloudNoiseGenerate.hlsl。
+        //
+        // 【なぜ2枚に分けるか】Shapeは雲の大まかな塊、Detailはその縁を削る高周波成分で、
+        // 必要な解像度が2桁違う。1枚にまとめると細かい側に合わせた巨大なテクスチャが要る
+        std::unique_ptr<RHI::IRHITexture> m_CloudShapeNoiseTexture;
+        std::unique_ptr<RHI::IRHITexture> m_CloudDetailNoiseTexture;
+        std::unique_ptr<RHI::IRHIShader> m_CloudShapeNoiseComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_CloudShapeNoisePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_CloudDetailNoiseComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_CloudDetailNoisePipelineState;
+        bool m_CloudNoiseBaked = false;
+
+        // --- 大気散乱のLUT(P14a/P14b: Hillaire 2020) ---
+        //
+        // TransmittanceとMultiScatteringは大気パラメータ(AtmosphereLUT.hlsl冒頭の定数と、
+        // 実行時に動かせる濁り)だけで決まり、カメラにも太陽にも時刻にも依存しない。
+        // そのためBRDF積分LUT・雲の3Dノイズとほぼ同じ「一度だけ焼く」作法に乗せ、
+        // 濁りが変わったときだけ焼き直す(m_AtmosphereLUTBakedTurbidity)。
+        //
+        // SkyViewは空そのもので太陽の位置に依存するため毎フレーム焼く。
+        // 192x108テクセル×(視線32段 + 天頂32段)なので、負荷は実質的に無い。
+        // **このLUTを読むパス(SkyIntegrate/SkyGenerate/Lighting/SSR/AerialPerspective/
+        // PlanarReflection)より前に実行される必要がある**が、順序はレンダーグラフが
+        // Reads/Writesの依存から自動で決めるので、パスの登録順に依存しない
+        std::unique_ptr<RHI::IRHITexture> m_TransmittanceLUT;
+        std::unique_ptr<RHI::IRHITexture> m_MultiScatteringLUT;
+        std::unique_ptr<RHI::IRHITexture> m_SkyViewLUT;
+        std::unique_ptr<RHI::IRHIBuffer> m_AtmosphereConstantBuffer;
+        std::unique_ptr<RHI::IRHIShader> m_TransmittanceComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_TransmittancePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_MultiScatteringComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MultiScatteringPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_SkyViewComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SkyViewPipelineState;
+        // Transmittance/MultiScatteringを焼いたときの濁り。負の値は「まだ一度も焼いていない」。
+        // 濁りが変わるとエアロゾルの量が変わるので、この2枚も焼き直す必要がある
+        float m_AtmosphereLUTBakedTurbidity = -1.0f;
         std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
@@ -1361,10 +1529,117 @@ namespace Kurenai
         float m_WaterWaveScale = Defaults::WaterWaveScale;
         float m_WaterWaveSpeed = Defaults::WaterWaveSpeed;
         float m_WaterWaveStrength = Defaults::WaterWaveStrength;
+        // 水面の反射に解析空フォールバックを使うか(P4: SSRの水面分岐)。SSRレイが画面外へ抜けた・
+        // 最大距離まで判定がつかなかった水面画素で、プリフィルタ済み鏡面IBL(128pxベースの
+        // キューブマップをラフネス由来のミップで引くため広い水面ではにじむ)の代わりに
+        // Sky.hlsliのSkyColorを画面解像度で直接評価する(SSR.hlslのPSMain参照)。
+        // 効果が出るのはm_ReflectionMode==ScreenSpaceのときだけで、かつ手続き空が無効な
+        // シーンでは常に無効化される(SSRパスのExecute内、usingProceduralSkyとのAND判定)
+        bool m_WaterAnalyticSkyReflection = Defaults::WaterAnalyticSkyReflection;
+
+        // --- 平面反射(P6) ---
+        // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断の詳細は
+        // Shaders/3D/PlanarReflection.hlsl冒頭のコメントを参照。反射解像度はレンダー解像度に
+        // m_PlanarReflectionResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う
+        std::unique_ptr<RHI::IRHITexture> m_PlanarReflectionColor;
+        std::unique_ptr<RHI::IRHITexture> m_PlanarReflectionDepth;
+        std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_PlanarReflectionPipelineState;
+        // 鏡映カメラで描くとワインディングが全反転するため、m_GBufferPipelineStateMirroredと同じ
+        // 仕組み(FrontCounterClockwiseの反転)で吸収する。ただし選択条件はinstance.IsMirroredの
+        // 否定になる(Render()側のExecute内のbindPipelineStateラムダ参照)
+        std::unique_ptr<RHI::IRHIPipelineState> m_PlanarReflectionPipelineStateMirrored;
+        // captureProbeFaceと同じ役割の専用FrameConstants(共有のm_FrameConstantBufferとは別インスタンス)。
+        // ViewProj/CameraPosition/PlanarReflectionPlaneだけをこのパス用に差し替える
+        std::unique_ptr<RHI::IRHIBuffer> m_PlanarReflectionConstantBuffer;
+        bool m_PlanarReflectionEnabled = Defaults::PlanarReflectionEnabled;
+        // 反射解像度の倍率(レンダー解像度に対する比)。EngineDefaults.hのコメント参照
+        float m_PlanarReflectionResolutionScale = Defaults::PlanarReflectionResolutionScale;
+        // 波の法線による画面UVのずらし量(SSR.hlslが読む)
+        float m_PlanarReflectionDistortion = Defaults::PlanarReflectionDistortion;
+        // 「システム」パネルのm_PendingRenderWidth/Height・m_RenderResolutionDirtyとまったく同じ方式
+        // (要求を記録するだけにしてRender()の先頭でまとめて反映する。理由はCreateRenderTargets/
+        // RequestRenderResolutionのコメント参照。GPUがまだ参照しているテクスチャを
+        // 即座には破棄できないため)
+        float m_PendingPlanarReflectionResolutionScale = Defaults::PlanarReflectionResolutionScale;
+        bool m_PlanarReflectionResolutionDirty = false;
+        // CreatePlanarReflectionTargetsが確保した反射解像度の実値(幅・高さ)。デバッグ表示
+        // (Present.hlslのレターボックス計算)が実寸を必要とするため保持しておく
+        uint32_t m_PlanarReflectionWidth = 0;
+        uint32_t m_PlanarReflectionHeight = 0;
+        // 複数の水面インスタンスが異なる高さで見つかったことを検出した最初のフレームだけ
+        // 警告ログを出すためのフラグ(m_LightTileOverflowLoggedと同じ作法)。平面反射は
+        // 「水面は単一の水平な平面である」という前提に立っており、複数ある場合は最初のものだけを使う
+        bool m_PlanarReflectionMultipleWaterLogged = false;
+
+        // --- 雲(P5) ---
+        // このフェーズでは積雲1層のみ(計画にある巻雲の多層化はP5の対象外)。
+        // 無効時はFrameConstants.CloudParams0.xへ被覆率0を渡し、Sky.hlsli側の早期脱出
+        // (SkyColor)を通す。CloudCoverageスライダー自体は動かせるが効果が出ない状態になる
+        bool m_CloudEnabled = Defaults::CloudEnabled;
+        // 被覆率。0.45は写真の見た目に寄せて選んだ値であり、物理的な導出ではない
+        // (実測で調整可能。EngineDefaults.h参照)
+        float m_CloudCoverage = Defaults::CloudCoverage;
+        // 雲底の高度[m](カメラのワールドY基準。Sky.hlsli EvaluateCloudLayerが視線との交点を
+        // 求めるのに使う)
+        float m_CloudAltitude = Defaults::CloudAltitude;
+        float m_CloudUvScale = Defaults::CloudUvScale;
+        float m_CloudDensity = Defaults::CloudDensity;
+        // 風速[m/s]。実世界の速度としてUIで直感的に扱えるようにしてあり、ノイズ空間の移動量への
+        // 換算(CloudUvScaleを掛ける)はRenderThreadMainのm_CloudScrollOffset更新側で行う
+        float m_CloudWindSpeed = Defaults::CloudWindSpeed;
+        // 風向き(度)。太陽方位角(m_SunAzimuthDegrees)と同じ規約(X軸0度、Z軸(+方向)90度)
+        float m_CloudWindDirectionDegrees = Defaults::CloudWindDirectionDegrees;
+        float m_CloudForwardG = Defaults::CloudForwardG;
+        // 積雲をボリューム(スラブのレイマーチ)として描くか(P13b)。falseで従来の平面へ戻る。
+        // シェーダー側へはCloudParams1.wの厚みを0にすることで伝える(専用のフラグは持たない)
+        bool m_CloudVolumetric = Defaults::CloudVolumetric;
+        // 雲底から雲頂までの厚み[m](P13b)。EngineDefaults::CloudThicknessのコメント参照
+        float m_CloudThickness = Defaults::CloudThickness;
+        // trueにすると雲のスクロールが止まる(m_WaterTimeFrozenの雲版。A/B比較などスクロールが
+        // 揺れると困る場面で使う)
+        bool m_CloudTimeFrozen = Defaults::CloudTimeFrozen;
+        // 風によるノイズ空間の移動量。m_WaterScrollOffsetと同じくUIつまみではなく内部状態で、
+        // RenderThreadMainがSky.hlsliのkCloudNoisePeriodと同じ周期でstd::fmodしながら進める
+        DirectX::XMFLOAT2 m_CloudScrollOffset{ 0.0f, 0.0f };
+        // 判断B(被覆率による平均透過率をIBLキューブのベイク時にだけ掛ける)のキャッシュ。
+        // bakeSkyThisFrameブロックで確定させ、ベイクとFrameConstantsが同じタイミングの
+        // 値を見るようにする(P9でGPU側へ移ったm_SkyParametersBufferと同じ更新タイミング)。
+        // P11で巻雲(m_CirrusCoverage)を加味した2層の積になるよう拡張した
+        // (ComputeCloudAverageTransmittance参照)
+        float m_ActiveCloudTransmittance = 1.0f;
+
+        // --- 巻雲(P11: 高層のレイヤーを2層目として追加し雲を多層化する) ---
+        // m_CloudEnabled=falseのときと同じく、無効時はFrameConstants.CloudParams2.xへ
+        // 被覆率0を渡し、Sky.hlsli側の早期脱出(SkyColor、判断C)を通す
+        bool m_CirrusEnabled = Defaults::CirrusEnabled;
+        float m_CirrusCoverage = Defaults::CirrusCoverage;
+        float m_CirrusAltitude = Defaults::CirrusAltitude;
+        float m_CirrusUvScale = Defaults::CirrusUvScale;
+        float m_CirrusDensity = Defaults::CirrusDensity;
+        // 風速[m/s]。風向はm_CloudWindDirectionDegreesを積雲と共有する(同じ風系という前提)
+        float m_CirrusWindSpeed = Defaults::CirrusWindSpeed;
+        // fBmのUV(U方向)を伸ばして筋状にする倍率
+        float m_CirrusAnisotropy = Defaults::CirrusAnisotropy;
+        // 風によるノイズ空間の移動量(巻雲側)。m_CloudScrollOffsetとまったく同じ形で
+        // RenderThreadMainがkCloudNoisePeriodの周期でstd::fmodしながら進める。
+        // 凍結トグルはm_CloudTimeFrozenを共有する(片方にしか効かないとA/B比較の対照が
+        // 崩れるため。RenderThreadMainのスクロール更新箇所を参照)
+        DirectX::XMFLOAT2 m_CirrusScrollOffset{ 0.0f, 0.0f };
 
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)
         float m_SunAzimuthDegrees = Defaults::SunAzimuthDegrees;
+
+        // 大気の濁り具合(P7: Preetham xyYモデルのタービディティ)。値が大きいほど地平線が白く
+        // 霞み、天頂の青が薄くなる。定義域はおおむね1.7〜10(EngineDefaults.h::SkyTurbidity参照)。
+        // 変更すると空の焼き直しが必要(Render()のturbidityMoved判定参照)
+        float m_SkyTurbidity = Defaults::SkyTurbidity;
+        // 空の彩度(アート指定)。既定1.0=Preethamそのまま。詳細はEngineDefaults::SkySaturation。
+        // .ksceneの[Scene]SkySaturationで初期化され、以降はUIで上書きできる
+        // (m_ReflectionModeがScene.SSREnabledから初期化されるのと同じ設計)
+        float m_SkySaturation = Defaults::SkySaturation;
 
         // 月の位置。**時刻には連動せず、ここで指定した固定位置に居続ける**。
         // 実際の月は太陽とは独立した周期(朔望月)で動くので、反太陽方向に固定するのは
@@ -1488,6 +1763,30 @@ namespace Kurenai
         // 多重発注を防ぐために見る
         bool m_SceneLoadInFlight = false;
 
+        // --- .ksceneのホットリロード(P16) -----------------------------------------------------
+        //
+        // 起動し直さずに.ksceneの変更を絵へ出すための仕組み。読み込み自体は上の非同期経路を
+        // そのまま使い(「今のシーンをもう一度読む」だけ)、ここが持つのは「いつ発注するか」だけ。
+        //
+        // 【監視するのは実行ファイルの隣のファイル】エンジンが読むのは<exe>\Assets\Scenes\*.ksceneで、
+        // リポジトリのScenes\*.ksceneからはKurenaiPacker --scene → Assets\Packed → xcopy の
+        // 2ホップで届く。エンジンは自分が実際に読んだファイル(m_SceneFilePaths)だけを見る
+
+        // 自動監視の有効/無効。**既定はオフ**。A/B比較の最中に勝手に再読み込みが走ると
+        // 「同一条件で2回撮る」対照が壊れるため、明示的に入れてもらう
+        bool m_SceneAutoReloadEnabled = false;
+        // リロード時に現在のカメラを保持するか。オフ(既定)ならファイルの[Camera]を適用する。
+        // [Camera]を詰めるときと、飛び回りながら空・水面・露出を詰めるときで要求が逆になる
+        bool m_SceneReloadKeepsCamera = false;
+        // 監視中の.ksceneの更新時刻(FILETIMEを64bitへ詰めたもの)。0は「まだ取得していない」
+        uint64_t m_WatchedSceneWriteTime = 0;
+        // 検証に失敗した更新時刻。同じ内容で警告ログを繰り返さないために覚えておく
+        uint64_t m_SceneReloadRejectedWriteTime = 0;
+        // 次に更新時刻を見る時刻。毎フレーム見る必要は無いので250msに1回へ間引く。
+        // Render()のフレーム時間ではなく自前のsteady_clockで測るのは、この関数が
+        // フレーム時間の更新より前に呼ばれる位置にあり、呼び出し順への依存を作らないため
+        std::chrono::steady_clock::time_point m_NextSceneWatchTime{};
+
         // Render → Loader の要求。-1は「要求なし」
         std::mutex m_LoadRequestMutex;
         std::condition_variable m_LoadRequestCV;
@@ -1506,6 +1805,9 @@ namespace Kurenai
         // 毎フレームのロックを避けるため、まずatomicで有無を判定してから中身を取りにいく
         std::atomic<bool> m_AppliedScenePending{ false };
         std::mutex m_AppliedSceneMutex;
+        // カメラを適用するか(P16)。ホットリロードで「現在のカメラを保持する」を選んでいるときだけ
+        // falseになる。falseでもウィンドウタイトルの更新は行うため、引き渡し自体は毎回発生する
+        bool m_AppliedSceneApplyCamera = true;
         Core::Camera m_AppliedSceneCamera;
         std::wstring m_AppliedSceneTitle;
 

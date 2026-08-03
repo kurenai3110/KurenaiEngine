@@ -109,6 +109,33 @@ namespace Kurenai::UI
             m_Engine.m_IBLBaked = false;
             m_Engine.m_IBLIrradianceBaked = false;
         }
+        // タービディティ(P7: Preetham xyYモデルの大気の濁り具合)。変更時にm_SkyBakeDirtyを
+        // 直接ここで立てず、Render()側のturbidityMoved判定(exposureMovedと同じ形)に任せる
+        SliderFloatEx(
+            "タービディティ###SkyTurbidity", &m_Engine.m_SkyTurbidity, 1.7f, 10.0f, Defaults::SkyTurbidity, "%.2f",
+            0,
+            "Preethamモデルの大気の濁り具合。値が大きいほど地平線が白く霞み、天頂の青が薄くなる。"
+            "1.7が最も澄んだ空、10が霞んだ空に近い");
+        // 空の彩度(アート指定)。タービディティと同じくPreethamの色度を動かすため、
+        // Render()側のsaturationMoved判定でベイクが焼き直される
+        SliderFloatEx(
+            "空の彩度###SkySaturation", &m_Engine.m_SkySaturation, 0.0f, 2.0f, Defaults::SkySaturation, "%.2f",
+            0,
+            "物理量ではないアート指定。1.0でPreethamの色度そのまま、上げるほど空が鮮やかになる"
+            "(色度図上で白色点から遠ざける倍率なので色相は変わらない)。"
+            "実測した参考写真の空はPreethamがどのタービディティでも出せない深さ(B/R=4.84)にあり、"
+            "その差を埋めるためのつまみ。2.0を超えると色域外へ出て赤成分が潰れる");
+        // 背景の解析評価(P3)。キューブマップの中身(SkyGenerateのベイク結果)には一切影響しない
+        // 表示の切り替えでしかないため、上の「手続き空」トグルと違ってm_SkyBakeDirty等の
+        // ベイク用フラグは立てない
+        CheckboxEx(
+            "空の背景を解析評価する###AnalyticSkyBackground", &m_Engine.m_SkyAnalyticBackground,
+            Defaults::SkyAnalyticBackground,
+            "背景(深度が無い画素)をキューブマップのサンプルではなく、Perez分布を画面解像度で"
+            "直接評価して描く。キューブマップは256px/面しかなく背景としては拡大表示されるため、"
+            "こちらのほうが空の輪郭がシャープになる。IBL(反射プローブ・拡散イラディアンス)は"
+            "常にキューブマップのままで、この設定の影響を受けない。手続き空が無効なときは、"
+            "この設定に関わらず常にキューブマップが使われる");
         SliderFloatEx(
             "EV100###SceneExposure", &m_Engine.m_SceneExposureEV100, -8.0f, 20.0f, Defaults::SceneExposureEV100, "%.2f",
             0,

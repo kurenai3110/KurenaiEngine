@@ -3,6 +3,13 @@
 // 括り出してある(P2: 水面マテリアル基盤)
 #include "GBufferCommon.hlsli"
 
+// bent normal(接空間で焼かれている。遮蔽マップと同じライトマップUV空間、34章)。
+// t0〜t3・t5はGBufferCommon.hlsliのマテリアルテクスチャが使用中、t4はTransparent.hlsl/
+// ProbeCapture.hlslがカスケードシャドウマップ配列に使っているためt6。
+// **Water.hlslはこのテクスチャを読まない**(水面はbent normalを焼いていない)ため、
+// 水面法線マップはt7に置いてある
+Texture2D BentNormalTexture : register(t6);
+
 PSOutput PSMain(PSInput input)
 {
     // baseColor = baseColorTexture * baseColorFactor(glTF仕様)。BaseColorTextureIndexが

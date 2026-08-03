@@ -8,17 +8,19 @@
 //   s0        MaterialSampler   タイリングするマテリアルテクスチャ、キューブマップ、スプライト
 //   s1        ColorSampler      色バッファ(SceneColor / AO / Present)、BRDF積分LUT
 //   s2        DataSampler       補間してはいけないデータ(深度、エンコード法線、metallic/roughness、シャドウマップ)
+//   s3        VolumeSampler     ワールド空間でタイリングするボリュームテクスチャ(3Dノイズ)
 //
 // エンジンが用意しているセット(KurenaiEngine3D::CreateSamplerSetsの2つ):
 //
-//   セット                s0 MaterialSampler        s1 ColorSampler   s2 DataSampler
-//   MaterialSamplers      Anisotropic 16x + Wrap    Linear + Clamp    Point + Clamp
-//   ScreenSpaceSamplers   Linear + Clamp            Linear + Clamp    Point + Clamp
+//   セット                s0 MaterialSampler        s1 ColorSampler   s2 DataSampler   s3 VolumeSampler
+//   MaterialSamplers      Anisotropic 16x + Wrap    Linear + Clamp    Point + Clamp    Linear + Wrap
+//   ScreenSpaceSamplers   Linear + Clamp            Linear + Clamp    Point + Clamp    Linear + Wrap
 //
 // MaterialSamplersはG-Buffer・半透明フォワード・スプライト・IBL畳み込みが、
 // ScreenSpaceSamplersはそれ以外のフルスクリーンパスが使う。
 // s0の実体がセットで異なるのが要点で、スクリーン空間パスにはWrapのサンプラーが1つもバインドされない
-// (=画面端でUVが反対側へ回り込む不具合が構造的に起きない)。
+// (=画面端でUVが反対側へ回り込む不具合が構造的に起きない)。**s3だけはこの原則の例外**で、
+// 両方のセットにWrapが入る。理由と安全性の根拠は下のVolumeSamplerの宣言に書いてある。
 //
 // なぜサンプラーを1個ずつ差し替えるのではなくセット単位なのか、という設計理由は
 // Source/Library/RHI/IRHISamplerSet.h に書いてある(DX12のディスクリプタヒープ上書き問題)。
@@ -53,5 +55,23 @@ SamplerState ColorSampler : register(s1);
 // アドレスモードがClampなのは、PCFのタップが[0,1]をはみ出したときに
 // シャドウマップの反対側の端を読んでカスケード境界へ偽の影・光漏れを作らないため
 SamplerState DataSampler : register(s2);
+
+// ワールド空間でタイリングするボリュームテクスチャ(3Dノイズ)用。Linear + Wrap。
+//
+// 【なぜスクリーン空間のセットにもWrapを入れてよいのか】上の役割表のとおり、この宣言は
+// 「スクリーン空間パスにはWrapを1つも置かない」という原則の唯一の例外である。原則が防いでいたのは
+// 「画面UV(0〜1が画面の端)をWrapで引いて反対側の端へ回り込む」不具合だが、このサンプラーで引くのは
+// 画面UVではなく**ワールド空間の3D座標から作ったUVW**であり、そもそも回り込む「反対側の画面端」が
+// 存在しない。役割で分ける方式を採っている以上、役割そのものが違えば同じセットに同居してよい。
+//
+// 【なぜWrapでなければならないのか】ボリュームノイズは有限のテクスチャを無限にタイリングして
+// 使う。Clampで引くと周期の境界でトライリニア補間のタップが端のテクセルに張り付き、
+// 一定間隔で継ぎ目が出る。**シェーダー側でfrac(uvw)してもこの継ぎ目は消せない** ——
+// u=0.999のテクセルは本来u=0.0のテクセルと補間されるべきだが、Clampでは端のテクセルと
+// 補間されてしまい、補間そのものがテクスチャの端を跨げないため。
+//
+// 異方性フィルタではなくLinearなのは、ボリュームをレイマーチで等方的に刻んで引くため
+// 画面空間の勾配に沿った異方性が意味を持たないから(かつ3Dの異方性フィルタは高価)
+SamplerState VolumeSampler : register(s3);
 
 #endif // KURENAI_SAMPLERS_HLSLI

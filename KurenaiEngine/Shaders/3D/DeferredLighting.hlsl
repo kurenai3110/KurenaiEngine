@@ -8,6 +8,19 @@
 #include "NormalEncoding.hlsli"
 // スペキュラのマルチスキャッタリング・エネルギー補正(14.9節)
 #include "SpecularEnergy.hlsli"
+// 空モデル(Perez分布)の共有ヘッダー(P3)。背景画素をSkyGenerate.hlslのキューブマップと
+// 同じ関数・同じパラメータで画面解像度評価するために使う。PIを定義しないため、
+// このファイルのPI定義(直後)より前でも後でもインクルード順は問題ない
+// ボリュメトリック積雲(P13b)が引く3Dノイズのレジスタ。Sky.hlsliはcbufferにもレジスタにも
+// 依存しない方針なので、DDGI.hlsliと同じくインクルードする側がマクロで指定する。
+// 定義しないシェーダー(SkyGenerate/AerialPerspective/PlanarReflection)ではボリュームの
+// 経路がコンパイルされず、従来の平面の経路だけが残る
+// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
+#define KURENAI_SKYVIEW_REGISTER t20
+#define KURENAI_CLOUD_SHAPE_REGISTER t18
+#define KURENAI_CLOUD_DETAIL_REGISTER t19
+#include "Sky.hlsli"
 
 static const float PI = 3.14159265359f;
 
@@ -78,9 +91,54 @@ cbuffer FrameConstants : register(b0)
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
     // bent normalによる遮蔽(34章)。x=ディフューズAOの出所、y=スペキュラ遮蔽の方式、
-    // z=multi-bounce AO、w=未使用。cbufferは宣言順レイアウトなので、
-    // 使わないシェーダーは末尾のこのフィールドを宣言しなくてよい
+    // z=multi-bounce AO、w=未使用。
+    // 【この位置を動かさないこと】C++側のFrameConstantsではDDGIParams4の直後に置いてある。
+    // cbufferは宣言順レイアウトなので、以降のフィールドのオフセットがすべてずれる
     float4 OcclusionParams;
+    // 水面(P2)用。このシェーダでは未使用だが、C++側でSkySunDirection等より手前に置かれているため
+    // オフセット合わせのためだけに宣言する
+    float4 TimeParams;
+    // 空の解析評価用(P3、末尾に追加)。背景(深度が無い画素)を、キューブマップのサンプルではなく
+    // Sky.hlsliのSkyColorを画面解像度で直接評価するために使う。キューブマップは256px/面・
+    // ミップ無しで、3840px・水平画角68度のカメラでは約20倍に拡大表示されるため、画面解像度で
+    // 評価したほうが背景の輪郭がシャープになる(IBLは畳み込むため低解像度のままで正しい)。
+    // 値はSkyGenerate.hlslが焼くキューブマップに使ったものと同一
+    // (m_SkyParametersBuffer参照。ティント・天頂輝度はP9でこのcbufferから
+    // StructuredBuffer<GPUSkyParameters>(t17)へ移った)。
+    // xyz=太陽が「ある」向き(未正規化のまま渡ってくる。PSMain側でnormalizeする。
+    // SkyGenerate.hlsl側の慣習=呼び出し側でnormalizeする、に合わせてある)、w=未使用
+    float4 SkySunDirection;
+    // x=未使用(P9で天頂輝度はSkyParametersBufferへ移動)、y=背景を解析評価するかのフラグ
+    // (1=解析、0=キューブマップをサンプル。手続き空が無効なときは常に0)、
+    // z=太陽照度/空照度比(SunToSkyIlluminanceRatio。MakeSkyParametersが読み、
+    // Sky.hlsliのEvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う)、w=未使用
+    float4 SkyParams;
+    // 雲(P5、さらに末尾に追加)。SSR.hlslの同名フィールドと完全に同じ順・同じ型であること
+    // (C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams0/1 と揃える。ずれると
+    // 背景に見える雲と水面に映る雲が食い違う)。
+    // CloudParams0: x=被覆率(0で雲なし。Sky.hlsliのSkyColorが早期脱出する)、
+    //               y=雲底の高度[m](カメラ基準)、z=UVスケール[ノイズ空間/m]、w=消散係数
+    float4 CloudParams0;
+    // CloudParams1: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
+    //               同じ周期でwrap済み)、z=Henyey-Greensteinの非対称パラメータ、w=未使用
+    float4 CloudParams1;
+    // 巻雲(P11、さらに末尾に追加)。SSR.hlsl/PlanarReflection.hlslの同名フィールドと完全に
+    // 同じ順・同じ型であること(C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams2/3 と揃える)。
+    // CloudParams2: x=巻雲の被覆率(0で巻雲なし)、y=雲底の高度[m](カメラ基準)、
+    //               z=UVスケール[ノイズ空間/m]、w=消散係数
+    float4 CloudParams2;
+    // CloudParams3: xy=風によるノイズ空間の移動量(積雲と同じくkCloudNoisePeriodでwrap済み)、
+    //               z=fBmのUV(U方向)を伸ばす異方性スケール、w=未使用
+    float4 CloudParams3;
+    // 平面反射(P6)。このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    float4 PlanarReflectionPlane;
+    // 大気遠近(P8、末尾に追加)。このシェーダでは未使用だが、C++側 KurenaiEngine3D.cpp の
+    // FrameConstantsと並びを一致させる目的だけで宣言する
+    // (AerialPerspective.hlsl/PlanarReflection.hlslが読む)
+    float4 FogParams0;
+    float4 FogParams1;
+    // 水中項(P8)。このシェーダでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
+    float4 WaterBodyColor;
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -96,12 +154,15 @@ Texture2D EmissiveTexture : register(t6);
 // 鏡面の反射方向)を求めるのに必要
 Texture2D NormalTexture : register(t7);
 // bent normal(GBuffer.hlslがSV_TARGET5へ書いたワールド空間のbRaw)。
-// t0〜t14はG-Buffer/BRDFLUT/反射プローブ、t15・t16はDDGI(22章)が使用中のためt17。
-// DX12のkTextureSlotCountを17→18へ上げてある(34章)
+// t12〜t14は反射プローブ、t15・t16はDDGI(22章)が使用中のためt17(34章)
 Texture2D BentNormalTexture : register(t17);
 // split-sum近似の第2項、BRDF積分LUT(x=NdotV, y=ラフネス。BRDFLUT.hlslで生成、方向性を持たない
 // (NdotV, ラフネス)の2Dルックアップテーブルのため、これだけは通常のTexture2Dのまま)
 Texture2D BRDFLUTTexture : register(t10);
+// SkyIntegrate.hlslが書いた空パラメータ(P9)。ティント4本と正規化済みの天頂輝度が入る。
+// 【t17からt11へ移した】t17はbent normal(34章)が使う。t11はM11 Stage 3で反射プローブの
+// 拡散イラディアンスが廃止されて空いたスロット
+StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t11);
 
 // グローバルIBLの拡散イラディアンス(t8)・プリフィルタ済み鏡面(t9)・プローブのプリフィルタ済み
 // 鏡面キューブマップ配列(t12)・プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・
@@ -222,19 +283,73 @@ float3 ReconstructWorldPos(float2 uv, float depth)
     return worldPos.xyz / worldPos.w;
 }
 
+// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる(P3)。
+// SunDirectionの正規化はここで行う(SkyGenerate.hlsl側の慣習=呼び出し側でnormalizeする、に揃える)。
+// SSR.hlsl/AerialPerspective.hlsl/PlanarReflection.hlslのMakeSkyParametersと完全に同一の内容で
+// あること。4つのシェーダーはcbufferをそれぞれ別に宣言しているため関数そのものは共有できず
+// 複製しているが、中身がずれると「背景の空」「水面に映る空」「フォグの合成先の色」が
+// 互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
+SkyParameters MakeSkyParameters()
+{
+    SkyParameters params;
+    params.SunDirection = normalize(SkySunDirection.xyz);
+    // ティント4本と天頂輝度はP9でSkyParametersBuffer(t17)へ移った(SkyIntegrate.hlslが書く)
+    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
+    // 太陽照度/空照度比(SkyParams.zに詰めてある。KurenaiEngine3D.cppのSkyParams.zコメント参照)。
+    // EvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う
+    params.SunToSkyIlluminanceRatio = SkyParams.z;
+    // 雲(P5)。SSR.hlslのMakeSkyParametersと完全に同一の内容であること(このファイル冒頭の
+    // コメントと同じ理由。背景に見える雲と水面に映る雲が食い違ってはいけない)
+    params.CloudCoverage = CloudParams0.x;
+    params.CloudAltitude = CloudParams0.y;
+    params.CloudUvScale = CloudParams0.z;
+    params.CloudDensity = CloudParams0.w;
+    params.CloudScrollOffset = CloudParams1.xy;
+    params.CloudForwardG = CloudParams1.z;
+    // 積雲の厚み[m](P13b)。CloudParams1.wは従来ずっと0で未使用だった枠なので、
+    // FrameConstantsは1バイトも増えていない。0ならレイマーチせず従来の平面になる
+    params.CloudThickness = CloudParams1.w;
+    // 巻雲(P11)。SSR.hlslのMakeSkyParametersと完全に同一の内容であること
+    params.CirrusCoverage = CloudParams2.x;
+    params.CirrusAltitude = CloudParams2.y;
+    params.CirrusUvScale = CloudParams2.z;
+    params.CirrusDensity = CloudParams2.w;
+    params.CirrusScrollOffset = CloudParams3.xy;
+    params.CirrusAnisotropy = CloudParams3.z;
+    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
+    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
+    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
+    return params;
+}
+
 float4 PSMain(PSInput input) : SV_TARGET
 {
     float depth = DepthTexture.Sample(DataSampler, input.UV).r;
     if (depth <= 0.0f)
     {
-        // 何も描かれなかった背景ピクセル: カメラからそのピクセル方向への視線ベクトルで
-        // 空のキューブマップをサンプリングする
+        // 何も描かれなかった背景ピクセル: カメラからそのピクセル方向への視線ベクトルを求める
         // Reverse-Zのため遠平面(=背景)はNDC z=0.0付近になる
         float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
         float3 rayDir = normalize(farPoint - CameraPosition.xyz);
-        // 手続き空は太陽高度に応じた明るさで焼かれている(夜は月明かりの空になる)ため、
-        // かつてここで行っていた「夜は暗い紺色へlerpする」補正は不要になった
-        const float3 skyColor = SkyboxTexture.Sample(MaterialSampler, rayDir).rgb;
+
+        // SkyParams.y > 0.5fなら、キューブマップをサンプルする代わりにSky.hlsliのSkyColorを
+        // 画面解像度で直接評価する。キューブマップは256px/面・ミップ無しのため、
+        // 3840px・水平画角68度のカメラでは約20倍に拡大表示され、背景としては輪郭がぼける
+        // (IBLとして使うぶんには畳み込むため低解像度のままで正しく、この解析評価は背景専用)。
+        // 手続き空が無効(.ksceneのDDSスカイボックス使用時)はC++側でSkyParams.yを0にしてあるため、
+        // ここでは値を見るだけでよい
+        float3 skyColor;
+        if (SkyParams.y > 0.5f)
+        {
+            const SkyParameters skyParams = MakeSkyParameters();
+            skyColor = SkyColor(rayDir, skyParams);
+        }
+        else
+        {
+            // 手続き空は太陽高度に応じた明るさで焼かれている(夜は月明かりの空になる)ため、
+            // かつてここで行っていた「夜は暗い紺色へlerpする」補正は不要になった
+            skyColor = SkyboxTexture.Sample(MaterialSampler, rayDir).rgb;
+        }
         return float4(skyColor, 1.0f);
     }
 

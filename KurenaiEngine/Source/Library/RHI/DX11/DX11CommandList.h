@@ -53,8 +53,19 @@ namespace Kurenai::RHI
         // 距離キューブや、DDGI(22章)のアトラス2枚が下のm_BoundPixelSrvsの追跡から漏れる。
         // そうなるとUnbindPixelSrvForResourceがこれらを外せず、ベイクがUAVで書き込む際の
         // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう
-        // (実際に12のまま放置され、t12/t13が漏れていた)
-        static constexpr uint32_t kTextureSlotCount = 18;
+        // (実際に12のまま放置され、t12/t13が漏れていた)。
+        //
+        // 【現在の21の内訳】最も多く使うDeferredLighting.hlslがt0〜t20をちょうど使い切る:
+        //   t0〜t7   G-Buffer一式(アルベド/直接光/マテリアル/深度/スカイボックス/AO/自発光/法線)
+        //   t8,t9    グローバルIBL(放射照度・プリフィルタ済み鏡面)
+        //   t10      BRDF LUT
+        //   t11      空パラメータ(GPUSkyParameters、SkyIntegrate.hlslが書く構造化バッファ)
+        //   t12〜t14 反射プローブ(鏡面専任。拡散はDDGIへ一本化した)
+        //   t15,t16  DDGIのオクタヘドラルアトラス2枚
+        //   t17      bent normalのG-Buffer(34章)
+        //   t18,t19  雲の形状/ディテールの3Dノイズ
+        //   t20      大気散乱のSkyView LUT
+        static constexpr uint32_t kTextureSlotCount = 21;
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
         // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。

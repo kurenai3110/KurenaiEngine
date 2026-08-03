@@ -37,13 +37,22 @@
 //         「1プローブぶんのセル」の切れ目が見えなくなり、境界の複製が効いているかを確認できない
 //      16=DDGIの距離モーメントアトラス(t0)。R=平均距離をGainで縮めてグレースケール表示する。
 //         Gが平均二乗距離だが、そのまま出しても読めないためRのみを見る
+//      18=雲の3Dノイズ(P13a、CloudNoiseGenerate.hlslが焼いたTexture3D)の指定スライスを表示する。
+//         ArraySliceをW座標(0〜1)として使う。**画面には2x2タイルぶんを表示する** ——
+//         このテクスチャで最も壊れやすいのがタイル境界の継ぎ目であり、1タイルだけ映しても
+//         境界が画面の端に来て確認できないため。継ぎ目があれば画面の十字線として現れる。
+//         引くのは必ずs3のVolumeSampler(Linear + Wrap)で、これは実際の利用側と同じ条件で
+//         見るためでもある(Clampで引くと継ぎ目の有無そのものが変わってしまう)
 //      17=G-BufferのMaterial.a(水面のマテリアルID、kMaterialIDWater。P2: 水面マテリアル基盤)を
 //         そのままグレースケール表示する(水面=白、それ以外=黒)。0/1の二値でジオメトリの縁を
 //         跨いで補間されると意味のない中間値になるため、Mode 1/2/5/7/14と同じくDataSamplerで
 //         生値のまま読む
-//      18=bent normal(34章)。有効フラグが立っていない画素はマゼンタ、Gain<=1.5なら軸を色で、
-//         それより大きければ長さ(=aoB)をグレースケールで表示する。
-//         正規化しないベクトルなのでこちらもDataSamplerで生値のまま読む
+//      19=bent normal(34章)。.rgb=正規化しないbRaw、.a=有効フラグ。有効フラグが立っていない
+//         テクセルはマゼンタで塗る。Gain=1で軸の向きを色表示、Gain>1.5で長さ(=aoB)を
+//         グレースケール表示する。生値を読むのでDataSampler側。
+//         **番号を足すときは上の分岐と重複していないか必ず確かめること** ——
+//         この表示はもともと15番だったが、15番はDDGIのイラディアンスアトラスが先にreturnして
+//         しまうため到達できていなかった(landscape-water-skyのマージで発見して19番へ移した)
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
@@ -58,6 +67,11 @@ cbuffer FrameConstants : register(b0)
     float4 LightColor;
     float4x4 View;
     float4x4 Proj;
+    // 【宣言はここで止めている】このシェーダーが読むのはProjまでで、それより後ろは使わない。
+    // C++側のFrameConstantsはこの後ろにTimeParams・Sky*・Cloud*・PlanarReflectionPlane・
+    // Fog*・WaterBodyColorを持つが、cbufferは宣言順レイアウトなので、途中を飛ばして末尾だけを
+    // 宣言すると誤ったオフセットを読む。しかもコンパイルは通り絵も「それらしく」出るため気付けない。
+    // これらが必要になったら、C++の並びどおりに間のフィールドをすべて宣言すること
 };
 
 cbuffer PresentConstants : register(b1)
@@ -91,6 +105,8 @@ StructuredBuffer<uint> LightTiles : register(t3);
 // 反射プローブのキューブマップ配列(Mode 12)専用。TextureCubeArrayはTextureCube(t1)とも
 // Texture2DArray(t2)とも別の型のため、さらにスロットを分ける必要がある
 TextureCubeArray DebugCubeArrayTexture : register(t4);
+// 雲の3Dノイズ(Mode 18)専用。Texture3Dはここまでのどの型とも別なので、さらにスロットを分ける
+Texture3D DebugVolumeTexture : register(t5);
 
 struct PSInput
 {
@@ -236,8 +252,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     // これらだけDataSamplerで引く。それ以外は色バッファなので、レターボックスの拡縮で
     // ブロック状にならないようColorSamplerで引く。
     // Modeは定数バッファ由来で波面内で一様のため、この分岐のコストは実質ゼロ
+    // Mode 19(bent normal)は、masterでは15番だった。しかし15番はその手前にあるDDGIの
+    // イラディアンスアトラスの分岐が先に return してしまうため、bent normalの表示へ到達できて
+    // いなかった(このマージで発見して番号を移した)。番号を足すときは上の分岐と重複していないか
+    // 必ず確かめること
     const bool readsRawData =
-        (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14 || Mode == 17 || Mode == 18);
+        (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14 || Mode == 17 || Mode == 19);
     float4 sourceColor = readsRawData
         ? SourceTexture.Sample(DataSampler, input.UV)
         : SourceTexture.Sample(ColorSampler, input.UV);
@@ -247,6 +267,15 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 水面マスク。G-BufferのMaterial.aは水面で1.0、それ以外で0.0の二値なのでGainは適用しない
         float waterMask = sourceColor.a;
         return float4(waterMask, waterMask, waterMask, 1.0f);
+    }
+
+    if (Mode == 18)
+    {
+        // 雲の3Dノイズ(P13a)。2x2タイルぶんを表示してタイル境界の継ぎ目を見えるようにする
+        // (ファイル冒頭のMode 18の説明参照)。ノイズは[0,1]なのでGainだけ掛けてそのまま出す
+        const float3 uvw = float3(input.UV * 2.0f, ArraySlice);
+        const float4 noise = DebugVolumeTexture.SampleLevel(VolumeSampler, uvw, 0.0f);
+        return float4(saturate(noise.rgb * Gain), 1.0f);
     }
 
     if (Mode == 7)
@@ -301,9 +330,11 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(saturate(encoded), 0.5f, 1.0f);
     }
 
-    if (Mode == 18)
+    if (Mode == 19)
     {
         // bent normal(34章)。.rgb = 正規化しないbRaw、.a = 有効フラグ。
+        // 【15番から19番へ移した】15番はこの関数の手前にあるDDGIのイラディアンスアトラスの
+        // 分岐が先に return するため、ここまで到達できていなかった
         // 有効フラグが立っていないテクセル(bent normalを持たないマテリアル)は
         // 「データ無し」がひと目で分かるようマゼンタで塗る。
         // 軸は方向なので *0.5+0.5 で色にし、Gainで長さ(=aoB)の表示へ切り替える:

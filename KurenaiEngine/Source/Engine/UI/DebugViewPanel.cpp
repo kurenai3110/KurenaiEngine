@@ -20,6 +20,15 @@ namespace Kurenai::UI
 
         using DebugView = KurenaiEngine3D::DebugView;
 
+        // DebugView::AtmosphereLUTで表示するLUTの選択肢。
+        // 並びはKurenaiEngine3D::m_AtmosphereLUTDebugIndexの意味と一致させること
+        static const char* kAtmosphereLUTNames[] =
+        {
+            "Transmittance (256x64)",
+            "MultiScattering (32x32)",
+            "SkyView (192x108)",
+        };
+
         // 並びはDebugView enumと一致していなければならない(下のstatic_assert参照)
         static const char* kDebugViewNames[] =
         {
@@ -55,14 +64,15 @@ namespace Kurenai::UI
             "DDGI - 距離モーメント (R=平均距離)",
             "bent normal (軸=色 / Gain>1.5で長さ=グレー)",
             "水面マスク (A=水面フラグ)",
+            "平面反射 (水面に映る鏡像)",
+            "雲の3Dノイズ (スライス表示・2x2タイル)",
+            "大気散乱LUT (Transmittance / MultiScattering / SkyView)",
         };
         static_assert(
-            // M11 Stage 3で「プローブ - イラディアンス」を1つ削ったため、masterでの29から28へ下がる
-            static_cast<int>(DebugView::BentNormal) == 28,
-            "kDebugViewNamesの並びをDebugView enumと一致させること");
-        static_assert(
-            static_cast<int>(DebugView::WaterMask) == 29,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はWaterMask)");
+            // M11 Stage 3で「プローブ - イラディアンス」が1つ減り、bent normalが1つ増えたため、
+            // 末尾のAtmosphereLUTの値は32のまま変わらない
+            static_cast<int>(DebugView::AtmosphereLUT) == 32,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はAtmosphereLUT)");
 
         DrawUsageHint();
         BeginParamGroup();
@@ -125,6 +135,31 @@ namespace Kurenai::UI
                     Defaults::ProbeDistanceDebugRange, "%.1f", ImGuiSliderFlags_Logarithmic,
                     "この距離で白飽和するようグレースケール化する。部屋の大きさに合わせると形が読める");
             }
+        }
+
+        if (m_Engine.m_DebugView == DebugView::CloudNoiseSlice)
+        {
+            ImGui::TextWrapped(
+                "画面には2x2タイルぶんを表示している。タイル境界に継ぎ目があれば画面中央の十字線として現れる");
+            CheckboxEx(
+                "ディテール(32^3)を見る###CloudNoiseDetail", &m_Engine.m_CloudNoiseDebugShowDetail, false,
+                "オフで形状ノイズ(128^3、RGB=Perlin-Worley/Worley/Worley)、オンで縁を削るディテールノイズ");
+            SliderFloatEx(
+                "スライス位置###CloudNoiseSlice", &m_Engine.m_CloudNoiseDebugSlice, 0.0f, 1.0f, 0.0f, "%.3f", 0,
+                "3Dテクスチャのどの断面を見るか(W座標)。動かして中身が変わらなければ焼けていない");
+        }
+
+        if (m_Engine.m_DebugView == DebugView::AtmosphereLUT)
+        {
+            ImGui::TextWrapped(
+                "Transmittance: 横=視線天頂角、縦=高度。地表(下端)から天頂(右端)を見た値が "
+                "(0.940, 0.868, 0.762) になるのが解析解との一致条件。"
+                "SkyView: 横=太陽の子午線からの方位(左端が太陽側)、"
+                "縦=天頂角(上端が天頂、中央が地平線)");
+            ComboEx(
+                "表示するLUT###AtmosphereLUTIndex", &m_Engine.m_AtmosphereLUTDebugIndex,
+                kAtmosphereLUTNames, IM_ARRAYSIZE(kAtmosphereLUTNames), 0,
+                "MultiScatteringは値が小さいので表示輝度の倍率を上げて見る");
         }
 
         if (m_Engine.m_DebugView == DebugView::LightTiles)

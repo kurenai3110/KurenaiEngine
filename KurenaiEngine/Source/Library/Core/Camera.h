@@ -22,6 +22,12 @@ namespace Kurenai::Core
         void Move(const DirectX::XMFLOAT3& delta);
         void Rotate(float deltaYaw, float deltaPitch);
 
+        // 【単位はラジアン】.ksceneの[Camera]Yaw/Pitchは**度**なので、書き出す側は変換すること
+        // (SceneLoader.cppが読み込み時にXMConvertToRadiansで変換している)。
+        // ScenePanelの「現在のカメラを[Camera]の書式でコピー」が使う
+        float GetYaw() const { return m_Yaw; }
+        float GetPitch() const { return m_Pitch; }
+
         void SetAspectRatio(float aspect) { m_Aspect = aspect; }
         void SetLens(float fovYRadians, float nearZ, float farZ);
 

@@ -171,10 +171,91 @@ namespace Kurenai::Assets
         // 「エネルギー損失による暗さ」と区別がつかなくなるため無効にする
         bool AOEnabled = true;
 
-        // SSR(スクリーンスペースリフレクション)を有効にするか。SSRは既にエネルギー保存している
-        // 鏡面IBLへ反射色を「加算」する設計のため、Furnace Testでは球が背景より明るくなってしまう
-        // (同じ反射を二重に計上している。docs/Architecture.html 14.9.5節)。そのため無効にする
+        // 鏡面反射を有効にするか(キー名はSSRしか無かった頃の名残)。手法(SSR / レイトレーシング)は
+        // シーンでは選べず、エンジンが環境から決める。
+        //
+        // 【HasSSREnabledOverrideが要る理由】このキーを書いていないシーンと
+        // 「= true」と書いたシーンは区別しなければならない。エンジンの既定は
+        // 「レイトレーシングが使えない環境では反射なし」(EngineDefaults.h の SSREnabled。
+        // SSRは画面端で反射が途切れる破綻が目立つため)で、書いていないシーンはそれに従う。
+        // 一方このキーを明示したシーンは、その既定を上書きする意思表示なので指定どおりにする。
+        // 【この区別が無く不具合になっていた】以前はどちらも同じ扱いで、しかも
+        // 「= true」と書いてもエンジンの既定へ問い合わせ直していたため、DX11では
+        // ReflectionMode::Off になりシーンの指定が握り潰されていた(モン・サン=ミシェルの
+        // 水面に何も映らない/White Furnace TestのSSR回帰テストが動いていない、という形で出ていた)。
+        // DX12はDXRが使えてレイトレーシング反射が選ばれるため露見しなかった
+        bool HasSSREnabledOverride = false;
         bool SSREnabled = true;
+
+        // トーンマップのカーブ。Source/LibraryはSource/Engineに依存できないため、
+        // KurenaiEngine3D::TonemapCurveと同じ並びの独立した列挙をここに持つ
+        // (KurenaiEngine3D::ApplyLoadedSceneが1対1で対応付ける。並びを変えたら両方直すこと)。
+        // 既定のAgXはハイライトが色相を保ったまま白へ脱色するので赤い内観に強い一方、
+        // 空のような広い面では彩度を落とす(実測: 空の最も青い画素でB/R 1.53→1.34)。
+        // 屋外の風景ではACESのほうが空の青が残るため、シーン単位で選べるようにしてある
+        enum class TonemapCurveSetting
+        {
+            Reinhard,
+            ACES,
+            AgX,
+        };
+        TonemapCurveSetting Tonemap = TonemapCurveSetting::AgX;
+
+        // 空の彩度(アート指定)。既定1.0は物理モデルの色度そのまま。色度図上で白色点から
+        // 遠ざける倍率で、色相は変えずに鮮やかさだけを変える。物理量ではないので
+        // 「写真に寄せたい」シーンだけが明示的に上げる
+        float SkySaturation = 1.0f;
+
+        // シーン全体の露出(EV100)。**指定されたときだけ**エンジンの設定を上書きする
+        // (IBLIntensityと同じ扱い)。Tonemap/SkySaturationのような無条件の反映にしないのは、
+        // 露出はUIでも頻繁に触る値で、Exposureを持たないシーンを読み直すたびに
+        // ユーザーの調整を既定値へ戻してしまうため。
+        //
+        // 【なぜシーンが持つのか】屋外の風景と屋内では被写体の輝度が桁で違う。エンジンの
+        // 既定値(EngineDefaults.h の SceneExposureEV100 = 15)は屋内基準で決まっており、
+        // 物理的に正しい空(地平線際が天頂の8倍明るい)を入れると屋外ではトーンカーブの肩に
+        // 乗って彩度が落ちる。既定値を動かすと他のシーンを巻き込むので、シーン側に持たせる
+        bool HasExposureOverride = false;
+        float ExposureEV100 = 15.0f;   // EngineDefaults.h の SceneExposureEV100 と同じ値にすること
+
+        // --- [Cloud]セクション(P10)。天候はシーンが持つべき性質なので、[Water]と同じく
+        // シーンごとに指定できるようにする。**指定されたキーだけ**エンジンの設定を上書きする
+        // (Exposure/IBLIntensityと同じ扱い)ので、書かなかったキーはエンジンの既定値のまま。
+        // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        bool HasCloudCoverage = false;
+        float CloudCoverage = 0.40f;
+        bool HasCloudAltitude = false;
+        float CloudAltitude = 1500.0f;      // 雲底の高度[m]
+        bool HasCloudThickness = false;
+        float CloudThickness = 400.0f;      // 雲底から雲頂までの厚み[m]
+        bool HasCloudDensity = false;
+        float CloudDensity = 8.0f;          // 光学的な濃さ。上げるほど不透明で白い塊になる
+        bool HasCloudCellSize = false;
+        float CloudCellSize = 1000.0f;      // 雲の塊1つぶんのワールド上の大きさ[m]。
+                                             // エンジン側はこの逆数(UvScale)を持つ
+        bool HasCirrusCoverage = false;
+        float CirrusCoverage = 0.5f;        // 高層の巻雲。0で消える
+
+        // --- [Fog]セクション。大気の澄み具合はシーンが持つべき性質なので、[Cloud]と同じく
+        // 指定されたキーだけエンジンの設定を上書きする。
+        //
+        // 【なぜシーンごとに要るのか】消散係数は遠景の霞の濃さだけでなく、**雲がどれだけ空から
+        // 浮き上がって見えるか**を一手に決める。雲底1,500mの層は仰角20度の方向で4.4km先にあり、
+        // エンジンの既定値0.0004(視程9.8km相当)ではそこまでの透過率が0.40しかない——
+        // 雲のコントラストの6割が目に届く前に空の色へ溶ける。実測でも、雲の受光を削っている
+        // 要因はこれがほぼ単独で、自己影(+1.2)や縦方向の勾配(+3.6)に対してこの項だけが
+        // +24.6(雲の90%点と空の中央値の差、255段階)を占めていた。
+        // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        bool HasFogEnabled = false;
+        bool FogEnabled = true;
+        bool HasFogDensity = false;
+        // 基準高度での消散係数[1/m]。気象学的視程Vとは Koschmieder の V = 3.912 / 消散係数
+        // で結び付く(0.0004 で V ≒ 9.8km、0.0002 で V ≒ 19.6km)
+        float FogDensity = 0.0004f;
+        bool HasFogScaleHeight = false;
+        float FogScaleHeight = 1000.0f;     // 霞の層の厚み[m]。大きいほど高い高度まで及ぶ
+        bool HasFogRefHeight = false;
+        float FogRefHeight = 0.0f;          // 消散係数を定義する高さ(ワールドY)
 
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う

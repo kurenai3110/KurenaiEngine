@@ -279,7 +279,12 @@ namespace Kurenai::Assets
             bool HasIBLIntensity = false;
             float IBLIntensity = 1.0f;
             bool AOEnabled = true;
+            bool HasSSREnabled = false;
             bool SSREnabled = true;
+            Scene::TonemapCurveSetting Tonemap = Scene::TonemapCurveSetting::AgX;
+            float SkySaturation = 1.0f;
+            bool HasExposure = false;
+            float ExposureEV100 = 15.0f;
 
             // [Water]セクション(P2: 水面マテリアル基盤)。NormalMapは[Scene]Skyboxと同じく
             // Assetsルートからの相対パスで、LoadScene側でルート外チェックのうえ絶対パスへ解決する。
@@ -288,6 +293,20 @@ namespace Kurenai::Assets
             float WaterWaveScale = 12.0f;
             float WaterWaveSpeed = 0.03f;
             float WaterWaveStrength = 0.25f;
+
+            // [Cloud]セクション(P10)。指定されたキーだけエンジンの設定を上書きする
+            bool HasCloudCoverage = false;   float CloudCoverage = 0.40f;
+            bool HasCloudAltitude = false;   float CloudAltitude = 1500.0f;
+            bool HasCloudThickness = false;  float CloudThickness = 400.0f;
+            bool HasCloudDensity = false;    float CloudDensity = 8.0f;
+            bool HasCloudCellSize = false;   float CloudCellSize = 1000.0f;
+            bool HasCirrusCoverage = false;  float CirrusCoverage = 0.5f;
+
+            // [Fog]セクション。指定されたキーだけエンジンの設定を上書きする
+            bool HasFogEnabled = false;      bool  FogEnabled = true;
+            bool HasFogDensity = false;      float FogDensity = 0.0004f;
+            bool HasFogScaleHeight = false;  float FogScaleHeight = 1000.0f;
+            bool HasFogRefHeight = false;    float FogRefHeight = 0.0f;
 
             std::vector<ParsedLightEntry> Lights;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
@@ -305,6 +324,8 @@ namespace Kurenai::Assets
             ReflectionProbe,
             GIVolume,
             Water,
+            Cloud,
+            Fog,
             Unknown,
         };
 
@@ -318,6 +339,8 @@ namespace Kurenai::Assets
             if (CaseInsensitiveEquals(name, L"ReflectionProbe")) return Section::ReflectionProbe;
             if (CaseInsensitiveEquals(name, L"GIVolume")) return Section::GIVolume;
             if (CaseInsensitiveEquals(name, L"Water")) return Section::Water;
+            if (CaseInsensitiveEquals(name, L"Cloud")) return Section::Cloud;
+            if (CaseInsensitiveEquals(name, L"Fog")) return Section::Fog;
             return Section::Unknown;
         }
 
@@ -473,11 +496,51 @@ namespace Kurenai::Assets
                         if (!parsedValue) errorAt(lineNumber, rawLine, "AmbientOcclusionの値はtrue/falseで指定してください");
                         result.AOEnabled = *parsedValue;
                     }
+                    else if (CaseInsensitiveEquals(key, L"Tonemap"))
+                    {
+                        // トーンマップのカーブをシーン単位で選ぶ。屋外の風景はACESのほうが空の青が残る
+                        // (既定のAgXはハイライトを色相保持のまま白へ脱色するため彩度が落ちる)
+                        if (CaseInsensitiveEquals(value, L"Reinhard"))
+                        {
+                            result.Tonemap = Scene::TonemapCurveSetting::Reinhard;
+                        }
+                        else if (CaseInsensitiveEquals(value, L"ACES"))
+                        {
+                            result.Tonemap = Scene::TonemapCurveSetting::ACES;
+                        }
+                        else if (CaseInsensitiveEquals(value, L"AgX"))
+                        {
+                            result.Tonemap = Scene::TonemapCurveSetting::AgX;
+                        }
+                        else
+                        {
+                            errorAt(lineNumber, rawLine, "Tonemapの値はReinhard/ACES/AgXのいずれかで指定してください");
+                        }
+                    }
+                    else if (CaseInsensitiveEquals(key, L"SkySaturation"))
+                    {
+                        if (!ParseFloatToken(value, result.SkySaturation)) errorAt(lineNumber, rawLine, "SkySaturationの値が不正です");
+                        if (result.SkySaturation < 0.0f) errorAt(lineNumber, rawLine, "SkySaturationは0以上で指定してください");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Exposure"))
+                    {
+                        if (!ParseFloatToken(value, result.ExposureEV100)) errorAt(lineNumber, rawLine, "Exposureの値が不正です");
+                        // EV100の実用域(暗い室内-6 〜 直射日光下17程度)を大きく外れた値は
+                        // 打ち間違いとみなす。自動露出の範囲(EngineDefaults.hのAutoExposure
+                        // Min/MaxEV100)と同じ-6〜18に合わせてある
+                        if (result.ExposureEV100 < -6.0f || result.ExposureEV100 > 18.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "Exposureは-6〜18(EV100)の範囲で指定してください");
+                        }
+                        result.HasExposure = true;
+                    }
                     else if (CaseInsensitiveEquals(key, L"ScreenSpaceReflection"))
                     {
                         const std::optional<bool> parsedValue = ParseBoolToken(value);
                         if (!parsedValue) errorAt(lineNumber, rawLine, "ScreenSpaceReflectionの値はtrue/falseで指定してください");
                         result.SSREnabled = *parsedValue;
+                        // 「書いた」ことそのものに意味がある(Scene::HasSSREnabledOverride参照)
+                        result.HasSSREnabled = true;
                     }
                     else
                     {
@@ -762,6 +825,98 @@ namespace Kurenai::Assets
                     }
                     break;
 
+                case Section::Cloud:
+                {
+                    // 数値1つを読んで範囲を確かめ、「指定された」印を立てるだけの処理が続くので
+                    // ラムダにまとめる(範囲外は打ち間違いとみなしてエラーにする)
+                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                    {
+                        if (!ParseFloatToken(value, out))
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                        }
+                        if (out < minValue || out > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        has = true;
+                    };
+
+                    if (CaseInsensitiveEquals(key, L"Coverage"))
+                    {
+                        readFloat(result.CloudCoverage, result.HasCloudCoverage, 0.0f, 1.0f, L"Coverage");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Altitude"))
+                    {
+                        readFloat(result.CloudAltitude, result.HasCloudAltitude, 100.0f, 20000.0f, L"Altitude");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Thickness"))
+                    {
+                        readFloat(result.CloudThickness, result.HasCloudThickness, 0.0f, 5000.0f, L"Thickness");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Density"))
+                    {
+                        readFloat(result.CloudDensity, result.HasCloudDensity, 0.0f, 100.0f, L"Density");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CellSize"))
+                    {
+                        readFloat(result.CloudCellSize, result.HasCloudCellSize, 10.0f, 100000.0f, L"CellSize");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CirrusCoverage"))
+                    {
+                        readFloat(result.CirrusCoverage, result.HasCirrusCoverage, 0.0f, 1.0f, L"CirrusCoverage");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
+                case Section::Fog:
+                {
+                    // [Cloud]と同じ作法。範囲外は打ち間違いとみなしてエラーにする
+                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                    {
+                        if (!ParseFloatToken(value, out))
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                        }
+                        if (out < minValue || out > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        has = true;
+                    };
+
+                    if (CaseInsensitiveEquals(key, L"Enabled"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
+                        result.FogEnabled = *parsedValue;
+                        result.HasFogEnabled = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Density"))
+                    {
+                        // 上限0.002は視程約2km(もや)に相当する。これより濃いと600m先の地物すら
+                        // 見えなくなり屋外の風景として成立しないため、UIのスライダーと同じ上限にしてある
+                        readFloat(result.FogDensity, result.HasFogDensity, 0.0f, 0.002f, L"Density");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"ScaleHeight"))
+                    {
+                        readFloat(result.FogScaleHeight, result.HasFogScaleHeight, 10.0f, 5000.0f, L"ScaleHeight");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"RefHeight"))
+                    {
+                        readFloat(result.FogRefHeight, result.HasFogRefHeight, -500.0f, 500.0f, L"RefHeight");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
                 default:
                     break;
                 }
@@ -857,7 +1012,22 @@ namespace Kurenai::Assets
         scene.ShadowEnabled = parsed.SunShadow;
         scene.SunEnabled = parsed.SunEnabled;
         scene.AOEnabled = parsed.AOEnabled;
+        scene.HasSSREnabledOverride = parsed.HasSSREnabled;
         scene.SSREnabled = parsed.SSREnabled;
+        scene.Tonemap = parsed.Tonemap;
+        scene.SkySaturation = parsed.SkySaturation;
+        scene.HasExposureOverride = parsed.HasExposure;
+        scene.HasCloudCoverage = parsed.HasCloudCoverage;   scene.CloudCoverage = parsed.CloudCoverage;
+        scene.HasCloudAltitude = parsed.HasCloudAltitude;   scene.CloudAltitude = parsed.CloudAltitude;
+        scene.HasCloudThickness = parsed.HasCloudThickness; scene.CloudThickness = parsed.CloudThickness;
+        scene.HasCloudDensity = parsed.HasCloudDensity;     scene.CloudDensity = parsed.CloudDensity;
+        scene.HasCloudCellSize = parsed.HasCloudCellSize;   scene.CloudCellSize = parsed.CloudCellSize;
+        scene.HasCirrusCoverage = parsed.HasCirrusCoverage; scene.CirrusCoverage = parsed.CirrusCoverage;
+        scene.HasFogEnabled = parsed.HasFogEnabled;         scene.FogEnabled = parsed.FogEnabled;
+        scene.HasFogDensity = parsed.HasFogDensity;         scene.FogDensity = parsed.FogDensity;
+        scene.HasFogScaleHeight = parsed.HasFogScaleHeight; scene.FogScaleHeight = parsed.FogScaleHeight;
+        scene.HasFogRefHeight = parsed.HasFogRefHeight;     scene.FogRefHeight = parsed.FogRefHeight;
+        scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;
 

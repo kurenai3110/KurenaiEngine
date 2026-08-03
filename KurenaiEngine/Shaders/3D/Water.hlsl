@@ -8,9 +8,9 @@
 
 // 水面法線マップ(タイル可能な接線空間法線、Assets/Packed/MontSaintMichelStudy/WaterNormal.png)。
 // t4はTransparent.hlsl/ProbeCapture.hlslがカスケードシャドウマップに、t5はOcclusionTextureに、
-// t6はBentNormalTexture(34章、GBufferCommon.hlsliで宣言)に使っているため、GBuffer系パスで
-// 次に空いているt7を使う。[Water]NormalMapが空文字列の
-// シーンではC++側(KurenaiEngine3D)が1x1のフラット法線(128,128,255,255)をここへバインドする
+// **t6はGBuffer.hlslのbent normal(34章)** に使っているため、次に空いているt7を使う。
+// [Water]NormalMapが空文字列のシーンではC++側(KurenaiEngine3D)が1x1のフラット法線
+// (128,128,255,255)をここへバインドする
 Texture2D WaterNormalTexture : register(t7);
 
 // UDN(Unity風のDerivative Normal)ブレンド用、2層のUVスケール・スクロール方向・速度倍率。
@@ -86,23 +86,25 @@ PSOutput PSMain(PSInput input)
     float ao = lerp(1.0f, occlusionSample, OcclusionStrength);
 
     PSOutput output;
-    output.Albedo = float4(baseColorSample.rgb, 1.0f);
+    // 水中項(P8)。メッシュ自身のbaseColorSample.rgb(誘電体でほぼ黒に焼かれている)は使わず、
+    // WaterBodyColor.rgb(FrameConstants、UIから調整可能)を出力Albedoに使う。
+    // これは水体で拡散的に後方散乱して戻ってくる光の粗い近似であり、屈折・水深依存の減衰は
+    // 含んでいない(G-Bufferが水深の情報を持たないため一定色にしている)。
+    // 拡散項として書くことで、Fresnelによる「見下ろすと水の色/すれすれだと鏡」の切り替わりは
+    // 既存のDeferredLighting.hlslの式がそのまま担当する(水面専用の分岐は増やさない)。
+    // baseColorSample.aによるアルファカットアウトはこの置き換えとは無関係にそのまま残す(直前のclip参照)
+    output.Albedo = float4(WaterBodyColor.rgb, 1.0f);
     output.Normal = OctEncode(N);
     // aチャンネルに水面のマテリアルIDを書く(GBuffer.hlslの通常マテリアルは0.0fのまま)。
     // DebugView::WaterMask(Present.hlsl Mode 17)がこの値をそのままグレースケール表示する
     output.Material = float4(metallic, roughness, ao, kMaterialIDWater);
     output.Emissive = float4(emissive, 1.0f);
     output.Velocity = currentUv - previousUv;
-
-    // bent normal(34章)。水面もG-Bufferの同じパス(同じレンダーターゲット構成)で描くため、
-    // SV_TARGET5を書かないとこのピクセルのbent normalが未定義になる。
-    // 引き方はGBuffer.hlslのPSMainと同じだが、法線は「波を合成した後のN」ではなく
-    // ジオメトリ由来のtbnで変換する ―― bent normalは焼いた時点の面の向きに対する
-    // 接空間の値であって、実行時に揺らした法線とは別物のため。
-    // 水面メッシュはbent normalを焼いていないので、実際にはKurenaiPackerが差す黒1x1が
-    // 引かれ、a=0(データ無し)として下流のライティングが従来のAOへ落ちる
-    const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
-    output.BentNormal = float4(mul(bentSample.xyz, tbn), bentSample.a);
-
+    // bent normal(34章)。水面はオフラインで遮蔽を焼いていないため「データ無し」を意味する
+    // 有効フラグ0を書く。消費側(DeferredLighting.hlsl/SSR.hlslのDecodeBentOcclusion)は
+    // このとき従来の遮蔽の経路へ落ちる。
+    // 【書き残してはいけない】PSOutputはGBuffer.hlslと共有しており、書かないと
+    // そのレンダーターゲットの内容が未定義になる(前フレームの残骸が読まれうる)
+    output.BentNormal = float4(0.0f, 0.0f, 0.0f, 0.0f);
     return output;
 }

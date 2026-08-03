@@ -1,5 +1,8 @@
-// 空のキューブマップをGPUで手続き生成する。Perez et al. "All-Weather Model for Sky Luminance
-// Distribution" (1993) / Preetham, Shirley, Smits (SIGGRAPH 1999) のCIE快晴空モデル。
+// 空のキューブマップをGPUで手続き生成する。このファイルはIBL専用キューブマップ
+// (256px/面、ミップ無し)のベイクに専念し、空モデル本体(Perez et al. "All-Weather Model
+// for Sky Luminance Distribution" (1993) / Preetham, Shirley, Smits (SIGGRAPH 1999) の
+// CIE快晴空モデル)はSky.hlsliへ移した(P3)。背景の解析評価(DeferredLighting.hlsl)も
+// 同じSky.hlsliの関数を使うため、キューブマップと背景は常に同じ空を見る。
 //
 // === なぜオフラインDDSではなくGPU生成なのか ===
 // Perez分布は太陽の位置に依存するため、時刻が変わると空の輝度分布の「形」そのものが変わる
@@ -9,46 +12,37 @@
 // prefilter(lerp(昼,夜,t)) == lerp(prefilter(昼),prefilter(夜),t) が厳密に成立するので、
 // 動的な再ベイクは純粋な無駄になる。再ベイクが意味を持つのは、この非線形な変化を追うときだけ。
 //
-// このシェーダーは Tools/generate_sky_cubemap.py の移植であり、両者は同じ絵を出す必要がある
-// (あちらはオフラインの参照実装 兼 手続き空を無効にしたときのフォールバック用)。
+// このシェーダー(とSky.hlsli)は Tools/generate_sky_cubemap.py の移植であり、両者は同じ絵を
+// 出す必要がある(あちらはオフラインの参照実装 兼 手続き空を無効にしたときのフォールバック用)。
 // 係数・定数を変える場合は必ず両方を同時に直すこと。
+//
+// 【P9】ティント4本と天頂輝度(雲を考慮しない晴天基準の値)はSkyIntegrate.hlslが求めて
+// SkyParametersBuffer(t0)へ書く。このシェーダーはそれを読むだけで、正規化の積分は行わない。
+// 雲による平均透過率(判断B)だけはCPU(KurenaiEngine3D.cpp)がCloudTransmittanceとして渡し、
+// ここでSkyParametersBufferのZenithLuminanceへ掛けてからキューブへ焼く
 #include "Samplers.hlsli"
-
-static const float PI = 3.14159265359f;
+// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
+#define KURENAI_SKYVIEW_REGISTER t1
+#include "Sky.hlsli"
 
 cbuffer SkyBakeConstants : register(b0)
 {
     // 処理対象の面(D3Dのキューブマップ標準順: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5)
     uint Face;
-    // 天頂輝度のスケール。Perezの相対輝度にこれを掛けたものが最終的な輝度になる
-    float ZenithLuminance;
+    // 雲(P5、判断B)による平均透過率。SkyParametersBuffer[0].Luminance.x
+    // (雲を考慮しない晴天基準の天頂輝度)にこの値を掛けてからキューブへ焼く
+    float CloudTransmittance;
     float2 SkyPadding0;
     // 太陽が「ある」向き(正規化済み)。光が進む向きとは符号が逆なので注意
     // (KurenaiEngine3D.cpp ComputeSunLighting の sunDirection と同じ向き)
     float4 SunDirection;
-    // --- 空の色味。太陽高度に応じてCPU側(ComputeSkyTint)が決めた値。xyzのみ使う ---
-    // 【なぜCPUで決めるのか】この色味は、ここでの描画と CPU 側の照度正規化
-    // (ComputeSkyZenithScale。積分の重みに色味の輝度成分が入る)の両方で完全に一致して
-    // いなければならない。CPUで1度決めて配れば、両者がずれることが構造的に起きなくなる
-    float4 ZenithTint;
-    float4 HorizonTint;
-    float4 GroundTint;
-    // xyz=夕焼け・朝焼けの暖色、w=その強さ(太陽の仰角0度で1、±15度で0)
-    float4 SunGlowTint;
 };
 
-RWTexture2DArray<float4> SkyOut : register(u0);
+// SkyIntegrate.hlslが書いた空パラメータ(ティント4本+正規化済みの天頂輝度)
+StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t0);
 
-// --- generate_sky_cubemap.py と一致させる定数 ---
-// 地平線より下は空モデルの適用範囲外。プラトー色から暗い接地色へフェードさせる。
-// ゼロにしないのは、IBLの拡散イラディアンス積分で下半球が完全な暗黒にならないようにするため
-static const float kGroundFadeStartY = -0.02f;
-static const float kGroundFadeEndY = -0.6f;
-// CIE快晴空係数(circumsolar項 c=10, d=-3)は反太陽側の水平線で輝度が天頂の0.2倍程度まで落ちる。
-// 実際の大気は多重散乱で暗部が持ち上がるためゼロにはしないが、以前ここを0.45にしていたときは
-// 輝度の勾配がほぼ消えて空全体が一様なスレートグレーになっていた(実測: 彩度0.26で時刻不変)。
-// 勾配が残る値まで下げてある。KurenaiEngine3D.cpp の kSkyRelativeLuminanceFloor と同じ値であること
-static const float kRelativeLuminanceFloor = 0.12f;
+RWTexture2DArray<float4> SkyOut : register(u0);
 
 // キューブマップの1面上のUV([0,1]^2)から方向を求める。
 // IBLConvolve.hlsl の CubeFaceDirection および generate_sky_cubemap.py の face_direction_grid と
@@ -70,81 +64,6 @@ float3 CubeFaceDirection(uint face, float2 uv)
     return normalize(dir);
 }
 
-// Perezの5係数関数。cosThetaは水平線(cosθ→0)で発散するため呼び出し側でクランプ済みの前提
-float PerezF(float cosTheta, float gamma, float a, float b, float c, float d, float e)
-{
-    const float cosGamma = cos(gamma);
-    return (1.0f + a * exp(b / cosTheta)) * (1.0f + c * exp(d * gamma) + e * cosGamma * cosGamma);
-}
-
-float PerezRelativeLuminance(float cosTheta, float gamma, float cosThetaSun, float thetaSun)
-{
-    // CIE快晴空の標準係数(Perez et al. 1993 / Preetham et al. 1999, Table 1)
-    const float a = -1.0f;
-    const float b = -0.32f;
-    const float c = 10.0f;
-    const float d = -3.0f;
-    const float e = 0.45f;
-    return PerezF(cosTheta, gamma, a, b, c, d, e) / PerezF(cosThetaSun, thetaSun, a, b, c, d, e);
-}
-
-// 太陽の暖色を混ぜる重み。KurenaiEngine3D.cpp の SunGlowWeight と同じ式であること。
-// 太陽から離れるほど急に落ちる4乗カーブ。太陽が地平線下にあっても、その方位の低空には
-// まだ暖色が残る(実際の夕焼けの残光と同じ構造)
-float SunGlowWeight(float cosGamma, float glowStrength)
-{
-    const float proximity = saturate(cosGamma);
-    const float falloff = proximity * proximity * proximity * proximity;
-    return saturate(glowStrength * falloff);
-}
-
-// 方向(天頂角と太陽との離角)に対する空の色味。
-// KurenaiEngine3D.cpp の SkyTint と同じ式であること
-float3 SkyTint(float cosTheta, float cosGamma)
-{
-    // 水平線側への寄せを3乗カーブにして、高度があるうちは天頂色をほぼ保つ
-    const float horizonBlend = pow(1.0f - saturate(cosTheta), 3.0f);
-    const float3 base = lerp(ZenithTint.rgb, HorizonTint.rgb, horizonBlend);
-    return lerp(base, SunGlowTint.rgb, SunGlowWeight(cosGamma, SunGlowTint.w));
-}
-
-// 水平線以上を仮定した空の色(呼び出し側で地面フェードと合成する)
-float3 SkyColorUpper(float3 dir, float3 sunDir)
-{
-    // Perez分布は水平線で不安定になるため天頂角を89.5度までにクランプする
-    const float clampedY = max(dir.y, cos(radians(89.5f)));
-    const float cosTheta = clamp(clampedY, 1e-3f, 1.0f);
-
-    const float thetaSun = acos(clamp(sunDir.y, -1.0f, 1.0f));
-    const float cosThetaSun = max(cos(thetaSun), 1e-3f);
-
-    const float cosGamma = clamp(dot(dir, sunDir), -1.0f, 1.0f);
-    const float gamma = acos(cosGamma);
-
-    float relative = max(PerezRelativeLuminance(cosTheta, gamma, cosThetaSun, thetaSun), 0.0f);
-    relative = kRelativeLuminanceFloor + (1.0f - kRelativeLuminanceFloor) * relative;
-
-    return relative * ZenithLuminance * SkyTint(cosTheta, cosGamma);
-}
-
-float3 SkyColor(float3 dir, float3 sunDir)
-{
-    if (dir.y >= kGroundFadeStartY)
-    {
-        return SkyColorUpper(dir, sunDir);
-    }
-
-    // 水平線より下: プラトー色(kGroundFadeStartYの高さへ射影した方向の空色)から接地色へフェード
-    float3 plateauDir = dir;
-    plateauDir.y = kGroundFadeStartY;
-    plateauDir = normalize(plateauDir);
-    const float3 plateauColor = SkyColorUpper(plateauDir, sunDir);
-
-    const float3 groundColor = ZenithLuminance * GroundTint.rgb;
-    const float groundT = saturate((dir.y - kGroundFadeStartY) / (kGroundFadeEndY - kGroundFadeStartY));
-    return lerp(plateauColor, groundColor, groundT);
-}
-
 [numthreads(8, 8, 1)]
 void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
@@ -159,7 +78,50 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float2 uv = (float2(dispatchThreadID.xy) + 0.5f) / float2(width, height);
     const float3 dir = CubeFaceDirection(Face, uv);
 
-    const float3 color = SkyColor(dir, normalize(SunDirection.xyz));
+    // SkyBakeConstants + SkyParametersBufferからSky.hlsliのSkyParametersを組み立てる。
+    // ここでの正規化(normalize)は元の実装(SkyColor呼び出し側でのnormalize(SunDirection.xyz))を
+    // そのまま踏襲したもので、Sky.hlsli側では正規化しない(呼び出し側の責務)
+    SkyParameters params;
+    params.SunDirection = normalize(SunDirection.xyz);
+    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
+    // SunToSkyIlluminanceRatioはこの経路では雲が常に無効(下のCloudCoverage=0)なので
+    // EvaluateCloudLayerから参照されることは無いが、未初期化のまま関数呼び出しへ渡さないよう
+    // (SkyBakeConstantsにこの値は存在しないため)明示的に0で埋めておく
+    params.SunToSkyIlluminanceRatio = 0.0f;
+    // 判断B: 雲による平均透過率はキューブへ焼く値にだけ掛ける(SkyParametersBuffer側の
+    // Luminance.xは雲を考慮しない晴天基準のまま。Sky.hlsli冒頭の雲セクション参照)
+    params.ZenithLuminance *= CloudTransmittance;
+
+    // 雲(P5)・巻雲(P11)は明示的に無効(CloudCoverage=CirrusCoverage=0)で埋める。IBL用
+    // キューブマップには雲を焼き込まない(判断A、詳細はSky.hlsliの雲セクションのコメント参照)。
+    // 雲が風で動くたびにキューブの焼き直し(空生成6回+プリフィルタ36回のディスパッチ)が
+    // 必要になるのを避けるためで、被覆率による減光(判断B)はキューブへ焼く直前にCPU側
+    // (KurenaiEngine3D.cpp)がZenithLuminanceへ2層ぶんの平均透過率の積を掛けることで表現する
+    // (ComputeCloudAverageTransmittance参照)。CloudCoverage=0ならSky.hlsli側の早期脱出で
+    // この下の残りのフィールドは一切参照されないが、意図を読めるようにするため他のフィールドも
+    // 明示的に0で埋めておく
+    params.CloudCoverage = 0.0f;
+    params.CloudAltitude = 0.0f;
+    params.CloudUvScale = 0.0f;
+    params.CloudDensity = 0.0f;
+    params.CloudScrollOffset = float2(0.0f, 0.0f);
+    params.CloudForwardG = 0.0f;
+    params.CloudThickness = 0.0f; // 判断Aにより雲は焼かない。意図を明示するため0を入れる
+    params.CirrusCoverage = 0.0f;
+    params.CirrusAltitude = 0.0f;
+    params.CirrusUvScale = 0.0f;
+    params.CirrusDensity = 0.0f;
+    params.CirrusScrollOffset = float2(0.0f, 0.0f);
+    params.CirrusAnisotropy = 0.0f;
+
+    // 雲へ掛ける大気遠近(P12)も明示的に無効で埋める。判断A(上記)により雲そのものを
+    // 焼かないので、このパスではEvaluateCloudLayer自体が一度も呼ばれず実質は無関係だが、
+    // 「IBLキューブは大気遠近を含まない晴天の空」という意図をここで読めるようにしておく。
+    // そもそもこのシェーダーのcbufferはSkyBakeConstantsでありFrameConstants::FogParams0を
+    // 持たないため、値を引いてくる先も無い
+    params = ApplyCloudFogParameters(params, float4(0.0f, 0.0f, 0.0f, 0.0f), 0.0f);
+
+    const float3 color = SkyColor(dir, params);
 
     // 面ごとに要素数1のUAVを張るためスライスは常に0
     SkyOut[uint3(dispatchThreadID.xy, 0)] = float4(max(color, 0.0f), 1.0f);

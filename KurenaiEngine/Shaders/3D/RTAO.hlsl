@@ -53,6 +53,11 @@ cbuffer FrameConstants : register(b0)
     float4 AmbientColor;
     float4 CascadeSplits;
     float4 ShadowParams;
+    // 【宣言はここで止めている】このシェーダーが読むのはShadowParamsまでで、それより後ろは使わない。
+    // C++側のFrameConstantsはこの後ろにTimeParams・Sky*・Cloud*・PlanarReflectionPlane・
+    // Fog*・WaterBodyColorを持つが、cbufferは宣言順レイアウトなので、途中を飛ばして末尾だけを
+    // 宣言すると誤ったオフセットを読む。しかもコンパイルは通り絵も「それらしく」出るため気付けない。
+    // これらが必要になったら、C++の並びどおりに間のフィールドをすべて宣言すること
 };
 
 cbuffer RTAOConstants : register(b1)
