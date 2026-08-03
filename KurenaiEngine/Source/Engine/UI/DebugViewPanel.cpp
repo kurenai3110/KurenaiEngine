@@ -44,7 +44,8 @@ namespace Kurenai::UI
             "IBL - BRDF LUT (X=NdotV, Y=粗さ, RGB=A/B/Eavg)",
             "ブルーム (ピラミッド最上段・半解像度)",
             "ライトタイル (タイルあたりのライト数ヒートマップ)",
-            "プローブ - イラディアンス (キューブマップ配列)",
+            // 「プローブ - イラディアンス」はM11 Stage 3で廃止した(反射プローブは鏡面専任になった。
+            // 拡散はDDGIへ一本化。「DDGI - イラディアンス」で見る)
             "プローブ - プリフィルタ済み鏡面 (ミップ0=キャプチャ結果)",
             "プローブ - 影響範囲 (プローブごとの色分け)",
             "プローブ - 距離 (キューブマップ配列)",
@@ -52,8 +53,13 @@ namespace Kurenai::UI
             "シーンカラー (生HDR・トーンマップなし)",
             "DDGI - イラディアンス (オクタヘドラルアトラス)",
             "DDGI - 距離モーメント (R=平均距離)",
+            "bent normal (軸=色 / Gain>1.5で長さ=グレー)",
             "水面マスク (A=水面フラグ)",
         };
+        static_assert(
+            // M11 Stage 3で「プローブ - イラディアンス」を1つ削ったため、masterでの29から28へ下がる
+            static_cast<int>(DebugView::BentNormal) == 28,
+            "kDebugViewNamesの並びをDebugView enumと一致させること");
         static_assert(
             static_cast<int>(DebugView::WaterMask) == 29,
             "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はWaterMask)");
@@ -93,8 +99,7 @@ namespace Kurenai::UI
                 "表示するミップの段。段が進むほど粗い面向けにぼかされている");
         }
 
-        if (m_Engine.m_DebugView == DebugView::ProbeIrradiance || m_Engine.m_DebugView == DebugView::ProbePrefilter ||
-            m_Engine.m_DebugView == DebugView::ProbeDistance)
+        if (m_Engine.m_DebugView == DebugView::ProbePrefilter || m_Engine.m_DebugView == DebugView::ProbeDistance)
         {
             // プローブが1つも無いシーンでもスライダーの範囲が壊れないよう下限を0に保つ
             const int maxProbeIndex =

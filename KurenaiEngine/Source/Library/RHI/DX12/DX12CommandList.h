@@ -80,9 +80,10 @@ namespace Kurenai::RHI
         // 未バインドのスロットを読むと0が返るというDX11と同じ挙動になる。
         // 反射プローブ(19章)がDeferredLighting.hlslでt11〜t14(イラディアンス配列・プリフィルタ配列・
         // 影響範囲バッファ・距離キューブ配列)を、DDGI(22章)がt15〜t16(イラディアンスアトラス・
-        // 距離モーメントアトラス)を使うため17スロット必要。DX12Device.cpp側の同名の定数
-        // (ルートシグネチャのSRVレンジ幅)およびDX11CommandList側の同名の定数と必ず一致させること
-        static constexpr uint32_t kTextureSlotCount = 17;
+        // 距離モーメントアトラス)を使い、さらにbent normalのG-Buffer(34章)がt17を
+        // 使うため18スロット必要。DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)
+        // およびDX11CommandList側の同名の定数と必ず一致させること
+        static constexpr uint32_t kTextureSlotCount = 18;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;
@@ -117,10 +118,10 @@ namespace Kurenai::RHI
         // CopyDescriptors・ルートテーブルの再バインドを行う。
         // SRVはDX11と同じく上書きするまで維持され、UAVはDX11がDispatch直後に
         // CSSetUnorderedAccessViewsでnullを張るのに合わせてDispatch直後にnullへ戻す
-        // SRVが16あるのはレイトレーシングのパスがTLAS・G-Buffer・シーンジオメトリを
-        // 1回のディスパッチで同時に読むため。DX12Device.cpp側の同名の定数
+        // SRVが17あるのはレイトレーシングのパス(RT反射)がTLAS・G-Buffer・シーンジオメトリに加えて
+        // bent normal(t16、34章)を1回のディスパッチで同時に読むため。DX12Device.cpp側の同名の定数
         // (ルートシグネチャのSRVレンジ幅)と必ず一致させること
-        static constexpr uint32_t kComputeSrvSlotCount = 16;
+        static constexpr uint32_t kComputeSrvSlotCount = 17;
         static constexpr uint32_t kComputeUavSlotCount = 4;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeSrvHandles[kComputeSrvSlotCount]{};
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeUavHandles[kComputeUavSlotCount]{};

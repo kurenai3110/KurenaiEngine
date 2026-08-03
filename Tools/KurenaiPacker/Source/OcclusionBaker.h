@@ -29,6 +29,11 @@ namespace KurenaiPacker
         // テクセルあたりのレイ本数。多いほどノイズが減るが線形に遅くなる
         uint32_t RayCount = 128;
 
+        // bent normal用のテクセルあたりのレイ本数。
+        // AO側(RayCount)より多いのは、スカラーの平均よりベクトル和のほうが収束が遅いため。
+        // 0にするとbent normalを焼かない(従来どおり遮蔽マップだけを出力する)
+        uint32_t BentNormalRayCount = 256;
+
         // レイの最大長。0 = 自動(モデルのバウンズ対角の10%)。
         // 無限長にすると屋外モデルで地面が空を向いた面まで一様に暗くなるため、
         // 「近傍の遮蔽だけを拾う」ようにこの距離で打ち切る
@@ -36,6 +41,23 @@ namespace KurenaiPacker
 
         // チャート境界のにじみを防ぐために、有効テクセルの外側へ色を広げる幅(テクセル)
         uint32_t DilationPixels = 4;
+
+        // 【UV展開の内部分割】三角形数がこの閾値を超えたメッシュだけ、xatlasへ渡す前に
+        // 空間分割して複数回AddMeshする。0 = 分割しない(従来どおり1メッシュ=1AddMesh)。
+        //
+        // 分割されるのは「xatlasに見せるトポロジー」だけで、遮蔽マップの粒度は変わらない
+        // ―― 分割した全チャンクは1枚の共有アトラスへ詰められるため、出力は従来どおり
+        // メッシュあたり遮蔽マップ1枚(MeshTextures[meshIndex])のままである。
+        //
+        // 【なぜ分割するか】xatlasのComputeChartsはメッシュごとに1タスクで並列化され、
+        // かつチャート統合(mergeCharts)と種まき(Place seeds)がチャートグループ内で
+        // 2乗に効く。連結した単一の巨大メッシュはこの両方を踏み抜き、Chinese Dragon
+        // (871306三角形・1メッシュ)で394秒かかる一方、Sponza(26万三角形・25メッシュ)は
+        // 13秒で終わる。分割すると2乗が表面化せず、コア数ぶんの並列化も効く(22.6.6節)
+        uint32_t UnwrapSplitThreshold = 50000;
+
+        // 分割後の1チャンクあたりの目標三角形数(22.6.6節)
+        uint32_t UnwrapChunkTriangles = 100000;
     };
 
     struct OcclusionBakeResult
@@ -43,6 +65,16 @@ namespace KurenaiPacker
         // メッシュごとの遮蔽マップ(R8、Resolution x Resolution、行優先)。
         // 空のvector = そのメッシュはUV展開に失敗して焼けなかった(遮蔽マップ無しとして扱う)
         std::vector<std::vector<uint8_t>> MeshTextures;
+
+        // メッシュごとのbent normal(RGBA float32、Resolution x Resolution、行優先)。
+        // 1テクセルあたり4要素で、.xyz = bRaw(正規化しない)、.w = 有効フラグ(0または1)。
+        //
+        // 【float32で持つ理由】書き出しはfp16だが、途中のダイレーションと検証をfp32で行う。
+        // 量子化前の値でチェックリスト(length <= 1、aoB >= aoN、既存AOとの一致)を確認しないと、
+        // 見つけた誤差がベイクのバグなのか量子化なのか切り分けられない。
+        // テクセルあたり16バイトになるため、遮蔽マップ(1バイト)の16倍のメモリを使う
+        std::vector<std::vector<float>> MeshBentNormals;
+
         uint32_t Resolution = 0;
         size_t BakedMeshCount = 0;
         size_t SkippedMeshCount = 0;

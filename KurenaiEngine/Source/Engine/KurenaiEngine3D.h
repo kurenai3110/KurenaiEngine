@@ -368,6 +368,8 @@ namespace Kurenai
         // インスタンスごとの前フレームのワールド行列(PrevWorld)を持つ必要がない。
         // 動的オブジェクトを入れる際はObjectConstantsへPrevWorldを追加すること
         std::unique_ptr<RHI::IRHITexture> m_GBufferVelocity;
+        // bent normal(ワールド空間の正規化しない可視方向の平均)。.rgb = bRaw、.a = 有効フラグ
+        std::unique_ptr<RHI::IRHITexture> m_GBufferBentNormal;
 
         // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         // 計算しHDRで書き出す。DeferredLightingパスとSSIL_VisibilityBitmask.hlslの両方から
@@ -812,7 +814,8 @@ namespace Kurenai
             IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス。R=A, G=B, B=Eavg)
             Bloom,              // ブルームのピラミッド最上段(半解像度、HDR)をトーンマッピングして表示
             LightTiles,         // タイルライトカリングのライトグリッド(タイルあたりのライト数)をヒートマップ表示
-            ProbeIrradiance,    // 反射プローブの拡散イラディアンス(m_ProbeDebugIndex番のプローブ)
+            // ProbeIrradiance(反射プローブの拡散イラディアンス)はM11 Stage 3で廃止した
+            // (反射プローブは鏡面専任になった。拡散はDDGIIrradianceで見る)
             ProbePrefilter,     // 反射プローブのプリフィルタ済み鏡面(ミップ0がキャプチャ結果そのもの)
             ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
             ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
@@ -820,6 +823,9 @@ namespace Kurenai
             SceneColorRaw,      // トーンマップ前のHDRシーンカラーをリニアのまま無加工で表示(測定用)
             DDGIIrradiance,     // DDGIのイラディアンスアトラス(オクタヘドラル2D、22章)
             DDGIDistance,       // DDGIの距離モーメントアトラス(R=平均距離、G=平均二乗距離)
+            BentNormal,         // bent normal(34章)。Debug View Gainが1なら軸を色表示、
+                                // 1.5より大きいと長さ(=aoB)をグレースケール表示。
+                                // データを持たないマテリアルはマゼンタで塗る
             WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示(P2)
         };
         DebugView m_DebugView = DebugView::Final;
@@ -976,6 +982,33 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_PrefilterPipelineState;
+        // 拡散イラディアンスの球面調和関数(SH L2)経路(M11 Stage 4a)。CSIrradianceの高速な
+        // 代替で、m_IBLUseSHIrradianceでA/B比較できるようトグルにしてある。詳細は
+        // IBLConvolve.hlsl冒頭のコメントとdocs/Architecture.htmlを参照
+        static constexpr uint32_t kSHCoeffCount = 9; // 実数SH L2(l<=2)の項数
+        // CSProjectSHの射影に使う離散化解像度(1面の1辺のテクセル数)。
+        // 【SourceSkyboxの実解像度とは無関係】スカイボックスはDDS(シーンごとに任意の解像度)や
+        // 手続き空(256)など実行時に変わりうる一方、IRHITextureには解像度を問い合わせる手段が
+        // 無いため、射影側は独立した固定解像度を持つ(IBLConvolve.hlslのSHProjectionSizeコメント参照)。
+        // 64×64×6=24,576テクセルはCSIrradianceの約9,750万サンプルに対し十分密で、
+        // 9個の係数を求めるだけの積分には(理論上は32でも足りる範囲)余裕を持たせた値
+        static constexpr uint32_t kSHProjectionSize = 64;
+        std::unique_ptr<RHI::IRHIShader> m_ProjectSHComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ProjectSHPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_ProjectSHFinalComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ProjectSHFinalPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_EvaluateSHComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_EvaluateSHPipelineState;
+        // CSProjectSHのグループごとの部分和(9係数×グループ数)と、CSProjectSHFinalが
+        // 合算した最終係数(9個)。どちらもRGB(float4のxyz、wは詰め物)
+        std::unique_ptr<RHI::IRHIBuffer> m_SHPartialSumsBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> m_SHCoefficientsBuffer;
+        // trueならCSIrradianceの代わりにSH L2経路を使う。既定false(検証で選べるようにしてあるが、
+        // どちらを既定にするかはリンギングの実測(ProbeTestのエミッシブ帯周り)で決めること。
+        // m_IBLUseDedicatedIrradiance/デバッグビューでイラディアンス焼き込みが要る場面でのみ意味を持つ
+        bool m_IBLUseSHIrradiance = Defaults::IBLUseSHIrradiance;
+        // SHのウィンドウ関数(Sloan)の強さ。0=無効(既定)。リンギングが実測で出た場合のつまみ
+        float m_SHWindowLambda = Defaults::SHWindowLambda;
         // プリフィルタ済み鏡面のミップごとの畳み込みで使うラフネス値を渡す専用の定数バッファ
         std::unique_ptr<RHI::IRHIBuffer> m_IBLPrefilterConstantBuffer;
         // デバッグ表示(Render Targets)で確認するプリフィルタ済み鏡面マップのミップレベル
@@ -997,6 +1030,34 @@ namespace Kurenai
         // 畳み込み処理自体はいつでも検証できるよう残してあり、このトグルをONにすると
         // その場で焼いて(m_IBLIrradianceBaked)従来経路に切り替わる
         bool m_IBLUseDedicatedIrradiance = Defaults::IBLUseDedicatedIrradiance;
+        // bent normalによる遮蔽(34章)。FrameConstants::OcclusionParamsへ載る
+        bool m_BentNormalAOSource = Defaults::BentNormalAOSource;
+        // スペキュラ遮蔽の方式。FrameConstants.OcclusionParams.yへ数値として渡し、
+        // SpecularEnergy.hlsliのComposeSpecularOcclusionが切り替える。
+        // 値はComposeSpecularOcclusionのsoModeと一致させること
+        enum class SpecularOcclusionMode
+        {
+            Legacy = 0,  // Frostbite近似(方向を見ない従来近似)
+            Cone = 1,    // 球冠交差(SpecularOcclusionBand。d >= av+as で厳密に0になる)
+            SG = 2,      // 球面ガウス(SpecularOcclusionSG、34.11節。常に正なので凹部が純黒へ潰れない)
+        };
+        SpecularOcclusionMode m_SpecularOcclusionMode =
+            static_cast<SpecularOcclusionMode>(Defaults::SpecularOcclusionMode);
+        bool m_MultiBounceAOEnabled = Defaults::MultiBounceAOEnabled;
+        // 環境光(間接光)の拡散・鏡面それぞれの倍率。FrameConstants.IBLParams.y / .z として渡す。
+        //
+        // m_IBLIntensityが拡散と鏡面へ一様に掛かる「環境光全体の明るさ」なのに対し、こちらは
+        // 両者の比率を意図的に崩すための画作り用のつまみ。金属やガラスの映り込みだけを強めたい、
+        // 逆に環境の照り返しを残したまま反射を抑えたい、といった調整がIBL強度単独ではできないため
+        // 分けている。
+        //
+        // 【IBLの有効/無効に関わらず効く】無効時の定数色アンビエントにも同じ倍率を掛ける。
+        // 片方にしか効かないとトグルを切り替えたときにつまみの意味が変わり、比較にならないため。
+        // 【間接光にのみ効く】直接光・自発光には掛けない(遮蔽マップと同じ方針。22.1節)。
+        // SSILの間接拡散光にも掛けない ―― あれはスクリーンスペースで得た周囲のサーフェスからの
+        // 光であって、ここで言う環境(空・プローブ)由来のアンビエントとは別の項のため
+        float m_AmbientDiffuseScale = Defaults::AmbientDiffuseScale;
+        float m_AmbientSpecularScale = Defaults::AmbientSpecularScale;
         // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)の方式。
         // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立した選択肢にしている。
         // FrameConstants.ShadowParams.wへ数値として渡し、共有ヘッダーSpecularEnergy.hlsliを
@@ -1056,8 +1117,9 @@ namespace Kurenai
         // TextureCube宣言のまま。これによりIBLの畳み込みシェーダーを一切変更せず再利用できる)。
         // プローブは1つずつ順に焼くため1枚で足りる
         std::unique_ptr<RHI::IRHITexture> m_ProbeRadianceCube;
-        // 畳み込み結果(プローブごと)。DeferredLighting.hlslがTextureCubeArrayとして読む
-        std::unique_ptr<RHI::IRHITexture> m_ProbeIrradianceArray;
+        // 畳み込み結果(プローブごと)。DeferredLighting.hlslがTextureCubeArrayとして読む。
+        // 拡散イラディアンス側の配列(旧m_ProbeIrradianceArray)はM11 Stage 3で廃止した
+        // (反射プローブは鏡面専任になった。拡散はDDGIへ一本化)
         std::unique_ptr<RHI::IRHITexture> m_ProbePrefilteredArray;
         // 距離キューブ(プローブごと、19.12節)。プローブ位置から各方向の被写体までのワールド距離。
         // 放射輝度と違い畳み込まないため、キャプチャからキューブ配列へ直接書き込む
@@ -1125,15 +1187,31 @@ namespace Kurenai
             // 変化していないフレームのコストはゼロだが、変化したフレームは全プローブぶんの
             // フルベイクが1フレームに集中する
             OnDemand,
-            // 上に加えて、毎フレーム1面ずつ焼き直す。6面揃った時点でそのプローブを畳み込み、
-            // 次のプローブへ回る(ラウンドロビン)。全プローブを毎フレーム焼くとドローコールが
-            // プローブ数×6倍になり非現実的なため、時間分割を既定の実装方式にしている
+            // 上に加えて、1プローブを12フレームかけて焼き直し、次のプローブへ回る(ラウンドロビン)。
+            // 内訳は「6フレームで1面ずつキャプチャ」→「6フレームで1面ぶんのミップチェーンずつ畳み込み」
+            // (M11 Stage 5。畳み込みの割り当ての根拠はKurenaiEngine3D.cppのプリフィルタフェーズ参照)。
+            // 全プローブを毎フレーム焼くとドローコールがプローブ数×6倍になり非現実的なため、
+            // 時間分割を既定の実装方式にしている
             Realtime,
         };
         ProbeUpdateMode m_ProbeUpdateMode = ProbeUpdateMode::Baked;
         // Realtimeの進行状態。次に焼くプローブ番号と面番号
         uint32_t m_ProbeRealtimeProbeIndex = 0;
         uint32_t m_ProbeRealtimeFace = 0;
+        // M11 Stage 5: プリフィルタ畳み込み(6ミップ×6面=36ディスパッチ)を1フレームへ集中させず、
+        // kProbeRealtimePrefilterStepsPerFrameずつ複数フレームへ分ける(19.8/19.10節が
+        // 「6フレームに1回のスパイク」と呼んでいた挙動を無くすため)。
+        // kProbePrefilterStepCount(36)が「プリフィルタ中でない」を表す番兵値
+        static constexpr uint32_t kProbePrefilterStepCount = kIBLPrefilterMipLevels * kCubeFaceCount;
+        // 1フレームに進めるステップ数。ステップ番号は「面を外側・ミップを内側」で(face, mip)へ
+        // 割り当てるため(KurenaiEngine3D.cppのRealtimeプリフィルタフェーズのコメント参照)、
+        // ここを kIBLPrefilterMipLevels と一致させると
+        // 「1フレーム = 1面ぶんのミップチェーン全部」となり6フレームすべてが厳密に同じ量になる。
+        // 一致させないとフレームごとにミップ0の面の数が0個/1個/2個とばらつき、
+        // ミップ0が畳み込み全体の75%を占めるためそのままスパイクの高さのばらつきになる。
+        // capture フェーズ(6面=6フレーム)ともデューティ比が対称になる
+        static constexpr uint32_t kProbeRealtimePrefilterStepsPerFrame = kIBLPrefilterMipLevels;
+        uint32_t m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
         // OnDemandの変化検出用。最後にフルベイクを発行した時点の状態の署名。
         // 毎フレームの署名と突き合わせ、変わっていれば焼き直しを要求する
         uint64_t m_ProbeBakeSignature = 0;

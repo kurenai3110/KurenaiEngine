@@ -66,5 +66,20 @@ PSOutput PSMain(PSInput input)
     output.Material = float4(metallic, roughness, ao, 0.0f);
     output.Emissive = float4(emissive, 1.0f);
     output.Velocity = currentUv - previousUv;
+
+    // bent normalも遮蔽マップと同じLightmapUVで引く(焼かれている空間が同じ)。
+    //
+    // 【接空間で焼かれている】ワールド(モデル)空間で焼くと「遮蔽なし = N」になるため、
+    // 曲面では遮蔽が無くても隣り合うテクセルの向きが違い、ミップ生成やバイリニア補間で
+    // 平均したときに打ち消し合って長さが縮む。消費側はその長さをaoB(遮蔽率)として
+    // 読むので、縮小するほど暗くなり細かい黒い点になる。接空間なら遮蔽なしは曲率に
+    // よらず常に(0,0,1)なので、平均しても長さ1のまま保たれる(34章)。
+    //
+    // ベイカーが使う基底は上のComputeTangentFrameとまったく同じ手順で組まれている。
+    // ここでmul(bentTS, tbn)と書けるのは、tbnの行が順にT/B/Nだから。
+    // 直交行列なので長さ(=aoB)は変換で保たれる ―― 遮蔽の強さが座標変換で変わってはいけない
+    const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
+    output.BentNormal = float4(mul(bentSample.xyz, tbn), bentSample.a);
+
     return output;
 }

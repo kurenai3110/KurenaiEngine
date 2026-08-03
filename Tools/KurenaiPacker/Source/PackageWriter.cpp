@@ -459,6 +459,115 @@ namespace KurenaiPacker
             }
         }
 
+        // === bent normal(RGBA16F、圧縮なし)の書き出し ===========================
+        //
+        // 遮蔽マップと違って圧縮しない。BC4/BC7はいずれも符号なしで、bRawの負の成分を表現できない
+        // (BC6H_SF16なら符号付きで扱えるが、第2段階として先送りする)。
+        //
+        // fp32ではなくfp16なのは、仮数11bitあればモンテカルロノイズ(256本で数%)より
+        // 桁違いに細かく、精度が要る検証はベイカー内のfloat32で済ませているため。容量は半分になる
+        std::vector<int32_t> bentNormalIndexByMesh(sourceModel.Meshes.size(), kNoTextureIndex);
+        if (options.BakedOcclusion != nullptr && options.BakedOcclusion->Resolution > 0)
+        {
+            const OcclusionBakeResult& baked = *options.BakedOcclusion;
+            const uint32_t resolution = baked.Resolution;
+            const fs::path bentDirectory = outputDirectory / L"_BentNormal";
+
+            for (size_t meshIndex = 0; meshIndex < sourceModel.Meshes.size(); ++meshIndex)
+            {
+                if (meshIndex >= baked.MeshBentNormals.size() || baked.MeshBentNormals[meshIndex].empty())
+                {
+                    continue;
+                }
+                const std::vector<float>& pixels = baked.MeshBentNormals[meshIndex];
+
+                try
+                {
+                    // ミップはfp32のまま生成してから一括でfp16へ落とす。
+                    // ボックスフィルタが「ベクトルの平均」になる順序であることが重要で、
+                    // 長さを取ってから平均するとJensenの不等式より必ず過大評価になる(34章)
+                    DirectX::ScratchImage source;
+                    HRESULT hr = source.Initialize2D(DXGI_FORMAT_R32G32B32A32_FLOAT, resolution, resolution, 1, 1);
+                    if (FAILED(hr))
+                    {
+                        throw std::runtime_error("bent normalの画像確保に失敗しました");
+                    }
+                    const DirectX::Image* destImage = source.GetImage(0, 0, 0);
+                    const size_t rowBytes = static_cast<size_t>(resolution) * 4 * sizeof(float);
+                    for (uint32_t y = 0; y < resolution; ++y)
+                    {
+                        std::memcpy(
+                            destImage->pixels + y * destImage->rowPitch,
+                            pixels.data() + static_cast<size_t>(y) * resolution * 4,
+                            rowBytes);
+                    }
+
+                    // 遮蔽マップと同じ理由でTEX_FILTER_FORCE_NON_WICを必ず付ける
+                    // (WIC経路は非8bit形式を扱えずE_FAILで落ちる)
+                    DirectX::ScratchImage mipChain;
+                    hr = DirectX::GenerateMipMaps(
+                        *destImage, DirectX::TEX_FILTER_DEFAULT | DirectX::TEX_FILTER_FORCE_NON_WIC, 0, mipChain);
+                    if (FAILED(hr))
+                    {
+                        throw std::runtime_error("bent normalのミップ生成に失敗しました");
+                    }
+
+                    DirectX::ScratchImage half;
+                    hr = DirectX::Convert(
+                        mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(),
+                        DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        DirectX::TEX_FILTER_DEFAULT | DirectX::TEX_FILTER_FORCE_NON_WIC,
+                        DirectX::TEX_THRESHOLD_DEFAULT, half);
+                    if (FAILED(hr))
+                    {
+                        throw std::runtime_error("bent normalのfp16変換に失敗しました");
+                    }
+
+                    DirectX::Blob blob;
+                    hr = DirectX::SaveToDDSMemory(
+                        half.GetImages(), half.GetImageCount(), half.GetMetadata(),
+                        DirectX::DDS_FLAGS_NONE, blob);
+                    if (FAILED(hr))
+                    {
+                        throw std::runtime_error("bent normalのDDSエンコードに失敗しました");
+                    }
+
+                    PackedTextureHeader texHeader{};
+                    std::memcpy(texHeader.Magic, kPackedTextureMagic, sizeof(kPackedTextureMagic));
+                    texHeader.Version = kPackedTextureVersion;
+                    texHeader.Flags = 0u; // 方向ベクトルは色ではないのでリニア
+                    texHeader.PayloadSize = blob.GetBufferSize();
+
+                    const fs::path ktexPath = bentDirectory /
+                        (fs::path(outputKModelPath).stem().wstring() + L"_Mesh" + std::to_wstring(meshIndex) + L".ktex");
+                    fs::create_directories(bentDirectory, ec);
+
+                    std::vector<uint8_t> fileBytes(sizeof(texHeader) + blob.GetBufferSize());
+                    std::memcpy(fileBytes.data(), &texHeader, sizeof(texHeader));
+                    std::memcpy(fileBytes.data() + sizeof(texHeader), blob.GetBufferPointer(), blob.GetBufferSize());
+                    WriteFileAtomic(ktexPath, fileBytes.data(), fileBytes.size());
+
+                    const fs::path relativeToModel = fs::relative(ktexPath, outputDirectory, ec);
+                    if (ec)
+                    {
+                        throw std::runtime_error("bent normalの相対パス計算に失敗しました");
+                    }
+
+                    TextureEntry entry{};
+                    entry.Flags = 0u;
+                    texturePathStrings.push_back(ToPackagePathString(relativeToModel));
+                    bentNormalIndexByMesh[meshIndex] = static_cast<int32_t>(textureEntries.size());
+                    textureEntries.push_back(entry);
+                    ++result.BentNormalBaked;
+                }
+                catch (const std::exception& e)
+                {
+                    std::cerr << "[KurenaiPacker][Warning] bent normalの書き出しに失敗しました(bent normal無しとして扱います) メッシュ["
+                        << meshIndex << "]: " << e.what() << "\n";
+                }
+            }
+        }
+
         // === 4. .kgeomを書き出す(メッシュ順に頂点/インデックスブロックを16バイト境界で連結) ===
         std::vector<uint8_t> geometryPayload;
         std::vector<MeshEntry> meshEntries(sourceModel.Meshes.size());
@@ -518,6 +627,9 @@ namespace KurenaiPacker
                 entry.OcclusionTextureIndex = resolveTextureIndex(meshTextureRefs[i].Occlusion);
                 entry.OcclusionStrength = mesh.OcclusionStrength;
             }
+            // bent normalはベイクでしか作られない(ソースモデル由来のものは存在しない)
+            entry.BentNormalTextureIndex = bentNormalIndexByMesh[i];
+            entry.Reserved2 = 0u;
 
             result.VertexCount += mesh.Vertices.size();
             result.IndexCount += mesh.Indices.size();

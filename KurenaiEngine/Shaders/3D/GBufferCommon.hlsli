@@ -49,6 +49,9 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams2;
     float4 DDGIParams3;
     float4 DDGIParams4;
+    // bent normalによる遮蔽用(34章)。このシェーダでは未使用だが、C++側でTimeParamsより手前に
+    // 置かれているためオフセット合わせのためだけに宣言する
+    float4 OcclusionParams;
     // 水面用(末尾に追加、P2)。x=水面法線マップのスクロールオフセット(0〜1、CPU側で
     // 既にfmod済み)、y=波のスケール倍率(m_WaterWaveScale、層ごとのUVスケールに掛ける)、
     // z=波の強さ(m_WaterWaveStrength、0〜1、距離減衰のweightに掛ける)、w=未使用。
@@ -98,6 +101,10 @@ Texture2D EmissiveTexture : register(t3);
 // t4はTransparent.hlsl/ProbeCapture.hlslがカスケードシャドウマップ配列に使っているため、
 // マテリアルテクスチャを読む3パスで共通して空いている最初のスロットがt5になる
 Texture2D OcclusionTexture : register(t5);
+// bent normal(RGBA16F)。遮蔽マップと同じライトマップUV空間へ焼かれている。
+// t4はカスケードシャドウ配列、t5は遮蔽マップが使っているためt6を割り当てる。
+// Water.hlslが使う水面法線マップはこの次のt7になる(t6はGBuffer/Water両方で共通に必要)
+Texture2D BentNormalTexture : register(t6);
 
 struct VSInput
 {
@@ -133,6 +140,9 @@ struct PSOutput
     float4 Emissive : SV_TARGET3;
     // モーションベクター(この画素の中身が前フレームから今フレームまでに動いた量、UV単位)
     float2 Velocity : SV_TARGET4;
+    // bent normal(正規化しない可視方向の平均、ワールド空間)。.rgb = bRaw、.a = 有効フラグ。
+    // R11G11B10_Floatは使えない ―― 符号なしのため負の成分が落ちる(34章)
+    float4 BentNormal : SV_TARGET5;
 };
 
 // クリップ空間座標を画面UV([0,1]、左上原点)へ変換する。

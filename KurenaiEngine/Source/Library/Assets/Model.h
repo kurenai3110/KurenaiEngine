@@ -34,6 +34,14 @@ namespace Kurenai::Assets
         // SSAO/SSILがスクリーンスペースの制約で拾えない、布の折り目や狭い隙間のような
         // 細部の遮蔽を補う。間接光(IBL・SSILの間接拡散光)にのみ効き、直接光と自発光には掛からない
         RHI::IRHITexture* OcclusionTexture = nullptr;
+        // bent normal(正規化しない可視方向の平均、RGBA16F)。ライトマップUV空間で、
+        // .rgb = bRaw、.a = 有効フラグ。未指定時は黒1x1(=.a が0 = データ無し)。
+        //
+        // 遮蔽マップが「どれだけ隠れているか」しか持たないのに対し、こちらは
+        // 「どの方向が開いているか」を持つ。消費側が軸 normalize(bRaw)・aoB = length(bRaw)・
+        // aoN = dot(N, bRaw) の3つへ分解し、スペキュラ遮蔽の方向依存(壁を向いた反射だけを
+        // 暗くする)とディフューズの方向バイアスを扱う(34章)
+        RHI::IRHITexture* BentNormalTexture = nullptr;
         float MetallicFactor = 0.0f;
         // ソースデータに値が無い場合はkInvalidMaterialFactor(負値)が入る。シェーダー側は
         // 負値を「係数の指定なし」とみなし1.0(テクスチャの値をそのまま使う)として扱う

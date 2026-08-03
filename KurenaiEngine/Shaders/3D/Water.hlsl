@@ -7,10 +7,11 @@
 #include "GBufferCommon.hlsli"
 
 // 水面法線マップ(タイル可能な接線空間法線、Assets/Packed/MontSaintMichelStudy/WaterNormal.png)。
-// t4はTransparent.hlsl/ProbeCapture.hlslがカスケードシャドウマップに、t5はOcclusionTextureに
-// 使っているため、GBuffer系パスで次に空いているt6を使う。[Water]NormalMapが空文字列の
+// t4はTransparent.hlsl/ProbeCapture.hlslがカスケードシャドウマップに、t5はOcclusionTextureに、
+// t6はBentNormalTexture(34章、GBufferCommon.hlsliで宣言)に使っているため、GBuffer系パスで
+// 次に空いているt7を使う。[Water]NormalMapが空文字列の
 // シーンではC++側(KurenaiEngine3D)が1x1のフラット法線(128,128,255,255)をここへバインドする
-Texture2D WaterNormalTexture : register(t6);
+Texture2D WaterNormalTexture : register(t7);
 
 // UDN(Unity風のDerivative Normal)ブレンド用、2層のUVスケール・スクロール方向・速度倍率。
 // Scene::WaterWaveScale/WaterWaveStrengthはFrameConstants.TimeParams.y/zとして渡り、下の
@@ -92,5 +93,16 @@ PSOutput PSMain(PSInput input)
     output.Material = float4(metallic, roughness, ao, kMaterialIDWater);
     output.Emissive = float4(emissive, 1.0f);
     output.Velocity = currentUv - previousUv;
+
+    // bent normal(34章)。水面もG-Bufferの同じパス(同じレンダーターゲット構成)で描くため、
+    // SV_TARGET5を書かないとこのピクセルのbent normalが未定義になる。
+    // 引き方はGBuffer.hlslのPSMainと同じだが、法線は「波を合成した後のN」ではなく
+    // ジオメトリ由来のtbnで変換する ―― bent normalは焼いた時点の面の向きに対する
+    // 接空間の値であって、実行時に揺らした法線とは別物のため。
+    // 水面メッシュはbent normalを焼いていないので、実際にはKurenaiPackerが差す黒1x1が
+    // 引かれ、a=0(データ無し)として下流のライティングが従来のAOへ落ちる
+    const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
+    output.BentNormal = float4(mul(bentSample.xyz, tbn), bentSample.a);
+
     return output;
 }

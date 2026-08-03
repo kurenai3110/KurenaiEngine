@@ -207,6 +207,24 @@ namespace Kurenai::Assets
                 return m_FlatNormal;
             }
 
+            // bent normalを持たないマテリアルのフォールバック。
+            //
+            // 【白ではなく黒】bent normalは「遮蔽なし」を定数テクスチャで表現できない ――
+            // 遮蔽なしのbRawは法線Nそのもので、ピクセルごとに違うため。
+            // アルファ0を「データ無し」の明示的なフラグとして使い、消費側で
+            // axis = N / aoB = 1(遮蔽なし)へ落とさせる。長さ0を遮蔽なしと解釈させると
+            // 完全遮蔽(SO=0)と区別がつかなくなる(34章)
+            RHI::IRHITexture* GetBlack()
+            {
+                if (!m_Black)
+                {
+                    auto texture = m_Device.CreateSolidColorTexture(0, 0, 0, 0);
+                    m_Black = texture.get();
+                    m_Model.Textures.push_back(std::move(texture));
+                }
+                return m_Black;
+            }
+
             // 読み込みに失敗したBaseColor/MetallicRoughnessテクスチャの代替。目立つ色にすることで
             // モデル全体の読み込みは継続しつつ問題箇所が分かるようにする
             RHI::IRHITexture* GetMagentaPlaceholder()
@@ -225,6 +243,7 @@ namespace Kurenai::Assets
             Model& m_Model;
             RHI::IRHITexture* m_White = nullptr;
             RHI::IRHITexture* m_FlatNormal = nullptr;
+            RHI::IRHITexture* m_Black = nullptr;
             RHI::IRHITexture* m_Magenta = nullptr;
         };
 
@@ -251,7 +270,11 @@ namespace Kurenai::Assets
                     {
                         return less(a.MetallicRoughnessTexture, b.MetallicRoughnessTexture);
                     }
-                    return less(a.OcclusionTexture, b.OcclusionTexture);
+                    if (a.OcclusionTexture != b.OcclusionTexture)
+                    {
+                        return less(a.OcclusionTexture, b.OcclusionTexture);
+                    }
+                    return less(a.BentNormalTexture, b.BentNormalTexture);
                 });
         }
     }
@@ -404,7 +427,8 @@ namespace Kurenai::Assets
                 mesh.NormalTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
                 mesh.MetallicRoughnessTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
                 mesh.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                mesh.OcclusionTextureIndex >= static_cast<int32_t>(textureEntries.size()))
+                mesh.OcclusionTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                mesh.BentNormalTextureIndex >= static_cast<int32_t>(textureEntries.size()))
             {
                 throw std::runtime_error("メッシュ[" + std::to_string(i) + "]が範囲外のテクスチャを参照しています: " + WideToUtf8(filePath));
             }
@@ -446,6 +470,17 @@ namespace Kurenai::Assets
             }
             RHI::IRHITexture* texture = resolvedTextures[static_cast<size_t>(index)];
             return texture ? texture : textureLoader.GetFlatNormal();
+        };
+        // 読み込みに失敗した場合も黒(=有効フラグ0)へ落とす。マゼンタのような目立つ色にすると
+        // bRawとして解釈された結果が不定になるため、ここは「データ無し」で縮退させるのが正しい
+        auto resolveBentNormal = [&](int32_t index) -> RHI::IRHITexture*
+        {
+            if (index == kNoTextureIndex)
+            {
+                return textureLoader.GetBlack();
+            }
+            RHI::IRHITexture* texture = resolvedTextures[static_cast<size_t>(index)];
+            return texture ? texture : textureLoader.GetBlack();
         };
 
         // レイトレーシング用の頂点属性・インデックスを作るか。デバイスが非対応なら作らない
@@ -511,6 +546,8 @@ namespace Kurenai::Assets
             // BaseColor/MetallicRoughnessと同じ解決を再利用する
             outMesh.OcclusionTexture = resolveBaseColorOrMetallicRoughness(mesh.OcclusionTextureIndex);
             outMesh.OcclusionStrength = mesh.OcclusionStrength;
+            // bent normalだけは白ではなく黒(=有効フラグ0)へ落とす。理由はGetBlackのコメント参照
+            outMesh.BentNormalTexture = resolveBentNormal(mesh.BentNormalTextureIndex);
             outMesh.MetallicFactor = mesh.MetallicFactor;
             outMesh.RoughnessFactor = mesh.RoughnessFactor;
             outMesh.AlphaCutoff = mesh.AlphaCutoff;
