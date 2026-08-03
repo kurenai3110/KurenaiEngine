@@ -3,6 +3,13 @@
 // 括り出してある(P2: 水面マテリアル基盤)
 #include "GBufferCommon.hlsli"
 
+// bent normal(接空間で焼かれている。遮蔽マップと同じライトマップUV空間、34章)。
+// t0〜t3・t5はGBufferCommon.hlsliのマテリアルテクスチャが使用中、t4はTransparent.hlsl/
+// ProbeCapture.hlslがカスケードシャドウマップ配列に使っているためt6。
+// **Water.hlslはこのテクスチャを読まない**(水面はbent normalを焼いていない)ため、
+// 水面法線マップはt7に置いてある
+Texture2D BentNormalTexture : register(t6);
+
 PSOutput PSMain(PSInput input)
 {
     // baseColor = baseColorTexture * baseColorFactor(glTF仕様)。BaseColorTextureIndexが
@@ -66,5 +73,20 @@ PSOutput PSMain(PSInput input)
     output.Material = float4(metallic, roughness, ao, 0.0f);
     output.Emissive = float4(emissive, 1.0f);
     output.Velocity = currentUv - previousUv;
+
+    // bent normalも遮蔽マップと同じLightmapUVで引く(焼かれている空間が同じ)。
+    //
+    // 【接空間で焼かれている】ワールド(モデル)空間で焼くと「遮蔽なし = N」になるため、
+    // 曲面では遮蔽が無くても隣り合うテクセルの向きが違い、ミップ生成やバイリニア補間で
+    // 平均したときに打ち消し合って長さが縮む。消費側はその長さをaoB(遮蔽率)として
+    // 読むので、縮小するほど暗くなり細かい黒い点になる。接空間なら遮蔽なしは曲率に
+    // よらず常に(0,0,1)なので、平均しても長さ1のまま保たれる(34章)。
+    //
+    // ベイカーが使う基底は上のComputeTangentFrameとまったく同じ手順で組まれている。
+    // ここでmul(bentTS, tbn)と書けるのは、tbnの行が順にT/B/Nだから。
+    // 直交行列なので長さ(=aoB)は変換で保たれる ―― 遮蔽の強さが座標変換で変わってはいけない
+    const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
+    output.BentNormal = float4(mul(bentSample.xyz, tbn), bentSample.a);
+
     return output;
 }

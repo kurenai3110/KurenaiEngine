@@ -80,11 +80,12 @@ namespace Kurenai::RHI
         // 未バインドのスロットを読むと0が返るというDX11と同じ挙動になる。
         // 反射プローブ(19章)がDeferredLighting.hlslでt11〜t14(イラディアンス配列・プリフィルタ配列・
         // 影響範囲バッファ・距離キューブ配列)を、DDGI(22章)がt15〜t16(イラディアンスアトラス・
-        // 距離モーメントアトラス)を使うため17スロット必要だったところへ、P9で空パラメータ
-        // (GPUSkyParameters、SkyIntegrate.hlslが書く構造化バッファ)がt17を使うため18スロットへ
-        // 増やした。DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)およびDX11CommandList
+        // 距離モーメントアトラス)を使い、さらに空パラメータの構造化バッファ・bent normalの
+        // G-Buffer(34章)・雲の3Dノイズ2枚・大気散乱のSkyView LUTを使うため21スロット必要。
+        // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
+        // DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)およびDX11CommandList
         // 側の同名の定数と必ず一致させること
-        static constexpr uint32_t kTextureSlotCount = 21; // 20→21(P14b): 大気散乱のSkyView LUT 1枚ぶん
+        static constexpr uint32_t kTextureSlotCount = 21;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;
@@ -119,10 +120,10 @@ namespace Kurenai::RHI
         // CopyDescriptors・ルートテーブルの再バインドを行う。
         // SRVはDX11と同じく上書きするまで維持され、UAVはDX11がDispatch直後に
         // CSSetUnorderedAccessViewsでnullを張るのに合わせてDispatch直後にnullへ戻す
-        // SRVが16あるのはレイトレーシングのパスがTLAS・G-Buffer・シーンジオメトリを
-        // 1回のディスパッチで同時に読むため。DX12Device.cpp側の同名の定数
+        // SRVが17あるのはレイトレーシングのパス(RT反射)がTLAS・G-Buffer・シーンジオメトリに加えて
+        // bent normal(t16、34章)を1回のディスパッチで同時に読むため。DX12Device.cpp側の同名の定数
         // (ルートシグネチャのSRVレンジ幅)と必ず一致させること
-        static constexpr uint32_t kComputeSrvSlotCount = 16;
+        static constexpr uint32_t kComputeSrvSlotCount = 17;
         static constexpr uint32_t kComputeUavSlotCount = 4;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeSrvHandles[kComputeSrvSlotCount]{};
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeUavHandles[kComputeUavSlotCount]{};

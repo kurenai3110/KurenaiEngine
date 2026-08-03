@@ -47,6 +47,12 @@
 //         そのままグレースケール表示する(水面=白、それ以外=黒)。0/1の二値でジオメトリの縁を
 //         跨いで補間されると意味のない中間値になるため、Mode 1/2/5/7/14と同じくDataSamplerで
 //         生値のまま読む
+//      19=bent normal(34章)。.rgb=正規化しないbRaw、.a=有効フラグ。有効フラグが立っていない
+//         テクセルはマゼンタで塗る。Gain=1で軸の向きを色表示、Gain>1.5で長さ(=aoB)を
+//         グレースケール表示する。生値を読むのでDataSampler側。
+//         **番号を足すときは上の分岐と重複していないか必ず確かめること** ——
+//         この表示はもともと15番だったが、15番はDDGIのイラディアンスアトラスが先にreturnして
+//         しまうため到達できていなかった(landscape-water-skyのマージで発見して19番へ移した)
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
@@ -247,7 +253,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     // これらだけDataSamplerで引く。それ以外は色バッファなので、レターボックスの拡縮で
     // ブロック状にならないようColorSamplerで引く。
     // Modeは定数バッファ由来で波面内で一様のため、この分岐のコストは実質ゼロ
-    const bool readsRawData = (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14 || Mode == 17);
+    // Mode 19(bent normal)は、masterでは15番だった。しかし15番はその手前にあるDDGIの
+    // イラディアンスアトラスの分岐が先に return してしまうため、bent normalの表示へ到達できて
+    // いなかった(このマージで発見して番号を移した)。番号を足すときは上の分岐と重複していないか
+    // 必ず確かめること
+    const bool readsRawData =
+        (Mode == 1 || Mode == 2 || Mode == 5 || Mode == 7 || Mode == 14 || Mode == 17 || Mode == 19);
     float4 sourceColor = readsRawData
         ? SourceTexture.Sample(DataSampler, input.UV)
         : SourceTexture.Sample(ColorSampler, input.UV);
@@ -318,6 +329,29 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 速い動きを見たいときはGainを下げ、静止に近い微小な速度を見たいときは上げる
         float2 encoded = 0.5f + velocityPixels * (Gain / 20.0f);
         return float4(saturate(encoded), 0.5f, 1.0f);
+    }
+
+    if (Mode == 19)
+    {
+        // bent normal(34章)。.rgb = 正規化しないbRaw、.a = 有効フラグ。
+        // 【15番から19番へ移した】15番はこの関数の手前にあるDDGIのイラディアンスアトラスの
+        // 分岐が先に return するため、ここまで到達できていなかった
+        // 有効フラグが立っていないテクセル(bent normalを持たないマテリアル)は
+        // 「データ無し」がひと目で分かるようマゼンタで塗る。
+        // 軸は方向なので *0.5+0.5 で色にし、Gainで長さ(=aoB)の表示へ切り替える:
+        //   Gain = 1 … 軸の向きを色で見る(法線表示と同じ読み方)
+        //   Gain > 1 … 長さをグレースケールで見る(遮蔽が強いほど暗い)
+        if (sourceColor.a < 0.5f)
+        {
+            return float4(1.0f, 0.0f, 1.0f, 1.0f);
+        }
+        const float aoB = length(sourceColor.rgb);
+        if (Gain > 1.5f)
+        {
+            return float4(aoB, aoB, aoB, 1.0f);
+        }
+        const float3 axis = aoB > 1e-3f ? sourceColor.rgb / aoB : float3(0.0f, 0.0f, 0.0f);
+        return float4(axis * 0.5f + 0.5f, 1.0f);
     }
 
     return float4(sourceColor.rgb * Gain, 1.0f);

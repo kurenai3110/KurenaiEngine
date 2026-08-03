@@ -93,6 +93,14 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams2;
     float4 DDGIParams3;
     float4 DDGIParams4;
+    // bent normalによる遮蔽(34章)。DeferredLighting.hlslと必ず同じ値を読むこと。
+    //
+    // 【masterではここでDDGIParams0〜4の5本が抜けていた】cbufferは宣言順レイアウトなので、
+    // 5本(80バイト)飛ばした位置を OcclusionParams として読んでいた——実体は DDGIParams0
+    // (GIボリュームの最小コーナーのワールド座標)で、その y をスペキュラ遮蔽の方式番号として
+    // 解釈していた。つまり**GIボリュームの高さでSSRの遮蔽方式が変わっていた**。
+    // landscape-water-skyのマージで、この5本を宣言することで直した
+    float4 OcclusionParams;
     float4 TimeParams;
     // 空の解析評価用(P3で追加)。水面の解析空フォールバック(P4、下記MakeSkyParameters参照)が
     // 読む。DeferredLighting.hlslのFrameConstants宣言と同じ意味を持つ値なのでそちらのコメントも
@@ -158,6 +166,9 @@ Texture2D AlbedoTexture : register(t4);
 Texture2D AOTexture : register(t5);
 // split-sum近似の第2項、BRDF積分LUT
 Texture2D BRDFLUTTexture : register(t6);
+// bent normal(GBuffer.hlslがSV_TARGET5へ書いたワールド空間のbRaw)。
+// 【masterではt11だったが、t11は平面反射(P6)が使っているためt16へ移した】(34章)
+Texture2D BentNormalTexture : register(t16);
 
 // プリフィルタ済み鏡面(t7)・プローブのキューブマップ配列(t8)・プローブの影響範囲バッファ(t9)・
 // プローブの距離キューブ(t10)の宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みは
@@ -381,10 +392,18 @@ float4 PSMain(PSInput input) : SV_TARGET
     // aoの合成式はDeferredLighting.hlslのPSMainとまったく同じでなければならない
     // (スクリーンスペースの遮蔽 × マテリアルの遮蔽マップ)。ズレるとSSRが適用される領域と
     // されない領域の境界に段差が出る
-    const float ao = AOTexture.Sample(ColorSampler, input.UV).a * materialAO;
+    const float ssao = AOTexture.Sample(ColorSampler, input.UV).a;
+    // bent normalもDeferredLighting.hlslとまったく同じ引き方をすること。
+    // 反射ベクトルも同じものを渡す。あちらはreflect(-V, N)でnormalizeを挟まないが、
+    // VとNが単位ベクトルならreflectは長さを保つので同じ向き・同じ長さになる
+    const BentOcclusion bent = DecodeBentOcclusion(BentNormalTexture.Sample(DataSampler, input.UV), N);
+    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(34.11節)。
+    // DeferredLighting.hlslとまったく同じ読み方をすること(段差防止)
+    const int soMode = (int)(OcclusionParams.y + 0.5f);
     const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+        SpecularIBLWeight(F0, NdotV, roughness, soMode, bent, N, reflectDir, materialAO, ssao, brdf,
+                          ShadowParams.w, ShadowParams.z);
     // Kulla-Conty方式の加算ローブ(SpecularIBLMultiScatterWeight)はここでは扱わない。
     // あれは拡散イラディアンスに掛かるほぼ拡散のローブで、鏡面反射として差し替える対象では
     // ないため、Lightingパスが足したまま残す(14.9節)

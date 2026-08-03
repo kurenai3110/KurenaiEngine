@@ -1,0 +1,53 @@
+# KurenaiEngine シーンファイル
+#
+# UV展開の内部分割(--unwrap-split-threshold)が、遮蔽マップに継ぎ目を出していないかを
+# 目視で確認するための比較シーン。McGuireのChinese Dragonを2体並べ、
+# 左が分割なし(従来の展開)、右が分割あり(既定の閾値50000・チャンク20000)。
+#
+#   -0.6  分割なし(--unwrap-split-threshold 0)
+#   +0.6  分割あり(既定)
+#
+# 【リフレクタンス=1にしている理由】F0=1の完全反射は入射した放射輝度をそのまま返すため、
+# 単体では環境の明るさと同じ値になり陰影が付かない(White Furnace Testと同じ理屈。
+# docs/Architecture.html 14.9.7節)。そこへ遮蔽マップだけが減衰要因として乗るので、
+# 見えている暗さがそのまま遮蔽マップの寄与になり、分割面に沿った筋があれば直接見える。
+# OcclusionBakeCompare.ksceneと同じ狙い。
+#
+# 【太陽を切ってある】遮蔽マップは間接光にのみ効く(22.1節)。太陽光を入れると直接光が
+# 支配的になって差が埋もれるため、環境光だけの条件にしている。
+#
+# 生成手順(Assets/Source/ChineseDragon/dragon.objから。dragon.objは
+# ThirdParty/SourceModels/.../McGuire/Chinese Dragon/dragon.zip を展開したもの):
+#
+#   KurenaiPacker.exe Assets\Source\ChineseDragon\dragon.obj ^
+#     -o Assets\Packed\ChineseDragon\DragonNoSplitR1.kmodel ^
+#     --bake-occlusion --occlusion-resolution 2048 --occlusion-rays 64 ^
+#     --unwrap-split-threshold 0 ^
+#     --metallic 1.0 --roughness 0.25 --base-color 1,1,1
+#   KurenaiPacker.exe Assets\Source\ChineseDragon\dragon.obj ^
+#     -o Assets\Packed\ChineseDragon\DragonSplitR1.kmodel ^
+#     --bake-occlusion --occlusion-resolution 2048 --occlusion-rays 64 ^
+#     --metallic 1.0 --roughness 0.25 --base-color 1,1,1
+
+[Scene]
+Name = Unwrap Split Compare (Chinese Dragon)
+
+[Model]
+Path = ChineseDragon/DragonNoSplitR1.kmodel
+Translation = -0.32, 0.0, 0.0
+RotationEuler = 0.0, 180.0, 0.0
+
+[Model]
+Path = ChineseDragon/DragonSplitR1.kmodel
+Translation = 0.32, 0.0, 0.0
+RotationEuler = 0.0, 180.0, 0.0
+
+# 継ぎ目は細い筋として出るため、2体が画面いっぱいに写る距離まで寄せてある。
+# これ以上寄せると左右で見る角度が変わり、遮蔽マップ以外の差(シルエットの違い)が混ざる
+[Camera]
+Position = 0.0, 0.16, -1.15
+Yaw = 0.0
+Pitch = -3.0
+
+[Sun]
+Enabled = false

@@ -55,8 +55,20 @@ namespace Kurenai::Assets
     // 遮蔽マップをKurenaiPackerで焼く(--bake-occlusion)には重なりの無い専用UVが必要で、
     // タイリング前提のTEXCOORD0は流用できないため(22章)。VertexStrideの検証だけでも
     // 読み込みは拒否されるが、理由を明示するためVersionも上げる。
-    // v5以前の.kmodelはVersion不一致で読み込み拒否され、KurenaiPackerの再実行で再生成される
-    constexpr uint32_t kPackageVersion = 6;
+    // v7: MeshEntryへBentNormalTextureIndex(bent normal、正規化しない可視方向の平均)を
+    // 追加したため加算。遮蔽マップが「どれだけ隠れているか」しか持たないのに対し、
+    // bent normalは「どの方向が開いているか」を持つ。消費側がこれを軸・aoB・aoNの3つへ
+    // 分解し、スペキュラ遮蔽の方向依存とディフューズの方向バイアスを扱えるようにした(34章参照)。
+    // v8: bent normalの格納空間をモデル空間から接空間へ変更したため加算。構造体レイアウトは
+    // v7と同一で、bent normalテクスチャの中身の意味だけが変わる。モデル空間では「遮蔽なし」が
+    // 法線Nそのものになるため、曲面上では遮蔽が無くても隣り合うテクセルの向きが違い、
+    // ミップ生成やバイリニア補間で平均すると打ち消し合って長さが縮む。消費側はその長さを
+    // aoB(遮蔽率)として読むので、縮小するほど暗くなり細かい黒い点が出ていた。
+    // 接空間なら遮蔽なしは曲率によらず常に(0,0,1)で、平均しても長さ1のまま保たれる(34.9)。
+    // 【レイアウトが同じなのでVersionでしか判別できない】上げないと古いアセットを黙って
+    // 誤って解釈することになる。
+    // 以前の.kmodelはVersion不一致で読み込み拒否され、KurenaiPackerの再実行で再生成される
+    constexpr uint32_t kPackageVersion = 8;
 
     struct PackageHeader
     {
@@ -122,8 +134,17 @@ namespace Kurenai::Assets
         // strengthはglTF仕様で既定値が1.0と明記されているため、ラフネス係数のような
         // kInvalidMaterialFactor(負値)方式は取らず、ソースに無ければ1.0を書き出す
         float    OcclusionStrength;
+        // bent normal(正規化しない可視方向の平均、RGBA16F)。.rgb = bRaw、.a = 有効フラグ。
+        // -1 = 指定なし → 黒1x1。
+        //
+        // 【白1x1ではなく黒1x1へ落とす】bent normalは「遮蔽なし」を定数テクスチャで表現できない。
+        // 遮蔽なしのbRawは法線Nそのものでピクセルごとに違うため。かといって長さ0を遮蔽なしと
+        // 解釈すると完全遮蔽と区別がつかなくなるので、.aを明示的な有効フラグにして
+        // 曖昧さを消し、無効なら消費側でaxis=N・aoB=1へ落とす(34章参照)
+        int32_t  BentNormalTextureIndex;
+        uint32_t Reserved2;                // 0固定。uint64_tメンバによる8バイト境界へ揃えるため
     };
-    static_assert(sizeof(MeshEntry) == 96, "MeshEntryのレイアウトは96バイト固定");
+    static_assert(sizeof(MeshEntry) == 104, "MeshEntryのレイアウトは104バイト固定");
 
     constexpr int32_t kNoTextureIndex = -1;
     constexpr uint32_t kMeshEntryFlagTransparent = 1u << 0;

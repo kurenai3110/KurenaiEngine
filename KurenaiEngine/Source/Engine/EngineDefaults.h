@@ -40,7 +40,32 @@ namespace Kurenai::Defaults
     inline constexpr bool IBLEnabled = true;
     inline constexpr float IBLIntensity = 0.5f;
     inline constexpr bool IBLUseDedicatedIrradiance = false;
+    // 拡散イラディアンスの球面調和関数(SH L2)経路(M11 Stage 4a)。CSIrradianceの高速な代替。
+    // 既定はfalse(旧来の総当たり積分)。IBLUseDedicatedIrradianceが有効な場面でのみ意味を持つ
+    inline constexpr bool IBLUseSHIrradiance = false;
+    // SHのウィンドウ関数(Sloan)の強さ。0=無効(既定)。リンギングが実測で出た場合のつまみ
+    inline constexpr float SHWindowLambda = 0.0f;
+
+    // bent normalによる遮蔽(34章)。
+    // BentNormalAOSource: ディフューズAOを aoN = dot(N, bRaw) から取るか(false = 従来のベイクAO)。
+    //   既定でbent normal側を使う。同じ積分の別推定量なので見た目は大きく変わらない。
+    // SpecularOcclusionMode: スペキュラ遮蔽の方式。KurenaiEngine3D::SpecularOcclusionMode と
+    //   HLSLのComposeSpecularOcclusionのsoModeに対応する(0=Frostbite近似 / 1=球冠交差 /
+    //   2=球面ガウス)。SpecularCompensationModeと同じ理由でintで持つ。
+    //   既定は2(SG) ―― 球冠交差(1)は d >= av+as で厳密に0になり、金属の凹部が純黒へ
+    //   潰れる(34.10節)。SGは常に正なので方向性を保ったまま潰れない(34.11節)
+    // MultiBounceAOEnabled: multi-bounce AO(Jimenez 2016)。アルベドが明るいほどAOを弱める補正で、
+    //   見た目を大きく変えるためbent normal自体の検証を汚さないよう既定は無効
+    inline constexpr bool BentNormalAOSource = true;
+    inline constexpr int SpecularOcclusionMode = 2;
+    inline constexpr bool MultiBounceAOEnabled = false;
     inline constexpr float AmbientScale = 0.2f;
+    // 環境光(間接光)の拡散・鏡面それぞれに掛かる倍率。既定の1.0は「何も変えない」値で、
+    // IBL強度(IBLIntensity)が拡散と鏡面へ一様に掛かるのに対し、こちらは両者の比率を崩す
+    // ための画作り用のつまみ。IBLの有効/無効に関わらず効く(無効時の定数色アンビエントにも
+    // 同じ倍率が掛かる)ので、切り替えても意味が変わらない
+    inline constexpr float AmbientDiffuseScale = 1.0f;
+    inline constexpr float AmbientSpecularScale = 1.0f;
     // スペキュラのマルチスキャッタリング・エネルギー補正の方式。
     // KurenaiEngine3D::SpecularCompensationMode と HLSL の KURENAI_SPEC_COMP_* に対応する
     // (0=Off / 1=Linear / 2=Series / 3=Kulla-Conty)。ここを型付きにするには enum を

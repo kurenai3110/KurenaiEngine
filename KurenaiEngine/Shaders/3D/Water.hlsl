@@ -7,10 +7,11 @@
 #include "GBufferCommon.hlsli"
 
 // 水面法線マップ(タイル可能な接線空間法線、Assets/Packed/MontSaintMichelStudy/WaterNormal.png)。
-// t4はTransparent.hlsl/ProbeCapture.hlslがカスケードシャドウマップに、t5はOcclusionTextureに
-// 使っているため、GBuffer系パスで次に空いているt6を使う。[Water]NormalMapが空文字列の
-// シーンではC++側(KurenaiEngine3D)が1x1のフラット法線(128,128,255,255)をここへバインドする
-Texture2D WaterNormalTexture : register(t6);
+// t4はTransparent.hlsl/ProbeCapture.hlslがカスケードシャドウマップに、t5はOcclusionTextureに、
+// **t6はGBuffer.hlslのbent normal(34章)** に使っているため、次に空いているt7を使う。
+// [Water]NormalMapが空文字列のシーンではC++側(KurenaiEngine3D)が1x1のフラット法線
+// (128,128,255,255)をここへバインドする
+Texture2D WaterNormalTexture : register(t7);
 
 // UDN(Unity風のDerivative Normal)ブレンド用、2層のUVスケール・スクロール方向・速度倍率。
 // Scene::WaterWaveScale/WaterWaveStrengthはFrameConstants.TimeParams.y/zとして渡り、下の
@@ -99,5 +100,11 @@ PSOutput PSMain(PSInput input)
     output.Material = float4(metallic, roughness, ao, kMaterialIDWater);
     output.Emissive = float4(emissive, 1.0f);
     output.Velocity = currentUv - previousUv;
+    // bent normal(34章)。水面はオフラインで遮蔽を焼いていないため「データ無し」を意味する
+    // 有効フラグ0を書く。消費側(DeferredLighting.hlsl/SSR.hlslのDecodeBentOcclusion)は
+    // このとき従来の遮蔽の経路へ落ちる。
+    // 【書き残してはいけない】PSOutputはGBuffer.hlslと共有しており、書かないと
+    // そのレンダーターゲットの内容が未定義になる(前フレームの残骸が読まれうる)
+    output.BentNormal = float4(0.0f, 0.0f, 0.0f, 0.0f);
     return output;
 }

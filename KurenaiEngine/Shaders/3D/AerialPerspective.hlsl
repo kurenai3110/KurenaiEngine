@@ -61,6 +61,9 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams2;
     float4 DDGIParams3;
     float4 DDGIParams4;
+    // bent normalによる遮蔽(34章)。このシェーダーでは読まないが、C++側のFrameConstantsでは
+    // DDGIParams4の直後にあるため、**宣言しないと以降のフィールドが16バイトずれる**
+    float4 OcclusionParams;
     float4 TimeParams;
     // 空の解析評価用(P3で追加)。MakeSkyParametersが読む。xyz=太陽が「ある」向き
     // (未正規化のまま渡ってくる。呼び出し側でnormalizeする)、w=未使用

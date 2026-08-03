@@ -38,6 +38,7 @@ namespace KurenaiPacker
         size_t TextureSkippedExisting = 0; // 既存の.ktexをそのまま使った数(Force=false時)
         size_t TextureFailed = 0;      // 読み込み失敗でフォールバック(-1)になった数
         size_t OcclusionBaked = 0;     // ベイクした遮蔽マップを.ktexとして書いた数
+        size_t BentNormalBaked = 0;    // ベイクしたbent normalを.ktexとして書いた数
     };
 
     // sourceModelを指定した.kmodelパスへ書き出す。

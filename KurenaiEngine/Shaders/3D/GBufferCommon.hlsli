@@ -49,6 +49,10 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams2;
     float4 DDGIParams3;
     float4 DDGIParams4;
+    // bent normalによる遮蔽(34章)。GBuffer.hlsl/Water.hlslのどちらのPSMainも読まないが、
+    // C++側 KurenaiEngine3D.cpp の FrameConstants ではDDGIParams4の直後にあるため、
+    // 後続のTimeParams(Water.hlslが読む)のオフセットを合わせるために宣言する
+    float4 OcclusionParams;
     // 水面用(末尾に追加、P2)。x=水面法線マップのスクロールオフセット(0〜1、CPU側で
     // 既にfmod済み)、y=波のスケール倍率(m_WaterWaveScale、層ごとのUVスケールに掛ける)、
     // z=波の強さ(m_WaterWaveStrength、0〜1、距離減衰のweightに掛ける)、w=未使用。
@@ -151,6 +155,12 @@ struct PSOutput
     float4 Emissive : SV_TARGET3;
     // モーションベクター(この画素の中身が前フレームから今フレームまでに動いた量、UV単位)
     float2 Velocity : SV_TARGET4;
+    // bent normal(正規化しない可視方向の平均、ワールド空間)。.rgb = bRaw、.a = 有効フラグ。
+    // R11G11B10_Floatは使えない ―― 符号なしのため負の成分が落ちる(34章)。
+    // 【Water.hlslも必ず書くこと】この構造体はGBuffer.hlslとWater.hlslで共有しており、
+    // 書き残すとそのターゲットの内容が未定義になる。水面はbent normalを焼いていないので
+    // 有効フラグ0(=データ無し)を書き、消費側で従来の経路へ落とす
+    float4 BentNormal : SV_TARGET5;
 };
 
 // クリップ空間座標を画面UV([0,1]、左上原点)へ変換する。

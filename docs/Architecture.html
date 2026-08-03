@@ -234,8 +234,10 @@
     <li><a href="#ddgi">31. DDGI(拡散グローバルイルミネーション)</a></li>
     <li><a href="#launchscripts">32. 起動スクリプト(Run.bat)</a></li>
     <li><a href="#runtimeswitch">33. 内部レンダー解像度とグラフィックスAPIの実行時切り替え</a></li>
-    <li><a href="#clouds">34. 雲(レイヤーモデル、P5)</a></li>
-    <li><a href="#planarreflection">35. 平面反射(P6)</a></li>
+    <li><a href="#bent-normal">34. Bent Normalによる遮蔽(ディフューズ / スペキュラ)</a></li>
+    <li><a href="#clouds">35. 雲(レイヤーモデル、P5)</a></li>
+    <li><a href="#planarreflection">36. 平面反射(P6)</a></li>
+    <li><a href="#aerialperspective">37. 大気遠近(height fog / aerial perspective、P8)</a></li>
   </ol>
 </nav>
 
@@ -2685,6 +2687,81 @@ SRVスロット1本だけで、いずれも実測できる負荷ではない</li
 <code>kTextureSlotCount</code>が12&rarr;11になる(DX12の半透明パスは<code>DrawIndexed</code>ごとに
 全スロットを再設定する設計(16章)のため、ディスクリプタコピーも1本ぶん減る)。
 </p>
+
+<h3>14.11 環境光の拡散倍率・鏡面倍率</h3>
+<p>
+環境光(間接光)の<b>拡散成分と鏡面成分に別々に掛かる倍率</b>を、
+<code>FrameConstants.IBLParams.y</code> / <code>.z</code> として渡している
+(C++側は<code>m_AmbientDiffuseScale</code> / <code>m_AmbientSpecularScale</code>、既定は両方1.0)。
+既存の「IBL 強度」(<code>ShadowParams.z</code>)が拡散と鏡面へ一様に掛かるのに対し、
+こちらは<b>両者の比率を意図的に崩す</b>ための画作り用のつまみである。
+環境の照り返しを保ったまま映り込みだけを増減する、といった調整はIBL強度単独ではできない。
+</p>
+<p>
+既定値の1.0では<code>x * 1.0f</code>がIEEE754で厳密に<code>x</code>となるため、
+このつまみを触らない限り絵はビット単位で変わらない。実測でもBistro Exteriorの
+ビューポート321,950画素中<b>差異は3画素</b>で、いずれも出力ディザリング
+(<code>Tonemap.hlsl</code>、フレーム依存)由来だった。
+</p>
+
+<h4>14.11.1 適用箇所と、外さないための置き場所</h4>
+<table>
+<tr><th>パス</th><th>拡散(<code>IBLParams.y</code>)</th><th>鏡面(<code>IBLParams.z</code>)</th></tr>
+<tr><td>不透明(<code>DeferredLighting.hlsl</code>)</td>
+    <td><code>EvaluateIBL</code>の<code>diffuseIBL</code>、およびIBL無効時のフォールバック</td>
+    <td>&mdash;(下の共有関数の中)</td></tr>
+<tr><td>SSR(<code>SSR.hlsl</code>)</td>
+    <td>&mdash;(拡散を扱わない)</td>
+    <td>&mdash;(下の共有関数の中)</td></tr>
+<tr><td>共有(<code>ReflectionProbe.hlsli</code>)</td>
+    <td>&mdash;</td>
+    <td><code>SpecularIBLWeight</code> / <code>SpecularIBLMultiScatterWeight</code></td></tr>
+<tr><td>半透明(<code>Transparent.hlsl</code>)</td>
+    <td colspan="2"><code>ambientDiffuse</code> / <code>ambientSpecular</code>へ、IBLの有無の分岐が合流した後で1か所だけ</td></tr>
+<tr><td>プローブ焼き込み(<code>ProbeCapture.hlsl</code>)</td>
+    <td colspan="2"><code>EvaluateGlobalIBL</code>の戻り値、およびIBL無効時のフォールバック</td></tr>
+</table>
+<p>
+<b>鏡面側を共有ヘッダーの中で読んでいるのが要点である。</b>
+<code>SpecularIBLWeight</code>は「DeferredLightingが適用した量とSSRが引き算する量が定義上必ず一致する」
+ことを目的に置かれた関数(<a href="#ssrprobe">20章</a>)なので、倍率を引数にすると
+両者が別の値を渡せてしまう余地が残る。そのため<code>iblIntensity</code>のように引数で受けず、
+<code>IBLParams.z</code>を関数内で直接読んでいる。式がずれるとSSRの適用領域と非適用領域の
+境界に段差として現れる。
+</p>
+<p>
+<b>Kulla-Contyの加算ローブは鏡面側に入れている。</b>
+<code>SpecularIBLMultiScatterWeight</code>が掛かる相手は拡散イラディアンスなので拡散に見えるが、
+これは鏡面BRDFが単散乱で取りこぼしたエネルギーを戻す項であって拡散反射ではない(14.9.2節)。
+拡散側に入れると、鏡面倍率を0にしても鏡面由来の光が残ってしまう。
+</p>
+
+<h4>14.11.2 IBLの有効/無効に関わらず効かせる</h4>
+<p>
+IBL無効時の定数色アンビエントにも同じ倍率を掛けている。
+片方にしか効かないと「IBLを有効にする」を切り替えたときにつまみの意味が変わり、
+IBLあり/なしの比較にならないためである。
+なお不透明パスとプローブ焼き込みのフォールバックは<b>拡散項しか持たない</b>ため、
+そこで掛かるのは拡散倍率だけになる(半透明パスのフォールバックは金属が真っ黒に
+ならないよう鏡面項も持っているので、両方が掛かる。<a href="#transparent">15章</a>)。
+</p>
+
+<h4>14.11.3 反射プローブの再ベイク署名へ含める</h4>
+<p>
+<code>ProbeCapture.hlsl</code>が同じ倍率を適用する以上、
+<code>KurenaiEngine3D</code>のプローブ再ベイク署名(焼き上がりに影響する状態のFNV-1aハッシュ、
+<a href="#reflectionprobe">19章</a>)にも両方を混ぜる必要がある。
+含め忘れると、つまみを動かしてもプローブの中身だけ古い倍率のまま残り、
+「壁は変わったのに映り込みだけ変わらない」という分かりにくい不整合になる。
+</p>
+
+<h4>14.11.4 SSILの間接拡散光には掛けない</h4>
+<p>
+<code>DeferredLighting.hlsl</code>の<code>indirectLight</code>(SSIL Visibility Bitmask由来)は
+この倍率の対象外にしている。あれはスクリーンスペースで得た<b>周囲のサーフェスからの光</b>であって、
+ここで言う環境(空・反射プローブ)由来のアンビエントとは別の項だからである。
+直接光・自発光に掛けないのは遮蔽マップと同じ方針(<a href="#occlusion-map">22.1節</a>)。
+</p>
 </section>
 
 <section id="transparent">
@@ -3958,7 +4035,7 @@ ImGuiの「Update Mode」で3方式を切り替えて比較できるようにし
 <tr><td colspan="3"><strong>モードによらず</strong>、実効プリ露出が1段(明るさ2倍)以上動いたら焼き直す
 (<code>Realtime</code>は常時焼き直しているので対象外)。プローブには<b>プリ露出済みの数値</b>が
 入っており、これを放置すると桁違いの明るさで合成されるため(19.14節)</td></tr>
-<tr><td><code>Realtime</code></td><td>毎フレーム1面ずつ(6面揃うごとに畳み込み、プローブはラウンドロビン)</td><td>キャプチャは毎フレーム、畳み込みは6フレームに1回</td></tr>
+<tr><td><code>Realtime</code></td><td>1プローブを12フレームで更新(6フレームで1面ずつキャプチャ→6フレームで1面ぶんのミップチェーンずつ畳み込み。プローブはラウンドロビン)</td><td>どちらのフェーズも毎フレーム同程度。畳み込みの割り当ての根拠と実測は19.15節</td></tr>
 </table>
 
 <h4>OnDemandの変化検出</h4>
@@ -4453,6 +4530,284 @@ Frame:     EV100=14.999988  TimeOfDay=12.000000   ← その後の定常値</cod
 時刻を自動進行させた1日80秒のスイープでも、開始時刻へ戻ったときの値が
 修正前46.7→55.0(+17.8%)に対し修正後51.2→56.6(+10.5%)と改善し、全時刻で白飽和は0%だった。
 </p>
+
+<h3>19.15 M11: 拡散をDDGIへ一本化し、反射プローブを鏡面専任にする</h3>
+<p>
+本節の数値は<strong>実機(DX11・DX12、内部レンダー解像度1280x720)での実測</strong>である。
+比較対象の「master」は本変更の分岐元コミットを同一手順で走らせたものを指す。
+</p>
+
+<h4>背景: 同じ物理量を2通りに持っていた</h4>
+<p>
+DDGI(<a href="#ddgi">31章</a>)が入ったことで、ある点Xの法線N方向へ来る間接拡散光
+<code>E(X,N)</code>を、反射プローブ(位置によらずプローブ中心の1値)とDDGI(格子8点の
+トライリニア+Chebyshev可視性、連続的に位置へ依存)の2通りで持つ状態になっていた。
+DDGIは反射プローブの拡散の上位互換であり、
+<code>DeferredLighting.hlsl</code>の<code>EvaluateIBL</code>はDDGI有効時、拡散を
+無条件でDDGI由来の値へ差し替えていた。つまり<strong>反射プローブのイラディアンス畳み込み
+(<code>CSIrradiance</code>、プローブ1個あたり最大の重さを占める処理)は、DDGI有効時は
+不透明面では一切使われず捨てられていた</strong>。読んでいたのは半透明パス
+(<code>Transparent.hlsl</code>)だけで、しかもそちらはDDGIに未接続だったため、同じ画面の中で
+不透明面と半透明面が別々の間接拡散光を受けるという矛盾もあった。
+</p>
+<p>
+加えてDDGIボリュームは1個しか持てず(31.10節)、外側では境界のプローブを外挿し続けるだけで
+戻る経路が無かった。プローブを持つシーン(<code>Sponza</code>・<code>BistroInteriorLit</code>)には
+<code>[GIVolume]</code>が置かれていなかったため、この2点を先に閉じないまま反射プローブの
+イラディアンスを削ると、これらのシーンは位置依存の拡散を丸ごと失う。
+</p>
+
+<h4>行った変更</h4>
+<ol>
+<li><strong>半透明パスをDDGIへ接続</strong>し、DDGIボリュームの外では
+グローバルIBLへ戻るフェード(境界の1グリッドセル分で線形に0まで落とす)を
+<code>DDGI.hlsli</code>の<code>SampleDDGIIrradiance</code>に追加した(<code>insideWeight</code>
+出力引数)。<code>DeferredLighting.hlsl</code>・<code>ProbeCapture.hlsl</code>(多重バウンスの
+フィードバック元)もこの重みでlerpするよう改めた</li>
+<li><code>Sponza.kscene</code>・<code>BistroInteriorLit.kscene</code>へ<code>[GIVolume]</code>を追加した。
+既存の<code>[ReflectionProbe]</code>ボックスのAABB(和集合)から機械的に求めた値で、
+19.13節のような幾何を直接測る手順は踏んでいない。特に<code>BistroInteriorLit</code>は3つの
+プローブがYaw=27.5度回転しており、GIVolumeは軸整列の直方体しか持てないため
+(31.10節)、外接直方体には無駄な余白が生じ、部屋の外(壁の中)に落ちるプローブも出うる
+(プローブ分類は未実装。19.13節の続きとして今後の課題)</li>
+<li><strong>反射プローブのイラディアンス畳み込みそのものを廃止</strong>した。
+<code>ReflectionProbe.hlsli</code>から<code>SampleProbeIrradiance</code>と
+<code>KURENAI_PROBE_IRRADIANCE_REGISTER</code>を削除し、<code>SampleEnvironment</code>の
+<code>irradiance</code>出力は「グローバルIBLの値そのもの」(プローブ由来の重み付けは受けない)
+になった。DDGIが有効な点はこの値がさらに呼び出し側でDDGI由来の値へlerpされ、DDGI無効・
+ボリューム外の点はグローバルIBLがそのまま最終値になる。プローブ用の専用配列
+(旧<code>m_ProbeIrradianceArray</code>、32²×6面×8、fp16)は削除した。
+<strong>反射プローブはこの時点で鏡面専任になった</strong>(19章冒頭の位置づけを実質的に変更)</li>
+</ol>
+<p>
+<strong>受け入れた代償</strong>: DDGI無効時、位置依存の拡散は完全に無くなりグローバルIBLのみになる。
+DDGIは比較用トグルの位置づけから、拡散の唯一の位置依存経路へ格上げされた。
+</p>
+
+<h4>明るさの変化(実測)</h4>
+<p>
+ビューポート領域の平均RGB(8bit、sRGB出力)。カメラはシーン定義のまま、
+<code>Sponza</code>はアトリウム、<code>BistroInteriorLit</code>は店内。
+</p>
+<table>
+<tr><th>シーン</th><th>master(プローブのイラディアンス)</th><th>M11 + DDGI</th><th>M11・DDGI無効</th></tr>
+<tr><td>Sponza</td><td>15.16 / 13.85 / 11.95</td><td>15.66 / 14.08 / 12.10(+1.3〜3.3%)</td><td>—</td></tr>
+<tr><td>BistroInteriorLit</td><td>5.16 / 1.19 / 0.47</td><td>3.83 / 0.90 / 0.33(<strong>−26%</strong>)</td><td>27.07 / 9.21 / 6.26(+424%)</td></tr>
+</table>
+<p>
+<code>BistroInteriorLit</code>は<strong>ロードマップが掲げた「明るさが現状より落ちない」を満たしていない</strong>。
+ただし切り分けの結果、これは配置ミスでも実装バグでもないことが分かった。
+</p>
+<ul>
+<li><strong>ボリュームが室外を覆っているせいではない</strong>。DDGIイラディアンスアトラスを見ると
+室外へ落ちたプローブは<em>空を見て明るい</em>。それが混ざるなら室内は明るくなる方向であって、
+暗化の説明にならない</li>
+<li><strong>自己遮蔽バイアス(19.14節)のせいでもない</strong>。<code>NormalBias</code>を0.25→0.70、
+<code>ViewBias</code>を0.10→0.35へ上げると平均は3.83→<strong>3.38とさらに暗くなった</strong>。
+バイアスは既に十分で、測っている遮蔽は実在のジオメトリによるものである</li>
+<li><strong>格子を細かくするとさらに暗くなる</strong>。間隔を半分(480→3840プローブ)にすると
+3.83→<strong>2.88</strong>。遮蔽の解像度が上がるほど暗くなる=収束方向が下向きである</li>
+</ul>
+<p>
+4つの数値は<code>27.07</code>(遮蔽を一切考えないグローバルIBL)&gt;<code>5.16</code>(可視性判定を持たない
+部屋平均=master)&gt;<code>3.83</code>(粗いDDGI)&gt;<code>2.88</code>(細かいDDGI)と単調に並ぶ。
+<strong>遮蔽をまじめに解くほど暗くなる</strong>という順序であり、masterの値は
+「壁や家具を透過して回り込んでいた光漏れ」を含んでいたと解釈するのが自然である。
+つまり<strong>「明るさが落ちないこと」は、この変更に対しては受け入れ基準として不適切だった</strong>
+——測っていたのは正しさではなく光漏れの量である。今後は
+<code>BistroInteriorLit</code>が暗いこと自体(17章)を露出・ライト側で扱うべき問題として切り分ける。
+</p>
+
+<h4>拡散イラディアンスの高速化(球面調和関数 L2)</h4>
+<p>
+<code>CSIrradiance</code>(総当たり積分、出力1テクセルあたり15,876サンプル)を、
+球面調和関数L2(9項)による経路(<code>CSProjectSH</code> → <code>CSProjectSHFinal</code> →
+<code>CSEvaluateSH</code>、いずれも<code>IBLConvolve.hlsl</code>)で置き換えられるようにした。
+コサインローブによる畳み込みは9項でどんな照明でも数%以内の誤差に収まる
+(Ramamoorthi &amp; Hanrahan 2001)。White Furnace Test(一様環境の入出力一致)で
+規約・立体角重み・畳み込み係数の正しさを検算できる形にしてある。
+</p>
+<p>
+射影の離散化解像度は<strong>ソーススカイボックスの実解像度とは独立</strong>にしてある
+(<code>SHProjectionSize</code>、既定64)。理由は実装上の制約で、<code>IRHITexture</code>に
+解像度を問い合わせる手段が無く、スカイボックスはシーンごとに任意解像度のDDSや手続き空(256)を
+とりうるため、射影側のバッファをそれに合わせて動的に確保できない。方向ベクトルでの
+<code>SampleLevel</code>参照は解像度に依存しないため、固定の離散化解像度で問題なく成立する。
+</p>
+<p>
+<strong>この最適化の実際の効果は限定的である。</strong><code>CSIrradiance</code>は
+「専用イラディアンスマップを使う」トグル(既定OFF)を有効にしたときと、Render Targetsで
+IBL Irradianceを表示したときにしか実行されない検証用の経路であり、既定の描画経路は
+プリフィルタ済み鏡面の最終ミップ(roughness=1)を使う(14.10節。両者は数学的に等価)。
+つまりSH化は<strong>通常のゲームプレイのフレーム時間には効かない</strong>。
+リンギング対策のウィンドウ関数(<code>SHWindowLambda</code>、既定0=無効)も含め、
+効果があるのは検証時と将来この経路を再利用する場面に限られる。
+</p>
+<p>
+<strong>精度の実測</strong>。イラディアンスマップをRender Targetsで直接表示し、
+ビューポートの平均RGBと標準偏差で比較した。
+</p>
+<ul>
+<li><strong>White Furnace Test(一様環境)</strong>: SH経路・総当たり積分とも
+(186, 186, 186)・標準偏差0で<strong>完全一致</strong>。DX11・DX12いずれも同値。
+規約(1/πの相殺)・立体角重み・畳み込み係数<code>Â₀</code>がすべて正しいことの確認になる</li>
+<li><strong>手続き空(Sponza、太陽12.49h)</strong>: 太陽位置を揃えて両経路で焼き直したところ
+<strong>最大絶対差0</strong>(8bit精度)。L2の打ち切り誤差は、なめらかな空に対しては
+出力の量子化幅より小さい</li>
+<li><strong>SH経路が実際に走っていることの確認</strong>: 上の「差が出ない」という結果は
+「片方が実行されていない」でも成立してしまうため、対照実験としてウィンドウ強度
+<code>λ=0.0993</code>を与えた。平均90.66→89.00・標準偏差0.475→0.000と
+<strong>高次バンドが減衰した形で変化する</strong>ことを確認している</li>
+</ul>
+<p>
+<strong>実装時に踏んだ罠</strong>: このトグルとウィンドウ強度は当初、切り替えても画面が
+まったく変わらなかった。イラディアンスマップは空が焼き直されたときにしか作り直されない
+(<code>m_IBLIrradianceBaked</code>)ため、値を変えただけでは古い経路の結果が出続けていたためである。
+A/B比較のために付けたつまみが機能しないという、<strong>効果がゼロに見えるので気づきにくい</strong>
+型の不具合で、値が変わったらフラグを倒すよう<code>RenderingPanel.cpp</code>側で明示的に要求している。
+</p>
+<p>
+一方、反射プローブの畳み込み(<code>ProbeBakeConvolvePrefilter</code>/
+<code>ProbeRealtimeConvolvePrefilterStep</code>)は<strong>無条件に実行される実コスト</strong>である。
+イラディアンス側の削除(上記)がこちらの最大の実削減であり、SH化はプリフィルタ側には
+適用していない(鏡面は畳み込みのローブが鋭く高周波が残るため、SHのような低次項への
+圧縮が効かない。詳細はコード内コメント参照)。
+</p>
+
+<h4>Realtimeモードの時間分割</h4>
+<p>
+19.10節が指摘していた「6フレームに1回のスパイク」(6面キャプチャ後にプリフィルタの
+6ミップ×6面=36ディスパッチを1フレームへ集中させていた)を、
+<code>kProbeRealtimePrefilterStepsPerFrame</code>ずつ複数フレームへ分けるよう改めた。
+キャプチャフェーズ(6フレーム)→プリフィルタフェーズ(6フレーム)を交互に繰り返す
+対称なデューティ比にしてあり、プリフィルタ中は次のプローブのキャプチャを止める
+(同じ<code>m_ProbeRadianceCube</code>を読み続ける必要があるため)。
+1プローブの一巡が7フレームから12フレームへ伸びるトレードオフを受け入れている。
+</p>
+<p>
+<strong>ステップ番号の割り当てが結果を決める</strong>。36ステップを(ミップ, 面)へ対応づける方法は
+2通りあり、最初の実装は<code>mip = step/6, face = step%6</code>としていた。これだと
+1フレーム目がミップ0の6面をまとめて引き受ける。ミップの解像度は段ごとに1/4になるため
+1面ぶん21,840テクセルのうちミップ0だけで16,384(<strong>75%</strong>)を占めており、
+<strong>個数を6ステップずつ均等に割ってもコストは均等にならない</strong>。
+面を外側・ミップを内側(<code>face = step/6, mip = step%6</code>)にすると
+1フレーム=1面ぶんのミップチェーン全部となり、6フレームすべてが厳密に同じテクセル数になる。
+</p>
+<p>
+実測(ProbeTest・DDGI無効・Realtimeモード、プロファイラのパス単位の値)。
+</p>
+<table>
+<tr><th></th><th>プローブ畳み込みパスの1フレーム最大</th><th>キャプチャパス</th></tr>
+<tr><td>master(<code>ProbeRealtimeConvolve</code>)</td><td><strong>19.96〜21.62 ms</strong>(6フレームに1回)</td><td>0.03〜0.05 ms</td></tr>
+<tr><td>M11・割り当て転置前</td><td>(フレーム全体で9.4 ms)</td><td>—</td></tr>
+<tr><td>M11(<code>ProbeRealtimeConvolvePrefilterStep</code>)</td><td><strong>0.97〜3.07 ms</strong></td><td>0.03〜0.06 ms</td></tr>
+</table>
+<p>
+ピークは<strong>約7分の1</strong>になった。ロードマップの完了条件「どのフレームもプローブ関連が
+1msを超えない」は、0.97〜3.07msという結果なので<strong>厳密には未達成</strong>である。
+残りの下限は「ミップ0の1面」(128²テクセル×256サンプル)で、これ以上細かくするには
+1つの面をさらに矩形へ分割するか、Karisのミップチェーンサンプリングで
+サンプル数自体を256から減らす(ロードマップのStage 4b、本M11では見送り)必要がある。
+時間分割だけでは1msには届かない。
+</p>
+<p>
+<code>kMaxReflectionProbes</code>(8)の見直しは行っていない。「1フレーム予算内に何個入るか」を
+決めるには実測が要り、憶測で数値を動かすのは<a href="#occlusion-map">22章</a>6節の遮蔽ベイクで
+見積もりを560倍外した教訓に反するため、意図的に見送っている。
+</p>
+
+<h4><code>[GIVolume]</code>追加のフレームコスト(実測)</h4>
+<p>
+Stage 2で<code>Sponza</code>・<code>BistroInteriorLit</code>にボリュームを置いたことで、
+これらのシーンでDDGIの更新が常時走るようになった。GPUフレーム時間は次のとおり。
+</p>
+<table>
+<tr><th>シーン</th><th>master(GIVolume無し)</th><th>M11(GIVolume有り)</th></tr>
+<tr><td>Sponza(1152プローブ)</td><td>1.44 ms</td><td><strong>9.65 ms</strong></td></tr>
+<tr><td>BistroInteriorLit(480プローブ)</td><td>1.71 ms</td><td><strong>14.26 ms</strong></td></tr>
+</table>
+<p>
+DDGIは1フレームあたり16プローブを更新する。1プローブあたりの実測は
+ProbeTest(メッシュ9個)で約0.74ms、BistroInteriorLit(メッシュ多数)で約0.79msと
+<strong>シーンの重さがまったく違うのにほぼ同じ</strong>である。したがってこのコストは
+ジオメトリ量でもピクセル量(16×16と極小)でもなく、
+<strong>プローブ1個につき6面ぶんのレンダーターゲット切り替え・クリア・定数更新・
+コピーCSという固定オーバーヘッド</strong>が支配していると読める
+(<code>captureDDGIProbeFace</code>。1フレームで96回)。
+これはM11のコードではなくDDGI(31章)の実装方式の問題であり、
+31.10節が挙げている「段階B: レイ取得のDXR化」が正面から効く箇所である。
+<strong>Stage 3で削ったプローブ畳み込みの節約(ピーク約18ms減)を、
+Stage 2で足したDDGIのコストが桁で上回っている</strong>ことは記録しておく。
+</p>
+
+<h4>半透明パスのDDGI接続と20章の不変条件(実測)</h4>
+<p>
+ProbeTestでDDGIのON/OFFだけを切り替えた2枚の差分を取ると、
+<strong>ガラス板が背後の壁とは独立に変化する</strong>——半透明パスがDDGIを読んでいることの直接の確認になる。
+同じ差分画像で<strong>金属球は完全に無変化</strong>(拡散成分を持たないため)であり、
+DDGIが鏡面に一切触れていないこと、すなわち20章の「足した量と引く量が一致する」不変条件が
+保たれていることも同時に確認できる。
+</p>
+
+<h4>bent normal(35章)との統合で決めたこと</h4>
+<p>
+M11は<code>master</code>から分岐した後、<code>master</code>側へbent normalによる方向を持つ遮蔽
+(<a href="#ch34">35章</a>)が入った。両者は<strong>同じ拡散の1行を別々に書き換えていた</strong>ため、
+統合時に次の判断が要った。
+</p>
+<ul>
+<li><strong>DDGIのサンプル方向は<code>N</code>のまま据え置く。</strong> 35章は
+<code>SampleEnvironment</code>へ渡す方向を<code>N</code>から<code>bent.axis</code>(開いている方向)へ
+変えたが、<code>SampleDDGIIrradiance</code>の<code>N</code>は<strong>オクタヘドラルの方向であると同時に
+プローブの裏面判定・重み付けにも使われる</strong>ため、ここだけ軸へ差し替えると格子の重みまで変わる。
+<code>ProbeCapture.hlsl</code>の多重バウンスも<code>N</code>で引いており、寄せるならDDGI全体で
+一貫して行うべき別件(31.10節・格子の置き方)である</li>
+<li><strong>DDGI由来のイラディアンスにもベイクのAO(<code>aoN</code>)は掛ける。</strong> これは
+M11の判断ではなく、DDGIとbent normalを共存させた時点で<code>master</code>側が既に決めていた形である。
+ベイクのAOはメッシュ細部の遮蔽、DDGIのChebyshevはプローブ格子スケールの可視性で、
+<strong>スケールが違うため二重計上にならない</strong></li>
+</ul>
+<p>
+スロットの衝突(半透明パスの<code>t14</code>)とその解消は34.6節に書いた。
+</p>
+
+<h4>検証の状況</h4>
+<p>確認できたこと:</p>
+<ul>
+<li>Release/Debugビルド 0警告0エラー、fxc(DX11、SM5.0)で全エントリポイントのコンパイル成功</li>
+<li><strong>DX12(dxc、SM6.5)の実行時コンパイルも成功</strong>。新規の3つのSHシェーダーと
+改造した<code>Transparent.hlsl</code>を含めて<code>KurenaiEngine.log</code>にError/Warningは0件。
+SH経路の構造化バッファUAV/SRVという、DX12のディスクリプタテーブルで最も壊れやすい箇所も
+White Furnace TestでDX11と同値であることを確認している</li>
+<li>DX11とDX12の描画結果の一致(ProbeTestで平均絶対差0.617/255)</li>
+</ul>
+<p><strong>35章を取り込んだ後に測り直した結果</strong>(いずれもDX11・内部解像度1280x720):</p>
+<ul>
+<li>3ソリューションともDebug/Release警告0エラー0。全46エントリポイントをfxcでコンパイル
+(レイトレーシングの3件だけは手元のSDK同梱dxcが古く<code>0x80070459</code>で通らないが、
+DX12実機起動でエンジン同梱の<code>dxcompiler.dll</code>がSM6.5でコンパイルし、ログのError/Warningは0件)</li>
+<li>White Furnace Test: ビューポート一様<strong>202、標準偏差0(最小=最大)</strong>。球が完全に溶ける</li>
+<li>DDGI ON/OFF差分: 金属球は<strong>最大差0</strong>(20章の不変条件)、ガラス板は100%の画素が変化
+(半透明パスのDDGIが生きている)。同条件の連続2枚の対照は最大差1</li>
+<li>DX11 vs DX12: 平均絶対差<strong>0.93</strong>、差&gt;2は0.99%でシルエットの縁に集中</li>
+<li>Realtimeモードで40フレーム連続のGPUフレーム時間は<strong>5.24〜6.16ms</strong>。スパイクなし</li>
+</ul>
+<p>
+なお<strong>比較は必ず起動直後から同じ手順で行うこと</strong>。シーンを切り替えても<code>EV100</code>は
+引き継がれるため、White Furnace Testを経由してからProbeTestを開いたDX11と、
+直接開いたDX12を比べると露出が違い、平均絶対差が0.93から<strong>25.3へ跳ね上がる</strong>
+(実際に一度この読み違いをした)。
+</p>
+<p>確認していないこと:</p>
+<ul>
+<li>DX12でのRealtimeスパイク測定、DX12での<code>Sponza</code>/<code>BistroInteriorLit</code></li>
+<li>OnDemandモードの挙動</li>
+<li>SHのリンギング(エミッシブ帯の周りで暗部が負へ振れる現象)。上記のとおり
+なめらかな空では総当たり積分と差が出ないため、リンギングが出る条件そのものを
+再現できていない。ウィンドウ関数<code>SHWindowLambda</code>の既定値0はこのため未検証のままである</li>
+<li><code>[GIVolume]</code>の配置は既存ボックスからの機械的な計算のままで、視覚的な調整は行っていない
+(境界の不連続は目視では確認できていない)</li>
+</ul>
 </section>
 
 <section id="ssrprobe">
@@ -4632,7 +4987,7 @@ SSRを有効にして計測したところ、<strong>3Dシーンの画素は1つ
 無関係なため、21.10節の背景解析評価と同じ理由で解析評価してはいけない。
 </p>
 <p class="note">
-<strong>追記(P6)。</strong><a href="#planarreflection">35章</a>で導入した平面反射が有効な
+<strong>追記(P6)。</strong><a href="#planarreflection">36章</a>で導入した平面反射が有効な
 水面画素では、この解析空フォールバックよりも平面反射の結果が優先される。平面反射は
 「実際に鏡映カメラで描いた景色」なので、Perez分布の解析評価よりも正確な答えになるため。
 平面反射が無効(パス未実行)な画素、または反射先の画面UVが画面外に出た画素では、
@@ -5354,7 +5709,7 @@ floatのツリー加算で行う。
 (<code>FrameConstants::SkyZenithTint</code>等)は削除した。
 </p>
 <p class="note">
-<strong>雲による平均透過率(判断B、34.4節)はCPUに残した。</strong>被覆率からの単純な線形補間で
+<strong>雲による平均透過率(判断B、35.4節)はCPUに残した。</strong>被覆率からの単純な線形補間で
 Perez分布とは無関係であり、二重実装の問題に該当しないため、GPU化の対象外とした。
 <code>SkyBakeConstants::ZenithLuminance</code>(4本のティントとあわせて削除)は
 <code>CloudTransmittance</code>1本に置き換わり、<code>SkyGenerate.hlsl</code>側で
@@ -5467,7 +5822,8 @@ SSILの間接拡散光の3つで、直接光(<code>DirectLighting.hlsl</code>)�
 <p>Deferredの不透明パスでは、マテリアル固有の値をライティングパスへ運ぶ経路がG-Bufferしかない。
 マテリアルG-Buffer(<code>R8G8B8A8_UNorm</code>)は<code>float4(metallic, roughness, 0, 0)</code>で
 <b>b/aの2チャンネルが未使用</b>だったため、新しいレンダーターゲットを増やさず<code>b</code>へ焼いている。
-帯域も増えない。読み手は<code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>の2つ。</p>
+帯域も増えない。読み手は<code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>・
+<code>RTReflection.hlsl</code>(28章)の3つ。</p>
 
 <p><code>occlusionTexture.strength</code>は<b><code>GBuffer.hlsl</code>の時点で適用済み</b>にする
 (<code>lerp(1, ao, strength)</code>)。下流は単に乗算するだけになり、strengthの解釈が1か所に閉じる。
@@ -5476,10 +5832,26 @@ strengthを運ぶ定数は<code>ObjectConstants</code>(b1)にあった純粋な�
 オフセットも変わっていない</b>。</p>
 
 <div class="note">
-<p><b><code>DeferredLighting.hlsl</code>と<code>SSR.hlsl</code>のao合成式は必ず一致させること。</b>
-20章のとおりSSRは「Lightingパスが適用した鏡面IBLをまったく同じ式で再現して差し替える」設計なので、
-片方だけが遮蔽マップを掛けると、SSRが適用される領域とされない領域の境界に段差が出る。
-どちらも <code>ao = AOTexture.a * material.b</code> で統一している。</p>
+<p><b><code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>・<code>RTReflection.hlsl</code>の
+ao合成式は必ず一致させること。</b>
+20章のとおりSSRは「Lightingパスが適用した鏡面IBLをまったく同じ式で再現して差し替える」設計で、
+28章のRT反射もまったく同じ構造に乗っている。そのため一部だけが遮蔽マップを掛けると、
+反射が適用される領域とされない領域の境界に段差が出る。
+3つとも <code>ao = AOTexture.a * material.b</code> で統一している。</p>
+
+<p><b>実際に取りこぼした。</b>この章(遮蔽マップ)と28章(RT反射)は別ブランチで並行して実装され、
+マージ時に<code>RTReflection.hlsl</code>だけ<code>materialAO</code>の乗算が入らないまま残っていた。
+ここが「読み手は2つ」と書かれていたことが、3つ目の読み手が増えたことに気付けなかった一因でもある。
+<b>G-Bufferのチャンネルに新しい読み手が増えたときは、この節の一覧も必ず更新すること。</b></p>
+
+<p><b>実測(Sponza / DX12 / レンダー解像度1280x720 / RT反射・SSAO有効 / TAAは切って比較)</b>:
+<code>materialAO</code>の乗算だけを入れ替えて撮り比べたところ、<b>8bit値で差2超が59.4%・最大63</b>。
+差は<b>ベイク済みAOが強く効く箇所に集中</b>した(壁の円形レリーフ、金属の吊り下げランプ、
+装飾帯、植栽)。<b>掛けていない側ではそれらが黒く潰れて模様が消える</b> ――
+Lightingパスが<code>ao * material.b</code>で足した鏡面IBLを、RT反射が<code>ao</code>だけで
+引いていたため引きすぎになっていた(28.2節でいう「足した覚えのない値を引く」)。
+なお同一シェーダで2回撮った対照は<b>差2超が0ピクセル・最大差1</b>で、
+自動露出まで含めて実行間で完全に再現するため、上の差はすべてこの1箇所に由来する。</p>
 </div>
 
 <h3>22.3 スペキュラオクルージョンの定義を共有ヘッダーへ移した</h3>
@@ -5626,7 +5998,46 @@ TEXCOORD0はレンガや石畳をタイリングして貼るためのUVであり
 既定のWIC経由の縮小は<code>R8_UNORM</code>のような単一チャンネル形式を扱えずE_FAILで落ちる
 (実際に発生した)。</p>
 
-<h4>22.6.4 検証</h4>
+<h4>22.6.4 解像度とレイ本数の配分 &mdash; 三角形密度が高いモデルでは解像度を優先する</h4>
+
+<p>
+<code>--occlusion-resolution</code>と<code>--occlusion-rays</code>はどちらもコストに効くが、
+<b>総レイ数が同じでも品質は同じにならない</b>。三角形数に対してテクセルが足りない場合、
+不足はレイ本数では埋められない。
+</p>
+
+<p>
+McGuireのChinese Dragon(<b>87万三角形</b>の3Dスキャン)で実際に踏んだ例:
+</p>
+
+<table>
+<tr><th>設定</th><th>1三角形あたりのテクセル数</th><th>所要時間</th><th>結果</th></tr>
+<tr><td>1024&sup2; / 256レイ</td><td>約1.2</td><td>7分54秒</td><td><b>斑点状のノイズ</b></td></tr>
+<tr><td>2048&sup2; / 64レイ</td><td>約4.8</td><td>7分13秒</td><td>解消</td></tr>
+</table>
+
+<p>
+総レイ数(約2.7億)はほぼ同じで、時間もほぼ同じである。にもかかわらず1024&sup2;が破綻するのは、
+xatlasが<b>数テクセル四方の極小チャートを大量に作る</b>ためである。チャートが小さいと、
+22.6.2のダイレーションで確保するパディングとバイリニア補間の余白がチャート面積の大半を占め、
+実際に半球サンプリングした値がほとんど残らない。レイを増やしても
+「サンプルできているテクセルが少なすぎる」という問題は変わらない。
+</p>
+
+<p>
+したがって<b>まず解像度を上げ、足りなくなったぶんをレイ本数から引く</b>のが正しい配分になる。
+チャートが十分な広さを持つようになれば、レイ本数は64本程度でもコサイン重点サンプリングと
+Hammersley列の低食い違い量性で足りる。逆に建築物のような三角形密度の低いモデルでは
+テクセルが余るので、既定の512&sup2; / 128レイのままでよい(Sponzaは26万三角形・25メッシュを
+この設定で約13秒、破綻なし)。
+</p>
+
+<p>
+判断の目安は<b>1三角形あたりのテクセル数</b>である。1を切るようなら解像度が不足しており、
+レイ本数を触る前に解像度を上げること。
+</p>
+
+<h4>22.6.5 検証</h4>
 
 <ul>
   <li><b>LightTest(床・壁・球4個)でベイク有無を撮り比べ</b>、差分を8倍に増幅して確認した。
@@ -5636,7 +6047,7 @@ TEXCOORD0はレンガや石畳をタイリングして貼るためのUVであり
       継ぎ目・黒抜け・UV破綻はいずれも出ていない</li>
 </ul>
 
-<h4>22.6.5 ベイク時間の内訳 &mdash; 99%はUV展開で、レイキャストではない</h4>
+<h4>22.6.6 ベイク時間の内訳 &mdash; 99%はUV展開で、レイキャストではない</h4>
 
 <p>
 「ベイクが遅いのはレイキャストだろう」という直感は<b>誤り</b>である。
@@ -5687,7 +6098,9 @@ xatlas内蔵のプロファイラ(<code>xatlas.cpp</code>の<code>XA_PROFILE</co
 残る<code>Place seeds</code>も、面をチャートへ追加できるか判定するたびに
 <b>チャート全体の境界グリッドを作り直して自己交差判定を走らせる</b>ため、
 チャートの面数の2乗で効く。どちらもxatlas側のアルゴリズムの性質で、
-呼び出し側から回避する手段は無い。
+<b>xatlasに渡す形を変えずに</b>回避する手段は無い。
+ただし後述のとおり、どちらも<b>チャートグループ内</b>で効くため、
+メッシュを分割して渡せば両方まとめて表面化しなくなる(22.6.6節。実測で25倍)。
 </p>
 
 <h5>単一の巨大メッシュだけが遅い</h5>
@@ -5706,6 +6119,8 @@ xatlasは<b>チャートグループ単位</b>で並列化するが、ドラゴ�
 <code>xatlas::Create()</code>は<b>Atlasごとに</b><code>hardware_concurrency - 1</code>個の
 ワーカースレッドを作る。28コア機で<code>UnwrapMesh</code>を28並列にすると
 28×27=756スレッドになり、オーバーサブスクリプションで逆に遅くなる。
+22.6.6の内部分割が<b>1つのAtlasへ複数回<code>AddMesh</code>する</b>形を採っているのは、
+xatlas自身のスケジューラに割り振らせればこの問題が起きないためでもある。
 </p>
 
 <h5>試して効かなかった / 採らなかった手</h5>
@@ -5720,8 +6135,138 @@ xatlasは<b>チャートグループ単位</b>で並列化するが、ドラゴ�
       (マージで大きくしたチャートが分割し直されるため、マージした方が最終的に増える)。
       速度・チャート数の両方で改善するが、<b>vendored submoduleへのパッチが必要</b>で
       新規クローン時の手順が増えるため、現時点では採っていない。
-      ベイク時間が問題になったら最初に検討する手</li>
+      22.6.6の内部分割で25倍速くなり必要性が薄れたため、現在は保留のまま</li>
 </ul>
+
+<h4>22.6.6 UV展開の内部分割 &mdash; 巨大な単一メッシュを25倍速くする</h4>
+
+<p>
+22.6.5の結論は「遅いのはxatlasのUV展開であり、しかも<b>連結した単一の巨大メッシュだけ</b>が遅い」
+だった。ならば<b>メッシュを分割してxatlasへ渡せばよい</b>。
+<code>UnwrapMesh</code>は三角形数が<code>UnwrapSplitThreshold</code>(既定50000)を超えたメッシュを
+空間的に分割し、チャンクごとに<code>xatlas::AddMesh</code>を呼ぶ。
+</p>
+
+<p>
+効く理由は22.6.5で挙げた2つの原因にそれぞれ対応している。
+</p>
+
+<ul>
+  <li><b>並列化が効くようになる。</b> xatlasの<code>ComputeCharts</code>は
+      「メッシュごとに1タスク」で並列化される(<code>xatlas.cpp</code>の
+      <code>// One task per mesh.</code>)。1メッシュ=1<code>AddMesh</code>では
+      この軸が丸ごと死んでいた</li>
+  <li><b>2乗が表面化しなくなる。</b> <code>mergeCharts</code>(チャート数の2乗)も
+      Place seeds(チャートの面数の2乗)も<b>チャートグループ内</b>で効くため、
+      グループが小さく分かれていれば問題にならない</li>
+</ul>
+
+<p class="note">
+<b>分割されるのは「xatlasに見せるトポロジー」だけで、遮蔽マップの粒度は変わらない。</b>
+<code>PackCharts</code>は<b>全チャンクを1枚の共有アトラスへ</b>詰めるため
+(<code>Atlas::width/height</code>はアトラス全体で1つ、<code>Atlas::meshes[i]</code>が
+各<code>AddMesh</code>に対応)、出力は従来どおりメッシュあたり遮蔽マップ1枚である。
+<code>SourceModel::Meshes</code>の要素数も<code>PackageWriter</code>への
+インターフェースも一切変えていない。
+</p>
+
+<p>
+分割はBVH構築と同じ<b>三角形重心の中央値分割</b>で、最も広がっている軸を
+<code>std::nth_element</code>で二分するのを目標三角形数以下になるまで繰り返す。
+チャンク境界に跨る頂点は複製され、それがチャート境界になる。
+</p>
+
+<h5>実測(Chinese Dragon 871306三角形・単一メッシュ、解像度2048 / レイ64本、RTX 4070 Ti)</h5>
+
+<table>
+<tr><th>目標三角形数</th><th>チャンク数</th><th>ComputeCharts</th><th>PackCharts</th><th>UV展開合計</th><th>チャート数</th><th>被覆率</th><th>頂点数</th></tr>
+<tr><td><b>分割なし</b></td><td>1</td><td><b>370.40秒</b></td><td>2.25秒</td><td><b>372.87秒</b></td><td>32279</td><td>37.98%</td><td>791529</td></tr>
+<tr><td><b>100000(既定)</b></td><td>16</td><td><b>14.07秒</b></td><td>2.24秒</td><td><b>16.52秒</b></td><td>32771</td><td>37.88%</td><td>793160</td></tr>
+<tr><td>50000</td><td>32</td><td>11.35秒</td><td>2.29秒</td><td>13.85秒</td><td>33480</td><td>37.58%</td><td>795730</td></tr>
+<tr><td>20000</td><td>64</td><td>10.70〜11.82秒</td><td>2.29秒</td><td>14.74秒</td><td>33449</td><td>37.65%</td><td>796119</td></tr>
+<tr><td>5000</td><td>256</td><td>7.65〜7.86秒</td><td>2.30秒</td><td>10.21秒</td><td>33917</td><td>37.55%</td><td>798061</td></tr>
+<tr><td>2000</td><td>512</td><td>5.71秒</td><td>2.31秒</td><td>8.09秒</td><td>33744</td><td>37.48%</td><td>&mdash;</td></tr>
+</table>
+
+<p>
+既定の100000で<b>372.87秒→16.52秒(約22.6倍)</b>。代償は驚くほど小さい。
+</p>
+
+<ul>
+  <li><b>被覆率は37.98%→37.88%(-0.10ポイント)</b>しか落ちない。
+      チャートが小さく多くなるぶん<code>blockAlign</code>の端数ロスが増えて
+      パッキング効率が落ちる、という事前の懸念はほぼ外れた。
+      512チャンクまで振っても-0.5ポイントに収まる</li>
+  <li><b>チャート数は+1.5%</b>(32279→32771)。<code>PackCharts</code>は
+      <code>taskScheduler</code>を受け取らず完全にシングルスレッドなので新たな律速に
+      なりうると見ていたが、512チャンクでも2.3秒で頭打ちであり顕在化しなかった</li>
+  <li><b>頂点は+0.21%</b>(791529→793160)。チャンク境界での複製ぶん</li>
+  <li><b>三角形の脱落はゼロ。</b> 全条件でインデックス数2613918(=871306×3)が入力と一致した</li>
+</ul>
+
+<h5>継ぎ目は出ていない(A/B比較で検証)</h5>
+
+<p>
+分割面に沿ってチャートが必ず切れるため、継ぎ目(筋状の明暗)が出ないかを実測で確認した。
+<code>Scenes/UnwrapSplitCompare.kscene</code>が比較用のシーンで、分割なしと分割ありを
+並べてある。リフレクタンス=1・太陽オフにしてあるのは、遮蔽マップだけが減衰要因になり
+差が直接読めるようにするため(<code>OcclusionBakeCompare.kscene</code>と同じ狙い)。
+</p>
+
+<p>
+ただし2体を並べると左右で見る角度が変わるため、厳密な判定には
+<b>同一位置・同一カメラで1体ずつ描画して差分を取る</b>方法を使った。1284x719の描画領域で:
+</p>
+
+<table>
+<tr><th>指標</th><th>値</th></tr>
+<tr><td>最大差</td><td>42 / 255</td></tr>
+<tr><td>平均差</td><td>0.089 / 255</td></tr>
+<tr><td>差 &gt; 32 の画素</td><td>4画素(0.0004%)</td></tr>
+<tr><td>差 &gt; 64 の画素</td><td>0画素</td></tr>
+</table>
+
+<p>
+決め手は<b>差の分布に直線構造がまったく無い</b>ことである。差&gt;32の4画素は
+1行あたり・1列あたりいずれも最大1画素で、孤立した点にしかならない。
+分割面に沿った継ぎ目が出ていれば行または列に集中するはずなので、
+<b>継ぎ目は発生していない</b>と言える。残る微小差はチャート境界のマイクロノイズが
+並び替わったもので、これは分割前から同じだけ存在する
+(22.6.4のとおりテクセル密度が1.81しかないことに由来する)。
+</p>
+
+<p class="note">
+<b>既定値を最速の値にしていない理由。</b> 表のとおり5000や2000のほうが速いが、
+チャンクを小さくするほど分割数が増え、分割面に沿った継ぎ目のリスクは上がる。
+継ぎ目は被覆率には表れないため、数値だけで最速を選ぶと見えない品質を失う。
+既定を100000(チャンク数16)にしたのは、372.87秒→16.52秒という速度改善のほぼ全部を
+取りつつ、分割数を最小限に抑えて継ぎ目のリスクを下げるため。
+</p>
+
+<p class="note">
+<b>上のA/B比較は目標三角形数20000(チャンク数64)で取ったものであり、
+既定値の100000(チャンク数16)そのものでは検証していない。</b>
+ただし100000は20000よりチャンク数が少なく分割面も少ないため、
+継ぎ目のリスクは20000で確認した「直線構造なし」の結果と同等かそれ以下のはずである。
+既定値を100000よりさらに大きくする、または明示的に小さい値へ変更する場合は、
+同じA/B検証をやり直すこと。
+</p>
+
+<p class="note">
+<b>閾値以下のメッシュはベイク結果がバイト単位で変わらない。</b>
+チャンク数1のとき頂点写像は恒等写像になり、処理は分割前と同じ経路を通る。
+Sponza(26万三角形・25メッシュ、全メッシュが閾値未満)で
+既定と<code>--unwrap-split-threshold 0</code>の出力91ファイルが完全一致することを確認済み。
+分割を入れる変更で最も怖いのは<b>既存アセットのベイク結果が黙って変わること</b>なので、
+この一致は回帰テストとして必ず維持すること。
+</p>
+
+<p class="note">
+<b>三角形の脱落は必ずログに出す。</b> xatlasは退化面(ゼロ面積・長さゼロの辺)を無視し、
+どのチャートにも入らなかった面は出力メッシュから消える。これは<b>分割の有無に関係なく
+起こりうる</b>が、黙って三角形が減ると描画に穴が開く。
+<code>UnwrapMesh</code>は入力と出力の三角形数を突き合わせ、減っていれば件数と割合を警告する。
+</p>
 
 <h3>22.7 既知の制約</h3>
 
@@ -6811,6 +7356,13 @@ Lightingパスが適用した鏡面IBLを差し引く部分は完全に共通:
 「足した覚えのない値を引く」ことが構造的に起きない。
 </p>
 <p>
+<b>ただし共有ヘッダーに入っていない引数は自分で揃える必要がある。</b>
+<code>SpecularIBLWeight</code>へ渡す<code>ao</code>がそれで、
+<code>ao = AOTexture.a * material.b</code>(実行時の遮蔽 × マテリアルの遮蔽マップ)と
+<code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>に揃えなければならない(22.2節)。
+実際にこれを取りこぼし、RT反射だけ<code>material.b</code>を掛けていない状態でマージされていた。
+</p>
+<p>
 確信度の扱いだけがSSRと違う。SSRには「レイが画面外へ外れて判定がつかない」という状態があり
 その場合は確信度0(=プローブ/IBLに任せる)としていたが、
 <strong>RTのレイは必ずヒットするか空へ抜けるかのどちらかに決着する</strong>ため、
@@ -7695,7 +8247,10 @@ DDGIと併用するのが正しい。
 <h3>31.10 現時点の実装範囲と既知の制約</h3>
 <ul>
 <li><strong>ボリュームは1個だけ</strong>。<code>.kscene</code>に複数書けるが2つ目以降は警告を出して切り捨てる
-(重なりと優先順位を決める仕組みがまだ無い)</li>
+(重なりと優先順位を決める仕組みがまだ無い)。<strong>【M11で追記】</strong>以前はボリュームの外側でも
+境界のプローブを外挿し続け、戻る経路が無かった(19.15節)。この段階で
+境界の1グリッドセル分でグローバルIBLへフェードする対処は入れたが、
+ボリューム自体が1個しか置けない制約そのものは残っている</li>
 <li><strong>格子は軸に平行な直方体のみ</strong>。回転・不均一な密度は持たない</li>
 <li><strong>プローブの分類を持たない</strong>。壁の内部に入ってしまったプローブ(周囲が全て裏面)を検出して
 無効化する仕組み(RTXGIのプローブ分類に相当)が無いため、格子の置き方は<code>.kscene</code>側で
@@ -7709,6 +8264,9 @@ BLAS/TLASとRHI抽象化が完成済み)へ載せ替えれば1ディスパッチ
 露出が動かないまま光源だけが変わった場合(ライトの色を変える等)は時定数どおり遅い</li>
 <li><strong>半透明メッシュはプローブへ焼かない</strong>(19.11節と同じ理由)。ガラス越しの間接光は出ない</li>
 <li>拡散のみ。鏡面は反射プローブの担当で、DDGIは<code>prefiltered</code>に触れない(31.2節)</li>
+<li><strong>【M11で追記】</strong>半透明パス(<code>Transparent.hlsl</code>)の拡散サンプル元がDDGIへ
+つながった(19.15節)。上の「半透明メッシュはプローブへ焼かない」はDDGIのキャプチャ(焼き込み)側の
+制約で、これとは別の話である。焼き込み側にガラスが映らない制約は変わっていない</li>
 </ul>
 </section>
 
@@ -7905,7 +8463,7 @@ DX11 → DX12 → DX11 と切り替えると<code>Logger::SetFileSuffix</code>�
 </section>
 
 <section id="clouds">
-<h2>34. 雲(レイヤーモデル、P5)</h2>
+<h2>35. 雲(レイヤーモデル、P5)</h2>
 
 <p>
 <a href="#procedural-sky">21章</a>で導入した手続き空(Perez分布)へ、積雲1層を足した。
@@ -7915,7 +8473,7 @@ DX11 → DX12 → DX11 と切り替えると<code>Logger::SetFileSuffix</code>�
 映り込みの両方に自動で行き渡る。これが21.10節でこの共有ヘッダー構造を先に作った理由の1つでもある。
 </p>
 
-<h3>34.1 フルボリュメトリックではなくレイヤーモデルを選んだ理由</h3>
+<h3>35.1 フルボリュメトリックではなくレイヤーモデルを選んだ理由</h3>
 <p>
 雲の表現としては、3Dテクスチャ(または複数スライスのボリューム)へ密度場を持ち、視線をその中で
 レイマーチングするフルボリュメトリック手法が写実性では上回る。しかし本エンジンの<code>RHI::
@@ -7936,7 +8494,7 @@ IRHIDevice</code>にはそもそも3Dテクスチャを生成する手段が無�
 奥行き感)は表現できないが、遠景の空としては許容範囲と判断した。
 </p>
 
-<h3>34.2 解析式であることの副次的な利点 ― 背景と水面反射が自動的に一致する</h3>
+<h3>35.2 解析式であることの副次的な利点 ― 背景と水面反射が自動的に一致する</h3>
 <p>
 レイヤーモデルは<code>SkyColor(dir, params)</code>という「方向を渡すと色が返る」純粋関数のまま
 実装できるため、<a href="#ssrprobe">20章</a>で確立した「背景が足した値とSSRが差し替える値の
@@ -7946,7 +8504,7 @@ IRHIDevice</code>にはそもそも3Dテクスチャを生成する手段が無�
 出すには反射方向へもう1回レイマーチングを行う必要があり、コストが単純に2倍になっていた。
 </p>
 
-<h3>34.3 判断A ― IBL用キューブマップには雲を焼かない</h3>
+<h3>35.3 判断A ― IBL用キューブマップには雲を焼かない</h3>
 <p>
 <code>SkyGenerate.hlsl</code>(21.10節、IBL専用の256px/面キューブマップをベイクする)は、
 <code>SkyParameters</code>を組み立てる際に雲のフィールドを明示的にすべて無効
@@ -7963,7 +8521,7 @@ IRHIDevice</code>にはそもそも3Dテクスチャを生成する手段が無�
 積分側も追従させる負債のほうが、「IBLの雲は焼かない」という割り切りより大きいと判断した。</li>
 </ul>
 
-<h3>34.4 判断B ― 被覆率による減光はキューブのベイク時にだけ掛ける</h3>
+<h3>35.4 判断B ― 被覆率による減光はキューブのベイク時にだけ掛ける</h3>
 <p>
 判断Aの結果、IBLは常に雲の無い晴天基準の明るさで焼かれる。しかし被覆率50%の曇り空で
 シーンが晴天と同じ明るさに照らされるのは明らかに不自然なため、<code>KurenaiEngine3D::Render()</code>
@@ -7980,10 +8538,10 @@ IRHIDevice</code>にはそもそも3Dテクスチャを生成する手段が無�
 ここも減光すると、<code>Sky.hlsli</code>の<code>SkyColor</code>が雲の隙間から見える青空
 (晴天色 × 透過率の「透過率」が1に近い部分)まで暗くしたうえへ、そこへさらに雲の散乱光を
 重ねることになり、二重に暗くなってしまう。晴天色そのものは常に「雲を考慮しない基準の明るさ」の
-まま保ち、雲の効果は<code>SkyColor</code>内の合成(34.6節)だけで表現する。
+まま保ち、雲の効果は<code>SkyColor</code>内の合成(35.6節)だけで表現する。
 </p>
 
-<h3>34.5 太陽の直接光は減光しない</h3>
+<h3>35.5 太陽の直接光は減光しない</h3>
 <p>
 <code>ComputeSunLighting</code>・<code>SunLighting::SkyIlluminanceLux</code>/
 <code>KeyIlluminanceLux</code>は雲の追加にあたって一切変更していない。被覆率は「空全体の
@@ -7994,7 +8552,7 @@ IRHIDevice</code>にはそもそも3Dテクスチャを生成する手段が無�
 自動露出の基準は雲の影響を受けないままにしてある。
 </p>
 
-<h3>34.6 密度・自己影・合成</h3>
+<h3>35.6 密度・自己影・合成</h3>
 <p>
 雲のUVは視線と雲底平面の交点から作るため、視線がほぼ水平に近づくほどワールド座標に比例して
 無限に大きくなる。風のスクロールオフセット(<code>m_CloudScrollOffset</code>)をCPU側で
@@ -8006,7 +8564,7 @@ fBmはオクターブ数<code>kCloudOctaves</code>(既定4)段で、オクター
 </p>
 <p>
 密度は<code>remap(fBm出力, 1-被覆率, 1.0)</code>を<code>saturate</code>したもので、
-被覆率0では常に0になる(34.7節の判断Cの根拠)。光路長は<code>1/max(dir.y, ε)</code>に比例させ、
+被覆率0では常に0になる(35.7節の判断Cの根拠)。光路長は<code>1/max(dir.y, ε)</code>に比例させ、
 上限をクランプする(クランプしないと地平線際で1画素あたりの雲セル数が発散しエイリアシングになる)。
 自己影は雲底のUVから太陽方向(XZへ投影)へ数ステップ進めながら密度を積分し、ビアの法則
 (<code>exp(-density * 消散係数 * 経路長)</code>)で求める。前方散乱はHenyey-Greenstein位相関数で
@@ -8024,7 +8582,7 @@ fBmはオクターブ数<code>kCloudOctaves</code>(既定4)段で、オクター
 持っており、そこへ雲を重ねる意味のある絵にならないため。
 </p>
 
-<h3>34.7 判断C ― 被覆率0のときP4完了時点と画素まで一致させる</h3>
+<h3>35.7 判断C ― 被覆率0のときP4完了時点と画素まで一致させる</h3>
 <p>
 <code>Sky.hlsli</code>の<code>SkyColor</code>は晴天色(<code>SkyColorUpper</code>の結果)を
 求めた直後、積雲・巻雲どちらの被覆率も0(<code>CloudCoverage &lt;= 0.0f &amp;&amp;
@@ -8034,17 +8592,17 @@ CirrusCoverage &lt;= 0.0f</code>)、または<code>dir.y &lt;= 0.0f</code>なら
 常にこの早期脱出経路を通るため、IBL用キューブマップの中身は雲追加の前後で変わらない。
 </p>
 <p class="note">
-<strong>P11(34.9節)で巻雲を足した後も、巻雲の被覆率が0のときは積雲だけだったP11着手時点(HEAD)と画素まで
+<strong>P11(35.9節)で巻雲を足した後も、巻雲の被覆率が0のときは積雲だけだったP11着手時点(HEAD)と画素まで
 厳密に一致する。</strong><code>SkyColor</code>は積雲を評価した直後、<code>CirrusCoverage
 &lt;= 0.0f</code>なら巻雲側の<code>EvaluateCloudLayer</code>を一度も呼ばず
 <code>clearColor * T_cumulus + S_cumulus</code>という積雲単体のときと1つも掛け算・足し算が
-増えない式でそのまま返す(34.9節参照)。「T_cirrus=1, S_cirrus=0になるから結果は同じはず」
+増えない式でそのまま返す(35.9節参照)。「T_cirrus=1, S_cirrus=0になるから結果は同じはず」
 という理屈には頼っていない――浮動小数の乗算は単位元(1.0倍)であっても丸め誤差そのものは
 発生しないためこの場合は実害が無いが、余計な演算を式に足すこと自体を避け、
 早期脱出という構造でビット単位の一致を担保している。
 </p>
 
-<h3>34.8 このフェーズの範囲(P5時点)</h3>
+<h3>35.8 このフェーズの範囲(P5時点)</h3>
 <p>
 計画には積雲+高層の巻雲という多層化も含まれるが、P5では積雲1層に絞った。コストとリスクを
 抑え、1層をきちんと動かすことを優先する判断による。<code>SkyParameters</code>の雲用フィールドは
@@ -8052,7 +8610,7 @@ CirrusCoverage &lt;= 0.0f</code>)、または<code>dir.y &lt;= 0.0f</code>なら
 ベクトルのまま持たせてある。巻雲の追加は34.9節(P11)で行った。
 </p>
 
-<h3>34.9 巻雲(P11) ― 2層目を足して雲を多層化する</h3>
+<h3>35.9 巻雲(P11) ― 2層目を足して雲を多層化する</h3>
 <p>
 P5で積雲1層に絞った雲モデルへ、高層の巻雲を2層目として追加した。積雲(<code>Cloud*</code>)と
 まったく同じレイヤーモデル(視線と雲底平面の交点からUVを作りfBmを評価する)を使うが、
@@ -8065,7 +8623,7 @@ P5で積雲1層に絞った雲モデルへ、高層の巻雲を2層目として�
 組み立てる。
 </p>
 
-<h3>34.9.1 巻雲は自己影を計算しない</h3>
+<h3>35.9.1 巻雲は自己影を計算しない</h3>
 <p>
 <code>CloudLayerParams::ShadowSteps</code>が0の層は、<code>EvaluateCloudLayer</code>内の
 自己影ブロック(太陽方向へ密度を積分してビアの法則で減衰させる部分)を丸ごとスキップし、
@@ -8078,7 +8636,7 @@ P5で積雲1層に絞った雲モデルへ、高層の巻雲を2層目として�
 変えてある。
 </p>
 
-<h3>34.9.2 合成順 ― 高い層から手前へ、巻雲の散乱光には積雲の透過率を掛ける</h3>
+<h3>35.9.2 合成順 ― 高い層から手前へ、巻雲の散乱光には積雲の透過率を掛ける</h3>
 <p>
 2層の合成は次の形にしてある(<code>SkyColor</code>)。
 </p>
@@ -8094,11 +8652,11 @@ P5で積雲1層に絞った雲モデルへ、高層の巻雲を2層目として�
 巻雲は見えないはずなのに、この項を落とすと被覆率に関わらず一定の明るさで足されてしまう)。
 </p>
 
-<h3>34.9.3 判断A・B・Cは2層目にもそのまま適用する</h3>
+<h3>35.9.3 判断A・B・Cは2層目にもそのまま適用する</h3>
 <p>
-判断A(IBL用キューブマップには雲を焼かない、34.3節)・判断C(被覆率0のとき画素まで一致、
-34.7節)は巻雲にもそのまま適用されることを各節に追記した。判断B(被覆率による減光は
-キューブのベイク時にだけ掛ける、34.4節)は<code>ComputeCloudAverageTransmittance</code>
+判断A(IBL用キューブマップには雲を焼かない、35.3節)・判断C(被覆率0のとき画素まで一致、
+35.7節)は巻雲にもそのまま適用されることを各節に追記した。判断B(被覆率による減光は
+キューブのベイク時にだけ掛ける、35.4節)は<code>ComputeCloudAverageTransmittance</code>
 (<code>KurenaiEngine3D.cpp</code>)を2層の透過率の積
 (<code>T = T_cumulus(積雲の被覆率) * T_cirrus(巻雲の被覆率)</code>)へ拡張する形で適用した。
 巻雲側の「全天が巻雲のときの透過率」(<code>kCirrusOvercastTransmittance</code>)は積雲の
@@ -8107,14 +8665,14 @@ P5で積雲1層に絞った雲モデルへ、高層の巻雲を2層目として�
 定性的な近似であり、精密な値は求めていない。
 </p>
 
-<h3>34.9.4 パラメータの持ち回り</h3>
+<h3>35.9.4 パラメータの持ち回り</h3>
 <p>
 <code>FrameConstants</code>の末尾へ<code>CloudParams2</code>(x=巻雲の被覆率、y=雲底の高度、
 z=UVスケール、w=消散係数)・<code>CloudParams3</code>(xy=風によるノイズ空間の移動量、
 z=fBmのUVを異方的に伸ばす倍率、w=未使用)を追加した。この構造体を宣言している
 <code>DeferredLighting.hlsl</code>・<code>SSR.hlsl</code>・<code>PlanarReflection.hlsl</code>
 (3つ目はパディング目的で末尾フィールドを直接は使わない)すべてを同時に更新し、C++側の宣言と
-1フィールドずつ突き合わせて一致を確認した(34.4節・34.9.3節と同じくここがずれると
+1フィールドずつ突き合わせて一致を確認した(35.4節・35.9.3節と同じくここがずれると
 全シェーダーが静かに壊れるため)。風のスクロール(<code>m_CirrusScrollOffset</code>)は
 <code>m_CloudScrollOffset</code>とまったく同じ形(<code>kCloudNoisePeriod</code>で
 <code>std::fmod</code>)でCPU側が進める。風向・凍結トグル(<code>m_CloudTimeFrozen</code>)は
@@ -8125,7 +8683,7 @@ z=fBmのUVを異方的に伸ばす倍率、w=未使用)を追加した。この�
 持たずシェーダ内定数にしてある(cbufferを増やす価値がないため)。
 </p>
 
-<h3>34.10 「空が全面曇っている」の正体は被覆率ではなく雲の大きさだった</h3>
+<h3>35.10 「空が全面曇っている」の正体は被覆率ではなく雲の大きさだった</h3>
 <p>
 カメラを15度上げると空がほぼ真っ白になり、青空が画素の1.9%しか残らない状態が続いていた。
 被覆率(<code>CloudCoverage = 0.45</code>)が高すぎるのだろうと考えて下げにいったが、
@@ -8213,11 +8771,11 @@ z=fBmのUVを異方的に伸ばす倍率、w=未使用)を追加した。この�
 オクターブ数や合成方法を変えたら測り直すこと。
 </p>
 
-<h3>34.11 ボリュメトリック雲の土台 ― 3Dテクスチャを扱えるようにする(P13a)</h3>
+<h3>35.11 ボリュメトリック雲の土台 ― 3Dテクスチャを扱えるようにする(P13a)</h3>
 <p>
 ここまでの雲は厚みゼロの平面レイヤーで、雲の上端と下端で視差が生まれず、雲底が暗く雲頂が明るいという
 積雲らしい明暗の勾配も出ない。本来のボリュメトリック雲へ進むには3Dノイズが要るが、
-<code>IRHIDevice</code>には3Dテクスチャを作る手段が無かった(34.1節でレイヤーモデルを選んだ理由の1つ)。
+<code>IRHIDevice</code>には3Dテクスチャを作る手段が無かった(35.1節でレイヤーモデルを選んだ理由の1つ)。
 P13aはその土台だけを入れる段で、<strong>見た目は1ビットも変えないのが正解</strong>である
 (まだ誰もこのテクスチャを読まないため)。
 </p>
@@ -8333,7 +8891,7 @@ DX11とDX12でノイズの内容が一致し(最大差1・平均0.003、fxcとdx
 </section>
 
 <section id="planarreflection">
-<h2>35. 平面反射(P6)</h2>
+<h2>36. 平面反射(P6)</h2>
 
 <p>
 水面に不透明ジオメトリ(城など)の鏡像を映すための専用フォワードパス
@@ -8343,7 +8901,7 @@ DX11とDX12でノイズの内容が一致し(最大差1・平均0.003、fxcとdx
 その鏡映カメラでもう一度シーンを描く」ことで、SSRのレイマーチとは別の情報源を水面に与える。
 </p>
 
-<h3>35.1 「同じ画面UVで引ける」ことが平面反射を選ぶ最大の理由</h3>
+<h3>36.1 「同じ画面UVで引ける」ことが平面反射を選ぶ最大の理由</h3>
 <p>
 水面平面についてカメラを鏡映行列<code>R</code>(<code>XMMatrixReflect</code>)で鏡映し、
 反射用ViewProj = <code>R * View * jitteredProj</code>でシーンを描くと、得られる絵は
@@ -8357,7 +8915,7 @@ DX11とDX12でノイズの内容が一致し(最大差1・平均0.003、fxcとdx
 別のジッターを使うとサブピクセル単位で画面UVの対応が崩れる。
 </p>
 
-<h3>35.2 ProbeCaptureと同じ割り切りに乗った</h3>
+<h3>36.2 ProbeCaptureと同じ割り切りに乗った</h3>
 <p>
 このシェーダーの土台は<a href="#reflectionprobe">19章</a>の<code>ProbeCapture.hlsl</code>
 (反射プローブのキャプチャパス)で、<code>cbuffer</code>の宣言・ライティングの式は意図的に
@@ -8370,11 +8928,11 @@ DX11とDX12でノイズの内容が一致し(最大差1・平均0.003、fxcとdx
 <p>
 ProbeCaptureとの違いは3点だけである。(1) レンダーターゲットは1枚(放射輝度のみ。プローブと違い
 視差補正用の距離は要らない)。(2) <code>View</code>にカメラのビュー行列をそのまま渡す理由が
-ProbeCaptureとは異なる(35.3節)。(3) 水面より下のジオメトリを<code>SV_ClipDistance0</code>で
-落とす(35.4節)。
+ProbeCaptureとは異なる(36.3節)。(3) 水面より下のジオメトリを<code>SV_ClipDistance0</code>で
+落とす(36.4節)。
 </p>
 
-<h3>35.3 <code>View</code>をカメラのままにする理由はProbeCaptureと違う</h3>
+<h3>36.3 <code>View</code>をカメラのままにする理由はProbeCaptureと違う</h3>
 <p>
 ProbeCaptureは「カスケード選択の深度がカメラ視錐台基準だから仕方なく」カメラの
 <code>View</code>を使っていた(プローブ自身の視点とは無関係にカメラ視点でカスケードを選ぶ、
@@ -8385,7 +8943,7 @@ ProbeCaptureは「カスケード選択の深度がカメラ視錐台基準だ�
 だから)。
 </p>
 
-<h3>35.4 <code>SV_ClipDistance0</code>で水面より下を落とす</h3>
+<h3>36.4 <code>SV_ClipDistance0</code>で水面より下を落とす</h3>
 <p>
 反射に映ってはいけない「水面より下にあるもの」を、頂点シェーダーの<code>SV_ClipDistance0</code>で
 落とす。値は水面平面の方程式に<code>worldPos</code>を代入したもの
@@ -8399,7 +8957,7 @@ ProbeCaptureは「カスケード選択の深度がカメラ視錐台基準だ�
 DX12がdxcのため両方で通る必要がある)。
 </p>
 
-<h3>35.5 ワインディングの反転をMirrored PSOの否定で吸収する</h3>
+<h3>36.5 ワインディングの反転をMirrored PSOの否定で吸収する</h3>
 <p>
 鏡映カメラで描くとワインディングが全反転するため、既存の<code>m_GBufferPipelineStateMirrored</code>
 (10.2節、負のスケールを持つインスタンス用に<code>FrontCounterClockwise</code>を反転したPSO)
@@ -8412,7 +8970,7 @@ GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定
 既存のPSO切り替えの仕組みを別の条件式で呼んでいるだけである。
 </p>
 
-<h3>35.6 水面平面の決定と鏡映カメラの構築</h3>
+<h3>36.6 水面平面の決定と鏡映カメラの構築</h3>
 <p>
 <code>KurenaiEngine3D::Render()</code>は<code>m_Scene.Instances</code>から
 <code>IsWater</code>が立っている最初のインスタンスを探し、そのワールド変換の平行移動Y
@@ -8435,16 +8993,16 @@ GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定
 <code>ViewProj</code>(反射用ViewProj、転置して格納)・<code>CameraPosition</code>
 (鏡映したカメラ位置)・<code>PlanarReflectionPlane</code>。<code>PrevViewProj</code>/
 <code>TAAParams</code>はcaptureProbeFaceと同じ理由(カメラ視点のものが混入するのを防ぐ)で
-明示的に潰す。<code>View</code>はカメラのものをそのまま残す(35.3節)。
+明示的に潰す。<code>View</code>はカメラのものをそのまま残す(36.3節)。
 </p>
 
-<h3>35.7 RenderGraph上の順序付けとSSR.hlslでの消費</h3>
+<h3>36.7 RenderGraph上の順序付けとSSR.hlslでの消費</h3>
 <p>
 パスの<code>.Reads</code>にシャドウマップ・IBL・DDGIのアトラスを挙げることで、これらを書く
 パスより後ろへ順序付ける。<code>SSR.hlsl</code>側の<code>.Reads</code>に
 <code>m_PlanarReflectionColor</code>を追加することで、SSRパスより前に順序付く。
 <code>SSR.hlsl</code>は<code>Texture2D PlanarReflectionTexture : register(t11)</code>
-(t0〜t10は既存の宣言ですべて埋まっている)として受け取り、35.1節のとおり
+(t0〜t10は既存の宣言ですべて埋まっている)として受け取り、36.1節のとおり
 <code>input.UV + N.xz * Params1.y</code>でそのままサンプルする(<code>Params1.y</code>は
 波による歪みの強さ、レンダリングパネルの「波による歪み」スライダーに対応する)。
 </p>
@@ -8464,7 +9022,7 @@ GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定
 厳密に同じコードパスを通る。
 </p>
 
-<h3>35.8 このフェーズの範囲</h3>
+<h3>36.8 このフェーズの範囲</h3>
 <p>
 「画面内の水面画素が0ならパスをスキップする」という最適化はこのフェーズでは行っていない。
 画素数を数える仕組みがRHIに無く、それ自体が新しい機構になるため見送った。パスを登録するか
@@ -8473,19 +9031,19 @@ GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定
 </section>
 
 <section id="aerialperspective">
-<h2>36. 大気遠近(height fog / aerial perspective、P8)</h2>
+<h2>37. 大気遠近(height fog / aerial perspective、P8)</h2>
 
 <p>
 高度で指数減衰する消散係数を持つ均一媒質を光線に沿って解析的に積分した透過率で、遠方の地物ほど
 背景の空の色(<a href="#procedural-sky">21章</a>の<code>Sky.hlsli</code>)へ滲んでいく効果を足した。
 新設した<code>Shaders/3D/AerialPerspective.hlsl</code>が反射パス(<a href="#ssr">7章</a>・
 <a href="#ssrprobe">20章</a>のSSR/RT反射)の直後、<a href="#taa">23章</a>のTAAパスの直前に置く
-フルスクリーン三角形+ピクセルシェーダーとして働く。合わせて、平面反射(<a href="#planarreflection">35章</a>)
+フルスクリーン三角形+ピクセルシェーダーとして働く。合わせて、平面反射(<a href="#planarreflection">36章</a>)
 の鏡像にも同じ式を適用し、水面(<a href="#ssrprobe">20.6節</a>)については見下ろしたときに
 Fresnelがほぼ最小になって真っ黒に沈む問題への対処として、水体の拡散反射色を1色足した。
 </p>
 
-<h3>36.1 なぜ独立パスなのか ― Lightingパスの中に入れなかった理由</h3>
+<h3>37.1 なぜ独立パスなのか ― Lightingパスの中に入れなかった理由</h3>
 <p>
 フォグの合成は「深度から求めた経路長 → 透過率 → 背景色とのlerp」という単純な式だが、
 Deferredな<code>DeferredLighting.hlsl</code>(<a href="#ssrprobe">20章</a>)の中でこれを行うと、
@@ -8509,7 +9067,7 @@ Lightingパスが完成させた<code>SceneColor</code>を「反射先の環境�
 深度と最終的な色の2枚だけを読む形にした。
 </p>
 
-<h3>36.2 なぜTAAの前なのか</h3>
+<h3>37.2 なぜTAAの前なのか</h3>
 <p>
 フォグの透過率は深度だけから決まる純関数で、時間方向に揺れる要素(ノイズ・時間的なサンプリング)を
 一切持たない。<a href="#taa">23章</a>のTAAより前に置けば、フォグが作る勾配の強い縁
@@ -8518,14 +9076,14 @@ Lightingパスが完成させた<code>SceneColor</code>を「反射先の環境�
 エイリアシングとして残ってしまう。
 </p>
 
-<h3>36.3 in-scatter項に<code>Sky.hlsli</code>の空モデルを使う理由</h3>
+<h3>37.3 in-scatter項に<code>Sky.hlsli</code>の空モデルを使う理由</h3>
 <p>
 フォグの合成先の色(in-scatter項)には、専用の定数色ではなく背景と同じ空モデル
 (<a href="#procedural-sky">21章</a>)をそのまま使う。
 理由は単純で、距離が無限大に近づくほど地物の色が<strong>厳密に</strong>背景の空色へ収束させたい
 ためである。専用の定数色を使うと、地平線際で「地物がフォグ色として滲んでいく先」と「背景として
 直接見えている空の色」が一致せず、水平線に沿って継ぎ目が出てしまう。空モデルを
-共有することで、<a href="#clouds">34.2節</a>で確立した「背景・水面反射・IBLが同じ空モデルの
+共有することで、<a href="#clouds">35.2節</a>で確立した「背景・水面反射・IBLが同じ空モデルの
 単一定義を経由する」という設計へ、大気遠近もそのまま乗る形になった。
 </p>
 <p>
@@ -8545,7 +9103,7 @@ in-scatter項が呼ぶのは、雲を合成した<code>SkyColor</code>ではな�
 <p>
 理由は物理的なものである。ここで必要なのは<strong>カメラと着目点の間にある空気</strong>が散乱して
 視線へ入れてくる光(airlight)であって、無限遠から届く空の放射輝度そのものではない。
-雲は高度1,000m以上のレイヤーモデル(<a href="#clouds">34章</a>)で、視線が雲底平面と交わるのは
+雲は高度1,000m以上のレイヤーモデル(<a href="#clouds">35章</a>)で、視線が雲底平面と交わるのは
 水平距離にして数km〜数十km先——カメラから数百m先にある地物の<em>手前</em>には存在しない。
 にもかかわらず<code>SkyColor</code>を使うと、そこに無いはずの雲の輝度がin-scatterに乗る。
 雲は青空の3倍以上明るく、しかもfBmで空間的に激しく変動するため、暗い地物ほど
@@ -8602,8 +9160,8 @@ gamma項(太陽角距離の項)と<code>SunGlowTint</code>が含まれており�
 <strong>雲は大気遠近を受ける側でなければならない。</strong>
 </p>
 <p>
-雲(<a href="#clouds">34章</a>)は深度を書かないため、大気遠近パスから見ると
-<code>depth &lt;= 0</code> の背景画素であり、36.4節の早期脱出でフォグを完全に免れていた。
+雲(<a href="#clouds">35章</a>)は深度を書かないため、大気遠近パスから見ると
+<code>depth &lt;= 0</code> の背景画素であり、37.4節の早期脱出でフォグを完全に免れていた。
 しかし雲は無限遠ではなく、積雲なら高度1,500m・巻雲なら8,000mの<strong>有限距離にある層</strong>である。
 視線と雲底平面の交点までの斜距離は<code>Altitude / dir.y</code>で、仰角が下がるほど急速に伸びる。
 既定の消散係数0.0004(視程10km)でも、本来この程度は減衰しているはずだった。
@@ -8700,7 +9258,7 @@ f倍に減り、雲が背後を遮る度合いも手前の大気光(airlight)で
 コンパイルを確認し、DX11・DX12の両方で起動・描画を確認した。
 </p>
 
-<h3>36.4 背景画素は1ビットも変えない</h3>
+<h3>37.4 背景画素は1ビットも変えない</h3>
 <p>
 Reverse-Zのため深度を持たない背景(スカイ)画素は<code>depth &lt;= 0.0f</code>になる。
 <code>AerialPerspective.hlsl</code>の<code>PSMain</code>はここで即座に元の色を返し、
@@ -8709,7 +9267,7 @@ Reverse-Zのため深度を持たない背景(スカイ)画素は<code>depth &lt
 この早期脱出により、フォグを無効化した状態との差分は背景領域について厳密にゼロになる。
 </p>
 
-<h3>36.5 モデルと閉形式の解</h3>
+<h3>37.5 モデルと閉形式の解</h3>
 <p>
 消散係数が高度で指数減衰する均一媒質<code>sigma(h) = Sigma0 * exp(-(h - RefHeight) / ScaleHeight)</code>
 を仮定すると、カメラ位置Aから着目点Bまでの光学的深さは解析的に積分できる
@@ -8747,9 +9305,9 @@ float  transmittance = exp(-max(tau, 0.0f));</code></pre>
 <code>MaxOpacity</code>を1.0未満にすると、最遠方でも元の色がうっすら透けて残る。
 </p>
 
-<h3>36.6 平面反射の鏡像にも同じフォグを掛ける</h3>
+<h3>37.6 平面反射の鏡像にも同じフォグを掛ける</h3>
 <p>
-<a href="#planarreflection">35章</a>の平面反射パスの出力(<code>m_PlanarReflectionColor</code>)は
+<a href="#planarreflection">36章</a>の平面反射パスの出力(<code>m_PlanarReflectionColor</code>)は
 <code>AerialPerspective.hlsl</code>の対象範囲(反射パスの出力)には含まれない――
 平面反射の結果はSSR側が<code>input.UV</code>でそのままサンプルして<code>SceneColor</code>へ
 合成されるため、SSRパスの出力(=大気遠近パスの入力)には既に「鏡像込みの水面反射色」が
@@ -8761,9 +9319,9 @@ float  transmittance = exp(-max(tau, 0.0f));</code></pre>
 同じ<code>HeightFogTransmittance</code>と<code>SkyColorUpper</code>(雲を含めない理由は36.3.1節)を
 使ってフォグを合成しておく。
 掛けないと「霞んだ本体 vs くっきりした鏡像」という不自然な絵になる。光が「物体 → 水面 → 目」の
-順に進む経路長は、鏡映カメラ(<code>CameraPosition</code>、35.3節)から物体までの距離と
+順に進む経路長は、鏡映カメラ(<code>CameraPosition</code>、36.3節)から物体までの距離と
 幾何学的に厳密に等しいため(鏡映は「鏡映カメラで景色を撮り直す」ことと数学的に等価という
-35.1節の理屈がそのまま成り立つ)、経路長にはその距離をそのまま使ってよい。
+36.1節の理屈がそのまま成り立つ)、経路長にはその距離をそのまま使ってよい。
 </p>
 <p>
 <strong>in-scatterの方向にも鏡映カメラからの向きをそのまま使ってよい。</strong>
@@ -8785,7 +9343,7 @@ y成分が常に負になり、<code>max(viewDir.y, 0)</code>のクランプで<
 差が広がる。
 </p>
 
-<h3>36.7 水中項 ― 見下ろした水面が真っ黒になる問題への対処</h3>
+<h3>37.7 水中項 ― 見下ろした水面が真っ黒になる問題への対処</h3>
 <p>
 現状の水面(<a href="#ssrprobe">20.6節</a>)は誘電体で<code>baseColorFactor</code>がほぼ黒に
 焼かれているため、見下ろす角度(<code>NdotV</code>が大きい)ではFresnelが最小値
@@ -8817,7 +9375,7 @@ y成分が常に負になり、<code>max(viewDir.y, 0)</code>のクランプで<
 物理量の実測ではなく、その帯域を根拠に見た目で決めた値である。
 </p>
 
-<h3>36.8 パラメータと手続き空との関係</h3>
+<h3>37.8 パラメータと手続き空との関係</h3>
 <p>
 消散係数・スケールハイト・基準高度・不透明度上限は<code>FrameConstants</code>末尾に追加した
 <code>FogParams0</code>/<code>FogParams1</code>として、水体の色は<code>WaterBodyColor</code>として
@@ -8847,6 +9405,840 @@ UIの設定に関わらず<code>FogParams0.w</code>(有効フラグ)を0にす�
 <a href="#ssrprobe">20.6節</a>のSSRが<code>usingProceduralSky</code>で水面の解析空フォールバックを
 落としているのと同じ判断である――DDSは任意の絵でPerezモデルとは無関係なため、
 <code>SkyColorUpper</code>による解析評価をin-scatter項に使ってはいけない。
+</p>
+
+</section>
+
+<section id="bent-normal">
+<h2>34. Bent Normalによる遮蔽(ディフューズ / スペキュラ)</h2>
+
+<p>
+22章の遮蔽マップは<strong>スカラーの遮蔽率しか持っていない</strong>。「どれだけ隠れているか」は
+分かるが「<strong>どの方向が開いているか</strong>」を捨てている。そのためスペキュラ遮蔽は
+Frostbiteの近似(<code>pow(NdotV + ao, exp2(-16r-1)) - 1 + ao</code>)に頼るしかなく、
+これは反射ベクトルRがどちらを向いていても同じ値を返す &mdash;&mdash;
+壁際で壁を向いた反射も、壁と反対を向いた反射も、同じだけ暗くなる。
+</p>
+
+<p>
+そこで<strong>正規化しないbent normalベクトル</strong><code>bRaw</code>をベイクし、消費側で3つへ分解する。
+</p>
+
+<table>
+<tr><th>量</th><th>式</th><th>用途</th></tr>
+<tr><td>軸 <code>axis</code></td><td><code>normalize(bRaw)</code></td><td>遮蔽コーンの向き</td></tr>
+<tr><td><code>aoB</code></td><td><code>length(bRaw)</code> = sin&sup2;&alpha;v</td><td>スペキュラ遮蔽の錐体の広がり</td></tr>
+<tr><td><code>aoN</code></td><td><code>dot(N, bRaw)</code></td><td>ディフューズAO(<strong>定義そのもの</strong>、厳密)</td></tr>
+</table>
+
+<p>
+定義は次のとおり。<code>V(&omega;)</code>は可視関数(遮られていなければ1)。
+</p>
+
+<pre><code>bRaw = (1/&pi;) &int; V(&omega;) &omega; d&omega;</code></pre>
+
+<p>
+遮蔽が無ければ<code>&int;&omega;d&omega; = &pi;N</code>なので<code>bRaw = N</code>となり、長さがちょうど1になる。
+また<code>dot(N, bRaw) = (1/&pi;)&int;V(&omega;)cos&theta;d&omega;</code>はコサイン重み付きAOの定義そのもので、
+22章のベイク済みAOと<strong>同じ量の別推定量</strong>になる。この一致がそのまま実装の検証になる。
+</p>
+
+<p>
+<strong>従来の「AOスカラー + 正規化済みbent normal」構成では不十分</strong>である点に注意。
+正規化するとコーンの広がり(<code>aoB</code>)の情報が失われ、スペキュラ遮蔽の錐体交差を
+構成できなくなる。だから正規化せずに焼く。
+</p>
+
+<h3>34.1 ベイク &mdash;&mdash; なぜコサイン重点サンプリングを使えないのか</h3>
+
+<p>
+22章のAOのループは<strong>コサイン重点サンプリング</strong>でヒット数を数えている。これはAOの被積分関数が
+コサイン項を持つため重みが打ち消し合い、「ヒット数を数えるだけ」で正しい推定量になるからである。
+</p>
+
+<p>
+<strong><code>bRaw</code>にはこれが使えない。</strong>被積分関数<code>V(&omega;)&omega;</code>にはコサイン項が無いため、
+コサイン重点サンプリング(pdf = cos&theta;/&pi;)を使うと重みが<code>&pi;/cos&theta;</code>になる。
+グレージング(<code>cos&theta;&rarr;0</code>)で重みが発散し、分散が爆発する。
+</p>
+
+<p>
+そのため<strong>一様半球サンプリング</strong>(pdf = 1/2&pi;、cos&theta;に一様)を使う。
+正規化係数は<code>(1/&pi;) &divide; (1/2&pi;) &divide; N = 2/N</code>となる。
+</p>
+
+<pre><code>float3 bRaw = 0;
+for (uint j = 0; j &lt; BentRayCount; ++j)
+{
+    const float2 xj  = Hammersley(j, BentRayCount);
+    const float cosT = xj.x;                       // cos&theta;に一様 = 立体角に一様
+    const float sinT = sqrt(max(0, 1 - cosT * cosT));
+    const float phi  = 6.2831853f * xj.y;
+    const float3 dir = normalize(T * (sinT * cos(phi)) + B * (sinT * sin(phi)) + N * cosT);
+
+    if (!Occluded(origin, dir, RayLength)) { bRaw += dir; }
+}
+bRaw *= 2.0f / float(BentRayCount);</code></pre>
+
+<p>
+レイ本数の既定は<strong>256</strong>(AO側の128より多い)。スカラーの平均よりベクトル和のほうが
+収束が遅いため。<code>--bent-rays</code>で変更でき、0で生成を無効にできる。
+</p>
+
+<p>
+<strong>ベイク時間への影響はほぼ無い。</strong>22.6.6節のとおりベイク時間の99%以上はxatlasのUV展開で、
+レイキャストは全体の0.1%に満たない。
+</p>
+
+<p>
+Chinese Dragon(871306三角形・2048&sup2;)の実測では、bent normalの256本を加えてもレイキャストは
+<strong>1.38秒</strong>(5.1億レイ、毎秒3.7億レイ)にしかならず、UV展開の476.00秒に対して
+総時間478.20秒の0.3%である。<strong>bent normalの追加コストは約1.1秒</strong>にとどまる。
+</p>
+
+<h3 id="ch34-2">34.2 ダイレーションとミップは「ベクトルのまま」行う</h3>
+
+<p>
+<code>length()</code>は凸関数なので、Jensenの不等式より次が<strong>常に</strong>成り立つ。
+</p>
+
+<pre><code>E[|b|] &ge; |E[b]|</code></pre>
+
+<p>
+つまりテクセルごとに長さを出してから平均すると、<strong>必ず真値より大きく</strong>出る。
+遮蔽コーンが実際より細く見積もられ、スペキュラが明るくなりすぎる。
+</p>
+
+<p>
+そのため<code>length()</code>を取るのは<strong>消費側(シェーダー)だけ</strong>に限る。
+ダイレーション(<code>DilateBentNormal</code>)はベクトルを平均し、ミップ生成のボックスフィルタも
+fp32のベクトルのまま行ってから一括でfp16へ落とす。サンプリング時のバイリニア補間も
+ベクトルを補間してから消費側で長さを取るので、順序は自動的に正しくなる。
+</p>
+
+<p>
+<strong>ただしこれだけでは足りない。</strong>Jensenの不等式は「長さを先に取ってはいけない」ことしか
+言っておらず、<em>ベクトルを平均したときに長さが縮む</em>ぶんが正しいかどうかは、
+何を格納しているかで決まる。同じ向きを向いた平面の中で平均するぶんには正しい
+(それは本当に広い面積の可視率を積分し直しているだけ)が、<strong>曲面をまたぐと
+「遮蔽が無いのに向きが違うので打ち消し合う」</strong>という別の縮みが混ざる。
+これを見落として実際に退行を出した &mdash;&mdash; 詳細と対処は<a href="#ch34-9">34.9</a>。
+</p>
+
+<h3 id="ch34-3">34.3 なぜ「有効フラグ」が要るのか</h3>
+
+<p>
+bent normalは<strong>「遮蔽なし」を定数テクスチャで表現できない</strong>。遮蔽なしの<code>bRaw</code>は
+法線<code>N</code>そのもので、ピクセルごとに違うからである。
+</p>
+
+<p>
+かといって<code>length(bRaw) &rarr; 0</code>を「遮蔽なし」と解釈すると、
+<strong>完全遮蔽(SO=0)と区別がつかなくなる</strong> &mdash;&mdash; 両者は正反対なのに同じ値になる。
+</p>
+
+<p>
+そこで<code>.a</code>を明示的な有効フラグにして曖昧さを消した。bent normalを持たないマテリアルには
+<strong>黒1x1</strong>(他のテクスチャの白1x1とは違う)をバインドし、消費側の
+<code>DecodeBentOcclusion</code>が<code>axis = N</code>・<code>aoB = 1</code>・<code>aoN = 1</code>(遮蔽なし)へ落とす。
+</p>
+
+<p>
+<strong>フラグをフィルタ対象に残してはいけない。</strong>当初はチャート外のテクセルを
+<code>(0,0,0,0)</code>のままにしていたが、ミップ生成のボックスフィルタが有効テクセルとの間で
+<code>.a</code>を中間値へ均してしまい、<code>a &lt; 0.5</code>というしきい値がテクセル単位で反転していた
+(実測でmip5の<strong>6.25%</strong>が中間値)。「遮蔽なし」と「ほぼ完全遮蔽」の間で跳ねるため
+細かい点になる。<a href="#ch34-9">34.9</a>で接空間へ移したことで<em>遮蔽なしを定数
+<code>(0,0,1)</code>で表せるようになった</em>ので、ダイレーションで届かなかったテクセルも
+これで埋めて<code>.a = 1</code>にしている &mdash;&mdash; 遮蔽マップ(R8)が余りを255で埋めるのと同じ扱い。
+結果、実マップ内の<code>.a</code>は全テクセル1になり、しきい値は
+<strong>1x1のフォールバックと本物のマップを区別するためだけ</strong>に使われる。
+</p>
+
+<h3>34.4 スペキュラ遮蔽 &mdash;&mdash; 錐体交差とratio estimator</h3>
+
+<p>
+可視コーン(軸<code>axis</code>・半頂角&alpha;v)と鏡面反射ローブ(軸<code>R</code>・ラフネス由来の半頂角&alpha;s)の
+<strong>球冠どうしの交差</strong>を解き、その面積比を遮蔽率とする(Oat &amp; Sander,
+"Ambient Aperture Lighting", 2007)。<code>aoB = sin&sup2;&alpha;v</code>の定義から
+&alpha;v = <code>asin(sqrt(aoB))</code>。
+</p>
+
+<p>
+<strong>ここで素の交差比をそのまま使ってはいけない。</strong>DFG LUTは既に半球で積分済みなので、
+交差比は「反射コーンのうち地平線より上の割合」を<strong>二重に</strong>数えてしまう。
+</p>
+
+<p>
+そこで同じ地平線クリップを含む基準値<code>ref</code>(可視コーンを半球=遮蔽なしとした場合の交差)で
+割る(<strong>ratio estimator</strong>)。これで二重計上が打ち消され、
+<code>aoB = 1</code>のとき<code>axis = N</code>なので分子と分母が同一式になり、
+<strong><code>SO = 1</code>が厳密に保証される</strong>。手で指数を調整する必要がない。
+</p>
+
+<pre><code>const float inter = SphericalCapIntersectionArea(av,      as, acos(dot(axis, R)));
+const float ref   = SphericalCapIntersectionArea(kHalfPi, as, acos(dot(N,    R)));
+return ref &gt; 1e-6f ? saturate(inter / ref) : 0.0f;</code></pre>
+
+<p>
+逆端も正しい: 完全遮蔽では&alpha;v = 0となり、交差面積の上限である
+「小さいほうの球冠の立体角」<code>2&pi;(1 - cos 0) = 0</code>が0になるため、<code>SO = 0</code>になる。
+</p>
+
+<p>
+なお仕様書が触れている<code>roughness &gt; 1.5</code>での&alpha;sの縮退は<strong>このエンジンでは起きない</strong>。
+GBuffer.hlslがroughnessを[0.045, 1.0]にクランプしているため。
+</p>
+
+<p>
+この球冠交差モデルには<a href="#ch34-10">34.10</a>で見つかった構造的な穴がある
+(<code>d &ge; &alpha;v + &alpha;s</code>で交差面積が厳密に0になり、金属の凹部が純黒へ潰れる)。
+<a href="#ch34-11">34.11</a>で球面ガウスへ置き換えたものを既定にしたが、この球冠交差モデル自体は
+UIの3値切替(Frostbite近似 / 球冠交差 / 球面ガウス)に残してあり、比較用に選択できる。
+</p>
+
+<h4>34.4.1 スクリーンスペース由来の遮蔽との合成</h4>
+
+<p>
+ベイクしたbent normalは方向を持つが、SSAO/SSILは持たない。両者は由来が独立なので積を取る。
+どちらも「遮蔽なし」で厳密に1を返すため、片方しか持たないパス(半透明・プローブ焼き込み)へ
+無条件に掛けてよい。
+</p>
+
+<pre><code>SO = SpecularOcclusionBand(axis, N, R, aoB, roughness)  // ベイク由来(方向あり)
+   * SpecularOcclusion(NdotV, roughness, ssao);          // スクリーンスペース由来(方向なし)</code></pre>
+
+<p>
+<strong>bent normal経路ではmaterialAO(遮蔽マップのスカラー)を掛けない。</strong>
+同じベイクの方向付きの表現であるbent normalへ役割ごと置き換わるため、両方掛けると
+同じ遮蔽を二重に数えることになる。
+</p>
+
+<p>
+トグルを切った従来経路は<code>SpecularOcclusion(NdotV, roughness, materialAO * ssao)</code>と、
+<strong>以前とまったく同じ式</strong>にしてある。<code>pow()</code>は非線形なので
+「それぞれ通してから掛ける」に変えると結果が変わり、回帰確認にならないため。
+</p>
+
+<h3>34.5 ディフューズ側 &mdash;&mdash; 方向バイアスの解消</h3>
+
+<p>
+拡散側は<code>aoN</code>を使い、さらに<strong>イラディアンスを<code>N</code>ではなく<code>axis</code>方向で評価する</strong>。
+遮蔽されている方向からはどのみち光が来ないので、開いている方向の環境を引くほうが正しい。
+壁際・窓際で「壁の側の空の色まで平均してしまう」方向バイアスがこれで解消される。
+鏡面の<code>R</code>は変えない &mdash;&mdash; あちらは反射方向そのものが物理的に決まっているため。
+</p>
+
+<p>
+あわせて<strong>multi-bounce AO</strong>(Jimenez et al., SIGGRAPH 2016)も入れた。アルベドが明るいほど
+AOを弱める補正で、物理的にはより正しいが<strong>見た目を大きく変える</strong>。
+bent normal自体の検証を汚さないよう独立したトグルにし、<strong>既定は無効</strong>にしてある。
+</p>
+
+<h3>34.6 スロット割り当てとRHIの上限引き上げ</h3>
+
+<p>
+bent normalはライトマップUV空間のテクスチャなので、ライティング時にはUV1が無く直接引けない。
+そのため<strong>G-Bufferを1枚増やす</strong>(<code>SV_TARGET5</code>、<code>R16G16B16A16_Float</code>)。
+<code>R11G11B10_Float</code>は<strong>使えない</strong> &mdash;&mdash; 符号なしのため負の成分が落ち、半球の半分の方向を失う。
+</p>
+
+<table>
+<tr><th>パス</th><th>スロット</th><th>備考</th></tr>
+<tr><td>GBuffer / ProbeCapture</td><td>t6</td><td>t4=シャドウ配列、t5=遮蔽マップ</td></tr>
+<tr><td>Transparent</td><td>t14</td><td>DDGIはt15/t16へ回した(下記)</td></tr>
+<tr><td>SSR</td><td>t11</td><td></td></tr>
+<tr><td>DeferredLighting</td><td><strong>t15</strong></td><td>t0〜t14が満杯 &rarr; 上限引き上げが必要</td></tr>
+</table>
+
+<p>
+<strong>M11(19.15節)とのスロット衝突</strong>: bent normalは半透明パスで<code>t14</code>を取るが、
+M11が半透明パスへDDGIを繋いだとき<code>t14</code>/<code>t15</code>を空きとして使っていた。
+どちらも「そのとき空いていた最小の番号」を選んだだけで、別ブランチで並行実装されたため
+<strong>コンパイル時には衝突が出ない</strong> &mdash;&mdash; C++側の<code>SetTexture(14, ...)</code>が
+パス冒頭でDDGIアトラスを張り、その後メッシュごとのループが同じ14番をbent normalで
+<strong>黙って上書きする</strong>形になる。DDGI側を<code>t15</code>/<code>t16</code>へ移して解消した。
+不透明側(<code>DeferredLighting.hlsl</code>)もDDGIは<code>t15</code>/<code>t16</code>なので、
+これで両パスの番号が揃う。
+</p>
+
+<p>
+DeferredLightingがt14まで使い切っていたため、<code>kTextureSlotCount</code>を<strong>15 &rarr; 16</strong>へ上げた。
+定数は3か所にあり、すべて揃える必要がある:
+<code>DX12CommandList.h</code>(追跡配列)、<code>DX12Device.cpp</code>(ルートシグネチャのSRVレンジ幅)、
+<code>DX11CommandList.h</code>(UAV衝突回避の追跡配列)。
+</p>
+
+<p>
+<strong>cbufferの落とし穴</strong>: <code>FrameConstants</code>末尾へ<code>OcclusionParams</code>を足したが、
+cbufferは宣言順レイアウトなので、途中のフィールドを宣言していないシェーダーでは
+オフセットがずれる。SSR/Transparent/ProbeCaptureは<code>PrevViewProj</code>・<code>TAAParams</code>を
+使わないが、<strong>宣言だけは必要</strong>である。
+</p>
+
+<h3 id="ch34-7">34.7 検証</h3>
+
+<p>
+仕様書のチェックリストは<strong>すべてベイカー内のfloat32(量子化前)で測れる</strong>。
+ここを通しておけば、後段で見つけた異常がベイクのバグなのかfp16量子化なのかを切り分けられる。
+</p>
+
+<table>
+<tr>
+  <th>項目</th><th>期待</th>
+  <th>OcclusionTest<br>(256&sup2; / AO 128本)</th>
+  <th>Chinese Dragon<br>(2048&sup2; / AO 64本、有効テクセル159万)</th>
+</tr>
+<tr><td><code>max|bRaw|</code></td><td>&le; 1.0</td><td>1.0000</td><td>1.0000</td></tr>
+<tr><td><code>max(aoN - aoB)</code></td><td>&le; 0</td><td>-0.0000</td><td>0.0000</td></tr>
+<tr><td><strong>既存AOとの誤差</strong></td><td>MC誤差の範囲</td>
+    <td><strong>RMS 0.0076 / 最大 0.0485</strong></td>
+    <td><strong>RMS 0.0166 / 最大 0.1059</strong></td></tr>
+<tr><td>完全遮蔽の割合</td><td>&mdash;</td><td>0.00%</td><td>0.18%</td></tr>
+</table>
+
+<p>
+Dragon側の誤差が倍あるのは<strong>AO側のレイが64本しかない</strong>ため。比較相手である22章のAOの
+推定量そのものがノイジーで、bent normalの精度が落ちているわけではない
+(bent normalは両方とも256本)。どちらもWarnのしきい値0.05を大きく下回る。
+</p>
+
+<p>
+<code>max|bRaw|</code>が<strong>ぴったり1.0000</strong>になっているのは偶然ではなく、
+<a href="#ch34-10">34.10</a>で正規化係数を実測値へ直した結果である。以前は求積誤差のぶんだけ
+0.9961で頭打ちになっており、それがグレージングでスペキュラを黒くしていた。
+</p>
+
+<p>
+<strong>3つ目が最も重要</strong>である。<code>aoN = dot(N, bRaw)</code>と22章のベイク済みAOは
+同じ積分の別推定量なので、ここがズレたらサンプリングか正規化係数(2/N)のバグを意味する。
+RMSが0.05を超えると<code>Warn()</code>を出すようにしてある。
+</p>
+
+<p>
+なお両者が<strong>MCノイズより一桁良く一致する</strong>のは、どちらもHammersley列(低食い違い量列)を
+使っており、乱数由来のノイズではなく決定的な低い誤差になるため。
+</p>
+
+<p>
+実機側では、White Furnace Testの球が背景へ完全に溶けて見えなくなること
+(= <code>SO</code>が厳密に1で、エネルギーが保存していること)、
+DX11とDX12で最大チャンネル差が2/255に収まること(ディザ由来)を確認した。
+</p>
+
+<p>
+<strong>この表の項目はすべてmip 0しか見ていない。</strong>そのためミップ生成で壊れる種類の
+不具合を1つ取り逃がした &mdash;&mdash; <a href="#ch34-9">34.9</a>。以後は
+<code>AccumulateMipStability</code>による<strong>ミップ耐性</strong>を併せて測っている。
+</p>
+
+<h3>34.8 既知の制約</h3>
+
+<ul>
+<li><strong>容量が大きい</strong>。符号付きベクトルのためBC4/BC7で圧縮できず無圧縮のfp16で書き出す。
+512&sup2;でミップ込み1メッシュあたり約2.7MB、数百メッシュのモデルでは合計がGB級になる。
+圧縮(BC6H_SF16)とオクタヘドラル化は第2段階へ回した</li>
+<li><strong>非一様スケールでコーンの方位がわずかにずれる</strong>。シェーダーのGram-Schmidt
+再直交化はワールド空間で行われるが、ベイカーはモデル空間で行うため、非一様スケールが
+入ると両者の基底が法線まわりにわずかに回る。<code>aoN</code>(=z成分)と<code>aoB</code>(=長さ)は
+基底の回転で不変なので影響を受けず、ずれるのはコーンの方位だけ</li>
+<li><strong>&gamma; + &alpha;v &gt; 90&deg; で過大評価</strong>になる。球冠交差の近似が
+2つの境界をsmoothstepで繋ぐ形のため、厳密な球面二角形の面積とはずれる</li>
+<li><strong>非対称な遮蔽では軸が正しくない</strong>。複数の方向から別々に遮られている場合、
+それらの平均方向は「開いている方向」を代表しない</li>
+<li><strong><code>SO</code>は立体角の比であってBRDF重み付き積分ではない</strong>。
+コーン内でのBRDFの分布は考慮していない</li>
+<li><strong>生成はオフラインベイカーのみ</strong>。スクリーンスペース(SSIL)側は未対応。
+将来やる場合、このエンジンは2本の地平線角ではなく32セクタのビットマスク
+(<code>SSIL_VisibilityBitmask.hlsl</code>)なので、可視セクタごとに積算する形へ読み替える必要がある。
+さらにSSILの現在のAO出力は<code>1 - countbits(mask)/32</code>(角度に一様なセクタ比)であって
+コサイン重み付きではないため、<code>dot(N, bRaw)</code>とは一致しない</li>
+</ul>
+
+<h3 id="ch34-9">34.9 退行 &mdash;&mdash; ミップで長さが崩壊し、細かい黒い点が出た</h3>
+
+<p>
+初版は<code>bRaw</code>を<strong>モデル空間のまま</strong>格納していた。仕様書どおりであり、
+<a href="#ch34-7">34.7</a>のチェックリスト(<code>max|bRaw|</code>・<code>aoN &le; aoB</code>・既存AOとの一致)も
+すべて通っていた。それでも実機で<strong>細かい黒い点</strong>が出た。
+</p>
+
+<h4>34.9.1 原因</h4>
+
+<p>
+チェックリストは<strong>すべてmip 0だけを見ていた</strong>。壊れていたのはミップである。
+</p>
+
+<p>
+モデル空間の<code>bRaw</code>は「遮蔽なし = <code>N</code>」なので、<strong>曲面上で隣り合うテクセルは
+遮蔽が無くても向きが違う</strong>。ミップ生成のボックスフィルタやバイリニア補間でこれを平均すると
+打ち消し合って長さが縮む。消費側はその長さを<code>aoB</code>(遮蔽率)として読むため、
+<strong>縮小されるほど暗くなる</strong>。ミップが切り替わる細部でこれが点として見える。
+</p>
+
+<p>
+ガター(チャート外)が原因ではないことを切り分けるため、<strong>4テクセルすべてが有効な
+ブロックだけ</strong>を対象にボックスフィルタを回して計測した(Chinese Dragon、2048&sup2;):
+</p>
+
+<table>
+<tr>
+  <th>mip</th>
+  <th><code>|E[b]|</code><br>実際に格納される値の長さ</th>
+  <th><code>E[|b|]</code><br>本来あるべき遮蔽率</th>
+  <th>比</th>
+</tr>
+<tr><td>0</td><td>0.816</td><td>0.816</td><td>1.000</td></tr>
+<tr><td>3</td><td>0.665</td><td>0.815</td><td>0.816</td></tr>
+<tr><td>5</td><td>0.417</td><td>0.814</td><td>0.512</td></tr>
+<tr><td>7</td><td><strong>0.205</strong></td><td>0.814</td><td><strong>0.252</strong></td></tr>
+</table>
+
+<p>
+<code>E[|b|]</code>が0.814で一定なのに<code>|E[b]|</code>だけが落ちている。差はすべて
+<strong>方向のばらつき由来</strong>で、ガターとは無関係だと確定できた。
+最下段(1&times;1)では<code>max|bRaw| = 0.012</code>、つまり<em>ほぼ完全遮蔽</em>になっていた。
+</p>
+
+<p>
+副次的にもう1つあった。チャート外を<code>(0,0,0,0)</code>のままにしていたため、
+<strong>有効フラグ<code>.a</code>までボックスフィルタの対象になっていた</strong>
+(実測でmip5の6.25%が中間値)。<code>a &lt; 0.5</code>というしきい値がテクセル単位で反転し、
+縁が「遮蔽なし」と「ほぼ完全遮蔽」の間で跳ねる。<a href="#ch34-3">34.3</a>。
+</p>
+
+<h4>34.9.2 対処 &mdash;&mdash; 接空間で格納する</h4>
+
+<p>
+<code>bRaw</code>を頂点接線基底へ射影して格納する。
+</p>
+
+<pre><code>bTS = (dot(bRaw, T), dot(bRaw, B), dot(bRaw, N))</code></pre>
+
+<p>
+こうすると<strong>遮蔽なしは曲率によらず常に<code>(0,0,1)</code></strong>になる。曲面をまたいで平均しても
+長さは1のまま保たれ、縮むのは<em>本当に遮蔽の量が違うとき</em>だけになる &mdash;&mdash;
+<a href="#ch34-2">34.2</a>で意図していた挙動がここで初めて成立する。
+基底は正規直交なので<code>aoB</code>(長さ)も<code>aoN</code>(<code>N</code>成分 = <code>bTS.z</code>)も
+変換で厳密に保たれる。実際、既存AOとの誤差RMSは変更の前後で完全に同じ値になった。
+</p>
+
+<p>
+おまけに「遮蔽なし」が定数で書けるようになったので、ダイレーションで届かなかったテクセルも
+<code>(0,0,1)</code>で埋めて<code>.a = 1</code>にできる。これで<code>.a</code>がフィルタ対象から外れ、
+上の副次的な不具合も消える。遮蔽マップ(R8)が余りを255で埋めるのとまったく同じ扱い。
+</p>
+
+<p>
+基底は<code>GBuffer.hlsl</code>の<code>ComputeTangentFrame</code>と<strong>まったく同じ手順</strong>で組む必要がある。
+頂点接線はパッカー自身(<code>ModelSource.cpp</code>)が計算していてエンジンと同一なので、
+ベイカー側で同じGram-Schmidt再直交化を行えば一致する。消費側は
+<code>mul(bentSample.xyz, tbn)</code>でワールドへ戻すだけになり、初版の
+「<code>NormalMatrix</code>で回してから長さを掛け直す」という扱いは不要になった。
+</p>
+
+<p>
+ミラーされたインスタンスも正しく動く。<code>TangentSignFlip</code>(ワールド行列の行列式が負なら-1)が
+<code>B = cross(N,T) * tangent.w</code>へ効くため、ワールド空間の基底はモデル空間の基底の
+正しい像になる &mdash;&mdash; 法線マップがミラーで破綻しないのとまったく同じ理屈。
+</p>
+
+<p>
+レイアウトは変わらないが<strong>テクスチャの中身の意味が変わる</strong>ため、
+<code>.kmodel</code>を<strong>v7 &rarr; v8</strong>へ上げた。構造体サイズが同じでVersionでしか判別できず、
+上げないと古いアセットを黙って誤って解釈することになる。
+</p>
+
+<h4>34.9.3 再発防止 &mdash;&mdash; ミップ耐性の検証を足した</h4>
+
+<p>
+このバグが素通りしたのは、検証がすべてmip 0で完結していたからである。
+ベイカーへ<code>AccumulateMipStability</code>を追加し、<strong>ダイレーション後(実際にミップ生成へ渡す状態)</strong>で
+ボックスフィルタを自前で回して<code>|E[b]| / E[|b|]</code>を測るようにした。0.85を下回ったら<code>Warn</code>を出す。
+</p>
+
+<p>
+<strong>見るのは先頭3段だけ</strong>にしてある。深い段では1テクセルが広い曲面を覆い、接線基底そのものが
+回るため、正しく実装していても比は下がる &mdash;&mdash; Sponzaは8&times;8まで測ると0.7958まで落ちるが、
+mip 1〜3では0.932以上ある。これは正当な劣化なので、そこで警告を出すと
+「いつも鳴っている警告」になって用をなさない。一方で狙っている不具合は浅い段から出る
+(モデル空間版のドラゴンはmip 3で既に0.816)。両者はmip 1〜3のしきい値0.85で明確に分かれる。
+また段数を固定することで、512&sup2;と2048&sup2;を同じ基準で比べられる。
+</p>
+
+<p>
+接空間化後の実測。<code>.a</code>が中間値になるテクセルも全段で0%になった:
+</p>
+
+<table>
+<tr><th>モデル</th><th>ミップ耐性(mip 1〜3の最悪値)</th><th>既存AOとの誤差 RMS</th></tr>
+<tr><td>OcclusionTest (256&sup2; / AO 128本)</td><td>0.9989</td><td>0.0076</td></tr>
+<tr><td>LightTest (512&sup2; / AO 128本)</td><td>0.9947</td><td>0.0088</td></tr>
+<tr><td>Sponza (512&sup2; / AO 128本、25メッシュ)</td><td>0.9320</td><td>0.0140</td></tr>
+<tr><td>Chinese Dragon (2048&sup2; / AO 64本)</td><td>0.9836</td><td>0.0166</td></tr>
+</table>
+
+<p>
+修正前のドラゴンは同じ指標で<strong>0.816</strong>(mip 3)だったので、しきい値0.85で確実に捕まる。
+</p>
+
+<p>
+実機では、Bistro(bent normalを持たない回帰ケース)・Sponza(25メッシュすべてが持つ)・
+Chinese Dragonのベイク有無4体比較・White Furnace Testを描画し、
+いずれも黒い点が出ないこと、エラー・警告0件であることを確認した。
+とくにドラゴン比較シーンは画面上でモデルが小さく<strong>深いミップを引く</strong>ため、
+この不具合がもっとも強く出る条件になっている。
+</p>
+
+<h3 id="ch34-10">34.10 求積バイアス &mdash;&mdash; NdotV&rarr;0でスペキュラが黒くなる</h3>
+
+<p>
+34.9を直した後、<strong>グレージング(NdotV&rarr;0)でスペキュラが黒くなる</strong>という別の症状が残っていた。
+原因は<code>bRaw</code>の正規化係数である。
+</p>
+
+<pre><code>(1/&pi;) &divide; pdf(=1/2&pi;) &divide; 本数 = 2/本数</code></pre>
+
+<p>
+これは本数&rarr;&infin;での係数であって、有限本数では求積誤差が残る。実際256本のHammersley列では
+<strong>遮蔽ゼロでも長さが1.0ではなく0.9961</strong>にしかならない。テクセルの内容に依らず列だけで
+決まる定数なので、<code>max|bRaw|</code>がどのモデルでもぴったり同じ値になっていたのがその証拠である。
+</p>
+
+<p>
+<strong>わずか0.39%だが無害ではない。</strong>消費側は<code>aoB</code>から可視コーンの半頂角を
+</p>
+
+<pre><code>&alpha;v = asin(sqrt(aoB))</code></pre>
+
+<p>
+で復元するが、<strong>この写像は<code>aoB &rarr; 1</code>で微分が発散する</strong>。0.39%の不足が
+<strong>3.58&deg;</strong>の角度誤差になり、ラフネス0.045の鏡面ローブ(半頂角3.65&deg;)と
+ほぼ同じ大きさになってしまう。数値で追うと:
+</p>
+
+<table>
+<tr><th><code>aoB</code></th><th>&alpha;v</th><th>&pi;/2との差</th>
+    <th>SO (r=0.045, NdotV=0.001)</th><th>SO (r=0.045, NdotV=0.05)</th></tr>
+<tr><td>1.0000(あるべき値)</td><td>90.00&deg;</td><td>0.00&deg;</td><td>1.0000</td><td>1.0000</td></tr>
+<tr><td>0.9961(実際の値)</td><td>86.42&deg;</td><td>3.58&deg;</td><td><strong>0.0017</strong></td><td><strong>0.3667</strong></td></tr>
+</table>
+
+<p>
+つまり<strong>遮蔽がまったく無い面でも</strong>グレージングでスペキュラ遮蔽が0に落ちていた。
+</p>
+
+<p>
+対処は、理論値ではなく<strong>同じ列で求めた「全方向の和」の長さ</strong>で割ること。
+</p>
+
+<pre><code>bAll += dirB;                      // 遮蔽判定に関わらず必ず積算
+if (!Occluded(...)) bRaw += dirB;
+...
+bRaw /= length(bAll);</code></pre>
+
+<p>
+遮蔽ゼロなら<code>bRaw == bAll</code>なので長さがちょうど1になり、求積誤差が定義上打ち消される。
+本数を変えても自動で追従する。実測で<code>max|bRaw|</code>は0.9961&rarr;<strong>1.0000</strong>になり、
+既存AOとの誤差RMSも改善した(OcclusionTest 0.0083&rarr;0.0076、LightTest 0.0095&rarr;0.0088)。
+<code>aoN</code>側も同じ量だけ過小評価していたので、AOとの一致が良くなるのは筋が通っている。
+</p>
+
+<h4>34.10.1 錐体モデルは地平線の遮蔽を過大に見積もる</h4>
+
+<p>
+バイアスを消しても、<strong>遮蔽が実際にあるテクセル</strong>(<code>aoB &lt; 1</code>)では
+グレージングでスペキュラ遮蔽が強く効く。これは実装の誤りではなく錐体モデルの性質である。
+</p>
+
+<p>
+理由: 地平線付近のリング状の遮蔽は<strong>立体角を大きく塞ぐのに<code>|bRaw|</code>をほとんど減らさない</strong>
+(水平に近い方向は互いに打ち消し合うため)。半頂角84.3&deg;のコープは立体角の約10%を塞ぐが、
+<code>aoB</code>は0.99にしかならない。この関係を逆に辿るため、<code>aoB</code>のわずかな低下が
+<strong>「地平線に幅の広い遮蔽リングがある」</strong>と解釈される。グレージングの反射ベクトルは
+まさにそのリングを向いているので、強く暗くなる。
+</p>
+
+<p>
+実測(OcclusionTest、バイアス修正後。<code>aoB</code>中央値0.994、軸の傾き&gamma;の中央値3.5&deg;):
+</p>
+
+<table>
+<tr><th>ラフネス</th><th>NdotV=0.02</th><th>NdotV=0.05</th><th>NdotV=0.1</th><th>NdotV=0.3</th></tr>
+<tr><td>0.045</td><td>平均SO 0.531 / SO&lt;0.5が59.3%</td><td>0.590 / 53.9%</td><td>0.678 / 21.5%</td><td>0.809 / 4.3%</td></tr>
+<tr><td>0.15</td><td>0.632 / 47.2%</td><td>0.649 / 44.7%</td><td>0.677 / 40.1%</td><td>0.805 / 11.0%</td></tr>
+<tr><td>0.5</td><td>0.767 / 17.3%</td><td>0.774 / 16.4%</td><td>0.785 / 14.8%</td><td>0.829 / 9.0%</td></tr>
+</table>
+
+<p>
+なお<strong>軸が傾いている場合(&gamma; &gt; 0)は意図どおり動いている</strong> ――
+開いた側を向いた反射はSO=1のまま、遮蔽側を向いた反射だけが0に落ちる。これが本機能の目的そのものである。
+問題が出るのは&gamma;&asymp;0、すなわちベイクが「遮蔽は方向を持たない」と言っている場合に限られる。
+</p>
+
+<h4 id="ch34-10-2">34.10.2 凹部が純黒へ潰れる &mdash;&mdash; <code>aoB</code>を下限に置くのは誤り</h4>
+
+<p>
+上の過大評価がもっとも露骨に出るのが<strong>拡散成分を持たないマテリアル(metallic = 1)</strong>である。
+スペキュラが見た目のすべてなので、<code>SpecularOcclusionBand</code>が
+<code>d &ge; &alpha;v + &alpha;s</code>(可視コーンと反射ローブが交差しない)で<strong>厳密に0を返す</strong>と、
+そのまま<strong>純黒</strong>に潰れる。Chinese Dragon(metallic = 1 / roughness = 0.25)の実測:
+</p>
+
+<table>
+<tr><th></th><th>bent normal(素のband)</th><th>従来近似</th><th><code>aoB</code>下限あり</th></tr>
+<tr><td>平均輝度</td><td>129.45</td><td>131.70</td><td>132.66</td></tr>
+<tr><td><strong>最小輝度</strong></td><td><strong>0.00</strong></td><td>11.33</td><td><strong>27.33</strong></td></tr>
+<tr><td>輝度 &lt; 5 の割合</td><td>1.45%</td><td>0.00%</td><td>0.00%</td></tr>
+<tr><td>従来近似で輝度15以上あったのに5未満へ潰れた画素</td><td>1965 (1.45%)</td><td>&mdash;</td><td><strong>0</strong></td></tr>
+</table>
+
+<p>
+平均輝度の差は1.7%しかない &mdash;&mdash; <strong>全体が暗いのではなく、凹部だけが局所的に潰れていた</strong>。
+潰れた画素の従来近似での輝度は平均49.5・最大101.3で、中間調がそのまま黒へ落ちていた。
+</p>
+
+<p>
+物理的にも0は行き過ぎに見える。空洞の中でも壁で跳ね返った光は返ってくる &mdash;&mdash;
+ディフューズ側でmulti-bounce AO(<code>GTAOMultiBounce</code>)が扱っているのと同じ話が、
+スペキュラ側には無い。そこで一度、平均可視率<code>aoB</code>を下限に置いてみた:
+</p>
+
+<pre><code>// 試したが誤りだったので採用していない
+return lerp(saturate(aoB), 1.0f, band);</code></pre>
+
+<p>
+黒潰れ自体は消える(最小輝度 0.00 &rarr; 27.33、輝度5未満の画素 1.45% &rarr; 0.00%)。
+2つの端点も壊れない &mdash;&mdash; <code>aoB = 1</code>なら<code>band</code>によらず1、
+<code>aoB = 0</code>なら<code>&alpha;v = 0</code>より<code>band = 0</code>で0になる。
+</p>
+
+<p>
+<strong>それでもこれは誤りである。</strong><code>aoB</code>は<strong>スカラーで方向を持たない</strong>ため、
+下限に置くと「どの方向でもこれ以上暗くなれない」という<strong>方向非依存の床</strong>を敷くことになる。
+34章の目的は「壁を向いた反射<em>だけ</em>を暗くする」ことなので、
+床は<strong>まさにその暗くする側だけを潰す</strong>。方向情報が明るくする側にしか効かなくなり、
+機能そのものが実質的に無効化される。
+</p>
+
+<p>
+実測(&gamma; = 20&deg;、same = 開いた側を向いた反射 / opp = 遮蔽側を向いた反射):
+</p>
+
+<table>
+<tr><th><code>aoB</code></th><th>roughness</th><th>NdotV</th>
+    <th>素のband<br>same / opp</th><th>コントラスト</th>
+    <th><code>aoB</code>下限あり<br>same / opp</th><th>コントラスト</th></tr>
+<tr><td>0.85</td><td>0.35</td><td>0.3</td><td>0.945 / 0.011</td><td><strong>87.4倍</strong></td>
+    <td>0.992 / 0.852</td><td>1.2倍</td></tr>
+<tr><td>0.70</td><td>0.15</td><td>0.7</td><td>1.000 / 0.053</td><td><strong>18.9倍</strong></td>
+    <td>1.000 / 0.716</td><td>1.4倍</td></tr>
+<tr><td>0.95</td><td>0.35</td><td>0.3</td><td>1.000 / 0.149</td><td><strong>6.7倍</strong></td>
+    <td>1.000 / 0.957</td><td>1.0倍</td></tr>
+</table>
+
+<p>
+全ケースで<strong>1.0〜1.4倍</strong>まで落ちる。画面全体でも「下限版が従来近似より暗い画素は0%」
+という結果になっており、方向による減光が完全に消えていた。
+</p>
+
+<p>
+したがって<strong>下限は入れず、素の錐体交差比のまま</strong>としている。
+凹部の純黒潰れは<a href="#ch34-10-3">34.10.3</a>の未解決課題として残す。
+</p>
+
+<h4 id="ch34-10-3">34.10.3 方向性を保ったまま純黒を避ける</h4>
+
+<p>
+残っている問題は「<strong>方向依存性を壊さずに</strong>、拡散成分を持たないマテリアルの凹部が
+純黒へ潰れるのを避ける」ことである。<code>aoB</code>下限が使えない以上、
+下限や<code>max()</code>のような<strong>方向を持たない量による底上げは原理的にすべて同じ理由で失格</strong>になる。
+検討した筋は次の2つ:
+</p>
+
+<ul>
+<li><strong>可視コーンを「硬い蓋」から柔らかい分布へ変える</strong>。
+    純黒は<code>d &ge; &alpha;v + &alpha;s</code>で交差面積が厳密に0になる、
+    <em>二値の球冠で可視性を近似したこと</em>の副作用である。滑らかな分布(vMF等)へ替えれば
+    遮蔽側にも<code>d</code>に応じた小さな残りが出るので、<strong>方向依存性は完全に保たれる</strong>。
+    ただし<code>(axis, aoB)</code>の2パラメータから分布を決める導出と、閉形式かLUTが要る</li>
+<li><strong>跳ね返り光を加算項として足す</strong>。
+    空洞を満たしているのは<em>壁で反射して戻ってきた光</em>であり、これは遮蔽率を弱める話ではなく
+    <code>prefiltered * SO + bounce</code>という加算の話である。<code>SO</code>は0まで落ちてよい。
+    ディフューズ側のmulti-bounce AOのスペキュラ版にあたる。
+    なお<code>GTAOMultiBounce(SO, F0)</code>のような<em>乗算</em>の形では
+    <code>SO = 0</code>が0のままなので純黒は解消しない</li>
+</ul>
+
+<p>
+<a href="#ch34-11">34.11</a>で1つめの筋(柔らかい分布 &mdash; 球面ガウス)を採用した。
+2つめ(跳ね返り光の加算)は見た目への影響がより広範囲(遮蔽の弱い場所にも常時足される項になる)
+かつ別途バウンス量の推定が要るため、今回は入れていない。将来の課題として残す。
+</p>
+
+<h3 id="ch34-11">34.11 可視性を球面ガウスへ &mdash;&mdash; 純黒の解消</h3>
+
+<h4>34.11.1 球冠を球面ガウス(SG)に置き換える</h4>
+
+<p>
+<a href="#ch34-10-3">34.10.3</a>で挙げた1つめの筋を実装した。振幅1・軸<code>p</code>・鋭さ&lambda;の
+SGを<code>G(&omega;) = exp(&lambda;(&omega;&middot;p - 1))</code>とすると、2つのSGの球面内積は
+閉形式で書ける(Wang et al., "All-Frequency Rendering of Dynamic, Spatially-Varying Reflectance", 2009):
+</p>
+
+<pre><code>integral(G1 * G2) domega = 4*pi * exp(-l1-l2) * sinh(dm) / dm ,   dm = |l1*p1 + l2*p2|</code></pre>
+
+<p>
+<code>sinh</code>は0でしか0にならないため、<strong>この量は常に正</strong>になる。
+球冠交差の<code>SphericalCapIntersectionArea</code>が<code>d &ge; a1+a2</code>で厳密に0を
+返していたのに対し、SGは遮蔽側にも<code>d</code>に応じた小さな残りを持つ。これが純黒が消える理由。
+</p>
+
+<h4 id="ch34-11-2">34.11.2 球冠の半頂角とSGの鋭さの対応づけ</h4>
+
+<p>
+半頂角&alpha;の球冠の立体角は<code>2&pi;(1 - cos&alpha;)</code>、鋭さ&lambda;のSGの立体角は
+おおむね<code>2&pi;/&lambda;</code>。両者を揃えると<code>&lambda; = 1 / (1 - cos&alpha;)</code>。
+一般化して<code>&lambda; = k / (1 - cos&alpha;)</code>と書くと、<code>k</code>は
+「球冠をどれだけ柔らかくするか」の係数になり、大きいほど硬い球冠に近づく。
+<strong>立体角の一致からそのまま出てくる値は<code>k = 1</code>で、実測でもこれが採用値になった</strong>
+(<a href="#ch34-11-4">34.11.4</a>)。この対応づけにより三角関数がすべて消える:
+</p>
+
+<table>
+<tr><th>量</th><th>球冠交差(34.4節)</th><th>SG</th></tr>
+<tr><td>可視コーン</td><td><code>&alpha;v = asin(sqrt(aoB))</code></td><td><code>1 - cos&alpha;v = 1 - sqrt(1 - aoB)</code></td></tr>
+<tr><td>鏡面ローブ</td><td><code>&alpha;s = acos(1 - r&sup2;)</code></td><td><code>1 - cos&alpha;s = r&sup2;</code></td></tr>
+<tr><td>交差の角度</td><td><code>d = acos(dot(axis, R))</code></td><td><code>dot(axis, R)</code>をそのまま使う</td></tr>
+</table>
+
+<p>
+<code>asin(sqrt(x))</code>は<code>x&rarr;1</code>で微分が発散する(<a href="#ch34-10">34.10</a>で
+<code>aoB</code>の0.39%の誤差が&alpha;vの3.58&deg;になった原因)。SG版はこの経路を踏まない。
+transcendentalは<code>exp</code>2回+<code>sqrt</code>に減り、球冠交差より安い。
+</p>
+
+<h4>34.11.3 白炉テストが厳密に保たれる理由</h4>
+
+<p>
+基準値<code>ref</code>は「遮蔽なし = &alpha;v 90&deg;」のSG。<code>1 - cos90&deg; = 1</code>なので
+<code>&lambda;_ref = k</code>。<code>aoB = 1</code>のとき<code>1 - sqrt(1-1) = 1</code>より
+<code>&lambda;v = k = &lambda;_ref</code>、かつ<code>axis = N</code>なので
+<code>dot(axis,R) = dot(N,R)</code> &mdash;&mdash; <code>inter</code>と<code>ref</code>が同一の式になり
+<strong><code>SO = 1</code>が厳密</strong>になる。<code>.a</code>フラグが0(bent normalを持たない
+マテリアル)の経路も<code>axis = N, aoB = 1</code>へ落ちるため同様に厳密に1で、
+<strong>bent normalを持たないモデルの見た目は一切変わらない</strong>。
+</p>
+
+<p>
+桁落ち対策: roughnessの下限0.045で<code>&lambda;s</code>は数万のオーダーまで大きくなる。
+<code>dm - &lambda;1 - &lambda;2</code>をそのまま引くとfp32で桁落ちするため、次の形へ
+変形して常に0以下の指数だけを扱う:
+</p>
+
+<pre><code>dm - l1 - l2 = (dm^2 - (l1+l2)^2) / (dm + l1 + l2) = -2*l1*l2*(1 - cosd) / (dm + l1 + l2)</code></pre>
+
+<h4 id="ch34-11-4">34.11.4 係数kは1(導出値) &mdash;&mdash; 合成形状のフィットでは決められない</h4>
+
+<p>
+まずオフラインの検証スクリプト(リポジトリには含めない)で決めようとした。
+壁1枚・90&deg;隅の点・対称な溝という、<strong>単一の球冠では表せない形状</strong>で可視性
+<code>V(&omega;)</code>を半球グリッド上に直接構成し、同じ形状から<code>bRaw</code>を数値積分して
+<code>axis</code>・<code>aoB</code>を求め、GGX重み付きの真値
+<code>SO_true = integral(V*L) / integral(L)</code>(<code>L</code>はUE4のsplit-sum近似と同じ
+<code>N=V=R</code>前提でRを中心に置いたGGX NDF)と比較した。
+</p>
+
+<p>
+<strong>ここで直感に反する結果が出た。</strong>二値可視性の真値だけへ素直にRMSE最小化でフィットすると、
+<code>k &rarr; &infin;</code>(=球冠交差そのもの)が最良になってしまう。
+単一平面や2平面による遮蔽では、遮蔽側の真値も実際にほぼ0になる &mdash;&mdash;
+単一コーンでも正しく表現できる単純な形状だからである。
+</p>
+
+<p>
+つまりSGへ替える動機は「真値への当てはまりを良くすること」ではない。<code>(axis, aoB)</code>という
+2パラメータへ還元する時点で、<strong>複雑な凹形状(鱗の隙間・爪の間)が持つわずかな回り込みの情報は
+そもそも失われている</strong>。ソフト化はこの情報損失を、真の値ではなく「潰さない」という
+安全側の振る舞いへ変換するための意図的な正則化である。
+</p>
+
+<p>
+<strong>そのため<code>k</code>は合成形状のオフライン評価では決められない。</strong>
+決めたのは実機の実測である &mdash;&mdash; Occlusion Bake Compareシーンのmetallicドラゴンを
+3方式 &times; <code>k</code>を振って同一カメラで撮り(カメラは<code>.kscene</code>由来なので毎回同一)、
+遮蔽が効いている110214画素で集計した。「潰れ画素」はFrostbite近似では輝度15以上あるのに
+そのモードで5未満になった画素で、これが今回直そうとしている症状そのものにあたる。
+同一モードを2回撮って求めたノイズ床は&plusmn;1画素:
+</p>
+
+<table>
+<tr><th>方式</th><th>最小輝度</th><th>潰れ画素</th><th>球冠交差が黒く潰した389画素での中央輝度</th><th>Frostbiteより暗い画素(平均減光)</th></tr>
+<tr><td>Frostbite近似</td><td>13.33</td><td>0</td><td>46.00</td><td>&mdash;</td></tr>
+<tr><td>球冠交差</td><td>0.00</td><td>464</td><td>0.00</td><td>4.1% (-21.2)</td></tr>
+<tr><td>SG <code>k=3.0</code></td><td>0.00</td><td><strong>572</strong></td><td><strong>0.00</strong></td><td>8.3% (-20.5)</td></tr>
+<tr><td><strong>SG <code>k=1.0</code>(採用)</strong></td><td>0.00</td><td><strong>81</strong></td><td><strong>14.00</strong></td><td>4.9% (- 9.8)</td></tr>
+<tr><td>SG <code>k=0.5</code></td><td>2.67</td><td>2</td><td>37.67</td><td>1.5% (- 5.1)</td></tr>
+</table>
+
+<p>
+<strong><code>k=3</code>は失敗する。</strong>減衰が急すぎて、球冠交差が黒く潰していた場所を
+まったく救えない(中央輝度0.00のまま)にもかかわらず全体を暗くするため、
+潰れ画素はかえって464&rarr;572へ<strong>増える</strong>。硬い球冠を柔らかくしたつもりで、
+実際には「球冠交差を全体的に暗くしただけ」になっていた。
+</p>
+
+<p>
+逆に<code>k=0.5</code>まで下げると純黒はほぼ消えるが、Frostbiteより暗い画素が1.5%・
+平均減光5.1輝度まで落ちる。これは<code>aoB</code>下限版で却下したのと
+<strong>同じ「方向性が消える」失敗</strong>(<a href="#ch34-10-2">34.10.2</a>)へ向かう挙動である。
+</p>
+
+<p>
+採用した<code>k=1.0</code>は、<a href="#ch34-11-2">34.11.2</a>の立体角の一致から
+<strong>そのまま出てくる導出値</strong>であって調整値ではない。潰れ画素を464&rarr;81へ、
+球冠交差が黒く潰した画素の中央輝度を0.00&rarr;14.00へ戻しつつ、方向による減光は
+4.9%・平均9.8輝度を保つ。減光の深さは球冠交差(4.1%・平均21.2)より浅いが、
+これは<strong>狭い領域を純黒まで落とす代わりに、広い領域を穏やかに暗くする</strong>という
+分布の違いであって、方向性が失われたわけではない(暗くなる画素の割合はむしろ増えている)。
+</p>
+
+<h4>34.11.5 UIの3値切替</h4>
+
+<p>
+<code>OcclusionParams.y</code>(<code>KurenaiEngine3D::SpecularOcclusionMode</code>)を
+0=Frostbite近似 / 1=球冠交差 / 2=球面ガウスの3値にした。<strong>既定は2(球面ガウス)</strong>。
+<code>ComposeSpecularOcclusion</code>の第1引数が<code>bool useBent</code>から<code>int soMode</code>へ
+変わったため、<code>SpecularIBLWeight</code> / <code>SpecularIBLMultiScatterWeight</code>
+(ReflectionProbe.hlsli)の該当引数も揃えて変更した。反射プローブの再ベイク署名にも
+<code>SpecularOcclusionMode</code>を混ぜてある(値として。旧来の<code>mixBool</code>ではなく
+<code>mixFloat</code>) &mdash;&mdash; ProbeCaptureが同じ分岐を持つため、含め忘れるとつまみを
+動かしてもプローブの中身だけ古いままになる。
+</p>
+
+<p>
+<strong>再パックは不要。</strong>この変更は<code>.kmodel</code>の形式にもベイク結果にも触れない、
+シェーダーとC++側の消費ロジックだけの変更である。
+</p>
+
+<h4>34.11.6 残る近似と、解消しきれていないもの</h4>
+
+<p>
+<strong>純黒は「ほぼ」解消であって完全ではない。</strong><code>k=1.0</code>でも最小輝度は0.00で、
+潰れ画素は464&rarr;81に減っただけである(34.11.4の表)。残っているのは
+<code>aoB</code>がほぼ0のテクセル &mdash;&mdash; つまり<em>本当にほぼ完全に遮蔽されている</em>場所で、
+そこが暗いこと自体は正しい。加えて<code>&lambda;</code>が大きい領域では
+<code>exp()</code>の引数が-87を下回ってfp32でアンダーフローし、厳密に0になる場合もある
+(実データのテクセル分布では、roughnessが低い側で0.5%程度)。
+</p>
+
+<p>
+SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積分ではない」という34.4節と同じ近似を
+引き継いでいる。また<code>k</code>の選定(34.11.4)が示すとおり、<code>(axis, aoB)</code>という
+単一コーンへの還元そのものが複雑な凹形状の情報を失っており、SGはそれを「潰さない」方向へ
+緩和する正則化であって真の可視性分布の再現ではない。
+残りを埋めるには跳ね返り光の加算(<a href="#ch34-10-3">34.10.3</a>)が要る &mdash;&mdash;
+引き続き将来の課題として残る。
 </p>
 
 </section>

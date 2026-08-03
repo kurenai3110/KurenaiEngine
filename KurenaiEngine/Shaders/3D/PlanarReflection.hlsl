@@ -84,6 +84,11 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams3;
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
+    // bent normalによる遮蔽(34章)。このシェーダーでは読まないが、C++側のFrameConstantsでは
+    // DDGIParams4の直後にあるため、**宣言しないと以降のフィールドが16バイトずれる**。
+    // 実際このマージで一度宣言し忘れ、PlanarReflectionPlaneが16バイトずれた結果
+    // SV_ClipDistance0が全ジオメトリを切り落とし、水面の鏡像が丸ごと消えた
+    float4 OcclusionParams;
     // 水面(P2)用。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で決まり
     // 途中のフィールドを飛ばせないため、末尾のPlanarReflectionPlaneのオフセットを
     // C++側 KurenaiEngine3D.cpp の FrameConstants と合わせる目的だけで宣言する
@@ -373,10 +378,18 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 worldPos, float3 albedo, flo
 
     // 【多重バウンス(22章)】ProbeCapture.hlslのEvaluateGlobalIBLと同じ理由・同じ式。
     // DDGIが有効なら拡散の環境光を前フレームのDDGIイラディアンスにすることで、
-    // このパスに映る反射にも多重バウンスの間接光が反映される
-    const float3 irradiance = (DDGIParams0.w > 0.5f)
-        ? SampleDDGIIrradiance(worldPos, N, V) * kDDGIBounceAttenuation
-        : IrradianceTexture.Sample(MaterialSampler, N).rgb;
+    // このパスに映る反射にも多重バウンスの間接光が反映される。
+    // 【M11 Stage 1】鏡映カメラが映す点はDDGIボリュームの外にあることがある(このシーンは
+    // 干潟が6,000m四方でボリュームより遥かに広い)。insideWeightが0の点ではグローバルIBLの
+    // ままにする——ProbeCapture.hlsl・DeferredLighting.hlslとまったく同じ規則
+    float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
+    if (DDGIParams0.w > 0.5f)
+    {
+        float ddgiInsideWeight;
+        const float3 ddgiIrradiance =
+            SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight) * kDDGIBounceAttenuation;
+        irradiance = lerp(irradiance, ddgiIrradiance, ddgiInsideWeight);
+    }
     const float3 fresnelRoughness =
         F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
     const float3 kd = (1.0f - fresnelRoughness) * (1.0f - metallic);

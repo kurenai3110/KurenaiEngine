@@ -69,12 +69,21 @@ cbuffer FrameConstants : register(b0)
     // 換算倍率(19.14節)で、ReflectionProbe.hlsliのBlendReflectionProbesが読む。x〜zはこの
     // シェーダでは未使用(視差補正・遮蔽判定のフラグと距離キューブの解像度)
     float4 ProbeParams2;
-    // 大気遠近(P8)・水中項(P8)。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で
-    // 決まるため、末尾に追加のみで既存フィールドのオフセットを動かさない(この末尾へ追加する限り、
-    // ここより前のフィールドしか読まないこのシェーダーは今回の変更の影響を受けない)
-    float4 FogParams0;
-    float4 FogParams1;
-    float4 WaterBodyColor;
+    // 【以下はこのシェーダーでは使わないが宣言だけ必要】cbufferは宣言順レイアウトなので、
+    // 末尾のOcclusionParamsを正しいオフセットで読むには途中のフィールドを飛ばせない。
+    // C++側のFrameConstantsと並びを必ず一致させること
+    float4x4 PrevViewProj;
+    float4 TAAParams;
+    float4 DDGIParams0;
+    float4 DDGIParams1;
+    float4 DDGIParams2;
+    float4 DDGIParams3;
+    float4 DDGIParams4;
+    // bent normalによる遮蔽(34章)。y=スペキュラ遮蔽の方式を読む。
+    // DeferredLighting.hlsl・SSR.hlslとまったく同じ読み方をすること(段差防止)
+    float4 OcclusionParams;
+    // これ以降(TimeParams / Sky* / Cloud* / PlanarReflectionPlane / Fog* / WaterBodyColor)は
+    // このシェーダーでは一切読まないため宣言しない
 };
 
 cbuffer RTReflectionConstants : register(b1)
@@ -98,6 +107,9 @@ Texture2D AlbedoTexture : register(t5);
 Texture2D AOTexture : register(t6);
 // split-sum近似の第2項、BRDF積分LUT
 Texture2D BRDFLUTTexture : register(t7);
+// bent normal(GBuffer.hlslがSV_TARGET5へ書いた接空間のbRaw)。t0〜t15が埋まっているためt16。
+// これに合わせてDX12のkComputeSrvSlotCountを16→17へ上げてある(34章)
+Texture2D BentNormalTexture : register(t16);
 
 // プリフィルタ済み鏡面(t8)・プローブのキューブマップ配列(t9)・プローブの影響範囲バッファ(t10)の
 // 宣言と、プローブの選択・視差補正・ブレンド・鏡面IBLの重みはReflectionProbe.hlsliが持つ
@@ -203,9 +215,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
-    const float2 materialSample = MaterialTexture[pixel].rg;
+    const float3 materialSample = MaterialTexture[pixel].rgb;
     const float metallic = materialSample.r;
     const float roughness = materialSample.g;
+    // b = マテリアルの遮蔽マップ(GBuffer.hlslでstrength適用済み。遮蔽マップを持たない
+    // マテリアルは1.0)。下のSpecularIBLWeight呼び出しへmaterialAOとして渡す
+    const float materialAO = materialSample.b;
 
     const float maxRayDistance = Params0.z;
     const float roughnessCutoff = Params0.w;
@@ -228,12 +243,20 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float3 reflectDir = normalize(reflect(-V, N));
 
     // --- Lightingパスが適用した鏡面IBLを、そのときとまったく同じ式で再現する ---
-    const float ao = AOTexture[pixel].a;
+    // 遮蔽の合成(materialAOとssao、bent normalの扱い)はDeferredLighting.hlslのPSMain・
+    // SSR.hlslとまったく同じでなければならない。ズレるとRT反射が適用される領域と
+    // されない領域の境界に段差が出る(22章の遮蔽マップ、28.2節の差し替え構造)
     // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(DeferredLighting.hlslの
     // EvaluateIBLと同じ。SpecularIBLWeightはfloat3のbrdfを受け取る)
     const float3 brdf = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotV, roughness), 0.0f).rgb;
+    // bent normalはDeferredLighting.hlsl・SSR.hlslとまったく同じ引き方をすること。
+    // このシェーダはコンピュートのためSampleではなくSampleLevelでミップ0を明示する
+    const BentOcclusion bent = DecodeBentOcclusion(BentNormalTexture.SampleLevel(DataSampler, uv, 0.0f), N);
+    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(34.11節)
+    const int soMode = (int)(OcclusionParams.y + 0.5f);
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+        SpecularIBLWeight(F0, NdotV, roughness, soMode, bent, N, reflectDir, materialAO,
+                          AOTexture[pixel].a, brdf, ShadowParams.w, ShadowParams.z);
 
     const float mipLevel = roughness * ShadowParams.y;
     float3 unusedIrradiance;

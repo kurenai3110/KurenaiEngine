@@ -75,11 +75,17 @@ uint DDGIProbeIndex(uint3 gridCoord, uint3 probeCounts)
     return gridCoord.x + gridCoord.y * probeCounts.x + gridCoord.z * probeCounts.x * probeCounts.y;
 }
 
-// worldPos の拡散間接光。ボリュームの外や未初期化時は呼び出し側が DDGIParams0.w で弾く。
+// worldPos の拡散間接光。ボリュームが完全に無効(機能OFF・未初期化)な場合は
+// 呼び出し側が DDGIParams0.w で弾く。
 //
-// N        シェーディングする面の法線
-// V        面からカメラへ向かう単位ベクトル
-float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V)
+// N            シェーディングする面の法線
+// V            面からカメラへ向かう単位ベクトル
+// insideWeight [出力] 1=完全にボリュームの内側、0=外側(境界の外1グリッドセル分でフェードする)。
+//              ボリュームは1個しか持てず(22.10節)、格子の外は最寄りの格子点を外挿し続けるだけで
+//              戻る経路が無かった。呼び出し側はこの重みでグローバルIBL/反射プローブの値と
+//              ブレンドし、ボリュームの外側が「1部屋ぶんの間接光」で照らされ続けるのを防ぐ
+//              (M11 Stage 1で追加。以前は無条件にDDGIへ差し替えていた)
+float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V, out float insideWeight)
 {
     const float3 origin = DDGIParams0.xyz;
     const float3 spacing = DDGIParams1.xyz;
@@ -105,6 +111,21 @@ float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V)
 
     // 格子内の連続座標。floorが手前側のプローブ、fracがトライリニアの重み
     const float3 gridSpace = (biasedPos - origin) / spacing;
+
+    // 【ボリューム外のフェード】gridSpaceが[0, probeCounts-1]の範囲内なら1、範囲外に出るほど
+    // 1グリッドセル分の距離で0まで滑らかに落とす。3軸のうち最も外側にはみ出している軸で判定する
+    // (どれか1軸でも大きく外れていれば、その点はもう「ボリュームの中」とは言えないため)
+    const float3 probeCountsF = float3(probeCounts);
+    const float3 outsideDistance = max(
+        max(-gridSpace, float3(0.0f, 0.0f, 0.0f)),
+        max(gridSpace - (probeCountsF - 1.0f), float3(0.0f, 0.0f, 0.0f)));
+    insideWeight = saturate(1.0f - max(outsideDistance.x, max(outsideDistance.y, outsideDistance.z)));
+    if (insideWeight <= 0.0f)
+    {
+        // 完全にボリュームの外。8近傍の走査自体が無駄なのでここで打ち切る
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
     const int3 baseCoord = (int3)floor(gridSpace);
     const float3 trilinear = saturate(gridSpace - float3(baseCoord));
 

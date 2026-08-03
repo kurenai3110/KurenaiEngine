@@ -12,20 +12,25 @@
 //   KURENAI_PROBE_PREFILTERED_REGISTER    必須。プローブのプリフィルタ済み鏡面(TextureCubeArray)
 //   KURENAI_PROBE_BUFFER_REGISTER         必須。プローブの影響範囲(StructuredBuffer)
 //   KURENAI_GLOBAL_IRRADIANCE_REGISTER    任意。拡散イラディアンスも要る場合のみ
-//   KURENAI_PROBE_IRRADIANCE_REGISTER     任意。同上(プローブ側)
 //   KURENAI_PROBE_DISTANCE_REGISTER       任意。距離キューブ(19.12節)を使う場合のみ
 //
-// 拡散側の2つを定義しなければ拡散イラディアンスのサンプルはコンパイルされず、
-// SampleEnvironmentは常にirradiance=0を返す(SSRは鏡面しか要らないためこちらを使う)。
+// 【M11 Stage 3で反射プローブは鏡面専任になった】拡散はDDGI(22章)へ一本化したため、
+// プローブ側の専用イラディアンスマップ(KURENAI_PROBE_IRRADIANCE_REGISTER・
+// SampleProbeIrradiance)は廃止した。SampleEnvironmentが返すirradianceは
+// KURENAI_GLOBAL_IRRADIANCE_REGISTERを定義した場合のみ「グローバルIBLの値そのもの」になり
+// (プローブの影響範囲による重み付けはもう受けない)、定義しなければ常に0を返す
+// (SSRは鏡面しか要らないためこちらを使う)。DDGIが有効な点ではDeferredLighting.hlsl/
+// Transparent.hlsl側でこの値がさらにDDGI由来の値へlerpされる
 //
 // KURENAI_PROBE_DISTANCE_REGISTERを定義しない場合、視差補正は箱との交差のみ、遮蔽判定は無しで
 // コンパイルされる。ただし「LightingパスとSSRパスがまったく同じ環境ソースを見る」ことが
 // 20章の前提なので、この2つは必ず同じ条件でコンパイルすること(片方だけ距離キューブを使うと、
 // SSRが自分の足した覚えのない値を引き算することになる)。
 //
-// このヘッダーはFrameConstants(b0)の ProbeParams / ProbeParams2 / ShadowParams / IBLParams を
-// 参照する(IBLParamsは拡散側のマクロを定義した場合のみ)。インクルードする側はこれらを
-// 含む形でFrameConstantsを宣言しておく必要がある。cbufferのレイアウトは宣言順で決まるため、
+// このヘッダーはFrameConstants(b0)の ProbeParams / ProbeParams2 / ShadowParams / AmbientColor /
+// IBLParams を参照する(IBLParams.xは拡散側のマクロを定義した場合のみ。.zは常に参照する)。
+// インクルードする側はこれらを含む形でFrameConstantsを宣言しておく必要がある。
+// cbufferのレイアウトは宣言順で決まるため、
 // 途中のフィールドを飛ばさずC++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること。
 #ifndef KURENAI_REFLECTION_PROBE_HLSLI
 #define KURENAI_REFLECTION_PROBE_HLSLI
@@ -38,9 +43,6 @@ TextureCubeArray ProbePrefilteredTexture : register(KURENAI_PROBE_PREFILTERED_RE
 
 #ifdef KURENAI_GLOBAL_IRRADIANCE_REGISTER
 TextureCube IrradianceTexture : register(KURENAI_GLOBAL_IRRADIANCE_REGISTER);
-#endif
-#ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
-TextureCubeArray ProbeIrradianceTexture : register(KURENAI_PROBE_IRRADIANCE_REGISTER);
 #endif
 #ifdef KURENAI_PROBE_DISTANCE_REGISTER
 // プローブ位置から各方向の被写体までのワールド距離(19.12節)。ジオメトリが無かった方向には
@@ -275,24 +277,23 @@ float3 SampleGlobalIrradiance(float3 N)
         : PrefilteredEnvTexture.SampleLevel(MaterialSampler, N, ShadowParams.y).rgb;
 }
 #endif
-#ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
-float3 SampleProbeIrradiance(float3 N, uint probeIndex)
-{
-    return (IBLParams.x > 0.5f)
-        ? ProbeIrradianceTexture.Sample(MaterialSampler, float4(N, probeIndex)).rgb
-        : ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(N, probeIndex), ShadowParams.y).rgb;
-}
-#endif
-
-// 環境ソース(拡散イラディアンス・プリフィルタ済み鏡面)を求める。影響下のプローブを重み付きで
-// 合成し、重みの合計が1に満たない残りをスカイボックス由来のグローバルIBLで埋める。
-// これによりプローブの影響範囲の外へ出るとき、境界で切り替わるのではなく徐々にグローバルIBLへ
-// 戻っていく。プローブが1つも効いていない場合は従来どおり完全にグローバルIBLになる。
-// 拡散側のレジスタが未定義の場合、irradianceは常に0が返る(鏡面しか要らない呼び出し側向け)
+// 環境ソース(拡散イラディアンス・プリフィルタ済み鏡面)を求める。
+//
+// 【M11 Stage 3: 拡散はプローブではなくグローバルIBLから取る】以前はここでプローブの
+// イラディアンスも重み付きブレンドしていたが、拡散の位置依存性はDDGI(22章)が担うようになった
+// ため廃止した(反射プローブは鏡面専任になった。19章の位置づけ変更)。
+// irradianceはKURENAI_GLOBAL_IRRADIANCE_REGISTERを定義していれば常にSampleGlobalIrradiance(N)
+// そのもの(プローブの影響範囲による重み付けは受けない)。DDGIが有効な点では、この値は
+// 呼び出し側(DeferredLighting.hlsl/Transparent.hlsl)でさらにDDGI由来の値へlerpされ、
+// DDGI無効時・ボリューム外の点ではこのグローバルIBLがそのまま最終値になる。
+// 拡散側のレジスタが未定義の場合、irradianceは常に0が返る(SSRは鏡面しか要らないため)。
+//
+// prefiltered(鏡面)は従来どおり、影響下のプローブを重み付きで合成し、重みの合計が1に
+// 満たない残りをスカイボックス由来のグローバルIBLで埋める。これによりプローブの影響範囲の
+// 外へ出るとき、境界で切り替わるのではなく徐々にグローバルIBLへ戻っていく
 void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
                        out float3 irradiance, out float3 prefiltered)
 {
-    float3 accumulatedIrradiance = float3(0.0f, 0.0f, 0.0f);
     float3 accumulatedPrefiltered = float3(0.0f, 0.0f, 0.0f);
     float totalWeight = 0.0f;
 
@@ -320,15 +321,10 @@ void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
             }
 #endif
 
-            // 拡散イラディアンスは低周波で位置による差が小さく、視差補正しても得られるものが
-            // ほとんど無い一方で交差計算のコストは掛かるため、鏡面の反射ベクトルにのみ適用する
             const float3 sampleR = (parallaxEnabled && probe.ShapeParams.x > 0.5f)
                 ? ProbeParallaxDirection(probe, worldPos, R, i)
                 : R;
 
-#ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
-            accumulatedIrradiance += SampleProbeIrradiance(N, i) * weight;
-#endif
             accumulatedPrefiltered += ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(sampleR, i), mipLevel).rgb * weight;
             totalWeight += weight;
         }
@@ -337,7 +333,6 @@ void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
         // 明るくなるので、超えた分は正規化して1に収める
         if (totalWeight > 1.0f)
         {
-            accumulatedIrradiance /= totalWeight;
             accumulatedPrefiltered /= totalWeight;
             totalWeight = 1.0f;
         }
@@ -362,35 +357,35 @@ void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
             }
 #endif
 
-#ifdef KURENAI_PROBE_IRRADIANCE_REGISTER
-            accumulatedIrradiance = SampleProbeIrradiance(N, (uint)nearest) * weight;
-#endif
             accumulatedPrefiltered = ProbePrefilteredTexture.SampleLevel(MaterialSampler, float4(sampleR, nearest), mipLevel).rgb * weight;
             totalWeight = weight;
         }
     }
 
-    // === プローブを焼いた時点の露出から現在の露出へ換算する ===
-    // キューブマップにはプリ露出済みの放射輝度が入っている(21.5節)。その倍率は時刻に連動して
-    // 最大18段(約26万倍)動くのに対し、Bakedモードのプローブはシーン読み込み時に一度焼いた
-    // きり更新されない。換算しないと、夜に焼いたプローブを昼のフレームが読んだ瞬間に
-    // プローブの寄与だけが17万倍になり、画面が白飛びしたまま戻らなくなる(19.14節)。
+    // === プローブを焼いた時点の露出から現在の露出へ換算する(19.14節) ===
+    // プローブのプリフィルタ済み鏡面キューブマップにはプリ露出済みの放射輝度が入っている
+    // (21.5節)。その倍率は時刻に連動して最大18段(約26万倍)動くのに対し、Bakedモードの
+    // プローブはシーン読み込み時に一度焼いたきり更新されない。換算しないと、夜に焼いた
+    // プローブを昼のフレームが読んだ瞬間にプローブの寄与だけが17万倍になり、画面が白飛びした
+    // まま戻らなくなる。
     //
     // **グローバルIBLを足す前に掛けること**。手続き空は露出が0.05段動くたびに焼き直されて
-    // 常に現在の露出になっているので、換算が要るのはプローブ由来の項だけである
-    accumulatedIrradiance *= ProbeParams2.w;
+    // 常に現在の露出になっているので、換算が要るのは鏡面のプローブ由来の項だけである。
+    // 拡散イラディアンスはM11 Stage 3でプローブ由来の項を廃止し、常にグローバルIBLだけで
+    // 決まるようになったため、この換算はもう不要
     accumulatedPrefiltered *= ProbeParams2.w;
 
     const float globalWeight = 1.0f - totalWeight;
     if (globalWeight > 0.0f)
     {
-#ifdef KURENAI_GLOBAL_IRRADIANCE_REGISTER
-        accumulatedIrradiance += SampleGlobalIrradiance(N) * globalWeight;
-#endif
         accumulatedPrefiltered += PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb * globalWeight;
     }
 
-    irradiance = accumulatedIrradiance;
+#ifdef KURENAI_GLOBAL_IRRADIANCE_REGISTER
+    irradiance = SampleGlobalIrradiance(N);
+#else
+    irradiance = float3(0.0f, 0.0f, 0.0f);
+#endif
     prefiltered = accumulatedPrefiltered;
 }
 
@@ -449,6 +444,10 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 //   compensationMode  ShadowParams.w(エネルギー補正の方式。0=無効/1=Linear/2=Series/3=Kulla-Conty)
 //   iblIntensity      ShadowParams.z(IBL強度倍率。0ならIBL自体が無効)
 //
+// 【環境光の鏡面倍率(IBLParams.z)は引数で受けずここで直接読む】iblIntensityのように引数に
+// すると、DeferredLightingとSSRが別々の値を渡してしまう余地が残る。この係数は上記のとおり
+// 「両者が定義上必ず一致する」ことが存在理由なので、外から差し込める口を増やさない
+//
 // 【この係数が受け持つのは単一散乱(鏡面)ローブだけ】Kulla-Conty方式が足す加算ローブは
 // プリフィルタ済み鏡面ではなく拡散イラディアンスに掛かるうえ、ほぼ拡散に近い広がりを持つため
 // スクリーンスペース反射で差し替える対象ではない。よってそちらは
@@ -459,7 +458,16 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 // かつてはここで昼度(AmbientColor.a)による夜間減衰も掛けていたが、手続き空の導入で
 // 空自体が太陽高度に応じて暗くなるようになったため撤廃した(21.4節)。
 // 掛けたままだと夜が二重に暗くなる
-float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, float3 brdf,
+//
+// 【遮蔽の引数について】materialAO(遮蔽マップのスカラー)とssao(スクリーンスペース側)を
+// 分けて受け取り、bentとあわせてSpecularEnergy.hlsliのComposeSpecularOcclusionで合成する。
+// soMode = 0なら従来どおりmaterialAO * ssaoを1回Frostbite近似へ通すだけになる。
+//
+// 【DeferredLightingとSSRへは必ず同じ値を渡すこと】この2つが定義上一致することが
+// この関数の存在理由で、ズレるとSSRの適用領域と非適用領域の境界に段差が出る
+float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness,
+                         int soMode, BentOcclusion bent, float3 N, float3 R,
+                         float materialAO, float ssao, float3 brdf,
                          float compensationMode, float iblIntensity)
 {
     // マルチスキャッタリング・エネルギー補正(SpecularEnergy.hlsli、14.9節)
@@ -468,7 +476,8 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, floa
 
     // スペキュラオクルージョン。式はSpecularEnergy.hlsliに1つだけ置いてある
     // (半透明パス・プローブ焼き込みからも同じものを使うため)
-    return splitSum * SpecularOcclusion(NdotV, roughness, ao) * iblIntensity;
+    const float so = ComposeSpecularOcclusion(soMode, bent, N, R, NdotV, roughness, materialAO, ssao);
+    return splitSum * so * iblIntensity * IBLParams.z;
 }
 
 // Kulla-Conty方式の加算ローブに掛かる係数。呼び出し側で拡散イラディアンスを乗算する:
@@ -476,8 +485,14 @@ float3 SpecularIBLWeight(float3 F0, float NdotV, float roughness, float ao, floa
 //   マルチスキャッタぶん = 拡散イラディアンス * SpecularIBLMultiScatterWeight(...)
 //
 // 方式0/1/2ではSpecularMultiScatterIBLが0を返すため、この項は完全に消える。
-// SSRはこの項を差し替えない(上のSpecularIBLWeightのコメント参照)
-float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness, float ao, float3 brdf,
+// SSRはこの項を差し替えない(上のSpecularIBLWeightのコメント参照)。
+//
+// 【この加算ローブは鏡面倍率(IBLParams.z)の側に入れる】掛かる相手が拡散イラディアンスなので
+// 拡散側に見えるが、これは鏡面BRDFが単散乱で取りこぼしたエネルギーを戻す項であって
+// 拡散反射ではない。拡散側に入れると、鏡面倍率を0にしても鏡面由来の光が残ってしまう
+float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness,
+                                     int soMode, BentOcclusion bent, float3 N, float3 R,
+                                     float materialAO, float ssao, float3 brdf,
                                      float compensationMode, float iblIntensity)
 {
     const int mode = (int)(compensationMode + 0.5f);
@@ -485,7 +500,8 @@ float3 SpecularIBLMultiScatterWeight(float3 F0, float NdotV, float roughness, fl
     const float Ess = brdf.x + brdf.y;
     const float3 multiScatter = SpecularMultiScatterIBL(F0, FssEss, Ess, mode);
 
-    return multiScatter * SpecularOcclusion(NdotV, roughness, ao) * iblIntensity;
+    const float so = ComposeSpecularOcclusion(soMode, bent, N, R, NdotV, roughness, materialAO, ssao);
+    return multiScatter * so * iblIntensity * IBLParams.z;
 }
 
 #endif // KURENAI_REFLECTION_PROBE_HLSLI

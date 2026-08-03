@@ -26,14 +26,18 @@ static const float PI = 3.14159265359f;
 
 // 反射プローブ(19章)の環境ソースと鏡面IBLの重み。DeferredLighting.hlsl・SSR.hlslと同じ定義を
 // 共有する。空きスロットが違うだけでレジスタ番号は各シェーダーが決める(ReflectionProbe.hlsli冒頭)。
-// このパスはt0〜t4とt8〜t11を既に使っているため、空いているt5〜t7を割り当てる。
+// このパスはt0〜t4とt8〜t11を既に使っているため、空いているt5〜t7を割り当てる
+// (t6は反射プローブのイラディアンスに使っていたが、M11 Stage 3で廃止し空いたまま残す)。
 // #include自体はFrameConstantsとSamplers.hlsliの宣言より後で行う必要があるため下にある
 #define KURENAI_GLOBAL_IRRADIANCE_REGISTER t9
 #define KURENAI_GLOBAL_PREFILTERED_REGISTER t10
 #define KURENAI_PROBE_PREFILTERED_REGISTER t5
-#define KURENAI_PROBE_IRRADIANCE_REGISTER t6
 #define KURENAI_PROBE_BUFFER_REGISTER t7
 #define KURENAI_PROBE_DISTANCE_REGISTER t12
+// DDGI(22章)。t0-t3,t5-t14を既に使っている(t14はbent normal・34章)ため、空いているt15/t16を
+// 割り当てる。不透明側のDeferredLighting.hlslもDDGIはt15/t16なので番号が揃う
+#define KURENAI_DDGI_IRRADIANCE_REGISTER t15
+#define KURENAI_DDGI_DISTANCE_REGISTER t16
 
 cbuffer FrameConstants : register(b0)
 {
@@ -51,8 +55,8 @@ cbuffer FrameConstants : register(b0)
     // 半透明パス専用。x=t8のライトリストの有効数(DirectLighting.hlsl側のLightingConstants.LightCount.xと
     // 同じ値)。他のシェーダーはこのフィールドを宣言していないため、末尾に追加してもオフセットは変わらない
     float4 ActiveLightCount;
-    // x: 拡散イラディアンスの取得元(0=プリフィルタ済み鏡面の最終ミップ、1=専用イラディアンスマップ)。
-    // ReflectionProbe.hlsliのSampleGlobalIrradiance/SampleProbeIrradiance参照。yzwは未使用
+    // x: 拡散イラディアンス(グローバルIBL)の取得元(0=プリフィルタ済み鏡面の最終ミップ、
+    // 1=専用イラディアンスマップ)。ReflectionProbe.hlsliのSampleGlobalIrradiance参照。yzwは未使用
     float4 IBLParams;
     // 反射プローブ用(19章)。x=有効プローブ数、y=影響範囲のデバッグ表示フラグ(このパスでは未使用)、
     // z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
@@ -60,15 +64,25 @@ cbuffer FrameConstants : register(b0)
     float4 ProbeParams;
     // 距離キューブ用(19.12節)。意味はDeferredLighting.hlslと同じ
     float4 ProbeParams2;
-    // 大気遠近(P8)・水中項(P8)。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で
-    // 決まるため、末尾に追加のみで既存フィールドのオフセットを動かさない(この末尾へ追加する限り、
-    // ここより前のフィールドしか読まないこのシェーダーは今回の変更の影響を受けない)。
+    // 【以下2つはこのシェーダーでは使わないが宣言だけ必要】cbufferは宣言順レイアウトなので、
+    // 後ろのDDGIParams/OcclusionParamsを正しいオフセットで読むには途中のフィールドを飛ばせない。
+    // C++側のFrameConstantsと並びを必ず一致させること
+    float4x4 PrevViewProj;
+    float4 TAAParams;
+    // DDGI用(22章、M11 Stage 1)。レイアウトはC++側 KurenaiEngine3D.cpp の FrameConstants の
+    // コメント参照。DDGI.hlsliがこの5本を読む
+    float4 DDGIParams0;
+    float4 DDGIParams1;
+    float4 DDGIParams2;
+    float4 DDGIParams3;
+    float4 DDGIParams4;
+    // bent normalによる遮蔽(34章)。DeferredLighting.hlslと同じ規則を適用する
+    float4 OcclusionParams;
+    // これ以降(TimeParams / Sky* / Cloud* / PlanarReflectionPlane / Fog* / WaterBodyColor)は
+    // このシェーダーでは一切読まないため宣言しない。
     // 【半透明メッシュにフォグを掛けない理由】AerialPerspective.hlslはこのTransparentパスより
     // 後のTAA直前に置かれるため、Transparentが描いた色も含めて後段でまとめてフォグが掛かる
     // (このシェーダー自体でフォグを計算する必要が無い)
-    float4 FogParams0;
-    float4 FogParams1;
-    float4 WaterBodyColor;
 };
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で
@@ -106,21 +120,31 @@ Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
 Texture2D EmissiveTexture : register(t3);
 // ベイク済みアンビエントオクルージョン(遮蔽マップ)。GBuffer.hlsl/ProbeCapture.hlslではt5だが、
-// このシェーダーはt5〜t7を反射プローブ(KURENAI_PROBE_PREFILTERED/IRRADIANCE/BUFFER_REGISTER、
+// このシェーダーはt5・t7を反射プローブ(KURENAI_PROBE_PREFILTERED/BUFFER_REGISTER、
 // 上記マクロ参照)に、t11をBRDFLUTTexture(下記)に割り当てて衝突するため、空いているt13を使う
 Texture2D OcclusionTexture : register(t13);
+// bent normal(遮蔽マップと同じライトマップUV空間)。このパスはt0〜t13を使い切っているためt14。
+// 不透明側はG-Bufferから読むが、フォワードの半透明はここでテクスチャを直接引く(34章)
+Texture2D BentNormalTexture : register(t14);
 // カスケードシャドウマップ(t4のTexture2DArray)とそのPCSSサンプリング。
 // DirectLighting.hlslと同じ実装を共有しているため、半透明と不透明で影がずれることはない。
 // FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)とDataSamplerを参照するため、
 // それらの宣言より後でインクルードする必要がある
 #include "ShadowSampling.hlsli"
 // IBL(14章)と反射プローブ(19章)。グローバルIBLのイラディアンス(t9)/プリフィルタ済み鏡面(t10)と、
-// プローブのキューブマップ配列(t5/t6)・影響範囲バッファ(t7)の宣言、およびプローブの選択・
-// 視差補正・ブレンドはReflectionProbe.hlsliが持つ(DeferredLighting.hlslと共有)。
+// プローブのプリフィルタ済み鏡面キューブマップ配列(t5)・影響範囲バッファ(t7)の宣言、および
+// プローブの選択・視差補正・ブレンドはReflectionProbe.hlsliが持つ(DeferredLighting.hlslと共有)。
+// 反射プローブは鏡面専任(M11 Stage 3)なので、このパスもプローブ側の拡散イラディアンスは持たない。
 //
 // 半透明パスにはSSRが適用されないため、ガラスにとっては環境ソースが唯一の映り込みになる。
 // 以前はここがグローバルIBL固定で、密閉された室内のガラスにも空が映っていた
 #include "ReflectionProbe.hlsli"
+// DDGI(22章、M11 Stage 1)。拡散イラディアンスだけを差し替える。半透明パスにはSSRが無いため
+// 20章の不変条件には関与しない(不透明側のDeferredLighting.hlslと同じ理由)。
+// 【重要】プローブの専用イラディアンスマップを読んでいたのはこのパスだけだった(M11 Context参照)。
+// それをStage 3で廃止したうえで、DDGIが有効な点は不透明側と同じくDDGIへ寄せることで、
+// 同じ画面の中で不透明面と半透明面が別々の間接拡散光を受けるという矛盾を解消している
+#include "DDGI.hlsli"
 Texture2D BRDFLUTTexture : register(t11);
 
 struct VSInput
@@ -230,7 +254,8 @@ void EvaluateDirectBRDF(
 // 遮蔽マップ(ベイク済みAO)はテクスチャなのでこのパスでも使える。aoにはそれを渡す
 // (遮蔽マップを持たないマテリアルは白1x1でao=1となり、従来と同じ結果になる)
 void EvaluateIBLSplit(
-    float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness, float ao,
+    float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness,
+    float materialAO, BentOcclusion bent,
     out float3 outDiffuse, out float3 outSpecular)
 {
     const float NdotV = saturate(dot(N, V));
@@ -242,7 +267,21 @@ void EvaluateIBLSplit(
 
     float3 irradiance;
     float3 prefiltered;
-    SampleEnvironment(worldPos, N, R, mipLevel, irradiance, prefiltered);
+    // 不透明側(DeferredLighting.hlslのEvaluateIBL)と同じく、開いている方向で
+    // イラディアンスを引く。鏡面のRは変えない
+    const float3 irradianceDir = (OcclusionParams.x > 0.5f) ? bent.axis : N;
+    SampleEnvironment(worldPos, irradianceDir, R, mipLevel, irradiance, prefiltered);
+
+    // DDGI(22章、M11 Stage 1)が有効なら拡散だけをDDGI由来へ差し替える。DeferredLighting.hlslの
+    // EvaluateIBLとまったく同じ規則(鏡面prefilteredには触れない、ボリューム外はlerpの重み0で
+    // SampleEnvironmentの値が残る)。半透明もこの規則に合わせないと、不透明面はDDGI・
+    // 半透明面は反射プローブという食い違った間接拡散光になる
+    if (DDGIParams0.w > 0.5f)
+    {
+        float ddgiInsideWeight;
+        const float3 ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight);
+        irradiance = lerp(irradiance, ddgiIrradiance, ddgiInsideWeight);
+    }
 
     // --- 拡散IBL ---
     // ラフネスを考慮したFresnel-Schlick(Lagarde, "Moving Frostbite to PBR")
@@ -255,22 +294,32 @@ void EvaluateIBLSplit(
     // EvaluateIBLと同じ。SpecularIBLWeightはfloat3のbrdfを受け取る)
     const float3 brdf = BRDFLUTTexture.Sample(ColorSampler, float2(NdotV, roughness)).rgb;
     // スペキュラオクルージョン・エネルギー補正・IBL強度倍率をまとめて掛ける係数。
-    // 半透明パスはスクリーンスペースのAO/GIバッファを持たないが、マテリアルの遮蔽マップは
-    // テクスチャなので使えるため、不透明側と同じ関数へそのままaoを渡している
-    // (遮蔽マップを持たないマテリアルはao=1となり、以前と同じ結果になる)
+    // 半透明パスはスクリーンスペースのAO/GIバッファを持たないため、そちらは1.0を渡す。
+    // ComposeSpecularOcclusionはどちらの経路も「遮蔽なしで厳密に1」なので、
+    // 片方が無くても結果は歪まない(遮蔽マップもbent normalも無ければ以前と同じ結果になる)
+    // 0 = Frostbite近似 / 1 = 球冠交差 / 2 = 球面ガウス(34.11節)
+    const int soMode = (int)(OcclusionParams.y + 0.5f);
     const float3 specularWeight =
-        SpecularIBLWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+        SpecularIBLWeight(F0, NdotV, roughness, soMode, bent, N, R, materialAO, 1.0f, brdf,
+                          ShadowParams.w, ShadowParams.z);
     // Kulla-Conty方式(ShadowParams.w = 3)が足す加算ローブ。DeferredLighting.hlslの
     // EvaluateIBLと同じ形にしておかないと、同じマテリアルが不透明と半透明で違う明るさになる。
     // 乗算型(1・2)と無効(0)ではこの係数が0になり、項ごと消える
     const float3 multiScatterWeight =
-        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, ao, brdf, ShadowParams.w, ShadowParams.z);
+        SpecularIBLMultiScatterWeight(F0, NdotV, roughness, soMode, bent, N, R, materialAO, 1.0f, brdf,
+                                      ShadowParams.w, ShadowParams.z);
 
     // 【昼度(AmbientColor.a)による減衰はしない】DeferredLighting.hlslのEvaluateIBLと同じ理由で、
     // 手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなるため、ここで掛けると
     // 二重に暗くなる(21.4節)。
-    // 鏡面側のShadowParams.z(IBL強度倍率)とaoはspecularWeightに含まれている
-    outDiffuse = kd * albedo * irradiance * ao * ShadowParams.z;
+    // 鏡面側のShadowParams.z(IBL強度倍率)と遮蔽はspecularWeightに含まれている。
+    // 拡散側のAOの出所と multi-bounce AO も不透明側(DeferredLighting.hlslのEvaluateIBL)と
+    // 同じ規則にしないと、同じマテリアルが不透明と半透明で違う明るさになる
+    const float diffuseAO = (OcclusionParams.x > 0.5f) ? bent.aoN : materialAO;
+    const float3 diffuseOcclusion = (OcclusionParams.z > 0.5f)
+        ? GTAOMultiBounce(diffuseAO, albedo)
+        : float3(diffuseAO, diffuseAO, diffuseAO);
+    outDiffuse = kd * albedo * irradiance * diffuseOcclusion * ShadowParams.z;
     outSpecular = prefiltered * specularWeight + irradiance * multiScatterWeight;
 }
 
@@ -432,7 +481,15 @@ float4 PSMain(PSInput input) : SV_TARGET
     if (ShadowParams.z > 0.0f)
     {
         // ShadowParams.zはEvaluateIBLSplitの中で拡散・鏡面それぞれに掛かっている
-        EvaluateIBLSplit(N, V, input.WorldPos, albedo, metallic, roughness, materialAO, ambientDiffuse, ambientSpecular);
+        // bent normalも遮蔽マップと同じLightmapUVで引く。持たないマテリアルは黒1x1が
+        // バインドされ、DecodeBentOcclusionがaxis = N・aoB = 1(遮蔽なし)へ落とす。
+        // 接空間で焼かれているのでtbnでワールドへ移す(直交行列なので長さは保たれる。
+        // 理由はGBuffer.hlslの同じ箇所を参照)
+        const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
+        const BentOcclusion bent = DecodeBentOcclusion(float4(mul(bentSample.xyz, tbn), bentSample.a), N);
+
+        EvaluateIBLSplit(N, V, input.WorldPos, albedo, metallic, roughness, materialAO, bent,
+                         ambientDiffuse, ambientSpecular);
     }
     else
     {
@@ -459,6 +516,14 @@ float4 PSMain(PSInput input) : SV_TARGET
                + SpecularMultiScatterIBL(F0, fallbackFssEss, fallbackEss, energy.Mode))
             * SpecularOcclusion(NdotV, roughness, materialAO);
     }
+
+    // 環境光の拡散・鏡面倍率。IBLの有効/無効どちらの経路にも同じように効かせたいので、
+    // 分岐の中ではなく合流した後で1か所だけ掛ける。
+    // 不透明パスでは同じ倍率がDeferredLighting.hlslとReflectionProbe.hlsliのSpecularIBLWeightに
+    // 入っており、半透明の鏡面がEvaluateIBLSplitで別計算になっている以上ここに書くしかない。
+    // 【ずらすと同じマテリアルが不透明と半透明で違う明るさになる】必ず両方を同時に直すこと
+    ambientDiffuse *= IBLParams.y;
+    ambientSpecular *= IBLParams.z;
 
     // 事前乗算済みアルファ(BlendMode::PremultipliedAlpha)で出力する。
     // 合成結果は out = src.rgb + dst.rgb * (1 - src.a) となるため、
