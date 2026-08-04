@@ -1,4 +1,4 @@
-"""モン・サン=ミシェル島モデル用の、手続き生成タイルテクスチャ(平均1.0の乗算変動場)を
+﻿"""モン・サン=ミシェル島モデル用の、手続き生成タイルテクスチャ(平均1.0の乗算変動場)を
 作るモジュール。
 
 設計の要: 各マテリアルの見た目のディテール(石積みの目地、スレートの段差、瓦の丸みなど)は
@@ -53,6 +53,7 @@ SEED_LEAD = 701
 SEED_LEAD_WEATHER = 702
 SEED_CANOPY = 801
 SEED_CANOPY_WEATHER = 802
+SEED_CANOPY_TINT = 803
 
 
 def _value_noise(resolution, freq_x, freq_y, seed):
@@ -169,14 +170,27 @@ def _band_limited_fine_noise(size, freq, seed, downsample_factor=4):
     return _resize_periodic(small_noise, size)
 
 
-def weathering_field(size, seed, cells_low=3, cells_mid=7, target_std=0.145):
+def weathering_field(size, seed, cells_low=3, cells_mid=7, target_std=0.22):
     """低周波の「風化むら」層(タイル内3x3セル + 7x7セル(振幅半分)、平滑補間)。
 
     遠景で縮小されても潰れずに残る、数メートル規模のむら(風化・汚れ・苔・濡れを想定)。
     ワールド空間のボックス投影UVと組み合わさることで、建物ごとの色調差も生む。
     合成後の標準偏差(1.0からの偏差)をtarget_stdへ厳密に合わせて返す(乱数の引きに
-    よらず狙った振幅を保証するため)。target_std=0.145は指定範囲0.13〜0.16の中央付近を
-    狙った出典なしの決め値。
+    よらず狙った振幅を保証するため)。
+
+    【修正・実機の石が写真の1/3の変動しかなかった】参考写真と実機の同じ領域を、島の幅で
+    正規化した同じ倍率で測ると(値は輝度の変動係数。括弧内は平均する画素数):
+                     写真 CV(1/2/4/8px)        実機 CV(1.5/3/6/12px)
+      裸の花崗岩      0.465 0.397 0.328 0.289   0.130 0.127 0.116 0.107
+      城壁(石積み)    0.546 0.484 0.425 0.318   0.120 0.117 0.114 0.100
+      修道院の石壁    0.520 0.462 0.399 0.340   0.160 0.154 0.143 0.132
+    縮小に耐えて遠景まで残るのはこの低周波の層だけなので(細かいノイズは平均へ潰れる)、
+    ここを上げるのが低周波では最も効く。ただし上げすぎると「石」ではなく「大きな染み」に
+    見えるため、0.28で一度試したあと0.22へ戻した。石の造形(明暗)の主成分は
+    テクスチャではなく太陽の向きで、方位を270度(カメラ真後ろの順光)から210度へ変えると
+    石積の変動係数は0.137→0.260になった(テクスチャの寄与は0.094→0.137)。
+    ※写真側の変動には窓・狭間・控え壁の陰影など立体の起伏も含まれるため、
+      テクスチャだけで写真のCVに並ぶわけではない。狙いは1/3を1/2強まで戻すこと
     """
     try:
         low = _value_noise(size, cells_low, cells_low, seed)
@@ -267,8 +281,11 @@ def rock_field():
         skewed = sign * np.where(c_base < 0.0, np.power(mag, 0.7), np.power(mag, 1.4))
 
         # 基礎ノイズと筋ノイズの合成比は出典なしの決め値
-        combined = 0.75 * skewed + 0.25 * c_streak
-        field = 1.0 + 0.22 * combined
+        # 【修正】参考写真の花崗岩の崖(正規化x0.19〜0.40)は縦方向の割れ目が目立つので、
+        # 筋の比を0.25→0.45へ上げ、全体の振幅も0.22→0.34にする
+        # (weathering_fieldのdocstringの実測表を参照)
+        combined = 0.55 * skewed + 0.45 * c_streak
+        field = 1.0 + 0.34 * combined
 
         field *= weathering_field(RESOLUTION, SEED_ROCK_WEATHER)
 
@@ -290,7 +307,8 @@ def masonry_field():
         field = np.ones((RESOLUTION, RESOLUTION), dtype=np.float32)
         field = _apply_block_pattern(
             field, RESOLUTION, rows=40, cols=20, seed=SEED_MASONRY,
-            mult_range=(0.85, 1.15), mortar_px=4, joint_mult=0.78, offset_mode="half",
+            # 【修正】ブロックごとのばらつきと目地の暗さを上げる(weathering_fieldの実測表を参照)
+            mult_range=(0.72, 1.28), mortar_px=4, joint_mult=0.62, offset_mode="half",
         )
         fine = _band_limited_fine_noise(RESOLUTION, freq=32, seed=SEED_MASONRY_FINE)
         field *= (1.0 + 0.025 * (fine - 0.5) * 2.0)
@@ -313,7 +331,8 @@ def rubble_field():
         field = np.ones((RESOLUTION, RESOLUTION), dtype=np.float32)
         field = _apply_block_pattern(
             field, RESOLUTION, rows=32, cols=24, seed=SEED_RUBBLE,
-            mult_range=(0.80, 1.20), mortar_px=4, joint_mult=0.80, offset_mode="random",
+            # 【修正】切石より乱れが大きいので、切石よりさらに広く振る
+            mult_range=(0.68, 1.34), mortar_px=4, joint_mult=0.62, offset_mode="random",
         )
 
         field *= weathering_field(RESOLUTION, SEED_RUBBLE_WEATHER)
@@ -465,7 +484,9 @@ def canopy_field():
         mag = np.abs(c)
         # 負側(暗)は0.5乗で強く伸ばし、正側(明)は1.6乗で抑える(出典なしの決め値)
         skewed = sign * np.where(c < 0.0, np.power(mag, 0.5), np.power(mag, 1.6))
-        field = 1.0 + 0.35 * skewed
+        # 【修正・樹冠の明暗の幅が写真の半分だった】材質IDで樹冠の画素を特定して最終画の
+        # 輝度を測ると p90/p10 は 写真3.50 対 実機1.82。葉の隙間の暗がりが足りない
+        field = 1.0 + 0.62 * skewed
 
         field *= weathering_field(RESOLUTION, SEED_CANOPY_WEATHER)
 
@@ -474,6 +495,34 @@ def canopy_field():
     except Exception as error:  # noqa: BLE001
         print(f"[ERROR] canopy_field()の生成に失敗しました: ({error})", file=sys.stderr)
         raise
+
+
+def canopy_tint_field():
+    """樹冠の色を2色のあいだで混ぜるための[0,1]の低周波マスク。
+
+    【なぜ要るか】既存の変動場はすべて「ベースカラーに掛けるスカラー」なので、明暗しか
+    変えられず色相は動かない。参考写真の樹林を測ると R/G の中央が0.831・p10〜p90の幅が
+    0.291あり(実機は中央0.692・幅0.172)、日向の黄緑から日陰の青緑まで色相が振れている。
+    スカラーの変動場ではこれを再現できないため、2色を混ぜるマスクを別に持つ。
+
+    タイルは12mでワールド空間のボックス投影なので、3x3セル(=4m)の低周波にすると
+    木ごと・枝ごとにゆっくり色が変わる(1本の中でも多少変わる)。出典なしの決め値
+    """
+    try:
+        low = _value_noise(RESOLUTION, 3, 3, SEED_CANOPY_TINT)
+        mid = _value_noise(RESOLUTION, 7, 7, SEED_CANOPY_TINT + 1)
+        blend = 0.7 * low + 0.3 * mid
+        blend = (blend - blend.min()) / max(float(blend.max() - blend.min()), 1e-8)
+        return blend.astype(np.float32)
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] canopy_tint_field()の生成に失敗しました: ({error})", file=sys.stderr)
+        raise
+
+
+# 色相を振るためのマスク(FIELD_FUNCTIONSとは別。乗算ではなく2色の混合率として使う)
+TINT_FIELD_FUNCTIONS = {
+    "canopy_tint": canopy_tint_field,
+}
 
 
 # フィールド名(MATERIAL_TEXTURE_FIELDSの値)から生成関数を引く対応表
@@ -495,7 +544,7 @@ def _linear_to_srgb(v):
     return np.where(v > 0.0031308, 1.055 * np.power(v, 1.0 / 2.4) - 0.055, 12.92 * v)
 
 
-def create_variation_image(name, field, base_color_linear):
+def create_variation_image(name, field, base_color_linear, tint_color_linear=None, tint_field=None):
     """変動場fieldとベースカラー(リニアRGB)から、Blenderの画像(sRGBエンコード済み)を作る。
 
     同名の画像が既に存在する場合は作り直さず再利用する(build_island()が複数回
@@ -523,6 +572,12 @@ def create_variation_image(name, field, base_color_linear):
     try:
         height, width = field.shape
         color = np.array(base_color_linear, dtype=np.float32).reshape(1, 1, 3)
+        if tint_color_linear is not None and tint_field is not None:
+            # 2色のあいだをtint_field(0〜1)で混ぜてから明暗の変動場を掛ける。
+            # 混合は平均0.5になるとは限らないので、遠景の平均色は2色の中間あたりになる
+            tint = np.array(tint_color_linear, dtype=np.float32).reshape(1, 1, 3)
+            t = tint_field[:, :, np.newaxis]
+            color = color * (1.0 - t) + tint * t
         linear_rgb = np.clip(field[:, :, np.newaxis] * color, 0.0, 1.0)
         srgb_rgb = _linear_to_srgb(linear_rgb)
         alpha = np.ones((height, width, 1), dtype=np.float32)

@@ -91,7 +91,7 @@ ISLAND_MATERIALS = [
     ("TileRoof",       (0.130, 0.100, 0.075), 0.70, 0.0),
     ("LeadRoof",       (0.085, 0.095, 0.095), 0.45, 0.0),
     ("Gilt",           (0.750, 0.550, 0.200), 0.30, 1.0),
-    ("TreeCanopy",     (0.050, 0.075, 0.030), 0.90, 0.0),
+    ("TreeCanopy",     (0.052, 0.070, 0.022), 0.90, 0.0),
     ("TreeTrunk",      (0.055, 0.040, 0.028), 0.95, 0.0),
     # 窓(ゴシック窓の開口部)。実物の窓は暗い開口部だが、当初は壁と同じMasonryのため
     # abbey_closeup.pngで壁より明るい縦縞に見えてしまっていた。既存のスロット順を
@@ -151,6 +151,29 @@ MATERIAL_UV_TILE_METERS = {
     "TileRoof":        8.0,
     "LeadRoof":        8.0,
     "TreeCanopy":     12.0,
+}
+
+# --- 色相を振るマテリアル(2色を低周波のマスクで混ぜる) ---
+# 【なぜ要るか】既存の変動場は「ベースカラーに掛けるスカラー」で明暗しか変えられない。
+# 参考写真の樹林を測ると R/G の中央が0.831・p10〜p90の幅が0.291あり、日向の黄緑から
+# 日陰の青緑まで色相が振れている(実機は中央0.692・幅0.172で、青すぎて幅も足りない)。
+# TreeCanopyのベースカラーを暗い青緑側へ寄せ、明るい黄緑をもう一方の色として混ぜる。
+# 2色の中間は (0.0625, 0.0775, 0.029) で R/G=0.806・B/G=0.374 になり、
+# 実機の見た目の R/G を写真の0.831へ寄せる狙い(出典なしの決め値)
+# 【値の詰め直し】材質IDで樹冠の画素を選んで最終画の色味を測ると R/G=0.690・B/G=1.033
+# (写真は0.831/0.855)だった。同じやり方で石を測ると 花崗岩R/G 写真1.067対実機1.019・
+# B/G 0.949対0.945、城壁 1.048対0.972 / 1.024対1.000 とよく合っているので、
+# 照明が青いのではなく樹冠のアルベドだけが外れている。
+# アルベドから実機の色味への倍率は実測で R/G×0.84・B/G×2.83(樹冠は青が小さいぶん
+# 環境光の青が相対的に効く)。写真の値を割り戻すと、要るアルベドは R/G≒0.99・B/G≒0.28。
+# 2色の混合(マスクの平均0.569)後がその値になるよう2色を決めた:
+#   0.431×(0.052,0.070,0.022) + 0.569×(0.096,0.082,0.021) = (0.077,0.077,0.021)
+# 【注意】この値は「写真の見た目に合わせて逆算した」もので、葉のアルベドの実測ではない
+MATERIAL_TINT_COLORS = {
+    "TreeCanopy": (0.096, 0.082, 0.021),
+}
+MATERIAL_TINT_FIELDS = {
+    "TreeCanopy": "canopy_tint",
 }
 
 # マテリアル名 -> msm_textures.FIELD_FUNCTIONS のキー、の対応表。ここに載っているマテリアルだけ
@@ -1108,18 +1131,28 @@ ABBEY_BLOCKS = [
 #   ・その内側の大きな棟 — 4階建て、淡い壁に灰色の屋根
 # どちらも足元は岩の表面に合わせる(_find_rock_t_for_radiusで逆算)。寸法は写真から
 # 目分量で決めた出典なしの決め値。
-WEST_END_TOWER_THETA_DEG = 172.0     # 城壁の弧(-195=165度〜65度)の西端寄り
+# 【修正・南面からまったく見えていなかった】172度はエンジンのz=+20.5m、つまり島の
+# 中心より北側で、南のカメラからは岩の裏に隠れていた(材質地図の画面x0.0〜0.1に
+# 集落系の材質が0%だったことで判明)。参考写真c_south_elevation_sunny.jpgでは
+# 正規化x0.02〜0.05に円錐屋根の丸い塔がはっきり写っている。
+# -170度にするとz=-26m(中心より南)になり遮られず、画面x=0.037に出る。
+# 高さも直す: 天端27.9mでは画面高さh=0.174になるが、写真の塔の天端はh≒0.115。
+# 換算(scratchpad/ht_table.py)では18mでh=0.113
+WEST_END_TOWER_THETA_DEG = -170.0
 WEST_END_TOWER_RADIUS = 7.0
-WEST_END_TOWER_BODY_HEIGHT = 20.0
-WEST_END_TOWER_ROOF_HEIGHT = 7.0
+WEST_END_TOWER_BODY_HEIGHT = 14.5
+WEST_END_TOWER_ROOF_HEIGHT = 3.5
 WEST_END_TOWER_SIDES = 12            # 丸い塔に見せるため城壁の塔(TOWER_SIDES)より多く割る
 # 大きな棟。城壁のすぐ内側に置きたいので、岩の表面から少しだけ内側(半径を縮める)
-WEST_END_LODGE_THETA_DEG = 163.0
+# 【修正】塔と同じ理由(163度はz=+38mで岩の裏)。-160度でz=-45m・画面x=0.098になり、
+# 参考写真の「塔の内側に並ぶ大きな棟」(正規化x0.06〜0.15、屋根の上端h≒0.12)と揃う。
+# 棟線22m(壁15+屋根7)では画面高さ0.136になるので18m(壁13+屋根5)へ下げる
+WEST_END_LODGE_THETA_DEG = -160.0
 WEST_END_LODGE_RADIUS_INSET = 12.0   # 岩の裾(t=0)の半径からこれだけ内側
 WEST_END_LODGE_WIDTH = 16.0          # 接線方向(妻の幅)
 WEST_END_LODGE_DEPTH = 12.0          # 半径方向(棟の長さ)
-WEST_END_LODGE_WALL_HEIGHT = 15.0    # 4階建て相当
-WEST_END_LODGE_ROOF_HEIGHT = 7.0
+WEST_END_LODGE_WALL_HEIGHT = 13.0    # 4階建て相当
+WEST_END_LODGE_ROOF_HEIGHT = 5.0
 
 # シャトレ双塔(実物の入口の左右にある円塔)。既存の_add_octagon_turret_to_bmeshを流用する。
 # sides=8はBELFRY_TURRET_SIDESと同じ慣例に合わせた出典なしの決め値
@@ -1198,7 +1231,15 @@ ABBEY_CORNICE_PROTRUSION = 1.6         # コーニスの出っ張り量
 # c_north_merveille_detail.jpg)を精査すると、実物の基礎は浅い段が何段も連なる「階段」では
 # なく、岩から直接立ち上がる高くて連続した石壁になっている。段数を4→2へ減らし
 # (ABBEY_TIER_DROP_FRACTIONも引き上げ)、1段あたりの壁を高くした
-ABBEY_TERRACE_OUTSETS = [12.0, 30.0]
+# 【修正・基礎の下端が写真より高かった】材質地図では石積が支配的になるのは画面高さ
+# h=0.4以上(h0.4-0.5で0.875)で、そこから下は岩と中腹の擁壁だった。参考写真の同じ
+# 正規化x(0.30〜0.65)では、修道院の石壁がh≒0.28まで途切れずに下りている。
+# 最下段は岩の表面まで届く(drop=1.0)ので、張り出しを一段足すと足元がそのぶん外・下へ伸びる
+# 【行きすぎの是正】55.0の段を足したら、h0.4-0.5が石積100%・h0.3-0.4も0.838になり、
+# 階段状の巨大な塊が島の上半分を飲み込んだ(樹木も0.147→0.114に隠された)。
+# 参考写真の基礎は「浅い段が何段も」ではなく1枚の高い壁なので、段を増やさずに
+# 外段の張り出しだけを30→40へ伸ばす
+ABBEY_TERRACE_OUTSETS = [12.0, 40.0]
 # 各段が「天端からその位置の岩の表面までの距離」のうち何割を下りるか。
 # 1.0未満にすることで下の段へ引き継がれ、段状になる(最下段だけは1.0=岩まで届かせる)。
 # 0.85に引き上げ、各段が岩の表面近くまで一気に下りる高い壁になるようにした
@@ -1718,7 +1759,14 @@ def _create_island_materials():
                 if field_name is not None:
                     field_func = msm_textures.FIELD_FUNCTIONS[field_name]
                     field = field_func()
-                    image = msm_textures.create_variation_image(name, field, color)
+                    tint_name = MATERIAL_TINT_FIELDS.get(name)
+                    tint_field = (msm_textures.TINT_FIELD_FUNCTIONS[tint_name]()
+                                  if tint_name is not None else None)
+                    image = msm_textures.create_variation_image(
+                        name, field, color,
+                        tint_color_linear=MATERIAL_TINT_COLORS.get(name),
+                        tint_field=tint_field,
+                    )
 
                     tex_node = mat.node_tree.nodes.new("ShaderNodeTexImage")
                     tex_node.name = f"{name}_Variation"
