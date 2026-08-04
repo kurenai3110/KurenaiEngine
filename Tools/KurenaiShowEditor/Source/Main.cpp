@@ -35,6 +35,17 @@ namespace
     using Kurenai::Core::Utf8ToWide;
     using Kurenai::Core::WideToUtf8;
 
+    // 【printfの書式文字列に日本語を置かないこと】/utf-8 を渡していても書式文字列の検査は
+    // ANSIコードページでバイト列を読むらしく、日本語を含めると C4819(現在のコードページで
+    // 表示できない文字)が出る。そのうえ %s や %zu の切り出しまでずれて C4474/C4477
+    // (引数の数・型の不一致)が続く。実行時の出力は正しいので気付きにくい。
+    // 文字列はここで組み立ててから、書式解析を通らないfputsで出す
+    void Print(const std::string& message)
+    {
+        std::fputs(message.c_str(), stdout);
+        std::fputs("\n", stdout);
+    }
+
     std::wstring GetExeDirectory()
     {
         wchar_t buffer[MAX_PATH];
@@ -150,14 +161,14 @@ namespace
             if (reloaded.DroneCount != source.DroneCount ||
                 reloaded.Formations.size() != source.Formations.size())
             {
-                std::printf("往復の検査に失敗しました: 機体数または編隊数が一致しません\n");
+                Print("往復の検査に失敗しました: 機体数または編隊数が一致しません");
                 return 1;
             }
             for (size_t f = 0; f < source.Formations.size(); ++f)
             {
                 if (reloaded.Formations[f].Name != source.Formations[f].Name)
                 {
-                    std::printf("往復の検査に失敗しました: 編隊%zuの名前が一致しません\n", f);
+                    Print("往復の検査に失敗しました: 編隊" + std::to_string(f) + "の名前が一致しません");
                     return 1;
                 }
                 for (uint32_t i = 0; i < source.DroneCount; ++i)
@@ -169,20 +180,23 @@ namespace
                     // floatをそのまま書いてそのまま読むので、ビット一致するのが正しい
                     if (a.x != b.x || a.y != b.y || a.z != b.z || ca.x != cb.x || ca.y != cb.y || ca.z != cb.z)
                     {
-                        std::printf("往復の検査に失敗しました: 編隊%zuの点%uが一致しません\n", f, i);
+                        Print(
+                            "往復の検査に失敗しました: 編隊" + std::to_string(f) + "の点" +
+                            std::to_string(i) + "が一致しません");
                         return 1;
                     }
                 }
             }
 
-            std::printf(
-                "書き出しました: %s (機体数 %u, 編隊 %zu, 往復一致)\n",
-                WideToUtf8(outputPath).c_str(), source.DroneCount, source.Formations.size());
+            Print(
+                "書き出しました: " + WideToUtf8(outputPath) + " (機体数 " +
+                std::to_string(source.DroneCount) + ", 編隊 " +
+                std::to_string(source.Formations.size()) + ", 往復一致)");
             return 0;
         }
         catch (const std::exception& e)
         {
-            std::printf("失敗しました: %s\n", e.what());
+            Print(std::string("失敗しました: ") + e.what());
             return 1;
         }
     }
@@ -197,7 +211,7 @@ int wmain(int argc, wchar_t** argv)
         std::wstring outputPath = FindOption(args, L"--generate-standard");
         if (outputPath.empty())
         {
-            std::printf("--generate-standard の後に出力パスを指定してください\n");
+            Print("--generate-standard の後に出力パスを指定してください");
             return 1;
         }
         return GenerateStandard(outputPath);
@@ -237,7 +251,7 @@ int wmain(int argc, wchar_t** argv)
     }
     catch (const std::exception& e)
     {
-        std::printf("初期化エラー: %s\n", e.what());
+        Print(std::string("初期化エラー: ") + e.what());
         MessageBoxW(nullptr, Utf8ToWide(e.what()).c_str(), L"KurenaiShowEditor - 初期化エラー", MB_OK | MB_ICONERROR);
         exitCode = 1;
     }
