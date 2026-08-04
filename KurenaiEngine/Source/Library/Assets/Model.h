@@ -25,6 +25,9 @@ namespace Kurenai::Assets
         // デバイスがレイトレーシング非対応の場合は両配列とも空で、この値は意味を持たない
         uint32_t RaytracingAttributeOffset = 0;
         uint32_t RaytracingIndexOffset = 0;
+        // 同じくModel::RaytracingMeshletTriangleOffsets内でこのメッシュのデータが始まる位置。
+        // 要素数はMeshletCount(メッシュレットを持たない.kmodelでは0)
+        uint32_t RaytracingMeshletOffset = 0;
 
         // --- メッシュレット(メッシュシェーダー用) ---------------------------------------
         //
@@ -36,11 +39,14 @@ namespace Kurenai::Assets
         // 変わらないため、ステージングリングを持たないこのUsageがそのまま当てはまる。
         //
         // 【空になる条件】(1) デバイスがメッシュシェーダー非対応、(2) .kmodelが
-        // --no-meshletsで焼かれている、のいずれか。MeshletCountが0なら
-        // 描画側は従来の頂点シェーダー経路を使うこと
+        // --no-meshletsで焼かれている、のいずれか。
+        // 描画側はMeshletCountではなくMeshletBufferの有無で経路を選ぶこと ――
+        // MeshletCountはアセットが持つメッシュレット数そのもので、メッシュシェーダー
+        // 非対応の環境でも(レイトレーシング側が使うため)0にはならない
         std::unique_ptr<RHI::IRHIBuffer> MeshletBuffer;
         std::unique_ptr<RHI::IRHIBuffer> MeshletVertexBuffer;
         std::unique_ptr<RHI::IRHIBuffer> MeshletTriangleBuffer;
+        // .kmodelが持つメッシュレット数。GPUバッファの有無とは独立
         uint32_t MeshletCount = 0;
         RHI::IRHITexture* BaseColorTexture = nullptr;
         RHI::IRHITexture* NormalTexture = nullptr;
@@ -139,6 +145,11 @@ namespace Kurenai::Assets
         // デバイスがレイトレーシング非対応の場合はそもそも構築されず空のまま
         std::vector<RaytracingVertexAttribute> RaytracingAttributes;
         std::vector<uint32_t> RaytracingIndices;
+        // メッシュレットごとの「メッシュ内での開始三角形番号」(Mesh::RaytracingMeshletOffsetが
+        // メッシュごとの開始位置を指す)。上の2つと同じくRaytracingScene::Buildが
+        // シーン全体の統合バッファへ連結した時点で解放される。
+        // 用途と、MeshletEntryをそのまま持たない理由はRaytracingScene::GetMeshletTriangleOffsetBuffer参照
+        std::vector<uint32_t> RaytracingMeshletTriangleOffsets;
 
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };

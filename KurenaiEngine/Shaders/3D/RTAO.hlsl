@@ -84,6 +84,10 @@ Texture2D DirectLightTexture : register(t8);
 #define KURENAI_RT_MESHINFO_REGISTER t5
 #define KURENAI_RT_INSTANCEINFO_REGISTER t6
 #define KURENAI_RT_MATERIAL_REGISTER t7
+// t8はDirectLightTextureが使っているため、メッシュレット表はその次のt9。
+// このシェーダーはメッシュレットを引かないが、RaytracingScene.hlsliが
+// 宣言を持つためレジスタの指定だけは必要
+#define KURENAI_RT_MESHLET_REGISTER t9
 #include "RaytracingScene.hlsli"
 
 // rgb=間接拡散光(イラディアンス), a=遮蔽率。SSAO/SSILの出力と同じ意味・同じフォーマット

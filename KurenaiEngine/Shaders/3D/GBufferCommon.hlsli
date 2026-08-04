@@ -7,6 +7,7 @@
 #ifndef KURENAI_GBUFFER_COMMON_HLSLI
 #define KURENAI_GBUFFER_COMMON_HLSLI
 
+#include "Meshlet.hlsli"
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
@@ -170,9 +171,6 @@ struct PSInput
     // (GBufferMeshlet.hlslのPSMainMeshletDebug)だけが使う
     nointerpolation uint MeshletIndex : TEXCOORD5;
 };
-
-// PSInput::MeshletIndexが「メッシュシェーダー由来ではない」ことを表す値
-static const uint kInvalidMeshletIndex = 0xFFFFFFFFu;
 
 struct PSOutput
 {

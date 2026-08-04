@@ -134,6 +134,7 @@ exit /b 0</Command>
     <None Include="Shaders\3D\LightCulling.hlsl" />
     <None Include="Shaders\3D\NormalEncoding.hlsli" />
     <None Include="Shaders\3D\Bindless.hlsli" />
+    <None Include="Shaders\3D\Meshlet.hlsli" />
     <None Include="Shaders\3D\SpecularEnergy.hlsli" />
     <None Include="Shaders\3D\ScreenSpaceShadow.hlsli" />
     <None Include="Shaders\3D\Present.hlsl" />

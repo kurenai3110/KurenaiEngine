@@ -15,6 +15,7 @@
 //   KURENAI_RT_MESHINFO_REGISTER      メッシュ情報(StructuredBuffer<RTMeshInfo>)
 //   KURENAI_RT_INSTANCEINFO_REGISTER  インスタンス情報(StructuredBuffer<RTInstanceInfo>)
 //   KURENAI_RT_MATERIAL_REGISTER      マテリアル(StructuredBuffer<RTMaterial>)
+//   KURENAI_RT_MESHLET_REGISTER       メッシュレット表(StructuredBuffer<uint>)
 //
 // このヘッダーはNormalEncoding.hlsliのOctDecodeを使うため、その後で#includeすること。
 #ifndef KURENAI_RAYTRACING_SCENE_HLSLI
@@ -23,6 +24,7 @@
 // ヒット面のマテリアルテクスチャをbindlessで引くために必要(FetchHitSurface参照)。
 // どちらもインクルードガードを持つため、消費側が先に取り込んでいても二重定義にならない
 #include "Bindless.hlsli"
+#include "Meshlet.hlsli"
 #include "Samplers.hlsli"
 
 // --- C++側の構造体の写し。並びとサイズを一致させること ---
@@ -35,12 +37,16 @@ struct RTVertexAttribute
     uint Padding;
 };
 
-// Assets::RaytracingMeshInfo(16バイト)
+// Assets::RaytracingMeshInfo(24バイト)
 struct RTMeshInfo
 {
     uint AttributeOffset;
     uint IndexOffset;
     uint MaterialIndex;
+    // メッシュレット表(RTMeshletTriangleOffsets)の中でこのメッシュのぶんが始まる位置と個数。
+    // メッシュレットを持たない.kmodelではCountが0になる
+    uint MeshletOffset;
+    uint MeshletCount;
     uint Padding;
 };
 
@@ -78,6 +84,8 @@ StructuredBuffer<uint> RTIndices : register(KURENAI_RT_INDEX_REGISTER);
 StructuredBuffer<RTMeshInfo> RTMeshInfos : register(KURENAI_RT_MESHINFO_REGISTER);
 StructuredBuffer<RTInstanceInfo> RTInstanceInfos : register(KURENAI_RT_INSTANCEINFO_REGISTER);
 StructuredBuffer<RTMaterial> RTMaterials : register(KURENAI_RT_MATERIAL_REGISTER);
+// メッシュレットごとの「メッシュ内での開始三角形番号」。RTFindMeshletが二分探索で引く
+StructuredBuffer<uint> RTMeshletTriangleOffsets : register(KURENAI_RT_MESHLET_REGISTER);
 
 // half2へ詰めたオクタヘドラル法線を復元する。CPU側のAssets::OctEncodeNormalの逆変換
 float3 RTUnpackNormal(uint packed)
@@ -144,6 +152,47 @@ void FetchHitSurface(uint instanceID, uint geometryIndex, uint primitiveIndex, f
         material.MetallicFactor = (material.MetallicFactor < 0.0f ? 1.0f : material.MetallicFactor) * mr.b;
         material.RoughnessFactor = (material.RoughnessFactor < 0.0f ? 1.0f : material.RoughnessFactor) * mr.g;
     }
+}
+
+// ヒットした三角形が、そのメッシュの何番目のメッシュレットに属するかを返す。
+// メッシュレットを持たないメッシュではkInvalidMeshletIndexを返す。
+//
+// 【二分探索で引ける理由】.kgeom v3から、インデックスバッファの三角形はメッシュレットの
+// 並び順そのものになっている(ModelPackage.hの.kgeom v3の説明)。つまり各メッシュレットの
+// 三角形は [TriangleOffset, TriangleOffset + TriangleCount) という連続した区間を占め、
+// TriangleOffsetはメッシュレット番号について単調増加する。
+// 三角形→メッシュレットの逆引きテーブルを別に持てば1回の読み出しで済むが、
+// Bistro級では数MBかかるうえ、log2(メッシュレット数)は高々16回の読み出しでしかない。
+//
+// 【戻り値はメッシュ内の番号】シーン全体での通し番号ではなくメッシュ内の番号を返すのは、
+// ラスタ側(GBufferMeshlet.hlslのPSInput::MeshletIndex)がメッシュ内の番号だから。
+// 色分けを見比べるとき、両者が同じ番号でないと意味がない
+uint RTFindMeshlet(RTMeshInfo meshInfo, uint primitiveIndex)
+{
+    if (meshInfo.MeshletCount == 0u)
+    {
+        return kInvalidMeshletIndex;
+    }
+
+    // TriangleOffset <= primitiveIndex を満たす最後の要素を探す。
+    // 先頭のTriangleOffsetは必ず0なので、答えは必ず存在する
+    uint low = 0u;
+    uint high = meshInfo.MeshletCount - 1u;
+    while (low < high)
+    {
+        // 上側へ寄せた中点。(low+high)/2 だと low==high-1 のときに mid==low となり、
+        // 条件が真の場合に low が動かず無限ループになる
+        const uint mid = (low + high + 1u) / 2u;
+        if (RTMeshletTriangleOffsets[meshInfo.MeshletOffset + mid] <= primitiveIndex)
+        {
+            low = mid;
+        }
+        else
+        {
+            high = mid - 1u;
+        }
+    }
+    return low;
 }
 
 // 遮蔽レイを1本撃ち、何かに当たれば true を返す。何に当たったかは問わないので

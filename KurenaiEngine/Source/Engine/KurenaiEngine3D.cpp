@@ -942,7 +942,10 @@ namespace Kurenai
         struct alignas(16) RTReflectionConstants
         {
             DirectX::XMFLOAT4 Params0; // xy: 出力サイズ(ピクセル), z: 最大レイ距離, w: ラフネスカットオフ
-            DirectX::XMFLOAT4 Params1; // x: 影レイを撃つか(1で撃つ), yzw: 未使用
+            // x: 影レイを撃つか(1で撃つ)
+            // y: メッシュレットのデバッグ表示(1で、反射に映る面をメッシュレット色で塗る)
+            // zw: 未使用
+            DirectX::XMFLOAT4 Params1;
         };
 
         // RTShadow.hlsl側のcbuffer RTShadowConstantsと一致させる必要がある
@@ -2189,8 +2192,10 @@ namespace Kurenai
         }
 
         // メッシュレットが焼かれていない(--no-meshletsでパックされた.kmodel)、
-        // またはデバイスが非対応でGPUバッファを作っていない場合は0になる
-        if (mesh.MeshletCount == 0)
+        // またはデバイスが非対応でGPUバッファを作っていない場合はnullptrになる。
+        // 【MeshletCountで判定しないこと】あちらはアセットが持つ数そのもので、
+        // メッシュシェーダー非対応の環境でも(レイトレーシングが使うため)0にはならない
+        if (!mesh.MeshletBuffer)
         {
             return false;
         }
@@ -6073,6 +6078,15 @@ namespace Kurenai
                         cmd->SetComputeShaderResourceBuffer(5, m_RaytracingScene.GetMeshInfoBuffer());
                         cmd->SetComputeShaderResourceBuffer(6, m_RaytracingScene.GetInstanceInfoBuffer());
                         cmd->SetComputeShaderResourceBuffer(7, m_RaytracingScene.GetMaterialBuffer());
+                        // メッシュレット表(t9)。RTAO.hlsl自体は引かないが、共有ヘッダーの
+                        // RaytracingScene.hlsliが宣言を持つためバインドしておく。
+                        // メッシュレットを持つメッシュが1つも無いシーンではバッファ自体が無いので
+                        // バインドしない(未バインドのスロットは0を返す。RTMeshInfo::MeshletCountも
+                        // 0になっているため、シェーダーがここを引くことはない)
+                        if (RHI::IRHIBuffer* meshletBuffer = m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
+                        {
+                            cmd->SetComputeShaderResourceBuffer(9, meshletBuffer);
+                        }
                         cmd->SetComputeTexture(8, m_DirectLightTexture.get());
 
                         // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
@@ -6572,7 +6586,15 @@ namespace Kurenai
                         static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight),
                         m_RTReflectionMaxDistance, m_RTReflectionRoughnessCutoff
                     };
-                    rtConstants.Params1 = { m_RTReflectionShadowRayEnabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+                    // yはメッシュレットのデバッグ表示。ラスタ側と同じトグルで駆動するので、
+                    // 有効にすると「直接見えている面」と「反射に映る面」の両方が
+                    // メッシュレット色になり、同じ塊が同じ色かを見比べられる
+                    rtConstants.Params1 = {
+                        m_RTReflectionShadowRayEnabled ? 1.0f : 0.0f,
+                        m_MeshletDebugViewEnabled ? 1.0f : 0.0f,
+                        0.0f,
+                        0.0f,
+                    };
                     cmd->UpdateBuffer(m_RTReflectionConstantBuffer.get(), &rtConstants, sizeof(rtConstants));
 
                     cmd->SetComputePipelineState(m_RTReflectionPipelineState.get());
@@ -6596,6 +6618,13 @@ namespace Kurenai
                     cmd->SetComputeShaderResourceBuffer(13, m_RaytracingScene.GetMeshInfoBuffer());
                     cmd->SetComputeShaderResourceBuffer(14, m_RaytracingScene.GetInstanceInfoBuffer());
                     cmd->SetComputeShaderResourceBuffer(15, m_RaytracingScene.GetMaterialBuffer());
+                    // メッシュレット表(t8)。RTReflection.hlslのKURENAI_RT_MESHLET_REGISTERと
+                    // 一致させること。デバッグ表示でヒット面のメッシュレットを引くのに使う。
+                    // 無いシーンでバインドしない理由はRTAO側と同じ
+                    if (RHI::IRHIBuffer* meshletBuffer = m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
+                    {
+                        cmd->SetComputeShaderResourceBuffer(8, meshletBuffer);
+                    }
                     // bent normal(34章)。t0〜t15が埋まっているためt16。
                     // SSR.hlslと同じくスペキュラ遮蔽の方向依存を再現するために要る
                     cmd->SetComputeTexture(16, m_GBufferBentNormal.get());

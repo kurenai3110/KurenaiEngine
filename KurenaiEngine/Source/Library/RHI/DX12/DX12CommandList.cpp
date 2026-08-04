@@ -520,6 +520,14 @@ namespace Kurenai::RHI
             return;
         }
 
+        // nullptrをそのまま進めるとTransitionToでnull参照になる。DX11実装は同じ状況を
+        // ログを残してスキップしているので、挙動を揃える
+        if (!buffer)
+        {
+            Core::Logger::Error("DX12", "SetComputeShaderResourceBuffer: バッファがnullptrのためバインドをスキップします");
+            return;
+        }
+
         // 構造化バッファのSRVはSetComputeTextureのテクスチャSRVと同じディスクリプタテーブルを共有するため、
         // バインド経路もSetComputeTextureと完全に同じにする(コピー元だけ記録しておき、
         // Dispatch直前のFlushPendingComputeWritesでまとめて反映する)

@@ -261,17 +261,8 @@ PSOutput PSMainMeshletDebug(PSInput input)
 {
     PSOutput output = PSMain(input);
 
-    // 番号から色を作る。隣り合うメッシュレットの色が近くならないよう、
-    // 大きめの素数を掛けてからビットを散らす
-    const uint hash = input.MeshletIndex * 2654435761u;
-    const float3 color = float3(
-        float((hash >> 0) & 0xFFu) / 255.0f,
-        float((hash >> 8) & 0xFFu) / 255.0f,
-        float((hash >> 16) & 0xFFu) / 255.0f);
-
-    // 頂点シェーダー経路で描かれたピクセル(メッシュレットを経由していない)は灰色にする。
-    // メッシュレット表示のはずなのに灰色が見えたら、そのメッシュだけ従来経路で
-    // 描かれているということ(メッシュレットが焼かれていない等)が一目で分かる
-    output.Albedo = float4(input.MeshletIndex == kInvalidMeshletIndex ? float3(0.5f, 0.5f, 0.5f) : color, 1.0f);
+    // 色の作り方はMeshlet.hlsliに集約してある(レイトレーシング側と同じ色でなければ
+    // 見比べる意味が無いため)。頂点シェーダー経路で描かれたピクセルは灰色になる
+    output.Albedo = float4(MeshletDebugColor(input.MeshletIndex), 1.0f);
     return output;
 }
