@@ -139,7 +139,15 @@ float4 PSMain(PSInput input) : SV_TARGET
     const float core = pow(falloff, kCoreExponent);
     const float glow = halo + core * kCoreWeight;
 
-    // 【アルファを1.0にすること】BlendMode::Additiveは src.rgb * src.a + dst.rgb なので、
-    // アルファに減衰を入れると二重に掛かる。減衰はrgb側で済ませてある
-    return float4(input.Color * glow, 1.0f);
+    // 【アルファを0にすること】PSOはBlendMode::PremultipliedAlpha
+    // (src.rgb + dst.rgb * (1 - src.a) / src.a + dst.a * (1 - src.a))で作ってある。
+    // ここで0を返すと rgb は素の加算合成、アルファは書き込み先の値が据え置かれる。
+    // 減衰はrgb側で済ませてあるのでアルファに入れる必要は無い。
+    //
+    // 【アルファを書いてはいけない理由】平面反射(m_PlanarReflectionColor)のアルファは
+    // 「そのテクセルにジオメトリが描かれたか」のカバレッジで、SSR.hlslのApplyPlanarReflectionが
+    // それを使って水面の解析空と混ぜている。発光点は光を足すだけで背景を遮らないので、
+    // ここでカバレッジを主張すると機体の円の内側から空の映り込みが消え、
+    // glowがほぼ0の外周が黒い円として抜ける
+    return float4(input.Color * glow, 0.0f);
 }

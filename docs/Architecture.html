@@ -10376,6 +10376,7 @@ HLSLのローカル構造体は代入していないメンバの値が未定義�
 比率を上げるほど芯が暗くなる。実測(画面全体の平均輝度): <code>Strength=0.5</code>で5.90、
 ブルーム無効で12.13 &mdash;&mdash; 半分以下に暗くなっていた。0.15前後が妥当</li>
 <li><strong>夜は表示できる明るさに上限がある(fp16の飽和)</strong> &mdash;&mdash; 下記38.8参照</li>
+<li><strong>加算合成の発光点は平面反射でカバレッジを書いてはいけない</strong> &mdash;&mdash; 下記38.9参照</li>
 <li><strong>昼のシーンへの影響が無いことの確認方法</strong> &mdash;&mdash; MontSaintMichelのような
 雲・水面のあるシーンは<strong>同じビルドで2回撮るだけで39%の画素が変わる</strong>(スクロール位相のため)ので、
 A/B比較の土台にならない。<code>[Cloud]Coverage = 0</code>・水面なしの静的なシーンを作ると
@@ -10492,6 +10493,105 @@ SceneColorは<code>R16G16B16A16_Float</code>で<strong>上限は65,504</strong>�
 <p>
 最大値は0.30以上でどれも153で並ぶが、<strong>平均彩度は0.710から0.275へ落ちる</strong>。
 当初の45は表示上限を150倍も超えており、明るさを1段も稼がないまま機体の色だけを失っていた。
+</p>
+
+<h3 id="ch38-9">38.9 水面の映り込みが暗かった問題(解決済み)</h3>
+
+<p>
+編隊は水面に映っているものの、直上の編隊(最大画素値132)に対して映り込みは<strong>34</strong>までしか出ず、
+形は追えるが「光っている」とは見えなかった。原因は独立した2つで、どちらも実測で切り分けた。
+撮影は<code>[DroneShow]Speed = 0</code>で編隊を凍結して行っている(そうしないと形が毎回変わって比較にならない)。
+</p>
+
+<h4>(1) 発光点がカバレッジ(アルファ)を書いていた</h4>
+
+<p>
+平面反射のレンダーターゲットは<strong>アルファを「そのテクセルにジオメトリが描かれたか」</strong>として使う。
+SSRパスの<code>ApplyPlanarReflection</code>が
+<code>解析空 &times; (1 - a) + 平面反射のrgb</code>という形で水面へ合成しており、
+アルファ0のテクセルは解析空へ戻る仕組みである(これは「反射先に何も無い方向で水面が黒く潰れる」問題への対処として
+先に入っていたもの)。
+</p>
+
+<p>
+ところが機体の描画は<code>BlendMode::Additive</code>で、これは
+<code>SrcBlendAlpha = ONE / DestBlendAlpha = ONE</code> &mdash;&mdash;
+つまり<strong>機体を1機描くたびにアルファへ1.0が積まれる</strong>。
+SceneColorではアルファを誰も読まないので実害が無いが、平面反射では
+<strong>クアッドの円の内側が「不透明なジオメトリで覆われた」ことになり、そこだけ空の映り込みが消える</strong>。
+発光の裾(glowがほぼ0の外周)は黒い円として抜け、機体が重なるとアルファは1を超えて
+解析空の係数<code>(1 - a)</code>が負へ振れる(最後の<code>max(&hellip;, 0)</code>で黒へ潰れる)。
+</p>
+
+<p>
+<strong>対処</strong>: PSOを<code>BlendMode::PremultipliedAlpha</code>
+(<code>SrcBlend = ONE / DestBlend = INV_SRC_ALPHA</code>)にし、<code>PSMain</code>が<strong>アルファ0</strong>を返す。
+これで<code>rgb = src + dst</code>(加算合成のまま)・<code>alpha = dst</code>(据え置き)になり、
+「光は足すが背景を遮らない」という発光点の正しい意味になる。RHIへの追加は不要で、
+既存のブレンドモードの組み合わせだけで済む。
+</p>
+
+<h4>(2) IBL強度0.5が鏡の映り込みまで半分にしていた</h4>
+
+<p>
+平面反射はSSRパスで
+<code>SceneColor + (反射の放射輝度 - 環境の放射輝度) &times; SpecularIBLWeight</code>
+として合成される。この<code>SpecularIBLWeight</code>には
+<strong><code>IBLIntensity</code>(既定0.5)が掛かっている</strong> &mdash;&mdash;
+間接光を全体的に抑えるための画作り用の値だが、拡散だけでなく間接鏡面にも一様に効くため、
+<strong>鏡のような水面の映り込みまで0.5倍される</strong>。
+</p>
+
+<p>
+<code>SpecularIBLWeight</code>の中身をシェーダーで差し替えて切り分けた(編隊の反射領域の最大画素値):
+</p>
+
+<table>
+<tr><th>係数</th><th>反射の最大画素値</th></tr>
+<tr><td>そのまま</td><td>43</td></tr>
+<tr><td>スペキュラオクルージョンを外す</td><td>46</td></tr>
+<tr><td>さらにIBL強度0.5を外す(split-sumのみ)</td><td><strong>73</strong></td></tr>
+<tr><td>純粋なSchlickフレネル</td><td>74</td></tr>
+</table>
+
+<p>
+split-sumのBRDF LUTは物理のフレネルを正しく再現できており(73対74)、遮蔽はほとんど効いていない。
+<strong>43との差はまるごと<code>IBLIntensity = 0.5</code>である。</strong>
+つまり1.0が「フレネルどおり」で、0.5は反射を物理より暗くしている側になる
+(<code>EnergyCompareSun</code>/<code>FurnaceTest</code>が検証用に1.0を指定しているのも同じ理由)。
+</p>
+
+<p>
+<strong>対処</strong>: <code>Scenes/DroneShow.kscene</code>で<code>[Scene]IBLIntensity = 1.0</code>を指定する。
+エンジンの既定は動かさない &mdash;&mdash; 0.5は全シーンの画作りに効く値で、
+映り込みが主題のこのシーンだけが物理どおりを必要としているため。
+副作用として間接光の拡散も2倍になり島と水面が少し明るくなるが(島16.2&rarr;21.5)、
+夜のシルエットとしては保たれている。
+</p>
+
+<h4>効果(DX11・DX12とも同値)</h4>
+
+<table>
+<tr><th>状態</th><th>編隊(直上)</th><th>映り込み 最大</th><th>映り込み 平均</th></tr>
+<tr><td>修正前</td><td>132</td><td>34</td><td>7.5</td></tr>
+<tr><td>(1)のみ</td><td>132</td><td>43</td><td>10.4</td></tr>
+<tr><td><strong>(1)+(2)</strong></td><td>132</td><td><strong>73</strong></td><td><strong>18.9</strong></td></tr>
+</table>
+
+<p>
+編隊そのものの明るさ(132)はどちらの修正でも変わらない &mdash;&mdash; 直しているのは水面側だけである。
+</p>
+
+<h4>この作業で分かった罠: 出力フォルダの<code>.kscene</code>は古いままになりうる</h4>
+
+<p>
+最初の計測はすべて<strong>無効だった</strong>。
+<code>Scenes/DroneShow.kscene</code>は<code>Assets\Packed\Scenes\</code>へコピーされ、
+そこから<code>xcopy /D</code>(新しいものだけ)で実行フォルダへ配布される。
+38.8で<code>Brightness</code>を45から0.30へ直した後に<strong>Sample3Dをビルドし直していなかった</strong>ため、
+実行フォルダには<strong>45.0のままの<code>.kscene</code></strong>が残っており、
+起動して見ていた絵も測っていた画素値もすべて旧設定のものだった。
+シェーダやDLLと同じで、<strong>直した先が実際に起動されるフォルダまで届いているかを毎回確かめること</strong>。
 </p>
 
 </section>

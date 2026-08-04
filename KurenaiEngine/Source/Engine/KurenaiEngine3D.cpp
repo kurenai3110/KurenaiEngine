@@ -1351,7 +1351,18 @@ namespace Kurenai
         droneShowPipelineDesc.HasDepthStencil = true;
         droneShowPipelineDesc.DepthWriteEnabled = false;
         droneShowPipelineDesc.ReverseZ = true;
-        droneShowPipelineDesc.BlendMode = RHI::BlendMode::Additive;
+        // 【Additiveではなくこちらを使う理由 ― アルファ(カバレッジ)を書かないため】
+        // Additiveは SrcBlendAlpha=ONE / DestBlendAlpha=ONE なので、機体を描くたびに
+        // レンダーターゲットのアルファへ1.0が積まれる。SceneColorではアルファを誰も読まないので
+        // 実害が無いが、平面反射(m_PlanarReflectionColor)ではアルファが
+        // 「そのテクセルにジオメトリが描かれたか」のカバレッジとして使われており
+        // (SSR.hlslのApplyPlanarReflection)、機体のクアッド全域でカバレッジが1になってしまう。
+        // すると水面はクアッドの円の内側で解析空の映り込みを失い、裾(glowがほぼ0の外周)が
+        // 黒い円として抜ける。機体が重なるとアルファは1を超え、解析空の係数(1-a)が負へ振れる。
+        // PremultipliedAlphaは SrcBlend=ONE / DestBlend=INV_SRC_ALPHA なので、
+        // PSMainがアルファ0を返せば rgb=src+dst(加算合成のまま)・alpha=dst(据え置き)になり、
+        // 「光は足すが遮蔽はしない」という発光点の正しい意味になる
+        droneShowPipelineDesc.BlendMode = RHI::BlendMode::PremultipliedAlpha;
         // 【平面反射用にワインディングを反転したPSOは要らない】
         // メッシュの描画(m_TransparentPipelineStateMirrored等)では鏡映ビュー行列が頂点そのものを
         // 変換するため画面上の巻きが反転するが、このパスのビルボードは
