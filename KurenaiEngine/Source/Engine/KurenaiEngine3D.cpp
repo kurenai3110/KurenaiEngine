@@ -6631,12 +6631,13 @@ namespace Kurenai
                     cmd->SetComputeShaderResourceBuffer(13, m_RaytracingScene.GetMeshInfoBuffer());
                     cmd->SetComputeShaderResourceBuffer(14, m_RaytracingScene.GetInstanceInfoBuffer());
                     cmd->SetComputeShaderResourceBuffer(15, m_RaytracingScene.GetMaterialBuffer());
-                    // メッシュレット表(t8)。RTReflection.hlslのKURENAI_RT_MESHLET_REGISTERと
+                    // メッシュレット表(t17)。RTReflection.hlslのKURENAI_RT_MESHLET_REGISTERと
                     // 一致させること。デバッグ表示でヒット面のメッシュレットを引くのに使う。
-                    // 無いシーンでバインドしない理由はRTAO側と同じ
+                    // 無いシーンでバインドしない理由はRTAO側と同じ。
+                    // t8はプリフィルタ済み鏡面(上の16行目)が使っており空いていない
                     if (RHI::IRHIBuffer* meshletBuffer = m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
                     {
-                        cmd->SetComputeShaderResourceBuffer(8, meshletBuffer);
+                        cmd->SetComputeShaderResourceBuffer(17, meshletBuffer);
                     }
                     // bent normal(34章)。t0〜t15が埋まっているためt16。
                     // SSR.hlslと同じくスペキュラ遮蔽の方向依存を再現するために要る

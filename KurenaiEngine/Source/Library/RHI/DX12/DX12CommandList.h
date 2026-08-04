@@ -122,10 +122,10 @@ namespace Kurenai::RHI
         // CopyDescriptors・ルートテーブルの再バインドを行う。
         // SRVはDX11と同じく上書きするまで維持され、UAVはDX11がDispatch直後に
         // CSSetUnorderedAccessViewsでnullを張るのに合わせてDispatch直後にnullへ戻す
-        // SRVが17あるのはレイトレーシングのパス(RT反射)がTLAS・G-Buffer・シーンジオメトリに加えて
-        // bent normal(t16、34章)を1回のディスパッチで同時に読むため。DX12Device.cpp側の同名の定数
-        // (ルートシグネチャのSRVレンジ幅)と必ず一致させること
-        static constexpr uint32_t kComputeSrvSlotCount = 17;
+        // SRVが18あるのはレイトレーシングのパス(RT反射)がTLAS・G-Buffer・シーンジオメトリに加えて
+        // bent normal(t16、34章)とメッシュレット表(t17、38章)を1回のディスパッチで同時に読むため。
+        // DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)と必ず一致させること
+        static constexpr uint32_t kComputeSrvSlotCount = 18;
         static constexpr uint32_t kComputeUavSlotCount = 4;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeSrvHandles[kComputeSrvSlotCount]{};
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeUavHandles[kComputeUavSlotCount]{};

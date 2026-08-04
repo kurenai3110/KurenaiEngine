@@ -88,12 +88,31 @@ Windows SDKに含まれる`dxcompiler.dll`と`dxil.dll`も同じ仕組みで実�
 ## 必要環境
 
 - Windows 10 / 11
-- Visual Studio 2022 (「C++によるデスクトップ開発」ワークロード、Windows 10 SDK)
+- Visual Studio 2022 (「C++によるデスクトップ開発」ワークロード)
+- Windows SDK **10.0.26100 以降**
 - CMake (Visual Studio付属のもので可)
 - DX12バックエンドのレイトレーシングを使う場合: DXR Tier 1.1 / シェーダーモデル6.5に対応したGPUとドライバ
-- DX12バックエンドのメッシュレット描画を使う場合: メッシュシェーダー Tier 1 / シェーダーモデル6.6に対応したGPUとドライバ。加えて次の2つ:
-  - ビルドに使うWindows SDKが **10.0.19041 以降** であること(`D3D12_FEATURE_D3D12_OPTIONS7`・`ID3D12GraphicsCommandList6`・`d3dx12.h`のメッシュシェーダー用サブオブジェクトがこのバージョンで追加されたため。VS2022付属のSDKはこれを満たします)
-  - 実行ファイルの隣へ配布される`dxcompiler.dll`が **1.6 以降** であること(シェーダーモデル6.6を知らない古いdxcではbindlessが無効になり、メッシュレット描画も選べなくなります)
+- DX12バックエンドのメッシュレット描画を使う場合: メッシュシェーダー Tier 1 / シェーダーモデル6.6に対応したGPUとドライバ
+
+各`.vcxproj`は`<WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>`
+(＝インストール済みの最新SDK)を指定しているため、SDKを入れれば設定の変更は要りません。
+
+**10.0.26100を要求する理由はdxcのバージョンです。**
+実行ファイルの隣へ配布される`dxcompiler.dll`はWindows SDKの`bin\<SDKバージョン>\x64`から
+コピーされる(上記のPostBuildEvent)ため、SDKのバージョンがそのままdxcのバージョンになります。
+シェーダーモデル6.6を知らないdxcではbindlessが無効になり、
+bindlessでジオメトリを引くメッシュレット描画も連動して選べなくなります。
+
+| Windows SDK | 同梱されるdxc | SM 6.6 (bindless / メッシュレット) |
+| --- | --- | --- |
+| 10.0.19041 | 1.5 (`10.0.19041.685`) | 使えない |
+| 10.0.26100 | 1.8 (`1.8.2502.11`) | 使える |
+
+なお**コンパイルだけ**なら10.0.19041でも通ります
+(`D3D12_FEATURE_D3D12_OPTIONS7`・`ID3D12GraphicsCommandList6`・`d3dx12.h`のメッシュシェーダー用
+サブオブジェクトはこのバージョンで揃っており、10.0.20348で追加された
+`D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED`はエンジン側で値を持っています)。
+ただし上記のとおりdxcが1.5どまりなので、起動してもメッシュレット描画とbindlessは無効のままです。
 
 ## セットアップ手順
 

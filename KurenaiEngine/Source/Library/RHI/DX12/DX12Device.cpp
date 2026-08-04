@@ -70,9 +70,10 @@ namespace Kurenai::RHI
         // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t16, u0〜u3)。
         // SRVが17必要なのはレイトレーシングのパス(RT反射)で、TLAS + G-Buffer(Albedo/Normal/Material/Depth) +
         // SceneColor + スカイボックス + シーンジオメトリ4本(頂点属性・インデックス・メッシュ情報・
-        // マテリアル) + インスタンス情報 + bent normal(t16、34章) を1回のディスパッチで同時に読むため。
+        // マテリアル) + インスタンス情報 + bent normal(t16、34章) + メッシュレット表(t17、38章)
+        // を1回のディスパッチで同時に読むため。
         // DX12CommandList.h側の同名の定数と必ず一致させること
-        constexpr uint32_t kComputeSrvSlotCount = 17;
+        constexpr uint32_t kComputeSrvSlotCount = 18;
         constexpr uint32_t kComputeUavSlotCount = 4;
         constexpr uint32_t kComputeTableSlotCount = kComputeSrvSlotCount + kComputeUavSlotCount;
         // 1フレームあたりに払い出せるコンピュートSRV+UAVテーブルブロックの最大数(Dispatch呼び出し回数の上限)。
@@ -102,6 +103,23 @@ namespace Kurenai::RHI
         // シェーダ可視CBV_SRV_UAVヒープの上限はTier 1でも1,000,000ディスクリプタあり、
         // 8192程度は問題にならない
         constexpr uint32_t kBindlessDescriptorCapacity = 8192;
+
+        // シェーダーがResourceDescriptorHeapでヒープを直接添字することを許可するルートシグネチャの
+        // フラグ(D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)。
+        //
+        // 【自前で持つ理由】この列挙子はWindows SDK 10.0.20348で追加されたもので、
+        // それ以前の10.0.19041のd3d12.hには無い。
+        // このリポジトリは10.0.26100以降を前提にしている(READMEの必要環境を参照。
+        // SM 6.6を吐けるdxcもSDKに同梱される1.8系が要る)ため通常は列挙子を使えるが、
+        // ここを列挙子に置き換えると、古いSDKしか無い環境ではDX12以外も含めて
+        // ライブラリ全体がコンパイルすら通らなくなる。
+        // bindless非対応環境ではこのフラグを立てずに従来どおり動く縮退を用意してあるのに、
+        // ビルドできないのでは縮退が働く前に詰んでしまう。
+        //
+        // 値0x400はD3D12のABIとして固定で、10.0.26100のd3d12.hでも同じ値が入っていることを確認済み。
+        // SDKの列挙子と名前が衝突しないよう、エンジン側の命名で持つ
+        constexpr D3D12_ROOT_SIGNATURE_FLAGS kRootSignatureFlagCbvSrvUavHeapDirectlyIndexed =
+            static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(0x400);
 
         // RHIのBlendModeをD3D12のレンダーターゲットブレンド設定へ写す。
         // 通常のグラフィックスPSOとメッシュシェーダーPSOの両方から使う
@@ -434,7 +452,7 @@ namespace Kurenai::RHI
         // bindlessが使えない環境でも起動できるよう、判定結果を見てから立てる。
         // SAMPLER_HEAP_DIRECTLY_INDEXEDは使っていない(サンプラーは従来どおり
         // s0〜s3の固定スロットで足りており、動的に選びたい場面が無いため)
-        return m_SupportsBindless ? D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED
+        return m_SupportsBindless ? kRootSignatureFlagCbvSrvUavHeapDirectlyIndexed
                                   : D3D12_ROOT_SIGNATURE_FLAG_NONE;
     }
 

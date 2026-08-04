@@ -127,8 +127,11 @@ Texture2D BentNormalTexture : register(t16);
 #define KURENAI_RT_MESHINFO_REGISTER t13
 #define KURENAI_RT_INSTANCEINFO_REGISTER t14
 #define KURENAI_RT_MATERIAL_REGISTER t15
-// t8〜t10はこのシェーダーでは空いている
-#define KURENAI_RT_MESHLET_REGISTER t8
+// メッシュレット表。t8〜t10はReflectionProbe.hlsliが、t16はbent normalが使っているため、
+// このシェーダーで空いているのはt17が最初。
+// これに合わせてDX12のkComputeSrvSlotCountを17→18へ上げてある。
+// KurenaiEngine3D.cppのRT反射パスのバインド(スロット17)と一致させること
+#define KURENAI_RT_MESHLET_REGISTER t17
 #include "RaytracingScene.hlsli"
 
 RWTexture2D<float4> OutputTexture : register(u0);

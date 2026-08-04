@@ -126,8 +126,16 @@ float ProbeBoxExitDistance(GPUReflectionProbe probe, float3 worldPos, float3 R)
     const float3 localR = WorldToProbeLocal(R, sinYaw, cosYaw);
 
     // 軸に平行な成分は対応する面と交差しない。0除算のinfをそのまま使うと後段のmaxで0*inf=NaNに
-    // なり得るため、符号を保ったまま絶対値に下限を与えてから逆数を取る
-    const float3 safeR = max(abs(localR), 1e-5f) * ((localR < 0.0f) ? -1.0f : 1.0f);
+    // なり得るため、符号を保ったまま絶対値に下限を与えてから逆数を取る。
+    //
+    // 符号の取り出しに三項演算子(localR < 0.0f ? -1.0f : 1.0f)を使ってはいけない。
+    // HLSL 2021(dxc 1.7以降の既定)では短絡評価する三項演算子の条件がスカラーに限定され、
+    // bool3を渡すとerrorになる。HLSL 2021のselect()は逆に古いdxcで通らないため、
+    // どちらの言語バージョンでも同じ意味になるstepで書く。
+    // step(0, x)はx >= 0で1、それ以外で0。-0.0fも>= 0.0fが真になるので三項演算子版と一致する。
+    // sign()は0のとき0を返し安全下限1e-5fが消えてinfに戻ってしまうので使えない
+    const float3 signR = 2.0f * step(0.0f, localR) - 1.0f;
+    const float3 safeR = max(abs(localR), 1e-5f) * signR;
     const float3 invR = 1.0f / safeR;
     const float3 planeNegative = (-probe.BoxExtents.xyz - localPos) * invR;
     const float3 planePositive = (probe.BoxExtents.xyz - localPos) * invR;
