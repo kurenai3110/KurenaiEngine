@@ -1029,7 +1029,15 @@ CHURCH_APSE_CENTER_X = CROSSING_CENTER_X + 10.0  # =35.0
 # 修正(参考写真c_abbey_south_closeup.jpgの内陣を拡大して実測): 実物の内陣は、外側に立つ
 # 控え柱の上の細長い小尖塔が屋根の棟より4〜5m高く突き出し、空に対して棘状の縁を作っている。
 # 旧値では柱の天端が102m・小尖塔の先端が105mで、内陣の棟(109m)より4m低く完全に隠れていた。
-FLYING_BUTTRESS_COUNT = 9             # 写真の密な林立に合わせて7→9
+# 【本数を増やしても見える本数が増えなかった理由】飛梁は後陣の半円に沿って
+# angle = -90°〜+90° を u=(i+0.5)/N で等分して置いている。この並びは angle=0(真東)に対して
+# **対称**なので、真南から見ると北半分の柱が南半分の柱の真後ろに重なり、
+# 画面上の相異なるX位置は N の半分しか出ない。9本置いても稜線の突起は5本しか立たない
+# (材質IDレンダで実測。写真の同じ区間は9本)。
+# 実物の飛梁も左右対称なので重なること自体は正しく、密度を上げるには本数を増やすしかない。
+# 15本にすると相異なるXは8つ(X=36.7〜51.0m、間隔約1.8m)になり、
+# 参考写真c_abbey_south_closeup.jpgの林立(約25mに12本前後=間隔2m)とほぼ同じ密度になる
+FLYING_BUTTRESS_COUNT = 15
 FLYING_BUTTRESS_PIER_HEIGHT = 14.0    # 柱の天端=CHURCH_FLOOR_Y+14=106m
 FLYING_BUTTRESS_PIER_THICKNESS = 1.0
 FLYING_BUTTRESS_PIER_OFFSET = 5.0
@@ -1044,13 +1052,28 @@ FLYING_BUTTRESS_BEAM_PIER_DROP = 8.0  # 柱側の取り付き=106-8=98m(壁側10
 # 接続部)付近を避け、-60°〜+60°の範囲に均等配置する
 APSE_WINDOW_COUNT = 5
 
-# タスク3: 後陣の壁上端(曲面部)に沿って並べる小尖塔の本数(出典なしの決め値)
-APSE_PINNACLE_COUNT = 7
+# タスク3: 後陣の壁上端(曲面部)に沿って並べる小尖塔の本数(出典なしの決め値)。
+# 飛梁と同じ理由(FLYING_BUTTRESS_COUNTのコメント参照)で真南からは半分しか見えないので、
+# 飛梁に合わせて増やす。半径11mに11本なら弧の間隔3.14mで、基部1.0mとは干渉しない
+APSE_PINNACLE_COUNT = 11
+# 飛梁の環(半径16m)と後陣の壁の環(半径11m)は、どちらも同じ角度の刻み方をしているため、
+# 画面上のX位置が近い場所へ重なって「2重の同じ列」に見えてしまう。
+# 壁側だけ半区間ずらして、投影したときに飛梁の小尖塔のあいだへ入るようにする
+APSE_PINNACLE_ANGLE_STAGGER = 0.5
 # 内陣専用の小尖塔の寸法。既定のPINNACLE_*(1.2×3.0m)はラ・メルヴェイユの控え壁の上でも
 # 使っており、そちらは実物も小さいので変えない。内陣のゴシックの小尖塔だけ細く高くする。
 # 柱の天端106m+7.0=113mとなり、内陣の棟(109m)より4m高く突き出て写真と一致する
 APSE_PINNACLE_BASE_SIZE = 1.0
 APSE_PINNACLE_HEIGHT = 7.0
+# 小尖塔の高さを、後陣の先端(東)へ向かってどれだけ落とすか。
+# 【なぜ要るか】柱の高さが全部同じだと小尖塔の先端も一直線に並び、遠景では
+# **同じ長さの棒が等間隔に並んだ櫛**に見える(spikes_eng.pngで確認)。
+# 参考写真c_abbey_south_closeup.jpgの林立は、交差部に近い西側がいちばん高く、
+# 後陣の先端へ向かって段々に下がっていく。写真で実測すると、西端の小尖塔の先端が
+# 天端から約8.5m、東端が約4mで、比はおよそ0.47。
+# 高さは APSE_PINNACLE_HEIGHT * (1 - TAPER * cos(angle)) で与える
+# (angle=0が後陣の先端=東、angle=±90°が交差部側=西)
+APSE_PINNACLE_EAST_TAPER = 0.53
 
 # --- ラ・メルヴェイユ。高さ40m・3階建て(出典: fr.wikipedia)。史実どおり教会の北側
 # (+Z方向、翼廊の北端に接続)へ配置する(fr.wikipediaの記述とも一致)。カメラは島の南
@@ -1222,6 +1245,40 @@ BELFRY_TURRET_EMBED = 3.0      # 鐘楼本体に埋め込む量(接続を自然�
 BELFRY_TURRET_ROOF_HEIGHT = 1.5
 BELFRY_WINDOW_FACE_COUNT = 4    # 窓を付ける面数(BELFRY_SIDES=4なので4面すべて)
 
+# --- 鐘楼のアーチ列(ロマネスクの鐘楼で最も目を引く部分)---
+# 旧実装は1面あたり窓1つ(WINDOW_WIDTH=1.5×WINDOW_HEIGHT=5.0)で、遠景の並置
+# (zoom_belfry.png)では塔の胴が「細い黒い切れ込みが1本あるだけの無地の塊」に見えていた。
+# 参考写真では胴に3連のアーチ開口が並び、その下にもう1段2つの小さい開口がある。
+#
+# 寸法は c_abbey_south_closeup.jpg を6倍に拡大して実測した(belfry_arcade_ref.png)。
+# 尺度は既存の実測と同じ 0.1154m/px(BELFRY_HALF_WIDTHのコメント参照)で、
+# 塔の左右の縁 x=631/751px(=13.85m。既実測の13.3mと1画素以内で一致)を基準にした:
+#   上段の開口 幅  10.8px → 1.25m  高さ 46.7px → 5.39m  中心間隔 26.7px → 3.08m
+#   上段の頭は天端(コーニス y=364px)から 21px → 2.4m 下
+#   下段の開口 幅   8.3px → 0.96m  中心間隔 58.3px → 6.7m  頭は天端から 101px → 11.65m 下
+# 下段は実物では手前の屋根に切られて下端が見えないため、高さは出典なしの決め値(3.5m)。
+#
+# 【入るかどうかを先に確かめた】胴の高さは BELFRY_TOP_Y(126.70) - 身廊の棟
+# (CHURCH_FLOOR_Y+NAVE_WALL_HEIGHT+NAVE_ROOF_HEIGHT=110.0) = 16.7m ある。
+# 上段の敷居は118.9m、下段の敷居は111.55mで、どちらも胴に収まる
+# (build_belfry内のコメントに「高さは5.7mしかない」とあるのは身廊を下げる前の古い記述)
+BELFRY_ARCADE_COUNT = 3
+BELFRY_ARCADE_WIDTH = 1.25
+BELFRY_ARCADE_HEIGHT = 5.39
+BELFRY_ARCADE_SPACING = 3.08
+BELFRY_ARCADE_HEAD_BELOW_TOP = 2.4     # 天端から開口の頭までの下がり
+BELFRY_LOWER_ARCADE_COUNT = 2
+BELFRY_LOWER_ARCADE_WIDTH = 0.96
+BELFRY_LOWER_ARCADE_HEIGHT = 3.5       # 出典なしの決め値(実物は手前の屋根に切られて見えない)
+BELFRY_LOWER_ARCADE_SPACING = 6.7
+BELFRY_LOWER_ARCADE_HEAD_BELOW_TOP = 11.65
+# 開口の飛び出し量。既定のWINDOW_PROTRUSION(0.4m)は「壁から飛び出す薄い箱」で窓を
+# 表現するための量だが、アーチ列は**奥まった開口**で、飛び出させると600m先では
+# 明るい縦縞になって逆効果になる(_add_window_to_bmeshのコメントにある過去の指摘と同じ)。
+# 面より内側へ引っ込める向きには作れない実装のため、飛び出しを最小にして、
+# 材質は既定のWindowGlass(0.020,0.022,0.028。全材質で最も暗い)のまま暗さを出す
+BELFRY_ARCADE_PROTRUSION = 0.05
+
 # --- 修道院の垂直基礎構造(教会+ラ・メルヴェイユの平面輪郭を、岩の斜面まで垂直に
 # 落とす花崗岩の壁の塊)。aerial12.jpg/aerial11.jpg/aerial6.jpgのいずれでも、教会は
 # なだらかな岩の頂上台地に直接載っておらず、岩の斜面から垂直な壁が20〜40mにわたって
@@ -1371,10 +1428,12 @@ SPIRE_TOP_Y = BELFRY_TOP_Y + 39.80     # =166.50
 STATUE_TOP_Y = SPIRE_TOP_Y + 3.50      # =170.00
 
 # 鐘楼(八角形の基部)。平面形状・半径は出典なしの決め値。底面は教会・翼廊交差部の屋根の
-# 実際の高さ(NAVE_WALL_HEIGHT+NAVE_ROOF_HEIGHT=29m、y=109。修道院の量塊を実測比に
-# 合わせる対応でNAVE_WALL_HEIGHT 18→24へ変更したため23m→29mに変わった。鐘楼の高さは
-# BELFRY_TOP_Y(114.70)-109=5.7mへ縮むが、build_belfry()内の0以下ガードには掛からない)に
-# 合わせ、隙間なくBELFRY_TOP_Yまで届くようbuild_belfry()内で高さを計算する
+# 実際の高さに合わせ、隙間なくBELFRY_TOP_Yまで届くようbuild_belfry()内で高さを計算する。
+# 【この記述は古かった】以前ここには「NAVE_WALL_HEIGHT+NAVE_ROOF_HEIGHT=29m、鐘楼の胴は
+# 5.7mへ縮む」と書いてあったが、その後NAVE_WALL_HEIGHT/NAVE_ROOF_HEIGHTは10.0/8.0へ
+# 下げられている(NAVE_WALL_HEIGHTのコメント「塔が屋根に埋もれて小さな小塔に見えていた」参照)。
+# 現在の胴の底は CHURCH_FLOOR_Y+18 = 110.0m、胴の高さは 126.70-110.0 = 16.7m ある。
+# アーチ列(BELFRY_ARCADE_*)が入るかどうかはこの値で判断している
 # 【形を写真に合わせる修正】以前は八角柱(BELFRY_SIDES=8、外接円半径6.0)だったが、
 # 参考写真c_abbey_south_closeup.jpg / c_belfry_spire_detail.jpg のどちらでも、実物の
 # 交差部の塔は**正方形**である(平らな面が縦の稜線で交わり、4隅に小塔が立つ)。
@@ -3486,6 +3545,23 @@ def _add_window_wall_to_bmesh(bm, wall_start, along_dir, wall_length, outward_di
             )
 
 
+def _apse_pinnacle_height(angle):
+    """内陣の小尖塔の高さ。後陣の先端(東)へ向かって低くする(APSE_PINNACLE_EAST_TAPER参照)。
+
+    angle: 後陣の中心から見た方位(ラジアン)。0が張り出しの先端(+X=東)、
+    ±π/2が交差部側(西)。
+    """
+    height = APSE_PINNACLE_HEIGHT * (1.0 - APSE_PINNACLE_EAST_TAPER * math.cos(angle))
+    if height <= 0.0:
+        print(
+            f"[ERROR] 内陣の小尖塔の高さが0以下になりました(angle={math.degrees(angle):.1f}度, "
+            f"height={height:.2f}m)。APSE_PINNACLE_EAST_TAPERは1.0未満にしてください",
+            file=sys.stderr,
+        )
+        raise ValueError("内陣の小尖塔の高さが0以下です")
+    return height
+
+
 def _add_pinnacle_to_bmesh(bm, base, size=PINNACLE_BASE_SIZE, height=PINNACLE_HEIGHT):
     """控え壁の上に乗せる小尖塔(四角錐)を1つbmeshへ追加する(承認済み計画の方針。
     石の花などの装飾は600m先では見えないため省略し、単純な四角錐で表現する)。
@@ -3556,12 +3632,15 @@ def _add_apse_to_bmesh(bm, center_x, center_z, radius, base_y, wall_height, roof
     # (_add_pinnacle_to_bmeshはマテリアルを自分でタグ付けしないため)
     first_pinnacle_face = len(bm.faces)
     for i in range(APSE_PINNACLE_COUNT):
-        u = (i + 0.5) / APSE_PINNACLE_COUNT
+        # 飛梁の列と投影が重ならないよう半区間ずらす(APSE_PINNACLE_ANGLE_STAGGER参照)。
+        # 端をはみ出さないよう、ずらしたあとの u は 0〜1 に収める
+        u = min(max((i + 0.5 + APSE_PINNACLE_ANGLE_STAGGER) / APSE_PINNACLE_COUNT, 0.0), 1.0)
         angle = -half_pi + math.pi * u
         x = center_x + radius * math.cos(angle)
         z = center_z + radius * math.sin(angle)
         _add_pinnacle_to_bmesh(bm, base=(x, base_y + wall_height, z),
-                               size=APSE_PINNACLE_BASE_SIZE, height=APSE_PINNACLE_HEIGHT)
+                               size=APSE_PINNACLE_BASE_SIZE,
+                               height=_apse_pinnacle_height(angle))
     _tag_new_faces(bm, first_pinnacle_face, "Masonry")
 
 
@@ -3619,9 +3698,11 @@ def _add_flying_buttresses_to_bmesh(bm, center_x, center_z, base_y):
                 pier_x - half_beam * tan_x, beam_pier_y, pier_z - half_beam * tan_z))
             bm.faces.new((wall_left, wall_right, pier_right, pier_left))
 
-            # 柱の天端に細く高い小尖塔を乗せる(内陣専用の寸法。APSE_PINNACLE_*参照)
+            # 柱の天端に細く高い小尖塔を乗せる(内陣専用の寸法。APSE_PINNACLE_*参照)。
+            # 高さは後陣の先端(東)へ向かって落とす(APSE_PINNACLE_EAST_TAPER参照)
             _add_pinnacle_to_bmesh(bm, base=(pier_x, pier_top_y, pier_z),
-                                   size=APSE_PINNACLE_BASE_SIZE, height=APSE_PINNACLE_HEIGHT)
+                                   size=APSE_PINNACLE_BASE_SIZE,
+                                   height=_apse_pinnacle_height(angle))
             # 柱・斜めの薄い板・ピナクルはいずれもMasonry(_add_flat_box_to_bmeshの柱は
             # 既定でMasonryだが、薄い板・ピナクルにはマテリアル引数が無いため一括で上書きする)
             _tag_new_faces(bm, first_buttress_face, "Masonry")
@@ -4725,24 +4806,54 @@ def build_belfry():
         # 小塔の円錐屋根は既定でSlateRoofになるため、ここでは本体のみタグ付けする)
         _tag_new_faces(bm, 0, "Masonry")
 
-        # 窓: BELFRY_WINDOW_FACE_COUNT面(等間隔)に配置する。BELFRY_SIDES=4なので
-        # 4面すべてに1つずつ入る(実物は面あたり3連のアーチ窓だが、600m先では影絵に
-        # 出ないため1つで代表させる)
+        # アーチ列: BELFRY_WINDOW_FACE_COUNT面(等間隔)に配置する。BELFRY_SIDES=4なので
+        # 4面すべてに入る。実物どおり上段3連・下段2つの2段構成にする(BELFRY_ARCADE_*参照)。
+        # 【旧実装】面あたり1つだけで「600m先では影絵に出ないため1つで代表させる」と
+        # していたが、実際に撮って測ると開口1つ(幅1.5m)は描かれている。3連の間隔3.08mは
+        # 内部解像度で約4.5画素あり、分離して見える
         apothem = BELFRY_HALF_WIDTH  # 面の中心までの距離(=対面幅の半分)
-        window_base_y = base_y + height * 0.35
-        for k in range(BELFRY_WINDOW_FACE_COUNT):
-            i = (k * BELFRY_SIDES) // BELFRY_WINDOW_FACE_COUNT
-            # 面i(頂点iとi+1の間)の中心角。頂点をBELFRY_CORNER_ANGLE_OFFSETだけ回して
-            # いるので、面の中心はちょうど 2πi/BELFRY_SIDES(=±X・±Z)になる
-            angle = BELFRY_CORNER_ANGLE_OFFSET + (i + 0.5) * 2.0 * math.pi / BELFRY_SIDES
-            outward_x, outward_z = math.cos(angle), math.sin(angle)
-            along_x, along_z = -math.sin(angle), math.cos(angle)
-            window_x = CROSSING_CENTER_X + apothem * outward_x
-            window_z = CROSSING_CENTER_Z + apothem * outward_z
-            _add_window_to_bmesh(
-                bm, base=(window_x, window_base_y, window_z),
-                along_dir=(along_x, 0.0, along_z), outward_dir=(outward_x, 0.0, outward_z),
-            )
+        arcade_stages = (
+            (BELFRY_ARCADE_COUNT, BELFRY_ARCADE_WIDTH, BELFRY_ARCADE_HEIGHT,
+             BELFRY_ARCADE_SPACING, BELFRY_ARCADE_HEAD_BELOW_TOP),
+            (BELFRY_LOWER_ARCADE_COUNT, BELFRY_LOWER_ARCADE_WIDTH, BELFRY_LOWER_ARCADE_HEIGHT,
+             BELFRY_LOWER_ARCADE_SPACING, BELFRY_LOWER_ARCADE_HEAD_BELOW_TOP),
+        )
+        for count, opening_width, opening_height, spacing, head_below_top in arcade_stages:
+            sill_y = BELFRY_TOP_Y - head_below_top - opening_height
+            if sill_y < base_y:
+                print(
+                    f"[ERROR] 鐘楼のアーチ列の敷居({sill_y:.2f}m)が胴の底({base_y:.2f}m)より"
+                    f"下にあります。BELFRY_ARCADE_*/身廊の高さを見直してください",
+                    file=sys.stderr,
+                )
+                raise ValueError("鐘楼のアーチ列が胴に収まりません")
+            if (count - 1) * spacing + opening_width > BELFRY_HALF_WIDTH * 2.0:
+                print(
+                    f"[ERROR] 鐘楼のアーチ列({count}連・間隔{spacing}m)が面の幅"
+                    f"({BELFRY_HALF_WIDTH * 2.0}m)に収まりません",
+                    file=sys.stderr,
+                )
+                raise ValueError("鐘楼のアーチ列が面幅に収まりません")
+
+            for k in range(BELFRY_WINDOW_FACE_COUNT):
+                i = (k * BELFRY_SIDES) // BELFRY_WINDOW_FACE_COUNT
+                # 面i(頂点iとi+1の間)の中心角。頂点をBELFRY_CORNER_ANGLE_OFFSETだけ回して
+                # いるので、面の中心はちょうど 2πi/BELFRY_SIDES(=±X・±Z)になる
+                angle = BELFRY_CORNER_ANGLE_OFFSET + (i + 0.5) * 2.0 * math.pi / BELFRY_SIDES
+                outward_x, outward_z = math.cos(angle), math.sin(angle)
+                along_x, along_z = -math.sin(angle), math.cos(angle)
+                face_x = CROSSING_CENTER_X + apothem * outward_x
+                face_z = CROSSING_CENTER_Z + apothem * outward_z
+                for j in range(count):
+                    # 面の中心を挟んで左右対称に並べる
+                    offset = (j - (count - 1) * 0.5) * spacing
+                    _add_window_to_bmesh(
+                        bm, base=(face_x + along_x * offset, sill_y, face_z + along_z * offset),
+                        along_dir=(along_x, 0.0, along_z),
+                        outward_dir=(outward_x, 0.0, outward_z),
+                        width=opening_width, height=opening_height,
+                        protrusion=BELFRY_ARCADE_PROTRUSION,
+                    )
 
         # 小塔: **すべての隅**に1本ずつ立てる。参考写真c_belfry_spire_detail.jpgでは
         # 正方形の塔の4隅すべてに小塔がある。
