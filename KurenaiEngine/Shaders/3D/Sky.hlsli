@@ -198,6 +198,21 @@ struct SkyParameters
     float  FogRefHeight;       // 基準高度[m](ワールドY。FogParams0.z)
     float  FogViewerHeight;    // 視点のワールドY。雲底高度がカメラ基準の相対値なので、
                                 // 絶対高度へ戻して消散係数を評価するために要る
+
+    // --- 星空 ---
+    // 【SkyColorでしか使わない】星は背景と水面の映り込みにだけ描き、IBLキューブ
+    // (SkyGenerate.hlsl)とフォグのin-scatter(AerialPerspective.hlsl)へは入れない。
+    // それらのMakeSkyParametersはStarsIntensityに0を入れること。
+    // 理由: キューブは256px/面しかなく点光源を焼くとエイリアシングし、
+    // プリフィルタ後の鏡面反射でファイアフライになる。星明かりの「照明」としての寄与は
+    // KurenaiEngine3D.cppのkStarlightIlluminanceLuxが一様な下限として既にモデル化済みで、
+    // ここは見た目だけを足す担当
+    float  StarsIntensity;     // 0で完全に無効(1命令も足さない)。昼はCPU側で0になる
+    float  StarsDensity;       // 天球を分割するセルの細かさ。1セルにつき星1個
+    float  StarsTwinkle;       // またたきの強さ。0で無効
+    float  StarsTime;          // またたきの位相に使う時刻[秒]
+    float  StarsPixelAngle;    // 1画素が張る角度[rad]。星がこれを下回らないようにして、
+                                // サブピクセルのちらつきを防ぐ
 };
 
 // SkyParametersの雲用フォグフィールドを埋めるヘルパ。5つあるMakeSkyParametersが
@@ -219,6 +234,19 @@ SkyParameters ApplyCloudFogParameters(SkyParameters params, float4 fogParams0, f
     params.FogScaleHeight = fogParams0.y;
     params.FogRefHeight = fogParams0.z;
     params.FogViewerHeight = viewerHeight;
+
+    // 【星空は既定で無効にする】この5行はフォグとは無関係だが、あえてここへ置いている。
+    // HLSLのローカル構造体は代入していないメンバの値が未定義で、5つあるMakeSkyParametersの
+    // どれか1つが星のフィールドを埋め忘れると、そのシェーダーはゴミの強度で星を描き始める
+    // (IBLキューブへ点光源が焼き込まれ、鏡面反射のファイアフライという分かりにくい形で出る)。
+    // このヘルパは5つ全員が必ず通るので、ここで0にしておけば「明示的に有効化した
+    // シェーダーだけが星を描く」という安全側の既定になる。
+    // 星を出すシェーダー(DeferredLighting.hlsl / SSR.hlsl)は、この呼び出しの**後**で上書きすること
+    params.StarsIntensity = 0.0f;
+    params.StarsDensity = 0.0f;
+    params.StarsTwinkle = 0.0f;
+    params.StarsTime = 0.0f;
+    params.StarsPixelAngle = 0.0f;
     return params;
 }
 
@@ -1213,11 +1241,137 @@ void EvaluateCloudLayer(
     scatteredLight *= fade;
 }
 
+// ============================================================================
+// 星空
+//
+// 視線方向を立方体の面へ射影してセル格子へ量子化し、1セルにつき星を1つ、セル内の
+// 決定的な位置へ置く。テクスチャを使わないのは背景が画面解像度で解析評価される経路
+// (DeferredLighting.hlslのSkyParams.y=1)に乗せるためで、こうすると星が拡大されず
+// 常にシャープに出る。
+//
+// 【なぜSkyColorUpperUnitではなくSkyColorへ足すのか】SkyColorUpperUnitの結果は
+// SkyIntegrate.hlslが積分して天頂輝度(=夜空の露出校正)を逆算する入力になっている
+// (このファイルのSkyColorUpperUnit手前の【重要】コメント参照)。そちらへ星を混ぜると
+// 校正値そのものが動き、星の有無で夜空全体の明るさが変わってしまう。
+// 星は「校正済みの空の色へ後から足す発光体」として扱うのが正しい
+// ============================================================================
+
+// セル座標から決定的な擬似乱数を3つ作る
+float3 StarHash3(float2 cell, float faceId)
+{
+    float3 p = float3(cell, faceId);
+    p = frac(p * float3(0.1031f, 0.1030f, 0.0973f));
+    p += dot(p, p.yzx + 33.33f);
+    return frac((p.xxy + p.yzz) * p.zyx);
+}
+
+float3 EvaluateStarfield(float3 dir, SkyParameters params)
+{
+    // 【昼と無効時はここで抜ける】判断C(雲が無いときP4完了時点と画素まで一致する)と
+    // 同じ考え方で、効かない条件では掛け算・足し算を1つも増やさない
+    if (params.StarsIntensity <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    // 地平線際は大気の消散が効いて実際に星が見えなくなるので落とす。
+    // ここで落としておくと、水平線より下へのフェード(SkyColorの後半)との境目も自然につながる
+    const float horizonFade = saturate(dir.y * 6.0f);
+    if (horizonFade <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    // 天球を立方体の6面へ射影する。球面座標(緯度経度)で切ると極で密度が跳ね上がるが、
+    // 立方体面なら面内の歪みが高々√3倍に収まり、密度がおおむね一様になる
+    const float3 a = abs(dir);
+    float2 uv;
+    float faceId;
+    if (a.x >= a.y && a.x >= a.z)      { uv = dir.zy / a.x; faceId = dir.x > 0.0f ? 0.0f : 1.0f; }
+    else if (a.y >= a.z)               { uv = dir.xz / a.y; faceId = dir.y > 0.0f ? 2.0f : 3.0f; }
+    else                               { uv = dir.xy / a.z; faceId = dir.z > 0.0f ? 4.0f : 5.0f; }
+
+    const float density = max(params.StarsDensity, 1.0f);
+    const float2 scaledUv = uv * density;
+    const float2 baseCell = floor(scaledUv);
+
+    // 面のUVは[-1,1]で90度を張るので、1UVあたりおよそ0.785rad。
+    // 星の見かけの半径が1画素を下回るとカメラを回したときにちらつくため、下限を設ける
+    const float uvPerRadian = density / 0.7854f;
+    const float minRadius = max(params.StarsPixelAngle * uvPerRadian * 1.2f, 0.03f);
+
+    float3 result = float3(0.0f, 0.0f, 0.0f);
+
+    // 隣接セルも見る。セル境界に近い星が片側からしか描かれないと、
+    // 格子状の切れ目が空に浮き出てしまう
+    for (int oy = -1; oy <= 1; ++oy)
+    {
+        for (int ox = -1; ox <= 1; ++ox)
+        {
+            const float2 cell = baseCell + float2(ox, oy);
+            const float3 h = StarHash3(cell, faceId);
+
+            // 【全セルに星を置かない】等級分布を作る前に間引く。1セル1個をそのまま全部
+            // 描くと空が均一な砂目になり、星座のような粗密が出ない
+            if (h.z > 0.55f)
+            {
+                continue;
+            }
+
+            // セル内の位置。端に寄りすぎると隣のセルの星と重なるので中央寄りへ詰める
+            const float2 starPos = cell + 0.5f + (h.xy - 0.5f) * 0.7f;
+            const float2 delta = scaledUv - starPos;
+            const float dist = length(delta);
+
+            // 等級分布。h.zを6乗して「暗い星が大多数、明るい星はごくわずか」にする。
+            // 実際の星の等級分布も明るい星ほど指数的に少ない
+            const float brightRandom = h.z / 0.55f;
+            const float magnitude = pow(1.0f - brightRandom, 4.0f);
+
+            // 明るい星ほど大きく見える(実際は目とレンズの滲みによる見かけの効果)
+            const float radius = minRadius * (1.0f + magnitude * 1.5f);
+            if (dist >= radius)
+            {
+                continue;
+            }
+
+            float falloff = saturate(1.0f - dist / radius);
+            falloff = falloff * falloff;
+
+            // 色温度。青白い星から橙色の星まで。h.xを使い回すと位置と色が相関するので
+            // 別の成分(h.y)から作る
+            const float3 warm = float3(1.00f, 0.80f, 0.62f);
+            const float3 cool = float3(0.72f, 0.82f, 1.00f);
+            float3 starColor = lerp(warm, cool, h.y);
+
+            // またたき。既定は0で、その場合この行は結果を変えない
+            if (params.StarsTwinkle > 0.0f)
+            {
+                const float phase = (h.x + h.y) * 6.2831853f;
+                const float flicker = 0.5f + 0.5f * sin(params.StarsTime * 3.0f + phase);
+                starColor *= lerp(1.0f, flicker, params.StarsTwinkle);
+            }
+
+            result += starColor * (falloff * magnitude);
+        }
+    }
+
+    // 天頂輝度を基準にすることで、夜空の明るさが変わっても星との相対関係が保たれる
+    return result * params.StarsIntensity * params.ZenithLuminance * horizonFade;
+}
+
 float3 SkyColor(float3 dir, SkyParameters params)
 {
     if (dir.y >= kGroundFadeStartY)
     {
-        const float3 clearColor = SkyColorUpper(dir, params);
+        // 星は雲より奥にあるので、雲で減光される前のここで足す。
+        // StarsIntensity=0(昼・無効)のときEvaluateStarfieldは即座に0を返し、
+        // 下の加算も分岐で飛ばすので、従来と画素まで一致する
+        float3 clearColor = SkyColorUpper(dir, params);
+        if (params.StarsIntensity > 0.0f)
+        {
+            clearColor += EvaluateStarfield(dir, params);
+        }
 
         // (h) 早期脱出。積雲・巻雲どちらの被覆率も0、または地平線より下(dir.y<=0、(e)節)では
         // 雲の計算を一切行わずclearColorをそのまま返す。判断C(被覆率0のときP4完了時点=雲を

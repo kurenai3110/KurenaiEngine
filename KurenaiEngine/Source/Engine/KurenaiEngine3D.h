@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 
+#include "DroneShow.h"
 #include "EngineDefaults.h"
 #include "KurenaiEngineBase.h"
 #include "KurenaiTypes.h"
@@ -35,6 +36,7 @@ namespace Kurenai::UI
     class SystemPanel;
     class ProfilerPanel;
     class ReflectionProbePanel;
+    class DroneShowPanel;
 }
 
 namespace Kurenai
@@ -101,6 +103,7 @@ namespace Kurenai
         friend class UI::SystemPanel;
         friend class UI::ProfilerPanel;
         friend class UI::ReflectionProbePanel;
+        friend class UI::DroneShowPanel;
 
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
         // スナップショット。m_TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
@@ -475,6 +478,57 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_TransparentPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineStateMirrored;
+
+        // --- ドローンショー(発光点の描画) ---------------------------------------------
+        // 夜空を編隊飛行する多数のドローンを、1機につきカメラ正対のビルボード1枚として
+        // 加算合成で描く。編隊の生成と時間補間はDroneShow.h/.cppが持ち、ここは描画だけを担う。
+        //
+        // 頂点バッファを持たず、Draw(6 * 機体数, 0)とSV_VertexIDでクアッドを展開する
+        // (理由はShaders/3D/DroneShow.hlsl冒頭)。機体データはm_DroneBufferから
+        // 頂点シェーダーが直接読む(SetVertexShaderResourceBuffer)。
+        //
+        // 【PSOは1本でよい】平面反射(鏡映カメラ)でもこれをそのまま使う。メッシュ描画のように
+        // ワインディングを反転したPSOを別に持つ必要は無い ―― 理由はPSO生成箇所のコメント
+        std::unique_ptr<RHI::IRHIShader> m_DroneShowVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_DroneShowPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DroneShowPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_DroneShowConstantBuffer;
+        // 機体データ(StructuredReadOnly)。kMaxDrones分を固定で確保し、実際に描くのは
+        // m_DroneInstances.size()機ぶんだけ
+        std::unique_ptr<RHI::IRHIBuffer> m_DroneBuffer;
+        // 1フレームぶんの機体の状態。毎フレームDroneShow::Evaluateが書き、
+        // グラフ構築前に1回だけm_DroneBufferへUpdateBufferする
+        // (m_LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
+        //  パスの中で更新すると先に走る側が未更新の内容を読む)
+        std::vector<GPUDrone> m_DroneInstances;
+        // 編隊の生成器。設定を変えたときだけConfigureし直す
+        DroneShow m_DroneShow;
+        // Configure済みの設定。ここと現在の設定が食い違ったときだけ作り直す
+        DroneShowSettings m_DroneShowConfiguredSettings{};
+        bool m_DroneShowConfigureRequested = true;
+
+        // ショーの進行時刻[秒]。RenderThreadMainがm_CloudScrollOffsetと同じ場所で進める
+        float m_DroneShowTime = 0.0f;
+
+        // --- .ksceneとUIから触るパラメータ ---
+        bool m_DroneShowEnabled = Defaults::DroneShowEnabled;
+        uint32_t m_DroneShowCount = Defaults::DroneShowCount;
+        DirectX::XMFLOAT3 m_DroneShowCenter{
+            Defaults::DroneShowCenterX, Defaults::DroneShowCenterY, Defaults::DroneShowCenterZ };
+        float m_DroneShowScale = Defaults::DroneShowScale;
+        float m_DroneShowRadius = Defaults::DroneShowRadius;
+        // 機体の明るさ。実効プリ露出はこれとは別に描画側で掛ける(シーン全体と同じ扱い)
+        float m_DroneShowBrightness = Defaults::DroneShowBrightness;
+        float m_DroneShowHoldSeconds = Defaults::DroneShowHoldSeconds;
+        float m_DroneShowMorphSeconds = Defaults::DroneShowMorphSeconds;
+        float m_DroneShowHoverAmplitude = Defaults::DroneShowHoverAmplitude;
+        float m_DroneShowSpeed = Defaults::DroneShowSpeed;
+        // 遠方の機体が1画素を割ってTAAのジッターでちらつくのを防ぐ、画面上の最小半径(NDC単位)
+        float m_DroneShowMinScreenRadius = Defaults::DroneShowMinScreenRadius;
+        // trueにするとショーの進行が止まる(m_CloudTimeFrozen / m_WaterTimeFrozenと同じ役割)。
+        // **A/B比較には必須**で、これが無いとスクリーンショットが毎回別の編隊になり対照が取れない
+        bool m_DroneShowTimeFrozen = Defaults::DroneShowTimeFrozen;
+        uint32_t m_DroneShowSeed = Defaults::DroneShowSeed;
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
@@ -1627,6 +1681,16 @@ namespace Kurenai
         // 凍結トグルはm_CloudTimeFrozenを共有する(片方にしか効かないとA/B比較の対照が
         // 崩れるため。RenderThreadMainのスクロール更新箇所を参照)
         DirectX::XMFLOAT2 m_CirrusScrollOffset{ 0.0f, 0.0f };
+
+        // --- 星空 ---
+        // 夜空の星。Sky.hlsliのSkyColorが方向ハッシュで解析的に描く(テクスチャは使わない)。
+        // **IBLキューブ(SkyGenerate.hlsl)へは焼かない**ので、これらを変えても空の焼き直しは要らない
+        // (雲の風と同じ扱い。m_SkyBakeDirtyを立てないこと)
+        bool m_StarsEnabled = Defaults::StarsEnabled;
+        float m_StarsDensity = Defaults::StarsDensity;
+        float m_StarsBrightness = Defaults::StarsBrightness;
+        // またたきの強さ。既定0。上げるとTAAがちらつきとして拾い、A/B比較の再現性も落ちる
+        float m_StarsTwinkle = Defaults::StarsTwinkle;
 
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)

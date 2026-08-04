@@ -1199,6 +1199,24 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>Density</code></td><td>float</td><td>-</td><td>0.0004</td><td>基準高度での消散係数[1/m]。0〜0.002。気象学的視程Vとは <code>V = 3.912 / 消散係数</code>(Koschmieder)で結び付くので、<strong>どのくらいの視程を想定するかで決める</strong>のが分かりやすい(0.0004でV≒10km、0.0002でV≒20km、上限の0.002でV≒2kmのもや)。<strong>遠景の霞だけの設定ではない</strong>——雲層は有限距離にあるため、この値が雲がどれだけ空から浮き上がって見えるかも一手に決める</td></tr>
 <tr><td><code>ScaleHeight</code></td><td>float</td><td>-</td><td>1000.0</td><td>霞の層の厚み[m]。10〜5000。大きいほど高い高度まで及ぶ</td></tr>
 <tr><td><code>RefHeight</code></td><td>float</td><td>-</td><td>0.0</td><td>消散係数を定義する高さ(ワールドY)。-500〜500</td></tr>
+<tr><td rowspan="3"><code>[Bloom]</code></td><td rowspan="3">0〜1</td><td><code>Enabled</code></td><td>bool</td><td>-</td><td>false</td><td>明部の滲み。<strong>エンジンの既定は無効</strong>(素の輝度分布を確認したいときに邪魔になるため)なので、発光体が主役の夜景ではシーン側で有効にする</td></tr>
+<tr><td><code>Strength</code></td><td>float</td><td>-</td><td>0.06</td><td>合成比。0〜1。トーンマップは元の色とブルームを<strong>加算ではなくlerp</strong>で混ぜるため、点光源のように広く薄く散る対象では上げるほど芯が暗くなる(実測: 0.5にすると画面全体の平均輝度が12.1→5.9へ下がった)</td></tr>
+<tr><td><code>Threshold</code></td><td>float</td><td>-</td><td>1.0</td><td>滲ませ始める輝度のしきい値。0〜100</td></tr>
+<tr><td rowspan="4"><code>[Stars]</code></td><td rowspan="4">0〜1</td><td><code>Enabled</code></td><td>bool</td><td>-</td><td>true</td><td>夜空の星。太陽が地平線より上にある間は強度が0まで落ちるため、<strong>昼のシーンの絵は変わらない</strong>。IBLキューブには焼かないので、変えても空の焼き直しは起きない</td></tr>
+<tr><td><code>Density</code></td><td>float</td><td>-</td><td>48.0</td><td>天球を分割するセルの細かさ。1〜256。1セルにつき星1個なので、大きいほど星が増える</td></tr>
+<tr><td><code>Brightness</code></td><td>float</td><td>-</td><td>1.0</td><td>星の明るさ倍率。0〜20。見た目だけの項で、夜空の目標照度(星明かりの照度)には影響しない</td></tr>
+<tr><td><code>Twinkle</code></td><td>float</td><td>-</td><td>0.0</td><td>またたきの強さ。0〜1。<strong>既定は0(無効)</strong>。上げるとTAAがちらつきとして拾い、スクリーンショットの再現性も落ちる</td></tr>
+<tr><td rowspan="11"><code>[DroneShow]</code></td><td rowspan="11">0〜1</td><td><code>Enabled</code></td><td>bool</td><td>-</td><td>false</td><td>夜空を編隊飛行する発光ドローン。1機につきカメラ正対のビルボードを1枚、加算合成で描く。光芒はこのパスでは作らず<code>[Bloom]</code>に任せるので、<strong>ブルームも合わせて有効にすること</strong></td></tr>
+<tr><td><code>Count</code></td><td>uint</td><td>-</td><td>1500</td><td>機体数。1〜4096(構造化バッファの固定容量)</td></tr>
+<tr><td><code>Center</code></td><td>float3</td><td>-</td><td>0, 220, 260</td><td>編隊の中心(ワールド座標)。<code>Center.y - Scale</code>が水面より下になると、編隊の下半分が反射から欠ける</td></tr>
+<tr><td><code>Scale</code></td><td>float</td><td>-</td><td>130.0</td><td>編隊の代表半径[m]。1〜5000</td></tr>
+<tr><td><code>Radius</code></td><td>float</td><td>-</td><td>1.2</td><td>1機の光点の半径[m]。0.01〜50。<strong>機体の大きさではなく光の見かけの大きさ</strong>で、遠方で1画素を割る場合は自動的に押し上げられる</td></tr>
+<tr><td><code>Brightness</code></td><td>float</td><td>-</td><td>60.0</td><td>発光強度。0〜10000。<strong>芯の明るさはある値で頭打ちになる</strong>ので、上げすぎても白く広がるだけで明るくはならない。背景との明暗差は<code>[Scene]Exposure</code>で決めるほうが効く</td></tr>
+<tr><td><code>HoldSeconds</code></td><td>float</td><td>-</td><td>6.0</td><td>1つの形を保つ時間[秒]。0〜120</td></tr>
+<tr><td><code>MorphSeconds</code></td><td>float</td><td>-</td><td>4.0</td><td>次の形へ変形する時間[秒]。0.1〜120。機体ごとに出発を最大25%ずらしてあるので、端から順に崩れて組み上がる</td></tr>
+<tr><td><code>HoverAmplitude</code></td><td>float</td><td>-</td><td>0.6</td><td>機体ごとの揺れの振幅[m]。0〜20。0にすると数学的に完全な位置で静止し、模型のように見える</td></tr>
+<tr><td><code>Speed</code></td><td>float</td><td>-</td><td>1.0</td><td>再生速度倍率。0〜20</td></tr>
+<tr><td><code>Seed</code></td><td>uint</td><td>-</td><td>20260804</td><td>揺れと出発タイミングのばらつきの種。固定値なので毎回同じ絵になる</td></tr>
 </tbody>
 </table>
 <p>

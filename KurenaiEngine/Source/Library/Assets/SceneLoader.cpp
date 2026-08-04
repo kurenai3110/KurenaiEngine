@@ -308,6 +308,30 @@ namespace Kurenai::Assets
             bool HasFogScaleHeight = false;  float FogScaleHeight = 1000.0f;
             bool HasFogRefHeight = false;    float FogRefHeight = 0.0f;
 
+            // [Bloom]セクション。指定されたキーだけエンジンの設定を上書きする
+            bool HasBloomEnabled = false;    bool  BloomEnabled = false;
+            bool HasBloomStrength = false;   float BloomStrength = 0.06f;
+            bool HasBloomThreshold = false;  float BloomThreshold = 1.0f;
+
+            // [Stars]セクション。指定されたキーだけエンジンの設定を上書きする
+            bool HasStarsEnabled = false;    bool  StarsEnabled = true;
+            bool HasStarsDensity = false;    float StarsDensity = 48.0f;
+            bool HasStarsBrightness = false; float StarsBrightness = 1.0f;
+            bool HasStarsTwinkle = false;    float StarsTwinkle = 0.0f;
+
+            // [DroneShow]セクション。指定されたキーだけエンジンの設定を上書きする
+            bool HasDroneShowEnabled = false;        bool  DroneShowEnabled = false;
+            bool HasDroneShowCount = false;          unsigned int DroneShowCount = 1500u;
+            bool HasDroneShowCenter = false;         float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };
+            bool HasDroneShowScale = false;          float DroneShowScale = 130.0f;
+            bool HasDroneShowRadius = false;         float DroneShowRadius = 1.2f;
+            bool HasDroneShowBrightness = false;     float DroneShowBrightness = 60.0f;
+            bool HasDroneShowHoldSeconds = false;    float DroneShowHoldSeconds = 6.0f;
+            bool HasDroneShowMorphSeconds = false;   float DroneShowMorphSeconds = 4.0f;
+            bool HasDroneShowHoverAmplitude = false; float DroneShowHoverAmplitude = 0.6f;
+            bool HasDroneShowSpeed = false;          float DroneShowSpeed = 1.0f;
+            bool HasDroneShowSeed = false;           unsigned int DroneShowSeed = 20260804u;
+
             std::vector<ParsedLightEntry> Lights;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
             std::vector<ParsedGIVolumeEntry> GIVolumes;
@@ -326,6 +350,9 @@ namespace Kurenai::Assets
             Water,
             Cloud,
             Fog,
+            Bloom,
+            Stars,
+            DroneShow,
             Unknown,
         };
 
@@ -341,6 +368,9 @@ namespace Kurenai::Assets
             if (CaseInsensitiveEquals(name, L"Water")) return Section::Water;
             if (CaseInsensitiveEquals(name, L"Cloud")) return Section::Cloud;
             if (CaseInsensitiveEquals(name, L"Fog")) return Section::Fog;
+            if (CaseInsensitiveEquals(name, L"Bloom")) return Section::Bloom;
+            if (CaseInsensitiveEquals(name, L"Stars")) return Section::Stars;
+            if (CaseInsensitiveEquals(name, L"DroneShow")) return Section::DroneShow;
             return Section::Unknown;
         }
 
@@ -917,6 +947,183 @@ namespace Kurenai::Assets
                     break;
                 }
 
+                case Section::Bloom:
+                {
+                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                    {
+                        if (!ParseFloatToken(value, out))
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                        }
+                        if (out < minValue || out > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        has = true;
+                    };
+
+                    if (CaseInsensitiveEquals(key, L"Enabled"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
+                        result.BloomEnabled = *parsedValue;
+                        result.HasBloomEnabled = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Strength"))
+                    {
+                        // Tonemapは元の色とブルームをこの比率でlerpするため1.0で完全に置き換わる
+                        readFloat(result.BloomStrength, result.HasBloomStrength, 0.0f, 1.0f, L"Strength");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Threshold"))
+                    {
+                        readFloat(result.BloomThreshold, result.HasBloomThreshold, 0.0f, 100.0f, L"Threshold");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
+                case Section::Stars:
+                {
+                    // [Cloud]/[Fog]と同じ作法。範囲外は打ち間違いとみなしてエラーにする
+                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                    {
+                        if (!ParseFloatToken(value, out))
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                        }
+                        if (out < minValue || out > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        has = true;
+                    };
+
+                    if (CaseInsensitiveEquals(key, L"Enabled"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
+                        result.StarsEnabled = *parsedValue;
+                        result.HasStarsEnabled = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Density"))
+                    {
+                        // 上限256は「1セルに1個」の規則から全天で数十万個に相当し、
+                        // これ以上は星というより砂嵐になる
+                        readFloat(result.StarsDensity, result.HasStarsDensity, 1.0f, 256.0f, L"Density");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Brightness"))
+                    {
+                        readFloat(result.StarsBrightness, result.HasStarsBrightness, 0.0f, 20.0f, L"Brightness");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Twinkle"))
+                    {
+                        readFloat(result.StarsTwinkle, result.HasStarsTwinkle, 0.0f, 1.0f, L"Twinkle");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
+                case Section::DroneShow:
+                {
+                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                    {
+                        if (!ParseFloatToken(value, out))
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                        }
+                        if (out < minValue || out > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        has = true;
+                    };
+                    // 正の整数として読む。小数・負数・0はここで弾く
+                    const auto readUint = [&](unsigned int& out, bool& has, unsigned int minValue,
+                                              unsigned int maxValue, const wchar_t* name)
+                    {
+                        float parsedValue = 0.0f;
+                        if (!ParseFloatToken(value, parsedValue) || std::floor(parsedValue) != parsedValue ||
+                            parsedValue < 0.0f)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です(正の整数で指定してください)");
+                        }
+                        const double asDouble = static_cast<double>(parsedValue);
+                        if (asDouble < minValue || asDouble > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        out = static_cast<unsigned int>(parsedValue);
+                        has = true;
+                    };
+
+                    if (CaseInsensitiveEquals(key, L"Enabled"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
+                        result.DroneShowEnabled = *parsedValue;
+                        result.HasDroneShowEnabled = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Count"))
+                    {
+                        // 上限4096はKurenaiEngine3D.cppのkMaxDrones(構造化バッファの固定容量)と
+                        // 一致させること。超える値を許すと黙って切り詰められる
+                        readUint(result.DroneShowCount, result.HasDroneShowCount, 1u, 4096u, L"Count");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Center"))
+                    {
+                        if (!ParseFloat3(value, result.DroneShowCenter))
+                        {
+                            errorAt(lineNumber, rawLine, "Centerの値が不正です(x, y, zの3要素が必要)");
+                        }
+                        result.HasDroneShowCenter = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Scale"))
+                    {
+                        readFloat(result.DroneShowScale, result.HasDroneShowScale, 1.0f, 5000.0f, L"Scale");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Radius"))
+                    {
+                        readFloat(result.DroneShowRadius, result.HasDroneShowRadius, 0.01f, 50.0f, L"Radius");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Brightness"))
+                    {
+                        readFloat(result.DroneShowBrightness, result.HasDroneShowBrightness, 0.0f, 10000.0f, L"Brightness");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"HoldSeconds"))
+                    {
+                        readFloat(result.DroneShowHoldSeconds, result.HasDroneShowHoldSeconds, 0.0f, 120.0f, L"HoldSeconds");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"MorphSeconds"))
+                    {
+                        // 0だと形が瞬間的に切り替わる。下限を0.1にして「一瞬で入れ替わる」を
+                        // 意図せず引き当てないようにする
+                        readFloat(result.DroneShowMorphSeconds, result.HasDroneShowMorphSeconds, 0.1f, 120.0f, L"MorphSeconds");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"HoverAmplitude"))
+                    {
+                        readFloat(result.DroneShowHoverAmplitude, result.HasDroneShowHoverAmplitude, 0.0f, 20.0f, L"HoverAmplitude");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Speed"))
+                    {
+                        readFloat(result.DroneShowSpeed, result.HasDroneShowSpeed, 0.0f, 20.0f, L"Speed");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Seed"))
+                    {
+                        readUint(result.DroneShowSeed, result.HasDroneShowSeed, 0u, 4294967295u, L"Seed");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
                 default:
                     break;
                 }
@@ -1027,6 +1234,29 @@ namespace Kurenai::Assets
         scene.HasFogDensity = parsed.HasFogDensity;         scene.FogDensity = parsed.FogDensity;
         scene.HasFogScaleHeight = parsed.HasFogScaleHeight; scene.FogScaleHeight = parsed.FogScaleHeight;
         scene.HasFogRefHeight = parsed.HasFogRefHeight;     scene.FogRefHeight = parsed.FogRefHeight;
+        scene.HasBloomEnabled = parsed.HasBloomEnabled;       scene.BloomEnabled = parsed.BloomEnabled;
+        scene.HasBloomStrength = parsed.HasBloomStrength;     scene.BloomStrength = parsed.BloomStrength;
+        scene.HasBloomThreshold = parsed.HasBloomThreshold;   scene.BloomThreshold = parsed.BloomThreshold;
+        scene.HasStarsEnabled = parsed.HasStarsEnabled;       scene.StarsEnabled = parsed.StarsEnabled;
+        scene.HasStarsDensity = parsed.HasStarsDensity;       scene.StarsDensity = parsed.StarsDensity;
+        scene.HasStarsBrightness = parsed.HasStarsBrightness; scene.StarsBrightness = parsed.StarsBrightness;
+        scene.HasStarsTwinkle = parsed.HasStarsTwinkle;       scene.StarsTwinkle = parsed.StarsTwinkle;
+        scene.HasDroneShowEnabled = parsed.HasDroneShowEnabled;   scene.DroneShowEnabled = parsed.DroneShowEnabled;
+        scene.HasDroneShowCount = parsed.HasDroneShowCount;       scene.DroneShowCount = parsed.DroneShowCount;
+        scene.HasDroneShowCenter = parsed.HasDroneShowCenter;
+        scene.DroneShowCenter[0] = parsed.DroneShowCenter[0];
+        scene.DroneShowCenter[1] = parsed.DroneShowCenter[1];
+        scene.DroneShowCenter[2] = parsed.DroneShowCenter[2];
+        scene.HasDroneShowScale = parsed.HasDroneShowScale;             scene.DroneShowScale = parsed.DroneShowScale;
+        scene.HasDroneShowRadius = parsed.HasDroneShowRadius;           scene.DroneShowRadius = parsed.DroneShowRadius;
+        scene.HasDroneShowBrightness = parsed.HasDroneShowBrightness;   scene.DroneShowBrightness = parsed.DroneShowBrightness;
+        scene.HasDroneShowHoldSeconds = parsed.HasDroneShowHoldSeconds; scene.DroneShowHoldSeconds = parsed.DroneShowHoldSeconds;
+        scene.HasDroneShowMorphSeconds = parsed.HasDroneShowMorphSeconds;
+        scene.DroneShowMorphSeconds = parsed.DroneShowMorphSeconds;
+        scene.HasDroneShowHoverAmplitude = parsed.HasDroneShowHoverAmplitude;
+        scene.DroneShowHoverAmplitude = parsed.DroneShowHoverAmplitude;
+        scene.HasDroneShowSpeed = parsed.HasDroneShowSpeed;             scene.DroneShowSpeed = parsed.DroneShowSpeed;
+        scene.HasDroneShowSeed = parsed.HasDroneShowSeed;               scene.DroneShowSeed = parsed.DroneShowSeed;
         scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;

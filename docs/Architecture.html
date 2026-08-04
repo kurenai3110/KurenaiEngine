@@ -238,6 +238,7 @@
     <li><a href="#clouds">35. 雲(レイヤーモデル、P5)</a></li>
     <li><a href="#planarreflection">36. 平面反射(P6)</a></li>
     <li><a href="#aerialperspective">37. 大気遠近(height fog / aerial perspective、P8)</a></li>
+    <li><a href="#ch38">38. ドローンショーと星空</a></li>
   </ol>
 </nav>
 
@@ -10239,6 +10240,204 @@ SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積�
 緩和する正則化であって真の可視性分布の再現ではない。
 残りを埋めるには跳ね返り光の加算(<a href="#ch34-10-3">34.10.3</a>)が要る &mdash;&mdash;
 引き続き将来の課題として残る。
+</p>
+
+</section>
+
+<section id="ch38">
+<h2>38. ドローンショーと星空</h2>
+
+<p>
+夜空を編隊飛行する発光ドローンの群れ(<code>Scenes/DroneShow.kscene</code>)と、その背景になる星空。
+このエンジンには<strong>パーティクル/ビルボード/インスタンシングも、オブジェクトのアニメーションも
+元々存在しなかった</strong>ため、描画の土台からここで作っている。
+</p>
+
+<h3 id="ch38-1">38.1 頂点シェーダから構造化バッファを読めるようにした(RHIの拡張)</h3>
+
+<p>
+1,500機を1回のDrawで描くには、頂点シェーダが機体データを直接引く必要がある。しかし既存のRHIには
+その手段が無かった &mdash;&mdash; DX12のグラフィックス用ルートシグネチャでSRVディスクリプタテーブルが
+<code>D3D12_SHADER_VISIBILITY_PIXEL</code>で宣言されており、頂点シェーダからは1つも見えない。
+</p>
+
+<p>
+検討して<strong>捨てた案</strong>を先に挙げる。どちらもDX12で破綻する:
+</p>
+<ul>
+<li><strong>定数バッファに機体配列を詰める</strong> &mdash;&mdash; DX12は定数バッファを
+<code>slotSize &times; kConstantBufferRingCapacity(8192)</code>のアップロードヒープとして確保するため、
+1,500機ぶんを持てるサイズにすると1バッファで数十〜数百MBを食う</li>
+<li><strong>頂点バッファへ毎フレーム書く</strong> &mdash;&mdash; DX12の頂点バッファはDEFAULTヒープ・
+<code>mappedPtr = nullptr</code>で作られるため<code>UpdateBuffer</code>がnullptrへのmemcpyになる。
+<strong>DX11だけ動いてDX12で落ちる</strong>という最も気付きにくい壊れ方をする</li>
+</ul>
+
+<p>
+採ったのは<code>IRHICommandList::SetVertexShaderResourceBuffer</code>の追加。コンピュート用に
+<code>SetComputeShaderResourceBuffer</code>を別に持っているのと同じ「ステージごとに独立した
+レジスタ空間を用意する」形に揃えてある。DX12側はディスクリプタテーブルではなく
+<strong>ルートSRV</strong>(ルートパラメータ4)に割り当てた &mdash;&mdash; 用途が「1回のDrawで参照する
+構造化バッファ1本」に限られるため、ヒープへブロックを払い出してCopyDescriptorsする経路を通す
+必要がないからである。
+</p>
+
+<p>
+<code>t0</code>が既存のSRVテーブル(t0〜t20)とレジスタ番号で重なるが、
+<strong>可視ステージが素で分離している</strong>(片方はPIXEL、もう片方はVERTEX)ため衝突しない。
+ルートシグネチャの一意性はシェーダーステージごとに判定される。
+</p>
+
+<p>
+状態遷移には<code>NON_PIXEL_SHADER_RESOURCE</code>を必ず含めること。既存の
+<code>SetShaderResourceBuffer</code>は<code>PIXEL_SHADER_RESOURCE</code>のみへ遷移させており、
+その状態のリソースを頂点シェーダから読むのはD3D12の仕様違反になる。
+</p>
+
+<h3 id="ch38-2">38.2 ビルボードの巻き &mdash;&mdash; 平面反射でPSOを切り替えてはいけない</h3>
+
+<p>
+メッシュの描画では、鏡映ビュー行列が頂点そのものを変換するため画面上の巻きが反転し、
+カリングを効かせたまま正しい面を残すには<code>FrontCounterClockwise</code>を反転したPSOが要る
+(<code>m_TransparentPipelineStateMirrored</code>等)。<strong>ドローンのビルボードはこれに当てはまらない。</strong>
+</p>
+
+<p>
+ビルボードは「ワールド座標を<code>View</code>で変換した<em>後</em>に、ビュー空間で四隅のオフセットを足す」
+という作り方をしている(<code>DroneShow.hlsl</code>の<code>VSMain</code>)。四隅のオフセットは
+鏡映行列を一度も通らないので、<code>View</code>が鏡映を含んでいてもクアッド自身の巻きは変わらない。
+</p>
+
+<p>
+実装当初はメッシュと同じつもりで反転したPSOを使っており、その結果
+<strong>1,500機が1機残らず裏面として捨てられ、水面に何も映らなかった</strong>。
+症状は「反射だけが完全に出ない」で、デバッグレイヤーは何も言わない。
+</p>
+
+<h3 id="ch38-3">38.3 パスの置き場所(大気遠近より後・TAAより前)</h3>
+
+<p>
+本描画は<code>taaInputColor</code>を決めた直後に登録する。理由は2つ:
+</p>
+<ul>
+<li><strong>大気遠近より後</strong> &mdash;&mdash; 機体は深度を書かないため、先に描くと
+<code>AerialPerspective</code>が「背後の空の距離」で霞を掛けてしまい、光点がwashoutする</li>
+<li><strong>TAAより前</strong> &mdash;&mdash; RenderGraphが<code>taaInputColor</code>の
+Read-after-Write依存で自動的に順序付ける。TAAの後(=<code>m_TAAHistory</code>へ直接加算)にすると
+履歴を汚し、次フレーム以降に尾を引く</li>
+</ul>
+
+<p>
+書き込み先を<code>taaInputColor</code>という変数にしているのは、反射やフォグの有無でHDRシーン色の
+実体が移り変わるため。「今のHDRシーン色」を指す変数へ描くことでどの組み合わせでも成立する。
+</p>
+
+<h3 id="ch38-4">38.4 モーフの点対応づけ &mdash;&mdash; 方位角で並べ替える</h3>
+
+<p>
+形Aのi番目と形Bのi番目を直線で結ぶのがモーフなので、両者のインデックスが無関係だと
+全機の軌跡が編隊の中央で交差し、変形の途中がただの塊になる。
+</p>
+
+<p>
+そこで<strong>どの形も生成直後に「中心から見た方位角、次に高さ」の順で安定ソートする</strong>。
+i番目どうしが常に概ね同じ方角・同じ高さに来るため、各機は自分の近くへ短く動くだけで済む。
+生成順そのものには意味を持たせず、この並べ替えを唯一の対応規則にしている。
+</p>
+
+<h3 id="ch38-5">38.5 星は<code>SkyColorUpperUnit</code>ではなく<code>SkyColor</code>へ足す</h3>
+
+<p>
+<code>SkyColorUpperUnit</code>の結果は<code>SkyIntegrate.hlsl</code>が積分して天頂輝度
+(=夜空の露出校正)を逆算する入力になっている。そちらへ星を混ぜると<strong>校正値そのものが動き、
+星の有無で夜空全体の明るさが変わってしまう</strong>。星は「校正済みの空の色へ後から足す発光体」として
+<code>SkyColor</code>側で加算し、雲の減光より手前に置くことで雲が星を正しく覆うようにしている。
+</p>
+
+<p>
+星を出すのは<strong>背景(<code>DeferredLighting.hlsl</code>)と水面の映り込み(<code>SSR.hlsl</code>)だけ</strong>。
+IBLキューブ(<code>SkyGenerate.hlsl</code>)へ焼くと、256px/面に点光源がエイリアシングし、
+プリフィルタ後の鏡面反射でファイアフライになる。星明かりの<em>照明</em>としての寄与は
+<code>kStarlightIlluminanceLux</code>が一様な下限として既にモデル化済みで、ここは見た目だけの担当。
+</p>
+
+<p>
+HLSLのローカル構造体は代入していないメンバの値が未定義なので、5つある<code>MakeSkyParameters</code>の
+どれか1つが星のフィールドを埋め忘れると、そのシェーダーはゴミの強度で星を描き始める。
+これを防ぐため<strong>全員が必ず通る<code>ApplyCloudFogParameters</code>で星のフィールドを0に初期化</strong>し、
+明示的に有効化したシェーダーだけが星を描くという安全側の既定にしてある。
+</p>
+
+<h3 id="ch38-6">38.6 検証で分かったこと(実測)</h3>
+
+<ul>
+<li><strong>ブルームは上げるほど暗くなる</strong> &mdash;&mdash; トーンマップはブルームを加算ではなく
+元の色との<code>lerp</code>で合成するため、点光源のようにピラミッドへ広く薄く散る対象では
+比率を上げるほど芯が暗くなる。実測(画面全体の平均輝度): <code>Strength=0.5</code>で5.90、
+ブルーム無効で12.13 &mdash;&mdash; 半分以下に暗くなっていた。0.15前後が妥当</li>
+<li><strong>機体の芯の明るさは頭打ちになる</strong> &mdash;&mdash; <code>Brightness</code>を45から400へ
+9倍にしても、編隊領域の画素値は最大153(sRGB)で完全に一致し1段も上がらなかった
+(約38,000画素が153に張り付く)。TAA(既定で無効)・バッファ形式(いずれも
+<code>R16G16B16A16_Float</code>)・撮影経路(昼のシーンでは198まで出る)は切り分け済みでどれも該当しない。
+<strong>原因は未特定</strong>。背景との明暗差は<code>[Scene]Exposure</code>で決めるほうが効く</li>
+<li><strong>昼のシーンへの影響が無いことの確認方法</strong> &mdash;&mdash; MontSaintMichelのような
+雲・水面のあるシーンは<strong>同じビルドで2回撮るだけで39%の画素が変わる</strong>(スクロール位相のため)ので、
+A/B比較の土台にならない。<code>[Cloud]Coverage = 0</code>・水面なしの静的なシーンを作ると
+同一条件2回の差が27画素(最大差1)まで落ち、そこで星あり/なしを比べると
+昼は516画素・最大差1(=ディザの範囲)、夜は50,705画素・最大差50となり、
+「昼は変わらず夜だけ星が出る」ことを測定として示せる</li>
+</ul>
+
+<h3 id="ch38-7">38.7 既知の問題</h3>
+
+<p>
+<strong>DX12では水面への機体の映り込みが出ない。</strong>DX11では出る。
+</p>
+
+<p>
+<strong>少なくとも「DX12では平面反射パスがそもそも走らない」ことが効いている。</strong>
+<code>planarReflectionPassRuns</code>の条件は
+<code>m_PlanarReflectionEnabled &amp;&amp; hasWaterInstance &amp;&amp; m_ReflectionMode == ReflectionMode::ScreenSpace</code>
+であり、DXR対応環境では<code>DefaultReflectionMode</code> / <code>ReflectionModeForCapability</code>が
+<code>Raytraced</code>を返すため、<code>.kscene</code>に<code>ScreenSpaceReflection = true</code>と書いても
+DX12では手法がRT反射になる。
+</p>
+
+<p>
+その結果、DX12の水面に映っているのは<strong>TLASへレイを撃った結果</strong>である。
+ドローンは手続き的に展開するビルボードでシーンジオメトリではなく、
+<strong>TLASに入っていないのでレイからは原理的に見えない</strong>。
+一方、島や地形はTLASに入っているのでRT反射でも正しく映る &mdash;&mdash;
+「MontSaintMichelでは島が水面に映るのにドローンだけ映らない」という一見ちぐはぐな症状は、これで説明が付く。
+</p>
+
+<p>
+切り分け済みの事実(いずれもドローン側の不具合ではないことを示す):
+</p>
+<ul>
+<li>空へ直接描かれる機体はDX11/DX12で一致する(編隊領域の画素値の分布・最大値とも同じ)</li>
+<li>DX12デバッグレイヤーの指摘は1件も出ていない(Debugビルドで確認)</li>
+<li>クリップ平面を外しても、深度テストを外しても、構造化バッファの読み取りを固定値へ
+置き換えても、DX12の水面は変わらなかった &mdash;&mdash; <strong>描画そのものが行われていない</strong>ことの裏付け</li>
+<li>KurenaiEngine3D.cppの<code>planarReflectionPassRuns</code>のコメントにも
+「実測でもDX12起動時に水面へ映っていたのはRT反射の結果で、平面反射パスの出力ではなかった」と
+既に記録されている</li>
+</ul>
+
+<p>
+<strong>ただしこれだけでは説明が閉じていない。</strong>
+<code>ApplyLoadedScene</code>で<code>m_ReflectionMode</code>を<code>ScreenSpace</code>へ強制して
+DX12で試したが、<strong>水面の映り込みは戻らなかった</strong>(水面領域の画素値は23のままで、
+DX11の71には届かない)。手法の切り替え自体は効いている(画面全体の平均輝度が23.93→24.86へ動いた)ので、
+<strong>RT反射への切り替わりとは別にもう1つ要因がある</strong>と考えられる。ここは未解明のまま残っている。
+</p>
+
+<p>
+<strong>直すなら</strong>、ドローンショーが有効なときは<code>Raytraced</code>でも平面反射パスを走らせ、
+RT反射側が水面画素に対してその結果を合成する必要がある(RT反射は機体を追跡できないため、
+ラスタで描いた反射像を別途混ぜるしかない)。上の未解明の要因を先に潰すこと。
+なお<code>DebugView::PlanarReflection</code>はDX12では最終画像が出るだけで反射バッファを表示しないため、
+この経路での切り分けには使えない(本作業とは無関係な既存の問題)。
 </p>
 
 </section>
