@@ -1003,7 +1003,7 @@ Texture3D CloudDetailNoiseTexture : register(KURENAI_CLOUD_DETAIL_REGISTER);
 //
 // 【C2でステップ数固定をやめた理由】C2より前は「スラブを常に12等分する」だったため、
 // 1歩の長さが厚みに比例して伸びた(厚み400mで33m、1,500mなら125m)。ディテールノイズの
-// 縦方向の周期は kCloudDetailWorldPeriod / kCloudDetailVerticalRepeat = 133m なので、
+// 縦方向の周期は 厚み / kCloudDetailVerticalRepeats = 120m(厚み1,200mのとき)なので、
 // 厚みを上げるとステップが特徴と正面衝突し、**層状の縞(スライス)**になる。
 // しかも開始位置が全画素で揃っていたため、縞が画面全体で揃った帯として出ていた(最悪の出方)。
 //
@@ -1013,18 +1013,53 @@ Texture3D CloudDetailNoiseTexture : register(KURENAI_CLOUD_DETAIL_REGISTER);
 // (地平線際)にコストが発散しないための歯止めで、そこでは1歩が伸びるが、
 // もともと霞に埋もれて見えない領域なので実害が無い。
 //
-// 下限12mは「ディテールの縦周期133mを11分割する」細かさ。これ以上細かくしても
+// 下限12mは「厚み1,200mでのディテールの縦周期120mを10分割する」細かさ。これ以上細かくしても
 // ノイズテクスチャが持っている情報より細かくならないので意味がない
 static const int kCloudMaxRaymarchSteps = 48;
 static const float kCloudMinStepMeters = 12.0f;
 
-// 形状ノイズがワールド空間で1周する距離[m]。雲の塊(ウェザーマップの1セル=1,000m)より
-// 大きくしておくと、同じ模様が隣の雲で繰り返されているのが読み取りにくくなる
-static const float kCloudShapeWorldPeriod = 4000.0f;
-// ディテールノイズが1周する距離[m]。縁を削るための高周波成分なので形状より1桁細かい
-static const float kCloudDetailWorldPeriod = 400.0f;
-// ディテールがスラブの厚み方向に何周するか。横方向と同じ密度の細かさを縦にも持たせる
-static const float kCloudDetailVerticalRepeat = 3.0f;
+// 3Dノイズの水平・垂直の尺度。**どちらも「何周するか」という無次元の回数で持つ**(C7)。
+// 水平はウェザーマップのノイズ周期(kCloudNoisePeriod=256セル)あたりの繰り返し数、
+// 垂直はスラブの厚みあたりの繰り返し数。こうすると
+//   ・水平は layer.UvScale(=1/セルの広さ)を通じて厚みに比例する。**この拡大はCPU側で
+//     掛かっている**(KurenaiEngine3D::EffectiveCloudUvScale。風のスクロールを進める側と
+//     同じ値にする必要があるため、シェーダーではなくCPUの1箇所に置いてある)
+//   ・垂直は厚みそのものに比例する
+// となり、**厚みを変えても模様の縦横比が変わらないまま雲が相似に大きくなる**。
+//
+// 【縦がスラブ内で何周するかが立体感を決める】密度がスラブ内で縦にほとんど変わらないと、
+// 2次元のウェザーマップの輪郭が雲底から雲頂まで押し出された形になる。画面ではこれが
+// **まっすぐな縦の側面**として見え、雲ではなく角柱・円筒に見える。実測でもこれが決定的で、
+// 項を1つずつ止めた切り分けでは、ウェザーマップだけを残すと直線が全部残り、
+// 3Dノイズだけを残すと直線が1本も出なかった。
+//
+// 【水平を回数で持つ理由: 巻き戻しを整数にするため】CPUは風のスクロール量を
+// kCloudNoisePeriodでfmodして巻き戻す。そのとき3Dテクスチャの座標が整数ぶんずれていないと
+// **巻き戻した瞬間に模様が飛ぶ**。水平の繰り返し数を整数にしておけば、セルの広さ(=厚み)を
+// どう変えてもこの条件が自動的に満たされる。
+// (C6で水平周期を1,500mと直接指定していたときは 256/1.5 = 170.67 で整数でなく、
+//  この飛びが起きる状態だった。回数で持つ形にして構造的に断つ)
+//
+// 【値の根拠】厚み1,200m・巻雲オフ・波を止めた条件で水平4段×垂直3段を実測し、参考写真と
+// 同じ物差し(縁の強さ・塊の数・面積の中央値・縦横の勾配比)で比べた。水平の値は
+// 周期[m] = kCloudNoisePeriod / 回数 × セルの広さ(1,000m) で読み替えている:
+//   水平4000 垂直4000(C5) … 縁0.65 塊 8 面積3644 比1.07  ← 巨大な塊に融合。円筒の正体
+//   水平4000 垂直 400     … 縁0.97 塊14 面積2497 比1.28
+//   水平2000 垂直 400     … 縁0.98 塊18 面積 220 比1.32
+//   水平1500 垂直 450     … 縁0.99 塊22 面積  98 比1.32
+//   水平1500 垂直 300     … 縁1.06 塊27 面積 107 比1.33  ← 採用(171回 / 4回)
+//   水平1500 垂直 200     … 縁1.24 塊24 面積 115 比1.24  (筋状に痩せる)
+//   水平1000 垂直 250     … 縁1.33 塊39 面積  76 比1.26  (刻まれすぎ)
+//   参考写真               … 縁1.64 塊21 面積  99 比1.42
+// なお「水平と垂直を等しくしたまま周期だけ縮める」(等方500m)も試したが、縦横の勾配比が
+// 0.995と等方になり写真の1.42から離れた。空の雲は縦の変化の方が強いので等方ではない。
+// 171回は 256/171 = 1.497セル = 厚み1,200mで1,497m(掃引の1,500mに最も近い整数)
+static const float kCloudShapeRepeats = 171.0f;
+static const float kCloudShapeVerticalRepeats = 4.0f;
+// ディテールノイズ。縁を削るための高周波成分なので形状より細かい。
+// 640回 = 0.4セル = 厚み1,200mで400m。縦横の比(1497:300 ≒ 400:80)は形状に合わせてある
+static const float kCloudDetailRepeats = 640.0f;
+static const float kCloudDetailVerticalRepeats = 10.0f;
 // ディテールで縁を削る強さ。0で削らない(形状そのまま)、大きいほど輪郭が房状に痩せる
 static const float kCloudDetailErode = 0.35f;
 // 3Dの変調(形状 × 高さプロファイル × ディテールの浸食)のスラブ内平均を1へ揃える係数。
@@ -1072,6 +1107,22 @@ static const float kCloudProfileCongestusTop = 0.80f;
 static const float kCloudTypeUvScale = 0.25f;
 // 被覆率の場と相関しないように位相をずらす。値そのものに意味は無い
 static const float2 kCloudTypeUvOffset = float2(137.0f, 71.0f);
+
+// 【雲の大きさをまばらにする】(C7) 局所的な被覆率を「雲の種類」の場に結び付ける。
+// 背の高い雲になる場所は被覆率も高くなって大きな塊にまとまり、背の低い場所は
+// 被覆率が下がって小さくまばらになる。空一面が同じ大きさの塊で埋まるのを防ぐ。
+//
+// 【この結び付けが物理的に正しい向きである理由】積雲は対流のセルなので、深い上昇流ほど
+// 水平方向のセルも大きい。雄大積雲が小さい塊で、層雲が巨大、という空は実在しない。
+//
+// 【追加コストがほぼ無い理由】CloudTypeAtは元々サンプルごとに呼んでいる(縦プロファイルの
+// 選択に使う)。呼ぶ順をウェザーマップより前へ動かして使い回すだけで、新しいノイズは引かない。
+//
+// 【Coverageの意味を保つ】lerp(a,b,type)のtypeの平均は0.5なので、(a+b)/2 = 1になるよう
+// 対称に取る。ただし被覆率からの整形(CloudRemap)は非線形なので平均の被覆率は厳密には
+// 保存しない。**既定のCoverageは測り直すこと**
+static const float kCloudCoverageAtStratus = 0.45f;
+static const float kCloudCoverageAtCongestus = 1.55f;
 
 // 高さによる密度の勾配。積雲は雲頂ほど凝結が進んで密度が高い。
 // 【平均を1に保つ】lerp(a,b,hf)のhf∈[0,1]での平均は(a+b)/2なので、0.6と1.4にすることで
@@ -1139,14 +1190,35 @@ float CloudWorleyFbmFromChannels(float3 channels)
 // weather は既に被覆率で整形済み(大半の方向で0に近い)なので 1-weather はほぼ1になり、
 // base(平均0.781・標準偏差0.055とほぼ定数)を上回れず密度が常に0へ落ちた。
 // 実測でも空の上側で「雲」と判定できる画素がほぼ0になっていた。
-float CloudSampleDensity(float2 noiseXZ, float hf, float weather, CloudLayerParams layer)
+// その場所のウェザーマップ(被覆率で整形済み)と雲の種類(C7)。
+// 種類を先に求め、それで局所的な被覆率を上下させることで大きさをまばらにする
+// (kCloudCoverageAtStratus のコメント参照)。cloudTypeは呼び出し側が
+// CloudSampleDensityへそのまま渡し、二度引かないようにする
+float CloudWeatherAt(float2 noiseXZ, CloudLayerParams layer, out float cloudType)
 {
-    // 3Dテクスチャは Wrap で引くので範囲を気にせず割るだけでよい。
-    // 分母に layer.UvScale を含めるのは、noiseXZ が既に UvScale を掛けた空間にいるため
-    const float shapeScale = 1.0f / max(kCloudShapeWorldPeriod * layer.UvScale, 1e-9f);
-    // W(奥行き)にはスラブ内の高さをそのまま入れる。厚み全体でテクスチャの奥行きを1周ぶん
-    // 使い切るので、雲底から雲頂まで途中で同じ断面が繰り返されない
-    const float3 shapeUvw = float3(noiseXZ * shapeScale, hf);
+    cloudType = CloudTypeAt(noiseXZ, layer.TypeBias);
+    const float localCoverage = saturate(
+        layer.Coverage * lerp(kCloudCoverageAtStratus, kCloudCoverageAtCongestus, cloudType));
+    // CloudRemapの分母は (1 - (1 - localCoverage)) = localCoverage なので、
+    // 0のときは割らずに抜ける(この層に雲が無い場所)
+    if (localCoverage <= 0.0f)
+    {
+        return 0.0f;
+    }
+    const float weatherN = CloudFbm(noiseXZ * layer.AnisotropicScale);
+    return saturate(CloudRemap(weatherN, 1.0f - localCoverage, 1.0f));
+}
+
+float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudType, CloudLayerParams layer)
+{
+    // 3Dテクスチャは Wrap で引くので範囲を気にせず掛けるだけでよい。
+    // 【水平はセル単位、垂直はスラブ単位】(C7) noiseXZ はセル単位(ワールド距離×UvScale)なので、
+    // 「ノイズ周期256セルあたり何回繰り返すか」を掛ければテクスチャ座標になる。
+    // セルの広さ自体が厚みに比例する(CPUのEffectiveCloudUvScale)ため、水平の実寸も付いてくる。
+    // 垂直は hf(0=雲底、1=雲頂)に回数を掛けるので、こちらも厚みに比例する。
+    // 結果として厚みをいくつにしても模様の縦横比は変わらない
+    const float shapeUvScale = kCloudShapeRepeats / kCloudNoisePeriod;
+    const float3 shapeUvw = float3(noiseXZ * shapeUvScale, hf * kCloudShapeVerticalRepeats);
     const float4 shape = CloudShapeNoiseTexture.SampleLevel(VolumeSampler, shapeUvw, 0.0f);
 
     // Perlin-Worley(R)を、周波数を上げたWorley(GBA)を下限として引き伸ばす。
@@ -1158,8 +1230,8 @@ float CloudSampleDensity(float2 noiseXZ, float hf, float weather, CloudLayerPara
     const float base = saturate(CloudRemap(rawBase, kCloudShapeContrastLow, kCloudShapeContrastHigh));
 
     // 高さプロファイルで整形する。**形は場所ごとの雲の種類で変わる**(C4)ので、
-    // 同じ層の中に背の低い雲と高い雲が同居する
-    const float cloudType = CloudTypeAt(noiseXZ, layer.TypeBias);
+    // 同じ層の中に背の低い雲と高い雲が同居する。
+    // cloudTypeはCloudWeatherAtが既に求めた値を受け取る(C7。同じ場を二度引かない)
     const float shaped = base * CloudVerticalProfile(hf, cloudType);
     if (shaped <= 0.0f)
     {
@@ -1168,9 +1240,10 @@ float CloudSampleDensity(float2 noiseXZ, float hf, float weather, CloudLayerPara
         return 0.0f;
     }
 
-    // ディテールで縁だけを削る。密度が高い芯はほとんど削れず、薄い縁だけが房状に痩せる
-    const float detailScale = 1.0f / max(kCloudDetailWorldPeriod * layer.UvScale, 1e-9f);
-    const float3 detailUvw = float3(noiseXZ * detailScale, hf * kCloudDetailVerticalRepeat);
+    // ディテールで縁だけを削る。密度が高い芯はほとんど削れず、薄い縁だけが房状に痩せる。
+    // 座標の作り方は形状ノイズと同じ(水平はセル単位の繰り返し数、垂直はスラブ内の繰り返し数)
+    const float detailUvScale = kCloudDetailRepeats / kCloudNoisePeriod;
+    const float3 detailUvw = float3(noiseXZ * detailUvScale, hf * kCloudDetailVerticalRepeats);
     const float3 detail = CloudDetailNoiseTexture.SampleLevel(VolumeSampler, detailUvw, 0.0f).rgb;
     const float detailFbm = CloudWorleyFbmFromChannels(detail);
     const float modulation = saturate(CloudRemap(shaped, detailFbm * kCloudDetailErode, 1.0f));
@@ -1194,13 +1267,13 @@ float CloudSampleDensityWorld(float3 worldPos, CloudLayerParams layer)
         return 0.0f;
     }
     const float2 noiseXZ = worldPos.xz * layer.UvScale + layer.ScrollOffset;
-    const float weatherN = CloudFbm(noiseXZ * layer.AnisotropicScale);
-    const float weather = saturate(CloudRemap(weatherN, 1.0f - layer.Coverage, 1.0f));
+    float cloudType;
+    const float weather = CloudWeatherAt(noiseXZ, layer, cloudType);
     if (weather <= 0.0f)
     {
         return 0.0f;
     }
-    return CloudSampleDensity(noiseXZ, hf, weather, layer);
+    return CloudSampleDensity(noiseXZ, hf, weather, cloudType, layer);
 }
 
 // サンプル位置から太陽方向への光学的深さ(C1)。**立体感の本体**。
@@ -1525,15 +1598,17 @@ void EvaluateCloudLayer(
 
             const float2 sampleNoiseXZ = samplePos.xz * layer.UvScale + layer.ScrollOffset;
 
-            // ウェザーマップ。ここが0なら3Dテクスチャを1枚も引かずに次のステップへ飛ぶ
-            const float weatherN = CloudFbm(sampleNoiseXZ * layer.AnisotropicScale);
-            const float weather = saturate(CloudRemap(weatherN, 1.0f - layer.Coverage, 1.0f));
+            // ウェザーマップ。ここが0なら3Dテクスチャを1枚も引かずに次のステップへ飛ぶ。
+            // 被覆率は場所ごとに雲の種類で上下する(C7。大きさをまばらにする)
+            float cloudType;
+            const float weather = CloudWeatherAt(sampleNoiseXZ, layer, cloudType);
             if (weather <= 0.0f)
             {
                 continue;
             }
 
-            const float sampleDensity = CloudSampleDensity(sampleNoiseXZ, hf, weather, layer);
+            const float sampleDensity =
+                CloudSampleDensity(sampleNoiseXZ, hf, weather, cloudType, layer);
             if (sampleDensity <= 0.0f)
             {
                 continue;
