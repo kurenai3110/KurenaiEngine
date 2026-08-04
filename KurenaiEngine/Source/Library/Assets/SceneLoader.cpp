@@ -299,6 +299,7 @@ namespace Kurenai::Assets
             bool HasCloudAltitude = false;   float CloudAltitude = 1500.0f;
             bool HasCloudThickness = false;  float CloudThickness = 400.0f;
             bool HasCloudDensity = false;    float CloudDensity = 8.0f;
+            bool HasCloudTypeBias = false;   float CloudTypeBias = 0.5f;
             bool HasCloudCellSize = false;   float CloudCellSize = 1000.0f;
             bool HasCirrusCoverage = false;  float CirrusCoverage = 0.5f;
 
@@ -858,6 +859,11 @@ namespace Kurenai::Assets
                     {
                         readFloat(result.CloudDensity, result.HasCloudDensity, 0.0f, 100.0f, L"Density");
                     }
+                    else if (CaseInsensitiveEquals(key, L"TypeBias"))
+                    {
+                        // 0=層雲寄り / 0.5=中立 / 1=雄大積雲寄り(C4)
+                        readFloat(result.CloudTypeBias, result.HasCloudTypeBias, 0.0f, 1.0f, L"TypeBias");
+                    }
                     else if (CaseInsensitiveEquals(key, L"CellSize"))
                     {
                         readFloat(result.CloudCellSize, result.HasCloudCellSize, 10.0f, 100000.0f, L"CellSize");
@@ -1021,6 +1027,7 @@ namespace Kurenai::Assets
         scene.HasCloudAltitude = parsed.HasCloudAltitude;   scene.CloudAltitude = parsed.CloudAltitude;
         scene.HasCloudThickness = parsed.HasCloudThickness; scene.CloudThickness = parsed.CloudThickness;
         scene.HasCloudDensity = parsed.HasCloudDensity;     scene.CloudDensity = parsed.CloudDensity;
+        scene.HasCloudTypeBias = parsed.HasCloudTypeBias; scene.CloudTypeBias = parsed.CloudTypeBias;
         scene.HasCloudCellSize = parsed.HasCloudCellSize;   scene.CloudCellSize = parsed.CloudCellSize;
         scene.HasCirrusCoverage = parsed.HasCirrusCoverage; scene.CirrusCoverage = parsed.CirrusCoverage;
         scene.HasFogEnabled = parsed.HasFogEnabled;         scene.FogEnabled = parsed.FogEnabled;

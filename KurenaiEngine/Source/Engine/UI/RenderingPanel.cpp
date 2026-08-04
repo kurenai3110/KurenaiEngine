@@ -731,6 +731,11 @@ namespace Kurenai::UI
             Defaults::CloudUvScale, "%.6f", ImGuiSliderFlags_Logarithmic,
             "ワールド1mあたりのノイズ空間の距離。大きいほど雲の塊(1個あたり)が小さく見える");
         SliderFloatEx(
+            "雲の種類###CloudTypeBias", &m_Engine.m_CloudTypeBias, 0.0f, 1.0f, Defaults::CloudTypeBias,
+            "%.2f", 0, "場所ごとの雲の背の高さをどちらへ寄せるか。0で層雲(薄いシート)、0.5で積雲、"
+            "1で雄大積雲。空全体が同じ種類になるのではなく、種類の場が低い周波数で分布している"
+            "ぶんを丸ごとずらす。厚み(Thickness)がスラブの上限で、種類はその何割まで使うかを決める");
+        SliderFloatEx(
             "密度###CloudDensity", &m_Engine.m_CloudDensity, 0.0f, 30.0f, Defaults::CloudDensity, "%.2f", 0,
             "消散係数。ビアの法則(exp(-density*経路長))で透過率を決める。大きいほど雲が不透明になり"
             "自己影も濃くなる");

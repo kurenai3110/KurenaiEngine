@@ -113,6 +113,8 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     params.CirrusDensity = 0.0f;
     params.CirrusScrollOffset = float2(0.0f, 0.0f);
     params.CirrusAnisotropy = 0.0f;
+    // 雲の種類の偏り(C4)。判断Aで雲を焼かないため使われないが、中立値で埋めておく
+    params.CloudTypeBias = 0.5f;
 
     // 雲へ掛ける大気遠近(P12)も明示的に無効で埋める。判断A(上記)により雲そのものを
     // 焼かないので、このパスではEvaluateCloudLayer自体が一度も呼ばれず実質は無関係だが、
@@ -122,6 +124,8 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 【P17】第3引数はレイの起点(ワールド)になった。ここは原点を渡す——判断Aにより
     // 被覆率0で呼ばれ、SkyColorWithRayの早期脱出で雲の計算が一度も走らないため値は使われない
     params = ApplyCloudFogParameters(params, float4(0.0f, 0.0f, 0.0f, 0.0f), float3(0.0f, 0.0f, 0.0f));
+    // レイマーチの開始位置のずらし量(C2)。このパスは画面を持たず、かつ判断Aで雲を焼かないため0
+    params.RaymarchJitter = 0.0f;
 
     const float3 color = SkyColor(dir, params);
 

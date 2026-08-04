@@ -1588,6 +1588,10 @@ namespace Kurenai
         // ため、カメラが地表付近にいる従来の構図では見た目は実質変わらない
         float m_CloudAltitude = Defaults::CloudAltitude;
         float m_CloudUvScale = Defaults::CloudUvScale;
+        // 雲の種類の偏り(C4)。FrameConstants.CloudParams3.wへ載る。
+        // Sky.hlsliのCloudTypeAtが場所ごとの種類(層雲/積雲/雄大積雲)を決めるとき、
+        // 空全体をどちらへ寄せるかのバイアスになる。0.5が中立
+        float m_CloudTypeBias = Defaults::CloudTypeBias;
         float m_CloudDensity = Defaults::CloudDensity;
         // 風速[m/s]。実世界の速度としてUIで直感的に扱えるようにしてあり、ノイズ空間の移動量への
         // 換算(CloudUvScaleを掛ける)はRenderThreadMainのm_CloudScrollOffset更新側で行う

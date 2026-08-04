@@ -137,7 +137,7 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 // (正規化の扱いを含む)。4つのシェーダーはcbufferをそれぞれ別に宣言しているため関数そのものは
 // 共有できず複製しているが、中身がずれると「背景の空」「水面に映る空」「フォグの合成先の色」が
 // 互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
-SkyParameters MakeSkyParameters()
+SkyParameters MakeSkyParameters(float2 pixelPosition)
 {
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
@@ -160,9 +160,13 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
+    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
+    params.CloudTypeBias = CloudParams3.w;
     // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
     // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
     params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
+    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える
+    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
     return params;
 }
 
@@ -232,7 +236,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 晴天より暗く無彩色になる)が、ここではその全天平均の減光は掛けていない。掛けるには
     // 平均透過率(KurenaiEngine3D.cppのComputeCloudAverageTransmittance)をFrameConstantsへ
     // 追加する必要があり、今回直したい破綻(雲の模様が地物へ焼き付く)とは別の話なので分けてある
-    const float3 inScatter = SkyColorUpper(fogDir, MakeSkyParameters());
+    const float3 inScatter = SkyColorUpper(fogDir, MakeSkyParameters(input.Position.xy));
 
     const float3 outColor = sceneColor * (1.0f - alpha) + inScatter * alpha;
     return float4(outColor, 1.0f);

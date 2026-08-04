@@ -245,7 +245,9 @@ namespace Kurenai
             DirectX::XMFLOAT4 CloudParams2;
             // CloudParams3: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
             //               同じ周期でstd::fmod済み。m_CirrusScrollOffset参照)、
-            //               z=fBmのUV(U方向)を伸ばす異方性スケール(m_CirrusAnisotropy)、w=未使用
+            //               z=fBmのUV(U方向)を伸ばす異方性スケール(m_CirrusAnisotropy)、
+            //               w=積雲の種類の偏り(m_CloudTypeBias、C4)。C4より前は未使用だった枠なので
+            //               FrameConstantsは1バイトも増えていない
             DirectX::XMFLOAT4 CloudParams3;
             // 平面反射(P6、さらに末尾に追加)。xyz=水面平面の法線(現状は常に(0,1,0))、
             // w=平面の距離項。PlanarReflection.hlslのVSMainが
@@ -2981,6 +2983,7 @@ namespace Kurenai
         if (m_Scene.HasCloudAltitude)  { m_CloudAltitude = m_Scene.CloudAltitude; }
         if (m_Scene.HasCloudThickness) { m_CloudThickness = m_Scene.CloudThickness; }
         if (m_Scene.HasCloudDensity)   { m_CloudDensity = m_Scene.CloudDensity; }
+        if (m_Scene.HasCloudTypeBias) { m_CloudTypeBias = m_Scene.CloudTypeBias; }
         if (m_Scene.HasCloudCellSize)  { m_CloudUvScale = 1.0f / std::max(m_Scene.CloudCellSize, 1.0f); }
         if (m_Scene.HasCirrusCoverage) { m_CirrusCoverage = m_Scene.CirrusCoverage; }
         // 大気遠近。[Cloud]と同じく指定されたキーだけを上書きする。
@@ -4555,7 +4558,7 @@ namespace Kurenai
             m_CirrusUvScale,
             m_CirrusDensity,
         };
-        constants.CloudParams3 = { m_CirrusScrollOffset.x, m_CirrusScrollOffset.y, m_CirrusAnisotropy, 0.0f };
+        constants.CloudParams3 = { m_CirrusScrollOffset.x, m_CirrusScrollOffset.y, m_CirrusAnisotropy, m_CloudTypeBias };
         // 平面反射(P6)。このフィールドを参照するのはPlanarReflection.hlslだけで、そちらは
         // 専用のm_PlanarReflectionConstantBufferで明示的に上書きした値を使う(下のPlanarReflection
         // パス登録箇所参照)。共有のm_FrameConstantBufferにも一貫した値を入れておく

@@ -289,7 +289,7 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 // あること。4つのシェーダーはcbufferをそれぞれ別に宣言しているため関数そのものは共有できず
 // 複製しているが、中身がずれると「背景の空」「水面に映る空」「フォグの合成先の色」が
 // 互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
-SkyParameters MakeSkyParameters()
+SkyParameters MakeSkyParameters(float2 pixelPosition)
 {
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
@@ -316,9 +316,13 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
+    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
+    params.CloudTypeBias = CloudParams3.w;
     // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
     // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
     params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
+    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える
+    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
     return params;
 }
 
@@ -341,7 +345,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         float3 skyColor;
         if (SkyParams.y > 0.5f)
         {
-            const SkyParameters skyParams = MakeSkyParameters();
+            const SkyParameters skyParams = MakeSkyParameters(input.Position.xy);
             skyColor = SkyColor(rayDir, skyParams);
         }
         else

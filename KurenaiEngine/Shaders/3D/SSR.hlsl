@@ -211,7 +211,7 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 // 宣言しているため関数そのものは共有できず複製しているが、中身がずれると「背景の空」
 // 「水面に映る空」「フォグの合成先の色」が互いに食い違ってしまうため、
 // 中身を変える場合は必ず4つとも同時に直すこと
-SkyParameters MakeSkyParameters()
+SkyParameters MakeSkyParameters(float2 pixelPosition)
 {
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
@@ -238,9 +238,13 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
+    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
+    params.CloudTypeBias = CloudParams3.w;
     // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
     // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
     params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
+    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える
+    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
     return params;
 }
 
@@ -515,7 +519,7 @@ float4 PSMain(PSInput input) : SV_TARGET
             // 丸ごと入っていた。起点を水面のワールド座標にすることで、水面から空を見上げる
             // 本来のレイとして雲層との交差が解ける
             newRadiance = ApplyPlanarReflection(
-                SkyColorWithRay(worldPos, reflectDir, kCloudBackgroundRayDistance, MakeSkyParameters()),
+                SkyColorWithRay(worldPos, reflectDir, kCloudBackgroundRayDistance, MakeSkyParameters(input.Position.xy)),
                 input.UV, N);
         }
         else
@@ -546,7 +550,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 通る**(SSRMaxDistance 5.0mに対し4,000m四方の水面では、ほぼ常に画面外へ抜けるか
         // 最大距離まで判定がつかない)ため、水面へ雲が映るかどうかは実質ここで決まる
         newRadiance = ApplyPlanarReflection(
-            SkyColorWithRay(worldPos, reflectDir, kCloudBackgroundRayDistance, MakeSkyParameters()),
+            SkyColorWithRay(worldPos, reflectDir, kCloudBackgroundRayDistance, MakeSkyParameters(input.Position.xy)),
             input.UV, N);
         confidence = roughnessFade;
     }

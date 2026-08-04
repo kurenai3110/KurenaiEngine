@@ -230,6 +230,8 @@ namespace Kurenai::Assets
         float CloudThickness = 400.0f;      // 雲底から雲頂までの厚み[m]
         bool HasCloudDensity = false;
         float CloudDensity = 8.0f;          // 光学的な濃さ。上げるほど不透明で白い塊になる
+        bool HasCloudTypeBias = false;
+        float CloudTypeBias = 0.5f;         // 雲の種類の偏り(C4)。0=層雲寄り / 0.5=中立 / 1=雄大積雲寄り
         bool HasCloudCellSize = false;
         float CloudCellSize = 1000.0f;      // 雲の塊1つぶんのワールド上の大きさ[m]。
                                              // エンジン側はこの逆数(UvScale)を持つ
