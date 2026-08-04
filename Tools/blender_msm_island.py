@@ -396,12 +396,42 @@ WALL_HEIGHT_MAX = 8.0
 WALL_HEIGHT_SEGMENTS = 8
 WALL_HEIGHT_SEED = 20260803  # VILLAGE_SEEDとは独立させた専用シード
 
-# 天端の縁取り(パラペット)。個々の凹凸(狭間)は作らず、連続した帯1本にする
-WALL_TOP_LEDGE_HEIGHT = 1.5
+# 天端の縁取り(パラペット)。下半分は連続した帯、上半分は狭間(WALL_MERLON_*)に分ける
+WALL_TOP_LEDGE_HEIGHT = 0.6
 
-# 持ち出し帯(マシクーリの簡略化)。個々の切れ目は作らず、連続した帯1本にする
-MACHICOLATION_HEIGHT = 0.8
-MACHICOLATION_OUTWARD_OFFSET = 0.6
+# --- 狭間(クレネル)。パラペットの上に、隙間をあけて並べる四角い歯 ---
+# 【なぜ要るか】城壁の帯(島の正規化高さ h0.00〜0.12)は、参考写真との局所コントラストの
+# 差がいちばん大きい場所だった(x×hの格子で上位10セルのうち6つ)。幾何の無い平らな面だけを
+# 切り出すと 参考写真0.378 / 実機0.176 で、法線マップを入れてもまだ半分以下。
+# 城壁の目地は既に法線の傾きの上限(60度)で2割が頭打ちになっており、テクスチャ側は天井。
+# ここから先はジオメトリで、参考写真(photo_rampart.png、島の幅で5倍に拡大)を見ると
+# 天端沿いに走る歯状の暗い帯と、その上の明るいパラペットが最も目を引く。
+#
+# 寸法は出典なしの決め値だが、根拠の軸は「実機の内部解像度で分離して見えること」:
+# 内部1280幅で島の実効幅は約516画素、城壁のあたりは約1.72画素/m。
+# 鐘楼のアーチ(幅1.25m=約2.2画素)は実際に分離して見えたので、それを下限の目安にする。
+# 歯2.4m・隙間1.4m(周期3.8m=約6.5画素)なら隙間も約2.4画素あり確実に残る。
+# 実物のクレネルはもっと細かいが、この距離では周期が細かいほど平均へ潰れて逆効果になる
+WALL_MERLON_WIDTH = 2.4        # 弧に沿った歯の幅
+WALL_MERLON_GAP = 1.4          # 歯と歯のあいだ(ここが空になって暗く見える)
+WALL_MERLON_HEIGHT = 0.9       # パラペットの天端からさらに立ち上がる高さ
+
+# 持ち出し帯(マシクーリの簡略化)。個々の切れ目は作らず、連続した帯1本にする。
+# 【大きさを見直した】旧値(出っ張り0.6m・高さ0.8m)は内部解像度で約1画素しかなく、
+# 高倍率で並べても実機側には暗い帯がまったく出ていなかった(eng_rampart.png)。
+# 参考写真ではこの帯が城壁でいちばん強い線で、持ち出しの下に落ちる影が黒く見えている。
+#
+# 【ずっと壁の中に埋まっていた】OUTWARD_OFFSETは**基準線からの距離**で、壁は
+# WALL_THICKNESS=3.0をSolidifyのoffset=0(中心振り分け)で付けているため、壁の外面は
+# 基準線+1.5mにある。帯の厚みはMACHICOLATION_THICKNESS=1.0なので、
+#   旧値0.6 → 帯は +0.1〜+1.1m で**完全に壁の内側**(1mmも外に出ていない)
+#   1.2にしても +0.7〜+1.7m で、壁面から出るのは0.2mだけ
+# 城壁を横切る行ごとの明るさを測ると、参考写真が0.50〜1.00と2倍振れるのに対し
+# 実機は0.83〜1.00でほぼ平坦だった(影がまったく落ちていない)。
+# 壁面から1.2m持ち出すには 1.5 + 1.2 - 0.5 = 2.2 が要る。
+# 太陽の仰角15度なので、1.2mの持ち出しは壁面へ 1.2/tan(15度) = 4.5m の影を落とす
+MACHICOLATION_HEIGHT = 1.4
+MACHICOLATION_OUTWARD_OFFSET = 2.2
 MACHICOLATION_BELOW_TOP_OFFSET = 2.0  # 天端からの下げ量
 MACHICOLATION_THICKNESS = 1.0  # 計画では「薄い帯」とだけ指定(数値は出典なしの決め値)
 
@@ -2296,6 +2326,101 @@ def _rampart_radius(theta, extra_offset=0.0):
     return _rock_radius(WALL_REF_T, theta) + WALL_OUTWARD_OFFSET + extra_offset
 
 
+def _build_wall_merlons(name, z_bottom, thickness):
+    """パラペットの上に狭間(クレネルの歯)を、弧に沿って等間隔に並べたオブジェクトを作る。
+
+    z_bottom: theta(ラジアン)を受け取って歯の底面の高さを返す関数(パラペットの天端)。
+    thickness: 壁と同じ厚み(Solidifyで内外へ均等に付ける)。
+
+    弧長で等間隔に歩く(角度で等分すると、半径が場所によって違うため間隔が揃わない)。
+    歯1つは弧に沿った4頂点の板をSolidifyで厚くしたもので、_build_wall_arc_stripと
+    同じ作り方をする。歯の中は弧を細かく割って曲率に追随させる。
+    """
+    pitch = WALL_MERLON_WIDTH + WALL_MERLON_GAP
+    if pitch <= 0.0 or WALL_MERLON_WIDTH <= 0.0:
+        print(
+            f"[ERROR] 狭間の寸法が不正です(幅={WALL_MERLON_WIDTH}m, 隙間={WALL_MERLON_GAP}m)。"
+            f"WALL_MERLON_WIDTH/GAPを見直してください",
+            file=sys.stderr,
+        )
+        raise ValueError("狭間の寸法が不正です")
+
+    arc_start = math.radians(RAMPART_ARC_START_DEG)
+    arc_end = math.radians(RAMPART_ARC_END_DEG)
+
+    # 弧長を数値積分して、弧長 -> theta の対応表を作る
+    samples = RAMPART_ARC_SEGMENTS * 8
+    thetas = [arc_start + (arc_end - arc_start) * (i / samples) for i in range(samples + 1)]
+    lengths = [0.0]
+    for i in range(samples):
+        r0, r1 = _rampart_radius(thetas[i]), _rampart_radius(thetas[i + 1])
+        x0, z0 = r0 * math.cos(thetas[i]), r0 * math.sin(thetas[i])
+        x1, z1 = r1 * math.cos(thetas[i + 1]), r1 * math.sin(thetas[i + 1])
+        lengths.append(lengths[-1] + math.hypot(x1 - x0, z1 - z0))
+    total = lengths[-1]
+
+    def theta_at(length):
+        # lengthsは単調増加なので線形探索で十分(samplesは高々数百)
+        for i in range(samples):
+            if lengths[i + 1] >= length:
+                span = lengths[i + 1] - lengths[i]
+                u = 0.0 if span <= 1e-9 else (length - lengths[i]) / span
+                return thetas[i] + (thetas[i + 1] - thetas[i]) * u
+        return thetas[-1]
+
+    bm = bmesh.new()
+    count = 0
+    try:
+        start = 0.0
+        while start + WALL_MERLON_WIDTH <= total:
+            # 歯1つを3分割して曲率に追随させる
+            steps = 3
+            bottom_verts = []
+            top_verts = []
+            for k in range(steps + 1):
+                theta = theta_at(start + WALL_MERLON_WIDTH * k / steps)
+                radius = _rampart_radius(theta)
+                bx, by = _engine_xz_to_blender_xy(radius * math.cos(theta), radius * math.sin(theta))
+                base_z = z_bottom(theta)
+                bottom_verts.append(bm.verts.new((bx, by, base_z)))
+                top_verts.append(bm.verts.new((bx, by, base_z + WALL_MERLON_HEIGHT)))
+            for k in range(steps):
+                bm.faces.new((bottom_verts[k], bottom_verts[k + 1],
+                              top_verts[k + 1], top_verts[k]))
+            count += 1
+            start += pitch
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] 狭間の作成に失敗しました(#{count}): ({error})", file=sys.stderr)
+        raise
+
+    _tag_new_faces(bm, 0, "Masonry")
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update()
+
+    obj = bpy.data.objects.new(name, mesh)
+    _link(obj)
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+
+    modifier = obj.modifiers.new(name="Solidify", type='SOLIDIFY')
+    modifier.thickness = thickness
+    modifier.offset = 0.0
+    modifier.use_rim = True
+    try:
+        bpy.ops.object.modifier_apply(modifier=modifier.name)
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] {name}のSolidifyモディファイアの適用に失敗しました: ({error})", file=sys.stderr)
+        raise
+
+    print(f"[INFO] 狭間: {count}個 (弧長{total:.0f}m 周期{pitch:.1f}m 歯{WALL_MERLON_WIDTH}m"
+          f"/隙間{WALL_MERLON_GAP}m 高さ{WALL_MERLON_HEIGHT}m)")
+    return obj
+
+
 def _build_wall_arc_strip(name, extra_offset, z_bottom, z_top, thickness):
     """岩の表面沿いに、RAMPART_ARC_START_DEG〜RAMPART_ARC_END_DEGの弧・指定した高さ範囲・
     半径オフセット・厚みで帯状のジオメトリを1つ作る。城壁本体・天端の縁取り・持ち出し帯の
@@ -2513,6 +2638,10 @@ def build_rampart():
         WALL_THICKNESS,
     )
 
+    # パラペットの上に狭間を並べる(WALL_MERLON_*参照)。歯と歯のあいだが空になり、
+    # 天端が一直線ではなくなる
+    merlons = _build_wall_merlons("WallMerlons", ledge_top, WALL_THICKNESS)
+
     def machicolation_bottom(theta):
         return wall_top(theta) - MACHICOLATION_BELOW_TOP_OFFSET
 
@@ -2525,7 +2654,7 @@ def build_rampart():
         MACHICOLATION_THICKNESS,
     )
 
-    return [wall, ledge, machicolation]
+    return [wall, ledge, merlons, machicolation]
 
 
 def _build_square_tower(name, theta, radius_tower, height_tower, base_z):
