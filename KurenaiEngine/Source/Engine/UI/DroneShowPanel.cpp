@@ -99,11 +99,13 @@ namespace Kurenai::UI
         ImGui::SeparatorText("見た目");
 
         SliderFloatEx(
-            "明るさ###DroneShowBrightness", &m_Engine.m_DroneShowBrightness, 0.0f, 400.0f,
-            Defaults::DroneShowBrightness, "%.1f", 0,
-            "機体の発光強度。実効プリ露出はこれとは別に描画側で掛かるので、"
-            "シーンの露出([Scene]Exposure)を変えても機体と背景の明るさの比は保たれる。"
-            "上げすぎると芯がACESで白へ脱色し、機体の色が分からなくなる");
+            "明るさ###DroneShowBrightness", &m_Engine.m_DroneShowBrightness, 0.0f, 2.0f,
+            Defaults::DroneShowBrightness, "%.3f", 0,
+            "機体の発光強度。実効プリ露出が掛かるので値の桁は小さい。\n"
+            "【0.3あたりで頭打ちになる】夜はプリ露出が-18段下がり、SceneColor(fp16、上限65504)へ"
+            "積まれる値が表示値の2^18倍になるため、表示できる上限が0.25(リニア)で決まってしまう。"
+            "それ以上上げても芯は明るくならず、裾まで白く飽和して機体の色が失われるだけ。\n"
+            "実測(夜・1500機): 0.30と45で画素の最大値はどちらも153だが、平均彩度は0.710と0.275");
 
         SliderFloatEx(
             "ビルボード半径###DroneShowRadius", &m_Engine.m_DroneShowRadius, 0.05f, 20.0f, Defaults::DroneShowRadius,

@@ -325,7 +325,7 @@ namespace Kurenai::Assets
             bool HasDroneShowCenter = false;         float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };
             bool HasDroneShowScale = false;          float DroneShowScale = 130.0f;
             bool HasDroneShowRadius = false;         float DroneShowRadius = 1.2f;
-            bool HasDroneShowBrightness = false;     float DroneShowBrightness = 60.0f;
+            bool HasDroneShowBrightness = false;     float DroneShowBrightness = 0.3f;
             bool HasDroneShowHoldSeconds = false;    float DroneShowHoldSeconds = 6.0f;
             bool HasDroneShowMorphSeconds = false;   float DroneShowMorphSeconds = 4.0f;
             bool HasDroneShowHoverAmplitude = false; float DroneShowHoverAmplitude = 0.6f;
@@ -1093,7 +1093,9 @@ namespace Kurenai::Assets
                     }
                     else if (CaseInsensitiveEquals(key, L"Brightness"))
                     {
-                        readFloat(result.DroneShowBrightness, result.HasDroneShowBrightness, 0.0f, 10000.0f, L"Brightness");
+                        // 上限10は実用上の頭打ち(0.3前後)の30倍で、上げても白く飽和するだけ。
+                        // それ以上を許すと「効かない値」を書けてしまう
+                        readFloat(result.DroneShowBrightness, result.HasDroneShowBrightness, 0.0f, 10.0f, L"Brightness");
                     }
                     else if (CaseInsensitiveEquals(key, L"HoldSeconds"))
                     {

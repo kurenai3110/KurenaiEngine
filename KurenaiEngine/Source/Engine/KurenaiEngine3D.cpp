@@ -1,4 +1,4 @@
-﻿#include "KurenaiEngine3D.h"
+#include "KurenaiEngine3D.h"
 
 #include <imgui.h>
 
@@ -3099,6 +3099,27 @@ namespace Kurenai
         // A/B比較の対照が取れなくなる(EV100が引き継がれるのと同じ落とし穴)。必ず0へ戻す
         m_DroneShowTime = 0.0f;
         m_DroneShowConfigureRequested = true;
+
+        // 【ドローンショーのあるシーンは反射をSSRへ寄せる】
+        // 機体は手続き的に展開するビルボードでシーンジオメトリではないため、TLASに入っていない。
+        // つまりRT反射のレイからは原理的に見えず、DXR対応環境(DX12)で既定のRaytracedのままだと
+        // 空には編隊が出ているのに水面には何も映らない、という絵になる。
+        // 機体の映り込みはSSRパスが読む平面反射パス(m_PlanarReflectionColor)でしか作れず、
+        // その平面反射パスは反射手法がScreenSpaceのときしか登録されない
+        // (上のplanarReflectionPassRunsの条件)。ショーが主役のシーンでは
+        // 「地物の反射がRTで正確なこと」より「主役が水面に映ること」を優先する。
+        //
+        // ここで決めるのはあくまで既定値で、UIから手法を変えれば従来どおり切り替えられる。
+        // 実測(DX12、水面領域の画素値): Raytracedのまま23 → ScreenSpaceで66(DX11は71)
+        if (m_DroneShowEnabled && m_ReflectionMode == ReflectionMode::Raytraced)
+        {
+            m_ReflectionMode = ReflectionMode::ScreenSpace;
+            m_SceneDefaultReflectionMode = m_ReflectionMode;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "ドローンショーが有効なため反射手法をScreenSpaceにしました"
+                "(RT反射はTLASに無いビルボードを追跡できず、水面に機体が映らないため)");
+        }
         // 水面(P2)。[Water]が無いシーンでもScene::WaterWaveScale等はリテラル既定値
         // (EngineDefaults.hを複製したもの、Scene.h参照)を持っているため、常にそのまま反映してよい
         // (m_TimeOfDay/m_SunAzimuthDegreesと同じ扱い)
@@ -4424,6 +4445,7 @@ namespace Kurenai
         //  平面反射パスの出力ではなかった)
         const bool planarReflectionPassRuns =
             m_PlanarReflectionEnabled && hasWaterInstance && m_ReflectionMode == ReflectionMode::ScreenSpace;
+
 
         // 大気遠近パス(P8)を実行するか。UIで無効化されているか、密度が0以下(効果が無い)なら
         // パス自体を登録しない(GetActiveReflectionOutput()の結果がそのままTAA/Tonemapへ渡る)。

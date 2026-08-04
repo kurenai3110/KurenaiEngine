@@ -434,9 +434,20 @@ namespace Kurenai::Defaults
     inline constexpr float DroneShowScale = 130.0f;
     // 1機のビルボード半径[m]
     inline constexpr float DroneShowRadius = 1.2f;
-    // 機体の明るさ。加算合成でHDRへ書くので、1.0を大きく超えないとブルームのしきい値に
-    // 届かず光芒が出ない(EmissiveIntensityと同じ事情)
-    inline constexpr float DroneShowBrightness = 60.0f;
+    // 機体の明るさ。**この値には実効プリ露出が掛かる**(シーンの他の発光物と同じ扱い)ので、
+    // 見た目のわりに小さな値になる。
+    //
+    // 【上げても明るくならない範囲がある】夜のシーンでは可変プリ露出が-18段まで下がり
+    // (KurenaiEngine3D::Renderのプリ露出決定ブロック。満月の夜がちょうど収まるよう選ばれた値)、
+    // SceneColorへ積まれる値は「表示値 × 2^18」になる。R16G16B16A16_Floatの上限は65504なので、
+    // **表示できる上限は 65504 / 2^18 = 0.25(リニア)で頭打ちになる**。
+    // この頭打ちは[Scene]Exposureを変えても動かない ―― 実効EV100と設定EV100が一緒にずれるため、
+    // 両者の比(2^-18)が変わらないからである。
+    //
+    // 実測(1500機、夜、編隊領域): Brightness=0.11/0.30/1.0/45 で画素の最大値は146/153/153/153と
+    // ほぼ同じだが、平均彩度は0.708/0.710/0.673/0.275。**上げるほど色が白へ飛ぶだけで明るくはならない**。
+    // 芯が上限に届き、かつ裾に色が残る0.3を既定にする
+    inline constexpr float DroneShowBrightness = 0.3f;
     inline constexpr float DroneShowHoldSeconds = 6.0f;
     inline constexpr float DroneShowMorphSeconds = 4.0f;
     inline constexpr float DroneShowHoverAmplitude = 0.6f;

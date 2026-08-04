@@ -295,7 +295,7 @@ namespace Kurenai::Assets
         bool HasDroneShowRadius = false;
         float DroneShowRadius = 1.2f;       // 1機のビルボード半径[m]
         bool HasDroneShowBrightness = false;
-        float DroneShowBrightness = 60.0f;
+        float DroneShowBrightness = 0.3f;
         bool HasDroneShowHoldSeconds = false;
         float DroneShowHoldSeconds = 6.0f;  // 1つの形を保つ時間[秒]
         bool HasDroneShowMorphSeconds = false;

@@ -10375,11 +10375,7 @@ HLSLのローカル構造体は代入していないメンバの値が未定義�
 元の色との<code>lerp</code>で合成するため、点光源のようにピラミッドへ広く薄く散る対象では
 比率を上げるほど芯が暗くなる。実測(画面全体の平均輝度): <code>Strength=0.5</code>で5.90、
 ブルーム無効で12.13 &mdash;&mdash; 半分以下に暗くなっていた。0.15前後が妥当</li>
-<li><strong>機体の芯の明るさは頭打ちになる</strong> &mdash;&mdash; <code>Brightness</code>を45から400へ
-9倍にしても、編隊領域の画素値は最大153(sRGB)で完全に一致し1段も上がらなかった
-(約38,000画素が153に張り付く)。TAA(既定で無効)・バッファ形式(いずれも
-<code>R16G16B16A16_Float</code>)・撮影経路(昼のシーンでは198まで出る)は切り分け済みでどれも該当しない。
-<strong>原因は未特定</strong>。背景との明暗差は<code>[Scene]Exposure</code>で決めるほうが効く</li>
+<li><strong>夜は表示できる明るさに上限がある(fp16の飽和)</strong> &mdash;&mdash; 下記38.8参照</li>
 <li><strong>昼のシーンへの影響が無いことの確認方法</strong> &mdash;&mdash; MontSaintMichelのような
 雲・水面のあるシーンは<strong>同じビルドで2回撮るだけで39%の画素が変わる</strong>(スクロール位相のため)ので、
 A/B比較の土台にならない。<code>[Cloud]Coverage = 0</code>・水面なしの静的なシーンを作ると
@@ -10388,14 +10384,11 @@ A/B比較の土台にならない。<code>[Cloud]Coverage = 0</code>・水面な
 「昼は変わらず夜だけ星が出る」ことを測定として示せる</li>
 </ul>
 
-<h3 id="ch38-7">38.7 既知の問題</h3>
+<h3 id="ch38-7">38.7 DX12で水面に機体が映らなかった問題(解決済み)</h3>
 
 <p>
-<strong>DX12では水面への機体の映り込みが出ない。</strong>DX11では出る。
-</p>
-
-<p>
-<strong>少なくとも「DX12では平面反射パスがそもそも走らない」ことが効いている。</strong>
+実装当初、<strong>DX12でだけ水面への機体の映り込みが出なかった</strong>(DX11では出る)。
+原因は<strong>DX12では平面反射パスがそもそも走らないこと</strong>だった。
 <code>planarReflectionPassRuns</code>の条件は
 <code>m_PlanarReflectionEnabled &amp;&amp; hasWaterInstance &amp;&amp; m_ReflectionMode == ReflectionMode::ScreenSpace</code>
 であり、DXR対応環境では<code>DefaultReflectionMode</code> / <code>ReflectionModeForCapability</code>が
@@ -10425,19 +10418,80 @@ DX12では手法がRT反射になる。
 </ul>
 
 <p>
-<strong>ただしこれだけでは説明が閉じていない。</strong>
-<code>ApplyLoadedScene</code>で<code>m_ReflectionMode</code>を<code>ScreenSpace</code>へ強制して
-DX12で試したが、<strong>水面の映り込みは戻らなかった</strong>(水面領域の画素値は23のままで、
-DX11の71には届かない)。手法の切り替え自体は効いている(画面全体の平均輝度が23.93→24.86へ動いた)ので、
-<strong>RT反射への切り替わりとは別にもう1つ要因がある</strong>と考えられる。ここは未解明のまま残っている。
+<strong>切り分けは推測ではなくログで決着させた。</strong>
+それまで「クリップ平面か」「深度テストか」「バッファの読み取りか」と当て推量で潰していたが、
+どれも外れだった。<code>m_RaytracingAvailable</code> / <code>m_ReflectionMode</code> /
+<code>planarReflectionPassRuns</code>をそのままログへ出したところ、
+DX11が<code>RT利用可=0 反射手法=ScreenSpace 平面反射パス実行=1</code>、
+DX12が<code>RT利用可=1 反射手法=Raytraced 平面反射パス実行=0</code>で一目で確定した。
+<strong>実行時の値を数個ログに出すほうが、仮説を1つずつビルドして試すより速い。</strong>
 </p>
 
 <p>
-<strong>直すなら</strong>、ドローンショーが有効なときは<code>Raytraced</code>でも平面反射パスを走らせ、
-RT反射側が水面画素に対してその結果を合成する必要がある(RT反射は機体を追跡できないため、
-ラスタで描いた反射像を別途混ぜるしかない)。上の未解明の要因を先に潰すこと。
+<strong>対処</strong>: <code>ApplyLoadedScene</code>で、ドローンショーが有効かつ手法が
+<code>Raytraced</code>のときだけ<code>ScreenSpace</code>へ落とす(ログを1行出す)。
+ショーが主役のシーンでは「地物の反射がRTで正確なこと」より「主役が水面に映ること」を優先する、
+という判断である。UIから手法を変えれば従来どおり切り替えられる。
+実測(DX12、水面領域の画素値): <strong>Raytracedのまま23 &rarr; ScreenSpaceで66</strong>(DX11は71)。
+</p>
+
+<p>
+より本格的に直すなら、<code>Raytraced</code>のままでも平面反射パスを走らせ、RT反射側が水面画素に対して
+その結果を合成する形になる(RT反射はTLASに無いビルボードを追跡できないため、
+ラスタで描いた反射像を別途混ぜるしかない)。
 なお<code>DebugView::PlanarReflection</code>はDX12では最終画像が出るだけで反射バッファを表示しないため、
 この経路での切り分けには使えない(本作業とは無関係な既存の問題)。
+</p>
+
+<h3 id="ch38-8">38.8 夜に表示できる明るさの上限(fp16の飽和)</h3>
+
+<p>
+<code>[DroneShow]Brightness</code>を45から400へ9倍にしても、編隊領域の画素値は最大153(sRGB)のまま
+1段も上がらない &mdash;&mdash; 約38,000画素がぴったり153に張り付く。
+<code>[Scene]Exposure</code>を2.0から0.5へ動かしても最大値は153のままだった。
+</p>
+
+<p>
+これも実行時の値をログへ出して決着した。夜のこのシーンでは:
+</p>
+<ul>
+<li>キー照度 = <strong>0.301 lx</strong>(満月の夜。正常な値)</li>
+<li><code>autoBias = log2(0.301 / 100000) = -18.34</code> &rarr; <code>[-18, 0]</code>でクランプされ<strong>-18</strong></li>
+<li>実効EV100 = 設定EV100 + (-18) = <strong>-17.5</strong>、実効露出 = <strong>154,470</strong></li>
+<li>機体の芯のHDR値 = <code>Brightness(45) &times; 154470 &times; glow(4)</code> = <strong>27,804,570</strong></li>
+</ul>
+
+<p>
+SceneColorは<code>R16G16B16A16_Float</code>で<strong>上限は65,504</strong>。
+27,804,570はその<strong>424倍</strong>で、全チャンネルが飽和する &mdash;&mdash; だから芯が真っ白になり、
+<code>Brightness</code>を上げても裾がさらに飽和して<em>白い塊が大きくなる</em>だけだった。
+</p>
+
+<p>
+<strong>この上限は<code>[Scene]Exposure</code>では動かせない。</strong>
+<code>manualExposureScale = 2^(実効EV100 - 設定EV100)</code>で、実効EV100は
+<code>設定EV100 - 18</code>だから、比は<strong>常に2<sup>-18</sup></strong>になり設定値が相殺される。
+つまり表示できる上限は<code>65504 / 2^18 = 0.25</code>(リニア)で固定であり、
+これは<strong>ドローンに限らず夜のシーンのあらゆる発光物に効く構造的な制約</strong>である。
+</p>
+
+<p>
+<strong>対処</strong>: 上限を超える値を入れても明るくならず色が失われるだけなので、
+<strong>芯が上限に届き、かつ裾に色が残る値</strong>を既定にした。
+実測(夜・1500機、編隊領域):
+</p>
+
+<table>
+<tr><th>Brightness</th><th>最大画素値</th><th>明るい画素数</th><th>平均彩度</th></tr>
+<tr><td>0.11</td><td>146</td><td>13,840</td><td>0.708</td></tr>
+<tr><td><strong>0.30</strong>(採用)</td><td><strong>153</strong></td><td>20,429</td><td><strong>0.710</strong></td></tr>
+<tr><td>1.00</td><td>153</td><td>25,889</td><td>0.673</td></tr>
+<tr><td>45.0(当初)</td><td>153</td><td>32,606</td><td>0.275</td></tr>
+</table>
+
+<p>
+最大値は0.30以上でどれも153で並ぶが、<strong>平均彩度は0.710から0.275へ落ちる</strong>。
+当初の45は表示上限を150倍も超えており、明るさを1段も稼がないまま機体の色だけを失っていた。
 </p>
 
 </section>

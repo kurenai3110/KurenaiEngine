@@ -1211,7 +1211,7 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>Center</code></td><td>float3</td><td>-</td><td>0, 220, 260</td><td>編隊の中心(ワールド座標)。<code>Center.y - Scale</code>が水面より下になると、編隊の下半分が反射から欠ける</td></tr>
 <tr><td><code>Scale</code></td><td>float</td><td>-</td><td>130.0</td><td>編隊の代表半径[m]。1〜5000</td></tr>
 <tr><td><code>Radius</code></td><td>float</td><td>-</td><td>1.2</td><td>1機の光点の半径[m]。0.01〜50。<strong>機体の大きさではなく光の見かけの大きさ</strong>で、遠方で1画素を割る場合は自動的に押し上げられる</td></tr>
-<tr><td><code>Brightness</code></td><td>float</td><td>-</td><td>60.0</td><td>発光強度。0〜10000。<strong>芯の明るさはある値で頭打ちになる</strong>ので、上げすぎても白く広がるだけで明るくはならない。背景との明暗差は<code>[Scene]Exposure</code>で決めるほうが効く</td></tr>
+<tr><td><code>Brightness</code></td><td>float</td><td>-</td><td>0.3</td><td>発光強度。0〜10。実効プリ露出が掛かるため値の桁は小さい。<strong>0.3あたりで頭打ち</strong>で、それ以上は明るくならず色が白へ飛ぶだけ(夜はSceneColorのfp16上限で表示が0.25リニアに制限されるため)。実測: 0.30と45で最大画素値はどちらも153、平均彩度は0.710と0.275</td></tr>
 <tr><td><code>HoldSeconds</code></td><td>float</td><td>-</td><td>6.0</td><td>1つの形を保つ時間[秒]。0〜120</td></tr>
 <tr><td><code>MorphSeconds</code></td><td>float</td><td>-</td><td>4.0</td><td>次の形へ変形する時間[秒]。0.1〜120。機体ごとに出発を最大25%ずらしてあるので、端から順に崩れて組み上がる</td></tr>
 <tr><td><code>HoverAmplitude</code></td><td>float</td><td>-</td><td>0.6</td><td>機体ごとの揺れの振幅[m]。0〜20。0にすると数学的に完全な位置で静止し、模型のように見える</td></tr>
