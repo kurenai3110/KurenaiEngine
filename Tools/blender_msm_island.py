@@ -667,6 +667,15 @@ VILLAGE_WINDOW_SKIP_PROBABILITY = 0.2  # 格子に見えないよう間引く割
 # 既存の家・樹木の位置がすべて動いてしまうため(ABBEY_FACADE_WINDOW_SEEDと同じ理由)
 VILLAGE_WINDOW_SEED = 20260806
 
+# --- 軒の出と煙突。参考写真の家は例外なく、軒の下に濃い水平の影の線が入り、
+# 屋根の稜線から煙突が突き出して屋根の線を刻んでいる。実機の家は屋根が壁と面一で、
+# 稜線も一直線だった。どちらも数メートル規模の凹凸で、島の暗部(写真13%対実機2.8%)は
+# こうした小さな陰の集まりでできている ---
+VILLAGE_EAVES_OVERHANG = 0.6   # 軒が壁より外へ出る量。実物のノルマンディの家は0.3〜0.5m
+VILLAGE_CHIMNEY_WIDTH = 0.9    # 煙突の平面寸法(正方形)
+VILLAGE_CHIMNEY_HEIGHT = 2.2   # 棟から上へ出る高さ
+VILLAGE_CHIMNEY_PROBABILITY = 0.85   # 煙突を持つ棟の割合(出典なしの決め値)
+
 
 # --- 植生(vegetation)。600m先では葉の1枚1枚は見えず緑の塊のシルエットとしてしか
 # 視認されないため、木1本のジオメトリは低ポリの円柱(幹)+潰したUV球(樹冠)で済ませる ---
@@ -2632,11 +2641,32 @@ def _add_house_to_bmesh(bm, base, along_dir, across_dir, width, depth, wall_heig
     bm.faces.new((b2, b1, r1))
     _tag_new_faces(bm, first_wall_face, wall_material)
 
+    # 軒(のき)。屋根を壁より外へVILLAGE_EAVES_OVERHANGだけ張り出させ、その真下に
+    # 水平な軒裏(そふぃっと)を作る。軒裏は真下を向くので直射日光が当たらず、
+    # 参考写真の家にある「軒の下の濃い水平の線」になる。
+    # 軒先の高さは壁の天端と同じにする(斜面を延長して下げると妻面の輪郭が
+    # 五角形になり、既存の妻の三角形2枚が使えなくなるため。600m先では差は出ない)
+    half_width_eaves = half_width + VILLAGE_EAVES_OVERHANG
+    e0 = bm.verts.new(point(-half_depth, -half_width_eaves, wall_height))
+    e1 = bm.verts.new(point(half_depth, -half_width_eaves, wall_height))
+    e2 = bm.verts.new(point(half_depth, half_width_eaves, wall_height))
+    e3 = bm.verts.new(point(-half_depth, half_width_eaves, wall_height))
+
     first_roof_face = len(bm.faces)
 
-    # 屋根の斜面(2枚。矩形の周を1周する順)
-    bm.faces.new((b0, b1, r1, r0))  # across=-half_width側の斜面
-    bm.faces.new((b3, b2, r1, r0))  # across=+half_width側の斜面
+    # 屋根の斜面(2枚。矩形の周を1周する順)。軒先まで伸ばす
+    bm.faces.new((e0, e1, r1, r0))  # across=-half_width側の斜面
+    bm.faces.new((e3, e2, r1, r0))  # across=+half_width側の斜面
+    # 軒裏(2枚。壁の天端から軒先までの水平な帯)
+    bm.faces.new((b0, b1, e1, e0))
+    bm.faces.new((b3, b2, e2, e3))
+    # 軒の妻側の小口(4枚)。これを入れないと、妻の三角形の辺(b→棟)と
+    # 軒先の辺(e→棟)・軒裏の辺(b→e)で囲まれた三角形が穴のまま残り、
+    # 非多様体になってBlenderが落ちる(実測: EXCEPTION_ACCESS_VIOLATIONで3回とも失敗)
+    bm.faces.new((b0, e0, r0))
+    bm.faces.new((b3, r0, e3))
+    bm.faces.new((b1, r1, e1))
+    bm.faces.new((b2, e2, r1))
     _tag_new_faces(bm, first_roof_face, roof_material)
 
 
@@ -2799,6 +2829,25 @@ def build_village():
                     wall_material=wall_material,
                     roof_material=roof_material,
                 )
+
+                # 煙突。棟(むね)の上に立てて屋根の一直線を刻む。参考写真の家並みは
+                # 煙突と屋根の段差で稜線がぎざぎざになっており、これが空との境で
+                # いちばん目に付く小さな凹凸になっている。
+                # 乱数は窓と同じ専用インスタンス(グローバルのrandomは消費しない)
+                if window_rng.random() < VILLAGE_CHIMNEY_PROBABILITY:
+                    # 棟の長さ方向の位置。両端を避けて中ほどへ置く
+                    along_offset = house_depth * (window_rng.uniform(-0.30, 0.30))
+                    chimney_base = (
+                        base_engine_x + house_along[0] * along_offset,
+                        base_engine_y + wall_height + roof_height - VILLAGE_CHIMNEY_WIDTH * 0.5,
+                        base_engine_z + house_along[2] * along_offset,
+                    )
+                    _add_flat_box_to_bmesh(
+                        bm, base=chimney_base, along_dir=house_along, across_dir=house_across,
+                        depth=VILLAGE_CHIMNEY_WIDTH, width=VILLAGE_CHIMNEY_WIDTH,
+                        height=VILLAGE_CHIMNEY_HEIGHT + VILLAGE_CHIMNEY_WIDTH * 0.5,
+                        side_material=wall_material, top_material="SlateRoof",
+                    )
 
                 # カメラ側(=島の中心から見て外向き)の1面にだけ窓を並べる。
                 # 妻を通りに向ける棟では along_dir が半径方向、そうでない棟では
