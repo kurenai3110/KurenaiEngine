@@ -763,7 +763,8 @@ namespace Kurenai
             // シャープネスの近傍タップに使う1テクセルぶんのUV(1/レンダー解像度)
             float InvRenderWidth;
             float InvRenderHeight;
-            float TonemapPadding;
+            // 黒の締め(ブラックポイント)。0で恒等。詳細はTonemap.hlsl側のコメント参照
+            float BlackPoint;
         };
 
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
@@ -2962,6 +2963,8 @@ namespace Kurenai
         case Assets::Scene::TonemapCurveSetting::ACES:     m_TonemapCurve = TonemapCurve::ACES;     break;
         case Assets::Scene::TonemapCurveSetting::AgX:      m_TonemapCurve = TonemapCurve::AgX;      break;
         }
+        // 黒の締め。Tonemap/SkySaturationと同じく無条件に反映する(既定0で恒等のため)
+        m_TonemapBlackPoint = m_Scene.TonemapBlackPoint;
         m_SkySaturation = m_Scene.SkySaturation;
         if (m_Scene.HasIBLIntensityOverride)
         {
@@ -6777,6 +6780,7 @@ namespace Kurenai
                 tonemapConstants.Sharpness = m_TAAEnabled ? m_TAASharpness : 0.0f;
                 tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(m_RenderWidth);
                 tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(m_RenderHeight);
+                tonemapConstants.BlackPoint = m_TonemapBlackPoint;
                 cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
 
                 cmd->SetViewport(gbufferViewport);

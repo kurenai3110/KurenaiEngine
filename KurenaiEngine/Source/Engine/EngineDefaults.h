@@ -332,6 +332,11 @@ namespace Kurenai::Defaults
     inline constexpr float TAABlendWeight = 0.1f;
     // ジッターの振れ幅の倍率。1.0でピクセル内いっぱい(±0.5px)に散らす
     inline constexpr float TAAJitterScale = 1.0f;
+    // トーンマップ後の黒の締め(ブラックポイント)。0で恒等=既定の見た目を変えない。
+    // 屋外の遠景では大気遠近が最暗部へ空の輝度を加算して黒が浮くため、シーン側で
+    // [Scene]TonemapBlackPoint を指定して締められるようにしてある
+    inline constexpr float TonemapBlackPoint = 0.0f;
+
     // 蓄積によるボケを補う量。0で無効。TAAの中ではなくTonemapパスで最終出力にのみ掛ける
     inline constexpr float TAASharpness = 0.35f;
     // 近傍クリップのボックス幅(近傍の標準偏差の何倍まで履歴を許容するか)。

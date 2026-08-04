@@ -283,6 +283,7 @@ namespace Kurenai::Assets
             bool SSREnabled = true;
             Scene::TonemapCurveSetting Tonemap = Scene::TonemapCurveSetting::AgX;
             float SkySaturation = 1.0f;
+            float TonemapBlackPoint = 0.0f;
             bool HasExposure = false;
             float ExposureEV100 = 15.0f;
 
@@ -521,6 +522,19 @@ namespace Kurenai::Assets
                     {
                         if (!ParseFloatToken(value, result.SkySaturation)) errorAt(lineNumber, rawLine, "SkySaturationの値が不正です");
                         if (result.SkySaturation < 0.0f) errorAt(lineNumber, rawLine, "SkySaturationは0以上で指定してください");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"TonemapBlackPoint"))
+                    {
+                        if (!ParseFloatToken(value, result.TonemapBlackPoint))
+                        {
+                            errorAt(lineNumber, rawLine, "TonemapBlackPointの値が不正です");
+                        }
+                        // 0で恒等、1で全部黒。0.2を超えると暗部が丸ごと潰れるので
+                        // 打ち間違いとみなす(実用域は0.00〜0.10)
+                        if (result.TonemapBlackPoint < 0.0f || result.TonemapBlackPoint > 0.2f)
+                        {
+                            errorAt(lineNumber, rawLine, "TonemapBlackPointは0〜0.2で指定してください");
+                        }
                     }
                     else if (CaseInsensitiveEquals(key, L"Exposure"))
                     {
@@ -1016,6 +1030,7 @@ namespace Kurenai::Assets
         scene.SSREnabled = parsed.SSREnabled;
         scene.Tonemap = parsed.Tonemap;
         scene.SkySaturation = parsed.SkySaturation;
+        scene.TonemapBlackPoint = parsed.TonemapBlackPoint;
         scene.HasExposureOverride = parsed.HasExposure;
         scene.HasCloudCoverage = parsed.HasCloudCoverage;   scene.CloudCoverage = parsed.CloudCoverage;
         scene.HasCloudAltitude = parsed.HasCloudAltitude;   scene.CloudAltitude = parsed.CloudAltitude;

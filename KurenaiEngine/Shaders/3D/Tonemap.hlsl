@@ -47,7 +47,15 @@ cbuffer TonemapConstants : register(b1)
     // シャープネスの近傍タップに使う1テクセルぶんのUV(1/レンダー解像度)
     float InvRenderWidth;
     float InvRenderHeight;
-    float TonemapPadding;
+    // 黒の締め(ブラックポイント)。トーンマップ後の表示リニア値からこの値を引き、
+    // 残りを[0,1]へ伸ばし直す。実カメラのトーンカーブが持つ「黒を締める」処理に相当する。
+    // 0で恒等(既定)なので、指定しないシーンの見た目は一切変わらない。
+    // 【なぜ要るか】屋外の遠景では大気遠近(霞)が最暗部へ空の輝度を一定量だけ加算する。
+    // 600m先・視程78kmでも空の3%が乗り、空は深い影の50倍ほど明るいので、
+    // 画面上の最暗値が輝度31前後で頭打ちになる。参考写真の同じ構図は6まで落ちており、
+    // その差は「凹凸を足す」では埋まらない(窓・軒・煙突を足しても最暗値は動かなかった)。
+    // 霞を非物理的な値まで薄めるのではなく、カメラ側の処理としてここで締める
+    float BlackPoint;
 };
 
 struct PSInput
@@ -267,6 +275,14 @@ float3 ResolveDisplayColor(float2 uv, float exposureScale)
     else
     {
         color = TonemapReinhard(color);
+    }
+
+    // 黒の締め。トーンマップ後・sRGBエンコード前の表示リニア値に対して掛ける
+    // (実カメラのトーンカーブと同じ位置。sRGBエンコード後に掛けるとガンマの効いた
+    //  空間での引き算になり、暗部の階調が不均一に潰れる)
+    if (BlackPoint > 0.0f)
+    {
+        color = saturate((color - BlackPoint) / max(1.0f - BlackPoint, 1e-4f));
     }
 
     return LinearToSRGB(color);
