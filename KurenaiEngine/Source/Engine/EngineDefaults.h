@@ -422,40 +422,22 @@ namespace Kurenai::Defaults
     inline constexpr float StarsTwinkle = 0.0f;
 
     // --- ドローンショー ---
+    // ショーの中身(点・機体数・保持/変形秒・明るさ・ビルボード半径・揺れ・再生速度・種)は
+    // .kshowが持つため、ここには無い。残っているのは「シーンが決める配置」と
+    // 「シーンにもショーにも決めさせない描画側の下限」だけ。
+    //
     // 既定はfalse。専用シーン(Scenes/DroneShow.kscene)が[DroneShow]Enabled=trueで
     // 有効にする。既定で走らせると全シーンに無関係な描画パスが増えてしまう
     inline constexpr bool DroneShowEnabled = false;
-    inline constexpr uint32_t DroneShowCount = 1500u;
     // 編隊の中心(ワールド座標)。水面より十分上に置くこと
     inline constexpr float DroneShowCenterX = 0.0f;
     inline constexpr float DroneShowCenterY = 220.0f;
     inline constexpr float DroneShowCenterZ = 260.0f;
-    // 編隊の代表半径[m]
+    // 編隊の代表半径[m]。.kshowの点は代表半径1へ正規化されており、これを掛けて実寸にする
     inline constexpr float DroneShowScale = 130.0f;
-    // 1機のビルボード半径[m]
-    inline constexpr float DroneShowRadius = 1.2f;
-    // 機体の明るさ。**この値には実効プリ露出が掛かる**(シーンの他の発光物と同じ扱い)ので、
-    // 見た目のわりに小さな値になる。
-    //
-    // 【上げても明るくならない範囲がある】夜のシーンでは可変プリ露出が-18段まで下がり
-    // (KurenaiEngine3D::Renderのプリ露出決定ブロック。満月の夜がちょうど収まるよう選ばれた値)、
-    // SceneColorへ積まれる値は「表示値 × 2^18」になる。R16G16B16A16_Floatの上限は65504なので、
-    // **表示できる上限は 65504 / 2^18 = 0.25(リニア)で頭打ちになる**。
-    // この頭打ちは[Scene]Exposureを変えても動かない ―― 実効EV100と設定EV100が一緒にずれるため、
-    // 両者の比(2^-18)が変わらないからである。
-    //
-    // 実測(1500機、夜、編隊領域): Brightness=0.11/0.30/1.0/45 で画素の最大値は146/153/153/153と
-    // ほぼ同じだが、平均彩度は0.708/0.710/0.673/0.275。**上げるほど色が白へ飛ぶだけで明るくはならない**。
-    // 芯が上限に届き、かつ裾に色が残る0.3を既定にする
-    inline constexpr float DroneShowBrightness = 0.3f;
-    inline constexpr float DroneShowHoldSeconds = 6.0f;
-    inline constexpr float DroneShowMorphSeconds = 4.0f;
-    inline constexpr float DroneShowHoverAmplitude = 0.6f;
-    // ショーの再生速度倍率
-    inline constexpr float DroneShowSpeed = 1.0f;
     // 画面上の最小半径(NDC単位)。遠方の機体が1画素を割るとTAAのジッターで明滅するため、
-    // これ以下にならないようシェーダ側で押し上げる。1280x720で約1.4画素に相当する
+    // これ以下にならないようシェーダ側で押し上げる。1280x720で約1.4画素に相当する。
+    // 【シーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
+    // 「1画素を割るとちらつく」という事実はどのシーン・どのショーでも変わらない
     inline constexpr float DroneShowMinScreenRadius = 0.002f;
-    // 揺れと出発タイミングのばらつきの種。固定値にしてあるのは毎回同じ絵を出すため
-    inline constexpr uint32_t DroneShowSeed = 20260804u;
 }

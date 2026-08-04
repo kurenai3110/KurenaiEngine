@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Model.h"
+#include "ShowLoader.h"
 
 namespace Kurenai::Assets
 {
@@ -284,28 +285,21 @@ namespace Kurenai::Assets
         // --- [DroneShow]セクション。夜空を編隊飛行する発光ドローンの群れ。
         // 他のセクションと同じく指定されたキーだけエンジンの設定を上書きする。
         // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        //
+        // 【シーンが決めるのは「出すか」と「どこにどの大きさで置くか」だけ】機体数・保持/変形秒・
+        // 明るさ・ビルボード半径・揺れ・再生速度・種は、かつてここに9キーとして並んでいたが
+        // すべてショー側(.kshow)へ移した。ショーの中身をシーンが上書きできると、同じショーが
+        // シーンごとに別物として鳴り、どちらが「そのショー」なのかが決まらなくなる
         bool HasDroneShowEnabled = false;
         bool DroneShowEnabled = false;
-        bool HasDroneShowCount = false;
-        unsigned int DroneShowCount = 1500u;
+        // [DroneShow]Pathで指定された.kshowを読み込んだもの。Formationsが空なら
+        // 「指定なし」または「読み込み失敗」で、どちらもドローンは描かれない
+        // (読み込み失敗はLoadScene側でエラーログに出る)
+        ShowData DroneShowData;
         bool HasDroneShowCenter = false;
         float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };  // 編隊の中心(ワールド座標)
         bool HasDroneShowScale = false;
         float DroneShowScale = 130.0f;      // 編隊の代表半径[m]
-        bool HasDroneShowRadius = false;
-        float DroneShowRadius = 1.2f;       // 1機のビルボード半径[m]
-        bool HasDroneShowBrightness = false;
-        float DroneShowBrightness = 0.3f;
-        bool HasDroneShowHoldSeconds = false;
-        float DroneShowHoldSeconds = 6.0f;  // 1つの形を保つ時間[秒]
-        bool HasDroneShowMorphSeconds = false;
-        float DroneShowMorphSeconds = 4.0f; // 次の形へ変形する時間[秒]
-        bool HasDroneShowHoverAmplitude = false;
-        float DroneShowHoverAmplitude = 0.6f;
-        bool HasDroneShowSpeed = false;
-        float DroneShowSpeed = 1.0f;
-        bool HasDroneShowSeed = false;
-        unsigned int DroneShowSeed = 20260804u;
 
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う

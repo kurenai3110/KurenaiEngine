@@ -19,6 +19,7 @@
 #include "Core/StringUtil.h"
 #include "ModelLoader.h"
 #include "ModelPackage.h"
+#include "ShowLoader.h"
 
 namespace Kurenai::Assets
 {
@@ -319,18 +320,13 @@ namespace Kurenai::Assets
             bool HasStarsBrightness = false; float StarsBrightness = 1.0f;
             bool HasStarsTwinkle = false;    float StarsTwinkle = 0.0f;
 
-            // [DroneShow]セクション。指定されたキーだけエンジンの設定を上書きする
+            // [DroneShow]セクション。指定されたキーだけエンジンの設定を上書きする。
+            // ショーの中身(機体数・秒数・明るさ等)はここではなく.kshowが持つ
             bool HasDroneShowEnabled = false;        bool  DroneShowEnabled = false;
-            bool HasDroneShowCount = false;          unsigned int DroneShowCount = 1500u;
+            // .kshowへのパス(Assetsルートからの相対)。解決はLoadScene側
+            std::wstring DroneShowPath;
             bool HasDroneShowCenter = false;         float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };
             bool HasDroneShowScale = false;          float DroneShowScale = 130.0f;
-            bool HasDroneShowRadius = false;         float DroneShowRadius = 1.2f;
-            bool HasDroneShowBrightness = false;     float DroneShowBrightness = 0.3f;
-            bool HasDroneShowHoldSeconds = false;    float DroneShowHoldSeconds = 6.0f;
-            bool HasDroneShowMorphSeconds = false;   float DroneShowMorphSeconds = 4.0f;
-            bool HasDroneShowHoverAmplitude = false; float DroneShowHoverAmplitude = 0.6f;
-            bool HasDroneShowSpeed = false;          float DroneShowSpeed = 1.0f;
-            bool HasDroneShowSeed = false;           unsigned int DroneShowSeed = 20260804u;
 
             std::vector<ParsedLightEntry> Lights;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
@@ -1043,24 +1039,6 @@ namespace Kurenai::Assets
                         }
                         has = true;
                     };
-                    // 正の整数として読む。小数・負数・0はここで弾く
-                    const auto readUint = [&](unsigned int& out, bool& has, unsigned int minValue,
-                                              unsigned int maxValue, const wchar_t* name)
-                    {
-                        float parsedValue = 0.0f;
-                        if (!ParseFloatToken(value, parsedValue) || std::floor(parsedValue) != parsedValue ||
-                            parsedValue < 0.0f)
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です(正の整数で指定してください)");
-                        }
-                        const double asDouble = static_cast<double>(parsedValue);
-                        if (asDouble < minValue || asDouble > maxValue)
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
-                        }
-                        out = static_cast<unsigned int>(parsedValue);
-                        has = true;
-                    };
 
                     if (CaseInsensitiveEquals(key, L"Enabled"))
                     {
@@ -1069,11 +1047,11 @@ namespace Kurenai::Assets
                         result.DroneShowEnabled = *parsedValue;
                         result.HasDroneShowEnabled = true;
                     }
-                    else if (CaseInsensitiveEquals(key, L"Count"))
+                    else if (CaseInsensitiveEquals(key, L"Path"))
                     {
-                        // 上限4096はKurenaiEngine3D.cppのkMaxDrones(構造化バッファの固定容量)と
-                        // 一致させること。超える値を許すと黙って切り詰められる
-                        readUint(result.DroneShowCount, result.HasDroneShowCount, 1u, 4096u, L"Count");
+                        // .kshowのパス。パス解決(ルート外チェック・絶対パス化)はここでは行わず、
+                        // [Scene]Skybox・[Water]NormalMapと同じくLoadScene側でまとめて行う
+                        result.DroneShowPath = value;
                     }
                     else if (CaseInsensitiveEquals(key, L"Center"))
                     {
@@ -1086,38 +1064,6 @@ namespace Kurenai::Assets
                     else if (CaseInsensitiveEquals(key, L"Scale"))
                     {
                         readFloat(result.DroneShowScale, result.HasDroneShowScale, 1.0f, 5000.0f, L"Scale");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Radius"))
-                    {
-                        readFloat(result.DroneShowRadius, result.HasDroneShowRadius, 0.01f, 50.0f, L"Radius");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Brightness"))
-                    {
-                        // 上限10は実用上の頭打ち(0.3前後)の30倍で、上げても白く飽和するだけ。
-                        // それ以上を許すと「効かない値」を書けてしまう
-                        readFloat(result.DroneShowBrightness, result.HasDroneShowBrightness, 0.0f, 10.0f, L"Brightness");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"HoldSeconds"))
-                    {
-                        readFloat(result.DroneShowHoldSeconds, result.HasDroneShowHoldSeconds, 0.0f, 120.0f, L"HoldSeconds");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"MorphSeconds"))
-                    {
-                        // 0だと形が瞬間的に切り替わる。下限を0.1にして「一瞬で入れ替わる」を
-                        // 意図せず引き当てないようにする
-                        readFloat(result.DroneShowMorphSeconds, result.HasDroneShowMorphSeconds, 0.1f, 120.0f, L"MorphSeconds");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"HoverAmplitude"))
-                    {
-                        readFloat(result.DroneShowHoverAmplitude, result.HasDroneShowHoverAmplitude, 0.0f, 20.0f, L"HoverAmplitude");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Speed"))
-                    {
-                        readFloat(result.DroneShowSpeed, result.HasDroneShowSpeed, 0.0f, 20.0f, L"Speed");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Seed"))
-                    {
-                        readUint(result.DroneShowSeed, result.HasDroneShowSeed, 0u, 4294967295u, L"Seed");
                     }
                     else
                     {
@@ -1244,21 +1190,11 @@ namespace Kurenai::Assets
         scene.HasStarsBrightness = parsed.HasStarsBrightness; scene.StarsBrightness = parsed.StarsBrightness;
         scene.HasStarsTwinkle = parsed.HasStarsTwinkle;       scene.StarsTwinkle = parsed.StarsTwinkle;
         scene.HasDroneShowEnabled = parsed.HasDroneShowEnabled;   scene.DroneShowEnabled = parsed.DroneShowEnabled;
-        scene.HasDroneShowCount = parsed.HasDroneShowCount;       scene.DroneShowCount = parsed.DroneShowCount;
         scene.HasDroneShowCenter = parsed.HasDroneShowCenter;
         scene.DroneShowCenter[0] = parsed.DroneShowCenter[0];
         scene.DroneShowCenter[1] = parsed.DroneShowCenter[1];
         scene.DroneShowCenter[2] = parsed.DroneShowCenter[2];
         scene.HasDroneShowScale = parsed.HasDroneShowScale;             scene.DroneShowScale = parsed.DroneShowScale;
-        scene.HasDroneShowRadius = parsed.HasDroneShowRadius;           scene.DroneShowRadius = parsed.DroneShowRadius;
-        scene.HasDroneShowBrightness = parsed.HasDroneShowBrightness;   scene.DroneShowBrightness = parsed.DroneShowBrightness;
-        scene.HasDroneShowHoldSeconds = parsed.HasDroneShowHoldSeconds; scene.DroneShowHoldSeconds = parsed.DroneShowHoldSeconds;
-        scene.HasDroneShowMorphSeconds = parsed.HasDroneShowMorphSeconds;
-        scene.DroneShowMorphSeconds = parsed.DroneShowMorphSeconds;
-        scene.HasDroneShowHoverAmplitude = parsed.HasDroneShowHoverAmplitude;
-        scene.DroneShowHoverAmplitude = parsed.DroneShowHoverAmplitude;
-        scene.HasDroneShowSpeed = parsed.HasDroneShowSpeed;             scene.DroneShowSpeed = parsed.DroneShowSpeed;
-        scene.HasDroneShowSeed = parsed.HasDroneShowSeed;               scene.DroneShowSeed = parsed.DroneShowSeed;
         scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;
@@ -1281,6 +1217,28 @@ namespace Kurenai::Assets
         scene.WaterWaveScale = parsed.WaterWaveScale;
         scene.WaterWaveSpeed = parsed.WaterWaveSpeed;
         scene.WaterWaveStrength = parsed.WaterWaveStrength;
+
+        // [DroneShow]Pathの.kshowも同じ規則で解決し、ここ(=Loaderスレッド)で読んでしまう。
+        // Renderスレッドでファイルを開かないための配置で、[Model]Pathの.kmodelと同じ扱い。
+        //
+        // 【読み込み失敗でシーンごと落とさない】モデルはシーンそのものだが、ドローンショーは
+        // 夜空の装飾で、これが無くてもシーンは成立する。エラーをログに残して編隊なしで進む
+        // (パス解決の失敗——Assetsルートの外を指しているなど——は書式の誤りなので従来どおり投げる)
+        if (!parsed.DroneShowPath.empty())
+        {
+            const std::wstring showPath =
+                ResolveAssetRelativePath(parsed.DroneShowPath, assetRootDirectory, L"[DroneShow]Path", sceneFilePath);
+            try
+            {
+                scene.DroneShowData = LoadShow(showPath);
+            }
+            catch (const std::exception& e)
+            {
+                Core::Logger::Error(
+                    "SceneLoader",
+                    std::string("[DroneShow]Pathのショーを読み込めませんでした(編隊なしで続行します): ") + e.what());
+            }
+        }
 
         // .kscene自身の[Light]で直接指定されたライトは、既にワールド空間の値として書かれているため
         // 変換不要でそのままScene::Lightsへ入れる(モデル埋め込みライトは下のモデルループ内で

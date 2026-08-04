@@ -1206,17 +1206,10 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>Density</code></td><td>float</td><td>-</td><td>48.0</td><td>天球を分割するセルの細かさ。1〜256。1セルにつき星1個なので、大きいほど星が増える</td></tr>
 <tr><td><code>Brightness</code></td><td>float</td><td>-</td><td>1.0</td><td>星の明るさ倍率。0〜20。見た目だけの項で、夜空の目標照度(星明かりの照度)には影響しない</td></tr>
 <tr><td><code>Twinkle</code></td><td>float</td><td>-</td><td>0.0</td><td>またたきの強さ。0〜1。<strong>既定は0(無効)</strong>。上げるとTAAがちらつきとして拾い、スクリーンショットの再現性も落ちる</td></tr>
-<tr><td rowspan="11"><code>[DroneShow]</code></td><td rowspan="11">0〜1</td><td><code>Enabled</code></td><td>bool</td><td>-</td><td>false</td><td>夜空を編隊飛行する発光ドローン。1機につきカメラ正対のビルボードを1枚、加算合成で描く。光芒はこのパスでは作らず<code>[Bloom]</code>に任せるので、<strong>ブルームも合わせて有効にすること</strong></td></tr>
-<tr><td><code>Count</code></td><td>uint</td><td>-</td><td>1500</td><td>機体数。1〜4096(構造化バッファの固定容量)</td></tr>
+<tr><td rowspan="4"><code>[DroneShow]</code></td><td rowspan="4">0〜1</td><td><code>Enabled</code></td><td>bool</td><td>-</td><td>false</td><td>夜空を編隊飛行する発光ドローン。1機につきカメラ正対のビルボードを1枚、加算合成で描く。光芒はこのパスでは作らず<code>[Bloom]</code>に任せるので、<strong>ブルームも合わせて有効にすること</strong></td></tr>
+<tr><td><code>Path</code></td><td>string</td><td>-</td><td>(なし)</td><td>再生する<code>.kshow</code>(ドローンショーのデータファイル)。Assetsルートからの相対パスで、基準は<code>[Model]Path</code>と同じ。<strong>ショーの中身——編隊の点そのもの・機体数・保持/変形秒・明るさ・機体の半径・揺れ・再生速度・種——はすべてこのファイルが持つ</strong>。指定が無い、または読み込みに失敗した場合はドローンが描かれない(失敗はログにエラーとして出るが、シーンの読み込み自体は続行する)。ファイルの作成・編集は<code>Tools\KurenaiShowEditor</code></td></tr>
 <tr><td><code>Center</code></td><td>float3</td><td>-</td><td>0, 220, 260</td><td>編隊の中心(ワールド座標)。<code>Center.y - Scale</code>が水面より下になると、編隊の下半分が反射から欠ける</td></tr>
-<tr><td><code>Scale</code></td><td>float</td><td>-</td><td>130.0</td><td>編隊の代表半径[m]。1〜5000</td></tr>
-<tr><td><code>Radius</code></td><td>float</td><td>-</td><td>1.2</td><td>1機の光点の半径[m]。0.01〜50。<strong>機体の大きさではなく光の見かけの大きさ</strong>で、遠方で1画素を割る場合は自動的に押し上げられる</td></tr>
-<tr><td><code>Brightness</code></td><td>float</td><td>-</td><td>0.3</td><td>発光強度。0〜10。実効プリ露出が掛かるため値の桁は小さい。<strong>0.3あたりで頭打ち</strong>で、それ以上は明るくならず色が白へ飛ぶだけ(夜はSceneColorのfp16上限で表示が0.25リニアに制限されるため)。実測: 0.30と45で最大画素値はどちらも153、平均彩度は0.710と0.275</td></tr>
-<tr><td><code>HoldSeconds</code></td><td>float</td><td>-</td><td>6.0</td><td>1つの形を保つ時間[秒]。0〜120</td></tr>
-<tr><td><code>MorphSeconds</code></td><td>float</td><td>-</td><td>4.0</td><td>次の形へ変形する時間[秒]。0.1〜120。機体ごとに出発を最大25%ずらしてあるので、端から順に崩れて組み上がる</td></tr>
-<tr><td><code>HoverAmplitude</code></td><td>float</td><td>-</td><td>0.6</td><td>機体ごとの揺れの振幅[m]。0〜20。0にすると数学的に完全な位置で静止し、模型のように見える</td></tr>
-<tr><td><code>Speed</code></td><td>float</td><td>-</td><td>1.0</td><td>再生速度倍率。0〜20</td></tr>
-<tr><td><code>Seed</code></td><td>uint</td><td>-</td><td>20260804</td><td>揺れと出発タイミングのばらつきの種。固定値なので毎回同じ絵になる</td></tr>
+<tr><td><code>Scale</code></td><td>float</td><td>-</td><td>130.0</td><td>編隊の代表半径[m]。1〜5000。<code>.kshow</code>の点は代表半径1へ正規化されており、これを掛けて実寸にする。<strong>同じショーを別のシーンへ別の規模で置けるのはこの分担があるため</strong></td></tr>
 </tbody>
 </table>
 <p>

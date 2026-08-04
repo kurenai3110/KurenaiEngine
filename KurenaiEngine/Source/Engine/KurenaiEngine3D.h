@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -36,7 +37,6 @@ namespace Kurenai::UI
     class SystemPanel;
     class ProfilerPanel;
     class ReflectionProbePanel;
-    class DroneShowPanel;
 }
 
 namespace Kurenai
@@ -85,6 +85,26 @@ namespace Kurenai
         static constexpr uint32_t kCascadeCount = 4;
         static_assert(kCascadeCount == 4, "CascadeSplitsはXMFLOAT4前提のため4カスケード固定");
 
+        // --- オーサリングツール向けの口(Tools/KurenaiShowEditor) ------------------------
+        //
+        // ドローンショーの編集UIと形状生成は、出荷するエンジンのDLLに持ち込みたくない。
+        // かといってエディタが自前でレンダラーを持つと、トーンマップ・ブルーム・露出が
+        // 本番と違う経路を通り、そこで作った形は本番で見ると別物になる。
+        // そこでエディタはこのエンジンをそのまま使い、下の2つだけを追加で呼ぶ。
+        // IPanel/UIWidgetsといった内部の型を公開せずに済むよう、口はこの2つに留める。
+
+        // 全パネルを描いた後に一度だけ呼ばれる追加のImGui描画。nullptrで解除。
+        // 【Renderスレッドで呼ばれる】ImGuiの状態を触るのはRenderスレッドだけという
+        // 不変条件があるため。コールバックの中からエンジンの状態を触ってよいのは、
+        // それがRenderスレッドの持ち物である限りにおいて
+        void SetExtraImGuiCallback(std::function<void()> callback);
+
+        // 再生中のショーを差し替える(エディタのプレビュー用。ファイルを書かずに絵へ反映する)。
+        // 【SetExtraImGuiCallbackで登録したコールバックの中から呼ぶこと】どちらもRenderスレッドで
+        // 走るため、この経路なら同期が要らない。別スレッドから呼ぶとm_DroneShowを
+        // 描画中に書き換えることになる
+        void ApplyDroneShowData(const Assets::ShowData& data);
+
     private:
         // UIパネル群(Source/Engine/UI/)は、m_SSAORadius等のパラメータメンバをImGuiウィジェットへ
         // アドレスで直接渡すためprivateへアクセスする必要がある。
@@ -103,7 +123,6 @@ namespace Kurenai
         friend class UI::SystemPanel;
         friend class UI::ProfilerPanel;
         friend class UI::ReflectionProbePanel;
-        friend class UI::DroneShowPanel;
 
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
         // スナップショット。m_TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
@@ -310,6 +329,10 @@ namespace Kurenai
         // UI::UIManagerは不完全型のままにするため、デストラクタは.cpp側で定義する
         std::unique_ptr<UI::UIManager> m_UIManager;
 
+        // SetExtraImGuiCallbackで登録された追加のImGui描画(Tools/KurenaiShowEditor)。
+        // Renderスレッドだけが読み書きする
+        std::function<void()> m_ExtraImGuiCallback;
+
         // ImGuiが入力を掴んでいるかを、RenderスレッドからUpdateスレッドへ返す逆方向のハンドオフ。
         // FrameState(Update→Render)の逆向きだが、渡す値がboolを2つだけなのでロックを増やす
         // 価値がなく、atomicで足りる。Updateスレッドはこれを見てWASD移動と視点回転の開始を抑止する
@@ -501,31 +524,26 @@ namespace Kurenai
         // (m_LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
         //  パスの中で更新すると先に走る側が未更新の内容を読む)
         std::vector<GPUDrone> m_DroneInstances;
-        // 編隊の生成器。設定を変えたときだけConfigureし直す
+        // 再生器。編隊の点そのものはここが持つ(.kshowから読み込む)
         DroneShow m_DroneShow;
-        // Configure済みの設定。ここと現在の設定が食い違ったときだけ作り直す
-        DroneShowSettings m_DroneShowConfiguredSettings{};
-        bool m_DroneShowConfigureRequested = true;
 
         // ショーの進行時刻[秒]。RenderThreadMainがm_CloudScrollOffsetと同じ場所で進める
         float m_DroneShowTime = 0.0f;
 
-        // --- .ksceneとUIから触るパラメータ ---
+        // --- .ksceneが持つパラメータ ---
+        //
+        // 【ショーの中身に属する値はここに無い】機体数・保持/変形秒・明るさ・ビルボード半径・
+        // 揺れ・再生速度・種はすべて.kshowが持つ(m_DroneShow.Data()から読む)。
+        // シーンが決めてよいのは「出すかどうか」と「どこにどの大きさで置くか」だけで、
+        // 同じショーを別のシーンへ置けるのはこの分担があるため
         bool m_DroneShowEnabled = Defaults::DroneShowEnabled;
-        uint32_t m_DroneShowCount = Defaults::DroneShowCount;
         DirectX::XMFLOAT3 m_DroneShowCenter{
             Defaults::DroneShowCenterX, Defaults::DroneShowCenterY, Defaults::DroneShowCenterZ };
         float m_DroneShowScale = Defaults::DroneShowScale;
-        float m_DroneShowRadius = Defaults::DroneShowRadius;
-        // 機体の明るさ。実効プリ露出はこれとは別に描画側で掛ける(シーン全体と同じ扱い)
-        float m_DroneShowBrightness = Defaults::DroneShowBrightness;
-        float m_DroneShowHoldSeconds = Defaults::DroneShowHoldSeconds;
-        float m_DroneShowMorphSeconds = Defaults::DroneShowMorphSeconds;
-        float m_DroneShowHoverAmplitude = Defaults::DroneShowHoverAmplitude;
-        float m_DroneShowSpeed = Defaults::DroneShowSpeed;
-        // 遠方の機体が1画素を割ってTAAのジッターでちらつくのを防ぐ、画面上の最小半径(NDC単位)
+        // 遠方の機体が1画素を割ってTAAのジッターでちらつくのを防ぐ、画面上の最小半径(NDC単位)。
+        // 【これだけはシーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
+        // 「1画素を割ったらちらつく」という事実はどのシーン・どのショーでも変わらないため
         float m_DroneShowMinScreenRadius = Defaults::DroneShowMinScreenRadius;
-        uint32_t m_DroneShowSeed = Defaults::DroneShowSeed;
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。

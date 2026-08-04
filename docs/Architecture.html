@@ -10345,6 +10345,13 @@ i番目どうしが常に概ね同じ方角・同じ高さに来るため、各�
 生成順そのものには意味を持たせず、この並べ替えを唯一の対応規則にしている。
 </p>
 
+<p>
+<strong>この並べ替えは現在オーサリング側(KurenaiShowEditor)で焼き込まれ、<code>.kshow</code>内の
+順序がそのまま対応関係になっている</strong>(38.11)。ランタイムはi番目とi番目を結ぶだけで、
+毎フレームでも毎シーン読み込みでもソートをやり直さない。対応づけはデータの性質であって、
+再生する側が決め直すことではないため。
+</p>
+
 <h3 id="ch38-5">38.5 星は<code>SkyColorUpperUnit</code>ではなく<code>SkyColor</code>へ足す</h3>
 
 <p>
@@ -10724,6 +10731,164 @@ UIから手法を<code>ScreenSpace</code>へ切り替える必要がある。</s
 見に行けば、下側の要件だけで決まった調整可能な定数だと分かった。
 <strong>「fp16の上限」のようにハードウェアの語彙で言い切れてしまう説明ほど、
 その手前に人が決めた値が挟まっていないかを疑うこと。</strong>
+</p>
+
+<h3 id="ch38-11">38.11 ショーをデータ資産にする(<code>.kshow</code>とオーサリングツール)</h3>
+
+<p>
+実装当初、ドローンショーは<strong>6つの形をC++に手続きとして埋め込み</strong>、
+機体数・保持/変形秒・明るさ・機体の半径・揺れ・再生速度・種の9項目を<code>.kscene</code>と
+専用のImGuiタブが持っていた。動くものはできたが、次の3つが噛み合っていない。
+</p>
+
+<ul>
+<li><strong>ショーの中身がコードに埋まっている。</strong> 新しい編隊を足すのに
+<code>DroneShow.cpp</code>の実装が要り、形がエンジンのビルド成果物になっている。
+手続きで書ける形しか作れない</li>
+<li><strong>「作る」ためのUIが「見る」だけのアプリに常駐している。</strong>
+編隊・速度・保持・変形は出荷するランタイムには要らない</li>
+<li><strong>ショーの有無が別機能の設定を書き換えていた。</strong>
+<code>ApplyLoadedScene</code>がドローンショー有効時に反射手法をRaytracedから
+ScreenSpaceへ勝手に倒していた(38.7)</li>
+</ul>
+
+<h4>分担 &mdash;&mdash; シーンが決めるのは「出すか」と「どこに置くか」だけ</h4>
+
+<p>
+ショー1本を<strong>バイナリの<code>.kshow</code>1ファイル</strong>にまとめ、
+<code>.kscene</code>の<code>[DroneShow]</code>は9キーから4キー
+(<code>Enabled</code> / <code>Path</code> / <code>Center</code> / <code>Scale</code>)へ減らした。
+</p>
+
+<table>
+<tr><th>持ち主</th><th>持つもの</th><th>理由</th></tr>
+<tr><td><code>.kshow</code></td><td>編隊の点そのもの・機体数・保持/変形秒・明るさ・機体の半径・揺れ・再生速度・種</td><td>ショーの中身。シーンが上書きできると、同じショーがシーンごとに別物として鳴り、どれが「そのショー」なのかが決まらなくなる</td></tr>
+<tr><td><code>.kscene</code></td><td><code>Enabled</code> / <code>Path</code> / <code>Center</code> / <code>Scale</code></td><td>出すかどうかと、どこにどの大きさで置くか。<strong>点は代表半径1へ正規化して持つ</strong>ので、同じショーを別のシーンへ別の場所・別の規模で置ける</td></tr>
+<tr><td><code>EngineDefaults.h</code></td><td><code>DroneShowMinScreenRadius</code>のみ</td><td>ショーの表現ではなく描画側の下限。「遠方の点が1画素を割るとTAAのジッタでちらつく」という事実はどのシーン・どのショーでも変わらない</td></tr>
+</table>
+
+<h4>フォーマット</h4>
+
+<p>
+書式の単一の正は<code>Source/Library/Assets/ShowPackage.h</code>で、規約は
+<code>.kmodel</code>(<code>ModelPackage.h</code>)に揃えてある &mdash;&mdash;
+リトルエンディアン、<code>#pragma pack</code>を使わず<code>static_assert</code>でサイズ固定、
+マジック+<code>Version</code>、文字列はUTF-8をStringPoolに長さ管理で置く。
+</p>
+
+<pre><code>[ShowHeader]                      64B  &#39;KSHW&#39; / Version / PointStride / DroneCount / FormationCount /
+                                       Speed / Hold / Morph / Brightness / Radius / Hover / Seed / StringPoolSize
+[FormationEntry &times; FormationCount] 16B  NameOffset / NameLength(表示名。エディタ用)
+[ShowPoint &times; DroneCount &times; FormationCount]  24B  Position(float3) + Color(float3)
+[StringPool]</code></pre>
+
+<p>
+1500機&times;6編隊で216,208バイト。読み書きは<code>ShowLoader.{h,cpp}</code>で、
+<strong>読み込みはLoaderスレッド(<code>LoadScene</code>の中)で行う</strong> &mdash;&mdash;
+<code>[Model]</code>の<code>.kmodel</code>と同じ扱いで、Renderスレッドでファイルを開かない。
+<code>Version</code>不一致は読み込み拒否(<code>.kmodel</code>と同じ)。ただし
+<strong>失敗してもシーンごとは落とさない</strong>: モデルはシーンそのものだが、
+ドローンショーは夜空の装飾で、無くてもシーンは成立するため、エラーをログに残して編隊なしで進む。
+</p>
+
+<h4>オーサリングツール(<code>Tools/KurenaiShowEditor</code>)</h4>
+
+<p>
+形状生成の6関数はここへ移した。<strong>エンジンから形の知識が無くなり、
+ここが「新しい形を足す場所」になる。</strong>
+エディタは自前のレンダラーを持たず<strong>エンジンをそのまま使ってプレビューする</strong>。
+別経路でプレビューすると、トーンマップ・ブルーム・露出が本番と違い、
+ここで作った形は本番で見ると別物になる &mdash;&mdash; 発光点は特にそうで、
+加算合成とACESの組み合わせには「上げても白く飛ぶだけ」の領域がある(38.10)。
+</p>
+
+<p>
+そのためエンジンへ公開APIを2つだけ足した。<code>IPanel</code>や<code>UIWidgets</code>といった
+内部の型を公開せずに済むよう、口はこの2つに留めてある。
+</p>
+
+<ul>
+<li><code>SetExtraImGuiCallback(std::function&lt;void()&gt;)</code> &mdash;&mdash;
+全パネルを描いた後に一度だけ呼ぶ追加のImGui描画。<strong>F1で隠す範囲の内側に置く</strong>
+(でないとスクリーンショットでの計測が壊れる)</li>
+<li><code>ApplyDroneShowData(const Assets::ShowData&amp;)</code> &mdash;&mdash;
+再生中のショーをファイルを経由せずに差し替える。上のコールバックの中から呼ぶ限り
+どちらもRenderスレッドなので同期が要らない</li>
+</ul>
+
+<p>
+ImGuiの実体は<code>KurenaiEngineLibrary.dll</code>が<code>__declspec(dllexport)</code>で持っている。
+エディタは<code>IMGUI_API=__declspec(dllimport)</code>を定義して同じコンテキスト・同じアロケータの
+上に描く(自前で<code>imgui.cpp</code>をコンパイルするとコンテキストが2つになって成立しない)。
+</p>
+
+<p>
+GUIのほかに<code>--generate-standard &lt;出力パス&gt;</code>というCLIモードを持つ。
+標準の6形状を書き出したあと<strong>読み直してビット一致まで検査する</strong> &mdash;&mdash;
+書き出しの誤りは次に読んだときに初めて分かる種類の失敗なので、書いて終わりにしない。
+リポジトリの<code>Shows/Standard.kshow</code>はこれで作った。
+</p>
+
+<h4><code>.kscene</code>から移した実測の根拠</h4>
+
+<p>
+<strong>バイナリの<code>.kshow</code>にはコメントを置けない。</strong>
+これまで<code>Scenes/DroneShow.kscene</code>のコメントが抱えていた実測の根拠を、
+消す前にここへ移す(値そのものは<code>Standard.kshow</code>のヘッダにある)。
+</p>
+
+<ul>
+<li><strong><code>Radius = 4.0</code></strong> &mdash;&mdash;
+これは<strong>機体の大きさではなく「光の見かけの大きさ」</strong>である。ドローン本体は数十cmだが、
+見えているのはLEDの光そのもので、大気の散乱とレンズのにじみで実際より大きく広がる。
+このシーンでは編隊がカメラから約1.3km先にあり、半径1.5mだと画面上1画素強にしかならず、
+編隊が砂粒の集まりにしか見えない</li>
+<li><strong><code>Brightness = 1.0</code></strong> &mdash;&mdash;
+夜の表示上限を外した(38.10)後に選び直した値。0.30/1.00/2.00/4.00の実測表は38.10にある。
+1.0が曲線の膝で、水面の映り込みが79&rarr;144とほぼ倍になる一方、彩度の低下は4%弱に収まる</li>
+<li><strong><code>Speed = 1.0</code> / <code>Hold = 6.0</code> / <code>Morph = 4.0</code></strong> &mdash;&mdash;
+1巡60秒。<code>Morph</code>に下限があるのは、0だと形が瞬間的に切り替わるため</li>
+</ul>
+
+<h4>検証 &mdash;&mdash; ショー時刻を止めないと測れない</h4>
+
+<p>
+「点データ化で見た目を落としていないか」を確かめるのに、最初は同じ構図の
+スクリーンショットどうしで領域の統計を比べた。データ駆動化の前後で水面の映り込みの
+明るい画素数が3,630&rarr;4,265と17%増えており、同じビルドを3回撮ると4,277/4,267/4,262と
+0.35%以内で揃うので、<strong>実差だと読んだ。これが間違いだった。</strong>
+</p>
+
+<p>
+撮影のタイミングを1秒・3秒・5秒ずらして撮り直すと、同じビルドのまま同じ指標が
+3,646&rarr;5,562&rarr;14,740と動く。<strong>この指標はショー時刻の位相に支配されていて、
+17%の差を解像できない。</strong> 3回の一致が示していたのは「起動から撮影までの所要時間が
+再現する」ことであって、指標が位相に依存しないことではなかった。
+</p>
+
+<p>
+そこで<code>.kshow</code>の<code>Speed</code>を0に書き換えてショー時刻を0で凍結し、
+決定的な条件で撮り直した。データ駆動化の前後で編隊領域は
+平均40.73 / 最大217 / p99 143 / 明るい画素33,025が<strong>すべて一致</strong>し、
+水面の映り込みも同じビルドを2回撮ったときのばらつき(11画素)の中に収まった。
+</p>
+
+<p>
+生成器の移設そのものは、絵ではなく<strong>ソースを突き合わせて</strong>確かめた。
+移設前のコミットから6つの生成関数・パレット・方位角ソートを取り出して比較し、
+<strong>文字単位で一致</strong>することを確認している。
+</p>
+
+<h4>教訓</h4>
+
+<p>
+<strong>再現性は位相非依存の証明ではない。</strong>
+同じ手順を3回繰り返して数字が揃うと、その指標は信頼できると感じてしまう。
+だが揃っていたのは<strong>手順のほう</strong>で、指標が何に依存しているかは
+何も確かめていなかった。動いているものを測るときは、まず
+<strong>止められる軸を止める</strong>(ここでは<code>Speed = 0</code>)か、
+<strong>その軸を意図的に振って指標がどれだけ動くかを先に測る</strong>こと。
+そのどちらもせずに読んだ差分は、実差より大きなノイズの上に乗っている。
 </p>
 
 </section>

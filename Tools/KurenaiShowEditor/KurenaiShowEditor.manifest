@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  KurenaiShowEditor を Per-Monitor V2 の DPI 対応プロセスにするマニフェスト。
+  内容と理由は Samples/Sample3D/Sample3D.manifest とまったく同じ(同じエンジンの
+  ウィンドウを開くため)。DPI 認識状態はプロセス単位で、最初のウィンドウ生成より前に
+  確定していなければならないので、DLL 側ではなく実行ファイルごとに宣言する必要がある。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <!-- PerMonitorV2 を解釈できない古い OS 向けのフォールバック -->
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+    </windowsSettings>
+  </application>
+</assembly>

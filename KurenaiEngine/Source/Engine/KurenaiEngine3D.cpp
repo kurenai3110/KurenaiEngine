@@ -3090,26 +3090,20 @@ namespace Kurenai
         if (m_Scene.HasStarsBrightness) { m_StarsBrightness = m_Scene.StarsBrightness; }
         if (m_Scene.HasStarsTwinkle)    { m_StarsTwinkle = m_Scene.StarsTwinkle; }
         // ドローンショー。[Cloud]/[Fog]と同じく指定されたキーだけを上書きする。
-        // 編隊の形に関わる値(機体数・中心・大きさ・種)が変わったので、次のフレームで
-        // 点群を作り直させる
+        // ショーの中身(点・機体数・秒数・明るさ)は.kshowが持ち、Loaderスレッドで読み込み済み
         if (m_Scene.HasDroneShowEnabled) { m_DroneShowEnabled = m_Scene.DroneShowEnabled; }
-        if (m_Scene.HasDroneShowCount)   { m_DroneShowCount = m_Scene.DroneShowCount; }
         if (m_Scene.HasDroneShowCenter)
         {
             m_DroneShowCenter = { m_Scene.DroneShowCenter[0], m_Scene.DroneShowCenter[1], m_Scene.DroneShowCenter[2] };
         }
         if (m_Scene.HasDroneShowScale)          { m_DroneShowScale = m_Scene.DroneShowScale; }
-        if (m_Scene.HasDroneShowRadius)         { m_DroneShowRadius = m_Scene.DroneShowRadius; }
-        if (m_Scene.HasDroneShowBrightness)     { m_DroneShowBrightness = m_Scene.DroneShowBrightness; }
-        if (m_Scene.HasDroneShowHoldSeconds)    { m_DroneShowHoldSeconds = m_Scene.DroneShowHoldSeconds; }
-        if (m_Scene.HasDroneShowMorphSeconds)   { m_DroneShowMorphSeconds = m_Scene.DroneShowMorphSeconds; }
-        if (m_Scene.HasDroneShowHoverAmplitude) { m_DroneShowHoverAmplitude = m_Scene.DroneShowHoverAmplitude; }
-        if (m_Scene.HasDroneShowSpeed)          { m_DroneShowSpeed = m_Scene.DroneShowSpeed; }
-        if (m_Scene.HasDroneShowSeed)           { m_DroneShowSeed = m_Scene.DroneShowSeed; }
+        // 【Formationsが空でもSetDataを呼ぶ】呼ばなければ前のシーンのショーがそのまま残る。
+        // 空を渡せばDroneShow側がエラーを出してm_HasDataをfalseにするので、
+        // 「ショーを持たないシーンへ切り替えたのに前の編隊が飛び続ける」を構造的に防げる
+        m_DroneShow.SetData(m_Scene.DroneShowData);
         // シーンを跨いでショーの進行が引き継がれると、切り替えるたびに違う編隊から始まって
         // A/B比較の対照が取れなくなる(EV100が引き継がれるのと同じ落とし穴)。必ず0へ戻す
         m_DroneShowTime = 0.0f;
-        m_DroneShowConfigureRequested = true;
 
         // 【ドローンショーの有無で反射手法を書き換えないこと】
         // かつてここには「ショーが有効かつRaytracedならScreenSpaceへ落とす」という分岐があった。
@@ -3715,6 +3709,23 @@ namespace Kurenai
         return requested < 0 ? m_GraphicsAPI : static_cast<GraphicsAPI>(requested);
     }
 
+    void KurenaiEngine3D::SetExtraImGuiCallback(std::function<void()> callback)
+    {
+        // 【Run()の前に呼ぶこと】Renderスレッドが走り出した後にここを書き換えると、
+        // 描画中のstd::functionを差し替えることになる。エディタはエンジンを構築した直後、
+        // Run()を呼ぶ前に一度だけ登録する
+        m_ExtraImGuiCallback = std::move(callback);
+    }
+
+    void KurenaiEngine3D::ApplyDroneShowData(const Assets::ShowData& data)
+    {
+        // 呼び出しスレッドの前提はヘッダー側のコメントを参照(SetExtraImGuiCallbackで
+        // 登録したコールバックの中から呼ぶこと)。
+        // 時刻は戻さない ―― プレビュー中に点をいじるたびにショーが先頭へ飛ぶと、
+        // 「いま見ている瞬間の形」を直せなくなるため
+        m_DroneShow.SetData(data);
+    }
+
     void KurenaiEngine3D::TickFrame()
     {
         const auto now = std::chrono::steady_clock::now();
@@ -3838,7 +3849,7 @@ namespace Kurenai
             // 仮数は24bitなので、1日(86,400秒)積むとULPが約0.010秒になり、60fpsのdt(0.0167秒)が
             // まともに積めなくなってショーが止まる。以前はUIの「ショー時刻」スライダーで
             // 手動で戻せることを逃げ道にしていたが、そのUIごと無くなったのでここで閉じる
-            m_DroneShowTime += renderDeltaTime * m_DroneShowSpeed;
+            m_DroneShowTime += renderDeltaTime * m_DroneShow.Data().Speed;
             const float showLoopDuration = m_DroneShow.LoopDuration();
             if (showLoopDuration > 0.0f)
             {
@@ -4087,6 +4098,14 @@ namespace Kurenai
             UI::PanelDrawContext panelContext;
             panelContext.Camera = &frameState.Camera;
             m_UIManager->Draw(panelContext);
+
+            // オーサリングツール(Tools/KurenaiShowEditor)が足す追加のUI。
+            // 【ImGuiVisibleの中に置くこと】F1で全パネルを隠したときに、これだけが
+            // 画面に残ってしまうとスクリーンショットでの計測が壊れる
+            if (m_ExtraImGuiCallback)
+            {
+                m_ExtraImGuiCallback();
+            }
         }
 
         // ImGuiがマウス/キーボードを掴んでいるかをUpdateスレッドへ返す(Update()が読む)。
@@ -4842,41 +4861,15 @@ namespace Kurenai
         m_DroneInstances.clear();
         if (m_DroneShowEnabled)
         {
-            // 機体数・配置・種のどれかが変わったときだけ編隊を作り直す。
-            // Evaluateは毎フレーム走るが、Configureは点群の生成と並べ替えを伴うので毎フレームは避ける
-            DroneShowSettings settings;
-            settings.Count = std::clamp(m_DroneShowCount, 1u, kMaxDrones);
-            settings.Center = m_DroneShowCenter;
-            settings.Scale = m_DroneShowScale;
-            settings.Radius = m_DroneShowRadius;
-            settings.HoldSeconds = m_DroneShowHoldSeconds;
-            settings.MorphSeconds = m_DroneShowMorphSeconds;
-            settings.HoverAmplitude = m_DroneShowHoverAmplitude;
-            settings.Seed = m_DroneShowSeed;
-
-            const DroneShowSettings& configured = m_DroneShowConfiguredSettings;
-            const bool needsConfigure =
-                m_DroneShowConfigureRequested || !m_DroneShow.IsConfigured() ||
-                configured.Count != settings.Count || configured.Seed != settings.Seed ||
-                configured.Scale != settings.Scale || configured.Center.x != settings.Center.x ||
-                configured.Center.y != settings.Center.y || configured.Center.z != settings.Center.z;
-            if (needsConfigure)
+            m_DroneShow.Evaluate(m_DroneShowTime, m_DroneShowCenter, m_DroneShowScale, m_DroneInstances);
+            // 【バッファの容量を超える機体は描かない】m_DroneBufferはkMaxDrones分を固定確保して
+            // いるので、それを超えた分をUpdateBufferへ渡すと書き込みが範囲外になる。
+            // .kshowの機体数はエディタ側で上限を掛けているが、外から来たファイルでも
+            // 壊れないよう、GPUへ渡す直前のここで切り詰める
+            if (m_DroneInstances.size() > kMaxDrones)
             {
-                m_DroneShow.Configure(settings);
-                m_DroneShowConfiguredSettings = settings;
-                m_DroneShowConfigureRequested = false;
+                m_DroneInstances.resize(kMaxDrones);
             }
-            else
-            {
-                // 形の生成に関わらないパラメータ(保持/遷移秒・ビルボード半径・揺れ)は、
-                // 点群を作り直さずにその場で差し替える。UIのスライダーを動かしている間
-                // 毎フレーム数千点の生成と並べ替えが走るのを避けるため
-                m_DroneShow.UpdateTimingSettings(
-                    settings.Radius, settings.HoldSeconds, settings.MorphSeconds, settings.HoverAmplitude);
-                m_DroneShowConfiguredSettings = settings;
-            }
-
-            m_DroneShow.Evaluate(m_DroneShowTime, m_DroneInstances);
             if (!m_DroneInstances.empty())
             {
                 commandList->UpdateBuffer(
@@ -6593,7 +6586,7 @@ namespace Kurenai
                             &droneConstants.View, DirectX::XMMatrixTranspose(reflectMatrix * viewMatrix));
                         DirectX::XMStoreFloat4x4(&droneConstants.Proj, DirectX::XMMatrixTranspose(jitteredProj));
                         droneConstants.Params0 = {
-                            m_DroneShowBrightness * effectiveExposure,
+                            m_DroneShow.Data().Brightness * effectiveExposure,
                             m_DroneShowMinScreenRadius,
                             projection._11,
                             0.0f,
@@ -6831,7 +6824,7 @@ namespace Kurenai
                     droneConstants.Params0 = {
                         // 実効プリ露出を掛ける。HDRバッファの中身はすべてプリ露出済みの値なので、
                         // ここで掛けないと機体だけが露出に追従しない浮いた明るさになる
-                        m_DroneShowBrightness * effectiveExposure,
+                        m_DroneShow.Data().Brightness * effectiveExposure,
                         m_DroneShowMinScreenRadius,
                         // 射影行列の[0][0]。シェーダ側で最小画面サイズを世界半径へ逆算するのに使う
                         projection._11,
