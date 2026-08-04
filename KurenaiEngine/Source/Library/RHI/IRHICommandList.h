@@ -77,6 +77,21 @@ namespace Kurenai::RHI
         // バインドする。スロット空間・バインドの寿命はSetTextureと共通(t0〜t11)なので、
         // 同じ描画内でスロットが衝突しないよう呼び出し側で調整すること
         virtual void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
+        // BufferUsage::StructuredReadOnlyで作成したバッファをStructuredBuffer<T>として
+        // 「頂点シェーダ」へバインドする。上のSetShaderResourceBufferがピクセルシェーダ専用なのに対し、
+        // こちらは頂点段からしか見えない独立したレジスタ空間を使う
+        // (コンピュート用にSetComputeShaderResourceBufferを別に用意しているのと同じ理由)。
+        //
+        // 【なぜ専用のAPIなのか】DX12のグラフィックス用ルートシグネチャでは、SetTexture/
+        // SetShaderResourceBufferが使うSRVディスクリプタテーブルがD3D12_SHADER_VISIBILITY_PIXELで
+        // 宣言されており、頂点シェーダからは1つも見えない。こちらは可視性をVERTEXに限定した
+        // 別のルートパラメータ(ルートSRV)へ割り当てるため、同じレジスタ番号を使っても衝突しない。
+        // DX11はステージごとにバインド空間が独立しているため元から衝突しない。
+        //
+        // 用途はドローンショーのように「1回のDrawで大量のインスタンスを頂点シェーダ側で展開する」
+        // 描画で、頂点バッファを使わずSV_VertexIDからこのバッファを引く(Shaders/3D/DroneShow.hlsl)。
+        // バインドの寿命はSetTextureと同じで、上書きするまで維持される
+        virtual void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) = 0;
         virtual void Draw(uint32_t vertexCount, uint32_t startVertexLocation) = 0;
         virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) = 0;
