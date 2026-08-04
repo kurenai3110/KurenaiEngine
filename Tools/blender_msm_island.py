@@ -990,11 +990,24 @@ CHURCH_WEST_BLOCK_ROOF_HEIGHT = 5.0
 # タスク4: 参考写真c_abbey_south_closeup.jpgで身廊の手前(南)に見える、身廊より低い
 # 付属棟(実物の修道院長の館などにあたる)。屋根面を重ねてのっぺり感を消すための
 # 出典なしの決め値
-ABBEY_SOUTH_ANNEX_X_MIN = 0.0
-ABBEY_SOUTH_ANNEX_X_MAX = 16.0
-ABBEY_SOUTH_ANNEX_DEPTH = 12.0     # 身廊の南壁からさらに-Z方向へ張り出す量
-ABBEY_SOUTH_ANNEX_WALL_HEIGHT = 15.0
-ABBEY_SOUTH_ANNEX_ROOF_HEIGHT = 4.0
+# 【修正・背が高すぎて教会と競合していた】旧値(幅16m・壁15m・屋根4m)は棟線が
+# 92+15+4=111mで、**身廊の棟線110mより高かった**。しかも身廊(z=0)より手前(z=-19)に
+# あるぶん画面ではさらに上に出るため、この付属棟がシルエットを作ってしまっていた
+# (skyline.pyでx0.4-0.5の実機が写真より+0.036高い件の一因)。
+# 参考写真c_abbey_south_closeup.jpgの南面の大きな棟は、教会より明らかに低く、
+# 幅が広く、屋根の勾配が急で暗い面が大きい。幅44m・壁5m・屋根9m(棟線106m)に改める。
+# 【高さは身廊のすぐ下ぎりぎりに置く】棟線を104mまで下げたら、skyline.pyのx0.5-0.6で
+# 実機が写真より低い差が -0.020 → -0.026 と広がった。この付属棟はその区間の稜線を
+# 作っていたので、下げすぎると穴があく。手前(z=-20、カメラから580m)にあるぶん
+# 画面では上に出るので、身廊の棟線(110m、z=0、600m)と同じ画面高さになるのは
+#   y = (110-1.6)/600 * 580 + 1.6 = 106.4m
+# ここを上限として106mに置く。これで身廊を越えず、かつ稜線を落とさない。
+# 棟に直交する幅14mに対して屋根9mで勾配52度
+ABBEY_SOUTH_ANNEX_X_MIN = -20.0
+ABBEY_SOUTH_ANNEX_X_MAX = 24.0
+ABBEY_SOUTH_ANNEX_DEPTH = 14.0     # 身廊の南壁からさらに-Z方向へ張り出す量
+ABBEY_SOUTH_ANNEX_WALL_HEIGHT = 5.0
+ABBEY_SOUTH_ANNEX_ROOF_HEIGHT = 9.0
 
 # --- 鐘楼・尖塔・像の配置基準(X/Z)。教会・翼廊の交差部の真上(承認済み計画の目安値)。
 # CROSSING_CENTER_XはNAVE_EAST_X(身廊東端=交差部)の変更に、CROSSING_CENTER_Zは身廊の
@@ -1337,6 +1350,38 @@ ABBEY_TERRACE_OUTSETS = [12.0, 40.0]
 # 0.85に引き上げ、各段が岩の表面近くまで一気に下りる高い壁になるようにした
 ABBEY_TIER_DROP_FRACTION = 0.85
 ABBEY_TERRACE_STEP_GAP = 1.0           # 各段の天端を1つ上の段の下端よりどれだけ下げるか(視覚的な段差)
+
+# --- 修道院の南面の下段の建物群(基礎の第2段の天端に載る棟の列)---
+# 【なぜ要るか】材質IDレンダで測ると、南面は無地の花崗岩の一枚壁になっていた。
+# 実行時のログで出した実際の値:
+#   第0段 天端92.0m 下端89.3m ( 2.7m)
+#   第1段 天端88.3m 下端82.4m ( 5.9m)
+#   第2段 天端81.4m 下端63.1m (18.2m)  ← カメラに最も近く、視野を支配する
+# 合計27mが窓以外なにも無い石の面で、その上に載る建物の屋根は94.7〜110mの15mの帯に
+# 固まっている(島の見かけの高さの約1割)。参考写真の修道院は屋根がもっと広い範囲へ
+# 散っており、暗いスレートと明るい壁が交互に重なって見える。
+# 数値でも、修道院の区画(正規化x0.25〜0.65 / h0.30〜0.80、島の画素のみ)の
+# 暗部が 参考写真29.7% に対して実機12.6%、CVが0.531に対して0.327しかない。
+#
+# 実物のこの高さには修道院の下部の南向きの建物群が建つ。第2段の天端(81.4m)に棟の列を
+# 載せて、無地の壁を「壁+急勾配の暗い屋根」の重なりに置き換える。
+# 寸法はすべて出典なしの決め値だが、根拠の軸は以下のとおり:
+#   ・棟の高さは、天端81.4m+壁5.5+屋根8.0=94.9mで、上のテラス(92.0m)をわずかに
+#     越える。参考写真でも下段の屋根は上段の建物の足元に少し掛かっており、
+#     完全に下へ収めると建物どうしが重ならず「並んだ模型」に見える
+#   ・棟に直交する幅16mに対して屋根の高さ8.0mで、勾配は45度。カメラの仰角
+#     (600m先で高さ90m→約8.5度)より十分急なので、屋根面が大きく見える
+# 【1回目は小さすぎた】幅11m・壁4.5m・屋根4.5mで作ったところ、屋根の見かけの高さが
+# 20画素しかなく細い横棒に見えた。修道院の区画の暗部は12.6%→12.7%とほぼ動かなかった
+# (追加した暗い面が区画のわずか4%にしかならないため)。奥行きと勾配を上げて面を稼ぐ
+ABBEY_SOUTH_ROW_COUNT = 4
+ABBEY_SOUTH_ROW_X_MIN = CHURCH_WEST_X + 5.0            # =-40.0
+ABBEY_SOUTH_ROW_X_MAX = CROSSING_CENTER_X + 26.0       # =26.0
+ABBEY_SOUTH_ROW_GAP = 2.5              # 棟と棟のあいだ(ここに影が落ちて分節して見える)
+ABBEY_SOUTH_ROW_DEPTH = 16.0           # 棟に直交する方向の幅(屋根の勾配を決める)
+ABBEY_SOUTH_ROW_WALL_HEIGHT = 5.5
+ABBEY_SOUTH_ROW_ROOF_HEIGHT = 8.0
+ABBEY_SOUTH_ROW_EDGE_INSET = 2.0       # 段の南端からどれだけ内側(北)へ引くか
 
 # 南テラス(実物の「西のテラス」「ゴーティエの跳躍」に相当する張り出し)。教会の南側は
 # 身廊・交差部が岩の中心付近(新ROCK_PLATEAU_RADIUS=20mの内側)にあるため上段・下段の壁が
@@ -3991,6 +4036,79 @@ def _add_abbey_facade_windows(bm, points, bottom_ys, top_ys, center_x, center_z,
     return place_count, skip_count
 
 
+def _add_abbey_south_row_to_bmesh(bm, outline, top_ys):
+    """修道院の南面に、基礎の最下段の天端へ載る棟の列を追加する(ABBEY_SOUTH_ROW_*参照)。
+
+    outline: その段の輪郭点[(x, z), ...]。top_ys: 各輪郭点での天端の高さ。
+    棟線はX方向(東西)。各棟のZ位置は、その棟の中心Xにおける輪郭の南端から
+    ABBEY_SOUTH_ROW_EDGE_INSETだけ北へ引いた位置を南壁とする。
+
+    【天端は棟ごとに取る】段の天端は輪郭点ごとに高さが違う(岩の斜面に追随するため、
+    南の正面では81mでも南東・南西の隅では50m台まで下がる)。南側の点の最小値を使うと
+    正面の棟まで28m下がって基礎の中へ埋もれてしまったので、棟ごとに**中心Xに最も近い
+    輪郭点の天端**を使う。結果として棟の列は岩の斜面に沿って東西へ下がり、
+    参考写真の「斜面を段々に下りる建物群」と同じ並びになる。
+    """
+    south_points = [(x, z, ty) for (x, z), ty in zip(outline, top_ys) if z < 0.0]
+    if not south_points:
+        print(
+            "[ERROR] 修道院の南面の棟を載せる段に、南側(z<0)の輪郭点がありません。"
+            "ABBEY_TERRACE_OUTSETS/基礎の輪郭を見直してください",
+            file=sys.stderr,
+        )
+        raise ValueError("修道院の南面の棟を載せる輪郭点がありません")
+
+    span = ABBEY_SOUTH_ROW_X_MAX - ABBEY_SOUTH_ROW_X_MIN
+    pitch = span / ABBEY_SOUTH_ROW_COUNT
+    width_x = pitch - ABBEY_SOUTH_ROW_GAP
+    if width_x <= 0.0:
+        print(
+            f"[ERROR] 修道院の南面の棟の幅が0以下です(間隔{pitch:.1f}m - 隙間"
+            f"{ABBEY_SOUTH_ROW_GAP}m)。ABBEY_SOUTH_ROW_COUNT/GAPを見直してください",
+            file=sys.stderr,
+        )
+        raise ValueError("修道院の南面の棟の幅が0以下です")
+
+    placed = 0
+    ridge_ys = []
+    for i in range(ABBEY_SOUTH_ROW_COUNT):
+        center_x = ABBEY_SOUTH_ROW_X_MIN + pitch * (i + 0.5)
+        # その中心Xにいちばん近い南側の輪郭点から、段の南端Zとその位置の天端を取る
+        _px, edge_z, base_y = min(south_points, key=lambda p: abs(p[0] - center_x))
+        south_wall_z = edge_z + ABBEY_SOUTH_ROW_EDGE_INSET
+        center_z = south_wall_z + ABBEY_SOUTH_ROW_DEPTH * 0.5
+        try:
+            _add_house_to_bmesh(
+                bm,
+                base=(center_x, base_y, center_z),
+                along_dir=(1.0, 0.0, 0.0),
+                across_dir=(0.0, 0.0, 1.0),
+                width=ABBEY_SOUTH_ROW_DEPTH,
+                depth=width_x,
+                wall_height=ABBEY_SOUTH_ROW_WALL_HEIGHT,
+                roof_height=ABBEY_SOUTH_ROW_ROOF_HEIGHT,
+                wall_material="Masonry",
+                roof_material="SlateRoof",
+            )
+        except Exception as error:  # noqa: BLE001
+            print(f"[ERROR] 修道院の南面の棟(#{i})の作成に失敗しました: ({error})", file=sys.stderr)
+            raise
+        placed += 1
+        ridge_ys.append(base_y + ABBEY_SOUTH_ROW_WALL_HEIGHT + ABBEY_SOUTH_ROW_ROOF_HEIGHT)
+
+    # プラットフォーム(92m)を少し越えるのは意図どおり(上段の建物の足元に掛けて
+    # 重なりを作るため)。ただし上段の建物のいちばん低い屋根(ABBEY_BLOCKSのOfficialite、
+    # 棟線94.7m)を越えると上段が丸ごと隠れるので、そこを閾値にする
+    if max(ridge_ys) > CHURCH_FLOOR_Y + 3.0:
+        print(
+            f"[WARNING] 修道院の南面の棟の棟線(最高{max(ridge_ys):.1f}m)が高すぎ、"
+            f"上段のいちばん低い建物(約{CHURCH_FLOOR_Y + 3.0:.1f}m)を隠します。"
+            f"ABBEY_SOUTH_ROW_WALL_HEIGHT/ROOF_HEIGHTを見直してください"
+        )
+    print(f"[INFO] 修道院の南面の棟: {placed}棟 1棟の幅={width_x:.1f}m "
+          f"棟線={' / '.join(f'{y:.1f}' for y in ridge_ys)}m(西→東)")
+
+
 def build_abbey_substructure():
     """修道院(教会+ラ・メルヴェイユ)の平面輪郭を、岩の斜面まで垂直に落とす花崗岩の壁の
     塊(垂直基礎構造)を1つのメッシュにまとめて作る。
@@ -4090,6 +4208,12 @@ def build_abbey_substructure():
     tier_bottom_ys_list = [upper_bottom_ys]
     tier_top_ys_list = [CHURCH_FLOOR_Y]
 
+    _south0 = min(range(len(upper_points)), key=lambda i: upper_points[i][1])
+    print(f"[INFO] 修道院基礎 第0段(教会の輪郭): 南端"
+          f"(x={upper_points[_south0][0]:.1f}, z={upper_points[_south0][1]:.1f}) "
+          f"天端={CHURCH_FLOOR_Y:.1f}m 下端={upper_bottom_ys[_south0]:.1f}m "
+          f"壁の高さ={CHURCH_FLOOR_Y - upper_bottom_ys[_south0]:.1f}m")
+
     prev_bottom_ys = upper_bottom_ys
     outset_count = len(ABBEY_TERRACE_OUTSETS)
     for k, outset in enumerate(ABBEY_TERRACE_OUTSETS):
@@ -4120,6 +4244,15 @@ def build_abbey_substructure():
         tier_bottom_ys_list.append(bottom_ys)
         tier_top_ys_list.append(top_ys)
         prev_bottom_ys = bottom_ys
+
+        # 南面(カメラの向き)での各段の高さをログに出す。修道院の分節を検討するとき、
+        # 「どの高さからどの高さまでが一枚の石壁か」を推測ではなく実際の値で見るため
+        # (輪郭点のうちzが最小=最も南のものを代表に取る)
+        south_index = min(range(len(points)), key=lambda i: points[i][1])
+        print(f"[INFO] 修道院基礎 第{k + 1}段(張り出し{outset}m): 南端"
+              f"(x={points[south_index][0]:.1f}, z={points[south_index][1]:.1f}) "
+              f"天端={top_ys[south_index]:.1f}m 下端={bottom_ys[south_index]:.1f}m "
+              f"壁の高さ={top_ys[south_index] - bottom_ys[south_index]:.1f}m")
 
     # 南テラス。X方向は上段/下段と同じ外接矩形(x_min〜x_max)を流用し、Z方向は
     # 教会の南辺(z_min。upper_pointsの南端がちょうどこの値になる)からさらに
@@ -4171,6 +4304,10 @@ def build_abbey_substructure():
 
     # 修道院の垂直基礎構造は段・キャップ・欄干・控え壁すべて花崗岩(Masonry)
     _tag_new_faces(bm, 0, "Masonry")
+
+    # 南面の下段の建物群(ABBEY_SOUTH_ROW_*参照)。Masonryの一括タグ付けの後に足すことで、
+    # 屋根のSlateRoofが上書きされないようにする(基礎正面の窓と同じ理由)
+    _add_abbey_south_row_to_bmesh(bm, tier_points_list[-1], tier_top_ys_list[-1])
 
     # タスク1: 第0段の南側の壁面に窓を配置する(上のMasonry一括タグ付けの後に追加することで、
     # 窓のマテリアル(WindowGlass、_add_window_to_bmesh内で設定)がMasonryに上書きされないようにする)
