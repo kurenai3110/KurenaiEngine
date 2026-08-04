@@ -283,24 +283,25 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 
 #### メッシュレット / bindless / レイトレーシングの確認用シーン(ドラゴン)
 
-`Tools\generate_dragon.py`が確認用のモデルを生成します。三角形が数十万ある単一メッシュの
-ドラゴンと、それを映す鏡面の床という構成です。ドラゴンには市松模様のベースカラーを与えてあり、
-「レイトレーシングのヒット面がテクスチャを読めているか」が反射像で判別できます。
+主役にはリポジトリに既にある**McGuireのChinese Dragon**(`Assets\Source\ChineseDragon\dragon.obj`、
+87万三角形の3Dスキャン)をそのまま使います。`OcclusionBakeCompare.kscene`などと同じ`.kmodel`です。
 
-Stanford Dragonを使う場合は、[Stanford 3D Scanning Repository](http://graphics.stanford.edu/data/3Dscanrep/)
-から`dragon_vrip.ply`(約87万三角形)を取得して`Assets\Source\Dragon\`へ置いてください。
-置かれていなければ、同程度の三角形数を持つ代替メッシュ(トーラスノット、約20万三角形)を
-手続き生成します。**どちらの場合も追加の手作業は要りません。**
+`Tools\generate_meshlet_stage.py`は、それを置くステージ(鏡面の床と市松模様の背景壁)だけを
+生成します。この2枚が要るのは、ドラゴン単体では確かめられないものが2つあるためです。
+
+- **鏡面の床** — メッシュレットの色分けがラスタ描画とレイトレーシングで一致するかを見るには、
+  同じドラゴンを映す相手が要ります
+- **市松模様の背景壁** — `dragon.obj`はテクスチャを持たない3Dスキャンなので、
+  ヒット面が単色でも「bindlessでテクスチャを引けていない」のか「もともと単色」なのかが
+  区別できません。模様のある面が1枚あれば、その1点だけで判別が付きます
 
 ```
-python Tools\generate_dragon.py
+python Tools\generate_meshlet_stage.py
 Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
-  Assets\Source\Dragon\Dragon.gltf -o Assets\Packed\Dragon\Dragon.kmodel
+  Assets\Source\MeshletStage\MeshletStage.gltf -o Assets\Packed\MeshletStage\MeshletStage.kmodel
+Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+  Assets\Source\ChineseDragon\dragon.obj -o Assets\Packed\ChineseDragon\DragonPlain.kmodel
 ```
-
-`.ply`を直接KurenaiPackerへ渡せないのは、assimpをglTF/FBX/OBJのインポータだけを有効にして
-ビルドしているためです(手順2参照)。このスクリプトが変換を引き受けることで、
-assimpのビルド構成を変えずに済ませています。
 
 確認の手順は`Scenes\Dragon.kscene`の冒頭コメントに書いてあります。
 
