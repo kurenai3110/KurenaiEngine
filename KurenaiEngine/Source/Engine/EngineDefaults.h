@@ -456,8 +456,6 @@ namespace Kurenai::Defaults
     // 画面上の最小半径(NDC単位)。遠方の機体が1画素を割るとTAAのジッターで明滅するため、
     // これ以下にならないようシェーダ側で押し上げる。1280x720で約1.4画素に相当する
     inline constexpr float DroneShowMinScreenRadius = 0.002f;
-    // 水面/雲の凍結トグルと同じ役割。A/B比較で編隊を止めるために使う
-    inline constexpr bool DroneShowTimeFrozen = false;
     // 揺れと出発タイミングのばらつきの種。固定値にしてあるのは毎回同じ絵を出すため
     inline constexpr uint32_t DroneShowSeed = 20260804u;
 }

@@ -525,9 +525,6 @@ namespace Kurenai
         float m_DroneShowSpeed = Defaults::DroneShowSpeed;
         // 遠方の機体が1画素を割ってTAAのジッターでちらつくのを防ぐ、画面上の最小半径(NDC単位)
         float m_DroneShowMinScreenRadius = Defaults::DroneShowMinScreenRadius;
-        // trueにするとショーの進行が止まる(m_CloudTimeFrozen / m_WaterTimeFrozenと同じ役割)。
-        // **A/B比較には必須**で、これが無いとスクリーンショットが毎回別の編隊になり対照が取れない
-        bool m_DroneShowTimeFrozen = Defaults::DroneShowTimeFrozen;
         uint32_t m_DroneShowSeed = Defaults::DroneShowSeed;
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを

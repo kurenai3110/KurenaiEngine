@@ -6,7 +6,6 @@
 #include "Core/Logger.h"
 #include "KurenaiEngine3D.h"
 #include "UI/DebugViewPanel.h"
-#include "UI/DroneShowPanel.h"
 #include "UI/LightingPanel.h"
 #include "UI/PostProcessPanel.h"
 #include "UI/ProfilerPanel.h"
@@ -27,7 +26,7 @@ namespace Kurenai::UI
         // 無い状態ではHasNodeがfalseになり、既定レイアウトが1回だけ組み直される。
         // 進めないと、新しく増えたパネルだけが宙に浮いた状態でユーザーに見えてしまう。
         // (逆に、単に表示名を変えただけならウィンドウIDは"###"以降で決まるため進める必要はない)
-        constexpr unsigned int kDockSpaceId = 0x4B554E44u; // 'KUND' (世代D: ドローンショーを加えた9パネル構成)
+        constexpr unsigned int kDockSpaceId = 0x4B554E45u; // 'KUNE' (世代E: ドローンショーのパネルを外した8パネル構成)
     }
 
     UIManager::UIManager(KurenaiEngine3D& engine)
@@ -46,7 +45,6 @@ namespace Kurenai::UI
         m_Panels.push_back(std::make_unique<PostProcessPanel>(engine));
         m_Panels.push_back(std::make_unique<LightingPanel>(engine));
         m_Panels.push_back(std::make_unique<ReflectionProbePanel>(engine));
-        m_Panels.push_back(std::make_unique<DroneShowPanel>(engine));
         m_Panels.push_back(std::make_unique<DebugViewPanel>(engine));
         m_Panels.push_back(std::make_unique<SystemPanel>(engine, *this));
         m_Panels.push_back(std::make_unique<ProfilerPanel>(engine));
@@ -255,7 +253,6 @@ namespace Kurenai::UI
             { "###Post Processing", Core::ImGuiDockSlot::Right },       // Renderingと同じノード = タブになる
             { "###Lighting",       Core::ImGuiDockSlot::RightBottom },
             { "###Reflection Probes", Core::ImGuiDockSlot::RightBottom }, // Lightingと同じノード = タブになる
-            { "###Drone Show",     Core::ImGuiDockSlot::RightBottom },  // Lightingと同じノード = タブになる
             { "###Render Targets", Core::ImGuiDockSlot::RightBottom },  // Lightingと同じノード = タブになる
             { "###Profiler",       Core::ImGuiDockSlot::Bottom },
         };

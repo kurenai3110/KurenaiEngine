@@ -3111,26 +3111,17 @@ namespace Kurenai
         m_DroneShowTime = 0.0f;
         m_DroneShowConfigureRequested = true;
 
-        // 【ドローンショーのあるシーンは反射をSSRへ寄せる】
-        // 機体は手続き的に展開するビルボードでシーンジオメトリではないため、TLASに入っていない。
-        // つまりRT反射のレイからは原理的に見えず、DXR対応環境(DX12)で既定のRaytracedのままだと
-        // 空には編隊が出ているのに水面には何も映らない、という絵になる。
-        // 機体の映り込みはSSRパスが読む平面反射パス(m_PlanarReflectionColor)でしか作れず、
-        // その平面反射パスは反射手法がScreenSpaceのときしか登録されない
-        // (上のplanarReflectionPassRunsの条件)。ショーが主役のシーンでは
-        // 「地物の反射がRTで正確なこと」より「主役が水面に映ること」を優先する。
+        // 【ドローンショーの有無で反射手法を書き換えないこと】
+        // かつてここには「ショーが有効かつRaytracedならScreenSpaceへ落とす」という分岐があった。
+        // 機体は手続き的に展開するビルボードでTLASに入っておらず、RT反射のレイからは原理的に
+        // 見えないため、DXR対応環境(DX12)では水面に編隊が映らない——それを避けるための対処だった。
         //
-        // ここで決めるのはあくまで既定値で、UIから手法を変えれば従来どおり切り替えられる。
-        // 実測(DX12、水面領域の画素値): Raytracedのまま23 → ScreenSpaceで66(DX11は71)
-        if (m_DroneShowEnabled && m_ReflectionMode == ReflectionMode::Raytraced)
-        {
-            m_ReflectionMode = ReflectionMode::ScreenSpace;
-            m_SceneDefaultReflectionMode = m_ReflectionMode;
-            Core::Logger::Info(
-                "KurenaiEngine3D",
-                "ドローンショーが有効なため反射手法をScreenSpaceにしました"
-                "(RT反射はTLASに無いビルボードを追跡できず、水面に機体が映らないため)");
-        }
+        // これは廃止した。1つの機能の有効/無効が、それとは別の機能の設定(反射手法)を黙って
+        // 書き換えるのは、シーンの指定が機能側の都合で覆るということであり、
+        // 「なぜこのシーンだけ反射手法が違うのか」を追えなくする。
+        // DX12で編隊を水面に映したい場合はUIの「反射」セクションから手動でScreenSpaceへ
+        // 切り替える(既知の制限としてdocs/Architecture.htmlの38.7に記録してある)。
+        //
         // 水面(P2)。[Water]が無いシーンでもScene::WaterWaveScale等はリテラル既定値
         // (EngineDefaults.hを複製したもの、Scene.h参照)を持っているため、常にそのまま反映してよい
         // (m_TimeOfDay/m_SunAzimuthDegreesと同じ扱い)
@@ -3841,12 +3832,18 @@ namespace Kurenai
 
             // ドローンショーの進行時刻。水面・雲のスクロール位相とまったく同じ場所・同じ理由で
             // Renderスレッド専有のまま進める。
-            // 【wrapしない理由】雲のノイズ空間と違い、DroneShow::Evaluateが自分で1巡の周期
-            // (保持+遷移の合計×形状数)でstd::fmodするため、ここで折り返す必要がない。
-            // floatの精度が落ちるほど長時間走らせた場合はUIの「ショー時刻」で戻せる
-            if (!m_DroneShowTimeFrozen)
+            //
+            // 【1巡ぶんで必ず折り返すこと】DroneShow::Evaluate自身も1巡の周期でstd::fmodするので
+            // 絵の上は折り返さなくても正しく出る。折り返しが要るのは**floatの精度**のためである。
+            // 仮数は24bitなので、1日(86,400秒)積むとULPが約0.010秒になり、60fpsのdt(0.0167秒)が
+            // まともに積めなくなってショーが止まる。以前はUIの「ショー時刻」スライダーで
+            // 手動で戻せることを逃げ道にしていたが、そのUIごと無くなったのでここで閉じる
+            m_DroneShowTime += renderDeltaTime * m_DroneShowSpeed;
+            const float showLoopDuration = m_DroneShow.LoopDuration();
+            if (showLoopDuration > 0.0f)
             {
-                m_DroneShowTime += renderDeltaTime * m_DroneShowSpeed;
+                // 未初期化(LoopDuration()==0)のときに割るとNaNになるのでガードする
+                m_DroneShowTime = std::fmod(m_DroneShowTime, showLoopDuration);
             }
 
             // m_Scene・ポストプロセスのパラメータ・UIの状態はすべてこのRenderスレッド専有に

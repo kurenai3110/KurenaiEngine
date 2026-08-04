@@ -58,6 +58,12 @@ namespace Kurenai::UI
         {
             DrawCloudSection();
         }
+        // 星は雲と同じ「空の見え方」なので隣に置く(どちらもSky.hlsliが描き、
+        // 一方を振るときはもう一方と見比べることになる)
+        if (ImGui::CollapsingHeader("星空###Starfield"))
+        {
+            DrawStarsSection();
+        }
         if (ImGui::CollapsingHeader("大気遠近###Fog"))
         {
             DrawFogSection();
@@ -800,6 +806,35 @@ namespace Kurenai::UI
         SliderFloatEx(
             "異方性(筋状)###CirrusAnisotropy", &m_Engine.m_CirrusAnisotropy, 1.0f, 8.0f, Defaults::CirrusAnisotropy,
             "%.2f", 0, "fBmのUV(U方向)を伸ばして筋状にする倍率。1.0で積雲と同じ等方形状になる");
+
+        EndParamGroup();
+    }
+
+    void RenderingPanel::DrawStarsSection()
+    {
+        ImGui::TextWrapped(
+            "夜空の星。Sky.hlsliが視線方向のハッシュから解析的に描くのでテクスチャは使わない。"
+            "IBLキューブには焼かないため、ここを変えても空の焼き直しは起きない。");
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "星を描く###StarsEnabled", &m_Engine.m_StarsEnabled, Defaults::StarsEnabled,
+            "昼は太陽の仰角で完全に0までフェードするので、無効にしても昼のシーンの絵は変わらない");
+
+        SliderFloatEx(
+            "密度###StarsDensity", &m_Engine.m_StarsDensity, 1.0f, 256.0f, Defaults::StarsDensity, "%.0f", 0,
+            "空を分割するセルの細かさ。1セルにつき星1個なので、大きいほど星が増える");
+
+        SliderFloatEx(
+            "明るさ###StarsBrightness", &m_Engine.m_StarsBrightness, 0.0f, 20.0f, Defaults::StarsBrightness, "%.2f", 0,
+            "星の明るさ倍率。星は見た目だけの項で、夜空の目標照度(星明かりの照度)には影響しないため、"
+            "ここを上げても風景の明るさは変わらない");
+
+        SliderFloatEx(
+            "またたき###StarsTwinkle", &m_Engine.m_StarsTwinkle, 0.0f, 1.0f, Defaults::StarsTwinkle, "%.2f", 0,
+            "またたきの強さ。既定は0(無効)。上げるとTAAがちらつきとして拾い、"
+            "A/B比較のスクリーンショットの再現性も落ちる");
 
         EndParamGroup();
     }

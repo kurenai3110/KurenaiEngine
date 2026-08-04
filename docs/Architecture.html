@@ -10385,7 +10385,7 @@ A/B比較の土台にならない。<code>[Cloud]Coverage = 0</code>・水面な
 「昼は変わらず夜だけ星が出る」ことを測定として示せる</li>
 </ul>
 
-<h3 id="ch38-7">38.7 DX12で水面に機体が映らなかった問題(解決済み)</h3>
+<h3 id="ch38-7">38.7 DX12の水面に機体が映らない(既知の制限)</h3>
 
 <p>
 実装当初、<strong>DX12でだけ水面への機体の映り込みが出なかった</strong>(DX11では出る)。
@@ -10428,16 +10428,29 @@ DX12が<code>RT利用可=1 反射手法=Raytraced 平面反射パス実行=0</co
 <strong>実行時の値を数個ログに出すほうが、仮説を1つずつビルドして試すより速い。</strong>
 </p>
 
+<h4>現在の扱い: 直さず、既知の制限とする</h4>
+
 <p>
-<strong>対処</strong>: <code>ApplyLoadedScene</code>で、ドローンショーが有効かつ手法が
-<code>Raytraced</code>のときだけ<code>ScreenSpace</code>へ落とす(ログを1行出す)。
-ショーが主役のシーンでは「地物の反射がRTで正確なこと」より「主役が水面に映ること」を優先する、
-という判断である。UIから手法を変えれば従来どおり切り替えられる。
-実測(DX12、水面領域の画素値): <strong>Raytracedのまま23 &rarr; ScreenSpaceで66</strong>(DX11は71)。
+一時期、<code>ApplyLoadedScene</code>に「ドローンショーが有効かつ手法が<code>Raytraced</code>なら
+<code>ScreenSpace</code>へ落とす」という対処を入れていた(実測: 水面領域の画素値が
+Raytracedのまま23 &rarr; ScreenSpaceで66)。<strong>これは廃止した。</strong>
 </p>
 
 <p>
-より本格的に直すなら、<code>Raytraced</code>のままでも平面反射パスを走らせ、RT反射側が水面画素に対して
+理由は絵ではなく構造にある。<strong>1つの機能の有効/無効が、それとは別の機能の設定を黙って
+書き換えていた</strong> &mdash;&mdash; <code>.kscene</code>に書いた指定が機能側の都合で覆るということで、
+「なぜこのシーンだけ反射手法が違うのか」をコードを読むまで追えなくする。
+同種の混同(「反射を出すか」と「どの手法か」を1つのフラグが兼ねる)は
+以前にも<code>ScreenSpaceReflection</code>で問題になっている。
+</p>
+
+<p>
+したがって現在は<strong>DX12では水面に機体が映らない</strong>。
+必要なときはUIの「反射」セクションから手動で<code>ScreenSpace</code>へ切り替える。
+</p>
+
+<p>
+本格的に直すなら、<code>Raytraced</code>のままでも平面反射パスを走らせ、RT反射側が水面画素に対して
 その結果を合成する形になる(RT反射はTLASに無いビルボードを追跡できないため、
 ラスタで描いた反射像を別途混ぜるしかない)。
 なお<code>DebugView::PlanarReflection</code>はDX12では最終画像が出るだけで反射バッファを表示しないため、
@@ -10577,7 +10590,13 @@ split-sumのBRDF LUTは物理のフレネルを正しく再現できており(73
 夜のシルエットとしては保たれている。
 </p>
 
-<h4>効果(DX11・DX12とも同値)</h4>
+<h4>効果</h4>
+
+<p>
+以下はDX11の値。当時はDX12も反射手法を<code>ScreenSpace</code>へ倒す対処が入っていたため
+同値だったが、その対処は廃止した(38.7)。<strong>現在DX12でこの表の値を再現するには、
+UIから手法を<code>ScreenSpace</code>へ切り替える必要がある。</strong>
+</p>
 
 <table>
 <tr><th>状態</th><th>編隊(直上)</th><th>映り込み 最大</th><th>映り込み 平均</th></tr>
