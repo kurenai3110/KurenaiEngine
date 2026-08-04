@@ -20,13 +20,12 @@
 // bindlessが無い環境向けの別実装は用意していない
 // (DX12Device::DetectMeshShaderSupportがbindless非対応なら丸ごと無効にする)。
 
-// 【.hlslを#includeしている】このファイルはG-Buffer書き込みそのものを持たず、
-// GBuffer.hlslのPSMainをそのまま使う。共有ヘッダー(.hlsli)へ括り出すのが本来の作法だが、
-// PSMainはGBuffer.hlslのほぼ全体でありデバッグ表示のためだけに移すと
-// 「不透明パスの本体がどこにあるか」が分かりにくくなる。
-// 写して2つに増やすと片方だけ直したときに静かに食い違うため、そのまま取り込む。
-// GBufferCommon.hlsliはインクルードガードを持つので二重定義にはならない
-#include "GBuffer.hlsl"
+// 【このファイルはピクセルシェーダーを持たない】G-Bufferへの書き込みはGBuffer.hlslの
+// PSMainがそのまま担う(出力するPSInputの中身をVSMainと同じにしてあるため)。
+// メッシュレットの色分け表示(PSMainMeshletDebug)もGBuffer.hlsl側に置いてある ――
+// このファイルは増幅シェーダー用のgroupshared宣言を持っており、
+// そこからピクセルシェーダーをコンパイルさせない方が安全なため
+#include "GBufferCommon.hlsli"
 #include "Bindless.hlsli"
 
 // Assets::MeshletEntry(48バイト)と1対1で対応。並びとサイズを一致させること
@@ -203,6 +202,10 @@ void MSMain(
     uint groupThreadId : SV_GroupThreadID,
     uint groupId : SV_GroupID,
     in payload MeshletPayload payload,
+    // 【Assets::kMeshletMaxVertices / kMeshletMaxTriangles と必ず一致させること】
+    // メッシュシェーダーの出力配列長はコンパイル時定数でなければならず、
+    // C++側のヘッダーをHLSLへ取り込む手段が無いため写している。
+    // パッカーが焼く上限を変えたらここも直すこと(小さいままだと出力が溢れる)
     out vertices PSInput outVertices[64],
     out indices uint3 outTriangles[124])
 {
@@ -247,22 +250,4 @@ void MSMain(
         const uint packed = meshletTriangles[meshlet.TriangleOffset + groupThreadId];
         outTriangles[groupThreadId] = uint3(packed & 0xFFu, (packed >> 8) & 0xFFu, (packed >> 16) & 0xFFu);
     }
-}
-
-// --- デバッグ表示 ---------------------------------------------------------------------
-
-// メッシュレットごとに違う色でG-Bufferのアルベドを塗るピクセルシェーダー。
-// 「メッシュがどう分割されたか」を目で確かめるためのもので、通常の描画では使わない。
-//
-// アルベド以外は通常のPSMainと同じ値を書く必要がある(書き残すとそのレンダーターゲットの
-// 内容が未定義になる。PSOutputのコメント参照)。法線・深度・モーションベクターが
-// 正しいままなので、この表示のままTAAや遮蔽が破綻することもない
-PSOutput PSMainMeshletDebug(PSInput input)
-{
-    PSOutput output = PSMain(input);
-
-    // 色の作り方はMeshlet.hlsliに集約してある(レイトレーシング側と同じ色でなければ
-    // 見比べる意味が無いため)。頂点シェーダー経路で描かれたピクセルは灰色になる
-    output.Albedo = float4(MeshletDebugColor(input.MeshletIndex), 1.0f);
-    return output;
 }

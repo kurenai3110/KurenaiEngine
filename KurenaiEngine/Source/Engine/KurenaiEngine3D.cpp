@@ -1212,7 +1212,8 @@ namespace Kurenai
             // メッシュレットごとに色分けするデバッグ表示用
             RHI::ShaderDesc gbufferMeshletDebugPsDesc;
             gbufferMeshletDebugPsDesc.Stage = RHI::ShaderStage::Pixel;
-            gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.hlsl";
+            // 実体はGBuffer.hlsl側(PSMainをそのまま呼んでアルベドだけ差し替えるため)
+            gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
             gbufferMeshletDebugPsDesc.EntryPoint = "PSMainMeshletDebug";
             m_GBufferMeshletDebugPixelShader = m_Device->CreateShader(gbufferMeshletDebugPsDesc);
         }
@@ -6067,6 +6068,11 @@ namespace Kurenai
                         cmd->UpdateBuffer(m_RTAOConstantBuffer.get(), &rtAOConstants, sizeof(rtAOConstants));
 
                         cmd->SetComputePipelineState(m_RTAOPipelineState.get());
+                        // ヒット面のマテリアルテクスチャをbindlessで引くためs0にWrapが要る
+                        // (理由はRT反射パスの同じ呼び出しのコメント参照)。
+                        // このパスは以前サンプラーセットを一度もバインドしておらず、
+                        // 直前のパスが残したセットに依存していた
+                        cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                         cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
                         cmd->SetComputeConstantBuffer(1, m_RTAOConstantBuffer.get());
 
@@ -6598,7 +6604,14 @@ namespace Kurenai
                     cmd->UpdateBuffer(m_RTReflectionConstantBuffer.get(), &rtConstants, sizeof(rtConstants));
 
                     cmd->SetComputePipelineState(m_RTReflectionPipelineState.get());
-                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    // 【スクリーン空間用ではなくマテリアル用のセット】ヒット面のマテリアル
+                    // テクスチャをbindlessで引くようになったため、s0にWrapのサンプラーが要る。
+                    // モデルのUVはタイリング前提で[0,1]の外へ出るので、Clampで引くと
+                    // 端のテクセルが引き伸ばされて模様が崩れる。
+                    // s1(色バッファ)・s2(データ)はどちらのセットでも中身が同じで、
+                    // s0でこのシェーダーが他に引くのはキューブマップだけ(アドレスモードは
+                    // 面をまたぐフィルタに使われないため無関係)なので、切り替えの影響はここだけ
+                    cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                     cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
                     cmd->SetComputeConstantBuffer(1, m_RTReflectionConstantBuffer.get());
 

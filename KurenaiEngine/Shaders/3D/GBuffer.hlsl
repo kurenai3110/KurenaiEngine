@@ -90,3 +90,24 @@ PSOutput PSMain(PSInput input)
 
     return output;
 }
+
+// メッシュレットごとに違う色でアルベドを塗るデバッグ表示。
+// メッシュシェーダー経路(GBufferMeshlet.hlsl)で描いたときだけ意味を持ち、
+// 従来の頂点シェーダー経路で描かれたピクセルは灰色になる。
+//
+// 【なぜこのファイルに置くのか】上のPSMainをそのまま呼んで一部だけ差し替えたいため。
+// 写して2つに増やすと片方だけ直したときに静かに食い違う。
+// GBufferMeshlet.hlsl側に置かないのは、あちらが増幅シェーダー用のgroupshared宣言を
+// 持っており、そこからピクセルシェーダーをコンパイルさせたくないから。
+//
+// アルベド以外は通常のPSMainと同じ値を書く必要がある(書き残すとそのレンダーターゲットの
+// 内容が未定義になる。PSOutputのコメント参照)。法線・深度・モーションベクターが
+// 正しいままなので、この表示のままTAAや遮蔽が破綻することもない
+PSOutput PSMainMeshletDebug(PSInput input)
+{
+    PSOutput output = PSMain(input);
+    // 色の作り方はMeshlet.hlsliに集約してある(レイトレーシング側と同じ色でなければ
+    // 見比べる意味が無いため)
+    output.Albedo = float4(MeshletDebugColor(input.MeshletIndex), 1.0f);
+    return output;
+}
