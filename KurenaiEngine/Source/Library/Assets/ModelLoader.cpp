@@ -560,6 +560,14 @@ namespace Kurenai::Assets
                 outMesh.MeshletTriangleBuffer =
                     createImmutable(mesh.MeshletTriangleOffset, mesh.MeshletTriangleCount, sizeof(uint32_t));
                 outMesh.MeshletCount = mesh.MeshletCount;
+
+                // メッシュシェーダーはこの4本をResourceDescriptorHeap経由で読む。
+                // 番号は描画時にObjectConstantsへ載せて渡すため、ここで一度だけ登録して
+                // IRHIBuffer側に覚えさせる(GetBindlessIndexで取り出せる)
+                device.RegisterBindless(outMesh.VertexBuffer.get());
+                device.RegisterBindless(outMesh.MeshletBuffer.get());
+                device.RegisterBindless(outMesh.MeshletVertexBuffer.get());
+                device.RegisterBindless(outMesh.MeshletTriangleBuffer.get());
             }
 
             if (buildRaytracingGeometry)

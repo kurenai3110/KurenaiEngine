@@ -127,6 +127,7 @@ exit /b 0</Command>
   </ItemGroup>
   <ItemGroup>
     <None Include="Shaders\3D\GBuffer.hlsl" />
+    <None Include="Shaders\3D\GBufferMeshlet.hlsl" />
     <None Include="Shaders\3D\DirectLighting.hlsl" />
     <None Include="Shaders\3D\DeferredLighting.hlsl" />
     <None Include="Shaders\3D\HiZ.hlsl" />

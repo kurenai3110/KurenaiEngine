@@ -680,6 +680,14 @@ namespace Kurenai
             // (Shadow.hlsl等が先頭までしか宣言していなくても影響しない、という上のBaseColorFactorの
             // コメントと同じ理由)
             float MaterialID;
+            // メッシュシェーダー経路(Shaders/3D/GBufferMeshlet.hlsl)がジオメトリを引くための
+            // bindlessディスクリプタ番号。頂点シェーダー経路では読まれない。
+            // すべて4バイトのスカラーなので、末尾に足しても既存フィールドのオフセットは動かない
+            uint32_t VertexBufferIndex;
+            uint32_t MeshletBufferIndex;
+            uint32_t MeshletVertexBufferIndex;
+            uint32_t MeshletTriangleBufferIndex;
+            uint32_t MeshletCount;
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -713,6 +721,19 @@ namespace Kurenai
             // 水面(kMaterialIDWater、Shaders/3D/GBufferCommon.hlsliと一致させること)。
             // 水面以外は0.0f(通常マテリアル)のまま
             constants.MaterialID = instance.IsWater ? 1.0f : 0.0f;
+
+            // メッシュレット。ModelLoaderが登録済みの番号をそのまま渡す。
+            // メッシュシェーダー非対応・メッシュレット未生成の場合は
+            // バッファ自体が無く、GetBindlessIndexはkInvalidBindlessIndexを返す
+            // (MeshletCountが0ならメッシュシェーダー経路には入らないため、その値は使われない)
+            const auto bindlessIndexOf = [](const RHI::IRHIBuffer* buffer) {
+                return buffer ? buffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
+            };
+            constants.VertexBufferIndex = bindlessIndexOf(mesh.VertexBuffer.get());
+            constants.MeshletBufferIndex = bindlessIndexOf(mesh.MeshletBuffer.get());
+            constants.MeshletVertexBufferIndex = bindlessIndexOf(mesh.MeshletVertexBuffer.get());
+            constants.MeshletTriangleBufferIndex = bindlessIndexOf(mesh.MeshletTriangleBuffer.get());
+            constants.MeshletCount = mesh.MeshletCount;
             return constants;
         }
 
@@ -1167,6 +1188,32 @@ namespace Kurenai
         gbufferWaterPsDesc.EntryPoint = "PSMain";
         m_GBufferWaterPixelShader = m_Device->CreateShader(gbufferWaterPsDesc);
 
+        // メッシュシェーダー版のG-Bufferパス(GBufferMeshlet.hlsl)。
+        // 対応環境でのみ作る ―― 非対応環境ではas/msプロファイルのコンパイル自体ができず、
+        // 毎回エラーログが出てしまうため。ピクセルシェーダーはGBuffer.hlslのものを共有する
+        // (メッシュレットのON/OFFで見た目が変わらないことがこのパスの前提)
+        if (m_Device->SupportsMeshShader())
+        {
+            RHI::ShaderDesc gbufferAsDesc;
+            gbufferAsDesc.Stage = RHI::ShaderStage::Amplification;
+            gbufferAsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.hlsl";
+            gbufferAsDesc.EntryPoint = "ASMain";
+            m_GBufferAmplificationShader = m_Device->CreateShader(gbufferAsDesc);
+
+            RHI::ShaderDesc gbufferMsDesc;
+            gbufferMsDesc.Stage = RHI::ShaderStage::Mesh;
+            gbufferMsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.hlsl";
+            gbufferMsDesc.EntryPoint = "MSMain";
+            m_GBufferMeshShader = m_Device->CreateShader(gbufferMsDesc);
+
+            // メッシュレットごとに色分けするデバッグ表示用
+            RHI::ShaderDesc gbufferMeshletDebugPsDesc;
+            gbufferMeshletDebugPsDesc.Stage = RHI::ShaderStage::Pixel;
+            gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.hlsl";
+            gbufferMeshletDebugPsDesc.EntryPoint = "PSMainMeshletDebug";
+            m_GBufferMeshletDebugPixelShader = m_Device->CreateShader(gbufferMeshletDebugPsDesc);
+        }
+
         // G-BufferのPSOはEmissiveのフォーマットがバッファ精度に依存するため、
         // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
 
@@ -1380,6 +1427,8 @@ namespace Kurenai
         // RTReflection.hlslはRayQueryを含むためシェーダーモデル6.5でしかコンパイルできない。
         // 非対応環境ではシェーダー自体を作らず、UIからもRaytracedを選べないようにする
         m_RaytracingAvailable = m_Device->SupportsRaytracing();
+        // メッシュシェーダーの可否もここで控える(UIパネルが参照する)
+        m_MeshShaderAvailable = m_Device->SupportsMeshShader();
         if (m_RaytracingAvailable)
         {
             RHI::ShaderDesc rtReflectionCsDesc;
@@ -2128,6 +2177,27 @@ namespace Kurenai
                m_RTAOPipelineState != nullptr && m_RTAORawTexture != nullptr && m_RTAOTexture != nullptr;
     }
 
+    bool KurenaiEngine3D::ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const
+    {
+        // 【水面はメッシュレット経路に載せない】水面のピクセルシェーダーはWater.hlslの
+        // PSMainで、G-Buffer本体のPSMainとは別物。メッシュシェーダー版を用意するには
+        // PSOをもう2本(通常/ミラー)増やすことになるが、水面は.ksceneが置く平面1枚で
+        // 三角形数が少なく、メッシュレットカリングの利得がほとんど無い
+        if (isWater)
+        {
+            return false;
+        }
+
+        // メッシュレットが焼かれていない(--no-meshletsでパックされた.kmodel)、
+        // またはデバイスが非対応でGPUバッファを作っていない場合は0になる
+        if (mesh.MeshletCount == 0)
+        {
+            return false;
+        }
+
+        return m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+    }
+
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAOTexture() const
     {
         if (!m_AOEnabled)
@@ -2217,6 +2287,40 @@ namespace Kurenai
             m_GBufferWaterPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
             gbufferPipelineDesc.FrontCounterClockwise = true;
             m_GBufferWaterPipelineStateMirrored = m_Device->CreatePipelineState(gbufferPipelineDesc);
+
+            // メッシュシェーダー版のG-Bufferパス(GBufferMeshlet.hlsl)。
+            // 入力レイアウトを持たない以外は上の通常PSOと同じ設定にする ―― ラスタライザ・
+            // 深度・レンダーターゲットのどれか1つでもずれると、メッシュレットのON/OFFで
+            // 見た目が変わってしまい「切り替えても一致するはず」という検証が成立しなくなる。
+            //
+            // 非対応環境ではCreateMeshPipelineStateがnullptrを返す。ポインタが空なら
+            // 描画側が従来経路を使うため、ここで分岐して作成をスキップする必要はない
+            if (m_Device->SupportsMeshShader() && m_GBufferMeshShader && m_GBufferAmplificationShader)
+            {
+                RHI::MeshPipelineStateDesc meshPipelineDesc;
+                meshPipelineDesc.AmplificationShader = m_GBufferAmplificationShader.get();
+                meshPipelineDesc.MeshShader = m_GBufferMeshShader.get();
+                meshPipelineDesc.PixelShader = m_GBufferPixelShader.get();
+                meshPipelineDesc.RenderTargetFormats = gbufferPipelineDesc.RenderTargetFormats;
+                meshPipelineDesc.HasDepthStencil = true;
+                meshPipelineDesc.ReverseZ = true;
+                meshPipelineDesc.FrontCounterClockwise = false;
+                m_GBufferMeshletPipelineState = m_Device->CreateMeshPipelineState(meshPipelineDesc);
+
+                meshPipelineDesc.FrontCounterClockwise = true;
+                m_GBufferMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(meshPipelineDesc);
+
+                // メッシュレットの分かれ方を色で確かめるデバッグ表示用。
+                // ピクセルシェーダーだけを差し替えた同じパイプライン
+                if (m_GBufferMeshletDebugPixelShader)
+                {
+                    meshPipelineDesc.PixelShader = m_GBufferMeshletDebugPixelShader.get();
+                    meshPipelineDesc.FrontCounterClockwise = false;
+                    m_GBufferMeshletDebugPipelineState = m_Device->CreateMeshPipelineState(meshPipelineDesc);
+                    meshPipelineDesc.FrontCounterClockwise = true;
+                    m_GBufferMeshletDebugPipelineStateMirrored = m_Device->CreateMeshPipelineState(meshPipelineDesc);
+                }
+            }
 
             // SSAOパス
             RHI::PipelineStateDesc ssaoPipelineDesc;
@@ -5648,12 +5752,30 @@ namespace Kurenai
                 // 一度も切り替えを行わず、発行されるコマンド列はこの機能の追加前と完全に同一になる。
                 // DX12のSetPipelineStateはルートシグネチャを張り直して既存のバインドを
                 // 無効化するので、切り替えたときはパス共通のバインドもやり直す
+                //
+                // メッシュレット経路(useMeshlet)はさらにその上の分岐。頂点シェーダー版と
+                // 同じG-Bufferへ同じ内容を書くので、切り替えても見た目は一致する
                 RHI::IRHIPipelineState* currentPipelineState = m_GBufferPipelineState.get();
-                const auto bindPipelineState = [&](bool mirrored, bool water)
+                const auto bindPipelineState = [&](bool mirrored, bool water, bool useMeshlet)
                 {
-                    RHI::IRHIPipelineState* const wanted = water
-                        ? (mirrored ? m_GBufferWaterPipelineStateMirrored.get() : m_GBufferWaterPipelineState.get())
-                        : (mirrored ? m_GBufferPipelineStateMirrored.get() : m_GBufferPipelineState.get());
+                    RHI::IRHIPipelineState* wanted = nullptr;
+                    if (useMeshlet)
+                    {
+                        // デバッグ表示が有効ならメッシュレットごとの色分けPSOを使う。
+                        // 用意できていない場合(作成失敗)は通常のメッシュレットPSOへ落とす
+                        const bool debugView = m_MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
+                        wanted = debugView
+                            ? (mirrored ? m_GBufferMeshletDebugPipelineStateMirrored.get()
+                                        : m_GBufferMeshletDebugPipelineState.get())
+                            : (mirrored ? m_GBufferMeshletPipelineStateMirrored.get()
+                                        : m_GBufferMeshletPipelineState.get());
+                    }
+                    else
+                    {
+                        wanted = water
+                            ? (mirrored ? m_GBufferWaterPipelineStateMirrored.get() : m_GBufferWaterPipelineState.get())
+                            : (mirrored ? m_GBufferPipelineStateMirrored.get() : m_GBufferPipelineState.get());
+                    }
                     if (wanted == currentPipelineState)
                     {
                         return;
@@ -5675,15 +5797,14 @@ namespace Kurenai
                             continue;
                         }
 
-                        bindPipelineState(instance.IsMirrored, instance.IsWater);
+                        const bool useMeshlet = ShouldUseMeshletPath(mesh, instance.IsWater);
+                        bindPipelineState(instance.IsMirrored, instance.IsWater, useMeshlet);
 
                         const ObjectConstants objectConstants =
                             MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
-                        cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                        cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                         cmd->SetTexture(0, mesh.BaseColorTexture);
                         cmd->SetTexture(1, mesh.NormalTexture);
                         cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
@@ -5697,7 +5818,22 @@ namespace Kurenai
                             // 【t6からt7へ移した】t6はbent normal(34章)が使うようになったため
                             cmd->SetTexture(7, m_WaterNormalMapTexture.get());
                         }
-                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+
+                        if (useMeshlet)
+                        {
+                            // 頂点/インデックスバッファは張らない。増幅シェーダーとメッシュシェーダーが
+                            // bindless経由で自分で読む(ObjectConstantsが番号を運んでいる)。
+                            // 起動するのは「メッシュレット数 ÷ 増幅シェーダーのグループサイズ」だけで、
+                            // 実際にラスタライズされるのはカリングを生き延びたぶんに絞られる
+                            constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
+                            cmd->DispatchMesh((mesh.MeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize, 1, 1);
+                        }
+                        else
+                        {
+                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        }
                     }
                 }
             },

@@ -110,6 +110,22 @@ cbuffer ObjectConstants : register(b1)
     // マテリアル種別ID(末尾に追加、P2)。0=通常マテリアル、1=水面(kMaterialIDWater、上記参照)。
     // C++側 KurenaiEngine3D::MakeObjectConstants が instance.IsWater に応じて設定する
     float MaterialID;
+
+    // --- メッシュシェーダー経路(GBufferMeshlet.hlsl)専用 -------------------------------
+    //
+    // メッシュシェーダーには入力アセンブラが無く、頂点もメッシュレットも自分でバッファから
+    // 読むしかない。読む先はbindlessディスクリプタ番号でここから受け取る
+    // (IRHIDevice::RegisterBindlessが払い出した番号。Bindless.hlsli参照)。
+    //
+    // 【末尾に足してあるので既存シェーダーへの影響は無い】Shadow.hlslのように
+    // 先頭までしか宣言していないシェーダーがあっても、定数バッファのオフセットは1バイトも
+    // 動かない(上のMaterialID・BaseColorFactorのコメントと同じ理由)。
+    // 頂点シェーダー経路ではどれも読まれないため、C++側は0のままでも構わない
+    uint VertexBufferIndex;          // StructuredBuffer<MeshVertex>(Assets::Vertexと同じ並び)
+    uint MeshletBufferIndex;         // StructuredBuffer<Meshlet>
+    uint MeshletVertexBufferIndex;   // StructuredBuffer<uint>(頂点バッファへのインデックス)
+    uint MeshletTriangleBufferIndex; // StructuredBuffer<uint>(ローカル頂点番号3つを詰めたもの)
+    uint MeshletCount;               // このメッシュのメッシュレット数(増幅シェーダーの範囲外判定用)
 };
 
 Texture2D BaseColorTexture : register(t0);
@@ -145,7 +161,18 @@ struct PSInput
     // 三角形の内側でずれる)
     float4 CurClip : TEXCOORD3;
     float4 PrevClip : TEXCOORD4;
+    // このピクセルを出したメッシュレットの番号。メッシュシェーダー経路
+    // (GBufferMeshlet.hlsl)でだけ実際の番号が入り、従来の頂点シェーダー経路では
+    // kInvalidMeshletIndexになる。
+    //
+    // 三角形の中では一定なのでnointerpolation(補間すると意味を成さない整数が混ざる)。
+    // 通常のPSMainは読まず、メッシュレットの分かれ方を目で確かめるデバッグ表示
+    // (GBufferMeshlet.hlslのPSMainMeshletDebug)だけが使う
+    nointerpolation uint MeshletIndex : TEXCOORD5;
 };
+
+// PSInput::MeshletIndexが「メッシュシェーダー由来ではない」ことを表す値
+static const uint kInvalidMeshletIndex = 0xFFFFFFFFu;
 
 struct PSOutput
 {
@@ -189,6 +216,8 @@ PSInput VSMain(VSInput input)
     // 違うのはカメラ由来のビュー射影行列だけになる。動的オブジェクトを入れる場合は
     // ObjectConstantsへPrevWorldを追加し、input.Positionをそちらで変換してからここへ渡すこと
     output.PrevClip = mul(float4(worldPos, 1.0f), PrevViewProj);
+    // この経路はメッシュレットを経由していない(GBufferCommon.hlsliのPSInput参照)
+    output.MeshletIndex = kInvalidMeshletIndex;
     return output;
 }
 

@@ -145,6 +145,11 @@ namespace Kurenai
         bool ShouldRunRaytracedShadow() const;
         // このフレームでRTAOパスを実行するか。上2つと同じ理由で判定を1か所に集約している
         bool ShouldRunRaytracedAO() const;
+        // このメッシュをメッシュシェーダー経路で描くか。上のShouldRun*と同じく、
+        // 「どのPSOを束ねるか」と「DispatchMeshとDrawIndexedのどちらを積むか」の判断が
+        // ずれると即座に破綻するため、判定を1か所に集約する。
+        // isWaterがtrueのメッシュは常にfalse(理由は実装のコメント参照)
+        bool ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const;
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
         // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
         RHI::IRHITexture* GetActiveAOTexture() const;
@@ -369,6 +374,35 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_GBufferWaterPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineStateMirrored;
+
+        // --- メッシュシェーダー版のジオメトリパス(Shaders/3D/GBufferMeshlet.hlsl) ---------
+        //
+        // 増幅シェーダーがメッシュレット単位で錐台・法線コーンのカリングを行い、
+        // 生き残った塊だけをメッシュシェーダーがラスタライザへ流す。書き込む先も内容も
+        // 上の通常パスとまったく同じG-Bufferで、ピクセルシェーダーも共有している
+        // (m_GBufferPixelShader)。そのため切り替えても見た目は一致するのが正しい。
+        //
+        // 非対応環境(DX11、メッシュシェーダーTier 1未満、bindless非対応)では
+        // すべてnullptrのままになり、描画側は自動的に従来経路を使う
+        std::unique_ptr<RHI::IRHIShader> m_GBufferAmplificationShader;
+        std::unique_ptr<RHI::IRHIShader> m_GBufferMeshShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletPipelineStateMirrored;
+        // メッシュレットごとに色分けするデバッグ表示。ピクセルシェーダーだけが違う
+        std::unique_ptr<RHI::IRHIShader> m_GBufferMeshletDebugPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletDebugPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletDebugPipelineStateMirrored;
+        // このデバイスがメッシュシェーダーを使えるか(IRHIDevice::SupportsMeshShader()の写し)。
+        // m_DeviceはKurenaiEngineBaseのprotectedメンバで、派生クラスのfriendであるUIパネルから
+        // 触れるかはC++の規則の解釈が分かれるため、m_RaytracingAvailableと同じくここへ控える
+        bool m_MeshShaderAvailable = false;
+        // メッシュレット経路を使うか(ImGuiのレンダリングパネルから切り替える)。
+        // 対応環境では既定で有効。無効にすると従来の頂点シェーダー描画に戻るため、
+        // 見た目の差分を目で比較できる
+        bool m_MeshletRenderingEnabled = true;
+        // メッシュレットごとの色分け表示。m_MeshletRenderingEnabledが有効なときだけ効く
+        bool m_MeshletDebugViewEnabled = false;
+
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
