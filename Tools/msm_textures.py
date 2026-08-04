@@ -538,6 +538,116 @@ FIELD_FUNCTIONS = {
 }
 
 
+# 法線マップの強さ(材質名 -> 高さの倍率)。変動場を高さとみなしたときの起伏の深さで、
+# 数値そのものに物理的な意味は無い(出典なしの決め値)。
+#
+# 【なぜ法線マップが要るか】幾何の無い平らな面だけを切り出して、島の幅を揃えてから
+# 局所コントラスト(局所標準偏差の中央値÷島の平均輝度、窓7画素)を測ると:
+#     城壁の素の壁面  参考写真 0.378 / 実機 0.118  (3.2倍)
+#     裸の花崗岩      参考写真 0.448 / 実機 0.131  (3.4倍)
+# 面そのものが平らで、狭間や塔を足しても壁の高さの2割弱しか占めないので届かない。
+# かといってアルベドの振幅を上げるのは筋が悪い。写真の変動の主成分は岩の凹凸が作る
+# **陰影**で、アルベドで真似ると光の向きに関係なく染みが焼き付いた面になる
+# (weathering_fieldのdocstring参照。実際に0.28まで上げて「大きな染み」に見え0.22へ戻した)。
+# 法線マップなら光の向きに応じた陰影が出る。太陽を仰角15度へ下げた直後なので噛み合う。
+# 材質名 -> (起伏の深さ[m], タイルの実寸[m])。タイルの実寸は
+# blender_msm_island.MATERIAL_UV_TILE_METERS と一致させること(勾配をメートルで取るため)。
+# 深さは出典なしの決め値だが、根拠の軸は「その材質の凹凸の実際の深さ」:
+#   花崗岩 0.5m  … 露岩の割れ目・転石の段差
+#   切石   0.12m … 目地の彫り込みと石の面のばらつき
+#   乱石積 0.18m … 石が不揃いに出入りするぶん切石より深い
+NORMAL_MAP_PARAMS = {
+    "rock":    (8.00, 45.0),
+    "masonry": (1.60, 15.0),
+    "rubble":  (2.00, 12.0),
+}
+# 法線の傾きの上限(tan)。目地は幅4画素で急峻なため、そのままだと勾配が桁で跳ねて
+# 直立した壁のようになる。tan(60度)=1.73で頭を打たせる
+NORMAL_MAP_MAX_SLOPE = 1.73
+
+
+def field_to_normal_map(field, depth_meters, tile_meters):
+    """変動場(平均1.0前後の乗数)を高さとみなして、接空間の法線マップRGB([0,1])を作る。
+
+    石は「暗いところ=凹んでいるところ」(裂け目・目地・影の溜まり)なので、
+    変動場をそのまま高さとして使える。タイルは繰り返すので勾配は周期境界で取る。
+
+    【勾配はメートルで取る】最初は隣接**画素**の差をそのまま傾きにしていたが、
+    1024画素が45mのタイルなので1画素=0.044m、変動±0.34が5m幅に広がっている場合の
+    傾きは約1度にしかならず、**法線マップを入れても絵がまったく変わらなかった**
+    (局所コントラスト 0.1177→0.1180)。画素ではなく実寸で微分する。
+
+    depth_meters: 変動場の振幅1.0ぶんを何メートルの起伏とみなすか。
+    tile_meters: このテクスチャが貼られる1タイルの実寸(MATERIAL_UV_TILE_METERSと同じ値)。
+
+    返すのは float32 の (H, W, 3)。**リニア色空間**の値なので、Blender側では
+    colorspace を 'Non-Color' にすること(sRGBデコードされると法線が歪む)。
+
+    Y方向の規約は create_variation_image と同じ(fieldの行インデックスが増える方向が
+    画像の下から上)。glTF/Blenderの接空間法線は +Y が上なので、行方向の勾配は
+    そのままYへ入れてよい。
+    """
+    try:
+        size = field.shape[0]
+        pixels_per_meter = size / float(tile_meters)
+        height = field.astype(np.float64) * depth_meters
+        # 周期境界の中心差分[m/画素] → メートルあたりの傾きへ直す
+        dx = (np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) * 0.5 * pixels_per_meter
+        dy = (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) * 0.5 * pixels_per_meter
+
+        slope = np.sqrt(dx * dx + dy * dy)
+        scale = np.where(slope > NORMAL_MAP_MAX_SLOPE, NORMAL_MAP_MAX_SLOPE / np.maximum(slope, 1e-9), 1.0)
+        dx, dy = dx * scale, dy * scale
+
+        nx, ny = -dx, -dy
+        nz = np.ones_like(height)
+        norm = np.sqrt(nx * nx + ny * ny + nz * nz)
+        nx, ny, nz = nx / norm, ny / norm, nz / norm
+
+        print(f"[INFO] 法線マップ: 深さ{depth_meters}m/タイル{tile_meters}m "
+              f"傾きの中央値={np.degrees(np.arctan(np.median(slope))):.1f}度 "
+              f"上限で頭打ち={float((slope > NORMAL_MAP_MAX_SLOPE).mean()):.1%}")
+        rgb = np.stack([nx * 0.5 + 0.5, ny * 0.5 + 0.5, nz * 0.5 + 0.5], axis=2)
+        return np.clip(rgb, 0.0, 1.0).astype(np.float32)
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] field_to_normal_map()の生成に失敗しました"
+              f"(depth={depth_meters}, tile={tile_meters}): ({error})", file=sys.stderr)
+        raise
+
+
+def create_normal_image(name, field, depth_meters, tile_meters):
+    """変動場から法線マップのBlender画像を作る(colorspaceは'Non-Color')。
+
+    create_variation_imageと同じく、同名の画像があれば作り直さず再利用する。
+    colorspaceはpixels代入より**先に**設定する(後から設定するとBlenderがバッファを
+    再読み込みして書き込んだ値が失われる。create_variation_imageのコメント参照)。
+    """
+    try:
+        import bpy
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] bpyのインポートに失敗しました(Blender内でのみ呼び出せます): ({error})",
+              file=sys.stderr)
+        raise
+
+    try:
+        rgb = field_to_normal_map(field, depth_meters, tile_meters)
+        h, w, _ = rgb.shape
+        alpha = np.ones((h, w, 1), dtype=np.float32)
+        rgba = np.concatenate([rgb, alpha], axis=2).astype(np.float32)
+
+        image = bpy.data.images.get(name)
+        if image is None:
+            image = bpy.data.images.new(name, w, h, alpha=False)
+        image.colorspace_settings.name = 'Non-Color'
+        image.pixels[:] = rgba.reshape(-1).tolist()
+        image.file_format = 'PNG'
+        image.pack()
+        return image
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] 法線マップ画像({name})の作成に失敗しました: ({error})", file=sys.stderr)
+        raise
+
+
 def _linear_to_srgb(v):
     """リニア値([0,1]にクランプ済み想定)をsRGBエンコードする。"""
     v = np.clip(v, 0.0, 1.0)

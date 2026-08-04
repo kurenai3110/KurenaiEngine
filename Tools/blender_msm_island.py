@@ -1930,6 +1930,35 @@ def _create_island_materials():
                     tex_node.name = f"{name}_Variation"
                     tex_node.image = image
                     mat.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
+
+                    # 法線マップ(msm_textures.NORMAL_MAP_STRENGTHSに載っている材質だけ)。
+                    # 同じ変動場を高さとみなして法線を作るので、アルベドの暗いところと
+                    # 凹みが一致する。理由と実測値はNORMAL_MAP_STRENGTHSのコメント参照
+                    normal_params = msm_textures.NORMAL_MAP_PARAMS.get(field_name)
+                    if normal_params is not None:
+                        depth_meters, tile_meters = normal_params
+                        # タイルの実寸は勾配をメートルで取るために要る。UV投影の値と
+                        # 食い違うと起伏の深さが名目どおりにならないので突き合わせる
+                        uv_tile = MATERIAL_UV_TILE_METERS.get(name)
+                        if uv_tile is not None and abs(uv_tile - tile_meters) > 1e-6:
+                            print(
+                                f"[ERROR] {name}の法線マップのタイル実寸({tile_meters}m)が"
+                                f"MATERIAL_UV_TILE_METERS({uv_tile}m)と違います。"
+                                f"msm_textures.NORMAL_MAP_PARAMSを合わせてください",
+                                file=sys.stderr,
+                            )
+                            raise ValueError(f"{name}の法線マップのタイル実寸が一致しません")
+                        normal_image = msm_textures.create_normal_image(
+                            f"{name}_Normal", field, depth_meters, tile_meters)
+                        normal_tex = mat.node_tree.nodes.new("ShaderNodeTexImage")
+                        normal_tex.name = f"{name}_NormalTex"
+                        normal_tex.image = normal_image
+                        normal_map = mat.node_tree.nodes.new("ShaderNodeNormalMap")
+                        normal_map.name = f"{name}_NormalMap"
+                        mat.node_tree.links.new(normal_tex.outputs["Color"],
+                                                normal_map.inputs["Color"])
+                        mat.node_tree.links.new(normal_map.outputs["Normal"],
+                                                bsdf.inputs["Normal"])
             materials.append(mat)
         except Exception as error:  # noqa: BLE001
             print(f"[ERROR] マテリアル({name})の作成に失敗しました: ({error})", file=sys.stderr)
