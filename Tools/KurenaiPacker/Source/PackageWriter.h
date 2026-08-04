@@ -26,6 +26,15 @@ namespace KurenaiPacker
         // 持っているものだけを使う)。非nullptrの場合、焼けたメッシュについては
         // ソースモデル側のocclusionTextureより焼いた結果を優先する
         const OcclusionBakeResult* BakedOcclusion = nullptr;
+
+        // メッシュレット(メッシュシェーダー用の分割情報)を生成するか。
+        // falseにすると頂点キャッシュ最適化もインデックスの並べ替えも行わず、
+        // 頂点/インデックスを入力のまま書き出す(メッシュレット関連のフィールドは0)。
+        //
+        // 既定でtrueなのは、生成しても従来の描画経路にまったく影響が無いため
+        // (増えるのは.kgeomの容量だけで、メッシュシェーダー非対応環境では読まれない)。
+        // falseにする用途は「見た目の異常がメッシュレット化に由来するかどうか」の切り分け
+        bool EnableMeshlets = true;
     };
 
     struct PackResult
@@ -39,6 +48,7 @@ namespace KurenaiPacker
         size_t TextureFailed = 0;      // 読み込み失敗でフォールバック(-1)になった数
         size_t OcclusionBaked = 0;     // ベイクした遮蔽マップを.ktexとして書いた数
         size_t BentNormalBaked = 0;    // ベイクしたbent normalを.ktexとして書いた数
+        size_t MeshletCount = 0;       // 生成したメッシュレットの総数(EnableMeshlets=falseなら0)
     };
 
     // sourceModelを指定した.kmodelパスへ書き出す。

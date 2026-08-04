@@ -25,6 +25,23 @@ namespace Kurenai::Assets
         // デバイスがレイトレーシング非対応の場合は両配列とも空で、この値は意味を持たない
         uint32_t RaytracingAttributeOffset = 0;
         uint32_t RaytracingIndexOffset = 0;
+
+        // --- メッシュレット(メッシュシェーダー用) ---------------------------------------
+        //
+        // KurenaiPackerが焼いた分割情報(Assets::MeshletEntry)と、その2段の間接参照テーブル。
+        // 増幅シェーダーがMeshletBufferのバウンディング球・法線コーンでカリングし、
+        // メッシュシェーダーが生き残ったメッシュレットの頂点/三角形を組み立てる。
+        //
+        // 3本ともBufferUsage::StructuredImmutable。シーン読み込み時に一度書いたら
+        // 変わらないため、ステージングリングを持たないこのUsageがそのまま当てはまる。
+        //
+        // 【空になる条件】(1) デバイスがメッシュシェーダー非対応、(2) .kmodelが
+        // --no-meshletsで焼かれている、のいずれか。MeshletCountが0なら
+        // 描画側は従来の頂点シェーダー経路を使うこと
+        std::unique_ptr<RHI::IRHIBuffer> MeshletBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> MeshletVertexBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> MeshletTriangleBuffer;
+        uint32_t MeshletCount = 0;
         RHI::IRHITexture* BaseColorTexture = nullptr;
         RHI::IRHITexture* NormalTexture = nullptr;
         RHI::IRHITexture* MetallicRoughnessTexture = nullptr;
