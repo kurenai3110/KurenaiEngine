@@ -49,7 +49,25 @@ namespace Kurenai
         m_AudioEngine = std::make_unique<Core::AudioEngine>();
     }
 
-    KurenaiEngineBase::~KurenaiEngineBase() = default;
+    KurenaiEngineBase::~KurenaiEngineBase()
+    {
+        // スワップチェーンを捨てる前にGPUの実行完了を待つ。
+        //
+        // 【DX12Device側の待機では間に合わない】メンバはm_Window→m_Device→m_SwapChainの順に
+        // 宣言してあるため、破棄はm_SwapChain→m_Deviceの逆順で走る。
+        // DX12Device::~DX12DeviceもWaitForGPUIdle()を呼ぶが、それはバックバッファが
+        // 解放された後になる。待たずに解放すると、まだGPUが参照しているバックバッファを
+        // DXGIが破棄することになり、デバッグレイヤーが
+        // OBJECT_DELETED_WHILE_STILL_IN_USE(EXECUTION ERROR #921)で例外を上げて
+        // 終了時にクラッシュする。
+        //
+        // 宣言順を入れ替える手もあるが、スワップチェーンはデバイスから作られるので
+        // 「デバイスより先に消える」という順序自体は正しい。待機を明示するほうが素直
+        if (m_Device)
+        {
+            m_Device->WaitForGPUIdle();
+        }
+    }
 
     void KurenaiEngineBase::ApplyPendingResize()
     {
