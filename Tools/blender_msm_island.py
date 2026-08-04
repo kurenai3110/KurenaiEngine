@@ -650,6 +650,24 @@ VILLAGE_HOUSE_GAP = 0.3
 # これで平均の正面幅は 0.85*5.0 + 0.15*9.0 = 5.6m(旧7.9m)
 VILLAGE_GABLE_TO_STREET_RATIO = 0.85
 
+# --- 集落の家の窓(開口)。参考写真の暗い画素は正規化高さ0.1〜0.3(=集落と中腹)に
+# 18〜22%集中していて、その正体は窓・扉・軒の陰。実機の家は無地の板で、
+# 暗い材質のWindowGlass(0.020,0.022,0.028)は島の0.2%しか無かった。
+# 実物のノルマンディの家の窓は幅0.8〜1.0m・高さ1.4〜1.6m・階高約3m(出典なしの決め値)。
+# 600m先では1つ約5x8画素になり、遠景でも点として効く。
+# カメラに向く面(半径方向の外側)にだけ置く。裏面は見えないので三角形を使わない ---
+VILLAGE_WINDOW_WIDTH = 0.9
+VILLAGE_WINDOW_HEIGHT = 1.5
+VILLAGE_WINDOW_SPACING = 2.4          # 横方向の間隔
+VILLAGE_WINDOW_PROTRUSION = 0.15      # 壁からのわずかな飛び出し(Booleanの代わり)
+VILLAGE_WINDOW_SILL_FIRST = 2.2       # 1階の窓の下端(地面から)
+VILLAGE_WINDOW_FLOOR_HEIGHT = 3.0     # 階高
+VILLAGE_WINDOW_SKIP_PROBABILITY = 0.2  # 格子に見えないよう間引く割合
+# 専用のrandom.Randomインスタンスを使う。グローバルのrandomを消費すると
+# 既存の家・樹木の位置がすべて動いてしまうため(ABBEY_FACADE_WINDOW_SEEDと同じ理由)
+VILLAGE_WINDOW_SEED = 20260806
+
+
 # --- 植生(vegetation)。600m先では葉の1枚1枚は見えず緑の塊のシルエットとしてしか
 # 視認されないため、木1本のジオメトリは低ポリの円柱(幹)+潰したUV球(樹冠)で済ませる ---
 VEGETATION_SEED = 20260805
@@ -1211,9 +1229,14 @@ ABBEY_SUBSTRUCTURE_SUPERELLIPSE_EXPONENT = 4.0  # 角を丸めた矩形にする
 # 写真の縦の塊はおよそ幅8〜14m・出3〜6mなので、そこへ寄せる(出典なしの決め値)。
 # 以前のパスが「控え壁が密に並びすぎて刳形に見える」として間隔を8→18mへ広げたのは、
 # 幅と出が足りないまま本数だけ減らしたため、平らさが増す方向に働いていた。
-ABBEY_BUTTRESS_WIDTH = 7.0             # 控え壁自体の幅(壁面に沿う方向)
-ABBEY_BUTTRESS_PROTRUSION = 4.0        # 控え壁の出っ張り量
-ABBEY_BUTTRESS_SPACING = 16.0          # 控え壁の配置間隔(周長に沿った距離、出典なしの決め値)
+# 【修正・分節が足りず一枚壁に見えていた】参考写真の壁を拡大すると、見えている変動の
+# 主成分は控え壁の縦の陰影(zoom_ref_wall.png)。実機の同じ場所は平らな面だった。
+# 太陽を真南西(225度)に置くと、控え壁の西を向く側面は順光・南を向く壁面は斜光になり、
+# 影の描画に頼らずに明暗の縦縞が出る。出っ張りを深く、間隔を詰めて縞を増やす。
+# 600m先では 幅5m=27px・間隔10m=53px(島の幅1464px)で、遠景でも縞として読める
+ABBEY_BUTTRESS_WIDTH = 5.0             # 控え壁自体の幅(壁面に沿う方向)
+ABBEY_BUTTRESS_PROTRUSION = 6.0        # 控え壁の出っ張り量
+ABBEY_BUTTRESS_SPACING = 10.0          # 控え壁の配置間隔(周長に沿った距離、出典なしの決め値)
 # コーニスも同じ理由で出っ張りを増やし、水平の影の線がはっきり出るようにする
 ABBEY_CORNICE_HEIGHT = 1.8             # 天端近くの水平の帯(コーニス)の高さ
 ABBEY_CORNICE_PROTRUSION = 1.6         # コーニスの出っ張り量
@@ -2664,6 +2687,9 @@ def build_village():
     機械的すぎないよう振る。
     """
     random.seed(VILLAGE_SEED)
+    # 窓の間引き専用の乱数。グローバルのrandomを消費すると家・樹木の位置が全部動くため、
+    # 独立したインスタンスを使う(ABBEY_FACADE_WINDOW_SEEDと同じ作法)
+    window_rng = random.Random(VILLAGE_WINDOW_SEED)
 
     bm = bmesh.new()
 
@@ -2773,6 +2799,44 @@ def build_village():
                     wall_material=wall_material,
                     roof_material=roof_material,
                 )
+
+                # カメラ側(=島の中心から見て外向き)の1面にだけ窓を並べる。
+                # 妻を通りに向ける棟では along_dir が半径方向、そうでない棟では
+                # across_dir が半径方向なので、外向きの面と、その面に沿う水平方向が入れ替わる
+                if gable_to_street:
+                    outward = house_along          # 半径方向(外向き)
+                    face_along = house_across      # 面に沿う水平方向
+                    face_length, face_offset = house_width, house_depth * 0.5
+                else:
+                    outward = house_across
+                    face_along = house_along
+                    face_length, face_offset = house_depth, house_width * 0.5
+
+                # 窓の下端の高さ。壁の上端(軒)から窓1つ分の余裕を残す
+                sill_ys = []
+                sill = VILLAGE_WINDOW_SILL_FIRST
+                while sill + VILLAGE_WINDOW_HEIGHT + 0.5 <= wall_height:
+                    sill_ys.append(base_engine_y + sill)
+                    sill += VILLAGE_WINDOW_FLOOR_HEIGHT
+
+                if sill_ys and face_length > VILLAGE_WINDOW_WIDTH * 2.0 + 0.5:
+                    face_center = (
+                        base_engine_x + outward[0] * face_offset,
+                        base_engine_y,
+                        base_engine_z + outward[2] * face_offset,
+                    )
+                    wall_start = (
+                        face_center[0] - face_along[0] * face_length * 0.5,
+                        face_center[1],
+                        face_center[2] - face_along[2] * face_length * 0.5,
+                    )
+                    _add_window_wall_to_bmesh(
+                        bm, wall_start=wall_start, along_dir=face_along,
+                        wall_length=face_length, outward_dir=outward, floor_base_ys=sill_ys,
+                        width=VILLAGE_WINDOW_WIDTH, height=VILLAGE_WINDOW_HEIGHT,
+                        thin_rng=window_rng, skip_probability=VILLAGE_WINDOW_SKIP_PROBABILITY,
+                        spacing=VILLAGE_WINDOW_SPACING, protrusion=VILLAGE_WINDOW_PROTRUSION,
+                    )
             except Exception as error:  # noqa: BLE001
                 print(f"[ERROR] 集落の家屋(段{terrace_index}, #{house_index})の作成に失敗しました: ({error})", file=sys.stderr)
                 raise
@@ -3313,7 +3377,8 @@ def _add_window_to_bmesh(bm, base, along_dir, outward_dir,
 
 def _add_window_wall_to_bmesh(bm, wall_start, along_dir, wall_length, outward_dir, floor_base_ys,
                                width=WINDOW_WIDTH, height=WINDOW_HEIGHT, thin_rng=None,
-                               skip_probability=0.0):
+                               skip_probability=0.0, spacing=WINDOW_HORIZONTAL_SPACING,
+                               protrusion=WINDOW_PROTRUSION):
     """壁の1面に沿ってWINDOW_HORIZONTAL_SPACING間隔で窓を並べる(横方向)。floor_base_ysに
     複数の高さを指定すれば、同じ横位置に階ごとの窓を追加する(縦方向)。
 
@@ -3333,7 +3398,7 @@ def _add_window_wall_to_bmesh(bm, wall_start, along_dir, wall_length, outward_di
     if span <= 0.0:
         print(f"[ERROR] 窓を並べる壁の長さが不足しています(wall_length={wall_length})", file=sys.stderr)
         raise ValueError("窓を並べる壁の長さが不足しています")
-    count = max(2, int(span / WINDOW_HORIZONTAL_SPACING) + 1)
+    count = max(2, int(span / spacing) + 1)
 
     start_x, _start_y, start_z = wall_start
     ax, _ay, az = along_dir
@@ -3346,7 +3411,7 @@ def _add_window_wall_to_bmesh(bm, wall_start, along_dir, wall_length, outward_di
             window_base = (start_x + ax * offset, floor_base_y, start_z + az * offset)
             _add_window_to_bmesh(
                 bm, base=window_base, along_dir=along_dir, outward_dir=outward_dir,
-                width=width, height=height,
+                width=width, height=height, protrusion=protrusion,
             )
 
 
