@@ -27,6 +27,22 @@ namespace Kurenai::Assets
             inOutTotalBytes += desc.SizeInBytes;
             return device.CreateBuffer(desc);
         }
+
+        // マテリアルのテクスチャをbindless区画へ登録し、シェーダーが使う番号を返す。
+        // テクスチャが無い(nullptr)場合と、デバイスがbindless非対応の場合はどちらも
+        // kInvalidBindlessIndexになり、シェーダー側は白1x1/フラット法線のプレースホルダーへ落ちる。
+        //
+        // 【同じテクスチャを複数のマテリアルが指しても無駄にならない】RegisterBindlessは
+        // 登録済みのリソースに対しては同じ番号を返すため、Sponzaのように1枚のテクスチャを
+        // 多数のメッシュが共有する構成でも区画の消費はテクスチャの実枚数どまりになる
+        uint32_t RegisterMaterialTexture(RHI::IRHIDevice& device, RHI::IRHITexture* texture)
+        {
+            if (!texture)
+            {
+                return RHI::kInvalidBindlessIndex;
+            }
+            return device.RegisterBindless(texture);
+        }
     }
 
     void RaytracingScene::Reset()
@@ -106,6 +122,12 @@ namespace Kurenai::Assets
                 material.RoughnessFactor = mesh.RoughnessFactor;
                 material.AlphaCutoff = mesh.AlphaCutoff;
                 material.Flags = mesh.IsTransparent ? kRaytracingMaterialFlagTransparent : 0u;
+                // ヒット面のテクスチャ。bindless非対応環境ではすべて無効値になり、
+                // シェーダーは従来どおり定数の係数だけで陰影を決める
+                material.BaseColorTextureIndex = RegisterMaterialTexture(device, mesh.BaseColorTexture);
+                material.NormalTextureIndex = RegisterMaterialTexture(device, mesh.NormalTexture);
+                material.MetallicRoughnessTextureIndex = RegisterMaterialTexture(device, mesh.MetallicRoughnessTexture);
+                material.EmissiveTextureIndex = RegisterMaterialTexture(device, mesh.EmissiveTexture);
 
                 RaytracingMeshInfo meshInfo;
                 meshInfo.AttributeOffset = attributeBase + mesh.RaytracingAttributeOffset;

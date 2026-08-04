@@ -61,9 +61,16 @@ namespace Kurenai::Assets
     //   struct RTMaterial { float4 BaseColorFactor; float3 EmissiveFactor; float MetallicFactor;
     //                       float RoughnessFactor; float AlphaCutoff; uint Flags; uint Padding; };
     //
-    // 【Phase 1の制約】テクスチャを含まない。ヒット面のアルベド/法線テクスチャをサンプルするには
-    // bindless(SM 6.6のResourceDescriptorHeap)が必要で、そこまでは踏み込んでいない。
-    // そのため反射・GIに映る色はマテリアルの定数値のみで決まり、やや平板になる
+    // 【テクスチャはbindless番号で持つ】かつてこの構造体は定数の係数しか持たず、
+    // 反射・GIに映る色がマテリアルの定数値のみで決まってやや平板だった。
+    // HLSLはリソースを実行時の番号で選べないため、ヒット面のテクスチャを引く手段が
+    // 無かったのがその理由(bindless = SM 6.6のResourceDescriptorHeapが要る)。
+    // 下の4つはIRHIDevice::RegisterBindlessが払い出した番号で、シェーダーは
+    // Shaders/3D/Bindless.hlsliのBindlessSampleLevelでこれを引く。
+    //
+    // 【bindless非対応環境ではkInvalidBindlessIndexが入る】RegisterBindlessは非対応なら
+    // 必ず無効値を返し、シェーダー側は無効値を「テクスチャ無し」として白1x1/フラット法線の
+    // プレースホルダーへ落とす。そのため従来とまったく同じ見た目へ静かに縮退する
     struct RaytracingMaterial
     {
         float BaseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -74,9 +81,14 @@ namespace Kurenai::Assets
         float AlphaCutoff = 0.0f;
         // bit0: 半透明(glTFのalphaMode=BLEND)
         uint32_t Flags = 0;
+        // 以下はbindlessディスクリプタ番号。既定はRHI::kInvalidBindlessIndex(=テクスチャ無し)
+        uint32_t BaseColorTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t NormalTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t MetallicRoughnessTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t EmissiveTextureIndex = RHI::kInvalidBindlessIndex;
         uint32_t Padding = 0;
     };
-    static_assert(sizeof(RaytracingMaterial) == 48, "HLSL側のRTMaterialと一致させるため48バイト固定");
+    static_assert(sizeof(RaytracingMaterial) == 64, "HLSL側のRTMaterialと一致させるため64バイト固定");
 
     // RaytracingMaterial::Flagsのビット定義
     inline constexpr uint32_t kRaytracingMaterialFlagTransparent = 1u << 0;

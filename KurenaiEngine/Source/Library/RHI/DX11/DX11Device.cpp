@@ -310,6 +310,18 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHIShader> DX11Device::CreateShader(const ShaderDesc& desc)
     {
+        // 増幅/メッシュシェーダーにはDX11のプロファイルが存在しない。下の三項演算子は
+        // 「Vertexでもcomputeでもなければpixel」という作りのため、弾かないとメッシュシェーダーを
+        // ピクセルシェーダーとしてコンパイルしようとし、原因の分かりにくいエラーになる
+        if (desc.Stage == ShaderStage::Amplification || desc.Stage == ShaderStage::Mesh)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "CreateShader: DX11はメッシュシェーダーパイプラインに対応していません。"
+                "SupportsMeshShader()で分岐してください");
+            return nullptr;
+        }
+
         const char* target =
             desc.Stage == ShaderStage::Vertex ? "vs_5_0" : desc.Stage == ShaderStage::Compute ? "cs_5_0" : "ps_5_0";
 
@@ -1016,6 +1028,31 @@ namespace Kurenai::RHI
         (void)desc;
         Core::Logger::Error(
             "DX11", "CreateTopLevelAS: DX11はレイトレーシングに対応していません。SupportsRaytracing()で分岐してください");
+        return nullptr;
+    }
+
+    uint32_t DX11Device::RegisterBindless(IRHITexture* texture)
+    {
+        (void)texture;
+        Core::Logger::Error(
+            "DX11", "RegisterBindless: DX11はbindlessに対応していません。SupportsBindless()で分岐してください");
+        return kInvalidBindlessIndex;
+    }
+
+    uint32_t DX11Device::RegisterBindless(IRHIBuffer* buffer)
+    {
+        (void)buffer;
+        Core::Logger::Error(
+            "DX11", "RegisterBindless: DX11はbindlessに対応していません。SupportsBindless()で分岐してください");
+        return kInvalidBindlessIndex;
+    }
+
+    std::unique_ptr<IRHIPipelineState> DX11Device::CreateMeshPipelineState(const MeshPipelineStateDesc& desc)
+    {
+        (void)desc;
+        Core::Logger::Error(
+            "DX11",
+            "CreateMeshPipelineState: DX11はメッシュシェーダーに対応していません。SupportsMeshShader()で分岐してください");
         return nullptr;
     }
 

@@ -37,6 +37,15 @@ namespace Kurenai::RHI
 
     DX12Texture::~DX12Texture()
     {
+        // bindless区画への登録があれば返却する(DX12Buffer::~DX12Bufferと同じ扱い)
+        if (m_Device)
+        {
+            if (DX12BindlessTable* table = m_Device->GetBindlessTable())
+            {
+                table->Unregister(m_BindlessIndex);
+            }
+        }
+
         if (m_SrvIndex != kInvalid)
         {
             m_SrvUavHeap->Free(m_SrvIndex);

@@ -67,6 +67,15 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHIAccelerationStructure> CreateBottomLevelAS(const BottomLevelASDesc& desc) override;
         std::unique_ptr<IRHIAccelerationStructure> CreateTopLevelAS(const TopLevelASDesc& desc) override;
 
+        // bindless(HLSLのResourceDescriptorHeap)もメッシュシェーダーも、レイトレーシングと同じく
+        // D3D12だけの機能でDX11には存在しない。上位層はSupports*()で分岐する設計のため、
+        // 下の登録・作成関数は呼ばれないのが正常
+        bool SupportsBindless() const override { return false; }
+        uint32_t RegisterBindless(IRHITexture* texture) override;
+        uint32_t RegisterBindless(IRHIBuffer* buffer) override;
+        bool SupportsMeshShader() const override { return false; }
+        std::unique_ptr<IRHIPipelineState> CreateMeshPipelineState(const MeshPipelineStateDesc& desc) override;
+
     private:
         // CreateMippedUAVTextureCube(単一キューブ、SRVはTextureCube)と
         // CreateMippedUAVTextureCubeArray(配列、SRVはTextureCubeArray)の共通実装。

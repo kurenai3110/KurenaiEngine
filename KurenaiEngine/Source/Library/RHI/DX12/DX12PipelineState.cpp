@@ -4,9 +4,11 @@
 
 namespace Kurenai::RHI
 {
-    DX12PipelineState::DX12PipelineState(Microsoft::WRL::ComPtr<ID3D12PipelineState> pipelineState, PrimitiveTopology topology)
+    DX12PipelineState::DX12PipelineState(
+        Microsoft::WRL::ComPtr<ID3D12PipelineState> pipelineState, PrimitiveTopology topology, bool isMeshPipeline)
         : m_PipelineState(std::move(pipelineState))
         , m_Topology(topology)
+        , m_IsMeshPipeline(isMeshPipeline)
     {
     }
 

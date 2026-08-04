@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <d3d12.h>
+#include <wrl/client.h>
 
 #include "RHI/IRHIBuffer.h"
 #include "RHI/IRHICommandList.h"
@@ -35,6 +36,7 @@ namespace Kurenai::RHI
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
         void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
+        void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
         void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
@@ -131,5 +133,15 @@ namespace Kurenai::RHI
         // 後続のDispatch/描画がこのDispatchの書き込み完了を確実に見えるようにするため保持する
         ID3D12Resource* m_BoundComputeUavResources[kComputeUavSlotCount]{};
         void FlushPendingComputeWrites();
+
+        // 直近のSetPipelineStateで設定したのがメッシュシェーダーPSOか。
+        // メッシュシェーダーPSOは専用のルートシグネチャ(DX12Device::GetMeshRootSignature)で
+        // 作られており、DispatchMeshを積む前にそれが束ねられている必要がある。
+        // Draw/DrawIndexedとDispatchMeshで排他になるため、取り違えを検出するのにも使う
+        bool m_CurrentPipelineIsMesh = false;
+        // DispatchMeshを積むためのインタフェース(ID3D12GraphicsCommandList6で追加)。
+        // メッシュシェーダー非対応環境ではnullptrのままで、DispatchMeshはログを出して何もしない。
+        // コンストラクタで一度だけQueryInterfaceして保持する
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList6> m_CommandList6;
     };
 }

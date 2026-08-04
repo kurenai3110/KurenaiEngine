@@ -32,6 +32,11 @@ namespace Kurenai::RHI
         std::fill(std::begin(m_PendingSrvHandles), std::end(m_PendingSrvHandles), nullSrv);
         std::fill(std::begin(m_PendingComputeSrvHandles), std::end(m_PendingComputeSrvHandles), nullSrv);
         std::fill(std::begin(m_PendingComputeUavHandles), std::end(m_PendingComputeUavHandles), nullUav);
+
+        // DispatchMeshはID3D12GraphicsCommandList6で追加されたメソッド。
+        // 取得に失敗しても致命的ではない(メッシュシェーダー経路が使えないだけ)ため、
+        // ここでは黙って握り、実際に呼ばれたときにDispatchMeshがログを出す
+        device->GetCommandList()->QueryInterface(IID_PPV_ARGS(&m_CommandList6));
     }
 
     void DX12CommandList::UnbindSrvSlotsBoundTo(IRHITexture* texture)
@@ -184,13 +189,25 @@ namespace Kurenai::RHI
         auto* dx12PipelineState = static_cast<DX12PipelineState*>(pipelineState);
         auto* cmdList = m_Device->GetCommandList();
 
+        // メッシュシェーダーPSOは専用のルートシグネチャで作られているため、束ねる方を切り替える。
+        // レイアウト(b0/b1 + SRVテーブル + サンプラーテーブル)は通常のものと同一なので、
+        // 以降のルート引数の張り直しはどちらでも同じコードで済む
+        m_CurrentPipelineIsMesh = dx12PipelineState->IsMeshPipeline();
+        ID3D12RootSignature* rootSignature =
+            m_CurrentPipelineIsMesh ? m_Device->GetMeshRootSignature() : m_Device->GetRootSignature();
+
         // SetGraphicsRootSignatureは以前バインドされていたルート引数をすべて無効化する。
         // DX11のイミディエイトコンテキストはパイプラインステートを切り替えても定数バッファ・SRV・
         // サンプラーのバインドを保持するため、ここでシャドウコピーから全ルート引数を張り直して
         // 挙動を揃える(そうしないと呼び出し側にDX12だけの「SetPipelineStateより後に呼ぶ」制約が残る)
-        cmdList->SetGraphicsRootSignature(m_Device->GetRootSignature());
+        cmdList->SetGraphicsRootSignature(rootSignature);
         cmdList->SetPipelineState(dx12PipelineState->GetPipelineState());
-        cmdList->IASetPrimitiveTopology(dx12PipelineState->GetTopology());
+        // メッシュシェーダーパイプラインには入力アセンブラが無く、トポロジは
+        // メッシュシェーダーの[outputtopology]属性で決まる
+        if (!m_CurrentPipelineIsMesh)
+        {
+            cmdList->IASetPrimitiveTopology(dx12PipelineState->GetTopology());
+        }
 
         // 定数バッファ(ルートパラメータ0/1)。一度もバインドされていないスロットはアドレスが0なので飛ばす
         for (uint32_t slot = 0; slot < kConstantBufferSlotCount; ++slot)
@@ -397,6 +414,28 @@ namespace Kurenai::RHI
     {
         FlushPendingSrvWrites();
         m_Device->GetCommandList()->DrawIndexedInstanced(indexCount, 1, startIndexLocation, baseVertexLocation, 0);
+    }
+
+    void DX12CommandList::DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+    {
+        if (!m_CommandList6)
+        {
+            Core::Logger::Error("DX12", "DispatchMeshが呼ばれましたが、ID3D12GraphicsCommandList6を取得できていません");
+            return;
+        }
+        if (!m_CurrentPipelineIsMesh)
+        {
+            // 通常のグラフィックスPSOのままDispatchMeshを積むと、D3D12のデバッグレイヤーが
+            // 出す前に実行時の挙動が未定義になる。呼び出し順の誤りとして早めに知らせる
+            Core::Logger::Error(
+                "DX12", "DispatchMeshの前にメッシュシェーダーのパイプラインステートが設定されていません");
+            return;
+        }
+
+        // SRVテーブル・サンプラーテーブルの反映は通常の描画とまったく同じ経路を使う。
+        // メッシュ用ルートシグネチャはレイアウトを揃えてあるため、ここで分岐は要らない
+        FlushPendingSrvWrites();
+        m_CommandList6->DispatchMesh(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
     }
 
     void DX12CommandList::SetComputePipelineState(IRHIPipelineState* pipelineState)

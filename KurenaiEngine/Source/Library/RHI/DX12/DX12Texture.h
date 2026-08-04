@@ -70,6 +70,11 @@ namespace Kurenai::RHI
         // 現在の状態と異なる場合のみバリアを発行して遷移する
         void TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState);
 
+        uint32_t GetBindlessIndex() const override { return m_BindlessIndex; }
+        // DX12Device::RegisterBindlessが払い出した番号を控える。
+        // デストラクタでこの番号をbindless区画へ返却する
+        void SetBindlessIndex(uint32_t index) { m_BindlessIndex = index; }
+
     private:
         DX12Device* m_Device;
         // m_SrvIndex / m_UavIndex / m_MipUavIndices の確保元(コンストラクタのコメント参照)
@@ -84,5 +89,8 @@ namespace Kurenai::RHI
         std::vector<uint32_t> m_SliceDsvIndices;
         // キューブマップ配列の枚数(非キューブマップ・単一キューブは1)。m_MipUavIndicesのフラット添字計算に使う
         uint32_t m_CubeCount = 1;
+        // bindless区画に登録されている場合のみ有効(既定は未登録)。
+        // 番号の意味と返却の作法はDX12BindlessTableを参照
+        uint32_t m_BindlessIndex = kInvalidBindlessIndex;
     };
 }

@@ -146,6 +146,10 @@ namespace Kurenai::RHI
                 return L"vs";
             case ShaderStage::Compute:
                 return L"cs";
+            case ShaderStage::Amplification:
+                return L"as";
+            case ShaderStage::Mesh:
+                return L"ms";
             case ShaderStage::Pixel:
             default:
                 return L"ps";
@@ -186,10 +190,16 @@ namespace Kurenai::RHI
             return false;
         }
 
-        // このエンジンが必要とする最上位はSM 6.5(インラインレイトレーシングのRayQuery)。
-        // これより新しいシェーダーモデルを使う機能は無いため、対応していても6.5で頭打ちにする
-        // (Windows SDK 10.0.19041同梱のdxcompiler.dll 1.5が扱えるのも6.5まで)
-        m_ShaderModel = highestShaderModel > D3D_SHADER_MODEL_6_5 ? D3D_SHADER_MODEL_6_5 : highestShaderModel;
+        // このエンジンが必要とする最上位はSM 6.6(bindlessのResourceDescriptorHeap)。
+        // それ以降のシェーダーモデルを使う機能は無いため、対応していても6.6で頭打ちにする。
+        //
+        // 【デバイスの上限だけでは決められない】プロファイル文字列を受け付けるかは
+        // dxcompiler.dll側のバージョンにも依存する。Windows SDK 10.0.19041同梱の
+        // dxcompiler.dll 1.5はSM 6.5までしか知らないため、GPUが6.6対応でも6.6を指定すると
+        // 「invalid target」で全シェーダーのコンパイルが落ちる。
+        // COMオブジェクト生成後にIDxcVersionInfoで実際のdxcバージョンを見て確定させる
+        // (この時点ではデバイス側の上限だけを控えておく)
+        m_ShaderModel = highestShaderModel > D3D_SHADER_MODEL_6_6 ? D3D_SHADER_MODEL_6_6 : highestShaderModel;
 
         m_Module = LoadLibraryW(kDxcCompilerDllName);
         if (!m_Module)
@@ -225,6 +235,30 @@ namespace Kurenai::RHI
             m_Module = nullptr;
             m_ShaderModel = static_cast<D3D_SHADER_MODEL>(0);
             return false;
+        }
+
+        // dxcompiler.dll側が扱えるシェーダーモデルの上限で、デバイス側の上限をさらに抑える。
+        // SM 6.6のプロファイル(vs_6_6等)を知っているのはdxc 1.6以降。IDxcVersionInfoを
+        // 取得できない古い実装は1.5以前とみなして6.5へ落とす。
+        //
+        // ここで落とすとResourceDescriptorHeap(bindless)が使えなくなるが、
+        // SupportsBindless()がfalseになるだけで、レイトレーシングや通常描画は
+        // 従来どおりSM 6.5で動く(RT/SSRの選択と同じ縮退の仕方)
+        if (m_ShaderModel > D3D_SHADER_MODEL_6_5)
+        {
+            UINT32 dxcMajor = 0;
+            UINT32 dxcMinor = 0;
+            Microsoft::WRL::ComPtr<IDxcVersionInfo> versionInfo;
+            const bool hasVersion = SUCCEEDED(m_Compiler.As(&versionInfo)) && versionInfo &&
+                                    SUCCEEDED(versionInfo->GetVersion(&dxcMajor, &dxcMinor));
+            if (!hasVersion || dxcMajor < 1 || (dxcMajor == 1 && dxcMinor < 6))
+            {
+                Core::Logger::Warning(
+                    "DX12",
+                    "dxcompiler.dllがシェーダーモデル6.6に対応していないため6.5で動作します"
+                    "(bindlessは無効。Windows SDKのバージョンを上げるとdxcも更新されます)");
+                m_ShaderModel = D3D_SHADER_MODEL_6_5;
+            }
         }
 
         // dxil.dll(署名用ライブラリ)はdxcompiler.dllが自分と同じフォルダから読み込む。
@@ -301,6 +335,16 @@ namespace Kurenai::RHI
         arguments.push_back(L"-O3");
 #endif
 
+        // bindless(ResourceDescriptorHeap)が使えるかをシェーダー側へ伝える。
+        // Shaders/3D/Bindless.hlsliがこのマクロで実装を切り替え、定義されていない場合は
+        // 「常に無効なディスクリプタ番号を返す」実装になるため、SM 6.5以下でも
+        // 同じシェーダーソースがコンパイルできる
+        std::vector<DxcDefine> defines;
+        if (SupportsBindless())
+        {
+            defines.push_back(DxcDefine{ L"KURENAI_BINDLESS", L"1" });
+        }
+
         Microsoft::WRL::ComPtr<IDxcOperationResult> operationResult;
         const HRESULT compileHr = m_Compiler->Compile(
             sourceBlob.Get(),
@@ -309,8 +353,8 @@ namespace Kurenai::RHI
             target.c_str(),
             arguments.data(),
             static_cast<UINT32>(arguments.size()),
-            nullptr,
-            0,
+            defines.empty() ? nullptr : defines.data(),
+            static_cast<UINT32>(defines.size()),
             &includeHandler,
             &operationResult);
 
