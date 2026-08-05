@@ -1329,6 +1329,19 @@ ABBEY_BLOCKS = [
 # -170度にするとz=-26m(中心より南)になり遮られず、画面x=0.037に出る。
 # 高さも直す: 天端27.9mでは画面高さh=0.174になるが、写真の塔の天端はh≒0.115。
 # 換算(scratchpad/ht_table.py)では18mでh=0.113
+#
+# 【修正・塔の上に載る尖った見張り塔を足す案は2度外して撤回した】参考写真の西端を
+# 拡大すると(scratchpad/westend.png)、実物は太い砲塔の上に細く急な円錐屋根の小塔が
+# 載る二段構えで、実機は頂部が平らな太い円柱に見える。そこで写真から列ごとの島の上端を
+# メートルで読んで(島の実寸306mを946画素として換算)砲塔と小塔を分けようとしたが、
+#   1度目: x0.041-0.054の11.6〜12mの平らな区間を砲塔の胸壁と読み、胴を14.5→6.5mへ。
+#          そこは砲塔ではなく城壁の天端だった。西端の高さの平均絶対差 2.66m→5.38m
+#   2度目: 肩(15.5〜16.2m)と頂点(20.1m)で決め直し胴を10.4mへ。5.04mで依然悪い
+# どちらも旧値より悪い。旧値(胴14.5+笠3.5、天端22.8m)は前のパスが
+# 「写真の塔の天端 h≒0.115」に合わせて決めたもので、そちらのほうが合っている。
+# **写真の輪郭を1列ずつメートルに直す読み方が、この区間では信用できない**
+# (城壁・砲塔・背後の建物・樹木が同じ列に重なり、どれの上端を読んでいるか決まらない)。
+# 小塔を足すなら、まず「どの高さがどの構造物か」を材質IDの地図で切り分けてから。
 WEST_END_TOWER_THETA_DEG = -170.0
 WEST_END_TOWER_RADIUS = 7.0
 WEST_END_TOWER_BODY_HEIGHT = 14.5
@@ -4962,6 +4975,34 @@ def build_west_end():
             wall_material="VillagePlaster",
             roof_material="SlateRoof",
         )
+        # 【修正・無地の板だった】参考写真のこの建物は4階分の窓が壁一面に並ぶのに、
+        # 実機は開口が1つも無い明るい板で、西端でいちばん目立つ塊が無地だった。
+        # 集落の家と同じ間隔で、カメラ側(接線方向に伸びる妻面)へ窓を並べる
+        lodge_sill_ys = []
+        lodge_sill = VILLAGE_WINDOW_SILL_FIRST
+        while lodge_sill + VILLAGE_WINDOW_HEIGHT + 0.5 <= WEST_END_LODGE_WALL_HEIGHT:
+            lodge_sill_ys.append(lodge_base_y + lodge_sill)
+            lodge_sill += VILLAGE_WINDOW_FLOOR_HEIGHT
+        if lodge_sill_ys:
+            _add_window_wall_to_bmesh(
+                bm,
+                wall_start=(
+                    lodge_x + radial[0] * (WEST_END_LODGE_DEPTH * 0.5)
+                    - tangent[0] * (WEST_END_LODGE_WIDTH * 0.5),
+                    lodge_base_y,
+                    lodge_z + radial[2] * (WEST_END_LODGE_DEPTH * 0.5)
+                    - tangent[2] * (WEST_END_LODGE_WIDTH * 0.5),
+                ),
+                along_dir=tangent,
+                wall_length=WEST_END_LODGE_WIDTH,
+                outward_dir=radial,
+                floor_base_ys=lodge_sill_ys,
+                # 既定はゴシック窓(1.5x5.0m)なので、町家の寸法へ差し替える
+                width=VILLAGE_WINDOW_WIDTH,
+                height=VILLAGE_WINDOW_HEIGHT,
+                spacing=VILLAGE_WINDOW_SPACING,
+                protrusion=VILLAGE_WINDOW_PROTRUSION,
+            )
 
         # ガブリエル塔。城壁の基準線(_rampart_radius)の上に立てる。
         # 城壁と同じく水際近くから立ち上がるので、足元は城壁の底面高さに合わせる
