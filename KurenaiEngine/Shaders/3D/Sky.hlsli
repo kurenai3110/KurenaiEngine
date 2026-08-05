@@ -1759,12 +1759,25 @@ void EvaluateCloudLayer(
 #endif
     {
         // --- 平面(P5〜P12と同一。巻雲がここを通る) ---
-        // (c) 雲の密度。fBmの出力を被覆率で塊に整形する。Coverage=0ならlo=hi=1になり
-        // remapの分子(n-1)は常に0以下、densityは常に0になる(判断Cの根拠の一部。
-        // ただし実際にはSkyColorの早期脱出でこの関数自体が呼ばれない)。
+        // (c) 雲の密度。fBmの出力を被覆率で塊に整形する。
         // AnisotropicScaleはここでUVへ掛ける(積雲は(1,1)なので無変化、巻雲はU方向だけ伸びて筋状になる)
         const float n = CloudFbm(anchorUv * layer.AnisotropicScale);
-        const float density = saturate(CloudRemap(n, 1.0f - layer.Coverage, 1.0f));
+
+        // 【D2でボリューム側を直した欠陥が、こちらに残っていた】以前は
+        //     density = saturate(remap(n, 1 - Coverage, 1.0))
+        // と**上端を1.0に固定**していた。CloudFbmの実測分布は平均0.500・標準偏差0.132、
+        // 99.9%点でも0.839で、1.0へは決して届かない。そのため
+        //  ・被覆率1でも密度が0.68止まりで「全天が巻雲」にならない
+        //  ・被覆率の効きが崖になる。しきい値 1-Coverage が分布の中央(0.5)を跨ぐ前後で
+        //    急に空が埋まる。実測でも被覆率0.3→0.5で空の埋まり具合が12.9%→19.9%と跳ねた
+        // 定数の根拠は kCloudWeatherLow のコメント(同じ CloudFbm を測ったもの)。
+        // 異方スケールでUVを伸ばしても値の分布は変わらないので、そのまま使える。
+        //
+        // 【Coverage=0がここへ来ないこと】判断C(被覆率0で雲を追加する前と画素まで一致)は
+        // SkyColor側の早期脱出が担保する。この式自体は Coverage=0 でしきい値が99%点になるだけで
+        // 0にはならないが、そこへは到達しない
+        const float threshold = lerp(kCloudWeatherHigh, kCloudWeatherLow, layer.Coverage);
+        const float density = saturate(CloudRemap(n, threshold, kCloudWeatherMax));
 
         // (d) 光路長。厚みゼロのシートを浅い角度で貫くほど経路が伸びるため 1/|dir.y| に
         // 比例させる。**この発散はモデルに内在するもの**(厚みゼロの面には交差の解が1点しか
