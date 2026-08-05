@@ -1149,6 +1149,33 @@ static const float2 kCloudTypeUvOffset = float2(137.0f, 71.0f);
 static const float kCloudCoverageAtStratus = 0.45f;
 static const float kCloudCoverageAtCongestus = 1.55f;
 
+// 【ウェザーマップを実測した分布へ合わせる】(D2)
+// CloudFbm の生値(weatherN)を実機から読み出して測ったところ **平均0.500・標準偏差0.127**、
+// 1%点0.243 / 99%点0.781 / 99.9%点0.839 だった。ところが以前の式は
+//     weather = saturate(remap(weatherN, 1 - Coverage, 1.0))
+// と**上端を1.0に固定**しており、weatherNが平均から4σ離れた1.0へ決して届かないため、
+// weather が値域の下の方へ潰れていた(実測: 雲のある画素でも中央値0.134、95%点0.395)。
+// これが次の3つをまとめて説明する:
+//   ・密度をしきい値化する形が過去に崩壊した(base > 1-weather をほぼ満たせない)
+//   ・kCloudVolumeDensityNormalize に4.315という大きな補正が要る
+//   ・Coverageが過敏(0.25→0.30で空の占有率がほぼ倍になる)——正規分布の裾で動かしているため
+// base 側には既に実測分布で引き伸ばす処理(kCloudShapeContrastLow/High)が入っており、
+// ウェザーマップだけ入っていなかった。
+//
+// 【新しい式】被覆率でしきい値を1%点〜99%点の間で動かし、上端は99.9%点の少し上へ置く:
+//   threshold = lerp(High, Low, localCoverage)
+//   weather   = saturate(remap(weatherN, threshold, Max))
+// 上端をLowではなくMaxにするのは、被覆率が小さいとき threshold が High に近づいて
+// remapの分母が0になるのを避けるため(分母は最小でも Max - High = 0.119)。
+static const float kCloudWeatherLow = 0.243f;    // 実測1%点
+static const float kCloudWeatherHigh = 0.781f;   // 実測99%点
+static const float kCloudWeatherMax = 0.900f;    // 実測99.9%点(0.839)の少し上。remapの上端
+
+// 【高さによる浸食】(D2) 上へ行くほどしきい値を上げ、雲の輪郭を内側へ縮める。
+// hf の2乗にしてあるのは、雲底付近は平らなまま保ち、上半分で一気に細らせるため
+// (積雲は底が平らで頭が丸い)。0で浸食なし=以前の押し出された角柱に戻る。
+// **輪郭がどう縮むかは3Dノイズ任せ**なので、単なる相似縮小ではなく高度ごとに違う形になる
+static const float kCloudHeightErosion = 0.55f;
 
 // 高さによる密度の勾配。積雲は雲頂ほど凝結が進んで密度が高い。
 // 【平均を1に保つ】lerp(a,b,hf)のhf∈[0,1]での平均は(a+b)/2なので、0.6と1.4にすることで
@@ -1205,15 +1232,21 @@ float CloudWorleyFbmFromChannels(float3 channels)
 //   hf      … スラブ内の高さ(0=雲底、1=雲頂)
 //   weather … ウェザーマップの値(既存の2次元 CloudFbm を被覆率で整形したもの)
 //
-// 【設計: 3Dノイズは密度を「作る」のではなく「再分配する」】
-// この関数は weather に 3D の変調を掛けた値を返し、その変調はスラブ内の平均が1になるよう
-// 正規化してある(kCloudVolumeDensityNormalize)。したがってスラブ全体の光学的深さの平均は
-// 平面レイヤーのときと一致し、CloudDensity(消散係数)と判断B(被覆率→平均透過率)の意味が
-// どちらも変わらない。3Dノイズが変えるのは「同じ量の雲が高さ方向にどう分布するか」だけである。
+// 【設計(D2で変わった): 3Dノイズが輪郭そのものを決める】
+// weather と高さプロファイルは「3Dノイズに掛けるしきい値」として使い、密度に掛けない。
+// 掛け算だと weather が輪郭を決める門になり、3Dノイズはその内側を彫るだけなので
+// **輪郭が高さでほとんど変わらない**(同じ形が積み上がって見える)。しきい値にすれば
+// 高さで輪郭そのものが変わる。
 //
-// 【一度失敗している形】saturate(CloudRemap(base, 1 - weather, 1)) のように3Dの形を
-// ウェザーマップでもう一度しきい値処理する形は、weatherが値域の下へ潰れているため
-// base が 1-weather を上回れず密度が常に0へ落ちた。
+// 【この形は一度失敗しており、原因も分かっている】当初 saturate(CloudRemap(base, 1 - weather, 1))
+// を試して密度が常に0へ落ちた。理由は2つあり、どちらもD2までに解消している:
+//   ・base がほぼ定数だった(当時 平均0.781・標準偏差0.055)。C1のコントラスト伸張後は
+//     平均0.455・標準偏差0.329
+//   ・weather が値域の下へ潰れていた(remapの上端がweatherNの届かない1.0だった)。
+//     D2で実測分布に合わせて直した(kCloudWeatherLow のコメント参照)
+//
+// なお kCloudVolumeDensityNormalize は「スラブ内の平均を1へ揃える」係数だが、
+// **D2で合成の式が変わったので測り直しが必要**である。
 // その場所のウェザーマップ(被覆率で整形済み)と雲の種類(C7)。
 // 種類を先に求め、それで局所的な被覆率を上下させることで大きさをまばらにする
 // (kCloudCoverageAtStratus のコメント参照)。cloudTypeは呼び出し側が
@@ -1230,7 +1263,10 @@ float CloudWeatherAt(float2 noiseXZ, CloudLayerParams layer, out float cloudType
         return 0.0f;
     }
     const float weatherN = CloudFbm(noiseXZ * layer.AnisotropicScale);
-    return saturate(CloudRemap(weatherN, 1.0f - localCoverage, 1.0f));
+    // 実測分布に合わせたしきい値化(D2。定数側のコメントに根拠がある)。
+    // localCoverage=0でしきい値は99%点(ほぼ雲なし)、1で1%点(ほぼ全面)
+    const float threshold = lerp(kCloudWeatherHigh, kCloudWeatherLow, localCoverage);
+    return saturate(CloudRemap(weatherN, threshold, kCloudWeatherMax));
 }
 
 float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudType, CloudLayerParams layer)
@@ -1256,14 +1292,30 @@ float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudTyp
     // 15%点〜92%点を[0,1]へ引き伸ばしてコントラストを付ける(定数のコメント参照)
     const float base = saturate(CloudRemap(rawBase, kCloudShapeContrastLow, kCloudShapeContrastHigh));
 
-    // 高さプロファイルで整形する。**形は場所ごとの雲の種類で変わる**(C4)ので、
-    // 同じ層の中に背の低い雲と高い雲が同居する。
-    // cloudTypeはCloudWeatherAtが既に求めた値を受け取る(C7。同じ場を二度引かない)
-    const float shaped = base * CloudVerticalProfile(hf, cloudType);
+    // 【D2: 掛け算からしきい値化へ】以前は base に高さプロファイルとウェザーマップを
+    // **掛けて**いた。掛け算だと weather が輪郭を決める門になり、3Dノイズはその内側を
+    // 彫るだけなので、**輪郭が高さによってほとんど変わらない**(同じ形が積み上がる)。
+    //
+    // ここでは weather と高さを「3Dノイズに掛けるしきい値」にする。しきい値を上へ行くほど
+    // 上げると輪郭が内側へ縮むが、**どこがどう縮むかは3Dノイズ任せ**なので、
+    // 単なる相似縮小ではなく高度ごとに違う形になる。平らな底と房状の頭が出る。
+    //
+    // 【この形は過去に一度失敗している】そのときは weather が値域の下へ潰れていて
+    // base が 1-weather を上回れず、密度が常に0へ落ちた。原因はウェザーマップのremapの
+    // 上端が実際には届かない1.0だったことで、そこは kCloudWeatherLow のコメントのとおり直した。
+    // いま base は平均0.455・標準偏差0.329、weather も[0,1]を使い切るので条件が違う。
+    const float profile = CloudVerticalProfile(hf, cloudType);
+    const float localCoverage =
+        saturate(weather * profile - kCloudHeightErosion * hf * hf);
+    if (localCoverage <= 0.0f)
+    {
+        // 雲底の直下・雲頂の直上と、浸食で消えた場所。ここで抜けると
+        // ディテール(2枚目のテクスチャフェッチ)を丸ごと省ける
+        return 0.0f;
+    }
+    const float shaped = saturate(CloudRemap(base, 1.0f - localCoverage, 1.0f));
     if (shaped <= 0.0f)
     {
-        // 雲底の直下と雲頂の直上ではプロファイルが0になる。ここで抜けると
-        // ディテール(2枚目のテクスチャフェッチ)を丸ごと省ける
         return 0.0f;
     }
 
@@ -1281,7 +1333,8 @@ float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudTyp
     const float densityGradient =
         lerp(kCloudDensityGradientBottom, kCloudDensityGradientTop, hf);
 
-    return weather * modulation * densityGradient * kCloudVolumeDensityNormalize;
+    // 【weatherを掛けない】(D2) weather は上のしきい値の中へ入ったので、ここで掛けると二重になる
+    return modulation * densityGradient * kCloudVolumeDensityNormalize;
 }
 
 // ワールド座標の1点の密度(C1)。太陽マーチが任意の位置を引けるように、
