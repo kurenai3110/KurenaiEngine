@@ -1,4 +1,4 @@
-// 大気遠近(height fog / aerial perspective、P8)。高度で指数減衰する消散係数を持つ
+// 大気遠近(height fog / aerial perspective)。高度で指数減衰する消散係数を持つ
 // 均一媒質を光線に沿って解析的に積分した透過率を返す、純粋な計算だけのヘッダー。
 //
 // 【モデル】 sigma(h) = sigma0 * exp(-(h - refHeight) / scaleHeight)

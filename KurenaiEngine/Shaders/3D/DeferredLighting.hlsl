@@ -8,14 +8,14 @@
 #include "NormalEncoding.hlsli"
 // スペキュラのマルチスキャッタリング・エネルギー補正(14.9節)
 #include "SpecularEnergy.hlsli"
-// 空モデル(Perez分布)の共有ヘッダー(P3)。背景画素をSkyGenerate.hlslのキューブマップと
+// 空モデル(Perez分布)の共有ヘッダー。背景画素をSkyGenerate.hlslのキューブマップと
 // 同じ関数・同じパラメータで画面解像度評価するために使う。PIを定義しないため、
 // このファイルのPI定義(直後)より前でも後でもインクルード順は問題ない
-// ボリュメトリック積雲(P13b)が引く3Dノイズのレジスタ。Sky.hlsliはcbufferにもレジスタにも
+// ボリュメトリック積雲が引く3Dノイズのレジスタ。Sky.hlsliはcbufferにもレジスタにも
 // 依存しない方針なので、DDGI.hlsliと同じくインクルードする側がマクロで指定する。
 // 定義しないシェーダー(SkyGenerate/AerialPerspective/PlanarReflection)ではボリュームの
 // 経路がコンパイルされず、従来の平面の経路だけが残る
-// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyView LUT。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
 // SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
 #define KURENAI_SKYVIEW_REGISTER t20
 #define KURENAI_CLOUD_SHAPE_REGISTER t18
@@ -29,8 +29,8 @@ static const float PI = 3.14159265359f;
 // ProbeParams/ShadowParams/AmbientColorを参照するため、それらの宣言より後でインクルードする
 #define KURENAI_GLOBAL_IRRADIANCE_REGISTER t8
 #define KURENAI_GLOBAL_PREFILTERED_REGISTER t9
-// t11は反射プローブのイラディアンスに使っていたが、M11 Stage 3で廃止した
-// (反射プローブは鏡面専任になった。ReflectionProbe.hlsli冒頭のコメント参照)。空いたまま残す
+// 反射プローブは鏡面専任なので拡散イラディアンス用のスロットは持たない
+// (ReflectionProbe.hlsli冒頭のコメント参照)
 #define KURENAI_PROBE_PREFILTERED_REGISTER t12
 #define KURENAI_PROBE_BUFFER_REGISTER t13
 #define KURENAI_PROBE_DISTANCE_REGISTER t14
@@ -52,10 +52,9 @@ cbuffer FrameConstants : register(b0)
     float4x4 Proj;
     // 昼夜サイクル用。rgb=環境光の色(m_AmbientScale乗算済み、KurenaiEngine3D::Render側の
     // constants.AmbientColor代入部を参照)、a=昼度(0=夜,1=昼)。
-    // **昼度はIBLの減衰にはもう使わない**。かつては空が昼固定のスカイボックスから焼かれていた
-    // ためこれが唯一の減光手段だったが、手続き空(SkyGenerate.hlsl)の導入で空自体が
-    // 太陽高度に応じて暗くなるようになり不要になった(21.4節。掛けると二重に暗くなる)。
-    // Enable IBL無効時はIBL導入以前と同じ、rgbをそのまま定数色アンビエントとして使う(PSMain参照)
+    // **昼度をIBLの減衰に使ってはいけない**。手続き空(SkyGenerate.hlsl)は太陽高度に応じて
+    // 空自体が暗くなるため、ここで掛けると二重に暗くなる(21.4節)。
+    // Enable IBL無効時はrgbをそのまま定数色アンビエントとして使う(PSMain参照)
     float4 AmbientColor;
     // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
     float4 CascadeSplits;
@@ -95,25 +94,25 @@ cbuffer FrameConstants : register(b0)
     // 【この位置を動かさないこと】C++側のFrameConstantsではDDGIParams4の直後に置いてある。
     // cbufferは宣言順レイアウトなので、以降のフィールドのオフセットがすべてずれる
     float4 OcclusionParams;
-    // 水面(P2)用。このシェーダでは未使用だが、C++側でSkySunDirection等より手前に置かれているため
+    // 水面用。このシェーダでは未使用だが、C++側でSkySunDirection等より手前に置かれているため
     // オフセット合わせのためだけに宣言する
     float4 TimeParams;
-    // 空の解析評価用(P3、末尾に追加)。背景(深度が無い画素)を、キューブマップのサンプルではなく
+    // 空の解析評価用(末尾に追加)。背景(深度が無い画素)を、キューブマップのサンプルではなく
     // Sky.hlsliのSkyColorを画面解像度で直接評価するために使う。キューブマップは256px/面・
     // ミップ無しで、3840px・水平画角68度のカメラでは約20倍に拡大表示されるため、画面解像度で
     // 評価したほうが背景の輪郭がシャープになる(IBLは畳み込むため低解像度のままで正しい)。
     // 値はSkyGenerate.hlslが焼くキューブマップに使ったものと同一
-    // (m_SkyParametersBuffer参照。ティント・天頂輝度はP9でこのcbufferから
-    // StructuredBuffer<GPUSkyParameters>(t17)へ移った)。
+    // (m_SkyParametersBuffer参照。ティント・天頂輝度はこのcbufferではなく
+    // StructuredBuffer<GPUSkyParameters>(t17)にある)。
     // xyz=太陽が「ある」向き(未正規化のまま渡ってくる。PSMain側でnormalizeする。
     // SkyGenerate.hlsl側の慣習=呼び出し側でnormalizeする、に合わせてある)、w=未使用
     float4 SkySunDirection;
-    // x=未使用(P9で天頂輝度はSkyParametersBufferへ移動)、y=背景を解析評価するかのフラグ
+    // x=未使用(天頂輝度はSkyParametersBufferにある)、y=背景を解析評価するかのフラグ
     // (1=解析、0=キューブマップをサンプル。手続き空が無効なときは常に0)、
     // z=太陽照度/空照度比(SunToSkyIlluminanceRatio。MakeSkyParametersが読み、
     // Sky.hlsliのEvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う)、w=未使用
     float4 SkyParams;
-    // 雲(P5、さらに末尾に追加)。SSR.hlslの同名フィールドと完全に同じ順・同じ型であること
+    // 雲(さらに末尾に追加)。SSR.hlslの同名フィールドと完全に同じ順・同じ型であること
     // (C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams0/1 と揃える。ずれると
     // 背景に見える雲と水面に映る雲が食い違う)。
     // CloudParams0: x=被覆率(0で雲なし。Sky.hlsliのSkyColorが早期脱出する)、
@@ -122,7 +121,7 @@ cbuffer FrameConstants : register(b0)
     // CloudParams1: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
     //               同じ周期でwrap済み)、z=Henyey-Greensteinの非対称パラメータ、w=未使用
     float4 CloudParams1;
-    // 巻雲(P11、さらに末尾に追加)。SSR.hlsl/PlanarReflection.hlslの同名フィールドと完全に
+    // 巻雲(さらに末尾に追加)。SSR.hlsl/PlanarReflection.hlslの同名フィールドと完全に
     // 同じ順・同じ型であること(C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams2/3 と揃える)。
     // CloudParams2: x=巻雲の被覆率(0で巻雲なし)、y=雲底の高度[m](カメラ基準)、
     //               z=UVスケール[ノイズ空間/m]、w=消散係数
@@ -130,14 +129,14 @@ cbuffer FrameConstants : register(b0)
     // CloudParams3: xy=風によるノイズ空間の移動量(積雲と同じくkCloudNoisePeriodでwrap済み)、
     //               z=fBmのUV(U方向)を伸ばす異方性スケール、w=未使用
     float4 CloudParams3;
-    // 平面反射(P6)。このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    // 平面反射。このシェーダでは未使用(オフセット合わせのためだけに宣言する)
     float4 PlanarReflectionPlane;
-    // 大気遠近(P8、末尾に追加)。このシェーダでは未使用だが、C++側 KurenaiEngine3D.cpp の
+    // 大気遠近(末尾に追加)。このシェーダでは未使用だが、C++側 KurenaiEngine3D.cpp の
     // FrameConstantsと並びを一致させる目的だけで宣言する
     // (AerialPerspective.hlsl/PlanarReflection.hlslが読む)
     float4 FogParams0;
     float4 FogParams1;
-    // 水中項(P8)。このシェーダでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
+    // 水中項。このシェーダでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
     float4 WaterBodyColor;
     // 星空(末尾に追加)。x=強度(0で無効。昼はCPU側が0にする)、y=密度、z=またたき、
     // w=1画素が張る角度[rad]。C++側 KurenaiEngine3D.cpp の FrameConstants::StarsParams と揃えること
@@ -162,15 +161,14 @@ Texture2D BentNormalTexture : register(t17);
 // split-sum近似の第2項、BRDF積分LUT(x=NdotV, y=ラフネス。BRDFLUT.hlslで生成、方向性を持たない
 // (NdotV, ラフネス)の2Dルックアップテーブルのため、これだけは通常のTexture2Dのまま)
 Texture2D BRDFLUTTexture : register(t10);
-// SkyIntegrate.hlslが書いた空パラメータ(P9)。ティント4本と正規化済みの天頂輝度が入る。
-// 【t17からt11へ移した】t17はbent normal(34章)が使う。t11はM11 Stage 3で反射プローブの
-// 拡散イラディアンスが廃止されて空いたスロット
+// SkyIntegrate.hlslが書いた空パラメータ。ティント4本と正規化済みの天頂輝度が入る。
+// t11を使う(t17はbent normal(34章)、反射プローブは鏡面専任で拡散側のスロットを持たない)
 StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t11);
 
 // グローバルIBLの拡散イラディアンス(t8)・プリフィルタ済み鏡面(t9)・プローブのプリフィルタ済み
 // 鏡面キューブマップ配列(t12)・プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・
 // 視差補正・ブレンド・鏡面IBLの重みはReflectionProbe.hlsliが持つ(SSR.hlslと共有するため。
-// レジスタ番号は上のマクロで与えている)。反射プローブは鏡面専任(M11 Stage 3)なので、
+// レジスタ番号は上のマクロで与えている)。反射プローブは鏡面専任なので、
 // プローブ側の拡散イラディアンスは無い
 #include "ReflectionProbe.hlsli"
 // DDGI(22章)。拡散イラディアンスだけを差し替える。鏡面には一切触れないため、
@@ -205,10 +203,10 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // 鏡面(prefiltered)は差し替えない——反射プローブのほうが方向解像度が桁違いに高く、
     // DDGIのオクタヘドラル6x6では鏡面の映り込みを表現できないため
     //
-    // 【M11 Stage 1: 無条件の差し替えから、ボリューム内外で重み付けするlerpへ変更】
-    // ボリュームは1個しか持てず(22.10節)、以前は外側でも境界のプローブを外挿し続けたため、
-    // ボリュームの外が「1部屋ぶんの間接光」で照らされていた。insideWeightが0の点(ボリューム外)は
-    // irradianceがSampleEnvironmentの返した値(グローバルIBL/反射プローブ)のまま残る
+    // 【無条件に差し替えず、ボリューム内外で重み付けしてlerpする】
+    // ボリュームは1個しか持てず(22.10節)、無条件に差し替えると外側でも境界のプローブを
+    // 外挿し続けてボリュームの外が「1部屋ぶんの間接光」で照らされる。insideWeightが0の点
+    // (ボリューム外)はirradianceがSampleEnvironmentの返した値のまま残る
     if (DDGIParams0.w > 0.5f)
     {
         float ddgiInsideWeight;
@@ -243,11 +241,10 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
         SpecularIBLMultiScatterWeight(F0, NdotV, roughness, soMode, bent, N, R, materialAO, ssao, brdf,
                                       ShadowParams.w, ShadowParams.z);
 
-    // 【昼度(AmbientColor.a)による減衰はしない】かつては空が昼固定のスカイボックスから
-    // 焼かれていたため、夜を表現する手段が「IBL全体を昼度で0倍する」ことしか無かった。
-    // その結果、IBLを有効にすると夜の環境光が厳密にゼロになり、建物が真っ黒な影絵になっていた。
-    // 現在は手続き空(SkyGenerate.hlsl)が太陽高度に応じて自分で暗くなり、夜は月明かりの
-    // 空になるため、ここで追加の減衰を掛ける必要がない(掛けると二重に暗くなる。21.4節)。
+    // 【昼度(AmbientColor.a)による減衰はしない】手続き空(SkyGenerate.hlsl)は太陽高度に
+    // 応じて自分で暗くなり、夜は月明かりの空になるため、ここで追加の減衰を掛ける必要がない
+    // (掛けると二重に暗くなる。21.4節)。「IBL全体を昼度で0倍する」と夜の環境光が厳密に
+    // ゼロになり、建物が真っ黒な影絵になる。
     // 鏡面側のShadowParams.z(IBL強度倍率)はspecularWeightに含まれている。
     // 環境光の鏡面倍率(IBLParams.z)も同様に2つのWeightの中で掛かっているため、
     // ここで明示的に掛けるのは拡散倍率(IBLParams.y)だけでよい。
@@ -286,7 +283,7 @@ float3 ReconstructWorldPos(float2 uv, float depth)
     return worldPos.xyz / worldPos.w;
 }
 
-// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる(P3)。
+// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる。
 // SunDirectionの正規化はここで行う(SkyGenerate.hlsl側の慣習=呼び出し側でnormalizeする、に揃える)。
 // SSR.hlsl/AerialPerspective.hlsl/PlanarReflection.hlslのMakeSkyParametersと完全に同一の内容で
 // あること。4つのシェーダーはcbufferをそれぞれ別に宣言しているため関数そのものは共有できず
@@ -296,12 +293,12 @@ SkyParameters MakeSkyParameters()
 {
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
-    // ティント4本と天頂輝度はP9でSkyParametersBuffer(t17)へ移った(SkyIntegrate.hlslが書く)
+    // ティント4本と天頂輝度はSkyParametersBuffer(t17)にある(SkyIntegrate.hlslが書く)
     params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
     // 太陽照度/空照度比(SkyParams.zに詰めてある。KurenaiEngine3D.cppのSkyParams.zコメント参照)。
     // EvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う
     params.SunToSkyIlluminanceRatio = SkyParams.z;
-    // 雲(P5)。SSR.hlslのMakeSkyParametersと完全に同一の内容であること(このファイル冒頭の
+    // 雲。SSR.hlslのMakeSkyParametersと完全に同一の内容であること(このファイル冒頭の
     // コメントと同じ理由。背景に見える雲と水面に映る雲が食い違ってはいけない)
     params.CloudCoverage = CloudParams0.x;
     params.CloudAltitude = CloudParams0.y;
@@ -309,17 +306,17 @@ SkyParameters MakeSkyParameters()
     params.CloudDensity = CloudParams0.w;
     params.CloudScrollOffset = CloudParams1.xy;
     params.CloudForwardG = CloudParams1.z;
-    // 積雲の厚み[m](P13b)。CloudParams1.wは従来ずっと0で未使用だった枠なので、
-    // FrameConstantsは1バイトも増えていない。0ならレイマーチせず従来の平面になる
+    // 積雲の厚み[m](CloudParams1.wの枠に詰めてある)。
+    // 0ならレイマーチせず平面として扱う
     params.CloudThickness = CloudParams1.w;
-    // 巻雲(P11)。SSR.hlslのMakeSkyParametersと完全に同一の内容であること
+    // 巻雲。SSR.hlslのMakeSkyParametersと完全に同一の内容であること
     params.CirrusCoverage = CloudParams2.x;
     params.CirrusAltitude = CloudParams2.y;
     params.CirrusUvScale = CloudParams2.z;
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
-    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
+    // 雲層へ掛ける大気遠近(Sky.hlsliのEvaluateCloudLayer (f)節)。
     // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
     params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
     // 星空。背景(このシェーダ)と水面の映り込み(SSR.hlsl)だけが星を描く。
@@ -357,7 +354,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         else
         {
             // 手続き空は太陽高度に応じた明るさで焼かれている(夜は月明かりの空になる)ため、
-            // かつてここで行っていた「夜は暗い紺色へlerpする」補正は不要になった
+            // 「夜は暗い紺色へlerpする」ような補正は要らない
             skyColor = SkyboxTexture.Sample(MaterialSampler, rayDir).rgb;
         }
         return float4(skyColor, 1.0f);
@@ -393,14 +390,13 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 directLight = DirectLightTexture.Sample(ColorSampler, input.UV).rgb; // DirectLighting.hlslで計算済み(シャドウ適用済み)
     float3 emissive = EmissiveTexture.Sample(ColorSampler, input.UV).rgb;
 
-    // ShadowParams.z = IBL強度倍率(0以下ならEnable IBL無効)。無効時はIBL導入以前と同じ、
+    // ShadowParams.z = IBL強度倍率(0以下ならEnable IBL無効)。無効時は
     // 定数色(昼夜サイクルで変化するAmbientColor.rgb)による簡易アンビエントにフォールバックする
     // (何もライティングしない真っ暗な状態にはしない)。
     // EvaluateIBL内のirradianceはIBLConvolve.hlsl側で1/πと積分のπを相殺済みなのでそのままでよいが、
     // このフォールバックの定数色AmbientColorはその正規化を受けていないため、DirectLighting.hlslの
     // 拡散反射(kd*albedo/PI)とスケールを揃えるべくここで明示的に/PIする
-    // (以前このフォールバックだけ/PIが抜けており、環境光がπ倍(意図の20%に対し実際は約65%)
-    // 明るくなっていた)
+    // (**/PIを落とすと環境光がπ倍(意図の20%に対し実際は約65%)明るくなる**)
     // ProbeParams.y = 影響範囲のデバッグ表示。どのプローブがどれだけ効いているかを色で
     // 塗り分けて返す(ライティングは行わない)。プローブの配置・形状・ブレンド幅の確認用
     if (ProbeParams.y > 0.0f)
@@ -429,8 +425,8 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 低ラフネスの誘電体も環境のハイライトを完全に失う。
         // そこで一様な環境放射輝度に対してsplit-sum近似の第2項(BRDF積分LUT。方向性を持たない
         // (NdotV, ラフネス)のテーブルなのでIBLの有効/無効に関わらず使える)を掛けた鏡面を足す。
-        // 半透明パス(Transparent.hlsl)は以前からこの形のフォールバックを持っており、
-        // 不透明パスとプローブ焼き込みパスにだけ無かったものを揃えたもの
+        // 半透明パス(Transparent.hlsl)・プローブ焼き込みパス(ProbeCapture.hlsl)も
+        // 同じ形のフォールバックを持つ(3経路で揃っていること)
         const float NdotV = saturate(dot(N, V));
         const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
         // LUTの第3成分(Eavg)はKulla-Conty方式だけが使うため.rgbで引く(EvaluateIBLと同じ)

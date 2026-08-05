@@ -9,14 +9,13 @@
 //     SpecularEnergy.hlsli経由で間接的にインクルードしている
 //   - FrameConstants の ShadowParams / CascadeSplits / CascadeViewProj
 //
-// 【なぜ共通化しているか】以前はDirectLighting.hlslとTransparent.hlslに同じPCSS実装が
-// 丸ごと重複しており、「片方だけ直すと半透明と不透明で影が食い違う」事故が起きやすかった。
-// 実装を1箇所に集約することで、両者が構造的にずれないようにしている
+// 【なぜ共通化しているか】DirectLighting.hlslとTransparent.hlslにPCSS実装を複製すると、
+// 「片方だけ直すと半透明と不透明で影が食い違う」事故が起きる。実装を1箇所に集約することで、
+// 両者が構造的にずれないようにしている
 
 // 全カスケードの深度を1枚にまとめたテクスチャ配列。スライス番号がカスケード番号に対応する
 // (エンジン側はKurenaiEngine3D::m_ShadowCascadeArray。CreateDepthTextureArrayで生成)。
-// 以前はカスケードごとにTexture2Dをt4〜t7へ1枚ずつ宣言していたが、テクスチャ配列に統合した
-// ことでt4の1本だけになった(t5〜t7は現在未使用)
+// カスケードごとにTexture2Dを1枚ずつ宣言せずテクスチャ配列に統合してあるため、t4の1本で済む
 Texture2DArray ShadowMapArray : register(t4);
 
 // PCSS(Percentage Closer Soft Shadows)。ライト視点のクリップ空間へ変換した上で、
@@ -108,8 +107,8 @@ float ComputeShadowFactor(uint cascadeIndex, float4x4 cascadeViewProj, float3 wo
 }
 
 // ピクセルのView空間深度からカスケード番号(0=カメラに近い方)を選び、そのスライスをサンプルする。
-// シャドウマップをTexture2DArrayに統合したことで、旧実装にあった「HLSLはリソース(Texture2D)を
-// 動的添字の配列として扱えない」制約(=カスケードごとの4分岐)が不要になった。
+// シャドウマップをTexture2DArrayに統合してあるため、「HLSLはリソース(Texture2D)を
+// 動的添字の配列として扱えない」制約(=カスケードごとの分岐)を受けない。
 // 配列スライスとcbuffer配列(CascadeViewProj)はいずれも動的添字で選べる
 float ComputeCascadedShadowFactor(float3 worldPos, float viewDepth, float NdotL)
 {

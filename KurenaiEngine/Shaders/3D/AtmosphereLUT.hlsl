@@ -1,11 +1,11 @@
-// 大気散乱のLUT生成(P14a)。Hillaire, "A Scalable and Production Ready Sky and Atmosphere
+// 大気散乱のLUT生成。Hillaire, "A Scalable and Production Ready Sky and Atmosphere
 // Rendering Technique" (EGSR 2020) の構成に従う。
 //
-// 【なぜPreethamから乗り換えるのか】P13bで参考写真と突き合わせた結果、空の色がPreethamの
-// 限界に当たっていることが実測で確定した。写真の最も青い空はB/R=4.84だが、Preethamは論文の
+// 【なぜPreethamではなくこのモデルなのか】参考写真と突き合わせると、空の色はPreethamの
+// 限界に当たる。写真の最も青い空はB/R=4.84だが、Preethamは論文の
 // 係数から実装とは独立に計算しても1.34〜1.74しか出さない(実装の実測もこの範囲内でモデルに忠実)。
 // Rayleigh散乱はλ^-4に比例するので、物理から始めればB/Rは散乱係数の時点で5.70になる。
-// つまりP13bで SkySaturation=1.9 という非物理のつまみで埋めた穴は、物理ベースのモデルなら
+// つまり SkySaturation=1.9 という非物理のつまみでしか埋まらない穴は、物理ベースのモデルなら
 // 自然に埋まる性質のものである。地平線がマゼンタに寄る問題(Preethamは仰角0.5度で緑の
 // 落ち込みが-7.6)も、Rayleigh/Mieを分けて持てば構造的に起きない。
 //
@@ -354,7 +354,7 @@ void CSMultiScattering(uint3 dispatchThreadID : SV_DispatchThreadID)
 // 単位空の絶対スケールがk倍ずれるとZenithLuminanceは1/k倍になって空の見た目は保たれるが、
 // **雲の明るさと地面ティントはZenithLuminanceに直接掛かっている**(Sky.hlsliの雲セクション/
 // groundColor参照)ため、そちらだけが1/k倍で暗く(明るく)なってしまう。
-// Preethamは定義上そのまま天頂で相対輝度1を返していたので、ここで同じ規約へ揃える。
+// 天頂で相対輝度1を返すという規約(Preethamの定義と同じ)へ、ここで揃える。
 // 割る量はRec.709輝度で、天頂の色度はそのまま保たれる
 // ============================================================================
 

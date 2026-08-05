@@ -22,11 +22,10 @@
 #include "Vertex.h"
 
 // KurenaiPacker.exe(オフラインのアセットビルドツール)が生成した.kmodel/.kgeom/.ktexを
-// 読み込む。以前はここでassimpによるモデル解析とWICデコード・ミップ生成・GPU BC7圧縮を
-// 実行時に行い、その結果を.kmodelcache/.ktexcacheへキャッシュしていたが、その前処理は
-// すべてKurenaiPackerへ移した。そのためこのファイルはもうassimp/zlibに依存せず、
+// 読み込む。**assimpによるモデル解析・WICデコード・ミップ生成・GPU BC7圧縮をここで行っては
+// いけない**(前処理はすべてKurenaiPackerの担当)。このファイルはassimp/zlibに依存せず、
 // 「パース済み・圧縮済みのデータをファイルから読み、GPUバッファ/テクスチャへ流し込むだけ」
-// になっている。詳細な設計判断はdocs/Architecture.htmlの「モデルパッケージ形式」の章を参照
+// である。詳細な設計判断はdocs/Architecture.htmlの「モデルパッケージ形式」の章を参照
 
 namespace Kurenai::Assets
 {
@@ -60,8 +59,8 @@ namespace Kurenai::Assets
 
         // テクスチャの読み込みとキャッシュ・共有インスタンス(白/フラット法線/マゼンタ)の管理。
         // .kmodelのTextureEntryは既にKurenaiPacker側でユニーク化(同じ画像+同じsRGBは1件に集約)
-        // 済みのため、旧実装のようなパス文字列ベースの重複排除キャッシュはもう不要で、
-        // 添字(TextureEntryのインデックス)だけで管理できる
+        // 済みのため、パス文字列ベースの重複排除キャッシュは持たず、
+        // 添字(TextureEntryのインデックス)だけで管理する
         class TextureLoader
         {
         public:
@@ -451,8 +450,7 @@ namespace Kurenai::Assets
         const auto textureLoadTime = std::chrono::steady_clock::now();
 
         // -1(指定なし)は白/フラット法線、指定されていたのに読み込みに失敗した場合は
-        // マゼンタ/フラット法線を使う(旧実装のTextureLoader::Load/LoadNormalのフォールバック
-        // 方針を踏襲。詳細はGetMagentaPlaceholder/GetFlatNormalのコメント参照)
+        // マゼンタ/フラット法線を使う(詳細はGetMagentaPlaceholder/GetFlatNormalのコメント参照)
         auto resolveBaseColorOrMetallicRoughness = [&](int32_t index) -> RHI::IRHITexture*
         {
             if (index == kNoTextureIndex)

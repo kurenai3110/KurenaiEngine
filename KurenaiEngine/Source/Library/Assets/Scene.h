@@ -29,7 +29,7 @@ namespace Kurenai::Assets
 
         // .ksceneの[Model]Waterで指定される。trueの場合、KurenaiEngine3DはこのインスタンスをG-Bufferパスの
         // 通常PSOではなく水面専用PSO(Water.hlsl)で描画し、G-BufferのMaterial.aへ水面のマテリアルID
-        // (kMaterialIDWater、Shaders/3D/GBufferCommon.hlsli)を書き込む(P2: 水面マテリアル基盤)
+        // (kMaterialIDWater、Shaders/3D/GBufferCommon.hlsli)を書き込む(水面マテリアル基盤)
         bool IsWater = false;
     };
 
@@ -180,11 +180,10 @@ namespace Kurenai::Assets
         // 「レイトレーシングが使えない環境では反射なし」(EngineDefaults.h の SSREnabled。
         // SSRは画面端で反射が途切れる破綻が目立つため)で、書いていないシーンはそれに従う。
         // 一方このキーを明示したシーンは、その既定を上書きする意思表示なので指定どおりにする。
-        // 【この区別が無く不具合になっていた】以前はどちらも同じ扱いで、しかも
-        // 「= true」と書いてもエンジンの既定へ問い合わせ直していたため、DX11では
-        // ReflectionMode::Off になりシーンの指定が握り潰されていた(モン・サン=ミシェルの
-        // 水面に何も映らない/White Furnace TestのSSR回帰テストが動いていない、という形で出ていた)。
-        // DX12はDXRが使えてレイトレーシング反射が選ばれるため露見しなかった
+        // 【この区別を落としてはいけない】どちらも同じ扱いにして「= true」でもエンジンの既定へ
+        // 問い合わせ直すと、DX11では ReflectionMode::Off になりシーンの指定が握り潰される
+        // (水面に何も映らない/White Furnace TestのSSR回帰テストが動かない、という形で出る)。
+        // DX12はDXRが使えてレイトレーシング反射が選ばれるため露見しない
         bool HasSSREnabledOverride = false;
         bool SSREnabled = true;
 
@@ -219,7 +218,7 @@ namespace Kurenai::Assets
         bool HasExposureOverride = false;
         float ExposureEV100 = 15.0f;   // EngineDefaults.h の SceneExposureEV100 と同じ値にすること
 
-        // --- [Cloud]セクション(P10)。天候はシーンが持つべき性質なので、[Water]と同じく
+        // --- [Cloud]セクション。天候はシーンが持つべき性質なので、[Water]と同じく
         // シーンごとに指定できるようにする。**指定されたキーだけ**エンジンの設定を上書きする
         // (Exposure/IBLIntensityと同じ扱い)ので、書かなかったキーはエンジンの既定値のまま。
         // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
@@ -306,7 +305,7 @@ namespace Kurenai::Assets
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
 
-        // .ksceneの[Water]セクション(P2: 水面マテリアル基盤)。水面(ModelInstance::IsWater)専用の
+        // .ksceneの[Water]セクション(水面マテリアル基盤)。水面(ModelInstance::IsWater)専用の
         // シェーディングパラメータで、[Water]が無いシーンでは既定値のまま(水面インスタンス自体も
         // 存在しないため未使用)。NormalMapはAssetsルートからの相対パスで、[Scene]Skyboxと同じ
         // ルート外チェックを通したうえで絶対パスへ解決してからここへ入る。空文字列なら
