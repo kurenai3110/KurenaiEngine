@@ -255,6 +255,7 @@
     <li><a href="#clouds">35. 雲(レイヤーモデル)</a></li>
     <li><a href="#planarreflection">36. 平面反射</a></li>
     <li><a href="#aerialperspective">37. 大気遠近(height fog / aerial perspective)</a></li>
+    <li><a href="#ch38">38. ドローンショーと星空</a></li>
   </ol>
 </nav>
 
@@ -5729,6 +5730,289 @@ SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積�
 置くのが誤りである理由、係数kを当てはまりで決めてはいけない理由は
 <a href="ImplementationDetail.md">ImplementationDetail.md</a> 34章。
 </p>
+</section>
+
+<section id="ch38">
+<h2>38. ドローンショーと星空</h2>
+
+<p>
+夜空を編隊飛行する発光ドローンの群れ(<code>Scenes/DroneShow.kscene</code>)と、その背景になる星空。
+このエンジンには<strong>パーティクル/ビルボード/インスタンシングも、オブジェクトのアニメーションも
+存在しない</strong>ため、描画の土台をこの章で作っている。
+</p>
+
+<p>
+責務は3つに分かれる。<strong>形とタイミングはデータ資産(<code>.kshow</code>)が持ち</strong>(38.6節)、
+<code>Source/Engine/DroneShow.{h,cpp}</code>がそれを時間で補間して1フレームぶんの
+<code>GPUDrone</code>配列を作り、<code>KurenaiEngine3D</code>のDroneShowパスと
+<code>Shaders/3D/DroneShow.hlsl</code>が1機につきカメラ正対のビルボードを1枚、加算合成で描く。
+形を作るのは別実行ファイルのオーサリングツール(38.7節)で、エンジンは形の作り方を知らない。
+</p>
+
+<p>
+この章の具体的な根拠(方式の選択理由、既定値の実測、検証手順)は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 38章にあります。
+</p>
+
+<h3 id="ch38-1">38.1 頂点シェーダから構造化バッファを読む(RHIの拡張)</h3>
+
+<p>
+1,500機を1回のDrawで描くため、頂点シェーダが機体データを直接引く
+&mdash;&mdash; <code>IRHICommandList::SetVertexShaderResourceBuffer</code>。コンピュート用に
+<code>SetComputeShaderResourceBuffer</code>を別に持っているのと同じ「ステージごとに独立した
+レジスタ空間を用意する」形に揃えてある。DX12側はディスクリプタテーブルではなく
+<strong>ルートSRV</strong>(ルートパラメータ4)に割り当てる &mdash;&mdash; 用途が「1回のDrawで参照する
+構造化バッファ1本」に限られるため、ヒープへブロックを払い出してCopyDescriptorsする経路は要らない。
+</p>
+
+<p>
+<code>t0</code>が既存のSRVテーブル(t0〜t20)とレジスタ番号で重なるが、
+<strong>可視ステージが素で分離している</strong>(片方は<code>PIXEL</code>、もう片方は<code>VERTEX</code>)
+ため衝突しない。ルートシグネチャの一意性はシェーダーステージごとに判定される。
+</p>
+
+<p>
+<strong>状態遷移には<code>NON_PIXEL_SHADER_RESOURCE</code>を必ず含めること。</strong> 既存の
+<code>SetShaderResourceBuffer</code>は<code>PIXEL_SHADER_RESOURCE</code>のみへ遷移させており、
+その状態のリソースを頂点シェーダから読むのはD3D12の仕様違反になる。
+</p>
+
+<h3 id="ch38-2">38.2 ビルボードの巻き &mdash;&mdash; 平面反射でPSOを切り替えない</h3>
+
+<p>
+メッシュの描画では、鏡映ビュー行列が頂点そのものを変換するため画面上の巻きが反転し、
+カリングを効かせたまま正しい面を残すには<code>FrontCounterClockwise</code>を反転したPSOが要る
+(<code>m_TransparentPipelineStateMirrored</code>等)。
+<strong>ドローンのビルボードはこれに当てはまらない。平面反射でも本描画と同じPSOを使うこと。</strong>
+</p>
+
+<p>
+ビルボードは「ワールド座標を<code>View</code>で変換した<em>後</em>に、ビュー空間で四隅のオフセットを足す」
+という作り方をしている(<code>DroneShow.hlsl</code>の<code>VSMain</code>)。四隅のオフセットは
+鏡映行列を一度も通らないので、<code>View</code>が鏡映を含んでいてもクアッド自身の巻きは変わらない。
+反転したPSOで描くと1機残らず裏面として捨てられ、水面に何も映らなくなる。
+</p>
+
+<h3 id="ch38-3">38.3 パスの置き場所(大気遠近より後・TAAより前)</h3>
+
+<p>
+本描画は<code>taaInputColor</code>を決めた直後に登録する。理由は2つ:
+</p>
+<ul>
+<li><strong>大気遠近より後</strong> &mdash;&mdash; 機体は深度を書かないため、先に描くと
+<code>AerialPerspective</code>が「背後の空の距離」で霞を掛けてしまい、光点がwashoutする</li>
+<li><strong>TAAより前</strong> &mdash;&mdash; RenderGraphが<code>taaInputColor</code>の
+Read-after-Write依存で自動的に順序付ける。TAAの後(=<code>m_TAAHistory</code>へ直接加算)にすると
+履歴を汚し、次フレーム以降に尾を引く</li>
+</ul>
+
+<p>
+書き込み先を<code>taaInputColor</code>という変数にしているのは、反射やフォグの有無でHDRシーン色の
+実体が移り変わるため。「今のHDRシーン色」を指す変数へ描くことでどの組み合わせでも成立する。
+</p>
+
+<h3 id="ch38-4">38.4 モーフの点対応づけ &mdash;&mdash; 方位角の並びはデータが持つ</h3>
+
+<p>
+形Aのi番目と形Bのi番目を直線で結ぶのがモーフなので、両者のインデックスが無関係だと
+全機の軌跡が編隊の中央で交差し、変形の途中がただの塊になる。
+そこで<strong>どの編隊も「中心から見た方位角、次に高さ」の順に並べる</strong>。i番目どうしが
+常に概ね同じ方角・同じ高さに来るため、各機は自分の近くへ短く動くだけで済む。
+</p>
+
+<p>
+<strong>この並べ替えはオーサリング側で焼き込まれ、<code>.kshow</code>内の順序がそのまま
+対応関係になる。</strong> ランタイムはi番目とi番目を結ぶだけで、ソートを行わない。
+対応づけはデータの性質であって、再生する側が決め直すことではない。
+</p>
+
+<p>
+同じ理由で<strong>全編隊が同じ点数を持たなければならない</strong>。揃っていないと変形の途中で
+機体が消える。エディタが保存時に揃え、<code>SaveShow</code>と<code>DroneShow::SetData</code>が
+それぞれ独立に検査する(ファイルを経由しないプレビュー経路があるため、受け取る側にも関所を置く)。
+</p>
+
+<h3 id="ch38-5">38.5 星は<code>SkyColorUpperUnit</code>ではなく<code>SkyColor</code>へ足す</h3>
+
+<p>
+<code>SkyColorUpperUnit</code>の結果は<code>SkyIntegrate.hlsl</code>が積分して天頂輝度
+(=夜空の露出校正)を逆算する入力になっている。そちらへ星を混ぜると<strong>校正値そのものが動き、
+星の有無で夜空全体の明るさが変わる</strong>。星は「校正済みの空の色へ後から足す発光体」として
+<code>SkyColor</code>側で加算し、雲の減光より手前に置くことで雲が星を正しく覆う。
+</p>
+
+<p>
+星を出すのは<strong>背景(<code>DeferredLighting.hlsl</code>)と水面の映り込み(<code>SSR.hlsl</code>)だけ</strong>。
+IBLキューブ(<code>SkyGenerate.hlsl</code>)へ焼くと、256px/面に点光源がエイリアシングし、
+プリフィルタ後の鏡面反射でファイアフライになる。星明かりの<em>照明</em>としての寄与は
+<code>kStarlightIlluminanceLux</code>が一様な下限として既にモデル化済みで、ここは見た目だけの担当。
+</p>
+
+<p>
+HLSLのローカル構造体は代入していないメンバの値が未定義なので、5つある<code>MakeSkyParameters</code>の
+どれか1つが星のフィールドを埋め忘れると、そのシェーダーはゴミの強度で星を描き始める。
+これを防ぐため<strong>全員が必ず通る<code>ApplyCloudFogParameters</code>で星のフィールドを0に初期化</strong>し、
+明示的に有効化したシェーダーだけが星を描くという安全側の既定にしてある。
+</p>
+
+<h3 id="ch38-6">38.6 ショーはデータ資産(<code>.kshow</code>)が持つ</h3>
+
+<p>
+ショー1本はバイナリの<code>.kshow</code>ファイル1つで、<strong>エンジンは編隊の形の作り方を知らない</strong>。
+持ち主の分担は次のとおり:
+</p>
+
+<table>
+<tr><th>持ち主</th><th>持つもの</th><th>理由</th></tr>
+<tr><td><code>.kshow</code></td>
+    <td>編隊の点そのもの・機体数・保持/変形秒・明るさ・機体の半径・揺れ・再生速度・種</td>
+    <td>ショーの中身。シーンが上書きできると、同じショーがシーンごとに別物として鳴り、
+        どれが「そのショー」なのかが決まらなくなる</td></tr>
+<tr><td><code>.kscene</code>の<code>[DroneShow]</code></td>
+    <td><code>Enabled</code> / <code>Path</code> / <code>Center</code> / <code>Scale</code>の4つ</td>
+    <td>出すかどうかと、どこにどの大きさで置くか。<strong>点は代表半径1へ正規化して持つ</strong>ので、
+        同じショーを別のシーンへ別の場所・別の規模で置ける</td></tr>
+<tr><td><code>EngineDefaults.h</code></td>
+    <td><code>DroneShowMinScreenRadius</code>のみ</td>
+    <td>ショーの表現ではなく描画側の下限。「遠方の点が1画素を割るとTAAのジッタでちらつく」
+        という事実はどのシーン・どのショーでも変わらない</td></tr>
+</table>
+
+<p>
+書式の単一の正は<code>Source/Library/Assets/ShowPackage.h</code>で、規約は<code>.kmodel</code>
+(<a href="#cache">10章</a>の<code>ModelPackage.h</code>)に揃えてある &mdash;&mdash;
+リトルエンディアン、<code>#pragma pack</code>を使わず<code>static_assert</code>でサイズ固定、
+マジック+<code>Version</code>、文字列はUTF-8をStringPoolに長さ管理で置く。
+読み書きは<code>ShowLoader.{h,cpp}</code>。
+</p>
+
+<p>
+<strong>読み込みはLoaderスレッド(<code>LoadScene</code>の中)で行う</strong> &mdash;&mdash;
+<code>[Model]</code>の<code>.kmodel</code>と同じ扱いで、Renderスレッドでファイルを開かない
+(<a href="#sceneloading">26章</a>)。<code>Version</code>不一致は読み込み拒否。ただし
+<strong>読み込みに失敗してもシーンごとは落とさない</strong>: モデルはシーンそのものだが、
+ドローンショーは夜空の装飾で、無くてもシーンは成立するため、エラーをログに残して編隊なしで進む。
+</p>
+
+<p>
+シーンを切り替えたときは、ショーを持たないシーンであっても
+<strong><code>DroneShow::SetData</code>を必ず呼ぶこと。</strong> 呼ばなければ前のシーンの編隊が
+飛び続ける。空のデータを渡せば再生対象なしになる。
+</p>
+
+<h3 id="ch38-7">38.7 オーサリングツールと公開API</h3>
+
+<p>
+<code>.kshow</code>を作るのは<code>Tools/KurenaiShowEditor</code>(別実行ファイル・独立ソリューション)。
+形状生成もここにあり、<strong>新しい編隊を足す場所はここ</strong>である。
+</p>
+
+<p>
+エディタは自前のレンダラーを持たず<strong>エンジンをそのまま使ってプレビューする</strong>。
+別経路でプレビューすると、トーンマップ・ブルーム・露出が本番と違い、そこで作った形は
+本番で見ると別物になる。そのためエンジンには次の2つだけを公開している &mdash;&mdash;
+<code>IPanel</code>や<code>UIWidgets</code>といったUI内部の型を外へ出さずに済ませるため、
+口はこの2つに留める。
+</p>
+
+<ul>
+<li><code>SetExtraImGuiCallback(std::function&lt;void()&gt;)</code> &mdash;&mdash;
+全パネルを描いた後に一度だけ呼ぶ追加のImGui描画。<strong>F1で隠す範囲の内側で呼ぶこと</strong>
+(でないとスクリーンショットでの計測が壊れる)。<strong>登録は<code>Run()</code>の前に行うこと</strong>
+(Renderスレッドが走り出した後に差し替えると、描画中の<code>std::function</code>を書き換えることになる)</li>
+<li><code>ApplyDroneShowData(const Assets::ShowData&amp;)</code> &mdash;&mdash;
+再生中のショーをファイルを経由せずに差し替える。<strong>上のコールバックの中から呼ぶこと</strong>。
+どちらもRenderスレッドで走るため、この経路なら同期が要らない</li>
+</ul>
+
+<p>
+ImGuiの実体は<code>KurenaiEngineLibrary.dll</code>が<code>__declspec(dllexport)</code>で持っている。
+エディタは<code>IMGUI_API=__declspec(dllimport)</code>を定義して同じコンテキスト・同じアロケータの
+上に描く。<strong>自前で<code>imgui.cpp</code>をコンパイルしてはいけない</strong>(コンテキストが
+2つになって成立しない)。
+</p>
+
+<p>
+GUIのほかに<code>--generate-standard &lt;出力パス&gt;</code>のCLIモードを持ち、標準の6形状を
+書き出したあと読み直してビット一致まで検査する。リポジトリの<code>Shows/Standard.kshow</code>は
+これで作る。<code>Scenes/*.kscene</code>と同じく、リポジトリ直下が正で、ランタイムが読むのは
+<code>Assets/Packed/Shows/</code>側である。
+</p>
+
+<h3 id="ch38-8">38.8 発光点は平面反射のカバレッジを書かない</h3>
+
+<p>
+平面反射(<a href="#planarreflection">36章</a>)のレンダーターゲットは
+<strong>アルファを「そのテクセルにジオメトリが描かれたか」</strong>として使う。SSRパスの
+<code>ApplyPlanarReflection</code>が<code>解析空 &times; (1 - a) + 平面反射のrgb</code>という形で
+水面へ合成しており、アルファ0のテクセルは解析空へ戻る。
+</p>
+
+<p>
+<strong>したがって加算合成で描く発光点はアルファを書いてはいけない。</strong>
+書くと、クアッドの円の内側が「不透明なジオメトリで覆われた」ことになってそこだけ空の映り込みが消え、
+機体が重なるとアルファが1を超えて解析空の係数<code>(1 - a)</code>が負へ振れる。
+PSOは<code>BlendMode::PremultipliedAlpha</code>(<code>SrcBlend = ONE / DestBlend = INV_SRC_ALPHA</code>)、
+<code>PSMain</code>はアルファ<strong>0</strong>を返す。これで<code>rgb = src + dst</code>(加算合成のまま)・
+<code>alpha = dst</code>(据え置き)になり、「光は足すが背景を遮らない」という発光点の正しい意味になる。
+</p>
+
+<p>
+なお平面反射はSSRパスで
+<code>SceneColor + (反射の放射輝度 - 環境の放射輝度) &times; SpecularIBLWeight</code>として合成され、
+この<code>SpecularIBLWeight</code>には<strong><code>IBLIntensity</code>が掛かる</strong>。
+これは間接光を抑えるための画作り用の値だが、拡散だけでなく間接鏡面にも一様に効くため、
+<strong>鏡のような水面の映り込みまで同じ倍率で暗くなる</strong>。映り込みを主題にするシーンは
+<code>[Scene]IBLIntensity</code>で明示すること(エンジンの既定は全シーンの画作りに効く値なので動かさない)。
+</p>
+
+<h3 id="ch38-9">38.9 夜の表示レンジ &mdash;&mdash; 可変プリ露出のクランプが両端を決める</h3>
+
+<p>
+可変プリ露出は「バッファの値」と「トーンマップが受け取る表示値」を
+<code>表示値 = バッファの値 &times; 2<sup>bias</sup></code>(<code>bias = 実効EV100 - 設定EV100</code>)
+で結ぶ。したがって<strong>バッファ(<code>R16G16B16A16_Float</code>)の両端がそのまま
+表示できる明るさの両端になる</strong>。<code>bias</code>は<code>KurenaiEngine3D::Render</code>で
+<code>[-12, 0]</code>にクランプしており、<strong>この下限が夜の表示上限を決める</strong>。
+</p>
+
+<p>
+<strong>クランプ下限を下げるときは上側の要件も同時に見ること。</strong>
+下限を深くするほど暗いシーンの階調は稼げるが、その分だけ表示できる最大輝度が下がる。
+両端の要件と-12という値の導出は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 38.9節。
+</p>
+
+<h3 id="ch38-10">38.10 DX12の水面に機体が映らない(既知の制限)</h3>
+
+<p>
+平面反射パスの実行条件は
+<code>m_PlanarReflectionEnabled &amp;&amp; hasWaterInstance &amp;&amp; m_ReflectionMode == ReflectionMode::ScreenSpace</code>
+であり、DXR対応環境では<code>DefaultReflectionMode</code> / <code>ReflectionModeForCapability</code>が
+<code>Raytraced</code>を返すため、<strong>DX12では平面反射パスが走らない</strong>。DX12の水面に映っているのは
+TLASへレイを撃った結果であり、ドローンは手続き的に展開するビルボードでTLASに入っていないので
+<strong>レイからは原理的に見えない</strong>。島や地形はTLASにあるため正しく映る。
+</p>
+
+<p>
+<strong>これは既知の制限として受け入れる。</strong> 必要なときはUIの「反射」セクションから
+手動で<code>ScreenSpace</code>へ切り替える。
+</p>
+
+<p>
+<strong>ショーの有効/無効で反射手法を書き換えてはいけない。</strong> 1つの機能の有効/無効が
+別の機能の設定を黙って書き換えると、<code>.kscene</code>に書いた指定が機能側の都合で覆り、
+「なぜこのシーンだけ反射手法が違うのか」をコードを読むまで追えなくなる。
+</p>
+
+<p>
+本格的に直すなら、<code>Raytraced</code>のままでも平面反射パスを走らせ、RT反射側が水面画素に対して
+その結果を合成する形になる(RT反射はTLASに無いビルボードを追跡できないため、
+ラスタで描いた反射像を別途混ぜるしかない)。
+なお<code>DebugView::PlanarReflection</code>はDX12では最終画像が出るだけで反射バッファを表示しないため、
+この経路での切り分けには使えない。
+</p>
+
 </section>
 
 </main>

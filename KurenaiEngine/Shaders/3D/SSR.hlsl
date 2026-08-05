@@ -140,6 +140,9 @@ cbuffer FrameConstants : register(b0)
     float4 FogParams1;
     // 水中項。このシェーダでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
     float4 WaterBodyColor;
+    // 星空(末尾に追加)。水面に映る空にも星を出すために読む。
+    // C++側 KurenaiEngine3D.cpp の FrameConstants::StarsParams と揃えること
+    float4 StarsParams;
 };
 
 cbuffer SSRConstants : register(b1)
@@ -240,6 +243,14 @@ SkyParameters MakeSkyParameters()
     // 雲層へ掛ける大気遠近(Sky.hlsliのEvaluateCloudLayer (f)節)。
     // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
     params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
+    // 星空。水面に映る空にも背景と同じ星を出す(ApplyCloudFogParametersが0で潰した後に上書きする)。
+    // 背景側(DeferredLighting.hlsl)と同じ値を入れること——食い違うと
+    // 「空には出ているのに水面には映らない星」ができる
+    params.StarsIntensity = StarsParams.x;
+    params.StarsDensity = StarsParams.y;
+    params.StarsTwinkle = StarsParams.z;
+    params.StarsPixelAngle = StarsParams.w;
+    params.StarsTime = TimeParams.x;
     return params;
 }
 

@@ -1,4 +1,4 @@
-﻿#include "KurenaiEngine3D.h"
+#include "KurenaiEngine3D.h"
 
 #include <imgui.h>
 
@@ -262,6 +262,14 @@ namespace Kurenai
             // メッシュ自身のBaseColorFactorの代わりにこの色を出力Albedoに使う
             // (見下ろした水面がFresnel最小(約0.02)でほぼ真っ黒になる問題への対処。詳細はWater.hlsl参照)
             DirectX::XMFLOAT4 WaterBodyColor;
+            // 星空(さらに末尾に追加)。Sky.hlsliのEvaluateStarfieldが読む。
+            // x=強度(0で完全に無効。昼はCPU側で0にする)、y=密度(天球を割るセルの細かさ)、
+            // z=またたきの強さ、w=1画素が張る角度[rad](星がこれを下回らないようにする)。
+            //
+            // 【読むのはDeferredLighting.hlslとSSR.hlslだけ】背景と水面の映り込みにしか
+            // 星を出さないため。AerialPerspective.hlsl(フォグのin-scatter)と
+            // SkyGenerate.hlsl(IBLキューブ)は自分のMakeSkyParametersで0を入れる
+            DirectX::XMFLOAT4 StarsParams;
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -972,6 +980,29 @@ namespace Kurenai
         // (シェーダはLightCount.xまでしかループしないため)
         constexpr uint32_t kMaxLights = 1024;
 
+        // ドローンショーの機体数の上限。構造化バッファをこの容量で固定確保する
+        // (32バイト×4096 = 128KB。DEFAULTヒープ本体とステージングリングを足しても
+        //  1.3MB程度で、機体数を増減しても作り直さずに済む)
+        constexpr uint32_t kMaxDrones = 4096;
+
+        // DroneShow.hlsl側のcbuffer DroneShowConstantsと一致させる必要がある。
+        // b0のFrameConstantsには相乗りさせない(理由はDroneShow.hlsl冒頭。
+        // 巨大なcbufferの途中のフィールドを宣言し忘れるとオフセットが静かにずれる)
+        struct alignas(16) DroneShowConstants
+        {
+            // 転置済み。メイン描画ではカメラのビュー行列、平面反射では鏡映×カメラのビュー行列
+            DirectX::XMFLOAT4X4 View;
+            // 転置済み。どちらのパスでもメインカメラのジッター済みProj
+            DirectX::XMFLOAT4X4 Proj;
+            // x=明るさ倍率(実効プリ露出を乗算済み)、y=画面上の最小半径(NDC)、
+            // z=射影行列の[0][0]成分、w=未使用
+            DirectX::XMFLOAT4 Params0;
+            // 平面反射で水面より下の機体を落とすクリップ平面(xyz=法線、w=距離項)
+            DirectX::XMFLOAT4 ClipPlane;
+            // x=クリップ平面を使うか(0=メイン描画、1=平面反射)、yzw=未使用
+            DirectX::XMFLOAT4 Params1;
+        };
+
         // DirectLighting.hlsl側のcbuffer LightingConstantsと一致させる必要がある。
         // b0はFrameConstantsが使っており定数バッファスロットは2本しか無いため、
         // 直接光パス固有のパラメータはすべてここへ足していく
@@ -1288,6 +1319,64 @@ namespace Kurenai
         m_TransparentPipelineState = m_Device->CreatePipelineState(transparentPipelineDesc);
         transparentPipelineDesc.FrontCounterClockwise = true;
         m_TransparentPipelineStateMirrored = m_Device->CreatePipelineState(transparentPipelineDesc);
+
+        // ドローンショーパス(DroneShow.hlsl)。頂点バッファを持たず、Draw(6*機体数, 0)と
+        // SV_VertexIDでビルボードのクアッドを展開する(InputLayoutは空のまま)
+        RHI::ShaderDesc droneShowVsDesc;
+        droneShowVsDesc.Stage = RHI::ShaderStage::Vertex;
+        droneShowVsDesc.FilePath = shaderDirectory + L"DroneShow.hlsl";
+        droneShowVsDesc.EntryPoint = "VSMain";
+        m_DroneShowVertexShader = m_Device->CreateShader(droneShowVsDesc);
+
+        RHI::ShaderDesc droneShowPsDesc;
+        droneShowPsDesc.Stage = RHI::ShaderStage::Pixel;
+        droneShowPsDesc.FilePath = shaderDirectory + L"DroneShow.hlsl";
+        droneShowPsDesc.EntryPoint = "PSMain";
+        m_DroneShowPixelShader = m_Device->CreateShader(droneShowPsDesc);
+
+        RHI::PipelineStateDesc droneShowPipelineDesc;
+        droneShowPipelineDesc.VertexShader = m_DroneShowVertexShader.get();
+        droneShowPipelineDesc.PixelShader = m_DroneShowPixelShader.get();
+        droneShowPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        // SceneColorと平面反射(m_PlanarReflectionColor)はどちらもR16G16B16A16_Floatなので、
+        // 同じPSOを両方のパスで使える
+        droneShowPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        // 島や地形の後ろに回った機体を隠すため深度テストは行うが、
+        // 機体同士は隠し合わせない(加算合成は順序に依存しないのでソートも不要)
+        droneShowPipelineDesc.HasDepthStencil = true;
+        droneShowPipelineDesc.DepthWriteEnabled = false;
+        droneShowPipelineDesc.ReverseZ = true;
+        // 【Additiveではなくこちらを使う理由 ― アルファ(カバレッジ)を書かないため】
+        // Additiveは SrcBlendAlpha=ONE / DestBlendAlpha=ONE なので、機体を描くたびに
+        // レンダーターゲットのアルファへ1.0が積まれる。SceneColorではアルファを誰も読まないので
+        // 実害が無いが、平面反射(m_PlanarReflectionColor)ではアルファが
+        // 「そのテクセルにジオメトリが描かれたか」のカバレッジとして使われており
+        // (SSR.hlslのApplyPlanarReflection)、機体のクアッド全域でカバレッジが1になってしまう。
+        // すると水面はクアッドの円の内側で解析空の映り込みを失い、裾(glowがほぼ0の外周)が
+        // 黒い円として抜ける。機体が重なるとアルファは1を超え、解析空の係数(1-a)が負へ振れる。
+        // PremultipliedAlphaは SrcBlend=ONE / DestBlend=INV_SRC_ALPHA なので、
+        // PSMainがアルファ0を返せば rgb=src+dst(加算合成のまま)・alpha=dst(据え置き)になり、
+        // 「光は足すが遮蔽はしない」という発光点の正しい意味になる
+        droneShowPipelineDesc.BlendMode = RHI::BlendMode::PremultipliedAlpha;
+        // 【平面反射用にワインディングを反転したPSOは要らない】
+        // メッシュの描画(m_TransparentPipelineStateMirrored等)では鏡映ビュー行列が頂点そのものを
+        // 変換するため画面上の巻きが反転するが、このパスのビルボードは
+        // 「ワールド座標をViewで変換した"後"に、ビュー空間で四隅のオフセットを足す」
+        // という作り方をしている(DroneShow.hlslのVSMain)。四隅のオフセットは鏡映行列を
+        // 一度も通らないので、Viewが鏡映を含んでいてもクアッド自身の巻きは変わらない。
+        // 反転したPSOで描くと1機残らず裏面として捨てられ、水面に何も映らなくなる
+        m_DroneShowPipelineState = m_Device->CreatePipelineState(droneShowPipelineDesc);
+
+        RHI::BufferDesc droneShowConstantBufferDesc;
+        droneShowConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        droneShowConstantBufferDesc.SizeInBytes = sizeof(DroneShowConstants);
+        m_DroneShowConstantBuffer = m_Device->CreateBuffer(droneShowConstantBufferDesc);
+
+        RHI::BufferDesc droneBufferDesc;
+        droneBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+        droneBufferDesc.SizeInBytes = sizeof(GPUDrone) * kMaxDrones;
+        droneBufferDesc.StrideInBytes = sizeof(GPUDrone);
+        m_DroneBuffer = m_Device->CreateBuffer(droneBufferDesc);
 
         // Hi-Zミップチェーン構築パス(コンピュートシェーダー)。CSCopyでG-Buffer深度をミップ0へコピーし、
         // CSDownsampleをミップ数-1回ディスパッチして1x1まで縮小する
@@ -2985,6 +3074,40 @@ namespace Kurenai
         if (m_Scene.HasFogDensity)     { m_FogDensity = m_Scene.FogDensity; }
         if (m_Scene.HasFogScaleHeight) { m_FogScaleHeight = m_Scene.FogScaleHeight; }
         if (m_Scene.HasFogRefHeight)   { m_FogRefHeight = m_Scene.FogRefHeight; }
+        // ブルーム。エンジンの既定は無効なので、夜景で光源が主役になるシーンは
+        // ここで有効にしないと発光体に光芒が出ない
+        if (m_Scene.HasBloomEnabled)   { m_BloomEnabled = m_Scene.BloomEnabled; }
+        if (m_Scene.HasBloomStrength)  { m_BloomStrength = m_Scene.BloomStrength; }
+        if (m_Scene.HasBloomThreshold) { m_BloomThreshold = m_Scene.BloomThreshold; }
+        // 星空。[Cloud]/[Fog]と同じく指定されたキーだけを上書きする
+        if (m_Scene.HasStarsEnabled)    { m_StarsEnabled = m_Scene.StarsEnabled; }
+        if (m_Scene.HasStarsDensity)    { m_StarsDensity = m_Scene.StarsDensity; }
+        if (m_Scene.HasStarsBrightness) { m_StarsBrightness = m_Scene.StarsBrightness; }
+        if (m_Scene.HasStarsTwinkle)    { m_StarsTwinkle = m_Scene.StarsTwinkle; }
+        // ドローンショー。[Cloud]/[Fog]と同じく指定されたキーだけを上書きする。
+        // ショーの中身(点・機体数・秒数・明るさ)は.kshowが持ち、Loaderスレッドで読み込み済み
+        if (m_Scene.HasDroneShowEnabled) { m_DroneShowEnabled = m_Scene.DroneShowEnabled; }
+        if (m_Scene.HasDroneShowCenter)
+        {
+            m_DroneShowCenter = { m_Scene.DroneShowCenter[0], m_Scene.DroneShowCenter[1], m_Scene.DroneShowCenter[2] };
+        }
+        if (m_Scene.HasDroneShowScale)          { m_DroneShowScale = m_Scene.DroneShowScale; }
+        // 【Formationsが空でもSetDataを呼ぶ】呼ばなければ前のシーンのショーがそのまま残る。
+        // 空を渡せばDroneShow側がエラーを出してm_HasDataをfalseにするので、
+        // 「ショーを持たないシーンへ切り替えたのに前の編隊が飛び続ける」を構造的に防げる
+        m_DroneShow.SetData(m_Scene.DroneShowData);
+        // シーンを跨いでショーの進行が引き継がれると、切り替えるたびに違う編隊から始まって
+        // A/B比較の対照が取れなくなる(EV100が引き継がれるのと同じ落とし穴)。必ず0へ戻す
+        m_DroneShowTime = 0.0f;
+
+        // 【ドローンショーの有無で反射手法を書き換えてはいけない】
+        // 1つの機能の有効/無効が、それとは別の機能の設定(反射手法)を黙って書き換えると、
+        // シーンの指定が機能側の都合で覆り、「なぜこのシーンだけ反射手法が違うのか」を
+        // 追えなくなる。機体は手続き的に展開するビルボードでTLASに入っておらず、
+        // RT反射のレイからは原理的に見えないため、DXR対応環境(DX12)では水面に編隊が映らない。
+        // これは既知の制限として受け入れる。映したい場合はUIの「反射」セクションから
+        // 手動でScreenSpaceへ切り替える。
+
         // 水面。[Water]が無いシーンでもScene::WaterWaveScale等はリテラル既定値
         // (EngineDefaults.hを複製したもの、Scene.h参照)を持っているため、常にそのまま反映してよい
         // (m_TimeOfDay/m_SunAzimuthDegreesと同じ扱い)
@@ -3578,6 +3701,23 @@ namespace Kurenai
         return requested < 0 ? m_GraphicsAPI : static_cast<GraphicsAPI>(requested);
     }
 
+    void KurenaiEngine3D::SetExtraImGuiCallback(std::function<void()> callback)
+    {
+        // 【Run()の前に呼ぶこと】Renderスレッドが走り出した後にここを書き換えると、
+        // 描画中のstd::functionを差し替えることになる。エディタはエンジンを構築した直後、
+        // Run()を呼ぶ前に一度だけ登録する
+        m_ExtraImGuiCallback = std::move(callback);
+    }
+
+    void KurenaiEngine3D::ApplyDroneShowData(const Assets::ShowData& data)
+    {
+        // 呼び出しスレッドの前提はヘッダー側のコメントを参照(SetExtraImGuiCallbackで
+        // 登録したコールバックの中から呼ぶこと)。
+        // 時刻は戻さない ―― プレビュー中に点をいじるたびにショーが先頭へ飛ぶと、
+        // 「いま見ている瞬間の形」を直せなくなるため
+        m_DroneShow.SetData(data);
+    }
+
     void KurenaiEngine3D::TickFrame()
     {
         const auto now = std::chrono::steady_clock::now();
@@ -3691,6 +3831,22 @@ namespace Kurenai
                     std::fmod(m_CirrusScrollOffset.x + windDirX * cirrusAdvanceNoiseSpace, kCloudNoisePeriod);
                 m_CirrusScrollOffset.y =
                     std::fmod(m_CirrusScrollOffset.y + windDirZ * cirrusAdvanceNoiseSpace, kCloudNoisePeriod);
+            }
+
+            // ドローンショーの進行時刻。水面・雲のスクロール位相とまったく同じ場所・同じ理由で
+            // Renderスレッド専有のまま進める。
+            //
+            // 【1巡ぶんで必ず折り返すこと】DroneShow::Evaluate自身も1巡の周期でstd::fmodするので
+            // 絵の上は折り返さなくても正しく出る。折り返しが要るのは**floatの精度**のためである。
+            // 仮数は24bitなので、1日(86,400秒)積むとULPが約0.010秒になり、60fpsのdt(0.0167秒)が
+            // まともに積めなくなってショーが止まる。以前はUIの「ショー時刻」スライダーで
+            // 手動で戻せることを逃げ道にしていたが、そのUIごと無くなったのでここで閉じる
+            m_DroneShowTime += renderDeltaTime * m_DroneShow.Data().Speed;
+            const float showLoopDuration = m_DroneShow.LoopDuration();
+            if (showLoopDuration > 0.0f)
+            {
+                // 未初期化(LoopDuration()==0)のときに割るとNaNになるのでガードする
+                m_DroneShowTime = std::fmod(m_DroneShowTime, showLoopDuration);
             }
 
             // m_Scene・ポストプロセスのパラメータ・UIの状態はすべてこのRenderスレッド専有に
@@ -3934,6 +4090,14 @@ namespace Kurenai
             UI::PanelDrawContext panelContext;
             panelContext.Camera = &frameState.Camera;
             m_UIManager->Draw(panelContext);
+
+            // オーサリングツール(Tools/KurenaiShowEditor)が足す追加のUI。
+            // 【ImGuiVisibleの中に置くこと】F1で全パネルを隠したときに、これだけが
+            // 画面に残ってしまうとスクリーンショットでの計測が壊れる
+            if (m_ExtraImGuiCallback)
+            {
+                m_ExtraImGuiCallback();
+            }
         }
 
         // ImGuiがマウス/キーボードを掴んでいるかをUpdateスレッドへ返す(Update()が読む)。
@@ -4029,9 +4193,35 @@ namespace Kurenai
         {
             const float keyIlluminance = std::max(sunLighting.KeyIlluminanceLux, 1e-6f);
             const float autoBias = std::log2(keyIlluminance / kSunIlluminanceLux);
-            // 下限-18段は満月の夜(キー照度0.3lx前後)がちょうど収まる範囲。
-            // 上限0段は「昼より明るくはしない」の意味
-            const float targetEV100 = m_SceneExposureEV100 + std::clamp(autoBias, -18.0f, 0.0f);
+            // 【下限-12段の根拠 ― 表示レンジの両端をfp16に収める】
+            // このバイアスは「HDRバッファの値」と「トーンマップが受け取る表示値」の橋渡しで、
+            //   表示値 = バッファの値 × 2^bias
+            // という関係にある。したがってバッファの上限(fp16の65504)と下限(最小正規化数6.1e-5)は、
+            // そのまま**表示できる明るさの上限と下限**になる。
+            //
+            //   上側: 表示16(ACESの白より十分上。ここまで出せれば発光物が白へ振り切れる)を
+            //         表すには 65504 × 2^bias >= 16 → bias >= -12
+            //   下側: 表示1e-4(sRGBで1階調にも満たない=見えない)がfp16の正規化域に残るには
+            //         1e-4 × 2^-bias >= 6.1e-5 → bias <= 0.7
+            //
+            // よって-12が両立点になる。**要件が表示値で書けているので、シーンのExposureにも
+            // その夜の照度にも依存しない**のがこの値の性質である。
+            //
+            // 【かつて-18だった理由と、それが上限を潰していたこと】
+            // 元の-18は「照度の差(満月なら-18.34段)をできるだけ打ち消す」という下側だけの
+            // 発想で決まっており、上側は見ていなかった。その結果 表示上限が
+            // 65504 × 2^-18 = 0.25 に落ち、**夜はどんな発光物も表示0.25(sRGBで132前後)より
+            // 明るくできない**状態になっていた。ドローンショーで[DroneShow]Brightnessを
+            // 0.30から45へ150倍にしても画素値が1段も動かなかったのはこれが原因で、
+            // 上限に張り付いたまま裾だけが飽和して色を失っていた。
+            // -12にすると上限は65504 × 2^-12 = 16へ64倍広がり、Brightnessが再び効くようになる
+            // (実測: 0.30/1.0/3.0 で編隊の最大画素値が 166/211/237 と動く。-18では全部153だった)。
+            //
+            // 【絵が変わらないことの保証】Tonemap/Bloom/AutoExposureはいずれもこの値を
+            // 割り戻すので、fp16の範囲に収まっている画素は1つも動かない。実測でも
+            // 地形・水面・空の画素値は-18のときと完全に一致し、飽和していた機体だけが変わった。
+            // 上限0段は「昼より明るくはしない」の意味で従来どおり
+            const float targetEV100 = m_SceneExposureEV100 + std::clamp(autoBias, -12.0f, 0.0f);
 
             if (!m_EffectiveExposureInitialized)
             {
@@ -4566,6 +4756,29 @@ namespace Kurenai
         // 水中項。Water.hlslのPSMainが読む
         constants.WaterBodyColor = { m_WaterBodyColor.x, m_WaterBodyColor.y, m_WaterBodyColor.z, 0.0f };
 
+        // 星空。
+        // 【昼は強度0にしてしまう】星は太陽が地平線下にあるときしか見えない。ここで0に
+        // 落としておけば、Sky.hlsli側は最初のif文で抜けるので昼のシーンの絵は1画素も動かない
+        // (m_StarsEnabledを切ったときとまったく同じ経路を通る)。
+        // sunLighting.SunPositionは太陽が「ある」向きなので、yが負なら地平線下。
+        // 仰角0度から-8度にかけて滑らかに立ち上げ、市民薄明のあいだに星が出そろう形にする
+        const float sunElevationSin = sunLighting.SunPosition.y;
+        const float starsNightFactor = std::clamp((-sunElevationSin - 0.005f) * 8.0f, 0.0f, 1.0f);
+        // 手続き空を使わないシーン(DDSスカイボックス指定)ではSkyColorの解析評価自体を
+        // 通らないため、フォグの有効フラグと同じ判断で0にしておく
+        const float starsIntensity =
+            (m_StarsEnabled && usingProceduralSky) ? (m_StarsBrightness * starsNightFactor) : 0.0f;
+        // 1画素が張る角度[rad]。射影行列の_22 = 1/tan(fovY/2) から
+        // 画面の高さ全体が 2*tan(fovY/2) なので、1画素あたりはそれを縦解像度で割ればよい。
+        // 解像度やFOVを変えても星の見かけの下限が追従する
+        DirectX::XMFLOAT4X4 projForPixelAngle;
+        DirectX::XMStoreFloat4x4(&projForPixelAngle, jitteredProj);
+        const float pixelAngle =
+            (projForPixelAngle._22 > 0.0f && m_RenderHeight > 0)
+                ? (2.0f / (projForPixelAngle._22 * static_cast<float>(m_RenderHeight)))
+                : 0.001f;
+        constants.StarsParams = { starsIntensity, m_StarsDensity, m_StarsTwinkle, pixelAngle };
+
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
@@ -4630,6 +4843,29 @@ namespace Kurenai
         if (!gpuLights.empty())
         {
             commandList->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
+        }
+
+        // --- ドローンショーの機体を評価し、GPUへ送る ---
+        // ライトリストとまったく同じ理由でグラフ構築の前に1回だけ更新する。このバッファは
+        // 本描画パスと平面反射パスの2箇所から読まれるため、パスの中で更新すると
+        // 先に走る側が未更新の内容を読んでしまう
+        m_DroneInstances.clear();
+        if (m_DroneShowEnabled)
+        {
+            m_DroneShow.Evaluate(m_DroneShowTime, m_DroneShowCenter, m_DroneShowScale, m_DroneInstances);
+            // 【バッファの容量を超える機体は描かない】m_DroneBufferはkMaxDrones分を固定確保して
+            // いるので、それを超えた分をUpdateBufferへ渡すと書き込みが範囲外になる。
+            // .kshowの機体数はエディタ側で上限を掛けているが、外から来たファイルでも
+            // 壊れないよう、GPUへ渡す直前のここで切り詰める
+            if (m_DroneInstances.size() > kMaxDrones)
+            {
+                m_DroneInstances.resize(kMaxDrones);
+            }
+            if (!m_DroneInstances.empty())
+            {
+                commandList->UpdateBuffer(
+                    m_DroneBuffer.get(), m_DroneInstances.data(), m_DroneInstances.size() * sizeof(GPUDrone));
+            }
         }
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
@@ -6219,9 +6455,11 @@ namespace Kurenai
                 .DepthTarget = m_PlanarReflectionDepth.get(),
                 // 大気遠近。空パラメータ(m_SkyParametersBuffer)をSkyIntegrateパスの後へ
                 // 順序付けさせるために挙げる(実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
-                .BufferReads = { m_LightBuffer.get(), m_SkyParametersBuffer.get() },
+                // m_DroneBufferはこのパス末尾でドローンショーの機体を描き足すために読む
+                // (実際のバインドはExecute内)
+                .BufferReads = { m_LightBuffer.get(), m_SkyParametersBuffer.get(), m_DroneBuffer.get() },
                 .Execute = [this, &constants, &planarReflectionViewport, reflectedViewProj, reflectMatrix,
-                            waterPlaneY](RHI::IRHICommandList* cmd)
+                            waterPlaneY, viewMatrix, jitteredProj, effectiveExposure](RHI::IRHICommandList* cmd)
                 {
                     // captureProbeFaceとまったく同じ作法(constants.ViewProj/CameraPosition/
                     // PrevViewProj/TAAParams/PlanarReflectionPlaneだけをこのパス用に差し替える)。
@@ -6310,6 +6548,43 @@ namespace Kurenai
                             cmd->SetTexture(5, mesh.OcclusionTexture);
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                         }
+                    }
+
+                    // --- 水面へ映すドローンショーの機体 ---
+                    // 平面反射は「カメラを鏡映しただけで世界は動かしていない」ので、
+                    // 機体もそのままのワールド座標で、鏡映済みのビュー行列で描き直せばよい。
+                    // これを描かないと、空には編隊が出ているのに水面には何も映らない
+                    // (SSRパスがm_PlanarReflectionColorを水面へ合成する)
+                    if (m_DroneShowEnabled && !m_DroneInstances.empty())
+                    {
+                        DirectX::XMFLOAT4X4 projection;
+                        DirectX::XMStoreFloat4x4(&projection, jitteredProj);
+
+                        DroneShowConstants droneConstants{};
+                        // 鏡映×カメラのビュー行列。reflectedViewProjの分解と同じ組み合わせで、
+                        // Projはメインカメラのジッター済みProjをそのまま使う
+                        DirectX::XMStoreFloat4x4(
+                            &droneConstants.View, DirectX::XMMatrixTranspose(reflectMatrix * viewMatrix));
+                        DirectX::XMStoreFloat4x4(&droneConstants.Proj, DirectX::XMMatrixTranspose(jitteredProj));
+                        droneConstants.Params0 = {
+                            m_DroneShow.Data().Brightness * effectiveExposure,
+                            m_DroneShowMinScreenRadius,
+                            projection._11,
+                            0.0f,
+                        };
+                        // 水面より下にいる機体は反射に映してはいけない。ジオメトリ側の
+                        // SV_ClipDistance0(FrameConstants.PlanarReflectionPlane)と同じ規約・同じ平面
+                        droneConstants.ClipPlane = { 0.0f, 1.0f, 0.0f, -waterPlaneY };
+                        droneConstants.Params1 = { 1.0f, 0.0f, 0.0f, 0.0f };
+                        cmd->UpdateBuffer(m_DroneShowConstantBuffer.get(), &droneConstants, sizeof(droneConstants));
+
+                        // メイン描画とまったく同じPSOでよい(ビルボードの四隅はビュー空間で
+                        // 足しており鏡映行列を通らないため、巻きが反転しない。
+                        // 詳しい理由はPSO生成箇所のコメント)
+                        cmd->SetPipelineState(m_DroneShowPipelineState.get());
+                        cmd->SetConstantBuffer(1, m_DroneShowConstantBuffer.get());
+                        cmd->SetVertexShaderResourceBuffer(0, m_DroneBuffer.get());
+                        cmd->Draw(static_cast<uint32_t>(m_DroneInstances.size()) * 6u, 0);
                     }
                 },
             });
@@ -6495,6 +6770,64 @@ namespace Kurenai
         //     有効ならその出力)で、SSRだけを見ていた従来の判定ではRT反射有効時にTAAが古い
         //     SceneColorを拾ってしまうため、ここも合わせて直す ---
         RHI::IRHITexture* const taaInputColor = fogPassRuns ? m_AerialPerspectiveTexture.get() : reflectionOutput;
+
+        // --- ドローンショーパス: 夜空の機体を発光ビルボードとして加算合成で描く ---
+        //
+        // 【なぜここなのか(大気遠近より後・TAAより前)】
+        //  ・大気遠近より後: 機体は深度を書かないため、先に描くとAerialPerspectiveが
+        //    「背後の空の距離」で霞を掛けてしまい、光点が washout する
+        //  ・TAAより前: ここに置くとRenderGraphがtaaInputColorのRead-after-Write依存で
+        //    自動的にTAAの前へ順序付ける。機体がTAA・自動露出・ブルーム・トーンマップを
+        //    一貫して通るため、シーンの他の発光物とまったく同じ扱いになる。
+        //    TAAの後(=m_TAAHistoryへ直接加算)にしてはいけない ―― 履歴を汚し、
+        //    次フレーム以降に尾を引く
+        //
+        // 書き込み先をtaaInputColorにしているのは、反射やフォグの有無でHDRシーン色の実体が
+        // 移り変わるため。「今のHDRシーン色」を指す変数へ描くことでどの組み合わせでも成立する
+        if (m_DroneShowEnabled && !m_DroneInstances.empty())
+        {
+            const uint32_t droneCount = static_cast<uint32_t>(m_DroneInstances.size());
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "DroneShow",
+                .RenderTargets = { taaInputColor },
+                // 島や地形の後ろに回った機体を隠すために深度テストを行う(書き込みはしない)
+                .DepthTarget = m_GBufferDepth.get(),
+                .BufferReads = { m_DroneBuffer.get() },
+                .Execute = [this, &gbufferViewport, viewMatrix, jitteredProj, effectiveExposure, droneCount](
+                               RHI::IRHICommandList* cmd)
+                {
+                    DirectX::XMFLOAT4X4 projection;
+                    DirectX::XMStoreFloat4x4(&projection, jitteredProj);
+
+                    DroneShowConstants droneConstants{};
+                    DirectX::XMStoreFloat4x4(&droneConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
+                    DirectX::XMStoreFloat4x4(&droneConstants.Proj, DirectX::XMMatrixTranspose(jitteredProj));
+                    droneConstants.Params0 = {
+                        // 実効プリ露出を掛ける。HDRバッファの中身はすべてプリ露出済みの値なので、
+                        // ここで掛けないと機体だけが露出に追従しない浮いた明るさになる
+                        m_DroneShow.Data().Brightness * effectiveExposure,
+                        m_DroneShowMinScreenRadius,
+                        // 射影行列の[0][0]。シェーダ側で最小画面サイズを世界半径へ逆算するのに使う
+                        projection._11,
+                        0.0f,
+                    };
+                    droneConstants.ClipPlane = { 0.0f, 1.0f, 0.0f, 0.0f };
+                    // メイン描画ではクリップしない(平面反射パスだけが使う)
+                    droneConstants.Params1 = { 0.0f, 0.0f, 0.0f, 0.0f };
+                    cmd->UpdateBuffer(m_DroneShowConstantBuffer.get(), &droneConstants, sizeof(droneConstants));
+
+                    cmd->SetViewport(gbufferViewport);
+                    cmd->SetPipelineState(m_DroneShowPipelineState.get());
+                    cmd->SetConstantBuffer(1, m_DroneShowConstantBuffer.get());
+                    // 機体データは頂点シェーダーが読む。通常のSetShaderResourceBufferが使う
+                    // SRVテーブルはピクセルシェーダーからしか見えないため専用の経路を使う
+                    cmd->SetVertexShaderResourceBuffer(0, m_DroneBuffer.get());
+                    // 1機につき2三角形。頂点バッファもインデックスバッファも要らない
+                    cmd->Draw(droneCount * 6u, 0);
+                },
+            });
+        }
+
         if (m_TAAEnabled)
         {
             // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる

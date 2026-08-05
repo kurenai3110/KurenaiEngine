@@ -405,4 +405,37 @@ namespace Kurenai::Defaults
     inline constexpr bool SkyAnalyticBackground = true;
     inline constexpr float SceneExposureEV100 = 15.0f;
     inline constexpr float EmissiveIntensity = 1.0f;
+
+    // --- 星空 ---
+    // 夜空に星を描くか。既定はtrueだが、昼は太陽の仰角で完全に0までフェードするため
+    // 昼のシーンの絵は1画素も変わらない(Sky.hlsliのEvaluateStarfield参照)
+    inline constexpr bool StarsEnabled = true;
+    // 星の密度。空を分割するセルの1辺あたりの数で、大きいほど星が増える。
+    // 肉眼で見える恒星は全天で約6,000個。既定値はその桁に合わせてある
+    inline constexpr float StarsDensity = 48.0f;
+    // 星の明るさ倍率。1.0で「実際の夜空を肉眼で見たときの印象」に寄せた既定
+    inline constexpr float StarsBrightness = 1.0f;
+    // またたきの強さ。**既定は0(無効)**。TAAと相性が悪くちらつきに見えるうえ、
+    // A/B比較のスクリーンショットの再現性も落とすため、必要なときだけ上げる
+    inline constexpr float StarsTwinkle = 0.0f;
+
+    // --- ドローンショー ---
+    // ショーの中身(点・機体数・保持/変形秒・明るさ・ビルボード半径・揺れ・再生速度・種)は
+    // .kshowが持つため、ここには無い。残っているのは「シーンが決める配置」と
+    // 「シーンにもショーにも決めさせない描画側の下限」だけ。
+    //
+    // 既定はfalse。専用シーン(Scenes/DroneShow.kscene)が[DroneShow]Enabled=trueで
+    // 有効にする。既定で走らせると全シーンに無関係な描画パスが増えてしまう
+    inline constexpr bool DroneShowEnabled = false;
+    // 編隊の中心(ワールド座標)。水面より十分上に置くこと
+    inline constexpr float DroneShowCenterX = 0.0f;
+    inline constexpr float DroneShowCenterY = 220.0f;
+    inline constexpr float DroneShowCenterZ = 260.0f;
+    // 編隊の代表半径[m]。.kshowの点は代表半径1へ正規化されており、これを掛けて実寸にする
+    inline constexpr float DroneShowScale = 130.0f;
+    // 画面上の最小半径(NDC単位)。遠方の機体が1画素を割るとTAAのジッターで明滅するため、
+    // これ以下にならないようシェーダ側で押し上げる。1280x720で約1.4画素に相当する。
+    // 【シーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
+    // 「1画素を割るとちらつく」という事実はどのシーン・どのショーでも変わらない
+    inline constexpr float DroneShowMinScreenRadius = 0.002f;
 }

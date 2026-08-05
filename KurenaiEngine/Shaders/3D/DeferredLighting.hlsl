@@ -138,6 +138,9 @@ cbuffer FrameConstants : register(b0)
     float4 FogParams1;
     // 水中項。このシェーダでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
     float4 WaterBodyColor;
+    // 星空(末尾に追加)。x=強度(0で無効。昼はCPU側が0にする)、y=密度、z=またたき、
+    // w=1画素が張る角度[rad]。C++側 KurenaiEngine3D.cpp の FrameConstants::StarsParams と揃えること
+    float4 StarsParams;
 };
 
 Texture2D AlbedoTexture : register(t0);
@@ -316,6 +319,13 @@ SkyParameters MakeSkyParameters()
     // 雲層へ掛ける大気遠近(Sky.hlsliのEvaluateCloudLayer (f)節)。
     // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
     params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
+    // 星空。背景(このシェーダ)と水面の映り込み(SSR.hlsl)だけが星を描く。
+    // 昼はCPU側がStarsParams.xへ0を入れるので、Sky.hlsli側が最初のifで抜ける
+    params.StarsIntensity = StarsParams.x;
+    params.StarsDensity = StarsParams.y;
+    params.StarsTwinkle = StarsParams.z;
+    params.StarsPixelAngle = StarsParams.w;
+    params.StarsTime = TimeParams.x;
     return params;
 }
 

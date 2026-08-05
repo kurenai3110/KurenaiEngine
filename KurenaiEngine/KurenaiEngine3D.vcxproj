@@ -97,6 +97,7 @@ exit /b 0</Command>
     <ClInclude Include="Source\Engine\KurenaiTypes.h" />
     <ClInclude Include="Source\Engine\KurenaiEngine3D.h" />
     <ClInclude Include="Source\Engine\EngineDefaults.h" />
+    <ClInclude Include="Source\Engine\DroneShow.h" />
     <ClInclude Include="Source\Engine\UI\IPanel.h" />
     <ClInclude Include="Source\Engine\UI\UIManager.h" />
     <ClInclude Include="Source\Engine\UI\UITheme.h" />
@@ -113,6 +114,7 @@ exit /b 0</Command>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Source\Engine\KurenaiEngine3D.cpp" />
+    <ClCompile Include="Source\Engine\DroneShow.cpp" />
     <ClCompile Include="Source\Engine\UI\UIManager.cpp" />
     <ClCompile Include="Source\Engine\UI\UITheme.cpp" />
     <ClCompile Include="Source\Engine\UI\UIWidgets.cpp" />

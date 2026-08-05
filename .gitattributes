@@ -6,3 +6,9 @@
 # core.autocrlf=falseの環境でcloneされてもCRLFを保つよう、ここで明示する。
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# ドローンショー(.kshow)はGit管理下に置く唯一のバイナリ資産。
+# 中身はfloatの生配列で、0x0D 0x0A が値の一部として普通に現れる。
+# gitのテキスト判定はNULバイトの有無に頼る発見的なものなので、
+# 万一テキストと見なされて改行変換されるとファイルが黙って壊れる。明示しておく。
+*.kshow binary

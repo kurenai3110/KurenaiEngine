@@ -6,12 +6,14 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "DroneShow.h"
 #include "EngineDefaults.h"
 #include "KurenaiEngineBase.h"
 #include "KurenaiTypes.h"
@@ -82,6 +84,26 @@ namespace Kurenai
         // KurenaiEngine3D.cpp側の匿名名前空間(FrameConstants宣言)からも参照するためpublicにしている
         static constexpr uint32_t kCascadeCount = 4;
         static_assert(kCascadeCount == 4, "CascadeSplitsはXMFLOAT4前提のため4カスケード固定");
+
+        // --- オーサリングツール向けの口(Tools/KurenaiShowEditor) ------------------------
+        //
+        // ドローンショーの編集UIと形状生成は、出荷するエンジンのDLLに持ち込みたくない。
+        // かといってエディタが自前でレンダラーを持つと、トーンマップ・ブルーム・露出が
+        // 本番と違う経路を通り、そこで作った形は本番で見ると別物になる。
+        // そこでエディタはこのエンジンをそのまま使い、下の2つだけを追加で呼ぶ。
+        // IPanel/UIWidgetsといった内部の型を公開せずに済むよう、口はこの2つに留める。
+
+        // 全パネルを描いた後に一度だけ呼ばれる追加のImGui描画。nullptrで解除。
+        // 【Renderスレッドで呼ばれる】ImGuiの状態を触るのはRenderスレッドだけという
+        // 不変条件があるため。コールバックの中からエンジンの状態を触ってよいのは、
+        // それがRenderスレッドの持ち物である限りにおいて
+        void SetExtraImGuiCallback(std::function<void()> callback);
+
+        // 再生中のショーを差し替える(エディタのプレビュー用。ファイルを書かずに絵へ反映する)。
+        // 【SetExtraImGuiCallbackで登録したコールバックの中から呼ぶこと】どちらもRenderスレッドで
+        // 走るため、この経路なら同期が要らない。別スレッドから呼ぶとm_DroneShowを
+        // 描画中に書き換えることになる
+        void ApplyDroneShowData(const Assets::ShowData& data);
 
     private:
         // UIパネル群(Source/Engine/UI/)は、m_SSAORadius等のパラメータメンバをImGuiウィジェットへ
@@ -305,6 +327,10 @@ namespace Kurenai
         // UI::UIManagerは不完全型のままにするため、デストラクタは.cpp側で定義する
         std::unique_ptr<UI::UIManager> m_UIManager;
 
+        // SetExtraImGuiCallbackで登録された追加のImGui描画(Tools/KurenaiShowEditor)。
+        // Renderスレッドだけが読み書きする
+        std::function<void()> m_ExtraImGuiCallback;
+
         // ImGuiが入力を掴んでいるかを、RenderスレッドからUpdateスレッドへ返す逆方向のハンドオフ。
         // FrameState(Update→Render)の逆向きだが、渡す値がboolを2つだけなのでロックを増やす
         // 価値がなく、atomicで足りる。Updateスレッドはこれを見てWASD移動と視点回転の開始を抑止する
@@ -473,6 +499,49 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_TransparentPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineStateMirrored;
+
+        // --- ドローンショー(発光点の描画) ---------------------------------------------
+        // 夜空を編隊飛行する多数のドローンを、1機につきカメラ正対のビルボード1枚として
+        // 加算合成で描く。編隊の生成と時間補間はDroneShow.h/.cppが持ち、ここは描画だけを担う。
+        //
+        // 頂点バッファを持たず、Draw(6 * 機体数, 0)とSV_VertexIDでクアッドを展開する
+        // (理由はShaders/3D/DroneShow.hlsl冒頭)。機体データはm_DroneBufferから
+        // 頂点シェーダーが直接読む(SetVertexShaderResourceBuffer)。
+        //
+        // 【PSOは1本でよい】平面反射(鏡映カメラ)でもこれをそのまま使う。メッシュ描画のように
+        // ワインディングを反転したPSOを別に持つ必要は無い ―― 理由はPSO生成箇所のコメント
+        std::unique_ptr<RHI::IRHIShader> m_DroneShowVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_DroneShowPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DroneShowPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_DroneShowConstantBuffer;
+        // 機体データ(StructuredReadOnly)。kMaxDrones分を固定で確保し、実際に描くのは
+        // m_DroneInstances.size()機ぶんだけ
+        std::unique_ptr<RHI::IRHIBuffer> m_DroneBuffer;
+        // 1フレームぶんの機体の状態。毎フレームDroneShow::Evaluateが書き、
+        // グラフ構築前に1回だけm_DroneBufferへUpdateBufferする
+        // (m_LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
+        //  パスの中で更新すると先に走る側が未更新の内容を読む)
+        std::vector<GPUDrone> m_DroneInstances;
+        // 再生器。編隊の点そのものはここが持つ(.kshowから読み込む)
+        DroneShow m_DroneShow;
+
+        // ショーの進行時刻[秒]。RenderThreadMainがm_CloudScrollOffsetと同じ場所で進める
+        float m_DroneShowTime = 0.0f;
+
+        // --- .ksceneが持つパラメータ ---
+        //
+        // 【ショーの中身に属する値はここに無い】機体数・保持/変形秒・明るさ・ビルボード半径・
+        // 揺れ・再生速度・種はすべて.kshowが持つ(m_DroneShow.Data()から読む)。
+        // シーンが決めてよいのは「出すかどうか」と「どこにどの大きさで置くか」だけで、
+        // 同じショーを別のシーンへ置けるのはこの分担があるため
+        bool m_DroneShowEnabled = Defaults::DroneShowEnabled;
+        DirectX::XMFLOAT3 m_DroneShowCenter{
+            Defaults::DroneShowCenterX, Defaults::DroneShowCenterY, Defaults::DroneShowCenterZ };
+        float m_DroneShowScale = Defaults::DroneShowScale;
+        // 遠方の機体が1画素を割ってTAAのジッターでちらつくのを防ぐ、画面上の最小半径(NDC単位)。
+        // 【これだけはシーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
+        // 「1画素を割ったらちらつく」という事実はどのシーン・どのショーでも変わらないため
+        float m_DroneShowMinScreenRadius = Defaults::DroneShowMinScreenRadius;
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
@@ -1615,6 +1684,16 @@ namespace Kurenai
         // 凍結トグルはm_CloudTimeFrozenを共有する(片方にしか効かないとA/B比較の対照が
         // 崩れるため。RenderThreadMainのスクロール更新箇所を参照)
         DirectX::XMFLOAT2 m_CirrusScrollOffset{ 0.0f, 0.0f };
+
+        // --- 星空 ---
+        // 夜空の星。Sky.hlsliのSkyColorが方向ハッシュで解析的に描く(テクスチャは使わない)。
+        // **IBLキューブ(SkyGenerate.hlsl)へは焼かない**ので、これらを変えても空の焼き直しは要らない
+        // (雲の風と同じ扱い。m_SkyBakeDirtyを立てないこと)
+        bool m_StarsEnabled = Defaults::StarsEnabled;
+        float m_StarsDensity = Defaults::StarsDensity;
+        float m_StarsBrightness = Defaults::StarsBrightness;
+        // またたきの強さ。既定0。上げるとTAAがちらつきとして拾い、A/B比較の再現性も落ちる
+        float m_StarsTwinkle = Defaults::StarsTwinkle;
 
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)

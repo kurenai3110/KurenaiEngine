@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Model.h"
+#include "ShowLoader.h"
 
 namespace Kurenai::Assets
 {
@@ -255,6 +256,49 @@ namespace Kurenai::Assets
         float FogScaleHeight = 1000.0f;     // 霞の層の厚み[m]。大きいほど高い高度まで及ぶ
         bool HasFogRefHeight = false;
         float FogRefHeight = 0.0f;          // 消散係数を定義する高さ(ワールドY)
+
+        // --- [Bloom]セクション。ブルームはエンジンの既定では**無効**(素の輝度分布を確認したい
+        // ときに邪魔になるため)だが、夜景で強い光源が主役になるシーンでは有効でないと成立しない。
+        // ドローンショーの機体は加算合成でHDRへ書くだけで光芒を作らず、滲みはブルームに任せている。
+        // 他のセクションと同じく指定されたキーだけ上書きする。
+        // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        bool HasBloomEnabled = false;
+        bool BloomEnabled = false;
+        bool HasBloomStrength = false;
+        float BloomStrength = 0.06f;
+        bool HasBloomThreshold = false;
+        float BloomThreshold = 1.0f;
+
+        // --- [Stars]セクション。星空も天候と同じくシーンが持つべき性質なので、[Cloud]/[Fog]と
+        // 同じく**指定されたキーだけ**エンジンの設定を上書きする。
+        // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        bool HasStarsEnabled = false;
+        bool StarsEnabled = true;
+        bool HasStarsDensity = false;
+        float StarsDensity = 48.0f;         // 空を分割するセルの細かさ。大きいほど星が増える
+        bool HasStarsBrightness = false;
+        float StarsBrightness = 1.0f;
+        bool HasStarsTwinkle = false;
+        float StarsTwinkle = 0.0f;          // またたきの強さ。既定0(TAAと相性が悪いため)
+
+        // --- [DroneShow]セクション。夜空を編隊飛行する発光ドローンの群れ。
+        // 他のセクションと同じく指定されたキーだけエンジンの設定を上書きする。
+        // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        //
+        // 【シーンが決めるのは「出すか」と「どこにどの大きさで置くか」だけ】機体数・保持/変形秒・
+        // 明るさ・ビルボード半径・揺れ・再生速度・種はショー側(.kshow)が持つ。
+        // ここへ足してはいけない ―― ショーの中身をシーンが上書きできると、同じショーが
+        // シーンごとに別物として鳴り、どちらが「そのショー」なのかが決まらなくなる
+        bool HasDroneShowEnabled = false;
+        bool DroneShowEnabled = false;
+        // [DroneShow]Pathで指定された.kshowを読み込んだもの。Formationsが空なら
+        // 「指定なし」または「読み込み失敗」で、どちらもドローンは描かれない
+        // (読み込み失敗はLoadScene側でエラーログに出る)
+        ShowData DroneShowData;
+        bool HasDroneShowCenter = false;
+        float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };  // 編隊の中心(ワールド座標)
+        bool HasDroneShowScale = false;
+        float DroneShowScale = 130.0f;      // 編隊の代表半径[m]
 
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う
