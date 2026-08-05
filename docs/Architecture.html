@@ -5738,68 +5738,59 @@ SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積�
 <p>
 夜空を編隊飛行する発光ドローンの群れ(<code>Scenes/DroneShow.kscene</code>)と、その背景になる星空。
 このエンジンには<strong>パーティクル/ビルボード/インスタンシングも、オブジェクトのアニメーションも
-元々存在しなかった</strong>ため、描画の土台からここで作っている。
-</p>
-
-<h3 id="ch38-1">38.1 頂点シェーダから構造化バッファを読めるようにした(RHIの拡張)</h3>
-
-<p>
-1,500機を1回のDrawで描くには、頂点シェーダが機体データを直接引く必要がある。しかし既存のRHIには
-その手段が無かった &mdash;&mdash; DX12のグラフィックス用ルートシグネチャでSRVディスクリプタテーブルが
-<code>D3D12_SHADER_VISIBILITY_PIXEL</code>で宣言されており、頂点シェーダからは1つも見えない。
+存在しない</strong>ため、描画の土台をこの章で作っている。
 </p>
 
 <p>
-検討して<strong>捨てた案</strong>を先に挙げる。どちらもDX12で破綻する:
+責務は3つに分かれる。<strong>形とタイミングはデータ資産(<code>.kshow</code>)が持ち</strong>(38.6節)、
+<code>Source/Engine/DroneShow.{h,cpp}</code>がそれを時間で補間して1フレームぶんの
+<code>GPUDrone</code>配列を作り、<code>KurenaiEngine3D</code>のDroneShowパスと
+<code>Shaders/3D/DroneShow.hlsl</code>が1機につきカメラ正対のビルボードを1枚、加算合成で描く。
+形を作るのは別実行ファイルのオーサリングツール(38.7節)で、エンジンは形の作り方を知らない。
 </p>
-<ul>
-<li><strong>定数バッファに機体配列を詰める</strong> &mdash;&mdash; DX12は定数バッファを
-<code>slotSize &times; kConstantBufferRingCapacity(8192)</code>のアップロードヒープとして確保するため、
-1,500機ぶんを持てるサイズにすると1バッファで数十〜数百MBを食う</li>
-<li><strong>頂点バッファへ毎フレーム書く</strong> &mdash;&mdash; DX12の頂点バッファはDEFAULTヒープ・
-<code>mappedPtr = nullptr</code>で作られるため<code>UpdateBuffer</code>がnullptrへのmemcpyになる。
-<strong>DX11だけ動いてDX12で落ちる</strong>という最も気付きにくい壊れ方をする</li>
-</ul>
 
 <p>
-採ったのは<code>IRHICommandList::SetVertexShaderResourceBuffer</code>の追加。コンピュート用に
+この章の具体的な根拠(方式の選択理由、既定値の実測、検証手順)は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 38章にあります。
+</p>
+
+<h3 id="ch38-1">38.1 頂点シェーダから構造化バッファを読む(RHIの拡張)</h3>
+
+<p>
+1,500機を1回のDrawで描くため、頂点シェーダが機体データを直接引く
+&mdash;&mdash; <code>IRHICommandList::SetVertexShaderResourceBuffer</code>。コンピュート用に
 <code>SetComputeShaderResourceBuffer</code>を別に持っているのと同じ「ステージごとに独立した
 レジスタ空間を用意する」形に揃えてある。DX12側はディスクリプタテーブルではなく
-<strong>ルートSRV</strong>(ルートパラメータ4)に割り当てた &mdash;&mdash; 用途が「1回のDrawで参照する
-構造化バッファ1本」に限られるため、ヒープへブロックを払い出してCopyDescriptorsする経路を通す
-必要がないからである。
+<strong>ルートSRV</strong>(ルートパラメータ4)に割り当てる &mdash;&mdash; 用途が「1回のDrawで参照する
+構造化バッファ1本」に限られるため、ヒープへブロックを払い出してCopyDescriptorsする経路は要らない。
 </p>
 
 <p>
 <code>t0</code>が既存のSRVテーブル(t0〜t20)とレジスタ番号で重なるが、
-<strong>可視ステージが素で分離している</strong>(片方はPIXEL、もう片方はVERTEX)ため衝突しない。
-ルートシグネチャの一意性はシェーダーステージごとに判定される。
+<strong>可視ステージが素で分離している</strong>(片方は<code>PIXEL</code>、もう片方は<code>VERTEX</code>)
+ため衝突しない。ルートシグネチャの一意性はシェーダーステージごとに判定される。
 </p>
 
 <p>
-状態遷移には<code>NON_PIXEL_SHADER_RESOURCE</code>を必ず含めること。既存の
+<strong>状態遷移には<code>NON_PIXEL_SHADER_RESOURCE</code>を必ず含めること。</strong> 既存の
 <code>SetShaderResourceBuffer</code>は<code>PIXEL_SHADER_RESOURCE</code>のみへ遷移させており、
 その状態のリソースを頂点シェーダから読むのはD3D12の仕様違反になる。
 </p>
 
-<h3 id="ch38-2">38.2 ビルボードの巻き &mdash;&mdash; 平面反射でPSOを切り替えてはいけない</h3>
+<h3 id="ch38-2">38.2 ビルボードの巻き &mdash;&mdash; 平面反射でPSOを切り替えない</h3>
 
 <p>
 メッシュの描画では、鏡映ビュー行列が頂点そのものを変換するため画面上の巻きが反転し、
 カリングを効かせたまま正しい面を残すには<code>FrontCounterClockwise</code>を反転したPSOが要る
-(<code>m_TransparentPipelineStateMirrored</code>等)。<strong>ドローンのビルボードはこれに当てはまらない。</strong>
+(<code>m_TransparentPipelineStateMirrored</code>等)。
+<strong>ドローンのビルボードはこれに当てはまらない。平面反射でも本描画と同じPSOを使うこと。</strong>
 </p>
 
 <p>
 ビルボードは「ワールド座標を<code>View</code>で変換した<em>後</em>に、ビュー空間で四隅のオフセットを足す」
 という作り方をしている(<code>DroneShow.hlsl</code>の<code>VSMain</code>)。四隅のオフセットは
 鏡映行列を一度も通らないので、<code>View</code>が鏡映を含んでいてもクアッド自身の巻きは変わらない。
-</p>
-
-<p>
-実装当初はメッシュと同じつもりで反転したPSOを使っており、その結果
-<strong>1,500機が1機残らず裏面として捨てられ、水面に何も映らなかった</strong>。
-症状は「反射だけが完全に出ない」で、デバッグレイヤーは何も言わない。
+反転したPSOで描くと1機残らず裏面として捨てられ、水面に何も映らなくなる。
 </p>
 
 <h3 id="ch38-3">38.3 パスの置き場所(大気遠近より後・TAAより前)</h3>
@@ -5820,24 +5811,25 @@ Read-after-Write依存で自動的に順序付ける。TAAの後(=<code>m_TAAHis
 実体が移り変わるため。「今のHDRシーン色」を指す変数へ描くことでどの組み合わせでも成立する。
 </p>
 
-<h3 id="ch38-4">38.4 モーフの点対応づけ &mdash;&mdash; 方位角で並べ替える</h3>
+<h3 id="ch38-4">38.4 モーフの点対応づけ &mdash;&mdash; 方位角の並びはデータが持つ</h3>
 
 <p>
 形Aのi番目と形Bのi番目を直線で結ぶのがモーフなので、両者のインデックスが無関係だと
 全機の軌跡が編隊の中央で交差し、変形の途中がただの塊になる。
+そこで<strong>どの編隊も「中心から見た方位角、次に高さ」の順に並べる</strong>。i番目どうしが
+常に概ね同じ方角・同じ高さに来るため、各機は自分の近くへ短く動くだけで済む。
 </p>
 
 <p>
-そこで<strong>どの形も生成直後に「中心から見た方位角、次に高さ」の順で安定ソートする</strong>。
-i番目どうしが常に概ね同じ方角・同じ高さに来るため、各機は自分の近くへ短く動くだけで済む。
-生成順そのものには意味を持たせず、この並べ替えを唯一の対応規則にしている。
+<strong>この並べ替えはオーサリング側で焼き込まれ、<code>.kshow</code>内の順序がそのまま
+対応関係になる。</strong> ランタイムはi番目とi番目を結ぶだけで、ソートを行わない。
+対応づけはデータの性質であって、再生する側が決め直すことではない。
 </p>
 
 <p>
-<strong>この並べ替えは現在オーサリング側(KurenaiShowEditor)で焼き込まれ、<code>.kshow</code>内の
-順序がそのまま対応関係になっている</strong>(38.11)。ランタイムはi番目とi番目を結ぶだけで、
-毎フレームでも毎シーン読み込みでもソートをやり直さない。対応づけはデータの性質であって、
-再生する側が決め直すことではないため。
+同じ理由で<strong>全編隊が同じ点数を持たなければならない</strong>。揃っていないと変形の途中で
+機体が消える。エディタが保存時に揃え、<code>SaveShow</code>と<code>DroneShow::SetData</code>が
+それぞれ独立に検査する(ファイルを経由しないプレビュー経路があるため、受け取る側にも関所を置く)。
 </p>
 
 <h3 id="ch38-5">38.5 星は<code>SkyColorUpperUnit</code>ではなく<code>SkyColor</code>へ足す</h3>
@@ -5845,8 +5837,8 @@ i番目どうしが常に概ね同じ方角・同じ高さに来るため、各�
 <p>
 <code>SkyColorUpperUnit</code>の結果は<code>SkyIntegrate.hlsl</code>が積分して天頂輝度
 (=夜空の露出校正)を逆算する入力になっている。そちらへ星を混ぜると<strong>校正値そのものが動き、
-星の有無で夜空全体の明るさが変わってしまう</strong>。星は「校正済みの空の色へ後から足す発光体」として
-<code>SkyColor</code>側で加算し、雲の減光より手前に置くことで雲が星を正しく覆うようにしている。
+星の有無で夜空全体の明るさが変わる</strong>。星は「校正済みの空の色へ後から足す発光体」として
+<code>SkyColor</code>側で加算し、雲の減光より手前に置くことで雲が星を正しく覆う。
 </p>
 
 <p>
@@ -5863,85 +5855,154 @@ HLSLのローカル構造体は代入していないメンバの値が未定義�
 明示的に有効化したシェーダーだけが星を描くという安全側の既定にしてある。
 </p>
 
-<h3 id="ch38-6">38.6 検証で分かったこと(実測)</h3>
-
-<ul>
-<li><strong>ブルームは上げるほど暗くなる</strong> &mdash;&mdash; トーンマップはブルームを加算ではなく
-元の色との<code>lerp</code>で合成するため、点光源のようにピラミッドへ広く薄く散る対象では
-比率を上げるほど芯が暗くなる。実測(画面全体の平均輝度): <code>Strength=0.5</code>で5.90、
-ブルーム無効で12.13 &mdash;&mdash; 半分以下に暗くなっていた。0.15前後が妥当</li>
-<li><strong>夜は表示できる明るさに上限がある(fp16の飽和)</strong> &mdash;&mdash; 下記38.8参照</li>
-<li><strong>加算合成の発光点は平面反射でカバレッジを書いてはいけない</strong> &mdash;&mdash; 下記38.9参照</li>
-<li><strong>昼のシーンへの影響が無いことの確認方法</strong> &mdash;&mdash; MontSaintMichelのような
-雲・水面のあるシーンは<strong>同じビルドで2回撮るだけで39%の画素が変わる</strong>(スクロール位相のため)ので、
-A/B比較の土台にならない。<code>[Cloud]Coverage = 0</code>・水面なしの静的なシーンを作ると
-同一条件2回の差が27画素(最大差1)まで落ち、そこで星あり/なしを比べると
-昼は516画素・最大差1(=ディザの範囲)、夜は50,705画素・最大差50となり、
-「昼は変わらず夜だけ星が出る」ことを測定として示せる</li>
-</ul>
-
-<h3 id="ch38-7">38.7 DX12の水面に機体が映らない(既知の制限)</h3>
+<h3 id="ch38-6">38.6 ショーはデータ資産(<code>.kshow</code>)が持つ</h3>
 
 <p>
-実装当初、<strong>DX12でだけ水面への機体の映り込みが出なかった</strong>(DX11では出る)。
-原因は<strong>DX12では平面反射パスがそもそも走らないこと</strong>だった。
-<code>planarReflectionPassRuns</code>の条件は
+ショー1本はバイナリの<code>.kshow</code>ファイル1つで、<strong>エンジンは編隊の形の作り方を知らない</strong>。
+持ち主の分担は次のとおり:
+</p>
+
+<table>
+<tr><th>持ち主</th><th>持つもの</th><th>理由</th></tr>
+<tr><td><code>.kshow</code></td>
+    <td>編隊の点そのもの・機体数・保持/変形秒・明るさ・機体の半径・揺れ・再生速度・種</td>
+    <td>ショーの中身。シーンが上書きできると、同じショーがシーンごとに別物として鳴り、
+        どれが「そのショー」なのかが決まらなくなる</td></tr>
+<tr><td><code>.kscene</code>の<code>[DroneShow]</code></td>
+    <td><code>Enabled</code> / <code>Path</code> / <code>Center</code> / <code>Scale</code>の4つ</td>
+    <td>出すかどうかと、どこにどの大きさで置くか。<strong>点は代表半径1へ正規化して持つ</strong>ので、
+        同じショーを別のシーンへ別の場所・別の規模で置ける</td></tr>
+<tr><td><code>EngineDefaults.h</code></td>
+    <td><code>DroneShowMinScreenRadius</code>のみ</td>
+    <td>ショーの表現ではなく描画側の下限。「遠方の点が1画素を割るとTAAのジッタでちらつく」
+        という事実はどのシーン・どのショーでも変わらない</td></tr>
+</table>
+
+<p>
+書式の単一の正は<code>Source/Library/Assets/ShowPackage.h</code>で、規約は<code>.kmodel</code>
+(<a href="#cache">10章</a>の<code>ModelPackage.h</code>)に揃えてある &mdash;&mdash;
+リトルエンディアン、<code>#pragma pack</code>を使わず<code>static_assert</code>でサイズ固定、
+マジック+<code>Version</code>、文字列はUTF-8をStringPoolに長さ管理で置く。
+読み書きは<code>ShowLoader.{h,cpp}</code>。
+</p>
+
+<p>
+<strong>読み込みはLoaderスレッド(<code>LoadScene</code>の中)で行う</strong> &mdash;&mdash;
+<code>[Model]</code>の<code>.kmodel</code>と同じ扱いで、Renderスレッドでファイルを開かない
+(<a href="#sceneloading">26章</a>)。<code>Version</code>不一致は読み込み拒否。ただし
+<strong>読み込みに失敗してもシーンごとは落とさない</strong>: モデルはシーンそのものだが、
+ドローンショーは夜空の装飾で、無くてもシーンは成立するため、エラーをログに残して編隊なしで進む。
+</p>
+
+<p>
+シーンを切り替えたときは、ショーを持たないシーンであっても
+<strong><code>DroneShow::SetData</code>を必ず呼ぶこと。</strong> 呼ばなければ前のシーンの編隊が
+飛び続ける。空のデータを渡せば再生対象なしになる。
+</p>
+
+<h3 id="ch38-7">38.7 オーサリングツールと公開API</h3>
+
+<p>
+<code>.kshow</code>を作るのは<code>Tools/KurenaiShowEditor</code>(別実行ファイル・独立ソリューション)。
+形状生成もここにあり、<strong>新しい編隊を足す場所はここ</strong>である。
+</p>
+
+<p>
+エディタは自前のレンダラーを持たず<strong>エンジンをそのまま使ってプレビューする</strong>。
+別経路でプレビューすると、トーンマップ・ブルーム・露出が本番と違い、そこで作った形は
+本番で見ると別物になる。そのためエンジンには次の2つだけを公開している &mdash;&mdash;
+<code>IPanel</code>や<code>UIWidgets</code>といったUI内部の型を外へ出さずに済ませるため、
+口はこの2つに留める。
+</p>
+
+<ul>
+<li><code>SetExtraImGuiCallback(std::function&lt;void()&gt;)</code> &mdash;&mdash;
+全パネルを描いた後に一度だけ呼ぶ追加のImGui描画。<strong>F1で隠す範囲の内側で呼ぶこと</strong>
+(でないとスクリーンショットでの計測が壊れる)。<strong>登録は<code>Run()</code>の前に行うこと</strong>
+(Renderスレッドが走り出した後に差し替えると、描画中の<code>std::function</code>を書き換えることになる)</li>
+<li><code>ApplyDroneShowData(const Assets::ShowData&amp;)</code> &mdash;&mdash;
+再生中のショーをファイルを経由せずに差し替える。<strong>上のコールバックの中から呼ぶこと</strong>。
+どちらもRenderスレッドで走るため、この経路なら同期が要らない</li>
+</ul>
+
+<p>
+ImGuiの実体は<code>KurenaiEngineLibrary.dll</code>が<code>__declspec(dllexport)</code>で持っている。
+エディタは<code>IMGUI_API=__declspec(dllimport)</code>を定義して同じコンテキスト・同じアロケータの
+上に描く。<strong>自前で<code>imgui.cpp</code>をコンパイルしてはいけない</strong>(コンテキストが
+2つになって成立しない)。
+</p>
+
+<p>
+GUIのほかに<code>--generate-standard &lt;出力パス&gt;</code>のCLIモードを持ち、標準の6形状を
+書き出したあと読み直してビット一致まで検査する。リポジトリの<code>Shows/Standard.kshow</code>は
+これで作る。<code>Scenes/*.kscene</code>と同じく、リポジトリ直下が正で、ランタイムが読むのは
+<code>Assets/Packed/Shows/</code>側である。
+</p>
+
+<h3 id="ch38-8">38.8 発光点は平面反射のカバレッジを書かない</h3>
+
+<p>
+平面反射(<a href="#planarreflection">36章</a>)のレンダーターゲットは
+<strong>アルファを「そのテクセルにジオメトリが描かれたか」</strong>として使う。SSRパスの
+<code>ApplyPlanarReflection</code>が<code>解析空 &times; (1 - a) + 平面反射のrgb</code>という形で
+水面へ合成しており、アルファ0のテクセルは解析空へ戻る。
+</p>
+
+<p>
+<strong>したがって加算合成で描く発光点はアルファを書いてはいけない。</strong>
+書くと、クアッドの円の内側が「不透明なジオメトリで覆われた」ことになってそこだけ空の映り込みが消え、
+機体が重なるとアルファが1を超えて解析空の係数<code>(1 - a)</code>が負へ振れる。
+PSOは<code>BlendMode::PremultipliedAlpha</code>(<code>SrcBlend = ONE / DestBlend = INV_SRC_ALPHA</code>)、
+<code>PSMain</code>はアルファ<strong>0</strong>を返す。これで<code>rgb = src + dst</code>(加算合成のまま)・
+<code>alpha = dst</code>(据え置き)になり、「光は足すが背景を遮らない」という発光点の正しい意味になる。
+</p>
+
+<p>
+なお平面反射はSSRパスで
+<code>SceneColor + (反射の放射輝度 - 環境の放射輝度) &times; SpecularIBLWeight</code>として合成され、
+この<code>SpecularIBLWeight</code>には<strong><code>IBLIntensity</code>が掛かる</strong>。
+これは間接光を抑えるための画作り用の値だが、拡散だけでなく間接鏡面にも一様に効くため、
+<strong>鏡のような水面の映り込みまで同じ倍率で暗くなる</strong>。映り込みを主題にするシーンは
+<code>[Scene]IBLIntensity</code>で明示すること(エンジンの既定は全シーンの画作りに効く値なので動かさない)。
+</p>
+
+<h3 id="ch38-9">38.9 夜の表示レンジ &mdash;&mdash; 可変プリ露出のクランプが両端を決める</h3>
+
+<p>
+可変プリ露出は「バッファの値」と「トーンマップが受け取る表示値」を
+<code>表示値 = バッファの値 &times; 2<sup>bias</sup></code>(<code>bias = 実効EV100 - 設定EV100</code>)
+で結ぶ。したがって<strong>バッファ(<code>R16G16B16A16_Float</code>)の両端がそのまま
+表示できる明るさの両端になる</strong>。<code>bias</code>は<code>KurenaiEngine3D::Render</code>で
+<code>[-12, 0]</code>にクランプしており、<strong>この下限が夜の表示上限を決める</strong>。
+</p>
+
+<p>
+<strong>クランプ下限を下げるときは上側の要件も同時に見ること。</strong>
+下限を深くするほど暗いシーンの階調は稼げるが、その分だけ表示できる最大輝度が下がる。
+両端の要件と-12という値の導出は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 38.9節。
+</p>
+
+<h3 id="ch38-10">38.10 DX12の水面に機体が映らない(既知の制限)</h3>
+
+<p>
+平面反射パスの実行条件は
 <code>m_PlanarReflectionEnabled &amp;&amp; hasWaterInstance &amp;&amp; m_ReflectionMode == ReflectionMode::ScreenSpace</code>
 であり、DXR対応環境では<code>DefaultReflectionMode</code> / <code>ReflectionModeForCapability</code>が
-<code>Raytraced</code>を返すため、<code>.kscene</code>に<code>ScreenSpaceReflection = true</code>と書いても
-DX12では手法がRT反射になる。
+<code>Raytraced</code>を返すため、<strong>DX12では平面反射パスが走らない</strong>。DX12の水面に映っているのは
+TLASへレイを撃った結果であり、ドローンは手続き的に展開するビルボードでTLASに入っていないので
+<strong>レイからは原理的に見えない</strong>。島や地形はTLASにあるため正しく映る。
 </p>
 
 <p>
-その結果、DX12の水面に映っているのは<strong>TLASへレイを撃った結果</strong>である。
-ドローンは手続き的に展開するビルボードでシーンジオメトリではなく、
-<strong>TLASに入っていないのでレイからは原理的に見えない</strong>。
-一方、島や地形はTLASに入っているのでRT反射でも正しく映る &mdash;&mdash;
-「MontSaintMichelでは島が水面に映るのにドローンだけ映らない」という一見ちぐはぐな症状は、これで説明が付く。
+<strong>これは既知の制限として受け入れる。</strong> 必要なときはUIの「反射」セクションから
+手動で<code>ScreenSpace</code>へ切り替える。
 </p>
 
 <p>
-切り分け済みの事実(いずれもドローン側の不具合ではないことを示す):
-</p>
-<ul>
-<li>空へ直接描かれる機体はDX11/DX12で一致する(編隊領域の画素値の分布・最大値とも同じ)</li>
-<li>DX12デバッグレイヤーの指摘は1件も出ていない(Debugビルドで確認)</li>
-<li>クリップ平面を外しても、深度テストを外しても、構造化バッファの読み取りを固定値へ
-置き換えても、DX12の水面は変わらなかった &mdash;&mdash; <strong>描画そのものが行われていない</strong>ことの裏付け</li>
-<li>KurenaiEngine3D.cppの<code>planarReflectionPassRuns</code>のコメントにも
-「実測でもDX12起動時に水面へ映っていたのはRT反射の結果で、平面反射パスの出力ではなかった」と
-既に記録されている</li>
-</ul>
-
-<p>
-<strong>切り分けは推測ではなくログで決着させた。</strong>
-それまで「クリップ平面か」「深度テストか」「バッファの読み取りか」と当て推量で潰していたが、
-どれも外れだった。<code>m_RaytracingAvailable</code> / <code>m_ReflectionMode</code> /
-<code>planarReflectionPassRuns</code>をそのままログへ出したところ、
-DX11が<code>RT利用可=0 反射手法=ScreenSpace 平面反射パス実行=1</code>、
-DX12が<code>RT利用可=1 反射手法=Raytraced 平面反射パス実行=0</code>で一目で確定した。
-<strong>実行時の値を数個ログに出すほうが、仮説を1つずつビルドして試すより速い。</strong>
-</p>
-
-<h4>現在の扱い: 直さず、既知の制限とする</h4>
-
-<p>
-一時期、<code>ApplyLoadedScene</code>に「ドローンショーが有効かつ手法が<code>Raytraced</code>なら
-<code>ScreenSpace</code>へ落とす」という対処を入れていた(実測: 水面領域の画素値が
-Raytracedのまま23 &rarr; ScreenSpaceで66)。<strong>これは廃止した。</strong>
-</p>
-
-<p>
-理由は絵ではなく構造にある。<strong>1つの機能の有効/無効が、それとは別の機能の設定を黙って
-書き換えていた</strong> &mdash;&mdash; <code>.kscene</code>に書いた指定が機能側の都合で覆るということで、
-「なぜこのシーンだけ反射手法が違うのか」をコードを読むまで追えなくする。
-同種の混同(「反射を出すか」と「どの手法か」を1つのフラグが兼ねる)は
-以前にも<code>ScreenSpaceReflection</code>で問題になっている。
-</p>
-
-<p>
-したがって現在は<strong>DX12では水面に機体が映らない</strong>。
-必要なときはUIの「反射」セクションから手動で<code>ScreenSpace</code>へ切り替える。
+<strong>ショーの有効/無効で反射手法を書き換えてはいけない。</strong> 1つの機能の有効/無効が
+別の機能の設定を黙って書き換えると、<code>.kscene</code>に書いた指定が機能側の都合で覆り、
+「なぜこのシーンだけ反射手法が違うのか」をコードを読むまで追えなくなる。
 </p>
 
 <p>
@@ -5949,434 +6010,7 @@ Raytracedのまま23 &rarr; ScreenSpaceで66)。<strong>これは廃止した。
 その結果を合成する形になる(RT反射はTLASに無いビルボードを追跡できないため、
 ラスタで描いた反射像を別途混ぜるしかない)。
 なお<code>DebugView::PlanarReflection</code>はDX12では最終画像が出るだけで反射バッファを表示しないため、
-この経路での切り分けには使えない(本作業とは無関係な既存の問題)。
-</p>
-
-<h3 id="ch38-8">38.8 夜に表示できる明るさの上限(fp16の飽和・解決済み)</h3>
-
-<p>
-<strong>【追記: 解決済み】</strong>
-以下は当初「ドローンに限らず夜のあらゆる発光物に効く構造的な制約」と結論した内容だが、
-これは誤りだった &mdash;&mdash; 上限は<strong>可変プリ露出のクランプ下限(-18段)が作っていた副作用</strong>で、
-その下限を-12段へ直すと上限は64倍に広がる。経緯と根拠は38.10に書いた。
-下記は「なぜ上限が0.25(リニア)になるか」の導出としてそのまま有効なので残す。
-</p>
-
-<p>
-<code>[DroneShow]Brightness</code>を45から400へ9倍にしても、編隊領域の画素値は最大153(sRGB)のまま
-1段も上がらない &mdash;&mdash; 約38,000画素がぴったり153に張り付く。
-<code>[Scene]Exposure</code>を2.0から0.5へ動かしても最大値は153のままだった。
-</p>
-
-<p>
-これも実行時の値をログへ出して決着した。夜のこのシーンでは:
-</p>
-<ul>
-<li>キー照度 = <strong>0.301 lx</strong>(満月の夜。正常な値)</li>
-<li><code>autoBias = log2(0.301 / 100000) = -18.34</code> &rarr; <code>[-18, 0]</code>でクランプされ<strong>-18</strong></li>
-<li>実効EV100 = 設定EV100 + (-18) = <strong>-17.5</strong>、実効露出 = <strong>154,470</strong></li>
-<li>機体の芯のHDR値 = <code>Brightness(45) &times; 154470 &times; glow(4)</code> = <strong>27,804,570</strong></li>
-</ul>
-
-<p>
-SceneColorは<code>R16G16B16A16_Float</code>で<strong>上限は65,504</strong>。
-27,804,570はその<strong>424倍</strong>で、全チャンネルが飽和する &mdash;&mdash; だから芯が真っ白になり、
-<code>Brightness</code>を上げても裾がさらに飽和して<em>白い塊が大きくなる</em>だけだった。
-</p>
-
-<p>
-<strong>この上限は<code>[Scene]Exposure</code>では動かせない。</strong>
-<code>manualExposureScale = 2^(実効EV100 - 設定EV100)</code>で、実効EV100は
-<code>設定EV100 - 18</code>だから、比は<strong>常に2<sup>-18</sup></strong>になり設定値が相殺される。
-つまり表示できる上限は<code>65504 / 2^18 = 0.25</code>(リニア)で固定であり、
-これは<strong>ドローンに限らず夜のシーンのあらゆる発光物に効く構造的な制約</strong>である。
-</p>
-
-<p>
-<strong>対処</strong>: 上限を超える値を入れても明るくならず色が失われるだけなので、
-<strong>芯が上限に届き、かつ裾に色が残る値</strong>を既定にした。
-実測(夜・1500機、編隊領域):
-</p>
-
-<table>
-<tr><th>Brightness</th><th>最大画素値</th><th>明るい画素数</th><th>平均彩度</th></tr>
-<tr><td>0.11</td><td>146</td><td>13,840</td><td>0.708</td></tr>
-<tr><td><strong>0.30</strong>(採用)</td><td><strong>153</strong></td><td>20,429</td><td><strong>0.710</strong></td></tr>
-<tr><td>1.00</td><td>153</td><td>25,889</td><td>0.673</td></tr>
-<tr><td>45.0(当初)</td><td>153</td><td>32,606</td><td>0.275</td></tr>
-</table>
-
-<p>
-最大値は0.30以上でどれも153で並ぶが、<strong>平均彩度は0.710から0.275へ落ちる</strong>。
-当初の45は表示上限を150倍も超えており、明るさを1段も稼がないまま機体の色だけを失っていた。
-</p>
-
-<h3 id="ch38-9">38.9 水面の映り込みが暗かった問題(解決済み)</h3>
-
-<p>
-編隊は水面に映っているものの、直上の編隊(最大画素値132)に対して映り込みは<strong>34</strong>までしか出ず、
-形は追えるが「光っている」とは見えなかった。原因は独立した2つで、どちらも実測で切り分けた。
-撮影は<code>[DroneShow]Speed = 0</code>で編隊を凍結して行っている(そうしないと形が毎回変わって比較にならない)。
-</p>
-
-<h4>(1) 発光点がカバレッジ(アルファ)を書いていた</h4>
-
-<p>
-平面反射のレンダーターゲットは<strong>アルファを「そのテクセルにジオメトリが描かれたか」</strong>として使う。
-SSRパスの<code>ApplyPlanarReflection</code>が
-<code>解析空 &times; (1 - a) + 平面反射のrgb</code>という形で水面へ合成しており、
-アルファ0のテクセルは解析空へ戻る仕組みである(これは「反射先に何も無い方向で水面が黒く潰れる」問題への対処として
-先に入っていたもの)。
-</p>
-
-<p>
-ところが機体の描画は<code>BlendMode::Additive</code>で、これは
-<code>SrcBlendAlpha = ONE / DestBlendAlpha = ONE</code> &mdash;&mdash;
-つまり<strong>機体を1機描くたびにアルファへ1.0が積まれる</strong>。
-SceneColorではアルファを誰も読まないので実害が無いが、平面反射では
-<strong>クアッドの円の内側が「不透明なジオメトリで覆われた」ことになり、そこだけ空の映り込みが消える</strong>。
-発光の裾(glowがほぼ0の外周)は黒い円として抜け、機体が重なるとアルファは1を超えて
-解析空の係数<code>(1 - a)</code>が負へ振れる(最後の<code>max(&hellip;, 0)</code>で黒へ潰れる)。
-</p>
-
-<p>
-<strong>対処</strong>: PSOを<code>BlendMode::PremultipliedAlpha</code>
-(<code>SrcBlend = ONE / DestBlend = INV_SRC_ALPHA</code>)にし、<code>PSMain</code>が<strong>アルファ0</strong>を返す。
-これで<code>rgb = src + dst</code>(加算合成のまま)・<code>alpha = dst</code>(据え置き)になり、
-「光は足すが背景を遮らない」という発光点の正しい意味になる。RHIへの追加は不要で、
-既存のブレンドモードの組み合わせだけで済む。
-</p>
-
-<h4>(2) IBL強度0.5が鏡の映り込みまで半分にしていた</h4>
-
-<p>
-平面反射はSSRパスで
-<code>SceneColor + (反射の放射輝度 - 環境の放射輝度) &times; SpecularIBLWeight</code>
-として合成される。この<code>SpecularIBLWeight</code>には
-<strong><code>IBLIntensity</code>(既定0.5)が掛かっている</strong> &mdash;&mdash;
-間接光を全体的に抑えるための画作り用の値だが、拡散だけでなく間接鏡面にも一様に効くため、
-<strong>鏡のような水面の映り込みまで0.5倍される</strong>。
-</p>
-
-<p>
-<code>SpecularIBLWeight</code>の中身をシェーダーで差し替えて切り分けた(編隊の反射領域の最大画素値):
-</p>
-
-<table>
-<tr><th>係数</th><th>反射の最大画素値</th></tr>
-<tr><td>そのまま</td><td>43</td></tr>
-<tr><td>スペキュラオクルージョンを外す</td><td>46</td></tr>
-<tr><td>さらにIBL強度0.5を外す(split-sumのみ)</td><td><strong>73</strong></td></tr>
-<tr><td>純粋なSchlickフレネル</td><td>74</td></tr>
-</table>
-
-<p>
-split-sumのBRDF LUTは物理のフレネルを正しく再現できており(73対74)、遮蔽はほとんど効いていない。
-<strong>43との差はまるごと<code>IBLIntensity = 0.5</code>である。</strong>
-つまり1.0が「フレネルどおり」で、0.5は反射を物理より暗くしている側になる
-(<code>EnergyCompareSun</code>/<code>FurnaceTest</code>が検証用に1.0を指定しているのも同じ理由)。
-</p>
-
-<p>
-<strong>対処</strong>: <code>Scenes/DroneShow.kscene</code>で<code>[Scene]IBLIntensity = 1.0</code>を指定する。
-エンジンの既定は動かさない &mdash;&mdash; 0.5は全シーンの画作りに効く値で、
-映り込みが主題のこのシーンだけが物理どおりを必要としているため。
-副作用として間接光の拡散も2倍になり島と水面が少し明るくなるが(島16.2&rarr;21.5)、
-夜のシルエットとしては保たれている。
-</p>
-
-<h4>効果</h4>
-
-<p>
-以下はDX11の値。当時はDX12も反射手法を<code>ScreenSpace</code>へ倒す対処が入っていたため
-同値だったが、その対処は廃止した(38.7)。<strong>現在DX12でこの表の値を再現するには、
-UIから手法を<code>ScreenSpace</code>へ切り替える必要がある。</strong>
-</p>
-
-<table>
-<tr><th>状態</th><th>編隊(直上)</th><th>映り込み 最大</th><th>映り込み 平均</th></tr>
-<tr><td>修正前</td><td>132</td><td>34</td><td>7.5</td></tr>
-<tr><td>(1)のみ</td><td>132</td><td>43</td><td>10.4</td></tr>
-<tr><td><strong>(1)+(2)</strong></td><td>132</td><td><strong>73</strong></td><td><strong>18.9</strong></td></tr>
-</table>
-
-<p>
-編隊そのものの明るさ(132)はどちらの修正でも変わらない &mdash;&mdash; 直しているのは水面側だけである。
-(この132という頭打ちのほうは38.10で別途解決した。)
-</p>
-
-<h4>この作業で分かった罠: 出力フォルダの<code>.kscene</code>は古いままになりうる</h4>
-
-<p>
-最初の計測はすべて<strong>無効だった</strong>。
-<code>Scenes/DroneShow.kscene</code>は<code>Assets\Packed\Scenes\</code>へコピーされ、
-そこから<code>xcopy /D</code>(新しいものだけ)で実行フォルダへ配布される。
-38.8で<code>Brightness</code>を45から0.30へ直した後に<strong>Sample3Dをビルドし直していなかった</strong>ため、
-実行フォルダには<strong>45.0のままの<code>.kscene</code></strong>が残っており、
-起動して見ていた絵も測っていた画素値もすべて旧設定のものだった。
-シェーダやDLLと同じで、<strong>直した先が実際に起動されるフォルダまで届いているかを毎回確かめること</strong>。
-</p>
-
-<h3 id="ch38-10">38.10 夜の明るさの上限を外す(可変プリ露出のクランプ下限)</h3>
-
-<p>
-38.8では「夜は表示できる明るさに上限(リニアで0.25)があり、これはドローンに限らず
-夜のあらゆる発光物に効く構造的な制約である」と結論していた。<strong>これは誤りだった。</strong>
-上限は<code>KurenaiEngine3D::Render</code>の可変プリ露出が持つ
-<strong>クランプ下限-18段という1つの定数</strong>が作っていたもので、
-その定数を-12段へ直すと上限は64倍に広がる。
-</p>
-
-<h4>なぜ1つの定数が上限を決めるのか</h4>
-
-<p>
-可変プリ露出は「バッファの値」と「トーンマップが受け取る表示値」を
-<code>表示値 = バッファの値 &times; 2<sup>bias</sup></code>(<code>bias = 実効EV100 - 設定EV100</code>)
-で結ぶ。したがって<strong>バッファ(fp16)の両端がそのまま表示できる明るさの両端になる</strong>:
-</p>
-
-<ul>
-<li>上限 = <code>65504 &times; 2<sup>bias</sup></code></li>
-<li>下限 = <code>6.1e-5 &times; 2<sup>bias</sup></code>(fp16の最小正規化数)</li>
-</ul>
-
-<p>
-<code>bias</code>は<code>clamp(log2(キー照度 / 100000), -18, 0)</code>で、満月の夜(0.301 lx)では
-<code>log2(0.301/100000) = -18.34</code>が<strong>-18でクランプされて張り付く</strong>。
-よって上限 = <code>65504 &times; 2<sup>-18</sup> = 0.25</code>。
-<strong>ACESの白(1.0以上)にすら届かない</strong>ので、夜はどんな発光物もsRGBで130前後より明るくできなかった。
-</p>
-
-<p>
-元の-18は<code>m_EffectiveExposureEV100</code>の宣言コメントにあるとおり
-<strong>「夜がfp16の非正規化域に落ちてつぶれる」という下側の問題だけを見て決まっている。</strong>
-照度差(-18.34段)をできるだけ打ち消す、という発想である。上側は検討されていなかった。
-</p>
-
-<h4>-12の導出</h4>
-
-<p>
-要件を<strong>表示値で</strong>書くと下限が一意に決まる。この形なら
-<strong>シーンのExposureにもその夜の照度にも依存しない</strong>:
-</p>
-
-<ul>
-<li>上側: 表示16(ACESの白より十分上)を表すには <code>65504 &times; 2<sup>bias</sup> &ge; 16</code> &rarr; <code>bias &ge; -12</code></li>
-<li>下側: 表示1e-4(sRGBで1階調にも満たない=見えない)がfp16の正規化域に残るには
-<code>1e-4 &times; 2<sup>-bias</sup> &ge; 6.1e-5</code> &rarr; <code>bias &le; 0.7</code></li>
-</ul>
-
-<h4>検証 &mdash;&mdash; 「変わってはいけないもの」と「変わるべきもの」を両方測る</h4>
-
-<p>
-プリ露出はTonemap/Bloom/AutoExposureがすべて割り戻すので、
-<strong>fp16に収まっている画素は1つも動かないはず</strong>である。これは陽性対照になる:
-<em>飽和していた機体だけが変わり、それ以外は完全に一致する</em>ことを示せばよい。
-</p>
-
-<table>
-<tr><th>測定</th><th>結果</th></tr>
-<tr><td>同一ビルド2回(ノイズ下限)</td><td>変化した画素 0.04%</td></tr>
-<tr><td>-18 対 -12(ビューポート内)</td><td>変化した画素 <strong>0.57%</strong> &mdash;&mdash; 位置は編隊とその反射のみ、他のセルは0%</td></tr>
-<tr><td>暗部ヒストグラム(輝度&le;24、461,397画素)</td><td>各ビンの差は&plusmn;20以内、全ビンの絶対差の合計546 &mdash;&mdash; <strong>バンディングも黒潰れも無し</strong></td></tr>
-<tr><td>地形・水面・空の平均画素値</td><td>21.49 / 21.53 / 29.71 で<strong>完全一致</strong></td></tr>
-</table>
-
-<p>
-<strong>注意</strong>: 最初に画面全体で差分を取ったときは34%が変化と出たが、これは
-<strong>ImGuiのドッキング配置が途中で変わってパネル幅が動いた</strong>ぶんだった。
-ビューポート内に限定して初めて0.57%という本当の値が出た。
-</p>
-
-<h4>効果 &mdash;&mdash; Brightnessが制御として復活する</h4>
-
-<p>
-上限に張り付いていた間は<code>[DroneShow]Brightness</code>を0.30から45へ150倍にしても
-画素値が1段も動かなかった(38.8の表)。-12にすると崖が消え、明るさと彩度が滑らかに交換される:
-</p>
-
-<table>
-<tr><th>Brightness</th><th>芯の最大</th><th>明るい画素(&gt;64)</th><th>平均彩度</th><th>白飛び(&ge;250)</th><th>水面の映り込み</th></tr>
-<tr><td>0.30</td><td>166</td><td>2,638</td><td>0.706</td><td>0</td><td>79</td></tr>
-<tr><td><strong>1.00</strong>(採用)</td><td><strong>211</strong></td><td>11,274</td><td><strong>0.680</strong></td><td>0</td><td><strong>144</strong></td></tr>
-<tr><td>2.00</td><td>228</td><td>16,005</td><td>0.641</td><td>0</td><td>182</td></tr>
-<tr><td>4.00</td><td>242</td><td>19,960</td><td>0.584</td><td>11</td><td>213</td></tr>
-</table>
-
-<p>
-1.0が曲線の膝で、映り込みが79&rarr;144とほぼ倍になる一方で彩度の低下は4%弱に収まる。
-なお38.8で0.30を選んだときの根拠(「上限にちょうど届き、かつ裾に色が残る値」)は
-上限があることを前提にしていたので、上限を外した時点で選び直しが必要になっている。
-</p>
-
-<h4>教訓</h4>
-
-<p>
-38.8は「実測とログで確認済み」と書いたうえで<strong>構造的な制約だと断じていた</strong>。
-測定そのものは正しく(上限0.25の導出も、Brightnessが効かないことも事実だった)、
-誤っていたのは<strong>「その上限がどこから来ているか」を1段階しか遡らなかったこと</strong>である。
-<code>65504 / 2<sup>18</sup></code>まで辿って手を止めず、<strong>その18がなぜ18なのか</strong>を
-見に行けば、下側の要件だけで決まった調整可能な定数だと分かった。
-<strong>「fp16の上限」のようにハードウェアの語彙で言い切れてしまう説明ほど、
-その手前に人が決めた値が挟まっていないかを疑うこと。</strong>
-</p>
-
-<h3 id="ch38-11">38.11 ショーをデータ資産にする(<code>.kshow</code>とオーサリングツール)</h3>
-
-<p>
-実装当初、ドローンショーは<strong>6つの形をC++に手続きとして埋め込み</strong>、
-機体数・保持/変形秒・明るさ・機体の半径・揺れ・再生速度・種の9項目を<code>.kscene</code>と
-専用のImGuiタブが持っていた。動くものはできたが、次の3つが噛み合っていない。
-</p>
-
-<ul>
-<li><strong>ショーの中身がコードに埋まっている。</strong> 新しい編隊を足すのに
-<code>DroneShow.cpp</code>の実装が要り、形がエンジンのビルド成果物になっている。
-手続きで書ける形しか作れない</li>
-<li><strong>「作る」ためのUIが「見る」だけのアプリに常駐している。</strong>
-編隊・速度・保持・変形は出荷するランタイムには要らない</li>
-<li><strong>ショーの有無が別機能の設定を書き換えていた。</strong>
-<code>ApplyLoadedScene</code>がドローンショー有効時に反射手法をRaytracedから
-ScreenSpaceへ勝手に倒していた(38.7)</li>
-</ul>
-
-<h4>分担 &mdash;&mdash; シーンが決めるのは「出すか」と「どこに置くか」だけ</h4>
-
-<p>
-ショー1本を<strong>バイナリの<code>.kshow</code>1ファイル</strong>にまとめ、
-<code>.kscene</code>の<code>[DroneShow]</code>は9キーから4キー
-(<code>Enabled</code> / <code>Path</code> / <code>Center</code> / <code>Scale</code>)へ減らした。
-</p>
-
-<table>
-<tr><th>持ち主</th><th>持つもの</th><th>理由</th></tr>
-<tr><td><code>.kshow</code></td><td>編隊の点そのもの・機体数・保持/変形秒・明るさ・機体の半径・揺れ・再生速度・種</td><td>ショーの中身。シーンが上書きできると、同じショーがシーンごとに別物として鳴り、どれが「そのショー」なのかが決まらなくなる</td></tr>
-<tr><td><code>.kscene</code></td><td><code>Enabled</code> / <code>Path</code> / <code>Center</code> / <code>Scale</code></td><td>出すかどうかと、どこにどの大きさで置くか。<strong>点は代表半径1へ正規化して持つ</strong>ので、同じショーを別のシーンへ別の場所・別の規模で置ける</td></tr>
-<tr><td><code>EngineDefaults.h</code></td><td><code>DroneShowMinScreenRadius</code>のみ</td><td>ショーの表現ではなく描画側の下限。「遠方の点が1画素を割るとTAAのジッタでちらつく」という事実はどのシーン・どのショーでも変わらない</td></tr>
-</table>
-
-<h4>フォーマット</h4>
-
-<p>
-書式の単一の正は<code>Source/Library/Assets/ShowPackage.h</code>で、規約は
-<code>.kmodel</code>(<code>ModelPackage.h</code>)に揃えてある &mdash;&mdash;
-リトルエンディアン、<code>#pragma pack</code>を使わず<code>static_assert</code>でサイズ固定、
-マジック+<code>Version</code>、文字列はUTF-8をStringPoolに長さ管理で置く。
-</p>
-
-<pre><code>[ShowHeader]                      64B  &#39;KSHW&#39; / Version / PointStride / DroneCount / FormationCount /
-                                       Speed / Hold / Morph / Brightness / Radius / Hover / Seed / StringPoolSize
-[FormationEntry &times; FormationCount] 16B  NameOffset / NameLength(表示名。エディタ用)
-[ShowPoint &times; DroneCount &times; FormationCount]  24B  Position(float3) + Color(float3)
-[StringPool]</code></pre>
-
-<p>
-1500機&times;6編隊で216,208バイト。読み書きは<code>ShowLoader.{h,cpp}</code>で、
-<strong>読み込みはLoaderスレッド(<code>LoadScene</code>の中)で行う</strong> &mdash;&mdash;
-<code>[Model]</code>の<code>.kmodel</code>と同じ扱いで、Renderスレッドでファイルを開かない。
-<code>Version</code>不一致は読み込み拒否(<code>.kmodel</code>と同じ)。ただし
-<strong>失敗してもシーンごとは落とさない</strong>: モデルはシーンそのものだが、
-ドローンショーは夜空の装飾で、無くてもシーンは成立するため、エラーをログに残して編隊なしで進む。
-</p>
-
-<h4>オーサリングツール(<code>Tools/KurenaiShowEditor</code>)</h4>
-
-<p>
-形状生成の6関数はここへ移した。<strong>エンジンから形の知識が無くなり、
-ここが「新しい形を足す場所」になる。</strong>
-エディタは自前のレンダラーを持たず<strong>エンジンをそのまま使ってプレビューする</strong>。
-別経路でプレビューすると、トーンマップ・ブルーム・露出が本番と違い、
-ここで作った形は本番で見ると別物になる &mdash;&mdash; 発光点は特にそうで、
-加算合成とACESの組み合わせには「上げても白く飛ぶだけ」の領域がある(38.10)。
-</p>
-
-<p>
-そのためエンジンへ公開APIを2つだけ足した。<code>IPanel</code>や<code>UIWidgets</code>といった
-内部の型を公開せずに済むよう、口はこの2つに留めてある。
-</p>
-
-<ul>
-<li><code>SetExtraImGuiCallback(std::function&lt;void()&gt;)</code> &mdash;&mdash;
-全パネルを描いた後に一度だけ呼ぶ追加のImGui描画。<strong>F1で隠す範囲の内側に置く</strong>
-(でないとスクリーンショットでの計測が壊れる)</li>
-<li><code>ApplyDroneShowData(const Assets::ShowData&amp;)</code> &mdash;&mdash;
-再生中のショーをファイルを経由せずに差し替える。上のコールバックの中から呼ぶ限り
-どちらもRenderスレッドなので同期が要らない</li>
-</ul>
-
-<p>
-ImGuiの実体は<code>KurenaiEngineLibrary.dll</code>が<code>__declspec(dllexport)</code>で持っている。
-エディタは<code>IMGUI_API=__declspec(dllimport)</code>を定義して同じコンテキスト・同じアロケータの
-上に描く(自前で<code>imgui.cpp</code>をコンパイルするとコンテキストが2つになって成立しない)。
-</p>
-
-<p>
-GUIのほかに<code>--generate-standard &lt;出力パス&gt;</code>というCLIモードを持つ。
-標準の6形状を書き出したあと<strong>読み直してビット一致まで検査する</strong> &mdash;&mdash;
-書き出しの誤りは次に読んだときに初めて分かる種類の失敗なので、書いて終わりにしない。
-リポジトリの<code>Shows/Standard.kshow</code>はこれで作った。
-</p>
-
-<h4><code>.kscene</code>から移した実測の根拠</h4>
-
-<p>
-<strong>バイナリの<code>.kshow</code>にはコメントを置けない。</strong>
-これまで<code>Scenes/DroneShow.kscene</code>のコメントが抱えていた実測の根拠を、
-消す前にここへ移す(値そのものは<code>Standard.kshow</code>のヘッダにある)。
-</p>
-
-<ul>
-<li><strong><code>Radius = 4.0</code></strong> &mdash;&mdash;
-これは<strong>機体の大きさではなく「光の見かけの大きさ」</strong>である。ドローン本体は数十cmだが、
-見えているのはLEDの光そのもので、大気の散乱とレンズのにじみで実際より大きく広がる。
-このシーンでは編隊がカメラから約1.3km先にあり、半径1.5mだと画面上1画素強にしかならず、
-編隊が砂粒の集まりにしか見えない</li>
-<li><strong><code>Brightness = 1.0</code></strong> &mdash;&mdash;
-夜の表示上限を外した(38.10)後に選び直した値。0.30/1.00/2.00/4.00の実測表は38.10にある。
-1.0が曲線の膝で、水面の映り込みが79&rarr;144とほぼ倍になる一方、彩度の低下は4%弱に収まる</li>
-<li><strong><code>Speed = 1.0</code> / <code>Hold = 6.0</code> / <code>Morph = 4.0</code></strong> &mdash;&mdash;
-1巡60秒。<code>Morph</code>に下限があるのは、0だと形が瞬間的に切り替わるため</li>
-</ul>
-
-<h4>検証 &mdash;&mdash; ショー時刻を止めないと測れない</h4>
-
-<p>
-「点データ化で見た目を落としていないか」を確かめるのに、最初は同じ構図の
-スクリーンショットどうしで領域の統計を比べた。データ駆動化の前後で水面の映り込みの
-明るい画素数が3,630&rarr;4,265と17%増えており、同じビルドを3回撮ると4,277/4,267/4,262と
-0.35%以内で揃うので、<strong>実差だと読んだ。これが間違いだった。</strong>
-</p>
-
-<p>
-撮影のタイミングを1秒・3秒・5秒ずらして撮り直すと、同じビルドのまま同じ指標が
-3,646&rarr;5,562&rarr;14,740と動く。<strong>この指標はショー時刻の位相に支配されていて、
-17%の差を解像できない。</strong> 3回の一致が示していたのは「起動から撮影までの所要時間が
-再現する」ことであって、指標が位相に依存しないことではなかった。
-</p>
-
-<p>
-そこで<code>.kshow</code>の<code>Speed</code>を0に書き換えてショー時刻を0で凍結し、
-決定的な条件で撮り直した。データ駆動化の前後で編隊領域は
-平均40.73 / 最大217 / p99 143 / 明るい画素33,025が<strong>すべて一致</strong>し、
-水面の映り込みも同じビルドを2回撮ったときのばらつき(11画素)の中に収まった。
-</p>
-
-<p>
-生成器の移設そのものは、絵ではなく<strong>ソースを突き合わせて</strong>確かめた。
-移設前のコミットから6つの生成関数・パレット・方位角ソートを取り出して比較し、
-<strong>文字単位で一致</strong>することを確認している。
-</p>
-
-<h4>教訓</h4>
-
-<p>
-<strong>再現性は位相非依存の証明ではない。</strong>
-同じ手順を3回繰り返して数字が揃うと、その指標は信頼できると感じてしまう。
-だが揃っていたのは<strong>手順のほう</strong>で、指標が何に依存しているかは
-何も確かめていなかった。動いているものを測るときは、まず
-<strong>止められる軸を止める</strong>(ここでは<code>Speed = 0</code>)か、
-<strong>その軸を意図的に振って指標がどれだけ動くかを先に測る</strong>こと。
-そのどちらもせずに読んだ差分は、実差より大きなノイズの上に乗っている。
+この経路での切り分けには使えない。
 </p>
 
 </section>

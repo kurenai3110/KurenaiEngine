@@ -27,9 +27,7 @@ namespace Kurenai::ShowEditor
         Assets::ShowData data{};
         data.DroneCount = droneCount;
         // 既定値の意図はShowLoader.h / ShowPackage.hのコメントを参照。
-        // Brightness=1.0は「可変プリ露出のクランプ下限を-12段へ上げて表示上限が16になった後」の
-        // 実測に基づく(それ以前は0.25で頭打ちになり、上げても白く飛ぶだけだった。
-        // 詳細はdocs/Architecture.html 38章)
+        // 各値の実測に基づく根拠はdocs/ImplementationDetail.md 38.6節・38.9節
         data.Speed = 1.0f;
         data.HoldSeconds = 6.0f;
         data.MorphSeconds = 4.0f;
@@ -225,7 +223,7 @@ namespace Kurenai::ShowEditor
         m_Dirty |= ImGui::SliderFloat("明るさ###ShowBrightness", &m_Brightness, 0.0f, 4.0f, "%.2f");
         ImGui::SetItemTooltip(
             "実効プリ露出が掛かった後の値。夜のシーンでは表示できる上限が2^-12段ぶんで頭打ちになり、\n"
-            "そこを超えると明るくならずに色が白へ飛ぶだけになる(実測の経緯はdocs/Architecture.html 38章)");
+            "そこを超えると明るくならずに色が白へ飛ぶだけになる(実測はdocs/ImplementationDetail.md 38.9節)");
         m_Dirty |= ImGui::SliderFloat("機体の半径[m]###ShowRadius", &m_Radius, 0.1f, 20.0f, "%.2f");
         ImGui::SetItemTooltip("ワールドの実寸。編隊の大きさ(シーンのScale)を変えても機体は太らない");
         m_Dirty |= ImGui::SliderFloat("揺れの振幅[m]###ShowHover", &m_HoverAmplitude, 0.0f, 10.0f, "%.2f");
