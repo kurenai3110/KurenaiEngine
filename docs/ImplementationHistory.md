@@ -5,10 +5,14 @@
 - 「以前はどうだったか」「何が問題として現れたか」「どう直したか」「何を測って確かめたか」
 - 実装中に踏んだ落とし穴、当初計画から外れた点、退行とその原因
 
-現在の**設計と仕様**は [Architecture.html](Architecture.html)(実装者向け)と
-[KurenaiEngine.html](KurenaiEngine.html)(APIリファレンス)に書かれています。
-このファイルには設計・仕様そのものは書きません。逆に、Architecture.html とコード中のコメントには
-経緯を書きません。
+現在の姿は次の3つに書かれています。このファイルには設計・仕様・具体的な理由そのものは
+書きません。逆に、下の3つとコード中のコメントには経緯を書きません。
+
+| ファイル | 内容 |
+|---|---|
+| [Architecture.html](Architecture.html) | 抽象的な設計と仕様(パス構成・責務分割・インターフェース規約・不変条件) |
+| [ImplementationDetail.md](ImplementationDetail.md) | 具体的な内容と理由(数値と根拠・式の導出・手続き) |
+| [KurenaiEngine.html](KurenaiEngine.html) | APIリファレンス(ユーザー向け) |
 
 章番号は Architecture.html の章立てに対応させています。
 
