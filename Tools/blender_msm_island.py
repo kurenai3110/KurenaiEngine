@@ -592,7 +592,22 @@ VILLAGE_SEED = 20260802
 # 写真の中央値0.16と最大0.24のあいだを取ってh=0.20を狙うと t≒0.125。
 # 段数も減らす: t=0.024〜0.125は岩の半径で約170m→150mの20mの帯で、家の奥行き(6〜12m)を
 # 考えると3列でいっぱい。5段のままだと段が2mおきになり家が完全に重なる
-VILLAGE_TERRACE_COUNT = 3
+#
+# 【修正・下げすぎた結果、中央だけ登り足りなくなった】上の修正は「一律に高すぎる」状態を
+# 直したもので、x方向の形までは合わせていなかった。屋根の上端を測り直すと:
+#   正規化x     0.40-0.45  0.45-0.55  0.55-0.60  0.60-0.65  0.65-0.80  0.80-0.95
+#   写真         0.150      0.160      0.220      0.240      0.16-0.19  0.11-0.14
+#   実機         0.101      0.117      0.137      0.199      0.162      0.14-0.16
+# **東側(x0.65以降)はもう合っていて、足りないのは中央(x0.40〜0.65)だけ**。
+# 一律に上げると東が写真を超えるので、上端と一緒に「上の段ほど西へ寄る」ようにする
+# (VILLAGE_TERRACE_CENTER_SHIFT_DEG)。実物のグランド・リュも、下は南東の王の門から
+# 始まり、登るほど西の修道院の階段へ寄っていく。
+# 目標は写真の最大 h=0.240(x0.60-0.65)。壁を低くしたので棟の高さは平均10.75mで、
+# t=0.125の地表h=0.081に対し実測の屋根の上端が0.199 ——つまり棟が0.118ぶん持ち上げる。
+# h=0.240 には地表h=0.122、ht_table.pyの逆引きで t≒0.185。
+# 段数は radius が t=0.024で約169m・t=0.185で約139mの30mの帯になるので、
+# 家の奥行き7〜11mに対し4列(段の間隔10m)がちょうど収まる
+VILLAGE_TERRACE_COUNT = 4
 # 【修正・西側斜面のシルエットが低かった】スカイラインの重ね合わせ(south_low/south_mid)で、
 # 画像左(西)だけ緑(モデル)が赤(写真)より系統的に低い残差が残っていた。
 # 参考写真c_south_elevation_hazy.jpgの西端を拡大すると、実物は城壁の上に建物が西端まで
@@ -624,7 +639,24 @@ VILLAGE_ARC_END_DEG = 0.0
 # 家の半径方向の奥行き(VILLAGE_DEPTH_MIN/MAX=6〜12m)の半分を見込むと、外縁が城壁に
 # 届く基準半径は約147.5m。_rock_radius(t, -90度)=147.5 を解くと t≒0.024
 VILLAGE_TERRACE_HEIGHT_T_START = 0.024  # 最下段(城壁の内側の面に接する)
-VILLAGE_TERRACE_HEIGHT_T_END = 0.125    # 最上段(VILLAGE_TERRACE_COUNTのコメント参照)
+VILLAGE_TERRACE_HEIGHT_T_END = 0.21     # 最上段(VILLAGE_TERRACE_COUNTのコメント参照)
+# 上の段ほど弧の中心を西へずらす量(度)。最下段で0、最上段でこの値。
+# 【なぜ要るか】_village_terrace_arc は上の段ほど角度範囲を絞る(span_factor 1.0→0.5)が、
+# 中心を全段共通にしていたため、上の段は弧の中心(-50度=南東)の周りにしか残らなかった。
+# 画面のxとの対応は theta=-100度→x=0.379 / -90度→0.479 / -50度→0.82 なので、
+# 中心-50度・半幅25度の最上段は x=0.38〜0.82 に届かず、**中央が登れない**。
+# 最上段の中心を-75度へ寄せると西端がちょうど VILLAGE_ARC_START_DEG(-100度)に一致し、
+# 中央(x0.38〜0.65)が上の段を持つ。東(x>0.82)は下の段だけが担うので今の高さのまま
+VILLAGE_TERRACE_CENTER_SHIFT_DEG = -25.0
+# 最上段が持つ角度幅(全幅に対する比)。最下段は1.0で、上の段ほどこの値へ線形に絞る。
+# 【0.5では広すぎた】中心を西へずらしただけで幅を0.5のままにすると、最上段が
+# theta=-100〜-50度(x=0.38〜0.82)を丸ごと覆い、写真では家が1軒も無い x0.15〜0.40 まで
+# 家が伸びたうえ、もう合っていた東(x0.70〜0.80)を 0.162 → 0.218 と押し上げてしまった。
+# 写真で家がいちばん高く登るのは x0.55〜0.65 の狭い窓(h=0.22〜0.24)だけで、
+# 対応する方位は theta=-84〜-66度。全幅100度に対し半幅9度=比0.18なので0.15を採る。
+# 値は scratchpad/fit_terraces.py で、射影だけを使って(段数, 上端t, ずらし, この幅)を
+# 総当たりし、写真の手読みカーブとの平均絶対差が最小になる組を選んだもの
+VILLAGE_TERRACE_SPAN_TOP = 0.15
 
 # 各段内の角度方向の位置ジッター(機械的すぎない配置にするための決め値)。
 # 修正パス(タスクC): 弧長に沿って家の幅ぶんずつ詰めて置く方式にしたため、ジッターは
@@ -2990,18 +3022,28 @@ def _village_terrace_arc(terrace_index):
     VILLAGE_ARC_START_DEG〜END_DEGの全幅に対する広さの比率(span_factor)を返す。
 
     下の段(terrace_index=0)ほど角度範囲いっぱいに広く(span_factor=1.0)、上の段
-    (terrace_index=VILLAGE_TERRACE_COUNT-1)ほど狭くなる(最上段でspan_factor=0.5)よう
-    線形に絞り込む(出典なしの決め値)。中心角度は全段で共通にする。
+    (terrace_index=VILLAGE_TERRACE_COUNT-1)ほど狭くなる(最上段でVILLAGE_TERRACE_SPAN_TOP)よう
+    線形に絞り込む。
+    中心角度は段ごとに VILLAGE_TERRACE_CENTER_SHIFT_DEG まで西へずらす(同定数のコメント参照。
+    以前は全段共通で、上の段が南東の一点に固まり中央が登れなかった)。
     """
     if VILLAGE_TERRACE_COUNT <= 1:
         u = 0.0
     else:
         u = terrace_index / (VILLAGE_TERRACE_COUNT - 1)
-    span_factor = 1.0 - 0.5 * u  # 最下段1.0→最上段0.5
+    span_factor = 1.0 - (1.0 - VILLAGE_TERRACE_SPAN_TOP) * u  # 最下段1.0→最上段SPAN_TOP
 
     arc_center_deg = (VILLAGE_ARC_START_DEG + VILLAGE_ARC_END_DEG) * 0.5
+    arc_center_deg += VILLAGE_TERRACE_CENTER_SHIFT_DEG * u
     arc_half_deg = (VILLAGE_ARC_END_DEG - VILLAGE_ARC_START_DEG) * 0.5 * span_factor
-    return arc_center_deg - arc_half_deg, arc_center_deg + arc_half_deg, span_factor
+    start_deg = arc_center_deg - arc_half_deg
+    if start_deg < VILLAGE_ARC_START_DEG - 1e-6:
+        # 西へずらしすぎると城壁の弧(RAMPART_ARC_START_DEG)より外へ家が出る
+        print(f"[ERROR] 集落の段{terrace_index}が弧の西端を越えました"
+              f"(開始={start_deg:.1f}度 < VILLAGE_ARC_START_DEG={VILLAGE_ARC_START_DEG:.1f}度)。"
+              f"VILLAGE_TERRACE_CENTER_SHIFT_DEGを小さくしてください", file=sys.stderr)
+        raise ValueError("集落の段が弧の西端を越えました")
+    return start_deg, arc_center_deg + arc_half_deg, span_factor
 
 
 def build_village():
