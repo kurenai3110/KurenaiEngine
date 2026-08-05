@@ -2949,6 +2949,18 @@ namespace Kurenai
             : DefaultReflectionMode(m_RaytracingAvailable);
         // UIの「既定値に戻す」はエンジンの既定ではなくここへ戻す(m_SceneDefaultReflectionMode参照)
         m_SceneDefaultReflectionMode = m_ReflectionMode;
+        // TAAと内部レンダー解像度。どちらも反射と同じく「キーを書いたシーンだけ」上書きし、
+        // 書いていないシーンはエンジンの既定のまま(Assets::Scene の Has〜Override のコメント参照)
+        if (m_Scene.HasTAAOverride)
+        {
+            m_TAAEnabled = m_Scene.TAAEnabled;
+        }
+        if (m_Scene.HasRenderResolutionOverride)
+        {
+            // 即時に作り直すとGPUがまだ参照しているテクスチャを壊すので、
+            // UIのシステムパネルと同じく要求だけ記録してRender()の先頭で反映させる
+            RequestRenderResolution(m_Scene.RenderWidth, m_Scene.RenderHeight);
+        }
         // トーンマップのカーブと空の彩度(アート指定)をシーンから受け取る。
         // Source/LibraryはSource/Engineに依存できないため、Scene側は同じ並びの独立した列挙を持つ。
         // 【並びを変えたら両方直すこと】(Assets/Scene.h の TonemapCurveSetting)

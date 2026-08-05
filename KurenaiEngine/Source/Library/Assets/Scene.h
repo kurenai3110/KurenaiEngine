@@ -186,6 +186,23 @@ namespace Kurenai::Assets
         bool HasSSREnabledOverride = false;
         bool SSREnabled = true;
 
+        // TAA(時間的アンチエイリアス)を有効にするか。SSREnabledと同じく「書いたこと」に
+        // 意味があるので Has〜Override で区別する(エンジンの既定は EngineDefaults.h の
+        // TAAEnabled = false。書いていないシーンはそれに従う)
+        bool HasTAAOverride = false;
+        bool TAAEnabled = false;
+
+        // G-Buffer以降の内部レンダー解像度。ウィンドウの大きさとは独立で、表示時に
+        // アスペクト比を保って拡大縮小される(KurenaiEngine3D::RequestRenderResolution)。
+        //
+        // 【なぜシーンが持つのか】参考写真と実機を数値で突き合わせる検証では、実効解像度が
+        // 測定値そのものを動かす。既定の1280x720では島の幅が約516画素で、参考写真の946画素の
+        // 半分しか無く、局所コントラストの比較が「拡大のぼけ」を測ってしまう。どの解像度で
+        // 測ったかはシーンの一部として残さないと再現できない
+        bool HasRenderResolutionOverride = false;
+        uint32_t RenderWidth = 0;
+        uint32_t RenderHeight = 0;
+
         // トーンマップのカーブ。Source/LibraryはSource/Engineに依存できないため、
         // KurenaiEngine3D::TonemapCurveと同じ並びの独立した列挙をここに持つ
         // (KurenaiEngine3D::ApplyLoadedSceneが1対1で対応付ける。並びを変えたら両方直すこと)。
