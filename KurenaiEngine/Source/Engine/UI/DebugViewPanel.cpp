@@ -53,8 +53,8 @@ namespace Kurenai::UI
             "IBL - BRDF LUT (X=NdotV, Y=粗さ, RGB=A/B/Eavg)",
             "ブルーム (ピラミッド最上段・半解像度)",
             "ライトタイル (タイルあたりのライト数ヒートマップ)",
-            // 「プローブ - イラディアンス」はM11 Stage 3で廃止した(反射プローブは鏡面専任になった。
-            // 拡散はDDGIへ一本化。「DDGI - イラディアンス」で見る)
+            // 反射プローブは鏡面専任なので「プローブ - イラディアンス」は無い
+            // (拡散はDDGIへ一本化。「DDGI - イラディアンス」で見る)
             "プローブ - プリフィルタ済み鏡面 (ミップ0=キャプチャ結果)",
             "プローブ - 影響範囲 (プローブごとの色分け)",
             "プローブ - 距離 (キューブマップ配列)",
@@ -69,8 +69,7 @@ namespace Kurenai::UI
             "大気散乱LUT (Transmittance / MultiScattering / SkyView)",
         };
         static_assert(
-            // M11 Stage 3で「プローブ - イラディアンス」が1つ減り、bent normalが1つ増えたため、
-            // 末尾のAtmosphereLUTの値は32のまま変わらない
+            // 末尾のAtmosphereLUTは32
             static_cast<int>(DebugView::AtmosphereLUT) == 32,
             "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はAtmosphereLUT)");
 
@@ -227,7 +226,7 @@ namespace Kurenai::UI
         ImGui::SameLine();
         precisionChanged |=
             ImGui::RadioButton("Legacy 8bit", &precisionIndex, static_cast<int>(BufferPrecision::Legacy8bit));
-        ItemHelp("中間バッファをすべてRGBA8_UNormにする(M7以前の構成)。暗部の階調が粗くなるのを比較するための経路");
+        ItemHelp("中間バッファをすべてRGBA8_UNormにする。暗部の階調が粗くなるのを比較するための経路");
 
         if (precisionChanged && precisionIndex != static_cast<int>(m_Engine.m_BufferPrecision))
         {
@@ -236,6 +235,6 @@ namespace Kurenai::UI
         }
 
         ImGui::TextWrapped(
-            "アルベドはどちらの構成でもリニアの8bit。sRGB格納は最終画像への寄与が測定限界以下だったため不採用");
+            "アルベドはどちらの構成でもリニアの8bit。sRGB格納は最終画像への寄与が測定限界以下のため不採用");
     }
 }

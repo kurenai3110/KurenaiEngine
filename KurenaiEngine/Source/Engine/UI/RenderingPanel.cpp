@@ -342,8 +342,8 @@ namespace Kurenai::UI
 
             if (m_Engine.m_IBLUseDedicatedIrradiance)
             {
-                // M11 Stage 4a: 専用イラディアンスマップを焼く2つの経路(旧: 総当たり積分/
-                // 新: 球面調和関数L2)をA/B比較できるようにする。既定は旧経路(false)。
+                // 専用イラディアンスマップを焼く2つの経路(総当たり積分 / 球面調和関数L2)を
+                // A/B比較できるようにする。既定は総当たり積分(false)。
                 //
                 // 【値が変わったら焼き直しを要求すること】イラディアンスマップは空が焼き直された
                 // ときにしか作り直されない(KurenaiEngine3D::Render の m_IBLIrradianceBaked 参照)。
@@ -611,7 +611,7 @@ namespace Kurenai::UI
             "波の強さ###WaterWaveStrength", &m_Engine.m_WaterWaveStrength, 0.0f, 1.0f, Defaults::WaterWaveStrength,
             "%.3f", 0, "波打ちの振幅。0で波が完全に消え平坦な鏡面、1で最大の揺らぎになる");
 
-        // --- 水中項(P8) ---
+        // --- 水中項 ---
         // ColorEdit3系のヘルパはUIWidgets.hに無いため、既存パネルと同じSliderFloatExを3本並べる
         ImGui::TextWrapped(
             "水面メッシュのAlbedo(誘電体でほぼ黒に焼かれている)の代わりに使う、水体の拡散反射色"
@@ -628,7 +628,7 @@ namespace Kurenai::UI
             "水体の色 B###WaterBodyColorB", &m_Engine.m_WaterBodyColor.z, 0.0f, 0.5f, Defaults::WaterBodyColorB,
             "%.4f", 0, "水体の拡散反射色(リニア)の青成分");
 
-        // --- 平面反射(P6) ---
+        // --- 平面反射 ---
         CheckboxEx(
             "平面反射を有効にする###PlanarReflectionEnabled", &m_Engine.m_PlanarReflectionEnabled,
             Defaults::PlanarReflectionEnabled,
@@ -748,7 +748,7 @@ namespace Kurenai::UI
 
         CheckboxEx(
             "ボリュームとして描く###CloudVolumetric", &m_Engine.m_CloudVolumetric, Defaults::CloudVolumetric,
-            "積雲を雲底から雲頂までのスラブとしてレイマーチする(P13b)。切ると従来の厚みゼロの"
+            "積雲を雲底から雲頂までのスラブとしてレイマーチする。切ると従来の厚みゼロの"
             "平面レイヤーへ戻るので、見た目と負荷をそのまま比べられる");
         if (m_Engine.m_CloudVolumetric)
         {
@@ -826,8 +826,8 @@ namespace Kurenai::UI
             "気象学的視程Vとは Koschmieder の V = 3.912 / 消散係数 で結び付くので、"
             "「どのくらいの視程を想定するか」で決めるのが分かりやすい"
             "(0.0004 で V ≒ 10km、0.0002 で V ≒ 20km、上限の0.002 で V ≒ 2km のもや)。"
-            "上限は以前0.01(V ≒ 391m)だったが、600m先の島すら見えず屋外の風景として"
-            "成立しない領域だったので下げた");
+            "上限を0.002に留めてあるのは、これより濃いと600m先の地物すら見えず"
+            "屋外の風景として成立しないため");
         SliderFloatEx(
             "スケールハイト###FogScaleHeight", &m_Engine.m_FogScaleHeight, 10.0f, 5000.0f, Defaults::FogScaleHeight,
             "%.0f m", 0, "霧の層の厚み。大きいほど高い高度まで霧が及ぶ");

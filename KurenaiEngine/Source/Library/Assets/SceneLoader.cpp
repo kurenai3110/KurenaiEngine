@@ -209,7 +209,7 @@ namespace Kurenai::Assets
             float Translation[3] = { 0.0f, 0.0f, 0.0f };
             float RotationEulerDegrees[3] = { 0.0f, 0.0f, 0.0f };
             float Scale[3] = { 1.0f, 1.0f, 1.0f };
-            // .kscene [Model]Water(P2: 水面マテリアル基盤)。trueならScene構築時に
+            // .kscene [Model]Water(水面マテリアル基盤)。trueならScene構築時に
             // ModelInstance::IsWaterへそのまま反映する
             bool Water = false;
         };
@@ -287,7 +287,7 @@ namespace Kurenai::Assets
             bool HasExposure = false;
             float ExposureEV100 = 15.0f;
 
-            // [Water]セクション(P2: 水面マテリアル基盤)。NormalMapは[Scene]Skyboxと同じく
+            // [Water]セクション(水面マテリアル基盤)。NormalMapは[Scene]Skyboxと同じく
             // Assetsルートからの相対パスで、LoadScene側でルート外チェックのうえ絶対パスへ解決する。
             // 空文字列のままなら「法線マップ無しのフラット水面」を意味する
             std::wstring WaterNormalMapPath;
@@ -295,7 +295,7 @@ namespace Kurenai::Assets
             float WaterWaveSpeed = 0.03f;
             float WaterWaveStrength = 0.25f;
 
-            // [Cloud]セクション(P10)。指定されたキーだけエンジンの設定を上書きする
+            // [Cloud]セクション。指定されたキーだけエンジンの設定を上書きする
             bool HasCloudCoverage = false;   float CloudCoverage = 0.40f;
             bool HasCloudAltitude = false;   float CloudAltitude = 1500.0f;
             bool HasCloudThickness = false;  float CloudThickness = 400.0f;
@@ -584,7 +584,7 @@ namespace Kurenai::Assets
                     }
                     else if (CaseInsensitiveEquals(key, L"Water"))
                     {
-                        // P2: 水面マテリアル基盤。trueにするとこのインスタンスがWater.hlslで
+                        // 水面マテリアル基盤。trueにするとこのインスタンスがWater.hlslで
                         // 描画され、G-BufferのMaterial.aへ水面のマテリアルIDが書かれるようになる
                         const std::optional<bool> parsed = ParseBoolToken(value);
                         if (!parsed) errorAt(lineNumber, rawLine, "Waterの値はtrue/falseで指定してください");
@@ -814,7 +814,7 @@ namespace Kurenai::Assets
                 }
 
                 case Section::Water:
-                    // P2: 水面マテリアル基盤。NormalMapのパス解決(ルート外チェック・絶対パス化)は
+                    // 水面マテリアル基盤。NormalMapのパス解決(ルート外チェック・絶対パス化)は
                     // ここでは行わず、[Scene]Skyboxと同じくLoadScene側でまとめて行う
                     // (ParseSceneFileは純粋なテキスト解析でファイルシステムに触れない方針のため)
                     if (CaseInsensitiveEquals(key, L"NormalMap"))

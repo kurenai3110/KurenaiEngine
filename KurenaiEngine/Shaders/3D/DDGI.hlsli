@@ -84,7 +84,7 @@ uint DDGIProbeIndex(uint3 gridCoord, uint3 probeCounts)
 //              ボリュームは1個しか持てず(22.10節)、格子の外は最寄りの格子点を外挿し続けるだけで
 //              戻る経路が無かった。呼び出し側はこの重みでグローバルIBL/反射プローブの値と
 //              ブレンドし、ボリュームの外側が「1部屋ぶんの間接光」で照らされ続けるのを防ぐ
-//              (M11 Stage 1で追加。以前は無条件にDDGIへ差し替えていた)
+//              (無条件にDDGIへ差し替えてはいけない)
 float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V, out float insideWeight)
 {
     const float3 origin = DDGIParams0.xyz;

@@ -33,7 +33,12 @@ TAA(モーションベクターによる再投影で複数フレームを蓄積�
 - **[docs/KurenaiEngine.html](docs/KurenaiEngine.html)** — APIリファレンス。KurenaiEngineを
   使って新しいアプリケーションを作る場合は、まずこちらを参照してください。
 - **[docs/Architecture.html](docs/Architecture.html)** — 実装者向けドキュメント。描画パイプラインの
-  内部設計や実装判断について知りたい場合はこちらを参照してください。
+  構成・責務分割・インターフェース規約など、設計と仕様の全体像はこちらです。
+- **[docs/ImplementationDetail.md](docs/ImplementationDetail.md)** — 実装詳細。既定値や
+  しきい値の根拠、式の導出、検証手順といった具体的な内容と理由はこちらです。
+- **[docs/ImplementationHistory.md](docs/ImplementationHistory.md)** — 実装経緯。現在の設計が
+  なぜその形になったのか(以前どうだったか・何が問題として現れたか・どう直したか)を
+  知りたい場合はこちらを参照してください。
 
 ## 構成
 

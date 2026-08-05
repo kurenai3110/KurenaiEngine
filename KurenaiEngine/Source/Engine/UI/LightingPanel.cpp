@@ -109,7 +109,7 @@ namespace Kurenai::UI
             m_Engine.m_IBLBaked = false;
             m_Engine.m_IBLIrradianceBaked = false;
         }
-        // タービディティ(P7: Preetham xyYモデルの大気の濁り具合)。変更時にm_SkyBakeDirtyを
+        // タービディティ(Preetham xyYモデルの大気の濁り具合)。変更時にm_SkyBakeDirtyを
         // 直接ここで立てず、Render()側のturbidityMoved判定(exposureMovedと同じ形)に任せる
         SliderFloatEx(
             "タービディティ###SkyTurbidity", &m_Engine.m_SkyTurbidity, 1.7f, 10.0f, Defaults::SkyTurbidity, "%.2f",
@@ -125,7 +125,7 @@ namespace Kurenai::UI
             "(色度図上で白色点から遠ざける倍率なので色相は変わらない)。"
             "実測した参考写真の空はPreethamがどのタービディティでも出せない深さ(B/R=4.84)にあり、"
             "その差を埋めるためのつまみ。2.0を超えると色域外へ出て赤成分が潰れる");
-        // 背景の解析評価(P3)。キューブマップの中身(SkyGenerateのベイク結果)には一切影響しない
+        // 背景の解析評価。キューブマップの中身(SkyGenerateのベイク結果)には一切影響しない
         // 表示の切り替えでしかないため、上の「手続き空」トグルと違ってm_SkyBakeDirty等の
         // ベイク用フラグは立てない
         CheckboxEx(
