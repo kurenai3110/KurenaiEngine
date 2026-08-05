@@ -769,6 +769,29 @@ VILLAGE_CHIMNEY_WIDTH = 0.9    # 煙突の平面寸法(正方形)
 VILLAGE_CHIMNEY_HEIGHT = 2.2   # 棟から上へ出る高さ
 VILLAGE_CHIMNEY_PROBABILITY = 0.85   # 煙突を持つ棟の割合(出典なしの決め値)
 
+# --- 屋根のドーマー(lucarne。屋根面から突き出す小さな切妻の出窓) ---
+# 【なぜ入れるか】集落の区画(x0.70-0.95 / h0.06-0.15)を島の平均で正規化した輝度で
+# 比べると、中央値と暗部は写真に合うのに明るい側だけ届かない(p90 写真1.87 対 実機1.52。
+# 両方を島幅520へ揃えて測った値)。写真の「島平均の2.0倍超」の画素を同じ解像度で
+# 描き戻すと、担っているのは壁面全体ではなく**屋根面から立ち上がる小さな明るい面と
+# その稜線**だった(scratchpad/photo_bright_520.png)。壁を明るくする案(漆喰の割合)は
+# 一度試して撤回済みで、道具が違う。
+# 【なぜこの寸法なら写るか】実物のルカルヌは幅1.2〜1.5m。600m先・島幅516画素では
+# 1.4mが約2.4画素になる。鐘楼のアーケードの開口(1.25m)は写っているので、この寸法は
+# 消えない(0.2m級の棟瓦は1画素未満で平均へ潰れるため入れない)。
+# 【なぜ明るくなるか】太陽は方位225度・仰角15度で向きは(-0.5, 0.707, -0.5)。
+# 妻を通りに向ける棟(85%)では屋根面が弧に沿う向き=東西を向くので、西を向く
+# ドーマーの正面(垂直面)は内積0.5で照らされる。壁材のアルベド(0.24〜0.55)は
+# スレート(0.10)の2.4〜5.5倍なので、同じ光でも屋根より明るい面になる。
+# 島の東側の家は半径方向の妻が東を向いて日が当たらないため、ここが効く
+VILLAGE_DORMER_PROBABILITY = 0.45   # 屋根面の片側1つあたりの確率(左右で独立に抽選)
+VILLAGE_DORMER_WIDTH = 1.4          # 主棟の棟線方向の幅
+VILLAGE_DORMER_DEPTH = 1.6          # 屋根面に垂直な方向(ドーマー自身の棟線方向)の奥行き
+VILLAGE_DORMER_WALL_HEIGHT = 1.3    # 軒の高さから正面の壁の天端まで
+VILLAGE_DORMER_ROOF_HEIGHT = 0.7    # ドーマー自身の切妻の高さ
+# 主棟の棟線より高くなるドーマーは作らない。屋根が浅い小さな家では収まらないため
+VILLAGE_DORMER_RIDGE_CLEARANCE = 0.9
+
 
 # --- 植生(vegetation)。600m先では葉の1枚1枚は見えず緑の塊のシルエットとしてしか
 # 視認されないため、木1本のジオメトリは低ポリの円柱(幹)+潰したUV球(樹冠)で済ませる ---
@@ -3233,6 +3256,39 @@ def build_village():
                         height=VILLAGE_CHIMNEY_HEIGHT + VILLAGE_CHIMNEY_WIDTH * 0.5,
                         side_material=wall_material, top_material="SlateRoof",
                     )
+
+                # ドーマー(VILLAGE_DORMER_*のコメント参照)。屋根面の左右それぞれに
+                # 独立して抽選する。乱数は煙突・窓と同じ専用インスタンスを使い、
+                # グローバルのrandom(家と樹木の位置)を消費しない
+                dormer_top = VILLAGE_DORMER_WALL_HEIGHT + VILLAGE_DORMER_ROOF_HEIGHT
+                if dormer_top <= roof_height * VILLAGE_DORMER_RIDGE_CLEARANCE:
+                    half_across = house_width * 0.5
+                    for side in (-1.0, 1.0):
+                        if window_rng.random() >= VILLAGE_DORMER_PROBABILITY:
+                            continue
+                        # 主棟の棟線方向の位置。妻の端を避けて中ほどへ置く
+                        along_offset = house_depth * window_rng.uniform(-0.28, 0.28)
+                        # 正面が壁面(軒ではなく)と同じ位置に来るよう、奥行きの半分だけ内側へ
+                        across_offset = side * (half_across - VILLAGE_DORMER_DEPTH * 0.5)
+                        _add_house_to_bmesh(
+                            bm,
+                            base=(
+                                base_engine_x + house_along[0] * along_offset
+                                + house_across[0] * across_offset,
+                                base_engine_y + wall_height,
+                                base_engine_z + house_along[2] * along_offset
+                                + house_across[2] * across_offset,
+                            ),
+                            # ドーマーの棟線は主棟と直交する(屋根面に垂直な向き)
+                            along_dir=house_across,
+                            across_dir=house_along,
+                            width=VILLAGE_DORMER_WIDTH,
+                            depth=VILLAGE_DORMER_DEPTH,
+                            wall_height=VILLAGE_DORMER_WALL_HEIGHT,
+                            roof_height=VILLAGE_DORMER_ROOF_HEIGHT,
+                            wall_material=wall_material,
+                            roof_material=roof_material,
+                        )
 
                 # カメラ側(=島の中心から見て外向き)の1面にだけ窓を並べる。
                 # 妻を通りに向ける棟では along_dir が半径方向、そうでない棟では
