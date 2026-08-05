@@ -283,6 +283,8 @@ namespace Kurenai::Assets
             bool SSREnabled = true;
             Scene::TonemapCurveSetting Tonemap = Scene::TonemapCurveSetting::AgX;
             float SkySaturation = 1.0f;
+            bool HasSkyTurbidity = false;
+            float SkyTurbidity = 2.5f;
             bool HasExposure = false;
             float ExposureEV100 = 15.0f;
 
@@ -527,6 +529,19 @@ namespace Kurenai::Assets
                     {
                         if (!ParseFloatToken(value, result.SkySaturation)) errorAt(lineNumber, rawLine, "SkySaturationの値が不正です");
                         if (result.SkySaturation < 0.0f) errorAt(lineNumber, rawLine, "SkySaturationは0以上で指定してください");
+                    }
+                    // 大気の濁り具合。大きいほど地平線が白く霞み、天頂の青が薄くなる。
+                    // 【SkySaturationと違って指定されたときだけ上書きする】タービディティを動かすと
+                    // 大気LUTの焼き直しが走るため、書いていないシーンにまで無条件で触りたくない
+                    else if (CaseInsensitiveEquals(key, L"SkyTurbidity"))
+                    {
+                        if (!ParseFloatToken(value, result.SkyTurbidity)) errorAt(lineNumber, rawLine, "SkyTurbidityの値が不正です");
+                        // Preethamの定義域はおおむね1.7〜10。外れた値は打ち間違いとみなす
+                        if (result.SkyTurbidity < 1.0f || result.SkyTurbidity > 10.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "SkyTurbidityの値が範囲外です");
+                        }
+                        result.HasSkyTurbidity = true;
                     }
                     else if (CaseInsensitiveEquals(key, L"Exposure"))
                     {
@@ -1051,6 +1066,7 @@ namespace Kurenai::Assets
         scene.SSREnabled = parsed.SSREnabled;
         scene.Tonemap = parsed.Tonemap;
         scene.SkySaturation = parsed.SkySaturation;
+        scene.HasSkyTurbidity = parsed.HasSkyTurbidity; scene.SkyTurbidity = parsed.SkyTurbidity;
         scene.HasExposureOverride = parsed.HasExposure;
         scene.HasCloudCoverage = parsed.HasCloudCoverage;   scene.CloudCoverage = parsed.CloudCoverage;
         scene.HasCloudAltitude = parsed.HasCloudAltitude;   scene.CloudAltitude = parsed.CloudAltitude;

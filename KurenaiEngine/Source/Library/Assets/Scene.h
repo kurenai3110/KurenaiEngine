@@ -206,6 +206,12 @@ namespace Kurenai::Assets
         // 「写真に寄せたい」シーンだけが明示的に上げる
         float SkySaturation = 1.0f;
 
+        // 大気の濁り具合(Preethamのタービディティ)。大きいほど地平線が白く霞み、天頂の青が薄くなる。
+        // **指定されたときだけ**エンジンの設定を上書きする(SkySaturationのような無条件の反映に
+        // しないのは、動かすと大気LUTの焼き直しが走るため)。定義域はおおむね1.7〜10
+        bool HasSkyTurbidity = false;
+        float SkyTurbidity = 2.5f;   // EngineDefaults.h の SkyTurbidity と同じ値にすること
+
         // シーン全体の露出(EV100)。**指定されたときだけ**エンジンの設定を上書きする
         // (IBLIntensityと同じ扱い)。Tonemap/SkySaturationのような無条件の反映にしないのは、
         // 露出はUIでも頻繁に触る値で、Exposureを持たないシーンを読み直すたびに

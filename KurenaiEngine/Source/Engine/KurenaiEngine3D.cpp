@@ -2965,6 +2965,9 @@ namespace Kurenai
         case Assets::Scene::TonemapCurveSetting::AgX:      m_TonemapCurve = TonemapCurve::AgX;      break;
         }
         m_SkySaturation = m_Scene.SkySaturation;
+        // タービディティは指定されたときだけ上書きする(Scene.h の HasSkyTurbidity 参照)。
+        // 値が動けばRender()側のturbidityMoved判定が大気LUTを焼き直す
+        if (m_Scene.HasSkyTurbidity) { m_SkyTurbidity = m_Scene.SkyTurbidity; }
         if (m_Scene.HasIBLIntensityOverride)
         {
             m_IBLIntensity = m_Scene.IBLIntensity;
