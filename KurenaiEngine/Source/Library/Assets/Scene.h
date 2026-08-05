@@ -235,8 +235,23 @@ namespace Kurenai::Assets
         bool HasCloudCellSize = false;
         float CloudCellSize = 1000.0f;      // 雲の塊1つぶんのワールド上の大きさ[m]。
                                              // エンジン側はこの逆数(UvScale)を持つ
+        // 高層の巻雲(P11)。積雲と同じく**指定されたキーだけ**上書きする。
+        // 【被覆率以外も持たせた理由】巻雲は「白い筋」ではなく灰色の薄膜として出ており、
+        // 明るさが未較正のまま出荷設定に0.5で入っていた。詰めるには濃さ・高度・筋の強さを
+        // シーンから振れる必要がある(シェーダ定数と違いホットリロードで振れる)
         bool HasCirrusCoverage = false;
-        float CirrusCoverage = 0.5f;        // 高層の巻雲。0で消える
+        float CirrusCoverage = 0.5f;        // 0で消える(このとき巻雲の計算経路自体を通らない)
+        bool HasCirrusAltitude = false;
+        float CirrusAltitude = 8000.0f;     // 雲底の高度[m]
+        bool HasCirrusCellSize = false;
+        float CirrusCellSize = 2000.0f;     // 筋1本ぶんのワールド上の大きさ[m]。
+                                             // 積雲のCellSizeと同じくエンジン側は逆数を持つ
+        bool HasCirrusDensity = false;
+        float CirrusDensity = 2.0f;         // 消散係数。巻雲は光学的に薄いので積雲より1桁小さい
+        bool HasCirrusAnisotropy = false;
+        float CirrusAnisotropy = 3.0f;      // fBmのUVをU方向へ伸ばす倍率。1で積雲と同じ等方な塊
+        bool HasCirrusWindSpeed = false;
+        float CirrusWindSpeed = 15.0f;      // 風速[m/s]。風向きは積雲と共有する
 
         // --- [Fog]セクション。大気の澄み具合はシーンが持つべき性質なので、[Cloud]と同じく
         // 指定されたキーだけエンジンの設定を上書きする。

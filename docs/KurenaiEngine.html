@@ -1189,12 +1189,18 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>WaveScale</code></td><td>float</td><td>-</td><td>12.0</td><td>法線マップのタイリング。大きいほど波が細かくなる</td></tr>
 <tr><td><code>WaveSpeed</code></td><td>float</td><td>-</td><td>0.03</td><td>法線マップのスクロール速度</td></tr>
 <tr><td><code>WaveStrength</code></td><td>float</td><td>-</td><td>0.25</td><td>波の法線の強さ。カメラからの距離で減衰し、遠方は幾何法線へ寄る(地平線際のエイリアシング対策)</td></tr>
-<tr><td rowspan="6"><code>[Cloud]</code></td><td rowspan="6">0〜1</td><td><code>Coverage</code></td><td>float</td><td>-</td><td>0.40</td><td>積雲の被覆率。0〜1。0で積雲が消える</td></tr>
+<tr><td rowspan="12"><code>[Cloud]</code></td><td rowspan="12">0〜1</td><td><code>Coverage</code></td><td>float</td><td>-</td><td>0.40</td><td>積雲の被覆率。0〜1。0で積雲が消える</td></tr>
 <tr><td><code>Altitude</code></td><td>float</td><td>-</td><td>1500.0</td><td>雲底の高度[m](カメラのワールドY基準)。100〜20000</td></tr>
 <tr><td><code>Thickness</code></td><td>float</td><td>-</td><td>400.0</td><td>雲底から雲頂までの厚み[m]。0〜5000。<strong>0にすると厚みゼロの平面として扱われ</strong>、ボリュームのレイマーチを通らなくなる</td></tr>
 <tr><td><code>Density</code></td><td>float</td><td>-</td><td>8.0</td><td>消散係数。0〜100。<strong>上げても雲は明るくならない</strong>——不透明にはなるが自己影が増えるぶん実測では暗くなる(8→100で雲画素の中央輝度が202→162)。雲の明るさを決めているのは<code>[Fog]</code>の消散係数のほう</td></tr>
-<tr><td><code>CellSize</code></td><td>float</td><td>-</td><td>1000.0</td><td>雲の塊1つぶんのワールド上の大きさ[m]。10〜100000。エンジン側はこの逆数(UVスケール)を持つ</td></tr>
-<tr><td><code>CirrusCoverage</code></td><td>float</td><td>-</td><td>0.5</td><td>高層の巻雲の被覆率。0〜1。0で巻雲が消える</td></tr>
+<tr><td><code>TypeBias</code></td><td>float</td><td>-</td><td>0.5</td><td>雲の種類の偏り。0〜1。0=層雲寄り / 0.5=中立 / 1=雄大積雲寄り。場所ごとに縦プロファイルを切り替えるので、同じ層に背の低い雲と高い雲が同居する</td></tr>
+<tr><td><code>CellSize</code></td><td>float</td><td>-</td><td>1000.0</td><td>雲の塊1つぶんのワールド上の大きさ[m]。10〜100000。エンジン側はこの逆数(UVスケール)を持つ。<strong>消散係数と独立ではない</strong>——雲1つが大きくなると自己影が深くなり、同じ<code>Density</code>でも明暗の幅が広がる</td></tr>
+<tr><td><code>CirrusCoverage</code></td><td>float</td><td>-</td><td>0.5</td><td>高層の巻雲の被覆率。0〜1。<strong>0にすると巻雲の計算経路自体を通らない</strong>ので、以下の巻雲キーはすべて効かなくなる</td></tr>
+<tr><td><code>CirrusAltitude</code></td><td>float</td><td>-</td><td>8000.0</td><td>巻雲の雲底の高度[m]。100〜20000</td></tr>
+<tr><td><code>CirrusCellSize</code></td><td>float</td><td>-</td><td>2000.0</td><td>巻雲の筋1本ぶんのワールド上の大きさ[m]。10〜100000。積雲の<code>CellSize</code>と同じくエンジン側は逆数を持つ。高度が高いぶん画角内に入る数が多いので、積雲より大きくても細い筋として読める</td></tr>
+<tr><td><code>CirrusDensity</code></td><td>float</td><td>-</td><td>2.0</td><td>巻雲の消散係数。0〜100。巻雲は光学的に薄く下の青空が透けるのが特徴なので積雲より1桁小さい</td></tr>
+<tr><td><code>CirrusAnisotropy</code></td><td>float</td><td>-</td><td>3.0</td><td>fBmのUVをU方向へ伸ばす倍率。1〜16。1.0で積雲と同じ等方な塊になり、大きいほど刷毛で掃いたような筋になる</td></tr>
+<tr><td><code>CirrusWindSpeed</code></td><td>float</td><td>-</td><td>15.0</td><td>巻雲の風速[m/s]。0〜200。高層ほど風が速いので積雲より大きい。風向きは積雲と共有する</td></tr>
 <tr><td rowspan="4"><code>[Fog]</code></td><td rowspan="4">0〜1</td><td><code>Enabled</code></td><td>bool</td><td>-</td><td>true</td><td>大気遠近の有効/無効。手続き空が無効なシーン(スカイボックス画像を明示したシーン)では、この値に関わらず常に無効になる</td></tr>
 <tr><td><code>Density</code></td><td>float</td><td>-</td><td>0.0004</td><td>基準高度での消散係数[1/m]。0〜0.002。気象学的視程Vとは <code>V = 3.912 / 消散係数</code>(Koschmieder)で結び付くので、<strong>どのくらいの視程を想定するかで決める</strong>のが分かりやすい(0.0004でV≒10km、0.0002でV≒20km、上限の0.002でV≒2kmのもや)。<strong>遠景の霞だけの設定ではない</strong>——雲層は有限距離にあるため、この値が雲がどれだけ空から浮き上がって見えるかも一手に決める</td></tr>
 <tr><td><code>ScaleHeight</code></td><td>float</td><td>-</td><td>1000.0</td><td>霞の層の厚み[m]。10〜5000。大きいほど高い高度まで及ぶ</td></tr>

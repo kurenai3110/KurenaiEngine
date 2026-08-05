@@ -2985,7 +2985,13 @@ namespace Kurenai
         if (m_Scene.HasCloudDensity)   { m_CloudDensity = m_Scene.CloudDensity; }
         if (m_Scene.HasCloudTypeBias) { m_CloudTypeBias = m_Scene.CloudTypeBias; }
         if (m_Scene.HasCloudCellSize)  { m_CloudUvScale = 1.0f / std::max(m_Scene.CloudCellSize, 1.0f); }
-        if (m_Scene.HasCirrusCoverage) { m_CirrusCoverage = m_Scene.CirrusCoverage; }
+        // 巻雲(P11)。CirrusCellSizeも積雲のCellSizeと同じく逆数へ直す
+        if (m_Scene.HasCirrusCoverage)   { m_CirrusCoverage = m_Scene.CirrusCoverage; }
+        if (m_Scene.HasCirrusAltitude)   { m_CirrusAltitude = m_Scene.CirrusAltitude; }
+        if (m_Scene.HasCirrusCellSize)   { m_CirrusUvScale = 1.0f / std::max(m_Scene.CirrusCellSize, 1.0f); }
+        if (m_Scene.HasCirrusDensity)    { m_CirrusDensity = m_Scene.CirrusDensity; }
+        if (m_Scene.HasCirrusAnisotropy) { m_CirrusAnisotropy = m_Scene.CirrusAnisotropy; }
+        if (m_Scene.HasCirrusWindSpeed)  { m_CirrusWindSpeed = m_Scene.CirrusWindSpeed; }
         // 大気遠近。[Cloud]と同じく指定されたキーだけを上書きする。
         // 【この値は遠景の霞だけの設定ではない】消散係数は雲がどれだけ空から浮き上がって
         // 見えるかも一手に決める(Scene.h の HasFogDensity 付近のコメントに実測を残してある)
