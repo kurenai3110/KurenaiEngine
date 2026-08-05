@@ -139,6 +139,38 @@ namespace Kurenai::Assets
             return true;
         }
 
+        // "3840, 2160"のような2要素の正整数([Scene]のRenderResolution用)。
+        // ParseUint3と同じく、分割はParseFloat3へ寄せて数値として読んでから整数性を検証する
+        bool ParseUint2(const std::wstring& value, uint32_t outXY[2])
+        {
+            // ParseFloat3は3要素固定なので、末尾に"0"を足して使い回さず素朴に分割する
+            std::vector<std::wstring> tokens;
+            size_t start = 0;
+            while (start <= value.size())
+            {
+                const size_t comma = value.find(L',', start);
+                const size_t end = comma == std::wstring::npos ? value.size() : comma;
+                tokens.push_back(TrimHalfWidth(value.substr(start, end - start)));
+                if (comma == std::wstring::npos)
+                {
+                    break;
+                }
+                start = comma + 1;
+            }
+            if (tokens.size() != 2)
+            {
+                return false;
+            }
+            for (int i = 0; i < 2; ++i)
+            {
+                float parsed = 0.0f;
+                if (!ParseFloatToken(tokens[i], parsed)) return false;
+                if (!(parsed >= 1.0f) || std::floor(parsed) != parsed) return false;
+                outXY[i] = static_cast<uint32_t>(parsed);
+            }
+            return true;
+        }
+
         std::optional<bool> ParseBoolToken(const std::wstring& value)
         {
             if (CaseInsensitiveEquals(value, L"true")) return true;
@@ -282,8 +314,14 @@ namespace Kurenai::Assets
             bool AOEnabled = true;
             bool HasSSREnabled = false;
             bool SSREnabled = true;
+            bool HasTAAEnabled = false;
+            bool TAAEnabled = false;
+            bool HasRenderResolution = false;
+            uint32_t RenderWidth = 0;
+            uint32_t RenderHeight = 0;
             Scene::TonemapCurveSetting Tonemap = Scene::TonemapCurveSetting::AgX;
             float SkySaturation = 1.0f;
+            float TonemapBlackPoint = 0.0f;
             bool HasExposure = false;
             float ExposureEV100 = 15.0f;
 
@@ -548,6 +586,19 @@ namespace Kurenai::Assets
                         if (!ParseFloatToken(value, result.SkySaturation)) errorAt(lineNumber, rawLine, "SkySaturationの値が不正です");
                         if (result.SkySaturation < 0.0f) errorAt(lineNumber, rawLine, "SkySaturationは0以上で指定してください");
                     }
+                    else if (CaseInsensitiveEquals(key, L"TonemapBlackPoint"))
+                    {
+                        if (!ParseFloatToken(value, result.TonemapBlackPoint))
+                        {
+                            errorAt(lineNumber, rawLine, "TonemapBlackPointの値が不正です");
+                        }
+                        // 0で恒等、1で全部黒。0.2を超えると暗部が丸ごと潰れるので
+                        // 打ち間違いとみなす(実用域は0.00〜0.10)
+                        if (result.TonemapBlackPoint < 0.0f || result.TonemapBlackPoint > 0.2f)
+                        {
+                            errorAt(lineNumber, rawLine, "TonemapBlackPointは0〜0.2で指定してください");
+                        }
+                    }
                     else if (CaseInsensitiveEquals(key, L"Exposure"))
                     {
                         if (!ParseFloatToken(value, result.ExposureEV100)) errorAt(lineNumber, rawLine, "Exposureの値が不正です");
@@ -559,6 +610,31 @@ namespace Kurenai::Assets
                             errorAt(lineNumber, rawLine, "Exposureは-6〜18(EV100)の範囲で指定してください");
                         }
                         result.HasExposure = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"TAA"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "TAAの値はtrue/falseで指定してください");
+                        result.TAAEnabled = *parsedValue;
+                        result.HasTAAEnabled = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"RenderResolution"))
+                    {
+                        uint32_t parsedXY[2] = {};
+                        if (!ParseUint2(value, parsedXY))
+                        {
+                            errorAt(lineNumber, rawLine, "RenderResolutionの値が不正です(幅, 高さの2要素の正整数が必要)");
+                        }
+                        // 上限はレンダーターゲット1枚あたりの現実的な大きさで抑える。
+                        // G-Buffer・TAA履歴・Bloomの段など多数のフルスクリーンテクスチャが
+                        // この解像度で作られるため、書き間違いで数GBを確保しないための歯止め
+                        if (parsedXY[0] > 7680u || parsedXY[1] > 4320u)
+                        {
+                            errorAt(lineNumber, rawLine, "RenderResolutionは7680x4320以下で指定してください");
+                        }
+                        result.RenderWidth = parsedXY[0];
+                        result.RenderHeight = parsedXY[1];
+                        result.HasRenderResolution = true;
                     }
                     else if (CaseInsensitiveEquals(key, L"ScreenSpaceReflection"))
                     {
@@ -1169,8 +1245,14 @@ namespace Kurenai::Assets
         scene.AOEnabled = parsed.AOEnabled;
         scene.HasSSREnabledOverride = parsed.HasSSREnabled;
         scene.SSREnabled = parsed.SSREnabled;
+        scene.HasTAAOverride = parsed.HasTAAEnabled;
+        scene.TAAEnabled = parsed.TAAEnabled;
+        scene.HasRenderResolutionOverride = parsed.HasRenderResolution;
+        scene.RenderWidth = parsed.RenderWidth;
+        scene.RenderHeight = parsed.RenderHeight;
         scene.Tonemap = parsed.Tonemap;
         scene.SkySaturation = parsed.SkySaturation;
+        scene.TonemapBlackPoint = parsed.TonemapBlackPoint;
         scene.HasExposureOverride = parsed.HasExposure;
         scene.HasCloudCoverage = parsed.HasCloudCoverage;   scene.CloudCoverage = parsed.CloudCoverage;
         scene.HasCloudAltitude = parsed.HasCloudAltitude;   scene.CloudAltitude = parsed.CloudAltitude;

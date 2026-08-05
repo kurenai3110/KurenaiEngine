@@ -749,6 +749,8 @@ namespace Kurenai
         // ことが知られており、Bistro内観のように赤い壁が支配的なシーンでその欠点が最も出やすい。
         // AgXはハイライトが色相を保ったまま白へ脱色するため、この用途では素直な絵になる
         TonemapCurve m_TonemapCurve = TonemapCurve::AgX;
+        // 黒の締め(ブラックポイント)。0で恒等。詳細はShaders/3D/Tonemap.hlslのコメント参照
+        float m_TonemapBlackPoint = Defaults::TonemapBlackPoint;
 
         // 薄明視(mesopic vision)の適用量。0で無効、1で完全適用。
         //

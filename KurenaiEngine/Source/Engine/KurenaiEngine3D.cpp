@@ -766,7 +766,8 @@ namespace Kurenai
             // シャープネスの近傍タップに使う1テクセルぶんのUV(1/レンダー解像度)
             float InvRenderWidth;
             float InvRenderHeight;
-            float TonemapPadding;
+            // 黒の締め(ブラックポイント)。0で恒等。詳細はTonemap.hlsl側のコメント参照
+            float BlackPoint;
         };
 
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
@@ -3037,6 +3038,18 @@ namespace Kurenai
             : DefaultReflectionMode(m_RaytracingAvailable);
         // UIの「既定値に戻す」はエンジンの既定ではなくここへ戻す(m_SceneDefaultReflectionMode参照)
         m_SceneDefaultReflectionMode = m_ReflectionMode;
+        // TAAと内部レンダー解像度。どちらも反射と同じく「キーを書いたシーンだけ」上書きし、
+        // 書いていないシーンはエンジンの既定のまま(Assets::Scene の Has〜Override のコメント参照)
+        if (m_Scene.HasTAAOverride)
+        {
+            m_TAAEnabled = m_Scene.TAAEnabled;
+        }
+        if (m_Scene.HasRenderResolutionOverride)
+        {
+            // 即時に作り直すとGPUがまだ参照しているテクスチャを壊すので、
+            // UIのシステムパネルと同じく要求だけ記録してRender()の先頭で反映させる
+            RequestRenderResolution(m_Scene.RenderWidth, m_Scene.RenderHeight);
+        }
         // トーンマップのカーブと空の彩度(アート指定)をシーンから受け取る。
         // Source/LibraryはSource/Engineに依存できないため、Scene側は同じ並びの独立した列挙を持つ。
         // 【並びを変えたら両方直すこと】(Assets/Scene.h の TonemapCurveSetting)
@@ -3046,6 +3059,8 @@ namespace Kurenai
         case Assets::Scene::TonemapCurveSetting::ACES:     m_TonemapCurve = TonemapCurve::ACES;     break;
         case Assets::Scene::TonemapCurveSetting::AgX:      m_TonemapCurve = TonemapCurve::AgX;      break;
         }
+        // 黒の締め。Tonemap/SkySaturationと同じく無条件に反映する(既定0で恒等のため)
+        m_TonemapBlackPoint = m_Scene.TonemapBlackPoint;
         m_SkySaturation = m_Scene.SkySaturation;
         if (m_Scene.HasIBLIntensityOverride)
         {
@@ -7095,6 +7110,7 @@ namespace Kurenai
                 tonemapConstants.Sharpness = m_TAAEnabled ? m_TAASharpness : 0.0f;
                 tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(m_RenderWidth);
                 tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(m_RenderHeight);
+                tonemapConstants.BlackPoint = m_TonemapBlackPoint;
                 cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
 
                 cmd->SetViewport(gbufferViewport);

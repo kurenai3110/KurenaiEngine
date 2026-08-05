@@ -187,6 +187,23 @@ namespace Kurenai::Assets
         bool HasSSREnabledOverride = false;
         bool SSREnabled = true;
 
+        // TAA(時間的アンチエイリアス)を有効にするか。SSREnabledと同じく「書いたこと」に
+        // 意味があるので Has〜Override で区別する(エンジンの既定は EngineDefaults.h の
+        // TAAEnabled = false。書いていないシーンはそれに従う)
+        bool HasTAAOverride = false;
+        bool TAAEnabled = false;
+
+        // G-Buffer以降の内部レンダー解像度。ウィンドウの大きさとは独立で、表示時に
+        // アスペクト比を保って拡大縮小される(KurenaiEngine3D::RequestRenderResolution)。
+        //
+        // 【なぜシーンが持つのか】参考写真と実機を数値で突き合わせる検証では、実効解像度が
+        // 測定値そのものを動かす。既定の1280x720では島の幅が約516画素で、参考写真の946画素の
+        // 半分しか無く、局所コントラストの比較が「拡大のぼけ」を測ってしまう。どの解像度で
+        // 測ったかはシーンの一部として残さないと再現できない
+        bool HasRenderResolutionOverride = false;
+        uint32_t RenderWidth = 0;
+        uint32_t RenderHeight = 0;
+
         // トーンマップのカーブ。Source/LibraryはSource/Engineに依存できないため、
         // KurenaiEngine3D::TonemapCurveと同じ並びの独立した列挙をここに持つ
         // (KurenaiEngine3D::ApplyLoadedSceneが1対1で対応付ける。並びを変えたら両方直すこと)。
@@ -200,6 +217,13 @@ namespace Kurenai::Assets
             AgX,
         };
         TonemapCurveSetting Tonemap = TonemapCurveSetting::AgX;
+
+        // 黒の締め(ブラックポイント)。トーンマップ後の表示リニア値からこの値を引き、
+        // 残りを[0,1]へ伸ばし直す。実カメラのトーンカーブが持つ処理に相当する。
+        // 0(既定)で恒等なので、指定しないシーンの見た目は一切変わらない。
+        // 屋外の遠景では大気遠近が最暗部へ空の輝度を一定量だけ加算するため、画面上の
+        // 最暗値が頭打ちになる。霞を非物理的な値まで薄めずに黒を締めるための逃げ道
+        float TonemapBlackPoint = 0.0f;
 
         // 空の彩度(アート指定)。既定1.0は物理モデルの色度そのまま。色度図上で白色点から
         // 遠ざける倍率で、色相は変えずに鮮やかさだけを変える。物理量ではないので
