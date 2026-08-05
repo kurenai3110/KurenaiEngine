@@ -1,4 +1,4 @@
-﻿"""モン・サン=ミシェル検証シーン(P1)用の島モデルを、Blenderのbpy APIで組み立てて
+"""モン・サン=ミシェル検証シーン(P1)用の島モデルを、Blenderのbpy APIで組み立てて
 glTFへ出力する、あるいはプレビュー画像をレンダリングするスクリプト。
 
 Tools/generate_msm_proxy.py(手書きJSONでglTFを直接生成する版)の後継。岩(rock)は実物の
@@ -431,7 +431,16 @@ WALL_TOP_LEDGE_HEIGHT = 0.6
 # 実物のクレネルはもっと細かいが、この距離では周期が細かいほど平均へ潰れて逆効果になる
 WALL_MERLON_WIDTH = 2.4        # 弧に沿った歯の幅
 WALL_MERLON_GAP = 1.4          # 歯と歯のあいだ(ここが空になって暗く見える)
-WALL_MERLON_HEIGHT = 0.9       # パラペットの天端からさらに立ち上がる高さ
+# 【0にした・実物の南面の城壁に狭間は無い】参考写真の城壁を6倍に拡大すると
+# (scratchpad/photo_rampart.png)、幕壁の天端は**一直線の平らなパラペット**で、
+# 歯(メルロン)と隙間の繰り返しはどこにも無い。目立つのはその少し下を走る
+# **マシクーリの持ち送りの点線**で、これが天端付近で一番強い横の線になっている。
+# 自己相関でも周期は出ない(3px=0.97mのピークは画像のぼけの相関長で、
+# 狭間の周期3.8m=11.7pxに当たるピークは無い)。
+# 狭間は足元の帯の局所コントラストを 0.171→0.216 と押し上げたが(720p時点)、
+# 写真に無いものを足して数字を上げていたことになるので0にして作らない。
+# 定数と_build_wall_merlonsは、塔や別の城壁で使う可能性があるため残す
+WALL_MERLON_HEIGHT = 0.0       # パラペットの天端からさらに立ち上がる高さ(0で作らない)
 
 # 持ち出し帯(マシクーリの簡略化)。個々の切れ目は作らず、連続した帯1本にする。
 # 【大きさを見直した】旧値(出っ張り0.6m・高さ0.8m)は内部解像度で約1画素しかなく、
@@ -2749,9 +2758,11 @@ def build_rampart():
         WALL_THICKNESS,
     )
 
-    # パラペットの上に狭間を並べる(WALL_MERLON_*参照)。歯と歯のあいだが空になり、
-    # 天端が一直線ではなくなる
-    merlons = _build_wall_merlons("WallMerlons", ledge_top, WALL_THICKNESS)
+    # パラペットの上の狭間(WALL_MERLON_*参照)。WALL_MERLON_HEIGHTが0以下なら作らない
+    merlons = (
+        _build_wall_merlons("WallMerlons", ledge_top, WALL_THICKNESS)
+        if WALL_MERLON_HEIGHT > 0.0 else None
+    )
 
     def machicolation_bottom(theta):
         return wall_top(theta) - MACHICOLATION_BELOW_TOP_OFFSET
@@ -2765,7 +2776,9 @@ def build_rampart():
         MACHICOLATION_THICKNESS,
     )
 
-    return [wall, ledge, merlons, machicolation]
+    # merlonsはWALL_MERLON_HEIGHT=0のときNoneになる。呼び出し側(all_parts)は
+    # 全要素へ_assign_material_slotsを掛けるので、ここでNoneを落としておく
+    return [part for part in (wall, ledge, merlons, machicolation) if part is not None]
 
 
 def _build_square_tower(name, theta, radius_tower, height_tower, base_z):
