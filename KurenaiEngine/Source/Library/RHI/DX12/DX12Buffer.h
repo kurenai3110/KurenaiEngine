@@ -110,9 +110,9 @@ namespace Kurenai::RHI
         D3D12_CPU_DESCRIPTOR_HANDLE GetSrvCpuHandle() const;
         // BufferUsage::StructuredReadOnlyで作成されたか(UpdateBufferの分岐に使う)。
         //
-        // 以前は「m_SrvIndexが有効値かどうか」で判定していたが、StructuredRWもSRVを持つように
-        // なったためその判定では両者を区別できない(StructuredRWがステージングリングを持たないまま
-        // UpdateBufferのStructuredReadOnly経路へ入り、nullptrのUPLOADリソースを触ってしまう)。
+        // **「m_SrvIndexが有効値かどうか」で判定してはいけない** ―― StructuredRWもSRVを持つため
+        // 両者を区別できず、StructuredRWがステージングリングを持たないまま
+        // UpdateBufferのStructuredReadOnly経路へ入り、nullptrのUPLOADリソースを触ってしまう。
         // Usageを直接保持して判定する
         bool IsStructuredReadOnly() const { return m_Usage == BufferUsage::StructuredReadOnly; }
         // BufferUsage::StructuredImmutableで作成されたか。CPU書き込み経路を持たないため、

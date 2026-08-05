@@ -124,8 +124,8 @@ namespace Kurenai::RHI
         void SignalFrame();
         // 次のフレームスロットへ進み、そのスロットを最後に使ったフレームのGPU実行完了を待ってから
         // (kFrameCountフレーム前の実行なので通常は待たずに完了している)コマンドアロケータ/リストを
-        // 開き直す。CPUはGPUの完了を待たずに次フレームの記録を始められるため、Present直後に
-        // 毎回完全同期していた旧実装と比べてCPU/GPUがオーバーラップして動作する
+        // 開き直す。CPUはGPUの完了を待たずに次フレームの記録を始められるため、
+        // CPU/GPUがオーバーラップして動作する(Present直後に毎回完全同期すると直列になる)
         void AdvanceToNextFrame();
         // フェンスでGPUの完全なアイドルを待つ(全フレームスロットの実行完了を保証する)。
         // リサイズやシャットダウンなど、パイプライン化の恩恵が不要な箇所でのみ使う
@@ -214,11 +214,11 @@ namespace Kurenai::RHI
 
         // CreateBuffer/CreateTextureFromImageの初期データアップロード専用のコマンドリスト/アロケータ/
         // フェンス。m_CommandList(GetImmediateCommandList、毎フレームRenderスレッドが使う)とは
-        // 完全に独立させてある。これらを共有していた旧実装では、シーン切り替え(LoadScene)のような
+        // 完全に独立させてある。**共有してはいけない** ―― シーン切り替え(LoadScene)のような
         // Render()呼び出しの外からのリソース作成が、Render()が記録中のコマンドリストを
         // Close/Reset/実行してしまい、設定済みのレンダーターゲット/パイプラインステート等を
-        // 破壊するバグがあった(KurenaiEngine2D::BuildFontAtlasをBeginFrame後に呼べない制約の原因もこれ)。
-        // 独立させたことで、LoadSceneをRenderスレッド以外(Updateスレッド等)から呼んでも
+        // 破壊する(KurenaiEngine2D::BuildFontAtlasをBeginFrame後に呼べない制約の原因もこれ)。
+        // 独立させてあるため、LoadSceneをRenderスレッド以外(Updateスレッド等)から呼んでも
         // 毎フレームの描画と安全に共存できる
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_UploadCommandAllocator;
         Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_UploadCommandList;

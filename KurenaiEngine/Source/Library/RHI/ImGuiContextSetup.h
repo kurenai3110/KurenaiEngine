@@ -3,8 +3,8 @@
 namespace Kurenai::RHI::Detail
 {
     // DX11ImGuiBackend / DX12ImGuiBackend が共通で行うImGuiコンテキストの生成と共通設定。
-    // 従来は両バックエンドに同じコード(IMGUI_CHECKVERSION / CreateContext / StyleColorsDark)が
-    // 重複していたため、ここへ集約した。
+    // 両バックエンドに同じコード(IMGUI_CHECKVERSION / CreateContext / StyleColorsDark)を
+    // 複製せず、ここへ集約する。
     //
     // スタイル・フォント・IniFilenameは「見た目とデータの置き場所」であってRHIの責務ではないため
     // ここでは一切触らない。それらはKurenaiEngine3D側(UI::UITheme)が設定する。

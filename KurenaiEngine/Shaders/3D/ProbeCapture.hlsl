@@ -295,9 +295,9 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 worldPos, float3 albedo, flo
     // E(n+1) ≈ E(n)·ρ で ρ→1 のとき収束が遅く、数値誤差で1を超えると発散する。
     // 1未満を掛けて等比級数が必ず収束するようにしている(エネルギーを少し捨てて安定を買う)。
     //
-    // 【M11 Stage 1】焼いているプローブがDDGIボリュームの外にある場合(19.13節のシーンは
-    // ボリュームを1個しか置けないため、Sponza/BistroのようにプローブがDDGI格子の外に
-    // 立つことがある)はDDGIIrradianceのinsideWeightが0になるので、グローバルIBL側へ
+    // 焼いているプローブがDDGIボリュームの外にある場合(ボリュームは1個しか置けないため、
+    // プローブがDDGI格子の外に立つことがある)はDDGIIrradianceのinsideWeightが0になるので、
+    // グローバルIBL側へ
     // フォールバックする。DeferredLighting.hlslのEvaluateIBLと同じ規則
     float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
     if (DDGIParams0.w > 0.5f)

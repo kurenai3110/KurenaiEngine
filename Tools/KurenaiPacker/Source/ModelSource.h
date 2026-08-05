@@ -11,9 +11,8 @@
 
 // assimpによるモデルファイル(glTF/FBX/OBJ等)の解析。GPUデバイスに一切依存しないため
 // KurenaiEngine.dll(ランタイム)には持たず、オフラインのKurenaiPacker.exeだけが
-// assimp/zlibにリンクする。ロジックはj:\Claude\KurenaiEngine\KurenaiEngine\Source\Library\
-// Assets\ModelLoader.cppに元々あったassimp解析部分をそのまま移設したもので、
-// 実測に基づく判断(接線の自前平均化、マテリアル単位のメッシュ結合など)を変更していない。
+// assimp/zlibにリンクする。接線の自前平均化・マテリアル単位のメッシュ結合など、
+// 実測に基づく判断はここに集約する。
 namespace KurenaiPacker
 {
     struct SourceMesh
