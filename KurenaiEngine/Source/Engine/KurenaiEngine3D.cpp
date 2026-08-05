@@ -2255,26 +2255,6 @@ namespace Kurenai
         }
     }
 
-    // 厚みで拡大したあとの雲のUVスケール(C7)。宣言側(KurenaiEngine3D.h)のコメントに
-    // 「なぜ厚みで割るのか」を書いてある
-    float KurenaiEngine3D::EffectiveCloudUvScale() const
-    {
-        // 厚み0は平面経路(Sky.hlsliのThickness==0の分岐)なので拡大しない。
-        // 下限は「厚みを極端に小さくしたときにセルが潰れて計算が破綻するのを防ぐ」ための歯止め
-        if (m_CloudThickness <= 0.0f)
-        {
-            return m_CloudUvScale;
-        }
-        // 【この値はSky.hlsliのコメントが前提にしている】3Dノイズの水平周期は
-        // 「ノイズ周期256セルあたり何回繰り返すか」で持っており(kCloudShapeRepeats等)、
-        // それをメートルへ読み替えた値(形状1,497m / ディテール400m)はこの厚みでの数値。
-        // ここを変えると向こうのコメントの実寸がずれるので、両方を直すこと
-        constexpr float kCloudReferenceThickness = 1200.0f;
-        const float sizeScale =
-            std::max(m_CloudThickness / kCloudReferenceThickness, 0.01f);
-        return m_CloudUvScale / sizeScale;
-    }
-
     void KurenaiEngine3D::DiscoverScenes()
     {
         const std::wstring sceneDirectory = GetModuleDirectory() + L"Assets\\Scenes\\";
@@ -3701,10 +3681,7 @@ namespace Kurenai
                 const float windRadians = DirectX::XMConvertToRadians(m_CloudWindDirectionDegrees);
                 const float windDirX = std::cos(windRadians);
                 const float windDirZ = std::sin(windRadians);
-                // シェーダーへ渡すのと同じUVスケールを使う(EffectiveCloudUvScaleのコメント参照)。
-                // 素のm_CloudUvScaleを使うと、厚みで拡大したセルと巻き戻しの周期が食い違う
-                const float advanceNoiseSpace =
-                    m_CloudWindSpeed * EffectiveCloudUvScale() * renderDeltaTime;
+                const float advanceNoiseSpace = m_CloudWindSpeed * m_CloudUvScale * renderDeltaTime;
                 // Sky.hlsliのkCloudNoisePeriodと同じ値でwrapする(このファイル冒頭近くの
                 // kCloudNoisePeriod定数のコメント参照)
                 m_CloudScrollOffset.x =
@@ -4564,8 +4541,7 @@ namespace Kurenai
         constants.CloudParams0 = {
             m_CloudEnabled ? m_CloudCoverage : 0.0f,
             m_CloudAltitude,
-            // 厚みで拡大したあとの値を渡す(C7)。風のスクロールを進める側と同じ値であること
-            EffectiveCloudUvScale(),
+            m_CloudUvScale,
             m_CloudDensity,
         };
         // wは長らく未使用(0.0f)だった枠。P13bで積雲の厚み[m]をここへ詰めたので、

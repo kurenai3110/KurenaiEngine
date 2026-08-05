@@ -1003,7 +1003,7 @@ Texture3D CloudDetailNoiseTexture : register(KURENAI_CLOUD_DETAIL_REGISTER);
 //
 // 【C2でステップ数固定をやめた理由】C2より前は「スラブを常に12等分する」だったため、
 // 1歩の長さが厚みに比例して伸びた(厚み400mで33m、1,500mなら125m)。ディテールノイズの
-// 縦方向の周期は 厚み / kCloudDetailVerticalRepeats = 120m(厚み1,200mのとき)なので、
+// 縦方向の周期は kCloudDetailVerticalPeriod = 67m なので、
 // 厚みを上げるとステップが特徴と正面衝突し、**層状の縞(スライス)**になる。
 // しかも開始位置が全画素で揃っていたため、縞が画面全体で揃った帯として出ていた(最悪の出方)。
 //
@@ -1013,19 +1013,20 @@ Texture3D CloudDetailNoiseTexture : register(KURENAI_CLOUD_DETAIL_REGISTER);
 // (地平線際)にコストが発散しないための歯止めで、そこでは1歩が伸びるが、
 // もともと霞に埋もれて見えない領域なので実害が無い。
 //
-// 下限12mは「厚み1,200mでのディテールの縦周期120mを10分割する」細かさ。これ以上細かくしても
+// 下限12mは「ディテールの縦周期67mを5〜6分割する」細かさ。これ以上細かくしても
 // ノイズテクスチャが持っている情報より細かくならないので意味がない
 static const int kCloudMaxRaymarchSteps = 48;
 static const float kCloudMinStepMeters = 12.0f;
 
-// 3Dノイズの水平・垂直の尺度。**どちらも「何周するか」という無次元の回数で持つ**(C7)。
-// 水平はウェザーマップのノイズ周期(kCloudNoisePeriod=256セル)あたりの繰り返し数、
-// 垂直はスラブの厚みあたりの繰り返し数。こうすると
-//   ・水平は layer.UvScale(=1/セルの広さ)を通じて厚みに比例する。**この拡大はCPU側で
-//     掛かっている**(KurenaiEngine3D::EffectiveCloudUvScale。風のスクロールを進める側と
-//     同じ値にする必要があるため、シェーダーではなくCPUの1箇所に置いてある)
-//   ・垂直は厚みそのものに比例する
-// となり、**厚みを変えても模様の縦横比が変わらないまま雲が相似に大きくなる**。
+// 3Dノイズの水平・垂直の尺度。**水平は「何周するか」の回数、垂直はワールド距離[m]**。
+//
+// 【C7で厚みに比例させたが撤去した】水平のセルの広さも垂直の周期も厚みに比例させ、
+// 厚みを「雲の大きさ」のつまみにしていたが、「厚みを上げても横幅が広がったように
+// 見えない」という判断で外した。実測では実効セル幅は厚みに正確に比例していた
+// (厚み600/1200/2400で493/997/1988m)ものの、同時に雲の背が高くなって空が埋まるため、
+// 幅の変化がそちらに飲み込まれて見えなかった。
+// **根本の問題は別にある**: 密度が2次元のウェザーマップの掛け算で決まるため、
+// 雲の輪郭が高さによって変わらない(同じ形が積み上がるだけになる)。
 //
 // 【縦がスラブ内で何周するかが立体感を決める】密度がスラブ内で縦にほとんど変わらないと、
 // 2次元のウェザーマップの輪郭が雲底から雲頂まで押し出された形になる。画面ではこれが
@@ -1053,13 +1054,37 @@ static const float kCloudMinStepMeters = 12.0f;
 //   参考写真               … 縁1.64 塊21 面積  99 比1.42
 // なお「水平と垂直を等しくしたまま周期だけ縮める」(等方500m)も試したが、縦横の勾配比が
 // 0.995と等方になり写真の1.42から離れた。空の雲は縦の変化の方が強いので等方ではない。
-// 171回は 256/171 = 1.497セル = 厚み1,200mで1,497m(掃引の1,500mに最も近い整数)
-static const float kCloudShapeRepeats = 171.0f;
-static const float kCloudShapeVerticalRepeats = 4.0f;
-// ディテールノイズ。縁を削るための高周波成分なので形状より細かい。
-// 640回 = 0.4セル = 厚み1,200mで400m。縦横の比(1497:300 ≒ 400:80)は形状に合わせてある
-static const float kCloudDetailRepeats = 640.0f;
-static const float kCloudDetailVerticalRepeats = 10.0f;
+// 【D1で縦横比を参考写真に合わせた】以前は 水平1,497m × 垂直300m の **5:1に扁平**な塊で、
+// それがスラブ内に4層積んでいた。すれすれの角度から見ると横縞の積層に見え、
+// 「同じ形のスライスがただ積み上がっている」という見え方になっていた。
+//
+// 【指標】雲の**内側**(3×3がすべて雲の画素)での縦横の勾配比。平たい塊が縦に積むと
+// 内部に横縞ができて |dI/dy| が |dI/dx| を上回る。丸い房なら等方に近づく。
+// 水平を400mに固定して縦横比だけを振った実測:
+//   1497×300 (5:1)   |dx|0.68 |dy|1.22 比1.80  ← 以前。横縞の積層
+//    400×400 (1:1)   |dx|1.21 |dy|1.25 比1.04  (等方は行き過ぎ)
+//    400×267 (1.5:1) |dx|1.22 |dy|1.51 比1.24  ← 採用。写真とほぼ一致
+//    400×200 (2:1)   |dx|1.27 |dy|1.73 比1.37
+//    400×133 (3:1)   |dx|1.33 |dy|1.80 比1.35
+//   参考写真          |dx|1.71 |dy|2.08 比1.22
+// 【内部のディテール量は写真に届いていない】比(1.24)は合ったが絶対量(1.22)は写真(1.71)より低い。
+//
+// 【この指標へ差し替えた理由】以前は地平線際の帯で「縁の強さ・塊の数・面積」を測って決めていたが、
+// それは**雲と空の境界**を見る指標で、**雲の内側が層状か塊状か**を見ていなかった。
+// 扁平なノイズは境界を細かくするので指標上は良く見え、実際の見た目は悪化していた。
+//
+// 【水平は繰り返し数、垂直はワールド距離】水平の繰り返し数は**整数でなければならない**。
+// CPUがスクロール量をkCloudNoisePeriod(256セル)で巻き戻すので、整数でないと
+// 巻き戻した瞬間にテクスチャ座標が半端にずれて模様が飛ぶ。
+// 周期[m] = 256 ÷ 繰り返し数 × セル幅(1,000m)。640回 = 400m
+static const float kCloudShapeRepeats = 640.0f;
+static const float kCloudShapeVerticalPeriod = 267.0f;
+// ディテールノイズ。縁を削るための高周波成分なので形状の1/4の細かさにし、
+// 縦横比(1.5:1)は形状に合わせる。2560回 = 100m。
+// 【縦周期の下限】レイマーチの1歩の下限が12mなので、40mを下回るとサンプルが足りず
+// ざらつきに化ける。67mはその上
+static const float kCloudDetailRepeats = 2560.0f;
+static const float kCloudDetailVerticalPeriod = 67.0f;
 // ディテールで縁を削る強さ。0で削らない(形状そのまま)、大きいほど輪郭が房状に痩せる
 static const float kCloudDetailErode = 0.35f;
 // 3Dの変調(形状 × 高さプロファイル × ディテールの浸食)のスラブ内平均を1へ揃える係数。
@@ -1124,6 +1149,7 @@ static const float2 kCloudTypeUvOffset = float2(137.0f, 71.0f);
 static const float kCloudCoverageAtStratus = 0.45f;
 static const float kCloudCoverageAtCongestus = 1.55f;
 
+
 // 高さによる密度の勾配。積雲は雲頂ほど凝結が進んで密度が高い。
 // 【平均を1に保つ】lerp(a,b,hf)のhf∈[0,1]での平均は(a+b)/2なので、0.6と1.4にすることで
 // 平均1になり、kCloudVolumeDensityNormalizeを動かさずに済む。
@@ -1185,11 +1211,9 @@ float CloudWorleyFbmFromChannels(float3 channels)
 // 平面レイヤーのときと一致し、CloudDensity(消散係数)と判断B(被覆率→平均透過率)の意味が
 // どちらも変わらない。3Dノイズが変えるのは「同じ量の雲が高さ方向にどう分布するか」だけである。
 //
-// 【最初にやって失敗した形】当初は saturate(CloudRemap(base, 1 - weather, 1)) のように
-// 3Dの形をウェザーマップでもう一度しきい値処理していた。しかしこれは二重に閾値を掛ける形で、
-// weather は既に被覆率で整形済み(大半の方向で0に近い)なので 1-weather はほぼ1になり、
-// base(平均0.781・標準偏差0.055とほぼ定数)を上回れず密度が常に0へ落ちた。
-// 実測でも空の上側で「雲」と判定できる画素がほぼ0になっていた。
+// 【一度失敗している形】saturate(CloudRemap(base, 1 - weather, 1)) のように3Dの形を
+// ウェザーマップでもう一度しきい値処理する形は、weatherが値域の下へ潰れているため
+// base が 1-weather を上回れず密度が常に0へ落ちた。
 // その場所のウェザーマップ(被覆率で整形済み)と雲の種類(C7)。
 // 種類を先に求め、それで局所的な被覆率を上下させることで大きさをまばらにする
 // (kCloudCoverageAtStratus のコメント参照)。cloudTypeは呼び出し側が
@@ -1212,13 +1236,16 @@ float CloudWeatherAt(float2 noiseXZ, CloudLayerParams layer, out float cloudType
 float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudType, CloudLayerParams layer)
 {
     // 3Dテクスチャは Wrap で引くので範囲を気にせず掛けるだけでよい。
-    // 【水平はセル単位、垂直はスラブ単位】(C7) noiseXZ はセル単位(ワールド距離×UvScale)なので、
-    // 「ノイズ周期256セルあたり何回繰り返すか」を掛ければテクスチャ座標になる。
-    // セルの広さ自体が厚みに比例する(CPUのEffectiveCloudUvScale)ため、水平の実寸も付いてくる。
-    // 垂直は hf(0=雲底、1=雲頂)に回数を掛けるので、こちらも厚みに比例する。
-    // 結果として厚みをいくつにしても模様の縦横比は変わらない
+    // 【水平はセル単位の繰り返し数、垂直はワールド距離】noiseXZ はセル単位
+    // (ワールド距離×UvScale)なので、「ノイズ周期256セルあたり何回繰り返すか」を掛ければ
+    // テクスチャ座標になる。繰り返し数が整数なので、CPUがスクロール量を巻き戻しても
+    // テクスチャ座標は整数ぶんしかずれず、模様が飛ばない。
+    // 垂直はメートルで割る。hf(スラブ内の相対高さ)のままだと縦の周期が厚みそのものになり、
+    // 厚みを上げるほど模様が縦へ引き伸びてしまう
     const float shapeUvScale = kCloudShapeRepeats / kCloudNoisePeriod;
-    const float3 shapeUvw = float3(noiseXZ * shapeUvScale, hf * kCloudShapeVerticalRepeats);
+    const float slabHeightMeters = hf * layer.Thickness;
+    const float3 shapeUvw =
+        float3(noiseXZ * shapeUvScale, slabHeightMeters / kCloudShapeVerticalPeriod);
     const float4 shape = CloudShapeNoiseTexture.SampleLevel(VolumeSampler, shapeUvw, 0.0f);
 
     // Perlin-Worley(R)を、周波数を上げたWorley(GBA)を下限として引き伸ばす。
@@ -1243,7 +1270,8 @@ float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudTyp
     // ディテールで縁だけを削る。密度が高い芯はほとんど削れず、薄い縁だけが房状に痩せる。
     // 座標の作り方は形状ノイズと同じ(水平はセル単位の繰り返し数、垂直はスラブ内の繰り返し数)
     const float detailUvScale = kCloudDetailRepeats / kCloudNoisePeriod;
-    const float3 detailUvw = float3(noiseXZ * detailUvScale, hf * kCloudDetailVerticalRepeats);
+    const float3 detailUvw =
+        float3(noiseXZ * detailUvScale, slabHeightMeters / kCloudDetailVerticalPeriod);
     const float3 detail = CloudDetailNoiseTexture.SampleLevel(VolumeSampler, detailUvw, 0.0f).rgb;
     const float detailFbm = CloudWorleyFbmFromChannels(detail);
     const float modulation = saturate(CloudRemap(shaped, detailFbm * kCloudDetailErode, 1.0f));
