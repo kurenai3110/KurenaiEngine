@@ -600,9 +600,9 @@ float3 SkyColorUpper(float3 dir, SkyParameters params)
 // CPU側で巻き戻した位置とシェーダー側の周期境界が食い違い、風が吹くたびに雲がジャンプする
 static const float kCloudNoisePeriod = 256.0f;
 
-// オクターブ数。既定4。親エージェント(またはコストを測る側)がこの1定数を変えるだけで
-// オクターブ数を調整できるようにしてある
-static const int kCloudOctaves = 4;
+// 【F2で未使用になった】ウェザーマップのfBmは単調減衰のオクターブ列から
+// 帯域制限した重み表(kCloudFbmWeight)へ変わったため、この定数はどこからも読まれない。
+// 帯の数と重みは CloudFbm のすぐ上を参照すること
 
 // 光路長のクランプに使う下限(方向のyがこれを下回ったらこの値で頭打ちにする)。
 //
@@ -850,27 +850,72 @@ float CloudValueNoise(float2 uv, float period)
     return lerp(nx0, nx1, w.y);
 }
 
-// kCloudOctaves段のfBm。オクターブごとに周期(period)も周波数と同じ倍率で2倍にしていく
-// (格子1マスあたりの絶対的な広さが半分になっても、格子が表すワールド範囲の周期性は
-// オクターブ0と揃っていないと継ぎ目の位置がオクターブごとにずれて周期性そのものが壊れるため)
+// ウェザーマップ(雲の置き場を決める2次元の場)。**帯域制限**した多重ノイズ(F2)。
+//
+// 【なぜ単調減衰のfBmをやめたか】実際の積雲は対流セルとして組織化しており、
+// セルの水平間隔は境界層の厚みの2〜5倍という**特徴スケール**を持つ。
+// ところが単調減衰のfBmは自己相似で、**特徴スケールを持たない**。その結果、
+// 雲の大きさに「これくらい」が生まれず、極小の雲が空一面に均一に散らばる絵になっていた。
+//
+// 【実測】40km四方を真上から見た雲の連結成分で「モード/中央値」(特徴スケールの有無)を測ると
+//   単調減衰(旧)                    0.64  ← 特徴スケール無しの対照(0.64)と同じ
+//   帯域制限(この式)                1.11  ← 特徴スケール有りの対照(1.12)に到達
+// 雲の大きさのべき指数は 1.88 → 2.15 で、実際の積雲の1.7〜2.2に収まったまま。
+//
+// 【低周波を足すだけでは駄目】fBmは何オクターブ足しても自己相似のままで、モードは生まれない。
+// **エネルギーを1つのスケールへ集める**必要がある。重みを山型にするだけなのでコストは同じ。
+//
+// 【周波数の制約】巻き戻しの周期は kCloudNoisePeriod * frequency 個の格子になるので、
+// **これが整数でなければならない**(整数でないとタイル境界で格子が揃わず筋が出る)。
+// 256 * {0.25, 0.5, 1, 2, 4} = {64, 128, 256, 512, 1024} で条件を満たす。
+// 重みのピークは frequency 0.5 = 波長2セル。CellSize 1,400m のとき **2,800m**で、
+// スラブ厚1,200mの2.33倍。物理が要求する2〜5倍に収まる。
+//
+// 【この重みを変えたら測り直すもの】kCloudWeatherLow/High/Max(場の1%/99%/99.9%点)と
+// kCloudVolumeDensityNormalize。どちらも下にこの重みで測り直した値が入っている。
+// 【大小2つのpopulationを同時に出す】(F2b) 実際の積雲の場は大きさがべき分布で、
+// **対流セルとして組織化した大きな雲と、その隙間を埋める小さな雲が同時に存在する**。
+// 重みを2組持ち、同じ帯の評価を使い回して2つの場を同時に作る(ノイズの評価は増えない)。
+//   Large … ピーク frequency 0.5 = 2,800m。対流セルの組織化
+//   Small … ピーク frequency 1.0 = 1,400m。セルの隙間を埋める小さなサーマル
+// 実測(40km四方を真上から): 大のみでべき指数2.16、大+小で**1.99**。
+// 実際の積雲の1.7〜2.2の真ん中へ寄り、雲の数も387→580へ増える。
+static const int kCloudFbmBands = 5;
+static const float kCloudFbmFrequency[5] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f };
+static const float kCloudFbmWeightLarge[5] = { 0.05f, 0.72f, 0.15f, 0.05f, 0.03f };
+static const float kCloudFbmWeightSmall[5] = { 0.00f, 0.05f, 0.45f, 0.32f, 0.18f };
+
+// 2つの重みで同時に評価する。合成は**しきい値化のあと**で行う(CloudWeatherAt参照)
+void CloudFbmBands(float2 uv, out float large, out float small)
+{
+    float sumLarge = 0.0f;
+    float sumSmall = 0.0f;
+    float weightLarge = 0.0f;
+    float weightSmall = 0.0f;
+    [unroll]
+    for (int band = 0; band < kCloudFbmBands; ++band)
+    {
+        const float frequency = kCloudFbmFrequency[band];
+        // 周期も周波数と同じ倍率で伸ばす。格子が表すワールド範囲の周期性が帯ごとに
+        // ずれると、継ぎ目の位置が揃わず周期性そのものが壊れるため
+        const float n = CloudValueNoise(uv * frequency, kCloudNoisePeriod * frequency);
+        sumLarge += kCloudFbmWeightLarge[band] * n;
+        sumSmall += kCloudFbmWeightSmall[band] * n;
+        weightLarge += kCloudFbmWeightLarge[band];
+        weightSmall += kCloudFbmWeightSmall[band];
+    }
+    // 各CloudValueNoiseは[0,1]を返すので、重みの和で割れば[0,1]に収まる
+    large = sumLarge / weightLarge;
+    small = sumSmall / weightSmall;
+}
+
+// 1つだけ欲しい呼び出し側(巻雲の平面経路)のための包み。大きい側を返す
 float CloudFbm(float2 uv)
 {
-    float amplitude = 0.5f;
-    float frequency = 1.0f;
-    float period = kCloudNoisePeriod;
-    float sum = 0.0f;
-    float amplitudeSum = 0.0f;
-    [unroll]
-    for (int octave = 0; octave < kCloudOctaves; ++octave)
-    {
-        sum += amplitude * CloudValueNoise(uv * frequency, period);
-        amplitudeSum += amplitude;
-        amplitude *= 0.5f;
-        frequency *= 2.0f;
-        period *= 2.0f;
-    }
-    // 等比級数の和で割って[0,1]へ正規化する(各オクターブのCloudValueNoiseは[0,1]を返すため)
-    return sum / amplitudeSum;
+    float large;
+    float small;
+    CloudFbmBands(uv, large, small);
+    return large;
 }
 
 // remap(x, lo, hi) = (x - lo) / (hi - lo)。CloudCoverage<=0(lo=hi=1)では呼び出し側
@@ -1116,7 +1161,10 @@ static const float kCloudDetailErode = 0.35f;
 // 3.59 / 3.51 / 3.48 / 3.50 / 3.56 / 3.64 / 3.82 とほぼ一定になり、定数として成立する:
 //   被覆率0.30: mean(weather) 0.0485 ÷ mean(3D変調) 0.0139 = 3.501
 // 【kCloudDetailErode・高さプロファイル・浸食・ノイズの生成方法のいずれかを変えたら測り直すこと】
-static const float kCloudVolumeDensityNormalize = 3.501f;
+// 【F2bで測り直した】CloudFbmを帯域制限へ、さらに大小2つのpopulationのmaxへ変えたため。
+// 被覆率0.05〜0.35で 3.654 / 3.599 / 3.600 / 3.566 / 3.652 とほぼ一定で、
+// 定数として成立している(帯域制限のみのときは3.587だった)
+static const float kCloudVolumeDensityNormalize = 3.610f;
 // 形状ノイズにコントラストを付ける範囲。**実測した分布から決めた値**で、
 // remap(shape.r, WorleyFbm(gba) - 1, 1) の出力は平均0.784・標準偏差0.055とほとんど定数だった
 // (下限が -0.6 付近になるため [0,1] が [0.375, 1] へ圧縮される)。このままだと3Dの形が
@@ -1186,9 +1234,21 @@ static const float kCloudCoverageAtCongestus = 1.55f;
 //   weather   = saturate(remap(weatherN, threshold, Max))
 // 上端をLowではなくMaxにするのは、被覆率が小さいとき threshold が High に近づいて
 // remapの分母が0になるのを避けるため(分母は最小でも Max - High = 0.119)。
-static const float kCloudWeatherLow = 0.243f;    // 実測1%点
-static const float kCloudWeatherHigh = 0.781f;   // 実測99%点
-static const float kCloudWeatherMax = 0.900f;    // 実測99.9%点(0.839)の少し上。remapの上端
+// 【F2で測り直した】CloudFbmの重みを帯域制限へ変えたので場の分布が動いた
+// (平均0.498 / 標準偏差0.159。旧: 標準偏差はもっと小さかった)。
+// **CloudFbmの重みを変えたら、この3つを必ず測り直すこと。**
+static const float kCloudWeatherLow = 0.174f;    // 実測1%点
+static const float kCloudWeatherHigh = 0.826f;   // 実測99%点
+static const float kCloudWeatherMax = 0.944f;    // 実測99.9%点の少し上。remapの上端
+
+// 小さい雲のpopulation(F2b)。重みが違うので分布も違う(平均0.499 / 標準偏差0.125)。
+// **kCloudFbmWeightSmall を変えたらこの3つも測り直すこと**
+static const float kCloudSmallWeatherLow = 0.221f;
+static const float kCloudSmallWeatherHigh = 0.778f;
+static const float kCloudSmallWeatherMax = 0.909f;
+// 小さい雲の被覆率を、大きい雲の被覆率の何倍にするか。
+// 0で小さい雲が消える(=帯域制限だけの状態へ戻る)、1で同じ被覆率
+static const float kCloudSmallCoverageScale = 0.6f;
 
 // 【高さによる浸食】(D2) 上へ行くほどしきい値を上げ、雲の輪郭を内側へ縮める。
 // hf の2乗にしてあるのは、雲底付近は平らなまま保ち、上半分で一気に細らせるため
@@ -1293,11 +1353,26 @@ float CloudWeatherAt(float2 noiseXZ, CloudLayerParams layer, out float cloudType
     {
         return 0.0f;
     }
-    const float weatherN = CloudFbm(noiseXZ * layer.AnisotropicScale);
+    float largeN;
+    float smallN;
+    CloudFbmBands(noiseXZ * layer.AnisotropicScale, largeN, smallN);
+
     // 実測分布に合わせたしきい値化(D2。定数側のコメントに根拠がある)。
     // localCoverage=0でしきい値は99%点(ほぼ雲なし)、1で1%点(ほぼ全面)
-    const float threshold = lerp(kCloudWeatherHigh, kCloudWeatherLow, localCoverage);
-    return saturate(CloudRemap(weatherN, threshold, kCloudWeatherMax));
+    const float largeThreshold = lerp(kCloudWeatherHigh, kCloudWeatherLow, localCoverage);
+    const float large = saturate(CloudRemap(largeN, largeThreshold, kCloudWeatherMax));
+
+    // 小さい雲(セルの隙間を埋める小さなサーマル)。被覆率は大きい雲に連動させる
+    const float smallCoverage = saturate(localCoverage * kCloudSmallCoverageScale);
+    const float smallThreshold =
+        lerp(kCloudSmallWeatherHigh, kCloudSmallWeatherLow, smallCoverage);
+    const float small = saturate(CloudRemap(smallN, smallThreshold, kCloudSmallWeatherMax));
+
+    // 【重みを混ぜるのではなくmaxを取る理由】(F2b) 2組の重みを1つの場へ足し込むと、
+    // populationが2つに分かれず「1つの場が2種類の細かさで波打つ」だけになる。
+    // しきい値化は非線形なので、**しきい値化してから合成する**ことで初めて
+    // 大きい雲と小さい雲という2つのpopulationになる
+    return max(large, small);
 }
 
 float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudType, CloudLayerParams layer)
