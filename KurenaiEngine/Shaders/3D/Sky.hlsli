@@ -1142,6 +1142,29 @@ static const float kCloudDetailRepeats = 683.0f;
 static const float kCloudDetailVerticalPeriod = 250.0f;
 // ディテールで縁を削る強さ。0で削らない(形状そのまま)、大きいほど輪郭が房状に痩せる
 static const float kCloudDetailErode = 0.35f;
+// 【F4: 浸食を高さで変える】乾燥空気の巻き込み(エントレインメント)は物理では
+// **雲頂で強く、雲底では起きない**。雲底は混合の面ではなく凝結が始まる高度そのもので、
+// 境界層がよく混ざっているためどこでも同じ高さになり、輪郭は鋭く平らなまま残る。
+// 一方で雲頂はサーマルが浮力を失って周囲へ吐き出される場所なので、房状にほつれる。
+// 変更前の浸食は高さに依らず一様で、**平らであるべき雲底にも同じだけ穴を開けていた**。
+//
+// 【平均を1に保つ】lerp(a,b,hf)のhf∈[0,1]での平均は(a+b)/2なので、a+b=2に取れば
+// スラブ内の浸食の総量は変わらない。「上で強く」であって「全体を強く」ではないことが
+// これで保証される。
+//
+// 【0.0と2.0の根拠】オフラインでスラブを格子で埋め、**厚みのあるカラム**(雲のセルが
+// スラブの30%以上あるカラム。雲の縁のカラムを混ぜると雲底の面ではなく輪郭を測ってしまう)
+// の雲底/雲頂について、隣のカラムとの高さ差の平均[m]を測った。カラム占有率は案ごとに
+// 被覆率を振り直して揃えてある:
+//   浸食            雲底の粗さ  雲頂の粗さ  頂/底
+//   底2.0 頂0.0(対照)   12.5 m     14.2 m    1.14  ← 符号を逆にすると逆へ動く
+//   一様(変更前)        11.5 m     15.9 m    1.38
+//   浸食なし            11.9 m     17.5 m    1.47  ← 一様な浸食は非対称を**減らしていた**
+//   底0.3 頂1.7         10.3 m     16.6 m    1.61
+//   底0.0 頂2.0         10.0 m     17.0 m    1.70  ← 採用
+// **この2つを変えたら kCloudVolumeDensityNormalize を測り直すこと**
+static const float kCloudErodeAtBase = 0.0f;
+static const float kCloudErodeAtTop = 2.0f;
 // 3Dの変調のスラブ内平均を**平面レイヤーだったときの値へ**揃える係数。
 // **見た目の調整値ではなく実測から逆算した値。**
 //
@@ -1164,7 +1187,14 @@ static const float kCloudDetailErode = 0.35f;
 // 【F2bで測り直した】CloudFbmを帯域制限へ、さらに大小2つのpopulationのmaxへ変えたため。
 // 被覆率0.05〜0.35で 3.654 / 3.599 / 3.600 / 3.566 / 3.652 とほぼ一定で、
 // 定数として成立している(帯域制限のみのときは3.587だった)
-static const float kCloudVolumeDensityNormalize = 3.610f;
+// 【F4で測り直した】浸食を高さで変えたため。同じオフライン再現・同じ被覆率
+// (0.04/0.06/0.10/0.20)で変更前と変更後を測り、その比を上の3.610へ掛けた:
+//   変更前(一様) 3.667 → 変更後(底0.0 頂2.0) 3.600  比 0.9817
+//   3.610 x 0.9817 = 3.544
+// 【比を使う理由】オフライン再現の絶対値には測る被覆率と乱数の種による揺れがあり、
+// 3.610自体は別の被覆率の組で測った値である。差し替えるのは「浸食を変えたぶん」だけなので、
+// 同じ条件で測った変更前後の比を掛けるのが正しい
+static const float kCloudVolumeDensityNormalize = 3.544f;
 // 形状ノイズにコントラストを付ける範囲。**実測した分布から決めた値**で、
 // remap(shape.r, WorleyFbm(gba) - 1, 1) の出力は平均0.784・標準偏差0.055とほとんど定数だった
 // (下限が -0.6 付近になるため [0,1] が [0.375, 1] へ圧縮される)。このままだと3Dの形が
@@ -1432,7 +1462,13 @@ float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudTyp
         float3(noiseXZ * detailUvScale, slabHeightMeters / kCloudDetailVerticalPeriod);
     const float3 detail = CloudDetailNoiseTexture.SampleLevel(VolumeSampler, detailUvw, 0.0f).rgb;
     const float detailFbm = CloudWorleyFbmFromChannels(detail);
-    const float modulation = saturate(CloudRemap(shaped, detailFbm * kCloudDetailErode, 1.0f));
+    // 【F4】浸食の強さを高さで変える(kCloudErodeAtBase のコメント参照)。
+    // 【縁の項を足していない理由】計画では「浸食を(1 - shaped)にも比例させて芯を守る」と
+    // していたが、remapの形が既にそれをしていた(実測: shaped>0.8 で削った後/削る前が0.997、
+    // shaped<0.3 で0.258)。(1 - shaped)を掛けると逆に**縁の浸食が弱まる**(0.258→0.389)
+    const float erodeStrength =
+        kCloudDetailErode * lerp(kCloudErodeAtBase, kCloudErodeAtTop, hf);
+    const float modulation = saturate(CloudRemap(shaped, detailFbm * erodeStrength, 1.0f));
 
     // 高さによる密度の勾配(C4)。スラブ内の平均が1になるよう対称に取ってあるので、
     // 全体の光学的深さは変わらず「底が透けて頭が詰まる」形だけが加わる
