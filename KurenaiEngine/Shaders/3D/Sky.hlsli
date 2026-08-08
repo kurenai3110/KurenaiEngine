@@ -880,10 +880,67 @@ float CloudValueNoise(float2 uv, float period)
 //   Small … ピーク frequency 1.0 = 1,400m。セルの隙間を埋める小さなサーマル
 // 実測(40km四方を真上から): 大のみでべき指数2.16、大+小で**1.99**。
 // 実際の積雲の1.7〜2.2の真ん中へ寄り、雲の数も387→580へ増える。
+//
+// 【G→H1で峰を 0.72 → 0.45 → 0.30 へ二段階で緩めた】被覆率を上げると**格子模様が見えていた**ため。
+// CloudValueNoise は正方格子の各点にハッシュを置いて補間しているので、単一の周波数だけを
+// 見るとその格子の目がそのまま模様になる。普段は複数のオクターブが重なって隠れるが、
+// F2で重みの0.72を frequency 0.5 の1本へ集めたことで露出した。
+//
+// 【測り方】40km四方の場を2次元FFTし、振幅を「軸に沿った十字帯(±15度)」と
+// 「斜めの帯(30〜60度)」で比べた比を異方性とする。等方な場なら1.0になる:
+//   峰0.72(F2)              異方性 1.72   モード/中央 1.01
+//   峰0.45(G)               異方性 1.28   モード/中央 1.02  ← 格子は薄れたがまだ見えた
+//   帯を3本に割る           異方性 1.37   モード/中央 0.29  ← モードを失う。不採用
+//   単調減衰(F2前)          異方性 1.07   モード/中央 0.32
+// **モードを測らずに峰だけ緩めてはいけない。** F2の成果はモードなので、そこは守る。
+//
+// 【H1で0.45から0.30へ】0.45でもユーザーには格子が見えていたため、峰の幅を刻み直した。
+// 窓を3つ取って平均した(1つの実現値で決めない):
+//   峰      異方性  モード/中央  べき指数
+//   0.45     1.25      0.87      1.91
+//   0.40     1.21      0.91      1.95
+//   0.35     1.17      1.01      1.99
+//   0.30     1.13      1.17      2.20  ← 採用。3条件をすべて満たす唯一の点
+//   0.25     1.08      1.36      2.34  ← べき指数が実際の積雲の範囲(1.7〜2.2)を外れる
+//
+// 【却下した2案】どちらも**絵で落ちた**。数値だけで決めてはいけない:
+//   ・ドメインワープ(UVを別のノイズで歪める)…異方性は1.19まで下がるが、
+//     絵が大理石模様(渦と筋)になる。振幅を上げるほど悪化する
+//   ・オクターブの回転(ピタゴラス数(3,4,5)でUVを回す)…異方性1.26でほとんど効かず、
+//     しかも巻き戻しの周期を 256f/5 にする必要があるため
+//     **世界の繰り返しが358kmから71.7kmへ縮む**(水平線際で反復が見える恐れ)
 static const int kCloudFbmBands = 5;
 static const float kCloudFbmFrequency[5] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f };
-static const float kCloudFbmWeightLarge[5] = { 0.05f, 0.72f, 0.15f, 0.05f, 0.03f };
+static const float kCloudFbmWeightLarge[5] = { 0.20f, 0.30f, 0.24f, 0.15f, 0.11f };
 static const float kCloudFbmWeightSmall[5] = { 0.00f, 0.05f, 0.45f, 0.32f, 0.18f };
+
+// 【H0: 帯ごとにUVの位相をずらす】これが無いと**ワールド原点に雲の穴が開く**。
+//
+// 【何が起きていたか】CloudHash12 は p=(0,0) で p3=(0,0,0) となり、
+// frac((0+0)*0) = **0** を返す(退化点)。CloudValueNoise は格子の4隅をハッシュするので、
+// 原点のセルに触れる場所は必ずこの0を混ぜることになる。さらに悪いことに、位相をずらさないと
+// **5つの帯すべてが uv≒0 で同じ格子点(0,0)を参照する**ので、帯どうしが打ち消し合わずに
+// 全部そろって0へ引っ張られる。fBmの「重ねれば平均へ寄る」という前提が原点付近だけ壊れる。
+//
+// 【実測(オフライン。カメラ位置 0,1.6,-600 の真上が見る ±0.7セルの窓)】
+//   位相ずらし無し  largeN の平均 0.237 / P(largeN<0.3) 71.9%
+//   位相ずらし有り  largeN の平均 0.529 / P(largeN<0.3)  0.0%
+//   世界全体では    平均 0.498 で**どちらも同じ**(4.4% 対 4.2%)
+// 実機でも weather = step(0.30, largeN) にして測ると真上の空の64.7%が
+// largeN<0.30 だった(世界全体の予測は4.5%)。**局所を世界全体の統計で語っていた。**
+//
+// この穴は島とカメラのある場所そのものに開いていたので、
+// 「真上の雲が少ない」「被覆率を1にしても埋まらない」の両方を単独で説明する。
+//
+// 【巻き戻しは壊れない】オフセットは定数なので、ワールドが kCloudNoisePeriod ずれたときの
+// UVのずれは 256*frequency の整数倍のままで、周期の境界は揃ったままになる。
+// 【値そのものに意味は無い】帯どうしが原点付近で別の格子点を見ればよいだけ。
+// **分布は変わらないので、しきい値の定数も正規化係数も測り直す必要はない**
+// (世界全体で 1%点 0.243 / 99%点 0.757 / 上端 0.880。現行の 0.241 / 0.758 / 0.881 と一致)
+static const float2 kCloudFbmBandOffset[5] = {
+    float2(23.7f, 91.3f), float2(57.1f, 13.9f), float2(11.3f, 77.7f),
+    float2(89.1f, 41.3f), float2(5.9f, 63.1f)
+};
 
 // 2つの重みで同時に評価する。合成は**しきい値化のあと**で行う(CloudWeatherAt参照)
 void CloudFbmBands(float2 uv, out float large, out float small)
@@ -898,7 +955,10 @@ void CloudFbmBands(float2 uv, out float large, out float small)
         const float frequency = kCloudFbmFrequency[band];
         // 周期も周波数と同じ倍率で伸ばす。格子が表すワールド範囲の周期性が帯ごとに
         // ずれると、継ぎ目の位置が揃わず周期性そのものが壊れるため
-        const float n = CloudValueNoise(uv * frequency, kCloudNoisePeriod * frequency);
+        // 【帯ごとの位相ずらし】kCloudFbmBandOffset のコメント参照。
+        // これが無いとワールド原点で全帯が同じ格子点(0,0)を引き、ハッシュの退化で穴が開く
+        const float n = CloudValueNoise(uv * frequency + kCloudFbmBandOffset[band],
+                                        kCloudNoisePeriod * frequency);
         sumLarge += kCloudFbmWeightLarge[band] * n;
         sumSmall += kCloudFbmWeightSmall[band] * n;
         weightLarge += kCloudFbmWeightLarge[band];
@@ -1132,8 +1192,35 @@ static const float kCloudMinStepMeters = 12.0f;
 //   水平1000m  |dx|2.20 |dy|2.70 比1.23
 //   水平1497m  |dx|2.02 |dy|2.49 比1.23  ← 採用。比は1000mと同じで、絶対量が写真に近い
 //   参考写真   |dx|1.71 |dy|2.08 比1.22
-static const float kCloudShapeRepeats = 171.0f;
-static const float kCloudShapeVerticalPeriod = 998.0f;
+// 【H1cで171→86・998→1984へ】被覆率を上げると**遠方まで一定間隔の繰り返し**が見えていた。
+// 原因は形状テクスチャの中身で、CloudNoiseGenerate.hlsl の kShapeBaseCells が4だったため
+// **128^3のタイル1枚に大きな特徴が4x4=16個しか無かった**。ワールドでは1セル524mで、
+// タイルは 1400*256/171 = 2,096m ごとに繰り返す。特徴の語彙が少なすぎるので、
+// タイルの継ぎ目をどう工夫しても「同じ大きさの塊が一定間隔」に見える。
+//
+// kShapeBaseCells を8へ上げると同時にここを半分にすることで、
+// **雲の特徴の大きさは524mのまま**、タイルは4,167mごと・特徴は8x8=64個になる。
+// (セル数だけ上げると特徴が小さくなり、周期だけ伸ばすと雲がのっぺりする。両方を同時に動かす)
+static const float kCloudShapeRepeats = 86.0f;
+static const float kCloudShapeVerticalPeriod = 1984.0f;
+
+// 【H1c: 形状テクスチャを2回引いて混ぜる】上のセル数だけでは遠方の繰り返しが残った。
+// 水平線際は100km以上先まで見えるので、4,167mのタイルが25回以上並んで細かい規則模様になる。
+//
+// **86と61は互いに素**(86=2*43、61は素数)なので、両方が同時に巻き戻るのは256セルごと。
+// つまり**合成した場は358kmでしか繰り返さない**。これで遠方の規則性が消えることを実機で確認した。
+//
+// 【順序が重要だった】セル数を上げる前に2回引きだけを試したときは効かなかった。
+// 特徴が16種類しか無い状態では、2つのタップが**同じ16種類**を使うため
+// 「並びの周期」を伸ばしても「語彙の少なさ」が残るため。**語彙を増やしてから並びを崩す。**
+//
+// 【縦周期は縦横比を保つ】1984 * 86/61 = 2797m。
+// 【コスト】3Dテクスチャのフェッチが2回→3回になる
+static const float kCloudShapeRepeatsB = 61.0f;
+static const float kCloudShapeVerticalPeriodB = 2797.0f;
+// 2つのタップが同じ場所を引かないようにずらす。値そのものに意味は無い
+static const float3 kCloudShapeUvOffsetB = float3(0.37f, 0.71f, 0.23f);
+static const float kCloudShapeMixB = 0.5f;
 // ディテールノイズ。縁を削るための高周波成分なので形状の1/4の細かさにし、
 // 縦横比(1.5:1)は形状に合わせる。683回 = 374m。
 // 【縦周期の下限】レイマーチの1歩の下限が12mなので、40mを下回るとサンプルが足りず
@@ -1194,15 +1281,28 @@ static const float kCloudErodeAtTop = 2.0f;
 // 【比を使う理由】オフライン再現の絶対値には測る被覆率と乱数の種による揺れがあり、
 // 3.610自体は別の被覆率の組で測った値である。差し替えるのは「浸食を変えたぶん」だけなので、
 // 同じ条件で測った変更前後の比を掛けるのが正しい
-static const float kCloudVolumeDensityNormalize = 3.544f;
+// 【Gで測り直した】帯の峰を緩め、remapの上端を被覆率で動かすようにしたため。
+// 同条件(被覆率0.04/0.06/0.10/0.20)で 3.600 → 3.837、3.544 x 3.837/3.600 = 3.777。
+// 被覆率ごとに 3.806 / 3.784 / 3.874 / 3.868 とほぼ一定で、定数として成立している
+// 【H1で測り直した】帯の峰を0.45→0.30へ緩めたため。運用点が0.17へ動いたので測る被覆率も
+// そこへ合わせ(0.10/0.17/0.25/0.40)、同条件で 3.947 → 3.903、3.777 x 3.903/3.947 = 3.736
+// 【H1cで測り直した】ベイクの基本セル数を8へ、形状テクスチャを2回引きへ変えたため。
+// 同条件(被覆率0.10/0.16/0.25/0.40)で 3.959 → 4.121、3.777 x 4.121/3.959 = 3.931。
+// 変更前として測った3.959は別経路で測った3.903とよく一致しており、測り方の妥当性の確認になっている
+static const float kCloudVolumeDensityNormalize = 3.931f;
 // 形状ノイズにコントラストを付ける範囲。**実測した分布から決めた値**で、
 // remap(shape.r, WorleyFbm(gba) - 1, 1) の出力は平均0.784・標準偏差0.055とほとんど定数だった
 // (下限が -0.6 付近になるため [0,1] が [0.375, 1] へ圧縮される)。このままだと3Dの形が
 // ほとんど効かないので、実測の15%点(0.726)〜92%点(0.856)を[0,1]へ引き伸ばす。
 // 変換後は平均0.455・標準偏差0.329となり、雲の芯と隙間がはっきり分かれる。
 // 【この2つを変えたら上のkCloudVolumeDensityNormalizeを測り直すこと】
-static const float kCloudShapeContrastLow = 0.726f;
-static const float kCloudShapeContrastHigh = 0.856f;
+// 【H1cで測り直した】ベイクの基本セル数を4→8へ上げ、形状テクスチャを2回引いて混ぜたため。
+// 混ぜると分散が下がる(rawBaseの標準偏差 0.054 → 0.039)ので、伸張範囲を測り直さないと
+// 雲が薄くなる。取り直した結果 base の分布は変更前と一致する:
+//   変更前(4セル・1回引き) base 平均0.454 標準偏差0.329
+//   変更後(8セル・2回引き) base 平均0.455 標準偏差0.330
+static const float kCloudShapeContrastLow = 0.746f;
+static const float kCloudShapeContrastHigh = 0.840f;
 
 // 【C4で縦プロファイルを「雲の種類」で切り替えるようにした】
 // C4より前は全ての雲が同じ1つのプロファイル(平らな底・丸い頭)だったため、空一面に
@@ -1267,9 +1367,31 @@ static const float kCloudCoverageAtCongestus = 1.55f;
 // 【F2で測り直した】CloudFbmの重みを帯域制限へ変えたので場の分布が動いた
 // (平均0.498 / 標準偏差0.159。旧: 標準偏差はもっと小さかった)。
 // **CloudFbmの重みを変えたら、この3つを必ず測り直すこと。**
-static const float kCloudWeatherLow = 0.174f;    // 実測1%点
-static const float kCloudWeatherHigh = 0.826f;   // 実測99%点
-static const float kCloudWeatherMax = 0.944f;    // 実測99.9%点の少し上。remapの上端
+// 【G→H1で測り直した】kCloudFbmWeightLarge の峰を 0.72→0.45→0.30 と緩めたため。
+// 峰を緩めるほど場は平均へ寄る(標準偏差 0.159 → 0.116 → 0.101。平均は常に0.498)。
+// **帯ごとのUV位相(kCloudFbmBandOffset)を入れた状態で測ること。**
+static const float kCloudWeatherLow = 0.269f;    // 実測1%点
+static const float kCloudWeatherHigh = 0.727f;   // 実測99%点
+static const float kCloudWeatherMax = 0.850f;    // 実測99.9%点の少し上。remapの上端
+
+// 【G: 被覆率が1へ近づいたらremapの幅も詰める】
+// 上の3つだけでは**被覆率1にしても空が埋まらない**。理由は remap の上端が固定だから:
+//   weather = saturate(remap(weatherN, Low, Max))
+// は場を[0,1]へ引き伸ばしているだけなので、被覆率1でも weather の平均は0.42にしかならない。
+// 「被覆率1」が「しきい値が場の1%点にある」という意味にしかなっておらず、
+// 「どこも濃い」という意味になっていなかった。
+//
+// ここで上端を下端へ寄せると、被覆率1で weather がほぼ全面1へ張り付く。
+// 【実測(仰角ごとに視線を192本ずつ飛ばし、空が雲で覆われる割合)】
+//   被覆率1.0        仰角5度  仰角20度  仰角45度  真上
+//   変更前            100.0%    91.1%    83.3%   76.0%
+//   上限だけ直す      100.0%    94.8%    89.6%   83.9%
+//   上限+この幅詰め   100.0%   100.0%    97.9%   98.4%  ← 採用
+// **真上が上限を直接映す方向である。** 雲層は厚み1,200mの水平スラブなので、
+// 真上の視線はスラブを最短で抜け、投影された占有率が場の点の割合そのものになる。
+// 水平線際は視線がスラブ内を13.8km進んで途中の雲を全部拾うため、上限が隠れて見えない。
+// (F1を「不要」として一度計画から外したのは、水平線寄りの画角だけで測っていたため)
+static const float kCloudWeatherNarrowSpan = 0.05f;
 
 // 小さい雲のpopulation(F2b)。重みが違うので分布も違う(平均0.499 / 標準偏差0.125)。
 // **kCloudFbmWeightSmall を変えたらこの3つも測り直すこと**
@@ -1375,8 +1497,20 @@ float CloudWorleyFbmFromChannels(float3 channels)
 float CloudWeatherAt(float2 noiseXZ, CloudLayerParams layer, out float cloudType)
 {
     cloudType = CloudTypeAt(noiseXZ, layer.TypeBias);
+    // 【G: Coverage=1でどこでも開ききるようにする】
+    // 以前は saturate(Coverage * typeScale) だった。typeScale は層雲寄りで0.45なので、
+    // **Coverage=1でも localCoverage が0.45で頭打ち**になり、空の半分近くが最後まで
+    // 開かなかった(実測: Coverage=1でのlocalCoverageの最小値0.467)。
+    // Coverage^2 の項を足すと、Coverage=1 で typeScale + (1 - typeScale) = 1 となって
+    // どこでも開ききる一方、Coverage が小さいうちは Coverage^2 が無視できるので
+    // 従来の挙動がそのまま残る(運用値0.04では 0.0180 → 0.0189。+5%)。
+    // 【typeScale を捨てない理由】これはC7で入れた「背の高い雲の場所は大きな塊にまとまる」
+    // という結び付きで、雲の大きさのばらつきの源。端だけを開けたいのであって
+    // 途中の性質は変えたくない
+    const float typeScale =
+        lerp(kCloudCoverageAtStratus, kCloudCoverageAtCongestus, cloudType);
     const float localCoverage = saturate(
-        layer.Coverage * lerp(kCloudCoverageAtStratus, kCloudCoverageAtCongestus, cloudType));
+        layer.Coverage * typeScale + (layer.Coverage * layer.Coverage) * (1.0f - typeScale));
     // CloudRemapの分母は (1 - (1 - localCoverage)) = localCoverage なので、
     // 0のときは割らずに抜ける(この層に雲が無い場所)
     if (localCoverage <= 0.0f)
@@ -1389,14 +1523,24 @@ float CloudWeatherAt(float2 noiseXZ, CloudLayerParams layer, out float cloudType
 
     // 実測分布に合わせたしきい値化(D2。定数側のコメントに根拠がある)。
     // localCoverage=0でしきい値は99%点(ほぼ雲なし)、1で1%点(ほぼ全面)
+    // 【G】上端も被覆率で下端へ寄せる(kCloudWeatherNarrowSpan のコメント参照)。
+    // 上端を固定にしていると、被覆率1でも weather は場を[0,1]へ引き伸ばしただけになり
+    // 平均0.42にしかならない。max(..., threshold + 小さい値) は分母が0になるのを防ぐため
     const float largeThreshold = lerp(kCloudWeatherHigh, kCloudWeatherLow, localCoverage);
-    const float large = saturate(CloudRemap(largeN, largeThreshold, kCloudWeatherMax));
+    const float largeTop = max(
+        lerp(kCloudWeatherMax, kCloudWeatherLow + kCloudWeatherNarrowSpan, localCoverage),
+        largeThreshold + 0.001f);
+    const float large = saturate(CloudRemap(largeN, largeThreshold, largeTop));
 
     // 小さい雲(セルの隙間を埋める小さなサーマル)。被覆率は大きい雲に連動させる
     const float smallCoverage = saturate(localCoverage * kCloudSmallCoverageScale);
     const float smallThreshold =
         lerp(kCloudSmallWeatherHigh, kCloudSmallWeatherLow, smallCoverage);
-    const float small = saturate(CloudRemap(smallN, smallThreshold, kCloudSmallWeatherMax));
+    const float smallTop = max(
+        lerp(kCloudSmallWeatherMax, kCloudSmallWeatherLow + kCloudWeatherNarrowSpan,
+             smallCoverage),
+        smallThreshold + 0.001f);
+    const float small = saturate(CloudRemap(smallN, smallThreshold, smallTop));
 
     // 【重みを混ぜるのではなくmaxを取る理由】(F2b) 2組の重みを1つの場へ足し込むと、
     // populationが2つに分かれず「1つの場が2種類の細かさで波打つ」だけになる。
@@ -1416,9 +1560,17 @@ float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudTyp
     // 厚みを上げるほど模様が縦へ引き伸びてしまう
     const float shapeUvScale = kCloudShapeRepeats / kCloudNoisePeriod;
     const float slabHeightMeters = hf * layer.Thickness;
+    // 【H1c: 2回引いて混ぜる】繰り返し数が互いに素なので、合成した場は358kmでしか
+    // 繰り返さない(kCloudShapeRepeatsB のコメント参照)
     const float3 shapeUvw =
         float3(noiseXZ * shapeUvScale, slabHeightMeters / kCloudShapeVerticalPeriod);
-    const float4 shape = CloudShapeNoiseTexture.SampleLevel(VolumeSampler, shapeUvw, 0.0f);
+    const float3 shapeUvwB =
+        float3(noiseXZ * (kCloudShapeRepeatsB / kCloudNoisePeriod),
+               slabHeightMeters / kCloudShapeVerticalPeriodB) + kCloudShapeUvOffsetB;
+    const float4 shape = lerp(
+        CloudShapeNoiseTexture.SampleLevel(VolumeSampler, shapeUvw, 0.0f),
+        CloudShapeNoiseTexture.SampleLevel(VolumeSampler, shapeUvwB, 0.0f),
+        kCloudShapeMixB);
 
     // Perlin-Worley(R)を、周波数を上げたWorley(GBA)を下限として引き伸ばす。
     // Rだけだと塊が丸すぎ、Worleyを重ねることで綿状の輪郭になる

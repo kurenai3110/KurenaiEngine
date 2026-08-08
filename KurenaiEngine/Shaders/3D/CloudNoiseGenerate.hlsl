@@ -165,7 +165,21 @@ float NoiseRemap(float x, float lo, float hi)
 // R = Perlin-Worley(低周波の塊)、G/B/A = 周波数を上げたWorley(縁を削るのに使う)。
 // この4チャンネル構成はSchneiderらのボリュメトリック雲(Nubis)で標準的に使われるもので、
 // R単体では塊が丸すぎ、Worleyを重ねることで綿状の輪郭になる
-static const float kShapeBaseCells = 4.0f;
+//
+// 【H1cで4から8へ上げた】被覆率を上げると**遠方まで一定間隔の繰り返し**が見えていた。
+// 4だと**タイル1枚に大きな特徴が4x4=16個しか無い**。Sky.hlsli側はこのテクスチャを
+// ワールドの2,096mごとに繰り返して敷いていたので、空が「同じ16種類の塊の反復」になっていた。
+//
+// 【この値だけを上げてはいけない】上げると特徴が小さくなるので、Sky.hlsliの
+// kCloudShapeRepeats を同じ比率で下げて**ワールドでの特徴の大きさ(524m)を保つ**こと。
+// 8にしたときの相棒は kCloudShapeRepeats = 86 / kCloudShapeVerticalPeriod = 1984。
+//
+// 【上限】128^3に対して1セルあたりのテクセル数が 128/8 = 16。WorleyFbmは3オクターブで
+// セル数を倍々にするので最高で 8*4 = 32セル = 4テクセル/セルになる。
+// これ以上増やすとベイクの時点でエイリアスするため、16へ上げるのは避ける。
+// 【この値を変えたら測り直すもの】kCloudShapeContrastLow/High と
+// kCloudVolumeDensityNormalize(どちらもSky.hlsli)
+static const float kShapeBaseCells = 8.0f;
 
 RWTexture3D<float4> ShapeOut : register(u0);
 
