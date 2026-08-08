@@ -1665,10 +1665,14 @@ namespace Kurenai
             kCloudShapeNoiseSize, kCloudShapeNoiseSize, kCloudShapeNoiseSize, RHI::Format::R8G8B8A8_UNorm);
         m_CloudDetailNoiseTexture = m_Device->CreateUAVTexture3D(
             kCloudDetailNoiseSize, kCloudDetailNoiseSize, kCloudDetailNoiseSize, RHI::Format::R8G8B8A8_UNorm);
-        if (!m_CloudShapeNoiseTexture || !m_CloudDetailNoiseTexture)
+        // ウェザーマップ(H3)。2Dなので CreateUAVTexture。8bitで足りることは実測済み
+        // (同じ解像度なら16bitとの誤差の差は0.0002。効くのは空間の刻みだけ)
+        m_CloudWeatherNoiseTexture = m_Device->CreateUAVTexture(
+            kCloudWeatherNoiseSize, kCloudWeatherNoiseSize, RHI::Format::R8G8B8A8_UNorm);
+        if (!m_CloudShapeNoiseTexture || !m_CloudDetailNoiseTexture || !m_CloudWeatherNoiseTexture)
         {
             Core::Logger::Error("KurenaiEngine3D",
-                "雲の3Dノイズテクスチャの作成に失敗しました(ボリュメトリック雲が正しく描画されません)");
+                "雲のノイズテクスチャの作成に失敗しました(ボリュメトリック雲が正しく描画されません)");
         }
 
         RHI::ShaderDesc cloudShapeNoiseCsDesc;
@@ -1698,6 +1702,20 @@ namespace Kurenai
         }
         m_CloudDetailNoisePipelineState =
             m_Device->CreateComputePipelineState({ m_CloudDetailNoiseComputeShader.get() });
+
+        RHI::ShaderDesc cloudWeatherNoiseCsDesc;
+        cloudWeatherNoiseCsDesc.Stage = RHI::ShaderStage::Compute;
+        cloudWeatherNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.hlsl";
+        cloudWeatherNoiseCsDesc.EntryPoint = "CSGenerateWeather";
+        m_CloudWeatherNoiseComputeShader = m_Device->CreateShader(cloudWeatherNoiseCsDesc);
+        if (!m_CloudWeatherNoiseComputeShader)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "CloudNoiseGenerate.hlsl CSGenerateWeather のコンパイルに失敗しました"
+                "(ウェザーマップが焼かれず、雲がまったく立ちません)");
+        }
+        m_CloudWeatherNoisePipelineState =
+            m_Device->CreateComputePipelineState({ m_CloudWeatherNoiseComputeShader.get() });
 
         // 大気散乱のLUT(P14a: Hillaire 2020)。TransmittanceとMultiScatteringはカメラにも太陽にも
         // 依存せず、大気パラメータ(濁りを含む)だけの関数なので、濁りが変わらない限り焼き直さない
@@ -4853,11 +4871,13 @@ namespace Kurenai
         //     まったく同じ理由で焼き直さない。2枚は互いに独立なので1パスの中で連続して
         //     ディスパッチしてよい(SRVとして読み合う関係が無く、BRDFLUTの2パス構成のような
         //     中間バッファも要らない) ---
-        if (!m_CloudNoiseBaked && m_CloudShapeNoisePipelineState && m_CloudDetailNoisePipelineState)
+        if (!m_CloudNoiseBaked && m_CloudShapeNoisePipelineState && m_CloudDetailNoisePipelineState
+            && m_CloudWeatherNoisePipelineState)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "CloudNoiseBake",
-                .Writes = { m_CloudShapeNoiseTexture.get(), m_CloudDetailNoiseTexture.get() },
+                .Writes = { m_CloudShapeNoiseTexture.get(), m_CloudDetailNoiseTexture.get(),
+                            m_CloudWeatherNoiseTexture.get() },
                 .Execute = [this](RHI::IRHICommandList* cmd)
                 {
                     // スレッドグループは4x4x4。3次元なのでグループあたり64スレッドで、
@@ -4875,6 +4895,15 @@ namespace Kurenai
                     cmd->SetComputeUnorderedAccessTexture(0, m_CloudDetailNoiseTexture.get(), 0);
                     const uint32_t detailGroups = (kCloudDetailNoiseSize + kGroupSize - 1) / kGroupSize;
                     cmd->Dispatch(detailGroups, detailGroups, detailGroups);
+
+                    // ウェザーマップ(H3)は2Dなのでスレッドグループが8x8(=64。上の4x4x4と同じ粒度)。
+                    // 4096^2 = 1,678万テクセルを一度だけ焼く
+                    constexpr uint32_t kWeatherGroupSize = 8;
+                    cmd->SetComputePipelineState(m_CloudWeatherNoisePipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_CloudWeatherNoiseTexture.get(), 0);
+                    const uint32_t weatherGroups =
+                        (kCloudWeatherNoiseSize + kWeatherGroupSize - 1) / kWeatherGroupSize;
+                    cmd->Dispatch(weatherGroups, weatherGroups, 1);
                 },
             });
             m_CloudNoiseBaked = true;
@@ -6090,6 +6119,8 @@ namespace Kurenai
                 cmd->SetTexture(19, m_CloudDetailNoiseTexture.get());
                 // 大気散乱のSkyView LUT(P14b)。日中の空の色はここから引く
                 cmd->SetTexture(20, m_SkyViewLUT.get());
+                // 焼いたウェザーマップ(H3)。3Dノイズと同じ理由で常にバインドする
+                cmd->SetTexture(21, m_CloudWeatherNoiseTexture.get());
                 cmd->Draw(3, 0);
             },
         });
@@ -6420,6 +6451,9 @@ namespace Kurenai
                     // 大気散乱のSkyView LUT(P14b)。雲と同じ理由で、水面に映る空も
                     // 背景とまったく同じものでなければならない
                     cmd->SetTexture(15, m_SkyViewLUT.get());
+                    // 焼いたウェザーマップ(H3)。**Lightingパスと同じものを渡さないと、
+                    // 水面に映る雲と空の雲が別の場所に立つ**
+                    cmd->SetTexture(17, m_CloudWeatherNoiseTexture.get());
                     // bent normal(34章)。Lightingパスとまったく同じものを読まないと、
                     // SSRが適用される領域とされない領域の境界に段差が出る。
                     // **t11は平面反射が使っているためt16へ移した**

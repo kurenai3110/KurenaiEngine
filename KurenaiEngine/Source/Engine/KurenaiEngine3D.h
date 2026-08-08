@@ -1019,6 +1019,11 @@ namespace Kurenai
         static constexpr uint32_t kSkyViewLUTHeight = 108;
         static constexpr uint32_t kCloudShapeNoiseSize = 128;
         static constexpr uint32_t kCloudDetailNoiseSize = 32;
+        // ウェザーマップ(H3)。ノイズ空間の1周期(256セル=358km)を1枚で覆うので、
+        // 4096なら88m/テクセル。**CloudNoiseGenerate.hlsl の kWeatherNoiseSize と同じ値であること**
+        // (片方だけ変えるとテクセル中心がずれ、バイリニアが半テクセル分ぼける)。
+        // R8G8B8A8で4096^2 = 67MB。解像度の実測はSky.hlsliのウェザーマップの節
+        static constexpr uint32_t kCloudWeatherNoiseSize = 4096;
         // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
         // オフラインで焼いたDDS(Sky.dds)と違い、太陽が動くと空の輝度分布の「形」も追従する
         // (circumsolarの明るい領域が太陽と一緒に動く)。詳細はSkyGenerate.hlsl冒頭。
@@ -1113,12 +1118,20 @@ namespace Kurenai
         //
         // 【なぜ2枚に分けるか】Shapeは雲の大まかな塊、Detailはその縁を削る高周波成分で、
         // 必要な解像度が2桁違う。1枚にまとめると細かい側に合わせた巨大なテクスチャが要る
+        //
+        // 【3枚目: ウェザーマップ(H3)】雲がどこに立つかを決める2Dの場。上の2枚と同じく
+        // 純粋な手続き生成なので同じパスで一度だけ焼く。**これはレイマーチの高速化が目的**で、
+        // 実測ではマーチの1歩あたりコストの91%がこの2Dのfbmだった(根拠と解像度の実測は
+        // Shaders/3D/Sky.hlsli のウェザーマップの節)
         std::unique_ptr<RHI::IRHITexture> m_CloudShapeNoiseTexture;
         std::unique_ptr<RHI::IRHITexture> m_CloudDetailNoiseTexture;
+        std::unique_ptr<RHI::IRHITexture> m_CloudWeatherNoiseTexture;
         std::unique_ptr<RHI::IRHIShader> m_CloudShapeNoiseComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudShapeNoisePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_CloudDetailNoiseComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudDetailNoisePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_CloudWeatherNoiseComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_CloudWeatherNoisePipelineState;
         bool m_CloudNoiseBaked = false;
 
         // --- 大気散乱のLUT(P14a/P14b: Hillaire 2020) ---

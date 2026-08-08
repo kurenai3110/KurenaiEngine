@@ -35,6 +35,8 @@
 #define KURENAI_SKYVIEW_REGISTER t15
 #define KURENAI_CLOUD_SHAPE_REGISTER t13
 #define KURENAI_CLOUD_DETAIL_REGISTER t14
+// 焼いたウェザーマップ(H3)。DeferredLighting.hlsl 側のコメント参照
+#define KURENAI_CLOUD_WEATHER_REGISTER t17
 #include "Sky.hlsli"
 
 static const int kSSRStepCount = 32;

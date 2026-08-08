@@ -55,7 +55,7 @@ namespace Kurenai::RHI
         // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう
         // (実際に12のまま放置され、t12/t13が漏れていた)。
         //
-        // 【現在の21の内訳】最も多く使うDeferredLighting.hlslがt0〜t20をちょうど使い切る:
+        // 【現在の22の内訳】最も多く使うDeferredLighting.hlslがt0〜t21をちょうど使い切る:
         //   t0〜t7   G-Buffer一式(アルベド/直接光/マテリアル/深度/スカイボックス/AO/自発光/法線)
         //   t8,t9    グローバルIBL(放射照度・プリフィルタ済み鏡面)
         //   t10      BRDF LUT
@@ -65,7 +65,8 @@ namespace Kurenai::RHI
         //   t17      bent normalのG-Buffer(34章)
         //   t18,t19  雲の形状/ディテールの3Dノイズ
         //   t20      大気散乱のSkyView LUT
-        static constexpr uint32_t kTextureSlotCount = 21;
+        //   t21      焼いた雲のウェザーマップ(H3。2D。レイマーチの1歩を8倍安くするためのもの)
+        static constexpr uint32_t kTextureSlotCount = 22;
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
         // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。

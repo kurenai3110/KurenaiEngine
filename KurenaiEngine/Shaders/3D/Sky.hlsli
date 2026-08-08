@@ -942,8 +942,49 @@ static const float2 kCloudFbmBandOffset[5] = {
     float2(89.1f, 41.3f), float2(5.9f, 63.1f)
 };
 
+// ============================================================================
+// ウェザーマップのテクスチャ(H3)
+// ============================================================================
+//
+// 【なぜ焼くのか】レイマーチの1歩あたりコストの**91%がこの2Dのfbm**だった(実機の実測。
+// 同じ条件で6枚ずつ撮った中央値):
+//   1歩 3.68ms / 48歩 5.64ms / 192歩 10.58ms  → 1歩あたり 0.0343ms
+//   CloudFbmBands と CloudTypeAt を定数へ置き換えると  → 1歩あたり 0.0032ms
+// フレーム全体5.64msのうちマーチは1.65ms(29%)で、残り3.99msは雲以外。
+//
+// 【空を飛ばす2段マーチは不採用】計画では「48歩のうち雲に当たるのは0.35歩、97.9%は空気」を
+// 根拠に空間スキップを予定していたが、実測すると**同じ評価回数なら現状より悪かった**
+// (仰角6度・基準18.8%に対し、2段マーチ51.0回→15.9% 対 現状47.5回→17.2%)。
+// 空歩は無駄ではなく探索そのもので、さらに粗い均一マーチは薄い雲を過大に積分するため
+// (40mの雲を1回引いて239m分の密度にする)、その過大評価が見落としを打ち消していた。
+// 細かく積分すると打ち消しだけが消えて悪化する。**歩数を減らすのではなく1歩を安くする**のが正しい。
+//
+// 【中身】R=大きい雲のfbm / G=小さい雲のfbm / B=雲の種類の生ノイズ。どれも[0,1]。
+// 被覆率によるしきい値化は引いたあとで行う(被覆率は実行時に変わるため焼き込めない)。
+//
+// 【解像度の根拠(オフラインで実測)】一番細かい帯は frequency 4.0 で格子の間隔が0.25セル=350m。
+// 周期256セル=358kmを1枚で覆うので、weatherの誤差(平均/最大)は:
+//   1024^2 (350m/テクセル)  0.0095 / 0.90   ← 使えない
+//   2048^2 (175m/テクセル)  0.0028 / 0.32
+//   4096^2 ( 88m/テクセル)  0.0009 / 0.095  ← 採用
+// **ビット数は効かない。** 同じ解像度なら8bitと16bitの誤差はほぼ同じで(4096^2で
+// 0.0011 対 0.0009)、誤差は空間の刻みだけで決まる。被覆率1でしきい値の幅が
+// kCloudWeatherNarrowSpan=0.05まで狭まるので量子化が増幅されると考えたが、外れだった。
+//
+// 【手続き版を消してはいけない】ベイク(CloudNoiseGenerate.hlsl の CSGenerateWeather)が
+// 下の *Procedural をそのまま呼んで焼く。**焼く側と引く側で式が分かれると必ずずれる。**
+// またテクスチャを束ねていないシェーダー(SkyGenerate / AerialPerspective /
+// PlanarReflection が通る巻雲の平面経路)は手続き版のまま走る
+#ifdef KURENAI_CLOUD_WEATHER_REGISTER
+// Samplers.hlsli をここでも取り込む。上の SkyView の #ifdef の中にしか include が無く、
+// そちらを定義しない利用者では VolumeSampler が未宣言になるため(インクルードガード持ち)
+#include "Samplers.hlsli"
+Texture2D CloudWeatherNoiseTexture : register(KURENAI_CLOUD_WEATHER_REGISTER);
+#define KURENAI_CLOUD_WEATHER_TEXTURE 1
+#endif
+
 // 2つの重みで同時に評価する。合成は**しきい値化のあと**で行う(CloudWeatherAt参照)
-void CloudFbmBands(float2 uv, out float large, out float small)
+void CloudFbmBandsProcedural(float2 uv, out float large, out float small)
 {
     float sumLarge = 0.0f;
     float sumSmall = 0.0f;
@@ -967,6 +1008,26 @@ void CloudFbmBands(float2 uv, out float large, out float small)
     // 各CloudValueNoiseは[0,1]を返すので、重みの和で割れば[0,1]に収まる
     large = sumLarge / weightLarge;
     small = sumSmall / weightSmall;
+}
+
+// 引く側の入口。テクスチャがあればフェッチ1回、無ければ手続きで評価する。
+//
+// 【uvをfrac()してはいけない】テクスチャはWrapで引く。ここでfrac()を掛けると
+// 周期の境界でバイリニアのタップが端のテクセルに張り付き、一定間隔で継ぎ目が出る
+// (VolumeSamplerのコメントと同じ理由。シェーダー側では消せない種類の継ぎ目)。
+// 【巻き戻しは壊れない】CPUは風のスクロール量を kCloudNoisePeriod で fmod する。
+// UVは uv / kCloudNoisePeriod なので、巻き戻しはUVがちょうど1周ぶんずれることに対応し、
+// Wrapで引く限り同じテクセルへ戻る
+void CloudFbmBands(float2 uv, out float large, out float small)
+{
+#ifdef KURENAI_CLOUD_WEATHER_TEXTURE
+    const float2 baked = CloudWeatherNoiseTexture.SampleLevel(
+        VolumeSampler, uv / kCloudNoisePeriod, 0.0f).rg;
+    large = baked.r;
+    small = baked.g;
+#else
+    CloudFbmBandsProcedural(uv, large, small);
+#endif
 }
 
 // 1つだけ欲しい呼び出し側(巻雲の平面経路)のための包み。大きい側を返す
@@ -1096,6 +1157,8 @@ CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
 // ボリュームの経路がコンパイルされず、平面の経路だけが残る。
 //   KURENAI_CLOUD_SHAPE_REGISTER    形状ノイズ(Texture3D)
 //   KURENAI_CLOUD_DETAIL_REGISTER   ディテールノイズ(Texture3D)
+// ウェザーマップ(Texture2D、KURENAI_CLOUD_WEATHER_REGISTER)も同じ作法だが、
+// **こちらは定義しなくても手続きで評価する経路が残る**ので上の節で別に宣言している
 // ============================================================================
 #ifdef KURENAI_CLOUD_SHAPE_REGISTER
 #include "Samplers.hlsli"
@@ -1437,10 +1500,24 @@ static const float kCloudDensityGradientTop = 1.4f;
 // 【1オクターブの値ノイズで足りる理由】種類は低周波の場なので、fBmの高周波成分が要らない。
 // この関数は視線マーチだけでなく太陽マーチのサンプルごとにも呼ばれるため、
 // CloudFbm(4オクターブ=16ハッシュ)ではなく値ノイズ1回(4ハッシュ)にしてある
+// ベイクが焼く生の値。typeBiasは実行時に変わるので**焼き込まない**
+float CloudTypeNoiseProcedural(float2 noiseXZ)
+{
+    return CloudValueNoise(
+        noiseXZ * kCloudTypeUvScale + kCloudTypeUvOffset, kCloudNoisePeriod * kCloudTypeUvScale);
+}
+
 float CloudTypeAt(float2 noiseXZ, float typeBias)
 {
-    const float n = CloudValueNoise(
-        noiseXZ * kCloudTypeUvScale + kCloudTypeUvOffset, kCloudNoisePeriod * kCloudTypeUvScale);
+    // 【CloudFbmBandsとは別のUVで引く】上は noiseXZ * AnisotropicScale、こちらは noiseXZ。
+    // 積雲は異方スケールが(1,1)なので同じ座標になるが、**式の上では別物なので分けて引く**。
+    // まとめると異方スケールを持つ層で静かに間違う
+#ifdef KURENAI_CLOUD_WEATHER_TEXTURE
+    const float n = CloudWeatherNoiseTexture.SampleLevel(
+        VolumeSampler, noiseXZ / kCloudNoisePeriod, 0.0f).b;
+#else
+    const float n = CloudTypeNoiseProcedural(noiseXZ);
+#endif
     // 値ノイズは[0,1]でおおむね平均0.5。typeBias=0.5が中立で、
     // 下げると層雲寄り、上げると雄大積雲寄りへ空全体が寄る
     return saturate(n - 0.5f + typeBias);

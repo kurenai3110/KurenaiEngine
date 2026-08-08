@@ -34,10 +34,13 @@ namespace Kurenai::RHI
         // t0〜t17。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
         // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer+距離キューブ配列
         // +DDGIのオクタヘドラルアトラス2枚+空パラメータのStructuredBuffer
-        // +bent normalのG-Buffer+雲の3Dノイズ2枚+大気散乱のSkyView LUT)。
+        // +bent normalのG-Buffer+雲の3Dノイズ2枚+大気散乱のSkyView LUT
+        // +焼いた雲のウェザーマップ)。
         // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
-        // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)
-        constexpr uint32_t kTextureSlotCount = 21;
+        // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)。
+        // 【超えるとDX11では黙って落ち、DX12ではPSOの作成が 0x80070057 で失敗する】
+        // H3でt21を足したときに実際に踏んだ。DX11だけで確認していると気付けない
+        constexpr uint32_t kTextureSlotCount = 22;
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
         // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler、s3 = VolumeSampler
         // (役割の定義はShaders/Samplers.hlsli)。どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。
