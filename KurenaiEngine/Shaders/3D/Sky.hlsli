@@ -108,6 +108,9 @@ struct GPUSkyParameters
     // Preetham xyYモデル用のパラメータ。x=タービディティ、y=Preethamの重み
     // (0=従来ティントのみ、1=Preethamのみ。SkyIntegrate.hlslが太陽仰角から求めて書く)、zw=予備
     float4 ModelParams;
+    // xyz=雲による空の明かりの変化(P18)。「雲込みの空の照度 ÷ 晴天の空の照度」をRGBで持つ。
+    // 被覆率0で厳密に(1,1,1)。w=予備。詳細はSkyParameters::CloudSkyLightのコメント
+    float4 CloudSkyLight;
 };
 
 // 空モデルの評価に必要なパラメータ一式。呼び出し側が自分のcbufferから組み立てて渡す
@@ -132,6 +135,30 @@ struct SkyParameters
     // ApplySkyParametersFromBufferでは埋まらないため、呼び出し側(各MakeSkyParameters)が
     // 別途代入すること
     float  SunToSkyIlluminanceRatio;
+
+    // --- 雲による空の明かりの変化(P18)。「雲込みの空の照度 ÷ 晴天の空の照度」のRGB ---
+    // 【何のためにあるか】大気遠近のin-scatter(airlight)を照らしているのは、視線の先の
+    // 空ではなく**その空間を照らしている光**、すなわち空全体の照度である。ところが
+    // AerialPerspective.hlslはその照度をSkyColorUpper(=雲を通さない晴天の空)から作っており、
+    // 被覆率1.0で空が灰色一色でも遠方の地物には青い散乱光が掛かり続けていた
+    // (実測: 被覆率1.0での水平線際の空はB-R 42・輝度81だが、掛かっていたのは被覆率0の
+    // B-R 86・輝度110。青みが2.0倍・明るさが1.35倍ずれていた)。
+    //
+    // 【なぜZenithLuminanceを暗くする形にしないか】天頂輝度は(a)雲の隙間から見える青空と
+    // (b)雲そのものの明るさ(sunIlluminance = 比 × SkyIlluminanceOverZenith × 天頂輝度)の
+    // 両方の基準になっている。ここを暗くすると隙間が二重に暗くなり、雲自体まで暗くなる
+    // (KurenaiEngine3D.cppのm_ActiveCloudTransmittanceの代入元にある同じ指摘を参照)。
+    // だから減光は天頂輝度に混ぜず、この独立した係数として持つ。
+    //
+    // 【スカラーではなくRGBである理由】曇天のairlightは暗いだけでなく**無彩色になる**。
+    // スカラー倍では暗い青のままで、上の実測でいうと明るさの1.35倍しか埋まらない。
+    //
+    // 【方向依存が要らない理由】airlightを照らすのは半球全体なので、正しい量は半球平均で
+    // ある。方向依存が効くのは太陽の直達光(薄明光線)だけで、このモデルはそれを持たない。
+    //
+    // 値はSkyIntegrate.hlslが求めてGPUSkyParameters::CloudSkyLightへ書く。
+    // 被覆率0では厳密に(1,1,1)になり、掛けても浮動小数の最下位ビットまで変わらない
+    float3 CloudSkyLight;
 
     // --- 日中の空(HillaireのSkyView LUT) ---
     // 大気の濁り具合。**この関数は読まない**。濁りはSkyView LUTを焼く側
@@ -305,6 +332,9 @@ SkyParameters ApplySkyParametersFromBuffer(SkyParameters params, GPUSkyParameter
     // 空照度/天頂輝度の積分値(EvaluateCloudLayerが太陽照度を天頂輝度の単位で表すのに使う。
     // SkyParameters::SkyIlluminanceOverZenithのコメント参照)
     params.SkyIlluminanceOverZenith = data.Luminance.y;
+    // 雲による空の明かりの変化(P18)。大気遠近のin-scatterへ掛ける
+    // (SkyParameters::CloudSkyLightのコメント参照)。被覆率0では(1,1,1)
+    params.CloudSkyLight = data.CloudSkyLight.xyz;
     return params;
 }
 

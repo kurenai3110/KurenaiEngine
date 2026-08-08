@@ -534,8 +534,10 @@ float4 PSMain(PSInput input) : SV_TARGET
         // Mie位相関数を掛けない理由、および雲を含むSkyColorではなく晴天のSkyColorUpperを使う
         // 理由(雲は高度1,000m以上にあり、カメラと着目点の間の空気には存在しないため、
         // in-scatterに乗せると雲の模様が地物へ透けて焼き付く)はAerialPerspective.hlslに
-        // 詳しく書いてある。2つのパスで霞の色が食い違わないよう、必ず同時に直すこと
-        const float3 inScatter = SkyColorUpper(fogDir, MakeSkyParameters(input.Position.xy));
+        // 詳しく書いてある。2つのパスで霞の色が食い違わないよう、必ず同時に直すこと。
+        // CloudSkyLight(P18、雲による空の明かりの減光と無彩色化)も同じ理由で両方に掛ける
+        const SkyParameters skyParams = MakeSkyParameters(input.Position.xy);
+        const float3 inScatter = SkyColorUpper(fogDir, skyParams) * skyParams.CloudSkyLight;
 
         color = color * (1.0f - alpha) + inScatter * alpha;
     }

@@ -232,11 +232,19 @@ float4 PSMain(PSInput input) : SV_TARGET
     // (dir.y < kGroundFadeStartY = -0.02)には決して入らず、SkyColorをSkyColorUpperへ
     // 置き換えることは「雲の合成を外す」ことと厳密に等価になる。
     //
-    // 【割り切り】雲に覆われた空の下では airlight を照らす光そのものが弱まる(曇天の霞は
-    // 晴天より暗く無彩色になる)が、ここではその全天平均の減光は掛けていない。掛けるには
-    // 平均透過率(KurenaiEngine3D.cppのComputeCloudAverageTransmittance)をFrameConstantsへ
-    // 追加する必要があり、今回直したい破綻(雲の模様が地物へ焼き付く)とは別の話なので分けてある
-    const float3 inScatter = SkyColorUpper(fogDir, MakeSkyParameters(input.Position.xy));
+    // 【雲による減光と無彩色化はここで掛ける】(P18) 雲に覆われた空の下では airlight を
+    // 照らす光そのものが弱まり、色も無彩色に寄る。SkyColorUpperは雲を通さない晴天の空
+    // なので、被覆率1.0で空が灰色一色でも遠方の地物には青い散乱光が掛かり続けていた
+    // (実測: 被覆率1.0での水平線際の空はB-R 42・輝度81だが、掛かっていたのは被覆率0の
+    // B-R 86・輝度110)。
+    //
+    // 【視線の先の雲でSkyColorへ替える案は却下した】(a)地物の画素ごとにレイマーチが走って
+    // コストが跳ねる。(b)地物までの散乱光を決めるのは「その空間を照らしている光」であって
+    // 視線の先の雲ではないので、意味的にもずれる。正しい量は空全体の照度の半球平均であり、
+    // それをSkyIntegrate.hlslが1本のRGBとして求めている(Sky.hlsli CloudSkyLight参照)。
+    // 被覆率0では厳密に(1,1,1)なので、雲を持たないシーンの画素は1ビットも動かない
+    const SkyParameters skyParams = MakeSkyParameters(input.Position.xy);
+    const float3 inScatter = SkyColorUpper(fogDir, skyParams) * skyParams.CloudSkyLight;
 
     const float3 outColor = sceneColor * (1.0f - alpha) + inScatter * alpha;
     return float4(outColor, 1.0f);

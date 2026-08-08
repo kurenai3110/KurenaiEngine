@@ -786,6 +786,10 @@ namespace Kurenai
             // Preetham xyYモデル用のパラメータ。x=タービディティ、y=Preethamの重み
             // (0=従来ティントのみ、1=Preethamのみ)、zw=予備
             DirectX::XMFLOAT4 ModelParams;
+            // xyz=雲による空の明かりの変化(P18)。「雲込みの空の照度 ÷ 晴天の空の照度」。
+            // 被覆率0で厳密に(1,1,1)。w=予備。大気遠近のin-scatterへ掛ける
+            // (意味と、なぜ天頂輝度に混ぜないのかはSky.hlsliのCloudSkyLightのコメント参照)
+            DirectX::XMFLOAT4 CloudSkyLight;
         };
 
         // SkyIntegrate.hlsl側のcbuffer SkyIntegrateConstantsと一致させる必要がある
@@ -794,8 +798,19 @@ namespace Kurenai
             // xyz=太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)、w=未使用
             DirectX::XMFLOAT4 SunDirection;
             // x=目標照度[lx](SunLighting::SkyIlluminanceLux)、y=実効プリ露出(effectiveExposure)、
-            // z=タービディティ(m_SkyTurbidity)、w=未使用
+            // z=タービディティ(m_SkyTurbidity)、w=空の彩度(m_SkySaturation)
             DirectX::XMFLOAT4 IntegrateParams;
+
+            // --- 以下はP18の第2段(雲込みの空の照度)専用。**FrameConstantsの同名の枠と
+            //     完全に同じ値を入れること**。食い違うと「背景に見えている雲」と
+            //     「大気遠近が想定している雲」が別物になる ---
+            DirectX::XMFLOAT4 CloudParams0;  // x=積雲の被覆率、y=雲底高度[m]、z=UVスケール、w=消散係数
+            DirectX::XMFLOAT4 CloudParams1;  // xy=スクロール量、z=前方散乱g、w=厚み[m]
+            DirectX::XMFLOAT4 CloudParams2;  // x=巻雲の被覆率、y=高度[m]、z=UVスケール、w=消散係数
+            DirectX::XMFLOAT4 CloudParams3;  // xy=スクロール量、z=異方スケール、w=雲の種類の偏り
+            DirectX::XMFLOAT4 FogParams0;    // x=消散係数[1/m]、y=スケールハイト[m]、z=基準高度[m]、w=有効フラグ
+            // xyz=視点のワールド座標(レイの起点)、w=太陽照度/空照度比
+            DirectX::XMFLOAT4 ViewerAndSunRatio;
         };
 
         // AtmosphereLUT.hlsl側のcbuffer AtmosphereConstantsと一致させる必要がある。
@@ -2458,6 +2473,33 @@ namespace Kurenai
         // 上書きしてしまうと検証そのものが壊れるため、明示指定があるときは必ずDDSを使う
         const bool useProcedural = m_ProceduralSkyEnabled && m_Scene.SkyboxPath.empty();
         return useProcedural ? m_ProceduralSkyTexture.get() : m_SkyboxTexture.get();
+    }
+
+    KurenaiEngine3D::CloudBakeSignature KurenaiEngine3D::MakeCloudBakeSignature() const
+    {
+        // 【FrameConstants/SkyIntegrateConstantsと同じ潰し方をすること】無効化のときに
+        // 何が0になるかが揃っていないと、「無効にしたのに焼き直しが走らない」取りこぼしが出る。
+        // 対応するのはRender()のconstants.CloudParams0〜3・FogParams0の組み立て箇所
+        CloudBakeSignature s;
+        s.CumulusCoverage = m_CloudEnabled ? m_CloudCoverage : 0.0f;
+        s.CumulusAltitude = m_CloudAltitude;
+        s.CumulusUvScale = m_CloudUvScale;
+        s.CumulusDensity = m_CloudDensity;
+        s.CumulusForwardG = m_CloudForwardG;
+        s.CumulusThickness = m_CloudVolumetric ? m_CloudThickness : 0.0f;
+        s.CloudTypeBias = m_CloudTypeBias;
+        s.CirrusCoverage = m_CirrusEnabled ? m_CirrusCoverage : 0.0f;
+        s.CirrusAltitude = m_CirrusAltitude;
+        s.CirrusUvScale = m_CirrusUvScale;
+        s.CirrusDensity = m_CirrusDensity;
+        s.CirrusAnisotropy = m_CirrusAnisotropy;
+        s.FogSigma0 = m_FogDensity;
+        s.FogScaleHeight = m_FogScaleHeight;
+        s.FogRefHeight = m_FogRefHeight;
+        // 【usingProceduralSkyを掛けない】FrameConstants側のfogEnabledFlagはそれも見るが、
+        // この判定自体が手続き空のときにしか走らない(呼び出し元のifを参照)ので同じ値になる
+        s.FogEnabled = (m_FogEnabled && m_FogDensity > 0.0f) ? 1.0f : 0.0f;
+        return s;
     }
 
     void KurenaiEngine3D::CreateRenderTargets(uint32_t width, uint32_t height)
@@ -4443,7 +4485,26 @@ namespace Kurenai
             const bool turbidityMoved = std::abs(m_SkyTurbidity - m_LastBakedTurbidity) > 0.01f;
             // 空の彩度(アート指定)もPreethamの色度を動かすため、タービディティと同じ扱いで焼き直す
             const bool saturationMoved = std::abs(m_SkySaturation - m_LastBakedSkySaturation) > 0.005f;
-            if (sunMoved || exposureMoved || turbidityMoved || saturationMoved)
+            // 雲のパラメータが動いたら焼き直す(P18)。
+            //
+            // 【なぜ要るか】ここまでの4つは晴天の空の形を決める値だけで、雲は「晴天の空を
+            // 変えない」ため入っていなかった。P18でSkyIntegrateが雲込みの空の照度を積むように
+            // なったので、被覆率を動かしても焼き直しが走らないと**古い被覆率で積んだ
+            // CloudSkyLightが残り続ける**。実際これで被覆率0でも比が1にならず、雲を持たない
+            // シーンの遠景が動いた(切り分け: SkyIntegrateへ1を直書きした絵と、消費側で1へ
+            // 潰した絵は画素まで一致した=経路は正しく、値だけが古かった)。
+            //
+            // 【風のスクロールを入れない】スクロール量は毎フレーム動くので、入れると毎フレーム
+            // 焼き直しになる。求めているのは半球平均なので、雲の場が平行移動しても値はほとんど
+            // 変わらない。同じ理由でカメラ位置も入れない。
+            //
+            // 【IBLの雲減光もこれで直る】m_ActiveCloudTransmittance(キューブへ焼く平均透過率)も
+            // このブロックの中でしか更新されないため、被覆率を動かしても環境光が追従しない
+            // という同じ形の取りこぼしがあった
+            const CloudBakeSignature cloudSignature = MakeCloudBakeSignature();
+            const bool cloudChanged = !m_HasBakedCloudSignature
+                                      || cloudSignature != m_LastBakedCloudSignature;
+            if (sunMoved || exposureMoved || turbidityMoved || saturationMoved || cloudChanged)
             {
                 m_SkyBakeDirty = true;
             }
@@ -4482,6 +4543,11 @@ namespace Kurenai
             // Sky.hlsli側のSkyColorがそこへさらに雲を重ねることで二重に暗くなってしまう
             m_ActiveCloudTransmittance = ComputeCloudAverageTransmittance(
                 m_CloudEnabled, m_CloudCoverage, m_CirrusEnabled, m_CirrusCoverage);
+
+            // P18: この焼き直しがどの雲パラメータで行われたかを覚えておく。
+            // 上の焼き直し判定(cloudChanged)がこれと比べる
+            m_LastBakedCloudSignature = MakeCloudBakeSignature();
+            m_HasBakedCloudSignature = true;
 
             // 空が変わったのでプリフィルタ済み鏡面も焼き直す必要がある。
             // 焼き直し要否のフラグ更新はここ(キャッシュを書いた場所)に一本化し、
@@ -5006,21 +5072,65 @@ namespace Kurenai
         //     理由はm_SkyParametersBuffer作成箇所とskyIntegrateThisFrame宣言のコメント参照) ---
         if (skyIntegrateThisFrame)
         {
+            // 第2段(P18: 雲込みの空の照度)へ渡す値。**FrameConstants(constants)から
+            // そのまま複製する**——別々に組み立てると、背景に見えている雲と大気遠近が
+            // 想定している雲が食い違いうる。ここで値を作り、ラムダへは値渡しで捕まえる
+            SkyIntegrateConstants integrateConstants{};
+            integrateConstants.SunDirection = {
+                sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+            };
+            integrateConstants.IntegrateParams = {
+                sunLighting.SkyIlluminanceLux, effectiveExposure, m_SkyTurbidity, m_SkySaturation
+            };
+            integrateConstants.CloudParams0 = constants.CloudParams0;
+            integrateConstants.CloudParams1 = constants.CloudParams1;
+            integrateConstants.CloudParams2 = constants.CloudParams2;
+            integrateConstants.CloudParams3 = constants.CloudParams3;
+            integrateConstants.FogParams0 = constants.FogParams0;
+            // レイの起点はカメラ。wはSkyParams.zと同じ太陽照度/空照度比
+            // (雲の明るさを太陽照度基準にするためにEvaluateCloudLayerが使う)
+            integrateConstants.ViewerAndSunRatio = {
+                constants.CameraPosition.x, constants.CameraPosition.y, constants.CameraPosition.z,
+                constants.SkyParams.z
+            };
+
+            // 雲の3Dノイズとウェザーマップ(P18の第2段)。
+            // **Readsへ入れることが順序の保証そのもの**——CloudNoiseBakeパスはこのパスより
+            // 後に登録されるが、レンダーグラフのKahn法が依存を見て焼き込みを先へ回す。
+            // 宣言を外すと初回フレームで未初期化のノイズを読み、雲込みの照度が意味の無い値になる。
+            //
+            // 【テクスチャの作成に失敗していた場合】バインドを外して縮退させる。SRVが
+            // 張られていなければサンプルは0を返し、ウェザーマップが0なら密度も0、つまり
+            // 「雲が無い」と積分される。結果CloudSkyLightは(1,1,1)になり、大気遠近は
+            // P18より前とまったく同じ振る舞いへ戻る。作成失敗そのものはInitialize側で
+            // 既にエラーを出しているので、ここでは1度だけ「P18が効いていない」ことを残す
+            const bool cloudNoiseReady = m_CloudShapeNoiseTexture && m_CloudDetailNoiseTexture
+                                         && m_CloudWeatherNoiseTexture;
+            if (!cloudNoiseReady && !m_SkyIntegrateCloudMissingLogged)
+            {
+                Core::Logger::Error("KurenaiEngine3D",
+                    "雲のノイズテクスチャが無いためSkyIntegrateへ束ねられません"
+                    "(大気遠近が曇り空へ追従せず、被覆率を上げても遠景に晴天の青い散乱光が残ります)");
+                m_SkyIntegrateCloudMissingLogged = true;
+            }
+
+            std::vector<RHI::IRHITexture*> integrateReads = { m_SkyViewLUT.get() };
+            if (cloudNoiseReady)
+            {
+                integrateReads.push_back(m_CloudShapeNoiseTexture.get());
+                integrateReads.push_back(m_CloudDetailNoiseTexture.get());
+                integrateReads.push_back(m_CloudWeatherNoiseTexture.get());
+            }
+
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyIntegrate",
                 // 日中の空はSkyView LUTを引くため、このパスもLUTを読む。
-                // これによりレンダーグラフがSkyViewBakeより後へ自動で並べてくれる
-                .Reads = { m_SkyViewLUT.get() },
+                // これによりレンダーグラフがSkyViewBakeより後へ自動で並べてくれる。
+                // 雲の3枚(P18)も同じ仕組みでCloudNoiseBakeより後へ並ぶ
+                .Reads = integrateReads,
                 .BufferWrites = { m_SkyParametersBuffer.get() },
-                .Execute = [this, &sunLighting, effectiveExposure](RHI::IRHICommandList* cmd)
+                .Execute = [this, integrateConstants, cloudNoiseReady](RHI::IRHICommandList* cmd)
                 {
-                    SkyIntegrateConstants integrateConstants{};
-                    integrateConstants.SunDirection = {
-                        sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
-                    };
-                    integrateConstants.IntegrateParams = {
-                        sunLighting.SkyIlluminanceLux, effectiveExposure, m_SkyTurbidity, m_SkySaturation
-                    };
                     cmd->UpdateBuffer(m_SkyIntegrateConstantBuffer.get(), &integrateConstants, sizeof(integrateConstants));
 
                     cmd->SetComputePipelineState(m_SkyIntegratePipelineState.get());
@@ -5028,6 +5138,16 @@ namespace Kurenai
                     // SkyView LUT(t0)とサンプラー(s1 ColorSampler)。日中の空はこのLUTから
                     // 引くため、積分側も同じLUTを読む必要がある
                     cmd->SetComputeTexture(0, m_SkyViewLUT.get());
+                    if (cloudNoiseReady)
+                    {
+                        // 雲(P18)。形状t1・ディテールt2・ウェザーマップt3。SkyIntegrate.hlslの
+                        // KURENAI_CLOUD_*_REGISTERと**同じ番号**であること
+                        cmd->SetComputeTexture(1, m_CloudShapeNoiseTexture.get());
+                        cmd->SetComputeTexture(2, m_CloudDetailNoiseTexture.get());
+                        cmd->SetComputeTexture(3, m_CloudWeatherNoiseTexture.get());
+                    }
+                    // s3 VolumeSamplerがLinear+Wrapで入っている(Samplers.hlsliの役割表参照)。
+                    // 雲の3Dノイズとウェザーマップはこれで引く
                     cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_SkyParametersBuffer.get());
                     // 1グループ×256スレッド固定(SkyIntegrate.hlsl参照)

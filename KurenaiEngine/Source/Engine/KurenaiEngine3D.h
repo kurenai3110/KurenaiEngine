@@ -1115,6 +1115,41 @@ namespace Kurenai
         float m_LastBakedTurbidity = 0.0f;
         // 最後に焼いたときの空の彩度。タービディティと同じ理由で、動いたら焼き直す
         float m_LastBakedSkySaturation = 0.0f;
+
+        // P18: 雲込みの空の照度(SkyIntegrateのCloudSkyLight)とIBLキューブの平均透過率
+        // (m_ActiveCloudTransmittance)は、どちらもベイクのタイミングでしか更新されない。
+        // ところが焼き直しの判定に雲のパラメータが入っていなかったため、被覆率を動かしても
+        // 古い値が残り続けていた。ここへ「ベイク時点の雲のパラメータ」を覚えておき、
+        // 変化したら焼き直す(Render()の焼き直し判定を参照)。
+        // **風のスクロールとカメラ位置は入れない**——毎フレーム動くので入れると毎フレーム
+        // 焼き直しになる。求めているのは半球平均なので、雲の場の平行移動では値がほとんど動かない
+        struct CloudBakeSignature
+        {
+            float CumulusCoverage = -1.0f;   // 無効(m_CloudEnabled=false)なら0
+            float CumulusAltitude = 0.0f;
+            float CumulusUvScale = 0.0f;
+            float CumulusDensity = 0.0f;
+            float CumulusForwardG = 0.0f;
+            float CumulusThickness = 0.0f;   // ボリューム無効なら0(FrameConstantsと同じ扱い)
+            float CloudTypeBias = 0.0f;
+            float CirrusCoverage = 0.0f;     // 無効(m_CirrusEnabled=false)なら0
+            float CirrusAltitude = 0.0f;
+            float CirrusUvScale = 0.0f;
+            float CirrusDensity = 0.0f;
+            float CirrusAnisotropy = 0.0f;
+            float FogSigma0 = 0.0f;          // 霞は雲の見え方(打ち切り)を変えるので入れる
+            float FogScaleHeight = 0.0f;
+            float FogRefHeight = 0.0f;
+            float FogEnabled = 0.0f;
+
+            bool operator==(const CloudBakeSignature&) const = default;
+        };
+        // 現在の設定からシグネチャを作る。**FrameConstants/SkyIntegrateConstantsへ詰めるのと
+        // 同じ有効/無効の潰し方をすること**(m_CloudEnabled=falseなら被覆率0、など)。
+        // 揃っていないと「無効にしたのに焼き直しが走らない」取りこぼしが出る
+        CloudBakeSignature MakeCloudBakeSignature() const;
+        CloudBakeSignature m_LastBakedCloudSignature{};
+        bool m_HasBakedCloudSignature = false;
         // 焼き直しの角度閾値(度)。Auto Advance既定(1h/s)では太陽は15度/秒動くので、
         // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
         float m_SkyBakeAngleThresholdDegrees = 1.0f;
@@ -1147,6 +1182,9 @@ namespace Kurenai
         // GPU専用(UAV/SRV)のDEFAULTヒープに確保しておりCPUから書き込む経路を持たないため、
         // UpdateBufferを呼ぶとクラッシュする(m_SkyParametersBuffer作成箇所のコメント参照)
         bool m_SkyParametersBufferInitialized = false;
+        // 雲のノイズテクスチャが無くP18(雲込みの空の照度)を積めなかったことを1度だけログへ出す。
+        // 毎ベイクで出すとログが埋まるため(m_PlanarReflectionMultipleWaterLoggedと同じ扱い)
+        bool m_SkyIntegrateCloudMissingLogged = false;
 
         bool m_IBLBaked = false;
         // BRDF積分LUTを焼き終えたか(m_IBLBakedとは別管理)。このLUTは(NdotV, ラフネス)の
