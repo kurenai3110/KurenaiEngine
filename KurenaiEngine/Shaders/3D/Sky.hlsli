@@ -2131,13 +2131,20 @@ void EvaluateCloudLayer(
         // 薄くなる——これがそのまま正しい振る舞いになる
         const float stepDepthScale = stepLength / layer.Thickness;
 
-        // 【透過率を2本持つ理由】(P17で霞をサンプルごとに掛けるようになったため)
-        //   cloudTransmittance … 雲そのものの透過率。奥のサンプルが手前の雲にどれだけ
-        //                        遮られるかの重みに使う(霞は関係しない)
-        //   accumTransmittance … 呼び出し側へ返す実効の透過率。霞で薄まったぶん、
-        //                        雲は背後の空を遮らなくなる。霞が無ければ両者は一致する
+        // 【霞は1歩ごとに掛けず、雲に入った位置の霞を最後に1回だけ掛ける】
+        // 以前は毎歩 lerp(1, stepTransmittance, sampleFog) を掛けていたが、これは
+        // **カメラからその点までの同じ霞を雲の奥行きぶん複利で効かせる**式になっていた。
+        // そのため打ち切りの条件しだいで絵が両極端に振れた:
+        //   cloudTransmittance で打ち切る … 複利が数歩で止まり返り値が高いまま残る。
+        //     消散係数を上げると「不透明な雲なのに背後の青空が2割見える」
+        //   返り値で打ち切る … 複利が最後まで効く。被覆率1.0の水平線際が真っ黒に近づく
+        //     (実測: 出荷カメラの仰角0〜4度の輝度中央値が 219.3 → 148.0)
+        // どちらも同じ式の裏表なので、複利そのものを断つ。雲が層を遮る割合は
+        // cloudTransmittance で、霞はその遮りがどれだけ見えるかを決めるだけ、と分ける
         float cloudTransmittance = 1.0f;
-        float accumTransmittance = 1.0f;
+        // 雲に最初に当たった位置の霞。遠方の雲ほど小さくなり、層が背後の空を遮らなくなる
+        float fogAtCloud = 1.0f;
+        bool hasCloud = false;
         float3 accumScatter = float3(0.0f, 0.0f, 0.0f);
 
         // 【C2: 開始位置を画素ごとにずらす】1歩ぶん未満のずれを入れることで、
@@ -2200,8 +2207,11 @@ void EvaluateCloudLayer(
 
             const float stepOpticalDepth = sampleDensity * layer.Density * stepDepthScale;
             const float stepTransmittance = exp(-stepOpticalDepth);
-            // 霞で薄まった実効の遮り。sampleFog=0(完全に霞む)なら1になり背後を遮らなくなる
-            const float effectiveStepTransmittance = lerp(1.0f, stepTransmittance, sampleFog);
+            if (!hasCloud)
+            {
+                fogAtCloud = sampleFog;
+                hasCloud = true;
+            }
 
             // 【C1: ここが立体感の本体】このサンプルから太陽方向へ実際に3Dマーチして
             // 光学的深さを求め、多重散乱のオクターブ和で散乱光にする。
@@ -2215,16 +2225,18 @@ void EvaluateCloudLayer(
             // さらに視点までの霞(sampleFog)で減る
             accumScatter += cloudTransmittance * (1.0f - stepTransmittance) * stepInScatter * sampleFog;
             cloudTransmittance *= stepTransmittance;
-            accumTransmittance *= effectiveStepTransmittance;
 
-            // ほぼ不透明になったら以降のステップは絵に出ない
+            // ほぼ不透明になったら以降のステップは絵に出ない。
+            // 霞を最後に1回だけ掛ける形にしたので、ここで見る量と返り値が同じ意味になり、
+            // 早い打ち切りでも返り値が高いまま残る不整合が構造的に起きない
             if (cloudTransmittance < 0.01f)
             {
                 break;
             }
         }
 
-        transmittance = accumTransmittance;
+        // 霞で薄まったぶん、雲は背後の空を遮らなくなる。霞が無ければ cloudTransmittance と一致する
+        transmittance = lerp(1.0f, cloudTransmittance, fogAtCloud);
         scatteredLight = accumScatter;
     }
     else
