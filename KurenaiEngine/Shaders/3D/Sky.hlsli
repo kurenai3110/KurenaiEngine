@@ -2064,12 +2064,16 @@ void EvaluateCloudLayer(
     float3 rayOrigin, float3 dir, float maxDistance, float jitter,
     CloudLayerParams layer, float3 sunDirection, float zenithLuminance,
     float sunToSkyIlluminanceRatio, float skyIlluminanceOverZenith, CloudFogParams fog,
-    out float transmittance, out float3 scatteredLight)
+    out float transmittance, out float3 scatteredLight, out float fogInFront)
 {
     // 層に当たらないレイが返す中立元。SkyColorの合成式 clearColor * T + S へ入れると
     // clearColor そのものになる(=この層は視線に何の影響も与えない)
     transmittance = 1.0f;
     scatteredLight = float3(0.0f, 0.0f, 0.0f);
+    // 【視点からこの層の雲に当たるまでの霞の透過率(P18b)】1.0は「手前に霞が無い」の意味で、
+    // 層に当たらなかった場合・霞が無効な場合の中立元でもある。呼び出し側(SkyColorWithRay)が
+    // 「雲の手前の霞そのものの色」を作るために使う。詳しくはSkyColorWithRayの該当箇所
+    fogInFront = 1.0f;
 
     // ================= (a) レイと層の交差(P17) =================
     // 層は**世界座標**のスラブ [Altitude, Altitude + Thickness]。厚みゼロの層(巻雲)だけは
@@ -2288,6 +2292,12 @@ void EvaluateCloudLayer(
         // 霞で薄まったぶん、雲は背後の空を遮らなくなる。霞が無ければ cloudTransmittance と一致する
         transmittance = lerp(1.0f, cloudTransmittance, fogAtCloud);
         scatteredLight = accumScatter;
+        // 雲に当たったときだけ、その位置までの霞を呼び出し側へ渡す(P18b)。
+        // 当たらなかった場合は初期値の1.0のまま=手前に霞が無い扱いになる
+        if (hasCloud)
+        {
+            fogInFront = fogAtCloud;
+        }
     }
     else
 #endif
@@ -2346,6 +2356,8 @@ void EvaluateCloudLayer(
         scatteredLight =
             CloudInScatter(sunTransmittance, phaseNormalized, layer, sunIlluminance, zenithLuminance)
             * (1.0f - planeTransmittance) * enterFog;
+        // 平面経路は交差の早期脱出を通り抜けた時点で必ず当たっているので、入口の霞をそのまま渡す(P18b)
+        fogInFront = enterFog;
     }
 
     // 【(e)の地平線フェードと(f)の一括フォグはP17で無くなった】
@@ -2508,6 +2520,34 @@ float3 SkyClearColor(float3 dir, SkyParameters params)
     return lerp(plateauColor, groundColor, groundT);
 }
 
+// 雲の手前にある霞の色を、晴天の空色から曇天の空色へ直す補正項(P18b)。
+//
+// 【何が起きていたか】雲層の合成は clearColor * T + S で、TはEvaluateCloudLayerが
+//   T = lerp(1, T_cloud, fog)
+// として返す。これを展開すると
+//   clearColor * fog * T_cloud   ← 雲の隙間から見える空(正しい)
+// + clearColor * (1 - fog)       ← **雲の手前の霞そのもの**
+// + S
+// となり、2項目の霞が晴天の空色で塗られていた。曇天では霞は無彩色に近くなるはずなので、
+// 被覆率を上げるほど「灰色であるべき雲に青が差す」という形で出る。
+// 実測(被覆率1.0・出荷カメラ): 霞を運用値5e-5から1e-7へ実質切ると、
+// 空の帯のB-Rの中央値が 32.0 → 2.0(中の帯)・6.0 → 0.0(上の帯)まで落ちた。
+// **霞を完全に切った対照で症状が消える**ので、原因は霞の色で確定している。
+//
+// 【直し方】正しい霞の色は「その空間を照らしている光」であり、それは大気遠近の
+// in-scatterとまったく同じ量である(AerialPerspective.hlslを参照)。すなわち
+// clearColor * CloudSkyLight。差分だけを足す形にすると
+//   clearColor * (CloudSkyLight - 1) * (1 - fog)
+// になる。CloudSkyLight = 1(被覆率0、または雲の減光が無い)のとき厳密に0なので、
+// 雲を持たないシーンでは1命令も効かない。
+//
+// 【なぜEvaluateCloudLayerの中でやらないか】層ごとに足すと、2層とも当たったときに
+// 視点から手前の層までの区間を二重に計上する。呼び出し側で1回だけ足せばその心配が無い
+float3 CloudAirlightCorrection(float3 clearColor, float fogInFront, SkyParameters params)
+{
+    return clearColor * (params.CloudSkyLight - 1.0f) * (1.0f - fogInFront);
+}
+
 // 起点と長さを持つ1本のレイに沿って空と雲を評価する(P17)。
 //   rayOrigin   … レイの起点(ワールド)。背景画素ならカメラ位置、水面の反射なら水面の位置
 //   dir         … 正規化済みの向き
@@ -2554,12 +2594,13 @@ float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParam
     // 一致する値)であり、CloudCoverage<=0のときEvaluateCloudLayerを呼ばずこの初期値のまま使う
     float cumulusTransmittance = 1.0f;
     float3 cumulusScatter = float3(0.0f, 0.0f, 0.0f);
+    float cumulusFogInFront = 1.0f;
     if (params.CloudCoverage > 0.0f)
     {
         EvaluateCloudLayer(
             rayOrigin, dir, maxDistance, params.RaymarchJitter, MakeCumulusLayerParams(params), params.SunDirection,
             params.ZenithLuminance, params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith,
-            fog, cumulusTransmittance, cumulusScatter);
+            fog, cumulusTransmittance, cumulusScatter, cumulusFogInFront);
     }
 
     // 【判断Cの担保の2つめ】巻雲の被覆率が0のとき、EvaluateCloudLayer(巻雲側)を一度も呼ばず、
@@ -2567,7 +2608,8 @@ float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParam
     // そのまま通す。掛け算・足し算を1つも増やさないことで、浮動小数の最下位ビットまで一致させる
     if (params.CirrusCoverage <= 0.0f)
     {
-        return clearColor * cumulusTransmittance + cumulusScatter;
+        return clearColor * cumulusTransmittance + cumulusScatter
+             + CloudAirlightCorrection(clearColor, cumulusFogInFront, params);
     }
 
     // 巻雲(上層、P11)を評価する。巻雲は積雲より高い位置にあるため、巻雲から届く散乱光は
@@ -2577,10 +2619,11 @@ float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParam
     // cumulusTransmittance=1となり、この項は自動的に無効になる(場合分けは要らない)
     float cirrusTransmittance;
     float3 cirrusScatter;
+    float cirrusFogInFront;
     EvaluateCloudLayer(
         rayOrigin, dir, maxDistance, params.RaymarchJitter, MakeCirrusLayerParams(params), params.SunDirection,
         params.ZenithLuminance, params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith,
-        fog, cirrusTransmittance, cirrusScatter);
+        fog, cirrusTransmittance, cirrusScatter, cirrusFogInFront);
 
     // (g) 2層合成: 高い層(巻雲)から手前(積雲)へ。
     //   透過率 = T_cirrus * T_cumulus (両層を貫く視線の透過率なので積)
@@ -2589,7 +2632,13 @@ float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParam
     // (lerpだと被覆率で単純に混ぜてしまい、隙間の青空まで雲色へ寄ってしまう)
     const float transmittance = cirrusTransmittance * cumulusTransmittance;
     const float3 scatteredLight = cumulusScatter + cirrusScatter * cumulusTransmittance;
-    return clearColor * transmittance + scatteredLight;
+    // 【霞の色は手前の層のものを使う】(P18b) 積雲は巻雲より低く、視線に当たっていれば必ず手前にある。
+    // 当たっていない(cumulusFogInFront == 1.0)ときだけ巻雲側の霞を見る。
+    // 霞が無効なときは両方1.0になり、補正は0になる
+    const float fogInFront =
+        (cumulusFogInFront < 1.0f) ? cumulusFogInFront : cirrusFogInFront;
+    return clearColor * transmittance + scatteredLight
+         + CloudAirlightCorrection(clearColor, fogInFront, params);
 }
 
 // 背景(地物に遮られない視線)用の薄いラッパー。起点は視点、レイ長は実質無限。

@@ -188,6 +188,17 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     cloudParams.ZenithLuminance = 1.0f;
     cloudParams.SkyIlluminanceOverZenith = skyIlluminanceOverZenith;
     cloudParams.SunToSkyIlluminanceRatio = ViewerAndSunRatio.w;
+    // 【ここは必ず1.0にする(P18b)】SkyColorWithRayは雲の手前の霞の色をCloudSkyLightで
+    // 直す(CloudAirlightCorrection参照)。その値は**いまここで求めようとしているもの**
+    // なので、参照すると循環する。1.0=補正なしにして、補正前の空の照度から比を求める。
+    //
+    // 【この1段だけで足りる理由】補正が効くのは霞に埋もれた雲、つまり (1 - 霞の透過率) が
+    // 大きい低い仰角に限られる。この積分は余弦重みなので低い仰角の寄与そのものが小さく、
+    // 反復しても比はほとんど動かない。出荷の霞(消散係数5e-5)では天頂方向の霞の透過率が
+    // 0.93あり、補正の掛かる余地は7%しかない。
+    // **(SkyParameters)0のまま放置してはいけない** —— 0だと補正項が
+    // clearColor * (0-1) * (1-霞) となり、霞の濃い方向の空を丸ごと引き算してしまう
+    cloudParams.CloudSkyLight = float3(1.0f, 1.0f, 1.0f);
 
     // 雲・巻雲。**FrameConstants側の詰め方(DeferredLighting.hlslのMakeSkyParameters)と
     // 完全に同じ順で読むこと**。ずれると背景と別の雲を積分することになる
