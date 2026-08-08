@@ -1285,6 +1285,13 @@ static const float kCloudMinStepMeters = 12.0f;
 // kShapeBaseCells を8へ上げると同時にここを半分にすることで、
 // **雲の特徴の大きさは524mのまま**、タイルは4,167mごと・特徴は8x8=64個になる。
 // (セル数だけ上げると特徴が小さくなり、周期だけ伸ばすと雲がのっぺりする。両方を同時に動かす)
+// 縦のノイズ座標を作るときの基準になる厚み[m]。**[Cloud] Thickness とは独立**で、
+// スラブが実際に何メートルでも、3Dノイズの縦は常にこの厚みぶんを通る
+// (理由と実測は CloudSampleDensity の slabHeightMeters のコメント)。
+// 値は下の縦周期・コントラスト・正規化係数をすべて測ったときの厚みに合わせてある。
+// **ここを変えたら kCloudShapeContrastLow/High と kCloudVolumeDensityNormalize を測り直すこと**
+static const float kCloudNoiseReferenceThickness = 1200.0f;
+
 static const float kCloudShapeRepeats = 86.0f;
 static const float kCloudShapeVerticalPeriod = 1984.0f;
 
@@ -1502,6 +1509,25 @@ static const float kCloudSmallCoverageScale = 0.6f;
 // 雲頂がほぼ消滅したため。面積が単調に減りつつ雲頂が残る(3割)ところを取る。
 // なお0.15〜0.55の差は等倍の絵では区別がつかない(画面に出るのは雲の側面の外郭で、
 // 削っているのは雲頂だから)。だから絵ではなくこの構造で決めている
+// 「被覆率1.0で全面曇り」を保証するための2定数。**これは物理からの意図的な逸脱**で、
+// 実際の積雲は補償下降流のせいで雲量3〜5割で頭打ちになり、空を埋めることはない。
+// つまみを端まで使えるようにするというアートの要求として入れてある。
+//
+// 【しきい値を持たせない】最初は被覆率0.85から smoothstep で立ち上げていたが、
+// 「つまみのある一点から急に性質が変わる」形はやめる方針。代わりに localCoverage
+// (=weather×プロファイル−高さ浸食。その場所に雲が立つ度合いそのもの)のべき乗で連続に効かせる。
+//   ・雲が立たない場所(localCoverage=0)では厳密に0なので、青空はそのまま青空のまま残る
+//   ・べきが効くので運用値では無視できる大きさにしかならない
+//     (被覆率0.14ではlocalCoverageの最大が約0.2で、下限は 0.25*0.2^4 = 0.0004)
+//   ・被覆率1.0ではプロファイルの頂点付近で0.25に達し、穴を埋める
+// 0.25 と 4.0 は実機で確かめた値。真上(Pitch70)・厚み300・雲の種類を層雲へ振り切った
+// 条件でも、わずかでも空が抜けた画素が0.00%になる。使い方は CloudSampleDensity の最後を参照
+static const float kCloudOvercastDensityFloor = 0.25f;
+static const float kCloudOvercastFalloff = 4.0f;
+// 下限の濃淡の下側。1.0で濃淡なし(一様な板)、小さいほど遠方に明暗が残るが、
+// 全面曇りの保証は **kCloudOvercastDensityFloor × これ** のほうで決まる
+static const float kCloudOvercastFloorMin = 0.5f;
+
 static const float kCloudHeightErosion = 0.25f;
 
 // 高さによる密度の勾配。積雲は雲頂ほど凝結が進んで密度が高い。
@@ -1592,8 +1618,13 @@ float CloudWorleyFbmFromChannels(float3 channels)
 // 種類を先に求め、それで局所的な被覆率を上下させることで大きさをまばらにする
 // (kCloudCoverageAtStratus のコメント参照)。cloudTypeは呼び出し側が
 // CloudSampleDensityへそのまま渡し、二度引かないようにする
-float CloudWeatherAt(float2 noiseXZ, CloudLayerParams layer, out float cloudType)
+float CloudWeatherAt(float2 noiseXZ, CloudLayerParams layer, out float cloudType,
+                     out float weatherLarge)
 {
+    // weatherLarge はしきい値化する**前**の大きい雲側のfBm。被覆率1.0では weather が
+    // どこでも1へ張り付いて濃淡を失うので、曇り空にゆるい濃淡を残すためにこちらを外へ出す
+    // (使い方は CloudSampleDensity の overcastFloor)
+    weatherLarge = 0.0f;
     cloudType = CloudTypeAt(noiseXZ, layer.TypeBias);
     // 【G: Coverage=1でどこでも開ききるようにする】
     // 以前は saturate(Coverage * typeScale) だった。typeScale は層雲寄りで0.45なので、
@@ -1618,6 +1649,7 @@ float CloudWeatherAt(float2 noiseXZ, CloudLayerParams layer, out float cloudType
     float largeN;
     float smallN;
     CloudFbmBands(noiseXZ * layer.AnisotropicScale, largeN, smallN);
+    weatherLarge = saturate(CloudRemap(largeN, kCloudWeatherLow, kCloudWeatherHigh));
 
     // 実測分布に合わせたしきい値化(D2。定数側のコメントに根拠がある)。
     // localCoverage=0でしきい値は99%点(ほぼ雲なし)、1で1%点(ほぼ全面)
@@ -1647,7 +1679,14 @@ float CloudWeatherAt(float2 noiseXZ, CloudLayerParams layer, out float cloudType
     return max(large, small);
 }
 
-float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudType, CloudLayerParams layer)
+// overcastFloorEnabled: 全面曇りの下限を効かせるなら1、切るなら0。
+// 【太陽マーチでは必ず0を渡す】下限は「視線が層を貫いたときに必ず不透明にする」ための
+// もので、雲の**明るさ**を決める自己影に混ぜてはいけない。混ぜていたときは被覆率1.0で
+// 空全体が暗くなった(実測: Pitch20の空の明部90%点が全帯で16〜22下がり、
+// **落ち幅が仰角によらずほぼ一定**だったことが視線側でなく太陽側だという証拠になった)
+float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudType,
+                         float weatherLarge, float overcastFloorEnabled,
+                         CloudLayerParams layer)
 {
     // 3Dテクスチャは Wrap で引くので範囲を気にせず掛けるだけでよい。
     // 【水平はセル単位の繰り返し数、垂直はワールド距離】noiseXZ はセル単位
@@ -1657,7 +1696,47 @@ float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudTyp
     // 垂直はメートルで割る。hf(スラブ内の相対高さ)のままだと縦の周期が厚みそのものになり、
     // 厚みを上げるほど模様が縦へ引き伸びてしまう
     const float shapeUvScale = kCloudShapeRepeats / kCloudNoisePeriod;
-    const float slabHeightMeters = hf * layer.Thickness;
+    // 【縦の座標は実際の厚みではなく基準厚みで作る】ここを hf * layer.Thickness にすると、
+    // **スラブが薄いほど3Dテクスチャの縦をわずかしか通らなくなる**。厚み1200では0.60周期
+    // (1200/1984)を通るのに対し、厚み300では0.15周期しか通らないので、1本の柱の中で
+    // base がほとんど変化せず、部分的な薄さが**柱まるごとの穴**に変わる。
+    //
+    // 【実測(Pitch20・被覆率1.0・青空 B-R>=90 の割合)】
+    //   hf * layer.Thickness   厚み1200 0.5% / 厚み300 7.9%
+    //   hf * 基準厚み          厚み1200 0.5% / 厚み300 0.1%
+    // 厚み1200では置換が恒等式になるので両者が一致する(これが対照。ここが動いたら実験が壊れている)。
+    //
+    // 【なぜ基準厚みで固定してよいか】「縦がスラブ内で何周するかが立体感を決める」ことは
+    // 下の kCloudShapeVerticalPeriod のコメントに実測で書いてある。その周期数が厚みで
+    // 勝手に変わるのは意図に反する。さらに kCloudShapeContrastLow/High と
+    // kCloudVolumeDensityNormalize は**厚み1200で測った値**なので、切り離して初めて
+    // どの厚みでも較正が正しくなる。
+    // 【C7で却下された案とは別物】C7は水平も垂直も厚みに比例させる案で、却下の理由は
+    // 「厚みを上げても横幅が広がって見えない」こと。ここは縦だけの切り離し。
+    //
+    // 【プロファイルが雲を置く高さの幅でも割る】厚みを固定しても、**高さプロファイルが
+    // 雲をスラブの一部へ閉じ込めると同じことが起きる**。層雲寄り(cloudType→0)の
+    // プロファイルは hf > kCloudProfileStratusTop*2 = 0.24 で0になるので、雲が立つのは
+    // スラブの下24%だけになり、そこを通る縦のノイズは0.145周期しかない。
+    //
+    // 【実測(Pitch20・被覆率1.0・青空 B-R>=90 の割合)】
+    //   TypeBias         0.5    0.3    0.1
+    //   割らない        0.5%   1.8%   5.6%
+    //   支持幅で割る    0.5%   1.1%   0.2%
+    // 高さプロファイルの雲の種類を0.5へ固定する対照では 0.8%/0.8%/0.7% となり、
+    // **雲の種類による悪化はプロファイルが原因だと単独で確かめてある**。
+    //
+    // 【却下した2案(どちらも実測)】
+    //   ・消散係数を上げる… 10→80で青空は 5.6%→10.1% と**増える**。穴は薄い雲ではなく
+    //     密度がちょうど0の硬い穴なので、消散係数では埋まらない
+    //   ・shapedのremapの上端を被覆率で狭める(旧計画のH2)… 0.1で5.6%→3.9%と半端で、
+    //     しかも0.3では1.8%→2.2%と悪化する
+    //
+    // 【正規化係数を測り直さなくてよい】3Dテクスチャは周期的なので、同じ場をより長い
+    // 範囲で引いても base の分布そのものは変わらない
+    const float profileSupport =
+        max(lerp(kCloudProfileStratusTop * 2.0f, 1.0f, saturate(cloudType * 2.0f)), 0.05f);
+    const float slabHeightMeters = hf * kCloudNoiseReferenceThickness / profileSupport;
     // 【H1c: 2回引いて混ぜる】繰り返し数が互いに素なので、合成した場は358kmでしか
     // 繰り返さない(kCloudShapeRepeatsB のコメント参照)
     const float3 shapeUvw =
@@ -1699,10 +1778,42 @@ float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudTyp
         // ディテール(2枚目のテクスチャフェッチ)を丸ごと省ける
         return 0.0f;
     }
+    // 【被覆率1.0は必ず全面曇りにする(アートの要求)】その場所に雲が立つ度合い
+    // (localCoverage)のべき乗で密度に下限を与える。しきい値は持たせない
+    // (kCloudOvercastDensityFloor のコメント参照)。
+    //
+    // 【なぜ形の側では保証できないか】残っていた穴は薄い雲ではなく**密度がちょうど0の硬い穴**
+    // (形状ノイズが柱まるごと0に近い場所)で、実測でも消散係数を10→80に上げると青空は
+    // 5.6%→10.1%と**増える**(穴が埋まらないまま縁だけ締まるため)。形の側を触る2案も測ったが
+    // 届かなかった: 縦のノイズを支持幅で伸ばす案は TypeBias 0.5 で0.47%止まり、
+    // shapedのremapの上端を狭める案(旧計画のH2)は0.4%止まりで TypeBias 0.3 では悪化した。
+    //
+    // 【localCoverageを使う利点】高さプロファイルが既に入っているので、雲底の下・雲頂の上は
+    // 自動的に0になる。掛けなければ層が1枚の直方体になってしまう
+    //
+    // 【下限に濃淡を持たせる】一定値の下限を敷くと、**遠方だけ濃く見える**。
+    // 下限は位置ごとに一定なので、その光学的深さは視線がスラブを通る距離に比例し、
+    // 仰角2度では 1/sin = 28.7、仰角20度では 2.9 と**10倍の差**になる。しかも一様なので
+    // 遠方は下限だけで埋まって明暗が消え、のっぺりした濃い塊になる
+    // (実測: 被覆率1.0・Pitch20の空の明部90%点が 12〜20度で 240.0 → 219.3)。
+    // そこで低周波の場で濃淡を付ける。使うのは**しきい値化する前の**大きい雲側のfBmで、
+    // 穴を作っている形状ノイズとは独立なうえ、被覆率1.0でも濃淡を保っている
+    // (weather 自体は1へ張り付いて使えない)。kCloudOvercastFloorMin が最も薄い場所の割合で、
+    // 全面曇りの保証はこの最小値のほうで担保する
+    const float overcastFloor =
+        kCloudOvercastDensityFloor * pow(localCoverage, kCloudOvercastFalloff)
+        * lerp(kCloudOvercastFloorMin, 1.0f, weatherLarge) * overcastFloorEnabled;
+    // 高さによる密度の勾配(C4)。スラブ内の平均が1になるよう対称に取ってあるので、
+    // 全体の光学的深さは変わらず「底が透けて頭が詰まる」形だけが加わる
+    const float densityGradient =
+        lerp(kCloudDensityGradientBottom, kCloudDensityGradientTop, hf);
+
     const float shaped = saturate(CloudRemap(base, 1.0f - localCoverage, 1.0f));
     if (shaped <= 0.0f)
     {
-        return 0.0f;
+        // 【ここでディテールを引かずに済む】浸食は shaped=0 を0のままにするので、
+        // 返す値は下限そのもの。下限を入れる前と同じく2枚目のテクスチャフェッチを省ける
+        return overcastFloor * densityGradient * kCloudVolumeDensityNormalize;
     }
 
     // ディテールで縁だけを削る。密度が高い芯はほとんど削れず、薄い縁だけが房状に痩せる。
@@ -1720,13 +1831,9 @@ float CloudSampleDensity(float2 noiseXZ, float hf, float weather, float cloudTyp
         kCloudDetailErode * lerp(kCloudErodeAtBase, kCloudErodeAtTop, hf);
     const float modulation = saturate(CloudRemap(shaped, detailFbm * erodeStrength, 1.0f));
 
-    // 高さによる密度の勾配(C4)。スラブ内の平均が1になるよう対称に取ってあるので、
-    // 全体の光学的深さは変わらず「底が透けて頭が詰まる」形だけが加わる
-    const float densityGradient =
-        lerp(kCloudDensityGradientBottom, kCloudDensityGradientTop, hf);
-
+    // 【構造は消えない】max なので、下限より濃い場所は元の密度のまま。下限が効くのは穴だけ。
     // 【weatherを掛けない】(D2) weather は上のしきい値の中へ入ったので、ここで掛けると二重になる
-    return modulation * densityGradient * kCloudVolumeDensityNormalize;
+    return max(modulation, overcastFloor) * densityGradient * kCloudVolumeDensityNormalize;
 }
 
 // ワールド座標の1点の密度(C1)。太陽マーチが任意の位置を引けるように、
@@ -1741,12 +1848,13 @@ float CloudSampleDensityWorld(float3 worldPos, CloudLayerParams layer)
     }
     const float2 noiseXZ = worldPos.xz * layer.UvScale + layer.ScrollOffset;
     float cloudType;
-    const float weather = CloudWeatherAt(noiseXZ, layer, cloudType);
+    float weatherLarge;
+    const float weather = CloudWeatherAt(noiseXZ, layer, cloudType, weatherLarge);
     if (weather <= 0.0f)
     {
         return 0.0f;
     }
-    return CloudSampleDensity(noiseXZ, hf, weather, cloudType, layer);
+    return CloudSampleDensity(noiseXZ, hf, weather, cloudType, weatherLarge, 0.0f, layer);
 }
 
 // サンプル位置から太陽方向への光学的深さ(C1)。**立体感の本体**。
@@ -2074,14 +2182,17 @@ void EvaluateCloudLayer(
             // ウェザーマップ。ここが0なら3Dテクスチャを1枚も引かずに次のステップへ飛ぶ。
             // 被覆率は場所ごとに雲の種類で上下する(C7。大きさをまばらにする)
             float cloudType;
-            const float weather = CloudWeatherAt(sampleNoiseXZ, layer, cloudType);
+            float weatherLarge;
+            const float weather =
+                CloudWeatherAt(sampleNoiseXZ, layer, cloudType, weatherLarge);
             if (weather <= 0.0f)
             {
                 continue;
             }
 
             const float sampleDensity =
-                CloudSampleDensity(sampleNoiseXZ, hf, weather, cloudType, layer);
+                CloudSampleDensity(sampleNoiseXZ, hf, weather, cloudType, weatherLarge,
+                                   1.0f, layer);
             if (sampleDensity <= 0.0f)
             {
                 continue;
