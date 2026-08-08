@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Model.h"
+#include "ShowLoader.h"
 
 namespace Kurenai::Assets
 {
@@ -28,7 +29,7 @@ namespace Kurenai::Assets
 
         // .ksceneの[Model]Waterで指定される。trueの場合、KurenaiEngine3DはこのインスタンスをG-Bufferパスの
         // 通常PSOではなく水面専用PSO(Water.hlsl)で描画し、G-BufferのMaterial.aへ水面のマテリアルID
-        // (kMaterialIDWater、Shaders/3D/GBufferCommon.hlsli)を書き込む(P2: 水面マテリアル基盤)
+        // (kMaterialIDWater、Shaders/3D/GBufferCommon.hlsli)を書き込む(水面マテリアル基盤)
         bool IsWater = false;
     };
 
@@ -179,13 +180,29 @@ namespace Kurenai::Assets
         // 「レイトレーシングが使えない環境では反射なし」(EngineDefaults.h の SSREnabled。
         // SSRは画面端で反射が途切れる破綻が目立つため)で、書いていないシーンはそれに従う。
         // 一方このキーを明示したシーンは、その既定を上書きする意思表示なので指定どおりにする。
-        // 【この区別が無く不具合になっていた】以前はどちらも同じ扱いで、しかも
-        // 「= true」と書いてもエンジンの既定へ問い合わせ直していたため、DX11では
-        // ReflectionMode::Off になりシーンの指定が握り潰されていた(モン・サン=ミシェルの
-        // 水面に何も映らない/White Furnace TestのSSR回帰テストが動いていない、という形で出ていた)。
-        // DX12はDXRが使えてレイトレーシング反射が選ばれるため露見しなかった
+        // 【この区別を落としてはいけない】どちらも同じ扱いにして「= true」でもエンジンの既定へ
+        // 問い合わせ直すと、DX11では ReflectionMode::Off になりシーンの指定が握り潰される
+        // (水面に何も映らない/White Furnace TestのSSR回帰テストが動かない、という形で出る)。
+        // DX12はDXRが使えてレイトレーシング反射が選ばれるため露見しない
         bool HasSSREnabledOverride = false;
         bool SSREnabled = true;
+
+        // TAA(時間的アンチエイリアス)を有効にするか。SSREnabledと同じく「書いたこと」に
+        // 意味があるので Has〜Override で区別する(エンジンの既定は EngineDefaults.h の
+        // TAAEnabled = false。書いていないシーンはそれに従う)
+        bool HasTAAOverride = false;
+        bool TAAEnabled = false;
+
+        // G-Buffer以降の内部レンダー解像度。ウィンドウの大きさとは独立で、表示時に
+        // アスペクト比を保って拡大縮小される(KurenaiEngine3D::RequestRenderResolution)。
+        //
+        // 【なぜシーンが持つのか】参考写真と実機を数値で突き合わせる検証では、実効解像度が
+        // 測定値そのものを動かす。既定の1280x720では島の幅が約516画素で、参考写真の946画素の
+        // 半分しか無く、局所コントラストの比較が「拡大のぼけ」を測ってしまう。どの解像度で
+        // 測ったかはシーンの一部として残さないと再現できない
+        bool HasRenderResolutionOverride = false;
+        uint32_t RenderWidth = 0;
+        uint32_t RenderHeight = 0;
 
         // トーンマップのカーブ。Source/LibraryはSource/Engineに依存できないため、
         // KurenaiEngine3D::TonemapCurveと同じ並びの独立した列挙をここに持つ
@@ -200,6 +217,13 @@ namespace Kurenai::Assets
             AgX,
         };
         TonemapCurveSetting Tonemap = TonemapCurveSetting::AgX;
+
+        // 黒の締め(ブラックポイント)。トーンマップ後の表示リニア値からこの値を引き、
+        // 残りを[0,1]へ伸ばし直す。実カメラのトーンカーブが持つ処理に相当する。
+        // 0(既定)で恒等なので、指定しないシーンの見た目は一切変わらない。
+        // 屋外の遠景では大気遠近が最暗部へ空の輝度を一定量だけ加算するため、画面上の
+        // 最暗値が頭打ちになる。霞を非物理的な値まで薄めずに黒を締めるための逃げ道
+        float TonemapBlackPoint = 0.0f;
 
         // 空の彩度(アート指定)。既定1.0は物理モデルの色度そのまま。色度図上で白色点から
         // 遠ざける倍率で、色相は変えずに鮮やかさだけを変える。物理量ではないので
@@ -224,7 +248,7 @@ namespace Kurenai::Assets
         bool HasExposureOverride = false;
         float ExposureEV100 = 15.0f;   // EngineDefaults.h の SceneExposureEV100 と同じ値にすること
 
-        // --- [Cloud]セクション(P10)。天候はシーンが持つべき性質なので、[Water]と同じく
+        // --- [Cloud]セクション。天候はシーンが持つべき性質なので、[Water]と同じく
         // シーンごとに指定できるようにする。**指定されたキーだけ**エンジンの設定を上書きする
         // (Exposure/IBLIntensityと同じ扱い)ので、書かなかったキーはエンジンの既定値のまま。
         // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
@@ -280,12 +304,55 @@ namespace Kurenai::Assets
         bool HasFogRefHeight = false;
         float FogRefHeight = 0.0f;          // 消散係数を定義する高さ(ワールドY)
 
+        // --- [Bloom]セクション。ブルームはエンジンの既定では**無効**(素の輝度分布を確認したい
+        // ときに邪魔になるため)だが、夜景で強い光源が主役になるシーンでは有効でないと成立しない。
+        // ドローンショーの機体は加算合成でHDRへ書くだけで光芒を作らず、滲みはブルームに任せている。
+        // 他のセクションと同じく指定されたキーだけ上書きする。
+        // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        bool HasBloomEnabled = false;
+        bool BloomEnabled = false;
+        bool HasBloomStrength = false;
+        float BloomStrength = 0.06f;
+        bool HasBloomThreshold = false;
+        float BloomThreshold = 1.0f;
+
+        // --- [Stars]セクション。星空も天候と同じくシーンが持つべき性質なので、[Cloud]/[Fog]と
+        // 同じく**指定されたキーだけ**エンジンの設定を上書きする。
+        // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        bool HasStarsEnabled = false;
+        bool StarsEnabled = true;
+        bool HasStarsDensity = false;
+        float StarsDensity = 48.0f;         // 空を分割するセルの細かさ。大きいほど星が増える
+        bool HasStarsBrightness = false;
+        float StarsBrightness = 1.0f;
+        bool HasStarsTwinkle = false;
+        float StarsTwinkle = 0.0f;          // またたきの強さ。既定0(TAAと相性が悪いため)
+
+        // --- [DroneShow]セクション。夜空を編隊飛行する発光ドローンの群れ。
+        // 他のセクションと同じく指定されたキーだけエンジンの設定を上書きする。
+        // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
+        //
+        // 【シーンが決めるのは「出すか」と「どこにどの大きさで置くか」だけ】機体数・保持/変形秒・
+        // 明るさ・ビルボード半径・揺れ・再生速度・種はショー側(.kshow)が持つ。
+        // ここへ足してはいけない ―― ショーの中身をシーンが上書きできると、同じショーが
+        // シーンごとに別物として鳴り、どちらが「そのショー」なのかが決まらなくなる
+        bool HasDroneShowEnabled = false;
+        bool DroneShowEnabled = false;
+        // [DroneShow]Pathで指定された.kshowを読み込んだもの。Formationsが空なら
+        // 「指定なし」または「読み込み失敗」で、どちらもドローンは描かれない
+        // (読み込み失敗はLoadScene側でエラーログに出る)
+        ShowData DroneShowData;
+        bool HasDroneShowCenter = false;
+        float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };  // 編隊の中心(ワールド座標)
+        bool HasDroneShowScale = false;
+        float DroneShowScale = 130.0f;      // 編隊の代表半径[m]
+
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
 
-        // .ksceneの[Water]セクション(P2: 水面マテリアル基盤)。水面(ModelInstance::IsWater)専用の
+        // .ksceneの[Water]セクション(水面マテリアル基盤)。水面(ModelInstance::IsWater)専用の
         // シェーディングパラメータで、[Water]が無いシーンでは既定値のまま(水面インスタンス自体も
         // 存在しないため未使用)。NormalMapはAssetsルートからの相対パスで、[Scene]Skyboxと同じ
         // ルート外チェックを通したうえで絶対パスへ解決してからここへ入る。空文字列なら

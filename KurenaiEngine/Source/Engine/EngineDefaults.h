@@ -22,7 +22,7 @@ namespace Kurenai::Defaults
     inline constexpr bool OcclusionMapEnabled = true;
     inline constexpr float SSAORadius = 0.5f;
     // 遮蔽率にかける指数。1.0は「求めた遮蔽率をそのまま使う」で、上げるほど遮蔽が濃くなる。
-    // 素の遮蔽率を基準にしたいため既定は1.0(かつては1.5で、既定のまま濃く付いていた)
+    // 素の遮蔽率を基準にしたいため既定は1.0
     inline constexpr float SSAOPower = 1.0f;
     inline constexpr float SSILRadius = 0.5f;
     inline constexpr float SSILThickness = 0.01f;
@@ -40,8 +40,8 @@ namespace Kurenai::Defaults
     inline constexpr bool IBLEnabled = true;
     inline constexpr float IBLIntensity = 0.5f;
     inline constexpr bool IBLUseDedicatedIrradiance = false;
-    // 拡散イラディアンスの球面調和関数(SH L2)経路(M11 Stage 4a)。CSIrradianceの高速な代替。
-    // 既定はfalse(旧来の総当たり積分)。IBLUseDedicatedIrradianceが有効な場面でのみ意味を持つ
+    // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradiance(総当たり積分)の高速な代替。
+    // 既定はfalse。IBLUseDedicatedIrradianceが有効な場面でのみ意味を持つ
     inline constexpr bool IBLUseSHIrradiance = false;
     // SHのウィンドウ関数(Sloan)の強さ。0=無効(既定)。リンギングが実測で出た場合のつまみ
     inline constexpr float SHWindowLambda = 0.0f;
@@ -83,7 +83,7 @@ namespace Kurenai::Defaults
     inline constexpr float SSRThickness = 0.1f;
     inline constexpr float SSRRoughnessCutoff = 0.6f;
 
-    // --- 水面(P2: 水面マテリアル基盤) ---
+    // --- 水面 ---
     // .ksceneの[Water]セクションが無い場合の既定値。[Water]がある場合はScene::WaterWaveScale等が
     // これらの値をリテラル複製した既定値で初期化され、そちらがKurenaiEngine3D::m_WaterWaveScale等を
     // 上書きする(Scene.hのコメント参照)。ここの値自体は.kscene側のコメントに残した暫定値の流用
@@ -93,7 +93,7 @@ namespace Kurenai::Defaults
     // シーンに依存しないUIつまみ(Scene::WaterWaveScale等と違い.ksceneのキーを持たない)
     inline constexpr bool WaterTimeFrozen = false;
     // 水面のSSR反射で、レイが画面外へ抜けた・最大距離まで判定がつかなかったときに解析空
-    // (Sky.hlsli)へフォールバックするか(P4: SSRの水面分岐)。既定ON。
+    // (Sky.hlsli)へフォールバックするか(SSRの水面分岐)。既定ON。
     // 【現状の効果は小さい】空が滑らかな勾配しか持たない間は、プリフィルタ済み鏡面を
     // 低ミップで引いた値と解析評価した値がほぼ一致する(実測: 8bitで最大1、平均0.67)。
     // 差が大きくなるのは空に高周波の要素(雲)が入ってからで、そのとき128pxベースの
@@ -103,7 +103,7 @@ namespace Kurenai::Defaults
     // (KurenaiEngine3D::m_WaterAnalyticSkyReflectionのコメント参照)
     inline constexpr bool WaterAnalyticSkyReflection = true;
 
-    // --- 平面反射(P6: 水面への鏡像描画) ---
+    // --- 平面反射(水面への鏡像描画) ---
     inline constexpr bool PlanarReflectionEnabled = true;
     // 反射解像度の倍率(1/2)。水面はラフネスが低いとはいえ波の法線で画面UVを歪ませて引くため
     // 等倍の解像度は要らず、フォワードパス(不透明メッシュ全体)をもう1回走らせるコストの方が
@@ -112,11 +112,11 @@ namespace Kurenai::Defaults
     // 波の法線による画面UVのずらし量(SSR.hlsl参照)。UV空間の小さな値から始め、実測で調整可能
     inline constexpr float PlanarReflectionDistortion = 0.02f;
 
-    // --- 雲(P5: 積雲1層のレイヤーモデル) ---
+    // --- 雲(積雲1層のレイヤーモデル) ---
     inline constexpr bool CloudEnabled = true;
-    // 被覆率。0.45は「晴れ間と雲がおよそ半々」という写真の見た目に寄せた値であり、
-    // 物理的な導出ではない(実測で調整可能)。実測でも狙いどおりで、雲を流しながら8枚撮った
-    // 画角内の青空の割合は中央値45.7%だった(下のCloudUvScaleのコメント参照)。
+    // 被覆率。0.40は「晴れ間と雲がおよそ半々」という写真の見た目に寄せた値であり、
+    // 物理的な導出ではない(実測で調整可能)。実測では、雲を流しながら8枚撮った
+    // 画角内の青空の割合が中央値45.7%になる(下のCloudUvScaleのコメント参照)。
     //
     // 【この目盛りは線形ではない】被覆率Cはシェーダー側で remap(fBm, 1-C, 1) のしきい値として
     // 使われる。fBmは4オクターブの平均なので[0,1]に一様ではなく平均0.499・標準偏差0.132に
@@ -132,8 +132,8 @@ namespace Kurenai::Defaults
     inline constexpr float CloudAltitude = 1500.0f;
     // ノイズ空間のUVスケール[ノイズ空間の距離/m]。1セル=1,000m。
     //
-    // 【1セルの大きさではなく「画角に何セル入るか」で決める】以前は1/2000(1セル=2km)で、
-    // 根拠は「積雲1個がおよそ2km」だった。しかしこの値が本当に効くのは雲そのものの寸法ではなく、
+    // 【1セルの大きさではなく「画角に何セル入るか」で決める】「積雲1個がおよそ2km」だから
+    // 1/2000、という決め方をしてはいけない。この値が本当に効くのは雲そのものの寸法ではなく、
     // 画角の中に雲と隙間が何回交代して現れるかである。雲底1,500mの平面を仰角θで見ると交点までの
     // 水平距離は1500/tanθで、画角の水平半角36.4度(FovY=45度・16:9)から画面が覆う横幅が決まる:
     //   仰角37度(カメラを15度上げたときの画面上端) -> 水平距離1,990m -> 画面の横幅は約2,940m
@@ -142,18 +142,18 @@ namespace Kurenai::Defaults
     // (雲を流しながら8枚撮った画角内の青空の割合。カメラを15度上げた構図):
     //   1セル2,000m … 最小20.4% / 中央38.0% / 最大58.9%  標準偏差12.3pt
     //   1セル1,000m … 最小33.9% / 中央44.3% / 最大53.6%  標準偏差 5.5pt
-    // 中央値はほとんど動いていない(=被覆率0.45の設定自体は妥当だった)。変わったのは
-    // 「悪い引き」が無くなったことで、標準偏差は半分以下になる。
+    // 中央値はほとんど動かない(=被覆率の設定だけでは決まらない)。効くのは
+    // 「悪い引き」が無くなることで、標準偏差は半分以下になる。
     //
     // 【1,000mという値】上の2,940mに雲と隙間の交代が3回以上入る条件から 2940/3 = 980m。
     // 参考に1セル800mも測ったが、画面上端の標準偏差が10.3ptへ戻り改善しなかったため採らない。
     //
-    // 【なぜ実害が大きかったか】風速の既定5m/sとこのUVスケールでは、ノイズ空間は毎秒
+    // 【なぜ効きが大きいか】風速の既定5m/sとこのUVスケールでは、ノイズ空間は毎秒
     // 0.005セルしか進まない(1セル進むのに3分以上かかる)。起動時のスクロール量は0なので、
-    // 実用上ほぼ常に「スクロール量0の引き」だけを見ることになる。そしてその引きは
-    // たまたま極端に悪く、カメラを15度上げると青空が1.9%しか残らなかった
+    // 実用上ほぼ常に「スクロール量0の引き」だけを見ることになる。1セル2,000mでは
+    // その引きが極端に悪く、カメラを15度上げると青空が1.9%しか残らない
     // (同じ引きで1セル1,000mにすると41.2%)。分布の中央値ではなくこの1枚が
-    // 「空が全面曇っている」という体感の正体だった
+    // 「空が全面曇っている」という体感を作る
     inline constexpr float CloudUvScale = 1.0f / 1000.0f;
     // 消散係数。既定の光路長(地平線際でクランプ後の最大約20倍)でも雲の芯が十分不透明に見え、
     // かつ薄い箇所では下の空が透けるバランスを見た目で探った調整値(実測で調整可能)
@@ -166,7 +166,7 @@ namespace Kurenai::Defaults
     // Henyey-Greensteinの非対称パラメータ。前方散乱が強すぎると太陽周辺だけが不自然に
     // 明るい点になるため、縁が仄かに光る程度に留めた調整値(実測で調整可能)
     inline constexpr float CloudForwardG = 0.6f;
-    // 積雲をボリューム(スラブのレイマーチ)として描くか(P13b)。無効にすると従来の
+    // 積雲をボリューム(スラブのレイマーチ)として描くか。無効にすると従来の
     // 厚みゼロの平面レイヤーに戻る。負荷と見た目を直接比べるためのA/Bトグルでもある
     inline constexpr bool CloudVolumetric = true;
     // 雲底から雲頂までの厚み[m]。1,000mは並雲(cumulus mediocris)の目安で、
@@ -181,16 +181,16 @@ namespace Kurenai::Defaults
     // 積雲・巻雲の両方に効く(片方だけ凍結できるとA/B比較の対照が取れなくなるため)
     inline constexpr bool CloudTimeFrozen = false;
 
-    // --- 巻雲(P11: 積雲の上に重ねる2層目) ---
+    // --- 巻雲(積雲の上に重ねる2層目) ---
     //
-    // 【この5つの値の決め方】いずれも見た目からの調整値で物理的な導出ではないが、
-    // 最初に置いた値(被覆率0.3・UVスケール1/6000・消散係数0.8)は実測すると
-    // 「有効/無効を切り替えても空領域の画素の4.5%しか動かない(平均差0.25/255)」という
-    // ほぼ見えない状態だった。原因は主にUVスケールで、下のCirrusUvScaleのコメント参照。
-    // 現在の値では同じ比較で23.8%(平均差2.20)になり、高層に筋雲が読み取れる
+    // 【この5つの値の決め方】いずれも見た目からの調整値で物理的な導出ではない。
+    // 有効/無効の切り替えで空領域の画素が23.8%動き(平均差2.20/255)、高層に筋雲が読み取れる
+    // ことを実測で確かめてある。**被覆率0.3・UVスケール1/6000・消散係数0.8のような
+    // 組み合わせにしてはいけない** ―― 同じ比較で4.5%(平均差0.25/255)しか動かず、
+    // 巻雲がほぼ見えなくなる(効くのは主にUVスケール。下のCirrusUvScaleのコメント参照)
     inline constexpr bool CirrusEnabled = true;
     // 被覆率。remap(fBm, 1-被覆率, 1)で塊に整形するため、この値が低いとfBmの上位だけが
-    // 残ってまばらな筋になる。積雲(0.45)と同程度にして空の広い範囲へ薄く掛かるようにした
+    // 残ってまばらな筋になる。積雲と同程度にして空の広い範囲へ薄く掛ける
     inline constexpr float CirrusCoverage = 0.5f;
     // 雲底の高度[m]。巻雲の高度帯として一般に言われる目安は5,000〜13,000mで、その中ほどを
     // 採った値(精密な気象観測値ではなく目安からの採用。積雲のCloudAltitudeと同じ性格)
@@ -202,7 +202,7 @@ namespace Kurenai::Defaults
     // (仰角37度)で水平距離10,600m・画面の横幅は約15,700m、1セル2,000mなら7.8セル入る。
     // 積雲が1.5セルしか入らず運任せになっていたのに対し、巻雲は元から十分な数が入っていたので
     // ここは動かさない。巻雲の細い筋・積雲の大きな塊という見え方の違いは、この高度差から自然に出る。
-    // 当初これを1/6000にしていたときは画角内に1〜2セルしか入らず、模様が大きすぎて筋として読めなかった
+    // これを1/6000のような大きなセルにすると画角内に1〜2セルしか入らず、模様が大きすぎて筋として読めない
     inline constexpr float CirrusUvScale = 1.0f / 2000.0f;
     // 消散係数。巻雲は光学的に薄く下の青空が透けるのが特徴なので積雲(8.0)より大幅に小さい。
     // 0.8まで下げると上の被覆率・UVスケールと相まってほぼ見えなくなったため、透けは保ちつつ
@@ -215,7 +215,7 @@ namespace Kurenai::Defaults
     // 見た目からの調整値。1.0で積雲と同じ等方的な塊になる
     inline constexpr float CirrusAnisotropy = 3.0f;
 
-    // --- 大気遠近(P8: height fog / aerial perspective) ---
+    // --- 大気遠近(height fog / aerial perspective) ---
     // 以下の数値はいずれも見た目からの調整値であり、物理的な導出や実測値ではない
     // (親セッション側の実機確認で調整可能。KurenaiEngine3D::m_FogDensity等のコメント参照)
     inline constexpr bool FogEnabled = true;
@@ -237,17 +237,15 @@ namespace Kurenai::Defaults
     // 見下ろしたときに水面が何色に見えるかをほぼ一手に決める(見下ろす角度ではFresnelが
     // 約0.03まで下がるため、見えているもののほぼ全部がこの色になる)。
     //
-    // 【値の決め方】Water.kmodelのbaseColorFactorは(0.02, 0.03, 0.04)だったが、この明るさでは
-    // 見下ろしたときの近距離の水面が輝度15/255程度にしかならず「海が見えない」状態だった
+    // 【値の決め方】メッシュのbaseColorFactor程度の暗さ((0.02, 0.03, 0.04)など)では、
+    // 見下ろしたときの近距離の水面が輝度15/255程度にしかならず「海が見えない」状態になる
     // (Fresnelが約0.028まで下がるため、見えているもののほぼ全部がこの拡散色になる)。
     // モン・サン=ミシェル湾は土砂を多く含む濁った海なので、澄んだ海水(反射率数%)ではなく
-    // 濁水の反射率(おおむね8〜15%と言われる帯域)の下寄りを採った。
+    // 濁水の反射率(おおむね8〜15%と言われる帯域)の下寄りを採る。
     //
-    // 【見下ろすと海が灰色になる不具合】直前の値(0.085, 0.082, 0.070)はB÷R比が0.82で
-    // ほぼ無彩色だったため、Fresnelが下がる見下ろす角度では海が曇り空のような灰色に見えていた
-    // (実測: 水面のB÷Rが0.95〜1.02)。新しい値は輝度をほぼ保ったまま青緑へ寄せたもので、
-    // 物理量の実測ではなく見た目からの調整値である。濁水の反射率としておおむね8〜15%と
-    // 言われる帯域の下寄りを狙っている点は従来どおり
+    // 【B÷R比を1へ近づけると灰色になる】無彩色に寄せると、Fresnelが下がる見下ろす角度では
+    // 海が曇り空のような灰色に見える。輝度をほぼ保ったまま青緑へ寄せてあり、
+    // 物理量の実測ではなく見た目からの調整値である
     inline constexpr float WaterBodyColorR = 0.040f;
     inline constexpr float WaterBodyColorG = 0.082f;
     inline constexpr float WaterBodyColorB = 0.085f;
@@ -336,6 +334,11 @@ namespace Kurenai::Defaults
     inline constexpr float TAABlendWeight = 0.1f;
     // ジッターの振れ幅の倍率。1.0でピクセル内いっぱい(±0.5px)に散らす
     inline constexpr float TAAJitterScale = 1.0f;
+    // トーンマップ後の黒の締め(ブラックポイント)。0で恒等=既定の見た目を変えない。
+    // 屋外の遠景では大気遠近が最暗部へ空の輝度を加算して黒が浮くため、シーン側で
+    // [Scene]TonemapBlackPoint を指定して締められるようにしてある
+    inline constexpr float TonemapBlackPoint = 0.0f;
+
     // 蓄積によるボケを補う量。0で無効。TAAの中ではなくTonemapパスで最終出力にのみ掛ける
     inline constexpr float TAASharpness = 0.35f;
     // 近傍クリップのボックス幅(近傍の標準偏差の何倍まで履歴を許容するか)。
@@ -388,14 +391,14 @@ namespace Kurenai::Defaults
     inline constexpr bool TimeAutoAdvance = false;
     inline constexpr float TimeAdvanceSpeed = 1.0f;
     inline constexpr float SunAzimuthDegrees = 126.87f;
-    // 大気の濁り具合(P7: Preetham xyYモデルのタービディティ)。Preethamの定義域はおおむね
+    // 大気の濁り具合(Preetham xyYモデルのタービディティ)。Preethamの定義域はおおむね
     // 1.7〜10で、2.5は「澄んだ晴天」に相当する見た目からの選択であり、実測値ではない
     inline constexpr float SkyTurbidity = 2.5f;
     // 空の彩度。**物理量ではなく明示的なアート指定**で、既定の1.0はPreethamの色度そのまま
     // (=物理的に導かれた値をいじらない)。色度図上で白色点(D65)から遠ざける倍率なので、
     // 色相は変えずに鮮やかさだけが変わる。
     //
-    // 【なぜ物理と分けて持つのか】参考写真の最も深い空はB/R=4.84だったが、Preethamは
+    // 【なぜ物理と分けて持つのか】参考写真の最も深い空はB/R=4.84だが、Preethamは
     // 論文の係数から独立に計算しても1.34〜1.74しか出さない(タービディティを1.8まで下げても
     // 改善しない)。実装はこの予測範囲の中にありモデルに忠実なので、差は実装の誤りではなく
     // モデルの性質であり、物理側をいじっても埋まらない。絵作りが要るシーンは
@@ -406,9 +409,42 @@ namespace Kurenai::Defaults
     inline constexpr float MoonElevationDegrees = 45.0f;
     inline constexpr bool ProceduralSkyEnabled = true;
     // 背景(深度が無い画素)をキューブマップのサンプルではなく、Sky.hlsliのSkyColorを画面解像度で
-    // 直接評価するか(P3)。キューブマップは256px/面しかなく背景としては拡大表示されるため、
+    // 直接評価するか。キューブマップは256px/面しかなく背景としては拡大表示されるため、
     // 既定でON。手続き空が無効なときはこの設定に関わらずキューブマップが使われる
     inline constexpr bool SkyAnalyticBackground = true;
     inline constexpr float SceneExposureEV100 = 15.0f;
     inline constexpr float EmissiveIntensity = 1.0f;
+
+    // --- 星空 ---
+    // 夜空に星を描くか。既定はtrueだが、昼は太陽の仰角で完全に0までフェードするため
+    // 昼のシーンの絵は1画素も変わらない(Sky.hlsliのEvaluateStarfield参照)
+    inline constexpr bool StarsEnabled = true;
+    // 星の密度。空を分割するセルの1辺あたりの数で、大きいほど星が増える。
+    // 肉眼で見える恒星は全天で約6,000個。既定値はその桁に合わせてある
+    inline constexpr float StarsDensity = 48.0f;
+    // 星の明るさ倍率。1.0で「実際の夜空を肉眼で見たときの印象」に寄せた既定
+    inline constexpr float StarsBrightness = 1.0f;
+    // またたきの強さ。**既定は0(無効)**。TAAと相性が悪くちらつきに見えるうえ、
+    // A/B比較のスクリーンショットの再現性も落とすため、必要なときだけ上げる
+    inline constexpr float StarsTwinkle = 0.0f;
+
+    // --- ドローンショー ---
+    // ショーの中身(点・機体数・保持/変形秒・明るさ・ビルボード半径・揺れ・再生速度・種)は
+    // .kshowが持つため、ここには無い。残っているのは「シーンが決める配置」と
+    // 「シーンにもショーにも決めさせない描画側の下限」だけ。
+    //
+    // 既定はfalse。専用シーン(Scenes/DroneShow.kscene)が[DroneShow]Enabled=trueで
+    // 有効にする。既定で走らせると全シーンに無関係な描画パスが増えてしまう
+    inline constexpr bool DroneShowEnabled = false;
+    // 編隊の中心(ワールド座標)。水面より十分上に置くこと
+    inline constexpr float DroneShowCenterX = 0.0f;
+    inline constexpr float DroneShowCenterY = 220.0f;
+    inline constexpr float DroneShowCenterZ = 260.0f;
+    // 編隊の代表半径[m]。.kshowの点は代表半径1へ正規化されており、これを掛けて実寸にする
+    inline constexpr float DroneShowScale = 130.0f;
+    // 画面上の最小半径(NDC単位)。遠方の機体が1画素を割るとTAAのジッターで明滅するため、
+    // これ以下にならないようシェーダ側で押し上げる。1280x720で約1.4画素に相当する。
+    // 【シーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
+    // 「1画素を割るとちらつく」という事実はどのシーン・どのショーでも変わらない
+    inline constexpr float DroneShowMinScreenRadius = 0.002f;
 }

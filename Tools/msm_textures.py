@@ -1,4 +1,4 @@
-"""モン・サン=ミシェル島モデル用の、手続き生成タイルテクスチャ(平均1.0の乗算変動場)を
+﻿"""モン・サン=ミシェル島モデル用の、手続き生成タイルテクスチャ(平均1.0の乗算変動場)を
 作るモジュール。
 
 設計の要: 各マテリアルの見た目のディテール(石積みの目地、スレートの段差、瓦の丸みなど)は
@@ -53,6 +53,7 @@ SEED_LEAD = 701
 SEED_LEAD_WEATHER = 702
 SEED_CANOPY = 801
 SEED_CANOPY_WEATHER = 802
+SEED_CANOPY_TINT = 803
 
 
 def _value_noise(resolution, freq_x, freq_y, seed):
@@ -169,14 +170,27 @@ def _band_limited_fine_noise(size, freq, seed, downsample_factor=4):
     return _resize_periodic(small_noise, size)
 
 
-def weathering_field(size, seed, cells_low=3, cells_mid=7, target_std=0.145):
+def weathering_field(size, seed, cells_low=3, cells_mid=7, target_std=0.22):
     """低周波の「風化むら」層(タイル内3x3セル + 7x7セル(振幅半分)、平滑補間)。
 
     遠景で縮小されても潰れずに残る、数メートル規模のむら(風化・汚れ・苔・濡れを想定)。
     ワールド空間のボックス投影UVと組み合わさることで、建物ごとの色調差も生む。
     合成後の標準偏差(1.0からの偏差)をtarget_stdへ厳密に合わせて返す(乱数の引きに
-    よらず狙った振幅を保証するため)。target_std=0.145は指定範囲0.13〜0.16の中央付近を
-    狙った出典なしの決め値。
+    よらず狙った振幅を保証するため)。
+
+    【修正・実機の石が写真の1/3の変動しかなかった】参考写真と実機の同じ領域を、島の幅で
+    正規化した同じ倍率で測ると(値は輝度の変動係数。括弧内は平均する画素数):
+                     写真 CV(1/2/4/8px)        実機 CV(1.5/3/6/12px)
+      裸の花崗岩      0.465 0.397 0.328 0.289   0.130 0.127 0.116 0.107
+      城壁(石積み)    0.546 0.484 0.425 0.318   0.120 0.117 0.114 0.100
+      修道院の石壁    0.520 0.462 0.399 0.340   0.160 0.154 0.143 0.132
+    縮小に耐えて遠景まで残るのはこの低周波の層だけなので(細かいノイズは平均へ潰れる)、
+    ここを上げるのが低周波では最も効く。ただし上げすぎると「石」ではなく「大きな染み」に
+    見えるため、0.28で一度試したあと0.22へ戻した。石の造形(明暗)の主成分は
+    テクスチャではなく太陽の向きで、方位を270度(カメラ真後ろの順光)から210度へ変えると
+    石積の変動係数は0.137→0.260になった(テクスチャの寄与は0.094→0.137)。
+    ※写真側の変動には窓・狭間・控え壁の陰影など立体の起伏も含まれるため、
+      テクスチャだけで写真のCVに並ぶわけではない。狙いは1/3を1/2強まで戻すこと
     """
     try:
         low = _value_noise(size, cells_low, cells_low, seed)
@@ -267,8 +281,11 @@ def rock_field():
         skewed = sign * np.where(c_base < 0.0, np.power(mag, 0.7), np.power(mag, 1.4))
 
         # 基礎ノイズと筋ノイズの合成比は出典なしの決め値
-        combined = 0.75 * skewed + 0.25 * c_streak
-        field = 1.0 + 0.22 * combined
+        # 【修正】参考写真の花崗岩の崖(正規化x0.19〜0.40)は縦方向の割れ目が目立つので、
+        # 筋の比を0.25→0.45へ上げ、全体の振幅も0.22→0.34にする
+        # (weathering_fieldのdocstringの実測表を参照)
+        combined = 0.55 * skewed + 0.45 * c_streak
+        field = 1.0 + 0.34 * combined
 
         field *= weathering_field(RESOLUTION, SEED_ROCK_WEATHER)
 
@@ -290,7 +307,8 @@ def masonry_field():
         field = np.ones((RESOLUTION, RESOLUTION), dtype=np.float32)
         field = _apply_block_pattern(
             field, RESOLUTION, rows=40, cols=20, seed=SEED_MASONRY,
-            mult_range=(0.85, 1.15), mortar_px=4, joint_mult=0.78, offset_mode="half",
+            # 【修正】ブロックごとのばらつきと目地の暗さを上げる(weathering_fieldの実測表を参照)
+            mult_range=(0.72, 1.28), mortar_px=4, joint_mult=0.62, offset_mode="half",
         )
         fine = _band_limited_fine_noise(RESOLUTION, freq=32, seed=SEED_MASONRY_FINE)
         field *= (1.0 + 0.025 * (fine - 0.5) * 2.0)
@@ -313,7 +331,8 @@ def rubble_field():
         field = np.ones((RESOLUTION, RESOLUTION), dtype=np.float32)
         field = _apply_block_pattern(
             field, RESOLUTION, rows=32, cols=24, seed=SEED_RUBBLE,
-            mult_range=(0.80, 1.20), mortar_px=4, joint_mult=0.80, offset_mode="random",
+            # 【修正】切石より乱れが大きいので、切石よりさらに広く振る
+            mult_range=(0.68, 1.34), mortar_px=4, joint_mult=0.62, offset_mode="random",
         )
 
         field *= weathering_field(RESOLUTION, SEED_RUBBLE_WEATHER)
@@ -465,7 +484,9 @@ def canopy_field():
         mag = np.abs(c)
         # 負側(暗)は0.5乗で強く伸ばし、正側(明)は1.6乗で抑える(出典なしの決め値)
         skewed = sign * np.where(c < 0.0, np.power(mag, 0.5), np.power(mag, 1.6))
-        field = 1.0 + 0.35 * skewed
+        # 【修正・樹冠の明暗の幅が写真の半分だった】材質IDで樹冠の画素を特定して最終画の
+        # 輝度を測ると p90/p10 は 写真3.50 対 実機1.82。葉の隙間の暗がりが足りない
+        field = 1.0 + 0.62 * skewed
 
         field *= weathering_field(RESOLUTION, SEED_CANOPY_WEATHER)
 
@@ -474,6 +495,34 @@ def canopy_field():
     except Exception as error:  # noqa: BLE001
         print(f"[ERROR] canopy_field()の生成に失敗しました: ({error})", file=sys.stderr)
         raise
+
+
+def canopy_tint_field():
+    """樹冠の色を2色のあいだで混ぜるための[0,1]の低周波マスク。
+
+    【なぜ要るか】既存の変動場はすべて「ベースカラーに掛けるスカラー」なので、明暗しか
+    変えられず色相は動かない。参考写真の樹林を測ると R/G の中央が0.831・p10〜p90の幅が
+    0.291あり(実機は中央0.692・幅0.172)、日向の黄緑から日陰の青緑まで色相が振れている。
+    スカラーの変動場ではこれを再現できないため、2色を混ぜるマスクを別に持つ。
+
+    タイルは12mでワールド空間のボックス投影なので、3x3セル(=4m)の低周波にすると
+    木ごと・枝ごとにゆっくり色が変わる(1本の中でも多少変わる)。出典なしの決め値
+    """
+    try:
+        low = _value_noise(RESOLUTION, 3, 3, SEED_CANOPY_TINT)
+        mid = _value_noise(RESOLUTION, 7, 7, SEED_CANOPY_TINT + 1)
+        blend = 0.7 * low + 0.3 * mid
+        blend = (blend - blend.min()) / max(float(blend.max() - blend.min()), 1e-8)
+        return blend.astype(np.float32)
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] canopy_tint_field()の生成に失敗しました: ({error})", file=sys.stderr)
+        raise
+
+
+# 色相を振るためのマスク(FIELD_FUNCTIONSとは別。乗算ではなく2色の混合率として使う)
+TINT_FIELD_FUNCTIONS = {
+    "canopy_tint": canopy_tint_field,
+}
 
 
 # フィールド名(MATERIAL_TEXTURE_FIELDSの値)から生成関数を引く対応表
@@ -489,13 +538,142 @@ FIELD_FUNCTIONS = {
 }
 
 
+# 法線マップの強さ(材質名 -> 高さの倍率)。変動場を高さとみなしたときの起伏の深さで、
+# 数値そのものに物理的な意味は無い(出典なしの決め値)。
+#
+# 【なぜ法線マップが要るか】幾何の無い平らな面だけを切り出して、島の幅を揃えてから
+# 局所コントラスト(局所標準偏差の中央値÷島の平均輝度、窓7画素)を測ると:
+#     城壁の素の壁面  参考写真 0.378 / 実機 0.118  (3.2倍)
+#     裸の花崗岩      参考写真 0.448 / 実機 0.131  (3.4倍)
+# 面そのものが平らで、狭間や塔を足しても壁の高さの2割弱しか占めないので届かない。
+# かといってアルベドの振幅を上げるのは筋が悪い。写真の変動の主成分は岩の凹凸が作る
+# **陰影**で、アルベドで真似ると光の向きに関係なく染みが焼き付いた面になる
+# (weathering_fieldのdocstring参照。実際に0.28まで上げて「大きな染み」に見え0.22へ戻した)。
+# 法線マップなら光の向きに応じた陰影が出る。太陽を仰角15度へ下げた直後なので噛み合う。
+# 材質名 -> (起伏の深さ[m], タイルの実寸[m])。タイルの実寸は
+# blender_msm_island.MATERIAL_UV_TILE_METERS と一致させること(勾配をメートルで取るため)。
+# 深さは出典なしの決め値だが、根拠の軸は「その材質の凹凸の実際の深さ」:
+#   花崗岩 0.5m  … 露岩の割れ目・転石の段差
+#   切石   0.12m … 目地の彫り込みと石の面のばらつき
+#   乱石積 0.18m … 石が不揃いに出入りするぶん切石より深い
+#
+# 【深さを物理的にありうる範囲へ戻した】以前は局所コントラストだけを根拠に
+# 岩8m→16m・石積1.6m・乱石積2.0mまで上げていたが、これは上の「実際の凹凸の深さ」の
+# 13〜32倍で、傾きが上限60度に張り付いた画素が岩で23.4%・石積で21.9%あった。
+# 上限に張り付いた法線は高さ場の勾配ではなく**向きの揃わない斑**になり、
+# 面が「起伏のある石」ではなく「ざらついたノイズ」に見える。
+#
+# 傾きの分布(1024画素タイル。中央値 / p90 / 60度で頭打ちの割合):
+#   岩   深さ 0.5m  2.0度 /  4.2度 / 0.0%    深さ 4.0m 15.7度 / 30.4度 / 0.0%
+#        深さ 8.0m 29.3度 / 49.6度 / 1.8%    深さ16.0m 48.3度 / 66.9度 / 23.4%
+#   石積 深さ0.12m  1.4度 / 60.0度 / 10.0%   深さ 1.6m 17.6度 / 87.5度 / 21.9%
+#   乱石 深さ0.18m  2.5度 / 72.2度 / 17.3%   深さ 2.0m 25.7度 / 88.3度 / 20.4%
+#
+# 岩は4.0mを採る。45mのタイルに対し起伏4mは自然の花崗岩の斜面として無理が無く、
+# **頭打ちが0.0%**で法線が高さ場の勾配のまま残る(中央15.7度・p90 30.4度)。
+# 石積・乱石積は上の実寸(0.12m / 0.18m)へ戻す。この2つは深さを下げても頭打ちが
+# 10〜17%残るが、それは目地そのものが急峻だからで正しい ——切石の目地は幅6cmに対し
+# 深さ12cmの垂直な彫り込みで、実際に60度を超える。深さを上げると目地ではなく
+# **石の面まで傾き**(1.6mでは面の中央値が17.6度)、平らであるべき切石が波打つ。
+NORMAL_MAP_PARAMS = {
+    "rock":    (4.00, 45.0),
+    "masonry": (0.12, 15.0),
+    "rubble":  (0.18, 12.0),
+}
+# 法線の傾きの上限(tan)。目地は幅4画素で急峻なため、そのままだと勾配が桁で跳ねて
+# 直立した壁のようになる。tan(60度)=1.73で頭を打たせる
+NORMAL_MAP_MAX_SLOPE = 1.73
+
+
+def field_to_normal_map(field, depth_meters, tile_meters):
+    """変動場(平均1.0前後の乗数)を高さとみなして、接空間の法線マップRGB([0,1])を作る。
+
+    石は「暗いところ=凹んでいるところ」(裂け目・目地・影の溜まり)なので、
+    変動場をそのまま高さとして使える。タイルは繰り返すので勾配は周期境界で取る。
+
+    【勾配はメートルで取る】最初は隣接**画素**の差をそのまま傾きにしていたが、
+    1024画素が45mのタイルなので1画素=0.044m、変動±0.34が5m幅に広がっている場合の
+    傾きは約1度にしかならず、**法線マップを入れても絵がまったく変わらなかった**
+    (局所コントラスト 0.1177→0.1180)。画素ではなく実寸で微分する。
+
+    depth_meters: 変動場の振幅1.0ぶんを何メートルの起伏とみなすか。
+    tile_meters: このテクスチャが貼られる1タイルの実寸(MATERIAL_UV_TILE_METERSと同じ値)。
+
+    返すのは float32 の (H, W, 3)。**リニア色空間**の値なので、Blender側では
+    colorspace を 'Non-Color' にすること(sRGBデコードされると法線が歪む)。
+
+    Y方向の規約は create_variation_image と同じ(fieldの行インデックスが増える方向が
+    画像の下から上)。glTF/Blenderの接空間法線は +Y が上なので、行方向の勾配は
+    そのままYへ入れてよい。
+    """
+    try:
+        size = field.shape[0]
+        pixels_per_meter = size / float(tile_meters)
+        height = field.astype(np.float64) * depth_meters
+        # 周期境界の中心差分[m/画素] → メートルあたりの傾きへ直す
+        dx = (np.roll(height, -1, axis=1) - np.roll(height, 1, axis=1)) * 0.5 * pixels_per_meter
+        dy = (np.roll(height, -1, axis=0) - np.roll(height, 1, axis=0)) * 0.5 * pixels_per_meter
+
+        slope = np.sqrt(dx * dx + dy * dy)
+        scale = np.where(slope > NORMAL_MAP_MAX_SLOPE, NORMAL_MAP_MAX_SLOPE / np.maximum(slope, 1e-9), 1.0)
+        dx, dy = dx * scale, dy * scale
+
+        nx, ny = -dx, -dy
+        nz = np.ones_like(height)
+        norm = np.sqrt(nx * nx + ny * ny + nz * nz)
+        nx, ny, nz = nx / norm, ny / norm, nz / norm
+
+        print(f"[INFO] 法線マップ: 深さ{depth_meters}m/タイル{tile_meters}m "
+              f"傾きの中央値={np.degrees(np.arctan(np.median(slope))):.1f}度 "
+              f"上限で頭打ち={float((slope > NORMAL_MAP_MAX_SLOPE).mean()):.1%}")
+        rgb = np.stack([nx * 0.5 + 0.5, ny * 0.5 + 0.5, nz * 0.5 + 0.5], axis=2)
+        return np.clip(rgb, 0.0, 1.0).astype(np.float32)
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] field_to_normal_map()の生成に失敗しました"
+              f"(depth={depth_meters}, tile={tile_meters}): ({error})", file=sys.stderr)
+        raise
+
+
+def create_normal_image(name, field, depth_meters, tile_meters):
+    """変動場から法線マップのBlender画像を作る(colorspaceは'Non-Color')。
+
+    create_variation_imageと同じく、同名の画像があれば作り直さず再利用する。
+    colorspaceはpixels代入より**先に**設定する(後から設定するとBlenderがバッファを
+    再読み込みして書き込んだ値が失われる。create_variation_imageのコメント参照)。
+    """
+    try:
+        import bpy
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] bpyのインポートに失敗しました(Blender内でのみ呼び出せます): ({error})",
+              file=sys.stderr)
+        raise
+
+    try:
+        rgb = field_to_normal_map(field, depth_meters, tile_meters)
+        h, w, _ = rgb.shape
+        alpha = np.ones((h, w, 1), dtype=np.float32)
+        rgba = np.concatenate([rgb, alpha], axis=2).astype(np.float32)
+
+        image = bpy.data.images.get(name)
+        if image is None:
+            image = bpy.data.images.new(name, w, h, alpha=False)
+        image.colorspace_settings.name = 'Non-Color'
+        image.pixels[:] = rgba.reshape(-1).tolist()
+        image.file_format = 'PNG'
+        image.pack()
+        return image
+    except Exception as error:  # noqa: BLE001
+        print(f"[ERROR] 法線マップ画像({name})の作成に失敗しました: ({error})", file=sys.stderr)
+        raise
+
+
 def _linear_to_srgb(v):
     """リニア値([0,1]にクランプ済み想定)をsRGBエンコードする。"""
     v = np.clip(v, 0.0, 1.0)
     return np.where(v > 0.0031308, 1.055 * np.power(v, 1.0 / 2.4) - 0.055, 12.92 * v)
 
 
-def create_variation_image(name, field, base_color_linear):
+def create_variation_image(name, field, base_color_linear, tint_color_linear=None, tint_field=None):
     """変動場fieldとベースカラー(リニアRGB)から、Blenderの画像(sRGBエンコード済み)を作る。
 
     同名の画像が既に存在する場合は作り直さず再利用する(build_island()が複数回
@@ -523,6 +701,12 @@ def create_variation_image(name, field, base_color_linear):
     try:
         height, width = field.shape
         color = np.array(base_color_linear, dtype=np.float32).reshape(1, 1, 3)
+        if tint_color_linear is not None and tint_field is not None:
+            # 2色のあいだをtint_field(0〜1)で混ぜてから明暗の変動場を掛ける。
+            # 混合は平均0.5になるとは限らないので、遠景の平均色は2色の中間あたりになる
+            tint = np.array(tint_color_linear, dtype=np.float32).reshape(1, 1, 3)
+            t = tint_field[:, :, np.newaxis]
+            color = color * (1.0 - t) + tint * t
         linear_rgb = np.clip(field[:, :, np.newaxis] * color, 0.0, 1.0)
         srgb_rgb = _linear_to_srgb(linear_rgb)
         alpha = np.ones((height, width, 1), dtype=np.float32)

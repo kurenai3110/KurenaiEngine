@@ -3,18 +3,16 @@ import struct
 
 import numpy as np
 
-# 物理ベースのHDRスカイボックス生成(太陽本体は描かず、青空のグラデーションのみ)。以前は
-# 地平線色→天頂色を単純に補間するだけのLDR(R8G8B8A8_UNorm、[0,1]にクランプ済み)キューブマップ
-# だったため、IBLのプリフィルタ済み鏡面(M3、docs/Architecture.html 14章)が畳み込む入力に
-# 十分なダイナミックレンジが無かった。
+# 物理ベースのHDRスカイボックス生成(太陽本体は描かず、青空のグラデーションのみ)。
+# **LDR(R8G8B8A8_UNorm、[0,1]にクランプ済み)にしてはいけない** ――
+# IBLのプリフィルタ済み鏡面(docs/Architecture.html 14章)が畳み込む入力に
+# 十分なダイナミックレンジが無くなる。
 #
 # 空の輝度分布はPerez et al., "All-Weather Model for Sky Luminance Distribution"(1993)/
 # Preetham, Shirley, Smits, "A Practical Analytic Model for Daylight"(SIGGRAPH 1999)の
 # CIE快晴空係数(a=-1, b=-0.32, c=10, d=-3, e=0.45)を使う。太陽の方向(sun_direction)自体は、
 # この係数が表す「太陽に近い方向ほど散乱で明るくなる(circumsolar)」という空自体の輝度分布の
-# 形を決めるためだけに使い、太陽本体の可視円盤は描かない(ユーザー指示により削除。以前は
-# 実際の角直径から求めた円盤をエネルギー保存しつつ焼いていたが、可視の太陽自体が不要になった
-# ため、その処理一式ごと削除した)。
+# 形を決めるためだけに使い、太陽本体の可視円盤は描かない。
 #
 # 絶対輝度のスケールはKurenaiEngine3D.cpp(ComputeSunLighting)と同じ出典(Lagarde & de Rousiers
 # 2014の照度参照テーブル、空光20,000lx)にComputeExposureと同じ露出式を適用して求めており、
@@ -30,7 +28,7 @@ import numpy as np
 # 数秒〜十秒程度かかっていたため)。半精度浮動小数点への変換もnumpyのfloat16キャストに
 # まかせる(自前のビット演算より検証済みで確実)
 #
-# 【雲(P5)は意図的に実装していない】Shaders/3D/Sky.hlsliへ積雲1層のレイヤーモデルを追加したが、
+# 【雲は意図的に実装していない】Shaders/3D/Sky.hlsliへ積雲1層のレイヤーモデルを追加したが、
 # このスクリプトへは移植していない。理由は2つ:
 #   (1) このスクリプトは「手続き空を無効にしたとき」のフォールバック用オフライン参照実装であり、
 #       手続き空自体が無効な場面で雲だけ動くのは前提が矛盾する
@@ -40,8 +38,8 @@ import numpy as np
 #       同じく雲の無い晴天のまま。したがって「Sky.hlsliと同期すべき対象」から雲だけは外れる
 # 以降、このファイルは従来どおりPerez分布(青空のグラデーションのみ)の移植を維持すればよい
 #
-# 【P7: 日中の色をPreetham xyYモデルへ置き換え】Shaders/3D/Sky.hlsliのSkyColorUpperUnitと
-# 同じ変更をこのスクリプトへも反映する。日中(太陽仰角5度以上)の色度(x, y)はPreetham et al. 1999の
+# 【日中の色はPreetham xyYモデル】Shaders/3D/Sky.hlsliのSkyColorUpperUnitと
+# 同じ扱いをこのスクリプトでも維持する。日中(太陽仰角5度以上)の色度(x, y)はPreetham et al. 1999の
 # xyYモデルから求め、輝度(Y)はPerez比+RELATIVE_LUMINANCE_FLOORのままタービディティ依存の係数へ
 # 差し替える。夜・薄明(太陽仰角5度未満)は引き続き従来のティント補間(compute_sky_tint/sky_tint)を
 # 使い、その間をクロスフェードする(sky_color_upper_unit参照)。
@@ -67,7 +65,7 @@ DEFAULT_SUN_AZIMUTH_DEGREES = 126.87
 # 実際の快晴の空は天頂から中程度の高度まで彩度の高い青を保ち、本当の水平線ぎわ(最後の
 # 20〜30度程度)でようやく白っぽくなる。天頂→水平線を単純に線形補間すると、ゲームカメラが
 # 見る典型的な低めの仰角(建物越しに覗く空など)でもすでに大きく白側へ寄ってしまい、
-# 「青空に見えない」結果になる(実際に一度この問題が起きた)。そのためTINT自体を水平線側でも
+# 「青空に見えない」結果になる。そのためTINT自体を水平線側でも
 # はっきり青みが残る値にし、かつ後述のブレンド係数も水平線ぎわに寄せてある。
 #
 # KurenaiEngine3D.cpp の ComputeSkyTint と同じ値・同じ補間であること。
@@ -102,7 +100,7 @@ GROUND_FADE_END_Y = -0.6
 #  Sky.hlsli の kRelativeLuminanceFloor と一致させること)
 RELATIVE_LUMINANCE_FLOOR = 0.12
 
-# 大気の濁り具合(P7: Preetham xyYモデルのタービディティ)。EngineDefaults.h::SkyTurbidityと
+# 大気の濁り具合(Preetham xyYモデルのタービディティ)。EngineDefaults.h::SkyTurbidityと
 # 同じ既定値(2.5)。Preethamの定義域はおおむね1.7〜10で、実測値ではなく見た目からの選択
 DEFAULT_TURBIDITY = 2.5
 
@@ -397,16 +395,16 @@ def compute_zenith_scale(sun_dir, target_illuminance_lux, tint_set, turbidity):
     #  正規化しているので最終的な照度は変わらない)
     # 正規化すると常に目標値ちょうどになる。
     #
-    # 補足: 「一様な空ならL=E/πなので従来はπ倍明るかった」という説明は誤り。積分には
+    # 補足: 「一様な空ならL=E/πなのでπ倍明るい」という説明は誤り。積分には
     # 実際に画面へ出る色のRec.709輝度成分も入るため、単位球の積分はπ(3.14)には遠く及ばず、
     # 正午での補正は数%〜十数%にすぎない。
     #
-    # KurenaiEngine3D.cpp から移った SkyIntegrate.hlsl の CSIntegrateSky と同じ結果になること。
+    # SkyIntegrate.hlsl の CSIntegrateSky と同じ結果になること。
     # 一方だけ変えると、オフラインで焼いたDDSと手続き空の明るさが食い違う
     #
-    # 【P7】被積分関数は「sky_color_upper_unit(=SkyColorUpperUnit)の結果のRec.709輝度」。
-    # 以前は「Perez相対輝度 × ティントの輝度成分」だったが、Preethamで輝度(Y)と色度(x,y)が
-    # 分離したためこの形に変えた(Sky.hlsli SkyIntegrate.hlsl冒頭のP7コメントと同じ理由)
+    # 被積分関数は「sky_color_upper_unit(=SkyColorUpperUnit)の結果のRec.709輝度」。
+    # 「Perez相対輝度 × ティントの輝度成分」ではない(Preethamで輝度(Y)と色度(x,y)が
+    # 分離するため。Sky.hlsli / SkyIntegrate.hlsl冒頭のコメントと同じ理由)
     theta_steps = 64
     phi_steps = 256
 

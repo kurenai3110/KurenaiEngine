@@ -19,6 +19,7 @@
 #include "Core/StringUtil.h"
 #include "ModelLoader.h"
 #include "ModelPackage.h"
+#include "ShowLoader.h"
 
 namespace Kurenai::Assets
 {
@@ -138,6 +139,38 @@ namespace Kurenai::Assets
             return true;
         }
 
+        // "3840, 2160"のような2要素の正整数([Scene]のRenderResolution用)。
+        // ParseUint3と同じく、分割はParseFloat3へ寄せて数値として読んでから整数性を検証する
+        bool ParseUint2(const std::wstring& value, uint32_t outXY[2])
+        {
+            // ParseFloat3は3要素固定なので、末尾に"0"を足して使い回さず素朴に分割する
+            std::vector<std::wstring> tokens;
+            size_t start = 0;
+            while (start <= value.size())
+            {
+                const size_t comma = value.find(L',', start);
+                const size_t end = comma == std::wstring::npos ? value.size() : comma;
+                tokens.push_back(TrimHalfWidth(value.substr(start, end - start)));
+                if (comma == std::wstring::npos)
+                {
+                    break;
+                }
+                start = comma + 1;
+            }
+            if (tokens.size() != 2)
+            {
+                return false;
+            }
+            for (int i = 0; i < 2; ++i)
+            {
+                float parsed = 0.0f;
+                if (!ParseFloatToken(tokens[i], parsed)) return false;
+                if (!(parsed >= 1.0f) || std::floor(parsed) != parsed) return false;
+                outXY[i] = static_cast<uint32_t>(parsed);
+            }
+            return true;
+        }
+
         std::optional<bool> ParseBoolToken(const std::wstring& value)
         {
             if (CaseInsensitiveEquals(value, L"true")) return true;
@@ -209,7 +242,7 @@ namespace Kurenai::Assets
             float Translation[3] = { 0.0f, 0.0f, 0.0f };
             float RotationEulerDegrees[3] = { 0.0f, 0.0f, 0.0f };
             float Scale[3] = { 1.0f, 1.0f, 1.0f };
-            // .kscene [Model]Water(P2: 水面マテリアル基盤)。trueならScene構築時に
+            // .kscene [Model]Water(水面マテリアル基盤)。trueならScene構築時に
             // ModelInstance::IsWaterへそのまま反映する
             bool Water = false;
         };
@@ -281,14 +314,20 @@ namespace Kurenai::Assets
             bool AOEnabled = true;
             bool HasSSREnabled = false;
             bool SSREnabled = true;
+            bool HasTAAEnabled = false;
+            bool TAAEnabled = false;
+            bool HasRenderResolution = false;
+            uint32_t RenderWidth = 0;
+            uint32_t RenderHeight = 0;
             Scene::TonemapCurveSetting Tonemap = Scene::TonemapCurveSetting::AgX;
             float SkySaturation = 1.0f;
             bool HasSkyTurbidity = false;
             float SkyTurbidity = 2.5f;
+            float TonemapBlackPoint = 0.0f;
             bool HasExposure = false;
             float ExposureEV100 = 15.0f;
 
-            // [Water]セクション(P2: 水面マテリアル基盤)。NormalMapは[Scene]Skyboxと同じく
+            // [Water]セクション(水面マテリアル基盤)。NormalMapは[Scene]Skyboxと同じく
             // Assetsルートからの相対パスで、LoadScene側でルート外チェックのうえ絶対パスへ解決する。
             // 空文字列のままなら「法線マップ無しのフラット水面」を意味する
             std::wstring WaterNormalMapPath;
@@ -296,7 +335,7 @@ namespace Kurenai::Assets
             float WaterWaveSpeed = 0.03f;
             float WaterWaveStrength = 0.25f;
 
-            // [Cloud]セクション(P10)。指定されたキーだけエンジンの設定を上書きする
+            // [Cloud]セクション。指定されたキーだけエンジンの設定を上書きする
             bool HasCloudCoverage = false;   float CloudCoverage = 0.40f;
             bool HasCloudAltitude = false;   float CloudAltitude = 1500.0f;
             bool HasCloudThickness = false;  float CloudThickness = 400.0f;
@@ -316,6 +355,25 @@ namespace Kurenai::Assets
             bool HasFogScaleHeight = false;  float FogScaleHeight = 1000.0f;
             bool HasFogRefHeight = false;    float FogRefHeight = 0.0f;
 
+            // [Bloom]セクション。指定されたキーだけエンジンの設定を上書きする
+            bool HasBloomEnabled = false;    bool  BloomEnabled = false;
+            bool HasBloomStrength = false;   float BloomStrength = 0.06f;
+            bool HasBloomThreshold = false;  float BloomThreshold = 1.0f;
+
+            // [Stars]セクション。指定されたキーだけエンジンの設定を上書きする
+            bool HasStarsEnabled = false;    bool  StarsEnabled = true;
+            bool HasStarsDensity = false;    float StarsDensity = 48.0f;
+            bool HasStarsBrightness = false; float StarsBrightness = 1.0f;
+            bool HasStarsTwinkle = false;    float StarsTwinkle = 0.0f;
+
+            // [DroneShow]セクション。指定されたキーだけエンジンの設定を上書きする。
+            // ショーの中身(機体数・秒数・明るさ等)はここではなく.kshowが持つ
+            bool HasDroneShowEnabled = false;        bool  DroneShowEnabled = false;
+            // .kshowへのパス(Assetsルートからの相対)。解決はLoadScene側
+            std::wstring DroneShowPath;
+            bool HasDroneShowCenter = false;         float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };
+            bool HasDroneShowScale = false;          float DroneShowScale = 130.0f;
+
             std::vector<ParsedLightEntry> Lights;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
             std::vector<ParsedGIVolumeEntry> GIVolumes;
@@ -334,6 +392,9 @@ namespace Kurenai::Assets
             Water,
             Cloud,
             Fog,
+            Bloom,
+            Stars,
+            DroneShow,
             Unknown,
         };
 
@@ -349,6 +410,9 @@ namespace Kurenai::Assets
             if (CaseInsensitiveEquals(name, L"Water")) return Section::Water;
             if (CaseInsensitiveEquals(name, L"Cloud")) return Section::Cloud;
             if (CaseInsensitiveEquals(name, L"Fog")) return Section::Fog;
+            if (CaseInsensitiveEquals(name, L"Bloom")) return Section::Bloom;
+            if (CaseInsensitiveEquals(name, L"Stars")) return Section::Stars;
+            if (CaseInsensitiveEquals(name, L"DroneShow")) return Section::DroneShow;
             return Section::Unknown;
         }
 
@@ -543,6 +607,19 @@ namespace Kurenai::Assets
                         }
                         result.HasSkyTurbidity = true;
                     }
+                    else if (CaseInsensitiveEquals(key, L"TonemapBlackPoint"))
+                    {
+                        if (!ParseFloatToken(value, result.TonemapBlackPoint))
+                        {
+                            errorAt(lineNumber, rawLine, "TonemapBlackPointの値が不正です");
+                        }
+                        // 0で恒等、1で全部黒。0.2を超えると暗部が丸ごと潰れるので
+                        // 打ち間違いとみなす(実用域は0.00〜0.10)
+                        if (result.TonemapBlackPoint < 0.0f || result.TonemapBlackPoint > 0.2f)
+                        {
+                            errorAt(lineNumber, rawLine, "TonemapBlackPointは0〜0.2で指定してください");
+                        }
+                    }
                     else if (CaseInsensitiveEquals(key, L"Exposure"))
                     {
                         if (!ParseFloatToken(value, result.ExposureEV100)) errorAt(lineNumber, rawLine, "Exposureの値が不正です");
@@ -554,6 +631,31 @@ namespace Kurenai::Assets
                             errorAt(lineNumber, rawLine, "Exposureは-6〜18(EV100)の範囲で指定してください");
                         }
                         result.HasExposure = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"TAA"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "TAAの値はtrue/falseで指定してください");
+                        result.TAAEnabled = *parsedValue;
+                        result.HasTAAEnabled = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"RenderResolution"))
+                    {
+                        uint32_t parsedXY[2] = {};
+                        if (!ParseUint2(value, parsedXY))
+                        {
+                            errorAt(lineNumber, rawLine, "RenderResolutionの値が不正です(幅, 高さの2要素の正整数が必要)");
+                        }
+                        // 上限はレンダーターゲット1枚あたりの現実的な大きさで抑える。
+                        // G-Buffer・TAA履歴・Bloomの段など多数のフルスクリーンテクスチャが
+                        // この解像度で作られるため、書き間違いで数GBを確保しないための歯止め
+                        if (parsedXY[0] > 7680u || parsedXY[1] > 4320u)
+                        {
+                            errorAt(lineNumber, rawLine, "RenderResolutionは7680x4320以下で指定してください");
+                        }
+                        result.RenderWidth = parsedXY[0];
+                        result.RenderHeight = parsedXY[1];
+                        result.HasRenderResolution = true;
                     }
                     else if (CaseInsensitiveEquals(key, L"ScreenSpaceReflection"))
                     {
@@ -591,7 +693,7 @@ namespace Kurenai::Assets
                     }
                     else if (CaseInsensitiveEquals(key, L"Water"))
                     {
-                        // P2: 水面マテリアル基盤。trueにするとこのインスタンスがWater.hlslで
+                        // 水面マテリアル基盤。trueにするとこのインスタンスがWater.hlslで
                         // 描画され、G-BufferのMaterial.aへ水面のマテリアルIDが書かれるようになる
                         const std::optional<bool> parsed = ParseBoolToken(value);
                         if (!parsed) errorAt(lineNumber, rawLine, "Waterの値はtrue/falseで指定してください");
@@ -821,7 +923,7 @@ namespace Kurenai::Assets
                 }
 
                 case Section::Water:
-                    // P2: 水面マテリアル基盤。NormalMapのパス解決(ルート外チェック・絶対パス化)は
+                    // 水面マテリアル基盤。NormalMapのパス解決(ルート外チェック・絶対パス化)は
                     // ここでは行わず、[Scene]Skyboxと同じくLoadScene側でまとめて行う
                     // (ParseSceneFileは純粋なテキスト解析でファイルシステムに触れない方針のため)
                     if (CaseInsensitiveEquals(key, L"NormalMap"))
@@ -967,6 +1069,135 @@ namespace Kurenai::Assets
                     break;
                 }
 
+                case Section::Bloom:
+                {
+                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                    {
+                        if (!ParseFloatToken(value, out))
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                        }
+                        if (out < minValue || out > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        has = true;
+                    };
+
+                    if (CaseInsensitiveEquals(key, L"Enabled"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
+                        result.BloomEnabled = *parsedValue;
+                        result.HasBloomEnabled = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Strength"))
+                    {
+                        // Tonemapは元の色とブルームをこの比率でlerpするため1.0で完全に置き換わる
+                        readFloat(result.BloomStrength, result.HasBloomStrength, 0.0f, 1.0f, L"Strength");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Threshold"))
+                    {
+                        readFloat(result.BloomThreshold, result.HasBloomThreshold, 0.0f, 100.0f, L"Threshold");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
+                case Section::Stars:
+                {
+                    // [Cloud]/[Fog]と同じ作法。範囲外は打ち間違いとみなしてエラーにする
+                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                    {
+                        if (!ParseFloatToken(value, out))
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                        }
+                        if (out < minValue || out > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        has = true;
+                    };
+
+                    if (CaseInsensitiveEquals(key, L"Enabled"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
+                        result.StarsEnabled = *parsedValue;
+                        result.HasStarsEnabled = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Density"))
+                    {
+                        // 上限256は「1セルに1個」の規則から全天で数十万個に相当し、
+                        // これ以上は星というより砂嵐になる
+                        readFloat(result.StarsDensity, result.HasStarsDensity, 1.0f, 256.0f, L"Density");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Brightness"))
+                    {
+                        readFloat(result.StarsBrightness, result.HasStarsBrightness, 0.0f, 20.0f, L"Brightness");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Twinkle"))
+                    {
+                        readFloat(result.StarsTwinkle, result.HasStarsTwinkle, 0.0f, 1.0f, L"Twinkle");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
+                case Section::DroneShow:
+                {
+                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                    {
+                        if (!ParseFloatToken(value, out))
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                        }
+                        if (out < minValue || out > maxValue)
+                        {
+                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                        }
+                        has = true;
+                    };
+
+                    if (CaseInsensitiveEquals(key, L"Enabled"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
+                        result.DroneShowEnabled = *parsedValue;
+                        result.HasDroneShowEnabled = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Path"))
+                    {
+                        // .kshowのパス。パス解決(ルート外チェック・絶対パス化)はここでは行わず、
+                        // [Scene]Skybox・[Water]NormalMapと同じくLoadScene側でまとめて行う
+                        result.DroneShowPath = value;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Center"))
+                    {
+                        if (!ParseFloat3(value, result.DroneShowCenter))
+                        {
+                            errorAt(lineNumber, rawLine, "Centerの値が不正です(x, y, zの3要素が必要)");
+                        }
+                        result.HasDroneShowCenter = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"Scale"))
+                    {
+                        readFloat(result.DroneShowScale, result.HasDroneShowScale, 1.0f, 5000.0f, L"Scale");
+                    }
+                    else
+                    {
+                        warnUnknownKey();
+                    }
+                    break;
+                }
+
                 default:
                     break;
                 }
@@ -1064,9 +1295,15 @@ namespace Kurenai::Assets
         scene.AOEnabled = parsed.AOEnabled;
         scene.HasSSREnabledOverride = parsed.HasSSREnabled;
         scene.SSREnabled = parsed.SSREnabled;
+        scene.HasTAAOverride = parsed.HasTAAEnabled;
+        scene.TAAEnabled = parsed.TAAEnabled;
+        scene.HasRenderResolutionOverride = parsed.HasRenderResolution;
+        scene.RenderWidth = parsed.RenderWidth;
+        scene.RenderHeight = parsed.RenderHeight;
         scene.Tonemap = parsed.Tonemap;
         scene.SkySaturation = parsed.SkySaturation;
         scene.HasSkyTurbidity = parsed.HasSkyTurbidity; scene.SkyTurbidity = parsed.SkyTurbidity;
+        scene.TonemapBlackPoint = parsed.TonemapBlackPoint;
         scene.HasExposureOverride = parsed.HasExposure;
         scene.HasCloudCoverage = parsed.HasCloudCoverage;   scene.CloudCoverage = parsed.CloudCoverage;
         scene.HasCloudAltitude = parsed.HasCloudAltitude;   scene.CloudAltitude = parsed.CloudAltitude;
@@ -1084,6 +1321,19 @@ namespace Kurenai::Assets
         scene.HasFogDensity = parsed.HasFogDensity;         scene.FogDensity = parsed.FogDensity;
         scene.HasFogScaleHeight = parsed.HasFogScaleHeight; scene.FogScaleHeight = parsed.FogScaleHeight;
         scene.HasFogRefHeight = parsed.HasFogRefHeight;     scene.FogRefHeight = parsed.FogRefHeight;
+        scene.HasBloomEnabled = parsed.HasBloomEnabled;       scene.BloomEnabled = parsed.BloomEnabled;
+        scene.HasBloomStrength = parsed.HasBloomStrength;     scene.BloomStrength = parsed.BloomStrength;
+        scene.HasBloomThreshold = parsed.HasBloomThreshold;   scene.BloomThreshold = parsed.BloomThreshold;
+        scene.HasStarsEnabled = parsed.HasStarsEnabled;       scene.StarsEnabled = parsed.StarsEnabled;
+        scene.HasStarsDensity = parsed.HasStarsDensity;       scene.StarsDensity = parsed.StarsDensity;
+        scene.HasStarsBrightness = parsed.HasStarsBrightness; scene.StarsBrightness = parsed.StarsBrightness;
+        scene.HasStarsTwinkle = parsed.HasStarsTwinkle;       scene.StarsTwinkle = parsed.StarsTwinkle;
+        scene.HasDroneShowEnabled = parsed.HasDroneShowEnabled;   scene.DroneShowEnabled = parsed.DroneShowEnabled;
+        scene.HasDroneShowCenter = parsed.HasDroneShowCenter;
+        scene.DroneShowCenter[0] = parsed.DroneShowCenter[0];
+        scene.DroneShowCenter[1] = parsed.DroneShowCenter[1];
+        scene.DroneShowCenter[2] = parsed.DroneShowCenter[2];
+        scene.HasDroneShowScale = parsed.HasDroneShowScale;             scene.DroneShowScale = parsed.DroneShowScale;
         scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;
@@ -1106,6 +1356,28 @@ namespace Kurenai::Assets
         scene.WaterWaveScale = parsed.WaterWaveScale;
         scene.WaterWaveSpeed = parsed.WaterWaveSpeed;
         scene.WaterWaveStrength = parsed.WaterWaveStrength;
+
+        // [DroneShow]Pathの.kshowも同じ規則で解決し、ここ(=Loaderスレッド)で読んでしまう。
+        // Renderスレッドでファイルを開かないための配置で、[Model]Pathの.kmodelと同じ扱い。
+        //
+        // 【読み込み失敗でシーンごと落とさない】モデルはシーンそのものだが、ドローンショーは
+        // 夜空の装飾で、これが無くてもシーンは成立する。エラーをログに残して編隊なしで進む
+        // (パス解決の失敗——Assetsルートの外を指しているなど——は書式の誤りなので従来どおり投げる)
+        if (!parsed.DroneShowPath.empty())
+        {
+            const std::wstring showPath =
+                ResolveAssetRelativePath(parsed.DroneShowPath, assetRootDirectory, L"[DroneShow]Path", sceneFilePath);
+            try
+            {
+                scene.DroneShowData = LoadShow(showPath);
+            }
+            catch (const std::exception& e)
+            {
+                Core::Logger::Error(
+                    "SceneLoader",
+                    std::string("[DroneShow]Pathのショーを読み込めませんでした(編隊なしで続行します): ") + e.what());
+            }
+        }
 
         // .kscene自身の[Light]で直接指定されたライトは、既にワールド空間の値として書かれているため
         // 変換不要でそのままScene::Lightsへ入れる(モデル埋め込みライトは下のモデルループ内で

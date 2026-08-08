@@ -1,7 +1,7 @@
 // 空のキューブマップをGPUで手続き生成する。このファイルはIBL専用キューブマップ
 // (256px/面、ミップ無し)のベイクに専念し、空モデル本体(Perez et al. "All-Weather Model
 // for Sky Luminance Distribution" (1993) / Preetham, Shirley, Smits (SIGGRAPH 1999) の
-// CIE快晴空モデル)はSky.hlsliへ移した(P3)。背景の解析評価(DeferredLighting.hlsl)も
+// CIE快晴空モデル)はSky.hlsliへ移した。背景の解析評価(DeferredLighting.hlsl)も
 // 同じSky.hlsliの関数を使うため、キューブマップと背景は常に同じ空を見る。
 //
 // === なぜオフラインDDSではなくGPU生成なのか ===
@@ -16,12 +16,12 @@
 // 出す必要がある(あちらはオフラインの参照実装 兼 手続き空を無効にしたときのフォールバック用)。
 // 係数・定数を変える場合は必ず両方を同時に直すこと。
 //
-// 【P9】ティント4本と天頂輝度(雲を考慮しない晴天基準の値)はSkyIntegrate.hlslが求めて
+// ティント4本と天頂輝度(雲を考慮しない晴天基準の値)はSkyIntegrate.hlslが求めて
 // SkyParametersBuffer(t0)へ書く。このシェーダーはそれを読むだけで、正規化の積分は行わない。
 // 雲による平均透過率(判断B)だけはCPU(KurenaiEngine3D.cpp)がCloudTransmittanceとして渡し、
 // ここでSkyParametersBufferのZenithLuminanceへ掛けてからキューブへ焼く
 #include "Samplers.hlsli"
-// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyView LUT。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
 // SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
 #define KURENAI_SKYVIEW_REGISTER t1
 #include "Sky.hlsli"
@@ -30,7 +30,7 @@ cbuffer SkyBakeConstants : register(b0)
 {
     // 処理対象の面(D3Dのキューブマップ標準順: +X=0,-X=1,+Y=2,-Y=3,+Z=4,-Z=5)
     uint Face;
-    // 雲(P5、判断B)による平均透過率。SkyParametersBuffer[0].Luminance.x
+    // 雲(判断B)による平均透過率。SkyParametersBuffer[0].Luminance.x
     // (雲を考慮しない晴天基準の天頂輝度)にこの値を掛けてからキューブへ焼く
     float CloudTransmittance;
     float2 SkyPadding0;
@@ -92,7 +92,7 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     // Luminance.xは雲を考慮しない晴天基準のまま。Sky.hlsli冒頭の雲セクション参照)
     params.ZenithLuminance *= CloudTransmittance;
 
-    // 雲(P5)・巻雲(P11)は明示的に無効(CloudCoverage=CirrusCoverage=0)で埋める。IBL用
+    // 雲・巻雲は明示的に無効(CloudCoverage=CirrusCoverage=0)で埋める。IBL用
     // キューブマップには雲を焼き込まない(判断A、詳細はSky.hlsliの雲セクションのコメント参照)。
     // 雲が風で動くたびにキューブの焼き直し(空生成6回+プリフィルタ36回のディスパッチ)が
     // 必要になるのを避けるためで、被覆率による減光(判断B)はキューブへ焼く直前にCPU側
@@ -116,7 +116,7 @@ void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 雲の種類の偏り(C4)。判断Aで雲を焼かないため使われないが、中立値で埋めておく
     params.CloudTypeBias = 0.5f;
 
-    // 雲へ掛ける大気遠近(P12)も明示的に無効で埋める。判断A(上記)により雲そのものを
+    // 雲へ掛ける大気遠近も明示的に無効で埋める。判断A(上記)により雲そのものを
     // 焼かないので、このパスではEvaluateCloudLayer自体が一度も呼ばれず実質は無関係だが、
     // 「IBLキューブは大気遠近を含まない晴天の空」という意図をここで読めるようにしておく。
     // そもそもこのシェーダーのcbufferはSkyBakeConstantsでありFrameConstants::FogParams0を

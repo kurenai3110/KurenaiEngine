@@ -1,8 +1,8 @@
-// 水面(Water.kmodel)専用のG-Bufferピクセルシェーダー(P2: 水面マテリアル基盤)。
+// 水面(Water.kmodel)専用のG-Bufferピクセルシェーダー(水面マテリアル基盤)。
 // 頂点シェーダー(VSMain)・入出力構造体・cbuffer宣言はGBuffer.hlslと共有するため
 // GBufferCommon.hlsliにある。ここでは「波打つ低ラフネス水面」に見せるための法線合成と、
 // 水面であることを示すマテリアルID(kMaterialIDWater)の書き込みだけを担当する。
-// 反射(SSR統合)はまだ行わない(それはP4)。影はShadow.hlslの通常の深度のみパスに乗せる
+// 反射(SSR統合)はこのシェーダーでは行わない(SSR.hlslの水面分岐が扱う)。影はShadow.hlslの通常の深度のみパスに乗せる
 // (他の不透明メッシュと同じ扱いで、このファイルでは何もしない)
 #include "GBufferCommon.hlsli"
 
@@ -46,7 +46,7 @@ PSOutput PSMain(PSInput input)
     // CPU側で既に[0,1)へfmod済みのため、ここで層ごとの速度倍率を掛けてfracし直しても
     // (どちらも有界な値どうしの掛け算・剰余なので)精度が失われず安全。
     // TimeParams.y(m_WaterWaveScale、既定12.0)をUVスケールに掛けているのは、水面メッシュの
-    // UVが元々「ワールド20mあたり1タイル」で焼かれているため(Tools/generate_water_plane.py参照)、
+    // UVが「ワールド20mあたり1タイル」で焼かれているため(Tools/generate_water_plane.py参照)、
     // その上でさらに何回波紋を繰り返すかを決める倍率として使うため
     float2 uvA = input.UV * kWaterLayerAUvScale * TimeParams.y + frac(TimeParams.x * kWaterLayerASpeedScale) * kWaterLayerAScrollDir;
     float2 uvB = input.UV * kWaterLayerBUvScale * TimeParams.y + frac(TimeParams.x * kWaterLayerBSpeedScale) * kWaterLayerBScrollDir;
@@ -86,7 +86,7 @@ PSOutput PSMain(PSInput input)
     float ao = lerp(1.0f, occlusionSample, OcclusionStrength);
 
     PSOutput output;
-    // 水中項(P8)。メッシュ自身のbaseColorSample.rgb(誘電体でほぼ黒に焼かれている)は使わず、
+    // 水中項。メッシュ自身のbaseColorSample.rgb(誘電体でほぼ黒に焼かれている)は使わず、
     // WaterBodyColor.rgb(FrameConstants、UIから調整可能)を出力Albedoに使う。
     // これは水体で拡散的に後方散乱して戻ってくる光の粗い近似であり、屈折・水深依存の減衰は
     // 含んでいない(G-Bufferが水深の情報を持たないため一定色にしている)。

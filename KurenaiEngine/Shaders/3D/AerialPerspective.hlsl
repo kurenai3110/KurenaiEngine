@@ -1,4 +1,4 @@
-// 大気遠近(height fog / aerial perspective)パス(P8)。
+// 大気遠近(height fog / aerial perspective)パス。
 //
 // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
 // Lightingパスの中に入れなかったのは次の2点が実コードの制約として存在するため:
@@ -20,7 +20,7 @@
 // 空モデル(Perez分布)の共有ヘッダー。in-scatter項(フォグの合成先の色)に、背景と同じ
 // SkyColorをそのまま使うことで、遠方の地物が無限遠で背景の空色へ厳密に収束するようにする
 // (詳細はSky.hlsli冒頭のコメント、および本ファイルPSMain末尾のコメント参照)
-// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyView LUT。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
 // SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
 #define KURENAI_SKYVIEW_REGISTER t3
 #include "Sky.hlsli"
@@ -50,7 +50,7 @@ cbuffer FrameConstants : register(b0)
     float4 ProbeParams;
     // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
     float4 ProbeParams2;
-    // ここから下、TAA(23章)・DDGI(22章)・水面の波(P2)用の8本はこのシェーダでは未使用。
+    // ここから下、TAA(23章)・DDGI(22章)・水面の波用の8本はこのシェーダでは未使用。
     // cbufferのレイアウトは宣言順で決まり途中のフィールドを飛ばせないため、末尾のSky*・Fog*
     // フィールドのオフセットをC++側 KurenaiEngine3D.cpp の FrameConstants と合わせる
     // 目的だけで宣言している(SSR.hlsl/DeferredLighting.hlslの同名フィールドと同じ扱い)
@@ -65,14 +65,14 @@ cbuffer FrameConstants : register(b0)
     // DDGIParams4の直後にあるため、**宣言しないと以降のフィールドが16バイトずれる**
     float4 OcclusionParams;
     float4 TimeParams;
-    // 空の解析評価用(P3で追加)。MakeSkyParametersが読む。xyz=太陽が「ある」向き
+    // 空の解析評価用。MakeSkyParametersが読む。xyz=太陽が「ある」向き
     // (未正規化のまま渡ってくる。呼び出し側でnormalizeする)、w=未使用
     float4 SkySunDirection;
     // x=未使用、y=このシェーダでは未使用(背景の解析評価トグルはDeferredLighting.hlsl専用)、
     // z=太陽照度/空照度比(SunToSkyIlluminanceRatio。MakeSkyParametersが読み、
     // Sky.hlsliのEvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う)、w=未使用
     float4 SkyParams;
-    // 雲(P5、さらに末尾に追加)。DeferredLighting.hlsl/SSR.hlsl/PlanarReflection.hlslの同名フィールドと
+    // 雲(さらに末尾に追加)。DeferredLighting.hlsl/SSR.hlsl/PlanarReflection.hlslの同名フィールドと
     // 完全に同じ順・同じ型であること(C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams0/1 と
     // 揃える。ずれるとフォグのin-scatterに使う空の色が背景・水面反射と食い違う)。
     // CloudParams0: x=被覆率(0で雲なし。Sky.hlsliのSkyColorが早期脱出する)、
@@ -81,7 +81,7 @@ cbuffer FrameConstants : register(b0)
     // CloudParams1: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
     //               同じ周期でwrap済み)、z=Henyey-Greensteinの非対称パラメータ、w=未使用
     float4 CloudParams1;
-    // 巻雲(P11、さらに末尾に追加)。他シェーダーの同名フィールドと完全に同じ順・同じ型であること
+    // 巻雲(さらに末尾に追加)。他シェーダーの同名フィールドと完全に同じ順・同じ型であること
     // (C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams2/3 と揃える)。
     // CloudParams2: x=巻雲の被覆率(0で巻雲なし)、y=雲底の高度[m](カメラ基準)、
     //               z=UVスケール[ノイズ空間/m]、w=消散係数
@@ -89,9 +89,9 @@ cbuffer FrameConstants : register(b0)
     // CloudParams3: xy=風によるノイズ空間の移動量(積雲と同じくkCloudNoisePeriodでwrap済み)、
     //               z=fBmのUV(U方向)を伸ばす異方性スケール、w=未使用
     float4 CloudParams3;
-    // 平面反射(P6)。このシェーダでは未使用(オフセット合わせのためだけに宣言する)
+    // 平面反射。このシェーダでは未使用(オフセット合わせのためだけに宣言する)
     float4 PlanarReflectionPlane;
-    // 大気遠近(P8、末尾に追加)。x=基準高度での消散係数[1/m]、y=スケールハイト[m]、
+    // 大気遠近(末尾に追加)。x=基準高度での消散係数[1/m]、y=スケールハイト[m]、
     // z=基準高度[m](ワールドY)、w=有効フラグ(0で無効。UIでオフ、またはシーンが手続き空を
     // 使っていない場合に0になる。手続き空が無効なシーンでは下のSkyColorによる解析評価が
     // 意味を持たないため、SSR.hlslのwaterAnalyticSkyFlagと同じ判断をC++側で行う)
@@ -151,8 +151,8 @@ SkyParameters MakeSkyParameters(float2 pixelPosition)
     params.CloudDensity = CloudParams0.w;
     params.CloudScrollOffset = CloudParams1.xy;
     params.CloudForwardG = CloudParams1.z;
-    // 積雲の厚み[m](P13b)。CloudParams1.wは従来ずっと0で未使用だった枠なので、
-    // FrameConstantsは1バイトも増えていない。0ならレイマーチせず従来の平面になる
+    // 積雲の厚み[m](CloudParams1.wの枠に詰めてある)。
+    // 0ならレイマーチせず平面として扱う
     params.CloudThickness = CloudParams1.w;
     params.CirrusCoverage = CloudParams2.x;
     params.CirrusAltitude = CloudParams2.y;
@@ -221,12 +221,12 @@ float4 PSMain(PSInput input) : SV_TARGET
     // in-scatterに乗る。雲は青空の3倍以上明るく、しかもfBmで空間的に激しく変動するため、
     // 暗い地物ほど「雲の模様が透けて見える」形で破綻する(実測: 雲が流れる6秒間で塔の画素が
     // 最大72・平均5.7動き、これは同じ2フレーム間の空そのものの変化量(最大86・平均6.3)と
-    // ほぼ同じだった=雲がほぼ素通しで地物へ焼き付いていた)。
+    // ほぼ同じ=雲がほぼ素通しで地物へ焼き付く)。
     //
     // 【地平線での背景との連続性は保たれる】無限遠へ収束するのは視線が水平(fogDir.y==0)の
     // ときだけで、Sky.hlsliの雲の地平線フェードはsmoothstep(kCloudHorizonFadeEndY=0,
     // kCloudHorizonFadeStartY=0.2, dir.y)——すなわちdir.y==0でフェードが厳密に0になり、
-    // そこではSkyColorとSkyColorUpperの値が一致する。よってP8の設計目標である
+    // そこではSkyColorとSkyColorUpperの値が一致する。よってこのパスの設計目標である
     // 「遠方の地物が背景の空色へ厳密に収束し水平線に継ぎ目が出ない」は成立したままになる。
     // なおfogDirはyを0以上へクランプ済みなのでSkyColorの地面フェード分岐
     // (dir.y < kGroundFadeStartY = -0.02)には決して入らず、SkyColorをSkyColorUpperへ

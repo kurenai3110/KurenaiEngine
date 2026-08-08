@@ -1,10 +1,10 @@
 // トーンマップパス。HDRのSceneColor(SSR有効時はSSR適用後のSceneColor)を読み、
 // トーンマッピングカーブ+sRGBエンコードでLDR(0〜1)へ変換してPresentパスへ渡す。
-// 以前はDeferredLighting.hlsl(ライティングパス自体)がこの変換まで行っていたが、
-// それだとSSRがトーンマップ済みLDRを反射元として読むことになり、反射色が1.0を超えられず
-// エネルギー保存が破れていた。SceneColorをHDRのまま保持しトーンマップをPresent直前の
-// この独立パスへ切り出すことで、SSR・ブルーム/露出制御が物理的に正しいHDR値の
-// 上に成立できるようにする
+// **この変換をライティングパス(DeferredLighting.hlsl)で行ってはいけない**。
+// SSRがトーンマップ済みLDRを反射元として読むことになり、反射色が1.0を超えられず
+// エネルギー保存が破れる。SceneColorをHDRのまま保持しトーンマップをPresent直前の
+// この独立パスへ置くことで、SSR・ブルーム/露出制御が物理的に正しいHDR値の
+// 上に成立する
 #include "Samplers.hlsli"
 
 Texture2D SceneColorTexture : register(t0);
@@ -47,7 +47,15 @@ cbuffer TonemapConstants : register(b1)
     // シャープネスの近傍タップに使う1テクセルぶんのUV(1/レンダー解像度)
     float InvRenderWidth;
     float InvRenderHeight;
-    float TonemapPadding;
+    // 黒の締め(ブラックポイント)。トーンマップ後の表示リニア値からこの値を引き、
+    // 残りを[0,1]へ伸ばし直す。実カメラのトーンカーブが持つ「黒を締める」処理に相当する。
+    // 0で恒等(既定)なので、指定しないシーンの見た目は一切変わらない。
+    // 【なぜ要るか】屋外の遠景では大気遠近(霞)が最暗部へ空の輝度を一定量だけ加算する。
+    // 600m先・視程78kmでも空の3%が乗り、空は深い影の50倍ほど明るいので、
+    // 画面上の最暗値が輝度31前後で頭打ちになる。参考写真の同じ構図は6まで落ちており、
+    // その差は「凹凸を足す」では埋まらない(窓・軒・煙突を足しても最暗値は動かなかった)。
+    // 霞を非物理的な値まで薄めるのではなく、カメラ側の処理としてここで締める
+    float BlackPoint;
 };
 
 struct PSInput
@@ -157,9 +165,9 @@ float3 TonemapAgX(float3 color)
     return saturate(color);
 }
 
-// リニア値をsRGBのOETF(区分関数)でエンコードする。従来は pow(color, 1/2.2) の近似だったが、
+// リニア値をsRGBのOETF(区分関数)でエンコードする。pow(color, 1/2.2) の近似にしてはいけない ――
 // テクスチャ側のデコードはハードウェアのsRGB(区分関数)で行われているため、
-// エンコードだけ2.2の冪にすると暗部が系統的にずれる。両者を揃える
+// エンコードだけ2.2の冪にすると暗部が系統的にずれる
 float3 LinearToSRGB(float3 color)
 {
     color = saturate(color);
@@ -201,7 +209,7 @@ static const float3 kNightVisionTint = float3(0.92f, 1.00f, 1.18f);
 // 【重要】桿体視へ移るかどうかは**目が順応している明るさ**で決まる。画素ごとの輝度で
 // 判定してはいけない。昼間の日陰は輝度だけ見れば薄明視の範囲に入ることがあるが、
 // 目はシーン全体の明るさに順応しているので錐体は働いており、日陰の色はちゃんと見える。
-// 画素ごとに判定した実装では実際に昼の日陰が脱色された(壁の彩度0.235→0.136)。
+// 画素ごとに判定すると昼の日陰が脱色される。
 //
 // 順応輝度にはCPU側が渡すMesopicAdaptationEV100(太陽・月・空の照度から求めた
 // シーンの基準EV。画面の構図にも露出設定にも依存しない)を使う。
@@ -239,7 +247,7 @@ float3 ResolveDisplayColor(float2 uv, float exposureScale)
     // 薄明視は**露出を掛ける前**に適用する。桿体視へ移るかどうかはシーンの実際の
     // 明るさで決まるものであって、表示の露出設定とは無関係だから。
     // (ブルームはこの後で合成されるため脱色されないが、ブルームが拾うのは
-    //  しきい値を超える明るい領域だけなので、そこは元々錐体視の側にある)
+    //  しきい値を超える明るい領域だけなので、そこはもともと錐体視の側にある)
     color = ApplyMesopicVision(color);
 
     color *= exposureScale;
@@ -267,6 +275,14 @@ float3 ResolveDisplayColor(float2 uv, float exposureScale)
     else
     {
         color = TonemapReinhard(color);
+    }
+
+    // 黒の締め。トーンマップ後・sRGBエンコード前の表示リニア値に対して掛ける
+    // (実カメラのトーンカーブと同じ位置。sRGBエンコード後に掛けるとガンマの効いた
+    //  空間での引き算になり、暗部の階調が不均一に潰れる)
+    if (BlackPoint > 0.0f)
+    {
+        color = saturate((color - BlackPoint) / max(1.0f - BlackPoint, 1e-4f));
     }
 
     return LinearToSRGB(color);

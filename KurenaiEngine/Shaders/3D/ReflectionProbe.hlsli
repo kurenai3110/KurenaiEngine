@@ -14,9 +14,8 @@
 //   KURENAI_GLOBAL_IRRADIANCE_REGISTER    任意。拡散イラディアンスも要る場合のみ
 //   KURENAI_PROBE_DISTANCE_REGISTER       任意。距離キューブ(19.12節)を使う場合のみ
 //
-// 【M11 Stage 3で反射プローブは鏡面専任になった】拡散はDDGI(22章)へ一本化したため、
-// プローブ側の専用イラディアンスマップ(KURENAI_PROBE_IRRADIANCE_REGISTER・
-// SampleProbeIrradiance)は廃止した。SampleEnvironmentが返すirradianceは
+// 【反射プローブは鏡面専任】拡散はDDGI(22章)へ一本化しているため、
+// プローブ側の専用イラディアンスマップは持たない。SampleEnvironmentが返すirradianceは
 // KURENAI_GLOBAL_IRRADIANCE_REGISTERを定義した場合のみ「グローバルIBLの値そのもの」になり
 // (プローブの影響範囲による重み付けはもう受けない)、定義しなければ常に0を返す
 // (SSRは鏡面しか要らないためこちらを使う)。DDGIが有効な点ではDeferredLighting.hlsl/
@@ -279,9 +278,8 @@ float3 SampleGlobalIrradiance(float3 N)
 #endif
 // 環境ソース(拡散イラディアンス・プリフィルタ済み鏡面)を求める。
 //
-// 【M11 Stage 3: 拡散はプローブではなくグローバルIBLから取る】以前はここでプローブの
-// イラディアンスも重み付きブレンドしていたが、拡散の位置依存性はDDGI(22章)が担うようになった
-// ため廃止した(反射プローブは鏡面専任になった。19章の位置づけ変更)。
+// 【拡散はプローブではなくグローバルIBLから取る】拡散の位置依存性はDDGI(22章)が担うため、
+// ここでプローブのイラディアンスを重み付きブレンドすることはしない(反射プローブは鏡面専任)。
 // irradianceはKURENAI_GLOBAL_IRRADIANCE_REGISTERを定義していれば常にSampleGlobalIrradiance(N)
 // そのもの(プローブの影響範囲による重み付けは受けない)。DDGIが有効な点では、この値は
 // 呼び出し側(DeferredLighting.hlsl/Transparent.hlsl)でさらにDDGI由来の値へlerpされ、
@@ -371,8 +369,8 @@ void SampleEnvironment(float3 worldPos, float3 N, float3 R, float mipLevel,
     //
     // **グローバルIBLを足す前に掛けること**。手続き空は露出が0.05段動くたびに焼き直されて
     // 常に現在の露出になっているので、換算が要るのは鏡面のプローブ由来の項だけである。
-    // 拡散イラディアンスはM11 Stage 3でプローブ由来の項を廃止し、常にグローバルIBLだけで
-    // 決まるようになったため、この換算はもう不要
+    // 拡散イラディアンスはプローブ由来の項を持たず常にグローバルIBLだけで決まるため、
+    // この換算は要らない
     accumulatedPrefiltered *= ProbeParams2.w;
 
     const float globalWeight = 1.0f - totalWeight;
@@ -455,9 +453,8 @@ float3 ProbeInfluenceDebugColor(float3 worldPos)
 // 乗算型(Linear/Series)ではSpecularEnergyCompensationが倍率を返し加算項は0になるので、
 // 従来どおりこの係数だけで完結する。
 //
-// かつてはここで昼度(AmbientColor.a)による夜間減衰も掛けていたが、手続き空の導入で
-// 空自体が太陽高度に応じて暗くなるようになったため撤廃した(21.4節)。
-// 掛けたままだと夜が二重に暗くなる
+// ここで昼度(AmbientColor.a)による夜間減衰を掛けてはいけない。手続き空は空自体が
+// 太陽高度に応じて暗くなるため、掛けると夜が二重に暗くなる(21.4節)
 //
 // 【遮蔽の引数について】materialAO(遮蔽マップのスカラー)とssao(スクリーンスペース側)を
 // 分けて受け取り、bentとあわせてSpecularEnergy.hlsliのComposeSpecularOcclusionで合成する。

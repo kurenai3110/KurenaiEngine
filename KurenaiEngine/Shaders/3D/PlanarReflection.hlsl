@@ -1,4 +1,4 @@
-// 平面反射パス(P6)。水面に不透明ジオメトリ(城など)の鏡像を映すためのフォワードパス。
+// 平面反射パス。水面に不透明ジオメトリ(城など)の鏡像を映すためのフォワードパス。
 //
 // 【カメラを鏡映して描くことの意味】水面の平面についてXMMatrixReflectで鏡映行列Rを作り、
 //   反射用ViewProj = R * View * jitteredProj
@@ -41,11 +41,11 @@
 // 確認済み(このエンジンはDX11がfxc/SM5.0固定、DX12がdxcのため両方で通る必要がある)。
 #include "SpecularEnergy.hlsli"
 #include "Samplers.hlsli"
-// 大気遠近(P8)。フォグの透過率を求める純粋関数(cbufferに依存しない)。AerialPerspective.hlslと共有する
+// 大気遠近。フォグの透過率を求める純粋関数(cbufferに依存しない)。AerialPerspective.hlslと共有する
 #include "HeightFog.hlsli"
 // 空モデル(Perez分布)の共有ヘッダー。大気遠近のin-scatter項に、背景と同じSkyColorを使うため
 // (Sky.hlsli冒頭のコメント参照)
-// SkyView LUT(P14b)。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
+// SkyView LUT。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
 // SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
 #define KURENAI_SKYVIEW_REGISTER t15
 #include "Sky.hlsli"
@@ -89,14 +89,14 @@ cbuffer FrameConstants : register(b0)
     // 実際このマージで一度宣言し忘れ、PlanarReflectionPlaneが16バイトずれた結果
     // SV_ClipDistance0が全ジオメトリを切り落とし、水面の鏡像が丸ごと消えた
     float4 OcclusionParams;
-    // 水面(P2)用。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で決まり
+    // 水面用。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で決まり
     // 途中のフィールドを飛ばせないため、末尾のPlanarReflectionPlaneのオフセットを
     // C++側 KurenaiEngine3D.cpp の FrameConstants と合わせる目的だけで宣言する
-    // (DeferredLighting.hlsl/SSR.hlslの同名フィールドと同じ扱い。P9でSkyZenithTint/
-    // SkyHorizonTint/SkyGroundTint/SkySunGlowTintの4本がSkyParametersBufferへ移り
-    // FrameConstantsから消えたため、ここも同時に削ってフィールド数を合わせてある)
+    // (DeferredLighting.hlsl/SSR.hlslの同名フィールドと同じ扱い。SkyZenithTint/
+    // SkyHorizonTint/SkyGroundTint/SkySunGlowTintの4本はFrameConstantsではなく
+    // SkyParametersBufferにあるため、ここでも宣言しない)
     float4 TimeParams;
-    // 空の解析評価用(P3)・雲(P5)。大気遠近(P8)のin-scatter項(下記MakeSkyParameters/SkyColor)が
+    // 空の解析評価用・雲。大気遠近のin-scatter項(下記MakeSkyParameters/SkyColor)が
     // 読むため、このシェーダーでも実際に使う。xyz=太陽が「ある」向き(未正規化のまま渡ってくる。
     // MakeSkyParametersでnormalizeする)、w=未使用
     float4 SkySunDirection;
@@ -110,21 +110,21 @@ cbuffer FrameConstants : register(b0)
     // CloudParams1: xy=風によるノイズ空間の移動量(kCloudNoisePeriodでwrap済み)、
     //               z=Henyey-Greensteinの非対称パラメータ、w=未使用。MakeSkyParametersが読む
     float4 CloudParams1;
-    // 巻雲(P11、さらに末尾に追加)。このシェーダーでは未使用だが、C++側 KurenaiEngine3D.cpp の
+    // 巻雲(さらに末尾に追加)。このシェーダーでは未使用だが、C++側 KurenaiEngine3D.cpp の
     // FrameConstants::CloudParams2/3 と揃える目的だけで宣言する
     // (DeferredLighting.hlsl/SSR.hlslの同名フィールドと同じ扱い)
     float4 CloudParams2;
     float4 CloudParams3;
-    // 平面反射(P6)。xyz=水面平面の法線(現状は常に(0,1,0))、w=平面の距離項
+    // 平面反射。xyz=水面平面の法線(現状は常に(0,1,0))、w=平面の距離項
     // (SV_ClipDistance0 = dot(worldPos, xyz) + w が水面より上で正になるように詰める)
     float4 PlanarReflectionPlane;
-    // 大気遠近(P8、末尾に追加)。鏡像にも同じフォグを掛けるため、AerialPerspective.hlslと同じ値を読む。
+    // 大気遠近(末尾に追加)。鏡像にも同じフォグを掛けるため、AerialPerspective.hlslと同じ値を読む。
     // x=基準高度での消散係数[1/m]、y=スケールハイト[m]、z=基準高度[m](ワールドY)、
     // w=有効フラグ(0で無効。C++側の判断はAerialPerspective.hlslのFogParams0.wコメント参照)
     float4 FogParams0;
     // x=不透明度の上限、yzw=未使用
     float4 FogParams1;
-    // 水中項(P8)。このシェーダーでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
+    // 水中項。このシェーダーでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
     float4 WaterBodyColor;
 };
 
@@ -174,7 +174,7 @@ Texture2D BRDFLUTTexture : register(t11);
 #define KURENAI_DDGI_DISTANCE_REGISTER t13
 #include "DDGI.hlsli"
 
-// SkyIntegrate.hlslが書いた空パラメータ(P9)。大気遠近(P8)のin-scatter項(MakeSkyParameters/
+// SkyIntegrate.hlslが書いた空パラメータ。大気遠近のin-scatter項(MakeSkyParameters/
 // SkyColor)が読む。t0〜t13が既に使用済みのためt14を使う
 StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t14);
 
@@ -218,7 +218,7 @@ PSInput VSMain(VSInput input)
     return output;
 }
 
-// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる。大気遠近(P8)の
+// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる。大気遠近の
 // in-scatter項にだけ使う(このパス自体のライティングは従来どおりIBLキューブマップを使う。
 // ファイル冒頭のEvaluateGlobalIBL参照)。
 // SSR.hlsl/DeferredLighting.hlsl/AerialPerspective.hlslのMakeSkyParametersと完全に同一の内容で
@@ -239,8 +239,8 @@ SkyParameters MakeSkyParameters(float2 pixelPosition)
     params.CloudDensity = CloudParams0.w;
     params.CloudScrollOffset = CloudParams1.xy;
     params.CloudForwardG = CloudParams1.z;
-    // 積雲の厚み[m](P13b)。CloudParams1.wは従来ずっと0で未使用だった枠なので、
-    // FrameConstantsは1バイトも増えていない。0ならレイマーチせず従来の平面になる
+    // 積雲の厚み[m](CloudParams1.wの枠に詰めてある)。
+    // 0ならレイマーチせず平面として扱う
     params.CloudThickness = CloudParams1.w;
     params.CirrusCoverage = CloudParams2.x;
     params.CirrusAltitude = CloudParams2.y;
@@ -386,8 +386,8 @@ float3 EvaluateGlobalIBL(float3 N, float3 V, float3 worldPos, float3 albedo, flo
     // 【多重バウンス(22章)】ProbeCapture.hlslのEvaluateGlobalIBLと同じ理由・同じ式。
     // DDGIが有効なら拡散の環境光を前フレームのDDGIイラディアンスにすることで、
     // このパスに映る反射にも多重バウンスの間接光が反映される。
-    // 【M11 Stage 1】鏡映カメラが映す点はDDGIボリュームの外にあることがある(このシーンは
-    // 干潟が6,000m四方でボリュームより遥かに広い)。insideWeightが0の点ではグローバルIBLの
+    // 鏡映カメラが映す点はDDGIボリュームの外にあることがある(広い水面のシーンでは
+    // 地形がボリュームより遥かに広い)。insideWeightが0の点ではグローバルIBLの
     // ままにする——ProbeCapture.hlsl・DeferredLighting.hlslとまったく同じ規則
     float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
     if (DDGIParams0.w > 0.5f)
@@ -501,7 +501,7 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     color += emissive;
 
-    // 大気遠近(P8)を鏡像にも適用する。掛けないと「霞んだ本体 vs くっきりした鏡像」になってしまう
+    // 大気遠近を鏡像にも適用する。掛けないと「霞んだ本体 vs くっきりした鏡像」になってしまう
     // (AerialPerspective.hlslは本編のSceneColorにしかフォグを掛けないため、この平面反射パスの
     // 出力は素通しだと霞まないまま合成されてしまう)。
     // 【経路長にCameraPositionをそのまま使ってよい理由】光は「物体→水面→目」の順に進むが、

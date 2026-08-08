@@ -204,6 +204,13 @@ namespace Kurenai::RHI
         // サンプラーテーブル(ルートパラメータ3)を直近のセットへ張り直す
         cmdList->SetGraphicsRootDescriptorTable(3, m_Device->GetShaderVisibleSamplerHeap()->GetGpuHandle(m_CurrentSamplerSetBase));
 
+        // 頂点シェーダ専用SRV(ルートパラメータ4)。定数バッファと同じく、一度もバインドされて
+        // いなければアドレスが0なので飛ばす
+        if (m_CurrentVertexRootSrv != 0)
+        {
+            cmdList->SetGraphicsRootShaderResourceView(kVertexShaderSrvRootParameterIndex, m_CurrentVertexRootSrv);
+        }
+
         // SRVテーブル(ルートパラメータ2)は次のDrawでFlushPendingSrvWrites()が新しいブロックを
         // 払い出して張り直す。ここでは「直前の描画と同じテクスチャならテーブルを使い回す」
         // キャッシュを無効にしておけばよい(ルート引数が無効化されたので使い回せない)
@@ -308,8 +315,8 @@ namespace Kurenai::RHI
         }
 
         // 未バインドのスロットもnullディスクリプタが入っているため常に全スロットをコピーする。
-        // 「今回セットされたスロットだけ」をコピーしていた旧実装は、払い出したブロックの残りが
-        // リングの前世代のディスクリプタ(未初期化ゴミ)のまま残るという問題があった。
+        // **「今回セットされたスロットだけ」をコピーしてはいけない** ―― 払い出したブロックの残りが
+        // リングの前世代のディスクリプタ(未初期化ゴミ)のまま残る。
         // 各レンジはすべてサイズ1(pRangeSizes=nullptrは各レンジサイズ1を意味する)
         m_Device->GetDevice()->CopyDescriptors(
             kTextureSlotCount, destRanges, nullptr, kTextureSlotCount, srcRanges, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -353,6 +360,41 @@ namespace Kurenai::RHI
         dx12Buffer->TransitionTo(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
         m_PendingSrvHandles[slot] = dx12Buffer->GetSrvCpuHandle();
+    }
+
+    void DX12CommandList::SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer)
+    {
+        if (slot >= kVertexShaderSrvSlotCount)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "SetVertexShaderResourceBuffer: スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0のみ)。"
+                "バインドをスキップします");
+            return;
+        }
+
+        if (buffer == nullptr)
+        {
+            Core::Logger::Error(
+                "DX12", "SetVertexShaderResourceBuffer: バッファがnullptrのためバインドをスキップします");
+            return;
+        }
+
+        auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+        auto* cmdList = m_Device->GetCommandList();
+
+        // 【NON_PIXEL_SHADER_RESOURCEを必ず含めること】既存のSetShaderResourceBufferは
+        // PIXEL_SHADER_RESOURCEへ遷移させるが、その状態のリソースを頂点シェーダから読むのは
+        // D3D12の仕様違反になる(デバッグレイヤーが検出する)。同じバッファをピクセル側からも
+        // 読む可能性があるため、両方を含んだ状態にしておく
+        dx12Buffer->TransitionTo(
+            cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        // ルートSRVはディスクリプタテーブルを経由しないため、SetTexture系のような
+        // Draw直前のフラッシュ(FlushPendingSrvWrites)は不要。ここで直接書き込む
+        const D3D12_GPU_VIRTUAL_ADDRESS address = dx12Buffer->GetGPUVirtualAddress();
+        m_CurrentVertexRootSrv = address;
+        cmdList->SetGraphicsRootShaderResourceView(kVertexShaderSrvRootParameterIndex, address);
     }
 
     void DX12CommandList::UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes)
@@ -608,11 +650,11 @@ namespace Kurenai::RHI
         }
 
         // Dispatchのたびに新しいテーブルブロックを払い出す方式のため、シャドウ配列の全スロットを
-        // 毎回コピーする。以前は「マスクが立っているスロットだけ」をコピーしており、
-        // 2回目以降のDispatchで前回のバインドが引き継がれず未初期化のディスクリプタを
-        // 参照する不具合があった(IBL畳み込みパスでスカイボックスを1回だけバインドし、
-        // 面ごとにUAVだけ差し替えて6回Dispatchすると、DX12だけ2面目以降が真っ黒になった)。
-        // 現在はコンストラクタで全スロットをnullディスクリプタに初期化してあるため、
+        // 毎回コピーする。**「マスクが立っているスロットだけ」をコピーしてはいけない** ――
+        // 2回目以降のDispatchで前回のバインドが引き継がれず未初期化のディスクリプタを参照する
+        // (IBL畳み込みパスでスカイボックスを1回だけバインドし、面ごとにUAVだけ差し替えて
+        // 6回Dispatchすると、DX12だけ2面目以降が真っ黒になる)。
+        // コンストラクタで全スロットをnullディスクリプタに初期化してあるため、
         // マスクを持たずに全スロットコピーするだけでDX11と同じバインド寿命になる
         m_Device->GetDevice()->CopyDescriptors(
             kComputeTableSlotCount, destRanges, nullptr, kComputeTableSlotCount, srcRanges, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);

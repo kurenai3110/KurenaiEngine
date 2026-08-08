@@ -6,30 +6,27 @@
 //       (キューブマップは256px/面のため、3840px・水平画角68度のカメラでは約20倍に拡大表示され
 //       背景としては解像度が足りない。IBLは畳み込むため低解像度のままで正しい)
 //   (c) SSR.hlsl                 … 水面のSSRレイが画面外へ抜けた・最大距離まで判定がつかなかった
-//       画素の解析空フォールバック(P4)
-//   (d) AerialPerspective.hlsl   … 大気遠近(P8)のin-scatter項。遠方の地物が無限遠で背景の空色へ
+//       画素の解析空フォールバック
+//   (d) AerialPerspective.hlsl   … 大気遠近のin-scatter項。遠方の地物が無限遠で背景の空色へ
 //       厳密に収束するようにするため、フォグの合成先としてこのモデルの色をそのまま使う
 //   (e) PlanarReflection.hlsl    … 平面反射の鏡像にも同じ大気遠近を掛けるため、(d)と同じ理由でin-scatter項に使う
-// 雲(P5)はこの5者すべてに自動で行き渡るよう、この共有ヘッダーへ足した(下のSkyParameters::Cloud*と
+// 雲はこの5者すべてに自動で行き渡るよう、この共有ヘッダーへ足した(下のSkyParameters::Cloud*と
 // SkyColor末尾を参照)。ただしIBL用キューブマップ(SkyGenerate.hlsl)には雲を焼き込まない
-// (理由は下の雲セクションの判断Aコメント参照)。大気遠近(P8)の消散係数・スケールハイト自体は
+// (理由は下の雲セクションの判断Aコメント参照)。大気遠近の消散係数・スケールハイト自体は
 // このヘッダーの管轄ではない(空モデルではなく大気遠近固有の値のため、HeightFog.hlsli側に持つ)。
 //
-// 【P7: 空の色をPreetham xyYモデルへ置き換え】以前は色味を昼・薄明・夜の3セットの
-// アート的な補間(ComputeSkyTintSet/SkyTintFromSet)だけで決めていたが、P7で日中
-// (太陽仰角5度以上)の色度(x, y)をPreetham et al. 1999のxyYモデルから物理的に導出するように
-// 変えた(SkyColorUpperUnit参照)。夜・薄明(Preethamの定義域外)は引き続きComputeSkyTintSetの
-// アート的な補間を使う——ここは変わっていない。ComputeSkyTintSet/SkyTintFromSet自体もそのまま
-// 残っている(夜・薄明のクロスフェードと、地平線より下の接地色GroundTintで必要なため)。
+// 【空の色】日中(太陽仰角5度以上)の色度(x, y)はPreetham et al. 1999のxyYモデルから
+// 物理的に導出する(SkyColorUpperUnit参照)。夜・薄明はPreethamの定義域外なので、
+// ComputeSkyTintSet/SkyTintFromSetによる昼・薄明・夜3セットのアート的な補間を使う
+// (地平線より下の接地色GroundTintも同じ経路)。
 //
 // このファイルの式は Tools/generate_sky_cubemap.py(オフラインの参照実装 兼 手続き空を
 // 無効にしたときのフォールバック)と一致させる必要がある。係数・定数を変える場合は
 // 必ずそちらも同時に直すこと。
 //
-// 【P9: 照度正規化積分のGPU化】以前は色味の決定(ComputeSkyTint)と照度正規化の積分
-// (ComputeSkyZenithScale、θ64分割×φ256分割=16,384サンプル)がKurenaiEngine3D.cppのCPUミラーと
-// このファイルの両方に実装されており、「片方を直したら必ずもう片方も直す」という規約でしか
-// 整合が保たれていなかった。P9でこれをGPU側(SkyIntegrate.hlsl)へ一本化し、CPUミラーは削除した。
+// 【照度正規化積分はGPU側に一本化してある】色味の決定と照度正規化の積分
+// (θ64分割×φ256分割=16,384サンプル)はSkyIntegrate.hlslだけが持ち、CPUミラーは置かない
+// (二重実装にすると「片方を直したら必ずもう片方も直す」という規約でしか整合が保てない)。
 // SkyIntegrate.hlslがこのファイルのComputeSkyTintSet/PerezRelativeLuminance/SkyTintFromSetを
 // 直接呼んで積分し、結果(ティント4本+正規化済みの天頂輝度)をGPUSkyParametersとして
 // 構造化バッファ(KurenaiEngine3D側 m_SkyParametersBuffer)へ書く。SkyGenerate.hlsl/
@@ -44,17 +41,17 @@
 #ifndef KURENAI_SKY_HLSLI
 #define KURENAI_SKY_HLSLI
 
-// 雲層(有限距離にある)へ大気遠近を掛けるために使う(P12、EvaluateCloudLayerの(f)節)。
+// 雲層(有限距離にある)へ大気遠近を掛けるために使う(EvaluateCloudLayerの(f)節)。
 // HeightFog.hlsliはcbuffer/レジスタに一切依存しない純粋関数だけのヘッダーなので、
 // この共有ヘッダーから読んでも利用者5者(冒頭の(a)〜(e))の結合は増えない。
 // 二重includeはHeightFog.hlsli側のインクルードガードで無害
 #include "HeightFog.hlsli"
 
-// SkyView LUT(P14b)のUVパラメータ化。焼く側(AtmosphereLUT.hlsl)と厳密に同じ写像を使う
+// SkyView LUTのUVパラメータ化。焼く側(AtmosphereLUT.hlsl)と厳密に同じ写像を使う
 #include "AtmosphereCommon.hlsli"
 
 // ============================================================================
-// SkyView LUT(P14b)
+// SkyView LUT
 //
 // 日中の空の色はHillaire (2020)の大気モデルを焼いたこのLUTから引く。
 // 雲の3Dノイズと同じく、レジスタはインクルードする側がマクロで決める:
@@ -85,7 +82,7 @@ static const float kGroundFadeEndY = -0.6f;
 // 勾配が残る値まで下げてある
 static const float kRelativeLuminanceFloor = 0.12f;
 
-// 空の色味セット(P9でKurenaiEngine3D.cppから移植)。太陽高度から選び、SkyIntegrate.hlslが
+// 空の色味セット。太陽高度から選び、SkyIntegrate.hlslが
 // GPUSkyParametersへ詰めてバッファへ書く
 struct SkyTintSet
 {
@@ -108,7 +105,7 @@ struct GPUSkyParameters
     float4 SunGlowTint;   // xyz=色、w=強さ
     float4 Luminance;     // x=天頂輝度(実効プリ露出込み、雲の減光は含まない)
                            // y=余弦重み積分の値(ログ・検証用)、zw=予備
-    // 【P7】Preetham xyYモデル用のパラメータ。x=タービディティ、y=Preethamの重み
+    // Preetham xyYモデル用のパラメータ。x=タービディティ、y=Preethamの重み
     // (0=従来ティントのみ、1=Preethamのみ。SkyIntegrate.hlslが太陽仰角から求めて書く)、zw=予備
     float4 ModelParams;
 };
@@ -136,23 +133,23 @@ struct SkyParameters
     // 別途代入すること
     float  SunToSkyIlluminanceRatio;
 
-    // --- 日中の空(P7でPreetham、P14bでHillaireのSkyView LUTへ置き換え) ---
-    // 大気の濁り具合。**P14b以降この関数は読まない**。濁りはSkyView LUTを焼く側
+    // --- 日中の空(HillaireのSkyView LUT) ---
+    // 大気の濁り具合。**この関数は読まない**。濁りはSkyView LUTを焼く側
     // (AtmosphereLUT.hlsl)でMieの密度倍率として効き、焼き上がったLUTに織り込まれている。
     // フィールドを残してあるのはSkyIntegrate.hlslが従来ティント経路(夜)でも
     // GPUSkyParametersを組み立てるためで、値そのものはログ・デバッグ用
     float  Turbidity;
     // 0=従来ティントのみ、1=物理モデル(Hillaire)のみ。太陽仰角0〜5度でクロスフェードする。
     // Hillaireは低い太陽も素で扱えるが、月光・薄明視(21.9.7)が従来ティント経路に
-    // 乗っているためP14bでもこの分岐は残してある(SkyColorUpperUnit参照)
+    // 乗っているためこの分岐が要る(SkyColorUpperUnit参照)
     float  PhysicalSkyWeight;
     // 空の彩度。**物理量ではなく明示的なアート指定**。1.0で物理モデルの色度そのまま。
     // 色度図上で白色点(D65)から遠ざける倍率で、色相は変えずに鮮やかさだけを変える。
-    // P13bではPreethamの淡さを埋めるために1.9まで上げていたが、P14bでその穴を物理側で
-    // 埋めたので、既定の1.0から動かす必要は本来無い(SkyColorUpperUnitの該当箇所参照)
+    // 物理モデル側で空の青さは足りるので、既定の1.0から動かす必要は本来無い
+    // (SkyColorUpperUnitの該当箇所参照)
     float  SkySaturation;
 
-    // --- 雲(P5: 積雲1層 / P11: 巻雲を2層目として追加)。CloudCoverage <= 0 なら積雲側の計算は
+    // --- 雲(積雲1層と、2層目の巻雲)。CloudCoverage <= 0 なら積雲側の計算は
     // 一切行わない(判断C、SkyColor参照)。フィールドはあえて配列化せず層ごとに独立した
     // 名前のスカラー/ベクトルのまま持たせてある(層ごとに高度・UVスケール等の単位や
     // 意味合いが異なり、配列化してもインデックスの意味を別途覚える必要が生じるため) ---
@@ -171,7 +168,7 @@ struct SkyParameters
     float  CloudThickness;     // 雲底から雲頂までの厚み[m](P13b)。0ならレイマーチせず
                                 // 従来の厚みゼロの平面として扱う(巻雲はこちら)
 
-    // --- 巻雲(P11)。積雲より高層にある2層目。CirrusCoverage <= 0 なら巻雲側の計算は
+    // --- 巻雲。積雲より高層にある2層目。CirrusCoverage <= 0 なら巻雲側の計算は
     // 一切行わない(判断C、SkyColor参照)。判断A(IBLキューブに雲を焼かない)・判断B
     // (平均透過率だけをベイク時に掛ける)は積雲とまったく同じ理由でこちらにも適用する
     // (Sky.hlsli冒頭の雲セクション、KurenaiEngine3D.cppのComputeCloudAverageTransmittance参照)。
@@ -185,7 +182,7 @@ struct SkyParameters
                                 // KurenaiEngine3D.cppのm_CirrusScrollOffset参照)
     float  CirrusAnisotropy;   // fBmのUV(U方向)を伸ばして筋状にする倍率。V方向は1.0固定
 
-    // --- 雲へ掛ける大気遠近(P12)。雲は「深度を持たない背景」として描かれるため
+    // --- 雲へ掛ける大気遠近。雲は「深度を持たない背景」として描かれるため
     // AerialPerspective.hlslの早期脱出(depth <= 0)に入り、フォグを一切受けていなかった。
     // だが雲は無限遠ではなく高度1,500m(積雲)・8,000m(巻雲)の有限距離にある層で、
     // 視線が寝るほど斜距離が伸びる(仰角15度で積雲まで5.8km)。掛けないと消散係数を上げたとき
@@ -194,7 +191,7 @@ struct SkyParameters
     // 値はFrameConstants::FogParams0とCameraPosition.yから各MakeSkyParametersが埋める。
     // ApplySkyParametersFromBufferでは埋まらない(空パラメータバッファはフォグを知らない)ため
     // 呼び出し側が別途代入すること。FogEnabledが0のときEvaluateCloudLayerはフォグの計算を
-    // 一切行わず、P12着手前と厳密に同じ値を返す ---
+    // 一切行わず、フォグを持たない場合と厳密に同じ値を返す ---
     float  FogEnabled;         // 0=フォグ無効(このヘッダーでは何もしない)、1=有効
     float  FogSigma0;          // 基準高度での消散係数[1/m](FogParams0.x)
     float  FogScaleHeight;     // スケールハイト[m](FogParams0.y)
@@ -216,6 +213,21 @@ struct SkyParameters
     // レイと層の交差を解くようになったため、レイの起点としてXZも要る。
     // SkyColor(dir, params)はこの位置を起点としたレイとして解釈する
     float3 ViewerPosition;
+
+    // --- 星空 ---
+    // 【SkyColorでしか使わない】星は背景と水面の映り込みにだけ描き、IBLキューブ
+    // (SkyGenerate.hlsl)とフォグのin-scatter(AerialPerspective.hlsl)へは入れない。
+    // それらのMakeSkyParametersはStarsIntensityに0を入れること。
+    // 理由: キューブは256px/面しかなく点光源を焼くとエイリアシングし、
+    // プリフィルタ後の鏡面反射でファイアフライになる。星明かりの「照明」としての寄与は
+    // KurenaiEngine3D.cppのkStarlightIlluminanceLuxが一様な下限として既にモデル化済みで、
+    // ここは見た目だけを足す担当
+    float  StarsIntensity;     // 0で完全に無効(1命令も足さない)。昼はCPU側で0になる
+    float  StarsDensity;       // 天球を分割するセルの細かさ。1セルにつき星1個
+    float  StarsTwinkle;       // またたきの強さ。0で無効
+    float  StarsTime;          // またたきの位相に使う時刻[秒]
+    float  StarsPixelAngle;    // 1画素が張る角度[rad]。星がこれを下回らないようにして、
+                                // サブピクセルのちらつきを防ぐ
 };
 
 // SkyParametersの雲用フォグフィールドを埋めるヘルパ。5つあるMakeSkyParametersが
@@ -254,10 +266,23 @@ SkyParameters ApplyCloudFogParameters(SkyParameters params, float4 fogParams0, f
     params.FogScaleHeight = fogParams0.y;
     params.FogRefHeight = fogParams0.z;
     params.ViewerPosition = viewerPosition;
+
+    // 【星空は既定で無効にする】この5行はフォグとは無関係だが、あえてここへ置いている。
+    // HLSLのローカル構造体は代入していないメンバの値が未定義で、5つあるMakeSkyParametersの
+    // どれか1つが星のフィールドを埋め忘れると、そのシェーダーはゴミの強度で星を描き始める
+    // (IBLキューブへ点光源が焼き込まれ、鏡面反射のファイアフライという分かりにくい形で出る)。
+    // このヘルパは5つ全員が必ず通るので、ここで0にしておけば「明示的に有効化した
+    // シェーダーだけが星を描く」という安全側の既定になる。
+    // 星を出すシェーダー(DeferredLighting.hlsl / SSR.hlsl)は、この呼び出しの**後**で上書きすること
+    params.StarsIntensity = 0.0f;
+    params.StarsDensity = 0.0f;
+    params.StarsTwinkle = 0.0f;
+    params.StarsTime = 0.0f;
+    params.StarsPixelAngle = 0.0f;
     return params;
 }
 
-// バッファの内容をSkyParametersのティント/輝度フィールドへ流し込むヘルパ(P9)。
+// バッファの内容をSkyParametersのティント/輝度フィールドへ流し込むヘルパ。
 // SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslの3つの消費側が同じ詰め替えを
 // 個別に書かないようにするため、ここへ1箇所だけ置く。SunDirection・雲パラメータ・
 // SunToSkyIlluminanceRatio(CPU側SunLightingから来る値)はこのバッファには入っていないため
@@ -299,8 +324,7 @@ float PerezF(float cosTheta, float gamma, float a, float b, float c, float d, fl
 // (実測: タービディティ2.5相当の係数で太陽仰角45度のとき0.763、仰角5度のとき0.361)、
 // 太陽が低いほど誤差が拡大する。輝度の絶対値はSkyIntegrate.hlslの照度正規化で吸収されるが、
 // 下のkRelativeLuminanceFloorとの相対関係が変わるため分布の形そのものが歪む。
-// この誤りはP7でPreethamのxyYを実装した際に発見し、同じ誤りがあったPreetham側(SkyColorUpperUnit)と
-// あわせて修正した。再発しやすい箇所なので根拠を残す
+// 再発しやすい箇所なので根拠を残す(Preetham側のSkyColorUpperUnitも同じ規則に従うこと)
 float PerezRelativeLuminance(float cosTheta, float gamma, float thetaSun)
 {
     // CIE快晴空の標準係数(Perez et al. 1993 / Preetham et al. 1999, Table 1)
@@ -346,15 +370,15 @@ float3 SkyTint(float cosTheta, float cosGamma, SkyParameters params)
     return SkyTintFromSet(cosTheta, cosGamma, tintSet);
 }
 
-// 太陽高度(のサイン)から空の色味を決める(P9でKurenaiEngine3D.cppのComputeSkyTintから移植)。
+// 太陽高度(のサイン)から空の色味を決める。
 //
-// 【P7時点でも夜・薄明はアート的な近似のまま】本来の夕焼けは、太陽光が大気を長く通る
+// 【夜・薄明はアート的な近似】本来の夕焼けは、太陽光が大気を長く通る
 // ことで短波長がRayleigh散乱により失われる波長依存の消散で生じる。それを解くには
-// Preetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。P7で日中
-// (太陽仰角5度以上)の色度はPreetham xyYモデルから物理的に導出するようになったが(Sky.hlsli
-// 冒頭のP7コメント、SkyColorUpperUnit参照)、Preethamは太陽が地平線下では定義域外のため、
+// Preetham/Hosek-Wilkieのような分光モデルか大気散乱の数値積分が要る。日中
+// (太陽仰角5度以上)の色度は物理モデルから導出する(Sky.hlsli冒頭のコメント、
+// SkyColorUpperUnit参照)が、物理モデルは太陽が地平線下では定義域外のため、
 // 夜・薄明とその間のクロスフェード、および地平線より下の接地色(GroundTint)はこの関数
-// (昼・薄明・夜の3セットを高度で補間するアート的な近似)を使い続ける。
+// (昼・薄明・夜の3セットを高度で補間するアート的な近似)が受け持つ。
 //
 // 【重要】ここで色味を暗くしても空が暗くなるわけではない。SkyIntegrate.hlslが
 // 「色味の輝度成分込みで積分して目標照度に合わせる」ため、色味は最終的な明るさではなく
@@ -405,20 +429,18 @@ SkyTintSet ComputeSkyTintSet(float sunElevationSin)
 // 視線に対してもSkyColorUpperを呼ぶため(地平線より下を引くとLUTの地面側のテクセルに入る)
 static const float kSkyViewMinDirY = 1e-3f;
 
-// Preetham xyYモデル(P7)
+// Preetham xyYモデル
 //
-// 従来のSkyColorUpperは「色味(SkyTintFromSet、アート的な4色補間)」と「輝度分布(Perez分布)」を
-// 完全に分離して持っていた。P7では日中(太陽が地平線上、仰角5度以上)の色度(x, y)をPreetham et al.
+// 日中(太陽が地平線上、仰角5度以上)の色度(x, y)はPreetham et al.
 // 1999のxyYモデルから求め、輝度(Y)と合成してXYZ→線形sRGBへ変換する。夜・薄明(Preethamの定義域外)
-// は従来どおりSkyTintFromSetによるアート的な補間を使う(SkyColorUpperUnitの早期脱出/クロスフェード
+// はSkyTintFromSet(アート的な4色補間)を使う(SkyColorUpperUnitの早期脱出/クロスフェード
 // 参照)。
 //
 // xyY→線形sRGB(Rec.709/D65)。負成分ぶんだけ全チャンネルへ白を足すデサチュレーションを
 // 入れてあるが、これは保険であって常用される経路ではない。
 //
-// 【実測: この保険は現状の使用域では一度も発動しない】P7の実装時に「Preethamの色度は色域外を
-// 頻繁に生成する」という前提で入れたが、実際に測ると発動しなかった。タービディティ1.7〜8.0 ×
-// 太陽仰角5〜60度で上半球を32×64方向に走査したところ、負値が出た方向は0.0%だった。
+// 【この保険は現状の使用域では一度も発動しない】タービディティ1.7〜8.0 ×
+// 太陽仰角5〜60度で上半球を32×64方向に走査しても、負値が出る方向は0.0%である。
 // Preethamの色度はCIE図の中央付近(おおむねx=0.2〜0.5、y=0.2〜0.45)に収まり、そこは
 // sRGBの三角形の内側だからである。min>=0のとき何もしない実装なので残しても害は無く、
 // タービディティの範囲やモデルを変えたときの保険として置いてある。
@@ -456,7 +478,7 @@ float3 XyYToLinearSRGB(float x, float y, float Y)
 }
 
 // 線形sRGB(Rec.709/D65) → 色度(x, y)と輝度Y。XyYToLinearSRGBの逆変換。
-// P14bで空の彩度を色度空間で効かせるために足した(SkyView LUTはRGBで返るため、
+// 空の彩度を色度空間で効かせるために使う(SkyView LUTはRGBで返るため、
 // 白色点から遠ざける操作をするにはいったん色度へ戻す必要がある)
 void LinearSRGBToXyY(float3 rgb, out float x, out float y, out float Y)
 {
@@ -496,8 +518,8 @@ float3 SkyColorUpperUnit(float3 dir, SkyParameters params)
 
     // 【夜の厳密一致を担保する早期脱出】太陽が地平線下(仰角0度未満)では従来のアート的な
     // ティント補間だけを使う。月光・薄明視(21.9.7)がこの経路に乗っているため、
-    // P14bで日中をHillaireへ置き換えたあともここは触っていない。物理モデル側の計算を
-    // 一切行わずに返すので、この分岐に限ってはP9完了時点と画素まで厳密に一致する
+    // この分岐は物理モデル側の計算を一切行わずに返すので、日中の空のモデルを差し替えても
+    // 夜の画素は1ビットも動かない
     if (params.PhysicalSkyWeight <= 0.0f)
     {
         float legacyRelative = max(PerezRelativeLuminance(cosTheta, gamma, thetaSun), 0.0f);
@@ -505,10 +527,10 @@ float3 SkyColorUpperUnit(float3 dir, SkyParameters params)
         return legacyRelative * SkyTint(cosTheta, cosGamma, params);
     }
 
-    // --- 日中の空: Hillaire (2020) のSkyView LUT(P14b) ---
+    // --- 日中の空: Hillaire (2020) のSkyView LUT ---
     //
-    // 【なぜPreethamを置き換えたのか】P13bで参考写真と突き合わせた結果、空の青さがPreetham
-    // というモデルの限界に当たっていることが実測で確定した。写真の最も青い空はB/R=4.84だが、
+    // 【なぜPreethamではないのか】参考写真と突き合わせると、空の青さはPreetham
+    // というモデルの限界に当たる。写真の最も青い空はB/R=4.84だが、
     // Preethamは論文の係数から実装とは独立に計算しても1.34〜1.74しか出さない(実装の実測も
     // この範囲内でモデルに忠実だった)。Rayleigh散乱はλ^-4に比例するので、物理から始めれば
     // B/Rは散乱係数の時点で5.70になる。地平線がマゼンタに寄る癖(Preethamは仰角0.5度で
@@ -519,7 +541,7 @@ float3 SkyColorUpperUnit(float3 dir, SkyParameters params)
     // (正規化の必要性はAtmosphereLUT.hlslのSkyViewセクション冒頭に書いてある)。
     //
     // 【地平線のクランプ】Perezは水平線で発散するためclampedY(仰角0.5度)が要ったが、
-    // Hillaireは特異点を持たないのでもっと下まで引ける。ただし大気遠近(P8)は下向きの
+    // Hillaireは特異点を持たないのでもっと下まで引ける。ただし大気遠近は下向きの
     // 視線に対してもSkyColorUpperを呼ぶため(遠くの地物のin-scatterに地平線際の空の色を
     // 使う)、クランプ自体は残して「地平線のすぐ上」へ写す必要がある。
     // SkyViewDirectionToUvはdir.yを天頂角の余弦、dir.xzを方位として独立に読むので、
@@ -533,11 +555,10 @@ float3 SkyColorUpperUnit(float3 dir, SkyParameters params)
     // 【空の彩度(アート指定)】色度図上で白色点(D65)から遠ざけ、色相と輝度を保ったまま
     // 鮮やかさだけを上げ下げする。1.0で無変換。
     //
-    // P13bではPreethamの淡さを埋めるために既定1.9まで上げていたが、P14bはその穴を物理で
-    // 埋めることが目的なので、このつまみは「届かなかったときの逃げ道」として残すだけになる。
-    // Preetham時代にあった仰角による重み付け(地平線際では効かせない)は外した。あれは
-    // Preethamの地平線がマゼンタに寄る癖を増幅しないための回避策で、その癖が無いモデルへ
-    // 移った以上は根拠が無い。地平線の緑の落ち込みの実測で妥当性を確認すること
+    // 空の青さは物理モデル側で足りるため、このつまみは「届かなかったときの逃げ道」でしかない。
+    // **仰角による重み付け(地平線際では効かせない)を足してはいけない**。それはPreethamの
+    // 地平線がマゼンタに寄る癖を増幅しないための回避策であって、その癖が無いモデルでは
+    // 根拠が無い。地平線の緑の落ち込みの実測で妥当性を確認すること
     if (params.SkySaturation != 1.0f)
     {
         float chromaX, chromaY, chromaLuminance;
@@ -569,7 +590,7 @@ float3 SkyColorUpper(float3 dir, SkyParameters params)
 }
 
 // ============================================================================
-// 雲(P5: 積雲1層のレイヤーモデル。P11で巻雲を2層目として追加し多層化した)
+// 雲(積雲と巻雲の2層のレイヤーモデル)
 //
 // 【判断A: IBL用キューブマップには雲を焼かない】
 // SkyGenerate.hlslはSkyParameters組み立て時にCloudCoverage=CirrusCoverage=0で埋めて呼ぶため、
@@ -713,14 +734,13 @@ static const float kCirrusForwardG = 0.3f;
 // ZenithLuminanceには既に実効プリ露出が掛かっているため、こうしておけば露出換算を
 // 別途書く必要がない)。
 // 多重散乱の項に下限と上限があるのは、積雲の厚い芯と薄い縁で明るさが変わるため。
-// 【なぜ定数1つではいけないか】当初これを定数0.5にしていたところ、太陽から離れた方向では
-// 位相関数の値が等方散乱比0.23まで落ちるため単散乱の寄与が全体の1割に満たず、
-// 雲の芯が例外なく(166,166,166)という単一の値に張り付いて立体感がまったく出なかった。
-// 多重散乱も厚みで減衰する量なので、自己影の透過率で下限〜上限を補間する形にしてある
-// (物理的な導出ではなく、厚い芯が暗く薄い縁が明るいという積雲の見え方に合わせた近似)
-// 【P11で層ごとの値へ】これらはCloudLayerParams::Albedo/SingleScatterScale/AmbientTermMin/Max
-// として層ごとに渡すようになった。式(EvaluateCloudLayer)は1箇所のまま、値だけを積雲・巻雲で
-// 変える。積雲側の値は元のP5と同じ(kCumulus接頭辞へ改名しただけで数値は変えていない)
+// 【多重散乱の項を定数1つにしてはいけない】太陽から離れた方向では位相関数の値が
+// 等方散乱比0.23まで落ちるため単散乱の寄与が全体の1割に満たず、定数にすると雲の芯が
+// 単一の値に張り付いて立体感が出ない。多重散乱も厚みで減衰する量なので、
+// 自己影の透過率で下限〜上限を補間する形にしてある
+// (物理的な導出ではなく、厚い芯が暗く薄い縁が明るいという積雲の見え方に合わせた近似)。
+// これらはCloudLayerParams::Albedo/SingleScatterScale/AmbientTermMin/Maxとして層ごとに渡す。
+// 式(EvaluateCloudLayer)は1箇所のまま、値だけを積雲・巻雲で変える。
 //
 // 【雲の明るさの基準を太陽照度へ変更】以前はzenithLuminance(青空の天頂輝度)に
 // 0.25〜0.83の係数を掛けていたため、雲は原理的に青空より暗くしかならず、日向の積雲でも
@@ -1046,7 +1066,7 @@ float CloudRemap(float x, float lo, float hi)
     return (x - lo) / (hi - lo);
 }
 
-// 1層ぶんの雲パラメータ(P11)。EvaluateCloudLayerはこの構造体を受け取ることで、積雲・巻雲の
+// 1層ぶんの雲パラメータ。EvaluateCloudLayerはこの構造体を受け取ることで、積雲・巻雲の
 // 式を1箇所(EvaluateCloudLayer本体)に保ったまま値だけを層ごとに変える。
 // SkyParametersの層ごとのスカラー/ベクトルからこの構造体を組み立てるのはMakeCumulusLayerParams/
 // MakeCirrusLayerParams(このすぐ下)の役目
@@ -1098,7 +1118,7 @@ CloudLayerParams MakeCumulusLayerParams(SkyParameters params)
     return layer;
 }
 
-// 巻雲(2層目、上層)のCloudLayerParamsを組み立てる(P11)。前方散乱・自己影ステップ数は
+// 巻雲(2層目、上層)のCloudLayerParamsを組み立てる。前方散乱・自己影ステップ数は
 // UIつまみを持たずシェーダ内定数(kCirrusForwardG/kCirrusShadowSteps参照)
 CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
 {
@@ -1110,7 +1130,7 @@ CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
     layer.ScrollOffset = params.CirrusScrollOffset;
     layer.ForwardG = kCirrusForwardG;
     // 【巻雲は厚みゼロのまま】巻雲は光学的に薄いシート状で、レイマーチする値が無い。
-    // 0を入れることで従来の平面の経路をそのまま通り、描画結果はP13b前と厳密に一致する
+    // 0を入れることで平面の経路を通す
     layer.Thickness = 0.0f;
     // 平面経路は縦プロファイルを持たないため読まれない。中立値を入れておく
     layer.TypeBias = 0.5f;
@@ -1137,16 +1157,16 @@ CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
 // 全体ではなくこの2つだけを個別の引数にしているのは、既存のsunDirection/zenithLuminanceと
 // 同じ「層に依らない値は個別の引数で渡す」規約に揃えるため
 // ============================================================================
-// ボリュメトリック積雲(P13b)
+// ボリュメトリック積雲
 //
 // 積雲だけを、雲底(Altitude)から雲頂(Altitude + Thickness)までのスラブとしてレイマーチする。
 // Thickness == 0 の層(巻雲)は従来どおり厚みゼロの平面として扱い、下の EvaluateCloudLayer の
-// 平面分岐をそのまま通る(＝巻雲の描画結果はP13b前と厳密に一致する)。
+// 平面分岐をそのまま通る。
 //
 // 【密度の組み立て】3つを掛け合わせる:
 //   ウェザーマップ … 既存の2次元 CloudFbm。「どこにどれだけ雲があるか」の平面分布。
-//                    P12で決めた CloudUvScale=1/1000・CloudCoverage=0.45 の意味と調整結果が
-//                    そのまま生きるよう、ここは捨てずに残してある
+//                    CloudUvScale=1/1000・CloudCoverage=0.40 の意味を保つため、
+//                    ここは3Dノイズに置き換えず残す
 //   形状(3D)       … CloudNoiseGenerate.hlsl が焼いた 128^3。塊の3次元的な形
 //   高さプロファイル … 積雲の「平らな底・丸い頭」を作る解析的な形状関数
 // さらにディテール(32^3)で縁だけを削り、房状の輪郭にする。
@@ -1967,8 +1987,8 @@ float3 CloudInScatterVolumetric(
 }
 #endif
 
-// 1サンプル(または平面1枚)の散乱光。P13bで平面とボリュームの両方から呼ぶために
-// 式を1箇所へ括り出した。中身はP13b前の EvaluateCloudLayer 末尾にあった式と同じ
+// 1サンプル(または平面1枚)の散乱光。平面とボリュームの両方から呼ぶため、
+// 式は必ずこの1箇所に置くこと
 float3 CloudInScatter(
     float sunTransmittance, float phaseNormalized, CloudLayerParams layer, float sunIlluminance,
     float zenithLuminance)
@@ -1984,7 +2004,7 @@ float3 CloudInScatter(
     return layer.Albedo * (sunLitTerm * sunIlluminance / kCloudPI + kCloudSkyAmbientTerm * zenithLuminance);
 }
 
-// 雲へ掛ける大気遠近の設定(P12)。SkyParametersの該当5フィールドをそのまま束ねたもの。
+// 雲へ掛ける大気遠近の設定。SkyParametersの該当5フィールドをそのまま束ねたもの。
 // 【なぜ5つのスカラーを個別に渡さずに束ねるか】既存の規約は「層に依らない値は個別の引数で渡す」
 // (sunDirection/zenithLuminance等)だが、それは1〜2個だから成り立つ書き方で、5つ増やすと
 // 引数列だけで順番を間違えやすくなる。CloudLayerParamsと同じく「意味のまとまりを1つの型にする」
@@ -2107,9 +2127,9 @@ void EvaluateCloudLayer(
     // (b) 透過率と散乱光。厚みを持つ層(積雲)はスラブをレイマーチし、
     // 厚みゼロの層(巻雲)は従来どおり1枚の平面として扱う。
     //
-    // 【巻雲のコードパスはP13b前と1命令も変わらない】下の #if が無効なシェーダー、および
-    // Thickness == 0 の層は else 側の平面経路だけを通る。式もP13b前とまったく同じで、
-    // 唯一の違いは散乱光の式を CloudInScatter へ括り出して両経路で共有した点
+    // 【厚みゼロの層は平面経路だけを通る】下の #if が無効なシェーダー、および
+    // Thickness == 0 の層は else 側の平面経路だけを通る。散乱光の式は CloudInScatter として
+    // 両経路で共有する
 #if KURENAI_CLOUD_VOLUME
     if (layer.Thickness > 0.0f)
     {
@@ -2317,6 +2337,125 @@ void EvaluateCloudLayer(
     // ——「霞で雲が完全に消えたら素の空色が見える」という正しい極限になる
 }
 
+// ============================================================================
+// 星空
+//
+// 視線方向を立方体の面へ射影してセル格子へ量子化し、1セルにつき星を1つ、セル内の
+// 決定的な位置へ置く。テクスチャを使わないのは背景が画面解像度で解析評価される経路
+// (DeferredLighting.hlslのSkyParams.y=1)に乗せるためで、こうすると星が拡大されず
+// 常にシャープに出る。
+//
+// 【なぜSkyColorUpperUnitではなくSkyColorへ足すのか】SkyColorUpperUnitの結果は
+// SkyIntegrate.hlslが積分して天頂輝度(=夜空の露出校正)を逆算する入力になっている
+// (このファイルのSkyColorUpperUnit手前の【重要】コメント参照)。そちらへ星を混ぜると
+// 校正値そのものが動き、星の有無で夜空全体の明るさが変わってしまう。
+// 星は「校正済みの空の色へ後から足す発光体」として扱うのが正しい
+// ============================================================================
+
+// セル座標から決定的な擬似乱数を3つ作る
+float3 StarHash3(float2 cell, float faceId)
+{
+    float3 p = float3(cell, faceId);
+    p = frac(p * float3(0.1031f, 0.1030f, 0.0973f));
+    p += dot(p, p.yzx + 33.33f);
+    return frac((p.xxy + p.yzz) * p.zyx);
+}
+
+float3 EvaluateStarfield(float3 dir, SkyParameters params)
+{
+    // 【昼と無効時はここで抜ける】判断C(雲が無いときP4完了時点と画素まで一致する)と
+    // 同じ考え方で、効かない条件では掛け算・足し算を1つも増やさない
+    if (params.StarsIntensity <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    // 地平線際は大気の消散が効いて実際に星が見えなくなるので落とす。
+    // ここで落としておくと、水平線より下へのフェード(SkyColorの後半)との境目も自然につながる
+    const float horizonFade = saturate(dir.y * 6.0f);
+    if (horizonFade <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    // 天球を立方体の6面へ射影する。球面座標(緯度経度)で切ると極で密度が跳ね上がるが、
+    // 立方体面なら面内の歪みが高々√3倍に収まり、密度がおおむね一様になる
+    const float3 a = abs(dir);
+    float2 uv;
+    float faceId;
+    if (a.x >= a.y && a.x >= a.z)      { uv = dir.zy / a.x; faceId = dir.x > 0.0f ? 0.0f : 1.0f; }
+    else if (a.y >= a.z)               { uv = dir.xz / a.y; faceId = dir.y > 0.0f ? 2.0f : 3.0f; }
+    else                               { uv = dir.xy / a.z; faceId = dir.z > 0.0f ? 4.0f : 5.0f; }
+
+    const float density = max(params.StarsDensity, 1.0f);
+    const float2 scaledUv = uv * density;
+    const float2 baseCell = floor(scaledUv);
+
+    // 面のUVは[-1,1]で90度を張るので、1UVあたりおよそ0.785rad。
+    // 星の見かけの半径が1画素を下回るとカメラを回したときにちらつくため、下限を設ける
+    const float uvPerRadian = density / 0.7854f;
+    const float minRadius = max(params.StarsPixelAngle * uvPerRadian * 1.2f, 0.03f);
+
+    float3 result = float3(0.0f, 0.0f, 0.0f);
+
+    // 隣接セルも見る。セル境界に近い星が片側からしか描かれないと、
+    // 格子状の切れ目が空に浮き出てしまう
+    for (int oy = -1; oy <= 1; ++oy)
+    {
+        for (int ox = -1; ox <= 1; ++ox)
+        {
+            const float2 cell = baseCell + float2(ox, oy);
+            const float3 h = StarHash3(cell, faceId);
+
+            // 【全セルに星を置かない】等級分布を作る前に間引く。1セル1個をそのまま全部
+            // 描くと空が均一な砂目になり、星座のような粗密が出ない
+            if (h.z > 0.55f)
+            {
+                continue;
+            }
+
+            // セル内の位置。端に寄りすぎると隣のセルの星と重なるので中央寄りへ詰める
+            const float2 starPos = cell + 0.5f + (h.xy - 0.5f) * 0.7f;
+            const float2 delta = scaledUv - starPos;
+            const float dist = length(delta);
+
+            // 等級分布。h.zを6乗して「暗い星が大多数、明るい星はごくわずか」にする。
+            // 実際の星の等級分布も明るい星ほど指数的に少ない
+            const float brightRandom = h.z / 0.55f;
+            const float magnitude = pow(1.0f - brightRandom, 4.0f);
+
+            // 明るい星ほど大きく見える(実際は目とレンズの滲みによる見かけの効果)
+            const float radius = minRadius * (1.0f + magnitude * 1.5f);
+            if (dist >= radius)
+            {
+                continue;
+            }
+
+            float falloff = saturate(1.0f - dist / radius);
+            falloff = falloff * falloff;
+
+            // 色温度。青白い星から橙色の星まで。h.xを使い回すと位置と色が相関するので
+            // 別の成分(h.y)から作る
+            const float3 warm = float3(1.00f, 0.80f, 0.62f);
+            const float3 cool = float3(0.72f, 0.82f, 1.00f);
+            float3 starColor = lerp(warm, cool, h.y);
+
+            // またたき。既定は0で、その場合この行は結果を変えない
+            if (params.StarsTwinkle > 0.0f)
+            {
+                const float phase = (h.x + h.y) * 6.2831853f;
+                const float flicker = 0.5f + 0.5f * sin(params.StarsTime * 3.0f + phase);
+                starColor *= lerp(1.0f, flicker, params.StarsTwinkle);
+            }
+
+            result += starColor * (falloff * magnitude);
+        }
+    }
+
+    // 天頂輝度を基準にすることで、夜空の明るさが変わっても星との相対関係が保たれる
+    return result * params.StarsIntensity * params.ZenithLuminance * horizonFade;
+}
+
 // 雲の無い素の空の色。地平線より上はSkyColorUpper、下はプラトー色から接地色へのフェード。
 // 【P17でSkyColorから括り出した】雲の合成を「地平線より上のif」の中から外へ出すため
 // (見下ろす視線にも雲が掛かるようにする)、基色を決める部分を独立させた。中身も呼び出し順も
@@ -2351,7 +2490,16 @@ float3 SkyClearColor(float3 dir, SkyParameters params)
 // まとめてある)
 float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParameters params)
 {
-    const float3 clearColor = SkyClearColor(dir, params);
+    float3 clearColor = SkyClearColor(dir, params);
+
+    // 星は雲より奥にあるので、雲で減光される前のここで足す。
+    // StarsIntensity=0(昼・無効)のときEvaluateStarfieldは即座に0を返し、
+    // この加算自体も分岐で飛ばすので、星を持たない場合と画素まで一致する。
+    // 水平線より下はEvaluateStarfield側のhorizonFadeが0になるため、ここで別扱いしなくてよい
+    if (params.StarsIntensity > 0.0f)
+    {
+        clearColor += EvaluateStarfield(dir, params);
+    }
 
     // (h) 早期脱出。積雲・巻雲どちらの被覆率も0なら雲の計算を一切行わずclearColorをそのまま返す。
     // 判断C(被覆率0のときP4完了時点=雲を追加する前と画素まで一致すること)の担保の1つめはここ

@@ -26,7 +26,7 @@ namespace Kurenai::UI
         // 無い状態ではHasNodeがfalseになり、既定レイアウトが1回だけ組み直される。
         // 進めないと、新しく増えたパネルだけが宙に浮いた状態でユーザーに見えてしまう。
         // (逆に、単に表示名を変えただけならウィンドウIDは"###"以降で決まるため進める必要はない)
-        constexpr unsigned int kDockSpaceId = 0x4B554E43u; // 'KUNC' (世代C: 反射プローブを加えた8パネル構成)
+        constexpr unsigned int kDockSpaceId = 0x4B554E45u; // 'KUNE' (世代E: ドローンショーのパネルを外した8パネル構成)
     }
 
     UIManager::UIManager(KurenaiEngine3D& engine)
