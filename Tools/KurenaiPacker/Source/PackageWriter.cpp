@@ -8,6 +8,7 @@
 #include "RHI/TextureImage.h"
 #include "Assets/ModelPackage.h"
 #include "Core/StringUtil.h"
+#include "MeshletBuilder.h"
 
 #include <algorithm>
 #include <atomic>
@@ -568,34 +569,54 @@ namespace KurenaiPacker
             }
         }
 
-        // === 4. .kgeomを書き出す(メッシュ順に頂点/インデックスブロックを16バイト境界で連結) ===
+        // === 4. .kgeomを書き出す ===
+        //
+        // メッシュ順に、メッシュごとの
+        // [頂点][インデックス][メッシュレット][メッシュレット頂点][メッシュレット三角形]
+        // を16バイト境界で連結する。
+        //
+        // メッシュレット化は頂点の並びとインデックスの並びの両方を変えるため、
+        // 書き出すのは入力のmesh.Vertices/mesh.Indicesではなくこの結果のほう
         std::vector<uint8_t> geometryPayload;
         std::vector<MeshEntry> meshEntries(sourceModel.Meshes.size());
+
+        // 任意の型の配列を1ブロックとして追記し、書き込み開始位置を返す。
+        // ブロックの直後は必ず16バイト境界まで0で埋める(kGeometryBlockAlignment)
+        const auto appendBlock = [&geometryPayload](const void* data, size_t byteCount) -> uint64_t {
+            const uint64_t offset = geometryPayload.size();
+            geometryPayload.resize(geometryPayload.size() + byteCount);
+            if (byteCount > 0)
+            {
+                std::memcpy(geometryPayload.data() + offset, data, byteCount);
+            }
+            geometryPayload.resize(AlignUp(geometryPayload.size(), kGeometryBlockAlignment), 0);
+            return offset;
+        };
+
         for (size_t i = 0; i < sourceModel.Meshes.size(); ++i)
         {
             const SourceMesh& mesh = sourceModel.Meshes[i];
             MeshEntry& entry = meshEntries[i];
 
-            entry.VertexOffset = geometryPayload.size();
-            const size_t vertexBytes = mesh.Vertices.size() * sizeof(Vertex);
-            geometryPayload.resize(geometryPayload.size() + vertexBytes);
-            if (vertexBytes > 0)
-            {
-                std::memcpy(geometryPayload.data() + entry.VertexOffset, mesh.Vertices.data(), vertexBytes);
-            }
-            geometryPayload.resize(AlignUp(geometryPayload.size(), kGeometryBlockAlignment), 0);
+            const MeshletBuildResult meshlets = BuildMeshlets(mesh.Vertices, mesh.Indices, options.EnableMeshlets);
 
-            entry.IndexOffset = geometryPayload.size();
-            const size_t indexBytes = mesh.Indices.size() * sizeof(uint32_t);
-            geometryPayload.resize(geometryPayload.size() + indexBytes);
-            if (indexBytes > 0)
-            {
-                std::memcpy(geometryPayload.data() + entry.IndexOffset, mesh.Indices.data(), indexBytes);
-            }
-            geometryPayload.resize(AlignUp(geometryPayload.size(), kGeometryBlockAlignment), 0);
+            entry.VertexOffset = appendBlock(meshlets.Vertices.data(), meshlets.Vertices.size() * sizeof(Vertex));
+            entry.IndexOffset = appendBlock(meshlets.Indices.data(), meshlets.Indices.size() * sizeof(uint32_t));
+            entry.MeshletOffset =
+                appendBlock(meshlets.Meshlets.data(), meshlets.Meshlets.size() * sizeof(Kurenai::Assets::MeshletEntry));
+            entry.MeshletVertexOffset =
+                appendBlock(meshlets.MeshletVertices.data(), meshlets.MeshletVertices.size() * sizeof(uint32_t));
+            entry.MeshletTriangleOffset =
+                appendBlock(meshlets.MeshletTriangles.data(), meshlets.MeshletTriangles.size() * sizeof(uint32_t));
 
-            entry.VertexCount = static_cast<uint32_t>(mesh.Vertices.size());
-            entry.IndexCount = static_cast<uint32_t>(mesh.Indices.size());
+            entry.MeshletCount = static_cast<uint32_t>(meshlets.Meshlets.size());
+            entry.MeshletVertexCount = static_cast<uint32_t>(meshlets.MeshletVertices.size());
+            entry.MeshletTriangleCount = static_cast<uint32_t>(meshlets.MeshletTriangles.size());
+            entry.Reserved3 = 0u;
+            result.MeshletCount += meshlets.Meshlets.size();
+
+            entry.VertexCount = static_cast<uint32_t>(meshlets.Vertices.size());
+            entry.IndexCount = static_cast<uint32_t>(meshlets.Indices.size());
             entry.MetallicFactor = mesh.MetallicFactor;
             entry.RoughnessFactor = mesh.RoughnessFactor;
             entry.AlphaCutoff = mesh.AlphaCutoff;
@@ -631,8 +652,10 @@ namespace KurenaiPacker
             entry.BentNormalTextureIndex = bentNormalIndexByMesh[i];
             entry.Reserved2 = 0u;
 
-            result.VertexCount += mesh.Vertices.size();
-            result.IndexCount += mesh.Indices.size();
+            // 入力ではなく書き出した側を数える。頂点キャッシュ最適化で
+            // どの三角形からも参照されない頂点が落ちるため、入力より少なくなることがある
+            result.VertexCount += meshlets.Vertices.size();
+            result.IndexCount += meshlets.Indices.size();
         }
 
         const fs::path kgeomPath = fs::path(kmodelPath).replace_extension(L".kgeom");

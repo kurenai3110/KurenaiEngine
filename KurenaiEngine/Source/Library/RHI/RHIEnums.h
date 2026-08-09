@@ -7,6 +7,18 @@ namespace Kurenai::RHI
         Vertex,
         Pixel,
         Compute,
+        // メッシュシェーダーパイプライン(DX12かつメッシュシェーダー Tier 1 以上、SM 6.5)。
+        // 入力アセンブラを持たず、頂点/インデックスはシェーダー自身がバッファから読む。
+        //
+        // Amplification(増幅シェーダー)はメッシュシェーダーの前段で、メッシュレット単位の
+        // カリング(錐台・法線コーン)を行って生き残ったメッシュレットだけをDispatchMeshで
+        // 起動する。Meshはメッシュレット1つ分の頂点/三角形をラスタライザへ出力する。
+        //
+        // DX11にはこのパイプラインが存在しないため、DX11バックエンドはこの2つのステージで
+        // シェーダーを作成しようとするとログを出してnullptrを返す
+        // (呼び出し側はIRHIDevice::SupportsMeshShader()で事前に確認すること)
+        Amplification,
+        Mesh,
     };
 
     enum class BufferUsage

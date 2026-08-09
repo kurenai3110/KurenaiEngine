@@ -16,13 +16,21 @@ namespace Kurenai::RHI
         uint32_t sizeInBytes,
         uint32_t strideInBytes,
         BufferUsage usage,
-        uint32_t ringCapacity)
+        uint32_t ringCapacity,
+        DX12DescriptorHeap* srvUavHeap,
+        uint32_t srvIndex)
         : m_Device(device)
+        , m_SrvUavHeap(srvUavHeap)
         , m_Resource(std::move(resource))
         , m_MappedPtr(mappedPtr)
         , m_SlotSizeInBytes(sizeInBytes)
         , m_RingCapacity(ringCapacity)
         , m_Usage(usage)
+        // 頂点バッファはDEFAULTヒープへ作られ、初期データのアップロード後
+        // VERTEX_AND_CONSTANT_BUFFER状態で置かれる(DX12Device::CreateBuffer)。
+        // ShaderReadableでSRVも張る場合はメッシュシェーダーが非ピクセルシェーダーリソースとして
+        // 読むが、この2状態は共存できるためTransitionToを呼ぶ必要はない
+        , m_SrvIndex(srvIndex)
     {
         const D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = m_Resource->GetGPUVirtualAddress();
 
@@ -137,6 +145,16 @@ namespace Kurenai::RHI
 
     DX12Buffer::~DX12Buffer()
     {
+        // bindless区画への登録があれば返却する。UnregisterはkInvalidBindlessIndexを
+        // 渡された場合に何もしないため、登録の有無で分岐する必要はない
+        if (m_Device)
+        {
+            if (DX12BindlessTable* table = m_Device->GetBindlessTable())
+            {
+                table->Unregister(m_BindlessIndex);
+            }
+        }
+
         if (m_UavIndex != kInvalid)
         {
             m_SrvUavHeap->Free(m_UavIndex);
@@ -200,6 +218,16 @@ namespace Kurenai::RHI
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Buffer::GetSrvCpuHandle() const
     {
+        // SRVを持たないUsage(Vertex/Index/Constant、およびShaderReadableを指定しなかった頂点バッファ)は
+        // m_SrvUavHeapがnullptrのまま、m_SrvIndexもkInvalidになる。そのまま計算すると
+        // nullptr参照、あるいは「ヒープ先頭 + 0xFFFFFFFF × ディスクリプタサイズ」という
+        // でたらめなハンドルになり、D3D12へ渡した時点でデバイス削除に至る
+        // (DX12Texture::HasSrvがガードしているのと同じ問題)。
+        // 呼び出し側が無効を判定できるよう、ここではポインタ0を返す
+        if (!m_SrvUavHeap || m_SrvIndex == kInvalid)
+        {
+            return D3D12_CPU_DESCRIPTOR_HANDLE{ 0 };
+        }
         return m_SrvUavHeap->GetCpuHandle(m_SrvIndex);
     }
 

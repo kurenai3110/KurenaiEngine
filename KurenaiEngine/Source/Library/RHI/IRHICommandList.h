@@ -96,6 +96,18 @@ namespace Kurenai::RHI
         virtual void Draw(uint32_t vertexCount, uint32_t startVertexLocation) = 0;
         virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) = 0;
 
+        // メッシュシェーダーパイプライン(CreateMeshPipelineStateで作ったステートをSetPipelineStateで
+        // 設定した状態)での描画。増幅シェーダーがある場合はそちらが、無い場合はメッシュシェーダーが
+        // 直接この数だけスレッドグループとして起動される。
+        //
+        // SetVertexBuffer/SetIndexBufferは呼ばない(呼んでも無視される)。ジオメトリは
+        // シェーダー自身がbindless経由でバッファから読む。定数バッファ・テクスチャ・
+        // サンプラーのバインドは通常の描画とまったく同じAPI・同じ寿命で使える。
+        //
+        // DX11およびメッシュシェーダー非対応のDX12環境では、ログを出して何もしない
+        // (呼び出し側はIRHIDevice::SupportsMeshShader()で事前に確認すること)
+        virtual void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) = 0;
+
         // コンピュートシェーダーの発行。グラフィックス用のSetPipelineState/SetConstantBuffer/SetTextureとは
         // レジスタ空間(DX12ではルートシグネチャ)が独立しているため専用のAPIを用意する
         virtual void SetComputePipelineState(IRHIPipelineState* pipelineState) = 0;

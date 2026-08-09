@@ -25,6 +25,10 @@ namespace Kurenai::UI
         {
             DrawAOSection();
         }
+        if (ImGui::CollapsingHeader("メッシュレット###Meshlet"))
+        {
+            DrawMeshletSection();
+        }
         if (ImGui::CollapsingHeader("シャドウ###Shadow"))
         {
             DrawShadowSection();
@@ -140,6 +144,74 @@ namespace Kurenai::UI
         ImGui::Text(
             "タイル: %u x %u (1タイルあたり最大%uライト)", m_Engine.m_LightTileCountX, m_Engine.m_LightTileCountY,
             KurenaiEngine3D::kLightTileCapacity);
+    }
+
+    void RenderingPanel::DrawMeshletSection()
+    {
+        ImGui::TextWrapped(
+            "メッシュを頂点64個・三角形124個までの塊(メッシュレット)に分け、"
+            "増幅シェーダーが塊ごとに錐台カリングと法線コーンによる背面カリングを行ってから、"
+            "生き残った塊だけをメッシュシェーダーがラスタライザへ流す。"
+            "従来の描画はDrawIndexed 1回=メッシュ全体が単位で、画面外の三角形も"
+            "すべてラスタライザまで到達していた。"
+            "タイルドライトカリングと同じく純粋な最適化であり、"
+            "有効/無効で最終画像が変わってはならない");
+
+        if (!m_Engine.m_MeshShaderAvailable)
+        {
+            // 非対応環境(DX11、メッシュシェーダーTier 1未満、bindless非対応)。
+            // 影・反射の手法選択と同じく、選べないものは操作させずに理由だけ示す
+            ImGui::TextWrapped(
+                "この環境ではメッシュシェーダーを使えないため、常に従来の頂点シェーダーで描画する。"
+                "DX12かつメッシュシェーダー Tier 1・シェーダーモデル6.6に対応したGPUが必要");
+            return;
+        }
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "メッシュレット描画を有効にする###EnableMeshlet", &m_Engine.m_MeshletRenderingEnabled, true,
+            "無効にすると従来の頂点シェーダー + DrawIndexedで描く。"
+            "切り替えても見た目は一致するはずで、変わる場合はメッシュシェーダー側の変換が"
+            "頂点シェーダーとずれている");
+
+        CheckboxEx(
+            "メッシュレットを色分けして表示###MeshletDebugView", &m_Engine.m_MeshletDebugViewEnabled, false,
+            "塊ごとに違う色でアルベドを塗る。分割のされ方を目で確かめるためのもので、"
+            "法線・深度・モーションベクターは通常どおり書くため他のパスは破綻しない。"
+            "灰色に見える面はメッシュレットを経由していない(メッシュレットが焼かれていない"
+            "モデル、または水面)。上の「メッシュレット描画」が有効なときだけ効く。"
+            "反射をレイトレーシングにしていると、反射に映る面も同じ色分けになる。"
+            "同じ塊が同じ色で映れば、描画とレイトレーシングが同一のジオメトリを"
+            "見ていることの確認になる");
+
+        EndParamGroup();
+
+        // .kmodelが--no-meshletsで焼かれていると、対応環境でも0のままになる。
+        // 「有効にしたのに何も変わらない」ときの切り分けに要るので数を出しておく
+        size_t meshletCount = 0;
+        size_t meshletMeshCount = 0;
+        size_t meshCount = 0;
+        for (const auto& instance : m_Engine.m_Scene.Instances)
+        {
+            for (const auto& mesh : instance.Model.Meshes)
+            {
+                ++meshCount;
+                meshletCount += mesh.MeshletCount;
+                if (mesh.MeshletCount > 0)
+                {
+                    ++meshletMeshCount;
+                }
+            }
+        }
+        ImGui::Text(
+            "メッシュレット: %zu (メッシュ %zu / %zu が保持)", meshletCount, meshletMeshCount, meshCount);
+        if (meshCount > 0 && meshletMeshCount == 0)
+        {
+            ImGui::TextWrapped(
+                "このシーンのモデルはメッシュレットを持っていない。KurenaiPackerで"
+                "--no-meshletsを付けずに再パックすること");
+        }
     }
 
     void RenderingPanel::DrawAOSection()

@@ -14,6 +14,16 @@ namespace Kurenai::RHI
         uint32_t SizeInBytes = 0;
         uint32_t StrideInBytes = 0;
         const void* InitialData = nullptr;
+        // このバッファを、本来の用途に加えてStructuredBuffer<T>としてもシェーダーから
+        // 読めるようにするか(SRVを追加で作る)。BufferUsage::Vertexにのみ意味がある。
+        //
+        // メッシュシェーダーには入力アセンブラが無く、頂点は自分でバッファから読むしかない。
+        // かといって頂点バッファとは別に同じ内容の構造化バッファを作るとVRAMを二重に食うため、
+        // 同一リソースへ頂点バッファビューとSRVの両方を張れるようにする。
+        // StrideInBytesがそのままStructuredBufferの要素サイズになる。
+        //
+        // DX11実装は参照しない(メッシュシェーダーが存在せず、用途が無いため)
+        bool ShaderReadable = false;
     };
 
     struct ShaderDesc
@@ -132,6 +142,29 @@ namespace Kurenai::RHI
     struct ComputePipelineStateDesc
     {
         IRHIShader* ComputeShader = nullptr;
+    };
+
+    // 増幅シェーダー(任意)+ メッシュシェーダー + ピクセルシェーダーによる描画のパイプラインステート。
+    //
+    // PipelineStateDescとの違いはInputLayout / VertexShaderを持たないことだけで、
+    // ラスタライザ・深度・ブレンド・レンダーターゲットフォーマットの扱いはすべて同じ。
+    // 同じG-Bufferへ書くパスを頂点シェーダー版とメッシュシェーダー版で切り替えられるよう、
+    // 対応するフィールドは名前も既定値もPipelineStateDescと揃えてある
+    struct MeshPipelineStateDesc
+    {
+        // nullptrでもよい(その場合カリングを行わず、DispatchMeshで指定した数だけ
+        // メッシュシェーダーが直接起動される)
+        IRHIShader* AmplificationShader = nullptr;
+        IRHIShader* MeshShader = nullptr;
+        IRHIShader* PixelShader = nullptr;
+
+        std::vector<Format> RenderTargetFormats;
+        bool HasDepthStencil = false;
+        bool DepthTargetAttached = false;
+        bool DepthWriteEnabled = true;
+        bool ReverseZ = false;
+        BlendMode BlendMode = BlendMode::Opaque;
+        bool FrontCounterClockwise = false;
     };
 
     // サンプラーの記述子。既定値は異方性16x + Wrapで、これまでの固定MIN_MAG_MIP_LINEARより

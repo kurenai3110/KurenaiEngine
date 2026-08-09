@@ -253,6 +253,17 @@ namespace Kurenai::RHI
         m_Context->DrawIndexed(indexCount, startIndexLocation, baseVertexLocation);
     }
 
+    void DX11CommandList::DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+    {
+        (void)threadGroupCountX;
+        (void)threadGroupCountY;
+        (void)threadGroupCountZ;
+        // 上位層はIRHIDevice::SupportsMeshShader()を見て従来の頂点シェーダー描画へ
+        // 分岐する設計のため、ここへ来るのは分岐漏れ
+        Core::Logger::Error(
+            "DX11", "DispatchMesh: DX11はメッシュシェーダーに対応していません。SupportsMeshShader()で分岐してください");
+    }
+
     void DX11CommandList::SetComputePipelineState(IRHIPipelineState* pipelineState)
     {
         auto* dx11ComputePipelineState = static_cast<DX11ComputePipelineState*>(pipelineState);

@@ -8,6 +8,7 @@
 #include <mutex>
 #include <wrl/client.h>
 
+#include "DX12BindlessTable.h"
 #include "DX12DescriptorHeap.h"
 #include "DX12ShaderCompiler.h"
 #include "RHI/IRHIDevice.h"
@@ -40,6 +41,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHIShader> CreateShader(const ShaderDesc& desc) override;
         std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
         std::unique_ptr<IRHIPipelineState> CreateComputePipelineState(const ComputePipelineStateDesc& desc) override;
+        std::unique_ptr<IRHIPipelineState> CreateMeshPipelineState(const MeshPipelineStateDesc& desc) override;
         std::unique_ptr<IRHITexture> CreateTextureFromFile(const std::wstring& filePath, bool sRGB) override;
         std::unique_ptr<IRHITexture> CreateTextureFromImage(const TextureImage& image) override;
         std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
@@ -135,6 +137,16 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHIAccelerationStructure> CreateBottomLevelAS(const BottomLevelASDesc& desc) override;
         std::unique_ptr<IRHIAccelerationStructure> CreateTopLevelAS(const TopLevelASDesc& desc) override;
 
+        bool SupportsBindless() const override { return m_SupportsBindless; }
+        uint32_t RegisterBindless(IRHITexture* texture) override;
+        uint32_t RegisterBindless(IRHIBuffer* buffer) override;
+        bool SupportsMeshShader() const override { return m_SupportsMeshShader; }
+
+        // DX12Texture/DX12Bufferがデストラクタでbindless番号を返却するのに使う。
+        // bindless非対応の場合はnullptrを返す
+        DX12BindlessTable* GetBindlessTable() const { return m_BindlessTable.get(); }
+        ID3D12RootSignature* GetMeshRootSignature() const { return m_MeshRootSignature.Get(); }
+
     private:
         // CreateBottomLevelAS/CreateTopLevelASの共通部分。組み立て済みの構築入力を受け取り、
         // 必要なサイズを問い合わせてASバッファとスクラッチバッファを確保し、
@@ -149,9 +161,22 @@ namespace Kurenai::RHI
         // デバイスが対応する最上位のシェーダーモデルを実測してm_HighestShaderModelへ記録し、
         // dxc(DX12ShaderCompiler)の初期化まで行う。CreateShaderより前に呼ぶ必要がある
         void DetectShaderModelAndInitCompiler();
+        // bindless(ResourceDescriptorHeap)が使えるかを判定してm_SupportsBindlessへ記録する。
+        // シェーダーモデル判定の後、かつルートシグネチャ作成より前に呼ぶこと
+        // (CreateRootSignatureがこの結果でフラグを変えるため)
+        void DetectBindlessSupport();
+        // メッシュシェーダーが使えるかを判定してm_SupportsMeshShaderへ記録する。
+        // このエンジンのメッシュシェーダーはジオメトリをbindlessで読むため、
+        // DetectBindlessSupportより後に呼ぶこと
+        void DetectMeshShaderSupport();
 
         void CreateRootSignature();
         void CreateComputeRootSignature();
+        // メッシュシェーダーパイプライン専用のルートシグネチャ。非対応環境では何もしない
+        void CreateMeshRootSignature();
+        // 3つのルートシグネチャが共通で足すbindless関連のフラグ。対応環境でのみ
+        // CBV_SRV_UAV_HEAP_DIRECTLY_INDEXEDを返す
+        D3D12_ROOT_SIGNATURE_FLAGS GetBindlessRootSignatureFlags() const;
         // CreateMippedUAVTextureCube(単一キューブ、SRVはTextureCube)と
         // CreateMippedUAVTextureCubeArray(配列、SRVはTextureCubeArray)の共通実装。
         // 両者はSRVの次元とキューブ枚数以外まったく同じ手順のため1箇所にまとめている
@@ -178,6 +203,10 @@ namespace Kurenai::RHI
         // GetRaytracingAccelerationStructurePrebuildInfoを呼ぶのに必要で、
         // 取得に失敗する(＝OS/ドライバがDXR世代でない)場合はm_SupportsRaytracingもfalseになる
         Microsoft::WRL::ComPtr<ID3D12Device5> m_Device5;
+        // メッシュシェーダーPSOの作成に使うインタフェース(パイプラインステートストリームを
+        // 受け取るCreatePipelineStateはID3D12Device2で追加された)。
+        // 取得に失敗する、またはメッシュシェーダー非対応の場合はnullptrのまま
+        Microsoft::WRL::ComPtr<ID3D12Device2> m_Device2;
         // AS構築コマンド(BuildRaytracingAccelerationStructure)を積むためのインタフェース。
         // m_UploadCommandList(リソースアップロード専用)からQueryInterfaceで取得する。
         // 毎フレーム用のm_CommandListではなくこちらを使うのは、AS構築がLoadScene(Renderスレッド外)から
@@ -190,6 +219,11 @@ namespace Kurenai::RHI
         // 加えてRayQueryを含むシェーダーはSM 6.5でしかコンパイルできないため、
         // dxcが使えない/シェーダーモデルが6.5未満の環境でもfalseにする
         bool m_SupportsRaytracing = false;
+        // HLSLのResourceDescriptorHeap(SM 6.6)が使えるか。シェーダーモデル・dxcのバージョン・
+        // リソースバインディングTier 3のすべてを満たしたときだけtrue(DetectBindlessSupport)
+        bool m_SupportsBindless = false;
+        // 増幅シェーダー/メッシュシェーダーによる描画が使えるか(DetectMeshShaderSupport)
+        bool m_SupportsMeshShader = false;
         // D3D12_FEATURE_SHADER_MODELで実測した、このデバイスが対応する最上位のシェーダーモデル。
         // 取得できなかった場合はD3D_SHADER_MODEL_5_1相当として扱う(0のまま)
         D3D_SHADER_MODEL m_HighestShaderModel = static_cast<D3D_SHADER_MODEL>(0);
@@ -230,6 +264,8 @@ namespace Kurenai::RHI
         std::mutex m_UploadMutex;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> m_RootSignature;
         Microsoft::WRL::ComPtr<ID3D12RootSignature> m_ComputeRootSignature;
+        // メッシュシェーダーパイプライン用。非対応環境ではnullptrのまま(CreateMeshRootSignature)
+        Microsoft::WRL::ComPtr<ID3D12RootSignature> m_MeshRootSignature;
 
         std::unique_ptr<DX12DescriptorHeap> m_RtvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_DsvHeap;
@@ -239,6 +275,10 @@ namespace Kurenai::RHI
         std::unique_ptr<DX12DescriptorHeap> m_RenderSrvCpuHeap;
         std::unique_ptr<DX12DescriptorHeap> m_ShaderVisibleSrvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_ShaderVisibleSamplerHeap;
+        // m_ShaderVisibleSrvHeapの末尾に切り出したbindless区画の管理。
+        // bindless非対応の環境でも「区画は確保するが誰も登録しない」状態で作られる
+        // (RegisterBindlessがm_SupportsBindlessを見て早期に弾くため無駄は生じない)
+        std::unique_ptr<DX12BindlessTable> m_BindlessTable;
         uint32_t m_FallbackSamplerSetBase = 0;
         // 未バインドスロット埋め用のnullディスクリプタ(m_RenderSrvCpuHeap上に1個ずつ確保する)。
         // デバイスと寿命を共にするため解放は行わない

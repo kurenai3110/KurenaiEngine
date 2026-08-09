@@ -622,7 +622,14 @@ IRHICommandList*                GetImmediateCommandList();
 
 bool SupportsRaytracing() const;
 std::unique_ptr&lt;IRHIAccelerationStructure&gt; CreateBottomLevelAS(const BottomLevelASDesc&amp; desc);
-std::unique_ptr&lt;IRHIAccelerationStructure&gt; CreateTopLevelAS(const TopLevelASDesc&amp; desc);</code></pre>
+std::unique_ptr&lt;IRHIAccelerationStructure&gt; CreateTopLevelAS(const TopLevelASDesc&amp; desc);
+
+bool     SupportsBindless() const;
+uint32_t RegisterBindless(IRHITexture* texture);
+uint32_t RegisterBindless(IRHIBuffer* buffer);
+
+bool SupportsMeshShader() const;
+std::unique_ptr&lt;IRHIPipelineState&gt; CreateMeshPipelineState(const MeshPipelineStateDesc&amp; desc);</code></pre>
 <p>
 <code>CreateTextureFromFile</code> は拡張子(<code>.dds</code>/<code>.tga</code>/その他はWIC経由で
 png・jpg・bmp等)から自動判別する。<code>sRGB=true</code> はベースカラー等「見た目の色」を持つ
@@ -756,6 +763,70 @@ HLSLの言語バージョンは<code>-HV 2018</code>で固定しているため�
 (日本語コメントを含む場合、BOMもUTF-16も使わない)。
 </p>
 
+<h4>4.2.2 bindless(<code>ResourceDescriptorHeap</code>)</h4>
+<p>
+bindlessは<b>DX12かつシェーダーモデル6.6対応のアダプタでのみ</b>使える。
+使う前に必ず<code>SupportsBindless()</code>で分岐すること。DX11は常に<code>false</code>を返す。
+</p>
+<p>
+<code>RegisterBindless</code>はテクスチャ/バッファのSRVを恒久的なディスクリプタ区画へ登録し、
+シェーダーが<code>ResourceDescriptorHeap[i]</code>で引くための番号を返す。非対応環境・
+登録失敗時は<code>RHI::kInvalidBindlessIndex</code>(<code>0xFFFFFFFF</code>)を返す(例外は投げない)。
+番号は<code>IRHITexture::GetBindlessIndex()</code> / <code>IRHIBuffer::GetBindlessIndex()</code>でも
+取り出せ、リソースが破棄されるときに自動で返却される。
+</p>
+<pre><code>const uint32_t index = device-&gt;RegisterBindless(texture.get());
+if (index != RHI::kInvalidBindlessIndex)
+{
+    // この番号を定数バッファ等でシェーダーへ渡す。
+    // HLSL側は Shaders/3D/Bindless.hlsli の BindlessSampleLevel などで引く
+}</code></pre>
+<p>
+同じリソースを何度登録しても同じ番号が返るため、共有テクスチャで区画を無駄に消費することはない。
+登録するのは「シェーダーから動的な番号で選びたいもの」だけにすること &mdash;&mdash;
+区画の容量は有限で、固定スロット経由でしか読まないレンダーターゲット等まで登録すると食い潰す。
+</p>
+<p>
+バッファを登録するにはSRVが要る。頂点バッファに<code>StructuredBuffer&lt;T&gt;</code>としての
+SRVも張るには、<code>BufferDesc::ShaderReadable = true</code>を指定する
+(<code>StrideInBytes</code>がそのまま要素サイズになる)。同一リソースに頂点バッファビューと
+SRVを重ねて張るだけなので、メモリが二重に消費されることはない。
+</p>
+
+<h4>4.2.3 メッシュシェーダー</h4>
+<p>
+増幅シェーダー/メッシュシェーダーによる描画は<b>DX12かつメッシュシェーダー Tier 1対応、
+さらにbindlessが使えるアダプタでのみ</b>使える(このエンジンのメッシュシェーダーは
+ジオメトリをbindlessで読む設計のため)。使う前に必ず<code>SupportsMeshShader()</code>で分岐すること。
+</p>
+<p>
+<code>ShaderStage::Amplification</code> / <code>ShaderStage::Mesh</code>で
+シェーダーを作り、<code>MeshPipelineStateDesc</code>(<code>PipelineStateDesc</code>から
+入力レイアウトと頂点シェーダーを除いたもの)でパイプラインステートを作る。
+描画は<code>SetVertexBuffer</code>/<code>SetIndexBuffer</code>/<code>DrawIndexed</code>ではなく
+<code>IRHICommandList::DispatchMesh</code>で行う。定数バッファ・テクスチャ・サンプラーの
+バインドは通常の描画とまったく同じAPI・同じ寿命で使える。
+</p>
+<pre><code>if (device-&gt;SupportsMeshShader())
+{
+    RHI::MeshPipelineStateDesc desc;
+    desc.AmplificationShader = amplificationShader.get(); // nullptrでもよい
+    desc.MeshShader          = meshShader.get();
+    desc.PixelShader         = pixelShader.get();
+    desc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+    desc.HasDepthStencil     = true;
+    auto pso = device-&gt;CreateMeshPipelineState(desc);
+
+    cmd-&gt;SetPipelineState(pso.get());
+    cmd-&gt;SetConstantBuffer(1, objectConstants.get());
+    cmd-&gt;DispatchMesh(groupCount, 1, 1);
+}</code></pre>
+<p>
+非対応環境では<code>CreateMeshPipelineState</code>が<code>nullptr</code>を、
+<code>CreateShader</code>もメッシュ系ステージでは<code>nullptr</code>を返し、
+<code>DispatchMesh</code>はログを残して何もしない。
+</p>
+
 <h3>4.3 <code>RHI::IRHICommandList</code></h3>
 <pre><code>void SetRenderTarget(IRHISwapChain* swapChain);
 void SetRenderTargets(IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture,
@@ -773,6 +844,8 @@ void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer); // BufferUsage:
 void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes);
 void Draw(uint32_t vertexCount, uint32_t startVertexLocation);
 void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation);
+// メッシュシェーダーパイプライン用(4.2.3参照)。頂点/インデックスバッファは張らない
+void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ);
 
 // コンピュートシェーダー(4.3.1参照)。SetPipelineState等のグラフィックス用APIとは
 // レジスタ空間が独立している
@@ -1514,6 +1587,7 @@ assimp・DirectXTexに加え<code>KurenaiEngineLibrary.vcxproj</code>への依�
 <tr><td>TAAと半透明</td><td>半透明メッシュはモーションベクター(速度バッファ)を書かないため、TAAは半透明面をその背後にあるもの(不透明メッシュ、無ければ空)の速度で再投影する。カメラを大きく並進させるとガラス面などに残像が出ることがある</td></tr>
 <tr><td>TAAと細い構造物</td><td>アンテナ・手すり・樹木の葉のように1画素より細いものは、ジッターのたびにその画素を覆ったり覆わなかったりするため、静止していてもちらつきが残る。ポストプロセスパネルの「静止時のちらつき抑制」で面のエッジのちらつきは消えるが、この孤立点は原理上残る</td></tr>
 <tr><td>アセットの事前変換が必須</td><td><code>Assets::LoadModel</code>は<code>.kmodel</code>のみを受け付ける。<code>.gltf</code>/<code>.fbx</code>等のソースモデルは、実行前に<code>KurenaiPacker.exe</code>で変換しておく必要がある(7章参照)</td></tr>
+<tr><td>bindless / メッシュシェーダーもDX12専用</td><td>どちらもD3D12の機能で、DX11では<code>SupportsBindless()</code>/<code>SupportsMeshShader()</code>が常に<code>false</code>を返す。DX12でもシェーダーモデル6.6・リソースバインディング Tier 3・<code>dxcompiler.dll</code> 1.6以降のいずれかが欠けるとbindlessは無効になり、メッシュシェーダーもあわせて無効になる(このエンジンのメッシュシェーダーはジオメトリをbindlessで読むため)。使う前に必ず分岐すること(4.2.2 / 4.2.3参照)</td></tr>
 <tr><td>レイトレーシングはDX12専用</td><td>DXRはD3D12の機能のため、DX11バックエンドでは使えない(<code>IRHIDevice::SupportsRaytracing()</code>が常に<code>false</code>を返し、<code>CreateBottomLevelAS</code>/<code>CreateTopLevelAS</code>は<code>nullptr</code>を返す)。DX12でもアダプタがDXR Tier 1.1に達していない場合、あるいはdxcでシェーダーモデル6.5をコンパイルできない場合は同様に<code>false</code>になる。使う前に必ずこの関数で分岐すること(4.2.1参照)</td></tr>
 <tr><td>シェーダーモデルがバックエンドで異なる</td><td>DX12はdxcでSM 6.5、DX11はd3dcompilerでSM 5.0へコンパイルする。SM 6.x固有の機能(<code>RayQuery</code>、wave intrinsicsなど)を使ったシェーダーはDX11では動かないため、両バックエンドで使うシェーダーはSM 5.0の範囲で書くこと(4.2.2参照)</td></tr>
 <tr><td>DX12はdxcのDLLを必要とする</td><td><code>dxcompiler.dll</code>と<code>dxil.dll</code>が実行ファイルの隣に必要(ビルド時に自動コピー)。無い場合はログに警告を出してSM 5.0へフォールバックし、レイトレーシングは無効になる(4.2.2参照)</td></tr>

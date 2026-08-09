@@ -126,6 +126,7 @@ exit /b 0</Command>
     <ClInclude Include="Source\Library\Assets\ShowLoader.h" />
     <ClInclude Include="Source\Library\RHI\RHIEnums.h" />
     <ClInclude Include="Source\Library\RHI\RHIDesc.h" />
+    <ClInclude Include="Source\Library\RHI\RHIBindless.h" />
     <ClInclude Include="Source\Library\Assets\RaytracingGeometry.h" />
     <ClInclude Include="Source\Library\Assets\RaytracingScene.h" />
     <ClInclude Include="Source\Library\RHI\IRHIAccelerationStructure.h" />
@@ -155,6 +156,7 @@ exit /b 0</Command>
     <ClInclude Include="Source\Library\RHI\DX11\DX11Util.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Util.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12DescriptorHeap.h" />
+    <ClInclude Include="Source\Library\RHI\DX12\DX12BindlessTable.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12AccelerationStructure.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Buffer.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Shader.h" />
@@ -207,6 +209,7 @@ exit /b 0</Command>
     <ClCompile Include="Source\Library\RHI\DX11\DX11Texture.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11SamplerSet.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12DescriptorHeap.cpp" />
+    <ClCompile Include="Source\Library\RHI\DX12\DX12BindlessTable.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12AccelerationStructure.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Buffer.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Shader.cpp" />

@@ -27,6 +27,22 @@ namespace Kurenai::Assets
             inOutTotalBytes += desc.SizeInBytes;
             return device.CreateBuffer(desc);
         }
+
+        // マテリアルのテクスチャをbindless区画へ登録し、シェーダーが使う番号を返す。
+        // テクスチャが無い(nullptr)場合と、デバイスがbindless非対応の場合はどちらも
+        // kInvalidBindlessIndexになり、シェーダー側は白1x1/フラット法線のプレースホルダーへ落ちる。
+        //
+        // 【同じテクスチャを複数のマテリアルが指しても無駄にならない】RegisterBindlessは
+        // 登録済みのリソースに対しては同じ番号を返すため、Sponzaのように1枚のテクスチャを
+        // 多数のメッシュが共有する構成でも区画の消費はテクスチャの実枚数どまりになる
+        uint32_t RegisterMaterialTexture(RHI::IRHIDevice& device, RHI::IRHITexture* texture)
+        {
+            if (!texture)
+            {
+                return RHI::kInvalidBindlessIndex;
+            }
+            return device.RegisterBindless(texture);
+        }
     }
 
     void RaytracingScene::Reset()
@@ -40,6 +56,7 @@ namespace Kurenai::Assets
         m_MeshInfoBuffer.reset();
         m_InstanceInfoBuffer.reset();
         m_MaterialBuffer.reset();
+        m_MeshletTriangleOffsetBuffer.reset();
 
         m_InstanceCount = 0;
         m_MeshCount = 0;
@@ -73,6 +90,7 @@ namespace Kurenai::Assets
         std::vector<RaytracingMeshInfo> meshInfos;
         std::vector<RaytracingInstanceInfo> instanceInfos;
         std::vector<RaytracingMaterial> materials;
+        std::vector<uint32_t> meshletTriangleOffsets;
         instanceInfos.reserve(scene.Instances.size());
 
         for (ModelInstance& instance : scene.Instances)
@@ -89,8 +107,13 @@ namespace Kurenai::Assets
             // インデックスの値そのもの(メッシュ内の相対番号)は書き換えない
             const uint32_t attributeBase = static_cast<uint32_t>(attributes.size());
             const uint32_t indexBase = static_cast<uint32_t>(indices.size());
+            const uint32_t meshletBase = static_cast<uint32_t>(meshletTriangleOffsets.size());
             attributes.insert(attributes.end(), model.RaytracingAttributes.begin(), model.RaytracingAttributes.end());
             indices.insert(indices.end(), model.RaytracingIndices.begin(), model.RaytracingIndices.end());
+            meshletTriangleOffsets.insert(
+                meshletTriangleOffsets.end(),
+                model.RaytracingMeshletTriangleOffsets.begin(),
+                model.RaytracingMeshletTriangleOffsets.end());
 
             for (const Mesh& mesh : model.Meshes)
             {
@@ -106,12 +129,21 @@ namespace Kurenai::Assets
                 material.RoughnessFactor = mesh.RoughnessFactor;
                 material.AlphaCutoff = mesh.AlphaCutoff;
                 material.Flags = mesh.IsTransparent ? kRaytracingMaterialFlagTransparent : 0u;
+                // ヒット面のテクスチャ。bindless非対応環境ではすべて無効値になり、
+                // シェーダーは従来どおり定数の係数だけで陰影を決める
+                material.BaseColorTextureIndex = RegisterMaterialTexture(device, mesh.BaseColorTexture);
+                material.NormalTextureIndex = RegisterMaterialTexture(device, mesh.NormalTexture);
+                material.MetallicRoughnessTextureIndex = RegisterMaterialTexture(device, mesh.MetallicRoughnessTexture);
+                material.EmissiveTextureIndex = RegisterMaterialTexture(device, mesh.EmissiveTexture);
 
                 RaytracingMeshInfo meshInfo;
                 meshInfo.AttributeOffset = attributeBase + mesh.RaytracingAttributeOffset;
                 meshInfo.IndexOffset = indexBase + mesh.RaytracingIndexOffset;
                 // 現状はメッシュとマテリアルを1対1で持つ(同一マテリアルの共有は将来の最適化)
                 meshInfo.MaterialIndex = static_cast<uint32_t>(materials.size());
+                // メッシュレットを持たない.kmodelではCountが0になり、シェーダー側は引かない
+                meshInfo.MeshletOffset = meshletBase + mesh.RaytracingMeshletOffset;
+                meshInfo.MeshletCount = mesh.MeshletCount;
 
                 materials.push_back(material);
                 meshInfos.push_back(meshInfo);
@@ -136,6 +168,15 @@ namespace Kurenai::Assets
             m_MeshInfoBuffer = CreateImmutableStructuredBuffer(device, meshInfos, m_GeometryBufferBytes);
             m_InstanceInfoBuffer = CreateImmutableStructuredBuffer(device, instanceInfos, m_GeometryBufferBytes);
             m_MaterialBuffer = CreateImmutableStructuredBuffer(device, materials, m_GeometryBufferBytes);
+            // メッシュレットを持つメッシュが1つも無いシーン(--no-meshletsでパックした.kmodelだけの
+            // 構成)では要素数0になる。要素数0の構造化バッファはD3D11/D3D12とも作れないため
+            // 作成自体を飛ばす。シェーダーはRTMeshInfo::MeshletCountが0かどうかで判断するので、
+            // バインドされていなくても破綻しない
+            if (!meshletTriangleOffsets.empty())
+            {
+                m_MeshletTriangleOffsetBuffer =
+                    CreateImmutableStructuredBuffer(device, meshletTriangleOffsets, m_GeometryBufferBytes);
+            }
         }
         catch (const std::exception& error)
         {
@@ -155,6 +196,8 @@ namespace Kurenai::Assets
             instance.Model.RaytracingAttributes.shrink_to_fit();
             instance.Model.RaytracingIndices.clear();
             instance.Model.RaytracingIndices.shrink_to_fit();
+            instance.Model.RaytracingMeshletTriangleOffsets.clear();
+            instance.Model.RaytracingMeshletTriangleOffsets.shrink_to_fit();
         }
 
         // --- BLAS(モデルインスタンスごと)を構築する -----------------------------------------

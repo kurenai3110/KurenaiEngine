@@ -67,8 +67,12 @@ namespace Kurenai::Assets
     // 接空間なら遮蔽なしは曲率によらず常に(0,0,1)で、平均しても長さ1のまま保たれる(34.9)。
     // 【レイアウトが同じなのでVersionでしか判別できない】上げないと古いアセットを黙って
     // 誤って解釈することになる。
+    // v9: MeshEntryへメッシュレット(MeshletOffset/MeshletCount ほか6フィールド)を追加し、
+    // .kgeomのペイロードへメッシュレット3ブロックを足したため加算(kGeometryVersionも同時にv3へ)。
+    // メッシュシェーダーがメッシュレット単位で錐台・法線コーンのカリングを行えるようにするため。
+    // あわせてインデックスバッファの並びがメッシュレット順になった点も、この版からの変更。
     // 以前の.kmodelはVersion不一致で読み込み拒否され、KurenaiPackerの再実行で再生成される
-    constexpr uint32_t kPackageVersion = 8;
+    constexpr uint32_t kPackageVersion = 9;
 
     struct PackageHeader
     {
@@ -143,8 +147,28 @@ namespace Kurenai::Assets
         // 曖昧さを消し、無効なら消費側でaxis=N・aoB=1へ落とす(34章参照)
         int32_t  BentNormalTextureIndex;
         uint32_t Reserved2;                // 0固定。uint64_tメンバによる8バイト境界へ揃えるため
+
+        // === メッシュレット(v9で追加) ===
+        //
+        // メッシュシェーダーが「メッシュレット1つ = 1スレッドグループ」で描くための分割情報。
+        // 増幅シェーダーが下のバウンディング球と法線コーンで錐台・背面カリングを行い、
+        // 生き残ったメッシュレットだけをメッシュシェーダーへ渡す。
+        // メッシュ全体でしかカリングできなかった従来と比べ、ドラゴンのような
+        // 「1メッシュ=数十万三角形」のモデルで画面外の三角形を大量に落とせる。
+        //
+        // 3つのオフセットはVertexOffset/IndexOffsetと同じく.kgeomペイロード先頭からの
+        // バイトオフセット(いずれも16バイト境界)。要素番号ではない点に注意。
+        // メッシュレットを生成していない(KurenaiPackerに--no-meshletsを指定した)場合は
+        // Countがすべて0になり、ランタイムはメッシュシェーダー経路を使わない
+        uint64_t MeshletOffset;            // MeshletEntry配列の先頭
+        uint64_t MeshletVertexOffset;      // uint32_t配列(このメッシュの頂点バッファへのインデックス)の先頭
+        uint64_t MeshletTriangleOffset;    // uint32_t配列(三角形1つにつき1要素)の先頭
+        uint32_t MeshletCount;
+        uint32_t MeshletVertexCount;       // 全メッシュレットのVertexCountの総和
+        uint32_t MeshletTriangleCount;     // 全メッシュレットのTriangleCountの総和(= IndexCount / 3)
+        uint32_t Reserved3;                // 0固定
     };
-    static_assert(sizeof(MeshEntry) == 104, "MeshEntryのレイアウトは104バイト固定");
+    static_assert(sizeof(MeshEntry) == 144, "MeshEntryのレイアウトは144バイト固定");
 
     constexpr int32_t kNoTextureIndex = -1;
     constexpr uint32_t kMeshEntryFlagTransparent = 1u << 0;
@@ -190,15 +214,28 @@ namespace Kurenai::Assets
     //   [GeometryHeader]
     //   [Payload (PayloadSize bytes)]
     //
-    // ペイロードはMeshEntryの並び順に[頂点ブロック][インデックスブロック]を連結したもの。
-    // 各ブロックの先頭は16バイト境界(パディングは0埋め)。頂点はVertex.hの48バイトレイアウト
+    // ペイロードはMeshEntryの並び順に、メッシュごとの
+    // [頂点ブロック][インデックスブロック][メッシュレットブロック]
+    // [メッシュレット頂点ブロック][メッシュレット三角形ブロック] を連結したもの。
+    // 各ブロックの先頭は16バイト境界(パディングは0埋め)。頂点はVertex.hのレイアウト
     // そのまま、インデックスはuint32_t生配列そのままで、読み込み後の加工は一切不要
     // (memcpy相当でそのままGPUバッファへ渡せる)。圧縮は行わない。
+    //
+    // 【インデックスの並びはメッシュレット順】v3から、インデックスブロックの三角形は
+    // メッシュレットの並び順そのものになっている。こうしておくと、レイトレーシングが
+    // ヒットしたグローバル三角形番号から所属メッシュレットを二分探索だけで引ける
+    // (三角形→メッシュレットの逆引きテーブルを別に持たずに済む)。
+    // ラスタライズ側も、メッシュシェーダーを使わない従来経路では
+    // このインデックスバッファをそのまま描くだけでよい。
+    // 並べ替えの前にmeshopt_optimizeVertexCache/VertexFetchを通しているため、
+    // 従来経路の頂点キャッシュ効率が落ちることはない。
 
     constexpr char kGeometryMagic[4] = { 'K', 'G', 'E', 'O' };
     // v2: Vertex(Vertex.h)へライトマップUV(UV1)を追加し、頂点ストライドが48→56バイトへ
     // 変わったため加算
-    constexpr uint32_t kGeometryVersion = 2;
+    // v3: メッシュレットの3ブロックをペイロードへ追加し、インデックスの並びを
+    // メッシュレット順へ変更したため加算(上のコメント参照)
+    constexpr uint32_t kGeometryVersion = 3;
 
     struct GeometryHeader
     {
@@ -211,8 +248,76 @@ namespace Kurenai::Assets
     };
     static_assert(sizeof(GeometryHeader) == 32, "GeometryHeaderのレイアウトは32バイト固定");
 
-    // ジオメトリブロック(頂点ブロック・インデックスブロックそれぞれ)を整列させる境界バイト数
+    // ジオメトリブロック(頂点・インデックス・メッシュレットの各ブロック)を整列させる境界バイト数
     constexpr uint64_t kGeometryBlockAlignment = 16;
+
+    // === メッシュレット ===
+    //
+    // メッシュを「頂点64個・三角形124個まで」の塊へ分割したもの。分割はKurenaiPackerが
+    // meshoptimizer(meshopt_buildMeshlets)で行い、ランタイムはそのまま読むだけ。
+    //
+    // 三角形はメッシュ全体の頂点バッファを直接は指さず、2段の間接参照で指す:
+    //   ローカル頂点番号 = MeshletTriangleブロック[TriangleOffset + t] の下位24bitから3つ取り出す
+    //   グローバル頂点番号 = MeshletVertexブロック[VertexOffset + ローカル頂点番号]
+    // こうすると三角形あたりのインデックスが1バイト×3で済み(1メッシュレットの頂点は64個までなので
+    // 8bitに収まる)、メッシュシェーダーが少ないバイト数でジオメトリを読める。
+    //
+    // HLSL側の対応(Shaders/3D/GBufferMeshlet.hlslのMeshlet):
+    //   struct Meshlet { uint VertexOffset; uint TriangleOffset; uint VertexCount; uint TriangleCount;
+    //                    float3 BoundsCenter; float BoundsRadius; float3 ConeAxis; float ConeCutoff; };
+    struct MeshletEntry
+    {
+        // MeshletVertexブロック内の要素オフセット(このメッシュのブロック先頭からの相対)
+        uint32_t VertexOffset;
+        // MeshletTriangleブロック内の要素(=三角形)オフセット。同じくメッシュ内の相対
+        uint32_t TriangleOffset;
+        uint32_t VertexCount;              // ≤ kMeshletMaxVertices
+        uint32_t TriangleCount;            // ≤ kMeshletMaxTriangles
+
+        // 錐台カリング用のバウンディング球(モデルのローカル空間)
+        float    BoundsCenter[3];
+        float    BoundsRadius;
+
+        // 背面カリング用の法線コーン。この塊に含まれる三角形の法線が
+        // 「軸ConeAxisを中心とする半頂角acos(ConeCutoff)の円錐」に収まることを表す。
+        // 視線方向をvとして dot(v, ConeAxis) >= ConeCutoff ならすべて背面なので丸ごと落とせる。
+        //
+        // 【apexを持たない】meshopt_computeMeshletBoundsは円錐の頂点(cone_apex)も返し、
+        // 透視投影ではそれを使うほうが厳密になる。ここで持たないのは、apexを使う判定が
+        // 「頂点からメッシュレットへのベクトル」を要求してレジスタと計算を増やす一方、
+        // 実用上はバウンディング球の中心を代用した近似で十分に落とせるため
+        float    ConeAxis[3];
+        float    ConeCutoff;               // = cos(角度/2)
+    };
+    static_assert(sizeof(MeshletEntry) == 48, "HLSL側のMeshletと一致させるため48バイト固定");
+
+    // 1メッシュレットあたりの上限。メッシュシェーダーの1スレッドグループが出力できる
+    // 頂点・プリミティブの上限(D3D12はどちらも256)に収まる範囲で、GPUベンダーが推奨する値。
+    //
+    // 【頂点64】ローカル頂点番号が8bitに収まる(=三角形1つを3バイトで表せる)境目でもある。
+    // 【三角形124】128ではなく124なのは、meshoptimizerが4の倍数を推奨しているのと、
+    // メッシュレットあたりのインデックスデータを4バイト境界へ収めるため
+    constexpr uint32_t kMeshletMaxVertices = 64;
+    constexpr uint32_t kMeshletMaxTriangles = 124;
+
+    // meshopt_buildMeshletsのcone_weight。0だとクラスタを詰め込むことだけを優先し、
+    // 1だと法線コーンの狭さだけを優先する。0.5はmeshoptimizerのドキュメントが挙げる
+    // バランスの取れた値で、背面カリングの効きとメッシュレット数の増加が釣り合う
+    constexpr float kMeshletConeWeight = 0.5f;
+
+    // MeshletTriangleブロックの1要素。ローカル頂点番号3つを下位24bitへ詰める
+    // (i0 | i1<<8 | i2<<16)。上位8bitは0固定。
+    //
+    // 【3バイトではなく4バイトにする理由】meshoptimizerが返すのはunsigned char 3つで、
+    // そのまま詰めれば三角形あたり3バイトで済む。それでも1バイト増やしているのは、
+    // このエンジンのRHIがByteAddressBufferを持たずStructuredBufferしか無いため。
+    // 3バイト詰めを読むにはバイト単位のアドレッシングが要り、RHI・DX11/DX12両実装・
+    // ディスクリプタ周りに新しい種類のバッファを通す必要がある。
+    // ドラゴン(87万三角形)で増えるのは0.9MBに過ぎず、割に合わない
+    inline constexpr uint32_t PackMeshletTriangle(uint32_t i0, uint32_t i1, uint32_t i2)
+    {
+        return (i0 & 0xFFu) | ((i1 & 0xFFu) << 8) | ((i2 & 0xFFu) << 16);
+    }
 
     // === .ktex (テクスチャ実体) ===
     //
