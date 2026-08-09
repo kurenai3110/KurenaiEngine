@@ -11,8 +11,8 @@
 //   - Smith可視性項とスペキュラのエネルギー補正(SpecularEnergy.hlsli)。BRDF積分LUTの生成と
 //     必ず一致していなければならないため
 //   - PCSS(Percentage Closer Soft Shadows)によるカスケードシャドウのサンプリング
-//     (ShadowSampling.hlsli)。以前はここに複製していたが、片方だけ直すと半透明と不透明で
-//     影が食い違う事故が起きやすかったため統合した
+//     (ShadowSampling.hlsli)。ここへ複製すると、片方だけ直したときに半透明と不透明で
+//     影が食い違う
 //
 // DX12のルートシグネチャがCBVをb0/b1の2枠しか持たないため、GBuffer.hlslと同じくb1に
 // ObjectConstants(モデル行列)を置く。そのためDirectLighting.hlsl側のb1(LightingConstants、
@@ -27,7 +27,7 @@ static const float PI = 3.14159265359f;
 // 反射プローブ(19章)の環境ソースと鏡面IBLの重み。DeferredLighting.hlsl・SSR.hlslと同じ定義を
 // 共有する。空きスロットが違うだけでレジスタ番号は各シェーダーが決める(ReflectionProbe.hlsli冒頭)。
 // このパスはt0〜t4とt8〜t11を既に使っているため、空いているt5〜t7を割り当てる
-// (t6は反射プローブのイラディアンスに使っていたが、M11 Stage 3で廃止し空いたまま残す)。
+// (反射プローブは鏡面専任なので拡散イラディアンス用のスロットは要らない)。
 // #include自体はFrameConstantsとSamplers.hlsliの宣言より後で行う必要があるため下にある
 #define KURENAI_GLOBAL_IRRADIANCE_REGISTER t9
 #define KURENAI_GLOBAL_PREFILTERED_REGISTER t10
@@ -134,16 +134,15 @@ Texture2D BentNormalTexture : register(t14);
 // IBL(14章)と反射プローブ(19章)。グローバルIBLのイラディアンス(t9)/プリフィルタ済み鏡面(t10)と、
 // プローブのプリフィルタ済み鏡面キューブマップ配列(t5)・影響範囲バッファ(t7)の宣言、および
 // プローブの選択・視差補正・ブレンドはReflectionProbe.hlsliが持つ(DeferredLighting.hlslと共有)。
-// 反射プローブは鏡面専任(M11 Stage 3)なので、このパスもプローブ側の拡散イラディアンスは持たない。
+// 反射プローブは鏡面専任なので、このパスもプローブ側の拡散イラディアンスは持たない。
 //
 // 半透明パスにはSSRが適用されないため、ガラスにとっては環境ソースが唯一の映り込みになる。
-// 以前はここがグローバルIBL固定で、密閉された室内のガラスにも空が映っていた
+// ここをグローバルIBL固定にすると、密閉された室内のガラスにも空が映る
 #include "ReflectionProbe.hlsli"
-// DDGI(22章、M11 Stage 1)。拡散イラディアンスだけを差し替える。半透明パスにはSSRが無いため
+// DDGI(22章)。拡散イラディアンスだけを差し替える。半透明パスにはSSRが無いため
 // 20章の不変条件には関与しない(不透明側のDeferredLighting.hlslと同じ理由)。
-// 【重要】プローブの専用イラディアンスマップを読んでいたのはこのパスだけだった(M11 Context参照)。
-// それをStage 3で廃止したうえで、DDGIが有効な点は不透明側と同じくDDGIへ寄せることで、
-// 同じ画面の中で不透明面と半透明面が別々の間接拡散光を受けるという矛盾を解消している
+// 【重要】DDGIが有効な点は不透明側と同じくDDGIへ寄せること。ここだけ別の経路にすると、
+// 同じ画面の中で不透明面と半透明面が別々の間接拡散光を受けることになる
 #include "DDGI.hlsli"
 Texture2D BRDFLUTTexture : register(t11);
 
@@ -505,8 +504,8 @@ float4 PSMain(PSInput input) : SV_TARGET
         //
         // AmbientColor.rgbは一様な環境のイラディアンスE相当(IBLConvolve.hlslが行っている
         // 1/πと積分のπの相殺を受けていない)なので、環境の放射輝度はL = E / PIになる。
-        // 以前はここだけ/PIが抜けており、拡散・鏡面ともπ倍明るかった
-        // (DeferredLighting.hlslは同じ抜けを先に修正済みで、3パスで式を揃えたもの)
+        // 【/PIを落とすと拡散・鏡面ともπ倍明るくなる】不透明・半透明・プローブ焼き込みの
+        // 3パスで式を揃えること
         const float3 ambientRadiance = AmbientColor.rgb / PI;
         const float3 fallbackFssEss = F0 * brdf.x + brdf.y;
         const float fallbackEss = brdf.x + brdf.y;

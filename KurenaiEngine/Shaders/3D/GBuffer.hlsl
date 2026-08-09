@@ -1,6 +1,6 @@
 // G-Buffer書き込み(不透明ジオメトリ用)のピクセルシェーダー。頂点シェーダー(VSMain)・
 // 入出力構造体・cbuffer宣言はGBuffer.hlsl/Water.hlslで共有するためGBufferCommon.hlsliへ
-// 括り出してある(P2: 水面マテリアル基盤)
+// 括り出してある(水面マテリアル基盤)
 #include "GBufferCommon.hlsli"
 
 // bent normal(接空間で焼かれている。遮蔽マップと同じライトマップUV空間、34章)。
@@ -69,7 +69,7 @@ PSOutput PSMain(PSInput input)
     output.Albedo = float4(baseColorSample.rgb, 1.0f);
     output.Normal = OctEncode(N);
     // bチャンネルはマテリアルの遮蔽率。DeferredLighting.hlslとSSR.hlslがSSAO/SSILの遮蔽と
-    // 乗算して使う(専用のG-Bufferを増やさずに済むよう、未使用だった枠を使っている)
+    // 乗算して使う(専用のG-Bufferを増やさずに済むよう、空き枠を使っている)
     output.Material = float4(metallic, roughness, ao, 0.0f);
     output.Emissive = float4(emissive, 1.0f);
     output.Velocity = currentUv - previousUv;

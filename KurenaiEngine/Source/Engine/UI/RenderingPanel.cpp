@@ -62,6 +62,12 @@ namespace Kurenai::UI
         {
             DrawCloudSection();
         }
+        // 星は雲と同じ「空の見え方」なので隣に置く(どちらもSky.hlsliが描き、
+        // 一方を振るときはもう一方と見比べることになる)
+        if (ImGui::CollapsingHeader("星空###Starfield"))
+        {
+            DrawStarsSection();
+        }
         if (ImGui::CollapsingHeader("大気遠近###Fog"))
         {
             DrawFogSection();
@@ -414,8 +420,8 @@ namespace Kurenai::UI
 
             if (m_Engine.m_IBLUseDedicatedIrradiance)
             {
-                // M11 Stage 4a: 専用イラディアンスマップを焼く2つの経路(旧: 総当たり積分/
-                // 新: 球面調和関数L2)をA/B比較できるようにする。既定は旧経路(false)。
+                // 専用イラディアンスマップを焼く2つの経路(総当たり積分 / 球面調和関数L2)を
+                // A/B比較できるようにする。既定は総当たり積分(false)。
                 //
                 // 【値が変わったら焼き直しを要求すること】イラディアンスマップは空が焼き直された
                 // ときにしか作り直されない(KurenaiEngine3D::Render の m_IBLIrradianceBaked 参照)。
@@ -683,7 +689,7 @@ namespace Kurenai::UI
             "波の強さ###WaterWaveStrength", &m_Engine.m_WaterWaveStrength, 0.0f, 1.0f, Defaults::WaterWaveStrength,
             "%.3f", 0, "波打ちの振幅。0で波が完全に消え平坦な鏡面、1で最大の揺らぎになる");
 
-        // --- 水中項(P8) ---
+        // --- 水中項 ---
         // ColorEdit3系のヘルパはUIWidgets.hに無いため、既存パネルと同じSliderFloatExを3本並べる
         ImGui::TextWrapped(
             "水面メッシュのAlbedo(誘電体でほぼ黒に焼かれている)の代わりに使う、水体の拡散反射色"
@@ -700,7 +706,7 @@ namespace Kurenai::UI
             "水体の色 B###WaterBodyColorB", &m_Engine.m_WaterBodyColor.z, 0.0f, 0.5f, Defaults::WaterBodyColorB,
             "%.4f", 0, "水体の拡散反射色(リニア)の青成分");
 
-        // --- 平面反射(P6) ---
+        // --- 平面反射 ---
         CheckboxEx(
             "平面反射を有効にする###PlanarReflectionEnabled", &m_Engine.m_PlanarReflectionEnabled,
             Defaults::PlanarReflectionEnabled,
@@ -820,7 +826,7 @@ namespace Kurenai::UI
 
         CheckboxEx(
             "ボリュームとして描く###CloudVolumetric", &m_Engine.m_CloudVolumetric, Defaults::CloudVolumetric,
-            "積雲を雲底から雲頂までのスラブとしてレイマーチする(P13b)。切ると従来の厚みゼロの"
+            "積雲を雲底から雲頂までのスラブとしてレイマーチする。切ると従来の厚みゼロの"
             "平面レイヤーへ戻るので、見た目と負荷をそのまま比べられる");
         if (m_Engine.m_CloudVolumetric)
         {
@@ -876,6 +882,35 @@ namespace Kurenai::UI
         EndParamGroup();
     }
 
+    void RenderingPanel::DrawStarsSection()
+    {
+        ImGui::TextWrapped(
+            "夜空の星。Sky.hlsliが視線方向のハッシュから解析的に描くのでテクスチャは使わない。"
+            "IBLキューブには焼かないため、ここを変えても空の焼き直しは起きない。");
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "星を描く###StarsEnabled", &m_Engine.m_StarsEnabled, Defaults::StarsEnabled,
+            "昼は太陽の仰角で完全に0までフェードするので、無効にしても昼のシーンの絵は変わらない");
+
+        SliderFloatEx(
+            "密度###StarsDensity", &m_Engine.m_StarsDensity, 1.0f, 256.0f, Defaults::StarsDensity, "%.0f", 0,
+            "空を分割するセルの細かさ。1セルにつき星1個なので、大きいほど星が増える");
+
+        SliderFloatEx(
+            "明るさ###StarsBrightness", &m_Engine.m_StarsBrightness, 0.0f, 20.0f, Defaults::StarsBrightness, "%.2f", 0,
+            "星の明るさ倍率。星は見た目だけの項で、夜空の目標照度(星明かりの照度)には影響しないため、"
+            "ここを上げても風景の明るさは変わらない");
+
+        SliderFloatEx(
+            "またたき###StarsTwinkle", &m_Engine.m_StarsTwinkle, 0.0f, 1.0f, Defaults::StarsTwinkle, "%.2f", 0,
+            "またたきの強さ。既定は0(無効)。上げるとTAAがちらつきとして拾い、"
+            "A/B比較のスクリーンショットの再現性も落ちる");
+
+        EndParamGroup();
+    }
+
     void RenderingPanel::DrawFogSection()
     {
         ImGui::TextWrapped(
@@ -898,8 +933,8 @@ namespace Kurenai::UI
             "気象学的視程Vとは Koschmieder の V = 3.912 / 消散係数 で結び付くので、"
             "「どのくらいの視程を想定するか」で決めるのが分かりやすい"
             "(0.0004 で V ≒ 10km、0.0002 で V ≒ 20km、上限の0.002 で V ≒ 2km のもや)。"
-            "上限は以前0.01(V ≒ 391m)だったが、600m先の島すら見えず屋外の風景として"
-            "成立しない領域だったので下げた");
+            "上限を0.002に留めてあるのは、これより濃いと600m先の地物すら見えず"
+            "屋外の風景として成立しないため");
         SliderFloatEx(
             "スケールハイト###FogScaleHeight", &m_Engine.m_FogScaleHeight, 10.0f, 5000.0f, Defaults::FogScaleHeight,
             "%.0f m", 0, "霧の層の厚み。大きいほど高い高度まで霧が及ぶ");

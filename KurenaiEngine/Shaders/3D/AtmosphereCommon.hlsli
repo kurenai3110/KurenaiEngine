@@ -1,4 +1,4 @@
-// SkyView LUT(P14b)のパラメータ化。焼く側(AtmosphereLUT.hlsl CSSkyView)と
+// SkyView LUTのパラメータ化。焼く側(AtmosphereLUT.hlsl CSSkyView)と
 // 引く側(Sky.hlsli SkyColorUpperUnit)の両方が使う共有ヘッダー。
 //
 // 【なぜ別ファイルにするのか】この写像は「方向 → UV」と「UV → 方向」が厳密に逆でなければ

@@ -141,7 +141,7 @@ float DistributionGGX(float NdotH, float roughness)
 }
 
 // GeometrySchlickGGX / GeometrySmith はSpecularEnergy.hlsliの共有定義を使う
-// (以前ここにあったDisneyのラフネス再マップ k=(roughness+1)^2/8 は除去した。理由は同ヘッダー参照)
+// (**Disneyのラフネス再マップ k=(roughness+1)^2/8 をここへ足してはいけない**。理由は同ヘッダー参照)
 
 float3 FresnelSchlick(float cosTheta, float3 F0)
 {
@@ -307,7 +307,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     float3 directLight = float3(0.0f, 0.0f, 0.0f);
 
     // --- 太陽(b0、カスケードシャドウ付き) ---
-    // ここでNdotL<=0のとき関数全体を打ち切ってはいけない(以前の実装の落とし穴)。
+    // ここでNdotL<=0のとき関数全体を打ち切ってはいけない。
     // 太陽の寄与だけをこのブロックに閉じ込め、その後は必ずライトリストのループへ進む
     float3 sunL = normalize(-LightDirection.xyz);
     float sunNdotL = saturate(dot(N, sunL));

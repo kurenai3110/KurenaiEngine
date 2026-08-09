@@ -6,12 +6,14 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "DroneShow.h"
 #include "EngineDefaults.h"
 #include "KurenaiEngineBase.h"
 #include "KurenaiTypes.h"
@@ -83,13 +85,32 @@ namespace Kurenai
         static constexpr uint32_t kCascadeCount = 4;
         static_assert(kCascadeCount == 4, "CascadeSplitsはXMFLOAT4前提のため4カスケード固定");
 
+        // --- オーサリングツール向けの口(Tools/KurenaiShowEditor) ------------------------
+        //
+        // ドローンショーの編集UIと形状生成は、出荷するエンジンのDLLに持ち込みたくない。
+        // かといってエディタが自前でレンダラーを持つと、トーンマップ・ブルーム・露出が
+        // 本番と違う経路を通り、そこで作った形は本番で見ると別物になる。
+        // そこでエディタはこのエンジンをそのまま使い、下の2つだけを追加で呼ぶ。
+        // IPanel/UIWidgetsといった内部の型を公開せずに済むよう、口はこの2つに留める。
+
+        // 全パネルを描いた後に一度だけ呼ばれる追加のImGui描画。nullptrで解除。
+        // 【Renderスレッドで呼ばれる】ImGuiの状態を触るのはRenderスレッドだけという
+        // 不変条件があるため。コールバックの中からエンジンの状態を触ってよいのは、
+        // それがRenderスレッドの持ち物である限りにおいて
+        void SetExtraImGuiCallback(std::function<void()> callback);
+
+        // 再生中のショーを差し替える(エディタのプレビュー用。ファイルを書かずに絵へ反映する)。
+        // 【SetExtraImGuiCallbackで登録したコールバックの中から呼ぶこと】どちらもRenderスレッドで
+        // 走るため、この経路なら同期が要らない。別スレッドから呼ぶとm_DroneShowを
+        // 描画中に書き換えることになる
+        void ApplyDroneShowData(const Assets::ShowData& data);
+
     private:
         // UIパネル群(Source/Engine/UI/)は、m_SSAORadius等のパラメータメンバをImGuiウィジェットへ
         // アドレスで直接渡すためprivateへアクセスする必要がある。
         // パラメータを専用の構造体へ切り出して物理的に移動させる案も検討したが、Render()内の
         // 参照が約200箇所あり、書き換えの過程で1箇所間違えてもコンパイルが通ってしまい静かに
-        // 壊れるため見送った(元々UI関数がメンバ関数としてprivateに触れていた構造を、
-        // 「friendだから触れる」へ平行移動しただけで、振る舞いの差分は無い)。
+        // 壊れるため採らない。
         // friendにしても「UIから触ってよいのはパラメータ用メンバだけで、RHIリソース
         // (m_GBufferAlbedo等)には触らない」という規約は各パネルの実装側で守ること
         friend class UI::UIManager;
@@ -128,7 +149,7 @@ namespace Kurenai
         // (理由はRHI/IRHISamplerSet.h)
         void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
-        // 平面反射(P6)専用のレンダーターゲット2枚(m_PlanarReflectionColor/Depth)を、
+        // 平面反射専用のレンダーターゲット2枚(m_PlanarReflectionColor/Depth)を、
         // 反射解像度(レンダー解像度 × m_PlanarReflectionResolutionScale)で作り直す。
         // メインのCreateRenderTargetsとは独立に呼べる(Legacy8bitフォールバックの対象外。
         // このバッファは常にHDR固定フォーマットのため)。呼び出し箇所はCreateRenderTargetsと
@@ -173,11 +194,10 @@ namespace Kurenai
         // --- シーン読み込みのスレッド分担 -----------------------------------------------------
         //
         // シーンの読み込みは「重いファイルI/O・デコード・GPUリソース作成」と「一瞬で終わる
-        // エンジン状態への反映」に分かれる。以前は両方をUpdateスレッドで行い、Render()全体と
-        // ミューテックスで排他していたため、読み込みの間フレームが1枚も進まなかった
-        // (Bistro Exteriorで約1.3秒)。
+        // エンジン状態への反映」に分かれる。両方をUpdateスレッドで行いRender()全体と
+        // ミューテックスで排他すると、読み込みの間フレームが1枚も進まない(Bistro Exteriorで約1.3秒)。
         //
-        // そこで前者を専用のLoaderスレッドへ、後者をRenderスレッドのフレーム境界へ分けた。
+        // そのため前者を専用のLoaderスレッドへ、後者をRenderスレッドのフレーム境界へ分ける。
         // 読み込み中もフレームが進み続け、排他は受け渡しの一瞬だけで済む
         // (詳細はdocs/Architecture.html 23章)。
 
@@ -192,7 +212,7 @@ namespace Kurenai
             Assets::Scene Scene;
             Assets::RaytracingScene RaytracingScene;
             std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
-            // 水面法線マップ版(P2)。SkyboxTextureとまったく同じ扱い
+            // 水面法線マップ版。SkyboxTextureとまったく同じ扱い
             std::unique_ptr<RHI::IRHITexture> WaterNormalMapTexture;
         };
 
@@ -206,7 +226,7 @@ namespace Kurenai
             // nullptrなら現在のスカイボックスを維持する
             std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
             std::wstring SkyboxPath;
-            // シーンの[Water]NormalMapが読み込み済みのものと異なる場合のみ非nullptr(P2)。
+            // シーンの[Water]NormalMapが読み込み済みのものと異なる場合のみ非nullptr。
             // nullptrなら現在の水面法線マップ(またはフラット法線フォールバック)を維持する
             std::unique_ptr<RHI::IRHITexture> WaterNormalMapTexture;
             std::wstring WaterNormalMapPath;
@@ -222,13 +242,13 @@ namespace Kurenai
         // レンダーターゲットの作り直しはGPUがそれらを参照していない状態で行う必要があるため、
         // ここでは要求を記録するだけにしてRender()の先頭でまとめて反映する
         void RequestRenderResolution(uint32_t width, uint32_t height);
-        // 平面反射(P6)の反射解像度の倍率変更を要求する(RenderingPanel = Renderスレッドから呼ばれる)。
+        // 平面反射の反射解像度の倍率変更を要求する(RenderingPanel = Renderスレッドから呼ばれる)。
         // RequestRenderResolutionと同じ方式(要求を記録するだけにしてRender()の先頭でまとめて反映)
         void RequestPlanarReflectionResolutionScale(float scale);
         // Renderスレッドがフレーム先頭で呼ぶ。保留中の切り替え要求の発注と、
         // 出来上がったシーンの取り込みを行う
         void UpdateSceneStreaming();
-        // .ksceneの更新時刻を見て、変わっていれば再読み込みを要求する(P16)。
+        // .ksceneの更新時刻を見て、変わっていれば再読み込みを要求する。
         // UpdateSceneStreamingの先頭から呼ぶ。m_SceneAutoReloadEnabledがfalseなら何もしない
         void UpdateSceneHotReloadWatch();
         // 現在のシーンの.ksceneの最終更新時刻。取得できなければ0を返す
@@ -312,6 +332,10 @@ namespace Kurenai
         // UI::UIManagerは不完全型のままにするため、デストラクタは.cpp側で定義する
         std::unique_ptr<UI::UIManager> m_UIManager;
 
+        // SetExtraImGuiCallbackで登録された追加のImGui描画(Tools/KurenaiShowEditor)。
+        // Renderスレッドだけが読み書きする
+        std::function<void()> m_ExtraImGuiCallback;
+
         // ImGuiが入力を掴んでいるかを、RenderスレッドからUpdateスレッドへ返す逆方向のハンドオフ。
         // FrameState(Update→Render)の逆向きだが、渡す値がboolを2つだけなのでロックを増やす
         // 価値がなく、atomicで足りる。Updateスレッドはこれを見てWASD移動と視点回転の開始を抑止する
@@ -341,8 +365,8 @@ namespace Kurenai
         // Updateスレッドが毎フレーム読み取ってm_Camera.SetAspectRatio()を呼ぶ
         std::atomic<float> m_RenderAspect{ 1.0f };
 
-        // 中間バッファの精度構成。HDRが本来採用したい構成で、Legacy8bitはM7以前の
-        // 「中間バッファはすべてR8G8B8A8_UNorm」だった構成を再現する比較用の経路。
+        // 中間バッファの精度構成。HDRが本来採用したい構成で、Legacy8bitは
+        // 「中間バッファはすべてR8G8B8A8_UNorm」にする比較用の経路。
         //
         // 精度改善の効果を主観ではなく実測で比較できるようにするために残している。
         // UNorm8は刻みが絶対値1/255=0.392%で固定なのに対し、half floatは仮数10bitで
@@ -367,7 +391,7 @@ namespace Kurenai
         // ミラーリング(Worldの行列式が負)されたインスタンス用。表裏判定を入れ替えただけで
         // 他は上と同一(ModelInstance::IsMirrored、docs/Architecture.html 10.2節)
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferPipelineStateMirrored;
-        // 水面(ModelInstance::IsWater)専用のピクセルシェーダー・PSO(P2: 水面マテリアル基盤)。
+        // 水面(ModelInstance::IsWater)専用のピクセルシェーダー・PSO(水面マテリアル基盤)。
         // 頂点シェーダーはm_GBufferVertexShaderをそのまま共有する(Water.hlslもGBufferCommon.hlsli
         // 由来の同じVSMainを使うため)。ミラーリングとの組み合わせ(4値)はGBufferパスの
         // bindPipelineStateラムダが選ぶ
@@ -510,6 +534,49 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineStateMirrored;
 
+        // --- ドローンショー(発光点の描画) ---------------------------------------------
+        // 夜空を編隊飛行する多数のドローンを、1機につきカメラ正対のビルボード1枚として
+        // 加算合成で描く。編隊の生成と時間補間はDroneShow.h/.cppが持ち、ここは描画だけを担う。
+        //
+        // 頂点バッファを持たず、Draw(6 * 機体数, 0)とSV_VertexIDでクアッドを展開する
+        // (理由はShaders/3D/DroneShow.hlsl冒頭)。機体データはm_DroneBufferから
+        // 頂点シェーダーが直接読む(SetVertexShaderResourceBuffer)。
+        //
+        // 【PSOは1本でよい】平面反射(鏡映カメラ)でもこれをそのまま使う。メッシュ描画のように
+        // ワインディングを反転したPSOを別に持つ必要は無い ―― 理由はPSO生成箇所のコメント
+        std::unique_ptr<RHI::IRHIShader> m_DroneShowVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_DroneShowPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DroneShowPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_DroneShowConstantBuffer;
+        // 機体データ(StructuredReadOnly)。kMaxDrones分を固定で確保し、実際に描くのは
+        // m_DroneInstances.size()機ぶんだけ
+        std::unique_ptr<RHI::IRHIBuffer> m_DroneBuffer;
+        // 1フレームぶんの機体の状態。毎フレームDroneShow::Evaluateが書き、
+        // グラフ構築前に1回だけm_DroneBufferへUpdateBufferする
+        // (m_LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
+        //  パスの中で更新すると先に走る側が未更新の内容を読む)
+        std::vector<GPUDrone> m_DroneInstances;
+        // 再生器。編隊の点そのものはここが持つ(.kshowから読み込む)
+        DroneShow m_DroneShow;
+
+        // ショーの進行時刻[秒]。RenderThreadMainがm_CloudScrollOffsetと同じ場所で進める
+        float m_DroneShowTime = 0.0f;
+
+        // --- .ksceneが持つパラメータ ---
+        //
+        // 【ショーの中身に属する値はここに無い】機体数・保持/変形秒・明るさ・ビルボード半径・
+        // 揺れ・再生速度・種はすべて.kshowが持つ(m_DroneShow.Data()から読む)。
+        // シーンが決めてよいのは「出すかどうか」と「どこにどの大きさで置くか」だけで、
+        // 同じショーを別のシーンへ置けるのはこの分担があるため
+        bool m_DroneShowEnabled = Defaults::DroneShowEnabled;
+        DirectX::XMFLOAT3 m_DroneShowCenter{
+            Defaults::DroneShowCenterX, Defaults::DroneShowCenterY, Defaults::DroneShowCenterZ };
+        float m_DroneShowScale = Defaults::DroneShowScale;
+        // 遠方の機体が1画素を割ってTAAのジッターでちらつくのを防ぐ、画面上の最小半径(NDC単位)。
+        // 【これだけはシーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
+        // 「1画素を割ったらちらつく」という事実はどのシーン・どのショーでも変わらないため
+        float m_DroneShowMinScreenRadius = Defaults::DroneShowMinScreenRadius;
+
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
         // オクルージョンカリングやSSRのレイマーチング高速化に使えるデータ構造だが、現時点では
@@ -540,12 +607,11 @@ namespace Kurenai
         }
         // シーンが何も言っていないときの既定。「反射を出すか」をここで決める。
         //
-        // 【この2つを1つの関数が兼ねていたために不具合になっていた】以前はこの関数が
-        // 「出すか」と「どの手法か」の両方を答えており、ApplyLoadedSceneが
-        // 「シーンが反射を要求している。ではどの手法か」を聞くのにも同じ関数を使っていた。
-        // Defaults::SSREnabledはfalse(SSRは画面端で反射が途切れる破綻が目立つため)なので、
-        // RTが使えない環境では**.ksceneがScreenSpaceReflection = trueと明示していても
-        // ReflectionMode::Offが返り、シーンの指定が握り潰されていた**。
+        // 【この関数に「出すか」と「どの手法か」を兼ねさせてはいけない】兼ねさせると、
+        // ApplyLoadedSceneが「シーンが反射を要求している。ではどの手法か」を聞くときにも
+        // 同じ関数を使うことになる。Defaults::SSREnabledはfalse(SSRは画面端で反射が途切れる
+        // 破綻が目立つため)なので、RTが使えない環境では**.ksceneがScreenSpaceReflection = true
+        // と明示していてもReflectionMode::Offが返り、シーンの指定が握り潰される**。
         // DX11でモン・サン=ミシェルの水面に何も映らない、White Furnace TestのSSR回帰テストが
         // 実は動いていない、という形で現れていた(DX12はDXRが使えてRTが選ばれるため露見しなかった)
         static constexpr ReflectionMode DefaultReflectionMode(bool raytracingAvailable)
@@ -602,7 +668,7 @@ namespace Kurenai
         int32_t m_RTShadowSampleCount = Defaults::RTShadowSampleCount;
         float m_RTShadowSunAngularRadiusDegrees = Defaults::RTShadowSunAngularRadiusDegrees;
 
-        // --- 大気遠近(P8: height fog / aerial perspective) ---
+        // --- 大気遠近(height fog / aerial perspective) ---
         // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
         // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
         // 冒頭のコメント参照。無効時(m_FogEnabled=falseまたはm_FogDensity<=0)はパス自体を
@@ -621,7 +687,7 @@ namespace Kurenai
         float m_FogRefHeight = Defaults::FogRefHeight;
         // 不透明度の上限(1.0で遠方が完全に空の色まで行く)
         float m_FogMaxOpacity = Defaults::FogMaxOpacity;
-        // 水中項(P8)。Water.hlslのPSMainがメッシュ自身のBaseColorFactorの代わりにこの色を
+        // 水中項。Water.hlslのPSMainがメッシュ自身のBaseColorFactorの代わりにこの色を
         // 出力Albedoに使う(見下ろした水面がFresnel最小でほぼ真っ黒になる問題への対処。
         // 干潟の水の色はシーン側で調整したいパラメータであり、.kmodelを焼き直さずに変えられるようにするため)
         DirectX::XMFLOAT3 m_WaterBodyColor{
@@ -709,7 +775,7 @@ namespace Kurenai
         // トーンマッピングカーブ。Tonemap.hlsl側のCurveと値を一致させること
         enum class TonemapCurve
         {
-            Reinhard, // c/(c+1)。M7以前の唯一のカーブで、比較用リファレンスとして残す
+            Reinhard, // c/(c+1)。比較用のリファレンスカーブ
             ACES,     // Narkowicz 2015のフィット近似
             AgX,      // Troy Sobotka の AgX(Filament/three.jsの実装形)
         };
@@ -717,6 +783,8 @@ namespace Kurenai
         // ことが知られており、Bistro内観のように赤い壁が支配的なシーンでその欠点が最も出やすい。
         // AgXはハイライトが色相を保ったまま白へ脱色するため、この用途では素直な絵になる
         TonemapCurve m_TonemapCurve = TonemapCurve::AgX;
+        // 黒の締め(ブラックポイント)。0で恒等。詳細はShaders/3D/Tonemap.hlslのコメント参照
+        float m_TonemapBlackPoint = Defaults::TonemapBlackPoint;
 
         // 薄明視(mesopic vision)の適用量。0で無効、1で完全適用。
         //
@@ -778,7 +846,7 @@ namespace Kurenai
         float m_AutoExposureCompensation = Defaults::AutoExposureCompensation;
         // 暗いシーンをわざと暗いまま写すための補正量[EV]。
         // 自動露出は測ったものを中庸なグレーへ持ち上げるので、これが0だと夜が昼と同じ明るさで
-        // 出てしまう(実測: 補正なしでは22時と12時の空の明度がほぼ一致していた)。
+        // 出てしまう(実測: 補正なしでは22時と12時の空の明度がほぼ一致する)。
         // 実写でも夜景はわざと露出を切り詰めて撮るため、既定で4.5段暗くする。
         // 既定値は「肉眼で見た月明かりの夜」に合わせて実測で決めた
         // (m_MesopicStrength=1のときの、月光を受ける壁 / 夜空の8bitコード):
@@ -789,11 +857,7 @@ namespace Kurenai
         // **m_MesopicStrengthとセットで意味を持つ**点に注意。露出を下げるだけでは
         // 「暗いが色鮮やかな夜」にしかならず、肉眼で見た夜と一致しない。
         //
-        // 参考: 旧既定(薄明視を入れる前)は次の値だった。
-        // 満月に照らされた石壁を、空が画面の約40%を占める屋上視点と、空が入らない構図の
-        // 両方で測った8bitコード(m_AutoExposureKeyCeilingEV=-1のとき):
-        //   3.0段 … 壁22   / 3.5段 … 壁15/13 / 4.0段 … 壁9/8
-        // 0にすると従来どおり「常に中庸なグレーへ合わせる」挙動に戻る。
+        // 0にすると「常に中庸なグレーへ合わせる」挙動になる。
         //
         // **m_AutoExposureKeyCeilingEVとセットで意味を持つ値**である点に注意。
         // 上のクランプが無いと測光値が構図で2〜3.5段振れるので、この値をいくつにしても
@@ -818,8 +882,7 @@ namespace Kurenai
         // 下側はm_AutoExposureMinEV100が絶対的な下限として効く。
         //
         // 既定の+2は「通常のシーンでは発動しないが、極端なケースは止まる」余裕を見た値。
-        // 空除外の前は-1にしていたが、空を外した今それでは締めすぎになる
-        // (夜の壁が3.8から4.7へ持ち上がってしまう)
+        // 測光から空を外してある(AutoExposure.hlsl)ため、-1のような強い値にすると締めすぎになる
         float m_AutoExposureKeyCeilingEV = Defaults::AutoExposureKeyCeilingEV;
 
         // 次のAutoExposureパスで順応を飛ばして測光値へ即座に合わせる要求。LoadSceneが立て、
@@ -904,8 +967,7 @@ namespace Kurenai
             IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス。R=A, G=B, B=Eavg)
             Bloom,              // ブルームのピラミッド最上段(半解像度、HDR)をトーンマッピングして表示
             LightTiles,         // タイルライトカリングのライトグリッド(タイルあたりのライト数)をヒートマップ表示
-            // ProbeIrradiance(反射プローブの拡散イラディアンス)はM11 Stage 3で廃止した
-            // (反射プローブは鏡面専任になった。拡散はDDGIIrradianceで見る)
+            // 反射プローブは鏡面専任なので拡散イラディアンスの表示は持たない(拡散はDDGIIrradiance)
             ProbePrefilter,     // 反射プローブのプリフィルタ済み鏡面(ミップ0がキャプチャ結果そのもの)
             ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
             ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
@@ -916,10 +978,10 @@ namespace Kurenai
             BentNormal,         // bent normal(34章)。Debug View Gainが1なら軸を色表示、
                                 // 1.5より大きいと長さ(=aoB)をグレースケール表示。
                                 // データを持たないマテリアルはマゼンタで塗る
-            WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示(P2)
-            PlanarReflection,   // 平面反射パス(P6)の出力(m_PlanarReflectionColor)をトーンマッピングして表示
-            CloudNoiseSlice,    // 雲の3Dノイズ(P13a)の任意スライス。m_CloudNoiseDebugSlice/Detailで選ぶ
-            AtmosphereLUT,      // 大気散乱のLUT(P14a)。m_AtmosphereLUTDebugMultiで2枚を切り替える
+            WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示
+            PlanarReflection,   // 平面反射パスの出力(m_PlanarReflectionColor)をトーンマッピングして表示
+            CloudNoiseSlice,    // 雲の3Dノイズの任意スライス。m_CloudNoiseDebugSlice/Detailで選ぶ
+            AtmosphereLUT,      // 大気散乱のLUT。m_AtmosphereLUTDebugMultiで2枚を切り替える
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -930,7 +992,7 @@ namespace Kurenai
         float m_DebugViewGain = Defaults::DebugViewGain;
         // DebugView::CloudNoiseSlice で表示する3Dノイズのスライス位置(0〜1、W方向)と、
         // 形状(128^3)とディテール(32^3)のどちらを見るか。タイル境界に継ぎ目が出ていないかを
-        // 目と数値の両方で確認するために用意してある(P13aの合格条件)
+        // 目と数値の両方で確認するために用意してある
         float m_CloudNoiseDebugSlice = 0.0f;
         bool m_CloudNoiseDebugShowDetail = false;
         // DebugView::AtmosphereLUT で表示するLUT
@@ -976,8 +1038,8 @@ namespace Kurenai
         // 実際の既定はシーン読み込み時に決め直される
         // 【反射と違い「出すか」と「どの手法か」を分けていない】Defaults::ShadowEnabledがtrueで
         // あるため、シーンがShadow = trueと書いたときにこの関数へ問い合わせても
-        // 手法の選択と同じ結果になり、いまは不具合にならない。ただし構造は反射で実際に踏んだ
-        // ものと同じ(DefaultReflectionModeのコメント参照)なので、Defaults::ShadowEnabledを
+        // 手法の選択と同じ結果になるため問題にならない。ただし構造は反射と同じ危うさを持つ
+        // (DefaultReflectionModeのコメント参照)ので、Defaults::ShadowEnabledを
         // falseにするなら反射と同じ形(ShadowModeForCapabilityへの分割)へ直すこと
         static constexpr ShadowMode DefaultShadowMode(bool raytracingAvailable)
         {
@@ -1010,7 +1072,7 @@ namespace Kurenai
         // 読み直さずに済むよう比較に使う
         std::wstring m_CurrentSkyboxPath;
 
-        // 水面法線マップ(P2: 水面マテリアル基盤)。m_SkyboxTextureとまったく同じ方針で、
+        // 水面法線マップ(水面マテリアル基盤)。m_SkyboxTextureとまったく同じ方針で、
         // .ksceneの[Water]NormalMapで差し替えられる。空文字列のシーン(NormalMap未指定)では
         // 1x1のフラット法線(128,128,255,255、CreateSolidColorTexture)へフォールバックする
         std::unique_ptr<RHI::IRHITexture> m_WaterNormalMapTexture;
@@ -1034,12 +1096,12 @@ namespace Kurenai
         // [0, kIBLPrefilterMipLevels-1]のミップ番号へ線形マッピングする(DeferredLighting.hlsl参照)
         static constexpr uint32_t kIBLPrefilterMipLevels = 6;
         static constexpr uint32_t kIBLBRDFLUTSize = 128;
-        // ボリュメトリック雲の3Dノイズ(P13a)の1辺のテクセル数。
+        // ボリュメトリック雲の3Dノイズの1辺のテクセル数。
         // Shapeは128^3のRGBA8で8MB、Detailは32^3のRGBA8で128KB。合わせて約8.1MB。
         // Shapeを128にしているのは、雲1つが画面上で数百画素に広がるため塊の形にはこの程度の
         // 解像度が要る一方、これ以上上げるとメモリが4倍(256^3で64MB)に跳ねるため。
         // Detailは縁を削るだけで低周波成分を持たないので32で足りる
-        // 大気散乱のLUT(P14a/P14b、Hillaire 2020)。解像度は論文の推奨値。
+        // 大気散乱のLUT(Hillaire 2020)。解像度は論文の推奨値。
         // Transmittanceは高度×視線天頂角、MultiScatteringは高度×太陽天頂角で、
         // どちらも大気パラメータだけで決まるためカメラにも時刻にも依存しない。
         // SkyViewは空そのもの(太陽の子午線からの方位×天頂角)で、太陽が動くと変わる。
@@ -1077,7 +1139,7 @@ namespace Kurenai
         // 最後に焼いたときの実効プリ露出。空はプリ露出済みの値で焼かれるため、
         // 露出が動いたときも焼き直さないと空だけ古い露出のまま取り残される
         float m_LastBakedExposureEV100 = 0.0f;
-        // 最後に焼いたときのタービディティ(P7)。m_SkyTurbidityが動いたときも、Preethamの
+        // 最後に焼いたときのタービディティ。m_SkyTurbidityが動いたときも、Preethamの
         // xyYモデルの形自体が変わるため焼き直しが要る(exposureMovedと同じ形の判定。Render()参照)
         float m_LastBakedTurbidity = 0.0f;
         // 最後に焼いたときの空の彩度。タービディティと同じ理由で、動いたら焼き直す
@@ -1087,15 +1149,14 @@ namespace Kurenai
         float m_SkyBakeAngleThresholdDegrees = 1.0f;
 
         // 背景(深度が書かれていない画素)をキューブマップのサンプルではなく、Sky.hlsliの
-        // SkyColorを画面解像度で直接評価するか(P3)。キューブマップは256px/面しかなく
+        // SkyColorを画面解像度で直接評価するか。キューブマップは256px/面しかなく
         // 3840px・水平画角68度のカメラでは約20倍に拡大表示されるため、既定で有効にしてある。
         // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらずキューブマップを使う
         // (DeferredLighting.hlslへ渡すSkyParams.yはActiveSkyTexture()の結果とのANDで決める)
         bool m_SkyAnalyticBackground = Defaults::SkyAnalyticBackground;
 
         // 空パラメータ(ティント4本+照度正規化済みの天頂輝度)をGPU側で計算するコンピュートシェーダー
-        // (P9: SkyIntegrate.hlsl)。以前はCPU(ComputeSkyTint/ComputeSkyZenithScale)とHLSL
-        // (Sky.hlsli)に同じ式が二重実装されていたが、GPU側へ一本化しCPUミラーを廃止した。
+        // (SkyIntegrate.hlsl)。**CPU側に同じ式のミラーを置いてはいけない**(二重実装になる)。
         // 結果はm_SkyParametersBuffer(SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む)へ書く
         std::unique_ptr<RHI::IRHIShader> m_SkyIntegrateComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_SkyIntegratePipelineState;
@@ -1139,7 +1200,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_BRDFLUTCombineComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTCombinePipelineState;
 
-        // --- ボリュメトリック雲の3Dノイズ(P13a) ---
+        // --- ボリュメトリック雲の3Dノイズ ---
         //
         // 雲の形状ノイズ。カメラにも太陽にも空の状態にも一切依存しない純粋な手続き生成なので、
         // BRDF積分LUTとまったく同じ理由で起動後に一度だけ焼き、二度と焼き直さない
@@ -1155,7 +1216,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudDetailNoisePipelineState;
         bool m_CloudNoiseBaked = false;
 
-        // --- 大気散乱のLUT(P14a/P14b: Hillaire 2020) ---
+        // --- 大気散乱のLUT(Hillaire 2020) ---
         //
         // TransmittanceとMultiScatteringは大気パラメータ(AtmosphereLUT.hlsl冒頭の定数と、
         // 実行時に動かせる濁り)だけで決まり、カメラにも太陽にも時刻にも依存しない。
@@ -1184,7 +1245,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_PrefilterPipelineState;
-        // 拡散イラディアンスの球面調和関数(SH L2)経路(M11 Stage 4a)。CSIrradianceの高速な
+        // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradianceの高速な
         // 代替で、m_IBLUseSHIrradianceでA/B比較できるようトグルにしてある。詳細は
         // IBLConvolve.hlsl冒頭のコメントとdocs/Architecture.htmlを参照
         static constexpr uint32_t kSHCoeffCount = 9; // 実数SH L2(l<=2)の項数
@@ -1216,17 +1277,16 @@ namespace Kurenai
         // デバッグ表示(Render Targets)で確認するプリフィルタ済み鏡面マップのミップレベル
         int32_t m_IBLPrefilterDebugMipLevel = 0;
         // IBL(拡散イラディアンス+プリフィルタ済み鏡面)のON/OFFと強度。無効時はシェーダ側
-        // (DeferredLighting.hlsl)でEvaluateIBLの代わりにIBL導入以前と同じ定数色アンビエント
+        // (DeferredLighting.hlsl)でEvaluateIBLの代わりに定数色アンビエント
         // (AmbientColor.rgb)へフォールバックする(真っ暗にはしない)。既定値を1.0でなく0.5に
-        // しているのは、スカイボックスの空の輝度分布を明るく補正した(14.6節)結果、既定の
-        // Perez分布そのままではIBL全体の寄与が強すぎたため(実機で指摘された見た目の問題)
+        // しているのは、明るく補正した空の輝度分布(14.6節)ではIBL全体の寄与が強すぎるため
         bool m_IBLEnabled = Defaults::IBLEnabled;
         float m_IBLIntensity = Defaults::IBLIntensity;
         // 拡散イラディアンスを専用マップ(m_IrradianceTexture)から取るかどうか。既定はfalseで、
         // プリフィルタ済み鏡面の最終ミップ(roughness=1)を使う。CSPrefilterがV=R=Nを仮定して
         // いるためroughness=1ではGGXの実効カーネルがコサイン畳み込みへ厳密に退化し、両者は同じ
         // E(N)/πを格納する(14.10節)。White Furnace Testで画素一致、実スカイボックスでも
-        // 最大2〜4/255の差しか出ないことを実機で確認したうえで専用マップを既定経路から外した。
+        // 最大2〜4/255の差しか出ないことを実機で確認してあるため、既定では専用マップを使わない。
         // これによりリフレクションプローブのような実行時のキューブマップ焼き直しから、最も重い
         // CSIrradiance(約9750万サンプル)を丸ごと省ける。
         // 畳み込み処理自体はいつでも検証できるよう残してあり、このトグルをONにすると
@@ -1320,8 +1380,7 @@ namespace Kurenai
         // プローブは1つずつ順に焼くため1枚で足りる
         std::unique_ptr<RHI::IRHITexture> m_ProbeRadianceCube;
         // 畳み込み結果(プローブごと)。DeferredLighting.hlslがTextureCubeArrayとして読む。
-        // 拡散イラディアンス側の配列(旧m_ProbeIrradianceArray)はM11 Stage 3で廃止した
-        // (反射プローブは鏡面専任になった。拡散はDDGIへ一本化)
+        // 反射プローブは鏡面専任なので拡散イラディアンス側の配列は持たない(拡散はDDGIへ一本化)
         std::unique_ptr<RHI::IRHITexture> m_ProbePrefilteredArray;
         // 距離キューブ(プローブごと、19.12節)。プローブ位置から各方向の被写体までのワールド距離。
         // 放射輝度と違い畳み込まないため、キャプチャからキューブ配列へ直接書き込む
@@ -1356,8 +1415,8 @@ namespace Kurenai
         // 従来の挙動になる。有効時も、箱との交点を探索範囲の上限として使う点は変わらない。
         //
         // 既定でfalseなのは、二重像が軽減される代わりにレイマーチの結果へ距離キューブの
-        // テクセルの階段状のエッジが乗るためで、実機で見比べた結果「全体としては良くなった
-        // とは言えない」という判断になった。式としては正しく動いており(19.12節の検証参照)、
+        // テクセルの階段状のエッジが乗るためで、実機で見比べると「全体としては良くなった
+        // とは言えない」ため。式としては正しく動いており(19.12節の検証参照)、
         // 距離キューブの解像度を上げるか2次モーメントを持って確率的に扱えば伸ばせる余地が
         // あるので、比較用のトグルとして残してある
         bool m_ProbeDepthParallaxEnabled = Defaults::ProbeDepthParallaxEnabled;
@@ -1391,7 +1450,7 @@ namespace Kurenai
             OnDemand,
             // 上に加えて、1プローブを12フレームかけて焼き直し、次のプローブへ回る(ラウンドロビン)。
             // 内訳は「6フレームで1面ずつキャプチャ」→「6フレームで1面ぶんのミップチェーンずつ畳み込み」
-            // (M11 Stage 5。畳み込みの割り当ての根拠はKurenaiEngine3D.cppのプリフィルタフェーズ参照)。
+            // (畳み込みの割り当ての根拠はKurenaiEngine3D.cppのプリフィルタフェーズ参照)。
             // 全プローブを毎フレーム焼くとドローコールがプローブ数×6倍になり非現実的なため、
             // 時間分割を既定の実装方式にしている
             Realtime,
@@ -1400,9 +1459,9 @@ namespace Kurenai
         // Realtimeの進行状態。次に焼くプローブ番号と面番号
         uint32_t m_ProbeRealtimeProbeIndex = 0;
         uint32_t m_ProbeRealtimeFace = 0;
-        // M11 Stage 5: プリフィルタ畳み込み(6ミップ×6面=36ディスパッチ)を1フレームへ集中させず、
-        // kProbeRealtimePrefilterStepsPerFrameずつ複数フレームへ分ける(19.8/19.10節が
-        // 「6フレームに1回のスパイク」と呼んでいた挙動を無くすため)。
+        // プリフィルタ畳み込み(6ミップ×6面=36ディスパッチ)を1フレームへ集中させず、
+        // kProbeRealtimePrefilterStepsPerFrameずつ複数フレームへ分ける(集中させると
+        // 「6フレームに1回のスパイク」になる)。
         // kProbePrefilterStepCount(36)が「プリフィルタ中でない」を表す番兵値
         static constexpr uint32_t kProbePrefilterStepCount = kIBLPrefilterMipLevels * kCubeFaceCount;
         // 1フレームに進めるステップ数。ステップ番号は「面を外側・ミップを内側」で(face, mip)へ
@@ -1511,7 +1570,7 @@ namespace Kurenai
         // 【反射プローブと違い「フルベイク」を持たない】反射プローブは8個までなので全プローブを
         // 1フレームで焼けるが、DDGIは数百個ある。同じことをするとBistroのようなシーンでは
         // 数百×6回のシーン描画が1フレームに集中して数秒のハングになる。
-        // DDGIはもともとヒステリシスで時間収束させる手法なので、初回も時間分割で埋めるのが素直。
+        // DDGIはヒステリシスで時間収束させる手法なので、初回も時間分割で埋めるのが素直。
         // ただし初回だけは「前の値」が存在しないため、一巡目はヒステリシスを使わず上書きする
         // (未初期化のアトラスと混ぜてはいけない)
         bool m_DDGIWarmingUp = true;
@@ -1548,7 +1607,7 @@ namespace Kurenai
         bool m_TimeAutoAdvance = Defaults::TimeAutoAdvance;
         float m_TimeAdvanceSpeed = Defaults::TimeAdvanceSpeed; // 自動進行時、1秒あたりに進む時間(時)
 
-        // 水面(P2: 水面マテリアル基盤)。m_TimeOfDayの自動進行とまったく同じ方針
+        // 水面。m_TimeOfDayの自動進行とまったく同じ方針
         // (RenderThreadMainが同じ場所・同じ条件分岐の形で進める)で、水面法線マップの
         // スクロール位相を[0,1)で持つ。FrameConstants.TimeParams.xとしてWater.hlslへ渡る
         float m_WaterScrollOffset = 0.0f;
@@ -1563,7 +1622,7 @@ namespace Kurenai
         float m_WaterWaveScale = Defaults::WaterWaveScale;
         float m_WaterWaveSpeed = Defaults::WaterWaveSpeed;
         float m_WaterWaveStrength = Defaults::WaterWaveStrength;
-        // 水面の反射に解析空フォールバックを使うか(P4: SSRの水面分岐)。SSRレイが画面外へ抜けた・
+        // 水面の反射に解析空フォールバックを使うか(SSRの水面分岐)。SSRレイが画面外へ抜けた・
         // 最大距離まで判定がつかなかった水面画素で、プリフィルタ済み鏡面IBL(128pxベースの
         // キューブマップをラフネス由来のミップで引くため広い水面ではにじむ)の代わりに
         // Sky.hlsliのSkyColorを画面解像度で直接評価する(SSR.hlslのPSMain参照)。
@@ -1571,7 +1630,7 @@ namespace Kurenai
         // シーンでは常に無効化される(SSRパスのExecute内、usingProceduralSkyとのAND判定)
         bool m_WaterAnalyticSkyReflection = Defaults::WaterAnalyticSkyReflection;
 
-        // --- 平面反射(P6) ---
+        // --- 平面反射 ---
         // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断の詳細は
         // Shaders/3D/PlanarReflection.hlsl冒頭のコメントを参照。反射解像度はレンダー解像度に
         // m_PlanarReflectionResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う
@@ -1607,12 +1666,12 @@ namespace Kurenai
         // 「水面は単一の水平な平面である」という前提に立っており、複数ある場合は最初のものだけを使う
         bool m_PlanarReflectionMultipleWaterLogged = false;
 
-        // --- 雲(P5) ---
-        // このフェーズでは積雲1層のみ(計画にある巻雲の多層化はP5の対象外)。
+        // --- 雲 ---
+        // 積雲(1層目)の有効/無効。巻雲は m_CirrusEnabled が別に持つ。
         // 無効時はFrameConstants.CloudParams0.xへ被覆率0を渡し、Sky.hlsli側の早期脱出
         // (SkyColor)を通す。CloudCoverageスライダー自体は動かせるが効果が出ない状態になる
         bool m_CloudEnabled = Defaults::CloudEnabled;
-        // 被覆率。0.45は写真の見た目に寄せて選んだ値であり、物理的な導出ではない
+        // 被覆率。0.40は写真の見た目に寄せて選んだ値であり、物理的な導出ではない
         // (実測で調整可能。EngineDefaults.h参照)
         float m_CloudCoverage = Defaults::CloudCoverage;
         // 雲底の高度[m](カメラのワールドY基準。Sky.hlsli EvaluateCloudLayerが視線との交点を
@@ -1626,10 +1685,10 @@ namespace Kurenai
         // 風向き(度)。太陽方位角(m_SunAzimuthDegrees)と同じ規約(X軸0度、Z軸(+方向)90度)
         float m_CloudWindDirectionDegrees = Defaults::CloudWindDirectionDegrees;
         float m_CloudForwardG = Defaults::CloudForwardG;
-        // 積雲をボリューム(スラブのレイマーチ)として描くか(P13b)。falseで従来の平面へ戻る。
+        // 積雲をボリューム(スラブのレイマーチ)として描くか。falseで従来の平面へ戻る。
         // シェーダー側へはCloudParams1.wの厚みを0にすることで伝える(専用のフラグは持たない)
         bool m_CloudVolumetric = Defaults::CloudVolumetric;
-        // 雲底から雲頂までの厚み[m](P13b)。EngineDefaults::CloudThicknessのコメント参照
+        // 雲底から雲頂までの厚み[m]。EngineDefaults::CloudThicknessのコメント参照
         float m_CloudThickness = Defaults::CloudThickness;
         // trueにすると雲のスクロールが止まる(m_WaterTimeFrozenの雲版。A/B比較などスクロールが
         // 揺れると困る場面で使う)
@@ -1639,12 +1698,12 @@ namespace Kurenai
         DirectX::XMFLOAT2 m_CloudScrollOffset{ 0.0f, 0.0f };
         // 判断B(被覆率による平均透過率をIBLキューブのベイク時にだけ掛ける)のキャッシュ。
         // bakeSkyThisFrameブロックで確定させ、ベイクとFrameConstantsが同じタイミングの
-        // 値を見るようにする(P9でGPU側へ移ったm_SkyParametersBufferと同じ更新タイミング)。
-        // P11で巻雲(m_CirrusCoverage)を加味した2層の積になるよう拡張した
+        // 値を見るようにする(GPU側のm_SkyParametersBufferと同じ更新タイミング)。
+        // 巻雲(m_CirrusCoverage)も加味した2層の積になる
         // (ComputeCloudAverageTransmittance参照)
         float m_ActiveCloudTransmittance = 1.0f;
 
-        // --- 巻雲(P11: 高層のレイヤーを2層目として追加し雲を多層化する) ---
+        // --- 巻雲(高層のレイヤーを2層目として追加し雲を多層化する) ---
         // m_CloudEnabled=falseのときと同じく、無効時はFrameConstants.CloudParams2.xへ
         // 被覆率0を渡し、Sky.hlsli側の早期脱出(SkyColor、判断C)を通す
         bool m_CirrusEnabled = Defaults::CirrusEnabled;
@@ -1662,11 +1721,21 @@ namespace Kurenai
         // 崩れるため。RenderThreadMainのスクロール更新箇所を参照)
         DirectX::XMFLOAT2 m_CirrusScrollOffset{ 0.0f, 0.0f };
 
+        // --- 星空 ---
+        // 夜空の星。Sky.hlsliのSkyColorが方向ハッシュで解析的に描く(テクスチャは使わない)。
+        // **IBLキューブ(SkyGenerate.hlsl)へは焼かない**ので、これらを変えても空の焼き直しは要らない
+        // (雲の風と同じ扱い。m_SkyBakeDirtyを立てないこと)
+        bool m_StarsEnabled = Defaults::StarsEnabled;
+        float m_StarsDensity = Defaults::StarsDensity;
+        float m_StarsBrightness = Defaults::StarsBrightness;
+        // またたきの強さ。既定0。上げるとTAAがちらつきとして拾い、A/B比較の再現性も落ちる
+        float m_StarsTwinkle = Defaults::StarsTwinkle;
+
         // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
         // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)
         float m_SunAzimuthDegrees = Defaults::SunAzimuthDegrees;
 
-        // 大気の濁り具合(P7: Preetham xyYモデルのタービディティ)。値が大きいほど地平線が白く
+        // 大気の濁り具合(Preetham xyYモデルのタービディティ)。値が大きいほど地平線が白く
         // 霞み、天頂の青が薄くなる。定義域はおおむね1.7〜10(EngineDefaults.h::SkyTurbidity参照)。
         // 変更すると空の焼き直しが必要(Render()のturbidityMoved判定参照)
         float m_SkyTurbidity = Defaults::SkyTurbidity;
@@ -1764,8 +1833,8 @@ namespace Kurenai
 
         // 現在描画しているシーン。ApplyLoadedScene(Renderスレッド)だけが差し替え、
         // Render()とUIパネル(いずれもRenderスレッド)だけが読む。つまりRenderスレッド専有の状態で、
-        // ミューテックスによる保護は不要(以前はLoadSceneがUpdateスレッドから直接書き換えていたため
-        // m_SceneMutexが要った。経緯はdocs/Architecture.html 23章)。
+        // ミューテックスによる保護は不要(LoadSceneがUpdateスレッドから直接書き換える構成だと
+        // ミューテックスが要る。26章)。
         //
         // 【読み込み中は空になる】シーン切り替えを開始した時点で旧シーンを手放すため
         // (VRAMの二重常駐を避けるため)、読み込みが終わるまでInstancesが空のまま描画される
@@ -1797,7 +1866,7 @@ namespace Kurenai
         // 多重発注を防ぐために見る
         bool m_SceneLoadInFlight = false;
 
-        // --- .ksceneのホットリロード(P16) -----------------------------------------------------
+        // --- .ksceneのホットリロード -----------------------------------------------------
         //
         // 起動し直さずに.ksceneの変更を絵へ出すための仕組み。読み込み自体は上の非同期経路を
         // そのまま使い(「今のシーンをもう一度読む」だけ)、ここが持つのは「いつ発注するか」だけ。
@@ -1839,7 +1908,7 @@ namespace Kurenai
         // 毎フレームのロックを避けるため、まずatomicで有無を判定してから中身を取りにいく
         std::atomic<bool> m_AppliedScenePending{ false };
         std::mutex m_AppliedSceneMutex;
-        // カメラを適用するか(P16)。ホットリロードで「現在のカメラを保持する」を選んでいるときだけ
+        // カメラを適用するか。ホットリロードで「現在のカメラを保持する」を選んでいるときだけ
         // falseになる。falseでもウィンドウタイトルの更新は行うため、引き渡し自体は毎回発生する
         bool m_AppliedSceneApplyCamera = true;
         Core::Camera m_AppliedSceneCamera;
@@ -1848,7 +1917,7 @@ namespace Kurenai
         // Loaderスレッド専有。「今どのスカイボックスを読み込み済みか」の真実。
         // スカイボックスを読むのがこのスレッドだけなので、ここで持つのが最も素直になる
         std::wstring m_LoaderSkyboxPath;
-        // 水面法線マップ版(P2)。m_LoaderSkyboxPathと同じ扱いで、空文字列なら
+        // 水面法線マップ版。m_LoaderSkyboxPathと同じ扱いで、空文字列なら
         // フラット法線フォールバックを読み込み済みであることを表す
         std::wstring m_LoaderWaterNormalMapPath;
 

@@ -37,11 +37,11 @@ SamplerState MaterialSampler : register(s0);
 // 色バッファ・ルックアップテーブル用。バイリニア補間したい一方で、UVの端が定義域の端なので
 // Wrapで引いてはいけないもの。
 //
-// 特にBRDF積分LUTは、この区別を怠って実際に不具合を出した箇所である。LUTはUVそのものが
+// 特にBRDF積分LUTは、この区別を怠ると壊れる。LUTはUVそのものが
 // 定義域(u = NdotV、v = roughness、どちらも[0,1])なので、Wrapで引くと u→1(視線が法線と一致する
 // 面の中央)でバイリニアのタップが u≈0(グレージング角)のテクセルへ回り込み、まったく別のEssが混ざる。
-// White Furnace Testの球の中心に数ピクセルの斑点として現れた(当時は異方性フィルタも併用しており、
-// 画面空間の勾配のぶんだけ回り込みが広がっていた)。v(roughness)側も同様で、
+// White Furnace Testの球の中心に数ピクセルの斑点として現れる(異方性フィルタを併用していると、
+// 画面空間の勾配のぶんだけ回り込みが広がる)。v(roughness)側も同様で、
 // roughness=0の面にroughness≈1の値が混ざる。詳細はdocs/Architecture.html 14.2.1節
 SamplerState ColorSampler : register(s1);
 

@@ -115,7 +115,7 @@ namespace Kurenai::RHI
         Wrap,
         // ルックアップテーブルのように「UVの端が定義域の端」であるテクスチャ用。端のテクセルを引き伸ばす。
         // Wrapのままだと端でバイリニア/異方性フィルタのタップが反対側の端へ回り込み、
-        // 無関係な値が混ざる(BRDF積分LUTのNdotV=1付近で実際に発生した。docs/Architecture.html 14.2節)
+        // 無関係な値が混ざる(BRDF積分LUTのNdotV=1付近で顕著。docs/Architecture.html 14.2節)
         Clamp,
     };
 

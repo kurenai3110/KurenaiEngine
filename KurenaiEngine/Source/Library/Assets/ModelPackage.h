@@ -330,10 +330,9 @@ namespace Kurenai::Assets
     // 元がDDS/TGAの場合は、既に圧縮・ミップ済みの配布形式として扱いそのままペイロードへ格納する
     // (TextureImage::LoadFromFileの拡張子判定を踏襲。BC7再圧縮・ミップ生成は行わない)。
     //
-    // .ktexcacheとの決定的な違い: SourceFileTime/SourceFileSizeを持たない。
-    // .ktexcacheは元画像から派生する自動失効キャッシュだったが、.ktexは元画像が無くても
-    // 成立する配布可能なアセットである。無効化は「パッカーを再実行するか」という
-    // ビルド上の判断に一本化される。
+    // **SourceFileTime/SourceFileSizeのような元ファイル依存の情報は持たない。**
+    // .ktexは元画像が無くても成立する配布可能なアセットであり(自動失効キャッシュではない)、
+    // 無効化は「パッカーを再実行するか」というビルド上の判断に一本化される。
 
     constexpr char kPackedTextureMagic[4] = { 'K', 'T', 'E', 'X' };
     constexpr uint32_t kPackedTextureVersion = 1;

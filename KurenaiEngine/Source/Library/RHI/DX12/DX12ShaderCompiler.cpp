@@ -52,7 +52,7 @@ namespace Kurenai::RHI
         // BOMの無いファイルの文字コードをシステムのANSIコードページとして解釈する。
         // このエンジンのシェーダーはBOM無しUTF-8で日本語コメントを含むため、
         // 日本語環境(CP932)ではUTF-8のバイト列が不正なCP932列として扱われ、
-        // コンパイル以前にERROR_NO_UNICODE_TRANSLATION(0x80070459)で失敗する(実際に発生)。
+        // コンパイル以前にERROR_NO_UNICODE_TRANSLATION(0x80070459)で失敗する。
         // 自前で読み込んでCP_UTF8を明示することで、シェーダーファイル側にBOMを付ける
         // (DX11のd3dcompiler経路にも影響が及ぶ)ことなく解決する
         class Utf8IncludeHandler : public IDxcIncludeHandler

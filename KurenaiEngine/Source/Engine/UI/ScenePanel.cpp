@@ -17,7 +17,7 @@ namespace Kurenai::UI
 {
     namespace
     {
-        // 現在のカメラを.ksceneの[Camera]セクションにそのまま貼れる文字列にする(P16)。
+        // 現在のカメラを.ksceneの[Camera]セクションにそのまま貼れる文字列にする。
         //
         // 【単位に注意】Core::CameraのYaw/Pitchはラジアン、.ksceneの[Camera]Yaw/Pitchは度。
         // 変換はSceneLoader.cppが読み込み時に行っている(XMConvertToRadians)ので、
@@ -46,7 +46,7 @@ namespace Kurenai::UI
             return;
         }
 
-        // --- .ksceneのホットリロード(P16) ---
+        // --- .ksceneのホットリロード ---
         //
         // 【なぜ一覧より前に置くか】シーンの切り替えはたまにしか使わないが、再読み込みと
         // カメラの書き出しは.ksceneを詰めている間ずっと使う。パネルは他のパネルとドックを
@@ -82,10 +82,10 @@ namespace Kurenai::UI
             "オンでも新しいシーンのカメラが適用される");
         EndParamGroup();
 
-        // --- 現在のカメラを[Camera]の書式で書き出す(P16) ---
+        // --- 現在のカメラを[Camera]の書式で書き出す ---
         //
         // UIにはカメラの位置・向きを表示する場所が他に無いため、「飛び回って構図を見つける →
-        // その視点を.ksceneへ書き戻す」がこれまでできなかった。P10(構図の追い込み)で必要になる
+        // その視点を.ksceneへ書き戻す」をこのボタンで賄う
         if (context.Camera != nullptr)
         {
             const std::string section = FormatCameraSection(*context.Camera);

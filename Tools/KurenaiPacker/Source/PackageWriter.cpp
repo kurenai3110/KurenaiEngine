@@ -393,7 +393,7 @@ namespace KurenaiPacker
                     }
 
                     // TEX_FILTER_FORCE_NON_WIC を必ず付ける。既定のWIC経由の縮小は
-                    // R8_UNORMのような単一チャンネル形式を扱えず、E_FAILで落ちる(実際に発生)。
+                    // R8_UNORMのような単一チャンネル形式を扱えず、E_FAILで落ちる。
                     // 非WICのボックスフィルタなら同じ形式のまま縮小できる
                     DirectX::ScratchImage mipChain;
                     hr = DirectX::GenerateMipMaps(

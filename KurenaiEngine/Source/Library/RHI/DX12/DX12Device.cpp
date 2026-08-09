@@ -525,15 +525,29 @@ namespace Kurenai::RHI
         CD3DX12_DESCRIPTOR_RANGE samplerRange;
         samplerRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, kSamplerSlotCount, 0);
 
-        CD3DX12_ROOT_PARAMETER rootParams[4];
+        CD3DX12_ROOT_PARAMETER rootParams[5];
         rootParams[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
         rootParams[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);
         rootParams[2].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL);
         rootParams[3].InitAsDescriptorTable(1, &samplerRange, D3D12_SHADER_VISIBILITY_PIXEL);
+        // 頂点シェーダ専用のStructuredBuffer(IRHICommandList::SetVertexShaderResourceBuffer)。
+        //
+        // 【なぜディスクリプタテーブルではなくルートSRVなのか】用途が「1回のDrawで参照する
+        // 構造化バッファ1本」に限られるため、ディスクリプタヒープへブロックを払い出して
+        // CopyDescriptorsする経路(rootParams[2]がやっていること)を通す必要がない。
+        // ルートSRVならGPU仮想アドレスを直接書き込むだけで済み、ヒープの割り当ても
+        // Draw直前のフラッシュも不要になる。
+        //
+        // 【t0がrootParams[2]のレンジ(t0〜t20)と重なるが衝突しない理由】rootParams[2]は
+        // D3D12_SHADER_VISIBILITY_PIXEL、こちらはD3D12_SHADER_VISIBILITY_VERTEXで、
+        // 可視ステージが素で分離している。ルートシグネチャの一意性はシェーダーステージごとに
+        // 判定されるため、頂点シェーダから見えるt0はこのルートSRVだけ、ピクセルシェーダから
+        // 見えるt0はテーブル側だけになる
+        rootParams[4].InitAsShaderResourceView(0, 0, D3D12_SHADER_VISIBILITY_VERTEX);
 
         CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc;
         rootSigDesc.Init(
-            4, rootParams, 0, nullptr,
+            5, rootParams, 0, nullptr,
             D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT | GetBindlessRootSignatureFlags());
 
         Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;

@@ -70,9 +70,7 @@ namespace KurenaiPacker
 
         // FBXは「Textures/xxx.dds」のようなパスやファイル名のみを格納している場合があり、
         // モデルからの相対パスをそのまま連結しただけでは見つからないことがあるため複数候補を試す
-        // (KurenaiEngine/Source/Library/Assets/ModelLoader.cppの旧ResolveTexturePathと同じロジック。
-        // 従来は実行時に毎回この探索を行っていたが、パック時に一度だけ確定させることで
-        // ランタイムからパス探索そのものが消える)
+        // (パック時に一度だけ確定させるため、ランタイムにはパス探索そのものが無い)
         std::wstring ResolveTexturePath(const std::wstring& directory, const std::wstring& rawPath)
         {
             std::wstring candidate = directory + rawPath;
@@ -327,10 +325,9 @@ namespace KurenaiPacker
         // 接線はassimpのaiProcess_CalcTangentSpaceに任せず自前で計算する(下記の頂点ループ内、
         // TangentAccumKey関連のコード参照)。CalcTangentSpaceはUV面積がほぼ0(縮退)の三角形で
         // 接線が数値的に不安定になり、位置・法線・UVが完全に同一の頂点間でさえ接線がほぼ正反対に
-        // なることがある(ガラス製小物のメッシュで実際に確認済み)。JoinIdenticalVerticesは
-        // 以前は「頂点バッファがやや冗長になるだけ」という理由で付けていなかったが、重複頂点を
-        // 減らせるため付けておく(自前の接線平均化は位置+法線をキーにしており重複頂点の有無に
-        // 依存しないため、平均化の正しさ自体には影響しない)
+        // なることがある。JoinIdenticalVerticesは重複頂点を減らせるため付けておく
+        // (自前の接線平均化は位置+法線をキーにしており重複頂点の有無に依存しないため、
+        // 平均化の正しさ自体には影響しない)
         const aiScene* scene = importer.ReadFile(
             WideToUtf8(filePath),
             aiProcess_Triangulate | aiProcess_ConvertToLeftHanded | aiProcess_JoinIdenticalVertices);

@@ -161,6 +161,23 @@ namespace Kurenai::RHI
         }
     }
 
+    void DX11CommandList::SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer)
+    {
+        if (buffer == nullptr)
+        {
+            Core::Logger::Error(
+                "DX11", "SetVertexShaderResourceBuffer: バッファがnullptrのためバインドをスキップします");
+            return;
+        }
+
+        // 頂点シェーダのSRVスロットはピクセルシェーダのそれとは完全に独立しているため、
+        // m_BoundPixelSrvs(SRV/UAVの同時バインド回避用のシャドウ)には記録しない。
+        // このバッファはコンピュートがUAVで書くことがなく、UAVとの衝突が起こり得ないため
+        auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
+        ID3D11ShaderResourceView* srvs[] = { dx11Buffer->GetShaderResourceView() };
+        m_Context->VSSetShaderResources(slot, 1, srvs);
+    }
+
     // 指定リソースをピクセルシェーダのSRVスロットから外す。
     // DX11は同一リソースをSRVとUAVに同時バインドできず、そのまま両方バインドすると
     // ドライバが片方を黙って外して警告を出す。UAVでの書き込み直前にSRV側を明示的に外すことで、

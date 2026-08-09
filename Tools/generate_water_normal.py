@@ -1,4 +1,4 @@
-"""モン・サン=ミシェル検証シーン(P1)用の、水面用タイル可能な接線空間法線マップを生成する。
+"""モン・サン=ミシェル検証シーン用の、水面用タイル可能な接線空間法線マップを生成する。
 
 512x512のRGBA8 PNG。複数オクターブのvalue noiseから高さ場を作り、中央差分で
 接線空間法線を求めて (n*0.5+0.5) をRGBへ格納する(Aは常に255)。
@@ -25,9 +25,9 @@ KurenaiEngine3D/Shaders/3D/GBuffer.hlslのPSMainは、法線マップのXY(RG)�
 
 生成物: Assets/Source/MontSaintMichelStudy/WaterNormal.png
 このフェーズではWater.gltf(generate_water_plane.py)のマテリアルからは参照しない
-(法線マップの貼り付けはP2で行う。今回はテクスチャアセットの生成だけを扱う)。そのため
+(このスクリプトはテクスチャアセットの生成だけを扱う)。そのため
 KurenaiPacker.exeによる.ktexへの変換は、Water.gltfのマテリアルへnormalTextureとして
-組み込んでモデルごとパックするタイミング(P2)まで不要(KurenaiPackerはモデルが参照する
+組み込んでモデルごとパックするタイミングまで不要(KurenaiPackerはモデルが参照する
 テクスチャだけを処理するため、参照されていないPNG単体を変換するコマンドは無い)。
 """
 

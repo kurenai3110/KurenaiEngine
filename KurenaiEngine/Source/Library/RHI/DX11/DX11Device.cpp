@@ -476,11 +476,11 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11BlendState> blendState;
         ThrowIfFailed(m_Device->CreateBlendState(&blendDesc, &blendState), "ブレンドステートの作成に失敗しました");
 
-        // ラスタライザステートも同様にPSO単位で持たせる。以前はRSSetStateを一度も呼ばず
-        // D3D11の既定状態(ソリッド塗り・裏面カリング・時計回りが表)に任せていたが、
-        // ミラーリングされたインスタンスをFrontCounterClockwise=TRUEで描き分けられるように
-        // 明示的に作成する。CD3D11_RASTERIZER_DESC(D3D11_DEFAULT)はその既定状態そのものなので、
-        // FrontCounterClockwise以外の項目は従来の挙動から変わらない
+        // ラスタライザステートも同様にPSO単位で持たせる。ミラーリングされたインスタンスを
+        // FrontCounterClockwise=TRUEで描き分けられるように明示的に作成する。
+        // CD3D11_RASTERIZER_DESC(D3D11_DEFAULT)はD3D11の暗黙の既定状態
+        // (ソリッド塗り・裏面カリング・時計回りが表)と全項目一致するため、
+        // FrontCounterClockwise以外の挙動は変わらない
         CD3D11_RASTERIZER_DESC rasterizerDesc(D3D11_DEFAULT);
         rasterizerDesc.FrontCounterClockwise = desc.FrontCounterClockwise ? TRUE : FALSE;
 

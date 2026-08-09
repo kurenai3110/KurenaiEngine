@@ -35,7 +35,12 @@ TAA(モーションベクターによる再投影で複数フレームを蓄積�
 - **[docs/KurenaiEngine.html](docs/KurenaiEngine.html)** — APIリファレンス。KurenaiEngineを
   使って新しいアプリケーションを作る場合は、まずこちらを参照してください。
 - **[docs/Architecture.html](docs/Architecture.html)** — 実装者向けドキュメント。描画パイプラインの
-  内部設計や実装判断について知りたい場合はこちらを参照してください。
+  構成・責務分割・インターフェース規約など、設計と仕様の全体像はこちらです。
+- **[docs/ImplementationDetail.md](docs/ImplementationDetail.md)** — 実装詳細。既定値や
+  しきい値の根拠、式の導出、検証手順といった具体的な内容と理由はこちらです。
+- **[docs/ImplementationHistory.md](docs/ImplementationHistory.md)** — 実装経緯。現在の設計が
+  なぜその形になったのか(以前どうだったか・何が問題として現れたか・どう直したか)を
+  知りたい場合はこちらを参照してください。
 
 ## 構成
 
@@ -59,13 +64,19 @@ Tools/
   KurenaiPacker/  KurenaiPacker.sln   アセットビルドツール(Application)。独立ソリューション。
                                        assimp/DirectXTexに依存(KurenaiEngineの各DLLとは別依存)
                   Build/               KurenaiPacker.exeの出力先(Git管理対象外)
+  KurenaiShowEditor/ KurenaiShowEditor.sln  ドローンショー(.kshow)のオーサリングツール。
+                                       独立ソリューション。エンジンの2つのDLLに依存し、
+                                       エンジンでプレビューしながら編隊を作る
+                  Build/               KurenaiShowEditor.exeの出力先(Git管理対象外)
 docs/                           ドキュメント(APIリファレンス・実装者向け)
 ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
 Scenes/                         手書きの.kscene(シーンファイル)。小さなテキストのためGit管理対象
+Shows/                          ドローンショーの.kshow。バイナリだが手で作る資産のためGit管理対象
+                                 (.kmodel等の派生物とは違い、元になるファイルが他に無い)
 Assets/                         アセット(Git管理対象外)
   Source/                        入力。ソースモデル(.gltf/.fbx等)
   Packed/                        出力。KurenaiPacker.exeが生成する.kmodel/.kgeom/.ktexと
-                                   検証済みの.kscene。KurenaiEngine3Dが実際に読み込むのはこちら
+                                   検証済みの.kscene・.kshow。KurenaiEngine3Dが実際に読み込むのはこちら
 Build/                          3つのDLL単体の出力先(Git管理対象外)。
                                  Build\Bin\<Platform>\<Configuration>\<プロジェクト名>\ にDLLと、
                                  それが参照するShadersのコピーが揃う
@@ -410,6 +421,70 @@ WaveStrength = 0.25                               # 省略可(既定0.25)
 ```
 
 対象インスタンスは「デバッグ表示」パネルの「水面マスク」で白く表示され確認できます。
+
+### ドローンショー
+
+`[DroneShow]`セクションを書くと、夜空を編隊飛行する発光ドローンの群れを描画します。
+1機につきカメラへ正対するビルボードを1枚、加算合成で描き、編隊から編隊へ順に変形して
+いきます。水面がある場合は編隊がそのまま映り込みます。
+
+**ショーの中身は`.kshow`というデータファイルが持ちます。** 編隊の点そのもの・機体数・
+保持時間・変形時間・明るさ・機体の半径・揺れ・再生速度・種はすべてそちらにあり、
+`.kscene`が決めるのは「出すか」と「どこにどの大きさで置くか」だけです。
+同じショーを別のシーンへ別の場所・別の規模で置けるのはこの分担があるためです。
+`.kshow`を作る・編集するには`Tools\KurenaiShowEditor`(下記)を使います。
+
+光芒はこのパスでは作らずHDRのまま出力してブルームに任せているため、
+**`[Bloom]`も合わせて有効にしてください**(エンジンの既定は無効です)。
+`[Stars]`で夜空に星を描けます(星は昼のシーンには影響しません)。
+
+```ini
+[Bloom]
+Enabled = true
+Strength = 0.15
+
+[Stars]
+Enabled = true
+
+[DroneShow]
+Enabled = true
+Path = Shows/Standard.kshow   # Assetsルートからの相対パス([Model]Pathと同じ基準)
+Center = 0, 200, 100          # 編隊の中心(ワールド座標)
+Scale = 140.0                 # 編隊の代表半径[m]。.kshowの点は代表半径1へ正規化されている
+```
+
+すぐ試すには `Sample3D.exe -scene DroneShow` を起動してください
+(`Scenes/DroneShow.kscene`。干潟の夜景の上空で1500機が飛びます)。
+
+> **DX12(レイトレーシング反射)では水面に機体が映りません。** 機体は手続き的に展開する
+> ビルボードで高速化構造(TLAS)に入っておらず、反射のレイからは原理的に見えないためです。
+> 「レンダリング」パネルから反射の手法をスクリーンスペースへ切り替えると映ります
+> (平面反射パスはそのときだけ登録されます)。DX11は既定でスクリーンスペースなので影響しません。
+
+各キーの意味と範囲は[APIリファレンス](docs/KurenaiEngine.html)の`.kscene`書式の表を参照してください。
+
+### ショーの作成(KurenaiShowEditor)
+
+`.kshow`はバイナリのデータファイルで、`Tools\KurenaiShowEditor`が読み書きします。
+エディタはエンジンをそのまま使ってプレビューするので、トーンマップ・ブルーム・露出は
+本番と同じ経路を通ります(発光点は加算合成とACESの組み合わせで「上げても白く飛ぶだけ」の
+領域があり、別経路のプレビューでは判断できません)。
+
+```
+MSBuild Tools\KurenaiShowEditor\KurenaiShowEditor.sln /p:Configuration=Release /p:Platform=x64
+
+rem GUIで編集する(既定でDroneShowシーンとAssets\Shows\Standard.kshowを開く)
+Tools\KurenaiShowEditor\Build\Bin\x64\Release\KurenaiShowEditor.exe
+
+rem 標準の6形状(球・円環・二重らせん・格子・ハート・らせん)を書き出す。
+rem 書いたあと読み直してバイト一致まで検査する
+Tools\KurenaiShowEditor\Build\Bin\x64\Release\KurenaiShowEditor.exe ^
+    --generate-standard Shows\Standard.kshow
+```
+
+リポジトリが持つ`.kshow`は`Scenes\*.kscene`と同じくリポジトリ直下の`Shows\`にあります。
+ランタイムが読むのは`Assets\Packed\Shows\`側なので、更新したらそちらへコピーしてください
+(`.kscene`を`Assets\Packed\Scenes\`へ置くのと同じ手順です)。
 
 ## 実行(Sample3D)
 

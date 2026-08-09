@@ -33,6 +33,7 @@ namespace Kurenai::RHI
         void SetTexture(uint32_t slot, IRHITexture* texture) override;
         void SetSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
+        void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
         void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
@@ -72,6 +73,16 @@ namespace Kurenai::RHI
         static constexpr uint32_t kConstantBufferSlotCount = 2;
         D3D12_GPU_VIRTUAL_ADDRESS m_CurrentRootCbv[kConstantBufferSlotCount]{};
         D3D12_GPU_VIRTUAL_ADDRESS m_CurrentComputeRootCbv[kConstantBufferSlotCount]{};
+
+        // 頂点シェーダ専用SRV(ルートパラメータ4)のシャドウ。定数バッファと同じく、
+        // SetPipelineStateがルート引数を無効化したあとに張り直すために保持する。
+        // ルートSRVはディスクリプタテーブルではないのでスロットは1本だけ(t0固定)
+        D3D12_GPU_VIRTUAL_ADDRESS m_CurrentVertexRootSrv = 0;
+        // ルートシグネチャ上の、頂点シェーダ専用SRVのルートパラメータ番号
+        // (DX12Device::CreateRootSignatureのrootParams[4]と一致させること)
+        static constexpr uint32_t kVertexShaderSrvRootParameterIndex = 4;
+        // SetVertexShaderResourceBufferで有効なスロット。ルートSRVはt0の1本だけを割り当てている
+        static constexpr uint32_t kVertexShaderSrvSlotCount = 1;
 
         // SRVスロット(t0〜t17)のシャドウ。SetTexture/SetShaderResourceBufferはCopyDescriptorsを
         // その場では呼ばず、コピー元ハンドルをここへ記録するだけにして、Draw直前の

@@ -14,8 +14,7 @@ namespace Kurenai::RHI
     //
     // DX12Util.hにも同じ名前・同じシグネチャの関数がログのタグだけ変えて定義されている。
     // inlineのままだと同一名前空間の同一シグネチャで実体が2つある状態(ODR違反)になり、
-    // リンカがどちらか一方に統一してしまう。実際にDX12側のThrowIfFailedがこちらの実体に
-    // 差し替えられ、DX12のエラーが[DX11]タグでログに出ていた(実際に発生)。
+    // リンカがどちらか一方に統一してしまい、DX12のエラーが[DX11]タグでログに出る。
     // staticにして翻訳単位ごとに別の実体を持たせることで、includeしたヘッダ側のタグが必ず使われる
     static inline void ThrowIfFailed(HRESULT hr, const std::string& message)
     {

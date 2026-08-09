@@ -1,7 +1,7 @@
 // GBuffer.hlsl/Water.hlslが共有する頂点シェーダー・構造体・cbuffer宣言。
 //
 // 両者は「頂点変換・G-Bufferへの書き込み方の枠組み」が完全に同一で、違いはPSMain内の
-// 法線の求め方とMaterial.aへ書くマテリアルIDだけ(P2: 水面マテリアル基盤)。
+// 法線の求め方とMaterial.aへ書くマテリアルIDだけ(水面マテリアル基盤)。
 // そのため頂点シェーダーVSMain・入出力構造体・cbuffer宣言をこのヘッダーへ括り出し、
 // GBuffer.hlsl/Water.hlslはそれぞれのPSMainだけを持つようにしている。
 #ifndef KURENAI_GBUFFER_COMMON_HLSLI
@@ -12,7 +12,7 @@
 #include "Samplers.hlsli"
 
 // G-BufferのMaterial.aに書き込むマテリアル種別ID。0=通常マテリアル(GBuffer.hlslのPSMainが
-// そのまま0.0fを書く)、1=水面。将来SSR.hlsl側で水面の反射統合(P4)を行う際にもこの値を
+// そのまま0.0fを書く)、1=水面。将来SSR.hlsl側で水面の反射統合を行う際にもこの値を
 // 参照する予定のため、値を変える場合は参照側(SSR.hlsl)も必ず同時に直すこと
 static const float kMaterialIDWater = 1.0f;
 
@@ -54,12 +54,12 @@ cbuffer FrameConstants : register(b0)
     // C++側 KurenaiEngine3D.cpp の FrameConstants ではDDGIParams4の直後にあるため、
     // 後続のTimeParams(Water.hlslが読む)のオフセットを合わせるために宣言する
     float4 OcclusionParams;
-    // 水面用(末尾に追加、P2)。x=水面法線マップのスクロールオフセット(0〜1、CPU側で
+    // 水面用(末尾に追加)。x=水面法線マップのスクロールオフセット(0〜1、CPU側で
     // 既にfmod済み)、y=波のスケール倍率(m_WaterWaveScale、層ごとのUVスケールに掛ける)、
     // z=波の強さ(m_WaterWaveStrength、0〜1、距離減衰のweightに掛ける)、w=未使用。
     // GBuffer.hlslのPSMainは使わないが、Water.hlslのPSMainが読む
     float4 TimeParams;
-    // 空の解析評価用(P3)・雲(P5)・巻雲(P11)・平面反射(P6)。GBuffer.hlsl/Water.hlslのどちらの
+    // 空の解析評価用・雲・巻雲・平面反射。GBuffer.hlsl/Water.hlslのどちらの
     // PSMainも使わないが、C++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させる
     // 目的だけで宣言する(他シェーダーの同名フィールドと同じ扱い)
     float4 SkySunDirection;
@@ -69,11 +69,11 @@ cbuffer FrameConstants : register(b0)
     float4 CloudParams2;
     float4 CloudParams3;
     float4 PlanarReflectionPlane;
-    // 大気遠近(P8、末尾に追加)。GBuffer.hlsl/Water.hlslのどちらのPSMainも使わない
+    // 大気遠近(末尾に追加)。GBuffer.hlsl/Water.hlslのどちらのPSMainも使わない
     // (オフセット合わせのためだけに宣言する)
     float4 FogParams0;
     float4 FogParams1;
-    // 水中項(P8)。xyz=水体の色(リニア)、w=未使用。GBuffer.hlslのPSMainは使わないが、
+    // 水中項。xyz=水体の色(リニア)、w=未使用。GBuffer.hlslのPSMainは使わないが、
     // Water.hlslのPSMainが「メッシュ自身のBaseColorFactorではなくこの色を出力Albedoに使う」ために読む
     // (干潟の水の色はシーン側で調整したいパラメータであり、.kmodelを焼き直さずに変えられるようにするため)
     float4 WaterBodyColor;
@@ -98,17 +98,16 @@ cbuffer ObjectConstants : register(b1)
     float AlphaCutoff;
     float3 EmissiveFactor;
     // glTFのocclusionTexture.strength(既定1.0)。遮蔽マップの効き具合をlerp(1, ao, strength)で
-    // 調整する。かつて純粋な詰め物(ObjectPadding)だった枠をそのまま使っているため、
-    // 定数バッファのサイズ・オフセットは変わっていない
+    // 調整する
     float OcclusionStrength;
     // glTFのpbrMetallicRoughness.baseColorFactor(既定[1,1,1,1])。glTF仕様では
     // baseColor = baseColorTexture * baseColorFactor と定義されており、テクスチャの有無に
     // 関わらず常に掛ける。半透明パス(Transparent.hlsl)・プローブ焼き込み(ProbeCapture.hlsl)・
-    // レイトレーシング(RaytracingScene.hlsli)は以前から掛けていたが、この不透明パスだけが
-    // 宣言しておらず落としていた。そのため同じメッシュでも「直接見たとき」と
-    // 「反射プローブ/RT反射に映ったとき」で色が食い違っていた(14章参照)
+    // レイトレーシング(RaytracingScene.hlsli)も同じく掛ける。**どれか1つでも落としてはいけない**
+    // ―― 同じメッシュでも「直接見たとき」と「反射プローブ/RT反射に映ったとき」で
+    // 色が食い違う(14章参照)
     float4 BaseColorFactor;
-    // マテリアル種別ID(末尾に追加、P2)。0=通常マテリアル、1=水面(kMaterialIDWater、上記参照)。
+    // マテリアル種別ID(末尾に追加)。0=通常マテリアル、1=水面(kMaterialIDWater、上記参照)。
     // C++側 KurenaiEngine3D::MakeObjectConstants が instance.IsWater に応じて設定する
     float MaterialID;
 

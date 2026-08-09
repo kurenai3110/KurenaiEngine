@@ -25,6 +25,7 @@ namespace Kurenai::RHI
         void SetTexture(uint32_t slot, IRHITexture* texture) override;
         void SetSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
+        void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
         void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
@@ -53,8 +54,8 @@ namespace Kurenai::RHI
         // この値が足りないと、反射プローブ(19章)が張るキューブマップ配列・影響範囲バッファ・
         // 距離キューブや、DDGI(22章)のアトラス2枚が下のm_BoundPixelSrvsの追跡から漏れる。
         // そうなるとUnbindPixelSrvForResourceがこれらを外せず、ベイクがUAVで書き込む際の
-        // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう
-        // (実際に12のまま放置され、t12/t13が漏れていた)。
+        // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう。
+        // **SetTextureは範囲外スロットも素通しするため、漏れていても描画結果には現れない。**
         //
         // 【現在の21の内訳】最も多く使うDeferredLighting.hlslがt0〜t20をちょうど使い切る:
         //   t0〜t7   G-Buffer一式(アルベド/直接光/マテリアル/深度/スカイボックス/AO/自発光/法線)
