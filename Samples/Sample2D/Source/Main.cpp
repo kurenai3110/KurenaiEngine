@@ -32,6 +32,7 @@ namespace
         Input,       // 2: 入力(押下エッジ・解放エッジ・ホイール)
         Sound,       // 3: サウンド(ボイス音量のフェード・マスター音量)
         Shapes,      // 4: 図形(角丸矩形の回転・円の枠線)
+        Atlas,       // 5: テクスチャアトラス(DrawSpriteUV / GetTextureSize)
         Count
     };
 
@@ -82,6 +83,7 @@ namespace
         case DemoScene::Input: return L"2: 入力 (押下エッジ・解放エッジ・ホイール)";
         case DemoScene::Sound: return L"3: サウンド (ボイス音量のフェード・マスター音量)";
         case DemoScene::Shapes: return L"4: 図形 (角丸矩形の回転・円の枠線)";
+        case DemoScene::Atlas: return L"5: テクスチャアトラス (DrawSpriteUV / GetTextureSize)";
         default: return L"(不明なデモ画面)";
         }
     }
@@ -290,6 +292,149 @@ namespace
         return file.good();
     }
 
+    // アトラスのデモ用に、4x4の区画に分けた24bit BMPを書き出す。区画ごとに色を変え、
+    // 左上へ向かうグラデーションを付けてDrawSpriteUVで切り出した向きが分かるようにする。
+    // リポジトリに画像ファイルを持たせずにアトラスの部分描画を示すため
+    // (LoadTextureはWIC経由なのでBMPをそのまま読める)
+    constexpr uint32_t kAtlasCellCount = 4;   // 1辺あたりの区画数
+    constexpr uint32_t kAtlasCellPixels = 64; // 1区画のピクセル数
+
+    bool WriteAtlasBmp(const std::wstring& filePath)
+    {
+        constexpr uint32_t kSize = kAtlasCellCount * kAtlasCellPixels;
+        // 24bit BMPは行を4バイト境界へ揃える必要がある(kSize=256なので256*3=768で既に揃っている)
+        constexpr uint32_t kRowBytes = kSize * 3;
+        std::vector<uint8_t> pixels(static_cast<size_t>(kRowBytes) * kSize, 0);
+
+        for (uint32_t y = 0; y < kSize; ++y)
+        {
+            for (uint32_t x = 0; x < kSize; ++x)
+            {
+                const uint32_t cellX = x / kAtlasCellPixels;
+                const uint32_t cellY = y / kAtlasCellPixels;
+                const uint32_t index = cellY * kAtlasCellCount + cellX;
+
+                // 区画ごとに色相をずらした色。区画の境界が分かるよう外周1pxは暗くする
+                const float hue = static_cast<float>(index) / static_cast<float>(kAtlasCellCount * kAtlasCellCount);
+                float rf = 0.5f + 0.5f * std::sinf(hue * 6.2831853f);
+                float gf = 0.5f + 0.5f * std::sinf(hue * 6.2831853f + 2.0944f);
+                float bf = 0.5f + 0.5f * std::sinf(hue * 6.2831853f + 4.1888f);
+
+                // 区画内での位置に応じた明暗。左上が明るく右下が暗いので、切り出した向きが分かる
+                const float localX = static_cast<float>(x % kAtlasCellPixels) / static_cast<float>(kAtlasCellPixels);
+                const float localY = static_cast<float>(y % kAtlasCellPixels) / static_cast<float>(kAtlasCellPixels);
+                const float shade = 1.0f - 0.6f * (localX + localY) * 0.5f;
+                rf *= shade;
+                gf *= shade;
+                bf *= shade;
+
+                const bool isEdge =
+                    (x % kAtlasCellPixels) == 0 || (x % kAtlasCellPixels) == kAtlasCellPixels - 1 ||
+                    (y % kAtlasCellPixels) == 0 || (y % kAtlasCellPixels) == kAtlasCellPixels - 1;
+                if (isEdge)
+                {
+                    rf *= 0.25f;
+                    gf *= 0.25f;
+                    bf *= 0.25f;
+                }
+
+                // BMPはボトムアップ(先頭行が画像の最下行)なのでyを反転して書く
+                const size_t offset = static_cast<size_t>(kSize - 1 - y) * kRowBytes + static_cast<size_t>(x) * 3;
+                pixels[offset + 0] = static_cast<uint8_t>(bf * 255.0f); // BGRの順
+                pixels[offset + 1] = static_cast<uint8_t>(gf * 255.0f);
+                pixels[offset + 2] = static_cast<uint8_t>(rf * 255.0f);
+            }
+        }
+
+        std::ofstream file(filePath, std::ios::binary);
+        if (!file)
+        {
+            return false;
+        }
+
+        const auto writeU32 = [&file](uint32_t value) { file.write(reinterpret_cast<const char*>(&value), 4); };
+        const auto writeU16 = [&file](uint16_t value) { file.write(reinterpret_cast<const char*>(&value), 2); };
+        const uint32_t dataBytes = static_cast<uint32_t>(pixels.size());
+
+        file.write("BM", 2);                 // BITMAPFILEHEADER
+        writeU32(14 + 40 + dataBytes);       // ファイル全体のサイズ
+        writeU16(0);
+        writeU16(0);
+        writeU32(14 + 40);                   // 画素データまでのオフセット
+        writeU32(40);                        // BITMAPINFOHEADERのサイズ
+        writeU32(kSize);
+        writeU32(kSize);
+        writeU16(1);                         // プレーン数
+        writeU16(24);                        // ビット深度
+        writeU32(0);                         // BI_RGB(無圧縮)
+        writeU32(dataBytes);
+        writeU32(2835);                      // 解像度(72dpi相当。表示には影響しない)
+        writeU32(2835);
+        writeU32(0);
+        writeU32(0);
+        file.write(reinterpret_cast<const char*>(pixels.data()), dataBytes);
+        return file.good();
+    }
+
+    // 「5: テクスチャアトラス」のデモ
+    void DrawAtlasDemo(KurenaiEngine2D& renderer, TextureHandle atlas, float width, float height)
+    {
+        if (!atlas.IsValid())
+        {
+            renderer.DrawText(width * 0.5f, height * 0.5f, L"アトラス用のBMPを用意できなかったため、このデモは無効です",
+                20.0f, 0.88f, 0.90f, 0.96f, 1.0f, true);
+            return;
+        }
+
+        uint32_t atlasWidth = 0;
+        uint32_t atlasHeight = 0;
+        renderer.GetTextureSize(atlas, atlasWidth, atlasHeight);
+
+        renderer.DrawText(width * 0.5f, height * 0.86f,
+            L"GetTextureSize: " + std::to_wstring(atlasWidth) + L" x " + std::to_wstring(atlasHeight) + L" px",
+            20.0f, 0.88f, 0.90f, 0.96f, 1.0f, true);
+
+        // 左: DrawSpriteでアトラス全体を表示
+        const float wholeSize = 256.0f;
+        const float wholeX = width * 0.25f;
+        const float wholeY = height * 0.5f;
+        renderer.DrawText(wholeX, wholeY + wholeSize * 0.5f + 24.0f, L"DrawSprite (テクスチャ全体)", 18.0f, 0.8f, 0.83f, 0.9f, 1.0f);
+        renderer.DrawSprite(wholeX, wholeY, wholeSize, wholeSize, 0.0f, atlas, 1.0f, 1.0f, 1.0f, 1.0f);
+
+        // 右: DrawSpriteUVで区画を1つずつ、ピクセル矩形から正規化UVを求めて切り出す
+        const float cellDrawSize = 56.0f;
+        const float gridOriginX = width * 0.68f;
+        const float gridOriginY = height * 0.5f + cellDrawSize * 1.5f;
+        renderer.DrawText(gridOriginX + cellDrawSize * 1.5f, gridOriginY + cellDrawSize * 0.5f + 24.0f,
+            L"DrawSpriteUV (区画ごとに切り出して並べ替え)", 18.0f, 0.8f, 0.83f, 0.9f, 1.0f);
+
+        if (atlasWidth == 0 || atlasHeight == 0)
+        {
+            return;
+        }
+
+        for (uint32_t cellY = 0; cellY < kAtlasCellCount; ++cellY)
+        {
+            for (uint32_t cellX = 0; cellX < kAtlasCellCount; ++cellX)
+            {
+                // ピクセル矩形 -> 正規化UV
+                const float u0 = static_cast<float>(cellX * kAtlasCellPixels) / static_cast<float>(atlasWidth);
+                const float v0 = static_cast<float>(cellY * kAtlasCellPixels) / static_cast<float>(atlasHeight);
+                const float u1 = static_cast<float>((cellX + 1) * kAtlasCellPixels) / static_cast<float>(atlasWidth);
+                const float v1 = static_cast<float>((cellY + 1) * kAtlasCellPixels) / static_cast<float>(atlasHeight);
+
+                // 左右を反転して並べ、切り出しが区画単位で効いていることを分かりやすくする
+                const uint32_t drawX = kAtlasCellCount - 1 - cellX;
+                renderer.DrawSpriteUV(
+                    gridOriginX + drawX * (cellDrawSize + 6.0f),
+                    gridOriginY - cellY * (cellDrawSize + 6.0f),
+                    cellDrawSize, cellDrawSize, 0.0f,
+                    atlas, u0, v0, u1, v1,
+                    1.0f, 1.0f, 1.0f, 1.0f);
+            }
+        }
+    }
+
     // 「4: 図形」のデモ。elapsedSecondsで回転角を進める
     void DrawShapesDemo(KurenaiEngine2D& renderer, float elapsedSeconds, float width, float height)
     {
@@ -490,20 +635,28 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         InitSprites(sprites);
         InputDemoState inputDemo{};
 
-        // サウンドデモ用のWAVを実行ファイルと同じフォルダへ生成して読み込む
-        SoundDemoState soundDemo{};
+        // デモ用のアセット(正弦波WAV・アトラスBMP)を実行ファイルと同じフォルダへ生成して読み込む。
+        // リポジトリにバイナリ資産を持たせないための措置
+        wchar_t modulePath[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+        const std::wstring moduleDirectory = [&modulePath]()
         {
-            wchar_t modulePath[MAX_PATH]{};
-            GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
-            std::wstring wavPath = modulePath;
-            const size_t lastSeparator = wavPath.find_last_of(L"\\/");
-            wavPath = (lastSeparator == std::wstring::npos ? std::wstring() : wavPath.substr(0, lastSeparator + 1)) + L"SineWave.wav";
+            const std::wstring full = modulePath;
+            const size_t lastSeparator = full.find_last_of(L"\\/");
+            return lastSeparator == std::wstring::npos ? std::wstring() : full.substr(0, lastSeparator + 1);
+        }();
 
-            if (WriteSineWaveWav(wavPath))
-            {
-                soundDemo.Sound = renderer.LoadSound(wavPath);
-                soundDemo.Available = soundDemo.Sound.IsValid();
-            }
+        SoundDemoState soundDemo{};
+        if (WriteSineWaveWav(moduleDirectory + L"SineWave.wav"))
+        {
+            soundDemo.Sound = renderer.LoadSound(moduleDirectory + L"SineWave.wav");
+            soundDemo.Available = soundDemo.Sound.IsValid();
+        }
+
+        TextureHandle atlasTexture;
+        if (WriteAtlasBmp(moduleDirectory + L"DemoAtlas.bmp"))
+        {
+            atlasTexture = renderer.LoadTexture(moduleDirectory + L"DemoAtlas.bmp");
         }
 
         DemoScene scene = DemoScene::Sprites;
@@ -579,6 +732,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 break;
             case DemoScene::Shapes:
                 DrawShapesDemo(renderer, elapsedSeconds, width, height);
+                break;
+            case DemoScene::Atlas:
+                DrawAtlasDemo(renderer, atlasTexture, width, height);
                 break;
             default:
                 break;

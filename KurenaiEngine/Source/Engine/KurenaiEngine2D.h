@@ -62,6 +62,24 @@ namespace Kurenai
             float x, float y, float width, float height, float rotationRadians,
             TextureHandle texture, float r, float g, float b, float a);
 
+        // DrawSpriteの、テクスチャの一部だけを描画する版。srcU0, srcV0, srcU1, srcV1は
+        // 0.0〜1.0の正規化UVで、原点は左上・V下向き(テクスチャの標準的な向き)。
+        // 複数のアイコンを1枚のアトラスにまとめ、テクスチャの切り替え回数を減らす用途で使う
+        // (x, y, width, height, rotationRadians, r, g, b, aの意味はDrawSpriteと同じ)。
+        //
+        // 【アトラスを作るときの注意】2Dのサンプラーは繰り返し(Wrap)を使っているため、
+        // 区画をぴったり詰めると縮小表示時に隣の区画の色がにじむ。区画の周囲には
+        // 1px以上の余白(同じ色で埋めたパディング)を入れること
+        void DrawSpriteUV(
+            float x, float y, float width, float height, float rotationRadians,
+            TextureHandle texture, float srcU0, float srcV0, float srcU1, float srcV1,
+            float r, float g, float b, float a);
+
+        // テクスチャのピクセルサイズを返す。アトラスの区画をピクセルで管理してから
+        // DrawSpriteUVへ渡す正規化UVを求める用途で使う。
+        // 無効なハンドルの場合はログを出して0を返す
+        void GetTextureSize(TextureHandle texture, uint32_t& outWidth, uint32_t& outHeight) const;
+
         // 中心(x, y)、半径radiusの塗り円を描画する。r, g, b, aは塗りつぶし色(半透明可)。
         // borderThicknessPixelsを0より大きくすると、塗りの内側にborderR/G/B/Aの枠線を
         // 重ねて描画する(DrawRoundedRectと同じ形。既定では枠線なし)。

@@ -437,6 +437,10 @@ APIを切り替えると<code>Run()</code>が戻ってそのまま終了しま�
         void BeginFrame(float clearR, float clearG, float clearB, float clearA = 1.0f);
         void DrawSprite(float x, float y, float width, float height, float rotationRadians,
                          TextureHandle texture, float r, float g, float b, float a);
+        void DrawSpriteUV(float x, float y, float width, float height, float rotationRadians,
+                           TextureHandle texture, float srcU0, float srcV0, float srcU1, float srcV1,
+                           float r, float g, float b, float a);
+        void GetTextureSize(TextureHandle texture, uint32_t&amp; outWidth, uint32_t&amp; outHeight) const;
         void DrawCircle(float x, float y, float radius, float r, float g, float b, float a,
                         float borderThicknessPixels = 0.0f,
                         float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f);
@@ -513,8 +517,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 <li><code>DrawSprite</code> の <code>r, g, b, a</code> はテクスチャに乗算されるティント色。
 <code>a &lt; 1.0</code> で半透明合成される(常にアルファブレンド有効。深度テストは行わないため、
 重なり順は呼び出し順で決まる — 先に呼んだスプライトほど背面に描かれる)。</li>
+<li><code>DrawSpriteUV</code>は<code>DrawSprite</code>の「テクスチャの一部だけを描く」版。
+<code>srcU0, srcV0, srcU1, srcV1</code>は0.0〜1.0の正規化UVで、原点は左上・V下向き
+(テクスチャの標準的な向き)。<code>DrawSprite</code>はこれを
+<code>(0, 0)-(1, 1)</code>で呼ぶだけの実装になっている。<br>
+アイコン類を1枚のアトラスへまとめ、<code>LoadTexture</code>の回数とフレーム中のテクスチャ
+切り替え回数を減らす用途に使う。区画をピクセルで管理する場合は
+<code>GetTextureSize</code>でテクスチャのピクセルサイズを取り、
+<code>ピクセル座標 / サイズ</code>で正規化UVを求める。<br>
+<strong>アトラスを作るときは、区画の周囲に1px以上の余白を入れること。</strong>
+2Dのサンプラーは繰り返し(Wrap)+異方性フィルタなので、区画をぴったり詰めると
+縮小表示時に隣の区画の色がにじむ。</li>
 <li><code>BeginFrame</code>/<code>EndFrame</code> は1フレームにつき必ず1回ずつ呼ぶ。
-<code>DrawSprite</code>/<code>DrawCircle</code>/<code>DrawLine</code>/<code>DrawRoundedRect</code>はその間に好きな回数呼べる。</li>
+<code>DrawSprite</code>/<code>DrawSpriteUV</code>/<code>DrawCircle</code>/<code>DrawLine</code>/<code>DrawRoundedRect</code>はその間に好きな回数呼べる。</li>
 <li><code>DrawCircle</code>は中心<code>(x, y)</code>・半径<code>radius</code>の塗り円をふちのアンチエイリアス付きで描画する
 (テクスチャ不要、ピクセルシェーダーの距離場でマスクする)。<code>DrawLine</code>は
 <code>(x1, y1)</code>-<code>(x2, y2)</code>を結ぶ太さ<code>thickness</code>の線分を、内部的には

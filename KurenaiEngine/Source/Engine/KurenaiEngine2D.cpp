@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "Core/Logger.h"
 #include "Core/StringUtil.h"
 
 namespace Kurenai
@@ -202,6 +203,15 @@ namespace Kurenai
         float x, float y, float width, float height, float rotationRadians,
         TextureHandle texture, float r, float g, float b, float a)
     {
+        // テクスチャ全体を描くのは「UV矩形が(0, 0)-(1, 1)」の特別な場合なので、実装は1本にまとめる
+        DrawSpriteUV(x, y, width, height, rotationRadians, texture, 0.0f, 0.0f, 1.0f, 1.0f, r, g, b, a);
+    }
+
+    void KurenaiEngine2D::DrawSpriteUV(
+        float x, float y, float width, float height, float rotationRadians,
+        TextureHandle texture, float srcU0, float srcV0, float srcU1, float srcV1,
+        float r, float g, float b, float a)
+    {
         if (!texture.IsValid())
         {
             return;
@@ -213,12 +223,30 @@ namespace Kurenai
             DirectX::XMMatrixTranslation(x, y, 0.0f);
         DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixTranspose(world));
         objectConstants.Color = { r, g, b, a };
+        // 頂点シェーダーが UVOffsetScale.xy + UV * UVOffsetScale.zw で変換するため、
+        // オフセットと大きさの形で積む(DrawTextがフォントアトラスを切り出すのと同じ仕組み)
+        objectConstants.UVOffsetScale = { srcU0, srcV0, srcU1 - srcU0, srcV1 - srcV0 };
 
         RHI::IRHICommandList* commandList = GetCommandList();
         commandList->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
         commandList->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
         commandList->SetTexture(0, static_cast<RHI::IRHITexture*>(texture.m_Handle));
         commandList->DrawIndexed(6, 0, 0);
+    }
+
+    void KurenaiEngine2D::GetTextureSize(TextureHandle texture, uint32_t& outWidth, uint32_t& outHeight) const
+    {
+        outWidth = 0;
+        outHeight = 0;
+        if (!texture.IsValid())
+        {
+            Core::Logger::Error("2D", "GetTextureSize: 無効なテクスチャハンドルが渡されました。0を返します");
+            return;
+        }
+
+        const auto* rhiTexture = static_cast<const RHI::IRHITexture*>(texture.m_Handle);
+        outWidth = rhiTexture->GetWidth();
+        outHeight = rhiTexture->GetHeight();
     }
 
     void KurenaiEngine2D::DrawCircle(
