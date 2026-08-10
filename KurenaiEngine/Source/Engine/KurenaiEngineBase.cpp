@@ -205,6 +205,25 @@ namespace Kurenai
         m_AudioEngine->StopSound(voice.m_Id);
     }
 
+    void KurenaiEngineBase::SetVoiceVolume(VoiceHandle voice, float volume)
+    {
+        if (!voice.IsValid())
+        {
+            return;
+        }
+        m_AudioEngine->SetVoiceVolume(voice.m_Id, volume);
+    }
+
+    void KurenaiEngineBase::SetMasterVolume(float volume)
+    {
+        m_AudioEngine->SetMasterVolume(volume);
+    }
+
+    float KurenaiEngineBase::GetMasterVolume() const
+    {
+        return m_AudioEngine->GetMasterVolume();
+    }
+
     RHI::IRHICommandList* KurenaiEngineBase::GetCommandList() const
     {
         return m_Device->GetImmediateCommandList();

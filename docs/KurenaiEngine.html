@@ -1542,12 +1542,16 @@ F1を消費しないので、通しても入力内容には影響しない。</l
 <h2>6. サウンド再生について</h2>
 <p>
 <code>KurenaiEngineBase</code> はXAudio2による簡易なサウンド再生APIを提供します。WAV(PCM)ファイルの
-読み込み・再生・停止に対応した最小限の実装で、音量変更等は行えません(効果音・BGM程度の単純な再生が目的)。
+読み込み・再生・停止・音量制御に対応した最小限の実装です(効果音・BGM程度の単純な再生が目的で、
+ピッチ・パン・カテゴリ別のバス等は持ちません)。
 </p>
 
 <pre><code>SoundHandle LoadSound(const std::wstring&amp; filePath);
 VoiceHandle PlaySound(SoundHandle sound, float volume = 1.0f, bool loop = false);
-void StopSound(VoiceHandle voice);</code></pre>
+void StopSound(VoiceHandle voice);
+void SetVoiceVolume(VoiceHandle voice, float volume);  // 再生中ボイスの音量(0.0〜1.0)
+void SetMasterVolume(float volume);                    // 全ボイスに掛かる音量(0.0〜1.0)
+float GetMasterVolume() const;</code></pre>
 
 <ul>
 <li><code>LoadSound</code> はWAV(PCM)ファイルを読み込み、<code>SoundHandle</code>を返す
@@ -1560,6 +1564,17 @@ void StopSound(VoiceHandle voice);</code></pre>
 <code>KurenaiEngine2D</code>/<code>KurenaiEngine3D</code>が破棄されるまで無限ループし続ける。
 単発再生(<code>loop=false</code>)は自動的に終了するため、通常<code>StopSound</code>を呼ぶ必要はない
 (呼んでも問題はない)。</li>
+<li><code>SetVoiceVolume</code> は再生中のボイスの音量を変更する。
+<strong>フェードイン/フェードアウトはこれを毎フレーム呼ぶ形でアプリ側が実装する</strong>
+(ループBGMを短い間隔で<code>StopSound</code>→<code>PlaySound</code>し直す方法は、
+再生位置が先頭へ戻るため代用にならない)。既に終了済み/無効なハンドルの場合は何もしない
+――単発再生がいつ終わるかは呼び出し側には分からないため、これは正常系でログも出ない。</li>
+<li><code>SetMasterVolume</code> は全ボイスに掛かる音量で、個々のボイスの音量とは掛け算になる。
+<strong>BGM/SEといったカテゴリ別のバスは持たない</strong>ため、
+設定画面でカテゴリごとに調整したい場合はカテゴリごとに<code>VoiceHandle</code>を覚えておき
+<code>SetVoiceVolume</code>で調整する。</li>
+<li>音量はいずれも0.0〜1.0。範囲外(NaNを含む)を渡すとログを出して範囲内へ丸める
+(音量の指定ミスでアプリを落とす価値は無いため例外にはしない)。</li>
 <li>これらは<code>KurenaiEngineBase</code>のメンバなので<code>KurenaiEngine2D</code>/
 <code>KurenaiEngine3D</code>どちらからも呼べる。</li>
 <li>使用にはCOM初期化(<code>CoInitializeEx</code>)が必要(WICテクスチャ読み込みと同じ要件。

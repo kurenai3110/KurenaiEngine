@@ -9,12 +9,14 @@
 #include <objbase.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <exception>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include "KurenaiEngine2D.h"
 #include "KurenaiTypes.h"
@@ -27,7 +29,8 @@ namespace
     enum class DemoScene
     {
         Sprites = 0, // 1: 跳ね回る半透明スプライト(従来のサンプル内容)
-        Input,       // 2: 入力(押下エッジ・解放エッジ)
+        Input,       // 2: 入力(押下エッジ・解放エッジ・ホイール)
+        Sound,       // 3: サウンド(ボイス音量のフェード・マスター音量)
         Count
     };
 
@@ -75,7 +78,8 @@ namespace
         switch (scene)
         {
         case DemoScene::Sprites: return L"1: DrawSprite (跳ね回る半透明スプライト)";
-        case DemoScene::Input: return L"2: 入力 (押下エッジ・解放エッジ)";
+        case DemoScene::Input: return L"2: 入力 (押下エッジ・解放エッジ・ホイール)";
+        case DemoScene::Sound: return L"3: サウンド (ボイス音量のフェード・マスター音量)";
         default: return L"(不明なデモ画面)";
         }
     }
@@ -229,6 +233,168 @@ namespace
         return buffer;
     }
 
+    // サウンドのデモ用に、440Hz・16bitモノラル・44.1kHzのWAVを生成して書き出す。
+    // リポジトリに音声ファイルを持たせずにサウンドAPIを動かすため
+    // (AudioEngine::LoadSoundはファイルパスしか受け取らないのでメモリ上では渡せない)。
+    // 戻り値は書き出せたかどうか
+    bool WriteSineWaveWav(const std::wstring& filePath)
+    {
+        constexpr uint32_t kSampleRate = 44100;
+        constexpr uint32_t kSampleCount = kSampleRate; // 1秒
+        constexpr float kFrequency = 440.0f;
+        // ループ再生でつなぎ目のプチノイズが出ないよう、両端を短くフェードさせる
+        constexpr uint32_t kFadeSamples = 512;
+
+        std::vector<int16_t> samples(kSampleCount);
+        for (uint32_t i = 0; i < kSampleCount; ++i)
+        {
+            const float t = static_cast<float>(i) / static_cast<float>(kSampleRate);
+            float gain = 0.3f;
+            if (i < kFadeSamples)
+            {
+                gain *= static_cast<float>(i) / static_cast<float>(kFadeSamples);
+            }
+            else if (i >= kSampleCount - kFadeSamples)
+            {
+                gain *= static_cast<float>(kSampleCount - i) / static_cast<float>(kFadeSamples);
+            }
+            samples[i] = static_cast<int16_t>(std::sinf(2.0f * 3.14159265f * kFrequency * t) * gain * 32767.0f);
+        }
+
+        const uint32_t dataBytes = static_cast<uint32_t>(samples.size() * sizeof(int16_t));
+        std::ofstream file(filePath, std::ios::binary);
+        if (!file)
+        {
+            return false;
+        }
+
+        const auto writeU32 = [&file](uint32_t value) { file.write(reinterpret_cast<const char*>(&value), 4); };
+        const auto writeU16 = [&file](uint16_t value) { file.write(reinterpret_cast<const char*>(&value), 2); };
+
+        file.write("RIFF", 4);
+        writeU32(36 + dataBytes);
+        file.write("WAVE", 4);
+        file.write("fmt ", 4);
+        writeU32(16);            // fmtチャンクのサイズ
+        writeU16(1);             // WAVE_FORMAT_PCM
+        writeU16(1);             // モノラル
+        writeU32(kSampleRate);
+        writeU32(kSampleRate * 2); // バイト/秒 = サンプリング周波数 × ブロックサイズ
+        writeU16(2);             // ブロックサイズ(16bitモノラル)
+        writeU16(16);            // ビット深度
+        file.write("data", 4);
+        writeU32(dataBytes);
+        file.write(reinterpret_cast<const char*>(samples.data()), dataBytes);
+        return file.good();
+    }
+
+    // 「3: サウンド」のデモが持ち越す状態
+    struct SoundDemoState
+    {
+        SoundHandle Sound;
+        VoiceHandle Voice;
+        bool Available = false;   // WAVの生成・読み込みに成功したか
+        bool FadingIn = false;
+        float VoiceVolume = 0.0f; // フェードで動かしている、このボイスの音量
+    };
+
+    void UpdateSoundDemo(KurenaiEngine2D& renderer, SoundDemoState& state, float deltaTime)
+    {
+        if (!state.Available)
+        {
+            return;
+        }
+
+        // Spaceでフェードイン/フェードアウトを切り替える。フェードそのものはエンジンに無く、
+        // SetVoiceVolumeを毎フレーム呼ぶことでアプリ側が作る
+        if (renderer.WasKeyPressed(VK_SPACE))
+        {
+            if (!state.Voice.IsValid())
+            {
+                state.VoiceVolume = 0.0f;
+                state.Voice = renderer.PlaySound(state.Sound, 0.0f, true); // ループ再生
+                state.FadingIn = true;
+            }
+            else
+            {
+                state.FadingIn = !state.FadingIn;
+            }
+        }
+
+        if (state.Voice.IsValid())
+        {
+            constexpr float kFadeSecondsToFull = 1.5f;
+            state.VoiceVolume += (state.FadingIn ? 1.0f : -1.0f) * (deltaTime / kFadeSecondsToFull);
+            state.VoiceVolume = (std::max)(0.0f, (std::min)(1.0f, state.VoiceVolume));
+            renderer.SetVoiceVolume(state.Voice, state.VoiceVolume);
+
+            // フェードアウトし切ったら止める(再生位置は先頭へ戻る)
+            if (!state.FadingIn && state.VoiceVolume <= 0.0f)
+            {
+                renderer.StopSound(state.Voice);
+                state.Voice = VoiceHandle();
+            }
+        }
+
+        // 左右キーでマスター音量
+        const float masterStep = deltaTime * 0.8f;
+        if (renderer.IsKeyDown(VK_LEFT))
+        {
+            renderer.SetMasterVolume((std::max)(0.0f, renderer.GetMasterVolume() - masterStep));
+        }
+        if (renderer.IsKeyDown(VK_RIGHT))
+        {
+            renderer.SetMasterVolume((std::min)(1.0f, renderer.GetMasterVolume() + masterStep));
+        }
+    }
+
+    void DrawSoundDemo(KurenaiEngine2D& renderer, const SoundDemoState& state, float width, float height)
+    {
+        const float centerX = width * 0.5f;
+        float textY = height * 0.62f;
+        const auto line = [&](const std::wstring& text, bool bold = false)
+        {
+            renderer.DrawText(centerX, textY, text, bold ? 22.0f : 18.0f, 0.88f, 0.90f, 0.96f, 1.0f, bold);
+            textY -= 32.0f;
+        };
+
+        if (!state.Available)
+        {
+            line(L"デモ用のWAVを用意できなかったため、このデモは無効です", true);
+            line(L"(実行ファイルと同じフォルダへ書き込めない場合に起きる)");
+            return;
+        }
+
+        line(L"Space: BGMのフェードイン / フェードアウト", true);
+        line(L"左右キー: マスター音量");
+
+        // 音量をバーで可視化する
+        const auto bar = [&](const std::wstring& label, float value, float y)
+        {
+            constexpr float kBarWidth = 360.0f;
+            constexpr float kBarHeight = 20.0f;
+            renderer.DrawText(centerX - kBarWidth * 0.5f - 16.0f, y, label, 18.0f, 0.8f, 0.83f, 0.9f, 1.0f, false, TextAlign::Right);
+            renderer.DrawRoundedRect(centerX, y, kBarWidth, kBarHeight, 6.0f, 0.16f, 0.18f, 0.24f, 1.0f, 1.0f, 0.4f, 0.45f, 0.55f, 1.0f);
+            const float filled = kBarWidth * value;
+            if (filled > 0.0f)
+            {
+                renderer.DrawRoundedRect(
+                    centerX - kBarWidth * 0.5f + filled * 0.5f, y, filled, kBarHeight, 6.0f,
+                    0.35f, 0.62f, 0.85f, 1.0f);
+            }
+            renderer.DrawText(centerX + kBarWidth * 0.5f + 16.0f, y, FormatFloat(value), 18.0f, 0.8f, 0.83f, 0.9f, 1.0f, false, TextAlign::Left);
+        };
+
+        textY -= 16.0f;
+        bar(L"ボイス音量", state.VoiceVolume, textY);
+        textY -= 40.0f;
+        bar(L"マスター音量", renderer.GetMasterVolume(), textY);
+        textY -= 44.0f;
+        line(state.Voice.IsValid()
+            ? (state.FadingIn ? L"状態: フェードイン中 / 再生中" : L"状態: フェードアウト中")
+            : L"状態: 停止");
+    }
+
     void DrawInputDemo(KurenaiEngine2D& renderer, const InputDemoState& state, float buttonX, float buttonY, float buttonW, float buttonH)
     {
         const bool held = state.ButtonArmed && renderer.IsMouseButtonDown(MouseButton::Left);
@@ -268,6 +434,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         std::array<Sprite, 24> sprites{};
         InitSprites(sprites);
         InputDemoState inputDemo{};
+
+        // サウンドデモ用のWAVを実行ファイルと同じフォルダへ生成して読み込む
+        SoundDemoState soundDemo{};
+        {
+            wchar_t modulePath[MAX_PATH]{};
+            GetModuleFileNameW(nullptr, modulePath, MAX_PATH);
+            std::wstring wavPath = modulePath;
+            const size_t lastSeparator = wavPath.find_last_of(L"\\/");
+            wavPath = (lastSeparator == std::wstring::npos ? std::wstring() : wavPath.substr(0, lastSeparator + 1)) + L"SineWave.wav";
+
+            if (WriteSineWaveWav(wavPath))
+            {
+                soundDemo.Sound = renderer.LoadSound(wavPath);
+                soundDemo.Available = soundDemo.Sound.IsValid();
+            }
+        }
 
         DemoScene scene = DemoScene::Sprites;
         auto lastFrameTime = std::chrono::steady_clock::now();
@@ -315,6 +497,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 UpdateInputDemo(renderer, inputDemo, buttonX, buttonY, buttonWidth, buttonHeight);
             }
+            else if (scene == DemoScene::Sound)
+            {
+                UpdateSoundDemo(renderer, soundDemo, deltaTime);
+            }
 
             renderer.BeginFrame(0.08f, 0.08f, 0.12f);
 
@@ -330,6 +516,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 break;
             case DemoScene::Input:
                 DrawInputDemo(renderer, inputDemo, buttonX, buttonY, buttonWidth, buttonHeight);
+                break;
+            case DemoScene::Sound:
+                DrawSoundDemo(renderer, soundDemo, width, height);
                 break;
             default:
                 break;
