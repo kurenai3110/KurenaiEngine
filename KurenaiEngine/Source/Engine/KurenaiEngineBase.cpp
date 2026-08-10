@@ -62,11 +62,25 @@ namespace Kurenai
         // 終了時にクラッシュする。
         //
         // 宣言順を入れ替える手もあるが、スワップチェーンはデバイスから作られるので
-        // 「デバイスより先に消える」という順序自体は正しい。待機を明示するほうが素直
-        if (m_Device)
+        // 「デバイスより先に消える」という順序自体は正しい。待機を明示するほうが素直。
+        //
+        // 【これは最後の砦であって、派生クラスのリソースには間に合わない】ここが走るのは
+        // 派生クラス(KurenaiEngine3D/KurenaiEngine2D)のメンバがすべて破棄された後なので、
+        // 派生クラスが持つGPUリソースは既に解放済みになっている。派生クラスは自分の
+        // デストラクタの先頭でWaitForGPUIdle()を呼ぶこと(宣言側のコメント参照)
+        WaitForGPUIdle();
+    }
+
+    void KurenaiEngineBase::WaitForGPUIdle()
+    {
+        if (!m_Device)
         {
-            m_Device->WaitForGPUIdle();
+            // コンストラクタがデバイス生成前に例外を投げた場合に通る。待つ相手がいないだけで
+            // 異常ではないため、ログは出さずに何もしない
+            return;
         }
+
+        m_Device->WaitForGPUIdle();
     }
 
     void KurenaiEngineBase::ApplyPendingResize()
@@ -143,14 +157,29 @@ namespace Kurenai
         return m_Window->WasMouseButtonPressed(button);
     }
 
+    bool KurenaiEngineBase::WasMouseButtonReleased(MouseButton button) const
+    {
+        return m_Window->WasMouseButtonReleased(button);
+    }
+
     bool KurenaiEngineBase::WasKeyPressed(KeyCode key) const
     {
         return m_Window->WasKeyPressed(key);
     }
 
+    bool KurenaiEngineBase::WasKeyReleased(KeyCode key) const
+    {
+        return m_Window->WasKeyReleased(key);
+    }
+
     POINT KurenaiEngineBase::GetClientMousePosition() const
     {
         return m_Window->GetClientMousePosition();
+    }
+
+    float KurenaiEngineBase::GetMouseWheelDelta() const
+    {
+        return m_Window->GetMouseWheelDelta();
     }
 
     SoundHandle KurenaiEngineBase::LoadSound(const std::wstring& filePath)
@@ -174,6 +203,25 @@ namespace Kurenai
             return;
         }
         m_AudioEngine->StopSound(voice.m_Id);
+    }
+
+    void KurenaiEngineBase::SetVoiceVolume(VoiceHandle voice, float volume)
+    {
+        if (!voice.IsValid())
+        {
+            return;
+        }
+        m_AudioEngine->SetVoiceVolume(voice.m_Id, volume);
+    }
+
+    void KurenaiEngineBase::SetMasterVolume(float volume)
+    {
+        m_AudioEngine->SetMasterVolume(volume);
+    }
+
+    float KurenaiEngineBase::GetMasterVolume() const
+    {
+        return m_AudioEngine->GetMasterVolume();
     }
 
     RHI::IRHICommandList* KurenaiEngineBase::GetCommandList() const

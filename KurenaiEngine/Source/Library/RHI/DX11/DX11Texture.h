@@ -51,6 +51,9 @@ namespace Kurenai::RHI
         static constexpr uint32_t kCubeFaceCount = 6;
         ID3D11UnorderedAccessView* GetCubeUnorderedAccessView(uint32_t face, uint32_t mipLevel = 0, uint32_t cubeIndex = 0) const;
 
+        uint32_t GetWidth() const override { return m_Width; }
+        uint32_t GetHeight() const override { return m_Height; }
+
     private:
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_Srv;
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_Rtv;
@@ -60,5 +63,9 @@ namespace Kurenai::RHI
         std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>> m_SliceDsvs;
         // キューブマップ配列の枚数(非キューブマップ・単一キューブは1)。m_MipUavsのフラット添字計算に使う
         uint32_t m_CubeCount = 1;
+        // ミップ0のピクセルサイズ。生成経路が多く引数からは受け取れないため、コンストラクタで
+        // 手持ちのビュー(SRV→RTV→DSV→UAVの順)からリソースを引いてGetDescで求める
+        uint32_t m_Width = 0;
+        uint32_t m_Height = 0;
     };
 }

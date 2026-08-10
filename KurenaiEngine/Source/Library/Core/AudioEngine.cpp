@@ -47,6 +47,26 @@ namespace Kurenai::Core
         {
             return std::memcmp(id, expected, 4) == 0;
         }
+
+        // 音量を0.0〜1.0へ収める。XAudio2のSetVolume自体は1.0超も負値も受け付けるが、
+        // 公開APIとしては0.0〜1.0と決めているため、範囲外は呼び出し側のバグとしてログを出す。
+        // 例外にはしない(音が大きい/小さいだけでアプリを落とす価値は無いため)
+        float ClampVolume(float volume, const char* apiName)
+        {
+            if (!(volume >= 0.0f) || volume > 1.0f) // NaNもこの条件で拾える
+            {
+                Logger::Error(
+                    "Audio",
+                    std::string(apiName) + ": 音量は0.0〜1.0で指定してください(指定値: " +
+                        std::to_string(volume) + ")。範囲内へ丸めて続行します");
+                if (!(volume >= 0.0f))
+                {
+                    return 0.0f;
+                }
+                return 1.0f;
+            }
+            return volume;
+        }
     }
 
     AudioEngine::AudioEngine()
@@ -175,7 +195,7 @@ namespace Kurenai::Core
         buffer.Flags = XAUDIO2_END_OF_STREAM;
         buffer.LoopCount = loop ? XAUDIO2_LOOP_INFINITE : 0;
 
-        voice->SetVolume(volume);
+        voice->SetVolume(ClampVolume(volume, "PlaySound"));
         voice->SubmitSourceBuffer(&buffer);
         voice->Start();
 
@@ -205,5 +225,47 @@ namespace Kurenai::Core
         it->second.Voice->Stop(0);
         it->second.Voice->DestroyVoice();
         m_ActiveVoices.erase(it);
+    }
+
+    void AudioEngine::SetVoiceVolume(uint64_t voiceId, float volume)
+    {
+        const auto it = m_ActiveVoices.find(voiceId);
+        if (it == m_ActiveVoices.end())
+        {
+            // 単発再生のボイスがいつ終わるかは呼び出し側には分からないため、
+            // 「見つからない」は正常系。毎フレーム呼ばれる想定のAPIでもあり、ログは出さない
+            return;
+        }
+
+        // IXAudio2SourceVoiceは再生中でもSetVolumeを受け付ける(次の処理パスから反映される)
+        const HRESULT hr = it->second.Voice->SetVolume(ClampVolume(volume, "SetVoiceVolume"));
+        if (FAILED(hr))
+        {
+            Logger::Error(
+                "Audio",
+                "ボイスの音量変更に失敗しました (HRESULT: 0x" + std::to_string(static_cast<uint32_t>(hr)) + ")");
+        }
+    }
+
+    void AudioEngine::SetMasterVolume(float volume)
+    {
+        const float clamped = ClampVolume(volume, "SetMasterVolume");
+        if (!m_MasteringVoice)
+        {
+            // コンストラクタでマスタリングボイスの作成に失敗した場合(通常は例外で止まるため到達しない)
+            Logger::Error("Audio", "マスタリングボイスが無いためマスター音量を変更できません");
+            return;
+        }
+
+        const HRESULT hr = m_MasteringVoice->SetVolume(clamped);
+        if (FAILED(hr))
+        {
+            Logger::Error(
+                "Audio",
+                "マスター音量の変更に失敗しました (HRESULT: 0x" + std::to_string(static_cast<uint32_t>(hr)) + ")");
+            return;
+        }
+
+        m_MasterVolume = clamped;
     }
 }

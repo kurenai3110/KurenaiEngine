@@ -1752,7 +1752,8 @@ DX11はイミディエイト実行のためこの制約がないが、両バッ�
 <table>
 <thead><tr><th>項目</th><th>内容</th></tr></thead>
 <tbody>
-<tr><td>シザー矩形</td><td>DX11はラスタライザが<code>ScissorEnable=FALSE</code>でクリップしない。DX12は必ず設定が要るため、レターボックスで非整数になるビューポートを左上<code>floor</code>・右下<code>ceil</code>で包む(切り捨てるとDX12だけ右端・下端が1px欠ける)</td></tr>
+<tr><td>シザー矩形</td><td><code>IRHICommandList::SetScissorRect</code>(2Dの<code>PushClipRect</code>が使う)のため、<b>DX11も全パイプラインステートのラスタライザを<code>ScissorEnable=TRUE</code>にして揃えてある</b>(D3D12にはこのフラグ自体が無く、シザーは常時有効)。<b>両APIとも既定のシザー矩形は「0本」= 全クリップ</b>なので、<code>SetViewport</code>が必ずビューポート全体の矩形を張ることでこれを塞ぐ。レターボックスで非整数になるビューポートの丸めは共通ヘルパー<code>MakeFullViewportScissorRect</code>(左上<code>floor</code>・右下<code>ceil</code>)に寄せてある(切り捨てると右端・下端が1px欠ける。片方だけ直すとバックエンド間で端がずれる)。<code>SetScissorRect</code>は必ず<code>SetViewport</code>より後に呼ぶこと(<code>SetViewport</code>がビューポート全体へ戻す)</td></tr>
+<tr><td>構造化バッファの更新回数</td><td>DX11の<code>StructuredReadOnly</code>は<code>D3D11_USAGE_DYNAMIC</code> + <code>Map(WRITE_DISCARD)</code>でドライバが毎回リネームするため、1フレームあたりの<code>UpdateBuffer</code>回数に上限が無い。DX12はUPLOADヒープのステージングリング経由なので、<b>「<code>BufferDesc::MaxUpdatesPerFrame</code> × <code>kFrameCount</code> + 1」段</b>を確保し、これを超えるとGPUが読み取り中のスロットを上書きして描画結果が静かに壊れる(<code>DX12Buffer::AdvanceUploadRingAndGetWritePtr</code>がログで検出)。既定値は4。多く更新するバッファは<code>MaxUpdatesPerFrame</code>で宣言し、<b>呼び出し側でも上限に達する前に弾く</b>こと(2Dの<code>DrawPolyline</code>は1フレーム32本でカウントして弾いている)</td></tr>
 <tr><td>DSVフォーマット</td><td>DX12はPSOが申告した<code>DSVFormat</code>と実際にバインドされるDSVが一致していないと仕様違反になる。スワップチェインの深度は<code>D32_FLOAT</code>(ステンシルは未使用)でオフスクリーン深度と揃えてある。深度テストは使わないがDSVは張られるパス(Present / 2D / ImGui)は<code>PipelineStateDesc::DepthTargetAttached</code>で表す。<code>HasDepthStencil</code>で兼ねると深度テストまで有効になってしまうため別フラグにしている</td></tr>
 <tr><td>スロット範囲</td><td>DX12は<code>SetConstantBuffer</code>のslotをそのままルートパラメータ番号として使うため、b2以降を渡すとSRV/サンプラーテーブルのルート引数を破壊する。b0〜b1・t0〜t11・コンピュートのt0〜t3/u0〜u3を範囲チェックし、外れたらログを出してスキップする</td></tr>
 <tr><td>無効なビュー</td><td>DX11はRTV/SRVを持たないテクスチャに対してnullptrをバインドして静かに描画をやめるが、DX12は<code>kInvalid</code>(0xFFFFFFFF)から「ヒープ先頭+0xFFFFFFFF×ディスクリプタサイズ」というでたらめなハンドルを作りデバイス削除に至る。<code>DX12Texture::HasSrv()/HasRtv()/HasDsv()</code>で事前に判定し、SRV/UAVはnullディスクリプタで代替、RTV/DSVはログを出してそのターゲットを除外する</td></tr>
@@ -3967,6 +3968,32 @@ m_RenderSrvCpuHeap  … CreateRenderTexture / CreateUAVTexture / CreateHiZTextur
 <li><strong>レンダーターゲット関連を触るのはRenderスレッドだけ</strong></li>
 <li><strong><code>m_Camera</code>を書くのはUpdateスレッドだけ</strong></li>
 <li><strong>シーン状態(<code>m_Scene</code>・ライト・反射プローブ・ポストプロセスのパラメータ)を触るのはRenderスレッドだけ</strong> — UIパネルもRenderスレッドで動くのでそのまま読み書きしてよい</li>
+<li><strong><code>KurenaiEngineBase</code>の派生クラスは、デストラクタの先頭で
+<code>WaitForGPUIdle()</code>を呼ぶ</strong> — 下記参照</li>
+</ul>
+<h3>26.7 終了時にGPUの完了を待つ位置</h3>
+<p>
+GPUがまだ参照しているリソースを解放すると、D3D12デバッグレイヤーが
+<code>OBJECT_DELETED_WHILE_STILL_IN_USE</code>(EXECUTION ERROR #921)をCORRUPTIONとして
+<strong>例外</strong>(<code>0x0000087d</code>)で上げ、終了時にプロセスが落ちる。
+デバッグレイヤーの有無に関わらず未定義動作であり、Releaseでは表面化しないだけである。
+</p>
+<p>
+待機は<strong>2箇所</strong>に要る。C++のデストラクタは「派生クラスの本体 →
+派生クラスのメンバ破棄 → 基底クラスの本体 → 基底クラスのメンバ破棄」の順に走るため、
+<code>KurenaiEngineBase</code>のデストラクタで待っても
+<code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code>が持つGPUリソース
+(レンダーターゲット・G-Buffer・各種バッファ・テクスチャ・フォントアトラス)は
+<strong>すでに解放済み</strong>である。
+</p>
+<ul>
+<li><strong>派生クラスのデストラクタの先頭</strong> — 自分のGPUリソースを守る。
+新しく<code>KurenaiEngineBase</code>を継承するクラスを作る場合も必ず書くこと</li>
+<li><strong><code>KurenaiEngineBase</code>のデストラクタ</strong> — スワップチェーンの
+バックバッファを守る最後の砦。<code>DX12Device::~DX12Device</code>も
+<code>WaitForGPUIdle()</code>を呼ぶが、メンバ宣言順が
+<code>m_Device</code>→<code>m_SwapChain</code>なので破棄はスワップチェーンが先になり、
+デバイス側の待機では間に合わない</li>
 </ul>
 <p class="note">
 リソース作成が使う<code>m_UploadCommandList</code> + <code>m_UploadMutex</code>は

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <iterator> // std::size(WM_KILLFOCUSでの押下状態の走査に使う)
 #include <stdexcept>
 #include <string>
 
@@ -450,10 +451,15 @@ namespace Kurenai::Core
 
     void Window::PumpMessages()
     {
-        // WasKeyPressed/WasMouseButtonPressedは「このPumpMessages呼び出し中に起きた押下」を返すため、
-        // メッセージ処理の前にエッジフラグをクリアする(呼び出し側は1フレームにつき1回呼ぶ想定)
+        // WasKeyPressed/WasMouseButtonPressed(および解放版)は「このPumpMessages呼び出し中に
+        // 起きた押下/解放」を返すため、メッセージ処理の前にエッジフラグをクリアする
+        // (呼び出し側は1フレームにつき1回呼ぶ想定)
         std::fill(std::begin(m_KeyPressedEdge), std::end(m_KeyPressedEdge), false);
         std::fill(std::begin(m_MouseButtonPressedEdge), std::end(m_MouseButtonPressedEdge), false);
+        std::fill(std::begin(m_KeyReleasedEdge), std::end(m_KeyReleasedEdge), false);
+        std::fill(std::begin(m_MouseButtonReleasedEdge), std::end(m_MouseButtonReleasedEdge), false);
+        // ホイールの回転量もエッジと同じ「この呼び出し中に起きた分」を返すため、ここでリセットする
+        m_MouseWheelDelta = 0.0f;
 
         MSG msg{};
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
@@ -511,6 +517,11 @@ namespace Kurenai::Core
         return m_MouseButtonPressedEdge[static_cast<size_t>(button)];
     }
 
+    bool Window::WasMouseButtonReleased(MouseButton button) const
+    {
+        return m_MouseButtonReleasedEdge[static_cast<size_t>(button)];
+    }
+
     bool Window::IsKeyDown(KeyCode key) const
     {
         return key >= 0 && key < 256 && m_KeyDown[key];
@@ -519,6 +530,11 @@ namespace Kurenai::Core
     bool Window::WasKeyPressed(KeyCode key) const
     {
         return key >= 0 && key < 256 && m_KeyPressedEdge[key];
+    }
+
+    bool Window::WasKeyReleased(KeyCode key) const
+    {
+        return key >= 0 && key < 256 && m_KeyReleasedEdge[key];
     }
 
     LRESULT CALLBACK Window::WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -658,9 +674,26 @@ namespace Kurenai::Core
         case WM_MBUTTONUP:
         {
             const size_t index = message == WM_LBUTTONUP ? 0 : message == WM_RBUTTONUP ? 1 : 2;
+            // 押されていた場合だけ解放エッジを立てる(押下エッジと対称)。ウィンドウの外で
+            // 押してから中で離した場合など、押下を受け取っていないWM_*BUTTONUPが単独で
+            // 届くことがあるため、それを「解放された」と報告しないようにする
+            if (m_MouseButtonDown[index])
+            {
+                m_MouseButtonReleasedEdge[index] = true;
+            }
             m_MouseButtonDown[index] = false;
             return 0;
         }
+
+        case WM_MOUSEWHEEL:
+            // WHEEL_DELTA(120)で割ってノッチ数にする。高分解能ホイールは120未満の値を
+            // 刻んで送ってくるため小数になり得る。
+            //
+            // 【lParamを座標の更新に使わないこと】WM_MOUSEWHEELのlParamはWM_MOUSEMOVE等と違い
+            // スクリーン座標で届く。m_MousePositionはクライアント座標なので、
+            // GET_X_LPARAM/GET_Y_LPARAMをそのまま流用すると座標系が食い違う
+            m_MouseWheelDelta += static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / static_cast<float>(WHEEL_DELTA);
+            return 0;
 
         case WM_KEYDOWN:
         {
@@ -684,6 +717,11 @@ namespace Kurenai::Core
             const KeyCode key = static_cast<KeyCode>(wParam);
             if (key >= 0 && key < 256)
             {
+                // 押されていた場合だけ解放エッジを立てる(WM_*BUTTONUPと同じ理由)
+                if (m_KeyDown[key])
+                {
+                    m_KeyReleasedEdge[key] = true;
+                }
                 m_KeyDown[key] = false;
             }
             return 0;
@@ -691,7 +729,26 @@ namespace Kurenai::Core
 
         case WM_KILLFOCUS:
             // フォーカスを失った時点のキー/ボタン押下状態を持ち越すと、フォーカスが戻った後も
-            // 実際には離されているキーが押されたまま扱われてしまうため、ここで全てクリアする
+            // 実際には離されているキーが押されたまま扱われてしまうため、ここで全てクリアする。
+            //
+            // このとき解放エッジも立てる。UI基盤は「押下→解放」でクリックを確定する都合上、
+            // 押下を受け取ったまま解放が来ないと押しっぱなしの状態で固まってしまう。
+            // フォーカスを失った時点でその操作は成立しないため、
+            // 「押されていたものはすべて解放された」として通知するほうが呼び出し側で扱いやすい
+            for (size_t i = 0; i < std::size(m_KeyDown); ++i)
+            {
+                if (m_KeyDown[i])
+                {
+                    m_KeyReleasedEdge[i] = true;
+                }
+            }
+            for (size_t i = 0; i < std::size(m_MouseButtonDown); ++i)
+            {
+                if (m_MouseButtonDown[i])
+                {
+                    m_MouseButtonReleasedEdge[i] = true;
+                }
+            }
             std::fill(std::begin(m_KeyDown), std::end(m_KeyDown), false);
             std::fill(std::begin(m_MouseButtonDown), std::end(m_MouseButtonDown), false);
             return DefWindowProcW(m_Handle, message, wParam, lParam);

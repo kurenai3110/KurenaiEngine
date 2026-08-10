@@ -435,17 +435,40 @@ APIを切り替えると<code>Run()</code>が戻ってそのまま終了しま�
         TextureHandle CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 
         void BeginFrame(float clearR, float clearG, float clearB, float clearA = 1.0f);
+
+        void SetCameraPosition(float x, float y);
+        void GetCameraPosition(float&amp; outX, float&amp; outY) const;
+        void SetCameraZoom(float zoom);
+        float GetCameraZoom() const;
+        void SetVirtualResolution(float width, float height); // (0, 0)で解除
+        void ClientToWorld(float clientX, float clientY, float&amp; outWorldX, float&amp; outWorldY) const;
+        void WorldToClient(float worldX, float worldY, float&amp; outClientX, float&amp; outClientY) const;
+        void GetMouseWorldPosition(float&amp; outWorldX, float&amp; outWorldY) const;
+
         void DrawSprite(float x, float y, float width, float height, float rotationRadians,
                          TextureHandle texture, float r, float g, float b, float a);
-        void DrawCircle(float x, float y, float radius, float r, float g, float b, float a);
+        void DrawSpriteUV(float x, float y, float width, float height, float rotationRadians,
+                           TextureHandle texture, float srcU0, float srcV0, float srcU1, float srcV1,
+                           float r, float g, float b, float a);
+        void GetTextureSize(TextureHandle texture, uint32_t&amp; outWidth, uint32_t&amp; outHeight) const;
+        void DrawCircle(float x, float y, float radius, float r, float g, float b, float a,
+                        float borderThicknessPixels = 0.0f,
+                        float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f);
         void DrawLine(float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a);
+        void DrawPolyline(const std::vector&lt;float&gt;&amp; points, float thickness, float r, float g, float b, float a);
         void DrawRoundedRect(float x, float y, float width, float height, float cornerRadiusPixels,
                               float r, float g, float b, float a,
                               float borderThicknessPixels = 0.0f,
-                              float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f);
+                              float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f,
+                              float rotationRadians = 0.0f);
         void DrawText(float x, float y, const std::wstring&amp; text, float fontSize, float r, float g, float b, float a,
                       bool bold = false, TextAlign align = TextAlign::Center, TextVerticalAlign verticalAlign = TextVerticalAlign::Middle);
         float MeasureText(const std::wstring&amp; text, float fontSize, bool bold = false);
+        float GetLineHeight(float fontSize, bool bold = false) const;
+        void MeasureTextBlock(const std::wstring&amp; text, float fontSize,
+                               float&amp; outWidth, float&amp; outHeight, bool bold = false);
+        void PushClipRect(float x, float y, float width, float height);
+        void PopClipRect();
         void EndFrame(bool vsync = true);
     };
 }</code></pre>
@@ -466,7 +489,37 @@ HWND GetWindowHandle() const; // 生成したウィンドウのHWND(ScreenToClie
 ピクセル単位のサイズ、<code>rotationRadians</code> は画面奥から手前を見た反時計回りのZ軸回転。
 </p>
 
-<h3>3.2 使い方</h3>
+<h3>3.2 カメラと論理解像度</h3>
+<p>
+カメラ系のAPIを<strong>一度も呼ばなければ従来どおり</strong>「クライアント領域を過不足なく映す」
+状態になります(ワールド座標0〜幅・0〜高さがそのまま画面いっぱいに出て、ウィンドウの
+リサイズにも自動追従する)。反映は<code>BeginFrame()</code>の時点なので、設定は
+<code>BeginFrame()</code>より前に行ってください(フレーム途中の変更は次のフレームから効きます)。
+</p>
+<table>
+<tr><th>状態</th><th>ウィンドウをリサイズしたとき</th></tr>
+<tr><td>何も設定していない(既定)</td><td>カメラ中心が新しいクライアント中央へ追従し、ワールド0〜幅・0〜高さが常に映る</td></tr>
+<tr><td><code>SetCameraPosition</code>済み</td><td>カメラ中心は固定。見えるワールドの範囲は「クライアントサイズ÷ズーム」なので、ウィンドウを広げると見える範囲が広がる</td></tr>
+<tr><td><code>SetVirtualResolution</code>済み</td><td>見えるワールドの範囲は「論理解像度÷ズーム」で<strong>ウィンドウサイズに依存しない</strong>。ビューポートだけが拡縮する</td></tr>
+</table>
+<ul>
+<li><code>SetCameraZoom</code>は1.0で等倍、2.0で2倍に拡大表示(= 見えるワールドの範囲が1/2)。
+0以下・NaNはログを出して無視する。</li>
+<li><code>SetVirtualResolution(w, h)</code>は、ワールド座標0〜w・0〜hの範囲がアスペクト比を
+保ったままクライアント領域の中央へ収まるようスケール＋センタリングする。
+「1600x900で組んだ盤面を、どのウィンドウサイズでも同じ構図で見せる」用途に使う。
+<code>(0, 0)</code>を渡すと解除される。</li>
+<li>余る側にはレターボックス/ピラーボックスが出る。<strong>この余白はビューポートの外なので、
+そこへ向けて描いたものは投影のクリップで消える</strong>(余白の色は<code>BeginFrame</code>の
+クリア色になる。黒帯にしたい場合は<code>BeginFrame(0, 0, 0)</code>を渡す)。</li>
+<li><code>ClientToWorld</code> / <code>WorldToClient</code> / <code>GetMouseWorldPosition</code> は
+クライアント座標(<code>GetClientMousePosition</code>が返す、原点は左上・Y-down)と
+ワールド座標を相互変換する。カメラ位置・ズーム・レターボックスをすべて考慮するので、
+<strong>マウスの当たり判定は必ずこれを通すこと</strong>(これらを使わずに
+<code>height - y</code>で変換すると、ズームや論理解像度を使った瞬間にずれる)。</li>
+</ul>
+
+<h3>3.3 使い方</h3>
 <pre><code>#include "KurenaiEngine2D.h"
 #include "KurenaiTypes.h"
 
@@ -510,19 +563,57 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 <li><code>DrawSprite</code> の <code>r, g, b, a</code> はテクスチャに乗算されるティント色。
 <code>a &lt; 1.0</code> で半透明合成される(常にアルファブレンド有効。深度テストは行わないため、
 重なり順は呼び出し順で決まる — 先に呼んだスプライトほど背面に描かれる)。</li>
+<li><code>DrawSpriteUV</code>は<code>DrawSprite</code>の「テクスチャの一部だけを描く」版。
+<code>srcU0, srcV0, srcU1, srcV1</code>は0.0〜1.0の正規化UVで、原点は左上・V下向き
+(テクスチャの標準的な向き)。<code>DrawSprite</code>はこれを
+<code>(0, 0)-(1, 1)</code>で呼ぶだけの実装になっている。<br>
+アイコン類を1枚のアトラスへまとめ、<code>LoadTexture</code>の回数とフレーム中のテクスチャ
+切り替え回数を減らす用途に使う。区画をピクセルで管理する場合は
+<code>GetTextureSize</code>でテクスチャのピクセルサイズを取り、
+<code>ピクセル座標 / サイズ</code>で正規化UVを求める。<br>
+<strong>アトラスを作るときは、区画の周囲に1px以上の余白を入れること。</strong>
+2Dのサンプラーは繰り返し(Wrap)+異方性フィルタなので、区画をぴったり詰めると
+縮小表示時に隣の区画の色がにじむ。</li>
 <li><code>BeginFrame</code>/<code>EndFrame</code> は1フレームにつき必ず1回ずつ呼ぶ。
-<code>DrawSprite</code>/<code>DrawCircle</code>/<code>DrawLine</code>/<code>DrawRoundedRect</code>はその間に好きな回数呼べる。</li>
+<code>DrawSprite</code>/<code>DrawSpriteUV</code>/<code>DrawCircle</code>/<code>DrawLine</code>/<code>DrawRoundedRect</code>はその間に好きな回数呼べる
+(<code>DrawPolyline</code>だけは1フレームあたりの本数に上限がある。下記)。</li>
 <li><code>DrawCircle</code>は中心<code>(x, y)</code>・半径<code>radius</code>の塗り円をふちのアンチエイリアス付きで描画する
 (テクスチャ不要、ピクセルシェーダーの距離場でマスクする)。<code>DrawLine</code>は
 <code>(x1, y1)</code>-<code>(x2, y2)</code>を結ぶ太さ<code>thickness</code>の線分を、内部的には
 回転・拡縮した矩形として<code>DrawSprite</code>と同じパイプラインで描画する。いずれも
-<code>r, g, b, a</code>は塗りつぶし色で半透明可。</li>
+<code>r, g, b, a</code>は塗りつぶし色で半透明可。<br>
+<code>DrawCircle</code>は<code>DrawRoundedRect</code>と同じ形の枠線引数を持つ。
+<strong>塗りを<code>a = 0</code>にして枠線だけを指定すると、中が完全に透明なリングになる</strong>
+(射程円・範囲表示のように、下の描画を隠したくない用途向け)。</li>
+<li><code>DrawPolyline</code>は<code>{x0, y0, x1, y1, ...}</code>の順に並べた点列を、太さ
+<code>thickness</code>の<strong>1本の帯</strong>として描く。角の接合はマイター(鋭角時はベベルへ
+フォールバック)、端は切りっぱなし(バットキャップ)。<br>
+<code>DrawLine</code>を繋いで折れ線を描くと角の外側に扇形の隙間が空くが、これは点列をまとめて
+1つのジオメトリ(重なりの無い三角形の集まり)として描くため隙間ができない。また各画素が
+きっかり1回だけブレンドされるので、<strong>半透明でも接合部の色が濃くならない</strong>。<br>
+制限は次のとおり。
+<ul>
+<li>折れ線が<strong>自分自身と交差する</strong>場合、その交点だけは2回ブレンドされる
+(1パスのアルファブレンドでは原理的に解決できない)</li>
+<li>1本あたり<strong>1024点</strong>まで。超えるとログを出して先頭1024点へ切り詰める</li>
+<li>1フレームあたり<strong>32本</strong>まで。超えるとログを出してその呼び出しを描画しない
+(DX12のステージングリングの段数で決まる上限。上限に達する前に弾くことで、
+リングを周回して描画結果が静かに壊れるのを防いでいる)</li>
+</ul></li>
 <li><code>DrawRoundedRect</code>は中心<code>(x, y)</code>、サイズ<code>width</code> x <code>height</code>、
 角丸半径<code>cornerRadiusPixels</code>(ピクセル単位)の角丸矩形を、<code>DrawCircle</code>と同様
 テクスチャ不要のピクセルシェーダー距離場(SDF)でふちをアンチエイリアスしながら描画する。
 <code>borderThicknessPixels</code>を0より大きくすると、塗りの内側に<code>borderR/G/B/A</code>の
 枠線をさらに重ねて描画する(既定は枠線なし)。UIのボタンやパネル背景など、角丸+枠線を
-1回の描画コマンドで表現したい場合に使う。</li>
+1回の描画コマンドで表現したい場合に使う。<br>
+枠線は<strong>塗りとは独立したレイヤーとして、塗りの上へ通常のアルファ合成で重ねる</strong>。
+このため塗りが半透明・完全透明でも枠線はその不透明度のまま出る(塗りが不透明な場合の
+結果は変わらない)。<code>DrawCircle</code>の枠線もまったく同じ扱い。<br>
+<code>rotationRadians</code>は<code>DrawSprite</code>と同じZ軸回転で、中心<code>(x, y)</code>まわりに回る。
+<code>width</code>/<code>height</code>と角丸半径・枠線太さは<strong>回転前のローカル空間での値</strong>
+なので、回しても角丸や枠線の太さは変わらない。既定値0のため、回転を使わない既存の呼び出しは
+従来どおり。<br>
+なお<code>DrawCircle</code>には回転引数が無い(円は回しても見た目が変わらないため)。</li>
 <li><code>DrawText</code>は既定(<code>align = TextAlign::Center</code>, <code>verticalAlign = TextVerticalAlign::Middle</code>)
 では<code>(x, y)</code>をテキスト中央基準として<code>text</code>を描画する。<code>fontSize</code>は
 おおよその文字高さ(ピクセル単位)。コンストラクタ内でGDI(<code>Yu Gothic UI</code>)によりASCII印字可能文字
@@ -544,7 +635,32 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 <li><code>MeasureText(text, fontSize, bold)</code>は指定した文字列・サイズ・太さで描画した場合の
 実測済み幅(ピクセル単位、各グリフの<code>AdvancePixels</code>の合計)を返す。<code>DrawText</code>と同様、
 アトラス未収録の文字はその場では幅0として扱われ、次の<code>BeginFrame()</code>でアトラスに追加された
-以降は正しい幅が返る。ボタン幅の自動計算など、中央揃え以外の用途で幅そのものが必要な場合に使う。</li>
+以降は正しい幅が返る。ボタン幅の自動計算など、中央揃え以外の用途で幅そのものが必要な場合に使う。
+<strong>改行は解釈しない</strong>ため、複数行の文字列には<code>MeasureTextBlock</code>を使う。</li>
+<li><code>DrawText</code>は<code>text</code>に含まれる<code>'\n'</code>で<strong>改行する</strong>
+(<code>"\r\n"</code>の<code>'\r'</code>は読み飛ばす)。2行目以降は<code>GetLineHeight</code>ぶん下へ送られる。
+<code>align</code>は<strong>行ごと</strong>に適用され(<code>Center</code>なら行ごとの中央揃え)、
+<code>verticalAlign</code>は<strong>テキストブロック全体</strong>に対して適用される。<br>
+<strong>指定幅での自動折り返しは行わない。</strong>折り返しが要る場合は、呼び出し側が
+<code>MeasureText</code>で折り返し位置を決め、<code>'\n'</code>を挿入した文字列を渡す。</li>
+<li><code>PushClipRect</code> / <code>PopClipRect</code>は、以後の描画を矩形の内側だけに制限する
+(内部的にはシザー矩形)。スクロールするUIパネルのように、パネルからはみ出した項目を
+切り落とす用途に使う。<code>x, y</code>は矩形の<strong>中心</strong>で、
+<code>DrawSprite</code>/<code>DrawRoundedRect</code>とまったく同じ引数の意味なので、
+パネルを<code>DrawRoundedRect</code>で描いた直後に同じ引数で<code>PushClipRect</code>すれば
+その内側へ子要素を閉じ込められる。<br>
+ネストした場合は現在の矩形との<strong>積</strong>が有効になる(積が空なら対応する
+<code>PopClipRect</code>までの描画は1ピクセルも出ない)。カメラ位置・ズーム・論理解像度による
+レターボックスはすべて考慮される。クリップできるのは<strong>軸平行な矩形のみ</strong>で、
+回転や角丸には追従しない(角丸パネルの内側を切りたい場合は外接矩形になる)。<br>
+<code>BeginFrame</code>がスタックを空に戻すので、フレームをまたいでクリップが残ることはない。
+<code>PopClipRect</code>し忘れたまま<code>EndFrame</code>を迎えた場合は(最初の1回だけ)ログを出す。</li>
+<li><code>GetLineHeight(fontSize, bold)</code>は1行ぶんの高さ(ピクセル単位)を返す。
+<code>fontSize</code>からの推測ではなく、GDIの<code>TEXTMETRICW::tmHeight</code>+パディングから決まる
+実際のセル高さに拡大率を掛けた値なので、フォントを差し替えても比率のずれが出ない。<br>
+<code>MeasureTextBlock(text, fontSize, outWidth, outHeight, bold)</code>は改行を考慮した
+テキストブロック全体の幅(最も長い行の幅)と高さ(行高さ×行数)を返す。説明文を囲むパネルの
+大きさを、描画前にAPI呼び出し1回で決められる。</li>
 <li><strong>かな漢字を含む任意のUnicode文字(BMP範囲)にも対応する。</strong>ASCII以外の文字は
 初回のコンストラクタ実行時点ではアトラスに含まれていないため、<code>DrawText</code>がアトラス未収録の
 文字を検出すると、その文字だけをその場では描画せず、次の<code>BeginFrame()</code>の先頭でアトラスへ
@@ -761,6 +877,14 @@ DX12でdxcを使うには<code>dxcompiler.dll</code>と<code>dxil.dll</code>が�
 HLSLの言語バージョンは<code>-HV 2018</code>で固定しているため、dxcのバージョンが上がっても
 既存シェーダーの意味は変わらない。シェーダーファイルは<b>BOM無しUTF-8</b>で保存すること
 (日本語コメントを含む場合、BOMもUTF-16も使わない)。
+</p>
+<p>
+固定しているのは<b>意味を安定させるため</b>であって、HLSL 2021で通らない書き方を許すためではない。
+リポジトリ内のシェーダーは<code>-HV</code>を渡さない(= 既定のHLSL 2021)コンパイルも通る状態を保つこと。
+特に<b>ベクタを条件にした三項演算子</b>(<code>(v &lt; 0.0f) ? a : b</code>で<code>v</code>が
+<code>float3</code>等)はHLSL 2018では成分ごとのselectとして通るがHLSL 2021ではエラーになる。
+<code>select()</code>は古いdxcに無いため、<code>step()</code>など<b>どちらの言語バージョンでも
+同じ意味になる書き方</b>へ置き換えること。
 </p>
 
 <h4>4.2.2 bindless(<code>ResourceDescriptorHeap</code>)</h4>
@@ -1430,9 +1554,12 @@ AzimuthDegrees = 126.87</code></pre>
 <pre><code>bool IsMouseOverWindow() const;                    // カーソルがクライアント領域内にあるか
 bool IsMouseButtonDown(MouseButton button) const;   // 現在押されている状態か(継続的な操作に使う)
 bool WasMouseButtonPressed(MouseButton button) const; // 直前のPumpEvents()中に押された(エッジ検出)か
+bool WasMouseButtonReleased(MouseButton button) const; // 直前のPumpEvents()中に離された(エッジ検出)か
 bool IsKeyDown(KeyCode key) const;                     // 同上(キー)。WASD移動など「押している間」続く操作に使う
 bool WasKeyPressed(KeyCode key) const;                 // 同上(キー)。オートリピートは無視する
-POINT GetClientMousePosition() const;               // クライアント座標(原点は左上、Y-down)</code></pre>
+bool WasKeyReleased(KeyCode key) const;                // 同上(キー)の解放エッジ
+POINT GetClientMousePosition() const;               // クライアント座標(原点は左上、Y-down)
+float GetMouseWheelDelta() const;                   // 直前のPumpEvents()中のホイール回転量(ノッチ単位、奥が正)</code></pre>
 
 <ul>
 <li><code>MouseButton</code> は <code>Left</code>/<code>Right</code>/<code>Middle</code> の3値。</li>
@@ -1443,9 +1570,20 @@ POINT GetClientMousePosition() const;               // クライアント座標(
 「押している間」継続する操作に使う。<code>Was*Pressed</code>系は「離れた状態から押された状態になった」
 エッジのみを検出する。判定対象の期間は直前の<code>PumpEvents()</code>呼び出し中
 (1フレームにつき1回呼ぶ想定)。</li>
+<li><code>Was*Released</code>系は<code>Was*Pressed</code>系と対になる解放エッジ。一般的なUIのボタンは
+<strong>押下ではなく「押下→同じボタン上での解放」でクリックを確定する</strong>(押したまま領域外へ
+カーソルを出せばキャンセルできる)ため、UI基盤を組む場合はこちらを使う。
+<code>Is*Down</code>の前フレーム値を呼び出し側で保持する方法とは違い、1回の
+<code>PumpEvents()</code>の中で押して離した場合も取りこぼさない。<br>
+ウィンドウが<strong>フォーカスを失った場合、その時点で押されていたキー・ボタンは
+「解放された」として通知される</strong>。押下だけ受け取って解放が来ないと、UIが押しっぱなしの状態で
+固まってしまうため。</li>
 <li><code>GetClientMousePosition</code>が返す座標はWin32標準のクライアント座標(原点は左上、Y-down)。
 <code>KurenaiEngine2D::DrawSprite</code>のワールド座標(原点は左下、Y-up。3.1節参照)とは上下が逆なので、
-スプライト座標と突き合わせる場合は<code>height - y</code>で変換すること。</li>
+スプライト座標と突き合わせる場合は<strong><code>KurenaiEngine2D::ClientToWorld</code>
+(または<code>GetMouseWorldPosition</code>)で変換すること</strong>(3.2節)。
+カメラ位置・ズーム・論理解像度によるレターボックスをすべて考慮するため、
+<code>height - y</code>のような自前の変換と違ってカメラを動かしてもずれない。</li>
 <li>これらはいずれも<code>KurenaiEngineBase</code>のメンバなので<code>KurenaiEngine2D</code>/
 <code>KurenaiEngine3D</code>どちらからも呼べる。<code>KurenaiEngine3D::Run()</code>自身も
 移動(WASD/E/Q)・速度切り替え(Shift)・ImGui表示切り替え(F1)にこのAPI(<code>IsKeyDown</code>/
@@ -1455,7 +1593,16 @@ POINT GetClientMousePosition() const;               // クライアント座標(
 実現するため<code>GetAsyncKeyState(VK_RBUTTON)</code>のままにしている。これにより
 <code>PostMessage</code>で<code>WM_RBUTTONDOWN</code>を送っても実カーソルの位置・表示状態には
 一切影響しない(意図しないカーソル操作の経路にならないことを構造的に保証している)。</li>
-<li>複数キー・複数ボタンの同時押しにも対応(それぞれ独立して状態を保持)。マウスホイールは未対応。</li>
+<li>複数キー・複数ボタンの同時押しにも対応(それぞれ独立して状態を保持)。</li>
+<li><code>GetMouseWheelDelta</code>は<code>WM_MOUSEWHEEL</code>の回転量を
+<code>WHEEL_DELTA</code>(120)で割ったノッチ数を返す。<strong>奥へ回すと正</strong>で、
+回転していなければ0。エッジ系と同じく寿命は直前の<code>PumpEvents()</code>呼び出しぶんで、
+その間に複数のメッセージが届いた場合は合算される。高分解能ホイールは1ノッチ未満を
+刻んで送ってくるため戻り値は<code>float</code>。<br>
+なお<code>WM_MOUSEWHEEL</code>の座標は他のマウスメッセージと違い<strong>スクリーン座標</strong>で
+届くため、<code>GetClientMousePosition</code>の更新には使っていない。
+ホイール操作の位置が要る場合は<code>GetClientMousePosition</code>の値
+(直近の<code>WM_MOUSEMOVE</code>の位置)を使うこと。</li>
 <li><code>IsMouseOverWindow</code>は、環境変数<code>KURENAI_INPUT_AUTOMATION=1</code>が設定されている
 場合に限り、下記のImGui側と同様の理由で<code>TrackMouseEvent</code>由来の<code>WM_MOUSELEAVE</code>
 ノイズを抑制する。実カーソルがウィンドウ外にある状態で<code>PostMessage</code>により
@@ -1514,12 +1661,16 @@ F1を消費しないので、通しても入力内容には影響しない。</l
 <h2>6. サウンド再生について</h2>
 <p>
 <code>KurenaiEngineBase</code> はXAudio2による簡易なサウンド再生APIを提供します。WAV(PCM)ファイルの
-読み込み・再生・停止に対応した最小限の実装で、音量変更等は行えません(効果音・BGM程度の単純な再生が目的)。
+読み込み・再生・停止・音量制御に対応した最小限の実装です(効果音・BGM程度の単純な再生が目的で、
+ピッチ・パン・カテゴリ別のバス等は持ちません)。
 </p>
 
 <pre><code>SoundHandle LoadSound(const std::wstring&amp; filePath);
 VoiceHandle PlaySound(SoundHandle sound, float volume = 1.0f, bool loop = false);
-void StopSound(VoiceHandle voice);</code></pre>
+void StopSound(VoiceHandle voice);
+void SetVoiceVolume(VoiceHandle voice, float volume);  // 再生中ボイスの音量(0.0〜1.0)
+void SetMasterVolume(float volume);                    // 全ボイスに掛かる音量(0.0〜1.0)
+float GetMasterVolume() const;</code></pre>
 
 <ul>
 <li><code>LoadSound</code> はWAV(PCM)ファイルを読み込み、<code>SoundHandle</code>を返す
@@ -1532,6 +1683,17 @@ void StopSound(VoiceHandle voice);</code></pre>
 <code>KurenaiEngine2D</code>/<code>KurenaiEngine3D</code>が破棄されるまで無限ループし続ける。
 単発再生(<code>loop=false</code>)は自動的に終了するため、通常<code>StopSound</code>を呼ぶ必要はない
 (呼んでも問題はない)。</li>
+<li><code>SetVoiceVolume</code> は再生中のボイスの音量を変更する。
+<strong>フェードイン/フェードアウトはこれを毎フレーム呼ぶ形でアプリ側が実装する</strong>
+(ループBGMを短い間隔で<code>StopSound</code>→<code>PlaySound</code>し直す方法は、
+再生位置が先頭へ戻るため代用にならない)。既に終了済み/無効なハンドルの場合は何もしない
+――単発再生がいつ終わるかは呼び出し側には分からないため、これは正常系でログも出ない。</li>
+<li><code>SetMasterVolume</code> は全ボイスに掛かる音量で、個々のボイスの音量とは掛け算になる。
+<strong>BGM/SEといったカテゴリ別のバスは持たない</strong>ため、
+設定画面でカテゴリごとに調整したい場合はカテゴリごとに<code>VoiceHandle</code>を覚えておき
+<code>SetVoiceVolume</code>で調整する。</li>
+<li>音量はいずれも0.0〜1.0。範囲外(NaNを含む)を渡すとログを出して範囲内へ丸める
+(音量の指定ミスでアプリを落とす価値は無いため例外にはしない)。</li>
 <li>これらは<code>KurenaiEngineBase</code>のメンバなので<code>KurenaiEngine2D</code>/
 <code>KurenaiEngine3D</code>どちらからも呼べる。</li>
 <li>使用にはCOM初期化(<code>CoInitializeEx</code>)が必要(WICテクスチャ読み込みと同じ要件。

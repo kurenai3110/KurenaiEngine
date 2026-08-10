@@ -33,6 +33,14 @@ namespace Kurenai::RHI
         , m_SliceDsvIndices(std::move(sliceDsvIndices))
         , m_CubeCount(cubeCount)
     {
+        // 生成経路が多く引数では寸法を受け取らないため、リソース記述子から求めて控える
+        // (経路ごとに記録すると追加時に漏れる。DX11Textureも同じ方針)
+        if (m_Resource)
+        {
+            const D3D12_RESOURCE_DESC desc = m_Resource->GetDesc();
+            m_Width = static_cast<uint32_t>(desc.Width);
+            m_Height = desc.Height;
+        }
     }
 
     DX12Texture::~DX12Texture()

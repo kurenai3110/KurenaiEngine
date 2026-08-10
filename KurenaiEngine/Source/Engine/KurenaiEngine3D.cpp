@@ -1186,7 +1186,17 @@ namespace Kurenai
         m_LastFrameTime = std::chrono::steady_clock::now();
     }
 
-    KurenaiEngine3D::~KurenaiEngine3D() = default;
+    KurenaiEngine3D::~KurenaiEngine3D()
+    {
+        // このクラスが持つGPUリソース(レンダーターゲット・G-Buffer・各種バッファ・
+        // シーンのテクスチャ)を1つも壊す前に、GPUの実行完了を待つ。
+        // 基底のKurenaiEngineBaseも待つが、そちらが走るのはこのクラスのメンバが
+        // すべて破棄された後なので間に合わない(WaitForGPUIdleの宣言側コメント参照)。
+        //
+        // ここへ来る時点でRun()がRender/Loaderの両スレッドをjoin済みのため、
+        // 待った後に新しいコマンドが積まれることはない
+        WaitForGPUIdle();
+    }
 
     void KurenaiEngine3D::CreateSceneResources()
     {

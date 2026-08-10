@@ -171,17 +171,46 @@ namespace Kurenai::RHI
         dxViewport.MaxDepth = viewport.MaxDepth;
         cmdList->RSSetViewports(1, &dxViewport);
 
-        // DX12はD3D11と異なりシザー矩形を必ず設定する必要があるため、ビューポート全体を覆う矩形を張る。
-        // DX11はラスタライザステートがScissorEnable=FALSEでそもそもクリップしないので、
-        // ここでビューポートより内側に丸めると「DX12だけ端が1px欠ける」という差になる。
-        // レターボックス表示ではTopLeftX/Widthが非整数になるため、左上はfloor・右下はceilで
-        // 必ずビューポート全体を含むように切り上げる
-        D3D12_RECT scissorRect{};
-        scissorRect.left = static_cast<LONG>(std::floor(viewport.TopLeftX));
-        scissorRect.top = static_cast<LONG>(std::floor(viewport.TopLeftY));
-        scissorRect.right = static_cast<LONG>(std::ceil(viewport.TopLeftX + viewport.Width));
-        scissorRect.bottom = static_cast<LONG>(std::ceil(viewport.TopLeftY + viewport.Height));
-        cmdList->RSSetScissorRects(1, &scissorRect);
+        // D3D12はシザーが常時有効で、コマンドリストのリセット直後は矩形0本(=全クリップ)なので、
+        // 必ずビューポート全体を覆う矩形を張る。丸め方はDX11と共有するヘルパーに寄せてある
+        // (片方だけ直すとバックエンド間で端の1pxがずれるため。MakeFullViewportScissorRect参照)。
+        // SetScissorRectで絞っていてもここでビューポート全体へ戻る仕様
+        m_CurrentViewport = viewport;
+        m_HasViewport = true;
+        ApplyScissorRect(MakeFullViewportScissorRect(viewport));
+    }
+
+    void DX12CommandList::SetScissorRect(const ScissorRect& rect)
+    {
+        if (!m_HasViewport)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "SetScissorRect: SetViewportより先に呼ばれました。クランプ先のビューポートが"
+                "決まらないため、この呼び出しを無視します");
+            return;
+        }
+        ApplyScissorRect(ClampScissorRectToViewport(rect, m_CurrentViewport));
+    }
+
+    void DX12CommandList::ResetScissorRect()
+    {
+        if (!m_HasViewport)
+        {
+            Core::Logger::Error("DX12", "ResetScissorRect: SetViewportより先に呼ばれました。この呼び出しを無視します");
+            return;
+        }
+        ApplyScissorRect(MakeFullViewportScissorRect(m_CurrentViewport));
+    }
+
+    void DX12CommandList::ApplyScissorRect(const ScissorRect& rect)
+    {
+        D3D12_RECT dxRect{};
+        dxRect.left = rect.Left;
+        dxRect.top = rect.Top;
+        dxRect.right = rect.Right;
+        dxRect.bottom = rect.Bottom;
+        m_Device->GetCommandList()->RSSetScissorRects(1, &dxRect);
     }
 
     void DX12CommandList::SetPipelineState(IRHIPipelineState* pipelineState)

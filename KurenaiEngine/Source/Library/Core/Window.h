@@ -67,13 +67,26 @@ namespace Kurenai::Core
         bool IsMouseButtonDown(MouseButton button) const;
         // 直前のPumpMessages()呼び出し中にボタンが押された(離れた状態から押された状態になった)か
         bool WasMouseButtonPressed(MouseButton button) const;
+        // 直前のPumpMessages()呼び出し中にボタンが離された(押された状態から離れた状態になった)か。
+        // 一般的なUIのボタンは「押下」ではなく「押下→同じボタン上での解放」でクリックを確定する
+        // (押したまま領域外へ出せばキャンセルできる)ため、その判定に使う。
+        // IsMouseButtonDown()の前フレーム値を呼び出し側で保持する方法と違い、
+        // 1回のPumpMessages()の中で押して離した場合も取りこぼさない
+        bool WasMouseButtonReleased(MouseButton button) const;
         // 現在キーが押された状態かどうか(WASD移動のような「押している間」継続する操作に使う)
         bool IsKeyDown(KeyCode key) const;
         // 直前のPumpMessages()呼び出し中にキーが押された(離れた状態から押された状態になった)か。
         // オートリピートによる連続したWM_KEYDOWNは無視する
         bool WasKeyPressed(KeyCode key) const;
+        // 直前のPumpMessages()呼び出し中にキーが離された(押された状態から離れた状態になった)か
+        bool WasKeyReleased(KeyCode key) const;
         // クライアント座標(原点は左上、Y-down。Win32の標準的な座標系)
         POINT GetClientMousePosition() const { return m_MousePosition; }
+        // 直前のPumpMessages()呼び出し中に回転したホイールのノッチ数(WHEEL_DELTA単位)。
+        // 奥へ回すと正。回転していなければ0。1回のPumpMessages()の中で複数の
+        // WM_MOUSEWHEELが届いた場合は合算される(押下エッジと同じ「1フレームぶん」の寿命)。
+        // 高分解能ホイールは1ノッチ未満の値を刻んで送ってくるため、整数ではなくfloatで返す
+        float GetMouseWheelDelta() const { return m_MouseWheelDelta; }
 
         // WndProc(PumpMessages呼び出し元スレッド=Updateスレッド)で受け取ったメッセージのうち
         // ImGui向けにキューイングされた分を、呼び出し元スレッド上でImGui_ImplWin32_WndProcHandlerへ
@@ -126,8 +139,13 @@ namespace Kurenai::Core
         POINT m_MousePosition{};
         bool m_MouseButtonDown[3]{};
         bool m_MouseButtonPressedEdge[3]{};
+        bool m_MouseButtonReleasedEdge[3]{};
         bool m_KeyDown[256]{};
         bool m_KeyPressedEdge[256]{};
+        bool m_KeyReleasedEdge[256]{};
+        // WM_MOUSEWHEELの回転量をWHEEL_DELTA単位で累積する。エッジフラグと同じく
+        // PumpMessagesの先頭でリセットするため、寿命は「1回のPumpMessages呼び出し」ぶん
+        float m_MouseWheelDelta = 0.0f;
 
         // WndProc(Updateスレッド)からForwardQueuedMessagesToImGui呼び出し元(Renderスレッド)への
         // メッセージ受け渡し用。ImGui自体はこのキューにもWndProc処理にも関与しないため、

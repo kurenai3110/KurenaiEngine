@@ -483,6 +483,15 @@ namespace Kurenai::RHI
         // FrontCounterClockwise以外の挙動は変わらない
         CD3D11_RASTERIZER_DESC rasterizerDesc(D3D11_DEFAULT);
         rasterizerDesc.FrontCounterClockwise = desc.FrontCounterClockwise ? TRUE : FALSE;
+        // IRHICommandList::SetScissorRectを使えるよう常時有効にする。D3D12にはこのフラグ自体が
+        // 存在せず(シザーは常時有効)、有効にすることでDX11/DX12の挙動が揃う。
+        //
+        // 【注意】D3D11のシザー矩形の既定は「矩形0本」であり、ScissorEnable=TRUEのまま
+        // RSSetScissorRectsを一度も呼ばないと全ピクセルがクリップされて何も映らなくなる。
+        // これを防ぐため、DX11CommandList::SetViewportが必ずビューポート全体の矩形を張る
+        // (D3D12もコマンドリストのリセット直後は矩形0本という同じ危険を抱えており、
+        //  現にDX12で描画が出ている事実が「全描画がSetViewportを経由している」ことの裏付けになる)
+        rasterizerDesc.ScissorEnable = TRUE;
 
         Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerState;
         ThrowIfFailed(m_Device->CreateRasterizerState(&rasterizerDesc, &rasterizerState), "ラスタライザステートの作成に失敗しました");

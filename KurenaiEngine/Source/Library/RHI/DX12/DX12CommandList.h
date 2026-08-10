@@ -26,6 +26,8 @@ namespace Kurenai::RHI
         void ClearRenderTarget(const ClearColor& color) override;
         void ClearDepth(float depth) override;
         void SetViewport(const Viewport& viewport) override;
+        void SetScissorRect(const ScissorRect& rect) override;
+        void ResetScissorRect() override;
         void SetPipelineState(IRHIPipelineState* pipelineState) override;
         void SetVertexBuffer(IRHIBuffer* buffer) override;
         void SetIndexBuffer(IRHIBuffer* buffer) override;
@@ -53,6 +55,12 @@ namespace Kurenai::RHI
 
     private:
         static constexpr uint32_t kMaxRenderTargets = 8;
+
+        // シザー矩形をD3D12へ設定する(SetViewport/SetScissorRect/ResetScissorRectの共通処理)
+        void ApplyScissorRect(const ScissorRect& rect);
+        // SetScissorRect/ResetScissorRectがクランプ先として使う、直近のSetViewportの値
+        Viewport m_CurrentViewport{};
+        bool m_HasViewport = false;
 
         DX12Device* m_Device;
         D3D12_CPU_DESCRIPTOR_HANDLE m_CurrentRenderTargetViews[kMaxRenderTargets]{};
