@@ -35,6 +35,7 @@ namespace
         Atlas,       // 5: テクスチャアトラス(DrawSpriteUV / GetTextureSize)
         Text,        // 6: テキスト(複数行・行高さ・ブロック計測)
         Camera,      // 7: 2Dカメラ(位置・ズーム・論理解像度)
+        Clip,        // 8: クリップ矩形(スクロールするパネル・ネスト)
         Count
     };
 
@@ -88,6 +89,7 @@ namespace
         case DemoScene::Atlas: return L"5: テクスチャアトラス (DrawSpriteUV / GetTextureSize)";
         case DemoScene::Text: return L"6: テキスト (複数行・GetLineHeight・MeasureTextBlock)";
         case DemoScene::Camera: return L"7: 2Dカメラ (位置・ズーム・論理解像度)";
+        case DemoScene::Clip: return L"8: クリップ矩形 (スクロールするパネル・ネスト)";
         default: return L"(不明なデモ画面)";
         }
     }
@@ -484,6 +486,73 @@ namespace
         }
     }
 
+    // 「8: クリップ矩形」のデモが持ち越す状態
+    struct ClipDemoState
+    {
+        float ScrollOffset = 0.0f; // 一覧のスクロール量(ピクセル)
+    };
+
+    void UpdateClipDemo(KurenaiEngine2D& renderer, ClipDemoState& state, float listHeight, float contentHeight)
+    {
+        // ホイールでスクロール。クリップが無いとパネルの外へ項目がはみ出す
+        const float wheel = renderer.GetMouseWheelDelta();
+        if (wheel != 0.0f)
+        {
+            state.ScrollOffset -= wheel * 40.0f;
+        }
+        const float maxScroll = (std::max)(0.0f, contentHeight - listHeight);
+        state.ScrollOffset = (std::max)(0.0f, (std::min)(maxScroll, state.ScrollOffset));
+    }
+
+    void DrawClipDemo(KurenaiEngine2D& renderer, const ClipDemoState& state, float width, float height,
+                      float listHeight, float itemHeight, int itemCount)
+    {
+        const float panelWidth = 420.0f;
+        const float panelX = width * 0.3f;
+        const float panelY = height * 0.48f;
+
+        renderer.DrawText(panelX, panelY + listHeight * 0.5f + 30.0f, L"PushClipRect あり(ホイールでスクロール)",
+            18.0f, 0.88f, 0.90f, 0.96f, 1.0f, true);
+
+        // パネルの背景。この矩形と同じ引数でPushClipRectすると内側へ子要素を閉じ込められる
+        renderer.DrawRoundedRect(panelX, panelY, panelWidth, listHeight, 8.0f,
+            0.12f, 0.14f, 0.20f, 1.0f, 2.0f, 0.45f, 0.55f, 0.72f, 1.0f);
+
+        renderer.PushClipRect(panelX, panelY, panelWidth, listHeight);
+        for (int i = 0; i < itemCount; ++i)
+        {
+            const float itemY = panelY + listHeight * 0.5f - itemHeight * 0.5f - i * itemHeight + state.ScrollOffset;
+            const float shade = (i % 2 == 0) ? 0.20f : 0.16f;
+            renderer.DrawRoundedRect(panelX, itemY, panelWidth - 24.0f, itemHeight - 6.0f, 6.0f, shade, shade + 0.04f, shade + 0.10f, 1.0f);
+            renderer.DrawText(panelX, itemY, L"ユニット " + std::to_wstring(i + 1), 18.0f, 0.85f, 0.88f, 0.94f, 1.0f);
+        }
+
+        // ネストの確認: 上の矩形とさらに小さい矩形の積だけが残る
+        renderer.PushClipRect(panelX, panelY, panelWidth * 0.5f, listHeight);
+        renderer.DrawRoundedRect(panelX, panelY, panelWidth * 2.0f, 40.0f, 0.0f, 0.85f, 0.35f, 0.30f, 0.55f);
+        renderer.PopClipRect();
+
+        renderer.PopClipRect();
+
+        renderer.DrawText(panelX, panelY - listHeight * 0.5f - 26.0f,
+            L"赤い帯はネストした矩形(パネル幅の半分)との積だけが残っている",
+            16.0f, 0.75f, 0.78f, 0.85f, 1.0f);
+
+        // 右: 同じ内容をクリップ無しで描く。はみ出すことの比較用
+        const float compareX = width * 0.75f;
+        renderer.DrawText(compareX, panelY + listHeight * 0.5f + 30.0f, L"PushClipRect なし(はみ出す)",
+            18.0f, 0.88f, 0.90f, 0.96f, 1.0f, true);
+        renderer.DrawRoundedRect(compareX, panelY, panelWidth * 0.7f, listHeight, 8.0f,
+            0.12f, 0.14f, 0.20f, 1.0f, 2.0f, 0.45f, 0.55f, 0.72f, 1.0f);
+        for (int i = 0; i < itemCount; ++i)
+        {
+            const float itemY = panelY + listHeight * 0.5f - itemHeight * 0.5f - i * itemHeight + state.ScrollOffset;
+            const float shade = (i % 2 == 0) ? 0.20f : 0.16f;
+            renderer.DrawRoundedRect(compareX, itemY, panelWidth * 0.7f - 24.0f, itemHeight - 6.0f, 6.0f, shade, shade + 0.04f, shade + 0.10f, 1.0f);
+            renderer.DrawText(compareX, itemY, L"ユニット " + std::to_wstring(i + 1), 18.0f, 0.85f, 0.88f, 0.94f, 1.0f);
+        }
+    }
+
     // 「7: 2Dカメラ」のデモ。論理解像度の指定を切り替えるためのフラグだけ持つ
     struct CameraDemoState
     {
@@ -866,6 +935,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         }
 
         CameraDemoState cameraDemo{};
+        ClipDemoState clipDemo{};
+        // クリップのデモの寸法(更新と描画で共有する)
+        constexpr float kClipListHeight = 340.0f;
+        constexpr float kClipItemHeight = 44.0f;
+        constexpr int kClipItemCount = 14;
 
         DemoScene scene = DemoScene::Sprites;
         float elapsedSeconds = 0.0f; // アニメーションするデモ画面の時間軸
@@ -938,6 +1012,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 UpdateCameraDemo(renderer, cameraDemo, deltaTime);
             }
+            else if (scene == DemoScene::Clip)
+            {
+                UpdateClipDemo(renderer, clipDemo, kClipListHeight, kClipItemHeight * kClipItemCount);
+            }
 
             if (scene != DemoScene::Camera)
             {
@@ -981,6 +1059,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 break;
             case DemoScene::Camera:
                 DrawCameraDemo(renderer, cameraDemo, drawable);
+                break;
+            case DemoScene::Clip:
+                DrawClipDemo(renderer, clipDemo, width, height, kClipListHeight, kClipItemHeight, kClipItemCount);
                 break;
             default:
                 break;

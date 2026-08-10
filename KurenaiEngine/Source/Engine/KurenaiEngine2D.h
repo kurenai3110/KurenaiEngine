@@ -181,6 +181,21 @@ namespace Kurenai
         void MeasureTextBlock(
             const std::wstring& text, float fontSize, float& outWidth, float& outHeight, bool bold = false);
 
+        // 以後の描画を、ワールド座標(=ピクセル座標。原点は画面左下、Y-up)の矩形の内側だけに
+        // 制限する。x, yは矩形の【中心】、width/heightはサイズで、DrawSprite/DrawRoundedRectと
+        // まったく同じ引数の意味にしてある(パネルをDrawRoundedRectで描いた直後に同じ引数で
+        // PushClipRectすれば、その内側へ子要素を閉じ込められる、というのが最も多い使い方のため)。
+        //
+        // ネストした場合は現在の矩形との積が有効になる。積が空になった場合、対応する
+        // PopClipRectまでの描画は1ピクセルも出ない。カメラ位置・ズーム・論理解像度による
+        // レターボックスはすべて考慮される。クリップできるのは軸平行な矩形のみで、
+        // 回転や角丸には追従しない(角丸パネルの内側を切りたい場合は外接矩形になる)。
+        //
+        // BeginFrameとEndFrameの間で呼ぶこと(BeginFrameがスタックを空に戻す)
+        void PushClipRect(float x, float y, float width, float height);
+        // 直近のPushClipRectを取り消す。対応するPushClipRectが無い場合はログを出して何もしない
+        void PopClipRect();
+
         // 描画コマンドを確定してバックバッファへ表示する。1フレームにつき1回だけ呼ぶ
         void EndFrame(bool vsync = true);
 
@@ -245,6 +260,20 @@ namespace Kurenai
             float Zoom = 1.0f;
         };
         ViewState ComputeViewState() const;
+
+        // PushClipRect/PopClipRectのスタック。各要素は「そこまでのネストの積を取り終えた後の」
+        // クライアント座標(原点は左上・Y-down、ピクセル)の矩形。積は浮動小数のまま取り、
+        // RHIへ渡す直前にだけ整数へ丸める(先に丸めるとネストのたびに誤差が積み上がるため)
+        struct ClipRect
+        {
+            float Left = 0.0f, Top = 0.0f, Right = 0.0f, Bottom = 0.0f;
+        };
+        std::vector<ClipRect> m_ClipRectStack;
+        // Push/Popの数が合わないままEndFrameを迎えたことを、最初の1回だけログに残すためのフラグ
+        // (毎フレーム出すとログが埋まる)
+        bool m_ClipRectLeakLogged = false;
+        // m_ClipRectStackの先頭(空ならビューポート全体)をコマンドリストへ反映する
+        void ApplyClipRect();
 
         std::unique_ptr<RHI::IRHIShader> m_VertexShader;
         std::unique_ptr<RHI::IRHIShader> m_PixelShader;

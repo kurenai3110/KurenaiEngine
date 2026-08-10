@@ -201,6 +201,11 @@ namespace Kurenai
         commandList->ClearRenderTarget({ clearR, clearG, clearB, clearA });
         commandList->SetViewport({ view.ViewportX, view.ViewportY, view.ViewportWidth, view.ViewportHeight, 0.0f, 1.0f });
 
+        // SetViewportがシザー矩形をビューポート全体へ戻すので、前フレームに積み残された
+        // クリップ矩形もここで捨てる(EndFrameが警告済み)。これによりPush/Popの数が
+        // 合っていないアプリでも、クリップがフレームをまたいで残り続けることはない
+        m_ClipRectStack.clear();
+
         commandList->SetPipelineState(m_PipelineState.get());
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &frameConstants, sizeof(frameConstants));
         commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
@@ -773,8 +778,90 @@ namespace Kurenai
         outHeight = GetLineHeight(fontSize, bold) * static_cast<float>(lines.size());
     }
 
+    void KurenaiEngine2D::PushClipRect(float x, float y, float width, float height)
+    {
+        // ワールド(Y-up)矩形の対角2点をクライアント座標(Y-down)へ変換する。カメラ位置・ズーム・
+        // レターボックスはWorldToClientがまとめて面倒を見る。Y-upとY-downで上下が入れ替わるため、
+        // 変換後にmin/maxを取り直す(回転は無いので対角2点だけで軸平行矩形が確定する)
+        float ax = 0.0f, ay = 0.0f, bx = 0.0f, by = 0.0f;
+        WorldToClient(x - width * 0.5f, y + height * 0.5f, ax, ay); // ワールドの左上
+        WorldToClient(x + width * 0.5f, y - height * 0.5f, bx, by); // ワールドの右下
+
+        ClipRect rect;
+        rect.Left = (std::min)(ax, bx);
+        rect.Top = (std::min)(ay, by);
+        rect.Right = (std::max)(ax, bx);
+        rect.Bottom = (std::max)(ay, by);
+
+        // ネスト時は現在の矩形との積。積が空(Left>=Right等)になってもそのまま積む
+        // (対応するPopClipRectまで何も描かれない、という素直な結果になる)
+        if (!m_ClipRectStack.empty())
+        {
+            const ClipRect& parent = m_ClipRectStack.back();
+            rect.Left = (std::max)(rect.Left, parent.Left);
+            rect.Top = (std::max)(rect.Top, parent.Top);
+            rect.Right = (std::min)(rect.Right, parent.Right);
+            rect.Bottom = (std::min)(rect.Bottom, parent.Bottom);
+        }
+
+        m_ClipRectStack.push_back(rect);
+        ApplyClipRect();
+    }
+
+    void KurenaiEngine2D::PopClipRect()
+    {
+        if (m_ClipRectStack.empty())
+        {
+            Core::Logger::Error(
+                "2D",
+                "PopClipRect: クリップ矩形が1つも積まれていません。PushClipRectとの対応を"
+                "確認してください。この呼び出しを無視します");
+            return;
+        }
+
+        m_ClipRectStack.pop_back();
+        ApplyClipRect();
+    }
+
+    void KurenaiEngine2D::ApplyClipRect()
+    {
+        RHI::IRHICommandList* commandList = GetCommandList();
+        if (m_ClipRectStack.empty())
+        {
+            commandList->ResetScissorRect(); // ビューポート全体へ戻す
+            return;
+        }
+
+        // D3D11/D3D12のシザーは「ピクセル中心が矩形の内側にあるピクセルを残す」規則
+        // (ピクセルpが残る条件はLeft <= p < Right、中心はp+0.5)。したがって望みの実数矩形
+        // [l, r)に対する正しい整数境界はfloor(l + 0.5) = 四捨五入になる。
+        // ビューポート全体のときの外側丸め(MakeFullViewportScissorRect)とは目的が違う
+        // (あちらは端の1pxを削らないため、こちらは1pxはみ出さないため)
+        const ClipRect& rect = m_ClipRectStack.back();
+        const auto toPixel = [](float value) { return static_cast<int32_t>(std::floor(value + 0.5f)); };
+        commandList->SetScissorRect({ toPixel(rect.Left), toPixel(rect.Top), toPixel(rect.Right), toPixel(rect.Bottom) });
+    }
+
     void KurenaiEngine2D::EndFrame(bool vsync)
     {
+        if (!m_ClipRectStack.empty())
+        {
+            // PushClipRectとPopClipRectの数が合っていない。次のBeginFrameでスタックは捨てられ
+            // シザー矩形もビューポート全体へ戻るため描画は続行できるが、意図しないクリップの
+            // 原因になるので知らせる。毎フレーム出すとログが埋まるため最初の1回だけにする
+            if (!m_ClipRectLeakLogged)
+            {
+                Core::Logger::Error(
+                    "2D",
+                    "EndFrame: PopClipRectされていないPushClipRectが" +
+                        std::to_string(m_ClipRectStack.size()) +
+                        "件残っています。次のBeginFrameで破棄しますが、Push/Popの対応を"
+                        "確認してください(この警告は最初の1回のみ)");
+                m_ClipRectLeakLogged = true;
+            }
+            m_ClipRectStack.clear();
+        }
+
         m_SwapChain->Present(vsync);
     }
 }

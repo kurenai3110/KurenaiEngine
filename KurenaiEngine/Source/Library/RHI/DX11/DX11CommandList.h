@@ -18,6 +18,8 @@ namespace Kurenai::RHI
         void ClearRenderTarget(const ClearColor& color) override;
         void ClearDepth(float depth) override;
         void SetViewport(const Viewport& viewport) override;
+        void SetScissorRect(const ScissorRect& rect) override;
+        void ResetScissorRect() override;
         void SetPipelineState(IRHIPipelineState* pipelineState) override;
         void SetVertexBuffer(IRHIBuffer* buffer) override;
         void SetIndexBuffer(IRHIBuffer* buffer) override;
@@ -75,6 +77,12 @@ namespace Kurenai::RHI
         // 解放済みのビューをGetResourceで触ってしまうのを防ぐため
         void UnbindPixelSrvForResource(ID3D11Resource* resource);
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_BoundPixelSrvs[kTextureSlotCount];
+
+        // シザー矩形をD3D11へ設定する(SetViewport/SetScissorRect/ResetScissorRectの共通処理)
+        void ApplyScissorRect(const ScissorRect& rect);
+        // SetScissorRect/ResetScissorRectがクランプ先として使う、直近のSetViewportの値
+        Viewport m_CurrentViewport{};
+        bool m_HasViewport = false;
 
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
         ID3D11RenderTargetView* m_CurrentRenderTargetViews[kMaxRenderTargets] = {};

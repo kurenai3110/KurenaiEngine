@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath> // MakeFullViewportScissorRectのfloor/ceil
+
 #include <cstddef>
 #include <cstdint>
 
@@ -24,6 +26,47 @@ namespace Kurenai::RHI
         float MaxDepth = 1.0f;
     };
 
+    // シザー矩形(ピクセル単位。原点は描画先の左上、Y-down)。
+    // Right/Bottomは半開区間の外側で、「ピクセルpが残る条件はLeft <= p < Right」という
+    // D3D11/D3D12共通の意味論をそのまま使う
+    struct ScissorRect
+    {
+        int32_t Left = 0;
+        int32_t Top = 0;
+        int32_t Right = 0;
+        int32_t Bottom = 0;
+    };
+
+    // ビューポート全体を過不足なく覆うシザー矩形。DX11/DX12の両実装が共有する
+    // (片方だけ丸め方を直すとバックエンド間で端の1pxがずれるため、必ずここへ寄せる)。
+    // レターボックス表示ではTopLeftX/Widthが非整数になるので、左上はfloor・右下はceilで
+    // 外側へ丸めて必ずビューポート全体を含める。外側へ丸めても描画範囲は広がらない
+    // (正射影/透視投影のクリップ空間が既にビューポート境界で厳密にカリングしているため)
+    inline ScissorRect MakeFullViewportScissorRect(const Viewport& viewport)
+    {
+        ScissorRect rect;
+        rect.Left = static_cast<int32_t>(std::floor(viewport.TopLeftX));
+        rect.Top = static_cast<int32_t>(std::floor(viewport.TopLeftY));
+        rect.Right = static_cast<int32_t>(std::ceil(viewport.TopLeftX + viewport.Width));
+        rect.Bottom = static_cast<int32_t>(std::ceil(viewport.TopLeftY + viewport.Height));
+        return rect;
+    }
+
+    // rectをビューポート全体との積へクランプする。D3D12はレンダーターゲット外や負値を含む
+    // シザー矩形を仕様違反として扱うため、RHIの側で必ず正規化してから渡す
+    // (ビューポート外はそもそも描画されないので、クランプしても意味は変わらない)。
+    // 積が空になった場合はLeft==RightまたはTop==Bottomの空矩形になり、以後の描画は出なくなる
+    inline ScissorRect ClampScissorRectToViewport(const ScissorRect& rect, const Viewport& viewport)
+    {
+        const ScissorRect bounds = MakeFullViewportScissorRect(viewport);
+        ScissorRect result;
+        result.Left = rect.Left < bounds.Left ? bounds.Left : (rect.Left > bounds.Right ? bounds.Right : rect.Left);
+        result.Top = rect.Top < bounds.Top ? bounds.Top : (rect.Top > bounds.Bottom ? bounds.Bottom : rect.Top);
+        result.Right = rect.Right > bounds.Right ? bounds.Right : (rect.Right < result.Left ? result.Left : rect.Right);
+        result.Bottom = rect.Bottom > bounds.Bottom ? bounds.Bottom : (rect.Bottom < result.Top ? result.Top : rect.Bottom);
+        return result;
+    }
+
     struct ClearColor
     {
         float R = 0.0f;
@@ -47,7 +90,22 @@ namespace Kurenai::RHI
             IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice = 0) = 0;
         virtual void ClearRenderTarget(const ClearColor& color) = 0;
         virtual void ClearDepth(float depth) = 0;
+        // 【重要】SetViewportはシザー矩形も「そのビューポート全体」へリセットする。
+        // シザーを使わない呼び出し側から見た挙動を従来どおりに保つための仕様なので、
+        // SetScissorRectは必ずSetViewportより後に呼ぶこと(先に呼ぶと上書きされる)
         virtual void SetViewport(const Viewport& viewport) = 0;
+        // 以後の描画を矩形の内側だけに制限する。矩形はピクセル単位・描画先の左上原点(Y-down)で、
+        // 現在のビューポート全体との積へクランプされる(ClampScissorRectToViewport)。
+        // 積が空なら以後の描画は1ピクセルも出ない。
+        //
+        // DX11はこのAPIのためにDX11Device::CreatePipelineStateが全パイプラインステートの
+        // ラスタライザをScissorEnable=TRUEで作っており、DX12はD3D12の仕様上シザーが
+        // 常時有効なので、両バックエンドで挙動は完全に同一。
+        // SetPipelineStateはシザー矩形をリセットしない(D3D11のラスタライザステートも
+        // D3D12のPSOもシザー矩形自体は持たない)ため、パイプラインを切り替えても絞ったまま
+        virtual void SetScissorRect(const ScissorRect& rect) = 0;
+        // SetScissorRectで絞った範囲を、直近のSetViewportで設定したビューポート全体へ戻す
+        virtual void ResetScissorRect() = 0;
         virtual void SetPipelineState(IRHIPipelineState* pipelineState) = 0;
         virtual void SetVertexBuffer(IRHIBuffer* buffer) = 0;
         virtual void SetIndexBuffer(IRHIBuffer* buffer) = 0;

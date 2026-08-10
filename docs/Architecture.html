@@ -1752,7 +1752,7 @@ DX11はイミディエイト実行のためこの制約がないが、両バッ�
 <table>
 <thead><tr><th>項目</th><th>内容</th></tr></thead>
 <tbody>
-<tr><td>シザー矩形</td><td>DX11はラスタライザが<code>ScissorEnable=FALSE</code>でクリップしない。DX12は必ず設定が要るため、レターボックスで非整数になるビューポートを左上<code>floor</code>・右下<code>ceil</code>で包む(切り捨てるとDX12だけ右端・下端が1px欠ける)</td></tr>
+<tr><td>シザー矩形</td><td><code>IRHICommandList::SetScissorRect</code>(2Dの<code>PushClipRect</code>が使う)のため、<b>DX11も全パイプラインステートのラスタライザを<code>ScissorEnable=TRUE</code>にして揃えてある</b>(D3D12にはこのフラグ自体が無く、シザーは常時有効)。<b>両APIとも既定のシザー矩形は「0本」= 全クリップ</b>なので、<code>SetViewport</code>が必ずビューポート全体の矩形を張ることでこれを塞ぐ。レターボックスで非整数になるビューポートの丸めは共通ヘルパー<code>MakeFullViewportScissorRect</code>(左上<code>floor</code>・右下<code>ceil</code>)に寄せてある(切り捨てると右端・下端が1px欠ける。片方だけ直すとバックエンド間で端がずれる)。<code>SetScissorRect</code>は必ず<code>SetViewport</code>より後に呼ぶこと(<code>SetViewport</code>がビューポート全体へ戻す)</td></tr>
 <tr><td>DSVフォーマット</td><td>DX12はPSOが申告した<code>DSVFormat</code>と実際にバインドされるDSVが一致していないと仕様違反になる。スワップチェインの深度は<code>D32_FLOAT</code>(ステンシルは未使用)でオフスクリーン深度と揃えてある。深度テストは使わないがDSVは張られるパス(Present / 2D / ImGui)は<code>PipelineStateDesc::DepthTargetAttached</code>で表す。<code>HasDepthStencil</code>で兼ねると深度テストまで有効になってしまうため別フラグにしている</td></tr>
 <tr><td>スロット範囲</td><td>DX12は<code>SetConstantBuffer</code>のslotをそのままルートパラメータ番号として使うため、b2以降を渡すとSRV/サンプラーテーブルのルート引数を破壊する。b0〜b1・t0〜t11・コンピュートのt0〜t3/u0〜u3を範囲チェックし、外れたらログを出してスキップする</td></tr>
 <tr><td>無効なビュー</td><td>DX11はRTV/SRVを持たないテクスチャに対してnullptrをバインドして静かに描画をやめるが、DX12は<code>kInvalid</code>(0xFFFFFFFF)から「ヒープ先頭+0xFFFFFFFF×ディスクリプタサイズ」というでたらめなハンドルを作りデバイス削除に至る。<code>DX12Texture::HasSrv()/HasRtv()/HasDsv()</code>で事前に判定し、SRV/UAVはnullディスクリプタで代替、RTV/DSVはログを出してそのターゲットを除外する</td></tr>

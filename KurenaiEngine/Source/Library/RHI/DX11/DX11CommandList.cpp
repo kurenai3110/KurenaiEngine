@@ -89,6 +89,49 @@ namespace Kurenai::RHI
         dxViewport.MinDepth = viewport.MinDepth;
         dxViewport.MaxDepth = viewport.MaxDepth;
         m_Context->RSSetViewports(1, &dxViewport);
+
+        // ラスタライザはScissorEnable=TRUE(DX11Device::CreatePipelineState)。
+        // D3D11のシザー矩形の既定は「矩形0本」なので、有効なまま一度も張らないと
+        // 全ピクセルがクリップされて何も映らなくなる。ここで必ずビューポート全体を張ることで、
+        // SetScissorRectを使わない呼び出し側から見た挙動は従来と変わらない。
+        // (D3D12もコマンドリストのリセット直後は矩形0本という同じ危険があり、
+        //  DX12CommandList::SetViewportが同じ方法で塞いでいる)
+        m_CurrentViewport = viewport;
+        m_HasViewport = true;
+        ApplyScissorRect(MakeFullViewportScissorRect(viewport));
+    }
+
+    void DX11CommandList::SetScissorRect(const ScissorRect& rect)
+    {
+        if (!m_HasViewport)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "SetScissorRect: SetViewportより先に呼ばれました。クランプ先のビューポートが"
+                "決まらないため、この呼び出しを無視します");
+            return;
+        }
+        ApplyScissorRect(ClampScissorRectToViewport(rect, m_CurrentViewport));
+    }
+
+    void DX11CommandList::ResetScissorRect()
+    {
+        if (!m_HasViewport)
+        {
+            Core::Logger::Error("DX11", "ResetScissorRect: SetViewportより先に呼ばれました。この呼び出しを無視します");
+            return;
+        }
+        ApplyScissorRect(MakeFullViewportScissorRect(m_CurrentViewport));
+    }
+
+    void DX11CommandList::ApplyScissorRect(const ScissorRect& rect)
+    {
+        D3D11_RECT dxRect{};
+        dxRect.left = rect.Left;
+        dxRect.top = rect.Top;
+        dxRect.right = rect.Right;
+        dxRect.bottom = rect.Bottom;
+        m_Context->RSSetScissorRects(1, &dxRect);
     }
 
     void DX11CommandList::SetPipelineState(IRHIPipelineState* pipelineState)

@@ -466,6 +466,8 @@ APIを切り替えると<code>Run()</code>が戻ってそのまま終了しま�
         float GetLineHeight(float fontSize, bool bold = false) const;
         void MeasureTextBlock(const std::wstring&amp; text, float fontSize,
                                float&amp; outWidth, float&amp; outHeight, bool bold = false);
+        void PushClipRect(float x, float y, float width, float height);
+        void PopClipRect();
         void EndFrame(bool vsync = true);
     };
 }</code></pre>
@@ -624,6 +626,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
 <code>verticalAlign</code>は<strong>テキストブロック全体</strong>に対して適用される。<br>
 <strong>指定幅での自動折り返しは行わない。</strong>折り返しが要る場合は、呼び出し側が
 <code>MeasureText</code>で折り返し位置を決め、<code>'\n'</code>を挿入した文字列を渡す。</li>
+<li><code>PushClipRect</code> / <code>PopClipRect</code>は、以後の描画を矩形の内側だけに制限する
+(内部的にはシザー矩形)。スクロールするUIパネルのように、パネルからはみ出した項目を
+切り落とす用途に使う。<code>x, y</code>は矩形の<strong>中心</strong>で、
+<code>DrawSprite</code>/<code>DrawRoundedRect</code>とまったく同じ引数の意味なので、
+パネルを<code>DrawRoundedRect</code>で描いた直後に同じ引数で<code>PushClipRect</code>すれば
+その内側へ子要素を閉じ込められる。<br>
+ネストした場合は現在の矩形との<strong>積</strong>が有効になる(積が空なら対応する
+<code>PopClipRect</code>までの描画は1ピクセルも出ない)。カメラ位置・ズーム・論理解像度による
+レターボックスはすべて考慮される。クリップできるのは<strong>軸平行な矩形のみ</strong>で、
+回転や角丸には追従しない(角丸パネルの内側を切りたい場合は外接矩形になる)。<br>
+<code>BeginFrame</code>がスタックを空に戻すので、フレームをまたいでクリップが残ることはない。
+<code>PopClipRect</code>し忘れたまま<code>EndFrame</code>を迎えた場合は(最初の1回だけ)ログを出す。</li>
 <li><code>GetLineHeight(fontSize, bold)</code>は1行ぶんの高さ(ピクセル単位)を返す。
 <code>fontSize</code>からの推測ではなく、GDIの<code>TEXTMETRICW::tmHeight</code>+パディングから決まる
 実際のセル高さに拡大率を掛けた値なので、フォントを差し替えても比率のずれが出ない。<br>
