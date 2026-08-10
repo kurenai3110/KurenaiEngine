@@ -762,6 +762,14 @@ HLSLの言語バージョンは<code>-HV 2018</code>で固定しているため�
 既存シェーダーの意味は変わらない。シェーダーファイルは<b>BOM無しUTF-8</b>で保存すること
 (日本語コメントを含む場合、BOMもUTF-16も使わない)。
 </p>
+<p>
+固定しているのは<b>意味を安定させるため</b>であって、HLSL 2021で通らない書き方を許すためではない。
+リポジトリ内のシェーダーは<code>-HV</code>を渡さない(= 既定のHLSL 2021)コンパイルも通る状態を保つこと。
+特に<b>ベクタを条件にした三項演算子</b>(<code>(v &lt; 0.0f) ? a : b</code>で<code>v</code>が
+<code>float3</code>等)はHLSL 2018では成分ごとのselectとして通るがHLSL 2021ではエラーになる。
+<code>select()</code>は古いdxcに無いため、<code>step()</code>など<b>どちらの言語バージョンでも
+同じ意味になる書き方</b>へ置き換えること。
+</p>
 
 <h4>4.2.2 bindless(<code>ResourceDescriptorHeap</code>)</h4>
 <p>
