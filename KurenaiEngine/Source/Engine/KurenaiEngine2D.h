@@ -62,8 +62,16 @@ namespace Kurenai
             float x, float y, float width, float height, float rotationRadians,
             TextureHandle texture, float r, float g, float b, float a);
 
-        // 中心(x, y)、半径radiusの塗り円を描画する。r, g, b, aは塗りつぶし色(半透明可)
-        void DrawCircle(float x, float y, float radius, float r, float g, float b, float a);
+        // 中心(x, y)、半径radiusの塗り円を描画する。r, g, b, aは塗りつぶし色(半透明可)。
+        // borderThicknessPixelsを0より大きくすると、塗りの内側にborderR/G/B/Aの枠線を
+        // 重ねて描画する(DrawRoundedRectと同じ形。既定では枠線なし)。
+        // 塗りをa=0にして枠線だけを指定すると、中が完全に透明なリングになる
+        // (射程円のように下の描画を隠したくない用途向け)
+        void DrawCircle(
+            float x, float y, float radius,
+            float r, float g, float b, float a,
+            float borderThicknessPixels = 0.0f,
+            float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f);
 
         // (x1, y1)-(x2, y2)を結ぶ、太さthicknessの線分を描画する。r, g, b, aは色(半透明可)
         void DrawLine(float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a);

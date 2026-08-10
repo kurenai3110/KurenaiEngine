@@ -221,13 +221,21 @@ namespace Kurenai
         commandList->DrawIndexed(6, 0, 0);
     }
 
-    void KurenaiEngine2D::DrawCircle(float x, float y, float radius, float r, float g, float b, float a)
+    void KurenaiEngine2D::DrawCircle(
+        float x, float y, float radius,
+        float r, float g, float b, float a,
+        float borderThicknessPixels,
+        float borderR, float borderG, float borderB, float borderA)
     {
         ObjectConstants objectConstants{};
         const DirectX::XMMATRIX world = DirectX::XMMatrixScaling(radius * 2.0f, radius * 2.0f, 1.0f) *
             DirectX::XMMatrixTranslation(x, y, 0.0f);
         DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixTranspose(world));
         objectConstants.Color = { r, g, b, a };
+        // PSCircleが枠線の太さをピクセルで扱えるよう、半径(ピクセル)を渡す。
+        // レイアウトはDrawRoundedRectと共通で、xyは半幅・半高さ(円なのでどちらも半径)
+        objectConstants.ShapeParams = { radius, radius, radius, borderThicknessPixels };
+        objectConstants.BorderColor = { borderR, borderG, borderB, borderA };
 
         RHI::IRHICommandList* commandList = GetCommandList();
         commandList->SetPipelineState(m_CirclePipelineState.get());

@@ -31,7 +31,7 @@ namespace
         Sprites = 0, // 1: 跳ね回る半透明スプライト(従来のサンプル内容)
         Input,       // 2: 入力(押下エッジ・解放エッジ・ホイール)
         Sound,       // 3: サウンド(ボイス音量のフェード・マスター音量)
-        Shapes,      // 4: 図形(角丸矩形の回転)
+        Shapes,      // 4: 図形(角丸矩形の回転・円の枠線)
         Count
     };
 
@@ -81,7 +81,7 @@ namespace
         case DemoScene::Sprites: return L"1: DrawSprite (跳ね回る半透明スプライト)";
         case DemoScene::Input: return L"2: 入力 (押下エッジ・解放エッジ・ホイール)";
         case DemoScene::Sound: return L"3: サウンド (ボイス音量のフェード・マスター音量)";
-        case DemoScene::Shapes: return L"4: 図形 (角丸矩形の回転)";
+        case DemoScene::Shapes: return L"4: 図形 (角丸矩形の回転・円の枠線)";
         default: return L"(不明なデモ画面)";
         }
     }
@@ -313,16 +313,33 @@ namespace
             renderer.DrawText(x, rowY - 90.0f, L"角丸 " + FormatFloat(cornerRadius) + L"px", 16.0f, 0.75f, 0.78f, 0.85f, 1.0f);
         }
 
-        // 下段: 回転が0のときは従来どおりであることの比較用(静止した同じ図形)
-        const float compareY = height * 0.28f;
-        renderer.DrawText(width * 0.5f, compareY + 90.0f, L"回転なし(既定値0。従来の呼び出しと同じ)",
+        // 下段: DrawCircleの枠線。塗りなし(a=0)+枠線がリングになることを見る。
+        // 背景として色つきの帯を敷き、リングの内側が透けていることを分かるようにする
+        const float circleY = height * 0.28f;
+        renderer.DrawText(width * 0.5f, circleY + 110.0f, L"DrawCircle の枠線(塗りa=0 + 枠線ありでリングになる)",
             20.0f, 0.88f, 0.90f, 0.96f, 1.0f, true);
+        renderer.DrawRoundedRect(width * 0.5f, circleY, width * 0.9f, 40.0f, 0.0f, 0.45f, 0.30f, 0.16f, 1.0f);
+
+        struct CircleStyle
+        {
+            const wchar_t* Label;
+            float FillA;
+            float BorderThickness;
+        };
+        const CircleStyle styles[] = {
+            { L"塗りのみ",           1.0f, 0.0f },
+            { L"塗り + 枠線",        1.0f, 4.0f },
+            { L"半透明の塗り + 枠線", 0.35f, 4.0f },
+            { L"塗りなし + 枠線",     0.0f, 4.0f },
+        };
         for (int i = 0; i < 4; ++i)
         {
-            renderer.DrawRoundedRect(
-                spacing * (i + 1), compareY, 150.0f, 90.0f, 4.0f + i * 12.0f,
-                0.18f, 0.24f, 0.34f, 1.0f,
-                3.0f, 0.55f, 0.75f, 0.95f, 1.0f);
+            const float x = spacing * (i + 1);
+            renderer.DrawCircle(
+                x, circleY, 52.0f,
+                0.20f, 0.42f, 0.70f, styles[i].FillA,
+                styles[i].BorderThickness, 0.95f, 0.85f, 0.35f, 1.0f);
+            renderer.DrawText(x, circleY - 80.0f, styles[i].Label, 16.0f, 0.75f, 0.78f, 0.85f, 1.0f);
         }
     }
 
