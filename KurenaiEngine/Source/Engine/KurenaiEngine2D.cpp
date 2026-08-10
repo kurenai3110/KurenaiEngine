@@ -41,6 +41,33 @@ namespace Kurenai
             // DrawRoundedRect専用。枠線の色
             DirectX::XMFLOAT4 BorderColor = { 0.0f, 0.0f, 0.0f, 0.0f };
         };
+
+        // --- DrawPolylineの上限 ---
+        //
+        // メモリは「1本あたりの最大頂点数 × 8バイト × (本数上限 × kFrameCount + 1)」で効く。
+        // 下記の値では 9210 × 8B ≒ 72KiB、DX12のステージングは 72KiB × 65 ≒ 4.7MiB。
+        // 用途に応じてこの2つの定数だけを触れば調整できる
+        constexpr uint32_t kMaxPolylinePoints = 1024;
+        // 全接合がベベルになる最悪ケース: セグメントごとに2三角形 + 内部頂点ごとに1三角形
+        constexpr uint32_t kMaxPolylineVertices = (kMaxPolylinePoints - 1) * 6 + (kMaxPolylinePoints - 2) * 3;
+        // 1フレームに描ける本数。DX12のステージングリング(BufferDesc::MaxUpdatesPerFrame)と同じ値にする
+        constexpr uint32_t kMaxPolylinesPerFrame = 32;
+        // マイター長がこの倍率(×半太さ)を超える鋭角ではベベルへ切り替える(SVGのstroke-miterlimit既定と同じ)
+        constexpr float kPolylineMiterLimit = 4.0f;
+
+        struct Float2
+        {
+            float X = 0.0f;
+            float Y = 0.0f;
+        };
+
+        Float2 operator+(const Float2& a, const Float2& b) { return { a.X + b.X, a.Y + b.Y }; }
+        Float2 operator-(const Float2& a, const Float2& b) { return { a.X - b.X, a.Y - b.Y }; }
+        Float2 operator*(const Float2& a, float s) { return { a.X * s, a.Y * s }; }
+        float Dot(const Float2& a, const Float2& b) { return a.X * b.X + a.Y * b.Y; }
+        // 2Dの外積(符号付き面積の2倍)。正なら反時計回り(ワールドはY-up)
+        float Cross(const Float2& a, const Float2& b) { return a.X * b.Y - a.Y * b.X; }
+        float Length(const Float2& v) { return std::sqrt(v.X * v.X + v.Y * v.Y); }
     }
 
     KurenaiEngine2D::KurenaiEngine2D(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api)
@@ -81,6 +108,27 @@ namespace Kurenai
         RHI::PipelineStateDesc roundedRectPipelineDesc = pipelineDesc;
         roundedRectPipelineDesc.PixelShader = m_RoundedRectPixelShader.get();
         m_RoundedRectPipelineState = m_Device->CreatePipelineState(roundedRectPipelineDesc);
+
+        // DrawPolyline用。頂点バッファを使わず頂点シェーダがSV_VertexIDで構造化バッファを引くため、
+        // 入力レイアウトは空にする(DX11Device::CreatePipelineStateは空ならCreateInputLayoutを
+        // 呼ばず、SetPipelineStateがIASetInputLayout(nullptr)を張るのでDX11でも成立する)
+        const std::wstring polylineShaderPath = GetModuleDirectory() + L"Shaders\\Polyline2D.hlsl";
+        m_PolylineVertexShader = m_Device->CreateShader({ RHI::ShaderStage::Vertex, polylineShaderPath, "VSPolyline" });
+        m_PolylinePixelShader = m_Device->CreateShader({ RHI::ShaderStage::Pixel, polylineShaderPath, "PSPolyline" });
+        RHI::PipelineStateDesc polylinePipelineDesc = pipelineDesc;
+        polylinePipelineDesc.InputLayout.clear();
+        polylinePipelineDesc.VertexShader = m_PolylineVertexShader.get();
+        polylinePipelineDesc.PixelShader = m_PolylinePixelShader.get();
+        m_PolylinePipelineState = m_Device->CreatePipelineState(polylinePipelineDesc);
+
+        RHI::BufferDesc polylineBufferDesc;
+        polylineBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+        polylineBufferDesc.SizeInBytes = kMaxPolylineVertices * sizeof(PolylineVertex);
+        polylineBufferDesc.StrideInBytes = sizeof(PolylineVertex);
+        // 1フレームに描ける本数ぶんのステージングリングを確保させる(既定の4本では足りない)
+        polylineBufferDesc.MaxUpdatesPerFrame = kMaxPolylinesPerFrame;
+        m_PolylineVertexBuffer = m_Device->CreateBuffer(polylineBufferDesc);
+        m_PolylineVertices.reserve(kMaxPolylineVertices);
 
         // 原点中心の単位クアッド(-0.5〜0.5)。スプライトごとの位置/大きさ/回転はWorld行列側で表現する
         const Vertex2D quadVertices[] = {
@@ -205,6 +253,10 @@ namespace Kurenai
         // クリップ矩形もここで捨てる(EndFrameが警告済み)。これによりPush/Popの数が
         // 合っていないアプリでも、クリップがフレームをまたいで残り続けることはない
         m_ClipRectStack.clear();
+
+        // DrawPolylineの本数カウンタも1フレームぶん(DX12のステージングリングの寿命と同じ)
+        m_PolylineDrawsThisFrame = 0;
+        m_PolylineOverflowLogged = false;
 
         commandList->SetPipelineState(m_PipelineState.get());
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &frameConstants, sizeof(frameConstants));
@@ -436,6 +488,255 @@ namespace Kurenai
 
         const float angle = std::atan2(dy, dx);
         DrawSprite((x1 + x2) * 0.5f, (y1 + y2) * 0.5f, length, thickness, angle, m_WhiteTexture, r, g, b, a);
+    }
+
+    uint32_t KurenaiEngine2D::BuildPolylineGeometry(const std::vector<float>& points, float halfThickness)
+    {
+        // 連続する重複点は方向ベクトルが定義できないので除去する
+        std::vector<Float2> path;
+        path.reserve(points.size() / 2);
+        for (size_t i = 0; i + 1 < points.size(); i += 2)
+        {
+            const Float2 p{ points[i], points[i + 1] };
+            if (!path.empty() && Length(p - path.back()) < 1e-6f)
+            {
+                continue;
+            }
+            path.push_back(p);
+            if (path.size() >= kMaxPolylinePoints)
+            {
+                break;
+            }
+        }
+
+        if (path.size() < 2)
+        {
+            Core::Logger::Error("2D", "DrawPolyline: 重複点を除いた有効な点が2点未満です。描画しません");
+            return 0;
+        }
+
+        const size_t pointCount = path.size();
+        const size_t segmentCount = pointCount - 1;
+
+        // セグメントごとの単位方向と左法線(ワールドはY-upなので、進行方向の左は(-dy, dx))
+        std::vector<Float2> directions(segmentCount);
+        std::vector<Float2> normals(segmentCount);
+        std::vector<float> lengths(segmentCount);
+        for (size_t i = 0; i < segmentCount; ++i)
+        {
+            const Float2 delta = path[i + 1] - path[i];
+            lengths[i] = Length(delta);
+            directions[i] = delta * (1.0f / lengths[i]);
+            normals[i] = { -directions[i].Y, directions[i].X };
+        }
+
+        // 各点の左右レール。接合がベベルになる点だけ、外側が「入る側」「出る側」の2点に割れる
+        struct Joint
+        {
+            Float2 LeftIn, LeftOut;   // 手前のセグメントが使う点 / 次のセグメントが使う点
+            Float2 RightIn, RightOut;
+            bool Bevel = false;
+            bool LeftIsOuter = false; // ベベル時、どちら側が2点に割れているか
+        };
+        std::vector<Joint> joints(pointCount);
+
+        // 端点(バットキャップ)。DrawLineが回転矩形=切りっぱなしなのに揃える
+        joints[0].LeftIn = joints[0].LeftOut = path[0] + normals[0] * halfThickness;
+        joints[0].RightIn = joints[0].RightOut = path[0] - normals[0] * halfThickness;
+        const size_t last = pointCount - 1;
+        joints[last].LeftIn = joints[last].LeftOut = path[last] + normals[segmentCount - 1] * halfThickness;
+        joints[last].RightIn = joints[last].RightOut = path[last] - normals[segmentCount - 1] * halfThickness;
+
+        for (size_t i = 1; i < last; ++i)
+        {
+            const Float2& prevNormal = normals[i - 1];
+            const Float2& nextNormal = normals[i];
+            const Float2 sum = prevNormal + nextNormal;
+            const float sumLength = Length(sum);
+
+            Joint& joint = joints[i];
+            if (sumLength < 1e-6f)
+            {
+                // 180度の折り返し。normalize()が0除算でNaNになり、そのまま描くと画面全体が消えるため、
+                // ここで潰す。オフセット0(接合点=元の点)のベベル扱いにする
+                joint.Bevel = true;
+                joint.LeftIsOuter = true;
+                joint.LeftIn = path[i] + prevNormal * halfThickness;
+                joint.LeftOut = path[i] + nextNormal * halfThickness;
+                joint.RightIn = joint.RightOut = path[i];
+                continue;
+            }
+
+            const Float2 miterDirection = sum * (1.0f / sumLength);
+            const float denominator = Dot(miterDirection, prevNormal);
+            const float miterLength = halfThickness / denominator;
+
+            // 旋回方向。左へ曲がるなら左側が内側になる
+            const float turn = Cross(directions[i - 1], directions[i]);
+            const bool leftIsOuter = turn < 0.0f;
+
+            // 内側は隣接する2セグメントの短いほうの長さでクランプする。これを忘れると
+            // 鋭角+太線で内側レールが隣のセグメントを突き抜け、帯が自己交差して
+            // その部分だけ色が濃くなる
+            const float shorterSegment = (std::min)(lengths[i - 1], lengths[i]);
+            const float innerLength = (std::min)(miterLength, shorterSegment);
+
+            if (miterLength > halfThickness * kPolylineMiterLimit)
+            {
+                // 鋭角すぎるのでベベルへフォールバックする(外側だけ2点に割る)
+                joint.Bevel = true;
+                joint.LeftIsOuter = leftIsOuter;
+                if (leftIsOuter)
+                {
+                    joint.LeftIn = path[i] + prevNormal * halfThickness;
+                    joint.LeftOut = path[i] + nextNormal * halfThickness;
+                    joint.RightIn = joint.RightOut = path[i] - miterDirection * innerLength;
+                }
+                else
+                {
+                    joint.RightIn = path[i] - prevNormal * halfThickness;
+                    joint.RightOut = path[i] - nextNormal * halfThickness;
+                    joint.LeftIn = joint.LeftOut = path[i] + miterDirection * innerLength;
+                }
+            }
+            else
+            {
+                // マイター。外側は交点まで伸ばし、内側はクランプ後の長さを使う
+                const float leftLength = leftIsOuter ? miterLength : innerLength;
+                const float rightLength = leftIsOuter ? innerLength : miterLength;
+                joint.LeftIn = joint.LeftOut = path[i] + miterDirection * leftLength;
+                joint.RightIn = joint.RightOut = path[i] - miterDirection * rightLength;
+            }
+        }
+
+        // 三角形を積む。2DのPSOは既定のラスタライザ(裏面カリング有効、時計回りが表)で作られており、
+        // ワールドはY-upなので「符号付き面積が負(=Y-upで時計回り)」が表になる
+        // (既存の単位クアッドの並びから逆算した規約)。旋回方向によって巻きが反転する
+        // ベベル三角形があるため、面積の符号を見て必要なら2頂点を入れ替える
+        m_PolylineVertices.clear();
+        const auto emitTriangle = [this](Float2 a, Float2 b, Float2 c)
+        {
+            if (Cross(b - a, c - a) > 0.0f)
+            {
+                std::swap(b, c);
+            }
+            m_PolylineVertices.push_back({ { a.X, a.Y } });
+            m_PolylineVertices.push_back({ { b.X, b.Y } });
+            m_PolylineVertices.push_back({ { c.X, c.Y } });
+        };
+
+        for (size_t i = 0; i < segmentCount; ++i)
+        {
+            const Float2 leftStart = joints[i].LeftOut;
+            const Float2 rightStart = joints[i].RightOut;
+            const Float2 leftEnd = joints[i + 1].LeftIn;
+            const Float2 rightEnd = joints[i + 1].RightIn;
+            emitTriangle(leftStart, leftEnd, rightEnd);
+            emitTriangle(leftStart, rightEnd, rightStart);
+        }
+
+        for (size_t i = 1; i < last; ++i)
+        {
+            const Joint& joint = joints[i];
+            if (!joint.Bevel)
+            {
+                continue;
+            }
+            // 外側が割れてできた楔を1枚の三角形で埋める
+            if (joint.LeftIsOuter)
+            {
+                emitTriangle(joint.RightIn, joint.LeftIn, joint.LeftOut);
+            }
+            else
+            {
+                emitTriangle(joint.LeftIn, joint.RightIn, joint.RightOut);
+            }
+        }
+
+        const uint32_t vertexCount = static_cast<uint32_t>(m_PolylineVertices.size());
+        if (vertexCount > kMaxPolylineVertices)
+        {
+            // 上限の計算(最悪ケース)が正しければ到達しない。防御的に弾いておく
+            Core::Logger::Error(
+                "2D",
+                "DrawPolyline: 生成した頂点数がバッファ容量を超えました (" + std::to_string(vertexCount) +
+                    " > " + std::to_string(kMaxPolylineVertices) + ")。描画しません");
+            return 0;
+        }
+        return vertexCount;
+    }
+
+    void KurenaiEngine2D::DrawPolyline(const std::vector<float>& points, float thickness, float r, float g, float b, float a)
+    {
+        if (points.size() % 2 != 0)
+        {
+            Core::Logger::Error(
+                "2D",
+                "DrawPolyline: pointsの要素数が奇数です(" + std::to_string(points.size()) +
+                    ")。{x, y}の並びで渡してください。描画しません");
+            return;
+        }
+        if (points.size() < 4)
+        {
+            Core::Logger::Error("2D", "DrawPolyline: 点が2点未満です。描画しません");
+            return;
+        }
+        if (!(thickness > 0.0f))
+        {
+            Core::Logger::Error(
+                "2D",
+                "DrawPolyline: 太さは0より大きい必要があります(指定値: " + std::to_string(thickness) + ")。描画しません");
+            return;
+        }
+        if (points.size() / 2 > kMaxPolylinePoints)
+        {
+            Core::Logger::Error(
+                "2D",
+                "DrawPolyline: 点数が上限を超えました (" + std::to_string(points.size() / 2) + " > " +
+                    std::to_string(kMaxPolylinePoints) + ")。先頭" + std::to_string(kMaxPolylinePoints) +
+                    "点へ切り詰めて描画します");
+        }
+
+        if (m_PolylineDrawsThisFrame >= kMaxPolylinesPerFrame)
+        {
+            // DX12のステージングリングを周回すると描画結果が静かに壊れるため、その前に弾く。
+            // ログは1フレームにつき1回だけ(毎フレーム大量に出るとログが埋まる)
+            if (!m_PolylineOverflowLogged)
+            {
+                Core::Logger::Error(
+                    "2D",
+                    "DrawPolyline: 1フレームあたりの本数上限(" + std::to_string(kMaxPolylinesPerFrame) +
+                        "本)を超えました。以降の呼び出しはこのフレームでは描画しません"
+                        "(この警告はフレームにつき1回のみ)");
+                m_PolylineOverflowLogged = true;
+            }
+            return;
+        }
+
+        const uint32_t vertexCount = BuildPolylineGeometry(points, thickness * 0.5f);
+        if (vertexCount == 0)
+        {
+            return;
+        }
+        ++m_PolylineDrawsThisFrame;
+
+        ObjectConstants objectConstants{};
+        // 頂点は既にワールド座標なのでWorldは単位行列(シェーダ側でも掛けない)
+        DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixIdentity());
+        objectConstants.Color = { r, g, b, a };
+
+        RHI::IRHICommandList* commandList = GetCommandList();
+        commandList->SetPipelineState(m_PolylinePipelineState.get());
+        // 【順序注意】UpdateBuffer → SetVertexShaderResourceBufferの順で呼ぶこと。
+        // DX12のUpdateBufferは最後にリソースをPIXEL_SHADER_RESOURCEへ戻すため、
+        // 逆順だと頂点段から不正な状態のリソースを読むことになる
+        commandList->UpdateBuffer(
+            m_PolylineVertexBuffer.get(), m_PolylineVertices.data(), vertexCount * sizeof(PolylineVertex));
+        commandList->SetVertexShaderResourceBuffer(0, m_PolylineVertexBuffer.get());
+        commandList->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+        commandList->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+        commandList->Draw(vertexCount, 0);
+        commandList->SetPipelineState(m_PipelineState.get()); // 以降のDrawSprite呼び出しのため戻す
     }
 
     void KurenaiEngine2D::DrawRoundedRect(

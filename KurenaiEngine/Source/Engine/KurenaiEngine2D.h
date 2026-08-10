@@ -127,6 +127,21 @@ namespace Kurenai
         // (x1, y1)-(x2, y2)を結ぶ、太さthicknessの線分を描画する。r, g, b, aは色(半透明可)
         void DrawLine(float x1, float y1, float x2, float y2, float thickness, float r, float g, float b, float a);
 
+        // pointsは{x0, y0, x1, y1, ...}の順に並んだ点列。thicknessは帯の太さ(ピクセル)。
+        // 角の接合はマイター(鋭角時はベベルへフォールバック)、端は切りっぱなし(バットキャップ)。
+        //
+        // DrawLineを繋いで折れ線を描くと角の外側に扇形の隙間が空くが、これは点列をまとめて
+        // 1つのジオメトリ(重なりの無い三角形の集まり)として描くため隙間ができない。
+        // また各画素がきっかり1回だけブレンドされるので、【半透明でも接合部の色が濃くならない】。
+        //
+        // 制限:
+        // - 折れ線が【自分自身と交差する】場合、その交点だけは2回ブレンドされる
+        //   (1パスのアルファブレンドでは原理的に解決できない)
+        // - 1本あたりの点数の上限は1024点。超えた場合はログを出して先頭1024点へ切り詰める
+        // - 1フレームあたり32本まで。超えた場合はログを出してその呼び出しを描画しない
+        //   (DX12のステージングリングの段数で決まる上限)
+        void DrawPolyline(const std::vector<float>& points, float thickness, float r, float g, float b, float a);
+
         // 中心(x, y)、サイズwidth x height、角丸半径cornerRadiusPixelsの角丸矩形を描画する。
         // r, g, b, aは塗りつぶし色(半透明可)。borderThicknessPixelsを0より大きくすると、
         // 塗りの内側にborderR/G/B/Aの枠線を重ねて描画する(既定では枠線なし)。
@@ -292,6 +307,28 @@ namespace Kurenai
         // DrawLineは太さ・長さに拡縮縮小した矩形として、この不透明白テクスチャを使ってDrawSpriteと
         // 同じスプライトパイプラインで描画する
         TextureHandle m_WhiteTexture;
+
+        // DrawPolyline用。頂点バッファを使わず、CPUで接合まで済ませた三角形リストを
+        // StructuredBufferへ載せて頂点シェーダがSV_VertexIDで引く(Shaders/2D/Polyline2D.hlsl)。
+        // DX12は頂点バッファを毎フレーム書き換えられないため、この経路しか採れない
+        struct PolylineVertex
+        {
+            float Position[2]; // ワールド=ピクセル座標。HLSL側のPolylineVertexと一致させること
+        };
+        std::unique_ptr<RHI::IRHIShader> m_PolylineVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_PolylinePixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_PolylinePipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_PolylineVertexBuffer;
+        // 毎フレームの再確保を避けるための作業領域(BuildPolylineGeometryが書き込む)
+        std::vector<PolylineVertex> m_PolylineVertices;
+        // 1フレームあたりの本数制限のカウンタ(BeginFrameでリセット)。DX12のステージングリングを
+        // 周回して描画結果が静かに壊れる前に、こちら側で先回りして弾くために持つ
+        uint32_t m_PolylineDrawsThisFrame = 0;
+        bool m_PolylineOverflowLogged = false;
+
+        // pointsからマイター/ベベル接合済みの三角形リストを組み、m_PolylineVerticesへ書き込む。
+        // 戻り値は生成した頂点数(生成できなかった場合は0)
+        uint32_t BuildPolylineGeometry(const std::vector<float>& points, float halfThickness);
 
         std::unique_ptr<RHI::IRHIBuffer> m_QuadVertexBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_QuadIndexBuffer;

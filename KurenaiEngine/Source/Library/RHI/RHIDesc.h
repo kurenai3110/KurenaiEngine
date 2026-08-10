@@ -24,6 +24,17 @@ namespace Kurenai::RHI
         //
         // DX11実装は参照しない(メッシュシェーダーが存在せず、用途が無いため)
         bool ShaderReadable = false;
+
+        // BufferUsage::StructuredReadOnlyのバッファを1フレームに何回UpdateBufferするかの上限。
+        // DX12はこの値からステージングリングの段数(値 × kFrameCount + 1)を決める。
+        // CPUはkFrameCountフレームぶん先行して記録するため、これを超えて更新すると
+        // GPUが読み取り中のスロットを上書きして描画結果が静かに壊れる
+        // (DX12Buffer::AdvanceUploadRingAndGetWritePtrがログで検出する)。
+        // 段数ぶんのUPLOADヒープを常時確保するので、大きなバッファに大きな値を与えないこと。
+        //
+        // DX11実装は参照しない(D3D11_USAGE_DYNAMIC + Map(WRITE_DISCARD)はドライバが毎回
+        // リネームするため、1フレームあたりの更新回数に上限が無い)
+        uint32_t MaxUpdatesPerFrame = 4;
     };
 
     struct ShaderDesc

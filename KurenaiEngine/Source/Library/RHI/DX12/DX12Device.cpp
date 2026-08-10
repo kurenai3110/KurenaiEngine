@@ -1023,9 +1023,17 @@ namespace Kurenai::RHI
             // 1フレーム内に同じバッファへ複数回UpdateBufferすることがある(例: m_LightBufferは
             // DirectLightパスとTransparentパスの2回)ため、kFrameCount+1では足りない。
             // 「1フレームあたりの更新回数の上限×kFrameCount」に余裕を足した値にしておく
-            // (超過はDX12Buffer::AdvanceUploadRingAndGetWritePtrがログで検出する)
-            constexpr uint32_t kMaxStructuredUpdatesPerFrame = 4;
-            constexpr uint32_t kStructuredReadOnlyUploadRingCapacity = kMaxStructuredUpdatesPerFrame * kFrameCount + 1;
+            // (超過はDX12Buffer::AdvanceUploadRingAndGetWritePtrがログで検出する)。
+            //
+            // 上限はバッファごとにBufferDesc::MaxUpdatesPerFrameで宣言する。既定値は4で、
+            // 明示しないバッファの段数は従来と変わらない
+            uint32_t maxUpdatesPerFrame = desc.MaxUpdatesPerFrame;
+            if (maxUpdatesPerFrame == 0)
+            {
+                Core::Logger::Error("DX12", "BufferDesc::MaxUpdatesPerFrameが0です。既定値の4として扱います");
+                maxUpdatesPerFrame = 4;
+            }
+            const uint32_t kStructuredReadOnlyUploadRingCapacity = maxUpdatesPerFrame * kFrameCount + 1;
             Microsoft::WRL::ComPtr<ID3D12Resource> uploadResource =
                 CreateUploadBuffer(static_cast<uint64_t>(desc.SizeInBytes) * kStructuredReadOnlyUploadRingCapacity);
 

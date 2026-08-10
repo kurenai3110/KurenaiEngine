@@ -102,6 +102,7 @@ exit /b 0</Command>
   </ItemGroup>
   <ItemGroup>
     <None Include="Shaders\2D\Sprite2D.hlsl" />
+    <None Include="Shaders\2D\Polyline2D.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="KurenaiEngineLibrary.vcxproj">

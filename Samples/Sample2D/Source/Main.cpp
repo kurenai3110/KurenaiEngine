@@ -36,6 +36,7 @@ namespace
         Text,        // 6: テキスト(複数行・行高さ・ブロック計測)
         Camera,      // 7: 2Dカメラ(位置・ズーム・論理解像度)
         Clip,        // 8: クリップ矩形(スクロールするパネル・ネスト)
+        Polyline,    // 9: 折れ線(マイター/ベベル接合・半透明)
         Count
     };
 
@@ -90,6 +91,7 @@ namespace
         case DemoScene::Text: return L"6: テキスト (複数行・GetLineHeight・MeasureTextBlock)";
         case DemoScene::Camera: return L"7: 2Dカメラ (位置・ズーム・論理解像度)";
         case DemoScene::Clip: return L"8: クリップ矩形 (スクロールするパネル・ネスト)";
+        case DemoScene::Polyline: return L"9: 折れ線 (DrawPolyline / DrawLine の比較)";
         default: return L"(不明なデモ画面)";
         }
     }
@@ -484,6 +486,80 @@ namespace
                     1.0f, 1.0f, 1.0f, 1.0f);
             }
         }
+    }
+
+    // 「9: 折れ線」のデモ。同じ点列をDrawPolylineとDrawLineの連結で描き、
+    // 接合部の隙間と、半透明での重なりの濃さを見比べる
+    void DrawPolylineDemo(KurenaiEngine2D& renderer, float width, float height)
+    {
+        constexpr float kThickness = 26.0f;
+        const float top = height * 0.66f;
+        const float bottom = height * 0.24f;
+
+        // 鈍角(マイター)・鋭角(ベベル)・折り返しを含む点列。左右に並べて同じ形を2通りで描く
+        const auto makePath = [](float originX, float originY)
+        {
+            return std::vector<float>{
+                originX +   0.0f, originY +   0.0f,
+                originX + 110.0f, originY + 120.0f,
+                originX + 220.0f, originY +   0.0f,
+                originX + 260.0f, originY + 120.0f, // ここが鋭角(ベベルへフォールバックする)
+                originX + 300.0f, originY +   0.0f,
+                originX + 440.0f, originY +  70.0f,
+            };
+        };
+
+        renderer.DrawText(width * 0.27f, top + 160.0f, L"DrawPolyline(1つのジオメトリ)",
+            20.0f, 0.88f, 0.90f, 0.96f, 1.0f, true);
+        renderer.DrawText(width * 0.73f, top + 160.0f, L"DrawLine の連結(接合部に隙間が空く)",
+            20.0f, 0.88f, 0.90f, 0.96f, 1.0f, true);
+
+        // 上段: 不透明。接合部の隙間の有無を見る
+        {
+            const std::vector<float> path = makePath(width * 0.27f - 220.0f, top);
+            renderer.DrawPolyline(path, kThickness, 0.35f, 0.65f, 0.90f, 1.0f);
+        }
+        {
+            const std::vector<float> path = makePath(width * 0.73f - 220.0f, top);
+            for (size_t i = 0; i + 3 < path.size(); i += 2)
+            {
+                renderer.DrawLine(path[i], path[i + 1], path[i + 2], path[i + 3], kThickness, 0.35f, 0.65f, 0.90f, 1.0f);
+            }
+        }
+        renderer.DrawText(width * 0.5f, top - 40.0f, L"↑ 不透明: 接合部の隙間の有無",
+            16.0f, 0.75f, 0.78f, 0.85f, 1.0f);
+
+        // 下段: 半透明。重なり部分が濃くならないことを見る
+        {
+            const std::vector<float> path = makePath(width * 0.27f - 220.0f, bottom);
+            renderer.DrawPolyline(path, kThickness, 0.95f, 0.55f, 0.25f, 0.5f);
+        }
+        {
+            const std::vector<float> path = makePath(width * 0.73f - 220.0f, bottom);
+            for (size_t i = 0; i + 3 < path.size(); i += 2)
+            {
+                renderer.DrawLine(path[i], path[i + 1], path[i + 2], path[i + 3], kThickness, 0.95f, 0.55f, 0.25f, 0.5f);
+            }
+        }
+        renderer.DrawText(width * 0.5f, bottom - 40.0f, L"↑ 半透明(a=0.5): 接合部が濃くならないか",
+            16.0f, 0.75f, 0.78f, 0.85f, 1.0f);
+
+        // ベベル接合の確認用。折り返しに近い鋭角(マイター長が上限を超えるのでベベルになる)を
+        // 含む短い折れ線を並べる。本数は1フレームあたりの上限(32本)に収まる範囲にしてある
+        constexpr int kSpikeCount = 24;
+        for (int i = 0; i < kSpikeCount; ++i)
+        {
+            const float x = 60.0f + i * ((width - 120.0f) / kSpikeCount);
+            const std::vector<float> spike = {
+                x, bottom - 120.0f,
+                x + 12.0f, bottom - 60.0f,
+                x + 2.0f, bottom - 118.0f, // ほぼ折り返し。ベベルへフォールバックする
+            };
+            renderer.DrawPolyline(spike, 8.0f, 0.55f, 0.85f, 0.55f, 1.0f);
+        }
+        renderer.DrawText(width * 0.5f, bottom - 150.0f,
+            L"↑ 折り返しに近い鋭角(ベベルへフォールバックする接合)を " + std::to_wstring(kSpikeCount) + L" 本",
+            16.0f, 0.75f, 0.78f, 0.85f, 1.0f);
     }
 
     // 「8: クリップ矩形」のデモが持ち越す状態
@@ -1062,6 +1138,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 break;
             case DemoScene::Clip:
                 DrawClipDemo(renderer, clipDemo, width, height, kClipListHeight, kClipItemHeight, kClipItemCount);
+                break;
+            case DemoScene::Polyline:
+                DrawPolylineDemo(renderer, width, height);
                 break;
             default:
                 break;
