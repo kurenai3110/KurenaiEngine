@@ -120,15 +120,33 @@ namespace Kurenai
         // Middle(既定)=テキスト上下中央基準、Top=テキスト上端基準)。align=Center/Rightまたは
         // verticalAlign=Bottom/Middleの場合、内部でMeasureText相当の幅・高さ計測を行ってから
         // 描画開始位置を決めるため、呼び出し側で手動に幅・高さを計算する必要はない
-        // (align=Left・verticalAlign=Topの組み合わせのみ、計測なしでそのまま(x, y)を使う)
+        // (align=Left・verticalAlign=Topの組み合わせのみ、計測なしでそのまま(x, y)を使う)。
+        //
+        // textに含まれる'\n'で改行し、2行目以降はGetLineHeight()ぶん下へ送って描画する
+        // ("\r\n"の'\r'は読み飛ばす)。alignは【行ごと】に適用し(Centerなら行ごとの中央揃え)、
+        // verticalAlignは【テキストブロック全体】に対して適用する。
+        // 指定幅での自動折り返しは行わないため、折り返しが要る場合は呼び出し側がMeasureTextで
+        // 折り返し位置を決め、'\n'を挿入した文字列を渡すこと
         void DrawText(
             float x, float y, const std::wstring& text, float fontSize, float r, float g, float b, float a,
             bool bold = false, TextAlign align = TextAlign::Center, TextVerticalAlign verticalAlign = TextVerticalAlign::Middle);
 
         // textをfontSize(・bold)で描画した場合の実測済み幅(ピクセル単位、AdvancePixelsの合計)を返す。
         // ボタンラベル等の正確な中央揃えに使う。DrawTextと同様、アトラス未収録の文字はその場では
-        // 幅0として扱われ、次のBeginFrame()でアトラスに追加された以降は正しい幅が返る
+        // 幅0として扱われ、次のBeginFrame()でアトラスに追加された以降は正しい幅が返る。
+        // 改行は解釈しないため、複数行の文字列にはMeasureTextBlockを使うこと
         float MeasureText(const std::wstring& text, float fontSize, bool bold = false);
+
+        // fontSize(・bold)で描画したときの1行ぶんの高さ(ピクセル単位)。
+        // fontSizeからの推測ではなく、GDIのTEXTMETRICW::tmHeightから決まる実際のセル高さを
+        // 返すため、フォントを差し替えても正しい値になる
+        float GetLineHeight(float fontSize, bool bold = false) const;
+
+        // 改行を考慮したテキストブロック全体の幅(最も長い行の幅)と高さ(行高さ×行数)を返す。
+        // 説明文を囲むパネルの大きさを、描画前にAPI呼び出し1回で決めるために使う。
+        // MeasureTextと同様、アトラス未収録の文字はその場では幅0として扱われる
+        void MeasureTextBlock(
+            const std::wstring& text, float fontSize, float& outWidth, float& outHeight, bool bold = false);
 
         // 描画コマンドを確定してバックバッファへ表示する。1フレームにつき1回だけ呼ぶ
         void EndFrame(bool vsync = true);
@@ -158,6 +176,10 @@ namespace Kurenai
 
         // 初回のASCII一式(0x20〜0x7E)を返す。コンストラクタでのBuildFontAtlas呼び出し用
         static std::vector<wchar_t> DefaultAsciiChars();
+
+        // textを'\n'で行へ分割する(CRLFの'\r'は読み飛ばす)。改行が無ければ1要素のまま返る。
+        // DrawTextとMeasureTextBlockが同じ行分割を使うためのヘルパー
+        static std::vector<std::wstring> SplitTextIntoLines(const std::wstring& text);
 
         Core::Camera m_Camera;
 

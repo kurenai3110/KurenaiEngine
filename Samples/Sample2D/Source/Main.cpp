@@ -33,6 +33,7 @@ namespace
         Sound,       // 3: サウンド(ボイス音量のフェード・マスター音量)
         Shapes,      // 4: 図形(角丸矩形の回転・円の枠線)
         Atlas,       // 5: テクスチャアトラス(DrawSpriteUV / GetTextureSize)
+        Text,        // 6: テキスト(複数行・行高さ・ブロック計測)
         Count
     };
 
@@ -84,6 +85,7 @@ namespace
         case DemoScene::Sound: return L"3: サウンド (ボイス音量のフェード・マスター音量)";
         case DemoScene::Shapes: return L"4: 図形 (角丸矩形の回転・円の枠線)";
         case DemoScene::Atlas: return L"5: テクスチャアトラス (DrawSpriteUV / GetTextureSize)";
+        case DemoScene::Text: return L"6: テキスト (複数行・GetLineHeight・MeasureTextBlock)";
         default: return L"(不明なデモ画面)";
         }
     }
@@ -435,6 +437,54 @@ namespace
         }
     }
 
+    // 「6: テキスト」のデモ。MeasureTextBlockで測った大きさのパネルへ複数行テキストを収める
+    void DrawTextDemo(KurenaiEngine2D& renderer, float width, float height)
+    {
+        const std::wstring body =
+            L"ユニットの説明文をパネル内へ折り返して表示する例。\n"
+            L"'\\n' で改行され、2行目以降は GetLineHeight ぶん下へ送られる。\n"
+            L"align は行ごとに、verticalAlign はブロック全体に適用される。\n"
+            L"パネルの大きさは MeasureTextBlock の戻り値から決めている。";
+
+        constexpr float kBodyFontSize = 20.0f;
+        constexpr float kPadding = 20.0f;
+
+        float blockWidth = 0.0f;
+        float blockHeight = 0.0f;
+        renderer.MeasureTextBlock(body, kBodyFontSize, blockWidth, blockHeight);
+
+        // 測ったブロックの大きさ + 余白でパネルを描き、そこへ文字を収める
+        const float panelX = width * 0.5f;
+        const float panelY = height * 0.55f;
+        renderer.DrawRoundedRect(
+            panelX, panelY, blockWidth + kPadding * 2.0f, blockHeight + kPadding * 2.0f, 10.0f,
+            0.14f, 0.17f, 0.24f, 1.0f,
+            2.0f, 0.45f, 0.55f, 0.72f, 1.0f);
+        renderer.DrawText(panelX, panelY, body, kBodyFontSize, 0.88f, 0.90f, 0.96f, 1.0f);
+
+        renderer.DrawText(
+            panelX, panelY + blockHeight * 0.5f + kPadding + 26.0f,
+            L"MeasureTextBlock: " + FormatFloat(blockWidth) + L" x " + FormatFloat(blockHeight) + L" px" +
+                L" / GetLineHeight: " + FormatFloat(renderer.GetLineHeight(kBodyFontSize)) + L" px",
+            18.0f, 0.75f, 0.78f, 0.85f, 1.0f);
+
+        // align の効き方(行ごとに適用される)を3種類並べて見せる
+        const std::wstring aligned = L"1行目\n2行目はすこし長い\n3行目";
+        const float sampleY = height * 0.22f;
+        const struct { const wchar_t* Label; TextAlign Align; float X; } samples[] = {
+            { L"align = Left",   TextAlign::Left,   width * 0.18f },
+            { L"align = Center", TextAlign::Center, width * 0.50f },
+            { L"align = Right",  TextAlign::Right,  width * 0.82f },
+        };
+        for (const auto& sample : samples)
+        {
+            renderer.DrawText(sample.X, sampleY + 60.0f, sample.Label, 16.0f, 0.75f, 0.78f, 0.85f, 1.0f);
+            renderer.DrawText(sample.X, sampleY, aligned, 18.0f, 0.85f, 0.90f, 0.70f, 1.0f, false, sample.Align);
+            // 基準線。alignがどの位置を基準にしているかが分かる
+            renderer.DrawLine(sample.X, sampleY - 44.0f, sample.X, sampleY + 44.0f, 1.0f, 0.9f, 0.4f, 0.4f, 0.6f);
+        }
+    }
+
     // 「4: 図形」のデモ。elapsedSecondsで回転角を進める
     void DrawShapesDemo(KurenaiEngine2D& renderer, float elapsedSeconds, float width, float height)
     {
@@ -735,6 +785,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 break;
             case DemoScene::Atlas:
                 DrawAtlasDemo(renderer, atlasTexture, width, height);
+                break;
+            case DemoScene::Text:
+                DrawTextDemo(renderer, width, height);
                 break;
             default:
                 break;

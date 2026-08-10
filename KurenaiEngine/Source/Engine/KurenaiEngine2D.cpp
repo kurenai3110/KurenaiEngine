@@ -491,6 +491,31 @@ namespace Kurenai
         return nullptr;
     }
 
+    std::vector<std::wstring> KurenaiEngine2D::SplitTextIntoLines(const std::wstring& text)
+    {
+        // 改行を含まない場合(大多数)は分割せずそのまま1行として返す
+        std::vector<std::wstring> lines;
+        std::wstring current;
+        current.reserve(text.size());
+        for (const wchar_t ch : text)
+        {
+            if (ch == L'\n')
+            {
+                lines.push_back(current);
+                current.clear();
+                continue;
+            }
+            if (ch == L'\r')
+            {
+                // CRLFの\rは読み飛ばす(\nだけで1改行として扱う)。単独の\rも同様に無視する
+                continue;
+            }
+            current.push_back(ch);
+        }
+        lines.push_back(current); // 末尾が\nの場合は空行が1つ増える(見た目上も1行ぶん送られる)
+        return lines;
+    }
+
     void KurenaiEngine2D::DrawText(
         float x, float y, const std::wstring& text, float fontSize, float r, float g, float b, float a,
         bool bold, TextAlign align, TextVerticalAlign verticalAlign)
@@ -500,52 +525,61 @@ namespace Kurenai
         RHI::IRHICommandList* commandList = GetCommandList();
         commandList->SetTexture(0, (bold ? m_BoldFontAtlasTexture : m_FontAtlasTexture).get());
 
-        // align=Left(既定はCenterだが、この分岐自体はLeftのときだけ計算を省く)の場合はxがそのまま
-        // テキスト左端基準になるため、MeasureTextによる幅の実測は不要。Center/Rightのときだけ実測する
-        float penX = x;
-        if (align != TextAlign::Left)
-        {
-            const float totalWidth = MeasureText(text, fontSize, bold);
-            penX = (align == TextAlign::Center) ? x - totalWidth * 0.5f : x - totalWidth;
-        }
+        const std::vector<std::wstring> lines = SplitTextIntoLines(text);
+        const float lineHeight = GetLineHeight(fontSize, bold);
 
-        // verticalAlign=Topの場合はyがそのままテキスト上端基準になるため、セル高さの取得は不要。
-        // Middle/Bottomのときだけ、アトラス全体で共通の1文字ぶんのセル高さ
-        // (m_FontAtlasCellHeight/m_BoldFontAtlasCellHeight)を使ってオフセットを計算する
-        float penYFromTop = y;
+        // verticalAlign=Topの場合はyがそのままテキストブロック上端基準になるため計算不要。
+        // Middle/Bottomのときだけ、ブロック全体の高さ(行高さ×行数)からオフセットを求める
+        // (verticalAlignは行ごとではなくテキストブロック全体に対して適用する)
+        float lineTop = y;
         if (verticalAlign != TextVerticalAlign::Top)
         {
-            const float lineHeight = (bold ? m_BoldFontAtlasCellHeight : m_FontAtlasCellHeight) * scale;
-            penYFromTop = (verticalAlign == TextVerticalAlign::Middle) ? y + lineHeight * 0.5f : y + lineHeight;
+            const float blockHeight = lineHeight * static_cast<float>(lines.size());
+            lineTop = (verticalAlign == TextVerticalAlign::Middle) ? y + blockHeight * 0.5f : y + blockHeight;
         }
 
-        for (const wchar_t ch : text)
+        for (const std::wstring& line : lines)
         {
-            const GlyphMetrics* glyph = FindGlyph(ch, bold);
-            if (!glyph)
+            // align=Left(既定はCenterだが、この分岐自体はLeftのときだけ計算を省く)の場合はxがそのまま
+            // 行の左端基準になるため、MeasureTextによる幅の実測は不要。Center/Rightのときだけ実測する
+            // (alignは行ごとに適用する。Centerなら各行がそれぞれ中央揃えになる)
+            float penX = x;
+            if (align != TextAlign::Left)
             {
-                // アトラス未収録の文字。次のBeginFrame()の先頭でアトラスへ追加されるまでの間、
-                // この文字自体の描画はスキップする(ペン位置も進めない簡易実装)
-                continue;
+                const float lineWidth = MeasureText(line, fontSize, bold);
+                penX = (align == TextAlign::Center) ? x - lineWidth * 0.5f : x - lineWidth;
             }
-            const float glyphWidth = glyph->WidthPixels * scale;
-            const float glyphHeight = glyph->HeightPixels * scale;
 
-            ObjectConstants objectConstants{};
-            // penXはテキスト左端基準、penYFromTopはテキスト上端基準(align/verticalAlignによる
-            // オフセットは呼び出し前に適用済み)。DrawSpriteと同様ワールド座標はY-upなので、
-            // グリフ矩形の中心はpenXから右へ、penYFromTopから下(Y-upなので減算方向)へずらした位置になる
-            const DirectX::XMMATRIX world = DirectX::XMMatrixScaling(glyphWidth, glyphHeight, 1.0f) *
-                DirectX::XMMatrixTranslation(penX + glyphWidth * 0.5f, penYFromTop - glyphHeight * 0.5f, 0.0f);
-            DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixTranspose(world));
-            objectConstants.Color = { r, g, b, a };
-            objectConstants.UVOffsetScale = { glyph->U0, glyph->V0, glyph->U1 - glyph->U0, glyph->V1 - glyph->V0 };
+            for (const wchar_t ch : line)
+            {
+                const GlyphMetrics* glyph = FindGlyph(ch, bold);
+                if (!glyph)
+                {
+                    // アトラス未収録の文字。次のBeginFrame()の先頭でアトラスへ追加されるまでの間、
+                    // この文字自体の描画はスキップする(ペン位置も進めない簡易実装)
+                    continue;
+                }
+                const float glyphWidth = glyph->WidthPixels * scale;
+                const float glyphHeight = glyph->HeightPixels * scale;
 
-            commandList->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-            commandList->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
-            commandList->DrawIndexed(6, 0, 0);
+                ObjectConstants objectConstants{};
+                // penXは行の左端基準、lineTopはその行の上端基準(align/verticalAlignによる
+                // オフセットは適用済み)。DrawSpriteと同様ワールド座標はY-upなので、
+                // グリフ矩形の中心はpenXから右へ、lineTopから下(Y-upなので減算方向)へずらした位置になる
+                const DirectX::XMMATRIX world = DirectX::XMMatrixScaling(glyphWidth, glyphHeight, 1.0f) *
+                    DirectX::XMMatrixTranslation(penX + glyphWidth * 0.5f, lineTop - glyphHeight * 0.5f, 0.0f);
+                DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixTranspose(world));
+                objectConstants.Color = { r, g, b, a };
+                objectConstants.UVOffsetScale = { glyph->U0, glyph->V0, glyph->U1 - glyph->U0, glyph->V1 - glyph->V0 };
 
-            penX += glyph->AdvancePixels * scale;
+                commandList->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                commandList->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+                commandList->DrawIndexed(6, 0, 0);
+
+                penX += glyph->AdvancePixels * scale;
+            }
+
+            lineTop -= lineHeight; // ワールドはY-upなので、次の行は下=減算方向へ送る
         }
     }
 
@@ -564,6 +598,33 @@ namespace Kurenai
             }
         }
         return width;
+    }
+
+    float KurenaiEngine2D::GetLineHeight(float fontSize, bool bold) const
+    {
+        const float atlasPixelHeight = bold ? m_BoldFontAtlasPixelHeight : m_FontAtlasPixelHeight;
+        if (atlasPixelHeight <= 0.0f)
+        {
+            // BuildFontAtlasが一度も成功していない場合(コンストラクタで例外になるため通常は到達しない)
+            Core::Logger::Error("2D", "GetLineHeight: フォントアトラスが構築されていません。0を返します");
+            return 0.0f;
+        }
+        // DrawTextのグリフ拡大率と同じ式。セル高さはGDIのTEXTMETRICW::tmHeight+パディングで、
+        // 文字集合によらずアトラス全体で共通
+        return (bold ? m_BoldFontAtlasCellHeight : m_FontAtlasCellHeight) * (fontSize / atlasPixelHeight);
+    }
+
+    void KurenaiEngine2D::MeasureTextBlock(
+        const std::wstring& text, float fontSize, float& outWidth, float& outHeight, bool bold)
+    {
+        const std::vector<std::wstring> lines = SplitTextIntoLines(text);
+
+        outWidth = 0.0f;
+        for (const std::wstring& line : lines)
+        {
+            outWidth = (std::max)(outWidth, MeasureText(line, fontSize, bold));
+        }
+        outHeight = GetLineHeight(fontSize, bold) * static_cast<float>(lines.size());
     }
 
     void KurenaiEngine2D::EndFrame(bool vsync)

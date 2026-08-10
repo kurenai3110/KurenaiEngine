@@ -631,6 +631,7 @@ DX11/DX12の描画結果を見比べるため)。引数なしの既定はDX11で
 | 3 | サウンド — `SetVoiceVolume` によるBGMのフェードイン/フェードアウトと、マスター音量 |
 | 4 | 図形 — `DrawRoundedRect` の回転と、`DrawCircle` の枠線(塗りa=0でリングになること) |
 | 5 | テクスチャアトラス — `GetTextureSize` で得たピクセルサイズから正規化UVを求め、`DrawSpriteUV` で区画を切り出す |
+| 6 | テキスト — `\n` による複数行描画と、`GetLineHeight` / `MeasureTextBlock` で大きさを決めたパネル |
 
 デモ5で使うアトラスも、初回起動時に `DemoAtlas.bmp`(4x4区画の256x256)を生成して読み込みます。
 
