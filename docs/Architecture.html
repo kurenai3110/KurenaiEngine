@@ -3967,6 +3967,32 @@ m_RenderSrvCpuHeap  … CreateRenderTexture / CreateUAVTexture / CreateHiZTextur
 <li><strong>レンダーターゲット関連を触るのはRenderスレッドだけ</strong></li>
 <li><strong><code>m_Camera</code>を書くのはUpdateスレッドだけ</strong></li>
 <li><strong>シーン状態(<code>m_Scene</code>・ライト・反射プローブ・ポストプロセスのパラメータ)を触るのはRenderスレッドだけ</strong> — UIパネルもRenderスレッドで動くのでそのまま読み書きしてよい</li>
+<li><strong><code>KurenaiEngineBase</code>の派生クラスは、デストラクタの先頭で
+<code>WaitForGPUIdle()</code>を呼ぶ</strong> — 下記参照</li>
+</ul>
+<h3>26.7 終了時にGPUの完了を待つ位置</h3>
+<p>
+GPUがまだ参照しているリソースを解放すると、D3D12デバッグレイヤーが
+<code>OBJECT_DELETED_WHILE_STILL_IN_USE</code>(EXECUTION ERROR #921)をCORRUPTIONとして
+<strong>例外</strong>(<code>0x0000087d</code>)で上げ、終了時にプロセスが落ちる。
+デバッグレイヤーの有無に関わらず未定義動作であり、Releaseでは表面化しないだけである。
+</p>
+<p>
+待機は<strong>2箇所</strong>に要る。C++のデストラクタは「派生クラスの本体 →
+派生クラスのメンバ破棄 → 基底クラスの本体 → 基底クラスのメンバ破棄」の順に走るため、
+<code>KurenaiEngineBase</code>のデストラクタで待っても
+<code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code>が持つGPUリソース
+(レンダーターゲット・G-Buffer・各種バッファ・テクスチャ・フォントアトラス)は
+<strong>すでに解放済み</strong>である。
+</p>
+<ul>
+<li><strong>派生クラスのデストラクタの先頭</strong> — 自分のGPUリソースを守る。
+新しく<code>KurenaiEngineBase</code>を継承するクラスを作る場合も必ず書くこと</li>
+<li><strong><code>KurenaiEngineBase</code>のデストラクタ</strong> — スワップチェーンの
+バックバッファを守る最後の砦。<code>DX12Device::~DX12Device</code>も
+<code>WaitForGPUIdle()</code>を呼ぶが、メンバ宣言順が
+<code>m_Device</code>→<code>m_SwapChain</code>なので破棄はスワップチェーンが先になり、
+デバイス側の待機では間に合わない</li>
 </ul>
 <p class="note">
 リソース作成が使う<code>m_UploadCommandList</code> + <code>m_UploadMutex</code>は

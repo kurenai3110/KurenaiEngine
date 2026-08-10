@@ -132,7 +132,14 @@ namespace Kurenai
         BuildFontAtlas(DefaultAsciiChars(), true);
     }
 
-    KurenaiEngine2D::~KurenaiEngine2D() = default;
+    KurenaiEngine2D::~KurenaiEngine2D()
+    {
+        // このクラスが持つGPUリソース(パイプラインステート・頂点/インデックスバッファ・
+        // 定数バッファ・テクスチャ・フォントアトラス)を1つも壊す前に、GPUの実行完了を待つ。
+        // 基底のKurenaiEngineBaseも待つが、そちらが走るのはこのクラスのメンバが
+        // すべて破棄された後なので間に合わない(WaitForGPUIdleの宣言側コメント参照)
+        WaitForGPUIdle();
+    }
 
     TextureHandle KurenaiEngine2D::LoadTexture(const std::wstring& filePath, bool sRGB)
     {

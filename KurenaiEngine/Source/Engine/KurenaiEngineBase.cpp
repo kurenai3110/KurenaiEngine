@@ -62,11 +62,25 @@ namespace Kurenai
         // 終了時にクラッシュする。
         //
         // 宣言順を入れ替える手もあるが、スワップチェーンはデバイスから作られるので
-        // 「デバイスより先に消える」という順序自体は正しい。待機を明示するほうが素直
-        if (m_Device)
+        // 「デバイスより先に消える」という順序自体は正しい。待機を明示するほうが素直。
+        //
+        // 【これは最後の砦であって、派生クラスのリソースには間に合わない】ここが走るのは
+        // 派生クラス(KurenaiEngine3D/KurenaiEngine2D)のメンバがすべて破棄された後なので、
+        // 派生クラスが持つGPUリソースは既に解放済みになっている。派生クラスは自分の
+        // デストラクタの先頭でWaitForGPUIdle()を呼ぶこと(宣言側のコメント参照)
+        WaitForGPUIdle();
+    }
+
+    void KurenaiEngineBase::WaitForGPUIdle()
+    {
+        if (!m_Device)
         {
-            m_Device->WaitForGPUIdle();
+            // コンストラクタがデバイス生成前に例外を投げた場合に通る。待つ相手がいないだけで
+            // 異常ではないため、ログは出さずに何もしない
+            return;
         }
+
+        m_Device->WaitForGPUIdle();
     }
 
     void KurenaiEngineBase::ApplyPendingResize()
