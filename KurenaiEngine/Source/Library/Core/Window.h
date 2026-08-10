@@ -82,6 +82,11 @@ namespace Kurenai::Core
         bool WasKeyReleased(KeyCode key) const;
         // クライアント座標(原点は左上、Y-down。Win32の標準的な座標系)
         POINT GetClientMousePosition() const { return m_MousePosition; }
+        // 直前のPumpMessages()呼び出し中に回転したホイールのノッチ数(WHEEL_DELTA単位)。
+        // 奥へ回すと正。回転していなければ0。1回のPumpMessages()の中で複数の
+        // WM_MOUSEWHEELが届いた場合は合算される(押下エッジと同じ「1フレームぶん」の寿命)。
+        // 高分解能ホイールは1ノッチ未満の値を刻んで送ってくるため、整数ではなくfloatで返す
+        float GetMouseWheelDelta() const { return m_MouseWheelDelta; }
 
         // WndProc(PumpMessages呼び出し元スレッド=Updateスレッド)で受け取ったメッセージのうち
         // ImGui向けにキューイングされた分を、呼び出し元スレッド上でImGui_ImplWin32_WndProcHandlerへ
@@ -138,6 +143,9 @@ namespace Kurenai::Core
         bool m_KeyDown[256]{};
         bool m_KeyPressedEdge[256]{};
         bool m_KeyReleasedEdge[256]{};
+        // WM_MOUSEWHEELの回転量をWHEEL_DELTA単位で累積する。エッジフラグと同じく
+        // PumpMessagesの先頭でリセットするため、寿命は「1回のPumpMessages呼び出し」ぶん
+        float m_MouseWheelDelta = 0.0f;
 
         // WndProc(Updateスレッド)からForwardQueuedMessagesToImGui呼び出し元(Renderスレッド)への
         // メッセージ受け渡し用。ImGui自体はこのキューにもWndProc処理にも関与しないため、

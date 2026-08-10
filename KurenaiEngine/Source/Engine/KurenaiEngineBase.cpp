@@ -177,6 +177,11 @@ namespace Kurenai
         return m_Window->GetClientMousePosition();
     }
 
+    float KurenaiEngineBase::GetMouseWheelDelta() const
+    {
+        return m_Window->GetMouseWheelDelta();
+    }
+
     SoundHandle KurenaiEngineBase::LoadSound(const std::wstring& filePath)
     {
         return SoundHandle(m_AudioEngine->LoadSound(filePath));

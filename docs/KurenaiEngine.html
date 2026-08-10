@@ -1442,7 +1442,8 @@ bool WasMouseButtonReleased(MouseButton button) const; // 直前のPumpEvents()�
 bool IsKeyDown(KeyCode key) const;                     // 同上(キー)。WASD移動など「押している間」続く操作に使う
 bool WasKeyPressed(KeyCode key) const;                 // 同上(キー)。オートリピートは無視する
 bool WasKeyReleased(KeyCode key) const;                // 同上(キー)の解放エッジ
-POINT GetClientMousePosition() const;               // クライアント座標(原点は左上、Y-down)</code></pre>
+POINT GetClientMousePosition() const;               // クライアント座標(原点は左上、Y-down)
+float GetMouseWheelDelta() const;                   // 直前のPumpEvents()中のホイール回転量(ノッチ単位、奥が正)</code></pre>
 
 <ul>
 <li><code>MouseButton</code> は <code>Left</code>/<code>Right</code>/<code>Middle</code> の3値。</li>
@@ -1473,7 +1474,16 @@ POINT GetClientMousePosition() const;               // クライアント座標(
 実現するため<code>GetAsyncKeyState(VK_RBUTTON)</code>のままにしている。これにより
 <code>PostMessage</code>で<code>WM_RBUTTONDOWN</code>を送っても実カーソルの位置・表示状態には
 一切影響しない(意図しないカーソル操作の経路にならないことを構造的に保証している)。</li>
-<li>複数キー・複数ボタンの同時押しにも対応(それぞれ独立して状態を保持)。マウスホイールは未対応。</li>
+<li>複数キー・複数ボタンの同時押しにも対応(それぞれ独立して状態を保持)。</li>
+<li><code>GetMouseWheelDelta</code>は<code>WM_MOUSEWHEEL</code>の回転量を
+<code>WHEEL_DELTA</code>(120)で割ったノッチ数を返す。<strong>奥へ回すと正</strong>で、
+回転していなければ0。エッジ系と同じく寿命は直前の<code>PumpEvents()</code>呼び出しぶんで、
+その間に複数のメッセージが届いた場合は合算される。高分解能ホイールは1ノッチ未満を
+刻んで送ってくるため戻り値は<code>float</code>。<br>
+なお<code>WM_MOUSEWHEEL</code>の座標は他のマウスメッセージと違い<strong>スクリーン座標</strong>で
+届くため、<code>GetClientMousePosition</code>の更新には使っていない。
+ホイール操作の位置が要る場合は<code>GetClientMousePosition</code>の値
+(直近の<code>WM_MOUSEMOVE</code>の位置)を使うこと。</li>
 <li><code>IsMouseOverWindow</code>は、環境変数<code>KURENAI_INPUT_AUTOMATION=1</code>が設定されている
 場合に限り、下記のImGui側と同様の理由で<code>TrackMouseEvent</code>由来の<code>WM_MOUSELEAVE</code>
 ノイズを抑制する。実カーソルがウィンドウ外にある状態で<code>PostMessage</code>により

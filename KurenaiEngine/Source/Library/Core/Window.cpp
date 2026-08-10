@@ -458,6 +458,8 @@ namespace Kurenai::Core
         std::fill(std::begin(m_MouseButtonPressedEdge), std::end(m_MouseButtonPressedEdge), false);
         std::fill(std::begin(m_KeyReleasedEdge), std::end(m_KeyReleasedEdge), false);
         std::fill(std::begin(m_MouseButtonReleasedEdge), std::end(m_MouseButtonReleasedEdge), false);
+        // ホイールの回転量もエッジと同じ「この呼び出し中に起きた分」を返すため、ここでリセットする
+        m_MouseWheelDelta = 0.0f;
 
         MSG msg{};
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
@@ -682,6 +684,16 @@ namespace Kurenai::Core
             m_MouseButtonDown[index] = false;
             return 0;
         }
+
+        case WM_MOUSEWHEEL:
+            // WHEEL_DELTA(120)で割ってノッチ数にする。高分解能ホイールは120未満の値を
+            // 刻んで送ってくるため小数になり得る。
+            //
+            // 【lParamを座標の更新に使わないこと】WM_MOUSEWHEELのlParamはWM_MOUSEMOVE等と違い
+            // スクリーン座標で届く。m_MousePositionはクライアント座標なので、
+            // GET_X_LPARAM/GET_Y_LPARAMをそのまま流用すると座標系が食い違う
+            m_MouseWheelDelta += static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / static_cast<float>(WHEEL_DELTA);
+            return 0;
 
         case WM_KEYDOWN:
         {

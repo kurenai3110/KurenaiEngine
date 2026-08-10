@@ -165,6 +165,8 @@ namespace
         int ClickCount = 0;   // 「押下→同じボタン上での解放」で確定したクリックの回数
         int CancelCount = 0;  // ボタンの外で離してキャンセルされた回数
         bool ButtonArmed = false; // ボタンの上で押下された(= 解放でクリック確定できる)状態か
+        float WheelDelta = 0.0f;      // 直近フレームの回転量(0でないフレームだけ更新して見えるようにする)
+        float WheelAccumulated = 0.0f; // 起動してからの累積(スクロール量に相当)
     };
 
     // 一般的なUIのボタンと同じく「押下→同じボタン上での解放」でクリックを確定する。
@@ -209,6 +211,22 @@ namespace
         {
             ++state.SpaceReleaseCount;
         }
+
+        const float wheel = renderer.GetMouseWheelDelta();
+        if (wheel != 0.0f)
+        {
+            // 回転量は1フレームしか立たないため、目視できるよう直近の値と累積を保持する
+            state.WheelDelta = wheel;
+            state.WheelAccumulated += wheel;
+        }
+    }
+
+    // 小数第2位までの文字列。ホイールの回転量は高分解能ホイールだと小数になり得る
+    std::wstring FormatFloat(float value)
+    {
+        wchar_t buffer[32]{};
+        swprintf_s(buffer, L"%.2f", value);
+        return buffer;
     }
 
     void DrawInputDemo(KurenaiEngine2D& renderer, const InputDemoState& state, float buttonX, float buttonY, float buttonW, float buttonH)
@@ -230,6 +248,7 @@ namespace
         line(L"左ボタン 押下: " + std::to_wstring(state.LeftPressCount) + L" / 解放: " + std::to_wstring(state.LeftReleaseCount));
         line(L"Space 押下: " + std::to_wstring(state.SpacePressCount) + L" / 解放: " + std::to_wstring(state.SpaceReleaseCount));
         line(L"クリック確定: " + std::to_wstring(state.ClickCount) + L" / 外で離してキャンセル: " + std::to_wstring(state.CancelCount));
+        line(L"ホイール 直近: " + FormatFloat(state.WheelDelta) + L" / 累積: " + FormatFloat(state.WheelAccumulated));
         line(L"ボタンの上で押し、外へ出して離すとキャンセルになる");
     }
 }

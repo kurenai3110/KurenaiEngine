@@ -91,6 +91,9 @@ namespace Kurenai
         bool WasMouseButtonReleased(MouseButton button) const;
         bool WasKeyReleased(KeyCode key) const;
         POINT GetClientMousePosition() const;
+        // 直前のPumpEvents()呼び出し中に回転したホイールのノッチ数(WHEEL_DELTA単位)。
+        // 奥へ回すと正。回転していなければ0。高分解能ホイールは1ノッチ未満を刻んで送ってくる
+        float GetMouseWheelDelta() const;
 
         // WAV(PCM)ファイルを読み込み、再生用に登録する
         SoundHandle LoadSound(const std::wstring& filePath);
