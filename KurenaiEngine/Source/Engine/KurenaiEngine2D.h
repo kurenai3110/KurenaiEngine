@@ -70,12 +70,16 @@ namespace Kurenai
 
         // 中心(x, y)、サイズwidth x height、角丸半径cornerRadiusPixelsの角丸矩形を描画する。
         // r, g, b, aは塗りつぶし色(半透明可)。borderThicknessPixelsを0より大きくすると、
-        // 塗りの内側にborderR/G/B/Aの枠線を重ねて描画する(既定では枠線なし)
+        // 塗りの内側にborderR/G/B/Aの枠線を重ねて描画する(既定では枠線なし)。
+        // rotationRadiansはDrawSpriteと同じZ軸(画面手前向き)回転で、中心(x, y)まわりに回る。
+        // width/heightと角丸半径は回転前のローカル空間での値なので、回しても角丸・枠線の
+        // 太さは変わらない(既定値0なので、回転を使わない呼び出しは従来どおり)
         void DrawRoundedRect(
             float x, float y, float width, float height, float cornerRadiusPixels,
             float r, float g, float b, float a,
             float borderThicknessPixels = 0.0f,
-            float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f);
+            float borderR = 0.0f, float borderG = 0.0f, float borderB = 0.0f, float borderA = 0.0f,
+            float rotationRadians = 0.0f);
 
         // fontSizeはおおよその文字高さ(ピクセル単位)。ビットマップフォント方式のため、
         // 厳密なフォントレンダリング(ヒンティング等)は行わない。ASCII印字可能文字(0x20〜0x7E)に

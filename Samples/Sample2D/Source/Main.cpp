@@ -31,6 +31,7 @@ namespace
         Sprites = 0, // 1: 跳ね回る半透明スプライト(従来のサンプル内容)
         Input,       // 2: 入力(押下エッジ・解放エッジ・ホイール)
         Sound,       // 3: サウンド(ボイス音量のフェード・マスター音量)
+        Shapes,      // 4: 図形(角丸矩形の回転)
         Count
     };
 
@@ -80,6 +81,7 @@ namespace
         case DemoScene::Sprites: return L"1: DrawSprite (跳ね回る半透明スプライト)";
         case DemoScene::Input: return L"2: 入力 (押下エッジ・解放エッジ・ホイール)";
         case DemoScene::Sound: return L"3: サウンド (ボイス音量のフェード・マスター音量)";
+        case DemoScene::Shapes: return L"4: 図形 (角丸矩形の回転)";
         default: return L"(不明なデモ画面)";
         }
     }
@@ -288,6 +290,42 @@ namespace
         return file.good();
     }
 
+    // 「4: 図形」のデモ。elapsedSecondsで回転角を進める
+    void DrawShapesDemo(KurenaiEngine2D& renderer, float elapsedSeconds, float width, float height)
+    {
+        const float angle = elapsedSeconds * 0.6f;
+
+        // 上段: DrawRoundedRectの回転。回しても角丸半径・枠線の太さが変わらないことを見る
+        const float rowY = height * 0.62f;
+        const float spacing = width / 5.0f;
+        renderer.DrawText(width * 0.5f, rowY + 110.0f, L"DrawRoundedRect の回転(角丸半径・枠線の太さは回転で変わらない)",
+            20.0f, 0.88f, 0.90f, 0.96f, 1.0f, true);
+
+        for (int i = 0; i < 4; ++i)
+        {
+            const float x = spacing * (i + 1);
+            const float cornerRadius = 4.0f + i * 12.0f;
+            renderer.DrawRoundedRect(
+                x, rowY, 150.0f, 90.0f, cornerRadius,
+                0.18f, 0.24f, 0.34f, 1.0f,
+                3.0f, 0.55f, 0.75f, 0.95f, 1.0f,
+                angle);
+            renderer.DrawText(x, rowY - 90.0f, L"角丸 " + FormatFloat(cornerRadius) + L"px", 16.0f, 0.75f, 0.78f, 0.85f, 1.0f);
+        }
+
+        // 下段: 回転が0のときは従来どおりであることの比較用(静止した同じ図形)
+        const float compareY = height * 0.28f;
+        renderer.DrawText(width * 0.5f, compareY + 90.0f, L"回転なし(既定値0。従来の呼び出しと同じ)",
+            20.0f, 0.88f, 0.90f, 0.96f, 1.0f, true);
+        for (int i = 0; i < 4; ++i)
+        {
+            renderer.DrawRoundedRect(
+                spacing * (i + 1), compareY, 150.0f, 90.0f, 4.0f + i * 12.0f,
+                0.18f, 0.24f, 0.34f, 1.0f,
+                3.0f, 0.55f, 0.75f, 0.95f, 1.0f);
+        }
+    }
+
     // 「3: サウンド」のデモが持ち越す状態
     struct SoundDemoState
     {
@@ -452,6 +490,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         }
 
         DemoScene scene = DemoScene::Sprites;
+        float elapsedSeconds = 0.0f; // アニメーションするデモ画面の時間軸
         auto lastFrameTime = std::chrono::steady_clock::now();
 
         while (!renderer.ShouldClose())
@@ -461,6 +500,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             const auto now = std::chrono::steady_clock::now();
             const float deltaTime = std::chrono::duration<float>(now - lastFrameTime).count();
             lastFrameTime = now;
+            elapsedSeconds += deltaTime;
 
             if (renderer.WasKeyPressed(VK_ESCAPE))
             {
@@ -519,6 +559,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 break;
             case DemoScene::Sound:
                 DrawSoundDemo(renderer, soundDemo, width, height);
+                break;
+            case DemoScene::Shapes:
+                DrawShapesDemo(renderer, elapsedSeconds, width, height);
                 break;
             default:
                 break;

@@ -255,10 +255,14 @@ namespace Kurenai
         float x, float y, float width, float height, float cornerRadiusPixels,
         float r, float g, float b, float a,
         float borderThicknessPixels,
-        float borderR, float borderG, float borderB, float borderA)
+        float borderR, float borderG, float borderB, float borderA,
+        float rotationRadians)
     {
         ObjectConstants objectConstants{};
+        // ShapeParamsはローカル空間(回転前)の半幅・半高さなので、回転を挟んでも
+        // シェーダー側の角丸・枠線の判定には影響しない(DrawSpriteと同じ順序で掛ける)
         const DirectX::XMMATRIX world = DirectX::XMMatrixScaling(width, height, 1.0f) *
+            DirectX::XMMatrixRotationZ(rotationRadians) *
             DirectX::XMMatrixTranslation(x, y, 0.0f);
         DirectX::XMStoreFloat4x4(&objectConstants.World, DirectX::XMMatrixTranspose(world));
         objectConstants.Color = { r, g, b, a };
