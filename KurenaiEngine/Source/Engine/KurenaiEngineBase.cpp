@@ -157,9 +157,19 @@ namespace Kurenai
         return m_Window->WasMouseButtonPressed(button);
     }
 
+    bool KurenaiEngineBase::WasMouseButtonReleased(MouseButton button) const
+    {
+        return m_Window->WasMouseButtonReleased(button);
+    }
+
     bool KurenaiEngineBase::WasKeyPressed(KeyCode key) const
     {
         return m_Window->WasKeyPressed(key);
+    }
+
+    bool KurenaiEngineBase::WasKeyReleased(KeyCode key) const
+    {
+        return m_Window->WasKeyReleased(key);
     }
 
     POINT KurenaiEngineBase::GetClientMousePosition() const

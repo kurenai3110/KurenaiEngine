@@ -67,11 +67,19 @@ namespace Kurenai::Core
         bool IsMouseButtonDown(MouseButton button) const;
         // 直前のPumpMessages()呼び出し中にボタンが押された(離れた状態から押された状態になった)か
         bool WasMouseButtonPressed(MouseButton button) const;
+        // 直前のPumpMessages()呼び出し中にボタンが離された(押された状態から離れた状態になった)か。
+        // 一般的なUIのボタンは「押下」ではなく「押下→同じボタン上での解放」でクリックを確定する
+        // (押したまま領域外へ出せばキャンセルできる)ため、その判定に使う。
+        // IsMouseButtonDown()の前フレーム値を呼び出し側で保持する方法と違い、
+        // 1回のPumpMessages()の中で押して離した場合も取りこぼさない
+        bool WasMouseButtonReleased(MouseButton button) const;
         // 現在キーが押された状態かどうか(WASD移動のような「押している間」継続する操作に使う)
         bool IsKeyDown(KeyCode key) const;
         // 直前のPumpMessages()呼び出し中にキーが押された(離れた状態から押された状態になった)か。
         // オートリピートによる連続したWM_KEYDOWNは無視する
         bool WasKeyPressed(KeyCode key) const;
+        // 直前のPumpMessages()呼び出し中にキーが離された(押された状態から離れた状態になった)か
+        bool WasKeyReleased(KeyCode key) const;
         // クライアント座標(原点は左上、Y-down。Win32の標準的な座標系)
         POINT GetClientMousePosition() const { return m_MousePosition; }
 
@@ -126,8 +134,10 @@ namespace Kurenai::Core
         POINT m_MousePosition{};
         bool m_MouseButtonDown[3]{};
         bool m_MouseButtonPressedEdge[3]{};
+        bool m_MouseButtonReleasedEdge[3]{};
         bool m_KeyDown[256]{};
         bool m_KeyPressedEdge[256]{};
+        bool m_KeyReleasedEdge[256]{};
 
         // WndProc(Updateスレッド)からForwardQueuedMessagesToImGui呼び出し元(Renderスレッド)への
         // メッセージ受け渡し用。ImGui自体はこのキューにもWndProc処理にも関与しないため、

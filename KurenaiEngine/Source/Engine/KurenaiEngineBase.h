@@ -81,6 +81,15 @@ namespace Kurenai
         // 直前のPumpEvents()呼び出し中に押された(エッジ検出)か
         bool WasMouseButtonPressed(MouseButton button) const;
         bool WasKeyPressed(KeyCode key) const;
+        // 直前のPumpEvents()呼び出し中に離された(エッジ検出)か。
+        // 一般的なUIのボタンは「押下→同じボタン上での解放」でクリックを確定する
+        // (押したまま領域外へ出せばキャンセルできる)ため、その判定に使う。
+        // IsMouseButtonDown()の前フレーム値を呼び出し側で保持する方法と違い、
+        // 1回のPumpEvents()の中で押して離した場合も取りこぼさない。
+        // ウィンドウがフォーカスを失った場合、その時点で押されていたものは
+        // 「解放された」として通知される(押しっぱなしで固まらないようにするため)
+        bool WasMouseButtonReleased(MouseButton button) const;
+        bool WasKeyReleased(KeyCode key) const;
         POINT GetClientMousePosition() const;
 
         // WAV(PCM)ファイルを読み込み、再生用に登録する
