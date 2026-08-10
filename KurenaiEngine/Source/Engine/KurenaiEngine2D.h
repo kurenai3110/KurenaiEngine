@@ -55,6 +55,39 @@ namespace Kurenai
         // 画面をクリアし、以後のDrawSprite呼び出しの準備をする。1フレームにつき1回だけ呼ぶ
         void BeginFrame(float clearR, float clearG, float clearB, float clearA = 1.0f);
 
+        // --- 2Dカメラ ---
+        //
+        // これらを一度も呼ばなければ、従来どおり「クライアント領域を過不足なく映す」状態になる
+        // (ワールド座標0〜幅・0〜高さがそのまま画面いっぱいに出て、ウィンドウのリサイズにも追従する)。
+        // 反映はBeginFrame()の時点なので、設定はBeginFrame()より前に行うこと。
+
+        // カメラ中心のワールド座標。設定するとウィンドウサイズへの自動追従をやめ、この値で固定する
+        void SetCameraPosition(float x, float y);
+        // 実際に使われているカメラ中心を返す(SetCameraPosition未設定の場合も既定値が返る)
+        void GetCameraPosition(float& outX, float& outY) const;
+        // 1.0で等倍、2.0で2倍に拡大表示(= 見えるワールドの範囲が1/2になる)。
+        // 0以下・NaNはログを出して無視する
+        void SetCameraZoom(float zoom);
+        float GetCameraZoom() const { return m_CameraZoom; }
+
+        // 論理解像度を指定する。指定するとワールド座標0〜width・0〜heightの範囲が、
+        // アスペクト比を保ったままクライアント領域の中央へ収まるようスケール＋センタリングされる
+        // (余る側にはレターボックス/ピラーボックスが出る。余白はBeginFrameのクリア色になる)。
+        // ウィンドウサイズが変わっても見えるワールドの範囲は変わらないため、
+        // 「1600x900で組んだ盤面を、どのウィンドウサイズでも同じ構図で見せる」用途に使う。
+        // (0, 0)を渡すと解除され、クライアント領域をそのまま論理解像度として使う既定へ戻る
+        void SetVirtualResolution(float width, float height);
+
+        // クライアント座標(GetClientMousePositionが返す、原点は左上・Y-downのピクセル座標)を
+        // ワールド座標(原点は左下・Y-up)へ変換する。カメラ位置・ズーム・論理解像度による
+        // レターボックスをすべて考慮するため、マウスの当たり判定はこれを通して行うこと。
+        // レターボックスの余白の上を指した場合は論理解像度の外側の座標が返る
+        void ClientToWorld(float clientX, float clientY, float& outWorldX, float& outWorldY) const;
+        // ClientToWorldの逆変換
+        void WorldToClient(float worldX, float worldY, float& outClientX, float& outClientY) const;
+        // GetClientMousePosition()にClientToWorldを適用した結果
+        void GetMouseWorldPosition(float& outWorldX, float& outWorldY) const;
+
         // x, y はワールド=ピクセル座標(原点は画面左下、Y-up)のスプライト中心位置。
         // width, height はピクセル単位のスプライトサイズ。rotationRadiansはZ軸(画面手前向き)回転。
         // r, g, b, a はテクスチャに乗算されるティント色(半透明にしたい場合はaを1未満にする)
@@ -182,6 +215,36 @@ namespace Kurenai
         static std::vector<std::wstring> SplitTextIntoLines(const std::wstring& text);
 
         Core::Camera m_Camera;
+
+        // --- 2Dカメラの状態(SetCameraPosition / SetCameraZoom / SetVirtualResolution) ---
+        //
+        // 「一度も設定していなければクライアント領域を過不足なく映す」という既定を保つため、
+        // 値そのものではなく「設定されたか」をフラグで持つ。未設定の間はComputeViewStateが
+        // 論理解像度の中央を実効カメラ位置として毎フレーム計算するので、ウィンドウの
+        // リサイズに自動追従する(= これらのAPIを一切呼ばないアプリの見た目は従来と同一)
+        float m_CameraX = 0.0f;
+        float m_CameraY = 0.0f;
+        bool m_HasCameraPosition = false;
+        float m_CameraZoom = 1.0f;
+        float m_VirtualWidth = 0.0f;
+        float m_VirtualHeight = 0.0f;
+        bool m_HasVirtualResolution = false;
+
+        // BeginFrameと座標変換が共有する「そのフレームの実効値」。2か所で別々に計算すると、
+        // 片方だけ直したときにマウス座標だけずれるという気付きにくい不整合が起きるため、
+        // 計算はComputeViewState()の1か所に閉じる
+        struct ViewState
+        {
+            // クライアント領域内の描画先(レターボックス適用済み。ピクセル、原点は左上)
+            float ViewportX = 0.0f, ViewportY = 0.0f;
+            float ViewportWidth = 0.0f, ViewportHeight = 0.0f;
+            // 論理解像度(SetVirtualResolution未設定ならクライアント領域と同じ)
+            float LogicalWidth = 0.0f, LogicalHeight = 0.0f;
+            // 実効カメラ中心(ワールド座標)と実効ズーム
+            float CameraCenterX = 0.0f, CameraCenterY = 0.0f;
+            float Zoom = 1.0f;
+        };
+        ViewState ComputeViewState() const;
 
         std::unique_ptr<RHI::IRHIShader> m_VertexShader;
         std::unique_ptr<RHI::IRHIShader> m_PixelShader;

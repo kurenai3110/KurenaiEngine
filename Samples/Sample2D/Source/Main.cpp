@@ -34,6 +34,7 @@ namespace
         Shapes,      // 4: 図形(角丸矩形の回転・円の枠線)
         Atlas,       // 5: テクスチャアトラス(DrawSpriteUV / GetTextureSize)
         Text,        // 6: テキスト(複数行・行高さ・ブロック計測)
+        Camera,      // 7: 2Dカメラ(位置・ズーム・論理解像度)
         Count
     };
 
@@ -86,20 +87,66 @@ namespace
         case DemoScene::Shapes: return L"4: 図形 (角丸矩形の回転・円の枠線)";
         case DemoScene::Atlas: return L"5: テクスチャアトラス (DrawSpriteUV / GetTextureSize)";
         case DemoScene::Text: return L"6: テキスト (複数行・GetLineHeight・MeasureTextBlock)";
+        case DemoScene::Camera: return L"7: 2Dカメラ (位置・ズーム・論理解像度)";
         default: return L"(不明なデモ画面)";
         }
     }
 
+    // クライアント座標(左上原点・Y-down)を基準に、画面に貼り付いた大きさでテキストを描く。
+    //
+    // 2Dの描画APIはワールド座標を取るため、カメラの位置・ズーム・論理解像度を変えると
+    // 見出しやHUDまで一緒に動いて拡大される。ClientToWorldで位置を求め、
+    // 「クライアント1pxがワールドいくつぶんか」で文字サイズを割ることで画面固定にする
+    void DrawScreenText(
+        KurenaiEngine2D& renderer, float clientX, float clientY, const std::wstring& text,
+        float fontSizePixels, float r, float g, float b, float a,
+        bool bold = false, TextAlign align = TextAlign::Left, TextVerticalAlign verticalAlign = TextVerticalAlign::Top)
+    {
+        // クライアント座標で100px下がワールド座標でいくつぶんかを測る
+        constexpr float kProbePixels = 100.0f;
+        float originX = 0.0f, originY = 0.0f;
+        float probeX = 0.0f, probeY = 0.0f;
+        renderer.ClientToWorld(clientX, clientY, originX, originY);
+        renderer.ClientToWorld(clientX, clientY + kProbePixels, probeX, probeY);
+        const float worldPerPixel = (originY - probeY) / kProbePixels;
+        if (!(worldPerPixel > 0.0f))
+        {
+            return; // クライアント領域が0のフレーム
+        }
+
+        renderer.DrawText(originX, originY, text, fontSizePixels * worldPerPixel, r, g, b, a, bold, align, verticalAlign);
+    }
+
+    // 描画できるクライアント矩形(レターボックス適用後のビューポート)。
+    //
+    // SetVirtualResolutionを使うと余白(レターボックス/ピラーボックス)はビューポートの外になり、
+    // そこへ向けて描いたものは投影のクリップで消える。画面に貼り付けるHUDはこの矩形の内側へ置く。
+    // 計算はKurenaiEngine2D::ComputeViewStateと同じ「アスペクト比を保って収める」式
+    struct DrawableRect
+    {
+        float X = 0.0f, Y = 0.0f, Width = 0.0f, Height = 0.0f;
+    };
+
+    DrawableRect GetDrawableClientRect(float clientWidth, float clientHeight, float virtualWidth, float virtualHeight)
+    {
+        DrawableRect rect{ 0.0f, 0.0f, clientWidth, clientHeight };
+        if (virtualWidth > 0.0f && virtualHeight > 0.0f && clientWidth > 0.0f && clientHeight > 0.0f)
+        {
+            const float scale = (std::min)(clientWidth / virtualWidth, clientHeight / virtualHeight);
+            rect.Width = virtualWidth * scale;
+            rect.Height = virtualHeight * scale;
+            rect.X = (clientWidth - rect.Width) * 0.5f;
+            rect.Y = (clientHeight - rect.Height) * 0.5f;
+        }
+        return rect;
+    }
+
     // 画面上端に、選択中のデモ画面名と操作説明を出す(全デモ画面で共通)
-    void DrawHeader(KurenaiEngine2D& renderer, DemoScene scene, GraphicsAPI api, float clientHeight)
+    void DrawHeader(KurenaiEngine2D& renderer, DemoScene scene, GraphicsAPI api, const DrawableRect& drawable)
     {
         const std::wstring title = std::wstring(api == GraphicsAPI::DX12 ? L"[DX12] " : L"[DX11] ") + GetSceneTitle(scene);
-        renderer.DrawText(
-            16.0f, clientHeight - 12.0f, title, 22.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-            true, TextAlign::Left, TextVerticalAlign::Top);
-        renderer.DrawText(
-            16.0f, clientHeight - 40.0f, L"数字キー: デモ切り替え / Esc: 終了", 16.0f, 0.7f, 0.7f, 0.75f, 1.0f,
-            false, TextAlign::Left, TextVerticalAlign::Top);
+        DrawScreenText(renderer, drawable.X + 16.0f, drawable.Y + 12.0f, title, 22.0f, 1.0f, 1.0f, 1.0f, 1.0f, true);
+        DrawScreenText(renderer, drawable.X + 16.0f, drawable.Y + 40.0f, L"数字キー: デモ切り替え / Esc: 終了", 16.0f, 0.7f, 0.7f, 0.75f, 1.0f);
     }
 
     void InitSprites(std::array<Sprite, 24>& sprites)
@@ -437,6 +484,115 @@ namespace
         }
     }
 
+    // 「7: 2Dカメラ」のデモ。論理解像度の指定を切り替えるためのフラグだけ持つ
+    struct CameraDemoState
+    {
+        bool UseVirtualResolution = false;
+    };
+
+    // このデモが使う論理解像度。ウィンドウ(既定16:9)に対して4:3にしてあるので、
+    // 有効にすると左右にピラーボックスが出て効いていることがすぐ分かる
+    constexpr float kVirtualWidth = 800.0f;
+    constexpr float kVirtualHeight = 600.0f;
+
+    void UpdateCameraDemo(KurenaiEngine2D& renderer, CameraDemoState& state, float deltaTime)
+    {
+        // ホイールでズーム。1ノッチあたり1.15倍
+        const float wheel = renderer.GetMouseWheelDelta();
+        if (wheel != 0.0f)
+        {
+            renderer.SetCameraZoom(renderer.GetCameraZoom() * std::powf(1.15f, wheel));
+        }
+
+        // WASD/矢印キーでカメラを動かす。移動量はズームに反比例させ、
+        // 画面上の移動速度が拡大率によらず一定になるようにする
+        float cameraX = 0.0f;
+        float cameraY = 0.0f;
+        renderer.GetCameraPosition(cameraX, cameraY);
+        const float speed = 400.0f * deltaTime / renderer.GetCameraZoom();
+        if (renderer.IsKeyDown('A') || renderer.IsKeyDown(VK_LEFT)) { cameraX -= speed; }
+        if (renderer.IsKeyDown('D') || renderer.IsKeyDown(VK_RIGHT)) { cameraX += speed; }
+        if (renderer.IsKeyDown('S') || renderer.IsKeyDown(VK_DOWN)) { cameraY -= speed; }
+        if (renderer.IsKeyDown('W') || renderer.IsKeyDown(VK_UP)) { cameraY += speed; }
+        renderer.SetCameraPosition(cameraX, cameraY);
+
+        // Vで論理解像度の指定を入り切りする
+        if (renderer.WasKeyPressed('V'))
+        {
+            state.UseVirtualResolution = !state.UseVirtualResolution;
+            if (state.UseVirtualResolution)
+            {
+                renderer.SetVirtualResolution(kVirtualWidth, kVirtualHeight);
+            }
+            else
+            {
+                renderer.SetVirtualResolution(0.0f, 0.0f); // 解除
+            }
+        }
+
+        // Rで既定へ戻す
+        if (renderer.WasKeyPressed('R'))
+        {
+            state.UseVirtualResolution = false;
+            renderer.SetVirtualResolution(0.0f, 0.0f);
+            renderer.SetCameraZoom(1.0f);
+            renderer.SetCameraPosition(kVirtualWidth * 0.5f, kVirtualHeight * 0.5f);
+        }
+    }
+
+    void DrawCameraDemo(KurenaiEngine2D& renderer, const CameraDemoState& state, const DrawableRect& drawable)
+    {
+        // 論理解像度(800x600)の範囲を示す枠と、100px間隔の格子。
+        // カメラを動かしてもワールド座標に固定されているので、パン・ズームが目に見える
+        renderer.DrawRoundedRect(
+            kVirtualWidth * 0.5f, kVirtualHeight * 0.5f, kVirtualWidth, kVirtualHeight, 0.0f,
+            0.10f, 0.12f, 0.18f, 1.0f, 2.0f, 0.55f, 0.65f, 0.85f, 1.0f);
+
+        for (int i = 0; i <= 8; ++i)
+        {
+            const float x = i * 100.0f;
+            renderer.DrawLine(x, 0.0f, x, kVirtualHeight, 1.0f, 0.35f, 0.40f, 0.50f, 1.0f);
+        }
+        for (int i = 0; i <= 6; ++i)
+        {
+            const float y = i * 100.0f;
+            renderer.DrawLine(0.0f, y, kVirtualWidth, y, 1.0f, 0.35f, 0.40f, 0.50f, 1.0f);
+        }
+
+        // 格子の交点にワールド座標を書く(ズームすると文字も一緒に拡大される)
+        for (int gx = 0; gx <= 8; gx += 2)
+        {
+            for (int gy = 0; gy <= 6; gy += 2)
+            {
+                renderer.DrawText(
+                    gx * 100.0f, gy * 100.0f,
+                    L"(" + std::to_wstring(gx * 100) + L", " + std::to_wstring(gy * 100) + L")",
+                    14.0f, 0.65f, 0.70f, 0.80f, 1.0f);
+            }
+        }
+
+        // マウス位置(ClientToWorld経由)にリングを出す。ズーム・パン・レターボックスを
+        // すべて考慮した変換になっていれば、カーソルへ正確に追従する
+        float mouseWorldX = 0.0f;
+        float mouseWorldY = 0.0f;
+        renderer.GetMouseWorldPosition(mouseWorldX, mouseWorldY);
+        renderer.DrawCircle(mouseWorldX, mouseWorldY, 24.0f, 0.0f, 0.0f, 0.0f, 0.0f, 3.0f, 0.95f, 0.75f, 0.30f, 1.0f);
+
+        float cameraX = 0.0f;
+        float cameraY = 0.0f;
+        renderer.GetCameraPosition(cameraX, cameraY);
+        const std::wstring info =
+            L"WASD/矢印: カメラ移動  ホイール: ズーム  V: 論理解像度 " +
+                std::wstring(state.UseVirtualResolution ? L"[ON]" : L"[OFF]") + L"  R: 既定へ戻す\n" +
+            L"カメラ中心 (" + FormatFloat(cameraX) + L", " + FormatFloat(cameraY) + L")" +
+            L"  ズーム " + FormatFloat(renderer.GetCameraZoom()) + L"倍\n" +
+            L"マウスのワールド座標 (" + FormatFloat(mouseWorldX) + L", " + FormatFloat(mouseWorldY) + L")";
+        // 情報表示はカメラ操作で動かないよう画面へ貼り付ける(ClientToWorld経由)
+        DrawScreenText(
+            renderer, drawable.X + 16.0f, drawable.Y + drawable.Height - 90.0f, info, 18.0f, 0.88f, 0.90f, 0.96f, 1.0f,
+            false, TextAlign::Left, TextVerticalAlign::Top);
+    }
+
     // 「6: テキスト」のデモ。MeasureTextBlockで測った大きさのパネルへ複数行テキストを収める
     void DrawTextDemo(KurenaiEngine2D& renderer, float width, float height)
     {
@@ -709,6 +865,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             atlasTexture = renderer.LoadTexture(moduleDirectory + L"DemoAtlas.bmp");
         }
 
+        CameraDemoState cameraDemo{};
+
         DemoScene scene = DemoScene::Sprites;
         float elapsedSeconds = 0.0f; // アニメーションするデモ画面の時間軸
         auto lastFrameTime = std::chrono::steady_clock::now();
@@ -732,7 +890,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 if (renderer.WasKeyPressed('1' + i))
                 {
-                    scene = static_cast<DemoScene>(i);
+                    const DemoScene next = static_cast<DemoScene>(i);
+                    if (scene == DemoScene::Camera && next != DemoScene::Camera)
+                    {
+                        // カメラのデモを抜けるときはズームと論理解像度を戻す。カメラ状態は
+                        // エンジン側が保持し続けるため、戻さないと他のデモ画面がずれたままになる
+                        // (カメラ位置は下のループで毎フレーム入れ直している)
+                        cameraDemo = CameraDemoState{};
+                        renderer.SetVirtualResolution(0.0f, 0.0f);
+                        renderer.SetCameraZoom(1.0f);
+                    }
+                    else if (next == DemoScene::Camera && scene != DemoScene::Camera)
+                    {
+                        // 論理解像度(800x600)の中央から始める
+                        renderer.SetCameraPosition(kVirtualWidth * 0.5f, kVirtualHeight * 0.5f);
+                    }
+                    scene = next;
                 }
             }
 
@@ -761,6 +934,23 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 UpdateSoundDemo(renderer, soundDemo, deltaTime);
             }
+            else if (scene == DemoScene::Camera)
+            {
+                UpdateCameraDemo(renderer, cameraDemo, deltaTime);
+            }
+
+            if (scene != DemoScene::Camera)
+            {
+                // カメラのデモ以外は既定の見え方(クライアント領域を過不足なく映す)に固定する。
+                // 一度SetCameraPositionを呼ぶとウィンドウサイズへの自動追従が止まるため、
+                // リサイズにも追従するよう毎フレーム入れ直す
+                renderer.SetCameraPosition(width * 0.5f, height * 0.5f);
+            }
+
+            // HUDを置ける範囲(レターボックスの余白の外へ描くとクリップされる)
+            const DrawableRect drawable = (scene == DemoScene::Camera && cameraDemo.UseVirtualResolution)
+                ? GetDrawableClientRect(width, height, kVirtualWidth, kVirtualHeight)
+                : GetDrawableClientRect(width, height, 0.0f, 0.0f);
 
             renderer.BeginFrame(0.08f, 0.08f, 0.12f);
 
@@ -789,11 +979,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             case DemoScene::Text:
                 DrawTextDemo(renderer, width, height);
                 break;
+            case DemoScene::Camera:
+                DrawCameraDemo(renderer, cameraDemo, drawable);
+                break;
             default:
                 break;
             }
 
-            DrawHeader(renderer, scene, api, height);
+            DrawHeader(renderer, scene, api, drawable);
             renderer.EndFrame(true);
         }
     }

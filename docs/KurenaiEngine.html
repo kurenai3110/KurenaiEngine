@@ -435,6 +435,16 @@ APIを切り替えると<code>Run()</code>が戻ってそのまま終了しま�
         TextureHandle CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 
         void BeginFrame(float clearR, float clearG, float clearB, float clearA = 1.0f);
+
+        void SetCameraPosition(float x, float y);
+        void GetCameraPosition(float&amp; outX, float&amp; outY) const;
+        void SetCameraZoom(float zoom);
+        float GetCameraZoom() const;
+        void SetVirtualResolution(float width, float height); // (0, 0)で解除
+        void ClientToWorld(float clientX, float clientY, float&amp; outWorldX, float&amp; outWorldY) const;
+        void WorldToClient(float worldX, float worldY, float&amp; outClientX, float&amp; outClientY) const;
+        void GetMouseWorldPosition(float&amp; outWorldX, float&amp; outWorldY) const;
+
         void DrawSprite(float x, float y, float width, float height, float rotationRadians,
                          TextureHandle texture, float r, float g, float b, float a);
         void DrawSpriteUV(float x, float y, float width, float height, float rotationRadians,
@@ -476,7 +486,37 @@ HWND GetWindowHandle() const; // 生成したウィンドウのHWND(ScreenToClie
 ピクセル単位のサイズ、<code>rotationRadians</code> は画面奥から手前を見た反時計回りのZ軸回転。
 </p>
 
-<h3>3.2 使い方</h3>
+<h3>3.2 カメラと論理解像度</h3>
+<p>
+カメラ系のAPIを<strong>一度も呼ばなければ従来どおり</strong>「クライアント領域を過不足なく映す」
+状態になります(ワールド座標0〜幅・0〜高さがそのまま画面いっぱいに出て、ウィンドウの
+リサイズにも自動追従する)。反映は<code>BeginFrame()</code>の時点なので、設定は
+<code>BeginFrame()</code>より前に行ってください(フレーム途中の変更は次のフレームから効きます)。
+</p>
+<table>
+<tr><th>状態</th><th>ウィンドウをリサイズしたとき</th></tr>
+<tr><td>何も設定していない(既定)</td><td>カメラ中心が新しいクライアント中央へ追従し、ワールド0〜幅・0〜高さが常に映る</td></tr>
+<tr><td><code>SetCameraPosition</code>済み</td><td>カメラ中心は固定。見えるワールドの範囲は「クライアントサイズ÷ズーム」なので、ウィンドウを広げると見える範囲が広がる</td></tr>
+<tr><td><code>SetVirtualResolution</code>済み</td><td>見えるワールドの範囲は「論理解像度÷ズーム」で<strong>ウィンドウサイズに依存しない</strong>。ビューポートだけが拡縮する</td></tr>
+</table>
+<ul>
+<li><code>SetCameraZoom</code>は1.0で等倍、2.0で2倍に拡大表示(= 見えるワールドの範囲が1/2)。
+0以下・NaNはログを出して無視する。</li>
+<li><code>SetVirtualResolution(w, h)</code>は、ワールド座標0〜w・0〜hの範囲がアスペクト比を
+保ったままクライアント領域の中央へ収まるようスケール＋センタリングする。
+「1600x900で組んだ盤面を、どのウィンドウサイズでも同じ構図で見せる」用途に使う。
+<code>(0, 0)</code>を渡すと解除される。</li>
+<li>余る側にはレターボックス/ピラーボックスが出る。<strong>この余白はビューポートの外なので、
+そこへ向けて描いたものは投影のクリップで消える</strong>(余白の色は<code>BeginFrame</code>の
+クリア色になる。黒帯にしたい場合は<code>BeginFrame(0, 0, 0)</code>を渡す)。</li>
+<li><code>ClientToWorld</code> / <code>WorldToClient</code> / <code>GetMouseWorldPosition</code> は
+クライアント座標(<code>GetClientMousePosition</code>が返す、原点は左上・Y-down)と
+ワールド座標を相互変換する。カメラ位置・ズーム・レターボックスをすべて考慮するので、
+<strong>マウスの当たり判定は必ずこれを通すこと</strong>(これらを使わずに
+<code>height - y</code>で変換すると、ズームや論理解像度を使った瞬間にずれる)。</li>
+</ul>
+
+<h3>3.3 使い方</h3>
 <pre><code>#include "KurenaiEngine2D.h"
 #include "KurenaiTypes.h"
 
@@ -1509,7 +1549,10 @@ float GetMouseWheelDelta() const;                   // 直前のPumpEvents()中�
 固まってしまうため。</li>
 <li><code>GetClientMousePosition</code>が返す座標はWin32標準のクライアント座標(原点は左上、Y-down)。
 <code>KurenaiEngine2D::DrawSprite</code>のワールド座標(原点は左下、Y-up。3.1節参照)とは上下が逆なので、
-スプライト座標と突き合わせる場合は<code>height - y</code>で変換すること。</li>
+スプライト座標と突き合わせる場合は<strong><code>KurenaiEngine2D::ClientToWorld</code>
+(または<code>GetMouseWorldPosition</code>)で変換すること</strong>(3.2節)。
+カメラ位置・ズーム・論理解像度によるレターボックスをすべて考慮するため、
+<code>height - y</code>のような自前の変換と違ってカメラを動かしてもずれない。</li>
 <li>これらはいずれも<code>KurenaiEngineBase</code>のメンバなので<code>KurenaiEngine2D</code>/
 <code>KurenaiEngine3D</code>どちらからも呼べる。<code>KurenaiEngine3D::Run()</code>自身も
 移動(WASD/E/Q)・速度切り替え(Shift)・ImGui表示切り替え(F1)にこのAPI(<code>IsKeyDown</code>/

@@ -177,10 +177,17 @@ namespace Kurenai
             return;
         }
 
-        // 2Dで単純にウィンドウのピクセル座標をそのままワールド座標として使う(原点は画面左下、Y-up)。
-        // 画面中央にカメラを置くことで、ワールド座標が0〜width/0〜heightの範囲を過不足なく映す
-        m_Camera.SetOrthographic(static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f);
-        m_Camera.SetPosition({ width * 0.5f, height * 0.5f, -1.0f });
+        // 2Dはウィンドウのピクセル座標をそのままワールド座標として使う(原点は画面左下、Y-up)。
+        // 実効的なカメラ中心・見える範囲・ビューポートはComputeViewStateが一元的に決める
+        // (SetCameraPosition/SetCameraZoom/SetVirtualResolutionを一度も呼ばなければ、
+        //  論理解像度=クライアント領域・ズーム1.0・カメラ中心=画面中央になり従来と同じ絵になる)
+        const ViewState view = ComputeViewState();
+
+        // ズームは「見える範囲を1/zoomへ狭める」ことで表現する。Core::Cameraは見える範囲を
+        // ワールド単位で受け取る設計(Camera::SetOrthographic)なので、3D側と共有している
+        // Core::Cameraにズーム専用のAPIを足す必要はない
+        m_Camera.SetOrthographic(view.LogicalWidth / view.Zoom, view.LogicalHeight / view.Zoom, 0.0f, 1.0f);
+        m_Camera.SetPosition({ view.CameraCenterX, view.CameraCenterY, -1.0f });
 
         FrameConstants frameConstants{};
         const DirectX::XMMATRIX viewProj = m_Camera.GetViewMatrix() * m_Camera.GetProjectionMatrix();
@@ -188,8 +195,11 @@ namespace Kurenai
 
         RHI::IRHICommandList* commandList = GetCommandList();
         commandList->SetRenderTarget(m_SwapChain.get());
+        // ClearRenderTargetはビューポートに関係なくバックバッファ全体を塗るため、
+        // SetVirtualResolution使用時のレターボックスの余白もこのクリア色になる
+        // (黒帯にしたい場合はBeginFrame(0, 0, 0)を渡す)
         commandList->ClearRenderTarget({ clearR, clearG, clearB, clearA });
-        commandList->SetViewport({ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f });
+        commandList->SetViewport({ view.ViewportX, view.ViewportY, view.ViewportWidth, view.ViewportHeight, 0.0f, 1.0f });
 
         commandList->SetPipelineState(m_PipelineState.get());
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &frameConstants, sizeof(frameConstants));
@@ -197,6 +207,142 @@ namespace Kurenai
         commandList->SetVertexBuffer(m_QuadVertexBuffer.get());
         commandList->SetIndexBuffer(m_QuadIndexBuffer.get());
         commandList->SetSamplerSet(m_SamplerSet.get());
+    }
+
+    KurenaiEngine2D::ViewState KurenaiEngine2D::ComputeViewState() const
+    {
+        const float clientWidth = static_cast<float>(GetWidth());
+        const float clientHeight = static_cast<float>(GetHeight());
+
+        ViewState state;
+        state.Zoom = m_CameraZoom;
+
+        if (m_HasVirtualResolution && clientWidth > 0.0f && clientHeight > 0.0f)
+        {
+            // 論理解像度が指定されている場合だけ、アスペクト比を保ったままクライアント領域の
+            // 中央へ収める(レターボックス/ピラーボックス)。見えるワールドの範囲は
+            // 論理解像度で決まるため、ウィンドウサイズに依存しなくなる
+            state.LogicalWidth = m_VirtualWidth;
+            state.LogicalHeight = m_VirtualHeight;
+            const float scale = (std::min)(clientWidth / m_VirtualWidth, clientHeight / m_VirtualHeight);
+            state.ViewportWidth = m_VirtualWidth * scale;
+            state.ViewportHeight = m_VirtualHeight * scale;
+            state.ViewportX = (clientWidth - state.ViewportWidth) * 0.5f;
+            state.ViewportY = (clientHeight - state.ViewportHeight) * 0.5f;
+        }
+        else
+        {
+            // 既定。クライアント領域をそのまま論理解像度として使う(従来の挙動)
+            state.LogicalWidth = clientWidth;
+            state.LogicalHeight = clientHeight;
+            state.ViewportWidth = clientWidth;
+            state.ViewportHeight = clientHeight;
+        }
+
+        // SetCameraPositionを一度も呼んでいなければ論理解像度の中央。これにより
+        // ワールド座標0〜LogicalWidth / 0〜LogicalHeightが過不足なく映る(従来の挙動)
+        state.CameraCenterX = m_HasCameraPosition ? m_CameraX : state.LogicalWidth * 0.5f;
+        state.CameraCenterY = m_HasCameraPosition ? m_CameraY : state.LogicalHeight * 0.5f;
+        return state;
+    }
+
+    void KurenaiEngine2D::SetCameraPosition(float x, float y)
+    {
+        m_CameraX = x;
+        m_CameraY = y;
+        m_HasCameraPosition = true; // 以後はウィンドウサイズへの自動追従をやめ、この値で固定する
+    }
+
+    void KurenaiEngine2D::GetCameraPosition(float& outX, float& outY) const
+    {
+        // 未設定の場合も「実際に使われている中心」を返す(BeginFrameと同じ計算を通す)
+        const ViewState view = ComputeViewState();
+        outX = view.CameraCenterX;
+        outY = view.CameraCenterY;
+    }
+
+    void KurenaiEngine2D::SetCameraZoom(float zoom)
+    {
+        // 0以下は0除算で投影行列が壊れ、NaNは画面全体が消える。
+        // !(zoom > 0.0f)と書くことでNaNも同時に弾ける
+        if (!(zoom > 0.0f))
+        {
+            Core::Logger::Error(
+                "2D",
+                "SetCameraZoom: ズーム倍率は0より大きい必要があります(指定値: " +
+                    std::to_string(zoom) + ")。この呼び出しを無視します");
+            return;
+        }
+        m_CameraZoom = zoom;
+    }
+
+    void KurenaiEngine2D::SetVirtualResolution(float width, float height)
+    {
+        // (0, 0)は「論理解像度の解除」= クライアント領域をそのまま使う既定へ戻す、と定義する
+        if (width == 0.0f && height == 0.0f)
+        {
+            m_HasVirtualResolution = false;
+            return;
+        }
+
+        if (!(width > 0.0f) || !(height > 0.0f))
+        {
+            Core::Logger::Error(
+                "2D",
+                "SetVirtualResolution: 幅・高さは0より大きい必要があります(指定値: " +
+                    std::to_string(width) + "x" + std::to_string(height) +
+                    ")。解除したい場合は(0, 0)を渡してください。この呼び出しを無視します");
+            return;
+        }
+
+        m_VirtualWidth = width;
+        m_VirtualHeight = height;
+        m_HasVirtualResolution = true;
+    }
+
+    void KurenaiEngine2D::ClientToWorld(float clientX, float clientY, float& outWorldX, float& outWorldY) const
+    {
+        const ViewState view = ComputeViewState();
+        if (view.ViewportWidth <= 0.0f || view.ViewportHeight <= 0.0f)
+        {
+            // 最小化直後などクライアント領域が0のフレーム。0除算でNaNを外へ出さないよう
+            // カメラ中心を返す(BeginFrameもこの状態では何も描かずに戻るため実害はない)
+            outWorldX = view.CameraCenterX;
+            outWorldY = view.CameraCenterY;
+            return;
+        }
+
+        // ビューポート内の正規化位置(0〜1)を経由する。クライアント座標はY-down、
+        // ワールドはY-upなのでvだけ符号が反転する
+        const float u = (clientX - view.ViewportX) / view.ViewportWidth;
+        const float v = (clientY - view.ViewportY) / view.ViewportHeight;
+        outWorldX = view.CameraCenterX + (u - 0.5f) * (view.LogicalWidth / view.Zoom);
+        outWorldY = view.CameraCenterY - (v - 0.5f) * (view.LogicalHeight / view.Zoom);
+    }
+
+    void KurenaiEngine2D::WorldToClient(float worldX, float worldY, float& outClientX, float& outClientY) const
+    {
+        const ViewState view = ComputeViewState();
+        const float visibleWidth = view.LogicalWidth / view.Zoom;
+        const float visibleHeight = view.LogicalHeight / view.Zoom;
+        if (visibleWidth <= 0.0f || visibleHeight <= 0.0f)
+        {
+            // ClientToWorldと同じ理由のガード
+            outClientX = 0.0f;
+            outClientY = 0.0f;
+            return;
+        }
+
+        const float u = (worldX - view.CameraCenterX) / visibleWidth + 0.5f;
+        const float v = 0.5f - (worldY - view.CameraCenterY) / visibleHeight;
+        outClientX = view.ViewportX + u * view.ViewportWidth;
+        outClientY = view.ViewportY + v * view.ViewportHeight;
+    }
+
+    void KurenaiEngine2D::GetMouseWorldPosition(float& outWorldX, float& outWorldY) const
+    {
+        const POINT mouse = GetClientMousePosition();
+        ClientToWorld(static_cast<float>(mouse.x), static_cast<float>(mouse.y), outWorldX, outWorldY);
     }
 
     void KurenaiEngine2D::DrawSprite(
