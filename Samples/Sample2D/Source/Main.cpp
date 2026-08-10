@@ -1,10 +1,13 @@
 // KurenaiEngine 2Dサンプルプログラム。
 // 公開API(KurenaiEngine2D)のみを使い、正射影カメラ・アルファブレンドの詳細はエンジン側に隠蔽されている。
-// 画面内を跳ね回る半透明の色つきスプライトを描画する。Escキーで終了する。
+//
+// 数字キーで2Dの各機能のデモ画面を切り替えられる。Escキーで終了する。
+// 「-dx12」引数を付けて起動するとDX12バックエンドになる(再ビルド無しでDX11/DX12を見比べるため)。
 
 #include <Windows.h>
 
 #include <objbase.h>
+#include <shellapi.h>
 
 #include <array>
 #include <chrono>
@@ -20,6 +23,16 @@ using namespace Kurenai;
 
 namespace
 {
+    // デモ画面。数字キー(1〜)で切り替える。issueごとに1画面ずつ足していく
+    enum class DemoScene
+    {
+        Sprites = 0, // 1: 跳ね回る半透明スプライト(従来のサンプル内容)
+        Count
+    };
+
+    constexpr uint32_t kWindowWidth = 1280;
+    constexpr uint32_t kWindowHeight = 720;
+
     struct Sprite
     {
         float PositionX = 0.0f;
@@ -32,21 +45,53 @@ namespace
         float R = 1.0f, G = 1.0f, B = 1.0f, A = 1.0f;
     };
 
-    constexpr uint32_t kWindowWidth = 1280;
-    constexpr uint32_t kWindowHeight = 720;
-}
-
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
-{
-    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-
-    int exitCode = 0;
-    try
+    // 「-dx12」引数が指定されていればDX12バックエンドを使う(Sample3Dと同じ流儀)
+    GraphicsAPI ParseGraphicsAPI()
     {
-        KurenaiEngine2D renderer(L"KurenaiEngine Sample2D", kWindowWidth, kWindowHeight, GraphicsAPI::DX11);
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return GraphicsAPI::DX11;
+        }
 
-        const TextureHandle whiteTexture = renderer.CreateSolidColorTexture(255, 255, 255, 255);
+        GraphicsAPI api = GraphicsAPI::DX11;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-dx12") == 0)
+            {
+                api = GraphicsAPI::DX12;
+                break;
+            }
+        }
 
+        LocalFree(argv);
+        return api;
+    }
+
+    const wchar_t* GetSceneTitle(DemoScene scene)
+    {
+        switch (scene)
+        {
+        case DemoScene::Sprites: return L"1: DrawSprite (跳ね回る半透明スプライト)";
+        default: return L"(不明なデモ画面)";
+        }
+    }
+
+    // 画面上端に、選択中のデモ画面名と操作説明を出す(全デモ画面で共通)
+    void DrawHeader(KurenaiEngine2D& renderer, DemoScene scene, GraphicsAPI api, float clientHeight)
+    {
+        const std::wstring title = std::wstring(api == GraphicsAPI::DX12 ? L"[DX12] " : L"[DX11] ") + GetSceneTitle(scene);
+        renderer.DrawText(
+            16.0f, clientHeight - 12.0f, title, 22.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+            true, TextAlign::Left, TextVerticalAlign::Top);
+        renderer.DrawText(
+            16.0f, clientHeight - 40.0f, L"数字キー: デモ切り替え / Esc: 終了", 16.0f, 0.7f, 0.7f, 0.75f, 1.0f,
+            false, TextAlign::Left, TextVerticalAlign::Top);
+    }
+
+    void InitSprites(std::array<Sprite, 24>& sprites)
+    {
         const std::array<std::array<float, 4>, 6> palette = { {
             { 0.95f, 0.25f, 0.30f, 0.8f },
             { 0.25f, 0.65f, 0.95f, 0.8f },
@@ -56,7 +101,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             { 0.95f, 0.55f, 0.20f, 0.8f },
         } };
 
-        std::array<Sprite, 24> sprites{};
         for (size_t i = 0; i < sprites.size(); ++i)
         {
             const float t = static_cast<float>(i);
@@ -74,7 +118,57 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             sprite.B = color[2];
             sprite.A = color[3];
         }
+    }
 
+    void UpdateSprites(std::array<Sprite, 24>& sprites, float deltaTime, float width, float height)
+    {
+        for (Sprite& sprite : sprites)
+        {
+            sprite.PositionX += sprite.VelocityX * deltaTime;
+            sprite.PositionY += sprite.VelocityY * deltaTime;
+            sprite.Rotation += sprite.RotationSpeed * deltaTime;
+
+            const float half = sprite.Size * 0.5f;
+            if (sprite.PositionX - half < 0.0f)
+            {
+                sprite.PositionX = half;
+                sprite.VelocityX = -sprite.VelocityX;
+            }
+            else if (sprite.PositionX + half > width)
+            {
+                sprite.PositionX = width - half;
+                sprite.VelocityX = -sprite.VelocityX;
+            }
+            if (sprite.PositionY - half < 0.0f)
+            {
+                sprite.PositionY = half;
+                sprite.VelocityY = -sprite.VelocityY;
+            }
+            else if (sprite.PositionY + half > height)
+            {
+                sprite.PositionY = height - half;
+                sprite.VelocityY = -sprite.VelocityY;
+            }
+        }
+    }
+}
+
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
+{
+    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+
+    int exitCode = 0;
+    try
+    {
+        const GraphicsAPI api = ParseGraphicsAPI();
+        KurenaiEngine2D renderer(L"KurenaiEngine Sample2D", kWindowWidth, kWindowHeight, api);
+
+        const TextureHandle whiteTexture = renderer.CreateSolidColorTexture(255, 255, 255, 255);
+
+        std::array<Sprite, 24> sprites{};
+        InitSprites(sprites);
+
+        DemoScene scene = DemoScene::Sprites;
         auto lastFrameTime = std::chrono::steady_clock::now();
 
         while (!renderer.ShouldClose())
@@ -85,55 +179,49 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             const float deltaTime = std::chrono::duration<float>(now - lastFrameTime).count();
             lastFrameTime = now;
 
-            if (GetAsyncKeyState(VK_ESCAPE) & 0x8000)
+            if (renderer.WasKeyPressed(VK_ESCAPE))
             {
                 renderer.Close();
             }
 
-            const uint32_t width = renderer.GetWidth();
-            const uint32_t height = renderer.GetHeight();
-            if (width == 0 || height == 0)
+            // 数字キー'1'〜でデモ画面を切り替える
+            for (int i = 0; i < static_cast<int>(DemoScene::Count); ++i)
+            {
+                if (renderer.WasKeyPressed('1' + i))
+                {
+                    scene = static_cast<DemoScene>(i);
+                }
+            }
+
+            const float width = static_cast<float>(renderer.GetWidth());
+            const float height = static_cast<float>(renderer.GetHeight());
+            if (width <= 0.0f || height <= 0.0f)
             {
                 continue;
             }
 
-            // スプライトの移動・反射・回転を更新する
-            for (Sprite& sprite : sprites)
+            if (scene == DemoScene::Sprites)
             {
-                sprite.PositionX += sprite.VelocityX * deltaTime;
-                sprite.PositionY += sprite.VelocityY * deltaTime;
-                sprite.Rotation += sprite.RotationSpeed * deltaTime;
-
-                const float half = sprite.Size * 0.5f;
-                if (sprite.PositionX - half < 0.0f)
-                {
-                    sprite.PositionX = half;
-                    sprite.VelocityX = -sprite.VelocityX;
-                }
-                else if (sprite.PositionX + half > static_cast<float>(width))
-                {
-                    sprite.PositionX = static_cast<float>(width) - half;
-                    sprite.VelocityX = -sprite.VelocityX;
-                }
-                if (sprite.PositionY - half < 0.0f)
-                {
-                    sprite.PositionY = half;
-                    sprite.VelocityY = -sprite.VelocityY;
-                }
-                else if (sprite.PositionY + half > static_cast<float>(height))
-                {
-                    sprite.PositionY = static_cast<float>(height) - half;
-                    sprite.VelocityY = -sprite.VelocityY;
-                }
+                UpdateSprites(sprites, deltaTime, width, height);
             }
 
             renderer.BeginFrame(0.08f, 0.08f, 0.12f);
-            for (const Sprite& sprite : sprites)
+
+            switch (scene)
             {
-                renderer.DrawSprite(
-                    sprite.PositionX, sprite.PositionY, sprite.Size, sprite.Size, sprite.Rotation,
-                    whiteTexture, sprite.R, sprite.G, sprite.B, sprite.A);
+            case DemoScene::Sprites:
+                for (const Sprite& sprite : sprites)
+                {
+                    renderer.DrawSprite(
+                        sprite.PositionX, sprite.PositionY, sprite.Size, sprite.Size, sprite.Rotation,
+                        whiteTexture, sprite.R, sprite.G, sprite.B, sprite.A);
+                }
+                break;
+            default:
+                break;
             }
+
+            DrawHeader(renderer, scene, api, height);
             renderer.EndFrame(true);
         }
     }

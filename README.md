@@ -613,12 +613,20 @@ KurenaiEngineLibrary.vcxproj+KurenaiEngine2D.vcxprojをプロジェクト参照�
 
 ### Sample2D
 
-`Kurenai::KurenaiEngine2D` を使い、画面内を跳ね回る半透明の色つきスプライトを描画するサンプルです
-(座標系・APIの詳細は `docs/KurenaiEngine.html` 3章を参照)。
+`Kurenai::KurenaiEngine2D` の公開APIを機能ごとのデモ画面として並べたサンプルです
+(座標系・APIの詳細は `docs/KurenaiEngine.html` 3章を参照)。数字キーでデモ画面を切り替えます。
 
 | 操作 | 入力 |
 | --- | --- |
+| デモ画面の切り替え | 数字キー(1〜) |
 | 終了 | Esc |
+
+Sample3Dと同様に、`-dx12` 引数を付けて起動するとDX12バックエンドになります(再ビルド無しで
+DX11/DX12の描画結果を見比べるため)。引数なしの既定はDX11です。
+
+| デモ画面 | 内容 |
+| --- | --- |
+| 1 | `DrawSprite` — 画面内を跳ね回る半透明の色つきスプライト |
 
 ## Assetsフォルダについて
 
