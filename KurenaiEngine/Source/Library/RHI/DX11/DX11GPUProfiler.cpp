@@ -55,7 +55,18 @@ namespace Kurenai::RHI
         FrameSlot& slot = m_Slots[m_WriteIndex];
         if (slot.ScopeCount >= kMaxScopesPerFrame)
         {
-            return; // 想定外に計測区間が増えた場合は計測のみスキップする(描画自体には影響しない)
+            // 計測のみスキップする(描画自体には影響しない)。ただしGPU Frame Timeは
+            // 各区間の合計なので、この状態では表示値が実際より小さくなる。黙って捨てると
+            // 最適化の効果測定を誤らせるため一度だけ警告する
+            if (!m_ScopeOverflowLogged)
+            {
+                m_ScopeOverflowLogged = true;
+                Core::Logger::Warning(
+                    "DX11",
+                    "GPUプロファイラの計測区間が上限(" + std::to_string(kMaxScopesPerFrame) + ")を超えました。'" + name +
+                        "'以降は計測されず、GPU Frame Timeも過小表示になります。kMaxScopesPerFrameを増やしてください");
+            }
+            return;
         }
         slot.ScopeNames[slot.ScopeCount] = name;
         m_Context->End(slot.BeginQueries[slot.ScopeCount].Get());

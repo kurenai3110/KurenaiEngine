@@ -378,6 +378,13 @@ namespace Kurenai::Defaults
     inline constexpr bool FixedFPSEnabled = true;
     inline constexpr float TargetFPS = 60.0f;
 
+    // --- 性能ログ ---
+    // FPS・CPU/GPUフレーム時間を一定間隔でログファイルへ出す。プロファイラパネルの表示は
+    // その場で消えてしまい後から比較できないため、実行の記録として残すためのもの。
+    // 出力は1秒に1行だけなのでフレーム時間への影響は無視できる
+    inline constexpr bool FrameStatsLoggingEnabled = true;
+    inline constexpr float FrameStatsLogIntervalSeconds = 1.0f;
+
     // --- デバッグ表示 ---
     inline constexpr float DebugViewGain = 1.0f;
 

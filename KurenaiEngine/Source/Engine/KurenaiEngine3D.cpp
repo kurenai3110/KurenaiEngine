@@ -4015,12 +4015,105 @@ namespace Kurenai
                 const float instantFPS = 1.0f / renderDeltaTime;
                 m_FPS = (m_FPS == 0.0f) ? instantFPS : (m_FPS * 0.9f + instantFPS * 0.1f);
             }
+
+            LogFrameStatsIfDue(renderDeltaTime);
         }
 
         if (SUCCEEDED(comResult))
         {
             CoUninitialize();
         }
+    }
+
+    // 性能の記録をログファイルへ残す。ProfilerPanelの表示は実行中しか見えず、後から
+    // 「この変更でフレーム時間がどう変わったか」を比較できない。集計期間ぶんを1行に
+    // まとめて出すことで、フレーム時間への影響(Logger::Infoはflushを伴う)を
+    // 1秒に1回に抑えつつ、実行ごとの記録が残るようにしている
+    void KurenaiEngine3D::LogFrameStatsIfDue(float renderDeltaTime)
+    {
+        if (!m_FrameStatsLoggingEnabled)
+        {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (m_FrameStatsFrameCount == 0)
+        {
+            m_FrameStatsWindowStart = now;
+        }
+
+        ++m_FrameStatsFrameCount;
+        m_FrameStatsCPUTimeSumMs += m_CPUFrameTimeMs;
+        m_FrameStatsGPUTimeSumMs += m_GPUProfiler ? m_GPUProfiler->GetTotalFrameTimeMs() : 0.0f;
+        m_FrameStatsGPUWaitSumMs += m_Device->GetLastFrameGPUWaitTimeMs();
+        m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
+
+        const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
+        if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
+        {
+            return;
+        }
+
+        // 集計期間の実測フレーム数から求める。m_FPS(指数移動平均)と違い、この値は
+        // 期間中に落ちたフレームがそのまま反映される
+        const float averageFPS = static_cast<float>(m_FrameStatsFrameCount) / std::max(elapsedSeconds, 1e-6f);
+        const double frameCount = static_cast<double>(m_FrameStatsFrameCount);
+
+        char buffer[256];
+        std::snprintf(
+            buffer,
+            sizeof(buffer),
+            "%ux%u %s | FPS %.1f (%u frames / %.2fs) | CPU %.2fms | GPU %.2fms | GPU待ち %.2fms | 最悪フレーム %.2fms",
+            m_RenderWidth,
+            m_RenderHeight,
+            m_GraphicsAPI == GraphicsAPI::DX12 ? "DX12" : "DX11",
+            averageFPS,
+            m_FrameStatsFrameCount,
+            elapsedSeconds,
+            m_FrameStatsCPUTimeSumMs / frameCount,
+            m_FrameStatsGPUTimeSumMs / frameCount,
+            m_FrameStatsGPUWaitSumMs / frameCount,
+            m_FrameStatsWorstFrameTimeMs);
+        Core::Logger::Info("Perf", buffer);
+
+        // パス別の内訳。どのパスを削れば効くのかは合計値からは分からないため、
+        // 集計期間の最後のフレームぶんを重い順に並べて残す。
+        // (毎フレーム平均を取るにはパス構成がフレームごとに変わりうるので、
+        //  代表として1フレームぶんを出す。ベイクパスが走ったフレームに当たると
+        //  その分だけ大きく出るが、常時走るパスの比較には十分)
+        if (m_GPUProfiler)
+        {
+            std::vector<RHI::GPUTimingResult> passes = m_GPUProfiler->GetResults();
+            std::sort(passes.begin(), passes.end(), [](const auto& a, const auto& b) { return a.TimeMs > b.TimeMs; });
+
+            std::string breakdown;
+            for (const auto& pass : passes)
+            {
+                // 0.05ms未満は並べても判断材料にならず、行が長くなるだけなので落とす
+                if (pass.TimeMs < 0.05f)
+                {
+                    break;
+                }
+                char passText[64];
+                std::snprintf(passText, sizeof(passText), "%s %.2f", pass.Name.c_str(), pass.TimeMs);
+                if (!breakdown.empty())
+                {
+                    breakdown += " / ";
+                }
+                breakdown += passText;
+            }
+
+            if (!breakdown.empty())
+            {
+                Core::Logger::Info("Perf", "  GPU内訳[ms]: " + breakdown);
+            }
+        }
+
+        m_FrameStatsFrameCount = 0;
+        m_FrameStatsCPUTimeSumMs = 0.0;
+        m_FrameStatsGPUTimeSumMs = 0.0;
+        m_FrameStatsGPUWaitSumMs = 0.0;
+        m_FrameStatsWorstFrameTimeMs = 0.0f;
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)

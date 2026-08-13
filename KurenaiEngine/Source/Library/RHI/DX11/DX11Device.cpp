@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "Core/StringUtil.h"
 #include "DX11Buffer.h"
 #include "DX11CommandList.h"
 #include "DX11ComputePipelineState.h"
@@ -99,6 +100,25 @@ namespace Kurenai::RHI
         ThrowIfFailed(dxgiDevice->GetAdapter(&adapter), "DXGIアダプタの取得に失敗しました");
 
         ThrowIfFailed(adapter->GetParent(IID_PPV_ARGS(&m_Factory)), "DXGIファクトリの取得に失敗しました");
+
+        // 実行中のGPUが何かをログに残す。どのGPUで測った値なのかが分からないと性能の記録が
+        // 後から比較できなくなる。診断目的の情報なので、取得に失敗しても描画は続行する
+        DXGI_ADAPTER_DESC adapterDesc{};
+        if (SUCCEEDED(adapter->GetDesc(&adapterDesc)))
+        {
+            constexpr uint64_t kBytesPerMiB = 1024ull * 1024ull;
+            Core::Logger::Info(
+                "DX11",
+                "GPU: " + Core::WideToUtf8(adapterDesc.Description) + " (専用VRAM " +
+                    std::to_string(adapterDesc.DedicatedVideoMemory / kBytesPerMiB) + "MB / 専用システムメモリ " +
+                    std::to_string(adapterDesc.DedicatedSystemMemory / kBytesPerMiB) + "MB / 共有システムメモリ " +
+                    std::to_string(adapterDesc.SharedSystemMemory / kBytesPerMiB) + "MB, 機能レベル " +
+                    (selectedFeatureLevel == D3D_FEATURE_LEVEL_11_1 ? "11_1" : "11_0") + ")");
+        }
+        else
+        {
+            Core::Logger::Warning("DX11", "DXGIアダプタの情報を取得できませんでした(GPU名をログに残せません)");
+        }
 
         m_ImmediateCommandList = std::make_unique<DX11CommandList>(m_Context);
 

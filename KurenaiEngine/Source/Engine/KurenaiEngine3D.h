@@ -290,6 +290,9 @@ namespace Kurenai
         void TickFrame();
         void RenderThreadMain();
         void Render(const FrameState& frameState);
+        // このフレームの計測値を集計し、集計期間(FrameStatsLogIntervalSeconds)ぶん溜まっていれば
+        // 1行にまとめてログへ出す。Renderスレッドからフレームごとに呼ぶ
+        void LogFrameStatsIfDue(float renderDeltaTime);
         // ProfilerPanel用。m_DeviceはKurenaiEngineBaseのprotectedメンバであり、派生クラスの
         // friendから触れるかどうかはC++の規則の解釈が分かれるため、ここで明示的に橋渡しする
         float GetLastFrameGPUWaitTimeMs() const;
@@ -1985,6 +1988,19 @@ namespace Kurenai
         // 追加の排他制御は不要
         float m_CPUFrameTimeMs = 0.0f;
         float m_FPS = 0.0f;
+
+        // 性能ログ(LogFrameStatsIfDue)。プロファイラパネルの表示はその場で消えてしまい後から
+        // 比較できないため、FPS・CPU/GPUフレーム時間を一定間隔でログファイルへ残す。
+        // すべてRenderスレッドのみが読み書きするため追加の排他制御は不要
+        bool m_FrameStatsLoggingEnabled = Defaults::FrameStatsLoggingEnabled;
+        std::chrono::steady_clock::time_point m_FrameStatsWindowStart;
+        uint32_t m_FrameStatsFrameCount = 0;
+        // 集計期間中の合計。平均を出すためにフレーム数で割る
+        double m_FrameStatsCPUTimeSumMs = 0.0;
+        double m_FrameStatsGPUTimeSumMs = 0.0;
+        double m_FrameStatsGPUWaitSumMs = 0.0;
+        // 平均だけではスパイクが埋もれるため、集計期間中のフレーム間隔の最悪値も残す
+        float m_FrameStatsWorstFrameTimeMs = 0.0f;
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};

@@ -24,6 +24,7 @@
 #include "DX12SwapChain.h"
 #include "DX12Texture.h"
 #include "DX12Util.h"
+#include "Core/StringUtil.h"
 #include "RHI/TextureImage.h"
 
 namespace Kurenai::RHI
@@ -211,6 +212,42 @@ namespace Kurenai::RHI
 
     }
 
+    // 実行中のGPUが何かをログに残す。どのGPUで測った値なのかが分からないと性能の記録が
+    // 後から比較できなくなるため、レイトレーシング等の対応状況ログと並べてここで出す。
+    // 診断目的の情報であり、取得に失敗しても描画は続行できるので例外は投げない
+    void DX12Device::LogAdapterInfo() const
+    {
+        const LUID deviceLuid = m_Device->GetAdapterLuid();
+
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        for (UINT index = 0; m_Factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index)
+        {
+            DXGI_ADAPTER_DESC1 desc{};
+            if (FAILED(adapter->GetDesc1(&desc)))
+            {
+                continue;
+            }
+
+            // D3D12CreateDeviceへnullptrを渡しているため、実際に使われたアダプタは
+            // デバイスのLUIDと一致するものを探して特定する
+            if (desc.AdapterLuid.LowPart != deviceLuid.LowPart || desc.AdapterLuid.HighPart != deviceLuid.HighPart)
+            {
+                continue;
+            }
+
+            constexpr uint64_t kBytesPerMiB = 1024ull * 1024ull;
+            Core::Logger::Info(
+                "DX12",
+                "GPU: " + Core::WideToUtf8(desc.Description) + " (専用VRAM " +
+                    std::to_string(desc.DedicatedVideoMemory / kBytesPerMiB) + "MB / 専用システムメモリ " +
+                    std::to_string(desc.DedicatedSystemMemory / kBytesPerMiB) + "MB / 共有システムメモリ " +
+                    std::to_string(desc.SharedSystemMemory / kBytesPerMiB) + "MB)");
+            return;
+        }
+
+        Core::Logger::Warning("DX12", "使用中のDXGIアダプタを特定できませんでした(GPU名をログに残せません)");
+    }
+
     DX12Device::DX12Device() = default;
 
     DX12Device::~DX12Device()
@@ -248,6 +285,8 @@ namespace Kurenai::RHI
         ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&m_Factory)), "DXGIファクトリの作成に失敗しました");
 
         ThrowIfFailed(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_Device)), "D3D12デバイスの作成に失敗しました");
+
+        LogAdapterInfo();
 
 #if defined(_DEBUG)
         // デバッグレイヤーの指摘はそのままではデバッガの出力ウィンドウにしか出ず、

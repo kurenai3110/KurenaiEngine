@@ -197,6 +197,9 @@ namespace Kurenai::RHI
         // CreateBuffer/CreateTextureFromImageの初期データアップロード専用(詳細はm_UploadCommandListの
         // コメント参照)
         void UploadSubmitAndWait();
+        // 実際に使われているDXGIアダプタ(GPU名・メモリ量)をログへ出す。
+        // 性能計測の値が「どのGPUで測ったものか」を後から追えるようにするための診断出力
+        void LogAdapterInfo() const;
 
         Microsoft::WRL::ComPtr<ID3D12Device> m_Device;
         // DXR用のインタフェース。m_DeviceからQueryInterfaceで取得する。

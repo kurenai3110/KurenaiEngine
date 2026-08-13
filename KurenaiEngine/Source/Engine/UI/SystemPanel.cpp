@@ -86,6 +86,12 @@ namespace Kurenai::UI
             }
         }
 
+        CheckboxEx(
+            "性能をログに記録###FrameStatsLogging", &m_Engine.m_FrameStatsLoggingEnabled,
+            Defaults::FrameStatsLoggingEnabled,
+            "FPS・CPU/GPUフレーム時間を1秒ごとにログファイルへ書き出す。"
+            "このパネルの表示は実行中しか見えないため、後から実行同士を比較するにはこちらを使う");
+
         EndParamGroup();
     }
 
