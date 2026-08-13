@@ -1850,6 +1850,64 @@ namespace Kurenai
         // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
         int m_LightTileHeatmapMax = Defaults::LightTileHeatmapMax;
 
+        // --- 品質プリセット(41章) ---------------------------------------------------------
+        //
+        // 個別のつまみを一括で振るための横断的な設定。UIの「システム」パネルから適用する。
+        // ここに置いているのは、この時点までにReflectionMode等の入れ子の列挙がすべて
+        // 宣言済みだからで、機能上の所属を示すものではない。
+        //
+        // 【どの項目を入れるかは実測で決めている】Intel UHD Graphics 620 / 1280x720 / DX11 /
+        // Release で5シーンを計測した結果、フレーム時間を支配していたのは以下だった:
+        //   DDGIのプローブ更新 40〜47ms(GIVolumeを持つシーン。フレームの約4割)
+        //   SSR 31ms(水面のあるシーン)
+        //   ボリュメトリック積雲 約10ms(空が画面の大半を占めるシーン)
+        // 逆にシャドウは全シーンで4カスケード合計1ms未満だったため、シャドウ関連は一切触らない。
+        // タイルドライトカリングは見た目を変えない最適化なので常に有効のままにする。
+        // 内部レンダー解像度は独立したつまみ(同じパネルの「解像度」節)であり、ここからは変えない
+        enum class QualityPreset
+        {
+            Low,     // 低
+            Medium,  // 中
+            High,    // 高(= シーンを読み込んだ直後の状態へ戻す)
+        };
+
+        // 品質プリセットが触る設定の一式。
+        //
+        // 【プリセット「高」はエンジンの静的な既定ではなく「シーン読み込み直後の値」へ戻す】
+        // .ksceneはSSR・TAAを自分で指定できる(ApplyLoadedScene参照。実例として
+        // MontSaintMichel.ksceneはどちらも明示的に有効化している)。静的なDefaults::へ戻すと
+        // 「高にしたらシーンが要求した反射が消える」ことになる。m_SceneDefaultReflectionModeが
+        // UIの右クリック(既定値へ戻す)に対して同じ問題を解いており、プリセットもそれに倣う
+        struct QualitySettings
+        {
+            ReflectionMode Reflection = ReflectionMode::Off;
+            bool PlanarReflectionEnabled = Defaults::PlanarReflectionEnabled;
+            float PlanarReflectionResolutionScale = Defaults::PlanarReflectionResolutionScale;
+            bool CloudVolumetric = Defaults::CloudVolumetric;
+            bool CirrusEnabled = Defaults::CirrusEnabled;
+            bool StarsEnabled = Defaults::StarsEnabled;
+            bool TAAEnabled = Defaults::TAAEnabled;
+            bool BloomEnabled = Defaults::BloomEnabled;
+            bool ScreenSpaceShadowEnabled = Defaults::ScreenSpaceShadowEnabled;
+            int32_t DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
+        };
+
+        // 現在の各メンバから上記の一式を読み出す
+        QualitySettings CaptureQualitySettings() const;
+        // 一式を各メンバへ書き戻す。平面反射の解像度倍率だけはレンダーターゲットの作り直しを
+        // 伴うため直接代入せず、RequestPlanarReflectionResolutionScale()経由で要求する
+        void ApplyQualitySettings(const QualitySettings& settings);
+        // プリセットを適用する(SystemPanel = Renderスレッドから呼ばれる)
+        void ApplyQualityPreset(QualityPreset preset);
+
+        // シーンを読み込んだ直後の値。ApplyLoadedSceneが控え、プリセット「高」が戻る先になる
+        QualitySettings m_SceneDefaultQuality;
+        // 最後に適用したプリセット。UIのComboの表示位置に使う。
+        // 【現在の状態を表すものではない】プリセットを適用した後に個別のつまみを動かしても
+        // ここは追従しない(全つまみの変更を捕まえる仕掛けを持たないため)。
+        // Comboは「今どれか」ではなく「どれを一括適用するか」の選択として読むこと
+        QualityPreset m_QualityPreset = QualityPreset::High;
+
         // 現在描画しているシーン。ApplyLoadedScene(Renderスレッド)だけが差し替え、
         // Render()とUIパネル(いずれもRenderスレッド)だけが読む。つまりRenderスレッド専有の状態で、
         // ミューテックスによる保護は不要(LoadSceneがUpdateスレッドから直接書き換える構成だと

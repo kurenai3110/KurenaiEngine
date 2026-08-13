@@ -2837,6 +2837,85 @@ namespace Kurenai
         m_PlanarReflectionResolutionDirty = true;
     }
 
+    KurenaiEngine3D::QualitySettings KurenaiEngine3D::CaptureQualitySettings() const
+    {
+        QualitySettings settings;
+        settings.Reflection = m_ReflectionMode;
+        settings.PlanarReflectionEnabled = m_PlanarReflectionEnabled;
+        settings.PlanarReflectionResolutionScale = m_PlanarReflectionResolutionScale;
+        settings.CloudVolumetric = m_CloudVolumetric;
+        settings.CirrusEnabled = m_CirrusEnabled;
+        settings.StarsEnabled = m_StarsEnabled;
+        settings.TAAEnabled = m_TAAEnabled;
+        settings.BloomEnabled = m_BloomEnabled;
+        settings.ScreenSpaceShadowEnabled = m_ScreenSpaceShadowEnabled;
+        settings.DDGIProbesPerFrame = m_DDGIProbesPerFrame;
+        return settings;
+    }
+
+    void KurenaiEngine3D::ApplyQualitySettings(const QualitySettings& settings)
+    {
+        m_ReflectionMode = settings.Reflection;
+        m_PlanarReflectionEnabled = settings.PlanarReflectionEnabled;
+        m_CloudVolumetric = settings.CloudVolumetric;
+        m_CirrusEnabled = settings.CirrusEnabled;
+        m_StarsEnabled = settings.StarsEnabled;
+        m_TAAEnabled = settings.TAAEnabled;
+        m_BloomEnabled = settings.BloomEnabled;
+        m_ScreenSpaceShadowEnabled = settings.ScreenSpaceShadowEnabled;
+        m_DDGIProbesPerFrame = settings.DDGIProbesPerFrame;
+
+        // 平面反射の解像度倍率だけはレンダーターゲットの作り直しを伴う。GPUがまだ参照している
+        // 可能性があるためここでは直接代入せず、要求として積んでRender()の先頭で反映させる
+        // (UI関数の中で直接リソースを作り直さない、という既存の作法に合わせる)
+        RequestPlanarReflectionResolutionScale(settings.PlanarReflectionResolutionScale);
+    }
+
+    void KurenaiEngine3D::ApplyQualityPreset(QualityPreset preset)
+    {
+        m_QualityPreset = preset;
+
+        // 「高」はシーンを読み込んだ直後の状態へ戻す(QualitySettingsのコメント参照)。
+        // 静的な既定へ戻すと、SSRやTAAを自分で指定しているシーンの意図を壊す
+        if (preset == QualityPreset::High)
+        {
+            ApplyQualitySettings(m_SceneDefaultQuality);
+            Core::Logger::Info("KurenaiEngine3D", "品質プリセット「高」を適用しました(シーン読み込み直後の状態へ戻しました)");
+            return;
+        }
+
+        // 「低」「中」はシーン既定を出発点にして、そこから重い項目だけを落とす。
+        // シーンが元から無効にしているものを勝手に有効化しないよう、有効化は一切行わない
+        QualitySettings settings = m_SceneDefaultQuality;
+
+        // 実測でGIVolumeを持つシーンの最大負荷(40〜47ms、フレームの約4割)。
+        // 1プローブにつきシーンを6回描くため、この値にほぼ比例する
+        settings.DDGIProbesPerFrame = (preset == QualityPreset::Low) ? 2 : 4;
+        // 実測31ms(水面のあるシーン)。低・中とも切る
+        settings.Reflection = ReflectionMode::Off;
+        // ボリュメトリック積雲は実測で約10ms。手続き雲(平面レイヤー)自体は残す
+        settings.CloudVolumetric = false;
+        settings.TAAEnabled = false;
+        settings.BloomEnabled = false;
+        settings.ScreenSpaceShadowEnabled = false;
+
+        if (preset == QualityPreset::Low)
+        {
+            settings.PlanarReflectionEnabled = false;
+            settings.CirrusEnabled = false;
+            settings.StarsEnabled = false;
+        }
+        // 平面反射は残す場合でも解像度を落とす。1.0を超える指定は
+        // RequestPlanarReflectionResolutionScaleが弾くため、下げる方向のみで安全
+        settings.PlanarReflectionResolutionScale =
+            std::min(m_SceneDefaultQuality.PlanarReflectionResolutionScale, 0.25f);
+
+        ApplyQualitySettings(settings);
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("品質プリセット「") + (preset == QualityPreset::Low ? "低" : "中") + "」を適用しました");
+    }
+
     void KurenaiEngine3D::RequestSceneLoad(size_t sceneIndex)
     {
         if (sceneIndex >= m_SceneFilePaths.size())
@@ -3390,6 +3469,14 @@ namespace Kurenai
         // (2)手動の再読み込み直後に「変更あり」と誤検出して延々と再読み込みし続ける
         m_WatchedSceneWriteTime = GetCurrentSceneFileWriteTime();
         m_SceneReloadRejectedWriteTime = 0;
+
+        // 品質プリセット「高」が戻る先を、いまの状態(= .ksceneの指定をすべて反映し終えた状態)で
+        // 控える。【この関数内のm_Scene.Has〜による上書きより後で呼ぶこと】先に控えると
+        // シーンがSSR/TAA/ブルーム/星を指定していても、エンジンの既定を控えることになる。
+        // シーンを切り替えたらプリセットの選択も「高」へ戻す(新しいシーンに対して前のシーンで
+        // 選んだ「低」が適用されたままになるわけではなく、実際に高相当の状態になっているため)
+        m_SceneDefaultQuality = CaptureQualitySettings();
+        m_QualityPreset = QualityPreset::High;
 
         // 初期カメラとウィンドウタイトルはUpdateスレッドが適用する。m_Cameraの書き込み手を
         // 1スレッドに保ち、ウィンドウタイトルもウィンドウを所有するスレッドから設定するため

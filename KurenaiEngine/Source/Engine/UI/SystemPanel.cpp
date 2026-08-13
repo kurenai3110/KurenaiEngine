@@ -27,6 +27,10 @@ namespace Kurenai::UI
         {
             DrawDisplaySection();
         }
+        if (ImGui::CollapsingHeader("品質プリセット###QualityPreset", ImGuiTreeNodeFlags_DefaultOpen))
+        {
+            DrawQualityPresetSection();
+        }
         if (ImGui::CollapsingHeader("解像度###Resolution", ImGuiTreeNodeFlags_DefaultOpen))
         {
             DrawResolutionSection();
@@ -91,6 +95,44 @@ namespace Kurenai::UI
             Defaults::FrameStatsLoggingEnabled,
             "FPS・CPU/GPUフレーム時間を1秒ごとにログファイルへ書き出す。"
             "このパネルの表示は実行中しか見えないため、後から実行同士を比較するにはこちらを使う");
+
+        EndParamGroup();
+    }
+
+    void SystemPanel::DrawQualityPresetSection()
+    {
+        ImGui::TextWrapped(
+            "重い設定をまとめて振る。押した時点で一括適用され、その後は「レンダリング」"
+            "「ポストプロセス」パネルで個別に上書きしてよい"
+            "(個別に変えてもこの選択の表示は追従しない)。"
+            "「高」はシーンファイルが指定した状態へ戻す");
+
+        BeginParamGroup();
+
+        // 表示名と値の並びは必ず一致させること(目標フレームレートのComboと同じ作法)
+        static const char* kPresetNames[] = { "低", "中", "高" };
+        static const KurenaiEngine3D::QualityPreset kPresetValues[] =
+        {
+            KurenaiEngine3D::QualityPreset::Low,
+            KurenaiEngine3D::QualityPreset::Medium,
+            KurenaiEngine3D::QualityPreset::High,
+        };
+        static_assert(IM_ARRAYSIZE(kPresetNames) == IM_ARRAYSIZE(kPresetValues), "表示名と値の並びを一致させること");
+
+        int presetIndex = static_cast<int>(m_Engine.m_QualityPreset);
+        if (ComboEx(
+                "品質###QualityPresetSelect", &presetIndex, kPresetNames, IM_ARRAYSIZE(kPresetNames),
+                static_cast<int>(KurenaiEngine3D::QualityPreset::High),
+                "低: DDGIのプローブ更新を2個/フレームへ、反射(SSR)・平面反射・ボリュメトリック積雲・"
+                "巻雲・星・TAA・ブルーム・スクリーンスペースシャドウを無効化\n"
+                "中: DDGIを4個/フレームへ、反射(SSR)・ボリュメトリック積雲・TAA・ブルーム・"
+                "スクリーンスペースシャドウを無効化(平面反射は1/4解像度で残す)\n"
+                "高: シーンを読み込んだ直後の状態へ戻す\n\n"
+                "シャドウは実測で常に1ms未満だったためどの段でも触らない。"
+                "内部レンダー解像度も変えない(下の「解像度」で別に指定する)"))
+        {
+            m_Engine.ApplyQualityPreset(kPresetValues[presetIndex]);
+        }
 
         EndParamGroup();
     }
