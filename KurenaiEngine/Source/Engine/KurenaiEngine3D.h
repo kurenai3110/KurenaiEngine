@@ -671,6 +671,22 @@ namespace Kurenai
         int32_t m_RTShadowSampleCount = Defaults::RTShadowSampleCount;
         float m_RTShadowSunAngularRadiusDegrees = Defaults::RTShadowSunAngularRadiusDegrees;
 
+        // --- 雲(低解像度の専用パス) ---
+        // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを
+        // 内部レンダー解像度の1/2(面積で1/4)で評価し、「透過率 + 事前乗算済みの散乱光」を書く。
+        // Lightingパスの背景分岐がこれをバイリニアで引いて
+        // SkyColorWithoutClouds(rayDir) * a + rgb を合成する。
+        // 分離の根拠と、太陽・星がフル解像度のまま保たれる理由はShaders/3D/SkyCloud.hlsl冒頭を参照
+        std::unique_ptr<RHI::IRHIShader> m_SkyCloudVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_SkyCloudPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SkyCloudPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_SkyCloudTexture;
+        // m_SkyCloudTextureの実寸(内部レンダー解像度を割った後の値。奇数解像度の切り捨てと
+        // 最低1pxの下限があるため、割り算をその場でやり直さずここへ保存する)。
+        // パスのビューポート指定に使う
+        uint32_t m_SkyCloudWidth = 0;
+        uint32_t m_SkyCloudHeight = 0;
+
         // --- 大気遠近(height fog / aerial perspective) ---
         // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
         // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl

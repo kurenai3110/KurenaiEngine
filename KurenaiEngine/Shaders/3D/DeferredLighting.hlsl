@@ -11,15 +11,15 @@
 // 空モデル(Perez分布)の共有ヘッダー。背景画素をSkyGenerate.hlslのキューブマップと
 // 同じ関数・同じパラメータで画面解像度評価するために使う。PIを定義しないため、
 // このファイルのPI定義(直後)より前でも後でもインクルード順は問題ない
-// ボリュメトリック積雲が引く3Dノイズのレジスタ。Sky.hlsliはcbufferにもレジスタにも
-// 依存しない方針なので、DDGI.hlsliと同じくインクルードする側がマクロで指定する。
-// 定義しないシェーダー(SkyGenerate/AerialPerspective/PlanarReflection)ではボリュームの
-// 経路がコンパイルされず、従来の平面の経路だけが残る
 // SkyView LUT。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
 // SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
 #define KURENAI_SKYVIEW_REGISTER t20
-#define KURENAI_CLOUD_SHAPE_REGISTER t18
-#define KURENAI_CLOUD_DETAIL_REGISTER t19
+// 【雲の3Dノイズ(KURENAI_CLOUD_SHAPE/DETAIL_REGISTER)をここで定義しない理由】
+// このシェーダーは雲を自分で評価しない。雲はSkyCloud.hlsl(低解像度の専用パス)が評価し、
+// 結果を「透過率 + 事前乗算済み散乱光」としてSkyCloudTexture(t18)から受け取る(PSMain参照)。
+// マクロを定義しないことでSky.hlsli側の3Dテクスチャ宣言が消え、t18/t19が空く。
+// このシェーダーはt0〜t20を使い切っている(RHIのkTextureSlotCount=21)ため、
+// この2枠の解放がそのままSkyCloudTextureの置き場所になっている
 #include "Sky.hlsli"
 
 static const float PI = 3.14159265359f;
@@ -164,6 +164,9 @@ Texture2D BRDFLUTTexture : register(t10);
 // SkyIntegrate.hlslが書いた空パラメータ。ティント4本と正規化済みの天頂輝度が入る。
 // t11を使う(t17はbent normal(34章)、反射プローブは鏡面専任で拡散側のスロットを持たない)
 StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t11);
+// SkyCloud.hlsl(低解像度の雲パス)の出力。rgb=事前乗算済みの散乱光、a=透過率。
+// 雲の3Dノイズを自前で引かなくなったことで空いたt18に置いている(このファイル冒頭のコメント参照)
+Texture2D SkyCloudTexture : register(t18);
 
 // グローバルIBLの拡散イラディアンス(t8)・プリフィルタ済み鏡面(t9)・プローブのプリフィルタ済み
 // 鏡面キューブマップ配列(t12)・プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・
@@ -349,7 +352,16 @@ float4 PSMain(PSInput input) : SV_TARGET
         if (SkyParams.y > 0.5f)
         {
             const SkyParameters skyParams = MakeSkyParameters();
-            skyColor = SkyColor(rayDir, skyParams);
+            // 雲を含まない空(SkyView LUT + 星)はここでフル解像度のまま評価する。
+            // 太陽・星のような高周波成分がこちら側にあるため、雲の低解像度化で
+            // にじむことがない
+            const float3 clearColor = SkyColorWithoutClouds(rayDir, skyParams);
+            // 雲はSkyCloudパスが低解像度で評価済み。事前乗算のover合成なので、
+            // バイリニアで引き伸ばしてもこの合成の形は変わらない(SkyCloud.hlsl冒頭参照)。
+            // 雲が無い画素には(0,1)が入っており、clearColor*1.0+0.0はIEEE754で
+            // 厳密にclearColorと一致する
+            const float4 cloud = SkyCloudTexture.Sample(ColorSampler, input.UV);
+            skyColor = clearColor * cloud.a + cloud.rgb;
         }
         else
         {

@@ -1346,7 +1346,17 @@ float3 EvaluateStarfield(float3 dir, SkyParameters params)
     return result * params.StarsIntensity * params.ZenithLuminance * horizonFade;
 }
 
-float3 SkyColor(float3 dir, SkyParameters params)
+// 雲を掛ける前の空(晴天の空 + 星 + 地平線より下のフェード)。
+//
+// 【なぜSkyColorから切り出したか】雲(EvaluateCloudLayer)は背景1画素あたり値ノイズを
+// 数十回評価するため極端に重く、Intel UHD Graphics 620 / 1280x720 の実測では
+// 積雲14.5ms + 巻雲1.3msとGPUフレーム時間の半分以上を占めていた。一方この関数は
+// SkyView LUTの1サンプルが主で桁違いに軽い。SkyColorの合成が
+// 「clearColor * transmittance + scatteredLight」という事前乗算のover合成になっている
+// おかげで、**雲だけを低解像度で評価して合成しても数学的に厳密**であり、太陽・星のような
+// 高周波成分はこちら側に残るのでフル解像度のまま保てる。
+// この分離を使うのがSkyCloud.hlsl(低解像度の雲パス)とDeferredLighting.hlsl(合成側)。
+float3 SkyColorWithoutClouds(float3 dir, SkyParameters params)
 {
     if (dir.y >= kGroundFadeStartY)
     {
@@ -1358,65 +1368,11 @@ float3 SkyColor(float3 dir, SkyParameters params)
         {
             clearColor += EvaluateStarfield(dir, params);
         }
-
-        // (h) 早期脱出。積雲・巻雲どちらの被覆率も0、または地平線より下(dir.y<=0、(e)節)では
-        // 雲の計算を一切行わずclearColorをそのまま返す。判断C(被覆率0のときは雲を
-        // 持たない空と画素まで一致すること)の担保の1つめはここ——雲側の計算(EvaluateCloudLayer)は
-        // 一度も呼ばれず、返す値もSkyColorUpperの結果そのままなので数値は変わりようがない
-        if ((params.CloudCoverage <= 0.0f && params.CirrusCoverage <= 0.0f) || dir.y <= 0.0f)
-        {
-            return clearColor;
-        }
-
-        // 雲へ掛ける大気遠近。層に依らない値なのでここで1回だけ組み立て、両層へ渡す。
-        // 【上の早期脱出より後に置く】判断Cの「雲が無いときは掛け算・足し算を1つも増やさない」に
-        // 揃えるため。被覆率0の画素はここへ到達せず、この組み立て自体が行われない
-        const CloudFogParams fog = MakeCloudFogParams(params);
-
-        // 積雲(下層)。被覆率0でもここへ来る場合があるため(巻雲だけの空)、個別に早期脱出する。
-        // transmittance=1.0/scatteredLight=0の初期値は「雲が無い」ことを表す中立元(下のclearColor*1+0と
-        // 一致する値)であり、CloudCoverage<=0のときEvaluateCloudLayerを呼ばずこの初期値のまま使う
-        float cumulusTransmittance = 1.0f;
-        float3 cumulusScatter = float3(0.0f, 0.0f, 0.0f);
-        if (params.CloudCoverage > 0.0f)
-        {
-            EvaluateCloudLayer(
-                dir, MakeCumulusLayerParams(params), params.SunDirection, params.ZenithLuminance,
-                params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith, fog,
-                cumulusTransmittance, cumulusScatter);
-        }
-
-        // 【判断Cの担保の2つめ】巻雲の被覆率が0のとき、EvaluateCloudLayer(巻雲側)を一度も呼ばず、
-        // 積雲だけの式(clearColor * T_cumulus + S_cumulus)を
-        // そのまま通す。掛け算・足し算を1つも増やさないことで、浮動小数の最下位ビットまで一致させる
-        if (params.CirrusCoverage <= 0.0f)
-        {
-            return clearColor * cumulusTransmittance + cumulusScatter;
-        }
-
-        // 巻雲(上層)を評価する。巻雲は積雲より高い位置にあるため、巻雲から届く散乱光は
-        // 手前(視点側)にある積雲でさらに減光される——これを表すのが下のcumulusTransmittanceを
-        // 掛ける項。掛けないと積雲に隠れるはずの巻雲が透けて見えてしまう
-        float cirrusTransmittance;
-        float3 cirrusScatter;
-        EvaluateCloudLayer(
-            dir, MakeCirrusLayerParams(params), params.SunDirection, params.ZenithLuminance,
-            params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith, fog,
-            cirrusTransmittance, cirrusScatter);
-
-        // (g) 2層合成: 高い層(巻雲)から手前(積雲)へ。
-        //   透過率 = T_cirrus * T_cumulus (両層を貫く視線の透過率なので積)
-        //   散乱光 = S_cumulus + S_cirrus * T_cumulus (巻雲の光は積雲を透過して初めて届く)
-        // lerpではなくこの形にするのは、雲の隙間からのぞく青空をそのまま残すため
-        // (lerpだと被覆率で単純に混ぜてしまい、隙間の青空まで雲色へ寄ってしまう)。
-        // 地平線より下(この関数の後続のelse分岐)には雲を一切掛けない
-        const float transmittance = cirrusTransmittance * cumulusTransmittance;
-        const float3 scatteredLight = cumulusScatter + cirrusScatter * cumulusTransmittance;
-        return clearColor * transmittance + scatteredLight;
+        return clearColor;
     }
 
     // 水平線より下: プラトー色(kGroundFadeStartYの高さへ射影した方向の空色)から接地色へフェード。
-    // (g) 雲は掛けない——ここはSkyColorUpperを直接呼ぶだけで、雲を合成する上のif内へは入らない
+    // (g) 雲は掛けない——SkyCloudLayersがここでは中立元(透過率1・散乱光0)を返す
     float3 plateauDir = dir;
     plateauDir.y = kGroundFadeStartY;
     plateauDir = normalize(plateauDir);
@@ -1425,6 +1381,86 @@ float3 SkyColor(float3 dir, SkyParameters params)
     const float3 groundColor = params.ZenithLuminance * params.GroundTint;
     const float groundT = saturate((dir.y - kGroundFadeStartY) / (kGroundFadeEndY - kGroundFadeStartY));
     return lerp(plateauColor, groundColor, groundT);
+}
+
+// 雲層(積雲+巻雲)だけを評価し、事前乗算のover合成に使う透過率と散乱光を返す。
+// 呼び出し側は SkyColorWithoutClouds(dir) * outTransmittance + outScatteredLight で合成する。
+//
+// 雲が無い場合(被覆率0・地平線より下・地平線フェード範囲外)は中立元
+// (透過率1.0 / 散乱光0)を返す。合成式は x*1.0 + 0.0 となりIEEE754で厳密にxと一致するため、
+// 分割前の「雲が無いときは雲を持たない空と画素まで一致する」(判断C)は維持される。
+void SkyCloudLayers(float3 dir, SkyParameters params, out float outTransmittance, out float3 outScatteredLight)
+{
+    outTransmittance = 1.0f;
+    outScatteredLight = float3(0.0f, 0.0f, 0.0f);
+
+    // (h) 早期脱出。積雲・巻雲どちらの被覆率も0、または地平線より下(dir.y<=0、(e)節)では
+    // 雲の計算を一切行わない。判断Cの担保の1つめ——雲側の計算(EvaluateCloudLayer)は
+    // 一度も呼ばれず、中立元がそのまま返る
+    if (dir.y < kGroundFadeStartY)
+    {
+        return;
+    }
+    if ((params.CloudCoverage <= 0.0f && params.CirrusCoverage <= 0.0f) || dir.y <= 0.0f)
+    {
+        return;
+    }
+
+    // 雲へ掛ける大気遠近。層に依らない値なのでここで1回だけ組み立て、両層へ渡す。
+    // 【上の早期脱出より後に置く】判断Cの「雲が無いときは掛け算・足し算を1つも増やさない」に
+    // 揃えるため。被覆率0の画素はここへ到達せず、この組み立て自体が行われない
+    const CloudFogParams fog = MakeCloudFogParams(params);
+
+    // 積雲(下層)。被覆率0でもここへ来る場合があるため(巻雲だけの空)、個別に早期脱出する。
+    // transmittance=1.0/scatteredLight=0の初期値は「雲が無い」ことを表す中立元であり、
+    // CloudCoverage<=0のときEvaluateCloudLayerを呼ばずこの初期値のまま使う
+    float cumulusTransmittance = 1.0f;
+    float3 cumulusScatter = float3(0.0f, 0.0f, 0.0f);
+    if (params.CloudCoverage > 0.0f)
+    {
+        EvaluateCloudLayer(
+            dir, MakeCumulusLayerParams(params), params.SunDirection, params.ZenithLuminance,
+            params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith, fog,
+            cumulusTransmittance, cumulusScatter);
+    }
+
+    // 【判断Cの担保の2つめ】巻雲の被覆率が0のとき、EvaluateCloudLayer(巻雲側)を一度も呼ばず、
+    // 積雲だけの結果をそのまま返す。掛け算・足し算を1つも増やさないことで、
+    // 浮動小数の最下位ビットまで一致させる
+    if (params.CirrusCoverage <= 0.0f)
+    {
+        outTransmittance = cumulusTransmittance;
+        outScatteredLight = cumulusScatter;
+        return;
+    }
+
+    // 巻雲(上層)を評価する。巻雲は積雲より高い位置にあるため、巻雲から届く散乱光は
+    // 手前(視点側)にある積雲でさらに減光される——これを表すのが下のcumulusTransmittanceを
+    // 掛ける項。掛けないと積雲に隠れるはずの巻雲が透けて見えてしまう
+    float cirrusTransmittance;
+    float3 cirrusScatter;
+    EvaluateCloudLayer(
+        dir, MakeCirrusLayerParams(params), params.SunDirection, params.ZenithLuminance,
+        params.SunToSkyIlluminanceRatio, params.SkyIlluminanceOverZenith, fog,
+        cirrusTransmittance, cirrusScatter);
+
+    // (g) 2層合成: 高い層(巻雲)から手前(積雲)へ。
+    //   透過率 = T_cirrus * T_cumulus (両層を貫く視線の透過率なので積)
+    //   散乱光 = S_cumulus + S_cirrus * T_cumulus (巻雲の光は積雲を透過して初めて届く)
+    // lerpではなくこの形にするのは、雲の隙間からのぞく青空をそのまま残すため
+    // (lerpだと被覆率で単純に混ぜてしまい、隙間の青空まで雲色へ寄ってしまう)
+    outTransmittance = cirrusTransmittance * cumulusTransmittance;
+    outScatteredLight = cumulusScatter + cirrusScatter * cumulusTransmittance;
+}
+
+// 空の色(雲を含む)。分割前と同じ結果を返すため、既存の呼び出し側
+// (SkyGenerate / SSR / PlanarReflection)はそのまま使える
+float3 SkyColor(float3 dir, SkyParameters params)
+{
+    float transmittance;
+    float3 scatteredLight;
+    SkyCloudLayers(dir, params, transmittance, scatteredLight);
+    return SkyColorWithoutClouds(dir, params) * transmittance + scatteredLight;
 }
 
 #endif // KURENAI_SKY_HLSLI

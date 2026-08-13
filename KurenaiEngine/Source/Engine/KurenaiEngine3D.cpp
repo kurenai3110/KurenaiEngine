@@ -1522,6 +1522,28 @@ namespace Kurenai
         aerialPerspectivePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
         m_AerialPerspectivePipelineState = m_Device->CreatePipelineState(aerialPerspectivePipelineDesc);
 
+        // 雲パス(頂点バッファなしのフルスクリーン三角形。積雲と巻雲だけを1/2解像度で評価し、
+        // 透過率と事前乗算済みの散乱光を書く)。専用のb1定数バッファは持たない
+        // (パラメータはFrameConstants末尾のCloudParams0-3等に入っているため)
+        RHI::ShaderDesc skyCloudVsDesc;
+        skyCloudVsDesc.Stage = RHI::ShaderStage::Vertex;
+        skyCloudVsDesc.FilePath = shaderDirectory + L"SkyCloud.hlsl";
+        skyCloudVsDesc.EntryPoint = "VSMain";
+        m_SkyCloudVertexShader = m_Device->CreateShader(skyCloudVsDesc);
+
+        RHI::ShaderDesc skyCloudPsDesc;
+        skyCloudPsDesc.Stage = RHI::ShaderStage::Pixel;
+        skyCloudPsDesc.FilePath = shaderDirectory + L"SkyCloud.hlsl";
+        skyCloudPsDesc.EntryPoint = "PSMain";
+        m_SkyCloudPixelShader = m_Device->CreateShader(skyCloudPsDesc);
+
+        RHI::PipelineStateDesc skyCloudPipelineDesc;
+        skyCloudPipelineDesc.VertexShader = m_SkyCloudVertexShader.get();
+        skyCloudPipelineDesc.PixelShader = m_SkyCloudPixelShader.get();
+        skyCloudPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        skyCloudPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        m_SkyCloudPipelineState = m_Device->CreatePipelineState(skyCloudPipelineDesc);
+
         // RT反射パス(コンピュートシェーダー。TLASへ鏡面レイを撃ち反射色を求める)。
         // RTReflection.hlslはRayQueryを含むためシェーダーモデル6.5でしかコンパイルできない。
         // 非対応環境ではシェーダー自体を作らず、UIからもRaytracedを選べないようにする
@@ -2602,6 +2624,14 @@ namespace Kurenai
             m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
             // 大気遠近パスの出力。m_SSRTextureと同じ作法(HDR、R16G16B16A16_Float)で永続確保する
             m_AerialPerspectiveTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            // 雲パスの出力(rgb=事前乗算済みの散乱光、a=透過率)。内部レンダー解像度の1/2で持つ。
+            // 【R16G16B16A16_Float固定にする理由】平面反射(CreatePlanarReflectionTargets)と同じで、
+            // 散乱光はHDRの輝度をそのまま持つためLegacy8bitでは飽和して雲が白く潰れる。
+            // また透過率は乗算に使うので8bitの量子化がそのままバンディングになる
+            m_SkyCloudWidth = std::max(1u, width / 2);
+            m_SkyCloudHeight = std::max(1u, height / 2);
+            m_SkyCloudTexture =
+                m_Device->CreateRenderTexture(m_SkyCloudWidth, m_SkyCloudHeight, RHI::Format::R16G16B16A16_Float);
             // RT反射はコンピュートシェーダーがUAVで書くため、レンダーターゲットではなくUAVテクスチャを作る。
             // 非対応環境ではパス自体が実行されないので確保しない
             if (m_RaytracingAvailable)
@@ -6520,6 +6550,47 @@ namespace Kurenai
         RHI::IRHITexture* const activeAOTexture = GetActiveAOTexture();
         RHI::IRHITexture* const activeAORawTexture = GetActiveAORawTexture();
 
+        // --- 雲パス: 積雲と巻雲だけを1/2解像度で評価し、透過率と事前乗算済みの散乱光を書く ---
+        //
+        // 【なぜ分離したか】雲の評価は背景1画素あたり値ノイズを数十回踏むため極端に重く、
+        // Intel UHD Graphics 620 / 1280x720 / DX11 / Release の実測ではLightingパス19.4msのうち
+        // 積雲14.5ms + 巻雲1.3msを占めていた。雲は空間周波数が低いので低解像度で評価しても
+        // 見た目の劣化が小さく、面積1/4で評価すればそのぶん素直に安くなる。
+        // 太陽・星のような高周波成分はLighting側(SkyColorWithoutClouds)に残るためにじまない。
+        // 合成が事前乗算のover合成であることを使った厳密な分離である(SkyCloud.hlsl冒頭参照)。
+        //
+        // 【手続き空が無効なら登録しない】.ksceneでDDSスカイボックスを使う場合、Lightingパスは
+        // キューブマップをサンプルする経路(SkyParams.y <= 0.5)へ入り、この結果を一切読まない
+        const bool skyCloudPassRuns = m_SkyCloudTexture && (m_SkyAnalyticBackground && usingProceduralSky);
+        if (skyCloudPassRuns)
+        {
+            RHI::Viewport skyCloudViewport;
+            skyCloudViewport.Width = static_cast<float>(m_SkyCloudWidth);
+            skyCloudViewport.Height = static_cast<float>(m_SkyCloudHeight);
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "SkyCloud",
+                // SkyViewBakeより後に順序付けさせる(SkyCloudLayers自体はLUTを引かないが、
+                // Sky.hlsliの宣言上バインドが必要で、パスの前後関係も揃えておく)
+                .Reads = { m_SkyViewLUT.get(), m_CloudShapeNoiseTexture.get(), m_CloudDetailNoiseTexture.get() },
+                .RenderTargets = { m_SkyCloudTexture.get() },
+                // 空パラメータ。SkyIntegrateパスより後に順序付けさせる
+                .BufferReads = { m_SkyParametersBuffer.get() },
+                .Execute = [this, skyCloudViewport](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetViewport(skyCloudViewport);
+                    cmd->SetPipelineState(m_SkyCloudPipelineState.get());
+                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->SetTexture(0, m_SkyViewLUT.get());
+                    cmd->SetTexture(1, m_CloudShapeNoiseTexture.get());
+                    cmd->SetTexture(2, m_CloudDetailNoiseTexture.get());
+                    cmd->SetShaderResourceBuffer(3, m_SkyParametersBuffer.get());
+                    cmd->Draw(3, 0);
+                },
+            });
+        }
+
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Lighting",
@@ -6536,6 +6607,9 @@ namespace Kurenai
                 // 大気散乱のSkyView LUT。背景の空をここから引くため、
                 // SkyViewBakeパスより後に順序付けさせる
                 m_SkyViewLUT.get(),
+                // 低解像度で評価済みの雲。SkyCloudパスより後に順序付けさせるために挙げる
+                // (パスが登録されないフレームでは書き手が居ないので依存も張られない)
+                m_SkyCloudTexture.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
             // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
@@ -6576,10 +6650,13 @@ namespace Kurenai
                 cmd->SetShaderResourceBuffer(11, m_SkyParametersBuffer.get());
                 // bent normal(34章)
                 cmd->SetTexture(17, m_GBufferBentNormal.get());
-                // ボリュメトリック積雲の3Dノイズ。反射プローブ・DDGIと同じ理由で、
-                // 雲が無効なフレームでも常にバインドする(シェーダーが宣言しているリソースは
-                // 必ず埋める。SetPipelineStateが毎回ルート引数を無効化するため)
-                cmd->SetTexture(18, m_CloudShapeNoiseTexture.get());
+                // 低解像度で評価済みの雲(rgb=事前乗算済みの散乱光、a=透過率)。
+                // このシェーダーは雲を自前で評価しなくなったため、3Dノイズが使っていたt18を
+                // そのまま流用している(DeferredLighting.hlsl冒頭のコメント参照)
+                cmd->SetTexture(18, m_SkyCloudTexture.get());
+                // t19はこのシェーダーがもう宣言していない。ただしDX12のディスクリプタテーブルは
+                // 21スロットぶんをまとめてコピーするため、未初期化のスロットを残さないよう
+                // 有効なテクスチャを入れておく(反射プローブ・DDGIを常にバインドするのと同じ理由)
                 cmd->SetTexture(19, m_CloudDetailNoiseTexture.get());
                 // 大気散乱のSkyView LUT。日中の空の色はここから引く
                 cmd->SetTexture(20, m_SkyViewLUT.get());
