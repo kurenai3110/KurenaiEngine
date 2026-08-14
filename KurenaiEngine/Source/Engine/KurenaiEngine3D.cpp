@@ -4234,6 +4234,37 @@ namespace Kurenai
             }
         }
 
+        // CPU側の内訳も同じ形で残す。GIVolumeを持つシーンではCPUフレーム時間が24〜28msあり、
+        // 60fpsの予算(16.7ms)をCPU単独で超えている。GPUの内訳だけでは、その時間が
+        // どのパスのドローコール発行に消えているのかが分からない
+        {
+            std::vector<Core::CPUTimingResult> cpuPasses = m_CPUProfiler.GetResults();
+            std::sort(
+                cpuPasses.begin(), cpuPasses.end(), [](const auto& a, const auto& b) { return a.TimeMs > b.TimeMs; });
+
+            std::string breakdown;
+            for (const auto& pass : cpuPasses)
+            {
+                // GPU側と同じ理由で0.05ms未満は落とす
+                if (pass.TimeMs < 0.05f)
+                {
+                    break;
+                }
+                char passText[64];
+                std::snprintf(passText, sizeof(passText), "%s %.2f", pass.Name.c_str(), pass.TimeMs);
+                if (!breakdown.empty())
+                {
+                    breakdown += " / ";
+                }
+                breakdown += passText;
+            }
+
+            if (!breakdown.empty())
+            {
+                Core::Logger::Info("Perf", "  CPU内訳[ms]: " + breakdown);
+            }
+        }
+
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
         m_FrameStatsGPUTimeSumMs = 0.0;
