@@ -284,6 +284,12 @@ namespace Kurenai::UI
             SliderFloatEx(
                 "SSAO 強度###SSAOPower", &m_Engine.m_SSAOPower, 0.1f, 4.0f, Defaults::SSAOPower, "%.3f", 0,
                 "遮蔽率にかける指数。大きいほど陰影が濃くなる");
+            SliderUIntEx(
+                "SSAO サンプル数###SSAOKernelSize", &m_Engine.m_SSAOKernelSize, 1, 16, Defaults::SSAOKernelSize,
+                "1画素あたり半球状に何点サンプリングするか。AOパスのコストはほぼこの数に比例する"
+                "(実測: 16→4でAOパスが5.82ms→2.22ms)。減らすほど遮蔽の推定は粗くなるが、"
+                "画素ごとにカーネルをランダム回転させたうえで後段の4x4ブラーで均すため、"
+                "最終画にどれだけ差が出るかはSSAO半径と間接光の強さ次第");
         }
         else if (m_Engine.m_AOTechnique == AOTechnique::Raytraced)
         {

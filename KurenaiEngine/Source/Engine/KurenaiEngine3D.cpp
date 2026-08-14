@@ -912,13 +912,14 @@ namespace Kurenai
             return levels;
         }
 
-        // SSAO.hlsl側のkSSAOKernelSizeと一致させる必要がある
-        constexpr uint32_t kSSAOKernelSize = 16;
+        // SSAO.hlsl側のkSSAOKernelSizeMaxと一致させる必要がある。
+        // 定数バッファに確保する数であって、実際に回す段数(m_SSAOKernelSize)ではない
+        constexpr uint32_t kSSAOKernelSizeMax = 16;
 
         struct alignas(16) SSAOConstants
         {
-            DirectX::XMFLOAT4 Samples[kSSAOKernelSize]; // タンジェント空間の半球カーネル
-            DirectX::XMFLOAT4 Params;                   // x: 半径, y: バイアス, z: 強さ(べき乗), w: 未使用
+            DirectX::XMFLOAT4 Samples[kSSAOKernelSizeMax]; // タンジェント空間の半球カーネル
+            DirectX::XMFLOAT4 Params;                      // x: 半径, y: バイアス, z: 強さ(べき乗), w: 使うサンプル数
         };
 
         // SSIL_VisibilityBitmask.hlsl側のcbuffer SSILConstantsと一致させる必要がある
@@ -1297,7 +1298,7 @@ namespace Kurenai
         // SSAO/SSIL/AOブラーのPSOは出力先(AO/GIバッファ)のフォーマットがバッファ精度に依存するため、
         // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
 
-        m_SSAOKernel = GenerateSSAOKernel(kSSAOKernelSize);
+        m_SSAOKernel = GenerateSSAOKernel(m_SSAOKernelSize);
 
         RHI::BufferDesc ssaoConstantBufferDesc;
         ssaoConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -2850,6 +2851,7 @@ namespace Kurenai
         settings.BloomEnabled = m_BloomEnabled;
         settings.ScreenSpaceShadowEnabled = m_ScreenSpaceShadowEnabled;
         settings.DDGIProbesPerFrame = m_DDGIProbesPerFrame;
+        settings.SSAOKernelSize = m_SSAOKernelSize;
         return settings;
     }
 
@@ -2864,6 +2866,8 @@ namespace Kurenai
         m_BloomEnabled = settings.BloomEnabled;
         m_ScreenSpaceShadowEnabled = settings.ScreenSpaceShadowEnabled;
         m_DDGIProbesPerFrame = settings.DDGIProbesPerFrame;
+        // カーネル自体の作り直しはSSAOパスの中で行う(段数が変わったことを見て作り直す)
+        m_SSAOKernelSize = settings.SSAOKernelSize;
 
         // 平面反射の解像度倍率だけはレンダーターゲットの作り直しを伴う。GPUがまだ参照している
         // 可能性があるためここでは直接代入せず、要求として積んでRender()の先頭で反映させる
@@ -2891,6 +2895,10 @@ namespace Kurenai
         // 実測でGIVolumeを持つシーンの最大負荷(40〜47ms、フレームの約4割)。
         // 1プローブにつきシーンを6回描くため、この値にほぼ比例する
         settings.DDGIProbesPerFrame = (preset == QualityPreset::Low) ? 2 : 4;
+        // 実測でジオメトリが画面を占めるシーンの4.8〜11.0ms。コストはほぼ段数に比例する。
+        // シーン既定より増やすことはしない(プリセットは落とす方向のみ)
+        settings.SSAOKernelSize = std::min(
+            m_SceneDefaultQuality.SSAOKernelSize, (preset == QualityPreset::Low) ? 4u : 8u);
         // 実測31ms(水面のあるシーン)。低・中とも切る
         settings.Reflection = ReflectionMode::Off;
         // ボリュメトリック積雲は実測で約10ms。手続き雲(平面レイヤー)自体は残す
@@ -6598,9 +6606,21 @@ namespace Kurenai
                         }
                         else
                         {
+                            // UIやプリセットで段数が変わったらカーネルを作り直す。
+                            // 先頭N本を流用してはいけない理由はm_SSAOKernelSizeのコメント参照。
+                            // 生成は16回のRNGだけなので毎フレーム比較しても問題にならない
+                            const uint32_t kernelSize =
+                                std::clamp(m_SSAOKernelSize, 1u, kSSAOKernelSizeMax);
+                            if (m_SSAOKernel.size() != kernelSize)
+                            {
+                                m_SSAOKernel = GenerateSSAOKernel(kernelSize);
+                            }
+
+                            // 使わない残りの要素は0のまま(シェーダはsampleCountまでしか読まない)
                             SSAOConstants ssaoConstants{};
                             std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
-                            ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
+                            ssaoConstants.Params = {
+                                m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, static_cast<float>(kernelSize) };
                             cmd->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
 
                             cmd->SetPipelineState(m_SSAOPipelineState.get());

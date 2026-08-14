@@ -490,6 +490,15 @@ namespace Kurenai
         std::vector<DirectX::XMFLOAT4> m_SSAOKernel;
         float m_SSAORadius = Defaults::SSAORadius;
         float m_SSAOPower = Defaults::SSAOPower;
+        // 1画素あたりのカーネルサンプル数。SSAOのコストはほぼこれに比例する
+        // (実測でAOパスはジオメトリが画面を占めるシーンで4.8〜11.0msあり、雲を分離した後の
+        //  最大の残りだった)。定数バッファの配列はkSSAOKernelSizeMax(16)で固定のまま、
+        // 実際に回す段数だけをSSAOConstants.Params.wでシェーダへ渡す。
+        //
+        // 【減らすときはカーネルを作り直す】GenerateSSAOKernelはi/kernelSizeで各サンプルの
+        // 長さを決めているため、16本用のカーネルの先頭N本を使うと原点付近の短いサンプルばかりが
+        // 残り、遠距離の遮蔽を拾わなくなる。必ずこの数で生成し直すこと(EnsureSSAOKernel)
+        uint32_t m_SSAOKernelSize = Defaults::SSAOKernelSize;
 
         // SSILパス(Visibility Bitmask): G-BufferのAlbedo/Normal/Depthから遮蔽率と間接拡散光を計算する
         std::unique_ptr<RHI::IRHIShader> m_SSILPixelShader;
@@ -1890,6 +1899,7 @@ namespace Kurenai
             bool BloomEnabled = Defaults::BloomEnabled;
             bool ScreenSpaceShadowEnabled = Defaults::ScreenSpaceShadowEnabled;
             int32_t DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
+            uint32_t SSAOKernelSize = Defaults::SSAOKernelSize;
         };
 
         // 現在の各メンバから上記の一式を読み出す

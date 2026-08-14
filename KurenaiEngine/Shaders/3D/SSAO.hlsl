@@ -7,7 +7,9 @@
 #include "Samplers.hlsli"
 
 static const float PI = 3.14159265359f;
-static const int kSSAOKernelSize = 16;
+// 定数バッファに確保するカーネルの最大数。実際に回す段数はParams.wで実行時に渡す
+// (品質プリセットから振れるようにするため。C++側のkSSAOKernelSizeMaxと一致させること)
+static const int kSSAOKernelSizeMax = 16;
 
 cbuffer FrameConstants : register(b0)
 {
@@ -29,8 +31,8 @@ cbuffer FrameConstants : register(b0)
 
 cbuffer SSAOConstants : register(b1)
 {
-    float4 Samples[kSSAOKernelSize]; // タンジェント空間の半球カーネル(xyz)。原点付近に偏らせてある
-    float4 Params;                   // x: 半径, y: バイアス, z: 強さ(べき乗), w: 未使用
+    float4 Samples[kSSAOKernelSizeMax]; // タンジェント空間の半球カーネル(xyz)。原点付近に偏らせてある
+    float4 Params;                      // x: 半径, y: バイアス, z: 強さ(べき乗), w: 実際に使うサンプル数
 };
 
 // PSMainではNormal(t0)/Depth(t1)、PSMainBlurではSSAO Raw(t0)をバインドして使い回す
@@ -98,9 +100,15 @@ float4 PSMain(PSInput input) : SV_TARGET
     const float bias = Params.y;
     const float power = Params.z;
 
+    // 段数は実行時に変わる(品質プリセット)。C++側が範囲内の値しか書かないが、
+    // 定数バッファの中身は保証できるものではないのでシェーダ側でも必ず丸める
+    const int sampleCount = clamp((int)Params.w, 1, kSSAOKernelSizeMax);
+
     float occlusion = 0.0f;
-    [unroll]
-    for (int i = 0; i < kSSAOKernelSize; ++i)
+    // 【[unroll]ではなく[loop]】可変回数のループは展開できない。
+    // 段数を固定していた頃は[unroll]で16回展開していた
+    [loop]
+    for (int i = 0; i < sampleCount; ++i)
     {
         float3 sampleVec = mul(Samples[i].xyz, tbn);
         float3 samplePos = viewPos + sampleVec * radius;
@@ -130,7 +138,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         occlusion += (sampleViewZ <= samplePos.z - bias ? 1.0f : 0.0f) * rangeCheck;
     }
 
-    float ao = saturate(1.0f - occlusion / float(kSSAOKernelSize));
+    float ao = saturate(1.0f - occlusion / float(sampleCount));
     ao = pow(ao, power);
     // SSAOは間接光を計算しないため、rgb(間接拡散光)は常に0、a(遮蔽率)のみを書き込む
     return float4(0.0f, 0.0f, 0.0f, ao);

@@ -24,6 +24,9 @@ namespace Kurenai::Defaults
     // 遮蔽率にかける指数。1.0は「求めた遮蔽率をそのまま使う」で、上げるほど遮蔽が濃くなる。
     // 素の遮蔽率を基準にしたいため既定は1.0
     inline constexpr float SSAOPower = 1.0f;
+    // 1画素あたりのカーネルサンプル数(1〜16)。上限はSSAO.hlslのkSSAOKernelSizeMaxと
+    // 定数バッファの配列長で決まっている。SSAOのコストはほぼこの数に比例する
+    inline constexpr uint32_t SSAOKernelSize = 16;
     inline constexpr float SSILRadius = 0.5f;
     inline constexpr float SSILThickness = 0.01f;
     inline constexpr float SSILIntensity = 2.0f;
