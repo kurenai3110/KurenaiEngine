@@ -1545,6 +1545,26 @@ namespace Kurenai
         skyCloudPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
         m_SkyCloudPipelineState = m_Device->CreatePipelineState(skyCloudPipelineDesc);
 
+        // DDGIの低解像度解決パス(雲パスと同じ作り。拡散イラディアンスとinsideWeightを書く)
+        RHI::ShaderDesc ddgiResolveVsDesc;
+        ddgiResolveVsDesc.Stage = RHI::ShaderStage::Vertex;
+        ddgiResolveVsDesc.FilePath = shaderDirectory + L"DDGIResolve.hlsl";
+        ddgiResolveVsDesc.EntryPoint = "VSMain";
+        m_DDGIResolveVertexShader = m_Device->CreateShader(ddgiResolveVsDesc);
+
+        RHI::ShaderDesc ddgiResolvePsDesc;
+        ddgiResolvePsDesc.Stage = RHI::ShaderStage::Pixel;
+        ddgiResolvePsDesc.FilePath = shaderDirectory + L"DDGIResolve.hlsl";
+        ddgiResolvePsDesc.EntryPoint = "PSMain";
+        m_DDGIResolvePixelShader = m_Device->CreateShader(ddgiResolvePsDesc);
+
+        RHI::PipelineStateDesc ddgiResolvePipelineDesc;
+        ddgiResolvePipelineDesc.VertexShader = m_DDGIResolveVertexShader.get();
+        ddgiResolvePipelineDesc.PixelShader = m_DDGIResolvePixelShader.get();
+        ddgiResolvePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        ddgiResolvePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        m_DDGIResolvePipelineState = m_Device->CreatePipelineState(ddgiResolvePipelineDesc);
+
         // RT反射パス(コンピュートシェーダー。TLASへ鏡面レイを撃ち反射色を求める)。
         // RTReflection.hlslはRayQueryを含むためシェーダーモデル6.5でしかコンパイルできない。
         // 非対応環境ではシェーダー自体を作らず、UIからもRaytracedを選べないようにする
@@ -2633,6 +2653,15 @@ namespace Kurenai
             m_SkyCloudHeight = std::max(1u, height / 2);
             m_SkyCloudTexture =
                 m_Device->CreateRenderTexture(m_SkyCloudWidth, m_SkyCloudHeight, RHI::Format::R16G16B16A16_Float);
+            // DDGIの低解像度解決パスの出力(rgb=イラディアンス、a=insideWeight)。雲と同じく1/2解像度。
+            // 【常に確保する】m_DDGIHalfResolutionが無効でもシェーダーのt19には何かを
+            // バインドしておく必要がある(DX12のディスクリプタテーブルを埋め切るため)。
+            // フォーマットを雲と揃えているのも同じ理由 ―― イラディアンスはHDRの物理量で、
+            // 8bitでは飽和と量子化がそのまま間接光のバンディングになる
+            m_DDGIResolveWidth = std::max(1u, width / 2);
+            m_DDGIResolveHeight = std::max(1u, height / 2);
+            m_DDGIResolveTexture = m_Device->CreateRenderTexture(
+                m_DDGIResolveWidth, m_DDGIResolveHeight, RHI::Format::R16G16B16A16_Float);
             // RT反射はコンピュートシェーダーがUAVで書くため、レンダーターゲットではなくUAVテクスチャを作る。
             // 非対応環境ではパス自体が実行されないので確保しない
             if (m_RaytracingAvailable)
@@ -2853,6 +2882,7 @@ namespace Kurenai
         settings.DDGIProbesPerFrame = m_DDGIProbesPerFrame;
         settings.SSAOKernelSize = m_SSAOKernelSize;
         settings.DDGIUpdate = m_DDGIUpdateMode;
+        settings.DDGIHalfResolution = m_DDGIHalfResolution;
         return settings;
     }
 
@@ -2869,6 +2899,7 @@ namespace Kurenai
         m_DDGIProbesPerFrame = settings.DDGIProbesPerFrame;
         // カーネル自体の作り直しはSSAOパスの中で行う(段数が変わったことを見て作り直す)
         m_SSAOKernelSize = settings.SSAOKernelSize;
+        m_DDGIHalfResolution = settings.DDGIHalfResolution;
 
         // 更新モードを変えたら停止状態は倒しておく。倒さないと「常時更新へ戻したのに
         // 止まったまま」になる(署名が変わるまで再開しないため)
@@ -2910,6 +2941,9 @@ namespace Kurenai
         // (定常状態の絵は変わらないが停止まで時間がかかる)
         settings.DDGIUpdate = (preset == QualityPreset::Low) ? DDGIUpdateMode::OverwriteThenStop
                                                             : DDGIUpdateMode::ConvergeThenStop;
+        // DDGIのサンプリングは実測でLightingパス23.9msのうち10.2msを占めていた。
+        // 低解像度化は輪郭で滲む近似なので既定は無効だが、プリセットでは有効にする
+        settings.DDGIHalfResolution = true;
         // 実測でジオメトリが画面を占めるシーンの4.8〜11.0ms。コストはほぼ段数に比例する。
         // シーン既定より増やすことはしない(プリセットは落とす方向のみ)
         settings.SSAOKernelSize = std::min(
@@ -5129,7 +5163,13 @@ namespace Kurenai
             m_DDGIIntensity,
             static_cast<float>(kDDGIProbeBorder),
         };
-        constants.DDGIParams4 = { effectiveExposure, 0.0f, 0.0f, 0.0f };
+        // y = DeferredLightingがDDGIを低解像度パス(DDGIResolve)から引くか。
+        // 【パスが実際に走る条件と一致させること】走らないのに1を渡すと、前フレームの
+        // (あるいは未初期化の)低解像度バッファを読んで間接光が固まる/壊れる。
+        // 条件はDDGIResolveパスの登録側(ddgiResolvePassRuns)と同じものを並べている
+        const bool ddgiHalfResolutionActive =
+            m_DDGIHalfResolution && m_DDGIResolveTexture && m_DDGIEnabled && m_HasGIVolume && m_DDGIBaked;
+        constants.DDGIParams4 = { effectiveExposure, ddgiHalfResolutionActive ? 1.0f : 0.0f, 0.0f, 0.0f };
         // 水面。スクロール位相はRenderThreadMainがm_WaterTimeFrozen/m_WaterWaveSpeedに
         // 応じて毎フレーム進める(m_TimeOfDayの自動進行と同じ場所・同じ方式)。
         // y=波のスケール倍率(m_WaterWaveScale)、z=波の強さ(m_WaterWaveStrength、0〜1)を
@@ -6810,6 +6850,41 @@ namespace Kurenai
             });
         }
 
+        // --- DDGIの低解像度解決パス(有効なときだけ) ---
+        // 拡散イラディアンスとinsideWeightを1/2解像度で求め、Lightingパスが深度を見て
+        // アップサンプルする。雲と違い厳密ではない近似のため既定は無効(DDGIResolve.hlsl冒頭参照)
+        const bool ddgiResolvePassRuns =
+            m_DDGIHalfResolution && m_DDGIResolveTexture && m_DDGIEnabled && m_HasGIVolume && m_DDGIBaked;
+        if (ddgiResolvePassRuns)
+        {
+            RHI::Viewport ddgiResolveViewport;
+            ddgiResolveViewport.Width = static_cast<float>(m_DDGIResolveWidth);
+            ddgiResolveViewport.Height = static_cast<float>(m_DDGIResolveHeight);
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "DDGIResolve",
+                // アトラスはDDGIUpdateパスが書くので、それより後に順序付けさせる。
+                // 深度と法線はG-Bufferパスより後
+                .Reads = {
+                    m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
+                    m_GBufferDepth.get(), m_GBufferNormal.get(),
+                },
+                .RenderTargets = { m_DDGIResolveTexture.get() },
+                .Execute = [this, ddgiResolveViewport](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetViewport(ddgiResolveViewport);
+                    cmd->SetPipelineState(m_DDGIResolvePipelineState.get());
+                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->SetTexture(0, m_DDGIIrradianceAtlas.get());
+                    cmd->SetTexture(1, m_DDGIDistanceAtlas.get());
+                    cmd->SetTexture(2, m_GBufferDepth.get());
+                    cmd->SetTexture(3, m_GBufferNormal.get());
+                    cmd->Draw(3, 0);
+                },
+            });
+        }
+
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Lighting",
@@ -6829,6 +6904,8 @@ namespace Kurenai
                 // 低解像度で評価済みの雲。SkyCloudパスより後に順序付けさせるために挙げる
                 // (パスが登録されないフレームでは書き手が居ないので依存も張られない)
                 m_SkyCloudTexture.get(),
+                // 同じく低解像度で評価済みのDDGI。DDGIResolveパスより後に順序付けさせる
+                m_DDGIResolveTexture.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
             // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
@@ -6873,10 +6950,13 @@ namespace Kurenai
                 // このシェーダーは雲を自前で評価しなくなったため、3Dノイズが使っていたt18を
                 // そのまま流用している(DeferredLighting.hlsl冒頭のコメント参照)
                 cmd->SetTexture(18, m_SkyCloudTexture.get());
-                // t19はこのシェーダーがもう宣言していない。ただしDX12のディスクリプタテーブルは
-                // 21スロットぶんをまとめてコピーするため、未初期化のスロットを残さないよう
-                // 有効なテクスチャを入れておく(反射プローブ・DDGIを常にバインドするのと同じ理由)
-                cmd->SetTexture(19, m_CloudDetailNoiseTexture.get());
+                // 低解像度で評価済みのDDGI(rgb=イラディアンス、a=insideWeight)。
+                // 【無効時も常にバインドする】シェーダーはDDGIParams4.yで読むかどうかを分けるが、
+                // DX12のディスクリプタテーブルは21スロットぶんをまとめてコピーするため、
+                // 未初期化のスロットを残せない(反射プローブ・DDGIアトラスと同じ理由)。
+                // 以前はここへ雲の3Dノイズを差していたが、Texture2Dの宣言と型が食い違うため
+                // このテクスチャへ置き換えた
+                cmd->SetTexture(19, m_DDGIResolveTexture.get());
                 // 大気散乱のSkyView LUT。日中の空の色はここから引く
                 cmd->SetTexture(20, m_SkyViewLUT.get());
                 cmd->Draw(3, 0);

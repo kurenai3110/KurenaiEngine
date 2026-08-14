@@ -696,6 +696,27 @@ namespace Kurenai
         uint32_t m_SkyCloudWidth = 0;
         uint32_t m_SkyCloudHeight = 0;
 
+        // --- DDGIの低解像度解決パス ---
+        // 雲と同じくLightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
+        // DDGIの拡散イラディアンスだけを内部レンダー解像度の1/2(面積で1/4)で評価し、
+        // 「rgb=イラディアンス, a=insideWeight」を書く。
+        //
+        // 【雲と違い近似である】雲は視線方向だけの関数で深度に依存しないため、
+        // 低解像度化してバイリニアで引き伸ばしても数学的に等価だった。DDGIは面の位置と
+        // 法線の関数なので、ジオメトリの輪郭をまたぐと手前の間接光が奥へ滲む。
+        // 合成側(DeferredLighting.hlslのUpsampleDDGI)が深度を見たアップサンプルで
+        // 抑えているが、厳密ではない。そのため**既定では無効**にしてある
+        std::unique_ptr<RHI::IRHIShader> m_DDGIResolveVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_DDGIResolvePixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIResolvePipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_DDGIResolveTexture;
+        // m_SkyCloudWidth/Heightと同じ理由でここへ保存する(パスのビューポート指定に使う)
+        uint32_t m_DDGIResolveWidth = 0;
+        uint32_t m_DDGIResolveHeight = 0;
+        // DDGIを低解像度パスから引くか。実測(ProbeTest / 1280x720 / DX11)では
+        // Lightingパス23.9msのうちDDGIのサンプリングが10.2msを占めていた
+        bool m_DDGIHalfResolution = Defaults::DDGIHalfResolution;
+
         // --- 大気遠近(height fog / aerial perspective) ---
         // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
         // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
@@ -1943,6 +1964,7 @@ namespace Kurenai
             int32_t DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
             uint32_t SSAOKernelSize = Defaults::SSAOKernelSize;
             DDGIUpdateMode DDGIUpdate = DDGIUpdateMode::Always;
+            bool DDGIHalfResolution = Defaults::DDGIHalfResolution;
         };
 
         // 現在の各メンバから上記の一式を読み出す

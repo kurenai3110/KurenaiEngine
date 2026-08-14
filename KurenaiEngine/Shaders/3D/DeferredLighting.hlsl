@@ -167,6 +167,11 @@ StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t11);
 // SkyCloud.hlsl(低解像度の雲パス)の出力。rgb=事前乗算済みの散乱光、a=透過率。
 // 雲の3Dノイズを自前で引かなくなったことで空いたt18に置いている(このファイル冒頭のコメント参照)
 Texture2D SkyCloudTexture : register(t18);
+// DDGIResolve.hlsl(低解像度のDDGIパス)の出力。rgb=イラディアンス、a=insideWeight。
+// DDGIParams4.yが1のときだけ読み、0のときはこのファイル内でSampleDDGIIrradianceを直接呼ぶ
+// (既定は0=直接呼ぶ。低解像度化は深度をまたぐ滲みを伴う近似のため。DDGIResolve.hlsl冒頭参照)。
+// t19はスカイクラウド分離でt18/t19が空いたうちの残り1枠(このファイル冒頭のコメント参照)
+Texture2D DDGIResolveTexture : register(t19);
 
 // グローバルIBLの拡散イラディアンス(t8)・プリフィルタ済み鏡面(t9)・プローブのプリフィルタ済み
 // 鏡面キューブマップ配列(t12)・プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・
@@ -178,11 +183,75 @@ Texture2D SkyCloudTexture : register(t18);
 // SSRとの「足した量と引く量が一致する」不変条件(20章)には影響しない
 #include "DDGI.hlsli"
 
+// DDGIResolveTexture(低解像度)を深度を見ながら引き伸ばす。
+//
+// 【なぜバイリニアでは駄目か】雲(SkyCloudTexture)は視線方向だけの関数で深度に依存しないため
+// 素直なバイリニアで数学的に正しかった。DDGIのイラディアンスは面の位置と法線の関数なので、
+// ジオメトリの輪郭をまたいで補間すると手前の面の間接光が奥の面へ滲む。
+// そこで4テクセルを個別に引き、**中心画素と深度が近いテクセルだけ**を採用する。
+//
+// centerDepth はこの画素のG-Buffer深度(Reverse-Z、生値)。
+// Reverse-Zの生値は概ね 1/z に比例するので、相対差をそのまま近さの尺度に使える
+// (輪郭の検出が目的で、正確な線形深度は要らない)
+float4 UpsampleDDGI(float2 uv, float centerDepth)
+{
+    uint width, height;
+    DDGIResolveTexture.GetDimensions(width, height);
+    const float2 resolution = float2(width, height);
+    const float2 texelSize = 1.0f / resolution;
+
+    // このUVを囲む4テクセルの中心。DDGIResolve.hlslが各テクセルで使ったUVと同じ式になるため、
+    // 「そのテクセルが代表している位置」の深度をここで正しく引き直せる
+    const float2 baseTexel = floor(uv * resolution - 0.5f);
+    const float2 fractional = uv * resolution - 0.5f - baseTexel;
+
+    float4 accumulated = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float totalWeight = 0.0f;
+
+    [unroll]
+    for (uint i = 0; i < 4; ++i)
+    {
+        const float2 offset = float2(float(i & 1u), float((i >> 1u) & 1u));
+        const float2 tapUV = (baseTexel + offset + 0.5f) * texelSize;
+
+        // バイリニアの重み
+        const float2 axisWeight = lerp(1.0f - fractional, fractional, offset);
+        float weight = axisWeight.x * axisWeight.y;
+
+        // 深度の近さ。背景(depth<=0)のテクセルはDDGIを持たないので必ず落とす
+        const float tapDepth = DepthTexture.SampleLevel(DataSampler, tapUV, 0.0f).r;
+        if (tapDepth <= 0.0f)
+        {
+            continue;
+        }
+        const float relativeDifference = abs(tapDepth - centerDepth) / max(centerDepth, 1e-6f);
+        // 相対差2%で概ね1/e。輪郭以外ではほぼ1になり、通常のバイリニアと一致する
+        weight *= exp(-relativeDifference * 50.0f);
+
+        if (weight <= 0.0f)
+        {
+            continue;
+        }
+        accumulated += DDGIResolveTexture.SampleLevel(DataSampler, tapUV, 0.0f) * weight;
+        totalWeight += weight;
+    }
+
+    // 4テクセルすべてが深度的に遠い(細い輪郭の内側など)。ここでDDGIを0にすると
+    // 輪郭に沿って間接光が抜けた黒い縁が出るため、最寄り1テクセルをそのまま採る
+    if (totalWeight <= 1e-6f)
+    {
+        return DDGIResolveTexture.SampleLevel(DataSampler, uv, 0.0f);
+    }
+    return accumulated / totalWeight;
+}
+
 // 環境ソース(プローブとグローバルIBLの重み付き合成)はSampleEnvironmentが返す。プローブと
 // グローバルIBLはどちらも同じ手順で焼かれており(IBLConvolve.hlslを共有している)、解像度・
 // ミップ構成も揃えてあるため、式そのものは同一で引くキューブマップだけが変わる
+// uv/depthはDDGIを低解像度パスから引くとき(DDGIParams4.y > 0.5)のアップサンプルにだけ使う
 float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness,
-                   float materialAO, float ssao, float diffuseAO, BentOcclusion bent)
+                   float materialAO, float ssao, float diffuseAO, BentOcclusion bent,
+                   float2 uv, float depth)
 {
     const float NdotV = saturate(dot(N, V));
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
@@ -212,8 +281,20 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // (ボリューム外)はirradianceがSampleEnvironmentの返した値のまま残る
     if (DDGIParams0.w > 0.5f)
     {
+        float3 ddgiIrradiance;
         float ddgiInsideWeight;
-        const float3 ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight);
+        // DDGIParams4.y は「低解像度のDDGIResolveパスの結果を使うか」。
+        // 定数バッファ由来のuniform分岐なので画素ごとに分かれることはない
+        if (DDGIParams4.y > 0.5f)
+        {
+            const float4 resolved = UpsampleDDGI(uv, depth);
+            ddgiIrradiance = resolved.rgb;
+            ddgiInsideWeight = resolved.a;
+        }
+        else
+        {
+            ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight);
+        }
         irradiance = lerp(irradiance, ddgiIrradiance, ddgiInsideWeight);
     }
 
@@ -422,7 +503,8 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 反射プローブ(19章)はEvaluateIBL内のSampleEnvironmentで環境ソースへ合成される。
         // プローブが1つも効いていない位置では従来どおりスカイボックス由来のグローバルIBLになる。
         // IBL強度倍率(ShadowParams.z)はEvaluateIBLの中で拡散・鏡面それぞれに掛かっている
-        ambient = EvaluateIBL(N, V, worldPos, albedo, metallic, roughness, materialAO, aoSample.a, diffuseAO, bent);
+        ambient = EvaluateIBL(
+            N, V, worldPos, albedo, metallic, roughness, materialAO, aoSample.a, diffuseAO, bent, input.UV, depth);
     }
     else
     {

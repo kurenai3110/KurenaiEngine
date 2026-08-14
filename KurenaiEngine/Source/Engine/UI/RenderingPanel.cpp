@@ -597,6 +597,16 @@ namespace Kurenai::UI
             m_Engine.m_DDGIStableCycles = 0;
         }
 
+        CheckboxEx(
+            "1/2解像度で評価する###DDGIHalfResolution", &m_Engine.m_DDGIHalfResolution, Defaults::DDGIHalfResolution,
+            "拡散間接光を内部レンダー解像度の1/2で求め、深度を見てアップサンプルする。"
+            "実測(ProbeTest / 1280x720 / DX11)ではLightingパス23.9msのうちDDGIのサンプリングが"
+            "10.2msを占めていた。\n\n"
+            "【雲の低解像度化と違い厳密ではない】雲は視線方向だけの関数なので低解像度化しても"
+            "数学的に等価だったが、DDGIは面の位置と法線の関数なので、ジオメトリの輪郭をまたぐと"
+            "手前の面の間接光が奥へ滲む。深度を見たアップサンプルで抑えてはいるが近似であり、"
+            "そのため既定は無効");
+
         if (m_Engine.m_DDGIUpdateSuspended)
         {
             ImGui::TextUnformatted("更新状態: 収束したため停止中");
