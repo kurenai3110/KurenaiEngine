@@ -1810,6 +1810,14 @@ namespace Kurenai
         // trueにすると雲のスクロールが止まる(m_WaterTimeFrozenの雲版。A/B比較などスクロールが
         // 揺れると困る場面で使う)
         bool m_CloudTimeFrozen = Defaults::CloudTimeFrozen;
+        // 積雲のボリュームレイマーチの段数。**このパスのコストの主なつまみ**。
+        // FrameConstants::CloudQualityParams.xとして渡り、SkyCloud.hlslだけが読む
+        // (ボリューム経路を持つのがこのシェーダーだけのため。詳細はそちらのコメント)。
+        // 減らすと雲の内部の階調が粗くなる=絵が変わるので、41.17までの「見た目を変えない削減」
+        // とは性質が違う。品質プリセットの低/中から振るための値である
+        uint32_t m_CloudRaymarchSteps = Defaults::CloudRaymarchSteps;
+        // 段数の上限。**Sky.hlsliのkCumulusRaymarchStepsMaxと一致させること**
+        static constexpr uint32_t kCloudRaymarchStepsMax = 32;
         // 風によるノイズ空間の移動量。m_WaterScrollOffsetと同じくUIつまみではなく内部状態で、
         // RenderThreadMainがSky.hlsliのkCloudNoisePeriodと同じ周期でstd::fmodしながら進める
         DirectX::XMFLOAT2 m_CloudScrollOffset{ 0.0f, 0.0f };
@@ -1989,6 +1997,7 @@ namespace Kurenai
             bool ScreenSpaceShadowEnabled = Defaults::ScreenSpaceShadowEnabled;
             int32_t DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
             uint32_t SSAOKernelSize = Defaults::SSAOKernelSize;
+            uint32_t CloudRaymarchSteps = Defaults::CloudRaymarchSteps;
             DDGIUpdateMode DDGIUpdate = DDGIUpdateMode::Always;
             bool DDGIHalfResolution = Defaults::DDGIHalfResolution;
         };

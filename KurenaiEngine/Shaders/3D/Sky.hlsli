@@ -164,6 +164,15 @@ struct SkyParameters
     float  CloudForwardG;      // Henyey-Greensteinの非対称パラメータ(前方散乱の強さ)
     float  CloudThickness;     // 雲底から雲頂までの厚み[m]。0ならレイマーチせず
                                 // 従来の厚みゼロの平面として扱う(巻雲はこちら)
+    // ボリューム経路のレイマーチ段数。**0以下なら kCumulusRaymarchSteps(コンパイル時の既定)**
+    // を使う。ApplySkyParametersFromBufferが0で初期化するので、cbufferにこの値を持たない
+    // シェーダー(SkyCloud.hlsl以外)は何もしなくても既定のまま動く。
+    // 【なぜ段数だけを実行時にしたのか】オクターブ数(kCloudOctaves)と自己影の段数
+    // (kCumulusShadowSteps)はfBmの値そのものを変えるため、これらを動かすと
+    // ボリューム経路(SkyCloud.hlsl)と平面経路(SSR/PlanarReflection/AerialPerspective)で
+    // 雲の形が食い違い、背景の雲と水面に映る雲が別物になる。
+    // レイマーチ段数はボリューム経路にしか存在しないのでその問題が起きない
+    int    CloudRaymarchSteps;
 
     // --- 巻雲。積雲より高層にある2層目。CirrusCoverage <= 0 なら巻雲側の計算は
     // 一切行わない(判断C、SkyColor参照)。判断A(IBLキューブに雲を焼かない)・判断B
@@ -270,6 +279,11 @@ SkyParameters ApplySkyParametersFromBuffer(SkyParameters params, GPUSkyParameter
     // 空照度/天頂輝度の積分値(EvaluateCloudLayerが太陽照度を天頂輝度の単位で表すのに使う。
     // SkyParameters::SkyIlluminanceOverZenithのコメント参照)
     params.SkyIlluminanceOverZenith = data.Luminance.y;
+    // 【ここで必ず0を入れる】雲のレイマーチ段数は SkyCloud.hlsl だけが cbuffer から上書きする。
+    // この関数は雲を評価しうる全シェーダーが呼ぶので、ここで初期化しておけば
+    // 上書きしないシェーダーでも未初期化のまま EvaluateCloudLayer へ渡ることがない。
+    // 0は「コンパイル時の既定(kCumulusRaymarchSteps)を使え」の意味
+    params.CloudRaymarchSteps = 0;
     return params;
 }
 
@@ -759,6 +773,9 @@ struct CloudLayerParams
     float  ForwardG;
     float2 AnisotropicScale; // fBmのUVを異方的に伸ばす倍率(積雲は(1,1)、巻雲は筋状にする)
     int    ShadowSteps;      // 自己影の積分ステップ数。0なら自己影を計算しない
+    // スラブのレイマーチ段数(Thickness > 0 の層だけが使う)。0以下なら
+    // kCumulusRaymarchSteps(コンパイル時の既定)へ落ちる。SkyParameters::CloudRaymarchSteps参照
+    int    RaymarchSteps;
     // 雲底から雲頂までの厚み[m]。**0なら従来の厚みゼロの平面として扱う**。
     // 巻雲は0を入れるため、巻雲は平面の経路だけを通る
     float  Thickness;
@@ -782,6 +799,7 @@ CloudLayerParams MakeCumulusLayerParams(SkyParameters params)
     layer.ForwardG = params.CloudForwardG;
     layer.AnisotropicScale = float2(1.0f, 1.0f); // 積雲は等方(筋状にしない)
     layer.ShadowSteps = kCumulusShadowSteps;
+    layer.RaymarchSteps = params.CloudRaymarchSteps;
     layer.Thickness = params.CloudThickness; // 0でなければスラブをレイマーチする
     layer.Albedo = kCumulusAlbedo;
     layer.SingleScatterScale = kCumulusSingleScatterScale;
@@ -806,6 +824,9 @@ CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
     layer.Thickness = 0.0f;
     layer.AnisotropicScale = float2(params.CirrusAnisotropy, 1.0f); // U方向だけ伸ばして筋状にする
     layer.ShadowSteps = kCirrusShadowSteps;
+    // 巻雲は厚みゼロ=平面の経路しか通らないのでレイマーチしない。使われない値だが、
+    // 未初期化のまま関数へ渡さないよう明示的に埋めておく
+    layer.RaymarchSteps = 0;
     layer.Albedo = kCirrusAlbedo;
     layer.SingleScatterScale = kCirrusSingleScatterScale;
     layer.AmbientTermMin = kCirrusAmbientTermMin;
@@ -851,9 +872,13 @@ Texture3D CloudDetailNoiseTexture : register(KURENAI_CLOUD_DETAIL_REGISTER);
 #define KURENAI_CLOUD_VOLUME 1
 #endif
 
-// レイマーチのステップ数。**コストの唯一のつまみ**なので、負荷を調整するときはここを動かす
-// (cbufferを増やさないためシェーダ内定数にしてある。kCirrusShadowStepsと同じ扱い)
+// レイマーチのステップ数の既定値。**このパスのコストの主なつまみ**で、1画素あたりの
+// ウェザーマップ評価18回(視線 + 自己影5 + 基底1)のうち大半がこのループである。
+// 実行時にはSkyParameters::CloudRaymarchSteps(SkyCloud.hlslがcbufferから渡す)が優先され、
+// 0以下のときだけこの値へ落ちる。
+// 【上限を持つ理由】定数バッファの中身は保証できるものではないので、シェーダー側でも丸める
 static const int kCumulusRaymarchSteps = 12;
+static const int kCumulusRaymarchStepsMax = 32;
 
 // 形状ノイズがワールド空間で1周する距離[m]。雲の塊(ウェザーマップの1セル=1,000m)より
 // 大きくしておくと、同じ模様が隣の雲で繰り返されているのが読み取りにくくなる
@@ -1100,7 +1125,14 @@ void EvaluateCloudLayer(
     if (layer.Thickness > 0.0f)
     {
         // --- ボリューム: 雲底から雲頂まで前から後ろへ積分する ---
-        const float invSteps = 1.0f / float(kCumulusRaymarchSteps);
+        // 段数は実行時に変わる(品質プリセット)。cbufferにこの値を持たないシェーダーは
+        // 0を渡してくるので、その場合はコンパイル時の既定へ落とす。
+        // 定数バッファの中身は保証できるものではないので上限側も必ず丸める
+        // (SSAOのサンプル数と同じ作法。SSAO.hlslのsampleCount参照)
+        const int raymarchSteps = (layer.RaymarchSteps > 0)
+            ? min(layer.RaymarchSteps, kCumulusRaymarchStepsMax)
+            : kCumulusRaymarchSteps;
+        const float invSteps = 1.0f / float(raymarchSteps);
 
         // 【縦方向の影は勾配であって減光ではない】下の aboveTransmittance は
         // exp(-(1-hf) * k) で雲底ほど暗くなる係数だが、これをそのまま掛けるとスラブ内の平均が
@@ -1118,7 +1150,7 @@ void EvaluateCloudLayer(
         float3 accumScatter = float3(0.0f, 0.0f, 0.0f);
 
         [loop]
-        for (int marchStep = 0; marchStep < kCumulusRaymarchSteps; ++marchStep)
+        for (int marchStep = 0; marchStep < raymarchSteps; ++marchStep)
         {
             // 中点サンプリング。hf=0が雲底、hf=1が雲頂
             const float hf = (float(marchStep) + 0.5f) * invSteps;

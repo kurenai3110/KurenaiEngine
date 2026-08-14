@@ -84,6 +84,10 @@ cbuffer FrameConstants : register(b0)
     float4 FogParams1;
     float4 WaterBodyColor;
     float4 StarsParams;
+    // x=積雲のボリュームレイマーチの段数(0以下ならSky.hlsliのコンパイル時の既定)。yzwは予備。
+    // **FrameConstantsの末尾にあること**。ここより手前へ入れると、途中までしか宣言していない
+    // 他のシェーダー(AerialPerspective/PlanarReflection等)のオフセットが全部ずれる
+    float4 CloudQualityParams;
 };
 
 // SkyIntegrate.hlslが書いた空パラメータ(ティント4本と正規化済みの天頂輝度)
@@ -139,6 +143,10 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
+    // ボリューム経路のレイマーチ段数。**このシェーダーだけが上書きする**
+    // (他のシェーダーはApplySkyParametersFromBufferが入れた0のままで、
+    //  Sky.hlsliのコンパイル時の既定へ落ちる。SkyParameters::CloudRaymarchSteps参照)
+    params.CloudRaymarchSteps = (int)CloudQualityParams.x;
     params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
     params.StarsIntensity = StarsParams.x;
     params.StarsDensity = StarsParams.y;

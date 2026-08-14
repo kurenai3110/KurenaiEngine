@@ -179,6 +179,10 @@ namespace Kurenai::Defaults
     // シーンに依存しないUIつまみ(m_WaterTimeFrozenと同じ位置づけ)。
     // 積雲・巻雲の両方に効く(片方だけ凍結できるとA/B比較の対照が取れなくなるため)
     inline constexpr bool CloudTimeFrozen = false;
+    // 積雲のボリュームレイマーチの段数(1〜32)。上限はSky.hlsliの
+    // kCumulusRaymarchStepsMaxと一致させること。雲パスのコストの主なつまみで、
+    // 1画素あたりのウェザーマップ評価18回(視線 + 自己影5 + 基底1)の大半がこのループになる
+    inline constexpr uint32_t CloudRaymarchSteps = 12;
 
     // --- 巻雲(積雲の上に重ねる2層目) ---
     //

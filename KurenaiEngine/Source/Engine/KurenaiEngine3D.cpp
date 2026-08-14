@@ -270,6 +270,16 @@ namespace Kurenai
             // 星を出さないため。AerialPerspective.hlsl(フォグのin-scatter)と
             // SkyGenerate.hlsl(IBLキューブ)は自分のMakeSkyParametersで0を入れる
             DirectX::XMFLOAT4 StarsParams;
+            // 雲の品質(さらに末尾に追加)。x=積雲のボリュームレイマーチの段数、yzwは予備。
+            //
+            // 【読むのはSkyCloud.hlslだけ】ボリューム経路を持つのがこのシェーダーだけだからである。
+            // 他のシェーダー(SSR/PlanarReflection/AerialPerspective)は厚みゼロの平面経路を通り、
+            // レイマーチそのものを行わないのでこの値を必要としない。
+            //
+            // 【オクターブ数と自己影の段数はここへ入れない】あれらはfBmの値そのものを変えるため、
+            // 実行時に動かすとボリューム経路と平面経路で雲の形が食い違い、
+            // 背景の雲と水面に映る雲が別物になる(Sky.hlsliのCloudRaymarchStepsのコメント参照)
+            DirectX::XMFLOAT4 CloudQualityParams;
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -2888,6 +2898,7 @@ namespace Kurenai
         settings.ScreenSpaceShadowEnabled = m_ScreenSpaceShadowEnabled;
         settings.DDGIProbesPerFrame = m_DDGIProbesPerFrame;
         settings.SSAOKernelSize = m_SSAOKernelSize;
+        settings.CloudRaymarchSteps = m_CloudRaymarchSteps;
         settings.DDGIUpdate = m_DDGIUpdateMode;
         settings.DDGIHalfResolution = m_DDGIHalfResolution;
         return settings;
@@ -2906,6 +2917,7 @@ namespace Kurenai
         m_DDGIProbesPerFrame = settings.DDGIProbesPerFrame;
         // カーネル自体の作り直しはSSAOパスの中で行う(段数が変わったことを見て作り直す)
         m_SSAOKernelSize = settings.SSAOKernelSize;
+        m_CloudRaymarchSteps = settings.CloudRaymarchSteps;
         m_DDGIHalfResolution = settings.DDGIHalfResolution;
 
         // 更新モードを変えたら停止状態は倒しておく。倒さないと「常時更新へ戻したのに
@@ -2957,17 +2969,27 @@ namespace Kurenai
             m_SceneDefaultQuality.SSAOKernelSize, (preset == QualityPreset::Low) ? 4u : 8u);
         // 実測31ms(水面のあるシーン)。低・中とも切る
         settings.Reflection = ReflectionMode::Off;
-        // ボリュメトリック積雲は実測で約10ms。手続き雲(平面レイヤー)自体は残す
-        settings.CloudVolumetric = false;
         settings.TAAEnabled = false;
         settings.BloomEnabled = false;
         settings.ScreenSpaceShadowEnabled = false;
 
         if (preset == QualityPreset::Low)
         {
+            // ボリュメトリック積雲は実測で約10ms。低ではまるごと切る
+            // (手続き雲そのものは残るので、空が真っ青になるわけではない。平面レイヤーへ落ちる)
+            settings.CloudVolumetric = false;
             settings.PlanarReflectionEnabled = false;
             settings.CirrusEnabled = false;
             settings.StarsEnabled = false;
+        }
+        else
+        {
+            // 中はボリュームを残したまま段数だけ落とす。コストはほぼ段数に比例するため、
+            // 「立体的な雲は残しつつ半分の値段にする」という中間段が作れる
+            // (段数を実行時に変えられるようにしたのはこのため)。
+            // SSAOの段数と同じく、シーン既定より増やすことはしない
+            settings.CloudRaymarchSteps =
+                std::min(m_SceneDefaultQuality.CloudRaymarchSteps, 6u);
         }
         // 平面反射は残す場合でも解像度を落とす。1.0を超える指定は
         // RequestPlanarReflectionResolutionScaleが弾くため、下げる方向のみで安全
@@ -5244,6 +5266,13 @@ namespace Kurenai
                 ? (2.0f / (projForPixelAngle._22 * static_cast<float>(m_RenderHeight)))
                 : 0.001f;
         constants.StarsParams = { starsIntensity, m_StarsDensity, m_StarsTwinkle, pixelAngle };
+
+        // 積雲のボリュームレイマーチの段数。シェーダー側でも上限へ丸めるが、
+        // 0以下を渡すと「コンパイル時の既定を使う」の意味になってしまうため下限はここで効かせる
+        constants.CloudQualityParams = {
+            static_cast<float>(std::clamp(m_CloudRaymarchSteps, 1u, kCloudRaymarchStepsMax)),
+            0.0f, 0.0f, 0.0f
+        };
 
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 

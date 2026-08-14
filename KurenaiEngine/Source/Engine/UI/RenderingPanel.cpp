@@ -888,6 +888,13 @@ namespace Kurenai::UI
                 "%.0f m", 0,
                 "雲底から雲頂までの厚み。目安は扁平雲(humilis)が約400m、並雲(mediocris)が約1000m、"
                 "雄大積雲(congestus)が約2500m。厚いほど縦に伸びた入道雲になる");
+            SliderUIntEx(
+                "レイマーチ段数###CloudRaymarchSteps", &m_Engine.m_CloudRaymarchSteps, 1,
+                KurenaiEngine3D::kCloudRaymarchStepsMax, Defaults::CloudRaymarchSteps,
+                "雲底から雲頂までを何段に分けて積分するか。雲パスのコストの主なつまみで、"
+                "1段ごとにウェザーマップのfBm(4オクターブ)と3Dノイズ2枚を引くため、"
+                "コストはほぼこの数に比例する。減らすと雲の内部の階調が段状に粗くなる"
+                "(輪郭ではなく芯の明暗に出る)");
         }
 
         ImGui::SeparatorText("巻雲(高層)");
