@@ -1272,8 +1272,12 @@ namespace Kurenai
         // そのためBRDF積分LUT・雲の3Dノイズとほぼ同じ「一度だけ焼く」作法に乗せ、
         // 濁りが変わったときだけ焼き直す(m_AtmosphereLUTBakedTurbidity)。
         //
-        // SkyViewは空そのもので太陽の位置に依存するため毎フレーム焼く。
-        // 192x108テクセル×(視線32段 + 天頂32段)なので、負荷は実質的に無い。
+        // SkyViewは空そのもので太陽の位置に依存するため、太陽か濁りが動いたときに焼き直す
+        // (m_SkyViewBakedSunPosition)。
+        // 【毎フレーム焼いていた頃の実測】192x108=20,736テクセルと小さいので「負荷は実質的に無い」と
+        // 書いていたが、Intel UHD Graphics 620 / DX11 / Release の実測では1.15〜1.53msあった。
+        // 1テクセルあたり視線32段+天頂32段の計64段のレイマーチで、各段が
+        // Transmittance LUTとMultiScattering LUTのサンプルを伴うため、テクセル数の割に高い。
         // **このLUTを読むパス(SkyIntegrate/SkyGenerate/Lighting/SSR/AerialPerspective/
         // PlanarReflection)より前に実行される必要がある**が、順序はレンダーグラフが
         // Reads/Writesの依存から自動で決めるので、パスの登録順に依存しない
@@ -1290,6 +1294,28 @@ namespace Kurenai
         // Transmittance/MultiScatteringを焼いたときの濁り。負の値は「まだ一度も焼いていない」。
         // 濁りが変わるとエアロゾルの量が変わるので、この2枚も焼き直す必要がある
         float m_AtmosphereLUTBakedTurbidity = -1.0f;
+        // SkyView LUTを最後に焼いたときの太陽の向きと濁り。負の濁りは「まだ一度も焼いていない」。
+        // 【なぜ毎フレーム焼かなくてよいのか】CSSkyViewの入力はこの2つだけである
+        // (視点位置はkSkyViewHeightKm固定でカメラに依存しない。AtmosphereLUT.hlsl参照)。
+        // どちらも動いていなければ、まったく同じ内容のLUTを焼き直しているだけになる。
+        // 手続き空の焼き直し(m_LastBakedSunPosition)とまったく同じ判定の形だが、
+        // あちらは露出・彩度にも依存するため条件を共用はできない
+        DirectX::XMFLOAT3 m_SkyViewBakedSunPosition{ 0.0f, 0.0f, 0.0f };
+        float m_SkyViewBakedTurbidity = -1.0f;
+        // 太陽がこの角度以上動いたらSkyView LUTを焼き直す。LUTは天頂方向180度を108テクセルで
+        // 持つので1テクセルあたり約1.67度あり、その1/30以下しかずらさない値にしてある。
+        //
+        // 【意図的に手続き空のm_SkyBakeAngleThresholdDegrees(1.0度)より桁で細かくしている】
+        // このLUTは背景の空(Sky.hlsliのSkyColor)が画面解像度で毎フレーム引くもので、
+        // 間引きの粒度がそのまま背景の時間解像度になる。一方あちらが焼くIBLキューブは
+        // 6面+プリフィルタ36回のディスパッチを伴う重いベイクで、間接光にしか効かない。
+        // 変更前は「毎フレーム焼く」だったので、それに最も近い挙動を選んでいる。
+        //
+        // 【時刻を自動で進めるシーンでは削減にならない】Auto Advance既定(1h/s)では太陽は
+        // 15度/秒動くため、60fpsでも毎フレームこの閾値を超えて結局毎フレーム焼く。
+        // 削減が効くのは太陽が止まっているシーン(Defaults::TimeAutoAdvanceは既定false)で、
+        // その場合は起動直後の1回だけになる
+        static constexpr float kSkyViewRebakeAngleDegrees = 0.05f;
         std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;

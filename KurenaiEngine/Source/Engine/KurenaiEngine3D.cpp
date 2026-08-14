@@ -1890,7 +1890,8 @@ namespace Kurenai
 
         // 大気散乱のLUT(Hillaire 2020)。TransmittanceとMultiScatteringはカメラにも太陽にも
         // 依存せず、大気パラメータ(濁りを含む)だけの関数なので、濁りが変わらない限り焼き直さない
-        // (m_AtmosphereLUTBakedTurbidity)。SkyViewは太陽の位置で変わるため毎フレーム焼く。
+        // (m_AtmosphereLUTBakedTurbidity)。SkyViewは太陽の位置と濁りで変わるため、
+        // そのどちらかが動いたときに焼き直す(m_SkyViewBakedSunPosition)。
         // HDRの放射輝度を格納するためR16G16B16A16_Float
         m_TransmittanceLUT = m_Device->CreateUAVTexture(
             kTransmittanceLUTWidth, kTransmittanceLUTHeight, RHI::Format::R16G16B16A16_Float);
@@ -1903,6 +1904,12 @@ namespace Kurenai
             Core::Logger::Error("KurenaiEngine3D",
                 "大気散乱のLUTテクスチャの作成に失敗しました(日中の空が黒くなります)");
         }
+        // 【ここで焼き直し要求を必ず立てる】3枚とも中身が未初期化の新しいテクスチャになったので、
+        // 「前回焼いたときの条件」を捨てないと、APIをDX11/DX12で切り替えた直後など
+        // この関数が再度呼ばれた場合に一度も焼かれないまま読まれて空が黒くなる
+        m_AtmosphereLUTBakedTurbidity = -1.0f;
+        m_SkyViewBakedTurbidity = -1.0f;
+        m_SkyViewBakedSunPosition = { 0.0f, 0.0f, 0.0f };
 
         RHI::BufferDesc atmosphereConstantBufferDesc;
         atmosphereConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -5392,8 +5399,26 @@ namespace Kurenai
             m_AtmosphereLUTBakedTurbidity = m_SkyTurbidity;
         }
 
-        if (m_SkyViewPipelineState)
+        // SkyView LUTを焼き直すかどうか。CSSkyViewの入力は太陽の向きと濁りだけで、
+        // 視点位置はkSkyViewHeightKm固定(カメラ非依存)なので、この2つが動かなければ
+        // まったく同じ内容を焼き直すことになる。実測1.15〜1.53ms/フレームがまるごと無駄だった。
+        // 濁りは上のAtmosphereLUTBakeとまったく同じ条件で判定するため、濁りが動いたフレームでは
+        // Transmittance/MultiScatteringとSkyViewが同じフレームで焼き直され、実行順序は
+        // Reads/Writesの依存からレンダーグラフが決める
+        bool bakeSkyViewThisFrame = m_SkyViewBakedTurbidity != m_SkyTurbidity;
+        if (!bakeSkyViewThisFrame)
         {
+            const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
+            const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_SkyViewBakedSunPosition);
+            const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
+            bakeSkyViewThisFrame =
+                cosAngle < std::cos(DirectX::XMConvertToRadians(kSkyViewRebakeAngleDegrees));
+        }
+
+        if (m_SkyViewPipelineState && bakeSkyViewThisFrame)
+        {
+            m_SkyViewBakedSunPosition = sunLighting.SunPosition;
+            m_SkyViewBakedTurbidity = m_SkyTurbidity;
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyViewBake",
                 .Reads = { m_TransmittanceLUT.get(), m_MultiScatteringLUT.get() },
