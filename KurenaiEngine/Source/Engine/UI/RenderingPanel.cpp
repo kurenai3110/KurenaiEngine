@@ -566,7 +566,7 @@ namespace Kurenai::UI
             "多いほど光の変化への追従が速くなるが、1プローブにつきシーンを6回描くため負荷も比例して上がる");
 
         // 表示名と値の並びは必ず一致させること(目標フレームレートのComboと同じ作法)
-        static const char* kDDGIUpdateModeNames[] = { "常時更新", "収束したら停止", "上書きで一巡して停止" };
+        static const char* kDDGIUpdateModeNames[] = { "常時更新", "多重バウンスまで焼いて停止", "一巡だけ焼いて停止" };
         static const KurenaiEngine3D::DDGIUpdateMode kDDGIUpdateModeValues[] = {
             KurenaiEngine3D::DDGIUpdateMode::Always,
             KurenaiEngine3D::DDGIUpdateMode::ConvergeThenStop,
@@ -581,12 +581,14 @@ namespace Kurenai::UI
                 "更新モード###DDGIUpdateMode", &ddgiUpdateModeIndex, kDDGIUpdateModeNames,
                 IM_ARRAYSIZE(kDDGIUpdateModeNames), static_cast<int>(KurenaiEngine3D::DDGIUpdateMode::Always),
                 "いつ焼くのをやめるか。どのモードでも時間分割であることは変わらない\n\n"
-                "常時更新: 常に焼き続ける(既定)\n"
-                "収束したら停止: 太陽・時刻・影・ライト・IBL・自発光が変わらなくなったら、"
-                "ヒステリシスのまま十分巡回したところで止める。定常状態の絵は「常時更新」と同じだが、"
-                "止まるまでに時間がかかる(既定のヒステリシス0.97なら151巡)\n"
-                "上書きで一巡して停止: 変化を検出したらヒステリシスを使わず一巡だけ焼いてすぐ止める。"
-                "数秒で止まる代わりに、複数巡にわたる時間平滑が効かない\n\n"
+                "常時更新: 常に焼き続ける(既定)。ヒステリシスで滑らかに追従する\n"
+                "多重バウンスまで焼いて停止: 太陽・時刻・影・ライト・IBL・自発光が変わらなくなったら、"
+                "ヒステリシスを使わない上書きで4巡してから止める。プローブのキャプチャは前巡の"
+                "アトラスを読むので、巡回するほど間接光のバウンスが積み上がる想定\n"
+                "一巡だけ焼いて停止: 同じく上書きだが1巡で止める。最も速く止まる\n"
+                "【4巡と1巡の差はまだ確認できていない】Sponzaの同一カメラで撮り比べると"
+                "ビット一致だった。バウンスの寄与を分離できる計測方法をまだ持っていないため、"
+                "4は保守的に置いた値である\n\n"
                 "止めている間はプローブ更新のコストがゼロになる"
                 "(実測でGPU 40〜47ms・CPU 30msを占めていた)。"
                 "焼き上がりに影響する状態が変わると自動で再開する"))

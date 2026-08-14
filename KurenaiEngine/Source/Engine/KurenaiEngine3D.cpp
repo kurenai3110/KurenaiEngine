@@ -2955,9 +2955,8 @@ namespace Kurenai
         // 実測でGIVolumeを持つシーンの最大負荷(40〜47ms、フレームの約4割)。
         // 1プローブにつきシーンを6回描くため、この値にほぼ比例する
         settings.DDGIProbesPerFrame = (preset == QualityPreset::Low) ? 2 : 4;
-        // 収束したら止める。低は「上書きで一巡して即停止」(数秒でゼロになる代わりに
-        // 複数巡の時間平滑が効かない)、中は「ヒステリシスのまま巡回して停止」
-        // (定常状態の絵は変わらないが停止まで時間がかかる)
+        // 焼き上がりが落ち着いたら止める。低は一巡だけ(最速で止まる代わりに間接光の
+        // バウンスが1回ぶん)、中はkDDGIBounceCycles巡だけ焼いてから止める
         settings.DDGIUpdate = (preset == QualityPreset::Low) ? DDGIUpdateMode::OverwriteThenStop
                                                             : DDGIUpdateMode::ConvergeThenStop;
         // DDGIのサンプリングは実測でLightingパス23.9msのうち10.2msを占めていた。
@@ -3639,26 +3638,6 @@ namespace Kurenai
             m_GIVolume.Origin[1] + static_cast<float>(y) * m_GIVolume.ProbeSpacing[1],
             m_GIVolume.Origin[2] + static_cast<float>(z) * m_GIVolume.ProbeSpacing[2],
         };
-    }
-
-    uint32_t KurenaiEngine3D::ComputeDDGIConvergeCycles() const
-    {
-        // 1巡ごとに「前の値」の重みはヒステリシス倍になる。残差がkDDGIConvergeResidualを
-        // 下回る巡回数 N = ln(残差) / ln(ヒステリシス) を停止の目安にする。
-        // 既定の0.97なら151巡(455プローブ・16個/フレームなら約29フレーム/巡)
-        const float hysteresis = m_GIVolume.Hysteresis;
-        // 0以下は毎巡上書きと同じ意味なので1巡で焼き切れている
-        if (hysteresis <= 0.0f)
-        {
-            return 1u;
-        }
-        // 1以上は数学的に収束しない。止まらないよりは上限で打ち切るほうがまし
-        if (hysteresis >= 1.0f)
-        {
-            return kDDGIConvergeCycleLimit;
-        }
-        const float cycles = std::log(kDDGIConvergeResidual) / std::log(hysteresis);
-        return std::clamp(static_cast<uint32_t>(std::ceil(cycles)), 1u, kDDGIConvergeCycleLimit);
     }
 
     uint64_t KurenaiEngine3D::ComputeProbeBakeSignature() const
@@ -6299,13 +6278,6 @@ namespace Kurenai
                 m_DDGIBakeSignatureValid = true;
                 m_DDGIStableCycles = 0;
                 m_DDGIUpdateSuspended = false;
-                // 一巡で焼き切って即座に止めるモードでは、ヒステリシスを使わない上書きへ切り替える
-                // (露出追従で使っているm_DDGIOverwriteRemainingと同じ仕組み)。
-                // 一巡目(warmingUp)は元から上書きなので何もしない
-                if (m_DDGIUpdateMode == DDGIUpdateMode::OverwriteThenStop && !m_DDGIWarmingUp)
-                {
-                    m_DDGIOverwriteRemaining = m_DDGIProbeCount;
-                }
             }
         }
 
@@ -6335,12 +6307,17 @@ namespace Kurenai
             const uint32_t overwriteThisFrame = std::min(m_DDGIOverwriteRemaining, perFrame);
             m_DDGIOverwriteRemaining -= overwriteThisFrame;
 
+            // 【止めるモードでは停止するまでの全巡回を上書きで焼く】理由はKurenaiEngine3D.hの
+            // kDDGIBounceCyclesのコメント参照。露出追従のm_DDGIOverwriteRemainingとは
+            // 独立に効かせたいので、残数を消費せず条件だけ合流させる
+            const bool overwriteWholeCycle = !warmingUp && m_DDGIUpdateMode != DDGIUpdateMode::Always;
+
             for (uint32_t i = 0; i < perFrame; ++i)
             {
                 const uint32_t probeIndex = (m_DDGIUpdateCursor + i) % m_DDGIProbeCount;
                 // 一巡目はヒステリシスを使わず上書きする(混ぜる相手の「前の値」が未初期化のため)。
                 // 露出が急変した直後も同じく上書きで追従させる
-                const bool overwrite = warmingUp || (i < overwriteThisFrame);
+                const bool overwrite = warmingUp || overwriteWholeCycle || (i < overwriteThisFrame);
 
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "DDGIUpdate" + std::to_string(probeIndex),
@@ -6374,7 +6351,7 @@ namespace Kurenai
                 {
                     const uint32_t requiredCycles = (m_DDGIUpdateMode == DDGIUpdateMode::OverwriteThenStop)
                         ? 1u
-                        : ComputeDDGIConvergeCycles();
+                        : kDDGIBounceCycles;
                     if (m_DDGIStableCycles >= requiredCycles)
                     {
                         m_DDGIUpdateSuspended = true;
