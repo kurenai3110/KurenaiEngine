@@ -62,6 +62,29 @@ float3 ReconstructWorldPos(float2 uv, float depth)
     return worldPos.xyz / worldPos.w;
 }
 
+// 深度バッファの値(NDCのz)から、ビュー空間のz(カメラからの距離)だけを直接求める。
+//
+// 【なぜワールドを経由しないのか】カーネルのサンプルごとに要るのはこのスカラー1個だけで、
+// ワールド座標そのものは使わない。ReconstructWorldPos → mul(..., View) と辿ると
+// 4x4の行列積を2回と除算を1回払うことになるが、行列を畳むと
+//   clip * InvViewProj * View = clip * InvProj * InvView * View = clip * InvProj
+// なので、実際に効いているのは射影行列の逆だけである。しかもzとwの2成分しか要らない。
+//
+// 射影は clip.z = vz*_33 + _43、clip.w = vz*_34 + _44 で、ndcZ = clip.z / clip.w だから
+//   vz*_33 + _43 = ndcZ*(vz*_34 + _44)  ->  vz = (ndcZ*_44 - _43) / (_33 - ndcZ*_34)
+// と解ける。**Projは既にこのcbufferで宣言済み**なので新しい定数は要らない。
+// 透視投影でも正射影でも、Reverse-Zでも成り立つ一般形にしてある
+// (行列の要素をそのまま使っており、特定の並びを仮定していない)。
+//
+// TAAのジッターは射影行列のx/yの平行移動にしか触れないため、この式には影響しない
+float ReconstructViewZ(float ndcZ)
+{
+    const float numerator = ndcZ * Proj._44 - Proj._43;
+    const float denominator = Proj._33 - ndcZ * Proj._34;
+    // 分母が0になるのは射影が退化している場合だけ。0除算でNaNを撒かないよう下限を入れる
+    return numerator / (abs(denominator) > 1e-9f ? denominator : 1e-9f);
+}
+
 // ピクセル座標から[0,1)の疑似乱数を得るハッシュ関数(Dave Hoskinsのhash12)。
 // タイル状のノイズテクスチャを用意する代わりに、画面全体で高周波なランダム回転を安価に生成する
 float Hash12(float2 p)
@@ -128,9 +151,9 @@ float4 PSMain(PSInput input) : SV_TARGET
             continue;
         }
 
-        // サンプル位置のワールド座標をView空間へ変換し、Z(カメラからの距離)だけを比較に使う
-        float3 sampleWorldPos = ReconstructWorldPos(sampleUV, sampleDepth);
-        float sampleViewZ = mul(float4(sampleWorldPos, 1.0f), View).z;
+        // 比較に使うのはZ(カメラからの距離)だけなので、ワールド座標を経由せず
+        // 射影行列から直接求める(ReconstructViewZのコメント参照)
+        float sampleViewZ = ReconstructViewZ(sampleDepth);
 
         // 遮蔽物がカーネルサンプル位置より手前(視距離が近い)にあれば遮蔽としてカウントする。
         // ただし遠く離れた無関係なジオメトリまで遮蔽扱いしないよう半径ベースで減衰させる(range check)
