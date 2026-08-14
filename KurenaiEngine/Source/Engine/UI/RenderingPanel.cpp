@@ -564,6 +564,43 @@ namespace Kurenai::UI
             "1フレームの更新プローブ数###DDGIProbesPerFrame", &m_Engine.m_DDGIProbesPerFrame, 1, 64,
             Defaults::DDGIProbesPerFrame,
             "多いほど光の変化への追従が速くなるが、1プローブにつきシーンを6回描くため負荷も比例して上がる");
+
+        // 表示名と値の並びは必ず一致させること(目標フレームレートのComboと同じ作法)
+        static const char* kDDGIUpdateModeNames[] = { "常時更新", "収束したら停止", "上書きで一巡して停止" };
+        static const KurenaiEngine3D::DDGIUpdateMode kDDGIUpdateModeValues[] = {
+            KurenaiEngine3D::DDGIUpdateMode::Always,
+            KurenaiEngine3D::DDGIUpdateMode::ConvergeThenStop,
+            KurenaiEngine3D::DDGIUpdateMode::OverwriteThenStop,
+        };
+        static_assert(
+            IM_ARRAYSIZE(kDDGIUpdateModeNames) == IM_ARRAYSIZE(kDDGIUpdateModeValues),
+            "表示名と値の並びを一致させること");
+
+        int ddgiUpdateModeIndex = static_cast<int>(m_Engine.m_DDGIUpdateMode);
+        if (ComboEx(
+                "更新モード###DDGIUpdateMode", &ddgiUpdateModeIndex, kDDGIUpdateModeNames,
+                IM_ARRAYSIZE(kDDGIUpdateModeNames), static_cast<int>(KurenaiEngine3D::DDGIUpdateMode::Always),
+                "いつ焼くのをやめるか。どのモードでも時間分割であることは変わらない\n\n"
+                "常時更新: 常に焼き続ける(既定)\n"
+                "収束したら停止: 太陽・時刻・影・ライト・IBL・自発光が変わらなくなったら、"
+                "ヒステリシスのまま十分巡回したところで止める。定常状態の絵は「常時更新」と同じだが、"
+                "止まるまでに時間がかかる(既定のヒステリシス0.97なら151巡)\n"
+                "上書きで一巡して停止: 変化を検出したらヒステリシスを使わず一巡だけ焼いてすぐ止める。"
+                "数秒で止まる代わりに、複数巡にわたる時間平滑が効かない\n\n"
+                "止めている間はプローブ更新のコストがゼロになる"
+                "(実測でGPU 40〜47ms・CPU 30msを占めていた)。"
+                "焼き上がりに影響する状態が変わると自動で再開する"))
+        {
+            m_Engine.m_DDGIUpdateMode = kDDGIUpdateModeValues[ddgiUpdateModeIndex];
+            // 「常時更新へ戻したのに止まったまま」を防ぐ(署名が変わるまで再開しないため)
+            m_Engine.m_DDGIUpdateSuspended = false;
+            m_Engine.m_DDGIStableCycles = 0;
+        }
+
+        if (m_Engine.m_DDGIUpdateSuspended)
+        {
+            ImGui::TextUnformatted("更新状態: 収束したため停止中");
+        }
         ImGui::EndDisabled();
 
         ImGui::Text(

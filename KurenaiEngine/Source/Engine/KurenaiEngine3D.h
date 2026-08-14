@@ -1621,6 +1621,48 @@ namespace Kurenai
         uint32_t m_DDGIUpdateCursor = 0;
         int32_t m_DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
 
+        // DDGIの更新モード。反射プローブのProbeUpdateModeと同じ考え方だが、
+        // **「1フレームでフルベイク」に相当するモードは持たない** ――
+        // DDGIは全プローブ×6面(455プローブなら2730回の描画)を1フレームでは焼けないため。
+        // どのモードでも時間分割(1フレームm_DDGIProbesPerFrame個)であることは変わらず、
+        // 違うのは「いつ止めるか」だけである。
+        //
+        // 【なぜ止める必要があるか】実測(Intel UHD Graphics 620 / 1280x720 / DX11)で、
+        // GIVolumeを持つシーンのプローブ更新は**GPU 40〜47ms + CPU 30ms**あり、
+        // どちらもフレームの最大要素だった。しかも収束後も止まらず課金され続けていた
+        enum class DDGIUpdateMode
+        {
+            // 常に焼き続ける。ライトや時刻が動き続けるシーンでも必ず追従する
+            Always,
+            // 焼き上がりに影響する状態(ComputeProbeBakeSignature)が変わらなくなったら、
+            // ヒステリシスのまま十分巡回したところで停止する。
+            // 定常状態の絵はAlwaysと変わらない代わりに、停止までに時間がかかる
+            // (既定のヒステリシス0.97なら151巡)
+            ConvergeThenStop,
+            // 同じく停止するが、署名が変わったらヒステリシスを使わない上書きで一巡してすぐ止める。
+            // 数秒で停止する代わりに、複数巡にわたる時間平滑が効かない
+            OverwriteThenStop,
+        };
+        // 【既定はAlways(従来どおり)】止める側を既定にすると既存シーンの実行時の挙動が変わるため。
+        // 止めたい場合はこのつまみか品質プリセット(低/中)から選ぶ
+        DDGIUpdateMode m_DDGIUpdateMode = DDGIUpdateMode::Always;
+        // 停止判定用。最後に「焼き上がりに影響する状態」が変わった時点の署名。
+        // 反射プローブと同じComputeProbeBakeSignature()を使う ―― DDGIのキャプチャも
+        // 同じFrameConstants(太陽・時刻・影・ライト・IBL・自発光)を読むため、影響する状態は同じ
+        uint64_t m_DDGIBakeSignature = 0;
+        bool m_DDGIBakeSignatureValid = false;
+        // 署名が変わらないまま完了した巡回数。ConvergeThenStopの停止判定に使う
+        uint32_t m_DDGIStableCycles = 0;
+        // 収束済みとみなして更新を止めている状態。署名が変わると倒れる
+        bool m_DDGIUpdateSuspended = false;
+        // ConvergeThenStopで停止するまでの巡回数を、そのボリュームのヒステリシスから求める
+        uint32_t ComputeDDGIConvergeCycles() const;
+        // 「収束した」とみなす残差。1巡ごとに前の値の重みはヒステリシス倍になるので、
+        // 停止までの巡回数は N = ln(残差) / ln(ヒステリシス) で決まる
+        static constexpr float kDDGIConvergeResidual = 0.01f;
+        // ヒステリシスが1.0以上(数学的に収束しない)のときに際限なく回り続けないための上限
+        static constexpr uint32_t kDDGIConvergeCycleLimit = 512;
+
         // 格子上のプローブ番号からワールド座標を求める。番号の分解は
         // index = x + y*Cx + z*Cx*Cy で、シェーダー側の並びと一致させること
         DirectX::XMFLOAT3 ComputeDDGIProbePosition(uint32_t probeIndex) const;
@@ -1900,6 +1942,7 @@ namespace Kurenai
             bool ScreenSpaceShadowEnabled = Defaults::ScreenSpaceShadowEnabled;
             int32_t DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
             uint32_t SSAOKernelSize = Defaults::SSAOKernelSize;
+            DDGIUpdateMode DDGIUpdate = DDGIUpdateMode::Always;
         };
 
         // 現在の各メンバから上記の一式を読み出す

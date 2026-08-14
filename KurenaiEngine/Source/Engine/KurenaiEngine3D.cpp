@@ -2852,6 +2852,7 @@ namespace Kurenai
         settings.ScreenSpaceShadowEnabled = m_ScreenSpaceShadowEnabled;
         settings.DDGIProbesPerFrame = m_DDGIProbesPerFrame;
         settings.SSAOKernelSize = m_SSAOKernelSize;
+        settings.DDGIUpdate = m_DDGIUpdateMode;
         return settings;
     }
 
@@ -2868,6 +2869,15 @@ namespace Kurenai
         m_DDGIProbesPerFrame = settings.DDGIProbesPerFrame;
         // カーネル自体の作り直しはSSAOパスの中で行う(段数が変わったことを見て作り直す)
         m_SSAOKernelSize = settings.SSAOKernelSize;
+
+        // 更新モードを変えたら停止状態は倒しておく。倒さないと「常時更新へ戻したのに
+        // 止まったまま」になる(署名が変わるまで再開しないため)
+        if (m_DDGIUpdateMode != settings.DDGIUpdate)
+        {
+            m_DDGIUpdateMode = settings.DDGIUpdate;
+            m_DDGIUpdateSuspended = false;
+            m_DDGIStableCycles = 0;
+        }
 
         // 平面反射の解像度倍率だけはレンダーターゲットの作り直しを伴う。GPUがまだ参照している
         // 可能性があるためここでは直接代入せず、要求として積んでRender()の先頭で反映させる
@@ -2895,6 +2905,11 @@ namespace Kurenai
         // 実測でGIVolumeを持つシーンの最大負荷(40〜47ms、フレームの約4割)。
         // 1プローブにつきシーンを6回描くため、この値にほぼ比例する
         settings.DDGIProbesPerFrame = (preset == QualityPreset::Low) ? 2 : 4;
+        // 収束したら止める。低は「上書きで一巡して即停止」(数秒でゼロになる代わりに
+        // 複数巡の時間平滑が効かない)、中は「ヒステリシスのまま巡回して停止」
+        // (定常状態の絵は変わらないが停止まで時間がかかる)
+        settings.DDGIUpdate = (preset == QualityPreset::Low) ? DDGIUpdateMode::OverwriteThenStop
+                                                            : DDGIUpdateMode::ConvergeThenStop;
         // 実測でジオメトリが画面を占めるシーンの4.8〜11.0ms。コストはほぼ段数に比例する。
         // シーン既定より増やすことはしない(プリセットは落とす方向のみ)
         settings.SSAOKernelSize = std::min(
@@ -3561,6 +3576,26 @@ namespace Kurenai
             m_GIVolume.Origin[1] + static_cast<float>(y) * m_GIVolume.ProbeSpacing[1],
             m_GIVolume.Origin[2] + static_cast<float>(z) * m_GIVolume.ProbeSpacing[2],
         };
+    }
+
+    uint32_t KurenaiEngine3D::ComputeDDGIConvergeCycles() const
+    {
+        // 1巡ごとに「前の値」の重みはヒステリシス倍になる。残差がkDDGIConvergeResidualを
+        // 下回る巡回数 N = ln(残差) / ln(ヒステリシス) を停止の目安にする。
+        // 既定の0.97なら151巡(455プローブ・16個/フレームなら約29フレーム/巡)
+        const float hysteresis = m_GIVolume.Hysteresis;
+        // 0以下は毎巡上書きと同じ意味なので1巡で焼き切れている
+        if (hysteresis <= 0.0f)
+        {
+            return 1u;
+        }
+        // 1以上は数学的に収束しない。止まらないよりは上限で打ち切るほうがまし
+        if (hysteresis >= 1.0f)
+        {
+            return kDDGIConvergeCycleLimit;
+        }
+        const float cycles = std::log(kDDGIConvergeResidual) / std::log(hysteresis);
+        return std::clamp(static_cast<uint32_t>(std::ceil(cycles)), 1u, kDDGIConvergeCycleLimit);
     }
 
     uint64_t KurenaiEngine3D::ComputeProbeBakeSignature() const
@@ -6158,7 +6193,29 @@ namespace Kurenai
             cmd->Dispatch((kBorderThreads + 7) / 8, (kBorderThreads + 7) / 8, 1);
         };
 
-        if (m_DDGIEnabled && m_HasGIVolume && m_DDGIProbeCount > 0)
+        // 焼き上がりに影響する状態が変わったら、停止していた更新を再開する。
+        // 【判定はm_DDGIEnabled等のガードの外に置く】無効な間も署名を追い続けないと、
+        // 無効中に時刻を動かして再度有効にしたとき「署名は同じ」と誤判定して止まったままになる
+        if (m_HasGIVolume && m_DDGIProbeCount > 0)
+        {
+            const uint64_t bakeSignature = ComputeProbeBakeSignature();
+            if (!m_DDGIBakeSignatureValid || bakeSignature != m_DDGIBakeSignature)
+            {
+                m_DDGIBakeSignature = bakeSignature;
+                m_DDGIBakeSignatureValid = true;
+                m_DDGIStableCycles = 0;
+                m_DDGIUpdateSuspended = false;
+                // 一巡で焼き切って即座に止めるモードでは、ヒステリシスを使わない上書きへ切り替える
+                // (露出追従で使っているm_DDGIOverwriteRemainingと同じ仕組み)。
+                // 一巡目(warmingUp)は元から上書きなので何もしない
+                if (m_DDGIUpdateMode == DDGIUpdateMode::OverwriteThenStop && !m_DDGIWarmingUp)
+                {
+                    m_DDGIOverwriteRemaining = m_DDGIProbeCount;
+                }
+            }
+        }
+
+        if (m_DDGIEnabled && m_HasGIVolume && m_DDGIProbeCount > 0 && !m_DDGIUpdateSuspended)
         {
             const uint32_t perFrame = std::min<uint32_t>(
                 static_cast<uint32_t>(std::max(m_DDGIProbesPerFrame, 1)), m_DDGIProbeCount);
@@ -6211,7 +6268,31 @@ namespace Kurenai
             }
 
             const uint32_t nextCursor = m_DDGIUpdateCursor + perFrame;
-            if (warmingUp && nextCursor >= m_DDGIProbeCount)
+            const bool cycleCompleted = nextCursor >= m_DDGIProbeCount;
+
+            // 一巡ぶん焼き終えるたびに数え、モードごとの巡回数に達したら止める。
+            // 【上書きが残っている間は止めない】まだ焼き切っていないため。
+            // 一巡目(warmingUp)はこの後の分岐で別に扱うのでここでは数えない
+            if (cycleCompleted && !warmingUp && m_DDGIUpdateMode != DDGIUpdateMode::Always)
+            {
+                ++m_DDGIStableCycles;
+                if (m_DDGIOverwriteRemaining == 0)
+                {
+                    const uint32_t requiredCycles = (m_DDGIUpdateMode == DDGIUpdateMode::OverwriteThenStop)
+                        ? 1u
+                        : ComputeDDGIConvergeCycles();
+                    if (m_DDGIStableCycles >= requiredCycles)
+                    {
+                        m_DDGIUpdateSuspended = true;
+                        Core::Logger::Info(
+                            "KurenaiEngine3D",
+                            "DDGIが収束したため更新を停止しました(" + std::to_string(m_DDGIStableCycles) +
+                                "巡)。焼き上がりに影響する状態が変わると再開します");
+                    }
+                }
+            }
+
+            if (warmingUp && cycleCompleted)
             {
                 // 全プローブが一度ずつ書かれた。ここから先はヒステリシスで滑らかに追従させ、
                 // 同時にサンプリング側(DDGIParams0.w)を有効にする
