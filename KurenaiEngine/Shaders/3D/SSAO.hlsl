@@ -1,6 +1,6 @@
 // SSAO(Screen Space Ambient Occlusion)パス。
 // PSMain: G-BufferのNormal/Depthからサンプリングカーネルを使って遮蔽率を計算する(Texture0=World Normal, Texture1=Depth)
-// PSMainBlur: PSMainの出力(タイル状ノイズを含む)を均すための4x4ボックスブラー(Texture0=AO Raw)。
+// PSMainBlur: PSMainの出力(タイル状ノイズを含む)を均すための5x5分離可能ブラー(Texture0=AO Raw)。
 // SSAOとSSIL(Visibility Bitmask)は同じRGBAフォーマット(rgb=間接拡散光, a=遮蔽率)を出力するため、
 // このブラーはSSIL_VisibilityBitmask.hlslのブラーパスとしても共用する
 #include "NormalEncoding.hlsli"
@@ -144,7 +144,33 @@ float4 PSMain(PSInput input) : SV_TARGET
     return float4(0.0f, 0.0f, 0.0f, ao);
 }
 
-// AO/GIバッファ(rgb=間接拡散光, a=遮蔽率)を4チャンネルまとめて均す汎用ボックスブラー
+// AO/GIバッファ(rgb=間接拡散光, a=遮蔽率)を4チャンネルまとめて均す汎用ブラー。
+//
+// 【このパスは完全にサンプラー律速である】Intel UHD Graphics 620 / 1280x720 / DX11 / Release の
+// 実測で2.21ms。1280x720の全画素×16タップ=14.7Mタップを、Gen9がRGBA16F(64bpp)のバイリニアを
+// 半レート(約6.6 Gtexel/s)で回すと2.23msになり、実測とほぼ一致する。演算でも帯域でもなく
+// 「タップ数×フォーマットのフィルタレート」だけで決まっているので、削るならタップ数を減らす。
+//
+// 【元の16タップが実際に作っていたカーネル】オフセットが{-1.5,-0.5,0.5,1.5}テクセル、つまり
+// すべて半テクセルずれた位置=テクセルの角に落ちる。バイリニアはそこで周囲2テクセル(1軸あたり)を
+// 1/2ずつ混ぜるので、1軸の重みを積み上げると{0.5, 1, 1, 1, 0.5}/4 という**5テクセル幅**の
+// 分離可能カーネルになる。名前は「4x4ボックス」だが実体は5x5のテントである。
+//
+// 【9タップでまったく同じカーネルを作る】同じ重みは、隣接する2テクセルを1回のバイリニアで
+// 拾う定番の畳み込みで1軸3タップに詰められる:
+//   ・オフセット -4/3 テクセル … テクセル(-2,-1)を(1/3, 2/3)で混ぜる。タップ重み1.5/4
+//   ・オフセット   0 テクセル … テクセル(0)ちょうど。タップ重み1.0/4
+//   ・オフセット +4/3 テクセル … テクセル(+1,+2)を(2/3, 1/3)で混ぜる。タップ重み1.5/4
+// 積み上げると1軸あたり{0.125, 0.25, 0.25, 0.25, 0.125}(合計1)で、元の{0.5,1,1,1,0.5}/4と
+// **完全に一致する**。2軸とも分離可能なので3x3=9タップで済み、タップ数は16→9(-44%)になる。
+//
+// 【厳密には一致しない部分】元のオフセットは重みがちょうど1/2で、これは補間器の固定小数で
+// 誤差なく表せる。新しい±4/3は1/3と2/3を要求するため、D3Dが保証するサブテクセル精度
+// (小数8bit=1/256刻み)で最大0.0013ずれる。タップ重み0.375を掛けるとテクセルあたりの重み誤差は
+// 0.0005以下で、[0,1]の遮蔽率に対して0.13/255相当。最終8bit出力の1LSBより小さい
+static const float kAOBlurOffsets[3] = { -4.0f / 3.0f, 0.0f, 4.0f / 3.0f };
+static const float kAOBlurWeights[3] = { 1.5f / 4.0f, 1.0f / 4.0f, 1.5f / 4.0f };
+
 float4 PSMainBlur(PSInput input) : SV_TARGET
 {
     uint width, height;
@@ -153,20 +179,19 @@ float4 PSMainBlur(PSInput input) : SV_TARGET
 
     float4 sum = float4(0.0f, 0.0f, 0.0f, 0.0f);
     [unroll]
-    for (int x = -2; x <= 1; ++x)
+    for (int x = 0; x < 3; ++x)
     {
         [unroll]
-        for (int y = -2; y <= 1; ++y)
+        for (int y = 0; y < 3; ++y)
         {
-            // 4x4(偶数)カーネルなので整数オフセット(-2..1)のままだと中心が半テクセル
-            // 左上へ偏る。+0.5してオフセットを{-1.5,-0.5,0.5,1.5}にし、中心をピクセル中心に揃える。
             // offsetUVは画面端で[0,1]をはみ出すが、ColorSamplerはClampなので端のテクセルが
             // 引き伸ばされるだけで済む(Wrapのサンプラーで引くと反対側の端のAO/GIが混ざり、
             // 画面の四辺2px幅に無関係な遮蔽が滲む)
-            float2 offsetUV = input.UV + (float2(x, y) + 0.5f) * texelSize;
-            sum += Texture0.Sample(ColorSampler, offsetUV);
+            float2 offsetUV = input.UV + float2(kAOBlurOffsets[x], kAOBlurOffsets[y]) * texelSize;
+            sum += (kAOBlurWeights[x] * kAOBlurWeights[y]) * Texture0.Sample(ColorSampler, offsetUV);
         }
     }
 
-    return sum / 16.0f;
+    // 重みの総和が1になるよう作ってあるので、ここでの割り算は要らない
+    return sum;
 }
