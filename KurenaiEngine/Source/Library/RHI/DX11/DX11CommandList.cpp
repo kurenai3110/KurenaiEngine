@@ -141,7 +141,11 @@ namespace Kurenai::RHI
         m_Context->IASetInputLayout(dx11PipelineState->GetInputLayout());
         m_Context->IASetPrimitiveTopology(dx11PipelineState->GetTopology());
         m_Context->VSSetShader(dx11PipelineState->GetVertexShader()->GetVertexShader(), nullptr, 0);
-        m_Context->PSSetShader(dx11PipelineState->GetPixelShader()->GetPixelShader(), nullptr, 0);
+        // ピクセルシェーダーを持たないパイプライン(深度プリパス)ではnullptrを張って
+        // ピクセルシェーダー段を無効化する。前のパスのものが残ると深度だけを書くつもりが
+        // レンダーターゲットへ書き込んでしまう
+        DX11Shader* const dx11PixelShader = dx11PipelineState->GetPixelShader();
+        m_Context->PSSetShader(dx11PixelShader ? dx11PixelShader->GetPixelShader() : nullptr, nullptr, 0);
         m_Context->OMSetDepthStencilState(dx11PipelineState->GetDepthStencilState(), 0);
         m_Context->OMSetBlendState(dx11PipelineState->GetBlendState(), nullptr, 0xFFFFFFFF);
         m_Context->RSSetState(dx11PipelineState->GetRasterizerState());

@@ -35,6 +35,12 @@ namespace Kurenai::Defaults
     inline constexpr uint32_t SSILSliceCount = 4;
     inline constexpr uint32_t SSILStepCount = 6;
 
+    // --- 深度プリパス(41.21節) ---
+    // G-Bufferを描く前に不透明ジオメトリの深度だけを埋め、隠れる画素のピクセルシェーダーを
+    // 早期Zで省く。ジオメトリを1周ぶん余計に描くコストと引き換えなので、
+    // オーバードローが小さいシーンでは損になる
+    inline constexpr bool DepthPrepassEnabled = true;
+
     // --- シャドウ ---
     inline constexpr bool ShadowEnabled = true;
     inline constexpr float ShadowLightSize = 0.02f;

@@ -1274,7 +1274,9 @@ namespace Kurenai::RHI
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
         psoDesc.pRootSignature = m_RootSignature.Get();
         psoDesc.VS = vertexShader->GetBytecode();
-        psoDesc.PS = pixelShader->GetBytecode();
+        // ピクセルシェーダーを持たないパイプライン(深度プリパス)は空のバイトコードを渡す。
+        // DX12はこれをピクセルシェーダー段なしとして扱う
+        psoDesc.PS = pixelShader ? pixelShader->GetBytecode() : D3D12_SHADER_BYTECODE{ nullptr, 0 };
         psoDesc.InputLayout = { elements.empty() ? nullptr : elements.data(), static_cast<UINT>(elements.size()) };
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
         // 既定は「時計回りが表・裏面カリング」。ミラーリング(負のスケール)を含むインスタンスは
@@ -1287,7 +1289,9 @@ namespace Kurenai::RHI
         psoDesc.DepthStencilState.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
         psoDesc.DepthStencilState.DepthWriteMask = desc.DepthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
         // Reverse-Z: 近平面=1.0/遠平面=0.0にマッピングするため、深度テストの向きもGREATERに反転する
-        psoDesc.DepthStencilState.DepthFunc = desc.ReverseZ ? D3D12_COMPARISON_FUNC_GREATER : D3D12_COMPARISON_FUNC_LESS;
+        psoDesc.DepthStencilState.DepthFunc = desc.ReverseZ
+            ? (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_GREATER)
+            : (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_LESS_EQUAL : D3D12_COMPARISON_FUNC_LESS);
         psoDesc.SampleMask = UINT_MAX;
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         psoDesc.NumRenderTargets = static_cast<UINT>(desc.RenderTargetFormats.size());
@@ -1350,7 +1354,9 @@ namespace Kurenai::RHI
         CD3DX12_DEPTH_STENCIL_DESC depthStencil(D3D12_DEFAULT);
         depthStencil.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
         depthStencil.DepthWriteMask = desc.DepthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
-        depthStencil.DepthFunc = desc.ReverseZ ? D3D12_COMPARISON_FUNC_GREATER : D3D12_COMPARISON_FUNC_LESS;
+        depthStencil.DepthFunc = desc.ReverseZ
+            ? (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_GREATER)
+            : (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_LESS_EQUAL : D3D12_COMPARISON_FUNC_LESS);
 
         D3D12_RT_FORMAT_ARRAY rtvFormats{};
         rtvFormats.NumRenderTargets = static_cast<UINT>(desc.RenderTargetFormats.size());

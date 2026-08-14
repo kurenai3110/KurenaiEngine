@@ -135,6 +135,16 @@ namespace Kurenai::RHI
         // 透視投影のメインカメラパスにのみ使う(正射影のシャドウマップはZが線形分布のため対象外)
         bool ReverseZ = false;
 
+        // 深度が等しい断片もテストに通すか(比較をGREATER/LESSからGREATER_EQUAL/LESS_EQUALへ緩める)。
+        // 深度プリパスと組み合わせて使う ―― プリパスが書いた深度と同じ値になる最前面の断片だけを
+        // 通し、それより奥の断片を早期Zで落とすことで、隠れる画素のピクセルシェーダーを省く。
+        //
+        // 【プリパスが無い状態で有効にしても絵は実質変わらない】GREATERとGREATER_EQUALの差が出るのは
+        // 深度がビット単位で等しい面が複数ある場合(同一平面の重なり)だけで、そのとき「先に描いた方が
+        // 残る」が「後に描いた方が残る」に変わる。不透明G-Bufferではどちらも同じ値を書くため、
+        // PSOを2組に増やさずプリパスの有無を切り替えられるよう常にこちらを使う
+        bool DepthAllowEqual = false;
+
         // アルファブレンド設定。既定は不透明(Opaque)。半透明の2Dスプライトなどを描画する場合はAlphaBlendを、
         // 炎・光などの発光エフェクトはAdditiveを、減光表現はMultiplyを、事前乗算済みテクスチャはPremultipliedAlphaを指定する
         BlendMode BlendMode = BlendMode::Opaque;
@@ -174,6 +184,7 @@ namespace Kurenai::RHI
         bool DepthTargetAttached = false;
         bool DepthWriteEnabled = true;
         bool ReverseZ = false;
+        bool DepthAllowEqual = false;
         BlendMode BlendMode = BlendMode::Opaque;
         bool FrontCounterClockwise = false;
     };

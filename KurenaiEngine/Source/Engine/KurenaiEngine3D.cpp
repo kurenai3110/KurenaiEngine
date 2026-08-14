@@ -1239,6 +1239,27 @@ namespace Kurenai
         gbufferWaterPsDesc.EntryPoint = "PSMain";
         m_GBufferWaterPixelShader = m_Device->CreateShader(gbufferWaterPsDesc);
 
+        // 深度プリパス(41.21節)のアルファカットアウト用。頂点シェーダーはG-Bufferと共有する
+        // (プリパスとG-Bufferで深度が1ulpでもずれると面が消えるため。PSO作成側のコメント参照)
+        try
+        {
+            RHI::ShaderDesc depthPrepassCutoutPsDesc;
+            depthPrepassCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
+            depthPrepassCutoutPsDesc.FilePath = shaderDirectory + L"DepthPrepass.hlsl";
+            depthPrepassCutoutPsDesc.EntryPoint = "PSMainCutout";
+            m_DepthPrepassCutoutPixelShader = m_Device->CreateShader(depthPrepassCutoutPsDesc);
+        }
+        catch (const std::exception& e)
+        {
+            // 作れなくてもプリパス自体は成立する(カットアウトのメッシュをプリパスから
+            // 除外して従来どおりG-Bufferだけで描く)ため、致命的とはしない
+            m_DepthPrepassCutoutPixelShader.reset();
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                std::string("深度プリパスのアルファカットアウト用ピクセルシェーダーの作成に失敗しました。"
+                            "カットアウトのメッシュはプリパスから除外します: ") + e.what());
+        }
+
         // メッシュシェーダー版のG-Bufferパス(GBufferMeshlet.hlsl)。
         // 対応環境でのみ作る ―― 非対応環境ではas/msプロファイルのコンパイル自体ができず、
         // 毎回エラーログが出てしまうため。ピクセルシェーダーはGBuffer.hlslのものを共有する
@@ -2432,6 +2453,11 @@ namespace Kurenai
             };
             gbufferPipelineDesc.HasDepthStencil = true;
             gbufferPipelineDesc.ReverseZ = true;
+            // 深度プリパス(41.21節)を通したとき、プリパスが書いた深度と同じ値になる最前面の
+            // 断片だけを通すため、比較をGREATER_EQUALへ緩める。プリパスを切っていても
+            // 不透明G-Bufferでは絵が変わらない(理由はRHIDesc.hのDepthAllowEqualのコメント)ので、
+            // 有効/無効でPSOを2組に増やさず常にこちらにしてある
+            gbufferPipelineDesc.DepthAllowEqual = true;
             m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
 
             // ミラーリングされたインスタンス用に、表裏判定だけを入れ替えた同じパイプラインを用意する。
@@ -2465,6 +2491,8 @@ namespace Kurenai
                 meshPipelineDesc.RenderTargetFormats = gbufferPipelineDesc.RenderTargetFormats;
                 meshPipelineDesc.HasDepthStencil = true;
                 meshPipelineDesc.ReverseZ = true;
+                // 頂点シェーダー版と1つでもずれると切り替えで見た目が変わるため、深度比較も揃える
+                meshPipelineDesc.DepthAllowEqual = true;
                 meshPipelineDesc.FrontCounterClockwise = false;
                 m_GBufferMeshletPipelineState = m_Device->CreateMeshPipelineState(meshPipelineDesc);
 
@@ -2481,6 +2509,36 @@ namespace Kurenai
                     meshPipelineDesc.FrontCounterClockwise = true;
                     m_GBufferMeshletDebugPipelineStateMirrored = m_Device->CreateMeshPipelineState(meshPipelineDesc);
                 }
+            }
+
+            // 深度プリパス(41.21節)。G-Bufferとまったく同じ頂点シェーダー・入力レイアウトで
+            // 深度だけを書く。レンダーターゲットは持たず、不透明マテリアル用は
+            // ピクセルシェーダーそのものを持たない(段ごと省く)。
+            //
+            // 【頂点シェーダーを共有する理由】プリパスとG-Bufferで頂点の変換結果が
+            // 1ulpでも違うと、深度が一致せずGREATER_EQUALのテストを通らなくなり、
+            // その面がまるごと消える。別のシェーダーに写すと最適化の差で容易にずれる
+            RHI::PipelineStateDesc depthPrepassPipelineDesc;
+            depthPrepassPipelineDesc.InputLayout = GetModelInputLayout();
+            depthPrepassPipelineDesc.VertexShader = m_GBufferVertexShader.get();
+            depthPrepassPipelineDesc.PixelShader = nullptr;
+            depthPrepassPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            depthPrepassPipelineDesc.HasDepthStencil = true;
+            depthPrepassPipelineDesc.ReverseZ = true;
+            m_DepthPrepassPipelineState = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
+            depthPrepassPipelineDesc.FrontCounterClockwise = true;
+            m_DepthPrepassPipelineStateMirrored = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
+
+            // アルファカットアウト(glTFのalphaMode=MASK)用。切り抜かれる部分の深度まで
+            // 書いてしまうとG-Buffer側のclipと食い違って穴が開くため、こちらだけ
+            // 同じ判定のclipを持つピクセルシェーダーを通す(DepthPrepass.hlsl)
+            if (m_DepthPrepassCutoutPixelShader)
+            {
+                depthPrepassPipelineDesc.PixelShader = m_DepthPrepassCutoutPixelShader.get();
+                depthPrepassPipelineDesc.FrontCounterClockwise = false;
+                m_DepthPrepassCutoutPipelineState = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
+                depthPrepassPipelineDesc.FrontCounterClockwise = true;
+                m_DepthPrepassCutoutPipelineStateMirrored = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
             }
 
             // SSAOパス
@@ -6378,23 +6436,110 @@ namespace Kurenai
             m_DDGIUpdateCursor = nextCursor % m_DDGIProbeCount;
         }
 
+        // --- 深度プリパス(41.21節): 不透明ジオメトリの深度だけを先に埋める ---
+        //
+        // これを通しておくと、次のG-Bufferパスでは最前面の断片だけが深度テストを通り
+        // (PSOのDepthAllowEqual)、隠れる画素のピクセルシェーダー ―― 6テクスチャの
+        // サンプルと6枚のレンダーターゲットへの書き込み ―― がまるごと省ける。
+        //
+        // 【カットアウトのPSOが作れていないときはプリパスごと切る】カットアウトのメッシュだけを
+        // プリパスから外すと、そのメッシュはG-Buffer側で深度を書くことになるが、
+        // プリパスで手前に別のものが書かれていると早期Zに落とされて消える。
+        // 中途半端に混ぜるより丸ごと従来経路にするほうが安全
+        //
+        // 【メッシュシェーダー経路とは併用しない】プリパスは頂点シェーダー経路で深度を書くが、
+        // G-Buffer側がメッシュシェーダーで描くと同じ頂点でも変換の丸めが一致する保証が無く、
+        // 深度が1ulpずれた面がGREATER_EQUALを通らずに消える
+        const bool meshletPathActive = m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+        const bool depthPrepassRuns = m_DepthPrepassEnabled && !meshletPathActive
+            && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
+        if (depthPrepassRuns)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "DepthPrepass",
+                // レンダーターゲットは持たない(深度だけを書く)
+                .DepthTarget = m_GBufferDepth.get(),
+                .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetViewport(gbufferViewport);
+                    // Reverse-Zのため遠平面側(NDC z=0.0)。G-Bufferパスの代わりにここでクリアする
+                    cmd->ClearDepth(0.0f);
+
+                    RHI::IRHIPipelineState* currentPipelineState = nullptr;
+                    for (const auto& instance : m_Scene.Instances)
+                    {
+                        for (const auto& mesh : instance.Model.Meshes)
+                        {
+                            // BLENDマテリアルはG-Bufferに描かれないので深度も書かない
+                            // (書くと後ろのものが消える)
+                            if (mesh.IsTransparent)
+                            {
+                                continue;
+                            }
+
+                            // カットアウトは切り抜きを反映しないと深度に嘘が入る。
+                            // ミラーリングは表裏判定が逆のPSOでないとカリングされる面が入れ替わり、
+                            // G-Bufferと違う深度になってしまう
+                            const bool cutout = mesh.AlphaCutoff > 0.0f;
+                            RHI::IRHIPipelineState* const wanted =
+                                cutout ? (instance.IsMirrored ? m_DepthPrepassCutoutPipelineStateMirrored.get()
+                                                              : m_DepthPrepassCutoutPipelineState.get())
+                                       : (instance.IsMirrored ? m_DepthPrepassPipelineStateMirrored.get()
+                                                              : m_DepthPrepassPipelineState.get());
+                            if (wanted != currentPipelineState)
+                            {
+                                cmd->SetPipelineState(wanted);
+                                cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                                cmd->SetSamplerSet(m_MaterialSamplers.get());
+                                currentPipelineState = wanted;
+                            }
+
+                            const ObjectConstants objectConstants =
+                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                            cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                            cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                            // カットアウト以外はピクセルシェーダーを持たないためテクスチャも要らない
+                            if (cutout)
+                            {
+                                cmd->SetTexture(0, mesh.BaseColorTexture);
+                            }
+
+                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        }
+                    }
+                },
+            });
+        }
+
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "GBuffer",
+            // 深度プリパス(直前に登録される)を通したときは、ここへ来る時点で深度が埋まっており、
+            // PSOのDepthAllowEqual(GREATER_EQUAL)によって最前面の断片だけがテストを通る。
+            //
             // 6枚目のbent normalまで含め、並びはGBuffer.hlslのPSOutputおよび
             // CreatePrecisionDependentPipelineStatesのRenderTargetFormatsと一致させること
             .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
                                m_GBufferEmissive.get(), m_GBufferVelocity.get(), m_GBufferBentNormal.get() },
             .DepthTarget = m_GBufferDepth.get(),
-            .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, depthPrepassRuns](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // ClearRenderTargetはバインド済みの全レンダーターゲットを同じ色でクリアするため、
                 // 速度バッファもここで0(=動いていない)になる。ジオメトリが描かれない画素
                 // (空)の速度は0のまま残るが、空はカメラ回転で動くのでTAA側で別途補う(TAA.hlsl参照)
                 cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
-                // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(GBuffer.hlsl参照)
-                cmd->ClearDepth(0.0f);
+                // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(GBuffer.hlsl参照)。
+                // 【深度プリパスを通したときはクリアしない】プリパスが既に正しい深度を
+                // 書いており、ここで消すとGREATER_EQUALのテストが全断片を通してしまい
+                // プリパスが無意味になる(クリアはプリパス側が行う)
+                if (!depthPrepassRuns)
+                {
+                    cmd->ClearDepth(0.0f);
+                }
 
                 cmd->SetPipelineState(m_GBufferPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());

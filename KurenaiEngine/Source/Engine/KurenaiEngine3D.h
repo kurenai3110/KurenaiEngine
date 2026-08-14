@@ -402,6 +402,25 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineStateMirrored;
 
+        // --- 深度プリパス(41.21節。Shaders/3D/DepthPrepass.hlsl) ------------------------
+        //
+        // G-Bufferを描く前に不透明ジオメトリの深度だけを埋め、G-Buffer側の深度比較を
+        // GREATER_EQUALにして最前面の断片だけを通す。隠れる画素のピクセルシェーダー
+        // (6テクスチャ + 6レンダーターゲット書き込み)がまるごと省ける。
+        //
+        // 【頂点シェーダーはm_GBufferVertexShaderを共有する】プリパスとG-Bufferで頂点の
+        // 変換結果が1ulpでもずれると深度が一致せず、GREATER_EQUALのテストを通らずに
+        // その面がまるごと消える。写して2本にすると最適化の差で容易にずれる。
+        // 不透明マテリアル用はピクセルシェーダーを持たない(nullptr = 段ごと省く)
+        std::unique_ptr<RHI::IRHIShader> m_DepthPrepassCutoutPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassPipelineStateMirrored;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineStateMirrored;
+        // プリパスを走らせるか。オーバードローが小さいシーンでは、増えるジオメトリ1周ぶんが
+        // 省けるピクセルシェーダーより高くつくため切れるようにしてある
+        bool m_DepthPrepassEnabled = Defaults::DepthPrepassEnabled;
+
         // --- メッシュシェーダー版のジオメトリパス(Shaders/3D/GBufferMeshlet.hlsl) ---------
         //
         // 増幅シェーダーがメッシュレット単位で錐台・法線コーンのカリングを行い、

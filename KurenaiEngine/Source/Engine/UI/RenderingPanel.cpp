@@ -25,6 +25,10 @@ namespace Kurenai::UI
         {
             DrawAOSection();
         }
+        if (ImGui::CollapsingHeader("ジオメトリ###Geometry"))
+        {
+            DrawGeometrySection();
+        }
         if (ImGui::CollapsingHeader("メッシュレット###Meshlet"))
         {
             DrawMeshletSection();
@@ -146,6 +150,25 @@ namespace Kurenai::UI
             KurenaiEngine3D::kLightTileCapacity);
     }
 
+    void RenderingPanel::DrawGeometrySection()
+    {
+        BeginParamGroup();
+
+        CheckboxEx(
+            "深度プリパスを使う###DepthPrepass", &m_Engine.m_DepthPrepassEnabled, Defaults::DepthPrepassEnabled,
+            "G-Bufferを描く前に不透明ジオメトリの深度だけを先に埋め、隠れる画素の"
+            "ピクセルシェーダー(6テクスチャのサンプルと6枚のレンダーターゲットへの書き込み)を"
+            "早期Zで省く。ジオメトリを1周ぶん余計に描くのと引き換えなので、"
+            "オーバードローが小さいシーンでは損になる。\n\n"
+            "【絵は変わらない】深度が等しい最前面の断片だけを通すので、書かれる値は同じ。"
+            "実測(Sponza / 1280x720 / DX11)でビット一致を確認している。\n\n"
+            "実測(Sponza): GBuffer 14.11ms が GBuffer 6.62ms + DepthPrepass 1.42ms になった"
+            "(同フレームのTonemap比で0.671倍)。この内訳からこのシーンのオーバードローは2.05倍。\n\n"
+            "「メッシュレット描画」が有効な間は自動で止まる(深度が一致する保証が無いため)");
+
+        EndParamGroup();
+    }
+
     void RenderingPanel::DrawMeshletSection()
     {
         ImGui::TextWrapped(
@@ -171,9 +194,15 @@ namespace Kurenai::UI
 
         CheckboxEx(
             "メッシュレット描画を有効にする###EnableMeshlet", &m_Engine.m_MeshletRenderingEnabled, true,
+            // 【深度プリパスと併用されない】理由は下のツールチップ本文と
+            // KurenaiEngine3D側のmeshletPathActiveのコメント
+            // 【深度プリパスと併用されない】プリパスは頂点シェーダー経路で深度を書くため、
+            // メッシュレット描画が有効な間はプリパスごと止まる(KurenaiEngine3D側のmeshletPathActive)。
             "無効にすると従来の頂点シェーダー + DrawIndexedで描く。"
             "切り替えても見た目は一致するはずで、変わる場合はメッシュシェーダー側の変換が"
-            "頂点シェーダーとずれている");
+            "頂点シェーダーとずれている。\n\n"
+            "【有効な間は深度プリパスが止まる】プリパスは頂点シェーダー経路で深度を書くため、"
+            "メッシュシェーダーで描いたG-Bufferと深度が一致する保証が無い");
 
         CheckboxEx(
             "メッシュレットを色分けして表示###MeshletDebugView", &m_Engine.m_MeshletDebugViewEnabled, false,

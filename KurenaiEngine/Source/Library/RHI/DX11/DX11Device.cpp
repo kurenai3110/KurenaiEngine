@@ -438,7 +438,9 @@ namespace Kurenai::RHI
         D3D11_DEPTH_STENCIL_DESC depthStencilDesc{};
         depthStencilDesc.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
         depthStencilDesc.DepthWriteMask = desc.DepthWriteEnabled ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-        depthStencilDesc.DepthFunc = desc.ReverseZ ? D3D11_COMPARISON_GREATER : D3D11_COMPARISON_LESS;
+        depthStencilDesc.DepthFunc = desc.ReverseZ
+            ? (desc.DepthAllowEqual ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_GREATER)
+            : (desc.DepthAllowEqual ? D3D11_COMPARISON_LESS_EQUAL : D3D11_COMPARISON_LESS);
         depthStencilDesc.StencilEnable = FALSE;
 
         Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilState;
