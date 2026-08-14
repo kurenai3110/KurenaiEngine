@@ -1239,7 +1239,7 @@ namespace Kurenai
         gbufferWaterPsDesc.EntryPoint = "PSMain";
         m_GBufferWaterPixelShader = m_Device->CreateShader(gbufferWaterPsDesc);
 
-        // 深度プリパス(41.21節)のアルファカットアウト用。頂点シェーダーはG-Bufferと共有する
+        // 深度プリパス(41.22節)のアルファカットアウト用。頂点シェーダーはG-Bufferと共有する
         // (プリパスとG-Bufferで深度が1ulpでもずれると面が消えるため。PSO作成側のコメント参照)
         try
         {
@@ -2453,7 +2453,7 @@ namespace Kurenai
             };
             gbufferPipelineDesc.HasDepthStencil = true;
             gbufferPipelineDesc.ReverseZ = true;
-            // 深度プリパス(41.21節)を通したとき、プリパスが書いた深度と同じ値になる最前面の
+            // 深度プリパス(41.22節)を通したとき、プリパスが書いた深度と同じ値になる最前面の
             // 断片だけを通すため、比較をGREATER_EQUALへ緩める。プリパスを切っていても
             // 不透明G-Bufferでは絵が変わらない(理由はRHIDesc.hのDepthAllowEqualのコメント)ので、
             // 有効/無効でPSOを2組に増やさず常にこちらにしてある
@@ -2511,7 +2511,7 @@ namespace Kurenai
                 }
             }
 
-            // 深度プリパス(41.21節)。G-Bufferとまったく同じ頂点シェーダー・入力レイアウトで
+            // 深度プリパス(41.22節)。G-Bufferとまったく同じ頂点シェーダー・入力レイアウトで
             // 深度だけを書く。レンダーターゲットは持たず、不透明マテリアル用は
             // ピクセルシェーダーそのものを持たない(段ごと省く)。
             //
@@ -6436,7 +6436,7 @@ namespace Kurenai
             m_DDGIUpdateCursor = nextCursor % m_DDGIProbeCount;
         }
 
-        // --- 深度プリパス(41.21節): 不透明ジオメトリの深度だけを先に埋める ---
+        // --- 深度プリパス(41.22節): 不透明ジオメトリの深度だけを先に埋める ---
         //
         // これを通しておくと、次のG-Bufferパスでは最前面の断片だけが深度テストを通り
         // (PSOのDepthAllowEqual)、隠れる画素のピクセルシェーダー ―― 6テクスチャの

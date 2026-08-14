@@ -402,7 +402,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineStateMirrored;
 
-        // --- 深度プリパス(41.21節。Shaders/3D/DepthPrepass.hlsl) ------------------------
+        // --- 深度プリパス(41.22節。Shaders/3D/DepthPrepass.hlsl) ------------------------
         //
         // G-Bufferを描く前に不透明ジオメトリの深度だけを埋め、G-Buffer側の深度比較を
         // GREATER_EQUALにして最前面の断片だけを通す。隠れる画素のピクセルシェーダー
