@@ -69,7 +69,7 @@ namespace Kurenai::RHI
         //   t17      bent normalのG-Buffer(34章)
         //   t18,t19  雲の形状/ディテールの3Dノイズ
         //   t20      大気散乱のSkyView LUT
-        //   t21      DDGIResolveが書いた低解像度の深度(41.23節)
+        //   t21      DDGIResolveが書いた低解像度の深度(41.24節)
         static constexpr uint32_t kTextureSlotCount = 22;
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。

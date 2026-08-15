@@ -18,7 +18,7 @@
 // このシェーダーは雲を自分で評価しない。雲はSkyCloud.hlsl(低解像度の専用パス)が評価し、
 // 結果を「透過率 + 事前乗算済み散乱光」としてSkyCloudTexture(t18)から受け取る(PSMain参照)。
 // マクロを定義しないことでSky.hlsli側の3Dテクスチャ宣言が消え、t18/t19が空く。
-// このシェーダーはt0〜t20を使い切っている(RHIのkTextureSlotCount=21)ため、
+// このシェーダーはt0〜t21を使い切っている(RHIのkTextureSlotCount=22)ため、
 // この2枠の解放がそのままSkyCloudTextureの置き場所になっている
 #include "Sky.hlsli"
 
@@ -172,7 +172,7 @@ Texture2D SkyCloudTexture : register(t18);
 // (既定は0=直接呼ぶ。低解像度化は深度をまたぐ滲みを伴う近似のため。DDGIResolve.hlsl冒頭参照)。
 // t19はスカイクラウド分離でt18/t19が空いたうちの残り1枠(このファイル冒頭のコメント参照)
 Texture2D DDGIResolveTexture : register(t19);
-// DDGIResolve.hlslがSV_TARGET1へ書いた「そのテクセルが代表している全解像度の深度」(41.23節)。
+// DDGIResolve.hlslがSV_TARGET1へ書いた「そのテクセルが代表している全解像度の深度」(41.24節)。
 // 【なぜ全解像度の深度(t3)から引き直さないのか】引き直しても同じ値になる ―― 向こうも
 // DataSampler(ポイント)で同じUVを引いている ―― が、4テクセルぶんとなると全解像度側は
 // 2テクセルおきの位置になり1回のGatherにまとまらない。低解像度で持っておけば
@@ -211,7 +211,7 @@ float4 UpsampleDDGI(float2 uv, float centerDepth)
     const float2 baseTexel = floor(uv * resolution - 0.5f);
     const float2 fractional = uv * resolution - 0.5f - baseTexel;
 
-    // 4テクセルぶんの深度を1回で取る(41.23節)。GatherRedが返す並びは
+    // 4テクセルぶんの深度を1回で取る(41.24節)。GatherRedが返す並びは
     // .x=(u0,v1) .y=(u1,v1) .z=(u1,v0) .w=(u0,v0) なので、以降で使う
     // (0,0)(1,0)(0,1)(1,1) の順へ並べ替えると w, z, x, y になる。
     //

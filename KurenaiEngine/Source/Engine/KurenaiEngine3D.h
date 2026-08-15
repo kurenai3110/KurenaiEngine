@@ -789,7 +789,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_DDGIResolvePixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_DDGIResolvePipelineState;
         std::unique_ptr<RHI::IRHITexture> m_DDGIResolveTexture;
-        // 上のパスが2枚目のレンダーターゲットへ書く低解像度の深度(41.23節)。
+        // 上のパスが2枚目のレンダーターゲットへ書く低解像度の深度(41.24節)。
         // 合成側のバイラテラルアップサンプルがGatherRed 1回で4テクセルぶんを取るために使う
         std::unique_ptr<RHI::IRHITexture> m_DDGIResolveDepthTexture;
         // m_SkyCloudWidth/Heightと同じ理由でここへ保存する(パスのビューポート指定に使う)
