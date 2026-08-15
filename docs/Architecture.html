@@ -4818,7 +4818,50 @@ UIから<code>RequestGraphicsAPIChange()</code>が呼ばれるとウィンドウ
 自分の破棄が生んだ<code>WM_QUIT</code>を取り除く。通常の終了経路ではこの後もう誰も
 メッセージを汲まないため、取り除いても影響はない。
 </p>
-<h3>33.4 ログファイルの追記</h3>
+<h3>33.4 超解像(FSR1相当のEASU + RCAS)</h3>
+<p>
+33.1の内部レンダー解像度を下げたぶんを、Presentの単純なバイリニア拡大ではなく
+AMD FidelityFX Super Resolution 1.0 のEASU(方向性エッジ再構成)とRCAS(シャープ化)で
+出力解像度へ再構成する。<code>Shaders/3D/Upscale.hlsl</code>の2つのコンピュートパス
+(<code>UpscaleEASU</code> / <code>UpscaleRCAS</code>)で、Tonemapの後・Presentの前に入る。
+</p>
+<p>
+<strong><code>m_RenderWidth</code> / <code>m_RenderHeight</code>の意味は変えていない。</strong>
+足したのは「出力解像度」(<code>m_UpscaleOutputWidth</code> / <code>m_UpscaleOutputHeight</code>)
+という一段外側の概念だけで、<code>出力解像度 ÷ 品質モードの倍率</code>を
+<code>RequestRenderResolution()</code>へ流し込む関係になっている。こうしてあるため、
+33.1が挙げている「<code>Render()</code>の20箇所ほどから読まれる」参照を
+レンダー解像度と出力解像度へ仕分ける必要が無い。導出結果は<strong>8の倍数へ切り捨てる</strong>——
+LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・SkyCloud/DDGIResolveの1/2解像度が
+いずれも2の冪で割っていくため。
+</p>
+<p>
+出力解像度のテクスチャ(<code>m_UpscaleTexture</code> / <code>m_UpscaleSharpTexture</code>)は
+<code>CreateRenderTargets()</code>ではなく<code>CreateUpscaleTargets()</code>が持つ。
+内部解像度用とは作り直す契機が違う(出力解像度が変わらない限り作り直す必要がない)ためだが、
+GPUがそれらを参照していない状態で作り直す必要があるのは同じなので、
+反映は33.1とまったく同じ枠——<code>Render()</code>先頭の<code>WaitForGPUIdle()</code>の後——で行う。
+</p>
+<p>
+<strong>不変条件が3つある。</strong>
+(1) EASU/RCASは<em>表示レンジの値</em>を前提に設計されているためTonemapの後に置く
+(RCASのリミッタは値域が[0,1]であることを式に埋め込んでいる)。
+(2) 同じ理由でTonemap側のシャープネスと二重になるので、超解像が有効な間は
+<code>TonemapConstants::Sharpness</code>へ0を渡し、シャープ化をRCASへ一本化する。
+(3) EASUのGather4は画面端で入力画像の外を引くため、
+サンプラーのアドレスモードが<strong>Clampでなければならない</strong>
+(<code>m_ScreenSpaceSamplers</code>にはWrapが1つも入らない設計なので構造的に守られる)。
+</p>
+<p>
+デバッグ表示(<code>DebugView::Final</code>以外)を選んでいる間はこの2パスを登録しない。
+中間バッファは内部解像度のまま等倍で見たいためである。
+ImGuiはRenderGraphの外でバックバッファへ直接描かれるため、この拡大の影響を受けない。
+</p>
+<p>
+移植時に参照実装から変えた点(定数の持ち方・ゼロ除算ガード・スレッドの割り当て)と実測は
+<a href="ImplementationHistory.md">ImplementationHistory.md</a> 41.23節。
+</p>
+<h3>33.5 ログファイルの追記</h3>
 <p>
 <code>Logger</code>はログファイルを「そのプロセスで初めて開く接尾辞なら<code>trunc</code>、
 2回目以降は<code>app</code>」で開く。常に<code>trunc</code>にすると
