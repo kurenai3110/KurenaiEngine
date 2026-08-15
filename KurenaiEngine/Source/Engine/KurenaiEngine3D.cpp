@@ -801,6 +801,50 @@ namespace Kurenai
             float BlackPoint;
         };
 
+        // Upscale.hlsl側のcbuffer UpscaleConstantsと一致させる必要がある
+        struct alignas(16) UpscaleConstants
+        {
+            // EASUの事前計算定数。ComputeEasuConstants()が入力/出力解像度から作る
+            DirectX::XMFLOAT4 EasuCon0;
+            DirectX::XMFLOAT4 EasuCon1;
+            DirectX::XMFLOAT4 EasuCon2;
+            DirectX::XMFLOAT4 EasuCon3;
+            // 書き込み先のサイズ(出力解像度)
+            DirectX::XMUINT2 OutputSize;
+            // RCASのシャープネス(ComputeRcasSharpnessScaleで変換済みの線形値)
+            float RcasSharpnessScale;
+            float UpscalePadding;
+        };
+
+        // FSR1のFsrEasuCon()と同じ内容。出力画素の整数座標から入力画像の再構成位置を求めるための
+        // スケール/オフセットと、12タップぶんの4回のGather4の中心へのオフセットを作る。
+        //
+        // 参照実装はこれらをuintへビットキャストして渡すが、それはFP16パック経路(A_HALF)と
+        // 定数を共用するためで、SM5.0でも動く必要がある(=16bitパック経路を使わない)このエンジンでは
+        // floatのまま持つほうがCPU側の構造体と素直に対応する
+        void ComputeEasuConstants(
+            UpscaleConstants& constants, uint32_t inputWidth, uint32_t inputHeight,
+            uint32_t outputWidth, uint32_t outputHeight)
+        {
+            const float inputW = static_cast<float>(inputWidth);
+            const float inputH = static_cast<float>(inputHeight);
+            const float outputW = static_cast<float>(outputWidth);
+            const float outputH = static_cast<float>(outputHeight);
+
+            // 出力の整数座標 → 入力の画素座標。0.5を引いているのはテクセル中心合わせ
+            constants.EasuCon0 = {
+                inputW / outputW,
+                inputH / outputH,
+                0.5f * inputW / outputW - 0.5f,
+                0.5f * inputH / outputH - 0.5f,
+            };
+            // 入力の画素座標 → 正規化UV。zwは12タップの左上ブロック('F'タップ)へのオフセット
+            constants.EasuCon1 = { 1.0f / inputW, 1.0f / inputH, 1.0f / inputW, -1.0f / inputH };
+            // 残り3つのGather中心へのオフセット(いずれも'F'ではなく1つめのGather中心からの相対)
+            constants.EasuCon2 = { -1.0f / inputW, 2.0f / inputH, 1.0f / inputW, 2.0f / inputH };
+            constants.EasuCon3 = { 0.0f, 4.0f / inputH, 0.0f, 0.0f };
+        }
+
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
         // SkyIntegrate.hlsl が書き、SkyGenerate.hlsl / DeferredLighting.hlsl / SSR.hlsl が読む
         // 構造化バッファ(要素数1)の1要素。Sky.hlsliのGPUSkyParametersと完全に一致させること
@@ -1173,6 +1217,11 @@ namespace Kurenai
         , m_InitialSceneIndex(initialSceneIndex)
         , m_RenderWidth(std::max(1u, renderWidth))
         , m_RenderHeight(std::max(1u, renderHeight))
+        // 超解像の出力解像度は、無効なうちは内部レンダー解像度と同じ意味を持つ。
+        // ここを揃えておかないと、UIで初めて超解像を有効にした瞬間に
+        // 出力解像度が既定値(1280x720)へ飛んでしまう
+        , m_UpscaleOutputWidth(std::max(1u, renderWidth))
+        , m_UpscaleOutputHeight(std::max(1u, renderHeight))
     {
         m_ImGuiBackend = m_Device->CreateImGuiBackend(m_Window->GetHandle());
         m_GPUProfiler = m_Device->CreateGPUProfiler();
@@ -1704,6 +1753,27 @@ namespace Kurenai
         tonemapConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         tonemapConstantBufferDesc.SizeInBytes = sizeof(TonemapConstants);
         m_TonemapConstantBuffer = m_Device->CreateBuffer(tonemapConstantBufferDesc);
+
+        // 超解像パス(EASU=拡大、RCAS=シャープ化。どちらもコンピュートシェーダー)。
+        // レンダーターゲットではなくUAVへ書くのでPSOにフォーマットの指定は要らない
+        RHI::ShaderDesc upscaleEasuCsDesc;
+        upscaleEasuCsDesc.Stage = RHI::ShaderStage::Compute;
+        upscaleEasuCsDesc.FilePath = shaderDirectory + L"Upscale.hlsl";
+        upscaleEasuCsDesc.EntryPoint = "CSEASU";
+        m_UpscaleEASUComputeShader = m_Device->CreateShader(upscaleEasuCsDesc);
+        m_UpscaleEASUPipelineState = m_Device->CreateComputePipelineState({ m_UpscaleEASUComputeShader.get() });
+
+        RHI::ShaderDesc upscaleRcasCsDesc;
+        upscaleRcasCsDesc.Stage = RHI::ShaderStage::Compute;
+        upscaleRcasCsDesc.FilePath = shaderDirectory + L"Upscale.hlsl";
+        upscaleRcasCsDesc.EntryPoint = "CSRCAS";
+        m_UpscaleRCASComputeShader = m_Device->CreateShader(upscaleRcasCsDesc);
+        m_UpscaleRCASPipelineState = m_Device->CreateComputePipelineState({ m_UpscaleRCASComputeShader.get() });
+
+        RHI::BufferDesc upscaleConstantBufferDesc;
+        upscaleConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        upscaleConstantBufferDesc.SizeInBytes = sizeof(UpscaleConstants);
+        m_UpscaleConstantBuffer = m_Device->CreateBuffer(upscaleConstantBufferDesc);
 
         // 自動露出パス(輝度ヒストグラムの構築→縮約→時間方向の順応。すべてコンピュートシェーダー)
         RHI::ShaderDesc autoExposureClearCsDesc;
@@ -2918,6 +2988,133 @@ namespace Kurenai
         m_RenderResolutionDirty = true;
     }
 
+    float KurenaiEngine3D::GetUpscaleRatio(UpscaleQualityMode mode)
+    {
+        // FSR1が定義している4段。倍率は「出力の一辺 ÷ 入力の一辺」
+        switch (mode)
+        {
+        case UpscaleQualityMode::UltraQuality: return 1.3f;
+        case UpscaleQualityMode::Quality:      return 1.5f;
+        case UpscaleQualityMode::Balanced:     return 1.7f;
+        case UpscaleQualityMode::Performance:  return 2.0f;
+        default:
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "GetUpscaleRatio: 未知の品質モード(" + std::to_string(static_cast<int>(mode)) +
+                    ")です。Quality(1.5倍)として扱います");
+            return 1.5f;
+        }
+    }
+
+    void KurenaiEngine3D::ComputeUpscaleRenderResolution(
+        uint32_t outputWidth, uint32_t outputHeight, UpscaleQualityMode mode,
+        uint32_t& outRenderWidth, uint32_t& outRenderHeight)
+    {
+        const float ratio = GetUpscaleRatio(mode);
+
+        // 8の倍数へ切り捨てる。LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・
+        // SkyCloud/DDGIResolveの1/2解像度がいずれも2の冪で割っていくため、
+        // 半端な解像度にすると端の1〜2画素の扱いがパスごとにずれる。
+        // 丸めた結果アスペクト比が出力とわずかにずれる(1920x1080の1.7倍で1128x632、
+        // 1.7848対1.7778で0.4%)が、EASUは入力矩形を出力矩形へ写すだけなのでこの差は
+        // 微小な引き伸ばしとして吸収され、視認できない
+        constexpr uint32_t kMinRenderSize = 320;
+        constexpr uint32_t kMinRenderHeight = 180;
+        const uint32_t rawWidth = static_cast<uint32_t>(static_cast<float>(outputWidth) / ratio);
+        const uint32_t rawHeight = static_cast<uint32_t>(static_cast<float>(outputHeight) / ratio);
+        outRenderWidth = std::max(kMinRenderSize, rawWidth & ~7u);
+        outRenderHeight = std::max(kMinRenderHeight, rawHeight & ~7u);
+    }
+
+    float KurenaiEngine3D::ComputeRcasSharpnessScale(float sharpness)
+    {
+        // FSR1のsharpnessは「シャープさを何ストップ(=半分に)落とすか」で、0が最大・大きいほど弱い。
+        // UI側は「0で無効、1で最強」のほうが直感的なので、ここで向きと尺度を変換する。
+        // 2ストップ(=1/4)を弱い側の端にしているのは、それ以上落とすと見た目の変化が無くなるため
+        const float clamped = std::clamp(sharpness, 0.0f, 1.0f);
+        if (clamped <= 0.0f)
+        {
+            // 完全に0のときはlobeごと0になるようにする(exp2(-2)=0.25では弱いシャープが残る)
+            return 0.0f;
+        }
+        return std::exp2(-2.0f * (1.0f - clamped));
+    }
+
+    void KurenaiEngine3D::RequestUpscaleSettings(
+        bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight)
+    {
+        if (outputWidth == 0 || outputHeight == 0)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "RequestUpscaleSettings: 出力解像度" + std::to_string(outputWidth) + "x" +
+                    std::to_string(outputHeight) + "が不正です。要求を無視します");
+            return;
+        }
+
+        m_UpscaleEnabled = enabled;
+        m_UpscaleQualityMode = mode;
+        m_UpscaleOutputWidth = outputWidth;
+        m_UpscaleOutputHeight = outputHeight;
+
+        if (enabled)
+        {
+            uint32_t renderWidth = 0;
+            uint32_t renderHeight = 0;
+            ComputeUpscaleRenderResolution(outputWidth, outputHeight, mode, renderWidth, renderHeight);
+            RequestRenderResolution(renderWidth, renderHeight);
+            // 出力解像度用のテクスチャがまだ無い、またはサイズが変わったときだけ作り直す
+            if (m_UpscaleTargetWidth != outputWidth || m_UpscaleTargetHeight != outputHeight)
+            {
+                m_UpscaleTargetsDirty = true;
+            }
+        }
+        else
+        {
+            // 無効化したときは内部解像度を出力解像度と同じに戻す。こうしないと
+            // 「超解像を切ったのに低解像度のまま」という状態が残る
+            RequestRenderResolution(outputWidth, outputHeight);
+            // 使わなくなったテクスチャは解放する(1080pで約8MBが2枚)
+            if (m_UpscaleTargetWidth != 0 || m_UpscaleTargetHeight != 0)
+            {
+                m_UpscaleTargetsDirty = true;
+            }
+        }
+    }
+
+    void KurenaiEngine3D::CreateUpscaleTargets(uint32_t width, uint32_t height)
+    {
+        // 無効化された場合は解放だけして戻る
+        if (!m_UpscaleEnabled)
+        {
+            m_UpscaleTexture.reset();
+            m_UpscaleSharpTexture.reset();
+            m_UpscaleTargetWidth = 0;
+            m_UpscaleTargetHeight = 0;
+            return;
+        }
+
+        // Tonemapの出力と同じR8G8B8A8_UNorm。EASU/RCASはどちらも表示レンジの値を前提にしており、
+        // ここをHDRフォーマットにしても情報は増えない(入力が既にLDRのため)。
+        //
+        // 【型付きUAVのフォーマット制約には当たらない】このエンジンが各所で注記している
+        // 「R32系しか保証されていない」という制約は型付きUAVからの"読み出し"のもので、
+        // EASU/RCASはUAVへ書くだけである(RCASがEASUの結果を読むのはSRV経由)。
+        // Bloomが同じくR16G16B16A16_FloatのUAVへ書けているのと同じ理屈
+        m_UpscaleTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_UpscaleSharpTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_UpscaleTargetWidth = width;
+        m_UpscaleTargetHeight = height;
+    }
+
+    bool KurenaiEngine3D::IsUpscaleActive() const
+    {
+        // テクスチャの確保に失敗している場合にパスを登録すると、バインドするリソースが無いまま
+        // Dispatchすることになるため、確保済みであることまで条件に入れる
+        return m_UpscaleEnabled && m_UpscaleTexture && m_UpscaleSharpTexture &&
+               m_UpscaleTargetWidth > 0 && m_UpscaleTargetHeight > 0;
+    }
+
     void KurenaiEngine3D::RequestPlanarReflectionResolutionScale(float scale)
     {
         // 0以下はテクスチャが確保できない。上限を1.0(等倍)にしているのは、水面はラフネスが
@@ -3419,8 +3616,14 @@ namespace Kurenai
         if (m_Scene.HasRenderResolutionOverride)
         {
             // 即時に作り直すとGPUがまだ参照しているテクスチャを壊すので、
-            // UIのシステムパネルと同じく要求だけ記録してRender()の先頭で反映させる
-            RequestRenderResolution(m_Scene.RenderWidth, m_Scene.RenderHeight);
+            // UIのシステムパネルと同じく要求だけ記録してRender()の先頭で反映させる。
+            //
+            // 超解像が有効なときはシーンの指定を「出力解像度」として解釈する。シーンが意図して
+            // いるのは「この絵をこの大きさで見せたい」であって内部で何画素描くかではないため。
+            // 超解像が無効ならRequestUpscaleSettingsは中でRequestRenderResolutionを呼ぶだけなので、
+            // 従来とまったく同じ動作になる
+            RequestUpscaleSettings(
+                m_UpscaleEnabled, m_UpscaleQualityMode, m_Scene.RenderWidth, m_Scene.RenderHeight);
         }
         // トーンマップのカーブと空の彩度(アート指定)をシーンから受け取る。
         // Source/LibraryはSource/Engineに依存できないため、Scene側は同じ並びの独立した列挙を持つ。
@@ -4637,7 +4840,8 @@ namespace Kurenai
         //
         // ここはApplyPendingResizeの後、かつこのフレームでm_RenderWidth/m_RenderHeightを
         // 読み始めるより前(最初の読み取りはTAAジッター)なので、解像度をまとめて差し替えてよい
-        if (m_BufferPrecisionDirty || m_RenderResolutionDirty || m_PlanarReflectionResolutionDirty)
+        if (m_BufferPrecisionDirty || m_RenderResolutionDirty || m_PlanarReflectionResolutionDirty ||
+            m_UpscaleTargetsDirty)
         {
             const bool precisionChanged = m_BufferPrecisionDirty;
             m_BufferPrecisionDirty = false;
@@ -4678,6 +4882,33 @@ namespace Kurenai
                 m_RenderHeight = previousHeight;
                 CreateRenderTargets(m_RenderWidth, m_RenderHeight);
                 CreatePlanarReflectionTargets();
+            }
+
+            // 超解像の出力解像度用テクスチャ。内部解像度用とは作り直す契機が違うため
+            // CreateRenderTargetsとは別に持っているが、GPUがそれらを参照していない状態で
+            // 作り直す必要があるのは同じなので、上のWaitForGPUIdle()の後のここで行う
+            if (m_UpscaleTargetsDirty)
+            {
+                m_UpscaleTargetsDirty = false;
+                try
+                {
+                    CreateUpscaleTargets(m_UpscaleOutputWidth, m_UpscaleOutputHeight);
+                }
+                catch (const std::exception& e)
+                {
+                    // 確保できなければ超解像を諦めて等倍表示へ落とす。内部解像度は下がったままだが、
+                    // Presentがバイリニアで拡大するので絵は出続ける(41.23節以前と同じ経路)
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "超解像の出力解像度" + std::to_string(m_UpscaleOutputWidth) + "x" +
+                            std::to_string(m_UpscaleOutputHeight) +
+                            "のテクスチャ作成に失敗したため、超解像を無効にします: " + e.what());
+                    m_UpscaleEnabled = false;
+                    m_UpscaleTexture.reset();
+                    m_UpscaleSharpTexture.reset();
+                    m_UpscaleTargetWidth = 0;
+                    m_UpscaleTargetHeight = 0;
+                }
             }
 
             // カメラのアスペクト比はUpdateスレッドが読み取って反映する(m_RenderAspectの宣言参照)
@@ -7928,12 +8159,16 @@ namespace Kurenai
         RHI::IRHITexture* bloomResultTexture =
             m_BloomUpTextures.empty() ? hdrSceneColor : m_BloomUpTextures[0].get();
 
+        // このフレームで超解像パスを走らせるか。デバッグ表示中は内部解像度の中間バッファを
+        // そのまま等倍で見たいので走らせない(拡大するとバッファの実際の解像度が分からなくなる)
+        const bool upscaleActive = IsUpscaleActive() && m_DebugView == DebugView::Final;
+
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Tonemap",
             .Reads = { hdrSceneColor, m_ExposureTexture.get(), bloomResultTexture },
             .RenderTargets = { m_TonemapTexture.get() },
             .Execute = [this, &gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale,
-                        keyReferenceEV100](RHI::IRHICommandList* cmd)
+                        keyReferenceEV100, upscaleActive](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
                 tonemapConstants.Curve = static_cast<int32_t>(m_TonemapCurve);
@@ -7950,8 +8185,13 @@ namespace Kurenai
                 // 自動露出の測光値ではなくキー照度から求めた基準EVを使う
                 tonemapConstants.MesopicAdaptationEV100 = keyReferenceEV100;
                 // シャープネスはTAAの蓄積で失われた高域を戻すためのものなので、TAAが無効なら0。
-                // そうしないとTAA導入前の絵と変わってしまう
-                tonemapConstants.Sharpness = m_TAAEnabled ? m_TAASharpness : 0.0f;
+                // そうしないとTAA導入前の絵と変わってしまう。
+                //
+                // 【超解像が有効なときも0にする】ここのシャープネスは内部レンダー解像度で効く。
+                // その後EASUで拡大すると、戻した高域もオーバーシュートの縁も一緒に引き伸ばされて
+                // 太い縁取りになる。超解像時のシャープ化は出力解像度で効くRCASへ一本化し、
+                // ここは素直なトーンマップ出力をEASUへ渡すことに徹する
+                tonemapConstants.Sharpness = (m_TAAEnabled && !upscaleActive) ? m_TAASharpness : 0.0f;
                 tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(m_RenderWidth);
                 tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(m_RenderHeight);
                 tonemapConstants.BlackPoint = m_TonemapBlackPoint;
@@ -7970,6 +8210,63 @@ namespace Kurenai
                 cmd->Draw(3, 0);
             },
         });
+
+        // --- 超解像パス(41.23節): Tonemapが出したLDR画像を出力解像度へ再構成する ---
+        //
+        // EASU(拡大)とRCAS(シャープ化)を別パスにしているのは、RCASがEASUの結果の
+        // 十字5タップを読むため。1つにまとめると同一リソースのSRV/UAV同時バインドになる。
+        //
+        // ここより後(Present)は出力解像度、ここより前はすべて内部レンダー解像度である。
+        // ImGuiはRenderGraphの外でバックバッファへ直接描かれるため、この拡大の影響を受けない
+        if (upscaleActive)
+        {
+            const uint32_t upscaleOutputWidth = m_UpscaleTargetWidth;
+            const uint32_t upscaleOutputHeight = m_UpscaleTargetHeight;
+
+            UpscaleConstants upscaleConstants{};
+            ComputeEasuConstants(
+                upscaleConstants, m_RenderWidth, m_RenderHeight, upscaleOutputWidth, upscaleOutputHeight);
+            upscaleConstants.OutputSize = { upscaleOutputWidth, upscaleOutputHeight };
+            upscaleConstants.RcasSharpnessScale = ComputeRcasSharpnessScale(m_UpscaleSharpness);
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "UpscaleEASU",
+                .Reads = { m_TonemapTexture.get() },
+                .Writes = { m_UpscaleTexture.get() },
+                .Execute = [this, upscaleConstants, upscaleOutputWidth,
+                            upscaleOutputHeight](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_UpscaleEASUPipelineState.get());
+                    // Gather4のアドレスモードがClampであることがEASUの前提(Upscale.hlslのコメント参照)
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->UpdateBuffer(m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
+                    cmd->SetComputeConstantBuffer(1, m_UpscaleConstantBuffer.get());
+                    cmd->SetComputeTexture(0, m_TonemapTexture.get());
+                    // UAVはDispatch直後に解除されるため毎回バインドし直す
+                    cmd->SetComputeUnorderedAccessTexture(0, m_UpscaleTexture.get());
+                    cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);
+                },
+            });
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "UpscaleRCAS",
+                .Reads = { m_UpscaleTexture.get() },
+                .Writes = { m_UpscaleSharpTexture.get() },
+                .Execute = [this, upscaleConstants, upscaleOutputWidth,
+                            upscaleOutputHeight](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_UpscaleRCASPipelineState.get());
+                    // RCASはLoadで整数座標を引くのでサンプラーは使わないが、シェーダーが
+                    // Samplers.hlsliを取り込んで宣言している以上バインドはしておく
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->UpdateBuffer(m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
+                    cmd->SetComputeConstantBuffer(1, m_UpscaleConstantBuffer.get());
+                    cmd->SetComputeTexture(0, m_UpscaleTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_UpscaleSharpTexture.get());
+                    cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);
+                },
+            });
+        }
 
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
         // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
@@ -7994,8 +8291,20 @@ namespace Kurenai
         switch (m_DebugView)
         {
         case DebugView::Final:
-            // Tonemapパスが既にSSR有効/無効を考慮したHDRソースをLDR変換済みのため、そのまま使う
-            presentSourceTexture = m_TonemapTexture.get();
+            // Tonemapパスが既にSSR有効/無効を考慮したHDRソースをLDR変換済みのため、そのまま使う。
+            // 超解像が有効なときは、その先のRCASまで通した出力解像度の結果へ差し替える。
+            // レターボックスの基準になるpresentSourceWidth/Heightも出力解像度にすること
+            // (ここを内部解像度のままにすると、拡大済みの絵をさらに拡大してしまう)
+            if (upscaleActive)
+            {
+                presentSourceTexture = m_UpscaleSharpTexture.get();
+                presentSourceWidth = m_UpscaleTargetWidth;
+                presentSourceHeight = m_UpscaleTargetHeight;
+            }
+            else
+            {
+                presentSourceTexture = m_TonemapTexture.get();
+            }
             break;
         case DebugView::Albedo:
             presentSourceTexture = m_GBufferAlbedo.get();

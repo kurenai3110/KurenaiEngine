@@ -368,6 +368,66 @@ namespace Kurenai
         // Updateスレッドが毎フレーム読み取ってm_Camera.SetAspectRatio()を呼ぶ
         std::atomic<float> m_RenderAspect{ 1.0f };
 
+        // --- 超解像(FSR1相当のEASU+RCAS。41.23節) ---
+        //
+        // 【m_RenderWidth/m_RenderHeightの意味は変えていない】ここで足したのは
+        // 「出力解像度」という一段外側の概念だけで、上のm_RenderWidth/m_RenderHeightは
+        // 従来どおり「G-Buffer以降すべての中間バッファの解像度」のままである。
+        // 超解像が有効なとき、出力解像度を品質モードの倍率で割った値を
+        // RequestRenderResolution()へ流し込む、という関係になっている。
+        // こうしてあるのは、Render()の各所に散らばるm_RenderWidth/m_RenderHeightの参照を
+        // 「レンダー解像度」と「出力解像度」へ仕分ける必要をなくすため。
+        // 追加のパスはTonemapの後ろに2本足すだけで済んでいる
+        enum class UpscaleQualityMode
+        {
+            UltraQuality, // 1.3倍
+            Quality,      // 1.5倍
+            Balanced,     // 1.7倍
+            Performance,  // 2.0倍
+        };
+        // 品質モードの既定値。EngineDefaults.hは列挙を知らない(<cstdint>しか取り込まない)ため
+        // ここに置くが、「メンバの初期化子とUIの『既定値に戻す』が同じ出所を見る」という
+        // EngineDefaults.hの原則自体は守る
+        static constexpr UpscaleQualityMode kDefaultUpscaleQualityMode = UpscaleQualityMode::Quality;
+
+        bool m_UpscaleEnabled = Defaults::UpscaleEnabled;
+        UpscaleQualityMode m_UpscaleQualityMode = kDefaultUpscaleQualityMode;
+        // RCASのシャープネス(0〜1)。UIの見た目の値で、シェーダーへ渡す前に
+        // ComputeRcasSharpnessScale()で参照実装のスケールへ変換する
+        float m_UpscaleSharpness = Defaults::UpscaleSharpness;
+        // 超解像が有効なときの出力解像度。無効なときは内部レンダー解像度そのものになる。
+        // ウィンドウサイズには追従しない(追従させるとドラッグ中に何度も
+        // レンダーターゲットを作り直すことになる。SystemPanelの「ウィンドウサイズに合わせる」参照)
+        uint32_t m_UpscaleOutputWidth = Defaults::RenderWidth;
+        uint32_t m_UpscaleOutputHeight = Defaults::RenderHeight;
+        // 出力解像度用テクスチャの作り直し要求。m_RenderResolutionDirtyとまったく同じ扱いで、
+        // Render()の先頭のWaitForGPUIdle()を挟んだ位置で処理する
+        bool m_UpscaleTargetsDirty = false;
+        // 実際に確保済みの出力解像度用テクスチャのサイズ。0なら未確保(超解像が無効)
+        uint32_t m_UpscaleTargetWidth = 0;
+        uint32_t m_UpscaleTargetHeight = 0;
+
+        // 品質モードの倍率(1.3 / 1.5 / 1.7 / 2.0)
+        static float GetUpscaleRatio(UpscaleQualityMode mode);
+        // 出力解像度と品質モードから内部レンダー解像度を求める。
+        // 8の倍数へ切り捨てるのは、LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・
+        // SkyCloud/DDGIResolveの1/2解像度がいずれも2の冪で割っていくため。下限は320x180
+        static void ComputeUpscaleRenderResolution(
+            uint32_t outputWidth, uint32_t outputHeight, UpscaleQualityMode mode,
+            uint32_t& outRenderWidth, uint32_t& outRenderHeight);
+        // UIのシャープネス(0〜1)を、シェーダーへ渡す線形スケールへ変換する。
+        // FSR1のsharpnessは「何ストップ弱めるか」で0が最大なので、2^(-2*(1-v)) とする
+        static float ComputeRcasSharpnessScale(float sharpness);
+
+        // 超解像の設定をまとめて要求する(SystemPanel = Renderスレッドから呼ばれる)。
+        // 内部でRequestRenderResolution()を呼ぶだけで、レンダーターゲットの作り直しはしない
+        void RequestUpscaleSettings(
+            bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight);
+        // 出力解像度のテクスチャを作り直す。GPUがそれらを参照していない状態で呼ぶこと
+        void CreateUpscaleTargets(uint32_t width, uint32_t height);
+        // このフレームで超解像パスを走らせるか(有効かつテクスチャが確保済み)
+        bool IsUpscaleActive() const;
+
         // 中間バッファの精度構成。HDRが本来採用したい構成で、Legacy8bitは
         // 「中間バッファはすべてR8G8B8A8_UNorm」にする比較用の経路。
         //
@@ -839,6 +899,18 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_TonemapPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_TonemapTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_TonemapConstantBuffer;
+
+        // 超解像パス(Upscale.hlsl): Tonemapが出したLDR画像を、EASUで出力解像度へ再構成し、
+        // RCASでシャープ化してからPresentへ渡す。2つのテクスチャはどちらも出力解像度で、
+        // 内部解像度用のm_TonemapTextureとは作り直す契機が違うためCreateRenderTargets()の外にある。
+        // 分けているのはRCASがEASUの結果を読むためで、同一リソースのSRV/UAV同時バインドを避ける
+        std::unique_ptr<RHI::IRHIShader> m_UpscaleEASUComputeShader;
+        std::unique_ptr<RHI::IRHIShader> m_UpscaleRCASComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_UpscaleEASUPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_UpscaleRCASPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_UpscaleTexture;      // EASUの出力
+        std::unique_ptr<RHI::IRHITexture> m_UpscaleSharpTexture; // RCASの出力(Presentが読む)
+        std::unique_ptr<RHI::IRHIBuffer> m_UpscaleConstantBuffer;
 
         // トーンマッピングカーブ。Tonemap.hlsl側のCurveと値を一致させること
         enum class TonemapCurve

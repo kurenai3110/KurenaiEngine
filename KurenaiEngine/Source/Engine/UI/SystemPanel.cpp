@@ -142,7 +142,9 @@ namespace Kurenai::UI
         ImGui::TextWrapped(
             "G-Buffer以降すべての中間バッファの解像度。ウィンドウサイズとは独立していて、"
             "表示時はアスペクト比を保ったままウィンドウへ拡大縮小する"
-            "(余る側にレターボックス/ピラーボックスが出る)");
+            "(余る側にレターボックス/ピラーボックスが出る)。"
+            "超解像を有効にすると、下の解像度は「出力解像度」の意味になり、"
+            "実際に描く内部レンダー解像度は品質モードの倍率で割った値が自動で設定される");
 
         BeginParamGroup();
 
@@ -155,13 +157,25 @@ namespace Kurenai::UI
         static_assert(
             IM_ARRAYSIZE(kResolutionNames) == IM_ARRAYSIZE(kResolutionValues), "表示名と値の並びを一致させること");
 
+        // 表示名と値の並びは KurenaiEngine3D::UpscaleQualityMode の宣言順に一致させること。
+        // 倍率の数値はGetUpscaleRatio()が持っているので、ここには表示名しか置かない
+        static const char* kUpscaleQualityNames[] =
+        {
+            "Ultra Quality (1.3x)", "Quality (1.5x)", "Balanced (1.7x)", "Performance (2.0x)"
+        };
+
+        // 超解像が有効なときComboが指すのは出力解像度、無効なときは内部レンダー解像度。
+        // どちらもm_UpscaleOutputWidth/Heightが追いかけているのでこれを見ればよい
+        const uint32_t comboWidth = m_Engine.m_UpscaleOutputWidth;
+        const uint32_t comboHeight = m_Engine.m_UpscaleOutputHeight;
+
         // 一覧に無い解像度(「ウィンドウサイズに合わせる」で設定した場合など)のときは-1のままにする。
         // ImGuiのComboは範囲外のインデックスを空表示として扱うため、そのままでも壊れない
         int resolutionIndex = -1;
         int defaultIndex = 0;
         for (int i = 0; i < IM_ARRAYSIZE(kResolutionValues); ++i)
         {
-            if (kResolutionValues[i][0] == m_Engine.m_RenderWidth && kResolutionValues[i][1] == m_Engine.m_RenderHeight)
+            if (kResolutionValues[i][0] == comboWidth && kResolutionValues[i][1] == comboHeight)
             {
                 resolutionIndex = i;
             }
@@ -171,14 +185,60 @@ namespace Kurenai::UI
             }
         }
 
+        // 変更があった項目に関わらず、最終的にRequestUpscaleSettings()を1回だけ呼ぶ形に統一する。
+        // 出力解像度・品質モード・有効/無効のどれが変わっても内部レンダー解像度の導出をやり直す
+        // 必要があり、経路を分けると片方だけ更新し忘れる
+        bool upscaleEnabled = m_Engine.m_UpscaleEnabled;
+        int qualityIndex = static_cast<int>(m_Engine.m_UpscaleQualityMode);
+        uint32_t outputWidth = comboWidth;
+        uint32_t outputHeight = comboHeight;
+        bool settingsChanged = false;
+
+        if (CheckboxEx(
+                "超解像(FSR1相当)###UpscaleEnabled", &upscaleEnabled, Defaults::UpscaleEnabled,
+                "低い内部解像度で描いた絵を、EASU(方向性エッジ再構成)とRCAS(シャープ化)で"
+                "出力解像度へ拡大する。単純な拡大より精細な絵をより短いフレーム時間で得られるが、"
+                "内部解像度が下がるので絵は変わる。ImGuiは出力解像度でそのまま描かれるためぼけない"))
+        {
+            settingsChanged = true;
+        }
+
         if (ComboEx(
-                "内部レンダー解像度###RenderResolution", &resolutionIndex, kResolutionNames,
-                IM_ARRAYSIZE(kResolutionNames), defaultIndex,
+                upscaleEnabled ? "出力解像度###RenderResolution" : "内部レンダー解像度###RenderResolution",
+                &resolutionIndex, kResolutionNames, IM_ARRAYSIZE(kResolutionNames), defaultIndex,
                 "上げるほど精細になるがVRAM使用量とフレーム時間が増える。"
                 "変更するとレンダーターゲットを作り直すため、TAAの履歴は一度破棄される"))
         {
-            m_Engine.RequestRenderResolution(
-                kResolutionValues[resolutionIndex][0], kResolutionValues[resolutionIndex][1]);
+            outputWidth = kResolutionValues[resolutionIndex][0];
+            outputHeight = kResolutionValues[resolutionIndex][1];
+            settingsChanged = true;
+        }
+
+        if (upscaleEnabled)
+        {
+            if (ComboEx(
+                    "品質モード###UpscaleQualityMode", &qualityIndex, kUpscaleQualityNames,
+                    IM_ARRAYSIZE(kUpscaleQualityNames),
+                    static_cast<int>(KurenaiEngine3D::kDefaultUpscaleQualityMode),
+                    "出力解像度を何倍に拡大するか。倍率が大きいほど内部解像度が下がって速くなるが、"
+                    "細部が失われる。内部解像度は8の倍数へ切り捨てられる"))
+            {
+                settingsChanged = true;
+            }
+
+            SliderFloatEx(
+                "シャープネス###UpscaleSharpness", &m_Engine.m_UpscaleSharpness, 0.0f, 1.0f,
+                Defaults::UpscaleSharpness, "%.2f", 0,
+                "RCASのシャープ化の強さ。0で無効。拡大後の出力解像度で効くため、"
+                "トーンマップ側のシャープネス(ポストプロセスパネルのTAAシャープネス)は"
+                "超解像が有効な間だけ自動的に0になる");
+        }
+
+        if (settingsChanged)
+        {
+            m_Engine.RequestUpscaleSettings(
+                upscaleEnabled, static_cast<KurenaiEngine3D::UpscaleQualityMode>(qualityIndex), outputWidth,
+                outputHeight);
         }
 
         EndParamGroup();
@@ -187,12 +247,19 @@ namespace Kurenai::UI
         {
             // 押した時点の1回きり。以後ウィンドウをリサイズしても内部解像度は追従しない
             // (毎フレーム追従させると、ドラッグ中に何度もレンダーターゲットを作り直すことになる)
-            m_Engine.RequestRenderResolution(m_Engine.GetWidth(), m_Engine.GetHeight());
+            m_Engine.RequestUpscaleSettings(
+                upscaleEnabled, static_cast<KurenaiEngine3D::UpscaleQualityMode>(qualityIndex), m_Engine.GetWidth(),
+                m_Engine.GetHeight());
         }
         ItemHelp(
-            "内部レンダー解像度をウィンドウのクライアント領域と同じにして、拡大縮小の無い等倍表示にする。"
+            "出力解像度をウィンドウのクライアント領域と同じにして、拡大縮小の無い等倍表示にする"
+            "(超解像が無効なら内部レンダー解像度がそのまま等倍になる)。"
             "押した時点で1回だけ適用され、その後のウィンドウリサイズには追従しない");
 
+        if (m_Engine.m_UpscaleEnabled)
+        {
+            ImGui::Text("出力解像度: %u x %u", m_Engine.m_UpscaleOutputWidth, m_Engine.m_UpscaleOutputHeight);
+        }
         ImGui::Text("内部レンダー解像度: %u x %u", m_Engine.m_RenderWidth, m_Engine.m_RenderHeight);
         ImGui::Text("ウィンドウ(クライアント領域): %u x %u", m_Engine.GetWidth(), m_Engine.GetHeight());
     }

@@ -390,6 +390,20 @@ namespace Kurenai::Defaults
     inline constexpr uint32_t RenderWidth = 1280;
     inline constexpr uint32_t RenderHeight = 720;
 
+    // --- 超解像(FSR1相当のEASU+RCAS。41.23節) ---
+    // 有効にすると、上の解像度は「出力解像度」の意味になり、内部レンダー解像度は
+    // 品質モードの倍率で割った値が自動で設定される。トーンマップ後のLDR画像を
+    // EASUで出力解像度へ再構成し、RCASでシャープ化してからPresentへ渡す。
+    // 既定でOFFなのは、有効にすると内部解像度が変わって絵が変わるため。
+    // 「速度と引き換えに絵を変える」判断はユーザーがするものであり、
+    // 深度プリパス(絵が変わらないので既定ON)とはそこが違う
+    inline constexpr bool UpscaleEnabled = false;
+    // RCASのシャープネス(0〜1)。0で無効、1で参照実装の最大。
+    // 内部で 2^(-2*(1-この値)) へ変換して渡す(FSR1のsharpnessは「ストップ数」で、
+    // 0ストップ=最大、大きいほど弱い)。既定の0.25は、
+    // TAAのシャープネス(Defaults::TAASharpness)と同程度の効き方になる値
+    inline constexpr float UpscaleSharpness = 0.25f;
+
     // --- 同期 ---
     inline constexpr bool VSyncEnabled = false;
     inline constexpr bool FixedFPSEnabled = true;
