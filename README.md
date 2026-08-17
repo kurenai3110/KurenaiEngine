@@ -736,6 +736,30 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   各室には半透明のガラス板(`alphaMode=BLEND`)も1枚ずつ立ててあり、半透明にはSSRが効かないため
   プローブの有無がそのまま映り込みの違いとして現れる。
   `Tools/generate_probe_test.py` で再生成できる
+- `Assets/Source/CherryTree/` — 桜(ソメイヨシノ)の満開の木。**メッシュシェーダー(メッシュレット)
+  描画の検証用**に、板ポリゴンの花房カードを十数万枚使う高密度モデルとして作ってある
+  (1本あたり約100万三角形 / メッシュレット約5万個)。乱数シード違いの3個体と地面を
+  `Tools/blender_cherry_tree.py` で再生成できる(Blender 2.82が必要):
+
+  ```
+  Tools\run_blender.ps1 -Script Tools\blender_cherry_tree.py ^
+    -ScriptArgs @("--export","Assets/Source/CherryTree/CherryTree_s1.gltf","--seed","1")
+  Tools\run_blender.ps1 -Script Tools\blender_cherry_tree.py ^
+    -ScriptArgs @("--export-ground","Assets/Source/CherryTree/CherryGround.gltf")
+  ```
+
+  パックするときは**`--force`を付けること**。手続き生成したテクスチャを描き直しても、
+  出力先に`.ktex`が残っていると変換がスキップされ、古いテクスチャのまま描かれます:
+
+  ```
+  Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe --force ^
+    Assets\Source\CherryTree\CherryTree_s1.gltf -o Assets\Packed\CherryTree\CherryTree_s1.kmodel
+  ```
+
+  花房は`alphaMode=MASK`(アルファカットアウト)です。**`BLEND`にしてはいけません** —
+  半透明フォワードパスへ回され、メッシュレット描画の対象外になります。
+  また**エンジンは`CULL_BACK`固定で両面描画を持たない**ため、カードは巻き順と法線を
+  反転した複製を必ず持ちます
 - `Scenes/` — `.kscene`(シーンファイル)。`Assets/`の外にあり**Git管理対象**。
   このうち`BistroInteriorLit.kscene`は、Bistro内装の照明器具の実際の位置に合わせてポイントライトを15灯置き、
   部屋の形に合わせた反射プローブを3個置いたシーンです。反射プローブ・スクリーンスペースシャドウ・
