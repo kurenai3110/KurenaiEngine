@@ -54,10 +54,16 @@ namespace Kurenai::RHI
         // 片側だけ静かに壊れる形になる
         constexpr uint32_t kSamplerSlotCount = 4;
         // 作成できるサンプラーセットの最大数。セットは初期化時にだけ作られ解放されないため、
-        // 用途の種類数(現状はマテリアル用・スクリーン空間用の2つ)に余裕を持たせた値でよい。
+        // 用途の種類数に余裕を持たせた値でよい。
         // シェーダ可視Samplerヒープの上限はD3D12の仕様で2048ディスクリプタ
-        // (D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE)なので、この程度なら十分収まる
-        constexpr uint32_t kMaxSamplerSets = 8;
+        // (D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE)なので、この程度なら十分収まる。
+        //
+        // 内訳: KurenaiEngine3Dが2つ(マテリアル用・スクリーン空間用)、KurenaiEngine2Dが7つ
+        // (スプライトのフィルタ3種×アドレスモード2種を作り置き + DrawText専用の1つ。
+        //  理由はRHI/IRHISamplerSet.h「セットの中身は生成後に書き換えない」)。
+        // 3Dと2Dは別プロセス・別デバイスなので同時に使われることはないが、
+        // 超えるとAllocateBlockが初期化時に例外を投げるため、増やす側に余裕を取っている
+        constexpr uint32_t kMaxSamplerSets = 16;
         // 1フレームあたりに払い出せるSRVテーブルブロック(t0〜t14のkTextureSlotCount個ひと組)の最大数。
         // 1フレーム中の(メッシュ数×パス数)を十分上回る値にしておく。実際に確保するヒープ容量は
         // これのkFrameCount倍(CPUがGPU完了を待たずに次フレームを記録し始めるため、直近kFrameCount

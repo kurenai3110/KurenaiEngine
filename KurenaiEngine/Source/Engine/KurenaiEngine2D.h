@@ -76,7 +76,21 @@ namespace Kurenai
         // ウィンドウサイズが変わっても見えるワールドの範囲は変わらないため、
         // 「1600x900で組んだ盤面を、どのウィンドウサイズでも同じ構図で見せる」用途に使う。
         // (0, 0)を渡すと解除され、クライアント領域をそのまま論理解像度として使う既定へ戻る
-        void SetVirtualResolution(float width, float height);
+        // (このときsnapToIntegerScaleの値は無視される)。
+        //
+        // snapToIntegerScale=trueにすると、拡大率をfloorして整数倍へ落とす(余った分は
+        // レターボックス/ピラーボックスの余白へ回る)。ビューポートの原点も整数へ丸めるため、
+        // 論理解像度の1テクセルが画面の整数個の画素へ正確に対応する。
+        // 【ドット絵にはSetSpriteFilter(Point)と両方が必要】拡大率が実数のままだと、
+        // 点サンプリングにしてもテクセル中心が画素中心からずれて輪郭が滲む。
+        //
+        // 整数倍スナップの制限:
+        // - クライアント領域が論理解像度より小さいと整数倍が取れない(floorが0になる)。
+        //   この場合はスナップせず実数倍へフォールバックする(絵が消えるのを避けるため。
+        //   最初の1回だけログに残す)
+        // - SetCameraZoomと併用する場合、画面上の総拡大率は「整数倍 × ズーム倍率」になる。
+        //   ズームに整数以外を指定すると総拡大率が実数へ戻るため、ドット絵では整数のズームを使うこと
+        void SetVirtualResolution(float width, float height, bool snapToIntegerScale = false);
 
         // クライアント座標(GetClientMousePositionが返す、原点は左上・Y-downのピクセル座標)を
         // ワールド座標(原点は左下・Y-up)へ変換する。カメラ位置・ズーム・論理解像度による
@@ -87,6 +101,23 @@ namespace Kurenai
         void WorldToClient(float worldX, float worldY, float& outClientX, float& outClientY) const;
         // GetClientMousePosition()にClientToWorldを適用した結果
         void GetMouseWorldPosition(float& outWorldX, float& outWorldY) const;
+
+        // --- スプライトのサンプリング方法 ---
+        //
+        // 以後のDrawSprite / DrawSpriteUV / DrawLineに適用される(描画状態として保持されるので、
+        // 呼び出しごとに指定する必要はない)。DrawCircle / DrawRoundedRect / DrawPolylineは
+        // テクスチャを読まないため影響を受けず、DrawTextは常にLinear+Clampの専用サンプラーを使う
+        // (フォントアトラスを点サンプリングにすると文字が汚れるため、ここの設定では変わらない)。
+        //
+        // フレームの途中でも切り替えられる(「盤面のドット絵はPoint、UIの素材はLinear」のように
+        // 1フレーム内で混ぜてよい)。既定はAnisotropic + Wrapで、従来の見た目と同一。
+        //
+        // 無効な値を渡した場合はログを出して呼び出しを無視する
+
+        void SetSpriteFilter(SpriteFilter filter);
+        SpriteFilter GetSpriteFilter() const { return m_SpriteFilter; }
+        void SetSpriteAddressMode(SpriteAddressMode addressMode);
+        SpriteAddressMode GetSpriteAddressMode() const { return m_SpriteAddressMode; }
 
         // x, y はワールド=ピクセル座標(原点は画面左下、Y-up)のスプライト中心位置。
         // width, height はピクセル単位のスプライトサイズ。rotationRadiansはZ軸(画面手前向き)回転。
@@ -100,9 +131,12 @@ namespace Kurenai
         // 複数のアイコンを1枚のアトラスにまとめ、テクスチャの切り替え回数を減らす用途で使う
         // (x, y, width, height, rotationRadians, r, g, b, aの意味はDrawSpriteと同じ)。
         //
-        // 【アトラスを作るときの注意】2Dのサンプラーは繰り返し(Wrap)を使っているため、
-        // 区画をぴったり詰めると縮小表示時に隣の区画の色がにじむ。区画の周囲には
-        // 1px以上の余白(同じ色で埋めたパディング)を入れること
+        // 【アトラスを作るときの注意】既定のアドレスモードは繰り返し(Wrap)なので、
+        // 区画をぴったり詰めると縮小表示時にフィルタのタップが反対側の端へ回り込み、
+        // 隣の区画の色がにじむ。SetSpriteAddressMode(Clamp)にすると回り込み自体は無くなるが、
+        // 【隣接する区画どうしのにじみはClampでも消えない】(タップが反対側へ回らず隣の区画へ
+        // はみ出すだけになる)。どちらの設定でも区画の周囲には1px以上の余白
+        // (同じ色で埋めたパディング)を入れること
         void DrawSpriteUV(
             float x, float y, float width, float height, float rotationRadians,
             TextureHandle texture, float srcU0, float srcV0, float srcU1, float srcV1,
@@ -259,6 +293,12 @@ namespace Kurenai
         float m_VirtualWidth = 0.0f;
         float m_VirtualHeight = 0.0f;
         bool m_HasVirtualResolution = false;
+        bool m_SnapVirtualResolutionToIntegerScale = false;
+        // 整数倍スナップを要求されたがクライアント領域が論理解像度より小さく、実数倍へ
+        // フォールバックしたことを最初の1回だけ知らせるためのフラグ。ComputeViewStateは
+        // constで毎フレーム(かつ座標変換のたびに)呼ばれるため、mutableにして中で立てる
+        // (毎回出すとログが埋まる。m_ClipRectLeakLoggedと同じ方針)
+        mutable bool m_IntegerScaleFallbackLogged = false;
 
         // BeginFrameと座標変換が共有する「そのフレームの実効値」。2か所で別々に計算すると、
         // 片方だけ直したときにマウス座標だけずれるという気付きにくい不整合が起きるため、
@@ -334,8 +374,29 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_QuadIndexBuffer;
 
         // 2Dはスプライトを1枚読むだけなのでs0(MaterialSampler)しか使わない。
-        // スロットの役割はShaders/3D/Samplers.hlsliの定義に揃えてある(Sprite2D.hlsl参照)
-        std::unique_ptr<RHI::IRHISamplerSet> m_SamplerSet;
+        // スロットの役割はShaders/3D/Samplers.hlsliの定義に揃えてある(Sprite2D.hlsl参照)。
+        //
+        // 【セットを作り置きする理由】IRHIDevice::CreateSamplerSetは描画開始前(初期化時)にしか
+        // 呼べない(セットの中身が不変であることが前提の設計。理由はRHI/IRHISamplerSet.h)。
+        // そのためSetSpriteFilter/SetSpriteAddressModeで都度作るわけにはいかず、
+        // フィルタ×アドレスモードの全組み合わせをコンストラクタで作り、
+        // 以後は「どれをバインドするか」の選択だけを行う
+        static constexpr uint32_t kSpriteFilterCount = 3;      // SpriteFilterの要素数
+        static constexpr uint32_t kSpriteAddressModeCount = 2; // SpriteAddressModeの要素数
+        std::unique_ptr<RHI::IRHISamplerSet> m_SpriteSamplerSets[kSpriteFilterCount * kSpriteAddressModeCount];
+        // DrawText専用。フォントアトラスは点サンプリングにすると文字が汚れるため常にLinear、
+        // アトラスの端のセルでタップが反対側へ回り込まないよう常にClampにする
+        std::unique_ptr<RHI::IRHISamplerSet> m_TextSamplerSet;
+        SpriteFilter m_SpriteFilter = SpriteFilter::Anisotropic;      // 既定は従来と同じ
+        SpriteAddressMode m_SpriteAddressMode = SpriteAddressMode::Wrap;
+        // 直近にコマンドリストへバインドしたセット。同じセットの積み直しを省くためだけに持つ
+        // (BeginFrameでnullptrへ戻す)
+        RHI::IRHISamplerSet* m_BoundSamplerSet = nullptr;
+        // m_SpriteSamplerSetsの添字。全組み合わせが作り置きされている前提の単純な計算
+        static uint32_t SpriteSamplerIndex(SpriteFilter filter, SpriteAddressMode addressMode);
+        // samplerSetが既にバインド済みなら何もしない。テクスチャを読む描画(DrawSpriteUV/DrawText)が
+        // Drawの直前に呼ぶ
+        void BindSamplerSet(RHI::IRHISamplerSet* samplerSet);
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_ObjectConstantBuffer;
 

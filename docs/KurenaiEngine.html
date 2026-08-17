@@ -440,10 +440,16 @@ APIを切り替えると<code>Run()</code>が戻ってそのまま終了しま�
         void GetCameraPosition(float&amp; outX, float&amp; outY) const;
         void SetCameraZoom(float zoom);
         float GetCameraZoom() const;
-        void SetVirtualResolution(float width, float height); // (0, 0)で解除
+        // (0, 0)で解除。snapToIntegerScale=trueで拡大率を整数倍へ落とす
+        void SetVirtualResolution(float width, float height, bool snapToIntegerScale = false);
         void ClientToWorld(float clientX, float clientY, float&amp; outWorldX, float&amp; outWorldY) const;
         void WorldToClient(float worldX, float worldY, float&amp; outClientX, float&amp; outClientY) const;
         void GetMouseWorldPosition(float&amp; outWorldX, float&amp; outWorldY) const;
+
+        void SetSpriteFilter(SpriteFilter filter);               // Linear / Anisotropic(既定) / Point
+        SpriteFilter GetSpriteFilter() const;
+        void SetSpriteAddressMode(SpriteAddressMode addressMode); // Wrap(既定) / Clamp
+        SpriteAddressMode GetSpriteAddressMode() const;
 
         void DrawSprite(float x, float y, float width, float height, float rotationRadians,
                          TextureHandle texture, float r, float g, float b, float a);
@@ -508,7 +514,14 @@ HWND GetWindowHandle() const; // 生成したウィンドウのHWND(ScreenToClie
 <li><code>SetVirtualResolution(w, h)</code>は、ワールド座標0〜w・0〜hの範囲がアスペクト比を
 保ったままクライアント領域の中央へ収まるようスケール＋センタリングする。
 「1600x900で組んだ盤面を、どのウィンドウサイズでも同じ構図で見せる」用途に使う。
-<code>(0, 0)</code>を渡すと解除される。</li>
+<code>(0, 0)</code>を渡すと解除される(このとき<code>snapToIntegerScale</code>も落ちる)。</li>
+<li>第3引数<code>snapToIntegerScale=true</code>にすると、拡大率を<code>floor</code>して
+<strong>整数倍</strong>へ落とし、ビューポートの原点も整数へ丸める。これにより論理解像度の
+1テクセルが画面の整数個の画素へ正確に対応する(<strong>ドット絵の整数倍拡大に必要</strong>。
+詳細は3.3節)。余った分はレターボックス/ピラーボックスの余白へ回るため、
+既定の実数倍より表示は一段小さくなる。
+クライアント領域が論理解像度より小さい場合は整数倍が取れないため、
+スナップせず実数倍へフォールバックする(最初の1回だけログに残す)。</li>
 <li>余る側にはレターボックス/ピラーボックスが出る。<strong>この余白はビューポートの外なので、
 そこへ向けて描いたものは投影のクリップで消える</strong>(余白の色は<code>BeginFrame</code>の
 クリア色になる。黒帯にしたい場合は<code>BeginFrame(0, 0, 0)</code>を渡す)。</li>
@@ -519,7 +532,65 @@ HWND GetWindowHandle() const; // 生成したウィンドウのHWND(ScreenToClie
 <code>height - y</code>で変換すると、ズームや論理解像度を使った瞬間にずれる)。</li>
 </ul>
 
-<h3>3.3 使い方</h3>
+<h3>3.3 スプライトのサンプリングとドット絵</h3>
+<p>
+<code>SetSpriteFilter</code> / <code>SetSpriteAddressMode</code> は<strong>描画状態</strong>として
+保持され、以後の <code>DrawSprite</code> / <code>DrawSpriteUV</code> / <code>DrawLine</code> に適用されます
+(呼び出しごとに指定する必要はなく、フレームの途中で何度でも切り替えられます)。
+<code>DrawCircle</code> / <code>DrawRoundedRect</code> / <code>DrawPolyline</code> はテクスチャを
+読まないため影響を受けず、<code>DrawText</code> は<strong>常に専用の Linear + Clamp サンプラー</strong>を
+使います(フォントアトラスを点サンプリングにするとアンチエイリアスが崩れて文字が汚れるため、
+<code>SetSpriteFilter(Point)</code> にしていても文字だけは元のまま描かれます)。
+</p>
+<table>
+<tr><th>値</th><th>意味</th></tr>
+<tr><td><code>SpriteFilter::Anisotropic</code>(既定)</td><td>異方性フィルタリング16x。<strong>ミップ付きテクスチャにしか効かない</strong> — <code>LoadTexture</code>で読んだPNG/BMP等はミップが生成されるので効くが、<code>CreateSolidColorTexture</code>・フォントアトラス・<code>.tga</code>/<code>.dds</code>はミップ1枚なので<code>Linear</code>と同じ結果になる</td></tr>
+<tr><td><code>SpriteFilter::Linear</code></td><td>バイリニア補間</td></tr>
+<tr><td><code>SpriteFilter::Point</code></td><td>最近傍(点)サンプリング。ドット絵向け</td></tr>
+<tr><td><code>SpriteAddressMode::Wrap</code>(既定)</td><td>UVを繰り返す。タイリングするスプライト向け</td></tr>
+<tr><td><code>SpriteAddressMode::Clamp</code></td><td>端のテクセルを引き伸ばす。アトラスの区画を<code>DrawSpriteUV</code>で切り出す場合はこちら</td></tr>
+</table>
+
+<h4>ドット絵を滲ませずに拡大するのに必要な3点</h4>
+<p>
+<strong>どれか1つでも欠けると輪郭が滲みます。</strong>3つは互いに代用できません。
+</p>
+<ol>
+<li><strong><code>SetSpriteFilter(SpriteFilter::Point)</code></strong> —
+補間そのものを止める。これだけでは足りない。</li>
+<li><strong><code>SetSpriteAddressMode(SpriteAddressMode::Clamp)</code></strong> —
+<code>Wrap</code>のままだと、スプライトの外周でフィルタのタップが
+テクスチャの<strong>反対側の端へ回り込む</strong>。実測では、左端に赤・右端に青を置いた
+32x32のスプライトを<code>Linear</code>+<code>Wrap</code>で描くと、左端の色が
+純赤(232, 48, 56)から紫(146, 78, 138)へ引きずられた
+(<code>Clamp</code>では純赤のまま。<code>docs/ImplementationDetail.md</code>参照)。</li>
+<li><strong><code>SetVirtualResolution(w, h, true)</code></strong> —
+拡大率が実数だとテクセル中心が画素中心からずれる。
+1280x720のウィンドウへ論理解像度240x135を収めると拡大率は5.333倍で、
+このとき<strong>点サンプリングにしても</strong>1テクセルが5画素と6画素に割れる
+(実測: 4テクセル角のチェッカーの1マスが21画素と22画素に交互に割れた。
+スナップONでは全マスがきっかり20画素)。</li>
+</ol>
+<p>
+<code>SetCameraZoom</code>と併用する場合、画面上の総拡大率は
+<strong>「整数倍 × ズーム倍率」</strong>になります。ズームに整数以外を指定すると
+総拡大率が実数へ戻るため、ドット絵では整数のズームを使ってください。
+スプライトの中心座標とサイズも整数にしておくこと(0.5刻みの中心だと
+スプライトの端がテクセル境界に乗らず、スナップが効いていても輪郭がずれます)。
+</p>
+
+<h4>ドット絵の画像形式は <code>.tga</code> / <code>.dds</code> にする</h4>
+<p>
+<code>LoadTexture</code> はWIC経由で読む画像(PNG/BMP/JPEG等)に対して
+<strong>ミップマップ生成とBC7圧縮</strong>を行います。BC7は4x4ブロック単位の非可逆圧縮なので、
+色数の少ないドット絵では色が僅かにずれます。
+<code>.tga</code> と <code>.dds</code> だけは「既に圧縮・ミップ済みの配布形式」として
+素通しされるため、無圧縮・ミップ無しのまま届きます。
+<strong>ドット絵はこちらの形式で用意してください</strong>
+(輪郭の位置はどちらでも保たれますが、色を原画どおりにしたい場合は素通しの経路が要ります)。
+</p>
+
+<h3>3.4 使い方</h3>
 <pre><code>#include "KurenaiEngine2D.h"
 #include "KurenaiTypes.h"
 

@@ -37,6 +37,7 @@ namespace
         Camera,      // 7: 2Dカメラ(位置・ズーム・論理解像度)
         Clip,        // 8: クリップ矩形(スクロールするパネル・ネスト)
         Polyline,    // 9: 折れ線(マイター/ベベル接合・半透明)
+        PixelArt,    // 0: ドット絵(点サンプリング・Clamp・整数倍スナップ)
         Count
     };
 
@@ -92,6 +93,7 @@ namespace
         case DemoScene::Camera: return L"7: 2Dカメラ (位置・ズーム・論理解像度)";
         case DemoScene::Clip: return L"8: クリップ矩形 (スクロールするパネル・ネスト)";
         case DemoScene::Polyline: return L"9: 折れ線 (DrawPolyline / DrawLine の比較)";
+        case DemoScene::PixelArt: return L"0: ドット絵 (SetSpriteFilter / SetSpriteAddressMode / 整数倍スナップ)";
         default: return L"(不明なデモ画面)";
         }
     }
@@ -131,16 +133,26 @@ namespace
         float X = 0.0f, Y = 0.0f, Width = 0.0f, Height = 0.0f;
     };
 
-    DrawableRect GetDrawableClientRect(float clientWidth, float clientHeight, float virtualWidth, float virtualHeight)
+    DrawableRect GetDrawableClientRect(
+        float clientWidth, float clientHeight, float virtualWidth, float virtualHeight, bool snapToIntegerScale = false)
     {
         DrawableRect rect{ 0.0f, 0.0f, clientWidth, clientHeight };
         if (virtualWidth > 0.0f && virtualHeight > 0.0f && clientWidth > 0.0f && clientHeight > 0.0f)
         {
-            const float scale = (std::min)(clientWidth / virtualWidth, clientHeight / virtualHeight);
+            float scale = (std::min)(clientWidth / virtualWidth, clientHeight / virtualHeight);
+            if (snapToIntegerScale && std::floor(scale) >= 1.0f)
+            {
+                scale = std::floor(scale); // エンジン側(ComputeViewState)のスナップと同じ式
+            }
             rect.Width = virtualWidth * scale;
             rect.Height = virtualHeight * scale;
             rect.X = (clientWidth - rect.Width) * 0.5f;
             rect.Y = (clientHeight - rect.Height) * 0.5f;
+            if (snapToIntegerScale)
+            {
+                rect.X = std::floor(rect.X);
+                rect.Y = std::floor(rect.Y);
+            }
         }
         return rect;
     }
@@ -150,7 +162,7 @@ namespace
     {
         const std::wstring title = std::wstring(api == GraphicsAPI::DX12 ? L"[DX12] " : L"[DX11] ") + GetSceneTitle(scene);
         DrawScreenText(renderer, drawable.X + 16.0f, drawable.Y + 12.0f, title, 22.0f, 1.0f, 1.0f, 1.0f, 1.0f, true);
-        DrawScreenText(renderer, drawable.X + 16.0f, drawable.Y + 40.0f, L"数字キー: デモ切り替え / Esc: 終了", 16.0f, 0.7f, 0.7f, 0.75f, 1.0f);
+        DrawScreenText(renderer, drawable.X + 16.0f, drawable.Y + 40.0f, L"数字キー1〜9・0: デモ切り替え / Esc: 終了", 16.0f, 0.7f, 0.7f, 0.75f, 1.0f);
     }
 
     void InitSprites(std::array<Sprite, 24>& sprites)
@@ -427,6 +439,219 @@ namespace
         writeU32(0);
         file.write(reinterpret_cast<const char*>(pixels.data()), dataBytes);
         return file.good();
+    }
+
+    // 「0: ドット絵」のデモ用に、32x32のドット絵を32bit無圧縮TGAで書き出す。
+    //
+    // 【なぜPNG/BMPではなくTGAなのか】LoadTextureはWIC経由の画像(PNG/BMP等)に対して
+    // ミップマップ生成とBC7圧縮を行う(RHI/TextureImage.cpp の LoadFromFile)。
+    // BC7は4x4ブロック単位の非可逆圧縮なので、色数の少ないドット絵では色が僅かにずれる。
+    // .tga と .dds だけは「既に圧縮・ミップ済みの配布形式」として素通しされるため、
+    // ドット絵は無圧縮・ミップ無しのまま届く。ドット絵にはこちらを使うこと。
+    //
+    // 絵柄は3つの機能がそれぞれ効いているか分かるように作る:
+    // - 4px角のチェッカー模様: Point と Linear の差が最も出る(拡大すると輪郭がぼける/ぼけない)
+    // - 外周1pxを辺ごとに違う色(左=赤/右=青/上=緑/下=黄): Wrap と Clamp の差が出る。
+    //   Wrapだと外周のフィルタのタップが反対側の辺へ回り込み、赤の隣に青が滲む
+    // - 中央のハードエッジな円: 整数倍でないときに階段の段幅が不均一になるのが見える
+    constexpr uint32_t kPixelArtSize = 32;
+
+    bool WritePixelArtTga(const std::wstring& filePath)
+    {
+        std::vector<uint8_t> pixels(static_cast<size_t>(kPixelArtSize) * kPixelArtSize * 4, 0);
+
+        const auto setPixel = [&pixels](uint32_t x, uint32_t y, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+        {
+            const size_t offset = (static_cast<size_t>(y) * kPixelArtSize + x) * 4;
+            pixels[offset + 0] = b; // TGAはBGRAの順
+            pixels[offset + 1] = g;
+            pixels[offset + 2] = r;
+            pixels[offset + 3] = a;
+        };
+
+        constexpr float kCenter = kPixelArtSize * 0.5f;
+        constexpr float kCircleRadius = 9.0f;
+
+        for (uint32_t y = 0; y < kPixelArtSize; ++y)
+        {
+            for (uint32_t x = 0; x < kPixelArtSize; ++x)
+            {
+                // 4px角のチェッカー(2色)
+                const bool darkCell = ((x / 4) + (y / 4)) % 2 == 0;
+                uint8_t r = darkCell ? 42 : 96;
+                uint8_t g = darkCell ? 48 : 108;
+                uint8_t b = darkCell ? 68 : 140;
+
+                // 中央のハードエッジな円(アンチエイリアス無し。ドット絵なので階段のまま)
+                const float dx = (static_cast<float>(x) + 0.5f) - kCenter;
+                const float dy = (static_cast<float>(y) + 0.5f) - kCenter;
+                if (dx * dx + dy * dy <= kCircleRadius * kCircleRadius)
+                {
+                    r = 240;
+                    g = 168;
+                    b = 48;
+                }
+
+                // 外周1pxは辺ごとに色を変える。角は左右を優先する(どちらでもよいが決めておく)
+                if (x == 0) { r = 232; g = 48; b = 56; }                          // 左=赤
+                else if (x == kPixelArtSize - 1) { r = 48; g = 112; b = 232; }    // 右=青
+                else if (y == 0) { r = 64; g = 208; b = 96; }                     // 上=緑
+                else if (y == kPixelArtSize - 1) { r = 232; g = 208; b = 48; }    // 下=黄
+
+                setPixel(x, y, r, g, b, 255);
+            }
+        }
+
+        std::ofstream file(filePath, std::ios::binary);
+        if (!file)
+        {
+            return false;
+        }
+
+        // 18バイトのTGAヘッダー(無圧縮トゥルーカラー・32bit・左上原点)
+        const uint8_t header[18] = {
+            0,    // IDフィールドの長さ
+            0,    // カラーマップ無し
+            2,    // 画像タイプ: 無圧縮トゥルーカラー
+            0, 0, 0, 0, 0, // カラーマップ仕様(未使用)
+            0, 0, // X原点
+            0, 0, // Y原点
+            static_cast<uint8_t>(kPixelArtSize & 0xFF), static_cast<uint8_t>(kPixelArtSize >> 8),
+            static_cast<uint8_t>(kPixelArtSize & 0xFF), static_cast<uint8_t>(kPixelArtSize >> 8),
+            32,   // 1画素32bit
+            0x28, // 下位4bit=アルファ8bit, bit5=左上原点(立てないとボトムアップ扱いで上下が反転する)
+        };
+        file.write(reinterpret_cast<const char*>(header), sizeof(header));
+        file.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+        return file.good();
+    }
+
+    // 「0: ドット絵」のデモ。ドット絵向けの3つの設定を個別に入り切りして、
+    // どれが欠けても輪郭が滲むことを見せる
+    struct PixelArtDemoState
+    {
+        SpriteFilter Filter = SpriteFilter::Point;
+        SpriteAddressMode AddressMode = SpriteAddressMode::Clamp;
+        bool SnapToIntegerScale = true;
+    };
+
+    // このデモが使う論理解像度。1280x720に対して5.33倍という【割り切れない】拡大率になるよう
+    // 選んである(1280/240 = 5.333...)。整数倍スナップを切ると、拡大率が実数のままなので
+    // 点サンプリングにしても1テクセルが5画素と6画素に割れて階段が不均一になる
+    constexpr float kPixelArtVirtualWidth = 240.0f;
+    constexpr float kPixelArtVirtualHeight = 135.0f;
+
+    const wchar_t* GetSpriteFilterName(SpriteFilter filter)
+    {
+        switch (filter)
+        {
+        case SpriteFilter::Linear: return L"Linear";
+        case SpriteFilter::Anisotropic: return L"Anisotropic";
+        case SpriteFilter::Point: return L"Point";
+        default: return L"(不明)";
+        }
+    }
+
+    // 論理解像度とスナップの設定をエンジンへ流し込む。切り替え直後にも反映が要るため、
+    // 更新処理と画面へ入った時の両方から呼ぶ
+    void ApplyPixelArtViewSettings(KurenaiEngine2D& renderer, const PixelArtDemoState& state)
+    {
+        renderer.SetVirtualResolution(kPixelArtVirtualWidth, kPixelArtVirtualHeight, state.SnapToIntegerScale);
+    }
+
+    void UpdatePixelArtDemo(KurenaiEngine2D& renderer, PixelArtDemoState& state)
+    {
+        // Fでフィルタを巡回(Point → Linear → Anisotropic → Point)
+        if (renderer.WasKeyPressed('F'))
+        {
+            switch (state.Filter)
+            {
+            case SpriteFilter::Point: state.Filter = SpriteFilter::Linear; break;
+            case SpriteFilter::Linear: state.Filter = SpriteFilter::Anisotropic; break;
+            default: state.Filter = SpriteFilter::Point; break;
+            }
+        }
+
+        // Cでアドレスモードを切り替え
+        if (renderer.WasKeyPressed('C'))
+        {
+            state.AddressMode =
+                (state.AddressMode == SpriteAddressMode::Clamp) ? SpriteAddressMode::Wrap : SpriteAddressMode::Clamp;
+        }
+
+        // Vで整数倍スナップを入り切り。論理解像度は入れたまま拡大率の丸めだけを変えるので、
+        // 「スナップだけが効いているか」を単独で見られる
+        if (renderer.WasKeyPressed('V'))
+        {
+            state.SnapToIntegerScale = !state.SnapToIntegerScale;
+            ApplyPixelArtViewSettings(renderer, state);
+        }
+
+        // Rでドット絵向けの推奨設定(Point + Clamp + 整数倍スナップ)へ戻す
+        if (renderer.WasKeyPressed('R'))
+        {
+            state = PixelArtDemoState{};
+            ApplyPixelArtViewSettings(renderer, state);
+        }
+    }
+
+    void DrawPixelArtDemo(
+        KurenaiEngine2D& renderer, const PixelArtDemoState& state, TextureHandle pixelArt, const DrawableRect& drawable)
+    {
+        if (!pixelArt.IsValid())
+        {
+            renderer.DrawText(
+                kPixelArtVirtualWidth * 0.5f, kPixelArtVirtualHeight * 0.5f,
+                L"ドット絵用のTGAを用意できなかったため、このデモは無効です",
+                10.0f, 0.88f, 0.90f, 0.96f, 1.0f, true);
+            return;
+        }
+
+        renderer.SetSpriteFilter(state.Filter);
+        renderer.SetSpriteAddressMode(state.AddressMode);
+
+        // 32pxの元絵を1倍・2倍・3倍で並べる。位置とサイズはすべて整数にしておく
+        // (中心座標が0.5刻みだとスプライトの端がテクセル境界に乗らず、
+        //  整数倍スナップが効いていても輪郭がずれる)
+        struct Placement
+        {
+            float CenterX, CenterY, Scale;
+        };
+        // 隣どうしを8px以上離しておく。詰めるとWrap時に「隣のスプライトの辺の滲み」と
+        // 「自分の辺の回り込み」が繋がって見え、どちらが原因か分からなくなる
+        const Placement placements[] = {
+            { 40.0f, 74.0f, 1.0f },  // ワールドx 24〜56
+            { 96.0f, 74.0f, 2.0f },  // ワールドx 64〜128
+            { 184.0f, 74.0f, 3.0f }, // ワールドx 136〜232
+        };
+
+        for (const Placement& placement : placements)
+        {
+            const float size = kPixelArtSize * placement.Scale;
+            renderer.DrawSprite(
+                placement.CenterX, placement.CenterY, size, size, 0.0f, pixelArt, 1.0f, 1.0f, 1.0f, 1.0f);
+            renderer.DrawText(
+                placement.CenterX, placement.CenterY - size * 0.5f - 7.0f,
+                std::to_wstring(static_cast<int>(placement.Scale)) + L"倍 (" +
+                    std::to_wstring(static_cast<int>(size)) + L"px)",
+                8.0f, 0.70f, 0.74f, 0.82f, 1.0f);
+        }
+
+        // 操作説明と現在の設定。ドット絵と同じ拡大率で文字を出すと読めないため、
+        // HUDは画面へ貼り付ける(DrawTextは常にLinear+Clampなので設定の影響を受けない)
+        const std::wstring info =
+            std::wstring(L"F: フィルタ [") + GetSpriteFilterName(state.Filter) + L"]" +
+            L"   C: アドレスモード [" + (state.AddressMode == SpriteAddressMode::Clamp ? L"Clamp" : L"Wrap") + L"]" +
+            L"   V: 整数倍スナップ [" + (state.SnapToIntegerScale ? L"ON" : L"OFF") + L"]" +
+            L"   R: 推奨設定へ戻す\n" +
+            L"論理解像度 240x135 / クライアント " + std::to_wstring(static_cast<int>(renderer.GetWidth())) + L"x" +
+                std::to_wstring(static_cast<int>(renderer.GetHeight())) + L" → 拡大率 " +
+                FormatFloat(drawable.Width / kPixelArtVirtualWidth) + L"倍\n" +
+            L"Point + Clamp + スナップONで輪郭が最も締まる。1つでも欠けると滲む\n" +
+            L"(Wrapにすると外周1pxで左の赤と右の青、上の緑と下の黄が互いに滲む)";
+        DrawScreenText(
+            renderer, drawable.X + 16.0f, drawable.Y + drawable.Height - 108.0f, info, 17.0f,
+            0.88f, 0.90f, 0.96f, 1.0f, false, TextAlign::Left, TextVerticalAlign::Top);
     }
 
     // 「5: テクスチャアトラス」のデモ
@@ -1010,7 +1235,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             atlasTexture = renderer.LoadTexture(moduleDirectory + L"DemoAtlas.bmp");
         }
 
+        // ドット絵のデモ用。BC7圧縮とミップ生成を通さないTGAで用意する(WritePixelArtTga参照)
+        TextureHandle pixelArtTexture;
+        if (WritePixelArtTga(moduleDirectory + L"DemoPixelArt.tga"))
+        {
+            pixelArtTexture = renderer.LoadTexture(moduleDirectory + L"DemoPixelArt.tga");
+        }
+
         CameraDemoState cameraDemo{};
+        PixelArtDemoState pixelArtDemo{};
         ClipDemoState clipDemo{};
         // クリップのデモの寸法(更新と描画で共有する)
         constexpr float kClipListHeight = 340.0f;
@@ -1035,28 +1268,49 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 renderer.Close();
             }
 
-            // 数字キー'1'〜でデモ画面を切り替える
+            // 数字キーでデモ画面を切り替える。'1'〜'9'が1〜9番目で、10番目だけ'0'に割り当てる
+            // (画面が10個になり、'1'+9では ':' になってしまうため)
             for (int i = 0; i < static_cast<int>(DemoScene::Count); ++i)
             {
-                if (renderer.WasKeyPressed('1' + i))
+                const int key = (i < 9) ? ('1' + i) : ('0' + (i - 9));
+                if (!renderer.WasKeyPressed(key))
                 {
-                    const DemoScene next = static_cast<DemoScene>(i);
-                    if (scene == DemoScene::Camera && next != DemoScene::Camera)
-                    {
-                        // カメラのデモを抜けるときはズームと論理解像度を戻す。カメラ状態は
-                        // エンジン側が保持し続けるため、戻さないと他のデモ画面がずれたままになる
-                        // (カメラ位置は下のループで毎フレーム入れ直している)
-                        cameraDemo = CameraDemoState{};
-                        renderer.SetVirtualResolution(0.0f, 0.0f);
-                        renderer.SetCameraZoom(1.0f);
-                    }
-                    else if (next == DemoScene::Camera && scene != DemoScene::Camera)
-                    {
-                        // 論理解像度(800x600)の中央から始める
-                        renderer.SetCameraPosition(kVirtualWidth * 0.5f, kVirtualHeight * 0.5f);
-                    }
-                    scene = next;
+                    continue;
                 }
+
+                const DemoScene next = static_cast<DemoScene>(i);
+                if (next == scene)
+                {
+                    continue;
+                }
+
+                // 【画面を抜けるときに必ず戻すこと】論理解像度・ズーム・スプライトのサンプラー設定は
+                // エンジン側が描画状態として保持し続けるため、戻さないと他のデモ画面がずれたまま・
+                // 滲んだままになる(カメラ位置は下のループで毎フレーム入れ直している)
+                if (scene == DemoScene::Camera)
+                {
+                    cameraDemo = CameraDemoState{};
+                    renderer.SetVirtualResolution(0.0f, 0.0f);
+                    renderer.SetCameraZoom(1.0f);
+                }
+                else if (scene == DemoScene::PixelArt)
+                {
+                    renderer.SetVirtualResolution(0.0f, 0.0f);
+                    renderer.SetSpriteFilter(SpriteFilter::Anisotropic); // 既定へ戻す
+                    renderer.SetSpriteAddressMode(SpriteAddressMode::Wrap);
+                }
+
+                if (next == DemoScene::Camera)
+                {
+                    // 論理解像度(800x600)の中央から始める
+                    renderer.SetCameraPosition(kVirtualWidth * 0.5f, kVirtualHeight * 0.5f);
+                }
+                else if (next == DemoScene::PixelArt)
+                {
+                    ApplyPixelArtViewSettings(renderer, pixelArtDemo);
+                }
+
+                scene = next;
             }
 
             const float width = static_cast<float>(renderer.GetWidth());
@@ -1088,12 +1342,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 UpdateCameraDemo(renderer, cameraDemo, deltaTime);
             }
+            else if (scene == DemoScene::PixelArt)
+            {
+                UpdatePixelArtDemo(renderer, pixelArtDemo);
+            }
             else if (scene == DemoScene::Clip)
             {
                 UpdateClipDemo(renderer, clipDemo, kClipListHeight, kClipItemHeight * kClipItemCount);
             }
 
-            if (scene != DemoScene::Camera)
+            if (scene == DemoScene::PixelArt)
+            {
+                // ドット絵のデモは論理解像度(240x135)の中央に固定する。カメラ中心を論理解像度の
+                // ちょうど中央に置くことで、ワールド座標0〜240がビューポートへ過不足なく収まる
+                renderer.SetCameraPosition(kPixelArtVirtualWidth * 0.5f, kPixelArtVirtualHeight * 0.5f);
+            }
+            else if (scene != DemoScene::Camera)
             {
                 // カメラのデモ以外は既定の見え方(クライアント領域を過不足なく映す)に固定する。
                 // 一度SetCameraPositionを呼ぶとウィンドウサイズへの自動追従が止まるため、
@@ -1102,9 +1366,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             }
 
             // HUDを置ける範囲(レターボックスの余白の外へ描くとクリップされる)
-            const DrawableRect drawable = (scene == DemoScene::Camera && cameraDemo.UseVirtualResolution)
-                ? GetDrawableClientRect(width, height, kVirtualWidth, kVirtualHeight)
-                : GetDrawableClientRect(width, height, 0.0f, 0.0f);
+            DrawableRect drawable = GetDrawableClientRect(width, height, 0.0f, 0.0f);
+            if (scene == DemoScene::Camera && cameraDemo.UseVirtualResolution)
+            {
+                drawable = GetDrawableClientRect(width, height, kVirtualWidth, kVirtualHeight);
+            }
+            else if (scene == DemoScene::PixelArt)
+            {
+                drawable = GetDrawableClientRect(
+                    width, height, kPixelArtVirtualWidth, kPixelArtVirtualHeight, pixelArtDemo.SnapToIntegerScale);
+            }
 
             renderer.BeginFrame(0.08f, 0.08f, 0.12f);
 
@@ -1141,6 +1412,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 break;
             case DemoScene::Polyline:
                 DrawPolylineDemo(renderer, width, height);
+                break;
+            case DemoScene::PixelArt:
+                DrawPixelArtDemo(renderer, pixelArtDemo, pixelArtTexture, drawable);
                 break;
             default:
                 break;
