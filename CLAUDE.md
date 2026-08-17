@@ -4,6 +4,20 @@
 文字コード・worktree運用・コミットの作法)は `~/.claude/CLAUDE.md` にある。
 ここにはKurenaiEngineでしか成り立たない前提だけを書く。
 
+# 手順はスキルに置いてある(読まずに自己流でやらない)
+
+このリポジトリが持つのは、KurenaiEngine固有の手順だけ。
+
+| やること | スキル |
+|---|---|
+| ビルドと起動 | `build-run` |
+| HLSLの一括コンパイル検証(マージ後・PR取り込み後・`.hlsl`編集後) | `shader-check` |
+| 描画結果のA/B比較 | `ab-compare` |
+| 実在の風景・建物を参考画像に近づける | `reference-match` |
+
+アプリの起動・撮影・入力(`verify-app`)、コミットとPR(`commit-flow`)、worktreeの棚卸し
+(`worktree-audit`)、コードベースの調査(`graphify`)は**横断スキル**で、`~/.claude/skills/` にある。
+
 # 構成とビルド
 
 - **DX11とDX12の両対応**。`Source/Library/RHI/` のRHI抽象化層で吸収しており、
@@ -78,6 +92,9 @@
   **`~/.claude/` にあり、このリポジトリには入っていない**。worktreeを作ってもどのプロジェクトを
   開いても効くようにするため。`git clean -xdf` 等で消さないよう注意する。
   別PCへの引き継ぎは `kurenai-claude-config` リポジトリの `Install-ClaudeConfig.ps1` で行う
-- このリポジトリがGit管理するのは、**このファイルと `.claude/skills/build-run` だけ**。
+- このリポジトリがGit管理するのは、**このファイルと `.claude/skills/` 配下の固有スキル
+  (`build-run` / `shader-check` / `ab-compare` / `reference-match`)だけ**。
   worktreeやcloneに自動で付いてくる必要があるプロジェクト固有の情報だから
-- `.claude/settings.local.json`(PCごとの許可リスト)と `.worktrees/` は `.gitignore` 対象
+- `.claude/settings.local.json`(PCごとの許可リスト)、worktreeの実体(`.worktrees/` と
+  `.claude/worktrees/` の両方。PCによって置き場所が違う)、
+  動作確認・解析用の使い捨てスクリプト置き場(`Claude/`)は `.gitignore` 対象
