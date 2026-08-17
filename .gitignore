@@ -31,11 +31,18 @@ __pycache__/
 /graphify-out/
 /.graphifyignore
 
-# worktreeの実体(PCごとのローカルな作業コピー。ブランチはoriginに置く)
+# worktreeの実体(PCごとのローカルな作業コピー。ブランチはoriginに置く)。
+# 置き場所はPCによって違う。EnterWorktreeツールは .claude/worktrees/ に作る
+# (このPCの実測で9.97GB / 13543ファイル。除外を書き忘れるとコミット対象に入る)
 /.worktrees/
+/.claude/worktrees/
 
 # Claude Codeのローカル状態(PCごとに異なる許可リスト等)。
 # 横断的なClaude資産(skills/agents/hooks/Tools・共通CLAUDE.md)は ~/.claude/ にあり、
 # そもそもこのリポジトリには存在しない。ここが管理するのはプロジェクト固有の
-# CLAUDE.md と .claude/skills/build-run だけで、worktreeやcloneに付いてくる必要がある
+# CLAUDE.md と .claude/skills/ 配下のスキルだけで、worktreeやcloneに付いてくる必要がある
 /.claude/settings.local.json
+
+# 動作確認・解析用のスクリプトと、その出力(PNG/CSV/__pycache__)。
+# 使い捨ての検証用でありプロジェクトの成果物ではないため管理しない
+/Claude/
