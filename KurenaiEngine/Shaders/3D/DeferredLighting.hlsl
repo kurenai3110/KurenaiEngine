@@ -18,7 +18,7 @@
 // このシェーダーは雲を自分で評価しない。雲はSkyCloud.hlsl(低解像度の専用パス)が評価し、
 // 結果を「透過率 + 事前乗算済み散乱光」としてSkyCloudTexture(t18)から受け取る(PSMain参照)。
 // マクロを定義しないことでSky.hlsli側の3Dテクスチャ宣言が消え、t18/t19が空く。
-// このシェーダーはt0〜t20を使い切っている(RHIのkTextureSlotCount=21)ため、
+// このシェーダーはt0〜t21を使い切っている(RHIのkTextureSlotCount=22)ため、
 // この2枠の解放がそのままSkyCloudTextureの置き場所になっている
 #include "Sky.hlsli"
 
@@ -172,6 +172,12 @@ Texture2D SkyCloudTexture : register(t18);
 // (既定は0=直接呼ぶ。低解像度化は深度をまたぐ滲みを伴う近似のため。DDGIResolve.hlsl冒頭参照)。
 // t19はスカイクラウド分離でt18/t19が空いたうちの残り1枠(このファイル冒頭のコメント参照)
 Texture2D DDGIResolveTexture : register(t19);
+// DDGIResolve.hlslがSV_TARGET1へ書いた「そのテクセルが代表している全解像度の深度」(41.24節)。
+// 【なぜ全解像度の深度(t3)から引き直さないのか】引き直しても同じ値になる ―― 向こうも
+// DataSampler(ポイント)で同じUVを引いている ―― が、4テクセルぶんとなると全解像度側は
+// 2テクセルおきの位置になり1回のGatherにまとまらない。低解像度で持っておけば
+// 隣り合う4テクセルなのでGatherRed 1回で済む(UpsampleDDGI参照)
+Texture2D DDGIResolveDepthTexture : register(t21);
 
 // グローバルIBLの拡散イラディアンス(t8)・プリフィルタ済み鏡面(t9)・プローブのプリフィルタ済み
 // 鏡面キューブマップ配列(t12)・プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・
@@ -205,36 +211,40 @@ float4 UpsampleDDGI(float2 uv, float centerDepth)
     const float2 baseTexel = floor(uv * resolution - 0.5f);
     const float2 fractional = uv * resolution - 0.5f - baseTexel;
 
-    float4 accumulated = float4(0.0f, 0.0f, 0.0f, 0.0f);
-    float totalWeight = 0.0f;
+    // 4テクセルぶんの深度を1回で取る(41.24節)。GatherRedが返す並びは
+    // .x=(u0,v1) .y=(u1,v1) .z=(u1,v0) .w=(u0,v0) なので、以降で使う
+    // (0,0)(1,0)(0,1)(1,1) の順へ並べ替えると w, z, x, y になる。
+    //
+    // 【ループにも配列にもしないこと】ここを[unroll]ループ + 添字アクセスで書くと、
+    // ローカル配列でもfloat4の添字でもfxcのコンパイル時間が爆発する
+    // (41.20節と同じ罠。実際にこのシェーダーのコンパイルが数十秒延びた)。
+    // 4本しかないので4成分のベクタ演算として素直に展開する ―― 重みの計算も
+    // 4本まとめて1命令ずつになるため、展開したほうが実行時も速い
+    const float4 tapDepth = DDGIResolveDepthTexture.GatherRed(DataSampler, uv).wzxy;
 
-    [unroll]
-    for (uint i = 0; i < 4; ++i)
-    {
-        const float2 offset = float2(float(i & 1u), float((i >> 1u) & 1u));
-        const float2 tapUV = (baseTexel + offset + 0.5f) * texelSize;
+    // バイリニアの重み。上の並び順に合わせて (1-fx)(1-fy), fx(1-fy), (1-fx)fy, fx*fy
+    const float2 wx = float2(1.0f - fractional.x, fractional.x);
+    const float2 wy = float2(1.0f - fractional.y, fractional.y);
+    float4 weight = float4(wx.x * wy.x, wx.y * wy.x, wx.x * wy.y, wx.y * wy.y);
 
-        // バイリニアの重み
-        const float2 axisWeight = lerp(1.0f - fractional, fractional, offset);
-        float weight = axisWeight.x * axisWeight.y;
+    // 深度の近さ。相対差2%で概ね1/e。輪郭以外ではほぼ1になり、通常のバイリニアと一致する
+    const float4 relativeDifference = abs(tapDepth - centerDepth) / max(centerDepth, 1e-6f);
+    weight *= exp(-relativeDifference * 50.0f);
+    // 背景(depth<=0)のテクセルはDDGIを持たないので必ず落とす。
+    // 重み0で足すのは「足さない」と厳密に同じ(0倍して加えても和は変わらない)
+    weight = (tapDepth > 0.0f) ? weight : 0.0f;
 
-        // 深度の近さ。背景(depth<=0)のテクセルはDDGIを持たないので必ず落とす
-        const float tapDepth = DepthTexture.SampleLevel(DataSampler, tapUV, 0.0f).r;
-        if (tapDepth <= 0.0f)
-        {
-            continue;
-        }
-        const float relativeDifference = abs(tapDepth - centerDepth) / max(centerDepth, 1e-6f);
-        // 相対差2%で概ね1/e。輪郭以外ではほぼ1になり、通常のバイリニアと一致する
-        weight *= exp(-relativeDifference * 50.0f);
+    const float2 uv00 = (baseTexel + float2(0.0f, 0.0f) + 0.5f) * texelSize;
+    const float2 uv10 = (baseTexel + float2(1.0f, 0.0f) + 0.5f) * texelSize;
+    const float2 uv01 = (baseTexel + float2(0.0f, 1.0f) + 0.5f) * texelSize;
+    const float2 uv11 = (baseTexel + float2(1.0f, 1.0f) + 0.5f) * texelSize;
 
-        if (weight <= 0.0f)
-        {
-            continue;
-        }
-        accumulated += DDGIResolveTexture.SampleLevel(DataSampler, tapUV, 0.0f) * weight;
-        totalWeight += weight;
-    }
+    // 加算の順序は展開前のループ(i=0..3)と同じにしてある。浮動小数の和は順序で結果が変わるため
+    float4 accumulated = DDGIResolveTexture.SampleLevel(DataSampler, uv00, 0.0f) * weight.x;
+    accumulated += DDGIResolveTexture.SampleLevel(DataSampler, uv10, 0.0f) * weight.y;
+    accumulated += DDGIResolveTexture.SampleLevel(DataSampler, uv01, 0.0f) * weight.z;
+    accumulated += DDGIResolveTexture.SampleLevel(DataSampler, uv11, 0.0f) * weight.w;
+    const float totalWeight = weight.x + weight.y + weight.z + weight.w;
 
     // 4テクセルすべてが深度的に遠い(細い輪郭の内側など)。ここでDDGIを0にすると
     // 輪郭に沿って間接光が抜けた黒い縁が出るため、最寄り1テクセルをそのまま採る

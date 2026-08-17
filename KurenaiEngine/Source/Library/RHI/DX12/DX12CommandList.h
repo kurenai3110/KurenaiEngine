@@ -106,7 +106,7 @@ namespace Kurenai::RHI
         // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
         // DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)およびDX11CommandList
         // 側の同名の定数と必ず一致させること
-        static constexpr uint32_t kTextureSlotCount = 21;
+        static constexpr uint32_t kTextureSlotCount = 22;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;

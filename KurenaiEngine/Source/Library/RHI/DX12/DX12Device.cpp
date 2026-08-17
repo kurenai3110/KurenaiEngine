@@ -38,7 +38,7 @@ namespace Kurenai::RHI
         // +bent normalのG-Buffer+雲の3Dノイズ2枚+大気散乱のSkyView LUT)。
         // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
         // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)
-        constexpr uint32_t kTextureSlotCount = 21;
+        constexpr uint32_t kTextureSlotCount = 22;
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
         // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler、s3 = VolumeSampler
         // (役割の定義はShaders/Samplers.hlsli)。どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。

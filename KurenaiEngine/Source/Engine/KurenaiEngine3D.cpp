@@ -1642,7 +1642,13 @@ namespace Kurenai
         ddgiResolvePipelineDesc.VertexShader = m_DDGIResolveVertexShader.get();
         ddgiResolvePipelineDesc.PixelShader = m_DDGIResolvePixelShader.get();
         ddgiResolvePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        ddgiResolvePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        // 2枚目はこのテクセルが代表している全解像度の深度(41.24節)。並びはDDGIResolve.hlslの
+        // PSOutputおよびDDGIResolveパスのRenderTargetsと一致させること。
+        // Reverse-Zの生値をそのまま持つのでR32_Float(合成側の相対差の判定に十分な精度が要る)
+        ddgiResolvePipelineDesc.RenderTargetFormats = {
+            RHI::Format::R16G16B16A16_Float,
+            RHI::Format::R32_Float,
+        };
         m_DDGIResolvePipelineState = m_Device->CreatePipelineState(ddgiResolvePipelineDesc);
 
         // RT反射パス(コンピュートシェーダー。TLASへ鏡面レイを撃ち反射色を求める)。
@@ -2807,6 +2813,11 @@ namespace Kurenai
             m_DDGIResolveHeight = std::max(1u, height / 2);
             m_DDGIResolveTexture = m_Device->CreateRenderTexture(
                 m_DDGIResolveWidth, m_DDGIResolveHeight, RHI::Format::R16G16B16A16_Float);
+            // 上のパスが同時に書く「そのテクセルが代表している全解像度の深度」(41.24節)。
+            // 合成側(DeferredLighting.hlsl)がGatherRed 1回で4テクセルぶんを取るためのもので、
+            // t19と同じ理由で常に確保する(t21を空のままにできない)
+            m_DDGIResolveDepthTexture = m_Device->CreateRenderTexture(
+                m_DDGIResolveWidth, m_DDGIResolveHeight, RHI::Format::R32_Float);
             // RT反射はコンピュートシェーダーがUAVで書くため、レンダーターゲットではなくUAVテクスチャを作る。
             // 非対応環境ではパス自体が実行されないので確保しない
             if (m_RaytracingAvailable)
@@ -7276,7 +7287,9 @@ namespace Kurenai
                     m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
                     m_GBufferDepth.get(), m_GBufferNormal.get(),
                 },
-                .RenderTargets = { m_DDGIResolveTexture.get() },
+                // 2枚目は合成側のGatherRed用の低解像度深度(41.24節)。
+                // 並びはDDGIResolve.hlslのPSOutputおよびPSOのRenderTargetFormatsと一致させること
+                .RenderTargets = { m_DDGIResolveTexture.get(), m_DDGIResolveDepthTexture.get() },
                 .Execute = [this, ddgiResolveViewport](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(ddgiResolveViewport);
@@ -7312,7 +7325,7 @@ namespace Kurenai
                 // (パスが登録されないフレームでは書き手が居ないので依存も張られない)
                 m_SkyCloudTexture.get(),
                 // 同じく低解像度で評価済みのDDGI。DDGIResolveパスより後に順序付けさせる
-                m_DDGIResolveTexture.get(),
+                m_DDGIResolveTexture.get(), m_DDGIResolveDepthTexture.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
             // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
@@ -7364,6 +7377,8 @@ namespace Kurenai
                 // 以前はここへ雲の3Dノイズを差していたが、Texture2Dの宣言と型が食い違うため
                 // このテクスチャへ置き換えた
                 cmd->SetTexture(19, m_DDGIResolveTexture.get());
+                // 低解像度の深度(41.24節)。UpsampleDDGIがGatherRed 1回で4テクセルぶんを取る
+                cmd->SetTexture(21, m_DDGIResolveDepthTexture.get());
                 // 大気散乱のSkyView LUT。日中の空の色はここから引く
                 cmd->SetTexture(20, m_SkyViewLUT.get());
                 cmd->Draw(3, 0);
