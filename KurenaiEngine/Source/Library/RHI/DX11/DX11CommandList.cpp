@@ -89,6 +89,49 @@ namespace Kurenai::RHI
         dxViewport.MinDepth = viewport.MinDepth;
         dxViewport.MaxDepth = viewport.MaxDepth;
         m_Context->RSSetViewports(1, &dxViewport);
+
+        // ラスタライザはScissorEnable=TRUE(DX11Device::CreatePipelineState)。
+        // D3D11のシザー矩形の既定は「矩形0本」なので、有効なまま一度も張らないと
+        // 全ピクセルがクリップされて何も映らなくなる。ここで必ずビューポート全体を張ることで、
+        // SetScissorRectを使わない呼び出し側から見た挙動は従来と変わらない。
+        // (D3D12もコマンドリストのリセット直後は矩形0本という同じ危険があり、
+        //  DX12CommandList::SetViewportが同じ方法で塞いでいる)
+        m_CurrentViewport = viewport;
+        m_HasViewport = true;
+        ApplyScissorRect(MakeFullViewportScissorRect(viewport));
+    }
+
+    void DX11CommandList::SetScissorRect(const ScissorRect& rect)
+    {
+        if (!m_HasViewport)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "SetScissorRect: SetViewportより先に呼ばれました。クランプ先のビューポートが"
+                "決まらないため、この呼び出しを無視します");
+            return;
+        }
+        ApplyScissorRect(ClampScissorRectToViewport(rect, m_CurrentViewport));
+    }
+
+    void DX11CommandList::ResetScissorRect()
+    {
+        if (!m_HasViewport)
+        {
+            Core::Logger::Error("DX11", "ResetScissorRect: SetViewportより先に呼ばれました。この呼び出しを無視します");
+            return;
+        }
+        ApplyScissorRect(MakeFullViewportScissorRect(m_CurrentViewport));
+    }
+
+    void DX11CommandList::ApplyScissorRect(const ScissorRect& rect)
+    {
+        D3D11_RECT dxRect{};
+        dxRect.left = rect.Left;
+        dxRect.top = rect.Top;
+        dxRect.right = rect.Right;
+        dxRect.bottom = rect.Bottom;
+        m_Context->RSSetScissorRects(1, &dxRect);
     }
 
     void DX11CommandList::SetPipelineState(IRHIPipelineState* pipelineState)
@@ -98,7 +141,11 @@ namespace Kurenai::RHI
         m_Context->IASetInputLayout(dx11PipelineState->GetInputLayout());
         m_Context->IASetPrimitiveTopology(dx11PipelineState->GetTopology());
         m_Context->VSSetShader(dx11PipelineState->GetVertexShader()->GetVertexShader(), nullptr, 0);
-        m_Context->PSSetShader(dx11PipelineState->GetPixelShader()->GetPixelShader(), nullptr, 0);
+        // ピクセルシェーダーを持たないパイプライン(深度プリパス)ではnullptrを張って
+        // ピクセルシェーダー段を無効化する。前のパスのものが残ると深度だけを書くつもりが
+        // レンダーターゲットへ書き込んでしまう
+        DX11Shader* const dx11PixelShader = dx11PipelineState->GetPixelShader();
+        m_Context->PSSetShader(dx11PixelShader ? dx11PixelShader->GetPixelShader() : nullptr, nullptr, 0);
         m_Context->OMSetDepthStencilState(dx11PipelineState->GetDepthStencilState(), 0);
         m_Context->OMSetBlendState(dx11PipelineState->GetBlendState(), nullptr, 0xFFFFFFFF);
         m_Context->RSSetState(dx11PipelineState->GetRasterizerState());
@@ -251,6 +298,17 @@ namespace Kurenai::RHI
     void DX11CommandList::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
     {
         m_Context->DrawIndexed(indexCount, startIndexLocation, baseVertexLocation);
+    }
+
+    void DX11CommandList::DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+    {
+        (void)threadGroupCountX;
+        (void)threadGroupCountY;
+        (void)threadGroupCountZ;
+        // 上位層はIRHIDevice::SupportsMeshShader()を見て従来の頂点シェーダー描画へ
+        // 分岐する設計のため、ここへ来るのは分岐漏れ
+        Core::Logger::Error(
+            "DX11", "DispatchMesh: DX11はメッシュシェーダーに対応していません。SupportsMeshShader()で分岐してください");
     }
 
     void DX11CommandList::SetComputePipelineState(IRHIPipelineState* pipelineState)

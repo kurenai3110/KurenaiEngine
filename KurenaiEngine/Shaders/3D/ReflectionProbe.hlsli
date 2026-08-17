@@ -125,8 +125,14 @@ float ProbeBoxExitDistance(GPUReflectionProbe probe, float3 worldPos, float3 R)
     const float3 localR = WorldToProbeLocal(R, sinYaw, cosYaw);
 
     // 軸に平行な成分は対応する面と交差しない。0除算のinfをそのまま使うと後段のmaxで0*inf=NaNに
-    // なり得るため、符号を保ったまま絶対値に下限を与えてから逆数を取る
-    const float3 safeR = max(abs(localR), 1e-5f) * ((localR < 0.0f) ? -1.0f : 1.0f);
+    // なり得るため、符号を保ったまま絶対値に下限を与えてから逆数を取る。
+    // sign()は0のとき0を返してしまうため使えない。step(0, x)はx>=0で1・x<0で0なので、
+    // *2-1すれば境界も含めて (localR < 0) ? -1 : 1 と一致する。
+    // 三項演算子で書かないのは、HLSL 2021が「条件はスカラーのみ」に変わりベクタ条件が
+    // エラーになるため(DX12ShaderCompilerは-HV 2018で固定しているので現状は通るが、
+    // この1行のためにその固定を外せなくなるのを避ける。DX11のfxc経路も同じ意味で通る)
+    const float3 signR = step(0.0f, localR) * 2.0f - 1.0f;
+    const float3 safeR = max(abs(localR), 1e-5f) * signR;
     const float3 invR = 1.0f / safeR;
     const float3 planeNegative = (-probe.BoxExtents.xyz - localPos) * invR;
     const float3 planePositive = (probe.BoxExtents.xyz - localPos) * invR;

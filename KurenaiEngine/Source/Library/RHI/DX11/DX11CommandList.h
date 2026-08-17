@@ -18,6 +18,8 @@ namespace Kurenai::RHI
         void ClearRenderTarget(const ClearColor& color) override;
         void ClearDepth(float depth) override;
         void SetViewport(const Viewport& viewport) override;
+        void SetScissorRect(const ScissorRect& rect) override;
+        void ResetScissorRect() override;
         void SetPipelineState(IRHIPipelineState* pipelineState) override;
         void SetVertexBuffer(IRHIBuffer* buffer) override;
         void SetIndexBuffer(IRHIBuffer* buffer) override;
@@ -29,6 +31,7 @@ namespace Kurenai::RHI
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
         void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
+        void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
         void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
@@ -56,7 +59,7 @@ namespace Kurenai::RHI
         // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう。
         // **SetTextureは範囲外スロットも素通しするため、漏れていても描画結果には現れない。**
         //
-        // 【現在の21の内訳】最も多く使うDeferredLighting.hlslがt0〜t20をちょうど使い切る:
+        // 【現在の22の内訳】最も多く使うDeferredLighting.hlslがt0〜t21をちょうど使い切る:
         //   t0〜t7   G-Buffer一式(アルベド/直接光/マテリアル/深度/スカイボックス/AO/自発光/法線)
         //   t8,t9    グローバルIBL(放射照度・プリフィルタ済み鏡面)
         //   t10      BRDF LUT
@@ -66,7 +69,8 @@ namespace Kurenai::RHI
         //   t17      bent normalのG-Buffer(34章)
         //   t18,t19  雲の形状/ディテールの3Dノイズ
         //   t20      大気散乱のSkyView LUT
-        static constexpr uint32_t kTextureSlotCount = 21;
+        //   t21      DDGIResolveが書いた低解像度の深度(41.24節)
+        static constexpr uint32_t kTextureSlotCount = 22;
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
         // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。
@@ -74,6 +78,12 @@ namespace Kurenai::RHI
         // 解放済みのビューをGetResourceで触ってしまうのを防ぐため
         void UnbindPixelSrvForResource(ID3D11Resource* resource);
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_BoundPixelSrvs[kTextureSlotCount];
+
+        // シザー矩形をD3D11へ設定する(SetViewport/SetScissorRect/ResetScissorRectの共通処理)
+        void ApplyScissorRect(const ScissorRect& rect);
+        // SetScissorRect/ResetScissorRectがクランプ先として使う、直近のSetViewportの値
+        Viewport m_CurrentViewport{};
+        bool m_HasViewport = false;
 
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
         ID3D11RenderTargetView* m_CurrentRenderTargetViews[kMaxRenderTargets] = {};

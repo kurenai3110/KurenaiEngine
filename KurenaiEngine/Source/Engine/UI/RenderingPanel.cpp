@@ -25,6 +25,14 @@ namespace Kurenai::UI
         {
             DrawAOSection();
         }
+        if (ImGui::CollapsingHeader("ジオメトリ###Geometry"))
+        {
+            DrawGeometrySection();
+        }
+        if (ImGui::CollapsingHeader("メッシュレット###Meshlet"))
+        {
+            DrawMeshletSection();
+        }
         if (ImGui::CollapsingHeader("シャドウ###Shadow"))
         {
             DrawShadowSection();
@@ -142,6 +150,99 @@ namespace Kurenai::UI
             KurenaiEngine3D::kLightTileCapacity);
     }
 
+    void RenderingPanel::DrawGeometrySection()
+    {
+        BeginParamGroup();
+
+        CheckboxEx(
+            "深度プリパスを使う###DepthPrepass", &m_Engine.m_DepthPrepassEnabled, Defaults::DepthPrepassEnabled,
+            "G-Bufferを描く前に不透明ジオメトリの深度だけを先に埋め、隠れる画素の"
+            "ピクセルシェーダー(6テクスチャのサンプルと6枚のレンダーターゲットへの書き込み)を"
+            "早期Zで省く。ジオメトリを1周ぶん余計に描くのと引き換えなので、"
+            "オーバードローが小さいシーンでは損になる。\n\n"
+            "【絵は変わらない】深度が等しい最前面の断片だけを通すので、書かれる値は同じ。"
+            "実測(Sponza / 1280x720 / DX11)でビット一致を確認している。\n\n"
+            "実測(Sponza): GBuffer 14.11ms が GBuffer 6.62ms + DepthPrepass 1.42ms になった"
+            "(同フレームのTonemap比で0.671倍)。この内訳からこのシーンのオーバードローは2.05倍。\n\n"
+            "「メッシュレット描画」が有効な間は自動で止まる(深度が一致する保証が無いため)");
+
+        EndParamGroup();
+    }
+
+    void RenderingPanel::DrawMeshletSection()
+    {
+        ImGui::TextWrapped(
+            "メッシュを頂点64個・三角形124個までの塊(メッシュレット)に分け、"
+            "増幅シェーダーが塊ごとに錐台カリングと法線コーンによる背面カリングを行ってから、"
+            "生き残った塊だけをメッシュシェーダーがラスタライザへ流す。"
+            "従来の描画はDrawIndexed 1回=メッシュ全体が単位で、画面外の三角形も"
+            "すべてラスタライザまで到達していた。"
+            "タイルドライトカリングと同じく純粋な最適化であり、"
+            "有効/無効で最終画像が変わってはならない");
+
+        if (!m_Engine.m_MeshShaderAvailable)
+        {
+            // 非対応環境(DX11、メッシュシェーダーTier 1未満、bindless非対応)。
+            // 影・反射の手法選択と同じく、選べないものは操作させずに理由だけ示す
+            ImGui::TextWrapped(
+                "この環境ではメッシュシェーダーを使えないため、常に従来の頂点シェーダーで描画する。"
+                "DX12かつメッシュシェーダー Tier 1・シェーダーモデル6.6に対応したGPUが必要");
+            return;
+        }
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "メッシュレット描画を有効にする###EnableMeshlet", &m_Engine.m_MeshletRenderingEnabled, true,
+            // 【深度プリパスと併用されない】理由は下のツールチップ本文と
+            // KurenaiEngine3D側のmeshletPathActiveのコメント
+            // 【深度プリパスと併用されない】プリパスは頂点シェーダー経路で深度を書くため、
+            // メッシュレット描画が有効な間はプリパスごと止まる(KurenaiEngine3D側のmeshletPathActive)。
+            "無効にすると従来の頂点シェーダー + DrawIndexedで描く。"
+            "切り替えても見た目は一致するはずで、変わる場合はメッシュシェーダー側の変換が"
+            "頂点シェーダーとずれている。\n\n"
+            "【有効な間は深度プリパスが止まる】プリパスは頂点シェーダー経路で深度を書くため、"
+            "メッシュシェーダーで描いたG-Bufferと深度が一致する保証が無い");
+
+        CheckboxEx(
+            "メッシュレットを色分けして表示###MeshletDebugView", &m_Engine.m_MeshletDebugViewEnabled, false,
+            "塊ごとに違う色でアルベドを塗る。分割のされ方を目で確かめるためのもので、"
+            "法線・深度・モーションベクターは通常どおり書くため他のパスは破綻しない。"
+            "灰色に見える面はメッシュレットを経由していない(メッシュレットが焼かれていない"
+            "モデル、または水面)。上の「メッシュレット描画」が有効なときだけ効く。"
+            "反射をレイトレーシングにしていると、反射に映る面も同じ色分けになる。"
+            "同じ塊が同じ色で映れば、描画とレイトレーシングが同一のジオメトリを"
+            "見ていることの確認になる");
+
+        EndParamGroup();
+
+        // .kmodelが--no-meshletsで焼かれていると、対応環境でも0のままになる。
+        // 「有効にしたのに何も変わらない」ときの切り分けに要るので数を出しておく
+        size_t meshletCount = 0;
+        size_t meshletMeshCount = 0;
+        size_t meshCount = 0;
+        for (const auto& instance : m_Engine.m_Scene.Instances)
+        {
+            for (const auto& mesh : instance.Model.Meshes)
+            {
+                ++meshCount;
+                meshletCount += mesh.MeshletCount;
+                if (mesh.MeshletCount > 0)
+                {
+                    ++meshletMeshCount;
+                }
+            }
+        }
+        ImGui::Text(
+            "メッシュレット: %zu (メッシュ %zu / %zu が保持)", meshletCount, meshletMeshCount, meshCount);
+        if (meshCount > 0 && meshletMeshCount == 0)
+        {
+            ImGui::TextWrapped(
+                "このシーンのモデルはメッシュレットを持っていない。KurenaiPackerで"
+                "--no-meshletsを付けずに再パックすること");
+        }
+    }
+
     void RenderingPanel::DrawAOSection()
     {
         using AOTechnique = KurenaiEngine3D::AOTechnique;
@@ -212,6 +313,12 @@ namespace Kurenai::UI
             SliderFloatEx(
                 "SSAO 強度###SSAOPower", &m_Engine.m_SSAOPower, 0.1f, 4.0f, Defaults::SSAOPower, "%.3f", 0,
                 "遮蔽率にかける指数。大きいほど陰影が濃くなる");
+            SliderUIntEx(
+                "SSAO サンプル数###SSAOKernelSize", &m_Engine.m_SSAOKernelSize, 1, 16, Defaults::SSAOKernelSize,
+                "1画素あたり半球状に何点サンプリングするか。AOパスのコストはほぼこの数に比例する"
+                "(実測: 16→4でAOパスが5.82ms→2.22ms)。減らすほど遮蔽の推定は粗くなるが、"
+                "画素ごとにカーネルをランダム回転させたうえで後段の4x4ブラーで均すため、"
+                "最終画にどれだけ差が出るかはSSAO半径と間接光の強さ次第");
         }
         else if (m_Engine.m_AOTechnique == AOTechnique::Raytraced)
         {
@@ -486,6 +593,55 @@ namespace Kurenai::UI
             "1フレームの更新プローブ数###DDGIProbesPerFrame", &m_Engine.m_DDGIProbesPerFrame, 1, 64,
             Defaults::DDGIProbesPerFrame,
             "多いほど光の変化への追従が速くなるが、1プローブにつきシーンを6回描くため負荷も比例して上がる");
+
+        // 表示名と値の並びは必ず一致させること(目標フレームレートのComboと同じ作法)
+        static const char* kDDGIUpdateModeNames[] = { "常時更新", "多重バウンスまで焼いて停止", "一巡だけ焼いて停止" };
+        static const KurenaiEngine3D::DDGIUpdateMode kDDGIUpdateModeValues[] = {
+            KurenaiEngine3D::DDGIUpdateMode::Always,
+            KurenaiEngine3D::DDGIUpdateMode::ConvergeThenStop,
+            KurenaiEngine3D::DDGIUpdateMode::OverwriteThenStop,
+        };
+        static_assert(
+            IM_ARRAYSIZE(kDDGIUpdateModeNames) == IM_ARRAYSIZE(kDDGIUpdateModeValues),
+            "表示名と値の並びを一致させること");
+
+        int ddgiUpdateModeIndex = static_cast<int>(m_Engine.m_DDGIUpdateMode);
+        if (ComboEx(
+                "更新モード###DDGIUpdateMode", &ddgiUpdateModeIndex, kDDGIUpdateModeNames,
+                IM_ARRAYSIZE(kDDGIUpdateModeNames), static_cast<int>(KurenaiEngine3D::DDGIUpdateMode::Always),
+                "いつ焼くのをやめるか。どのモードでも時間分割であることは変わらない\n\n"
+                "常時更新: 常に焼き続ける(既定)。ヒステリシスで滑らかに追従する\n"
+                "多重バウンスまで焼いて停止: 太陽・時刻・影・ライト・IBL・自発光が変わらなくなったら、"
+                "ヒステリシスを使わない上書きで4巡してから止める。プローブのキャプチャは前巡の"
+                "アトラスを読むので、巡回するほど間接光のバウンスが積み上がる想定\n"
+                "一巡だけ焼いて停止: 同じく上書きだが1巡で止める。最も速く止まる\n"
+                "【4巡と1巡の差はまだ確認できていない】Sponzaの同一カメラで撮り比べると"
+                "ビット一致だった。バウンスの寄与を分離できる計測方法をまだ持っていないため、"
+                "4は保守的に置いた値である\n\n"
+                "止めている間はプローブ更新のコストがゼロになる"
+                "(実測でGPU 40〜47ms・CPU 30msを占めていた)。"
+                "焼き上がりに影響する状態が変わると自動で再開する"))
+        {
+            m_Engine.m_DDGIUpdateMode = kDDGIUpdateModeValues[ddgiUpdateModeIndex];
+            // 「常時更新へ戻したのに止まったまま」を防ぐ(署名が変わるまで再開しないため)
+            m_Engine.m_DDGIUpdateSuspended = false;
+            m_Engine.m_DDGIStableCycles = 0;
+        }
+
+        CheckboxEx(
+            "1/2解像度で評価する###DDGIHalfResolution", &m_Engine.m_DDGIHalfResolution, Defaults::DDGIHalfResolution,
+            "拡散間接光を内部レンダー解像度の1/2で求め、深度を見てアップサンプルする。"
+            "実測(ProbeTest / 1280x720 / DX11)ではLightingパス23.9msのうちDDGIのサンプリングが"
+            "10.2msを占めていた。\n\n"
+            "【雲の低解像度化と違い厳密ではない】雲は視線方向だけの関数なので低解像度化しても"
+            "数学的に等価だったが、DDGIは面の位置と法線の関数なので、ジオメトリの輪郭をまたぐと"
+            "手前の面の間接光が奥へ滲む。深度を見たアップサンプルで抑えてはいるが近似であり、"
+            "そのため既定は無効");
+
+        if (m_Engine.m_DDGIUpdateSuspended)
+        {
+            ImGui::TextUnformatted("更新状態: 収束したため停止中");
+        }
         ImGui::EndDisabled();
 
         ImGui::Text(
@@ -763,6 +919,13 @@ namespace Kurenai::UI
                 "%.0f m", 0,
                 "雲底から雲頂までの厚み。目安は扁平雲(humilis)が約400m、並雲(mediocris)が約1000m、"
                 "雄大積雲(congestus)が約2500m。厚いほど縦に伸びた入道雲になる");
+            SliderUIntEx(
+                "レイマーチ段数###CloudRaymarchSteps", &m_Engine.m_CloudRaymarchSteps, 1,
+                KurenaiEngine3D::kCloudRaymarchStepsMax, Defaults::CloudRaymarchSteps,
+                "雲底から雲頂までを何段に分けて積分するか。雲パスのコストの主なつまみで、"
+                "1段ごとにウェザーマップのfBm(4オクターブ)と3Dノイズ2枚を引くため、"
+                "コストはほぼこの数に比例する。減らすと雲の内部の階調が段状に粗くなる"
+                "(輪郭ではなく芯の明暗に出る)");
         }
 
         ImGui::SeparatorText("巻雲(高層)");

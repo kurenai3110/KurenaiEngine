@@ -81,7 +81,19 @@ namespace Kurenai
         // 直前のPumpEvents()呼び出し中に押された(エッジ検出)か
         bool WasMouseButtonPressed(MouseButton button) const;
         bool WasKeyPressed(KeyCode key) const;
+        // 直前のPumpEvents()呼び出し中に離された(エッジ検出)か。
+        // 一般的なUIのボタンは「押下→同じボタン上での解放」でクリックを確定する
+        // (押したまま領域外へ出せばキャンセルできる)ため、その判定に使う。
+        // IsMouseButtonDown()の前フレーム値を呼び出し側で保持する方法と違い、
+        // 1回のPumpEvents()の中で押して離した場合も取りこぼさない。
+        // ウィンドウがフォーカスを失った場合、その時点で押されていたものは
+        // 「解放された」として通知される(押しっぱなしで固まらないようにするため)
+        bool WasMouseButtonReleased(MouseButton button) const;
+        bool WasKeyReleased(KeyCode key) const;
         POINT GetClientMousePosition() const;
+        // 直前のPumpEvents()呼び出し中に回転したホイールのノッチ数(WHEEL_DELTA単位)。
+        // 奥へ回すと正。回転していなければ0。高分解能ホイールは1ノッチ未満を刻んで送ってくる
+        float GetMouseWheelDelta() const;
 
         // WAV(PCM)ファイルを読み込み、再生用に登録する
         SoundHandle LoadSound(const std::wstring& filePath);
@@ -90,11 +102,34 @@ namespace Kurenai
         VoiceHandle PlaySound(SoundHandle sound, float volume = 1.0f, bool loop = false);
         // PlaySoundが返したVoiceHandleを指定して再生を即座に停止する。単発再生には通常不要
         void StopSound(VoiceHandle voice);
+        // PlaySoundが返したVoiceHandleの音量を変更する。volumeは0.0〜1.0。
+        // 既に終了済み/無効なハンドルの場合は何もしない。
+        // BGMのフェードイン/フェードアウトは、これを毎フレーム呼ぶことで実現する
+        // (再生位置が先頭へ戻ってしまうStopSound→PlaySoundの繰り返しでは代用できない)
+        void SetVoiceVolume(VoiceHandle voice, float volume);
+        // 全ボイスに掛かるマスター音量。0.0〜1.0。個々のボイスの音量とは掛け算になる。
+        // BGM/SEを個別に調整したい場合は、カテゴリごとにVoiceHandleを覚えておき
+        // SetVoiceVolumeで調整する(エンジンはカテゴリ別のバスを持たない)
+        void SetMasterVolume(float volume);
+        float GetMasterVolume() const;
 
     protected:
         KurenaiEngineBase(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api);
 
         RHI::IRHICommandList* GetCommandList() const;
+
+        // GPUが投入済みのコマンドを実行し終えるまで待つ。
+        //
+        // 【派生クラスのデストラクタは、必ずこれを先頭で呼ぶこと】
+        // 派生クラスのメンバ(レンダーターゲット・頂点バッファ・テクスチャ等のGPUリソース)は
+        // 派生クラスのデストラクタ本体が終わった時点で破棄され、基底の~KurenaiEngineBaseが
+        // 走るのはそのさらに後になる。つまり基底側の待機では派生クラスのリソースには間に合わない。
+        // GPUがまだ参照しているリソースを解放すると、D3D12デバッグレイヤーが
+        // OBJECT_DELETED_WHILE_STILL_IN_USE(EXECUTION ERROR #921)をCORRUPTIONとして
+        // 例外で上げ、終了時にクラッシュする(デバッグレイヤーの有無に関わらず未定義動作)。
+        //
+        // 呼ぶ時点で描画スレッドは停止していること(新たなコマンドが積まれると待機の意味が無い)
+        void WaitForGPUIdle();
 
         // WM_SIZEで記録しておいたリサイズ要求があれば、スワップチェーンへ反映する。
         //

@@ -135,6 +135,41 @@ namespace Kurenai::RHI
         // DX11は同期的なリソース管理のため実質的に即座に返る
         virtual void WaitForGPUIdle() = 0;
 
+        // --- bindless -------------------------------------------------------------------------
+
+        // HLSLのResourceDescriptorHeap(シェーダーモデル6.6)が使えるか。
+        // DX11には存在しないため常にfalse。DX12でもシェーダーモデル・dxcのバージョン・
+        // リソースバインディングTierのいずれかが足りなければfalseになる。
+        //
+        // 上位層はbindlessを前提にした経路へ入る前に必ずこれを確認すること。
+        // falseの場合、下のRegisterBindlessは常にkInvalidBindlessIndexを返す
+        // (SupportsRaytracing()と同じ扱い方。詳細はRHIBindless.h)
+        virtual bool SupportsBindless() const = 0;
+
+        // テクスチャ/バッファのSRVをbindlessヒープへ登録し、シェーダーが使う番号を返す。
+        // 非対応環境・登録失敗時はkInvalidBindlessIndexを返す(例外は投げない)。
+        //
+        // 登録したディスクリプタはリソースが破棄されるまで生き続け、破棄時に自動で返却される。
+        // 同じリソースに対して複数回呼ぶと別々の番号が払い出されて区画を無駄に消費するため、
+        // 呼び出し側は結果を保持して使い回すこと(IRHITexture::GetBindlessIndexで取り出せる)
+        virtual uint32_t RegisterBindless(IRHITexture* texture) = 0;
+        virtual uint32_t RegisterBindless(IRHIBuffer* buffer) = 0;
+
+        // --- メッシュシェーダー ---------------------------------------------------------------
+
+        // 増幅シェーダー/メッシュシェーダーによる描画(DispatchMesh)が使えるか。
+        // DX11には存在しないため常にfalse。DX12でもメッシュシェーダーTier 1未満、
+        // あるいはbindless非対応の環境ではfalseになる
+        // (このエンジンのメッシュシェーダーはジオメトリをbindlessで読むため)。
+        //
+        // falseの環境では従来の頂点シェーダー + DrawIndexedで描くこと
+        virtual bool SupportsMeshShader() const = 0;
+
+        // 増幅シェーダー(任意)+ メッシュシェーダー + ピクセルシェーダーのパイプラインステート。
+        // 入力レイアウトを持たない点以外はCreatePipelineStateと同じ扱いができる。
+        // 非対応環境・作成失敗時はログを出してnullptrを返す(例外は投げない)
+        virtual std::unique_ptr<IRHIPipelineState> CreateMeshPipelineState(const MeshPipelineStateDesc& desc) = 0;
+
         // --- レイトレーシング -----------------------------------------------------------------
 
         // インラインレイトレーシング(HLSLのRayQuery、DXR 1.1)が使えるか。

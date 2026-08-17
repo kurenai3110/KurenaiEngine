@@ -417,7 +417,17 @@ namespace Kurenai::Assets
             const MeshEntry& mesh = meshEntries[i];
             const uint64_t vertexEnd = mesh.VertexOffset + static_cast<uint64_t>(mesh.VertexCount) * sizeof(Vertex);
             const uint64_t indexEnd = mesh.IndexOffset + static_cast<uint64_t>(mesh.IndexCount) * sizeof(uint32_t);
-            if (vertexEnd > geometryPayload.size() || indexEnd > geometryPayload.size())
+            // メッシュレットの3ブロックも同様に検証する。カウントが0の場合はオフセットが
+            // ペイロード末尾を指しうるが、末尾ちょうどは範囲内として扱ってよい(0バイト読む)
+            const uint64_t meshletEnd =
+                mesh.MeshletOffset + static_cast<uint64_t>(mesh.MeshletCount) * sizeof(MeshletEntry);
+            const uint64_t meshletVertexEnd =
+                mesh.MeshletVertexOffset + static_cast<uint64_t>(mesh.MeshletVertexCount) * sizeof(uint32_t);
+            const uint64_t meshletTriangleEnd =
+                mesh.MeshletTriangleOffset + static_cast<uint64_t>(mesh.MeshletTriangleCount) * sizeof(uint32_t);
+            if (vertexEnd > geometryPayload.size() || indexEnd > geometryPayload.size() ||
+                meshletEnd > geometryPayload.size() || meshletVertexEnd > geometryPayload.size() ||
+                meshletTriangleEnd > geometryPayload.size())
             {
                 throw std::runtime_error(
                     "メッシュ[" + std::to_string(i) + "]がジオメトリペイロードの範囲外を参照しています: " + WideToUtf8(geometryPath));
@@ -497,6 +507,11 @@ namespace Kurenai::Assets
             model.RaytracingIndices.reserve(totalIndexCount);
         }
 
+        // メッシュレットのGPUバッファを作るか。デバイスがメッシュシェーダーに対応していない、
+        // あるいは.kmodelが--no-meshletsで焼かれている場合は作らない
+        // (読まれないバッファでVRAMを占有しないため。レイトレーシング用配列と同じ考え方)
+        const bool buildMeshletGeometry = device.SupportsMeshShader();
+
         model.Meshes.reserve(meshEntries.size());
         for (const MeshEntry& mesh : meshEntries)
         {
@@ -507,6 +522,11 @@ namespace Kurenai::Assets
             vertexBufferDesc.SizeInBytes = static_cast<uint32_t>(mesh.VertexCount) * sizeof(Vertex);
             vertexBufferDesc.StrideInBytes = sizeof(Vertex);
             vertexBufferDesc.InitialData = geometryPayload.data() + mesh.VertexOffset;
+            // メッシュシェーダーには入力アセンブラが無く、頂点は自分でバッファから読む。
+            // 同じリソースへ頂点バッファビューとStructuredBuffer<Vertex>のSRVを重ねて張り、
+            // 従来経路とメッシュシェーダー経路で1本の頂点バッファを共有する
+            // (別に複製するとVRAMを二重に食う)
+            vertexBufferDesc.ShaderReadable = buildMeshletGeometry;
             outMesh.VertexBuffer = device.CreateBuffer(vertexBufferDesc);
 
             RHI::BufferDesc indexBufferDesc;
@@ -517,6 +537,39 @@ namespace Kurenai::Assets
             outMesh.IndexBuffer = device.CreateBuffer(indexBufferDesc);
             outMesh.IndexCount = mesh.IndexCount;
             outMesh.VertexCount = mesh.VertexCount;
+
+            // アセットが持つメッシュレット数。GPUバッファを作るかどうか(下)とは独立で、
+            // メッシュシェーダー非対応の環境でもレイトレーシング側が使うため常に控える
+            outMesh.MeshletCount = mesh.MeshletCount;
+
+            if (buildMeshletGeometry && mesh.MeshletCount > 0)
+            {
+                // 3本ともシーン読み込み時に一度書いたら変わらないためStructuredImmutable。
+                // 内容は.kgeomのバイト列そのままで、読み込み後の加工は一切要らない
+                const auto createImmutable = [&](uint64_t offset, uint32_t count, uint32_t stride) {
+                    RHI::BufferDesc desc;
+                    desc.Usage = RHI::BufferUsage::StructuredImmutable;
+                    desc.SizeInBytes = count * stride;
+                    desc.StrideInBytes = stride;
+                    desc.InitialData = geometryPayload.data() + offset;
+                    return device.CreateBuffer(desc);
+                };
+
+                outMesh.MeshletBuffer =
+                    createImmutable(mesh.MeshletOffset, mesh.MeshletCount, sizeof(MeshletEntry));
+                outMesh.MeshletVertexBuffer =
+                    createImmutable(mesh.MeshletVertexOffset, mesh.MeshletVertexCount, sizeof(uint32_t));
+                outMesh.MeshletTriangleBuffer =
+                    createImmutable(mesh.MeshletTriangleOffset, mesh.MeshletTriangleCount, sizeof(uint32_t));
+
+                // メッシュシェーダーはこの4本をResourceDescriptorHeap経由で読む。
+                // 番号は描画時にObjectConstantsへ載せて渡すため、ここで一度だけ登録して
+                // IRHIBuffer側に覚えさせる(GetBindlessIndexで取り出せる)
+                device.RegisterBindless(outMesh.VertexBuffer.get());
+                device.RegisterBindless(outMesh.MeshletBuffer.get());
+                device.RegisterBindless(outMesh.MeshletVertexBuffer.get());
+                device.RegisterBindless(outMesh.MeshletTriangleBuffer.get());
+            }
 
             if (buildRaytracingGeometry)
             {
@@ -534,6 +587,16 @@ namespace Kurenai::Assets
 
                 const auto* indices = reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset);
                 model.RaytracingIndices.insert(model.RaytracingIndices.end(), indices, indices + mesh.IndexCount);
+
+                // ヒットした三角形番号から所属メッシュレットを引くための表。
+                // MeshletEntryのうちTriangleOffsetだけを抜き出して詰める
+                // (理由はRaytracingScene::GetMeshletTriangleOffsetBufferのコメント参照)
+                outMesh.RaytracingMeshletOffset = static_cast<uint32_t>(model.RaytracingMeshletTriangleOffsets.size());
+                const auto* meshlets = reinterpret_cast<const MeshletEntry*>(geometryPayload.data() + mesh.MeshletOffset);
+                for (uint32_t m = 0; m < mesh.MeshletCount; ++m)
+                {
+                    model.RaytracingMeshletTriangleOffsets.push_back(meshlets[m].TriangleOffset);
+                }
             }
 
             outMesh.BaseColorTexture = resolveBaseColorOrMetallicRoughness(mesh.BaseColorTextureIndex);

@@ -166,6 +166,11 @@ namespace Kurenai
         bool ShouldRunRaytracedShadow() const;
         // このフレームでRTAOパスを実行するか。上2つと同じ理由で判定を1か所に集約している
         bool ShouldRunRaytracedAO() const;
+        // このメッシュをメッシュシェーダー経路で描くか。上のShouldRun*と同じく、
+        // 「どのPSOを束ねるか」と「DispatchMeshとDrawIndexedのどちらを積むか」の判断が
+        // ずれると即座に破綻するため、判定を1か所に集約する。
+        // isWaterがtrueのメッシュは常にfalse(理由は実装のコメント参照)
+        bool ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const;
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
         // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
         RHI::IRHITexture* GetActiveAOTexture() const;
@@ -285,6 +290,9 @@ namespace Kurenai
         void TickFrame();
         void RenderThreadMain();
         void Render(const FrameState& frameState);
+        // このフレームの計測値を集計し、集計期間(FrameStatsLogIntervalSeconds)ぶん溜まっていれば
+        // 1行にまとめてログへ出す。Renderスレッドからフレームごとに呼ぶ
+        void LogFrameStatsIfDue(float renderDeltaTime);
         // ProfilerPanel用。m_DeviceはKurenaiEngineBaseのprotectedメンバであり、派生クラスの
         // friendから触れるかどうかはC++の規則の解釈が分かれるため、ここで明示的に橋渡しする
         float GetLastFrameGPUWaitTimeMs() const;
@@ -360,6 +368,66 @@ namespace Kurenai
         // Updateスレッドが毎フレーム読み取ってm_Camera.SetAspectRatio()を呼ぶ
         std::atomic<float> m_RenderAspect{ 1.0f };
 
+        // --- 超解像(FSR1相当のEASU+RCAS。41.23節) ---
+        //
+        // 【m_RenderWidth/m_RenderHeightの意味は変えていない】ここで足したのは
+        // 「出力解像度」という一段外側の概念だけで、上のm_RenderWidth/m_RenderHeightは
+        // 従来どおり「G-Buffer以降すべての中間バッファの解像度」のままである。
+        // 超解像が有効なとき、出力解像度を品質モードの倍率で割った値を
+        // RequestRenderResolution()へ流し込む、という関係になっている。
+        // こうしてあるのは、Render()の各所に散らばるm_RenderWidth/m_RenderHeightの参照を
+        // 「レンダー解像度」と「出力解像度」へ仕分ける必要をなくすため。
+        // 追加のパスはTonemapの後ろに2本足すだけで済んでいる
+        enum class UpscaleQualityMode
+        {
+            UltraQuality, // 1.3倍
+            Quality,      // 1.5倍
+            Balanced,     // 1.7倍
+            Performance,  // 2.0倍
+        };
+        // 品質モードの既定値。EngineDefaults.hは列挙を知らない(<cstdint>しか取り込まない)ため
+        // ここに置くが、「メンバの初期化子とUIの『既定値に戻す』が同じ出所を見る」という
+        // EngineDefaults.hの原則自体は守る
+        static constexpr UpscaleQualityMode kDefaultUpscaleQualityMode = UpscaleQualityMode::Quality;
+
+        bool m_UpscaleEnabled = Defaults::UpscaleEnabled;
+        UpscaleQualityMode m_UpscaleQualityMode = kDefaultUpscaleQualityMode;
+        // RCASのシャープネス(0〜1)。UIの見た目の値で、シェーダーへ渡す前に
+        // ComputeRcasSharpnessScale()で参照実装のスケールへ変換する
+        float m_UpscaleSharpness = Defaults::UpscaleSharpness;
+        // 超解像が有効なときの出力解像度。無効なときは内部レンダー解像度そのものになる。
+        // ウィンドウサイズには追従しない(追従させるとドラッグ中に何度も
+        // レンダーターゲットを作り直すことになる。SystemPanelの「ウィンドウサイズに合わせる」参照)
+        uint32_t m_UpscaleOutputWidth = Defaults::RenderWidth;
+        uint32_t m_UpscaleOutputHeight = Defaults::RenderHeight;
+        // 出力解像度用テクスチャの作り直し要求。m_RenderResolutionDirtyとまったく同じ扱いで、
+        // Render()の先頭のWaitForGPUIdle()を挟んだ位置で処理する
+        bool m_UpscaleTargetsDirty = false;
+        // 実際に確保済みの出力解像度用テクスチャのサイズ。0なら未確保(超解像が無効)
+        uint32_t m_UpscaleTargetWidth = 0;
+        uint32_t m_UpscaleTargetHeight = 0;
+
+        // 品質モードの倍率(1.3 / 1.5 / 1.7 / 2.0)
+        static float GetUpscaleRatio(UpscaleQualityMode mode);
+        // 出力解像度と品質モードから内部レンダー解像度を求める。
+        // 8の倍数へ切り捨てるのは、LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・
+        // SkyCloud/DDGIResolveの1/2解像度がいずれも2の冪で割っていくため。下限は320x180
+        static void ComputeUpscaleRenderResolution(
+            uint32_t outputWidth, uint32_t outputHeight, UpscaleQualityMode mode,
+            uint32_t& outRenderWidth, uint32_t& outRenderHeight);
+        // UIのシャープネス(0〜1)を、シェーダーへ渡す線形スケールへ変換する。
+        // FSR1のsharpnessは「何ストップ弱めるか」で0が最大なので、2^(-2*(1-v)) とする
+        static float ComputeRcasSharpnessScale(float sharpness);
+
+        // 超解像の設定をまとめて要求する(SystemPanel = Renderスレッドから呼ばれる)。
+        // 内部でRequestRenderResolution()を呼ぶだけで、レンダーターゲットの作り直しはしない
+        void RequestUpscaleSettings(
+            bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight);
+        // 出力解像度のテクスチャを作り直す。GPUがそれらを参照していない状態で呼ぶこと
+        void CreateUpscaleTargets(uint32_t width, uint32_t height);
+        // このフレームで超解像パスを走らせるか(有効かつテクスチャが確保済み)
+        bool IsUpscaleActive() const;
+
         // 中間バッファの精度構成。HDRが本来採用したい構成で、Legacy8bitは
         // 「中間バッファはすべてR8G8B8A8_UNorm」にする比較用の経路。
         //
@@ -393,6 +461,54 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_GBufferWaterPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineStateMirrored;
+
+        // --- 深度プリパス(41.22節。Shaders/3D/DepthPrepass.hlsl) ------------------------
+        //
+        // G-Bufferを描く前に不透明ジオメトリの深度だけを埋め、G-Buffer側の深度比較を
+        // GREATER_EQUALにして最前面の断片だけを通す。隠れる画素のピクセルシェーダー
+        // (6テクスチャ + 6レンダーターゲット書き込み)がまるごと省ける。
+        //
+        // 【頂点シェーダーはm_GBufferVertexShaderを共有する】プリパスとG-Bufferで頂点の
+        // 変換結果が1ulpでもずれると深度が一致せず、GREATER_EQUALのテストを通らずに
+        // その面がまるごと消える。写して2本にすると最適化の差で容易にずれる。
+        // 不透明マテリアル用はピクセルシェーダーを持たない(nullptr = 段ごと省く)
+        std::unique_ptr<RHI::IRHIShader> m_DepthPrepassCutoutPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassPipelineStateMirrored;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineStateMirrored;
+        // プリパスを走らせるか。オーバードローが小さいシーンでは、増えるジオメトリ1周ぶんが
+        // 省けるピクセルシェーダーより高くつくため切れるようにしてある
+        bool m_DepthPrepassEnabled = Defaults::DepthPrepassEnabled;
+
+        // --- メッシュシェーダー版のジオメトリパス(Shaders/3D/GBufferMeshlet.hlsl) ---------
+        //
+        // 増幅シェーダーがメッシュレット単位で錐台・法線コーンのカリングを行い、
+        // 生き残った塊だけをメッシュシェーダーがラスタライザへ流す。書き込む先も内容も
+        // 上の通常パスとまったく同じG-Bufferで、ピクセルシェーダーも共有している
+        // (m_GBufferPixelShader)。そのため切り替えても見た目は一致するのが正しい。
+        //
+        // 非対応環境(DX11、メッシュシェーダーTier 1未満、bindless非対応)では
+        // すべてnullptrのままになり、描画側は自動的に従来経路を使う
+        std::unique_ptr<RHI::IRHIShader> m_GBufferAmplificationShader;
+        std::unique_ptr<RHI::IRHIShader> m_GBufferMeshShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletPipelineStateMirrored;
+        // メッシュレットごとに色分けするデバッグ表示。ピクセルシェーダーだけが違う
+        std::unique_ptr<RHI::IRHIShader> m_GBufferMeshletDebugPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletDebugPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletDebugPipelineStateMirrored;
+        // このデバイスがメッシュシェーダーを使えるか(IRHIDevice::SupportsMeshShader()の写し)。
+        // m_DeviceはKurenaiEngineBaseのprotectedメンバで、派生クラスのfriendであるUIパネルから
+        // 触れるかはC++の規則の解釈が分かれるため、m_RaytracingAvailableと同じくここへ控える
+        bool m_MeshShaderAvailable = false;
+        // メッシュレット経路を使うか(ImGuiのレンダリングパネルから切り替える)。
+        // 対応環境では既定で有効。無効にすると従来の頂点シェーダー描画に戻るため、
+        // 見た目の差分を目で比較できる
+        bool m_MeshletRenderingEnabled = true;
+        // メッシュレットごとの色分け表示。m_MeshletRenderingEnabledが有効なときだけ効く
+        bool m_MeshletDebugViewEnabled = false;
+
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
@@ -453,6 +569,15 @@ namespace Kurenai
         std::vector<DirectX::XMFLOAT4> m_SSAOKernel;
         float m_SSAORadius = Defaults::SSAORadius;
         float m_SSAOPower = Defaults::SSAOPower;
+        // 1画素あたりのカーネルサンプル数。SSAOのコストはほぼこれに比例する
+        // (実測でAOパスはジオメトリが画面を占めるシーンで4.8〜11.0msあり、雲を分離した後の
+        //  最大の残りだった)。定数バッファの配列はkSSAOKernelSizeMax(16)で固定のまま、
+        // 実際に回す段数だけをSSAOConstants.Params.wでシェーダへ渡す。
+        //
+        // 【減らすときはカーネルを作り直す】GenerateSSAOKernelはi/kernelSizeで各サンプルの
+        // 長さを決めているため、16本用のカーネルの先頭N本を使うと原点付近の短いサンプルばかりが
+        // 残り、遠距離の遮蔽を拾わなくなる。必ずこの数で生成し直すこと(EnsureSSAOKernel)
+        uint32_t m_SSAOKernelSize = Defaults::SSAOKernelSize;
 
         // SSILパス(Visibility Bitmask): G-BufferのAlbedo/Normal/Depthから遮蔽率と間接拡散光を計算する
         std::unique_ptr<RHI::IRHIShader> m_SSILPixelShader;
@@ -634,6 +759,46 @@ namespace Kurenai
         int32_t m_RTShadowSampleCount = Defaults::RTShadowSampleCount;
         float m_RTShadowSunAngularRadiusDegrees = Defaults::RTShadowSunAngularRadiusDegrees;
 
+        // --- 雲(低解像度の専用パス) ---
+        // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを
+        // 内部レンダー解像度の1/2(面積で1/4)で評価し、「透過率 + 事前乗算済みの散乱光」を書く。
+        // Lightingパスの背景分岐がこれをバイリニアで引いて
+        // SkyColorWithoutClouds(rayDir) * a + rgb を合成する。
+        // 分離の根拠と、太陽・星がフル解像度のまま保たれる理由はShaders/3D/SkyCloud.hlsl冒頭を参照
+        std::unique_ptr<RHI::IRHIShader> m_SkyCloudVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_SkyCloudPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SkyCloudPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_SkyCloudTexture;
+        // m_SkyCloudTextureの実寸(内部レンダー解像度を割った後の値。奇数解像度の切り捨てと
+        // 最低1pxの下限があるため、割り算をその場でやり直さずここへ保存する)。
+        // パスのビューポート指定に使う
+        uint32_t m_SkyCloudWidth = 0;
+        uint32_t m_SkyCloudHeight = 0;
+
+        // --- DDGIの低解像度解決パス ---
+        // 雲と同じくLightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
+        // DDGIの拡散イラディアンスだけを内部レンダー解像度の1/2(面積で1/4)で評価し、
+        // 「rgb=イラディアンス, a=insideWeight」を書く。
+        //
+        // 【雲と違い近似である】雲は視線方向だけの関数で深度に依存しないため、
+        // 低解像度化してバイリニアで引き伸ばしても数学的に等価だった。DDGIは面の位置と
+        // 法線の関数なので、ジオメトリの輪郭をまたぐと手前の間接光が奥へ滲む。
+        // 合成側(DeferredLighting.hlslのUpsampleDDGI)が深度を見たアップサンプルで
+        // 抑えているが、厳密ではない。そのため**既定では無効**にしてある
+        std::unique_ptr<RHI::IRHIShader> m_DDGIResolveVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_DDGIResolvePixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIResolvePipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_DDGIResolveTexture;
+        // 上のパスが2枚目のレンダーターゲットへ書く低解像度の深度(41.24節)。
+        // 合成側のバイラテラルアップサンプルがGatherRed 1回で4テクセルぶんを取るために使う
+        std::unique_ptr<RHI::IRHITexture> m_DDGIResolveDepthTexture;
+        // m_SkyCloudWidth/Heightと同じ理由でここへ保存する(パスのビューポート指定に使う)
+        uint32_t m_DDGIResolveWidth = 0;
+        uint32_t m_DDGIResolveHeight = 0;
+        // DDGIを低解像度パスから引くか。実測(ProbeTest / 1280x720 / DX11)では
+        // Lightingパス23.9msのうちDDGIのサンプリングが10.2msを占めていた
+        bool m_DDGIHalfResolution = Defaults::DDGIHalfResolution;
+
         // --- 大気遠近(height fog / aerial perspective) ---
         // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
         // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
@@ -737,6 +902,18 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_TonemapPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_TonemapTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_TonemapConstantBuffer;
+
+        // 超解像パス(Upscale.hlsl): Tonemapが出したLDR画像を、EASUで出力解像度へ再構成し、
+        // RCASでシャープ化してからPresentへ渡す。2つのテクスチャはどちらも出力解像度で、
+        // 内部解像度用のm_TonemapTextureとは作り直す契機が違うためCreateRenderTargets()の外にある。
+        // 分けているのはRCASがEASUの結果を読むためで、同一リソースのSRV/UAV同時バインドを避ける
+        std::unique_ptr<RHI::IRHIShader> m_UpscaleEASUComputeShader;
+        std::unique_ptr<RHI::IRHIShader> m_UpscaleRCASComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_UpscaleEASUPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_UpscaleRCASPipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_UpscaleTexture;      // EASUの出力
+        std::unique_ptr<RHI::IRHITexture> m_UpscaleSharpTexture; // RCASの出力(Presentが読む)
+        std::unique_ptr<RHI::IRHIBuffer> m_UpscaleConstantBuffer;
 
         // トーンマッピングカーブ。Tonemap.hlsl側のCurveと値を一致させること
         enum class TonemapCurve
@@ -1189,8 +1366,12 @@ namespace Kurenai
         // そのためBRDF積分LUT・雲の3Dノイズとほぼ同じ「一度だけ焼く」作法に乗せ、
         // 濁りが変わったときだけ焼き直す(m_AtmosphereLUTBakedTurbidity)。
         //
-        // SkyViewは空そのもので太陽の位置に依存するため毎フレーム焼く。
-        // 192x108テクセル×(視線32段 + 天頂32段)なので、負荷は実質的に無い。
+        // SkyViewは空そのもので太陽の位置に依存するため、太陽か濁りが動いたときに焼き直す
+        // (m_SkyViewBakedSunPosition)。
+        // 【毎フレーム焼いていた頃の実測】192x108=20,736テクセルと小さいので「負荷は実質的に無い」と
+        // 書いていたが、Intel UHD Graphics 620 / DX11 / Release の実測では1.15〜1.53msあった。
+        // 1テクセルあたり視線32段+天頂32段の計64段のレイマーチで、各段が
+        // Transmittance LUTとMultiScattering LUTのサンプルを伴うため、テクセル数の割に高い。
         // **このLUTを読むパス(SkyIntegrate/SkyGenerate/Lighting/SSR/AerialPerspective/
         // PlanarReflection)より前に実行される必要がある**が、順序はレンダーグラフが
         // Reads/Writesの依存から自動で決めるので、パスの登録順に依存しない
@@ -1207,6 +1388,28 @@ namespace Kurenai
         // Transmittance/MultiScatteringを焼いたときの濁り。負の値は「まだ一度も焼いていない」。
         // 濁りが変わるとエアロゾルの量が変わるので、この2枚も焼き直す必要がある
         float m_AtmosphereLUTBakedTurbidity = -1.0f;
+        // SkyView LUTを最後に焼いたときの太陽の向きと濁り。負の濁りは「まだ一度も焼いていない」。
+        // 【なぜ毎フレーム焼かなくてよいのか】CSSkyViewの入力はこの2つだけである
+        // (視点位置はkSkyViewHeightKm固定でカメラに依存しない。AtmosphereLUT.hlsl参照)。
+        // どちらも動いていなければ、まったく同じ内容のLUTを焼き直しているだけになる。
+        // 手続き空の焼き直し(m_LastBakedSunPosition)とまったく同じ判定の形だが、
+        // あちらは露出・彩度にも依存するため条件を共用はできない
+        DirectX::XMFLOAT3 m_SkyViewBakedSunPosition{ 0.0f, 0.0f, 0.0f };
+        float m_SkyViewBakedTurbidity = -1.0f;
+        // 太陽がこの角度以上動いたらSkyView LUTを焼き直す。LUTは天頂方向180度を108テクセルで
+        // 持つので1テクセルあたり約1.67度あり、その1/30以下しかずらさない値にしてある。
+        //
+        // 【意図的に手続き空のm_SkyBakeAngleThresholdDegrees(1.0度)より桁で細かくしている】
+        // このLUTは背景の空(Sky.hlsliのSkyColor)が画面解像度で毎フレーム引くもので、
+        // 間引きの粒度がそのまま背景の時間解像度になる。一方あちらが焼くIBLキューブは
+        // 6面+プリフィルタ36回のディスパッチを伴う重いベイクで、間接光にしか効かない。
+        // 変更前は「毎フレーム焼く」だったので、それに最も近い挙動を選んでいる。
+        //
+        // 【時刻を自動で進めるシーンでは削減にならない】Auto Advance既定(1h/s)では太陽は
+        // 15度/秒動くため、60fpsでも毎フレームこの閾値を超えて結局毎フレーム焼く。
+        // 削減が効くのは太陽が止まっているシーン(Defaults::TimeAutoAdvanceは既定false)で、
+        // その場合は起動直後の1回だけになる
+        static constexpr float kSkyViewRebakeAngleDegrees = 0.05f;
         std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
@@ -1559,6 +1762,64 @@ namespace Kurenai
         uint32_t m_DDGIUpdateCursor = 0;
         int32_t m_DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
 
+        // DDGIの更新モード。反射プローブのProbeUpdateModeと同じ考え方だが、
+        // **「1フレームでフルベイク」に相当するモードは持たない** ――
+        // DDGIは全プローブ×6面(455プローブなら2730回の描画)を1フレームでは焼けないため。
+        // どのモードでも時間分割(1フレームm_DDGIProbesPerFrame個)であることは変わらず、
+        // 違うのは「いつ止めるか」だけである。
+        //
+        // 【なぜ止める必要があるか】実測(Intel UHD Graphics 620 / 1280x720 / DX11)で、
+        // GIVolumeを持つシーンのプローブ更新は**GPU 40〜47ms + CPU 30ms**あり、
+        // どちらもフレームの最大要素だった。しかも収束後も止まらず課金され続けていた
+        enum class DDGIUpdateMode
+        {
+            // 常に焼き続ける。ライトや時刻が動き続けるシーンでも必ず追従する
+            Always,
+            // 焼き上がりに影響する状態(ComputeProbeBakeSignature)が変わらなくなったら、
+            // 多重バウンスが積み上がるkDDGIBounceCycles巡だけ焼いて停止する
+            ConvergeThenStop,
+            // 同じく停止するが、こちらは一巡だけで止める。最も速く止まる代わりに
+            // 多重バウンスが1回ぶんしか乗らない
+            OverwriteThenStop,
+        };
+        // 【既定はAlways(従来どおり)】止める側を既定にすると既存シーンの実行時の挙動が変わるため。
+        // 止めたい場合はこのつまみか品質プリセット(低/中)から選ぶ
+        DDGIUpdateMode m_DDGIUpdateMode = DDGIUpdateMode::Always;
+        // 停止判定用。最後に「焼き上がりに影響する状態」が変わった時点の署名。
+        // 反射プローブと同じComputeProbeBakeSignature()を使う ―― DDGIのキャプチャも
+        // 同じFrameConstants(太陽・時刻・影・ライト・IBL・自発光)を読むため、影響する状態は同じ
+        uint64_t m_DDGIBakeSignature = 0;
+        bool m_DDGIBakeSignatureValid = false;
+        // 署名が変わらないまま完了した巡回数。停止判定に使う
+        uint32_t m_DDGIStableCycles = 0;
+        // 収束済みとみなして更新を止めている状態。署名が変わると倒れる
+        bool m_DDGIUpdateSuspended = false;
+        // ConvergeThenStopで停止するまでの巡回数。
+        //
+        // 【なぜヒステリシス由来の巡回数をやめたか】以前は残差0.01を切る巡回数
+        // N = ln(0.01)/ln(ヒステリシス) を停止条件にしていた(既定0.97なら152巡)。
+        // これは**1巡が何フレームかを見ていない**ため、プローブが多いボリュームでは
+        // 実質止まらなかった ―― Sponza(1152プローブ・4個/フレーム)で1巡288フレーム、
+        // 152巡 = 43,776フレーム ≒ 53分。実測でも180秒回して止まらず、
+        // 品質プリセット「中」がいちばん助けが要るシーンで効かない状態だった。
+        //
+        // 【上書きで巡回すれば足りる理由】署名が止まっている間、キャプチャは決定的な
+        // ラスタライズなので平滑すべき確率的ノイズが無い。ヒステリシスは目標値へ
+        // 指数的に近づくだけで、目標値そのものは上書き1巡で入る。複数巡が要るのは
+        // 多重バウンスだけで、ProbeCapture.hlslが前巡のアトラスを読む構造上
+        // 1巡につき1バウンス積み上がる。反射率aの面ならN巡後の相対残差はおよそa^Nで、
+        // a=0.5なら4巡で6%、a=0.7なら24%。4巡は「止まるまでの時間」との折り合いで選んだ値であり、
+        // バウンスを完全に積み切る数ではない(積み切りたいならAlwaysを使う)。
+        // ヒステリシスは「常時更新」で光の変化に滑らかに追従させる役目に戻した。
+        //
+        // 【4巡と1巡の差はまだ実測できていない】Sponzaの同一カメラで両者を撮り比べると
+        // 3Dビューポートはビット一致だった(Alwaysを200秒回したものとも一致)。
+        // ProbeCapture.hlslへデバッグ色を焼いて原因を追ったが、赤チャンネルが垂れ幕への
+        // 直接光と混ざり、Always側もヒステリシス0.97のため200秒ではまだ大半がウォームアップ時の
+        // 値で、多重バウンスの寄与を分離できる計測になっていない。上の残差の式は理屈であって
+        // 裏取り済みの数字ではない
+        static constexpr uint32_t kDDGIBounceCycles = 4;
+
         // 格子上のプローブ番号からワールド座標を求める。番号の分解は
         // index = x + y*Cx + z*Cx*Cy で、シェーダー側の並びと一致させること
         DirectX::XMFLOAT3 ComputeDDGIProbePosition(uint32_t probeIndex) const;
@@ -1659,6 +1920,14 @@ namespace Kurenai
         // trueにすると雲のスクロールが止まる(m_WaterTimeFrozenの雲版。A/B比較などスクロールが
         // 揺れると困る場面で使う)
         bool m_CloudTimeFrozen = Defaults::CloudTimeFrozen;
+        // 積雲のボリュームレイマーチの段数。**このパスのコストの主なつまみ**。
+        // FrameConstants::CloudQualityParams.xとして渡り、SkyCloud.hlslだけが読む
+        // (ボリューム経路を持つのがこのシェーダーだけのため。詳細はそちらのコメント)。
+        // 減らすと雲の内部の階調が粗くなる=絵が変わるので、41.17までの「見た目を変えない削減」
+        // とは性質が違う。品質プリセットの低/中から振るための値である
+        uint32_t m_CloudRaymarchSteps = Defaults::CloudRaymarchSteps;
+        // 段数の上限。**Sky.hlsliのkCumulusRaymarchStepsMaxと一致させること**
+        static constexpr uint32_t kCloudRaymarchStepsMax = 32;
         // 風によるノイズ空間の移動量。m_WaterScrollOffsetと同じくUIつまみではなく内部状態で、
         // RenderThreadMainがSky.hlsliのkCloudNoisePeriodと同じ周期でstd::fmodしながら進める
         DirectX::XMFLOAT2 m_CloudScrollOffset{ 0.0f, 0.0f };
@@ -1796,6 +2065,68 @@ namespace Kurenai
         // DebugView::LightTilesのヒートマップで赤に振り切る基準のライト数。容量(64)を基準にすると
         // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
         int m_LightTileHeatmapMax = Defaults::LightTileHeatmapMax;
+
+        // --- 品質プリセット(41章) ---------------------------------------------------------
+        //
+        // 個別のつまみを一括で振るための横断的な設定。UIの「システム」パネルから適用する。
+        // ここに置いているのは、この時点までにReflectionMode等の入れ子の列挙がすべて
+        // 宣言済みだからで、機能上の所属を示すものではない。
+        //
+        // 【どの項目を入れるかは実測で決めている】Intel UHD Graphics 620 / 1280x720 / DX11 /
+        // Release で5シーンを計測した結果、フレーム時間を支配していたのは以下だった:
+        //   DDGIのプローブ更新 40〜47ms(GIVolumeを持つシーン。フレームの約4割)
+        //   SSR 31ms(水面のあるシーン)
+        //   ボリュメトリック積雲 約10ms(空が画面の大半を占めるシーン)
+        // 逆にシャドウは全シーンで4カスケード合計1ms未満だったため、シャドウ関連は一切触らない。
+        // タイルドライトカリングは見た目を変えない最適化なので常に有効のままにする。
+        // 内部レンダー解像度は独立したつまみ(同じパネルの「解像度」節)であり、ここからは変えない
+        enum class QualityPreset
+        {
+            Low,     // 低
+            Medium,  // 中
+            High,    // 高(= シーンを読み込んだ直後の状態へ戻す)
+        };
+
+        // 品質プリセットが触る設定の一式。
+        //
+        // 【プリセット「高」はエンジンの静的な既定ではなく「シーン読み込み直後の値」へ戻す】
+        // .ksceneはSSR・TAAを自分で指定できる(ApplyLoadedScene参照。実例として
+        // MontSaintMichel.ksceneはどちらも明示的に有効化している)。静的なDefaults::へ戻すと
+        // 「高にしたらシーンが要求した反射が消える」ことになる。m_SceneDefaultReflectionModeが
+        // UIの右クリック(既定値へ戻す)に対して同じ問題を解いており、プリセットもそれに倣う
+        struct QualitySettings
+        {
+            ReflectionMode Reflection = ReflectionMode::Off;
+            bool PlanarReflectionEnabled = Defaults::PlanarReflectionEnabled;
+            float PlanarReflectionResolutionScale = Defaults::PlanarReflectionResolutionScale;
+            bool CloudVolumetric = Defaults::CloudVolumetric;
+            bool CirrusEnabled = Defaults::CirrusEnabled;
+            bool StarsEnabled = Defaults::StarsEnabled;
+            bool TAAEnabled = Defaults::TAAEnabled;
+            bool BloomEnabled = Defaults::BloomEnabled;
+            bool ScreenSpaceShadowEnabled = Defaults::ScreenSpaceShadowEnabled;
+            int32_t DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
+            uint32_t SSAOKernelSize = Defaults::SSAOKernelSize;
+            uint32_t CloudRaymarchSteps = Defaults::CloudRaymarchSteps;
+            DDGIUpdateMode DDGIUpdate = DDGIUpdateMode::Always;
+            bool DDGIHalfResolution = Defaults::DDGIHalfResolution;
+        };
+
+        // 現在の各メンバから上記の一式を読み出す
+        QualitySettings CaptureQualitySettings() const;
+        // 一式を各メンバへ書き戻す。平面反射の解像度倍率だけはレンダーターゲットの作り直しを
+        // 伴うため直接代入せず、RequestPlanarReflectionResolutionScale()経由で要求する
+        void ApplyQualitySettings(const QualitySettings& settings);
+        // プリセットを適用する(SystemPanel = Renderスレッドから呼ばれる)
+        void ApplyQualityPreset(QualityPreset preset);
+
+        // シーンを読み込んだ直後の値。ApplyLoadedSceneが控え、プリセット「高」が戻る先になる
+        QualitySettings m_SceneDefaultQuality;
+        // 最後に適用したプリセット。UIのComboの表示位置に使う。
+        // 【現在の状態を表すものではない】プリセットを適用した後に個別のつまみを動かしても
+        // ここは追従しない(全つまみの変更を捕まえる仕掛けを持たないため)。
+        // Comboは「今どれか」ではなく「どれを一括適用するか」の選択として読むこと
+        QualityPreset m_QualityPreset = QualityPreset::High;
 
         // 現在描画しているシーン。ApplyLoadedScene(Renderスレッド)だけが差し替え、
         // Render()とUIパネル(いずれもRenderスレッド)だけが読む。つまりRenderスレッド専有の状態で、
@@ -1951,6 +2282,19 @@ namespace Kurenai
         // 追加の排他制御は不要
         float m_CPUFrameTimeMs = 0.0f;
         float m_FPS = 0.0f;
+
+        // 性能ログ(LogFrameStatsIfDue)。プロファイラパネルの表示はその場で消えてしまい後から
+        // 比較できないため、FPS・CPU/GPUフレーム時間を一定間隔でログファイルへ残す。
+        // すべてRenderスレッドのみが読み書きするため追加の排他制御は不要
+        bool m_FrameStatsLoggingEnabled = Defaults::FrameStatsLoggingEnabled;
+        std::chrono::steady_clock::time_point m_FrameStatsWindowStart;
+        uint32_t m_FrameStatsFrameCount = 0;
+        // 集計期間中の合計。平均を出すためにフレーム数で割る
+        double m_FrameStatsCPUTimeSumMs = 0.0;
+        double m_FrameStatsGPUTimeSumMs = 0.0;
+        double m_FrameStatsGPUWaitSumMs = 0.0;
+        // 平均だけではスパイクが埋もれるため、集計期間中のフレーム間隔の最悪値も残す
+        float m_FrameStatsWorstFrameTimeMs = 0.0f;
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};

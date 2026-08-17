@@ -7,6 +7,39 @@
 
 namespace Kurenai::RHI
 {
+    namespace
+    {
+        // 手持ちのビューからリソースを引き、ミップ0の幅・高さを取り出す。
+        // DX11Textureはビューしか受け取らない(生成経路が10種類以上ありどれも寸法を渡してこない)ため、
+        // 経路ごとに記録するのではなくここで一括して求め、記録漏れが起きないようにする。
+        // ID3D11Texture2D以外(バッファのSRV等)は寸法を持たないため0のままになる
+        void QueryTextureSize(ID3D11View* view, uint32_t& outWidth, uint32_t& outHeight)
+        {
+            if (!view)
+            {
+                return;
+            }
+
+            Microsoft::WRL::ComPtr<ID3D11Resource> resource;
+            view->GetResource(&resource);
+            if (!resource)
+            {
+                return;
+            }
+
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> texture2D;
+            if (FAILED(resource.As(&texture2D)))
+            {
+                return;
+            }
+
+            D3D11_TEXTURE2D_DESC desc{};
+            texture2D->GetDesc(&desc);
+            outWidth = desc.Width;
+            outHeight = desc.Height;
+        }
+    }
+
     DX11Texture::DX11Texture(
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv,
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> rtv,
@@ -23,6 +56,20 @@ namespace Kurenai::RHI
         , m_SliceDsvs(std::move(sliceDsvs))
         , m_CubeCount(cubeCount)
     {
+        // 持っているビューを優先順に試す(SRVを持たないレンダーターゲット/深度テクスチャもあるため)
+        QueryTextureSize(m_Srv.Get(), m_Width, m_Height);
+        if (m_Width == 0)
+        {
+            QueryTextureSize(m_Rtv.Get(), m_Width, m_Height);
+        }
+        if (m_Width == 0)
+        {
+            QueryTextureSize(m_Dsv.Get(), m_Width, m_Height);
+        }
+        if (m_Width == 0)
+        {
+            QueryTextureSize(m_Uav.Get(), m_Width, m_Height);
+        }
     }
 
     ID3D11UnorderedAccessView* DX11Texture::GetCubeUnorderedAccessView(uint32_t face, uint32_t mipLevel, uint32_t cubeIndex) const

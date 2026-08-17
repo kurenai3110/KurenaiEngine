@@ -24,6 +24,9 @@ namespace Kurenai::Defaults
     // 遮蔽率にかける指数。1.0は「求めた遮蔽率をそのまま使う」で、上げるほど遮蔽が濃くなる。
     // 素の遮蔽率を基準にしたいため既定は1.0
     inline constexpr float SSAOPower = 1.0f;
+    // 1画素あたりのカーネルサンプル数(1〜16)。上限はSSAO.hlslのkSSAOKernelSizeMaxと
+    // 定数バッファの配列長で決まっている。SSAOのコストはほぼこの数に比例する
+    inline constexpr uint32_t SSAOKernelSize = 16;
     inline constexpr float SSILRadius = 0.5f;
     inline constexpr float SSILThickness = 0.01f;
     inline constexpr float SSILIntensity = 2.0f;
@@ -31,6 +34,12 @@ namespace Kurenai::Defaults
     inline constexpr float SSILPower = 1.0f;
     inline constexpr uint32_t SSILSliceCount = 4;
     inline constexpr uint32_t SSILStepCount = 6;
+
+    // --- 深度プリパス(41.22節) ---
+    // G-Bufferを描く前に不透明ジオメトリの深度だけを埋め、隠れる画素のピクセルシェーダーを
+    // 早期Zで省く。ジオメトリを1周ぶん余計に描くコストと引き換えなので、
+    // オーバードローが小さいシーンでは損になる
+    inline constexpr bool DepthPrepassEnabled = true;
 
     // --- シャドウ ---
     inline constexpr bool ShadowEnabled = true;
@@ -176,6 +185,10 @@ namespace Kurenai::Defaults
     // シーンに依存しないUIつまみ(m_WaterTimeFrozenと同じ位置づけ)。
     // 積雲・巻雲の両方に効く(片方だけ凍結できるとA/B比較の対照が取れなくなるため)
     inline constexpr bool CloudTimeFrozen = false;
+    // 積雲のボリュームレイマーチの段数(1〜32)。上限はSky.hlsliの
+    // kCumulusRaymarchStepsMaxと一致させること。雲パスのコストの主なつまみで、
+    // 1画素あたりのウェザーマップ評価18回(視線 + 自己影5 + 基底1)の大半がこのループになる
+    inline constexpr uint32_t CloudRaymarchSteps = 12;
 
     // --- 巻雲(積雲の上に重ねる2層目) ---
     //
@@ -314,6 +327,10 @@ namespace Kurenai::Defaults
     // 1フレームに焼き直すプローブ数。DDGIはヒステリシスで時間収束させる手法なので、
     // 全プローブを毎フレーム焼く必要はない(455個ならこの値で約29フレームで一巡する)
     inline constexpr int DDGIProbesPerFrame = 16;
+    // DDGIの拡散イラディアンスを内部レンダー解像度の1/2で評価し、深度を見てアップサンプルするか。
+    // 【既定は無効】雲の低解像度化(SkyCloud.hlsl)と違い、DDGIは面の位置と法線の関数なので
+    // 数学的に等価ではなく、ジオメトリの輪郭で滲みが出る近似である。品質プリセットの低/中が有効にする
+    inline constexpr bool DDGIHalfResolution = false;
 
     // --- トーンマップ / ディザ ---
     // 8bit出力時のバンディングを散らすディザ。最終出力へノイズを載せる処理であり、
@@ -373,10 +390,31 @@ namespace Kurenai::Defaults
     inline constexpr uint32_t RenderWidth = 1280;
     inline constexpr uint32_t RenderHeight = 720;
 
+    // --- 超解像(FSR1相当のEASU+RCAS。41.23節) ---
+    // 有効にすると、上の解像度は「出力解像度」の意味になり、内部レンダー解像度は
+    // 品質モードの倍率で割った値が自動で設定される。トーンマップ後のLDR画像を
+    // EASUで出力解像度へ再構成し、RCASでシャープ化してからPresentへ渡す。
+    // 既定でOFFなのは、有効にすると内部解像度が変わって絵が変わるため。
+    // 「速度と引き換えに絵を変える」判断はユーザーがするものであり、
+    // 深度プリパス(絵が変わらないので既定ON)とはそこが違う
+    inline constexpr bool UpscaleEnabled = false;
+    // RCASのシャープネス(0〜1)。0で無効、1で参照実装の最大。
+    // 内部で 2^(-2*(1-この値)) へ変換して渡す(FSR1のsharpnessは「ストップ数」で、
+    // 0ストップ=最大、大きいほど弱い)。既定の0.25は、
+    // TAAのシャープネス(Defaults::TAASharpness)と同程度の効き方になる値
+    inline constexpr float UpscaleSharpness = 0.25f;
+
     // --- 同期 ---
     inline constexpr bool VSyncEnabled = false;
     inline constexpr bool FixedFPSEnabled = true;
     inline constexpr float TargetFPS = 60.0f;
+
+    // --- 性能ログ ---
+    // FPS・CPU/GPUフレーム時間を一定間隔でログファイルへ出す。プロファイラパネルの表示は
+    // その場で消えてしまい後から比較できないため、実行の記録として残すためのもの。
+    // 出力は1秒に1行だけなのでフレーム時間への影響は無視できる
+    inline constexpr bool FrameStatsLoggingEnabled = true;
+    inline constexpr float FrameStatsLogIntervalSeconds = 1.0f;
 
     // --- デバッグ表示 ---
     inline constexpr float DebugViewGain = 1.0f;

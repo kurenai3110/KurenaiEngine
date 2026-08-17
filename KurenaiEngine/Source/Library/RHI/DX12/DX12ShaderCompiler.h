@@ -44,6 +44,18 @@ namespace Kurenai::RHI
         // Initialize前およびInitializeに失敗した場合は0
         D3D_SHADER_MODEL GetShaderModel() const { return m_ShaderModel; }
 
+        // bindless(HLSLのResourceDescriptorHeap)を含むシェーダーをコンパイルできるか。
+        // SM 6.6が必要で、これはデバイスの対応状況とdxcompiler.dllのバージョンの
+        // 両方で決まる(Initializeのコメント参照)。
+        // trueのときだけCompileが -D KURENAI_BINDLESS=1 を渡す
+        bool SupportsBindless() const { return m_ShaderModel >= D3D_SHADER_MODEL_6_6; }
+
+        // メッシュシェーダー(as/msプロファイル)をコンパイルできるか。SM 6.5が下限。
+        // 【デバイスがメッシュシェーダーに対応しているかは別問題】こちらはあくまで
+        // 「コンパイラが投げられるか」で、実行できるかはD3D12_FEATURE_D3D12_OPTIONS7が決める
+        // (両方を見て判断するのはDX12Device::SupportsMeshShader)
+        bool SupportsMeshShaderProfile() const { return m_ShaderModel >= D3D_SHADER_MODEL_6_5; }
+
         // HLSLファイルの1エントリポイントをDXILへコンパイルする。
         // 成功時はバイトコード、失敗時はnullptrを返す(エラー内容はログへ出す)。
         // 戻り値の型がID3DBlobなのは、IDxcBlobがID3D10Blob/ID3DBlobと同じIIDの別名として

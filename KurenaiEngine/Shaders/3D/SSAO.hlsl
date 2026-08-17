@@ -1,13 +1,15 @@
 // SSAO(Screen Space Ambient Occlusion)パス。
 // PSMain: G-BufferのNormal/Depthからサンプリングカーネルを使って遮蔽率を計算する(Texture0=World Normal, Texture1=Depth)
-// PSMainBlur: PSMainの出力(タイル状ノイズを含む)を均すための4x4ボックスブラー(Texture0=AO Raw)。
+// PSMainBlur: PSMainの出力(タイル状ノイズを含む)を均すための5x5分離可能ブラー(Texture0=AO Raw)。
 // SSAOとSSIL(Visibility Bitmask)は同じRGBAフォーマット(rgb=間接拡散光, a=遮蔽率)を出力するため、
 // このブラーはSSIL_VisibilityBitmask.hlslのブラーパスとしても共用する
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
 static const float PI = 3.14159265359f;
-static const int kSSAOKernelSize = 16;
+// 定数バッファに確保するカーネルの最大数。実際に回す段数はParams.wで実行時に渡す
+// (品質プリセットから振れるようにするため。C++側のkSSAOKernelSizeMaxと一致させること)
+static const int kSSAOKernelSizeMax = 16;
 
 cbuffer FrameConstants : register(b0)
 {
@@ -29,8 +31,8 @@ cbuffer FrameConstants : register(b0)
 
 cbuffer SSAOConstants : register(b1)
 {
-    float4 Samples[kSSAOKernelSize]; // タンジェント空間の半球カーネル(xyz)。原点付近に偏らせてある
-    float4 Params;                   // x: 半径, y: バイアス, z: 強さ(べき乗), w: 未使用
+    float4 Samples[kSSAOKernelSizeMax]; // タンジェント空間の半球カーネル(xyz)。原点付近に偏らせてある
+    float4 Params;                      // x: 半径, y: バイアス, z: 強さ(べき乗), w: 実際に使うサンプル数
 };
 
 // PSMainではNormal(t0)/Depth(t1)、PSMainBlurではSSAO Raw(t0)をバインドして使い回す
@@ -58,6 +60,29 @@ float3 ReconstructWorldPos(float2 uv, float depth)
     float4 clipPos = float4(ndc, depth, 1.0f);
     float4 worldPos = mul(clipPos, InvViewProj);
     return worldPos.xyz / worldPos.w;
+}
+
+// 深度バッファの値(NDCのz)から、ビュー空間のz(カメラからの距離)だけを直接求める。
+//
+// 【なぜワールドを経由しないのか】カーネルのサンプルごとに要るのはこのスカラー1個だけで、
+// ワールド座標そのものは使わない。ReconstructWorldPos → mul(..., View) と辿ると
+// 4x4の行列積を2回と除算を1回払うことになるが、行列を畳むと
+//   clip * InvViewProj * View = clip * InvProj * InvView * View = clip * InvProj
+// なので、実際に効いているのは射影行列の逆だけである。しかもzとwの2成分しか要らない。
+//
+// 射影は clip.z = vz*_33 + _43、clip.w = vz*_34 + _44 で、ndcZ = clip.z / clip.w だから
+//   vz*_33 + _43 = ndcZ*(vz*_34 + _44)  ->  vz = (ndcZ*_44 - _43) / (_33 - ndcZ*_34)
+// と解ける。**Projは既にこのcbufferで宣言済み**なので新しい定数は要らない。
+// 透視投影でも正射影でも、Reverse-Zでも成り立つ一般形にしてある
+// (行列の要素をそのまま使っており、特定の並びを仮定していない)。
+//
+// TAAのジッターは射影行列のx/yの平行移動にしか触れないため、この式には影響しない
+float ReconstructViewZ(float ndcZ)
+{
+    const float numerator = ndcZ * Proj._44 - Proj._43;
+    const float denominator = Proj._33 - ndcZ * Proj._34;
+    // 分母が0になるのは射影が退化している場合だけ。0除算でNaNを撒かないよう下限を入れる
+    return numerator / (abs(denominator) > 1e-9f ? denominator : 1e-9f);
 }
 
 // ピクセル座標から[0,1)の疑似乱数を得るハッシュ関数(Dave Hoskinsのhash12)。
@@ -98,9 +123,15 @@ float4 PSMain(PSInput input) : SV_TARGET
     const float bias = Params.y;
     const float power = Params.z;
 
+    // 段数は実行時に変わる(品質プリセット)。C++側が範囲内の値しか書かないが、
+    // 定数バッファの中身は保証できるものではないのでシェーダ側でも必ず丸める
+    const int sampleCount = clamp((int)Params.w, 1, kSSAOKernelSizeMax);
+
     float occlusion = 0.0f;
-    [unroll]
-    for (int i = 0; i < kSSAOKernelSize; ++i)
+    // 【[unroll]ではなく[loop]】可変回数のループは展開できない。
+    // 段数を固定していた頃は[unroll]で16回展開していた
+    [loop]
+    for (int i = 0; i < sampleCount; ++i)
     {
         float3 sampleVec = mul(Samples[i].xyz, tbn);
         float3 samplePos = viewPos + sampleVec * radius;
@@ -120,9 +151,9 @@ float4 PSMain(PSInput input) : SV_TARGET
             continue;
         }
 
-        // サンプル位置のワールド座標をView空間へ変換し、Z(カメラからの距離)だけを比較に使う
-        float3 sampleWorldPos = ReconstructWorldPos(sampleUV, sampleDepth);
-        float sampleViewZ = mul(float4(sampleWorldPos, 1.0f), View).z;
+        // 比較に使うのはZ(カメラからの距離)だけなので、ワールド座標を経由せず
+        // 射影行列から直接求める(ReconstructViewZのコメント参照)
+        float sampleViewZ = ReconstructViewZ(sampleDepth);
 
         // 遮蔽物がカーネルサンプル位置より手前(視距離が近い)にあれば遮蔽としてカウントする。
         // ただし遠く離れた無関係なジオメトリまで遮蔽扱いしないよう半径ベースで減衰させる(range check)
@@ -130,13 +161,39 @@ float4 PSMain(PSInput input) : SV_TARGET
         occlusion += (sampleViewZ <= samplePos.z - bias ? 1.0f : 0.0f) * rangeCheck;
     }
 
-    float ao = saturate(1.0f - occlusion / float(kSSAOKernelSize));
+    float ao = saturate(1.0f - occlusion / float(sampleCount));
     ao = pow(ao, power);
     // SSAOは間接光を計算しないため、rgb(間接拡散光)は常に0、a(遮蔽率)のみを書き込む
     return float4(0.0f, 0.0f, 0.0f, ao);
 }
 
-// AO/GIバッファ(rgb=間接拡散光, a=遮蔽率)を4チャンネルまとめて均す汎用ボックスブラー
+// AO/GIバッファ(rgb=間接拡散光, a=遮蔽率)を4チャンネルまとめて均す汎用ブラー。
+//
+// 【このパスは完全にサンプラー律速である】Intel UHD Graphics 620 / 1280x720 / DX11 / Release の
+// 実測で2.21ms。1280x720の全画素×16タップ=14.7Mタップを、Gen9がRGBA16F(64bpp)のバイリニアを
+// 半レート(約6.6 Gtexel/s)で回すと2.23msになり、実測とほぼ一致する。演算でも帯域でもなく
+// 「タップ数×フォーマットのフィルタレート」だけで決まっているので、削るならタップ数を減らす。
+//
+// 【元の16タップが実際に作っていたカーネル】オフセットが{-1.5,-0.5,0.5,1.5}テクセル、つまり
+// すべて半テクセルずれた位置=テクセルの角に落ちる。バイリニアはそこで周囲2テクセル(1軸あたり)を
+// 1/2ずつ混ぜるので、1軸の重みを積み上げると{0.5, 1, 1, 1, 0.5}/4 という**5テクセル幅**の
+// 分離可能カーネルになる。名前は「4x4ボックス」だが実体は5x5のテントである。
+//
+// 【9タップでまったく同じカーネルを作る】同じ重みは、隣接する2テクセルを1回のバイリニアで
+// 拾う定番の畳み込みで1軸3タップに詰められる:
+//   ・オフセット -4/3 テクセル … テクセル(-2,-1)を(1/3, 2/3)で混ぜる。タップ重み1.5/4
+//   ・オフセット   0 テクセル … テクセル(0)ちょうど。タップ重み1.0/4
+//   ・オフセット +4/3 テクセル … テクセル(+1,+2)を(2/3, 1/3)で混ぜる。タップ重み1.5/4
+// 積み上げると1軸あたり{0.125, 0.25, 0.25, 0.25, 0.125}(合計1)で、元の{0.5,1,1,1,0.5}/4と
+// **完全に一致する**。2軸とも分離可能なので3x3=9タップで済み、タップ数は16→9(-44%)になる。
+//
+// 【厳密には一致しない部分】元のオフセットは重みがちょうど1/2で、これは補間器の固定小数で
+// 誤差なく表せる。新しい±4/3は1/3と2/3を要求するため、D3Dが保証するサブテクセル精度
+// (小数8bit=1/256刻み)で最大0.0013ずれる。タップ重み0.375を掛けるとテクセルあたりの重み誤差は
+// 0.0005以下で、[0,1]の遮蔽率に対して0.13/255相当。最終8bit出力の1LSBより小さい
+static const float kAOBlurOffsets[3] = { -4.0f / 3.0f, 0.0f, 4.0f / 3.0f };
+static const float kAOBlurWeights[3] = { 1.5f / 4.0f, 1.0f / 4.0f, 1.5f / 4.0f };
+
 float4 PSMainBlur(PSInput input) : SV_TARGET
 {
     uint width, height;
@@ -145,20 +202,19 @@ float4 PSMainBlur(PSInput input) : SV_TARGET
 
     float4 sum = float4(0.0f, 0.0f, 0.0f, 0.0f);
     [unroll]
-    for (int x = -2; x <= 1; ++x)
+    for (int x = 0; x < 3; ++x)
     {
         [unroll]
-        for (int y = -2; y <= 1; ++y)
+        for (int y = 0; y < 3; ++y)
         {
-            // 4x4(偶数)カーネルなので整数オフセット(-2..1)のままだと中心が半テクセル
-            // 左上へ偏る。+0.5してオフセットを{-1.5,-0.5,0.5,1.5}にし、中心をピクセル中心に揃える。
             // offsetUVは画面端で[0,1]をはみ出すが、ColorSamplerはClampなので端のテクセルが
             // 引き伸ばされるだけで済む(Wrapのサンプラーで引くと反対側の端のAO/GIが混ざり、
             // 画面の四辺2px幅に無関係な遮蔽が滲む)
-            float2 offsetUV = input.UV + (float2(x, y) + 0.5f) * texelSize;
-            sum += Texture0.Sample(ColorSampler, offsetUV);
+            float2 offsetUV = input.UV + float2(kAOBlurOffsets[x], kAOBlurOffsets[y]) * texelSize;
+            sum += (kAOBlurWeights[x] * kAOBlurWeights[y]) * Texture0.Sample(ColorSampler, offsetUV);
         }
     }
 
-    return sum / 16.0f;
+    // 重みの総和が1になるよう作ってあるので、ここでの割り算は要らない
+    return sum;
 }

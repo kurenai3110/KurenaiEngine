@@ -28,6 +28,9 @@ namespace Kurenai::RHI
     class DX12Buffer : public IRHIBuffer
     {
     public:
+        // srvUavHeap/srvIndexはBufferDesc::ShaderReadableを指定した頂点バッファでのみ渡す
+        // (頂点バッファビューに加えてStructuredBuffer<T>としてのSRVも張る場合)。
+        // それ以外のUsageでは既定値のまま = SRVを持たない
         DX12Buffer(
             DX12Device* device,
             Microsoft::WRL::ComPtr<ID3D12Resource> resource,
@@ -35,7 +38,9 @@ namespace Kurenai::RHI
             uint32_t sizeInBytes,
             uint32_t strideInBytes,
             BufferUsage usage,
-            uint32_t ringCapacity = 1);
+            uint32_t ringCapacity = 1,
+            DX12DescriptorHeap* srvUavHeap = nullptr,
+            uint32_t srvIndex = 0xFFFFFFFFu);
 
         // 以降のコンストラクタが受け取るsrvUavHeapは、srvIndex/uavIndexを確保した非シェーダー可視ヒープ。
         // このヒープはアセット用と描画用の2本に分かれており(DX12Device::GetAssetSrvCpuHeap参照)、
@@ -127,6 +132,10 @@ namespace Kurenai::RHI
         ID3D12Resource* GetUploadResource() const { return m_UploadResource.Get(); }
         uint64_t GetUploadRingOffset() const { return static_cast<uint64_t>(m_UploadRingIndex) * m_SlotSizeInBytes; }
 
+        uint32_t GetBindlessIndex() const override { return m_BindlessIndex; }
+        // 意味はDX12Texture::SetBindlessIndexと同じ
+        void SetBindlessIndex(uint32_t index) { m_BindlessIndex = index; }
+
     private:
         DX12Device* m_Device = nullptr;
         // m_SrvIndex / m_UavIndex の確保元。頂点/インデックス/定数バッファは
@@ -138,6 +147,8 @@ namespace Kurenai::RHI
         uint32_t m_RingCapacity;
         uint32_t m_CurrentRingIndex = 0;
         uint32_t m_UavIndex = kInvalid;
+        // bindless区画に登録されている場合のみ有効(既定は未登録)
+        uint32_t m_BindlessIndex = kInvalidBindlessIndex;
         // このバッファがどのUsageで作られたか。SRV/UAVディスクリプタの有無だけでは
         // StructuredReadOnlyとStructuredRWを区別できないため保持する
         BufferUsage m_Usage = BufferUsage::Vertex;

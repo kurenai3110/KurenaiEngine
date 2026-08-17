@@ -80,7 +80,11 @@ namespace
             "      --base-color <R,G,B>        全マテリアルのベースカラー係数を上書きする(各0〜1)\n"
             "                                  生のOBJ等、PBR係数を表現できない形式へ検証用の\n"
             "                                  マテリアルを与えるためのもの\n"
-            "  -h, --help            このヘルプを表示する\n";
+            "      --no-meshlets       メッシュレット(メッシュシェーダー用の分割情報)を生成しない。\n"
+"                                  併せて頂点キャッシュ最適化とインデックスの並べ替えも\n"
+"                                  行わないため、頂点/インデックスは入力の並びのまま出る。\n"
+"                                  見た目の異常がメッシュレット化由来かの切り分けに使う\n"
+"  -h, --help            このヘルプを表示する\n";
     }
 
     void PrintError(const std::string& message)
@@ -98,6 +102,7 @@ namespace
         bool ShowHelp = false;
         bool SceneMode = false;
         bool BakeOcclusion = false;
+        bool EnableMeshlets = true;
         unsigned int OcclusionResolution = 512;
         unsigned int OcclusionRays = 128;
         unsigned int BentNormalRays = 256;
@@ -235,6 +240,10 @@ namespace
                     PrintError("--jobs の値が不正です: " + WideToUtf8(argv[i]));
                     return std::nullopt;
                 }
+            }
+            else if (arg == L"--no-meshlets")
+            {
+                args.EnableMeshlets = false;
             }
             else if (arg == L"--bake-occlusion")
             {
@@ -507,6 +516,7 @@ int wmain(int argc, wchar_t** argv)
     options.Force = args.Force;
     options.JobCount = args.JobCount;
     options.BakedOcclusion = args.BakeOcclusion ? &bakeResult : nullptr;
+    options.EnableMeshlets = args.EnableMeshlets;
 
     KurenaiPacker::PackResult result;
     try
@@ -530,6 +540,19 @@ int wmain(int argc, wchar_t** argv)
         << " (新規生成 " << result.TextureGenerated
         << " / 既存スキップ " << result.TextureSkippedExisting
         << " / 失敗(フォールバック) " << result.TextureFailed << ")\n";
+
+    if (args.EnableMeshlets)
+    {
+        std::cout << "  メッシュレット: " << result.MeshletCount;
+        if (result.MeshletCount > 0)
+        {
+            // 1メッシュレットあたりの平均三角形数。上限(kMeshletMaxTriangles)に近いほど
+            // 分割が詰まっており、極端に少ない場合はモデルの三角形が散らばっている
+            std::cout << " (1つあたり平均 "
+                      << (result.IndexCount / 3 + result.MeshletCount / 2) / result.MeshletCount << "三角形)";
+        }
+        std::cout << "\n";
+    }
 
     if (args.BakeOcclusion)
     {

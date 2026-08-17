@@ -31,6 +31,8 @@ namespace Kurenai::UI
         void DrawDDGISection();
         void DrawSSRSection();
         void DrawLightCullingSection();
+        void DrawGeometrySection();
+        void DrawMeshletSection();
         void DrawWaterSection();
         void DrawCloudSection();
         void DrawStarsSection();

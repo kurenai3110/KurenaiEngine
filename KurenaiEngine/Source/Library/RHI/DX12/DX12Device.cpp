@@ -24,6 +24,7 @@
 #include "DX12SwapChain.h"
 #include "DX12Texture.h"
 #include "DX12Util.h"
+#include "Core/StringUtil.h"
 #include "RHI/TextureImage.h"
 
 namespace Kurenai::RHI
@@ -37,7 +38,7 @@ namespace Kurenai::RHI
         // +bent normalのG-Buffer+雲の3Dノイズ2枚+大気散乱のSkyView LUT)。
         // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
         // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)
-        constexpr uint32_t kTextureSlotCount = 21;
+        constexpr uint32_t kTextureSlotCount = 22;
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
         // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler、s3 = VolumeSampler
         // (役割の定義はShaders/Samplers.hlsli)。どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。
@@ -70,9 +71,10 @@ namespace Kurenai::RHI
         // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t16, u0〜u3)。
         // SRVが17必要なのはレイトレーシングのパス(RT反射)で、TLAS + G-Buffer(Albedo/Normal/Material/Depth) +
         // SceneColor + スカイボックス + シーンジオメトリ4本(頂点属性・インデックス・メッシュ情報・
-        // マテリアル) + インスタンス情報 + bent normal(t16、34章) を1回のディスパッチで同時に読むため。
+        // マテリアル) + インスタンス情報 + bent normal(t16、34章) + メッシュレット表(t17、38章)
+        // を1回のディスパッチで同時に読むため。
         // DX12CommandList.h側の同名の定数と必ず一致させること
-        constexpr uint32_t kComputeSrvSlotCount = 17;
+        constexpr uint32_t kComputeSrvSlotCount = 18;
         constexpr uint32_t kComputeUavSlotCount = 4;
         constexpr uint32_t kComputeTableSlotCount = kComputeSrvSlotCount + kComputeUavSlotCount;
         // 1フレームあたりに払い出せるコンピュートSRV+UAVテーブルブロックの最大数(Dispatch呼び出し回数の上限)。
@@ -85,6 +87,90 @@ namespace Kurenai::RHI
         // 実際の掛け合わせはこれを参照できるメンバ関数側で行う)
         constexpr uint32_t kGraphicsSrvHeapCapacityPerFrame = kTextureSlotCount * kMaxSrvTableBlocksPerFrame;
         constexpr uint32_t kComputeSrvHeapCapacityPerFrame = kComputeTableSlotCount * kMaxComputeDispatchesPerFrame;
+
+        // bindless区画(HLSLのResourceDescriptorHeapが直接添字する恒久ディスクリプタ)の容量。
+        // シェーダ可視SRVヒープの**末尾**に、上の2つのリングより後ろへ切り出す。
+        //
+        // 【なぜ末尾なのか】先頭に置くとAllocateSrvTableBlock/AllocateComputeTableBlockの
+        // 区画先頭の計算を両方ずらす必要があり、リングの巻き戻り位置の議論をやり直すことになる。
+        // 末尾なら既存2つのリングの番号空間に一切触れずに済む。
+        //
+        // 【容量の根拠】登録するのは「シェーダーが動的な番号で選びたいもの」だけで、
+        // 内訳はマテリアルテクスチャ(Bistro Exteriorで182枚)と、モデルごとの
+        // ジオメトリバッファ(頂点+メッシュレット3本 = メッシュ数×4)。
+        // Bistro Exteriorのメッシュ数は約400なので 182 + 1600 ≒ 1800。
+        // シーン切り替えで解放・再登録されるためフリーリストで回るが、
+        // 複数モデルを並べるシーンに備えて余裕を持たせる。
+        // シェーダ可視CBV_SRV_UAVヒープの上限はTier 1でも1,000,000ディスクリプタあり、
+        // 8192程度は問題にならない
+        constexpr uint32_t kBindlessDescriptorCapacity = 8192;
+
+        // シェーダーがResourceDescriptorHeapでヒープを直接添字することを許可するルートシグネチャの
+        // フラグ(D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)。
+        //
+        // 【自前で持つ理由】この列挙子はWindows SDK 10.0.20348で追加されたもので、
+        // それ以前の10.0.19041のd3d12.hには無い。
+        // このリポジトリは10.0.26100以降を前提にしている(READMEの必要環境を参照。
+        // SM 6.6を吐けるdxcもSDKに同梱される1.8系が要る)ため通常は列挙子を使えるが、
+        // ここを列挙子に置き換えると、古いSDKしか無い環境ではDX12以外も含めて
+        // ライブラリ全体がコンパイルすら通らなくなる。
+        // bindless非対応環境ではこのフラグを立てずに従来どおり動く縮退を用意してあるのに、
+        // ビルドできないのでは縮退が働く前に詰んでしまう。
+        //
+        // 値0x400はD3D12のABIとして固定で、10.0.26100のd3d12.hでも同じ値が入っていることを確認済み。
+        // SDKの列挙子と名前が衝突しないよう、エンジン側の命名で持つ
+        constexpr D3D12_ROOT_SIGNATURE_FLAGS kRootSignatureFlagCbvSrvUavHeapDirectlyIndexed =
+            static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(0x400);
+
+        // RHIのBlendModeをD3D12のレンダーターゲットブレンド設定へ写す。
+        // 通常のグラフィックスPSOとメッシュシェーダーPSOの両方から使う
+        // (2つのPSO作成関数で同じswitchを書き写すと、片方だけ直して静かに挙動がずれる)
+        void ApplyBlendMode(D3D12_RENDER_TARGET_BLEND_DESC& rt, BlendMode blendMode)
+        {
+            switch (blendMode)
+            {
+            case BlendMode::AlphaBlend:
+                rt.BlendEnable = TRUE;
+                rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+                rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOp = D3D12_BLEND_OP_ADD;
+                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+                rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::Additive:
+                rt.BlendEnable = TRUE;
+                rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+                rt.DestBlend = D3D12_BLEND_ONE;
+                rt.BlendOp = D3D12_BLEND_OP_ADD;
+                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+                rt.DestBlendAlpha = D3D12_BLEND_ONE;
+                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::Multiply:
+                rt.BlendEnable = TRUE;
+                rt.SrcBlend = D3D12_BLEND_DEST_COLOR;
+                rt.DestBlend = D3D12_BLEND_ZERO;
+                rt.BlendOp = D3D12_BLEND_OP_ADD;
+                rt.SrcBlendAlpha = D3D12_BLEND_DEST_ALPHA;
+                rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::PremultipliedAlpha:
+                rt.BlendEnable = TRUE;
+                rt.SrcBlend = D3D12_BLEND_ONE;
+                rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOp = D3D12_BLEND_OP_ADD;
+                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+                rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                break;
+            case BlendMode::Opaque:
+            default:
+                rt.BlendEnable = FALSE;
+                break;
+            }
+        }
 
         // 非シェーダー可視のCBV_SRV_UAVヒープ(テクスチャ/構造化バッファ作成時に
         // CreateShaderResourceView等の恒久的なビューを1つずつ確保する)の容量。
@@ -126,6 +212,42 @@ namespace Kurenai::RHI
 
     }
 
+    // 実行中のGPUが何かをログに残す。どのGPUで測った値なのかが分からないと性能の記録が
+    // 後から比較できなくなるため、レイトレーシング等の対応状況ログと並べてここで出す。
+    // 診断目的の情報であり、取得に失敗しても描画は続行できるので例外は投げない
+    void DX12Device::LogAdapterInfo() const
+    {
+        const LUID deviceLuid = m_Device->GetAdapterLuid();
+
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        for (UINT index = 0; m_Factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; ++index)
+        {
+            DXGI_ADAPTER_DESC1 desc{};
+            if (FAILED(adapter->GetDesc1(&desc)))
+            {
+                continue;
+            }
+
+            // D3D12CreateDeviceへnullptrを渡しているため、実際に使われたアダプタは
+            // デバイスのLUIDと一致するものを探して特定する
+            if (desc.AdapterLuid.LowPart != deviceLuid.LowPart || desc.AdapterLuid.HighPart != deviceLuid.HighPart)
+            {
+                continue;
+            }
+
+            constexpr uint64_t kBytesPerMiB = 1024ull * 1024ull;
+            Core::Logger::Info(
+                "DX12",
+                "GPU: " + Core::WideToUtf8(desc.Description) + " (専用VRAM " +
+                    std::to_string(desc.DedicatedVideoMemory / kBytesPerMiB) + "MB / 専用システムメモリ " +
+                    std::to_string(desc.DedicatedSystemMemory / kBytesPerMiB) + "MB / 共有システムメモリ " +
+                    std::to_string(desc.SharedSystemMemory / kBytesPerMiB) + "MB)");
+            return;
+        }
+
+        Core::Logger::Warning("DX12", "使用中のDXGIアダプタを特定できませんでした(GPU名をログに残せません)");
+    }
+
     DX12Device::DX12Device() = default;
 
     DX12Device::~DX12Device()
@@ -163,6 +285,8 @@ namespace Kurenai::RHI
         ThrowIfFailed(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&m_Factory)), "DXGIファクトリの作成に失敗しました");
 
         ThrowIfFailed(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_Device)), "D3D12デバイスの作成に失敗しました");
+
+        LogAdapterInfo();
 
 #if defined(_DEBUG)
         // デバッグレイヤーの指摘はそのままではデバッガの出力ウィンドウにしか出ず、
@@ -252,6 +376,11 @@ namespace Kurenai::RHI
         // DetectRaytracingSupportがこの結果を参照する
         DetectShaderModelAndInitCompiler();
         DetectRaytracingSupport();
+        // bindless・メッシュシェーダーの判定もシェーダーモデルに依存するためこの後で行う。
+        // ルートシグネチャの作成(CreateRootSignature)がbindlessの可否でフラグを変えるので、
+        // それより前である必要もある
+        DetectBindlessSupport();
+        DetectMeshShaderSupport();
 
         // RTVの内訳: スワップチェーンのバックバッファ2 + オフスクリーンのレンダーテクスチャ12 = 常時14。
         // DSVと同じくCreateRenderTargetsのリサイズ処理は「新しいテクスチャを作ってから古いunique_ptrを
@@ -273,10 +402,12 @@ namespace Kurenai::RHI
         // コンピュートシェーダー用のSRV+UAVテーブル(kComputeSrvHeapCapacityPerFrame×kFrameCount)ぶんも
         // 同じシェーダ可視ヒープの後ろの区画に確保する(DX12は同時にバインドできるCBV_SRV_UAVヒープが
         // 1つだけのため、グラフィックス用と共存させる必要がある。詳細はAllocateComputeTableBlock参照)
+        // さらにその後ろへbindless区画(恒久ディスクリプタ)を足す。区画の切り分けは
+        // 定数計算だけで決まり、DX12DescriptorHeap内部のAllocate/AllocateBlockは使わない
         m_ShaderVisibleSrvHeap = std::make_unique<DX12DescriptorHeap>(
             m_Device.Get(),
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-            (kGraphicsSrvHeapCapacityPerFrame + kComputeSrvHeapCapacityPerFrame) * kFrameCount,
+            (kGraphicsSrvHeapCapacityPerFrame + kComputeSrvHeapCapacityPerFrame) * kFrameCount + kBindlessDescriptorCapacity,
             true);
         // サンプラーセットはCreateSamplerSetで連続ブロックとして払い出す(kMaxSamplerSets個ぶん)。
         // 加えて先頭に1ブロックぶんのフォールバックを確保しておく(下記参照)
@@ -332,13 +463,97 @@ namespace Kurenai::RHI
             m_Device->CreateUnorderedAccessView(nullptr, nullptr, &nullUavDesc, m_RenderSrvCpuHeap->GetCpuHandle(m_NullUavIndex));
         }
 
+        // bindless区画。シェーダ可視SRVヒープの、リング2区画より後ろの残り全部
+        // (kBindlessDescriptorCapacityのコメント参照)
+        m_BindlessTable = std::make_unique<DX12BindlessTable>(
+            m_Device.Get(),
+            m_ShaderVisibleSrvHeap.get(),
+            (kGraphicsSrvHeapCapacityPerFrame + kComputeSrvHeapCapacityPerFrame) * kFrameCount,
+            kBindlessDescriptorCapacity);
+
         CreateRootSignature();
         CreateComputeRootSignature();
+        CreateMeshRootSignature();
 
         ID3D12DescriptorHeap* heaps[] = { m_ShaderVisibleSrvHeap->GetHeap(), m_ShaderVisibleSamplerHeap->GetHeap() };
         m_CommandList->SetDescriptorHeaps(2, heaps);
 
         m_ImmediateCommandList = std::make_unique<DX12CommandList>(this);
+    }
+
+    D3D12_ROOT_SIGNATURE_FLAGS DX12Device::GetBindlessRootSignatureFlags() const
+    {
+        // シェーダーがResourceDescriptorHeapで直接ヒープを添字するには、ルートシグネチャが
+        // 明示的にそれを許可している必要がある。
+        //
+        // 【対応環境でのみ立てる】このフラグはSM 6.6と同時に追加されたもので、
+        // 古いD3D12ランタイムは未知のフラグとしてシリアライズを失敗させる。
+        // bindlessが使えない環境でも起動できるよう、判定結果を見てから立てる。
+        // SAMPLER_HEAP_DIRECTLY_INDEXEDは使っていない(サンプラーは従来どおり
+        // s0〜s3の固定スロットで足りており、動的に選びたい場面が無いため)
+        return m_SupportsBindless ? kRootSignatureFlagCbvSrvUavHeapDirectlyIndexed
+                                  : D3D12_ROOT_SIGNATURE_FLAG_NONE;
+    }
+
+    void DX12Device::CreateMeshRootSignature()
+    {
+        if (!m_SupportsMeshShader)
+        {
+            return;
+        }
+
+        // レイアウトはグラフィックス用と同じ(b0/b1 + SRVテーブル + サンプラーテーブル)だが、
+        // 2点だけ異なる:
+        //
+        // 1. SRV/サンプラーテーブルの可視性がPIXELではなくALL。増幅シェーダー・
+        //    メッシュシェーダーもピクセルシェーダーと同じサンプラーを使い、
+        //    ピクセルシェーダー側のマテリアルテクスチャのバインドはそのまま流用したいため。
+        // 2. ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUTを立てない。メッシュシェーダーパイプラインには
+        //    入力アセンブラが存在せず、このフラグを立てるとPSOの作成が失敗する。
+        //
+        // ジオメトリ(頂点・メッシュレット各バッファ)はSRVテーブルではなくbindlessで引くため、
+        // テーブルのスロット数を増やす必要は無い
+        CD3DX12_DESCRIPTOR_RANGE srvRange;
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kTextureSlotCount, 0);
+
+        CD3DX12_DESCRIPTOR_RANGE samplerRange;
+        samplerRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, kSamplerSlotCount, 0);
+
+        CD3DX12_ROOT_PARAMETER rootParams[4];
+        rootParams[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_ALL);
+        rootParams[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_ALL);
+        rootParams[2].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_ALL);
+        rootParams[3].InitAsDescriptorTable(1, &samplerRange, D3D12_SHADER_VISIBILITY_ALL);
+
+        CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc;
+        rootSigDesc.Init(4, rootParams, 0, nullptr, GetBindlessRootSignatureFlags());
+
+        Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;
+        Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
+        const HRESULT hr = D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signatureBlob, &errorBlob);
+        if (FAILED(hr))
+        {
+            std::string message = "メッシュシェーダー用ルートシグネチャのシリアライズに失敗しました";
+            if (errorBlob)
+            {
+                message += ": ";
+                message += static_cast<const char*>(errorBlob->GetBufferPointer());
+            }
+            // ここで例外を投げるとメッシュシェーダー非対応環境と同じ状況で起動できなくなる。
+            // 従来の頂点シェーダー描画へ縮退させれば動作は続けられるため、警告に留める
+            Core::Logger::Warning("DX12", message + " (メッシュシェーダーを無効にします)");
+            m_SupportsMeshShader = false;
+            return;
+        }
+
+        if (FAILED(m_Device->CreateRootSignature(
+                0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(), IID_PPV_ARGS(&m_MeshRootSignature))))
+        {
+            Core::Logger::Warning(
+                "DX12", "メッシュシェーダー用ルートシグネチャの作成に失敗しました(メッシュシェーダーを無効にします)");
+            m_MeshRootSignature.Reset();
+            m_SupportsMeshShader = false;
+        }
     }
 
     void DX12Device::CreateRootSignature()
@@ -370,7 +585,9 @@ namespace Kurenai::RHI
         rootParams[4].InitAsShaderResourceView(0, 0, D3D12_SHADER_VISIBILITY_VERTEX);
 
         CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc;
-        rootSigDesc.Init(5, rootParams, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+        rootSigDesc.Init(
+            5, rootParams, 0, nullptr,
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT | GetBindlessRootSignatureFlags());
 
         Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;
         Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
@@ -413,7 +630,7 @@ namespace Kurenai::RHI
         rootParams[3].InitAsDescriptorTable(1, &samplerRange, D3D12_SHADER_VISIBILITY_ALL);
 
         CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc;
-        rootSigDesc.Init(4, rootParams, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE);
+        rootSigDesc.Init(4, rootParams, 0, nullptr, GetBindlessRootSignatureFlags());
 
         Microsoft::WRL::ComPtr<ID3DBlob> signatureBlob;
         Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
@@ -845,9 +1062,17 @@ namespace Kurenai::RHI
             // 1フレーム内に同じバッファへ複数回UpdateBufferすることがある(例: m_LightBufferは
             // DirectLightパスとTransparentパスの2回)ため、kFrameCount+1では足りない。
             // 「1フレームあたりの更新回数の上限×kFrameCount」に余裕を足した値にしておく
-            // (超過はDX12Buffer::AdvanceUploadRingAndGetWritePtrがログで検出する)
-            constexpr uint32_t kMaxStructuredUpdatesPerFrame = 4;
-            constexpr uint32_t kStructuredReadOnlyUploadRingCapacity = kMaxStructuredUpdatesPerFrame * kFrameCount + 1;
+            // (超過はDX12Buffer::AdvanceUploadRingAndGetWritePtrがログで検出する)。
+            //
+            // 上限はバッファごとにBufferDesc::MaxUpdatesPerFrameで宣言する。既定値は4で、
+            // 明示しないバッファの段数は従来と変わらない
+            uint32_t maxUpdatesPerFrame = desc.MaxUpdatesPerFrame;
+            if (maxUpdatesPerFrame == 0)
+            {
+                Core::Logger::Error("DX12", "BufferDesc::MaxUpdatesPerFrameが0です。既定値の4として扱います");
+                maxUpdatesPerFrame = 4;
+            }
+            const uint32_t kStructuredReadOnlyUploadRingCapacity = maxUpdatesPerFrame * kFrameCount + 1;
             Microsoft::WRL::ComPtr<ID3D12Resource> uploadResource =
                 CreateUploadBuffer(static_cast<uint64_t>(desc.SizeInBytes) * kStructuredReadOnlyUploadRingCapacity);
 
@@ -937,9 +1162,39 @@ namespace Kurenai::RHI
                 "バッファの作成に失敗しました");
         }
 
+        // メッシュシェーダーが頂点を自分で読むための追加SRV(BufferDesc::ShaderReadable)。
+        // 頂点バッファビューと同じリソースへ、StructuredBuffer<Vertex>としてのビューを重ねて張る
+        // (同一リソースに複数のビューを持たせるのはD3D12では通常の使い方で、複製は生じない)。
+        // Usage自体はVertexのままなので、従来の入力アセンブラ経由の描画にも一切影響しない
+        DX12DescriptorHeap* vertexSrvHeap = nullptr;
+        uint32_t vertexSrvIndex = DX12Buffer::kInvalid;
+        if (desc.ShaderReadable && desc.Usage == BufferUsage::Vertex)
+        {
+            if (desc.StrideInBytes == 0)
+            {
+                Core::Logger::Error(
+                    "DX12", "ShaderReadableな頂点バッファのStrideInBytesが0です(SRVを作れないためbindlessでは読めません)");
+            }
+            else
+            {
+                // 頂点バッファはアセット由来(ModelLoader)なのでアセット側のヒープから確保する
+                vertexSrvHeap = m_AssetSrvCpuHeap.get();
+                vertexSrvIndex = vertexSrvHeap->Allocate();
+
+                D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+                srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                srvDesc.Buffer.NumElements = desc.SizeInBytes / desc.StrideInBytes;
+                srvDesc.Buffer.StructureByteStride = desc.StrideInBytes;
+                m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, vertexSrvHeap->GetCpuHandle(vertexSrvIndex));
+            }
+        }
+
         // DEFAULTヒープはCPUからマップできないためnullptrを渡す。頂点/インデックスバッファは
         // 初回アップロード後書き換えない(ringCapacity=1でAdvanceRingAndGetWritePtrは呼ばれない)
-        return std::make_unique<DX12Buffer>(this, resource, nullptr, desc.SizeInBytes, desc.StrideInBytes, desc.Usage, 1);
+        return std::make_unique<DX12Buffer>(
+            this, resource, nullptr, desc.SizeInBytes, desc.StrideInBytes, desc.Usage, 1, vertexSrvHeap, vertexSrvIndex);
     }
 
     std::unique_ptr<IRHIShader> DX12Device::CreateShader(const ShaderDesc& desc)
@@ -1019,7 +1274,9 @@ namespace Kurenai::RHI
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc{};
         psoDesc.pRootSignature = m_RootSignature.Get();
         psoDesc.VS = vertexShader->GetBytecode();
-        psoDesc.PS = pixelShader->GetBytecode();
+        // ピクセルシェーダーを持たないパイプライン(深度プリパス)は空のバイトコードを渡す。
+        // DX12はこれをピクセルシェーダー段なしとして扱う
+        psoDesc.PS = pixelShader ? pixelShader->GetBytecode() : D3D12_SHADER_BYTECODE{ nullptr, 0 };
         psoDesc.InputLayout = { elements.empty() ? nullptr : elements.data(), static_cast<UINT>(elements.size()) };
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
         // 既定は「時計回りが表・裏面カリング」。ミラーリング(負のスケール)を含むインスタンスは
@@ -1027,57 +1284,14 @@ namespace Kurenai::RHI
         // (RHIDesc.hのFrontCounterClockwise、docs/Architecture.html 10.2節)
         psoDesc.RasterizerState.FrontCounterClockwise = desc.FrontCounterClockwise ? TRUE : FALSE;
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-        {
-            D3D12_RENDER_TARGET_BLEND_DESC& rt = psoDesc.BlendState.RenderTarget[0];
-            switch (desc.BlendMode)
-            {
-            case BlendMode::AlphaBlend:
-                rt.BlendEnable = TRUE;
-                rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
-                rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-                rt.BlendOp = D3D12_BLEND_OP_ADD;
-                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
-                rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-                break;
-            case BlendMode::Additive:
-                rt.BlendEnable = TRUE;
-                rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
-                rt.DestBlend = D3D12_BLEND_ONE;
-                rt.BlendOp = D3D12_BLEND_OP_ADD;
-                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
-                rt.DestBlendAlpha = D3D12_BLEND_ONE;
-                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-                break;
-            case BlendMode::Multiply:
-                rt.BlendEnable = TRUE;
-                rt.SrcBlend = D3D12_BLEND_DEST_COLOR;
-                rt.DestBlend = D3D12_BLEND_ZERO;
-                rt.BlendOp = D3D12_BLEND_OP_ADD;
-                rt.SrcBlendAlpha = D3D12_BLEND_DEST_ALPHA;
-                rt.DestBlendAlpha = D3D12_BLEND_ZERO;
-                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-                break;
-            case BlendMode::PremultipliedAlpha:
-                rt.BlendEnable = TRUE;
-                rt.SrcBlend = D3D12_BLEND_ONE;
-                rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-                rt.BlendOp = D3D12_BLEND_OP_ADD;
-                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
-                rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-                break;
-            case BlendMode::Opaque:
-            default:
-                rt.BlendEnable = FALSE;
-                break;
-            }
-        }
+        ApplyBlendMode(psoDesc.BlendState.RenderTarget[0], desc.BlendMode);
         psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         psoDesc.DepthStencilState.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
         psoDesc.DepthStencilState.DepthWriteMask = desc.DepthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
         // Reverse-Z: 近平面=1.0/遠平面=0.0にマッピングするため、深度テストの向きもGREATERに反転する
-        psoDesc.DepthStencilState.DepthFunc = desc.ReverseZ ? D3D12_COMPARISON_FUNC_GREATER : D3D12_COMPARISON_FUNC_LESS;
+        psoDesc.DepthStencilState.DepthFunc = desc.ReverseZ
+            ? (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_GREATER)
+            : (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_LESS_EQUAL : D3D12_COMPARISON_FUNC_LESS);
         psoDesc.SampleMask = UINT_MAX;
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         psoDesc.NumRenderTargets = static_cast<UINT>(desc.RenderTargetFormats.size());
@@ -1094,6 +1308,97 @@ namespace Kurenai::RHI
         ThrowIfFailed(m_Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pso)), "パイプラインステートの作成に失敗しました");
 
         return std::make_unique<DX12PipelineState>(pso, desc.Topology);
+    }
+
+    std::unique_ptr<IRHIPipelineState> DX12Device::CreateMeshPipelineState(const MeshPipelineStateDesc& desc)
+    {
+        if (!m_SupportsMeshShader || !m_Device2 || !m_MeshRootSignature)
+        {
+            Core::Logger::Error("DX12", "メッシュシェーダー非対応の環境でCreateMeshPipelineStateが呼ばれました");
+            return nullptr;
+        }
+        if (!desc.MeshShader || !desc.PixelShader)
+        {
+            Core::Logger::Error("DX12", "CreateMeshPipelineStateにメッシュシェーダーまたはピクセルシェーダーが指定されていません");
+            return nullptr;
+        }
+
+        // メッシュシェーダーPSOはD3D12_GRAPHICS_PIPELINE_STATE_DESCでは表現できない
+        // (AS/MSのサブオブジェクトが定義されていない)。ID3D12Device2で追加された
+        // 「パイプラインステートストリーム」= サブオブジェクトを型タグ付きで並べた構造体を渡す形式を使う。
+        // 並び順に決まりは無く、必要なものだけを列挙すればよい
+        struct MeshPipelineStateStream
+        {
+            CD3DX12_PIPELINE_STATE_STREAM_ROOT_SIGNATURE RootSignature;
+            CD3DX12_PIPELINE_STATE_STREAM_AS AS;
+            CD3DX12_PIPELINE_STATE_STREAM_MS MS;
+            CD3DX12_PIPELINE_STATE_STREAM_PS PS;
+            CD3DX12_PIPELINE_STATE_STREAM_RASTERIZER Rasterizer;
+            CD3DX12_PIPELINE_STATE_STREAM_BLEND_DESC Blend;
+            CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL DepthStencil;
+            CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL_FORMAT DSVFormat;
+            CD3DX12_PIPELINE_STATE_STREAM_RENDER_TARGET_FORMATS RTVFormats;
+            CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_DESC SampleDesc;
+            CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_MASK SampleMask;
+        };
+
+        // 以降のラスタライザ・ブレンド・深度・RTVフォーマットの決め方は
+        // CreatePipelineStateとまったく同じ(同じG-Bufferへ書くパスを2通りの経路で
+        // 切り替えられるようにするため、ここがずれると見た目が変わってしまう)
+        CD3DX12_RASTERIZER_DESC rasterizer(D3D12_DEFAULT);
+        rasterizer.FrontCounterClockwise = desc.FrontCounterClockwise ? TRUE : FALSE;
+
+        CD3DX12_BLEND_DESC blend(D3D12_DEFAULT);
+        ApplyBlendMode(blend.RenderTarget[0], desc.BlendMode);
+
+        CD3DX12_DEPTH_STENCIL_DESC depthStencil(D3D12_DEFAULT);
+        depthStencil.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
+        depthStencil.DepthWriteMask = desc.DepthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+        depthStencil.DepthFunc = desc.ReverseZ
+            ? (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_GREATER)
+            : (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_LESS_EQUAL : D3D12_COMPARISON_FUNC_LESS);
+
+        D3D12_RT_FORMAT_ARRAY rtvFormats{};
+        rtvFormats.NumRenderTargets = static_cast<UINT>(desc.RenderTargetFormats.size());
+        for (size_t i = 0; i < desc.RenderTargetFormats.size(); ++i)
+        {
+            rtvFormats.RTFormats[i] = ToDXGIFormat(desc.RenderTargetFormats[i]);
+        }
+
+        auto* meshShader = static_cast<DX12Shader*>(desc.MeshShader);
+        auto* pixelShader = static_cast<DX12Shader*>(desc.PixelShader);
+        auto* amplificationShader = static_cast<DX12Shader*>(desc.AmplificationShader);
+
+        MeshPipelineStateStream stream{};
+        stream.RootSignature = m_MeshRootSignature.Get();
+        // 増幅シェーダーは任意。指定が無い場合は空のバイトコードを置く
+        // (サブオブジェクト自体を省く必要はなく、長さ0なら「無し」として扱われる)
+        stream.AS = amplificationShader ? amplificationShader->GetBytecode() : D3D12_SHADER_BYTECODE{ nullptr, 0 };
+        stream.MS = meshShader->GetBytecode();
+        stream.PS = pixelShader->GetBytecode();
+        stream.Rasterizer = rasterizer;
+        stream.Blend = blend;
+        stream.DepthStencil = depthStencil;
+        stream.DSVFormat = (desc.HasDepthStencil || desc.DepthTargetAttached) ? DXGI_FORMAT_D32_FLOAT : DXGI_FORMAT_UNKNOWN;
+        stream.RTVFormats = rtvFormats;
+        stream.SampleDesc = DXGI_SAMPLE_DESC{ 1, 0 };
+        stream.SampleMask = UINT_MAX;
+
+        D3D12_PIPELINE_STATE_STREAM_DESC streamDesc{};
+        streamDesc.SizeInBytes = sizeof(stream);
+        streamDesc.pPipelineStateSubobjectStream = &stream;
+
+        Microsoft::WRL::ComPtr<ID3D12PipelineState> pso;
+        if (FAILED(m_Device2->CreatePipelineState(&streamDesc, IID_PPV_ARGS(&pso))))
+        {
+            // 従来の頂点シェーダー描画へ縮退できるため、例外ではなくnullptrを返す
+            Core::Logger::Error("DX12", "メッシュシェーダーパイプラインステートの作成に失敗しました");
+            return nullptr;
+        }
+
+        // トポロジはメッシュシェーダーの[outputtopology]属性が決めるため、ここで渡す値は使われない
+        // (DX12CommandList::SetPipelineStateがIASetPrimitiveTopologyを呼ばない)
+        return std::make_unique<DX12PipelineState>(pso, PrimitiveTopology::TriangleList, /*isMeshPipeline*/ true);
     }
 
     std::unique_ptr<IRHIPipelineState> DX12Device::CreateComputePipelineState(const ComputePipelineStateDesc& desc)
@@ -1715,8 +2020,11 @@ namespace Kurenai::RHI
         // D3D12_FEATURE_SHADER_MODELは「HighestShaderModelへ聞きたい上限を入れて呼ぶと、
         // 対応している値まで引き下げて返す」APIだが、ランタイムが知らない列挙値を渡すと
         // E_INVALIDARGを返す。そのため上から順に下げながら問い合わせる
+        // 先頭が6_6なのはbindless(ResourceDescriptorHeap)がSM 6.6で追加されたため。
+        // ここを6_5のままにするとデバイスが6.6対応でも6.5としか報告されず、
+        // bindlessが常に無効になる
         static constexpr D3D_SHADER_MODEL kCandidates[] = {
-            D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_4, D3D_SHADER_MODEL_6_3,
+            D3D_SHADER_MODEL_6_6, D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_4, D3D_SHADER_MODEL_6_3,
             D3D_SHADER_MODEL_6_2, D3D_SHADER_MODEL_6_1, D3D_SHADER_MODEL_6_0,
         };
 
@@ -1741,6 +2049,156 @@ namespace Kurenai::RHI
         // Initializeは失敗しても例外を投げない(理由はログへ出る)。
         // 戻り値がfalseの場合はCreateShaderがd3dcompiler/SM 5.0へフォールバックする
         m_ShaderCompiler.Initialize(m_HighestShaderModel);
+    }
+
+    void DX12Device::DetectBindlessSupport()
+    {
+        m_SupportsBindless = false;
+
+        // シェーダー側の条件。SM 6.6でコンパイルできること(デバイスの対応状況と
+        // dxcompiler.dllのバージョンの両方で決まる。DX12ShaderCompiler::Initialize参照)
+        if (!m_ShaderCompiler.IsAvailable() || !m_ShaderCompiler.SupportsBindless())
+        {
+            Core::Logger::Info(
+                "DX12",
+                "bindless非対応: シェーダーモデル6.6でのコンパイルができません"
+                "(ResourceDescriptorHeapにはdxc 1.6以降とSM 6.6対応のGPUが必要です)");
+            return;
+        }
+
+        // ハードウェア側の条件。SM 6.6の動的リソース(ResourceDescriptorHeap)は
+        // 「ヒープ全体をシェーダーから直接添字できる」ことが前提で、これはリソースバインディング
+        // Tier 3が保証する性質。Tier 2以下はディスクリプタテーブルの範囲を越えたアクセスを
+        // 認めていないため、コンパイルは通っても実行時の挙動が未定義になる
+        D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
+        if (FAILED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options))))
+        {
+            Core::Logger::Warning("DX12", "bindless非対応: D3D12_FEATURE_D3D12_OPTIONSの問い合わせに失敗しました");
+            return;
+        }
+
+        if (options.ResourceBindingTier < D3D12_RESOURCE_BINDING_TIER_3)
+        {
+            Core::Logger::Info(
+                "DX12",
+                "bindless非対応: ResourceBindingTierが" + std::to_string(static_cast<int>(options.ResourceBindingTier)) +
+                    "でTier 3に達していません");
+            return;
+        }
+
+        m_SupportsBindless = true;
+        Core::Logger::Info("DX12", "bindless(ResourceDescriptorHeap / SM 6.6)が利用可能です");
+    }
+
+    void DX12Device::DetectMeshShaderSupport()
+    {
+        m_SupportsMeshShader = false;
+
+        // as/msプロファイルはSM 6.5が下限。RayQueryと同じ条件のため、
+        // レイトレーシングが使える環境なら通常ここも通る
+        if (!m_ShaderCompiler.IsAvailable() || !m_ShaderCompiler.SupportsMeshShaderProfile())
+        {
+            Core::Logger::Info(
+                "DX12", "メッシュシェーダー非対応: シェーダーモデル6.5でのコンパイルができません");
+            return;
+        }
+
+        // メッシュシェーダーPSOの作成にはID3D12Device2::CreatePipelineState(パイプラインステート
+        // ストリーム)が要る。ID3D12Device2はWindows 10 1709で追加されたインタフェースで、
+        // メッシュシェーダー対応GPUなら必ず取得できるが、無ければPSOを作る手段が無い
+        if (FAILED(m_Device.As(&m_Device2)))
+        {
+            Core::Logger::Info("DX12", "メッシュシェーダー非対応: ID3D12Device2を取得できませんでした");
+            return;
+        }
+
+        D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7{};
+        if (FAILED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7))))
+        {
+            // OPTIONS7自体がWindows 10 2004で追加された問い合わせのため、
+            // それ以前のOSでは失敗する。その場合メッシュシェーダーも存在しない
+            Core::Logger::Info("DX12", "メッシュシェーダー非対応: D3D12_FEATURE_D3D12_OPTIONS7の問い合わせに失敗しました");
+            m_Device2.Reset();
+            return;
+        }
+
+        if (options7.MeshShaderTier < D3D12_MESH_SHADER_TIER_1)
+        {
+            Core::Logger::Info("DX12", "メッシュシェーダー非対応: MeshShaderTierがTier 1に達していません");
+            m_Device2.Reset();
+            return;
+        }
+
+        // 【bindlessを必須にする】このエンジンのメッシュシェーダーは、入力アセンブラの代わりに
+        // 頂点・メッシュレットの各バッファをResourceDescriptorHeap経由で読む設計にしてある
+        // (Shaders/3D/GBufferMeshlet.hlsl)。bindlessが無い環境向けにSRVテーブル経由の
+        // 別実装を持つこともできるが、メッシュシェーダー対応GPUは実質すべてSM 6.6にも
+        // 対応しているため、2系統を抱える価値が無い
+        if (!m_SupportsBindless)
+        {
+            Core::Logger::Info(
+                "DX12", "メッシュシェーダー非対応: bindlessが利用できないため無効にします");
+            m_Device2.Reset();
+            return;
+        }
+
+        m_SupportsMeshShader = true;
+        Core::Logger::Info("DX12", "メッシュシェーダー(Tier 1 / SM 6.5)が利用可能です");
+    }
+
+    uint32_t DX12Device::RegisterBindless(IRHITexture* texture)
+    {
+        if (!m_SupportsBindless || !m_BindlessTable || !texture)
+        {
+            return kInvalidBindlessIndex;
+        }
+
+        auto* dx12Texture = static_cast<DX12Texture*>(texture);
+        // 既に登録済みなら同じ番号を返す。呼び出し側が重複登録で区画を食い潰さないようにする
+        if (dx12Texture->GetBindlessIndex() != kInvalidBindlessIndex)
+        {
+            return dx12Texture->GetBindlessIndex();
+        }
+
+        // SRVを持たないテクスチャ(深度専用など)はbindlessで読めない。
+        // 無効なハンドルを渡すとでたらめなディスクリプタが区画へ入るため、ここで弾く
+        if (!dx12Texture->HasSrv())
+        {
+            Core::Logger::Error("DX12", "SRVを持たないテクスチャがbindlessへ登録されようとしました");
+            return kInvalidBindlessIndex;
+        }
+
+        const uint32_t index = m_BindlessTable->Register(dx12Texture->GetSrvCpuHandle());
+        dx12Texture->SetBindlessIndex(index);
+        return index;
+    }
+
+    uint32_t DX12Device::RegisterBindless(IRHIBuffer* buffer)
+    {
+        if (!m_SupportsBindless || !m_BindlessTable || !buffer)
+        {
+            return kInvalidBindlessIndex;
+        }
+
+        auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+        if (dx12Buffer->GetBindlessIndex() != kInvalidBindlessIndex)
+        {
+            return dx12Buffer->GetBindlessIndex();
+        }
+
+        const D3D12_CPU_DESCRIPTOR_HANDLE srv = dx12Buffer->GetSrvCpuHandle();
+        if (srv.ptr == 0)
+        {
+            // SRVを持たないUsage(Vertex/Index/Constant、およびShaderReadableを指定しなかった
+            // 頂点バッファ)。BufferDesc::ShaderReadableの指定漏れがここで表面化する
+            Core::Logger::Error(
+                "DX12", "SRVを持たないバッファがbindlessへ登録されようとしました(BufferDesc::ShaderReadableの指定漏れ?)");
+            return kInvalidBindlessIndex;
+        }
+
+        const uint32_t index = m_BindlessTable->Register(srv);
+        dx12Buffer->SetBindlessIndex(index);
+        return index;
     }
 
     void DX12Device::DetectRaytracingSupport()

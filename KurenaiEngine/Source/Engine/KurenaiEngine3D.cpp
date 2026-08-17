@@ -270,6 +270,16 @@ namespace Kurenai
             // 星を出さないため。AerialPerspective.hlsl(フォグのin-scatter)と
             // SkyGenerate.hlsl(IBLキューブ)は自分のMakeSkyParametersで0を入れる
             DirectX::XMFLOAT4 StarsParams;
+            // 雲の品質(さらに末尾に追加)。x=積雲のボリュームレイマーチの段数、yzwは予備。
+            //
+            // 【読むのはSkyCloud.hlslだけ】ボリューム経路を持つのがこのシェーダーだけだからである。
+            // 他のシェーダー(SSR/PlanarReflection/AerialPerspective)は厚みゼロの平面経路を通り、
+            // レイマーチそのものを行わないのでこの値を必要としない。
+            //
+            // 【オクターブ数と自己影の段数はここへ入れない】あれらはfBmの値そのものを変えるため、
+            // 実行時に動かすとボリューム経路と平面経路で雲の形が食い違い、
+            // 背景の雲と水面に映る雲が別物になる(Sky.hlsliのCloudRaymarchStepsのコメント参照)
+            DirectX::XMFLOAT4 CloudQualityParams;
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -683,6 +693,14 @@ namespace Kurenai
             // (Shadow.hlsl等が先頭までしか宣言していなくても影響しない、という上のBaseColorFactorの
             // コメントと同じ理由)
             float MaterialID;
+            // メッシュシェーダー経路(Shaders/3D/GBufferMeshlet.hlsl)がジオメトリを引くための
+            // bindlessディスクリプタ番号。頂点シェーダー経路では読まれない。
+            // すべて4バイトのスカラーなので、末尾に足しても既存フィールドのオフセットは動かない
+            uint32_t VertexBufferIndex;
+            uint32_t MeshletBufferIndex;
+            uint32_t MeshletVertexBufferIndex;
+            uint32_t MeshletTriangleBufferIndex;
+            uint32_t MeshletCount;
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -716,6 +734,19 @@ namespace Kurenai
             // 水面(kMaterialIDWater、Shaders/3D/GBufferCommon.hlsliと一致させること)。
             // 水面以外は0.0f(通常マテリアル)のまま
             constants.MaterialID = instance.IsWater ? 1.0f : 0.0f;
+
+            // メッシュレット。ModelLoaderが登録済みの番号をそのまま渡す。
+            // メッシュシェーダー非対応・メッシュレット未生成の場合は
+            // バッファ自体が無く、GetBindlessIndexはkInvalidBindlessIndexを返す
+            // (MeshletCountが0ならメッシュシェーダー経路には入らないため、その値は使われない)
+            const auto bindlessIndexOf = [](const RHI::IRHIBuffer* buffer) {
+                return buffer ? buffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
+            };
+            constants.VertexBufferIndex = bindlessIndexOf(mesh.VertexBuffer.get());
+            constants.MeshletBufferIndex = bindlessIndexOf(mesh.MeshletBuffer.get());
+            constants.MeshletVertexBufferIndex = bindlessIndexOf(mesh.MeshletVertexBuffer.get());
+            constants.MeshletTriangleBufferIndex = bindlessIndexOf(mesh.MeshletTriangleBuffer.get());
+            constants.MeshletCount = mesh.MeshletCount;
             return constants;
         }
 
@@ -769,6 +800,50 @@ namespace Kurenai
             // 黒の締め(ブラックポイント)。0で恒等。詳細はTonemap.hlsl側のコメント参照
             float BlackPoint;
         };
+
+        // Upscale.hlsl側のcbuffer UpscaleConstantsと一致させる必要がある
+        struct alignas(16) UpscaleConstants
+        {
+            // EASUの事前計算定数。ComputeEasuConstants()が入力/出力解像度から作る
+            DirectX::XMFLOAT4 EasuCon0;
+            DirectX::XMFLOAT4 EasuCon1;
+            DirectX::XMFLOAT4 EasuCon2;
+            DirectX::XMFLOAT4 EasuCon3;
+            // 書き込み先のサイズ(出力解像度)
+            DirectX::XMUINT2 OutputSize;
+            // RCASのシャープネス(ComputeRcasSharpnessScaleで変換済みの線形値)
+            float RcasSharpnessScale;
+            float UpscalePadding;
+        };
+
+        // FSR1のFsrEasuCon()と同じ内容。出力画素の整数座標から入力画像の再構成位置を求めるための
+        // スケール/オフセットと、12タップぶんの4回のGather4の中心へのオフセットを作る。
+        //
+        // 参照実装はこれらをuintへビットキャストして渡すが、それはFP16パック経路(A_HALF)と
+        // 定数を共用するためで、SM5.0でも動く必要がある(=16bitパック経路を使わない)このエンジンでは
+        // floatのまま持つほうがCPU側の構造体と素直に対応する
+        void ComputeEasuConstants(
+            UpscaleConstants& constants, uint32_t inputWidth, uint32_t inputHeight,
+            uint32_t outputWidth, uint32_t outputHeight)
+        {
+            const float inputW = static_cast<float>(inputWidth);
+            const float inputH = static_cast<float>(inputHeight);
+            const float outputW = static_cast<float>(outputWidth);
+            const float outputH = static_cast<float>(outputHeight);
+
+            // 出力の整数座標 → 入力の画素座標。0.5を引いているのはテクセル中心合わせ
+            constants.EasuCon0 = {
+                inputW / outputW,
+                inputH / outputH,
+                0.5f * inputW / outputW - 0.5f,
+                0.5f * inputH / outputH - 0.5f,
+            };
+            // 入力の画素座標 → 正規化UV。zwは12タップの左上ブロック('F'タップ)へのオフセット
+            constants.EasuCon1 = { 1.0f / inputW, 1.0f / inputH, 1.0f / inputW, -1.0f / inputH };
+            // 残り3つのGather中心へのオフセット(いずれも'F'ではなく1つめのGather中心からの相対)
+            constants.EasuCon2 = { -1.0f / inputW, 2.0f / inputH, 1.0f / inputW, 2.0f / inputH };
+            constants.EasuCon3 = { 0.0f, 4.0f / inputH, 0.0f, 0.0f };
+        }
 
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
         // SkyIntegrate.hlsl が書き、SkyGenerate.hlsl / DeferredLighting.hlsl / SSR.hlsl が読む
@@ -891,13 +966,14 @@ namespace Kurenai
             return levels;
         }
 
-        // SSAO.hlsl側のkSSAOKernelSizeと一致させる必要がある
-        constexpr uint32_t kSSAOKernelSize = 16;
+        // SSAO.hlsl側のkSSAOKernelSizeMaxと一致させる必要がある。
+        // 定数バッファに確保する数であって、実際に回す段数(m_SSAOKernelSize)ではない
+        constexpr uint32_t kSSAOKernelSizeMax = 16;
 
         struct alignas(16) SSAOConstants
         {
-            DirectX::XMFLOAT4 Samples[kSSAOKernelSize]; // タンジェント空間の半球カーネル
-            DirectX::XMFLOAT4 Params;                   // x: 半径, y: バイアス, z: 強さ(べき乗), w: 未使用
+            DirectX::XMFLOAT4 Samples[kSSAOKernelSizeMax]; // タンジェント空間の半球カーネル
+            DirectX::XMFLOAT4 Params;                      // x: 半径, y: バイアス, z: 強さ(べき乗), w: 使うサンプル数
         };
 
         // SSIL_VisibilityBitmask.hlsl側のcbuffer SSILConstantsと一致させる必要がある
@@ -925,7 +1001,10 @@ namespace Kurenai
         struct alignas(16) RTReflectionConstants
         {
             DirectX::XMFLOAT4 Params0; // xy: 出力サイズ(ピクセル), z: 最大レイ距離, w: ラフネスカットオフ
-            DirectX::XMFLOAT4 Params1; // x: 影レイを撃つか(1で撃つ), yzw: 未使用
+            // x: 影レイを撃つか(1で撃つ)
+            // y: メッシュレットのデバッグ表示(1で、反射に映る面をメッシュレット色で塗る)
+            // zw: 未使用
+            DirectX::XMFLOAT4 Params1;
         };
 
         // RTShadow.hlsl側のcbuffer RTShadowConstantsと一致させる必要がある
@@ -1138,6 +1217,11 @@ namespace Kurenai
         , m_InitialSceneIndex(initialSceneIndex)
         , m_RenderWidth(std::max(1u, renderWidth))
         , m_RenderHeight(std::max(1u, renderHeight))
+        // 超解像の出力解像度は、無効なうちは内部レンダー解像度と同じ意味を持つ。
+        // ここを揃えておかないと、UIで初めて超解像を有効にした瞬間に
+        // 出力解像度が既定値(1280x720)へ飛んでしまう
+        , m_UpscaleOutputWidth(std::max(1u, renderWidth))
+        , m_UpscaleOutputHeight(std::max(1u, renderHeight))
     {
         m_ImGuiBackend = m_Device->CreateImGuiBackend(m_Window->GetHandle());
         m_GPUProfiler = m_Device->CreateGPUProfiler();
@@ -1162,7 +1246,17 @@ namespace Kurenai
         m_LastFrameTime = std::chrono::steady_clock::now();
     }
 
-    KurenaiEngine3D::~KurenaiEngine3D() = default;
+    KurenaiEngine3D::~KurenaiEngine3D()
+    {
+        // このクラスが持つGPUリソース(レンダーターゲット・G-Buffer・各種バッファ・
+        // シーンのテクスチャ)を1つも壊す前に、GPUの実行完了を待つ。
+        // 基底のKurenaiEngineBaseも待つが、そちらが走るのはこのクラスのメンバが
+        // すべて破棄された後なので間に合わない(WaitForGPUIdleの宣言側コメント参照)。
+        //
+        // ここへ来る時点でRun()がRender/Loaderの両スレッドをjoin済みのため、
+        // 待った後に新しいコマンドが積まれることはない
+        WaitForGPUIdle();
+    }
 
     void KurenaiEngine3D::CreateSceneResources()
     {
@@ -1193,6 +1287,54 @@ namespace Kurenai
         gbufferWaterPsDesc.FilePath = shaderDirectory + L"Water.hlsl";
         gbufferWaterPsDesc.EntryPoint = "PSMain";
         m_GBufferWaterPixelShader = m_Device->CreateShader(gbufferWaterPsDesc);
+
+        // 深度プリパス(41.22節)のアルファカットアウト用。頂点シェーダーはG-Bufferと共有する
+        // (プリパスとG-Bufferで深度が1ulpでもずれると面が消えるため。PSO作成側のコメント参照)
+        try
+        {
+            RHI::ShaderDesc depthPrepassCutoutPsDesc;
+            depthPrepassCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
+            depthPrepassCutoutPsDesc.FilePath = shaderDirectory + L"DepthPrepass.hlsl";
+            depthPrepassCutoutPsDesc.EntryPoint = "PSMainCutout";
+            m_DepthPrepassCutoutPixelShader = m_Device->CreateShader(depthPrepassCutoutPsDesc);
+        }
+        catch (const std::exception& e)
+        {
+            // 作れなくてもプリパス自体は成立する(カットアウトのメッシュをプリパスから
+            // 除外して従来どおりG-Bufferだけで描く)ため、致命的とはしない
+            m_DepthPrepassCutoutPixelShader.reset();
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                std::string("深度プリパスのアルファカットアウト用ピクセルシェーダーの作成に失敗しました。"
+                            "カットアウトのメッシュはプリパスから除外します: ") + e.what());
+        }
+
+        // メッシュシェーダー版のG-Bufferパス(GBufferMeshlet.hlsl)。
+        // 対応環境でのみ作る ―― 非対応環境ではas/msプロファイルのコンパイル自体ができず、
+        // 毎回エラーログが出てしまうため。ピクセルシェーダーはGBuffer.hlslのものを共有する
+        // (メッシュレットのON/OFFで見た目が変わらないことがこのパスの前提)
+        if (m_Device->SupportsMeshShader())
+        {
+            RHI::ShaderDesc gbufferAsDesc;
+            gbufferAsDesc.Stage = RHI::ShaderStage::Amplification;
+            gbufferAsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.hlsl";
+            gbufferAsDesc.EntryPoint = "ASMain";
+            m_GBufferAmplificationShader = m_Device->CreateShader(gbufferAsDesc);
+
+            RHI::ShaderDesc gbufferMsDesc;
+            gbufferMsDesc.Stage = RHI::ShaderStage::Mesh;
+            gbufferMsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.hlsl";
+            gbufferMsDesc.EntryPoint = "MSMain";
+            m_GBufferMeshShader = m_Device->CreateShader(gbufferMsDesc);
+
+            // メッシュレットごとに色分けするデバッグ表示用
+            RHI::ShaderDesc gbufferMeshletDebugPsDesc;
+            gbufferMeshletDebugPsDesc.Stage = RHI::ShaderStage::Pixel;
+            // 実体はGBuffer.hlsl側(PSMainをそのまま呼んでアルベドだけ差し替えるため)
+            gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
+            gbufferMeshletDebugPsDesc.EntryPoint = "PSMainMeshletDebug";
+            m_GBufferMeshletDebugPixelShader = m_Device->CreateShader(gbufferMeshletDebugPsDesc);
+        }
 
         // G-BufferのPSOはEmissiveのフォーマットがバッファ精度に依存するため、
         // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
@@ -1236,7 +1378,7 @@ namespace Kurenai
         // SSAO/SSIL/AOブラーのPSOは出力先(AO/GIバッファ)のフォーマットがバッファ精度に依存するため、
         // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
 
-        m_SSAOKernel = GenerateSSAOKernel(kSSAOKernelSize);
+        m_SSAOKernel = GenerateSSAOKernel(m_SSAOKernelSize);
 
         RHI::BufferDesc ssaoConstantBufferDesc;
         ssaoConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -1461,10 +1603,60 @@ namespace Kurenai
         aerialPerspectivePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
         m_AerialPerspectivePipelineState = m_Device->CreatePipelineState(aerialPerspectivePipelineDesc);
 
+        // 雲パス(頂点バッファなしのフルスクリーン三角形。積雲と巻雲だけを1/2解像度で評価し、
+        // 透過率と事前乗算済みの散乱光を書く)。専用のb1定数バッファは持たない
+        // (パラメータはFrameConstants末尾のCloudParams0-3等に入っているため)
+        RHI::ShaderDesc skyCloudVsDesc;
+        skyCloudVsDesc.Stage = RHI::ShaderStage::Vertex;
+        skyCloudVsDesc.FilePath = shaderDirectory + L"SkyCloud.hlsl";
+        skyCloudVsDesc.EntryPoint = "VSMain";
+        m_SkyCloudVertexShader = m_Device->CreateShader(skyCloudVsDesc);
+
+        RHI::ShaderDesc skyCloudPsDesc;
+        skyCloudPsDesc.Stage = RHI::ShaderStage::Pixel;
+        skyCloudPsDesc.FilePath = shaderDirectory + L"SkyCloud.hlsl";
+        skyCloudPsDesc.EntryPoint = "PSMain";
+        m_SkyCloudPixelShader = m_Device->CreateShader(skyCloudPsDesc);
+
+        RHI::PipelineStateDesc skyCloudPipelineDesc;
+        skyCloudPipelineDesc.VertexShader = m_SkyCloudVertexShader.get();
+        skyCloudPipelineDesc.PixelShader = m_SkyCloudPixelShader.get();
+        skyCloudPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        skyCloudPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        m_SkyCloudPipelineState = m_Device->CreatePipelineState(skyCloudPipelineDesc);
+
+        // DDGIの低解像度解決パス(雲パスと同じ作り。拡散イラディアンスとinsideWeightを書く)
+        RHI::ShaderDesc ddgiResolveVsDesc;
+        ddgiResolveVsDesc.Stage = RHI::ShaderStage::Vertex;
+        ddgiResolveVsDesc.FilePath = shaderDirectory + L"DDGIResolve.hlsl";
+        ddgiResolveVsDesc.EntryPoint = "VSMain";
+        m_DDGIResolveVertexShader = m_Device->CreateShader(ddgiResolveVsDesc);
+
+        RHI::ShaderDesc ddgiResolvePsDesc;
+        ddgiResolvePsDesc.Stage = RHI::ShaderStage::Pixel;
+        ddgiResolvePsDesc.FilePath = shaderDirectory + L"DDGIResolve.hlsl";
+        ddgiResolvePsDesc.EntryPoint = "PSMain";
+        m_DDGIResolvePixelShader = m_Device->CreateShader(ddgiResolvePsDesc);
+
+        RHI::PipelineStateDesc ddgiResolvePipelineDesc;
+        ddgiResolvePipelineDesc.VertexShader = m_DDGIResolveVertexShader.get();
+        ddgiResolvePipelineDesc.PixelShader = m_DDGIResolvePixelShader.get();
+        ddgiResolvePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        // 2枚目はこのテクセルが代表している全解像度の深度(41.24節)。並びはDDGIResolve.hlslの
+        // PSOutputおよびDDGIResolveパスのRenderTargetsと一致させること。
+        // Reverse-Zの生値をそのまま持つのでR32_Float(合成側の相対差の判定に十分な精度が要る)
+        ddgiResolvePipelineDesc.RenderTargetFormats = {
+            RHI::Format::R16G16B16A16_Float,
+            RHI::Format::R32_Float,
+        };
+        m_DDGIResolvePipelineState = m_Device->CreatePipelineState(ddgiResolvePipelineDesc);
+
         // RT反射パス(コンピュートシェーダー。TLASへ鏡面レイを撃ち反射色を求める)。
         // RTReflection.hlslはRayQueryを含むためシェーダーモデル6.5でしかコンパイルできない。
         // 非対応環境ではシェーダー自体を作らず、UIからもRaytracedを選べないようにする
         m_RaytracingAvailable = m_Device->SupportsRaytracing();
+        // メッシュシェーダーの可否もここで控える(UIパネルが参照する)
+        m_MeshShaderAvailable = m_Device->SupportsMeshShader();
         if (m_RaytracingAvailable)
         {
             RHI::ShaderDesc rtReflectionCsDesc;
@@ -1567,6 +1759,27 @@ namespace Kurenai
         tonemapConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         tonemapConstantBufferDesc.SizeInBytes = sizeof(TonemapConstants);
         m_TonemapConstantBuffer = m_Device->CreateBuffer(tonemapConstantBufferDesc);
+
+        // 超解像パス(EASU=拡大、RCAS=シャープ化。どちらもコンピュートシェーダー)。
+        // レンダーターゲットではなくUAVへ書くのでPSOにフォーマットの指定は要らない
+        RHI::ShaderDesc upscaleEasuCsDesc;
+        upscaleEasuCsDesc.Stage = RHI::ShaderStage::Compute;
+        upscaleEasuCsDesc.FilePath = shaderDirectory + L"Upscale.hlsl";
+        upscaleEasuCsDesc.EntryPoint = "CSEASU";
+        m_UpscaleEASUComputeShader = m_Device->CreateShader(upscaleEasuCsDesc);
+        m_UpscaleEASUPipelineState = m_Device->CreateComputePipelineState({ m_UpscaleEASUComputeShader.get() });
+
+        RHI::ShaderDesc upscaleRcasCsDesc;
+        upscaleRcasCsDesc.Stage = RHI::ShaderStage::Compute;
+        upscaleRcasCsDesc.FilePath = shaderDirectory + L"Upscale.hlsl";
+        upscaleRcasCsDesc.EntryPoint = "CSRCAS";
+        m_UpscaleRCASComputeShader = m_Device->CreateShader(upscaleRcasCsDesc);
+        m_UpscaleRCASPipelineState = m_Device->CreateComputePipelineState({ m_UpscaleRCASComputeShader.get() });
+
+        RHI::BufferDesc upscaleConstantBufferDesc;
+        upscaleConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        upscaleConstantBufferDesc.SizeInBytes = sizeof(UpscaleConstants);
+        m_UpscaleConstantBuffer = m_Device->CreateBuffer(upscaleConstantBufferDesc);
 
         // 自動露出パス(輝度ヒストグラムの構築→縮約→時間方向の順応。すべてコンピュートシェーダー)
         RHI::ShaderDesc autoExposureClearCsDesc;
@@ -1784,7 +1997,8 @@ namespace Kurenai
 
         // 大気散乱のLUT(Hillaire 2020)。TransmittanceとMultiScatteringはカメラにも太陽にも
         // 依存せず、大気パラメータ(濁りを含む)だけの関数なので、濁りが変わらない限り焼き直さない
-        // (m_AtmosphereLUTBakedTurbidity)。SkyViewは太陽の位置で変わるため毎フレーム焼く。
+        // (m_AtmosphereLUTBakedTurbidity)。SkyViewは太陽の位置と濁りで変わるため、
+        // そのどちらかが動いたときに焼き直す(m_SkyViewBakedSunPosition)。
         // HDRの放射輝度を格納するためR16G16B16A16_Float
         m_TransmittanceLUT = m_Device->CreateUAVTexture(
             kTransmittanceLUTWidth, kTransmittanceLUTHeight, RHI::Format::R16G16B16A16_Float);
@@ -1797,6 +2011,12 @@ namespace Kurenai
             Core::Logger::Error("KurenaiEngine3D",
                 "大気散乱のLUTテクスチャの作成に失敗しました(日中の空が黒くなります)");
         }
+        // 【ここで焼き直し要求を必ず立てる】3枚とも中身が未初期化の新しいテクスチャになったので、
+        // 「前回焼いたときの条件」を捨てないと、APIをDX11/DX12で切り替えた直後など
+        // この関数が再度呼ばれた場合に一度も焼かれないまま読まれて空が黒くなる
+        m_AtmosphereLUTBakedTurbidity = -1.0f;
+        m_SkyViewBakedTurbidity = -1.0f;
+        m_SkyViewBakedSunPosition = { 0.0f, 0.0f, 0.0f };
 
         RHI::BufferDesc atmosphereConstantBufferDesc;
         atmosphereConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -2213,6 +2433,29 @@ namespace Kurenai
                m_RTAOPipelineState != nullptr && m_RTAORawTexture != nullptr && m_RTAOTexture != nullptr;
     }
 
+    bool KurenaiEngine3D::ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const
+    {
+        // 【水面はメッシュレット経路に載せない】水面のピクセルシェーダーはWater.hlslの
+        // PSMainで、G-Buffer本体のPSMainとは別物。メッシュシェーダー版を用意するには
+        // PSOをもう2本(通常/ミラー)増やすことになるが、水面は.ksceneが置く平面1枚で
+        // 三角形数が少なく、メッシュレットカリングの利得がほとんど無い
+        if (isWater)
+        {
+            return false;
+        }
+
+        // メッシュレットが焼かれていない(--no-meshletsでパックされた.kmodel)、
+        // またはデバイスが非対応でGPUバッファを作っていない場合はnullptrになる。
+        // 【MeshletCountで判定しないこと】あちらはアセットが持つ数そのもので、
+        // メッシュシェーダー非対応の環境でも(レイトレーシングが使うため)0にはならない
+        if (!mesh.MeshletBuffer)
+        {
+            return false;
+        }
+
+        return m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+    }
+
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAOTexture() const
     {
         if (!m_AOEnabled)
@@ -2286,6 +2529,11 @@ namespace Kurenai
             };
             gbufferPipelineDesc.HasDepthStencil = true;
             gbufferPipelineDesc.ReverseZ = true;
+            // 深度プリパス(41.22節)を通したとき、プリパスが書いた深度と同じ値になる最前面の
+            // 断片だけを通すため、比較をGREATER_EQUALへ緩める。プリパスを切っていても
+            // 不透明G-Bufferでは絵が変わらない(理由はRHIDesc.hのDepthAllowEqualのコメント)ので、
+            // 有効/無効でPSOを2組に増やさず常にこちらにしてある
+            gbufferPipelineDesc.DepthAllowEqual = true;
             m_GBufferPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
 
             // ミラーリングされたインスタンス用に、表裏判定だけを入れ替えた同じパイプラインを用意する。
@@ -2302,6 +2550,72 @@ namespace Kurenai
             m_GBufferWaterPipelineState = m_Device->CreatePipelineState(gbufferPipelineDesc);
             gbufferPipelineDesc.FrontCounterClockwise = true;
             m_GBufferWaterPipelineStateMirrored = m_Device->CreatePipelineState(gbufferPipelineDesc);
+
+            // メッシュシェーダー版のG-Bufferパス(GBufferMeshlet.hlsl)。
+            // 入力レイアウトを持たない以外は上の通常PSOと同じ設定にする ―― ラスタライザ・
+            // 深度・レンダーターゲットのどれか1つでもずれると、メッシュレットのON/OFFで
+            // 見た目が変わってしまい「切り替えても一致するはず」という検証が成立しなくなる。
+            //
+            // 非対応環境ではCreateMeshPipelineStateがnullptrを返す。ポインタが空なら
+            // 描画側が従来経路を使うため、ここで分岐して作成をスキップする必要はない
+            if (m_Device->SupportsMeshShader() && m_GBufferMeshShader && m_GBufferAmplificationShader)
+            {
+                RHI::MeshPipelineStateDesc meshPipelineDesc;
+                meshPipelineDesc.AmplificationShader = m_GBufferAmplificationShader.get();
+                meshPipelineDesc.MeshShader = m_GBufferMeshShader.get();
+                meshPipelineDesc.PixelShader = m_GBufferPixelShader.get();
+                meshPipelineDesc.RenderTargetFormats = gbufferPipelineDesc.RenderTargetFormats;
+                meshPipelineDesc.HasDepthStencil = true;
+                meshPipelineDesc.ReverseZ = true;
+                // 頂点シェーダー版と1つでもずれると切り替えで見た目が変わるため、深度比較も揃える
+                meshPipelineDesc.DepthAllowEqual = true;
+                meshPipelineDesc.FrontCounterClockwise = false;
+                m_GBufferMeshletPipelineState = m_Device->CreateMeshPipelineState(meshPipelineDesc);
+
+                meshPipelineDesc.FrontCounterClockwise = true;
+                m_GBufferMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(meshPipelineDesc);
+
+                // メッシュレットの分かれ方を色で確かめるデバッグ表示用。
+                // ピクセルシェーダーだけを差し替えた同じパイプライン
+                if (m_GBufferMeshletDebugPixelShader)
+                {
+                    meshPipelineDesc.PixelShader = m_GBufferMeshletDebugPixelShader.get();
+                    meshPipelineDesc.FrontCounterClockwise = false;
+                    m_GBufferMeshletDebugPipelineState = m_Device->CreateMeshPipelineState(meshPipelineDesc);
+                    meshPipelineDesc.FrontCounterClockwise = true;
+                    m_GBufferMeshletDebugPipelineStateMirrored = m_Device->CreateMeshPipelineState(meshPipelineDesc);
+                }
+            }
+
+            // 深度プリパス(41.22節)。G-Bufferとまったく同じ頂点シェーダー・入力レイアウトで
+            // 深度だけを書く。レンダーターゲットは持たず、不透明マテリアル用は
+            // ピクセルシェーダーそのものを持たない(段ごと省く)。
+            //
+            // 【頂点シェーダーを共有する理由】プリパスとG-Bufferで頂点の変換結果が
+            // 1ulpでも違うと、深度が一致せずGREATER_EQUALのテストを通らなくなり、
+            // その面がまるごと消える。別のシェーダーに写すと最適化の差で容易にずれる
+            RHI::PipelineStateDesc depthPrepassPipelineDesc;
+            depthPrepassPipelineDesc.InputLayout = GetModelInputLayout();
+            depthPrepassPipelineDesc.VertexShader = m_GBufferVertexShader.get();
+            depthPrepassPipelineDesc.PixelShader = nullptr;
+            depthPrepassPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            depthPrepassPipelineDesc.HasDepthStencil = true;
+            depthPrepassPipelineDesc.ReverseZ = true;
+            m_DepthPrepassPipelineState = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
+            depthPrepassPipelineDesc.FrontCounterClockwise = true;
+            m_DepthPrepassPipelineStateMirrored = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
+
+            // アルファカットアウト(glTFのalphaMode=MASK)用。切り抜かれる部分の深度まで
+            // 書いてしまうとG-Buffer側のclipと食い違って穴が開くため、こちらだけ
+            // 同じ判定のclipを持つピクセルシェーダーを通す(DepthPrepass.hlsl)
+            if (m_DepthPrepassCutoutPixelShader)
+            {
+                depthPrepassPipelineDesc.PixelShader = m_DepthPrepassCutoutPixelShader.get();
+                depthPrepassPipelineDesc.FrontCounterClockwise = false;
+                m_DepthPrepassCutoutPipelineState = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
+                depthPrepassPipelineDesc.FrontCounterClockwise = true;
+                m_DepthPrepassCutoutPipelineStateMirrored = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
+            }
 
             // SSAOパス
             RHI::PipelineStateDesc ssaoPipelineDesc;
@@ -2482,6 +2796,28 @@ namespace Kurenai
             m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
             // 大気遠近パスの出力。m_SSRTextureと同じ作法(HDR、R16G16B16A16_Float)で永続確保する
             m_AerialPerspectiveTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            // 雲パスの出力(rgb=事前乗算済みの散乱光、a=透過率)。内部レンダー解像度の1/2で持つ。
+            // 【R16G16B16A16_Float固定にする理由】平面反射(CreatePlanarReflectionTargets)と同じで、
+            // 散乱光はHDRの輝度をそのまま持つためLegacy8bitでは飽和して雲が白く潰れる。
+            // また透過率は乗算に使うので8bitの量子化がそのままバンディングになる
+            m_SkyCloudWidth = std::max(1u, width / 2);
+            m_SkyCloudHeight = std::max(1u, height / 2);
+            m_SkyCloudTexture =
+                m_Device->CreateRenderTexture(m_SkyCloudWidth, m_SkyCloudHeight, RHI::Format::R16G16B16A16_Float);
+            // DDGIの低解像度解決パスの出力(rgb=イラディアンス、a=insideWeight)。雲と同じく1/2解像度。
+            // 【常に確保する】m_DDGIHalfResolutionが無効でもシェーダーのt19には何かを
+            // バインドしておく必要がある(DX12のディスクリプタテーブルを埋め切るため)。
+            // フォーマットを雲と揃えているのも同じ理由 ―― イラディアンスはHDRの物理量で、
+            // 8bitでは飽和と量子化がそのまま間接光のバンディングになる
+            m_DDGIResolveWidth = std::max(1u, width / 2);
+            m_DDGIResolveHeight = std::max(1u, height / 2);
+            m_DDGIResolveTexture = m_Device->CreateRenderTexture(
+                m_DDGIResolveWidth, m_DDGIResolveHeight, RHI::Format::R16G16B16A16_Float);
+            // 上のパスが同時に書く「そのテクセルが代表している全解像度の深度」(41.24節)。
+            // 合成側(DeferredLighting.hlsl)がGatherRed 1回で4テクセルぶんを取るためのもので、
+            // t19と同じ理由で常に確保する(t21を空のままにできない)
+            m_DDGIResolveDepthTexture = m_Device->CreateRenderTexture(
+                m_DDGIResolveWidth, m_DDGIResolveHeight, RHI::Format::R32_Float);
             // RT反射はコンピュートシェーダーがUAVで書くため、レンダーターゲットではなくUAVテクスチャを作る。
             // 非対応環境ではパス自体が実行されないので確保しない
             if (m_RaytracingAvailable)
@@ -2663,6 +2999,133 @@ namespace Kurenai
         m_RenderResolutionDirty = true;
     }
 
+    float KurenaiEngine3D::GetUpscaleRatio(UpscaleQualityMode mode)
+    {
+        // FSR1が定義している4段。倍率は「出力の一辺 ÷ 入力の一辺」
+        switch (mode)
+        {
+        case UpscaleQualityMode::UltraQuality: return 1.3f;
+        case UpscaleQualityMode::Quality:      return 1.5f;
+        case UpscaleQualityMode::Balanced:     return 1.7f;
+        case UpscaleQualityMode::Performance:  return 2.0f;
+        default:
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "GetUpscaleRatio: 未知の品質モード(" + std::to_string(static_cast<int>(mode)) +
+                    ")です。Quality(1.5倍)として扱います");
+            return 1.5f;
+        }
+    }
+
+    void KurenaiEngine3D::ComputeUpscaleRenderResolution(
+        uint32_t outputWidth, uint32_t outputHeight, UpscaleQualityMode mode,
+        uint32_t& outRenderWidth, uint32_t& outRenderHeight)
+    {
+        const float ratio = GetUpscaleRatio(mode);
+
+        // 8の倍数へ切り捨てる。LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・
+        // SkyCloud/DDGIResolveの1/2解像度がいずれも2の冪で割っていくため、
+        // 半端な解像度にすると端の1〜2画素の扱いがパスごとにずれる。
+        // 丸めた結果アスペクト比が出力とわずかにずれる(1920x1080の1.7倍で1128x632、
+        // 1.7848対1.7778で0.4%)が、EASUは入力矩形を出力矩形へ写すだけなのでこの差は
+        // 微小な引き伸ばしとして吸収され、視認できない
+        constexpr uint32_t kMinRenderSize = 320;
+        constexpr uint32_t kMinRenderHeight = 180;
+        const uint32_t rawWidth = static_cast<uint32_t>(static_cast<float>(outputWidth) / ratio);
+        const uint32_t rawHeight = static_cast<uint32_t>(static_cast<float>(outputHeight) / ratio);
+        outRenderWidth = std::max(kMinRenderSize, rawWidth & ~7u);
+        outRenderHeight = std::max(kMinRenderHeight, rawHeight & ~7u);
+    }
+
+    float KurenaiEngine3D::ComputeRcasSharpnessScale(float sharpness)
+    {
+        // FSR1のsharpnessは「シャープさを何ストップ(=半分に)落とすか」で、0が最大・大きいほど弱い。
+        // UI側は「0で無効、1で最強」のほうが直感的なので、ここで向きと尺度を変換する。
+        // 2ストップ(=1/4)を弱い側の端にしているのは、それ以上落とすと見た目の変化が無くなるため
+        const float clamped = std::clamp(sharpness, 0.0f, 1.0f);
+        if (clamped <= 0.0f)
+        {
+            // 完全に0のときはlobeごと0になるようにする(exp2(-2)=0.25では弱いシャープが残る)
+            return 0.0f;
+        }
+        return std::exp2(-2.0f * (1.0f - clamped));
+    }
+
+    void KurenaiEngine3D::RequestUpscaleSettings(
+        bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight)
+    {
+        if (outputWidth == 0 || outputHeight == 0)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "RequestUpscaleSettings: 出力解像度" + std::to_string(outputWidth) + "x" +
+                    std::to_string(outputHeight) + "が不正です。要求を無視します");
+            return;
+        }
+
+        m_UpscaleEnabled = enabled;
+        m_UpscaleQualityMode = mode;
+        m_UpscaleOutputWidth = outputWidth;
+        m_UpscaleOutputHeight = outputHeight;
+
+        if (enabled)
+        {
+            uint32_t renderWidth = 0;
+            uint32_t renderHeight = 0;
+            ComputeUpscaleRenderResolution(outputWidth, outputHeight, mode, renderWidth, renderHeight);
+            RequestRenderResolution(renderWidth, renderHeight);
+            // 出力解像度用のテクスチャがまだ無い、またはサイズが変わったときだけ作り直す
+            if (m_UpscaleTargetWidth != outputWidth || m_UpscaleTargetHeight != outputHeight)
+            {
+                m_UpscaleTargetsDirty = true;
+            }
+        }
+        else
+        {
+            // 無効化したときは内部解像度を出力解像度と同じに戻す。こうしないと
+            // 「超解像を切ったのに低解像度のまま」という状態が残る
+            RequestRenderResolution(outputWidth, outputHeight);
+            // 使わなくなったテクスチャは解放する(1080pで約8MBが2枚)
+            if (m_UpscaleTargetWidth != 0 || m_UpscaleTargetHeight != 0)
+            {
+                m_UpscaleTargetsDirty = true;
+            }
+        }
+    }
+
+    void KurenaiEngine3D::CreateUpscaleTargets(uint32_t width, uint32_t height)
+    {
+        // 無効化された場合は解放だけして戻る
+        if (!m_UpscaleEnabled)
+        {
+            m_UpscaleTexture.reset();
+            m_UpscaleSharpTexture.reset();
+            m_UpscaleTargetWidth = 0;
+            m_UpscaleTargetHeight = 0;
+            return;
+        }
+
+        // Tonemapの出力と同じR8G8B8A8_UNorm。EASU/RCASはどちらも表示レンジの値を前提にしており、
+        // ここをHDRフォーマットにしても情報は増えない(入力が既にLDRのため)。
+        //
+        // 【型付きUAVのフォーマット制約には当たらない】このエンジンが各所で注記している
+        // 「R32系しか保証されていない」という制約は型付きUAVからの"読み出し"のもので、
+        // EASU/RCASはUAVへ書くだけである(RCASがEASUの結果を読むのはSRV経由)。
+        // Bloomが同じくR16G16B16A16_FloatのUAVへ書けているのと同じ理屈
+        m_UpscaleTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_UpscaleSharpTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        m_UpscaleTargetWidth = width;
+        m_UpscaleTargetHeight = height;
+    }
+
+    bool KurenaiEngine3D::IsUpscaleActive() const
+    {
+        // テクスチャの確保に失敗している場合にパスを登録すると、バインドするリソースが無いまま
+        // Dispatchすることになるため、確保済みであることまで条件に入れる
+        return m_UpscaleEnabled && m_UpscaleTexture && m_UpscaleSharpTexture &&
+               m_UpscaleTargetWidth > 0 && m_UpscaleTargetHeight > 0;
+    }
+
     void KurenaiEngine3D::RequestPlanarReflectionResolutionScale(float scale)
     {
         // 0以下はテクスチャが確保できない。上限を1.0(等倍)にしているのは、水面はラフネスが
@@ -2685,6 +3148,123 @@ namespace Kurenai
         // RequestRenderResolutionと同じく要求を記録するだけにしてRender()の先頭でまとめて反映する
         m_PendingPlanarReflectionResolutionScale = scale;
         m_PlanarReflectionResolutionDirty = true;
+    }
+
+    KurenaiEngine3D::QualitySettings KurenaiEngine3D::CaptureQualitySettings() const
+    {
+        QualitySettings settings;
+        settings.Reflection = m_ReflectionMode;
+        settings.PlanarReflectionEnabled = m_PlanarReflectionEnabled;
+        settings.PlanarReflectionResolutionScale = m_PlanarReflectionResolutionScale;
+        settings.CloudVolumetric = m_CloudVolumetric;
+        settings.CirrusEnabled = m_CirrusEnabled;
+        settings.StarsEnabled = m_StarsEnabled;
+        settings.TAAEnabled = m_TAAEnabled;
+        settings.BloomEnabled = m_BloomEnabled;
+        settings.ScreenSpaceShadowEnabled = m_ScreenSpaceShadowEnabled;
+        settings.DDGIProbesPerFrame = m_DDGIProbesPerFrame;
+        settings.SSAOKernelSize = m_SSAOKernelSize;
+        settings.CloudRaymarchSteps = m_CloudRaymarchSteps;
+        settings.DDGIUpdate = m_DDGIUpdateMode;
+        settings.DDGIHalfResolution = m_DDGIHalfResolution;
+        return settings;
+    }
+
+    void KurenaiEngine3D::ApplyQualitySettings(const QualitySettings& settings)
+    {
+        m_ReflectionMode = settings.Reflection;
+        m_PlanarReflectionEnabled = settings.PlanarReflectionEnabled;
+        m_CloudVolumetric = settings.CloudVolumetric;
+        m_CirrusEnabled = settings.CirrusEnabled;
+        m_StarsEnabled = settings.StarsEnabled;
+        m_TAAEnabled = settings.TAAEnabled;
+        m_BloomEnabled = settings.BloomEnabled;
+        m_ScreenSpaceShadowEnabled = settings.ScreenSpaceShadowEnabled;
+        m_DDGIProbesPerFrame = settings.DDGIProbesPerFrame;
+        // カーネル自体の作り直しはSSAOパスの中で行う(段数が変わったことを見て作り直す)
+        m_SSAOKernelSize = settings.SSAOKernelSize;
+        m_CloudRaymarchSteps = settings.CloudRaymarchSteps;
+        m_DDGIHalfResolution = settings.DDGIHalfResolution;
+
+        // 更新モードを変えたら停止状態は倒しておく。倒さないと「常時更新へ戻したのに
+        // 止まったまま」になる(署名が変わるまで再開しないため)
+        if (m_DDGIUpdateMode != settings.DDGIUpdate)
+        {
+            m_DDGIUpdateMode = settings.DDGIUpdate;
+            m_DDGIUpdateSuspended = false;
+            m_DDGIStableCycles = 0;
+        }
+
+        // 平面反射の解像度倍率だけはレンダーターゲットの作り直しを伴う。GPUがまだ参照している
+        // 可能性があるためここでは直接代入せず、要求として積んでRender()の先頭で反映させる
+        // (UI関数の中で直接リソースを作り直さない、という既存の作法に合わせる)
+        RequestPlanarReflectionResolutionScale(settings.PlanarReflectionResolutionScale);
+    }
+
+    void KurenaiEngine3D::ApplyQualityPreset(QualityPreset preset)
+    {
+        m_QualityPreset = preset;
+
+        // 「高」はシーンを読み込んだ直後の状態へ戻す(QualitySettingsのコメント参照)。
+        // 静的な既定へ戻すと、SSRやTAAを自分で指定しているシーンの意図を壊す
+        if (preset == QualityPreset::High)
+        {
+            ApplyQualitySettings(m_SceneDefaultQuality);
+            Core::Logger::Info("KurenaiEngine3D", "品質プリセット「高」を適用しました(シーン読み込み直後の状態へ戻しました)");
+            return;
+        }
+
+        // 「低」「中」はシーン既定を出発点にして、そこから重い項目だけを落とす。
+        // シーンが元から無効にしているものを勝手に有効化しないよう、有効化は一切行わない
+        QualitySettings settings = m_SceneDefaultQuality;
+
+        // 実測でGIVolumeを持つシーンの最大負荷(40〜47ms、フレームの約4割)。
+        // 1プローブにつきシーンを6回描くため、この値にほぼ比例する
+        settings.DDGIProbesPerFrame = (preset == QualityPreset::Low) ? 2 : 4;
+        // 焼き上がりが落ち着いたら止める。低は一巡だけ(最速で止まる代わりに間接光の
+        // バウンスが1回ぶん)、中はkDDGIBounceCycles巡だけ焼いてから止める
+        settings.DDGIUpdate = (preset == QualityPreset::Low) ? DDGIUpdateMode::OverwriteThenStop
+                                                            : DDGIUpdateMode::ConvergeThenStop;
+        // DDGIのサンプリングは実測でLightingパス23.9msのうち10.2msを占めていた。
+        // 低解像度化は輪郭で滲む近似なので既定は無効だが、プリセットでは有効にする
+        settings.DDGIHalfResolution = true;
+        // 実測でジオメトリが画面を占めるシーンの4.8〜11.0ms。コストはほぼ段数に比例する。
+        // シーン既定より増やすことはしない(プリセットは落とす方向のみ)
+        settings.SSAOKernelSize = std::min(
+            m_SceneDefaultQuality.SSAOKernelSize, (preset == QualityPreset::Low) ? 4u : 8u);
+        // 実測31ms(水面のあるシーン)。低・中とも切る
+        settings.Reflection = ReflectionMode::Off;
+        settings.TAAEnabled = false;
+        settings.BloomEnabled = false;
+        settings.ScreenSpaceShadowEnabled = false;
+
+        if (preset == QualityPreset::Low)
+        {
+            // ボリュメトリック積雲は実測で約10ms。低ではまるごと切る
+            // (手続き雲そのものは残るので、空が真っ青になるわけではない。平面レイヤーへ落ちる)
+            settings.CloudVolumetric = false;
+            settings.PlanarReflectionEnabled = false;
+            settings.CirrusEnabled = false;
+            settings.StarsEnabled = false;
+        }
+        else
+        {
+            // 中はボリュームを残したまま段数だけ落とす。コストはほぼ段数に比例するため、
+            // 「立体的な雲は残しつつ半分の値段にする」という中間段が作れる
+            // (段数を実行時に変えられるようにしたのはこのため)。
+            // SSAOの段数と同じく、シーン既定より増やすことはしない
+            settings.CloudRaymarchSteps =
+                std::min(m_SceneDefaultQuality.CloudRaymarchSteps, 6u);
+        }
+        // 平面反射は残す場合でも解像度を落とす。1.0を超える指定は
+        // RequestPlanarReflectionResolutionScaleが弾くため、下げる方向のみで安全
+        settings.PlanarReflectionResolutionScale =
+            std::min(m_SceneDefaultQuality.PlanarReflectionResolutionScale, 0.25f);
+
+        ApplyQualitySettings(settings);
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("品質プリセット「") + (preset == QualityPreset::Low ? "低" : "中") + "」を適用しました");
     }
 
     void KurenaiEngine3D::RequestSceneLoad(size_t sceneIndex)
@@ -3047,8 +3627,14 @@ namespace Kurenai
         if (m_Scene.HasRenderResolutionOverride)
         {
             // 即時に作り直すとGPUがまだ参照しているテクスチャを壊すので、
-            // UIのシステムパネルと同じく要求だけ記録してRender()の先頭で反映させる
-            RequestRenderResolution(m_Scene.RenderWidth, m_Scene.RenderHeight);
+            // UIのシステムパネルと同じく要求だけ記録してRender()の先頭で反映させる。
+            //
+            // 超解像が有効なときはシーンの指定を「出力解像度」として解釈する。シーンが意図して
+            // いるのは「この絵をこの大きさで見せたい」であって内部で何画素描くかではないため。
+            // 超解像が無効ならRequestUpscaleSettingsは中でRequestRenderResolutionを呼ぶだけなので、
+            // 従来とまったく同じ動作になる
+            RequestUpscaleSettings(
+                m_UpscaleEnabled, m_UpscaleQualityMode, m_Scene.RenderWidth, m_Scene.RenderHeight);
         }
         // トーンマップのカーブと空の彩度(アート指定)をシーンから受け取る。
         // Source/LibraryはSource/Engineに依存できないため、Scene側は同じ並びの独立した列挙を持つ。
@@ -3240,6 +3826,14 @@ namespace Kurenai
         // (2)手動の再読み込み直後に「変更あり」と誤検出して延々と再読み込みし続ける
         m_WatchedSceneWriteTime = GetCurrentSceneFileWriteTime();
         m_SceneReloadRejectedWriteTime = 0;
+
+        // 品質プリセット「高」が戻る先を、いまの状態(= .ksceneの指定をすべて反映し終えた状態)で
+        // 控える。【この関数内のm_Scene.Has〜による上書きより後で呼ぶこと】先に控えると
+        // シーンがSSR/TAA/ブルーム/星を指定していても、エンジンの既定を控えることになる。
+        // シーンを切り替えたらプリセットの選択も「高」へ戻す(新しいシーンに対して前のシーンで
+        // 選んだ「低」が適用されたままになるわけではなく、実際に高相当の状態になっているため)
+        m_SceneDefaultQuality = CaptureQualitySettings();
+        m_QualityPreset = QualityPreset::High;
 
         // 初期カメラとウィンドウタイトルはUpdateスレッドが適用する。m_Cameraの書き込み手を
         // 1スレッドに保ち、ウィンドウタイトルもウィンドウを所有するスレッドから設定するため
@@ -3895,12 +4489,136 @@ namespace Kurenai
                 const float instantFPS = 1.0f / renderDeltaTime;
                 m_FPS = (m_FPS == 0.0f) ? instantFPS : (m_FPS * 0.9f + instantFPS * 0.1f);
             }
+
+            LogFrameStatsIfDue(renderDeltaTime);
         }
 
         if (SUCCEEDED(comResult))
         {
             CoUninitialize();
         }
+    }
+
+    // 性能の記録をログファイルへ残す。ProfilerPanelの表示は実行中しか見えず、後から
+    // 「この変更でフレーム時間がどう変わったか」を比較できない。集計期間ぶんを1行に
+    // まとめて出すことで、フレーム時間への影響(Logger::Infoはflushを伴う)を
+    // 1秒に1回に抑えつつ、実行ごとの記録が残るようにしている
+    void KurenaiEngine3D::LogFrameStatsIfDue(float renderDeltaTime)
+    {
+        if (!m_FrameStatsLoggingEnabled)
+        {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (m_FrameStatsFrameCount == 0)
+        {
+            m_FrameStatsWindowStart = now;
+        }
+
+        ++m_FrameStatsFrameCount;
+        m_FrameStatsCPUTimeSumMs += m_CPUFrameTimeMs;
+        m_FrameStatsGPUTimeSumMs += m_GPUProfiler ? m_GPUProfiler->GetTotalFrameTimeMs() : 0.0f;
+        m_FrameStatsGPUWaitSumMs += m_Device->GetLastFrameGPUWaitTimeMs();
+        m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
+
+        const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
+        if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
+        {
+            return;
+        }
+
+        // 集計期間の実測フレーム数から求める。m_FPS(指数移動平均)と違い、この値は
+        // 期間中に落ちたフレームがそのまま反映される
+        const float averageFPS = static_cast<float>(m_FrameStatsFrameCount) / std::max(elapsedSeconds, 1e-6f);
+        const double frameCount = static_cast<double>(m_FrameStatsFrameCount);
+
+        char buffer[256];
+        std::snprintf(
+            buffer,
+            sizeof(buffer),
+            "%ux%u %s | FPS %.1f (%u frames / %.2fs) | CPU %.2fms | GPU %.2fms | GPU待ち %.2fms | 最悪フレーム %.2fms",
+            m_RenderWidth,
+            m_RenderHeight,
+            m_GraphicsAPI == GraphicsAPI::DX12 ? "DX12" : "DX11",
+            averageFPS,
+            m_FrameStatsFrameCount,
+            elapsedSeconds,
+            m_FrameStatsCPUTimeSumMs / frameCount,
+            m_FrameStatsGPUTimeSumMs / frameCount,
+            m_FrameStatsGPUWaitSumMs / frameCount,
+            m_FrameStatsWorstFrameTimeMs);
+        Core::Logger::Info("Perf", buffer);
+
+        // パス別の内訳。どのパスを削れば効くのかは合計値からは分からないため、
+        // 集計期間の最後のフレームぶんを重い順に並べて残す。
+        // (毎フレーム平均を取るにはパス構成がフレームごとに変わりうるので、
+        //  代表として1フレームぶんを出す。ベイクパスが走ったフレームに当たると
+        //  その分だけ大きく出るが、常時走るパスの比較には十分)
+        if (m_GPUProfiler)
+        {
+            std::vector<RHI::GPUTimingResult> passes = m_GPUProfiler->GetResults();
+            std::sort(passes.begin(), passes.end(), [](const auto& a, const auto& b) { return a.TimeMs > b.TimeMs; });
+
+            std::string breakdown;
+            for (const auto& pass : passes)
+            {
+                // 0.05ms未満は並べても判断材料にならず、行が長くなるだけなので落とす
+                if (pass.TimeMs < 0.05f)
+                {
+                    break;
+                }
+                char passText[64];
+                std::snprintf(passText, sizeof(passText), "%s %.2f", pass.Name.c_str(), pass.TimeMs);
+                if (!breakdown.empty())
+                {
+                    breakdown += " / ";
+                }
+                breakdown += passText;
+            }
+
+            if (!breakdown.empty())
+            {
+                Core::Logger::Info("Perf", "  GPU内訳[ms]: " + breakdown);
+            }
+        }
+
+        // CPU側の内訳も同じ形で残す。GIVolumeを持つシーンではCPUフレーム時間が24〜28msあり、
+        // 60fpsの予算(16.7ms)をCPU単独で超えている。GPUの内訳だけでは、その時間が
+        // どのパスのドローコール発行に消えているのかが分からない
+        {
+            std::vector<Core::CPUTimingResult> cpuPasses = m_CPUProfiler.GetResults();
+            std::sort(
+                cpuPasses.begin(), cpuPasses.end(), [](const auto& a, const auto& b) { return a.TimeMs > b.TimeMs; });
+
+            std::string breakdown;
+            for (const auto& pass : cpuPasses)
+            {
+                // GPU側と同じ理由で0.05ms未満は落とす
+                if (pass.TimeMs < 0.05f)
+                {
+                    break;
+                }
+                char passText[64];
+                std::snprintf(passText, sizeof(passText), "%s %.2f", pass.Name.c_str(), pass.TimeMs);
+                if (!breakdown.empty())
+                {
+                    breakdown += " / ";
+                }
+                breakdown += passText;
+            }
+
+            if (!breakdown.empty())
+            {
+                Core::Logger::Info("Perf", "  CPU内訳[ms]: " + breakdown);
+            }
+        }
+
+        m_FrameStatsFrameCount = 0;
+        m_FrameStatsCPUTimeSumMs = 0.0;
+        m_FrameStatsGPUTimeSumMs = 0.0;
+        m_FrameStatsGPUWaitSumMs = 0.0;
+        m_FrameStatsWorstFrameTimeMs = 0.0f;
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
@@ -4133,7 +4851,8 @@ namespace Kurenai
         //
         // ここはApplyPendingResizeの後、かつこのフレームでm_RenderWidth/m_RenderHeightを
         // 読み始めるより前(最初の読み取りはTAAジッター)なので、解像度をまとめて差し替えてよい
-        if (m_BufferPrecisionDirty || m_RenderResolutionDirty || m_PlanarReflectionResolutionDirty)
+        if (m_BufferPrecisionDirty || m_RenderResolutionDirty || m_PlanarReflectionResolutionDirty ||
+            m_UpscaleTargetsDirty)
         {
             const bool precisionChanged = m_BufferPrecisionDirty;
             m_BufferPrecisionDirty = false;
@@ -4174,6 +4893,33 @@ namespace Kurenai
                 m_RenderHeight = previousHeight;
                 CreateRenderTargets(m_RenderWidth, m_RenderHeight);
                 CreatePlanarReflectionTargets();
+            }
+
+            // 超解像の出力解像度用テクスチャ。内部解像度用とは作り直す契機が違うため
+            // CreateRenderTargetsとは別に持っているが、GPUがそれらを参照していない状態で
+            // 作り直す必要があるのは同じなので、上のWaitForGPUIdle()の後のここで行う
+            if (m_UpscaleTargetsDirty)
+            {
+                m_UpscaleTargetsDirty = false;
+                try
+                {
+                    CreateUpscaleTargets(m_UpscaleOutputWidth, m_UpscaleOutputHeight);
+                }
+                catch (const std::exception& e)
+                {
+                    // 確保できなければ超解像を諦めて等倍表示へ落とす。内部解像度は下がったままだが、
+                    // Presentがバイリニアで拡大するので絵は出続ける(41.23節以前と同じ経路)
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "超解像の出力解像度" + std::to_string(m_UpscaleOutputWidth) + "x" +
+                            std::to_string(m_UpscaleOutputHeight) +
+                            "のテクスチャ作成に失敗したため、超解像を無効にします: " + e.what());
+                    m_UpscaleEnabled = false;
+                    m_UpscaleTexture.reset();
+                    m_UpscaleSharpTexture.reset();
+                    m_UpscaleTargetWidth = 0;
+                    m_UpscaleTargetHeight = 0;
+                }
             }
 
             // カメラのアスペクト比はUpdateスレッドが読み取って反映する(m_RenderAspectの宣言参照)
@@ -4725,7 +5471,13 @@ namespace Kurenai
             m_DDGIIntensity,
             static_cast<float>(kDDGIProbeBorder),
         };
-        constants.DDGIParams4 = { effectiveExposure, 0.0f, 0.0f, 0.0f };
+        // y = DeferredLightingがDDGIを低解像度パス(DDGIResolve)から引くか。
+        // 【パスが実際に走る条件と一致させること】走らないのに1を渡すと、前フレームの
+        // (あるいは未初期化の)低解像度バッファを読んで間接光が固まる/壊れる。
+        // 条件はDDGIResolveパスの登録側(ddgiResolvePassRuns)と同じものを並べている
+        const bool ddgiHalfResolutionActive =
+            m_DDGIHalfResolution && m_DDGIResolveTexture && m_DDGIEnabled && m_HasGIVolume && m_DDGIBaked;
+        constants.DDGIParams4 = { effectiveExposure, ddgiHalfResolutionActive ? 1.0f : 0.0f, 0.0f, 0.0f };
         // 水面。スクロール位相はRenderThreadMainがm_WaterTimeFrozen/m_WaterWaveSpeedに
         // 応じて毎フレーム進める(m_TimeOfDayの自動進行と同じ場所・同じ方式)。
         // y=波のスケール倍率(m_WaterWaveScale)、z=波の強さ(m_WaterWaveStrength、0〜1)を
@@ -4793,6 +5545,13 @@ namespace Kurenai
                 ? (2.0f / (projForPixelAngle._22 * static_cast<float>(m_RenderHeight)))
                 : 0.001f;
         constants.StarsParams = { starsIntensity, m_StarsDensity, m_StarsTwinkle, pixelAngle };
+
+        // 積雲のボリュームレイマーチの段数。シェーダー側でも上限へ丸めるが、
+        // 0以下を渡すと「コンパイル時の既定を使う」の意味になってしまうため下限はここで効かせる
+        constants.CloudQualityParams = {
+            static_cast<float>(std::clamp(m_CloudRaymarchSteps, 1u, kCloudRaymarchStepsMax)),
+            0.0f, 0.0f, 0.0f
+        };
 
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
@@ -4948,8 +5707,26 @@ namespace Kurenai
             m_AtmosphereLUTBakedTurbidity = m_SkyTurbidity;
         }
 
-        if (m_SkyViewPipelineState)
+        // SkyView LUTを焼き直すかどうか。CSSkyViewの入力は太陽の向きと濁りだけで、
+        // 視点位置はkSkyViewHeightKm固定(カメラ非依存)なので、この2つが動かなければ
+        // まったく同じ内容を焼き直すことになる。実測1.15〜1.53ms/フレームがまるごと無駄だった。
+        // 濁りは上のAtmosphereLUTBakeとまったく同じ条件で判定するため、濁りが動いたフレームでは
+        // Transmittance/MultiScatteringとSkyViewが同じフレームで焼き直され、実行順序は
+        // Reads/Writesの依存からレンダーグラフが決める
+        bool bakeSkyViewThisFrame = m_SkyViewBakedTurbidity != m_SkyTurbidity;
+        if (!bakeSkyViewThisFrame)
         {
+            const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
+            const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_SkyViewBakedSunPosition);
+            const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
+            bakeSkyViewThisFrame =
+                cosAngle < std::cos(DirectX::XMConvertToRadians(kSkyViewRebakeAngleDegrees));
+        }
+
+        if (m_SkyViewPipelineState && bakeSkyViewThisFrame)
+        {
+            m_SkyViewBakedSunPosition = sunLighting.SunPosition;
+            m_SkyViewBakedTurbidity = m_SkyTurbidity;
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyViewBake",
                 .Reads = { m_TransmittanceLUT.get(), m_MultiScatteringLUT.get() },
@@ -5789,7 +6566,22 @@ namespace Kurenai
             cmd->Dispatch((kBorderThreads + 7) / 8, (kBorderThreads + 7) / 8, 1);
         };
 
-        if (m_DDGIEnabled && m_HasGIVolume && m_DDGIProbeCount > 0)
+        // 焼き上がりに影響する状態が変わったら、停止していた更新を再開する。
+        // 【判定はm_DDGIEnabled等のガードの外に置く】無効な間も署名を追い続けないと、
+        // 無効中に時刻を動かして再度有効にしたとき「署名は同じ」と誤判定して止まったままになる
+        if (m_HasGIVolume && m_DDGIProbeCount > 0)
+        {
+            const uint64_t bakeSignature = ComputeProbeBakeSignature();
+            if (!m_DDGIBakeSignatureValid || bakeSignature != m_DDGIBakeSignature)
+            {
+                m_DDGIBakeSignature = bakeSignature;
+                m_DDGIBakeSignatureValid = true;
+                m_DDGIStableCycles = 0;
+                m_DDGIUpdateSuspended = false;
+            }
+        }
+
+        if (m_DDGIEnabled && m_HasGIVolume && m_DDGIProbeCount > 0 && !m_DDGIUpdateSuspended)
         {
             const uint32_t perFrame = std::min<uint32_t>(
                 static_cast<uint32_t>(std::max(m_DDGIProbesPerFrame, 1)), m_DDGIProbeCount);
@@ -5815,12 +6607,17 @@ namespace Kurenai
             const uint32_t overwriteThisFrame = std::min(m_DDGIOverwriteRemaining, perFrame);
             m_DDGIOverwriteRemaining -= overwriteThisFrame;
 
+            // 【止めるモードでは停止するまでの全巡回を上書きで焼く】理由はKurenaiEngine3D.hの
+            // kDDGIBounceCyclesのコメント参照。露出追従のm_DDGIOverwriteRemainingとは
+            // 独立に効かせたいので、残数を消費せず条件だけ合流させる
+            const bool overwriteWholeCycle = !warmingUp && m_DDGIUpdateMode != DDGIUpdateMode::Always;
+
             for (uint32_t i = 0; i < perFrame; ++i)
             {
                 const uint32_t probeIndex = (m_DDGIUpdateCursor + i) % m_DDGIProbeCount;
                 // 一巡目はヒステリシスを使わず上書きする(混ぜる相手の「前の値」が未初期化のため)。
                 // 露出が急変した直後も同じく上書きで追従させる
-                const bool overwrite = warmingUp || (i < overwriteThisFrame);
+                const bool overwrite = warmingUp || overwriteWholeCycle || (i < overwriteThisFrame);
 
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "DDGIUpdate" + std::to_string(probeIndex),
@@ -5842,7 +6639,31 @@ namespace Kurenai
             }
 
             const uint32_t nextCursor = m_DDGIUpdateCursor + perFrame;
-            if (warmingUp && nextCursor >= m_DDGIProbeCount)
+            const bool cycleCompleted = nextCursor >= m_DDGIProbeCount;
+
+            // 一巡ぶん焼き終えるたびに数え、モードごとの巡回数に達したら止める。
+            // 【上書きが残っている間は止めない】まだ焼き切っていないため。
+            // 一巡目(warmingUp)はこの後の分岐で別に扱うのでここでは数えない
+            if (cycleCompleted && !warmingUp && m_DDGIUpdateMode != DDGIUpdateMode::Always)
+            {
+                ++m_DDGIStableCycles;
+                if (m_DDGIOverwriteRemaining == 0)
+                {
+                    const uint32_t requiredCycles = (m_DDGIUpdateMode == DDGIUpdateMode::OverwriteThenStop)
+                        ? 1u
+                        : kDDGIBounceCycles;
+                    if (m_DDGIStableCycles >= requiredCycles)
+                    {
+                        m_DDGIUpdateSuspended = true;
+                        Core::Logger::Info(
+                            "KurenaiEngine3D",
+                            "DDGIが収束したため更新を停止しました(" + std::to_string(m_DDGIStableCycles) +
+                                "巡)。焼き上がりに影響する状態が変わると再開します");
+                    }
+                }
+            }
+
+            if (warmingUp && cycleCompleted)
             {
                 // 全プローブが一度ずつ書かれた。ここから先はヒステリシスで滑らかに追従させ、
                 // 同時にサンプリング側(DDGIParams0.w)を有効にする
@@ -5857,23 +6678,110 @@ namespace Kurenai
             m_DDGIUpdateCursor = nextCursor % m_DDGIProbeCount;
         }
 
+        // --- 深度プリパス(41.22節): 不透明ジオメトリの深度だけを先に埋める ---
+        //
+        // これを通しておくと、次のG-Bufferパスでは最前面の断片だけが深度テストを通り
+        // (PSOのDepthAllowEqual)、隠れる画素のピクセルシェーダー ―― 6テクスチャの
+        // サンプルと6枚のレンダーターゲットへの書き込み ―― がまるごと省ける。
+        //
+        // 【カットアウトのPSOが作れていないときはプリパスごと切る】カットアウトのメッシュだけを
+        // プリパスから外すと、そのメッシュはG-Buffer側で深度を書くことになるが、
+        // プリパスで手前に別のものが書かれていると早期Zに落とされて消える。
+        // 中途半端に混ぜるより丸ごと従来経路にするほうが安全
+        //
+        // 【メッシュシェーダー経路とは併用しない】プリパスは頂点シェーダー経路で深度を書くが、
+        // G-Buffer側がメッシュシェーダーで描くと同じ頂点でも変換の丸めが一致する保証が無く、
+        // 深度が1ulpずれた面がGREATER_EQUALを通らずに消える
+        const bool meshletPathActive = m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+        const bool depthPrepassRuns = m_DepthPrepassEnabled && !meshletPathActive
+            && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
+        if (depthPrepassRuns)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "DepthPrepass",
+                // レンダーターゲットは持たない(深度だけを書く)
+                .DepthTarget = m_GBufferDepth.get(),
+                .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetViewport(gbufferViewport);
+                    // Reverse-Zのため遠平面側(NDC z=0.0)。G-Bufferパスの代わりにここでクリアする
+                    cmd->ClearDepth(0.0f);
+
+                    RHI::IRHIPipelineState* currentPipelineState = nullptr;
+                    for (const auto& instance : m_Scene.Instances)
+                    {
+                        for (const auto& mesh : instance.Model.Meshes)
+                        {
+                            // BLENDマテリアルはG-Bufferに描かれないので深度も書かない
+                            // (書くと後ろのものが消える)
+                            if (mesh.IsTransparent)
+                            {
+                                continue;
+                            }
+
+                            // カットアウトは切り抜きを反映しないと深度に嘘が入る。
+                            // ミラーリングは表裏判定が逆のPSOでないとカリングされる面が入れ替わり、
+                            // G-Bufferと違う深度になってしまう
+                            const bool cutout = mesh.AlphaCutoff > 0.0f;
+                            RHI::IRHIPipelineState* const wanted =
+                                cutout ? (instance.IsMirrored ? m_DepthPrepassCutoutPipelineStateMirrored.get()
+                                                              : m_DepthPrepassCutoutPipelineState.get())
+                                       : (instance.IsMirrored ? m_DepthPrepassPipelineStateMirrored.get()
+                                                              : m_DepthPrepassPipelineState.get());
+                            if (wanted != currentPipelineState)
+                            {
+                                cmd->SetPipelineState(wanted);
+                                cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                                cmd->SetSamplerSet(m_MaterialSamplers.get());
+                                currentPipelineState = wanted;
+                            }
+
+                            const ObjectConstants objectConstants =
+                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                            cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                            cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                            // カットアウト以外はピクセルシェーダーを持たないためテクスチャも要らない
+                            if (cutout)
+                            {
+                                cmd->SetTexture(0, mesh.BaseColorTexture);
+                            }
+
+                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        }
+                    }
+                },
+            });
+        }
+
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "GBuffer",
+            // 深度プリパス(直前に登録される)を通したときは、ここへ来る時点で深度が埋まっており、
+            // PSOのDepthAllowEqual(GREATER_EQUAL)によって最前面の断片だけがテストを通る。
+            //
             // 6枚目のbent normalまで含め、並びはGBuffer.hlslのPSOutputおよび
             // CreatePrecisionDependentPipelineStatesのRenderTargetFormatsと一致させること
             .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
                                m_GBufferEmissive.get(), m_GBufferVelocity.get(), m_GBufferBentNormal.get() },
             .DepthTarget = m_GBufferDepth.get(),
-            .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, depthPrepassRuns](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // ClearRenderTargetはバインド済みの全レンダーターゲットを同じ色でクリアするため、
                 // 速度バッファもここで0(=動いていない)になる。ジオメトリが描かれない画素
                 // (空)の速度は0のまま残るが、空はカメラ回転で動くのでTAA側で別途補う(TAA.hlsl参照)
                 cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
-                // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(GBuffer.hlsl参照)
-                cmd->ClearDepth(0.0f);
+                // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(GBuffer.hlsl参照)。
+                // 【深度プリパスを通したときはクリアしない】プリパスが既に正しい深度を
+                // 書いており、ここで消すとGREATER_EQUALのテストが全断片を通してしまい
+                // プリパスが無意味になる(クリアはプリパス側が行う)
+                if (!depthPrepassRuns)
+                {
+                    cmd->ClearDepth(0.0f);
+                }
 
                 cmd->SetPipelineState(m_GBufferPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
@@ -5885,12 +6793,30 @@ namespace Kurenai
                 // 一度も切り替えを行わず、発行されるコマンド列はこの機能の追加前と完全に同一になる。
                 // DX12のSetPipelineStateはルートシグネチャを張り直して既存のバインドを
                 // 無効化するので、切り替えたときはパス共通のバインドもやり直す
+                //
+                // メッシュレット経路(useMeshlet)はさらにその上の分岐。頂点シェーダー版と
+                // 同じG-Bufferへ同じ内容を書くので、切り替えても見た目は一致する
                 RHI::IRHIPipelineState* currentPipelineState = m_GBufferPipelineState.get();
-                const auto bindPipelineState = [&](bool mirrored, bool water)
+                const auto bindPipelineState = [&](bool mirrored, bool water, bool useMeshlet)
                 {
-                    RHI::IRHIPipelineState* const wanted = water
-                        ? (mirrored ? m_GBufferWaterPipelineStateMirrored.get() : m_GBufferWaterPipelineState.get())
-                        : (mirrored ? m_GBufferPipelineStateMirrored.get() : m_GBufferPipelineState.get());
+                    RHI::IRHIPipelineState* wanted = nullptr;
+                    if (useMeshlet)
+                    {
+                        // デバッグ表示が有効ならメッシュレットごとの色分けPSOを使う。
+                        // 用意できていない場合(作成失敗)は通常のメッシュレットPSOへ落とす
+                        const bool debugView = m_MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
+                        wanted = debugView
+                            ? (mirrored ? m_GBufferMeshletDebugPipelineStateMirrored.get()
+                                        : m_GBufferMeshletDebugPipelineState.get())
+                            : (mirrored ? m_GBufferMeshletPipelineStateMirrored.get()
+                                        : m_GBufferMeshletPipelineState.get());
+                    }
+                    else
+                    {
+                        wanted = water
+                            ? (mirrored ? m_GBufferWaterPipelineStateMirrored.get() : m_GBufferWaterPipelineState.get())
+                            : (mirrored ? m_GBufferPipelineStateMirrored.get() : m_GBufferPipelineState.get());
+                    }
                     if (wanted == currentPipelineState)
                     {
                         return;
@@ -5912,15 +6838,14 @@ namespace Kurenai
                             continue;
                         }
 
-                        bindPipelineState(instance.IsMirrored, instance.IsWater);
+                        const bool useMeshlet = ShouldUseMeshletPath(mesh, instance.IsWater);
+                        bindPipelineState(instance.IsMirrored, instance.IsWater, useMeshlet);
 
                         const ObjectConstants objectConstants =
                             MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
-                        cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                        cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                         cmd->SetTexture(0, mesh.BaseColorTexture);
                         cmd->SetTexture(1, mesh.NormalTexture);
                         cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
@@ -5934,7 +6859,22 @@ namespace Kurenai
                             // 【t6は使えない】t6はbent normal(34章)が使う
                             cmd->SetTexture(7, m_WaterNormalMapTexture.get());
                         }
-                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+
+                        if (useMeshlet)
+                        {
+                            // 頂点/インデックスバッファは張らない。増幅シェーダーとメッシュシェーダーが
+                            // bindless経由で自分で読む(ObjectConstantsが番号を運んでいる)。
+                            // 起動するのは「メッシュレット数 ÷ 増幅シェーダーのグループサイズ」だけで、
+                            // 実際にラスタライズされるのはカリングを生き延びたぶんに絞られる
+                            constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
+                            cmd->DispatchMesh((mesh.MeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize, 1, 1);
+                        }
+                        else
+                        {
+                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        }
                     }
                 }
             },
@@ -5942,6 +6882,15 @@ namespace Kurenai
 
         // --- Hi-Zミップチェーン構築パス: G-Buffer深度から1x1までのミップチェーンをコンピュートシェーダーで
         //     構築する(現時点では利用箇所は無く、デバッグ表示専用) ---
+        //
+        // 【デバッグ表示中だけ登録する理由】m_HiZTextureを読むのはPresentパスのDebugView::HiZ
+        // (このファイルのDebugView::HiZのcase)だけであり、それ以外のフレームでは構築結果を
+        // 誰も参照しない。にもかかわらず毎フレーム「コピー1回 + ミップ段数-1回のディスパッチ」
+        // (1280x720なら計11回)を走らせていた。Intel UHD 620での実測でこのパスは1.19〜1.21ms、
+        // GPUフレーム時間30msの約4%を占めており、まるごと無駄だった。
+        // SSRのHi-Zトラバース等で使うようになったらこの条件を外すこと
+        if (m_DebugView == DebugView::HiZ)
+        {
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "HiZ",
             .Reads = { m_GBufferDepth.get() },
@@ -5980,6 +6929,7 @@ namespace Kurenai
                 }
             },
         });
+        }
 
         // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
         //     インデックスリストをコンピュートシェーダーで作る。直接光パスはそのリストだけをループする。
@@ -6163,6 +7113,11 @@ namespace Kurenai
                         cmd->UpdateBuffer(m_RTAOConstantBuffer.get(), &rtAOConstants, sizeof(rtAOConstants));
 
                         cmd->SetComputePipelineState(m_RTAOPipelineState.get());
+                        // ヒット面のマテリアルテクスチャをbindlessで引くためs0にWrapが要る
+                        // (理由はRT反射パスの同じ呼び出しのコメント参照)。
+                        // このパスは以前サンプラーセットを一度もバインドしておらず、
+                        // 直前のパスが残したセットに依存していた
+                        cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                         cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
                         cmd->SetComputeConstantBuffer(1, m_RTAOConstantBuffer.get());
 
@@ -6174,6 +7129,15 @@ namespace Kurenai
                         cmd->SetComputeShaderResourceBuffer(5, m_RaytracingScene.GetMeshInfoBuffer());
                         cmd->SetComputeShaderResourceBuffer(6, m_RaytracingScene.GetInstanceInfoBuffer());
                         cmd->SetComputeShaderResourceBuffer(7, m_RaytracingScene.GetMaterialBuffer());
+                        // メッシュレット表(t9)。RTAO.hlsl自体は引かないが、共有ヘッダーの
+                        // RaytracingScene.hlsliが宣言を持つためバインドしておく。
+                        // メッシュレットを持つメッシュが1つも無いシーンではバッファ自体が無いので
+                        // バインドしない(未バインドのスロットは0を返す。RTMeshInfo::MeshletCountも
+                        // 0になっているため、シェーダーがここを引くことはない)
+                        if (RHI::IRHIBuffer* meshletBuffer = m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
+                        {
+                            cmd->SetComputeShaderResourceBuffer(9, meshletBuffer);
+                        }
                         cmd->SetComputeTexture(8, m_DirectLightTexture.get());
 
                         // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
@@ -6212,9 +7176,21 @@ namespace Kurenai
                         }
                         else
                         {
+                            // UIやプリセットで段数が変わったらカーネルを作り直す。
+                            // 先頭N本を流用してはいけない理由はm_SSAOKernelSizeのコメント参照。
+                            // 生成は16回のRNGだけなので毎フレーム比較しても問題にならない
+                            const uint32_t kernelSize =
+                                std::clamp(m_SSAOKernelSize, 1u, kSSAOKernelSizeMax);
+                            if (m_SSAOKernel.size() != kernelSize)
+                            {
+                                m_SSAOKernel = GenerateSSAOKernel(kernelSize);
+                            }
+
+                            // 使わない残りの要素は0のまま(シェーダはsampleCountまでしか読まない)
                             SSAOConstants ssaoConstants{};
                             std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
-                            ssaoConstants.Params = { m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, 0.0f };
+                            ssaoConstants.Params = {
+                                m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, static_cast<float>(kernelSize) };
                             cmd->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
 
                             cmd->SetPipelineState(m_SSAOPipelineState.get());
@@ -6251,6 +7227,84 @@ namespace Kurenai
         RHI::IRHITexture* const activeAOTexture = GetActiveAOTexture();
         RHI::IRHITexture* const activeAORawTexture = GetActiveAORawTexture();
 
+        // --- 雲パス: 積雲と巻雲だけを1/2解像度で評価し、透過率と事前乗算済みの散乱光を書く ---
+        //
+        // 【なぜ分離したか】雲の評価は背景1画素あたり値ノイズを数十回踏むため極端に重く、
+        // Intel UHD Graphics 620 / 1280x720 / DX11 / Release の実測ではLightingパス19.4msのうち
+        // 積雲14.5ms + 巻雲1.3msを占めていた。雲は空間周波数が低いので低解像度で評価しても
+        // 見た目の劣化が小さく、面積1/4で評価すればそのぶん素直に安くなる。
+        // 太陽・星のような高周波成分はLighting側(SkyColorWithoutClouds)に残るためにじまない。
+        // 合成が事前乗算のover合成であることを使った厳密な分離である(SkyCloud.hlsl冒頭参照)。
+        //
+        // 【手続き空が無効なら登録しない】.ksceneでDDSスカイボックスを使う場合、Lightingパスは
+        // キューブマップをサンプルする経路(SkyParams.y <= 0.5)へ入り、この結果を一切読まない
+        const bool skyCloudPassRuns = m_SkyCloudTexture && (m_SkyAnalyticBackground && usingProceduralSky);
+        if (skyCloudPassRuns)
+        {
+            RHI::Viewport skyCloudViewport;
+            skyCloudViewport.Width = static_cast<float>(m_SkyCloudWidth);
+            skyCloudViewport.Height = static_cast<float>(m_SkyCloudHeight);
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "SkyCloud",
+                // SkyViewBakeより後に順序付けさせる(SkyCloudLayers自体はLUTを引かないが、
+                // Sky.hlsliの宣言上バインドが必要で、パスの前後関係も揃えておく)
+                .Reads = { m_SkyViewLUT.get(), m_CloudShapeNoiseTexture.get(), m_CloudDetailNoiseTexture.get() },
+                .RenderTargets = { m_SkyCloudTexture.get() },
+                // 空パラメータ。SkyIntegrateパスより後に順序付けさせる
+                .BufferReads = { m_SkyParametersBuffer.get() },
+                .Execute = [this, skyCloudViewport](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetViewport(skyCloudViewport);
+                    cmd->SetPipelineState(m_SkyCloudPipelineState.get());
+                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->SetTexture(0, m_SkyViewLUT.get());
+                    cmd->SetTexture(1, m_CloudShapeNoiseTexture.get());
+                    cmd->SetTexture(2, m_CloudDetailNoiseTexture.get());
+                    cmd->SetShaderResourceBuffer(3, m_SkyParametersBuffer.get());
+                    cmd->Draw(3, 0);
+                },
+            });
+        }
+
+        // --- DDGIの低解像度解決パス(有効なときだけ) ---
+        // 拡散イラディアンスとinsideWeightを1/2解像度で求め、Lightingパスが深度を見て
+        // アップサンプルする。雲と違い厳密ではない近似のため既定は無効(DDGIResolve.hlsl冒頭参照)
+        const bool ddgiResolvePassRuns =
+            m_DDGIHalfResolution && m_DDGIResolveTexture && m_DDGIEnabled && m_HasGIVolume && m_DDGIBaked;
+        if (ddgiResolvePassRuns)
+        {
+            RHI::Viewport ddgiResolveViewport;
+            ddgiResolveViewport.Width = static_cast<float>(m_DDGIResolveWidth);
+            ddgiResolveViewport.Height = static_cast<float>(m_DDGIResolveHeight);
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "DDGIResolve",
+                // アトラスはDDGIUpdateパスが書くので、それより後に順序付けさせる。
+                // 深度と法線はG-Bufferパスより後
+                .Reads = {
+                    m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
+                    m_GBufferDepth.get(), m_GBufferNormal.get(),
+                },
+                // 2枚目は合成側のGatherRed用の低解像度深度(41.24節)。
+                // 並びはDDGIResolve.hlslのPSOutputおよびPSOのRenderTargetFormatsと一致させること
+                .RenderTargets = { m_DDGIResolveTexture.get(), m_DDGIResolveDepthTexture.get() },
+                .Execute = [this, ddgiResolveViewport](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetViewport(ddgiResolveViewport);
+                    cmd->SetPipelineState(m_DDGIResolvePipelineState.get());
+                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->SetTexture(0, m_DDGIIrradianceAtlas.get());
+                    cmd->SetTexture(1, m_DDGIDistanceAtlas.get());
+                    cmd->SetTexture(2, m_GBufferDepth.get());
+                    cmd->SetTexture(3, m_GBufferNormal.get());
+                    cmd->Draw(3, 0);
+                },
+            });
+        }
+
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Lighting",
@@ -6267,6 +7321,11 @@ namespace Kurenai
                 // 大気散乱のSkyView LUT。背景の空をここから引くため、
                 // SkyViewBakeパスより後に順序付けさせる
                 m_SkyViewLUT.get(),
+                // 低解像度で評価済みの雲。SkyCloudパスより後に順序付けさせるために挙げる
+                // (パスが登録されないフレームでは書き手が居ないので依存も張られない)
+                m_SkyCloudTexture.get(),
+                // 同じく低解像度で評価済みのDDGI。DDGIResolveパスより後に順序付けさせる
+                m_DDGIResolveTexture.get(), m_DDGIResolveDepthTexture.get(),
             },
             .RenderTargets = { m_SceneColor.get() },
             // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
@@ -6307,11 +7366,19 @@ namespace Kurenai
                 cmd->SetShaderResourceBuffer(11, m_SkyParametersBuffer.get());
                 // bent normal(34章)
                 cmd->SetTexture(17, m_GBufferBentNormal.get());
-                // ボリュメトリック積雲の3Dノイズ。反射プローブ・DDGIと同じ理由で、
-                // 雲が無効なフレームでも常にバインドする(シェーダーが宣言しているリソースは
-                // 必ず埋める。SetPipelineStateが毎回ルート引数を無効化するため)
-                cmd->SetTexture(18, m_CloudShapeNoiseTexture.get());
-                cmd->SetTexture(19, m_CloudDetailNoiseTexture.get());
+                // 低解像度で評価済みの雲(rgb=事前乗算済みの散乱光、a=透過率)。
+                // このシェーダーは雲を自前で評価しなくなったため、3Dノイズが使っていたt18を
+                // そのまま流用している(DeferredLighting.hlsl冒頭のコメント参照)
+                cmd->SetTexture(18, m_SkyCloudTexture.get());
+                // 低解像度で評価済みのDDGI(rgb=イラディアンス、a=insideWeight)。
+                // 【無効時も常にバインドする】シェーダーはDDGIParams4.yで読むかどうかを分けるが、
+                // DX12のディスクリプタテーブルは21スロットぶんをまとめてコピーするため、
+                // 未初期化のスロットを残せない(反射プローブ・DDGIアトラスと同じ理由)。
+                // 以前はここへ雲の3Dノイズを差していたが、Texture2Dの宣言と型が食い違うため
+                // このテクスチャへ置き換えた
+                cmd->SetTexture(19, m_DDGIResolveTexture.get());
+                // 低解像度の深度(41.24節)。UpsampleDDGIがGatherRed 1回で4テクセルぶんを取る
+                cmd->SetTexture(21, m_DDGIResolveDepthTexture.get());
                 // 大気散乱のSkyView LUT。日中の空の色はここから引く
                 cmd->SetTexture(20, m_SkyViewLUT.get());
                 cmd->Draw(3, 0);
@@ -6711,11 +7778,26 @@ namespace Kurenai
                         static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight),
                         m_RTReflectionMaxDistance, m_RTReflectionRoughnessCutoff
                     };
-                    rtConstants.Params1 = { m_RTReflectionShadowRayEnabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+                    // yはメッシュレットのデバッグ表示。ラスタ側と同じトグルで駆動するので、
+                    // 有効にすると「直接見えている面」と「反射に映る面」の両方が
+                    // メッシュレット色になり、同じ塊が同じ色かを見比べられる
+                    rtConstants.Params1 = {
+                        m_RTReflectionShadowRayEnabled ? 1.0f : 0.0f,
+                        m_MeshletDebugViewEnabled ? 1.0f : 0.0f,
+                        0.0f,
+                        0.0f,
+                    };
                     cmd->UpdateBuffer(m_RTReflectionConstantBuffer.get(), &rtConstants, sizeof(rtConstants));
 
                     cmd->SetComputePipelineState(m_RTReflectionPipelineState.get());
-                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    // 【スクリーン空間用ではなくマテリアル用のセット】ヒット面のマテリアル
+                    // テクスチャをbindlessで引くようになったため、s0にWrapのサンプラーが要る。
+                    // モデルのUVはタイリング前提で[0,1]の外へ出るので、Clampで引くと
+                    // 端のテクセルが引き伸ばされて模様が崩れる。
+                    // s1(色バッファ)・s2(データ)はどちらのセットでも中身が同じで、
+                    // s0でこのシェーダーが他に引くのはキューブマップだけ(アドレスモードは
+                    // 面をまたぐフィルタに使われないため無関係)なので、切り替えの影響はここだけ
+                    cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
                     cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
                     cmd->SetComputeConstantBuffer(1, m_RTReflectionConstantBuffer.get());
 
@@ -6735,6 +7817,14 @@ namespace Kurenai
                     cmd->SetComputeShaderResourceBuffer(13, m_RaytracingScene.GetMeshInfoBuffer());
                     cmd->SetComputeShaderResourceBuffer(14, m_RaytracingScene.GetInstanceInfoBuffer());
                     cmd->SetComputeShaderResourceBuffer(15, m_RaytracingScene.GetMaterialBuffer());
+                    // メッシュレット表(t17)。RTReflection.hlslのKURENAI_RT_MESHLET_REGISTERと
+                    // 一致させること。デバッグ表示でヒット面のメッシュレットを引くのに使う。
+                    // 無いシーンでバインドしない理由はRTAO側と同じ。
+                    // t8はプリフィルタ済み鏡面(上の16行目)が使っており空いていない
+                    if (RHI::IRHIBuffer* meshletBuffer = m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
+                    {
+                        cmd->SetComputeShaderResourceBuffer(17, meshletBuffer);
+                    }
                     // bent normal(34章)。t0〜t15が埋まっているためt16。
                     // SSR.hlslと同じくスペキュラ遮蔽の方向依存を再現するために要る
                     cmd->SetComputeTexture(16, m_GBufferBentNormal.get());
@@ -7084,12 +8174,16 @@ namespace Kurenai
         RHI::IRHITexture* bloomResultTexture =
             m_BloomUpTextures.empty() ? hdrSceneColor : m_BloomUpTextures[0].get();
 
+        // このフレームで超解像パスを走らせるか。デバッグ表示中は内部解像度の中間バッファを
+        // そのまま等倍で見たいので走らせない(拡大するとバッファの実際の解像度が分からなくなる)
+        const bool upscaleActive = IsUpscaleActive() && m_DebugView == DebugView::Final;
+
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Tonemap",
             .Reads = { hdrSceneColor, m_ExposureTexture.get(), bloomResultTexture },
             .RenderTargets = { m_TonemapTexture.get() },
             .Execute = [this, &gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale,
-                        keyReferenceEV100](RHI::IRHICommandList* cmd)
+                        keyReferenceEV100, upscaleActive](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
                 tonemapConstants.Curve = static_cast<int32_t>(m_TonemapCurve);
@@ -7106,8 +8200,13 @@ namespace Kurenai
                 // 自動露出の測光値ではなくキー照度から求めた基準EVを使う
                 tonemapConstants.MesopicAdaptationEV100 = keyReferenceEV100;
                 // シャープネスはTAAの蓄積で失われた高域を戻すためのものなので、TAAが無効なら0。
-                // そうしないとTAA導入前の絵と変わってしまう
-                tonemapConstants.Sharpness = m_TAAEnabled ? m_TAASharpness : 0.0f;
+                // そうしないとTAA導入前の絵と変わってしまう。
+                //
+                // 【超解像が有効なときも0にする】ここのシャープネスは内部レンダー解像度で効く。
+                // その後EASUで拡大すると、戻した高域もオーバーシュートの縁も一緒に引き伸ばされて
+                // 太い縁取りになる。超解像時のシャープ化は出力解像度で効くRCASへ一本化し、
+                // ここは素直なトーンマップ出力をEASUへ渡すことに徹する
+                tonemapConstants.Sharpness = (m_TAAEnabled && !upscaleActive) ? m_TAASharpness : 0.0f;
                 tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(m_RenderWidth);
                 tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(m_RenderHeight);
                 tonemapConstants.BlackPoint = m_TonemapBlackPoint;
@@ -7126,6 +8225,63 @@ namespace Kurenai
                 cmd->Draw(3, 0);
             },
         });
+
+        // --- 超解像パス(41.23節): Tonemapが出したLDR画像を出力解像度へ再構成する ---
+        //
+        // EASU(拡大)とRCAS(シャープ化)を別パスにしているのは、RCASがEASUの結果の
+        // 十字5タップを読むため。1つにまとめると同一リソースのSRV/UAV同時バインドになる。
+        //
+        // ここより後(Present)は出力解像度、ここより前はすべて内部レンダー解像度である。
+        // ImGuiはRenderGraphの外でバックバッファへ直接描かれるため、この拡大の影響を受けない
+        if (upscaleActive)
+        {
+            const uint32_t upscaleOutputWidth = m_UpscaleTargetWidth;
+            const uint32_t upscaleOutputHeight = m_UpscaleTargetHeight;
+
+            UpscaleConstants upscaleConstants{};
+            ComputeEasuConstants(
+                upscaleConstants, m_RenderWidth, m_RenderHeight, upscaleOutputWidth, upscaleOutputHeight);
+            upscaleConstants.OutputSize = { upscaleOutputWidth, upscaleOutputHeight };
+            upscaleConstants.RcasSharpnessScale = ComputeRcasSharpnessScale(m_UpscaleSharpness);
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "UpscaleEASU",
+                .Reads = { m_TonemapTexture.get() },
+                .Writes = { m_UpscaleTexture.get() },
+                .Execute = [this, upscaleConstants, upscaleOutputWidth,
+                            upscaleOutputHeight](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_UpscaleEASUPipelineState.get());
+                    // Gather4のアドレスモードがClampであることがEASUの前提(Upscale.hlslのコメント参照)
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->UpdateBuffer(m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
+                    cmd->SetComputeConstantBuffer(1, m_UpscaleConstantBuffer.get());
+                    cmd->SetComputeTexture(0, m_TonemapTexture.get());
+                    // UAVはDispatch直後に解除されるため毎回バインドし直す
+                    cmd->SetComputeUnorderedAccessTexture(0, m_UpscaleTexture.get());
+                    cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);
+                },
+            });
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "UpscaleRCAS",
+                .Reads = { m_UpscaleTexture.get() },
+                .Writes = { m_UpscaleSharpTexture.get() },
+                .Execute = [this, upscaleConstants, upscaleOutputWidth,
+                            upscaleOutputHeight](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_UpscaleRCASPipelineState.get());
+                    // RCASはLoadで整数座標を引くのでサンプラーは使わないが、シェーダーが
+                    // Samplers.hlsliを取り込んで宣言している以上バインドはしておく
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                    cmd->UpdateBuffer(m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
+                    cmd->SetComputeConstantBuffer(1, m_UpscaleConstantBuffer.get());
+                    cmd->SetComputeTexture(0, m_UpscaleTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_UpscaleSharpTexture.get());
+                    cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);
+                },
+            });
+        }
 
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
         // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
@@ -7150,8 +8306,20 @@ namespace Kurenai
         switch (m_DebugView)
         {
         case DebugView::Final:
-            // Tonemapパスが既にSSR有効/無効を考慮したHDRソースをLDR変換済みのため、そのまま使う
-            presentSourceTexture = m_TonemapTexture.get();
+            // Tonemapパスが既にSSR有効/無効を考慮したHDRソースをLDR変換済みのため、そのまま使う。
+            // 超解像が有効なときは、その先のRCASまで通した出力解像度の結果へ差し替える。
+            // レターボックスの基準になるpresentSourceWidth/Heightも出力解像度にすること
+            // (ここを内部解像度のままにすると、拡大済みの絵をさらに拡大してしまう)
+            if (upscaleActive)
+            {
+                presentSourceTexture = m_UpscaleSharpTexture.get();
+                presentSourceWidth = m_UpscaleTargetWidth;
+                presentSourceHeight = m_UpscaleTargetHeight;
+            }
+            else
+            {
+                presentSourceTexture = m_TonemapTexture.get();
+            }
             break;
         case DebugView::Albedo:
             presentSourceTexture = m_GBufferAlbedo.get();

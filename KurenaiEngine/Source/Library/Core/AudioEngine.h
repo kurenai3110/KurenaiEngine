@@ -19,8 +19,10 @@
 
 namespace Kurenai::Core
 {
-    // XAudio2による簡易なサウンド再生。WAV(PCM)ファイルの読み込みと再生、および再生中ボイスの
-    // 停止に対応した最小限の実装(効果音・BGM程度の単純な再生が目的で、音量変更等は持たない)。
+    // XAudio2による簡易なサウンド再生。WAV(PCM)ファイルの読み込みと再生、再生中ボイスの停止・
+    // 音量変更、マスター音量に対応した最小限の実装(効果音・BGM程度の単純な再生が目的で、
+    // ピッチ・パン・カテゴリ別のバス等は持たない)。
+    // BGMのフェードは、SetVoiceVolumeを毎フレーム呼ぶ形で呼び出し側が実装する。
     // 使用にはCoInitializeEx済みであること(WICテクスチャ読み込みと同じCOM初期化要件)
     class KURENAI_LIB_API AudioEngine
     {
@@ -43,6 +45,17 @@ namespace Kurenai::Core
         // 自動的に終了するため呼ぶ必要はないが、ループ再生(loop=true)を止めるにはこれを呼ぶ。
         // 既に終了済み/無効なIDの場合は何もしない
         void StopSound(uint64_t voiceId);
+
+        // 再生中のボイスの音量を変更する。volumeは0.0〜1.0(範囲外はログを出してクランプする)。
+        // 既に終了済み/無効なIDの場合は何もしない(単発再生はいつ終わるか呼び出し側には
+        // 分からないため、これは正常系。ログも出さない)。
+        // BGMのフェードイン/フェードアウトはこれを毎フレーム呼ぶことで実現する
+        void SetVoiceVolume(uint64_t voiceId, float volume);
+
+        // 全ボイスに掛かるマスター音量。0.0〜1.0(範囲外はログを出してクランプする)。
+        // 個々のボイスの音量とは掛け算になる
+        void SetMasterVolume(float volume);
+        float GetMasterVolume() const { return m_MasterVolume; }
 
     private:
         struct SoundData
@@ -71,6 +84,9 @@ namespace Kurenai::Core
         std::vector<std::unique_ptr<SoundData>> m_Sounds;
         std::unordered_map<uint64_t, VoiceEntry> m_ActiveVoices;
         uint64_t m_NextVoiceId = 1;
+        // GetMasterVolume用。IXAudio2MasteringVoice::GetVolumeでも取れるが、
+        // SetMasterVolumeでクランプした後の「エンジンが認識している値」を返したいので保持する
+        float m_MasterVolume = 1.0f;
     };
 }
 

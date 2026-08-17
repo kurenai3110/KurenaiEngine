@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "Core/StringUtil.h"
 #include "DX11Buffer.h"
 #include "DX11CommandList.h"
 #include "DX11ComputePipelineState.h"
@@ -99,6 +100,25 @@ namespace Kurenai::RHI
         ThrowIfFailed(dxgiDevice->GetAdapter(&adapter), "DXGIアダプタの取得に失敗しました");
 
         ThrowIfFailed(adapter->GetParent(IID_PPV_ARGS(&m_Factory)), "DXGIファクトリの取得に失敗しました");
+
+        // 実行中のGPUが何かをログに残す。どのGPUで測った値なのかが分からないと性能の記録が
+        // 後から比較できなくなる。診断目的の情報なので、取得に失敗しても描画は続行する
+        DXGI_ADAPTER_DESC adapterDesc{};
+        if (SUCCEEDED(adapter->GetDesc(&adapterDesc)))
+        {
+            constexpr uint64_t kBytesPerMiB = 1024ull * 1024ull;
+            Core::Logger::Info(
+                "DX11",
+                "GPU: " + Core::WideToUtf8(adapterDesc.Description) + " (専用VRAM " +
+                    std::to_string(adapterDesc.DedicatedVideoMemory / kBytesPerMiB) + "MB / 専用システムメモリ " +
+                    std::to_string(adapterDesc.DedicatedSystemMemory / kBytesPerMiB) + "MB / 共有システムメモリ " +
+                    std::to_string(adapterDesc.SharedSystemMemory / kBytesPerMiB) + "MB, 機能レベル " +
+                    (selectedFeatureLevel == D3D_FEATURE_LEVEL_11_1 ? "11_1" : "11_0") + ")");
+        }
+        else
+        {
+            Core::Logger::Warning("DX11", "DXGIアダプタの情報を取得できませんでした(GPU名をログに残せません)");
+        }
 
         m_ImmediateCommandList = std::make_unique<DX11CommandList>(m_Context);
 
@@ -310,6 +330,18 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHIShader> DX11Device::CreateShader(const ShaderDesc& desc)
     {
+        // 増幅/メッシュシェーダーにはDX11のプロファイルが存在しない。下の三項演算子は
+        // 「Vertexでもcomputeでもなければpixel」という作りのため、弾かないとメッシュシェーダーを
+        // ピクセルシェーダーとしてコンパイルしようとし、原因の分かりにくいエラーになる
+        if (desc.Stage == ShaderStage::Amplification || desc.Stage == ShaderStage::Mesh)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "CreateShader: DX11はメッシュシェーダーパイプラインに対応していません。"
+                "SupportsMeshShader()で分岐してください");
+            return nullptr;
+        }
+
         const char* target =
             desc.Stage == ShaderStage::Vertex ? "vs_5_0" : desc.Stage == ShaderStage::Compute ? "cs_5_0" : "ps_5_0";
 
@@ -406,7 +438,9 @@ namespace Kurenai::RHI
         D3D11_DEPTH_STENCIL_DESC depthStencilDesc{};
         depthStencilDesc.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
         depthStencilDesc.DepthWriteMask = desc.DepthWriteEnabled ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-        depthStencilDesc.DepthFunc = desc.ReverseZ ? D3D11_COMPARISON_GREATER : D3D11_COMPARISON_LESS;
+        depthStencilDesc.DepthFunc = desc.ReverseZ
+            ? (desc.DepthAllowEqual ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_GREATER)
+            : (desc.DepthAllowEqual ? D3D11_COMPARISON_LESS_EQUAL : D3D11_COMPARISON_LESS);
         depthStencilDesc.StencilEnable = FALSE;
 
         Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilState;
@@ -471,6 +505,15 @@ namespace Kurenai::RHI
         // FrontCounterClockwise以外の挙動は変わらない
         CD3D11_RASTERIZER_DESC rasterizerDesc(D3D11_DEFAULT);
         rasterizerDesc.FrontCounterClockwise = desc.FrontCounterClockwise ? TRUE : FALSE;
+        // IRHICommandList::SetScissorRectを使えるよう常時有効にする。D3D12にはこのフラグ自体が
+        // 存在せず(シザーは常時有効)、有効にすることでDX11/DX12の挙動が揃う。
+        //
+        // 【注意】D3D11のシザー矩形の既定は「矩形0本」であり、ScissorEnable=TRUEのまま
+        // RSSetScissorRectsを一度も呼ばないと全ピクセルがクリップされて何も映らなくなる。
+        // これを防ぐため、DX11CommandList::SetViewportが必ずビューポート全体の矩形を張る
+        // (D3D12もコマンドリストのリセット直後は矩形0本という同じ危険を抱えており、
+        //  現にDX12で描画が出ている事実が「全描画がSetViewportを経由している」ことの裏付けになる)
+        rasterizerDesc.ScissorEnable = TRUE;
 
         Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerState;
         ThrowIfFailed(m_Device->CreateRasterizerState(&rasterizerDesc, &rasterizerState), "ラスタライザステートの作成に失敗しました");
@@ -1016,6 +1059,31 @@ namespace Kurenai::RHI
         (void)desc;
         Core::Logger::Error(
             "DX11", "CreateTopLevelAS: DX11はレイトレーシングに対応していません。SupportsRaytracing()で分岐してください");
+        return nullptr;
+    }
+
+    uint32_t DX11Device::RegisterBindless(IRHITexture* texture)
+    {
+        (void)texture;
+        Core::Logger::Error(
+            "DX11", "RegisterBindless: DX11はbindlessに対応していません。SupportsBindless()で分岐してください");
+        return kInvalidBindlessIndex;
+    }
+
+    uint32_t DX11Device::RegisterBindless(IRHIBuffer* buffer)
+    {
+        (void)buffer;
+        Core::Logger::Error(
+            "DX11", "RegisterBindless: DX11はbindlessに対応していません。SupportsBindless()で分岐してください");
+        return kInvalidBindlessIndex;
+    }
+
+    std::unique_ptr<IRHIPipelineState> DX11Device::CreateMeshPipelineState(const MeshPipelineStateDesc& desc)
+    {
+        (void)desc;
+        Core::Logger::Error(
+            "DX11",
+            "CreateMeshPipelineState: DX11はメッシュシェーダーに対応していません。SupportsMeshShader()で分岐してください");
         return nullptr;
     }
 

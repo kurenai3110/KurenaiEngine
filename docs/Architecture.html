@@ -256,6 +256,7 @@
     <li><a href="#planarreflection">36. 平面反射</a></li>
     <li><a href="#aerialperspective">37. 大気遠近(height fog / aerial perspective)</a></li>
     <li><a href="#ch38">38. ドローンショーと星空</a></li>
+    <li><a href="#meshlet">39. メッシュレットとbindless(メッシュシェーダー / レイトレーシングとの統合)</a></li>
   </ol>
 </nav>
 
@@ -1751,7 +1752,8 @@ DX11はイミディエイト実行のためこの制約がないが、両バッ�
 <table>
 <thead><tr><th>項目</th><th>内容</th></tr></thead>
 <tbody>
-<tr><td>シザー矩形</td><td>DX11はラスタライザが<code>ScissorEnable=FALSE</code>でクリップしない。DX12は必ず設定が要るため、レターボックスで非整数になるビューポートを左上<code>floor</code>・右下<code>ceil</code>で包む(切り捨てるとDX12だけ右端・下端が1px欠ける)</td></tr>
+<tr><td>シザー矩形</td><td><code>IRHICommandList::SetScissorRect</code>(2Dの<code>PushClipRect</code>が使う)のため、<b>DX11も全パイプラインステートのラスタライザを<code>ScissorEnable=TRUE</code>にして揃えてある</b>(D3D12にはこのフラグ自体が無く、シザーは常時有効)。<b>両APIとも既定のシザー矩形は「0本」= 全クリップ</b>なので、<code>SetViewport</code>が必ずビューポート全体の矩形を張ることでこれを塞ぐ。レターボックスで非整数になるビューポートの丸めは共通ヘルパー<code>MakeFullViewportScissorRect</code>(左上<code>floor</code>・右下<code>ceil</code>)に寄せてある(切り捨てると右端・下端が1px欠ける。片方だけ直すとバックエンド間で端がずれる)。<code>SetScissorRect</code>は必ず<code>SetViewport</code>より後に呼ぶこと(<code>SetViewport</code>がビューポート全体へ戻す)</td></tr>
+<tr><td>構造化バッファの更新回数</td><td>DX11の<code>StructuredReadOnly</code>は<code>D3D11_USAGE_DYNAMIC</code> + <code>Map(WRITE_DISCARD)</code>でドライバが毎回リネームするため、1フレームあたりの<code>UpdateBuffer</code>回数に上限が無い。DX12はUPLOADヒープのステージングリング経由なので、<b>「<code>BufferDesc::MaxUpdatesPerFrame</code> × <code>kFrameCount</code> + 1」段</b>を確保し、これを超えるとGPUが読み取り中のスロットを上書きして描画結果が静かに壊れる(<code>DX12Buffer::AdvanceUploadRingAndGetWritePtr</code>がログで検出)。既定値は4。多く更新するバッファは<code>MaxUpdatesPerFrame</code>で宣言し、<b>呼び出し側でも上限に達する前に弾く</b>こと(2Dの<code>DrawPolyline</code>は1フレーム32本でカウントして弾いている)</td></tr>
 <tr><td>DSVフォーマット</td><td>DX12はPSOが申告した<code>DSVFormat</code>と実際にバインドされるDSVが一致していないと仕様違反になる。スワップチェインの深度は<code>D32_FLOAT</code>(ステンシルは未使用)でオフスクリーン深度と揃えてある。深度テストは使わないがDSVは張られるパス(Present / 2D / ImGui)は<code>PipelineStateDesc::DepthTargetAttached</code>で表す。<code>HasDepthStencil</code>で兼ねると深度テストまで有効になってしまうため別フラグにしている</td></tr>
 <tr><td>スロット範囲</td><td>DX12は<code>SetConstantBuffer</code>のslotをそのままルートパラメータ番号として使うため、b2以降を渡すとSRV/サンプラーテーブルのルート引数を破壊する。b0〜b1・t0〜t11・コンピュートのt0〜t3/u0〜u3を範囲チェックし、外れたらログを出してスキップする</td></tr>
 <tr><td>無効なビュー</td><td>DX11はRTV/SRVを持たないテクスチャに対してnullptrをバインドして静かに描画をやめるが、DX12は<code>kInvalid</code>(0xFFFFFFFF)から「ヒープ先頭+0xFFFFFFFF×ディスクリプタサイズ」というでたらめなハンドルを作りデバイス削除に至る。<code>DX12Texture::HasSrv()/HasRtv()/HasDsv()</code>で事前に判定し、SRV/UAVはnullディスクリプタで代替、RTV/DSVはログを出してそのターゲットを除外する</td></tr>
@@ -3966,6 +3968,32 @@ m_RenderSrvCpuHeap  … CreateRenderTexture / CreateUAVTexture / CreateHiZTextur
 <li><strong>レンダーターゲット関連を触るのはRenderスレッドだけ</strong></li>
 <li><strong><code>m_Camera</code>を書くのはUpdateスレッドだけ</strong></li>
 <li><strong>シーン状態(<code>m_Scene</code>・ライト・反射プローブ・ポストプロセスのパラメータ)を触るのはRenderスレッドだけ</strong> — UIパネルもRenderスレッドで動くのでそのまま読み書きしてよい</li>
+<li><strong><code>KurenaiEngineBase</code>の派生クラスは、デストラクタの先頭で
+<code>WaitForGPUIdle()</code>を呼ぶ</strong> — 下記参照</li>
+</ul>
+<h3>26.7 終了時にGPUの完了を待つ位置</h3>
+<p>
+GPUがまだ参照しているリソースを解放すると、D3D12デバッグレイヤーが
+<code>OBJECT_DELETED_WHILE_STILL_IN_USE</code>(EXECUTION ERROR #921)をCORRUPTIONとして
+<strong>例外</strong>(<code>0x0000087d</code>)で上げ、終了時にプロセスが落ちる。
+デバッグレイヤーの有無に関わらず未定義動作であり、Releaseでは表面化しないだけである。
+</p>
+<p>
+待機は<strong>2箇所</strong>に要る。C++のデストラクタは「派生クラスの本体 →
+派生クラスのメンバ破棄 → 基底クラスの本体 → 基底クラスのメンバ破棄」の順に走るため、
+<code>KurenaiEngineBase</code>のデストラクタで待っても
+<code>KurenaiEngine3D</code>/<code>KurenaiEngine2D</code>が持つGPUリソース
+(レンダーターゲット・G-Buffer・各種バッファ・テクスチャ・フォントアトラス)は
+<strong>すでに解放済み</strong>である。
+</p>
+<ul>
+<li><strong>派生クラスのデストラクタの先頭</strong> — 自分のGPUリソースを守る。
+新しく<code>KurenaiEngineBase</code>を継承するクラスを作る場合も必ず書くこと</li>
+<li><strong><code>KurenaiEngineBase</code>のデストラクタ</strong> — スワップチェーンの
+バックバッファを守る最後の砦。<code>DX12Device::~DX12Device</code>も
+<code>WaitForGPUIdle()</code>を呼ぶが、メンバ宣言順が
+<code>m_Device</code>→<code>m_SwapChain</code>なので破棄はスワップチェーンが先になり、
+デバイス側の待機では間に合わない</li>
 </ul>
 <p class="note">
 リソース作成が使う<code>m_UploadCommandList</code> + <code>m_UploadMutex</code>は
@@ -4790,7 +4818,50 @@ UIから<code>RequestGraphicsAPIChange()</code>が呼ばれるとウィンドウ
 自分の破棄が生んだ<code>WM_QUIT</code>を取り除く。通常の終了経路ではこの後もう誰も
 メッセージを汲まないため、取り除いても影響はない。
 </p>
-<h3>33.4 ログファイルの追記</h3>
+<h3>33.4 超解像(FSR1相当のEASU + RCAS)</h3>
+<p>
+33.1の内部レンダー解像度を下げたぶんを、Presentの単純なバイリニア拡大ではなく
+AMD FidelityFX Super Resolution 1.0 のEASU(方向性エッジ再構成)とRCAS(シャープ化)で
+出力解像度へ再構成する。<code>Shaders/3D/Upscale.hlsl</code>の2つのコンピュートパス
+(<code>UpscaleEASU</code> / <code>UpscaleRCAS</code>)で、Tonemapの後・Presentの前に入る。
+</p>
+<p>
+<strong><code>m_RenderWidth</code> / <code>m_RenderHeight</code>の意味は変えていない。</strong>
+足したのは「出力解像度」(<code>m_UpscaleOutputWidth</code> / <code>m_UpscaleOutputHeight</code>)
+という一段外側の概念だけで、<code>出力解像度 ÷ 品質モードの倍率</code>を
+<code>RequestRenderResolution()</code>へ流し込む関係になっている。こうしてあるため、
+33.1が挙げている「<code>Render()</code>の20箇所ほどから読まれる」参照を
+レンダー解像度と出力解像度へ仕分ける必要が無い。導出結果は<strong>8の倍数へ切り捨てる</strong>——
+LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・SkyCloud/DDGIResolveの1/2解像度が
+いずれも2の冪で割っていくため。
+</p>
+<p>
+出力解像度のテクスチャ(<code>m_UpscaleTexture</code> / <code>m_UpscaleSharpTexture</code>)は
+<code>CreateRenderTargets()</code>ではなく<code>CreateUpscaleTargets()</code>が持つ。
+内部解像度用とは作り直す契機が違う(出力解像度が変わらない限り作り直す必要がない)ためだが、
+GPUがそれらを参照していない状態で作り直す必要があるのは同じなので、
+反映は33.1とまったく同じ枠——<code>Render()</code>先頭の<code>WaitForGPUIdle()</code>の後——で行う。
+</p>
+<p>
+<strong>不変条件が3つある。</strong>
+(1) EASU/RCASは<em>表示レンジの値</em>を前提に設計されているためTonemapの後に置く
+(RCASのリミッタは値域が[0,1]であることを式に埋め込んでいる)。
+(2) 同じ理由でTonemap側のシャープネスと二重になるので、超解像が有効な間は
+<code>TonemapConstants::Sharpness</code>へ0を渡し、シャープ化をRCASへ一本化する。
+(3) EASUのGather4は画面端で入力画像の外を引くため、
+サンプラーのアドレスモードが<strong>Clampでなければならない</strong>
+(<code>m_ScreenSpaceSamplers</code>にはWrapが1つも入らない設計なので構造的に守られる)。
+</p>
+<p>
+デバッグ表示(<code>DebugView::Final</code>以外)を選んでいる間はこの2パスを登録しない。
+中間バッファは内部解像度のまま等倍で見たいためである。
+ImGuiはRenderGraphの外でバックバッファへ直接描かれるため、この拡大の影響を受けない。
+</p>
+<p>
+移植時に参照実装から変えた点(定数の持ち方・ゼロ除算ガード・スレッドの割り当て)と実測は
+<a href="ImplementationHistory.md">ImplementationHistory.md</a> 41.23節。
+</p>
+<h3>33.5 ログファイルの追記</h3>
 <p>
 <code>Logger</code>はログファイルを「そのプロセスで初めて開く接尾辞なら<code>trunc</code>、
 2回目以降は<code>app</code>」で開く。常に<code>trunc</code>にすると
@@ -6012,6 +6083,242 @@ TLASへレイを撃った結果であり、ドローンは手続き的に展開�
 なお<code>DebugView::PlanarReflection</code>はDX12では最終画像が出るだけで反射バッファを表示しないため、
 この経路での切り分けには使えない。
 </p>
+
+</section>
+
+<section id="meshlet">
+<h2>39. メッシュレットとbindless(メッシュシェーダー / レイトレーシングとの統合)</h2>
+
+<p>
+この章までのエンジンには、互いに独立に見えて実は同じ根を持つ頭打ちが3つあった。
+</p>
+<ol>
+<li><strong>カリングの粒度がメッシュ全体しかない。</strong>
+描画は<code>DrawIndexed</code>1回=1メッシュで、Stanford Dragonのような
+「1メッシュ=87万三角形」のモデルでは画面外・背面の三角形もすべてラスタライザへ流れる。</li>
+<li><strong>レイトレーシングのヒット面がテクスチャを読めない。</strong>
+<code>RaytracingMaterial</code>は定数の係数しか持てず、反射・GIに映る色が一律に平板だった。</li>
+<li><strong>DX12のSRVバインドが毎ドローのテーブルコピー。</strong>
+メッシュレット化してドロー数が増えると、そのままボトルネックになる。</li>
+</ol>
+<p>
+根は共通で、<strong>HLSLがリソースそのものを実行時の番号で選べない</strong>ことにある。
+このためエンジンは「1つのリソースに詰め直す」対処を繰り返してきた &mdash;&mdash;
+カスケードシャドウマップを<code>Texture2DArray</code>へ、反射プローブを<code>TextureCubeArray</code>へ、
+レイトレーシングのシーンジオメトリを1本ずつの構造化バッファへ
+(<a href="#raytracing">25章</a>)。シェーダーモデル6.6の
+<code>ResourceDescriptorHeap</code>(bindless)はこの制約を取り払うもので、
+残り2つの前提にもなる。よって<strong>bindless → メッシュレット生成 → 描画 → RTとの統合</strong>の順で積んだ。
+</p>
+
+<h3>38.1 bindless: ヒープの末尾に恒久区画を切る</h3>
+<p>
+<code>ResourceDescriptorHeap[i]</code>は「そのとき束ねられているシェーダ可視ヒープの
+先頭からi番目」を指す。つまりbindlessで引けるようにするとは、
+<strong>シェーダ可視ヒープ上の恒久的な場所へディスクリプタを1つ置き、その番号を覚える</strong>だけのことで、
+ディスクリプタテーブルもルートパラメータも介さない。
+</p>
+<p>
+問題は、このエンジンのシェーダ可視SRVヒープが<strong>描画のたびにブロックを払い出すリング</strong>として
+使われていることだった(<code>DX12Device::AllocateSrvTableBlock</code>)。
+リングは古い領域を上書きし続けるので、恒久的に生かしたいディスクリプタをそこへ置けない。
+そこでヒープを<code>kBindlessDescriptorCapacity</code>ぶん拡張し、
+<strong>末尾</strong>に固定長の区画を切り出して<code>DX12BindlessTable</code>が寿命を管理する。
+</p>
+<p>
+先頭ではなく末尾なのは、既存2つのリング(グラフィックス用・コンピュート用)の
+区画先頭の計算に一切触れずに済むから。先頭へ入れると両方のオフセットがずれ、
+「リングが巻き戻る位置は少なくとも<code>kFrameCount-1</code>フレーム前」という
+安全性の議論をやり直すことになる。
+</p>
+<p>
+非シェーダー可視ヒープは「触るスレッドごとに別ヒープ」にすることでロック無しを実現しているが
+(<a href="#sceneloading">26章</a>)、bindless区画は<strong>番号空間を1本にしないと意味がない</strong>ため
+分割できない。登録はリソース生成時にしか起きず頻度が低いので、素直に<code>std::mutex</code>で守っている。
+</p>
+
+<h3>38.2 bindlessが使えるかの判定は3つ見る</h3>
+<p>
+<code>DetectBindlessSupport</code>が確認するのは次の3つで、1つでも欠けると無効になる。
+</p>
+<table>
+<thead><tr><th>条件</th><th>確認方法</th><th>欠けると何が起きるか</th></tr></thead>
+<tbody>
+<tr><td>デバイスがSM 6.6対応</td><td><code>D3D12_FEATURE_SHADER_MODEL</code></td><td>そもそも<code>ResourceDescriptorHeap</code>が使えない</td></tr>
+<tr><td>リソースバインディング Tier 3</td><td><code>D3D12_FEATURE_D3D12_OPTIONS</code></td><td>コンパイルは通るが実行時の挙動が未定義</td></tr>
+<tr><td>dxcompiler.dllが1.6以降</td><td><code>IDxcVersionInfo::GetVersion</code></td><td><strong>全シェーダーのコンパイルが落ちる</strong></td></tr>
+</tbody>
+</table>
+<p>
+3つ目が要るのが実務上の勘所である。Windows SDK 10.0.19041同梱の<code>dxcompiler.dll</code>は1.5で
+SM 6.6のプロファイル(<code>vs_6_6</code>等)を知らない。GPUが6.6対応でも6.6を指定すると
+「invalid target」で<strong>1本残らず</strong>コンパイルに失敗し、画面が出ない。
+デバイス側の能力だけで決めてはいけない。
+</p>
+<p>
+ルートシグネチャの<code>CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED</code>フラグも、
+判定が通ったときにだけ立てる。このフラグはSM 6.6と同時に追加されたもので、
+古いD3D12ランタイムは未知のフラグとしてシリアライズを失敗させるため。
+</p>
+
+<h3>38.3 レイトレーシングのヒット面をテクスチャ化する</h3>
+<p>
+<code>RaytracingMaterial</code>へ4つのbindless番号(ベースカラー・法線・メタリック/ラフネス・自発光)を
+足し、<code>FetchHitSurface</code>が<strong>サンプル結果を係数へ畳み込んで返す</strong>方式にした。
+消費側(<code>RTReflection.hlsl</code> / <code>RTAO.hlsl</code>)は今までどおり
+<code>material.BaseColorFactor</code>を読むだけでよく、呼び出しは1行も変わっていない。
+</p>
+<p>
+bindless非対応の環境では<code>BindlessSampleLevel</code>が白1x1相当を返すため、
+<strong>結果は従来と完全に同じ</strong>まま縮退する。
+</p>
+<p>
+metallic/roughnessだけは「テクスチャがあるときだけ」畳み込む分岐を入れてある。
+この2つの係数は「ソースデータに値が無い」ことを負値(<code>kInvalidMaterialFactor</code>)で
+表しており、その解釈は「係数1.0=テクスチャの値をそのまま使う」と決まっている
+(<a href="#occlusion-map">22章</a>)。テクスチャが無いのに負値を1.0へ丸めると、
+データを持たないマテリアルが<strong>一律メタリック1.0</strong>になって従来の見た目を壊す。
+</p>
+<p>
+ヒット点のミップは<code>SampleLevel</code>でLOD 0固定にしている。レイのヒット点には
+隣接ピクセルとのUV勾配が無く暗黙のミップ選択ができないためで、距離からLODを推定する手もあるが、
+反射・GIに映る面は元々ラフネスでぼかされるうえ、誤ったLODで縮小されるより最大解像度で引くほうが
+破綻が少ない。
+</p>
+
+<h3>38.4 メッシュレットの生成はオフラインで</h3>
+<p>
+分割はmeshoptimizer(<code>meshopt_buildMeshlets</code>)に任せ、
+<strong>KurenaiPackerが焼く</strong>。分割は入力ジオメトリだけで決まり実行時に変化しない一方、
+数十万三角形では秒単位かかるため、遮蔽マップのベイクと同じ扱いにした。
+xatlasと同じくライブラリ化せず必要なソースだけを直接コンパイルしており、
+<strong>KurenaiEngineの各DLLはmeshoptimizerにリンクしない</strong>。
+</p>
+<p>
+1メッシュレットは頂点64個・三角形124個まで。頂点64はローカル頂点番号が8bitに収まる境目でもある。
+三角形は「ローカル頂点番号3つ」で表され、meshoptimizerはこれを<code>unsigned char</code>3つで返すが、
+<code>.kgeom</code>へは<strong>1つの<code>uint32</code>へ詰めて</strong>書いている。
+</p>
+<p>
+3バイトのままにできないのは、<strong>このエンジンのRHIが<code>ByteAddressBuffer</code>を持たず
+<code>StructuredBuffer</code>しか無い</strong>ため。3バイト詰めを読むにはバイト単位のアドレッシングが要り、
+RHI・DX11/DX12の両実装・ディスクリプタ周りに新しい種類のバッファを通す必要がある。
+20万三角形のモデルで増えるのは0.2MBに過ぎず、割に合わない。
+</p>
+
+<h3>38.5 インデックスをメッシュレット順に並べ替える</h3>
+<p>
+<code>.kgeom</code> v3から、インデックスバッファの三角形は<strong>メッシュレットの並び順そのもの</strong>に
+なっている。これはラスタライズのためではなく、<strong>レイトレーシング側のため</strong>の変更である。
+</p>
+<p>
+こうしておくと、各メッシュレットの三角形は
+<code>[TriangleOffset, TriangleOffset + TriangleCount)</code> という連続した区間を占め、
+<code>TriangleOffset</code>はメッシュレット番号について単調増加する。
+<code>RayQuery</code>が返す<code>PrimitiveIndex</code>から所属メッシュレットを
+<strong>二分探索だけ</strong>で引けるようになり、三角形→メッシュレットの逆引きテーブルを持たずに済む
+(Bistro級では数MBかかる)。
+</p>
+<p>
+並べ替えの前に<code>meshopt_optimizeVertexCache</code> →
+<code>meshopt_optimizeVertexFetch</code>を通しているため、従来の頂点シェーダー経路の
+キャッシュ効率が落ちることはない(むしろ改善方向)。
+</p>
+
+<h3>38.6 描画パス: 専用ルートシグネチャが要る理由</h3>
+<p>
+メッシュシェーダーPSOは既存のグラフィックス用ルートシグネチャでは作れない。2点が噛み合わないため。
+</p>
+<ul>
+<li>SRV/サンプラーテーブルの可視性が<code>D3D12_SHADER_VISIBILITY_PIXEL</code>で、
+増幅/メッシュシェーダーから見えない</li>
+<li><code>ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT</code>はメッシュパイプラインでは禁止されており、
+立てるとPSOの作成が失敗する</li>
+</ul>
+<p>
+そこでALL可視・IAフラグ無しの<code>m_MeshRootSignature</code>を別に作った。
+<strong>レイアウト(b0/b1 + SRVテーブル + サンプラーテーブル)は既存と同一</strong>にしてあるので、
+<code>DX12CommandList</code>側のルート引数の張り直しは通常描画と同じコードで済む。
+ジオメトリはすべてbindlessで引くため、テーブルの幅を増やす必要もなかった。
+</p>
+<p>
+増幅シェーダーの「生き残ったメッシュレットを詰める」処理には、
+<code>WavePrefixCountBits</code>ではなく<strong>グループ共有カウンタ+<code>InterlockedAdd</code></strong>を使っている。
+波の命令は1グループが1波に収まることを暗に仮定することになるが、波幅は32/64とGPUによって違う。
+カリング判定は1メッシュレットに1回しか走らないので、原子加算の競合が実害になる頻度ではない。
+</p>
+<p>
+法線コーンによる背面カリングには落とし穴が1つある。法線の広がりが半球を超えてコーンで表せない場合、
+meshoptimizerは<code>cone_cutoff = 1</code>・<code>cone_axis = (0,0,0)</code>を返す。
+判定式<code>dot(view, axis) &gt;= cutoff</code>自体は<code>0 &gt;= 1</code>で偽になり安全に「通す」側へ倒れるが、
+<strong>長さ0の軸を<code>normalize</code>するとNaNになる</strong>。<code>ConeCutoff &gt;= 1</code>を先に弾く必要がある
+(実測では20万三角形のモデルで1.5%のメッシュレットがこれに該当した)。
+</p>
+<p>
+水面(<code>ModelInstance::IsWater</code>)は従来経路のまま残した。ピクセルシェーダーが
+<code>Water.hlsl</code>の別物でPSOを2本増やすことになる一方、<code>.kscene</code>が置く平面1枚では
+カリングの利得がほとんど無いため。
+</p>
+
+<h3>38.7 レイトレーシングへ送るのはTriangleOffsetだけ</h3>
+<p>
+RT側の<code>RTMeshInfo</code>へ<code>MeshletOffset</code>/<code>MeshletCount</code>を足し、
+シーン全体で連結した<strong><code>uint</code>1本の表</strong>を別に持たせた。
+<code>MeshletEntry</code>(48バイト)をそのまま送らないのは、RT側が必要とするのが
+区間の開始位置だけで、バウンディング球と法線コーンを使わないから(カリングはTLAS/BLASの仕事)。
+Bistro級(約5万メッシュレット)で2.4MBのところ、200KBで収まる。
+</p>
+<p>
+ここで守るべき不変条件は<strong>「ジオメトリの正は<code>.kgeom</code>ただ1つ」</strong>である。
+RT側に載る頂点属性・インデックスはすべて<code>.kgeom</code>から読んだものをそのまま連結したもので、
+ラスタライズ側の頂点/インデックスバッファとまったく同じ並び。メッシュレットも同じ<code>.kgeom</code>に
+焼かれた分割情報でしかない。片方だけを並べ替える・間引くといった加工を挟んだ瞬間、
+反射に映る形と直接見える形が食い違い、<strong>しかもどちらも一見もっともらしいまま壊れる</strong>。
+</p>
+<p>
+この不変条件を目で確かめられるよう、メッシュレットの色分け表示を
+<strong>ラスタ側とRT側の両方</strong>へ同じトグルで出るようにした。直接見えている面と
+反射に映る面で同じ塊が同じ色なら、両者が同一のジオメトリを見ている。
+色の作り方は<code>Shaders/3D/Meshlet.hlsli</code>へ括り出してある &mdash;&mdash;
+写して2つに増やすと、片方だけ直したときに<strong>確認そのものが成立しなくなる</strong>ため。
+</p>
+
+<h3>38.8 実測(確認用シーンのドラゴン)</h3>
+<p>
+<code>Tools/generate_dragon.py</code>が生成する代替メッシュ(トーラスノット、19.7万三角形)での
+オフライン計測。
+</p>
+<table>
+<thead><tr><th></th><th>値</th></tr></thead>
+<tbody>
+<tr><td>三角形数</td><td>196,608</td></tr>
+<tr><td>メッシュレット数</td><td>2,058</td></tr>
+<tr><td>1メッシュレットあたりの三角形数(平均)</td><td>95.5(上限124)</td></tr>
+<tr><td>法線コーンが使えないメッシュレット</td><td>30(1.5%)</td></tr>
+<tr><td>頂点+インデックス</td><td>7.50 MB</td></tr>
+<tr><td>メッシュレット3ブロックの追加分</td><td>1.35 MB(+18%)</td></tr>
+<tr><td>分割の所要時間</td><td>0.18秒</td></tr>
+</tbody>
+</table>
+
+<h3>38.9 残した制約</h3>
+<ul>
+<li><strong>レイトレーシングのヒット面に法線マップを適用していない。</strong>
+接空間の基底が要るが、<code>RTVertexAttribute</code>は16バイトに抑えるため法線とUVしか持っていない
+(接線を足す場所として<code>Padding</code>が予約してある)。
+番号だけは<code>RTMaterial::NormalTextureIndex</code>で運んであるので、接線を足せばそこを読むだけで済む。</li>
+<li><strong>影レイのアルファテストは相変わらず行っていない。</strong>
+bindlessが無かった頃はそもそも書けなかったが、現在は書ける。それでも入れていないのは、
+<code>RayQuery::Proceed()</code>のループを回すと「最初のヒットで打ち切る」最適化が効かなくなり、
+葉や柵の影の精度に対して代償が大きいため。</li>
+<li><strong>Hi-Zによるオクルージョンカリングは行っていない。</strong>
+増幅シェーダーが見ているのは錐台と法線コーンだけで、手前の物体に隠れたメッシュレットは落ちない。
+<a href="#hiz">Hi-Zミップチェーン</a>は既にあるので足す先はある。</li>
+<li><strong>メッシュレット単位のLOD(クラスタLOD)は無い。</strong>
+入れる場合はBLASも焼き直して両者を揃えること(38.7の不変条件)。</li>
+<li><strong>シャドウパスと反射プローブのキャプチャは従来経路のまま。</strong>
+どちらも解像度が低くカリングの利得が小さい一方、増幅/メッシュシェーダーのPSOだけ増えるため。</li>
+</ul>
 
 </section>
 
