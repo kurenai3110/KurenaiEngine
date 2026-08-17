@@ -709,6 +709,22 @@ namespace KurenaiPacker
             outMesh.AlphaCutoff = (hasAlphaMode && std::strcmp(alphaMode.C_Str(), "MASK") == 0) ? alphaCutoff : 0.0f;
             outMesh.IsTransparent = hasAlphaMode && std::strcmp(alphaMode.C_Str(), "BLEND") == 0;
 
+            // 透過率(葉・花弁のような薄いものが裏からの光を透かす量)。
+            // glTFにこれを表す標準のプロパティが無いため、--translucent <マテリアル名>=<値> で
+            // 外から与える。名前が一致したマテリアルにだけ設定する
+            if (!materialOverride.Translucency.empty())
+            {
+                aiString materialName;
+                if (material->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS)
+                {
+                    const auto found = materialOverride.Translucency.find(materialName.C_Str());
+                    if (found != materialOverride.Translucency.end())
+                    {
+                        outMesh.Translucency = found->second;
+                    }
+                }
+            }
+
             // OBJ等、alphaModeの概念を持たない形式ではAI_MATKEY_OPACITY(WavefrontMTLの
             // d/Trから変換された不透明度。assimpのObjFileImporter.cppが
             // AI_MATKEY_OPACITYへ格納する)を見る。d/Trがどちらも無ければassimpは既定の1.0

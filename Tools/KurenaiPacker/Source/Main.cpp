@@ -75,6 +75,10 @@ namespace
             "                                  (既定50000、0で分割しない)。巨大な単一メッシュの\n"
             "                                  UV展開が極端に遅くなるのを防ぐ\n"
             "      --unwrap-chunk-triangles <N>  分割後の1チャンクあたりの目標三角形数(既定100000)\n"
+            "      --translucent <名前>=<V>    指定した名前のマテリアルへ透過率(0〜1)を与える。\n"
+            "                                  葉や花弁のように薄いものが、裏から当たった光を透かして\n"
+            "                                  表側が明るく見える量。複数指定できる\n"
+            "                                  (例: --translucent Blossom=0.55)\n"
             "      --metallic <V>              全マテリアルのメタリック値を上書きする(0〜1)\n"
             "      --roughness <V>             全マテリアルのラフネス値を上書きする(0〜1)\n"
             "      --base-color <R,G,B>        全マテリアルのベースカラー係数を上書きする(各0〜1)\n"
@@ -279,6 +283,27 @@ namespace
                 {
                     return std::nullopt;
                 }
+            }
+            else if (arg == L"--translucent")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--translucent には <マテリアル名>=<値> が必要です");
+                    return std::nullopt;
+                }
+                const std::wstring token = argv[++i];
+                const size_t separator = token.rfind(L'=');
+                if (separator == std::wstring::npos || separator == 0 || separator + 1 >= token.size())
+                {
+                    PrintError("--translucent の書式が不正です(<マテリアル名>=<値>): " + WideToUtf8(token));
+                    return std::nullopt;
+                }
+                std::optional<float> value;
+                if (!ParseUnitScalar(arg, token.substr(separator + 1), value))
+                {
+                    return std::nullopt;
+                }
+                args.MaterialOverride.Translucency[WideToUtf8(token.substr(0, separator))] = value.value_or(0.0f);
             }
             else if (arg == L"--metallic" || arg == L"--roughness")
             {

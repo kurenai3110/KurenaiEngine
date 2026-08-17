@@ -73,6 +73,10 @@ namespace Kurenai::Assets
         // 0以下ならアルファカットアウト無効(常に不透明)。glTFのalphaMode=MASKのマテリアルのみ
         // alphaCutoff(既定0.5)が設定される
         float AlphaCutoff = 0.0f;
+        // 透過率(0=不透明、1=完全に透ける)。葉や花弁のように薄いものが、裏から当たった光を
+        // 透かして表側が明るく見える量。0なら従来どおりの不透明な陰影になる。
+        // KurenaiPackerの --translucent <マテリアル名>=<値> で設定する(45章)
+        float Translucency = 0.0f;
         // glTFのalphaMode=BLENDのマテリアルのみtrue。GBufferパス(不透明)には描画されず、
         // 専用のTransparentパス(KurenaiEngine3D::Render参照)でカメラから遠い順にアルファブレンド
         // 合成される。AlphaCutoffとは排他(glTF仕様上alphaModeはOPAQUE/MASK/BLENDのいずれか1つ)

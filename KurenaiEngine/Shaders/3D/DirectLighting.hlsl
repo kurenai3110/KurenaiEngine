@@ -184,6 +184,41 @@ float3 EvaluateDirectBRDF(
     return (diffuse + specular) * NdotL;
 }
 
+// 透過項に掛ける遮蔽の下限を決める係数。透過率へ掛けたものが「完全な影でも残る割合」になる
+// (透過率0.55なら下限0.33)。葉が重なった樹冠を単発のシャドウ問い合わせで表すための近似で、
+// 本来は多重散乱で解くべきところ。上げるほど樹冠の内側が明るく平坦になる
+static const float kTranslucencyShadowFloor = 0.6f;
+
+// 薄いものの透過(translucency)を1灯ぶん評価する。シャドウ・ライト色は呼び出し側で乗算する。
+//
+// 【何のためにあるか】葉・花弁・紙のように薄いものは、裏から当たった光を透かして
+// 表側が明るく見える。Cook-Torranceは NdotL<=0 の面を真っ黒にするため、そのままでは
+// 逆光の樹冠が空の環境光だけで照らされ、青灰色に沈む(45章)。
+//
+// 【物理的な位置づけ】厚みを持つ媒質の散乱を解くのではなく、
+// 「薄い両面の被写体」を近似する定番の形(いわゆる wrap / back-lit translucency)。
+// 拡散のみで鏡面は持たない ―― 透過してきた光は媒質内で散乱しきっており、
+// 表面反射のローブを作らないため。
+float3 EvaluateTranslucency(float3 N, float3 V, float3 L, float3 albedo, float translucency)
+{
+    if (translucency <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    // 裏面がどれだけ光を受けているか。表(N)の裏返し(-N)で測る
+    float backNdotL = saturate(dot(-N, L));
+
+    // 前方散乱。光の進行方向(-L)を見込む角度ほど強く透ける(葉を太陽にかざしたときの見え方)。
+    // 全周に一定量を残すのは、散乱しきった成分がどの方向にも一様に抜けるため
+    float forward = saturate(dot(V, -L));
+    float lobe = 0.35f + 0.65f * (forward * forward * forward);
+
+    // アルベドを掛けるのは、透けてくる光が媒質の色に染まるため(白い花弁は白く、葉は緑に透ける)。
+    // 1/PIは拡散項と同じ正規化
+    return albedo * (translucency * backNdotL * lobe / PI);
+}
+
 // Karis 2013 / Frostbite の windowed inverse-square。Range を超えると厳密に0になり、
 // 打ち切り境界でのハードエッジが出ない
 float DistanceAttenuation(float distSq, float range)
@@ -214,7 +249,7 @@ float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float an
 // そのピクセルに実際に届いているライトから順に予算が使われる
 float3 EvaluateLight(
     GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
-    SpecularEnergyContext energy, float2 pixelCoord, inout uint shadowRayBudget)
+    float translucency, SpecularEnergyContext energy, float2 pixelCoord, inout uint shadowRayBudget)
 {
     uint lightType = (uint)light.PositionType.w;
     float range = light.ColorRange.w;
@@ -258,7 +293,10 @@ float3 EvaluateLight(
         }
     }
 
-    if (dot(N, L) <= 0.0f)
+    // 【透過するマテリアルではNdotL<=0でも打ち切らない】薄いものは裏から当たった光を
+    // 透かすため、その側にこそ寄与がある(EvaluateTranslucency参照)。
+    // 透過しないマテリアル(translucency=0)は従来どおりここで打ち切る
+    if (dot(N, L) <= 0.0f && translucency <= 0.0f)
     {
         return float3(0.0f, 0.0f, 0.0f);
     }
@@ -272,8 +310,11 @@ float3 EvaluateLight(
         shadowRayBudget -= 1u;
     }
 
-    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy)
-        * light.ColorRange.rgb * atten * shadow;
+    const float3 reflected = EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy);
+    // 透過側の遮蔽は太陽と同じ扱い(遮蔽側も光を通すぶんを下限として残す)
+    const float transmissionShadow = lerp(saturate(translucency * kTranslucencyShadowFloor), 1.0f, shadow);
+    const float3 transmitted = EvaluateTranslucency(N, V, L, albedo, translucency) * transmissionShadow;
+    return reflected * shadow * light.ColorRange.rgb * atten + transmitted * light.ColorRange.rgb * atten;
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
@@ -287,7 +328,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 albedo = AlbedoTexture.Sample(ColorSampler, input.UV).rgb;
+    // aチャンネルは透過率(GBuffer.hlslが書く)。0なら従来どおりの不透明な陰影になる
+    float4 albedoSample = AlbedoTexture.Sample(ColorSampler, input.UV);
+    float3 albedo = albedoSample.rgb;
+    float translucency = albedoSample.a;
     float3 N = OctDecode(NormalTexture.Sample(DataSampler, input.UV).xy);
     float2 material = MaterialTexture.Sample(DataSampler, input.UV).rg;
     float metallic = material.r;
@@ -311,13 +355,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 太陽の寄与だけをこのブロックに閉じ込め、その後は必ずライトリストのループへ進む
     float3 sunL = normalize(-LightDirection.xyz);
     float sunNdotL = saturate(dot(N, sunL));
-    if (sunNdotL > 0.0f)
+    // 【透過はNdotL<=0の側で効く】葉や花弁は薄いので、裏から当たった光が透けて表側を光らせる。
+    // 不透明体としての寄与(上のsunNdotL>0)とは排他なので、シャドウの取得だけ共有できるよう
+    // ここで先に影の可視率を求めておく
+    const bool needSunShadow = (sunNdotL > 0.0f) || (translucency > 0.0f);
+    float sunShadow = 1.0f;
+    if (needSunShadow)
     {
-        float shadow;
         if (LightCount.z == 2u) // Raytraced
         {
             // RTShadow.hlslが同じ解像度・同じピクセル格子へ書いた可視率をそのまま使う
-            shadow = RTShadowTexture.Load(int3((int2)input.Position.xy, 0)).r;
+            sunShadow = RTShadowTexture.Load(int3((int2)input.Position.xy, 0)).r;
         }
         else
         {
@@ -325,9 +373,27 @@ float4 PSMain(PSInput input) : SV_TARGET
             // クリアしたまま何も描かないため、ComputeShadowFactorの深度比較が常に
             // 「影なし」と判定して1.0を返す(シャドウパスのClearDepth参照)
             float viewDepth = mul(float4(worldPos, 1.0f), View).z;
-            shadow = ComputeCascadedShadowFactor(worldPos, viewDepth, sunNdotL);
+            // 【透過側ではNdotLを0で渡す】ComputeCascadedShadowFactorはNdotLを
+            // 法線オフセット(シャドウアクネ対策)に使う。裏から照らされている面では
+            // sunNdotLが0なのでオフセットは掛からず、面そのものの深度で比較される
+            sunShadow = ComputeCascadedShadowFactor(worldPos, viewDepth, sunNdotL);
         }
-        directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energy) * LightColor.rgb * shadow;
+
+        if (sunNdotL > 0.0f)
+        {
+            directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energy)
+                * LightColor.rgb * sunShadow;
+        }
+
+        // 【透過には不透明体の影をそのまま掛けない】シャドウは「不透明な何かに遮られたか」しか
+        // 答えないが、透過するものが重なっている場合は遮蔽側も光を通す。そのまま掛けると、
+        // 密な樹冠では1枚重なった時点で透過が完全に消える
+        // (実測: 樹冠の平均が (109, 109, 120) → (75, 82, 98) まで落ち、透過を入れた意味が無くなる)。
+        // 遮蔽側の透過ぶんを下限として残す。下限をマテリアル自身の透過率から作るのは、
+        // よく透けるものほど「隣も同じだけ透ける」ため。不透明(translucency=0)なら
+        // 下限も0になり、従来どおり完全な影になる
+        const float transmissionShadow = lerp(saturate(translucency * kTranslucencyShadowFloor), 1.0f, sunShadow);
+        directLight += EvaluateTranslucency(N, V, sunL, albedo, translucency) * LightColor.rgb * transmissionShadow;
     }
 
     // --- t8のライトリスト(スクリーンスペースシャドウ付き) ---
@@ -350,7 +416,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         {
             directLight += EvaluateLight(
                 Lights[LightTiles[tileBase + 1u + t]], worldPos, N, V, NdotV, albedo, metallic, roughness,
-                energy, input.Position.xy, shadowRayBudget);
+                translucency, energy, input.Position.xy, shadowRayBudget);
         }
     }
     else
@@ -359,7 +425,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         for (uint i = 0; i < LightCount.x; ++i)
         {
             directLight += EvaluateLight(
-                Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness, energy,
+                Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness, translucency, energy,
                 input.Position.xy, shadowRayBudget);
         }
     }

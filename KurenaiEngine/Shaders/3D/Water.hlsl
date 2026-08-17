@@ -93,7 +93,11 @@ PSOutput PSMain(PSInput input)
     // 拡散項として書くことで、Fresnelによる「見下ろすと水の色/すれすれだと鏡」の切り替わりは
     // 既存のDeferredLighting.hlslの式がそのまま担当する(水面専用の分岐は増やさない)。
     // baseColorSample.aによるアルファカットアウトはこの置き換えとは無関係にそのまま残す(直前のclip参照)
-    output.Albedo = float4(WaterBodyColor.rgb, 1.0f);
+    // aチャンネルは透過率(GBuffer.hlslと共有するPSOutputの規約)。
+    // 水面は葉のような薄い透過体ではなく専用の経路で扱うため、0(透過なし)を書く。
+    // **書き残してはいけない** ―― この構造体はGBuffer.hlslと共有しており、
+    // 書かないとそのチャンネルの内容が未定義になる
+    output.Albedo = float4(WaterBodyColor.rgb, 0.0f);
     output.Normal = OctEncode(N);
     // aチャンネルに水面のマテリアルIDを書く(GBuffer.hlslの通常マテリアルは0.0fのまま)。
     // DebugView::WaterMask(Present.hlsl Mode 17)がこの値をそのままグレースケール表示する

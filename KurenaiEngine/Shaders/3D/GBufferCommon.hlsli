@@ -126,6 +126,12 @@ cbuffer ObjectConstants : register(b1)
     uint MeshletVertexBufferIndex;   // StructuredBuffer<uint>(頂点バッファへのインデックス)
     uint MeshletTriangleBufferIndex; // StructuredBuffer<uint>(ローカル頂点番号3つを詰めたもの)
     uint MeshletCount;               // このメッシュのメッシュレット数(増幅シェーダーの範囲外判定用)
+
+    // 透過率(0=不透明、1=完全に透ける)。葉・花弁のように薄いものが、裏から当たった光を
+    // 透かして表側を光らせる量。GBuffer.hlslがG-BufferのAlbedo.aへ書き、
+    // DeferredLighting.hlsl/DirectLighting.hlslの透過項が読む(45章)。
+    // 末尾に足しているので、先頭までしか宣言していないシェーダー(Shadow.hlsl等)への影響は無い
+    float Translucency;
 };
 
 Texture2D BaseColorTexture : register(t0);

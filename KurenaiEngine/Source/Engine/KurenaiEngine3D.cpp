@@ -701,6 +701,10 @@ namespace Kurenai
             uint32_t MeshletVertexBufferIndex;
             uint32_t MeshletTriangleBufferIndex;
             uint32_t MeshletCount;
+            // 透過率(0=不透明)。GBufferパスがG-BufferのAlbedo.aへ書き、
+            // DirectLighting.hlslの透過項が読む(45章)。
+            // 4バイトのスカラーを末尾に足しているだけなので、既存フィールドのオフセットは動かない
+            float Translucency;
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -734,6 +738,7 @@ namespace Kurenai
             // 水面(kMaterialIDWater、Shaders/3D/GBufferCommon.hlsliと一致させること)。
             // 水面以外は0.0f(通常マテリアル)のまま
             constants.MaterialID = instance.IsWater ? 1.0f : 0.0f;
+            constants.Translucency = mesh.Translucency;
 
             // メッシュレット。ModelLoaderが登録済みの番号をそのまま渡す。
             // メッシュシェーダー非対応・メッシュレット未生成の場合は
