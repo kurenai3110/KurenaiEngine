@@ -66,7 +66,10 @@ PSOutput PSMain(PSInput input)
     float ao = lerp(1.0f, occlusionSample, OcclusionStrength);
 
     PSOutput output;
-    output.Albedo = float4(baseColorSample.rgb, 1.0f);
+    // aチャンネルは透過率。専用のG-Bufferを増やさずに済むよう空き枠を使っている
+    // (従来ここは定数1.0で、消費側はどこも読んでいなかった)。
+    // 葉・花弁のように薄いものが裏からの光を透かす量で、0なら従来どおりの不透明な陰影になる
+    output.Albedo = float4(baseColorSample.rgb, Translucency);
     output.Normal = OctEncode(N);
     // bチャンネルはマテリアルの遮蔽率。DeferredLighting.hlslとSSR.hlslがSSAO/SSILの遮蔽と
     // 乗算して使う(専用のG-Bufferを増やさずに済むよう、空き枠を使っている)

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -26,6 +27,11 @@ namespace KurenaiPacker
         // 0以下ならアルファカットアウト無効(常に不透明)。glTFのalphaMode=MASKのマテリアルのみ
         // alphaCutoff(既定0.5)が設定される
         float AlphaCutoff = 0.0f;
+        // 透過率(0=不透明、1=完全に透ける)。葉や花弁のように薄いものが、裏から当たった光を
+        // 透かして表側が明るく見える量。glTFにこれを表す標準のプロパティが無く(既存の
+        // 拡張はガラス向けで、Blender 2.82のエクスポータも書き出さない)、
+        // KurenaiPackerの --translucent <マテリアル名>=<値> で外から与える
+        float Translucency = 0.0f;
         // glTFのalphaMode=BLENDのマテリアルのみtrue。AlphaCutoffとは排他(alphaModeはOPAQUE/MASK/BLENDの
         // いずれか1つ)
         bool IsTransparent = false;
@@ -89,6 +95,10 @@ namespace KurenaiPacker
         std::optional<float> MetallicFactor;
         std::optional<float> RoughnessFactor;
         std::optional<std::array<float, 3>> BaseColor;
+        // マテリアル名 → 透過率。名前が一致したマテリアルにだけ透過率を与える
+        // (メタリック等の「全マテリアルへ一律」とは違い、木の中でも花弁だけを
+        //  透けさせたい、という使い方になるため)
+        std::map<std::string, float> Translucency;
     };
 
     // モデルファイルをassimpで解析する。失敗時はstd::runtime_errorを投げる。

@@ -121,9 +121,19 @@ namespace Kurenai::Assets
         // BaseColor等と同様に白のプレースホルダーへフォールバックしてよい)
         int32_t  EmissiveTextureIndex;
         uint32_t Flags;                    // bit0: 半透明(kMeshEntryFlagTransparent。glTFのalphaMode=BLEND)
-        uint32_t Reserved;                 // 0固定(uint64_tメンバがあるため構造体全体が8バイト境界に
-                                            // アラインされ、Flagsだけでは68バイトになり暗黙のパディングが
-                                            // 発生してしまうため、明示的なフィールドとして72バイトに揃える)
+        // 透過率(0=不透明、1=完全に透ける)。葉・花弁のような薄い被写体が、裏から当たった光を
+        // 透かして表側を光らせる量。DeferredLightingの透過項が使う(45章)。
+        //
+        // 【この枠はもともと Reserved(0固定のパディング)だった】uint64_tメンバがあるため
+        // 構造体全体が8バイト境界へアラインされ、Flagsだけでは68バイトになって暗黙のパディングが
+        // 発生する。それを避けるための明示的な詰め物だったので、サイズは72バイトのまま変わらない。
+        //
+        // 【だからkPackageVersionを上げていない】旧い.kmodelはここに0が書かれており、
+        // floatとして読むと +0.0f = 「透過なし」になる。これは旧アセットの従来の見た目
+        // そのものなので、誤って解釈されることが無い。v8のように「レイアウトは同じだが
+        // 中身の意味が変わる」場合は上げる必要があるが、ここは旧値の意味が新しい解釈でも
+        // 一致するため、既存の Assets/Packed/ を再パックせずに済む
+        float    Translucency;
         // glTFのpbrMetallicRoughness.baseColorFactor(RGBA、既定[1,1,1,1])。テクスチャの有無に
         // 関わらず常に設定され、BaseColorTextureIndex=-1の場合の白1x1プレースホルダーと乗算される
         // ことで、テクスチャを持たずbaseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等)を

@@ -612,6 +612,9 @@ namespace Kurenai::Assets
             outMesh.MetallicFactor = mesh.MetallicFactor;
             outMesh.RoughnessFactor = mesh.RoughnessFactor;
             outMesh.AlphaCutoff = mesh.AlphaCutoff;
+            // 旧い.kmodelではこの枠はReserved(0固定)だったため、0=透過なしとして読まれる
+            // (ModelPackage.hのTranslucencyのコメント参照)
+            outMesh.Translucency = mesh.Translucency;
             outMesh.IsTransparent = (mesh.Flags & kMeshEntryFlagTransparent) != 0;
             outMesh.BaseColorFactor[0] = mesh.BaseColorFactor[0];
             outMesh.BaseColorFactor[1] = mesh.BaseColorFactor[1];

@@ -620,6 +620,9 @@ namespace KurenaiPacker
             entry.MetallicFactor = mesh.MetallicFactor;
             entry.RoughnessFactor = mesh.RoughnessFactor;
             entry.AlphaCutoff = mesh.AlphaCutoff;
+            // 透過率。旧い.kmodelではこの枠はReserved(0固定)だったため、
+            // 書き出さないアセットは0=透過なしとして読まれる(ModelPackage.h参照)
+            entry.Translucency = mesh.Translucency;
             entry.EmissiveFactor[0] = mesh.EmissiveFactor[0];
             entry.EmissiveFactor[1] = mesh.EmissiveFactor[1];
             entry.EmissiveFactor[2] = mesh.EmissiveFactor[2];
@@ -628,7 +631,7 @@ namespace KurenaiPacker
             entry.MetallicRoughnessTextureIndex = resolveTextureIndex(meshTextureRefs[i].MetallicRoughness);
             entry.EmissiveTextureIndex = resolveTextureIndex(meshTextureRefs[i].Emissive);
             entry.Flags = mesh.IsTransparent ? kMeshEntryFlagTransparent : 0u;
-            entry.Reserved = 0u;
+            // 旧Reservedの枠は透過率になった(上で設定済み。ModelPackage.h参照)
             entry.BaseColorFactor[0] = mesh.BaseColorFactor[0];
             entry.BaseColorFactor[1] = mesh.BaseColorFactor[1];
             entry.BaseColorFactor[2] = mesh.BaseColorFactor[2];
