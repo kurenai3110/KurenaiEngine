@@ -273,30 +273,17 @@ STAMEN_TIP_COLOR = (0.780, 0.620, 0.330)
 # 花柄(小さな枝)
 PEDICEL_COLOR = (0.430, 0.300, 0.260)
 
-# --- 花弁の透過の代用(emissive) ---
-# 【定数のemissiveは使わない・実測で判明】emissiveFactorだけを与えると、テクスチャの
-# どこにでも同じ色が一様に足される。その結果、花弁の白・萼の淡紅・葯の黄がすべて
-# 同じ藤色へ寄り、寄りで見たときにカードが「一様にくすんだ藤色の面」になっていた
-# (審査の項目3=2点「花1輪の形が一切分離しない」の主因)。
-# そこで**アトラスを定数倍した専用の自発光テクスチャ**を作って貼る。
-# こうすると発光が花弁の模様に従うので、明るくしても花の形が消えない。
-# エンジン側は EmissiveTexture(GBufferCommon.hlsli t3)を持っており、
-# KurenaiPackerもglTFのemissiveTextureを取り込む
-# 【なぜ要るか・実測に基づく】実際の花弁は光をよく透過し、逆光の桜は花が発光して見える。
-# エンジンには植生用の透過(subsurface/translucency)が無いため、太陽に背を向けたカードは
-# **空の環境光だけ**で照らされ、青灰色に沈む。
-# it03の実測(shots/it03/it03_s1_full.png、樹冠の画素):
-#   平均 RGB (78, 85, 104)   ← B > G > R。空の環境光が主で、桜の色になっていない
-#   上位10%の明るい画素 (204, 203, 210) ← 直射が当たったカードはきちんと明るい
-# つまり「照明が弱い」のではなく「日向と日陰の差が極端で、日陰が青い」状態だった。
-# 透過の代わりに弱いemissiveを乗せて、日陰側の花に淡紅色の下限を与える。
-# 値は淡紅(sRGBの(1.00, 0.88, 0.90)相当)をリニアへ落とし、強度を0.13にしたもの。
-# 【上げすぎない】強くすると陰影が消えてのっぺりする(ルーブリック項目5の立体感を落とす)ので、
-# 「日陰でも桜色に見える」下限として最小限に留める
-# 自発光テクスチャの強さ(アトラスの色に掛ける係数)。
-# 【上げすぎない】強くすると陰影が消えてのっぺりする(ルーブリック項目5の立体感を落とす)ので、
-# 「日陰でも桜色に見える」下限として最小限に留める
-BLOSSOM_EMISSIVE_STRENGTH = 0.16
+# --- 花弁の透過 ---
+# 花弁は薄いので、裏から当たった光を透かして表側が明るく見える。
+# **これはエンジン側の透過(translucency)で行う。** 以前は自発光(emissive)で代用していたが、
+# 自発光は光源と無関係に一律で光るため、逆光でも順光でも同じだけ明るくなり、
+# 陰影そのものが浅くなっていた(審査でも「のっぺりしている」と繰り返し指摘された)。
+#
+# エンジンは .kmodel のマテリアルごとに透過率を持ち、DirectLighting.hlsl の
+# EvaluateTranslucency が「裏面がどれだけ光を受けているか」と前方散乱で評価する。
+# したがってこのスクリプトは**値を持たず**、パック時に
+#   KurenaiPacker.exe --translucent Blossom=<値>
+# で与える(Claude/cherry-tree/rebuild.ps1 がこれを渡している)
 
 # ============================================================================
 # 樹皮テクスチャ
@@ -659,14 +646,11 @@ def _create_image(name, rgba, colorspace):
 
 
 def _make_material(name, color_srgb, roughness, metallic,
-                   albedo_image=None, normal_image=None, alpha_from_albedo=False,
-                   emission_image=None):
+                   albedo_image=None, normal_image=None, alpha_from_albedo=False):
     """Principled BSDFのマテリアルを1つ作る。
 
-    emission_image を渡すとPrincipled BSDFのEmissionへ画像を接続する。
-    glTFの emissiveTexture として書き出され、エンジン側は
-    GBufferCommon.hlsli の EmissiveTexture(t3) として読む。
-    強さは画像側にあらかじめ掛けてある(定数のemissiveFactorだと模様が潰れるため)。
+    **自発光は設定しない。** 花弁の透過はエンジン側の透過(translucency)で行い、
+    パック時に KurenaiPacker.exe --translucent で与える(上のコメント参照)。
     """
     try:
         mat = bpy.data.materials.get(name)
@@ -683,11 +667,6 @@ def _make_material(name, color_srgb, roughness, metallic,
         bsdf.inputs["Roughness"].default_value = roughness
         bsdf.inputs["Metallic"].default_value = metallic
         bsdf.inputs["Specular"].default_value = 0.25
-        if emission_image is not None:
-            etex = mat.node_tree.nodes.new("ShaderNodeTexImage")
-            etex.name = f"{name}_Emissive"
-            etex.image = emission_image
-            mat.node_tree.links.new(etex.outputs["Color"], bsdf.inputs["Emission"])
 
         if albedo_image is not None:
             tex = mat.node_tree.nodes.new("ShaderNodeTexImage")
@@ -739,15 +718,6 @@ def _create_materials(rng):
     img_branch = _create_image("CherryBranchBark", to_rgba(branch_rgb), 'sRGB')
     img_blossom = _create_image("CherryBlossomAtlas", atlas, 'sRGB')
 
-    # 自発光用。アルベドと同じ模様を暗くしたもの(アルファは維持する)。
-    # 【必ずリニア空間で掛ける】アトラスはsRGBエンコード済みなので、sRGB値のまま
-    # 0.22を掛けるとリニアでは0.035相当にしかならず、狙いの1/5以下になる
-    # (実際これで樹冠が青灰色へ戻った)。リニアへ戻して掛け、sRGBへ再エンコードする
-    emissive = atlas.copy()
-    emissive[:, :, :3] = _linear_to_srgb(
-        _srgb_to_linear(atlas[:, :, :3]) * BLOSSOM_EMISSIVE_STRENGTH)
-    img_emissive = _create_image("CherryBlossomEmissive", emissive, 'sRGB')
-
     images = {
         MATERIAL_TRUNK: (img_trunk, img_trunk_n, False),
         MATERIAL_BRANCH: (img_branch, None, False),
@@ -757,11 +727,9 @@ def _create_materials(rng):
     materials = []
     for name, color, roughness, metallic in CHERRY_MATERIALS:
         albedo, normal, alpha = images.get(name, (None, None, False))
-        emission = img_emissive if name == MATERIAL_BLOSSOM else None
         materials.append(_make_material(name, color, roughness, metallic,
                                         albedo_image=albedo, normal_image=normal,
-                                        alpha_from_albedo=alpha,
-                                        emission_image=emission))
+                                        alpha_from_albedo=alpha))
     return materials
 
 
