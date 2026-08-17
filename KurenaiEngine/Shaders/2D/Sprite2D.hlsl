@@ -24,7 +24,9 @@ cbuffer ObjectConstants : register(b1)
 Texture2D SpriteTexture : register(t0);
 // 役割はKurenaiEngine/Shaders/3D/Samplers.hlsliのMaterialSamplerと同じ(s0固定)。
 // 2Dは3D側の共有ヘッダーに依存させないため、ここで単独に宣言している。
-// KurenaiEngine2Dはこのスロットへ異方性16x + Wrapのサンプラーを1つだけ持つセットをバインドする
+// KurenaiEngine2Dはこのスロットへサンプラーを1つだけ持つセットをバインドする。
+// 中身は描画ごとに選ばれる: DrawSprite系はSetSpriteFilter/SetSpriteAddressModeで選んだ
+// 組み合わせ(既定は異方性16x + Wrap)、DrawTextは常にLinear + Clamp
 SamplerState MaterialSampler : register(s0);
 
 struct VSInput

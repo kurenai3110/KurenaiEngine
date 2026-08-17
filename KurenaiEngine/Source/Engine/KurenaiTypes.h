@@ -38,6 +38,34 @@ namespace Kurenai
         Middle,
     };
 
+    // KurenaiEngine2D::SetSpriteFilterで選ぶ、スプライトを拡大縮小したときのテクスチャの補間方法。
+    // RHI::SamplerFilterと同じ選択肢だが、公開APIにRHIの型を出さないため2D向けに別の列挙として持つ
+    // (GraphicsAPIと同じ流儀)
+    enum class SpriteFilter
+    {
+        // バイリニア補間。写真的なスプライト・UI素材の既定的な選択
+        Linear,
+        // 異方性フィルタリング(16x)。KurenaiEngine2Dの既定。
+        // 【ミップ付きテクスチャにしか効かない】LoadTextureで読んだ画像はミップが生成されるため
+        // 効くが、CreateSolidColorTexture・フォントアトラスはミップ1枚なのでLinearと同じ結果になる
+        Anisotropic,
+        // 最近傍(点)サンプリング。ドット絵を整数倍に拡大しても輪郭が滲まない。
+        // 【整数倍スナップと併用すること】拡大率が実数だとテクセル中心が画素中心からずれ、
+        // 点サンプリングでも隣のテクセルを拾って輪郭が1px単位で不均一になる
+        // (KurenaiEngine2D::SetVirtualResolutionのsnapToIntegerScale)
+        Point,
+    };
+
+    // KurenaiEngine2D::SetSpriteAddressModeで選ぶ、UVが0.0〜1.0の外へ出たときの扱い
+    enum class SpriteAddressMode
+    {
+        // UVを繰り返す。KurenaiEngine2Dの既定(タイリングするスプライト向け)
+        Wrap,
+        // 端のテクセルを引き伸ばす。DrawSpriteUVでアトラスの区画を切り出す場合はこちら。
+        // Wrapのままだと区画の端でフィルタのタップが反対側へ回り込み、隣の区画の色が混ざる
+        Clamp,
+    };
+
     // KurenaiEngine2D::DrawTextの水平方向の文字揃え。xの意味がalignごとに変わる
     // (Left: テキスト左端基準/Center: テキスト中央基準(既定)/Right: テキスト右端基準)
     enum class TextAlign

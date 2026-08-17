@@ -55,6 +55,41 @@ namespace Kurenai
         // マイター長がこの倍率(×半太さ)を超える鋭角ではベベルへ切り替える(SVGのstroke-miterlimit既定と同じ)
         constexpr float kPolylineMiterLimit = 4.0f;
 
+        // 公開APIの列挙(KurenaiTypes.h)からRHIの列挙(RHI/RHIEnums.h)への対応。
+        // GraphicsAPIをKurenaiEngineBase.cppのToRHIで変換しているのと同じ流儀で、
+        // 公開ヘッダーにRHIの型を出さないために挟んでいる
+        RHI::SamplerFilter ToRHI(SpriteFilter filter)
+        {
+            switch (filter)
+            {
+            case SpriteFilter::Linear: return RHI::SamplerFilter::Linear;
+            case SpriteFilter::Anisotropic: return RHI::SamplerFilter::Anisotropic;
+            case SpriteFilter::Point: return RHI::SamplerFilter::Point;
+            default:
+                // 公開APIの入口(SetSpriteFilter)で弾いているため到達しない。防御的に既定へ倒す
+                Core::Logger::Error(
+                    "2D",
+                    "ToRHI: 未知のSpriteFilter(" + std::to_string(static_cast<int>(filter)) +
+                        ")が指定されました。Anisotropicで代用します");
+                return RHI::SamplerFilter::Anisotropic;
+            }
+        }
+
+        RHI::SamplerAddressMode ToRHI(SpriteAddressMode addressMode)
+        {
+            switch (addressMode)
+            {
+            case SpriteAddressMode::Wrap: return RHI::SamplerAddressMode::Wrap;
+            case SpriteAddressMode::Clamp: return RHI::SamplerAddressMode::Clamp;
+            default:
+                Core::Logger::Error(
+                    "2D",
+                    "ToRHI: 未知のSpriteAddressMode(" + std::to_string(static_cast<int>(addressMode)) +
+                        ")が指定されました。Wrapで代用します");
+                return RHI::SamplerAddressMode::Wrap;
+            }
+        }
+
         struct Float2
         {
             float X = 0.0f;
@@ -153,12 +188,32 @@ namespace Kurenai
         indexBufferDesc.InitialData = quadIndices;
         m_QuadIndexBuffer = m_Device->CreateBuffer(indexBufferDesc);
 
-        // スプライト用。UVOffsetScaleでアトラスを切り出す用途と、タイリングするスプライトの
-        // 両方に対応するためWrap。拡大縮小したスプライトのボケを抑えるため異方性16x
-        RHI::SamplerDesc spriteSampler{};
-        spriteSampler.Filter = RHI::SamplerFilter::Anisotropic;
-        spriteSampler.AddressMode = RHI::SamplerAddressMode::Wrap;
-        m_SamplerSet = m_Device->CreateSamplerSet(&spriteSampler, 1);
+        // スプライト用のサンプラーセットを、フィルタ×アドレスモードの全組み合わせぶん作り置きする。
+        // CreateSamplerSetは描画開始前にしか呼べないため、SetSpriteFilter/SetSpriteAddressModeは
+        // ここで作ったセットの選択しか行わない(KurenaiEngine2D.hのm_SpriteSamplerSets参照)。
+        // 既定はAnisotropic + Wrapで従来と同じ見た目になる
+        for (uint32_t filterIndex = 0; filterIndex < kSpriteFilterCount; ++filterIndex)
+        {
+            for (uint32_t addressIndex = 0; addressIndex < kSpriteAddressModeCount; ++addressIndex)
+            {
+                const auto filter = static_cast<SpriteFilter>(filterIndex);
+                const auto addressMode = static_cast<SpriteAddressMode>(addressIndex);
+
+                RHI::SamplerDesc spriteSampler{};
+                spriteSampler.Filter = ToRHI(filter);
+                spriteSampler.AddressMode = ToRHI(addressMode);
+                m_SpriteSamplerSets[SpriteSamplerIndex(filter, addressMode)] =
+                    m_Device->CreateSamplerSet(&spriteSampler, 1);
+            }
+        }
+
+        // DrawText専用。フォントアトラスはミップを持たない1枚テクスチャなので異方性にしても
+        // Linearと同じ結果になり、点サンプリングにすると文字のアンチエイリアスが崩れて汚れる。
+        // アトラス右端・下端のセルでタップが反対側へ回り込まないようClampにする
+        RHI::SamplerDesc textSampler{};
+        textSampler.Filter = RHI::SamplerFilter::Linear;
+        textSampler.AddressMode = RHI::SamplerAddressMode::Clamp;
+        m_TextSamplerSet = m_Device->CreateSamplerSet(&textSampler, 1);
 
         RHI::BufferDesc frameConstantBufferDesc;
         frameConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -263,7 +318,62 @@ namespace Kurenai
         commandList->SetConstantBuffer(0, m_FrameConstantBuffer.get());
         commandList->SetVertexBuffer(m_QuadVertexBuffer.get());
         commandList->SetIndexBuffer(m_QuadIndexBuffer.get());
-        commandList->SetSamplerSet(m_SamplerSet.get());
+
+        // サンプラーセットはフレーム先頭で1回張るのではなく、テクスチャを読む描画
+        // (DrawSpriteUV / DrawText)がDrawの直前に選ぶ。スプライトとフォントで別のセットが
+        // 必要になったため、フレーム単位では決められない。
+        // キャッシュはフレームごとに捨てる(コマンドリストが作り直されるため)
+        m_BoundSamplerSet = nullptr;
+    }
+
+    uint32_t KurenaiEngine2D::SpriteSamplerIndex(SpriteFilter filter, SpriteAddressMode addressMode)
+    {
+        return static_cast<uint32_t>(filter) * kSpriteAddressModeCount + static_cast<uint32_t>(addressMode);
+    }
+
+    void KurenaiEngine2D::BindSamplerSet(RHI::IRHISamplerSet* samplerSet)
+    {
+        if (!samplerSet)
+        {
+            // コンストラクタでの生成に失敗していれば例外になっているため到達しない。
+            // ここで黙って何もしないとDX12が未初期化のディスクリプタを引きうる(RHI側の
+            // フォールバックで即座には壊れないが、原因の分からない絵になる)ので残す
+            Core::Logger::Error("2D", "BindSamplerSet: サンプラーセットがnullptrです。バインドをスキップします");
+            return;
+        }
+        if (m_BoundSamplerSet == samplerSet)
+        {
+            return; // 既に張られている(DrawSpriteを連続で呼ぶ大多数のケース)
+        }
+
+        GetCommandList()->SetSamplerSet(samplerSet);
+        m_BoundSamplerSet = samplerSet;
+    }
+
+    void KurenaiEngine2D::SetSpriteFilter(SpriteFilter filter)
+    {
+        if (static_cast<uint32_t>(filter) >= kSpriteFilterCount)
+        {
+            Core::Logger::Error(
+                "2D",
+                "SetSpriteFilter: 未知のSpriteFilter(" + std::to_string(static_cast<int>(filter)) +
+                    ")が指定されました。この呼び出しを無視します");
+            return;
+        }
+        m_SpriteFilter = filter;
+    }
+
+    void KurenaiEngine2D::SetSpriteAddressMode(SpriteAddressMode addressMode)
+    {
+        if (static_cast<uint32_t>(addressMode) >= kSpriteAddressModeCount)
+        {
+            Core::Logger::Error(
+                "2D",
+                "SetSpriteAddressMode: 未知のSpriteAddressMode(" + std::to_string(static_cast<int>(addressMode)) +
+                    ")が指定されました。この呼び出しを無視します");
+            return;
+        }
+        m_SpriteAddressMode = addressMode;
     }
 
     KurenaiEngine2D::ViewState KurenaiEngine2D::ComputeViewState() const
@@ -281,11 +391,49 @@ namespace Kurenai
             // 論理解像度で決まるため、ウィンドウサイズに依存しなくなる
             state.LogicalWidth = m_VirtualWidth;
             state.LogicalHeight = m_VirtualHeight;
-            const float scale = (std::min)(clientWidth / m_VirtualWidth, clientHeight / m_VirtualHeight);
+            float scale = (std::min)(clientWidth / m_VirtualWidth, clientHeight / m_VirtualHeight);
+
+            if (m_SnapVirtualResolutionToIntegerScale)
+            {
+                // 拡大率を整数へ落とす。これをやらないと論理解像度の1テクセルが画面の
+                // 1.2画素などに対応し、点サンプリングにしてもテクセル中心が画素中心から
+                // ずれて輪郭が滲む(ドット絵の整数倍拡大が成立しない)
+                const float integerScale = std::floor(scale);
+                if (integerScale >= 1.0f)
+                {
+                    scale = integerScale;
+                }
+                else if (!m_IntegerScaleFallbackLogged)
+                {
+                    // クライアント領域が論理解像度より小さい。floorすると0倍=ビューポートが
+                    // 消えてしまうため、実数倍のままにする(何も映らないより滲むほうがまし)。
+                    // 毎フレーム・座標変換のたびに呼ばれるので、知らせるのは最初の1回だけ
+                    Core::Logger::Warning(
+                        "2D",
+                        "SetVirtualResolution: クライアント領域(" + std::to_string(static_cast<int>(clientWidth)) +
+                            "x" + std::to_string(static_cast<int>(clientHeight)) + ")が論理解像度(" +
+                            std::to_string(static_cast<int>(m_VirtualWidth)) + "x" +
+                            std::to_string(static_cast<int>(m_VirtualHeight)) +
+                            ")より小さいため、整数倍スナップを適用できません。実数倍で描画します"
+                            "(この警告は最初の1回のみ)");
+                    m_IntegerScaleFallbackLogged = true;
+                }
+            }
+
             state.ViewportWidth = m_VirtualWidth * scale;
             state.ViewportHeight = m_VirtualHeight * scale;
             state.ViewportX = (clientWidth - state.ViewportWidth) * 0.5f;
             state.ViewportY = (clientHeight - state.ViewportHeight) * 0.5f;
+
+            if (m_SnapVirtualResolutionToIntegerScale)
+            {
+                // 拡大率が整数でも、余白の半分が0.5画素になるとテクセル中心が画素中心から
+                // 半画素ずれて元の木阿弥になる(クライアント幅と拡大後の幅の偶奇が違うと起きる)。
+                // スナップ時だけ原点も整数へ落とす。既定の経路の見た目を変えないよう、
+                // 無効時はこの丸めを通さない
+                state.ViewportX = std::floor(state.ViewportX);
+                state.ViewportY = std::floor(state.ViewportY);
+            }
         }
         else
         {
@@ -333,12 +481,14 @@ namespace Kurenai
         m_CameraZoom = zoom;
     }
 
-    void KurenaiEngine2D::SetVirtualResolution(float width, float height)
+    void KurenaiEngine2D::SetVirtualResolution(float width, float height, bool snapToIntegerScale)
     {
-        // (0, 0)は「論理解像度の解除」= クライアント領域をそのまま使う既定へ戻す、と定義する
+        // (0, 0)は「論理解像度の解除」= クライアント領域をそのまま使う既定へ戻す、と定義する。
+        // 解除時はスナップの指定も一緒に落とす(論理解像度が無ければ拡大率という概念自体が無い)
         if (width == 0.0f && height == 0.0f)
         {
             m_HasVirtualResolution = false;
+            m_SnapVirtualResolutionToIntegerScale = false;
             return;
         }
 
@@ -355,6 +505,13 @@ namespace Kurenai
         m_VirtualWidth = width;
         m_VirtualHeight = height;
         m_HasVirtualResolution = true;
+        if (m_SnapVirtualResolutionToIntegerScale != snapToIntegerScale)
+        {
+            // 設定が変わったらフォールバックの警告も出し直せるようにする
+            // (小さいウィンドウで一度警告が出た後、解像度を下げ直したのに黙ったままになるのを防ぐ)
+            m_IntegerScaleFallbackLogged = false;
+        }
+        m_SnapVirtualResolutionToIntegerScale = snapToIntegerScale;
     }
 
     void KurenaiEngine2D::ClientToWorld(float clientX, float clientY, float& outWorldX, float& outWorldY) const
@@ -429,6 +586,9 @@ namespace Kurenai
         // 頂点シェーダーが UVOffsetScale.xy + UV * UVOffsetScale.zw で変換するため、
         // オフセットと大きさの形で積む(DrawTextがフォントアトラスを切り出すのと同じ仕組み)
         objectConstants.UVOffsetScale = { srcU0, srcV0, srcU1 - srcU0, srcV1 - srcV0 };
+
+        // 現在選ばれているフィルタ×アドレスモードのセットへ切り替える(既に張られていれば何もしない)
+        BindSamplerSet(m_SpriteSamplerSets[SpriteSamplerIndex(m_SpriteFilter, m_SpriteAddressMode)].get());
 
         RHI::IRHICommandList* commandList = GetCommandList();
         commandList->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -974,6 +1134,11 @@ namespace Kurenai
     {
         const float atlasPixelHeight = bold ? m_BoldFontAtlasPixelHeight : m_FontAtlasPixelHeight;
         const float scale = fontSize / atlasPixelHeight;
+
+        // フォントは常に専用のLinear+Clampセットを使う。SetSpriteFilter(Point)にしていても
+        // 文字だけはここで元に戻る(点サンプリングにするとアンチエイリアスが崩れて汚れるため)
+        BindSamplerSet(m_TextSamplerSet.get());
+
         RHI::IRHICommandList* commandList = GetCommandList();
         commandList->SetTexture(0, (bold ? m_BoldFontAtlasTexture : m_FontAtlasTexture).get());
 
