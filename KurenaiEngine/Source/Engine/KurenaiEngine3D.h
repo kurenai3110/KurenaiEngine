@@ -77,6 +77,23 @@ namespace Kurenai
         uint32_t GetRenderHeight() const { return m_RenderHeight; }
         size_t GetCurrentSceneIndex() const { return m_CurrentSceneIndex; }
 
+        // デバッグ表示を番号で選ぶ(番号の並びはUIの「デバッグ表示」コンボと同じ)。
+        //
+        // 【何のためにあるのか】アトラスやバッファの生値を確かめる検証を、GUIのクリック操作
+        // なしで起動オプションから行えるようにするため。DDGIのイラディアンスアトラスが
+        // 一様な白の環境で基準値と一致するか、といった検証は「見て判断する」ものではなく
+        // 画素値を測るものなので、毎回コンボを人手で操作する形にすると再現性が落ちる。
+        //
+        // 範囲外の番号は無視してログを残す(呼び出し側で範囲を知らなくてよいようにする)
+        void SetDebugViewIndex(int index);
+
+        // DDGIのレイの取得をラスタライズへ強制する(既定はDXRが使えるならDXR)。
+        //
+        // 【何のためにあるのか】ラスタ経路とレイトレース経路のA/B比較を、GUIのコンボを
+        // 人手で操作せずに同じ起動手順で行えるようにするため。シーンを切り替えると
+        // 露出(EV100)が引き継がれてしまうので、比較は必ず起動直後から同じ手順で行う
+        void ForceDDGIRayModeRaster();
+
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
         // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
         // FrameConstants::CascadeSplitsがXMFLOAT4(4要素)にfar距離を詰めているため、
@@ -166,6 +183,10 @@ namespace Kurenai
         bool ShouldRunRaytracedShadow() const;
         // このフレームでRTAOパスを実行するか。上2つと同じ理由で判定を1か所に集約している
         bool ShouldRunRaytracedAO() const;
+        // DDGIのプローブ取得をレイトレースで行うか。
+        // 「パスを走らせるか」と「その出力を読むか」を同じ1つの述語で判定するための関数
+        // (ShouldRunRaytraced*と同じ作法)
+        bool ShouldRunRaytracedDDGITrace() const;
         // このメッシュをメッシュシェーダー経路で描くか。上のShouldRun*と同じく、
         // 「どのPSOを束ねるか」と「DispatchMeshとDrawIndexedのどちらを積むか」の判断が
         // ずれると即座に破綻するため、判定を1か所に集約する。
@@ -1719,6 +1740,11 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_DDGIBorderCopyComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_DDGIBorderCopyPipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_DDGIUpdateConstantBuffer;
+        // DDGIのレイ取得をDXRで行う経路(DDGIProbeTrace.hlsl)。
+        // m_RaytracingAvailableがtrueのときだけ作る(RTAO/RT反射と同じ扱い)
+        std::unique_ptr<RHI::IRHIShader> m_DDGIProbeTraceComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIProbeTracePipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_DDGITraceConstantBuffer;
         // DDGIのキャプチャ先(反射プローブとは解像度が違うため別に持つ)
         std::unique_ptr<RHI::IRHITexture> m_DDGICaptureColor;
         std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistance;
@@ -1785,6 +1811,44 @@ namespace Kurenai
         // 【既定はAlways(従来どおり)】止める側を既定にすると既存シーンの実行時の挙動が変わるため。
         // 止めたい場合はこのつまみか品質プリセット(低/中)から選ぶ
         DDGIUpdateMode m_DDGIUpdateMode = DDGIUpdateMode::Always;
+
+        // プローブへ入れる放射輝度・距離を、どうやって集めるか。
+        //
+        // Raytracedを末尾に置くこと ―― UI側が「レイトレーシング非対応なら選択肢の末尾を
+        // 削って出す」形で分岐しており(DrawSSRSectionと同じ作法)、並びを変えると
+        // 非対応環境で別の項目が消える
+        enum class DDGIRayMode
+        {
+            // 従来のラスタライズ。プローブ1個につきシーンを6回描く(ProbeCapture.hlsl)。
+            // 1フレームの描画回数がメッシュ数に比例して増えるため、
+            // ClampDDGIProbesPerFrameToConstantRingで更新プローブ数を抑える必要がある
+            Raster,
+            // DXR(インラインRayQuery)。1スレッド1レイでスクラッチキューブを直接埋める
+            // (DDGIProbeTrace.hlsl)。メッシュ数はBVHが吸収するので描画回数の制約が無く、
+            // 太陽の影もカスケードシャドウマップではなく影レイで求まる
+            Raytraced,
+        };
+        // 「レイをどう集めるか」を環境から選ぶ。DXRが使えるなら常にそちら ――
+        // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
+        // (ReflectionModeForCapabilityと同じ考え方)
+        static constexpr DDGIRayMode DDGIRayModeForCapability(bool raytracingAvailable)
+        {
+            return raytracingAvailable ? DDGIRayMode::Raytraced : DDGIRayMode::Raster;
+        }
+        // 【既定はDXRが使えるならDXR】DX11とDXR非対応機は自動的にラスタのまま。
+        // 実際の値はレイトレーシングの可否が分かった時点(Initialize)で入れ直す
+        DDGIRayMode m_DDGIRayMode = DDGIRayMode::Raster;
+        // レイトレース経路で太陽の影レイを撃つか。
+        //
+        // 【何のためにつまみにしてあるのか】これを切ると「影が落ちない」ラスタ経路の
+        // 既知の制約と同じ状態になる。切り替えて絵と数値が動くことが、
+        // レイトレース経路が実際に走っていることの対照実験になる(差分ゼロは合格ではない)。
+        // 常用の想定は有効側で、ラスタ経路には効かない
+        bool m_DDGISunShadowRayEnabled = true;
+        // どちらの経路が実際に走ったかを、切り替わったときだけログへ出すための状態。
+        // 毎フレーム出すと埋もれるが、出さないと「切り替えたつもり」の取り違えに気づけない
+        bool m_DDGIRayModeReported = false;
+        bool m_DDGIRayModeReportedRaytraced = false;
         // 停止判定用。最後に「焼き上がりに影響する状態」が変わった時点の署名。
         // 反射プローブと同じComputeProbeBakeSignature()を使う ―― DDGIのキャプチャも
         // 同じFrameConstants(太陽・時刻・影・ライト・IBL・自発光)を読むため、影響する状態は同じ

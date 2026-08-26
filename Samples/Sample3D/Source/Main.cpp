@@ -56,6 +56,78 @@ namespace
         return api;
     }
 
+    // コマンドラインに「-ddgiraster」があるか。あればDDGIのレイ取得をラスタライズへ固定する。
+    // ラスタ経路とレイトレース経路のA/B比較を、同じ起動手順のまま切り替えるために使う
+    bool ParseForceDDGIRaster()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return false;
+        }
+
+        bool forceRaster = false;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-ddgiraster") == 0)
+            {
+                forceRaster = true;
+                break;
+            }
+        }
+
+        LocalFree(argv);
+        return forceRaster;
+    }
+
+    // コマンドラインの「-debugview <番号>」を読む。番号の並びはUIの「デバッグ表示」コンボと同じ。
+    // 指定が無ければ-1(=既定のFinalのまま)を返す。
+    //
+    // 【何のためにあるのか】アトラスやバッファの生値を測る検証を、GUIのコンボを人手で
+    // 操作せずに再現できるようにするため(KurenaiEngine3D::SetDebugViewIndexのコメント参照)
+    int ParseDebugViewIndex()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return -1;
+        }
+
+        int index = -1;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-debugview") != 0)
+            {
+                continue;
+            }
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", "-debugviewの後に番号が指定されていないため、デバッグ表示は既定のままにします");
+                break;
+            }
+            // 数字以外が来たら弾く(wcstolは先頭が数字でなければ0を返すため、自前で見る)
+            wchar_t* end = nullptr;
+            const long parsed = wcstol(argv[i + 1], &end, 10);
+            // 末尾までが数字であること(終端がNUL以外なら余計な文字が付いている)
+            if (end == argv[i + 1] || (end != nullptr && *end != 0))
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    "-debugviewの引数が数値ではないため、デバッグ表示は既定のままにします: " +
+                        Kurenai::Core::WideToUtf8(argv[i + 1]));
+                break;
+            }
+            index = static_cast<int>(parsed);
+            break;
+        }
+
+        LocalFree(argv);
+        return index;
+    }
+
     // コマンドラインの「-scene <名前>」(拡張子を除いたファイル名。例: MontSaintMichel)を、
     // KurenaiEngine3Dが構築するシーン一覧上の番号へ解決する。
     // 一覧の作り方(列挙→_wcsicmpで昇順ソート→Assets::ReadSceneNameが成功したものだけ採用)は
@@ -209,10 +281,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         uint32_t renderWidth = Kurenai::Defaults::RenderWidth;
         uint32_t renderHeight = Kurenai::Defaults::RenderHeight;
         size_t sceneIndex = ParseInitialSceneIndex();
+        const int debugViewIndex = ParseDebugViewIndex();
+        const bool forceDDGIRaster = ParseForceDDGIRaster();
 
         for (;;)
         {
             Kurenai::KurenaiEngine3D engine(api, renderWidth, renderHeight, sceneIndex);
+            // グラフィックスAPIを切り替えて作り直したときも同じ表示で見たいので毎回適用する
+            if (debugViewIndex >= 0)
+            {
+                engine.SetDebugViewIndex(debugViewIndex);
+            }
+            if (forceDDGIRaster)
+            {
+                engine.ForceDDGIRayModeRaster();
+            }
             engine.Run();
 
             if (!engine.HasPendingGraphicsAPIChange())

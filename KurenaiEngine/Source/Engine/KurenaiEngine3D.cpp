@@ -300,6 +300,16 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params2;
         };
 
+        // DDGIProbeTrace.hlsl側のcbuffer DDGITraceConstants(register b1)と一致させる必要がある
+        struct alignas(16) DDGITraceConstants
+        {
+            // xyz=いま焼いているプローブのワールド座標、w=処理対象の面(D3Dのキューブ標準順)
+            DirectX::XMFLOAT4 Params0;
+            // x=キャプチャキューブの1面の解像度、y=エミッシブ強度(ラスタ経路のObjectConstantsへ
+            // 掛かっているのと同じ倍率)、z=太陽の影レイを撃つか(0/1。対照実験用)、w=未使用
+            DirectX::XMFLOAT4 Params1;
+        };
+
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
         struct alignas(16) CascadeConstants
         {
@@ -1703,8 +1713,30 @@ namespace Kurenai
             rtAOConstantBufferDesc.SizeInBytes = sizeof(RTAOConstants);
             m_RTAOConstantBuffer = m_Device->CreateBuffer(rtAOConstantBufferDesc);
 
+            // DDGIのプローブ取得(コンピュートシェーダー。プローブから6面ぶんのレイを撃ち、
+            // ラスタ経路と同じ形のスクラッチキューブを直接埋める)
+            RHI::ShaderDesc ddgiTraceCsDesc;
+            ddgiTraceCsDesc.Stage = RHI::ShaderStage::Compute;
+            ddgiTraceCsDesc.FilePath = shaderDirectory + L"DDGIProbeTrace.hlsl";
+            ddgiTraceCsDesc.EntryPoint = "CSMain";
+            m_DDGIProbeTraceComputeShader = m_Device->CreateShader(ddgiTraceCsDesc);
+            m_DDGIProbeTracePipelineState =
+                m_Device->CreateComputePipelineState({ m_DDGIProbeTraceComputeShader.get() });
+
+            RHI::BufferDesc ddgiTraceConstantBufferDesc;
+            ddgiTraceConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+            ddgiTraceConstantBufferDesc.SizeInBytes = sizeof(DDGITraceConstants);
+            // プローブ1個につき6面ぶん書き換えるため、既定の段数では
+            // 更新プローブ数を増やしたときに足りなくなる(1フレーム最大64プローブ×6面=384回)
+            ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
+            m_DDGITraceConstantBuffer = m_Device->CreateBuffer(ddgiTraceConstantBufferDesc);
+
+            // レイトレーシングが使える環境ではDDGIのレイ取得も既定でDXRにする。
+            // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
+            m_DDGIRayMode = DDGIRayModeForCapability(true);
+
             Core::Logger::Info(
-                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウ・AO/GIでRaytracedを選択可能)");
+                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウ・AO/GI・DDGIでRaytracedを選択可能)");
         }
         else
         {
@@ -2443,6 +2475,35 @@ namespace Kurenai
     {
         return m_AOTechnique == AOTechnique::Raytraced && m_RaytracingScene.IsValid() &&
                m_RTAOPipelineState != nullptr && m_RTAORawTexture != nullptr && m_RTAOTexture != nullptr;
+    }
+
+    void KurenaiEngine3D::SetDebugViewIndex(int index)
+    {
+        // 末尾はAtmosphereLUT。UI側(DebugViewPanel.cpp)のstatic_assertと同じ前提に依存する
+        constexpr int kDebugViewCount = static_cast<int>(DebugView::AtmosphereLUT) + 1;
+        if (index < 0 || index >= kDebugViewCount)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "デバッグ表示の番号が範囲外のため無視します: " + std::to_string(index) + " (0〜" +
+                    std::to_string(kDebugViewCount - 1) + ")");
+            return;
+        }
+
+        m_DebugView = static_cast<DebugView>(index);
+        Core::Logger::Info("KurenaiEngine3D", "デバッグ表示を番号で選択しました: " + std::to_string(index));
+    }
+
+    void KurenaiEngine3D::ForceDDGIRayModeRaster()
+    {
+        m_DDGIRayMode = DDGIRayMode::Raster;
+        Core::Logger::Info("KurenaiEngine3D", "DDGIのレイ取得をラスタライズへ固定しました(起動オプション)");
+    }
+
+    bool KurenaiEngine3D::ShouldRunRaytracedDDGITrace() const
+    {
+        return m_DDGIRayMode == DDGIRayMode::Raytraced && m_RaytracingScene.IsValid() &&
+               m_DDGIProbeTracePipelineState != nullptr && m_DDGITraceConstantBuffer != nullptr;
     }
 
     bool KurenaiEngine3D::ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const
@@ -4011,6 +4072,14 @@ namespace Kurenai
         // 常にカスケードシャドウマップで、そのシャドウマップはRTシャドウ選択時も同じように
         // 描かれるため、CascadedShadowMapとRaytracedでプローブの焼き上がりは変わらない
         mixBool(m_ShadowMode != ShadowMode::Off);
+        // DDGIのレイの取得(ラスタライズ / レイトレーシング)と、その影レイの有無。
+        //
+        // 【混ぜ忘れると「つまみが効かない」型の不具合になる】切り替えても署名が変わらないため
+        // 焼き直しが起きず、収束済みで停止しているモードでは絵が一切変わらない。
+        // 反射プローブはこの2つの影響を受けないが、署名を共有しているため一緒に焼き直しになる
+        // (余分な焼き直しが1回起きるだけで、破綻はしない)
+        mixBool(m_DDGIRayMode == DDGIRayMode::Raytraced);
+        mixBool(m_DDGISunShadowRayEnabled);
         // 月は時刻に連動せず手動指定なので、太陽とは別に混ぜる必要がある。太陽が沈むと
         // 平行光源の枠が月へ切り替わり、キャプチャの直接光がそのまま変わる
         mixFloat(m_MoonAzimuthDegrees);
@@ -6591,6 +6660,66 @@ namespace Kurenai
             cmd->Dispatch((kDDGICaptureSize + 7) / 8, (kDDGICaptureSize + 7) / 8, 1);
         };
 
+        // captureDDGIProbeFaceのDXR版。ラスタライズとキューブへの書き写しをまとめて置き換え、
+        // 同じスクラッチキューブ2本を1ディスパッチで直接埋める。
+        //
+        // 【面ごとに1ディスパッチなのはRHIの制約】キューブのUAVは面ごと(要素数1のTexture2DArray)に
+        // しか張れないため、6面を1回のディスパッチへ畳むにはRHIへ「キューブ全スライスを
+        // RWTexture2DArrayとして張る」メソッドをDX11/DX12の両方へ足す必要がある。
+        // ドローとメッシュ走査が消えるのが本題なので、そこは測ってから決める
+        const auto traceDDGIProbeFace =
+            [this, skyTexture](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+        {
+            const DirectX::XMFLOAT3 probePosition = ComputeDDGIProbePosition(probeIndex);
+
+            DDGITraceConstants traceConstants{};
+            traceConstants.Params0 = {
+                probePosition.x, probePosition.y, probePosition.z, static_cast<float>(face)
+            };
+            traceConstants.Params1 = {
+                static_cast<float>(kDDGICaptureSize),
+                m_EmissiveIntensity,
+                m_DDGISunShadowRayEnabled ? 1.0f : 0.0f,
+                0.0f
+            };
+
+            cmd->SetComputePipelineState(m_DDGIProbeTracePipelineState.get());
+            // ヒット面のマテリアルテクスチャをbindlessで引くためs0にWrapが要る(RTAOと同じ理由)
+            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+            cmd->UpdateBuffer(m_DDGITraceConstantBuffer.get(), &traceConstants, sizeof(traceConstants));
+            // b0はこのフレームのFrameConstantsをそのまま使う。ラスタ経路と違い、
+            // プローブ位置は専用の定数バッファ(b1)で渡すのでViewProjを差し替える必要が無い
+            cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+            cmd->SetComputeConstantBuffer(1, m_DDGITraceConstantBuffer.get());
+
+            cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+            cmd->SetComputeShaderResourceBuffer(1, m_RaytracingScene.GetVertexAttributeBuffer());
+            cmd->SetComputeShaderResourceBuffer(2, m_RaytracingScene.GetIndexBuffer());
+            cmd->SetComputeShaderResourceBuffer(3, m_RaytracingScene.GetMeshInfoBuffer());
+            cmd->SetComputeShaderResourceBuffer(4, m_RaytracingScene.GetInstanceInfoBuffer());
+            cmd->SetComputeShaderResourceBuffer(5, m_RaytracingScene.GetMaterialBuffer());
+            // メッシュレット表(t6)。このシェーダー自身は引かないが、共有ヘッダーの
+            // RaytracingScene.hlsliが宣言を持つためバインドしておく(RTAOと同じ扱い)。
+            // メッシュレットを持つメッシュが1つも無いシーンではバッファ自体が無い
+            if (RHI::IRHIBuffer* meshletBuffer = m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
+            {
+                cmd->SetComputeShaderResourceBuffer(6, meshletBuffer);
+            }
+            cmd->SetComputeShaderResourceBuffer(7, m_LightBuffer.get());
+            cmd->SetComputeTexture(8, m_IrradianceTexture.get());
+            cmd->SetComputeTexture(9, m_PrefilteredEnvTexture.get());
+            cmd->SetComputeTexture(10, m_BRDFLUTTexture.get());
+            cmd->SetComputeTexture(11, skyTexture);
+            // DDGIの多重バウンス。ラスタ経路がt12/t13で引いているのと同じアトラス
+            cmd->SetComputeTexture(12, m_DDGIIrradianceAtlas.get());
+            cmd->SetComputeTexture(13, m_DDGIDistanceAtlas.get());
+
+            // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_DDGICaptureRadianceCube.get(), face, 0, 0);
+            cmd->SetComputeUnorderedAccessTextureCubeFace(1, m_DDGICaptureDistanceCube.get(), face, 0, 0);
+            cmd->Dispatch((kDDGICaptureSize + 7) / 8, (kDDGICaptureSize + 7) / 8, 1);
+        };
+
         // 組み上がったキューブ2本から、オクタヘドラルアトラスの該当セルを焼き直す。
         // 境界の複製は本体の書き込みが全て終わってからでないと正しい値を読めないので別ディスパッチ
         const auto updateDDGIProbe = [this, effectiveExposure](RHI::IRHICommandList* cmd, uint32_t probeIndex, bool overwrite)
@@ -6656,9 +6785,31 @@ namespace Kurenai
 
         if (m_DDGIEnabled && m_HasGIVolume && m_DDGIProbeCount > 0 && !m_DDGIUpdateSuspended)
         {
+            // レイの取得をどちらで行うか。パスの登録とキャプチャの実行で同じ判定を使う
+            const bool useRaytracedTrace = ShouldRunRaytracedDDGITrace();
+
+            // 【どちらの経路が実際に走ったかをログに残す】切り替えたつもりで切り替わっていない、
+            // という取り違えをA/B比較の前に潰すため。切り替わったときだけ出す
+            if (!m_DDGIRayModeReported || m_DDGIRayModeReportedRaytraced != useRaytracedTrace)
+            {
+                m_DDGIRayModeReported = true;
+                m_DDGIRayModeReportedRaytraced = useRaytracedTrace;
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    useRaytracedTrace
+                        ? std::string("DDGIのレイ取得: レイトレーシング(DXR)。太陽の影レイ: ") +
+                              (m_DDGISunShadowRayEnabled ? "有効" : "無効")
+                        : std::string("DDGIのレイ取得: ラスタライズ"));
+            }
+
             uint32_t perFrame = std::min<uint32_t>(
                 static_cast<uint32_t>(std::max(m_DDGIProbesPerFrame, 1)), m_DDGIProbeCount);
-            perFrame = ClampDDGIProbesPerFrameToConstantRing(perFrame);
+            if (!useRaytracedTrace)
+            {
+                // 1フレームの描画回数・定数書き込み回数の上限はラスタ経路だけの制約。
+                // レイトレース経路はメッシュごとの描画をしないので抑える必要が無い
+                perFrame = ClampDDGIProbesPerFrameToConstantRing(perFrame);
+            }
             const bool warmingUp = m_DDGIWarmingUp;
 
             // 実効プリ露出が大きく動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる
@@ -6701,11 +6852,22 @@ namespace Kurenai
                         m_DDGICaptureRadianceCube.get(), m_DDGICaptureDistanceCube.get(),
                         m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
                     },
-                    .Execute = [&captureDDGIProbeFace, &updateDDGIProbe, probeIndex, overwrite](RHI::IRHICommandList* cmd)
+                    .Execute =
+                        [&captureDDGIProbeFace, &traceDDGIProbeFace, &updateDDGIProbe, probeIndex, overwrite,
+                         useRaytracedTrace](RHI::IRHICommandList* cmd)
                     {
+                        // レイの取得だけを差し替える。埋めるスクラッチキューブも、
+                        // そのあとの更新CSも同じものを使う(A/Bの差分をレイ取得に限定するため)
                         for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                         {
-                            captureDDGIProbeFace(cmd, probeIndex, face);
+                            if (useRaytracedTrace)
+                            {
+                                traceDDGIProbeFace(cmd, probeIndex, face);
+                            }
+                            else
+                            {
+                                captureDDGIProbeFace(cmd, probeIndex, face);
+                            }
                         }
                         updateDDGIProbe(cmd, probeIndex, overwrite);
                     },
