@@ -92,6 +92,9 @@ float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V, out float insid
     const uint3 probeCounts = uint3((uint)DDGIParams2.x, (uint)DDGIParams2.y, (uint)DDGIParams2.z);
     const float normalBias = DDGIParams1.w;
     const float viewBias = DDGIParams2.w;
+    // プローブ分類のしきい値(裏面ヒット率がこれを超えたら、そのプローブを信用しない)。
+    // 0以下なら分類そのものを無効にする(全プローブを有効として扱う)
+    const float backfaceThreshold = (DDGIParams4.w > 0.0f) ? DDGIParams4.w : 1.0f;
     const float irradianceTexels = DDGIParams3.x;
     const float distanceTexels = DDGIParams3.y;
     const float border = DDGIParams3.w;
@@ -180,12 +183,36 @@ float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V, out float insid
         // イラディアンスは法線方向で引く(距離は「プローブから見た向き」で引くのに対し、
         // こちらは「面が向いている向き」であることに注意)
         const float2 irradianceUV = DDGIProbeAtlasUV(probeIndex, N, probeCounts, irradianceTexels, border);
-        accumulated += DDGIIrradianceAtlas.SampleLevel(ColorSampler, irradianceUV, 0.0f).rgb * weight;
+        const float4 probeSample = DDGIIrradianceAtlas.SampleLevel(ColorSampler, irradianceUV, 0.0f);
+
+        // (4) プローブ分類。αには「そのプローブの裏面ヒット率」が入っている
+        //     (DDGIProbeUpdate.hlsl の ComputeProbeBackfaceRatio)。
+        //     壁や地面の内部に埋まったプローブは、周囲の面から見て「そこには光が無い」という
+        //     嘘の情報を配るので、しきい値を超えたものは重み0にして外す。
+        //
+        //     【αはセル内で定数なのでバイリニアで引いても安全】更新CSはセル内の全テクセルへ
+        //     同じ率を書き、境界複製もfloat4ごと写す。UVはセルの内側に収まるため、
+        //     補間が隣のセルへ届くことはない。
+        //
+        //     【ラスタ経路では常に0】負の距離を書くのはレイトレース経路だけなので、
+        //     ラスタ経路では分類が働かず従来どおりの挙動になる
+        const float validity = (probeSample.a > backfaceThreshold) ? 0.0f : 1.0f;
+        weight *= validity;
+        if (weight <= 0.0f)
+        {
+            continue;
+        }
+
+        accumulated += probeSample.rgb * weight;
         totalWeight += weight;
     }
 
     if (totalWeight <= 0.0f)
     {
+        // 8近傍が全て「壁の内部」と判定された。ここでDDGIの値(=0)を返すと、
+        // 呼び出し側がinsideWeightで混ぜて真っ黒にしてしまう。
+        // insideWeightを0へ落として、グローバルIBLへそのまま戻す
+        insideWeight = 0.0f;
         return float3(0.0f, 0.0f, 0.0f);
     }
 

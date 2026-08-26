@@ -67,11 +67,12 @@ namespace Kurenai::UI
             "平面反射 (水面に映る鏡像)",
             "雲の3Dノイズ (スライス表示・2x2タイル)",
             "大気散乱LUT (Transmittance / MultiScattering / SkyView)",
+            "DDGI - プローブ裏面率 (壁の内部に埋まったプローブ)",
         };
         static_assert(
-            // 末尾のAtmosphereLUTは32
-            static_cast<int>(DebugView::AtmosphereLUT) == 32,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はAtmosphereLUT)");
+            // 末尾のDDGIProbeBackfaceは33
+            static_cast<int>(DebugView::DDGIProbeBackface) == 33,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はDDGIProbeBackface)");
 
         DrawUsageHint();
         BeginParamGroup();

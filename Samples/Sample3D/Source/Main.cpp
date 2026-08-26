@@ -56,6 +56,49 @@ namespace
         return api;
     }
 
+    // コマンドラインの「-ddgithreshold <値>」を読む。DDGIのプローブ分類のしきい値。
+    // 0を渡すと分類そのものを無効にする。指定が無ければ負を返して既定のままにする
+    float ParseDDGIBackfaceThreshold()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return -1.0f;
+        }
+
+        float threshold = -1.0f;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-ddgithreshold") != 0)
+            {
+                continue;
+            }
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", "-ddgithresholdの後に値が指定されていないため、既定のままにします");
+                break;
+            }
+            wchar_t* end = nullptr;
+            const double parsed = wcstod(argv[i + 1], &end);
+            // 末尾までが数値であること(終端がNUL以外なら余計な文字が付いている)
+            if (end == argv[i + 1] || (end != nullptr && *end != 0))
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    "-ddgithresholdの引数が数値ではないため、既定のままにします: " +
+                        Kurenai::Core::WideToUtf8(argv[i + 1]));
+                break;
+            }
+            threshold = static_cast<float>(parsed);
+            break;
+        }
+
+        LocalFree(argv);
+        return threshold;
+    }
+
     // コマンドラインに「-ddgiraster」があるか。あればDDGIのレイ取得をラスタライズへ固定する。
     // ラスタ経路とレイトレース経路のA/B比較を、同じ起動手順のまま切り替えるために使う
     bool ParseForceDDGIRaster()
@@ -283,6 +326,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         size_t sceneIndex = ParseInitialSceneIndex();
         const int debugViewIndex = ParseDebugViewIndex();
         const bool forceDDGIRaster = ParseForceDDGIRaster();
+        const float ddgiBackfaceThreshold = ParseDDGIBackfaceThreshold();
 
         for (;;)
         {
@@ -295,6 +339,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (forceDDGIRaster)
             {
                 engine.ForceDDGIRayModeRaster();
+            }
+            if (ddgiBackfaceThreshold >= 0.0f)
+            {
+                engine.SetDDGIBackfaceThreshold(ddgiBackfaceThreshold);
             }
             engine.Run();
 

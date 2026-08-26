@@ -634,6 +634,35 @@ namespace Kurenai::UI
                 m_Engine.m_DDGIUpdateSuspended = false;
                 m_Engine.m_DDGIStableCycles = 0;
             }
+
+            // プローブ分類。裏面に当たったことを記録できるのはレイトレース経路だけなので、
+            // ラスタ経路では掛からない(αが常に0になるため)
+            if (CheckboxEx(
+                    "プローブ分類を有効にする###DDGIProbeClassification",
+                    &m_Engine.m_DDGIProbeClassificationEnabled, true,
+                    "壁や地面の内部に埋まってしまったプローブを、サンプリングから外す。\n\n"
+                    "埋まったプローブは周囲のほとんどの方向で面の裏側しか見えず、"
+                    "「そこには光が無い」という嘘の情報を周りの面へ配ってしまう。\n\n"
+                    "レイトレース経路でのみ有効(裏面に当たったことを記録できるのがこちらだけのため)"))
+            {
+                m_Engine.m_DDGIUpdateSuspended = false;
+                m_Engine.m_DDGIStableCycles = 0;
+            }
+
+            ImGui::BeginDisabled(!m_Engine.m_DDGIProbeClassificationEnabled);
+            SliderFloatEx(
+                "裏面率のしきい値###DDGIBackfaceThreshold", &m_Engine.m_DDGIBackfaceThreshold, 0.0f, 1.0f, 0.5f,
+                "%.3f", 0,
+                "プローブから撃ったレイのうち、この割合を超えて「面の裏側」に当たったプローブを"
+                "信用しない。既定の0.5は「全レイの半分より多くが裏面 = そのプローブは外より内側にいる」"
+                "という判定にあたる。\n\n"
+                "分布はデバッグ表示の「DDGI - プローブ裏面率」で確認できる。開けた場所のプローブは"
+                "ほぼ0に寄り、埋まったプローブほど1に近づく。ただし二山に分かれるとは限らず"
+                "(Sponzaは分かれるがBistroInteriorLitは連続的に減るだけ)、値は"
+                "A/Bで効果の向きを見て決めること。\n\n"
+                "焼き直しは不要(アトラスには率そのものが入っており、しきい値は読み出し時に掛かる)");
+            ImGui::EndDisabled();
+
             ImGui::EndDisabled();
         }
         else

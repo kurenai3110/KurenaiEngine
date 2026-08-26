@@ -241,15 +241,21 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         const bool backFace = (dot(hitNormal, rayDirection) > 0.0f);
         if (backFace)
         {
-            // 裏面は「光を返さない遮蔽物」として扱う。距離は正のまま書く
-            // (負で記録して分類に使うのは段階2の仕事で、更新CS側の対応が要る)
+            // 裏面は「光を返さない遮蔽物」として扱う。
+            //
+            // 【距離を負で記録する】更新CSがこの符号を数えてプローブの裏面ヒット率を求め、
+            // 壁の内部に落ちたプローブを見分ける(RTXGIのプローブ分類と同じ約束)。
+            // ラスタ経路は length() の非負値と空の 1e6 しか書かないので、
+            // 負であることが「レイトレース経路が裏面に当てた」ことの一意な印になる。
+            // 距離モーメント側は abs() を取って使うので、遮蔽の判定はこれまでどおり効く
             radiance = float3(0.0f, 0.0f, 0.0f);
+            distance = -hitDistance;
         }
         else
         {
             radiance = ShadeProbeRayHit(hitPosition, hitNormal, hitMaterial, rayDirection);
+            distance = hitDistance;
         }
-        distance = hitDistance;
     }
     else
     {

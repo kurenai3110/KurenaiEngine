@@ -186,6 +186,21 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(color, 1.0f);
     }
 
+    if (Mode == 20)
+    {
+        // DDGIのプローブ裏面率(22章)。イラディアンスアトラスのαに入っている
+        // 「そのプローブから撃ったレイのうち何割が面の裏側に当たったか」を表示する。
+        //
+        // 【Mode 15/16と同じ場所へ置くこと】この関数の手前でDDGIの分岐が先にreturnするため、
+        // 番号を後ろへ置くと一度も実行されない(19番がその理由で移されている)。
+        //
+        // 率は[0,1]なのでGainは掛けない。壁の内部に埋まったプローブは白へ、
+        // 開けた場所のプローブは黒へ寄る。しきい値をどこへ置くかを目と数値で決めるための表示。
+        // ラスタ経路では裏面を記録できないため、全プローブが黒(0)になる
+        float backfaceRatio = SourceTexture.Sample(DataSampler, input.UV).a;
+        return float4(backfaceRatio, backfaceRatio, backfaceRatio, 1.0f);
+    }
+
     if (Mode == 16)
     {
         // DDGIの距離モーメントアトラス(22章)。R=平均距離、G=平均二乗距離のうち、

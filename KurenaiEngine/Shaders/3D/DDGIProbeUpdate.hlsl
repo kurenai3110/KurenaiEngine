@@ -168,7 +168,12 @@ void IntegrateRays(float3 d, float captureSize, float maxRayDistance,
                 // ここへ来る時点で(0,1]に収まっている)。コンパイラへ「負は来ない」と伝えて
                 // pow()の警告X3571を消すために書いている
                 const float sharpWeight = pow(saturate(cosTheta), kDistanceSharpness) * solidAngle;
-                const float rayDistance = min(CaptureDistance.SampleLevel(DataSampler, rayDirection, 0.0f).r, maxRayDistance);
+                // 【abs()が要る】レイトレース経路は裏面ヒットを負の距離で記録する
+                // (プローブ分類のため。DDGIProbeTrace.hlsl参照)。遮蔽の判定に必要なのは
+                // 「どれだけ遠いか」だけなので、符号は落としてから使う。
+                // これを忘れると負の距離がそのまま平均に入り、チェビシェフ判定が壊れる
+                const float rayDistance =
+                    min(abs(CaptureDistance.SampleLevel(DataSampler, rayDirection, 0.0f).r), maxRayDistance);
                 momentSum += float2(rayDistance, rayDistance * rayDistance) * sharpWeight;
                 sharpWeightSum += sharpWeight;
             }
@@ -179,11 +184,72 @@ void IntegrateRays(float3 d, float captureSize, float maxRayDistance,
     distanceMoments = momentSum / max(sharpWeightSum, 1e-8f);
 }
 
+// --- プローブ分類(壁の内部に落ちたプローブを見分ける) ---
+//
+// 【何を測るのか】そのプローブから撃った全レイのうち、何割が「面の裏側」に当たったか。
+// 開けた場所のプローブはほぼ0、壁や地面の内部に埋まったプローブは1に近づく。
+// RTXGIのプローブ分類と同じ考え方で、埋まったプローブは周囲の面から見て
+// 「そこには光が無い」という嘘の情報を配るため、サンプリング側で外せるようにする。
+//
+// 【率そのものをアトラスへ入れる理由】0/1の判定をここで済ませてしまうと、
+// しきい値を変えるたびに全プローブを焼き直すことになり、しきい値の根拠を実測で
+// 決めることもできない。率を入れておけばサンプリング側でしきい値を掛けるだけで済み、
+// デバッグ表示で分布そのものを測れる。
+//
+// 【ラスタ経路では常に0になる】負の距離を書くのはレイトレース経路だけなので、
+// ラスタ経路のプローブはすべて「裏面ヒット率0=有効」として扱われる(従来どおりの挙動)。
+//
+// グループ内の64スレッドで1536本を分担して数える。この関数はグループ内の全スレッドが
+// 必ず呼ぶこと(GroupMemoryBarrierWithGroupSyncを含むため、一部のスレッドだけが
+// 呼ぶとハングする)
+static const uint kProbeUpdateGroupThreads = 64u;
+groupshared uint gBackfaceRayCount[kProbeUpdateGroupThreads];
+
+float ComputeProbeBackfaceRatio(uint groupThreadIndex, float captureSize)
+{
+    const uint size = (uint)captureSize;
+    const uint faceTexels = size * size;
+    const uint totalRays = 6u * faceTexels;
+
+    uint backface = 0u;
+    [loop]
+    for (uint i = groupThreadIndex; i < totalRays; i += kProbeUpdateGroupThreads)
+    {
+        const uint face = i / faceTexels;
+        const uint remainder = i - face * faceTexels;
+        const uint y = remainder / size;
+        const uint x = remainder - y * size;
+
+        const float2 uv = (float2(x, y) + 0.5f) / captureSize;
+        const float3 rayDirection = CubeFaceDirection(face, uv);
+        const float rayDistance = CaptureDistance.SampleLevel(DataSampler, rayDirection, 0.0f).r;
+        if (rayDistance < 0.0f)
+        {
+            ++backface;
+        }
+    }
+
+    gBackfaceRayCount[groupThreadIndex] = backface;
+    GroupMemoryBarrierWithGroupSync();
+
+    // 64要素の直列リダクション。全スレッドが同じ値を得るので、追加の同期は要らない
+    uint totalBackface = 0u;
+    [loop]
+    for (uint k = 0; k < kProbeUpdateGroupThreads; ++k)
+    {
+        totalBackface += gBackfaceRayCount[k];
+    }
+
+    // 分母はヒット数ではなく全レイ本数。開けた場所でヒットが数本しか無いときに
+    // 率が跳ね上がらないようにするため(RTXGIと同じ取り方)
+    return (float)totalBackface / (float)max(totalRays, 1u);
+}
+
 // プローブ1個ぶんのイラディアンスと距離モーメントを焼き直す。
 // ディスパッチは1プローブにつき1回で、スレッドはイラディアンス側と距離側の広いほうに合わせて
 // 起動し、それぞれの範囲外は自分で弾く(2つの解像度が違うため)
 [numthreads(8, 8, 1)]
-void CSUpdateProbe(uint3 dispatchThreadID : SV_DispatchThreadID)
+void CSUpdateProbe(uint3 dispatchThreadID : SV_DispatchThreadID, uint groupThreadIndex : SV_GroupIndex)
 {
     const uint probeIndex = (uint)Params0.x;
     const float hysteresis = Params0.y;
@@ -198,6 +264,10 @@ void CSUpdateProbe(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     const uint3 probeCounts = uint3((uint)Params2.x, (uint)Params2.y, (uint)Params2.z);
     const float preExposure = Params2.w;
+
+    // 【条件分岐より前に置くこと】この関数はグループ同期を含むので、
+    // 一部のスレッドだけが呼ぶとハングする
+    const float backfaceRatio = ComputeProbeBackfaceRatio(groupThreadIndex, captureSize);
 
     const uint2 texel = dispatchThreadID.xy;
 
@@ -222,7 +292,11 @@ void CSUpdateProbe(uint3 dispatchThreadID : SV_DispatchThreadID)
         const uint2 writeAt = ProbeAtlasOrigin(probeIndex, probeCounts, irradianceTexels, border) + border + texel;
         const float3 previous = IrradianceAtlas[writeAt].rgb;
         const float3 blended = overwrite ? irradiance : lerp(irradiance, previous, hysteresis);
-        IrradianceAtlas[writeAt] = float4(blended, 1.0f);
+        // αにはこのプローブの裏面ヒット率を入れる(セル内では定数)。
+        // 【ヒステリシスを掛けない】これは放射輝度ではなく幾何から決まる分類なので、
+        // 前の値と混ぜる意味が無い。ジオメトリが動かない限り毎回同じ値になる。
+        // αを使うことで、サンプリング側の4本のシェーダーへ新しいリソースを配らずに済んでいる
+        IrradianceAtlas[writeAt] = float4(blended, backfaceRatio);
     }
 
     if (texel.x < distanceTexels && texel.y < distanceTexels)

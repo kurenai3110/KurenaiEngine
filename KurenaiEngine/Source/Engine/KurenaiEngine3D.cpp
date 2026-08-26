@@ -162,7 +162,10 @@ namespace Kurenai
             //                y=距離モーメントの1辺のテクセル数(同)、z=拡散間接光の強度倍率、
             //                w=境界の幅(テクセル)
             DirectX::XMFLOAT4 DDGIParams3;
-            // DDGIParams4: x=このフレームの実効プリ露出(m_EffectiveExposureEV100の線形倍率)、yzw=未使用。
+            // DDGIParams4: x=このフレームの実効プリ露出(m_EffectiveExposureEV100の線形倍率)、
+            //             y=1/2解像度で評価するか、z=未使用、
+            //             w=プローブ分類のしきい値(裏面ヒット率がこれを超えたら
+            //               そのプローブを信用しない。0以下なら分類を無効にする)。
             //
             // 【アトラスは露出非依存の単位で持つ】ライトの色にはCPU側で実効プリ露出が
             // 事前乗算されており(21.5節)、その倍率は時刻に連動して最大18段(約26万倍)動く。
@@ -2479,8 +2482,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetDebugViewIndex(int index)
     {
-        // 末尾はAtmosphereLUT。UI側(DebugViewPanel.cpp)のstatic_assertと同じ前提に依存する
-        constexpr int kDebugViewCount = static_cast<int>(DebugView::AtmosphereLUT) + 1;
+        // 総数はenumのすぐ隣で定義してある(KurenaiEngine3D.h)
         if (index < 0 || index >= kDebugViewCount)
         {
             Core::Logger::Warning(
@@ -2498,6 +2500,22 @@ namespace Kurenai
     {
         m_DDGIRayMode = DDGIRayMode::Raster;
         Core::Logger::Info("KurenaiEngine3D", "DDGIのレイ取得をラスタライズへ固定しました(起動オプション)");
+    }
+
+    void KurenaiEngine3D::SetDDGIBackfaceThreshold(float threshold)
+    {
+        if (threshold <= 0.0f)
+        {
+            m_DDGIProbeClassificationEnabled = false;
+            Core::Logger::Info("KurenaiEngine3D", "DDGIのプローブ分類を無効にしました(起動オプション)");
+            return;
+        }
+
+        m_DDGIProbeClassificationEnabled = true;
+        m_DDGIBackfaceThreshold = threshold;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "DDGIのプローブ分類のしきい値を設定しました(起動オプション): " + std::to_string(threshold));
     }
 
     bool KurenaiEngine3D::ShouldRunRaytracedDDGITrace() const
@@ -5619,7 +5637,15 @@ namespace Kurenai
         // 条件はDDGIResolveパスの登録側(ddgiResolvePassRuns)と同じものを並べている
         const bool ddgiHalfResolutionActive =
             m_DDGIHalfResolution && m_DDGIResolveTexture && m_DDGIEnabled && m_HasGIVolume && m_DDGIBaked;
-        constants.DDGIParams4 = { effectiveExposure, ddgiHalfResolutionActive ? 1.0f : 0.0f, 0.0f, 0.0f };
+        // プローブ分類のしきい値。裏面の情報を持てるのはレイトレース経路だけなので、
+        // ラスタ経路では分類そのものを無効(0)にして従来どおりの挙動に保つ
+        // (ラスタ経路のαは常に0なのでどのしきい値でも有効側に倒れるが、
+        //  「分類は掛かっていない」ことを値として明示しておく)
+        const float ddgiBackfaceThreshold =
+            (m_DDGIProbeClassificationEnabled && ShouldRunRaytracedDDGITrace()) ? m_DDGIBackfaceThreshold : 0.0f;
+        constants.DDGIParams4 = {
+            effectiveExposure, ddgiHalfResolutionActive ? 1.0f : 0.0f, 0.0f, ddgiBackfaceThreshold
+        };
         // 水面。スクロール位相はRenderThreadMainがm_WaterTimeFrozen/m_WaterWaveSpeedに
         // 応じて毎フレーム進める(m_TimeOfDayの自動進行と同じ場所・同じ方式)。
         // y=波のスケール倍率(m_WaterWaveScale)、z=波の強さ(m_WaterWaveStrength、0〜1)を
@@ -8709,12 +8735,15 @@ namespace Kurenai
             break;
         case DebugView::DDGIIrradiance:
         case DebugView::DDGIDistance:
+        case DebugView::DDGIProbeBackface:
         {
             // アトラスはただのTexture2Dなのでt0でそのまま受け取れる(22章)。
             // 反射プローブのキューブと違い専用スロットは要らない。
             // アトラスは横長(列=Cx*Cy、行=Cz)なので、レターボックスがその比率に合うよう
             // 実寸を渡す。渡さないと画面いっぱいへ引き伸ばされ、セルが正方形に見えなくなる
-            const bool isIrradiance = (m_DebugView == DebugView::DDGIIrradiance);
+            // 裏面率はイラディアンスアトラスのαなので、資源も寸法もイラディアンスと同じ
+            const bool isIrradiance =
+                (m_DebugView == DebugView::DDGIIrradiance || m_DebugView == DebugView::DDGIProbeBackface);
             const uint32_t cell = isIrradiance ? kDDGIIrradianceCell : kDDGIDistanceCell;
             const uint32_t columns = m_GIVolume.ProbeCounts[0] * m_GIVolume.ProbeCounts[1];
             const uint32_t rows = m_GIVolume.ProbeCounts[2];
@@ -8722,7 +8751,7 @@ namespace Kurenai
             presentSourceTexture = isIrradiance ? m_DDGIIrradianceAtlas.get() : m_DDGIDistanceAtlas.get();
             // Present.hlslのMode 14はモーションベクター(TAA、23章)が既に使っているため、
             // DDGIのイラディアンス/距離モーメントはMode 15/16にずらしてある
-            presentMode = isIrradiance ? 15 : 16;
+            presentMode = (m_DebugView == DebugView::DDGIProbeBackface) ? 20 : (isIrradiance ? 15 : 16);
             presentSourceWidth = m_HasGIVolume ? columns * cell : cell;
             presentSourceHeight = m_HasGIVolume ? rows * cell : cell;
             break;
