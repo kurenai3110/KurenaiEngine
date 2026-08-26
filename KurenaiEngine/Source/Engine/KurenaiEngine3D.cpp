@@ -2344,6 +2344,13 @@ namespace Kurenai
         RHI::BufferDesc objectConstantBufferDesc;
         objectConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         objectConstantBufferDesc.SizeInBytes = sizeof(ObjectConstants);
+        // このバッファだけは「メッシュごと・パスごと」に書かれるため、既定の段数では足りない。
+        // 1フレームの最悪ケースは、本編のパス(深度プリパス・G-Buffer・シャドウ4枚・半透明ほか)に
+        // 加えて、プローブのキャプチャが「プローブ数 × 6面 × 不透明メッシュ数」を積む。
+        // BistroInteriorLit(不透明59メッシュ)で既定の16プローブ/フレームだと
+        // 59 × 6 × 16 = 5664 回に達し、既定の4096回では一周して描画が壊れていた。
+        // 16384にしておけば同シーンで3倍近い余裕がある(1スロット256Bなので約8MB)
+        objectConstantBufferDesc.MaxConstantUpdatesPerFrame = kObjectConstantUpdatesPerFrame;
         m_ObjectConstantBuffer = m_Device->CreateBuffer(objectConstantBufferDesc);
 
         // ポイント/スポットライトのリスト(t8)。CPUから毎フレーム更新するが、ピクセルシェーダから
@@ -3886,6 +3893,8 @@ namespace Kurenai
         m_DDGIBaked = false;
         m_DDGIWarmingUp = true;
         m_DDGIUpdateCursor = 0;
+        // シーンが変わればメッシュ数も変わるので、クランプの報告も出し直す
+        m_DDGIProbesPerFrameClampReported = false;
         m_DDGIOverwriteRemaining = 0;
         m_DDGILastExposureValid = false;
 
@@ -3899,6 +3908,65 @@ namespace Kurenai
                     std::to_string(columns * kDDGIIrradianceCell) + "x" + std::to_string(rows * kDDGIIrradianceCell) +
                     " / " + std::to_string(columns * kDDGIDistanceCell) + "x" + std::to_string(rows * kDDGIDistanceCell));
         }
+    }
+
+    uint32_t KurenaiEngine3D::ClampDDGIProbesPerFrameToConstantRing(uint32_t requested)
+    {
+        // DX11はどちらの上限も持たない(UINT32_MAXが返る)
+        const uint32_t maxDraws = m_Device->GetMaxDrawsPerFrame();
+        const uint32_t maxWrites =
+            m_ObjectConstantBuffer ? m_ObjectConstantBuffer->GetSafeUpdatesPerFrame() : UINT32_MAX;
+        // 描画1回につきObjectConstantsを1回書くので、厳しい方に合わせれば両方を満たす
+        const uint32_t maxWork = std::min(maxDraws, maxWrites);
+        if (maxWork == UINT32_MAX)
+        {
+            return requested;
+        }
+
+        // ラスタ経路が1プローブあたり描き直す不透明メッシュの数。
+        // captureDDGIProbeFaceの描画ループと同じ条件で数えること
+        uint32_t opaqueMeshCount = 0;
+        for (const auto& instance : m_Scene.Instances)
+        {
+            for (const auto& mesh : instance.Model.Meshes)
+            {
+                if (!mesh.IsTransparent)
+                {
+                    ++opaqueMeshCount;
+                }
+            }
+        }
+        if (opaqueMeshCount == 0)
+        {
+            return requested;
+        }
+
+        const uint32_t reserved = opaqueMeshCount * kDDGIFrameBudgetReserveDrawsPerMesh;
+        const uint32_t perProbe = kCubeFaceCount * opaqueMeshCount;
+        // 本編のパスだけで予算を使い切る規模のシーンでは、DDGIへ回せる分が残らない。
+        // それでも0にはせず1プローブは進める(進めないと永久に焼き上がらないため)。
+        // 予算そのものの超過は、それぞれの上限側がエラーとして報告する
+        const uint32_t budget = (maxWork > reserved) ? (maxWork - reserved) : 0u;
+        const uint32_t allowed = std::max<uint32_t>(1u, budget / perProbe);
+
+        if (requested <= allowed)
+        {
+            return requested;
+        }
+
+        if (!m_DDGIProbesPerFrameClampReported)
+        {
+            m_DDGIProbesPerFrameClampReported = true;
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "DDGIのラスタ経路が1フレームの予算を超えるため、更新プローブ数を " +
+                    std::to_string(requested) + " から " + std::to_string(allowed) +
+                    " へ制限しました(不透明メッシュ " + std::to_string(opaqueMeshCount) +
+                    " × 6面 × プローブ数。1フレームの上限は 描画 " + std::to_string(maxDraws) +
+                    " 回 / 定数書き込み " + std::to_string(maxWrites) +
+                    " 回)。収束は遅くなりますが描画は壊れません。レイトレース経路にはこの制限は掛かりません");
+        }
+        return allowed;
     }
 
     DirectX::XMFLOAT3 KurenaiEngine3D::ComputeDDGIProbePosition(uint32_t probeIndex) const
@@ -6588,8 +6656,9 @@ namespace Kurenai
 
         if (m_DDGIEnabled && m_HasGIVolume && m_DDGIProbeCount > 0 && !m_DDGIUpdateSuspended)
         {
-            const uint32_t perFrame = std::min<uint32_t>(
+            uint32_t perFrame = std::min<uint32_t>(
                 static_cast<uint32_t>(std::max(m_DDGIProbesPerFrame, 1)), m_DDGIProbeCount);
+            perFrame = ClampDDGIProbesPerFrameToConstantRing(perFrame);
             const bool warmingUp = m_DDGIWarmingUp;
 
             // 実効プリ露出が大きく動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる

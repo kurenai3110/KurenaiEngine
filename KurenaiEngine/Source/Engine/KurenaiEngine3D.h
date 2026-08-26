@@ -1829,6 +1829,31 @@ namespace Kurenai
         // 「確保しない」という選択肢は取れない。無効化はDDGIParams0.wで行う)
         void RecreateDDGIAtlases();
 
+        // 1フレームに焼くプローブ数を、DX12の「1フレームあたりの予算」に収まる範囲へ抑える。
+        //
+        // 【なぜ要るのか】ラスタ経路のプローブキャプチャは1プローブにつきシーンを6回描き直すため、
+        // 1フレームの描画回数とObjectConstantsの書き込み回数がどちらも
+        // 「プローブ数 × 6面 × 不透明メッシュ数」に比例して増える。DX12はどちらにも上限があり、
+        //   - 描画回数(IRHIDevice::GetMaxDrawsPerFrame) … 超えるとSRVテーブルの払い出しが
+        //     例外を投げ、ログを残さずプロセスごと落ちる
+        //   - 定数の書き込み回数(IRHIBuffer::GetSafeUpdatesPerFrame) … 超えるとGPUが
+        //     読み取り中のスロットを上書きして描画が壊れる
+        // BistroInteriorLit(不透明59メッシュ)を既定の16プローブ/フレームで焼くと
+        // 59×6×16 = 5664 となり、実際に前者を踏んで起動直後に落ちていた。
+        //
+        // レイトレース経路にはメッシュごとの描画そのものが無いので、この制約は掛からない
+        uint32_t ClampDDGIProbesPerFrameToConstantRing(uint32_t requested);
+        // ObjectConstantsのリングに要求する「1フレームあたりの書き込み回数」。
+        // 根拠はこのバッファを作っている箇所(KurenaiEngine3D.cpp)のコメントを参照
+        static constexpr uint32_t kObjectConstantUpdatesPerFrame = 16384;
+        // DDGI以外のパスが1メッシュあたり何回描くかの見積り。DDGIへ回す予算から差し引く。
+        // 内訳の目安: 深度プリパス1 + G-Buffer1 + シャドウ4 + 半透明・平面反射・水面で数回、
+        // これに反射プローブのキャプチャ(こちらも1プローブ6面ぶんメッシュを描き直す)が乗る。
+        // 厳密に数えず多めに取っているのは、パス構成が設定とシーンで変わるため
+        static constexpr uint32_t kDDGIFrameBudgetReserveDrawsPerMesh = 16;
+        // 上のクランプが効いたことを一度だけログへ出すためのフラグ(毎フレーム出さない)
+        bool m_DDGIProbesPerFrameClampReported = false;
+
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = Defaults::TimeOfDay;
         bool m_TimeAutoAdvance = Defaults::TimeAutoAdvance;
