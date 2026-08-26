@@ -56,6 +56,71 @@ namespace
         return api;
     }
 
+    // コマンドラインの「-ddgilod <段数>」と「-ddgifollow」を読む。
+    // クリップマップLODの段数を振って効果を測るためのもの。指定が無ければ0を返す
+    uint32_t ParseDDGILODCount()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return 0u;
+        }
+
+        uint32_t lodCount = 0u;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-ddgilod") != 0)
+            {
+                continue;
+            }
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", "-ddgilodの後に段数が指定されていないため、.ksceneの指定のままにします");
+                break;
+            }
+            wchar_t* end = nullptr;
+            const long parsed = wcstol(argv[i + 1], &end, 10);
+            if (end == argv[i + 1] || (end != nullptr && *end != 0) || parsed < 1)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    "-ddgilodの引数が正の整数ではないため、.ksceneの指定のままにします: " +
+                        Kurenai::Core::WideToUtf8(argv[i + 1]));
+                break;
+            }
+            lodCount = static_cast<uint32_t>(parsed);
+            break;
+        }
+
+        LocalFree(argv);
+        return lodCount;
+    }
+
+    bool ParseDDGIFollowCamera()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return false;
+        }
+
+        bool follow = false;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-ddgifollow") == 0)
+            {
+                follow = true;
+                break;
+            }
+        }
+
+        LocalFree(argv);
+        return follow;
+    }
+
     // コマンドラインの「-ddgithreshold <値>」を読む。DDGIのプローブ分類のしきい値。
     // 0を渡すと分類そのものを無効にする。指定が無ければ負を返して既定のままにする
     float ParseDDGIBackfaceThreshold()
@@ -327,6 +392,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int debugViewIndex = ParseDebugViewIndex();
         const bool forceDDGIRaster = ParseForceDDGIRaster();
         const float ddgiBackfaceThreshold = ParseDDGIBackfaceThreshold();
+        const uint32_t ddgiLODCount = ParseDDGILODCount();
+        const bool ddgiFollowCamera = ParseDDGIFollowCamera();
 
         for (;;)
         {
@@ -343,6 +410,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (ddgiBackfaceThreshold >= 0.0f)
             {
                 engine.SetDDGIBackfaceThreshold(ddgiBackfaceThreshold);
+            }
+            if (ddgiLODCount > 0u || ddgiFollowCamera)
+            {
+                // 段数に0を渡すと「.ksceneの指定のまま」で、追従だけを切り替える
+                engine.OverrideDDGILOD(ddgiLODCount, ddgiFollowCamera);
             }
             engine.Run();
 

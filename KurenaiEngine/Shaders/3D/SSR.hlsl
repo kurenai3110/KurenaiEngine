@@ -92,6 +92,12 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams2;
     float4 DDGIParams3;
     float4 DDGIParams4;
+    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
+    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
+    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
+    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
+    float4 DDGILODOrigin[4];
+    float4 DDGILODBase[4];
     // bent normalによる遮蔽(34章)。DeferredLighting.hlslと必ず同じ値を読むこと。
     //
     // 【masterではここでDDGIParams0〜4の5本が抜けていた】cbufferは宣言順レイアウトなので、

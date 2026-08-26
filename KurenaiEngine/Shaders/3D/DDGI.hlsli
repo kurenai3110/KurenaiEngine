@@ -47,14 +47,19 @@ float2 DDGIDirectionToOctahedral(float3 direction)
 // セルの内側(境界を除いた texels x texels)へ収まるようスケールしてから、境界ぶんだけずらす。
 // バイリニア補間はセルの縁で境界テクセルを拾い、それは対辺から複製されているので
 // 折り返しが正しく効く
-float2 DDGIProbeAtlasUV(uint probeIndex, float3 direction, uint3 probeCounts, float texels, float border)
+// lodCount: クリップマップLODの段数。アトラスはLODを縦に積むので、行数が段数倍になる
+// (C++側 RecreateDDGIAtlases と一致させること)。通し番号
+// slot = k*(Cx*Cy*Cz) + z*Cx*Cy + y*Cx + x に対して、下の row/column の式は
+// そのまま LOD k の行 [k*Cz, (k+1)*Cz) を指す
+float2 DDGIProbeAtlasUV(
+    uint probeIndex, float3 direction, uint3 probeCounts, uint lodCount, float texels, float border)
 {
     const uint slice = probeCounts.x * probeCounts.y;
     const uint row = probeIndex / slice;
     const uint column = probeIndex - row * slice;
 
     const float cell = texels + border * 2.0f;
-    const float2 atlasSize = float2((float)slice * cell, (float)probeCounts.z * cell);
+    const float2 atlasSize = float2((float)slice * cell, (float)(probeCounts.z * lodCount) * cell);
 
     // [-1,1] を [0,texels] のテクセル座標へ
     const float2 oct = DDGIDirectionToOctahedral(direction);
@@ -75,6 +80,24 @@ uint DDGIProbeIndex(uint3 gridCoord, uint3 probeCounts)
     return gridCoord.x + gridCoord.y * probeCounts.x + gridCoord.z * probeCounts.x * probeCounts.y;
 }
 
+// ワールドの格子座標から、アトラス上のセル(=通し番号)を求める。
+//
+// 【トロイダル(剰余)addressing】格子がカメラに追従してスクロールするとき、
+// アトラスの中身を平行移動するのはコピーが重すぎる。代わりに
+// 「ワールド格子座標 mod プローブ数」でセルを決めると、左端から抜けた列がそのまま
+// 右端の新しい列のスロットになり、範囲に残ったプローブは同じセルに居座る。
+//
+// HLSLの % は負の被除数に対して切り捨て方向(結果が負になりうる)なので、
+// ((a % n) + n) % n で必ず [0, n) に入れること。ここを素の % で書くと、
+// 原点が負の側にあるシーンでだけアトラスの外を引く
+uint DDGIProbeSlot(int3 worldCoord, uint3 probeCounts, uint lod)
+{
+    const int3 counts = int3(probeCounts);
+    const int3 wrapped = ((worldCoord % counts) + counts) % counts;
+    const uint perLOD = probeCounts.x * probeCounts.y * probeCounts.z;
+    return lod * perLOD + DDGIProbeIndex((uint3)wrapped, probeCounts);
+}
+
 // worldPos の拡散間接光。ボリュームが完全に無効(機能OFF・未初期化)な場合は
 // 呼び出し側が DDGIParams0.w で弾く。
 //
@@ -85,47 +108,32 @@ uint DDGIProbeIndex(uint3 gridCoord, uint3 probeCounts)
 //              戻る経路が無かった。呼び出し側はこの重みでグローバルIBL/反射プローブの値と
 //              ブレンドし、ボリュームの外側が「1部屋ぶんの間接光」で照らされ続けるのを防ぐ
 //              (無条件にDDGIへ差し替えてはいけない)
-float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V, out float insideWeight)
+// LOD 1段ぶんの8近傍ギャザー。SampleDDGIIrradianceから段ごとに呼ばれる。
+//
+// 戻り値はそのLODのイラディアンス(正規化済み)、lodWeightは
+// 「この段をどれだけ信用してよいか」(格子の外へ出るほど0、近傍が全て無効なら0)。
+float3 GatherDDGILOD(
+    uint lod, uint lodCount, float3 biasedPos, float3 N, uint3 probeCounts,
+    float irradianceTexels, float distanceTexels, float border, float backfaceThreshold,
+    out float lodWeight)
 {
-    const float3 origin = DDGIParams0.xyz;
-    const float3 spacing = DDGIParams1.xyz;
-    const uint3 probeCounts = uint3((uint)DDGIParams2.x, (uint)DDGIParams2.y, (uint)DDGIParams2.z);
-    const float normalBias = DDGIParams1.w;
-    const float viewBias = DDGIParams2.w;
-    // プローブ分類のしきい値(裏面ヒット率がこれを超えたら、そのプローブを信用しない)。
-    // 0以下なら分類そのものを無効にする(全プローブを有効として扱う)
-    const float backfaceThreshold = (DDGIParams4.w > 0.0f) ? DDGIParams4.w : 1.0f;
-    const float irradianceTexels = DDGIParams3.x;
-    const float distanceTexels = DDGIParams3.y;
-    const float border = DDGIParams3.w;
-
-    // 【照会点(query point)】遮蔽判定にだけ使う、少しずらした位置。
-    //
-    // worldPos をそのまま使うと「面が、自分を直接照らしているプローブから見えていない」と
-    // 誤判定する(自己遮蔽)。記録されている距離 r̄ はコーンの加重平均なので、面が曲がって
-    // いたり斜めだったりすると容易に distance(probe, worldPos) より僅かに小さく出て、
-    // チェビシェフ判定が境界上で1を下回るためである。
-    // これはほぼ全ての面で一様に起きるので画面全体が均一に暗くなり、視点に依存しないため
-    // ちらつかず、「GIが弱いだけ」に見えてバグと気づきにくい。ゲインで持ち上げると
-    // 今度は本当に遮蔽されるべき場所の光漏れが増えるので、バイアスでしか直らない。
-    //
-    // 反射プローブのProbeVisibility(19.12節)へ入れたのとまったく同じ対処である
-    const float3 biasedPos = worldPos + N * normalBias + V * viewBias;
+    const float3 lodSpacing = DDGIParams1.xyz * (float)(1u << lod);
+    const float3 lodOrigin = DDGILODOrigin[lod].xyz;
+    const int3 lodBase = int3(DDGILODBase[lod].xyz);
 
     // 格子内の連続座標。floorが手前側のプローブ、fracがトライリニアの重み
-    const float3 gridSpace = (biasedPos - origin) / spacing;
+    const float3 gridSpace = (biasedPos - lodOrigin) / lodSpacing;
 
-    // 【ボリューム外のフェード】gridSpaceが[0, probeCounts-1]の範囲内なら1、範囲外に出るほど
+    // 【格子外のフェード】gridSpaceが[0, probeCounts-1]の範囲内なら1、範囲外に出るほど
     // 1グリッドセル分の距離で0まで滑らかに落とす。3軸のうち最も外側にはみ出している軸で判定する
-    // (どれか1軸でも大きく外れていれば、その点はもう「ボリュームの中」とは言えないため)
     const float3 probeCountsF = float3(probeCounts);
     const float3 outsideDistance = max(
         max(-gridSpace, float3(0.0f, 0.0f, 0.0f)),
         max(gridSpace - (probeCountsF - 1.0f), float3(0.0f, 0.0f, 0.0f)));
-    insideWeight = saturate(1.0f - max(outsideDistance.x, max(outsideDistance.y, outsideDistance.z)));
-    if (insideWeight <= 0.0f)
+    lodWeight = saturate(1.0f - max(outsideDistance.x, max(outsideDistance.y, outsideDistance.z)));
+    if (lodWeight <= 0.0f)
     {
-        // 完全にボリュームの外。8近傍の走査自体が無駄なのでここで打ち切る
+        // 完全にこの段の外。8近傍の走査自体が無駄なのでここで打ち切る
         return float3(0.0f, 0.0f, 0.0f);
     }
 
@@ -142,9 +150,12 @@ float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V, out float insid
         const uint3 offset = uint3(i & 1u, (i >> 1u) & 1u, (i >> 2u) & 1u);
         const int3 coord = clamp(baseCoord + int3(offset), int3(0, 0, 0), int3(probeCounts) - 1);
         const uint3 gridCoord = (uint3)coord;
-        const uint probeIndex = DDGIProbeIndex(gridCoord, probeCounts);
+        // 【スロットはトロイダル。位置は素の格子座標】この2つを取り違えると、
+        // 引いてくるプローブと、その距離判定に使う位置が別物になる
+        const int3 worldCoord = lodBase + coord;
+        const uint probeIndex = DDGIProbeSlot(worldCoord, probeCounts, lod);
 
-        const float3 probePos = DDGIProbePosition(gridCoord, origin, spacing);
+        const float3 probePos = DDGIProbePosition(gridCoord, lodOrigin, lodSpacing);
         const float3 toProbe = probePos - biasedPos;
         const float distanceToProbe = length(toProbe);
         const float3 dirToProbe = (distanceToProbe > 1e-6f) ? (toProbe / distanceToProbe) : N;
@@ -162,7 +173,7 @@ float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V, out float insid
         // (3) チェビシェフ可視性。プローブが記録した「その方向の面までの距離」の
         //     平均と分散から、距離 t の点が見えている確率の上界を求める(分散シャドウマップと
         //     同じ式)。低解像度でも遮蔽の輪郭がガタつかないのが確率にする利点
-        const float2 momentUV = DDGIProbeAtlasUV(probeIndex, -dirToProbe, probeCounts, distanceTexels, border);
+        const float2 momentUV = DDGIProbeAtlasUV(probeIndex, -dirToProbe, probeCounts, lodCount, distanceTexels, border);
         const float2 moments = DDGIDistanceAtlas.SampleLevel(ColorSampler, momentUV, 0.0f).rg;
         const float meanDistance = moments.x;
         const float variance = max(moments.y - meanDistance * meanDistance, 0.0f);
@@ -182,7 +193,7 @@ float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V, out float insid
 
         // イラディアンスは法線方向で引く(距離は「プローブから見た向き」で引くのに対し、
         // こちらは「面が向いている向き」であることに注意)
-        const float2 irradianceUV = DDGIProbeAtlasUV(probeIndex, N, probeCounts, irradianceTexels, border);
+        const float2 irradianceUV = DDGIProbeAtlasUV(probeIndex, N, probeCounts, lodCount, irradianceTexels, border);
         const float4 probeSample = DDGIIrradianceAtlas.SampleLevel(ColorSampler, irradianceUV, 0.0f);
 
         // (4) プローブ分類。αには「そのプローブの裏面ヒット率」が入っている
@@ -209,17 +220,85 @@ float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V, out float insid
 
     if (totalWeight <= 0.0f)
     {
-        // 8近傍が全て「壁の内部」と判定された。ここでDDGIの値(=0)を返すと、
-        // 呼び出し側がinsideWeightで混ぜて真っ黒にしてしまう。
-        // insideWeightを0へ落として、グローバルIBLへそのまま戻す
-        insideWeight = 0.0f;
+        // 8近傍が全て「壁の内部」と判定された。この段は使えないので重みを0にして、
+        // 呼び出し側が1段粗いLOD(最後はグローバルIBL)へ回せるようにする
+        lodWeight = 0.0f;
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+
+    return accumulated / totalWeight;
+}
+
+float3 SampleDDGIIrradiance(float3 worldPos, float3 N, float3 V, out float insideWeight)
+{
+    const uint3 probeCounts = uint3((uint)DDGIParams2.x, (uint)DDGIParams2.y, (uint)DDGIParams2.z);
+    const uint lodCount = max(1u, (uint)DDGIParams4.z);
+    const float normalBias = DDGIParams1.w;
+    const float viewBias = DDGIParams2.w;
+    // プローブ分類のしきい値(裏面ヒット率がこれを超えたら、そのプローブを信用しない)。
+    // 0以下なら分類そのものを無効にする(全プローブを有効として扱う)
+    const float backfaceThreshold = (DDGIParams4.w > 0.0f) ? DDGIParams4.w : 1.0f;
+    const float irradianceTexels = DDGIParams3.x;
+    const float distanceTexels = DDGIParams3.y;
+    const float border = DDGIParams3.w;
+
+    // 【照会点(query point)】遮蔽判定にだけ使う、少しずらした位置。
+    //
+    // worldPos をそのまま使うと「面が、自分を直接照らしているプローブから見えていない」と
+    // 誤判定する(自己遮蔽)。記録されている距離 r̄ はコーンの加重平均なので、面が曲がって
+    // いたり斜めだったりすると容易に distance(probe, worldPos) より僅かに小さく出て、
+    // チェビシェフ判定が境界上で1を下回るためである。
+    // これはほぼ全ての面で一様に起きるので画面全体が均一に暗くなり、視点に依存しないため
+    // ちらつかず、「GIが弱いだけ」に見えてバグと気づきにくい。ゲインで持ち上げると
+    // 今度は本当に遮蔽されるべき場所の光漏れが増えるので、バイアスでしか直らない。
+    //
+    // 反射プローブのProbeVisibility(19.12節)へ入れたのとまったく同じ対処である。
+    //
+    // 【バイアスはLOD0の間隔で決める】段ごとに間隔が倍になるが、バイアスまで倍にすると
+    // 粗い段だけ照会点が大きくずれて別の場所の光を引く。細かい段に合わせておく
+    const float3 biasedPos = worldPos + N * normalBias + V * viewBias;
+
+    // 【クリップマップのカスケード】細かい段から順に見て、埋まらなかったぶんだけ
+    // 粗い段へ回す。最後まで埋まらなかったぶんはinsideWeightに反映され、
+    // 呼び出し側がグローバルIBLとブレンドする。
+    // 段ごとの重みはそのまま「その段をどれだけ信用してよいか」なので、
+    // 境界では細かい段が滑らかに抜けて粗い段が引き継ぐ
+    float3 accumulatedIrradiance = float3(0.0f, 0.0f, 0.0f);
+    float accumulatedWeight = 0.0f;
+    float remaining = 1.0f;
+
+    [loop]
+    for (uint lod = 0; lod < lodCount; ++lod)
+    {
+        float lodWeight;
+        const float3 lodIrradiance = GatherDDGILOD(
+            lod, lodCount, biasedPos, N, probeCounts,
+            irradianceTexels, distanceTexels, border, backfaceThreshold, lodWeight);
+        if (lodWeight <= 0.0f)
+        {
+            continue;
+        }
+
+        const float contribution = remaining * lodWeight;
+        accumulatedIrradiance += lodIrradiance * contribution;
+        accumulatedWeight += contribution;
+        remaining -= contribution;
+        if (remaining <= 1e-4f)
+        {
+            break;
+        }
+    }
+
+    insideWeight = saturate(accumulatedWeight);
+    if (accumulatedWeight <= 0.0f)
+    {
         return float3(0.0f, 0.0f, 0.0f);
     }
 
     // アトラスは露出非依存の物理量で持っている(理由はC++側 FrameConstants::DDGIParams4 の
     // コメント参照)。ここでこのフレームの実効プリ露出を掛けて、他のライティングと同じ
     // 表示レンジへ戻す。DDGIParams3.z は強度倍率
-    return (accumulated / totalWeight) * DDGIParams3.z * DDGIParams4.x;
+    return (accumulatedIrradiance / accumulatedWeight) * DDGIParams3.z * DDGIParams4.x;
 }
 
 #endif // KURENAI_DDGI_HLSLI

@@ -98,6 +98,11 @@ namespace Kurenai
         // しきい値の効き方をA/Bで測るための起動オプション用。根拠はm_DDGIBackfaceThresholdを参照
         void SetDDGIBackfaceThreshold(float threshold);
 
+        // DDGIのクリップマップLODの段数と追従の有無を、読み込んだ`.kscene`の指定より優先して上書きする。
+        // 段数を振って効果を測るための起動オプション用。アトラスを確保し直すので、
+        // **フレームの記録が始まる前(Run()より前)にだけ呼ぶこと**
+        void OverrideDDGILOD(uint32_t lodCount, bool followCamera);
+
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
         // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
         // FrameConstants::CascadeSplitsがXMFLOAT4(4要素)にfar距離を詰めているため、
@@ -1729,7 +1734,14 @@ namespace Kurenai
         static constexpr uint32_t kDDGIDistanceCell = kDDGIDistanceTexels + kDDGIProbeBorder * 2;
         // プローブ数の上限。反射プローブと違いアトラスはシーン読み込み時に確保し直すので
         // 技術的な固定容量ではないが、.ksceneの書き間違いで数GBのアトラスを作らないための歯止め
-        static constexpr uint32_t kDDGIMaxProbes = 4096;
+        // シーン全体で確保してよいプローブ数の上限。**容量の限界ではなく、`.kscene`の
+        // 打ち間違いでギガバイト単位を確保しないための番人**である。
+        // クリップマップLODでプローブ総数が「格子の積 × LOD段数」になったので引き上げた
+        // (8192でもイラディアンス8MB + 距離16MB程度で、実際の律速は更新スループット側)
+        static constexpr uint32_t kDDGIMaxProbes = 8192;
+        // クリップマップLODの最大段数。FrameConstantsへ段数ぶんの配列を持つので有界にしておく。
+        // SceneLoaderのLODCountの検証範囲と一致させること
+        static constexpr uint32_t kDDGIMaxLODCount = 4;
         // キャプチャ解像度(1面あたり)。6面ぶんで 16×16×6 = 1536方向がレイの代わりになる。
         // 反射プローブのkProbeCaptureSize(128)と違い小さくてよいのは、DDGIが必要とするのが
         // 「低周波の拡散イラディアンス」であって鏡面の映り込みではないため
@@ -1739,8 +1751,17 @@ namespace Kurenai
         // アトラスは1プローブぶんのダミーとして確保され、シェーダー側もDDGIParams0.w=0で無効になる
         Assets::GIVolume m_GIVolume;
         bool m_HasGIVolume = false;
-        // ボリュームの総プローブ数(ProbeCountsの3軸の積)。ダミー時は1
+        // シーン全体の総プローブ数(= ProbeCountsの3軸の積 × LOD段数)。ダミー時は1。
+        // アトラスの確保と更新のラウンドロビンはこの数で回る
         uint32_t m_DDGIProbeCount = 1;
+        // LOD 1段ぶんのプローブ数(ProbeCountsの3軸の積)。通し番号からLODを割り出すのに使う
+        uint32_t m_DDGIProbesPerLOD = 1;
+        // 実際に使うLOD段数(m_GIVolume.LODCountをkDDGIMaxLODCountでクランプしたもの)
+        uint32_t m_DDGILODCount = 1;
+        // 格子を追従させる中心(カメラのワールド座標)。
+        // 【Render中に固定する】格子の原点・プローブ位置・dirty判定・シェーダーへ渡す値が
+        // すべてこれを基準に決まるので、1フレームの途中で動くと食い違う
+        DirectX::XMFLOAT3 m_DDGIFollowCenter{ 0.0f, 0.0f, 0.0f };
 
         // オクタヘドラル2Dアトラス。RGBがイラディアンス、距離側はR=平均距離・G=平均二乗距離。
         // どちらもR32系で確保する。更新CSがヒステリシスのために「前の値を読んでから書く」ため、
@@ -1753,6 +1774,17 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_DDGIBorderCopyComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_DDGIBorderCopyPipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_DDGIUpdateConstantBuffer;
+        // スクロールで担当する場所が変わったプローブを、焼き直されるまでサンプリングから外すパス。
+        // 詳細はDDGIProbeUpdate.hlslのCSInvalidateProbesを参照
+        std::unique_ptr<RHI::IRHIShader> m_DDGIInvalidateProbesComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIInvalidateProbesPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_DDGIDirtyProbeBuffer;
+        // 各スロットが「最後に焼いたときのワールド格子座標」。いまの座標と違えば未確定(dirty)。
+        // 【ワールド座標で持つこと】アトラスのセル番号で持つと、スクロールしてもセル番号は
+        // 変わらないので「別の場所を担当するようになった」ことを検出できない
+        std::vector<DirectX::XMINT3> m_DDGIProbeBakedCoord;
+        // 焼き直し待ちのスロット番号(毎フレーム組み直す。GPUへ渡す一時の並び)
+        std::vector<uint32_t> m_DDGIDirtyProbeList;
         // DDGIのレイ取得をDXRで行う経路(DDGIProbeTrace.hlsl)。
         // m_RaytracingAvailableがtrueのときだけ作る(RTAO/RT反射と同じ扱い)
         std::unique_ptr<RHI::IRHIShader> m_DDGIProbeTraceComputeShader;
@@ -1938,6 +1970,26 @@ namespace Kurenai
 
         // 格子上のプローブ番号からワールド座標を求める。番号の分解は
         // index = x + y*Cx + z*Cx*Cy で、シェーダー側の並びと一致させること
+        // --- クリップマップLODの格子 ---
+        //
+        // LOD k は間隔が ProbeSpacing * 2^k。プローブ数は全LOD共通なので、覆う範囲は
+        // LODが1つ上がるごとに2倍になる。アトラスはLODを縦に積むだけで済む ――
+        // 通し番号 slot = k*(Cx*Cy*Cz) + z*Cx*Cy + y*Cx + x を使うと、既存の
+        // 「行 = slot/(Cx*Cy)、列 = slot%(Cx*Cy)」がそのまま LOD k の行 [k*Cz, (k+1)*Cz) を指す。
+        // このおかげで**更新CSのアトラス座標式は1文字も変えなくてよい**。
+        DirectX::XMFLOAT3 ComputeDDGILODSpacing(uint32_t lod) const;
+        // そのLODの格子の原点。追従するときはLOD自身の格子へスナップし、カメラを中心に置く。
+        // 追従しないときは、LOD0は.ksceneのOriginそのまま、上のLODは中心を保ったまま広がる
+        DirectX::XMFLOAT3 ComputeDDGILODOrigin(uint32_t lod) const;
+        // 原点に対応する格子の整数座標。トロイダル(剰余)addressingの基準になる。
+        // **CPUとシェーダーで同じ値を使う必要があるので、CPU側で求めて渡す**
+        // (原点÷間隔をシェーダー側でも計算すると、丸めが食い違ったときに
+        //  プローブの位置とアトラスのセルがずれる)
+        DirectX::XMINT3 ComputeDDGILODBaseIndex(uint32_t lod) const;
+
+        // そのスロットがいま担当しているワールド格子座標。dirty判定の基準になる
+        DirectX::XMINT3 ComputeDDGIProbeWorldCoord(uint32_t probeIndex) const;
+
         DirectX::XMFLOAT3 ComputeDDGIProbePosition(uint32_t probeIndex) const;
 
         // m_GIVolumeのProbeCountsに合わせてアトラス2枚を確保し直す。ボリュームが無いシーンでは

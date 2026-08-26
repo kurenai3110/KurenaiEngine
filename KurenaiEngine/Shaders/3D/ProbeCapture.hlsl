@@ -59,6 +59,12 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams3;
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
+    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
+    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
+    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
+    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
+    float4 DDGILODOrigin[4];
+    float4 DDGILODBase[4];
     // bent normalによる遮蔽(34章)。プローブの中身も不透明パスと同じ規則で焼かないと、
     // つまみを動かしたときにプローブだけ古い見た目のまま残る。
     // KurenaiEngine3D側の再ベイク署名にもこの値を混ぜてあること

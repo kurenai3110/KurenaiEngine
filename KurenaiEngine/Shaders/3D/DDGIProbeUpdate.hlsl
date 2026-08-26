@@ -39,6 +39,10 @@ cbuffer DDGIUpdateConstants : register(b0)
 TextureCube CaptureRadiance : register(t0);
 TextureCube CaptureDistance : register(t1);
 
+// スクロールで担当する場所が変わってしまったプローブの通し番号(CSInvalidateProbesだけが読む)。
+// 他のエントリでは使わないが、同じファイルの中なので宣言は共有される
+StructuredBuffer<uint> DirtyProbeIndices : register(t2);
+
 // 【R32系である必要がある】ヒステリシスのために前の値を読んでから書くが、型付きUAV読み出しは
 // R32系しか保証されていない(それ以外はTypedUAVLoadAdditionalFormatsが要る)。
 // AutoExposure.hlslが同じ理由でR32_Floatを2テクセル並べる構成を選んでいるのと同じ判断
@@ -396,4 +400,44 @@ void CSCopyBorder(uint3 dispatchThreadID : SV_DispatchThreadID)
             }
         }
     }
+}
+
+// --- スクロールで未確定になったプローブを、焼き直されるまでサンプリングから外す ---
+//
+// 【なぜ要るのか】クリップマップの格子がカメラに追従してスクロールすると、
+// 新しく範囲へ入ったプローブのセルには**まだ別の場所のイラディアンス**が入っている。
+// 焼き直されるまでそれを引くと、動いた方向へ光が引きずられる(いちばん醜い破綻)。
+//
+// 【αへ2.0を書く】αはプローブ分類の裏面ヒット率(0〜1)なので、それを超える値を入れれば
+// **どんなしきい値でも必ず外れる**(分類を無効にしたときサンプリング側のしきい値は1.0になるが、
+// 2.0はそれも超える)。専用のリソースもフラグも増やさずに「まだ信用できない」を表せる。
+// 焼き直されると CSUpdateProbe が本来の裏面ヒット率で上書きするので、自動的に復帰する。
+//
+// 1グループ = 1プローブのセル(境界を含む8x8)。numthreadsはセルの一辺と一致させること
+[numthreads(8, 8, 1)]
+void CSInvalidateProbes(uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID)
+{
+    // Params0.x に「無効化するプローブの個数」を入れて呼ぶ(焼き込み用の probeIndex とは別の使い方)
+    const uint dirtyCount = (uint)Params0.x;
+    if (groupID.x >= dirtyCount)
+    {
+        return;
+    }
+
+    const uint irradianceTexels = (uint)Params1.x;
+    const uint border = (uint)Params1.z;
+    const uint cellSize = irradianceTexels + border * 2u;
+    if (groupThreadID.x >= cellSize || groupThreadID.y >= cellSize)
+    {
+        return;
+    }
+
+    const uint3 probeCounts = uint3((uint)Params2.x, (uint)Params2.y, (uint)Params2.z);
+    const uint probeIndex = DirtyProbeIndices[groupID.x];
+    const uint2 writeAt =
+        ProbeAtlasOrigin(probeIndex, probeCounts, irradianceTexels, border) + groupThreadID.xy;
+
+    // rgbはそのまま(焼き直しでどうせ上書きされる)。αだけを「信用できない」印にする
+    const float3 previous = IrradianceAtlas[writeAt].rgb;
+    IrradianceAtlas[writeAt] = float4(previous, 2.0f);
 }
