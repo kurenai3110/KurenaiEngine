@@ -20,6 +20,7 @@
 // 混ざったら、そこから求める可視性判定が破綻するため。指数を大きく取った鋭い重みで、
 // dのほぼ真正面だけを拾う。
 #include "Samplers.hlsli"
+#include "CubeFace.hlsli"
 
 static const float PI = 3.14159265359f;
 
@@ -82,24 +83,8 @@ float3 OctahedralToDirection(float2 oct)
 }
 
 // --- キャプチャキューブのレイ列挙 ---
-// IBLConvolve.hlslのCubeFaceDirectionと同じ対応でなければならない。ここがずれると
+// 面→方向の対応(CubeFaceDirection)はCubeFace.hlsliが唯一の定義。ここが焼く側とずれると
 // 「焼いた面の向き」と「読む向き」が食い違い、間接光が見当違いの方向から来る
-float3 CubeFaceDirection(uint face, float2 uv)
-{
-    const float2 ndc = uv * 2.0f - 1.0f;
-    const float u = ndc.x;
-    const float v = ndc.y;
-
-    float3 dir;
-    if (face == 0)      dir = float3(1.0f, -v, -u);   // +X
-    else if (face == 1) dir = float3(-1.0f, -v, u);   // -X
-    else if (face == 2) dir = float3(u, 1.0f, v);     // +Y
-    else if (face == 3) dir = float3(u, -1.0f, -v);   // -Y
-    else if (face == 4) dir = float3(u, -v, 1.0f);    // +Z
-    else                dir = float3(-u, -v, -1.0f);  // -Z
-
-    return normalize(dir);
-}
 
 // キューブ面上の座標(u,v)∈[-1,1]^2 が張る立体角(定数倍を除く)。
 //
