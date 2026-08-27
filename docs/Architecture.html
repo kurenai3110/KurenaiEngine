@@ -662,6 +662,71 @@ assimpのOBJインポータの有効化手順、マテリアル単位マージ�
 半透明判定、MTLの<code>Ns</code>からのラフネス変換、<code>--scale</code>の決め方は
 <a href="ImplementationDetail.md">ImplementationDetail.md</a> 11章。
 </p>
+
+<h3>11.6 FBX都市アセットの変換(NVIDIA Emerald Square)</h3>
+<p>
+<code>Assets/Packed/EmeraldSquare/Day.kmodel</code>は
+<a href="https://developer.nvidia.com/orca/nvidia-emerald-square">NVIDIA Emerald Square</a>(ORCA)の
+FBX配布を直接パックしたものです。<strong>リポジトリで初めてFBXを入力にしたアセット</strong>で、
+glTF/OBJでは表に出なかった前提がいくつか崩れました。取得から配布までは
+<code>Tools/import_emerald_square.ps1</code>が一括で行います。
+</p>
+<pre><code>KurenaiPacker.exe ThirdParty/SourceModels/EmeraldSquare_v4_1/EmeraldSquare_Day.fbx \
+  -o Assets/Packed/EmeraldSquare/Day.kmodel \
+  --specular-as-orm --alpha-cutout "&lt;.DoubleSidedの29マテリアル&gt;=0.5"</code></pre>
+<p>
+Bistroと同じく<strong>中間形式を経由しません</strong>。FBXはassimpの
+<code>LoadSourceModel</code>経路でそのまま読みます。
+</p>
+
+<h4>この変換のために増やした3つのオプション</h4>
+<ul>
+<li><code>--inspect</code> ―― パッケージを書き出さず、assimpが読んだ直後のシーン構造(単位系・
+上方向軸・ルート変換行列・ノード数・スケール適用後のバウンズ・マテリアルごとのテクスチャスロット・
+埋め込みテクスチャ)を印字して終わる。<strong>外部から持ち込んだモデルの素性は「読ませれば分かる」が、
+そのために数GBの書き出しまで走らせるのは現実的でない</strong>ため、読み込み直後で止める経路を分けた。
+パッカーが消費しないスロットには<code>[パッカー未使用]</code>が付く。</li>
+<li><code>--specular-as-orm</code> ―― <code>aiTextureType_SPECULAR</code>のテクスチャを
+metallicRoughnessと遮蔽として読む。<strong>SpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を
+入れる規約のFBX向け</strong>。チャンネルの割り当てがglTFのmetallicRoughnessと一致するため
+シェーダー側の変更は不要。<strong>フラグ制</strong>にしてあるのは、SpecularColorが本来の鏡面反射色である
+アセットに無条件で適用すると全面が金属になり、既存アセットの再パックで静かに壊れるため。</li>
+<li><code>--alpha-cutout &lt;マテリアル名&gt;=&lt;しきい値&gt;</code> ―― 名前が一致したマテリアルを
+アルファカットアウトにする。<strong>アルファモード(OPAQUE/MASK/BLEND)はglTFにしかない情報</strong>で、
+FBX/OBJでは「アルファで抜く前提の葉」を解析だけでは判別できない。既存の
+<code>--translucent</code>と同じ「名前で外から与える」形にそろえてある。</li>
+</ul>
+
+<h4>ブロック圧縮テクスチャの寸法チェック</h4>
+<p>
+テクスチャがブロック圧縮(BC1〜BC7)で幅か高さが4未満の場合、警告を出してそのスロットを
+フォールバックとして扱います。ブロック圧縮は4×4ピクセルを1ブロックとして符号化するため、
+1×1などは<strong>シェーダリソースビューの作成が<code>E_INVALIDARG</code>で失敗します</strong>。
+配布アセットには「法線マップ無し」を表す1×1のダミーが圧縮形式のまま置かれていることがあり
+(このアセットでは法線マップ115枚中6枚)、パック時に弾かないと実行のたびに転送失敗のエラーが出ます。
+<strong>既存の<code>.ktex</code>を再利用する経路でも同じ検査をします</strong> ――
+<code>--force</code>時だけの検査にすると、一度生成した不正な<code>.ktex</code>を
+<code>.kmodel</code>が参照し続け、再パックしても直らないためです。
+</p>
+
+<h4>11.6.1 既知の制約</h4>
+<ul>
+<li><strong>両面描画を持たないため、植生の葉を裏から見ると欠ける可能性がある。</strong>
+エンジンは<code>CULL_BACK</code>固定で、このアセットの<code>.DoubleSided</code>マテリアルは
+名前のとおり両面前提で作られている。桜(<a href="ImplementationDetail.md">ImplementationDetail.md</a> 40章)は
+巻き順と法線を反転した複製を持たせて対処しているが、このアセットは複製を持たない。
+街路レベルの構図では破綻が見えていないが、確認しきってはいない。</li>
+<li><strong>法線マップ3枚がフォールバックされる</strong>(<code>Painted_Metal</code> /
+<code>Emissive_Light_2</code> / <code>Emissive_Light_Inst</code>)。上記の1×1ブロック圧縮のため。
+配布物側の作りで、絵への影響は軽微。</li>
+<li><strong>ライセンスがCC BY-NC-SA 3.0 Unported(非商用のみ・継承あり)</strong>で、
+リポジトリの他のアセット(SponzaやBistroはCC BY相当)と条件が違う。</li>
+</ul>
+<p>
+<code>--scale</code>を付けない根拠、<code>--specular-as-orm</code>の対照実験、
+カットアウト対象をDDSのFourCCで裏取りした過程は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 43章。
+</p>
 </section>
 
 <section id="lights">

@@ -283,6 +283,33 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 - `--metallic <V>` / `--roughness <V>` / `--base-color <R,G,B>` で、全マテリアルのPBR係数を
   上書きできます。マテリアルを持たない生の`.obj`(3Dスキャンの配布物など)へ検証用の
   マテリアルを与えるためのものです
+- `--alpha-cutout <マテリアル名>=<しきい値>` で、指定した名前のマテリアルをアルファカットアウトに
+  します(ベースカラーのアルファがしきい値未満の画素を捨てます)。複数指定できます。
+  **glTF以外の形式で葉や草を正しく描くにはこれが要ります** — アルファモード(OPAQUE/MASK/BLEND)は
+  glTFにしかない情報で、FBX/OBJでは「アルファで抜く前提のマテリアル」を解析だけでは判別できず、
+  指定しないと不透明な板として描かれます
+- `--specular-as-orm` を付けると、`aiTextureType_SPECULAR`のテクスチャをメタリック/ラフネスと
+  遮蔽マップとして読みます。**SpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を
+  格納する規約のFBX向け**です(NVIDIA Emerald Squareがこれ)。チャンネルの割り当てがglTFの
+  metallicRoughnessと一致するため、テクスチャの加工は要りません。
+  ただし**SpecularColorが本来の鏡面反射色であるアセットに指定すると全面が金属になります**。
+  そのため既定では無効で、指定したときだけ有効になります
+- `--inspect` を付けると、**パッケージを書き出さずに**assimpが読んだ直後のシーン構造を印字して
+  終わります(`-o`は不要)。単位系(FBXの`UnitScaleFactor`)・上方向軸・ルート変換行列・ノード数・
+  スケール適用後のバウンズ・マテリアルごとのテクスチャスロット・埋め込みテクスチャの一覧が出ます。
+  **外部から持ち込んだモデルの`--scale`を決めるとき、テクスチャがどのスロットへ入ったかを
+  確かめるとき**に使います。パッカーが読まないスロットには`[パッカー未使用]`が付きます
+
+  ```
+  Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+    ThirdParty\SourceModels\EmeraldSquare_v4_1\EmeraldSquare_Day.fbx --inspect
+  ```
+
+- テクスチャが**ブロック圧縮(BC1〜BC7)で幅か高さが4未満**の場合は、警告を出してそのスロットを
+  フォールバック(白1x1/フラット法線)として扱います。ブロック圧縮は4x4ピクセル単位で符号化される
+  ため、1x1などはGPUのシェーダリソースビュー作成が失敗します。配布アセットには「法線マップ無し」を
+  表す1x1のダミーが圧縮形式のまま置かれていることがあり(Emerald Squareの法線マップ115枚中6枚)、
+  パックの時点で弾かないと実行のたびに転送失敗のエラーが出ます
 
 > **`.kmodel`の形式が v9、`.kgeom`が v3 になりました。** v6でライトマップUVを頂点へ追加し、
 > v7でbent normalのテクスチャ参照をメッシュへ追加し、v8でbent normalの格納空間を
@@ -292,6 +319,46 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 > 不一致で読み込みを拒否されるため、既存の`Assets\Packed\`はKurenaiPacker.exeで
 > **再パックが必要**です
 > (テクスチャの`.ktex`はそのまま流用されるため、`--force`を付けなければ短時間で終わります)。
+
+#### 現代の街並みの確認用シーン(NVIDIA Emerald Square)
+
+商業街区4ブロック(約230m四方)の屋外シーンです。中低層のビルとストリートファニチャ、
+SpeedTreeの植生、バス、高さ108mの展望塔が入ります。**取得から配布までは
+`Tools\import_emerald_square.ps1`が一括で行います**(既にあるものは飛ばすので何度実行しても構いません):
+
+```
+Tools\import_emerald_square.ps1
+Samples\Sample3D\Build\Bin\x64\Release\Sample3D.exe -scene EmeraldSquare
+```
+
+手で行う場合は、ZIPを`ThirdParty\SourceModels\`へ展開してから次を実行します
+(カットアウト対象は`.DoubleSided`で終わる29マテリアル。一覧はスクリプト内にあります):
+
+```
+curl -L -o EmeraldSquare_v4_1.zip https://developer.nvidia.com/emerald-square
+Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+  ThirdParty\SourceModels\EmeraldSquare_v4_1\EmeraldSquare_Day.fbx ^
+  -o Assets\Packed\EmeraldSquare\Day.kmodel ^
+  --specular-as-orm --alpha-cutout "Grass_blades.DoubleSided=0.5" (...29件)
+Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+  --scene Scenes\EmeraldSquare.kscene -o Assets\Packed\Scenes\EmeraldSquare.kscene
+```
+
+- **`--scale`は要りません。** このFBXは`UnitScaleFactor=100`と宣言していますが、assimpが読んだ
+  直後のルート変換行列は単位行列で、頂点はそのままメートルです(`--inspect`で確認できます:
+  バウンズ230.1×113.2×230.2m、展望塔の高さ108.25m)。`--scale 0.01`を付けると1/100になります
+- **`--specular-as-orm`が要ります。** ORMがFBXのSpecularColorスロットに入っているため、
+  既定の解決では220マテリアル全部が1枚も拾えません(テクスチャ要求が225枚→336枚に変わります)
+- **`--alpha-cutout`が要ります。** 付けないと葉や草が不透明な板として描かれます
+- ダウンロードURLは302で署名付きURLへ飛びます。トークンは短時間で失効するので、直リンクを
+  控えず必ず`/emerald-square`からリダイレクトを辿ってください(認証は不要です)
+- 法線マップ3枚(`Painted_Metal` / `Emissive_Light_2` / `Emissive_Light_Inst`)は1x1のブロック圧縮
+  なのでフォールバックされ、パック時に警告が出ます。配布物側の作りで、絵への影響は軽微です
+
+> **ライセンス: CC BY-NC-SA 3.0 Unported(非商用のみ・継承あり)。**
+> 出典: NVIDIA ORCA - NVIDIA Emerald Square v4.1 / Nicholas Hull, Kate Anderson, Nir Benty (2017)
+> <https://developer.nvidia.com/orca/nvidia-emerald-square> 。植生はSpeedTreeのORCAアセットです。
+> 商用利用が必要な場合はこのアセットを使えません。
 
 #### メッシュレット / bindless / レイトレーシングの確認用シーン(ドラゴン)
 
@@ -766,6 +833,11 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
 - `Assets/Source/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
 - `Assets/Source/BistroMcGuire/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)のMorgan McGuire版OBJ配布([awesome-3d-meshes](https://github.com/Graphify-Labs/awesome-3d-meshes)経由、`ThirdParty/SourceModels/`内の7z/zipアーカイブを展開したもの)。
   KurenaiPacker内蔵のassimp OBJインポータで直接パックする(`--scale 0.01`が必要)。詳細・展開手順は[実装者向けドキュメント](docs/Architecture.html)11章を参照
+- `ThirdParty/SourceModels/EmeraldSquare_v4_1/` — [NVIDIA Emerald Square](https://developer.nvidia.com/orca/nvidia-emerald-square)(ORCA)。
+  商業街区4ブロックの屋外シーン。**このアセットだけは`Assets/Source/`を経由せず、展開先から直接
+  パックします**(配布物がFBX+外部DDSで完結しており、中間形式へ変換する必要がないため)。
+  `Tools/import_emerald_square.ps1`が取得から配布まで行います。
+  **ライセンスはCC BY-NC-SA 3.0 Unported(非商用のみ)** で、他のアセットと条件が違う点に注意してください
 - `Assets/Source/FurnaceTest/` — White Furnace Test用の金属球列(`metallic=1.0`、粗さ0.0〜1.0の11個)。
   一様な放射輝度のキューブマップ(`Assets/Packed/Skybox/UniformWhite.dds`)と合わせて
   `Tools/generate_furnace_test.py` で再生成できる
