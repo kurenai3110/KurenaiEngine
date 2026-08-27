@@ -99,6 +99,23 @@ namespace KurenaiPacker
         // (メタリック等の「全マテリアルへ一律」とは違い、木の中でも花弁だけを
         //  透けさせたい、という使い方になるため)
         std::map<std::string, float> Translucency;
+        // マテリアル名 → アルファカットアウトのしきい値。
+        // FBX/OBJにはglTFのalphaMode(OPAQUE/MASK/BLEND)に相当する情報が無いため、
+        // 「BaseColorのアルファで抜く」前提で作られた葉や草のマテリアルであっても
+        // 解析だけでは判別できず、不透明な板として描かれてしまう。外から名前で指定する
+        std::map<std::string, float> AlphaCutoff;
+        // aiTextureType_SPECULARに入っているテクスチャをmetallicRoughnessとして読むか。
+        //
+        // FBXのSpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を格納する
+        // 規約のアセットがある(NVIDIA Emerald Squareがこれで、README.txtに明記されている)。
+        // assimpはFBXのSpecularColorをaiTextureType_SPECULARへ入れるため、既定の
+        // DIFFUSE_ROUGHNESS/METALNESSしか見ない解決では1枚も拾えない。
+        //
+        // 【無条件に見てはいけない】SpecularColorが本来の「鏡面反射色」であるアセット
+        // (Specular/Glossinessワークフロー)では、色マップがそのままメタリック/ラフネスとして
+        // 読まれ、全面が金属になる。既存アセットを再パックしたときに静かに壊れるため、
+        // 指定したときだけ有効にする
+        bool SpecularAsOrm = false;
     };
 
     // モデルファイルをassimpで解析する。失敗時はstd::runtime_errorを投げる。
@@ -110,4 +127,18 @@ namespace KurenaiPacker
         const std::wstring& filePath,
         float scale = 1.0f,
         const MaterialOverride& materialOverride = {});
+
+    // assimpが読んだ直後のシーン構造を標準出力へ印字する(パッケージは書き出さない)。
+    // 失敗時はLoadSourceModelと同じくstd::runtime_errorを投げる。
+    //
+    // 外部から持ち込んだモデルは、単位系(FBXのUnitScaleFactor)・上方向軸・テクスチャが
+    // どのスロットへ入るか・ノード数の規模が事前に分からない。これらは「assimpに読ませれば
+    // 全部分かる」ものだが、LoadSourceModel + WriteModelPackage を通すとテクスチャ変換と
+    // メッシュレット構築と数GBの書き出しまで走ってしまい、「スケールを知りたいだけ」の
+    // 一度の確認に毎回それを払うことになる(147MBのFBXで実測して判断するには非現実的で、
+    // 試行のたびに出力先も数GB埋まる)。読み込んだ直後で止める経路を分けておく。
+    //
+    // scale: 印字するバウンディングボックスへ乗算する係数。--scaleに与える値の妥当性を
+    // 「既知の寸法(車両の全長、建物の高さ)と合うか」で判定するためのもの
+    void InspectModel(const std::wstring& filePath, float scale = 1.0f);
 }

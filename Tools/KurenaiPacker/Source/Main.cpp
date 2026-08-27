@@ -53,11 +53,17 @@ namespace
             "使い方:\n"
             "  KurenaiPacker.exe <入力モデル> -o <出力.kmodel> [オプション]     モデルをパックする\n"
             "  KurenaiPacker.exe --scene <入力.kscene> -o <出力.kscene>         シーンを検証して配置する\n"
+            "  KurenaiPacker.exe <入力モデル> --inspect [--scale S]             中身を印字するだけ(書き出さない)\n"
             "\n"
             "オプション:\n"
             "  -o, --output <path>   出力先のパス(必須)。モデルモードではこの親ディレクトリが\n"
             "                        .kgeomと.ktexのミラー先ルートになる\n"
             "      --scene <path>    <入力モデル>の代わりに.ksceneを検証・配置するモードにする\n"
+            "      --inspect         assimpが読んだ直後のシーン構造(単位系・上方向軸・ノード数・\n"
+            "                        バウンズ・マテリアルのテクスチャスロット・埋め込みテクスチャ)を\n"
+            "                        印字して終わる。パッケージは書き出さないので-oは不要。\n"
+            "                        外部から持ち込んだモデルの--scaleを決めるとき、テクスチャが\n"
+            "                        どのスロットへ入ったかを確かめるときに使う\n"
             "      --force           既存の.ktexがあっても再圧縮して上書きする(モデルモードのみ)\n"
             "      --jobs <N>        テクスチャ処理のワーカースレッド数(既定: 論理コア数、上限8。モデルモードのみ)\n"
             "      --scale <S>       頂点位置・バウンズに乗算する係数(既定1.0、モデルモードのみ)。\n"
@@ -79,6 +85,16 @@ namespace
             "                                  葉や花弁のように薄いものが、裏から当たった光を透かして\n"
             "                                  表側が明るく見える量。複数指定できる\n"
             "                                  (例: --translucent Blossom=0.55)\n"
+            "      --alpha-cutout <名前>=<V>   指定した名前のマテリアルをアルファカットアウトにする。\n"
+            "                                  BaseColorのアルファがV未満の画素を捨てる(0〜1)。\n"
+            "                                  FBX/OBJにはglTFのalphaModeに相当する情報が無いため、\n"
+            "                                  葉や草のように「アルファで抜く」前提のマテリアルは\n"
+            "                                  これを指定しないと不透明な板として描かれる。複数指定できる\n"
+            "      --specular-as-orm           aiTextureType_SPECULARのテクスチャをmetallicRoughnessと\n"
+            "                                  遮蔽マップとして読む。SpecularColorスロットへ\n"
+            "                                  ORM(R=遮蔽/G=ラフネス/B=メタリック)を格納する規約の\n"
+            "                                  FBX向け。SpecularColorが本来の鏡面反射色である\n"
+            "                                  アセットに指定すると全面が金属になるので注意する\n"
             "      --metallic <V>              全マテリアルのメタリック値を上書きする(0〜1)\n"
             "      --roughness <V>             全マテリアルのラフネス値を上書きする(0〜1)\n"
             "      --base-color <R,G,B>        全マテリアルのベースカラー係数を上書きする(各0〜1)\n"
@@ -105,6 +121,7 @@ namespace
         float Scale = 1.0f;
         bool ShowHelp = false;
         bool SceneMode = false;
+        bool Inspect = false;
         bool BakeOcclusion = false;
         bool EnableMeshlets = true;
         unsigned int OcclusionResolution = 512;
@@ -224,6 +241,10 @@ namespace
                 args.SceneMode = true;
                 args.InputPath = argv[++i];
             }
+            else if (arg == L"--inspect")
+            {
+                args.Inspect = true;
+            }
             else if (arg == L"--force")
             {
                 args.Force = true;
@@ -304,6 +325,31 @@ namespace
                     return std::nullopt;
                 }
                 args.MaterialOverride.Translucency[WideToUtf8(token.substr(0, separator))] = value.value_or(0.0f);
+            }
+            else if (arg == L"--alpha-cutout")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--alpha-cutout には <マテリアル名>=<値> が必要です");
+                    return std::nullopt;
+                }
+                const std::wstring token = argv[++i];
+                const size_t separator = token.rfind(L'=');
+                if (separator == std::wstring::npos || separator == 0 || separator + 1 >= token.size())
+                {
+                    PrintError("--alpha-cutout の書式が不正です(<マテリアル名>=<値>): " + WideToUtf8(token));
+                    return std::nullopt;
+                }
+                std::optional<float> value;
+                if (!ParseUnitScalar(arg, token.substr(separator + 1), value))
+                {
+                    return std::nullopt;
+                }
+                args.MaterialOverride.AlphaCutoff[WideToUtf8(token.substr(0, separator))] = value.value_or(0.5f);
+            }
+            else if (arg == L"--specular-as-orm")
+            {
+                args.MaterialOverride.SpecularAsOrm = true;
             }
             else if (arg == L"--metallic" || arg == L"--roughness")
             {
@@ -475,12 +521,22 @@ int wmain(int argc, wchar_t** argv)
         return 0;
     }
 
-    if (args.InputPath.empty() || args.OutputPath.empty())
+    // --inspectは読んで印字するだけで何も書き出さないため-oを要求しない。
+    // それ以外のモードでは従来どおり入力と出力の両方が要る
+    if (args.InputPath.empty() || (args.OutputPath.empty() && !args.Inspect))
     {
         PrintError(args.SceneMode
             ? "--scene と -o/--output の両方の指定が必要です"
-            : "入力モデルと -o/--output の両方の指定が必要です");
+            : (args.Inspect
+                ? "--inspect には入力モデルの指定が必要です"
+                : "入力モデルと -o/--output の両方の指定が必要です"));
         PrintUsage();
+        return 1;
+    }
+
+    if (args.SceneMode && args.Inspect)
+    {
+        PrintError("--scene と --inspect は同時に指定できません");
         return 1;
     }
 
@@ -498,6 +554,21 @@ int wmain(int argc, wchar_t** argv)
         return 2;
     }
     const std::wstring sourceModelDirectory = inputAbsolute.parent_path().wstring();
+
+    // --inspect: assimpが読んだ構造を印字して終わる。以降のベイク・書き出しには進まない
+    if (args.Inspect)
+    {
+        try
+        {
+            KurenaiPacker::InspectModel(inputAbsolute.wstring(), args.Scale);
+        }
+        catch (const std::exception& e)
+        {
+            PrintError("入力モデルの解析に失敗しました: " + std::string(e.what()));
+            return 2;
+        }
+        return 0;
+    }
 
     const auto startTime = std::chrono::steady_clock::now();
 
