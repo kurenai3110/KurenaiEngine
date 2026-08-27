@@ -819,6 +819,21 @@ namespace Kurenai::RHI
         // コンピュート専用のリングとして扱う。考え方はAllocateSrvTableBlockと同じ
         const uint32_t regionBase = kGraphicsSrvHeapCapacityPerFrame * kFrameCount;
         const uint32_t totalCapacity = kComputeSrvHeapCapacityPerFrame * kFrameCount;
+
+        // 【区画の末尾をまたぐブロックを返さない】区画の直後にはbindless区画が続いているため、
+        // またいだブロックへ書き込むとbindlessのディスクリプタを踏み潰す。
+        // そうなるとメッシュシェーダーがジオメトリを引けなくなり、
+        // 「G-Bufferだけが空になり、頂点シェーダー経路へ切り替えると直る」という
+        // 原因の分かりにくい壊れ方をする(実際に一度この壊し方をしている)。
+        //
+        // 【以前は問題にならなかった】払い出し単位が常にkComputeTableSlotCount固定で、
+        // 区画容量もその倍数だったため末尾がちょうど揃っていた。
+        // 1個だけ借りる呼び出しが入った時点でこの前提は消える
+        if (m_NextComputeTableIndex + count > totalCapacity)
+        {
+            m_NextComputeTableIndex = 0;
+        }
+
         const uint32_t base = m_NextComputeTableIndex;
         m_NextComputeTableIndex = (m_NextComputeTableIndex + count) % totalCapacity;
         return regionBase + base;
