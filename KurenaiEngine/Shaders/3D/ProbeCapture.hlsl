@@ -59,6 +59,12 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams3;
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
+    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
+    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
+    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
+    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
+    float4 DDGILODOrigin[4];
+    float4 DDGILODBase[4];
     // bent normalによる遮蔽(34章)。プローブの中身も不透明パスと同じ規則で焼かないと、
     // つまみを動かしたときにプローブだけ古い見た目のまま残る。
     // KurenaiEngine3D側の再ベイク署名にもこの値を混ぜてあること
@@ -83,16 +89,6 @@ cbuffer ObjectConstants : register(b1)
     float4 BaseColorFactor;
 };
 
-// DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
-struct GPULight
-{
-    float4 PositionType;
-    float4 ColorRange;
-    float4 DirectionAngle;
-    float4 Params;
-};
-StructuredBuffer<GPULight> Lights : register(t8);
-
 Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
 Texture2D MetallicRoughnessTexture : register(t2);
@@ -107,19 +103,17 @@ Texture2D BentNormalTexture : register(t6);
 // 本編の影が食い違うことはない。FrameConstants(CascadeViewProj/CascadeSplits/ShadowParams)と
 // DataSamplerを参照するため、それらの宣言より後でインクルードする必要がある
 #include "ShadowSampling.hlsli"
-// スカイボックス由来のグローバルIBL。プローブに映る面の環境光として使う
-TextureCube IrradianceTexture : register(t9);
-TextureCube PrefilteredEnvTexture : register(t10);
-Texture2D BRDFLUTTexture : register(t11);
+// プローブへ焼く1点ぶんのシェーディング(ライトリスト・グローバルIBL・多重バウンス)は
+// ProbeShading.hlsliが唯一の定義。DDGIのレイトレース経路(DDGIProbeTrace.hlsl)と
+// 同じ式でなければA/B比較が「経路の差」を測れなくなるため、複製を持たない
+#define KURENAI_PROBE_LIGHT_REGISTER t8
+#define KURENAI_PROBE_IRRADIANCE_REGISTER t9
+#define KURENAI_PROBE_PREFILTERED_REGISTER t10
+#define KURENAI_PROBE_BRDFLUT_REGISTER t11
 // DDGI(22章)の多重バウンス用。前フレームのイラディアンスを拡散の環境光として使う
 #define KURENAI_DDGI_IRRADIANCE_REGISTER t12
 #define KURENAI_DDGI_DISTANCE_REGISTER t13
-#include "DDGI.hlsli"
-
-// 多重バウンスの減衰。1未満でなければならない(理由はEvaluateGlobalIBLのコメント参照)。
-// 0.95は「1バウンスあたり5%のエネルギーを捨てる」という意味で、反射率1の白い部屋でも
-// 等比級数 1 + 0.95 + 0.95² + ... = 20 で必ず収束する
-static const float kDDGIBounceAttenuation = 0.95f;
+#include "ProbeShading.hlsli"
 
 struct VSInput
 {
@@ -162,179 +156,6 @@ float3x3 ComputeTangentFrame(float3 N, float4 tangent)
     return float3x3(T, B, N);
 }
 
-float DistributionGGX(float NdotH, float roughness)
-{
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float d = NdotH * NdotH * (a2 - 1.0f) + 1.0f;
-    return a2 / max(PI * d * d, 1e-6f);
-}
-
-float3 FresnelSchlick(float cosTheta, float3 F0)
-{
-    return F0 + (1.0f - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
-}
-
-// DirectLighting.hlslのEvaluateDirectBRDFと同じ(拡散+鏡面を足した1つの値を返す)
-float3 EvaluateDirectBRDF(
-    float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness,
-    SpecularEnergyContext energy)
-{
-    float3 H = normalize(V + L);
-    float NdotL = saturate(dot(N, L));
-    float NdotH = saturate(dot(N, H));
-    float VdotH = saturate(dot(V, H));
-
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    float D = DistributionGGX(NdotH, roughness);
-    float G = GeometrySmith(NdotV, NdotL, roughness);
-    float3 F = FresnelSchlick(VdotH, F0);
-
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energy.Compensation;
-
-    if (energy.Mode == KURENAI_SPEC_COMP_KULLACONTY)
-    {
-        // 加算ローブはE(NdotL)を要る(DirectLighting.hlslの同じ箇所と同一の処理)
-        const float2 brdfL = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotL, energy.Roughness), 0).rg;
-        specular += SpecularMultiScatterLobe(F0, energy.EssV, brdfL.x + brdfL.y, energy.Eavg, energy.Mode);
-    }
-
-    float3 kd = (1.0f - F) * (1.0f - metallic);
-    float3 diffuse = kd * albedo / PI;
-
-    return (diffuse + specular) * NdotL;
-}
-
-float DistanceAttenuation(float distSq, float range)
-{
-    float factor = distSq / max(range * range, 1e-4f);
-    float window = saturate(1.0f - factor * factor);
-    return (window * window) / max(distSq, 0.0001f);
-}
-
-float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float angleOffset)
-{
-    float t = saturate(dot(spotDirection, -L) * angleScale + angleOffset);
-    return t * t;
-}
-
-// DirectLighting.hlslのEvaluateLightと同じ(影なし)
-float3 EvaluateLight(
-    GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
-    SpecularEnergyContext energy)
-{
-    uint lightType = (uint)light.PositionType.w;
-    float range = light.ColorRange.w;
-
-    float3 L;
-    float atten = 1.0f;
-
-    if (lightType == 0u)
-    {
-        L = normalize(-light.DirectionAngle.xyz);
-    }
-    else
-    {
-        float3 toLight = light.PositionType.xyz - worldPos;
-        float distSq = dot(toLight, toLight);
-        if (distSq > range * range)
-        {
-            return float3(0.0f, 0.0f, 0.0f);
-        }
-
-        atten = DistanceAttenuation(distSq, range);
-        if (atten <= 0.0f)
-        {
-            return float3(0.0f, 0.0f, 0.0f);
-        }
-
-        L = toLight * rsqrt(max(distSq, 1e-8f));
-
-        if (lightType == 2u)
-        {
-            float spotAtten = SpotAttenuation(light.DirectionAngle.xyz, L, light.DirectionAngle.w, light.Params.x);
-            if (spotAtten <= 0.0f)
-            {
-                return float3(0.0f, 0.0f, 0.0f);
-            }
-            atten *= spotAtten;
-        }
-    }
-
-    if (dot(N, L) <= 0.0f)
-    {
-        return float3(0.0f, 0.0f, 0.0f);
-    }
-
-    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy) * light.ColorRange.rgb * atten;
-}
-
-// スカイボックス由来のグローバルIBL(DeferredLighting.hlslのEvaluateIBLと同じ式。
-// キャプチャ時にはスクリーンスペースのAO/GIバッファが無いが、マテリアルの遮蔽マップは
-// テクスチャなので使える。焼いた絵とメインパスの絵が食い違わないよう、aoにはそれを渡す)。
-// 昼度(AmbientColor.a)による夜間減衰は、手続き空の導入でどこでも掛けなくなった(21.4節)。
-// 空のキューブマップ自体が太陽高度に応じて暗くなるため、焼き込み時にも使用時にも不要
-float3 EvaluateGlobalIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness,
-                         float materialAO, BentOcclusion bent, float3 brdf, int compensationMode)
-{
-    const float NdotV = saturate(dot(N, V));
-    const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-
-    // 【多重バウンス(22章)】DDGIが有効なら、拡散の環境光を前フレームのDDGIイラディアンスにする。
-    //
-    // これが無いとプローブへ焼かれるのは「直接光 + 空」までの1バウンスで、壁に当たった光が
-    // 床を照らすところまでしか出ない(その床の照り返しが天井を照らす分は出ない)。
-    // 前フレームの結果を入力に回すと
-    //   フレーム1: 直接光のみ → E1(1バウンス)
-    //   フレーム2: E1を環境光として使う → E2(2バウンス)
-    //   フレーム3: E2を使う → E3(3バウンス) ...
-    // と毎フレーム1バウンスずつ積み上がる。「Nバウンスまで計算する」のではなく
-    // フィードバックループが勝手に収束するのがDDGIのinfinite bouncesの意味である。
-    //
-    // 減衰(kDDGIBounceAttenuation)は発散対策。反射率が1に近い白い部屋では
-    // E(n+1) ≈ E(n)·ρ で ρ→1 のとき収束が遅く、数値誤差で1を超えると発散する。
-    // 1未満を掛けて等比級数が必ず収束するようにしている(エネルギーを少し捨てて安定を買う)。
-    //
-    // 焼いているプローブがDDGIボリュームの外にある場合(ボリュームは1個しか置けないため、
-    // プローブがDDGI格子の外に立つことがある)はDDGIIrradianceのinsideWeightが0になるので、
-    // グローバルIBL側へ
-    // フォールバックする。DeferredLighting.hlslのEvaluateIBLと同じ規則
-    float3 irradiance = IrradianceTexture.Sample(MaterialSampler, N).rgb;
-    if (DDGIParams0.w > 0.5f)
-    {
-        float ddgiInsideWeight;
-        const float3 ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight) * kDDGIBounceAttenuation;
-        irradiance = lerp(irradiance, ddgiIrradiance, ddgiInsideWeight);
-    }
-    const float3 fresnelRoughness =
-        F0 + (max(float3(1.0f - roughness, 1.0f - roughness, 1.0f - roughness), F0) - F0) * pow(saturate(1.0f - NdotV), 5.0f);
-    const float3 kd = (1.0f - fresnelRoughness) * (1.0f - metallic);
-    // 拡散側のAOの出所とmulti-bounce AOは不透明パスと同じ規則にする
-    const float diffuseAO = (OcclusionParams.x > 0.5f) ? bent.aoN : materialAO;
-    const float3 diffuseOcclusion = (OcclusionParams.z > 0.5f)
-        ? GTAOMultiBounce(diffuseAO, albedo)
-        : float3(diffuseAO, diffuseAO, diffuseAO);
-    const float3 diffuseIBL = kd * albedo * irradiance * diffuseOcclusion;
-
-    const float3 R = reflect(-V, N);
-    const float mipLevel = roughness * ShadowParams.y;
-    const float3 prefiltered = PrefilteredEnvTexture.SampleLevel(MaterialSampler, R, mipLevel).rgb;
-    // 乗算型(モード1・2)は単一散乱項へ倍率として掛かり、Kulla-Conty(3)は加算ローブを足す
-    // (DeferredLighting.hlslのEvaluateIBLと同じ形。加算ぶんは拡散イラディアンスに掛かる)。
-    // スペキュラオクルージョンは両方の項へ掛ける ―― ReflectionProbe.hlsliのSpecularIBLWeightと
-    // SpecularIBLMultiScatterWeightがどちらも掛けているのと揃えるため
-    const float3 FssEss = F0 * brdf.x + brdf.y;
-    const float Ess = brdf.x + brdf.y;
-    const float3 specularIBL =
-        (prefiltered * FssEss * SpecularEnergyCompensation(F0, brdf, compensationMode)
-         + SpecularMultiScatterIBL(F0, FssEss, Ess, compensationMode) * irradiance)
-        * ComposeSpecularOcclusion((int)(OcclusionParams.y + 0.5f), bent, N, R, NdotV, roughness, materialAO, 1.0f);
-
-    // 環境光の拡散・鏡面倍率(IBLParams.y / .z)。メインパスと同じ倍率を焼き込み時にも掛けないと、
-    // プローブの中身だけつまみを動かす前の明るさで残ってしまう。
-    // これを焼き上がりへ反映させるため、C++側の再ベイク署名にも両方を混ぜてある
-    return diffuseIBL * IBLParams.y + specularIBL * IBLParams.z;
-}
 
 // キャプチャは2枚のレンダーターゲットへ書く。
 //   SV_TARGET0 … 放射輝度(HDR)。畳み込んでプローブのイラディアンス/プリフィルタ済み鏡面になる
@@ -410,34 +231,10 @@ PSOutput PSMain(PSInput input)
         color += EvaluateLight(Lights[i], input.WorldPos, N, V, NdotV, albedo, metallic, roughness, energy);
     }
 
-    // --- スカイボックス由来のグローバルIBL(環境光) ---
-    // ShadowParams.z = IBL強度倍率(Enable IBL無効なら0)。無効時はDeferredLighting.hlslと同じ
-    // 定数色アンビエントへフォールバックし、プローブが真っ黒に焼けるのを防ぐ
-    if (ShadowParams.z > 0.0f)
-    {
-        color += EvaluateGlobalIBL(N, V, input.WorldPos, albedo, metallic, roughness, materialAO, bent, brdf, energy.Mode) * ShadowParams.z;
-    }
-    else
-    {
-        // AmbientColor.rgbは一様な環境のイラディアンスE相当なので、その環境の放射輝度はL = E / PI。
-        // 拡散項の値は従来と厳密に一致する(DeferredLighting.hlslの同じ分岐と揃えてある)
-        const float3 ambientRadiance = AmbientColor.rgb / PI;
-
-        // 鏡面項を落とすと金属(拡散項が0)が真っ黒に焼き込まれ、そのプローブを引く面の
-        // 反射まで黒くなるため必ず計算する。F0/brdf/energyはPSMain冒頭で既に求めてある
-        const float3 fallbackFssEss = F0 * brdf.x + brdf.y;
-        const float fallbackEss = brdf.x + brdf.y;
-
-        // 拡散項の遮蔽はディフューズAOの出所切り替え(OcclusionParams.x)に従う。鏡面項は
-        // DeferredLighting.hlslの同じ分岐と同様、方向を持たない一様環境の近似のため
-        // bent normalのコーン交差ではなく従来どおりmaterialAOのSpecularOcclusionのままでよい
-        const float diffuseAO = (OcclusionParams.x > 0.5f) ? bent.aoN : materialAO;
-        color += albedo * (1.0f - metallic) * ambientRadiance * diffuseAO
-            + ambientRadiance
-                * (fallbackFssEss * energy.Compensation
-                   + SpecularMultiScatterIBL(F0, fallbackFssEss, fallbackEss, energy.Mode))
-                * SpecularOcclusion(NdotV, roughness, materialAO);
-    }
+    // --- 環境光(スカイボックス由来のグローバルIBL、無効時は定数色へフォールバック) ---
+    // 分岐ごとProbeShading.hlsliで共有している。DDGIのレイトレース経路と同じ式にするため
+    color += EvaluateProbeEnvironment(
+        N, V, input.WorldPos, albedo, metallic, roughness, NdotV, materialAO, bent, brdf, energy);
 
     color += emissive;
 

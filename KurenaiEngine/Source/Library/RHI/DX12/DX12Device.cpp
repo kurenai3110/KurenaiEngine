@@ -1109,7 +1109,11 @@ namespace Kurenai::RHI
             // 1フレームぶんのコマンドをすべて記録してから1回だけ実行する設計のため、同じ定数バッファへ
             // メッシュごとに複数回UpdateBufferすると、GPU実行時にはそのフレーム最後の書き込みへ
             // 全描画が上書きされてしまう。これを避けるため、リング状に複数コピーを確保しておく
-            const uint32_t ringCapacity = kConstantBufferRingCapacity;
+            // 既定では足りないバッファ(メッシュ数×パス数だけ書かれるObjectConstantsなど)は
+            // BufferDesc::MaxConstantUpdatesPerFrameで必要な段数を要求できる
+            const uint32_t ringCapacity = (desc.MaxConstantUpdatesPerFrame > 0)
+                ? (desc.MaxConstantUpdatesPerFrame * kFrameCount)
+                : kConstantBufferRingCapacity;
 
             Microsoft::WRL::ComPtr<ID3D12Resource> resource = CreateUploadBuffer(static_cast<uint64_t>(slotSizeInBytes) * ringCapacity);
 
@@ -2205,6 +2209,13 @@ namespace Kurenai::RHI
         const uint32_t index = m_BindlessTable->Register(srv);
         dx12Buffer->SetBindlessIndex(index);
         return index;
+    }
+
+    uint32_t DX12Device::GetMaxDrawsPerFrame() const
+    {
+        // AllocateSrvTableBlockが1フレームに払い出せるブロック数と同じ。
+        // これを超えるとAllocateSrvTableBlockが例外を投げる
+        return kMaxSrvTableBlocksPerFrame;
     }
 
     void DX12Device::DetectRaytracingSupport()

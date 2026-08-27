@@ -56,6 +56,186 @@ namespace
         return api;
     }
 
+    // コマンドラインの「-ddgilod <段数>」と「-ddgifollow」を読む。
+    // クリップマップLODの段数を振って効果を測るためのもの。指定が無ければ0を返す
+    uint32_t ParseDDGILODCount()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return 0u;
+        }
+
+        uint32_t lodCount = 0u;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-ddgilod") != 0)
+            {
+                continue;
+            }
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", "-ddgilodの後に段数が指定されていないため、.ksceneの指定のままにします");
+                break;
+            }
+            wchar_t* end = nullptr;
+            const long parsed = wcstol(argv[i + 1], &end, 10);
+            if (end == argv[i + 1] || (end != nullptr && *end != 0) || parsed < 1)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    "-ddgilodの引数が正の整数ではないため、.ksceneの指定のままにします: " +
+                        Kurenai::Core::WideToUtf8(argv[i + 1]));
+                break;
+            }
+            lodCount = static_cast<uint32_t>(parsed);
+            break;
+        }
+
+        LocalFree(argv);
+        return lodCount;
+    }
+
+    bool ParseDDGIFollowCamera()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return false;
+        }
+
+        bool follow = false;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-ddgifollow") == 0)
+            {
+                follow = true;
+                break;
+            }
+        }
+
+        LocalFree(argv);
+        return follow;
+    }
+
+    // コマンドラインの「-ddgithreshold <値>」を読む。DDGIのプローブ分類のしきい値。
+    // 0を渡すと分類そのものを無効にする。指定が無ければ負を返して既定のままにする
+    float ParseDDGIBackfaceThreshold()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return -1.0f;
+        }
+
+        float threshold = -1.0f;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-ddgithreshold") != 0)
+            {
+                continue;
+            }
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", "-ddgithresholdの後に値が指定されていないため、既定のままにします");
+                break;
+            }
+            wchar_t* end = nullptr;
+            const double parsed = wcstod(argv[i + 1], &end);
+            // 末尾までが数値であること(終端がNUL以外なら余計な文字が付いている)
+            if (end == argv[i + 1] || (end != nullptr && *end != 0))
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    "-ddgithresholdの引数が数値ではないため、既定のままにします: " +
+                        Kurenai::Core::WideToUtf8(argv[i + 1]));
+                break;
+            }
+            threshold = static_cast<float>(parsed);
+            break;
+        }
+
+        LocalFree(argv);
+        return threshold;
+    }
+
+    // コマンドラインに「-ddgiraster」があるか。あればDDGIのレイ取得をラスタライズへ固定する。
+    // ラスタ経路とレイトレース経路のA/B比較を、同じ起動手順のまま切り替えるために使う
+    bool ParseForceDDGIRaster()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return false;
+        }
+
+        bool forceRaster = false;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-ddgiraster") == 0)
+            {
+                forceRaster = true;
+                break;
+            }
+        }
+
+        LocalFree(argv);
+        return forceRaster;
+    }
+
+    // コマンドラインの「-debugview <番号>」を読む。番号の並びはUIの「デバッグ表示」コンボと同じ。
+    // 指定が無ければ-1(=既定のFinalのまま)を返す。
+    //
+    // 【何のためにあるのか】アトラスやバッファの生値を測る検証を、GUIのコンボを人手で
+    // 操作せずに再現できるようにするため(KurenaiEngine3D::SetDebugViewIndexのコメント参照)
+    int ParseDebugViewIndex()
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return -1;
+        }
+
+        int index = -1;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-debugview") != 0)
+            {
+                continue;
+            }
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", "-debugviewの後に番号が指定されていないため、デバッグ表示は既定のままにします");
+                break;
+            }
+            // 数字以外が来たら弾く(wcstolは先頭が数字でなければ0を返すため、自前で見る)
+            wchar_t* end = nullptr;
+            const long parsed = wcstol(argv[i + 1], &end, 10);
+            // 末尾までが数字であること(終端がNUL以外なら余計な文字が付いている)
+            if (end == argv[i + 1] || (end != nullptr && *end != 0))
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    "-debugviewの引数が数値ではないため、デバッグ表示は既定のままにします: " +
+                        Kurenai::Core::WideToUtf8(argv[i + 1]));
+                break;
+            }
+            index = static_cast<int>(parsed);
+            break;
+        }
+
+        LocalFree(argv);
+        return index;
+    }
+
     // コマンドラインの「-scene <名前>」(拡張子を除いたファイル名。例: MontSaintMichel)を、
     // KurenaiEngine3Dが構築するシーン一覧上の番号へ解決する。
     // 一覧の作り方(列挙→_wcsicmpで昇順ソート→Assets::ReadSceneNameが成功したものだけ採用)は
@@ -209,10 +389,33 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         uint32_t renderWidth = Kurenai::Defaults::RenderWidth;
         uint32_t renderHeight = Kurenai::Defaults::RenderHeight;
         size_t sceneIndex = ParseInitialSceneIndex();
+        const int debugViewIndex = ParseDebugViewIndex();
+        const bool forceDDGIRaster = ParseForceDDGIRaster();
+        const float ddgiBackfaceThreshold = ParseDDGIBackfaceThreshold();
+        const uint32_t ddgiLODCount = ParseDDGILODCount();
+        const bool ddgiFollowCamera = ParseDDGIFollowCamera();
 
         for (;;)
         {
             Kurenai::KurenaiEngine3D engine(api, renderWidth, renderHeight, sceneIndex);
+            // グラフィックスAPIを切り替えて作り直したときも同じ表示で見たいので毎回適用する
+            if (debugViewIndex >= 0)
+            {
+                engine.SetDebugViewIndex(debugViewIndex);
+            }
+            if (forceDDGIRaster)
+            {
+                engine.ForceDDGIRayModeRaster();
+            }
+            if (ddgiBackfaceThreshold >= 0.0f)
+            {
+                engine.SetDDGIBackfaceThreshold(ddgiBackfaceThreshold);
+            }
+            if (ddgiLODCount > 0u || ddgiFollowCamera)
+            {
+                // 段数に0を渡すと「.ksceneの指定のまま」で、追従だけを切り替える
+                engine.OverrideDDGILOD(ddgiLODCount, ddgiFollowCamera);
+            }
             engine.Run();
 
             if (!engine.HasPendingGraphicsAPIChange())

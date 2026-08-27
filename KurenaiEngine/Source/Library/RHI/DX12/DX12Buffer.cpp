@@ -178,6 +178,15 @@ namespace Kurenai::RHI
         return static_cast<uint8_t*>(m_MappedPtr) + static_cast<size_t>(m_CurrentRingIndex) * m_SlotSizeInBytes;
     }
 
+    uint32_t DX12Buffer::GetSafeUpdatesPerFrame() const
+    {
+        if (m_RingCapacity <= 1u)
+        {
+            return UINT32_MAX;
+        }
+        return m_RingCapacity / DX12Device::kFrameCount;
+    }
+
     void DX12Buffer::CheckRingOverflow(
         uint32_t ringCapacity, uint32_t& writesThisFrame, bool& reported, const char* bufferKindName)
     {

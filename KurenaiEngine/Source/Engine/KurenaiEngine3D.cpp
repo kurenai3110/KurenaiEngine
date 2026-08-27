@@ -81,6 +81,13 @@ namespace Kurenai
             };
         }
 
+        // FrameConstantsのDDGILOD配列の要素数。
+        //
+        // 【クラスのkDDGIMaxLODCountと同じ値でなければならない】この構造体は無名名前空間に
+        // あってKurenaiEngine3Dのprivate定数を見られないので、独立に定義している。
+        // 食い違いは下のstatic_assertが止める(cbufferのレイアウトが静かにずれるのを防ぐ)
+        constexpr uint32_t kFrameConstantsDDGILODCount = 4;
+
         struct alignas(16) FrameConstants
         {
             DirectX::XMFLOAT4X4 ViewProj;
@@ -162,7 +169,10 @@ namespace Kurenai
             //                y=距離モーメントの1辺のテクセル数(同)、z=拡散間接光の強度倍率、
             //                w=境界の幅(テクセル)
             DirectX::XMFLOAT4 DDGIParams3;
-            // DDGIParams4: x=このフレームの実効プリ露出(m_EffectiveExposureEV100の線形倍率)、yzw=未使用。
+            // DDGIParams4: x=このフレームの実効プリ露出(m_EffectiveExposureEV100の線形倍率)、
+            //             y=1/2解像度で評価するか、z=未使用、
+            //             w=プローブ分類のしきい値(裏面ヒット率がこれを超えたら
+            //               そのプローブを信用しない。0以下なら分類を無効にする)。
             //
             // 【アトラスは露出非依存の単位で持つ】ライトの色にはCPU側で実効プリ露出が
             // 事前乗算されており(21.5節)、その倍率は時刻に連動して最大18段(約26万倍)動く。
@@ -174,6 +184,23 @@ namespace Kurenai
             // アトラスの中身を露出に依存しない物理量に保つ。
             // R32で確保してある(22.6節)ので、夜の小さな値でもfp32の範囲に余裕がある
             DirectX::XMFLOAT4 DDGIParams4;
+            // DDGIのクリップマップLOD(31.4.2節)。LOD k は間隔が ProbeSpacing * 2^k。
+            //
+            // DDGILODOrigin[k].xyz … LOD k の格子の原点(ワールド)。k=0はDDGIParams0.xyzと同じ値
+            // DDGILODBase[k].xyz   … その原点に対応する格子の整数座標。
+            //                        トロイダル(剰余)addressingの基準。
+            //
+            // 【どちらもCPUで求めて渡す】原点÷間隔をシェーダー側でも計算すると、丸めが
+            // 食い違ったときにプローブのワールド位置とアトラスのセルがずれる。
+            // ずれても絵は出るので気づけない。「同じ量を2か所で導出しない」ための冗長さである。
+            //
+            // 【なぜDDGIParams4の直後なのか】末尾へ足すと、DDGIを実際に読む6本が
+            // ここから末尾までの14個のフィールドをオフセット合わせのためだけに宣言する羽目になる。
+            // ここへ入れれば、DDGIブロックを既に宣言している11本が1行ずつ足すだけで済む。
+            // **cbufferは宣言順でオフセットが決まるので、宣言している全シェーダーへ
+            // 同じ位置に足すこと**(飛ばすと、後続フィールドを読む側が静かにずれる)
+            DirectX::XMFLOAT4 DDGILODOrigin[kFrameConstantsDDGILODCount];
+            DirectX::XMFLOAT4 DDGILODBase[kFrameConstantsDDGILODCount];
             // bent normalによる遮蔽用(34章)。
             // x=ディフューズAOの出所   0=従来のベイクAO(Material.b) / 1=aoN = dot(N, bRaw)
             // y=スペキュラ遮蔽の方式   0=Frostbite近似(従来)      / 1=bent normalの錐体交差
@@ -280,6 +307,7 @@ namespace Kurenai
             // 実行時に動かすとボリューム経路と平面経路で雲の形が食い違い、
             // 背景の雲と水面に映る雲が別物になる(Sky.hlsliのCloudRaymarchStepsのコメント参照)
             DirectX::XMFLOAT4 CloudQualityParams;
+
         };
 
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
@@ -298,6 +326,16 @@ namespace Kurenai
             // w=このフレームの実効プリ露出。積分した放射輝度をこれで割ってから格納する
             // (理由はFrameConstants::DDGIParams4のコメント参照)
             DirectX::XMFLOAT4 Params2;
+        };
+
+        // DDGIProbeTrace.hlsl側のcbuffer DDGITraceConstants(register b1)と一致させる必要がある
+        struct alignas(16) DDGITraceConstants
+        {
+            // xyz=いま焼いているプローブのワールド座標、w=処理対象の面(D3Dのキューブ標準順)
+            DirectX::XMFLOAT4 Params0;
+            // x=キャプチャキューブの1面の解像度、y=エミッシブ強度(ラスタ経路のObjectConstantsへ
+            // 掛かっているのと同じ倍率)、z=太陽の影レイを撃つか(0/1。対照実験用)、w=未使用
+            DirectX::XMFLOAT4 Params1;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -1703,8 +1741,30 @@ namespace Kurenai
             rtAOConstantBufferDesc.SizeInBytes = sizeof(RTAOConstants);
             m_RTAOConstantBuffer = m_Device->CreateBuffer(rtAOConstantBufferDesc);
 
+            // DDGIのプローブ取得(コンピュートシェーダー。プローブから6面ぶんのレイを撃ち、
+            // ラスタ経路と同じ形のスクラッチキューブを直接埋める)
+            RHI::ShaderDesc ddgiTraceCsDesc;
+            ddgiTraceCsDesc.Stage = RHI::ShaderStage::Compute;
+            ddgiTraceCsDesc.FilePath = shaderDirectory + L"DDGIProbeTrace.hlsl";
+            ddgiTraceCsDesc.EntryPoint = "CSMain";
+            m_DDGIProbeTraceComputeShader = m_Device->CreateShader(ddgiTraceCsDesc);
+            m_DDGIProbeTracePipelineState =
+                m_Device->CreateComputePipelineState({ m_DDGIProbeTraceComputeShader.get() });
+
+            RHI::BufferDesc ddgiTraceConstantBufferDesc;
+            ddgiTraceConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+            ddgiTraceConstantBufferDesc.SizeInBytes = sizeof(DDGITraceConstants);
+            // プローブ1個につき6面ぶん書き換えるため、既定の段数では
+            // 更新プローブ数を増やしたときに足りなくなる(1フレーム最大64プローブ×6面=384回)
+            ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
+            m_DDGITraceConstantBuffer = m_Device->CreateBuffer(ddgiTraceConstantBufferDesc);
+
+            // レイトレーシングが使える環境ではDDGIのレイ取得も既定でDXRにする。
+            // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
+            m_DDGIRayMode = DDGIRayModeForCapability(true);
+
             Core::Logger::Info(
-                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウ・AO/GIでRaytracedを選択可能)");
+                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウ・AO/GI・DDGIでRaytracedを選択可能)");
         }
         else
         {
@@ -2326,6 +2386,23 @@ namespace Kurenai
         ddgiUpdateConstantBufferDesc.SizeInBytes = sizeof(DDGIUpdateConstants);
         m_DDGIUpdateConstantBuffer = m_Device->CreateBuffer(ddgiUpdateConstantBufferDesc);
 
+        // スクロールで未確定になったプローブを、焼き直されるまでサンプリングから外すパス
+        RHI::ShaderDesc ddgiInvalidateCsDesc;
+        ddgiInvalidateCsDesc.Stage = RHI::ShaderStage::Compute;
+        ddgiInvalidateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.hlsl";
+        ddgiInvalidateCsDesc.EntryPoint = "CSInvalidateProbes";
+        m_DDGIInvalidateProbesComputeShader = m_Device->CreateShader(ddgiInvalidateCsDesc);
+        m_DDGIInvalidateProbesPipelineState =
+            m_Device->CreateComputePipelineState({ m_DDGIInvalidateProbesComputeShader.get() });
+
+        // 焼き直し待ちのスロット番号を渡す。最悪ケース(全プローブが一度に未確定)でも足りる大きさ。
+        // 1フレームに1回しか書かないのでリングの段数は既定のままでよい
+        RHI::BufferDesc ddgiDirtyBufferDesc;
+        ddgiDirtyBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+        ddgiDirtyBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * kDDGIMaxProbes;
+        ddgiDirtyBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        m_DDGIDirtyProbeBuffer = m_Device->CreateBuffer(ddgiDirtyBufferDesc);
+
         // シーン読み込み前でもSRVをバインドできるよう、この時点で1プローブぶんのダミーを確保しておく
         RecreateDDGIAtlases();
 
@@ -2344,6 +2421,13 @@ namespace Kurenai
         RHI::BufferDesc objectConstantBufferDesc;
         objectConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         objectConstantBufferDesc.SizeInBytes = sizeof(ObjectConstants);
+        // このバッファだけは「メッシュごと・パスごと」に書かれるため、既定の段数では足りない。
+        // 1フレームの最悪ケースは、本編のパス(深度プリパス・G-Buffer・シャドウ4枚・半透明ほか)に
+        // 加えて、プローブのキャプチャが「プローブ数 × 6面 × 不透明メッシュ数」を積む。
+        // BistroInteriorLit(不透明59メッシュ)で既定の16プローブ/フレームだと
+        // 59 × 6 × 16 = 5664 回に達し、既定の4096回では一周して描画が壊れていた。
+        // 16384にしておけば同シーンで3倍近い余裕がある(1スロット256Bなので約8MB)
+        objectConstantBufferDesc.MaxConstantUpdatesPerFrame = kObjectConstantUpdatesPerFrame;
         m_ObjectConstantBuffer = m_Device->CreateBuffer(objectConstantBufferDesc);
 
         // ポイント/スポットライトのリスト(t8)。CPUから毎フレーム更新するが、ピクセルシェーダから
@@ -2436,6 +2520,85 @@ namespace Kurenai
     {
         return m_AOTechnique == AOTechnique::Raytraced && m_RaytracingScene.IsValid() &&
                m_RTAOPipelineState != nullptr && m_RTAORawTexture != nullptr && m_RTAOTexture != nullptr;
+    }
+
+    void KurenaiEngine3D::SetDebugViewIndex(int index)
+    {
+        // 総数はenumのすぐ隣で定義してある(KurenaiEngine3D.h)
+        if (index < 0 || index >= kDebugViewCount)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "デバッグ表示の番号が範囲外のため無視します: " + std::to_string(index) + " (0〜" +
+                    std::to_string(kDebugViewCount - 1) + ")");
+            return;
+        }
+
+        m_DebugView = static_cast<DebugView>(index);
+        Core::Logger::Info("KurenaiEngine3D", "デバッグ表示を番号で選択しました: " + std::to_string(index));
+    }
+
+    void KurenaiEngine3D::ForceDDGIRayModeRaster()
+    {
+        m_DDGIRayMode = DDGIRayMode::Raster;
+        Core::Logger::Info("KurenaiEngine3D", "DDGIのレイ取得をラスタライズへ固定しました(起動オプション)");
+    }
+
+    void KurenaiEngine3D::SetDDGIBackfaceThreshold(float threshold)
+    {
+        if (threshold <= 0.0f)
+        {
+            m_DDGIProbeClassificationEnabled = false;
+            Core::Logger::Info("KurenaiEngine3D", "DDGIのプローブ分類を無効にしました(起動オプション)");
+            return;
+        }
+
+        m_DDGIProbeClassificationEnabled = true;
+        m_DDGIBackfaceThreshold = threshold;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "DDGIのプローブ分類のしきい値を設定しました(起動オプション): " + std::to_string(threshold));
+    }
+
+    void KurenaiEngine3D::OverrideDDGILOD(uint32_t lodCount, bool followCamera)
+    {
+        if (!m_HasGIVolume)
+        {
+            Core::Logger::Warning("KurenaiEngine3D", "[GIVolume]が無いためLODの上書きは効きません");
+            return;
+        }
+
+        // 0は「.ksceneの指定のまま」を意味する(追従だけを切り替えたいとき)
+        const uint32_t requested = (lodCount == 0u) ? m_GIVolume.LODCount : lodCount;
+        const uint32_t clamped = std::clamp(requested, 1u, kDDGIMaxLODCount);
+        const uint64_t probeCount =
+            static_cast<uint64_t>(m_GIVolume.ProbeCounts[0]) *
+            static_cast<uint64_t>(m_GIVolume.ProbeCounts[1]) *
+            static_cast<uint64_t>(m_GIVolume.ProbeCounts[2]) *
+            static_cast<uint64_t>(clamped);
+        if (probeCount > kDDGIMaxProbes)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "LODの上書きでプローブ数が上限(" + std::to_string(kDDGIMaxProbes) + ")を超えるため無視します: " +
+                    std::to_string(probeCount) + "個");
+            return;
+        }
+
+        m_GIVolume.LODCount = clamped;
+        m_GIVolume.FollowCamera = followCamera;
+        // 段数が変わるとアトラスの行数が変わるので確保し直す(中身も作り直しになる)
+        RecreateDDGIAtlases();
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "DDGIのLODを上書きしました(起動オプション): 段数 " + std::to_string(clamped) +
+                " / カメラ追従 " + (followCamera ? "有効" : "無効"));
+    }
+
+    bool KurenaiEngine3D::ShouldRunRaytracedDDGITrace() const
+    {
+        return m_DDGIRayMode == DDGIRayMode::Raytraced && m_RaytracingScene.IsValid() &&
+               m_DDGIProbeTracePipelineState != nullptr && m_DDGITraceConstantBuffer != nullptr;
     }
 
     bool KurenaiEngine3D::ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const
@@ -3794,10 +3957,22 @@ namespace Kurenai
         if (m_HasGIVolume)
         {
             m_GIVolume = m_Scene.GIVolumes.front();
+            const uint32_t lodCount = std::clamp(m_GIVolume.LODCount, 1u, kDDGIMaxLODCount);
+            if (m_GIVolume.LODCount > kDDGIMaxLODCount)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "[GIVolume]のLODCountが上限(" + std::to_string(kDDGIMaxLODCount) + ")を超えているため丸めます: " +
+                        std::to_string(m_GIVolume.LODCount));
+                m_GIVolume.LODCount = lodCount;
+            }
+            // 【段数ぶん掛けること】クリップマップLODはプローブ数が段数倍になる。
+            // 掛け忘れると上限のチェックが素通りし、確保だけが膨らむ
             const uint64_t probeCount =
                 static_cast<uint64_t>(m_GIVolume.ProbeCounts[0]) *
                 static_cast<uint64_t>(m_GIVolume.ProbeCounts[1]) *
-                static_cast<uint64_t>(m_GIVolume.ProbeCounts[2]);
+                static_cast<uint64_t>(m_GIVolume.ProbeCounts[2]) *
+                static_cast<uint64_t>(lodCount);
             if (probeCount > kDDGIMaxProbes)
             {
                 // 切り捨てでは格子が歪んで意味を成さない(反射プローブのように「先頭N個」で
@@ -3805,7 +3980,8 @@ namespace Kurenai
                 Core::Logger::Error(
                     "KurenaiEngine3D",
                     "[GIVolume]のプローブ数が上限(" + std::to_string(kDDGIMaxProbes) + ")を超えたためDDGIを無効にします: " +
-                        std::to_string(probeCount) + "個。ProbeCountsを減らすかProbeSpacingを広げてください");
+                        std::to_string(probeCount) + "個(格子 × LOD" + std::to_string(lodCount) +
+                        "段)。ProbeCountsかLODCountを減らすかProbeSpacingを広げてください");
                 m_HasGIVolume = false;
             }
         }
@@ -3866,10 +4042,18 @@ namespace Kurenai
         const uint32_t countY = m_HasGIVolume ? m_GIVolume.ProbeCounts[1] : 1u;
         const uint32_t countZ = m_HasGIVolume ? m_GIVolume.ProbeCounts[2] : 1u;
 
-        m_DDGIProbeCount = countX * countY * countZ;
+        m_DDGILODCount = m_HasGIVolume
+            ? std::clamp(m_GIVolume.LODCount, 1u, kDDGIMaxLODCount)
+            : 1u;
+        m_DDGIProbesPerLOD = countX * countY * countZ;
+        m_DDGIProbeCount = m_DDGIProbesPerLOD * m_DDGILODCount;
 
+        // 【LODは縦に積むだけ】列は変えず、行だけ段数倍にする。こうすると通し番号
+        // slot = k*(Cx*Cy*Cz) + z*Cx*Cy + y*Cx + x に対して
+        // 「行 = slot/(Cx*Cy)、列 = slot%(Cx*Cy)」がそのまま LOD k の行 [k*Cz, (k+1)*Cz) を指すので、
+        // 更新CS(DDGIProbeUpdate.hlsl)のアトラス座標式を1文字も変えずに済む
         const uint32_t columns = countX * countY;
-        const uint32_t rows = countZ;
+        const uint32_t rows = countZ * m_DDGILODCount;
 
         // 【R32系である必要がある】更新CSはヒステリシス(前の値と新しい値のlerp)のために
         // アトラスをRWTexture2Dとして読んでから書く。型付きUAV読み出しはR32系しか保証されておらず、
@@ -3882,10 +4066,19 @@ namespace Kurenai
         m_DDGIDistanceAtlas = m_Device->CreateUAVTexture(
             columns * kDDGIDistanceCell, rows * kDDGIDistanceCell, RHI::Format::R32G32_Float);
 
+        // 確保し直した直後のアトラスは中身が未定義なので、全スロットを「未確定」として持つ。
+        // 【あり得ない座標で埋める】0で埋めると、たまたまその座標を担当するスロットが
+        // 「もう焼いてある」と誤判定される
+        m_DDGIProbeBakedCoord.assign(
+            m_DDGIProbeCount, DirectX::XMINT3{ INT32_MIN, INT32_MIN, INT32_MIN });
+        m_DDGIDirtyProbeList.clear();
+
         // 確保し直した直後のアトラスは中身が未定義なので、一巡目からやり直す
         m_DDGIBaked = false;
         m_DDGIWarmingUp = true;
         m_DDGIUpdateCursor = 0;
+        // シーンが変わればメッシュ数も変わるので、クランプの報告も出し直す
+        m_DDGIProbesPerFrameClampReported = false;
         m_DDGIOverwriteRemaining = 0;
         m_DDGILastExposureValid = false;
 
@@ -3901,19 +4094,208 @@ namespace Kurenai
         }
     }
 
-    DirectX::XMFLOAT3 KurenaiEngine3D::ComputeDDGIProbePosition(uint32_t probeIndex) const
+    uint32_t KurenaiEngine3D::ClampDDGIProbesPerFrameToConstantRing(uint32_t requested)
+    {
+        // DX11はどちらの上限も持たない(UINT32_MAXが返る)
+        const uint32_t maxDraws = m_Device->GetMaxDrawsPerFrame();
+        const uint32_t maxWrites =
+            m_ObjectConstantBuffer ? m_ObjectConstantBuffer->GetSafeUpdatesPerFrame() : UINT32_MAX;
+        // 描画1回につきObjectConstantsを1回書くので、厳しい方に合わせれば両方を満たす
+        const uint32_t maxWork = std::min(maxDraws, maxWrites);
+        if (maxWork == UINT32_MAX)
+        {
+            return requested;
+        }
+
+        // ラスタ経路が1プローブあたり描き直す不透明メッシュの数。
+        // captureDDGIProbeFaceの描画ループと同じ条件で数えること
+        uint32_t opaqueMeshCount = 0;
+        for (const auto& instance : m_Scene.Instances)
+        {
+            for (const auto& mesh : instance.Model.Meshes)
+            {
+                if (!mesh.IsTransparent)
+                {
+                    ++opaqueMeshCount;
+                }
+            }
+        }
+        if (opaqueMeshCount == 0)
+        {
+            return requested;
+        }
+
+        const uint32_t reserved = opaqueMeshCount * kDDGIFrameBudgetReserveDrawsPerMesh;
+        const uint32_t perProbe = kCubeFaceCount * opaqueMeshCount;
+        // 本編のパスだけで予算を使い切る規模のシーンでは、DDGIへ回せる分が残らない。
+        // それでも0にはせず1プローブは進める(進めないと永久に焼き上がらないため)。
+        // 予算そのものの超過は、それぞれの上限側がエラーとして報告する
+        const uint32_t budget = (maxWork > reserved) ? (maxWork - reserved) : 0u;
+        const uint32_t allowed = std::max<uint32_t>(1u, budget / perProbe);
+
+        if (requested <= allowed)
+        {
+            return requested;
+        }
+
+        if (!m_DDGIProbesPerFrameClampReported)
+        {
+            m_DDGIProbesPerFrameClampReported = true;
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "DDGIのラスタ経路が1フレームの予算を超えるため、更新プローブ数を " +
+                    std::to_string(requested) + " から " + std::to_string(allowed) +
+                    " へ制限しました(不透明メッシュ " + std::to_string(opaqueMeshCount) +
+                    " × 6面 × プローブ数。1フレームの上限は 描画 " + std::to_string(maxDraws) +
+                    " 回 / 定数書き込み " + std::to_string(maxWrites) +
+                    " 回)。収束は遅くなりますが描画は壊れません。レイトレース経路にはこの制限は掛かりません");
+        }
+        return allowed;
+    }
+
+    DirectX::XMFLOAT3 KurenaiEngine3D::ComputeDDGILODSpacing(uint32_t lod) const
+    {
+        // LODが1つ上がるごとに間隔が2倍(=覆う範囲が2倍)
+        const float scale = static_cast<float>(1u << lod);
+        return DirectX::XMFLOAT3{
+            m_GIVolume.ProbeSpacing[0] * scale,
+            m_GIVolume.ProbeSpacing[1] * scale,
+            m_GIVolume.ProbeSpacing[2] * scale,
+        };
+    }
+
+    DirectX::XMINT3 KurenaiEngine3D::ComputeDDGILODBaseIndex(uint32_t lod) const
+    {
+        const DirectX::XMFLOAT3 spacing = ComputeDDGILODSpacing(lod);
+        const int32_t countX = static_cast<int32_t>(m_GIVolume.ProbeCounts[0]);
+        const int32_t countY = static_cast<int32_t>(m_GIVolume.ProbeCounts[1]);
+        const int32_t countZ = static_cast<int32_t>(m_GIVolume.ProbeCounts[2]);
+
+        if (!m_GIVolume.FollowCamera)
+        {
+            // 追従しないので格子は動かない。基準は0でよい
+            // (トロイダルの写像は基準が何であっても自己整合するが、動かないなら0が素直)
+            return DirectX::XMINT3{ 0, 0, 0 };
+        }
+
+        // 【そのLOD自身の格子へスナップする】スナップすれば、カメラが動いてもプローブの
+        // ワールド座標は動かない。動くのは「どのプローブが範囲に入っているか」だけになり、
+        // 範囲に残ったプローブの焼き上がりをそのまま使える。
+        // スナップしないと毎フレーム全プローブが焼き直しになる
+        const DirectX::XMFLOAT3 camera = m_DDGIFollowCenter;
+        const auto snap = [](float centerValue, float spacingValue, int32_t count) -> int32_t
+        {
+            if (spacingValue <= 0.0f)
+            {
+                return 0;
+            }
+            const int32_t centerIndex = static_cast<int32_t>(std::floor(centerValue / spacingValue));
+            // カメラを格子の中央へ置く
+            return centerIndex - (count - 1) / 2;
+        };
+
+        return DirectX::XMINT3{
+            snap(camera.x, spacing.x, countX),
+            snap(camera.y, spacing.y, countY),
+            snap(camera.z, spacing.z, countZ),
+        };
+    }
+
+    DirectX::XMFLOAT3 KurenaiEngine3D::ComputeDDGILODOrigin(uint32_t lod) const
+    {
+        const DirectX::XMFLOAT3 spacing = ComputeDDGILODSpacing(lod);
+
+        if (m_GIVolume.FollowCamera)
+        {
+            const DirectX::XMINT3 base = ComputeDDGILODBaseIndex(lod);
+            return DirectX::XMFLOAT3{
+                static_cast<float>(base.x) * spacing.x,
+                static_cast<float>(base.y) * spacing.y,
+                static_cast<float>(base.z) * spacing.z,
+            };
+        }
+
+        // 追従しない場合、LOD0は.ksceneのOriginをそのまま使う(既存シーンの挙動を1ビットも
+        // 変えないため)。上のLODは同じ中心を保ったまま広がるように置く
+        if (lod == 0)
+        {
+            return DirectX::XMFLOAT3{ m_GIVolume.Origin[0], m_GIVolume.Origin[1], m_GIVolume.Origin[2] };
+        }
+
+        const auto centered = [this, &spacing](int axis) -> float
+        {
+            const float count = static_cast<float>(m_GIVolume.ProbeCounts[axis]);
+            const float extent0 = (count - 1.0f) * m_GIVolume.ProbeSpacing[axis];
+            const float extentK = (count - 1.0f) * (&spacing.x)[axis];
+            return m_GIVolume.Origin[axis] + (extent0 - extentK) * 0.5f;
+        };
+        return DirectX::XMFLOAT3{ centered(0), centered(1), centered(2) };
+    }
+
+    DirectX::XMINT3 KurenaiEngine3D::ComputeDDGIProbeWorldCoord(uint32_t probeIndex) const
     {
         const uint32_t countX = m_GIVolume.ProbeCounts[0];
         const uint32_t countY = m_GIVolume.ProbeCounts[1];
 
-        const uint32_t x = probeIndex % countX;
-        const uint32_t y = (probeIndex / countX) % countY;
-        const uint32_t z = probeIndex / (countX * countY);
+        const uint32_t perLOD = std::max(1u, m_DDGIProbesPerLOD);
+        const uint32_t lod = std::min(probeIndex / perLOD, m_DDGILODCount - 1u);
+        const uint32_t local = probeIndex - lod * perLOD;
+
+        const int32_t atlasX = static_cast<int32_t>(local % countX);
+        const int32_t atlasY = static_cast<int32_t>((local / countX) % countY);
+        const int32_t atlasZ = static_cast<int32_t>(local / (countX * countY));
+
+        const DirectX::XMINT3 base = ComputeDDGILODBaseIndex(lod);
+        const auto unwrap = [](int32_t atlasCoord, int32_t baseCoord, int32_t count) -> int32_t
+        {
+            return baseCoord + ((atlasCoord - baseCoord) % count + count) % count;
+        };
+
+        return DirectX::XMINT3{
+            unwrap(atlasX, base.x, static_cast<int32_t>(countX)),
+            unwrap(atlasY, base.y, static_cast<int32_t>(m_GIVolume.ProbeCounts[1])),
+            unwrap(atlasZ, base.z, static_cast<int32_t>(m_GIVolume.ProbeCounts[2])),
+        };
+    }
+
+    DirectX::XMFLOAT3 KurenaiEngine3D::ComputeDDGIProbePosition(uint32_t probeIndex) const
+    {
+        const uint32_t countX = m_GIVolume.ProbeCounts[0];
+        const uint32_t countY = m_GIVolume.ProbeCounts[1];
+        const uint32_t countZ = m_GIVolume.ProbeCounts[2];
+
+        // 通し番号 → LOD段 → その段の中の位置
+        const uint32_t perLOD = std::max(1u, m_DDGIProbesPerLOD);
+        const uint32_t lod = std::min(probeIndex / perLOD, m_DDGILODCount - 1u);
+        const uint32_t local = probeIndex - lod * perLOD;
+
+        // アトラス上の格子座標(セルの並びそのもの)
+        const int32_t atlasX = static_cast<int32_t>(local % countX);
+        const int32_t atlasY = static_cast<int32_t>((local / countX) % countY);
+        const int32_t atlasZ = static_cast<int32_t>(local / (countX * countY));
+
+        const DirectX::XMFLOAT3 spacing = ComputeDDGILODSpacing(lod);
+        const DirectX::XMFLOAT3 origin = ComputeDDGILODOrigin(lod);
+        const DirectX::XMINT3 base = ComputeDDGILODBaseIndex(lod);
+
+        // 【トロイダル(剰余)addressingの逆変換】アトラスのセル番号は
+        // 「ワールド格子座標 mod プローブ数」なので、いま範囲に入っている区間
+        // [base, base + count) の中で、その剰余に一致する格子座標を1つ選び直す。
+        // これがそのセルがいま担当しているプローブのワールド位置になる
+        const auto unwrap = [](int32_t atlasCoord, int32_t baseCoord, int32_t count) -> int32_t
+        {
+            const int32_t offset = ((atlasCoord - baseCoord) % count + count) % count;
+            return offset;
+        };
+
+        const int32_t localX = unwrap(atlasX, base.x, static_cast<int32_t>(countX));
+        const int32_t localY = unwrap(atlasY, base.y, static_cast<int32_t>(countY));
+        const int32_t localZ = unwrap(atlasZ, base.z, static_cast<int32_t>(countZ));
 
         return DirectX::XMFLOAT3{
-            m_GIVolume.Origin[0] + static_cast<float>(x) * m_GIVolume.ProbeSpacing[0],
-            m_GIVolume.Origin[1] + static_cast<float>(y) * m_GIVolume.ProbeSpacing[1],
-            m_GIVolume.Origin[2] + static_cast<float>(z) * m_GIVolume.ProbeSpacing[2],
+            origin.x + static_cast<float>(localX) * spacing.x,
+            origin.y + static_cast<float>(localY) * spacing.y,
+            origin.z + static_cast<float>(localZ) * spacing.z,
         };
     }
 
@@ -3943,6 +4325,14 @@ namespace Kurenai
         // 常にカスケードシャドウマップで、そのシャドウマップはRTシャドウ選択時も同じように
         // 描かれるため、CascadedShadowMapとRaytracedでプローブの焼き上がりは変わらない
         mixBool(m_ShadowMode != ShadowMode::Off);
+        // DDGIのレイの取得(ラスタライズ / レイトレーシング)と、その影レイの有無。
+        //
+        // 【混ぜ忘れると「つまみが効かない」型の不具合になる】切り替えても署名が変わらないため
+        // 焼き直しが起きず、収束済みで停止しているモードでは絵が一切変わらない。
+        // 反射プローブはこの2つの影響を受けないが、署名を共有しているため一緒に焼き直しになる
+        // (余分な焼き直しが1回起きるだけで、破綻はしない)
+        mixBool(m_DDGIRayMode == DDGIRayMode::Raytraced);
+        mixBool(m_DDGISunShadowRayEnabled);
         // 月は時刻に連動せず手動指定なので、太陽とは別に混ぜる必要がある。太陽が沈むと
         // 平行光源の枠が月へ切り替わり、キャプチャの直接光がそのまま変わる
         mixFloat(m_MoonAzimuthDegrees);
@@ -5287,6 +5677,12 @@ namespace Kurenai
         {
             DirectX::XMStoreFloat4x4(&constants.CascadeViewProj[cascade], DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
         }
+        // 【DDGIのクリップマップの追従中心をここで固定する】このあと組み立てるFrameConstantsの
+        // 各LODの原点も、後段のプローブのキャプチャ位置も、すべてこの値を基準に決まる。
+        // 1フレームの途中で動かすと「シェーダーが見ている格子」と「実際に焼いた位置」が
+        // 食い違い、間接光が別の場所のものになる
+        m_DDGIFollowCenter = DirectX::XMFLOAT3{ cameraPosition.x, cameraPosition.y, cameraPosition.z };
+
         constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
         constants.LightDirection = { sunLighting.Direction.x, sunLighting.Direction.y, sunLighting.Direction.z, 0.0f };
         // 太陽を無効にする場合は色をゼロにするだけでよい(シェーダー側は太陽の寄与に
@@ -5482,7 +5878,42 @@ namespace Kurenai
         // 条件はDDGIResolveパスの登録側(ddgiResolvePassRuns)と同じものを並べている
         const bool ddgiHalfResolutionActive =
             m_DDGIHalfResolution && m_DDGIResolveTexture && m_DDGIEnabled && m_HasGIVolume && m_DDGIBaked;
-        constants.DDGIParams4 = { effectiveExposure, ddgiHalfResolutionActive ? 1.0f : 0.0f, 0.0f, 0.0f };
+        // プローブ分類のしきい値。裏面の情報を持てるのはレイトレース経路だけなので、
+        // ラスタ経路では分類そのものを無効(0)にして従来どおりの挙動に保つ
+        // (ラスタ経路のαは常に0なのでどのしきい値でも有効側に倒れるが、
+        //  「分類は掛かっていない」ことを値として明示しておく)
+        const float ddgiBackfaceThreshold =
+            (m_DDGIProbeClassificationEnabled && ShouldRunRaytracedDDGITrace()) ? m_DDGIBackfaceThreshold : 0.0f;
+        constants.DDGIParams4 = {
+            effectiveExposure, ddgiHalfResolutionActive ? 1.0f : 0.0f,
+            static_cast<float>(m_DDGILODCount), ddgiBackfaceThreshold
+        };
+
+        // クリップマップLODの各段の原点と、トロイダルaddressingの基準になる格子座標。
+        // 使わない段も0で埋めておく(未初期化のまま渡すと、段数を増やした瞬間に
+        // ゴミを読んで見当違いの場所からプローブを引く)
+        static_assert(
+            kFrameConstantsDDGILODCount == kDDGIMaxLODCount,
+            "FrameConstantsのDDGILOD配列の要素数とkDDGIMaxLODCountを一致させること"
+            "(ずれるとcbufferのレイアウトが静かに食い違う)");
+        for (uint32_t lod = 0; lod < kDDGIMaxLODCount; ++lod)
+        {
+            if (m_HasGIVolume && lod < m_DDGILODCount)
+            {
+                const DirectX::XMFLOAT3 lodOrigin = ComputeDDGILODOrigin(lod);
+                const DirectX::XMINT3 lodBase = ComputeDDGILODBaseIndex(lod);
+                constants.DDGILODOrigin[lod] = { lodOrigin.x, lodOrigin.y, lodOrigin.z, 0.0f };
+                constants.DDGILODBase[lod] = {
+                    static_cast<float>(lodBase.x), static_cast<float>(lodBase.y),
+                    static_cast<float>(lodBase.z), 0.0f
+                };
+            }
+            else
+            {
+                constants.DDGILODOrigin[lod] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                constants.DDGILODBase[lod] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            }
+        }
         // 水面。スクロール位相はRenderThreadMainがm_WaterTimeFrozen/m_WaterWaveSpeedに
         // 応じて毎フレーム進める(m_TimeOfDayの自動進行と同じ場所・同じ方式)。
         // y=波のスケール倍率(m_WaterWaveScale)、z=波の強さ(m_WaterWaveStrength、0〜1)を
@@ -6523,6 +6954,66 @@ namespace Kurenai
             cmd->Dispatch((kDDGICaptureSize + 7) / 8, (kDDGICaptureSize + 7) / 8, 1);
         };
 
+        // captureDDGIProbeFaceのDXR版。ラスタライズとキューブへの書き写しをまとめて置き換え、
+        // 同じスクラッチキューブ2本を1ディスパッチで直接埋める。
+        //
+        // 【面ごとに1ディスパッチなのはRHIの制約】キューブのUAVは面ごと(要素数1のTexture2DArray)に
+        // しか張れないため、6面を1回のディスパッチへ畳むにはRHIへ「キューブ全スライスを
+        // RWTexture2DArrayとして張る」メソッドをDX11/DX12の両方へ足す必要がある。
+        // ドローとメッシュ走査が消えるのが本題なので、そこは測ってから決める
+        const auto traceDDGIProbeFace =
+            [this, skyTexture](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+        {
+            const DirectX::XMFLOAT3 probePosition = ComputeDDGIProbePosition(probeIndex);
+
+            DDGITraceConstants traceConstants{};
+            traceConstants.Params0 = {
+                probePosition.x, probePosition.y, probePosition.z, static_cast<float>(face)
+            };
+            traceConstants.Params1 = {
+                static_cast<float>(kDDGICaptureSize),
+                m_EmissiveIntensity,
+                m_DDGISunShadowRayEnabled ? 1.0f : 0.0f,
+                0.0f
+            };
+
+            cmd->SetComputePipelineState(m_DDGIProbeTracePipelineState.get());
+            // ヒット面のマテリアルテクスチャをbindlessで引くためs0にWrapが要る(RTAOと同じ理由)
+            cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
+            cmd->UpdateBuffer(m_DDGITraceConstantBuffer.get(), &traceConstants, sizeof(traceConstants));
+            // b0はこのフレームのFrameConstantsをそのまま使う。ラスタ経路と違い、
+            // プローブ位置は専用の定数バッファ(b1)で渡すのでViewProjを差し替える必要が無い
+            cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+            cmd->SetComputeConstantBuffer(1, m_DDGITraceConstantBuffer.get());
+
+            cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+            cmd->SetComputeShaderResourceBuffer(1, m_RaytracingScene.GetVertexAttributeBuffer());
+            cmd->SetComputeShaderResourceBuffer(2, m_RaytracingScene.GetIndexBuffer());
+            cmd->SetComputeShaderResourceBuffer(3, m_RaytracingScene.GetMeshInfoBuffer());
+            cmd->SetComputeShaderResourceBuffer(4, m_RaytracingScene.GetInstanceInfoBuffer());
+            cmd->SetComputeShaderResourceBuffer(5, m_RaytracingScene.GetMaterialBuffer());
+            // メッシュレット表(t6)。このシェーダー自身は引かないが、共有ヘッダーの
+            // RaytracingScene.hlsliが宣言を持つためバインドしておく(RTAOと同じ扱い)。
+            // メッシュレットを持つメッシュが1つも無いシーンではバッファ自体が無い
+            if (RHI::IRHIBuffer* meshletBuffer = m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
+            {
+                cmd->SetComputeShaderResourceBuffer(6, meshletBuffer);
+            }
+            cmd->SetComputeShaderResourceBuffer(7, m_LightBuffer.get());
+            cmd->SetComputeTexture(8, m_IrradianceTexture.get());
+            cmd->SetComputeTexture(9, m_PrefilteredEnvTexture.get());
+            cmd->SetComputeTexture(10, m_BRDFLUTTexture.get());
+            cmd->SetComputeTexture(11, skyTexture);
+            // DDGIの多重バウンス。ラスタ経路がt12/t13で引いているのと同じアトラス
+            cmd->SetComputeTexture(12, m_DDGIIrradianceAtlas.get());
+            cmd->SetComputeTexture(13, m_DDGIDistanceAtlas.get());
+
+            // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_DDGICaptureRadianceCube.get(), face, 0, 0);
+            cmd->SetComputeUnorderedAccessTextureCubeFace(1, m_DDGICaptureDistanceCube.get(), face, 0, 0);
+            cmd->Dispatch((kDDGICaptureSize + 7) / 8, (kDDGICaptureSize + 7) / 8, 1);
+        };
+
         // 組み上がったキューブ2本から、オクタヘドラルアトラスの該当セルを焼き直す。
         // 境界の複製は本体の書き込みが全て終わってからでないと正しい値を読めないので別ディスパッチ
         const auto updateDDGIProbe = [this, effectiveExposure](RHI::IRHICommandList* cmd, uint32_t probeIndex, bool overwrite)
@@ -6588,8 +7079,31 @@ namespace Kurenai
 
         if (m_DDGIEnabled && m_HasGIVolume && m_DDGIProbeCount > 0 && !m_DDGIUpdateSuspended)
         {
-            const uint32_t perFrame = std::min<uint32_t>(
+            // レイの取得をどちらで行うか。パスの登録とキャプチャの実行で同じ判定を使う
+            const bool useRaytracedTrace = ShouldRunRaytracedDDGITrace();
+
+            // 【どちらの経路が実際に走ったかをログに残す】切り替えたつもりで切り替わっていない、
+            // という取り違えをA/B比較の前に潰すため。切り替わったときだけ出す
+            if (!m_DDGIRayModeReported || m_DDGIRayModeReportedRaytraced != useRaytracedTrace)
+            {
+                m_DDGIRayModeReported = true;
+                m_DDGIRayModeReportedRaytraced = useRaytracedTrace;
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    useRaytracedTrace
+                        ? std::string("DDGIのレイ取得: レイトレーシング(DXR)。太陽の影レイ: ") +
+                              (m_DDGISunShadowRayEnabled ? "有効" : "無効")
+                        : std::string("DDGIのレイ取得: ラスタライズ"));
+            }
+
+            uint32_t perFrame = std::min<uint32_t>(
                 static_cast<uint32_t>(std::max(m_DDGIProbesPerFrame, 1)), m_DDGIProbeCount);
+            if (!useRaytracedTrace)
+            {
+                // 1フレームの描画回数・定数書き込み回数の上限はラスタ経路だけの制約。
+                // レイトレース経路はメッシュごとの描画をしないので抑える必要が無い
+                perFrame = ClampDDGIProbesPerFrameToConstantRing(perFrame);
+            }
             const bool warmingUp = m_DDGIWarmingUp;
 
             // 実効プリ露出が大きく動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる
@@ -6617,12 +7131,120 @@ namespace Kurenai
             // 独立に効かせたいので、残数を消費せず条件だけ合流させる
             const bool overwriteWholeCycle = !warmingUp && m_DDGIUpdateMode != DDGIUpdateMode::Always;
 
+            // --- 格子のスクロールで未確定になったスロットを拾う ---
+            //
+            // カメラが動くと、各LODの原点がその段の格子へスナップし直される。スナップして
+            // いるのでプローブのワールド座標そのものは動かないが、範囲から抜けた列のセルが
+            // 反対側の新しい列へ回るため、そのセルは「別の場所を担当する」ようになる。
+            // そこには前の場所のイラディアンスが残っているので、焼き直すまで使ってはいけない。
+            m_DDGIDirtyProbeList.clear();
+            if (m_DDGIProbeBakedCoord.size() == m_DDGIProbeCount)
+            {
+                for (uint32_t slot = 0; slot < m_DDGIProbeCount; ++slot)
+                {
+                    const DirectX::XMINT3 current = ComputeDDGIProbeWorldCoord(slot);
+                    const DirectX::XMINT3& baked = m_DDGIProbeBakedCoord[slot];
+                    if (current.x != baked.x || current.y != baked.y || current.z != baked.z)
+                    {
+                        m_DDGIDirtyProbeList.push_back(slot);
+                    }
+                }
+            }
+
+            // 【細かいLODを優先する】通し番号は LOD0 が先頭に並ぶので、番号順に詰めるだけで
+            // 「細かい段から先に焼き直す」になる。見ている場所の間接光が先に確定する。
+            //
+            // 未確定が1フレームの予算を超えるときは、超えたぶんが次フレーム以降へ回る。
+            // その間そのスロットはαの印(2.0)でサンプリングから外れているので、
+            // 「別の場所の色を配る」ことは無い(遅れるだけで壊れない)
+            const uint32_t dirtyThisFrame =
+                std::min<uint32_t>(static_cast<uint32_t>(m_DDGIDirtyProbeList.size()), perFrame);
+
+            // 【スナップが効いているかを数で見るためのログ】カメラが1セル未満しか動かなければ
+            // どのプローブもワールド座標を変えないので、未確定は0のままでなければならない。
+            // セル境界をまたぐと、その軸に垂直な面1枚ぶんが一度に未確定になる。
+            // 追従が「スナップせず連続的に動く」実装になっていると毎フレーム全数が未確定になるので、
+            // この数を見れば取り違えにすぐ気づける
+            if (m_GIVolume.FollowCamera && !m_DDGIDirtyProbeList.empty())
+            {
+                // 【LOD0の基準格子座標も出す】これが同じなら格子は同じ場所にある。
+                // 往復の検証で「カメラが同じセルへ戻ったか」を、絵ではなく数で確かめられる
+                const DirectX::XMINT3 base0 = ComputeDDGILODBaseIndex(0);
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "DDGIの格子がスクロールしました: 未確定 " +
+                        std::to_string(m_DDGIDirtyProbeList.size()) + " / " +
+                        std::to_string(m_DDGIProbeCount) + " スロット(このフレームで焼き直すのは " +
+                        std::to_string(dirtyThisFrame) + " 個) LOD0基準=(" +
+                        std::to_string(base0.x) + "," + std::to_string(base0.y) + "," +
+                        std::to_string(base0.z) + ")");
+            }
+
+            // --- 未確定のスロットを、焼き直されるまでサンプリングから外す ---
+            //
+            // 【焼ける数より多くてもすべて外す】このフレームで焼けるのは perFrame 個までだが、
+            // 印を付けるのは全部に対して行う。付けそこねたスロットは、焼き直されるまでの間
+            // 「別の場所のイラディアンス」を配り続けることになる
+            if (!m_DDGIDirtyProbeList.empty() && m_DDGIInvalidateProbesPipelineState && m_DDGIDirtyProbeBuffer)
+            {
+                const uint32_t dirtyCount =
+                    std::min<uint32_t>(static_cast<uint32_t>(m_DDGIDirtyProbeList.size()), kDDGIMaxProbes);
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "DDGIInvalidate",
+                    .Writes = { m_DDGIIrradianceAtlas.get() },
+                    .Execute = [this, dirtyCount](RHI::IRHICommandList* cmd)
+                    {
+                        cmd->UpdateBuffer(
+                            m_DDGIDirtyProbeBuffer.get(), m_DDGIDirtyProbeList.data(),
+                            dirtyCount * static_cast<uint32_t>(sizeof(uint32_t)));
+
+                        DDGIUpdateConstants invalidateConstants{};
+                        // このパスだけ Params0.x は「無効化する個数」の意味で使う
+                        invalidateConstants.Params0 = {
+                            static_cast<float>(dirtyCount), 0.0f, 0.0f, static_cast<float>(kDDGICaptureSize)
+                        };
+                        invalidateConstants.Params1 = {
+                            static_cast<float>(kDDGIIrradianceTexels), static_cast<float>(kDDGIDistanceTexels),
+                            static_cast<float>(kDDGIProbeBorder), 0.0f
+                        };
+                        invalidateConstants.Params2 = {
+                            static_cast<float>(m_GIVolume.ProbeCounts[0]),
+                            static_cast<float>(m_GIVolume.ProbeCounts[1]),
+                            static_cast<float>(m_GIVolume.ProbeCounts[2]), 1.0f
+                        };
+                        cmd->UpdateBuffer(
+                            m_DDGIUpdateConstantBuffer.get(), &invalidateConstants, sizeof(invalidateConstants));
+
+                        cmd->SetComputePipelineState(m_DDGIInvalidateProbesPipelineState.get());
+                        cmd->SetComputeConstantBuffer(0, m_DDGIUpdateConstantBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(2, m_DDGIDirtyProbeBuffer.get());
+                        // UAVはDispatch直後に解除されるため毎回バインドし直す
+                        cmd->SetComputeUnorderedAccessTexture(0, m_DDGIIrradianceAtlas.get());
+                        // 1グループ = 1プローブのセル
+                        cmd->Dispatch(dirtyCount, 1, 1);
+                    },
+                });
+            }
+
             for (uint32_t i = 0; i < perFrame; ++i)
             {
-                const uint32_t probeIndex = (m_DDGIUpdateCursor + i) % m_DDGIProbeCount;
+                // 未確定のスロットを先に消化し、余った枠を通常のラウンドロビンへ回す
+                const bool isDirtySlot = (i < dirtyThisFrame);
+                const uint32_t probeIndex = isDirtySlot
+                    ? m_DDGIDirtyProbeList[i]
+                    : (m_DDGIUpdateCursor + (i - dirtyThisFrame)) % m_DDGIProbeCount;
+
                 // 一巡目はヒステリシスを使わず上書きする(混ぜる相手の「前の値」が未初期化のため)。
-                // 露出が急変した直後も同じく上書きで追従させる
-                const bool overwrite = warmingUp || overwriteWholeCycle || (i < overwriteThisFrame);
+                // 露出が急変した直後も同じく上書きで追従させる。
+                // **未確定のスロットも必ず上書き** ―― 前の値は別の場所のものなので混ぜてはいけない
+                const bool overwrite =
+                    warmingUp || overwriteWholeCycle || isDirtySlot || (i < overwriteThisFrame);
+
+                // このスロットを焼いたので、担当しているワールド格子座標を記録し直す
+                if (m_DDGIProbeBakedCoord.size() == m_DDGIProbeCount)
+                {
+                    m_DDGIProbeBakedCoord[probeIndex] = ComputeDDGIProbeWorldCoord(probeIndex);
+                }
 
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "DDGIUpdate" + std::to_string(probeIndex),
@@ -6632,18 +7254,31 @@ namespace Kurenai
                         m_DDGICaptureRadianceCube.get(), m_DDGICaptureDistanceCube.get(),
                         m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
                     },
-                    .Execute = [&captureDDGIProbeFace, &updateDDGIProbe, probeIndex, overwrite](RHI::IRHICommandList* cmd)
+                    .Execute =
+                        [&captureDDGIProbeFace, &traceDDGIProbeFace, &updateDDGIProbe, probeIndex, overwrite,
+                         useRaytracedTrace](RHI::IRHICommandList* cmd)
                     {
+                        // レイの取得だけを差し替える。埋めるスクラッチキューブも、
+                        // そのあとの更新CSも同じものを使う(A/Bの差分をレイ取得に限定するため)
                         for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                         {
-                            captureDDGIProbeFace(cmd, probeIndex, face);
+                            if (useRaytracedTrace)
+                            {
+                                traceDDGIProbeFace(cmd, probeIndex, face);
+                            }
+                            else
+                            {
+                                captureDDGIProbeFace(cmd, probeIndex, face);
+                            }
                         }
                         updateDDGIProbe(cmd, probeIndex, overwrite);
                     },
                 });
             }
 
-            const uint32_t nextCursor = m_DDGIUpdateCursor + perFrame;
+            // 【未確定ぶんはカーソルを進めない】未確定のスロットは番号順ではなく飛び飛びに
+            // 選ばれるので、その枠までカーソルを進めると通常の巡回に穴が空く
+            const uint32_t nextCursor = m_DDGIUpdateCursor + (perFrame - dirtyThisFrame);
             const bool cycleCompleted = nextCursor >= m_DDGIProbeCount;
 
             // 一巡ぶん焼き終えるたびに数え、モードごとの巡回数に達したら止める。
@@ -8478,12 +9113,15 @@ namespace Kurenai
             break;
         case DebugView::DDGIIrradiance:
         case DebugView::DDGIDistance:
+        case DebugView::DDGIProbeBackface:
         {
             // アトラスはただのTexture2Dなのでt0でそのまま受け取れる(22章)。
             // 反射プローブのキューブと違い専用スロットは要らない。
             // アトラスは横長(列=Cx*Cy、行=Cz)なので、レターボックスがその比率に合うよう
             // 実寸を渡す。渡さないと画面いっぱいへ引き伸ばされ、セルが正方形に見えなくなる
-            const bool isIrradiance = (m_DebugView == DebugView::DDGIIrradiance);
+            // 裏面率はイラディアンスアトラスのαなので、資源も寸法もイラディアンスと同じ
+            const bool isIrradiance =
+                (m_DebugView == DebugView::DDGIIrradiance || m_DebugView == DebugView::DDGIProbeBackface);
             const uint32_t cell = isIrradiance ? kDDGIIrradianceCell : kDDGIDistanceCell;
             const uint32_t columns = m_GIVolume.ProbeCounts[0] * m_GIVolume.ProbeCounts[1];
             const uint32_t rows = m_GIVolume.ProbeCounts[2];
@@ -8491,7 +9129,7 @@ namespace Kurenai
             presentSourceTexture = isIrradiance ? m_DDGIIrradianceAtlas.get() : m_DDGIDistanceAtlas.get();
             // Present.hlslのMode 14はモーションベクター(TAA、23章)が既に使っているため、
             // DDGIのイラディアンス/距離モーメントはMode 15/16にずらしてある
-            presentMode = isIrradiance ? 15 : 16;
+            presentMode = (m_DebugView == DebugView::DDGIProbeBackface) ? 20 : (isIrradiance ? 15 : 16);
             presentSourceWidth = m_HasGIVolume ? columns * cell : cell;
             presentSourceHeight = m_HasGIVolume ? rows * cell : cell;
             break;

@@ -138,6 +138,8 @@ exit /b 0</Command>
     <None Include="Shaders\3D\Bindless.hlsli" />
     <None Include="Shaders\3D\Meshlet.hlsli" />
     <None Include="Shaders\3D\SpecularEnergy.hlsli" />
+    <None Include="Shaders\3D\CubeFace.hlsli" />
+    <None Include="Shaders\3D\ProbeShading.hlsli" />
     <None Include="Shaders\3D\ScreenSpaceShadow.hlsli" />
     <None Include="Shaders\3D\Present.hlsl" />
     <None Include="Shaders\3D\SSAO.hlsl" />
@@ -146,6 +148,7 @@ exit /b 0</Command>
     <None Include="Shaders\3D\RTReflection.hlsl" />
     <None Include="Shaders\3D\RTShadow.hlsl" />
     <None Include="Shaders\3D\RTAO.hlsl" />
+    <None Include="Shaders\3D\DDGIProbeTrace.hlsl" />
     <None Include="Shaders\3D\RaytracingScene.hlsli" />
     <None Include="Shaders\3D\Shadow.hlsl" />
     <None Include="Shaders\3D\TAA.hlsl" />

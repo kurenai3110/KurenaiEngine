@@ -77,6 +77,32 @@ namespace Kurenai
         uint32_t GetRenderHeight() const { return m_RenderHeight; }
         size_t GetCurrentSceneIndex() const { return m_CurrentSceneIndex; }
 
+        // デバッグ表示を番号で選ぶ(番号の並びはUIの「デバッグ表示」コンボと同じ)。
+        //
+        // 【何のためにあるのか】アトラスやバッファの生値を確かめる検証を、GUIのクリック操作
+        // なしで起動オプションから行えるようにするため。DDGIのイラディアンスアトラスが
+        // 一様な白の環境で基準値と一致するか、といった検証は「見て判断する」ものではなく
+        // 画素値を測るものなので、毎回コンボを人手で操作する形にすると再現性が落ちる。
+        //
+        // 範囲外の番号は無視してログを残す(呼び出し側で範囲を知らなくてよいようにする)
+        void SetDebugViewIndex(int index);
+
+        // DDGIのレイの取得をラスタライズへ強制する(既定はDXRが使えるならDXR)。
+        //
+        // 【何のためにあるのか】ラスタ経路とレイトレース経路のA/B比較を、GUIのコンボを
+        // 人手で操作せずに同じ起動手順で行えるようにするため。シーンを切り替えると
+        // 露出(EV100)が引き継がれてしまうので、比較は必ず起動直後から同じ手順で行う
+        void ForceDDGIRayModeRaster();
+
+        // プローブ分類のしきい値を上書きする(0以下なら分類そのものを無効にする)。
+        // しきい値の効き方をA/Bで測るための起動オプション用。根拠はm_DDGIBackfaceThresholdを参照
+        void SetDDGIBackfaceThreshold(float threshold);
+
+        // DDGIのクリップマップLODの段数と追従の有無を、読み込んだ`.kscene`の指定より優先して上書きする。
+        // 段数を振って効果を測るための起動オプション用。アトラスを確保し直すので、
+        // **フレームの記録が始まる前(Run()より前)にだけ呼ぶこと**
+        void OverrideDDGILOD(uint32_t lodCount, bool followCamera);
+
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
         // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
         // FrameConstants::CascadeSplitsがXMFLOAT4(4要素)にfar距離を詰めているため、
@@ -166,6 +192,10 @@ namespace Kurenai
         bool ShouldRunRaytracedShadow() const;
         // このフレームでRTAOパスを実行するか。上2つと同じ理由で判定を1か所に集約している
         bool ShouldRunRaytracedAO() const;
+        // DDGIのプローブ取得をレイトレースで行うか。
+        // 「パスを走らせるか」と「その出力を読むか」を同じ1つの述語で判定するための関数
+        // (ShouldRunRaytraced*と同じ作法)
+        bool ShouldRunRaytracedDDGITrace() const;
         // このメッシュをメッシュシェーダー経路で描くか。上のShouldRun*と同じく、
         // 「どのPSOを束ねるか」と「DispatchMeshとDrawIndexedのどちらを積むか」の判断が
         // ずれると即座に破綻するため、判定を1か所に集約する。
@@ -1125,7 +1155,16 @@ namespace Kurenai
             PlanarReflection,   // 平面反射パスの出力(m_PlanarReflectionColor)をトーンマッピングして表示
             CloudNoiseSlice,    // 雲の3Dノイズの任意スライス。m_CloudNoiseDebugSlice/Detailで選ぶ
             AtmosphereLUT,      // 大気散乱のLUT。m_AtmosphereLUTDebugMultiで2枚を切り替える
+            DDGIProbeBackface,  // DDGIのプローブ裏面率(イラディアンスアトラスのα、22章)。
+                                // 白いほど「面の裏側ばかり見ている」=壁の内部に埋まっている。
+                                // 分類のしきい値を実測で決めるための表示。ラスタ経路では常に黒
         };
+        // デバッグ表示の総数。**enumの末尾を足したらここも直すこと**。
+        // enumのすぐ隣に置いてあるのは、離れた場所にあると更新を忘れるため
+        // (実際に DDGIProbeBackface を足したとき、範囲チェックが古い末尾のままで
+        //  起動オプションからの選択が弾かれた)
+        static constexpr int kDebugViewCount = static_cast<int>(DebugView::DDGIProbeBackface) + 1;
+
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
         // 値そのものが小さいバッファ(この暗い室内では0.02〜0.1程度)は、等倍で表示しても
@@ -1695,7 +1734,14 @@ namespace Kurenai
         static constexpr uint32_t kDDGIDistanceCell = kDDGIDistanceTexels + kDDGIProbeBorder * 2;
         // プローブ数の上限。反射プローブと違いアトラスはシーン読み込み時に確保し直すので
         // 技術的な固定容量ではないが、.ksceneの書き間違いで数GBのアトラスを作らないための歯止め
-        static constexpr uint32_t kDDGIMaxProbes = 4096;
+        // シーン全体で確保してよいプローブ数の上限。**容量の限界ではなく、`.kscene`の
+        // 打ち間違いでギガバイト単位を確保しないための番人**である。
+        // クリップマップLODでプローブ総数が「格子の積 × LOD段数」になったので引き上げた
+        // (8192でもイラディアンス8MB + 距離16MB程度で、実際の律速は更新スループット側)
+        static constexpr uint32_t kDDGIMaxProbes = 8192;
+        // クリップマップLODの最大段数。FrameConstantsへ段数ぶんの配列を持つので有界にしておく。
+        // SceneLoaderのLODCountの検証範囲と一致させること
+        static constexpr uint32_t kDDGIMaxLODCount = 4;
         // キャプチャ解像度(1面あたり)。6面ぶんで 16×16×6 = 1536方向がレイの代わりになる。
         // 反射プローブのkProbeCaptureSize(128)と違い小さくてよいのは、DDGIが必要とするのが
         // 「低周波の拡散イラディアンス」であって鏡面の映り込みではないため
@@ -1705,8 +1751,17 @@ namespace Kurenai
         // アトラスは1プローブぶんのダミーとして確保され、シェーダー側もDDGIParams0.w=0で無効になる
         Assets::GIVolume m_GIVolume;
         bool m_HasGIVolume = false;
-        // ボリュームの総プローブ数(ProbeCountsの3軸の積)。ダミー時は1
+        // シーン全体の総プローブ数(= ProbeCountsの3軸の積 × LOD段数)。ダミー時は1。
+        // アトラスの確保と更新のラウンドロビンはこの数で回る
         uint32_t m_DDGIProbeCount = 1;
+        // LOD 1段ぶんのプローブ数(ProbeCountsの3軸の積)。通し番号からLODを割り出すのに使う
+        uint32_t m_DDGIProbesPerLOD = 1;
+        // 実際に使うLOD段数(m_GIVolume.LODCountをkDDGIMaxLODCountでクランプしたもの)
+        uint32_t m_DDGILODCount = 1;
+        // 格子を追従させる中心(カメラのワールド座標)。
+        // 【Render中に固定する】格子の原点・プローブ位置・dirty判定・シェーダーへ渡す値が
+        // すべてこれを基準に決まるので、1フレームの途中で動くと食い違う
+        DirectX::XMFLOAT3 m_DDGIFollowCenter{ 0.0f, 0.0f, 0.0f };
 
         // オクタヘドラル2Dアトラス。RGBがイラディアンス、距離側はR=平均距離・G=平均二乗距離。
         // どちらもR32系で確保する。更新CSがヒステリシスのために「前の値を読んでから書く」ため、
@@ -1719,6 +1774,22 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_DDGIBorderCopyComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_DDGIBorderCopyPipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_DDGIUpdateConstantBuffer;
+        // スクロールで担当する場所が変わったプローブを、焼き直されるまでサンプリングから外すパス。
+        // 詳細はDDGIProbeUpdate.hlslのCSInvalidateProbesを参照
+        std::unique_ptr<RHI::IRHIShader> m_DDGIInvalidateProbesComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIInvalidateProbesPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_DDGIDirtyProbeBuffer;
+        // 各スロットが「最後に焼いたときのワールド格子座標」。いまの座標と違えば未確定(dirty)。
+        // 【ワールド座標で持つこと】アトラスのセル番号で持つと、スクロールしてもセル番号は
+        // 変わらないので「別の場所を担当するようになった」ことを検出できない
+        std::vector<DirectX::XMINT3> m_DDGIProbeBakedCoord;
+        // 焼き直し待ちのスロット番号(毎フレーム組み直す。GPUへ渡す一時の並び)
+        std::vector<uint32_t> m_DDGIDirtyProbeList;
+        // DDGIのレイ取得をDXRで行う経路(DDGIProbeTrace.hlsl)。
+        // m_RaytracingAvailableがtrueのときだけ作る(RTAO/RT反射と同じ扱い)
+        std::unique_ptr<RHI::IRHIShader> m_DDGIProbeTraceComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIProbeTracePipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_DDGITraceConstantBuffer;
         // DDGIのキャプチャ先(反射プローブとは解像度が違うため別に持つ)
         std::unique_ptr<RHI::IRHITexture> m_DDGICaptureColor;
         std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistance;
@@ -1785,6 +1856,83 @@ namespace Kurenai
         // 【既定はAlways(従来どおり)】止める側を既定にすると既存シーンの実行時の挙動が変わるため。
         // 止めたい場合はこのつまみか品質プリセット(低/中)から選ぶ
         DDGIUpdateMode m_DDGIUpdateMode = DDGIUpdateMode::Always;
+
+        // プローブへ入れる放射輝度・距離を、どうやって集めるか。
+        //
+        // Raytracedを末尾に置くこと ―― UI側が「レイトレーシング非対応なら選択肢の末尾を
+        // 削って出す」形で分岐しており(DrawSSRSectionと同じ作法)、並びを変えると
+        // 非対応環境で別の項目が消える
+        enum class DDGIRayMode
+        {
+            // 従来のラスタライズ。プローブ1個につきシーンを6回描く(ProbeCapture.hlsl)。
+            // 1フレームの描画回数がメッシュ数に比例して増えるため、
+            // ClampDDGIProbesPerFrameToConstantRingで更新プローブ数を抑える必要がある
+            Raster,
+            // DXR(インラインRayQuery)。1スレッド1レイでスクラッチキューブを直接埋める
+            // (DDGIProbeTrace.hlsl)。メッシュ数はBVHが吸収するので描画回数の制約が無く、
+            // 太陽の影もカスケードシャドウマップではなく影レイで求まる
+            Raytraced,
+        };
+        // 「レイをどう集めるか」を環境から選ぶ。DXRが使えるなら常にそちら ――
+        // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
+        // (ReflectionModeForCapabilityと同じ考え方)
+        static constexpr DDGIRayMode DDGIRayModeForCapability(bool raytracingAvailable)
+        {
+            return raytracingAvailable ? DDGIRayMode::Raytraced : DDGIRayMode::Raster;
+        }
+        // 【既定はDXRが使えるならDXR】DX11とDXR非対応機は自動的にラスタのまま。
+        // 実際の値はレイトレーシングの可否が分かった時点(Initialize)で入れ直す
+        DDGIRayMode m_DDGIRayMode = DDGIRayMode::Raster;
+        // プローブ分類(壁や地面の内部に埋まったプローブをサンプリングから外す)を行うか。
+        //
+        // 【レイトレース経路でのみ意味を持つ】裏面に当たったことを記録できるのはDXR経路だけで、
+        // ラスタ経路は裏面カリングの結果それを「空」として見てしまうため分類できない。
+        // ラスタ経路ではこのフラグに関わらず分類は掛からない
+        bool m_DDGIProbeClassificationEnabled = true;
+        // 裏面ヒット率がこれを超えたプローブを「信用しない」と判定する。
+        //
+        // 【既定値0.5の根拠】2つのシーンで分布と効果を実測して決めた。分布そのものは
+        // デバッグ表示「DDGI - プローブ裏面率」で確認できる。
+        //
+        //   Sponza(1152プローブ)      … きれいに二山。76%が0.05未満、21%が0.5超で、
+        //                                その間(0.05〜0.50)はほぼ空。谷が広いので
+        //                                この範囲のどこに置いてもほぼ同じ集合になる
+        //   BistroInteriorLit(480個) … 二山にならない。0から滑らかに減る連続分布で、
+        //                                0.5を超えるのは1.9%(9個)、0.9超は0.6%(3個)だけ
+        //
+        // つまり「谷に置く」という決め方はSponzaでしか使えない。そこで**効果の向きが
+        // 両シーンで揃う位置**を採った ―― 0.5では両シーンとも「わずかに明るくなり、
+        // 暗くなる画素は0.1%未満」で一致する(埋まったプローブが配っていた偽の暗さが消えるため)。
+        //
+        // 【0.25を採らなかった理由】RTXGIの既定値だが、Bistroの連続分布を途中で切るため
+        // 壁の領域が18〜22%暗くなる。しきい値を0.75(3個だけ無効)にすると同じ領域の変化は
+        // +0.004%(82800画素中28画素が±1階調)まで落ちるので、この暗化は
+        // 「明らかに埋まったプローブ」ではなく中間の率を持つプローブを落としたことによると分かる。
+        // それが正しい方向だと言える根拠が無いため採らなかった。
+        //
+        // 【この根拠の弱いところ】数字を額面どおりに受け取らないこと。
+        //   - BistroInteriorLitは画面がほぼ真っ暗(平均輝度1.19/255、95%の画素が4未満)で、
+        //     「-18%」は平均にすると0.5階調ほどしかない。個々の画素では最大41〜66階調
+        //     動いているので実体はあるが、百分率だけを根拠に使わないこと
+        //   - Sponza側の変化はほとんどが±1階調で、8bitの量子化の底に張り付いている
+        //   - 分布は8bitのデバッグ表示越しに読んでいる。率は約1/1536刻みで計算されるので、
+        //     しきい値の境目にいるプローブの数え方には±数個の誤差がある
+        //
+        // 0.5は物理的な意味も明確で、「全レイの半分より多くが面の裏側に当たった」
+        // = そのプローブは外より内側にいる、という判定になる
+        float m_DDGIBackfaceThreshold = 0.5f;
+
+        // レイトレース経路で太陽の影レイを撃つか。
+        //
+        // 【何のためにつまみにしてあるのか】これを切ると「影が落ちない」ラスタ経路の
+        // 既知の制約と同じ状態になる。切り替えて絵と数値が動くことが、
+        // レイトレース経路が実際に走っていることの対照実験になる(差分ゼロは合格ではない)。
+        // 常用の想定は有効側で、ラスタ経路には効かない
+        bool m_DDGISunShadowRayEnabled = true;
+        // どちらの経路が実際に走ったかを、切り替わったときだけログへ出すための状態。
+        // 毎フレーム出すと埋もれるが、出さないと「切り替えたつもり」の取り違えに気づけない
+        bool m_DDGIRayModeReported = false;
+        bool m_DDGIRayModeReportedRaytraced = false;
         // 停止判定用。最後に「焼き上がりに影響する状態」が変わった時点の署名。
         // 反射プローブと同じComputeProbeBakeSignature()を使う ―― DDGIのキャプチャも
         // 同じFrameConstants(太陽・時刻・影・ライト・IBL・自発光)を読むため、影響する状態は同じ
@@ -1822,12 +1970,57 @@ namespace Kurenai
 
         // 格子上のプローブ番号からワールド座標を求める。番号の分解は
         // index = x + y*Cx + z*Cx*Cy で、シェーダー側の並びと一致させること
+        // --- クリップマップLODの格子 ---
+        //
+        // LOD k は間隔が ProbeSpacing * 2^k。プローブ数は全LOD共通なので、覆う範囲は
+        // LODが1つ上がるごとに2倍になる。アトラスはLODを縦に積むだけで済む ――
+        // 通し番号 slot = k*(Cx*Cy*Cz) + z*Cx*Cy + y*Cx + x を使うと、既存の
+        // 「行 = slot/(Cx*Cy)、列 = slot%(Cx*Cy)」がそのまま LOD k の行 [k*Cz, (k+1)*Cz) を指す。
+        // このおかげで**更新CSのアトラス座標式は1文字も変えなくてよい**。
+        DirectX::XMFLOAT3 ComputeDDGILODSpacing(uint32_t lod) const;
+        // そのLODの格子の原点。追従するときはLOD自身の格子へスナップし、カメラを中心に置く。
+        // 追従しないときは、LOD0は.ksceneのOriginそのまま、上のLODは中心を保ったまま広がる
+        DirectX::XMFLOAT3 ComputeDDGILODOrigin(uint32_t lod) const;
+        // 原点に対応する格子の整数座標。トロイダル(剰余)addressingの基準になる。
+        // **CPUとシェーダーで同じ値を使う必要があるので、CPU側で求めて渡す**
+        // (原点÷間隔をシェーダー側でも計算すると、丸めが食い違ったときに
+        //  プローブの位置とアトラスのセルがずれる)
+        DirectX::XMINT3 ComputeDDGILODBaseIndex(uint32_t lod) const;
+
+        // そのスロットがいま担当しているワールド格子座標。dirty判定の基準になる
+        DirectX::XMINT3 ComputeDDGIProbeWorldCoord(uint32_t probeIndex) const;
+
         DirectX::XMFLOAT3 ComputeDDGIProbePosition(uint32_t probeIndex) const;
 
         // m_GIVolumeのProbeCountsに合わせてアトラス2枚を確保し直す。ボリュームが無いシーンでは
         // 1プローブぶんのダミーを確保する(SRVは常にバインドできる必要があるため、
         // 「確保しない」という選択肢は取れない。無効化はDDGIParams0.wで行う)
         void RecreateDDGIAtlases();
+
+        // 1フレームに焼くプローブ数を、DX12の「1フレームあたりの予算」に収まる範囲へ抑える。
+        //
+        // 【なぜ要るのか】ラスタ経路のプローブキャプチャは1プローブにつきシーンを6回描き直すため、
+        // 1フレームの描画回数とObjectConstantsの書き込み回数がどちらも
+        // 「プローブ数 × 6面 × 不透明メッシュ数」に比例して増える。DX12はどちらにも上限があり、
+        //   - 描画回数(IRHIDevice::GetMaxDrawsPerFrame) … 超えるとSRVテーブルの払い出しが
+        //     例外を投げ、ログを残さずプロセスごと落ちる
+        //   - 定数の書き込み回数(IRHIBuffer::GetSafeUpdatesPerFrame) … 超えるとGPUが
+        //     読み取り中のスロットを上書きして描画が壊れる
+        // BistroInteriorLit(不透明59メッシュ)を既定の16プローブ/フレームで焼くと
+        // 59×6×16 = 5664 となり、実際に前者を踏んで起動直後に落ちていた。
+        //
+        // レイトレース経路にはメッシュごとの描画そのものが無いので、この制約は掛からない
+        uint32_t ClampDDGIProbesPerFrameToConstantRing(uint32_t requested);
+        // ObjectConstantsのリングに要求する「1フレームあたりの書き込み回数」。
+        // 根拠はこのバッファを作っている箇所(KurenaiEngine3D.cpp)のコメントを参照
+        static constexpr uint32_t kObjectConstantUpdatesPerFrame = 16384;
+        // DDGI以外のパスが1メッシュあたり何回描くかの見積り。DDGIへ回す予算から差し引く。
+        // 内訳の目安: 深度プリパス1 + G-Buffer1 + シャドウ4 + 半透明・平面反射・水面で数回、
+        // これに反射プローブのキャプチャ(こちらも1プローブ6面ぶんメッシュを描き直す)が乗る。
+        // 厳密に数えず多めに取っているのは、パス構成が設定とシーンで変わるため
+        static constexpr uint32_t kDDGIFrameBudgetReserveDrawsPerMesh = 16;
+        // 上のクランプが効いたことを一度だけログへ出すためのフラグ(毎フレーム出さない)
+        bool m_DDGIProbesPerFrameClampReported = false;
 
         // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
         float m_TimeOfDay = Defaults::TimeOfDay;
