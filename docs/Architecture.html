@@ -382,6 +382,17 @@ G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_F
 粗くカバーします。
 </p>
 <p>
+<strong>分割する範囲は既定でカメラの近クリップ面〜遠クリップ面そのもの</strong>で、シャドウ専用の
+打ち切り距離は持ちません。遠クリップ面はシーンAABBの対角から自動決定される
+(<code>farZ = max(100, 対角×4)</code>)ため、数十km規模のシーンでは<code>farZ</code>が
+100km級になり、<strong>第1カスケードが数kmを2048x2048の1枚で覆うことになって近景の影が
+事実上消えます</strong>。これを避けたい場合は<code>.kscene</code>の
+<code>[Scene] ShadowDistance</code>でカスケードの分割範囲だけを手前で打ち切れます
+(遠景の描画距離はそのまま)。<strong>未指定なら従来どおりの挙動</strong>で、
+書かなかったシーンの見え方は変わりません。範囲と既定値を持たせない理由は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 44.6。
+</p>
+<p>
 分割境界は対数分割(遠くのカスケードほど急激に広がる)と均等分割(どのカスケードも同じ奥行き)を
 按分するPractical Split Scheme(GPU Gems 3, Dimitrov 2007)を使っています
 (<code>KurenaiEngine3D::ComputeCascadeSplits</code>)。各カスケードのライト視点正射影は、その
@@ -439,6 +450,54 @@ Texture2DArrayへ統合する理由とその効果は
 <a href="ImplementationDetail.md">ImplementationDetail.md</a> 4章。
 </p>
 </section>
+
+<h3>4.9 モデル単位のフラスタムカリング</h3>
+<p>
+各描画パスは<code>Scene::Instances</code>を走査してドローコールを発行しますが、その手前で
+<strong>インスタンスのワールドAABBが視錐台の外にあるものを丸ごと飛ばします</strong>。
+判定は<code>ExtractFrustumPlanes</code>(ビュー射影行列から6平面をGribb-Hartmannで取り出す)と
+<code>IsAABBVisible</code>(平面ごとにp-vertexだけを見る保守的な判定)の2つで、
+どちらもRHIに触れないためDX11/DX12で共通です。
+</p>
+<p>
+<strong>錐台はパスごとに違うものを使います。</strong> G-Buffer・深度プリパス・半透明は
+メインカメラ、シャドウは<strong>カスケードごとのライト正射影</strong>、平面反射は鏡映カメラ、
+反射プローブはキューブ面ごとの錐台です。カメラを裏返しても、ライト視点の錐台に入っている
+モデルは影を落とし続けます。
+</p>
+<p>
+CPU側の視錐台平面の作り方は増幅シェーダーの<code>IsSphereInFrustum</code>
+(<code>GBufferMeshlet.hlsl</code>、メッシュレット単位のカリング)と同じ平面を作っていますが、
+<strong>向こうは転置済み行列の「列」から、こちらは転置前の「行」から</strong>組み立てます
+(詳細は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 44.1)。
+</p>
+
+<h4>効いているかを数値で見る</h4>
+<p>
+性能ログ(<code>KurenaiEngine3D::LogFrameStatsIfDue</code>)へ「判定した数 / 間引いた数」を出します。
+<strong>「間引き0」だけでは、判定式が常に通しているのか本当に全部視界内なのかを区別できない</strong>
+ためです。判定式が常にtrueを返していても既存シーンの絵は完全に一致してしまいます。
+</p>
+
+<h4>4.9.1 既知の制約</h4>
+<ul>
+<li><strong>メッシュ単位ではできません。</strong> <code>Assets::Mesh</code>はAABBを持たず、
+AABBがあるのは<code>Assets::Model</code>だけです(<code>Model.h</code>)。したがって
+<strong>1モデルに多数のメッシュを持つアセット(Bistro、Emerald Square)では1つも間引けません</strong>。
+効くのは<code>.kmodel</code>を多数<code>[Model]</code>として並べるシーンのほうです。</li>
+<li><strong>DDGIのプローブキャプチャには入れていません。</strong> このループの描画回数は
+<code>ClampDDGIProbesPerFrameToConstantRing</code>が「同じ条件で数えること」を前提に
+定数バッファの予算を決めており、カリングを入れると予算計算と食い違います。
+定数バッファの予算超過は例外ではなくログ1行で続行し、描画が静かに壊れます
+(<code>DX12Buffer.h</code>)。</li>
+<li>ソフトウェアラスタライザのパスでは、<strong>全インスタンスが間引かれたフレームでも
+visibility bufferを必ずクリアします</strong>。散布書き込みなので、クリアせずに戻ると
+前フレームの絵が焼き付いて残ります。</li>
+</ul>
+<p>
+この機能をいつ・なぜ入れたのか(過去に測定で却下した経緯を含む)は
+<a href="ImplementationHistory.md">ImplementationHistory.md</a> 48章。
+</p>
 
 <section id="tangent">
 <h2>5. 法線マッピングの接線ベクトル計算</h2>
