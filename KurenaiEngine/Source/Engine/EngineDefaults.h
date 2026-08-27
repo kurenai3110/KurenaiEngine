@@ -307,6 +307,11 @@ namespace Kurenai::Defaults
 
     // --- タイルドライトカリング ---
     inline constexpr bool LightCullingEnabled = true;
+
+    // 自前ソフトウェアラスタライザ(46章)を実行するか。既定は無効。
+    // 比較・検証用の経路で通常の描画には寄与しないため、必要なときだけUIから有効にする
+    // (DX12かつSM 6.6 + Int64ShaderOps + bindlessの環境でのみ選択できる)
+    inline constexpr bool SoftwareRasterEnabled = false;
     inline constexpr int LightTileHeatmapMax = 8;
 
     // --- 反射プローブ ---

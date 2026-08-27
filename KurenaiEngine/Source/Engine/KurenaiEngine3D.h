@@ -155,6 +155,16 @@ namespace Kurenai
         // このバッファは常にHDR固定フォーマットのため)。呼び出し箇所はCreateRenderTargetsと
         // 同じ2か所(Initialize直後、Render()の解像度変更ハンドリング)
         void CreatePlanarReflectionTargets();
+        // 自前ソフトウェアラスタライザパス(46章)の本体。クリア2回とディスパッチ3回を積む。
+        // 呼ぶのはRender()のレンダーグラフ登録からのみで、
+        // m_SoftwareRasterEnabled && m_SoftwareRasterAvailable のときだけ登録される。
+        // viewProjはGBufferパスが使ったものとまったく同じ行列(ジッターを含む)を渡すこと ――
+        // 別の行列で描くと深度の比較が意味を失う。
+        // sunDirectionは光が進む向き(FrameConstants::LightDirectionと同じ規約)
+        void ExecuteSoftwareRasterPass(
+            RHI::IRHICommandList* cmd,
+            const DirectX::XMMATRIX& viewProj,
+            const DirectX::XMFLOAT3& sunDirection);
         // このフレームでRT反射パスを実行するか。手法がRaytracedでも、高速化構造が無ければ
         // (非対応環境・シーン読み込み中の空シーン・構築失敗)撃つ相手がいないため実行しない。
         // 「パスを追加する条件」と「後段がその出力を読む条件」がずれると、
@@ -1125,6 +1135,11 @@ namespace Kurenai
             PlanarReflection,   // 平面反射パスの出力(m_PlanarReflectionColor)をトーンマッピングして表示
             CloudNoiseSlice,    // 雲の3Dノイズの任意スライス。m_CloudNoiseDebugSlice/Detailで選ぶ
             AtmosphereLUT,      // 大気散乱のLUT。m_AtmosphereLUTDebugMultiで2枚を切り替える
+            // 以下3つは自前ソフトウェアラスタライザ(46章)の出力。パスが実行されていない
+            // フレームでは中身が前フレーム/未定義の残骸なので、最終結果のまま切り替えない
+            SoftwareRaster,       // ソフトウェアラスタライザのフラットな陰影(HDR)
+            SoftwareRasterDepth,  // 同 深度(生値)。DebugView::DepthRawと並べて差分を取る
+            SoftwareRasterNormal, // 同 法線。DebugView::Normalとまったく同じ符号化・同じ表示
         };
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -2065,6 +2080,74 @@ namespace Kurenai
         // DebugView::LightTilesのヒートマップで赤に振り切る基準のライト数。容量(64)を基準にすると
         // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
         int m_LightTileHeatmapMax = Defaults::LightTileHeatmapMax;
+
+        // --- 自前ソフトウェアラスタライザ(46章) -------------------------------------------
+        //
+        // 三角形をコンピュートシェーダーで自前にラスタライズする比較用の経路。
+        // 既存のG-Buffer経路には一切影響せず、専用のバッファへ描いてDebugViewで見る。
+        // 詳細はShaders/3D/SoftwareRasterCommon.hlsli冒頭。
+        //
+        // DX12かつSM 6.6 + Int64ShaderOps + bindlessの環境でのみ動く
+        // (IRHIDevice::SupportsSoftwareRaster)。
+
+        // スクリーンbboxの画素面積がこれを超えた三角形は、1スレッドでラスタライズせず
+        // 巨大三角形リストへ回す既定値。4096 = 64x64相当。
+        //
+        // 【この値が上限を決めている】小三角形パスは1スレッド1三角形なので、
+        // このしきい値がそのまま「1スレッドが回す最大ループ回数」になる。
+        // 上げすぎると画面を覆う三角形1個でTDRに達する
+        static constexpr uint32_t kSWRasterDefaultLargeTriangleArea = 4096;
+        // しきい値の可動範囲。UIから振って2つの経路を突き合わせるために使う(下のメンバ参照)
+        static constexpr uint32_t kSWRasterMinLargeTriangleArea = 16;
+        static constexpr uint32_t kSWRasterMaxLargeTriangleArea = 1u << 24;
+        // 巨大三角形リストの容量(要素数)。超えた分は描かれず、CSResolveが画面左上を
+        // マゼンタで塗って知らせる
+        static constexpr uint32_t kSWRasterLargeListCapacity = 4096;
+        // 1フレームに扱えるメッシュレコード数の上限。Bistro Exteriorで約400
+        static constexpr uint32_t kSWRasterMaxMeshes = 2048;
+        // CSRasterの1グループのスレッド数。SoftwareRaster.hlslの
+        // KURENAI_SWRASTER_GROUP_SIZEと一致させること
+        static constexpr uint32_t kSWRasterGroupSize = 64;
+        // Dispatchの1次元あたりの上限(65535)に収めるための2D分解の刻み
+        static constexpr uint32_t kSWRasterMaxGroupsPerAxis = 32768;
+
+        std::unique_ptr<RHI::IRHIShader> m_SoftwareRasterComputeShader;
+        std::unique_ptr<RHI::IRHIShader> m_SoftwareRasterLargeComputeShader;
+        std::unique_ptr<RHI::IRHIShader> m_SoftwareRasterResolveComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SoftwareRasterPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SoftwareRasterLargePipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_SoftwareRasterResolvePipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterConstantBuffer;
+        // メッシュ1件 = 1レコード。毎フレームm_Scene.Instancesから組み直す
+        std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterMeshInfoBuffer;
+        // 巨大三角形の通し番号リストと、その個数を兼ねた間接ディスパッチ引数
+        std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterLargeEntriesBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterIndirectArgsBuffer;
+        // 以下は解像度に依存するためCreateRenderTargetsで作る。
+        // visibility bufferは画素あたり64bit(深度32 + 三角形番号32)
+        std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterVisibilityBuffer;
+        std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterColor;
+        std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterDepth;
+        // m_GBufferNormalとまったく同じR16G16_Floatのオクタヘドラル符号化。
+        // Present.hlslのMode 7で並べて差分を取れるようにするため
+        std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterNormal;
+
+        // デバイスが対応していて、かつシェーダー/リソースの作成に成功したか。
+        // どちらかが欠けたらUIのチェックボックスごと無効化する
+        bool m_SoftwareRasterAvailable = false;
+        bool m_SoftwareRasterEnabled = Defaults::SoftwareRasterEnabled;
+        // 巨大三角形とみなすbbox画素面積のしきい値。
+        //
+        // 【実行時に振れるようにしている理由】小三角形パス(CSRaster)と巨大三角形パス
+        // (CSRasterLarge)は同じ三角形を別のコードで塗る。極端に小さくすればほぼ全三角形が
+        // 巨大リストへ回り、極端に大きくすればすべてCSRaster単独になるので、
+        // **両極端で同じ絵が出ること**を確かめれば2つの経路が一致していると言える。
+        // ビルドし直さずにこの対照実験ができるよう定数ではなくメンバにしてある
+        // (「片方が実行されていない」という失敗を先に潰すための手順。ab-compareスキル)
+        int m_SoftwareRasterLargeTriangleArea = static_cast<int>(kSWRasterDefaultLargeTriangleArea);
+        // メッシュレコード数が容量を超えた最初のフレームだけ警告を出すためのフラグ
+        // (m_LightTileOverflowLoggedと同じ作法)
+        bool m_SoftwareRasterMeshOverflowLogged = false;
 
         // --- 品質プリセット(41章) ---------------------------------------------------------
         //
