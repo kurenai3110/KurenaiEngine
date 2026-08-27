@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Model.h"
+#include "ModelLoader.h"
 #include "ShowLoader.h"
 
 namespace Kurenai::Assets
@@ -138,6 +139,13 @@ namespace Kurenai::Assets
     {
         std::wstring Name;
         std::vector<ModelInstance> Instances;
+
+        // 全モデルで共有する1x1のフォールバックテクスチャ(白/フラット法線/黒/マゼンタ)。
+        //
+        // 【Instancesより後ろに置いてはいけない】メンバはここでの宣言順に構築され、
+        // 逆順に破棄される。Instancesが持つModelはここのテクスチャを生ポインタで指しているため、
+        // 先に破棄されると解放済みを指す。Instancesより前に宣言してこの順序を保証する
+        SharedTexturePool SharedTextures;
 
         // 各ModelInstanceが持つModel::Lights(モデルファイル埋め込みのライト。glTFのKHR_lights_punctual
         // やFBXのライトノード由来)をInstance::Worldでワールド空間へ変換したものと、.kscene自身の

@@ -1414,7 +1414,9 @@ namespace Kurenai::Assets
             const std::wstring fullModelPath = assetRootDirectory + normalizedPath;
 
             ModelInstance instance;
-            instance.Model = LoadModel(device, fullModelPath);
+            // 1x1のフォールバックはシーン全体で1組を共有する(モデルごとに作ると
+            // 671モデルのシーンで2000個超の個別リソースになる。ModelLoader.hのコメント参照)
+            instance.Model = LoadModel(device, fullModelPath, &scene.SharedTextures);
             instance.IsWater = parsedModel.Water;
 
             using namespace DirectX;
