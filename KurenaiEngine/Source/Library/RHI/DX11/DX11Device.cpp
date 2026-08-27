@@ -186,6 +186,44 @@ namespace Kurenai::RHI
             return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, uav);
         }
 
+        // 間接ディスパッチの引数バッファ。D3D11はDRAWINDIRECT_ARGSと構造化バッファを同時に
+        // 指定できないため、raw(ByteAddress)バッファとして作りHLSL側もRWByteAddressBufferで受ける
+        // (RHIEnums.hのBufferUsage::IndirectArgsのコメント参照)
+        if (desc.Usage == BufferUsage::IndirectArgs)
+        {
+            // raw UAVは4バイト単位でアドレスを刻むため、サイズも4の倍数でなければ末尾が書けない
+            if (desc.SizeInBytes == 0 || (desc.SizeInBytes % 4) != 0)
+            {
+                Core::Logger::Error("DX11", "IndirectArgsバッファのサイズが0か4の倍数ではありません。作成を中止します");
+                throw std::runtime_error("IndirectArgsバッファのサイズが不正です");
+            }
+
+            D3D11_BUFFER_DESC argsDesc{};
+            argsDesc.ByteWidth = desc.SizeInBytes;
+            argsDesc.Usage = D3D11_USAGE_DEFAULT;
+            argsDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+            argsDesc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> argsBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&argsDesc, nullptr, &argsBuffer),
+                "間接ディスパッチ引数バッファ(IndirectArgs)の作成に失敗しました");
+
+            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            uavDesc.Buffer.FirstElement = 0;
+            uavDesc.Buffer.NumElements = desc.SizeInBytes / 4;
+            uavDesc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+            ThrowIfFailed(
+                m_Device->CreateUnorderedAccessView(argsBuffer.Get(), &uavDesc, &uav),
+                "間接ディスパッチ引数バッファのアンオーダードアクセスビューの作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(argsBuffer, desc.StrideInBytes, uav, true);
+        }
+
         // 読み取り専用の構造化バッファ(StructuredBuffer)。CPUから毎フレームUpdateBufferで書き換える前提
         // なのでD3D11_USAGE_DYNAMIC + CPU_ACCESS_WRITEで作成し、Map(WRITE_DISCARD)経由で更新する
         // (UAVを持たないためUpdateSubresourceが使えるDEFAULTヒープにする必要はない)

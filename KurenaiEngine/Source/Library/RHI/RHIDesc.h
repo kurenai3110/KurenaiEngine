@@ -15,14 +15,17 @@ namespace Kurenai::RHI
         uint32_t StrideInBytes = 0;
         const void* InitialData = nullptr;
         // このバッファを、本来の用途に加えてStructuredBuffer<T>としてもシェーダーから
-        // 読めるようにするか(SRVを追加で作る)。BufferUsage::Vertexにのみ意味がある。
+        // 読めるようにするか(SRVを追加で作る)。BufferUsage::VertexとBufferUsage::Indexに
+        // のみ意味がある。
         //
         // メッシュシェーダーには入力アセンブラが無く、頂点は自分でバッファから読むしかない。
-        // かといって頂点バッファとは別に同じ内容の構造化バッファを作るとVRAMを二重に食うため、
-        // 同一リソースへ頂点バッファビューとSRVの両方を張れるようにする。
-        // StrideInBytesがそのままStructuredBufferの要素サイズになる。
+        // コンピュートシェーダーによる自前ラスタライザ(SoftwareRaster.hlsl)はさらに
+        // インデックスも自分で引く。かといって別に同じ内容の構造化バッファを作ると
+        // VRAMを二重に食うため、同一リソースへ本来のビューとSRVの両方を張れるようにする。
+        // StrideInBytesがそのままStructuredBufferの要素サイズになる
+        // (頂点ならsizeof(Vertex)、インデックスなら4 = StructuredBuffer<uint>)。
         //
-        // DX11実装は参照しない(メッシュシェーダーが存在せず、用途が無いため)
+        // DX11実装は参照しない(メッシュシェーダーも自前ラスタライザも存在せず、用途が無いため)
         bool ShaderReadable = false;
 
         // BufferUsage::StructuredReadOnlyのバッファを1フレームに何回UpdateBufferするかの上限。

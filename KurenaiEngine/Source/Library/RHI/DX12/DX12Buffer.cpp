@@ -54,7 +54,8 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D12Resource> resource,
         uint32_t uavIndex,
         uint32_t sizeInBytes,
-        uint32_t strideInBytes)
+        uint32_t strideInBytes,
+        BufferUsage usage)
         : m_Device(device)
         , m_SrvUavHeap(srvUavHeap)
         , m_Resource(std::move(resource))
@@ -62,9 +63,10 @@ namespace Kurenai::RHI
         , m_SlotSizeInBytes(sizeInBytes)
         , m_RingCapacity(1)
         , m_UavIndex(uavIndex)
-        , m_Usage(BufferUsage::Structured)
-        // BufferUsage::Structuredのリソースは作成時点でUNORDERED_ACCESS状態になっている
-        // (DX12Device::CreateBuffer参照)。TransitionToが余計なバリアを積まないよう実態に合わせる
+        , m_Usage(usage)
+        // BufferUsage::Structured / IndirectArgsのリソースは作成時点でUNORDERED_ACCESS状態に
+        // なっている(DX12Device::CreateBuffer参照)。
+        // TransitionToが余計なバリアを積まないよう実態に合わせる
         , m_CurrentState(D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
     {
         (void)strideInBytes;
@@ -163,6 +165,51 @@ namespace Kurenai::RHI
         {
             m_SrvUavHeap->Free(m_SrvIndex);
         }
+        if (m_ClearUavIndex != kInvalid)
+        {
+            m_SrvUavHeap->Free(m_ClearUavIndex);
+        }
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE DX12Buffer::GetOrCreateClearUavCpuHandle()
+    {
+        if (!HasUav())
+        {
+            return D3D12_CPU_DESCRIPTOR_HANDLE{ 0 };
+        }
+
+        // 元からrawなUsage(IndirectArgs)は通常のUAVがそのままクリアに使える
+        if (m_Usage == BufferUsage::IndirectArgs)
+        {
+            return GetUavCpuHandle();
+        }
+
+        if (m_ClearUavIndex != kInvalid)
+        {
+            return m_SrvUavHeap->GetCpuHandle(m_ClearUavIndex);
+        }
+
+        // rawビューは4バイト単位でアドレスを刻むため、サイズが4の倍数でないと末尾を消せない。
+        // 構造化バッファのストライドは4の倍数なので通常ここへは来ない
+        if (m_SlotSizeInBytes == 0 || (m_SlotSizeInBytes % 4) != 0)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "クリア用のraw UAVを作れません(サイズが4の倍数ではありません: " + std::to_string(m_SlotSizeInBytes) + ")");
+            return D3D12_CPU_DESCRIPTOR_HANDLE{ 0 };
+        }
+
+        m_ClearUavIndex = m_SrvUavHeap->Allocate();
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+        uavDesc.Buffer.NumElements = m_SlotSizeInBytes / 4;
+        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        m_Device->GetDevice()->CreateUnorderedAccessView(
+            m_Resource.Get(), nullptr, &uavDesc, m_SrvUavHeap->GetCpuHandle(m_ClearUavIndex));
+
+        return m_SrvUavHeap->GetCpuHandle(m_ClearUavIndex);
     }
 
     D3D12_GPU_VIRTUAL_ADDRESS DX12Buffer::GetGPUVirtualAddress() const
@@ -213,6 +260,12 @@ namespace Kurenai::RHI
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Buffer::GetUavCpuHandle() const
     {
+        // UAVを持たないUsageで呼ばれた場合にでたらめなハンドルを返さないよう、
+        // GetSrvCpuHandleと同じくポインタ0を返して呼び出し側が判定できるようにする
+        if (!HasUav())
+        {
+            return D3D12_CPU_DESCRIPTOR_HANDLE{ 0 };
+        }
         return m_SrvUavHeap->GetCpuHandle(m_UavIndex);
     }
 

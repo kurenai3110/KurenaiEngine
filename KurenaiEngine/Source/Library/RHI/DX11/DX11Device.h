@@ -75,6 +75,9 @@ namespace Kurenai::RHI
         uint32_t RegisterBindless(IRHIBuffer* buffer) override;
         bool SupportsMeshShader() const override { return false; }
         std::unique_ptr<IRHIPipelineState> CreateMeshPipelineState(const MeshPipelineStateDesc& desc) override;
+        // コンピュートシェーダーによる自前ラスタライザもD3D12専用。DX11のコンピュートシェーダーは
+        // cs_5_0固定で、必要な64bitアトミック(SM 6.6)もbindlessも原理的に持てない
+        bool SupportsSoftwareRaster() const override { return false; }
 
     private:
         // CreateMippedUAVTextureCube(単一キューブ、SRVはTextureCube)と

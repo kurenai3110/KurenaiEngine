@@ -1,6 +1,7 @@
 #include "DX11CommandList.h"
 
 #include <cstring>
+#include <string>
 #include <utility>
 
 #include "Core/Logger.h"
@@ -420,7 +421,69 @@ namespace Kurenai::RHI
     void DX11CommandList::Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
     {
         m_Context->Dispatch(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+        ReleaseComputeUavBindingsAfterDispatch();
+    }
 
+    // 【DX11では呼び出し側が存在しない】このAPIを使うのはコンピュートシェーダーによる
+    // 自前ラスタライザだけで、そちらはSM 6.6とbindlessを要求するためDX12専用
+    // (IRHIDevice::SupportsSoftwareRaster()はDX11では常にfalse)。
+    // RHIの抽象を片肺にしないため実装は用意してあるが、この経路は実行されない
+    void DX11CommandList::DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes)
+    {
+        if (!argsBuffer)
+        {
+            Core::Logger::Error("DX11", "DispatchIndirect: 引数バッファがnullptrです。ディスパッチをスキップします");
+            return;
+        }
+
+        auto* dx11Buffer = static_cast<DX11Buffer*>(argsBuffer);
+        if (!dx11Buffer->IsIndirectArgs())
+        {
+            Core::Logger::Error(
+                "DX11", "DispatchIndirect: BufferUsage::IndirectArgs以外のバッファが渡されました。ディスパッチをスキップします");
+            return;
+        }
+        if ((offsetInBytes % 4) != 0)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "DispatchIndirect: offsetInBytes(" + std::to_string(offsetInBytes) +
+                    ")が4の倍数ではありません。ディスパッチをスキップします");
+            return;
+        }
+
+        m_Context->DispatchIndirect(dx11Buffer->GetBuffer(), offsetInBytes);
+        ReleaseComputeUavBindingsAfterDispatch();
+    }
+
+    // 【DX11では呼び出し側が存在しない】理由はDispatchIndirectのコメントと同じ
+    void DX11CommandList::ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value)
+    {
+        if (!buffer)
+        {
+            Core::Logger::Error("DX11", "ClearUnorderedAccessBufferUint: バッファがnullptrです。クリアをスキップします");
+            return;
+        }
+
+        auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
+        ID3D11UnorderedAccessView* uav = dx11Buffer->GetUnorderedAccessView();
+        if (!uav)
+        {
+            Core::Logger::Error(
+                "DX11", "ClearUnorderedAccessBufferUint: UAVを持たないバッファが渡されました。クリアをスキップします");
+            return;
+        }
+
+        // UAVとして触る前に、同一リソースがピクセルシェーダのSRVとして張られていたら外す
+        // (SetComputeUnorderedAccessBufferと同じ理由。DX11はSRVとUAVを同時にバインドできない)
+        UnbindPixelSrvForResource(dx11Buffer->GetBuffer());
+
+        const UINT values[4] = { value, value, value, value };
+        m_Context->ClearUnorderedAccessViewUint(uav, values);
+    }
+
+    void DX11CommandList::ReleaseComputeUavBindingsAfterDispatch()
+    {
         // バインドしたUAVはこのDispatchでのみ有効とし、直後に明示的に解放する(コメントはヘッダ側参照)
         if (m_BoundComputeUavSlotMask != 0)
         {

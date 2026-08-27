@@ -103,8 +103,8 @@ namespace Kurenai::RHI
         //
         // 【容量の根拠】登録するのは「シェーダーが動的な番号で選びたいもの」だけで、
         // 内訳はマテリアルテクスチャ(Bistro Exteriorで182枚)と、モデルごとの
-        // ジオメトリバッファ(頂点+メッシュレット3本 = メッシュ数×4)。
-        // Bistro Exteriorのメッシュ数は約400なので 182 + 1600 ≒ 1800。
+        // ジオメトリバッファ(頂点+メッシュレット3本+インデックス = メッシュ数×5)。
+        // Bistro Exteriorのメッシュ数は約400なので 182 + 2000 ≒ 2182。
         // シーン切り替えで解放・再登録されるためフリーリストで回るが、
         // 複数モデルを並べるシーンに備えて余裕を持たせる。
         // シェーダ可視CBV_SRV_UAVヒープの上限はTier 1でも1,000,000ディスクリプタあり、
@@ -184,12 +184,16 @@ namespace Kurenai::RHI
         // DX12DescriptorHeapはロックを持たないため、確保・解放するスレッドごとに別のヒープへ
         // 分けてある(DX12Device.hのGetAssetSrvCpuHeap/GetRenderSrvCpuHeapのコメント参照)。
         //
-        // アセット側: Bistro Exteriorでテクスチャ182枚 + RT統合バッファ5本 + TLAS 1本。
+        // アセット側: Bistro Exteriorでテクスチャ182枚 + RT統合バッファ5本 + TLAS 1本に加え、
+        // メッシュごとのジオメトリバッファが効く。メッシュ数は約400で、1メッシュあたり
+        // 頂点1 + メッシュレット3 + インデックス1 = 5本(ShaderReadableな頂点/インデックスは
+        // メッシュシェーダーとソフトウェアラスタライザのどちらかが使える環境でのみ作られる)。
+        // 合計で 182 + 400×5 + 6 ≒ 2188 になるため4096まで引き上げてある。
         // シーン切り替え時は旧シーンを先に破棄してから新シーンを読むため二重確保は起きない。
         // レンダー側: レンダーターゲットのSRV/UAVに加え、Hi-Zとブルームのミップ別UAV、
         // IBL・反射プローブのキューブマップ(プローブ数×6面×ミップ数のUAV)が効く。
         // どちらも非シェーダー可視ヒープでCPUメモリのみを消費するため、余裕を持った値にしておく
-        constexpr uint32_t kAssetSrvCpuHeapCapacity = 2048;
+        constexpr uint32_t kAssetSrvCpuHeapCapacity = 4096;
         constexpr uint32_t kRenderSrvCpuHeapCapacity = 2048;
 
         DXGI_FORMAT ToDXGIFormat(Format format)
@@ -387,6 +391,8 @@ namespace Kurenai::RHI
         // それより前である必要もある
         DetectBindlessSupport();
         DetectMeshShaderSupport();
+        // 自前ラスタライザは頂点/インデックスをbindlessで引くため、bindlessの判定より後で行う
+        DetectSoftwareRasterSupport();
 
         // RTVの内訳: スワップチェーンのバックバッファ2 + オフスクリーンのレンダーテクスチャ12 = 常時14。
         // DSVと同じくCreateRenderTargetsのリサイズ処理は「新しいテクスチャを作ってから古いunique_ptrを
@@ -480,6 +486,7 @@ namespace Kurenai::RHI
         CreateRootSignature();
         CreateComputeRootSignature();
         CreateMeshRootSignature();
+        CreateDispatchCommandSignature();
 
         ID3D12DescriptorHeap* heaps[] = { m_ShaderVisibleSrvHeap->GetHeap(), m_ShaderVisibleSamplerHeap->GetHeap() };
         m_CommandList->SetDescriptorHeaps(2, heaps);
@@ -658,6 +665,25 @@ namespace Kurenai::RHI
             "コンピュート用ルートシグネチャの作成に失敗しました");
     }
 
+    void DX12Device::CreateDispatchCommandSignature()
+    {
+        // 引数はuint3(スレッドグループ数X/Y/Z)1個だけ。ルートシグネチャの内容を
+        // 引数バッファから変更しない(ルート定数もビューも含めない)ため、
+        // CreateCommandSignatureへ渡すルートシグネチャはnullptrでよい。
+        // ByteStrideはD3D12_DISPATCH_ARGUMENTSと同じ12バイト
+        D3D12_INDIRECT_ARGUMENT_DESC argumentDesc{};
+        argumentDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+
+        D3D12_COMMAND_SIGNATURE_DESC signatureDesc{};
+        signatureDesc.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+        signatureDesc.NumArgumentDescs = 1;
+        signatureDesc.pArgumentDescs = &argumentDesc;
+
+        ThrowIfFailed(
+            m_Device->CreateCommandSignature(&signatureDesc, nullptr, IID_PPV_ARGS(&m_DispatchCommandSignature)),
+            "間接ディスパッチ用コマンドシグネチャの作成に失敗しました");
+    }
+
     void DX12Device::ExecuteCommandList()
     {
         ThrowIfFailed(m_CommandList->Close(), "コマンドリストのクローズに失敗しました");
@@ -828,7 +854,7 @@ namespace Kurenai::RHI
         //
         // 【以前は問題にならなかった】払い出し単位が常にkComputeTableSlotCount固定で、
         // 区画容量もその倍数だったため末尾がちょうど揃っていた。
-        // 1個だけ借りる呼び出しが入った時点でこの前提は消える
+        // 1個だけ借りる呼び出し(ClearUnorderedAccessBufferUint)が入った時点でこの前提は消える
         if (m_NextComputeTableIndex + count > totalCapacity)
         {
             m_NextComputeTableIndex = 0;
@@ -1114,6 +1140,44 @@ namespace Kurenai::RHI
                 kStructuredReadOnlyUploadRingCapacity);
         }
 
+        // 間接ディスパッチの引数バッファ。コンピュートシェーダーがRWByteAddressBufferとして
+        // スレッドグループ数を書き、そのままExecuteIndirectへ渡す。
+        // CPUからは書かないため初期データもステージングリングも持たず、DEFAULTヒープに
+        // raw UAVを1つだけ作る(StructuredRWと同じく作成時点でUNORDERED_ACCESS状態にしておく)
+        if (desc.Usage == BufferUsage::IndirectArgs)
+        {
+            // raw UAVは4バイト単位でアドレスを刻むため、サイズも4の倍数でなければ
+            // NumElementsが切り捨てられて末尾が書けなくなる
+            if (desc.SizeInBytes == 0 || (desc.SizeInBytes % 4) != 0)
+            {
+                Core::Logger::Error("DX12", "IndirectArgsバッファのサイズが0か4の倍数ではありません。作成を中止します");
+                throw std::runtime_error("IndirectArgsバッファのサイズが不正です");
+            }
+
+            const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+            const CD3DX12_RESOURCE_DESC resourceDesc =
+                CD3DX12_RESOURCE_DESC::Buffer(desc.SizeInBytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+            ThrowIfFailed(
+                m_Device->CreateCommittedResource(
+                    &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&resource)),
+                "間接ディスパッチ引数バッファ(IndirectArgs)の作成に失敗しました");
+
+            // raw(ByteAddress)ビュー。DX11がDRAWINDIRECT_ARGSと構造化を同時に指定できない制約に
+            // 合わせて、DX12側も同じrawの形にしてHLSLを1本で済ませる(RHIEnums.hのコメント参照)
+            const uint32_t uavIndex = m_RenderSrvCpuHeap->Allocate();
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+            uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+            uavDesc.Buffer.NumElements = desc.SizeInBytes / 4;
+            uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+            m_Device->CreateUnorderedAccessView(resource.Get(), nullptr, &uavDesc, m_RenderSrvCpuHeap->GetCpuHandle(uavIndex));
+
+            return std::make_unique<DX12Buffer>(
+                this, m_RenderSrvCpuHeap.get(), resource, uavIndex, desc.SizeInBytes, desc.StrideInBytes, BufferUsage::IndirectArgs);
+        }
+
         // 定数バッファはCPUから毎フレームUpdateBufferで書き込むため、UPLOADヒープに常駐させ
         // マップしたままにする(従来通り)
         if (desc.Usage == BufferUsage::Constant)
@@ -1183,18 +1247,22 @@ namespace Kurenai::RHI
                 "バッファの作成に失敗しました");
         }
 
-        // メッシュシェーダーが頂点を自分で読むための追加SRV(BufferDesc::ShaderReadable)。
-        // 頂点バッファビューと同じリソースへ、StructuredBuffer<Vertex>としてのビューを重ねて張る
+        // シェーダーが頂点/インデックスを自分で読むための追加SRV(BufferDesc::ShaderReadable)。
+        // 頂点バッファビュー・インデックスバッファビューと同じリソースへ、
+        // StructuredBuffer<Vertex> / StructuredBuffer<uint> としてのビューを重ねて張る
         // (同一リソースに複数のビューを持たせるのはD3D12では通常の使い方で、複製は生じない)。
-        // Usage自体はVertexのままなので、従来の入力アセンブラ経由の描画にも一切影響しない
+        // Usage自体はVertex/Indexのままなので、従来の入力アセンブラ経由の描画にも一切影響しない。
+        //
+        // 【誰が使うか】メッシュシェーダー経路(頂点のみ)と、コンピュートシェーダーによる
+        // 自前ラスタライザ経路(頂点+インデックス)。どちらもResourceDescriptorHeap経由で引く
         DX12DescriptorHeap* vertexSrvHeap = nullptr;
         uint32_t vertexSrvIndex = DX12Buffer::kInvalid;
-        if (desc.ShaderReadable && desc.Usage == BufferUsage::Vertex)
+        if (desc.ShaderReadable && (desc.Usage == BufferUsage::Vertex || desc.Usage == BufferUsage::Index))
         {
             if (desc.StrideInBytes == 0)
             {
                 Core::Logger::Error(
-                    "DX12", "ShaderReadableな頂点バッファのStrideInBytesが0です(SRVを作れないためbindlessでは読めません)");
+                    "DX12", "ShaderReadableな頂点/インデックスバッファのStrideInBytesが0です(SRVを作れないためbindlessでは読めません)");
             }
             else
             {
@@ -2165,6 +2233,43 @@ namespace Kurenai::RHI
 
         m_SupportsMeshShader = true;
         Core::Logger::Info("DX12", "メッシュシェーダー(Tier 1 / SM 6.5)が利用可能です");
+    }
+
+    void DX12Device::DetectSoftwareRasterSupport()
+    {
+        m_SupportsSoftwareRaster = false;
+
+        // 【bindlessを必須にする】自前ラスタライザは三角形1つにつき頂点バッファと
+        // インデックスバッファをResourceDescriptorHeap経由で引く(Shaders/3D/SoftwareRaster.hlsl)。
+        // bindlessが立っている時点でシェーダーモデル6.6とリソースバインディングTier 3が
+        // 保証されるため、シェーダーモデルの再判定は要らない
+        if (!m_SupportsBindless)
+        {
+            Core::Logger::Info(
+                "DX12", "ソフトウェアラスタライザ非対応: bindlessが利用できません");
+            return;
+        }
+
+        // 深度と三角形IDを1つの64bit値へ詰めてInterlockedMaxで解決するため、
+        // 64bit整数のシェーダー演算が要る。SM 6.6に対応していてもこれが無いGPUはあり得るので
+        // (機能レベルとは独立した任意機能)、必ず個別に問い合わせる
+        D3D12_FEATURE_DATA_D3D12_OPTIONS1 options1{};
+        if (FAILED(m_Device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &options1, sizeof(options1))))
+        {
+            Core::Logger::Info(
+                "DX12", "ソフトウェアラスタライザ非対応: D3D12_FEATURE_D3D12_OPTIONS1の問い合わせに失敗しました");
+            return;
+        }
+
+        if (!options1.Int64ShaderOps)
+        {
+            Core::Logger::Info(
+                "DX12", "ソフトウェアラスタライザ非対応: 64bit整数のシェーダー演算(Int64ShaderOps)に対応していません");
+            return;
+        }
+
+        m_SupportsSoftwareRaster = true;
+        Core::Logger::Info("DX12", "ソフトウェアラスタライザ(SM 6.6 / 64bitアトミック)が利用可能です");
     }
 
     uint32_t DX12Device::RegisterBindless(IRHITexture* texture)

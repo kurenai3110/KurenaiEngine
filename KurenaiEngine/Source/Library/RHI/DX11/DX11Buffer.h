@@ -11,10 +11,14 @@ namespace Kurenai::RHI
     class DX11Buffer : public IRHIBuffer
     {
     public:
+        // BufferUsage::Structured用(uavのみ)。BufferUsage::IndirectArgsも
+        // raw UAVを1つだけ持つ同じ構造のため共用し、isIndirectArgsで区別する
+        // (DispatchIndirectがUsageを検証するため)
         DX11Buffer(
             Microsoft::WRL::ComPtr<ID3D11Buffer> buffer,
             uint32_t strideInBytes,
-            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = nullptr);
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = nullptr,
+            bool isIndirectArgs = false);
 
         // BufferUsage::StructuredReadOnly用: D3D11_USAGE_DYNAMICで作成し、UpdateBufferがMap/Unmap経由で
         // 書き込む。srvは読み取り専用バインド(PSSetShaderResources)用。
@@ -45,6 +49,8 @@ namespace Kurenai::RHI
         bool IsDynamic() const { return m_IsDynamic; }
         // D3D11_USAGE_IMMUTABLEで作成されたか(UpdateBufferが更新を弾くのに使う)
         bool IsImmutable() const { return m_IsImmutable; }
+        // BufferUsage::IndirectArgsで作成されたか(DispatchIndirectが引数バッファを検証するのに使う)
+        bool IsIndirectArgs() const { return m_IsIndirectArgs; }
 
     private:
         Microsoft::WRL::ComPtr<ID3D11Buffer> m_Buffer;
@@ -53,5 +59,6 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_Srv;
         bool m_IsDynamic = false;
         bool m_IsImmutable = false;
+        bool m_IsIndirectArgs = false;
     };
 }
