@@ -257,6 +257,7 @@
     <li><a href="#aerialperspective">37. 大気遠近(height fog / aerial perspective)</a></li>
     <li><a href="#ch38">38. ドローンショーと星空</a></li>
     <li><a href="#meshlet">39. メッシュレットとbindless(メッシュシェーダー / レイトレーシングとの統合)</a></li>
+    <li><a href="#swraster">40. コンピュートシェーダーによる自前ソフトウェアラスタライザ</a></li>
   </ol>
 </nav>
 
@@ -6351,6 +6352,186 @@ bindlessが無かった頃はそもそも書けなかったが、現在は書け
 入れる場合はBLASも焼き直して両者を揃えること(38.7の不変条件)。</li>
 <li><strong>シャドウパスと反射プローブのキャプチャは従来経路のまま。</strong>
 どちらも解像度が低くカリングの利得が小さい一方、増幅/メッシュシェーダーのPSOだけ増えるため。</li>
+</ul>
+
+</section>
+
+<section id="swraster">
+<h2>40. コンピュートシェーダーによる自前ソフトウェアラスタライザ</h2>
+
+<p>
+三角形をコンピュートシェーダーで自前にラスタライズする<strong>比較用の経路</strong>。
+ハードウェアラスタライザがブラックボックスで行っている処理 ——
+頂点変換・背面カリング・スクリーン空間への投影・エッジ関数による被覆判定・深度テスト・
+透視補正補間 —— を明示的なコードとして持ち、G-Bufferと直接突き合わせられるようにするためのもの。
+</p>
+
+<p>
+<strong>既存のG-Buffer経路には一切寄与しない。</strong>
+専用のバッファへ描いてデバッグ表示でのみ見る、自己完結した1パスである。
+既定は無効で、有効な間だけレンダーグラフへ登録される。
+既定値やしきい値の根拠は<code>docs/ImplementationDetail.md</code> 42章。
+</p>
+
+<h3>40.1 動作条件</h3>
+
+<p>
+<code>IRHIDevice::SupportsSoftwareRaster()</code> が真の環境でのみ動く。中身は
+<strong><code>SupportsBindless()</code> かつ <code>D3D12_FEATURE_DATA_D3D12_OPTIONS1::Int64ShaderOps</code></strong>。
+bindlessが立っている時点でシェーダーモデル6.6とリソースバインディングTier 3が保証されるため、
+追加で見るのは64bit整数のシェーダー演算だけでよい。
+DX11のコンピュートシェーダーは<code>cs_5_0</code>固定なので原理的に不可で、常に偽を返す
+(<code>SupportsRaytracing()</code> / <code>SupportsMeshShader()</code> と同じ扱い)。
+</p>
+
+<h3>40.2 パス構成</h3>
+
+<p>
+1回のパスの中でクリア2回とディスパッチ3回を積む。定数バッファはb1の
+<code>SWRasterConstants</code>1本だけで、<code>FrameConstants</code>(b0)には依存しない
+——依存させるとcbufferのレイアウト変更の巻き添えを受けるため。
+</p>
+
+<table>
+<thead><tr><th>#</th><th>種別</th><th>SRV</th><th>UAV</th><th>ディスパッチ</th></tr></thead>
+<tbody>
+<tr><td>0</td><td>RHI呼び出し</td><td>—</td><td>—</td>
+<td><code>ClearUnorderedAccessBufferUint(Visibility, 0)</code> / <code>(IndirectArgs, 0)</code></td></tr>
+<tr><td>1</td><td><code>CSRaster</code>(1スレッド=1三角形)</td><td>t0=MeshInfo</td>
+<td>u0=Visibility, u1=LargeEntries, u2=IndirectArgs</td><td>三角形数から2D分解</td></tr>
+<tr><td>2</td><td><code>CSRasterLarge</code>(1グループ=巨大三角形1個)</td><td>t0=MeshInfo, t1=LargeEntries</td>
+<td>u0=Visibility</td><td><strong><code>DispatchIndirect</code></strong></td></tr>
+<tr><td>3</td><td><code>CSResolve</code>(1スレッド=1画素)</td><td>t0=MeshInfo, t1=Visibility</td>
+<td>u0=SWColor, u1=SWDepth, u2=SWNormal, u3=IndirectArgs</td><td><code>ceil(w/8), ceil(h/8)</code></td></tr>
+</tbody>
+</table>
+
+<p>
+<strong>頂点とインデックスはスロットを使わない。</strong>
+<code>ResourceDescriptorHeap</code>経由で<code>MeshInfo[i].VertexBufferIndex</code> /
+<code>IndexBufferIndex</code>から直接引く(メッシュシェーダー経路と同じ手)。
+UAVは最大4本で<code>kComputeUavSlotCount</code>ちょうど、SRVは2本(枠は18)に収まるため、
+スロット数の定数には触っていない。
+</p>
+
+<p>
+<strong>被覆判定とResolveはファイルを分けてある</strong>
+(<code>SoftwareRaster.hlsl</code> / <code>SoftwareRasterResolve.hlsl</code>)。
+HLSLのレジスタ割り当てはファイル単位で行われ、同じファイル内の別エントリポイントで
+同じレジスタを使い回せないため、u0〜u3の4本しかない枠に両者を同居させられない。
+</p>
+
+<h3>40.3 ジオメトリの供給 —— 専用のコピーを持たない</h3>
+
+<p>
+描画に使っている頂点バッファとインデックスバッファ<strong>そのもの</strong>をbindlessで読む。
+<code>ModelLoader</code>が<code>BufferDesc::ShaderReadable</code>を立てて
+同一リソースへSRVを重ね(頂点バッファビュー / インデックスバッファビューと共存する)、
+<code>RegisterBindless</code>で番号を払い出しておく。
+</p>
+
+<p>
+<strong>メッシュシェーダー対応と連動させてはいけない。</strong>
+SM 6.6には対応しているがメッシュシェーダーを持たないGPU(NVIDIA Pascal世代など)では、
+メッシュレット用のバッファが作られないまま自前ラスタライザだけが使える。
+連動させるとその環境でジオメトリを引けなくなる。
+</p>
+
+<p>
+エンジン側が毎フレーム組み直すのは<strong>メッシュ1件=1レコードの表だけ</strong>
+(<code>SWRasterMeshInfo</code>、160バイト)。ワールド行列・法線行列・頂点/インデックスの
+bindless番号・シーン全体での通し三角形番号の先頭と本数・表裏の符号を持つ。
+数百件のオーダーなので毎フレーム走査で構わない。
+</p>
+
+<p>
+<strong>中間の三角形レコードも持たない。</strong>
+visibility bufferにグローバル三角形番号が入っているので、Resolveはその番号から
+ジオメトリを引き直して再変換すればスクリーン座標もinvWも重心座標も復元できる。
+頂点3個の変換は数十FLOPしかなく、Bistro級で48〜136MBになる中間バッファをまるごと省ける。
+三角形番号からメッシュを引くのは<code>FirstTriangle</code>に対する二分探索で、
+専用の逆引きテーブル(三角形数×4バイト)は持たない。
+</p>
+
+<h3>40.4 深度テストと三角形IDを1つのアトミックにまとめる</h3>
+
+<p>
+深度と三角形番号を1つの64bit値へ詰め、<code>InterlockedMax</code>1回で解決する。
+判定と書き込みを分けると「勝者が深度を書いた後で敗者がIDを書く」競合が必ず起きるため。
+Reverse-Zにより「大きいz=手前」なので<code>InterlockedMax</code>がそのまま最近傍を選び、
+深度が同値なら三角形番号の大きい方が勝つので<strong>結果は完全に決定的</strong>になる。
+クリア値0は遠平面(=当たり無し)を意味する。導出と32bitでは足りない理由は
+ImplementationDetail.md 42.1。
+</p>
+
+<h3>40.5 巨大三角形を別パスへ逃がす</h3>
+
+<p>
+1スレッド1三角形方式の唯一の弱点は、画面全体を覆う三角形を1スレッドが数百万回ループすること。
+スクリーンバウンディングボックスの画素面積がしきい値(既定4096 = 64x64相当)を超えた三角形は、
+自分ではラスタライズせず巨大三角形リストへ<code>InterlockedAdd</code>1回で登録して抜ける。
+巨大三角形パスは1スレッドグループ(256スレッド)=1三角形で、bboxをストライドしながら分担する。
+</p>
+
+<p>
+<strong>この個数はGPU上でしか分からないため間接ディスパッチでなければ発行できない。</strong>
+これが<code>IRHICommandList::DispatchIndirect</code>と<code>BufferUsage::IndirectArgs</code>を
+RHIへ足した理由である。引数バッファのXフィールド(スレッドグループ数X)をそのまま
+カウンタとして使うので、別のカウンタバッファも集計用ディスパッチも要らない。
+</p>
+
+<h3>40.6 RHIへ足した3つ</h3>
+
+<ul>
+<li><code>IRHIDevice::SupportsSoftwareRaster()</code> —— 40.1のとおり。落ちた理由は必ずログへ</li>
+<li><code>IRHICommandList::ClearUnorderedAccessBufferUint()</code> ——
+UAVを持つバッファ全体を符号なし整数で埋める。<strong>バインド状態を変えない</strong>のが契約。
+構造化バッファのUAVは<code>ClearUnorderedAccessView*</code>が受け付けないため、
+DX12実装は同じリソースへ<strong>クリア専用のraw UAV</strong>を重ねて張る</li>
+<li><code>IRHICommandList::DispatchIndirect()</code> と <code>BufferUsage::IndirectArgs</code> ——
+引数バッファはrawで作る。D3D11が<code>MISC_DRAWINDIRECT_ARGS</code>と
+<code>MISC_BUFFER_STRUCTURED</code>を同時指定できないため、HLSLを1本で済ませるようDX12も
+同じ形に揃えている</li>
+</ul>
+
+<p>
+DX11側の後ろ2つは<strong>この機能がDX12専用のため呼び出し側が存在しない</strong>。
+RHIの抽象を片肺にしないために実装はしてあるが、DX11経路では実行されない。
+</p>
+
+<h3>40.7 デバッグ表示 —— ハードウェアと同じ表示モードで出す</h3>
+
+<p>
+出力は3つ。<strong>いずれもハードウェア側と同じPresentのモードで表示する</strong>ので、
+スクリーンショットをそのまま差分に掛けられる。
+</p>
+
+<table>
+<thead><tr><th>デバッグ表示</th><th>バッファ</th><th>Presentのモード</th><th>突き合わせ先</th></tr></thead>
+<tbody>
+<tr><td>SWラスタ</td><td>R16G16B16A16_Float</td><td>4(Reinhard+ガンマ)</td><td>—(形の確認用)</td></tr>
+<tr><td>SWラスタ - 深度 (生値)</td><td>R32_Float</td><td>5(生値)</td><td>「深度 (生値)」</td></tr>
+<tr><td>SWラスタ - 法線</td><td><strong>R16G16_Float</strong>(G-Bufferと同じオクタヘドラル符号化)</td><td>7</td><td>「法線」</td></tr>
+</tbody>
+</table>
+
+<p>
+パスが今フレーム実行されていない場合はバッファの中身が前フレーム/未定義の残骸なので、
+最終結果のまま何も切り替えない(平面反射・RTシャドウのデバッグ表示と同じ方針)。
+<code>Present.hlsl</code>には手を入れていない。
+</p>
+
+<h3>40.8 フェーズ1の制約</h3>
+
+<ul>
+<li><strong>アルファカットアウト未対応。</strong>1パスのvisibility bufferでは被覆判定の内側で
+ベースカラーを引く必要があり、内側ループのコストが一段上がる。bindlessは既にあるので
+技術的な障壁は無い</li>
+<li><strong>近平面クリッピング未実装。</strong>クリップ空間のwが閾値以下の頂点を持つ三角形は棄却する</li>
+<li><strong>フィルルール。</strong>D3Dのtop-leftルールとサブピクセルスナップは再現しない。
+3辺とも0以上で判定するため共有辺は二重被覆になるが隙間は開かない(シルエットに±1画素)</li>
+<li><strong>法線マップは適用しない</strong>(頂点法線の補間のみ)</li>
+<li>巨大三角形リスト(容量4096)が溢れると、Resolveが画面左上をマゼンタで塗る</li>
 </ul>
 
 </section>
