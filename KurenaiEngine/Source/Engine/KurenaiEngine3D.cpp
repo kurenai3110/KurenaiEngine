@@ -4939,7 +4939,15 @@ namespace Kurenai
     void KurenaiEngine3D::ComputeCascadeSplits(const Core::Camera& camera, float (&outSplits)[kCascadeCount]) const
     {
         const float nearZ = camera.GetNearZ();
-        const float farZ = camera.GetFarZ();
+        // [Scene]ShadowDistanceが指定されていれば、そこでカスケードの分割範囲を打ち切る。
+        //
+        // 【なぜ必要か】遠クリップ面はシーンAABBの対角から自動で決まる(farZ = max(100, 対角×4))。
+        // 数十km規模のシーンではfarZが100km級になり、分割範囲がそのまま伸びるため
+        // 第1カスケードが数kmを2048x2048の1枚で覆うことになって近景の影が消える。
+        // 【未指定なら従来どおり】書かなかったシーンの見え方は1ピクセルも変えない
+        const float farZ = m_Scene.HasShadowDistance
+            ? (std::min)(camera.GetFarZ(), m_Scene.ShadowDistance)
+            : camera.GetFarZ();
         const float lambda = 0.75f;
 
         for (uint32_t i = 0; i < kCascadeCount; ++i)
@@ -7385,6 +7393,12 @@ namespace Kurenai
             cmd->SetTexture(12, m_DDGIIrradianceAtlas.get());
             cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
 
+            // 【ここにはフラスタムカリングを入れない】このループのドロー数は
+            // ClampDDGIProbesPerFrameToConstantRingが「同じ条件で数えること」を前提に
+            // 定数バッファリングの予算を決めている(同関数のコメント)。カリングは
+            // プローブの位置ごとに結果が変わるため、予算計算と食い違う。
+            // 定数バッファの予算超過は例外ではなくログ1行で続行し、描画が静かに壊れる
+            // (DX12Buffer.h)ため、整合が取れるまでは入れないほうが安全
             for (const auto& instance : m_Scene.Instances)
             {
                 for (const auto& mesh : instance.Model.Meshes)

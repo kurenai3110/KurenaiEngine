@@ -313,6 +313,8 @@ namespace Kurenai::Assets
             std::wstring SkyboxPath;
             bool HasIBLIntensity = false;
             float IBLIntensity = 1.0f;
+            bool HasShadowDistance = false;
+            float ShadowDistance = 0.0f;
             bool AOEnabled = true;
             bool HasSSREnabled = false;
             bool SSREnabled = true;
@@ -555,6 +557,19 @@ namespace Kurenai::Assets
                         if (!ParseFloatToken(value, result.IBLIntensity)) errorAt(lineNumber, rawLine, "IBLIntensityの値が不正です");
                         if (result.IBLIntensity < 0.0f) errorAt(lineNumber, rawLine, "IBLIntensityは0以上で指定してください");
                         result.HasIBLIntensity = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"ShadowDistance"))
+                    {
+                        if (!ParseFloatToken(value, result.ShadowDistance)) errorAt(lineNumber, rawLine, "ShadowDistanceの値が不正です");
+                        // 下限: 近クリップ面は最大でも0.1mなので、それを下回ると影が1枚も出ない。
+                        // 上限: シャドウマップ1枚(2048x2048)で覆って意味のある範囲を大きく超えると、
+                        // 打ち切る意味がなくなる(既定のfarZ側でどのみち制限される)。
+                        // どちらも打ち間違い(0や桁の取り違え)を弾くためのもの
+                        if (result.ShadowDistance < 1.0f || result.ShadowDistance > 100000.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "ShadowDistanceは1〜100000の範囲で指定してください");
+                        }
+                        result.HasShadowDistance = true;
                     }
                     else if (CaseInsensitiveEquals(key, L"AmbientOcclusion"))
                     {
@@ -1300,6 +1315,8 @@ namespace Kurenai::Assets
         scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;
+        scene.HasShadowDistance = parsed.HasShadowDistance;
+        scene.ShadowDistance = parsed.ShadowDistance;
 
         // [Scene]Skyboxは[Model]Pathと同じくAssetsルートからの相対パスとして扱い、
         // 同じルート外チェックを適用したうえで絶対パスへ解決してから返す

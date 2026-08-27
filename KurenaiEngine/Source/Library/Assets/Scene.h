@@ -202,6 +202,20 @@ namespace Kurenai::Assets
         bool HasIBLIntensityOverride = false;
         float IBLIntensity = 1.0f;
 
+        // カスケードシャドウを打ち切る距離[m]。未指定(HasShadowDistance == false)なら
+        // 従来どおりカメラの遠クリップ面までを4カスケードで分割する。
+        //
+        // 【なぜ必要か】遠クリップ面はシーンAABBの対角から自動決定される
+        // (farZ = max(100, 対角×4)、KurenaiEngine3D::ComputeInitialCamera)。数十km規模のシーンでは
+        // farZが100km級になり、カスケードの分割範囲がそのまま伸びるため、第1カスケードが
+        // 数kmを2048x2048の1枚で覆うことになって近景の影が事実上消える。
+        // シャドウだけを手前で打ち切れば、遠景の描画距離を保ったまま近景の影の密度を戻せる。
+        //
+        // 【既定値を持たせない理由】「指定しなければ従来の挙動」を保証するためにフラグで分ける。
+        // 何らかの既定値を入れると、これまで正しく影が出ていたシーンの見え方が黙って変わる
+        bool HasShadowDistance = false;
+        float ShadowDistance = 0.0f;
+
         // AO/間接光(SSAO・SSIL)を有効にするか。Furnace Testでは球の縁がAOで暗くなると
         // 「エネルギー損失による暗さ」と区別がつかなくなるため無効にする
         bool AOEnabled = true;
