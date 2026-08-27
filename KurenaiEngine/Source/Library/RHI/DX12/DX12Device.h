@@ -143,11 +143,16 @@ namespace Kurenai::RHI
         uint32_t RegisterBindless(IRHITexture* texture) override;
         uint32_t RegisterBindless(IRHIBuffer* buffer) override;
         bool SupportsMeshShader() const override { return m_SupportsMeshShader; }
+        bool SupportsSoftwareRaster() const override { return m_SupportsSoftwareRaster; }
 
         // DX12Texture/DX12Bufferがデストラクタでbindless番号を返却するのに使う。
         // bindless非対応の場合はnullptrを返す
         DX12BindlessTable* GetBindlessTable() const { return m_BindlessTable.get(); }
         ID3D12RootSignature* GetMeshRootSignature() const { return m_MeshRootSignature.Get(); }
+        // DX12CommandList::DispatchIndirectがExecuteIndirectへ渡すコマンドシグネチャ。
+        // 引数はuint3(スレッドグループ数)1個だけで、内容がパスによらず不変のため
+        // デバイス初期化時に1つ作って使い回す
+        ID3D12CommandSignature* GetDispatchCommandSignature() const { return m_DispatchCommandSignature.Get(); }
 
     private:
         // CreateBottomLevelAS/CreateTopLevelASの共通部分。組み立て済みの構築入力を受け取り、
@@ -171,9 +176,15 @@ namespace Kurenai::RHI
         // このエンジンのメッシュシェーダーはジオメトリをbindlessで読むため、
         // DetectBindlessSupportより後に呼ぶこと
         void DetectMeshShaderSupport();
+        // コンピュートシェーダーによる自前ラスタライザ(SoftwareRaster.hlsl)が動くかを判定して
+        // m_SupportsSoftwareRasterへ記録する。頂点/インデックスをbindlessで引くため
+        // DetectBindlessSupportより後に呼ぶこと
+        void DetectSoftwareRasterSupport();
 
         void CreateRootSignature();
         void CreateComputeRootSignature();
+        // 間接ディスパッチ(ExecuteIndirect)用のコマンドシグネチャを1つだけ作る
+        void CreateDispatchCommandSignature();
         // メッシュシェーダーパイプライン専用のルートシグネチャ。非対応環境では何もしない
         void CreateMeshRootSignature();
         // 3つのルートシグネチャが共通で足すbindless関連のフラグ。対応環境でのみ
@@ -229,6 +240,9 @@ namespace Kurenai::RHI
         bool m_SupportsBindless = false;
         // 増幅シェーダー/メッシュシェーダーによる描画が使えるか(DetectMeshShaderSupport)
         bool m_SupportsMeshShader = false;
+        // コンピュートシェーダーによる自前ラスタライザが使えるか(DetectSoftwareRasterSupport)。
+        // bindlessと64bit整数アトミック(Int64ShaderOps)の両方が要る
+        bool m_SupportsSoftwareRaster = false;
         // D3D12_FEATURE_SHADER_MODELで実測した、このデバイスが対応する最上位のシェーダーモデル。
         // 取得できなかった場合はD3D_SHADER_MODEL_5_1相当として扱う(0のまま)
         D3D_SHADER_MODEL m_HighestShaderModel = static_cast<D3D_SHADER_MODEL>(0);
@@ -271,6 +285,9 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D12RootSignature> m_ComputeRootSignature;
         // メッシュシェーダーパイプライン用。非対応環境ではnullptrのまま(CreateMeshRootSignature)
         Microsoft::WRL::ComPtr<ID3D12RootSignature> m_MeshRootSignature;
+        // 間接ディスパッチ用コマンドシグネチャ(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH 1個)。
+        // ルートシグネチャに触らない引数のみのためpRootSignatureはnullptrでよい
+        Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignature;
 
         std::unique_ptr<DX12DescriptorHeap> m_RtvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_DsvHeap;

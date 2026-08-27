@@ -740,7 +740,104 @@ namespace Kurenai::RHI
     {
         FlushPendingComputeWrites();
         m_Device->GetCommandList()->Dispatch(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+        ReleaseComputeUavBindingsAfterDispatch();
+    }
 
+    void DX12CommandList::DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes)
+    {
+        if (!argsBuffer)
+        {
+            Core::Logger::Error("DX12", "DispatchIndirect: 引数バッファがnullptrです。ディスパッチをスキップします");
+            return;
+        }
+
+        auto* dx12Buffer = static_cast<DX12Buffer*>(argsBuffer);
+        if (!dx12Buffer->IsIndirectArgs())
+        {
+            Core::Logger::Error(
+                "DX12", "DispatchIndirect: BufferUsage::IndirectArgs以外のバッファが渡されました。ディスパッチをスキップします");
+            return;
+        }
+        if ((offsetInBytes % 4) != 0)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "DispatchIndirect: offsetInBytes(" + std::to_string(offsetInBytes) +
+                    ")が4の倍数ではありません。ディスパッチをスキップします");
+            return;
+        }
+
+        ID3D12CommandSignature* signature = m_Device->GetDispatchCommandSignature();
+        if (!signature)
+        {
+            Core::Logger::Error("DX12", "DispatchIndirect: コマンドシグネチャが未作成です。ディスパッチをスキップします");
+            return;
+        }
+
+        FlushPendingComputeWrites();
+
+        // 【この遷移はUAVバインドと両立しない】引数バッファ自身をこのディスパッチのUAVスロットへ
+        // 張ったままINDIRECT_ARGUMENTへ遷移させることはできない。引数を書くディスパッチと
+        // それを消費するDispatchIndirectは必ず別の呼び出しに分けること
+        dx12Buffer->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
+        m_Device->GetCommandList()->ExecuteIndirect(
+            signature, 1, dx12Buffer->GetResource(), offsetInBytes, nullptr, 0);
+
+        ReleaseComputeUavBindingsAfterDispatch();
+    }
+
+    void DX12CommandList::ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value)
+    {
+        if (!buffer)
+        {
+            Core::Logger::Error("DX12", "ClearUnorderedAccessBufferUint: バッファがnullptrです。クリアをスキップします");
+            return;
+        }
+
+        auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+        if (!dx12Buffer->HasUav())
+        {
+            Core::Logger::Error(
+                "DX12", "ClearUnorderedAccessBufferUint: UAVを持たないバッファが渡されました。クリアをスキップします");
+            return;
+        }
+
+        // ClearUnorderedAccessViewUintは「シェーダー可視ヒープ上のGPUハンドル」と
+        // 「非シェーダー可視ヒープ上のCPUハンドル」の両方を要求する。後者はバッファが
+        // 作成時から持っているものをそのまま使い、前者はコンピュート用ディスクリプタリングから
+        // 1枠だけ借りてコピーして作る。
+        //
+        // 【バインド状態は変わらない】SetComputeRootDescriptorTableは呼ばないため、
+        // 直前にSetComputeUnorderedAccess*で積んだシャドウには一切影響しない
+        // 構造化バッファのUAVはClearUnorderedAccessView*が受け付けないため、
+        // クリア専用のraw UAVを使う(DX12Buffer::GetOrCreateClearUavCpuHandleのコメント参照)
+        const D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = dx12Buffer->GetOrCreateClearUavCpuHandle();
+        if (cpuHandle.ptr == 0)
+        {
+            Core::Logger::Error(
+                "DX12", "ClearUnorderedAccessBufferUint: クリア用のUAVを用意できませんでした。クリアをスキップします");
+            return;
+        }
+
+        const uint32_t tableIndex = m_Device->AllocateComputeTableBlock(1);
+        auto* heap = m_Device->GetShaderVisibleSrvHeap();
+        m_Device->GetDevice()->CopyDescriptorsSimple(
+            1, heap->GetCpuHandle(tableIndex), cpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        dx12Buffer->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        const UINT values[4] = { value, value, value, value };
+        m_Device->GetCommandList()->ClearUnorderedAccessViewUint(
+            heap->GetGpuHandle(tableIndex), cpuHandle, dx12Buffer->GetResource(), values, 0, nullptr);
+
+        // 後続のディスパッチがクリア後の値を読むことを保証する
+        const D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(dx12Buffer->GetResource());
+        m_Device->GetCommandList()->ResourceBarrier(1, &barrier);
+    }
+
+    void DX12CommandList::ReleaseComputeUavBindingsAfterDispatch()
+    {
         // このDispatchでUAVとして書き込んだリソースは、直後に別のDispatchやSRVとして読む場合に
         // 書き込み完了を保証する必要があるため、UAVバリアを発行しておく。
         // あわせてUAVスロットのシャドウをnullディスクリプタへ戻す。DX11がDispatch直後に

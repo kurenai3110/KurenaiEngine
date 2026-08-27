@@ -212,5 +212,22 @@ namespace Kurenai::RHI
         // 呼ぶとログを出して何もしない
         virtual void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) = 0;
         virtual void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) = 0;
+        // BufferUsage::IndirectArgsで作ったバッファのoffsetInBytesの位置にあるuint3を
+        // スレッドグループ数として解釈してディスパッチする。offsetInBytesは4の倍数であること。
+        // 「発行するグループ数がGPU上でしか分からない」場合に使う(自前ラスタライザの
+        // 巨大三角形パスがこれにあたる。個数は直前のディスパッチが数え上げる)。
+        //
+        // 引数バッファ以外のUsageを渡すとログを出して何もしない。
+        // Dispatchと同じく、この呼び出しの直後にUAVスロットは全解除される
+        virtual void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) = 0;
+
+        // UAVを持つバッファ全体を、指定した符号なし整数値で埋める。散布書き込みされる
+        // バッファ(自前ラスタライザのvisibility bufferや間接ディスパッチ引数)を毎フレーム
+        // 初期値へ戻す用途向け。
+        //
+        // 【この呼び出しはバインド状態を変えない】SetComputeUnorderedAccess*で張ったスロットには
+        // 影響しない(内部で一時的なディスクリプタを使うため)。
+        // UAVを持たないバッファを渡すとログを出して何もしない
+        virtual void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) = 0;
     };
 }

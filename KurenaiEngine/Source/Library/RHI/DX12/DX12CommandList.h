@@ -52,6 +52,8 @@ namespace Kurenai::RHI
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
+        void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) override;
+        void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) override;
 
     private:
         static constexpr uint32_t kMaxRenderTargets = 8;
@@ -152,6 +154,9 @@ namespace Kurenai::RHI
         // 後続のDispatch/描画がこのDispatchの書き込み完了を確実に見えるようにするため保持する
         ID3D12Resource* m_BoundComputeUavResources[kComputeUavSlotCount]{};
         void FlushPendingComputeWrites();
+        // Dispatch/DispatchIndirectの後始末。UAVとして書いたリソースへUAVバリアを積み、
+        // UAVスロットのシャドウをnullディスクリプタへ戻す(バインドの寿命は1ディスパッチ)
+        void ReleaseComputeUavBindingsAfterDispatch();
 
         // 直近のSetPipelineStateで設定したのがメッシュシェーダーPSOか。
         // メッシュシェーダーPSOは専用のルートシグネチャ(DX12Device::GetMeshRootSignature)で

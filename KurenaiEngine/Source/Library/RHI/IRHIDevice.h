@@ -170,6 +170,18 @@ namespace Kurenai::RHI
         // 非対応環境・作成失敗時はログを出してnullptrを返す(例外は投げない)
         virtual std::unique_ptr<IRHIPipelineState> CreateMeshPipelineState(const MeshPipelineStateDesc& desc) = 0;
 
+        // --- ソフトウェアラスタライザ ---------------------------------------------------------
+
+        // コンピュートシェーダーによる自前ラスタライザ(SoftwareRaster.hlsl)が動く環境か。
+        // 必要なのは次の2つで、どちらもDX11には無いため常にfalse:
+        //   (1) bindless(SupportsBindless)。頂点/インデックスをResourceDescriptorHeapで引くため。
+        //       この時点でシェーダーモデル6.6とリソースバインディングTier 3が保証される
+        //   (2) 64bit整数のアトミック(D3D12_FEATURE_DATA_D3D12_OPTIONS1::Int64ShaderOps)。
+        //       深度と三角形IDを1ワードへ詰めてInterlockedMaxで解決するため
+        //
+        // 上位層はこの経路へ入る前に必ず確認すること(SupportsRaytracing()と同じ扱い方)
+        virtual bool SupportsSoftwareRaster() const = 0;
+
         // --- レイトレーシング -----------------------------------------------------------------
 
         // インラインレイトレーシング(HLSLのRayQuery、DXR 1.1)が使えるか。

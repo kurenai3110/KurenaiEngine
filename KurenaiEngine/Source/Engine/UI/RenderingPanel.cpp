@@ -33,6 +33,11 @@ namespace Kurenai::UI
         {
             DrawMeshletSection();
         }
+        if (ImGui::CollapsingHeader("ソフトウェアラスタライザ###SoftwareRaster"))
+        {
+            DrawSoftwareRasterSection();
+        }
+
         if (ImGui::CollapsingHeader("シャドウ###Shadow"))
         {
             DrawShadowSection();
@@ -241,6 +246,86 @@ namespace Kurenai::UI
                 "このシーンのモデルはメッシュレットを持っていない。KurenaiPackerで"
                 "--no-meshletsを付けずに再パックすること");
         }
+    }
+
+    void RenderingPanel::DrawSoftwareRasterSection()
+    {
+        ImGui::TextWrapped(
+            "三角形をコンピュートシェーダーで自前にラスタライズする比較用の経路(46章)。"
+            "ハードウェアがブラックボックスで行っている処理 ―― 頂点変換・背面カリング・"
+            "スクリーン空間への投影・エッジ関数による被覆判定・深度テスト・透視補正補間 ―― を"
+            "明示的なコードとして持ち、G-Bufferと直接突き合わせられるようにするためのもの。"
+            "既存の描画経路には一切寄与せず、結果はデバッグ表示でのみ見る");
+
+        if (!m_Engine.m_SoftwareRasterAvailable)
+        {
+            // 非対応環境(DX11、SM 6.6未満、Int64ShaderOps非対応、bindless非対応)、
+            // あるいはシェーダー/リソースの作成に失敗した場合。
+            // メッシュレット・影・反射の手法選択と同じく、選べないものは操作させずに理由だけ示す
+            ImGui::TextWrapped(
+                "この環境では利用できない。DX12かつシェーダーモデル6.6・64bit整数の"
+                "シェーダー演算(Int64ShaderOps)・bindless(ResourceDescriptorHeap)の"
+                "すべてに対応したGPUが必要。詳しい理由は起動ログを参照");
+            return;
+        }
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "ソフトウェアラスタライザを実行する###EnableSoftwareRaster",
+            &m_Engine.m_SoftwareRasterEnabled, false,
+            "有効にすると、G-Bufferパスの直後に専用のパス(SWRaster)が走る。"
+            "出力はデバッグ表示の「SWラスタ」「SWラスタ - 深度 (生値)」「SWラスタ - 法線」で見る。"
+            "無効の間はパスごと登録されないため、コストもVRAM以外は掛からない。\n\n"
+            "【比べ方】深度は「深度 (生値)」と、法線は「法線」と同じ表示モードで出しているので、"
+            "スクリーンショットを撮って差分を取ればよい。TAAを切っておくこと ―― "
+            "有効だとフレームごとに射影行列のジッターが変わり、比較にならない");
+
+        SliderIntEx(
+            "巨大三角形のしきい値 (画素)###SWRasterLargeArea",
+            &m_Engine.m_SoftwareRasterLargeTriangleArea,
+            static_cast<int>(KurenaiEngine3D::kSWRasterMinLargeTriangleArea),
+            static_cast<int>(KurenaiEngine3D::kSWRasterMaxLargeTriangleArea),
+            static_cast<int>(KurenaiEngine3D::kSWRasterDefaultLargeTriangleArea),
+            "スクリーンバウンディングボックスの画素面積がこれを超えた三角形は、1スレッドで塗らず"
+            "巨大三角形パス(1スレッドグループ=1三角形)へ回す。既定の4096は64x64相当。\n\n"
+            "【対照実験に使う】極端に小さくすればほぼ全三角形が巨大三角形パスへ回り、"
+            "極端に大きくすればすべて小三角形パス単独になる。両極端で同じ絵が出れば、"
+            "2つの経路が一致していると言える(「片方が実行されていない」を先に潰す手順)。\n\n"
+            "小三角形パスは1スレッド1三角形なので、この値がそのまま"
+            "「1スレッドが回す最大ループ回数」になる。上げすぎると画面を覆う三角形1個で"
+            "描画が長時間止まる");
+
+        EndParamGroup();
+
+        // 「有効にしたのに何も出ない」ときの切り分け用。半透明とbindless未登録のメッシュは
+        // 対象外なので、シーンのメッシュ数そのものとは一致しない
+        size_t targetMeshCount = 0;
+        size_t triangleCount = 0;
+        for (const auto& instance : m_Engine.m_Scene.Instances)
+        {
+            for (const auto& mesh : instance.Model.Meshes)
+            {
+                if (mesh.IsTransparent || mesh.IndexCount < 3)
+                {
+                    continue;
+                }
+                ++targetMeshCount;
+                triangleCount += mesh.IndexCount / 3;
+            }
+        }
+        ImGui::Text("対象メッシュ: %zu / 三角形: %zu", targetMeshCount, triangleCount);
+        if (targetMeshCount > KurenaiEngine3D::kSWRasterMaxMeshes)
+        {
+            ImGui::TextWrapped(
+                "メッシュ数が上限を超えている。超過分は描画されない"
+                "(上限はKurenaiEngine3D::kSWRasterMaxMeshes)");
+        }
+
+        ImGui::TextWrapped(
+            "【フェーズ1の制約】アルファカットアウト未対応(植栽・日除けは板になる)、"
+            "近平面クリッピング未実装(壁に近づくと三角形が消える)、法線マップは適用しない。"
+            "巨大三角形リストが溢れると画面左上がマゼンタになる");
     }
 
     void RenderingPanel::DrawAOSection()

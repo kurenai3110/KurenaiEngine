@@ -55,6 +55,18 @@ namespace Kurenai::RHI
         // ステージング領域が本体の数倍のUPLOADヒープを占有してしまう。
         // このUsageはUpdateBufferを受け付けない(呼ぶとログを出して無視される)
         StructuredImmutable,
+        // 間接ディスパッチ(IRHICommandList::DispatchIndirect)の引数バッファ。
+        // uint3(スレッドグループ数X/Y/Z)をコンピュートシェーダーが書き、そのまま
+        // DispatchIndirectへ渡す。「発行するグループ数がGPU上でしか分からない」場合に使う。
+        //
+        // 【構造化バッファにできない】D3D11はD3D11_RESOURCE_MISC_DRAWINDIRECT_ARGSと
+        // D3D11_RESOURCE_MISC_BUFFER_STRUCTUREDを同時に指定できないため、
+        // raw(ByteAddress)バッファとして作りHLSL側もRWByteAddressBufferで受ける。
+        // DX12にはこの制約は無いが、シェーダーを1本で済ませるため同じ形に揃えている。
+        //
+        // CPUからは書き込まない(UpdateBufferは受け付けない)。初期化は
+        // IRHICommandList::ClearUnorderedAccessBufferUintで行う
+        IndirectArgs,
     };
 
     enum class PrimitiveTopology

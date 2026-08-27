@@ -7,10 +7,12 @@ namespace Kurenai::RHI
     DX11Buffer::DX11Buffer(
         Microsoft::WRL::ComPtr<ID3D11Buffer> buffer,
         uint32_t strideInBytes,
-        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav)
+        Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav,
+        bool isIndirectArgs)
         : m_Buffer(std::move(buffer))
         , m_StrideInBytes(strideInBytes)
         , m_Uav(std::move(uav))
+        , m_IsIndirectArgs(isIndirectArgs)
     {
     }
 
