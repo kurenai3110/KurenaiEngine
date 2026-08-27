@@ -38,6 +38,20 @@ namespace Kurenai::RHI
         // DX11実装は参照しない(D3D11_USAGE_DYNAMIC + Map(WRITE_DISCARD)はドライバが毎回
         // リネームするため、1フレームあたりの更新回数に上限が無い)
         uint32_t MaxUpdatesPerFrame = 4;
+
+        // BufferUsage::Constantのバッファを1フレームに何回UpdateBufferするかの上限。
+        // 0なら実装既定(DX12は8192スロット = 1フレームあたり4096回)を使う。
+        //
+        // 定数バッファも上のStructuredReadOnlyと同じ理由でリングになっている。
+        // メッシュごと・パスごとに書き換えるバッファ(ObjectConstants)は、シーンの
+        // メッシュ数とパス数の積だけ書かれるため、既定では足りないことがある
+        // ―― BistroInteriorLit(不透明59メッシュ)はプローブのキャプチャだけで
+        // 1フレーム6000回を超え、実際にリングを一周して描画が壊れていた。
+        //
+        // DX12はこの値 × kFrameCount ぶんのスロットをUPLOADヒープに常時確保するので、
+        // (1スロットは256バイト境界へ切り上げられる)大きな値は必要なバッファにだけ与えること。
+        // DX11実装は参照しない(MaxUpdatesPerFrameと同じ理由)
+        uint32_t MaxConstantUpdatesPerFrame = 0;
     };
 
     struct ShaderDesc

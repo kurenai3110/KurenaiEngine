@@ -67,14 +67,18 @@ namespace Kurenai::UI
             "平面反射 (水面に映る鏡像)",
             "雲の3Dノイズ (スライス表示・2x2タイル)",
             "大気散乱LUT (Transmittance / MultiScattering / SkyView)",
+            "DDGI - プローブ裏面率 (壁の内部に埋まったプローブ)",
             "SWラスタ (自前ラスタライザのフラット陰影)",
             "SWラスタ - 深度 (生値)",
             "SWラスタ - 法線",
         };
         static_assert(
-            // 末尾のSoftwareRasterNormalは35
-            static_cast<int>(DebugView::SoftwareRasterNormal) == 35,
+            // 末尾のSoftwareRasterNormalは36
+            static_cast<int>(DebugView::SoftwareRasterNormal) == 36,
             "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はSoftwareRasterNormal)");
+        static_assert(
+            IM_ARRAYSIZE(kDebugViewNames) == KurenaiEngine3D::kDebugViewCount,
+            "kDebugViewNamesの要素数をDebugViewの総数と一致させること");
 
         DrawUsageHint();
         BeginParamGroup();

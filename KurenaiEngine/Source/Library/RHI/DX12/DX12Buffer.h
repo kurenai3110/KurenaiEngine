@@ -151,6 +151,12 @@ namespace Kurenai::RHI
         uint64_t GetUploadRingOffset() const { return static_cast<uint64_t>(m_UploadRingIndex) * m_SlotSizeInBytes; }
 
         uint32_t GetBindlessIndex() const override { return m_BindlessIndex; }
+
+        // CPUはkFrameCountフレームぶん先行して記録するため、1フレームで安全に使えるのは
+        // リング容量のkFrameCount分の1まで(判定はCheckRingOverflowと同じ)。
+        // リングを持たないUsage(m_RingCapacity==1)は上限が無いものとして扱う。
+        // 実装が.cpp側にあるのは、このヘッダーではDX12Deviceが前方宣言でしかないため
+        uint32_t GetSafeUpdatesPerFrame() const override;
         // 意味はDX12Texture::SetBindlessIndexと同じ
         void SetBindlessIndex(uint32_t index) { m_BindlessIndex = index; }
 

@@ -134,6 +134,8 @@ namespace Kurenai::RHI
         void WaitForGPUIdle() override;
 
         bool SupportsRaytracing() const override { return m_SupportsRaytracing; }
+        // 実装はDX12Device.cpp(上限の定数kMaxSrvTableBlocksPerFrameが匿名名前空間にあるため)
+        uint32_t GetMaxDrawsPerFrame() const override;
         std::unique_ptr<IRHIAccelerationStructure> CreateBottomLevelAS(const BottomLevelASDesc& desc) override;
         std::unique_ptr<IRHIAccelerationStructure> CreateTopLevelAS(const TopLevelASDesc& desc) override;
 

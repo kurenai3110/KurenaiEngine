@@ -68,6 +68,12 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams2;
     float4 DDGIParams3;
     float4 DDGIParams4;
+    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
+    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
+    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
+    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
+    float4 DDGILODOrigin[4];
+    float4 DDGILODBase[4];
     float4 OcclusionParams;
     // x=星のまたたきに使う時刻
     float4 TimeParams;

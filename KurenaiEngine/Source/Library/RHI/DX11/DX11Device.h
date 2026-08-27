@@ -64,6 +64,8 @@ namespace Kurenai::RHI
         // 上位層はSupportsRaytracing()を見て従来のスクリーンスペース手法へフォールバックする設計のため、
         // 下の2つは呼ばれないのが正常。呼ばれた場合はエラーログを残してnullptrを返す
         bool SupportsRaytracing() const override { return false; }
+        // DX11はディスクリプタテーブルを持たないため、1フレームの描画回数に上限が無い
+        uint32_t GetMaxDrawsPerFrame() const override { return UINT32_MAX; }
         std::unique_ptr<IRHIAccelerationStructure> CreateBottomLevelAS(const BottomLevelASDesc& desc) override;
         std::unique_ptr<IRHIAccelerationStructure> CreateTopLevelAS(const TopLevelASDesc& desc) override;
 

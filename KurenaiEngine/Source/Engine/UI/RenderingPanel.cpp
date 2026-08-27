@@ -671,6 +671,90 @@ namespace Kurenai::UI
             "無効にすると拡散の環境光が従来どおりグローバルIBL/反射プローブのイラディアンスに戻る");
 
         ImGui::BeginDisabled(!m_Engine.m_DDGIEnabled);
+
+        // レイの取得。Raytracedはレイトレーシング非対応の環境(DX11、あるいはDXR Tier 1.1に
+        // 達していないDX12)では選べないため、選択肢そのものを出さない
+        // (「出ているのに選ぶと何も起きない」より「出ていない」ほうが誤解が少ない。
+        //  DrawSSRSectionと同じ作法。並びはDDGIRayModeと一致させ、RTを末尾に置くこと)
+        static const char* kDDGIRayModeNamesWithRT[] = { "ラスタライズ", "レイトレーシング (DXR)" };
+        static const char* kDDGIRayModeNamesWithoutRT[] = { "ラスタライズ" };
+
+        const bool ddgiRtAvailable = m_Engine.m_RaytracingAvailable;
+        const char* const* ddgiRayModeNames = ddgiRtAvailable ? kDDGIRayModeNamesWithRT : kDDGIRayModeNamesWithoutRT;
+        const int ddgiRayModeCount =
+            ddgiRtAvailable ? IM_ARRAYSIZE(kDDGIRayModeNamesWithRT) : IM_ARRAYSIZE(kDDGIRayModeNamesWithoutRT);
+
+        int ddgiRayModeIndex = static_cast<int>(m_Engine.m_DDGIRayMode);
+        if (ComboEx(
+                "レイの取得###DDGIRayMode", &ddgiRayModeIndex, ddgiRayModeNames, ddgiRayModeCount,
+                static_cast<int>(KurenaiEngine3D::DDGIRayModeForCapability(ddgiRtAvailable)),
+                "プローブへ入れる放射輝度と距離をどう集めるか。\n\n"
+                "【ラスタライズ】プローブ1個につきシーンを6回描く。1フレームの描画回数が"
+                "メッシュ数に比例して増えるため、大きなシーンでは更新プローブ数が自動的に抑えられる。\n\n"
+                "【レイトレーシング】1スレッド1レイでキューブを直接埋める。メッシュ数はBVHが吸収する。"
+                "太陽の影をカスケードシャドウマップではなく影レイで求めるため、"
+                "カメラから遠いプローブにも影が落ちる。\n"
+                "代わりに法線マップ・ベイク済みAO・bent normalはヒット面で引けないため、"
+                "その分だけラスタライズとは絵が違う"))
+        {
+            m_Engine.m_DDGIRayMode = static_cast<KurenaiEngine3D::DDGIRayMode>(ddgiRayModeIndex);
+            // 収束して停止しているときに切り替えても焼き直されるようにする
+            // (再ベイク署名にはこのモードも混ぜてあるので通常は自動で倒れるが、
+            //  つまみを触った直後に必ず動くほうが確かめやすい)
+            m_Engine.m_DDGIUpdateSuspended = false;
+            m_Engine.m_DDGIStableCycles = 0;
+        }
+
+        if (ddgiRtAvailable)
+        {
+            // 対照実験用のつまみ。切ると「影が落ちない」ラスタ経路と同じ状態になるので、
+            // 振って絵が動くことがレイトレース経路が実際に走っている証拠になる
+            ImGui::BeginDisabled(m_Engine.m_DDGIRayMode != KurenaiEngine3D::DDGIRayMode::Raytraced);
+            if (CheckboxEx(
+                    "太陽の影レイを撃つ###DDGISunShadowRay", &m_Engine.m_DDGISunShadowRayEnabled, true,
+                    "レイトレース経路でのみ有効。切ると太陽の遮蔽を一切見なくなり、"
+                    "ラスタ経路の既知の制約(カメラから遠いプローブに影が落ちない)と同じ状態になる。\n\n"
+                    "常用は有効側。切り替えて絵と数値が動くことを確かめる対照実験のために置いてある"))
+            {
+                m_Engine.m_DDGIUpdateSuspended = false;
+                m_Engine.m_DDGIStableCycles = 0;
+            }
+
+            // プローブ分類。裏面に当たったことを記録できるのはレイトレース経路だけなので、
+            // ラスタ経路では掛からない(αが常に0になるため)
+            if (CheckboxEx(
+                    "プローブ分類を有効にする###DDGIProbeClassification",
+                    &m_Engine.m_DDGIProbeClassificationEnabled, true,
+                    "壁や地面の内部に埋まってしまったプローブを、サンプリングから外す。\n\n"
+                    "埋まったプローブは周囲のほとんどの方向で面の裏側しか見えず、"
+                    "「そこには光が無い」という嘘の情報を周りの面へ配ってしまう。\n\n"
+                    "レイトレース経路でのみ有効(裏面に当たったことを記録できるのがこちらだけのため)"))
+            {
+                m_Engine.m_DDGIUpdateSuspended = false;
+                m_Engine.m_DDGIStableCycles = 0;
+            }
+
+            ImGui::BeginDisabled(!m_Engine.m_DDGIProbeClassificationEnabled);
+            SliderFloatEx(
+                "裏面率のしきい値###DDGIBackfaceThreshold", &m_Engine.m_DDGIBackfaceThreshold, 0.0f, 1.0f, 0.5f,
+                "%.3f", 0,
+                "プローブから撃ったレイのうち、この割合を超えて「面の裏側」に当たったプローブを"
+                "信用しない。既定の0.5は「全レイの半分より多くが裏面 = そのプローブは外より内側にいる」"
+                "という判定にあたる。\n\n"
+                "分布はデバッグ表示の「DDGI - プローブ裏面率」で確認できる。開けた場所のプローブは"
+                "ほぼ0に寄り、埋まったプローブほど1に近づく。ただし二山に分かれるとは限らず"
+                "(Sponzaは分かれるがBistroInteriorLitは連続的に減るだけ)、値は"
+                "A/Bで効果の向きを見て決めること。\n\n"
+                "焼き直しは不要(アトラスには率そのものが入っており、しきい値は読み出し時に掛かる)");
+            ImGui::EndDisabled();
+
+            ImGui::EndDisabled();
+        }
+        else
+        {
+            ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
+        }
+
         SliderFloatEx(
             "DDGI 強度###DDGIIntensity", &m_Engine.m_DDGIIntensity, 0.0f, 2.0f, Defaults::DDGIIntensity, "%.3f", 0,
             "拡散間接光の倍率。SSILと寄与が重なるぶんを実測で調整するためのつまみ");

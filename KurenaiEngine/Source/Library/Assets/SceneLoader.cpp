@@ -286,6 +286,8 @@ namespace Kurenai::Assets
             float ViewBias = 0.10f;
             float Hysteresis = 0.97f;
             float MaxRayDistance = 8.0f;
+            uint32_t LODCount = 1u;
+            bool FollowCamera = false;
             std::wstring Name;
         };
 
@@ -890,6 +892,24 @@ namespace Kurenai::Assets
                             errorAt(lineNumber, rawLine, "MaxRayDistanceは0より大きく200以下で指定してください(分散の計算が桁落ちで潰れるため)");
                         }
                     }
+                    else if (CaseInsensitiveEquals(key, L"LODCount"))
+                    {
+                        float parsed = 0.0f;
+                        if (!ParseFloatToken(value, parsed)) errorAt(lineNumber, rawLine, "LODCountの値が不正です");
+                        // 段数が増えるとプローブ総数が段数倍になる(=一巡にかかる時間もその分伸びる)。
+                        // 上限はkDDGIMaxLODCountと合わせること
+                        if (parsed < 1.0f || parsed > 4.0f || parsed != std::floor(parsed))
+                        {
+                            errorAt(lineNumber, rawLine, "LODCountは1以上4以下の整数で指定してください");
+                        }
+                        entry.LODCount = static_cast<uint32_t>(parsed);
+                    }
+                    else if (CaseInsensitiveEquals(key, L"FollowCamera"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "FollowCameraの値が不正です");
+                        entry.FollowCamera = *parsedValue;
+                    }
                     else if (CaseInsensitiveEquals(key, L"Name"))
                     {
                         entry.Name = value;
@@ -1371,6 +1391,8 @@ namespace Kurenai::Assets
             volume.ViewBias = parsedVolume.ViewBias;
             volume.Hysteresis = parsedVolume.Hysteresis;
             volume.MaxRayDistance = parsedVolume.MaxRayDistance;
+            volume.LODCount = parsedVolume.LODCount;
+            volume.FollowCamera = parsedVolume.FollowCamera;
             volume.Name = parsedVolume.Name.empty()
                 ? ("GI Volume " + std::to_string(scene.GIVolumes.size()))
                 : WideToUtf8(parsedVolume.Name);
