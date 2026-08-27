@@ -7892,7 +7892,7 @@ namespace Kurenai
             .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
                                m_GBufferEmissive.get(), m_GBufferVelocity.get(), m_GBufferBentNormal.get() },
             .DepthTarget = m_GBufferDepth.get(),
-            .Execute = [this, &gbufferViewport, depthPrepassRuns](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, depthPrepassRuns, &viewProj](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // ClearRenderTargetはバインド済みの全レンダーターゲットを同じ色でクリアするため、
@@ -8570,7 +8570,7 @@ namespace Kurenai
             },
             .RenderTargets = { m_SceneColor.get() },
             .DepthTarget = m_GBufferDepth.get(),
-            .Execute = [this, &gbufferViewport, &gpuLights, &cameraPosition](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, &gpuLights, &cameraPosition, &viewProj](RHI::IRHICommandList* cmd)
             {
                 // 半透明メッシュをインスタンス単位でカメラからの距離降順(奥から手前)に並べる。
                 // instance.WorldはHLSL(mul(vec, World))に合わせて転置済みのため、ワールド座標の
