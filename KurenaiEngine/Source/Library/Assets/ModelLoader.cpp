@@ -512,6 +512,18 @@ namespace Kurenai::Assets
         // (読まれないバッファでVRAMを占有しないため。レイトレーシング用配列と同じ考え方)
         const bool buildMeshletGeometry = device.SupportsMeshShader();
 
+        // 頂点/インデックスバッファへSRVを重ねて張り、bindlessで引けるようにするか。
+        // 使うのはメッシュシェーダー経路(頂点のみ)とコンピュートシェーダーによる
+        // 自前ラスタライザ経路(頂点+インデックス)。
+        //
+        // 【メッシュシェーダー対応と連動させない】SM 6.6には対応しているがメッシュシェーダーを
+        // 持たないGPU(NVIDIA Pascal世代など)では、buildMeshletGeometryがfalseのまま
+        // 自前ラスタライザだけが使える。連動させるとその環境でジオメトリを引けなくなる。
+        //
+        // 追加コストはメッシュあたりSRV 2本ぶんのディスクリプタだけで、
+        // バッファ本体は頂点バッファビュー/インデックスバッファビューと同一リソースを共有する
+        const bool shaderReadableGeometry = buildMeshletGeometry || device.SupportsSoftwareRaster();
+
         model.Meshes.reserve(meshEntries.size());
         for (const MeshEntry& mesh : meshEntries)
         {
@@ -526,7 +538,7 @@ namespace Kurenai::Assets
             // 同じリソースへ頂点バッファビューとStructuredBuffer<Vertex>のSRVを重ねて張り、
             // 従来経路とメッシュシェーダー経路で1本の頂点バッファを共有する
             // (別に複製するとVRAMを二重に食う)
-            vertexBufferDesc.ShaderReadable = buildMeshletGeometry;
+            vertexBufferDesc.ShaderReadable = shaderReadableGeometry;
             outMesh.VertexBuffer = device.CreateBuffer(vertexBufferDesc);
 
             RHI::BufferDesc indexBufferDesc;
@@ -534,6 +546,10 @@ namespace Kurenai::Assets
             indexBufferDesc.SizeInBytes = static_cast<uint32_t>(mesh.IndexCount) * sizeof(uint32_t);
             indexBufferDesc.StrideInBytes = sizeof(uint32_t);
             indexBufferDesc.InitialData = geometryPayload.data() + mesh.IndexOffset;
+            // 頂点と同じ理由でインデックスバッファにもSRVを重ねる。自前ラスタライザは
+            // 三角形番号からインデックスを3つ引くため、StructuredBuffer<uint>として読む
+            // (メッシュシェーダー経路はメッシュレット側の間接テーブルを使うのでこれは読まない)
+            indexBufferDesc.ShaderReadable = shaderReadableGeometry;
             outMesh.IndexBuffer = device.CreateBuffer(indexBufferDesc);
             outMesh.IndexCount = mesh.IndexCount;
             outMesh.VertexCount = mesh.VertexCount;
@@ -541,6 +557,19 @@ namespace Kurenai::Assets
             // アセットが持つメッシュレット数。GPUバッファを作るかどうか(下)とは独立で、
             // メッシュシェーダー非対応の環境でもレイトレーシング側が使うため常に控える
             outMesh.MeshletCount = mesh.MeshletCount;
+
+            // 頂点/インデックスのbindless番号。メッシュシェーダー経路は頂点を、
+            // 自前ラスタライザ経路は両方を、ResourceDescriptorHeap経由で読む。
+            // 番号は描画時に定数バッファへ載せて渡すため、ここで一度だけ登録して
+            // IRHIBuffer側に覚えさせる(GetBindlessIndexで取り出せる)。
+            //
+            // 【メッシュレットの有無と連動させない】メッシュレットを持たない.kmodelでも
+            // 自前ラスタライザはジオメトリを引く必要がある
+            if (shaderReadableGeometry)
+            {
+                device.RegisterBindless(outMesh.VertexBuffer.get());
+                device.RegisterBindless(outMesh.IndexBuffer.get());
+            }
 
             if (buildMeshletGeometry && mesh.MeshletCount > 0)
             {
@@ -562,10 +591,8 @@ namespace Kurenai::Assets
                 outMesh.MeshletTriangleBuffer =
                     createImmutable(mesh.MeshletTriangleOffset, mesh.MeshletTriangleCount, sizeof(uint32_t));
 
-                // メッシュシェーダーはこの4本をResourceDescriptorHeap経由で読む。
-                // 番号は描画時にObjectConstantsへ載せて渡すため、ここで一度だけ登録して
-                // IRHIBuffer側に覚えさせる(GetBindlessIndexで取り出せる)
-                device.RegisterBindless(outMesh.VertexBuffer.get());
+                // メッシュシェーダーはこの3本もResourceDescriptorHeap経由で読む
+                // (頂点バッファは上で登録済み)
                 device.RegisterBindless(outMesh.MeshletBuffer.get());
                 device.RegisterBindless(outMesh.MeshletVertexBuffer.get());
                 device.RegisterBindless(outMesh.MeshletTriangleBuffer.get());
