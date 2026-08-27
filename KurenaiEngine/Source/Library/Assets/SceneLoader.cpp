@@ -1454,6 +1454,8 @@ namespace Kurenai::Assets
             // モデルのローカル空間AABB(8頂点)をWorldで変換し、シーン全体のAABBへ合成する。
             // 軸並行のまま変換前のmin/maxだけを使うと回転時に不正確になるため、必ず8頂点全てを変換する
             const Model& loadedModel = instance.Model;
+            // インスタンス自身のワールドAABBも同じループで求める(フラスタムカリング用)
+            bool instanceBoundsInitialized = false;
             for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
             {
                 const XMVECTOR corner = XMVectorSet(
@@ -1481,6 +1483,22 @@ namespace Kurenai::Assets
                     scene.BoundsMax[1] = std::max(scene.BoundsMax[1], transformedFloat3.y);
                     scene.BoundsMax[2] = std::max(scene.BoundsMax[2], transformedFloat3.z);
                 }
+
+                const float cornerXYZ[3] = { transformedFloat3.x, transformedFloat3.y, transformedFloat3.z };
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    if (!instanceBoundsInitialized)
+                    {
+                        instance.WorldBoundsMin[axis] = cornerXYZ[axis];
+                        instance.WorldBoundsMax[axis] = cornerXYZ[axis];
+                    }
+                    else
+                    {
+                        instance.WorldBoundsMin[axis] = std::min(instance.WorldBoundsMin[axis], cornerXYZ[axis]);
+                        instance.WorldBoundsMax[axis] = std::max(instance.WorldBoundsMax[axis], cornerXYZ[axis]);
+                    }
+                }
+                instanceBoundsInitialized = true;
             }
 
             // モデルファイル埋め込みのライト(glTFのKHR_lights_punctual・FBXのライトノード由来、

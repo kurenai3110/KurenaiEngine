@@ -32,6 +32,16 @@ namespace Kurenai::Assets
         // 通常PSOではなく水面専用PSO(Water.hlsl)で描画し、G-BufferのMaterial.aへ水面のマテリアルID
         // (kMaterialIDWater、Shaders/3D/GBufferCommon.hlsli)を書き込む(水面マテリアル基盤)
         bool IsWater = false;
+
+        // Model::BoundsMin/MaxをWorldで変換した、ワールド空間の軸並行バウンディングボックス。
+        // フラスタムカリングの判定に使う。
+        //
+        // 【読み込み時に一度だけ求める】Worldは読み込み後に変化しない(書き込みはSceneLoaderの
+        // 1箇所のみ)ため、毎フレーム8頂点を変換し直す必要がない。
+        // 回転が入ると軸並行でなくなるので、min/maxだけを変換するのではなく必ず8頂点を変換して
+        // その包絡を取る(シーン全体のAABBを合成しているのと同じループで求めている)
+        float WorldBoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+        float WorldBoundsMax[3] = { 0.0f, 0.0f, 0.0f };
     };
 
     // 反射プローブ(リフレクションプローブ)。この位置から周囲をキューブマップへキャプチャし、
