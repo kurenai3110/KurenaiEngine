@@ -5440,11 +5440,30 @@ namespace Kurenai
             }
         }
 
+        // フラスタムカリングの効き。「間引いた数が0」は、判定式が常に通しているのか
+        // 本当に全部が視界内なのかを区別できないため、テストした数と併せて出す
+        if (m_FrameStatsCullTestedSum > 0 && m_FrameStatsFrameCount > 0)
+        {
+            const double testedPerFrame = static_cast<double>(m_FrameStatsCullTestedSum) / m_FrameStatsFrameCount;
+            const double culledPerFrame = static_cast<double>(m_FrameStatsCullCulledSum) / m_FrameStatsFrameCount;
+            const double ratio = 100.0 * static_cast<double>(m_FrameStatsCullCulledSum)
+                / static_cast<double>(m_FrameStatsCullTestedSum);
+
+            char cullText[192];
+            std::snprintf(
+                cullText, sizeof(cullText),
+                "  フラスタムカリング: 判定 %.1f / 間引き %.1f (%.1f%%) [1フレームあたり・全パス合計]",
+                testedPerFrame, culledPerFrame, ratio);
+            Core::Logger::Info("Perf", cullText);
+        }
+
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
         m_FrameStatsGPUTimeSumMs = 0.0;
         m_FrameStatsGPUWaitSumMs = 0.0;
         m_FrameStatsWorstFrameTimeMs = 0.0f;
+        m_FrameStatsCullTestedSum = 0;
+        m_FrameStatsCullCulledSum = 0;
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
