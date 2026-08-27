@@ -33,6 +33,7 @@ namespace Kurenai::UI
         void DrawLightCullingSection();
         void DrawGeometrySection();
         void DrawMeshletSection();
+        void DrawSoftwareRasterSection();
         void DrawWaterSection();
         void DrawCloudSection();
         void DrawStarsSection();
