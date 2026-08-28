@@ -605,6 +605,14 @@ namespace Kurenai::Assets
             outMesh.IndexCount = mesh.IndexCount;
             outMesh.VertexCount = mesh.VertexCount;
 
+            // メッシュ単位のAABB(v10でMeshEntryへ追加)。モデルのローカル空間のまま写す。
+            // ワールド空間への変換はSceneLoaderが行う(Modelは複数インスタンスから共有されうる)
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                outMesh.BoundsMin[axis] = mesh.BoundsMin[axis];
+                outMesh.BoundsMax[axis] = mesh.BoundsMax[axis];
+            }
+
             // アセットが持つメッシュレット数。GPUバッファを作るかどうか(下)とは独立で、
             // メッシュシェーダー非対応の環境でもレイトレーシング側が使うため常に控える。
             //

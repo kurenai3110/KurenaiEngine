@@ -1566,6 +1566,46 @@ namespace Kurenai::Assets
                 instanceBoundsInitialized = true;
             }
 
+            // メッシュごとのワールドAABB(メッシュ単位フラスタムカリング用)。
+            // インスタンスのAABBとまったく同じ手順を、Mesh::BoundsMin/Max(.kmodel v10が持つ
+            // メッシュ単位のローカルAABB)に対して繰り返す。
+            //
+            // 【ここでも8頂点すべてを変換する】回転が入ると軸並行でなくなるため、
+            // min/maxだけを変換して包絡を取ってはいけない(上のインスタンスAABBと同じ理由)。
+            // 【毎フレームやらない】Worldは読み込み後に変化しない(書き込みはこの1箇所のみ)
+            instance.MeshWorldBoundsList.resize(loadedModel.Meshes.size());
+            for (size_t meshIndex = 0; meshIndex < loadedModel.Meshes.size(); ++meshIndex)
+            {
+                const Mesh& sourceMesh = loadedModel.Meshes[meshIndex];
+                MeshWorldBounds& meshBounds = instance.MeshWorldBoundsList[meshIndex];
+
+                for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
+                {
+                    const XMVECTOR corner = XMVectorSet(
+                        (cornerIndex & 1) ? sourceMesh.BoundsMax[0] : sourceMesh.BoundsMin[0],
+                        (cornerIndex & 2) ? sourceMesh.BoundsMax[1] : sourceMesh.BoundsMin[1],
+                        (cornerIndex & 4) ? sourceMesh.BoundsMax[2] : sourceMesh.BoundsMin[2],
+                        1.0f);
+                    XMFLOAT3 transformedFloat3;
+                    XMStoreFloat3(&transformedFloat3, XMVector3TransformCoord(corner, worldMathSpace));
+
+                    const float cornerXYZ[3] = { transformedFloat3.x, transformedFloat3.y, transformedFloat3.z };
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        if (cornerIndex == 0)
+                        {
+                            meshBounds.Min[axis] = cornerXYZ[axis];
+                            meshBounds.Max[axis] = cornerXYZ[axis];
+                        }
+                        else
+                        {
+                            meshBounds.Min[axis] = std::min(meshBounds.Min[axis], cornerXYZ[axis]);
+                            meshBounds.Max[axis] = std::max(meshBounds.Max[axis], cornerXYZ[axis]);
+                        }
+                    }
+                }
+            }
+
             // モデルファイル埋め込みのライト(glTFのKHR_lights_punctual・FBXのライトノード由来、
             // ModelLoader.cppがModel::Lightsへ読み込み済み)をInstance::Worldでワールド空間へ変換して
             // シーン全体のライト一覧へ追加する。Positionは平行移動を含む点として、Directionは

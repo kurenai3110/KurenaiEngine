@@ -109,6 +109,51 @@ namespace Kurenai
             return true;
         }
 
+        // メッシュ単位のフラスタムカリング判定。IsAABBVisibleを呼ぶ7つの描画パスすべてが、
+        // モデル単位の判定を通ったあとのメッシュのループから同じ形で呼ぶ。
+        //
+        // 【統計はモデル単位と別のカウンタへ入れる】分母も意味も違うため
+        // (KurenaiEngine3D.h の m_MeshCullTested のコメント参照)。呼び出し側が
+        // どのカウンタを渡すかを見て取れるよう、メンバではなく引数で受ける。
+        //
+        // 【メッシュ番号はポインタ差で引く】各パスのループは
+        // for (const auto& mesh : instance.Model.Meshes) の形で添字を持たない。
+        // Meshesはvectorで連続しているため、先頭との差がそのまま添字になる
+        bool IsMeshVisibleWithStats(
+            const FrustumPlanes& frustum, const Assets::ModelInstance& instance, const Assets::Mesh& mesh,
+            uint32_t& tested, uint32_t& culled)
+        {
+            ++tested;
+
+            const size_t meshIndex = static_cast<size_t>(&mesh - instance.Model.Meshes.data());
+            if (meshIndex >= instance.MeshWorldBoundsList.size())
+            {
+                // SceneLoaderが必ずMeshesと同じ要素数で作るのでここへは来ない。
+                // 来た場合は間引かない側(保守側)へ倒す ―― 見えるものを消すより、
+                // 間引けないほうが被害が小さい。毎フレーム何千回も呼ばれるので記録は1回だけ
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "メッシュ単位のワールドAABBが足りません(メッシュ数 " +
+                            std::to_string(instance.Model.Meshes.size()) + " / AABB " +
+                            std::to_string(instance.MeshWorldBoundsList.size()) +
+                            ")。メッシュ単位のフラスタムカリングを行いません");
+                }
+                return true;
+            }
+
+            const Assets::MeshWorldBounds& bounds = instance.MeshWorldBoundsList[meshIndex];
+            if (!IsAABBVisible(frustum, bounds.Min, bounds.Max))
+            {
+                ++culled;
+                return false;
+            }
+            return true;
+        }
+
         // 濁り(タービディティ)からMie(エアロゾル)密度の倍率を求める。
         //
         // 【Preethamの定義をそのまま持ち込んではいけない】Preethamのタービディティは
@@ -3432,6 +3477,14 @@ namespace Kurenai
                     continue;
                 }
 
+                // メッシュ単位のカリング。統計はモデル単位とは別カウンタへ入れる。
+                // 【描かないメッシュを弾いた後に置く】分母を「このパスが実際に描くメッシュ」に
+                // 揃えないと、間引き率が薄まって効きが読めなくなる
+                if (!IsMeshVisibleWithStats(swRasterFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                {
+                    continue;
+                }
+
                 const uint32_t vertexBufferIndex =
                     mesh.VertexBuffer ? mesh.VertexBuffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
                 const uint32_t indexBufferIndex =
@@ -5426,6 +5479,8 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
         m_FrameStatsCullTestedSum += m_FrustumCullTested;
         m_FrameStatsCullCulledSum += m_FrustumCullCulled;
+        m_FrameStatsMeshCullTestedSum += m_MeshCullTested;
+        m_FrameStatsMeshCullCulledSum += m_MeshCullCulled;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -5520,21 +5575,31 @@ namespace Kurenai
         }
 
         // フラスタムカリングの効き。「間引いた数が0」は、判定式が常に通しているのか
-        // 本当に全部が視界内なのかを区別できないため、テストした数と併せて出す
-        if (m_FrameStatsCullTestedSum > 0 && m_FrameStatsFrameCount > 0)
+        // 本当に全部が視界内なのかを区別できないため、テストした数と併せて出す。
+        //
+        // 【モデル単位とメッシュ単位を別の行にする】分母も、効くシーンも違う。
+        // モデル単位は.kmodelを多数並べるシーンで効き、1モデルに数千メッシュを持つ
+        // アセットでは1つも間引けない。メッシュ単位はその逆。合算すると、どちらが効いたのか
+        // ―― あるいは片方が一度も実行されていないのか ―― が読めなくなる
+        const auto logCullStats = [this](const char* label, uint64_t testedSum, uint64_t culledSum)
         {
-            const double testedPerFrame = static_cast<double>(m_FrameStatsCullTestedSum) / m_FrameStatsFrameCount;
-            const double culledPerFrame = static_cast<double>(m_FrameStatsCullCulledSum) / m_FrameStatsFrameCount;
-            const double ratio = 100.0 * static_cast<double>(m_FrameStatsCullCulledSum)
-                / static_cast<double>(m_FrameStatsCullTestedSum);
+            if (testedSum == 0 || m_FrameStatsFrameCount == 0)
+            {
+                // 判定が1回も走っていない。「間引き0」と区別が付くよう、行そのものを出さない
+                return;
+            }
+            const double testedPerFrame = static_cast<double>(testedSum) / m_FrameStatsFrameCount;
+            const double culledPerFrame = static_cast<double>(culledSum) / m_FrameStatsFrameCount;
+            const double ratio = 100.0 * static_cast<double>(culledSum) / static_cast<double>(testedSum);
 
-            char cullText[192];
+            char cullText[224];
             std::snprintf(
-                cullText, sizeof(cullText),
-                "  フラスタムカリング: 判定 %.1f / 間引き %.1f (%.1f%%) [1フレームあたり・全パス合計]",
-                testedPerFrame, culledPerFrame, ratio);
+                cullText, sizeof(cullText), "  %s: 判定 %.1f / 間引き %.1f (%.1f%%) [1フレームあたり・全パス合計]",
+                label, testedPerFrame, culledPerFrame, ratio);
             Core::Logger::Info("Perf", cullText);
-        }
+        };
+        logCullStats("フラスタムカリング(モデル単位)", m_FrameStatsCullTestedSum, m_FrameStatsCullCulledSum);
+        logCullStats("フラスタムカリング(メッシュ単位)", m_FrameStatsMeshCullTestedSum, m_FrameStatsMeshCullCulledSum);
 
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
@@ -5543,6 +5608,8 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = 0.0f;
         m_FrameStatsCullTestedSum = 0;
         m_FrameStatsCullCulledSum = 0;
+        m_FrameStatsMeshCullTestedSum = 0;
+        m_FrameStatsMeshCullCulledSum = 0;
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
@@ -5720,9 +5787,12 @@ namespace Kurenai
 
     void KurenaiEngine3D::Render(const FrameState& frameState)
     {
-        // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる
+        // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる。
+        // モデル単位とメッシュ単位は別のカウンタで、混ぜない(KurenaiEngine3D.h参照)
         m_FrustumCullTested = 0;
         m_FrustumCullCulled = 0;
+        m_MeshCullTested = 0;
+        m_MeshCullCulled = 0;
 
         // WM_SIZE(Updateスレッド)が記録しておいたリサイズ要求を、スワップチェーンを実際に使う
         // このスレッドで反映する。このフレームのGPUコマンドをまだ1つも積んでいないこの位置で
@@ -7048,6 +7118,14 @@ namespace Kurenai
 
                             for (const auto& mesh : instance.Model.Meshes)
                             {
+                                // メッシュ単位のカリング。錐台はこのカスケードのライト正射影で、
+                                // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)
+                                if (!IsMeshVisibleWithStats(
+                                        cascadeFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                                {
+                                    continue;
+                                }
+
                                 bindPipelineState(instance.IsMirrored);
 
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
@@ -7153,6 +7231,12 @@ namespace Kurenai
                     // キャプチャ側にも奥から手前への描画順とブレンドが要り、コストに見合わない
                     // (プローブへ半透明を含めないのは一般的な割り切り)
                     if (mesh.IsTransparent)
+                    {
+                        continue;
+                    }
+
+                    // メッシュ単位のカリング。錐台はキューブの1面ぶん
+                    if (!IsMeshVisibleWithStats(faceFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
                     {
                         continue;
                     }
@@ -7934,6 +8018,17 @@ namespace Kurenai
                                 continue;
                             }
 
+                            // メッシュ単位のカリング。
+                            // 【G-Bufferと同じ錐台・同じ判定にすること】ここで間引いたメッシュが
+                            // G-Bufferでは描かれると、深度プリパスが埋めていない画素で早期Zが効かず
+                            // 遅くなるだけで済むが、逆(プリパスで描いてG-Bufferで間引く)だと
+                            // 描かれていないものの深度が残る
+                            if (!IsMeshVisibleWithStats(
+                                    prepassFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                            {
+                                continue;
+                            }
+
                             // カットアウトは切り抜きを反映しないと深度に嘘が入る。
                             // ミラーリングは表裏判定が逆のPSOでないとカリングされる面が入れ替わり、
                             // G-Bufferと違う深度になってしまう
@@ -8042,11 +8137,15 @@ namespace Kurenai
                     currentPipelineState = wanted;
                 };
 
-                // 視錐台の外にあるモデルは丸ごと飛ばす。
+                // 視錐台の外にあるモデルは丸ごと飛ばし、通ったモデルの中でさらに
+                // 視錐台の外にあるメッシュを飛ばす(下のメッシュのループ)。
                 //
-                // 【メッシュ単位ではできない】Assets::MeshはAABBを持たず、AABBがあるのはModelだけ
-                // (Model.h)。したがって1モデルに多数のメッシュを持つアセット(Bistro、Emerald Square)
-                // では1つも間引けない。効くのは.kmodelを多数並べるシーンのほう
+                // 【2段になっている理由】モデル単位だけだと、1モデルに多数のメッシュを持つ
+                // アセット(Bistro、Emerald Square、PLATEAUのLOD2タイル)では1つも間引けない
+                // ―― モデル全体のAABBが視錐台と交差する限り全メッシュを描くしかないため。
+                // .kmodel v10がメッシュ単位のAABBを持つようになったので、もう一段入れてある。
+                // 効くシーンが逆(モデル単位は.kmodelを多数並べるシーンで効く)なので、
+                // 統計も別のカウンタで数える
                 const FrustumPlanes frustum = ExtractFrustumPlanes(viewProj);
 
                 for (const auto& instance : m_Scene.Instances)
@@ -8063,6 +8162,13 @@ namespace Kurenai
                         // BLENDマテリアル(mesh.IsTransparent)はG-Bufferに書き込まず、専用のTransparentパスで
                         // フォワードシェーディングする(G-Bufferのアルファは常に1.0で半透明合成ができないため)
                         if (mesh.IsTransparent)
+                        {
+                            continue;
+                        }
+
+                        // メッシュ単位のカリング。深度プリパスとまったく同じ錐台・同じ判定
+                        // (片方だけで間引くと深度とG-Bufferが食い違う)
+                        if (!IsMeshVisibleWithStats(frustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
                         {
                             continue;
                         }
@@ -8694,6 +8800,13 @@ namespace Kurenai
                         {
                             continue;
                         }
+                        // メッシュ単位のカリング。ここだけはループ内で描かず描画リストを作るので、
+                        // 判定はpush_backの直前に入れる(描かないものをリストへ積まない)
+                        if (!IsMeshVisibleWithStats(
+                                transparentFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                        {
+                            continue;
+                        }
                         draws.push_back({ &instance, &mesh, distanceSq });
                     }
                 }
@@ -8888,6 +9001,13 @@ namespace Kurenai
                             // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
                             // PlanarReflection.hlsl冒頭参照)
                             if (mesh.IsTransparent)
+                            {
+                                continue;
+                            }
+
+                            // メッシュ単位のカリング。錐台は鏡映カメラのもの
+                            if (!IsMeshVisibleWithStats(
+                                    reflectionFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
                             {
                                 continue;
                             }

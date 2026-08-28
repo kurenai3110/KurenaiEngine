@@ -29,6 +29,20 @@ namespace Kurenai::Assets
         // 要素数はMeshletCount(メッシュレットを持たない.kmodelでは0)
         uint32_t RaytracingMeshletOffset = 0;
 
+        // このメッシュだけを包むAABB(モデルのローカル空間)。.kmodel v10のMeshEntryが持つ
+        // 値をModelLoaderがそのまま写す。
+        //
+        // 【何のためにあるか】Model::BoundsMin/Maxはモデル全体を包むため、1モデルに多数の
+        // メッシュを持つアセット(Bistro、Emerald Square、PLATEAUのLOD2タイル)では
+        // モデル単位のフラスタムカリングが1つも間引けない。メッシュ単位のAABBがあれば、
+        // モデル単位の判定を通ったあとにもう一段間引ける。
+        //
+        // 【ワールド空間ではない】判定に使うのはSceneLoaderがWorldで変換した
+        // ModelInstance::MeshWorldBounds のほう。Modelは複数のインスタンスから共有されうるので、
+        // ワールド空間の値をここに持たせてはいけない
+        float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+        float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
         // --- メッシュレット(メッシュシェーダー用) ---------------------------------------
         //
         // KurenaiPackerが焼いた分割情報(Assets::MeshletEntry)と、その2段の間接参照テーブル。

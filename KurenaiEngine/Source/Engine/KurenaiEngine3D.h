@@ -2614,6 +2614,21 @@ namespace Kurenai
         uint64_t m_FrameStatsCullTestedSum = 0;
         uint64_t m_FrameStatsCullCulledSum = 0;
 
+        // メッシュ単位フラスタムカリングの統計(1フレーム分)。上のモデル単位とまったく同じ扱い。
+        //
+        // 【絶対に上のカウンタと混ぜない】分母も意味も違う。モデル単位は
+        // 「シーンのインスタンス数」が分母で、メッシュ単位は「モデル単位を通過した
+        // インスタンスのメッシュ数の合計」が分母になる。合算すると、どちらが効いているのか
+        // ―― あるいは片方が一度も実行されていないのか ―― が読めなくなる。
+        //
+        // 【効くシーンが逆】モデル単位は.kmodelを多数並べるシーン(PLATEAUの671タイル)で効き、
+        // 1モデルに数千メッシュを持つアセット(Emerald Square、Bistro)では1つも間引けない。
+        // メッシュ単位はその逆で、後者でしか値が動かない
+        uint32_t m_MeshCullTested = 0;
+        uint32_t m_MeshCullCulled = 0;
+        uint64_t m_FrameStatsMeshCullTestedSum = 0;
+        uint64_t m_FrameStatsMeshCullCulledSum = 0;
+
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};
 

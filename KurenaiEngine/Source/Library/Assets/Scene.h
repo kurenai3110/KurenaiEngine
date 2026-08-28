@@ -29,6 +29,16 @@ namespace Kurenai::Assets
         Loaded   = 2,   // 常駐。描画できる
     };
 
+    // メッシュ1つぶんのワールド空間AABB。ModelInstanceが自分のModelのメッシュ数だけ持つ。
+    //
+    // 【なぜ配列でなく構造体にするか】IsAABBVisible(KurenaiEngine3D.cpp)が
+    // const float(&)[3] を2本取るため、min/maxが同じ要素の中に隣り合っている必要がある
+    struct MeshWorldBounds
+    {
+        float Min[3] = { 0.0f, 0.0f, 0.0f };
+        float Max[3] = { 0.0f, 0.0f, 0.0f };
+    };
+
     // シーン内に配置された1つのモデルインスタンス。Modelのジオメトリ自体は
     // ワールド空間原点に焼き込み済み(ModelLoader.cpp参照)のままなので、
     // 実際の配置はWorld/NormalMatrixで頂点シェーダー側にて適用する(KurenaiEngine3D::
@@ -59,6 +69,19 @@ namespace Kurenai::Assets
         // その包絡を取る(シーン全体のAABBを合成しているのと同じループで求めている)
         float WorldBoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float WorldBoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
+        // Model::MeshesのメッシュごとのワールドAABB(要素数はModel.Meshes.size()と同じ)。
+        // 上のWorldBoundsMin/Maxと同じくSceneLoaderが読み込み時に一度だけ求める。
+        //
+        // 【なぜインスタンス側に持つか】Meshのローカル空間AABBはModelが持つが、
+        // ワールド空間の値はインスタンスのWorldに依存する。将来同じModelを複数のインスタンスで
+        // 共有するようになっても壊れないよう、変換後の値はこちらへ置く。
+        //
+        // 【空になることがある】.kmodelがv10より前のメッシュ単位AABBを持たない世代…という
+        // 分岐は無い(v10未満は読み込み自体が拒否される)。空になるのはメッシュ0個のモデルだけ。
+        // 描画側は「要素数がMeshesと一致していること」を前提にしてよいが、
+        // 念のため添字の範囲は確かめること
+        std::vector<MeshWorldBounds> MeshWorldBoundsList;
 
         // ストリーミングの常駐状態と、いま使っているモデルLODの段(0が最も詳細)。
         //
