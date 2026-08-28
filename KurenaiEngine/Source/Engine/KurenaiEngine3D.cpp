@@ -4446,7 +4446,7 @@ namespace Kurenai
 
         for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
         {
-            const Assets::ModelInstance& instance = m_Scene.Instances[i];
+            Assets::ModelInstance& instance = m_Scene.Instances[i];
             InstanceLODState& state = m_InstanceLODStates[i];
 
             const size_t levelCount = instance.LODModels.size() + 1;
@@ -4456,6 +4456,7 @@ namespace Kurenai
                 state.CurrentLOD = 0;
                 state.PreviousLOD = 0;
                 state.FadeT = 1.0f;
+                instance.LODLevel = 0;
                 continue;
             }
 
@@ -4507,6 +4508,9 @@ namespace Kurenai
             {
                 ++m_LODFadingCount;
             }
+
+            // 常駐マップ(StreamingPanel)が色分けに使う。ここが唯一の書き込み元
+            instance.LODLevel = state.CurrentLOD;
         }
     }
 
@@ -4712,11 +4716,22 @@ namespace Kurenai
 
         for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
         {
-            const Assets::ModelInstance& instance = m_Scene.Instances[i];
+            Assets::ModelInstance& instance = m_Scene.Instances[i];
             if (instance.ModelPaths.empty())
             {
                 continue;
             }
+
+            // 常駐マップ(StreamingPanel)が色分けに使う3値。
+            // 【距離で抜ける前に書く】範囲外のインスタンスもここを通らなければ
+            // 古い値が残り、破棄されたものが「常駐」の色のまま地図に出る
+            const uint32_t level = (i < m_InstanceLODStates.size()) ? m_InstanceLODStates[i].CurrentLOD : 0u;
+            const size_t levelIndex = (level < instance.ModelPaths.size()) ? level : 0u;
+            instance.Residency =
+                instance.IsLODLoaded(levelIndex)                             ? Assets::ResidencyState::Loaded
+                : (m_StreamingInFlight.count(instance.ModelPaths[levelIndex]) != 0)
+                                                                            ? Assets::ResidencyState::Loading
+                                                                            : Assets::ResidencyState::Unloaded;
 
             // モデルLODと同じ「AABBの最近接点まで」の距離
             float squaredDistance = 0.0f;
@@ -4742,8 +4757,6 @@ namespace Kurenai
             }
             ++m_StreamingTargetCount;
 
-            const uint32_t level = (i < m_InstanceLODStates.size()) ? m_InstanceLODStates[i].CurrentLOD : 0u;
-            const size_t levelIndex = (level < instance.ModelPaths.size()) ? level : 0u;
             if (instance.IsLODLoaded(levelIndex))
             {
                 ++m_StreamingResidentCount;

@@ -21,10 +21,8 @@ namespace Kurenai::Assets
     inline constexpr size_t kMaxModelLODCount = 4;
     // モデルインスタンスの常駐状態(ストリーミング)。
     //
-    // 【現状はまだ動いていない】ストリーミング本体(距離に応じた読み込みと破棄)は未実装で、
-    // 読み込まれたインスタンスはすべてLoadedのまま変化しない。ここにあるのは
-    // 「常駐状態を色分けして俯瞰図に出す」デバッグ表示の受け皿で、
-    // 値を実際に動かすのはストリーミングを入れる側の責務。
+    // 値が動くのは[Scene]StreamingDistanceを指定したシーンだけで、
+    // 指定が無ければ読み込み時のLoadedのまま変化しない(従来どおりの全常駐)。
     //
     // 【なぜ表示を先に用意するか】破棄が早すぎる/範囲内なのに読み込まれない、といった破綻は
     // 画面を見ても分からない(そこに何も無いのが正しいのか間違いなのか区別できない)。
@@ -130,9 +128,9 @@ namespace Kurenai::Assets
 
         // ストリーミングの常駐状態と、いま使っているモデルLODの段(0が最も詳細)。
         //
-        // 【まだ動かす側がいない】どちらもSceneLoaderが読み込み時にLoaded/0を入れたきり
-        // 変化しない。UIの常駐マップがこの2つを色分けして出すので、ストリーミングと
-        // モデルLODを入れる側はここを更新すること(更新しなければ表示は全部「常駐」のまま)。
+        // 【書き込むのはエンジン側の毎フレーム更新1箇所ずつ】Residencyは
+        // KurenaiEngine3D::UpdateModelStreaming、LODLevelはUpdateModelLODが書く。
+        // SceneLoaderが入れるLoaded/0は「ストリーミングもLODも使わないシーン」の値。
         // 詳細はResidencyStateのコメント
         ResidencyState Residency = ResidencyState::Loaded;
         uint32_t LODLevel = 0;
