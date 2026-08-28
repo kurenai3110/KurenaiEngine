@@ -35,6 +35,18 @@ namespace KurenaiPacker
         // (増えるのは.kgeomの容量だけで、メッシュシェーダー非対応環境では読まれない)。
         // falseにする用途は「見た目の異常がメッシュレット化に由来するかどうか」の切り分け
         bool EnableMeshlets = true;
+
+        // メッシュレットの離散LODを何段まで作るか(LOD0を含む)。1なら従来どおり原寸のみ。
+        // 0はEnableMeshlets=falseと同じ扱い。上限はAssets::kMaxMeshletLODCount。
+        //
+        // 既定で段を作るのは、フォーマットのバージョンを上げるたびに全アセットの再パックが
+        // 要るため。あとから段を足したくなったときに847モデルの変換をやり直さずに済む
+        unsigned int MeshletLODCount = 4;
+
+        // 埋め込みテクスチャの取り出し先ディレクトリ(SourceModel::EmbeddedTextures->Directory())。
+        // ここから始まるパスは入力モデルの外にあるため、そのままでは_External/へ平坦化されて
+        // しまう。埋め込み由来と分かるように_Embedded/へ振り分けるために使う。空なら埋め込み無し
+        std::wstring EmbeddedTextureDirectory;
     };
 
     struct PackResult
@@ -48,7 +60,10 @@ namespace KurenaiPacker
         size_t TextureFailed = 0;      // 読み込み失敗でフォールバック(-1)になった数
         size_t OcclusionBaked = 0;     // ベイクした遮蔽マップを.ktexとして書いた数
         size_t BentNormalBaked = 0;    // ベイクしたbent normalを.ktexとして書いた数
-        size_t MeshletCount = 0;       // 生成したメッシュレットの総数(EnableMeshlets=falseなら0)
+        size_t MeshletCount = 0;       // 生成したメッシュレットの総数(全LOD段の合計)
+        size_t MeshletLOD0Count = 0;   // うちLOD0(原寸)のぶん。描画が実際に回すのはこちら
+        // 段ごとの三角形数(要素0がLOD0)。段を進めるごとに減っていることの確認に使う
+        size_t MeshletTrianglesByLOD[4] = { 0, 0, 0, 0 };
     };
 
     // sourceModelを指定した.kmodelパスへ書き出す。

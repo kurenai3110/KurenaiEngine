@@ -504,6 +504,7 @@ namespace Kurenai::Assets
 
         PackageHeader header{};
         std::vector<TextureEntry> textureEntries;
+        std::vector<MaterialEntry> materialEntries;
         std::vector<MeshEntry> meshEntries;
         std::vector<LightEntry> lightEntries;
         std::string stringPool;
@@ -532,6 +533,14 @@ namespace Kurenai::Assets
             if (header.TextureCount > 0)
             {
                 in.read(reinterpret_cast<char*>(textureEntries.data()), static_cast<std::streamsize>(textureEntries.size() * sizeof(TextureEntry)));
+            }
+
+            // マテリアルはテクスチャ番号を参照するのでテクスチャの後ろ、メッシュの前
+            // (v10で追加。ModelPackage.hのファイルレイアウト参照)
+            materialEntries.resize(header.MaterialCount);
+            if (header.MaterialCount > 0)
+            {
+                in.read(reinterpret_cast<char*>(materialEntries.data()), static_cast<std::streamsize>(materialEntries.size() * sizeof(MaterialEntry)));
             }
 
             meshEntries.resize(header.MeshCount);
@@ -638,14 +647,43 @@ namespace Kurenai::Assets
                 throw std::runtime_error(
                     "メッシュ[" + std::to_string(i) + "]がジオメトリペイロードの範囲外を参照しています: " + WideToUtf8(geometryPath));
             }
-            if (mesh.BaseColorTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                mesh.NormalTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                mesh.MetallicRoughnessTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                mesh.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                mesh.OcclusionTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                mesh.BentNormalTextureIndex >= static_cast<int32_t>(textureEntries.size()))
+            // メッシュレットの段は、範囲がメッシュレット配列に収まっていなければならない。
+            // 段の範囲が壊れていると、描画時に他のメッシュのメッシュレットを掴む
+            if (mesh.MeshletLODCount > kMaxMeshletLODCount)
             {
-                throw std::runtime_error("メッシュ[" + std::to_string(i) + "]が範囲外のテクスチャを参照しています: " + WideToUtf8(filePath));
+                throw std::runtime_error(
+                    "メッシュ[" + std::to_string(i) + "]のメッシュレットLODの段数が上限を超えています: " + WideToUtf8(filePath));
+            }
+            for (uint32_t lod = 0; lod < mesh.MeshletLODCount; ++lod)
+            {
+                const uint64_t lodEnd =
+                    static_cast<uint64_t>(mesh.MeshletLODOffsets[lod]) + mesh.MeshletLODCounts[lod];
+                if (lodEnd > mesh.MeshletCount)
+                {
+                    throw std::runtime_error(
+                        "メッシュ[" + std::to_string(i) + "]のメッシュレットLOD[" + std::to_string(lod) +
+                        "]がメッシュレット配列の範囲外です: " + WideToUtf8(filePath));
+                }
+            }
+
+            if (mesh.MaterialIndex < 0 || mesh.MaterialIndex >= static_cast<int32_t>(materialEntries.size()))
+            {
+                throw std::runtime_error("メッシュ[" + std::to_string(i) + "]が範囲外のマテリアルを参照しています: " + WideToUtf8(filePath));
+            }
+        }
+
+        // テクスチャ番号の検証はマテリアル側で行う(v10で材質がMeshEntryから移ったため)
+        for (size_t i = 0; i < materialEntries.size(); ++i)
+        {
+            const MaterialEntry& material = materialEntries[i];
+            if (material.BaseColorTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                material.NormalTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                material.MetallicRoughnessTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                material.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                material.OcclusionTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                material.BentNormalTextureIndex >= static_cast<int32_t>(textureEntries.size()))
+            {
+                throw std::runtime_error("マテリアル[" + std::to_string(i) + "]が範囲外のテクスチャを参照しています: " + WideToUtf8(filePath));
             }
         }
 
@@ -782,8 +820,13 @@ namespace Kurenai::Assets
             outMesh.VertexCount = mesh.VertexCount;
 
             // アセットが持つメッシュレット数。GPUバッファを作るかどうか(下)とは独立で、
-            // メッシュシェーダー非対応の環境でもレイトレーシング側が使うため常に控える
-            outMesh.MeshletCount = mesh.MeshletCount;
+            // メッシュシェーダー非対応の環境でもレイトレーシング側が使うため常に控える。
+            //
+            // 【全段の合計ではなくLOD0の個数を入れる】v10からメッシュレット配列は
+            // 離散LODの全段を連結して持つ。描画もレイトレーシングもLOD0だけを見るので、
+            // MeshEntry.MeshletCount(全段の合計)をそのまま渡すと、簡略化した段まで
+            // 重ねて描かれる/三角形番号の対応が崩れる。段を選ぶのはメッシュレットLODの実装で行う
+            outMesh.MeshletCount = mesh.MeshletLODCount > 0 ? mesh.MeshletLODCounts[0] : 0u;
 
             // 頂点/インデックスのbindless番号。メッシュシェーダー経路は頂点を、
             // 自前ラスタライザ経路は両方を、ResourceDescriptorHeap経由で読む。
@@ -798,7 +841,7 @@ namespace Kurenai::Assets
                 device.RegisterBindless(outMesh.IndexBuffer.get());
             }
 
-            if (buildMeshletGeometry && mesh.MeshletCount > 0)
+            if (buildMeshletGeometry && outMesh.MeshletCount > 0)
             {
                 // メッシュレットの3ブロックは**モデル単位の1本へ連結する**。
                 // メッシュごとに別バッファのままだと1回のDispatchMeshで1メッシュしか
@@ -819,10 +862,31 @@ namespace Kurenai::Assets
                 const auto* srcMeshletTriangles =
                     reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.MeshletTriangleOffset);
 
+                // 【LOD0の段だけを載せる】v10からメッシュレット配列は離散LODの全段を
+                // 連結して持っており、MeshEntry::MeshletCountは**全段の合計**である。
+                // そのまま回すと、簡略化した段まで同じ場所へ重ねて描かれる。
+                // 描くのはLOD0(必ず要素0から始まる)だけで、段を選ぶのはStage 6の担当。
+                //
+                // 【間接参照テーブルは全段ぶんをそのまま連結する】LOD0のメッシュレットが
+                // 指すのはブロックの先頭側なので、後ろに他の段のデータが付いていても
+                // オフセットは正しいまま。段ごとに切り詰めるとStage 6で結局入れ直すことになる
                 outMesh.MeshletOffset = static_cast<uint32_t>(modelMeshlets.size());
-                for (uint32_t m = 0; m < mesh.MeshletCount; ++m)
+                // ディスク上のメッシュレットが本当に所属メッシュと同じ材質を指しているか。
+                //
+                // 【なぜ確かめるのか】1モデル1ドローは「メッシュレットが材質を跨がない」
+                // という前提の上に成り立っている。破れていても絵は出てしまい、
+                // 「一部の面だけ別のテクスチャで描かれる」という形でしか現れない。
+                // v10はMeshletEntry自身がMaterialIndexを持つので、突き合わせれば
+                // パッカーとローダーの食い違いをその場で機械的に検出できる
+                bool meshletMaterialMismatch = false;
+
+                for (uint32_t m = 0; m < outMesh.MeshletCount; ++m)
                 {
                     const MeshletEntry& src = srcMeshlets[m];
+                    if (src.MaterialIndex != static_cast<uint32_t>(mesh.MaterialIndex))
+                    {
+                        meshletMaterialMismatch = true;
+                    }
                     GpuMeshlet dst;
                     dst.VertexOffset = meshletVertexBase + src.VertexOffset;
                     dst.TriangleOffset = meshletTriangleBase + src.TriangleOffset;
@@ -843,6 +907,14 @@ namespace Kurenai::Assets
                     // メッシュを入れ替えるため、ここで振ると対応が崩れる)
                     dst.MeshletIndexInMesh = m;
                     modelMeshlets.push_back(dst);
+                }
+
+                if (meshletMaterialMismatch)
+                {
+                    Core::Logger::Error(
+                        "ModelLoader",
+                        "メッシュレットが所属メッシュと違う材質を指しています(1モデル1ドローの前提が"
+                        "破れています): " + WideToUtf8(filePath));
                 }
 
                 // 間接参照テーブルは中身を書き換えずそのまま連結してよい
@@ -875,38 +947,48 @@ namespace Kurenai::Assets
                 // ヒットした三角形番号から所属メッシュレットを引くための表。
                 // MeshletEntryのうちTriangleOffsetだけを抜き出して詰める
                 // (理由はRaytracingScene::GetMeshletTriangleOffsetBufferのコメント参照)
+                //
+                // 【LOD0だけ詰める】三角形番号はインデックスバッファ上の番号で、
+                // インデックスバッファにはLOD0の三角形しか入っていない(.kgeom v4)。
+                // 簡略化した段のメッシュレットを混ぜると、TriangleOffsetが昇順でなくなり
+                // 二分探索が破綻する
                 outMesh.RaytracingMeshletOffset = static_cast<uint32_t>(model.RaytracingMeshletTriangleOffsets.size());
                 const auto* meshlets = reinterpret_cast<const MeshletEntry*>(geometryPayload.data() + mesh.MeshletOffset);
-                for (uint32_t m = 0; m < mesh.MeshletCount; ++m)
+                for (uint32_t m = 0; m < outMesh.MeshletCount; ++m)
                 {
                     model.RaytracingMeshletTriangleOffsets.push_back(meshlets[m].TriangleOffset);
                 }
             }
 
-            outMesh.BaseColorTexture = resolveBaseColorOrMetallicRoughness(mesh.BaseColorTextureIndex);
-            outMesh.NormalTexture = resolveNormal(mesh.NormalTextureIndex);
-            outMesh.MetallicRoughnessTexture = resolveBaseColorOrMetallicRoughness(mesh.MetallicRoughnessTextureIndex);
-            outMesh.EmissiveTexture = resolveBaseColorOrMetallicRoughness(mesh.EmissiveTextureIndex);
+            // 材質はv10からMaterialEntry側にある。番号の範囲は上の検証で確認済み。
+            //
+            // 【Assets::Meshの持ち方は変えない】ランタイムの構造体はメッシュごとに材質を
+            // 持ったままで、ここで転記する。描画側(レンダラ・シェーダー)に一切影響を出さず、
+            // フォーマットの変更をこの1関数へ閉じ込めるため
+            const MaterialEntry& material = materialEntries[static_cast<size_t>(mesh.MaterialIndex)];
+
+            outMesh.BaseColorTexture = resolveBaseColorOrMetallicRoughness(material.BaseColorTextureIndex);
+            outMesh.NormalTexture = resolveNormal(material.NormalTextureIndex);
+            outMesh.MetallicRoughnessTexture = resolveBaseColorOrMetallicRoughness(material.MetallicRoughnessTextureIndex);
+            outMesh.EmissiveTexture = resolveBaseColorOrMetallicRoughness(material.EmissiveTextureIndex);
             // 遮蔽マップも未指定なら白1x1(=遮蔽なし)へフォールバックさせればよいので、
             // BaseColor/MetallicRoughnessと同じ解決を再利用する
-            outMesh.OcclusionTexture = resolveBaseColorOrMetallicRoughness(mesh.OcclusionTextureIndex);
-            outMesh.OcclusionStrength = mesh.OcclusionStrength;
+            outMesh.OcclusionTexture = resolveBaseColorOrMetallicRoughness(material.OcclusionTextureIndex);
+            outMesh.OcclusionStrength = material.OcclusionStrength;
             // bent normalだけは白ではなく黒(=有効フラグ0)へ落とす。理由はGetBlackのコメント参照
-            outMesh.BentNormalTexture = resolveBentNormal(mesh.BentNormalTextureIndex);
-            outMesh.MetallicFactor = mesh.MetallicFactor;
-            outMesh.RoughnessFactor = mesh.RoughnessFactor;
-            outMesh.AlphaCutoff = mesh.AlphaCutoff;
-            // 旧い.kmodelではこの枠はReserved(0固定)だったため、0=透過なしとして読まれる
-            // (ModelPackage.hのTranslucencyのコメント参照)
-            outMesh.Translucency = mesh.Translucency;
-            outMesh.IsTransparent = (mesh.Flags & kMeshEntryFlagTransparent) != 0;
-            outMesh.BaseColorFactor[0] = mesh.BaseColorFactor[0];
-            outMesh.BaseColorFactor[1] = mesh.BaseColorFactor[1];
-            outMesh.BaseColorFactor[2] = mesh.BaseColorFactor[2];
-            outMesh.BaseColorFactor[3] = mesh.BaseColorFactor[3];
-            outMesh.EmissiveFactor[0] = mesh.EmissiveFactor[0];
-            outMesh.EmissiveFactor[1] = mesh.EmissiveFactor[1];
-            outMesh.EmissiveFactor[2] = mesh.EmissiveFactor[2];
+            outMesh.BentNormalTexture = resolveBentNormal(material.BentNormalTextureIndex);
+            outMesh.MetallicFactor = material.MetallicFactor;
+            outMesh.RoughnessFactor = material.RoughnessFactor;
+            outMesh.AlphaCutoff = material.AlphaCutoff;
+            outMesh.Translucency = material.Translucency;
+            outMesh.IsTransparent = (material.Flags & kMeshEntryFlagTransparent) != 0;
+            outMesh.BaseColorFactor[0] = material.BaseColorFactor[0];
+            outMesh.BaseColorFactor[1] = material.BaseColorFactor[1];
+            outMesh.BaseColorFactor[2] = material.BaseColorFactor[2];
+            outMesh.BaseColorFactor[3] = material.BaseColorFactor[3];
+            outMesh.EmissiveFactor[0] = material.EmissiveFactor[0];
+            outMesh.EmissiveFactor[1] = material.EmissiveFactor[1];
+            outMesh.EmissiveFactor[2] = material.EmissiveFactor[2];
 
             model.Meshes.push_back(std::move(outMesh));
         }

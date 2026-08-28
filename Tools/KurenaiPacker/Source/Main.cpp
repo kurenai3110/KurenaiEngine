@@ -109,6 +109,9 @@ namespace
 "                                  併せて頂点キャッシュ最適化とインデックスの並べ替えも\n"
 "                                  行わないため、頂点/インデックスは入力の並びのまま出る。\n"
 "                                  見た目の異常がメッシュレット化由来かの切り分けに使う\n"
+"      --meshlet-lods <N>  メッシュレットの離散LODを何段まで作るか(既定4、上限4)。\n"
+"                                  1なら原寸のみ。0は--no-meshletsと同じ。\n"
+"                                  段ごとに三角形を半分にし、それ以上潰せなくなったら打ち切る\n"
 "  -h, --help            このヘルプを表示する\n";
     }
 
@@ -130,6 +133,7 @@ namespace
         bool Inspect = false;
         bool BakeOcclusion = false;
         bool EnableMeshlets = true;
+        unsigned int MeshletLODCount = 4;
         unsigned int OcclusionResolution = 512;
         unsigned int OcclusionRays = 128;
         unsigned int BentNormalRays = 256;
@@ -275,6 +279,26 @@ namespace
             else if (arg == L"--no-meshlets")
             {
                 args.EnableMeshlets = false;
+            }
+            else if (arg == L"--meshlet-lods")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError(WideToUtf8(arg) + " には値が必要です");
+                    return std::nullopt;
+                }
+                // 0(段を作らない=メッシュレット自体を作らない)を許す
+                if (!ParseUnsigned(arg, argv[++i], args.MeshletLODCount, true))
+                {
+                    return std::nullopt;
+                }
+                if (args.MeshletLODCount > Kurenai::Assets::kMaxMeshletLODCount)
+                {
+                    PrintError("--meshlet-lods の上限は "
+                        + std::to_string(Kurenai::Assets::kMaxMeshletLODCount)
+                        + " です(MeshEntryが段ごとの範囲を固定長で持つため)");
+                    return std::nullopt;
+                }
             }
             else if (arg == L"--bake-occlusion")
             {
@@ -659,6 +683,11 @@ int wmain(int argc, wchar_t** argv)
     options.JobCount = args.JobCount;
     options.BakedOcclusion = args.BakeOcclusion ? &bakeResult : nullptr;
     options.EnableMeshlets = args.EnableMeshlets;
+    options.MeshletLODCount = args.MeshletLODCount;
+    if (sourceModel.EmbeddedTextures)
+    {
+        options.EmbeddedTextureDirectory = sourceModel.EmbeddedTextures->Directory();
+    }
 
     KurenaiPacker::PackResult result;
     try
@@ -692,17 +721,43 @@ int wmain(int argc, wchar_t** argv)
         << " / 既存スキップ " << result.TextureSkippedExisting
         << " / 失敗(フォールバック) " << result.TextureFailed << ")\n";
 
-    if (args.EnableMeshlets)
+    if (sourceModel.EmbeddedTextures && sourceModel.EmbeddedTextures->ExtractedCount() > 0)
     {
-        std::cout << "  メッシュレット: " << result.MeshletCount;
-        if (result.MeshletCount > 0)
+        // 埋め込みテクスチャは「取り出せた枚数」と「テクスチャ要求の数」の両方を見ないと
+        // 落ちているものに気づけない(取り出しに失敗したスロットは-1へフォールバックし、
+        // 要求そのものが立たないため)
+        std::cout << "  埋め込みテクスチャ: " << sourceModel.EmbeddedTextures->ExtractedCount()
+            << "枚を一時ファイルへ取り出しました\n";
+    }
+
+    if (args.EnableMeshlets && args.MeshletLODCount > 0)
+    {
+        std::cout << "  メッシュレット: " << result.MeshletCount << " (LOD0 " << result.MeshletLOD0Count << ")";
+        if (result.MeshletLOD0Count > 0)
         {
             // 1メッシュレットあたりの平均三角形数。上限(kMeshletMaxTriangles)に近いほど
-            // 分割が詰まっており、極端に少ない場合はモデルの三角形が散らばっている
-            std::cout << " (1つあたり平均 "
-                      << (result.IndexCount / 3 + result.MeshletCount / 2) / result.MeshletCount << "三角形)";
+            // 分割が詰まっており、極端に少ない場合はモデルの三角形が散らばっている。
+            // LOD0だけで割る(簡略化した段は三角形が減っているので混ぜると意味が薄れる)
+            std::cout << " (LOD0の1つあたり平均 "
+                      << (result.IndexCount / 3 + result.MeshletLOD0Count / 2) / result.MeshletLOD0Count << "三角形)";
         }
         std::cout << "\n";
+
+        if (args.MeshletLODCount > 1 && result.MeshletTrianglesByLOD[0] > 0)
+        {
+            // 【段ごとに出す】段が進んでも三角形が減っていなければ、簡略化が効いていない。
+            // 総数だけを見ていると「段は作れた」で通ってしまう
+            std::cout << "  メッシュレットLOD:";
+            for (unsigned int lod = 0; lod < Kurenai::Assets::kMaxMeshletLODCount; ++lod)
+            {
+                if (lod > 0 && result.MeshletTrianglesByLOD[lod] == 0)
+                {
+                    break;
+                }
+                std::cout << " [" << lod << "] " << result.MeshletTrianglesByLOD[lod] << "三角形";
+            }
+            std::cout << "\n";
+        }
     }
 
     if (args.BakeOcclusion)
