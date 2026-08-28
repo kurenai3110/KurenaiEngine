@@ -194,6 +194,8 @@ namespace Kurenai::RHI
         // メッシュシェーダーが直接起動される)
         IRHIShader* AmplificationShader = nullptr;
         IRHIShader* MeshShader = nullptr;
+        // nullptrでもよい(深度だけを書くパスではピクセルシェーダーの段ごと省ける)。
+        // PipelineStateDesc::PixelShaderと同じ扱い
         IRHIShader* PixelShader = nullptr;
 
         std::vector<Format> RenderTargetFormats;

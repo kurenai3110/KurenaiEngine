@@ -1444,9 +1444,9 @@ namespace Kurenai::RHI
             Core::Logger::Error("DX12", "メッシュシェーダー非対応の環境でCreateMeshPipelineStateが呼ばれました");
             return nullptr;
         }
-        if (!desc.MeshShader || !desc.PixelShader)
+        if (!desc.MeshShader)
         {
-            Core::Logger::Error("DX12", "CreateMeshPipelineStateにメッシュシェーダーまたはピクセルシェーダーが指定されていません");
+            Core::Logger::Error("DX12", "CreateMeshPipelineStateにメッシュシェーダーが指定されていません");
             return nullptr;
         }
 
@@ -1502,7 +1502,10 @@ namespace Kurenai::RHI
         // (サブオブジェクト自体を省く必要はなく、長さ0なら「無し」として扱われる)
         stream.AS = amplificationShader ? amplificationShader->GetBytecode() : D3D12_SHADER_BYTECODE{ nullptr, 0 };
         stream.MS = meshShader->GetBytecode();
-        stream.PS = pixelShader->GetBytecode();
+        // ピクセルシェーダーも任意。深度だけを書くパス(深度プリパスの不透明ぶん・シャドウ)は
+        // 段ごと省きたいので、長さ0のバイトコードを置いて「無し」にする
+        // (CreatePipelineStateがPixelShader=nullptrを同じ扱いにしているのに揃える)
+        stream.PS = pixelShader ? pixelShader->GetBytecode() : D3D12_SHADER_BYTECODE{ nullptr, 0 };
         stream.Rasterizer = rasterizer;
         stream.Blend = blend;
         stream.DepthStencil = depthStencil;
