@@ -1414,7 +1414,7 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <table>
 <thead><tr><th>セクション</th><th>出現</th><th>キー</th><th>型</th><th>必須</th><th>既定値</th><th>説明</th></tr></thead>
 <tbody>
-<tr><td rowspan="13"><code>[Scene]</code></td><td rowspan="13">0〜1</td><td><code>Name</code></td><td>string</td><td>-</td><td>ファイル名</td><td>ImGuiのシーン一覧に出る表示名</td></tr>
+<tr><td rowspan="15"><code>[Scene]</code></td><td rowspan="15">0〜1</td><td><code>Name</code></td><td>string</td><td>-</td><td>ファイル名</td><td>ImGuiのシーン一覧に出る表示名</td></tr>
 <tr><td><code>Skybox</code></td><td>path</td><td>-</td><td>Skybox/Sky.dds</td><td>Assetsルートからのキューブマップ<code>.dds</code>相対パス。IBLの環境光もこれから焼かれる</td></tr>
 <tr><td><code>IBLIntensity</code></td><td>float</td><td>-</td><td>変更しない</td><td>IBLの強度倍率。0以上</td></tr>
 <tr><td><code>AmbientOcclusion</code></td><td>bool</td><td>-</td><td>true</td><td>AO/間接光の有効/無効。手法(SSAO / SSIL / レイトレーシング)は<code>.kscene</code>では指定せず、レンダリングパネルで切り替える</td></tr>
@@ -1425,11 +1425,17 @@ TRS(平行移動・回転・スケール)から計算したワールド行列・
 <tr><td><code>Exposure</code></td><td>float</td><td>-</td><td>変更しない</td><td>シーン全体の露出(EV100、-6〜18)。指定が無ければエンジンの設定をそのまま使う(<code>IBLIntensity</code>と同じ扱い)。屋外の風景と屋内では被写体の輝度が桁で違うため、エンジンの既定値を動かさずにシーン側で持てるようにしてある。値が大きいほど暗く写る(写真のEVと同じ向き)</td></tr>
 <tr><td><code>RenderResolution</code></td><td>uint2</td><td>-</td><td>変更しない</td><td>G-Buffer以降の内部レンダー解像度を<code>幅, 高さ</code>で指定する。ウィンドウの大きさとは独立で、表示時はアスペクト比を保って拡大縮小される(余る側にレターボックス/ピラーボックスが出る)。書かなければシステムパネルの設定のまま。各要素は1以上の整数で、<strong>7680×4320以下</strong>。超えるとエラーになる(この解像度でフルスクリーンのテクスチャが多数作られるため、書き間違いで数GBを確保しないための歯止め)</td></tr>
 <tr><td><code>TAA</code></td><td>bool</td><td>-</td><td>変更しない</td><td>TAA(時間的アンチエイリアス)の有効/無効。<strong>キーを書いたシーンだけがエンジンの既定を上書きする</strong>(<code>ScreenSpaceReflection</code>や<code>Exposure</code>と同じ扱い)。書かなければエンジンの既定(無効)に従う</td></tr>
+<tr><td><code>ShadowDistance</code></td><td>float</td><td>-</td><td>カメラの遠クリップ面</td><td>カスケードシャドウを打ち切る距離[m]。1〜100000。遠クリップ面はシーンAABBの対角から自動で決まる(<code>farZ = max(100, 対角×4)</code>)ため、数十km規模のシーンではカスケードの分割範囲がそのまま伸び、<strong>第1カスケードが数kmを2048×2048の1枚で覆うことになって近景の影が事実上消える</strong>。ここで手前に打ち切れば、遠景の描画距離を保ったまま近景の影の密度を戻せる</td></tr>
+<tr><td><code>StreamingDistance</code></td><td>float</td><td>-</td><td>全常駐</td><td>この距離(メートル、1〜100000)以内のモデルだけを常駐させる。読み込み時は<code>.kmodel</code>のヘッダのAABBだけで配置を決め、実体はカメラが近づいたときにLoaderスレッドが読む。距離の測り方は<code>LODDistance</code>と同じ(AABBの最近接点まで)。<strong>書かなければ従来どおり全部常駐</strong>。レイトレーシングは常駐の増減に追随して高速化構造を作り直す。制限: モデル埋め込みライトは無視される</td></tr>
+<tr><td><code>CameraSpeed</code></td><td>float</td><td>-</td><td>シーン対角から自動</td><td>WASD/E/Qでカメラを動かす速さ[m/s]。0.01〜10000。<strong>Shiftを押している間は4倍</strong>になる。書かなければシーンAABBの対角から自動で決まり、基準はEmeraldSquare(対角344.6m)で5 m/s、それより小さいシーンは5 m/s据え置き(根拠は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 50章)。実行中はシーンパネルのスライダでも変えられる(右クリックの「シーンから再計算」でこの自動値へ戻る)</td></tr>
 <tr><td><code>TextureStreaming</code></td><td>bool</td><td>-</td><td>false</td><td>テクスチャの常駐ミップ制御。有効にすると、カメラからの距離とメッシュのUV密度から「何段目のミップから常駐していれば足りるか」をCPUで見積もり、足りているぶんだけを<code>.ktex</code>から読み直してGPUリソースを小さく作り直す。<strong>書かなければ全ミップ常駐</strong>で、既存シーンの見え方もVRAM使用量も変わらない。DX12でタイルリソース(Tier 2以上)が使える場合は、リソースを作り直さずタイルの貼り替えだけで済ませる(DX11とTier 1では常駐ミップ制御のみ)。常駐の状況はシステムパネルの「テクスチャストリーミング」でサイズ帯ごとに見られる</td></tr>
-<tr><td><code>TextureStreamingBias</code></td><td>float</td><td>-</td><td>-3</td><td>必要ミップの推定に足すバイアス[段]。負なら安全側(より詳細なミップを常駐させる)。指定できるのは<strong>-8〜4</strong>で、外れるとエラーになる。<strong>既定の-3は実測で決めた値</strong>で、CPU側の等方的な見積もりが取りこぼす分(斜めから見た面が異方性フィルタに要求する細かさ、1メッシュ内でのUV密度のばらつき)を吸収している。根拠と感度は<code>docs/ImplementationDetail.md</code> 48章</td></tr>
-<tr><td rowspan="3"><code>[Model]</code></td><td rowspan="3">1以上</td><td><code>Path</code></td><td>path</td><td><strong>必須</strong></td><td>-</td><td>Assetsルートからの<code>.kmodel</code>相対パス</td></tr>
+<tr><td><code>TextureStreamingBias</code></td><td>float</td><td>-</td><td>-2</td><td>必要ミップの推定に足すバイアス[段]。負なら安全側(より詳細なミップを常駐させる)。指定できるのは<strong>-8〜4</strong>で、外れるとエラーになる。<strong>既定の-2は実測で決めた値</strong>。UV密度の代表値の採り方(低い側の10パーセンタイル)が支配的で、このバイアスはその補正でしかない。根拠と感度は<code>docs/ImplementationDetail.md</code> 48.3〜48.4</td></tr>
+<tr><td rowspan="6"><code>[Model]</code></td><td rowspan="6">1以上</td><td><code>Path</code></td><td>path</td><td><strong>必須</strong></td><td>-</td><td>Assetsルートからの<code>.kmodel</code>相対パス</td></tr>
 <tr><td><code>Translation</code></td><td>float3</td><td>-</td><td>0,0,0</td><td>平行移動</td></tr>
 <tr><td><code>RotationEuler</code>/<code>Scale</code></td><td>float3</td><td>-</td><td>0,0,0 / 1,1,1</td><td>回転(度、pitch/yaw/roll)・スケール(負値も可)</td></tr>
+<tr><td><code>Water</code></td><td>bool</td><td>-</td><td>false</td><td>このインスタンスを水面として描く(<code>Water.hlsl</code>専用PSO。G-Bufferのマテリアルキーワードに水面IDを書く)。空と雲、不透明ジオメトリの鏡像(平面反射)が映る</td></tr>
+<tr><td><code>LODPath</code></td><td>path</td><td>-</td><td>-</td><td>モデルLODの2段目以降。<code>LODDistance</code>と<strong>対で</strong>、粗くなっていく順に最大3つ(<code>Path</code>を含めて4段)。対になっていない指定はエラー</td></tr>
+<tr><td><code>LODDistance</code></td><td>float</td><td>直前の<code>LODPath</code>に対し必須</td><td>-</td><td>直前の<code>LODPath</code>へ切り替える距離(メートル、1〜1000000)。距離は<strong>インスタンスのAABBの最近接点まで</strong>で測る(中心距離だと1km四方のタイルで「足元だけ粗くなる」逆転が起きる)。切替点の±5%は不感帯で、前後は短時間クロスディザで重ねてポップを抑える。<strong>昇順で書くこと</strong>(降順はエラー)。影・反射プローブ・DDGIは常に最も粗い段を使う</td></tr>
 <tr><td rowspan="2"><code>[Camera]</code></td><td rowspan="2">0〜1</td><td><code>Position</code></td><td>float3</td><td>セクションがあれば必須</td><td>-</td><td>初期カメラ位置</td></tr>
 <tr><td><code>Yaw</code> / <code>Pitch</code></td><td>float</td><td>-</td><td>0.0</td><td>度</td></tr>
 <tr><td rowspan="4"><code>[Sun]</code></td><td rowspan="4">0〜1</td><td><code>TimeOfDay</code></td><td>float</td><td>-</td><td>12.0</td><td>0〜24。範囲外はエラー</td></tr>

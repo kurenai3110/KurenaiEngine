@@ -24,6 +24,11 @@ namespace Kurenai
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
 
+        // シーン読み込みの進捗をログへ落とす最短間隔[秒]。
+        // 1モデルごとに出すと767モデルのシーンで767行になるため間引く。
+        // 最初(0/N)と最後(N/N)だけは間隔に関わらず必ず出す
+        constexpr float kSceneLoadProgressLogIntervalSeconds = 1.0f;
+
         // ビュー射影行列から取り出した視錐台の6平面(左/右/下/上/手前/奥)。
         // 各要素は平面の方程式 dot(n, p) + d の (n.xyz, d)
         struct FrustumPlanes
@@ -100,6 +105,69 @@ namespace Kurenai
                 {
                     return false;
                 }
+            }
+            return true;
+        }
+
+        // メッシュ単位のフラスタムカリング判定。IsAABBVisibleを呼ぶ7つの描画パスすべてが、
+        // モデル単位の判定を通ったあとのメッシュのループから同じ形で呼ぶ。
+        //
+        // 【統計はモデル単位と別のカウンタへ入れる】分母も意味も違うため
+        // (KurenaiEngine3D.h の m_MeshCullTested のコメント参照)。呼び出し側が
+        // どのカウンタを渡すかを見て取れるよう、メンバではなく引数で受ける。
+        //
+        // 【メッシュ番号はポインタ差で引く】各パスのループは
+        // for (const auto& mesh : instance.Model.Meshes) の形で添字を持たない。
+        // Meshesはvectorで連続しているため、先頭との差がそのまま添字になる
+        bool IsMeshVisibleWithStats(
+            bool enabled, const FrustumPlanes& frustum, const Assets::ModelInstance& instance,
+            const Assets::Model& model, const Assets::Mesh& mesh, uint32_t& tested, uint32_t& culled)
+        {
+            if (!enabled)
+            {
+                // 対照実験用のOFF。判定を1回も呼ばないので統計は「判定なし」になり、
+                // 「実行したが間引き0」と区別できる(EngineDefaults.h の MeshCullingEnabled 参照)
+                return true;
+            }
+
+            // 【AABBは基準の段のぶんしか無い】MeshWorldBoundsListはSceneLoaderが
+            // instance.Model(=最も詳細な段)のメッシュに対して1回だけ作る。
+            // モデルLODで別の段を描いているあいだと、ストリーミングで後から読み込まれた
+            // モデルには対応する要素が無く、ポインタ差で引いた添字も別のvectorのものになる。
+            // 判定せず間引かない側(保守側)へ倒す ―― 早さより、見えるものを消さないことを採る。
+            // 【++testedより前に返す】分母を「実際に判定したメッシュ」に揃えないと間引き率が薄まる
+            if (instance.Model.get() != &model)
+            {
+                return true;
+            }
+
+            ++tested;
+
+            const size_t meshIndex = static_cast<size_t>(&mesh - model.Meshes.data());
+            if (meshIndex >= instance.MeshWorldBoundsList.size())
+            {
+                // SceneLoaderが必ずMeshesと同じ要素数で作るのでここへは来ない。
+                // 来た場合は間引かない側(保守側)へ倒す ―― 見えるものを消すより、
+                // 間引けないほうが被害が小さい。毎フレーム何千回も呼ばれるので記録は1回だけ
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "メッシュ単位のワールドAABBが足りません(メッシュ数 " +
+                            std::to_string(model.Meshes.size()) + " / AABB " +
+                            std::to_string(instance.MeshWorldBoundsList.size()) +
+                            ")。メッシュ単位のフラスタムカリングを行いません");
+                }
+                return true;
+            }
+
+            const Assets::MeshWorldBounds& bounds = instance.MeshWorldBoundsList[meshIndex];
+            if (!IsAABBVisible(frustum, bounds.Min, bounds.Max))
+            {
+                ++culled;
+                return false;
             }
             return true;
         }
@@ -836,16 +904,54 @@ namespace Kurenai
             float MaterialID;
             // メッシュシェーダー経路(Shaders/3D/GBufferMeshlet.hlsl)がジオメトリを引くための
             // bindlessディスクリプタ番号。頂点シェーダー経路では読まれない。
-            // すべて4バイトのスカラーなので、末尾に足しても既存フィールドのオフセットは動かない
-            uint32_t VertexBufferIndex;
+            // すべて4バイトのスカラーなので、末尾に足しても既存フィールドのオフセットは動かない。
+            //
+            // 【3本ともモデル単位】かつてメッシュ単位のバッファを指していたが、
+            // 1回のDispatchMeshでモデル全体を描けるようにするためモデル単位へ統合した
+            // (Assets::GpuMeshletのコメント参照)。頂点バッファの番号はメッシュレット1件ごとに
+            // 持たせてあるので、ここでは渡さない。
+            //
+            // 【MeshletOffsetは旧VertexBufferIndexの枠】読むのはGBufferMeshlet.hlslだけで、
+            // かつ同時に直すため、枠を使い回してもレイアウトのずれは起きない
+            uint32_t MeshletOffset;
             uint32_t MeshletBufferIndex;
             uint32_t MeshletVertexBufferIndex;
             uint32_t MeshletTriangleBufferIndex;
+            // このドローで見るメッシュレット数(増幅シェーダーの範囲外判定用)
             uint32_t MeshletCount;
             // 透過率(0=不透明)。GBufferパスがG-BufferのAlbedo.aへ書き、
             // DirectLighting.hlslの透過項が読む(45章)。
             // 4バイトのスカラーを末尾に足しているだけなので、既存フィールドのオフセットは動かない
             float Translucency;
+            // モデルLODのクロスディザ係数。1.0=切替中でない(全画素を描く)、
+            // 0<f<1=切り替え先、-1<f<0=切り替え元。意味と対称性の理由は
+            // Shaders/3D/GBufferCommon.hlsli の DitherFade のコメントを参照。
+            // 既定を1.0にしたいので、MakeObjectConstantsが明示的に代入する
+            // (ObjectConstants{}のゼロ初期化のままだと全画素が捨てられる)
+            float DitherFade;
+
+            // --- マテリアルテーブル経路(1モデル1ドロー)専用 -------------------------------
+            //
+            // 1回のDispatchMeshでモデル全体を描くと、上のMetallicFactor〜Translucencyのような
+            // 「メッシュごとに違う値」を定数バッファでは渡せない。代わりにマテリアルを
+            // 構造化バッファ(Assets::GpuMaterial)へ載せ、その番号をここで渡す。
+            // kInvalidBindlessIndexならピクセルシェーダーは従来の定数+t0〜t6経路を使う
+            uint32_t MaterialTableIndex;
+            // 増幅シェーダーがメッシュレットを取捨するマスク(Assets::kGpuMaterialFlag*)
+            uint32_t MeshletFilterReject;
+            uint32_t MeshletFilterRequire;
+            // シーン全体の自発光倍率と遮蔽マップの有効/無効(1.0 or 0.0)。
+            //
+            // 【従来経路では必ず1.0を入れる】これまでこの2つはMakeObjectConstantsが
+            // 係数へ掛けてから渡していた。ピクセルシェーダーはどちらの経路でも必ず
+            // 掛けるようにしてあるので、既に織り込み済みの従来経路では1.0でなければ
+            // 二重に掛かる
+            float EmissiveIntensity;
+            float OcclusionMapScale;
+            // このドローでメッシュレットカリングの統計を数えるか(0/1)。
+            // 深度プリパスは G-Buffer と同じ増幅シェーダーを使うため、
+            // フレーム全体のフラグだけだと同じ塊を1フレームに2回数えてしまう
+            uint32_t MeshletStatsEnabled;
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -857,11 +963,17 @@ namespace Kurenai
         // occlusionMapEnabled: マテリアルの遮蔽マップを使うか(m_OcclusionMapEnabled)。
         // 各パスは lerp(1, occlusionSample, OcclusionStrength) で遮蔽率を求めるため、
         // ここで0を渡せばシェーダー側に手を入れずに遮蔽マップの寄与だけを消せる
+        // ditherFade: モデルLODの切り替え中だけ1.0以外を渡す(既定の1.0は「全画素を描く」)。
+        // 呼び出し箇所7つのうち、2段を重ねるのはG-Bufferと深度プリパスだけなので既定値を持たせている。
+        // シャドウ・プローブ・DDGIは常に最も粗い段を1つだけ描くためフェードそのものが起きない
+        // 【モデルは引数で受け取る】meshが属する段のメッシュレット表を指す必要がある。
+        // instance.Modelは最も詳細な段でしかなく、シャドウや粗い段を描くときは食い違う
         ObjectConstants MakeObjectConstants(
-            const Assets::ModelInstance& instance, const Assets::Mesh& mesh, float emissiveIntensity,
-            bool occlusionMapEnabled)
+            const Assets::ModelInstance& instance, const Assets::Model& model, const Assets::Mesh& mesh,
+            float emissiveIntensity, bool occlusionMapEnabled, float ditherFade = 1.0f)
         {
             ObjectConstants constants{};
+            constants.DitherFade = ditherFade;
             constants.World = instance.World;
             constants.NormalMatrix = instance.NormalMatrix;
             constants.MetallicFactor = mesh.MetallicFactor;
@@ -884,15 +996,74 @@ namespace Kurenai
             // メッシュレット。ModelLoaderが登録済みの番号をそのまま渡す。
             // メッシュシェーダー非対応・メッシュレット未生成の場合は
             // バッファ自体が無く、GetBindlessIndexはkInvalidBindlessIndexを返す
-            // (MeshletCountが0ならメッシュシェーダー経路には入らないため、その値は使われない)
+            // (MeshletCountが0ならメッシュシェーダー経路には入らないため、その値は使われない)。
+            // 表はモデル単位なので、このメッシュのぶんの範囲をMeshletOffset/MeshletCountで示す
             const auto bindlessIndexOf = [](const RHI::IRHIBuffer* buffer) {
                 return buffer ? buffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
             };
-            constants.VertexBufferIndex = bindlessIndexOf(mesh.VertexBuffer.get());
-            constants.MeshletBufferIndex = bindlessIndexOf(mesh.MeshletBuffer.get());
-            constants.MeshletVertexBufferIndex = bindlessIndexOf(mesh.MeshletVertexBuffer.get());
-            constants.MeshletTriangleBufferIndex = bindlessIndexOf(mesh.MeshletTriangleBuffer.get());
+            constants.MeshletOffset = mesh.MeshletOffset;
+            constants.MeshletBufferIndex = bindlessIndexOf(model.MeshletBuffer.get());
+            constants.MeshletVertexBufferIndex = bindlessIndexOf(model.MeshletVertexBuffer.get());
+            constants.MeshletTriangleBufferIndex = bindlessIndexOf(model.MeshletTriangleBuffer.get());
             constants.MeshletCount = mesh.MeshletCount;
+
+            // メッシュ単位の経路。マテリアルは上の定数とt0〜t6から読むため、
+            // テーブルは使わない(=無効番号)。EmissiveFactorとOcclusionStrengthには
+            // 既にシーン全体の倍率が織り込まれているので、シェーダー側の乗算は1.0にする
+            constants.MaterialTableIndex = RHI::kInvalidBindlessIndex;
+            constants.MeshletFilterReject = 0;
+            constants.MeshletFilterRequire = 0;
+            constants.EmissiveIntensity = 1.0f;
+            constants.OcclusionMapScale = 1.0f;
+            return constants;
+        }
+
+        // 1回のDispatchMeshでモデル全体を描くときの定数。
+        //
+        // 【メッシュ単位の値を入れない】マテリアルの係数もテクスチャもモデル内で
+        // メッシュごとに違うため、定数バッファでは渡せない。ピクセルシェーダーは
+        // メッシュシェーダーが出力したMaterialIndexでマテリアルテーブルを引く。
+        // World/NormalMatrix/TangentSignFlip/MaterialIDだけがインスタンス単位の値で、
+        // これらはモデル全体で共通なので従来どおり定数バッファで渡してよい。
+        //
+        // rejectMask/requireMask: このパスで描くマテリアルの選び方
+        // (Assets::kGpuMaterialFlag*。GBufferCommon.hlsliのMeshletFilter*参照)
+        // 【モデルは引数で受け取る】モデルLODが入り、instance.Modelは「最も詳細な段」でしかない。
+        // シャドウは最も粗い段、G-Buffer/プリパスはそのフレームで選ばれた段を描くので、
+        // どの段のメッシュレット表を指すかは呼び出し側にしか決められない
+        ObjectConstants MakeModelObjectConstants(
+            const Assets::ModelInstance& instance, const Assets::Model& model, float emissiveIntensity,
+            bool occlusionMapEnabled, uint32_t rejectMask, uint32_t requireMask,
+            bool countCullStats = false, float ditherFade = 1.0f)
+        {
+            ObjectConstants constants{};
+            constants.DitherFade = ditherFade;
+            constants.World = instance.World;
+            constants.NormalMatrix = instance.NormalMatrix;
+            constants.TangentSignFlip = instance.TangentSignFlip;
+            // 水面はメッシュレット経路に載せない(ShouldUseMeshletPath)ので常に通常マテリアル
+            constants.MaterialID = 0.0f;
+
+            const auto bindlessIndexOf = [](const RHI::IRHIBuffer* buffer) {
+                return buffer ? buffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
+            };
+            // モデル全体の塊を1回で回すので、範囲は表の先頭から全件
+            constants.MeshletOffset = 0;
+            constants.MeshletBufferIndex = bindlessIndexOf(model.MeshletBuffer.get());
+            constants.MeshletVertexBufferIndex = bindlessIndexOf(model.MeshletVertexBuffer.get());
+            constants.MeshletTriangleBufferIndex = bindlessIndexOf(model.MeshletTriangleBuffer.get());
+            constants.MeshletCount = model.TotalMeshletCount;
+
+            constants.MaterialTableIndex = bindlessIndexOf(model.MaterialTableBuffer.get());
+            constants.MeshletFilterReject = rejectMask;
+            constants.MeshletFilterRequire = requireMask;
+            // マテリアルテーブルは読み込み時に焼くため、シーン全体の倍率は焼き込めない。
+            // ピクセルシェーダーがここの値を掛ける
+            constants.EmissiveIntensity = emissiveIntensity;
+            constants.OcclusionMapScale = occlusionMapEnabled ? 1.0f : 0.0f;
+            // 統計を数えるのは G-Buffer パスだけ。深度プリパスとシャドウは同じ
+            // 増幅シェーダーを使うので、ここで切らないと同じ塊を何度も数えてしまう
+            constants.MeshletStatsEnabled = countCullStats ? 1u : 0u;
             return constants;
         }
 
@@ -1521,6 +1692,21 @@ namespace Kurenai
             gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.kshader";
             gbufferMeshletDebugPsDesc.EntryPoint = "PSMainMeshletDebug";
             m_GBufferMeshletDebugPixelShader = m_Device->CreateShader(gbufferMeshletDebugPsDesc);
+
+            // シャドウパスのメッシュシェーダー版。G-Buffer版と分けているのは、
+            // シャドウのb0がFrameConstantsではなくCascadeConstantsで、cbufferの
+            // レイアウトが違うため(ShadowMeshlet.hlsl冒頭のコメント参照)
+            RHI::ShaderDesc shadowAsDesc;
+            shadowAsDesc.Stage = RHI::ShaderStage::Amplification;
+            shadowAsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.kshader";
+            shadowAsDesc.EntryPoint = "ASMain";
+            m_ShadowAmplificationShader = m_Device->CreateShader(shadowAsDesc);
+
+            RHI::ShaderDesc shadowMsDesc;
+            shadowMsDesc.Stage = RHI::ShaderStage::Mesh;
+            shadowMsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.kshader";
+            shadowMsDesc.EntryPoint = "MSMain";
+            m_ShadowMeshShader = m_Device->CreateShader(shadowMsDesc);
         }
 
         // G-BufferのPSOはEmissiveのフォーマットがバッファ精度に依存するため、
@@ -1936,6 +2122,8 @@ namespace Kurenai
         m_RaytracingAvailable = m_Device->SupportsRaytracing();
         // メッシュシェーダーの可否もここで控える(UIパネルが参照する)
         m_MeshShaderAvailable = m_Device->SupportsMeshShader();
+        // bindless区画の容量も同じ理由でここへ控える(使用数はフレームごとに更新する)
+        m_BindlessCapacity = m_Device->GetBindlessCapacity();
 
         // メッシュレットカリングの統計(Stage 5-2)。増幅シェーダーがカウンタへ数え上げ、
         // それを数フレーム遅れでCPUへ読み戻してPerfログへ出す。
@@ -2262,9 +2450,31 @@ namespace Kurenai
         shadowPsDesc.EntryPoint = "PSMain";
         m_ShadowPixelShader = m_Device->CreateShader(shadowPsDesc);
 
+        // アルファカットアウト用。切り抜きを反映しないと、葉や柵のように
+        // テクスチャで抜く前提のマテリアルが板ポリゴンのまま影を落とす
+        RHI::ShaderDesc shadowCutoutVsDesc;
+        shadowCutoutVsDesc.Stage = RHI::ShaderStage::Vertex;
+        shadowCutoutVsDesc.FilePath = shaderDirectory + L"Shadow.kshader";
+        shadowCutoutVsDesc.EntryPoint = "VSMainCutout";
+        m_ShadowCutoutVertexShader = m_Device->CreateShader(shadowCutoutVsDesc);
+
+        RHI::ShaderDesc shadowCutoutPsDesc;
+        shadowCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
+        shadowCutoutPsDesc.FilePath = shaderDirectory + L"Shadow.kshader";
+        shadowCutoutPsDesc.EntryPoint = "PSMainCutout";
+        m_ShadowCutoutPixelShader = m_Device->CreateShader(shadowCutoutPsDesc);
+
         const std::vector<RHI::InputElementDesc> shadowInputLayout =
         {
             { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+        };
+
+        // カットアウトはベースカラーのアルファを引くためUVも要る。
+        // オフセット24はAssets::Vertexの並び(Position 0 / Normal 12 / UV 24)から
+        const std::vector<RHI::InputElementDesc> shadowCutoutInputLayout =
+        {
+            { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+            { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
         };
 
         RHI::PipelineStateDesc shadowPipelineDesc;
@@ -2278,6 +2488,58 @@ namespace Kurenai
         // シャドウマップへ内側の面の深度が書かれ、影の形と自己遮蔽の出方がずれる
         shadowPipelineDesc.FrontCounterClockwise = true;
         m_ShadowPipelineStateMirrored = m_Device->CreatePipelineState(shadowPipelineDesc);
+
+        // アルファカットアウト用(頂点シェーダー経路)。切り抜きを反映して深度を書く。
+        // 【DX11でも効く】bindlessもメッシュシェーダーも要らないので、両バックエンドで同じ影になる
+        if (m_ShadowCutoutVertexShader && m_ShadowCutoutPixelShader)
+        {
+            RHI::PipelineStateDesc shadowCutoutDesc;
+            shadowCutoutDesc.InputLayout = shadowCutoutInputLayout;
+            shadowCutoutDesc.VertexShader = m_ShadowCutoutVertexShader.get();
+            shadowCutoutDesc.PixelShader = m_ShadowCutoutPixelShader.get();
+            shadowCutoutDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            shadowCutoutDesc.HasDepthStencil = true;
+            shadowCutoutDesc.FrontCounterClockwise = false;
+            m_ShadowCutoutPipelineState = m_Device->CreatePipelineState(shadowCutoutDesc);
+            shadowCutoutDesc.FrontCounterClockwise = true;
+            m_ShadowCutoutPipelineStateMirrored = m_Device->CreatePipelineState(shadowCutoutDesc);
+        }
+
+        // メッシュシェーダー版のシャドウPSO。
+        //
+        // 【これが無いと1ドロー化が片手落ちになる】メッシュレット経路はG-Bufferにしか
+        // 無かったため、モデルを1ドローで描けるようになってもシャドウは従来どおり
+        // メッシュ単位で、しかもカスケード4枚ぶん発行され続ける。
+        // PLATEAU LOD2の1タイル(メッシュ1,715個)ならG-Bufferが1ドローになる一方で
+        // シャドウは6,860ドローのまま、ということになる。
+        //
+        // ピクセルシェーダーは持たない(深度だけを書く)。頂点シェーダー版が
+        // 空のPSMainを渡しているのに合わせず段ごと省いているのは、深度プリパスの
+        // 不透明用PSOと同じ理由(RHIDesc.hのPixelShader=nullptrの扱い)
+        if (m_ShadowAmplificationShader && m_ShadowMeshShader)
+        {
+            RHI::MeshPipelineStateDesc shadowMeshDesc;
+            shadowMeshDesc.AmplificationShader = m_ShadowAmplificationShader.get();
+            shadowMeshDesc.MeshShader = m_ShadowMeshShader.get();
+            shadowMeshDesc.PixelShader = nullptr;
+            shadowMeshDesc.HasDepthStencil = true;
+            shadowMeshDesc.FrontCounterClockwise = false;
+            m_ShadowMeshletPipelineState = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+            shadowMeshDesc.FrontCounterClockwise = true;
+            m_ShadowMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+
+            // カットアウト用。ピクセルシェーダーは頂点シェーダー経路と共有する
+            // (ShadowMeshlet.hlslのShadowPSInputとShadow.hlslのCutoutPSInputは
+            //  同じ並び・同じセマンティクスにしてある)
+            if (m_ShadowCutoutPixelShader)
+            {
+                shadowMeshDesc.PixelShader = m_ShadowCutoutPixelShader.get();
+                shadowMeshDesc.FrontCounterClockwise = false;
+                m_ShadowMeshletCutoutPipelineState = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+                shadowMeshDesc.FrontCounterClockwise = true;
+                m_ShadowMeshletCutoutPipelineStateMirrored = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+            }
+        }
 
         // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する。
         // 全カスケードを1つのTexture2DArrayにまとめ、スライスごとのDSVで1カスケードずつ描き込む
@@ -2922,7 +3184,8 @@ namespace Kurenai
                m_DDGIProbeTracePipelineState != nullptr && m_DDGITraceConstantBuffer != nullptr;
     }
 
-    bool KurenaiEngine3D::ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const
+    bool KurenaiEngine3D::ShouldUseMeshletPath(
+        const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const
     {
         // 【水面はメッシュレット経路に載せない】水面のピクセルシェーダーはWater.hlslの
         // PSMainで、G-Buffer本体のPSMainとは別物。メッシュシェーダー版を用意するには
@@ -2936,13 +3199,35 @@ namespace Kurenai
         // メッシュレットが焼かれていない(--no-meshletsでパックされた.kmodel)、
         // またはデバイスが非対応でGPUバッファを作っていない場合はnullptrになる。
         // 【MeshletCountで判定しないこと】あちらはアセットが持つ数そのもので、
-        // メッシュシェーダー非対応の環境でも(レイトレーシングが使うため)0にはならない
-        if (!mesh.MeshletBuffer)
+        // メッシュシェーダー非対応の環境でも(レイトレーシングが使うため)0にはならない。
+        // 表はモデル単位なので、このメッシュ自身が塊を持っているかも併せて見る
+        // (モデル内に塊を持たないメッシュが混ざりうる)
+        if (!model.MeshletBuffer || !model.MaterialTableBuffer || mesh.MeshletCount == 0)
         {
             return false;
         }
 
         return m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+    }
+
+    bool KurenaiEngine3D::ShouldUseModelMeshletPath(
+        const Assets::ModelInstance& instance, const Assets::Model& model) const
+    {
+        // モデル内の1メッシュでも従来経路へ落ちる条件があるなら、モデル全体を従来経路にする。
+        // 混ぜると「1ドローで描いたぶん」と「メッシュ単位で描いたぶん」が同じフレームに
+        // 同居し、食い違いが出たときにどちらのせいか切り分けられなくなる
+        if (!model.AllMeshesHaveMeshlets)
+        {
+            return false;
+        }
+        if (model.Meshes.empty())
+        {
+            return false;
+        }
+
+        // 代表として先頭のメッシュで判定する。AllMeshesHaveMeshletsが真なら
+        // メッシュ間で結果は変わらない(残りの条件はすべてモデル単位/インスタンス単位)
+        return ShouldUseMeshletPath(model, model.Meshes.front(), instance.IsWater);
     }
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAOTexture() const
@@ -3104,6 +3389,40 @@ namespace Kurenai
                 m_DepthPrepassCutoutPipelineState = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
                 depthPrepassPipelineDesc.FrontCounterClockwise = true;
                 m_DepthPrepassCutoutPipelineStateMirrored = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
+            }
+
+            // メッシュシェーダー版の深度プリパス。
+            //
+            // 【これが無いとプリパスがまるごと止まる】かつてプリパスはメッシュレット経路と
+            // 排他だった。プリパスが頂点シェーダーで深度を書き、G-Bufferがメッシュシェーダーで
+            // 描くと、同じ頂点でも変換の丸めが一致する保証が無く、深度が1ulpずれた面が
+            // GREATER_EQUALを通らずに消えるため。**G-Bufferと同じ増幅/メッシュシェーダーを
+            // そのまま使えば変換は文字どおり同一のコードになり、この問題自体が消える。**
+            //
+            // 不透明用はピクセルシェーダーを持たない(段ごと省く)。カットアウト用は
+            // G-Bufferとまったく同じ判定のclipを通す(DepthPrepass.hlsl)
+            if (m_GBufferMeshShader && m_GBufferAmplificationShader)
+            {
+                RHI::MeshPipelineStateDesc prepassMeshDesc;
+                prepassMeshDesc.AmplificationShader = m_GBufferAmplificationShader.get();
+                prepassMeshDesc.MeshShader = m_GBufferMeshShader.get();
+                prepassMeshDesc.PixelShader = nullptr;
+                prepassMeshDesc.HasDepthStencil = true;
+                prepassMeshDesc.ReverseZ = true;
+                prepassMeshDesc.FrontCounterClockwise = false;
+                m_DepthPrepassMeshletPipelineState = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                prepassMeshDesc.FrontCounterClockwise = true;
+                m_DepthPrepassMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+
+                if (m_DepthPrepassCutoutPixelShader)
+                {
+                    prepassMeshDesc.PixelShader = m_DepthPrepassCutoutPixelShader.get();
+                    prepassMeshDesc.FrontCounterClockwise = false;
+                    m_DepthPrepassMeshletCutoutPipelineState = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                    prepassMeshDesc.FrontCounterClockwise = true;
+                    m_DepthPrepassMeshletCutoutPipelineStateMirrored =
+                        m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                }
             }
 
             // SSAOパス
@@ -3520,8 +3839,9 @@ namespace Kurenai
 
         const FrustumPlanes swRasterFrustum = ExtractFrustumPlanes(viewProj);
 
-        for (const auto& instance : m_Scene.Instances)
+        for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
         {
+            const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
             ++m_FrustumCullTested;
             if (!IsAABBVisible(swRasterFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
             {
@@ -3529,10 +3849,23 @@ namespace Kurenai
                 continue;
             }
 
-            for (const auto& mesh : instance.Model.Meshes)
+            // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
+            // ストリーミング中で未読み込みなら描かない
+            const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
+            if (!currentModel) { continue; }
+            for (const auto& mesh : currentModel->Meshes)
             {
                 // 半透明(alphaMode=BLEND)はハードウェア側でもG-Bufferに描かれないため揃える
                 if (mesh.IsTransparent || mesh.IndexCount < 3)
+                {
+                    continue;
+                }
+
+                // メッシュ単位のカリング。統計はモデル単位とは別カウンタへ入れる。
+                // 【描かないメッシュを弾いた後に置く】分母を「このパスが実際に描くメッシュ」に
+                // 揃えないと、間引き率が薄まって効きが読めなくなる
+                if (!IsMeshVisibleWithStats(
+                        m_MeshCullingEnabled, swRasterFrustum, instance, *currentModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                 {
                     continue;
                 }
@@ -4131,6 +4464,482 @@ namespace Kurenai
         }
         m_LoadRequestCV.notify_one();
         m_SceneLoadInFlight = true;
+        // 進捗表示にシーン名を出すために、いま読ませているシーンを控える
+        m_SceneLoadingIndex = sceneIndex;
+    }
+
+    void KurenaiEngine3D::UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds)
+    {
+        m_LODSwitchCount = 0;
+        m_LODFadingCount = 0;
+
+        if (m_InstanceLODStates.size() != m_Scene.Instances.size())
+        {
+            // シーンが差し替わった直後。状態を作り直す(全インスタンスが最も詳細な段から始まる)
+            m_InstanceLODStates.assign(m_Scene.Instances.size(), InstanceLODState{});
+        }
+
+        for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+        {
+            Assets::ModelInstance& instance = m_Scene.Instances[i];
+            InstanceLODState& state = m_InstanceLODStates[i];
+
+            const size_t levelCount = instance.LODModels.size() + 1;
+            if (levelCount <= 1)
+            {
+                // LODを持たないインスタンス。従来どおり1段だけ
+                state.CurrentLOD = 0;
+                state.PreviousLOD = 0;
+                state.FadeT = 1.0f;
+                instance.LODLevel = 0;
+                continue;
+            }
+
+            // 【AABBの最近接点までの距離】中心距離だと1.1km四方のPLATEAUタイルで破綻する。
+            // タイルの上に立っていても中心までは500m以上あるため、近景なのに粗い段が選ばれる。
+            // 点がAABBの内側なら距離0になる(各軸の食い込み量が0になるため)
+            float squaredDistance = 0.0f;
+            const float cameraXYZ[3] = { cameraPosition.x, cameraPosition.y, cameraPosition.z };
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float outside = (std::max)(
+                    { instance.WorldBoundsMin[axis] - cameraXYZ[axis],
+                      cameraXYZ[axis] - instance.WorldBoundsMax[axis], 0.0f });
+                squaredDistance += outside * outside;
+            }
+            const float distance = std::sqrt(squaredDistance);
+
+            // 【1フレームに1段だけ動かす】ヒステリシスを素直に書ける。段数の上限は4なので、
+            // 遠くから一気に近づいても数フレームで追いつく
+            uint32_t desired = state.CurrentLOD;
+            if (desired < instance.LODDistances.size() &&
+                distance > instance.LODDistances[desired] * (1.0f + m_LODHysteresis))
+            {
+                desired = desired + 1;
+            }
+            else if (desired > 0 &&
+                     distance < instance.LODDistances[desired - 1] * (1.0f - m_LODHysteresis))
+            {
+                desired = desired - 1;
+            }
+
+            if (desired != state.CurrentLOD)
+            {
+                // フェード中に次の切り替えが来たら、いま描いている「先」を新しい「元」にする。
+                // 3段以上を同時に重ねることはしない(ディザが排他にならず穴が開く)
+                state.PreviousLOD = state.CurrentLOD;
+                state.CurrentLOD = desired;
+                state.FadeT = 0.0f;
+                ++m_LODSwitchCount;
+            }
+            else if (state.FadeT < 1.0f)
+            {
+                state.FadeT = (m_LODFadeDuration > 0.0f)
+                    ? (std::min)(1.0f, state.FadeT + deltaSeconds / m_LODFadeDuration)
+                    : 1.0f;
+            }
+
+            if (state.FadeT < 1.0f)
+            {
+                ++m_LODFadingCount;
+            }
+
+            // 常駐マップ(StreamingPanel)が色分けに使う。ここが唯一の書き込み元
+            instance.LODLevel = state.CurrentLOD;
+        }
+    }
+
+    void KurenaiEngine3D::RequestRaytracingRebuild()
+    {
+        if (!m_Device->SupportsRaytracing() || !m_Scene.HasStreamingDistance)
+        {
+            return;
+        }
+        m_RaytracingRebuildPending = true;
+        m_RaytracingRebuildAfter = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(static_cast<int>(kRaytracingRebuildQuietSeconds * 1000.0f));
+    }
+
+    void KurenaiEngine3D::UpdateRaytracingRebuild()
+    {
+        // --- 出来上がったものを差し替える ---------------------------------------------------
+        {
+            std::unique_ptr<Assets::RaytracingScene> rebuilt;
+            uint64_t generation = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_RaytracingRebuiltMutex);
+                rebuilt = std::move(m_RaytracingRebuilt);
+                generation = m_RaytracingRebuiltGeneration;
+            }
+            if (rebuilt && generation == m_StreamingGeneration)
+            {
+                auto retired = std::make_unique<Assets::RaytracingScene>(std::move(m_RaytracingScene));
+                m_RaytracingPendingRelease.push_back({ std::move(retired), kStreamingReleaseDelayFrames });
+                m_RaytracingScene = std::move(*rebuilt);
+                ++m_RaytracingRebuildCount;
+            }
+        }
+
+        // --- 寝かせ終えたものをLoaderスレッドへ渡す -------------------------------------------
+        //
+        // 【ここでresetしてはいけない】RaytracingSceneが持つディスクリプタは、ロックを持たない
+        // アセット用ヒープから取られている。Loaderスレッドがストリーミングで確保している最中に
+        // Renderスレッドが解放するとフリーリストが壊れる。モデルの破棄と同じ経路へ寄せる
+        if (!m_RaytracingPendingRelease.empty())
+        {
+            std::vector<std::unique_ptr<Assets::RaytracingScene>> ready;
+            for (PendingRaytracingRelease& pending : m_RaytracingPendingRelease)
+            {
+                if (pending.FramesRemaining > 0)
+                {
+                    --pending.FramesRemaining;
+                    continue;
+                }
+                ready.push_back(std::move(pending.Scene));
+            }
+            m_RaytracingPendingRelease.erase(
+                std::remove_if(
+                    m_RaytracingPendingRelease.begin(), m_RaytracingPendingRelease.end(),
+                    [](const PendingRaytracingRelease& pending) { return !pending.Scene; }),
+                m_RaytracingPendingRelease.end());
+
+            if (!ready.empty())
+            {
+                {
+                    std::lock_guard<std::mutex> lock(m_RaytracingReleaseMutex);
+                    for (auto& scene : ready)
+                    {
+                        m_RaytracingRelease.push_back(std::move(scene));
+                    }
+                }
+                m_LoadRequestCV.notify_one();
+            }
+        }
+
+        // --- 静かになったら発注する -----------------------------------------------------------
+        if (!m_RaytracingRebuildPending || std::chrono::steady_clock::now() < m_RaytracingRebuildAfter)
+        {
+            return;
+        }
+        m_RaytracingRebuildPending = false;
+        m_RaytracingRebuildInFlight.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
+            m_RaytracingRebuildRequested = true;
+        }
+        m_LoadRequestCV.notify_one();
+    }
+
+    void KurenaiEngine3D::UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition)
+    {
+        m_StreamingResidentCount = 0;
+        m_StreamingTargetCount = 0;
+
+        // 破棄待ちを1フレーム進める。0になったものだけLoaderスレッドへ渡す。
+        // 【ストリーミングを使わないシーンでも回す】シーンを切り替えた直後に、
+        // 前のシーンで積んだ分が残っていることがある
+        if (!m_StreamingPendingRelease.empty())
+        {
+            std::vector<std::shared_ptr<Assets::Model>> ready;
+            for (PendingModelRelease& pending : m_StreamingPendingRelease)
+            {
+                if (pending.FramesRemaining > 0)
+                {
+                    --pending.FramesRemaining;
+                    continue;
+                }
+                ready.push_back(std::move(pending.Model));
+            }
+            m_StreamingPendingRelease.erase(
+                std::remove_if(
+                    m_StreamingPendingRelease.begin(), m_StreamingPendingRelease.end(),
+                    [](const PendingModelRelease& pending) { return !pending.Model; }),
+                m_StreamingPendingRelease.end());
+
+            if (!ready.empty())
+            {
+                {
+                    std::lock_guard<std::mutex> lock(m_StreamingReleaseMutex);
+                    for (std::shared_ptr<Assets::Model>& model : ready)
+                    {
+                        m_StreamingRelease.push_back(std::move(model));
+                    }
+                }
+                // Loaderスレッドが寝ていると破棄が溜まり続けるので起こす
+                m_LoadRequestCV.notify_one();
+            }
+        }
+
+        if (!m_Scene.HasStreamingDistance)
+        {
+            return;
+        }
+
+        // --- Loaderスレッドが仕上げたものを取り込む -----------------------------------------
+        {
+            std::vector<StreamingLoaded> loaded;
+            {
+                std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
+                loaded.swap(m_StreamingLoaded);
+            }
+            // 再構築中はLoaderスレッドが m_Scene を走査しているので差し込まない
+            if (m_RaytracingRebuildInFlight.load(std::memory_order_acquire))
+            {
+                std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
+                for (StreamingLoaded& item : loaded)
+                {
+                    m_StreamingLoaded.push_back(std::move(item));
+                }
+                loaded.clear();
+            }
+
+            for (StreamingLoaded& item : loaded)
+            {
+                m_StreamingInFlight.erase(item.Path);
+                // 【古い世代は捨てる】シーンを切り替えた後に前のシーンのモデルが届くことがある
+                if (item.Generation != m_StreamingGeneration || !item.Model)
+                {
+                    continue;
+                }
+                ++m_StreamingLoadedTotal;
+                RequestRaytracingRebuild();
+                // 同じパスを指すすべての段へ差し込む(モデル共有。2-1と同じ考え方)
+                auto shared = std::shared_ptr<const Assets::Model>(item.Model);
+                m_Scene.ModelCache[item.Path] = std::move(item.Model);
+                for (Assets::ModelInstance& instance : m_Scene.Instances)
+                {
+                    for (size_t level = 0; level < instance.ModelPaths.size(); ++level)
+                    {
+                        if (instance.ModelPaths[level] != item.Path)
+                        {
+                            continue;
+                        }
+                        if (level == 0)
+                        {
+                            instance.Model = shared;
+                        }
+                        else
+                        {
+                            instance.LODModels[level - 1] = shared;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- 距離を見て、足りないものを近い順に発注する -------------------------------------
+        //
+        // 【段ごとに要否が違う】いま選ばれている段だけを読めばよい。遠くて粗い段しか使わない
+        // タイルの詳細な段まで読むと、ストリーミングの意味が無くなる
+        struct Candidate
+        {
+            float DistanceSq = 0.0f;
+            const std::wstring* Path = nullptr;
+        };
+        std::vector<Candidate> candidates;
+
+        // 破棄しない(=まだ要る)パスの集合。読み込みの判定より広い距離で集める
+        std::unordered_set<std::wstring> neededPaths;
+
+        const float limit = m_Scene.StreamingDistance;
+        const float limitSq = limit * limit;
+        // 【破棄は読み込みより遠くで行う】同じ距離でやると、境界上でカメラが揺れるたびに
+        // 読み込みと破棄が交互に起きて、ディスクアクセスが止まらなくなる。
+        // 1.25倍の不感帯を置く(モデルLODのヒステリシスと同じ考え方)
+        const float evictLimitSq = (limit * 1.25f) * (limit * 1.25f);
+        const float cameraXYZ[3] = { cameraPosition.x, cameraPosition.y, cameraPosition.z };
+
+        for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+        {
+            Assets::ModelInstance& instance = m_Scene.Instances[i];
+            if (instance.ModelPaths.empty())
+            {
+                continue;
+            }
+
+            // 常駐マップ(StreamingPanel)が色分けに使う3値。
+            // 【距離で抜ける前に書く】範囲外のインスタンスもここを通らなければ
+            // 古い値が残り、破棄されたものが「常駐」の色のまま地図に出る
+            const uint32_t level = (i < m_InstanceLODStates.size()) ? m_InstanceLODStates[i].CurrentLOD : 0u;
+            const size_t levelIndex = (level < instance.ModelPaths.size()) ? level : 0u;
+            instance.Residency =
+                instance.IsLODLoaded(levelIndex)                             ? Assets::ResidencyState::Loaded
+                : (m_StreamingInFlight.count(instance.ModelPaths[levelIndex]) != 0)
+                                                                            ? Assets::ResidencyState::Loading
+                                                                            : Assets::ResidencyState::Unloaded;
+
+            // モデルLODと同じ「AABBの最近接点まで」の距離
+            float squaredDistance = 0.0f;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float outside = (std::max)(
+                    { instance.WorldBoundsMin[axis] - cameraXYZ[axis],
+                      cameraXYZ[axis] - instance.WorldBoundsMax[axis], 0.0f });
+                squaredDistance += outside * outside;
+            }
+            // 破棄の不感帯(1.25倍)の内側にあるものは、読み込み対象でなくても捨てない
+            if (squaredDistance <= evictLimitSq)
+            {
+                for (const std::wstring& path : instance.ModelPaths)
+                {
+                    neededPaths.insert(path);
+                }
+            }
+
+            if (squaredDistance > limitSq)
+            {
+                continue;
+            }
+            ++m_StreamingTargetCount;
+
+            if (instance.IsLODLoaded(levelIndex))
+            {
+                ++m_StreamingResidentCount;
+                continue;
+            }
+
+            const std::wstring& path = instance.ModelPaths[levelIndex];
+            if (m_StreamingInFlight.count(path) != 0)
+            {
+                continue;
+            }
+            candidates.push_back({ squaredDistance, &path });
+        }
+
+        // --- 遠ざかったものを破棄する ---------------------------------------------------------
+        //
+        // 【モデルは共有されている】同じ.kmodelを複数のインスタンスが指しうるので、
+        // 「どれか1つでもまだ要る」なら捨てられない。インスタンス単位ではなく
+        // ModelCacheをパス単位で見て、needed に無いものだけを外す
+        // 再構築中は破棄しない(理由は上の差し込みと同じ)
+        if (!m_RaytracingRebuildInFlight.load(std::memory_order_acquire))
+        {
+            std::vector<std::wstring> evictPaths;
+            for (const auto& entry : m_Scene.ModelCache)
+            {
+                if (neededPaths.count(entry.first) == 0)
+                {
+                    evictPaths.push_back(entry.first);
+                }
+            }
+
+            for (const std::wstring& path : evictPaths)
+            {
+                // インスタンス側の参照を外す。描画ループは未読み込みとして飛ばす
+                for (Assets::ModelInstance& instance : m_Scene.Instances)
+                {
+                    for (size_t level = 0; level < instance.ModelPaths.size(); ++level)
+                    {
+                        if (instance.ModelPaths[level] != path)
+                        {
+                            continue;
+                        }
+                        if (level == 0)
+                        {
+                            instance.Model.reset();
+                        }
+                        else
+                        {
+                            instance.LODModels[level - 1].reset();
+                        }
+                    }
+                }
+
+                auto cached = m_Scene.ModelCache.find(path);
+                if (cached == m_Scene.ModelCache.end())
+                {
+                    continue;
+                }
+                // 実体はここで消さず、GPUが読み終わるまで寝かせる
+                m_StreamingPendingRelease.push_back(
+                    { std::move(cached->second), kStreamingReleaseDelayFrames });
+                m_Scene.ModelCache.erase(cached);
+                ++m_StreamingEvictedTotal;
+                RequestRaytracingRebuild();
+            }
+        }
+
+        if (candidates.empty())
+        {
+            return;
+        }
+
+        // 近い順に発注する。手前のものから絵が埋まるので、遠くの読み込みで手前が待たされない
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Candidate& a, const Candidate& b) { return a.DistanceSq < b.DistanceSq; });
+
+        // 【1フレームの発注数に上限を置く】Loaderスレッドは1本で、シーン切り替えもここを通る。
+        // 際限なく積むと、切り替え要求が数百件の読み込みの後ろで待たされる
+        constexpr size_t kMaxStreamingRequestsPerFrame = 8;
+        const size_t requestCount = (std::min)(candidates.size(), kMaxStreamingRequestsPerFrame);
+
+        {
+            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
+            for (size_t i = 0; i < requestCount; ++i)
+            {
+                m_StreamingRequests.push_back({ *candidates[i].Path, m_StreamingGeneration });
+                m_StreamingInFlight.insert(*candidates[i].Path);
+            }
+        }
+        m_LoadRequestCV.notify_one();
+    }
+
+    uint32_t KurenaiEngine3D::GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const
+    {
+        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+        // ストリーミング中はまだ読み込まれていない段がある。nullptrの段は描画対象から外す
+        const auto modelAt = [&instance](uint32_t level) -> const Assets::Model*
+        {
+            return (level == 0) ? instance.Model.get() : instance.LODModels[level - 1].get();
+        };
+
+        if (instanceIndex >= m_InstanceLODStates.size())
+        {
+            outDraws[0] = { instance.Model.get(), 1.0f };
+            return instance.Model ? 1u : 0u;
+        }
+
+        const InstanceLODState& state = m_InstanceLODStates[instanceIndex];
+        if (state.FadeT >= 1.0f)
+        {
+            outDraws[0] = { modelAt(state.CurrentLOD), 1.0f };
+            return outDraws[0].Model ? 1u : 0u;
+        }
+
+        // 切り替え「先」は +FadeT、「元」は -FadeT。同じノイズをしきい値の両側で分け合うので、
+        // 2段が同じ画素に重ならず(Zファイティングにならず)、隙間もできない。
+        //
+        // 【片方が未読み込みなら、もう片方を全画素で描く】ディザで分け合う相手がいないのに
+        // 半分だけ描くと、その間だけモデルに穴が開く
+        const Assets::Model* const toModel = modelAt(state.CurrentLOD);
+        const Assets::Model* const fromModel = modelAt(state.PreviousLOD);
+        if (!toModel || !fromModel)
+        {
+            const Assets::Model* const only = toModel ? toModel : fromModel;
+            outDraws[0] = { only, 1.0f };
+            return only ? 1u : 0u;
+        }
+        outDraws[0] = { toModel, state.FadeT };
+        outDraws[1] = { fromModel, -state.FadeT };
+        return 2;
+    }
+
+    const Assets::Model* KurenaiEngine3D::GetCurrentLOD(size_t instanceIndex) const
+    {
+        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+        const uint32_t level = (instanceIndex < m_InstanceLODStates.size())
+            ? m_InstanceLODStates[instanceIndex].CurrentLOD
+            : 0u;
+        // ストリーミング中はまだ読み込まれていないことがある。nullptrを返し、呼び出し側が飛ばす
+        return (level == 0) ? instance.Model.get() : instance.LODModels[level - 1].get();
+    }
+
+    const Assets::Model* KurenaiEngine3D::GetCoarsestLOD(const Assets::ModelInstance& instance) const
+    {
+        // 【影と間接光は常に最も粗い段】どちらもテクスチャを読まないので、詳細な段を描く意味が無い。
+        // PLATEAUではLOD2(約1715メッシュ)がLOD1(1メッシュ)になるため、
+        // シャドウのドローコールが4カスケード分まとめて桁で減る
+        return instance.LODModels.empty() ? instance.Model.get() : instance.LODModels.back().get();
     }
 
     void KurenaiEngine3D::RetireAssets(RetiredAssets&& retired)
@@ -4158,18 +4967,132 @@ namespace Kurenai
             // retiredのデストラクタでGPUリソースが解放される
         };
 
+        // ストリーミングで遠ざかったモデルの破棄。Renderスレッドが
+        // kStreamingReleaseDelayFrames フレーム寝かせたものだけがここへ来る
+        // (RetiredAssetsと違いWaitForGPUIdleは通っていない。遅延がその代わり)
+        const auto destroyStreamedModels = [this]()
+        {
+            std::vector<std::shared_ptr<Assets::Model>> release;
+            {
+                std::lock_guard<std::mutex> lock(m_StreamingReleaseMutex);
+                release.swap(m_StreamingRelease);
+            }
+            // releaseのデストラクタでGPUリソースが解放される
+
+            // 差し替えられた旧RaytracingSceneも同じ理由でこのスレッドで解放する
+            // (BLAS/TLASと統合バッファのディスクリプタはアセット用ヒープから取られている)
+            std::vector<std::unique_ptr<Assets::RaytracingScene>> scenes;
+            {
+                std::lock_guard<std::mutex> lock(m_RaytracingReleaseMutex);
+                scenes.swap(m_RaytracingRelease);
+            }
+        };
+
         for (;;)
         {
             int sceneIndex = -1;
+            std::vector<StreamingRequest> streamingRequests;
+            bool raytracingRebuild = false;
             {
                 std::unique_lock<std::mutex> lock(m_LoadRequestMutex);
-                m_LoadRequestCV.wait(lock, [this] { return m_LoadRequestSceneIndex >= 0 || m_StopLoaderThread; });
+                m_LoadRequestCV.wait(lock, [this] {
+                    if (m_LoadRequestSceneIndex >= 0 || !m_StreamingRequests.empty() ||
+                        m_RaytracingRebuildRequested || m_StopLoaderThread)
+                    {
+                        return true;
+                    }
+                    // 破棄だけが積まれている場合も起きる(読み込みが止まっている間に
+                    // 破棄が溜まり続けると、遠ざかったモデルのVRAMが解放されない)
+                    {
+                        std::lock_guard<std::mutex> releaseLock(m_StreamingReleaseMutex);
+                        if (!m_StreamingRelease.empty()) { return true; }
+                    }
+                    std::lock_guard<std::mutex> rtLock(m_RaytracingReleaseMutex);
+                    return !m_RaytracingRelease.empty();
+                });
                 if (m_StopLoaderThread && m_LoadRequestSceneIndex < 0)
                 {
                     break;
                 }
                 sceneIndex = m_LoadRequestSceneIndex;
                 m_LoadRequestSceneIndex = -1;
+                // 【シーン切り替えが来たら、溜まっているストリーミング発注は捨てる】
+                // それらは切り替え前のシーンのもので、読んでも差し込む先が無い
+                if (sceneIndex >= 0)
+                {
+                    m_StreamingRequests.clear();
+                    // 切り替え前のシーンへの再構築要求は無意味。
+                    // 【フラグを降ろすのを忘れない】立てたままだとRenderスレッドの
+                    // 差し込みと破棄が永久に止まる
+                    m_RaytracingRebuildRequested = false;
+                    m_RaytracingRebuildInFlight.store(false, std::memory_order_release);
+                }
+                else
+                {
+                    streamingRequests.swap(m_StreamingRequests);
+                    raytracingRebuild = m_RaytracingRebuildRequested;
+                    m_RaytracingRebuildRequested = false;
+                }
+            }
+
+            // 破棄は毎ループ引き取る。読み込みより先に行うことでVRAMのピークを下げる
+            destroyStreamedModels();
+
+            // --- ストリーミングの読み込み ---------------------------------------------------
+            if (!streamingRequests.empty())
+            {
+                if (!m_StreamingTexturePool)
+                {
+                    m_StreamingTexturePool = std::make_unique<Assets::SharedTexturePool>();
+                }
+                for (const StreamingRequest& request : streamingRequests)
+                {
+                    std::shared_ptr<Assets::Model> model;
+                    try
+                    {
+                        model = std::make_shared<Assets::Model>(
+                            Assets::LoadModel(*m_Device, request.Path, m_StreamingTexturePool.get()));
+                    }
+                    catch (const std::exception& error)
+                    {
+                        // 1件の失敗でストリーミング全体を止めない。そのモデルだけが出ないまま続く
+                        Core::Logger::Error(
+                            "KurenaiEngine3D",
+                            "ストリーミングの読み込みに失敗しました: " + WideToUtf8(request.Path) + " (" +
+                                error.what() + ")");
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
+                        // 失敗しても空のまま返す。Renderスレッドが「発注中」から外せないと
+                        // 同じものを永久に再発注し続ける
+                        m_StreamingLoaded.push_back({ request.Path, std::move(model), request.Generation });
+                    }
+                }
+                // 【ここでcontinueしない】読み込みと再構築が同時に積まれることがある。
+                // 抜けると再構築要求だけが失われ、m_RaytracingRebuildInFlightが立ったまま戻らない
+            }
+
+            // --- レイトレーシングの作り直し(Loaderスレッドで行う) ---------------------------
+            if (raytracingRebuild)
+            {
+                const auto startTime = std::chrono::steady_clock::now();
+                auto rebuilt = std::make_unique<Assets::RaytracingScene>();
+                if (rebuilt->Build(*m_Device, m_Scene))
+                {
+                    const double elapsedMs =
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startTime).count();
+                    std::lock_guard<std::mutex> lock(m_RaytracingRebuiltMutex);
+                    m_RaytracingRebuildLastMs = elapsedMs;
+                    m_RaytracingRebuilt = std::move(rebuilt);
+                    m_RaytracingRebuiltGeneration = m_StreamingGeneration;
+                }
+                // 【成否にかかわらず必ず降ろす】
+                m_RaytracingRebuildInFlight.store(false, std::memory_order_release);
+            }
+
+            if (sceneIndex < 0)
+            {
+                continue;
             }
 
             // 先に破棄を済ませてから読み込む(Renderスレッドは手放す前にWaitForGPUIdle済み)。
@@ -4200,6 +5123,13 @@ namespace Kurenai
         // 停止時に残っている破棄依頼をこのスレッドで片付ける
         destroyRetiredAssets();
 
+        // 破棄待ちの残りもここで片付ける
+        destroyStreamedModels();
+
+        // ストリーミング用の共有テクスチャも、確保したのと同じLoaderスレッドで解放する
+        // (アセット用ディスクリプタヒープはロックを持たない。RetiredAssetsのコメント参照)
+        m_StreamingTexturePool.reset();
+
         if (SUCCEEDED(comResult))
         {
             CoUninitialize();
@@ -4221,9 +5151,39 @@ namespace Kurenai
         auto loaded = std::make_unique<LoadedScene>();
         loaded->SceneIndex = sceneIndex;
 
+        // 読み込み進捗。UIの進捗ウィンドウ(UIManager)がatomicを読んで出す。
+        //
+        // 【ログにも出す】UIを開いていない・F1で隠している・ヘッドレスに近い確認では
+        // 画面の表示が見えない。一定間隔でログへ落としておけば後からでも追える。
+        // 1件ごとに出すと767行になるため、間隔を空けて間引く
+        m_SceneLoadProgressLoaded.store(0, std::memory_order_relaxed);
+        m_SceneLoadProgressTotal.store(0, std::memory_order_relaxed);
+        const std::wstring& progressSceneFileName = m_SceneFilePaths[sceneIndex];
+        auto lastProgressLogTime = std::chrono::steady_clock::now();
+        const auto onProgress =
+            [this, &lastProgressLogTime, &progressSceneFileName](size_t loadedModels, size_t totalModels)
+        {
+            m_SceneLoadProgressLoaded.store(static_cast<uint32_t>(loadedModels), std::memory_order_relaxed);
+            m_SceneLoadProgressTotal.store(static_cast<uint32_t>(totalModels), std::memory_order_relaxed);
+
+            const auto now = std::chrono::steady_clock::now();
+            const bool isFirstOrLast = (loadedModels == 0) || (loadedModels == totalModels);
+            const bool intervalElapsed =
+                std::chrono::duration<float>(now - lastProgressLogTime).count() >= kSceneLoadProgressLogIntervalSeconds;
+            if (!isFirstOrLast && !intervalElapsed)
+            {
+                return;
+            }
+            lastProgressLogTime = now;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "シーン読み込み: " + std::to_string(loadedModels) + " / " + std::to_string(totalModels) +
+                    " モデル (" + WideToUtf8(progressSceneFileName) + ")");
+        };
+
         try
         {
-            loaded->Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory);
+            loaded->Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory, onProgress);
         }
         catch (const std::exception& e)
         {
@@ -4299,9 +5259,24 @@ namespace Kurenai
         // レイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの統合バッファを構築する。
         // 非対応環境(DX11、Tier 1.1未満のアダプタ)では何も作らず、描画側は従来の
         // スクリーンスペース手法のまま動く。構築に失敗しても描画は継続する
+        //
+        // 【ストリーミング中のシーンでは構築しない】読み込み時点でモデルの実体が1つも無く、
+        // BLASを作る材料が無い。常駐が増減するたびにTLASと統合バッファを作り直す仕組みは
+        // まだ入れていないため、いまは構築を見送って理由をログに残す
+        // (ストリーミングは既定で無効なので、既存シーンのレイトレーシングは何も変わらない)
         if (m_Device->SupportsRaytracing())
         {
-            loaded->RaytracingScene.Build(*m_Device, loaded->Scene);
+            if (loaded->Scene.HasStreamingDistance)
+            {
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "ストリーミング対象のシーンでは、モデルが常駐してからレイトレーシングの"
+                    "高速化構造を構築します(常駐が変わるたびに作り直します)");
+            }
+            else
+            {
+                loaded->RaytracingScene.Build(*m_Device, loaded->Scene);
+            }
         }
 
         loaded->Camera = ComputeInitialCamera(loaded->Scene);
@@ -4319,6 +5294,35 @@ namespace Kurenai
         m_Scene = std::move(loaded.Scene);
         m_RaytracingScene = std::move(loaded.RaytracingScene);
         m_CurrentSceneIndex = loaded.SceneIndex;
+
+        // ストリーミングの状態もシーンに紐づく。世代を進めることで、切り替え前に発注して
+        // まだ届いていない完成品を確実に捨てる(そのまま差し込むと別シーンのモデルが混ざる)
+        ++m_StreamingGeneration;
+        m_StreamingInFlight.clear();
+        m_RaytracingRebuildPending = false;
+        {
+            // 【ここでresetしてはいけない】Renderスレッドでの解放になる。
+            // 受け取り待ちの完成品も、破棄はLoaderスレッドへ回す
+            std::unique_ptr<Assets::RaytracingScene> stale;
+            {
+                std::lock_guard<std::mutex> lock(m_RaytracingRebuiltMutex);
+                stale = std::move(m_RaytracingRebuilt);
+            }
+            if (stale)
+            {
+                std::lock_guard<std::mutex> lock(m_RaytracingReleaseMutex);
+                m_RaytracingRelease.push_back(std::move(stale));
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
+            m_StreamingLoaded.clear();
+        }
+
+        // モデルLODの状態はシーンに紐づくので必ず捨てる。
+        // 【要素数の一致だけを見て使い回してはいけない】たまたま同じインスタンス数の
+        // シーンへ切り替えたときに、前のシーンの段とフェード途中の状態が残る
+        m_InstanceLODStates.assign(m_Scene.Instances.size(), InstanceLODState{});
 
         // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
@@ -4677,7 +5681,13 @@ namespace Kurenai
         uint32_t opaqueMeshCount = 0;
         for (const auto& instance : m_Scene.Instances)
         {
-            for (const auto& mesh : instance.Model.Meshes)
+            // 【7545行目のDDGIラスタ経路と同じ段を数えること】ここの数が定数バッファリングの
+            // 予算(ClampDDGIProbesPerFrameToConstantRing)を決めるため、実際に描く段と食い違うと
+            // 予算の見積もりが狂う
+            // ストリーミング中で未読み込みなら描かない
+            const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+            if (!coarsestModel) { continue; }
+            for (const auto& mesh : coarsestModel->Meshes)
             {
                 if (!mesh.IsTransparent)
                 {
@@ -4971,6 +5981,29 @@ namespace Kurenai
         // 半径を伸ばすほど画面上のサンプル間隔が粗くなって破綻するが、RTには
         // その制約が無く、部屋の広さ程度まで伸ばしたほうがバウンス光が正しく回る
         m_RTAOMaxDistance = std::clamp(diagonal * 0.03f, 0.1f, 10.0f);
+
+        // カメラの移動速度。.ksceneが[Scene]CameraSpeedを持っていればそれを使い、
+        // 無ければシーン対角から決める。
+        //
+        // 【比例と下限の2段】基準はEmeraldSquare(対角344.6m)で従来どおりの5 m/sになる比例式。
+        // それより小さいシーンは従来の5 m/sで既に使いやすいので下限で据え置く
+        // (比例だけだとSponza(対角37.1m)が0.54 m/sになり、逆に遅くなる)。
+        // 根拠と実測はEngineDefaults.hのCameraSpeed一式のコメントに置いてある
+        m_CameraSpeed = m_Scene.HasCameraSpeed
+            ? m_Scene.CameraSpeed
+            : (std::max)(
+                  Defaults::CameraSpeedMin,
+                  diagonal / Defaults::CameraSpeedReferenceDiagonal * Defaults::CameraSpeed);
+
+        // 【必ずログに出す】速度は絵に写らないため、「効いていない」と「効いているが
+        // 想定と違う値になっている」を見た目では区別できない。シーンごとの実効値を残しておく
+        char cameraSpeedText[192];
+        std::snprintf(
+            cameraSpeedText, sizeof(cameraSpeedText),
+            "カメラ移動速度: %.2f m/s (Shift時 %.2f m/s) [シーン対角 %.1f m / %s]",
+            m_CameraSpeed, m_CameraSpeed * Defaults::CameraSpeedShiftMultiplier, diagonal,
+            m_Scene.HasCameraSpeed ? "[Scene]CameraSpeedの指定" : "対角からの自動決定");
+        Core::Logger::Info("KurenaiEngine3D", cameraSpeedText);
     }
 
     // 歩き回る視点のカメラの近平面を求める。シーン対角に比例させつつ、上限で頭打ちにする。
@@ -5491,6 +6524,13 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
         m_FrameStatsCullTestedSum += m_FrustumCullTested;
         m_FrameStatsCullCulledSum += m_FrustumCullCulled;
+        m_FrameStatsLODSwitchSum += m_LODSwitchCount;
+        m_FrameStatsLODFadingSum += m_LODFadingCount;
+        m_FrameStatsMeshCullTestedSum += m_MeshCullTested;
+        m_FrameStatsMeshCullCulledSum += m_MeshCullCulled;
+        m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
+        m_FrameStatsDrawCallsShadowSum += m_DrawCallsShadow;
+        m_FrameStatsDrawCallsDepthPrepassSum += m_DrawCallsDepthPrepass;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -5585,20 +6625,92 @@ namespace Kurenai
         }
 
         // フラスタムカリングの効き。「間引いた数が0」は、判定式が常に通しているのか
-        // 本当に全部が視界内なのかを区別できないため、テストした数と併せて出す
-        if (m_FrameStatsCullTestedSum > 0 && m_FrameStatsFrameCount > 0)
+        // 本当に全部が視界内なのかを区別できないため、テストした数と併せて出す。
+        //
+        // 【モデル単位とメッシュ単位を別の行にする】分母も、効くシーンも違う。
+        // モデル単位は.kmodelを多数並べるシーンで効き、1モデルに数千メッシュを持つ
+        // アセットでは1つも間引けない。メッシュ単位はその逆。合算すると、どちらが効いたのか
+        // ―― あるいは片方が一度も実行されていないのか ―― が読めなくなる
+        const auto logCullStats = [this](const char* label, uint64_t testedSum, uint64_t culledSum)
         {
-            const double testedPerFrame = static_cast<double>(m_FrameStatsCullTestedSum) / m_FrameStatsFrameCount;
-            const double culledPerFrame = static_cast<double>(m_FrameStatsCullCulledSum) / m_FrameStatsFrameCount;
-            const double ratio = 100.0 * static_cast<double>(m_FrameStatsCullCulledSum)
-                / static_cast<double>(m_FrameStatsCullTestedSum);
+            if (testedSum == 0 || m_FrameStatsFrameCount == 0)
+            {
+                // 判定が1回も走っていない。「間引き0」と区別が付くよう、行そのものを出さない
+                return;
+            }
+            const double testedPerFrame = static_cast<double>(testedSum) / m_FrameStatsFrameCount;
+            const double culledPerFrame = static_cast<double>(culledSum) / m_FrameStatsFrameCount;
+            const double ratio = 100.0 * static_cast<double>(culledSum) / static_cast<double>(testedSum);
 
-            char cullText[192];
+            char cullText[224];
             std::snprintf(
-                cullText, sizeof(cullText),
-                "  フラスタムカリング: 判定 %.1f / 間引き %.1f (%.1f%%) [1フレームあたり・全パス合計]",
-                testedPerFrame, culledPerFrame, ratio);
+                cullText, sizeof(cullText), "  %s: 判定 %.1f / 間引き %.1f (%.1f%%) [1フレームあたり・全パス合計]",
+                label, testedPerFrame, culledPerFrame, ratio);
             Core::Logger::Info("Perf", cullText);
+        };
+        logCullStats("フラスタムカリング(モデル単位)", m_FrameStatsCullTestedSum, m_FrameStatsCullCulledSum);
+        logCullStats("フラスタムカリング(メッシュ単位)", m_FrameStatsMeshCullTestedSum, m_FrameStatsMeshCullCulledSum);
+
+        // モデルLOD。【切り替え0回なら一度も効いていない】距離のしきい値が実際の
+        // カメラの動く範囲から外れているか、そもそもLODPathが指定されていない
+        {
+            char lodText[192];
+            std::snprintf(
+                lodText, sizeof(lodText),
+                "  モデルLOD: 切り替え %llu回 / フェード %llu インスタンス×フレーム [いずれも集計期間の合計]",
+                static_cast<unsigned long long>(m_FrameStatsLODSwitchSum),
+                static_cast<unsigned long long>(m_FrameStatsLODFadingSum));
+            Core::Logger::Info("Perf", lodText);
+        }
+
+        // モデルのストリーミング。【常駐0や読み込み0なら効いていない】
+        // 範囲内なのに常駐していないものが残り続けるなら、発注か受け取りのどこかで詰まっている
+        if (m_Scene.HasStreamingDistance)
+        {
+            char streamText[192];
+            std::snprintf(
+                streamText, sizeof(streamText),
+                "  ストリーミング: 常駐 %u / 範囲内 %u (距離 %.0fm) / 読み込み累計 %llu件 / 破棄累計 %llu件"
+                " / RT再構築 %llu回(直近 %.1fms)",
+                m_StreamingResidentCount, m_StreamingTargetCount, m_Scene.StreamingDistance,
+                static_cast<unsigned long long>(m_StreamingLoadedTotal),
+                static_cast<unsigned long long>(m_StreamingEvictedTotal),
+                static_cast<unsigned long long>(m_RaytracingRebuildCount), m_RaytracingRebuildLastMs);
+            Core::Logger::Info("Perf", streamText);
+        }
+
+        // パス別のドローコール数。**「G-Bufferは減ったがシャドウは減っていない」**のような
+        // 片手落ちは合計値では見えない(シャドウはカスケード4回ぶんが積み上がる)
+        if (m_FrameStatsFrameCount > 0)
+        {
+            const double frames = static_cast<double>(m_FrameStatsFrameCount);
+            char drawText[224];
+            std::snprintf(
+                drawText, sizeof(drawText),
+                "  ドローコール: G-Buffer %.1f / シャドウ %.1f (4カスケード計) / 深度プリパス %.1f "
+                "[1フレームあたり]",
+                static_cast<double>(m_FrameStatsDrawCallsGBufferSum) / frames,
+                static_cast<double>(m_FrameStatsDrawCallsShadowSum) / frames,
+                static_cast<double>(m_FrameStatsDrawCallsDepthPrepassSum) / frames);
+            Core::Logger::Info("Perf", drawText);
+        }
+
+        // bindless区画の使用状況。**満杯になっても例外は飛ばず、エラーログ1行と
+        // kInvalidBindlessIndex(=白1x1へ落ちる)しか残らない**ため、上限へ近づいていることを
+        // 定期的に見えるようにしておく(IRHIDevice::GetBindlessUsedCountのコメント参照)
+        if (m_Device)
+        {
+            const uint32_t bindlessCapacity = m_Device->GetBindlessCapacity();
+            if (bindlessCapacity > 0)
+            {
+                const uint32_t bindlessUsed = m_Device->GetBindlessUsedCount();
+                char bindlessText[160];
+                std::snprintf(
+                    bindlessText, sizeof(bindlessText), "  bindless: %u / %u ディスクリプタ (%.1f%%)",
+                    bindlessUsed, bindlessCapacity,
+                    100.0 * static_cast<double>(bindlessUsed) / static_cast<double>(bindlessCapacity));
+                Core::Logger::Info("Perf", bindlessText);
+            }
         }
 
         // メッシュレット単位のカリング(増幅シェーダー)の効き。上のCPU側とは粒度も判定の種類も
@@ -5633,6 +6745,13 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = 0.0f;
         m_FrameStatsCullTestedSum = 0;
         m_FrameStatsCullCulledSum = 0;
+        m_FrameStatsLODSwitchSum = 0;
+        m_FrameStatsLODFadingSum = 0;
+        m_FrameStatsMeshCullTestedSum = 0;
+        m_FrameStatsMeshCullCulledSum = 0;
+        m_FrameStatsDrawCallsGBufferSum = 0;
+        m_FrameStatsDrawCallsShadowSum = 0;
+        m_FrameStatsDrawCallsDepthPrepassSum = 0;
         m_FrameStatsMeshletTestedSum = 0;
         m_FrameStatsMeshletFrustumCulledSum = 0;
         m_FrameStatsMeshletOcclusionCulledSum = 0;
@@ -5723,7 +6842,12 @@ namespace Kurenai
     {
         // メッセージベースの入力API(IsKeyDown)を使う。GetAsyncKeyStateと異なりウィンドウが
         // フォーカスを失っている間は反応せず、PostMessageによるテスト自動化とも整合する
-        const float moveSpeed = IsKeyDown(VK_SHIFT) ? 20.0f : 5.0f;
+        //
+        // 【速度は即値ではなくシーンから決まる】m_CameraSpeedは.ksceneの[Scene]CameraSpeed、
+        // 無ければシーン対角から自動で決まる(ResetSceneDependentParams)。Shiftの倍率は
+        // 従来の 20/5 = 4倍をそのまま保つ
+        const float moveSpeed =
+            m_CameraSpeed * (IsKeyDown(VK_SHIFT) ? Defaults::CameraSpeedShiftMultiplier : 1.0f);
         const float moveAmount = moveSpeed * deltaTime;
 
         const DirectX::XMFLOAT3 forward = m_Camera.GetForward();
@@ -5831,9 +6955,34 @@ namespace Kurenai
 
     void KurenaiEngine3D::Render(const FrameState& frameState)
     {
-        // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる
+        // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる。
+        // モデル単位とメッシュ単位は別のカウンタで、混ぜない(KurenaiEngine3D.h参照)。
+        //
+        // 【0に戻す前に前フレームの値を控える】ドローコール数と同じ理由で、UIパネルは
+        // Renderの外で描かれるため現在のカウンタを読むと必ずリセット直後の0になる
+        m_FrustumCullTestedLastFrame = m_FrustumCullTested;
+        m_FrustumCullCulledLastFrame = m_FrustumCullCulled;
+        m_MeshCullTestedLastFrame = m_MeshCullTested;
+        m_MeshCullCulledLastFrame = m_MeshCullCulled;
         m_FrustumCullTested = 0;
         m_FrustumCullCulled = 0;
+        m_MeshCullTested = 0;
+        m_MeshCullCulled = 0;
+        // ドローコール数も同じくフレーム単位。各パスが自分のカウンタを積み上げる。
+        //
+        // 【0に戻す前に前フレームの値を控える】UIパネルはRenderの外で描かれるため、
+        // 現在のカウンタを読むと必ずリセット直後の0になる(実際にそう表示されていた)。
+        // 完成した最後のフレームの値を別に持たせる
+        m_DrawCallsGBufferLastFrame = m_DrawCallsGBuffer;
+        m_DrawCallsShadowLastFrame = m_DrawCallsShadow;
+        m_DrawCallsDepthPrepassLastFrame = m_DrawCallsDepthPrepass;
+        m_DrawCallsGBuffer = 0;
+        m_DrawCallsShadow = 0;
+        m_DrawCallsDepthPrepass = 0;
+        // bindless区画の使用数を控える(UIパネルは m_Device へ直接触れないため。
+        // m_MeshShaderAvailable と同じ扱い)。登録はシーン読み込み時にしか起きないので、
+        // フレームごとに1回問い合わせるだけで足りる
+        m_BindlessUsedCount = m_Device ? m_Device->GetBindlessUsedCount() : 0;
 
         // WM_SIZE(Updateスレッド)が記録しておいたリサイズ要求を、スワップチェーンを実際に使う
         // このスレッドで反映する。このフレームのGPUコマンドをまだ1つも積んでいないこの位置で
@@ -6078,6 +7227,19 @@ namespace Kurenai
         }
 
         const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
+
+        // モデルLODの段を、レンダーグラフを組む前にこの1回だけ決める。
+        // 【パスごとに測り直してはいけない】深度プリパスとG-Bufferが違う段を選ぶと、
+        // プリパスが深度を書いた画素をG-Bufferが描かず、画面に穴が開く。
+        // G-Bufferパスのラムダはそもそもカメラ位置をキャプチャしていない(半透明パスだけが持つ)ので、
+        // ここで決めてm_InstanceLODStatesへ置く形にしてある
+        UpdateModelLOD(cameraPosition, m_RenderDeltaTime);
+
+        // モデルのストリーミング。【LODの後に呼ぶ】どの段を読むかは選ばれた段で決まる
+        UpdateModelStreaming(cameraPosition);
+
+        // レイトレーシングを常駐の増減へ追随させる(ストリーミング時のみ働く)
+        UpdateRaytracingRebuild();
 
         // テクスチャの常駐ミップの目標を更新し、差のあるものをワーカーへ積む。
         // 実際の差し替えは次フレーム以降のCommitReady(このフレームの先頭で呼んだもの)で確定する。
@@ -7208,17 +8370,29 @@ namespace Kurenai
                         // ミラーリングされたインスタンスは表裏が入れ替わるため、GBufferパスと同じく
                         // 表裏判定を反転したパイプラインへ切り替える(切り替え時はb0も張り直す)
                         RHI::IRHIPipelineState* currentPipelineState = m_ShadowPipelineState.get();
-                        const auto bindPipelineState = [&](bool mirrored)
+                        const auto bindShadowPipelineState = [&](RHI::IRHIPipelineState* wanted)
                         {
-                            RHI::IRHIPipelineState* const wanted =
-                                mirrored ? m_ShadowPipelineStateMirrored.get() : m_ShadowPipelineState.get();
-                            if (wanted == currentPipelineState)
+                            if (!wanted || wanted == currentPipelineState)
                             {
                                 return;
                             }
                             cmd->SetPipelineState(wanted);
                             cmd->SetConstantBuffer(0, m_ShadowCascadeConstantBuffer.get());
+                            // カットアウトのピクセルシェーダーがベースカラーを引くためサンプラーが要る。
+                            // 不透明用のPSOはピクセルシェーダーを持たないので無害
+                            cmd->SetSamplerSet(m_MaterialSamplers.get());
                             currentPipelineState = wanted;
+                        };
+                        // アルファカットアウトのマテリアルは切り抜きを反映して深度を書く。
+                        // PSOが作れていない場合は従来どおり切り抜きを見ない(影が板のままになる)
+                        const auto selectShadowPipelineState = [&](bool mirrored, bool cutout)
+                        {
+                            if (cutout && m_ShadowCutoutPipelineState)
+                            {
+                                return mirrored ? m_ShadowCutoutPipelineStateMirrored.get()
+                                                : m_ShadowCutoutPipelineState.get();
+                            }
+                            return mirrored ? m_ShadowPipelineStateMirrored.get() : m_ShadowPipelineState.get();
                         };
 
                         // このカスケードのライト正射影に対して視錐台カリングする。
@@ -7234,20 +8408,100 @@ namespace Kurenai
                                 continue;
                             }
 
-                            for (const auto& mesh : instance.Model.Meshes)
+                            // 【影は常に最も粗い段】影はテクスチャを読まないので詳細な段を描く
+                            // 意味が無い。ストリーミング中で未読み込みなら描かない
+                            const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                            if (!coarsestModel) { continue; }
+
+                            // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
+                            //
+                            // 【半透明は落とさない】このパスは従来から、BLENDのメッシュも
+                            // 実体のまま影を落としている。ここでふるい分けると影の出方が変わって
+                            // しまうため、意図的に何も落とさない(カットアウトの切り抜きだけは
+                            // 下で反映する ―― そちらは板ポリゴンの影が出る明確な不具合だった)。
+                            //
+                            // 【カットアウトを持つモデルだけ2回に分ける】不透明ぶんは
+                            // ピクセルシェーダーを持たないPSOで描きたいので、
+                            // 切り抜きが要るぶんとは同じドローにまとめられない
+                            if (m_ShadowMeshletPipelineState && ShouldUseModelMeshletPath(instance, *coarsestModel))
                             {
-                                bindPipelineState(instance.IsMirrored);
+                                constexpr uint32_t kAmplificationGroupSize = 32;
+                                const uint32_t groupCount =
+                                    (coarsestModel->TotalMeshletCount + kAmplificationGroupSize - 1)
+                                    / kAmplificationGroupSize;
+
+                                const auto dispatchShadowMeshlets =
+                                    [&](RHI::IRHIPipelineState* pipelineState, uint32_t rejectMask,
+                                        uint32_t requireMask)
+                                {
+                                    if (!pipelineState)
+                                    {
+                                        return;
+                                    }
+                                    bindShadowPipelineState(pipelineState);
+
+                                    const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                        instance, *coarsestModel, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask,
+                                        requireMask);
+                                    cmd->UpdateBuffer(
+                                        m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                    cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+                                    cmd->DispatchMesh(groupCount, 1, 1);
+                                    ++m_DrawCallsShadow;
+                                };
+
+                                // カットアウト用のPSOが作れていない場合は、従来どおり
+                                // 切り抜きを見ずに全部を1回で描く(影が板のままになる)
+                                const bool splitCutout =
+                                    coarsestModel->HasCutoutMaterial && m_ShadowMeshletCutoutPipelineState;
+
+                                dispatchShadowMeshlets(
+                                    instance.IsMirrored ? m_ShadowMeshletPipelineStateMirrored.get()
+                                                        : m_ShadowMeshletPipelineState.get(),
+                                    splitCutout ? Assets::kGpuMaterialFlagCutout : 0u, 0u);
+
+                                if (splitCutout)
+                                {
+                                    dispatchShadowMeshlets(
+                                        instance.IsMirrored ? m_ShadowMeshletCutoutPipelineStateMirrored.get()
+                                                            : m_ShadowMeshletCutoutPipelineState.get(),
+                                        0u, Assets::kGpuMaterialFlagCutout);
+                                }
+                                continue;
+                            }
+
+                            for (const auto& mesh : coarsestModel->Meshes)
+                            {
+                                // メッシュ単位のカリング。錐台はこのカスケードのライト正射影で、
+                                // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)
+                                if (!IsMeshVisibleWithStats(
+                                        m_MeshCullingEnabled, cascadeFrustum, instance, *coarsestModel, mesh, m_MeshCullTested,
+                                        m_MeshCullCulled))
+                                {
+                                    continue;
+                                }
+                                // アルファカットアウトは切り抜きを反映して深度を書く。
+                                // 見ないままだと、葉や柵のようにテクスチャで抜く前提の
+                                // マテリアルが板ポリゴンのまま影を落とす
+                                const bool cutout = mesh.AlphaCutoff > 0.0f;
+                                bindShadowPipelineState(selectShadowPipelineState(instance.IsMirrored, cutout));
 
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
                                 const ObjectConstants objectConstants =
-                                    MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                    MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                                if (cutout)
+                                {
+                                    cmd->SetTexture(0, mesh.BaseColorTexture);
+                                }
 
                                 cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                                 cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                                 cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                                ++m_DrawCallsShadow;
                             }
                         }
                     }
@@ -7340,7 +8594,11 @@ namespace Kurenai
                     continue;
                 }
 
-                for (const auto& mesh : instance.Model.Meshes)
+                // 【プローブも最も粗い段】焼き込むのは間接光で、細部は残らない
+                // ストリーミング中で未読み込みなら描かない
+                const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                if (!coarsestModel) { continue; }
+                for (const auto& mesh : coarsestModel->Meshes)
                 {
                     // 半透明メッシュはプローブへ焼かない。ProbeCapture.hlslは不透明として描くため、
                     // ガラスを焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに
@@ -7352,7 +8610,14 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                    // メッシュ単位のカリング。錐台はキューブの1面ぶん
+                    if (!IsMeshVisibleWithStats(
+                            m_MeshCullingEnabled, faceFrustum, instance, *coarsestModel, mesh, m_MeshCullTested, m_MeshCullCulled))
+                    {
+                        continue;
+                    }
+
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -7672,7 +8937,11 @@ namespace Kurenai
             // (DX12Buffer.h)ため、整合が取れるまでは入れないほうが安全
             for (const auto& instance : m_Scene.Instances)
             {
-                for (const auto& mesh : instance.Model.Meshes)
+                // 【DDGIも最も粗い段】理由は反射プローブと同じ
+                // ストリーミング中で未読み込みなら描かない
+                const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                if (!coarsestModel) { continue; }
+                for (const auto& mesh : coarsestModel->Meshes)
                 {
                     // 半透明メッシュを焼かない理由は反射プローブと同じ(不透明として描かれるため、
                     // ガラスが壁になって裏の景色が欠ける)
@@ -7681,7 +8950,7 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8090,11 +9359,16 @@ namespace Kurenai
         // プリパスで手前に別のものが書かれていると早期Zに落とされて消える。
         // 中途半端に混ぜるより丸ごと従来経路にするほうが安全
         //
-        // 【メッシュシェーダー経路とは併用しない】プリパスは頂点シェーダー経路で深度を書くが、
-        // G-Buffer側がメッシュシェーダーで描くと同じ頂点でも変換の丸めが一致する保証が無く、
-        // 深度が1ulpずれた面がGREATER_EQUALを通らずに消える
-        // meshletPathActiveはFrameConstantsを書く手前で確定させてある(そちらのコメント参照)
-        const bool depthPrepassRuns = m_DepthPrepassEnabled && !meshletPathActive
+        // 【メッシュシェーダー経路とも併用できるようになった】かつてプリパスはメッシュレット経路と
+        // 排他だった。プリパスが頂点シェーダーで深度を書き、G-Bufferがメッシュシェーダーで描くと、
+        // 同じ頂点でも変換の丸めが一致する保証が無く、深度が1ulpずれた面がGREATER_EQUALを
+        // 通らずに消えるため。プリパスにもG-Bufferとまったく同じ増幅/メッシュシェーダーを使う
+        // PSOを用意したので、変換は文字どおり同一のコードになりこの問題は起きない。
+        //
+        // メッシュレット版のPSOが作れなかった場合は、その経路で描くモデルだけを
+        // プリパスから外す(下のループ参照)。深度が埋まらないぶん早期Zが効かないだけで、
+        // G-Buffer側が改めて深度を書くため絵は壊れない
+        const bool depthPrepassRuns = m_DepthPrepassEnabled
             && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
         if (depthPrepassRuns)
         {
@@ -8111,8 +9385,9 @@ namespace Kurenai
                     RHI::IRHIPipelineState* currentPipelineState = nullptr;
                     // G-Bufferと同じカメラなので、間引かれるモデルも同じになる
                     const FrustumPlanes prepassFrustum = ExtractFrustumPlanes(viewProj);
-                    for (const auto& instance : m_Scene.Instances)
+                    for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
                     {
+                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
                         ++m_FrustumCullTested;
                         if (!IsAABBVisible(prepassFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                         {
@@ -8120,7 +9395,88 @@ namespace Kurenai
                             continue;
                         }
 
-                        for (const auto& mesh : instance.Model.Meshes)
+                        // モデルLOD。フェード中は2段を重ねる。
+                        // 【G-Bufferとまったく同じ組・同じDitherFadeで描くこと】片方だけが捨てた画素は
+                        // 「深度は書かれているのに色が書かれない」穴になる
+                        LODDraw lodDraws[2];
+                        const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                        for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
+                        {
+                        const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
+                        const Assets::Model& lodModel = *lodDraws[lodDrawIndex].Model;
+
+                        // G-Bufferが1ドローで描くモデルは、プリパスも同じ増幅/メッシュシェーダーで
+                        // 描く。**同じ判断関数(ShouldUseModelMeshletPath)で経路を選ぶことが要点**で、
+                        // 片方だけがメッシュシェーダーになると深度が一致しない。
+                        //
+                        // 不透明とカットアウトでピクセルシェーダーの有無が変わるため、
+                        // カットアウトのマテリアルを持つモデルだけ2回に分ける。
+                        // 持たないモデル(PLATEAUのタイルがそう)は1回で済む
+                        if (ShouldUseModelMeshletPath(instance, lodModel))
+                        {
+                            // 【フェード中は1ドロー経路のプリパスを外す】不透明用のPSOは
+                            // ピクセルシェーダーを持たないためApplyLODDitherを通せず、
+                            // 捨てるはずの画素まで深度を書いてG-Bufferとの食い違いで穴が開く。
+                            // 早期Zが効かなくなるだけで、G-Buffer側が深度を書くので絵は壊れない
+                            if (lodDitherFade < 1.0f)
+                            {
+                                continue;
+                            }
+
+                            if (!m_DepthPrepassMeshletPipelineState)
+                            {
+                                // メッシュレット版のPSOが無い。このモデルはプリパスから外す
+                                // (早期Zが効かないだけで、G-Buffer側が深度を書くので絵は壊れない)
+                                continue;
+                            }
+
+                            constexpr uint32_t kAmplificationGroupSize = 32;
+                            const uint32_t groupCount =
+                                (lodModel.TotalMeshletCount + kAmplificationGroupSize - 1)
+                                / kAmplificationGroupSize;
+
+                            const auto dispatchMeshletPrepass =
+                                [&](RHI::IRHIPipelineState* pipelineState, uint32_t rejectMask, uint32_t requireMask)
+                            {
+                                if (!pipelineState)
+                                {
+                                    return;
+                                }
+                                if (pipelineState != currentPipelineState)
+                                {
+                                    cmd->SetPipelineState(pipelineState);
+                                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                                    cmd->SetSamplerSet(m_MaterialSamplers.get());
+                                    currentPipelineState = pipelineState;
+                                }
+
+                                const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                    instance, lodModel, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask, requireMask);
+                                cmd->UpdateBuffer(
+                                    m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+                                cmd->DispatchMesh(groupCount, 1, 1);
+                                ++m_DrawCallsDepthPrepass;
+                            };
+
+                            // 不透明ぶん(ピクセルシェーダー無し)。半透明とカットアウトを落とす
+                            dispatchMeshletPrepass(
+                                instance.IsMirrored ? m_DepthPrepassMeshletPipelineStateMirrored.get()
+                                                    : m_DepthPrepassMeshletPipelineState.get(),
+                                Assets::kGpuMaterialFlagTransparent | Assets::kGpuMaterialFlagCutout, 0);
+
+                            // カットアウトぶん(clipを通す)。持たないモデルではこの回は発行しない
+                            if (lodModel.HasCutoutMaterial)
+                            {
+                                dispatchMeshletPrepass(
+                                    instance.IsMirrored ? m_DepthPrepassMeshletCutoutPipelineStateMirrored.get()
+                                                        : m_DepthPrepassMeshletCutoutPipelineState.get(),
+                                    Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout);
+                            }
+                            continue;
+                        }
+
+                        for (const auto& mesh : lodModel.Meshes)
                         {
                             // BLENDマテリアルはG-Bufferに描かれないので深度も書かない
                             // (書くと後ろのものが消える)
@@ -8129,10 +9485,24 @@ namespace Kurenai
                                 continue;
                             }
 
+                            // メッシュ単位のカリング。
+                            // 【G-Bufferと同じ錐台・同じ判定にすること】ここで間引いたメッシュが
+                            // G-Bufferでは描かれると、深度プリパスが埋めていない画素で早期Zが効かず
+                            // 遅くなるだけで済むが、逆(プリパスで描いてG-Bufferで間引く)だと
+                            // 描かれていないものの深度が残る
+                            if (!IsMeshVisibleWithStats(
+                                    m_MeshCullingEnabled, prepassFrustum, instance, lodModel, mesh, m_MeshCullTested,
+                                    m_MeshCullCulled))
+                            {
+                                continue;
+                            }
+
                             // カットアウトは切り抜きを反映しないと深度に嘘が入る。
                             // ミラーリングは表裏判定が逆のPSOでないとカリングされる面が入れ替わり、
-                            // G-Bufferと違う深度になってしまう
-                            const bool cutout = mesh.AlphaCutoff > 0.0f;
+                            // G-Bufferと違う深度になってしまう。
+                            // 【LODのフェード中もピクセルシェーダーが要る】カットアウトが無くても
+                            // クロスディザで捨てる画素があるため、PS無しのPSOでは抜けない
+                            const bool cutout = mesh.AlphaCutoff > 0.0f || lodDitherFade < 1.0f;
                             RHI::IRHIPipelineState* const wanted =
                                 cutout ? (instance.IsMirrored ? m_DepthPrepassCutoutPipelineStateMirrored.get()
                                                               : m_DepthPrepassCutoutPipelineState.get())
@@ -8147,7 +9517,7 @@ namespace Kurenai
                             }
 
                             const ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8160,7 +9530,9 @@ namespace Kurenai
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            ++m_DrawCallsDepthPrepass;
                         }
+                        }   // モデルLODの段のループ
                     }
                 },
             });
@@ -8275,15 +9647,20 @@ namespace Kurenai
                     currentPipelineState = wanted;
                 };
 
-                // 視錐台の外にあるモデルは丸ごと飛ばす。
+                // 視錐台の外にあるモデルは丸ごと飛ばし、通ったモデルの中でさらに
+                // 視錐台の外にあるメッシュを飛ばす(下のメッシュのループ)。
                 //
-                // 【メッシュ単位ではできない】Assets::MeshはAABBを持たず、AABBがあるのはModelだけ
-                // (Model.h)。したがって1モデルに多数のメッシュを持つアセット(Bistro、Emerald Square)
-                // では1つも間引けない。効くのは.kmodelを多数並べるシーンのほう
+                // 【2段になっている理由】モデル単位だけだと、1モデルに多数のメッシュを持つ
+                // アセット(Bistro、Emerald Square、PLATEAUのLOD2タイル)では1つも間引けない
+                // ―― モデル全体のAABBが視錐台と交差する限り全メッシュを描くしかないため。
+                // .kmodel v10がメッシュ単位のAABBを持つようになったので、もう一段入れてある。
+                // 効くシーンが逆(モデル単位は.kmodelを多数並べるシーンで効く)なので、
+                // 統計も別のカウンタで数える
                 const FrustumPlanes frustum = ExtractFrustumPlanes(viewProj);
 
-                for (const auto& instance : m_Scene.Instances)
+                for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
                 {
+                    const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
                     ++m_FrustumCullTested;
                     if (!IsAABBVisible(frustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                     {
@@ -8291,7 +9668,44 @@ namespace Kurenai
                         continue;
                     }
 
-                    for (const auto& mesh : instance.Model.Meshes)
+                    // モデルLOD。フェード中は2段を重ねる。
+                    // 【深度プリパスとまったく同じ組・同じDitherFadeであること】UpdateModelLODが
+                    // フレーム先頭で1回だけ決めた結果を両方が引くので、ここで距離を測り直さない
+                    LODDraw lodDraws[2];
+                    const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                    for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
+                    {
+                    const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
+                    const Assets::Model& lodModel = *lodDraws[lodDrawIndex].Model;
+
+                    // モデル全体を1回のDispatchMeshで描ける場合はメッシュのループへ入らない。
+                    // マテリアルはメッシュシェーダーが出力した番号でピクセルシェーダーが引くため、
+                    // メッシュごとのSetTextureも定数バッファの更新も要らない。
+                    //
+                    // 【BLENDだけは増幅シェーダーが落とす】半透明はG-Bufferに書かず専用の
+                    // Transparentパスでフォワードシェーディングする。ドローを分けられない以上、
+                    // メッシュレット単位のふるい分けでしか除外できない
+                    if (ShouldUseModelMeshletPath(instance, lodModel))
+                    {
+                        bindPipelineState(instance.IsMirrored, false, true);
+
+                        const ObjectConstants objectConstants = MakeModelObjectConstants(
+                            instance, lodModel, m_EmissiveIntensity, m_OcclusionMapEnabled,
+                            Assets::kGpuMaterialFlagTransparent, 0, /*countCullStats=*/true, lodDitherFade);
+                        cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                        cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                        // 起動するのは「モデル全体のメッシュレット数 ÷ 増幅シェーダーのグループサイズ」。
+                        // 実際にラスタライズされるのはカリングとふるい分けを生き延びたぶんに絞られる
+                        constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
+                        const uint32_t groupCount =
+                            (lodModel.TotalMeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize;
+                        cmd->DispatchMesh(groupCount, 1, 1);
+                        ++m_DrawCallsGBuffer;
+                        continue;
+                    }
+
+                    for (const auto& mesh : lodModel.Meshes)
                     {
                         // BLENDマテリアル(mesh.IsTransparent)はG-Bufferに書き込まず、専用のTransparentパスで
                         // フォワードシェーディングする(G-Bufferのアルファは常に1.0で半透明合成ができないため)
@@ -8300,11 +9714,24 @@ namespace Kurenai
                             continue;
                         }
 
-                        const bool useMeshlet = ShouldUseMeshletPath(mesh, instance.IsWater);
-                        bindPipelineState(instance.IsMirrored, instance.IsWater, useMeshlet);
+                        // メッシュ単位のカリング。深度プリパスとまったく同じ錐台・同じ判定
+                        // (片方だけで間引くと深度とG-Bufferが食い違う)
+                        if (!IsMeshVisibleWithStats(
+                                m_MeshCullingEnabled, frustum, instance, lodModel, mesh, m_MeshCullTested, m_MeshCullCulled))
+                        {
+                            continue;
+                        }
+                        // 【ここへ来た時点でメッシュレット経路は使わない】上のモデル単位の
+                        // 判定を通らなかったインスタンス(水面、メッシュレットを持たない
+                        // メッシュが混ざるモデル、メッシュレット描画が無効)なので、
+                        // モデル全体を従来の頂点シェーダーで描く。
+                        // **メッシュ単位でメッシュレット経路へ入れてはいけない** ――
+                        // 深度プリパスは同じ判断関数(ShouldUseModelMeshletPath)で経路を選ぶため、
+                        // ここで食い違うとプリパスの深度とG-Bufferの深度が一致しなくなる
+                        bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
                         const ObjectConstants objectConstants =
-                            MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                            MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8322,22 +9749,12 @@ namespace Kurenai
                             cmd->SetTexture(7, m_WaterNormalMapTexture.get());
                         }
 
-                        if (useMeshlet)
-                        {
-                            // 頂点/インデックスバッファは張らない。増幅シェーダーとメッシュシェーダーが
-                            // bindless経由で自分で読む(ObjectConstantsが番号を運んでいる)。
-                            // 起動するのは「メッシュレット数 ÷ 増幅シェーダーのグループサイズ」だけで、
-                            // 実際にラスタライズされるのはカリングを生き延びたぶんに絞られる
-                            constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
-                            cmd->DispatchMesh((mesh.MeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize, 1, 1);
-                        }
-                        else
-                        {
-                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
-                        }
+                        cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                        cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        ++m_DrawCallsGBuffer;
                     }
+                    }   // モデルLODの段のループ
                 }
 
                 // 数え終わったカウンタを受け皿へ写す。読むのは数フレーム後(下のリングの説明参照)。
@@ -8936,6 +10353,8 @@ namespace Kurenai
                 struct TransparentDraw
                 {
                     const Assets::ModelInstance* Instance;
+                    // 【段も覚える】meshが属する段のメッシュレット表を指す必要がある
+                    const Assets::Model* Model;
                     const Assets::Mesh* Mesh;
                     float DistanceSq;
                 };
@@ -8943,8 +10362,9 @@ namespace Kurenai
                 // 半透明もカメラの錐台で間引く。ここは描画リストの構築なので、
                 // 間引いた分はソートの対象からも外れる
                 const FrustumPlanes transparentFrustum = ExtractFrustumPlanes(viewProj);
-                for (const auto& instance : m_Scene.Instances)
+                for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
                 {
+                    const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
                     ++m_FrustumCullTested;
                     if (!IsAABBVisible(transparentFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                     {
@@ -8956,13 +10376,25 @@ namespace Kurenai
                     const float dy = instance.World._24 - cameraPosition.y;
                     const float dz = instance.World._34 - cameraPosition.z;
                     const float distanceSq = dx * dx + dy * dy + dz * dz;
-                    for (const auto& mesh : instance.Model.Meshes)
+                    // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
+                    // ストリーミング中で未読み込みなら描かない
+                    const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
+                    if (!currentModel) { continue; }
+                    for (const auto& mesh : currentModel->Meshes)
                     {
                         if (!mesh.IsTransparent)
                         {
                             continue;
                         }
-                        draws.push_back({ &instance, &mesh, distanceSq });
+                        // メッシュ単位のカリング。ここだけはループ内で描かず描画リストを作るので、
+                        // 判定はpush_backの直前に入れる(描かないものをリストへ積まない)
+                        if (!IsMeshVisibleWithStats(
+                                m_MeshCullingEnabled, transparentFrustum, instance, *currentModel, mesh, m_MeshCullTested,
+                                m_MeshCullCulled))
+                        {
+                            continue;
+                        }
+                        draws.push_back({ &instance, currentModel, &mesh, distanceSq });
                     }
                 }
                 if (draws.empty())
@@ -9029,7 +10461,9 @@ namespace Kurenai
                     bindPipelineState(draw.Instance->IsMirrored);
 
                     const ObjectConstants objectConstants =
-                        MakeObjectConstants(*draw.Instance, *draw.Mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                        MakeObjectConstants(
+                            *draw.Instance, *draw.Model, *draw.Mesh, m_EmissiveIntensity,
+                            m_OcclusionMapEnabled);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9147,8 +10581,9 @@ namespace Kurenai
                     // 画面には映っていないが水面には映るものが正しく残る
                     const FrustumPlanes reflectionFrustum = ExtractFrustumPlanes(reflectedViewProj);
 
-                    for (const auto& instance : m_Scene.Instances)
+                    for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
                     {
+                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
                         ++m_FrustumCullTested;
                         if (!IsAABBVisible(reflectionFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                         {
@@ -9156,7 +10591,11 @@ namespace Kurenai
                             continue;
                         }
 
-                        for (const auto& mesh : instance.Model.Meshes)
+                        // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
+                        // ストリーミング中で未読み込みなら描かない
+                        const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
+                        if (!currentModel) { continue; }
+                        for (const auto& mesh : currentModel->Meshes)
                         {
                             // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
                             // PlanarReflection.hlsl冒頭参照)
@@ -9165,10 +10604,18 @@ namespace Kurenai
                                 continue;
                             }
 
+                            // メッシュ単位のカリング。錐台は鏡映カメラのもの
+                            if (!IsMeshVisibleWithStats(
+                                    m_MeshCullingEnabled, reflectionFrustum, instance, *currentModel, mesh, m_MeshCullTested,
+                                    m_MeshCullCulled))
+                            {
+                                continue;
+                            }
+
                             bindPipelineState(!instance.IsMirrored);
 
                             const ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 

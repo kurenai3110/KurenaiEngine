@@ -44,12 +44,42 @@ float4 BindlessSampleLevel(uint index, SamplerState samplerState, float2 uv, flo
         return defaultValue;
     }
 
-    Texture2D<float4> tex = ResourceDescriptorHeap[index];
+    // 【NonUniformResourceIndexが要る】番号はヒット面/メッシュレットごとに違い、
+    // 同じ波の中で値が発散する。付けないと未定義動作(ハードウェアは波内で番号が
+    // 揃っていることを前提に1回だけディスクリプタを読む実装が許されている)。
+    // **絵はそれらしく出たまま静かに壊れる**類なので、付け忘れに気づく手立てが無い
+    Texture2D<float4> tex = ResourceDescriptorHeap[NonUniformResourceIndex(index)];
     return tex.SampleLevel(samplerState, uv, lod);
 #else
     // bindless非対応環境。引数はどれも使わず、従来のプレースホルダーと同じ値を返す
     // (HLSLには (void)x のような未使用を明示する書き方が無いため、そのまま放置する。
     //  未使用の引数はdxcの警告対象ではない)
+    return defaultValue;
+#endif
+}
+
+// bindless番号で指したTexture2Dを、暗黙のミップ選択でサンプルする。
+//
+// BindlessSampleLevelとの違いはLODの決め方だけ。ラスタライズ経路のピクセルシェーダーには
+// 隣接ピクセルとのUV勾配があるため、レイトレーシングのようにLODを自分で決める必要が無い
+// (むしろSampleLevelでLOD 0に固定すると、遠くの面でテクスチャがちらつく)。
+//
+// 【勾配は分岐の外で決まる】Sampleは暗黙の微分を使うため、本来は波内で一様な制御フローから
+// 呼ばなければならない。ここでは番号の有効判定でしか分岐しておらず、UVは分岐に依存しないので
+// dxcは勾配を分岐の外で計算できる。マテリアルごとにUVの計算そのものを変えるような
+// 書き方をしたら、この前提は崩れる
+float4 BindlessSample(uint index, SamplerState samplerState, float2 uv, float4 defaultValue)
+{
+#if defined(KURENAI_BINDLESS)
+    if (index == kInvalidBindlessIndex)
+    {
+        return defaultValue;
+    }
+
+    // NonUniformResourceIndexが要る理由はBindlessSampleLevelのコメント参照
+    Texture2D<float4> tex = ResourceDescriptorHeap[NonUniformResourceIndex(index)];
+    return tex.Sample(samplerState, uv);
+#else
     return defaultValue;
 #endif
 }

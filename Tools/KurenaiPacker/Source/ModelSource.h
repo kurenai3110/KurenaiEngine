@@ -196,11 +196,29 @@ namespace KurenaiPacker
     // このときタイルごとに「自分のAABBの中心」で寄せてしまうと、タイル同士の相対的な
     // 位置関係が壊れて街が崩れる。**複数のモデルで同じ値を引く**必要があるため、
     // 自動ではなく呼び出し側が明示する形にしている
+    // 解析(LoadSourceModel)のフェーズ別の累計秒。メッシュをまたいで積算する。
+    //
+    // 【なぜ解析側にも計装が要るのか】「パックが遅い」の律速は入力によって正反対になる。
+    // 埋め込みテクスチャ1714枚のPLATEAU LOD2は書き出しが98%だが、テクスチャ0枚の
+    // LOD1タイルは**解析が63%**で書き出しは37%しかない(実測)。どちらの経路を触るべきかは
+    // 測らないと決められないので、OcclusionBakerのBakeTimingsと同じ形で分けて出す
+    struct ParseTimings
+    {
+        double ReadSeconds = 0.0;      // assimpのImporter::ReadFile(外部ライブラリ)
+        double CollectSeconds = 0.0;   // ノード階層を辿ってメッシュ×ワールド行列を集める
+        double TangentSeconds = 0.0;   // 位置+法線をキーにした接線の蓄積(自前・ハッシュマップ)
+        double VertexSeconds = 0.0;    // 頂点ループ(行列適用・正規化・接線の引き当て・AABB更新)
+        double MergeSeconds = 0.0;     // インデックスの平坦化とマテリアル別アキュムレータへの結合
+        double MaterialSeconds = 0.0;  // マテリアル走査とテクスチャパスの解決(埋め込みの取り出しを含む)
+    };
+
+    // outTimings: 非nullptrならフェーズ別の所要時間を書き込む。nullptrなら計測しない
     SourceModel LoadSourceModel(
         const std::wstring& filePath,
         float scale = 1.0f,
         const MaterialOverride& materialOverride = {},
-        const std::optional<std::array<float, 3>>& originOffset = std::nullopt);
+        const std::optional<std::array<float, 3>>& originOffset = std::nullopt,
+        ParseTimings* outTimings = nullptr);
 
     // assimpが読んだ直後のシーン構造を標準出力へ印字する(パッケージは書き出さない)。
     // 失敗時はLoadSourceModelと同じくstd::runtime_errorを投げる。
@@ -214,5 +232,12 @@ namespace KurenaiPacker
     //
     // scale: 印字するバウンディングボックスへ乗算する係数。--scaleに与える値の妥当性を
     // 「既知の寸法(車両の全長、建物の高さ)と合うか」で判定するためのもの
+    // ピークワーキングセット(MB)。「読めるが遅い」のか「メモリを食い潰す」のかを切り分ける
+    double GetPeakWorkingSetMB();
+
+    // プロセスが消費したCPU時間(全スレッドの合計、秒)。実時間で割ると「何コア相当を
+    // 使ったか」になる。ワーカー数を超えていたら内側のライブラリが既に並列化している
+    double GetProcessCpuSeconds();
+
     void InspectModel(const std::wstring& filePath, float scale = 1.0f);
 }

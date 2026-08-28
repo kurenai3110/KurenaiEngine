@@ -454,13 +454,33 @@ Texture2DArrayへ統合する理由とその効果は
 </p>
 </section>
 
-<h3>4.9 モデル単位のフラスタムカリング</h3>
+<h3>4.9 フラスタムカリング(モデル単位とメッシュ単位の2段)</h3>
 <p>
 各描画パスは<code>Scene::Instances</code>を走査してドローコールを発行しますが、その手前で
-<strong>インスタンスのワールドAABBが視錐台の外にあるものを丸ごと飛ばします</strong>。
+<strong>インスタンスのワールドAABBが視錐台の外にあるものを丸ごと飛ばし</strong>、
+通ったインスタンスのメッシュのループで<strong>メッシュのワールドAABBが視錐台の外にあるものを
+さらに飛ばします</strong>。
 判定は<code>ExtractFrustumPlanes</code>(ビュー射影行列から6平面をGribb-Hartmannで取り出す)と
 <code>IsAABBVisible</code>(平面ごとにp-vertexだけを見る保守的な判定)の2つで、
 どちらもRHIに触れないためDX11/DX12で共通です。
+</p>
+<p>
+<strong>2段になっているのは、効くシーンが逆だからです。</strong> モデル単位は
+<code>.kmodel</code>を多数<code>[Model]</code>として並べるシーン(PLATEAU 東京23区の671タイル)で
+効き、<strong>1モデルに数千メッシュを持つアセット(Bistro、Emerald Square、PLATEAUのLOD2タイル)
+では1つも間引けません</strong> ―― モデル全体のAABBが視錐台と交差する限り、全メッシュを
+描くしかないためです。メッシュ単位はその逆で、後者でしか値が動きません。
+<strong>bindlessもメッシュシェーダーも使えない環境(DX11、基準実機のIntel UHD Graphics 620)では、
+これがドローコールを減らす唯一の手段です。</strong>
+</p>
+<p>
+メッシュのローカルAABBは<code>.kmodel</code> v10の<code>MeshEntry</code>が持ち、
+<code>ModelLoader</code>が<code>Assets::Mesh::BoundsMin/Max</code>へ写します。
+それを<code>World</code>で変換したワールドAABBは
+<strong><code>ModelInstance::MeshWorldBoundsList</code>(インスタンス側)</strong>にあります ――
+<code>Model</code>は複数のインスタンスから共有されうるため、ワールド空間の値を
+<code>Model</code>側に持たせてはいけません。変換はインスタンスのAABBと同じく
+<strong>読み込み時に一度だけ</strong>、8頂点すべてを変換して包絡を取ります。
 </p>
 <p>
 <strong>錐台はパスごとに違うものを使います。</strong> G-Buffer・深度プリパス・半透明は
@@ -470,24 +490,32 @@ Texture2DArrayへ統合する理由とその効果は
 </p>
 <p>
 CPU側の視錐台平面の作り方は増幅シェーダーの<code>IsSphereInFrustum</code>
-(<code>GBufferMeshlet.hlsl</code>、メッシュレット単位のカリング)と同じ平面を作っていますが、
-<strong>向こうは転置済み行列の「列」から、こちらは転置前の「行」から</strong>組み立てます
-(詳細は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 44.1)。
+(<code>GBufferMeshlet.hlsl</code>、メッシュレット単位のカリング)と同じ平面を作ります。
+<strong>どちらも行列の「列」から</strong>組み立てます ―― クリップ座標が
+<code>c = v * M</code>(行ベクトル×行列)なので、<code>c.x</code>は列0との内積になるためです。
+<strong>「行」から作ると転置した行列の平面になり、ほぼ真下を向いたときに100%間引かれます</strong>
+(実際に一度間違えました。正面付近ではそれらしく動くのでYawを振る対照実験では見つかりません)。
+詳細は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 44.1。
 </p>
 
 <h4>効いているかを数値で見る</h4>
 <p>
-性能ログ(<code>KurenaiEngine3D::LogFrameStatsIfDue</code>)へ「判定した数 / 間引いた数」を出します。
+性能ログ(<code>KurenaiEngine3D::LogFrameStatsIfDue</code>)とプロファイラパネルへ
+「判定した数 / 間引いた数」を出します。
 <strong>「間引き0」だけでは、判定式が常に通しているのか本当に全部視界内なのかを区別できない</strong>
 ためです。判定式が常にtrueを返していても既存シーンの絵は完全に一致してしまいます。
+</p>
+<p>
+<strong>モデル単位とメッシュ単位は別のカウンタで、絶対に混ぜません。</strong>
+分母が違い(前者はインスタンス数、後者はモデル単位を通過したインスタンスのメッシュ数の合計)、
+効くシーンも逆です。合算すると<strong>どちらが効いたのか ―― あるいは片方が一度も
+実行されていないのか ―― が読めなくなります</strong>。
+判定が1回も走っていないときは、行そのものを出さない(ログ)か「判定なし」と書く(パネル)ことで、
+「間引き0」と区別できるようにしてあります。
 </p>
 
 <h4>4.9.1 既知の制約</h4>
 <ul>
-<li><strong>メッシュ単位ではできません。</strong> <code>Assets::Mesh</code>はAABBを持たず、
-AABBがあるのは<code>Assets::Model</code>だけです(<code>Model.h</code>)。したがって
-<strong>1モデルに多数のメッシュを持つアセット(Bistro、Emerald Square)では1つも間引けません</strong>。
-効くのは<code>.kmodel</code>を多数<code>[Model]</code>として並べるシーンのほうです。</li>
 <li><strong>DDGIのプローブキャプチャには入れていません。</strong> このループの描画回数は
 <code>ClampDDGIProbesPerFrameToConstantRing</code>が「同じ条件で数えること」を前提に
 定数バッファの予算を決めており、カリングを入れると予算計算と食い違います。
@@ -1179,9 +1207,28 @@ Sample2Dの出力フォルダには<code>KurenaiEngineLibrary.dll</code>・<code
 <h3>13.6 UIモジュールの分割とKurenaiEngine3Dのfriend化</h3>
 <p>
 UIは<code>Source/Engine/UI/</code>配下の<code>IPanel</code>実装クラスへ分割され、
-<code>UI::UIManager</code>が所有・描画する(現在8クラス:
+<code>UI::UIManager</code>が所有・描画する(現在9クラス:
 シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ / デバッグ表示 /
-システム / プロファイラ)。
+<strong>ストリーミング</strong> / システム / プロファイラ)。
+</p>
+<p>
+<code>UIManager</code>自身も1つだけウィンドウを持つ ―― <strong>シーン読み込み中の進捗</strong>
+(<code>DrawSceneLoadProgress</code>)である。読み込みは専用のLoaderスレッドで走り、その間
+Renderスレッドはフレームを進め続けるが、<strong>旧シーンは読み込み開始と同時に手放されるため
+画面にはUIとスカイボックスしか出ない</strong>(23章)。671モデルのシーンでは数十秒かかるため、
+「進んでいる」と「固まった」を区別できる手がかりがどこにも無かった。
+パネルではなく<code>UIManager</code>が直接出しているのは、ドックに入れず読み込み中だけ
+画面中央へ重ねるウィンドウで、表示/非表示をユーザーが選ぶ対象ではないため。
+</p>
+<p>
+「ストリーミング」パネルは<code>Assets::ModelInstance</code>が持つ
+<code>ResidencyState</code>(常駐 / 読み込み中 / 未読み込み)と<code>LODLevel</code>を、
+各インスタンスのワールドAABBをXZ平面へ落とした<strong>俯瞰の地図</strong>として色分けする。
+<strong>ストリーミング本体とモデルLODはまだ未実装で、現状は全件が「常駐」・LOD段0のまま動かない</strong>
+―― これは先に用意した受け皿である。ストリーミングの破綻(破棄が早すぎる・範囲内なのに
+読み込まれない)は絵からは判別できず、しかも最も見たい破綻は「視界の外で消えている」なので、
+画面を塗り分けても見えない。描画は<code>ImDrawList</code>だけで行いレンダラには触れない
+(理由と表示上の決めごとは<a href="ImplementationDetail.md">ImplementationDetail.md</a> 50.3)。
 </p>
 <p>
 機能を1つ足すときに触るのは原則「そのパネルの<code>.cpp</code>」だけになる。新しいパネルを
@@ -6754,7 +6801,95 @@ RT側に載る頂点属性・インデックスはすべて<code>.kgeom</code>�
 </tbody>
 </table>
 
-<h3>38.9 残した制約</h3>
+<h3>38.9 1モデル1ドロー: マテリアルをテーブルにする</h3>
+<p>
+メッシュレットで三角形を間引けても、<strong>ドローの発行回数はメッシュの数のまま</strong>だった。
+マテリアルを描画直前の<code>SetTexture(t0..t6)</code>と定数バッファで渡している限り、
+1ドロー = 1マテリアルから抜けられないためである。
+PLATEAU LOD2のタイルは1枚がメッシュ1,715個・マテリアル1,715件あり、
+ここが支配的なコストになる(三角形は115k しかない)。
+</p>
+<p>
+そこで<strong>マテリアルを構造化バッファ(<code>Assets::GpuMaterial</code>、80バイト)へ載せ、
+ピクセルシェーダーが実行時の番号で引く</strong>形にした。番号はメッシュシェーダーが
+メッシュレットから読んで<code>nointerpolation</code>の頂点属性として出力する。
+</p>
+<p>
+<strong>プリミティブ属性ストリームは使っていない。</strong>
+メッシュレットは1つの材質の三角形だけで構成される(パッカーがマテリアル単位で結合してから
+メッシュごとに<code>meshopt_buildMeshlets</code>を呼ぶため)ので、
+塊の中では全頂点が同じ値になり、既存の<code>MeshletIndex</code>とまったく同じ形で足りる。
+</p>
+<p>
+<strong>ピクセルシェーダーは1本のまま両経路を賄う。</strong>
+<code>LoadSurfaceMaterial()</code>が「番号が有効ならテーブルから、無効なら定数バッファから」返し、
+以降の式は1行も変わらない。メッシュレットのON/OFFで絵が一致するのはこの構造による
+&mdash;&mdash; 経路ごとにピクセルシェーダーを写すと、片方だけ直したときに静かに食い違う。
+</p>
+
+<h4>メッシュレットの表はモデル単位へ統合する</h4>
+<p>
+1回の<code>DispatchMesh</code>でモデル全体を回すには、メッシュごとに分かれていたメッシュレットの
+3ブロックを1本へ連結し、メッシュ内相対だった<code>VertexOffset</code>/<code>TriangleOffset</code>を
+モデル基準へ付け替える必要がある。
+</p>
+<p>
+<strong>頂点バッファだけはメッシュ単位のまま残した。</strong>
+<code>.kgeom</code>のペイロードは<code>[頂点][インデックス][メッシュレット3本]</code>をメッシュごとに
+連結した並びで、頂点ブロックが連続していない。モデル単位にまとめるには集めて複製するしかなく、
+従来経路(DX11・BLAS・自前ラスタライザ)が使うバッファと二重にVRAMを食う。
+代わりに<strong>メッシュレット1件ごとが自分の頂点バッファのbindless番号を持つ</strong>
+(自前ラスタライザの<code>SWRasterMeshInfo</code>と同じ方式)。
+副産物としてbindlessの消費が「メッシュ×5」から「メッシュ×2 + モデル×4」へ減る。
+</p>
+<p>
+<strong><code>NonUniformResourceIndex</code>を必ず通すこと。</strong>
+1ドロー内でマテリアル番号も頂点バッファ番号も波内で発散する。
+付け忘れても<strong>絵はそれらしく出たまま未定義動作になる</strong>ので、気づく手立てが無い。
+</p>
+
+<h4>材質のふるい分けは増幅シェーダーが行う</h4>
+<p>
+1ドローにするとドローやPSOの分割で材質を出し分けられなくなる。
+「半透明はG-Bufferに描かない」「カットアウトだけピクセルシェーダーを通す」といった判断を、
+定数バッファのマスク(<code>MeshletFilterReject</code>/<code>MeshletFilterRequire</code>)と
+メッシュレットのフラグの突き合わせで行う。
+</p>
+<table>
+<thead><tr><th>パス</th><th>Reject</th><th>Require</th><th>1インスタンスあたりの発行回数</th></tr></thead>
+<tbody>
+<tr><td>G-Buffer</td><td>BLEND</td><td>&mdash;</td><td>1</td></tr>
+<tr><td>深度プリパス(不透明)</td><td>BLEND / CUTOUT</td><td>&mdash;</td><td>1</td></tr>
+<tr><td>深度プリパス(カットアウト)</td><td>BLEND</td><td>CUTOUT</td><td>カットアウトを持つモデルのみ +1</td></tr>
+<tr><td>シャドウ(不透明)</td><td>CUTOUT</td><td>&mdash;</td><td>1</td></tr>
+<tr><td>シャドウ(カットアウト)</td><td>&mdash;</td><td>CUTOUT</td><td>カットアウトを持つモデルのみ +1</td></tr>
+</tbody>
+</table>
+<p>
+不透明ぶんを分けているのは、<strong>ピクセルシェーダーを持たない速い経路を捨てたくない</strong>から。
+カットアウトのマテリアルを持たないモデル(PLATEAUのタイルがそう)は1ドローで済む。
+シャドウが半透明を落としていないのは従来からの挙動を保つためで、
+BLENDのメッシュは実体のまま影を落とす。
+</p>
+
+<h4>深度プリパスとの排他が外れた</h4>
+<p>
+プリパスは長らく<strong>メッシュレット経路が有効な間まるごと止まっていた</strong>。
+プリパスが頂点シェーダーで深度を書き、G-Bufferがメッシュシェーダーで描くと、
+同じ頂点でも変換の丸めが一致する保証が無く、深度が1ulpずれた面が
+<code>GREATER_EQUAL</code>を通らずに消えるためである。メッシュレット描画は既定で有効なので、
+<strong>DX12の既定構成ではプリパスが一度も走っていなかった。</strong>
+</p>
+<p>
+プリパスにもG-Bufferと<strong>まったく同じ増幅/メッシュシェーダー</strong>を使うPSOを用意すれば、
+変換は文字どおり同一のコードになりこの問題は起きない。
+あわせてG-Bufferの「メッシュ単位のメッシュレット経路」は削除した &mdash;&mdash;
+残すと「モデル単位の判定は通らないがメッシュ単位では通る」場合にG-Bufferだけが
+メッシュシェーダーになり、同じ深度不一致がそのまま再現する。
+<strong>両パスが同じ判断関数(<code>ShouldUseModelMeshletPath</code>)で経路を選ぶ</strong>ことが要点である。
+</p>
+
+<h3>38.10 残した制約</h3>
 <ul>
 <li><strong>レイトレーシングのヒット面に法線マップを適用していない。</strong>
 接空間の基底が要るが、<code>RTVertexAttribute</code>は16バイトに抑えるため法線とUVしか持っていない
@@ -6764,13 +6899,20 @@ RT側に載る頂点属性・インデックスはすべて<code>.kgeom</code>�
 bindlessが無かった頃はそもそも書けなかったが、現在は書ける。それでも入れていないのは、
 <code>RayQuery::Proceed()</code>のループを回すと「最初のヒットで打ち切る」最適化が効かなくなり、
 葉や柵の影の精度に対して代償が大きいため。</li>
-<li><strong>Hi-Zによるオクルージョンカリングは行っていない。</strong>
-増幅シェーダーが見ているのは錐台と法線コーンだけで、手前の物体に隠れたメッシュレットは落ちない。
-<a href="#hiz">Hi-Zミップチェーン</a>は既にあるので足す先はある。</li>
-<li><strong>メッシュレット単位のLOD(クラスタLOD)は無い。</strong>
-入れる場合はBLASも焼き直して両者を揃えること(38.7の不変条件)。</li>
-<li><strong>シャドウパスと反射プローブのキャプチャは従来経路のまま。</strong>
-どちらも解像度が低くカリングの利得が小さい一方、増幅/メッシュシェーダーのPSOだけ増えるため。</li>
+<li><strong>メッシュレット単位のLODは、段が<code>.kmodel</code>に焼かれているだけでまだ選んでいない。</strong>
+ランタイムが読むのはLOD0の段だけである(<code>MeshEntry::MeshletCount</code>は全段の合計なので、
+そのまま回すと簡略化した段まで同じ場所へ重ねて描かれる)。
+増幅シェーダーが段を選ぶようにする場合はBLASも焼き直して両者を揃えること(38.7の不変条件)。</li>
+<li><strong>反射プローブのキャプチャは従来経路のまま。</strong>
+解像度が低くカリングの利得が小さい一方、増幅/メッシュシェーダーのPSOだけ増えるため。
+シャドウと深度プリパスは38.9でメッシュシェーダー経路へ移した。</li>
+<li><strong>シャドウの増幅シェーダーは背面カリングをしていない。</strong>
+<code>CascadeConstants</code>が持つのはビュー射影だけで、平行光の向きを直接持っていないため
+錐台カリングのみ行う。影は表裏どちらの面からも落ちるので、通しすぎる側は安全でもある。</li>
+<li><strong>マテリアルの重複除去をしていない。</strong>
+<code>.kmodel</code>はメッシュとマテリアルが1対1(パッカーがマテリアル単位で結合するため)で、
+テーブルもその番号をそのまま使う。共有させるなら、ベイク結果(遮蔽マップ/bent normal)が
+メッシュ単位の成果物であることを先に決め直す必要がある。</li>
 </ul>
 
 </section>
@@ -7285,8 +7427,8 @@ bindlessの有無がパスによって食い違います)。
 明示的に捨てます。
 </p>
 <p>
-経緯は<a href="ImplementationHistory.md">ImplementationHistory.md</a> 53章、
-根拠は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 49章。
+経緯は<a href="ImplementationHistory.md">ImplementationHistory.md</a> 58章、
+根拠は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 54章。
 </p>
 </section>
 

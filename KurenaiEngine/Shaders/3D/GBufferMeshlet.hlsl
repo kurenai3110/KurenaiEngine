@@ -28,43 +28,9 @@
 #include "GBufferCommon.hlsli"
 #include "Bindless.hlsli"
 
-// Assets::MeshletEntry(64バイト)と1対1で対応。並びとサイズを一致させること。
-//
-// 【ずれてもコンパイルは通る】StructuredBufferのストライドはC++側が指定するため、
-// ここの宣言が実体と食い違うと、絵が壊れて初めて分かる。ModelPackage.hを触ったら必ずここも見る
-struct Meshlet
-{
-    uint VertexOffset;
-    uint TriangleOffset;
-    uint VertexCount;
-    uint TriangleCount;
-    float3 BoundsCenter;
-    float BoundsRadius;
-    float3 ConeAxis;
-    float ConeCutoff;
-    // v10で追加。このメッシュレットを描く材質と、何段目のLODに属するか。
-    // 増幅シェーダーが段を選ぶようになるまで(Stage 6)は読まれないが、
-    // **宣言しないとストライドがずれる**
-    uint MaterialIndex;
-    uint LODLevel;
-    uint2 Reserved;
-};
-
-// Assets::Vertex(56バイト)と1対1で対応。
-//
-// 【構造化バッファは詰めて並ぶ】定数バッファと違い、StructuredBuffer<T>のTは
-// C++と同じ「メンバの型のアラインメントに従った詰めた配置」になる。
-// 定数バッファの規則(float3の直後のfloatが16バイト境界をまたげない等)は適用されない。
-// 実際のオフセットは Position=0 / Normal=12 / UV=24 / Tangent=32 / UV1=48 で、
-// Assets::Vertexと完全に一致する
-struct MeshVertex
-{
-    float3 Position;
-    float3 Normal;
-    float2 UV;
-    float4 Tangent;
-    float2 UV1;
-};
+// 【Meshlet / MeshVertex の定義は Meshlet.hlsli にある】シャドウ版の
+// メッシュシェーダー(ShadowMeshlet.hlsl)と共有するため。写して2つに増やすと
+// 片方だけ直したときにジオメトリの読み方が静かに食い違う
 
 // 増幅シェーダー1グループが判定するメッシュレット数。
 // 生き残ったメッシュレット番号をペイロードで渡すため、ペイロードの配列長でもある。
@@ -101,53 +67,9 @@ groupshared uint s_StatsOcclusionCulled;
 
 // --- カリング -------------------------------------------------------------------------
 
-// バウンディング球(ワールド空間)が視錐台と交差するか。
-//
-// 平面はViewProjから直接取り出す。このエンジンはmul(vector, matrix)の規約なので
-// clip.x = dot(v, ViewProjの0列目)、clip.w = dot(v, ViewProjの3列目) になる。
-// クリップ空間の条件 -w <= x <= w、-w <= y <= w、0 <= z <= w をそれぞれ
-// 「dot(平面, v) >= 0」の形に直したものが6枚の平面。
-//
-// 【Reverse-Zでもこのままでよい】近平面と遠平面の意味は入れ替わるが、
-// 0 <= z <= w という条件自体は変わらないため、平面の式は同じで済む。
-//
-// 【TAAのジッターは無視してよい】ViewProjにはサブピクセルのジッターが乗っているが、
-// ずれはピクセル単位以下で、バウンディング球という保守的な近似の余裕に埋もれる
-bool IsSphereInFrustum(float3 center, float radius)
-{
-    // ViewProjの列ベクトル(HLSLのfloat4x4は行優先の添字なので、列は_mXY表記で取り出す)
-    const float4 col0 = float4(ViewProj._m00, ViewProj._m10, ViewProj._m20, ViewProj._m30);
-    const float4 col1 = float4(ViewProj._m01, ViewProj._m11, ViewProj._m21, ViewProj._m31);
-    const float4 col2 = float4(ViewProj._m02, ViewProj._m12, ViewProj._m22, ViewProj._m32);
-    const float4 col3 = float4(ViewProj._m03, ViewProj._m13, ViewProj._m23, ViewProj._m33);
-
-    float4 planes[6];
-    planes[0] = col3 + col0; // 左   (x >= -w)
-    planes[1] = col3 - col0; // 右   (x <=  w)
-    planes[2] = col3 + col1; // 下   (y >= -w)
-    planes[3] = col3 - col1; // 上   (y <=  w)
-    planes[4] = col2;        // 手前 (z >=  0)
-    planes[5] = col3 - col2; // 奥   (z <=  w)
-
-    [unroll]
-    for (uint i = 0; i < 6; ++i)
-    {
-        // 平面を正規化しないと「距離」の尺度が平面ごとに変わり、radiusと比較できない
-        const float length3 = length(planes[i].xyz);
-        if (length3 <= 0.0f)
-        {
-            // 射影行列が退化している(想定外)。カリングを諦めて通す
-            continue;
-        }
-
-        const float4 plane = planes[i] / length3;
-        if (dot(plane.xyz, center) + plane.w < -radius)
-        {
-            return false;
-        }
-    }
-    return true;
-}
+// 【錐台カリングとスケール計算は Meshlet.hlsli にある】シャドウ版と共有するため。
+// 視錐台平面を行から作るか列から作るかは過去に取り違えて100%誤検出した箇所で、
+// 実装を2つに増やすと片方だけが壊れたまま気づけない(実装史39章)
 
 // 法線コーンによる背面カリング。この塊の三角形の法線がすべて
 // 「軸ConeAxisを中心とする半頂角acos(ConeCutoff)の円錐」に収まることを利用し、
@@ -169,17 +91,6 @@ bool IsMeshletBackfacing(Meshlet meshlet, float3 centerWorld)
     const float3 axisWorld = normalize(mul(meshlet.ConeAxis, (float3x3)NormalMatrix));
     const float3 viewDir = normalize(centerWorld - CameraPosition.xyz);
     return dot(viewDir, axisWorld) >= meshlet.ConeCutoff;
-}
-
-// Worldに含まれる最大スケールを求める。バウンディング球の半径をワールド空間へ移すのに使う。
-// 3軸で違うスケールがかかっている場合、最大のものを使えば球は必ず元の形状を包む
-float MaxWorldScale()
-{
-    // mul(vector, matrix)規約なので、ローカルのx/y/z軸はWorldの各行に対応する
-    const float sx = length(float3(World._m00, World._m01, World._m02));
-    const float sy = length(float3(World._m10, World._m11, World._m12));
-    const float sz = length(float3(World._m20, World._m21, World._m22));
-    return max(sx, max(sy, sz));
 }
 
 // --- Hi-Zオクルージョンカリング ---------------------------------------------------------
@@ -307,7 +218,7 @@ bool IsMeshletOccluded(float3 centerWorld, float radiusWorld)
 [numthreads(KURENAI_AMPLIFICATION_GROUP_SIZE, 1, 1)]
 void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV_GroupThreadID)
 {
-    const bool statsEnabled = (MeshletCullStatsParams.x != 0.0f);
+    const bool statsEnabled = (MeshletCullStatsParams.x != 0.0f) && (MeshletStatsEnabled != 0u);
 
     if (groupThreadId == 0)
     {
@@ -320,19 +231,30 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
 
     if (dispatchThreadId < MeshletCount)
     {
+        // 表はモデル単位なので、このドローが見る範囲の先頭(MeshletOffset)を足す
+        const uint meshletIndex = MeshletOffset + dispatchThreadId;
         StructuredBuffer<Meshlet> meshlets = KURENAI_BINDLESS_BUFFER(MeshletBufferIndex);
-        const Meshlet meshlet = meshlets[dispatchThreadId];
+        const Meshlet meshlet = meshlets[meshletIndex];
 
         const float3 centerWorld = mul(float4(meshlet.BoundsCenter, 1.0f), World).xyz;
-        const float radiusWorld = meshlet.BoundsRadius * MaxWorldScale();
+        const float radiusWorld = meshlet.BoundsRadius * MeshletMaxWorldScale(World);
+
+        // 材質によるふるい分け(GBufferCommon.hlsliのMeshletFilterReject/Require参照)。
+        // G-Bufferでは半透明(BLEND)を落とす。
+        //
+        // 【材質で落ちた塊はカリングの統計に数えない】数えると、そのパスが除外している
+        // 材質のぶんだけ「間引き率」が薄まり、俯瞰と街路の差を見る目的に使えなくなる
+        const bool materialAccepted =
+            MeshletPassesMaterialFilter(meshlet.Flags, MeshletFilterReject, MeshletFilterRequire);
 
         // 【この順に判定する】視錐台と法線コーンは定数時間だが、Hi-Z判定は8頂点の投影と
         // テクスチャ読みを伴う。先に安いほうで落とせば、画面外・背面の塊ではHi-Zを一切読まない
-        const bool frustumOrConeCulled =
-            !IsSphereInFrustum(centerWorld, radiusWorld) || IsMeshletBackfacing(meshlet, centerWorld);
-        const bool occlusionCulled = !frustumOrConeCulled && IsMeshletOccluded(centerWorld, radiusWorld);
+        const bool frustumOrConeCulled = !MeshletSphereInFrustum(ViewProj, centerWorld, radiusWorld)
+            || IsMeshletBackfacing(meshlet, centerWorld);
+        const bool occlusionCulled =
+            materialAccepted && !frustumOrConeCulled && IsMeshletOccluded(centerWorld, radiusWorld);
 
-        if (statsEnabled)
+        if (statsEnabled && materialAccepted)
         {
             InterlockedAdd(s_StatsTested, 1);
             if (frustumOrConeCulled)
@@ -345,14 +267,14 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
             }
         }
 
-        if (!frustumOrConeCulled && !occlusionCulled)
+        if (materialAccepted && !frustumOrConeCulled && !occlusionCulled)
         {
             // 【波の幅に依存しない詰め方】WavePrefixCountBitsを使うと1グループが
             // 1波に収まることを暗に仮定することになる(波幅32/64はGPUによって違う)。
             // グループ共有のカウンタなら仮定が要らず、頻度も低いので競合の実害も無い
             uint slot;
             InterlockedAdd(s_VisibleCount, 1, slot);
-            s_Payload.MeshletIndices[slot] = dispatchThreadId;
+            s_Payload.MeshletIndices[slot] = meshletIndex;
         }
     }
 
@@ -399,7 +321,11 @@ void MSMain(
     if (groupThreadId < meshlet.VertexCount)
     {
         StructuredBuffer<uint> meshletVertices = KURENAI_BINDLESS_BUFFER(MeshletVertexBufferIndex);
-        StructuredBuffer<MeshVertex> vertices = KURENAI_BINDLESS_BUFFER(VertexBufferIndex);
+        // 【NonUniformResourceIndexが要る】頂点バッファの番号はメッシュレットごとに違い、
+        // 1回のディスパッチでメッシュを跨ぐと同じ波の中で値が発散する。
+        // 付け忘れると未定義動作になるが、**絵はそれらしく出たまま静かに壊れる**
+        StructuredBuffer<MeshVertex> vertices =
+            KURENAI_BINDLESS_BUFFER(NonUniformResourceIndex(meshlet.VertexBufferIndex));
 
         const uint globalVertexIndex = meshletVertices[meshlet.VertexOffset + groupThreadId];
         const MeshVertex vertex = vertices[globalVertexIndex];
@@ -417,7 +343,14 @@ void MSMain(
         output.Tangent = float4(mul(vertex.Tangent.xyz, (float3x3)World), vertex.Tangent.w * TangentSignFlip);
         output.CurClip = output.Position;
         output.PrevClip = mul(float4(worldPos, 1.0f), PrevViewProj);
-        output.MeshletIndex = meshletIndex;
+        // 【モデル内の通し番号ではなくメッシュ内の番号を書く】色分け表示は
+        // レイトレーシング側(RaytracingScene.hlsliのRTFindMeshlet)と同じ色でなければ
+        // 見比べる意味が無く、あちらはメッシュ内の番号を返す
+        output.MeshletIndex = meshlet.MeshletIndexInMesh;
+        // ピクセルシェーダーがマテリアルテーブルを引くための番号。
+        // 塊の中では全頂点で同じ値になる(メッシュレットは材質を跨がない)ので、
+        // PSInput側のnointerpolationがそのまま正しい値を拾う
+        output.MaterialIndex = meshlet.MaterialIndex;
 
         outVertices[groupThreadId] = output;
     }

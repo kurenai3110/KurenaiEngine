@@ -1,0 +1,45 @@
+# モデルLODの切り替えが起きることを目で見るための検証シーン。
+#
+# 同じ配置を距離を変えて5つ並べる。LODDistance = 40 なので、
+# カメラから40mより近いものは MaterialTest(球の列)、遠いものは MeshletStage(箱)になる。
+# 1枚の画面の中に境界が入るので、切り替わっていること自体がその場で判る。
+[Scene]
+Name = LOD 切り替えテスト
+
+[Model]
+Path        = MaterialTest/MaterialTest.kmodel
+LODPath     = MeshletStage/MeshletStage.kmodel
+LODDistance = 40
+Translation = 0, 0, 0
+
+[Model]
+Path        = MaterialTest/MaterialTest.kmodel
+LODPath     = MeshletStage/MeshletStage.kmodel
+LODDistance = 40
+Translation = 0, 0, -30
+
+[Model]
+Path        = MaterialTest/MaterialTest.kmodel
+LODPath     = MeshletStage/MeshletStage.kmodel
+LODDistance = 40
+Translation = 0, 0, -60
+
+[Model]
+Path        = MaterialTest/MaterialTest.kmodel
+LODPath     = MeshletStage/MeshletStage.kmodel
+LODDistance = 40
+Translation = 0, 0, -90
+
+[Model]
+Path        = MaterialTest/MaterialTest.kmodel
+LODPath     = MeshletStage/MeshletStage.kmodel
+LODDistance = 40
+Translation = 0, 0, -120
+
+[Camera]
+Position = 0.0, 8.0, 30.0
+Yaw = 180.0
+Pitch = -8.0
+
+[Sun]
+TimeOfDay = 10.0

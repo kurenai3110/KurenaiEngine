@@ -61,8 +61,16 @@ namespace Kurenai::Assets
         // メッシュのUV密度(モデルローカル1メートルあたりのUV単位)を、三角形を抜き取って見積もる。
         // 求められない場合(UVが無い・全部縮退している)は0を返す。
         //
-        // 【中央値を採る】平均は極端に引き伸ばされた三角形1個で飛ぶ。テクスチャストリーミングの
-        // 見積もりに使う値なので、代表値がずれると常駐ミップの選択が丸ごとずれる。
+        // 【10パーセンタイル(低い側)を採る】1つのテクスチャに常駐段は1つしか持てないので、
+        // 縛るのは「最も引き伸ばされている=テクセル密度が最も低い」領域である。そこが
+        // 最も細かいミップを要求する。密度を高く見積もると、引き伸ばされた面が耐えられない
+        // 段まで削ってぼける。
+        //
+        // 最小値ではなく1割の位置を採るのは、UVが潰れかけた細長い三角形が最小値を支配し、
+        // どのテクスチャも常に全ミップ常駐になってしまうため。
+        //
+        // 【実測】中央値(従来)とp90で比べると、p90はbias -2で0.80を下回るタイルが3枚→14枚、
+        // 最悪タイルが0.572→0.175へ悪化した。密度は高く見積もるほどぼける。
         //
         // 【全三角形を見ない】読み込み時間に効く(LOD2の1タイルで11万三角形×1715メッシュ)。
         // 先頭64個ではなく等間隔に抜くのは、メッシュの一部だけに偏った密度を代表値にしないため
@@ -124,9 +132,10 @@ namespace Kurenai::Assets
                 return 0.0f;
             }
 
-            const size_t middle = densities.size() / 2;
-            std::nth_element(densities.begin(), densities.begin() + middle, densities.end());
-            return densities[middle];
+            // 10パーセンタイル。要素が少ないときも範囲外にならないよう添字で丸める
+            const size_t index = densities.size() / 10;
+            std::nth_element(densities.begin(), densities.begin() + index, densities.end());
+            return densities[index];
         }
 
         // テクスチャの読み込みとキャッシュ・共有インスタンス(白/フラット法線/マゼンタ)の管理。
@@ -363,6 +372,194 @@ namespace Kurenai::Assets
                     }
                     return less(a.BentNormalTexture, b.BentNormalTexture);
                 });
+        }
+
+        // マテリアルテーブル(Model::MaterialTableBuffer)を組み立てる。
+        //
+        // 【SortMeshesByMaterialの後で呼ぶこと】あちらはメッシュの並びを入れ替えるため、
+        // 先に番号を振ると対応が崩れる。
+        //
+        // 【テクスチャのbindless登録もここで行う】Mesh側のポインタは、モデルが所有する
+        // テクスチャとシーン共有の1x1フォールバックのどちらでもありうるが、
+        // RegisterBindlessは同じリソースに対して同じ番号を返す(冪等)ので区別しなくてよい。
+        // どのメッシュからも参照されないテクスチャは登録されず、区画を無駄にしない。
+        //
+        // 【v9はマテリアルとメッシュが1対1】.kmodel v9のMeshEntryは係数とテクスチャ番号を
+        // 直接持っており、マテリアルテーブルという概念自体が無い。そのため
+        // 「メッシュ1つ = マテリアル1件」として作る。**重複除去は行わない** ――
+        // .kmodelがマテリアルテーブルを持つようになればそちらの番号をそのまま使うので、
+        // ここで独自の集約規則を作ると二重管理になる。
+        // (PLATEAU LOD2はマテリアル1,715件がすべて異なり、集約しても1件も減らない)
+        void BuildMaterialTable(RHI::IRHIDevice& device, Model& model)
+        {
+            if (!device.SupportsBindless() || model.Meshes.empty())
+            {
+                return;
+            }
+
+            const auto registerTexture = [&device](RHI::IRHITexture* texture) {
+                return texture ? device.RegisterBindless(texture) : RHI::kInvalidBindlessIndex;
+            };
+
+            std::vector<GpuMaterial> materials;
+            materials.reserve(model.Meshes.size());
+            for (Mesh& mesh : model.Meshes)
+            {
+                GpuMaterial material;
+                material.BaseColorFactor[0] = mesh.BaseColorFactor[0];
+                material.BaseColorFactor[1] = mesh.BaseColorFactor[1];
+                material.BaseColorFactor[2] = mesh.BaseColorFactor[2];
+                material.BaseColorFactor[3] = mesh.BaseColorFactor[3];
+                material.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+                material.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+                material.EmissiveFactor[2] = mesh.EmissiveFactor[2];
+                material.MetallicFactor = mesh.MetallicFactor;
+                material.RoughnessFactor = mesh.RoughnessFactor;
+                material.AlphaCutoff = mesh.AlphaCutoff;
+                material.OcclusionStrength = mesh.OcclusionStrength;
+                material.Translucency = mesh.Translucency;
+                material.BaseColorTextureIndex = registerTexture(mesh.BaseColorTexture);
+                material.NormalTextureIndex = registerTexture(mesh.NormalTexture);
+                material.MetallicRoughnessTextureIndex = registerTexture(mesh.MetallicRoughnessTexture);
+                material.EmissiveTextureIndex = registerTexture(mesh.EmissiveTexture);
+                material.OcclusionTextureIndex = registerTexture(mesh.OcclusionTexture);
+                material.BentNormalTextureIndex = registerTexture(mesh.BentNormalTexture);
+                material.Flags = 0;
+                if (mesh.IsTransparent)
+                {
+                    material.Flags |= kGpuMaterialFlagTransparent;
+                }
+                if (mesh.AlphaCutoff > 0.0f)
+                {
+                    material.Flags |= kGpuMaterialFlagCutout;
+                }
+
+                mesh.MaterialIndex = static_cast<uint32_t>(materials.size());
+                materials.push_back(material);
+            }
+
+            RHI::BufferDesc desc;
+            desc.Usage = RHI::BufferUsage::StructuredImmutable;
+            desc.SizeInBytes = static_cast<uint32_t>(materials.size() * sizeof(GpuMaterial));
+            desc.StrideInBytes = sizeof(GpuMaterial);
+            desc.InitialData = materials.data();
+            model.MaterialTableBuffer = device.CreateBuffer(desc);
+            if (!model.MaterialTableBuffer)
+            {
+                Core::Logger::Error("ModelLoader", "マテリアルテーブルのバッファ作成に失敗しました");
+                return;
+            }
+
+            model.MaterialCount = static_cast<uint32_t>(materials.size());
+            if (device.RegisterBindless(model.MaterialTableBuffer.get()) == RHI::kInvalidBindlessIndex)
+            {
+                // bindless区画が満杯。ここで諦めておかないと、シェーダーが
+                // 無効番号でテーブルを引こうとする(=未定義動作)ことになる。
+                // テーブルを捨てれば描画側は従来のメッシュ単位経路へ落ちる
+                Core::Logger::Error(
+                    "ModelLoader", "マテリアルテーブルをbindlessへ登録できませんでした(区画が満杯?)");
+                model.MaterialTableBuffer.reset();
+                model.MaterialCount = 0;
+            }
+        }
+
+        // モデル単位に連結したメッシュレットの3ブロックをGPUバッファにする。
+        //
+        // 【SortMeshesByMaterialとBuildMaterialTableの後で呼ぶこと】メッシュレット1件ごとに
+        // 「どのマテリアルか」を書き込む必要があり、その番号はマテリアルテーブルを
+        // 組み立てて初めて決まる。またSortMeshesByMaterialはメッシュを入れ替えるが、
+        // Mesh::MeshletOffsetはメッシュ自身が持っているので入れ替わっても対応は保たれる
+        void BuildMeshletTables(
+            RHI::IRHIDevice& device, Model& model, std::vector<GpuMeshlet>& meshlets,
+            const std::vector<uint32_t>& meshletVertices, const std::vector<uint32_t>& meshletTriangles)
+        {
+            if (meshlets.empty())
+            {
+                return;
+            }
+
+            // マテリアル番号と材質のフラグを、メッシュから各メッシュレットへ配る。
+            // 1つのメッシュレットは必ず1つのメッシュ(=1つのマテリアル)に属する ――
+            // KurenaiPackerがmeshopt_buildMeshletsをメッシュごとに呼んでいるため、
+            // 塊が材質を跨ぐことは構造的に起きない
+            for (const Mesh& mesh : model.Meshes)
+            {
+                uint32_t flags = 0;
+                if (mesh.IsTransparent)
+                {
+                    flags |= kGpuMaterialFlagTransparent;
+                }
+                if (mesh.AlphaCutoff > 0.0f)
+                {
+                    flags |= kGpuMaterialFlagCutout;
+                }
+
+                for (uint32_t m = 0; m < mesh.MeshletCount; ++m)
+                {
+                    GpuMeshlet& meshlet = meshlets[mesh.MeshletOffset + m];
+                    meshlet.MaterialIndex = mesh.MaterialIndex;
+                    meshlet.Flags = flags;
+                }
+            }
+
+            // 3本ともシーン読み込み時に一度書いたら変わらないためStructuredImmutable
+            const auto createImmutable = [&device](const void* data, size_t count, uint32_t stride) {
+                RHI::BufferDesc desc;
+                desc.Usage = RHI::BufferUsage::StructuredImmutable;
+                desc.SizeInBytes = static_cast<uint32_t>(count) * stride;
+                desc.StrideInBytes = stride;
+                desc.InitialData = data;
+                return device.CreateBuffer(desc);
+            };
+
+            model.MeshletBuffer = createImmutable(meshlets.data(), meshlets.size(), sizeof(GpuMeshlet));
+            model.MeshletVertexBuffer =
+                createImmutable(meshletVertices.data(), meshletVertices.size(), sizeof(uint32_t));
+            model.MeshletTriangleBuffer =
+                createImmutable(meshletTriangles.data(), meshletTriangles.size(), sizeof(uint32_t));
+            if (!model.MeshletBuffer || !model.MeshletVertexBuffer || !model.MeshletTriangleBuffer)
+            {
+                Core::Logger::Error("ModelLoader", "メッシュレットのバッファ作成に失敗しました");
+                model.MeshletBuffer.reset();
+                model.MeshletVertexBuffer.reset();
+                model.MeshletTriangleBuffer.reset();
+                return;
+            }
+
+            // メッシュシェーダーはこの3本をResourceDescriptorHeap経由で読む
+            const bool registered =
+                device.RegisterBindless(model.MeshletBuffer.get()) != RHI::kInvalidBindlessIndex &&
+                device.RegisterBindless(model.MeshletVertexBuffer.get()) != RHI::kInvalidBindlessIndex &&
+                device.RegisterBindless(model.MeshletTriangleBuffer.get()) != RHI::kInvalidBindlessIndex;
+            if (!registered)
+            {
+                // 無効番号のままメッシュシェーダーへ渡すと未定義動作になる。
+                // 表ごと捨てれば描画側は従来の頂点シェーダー経路へ落ちる
+                Core::Logger::Error(
+                    "ModelLoader", "メッシュレットの表をbindlessへ登録できませんでした(区画が満杯?)");
+                model.MeshletBuffer.reset();
+                model.MeshletVertexBuffer.reset();
+                model.MeshletTriangleBuffer.reset();
+                return;
+            }
+
+            model.TotalMeshletCount = static_cast<uint32_t>(meshlets.size());
+
+            // 1モデル1ドローにできるかの前提条件。1つでも塊を持たないメッシュがあると、
+            // そのメッシュは表に載っておらず、1回のDispatchMeshでは描かれずに消える
+            model.AllMeshesHaveMeshlets = true;
+            for (const Mesh& mesh : model.Meshes)
+            {
+                if (mesh.MeshletCount == 0)
+                {
+                    model.AllMeshesHaveMeshlets = false;
+                    Core::Logger::Warning(
+                        "ModelLoader",
+                        "メッシュレットを持たないメッシュがあるため、このモデルは1ドロー化できません"
+                        "(メッシュ単位の描画へ落とします)");
+                    break;
+                }
+            }
         }
     }
 
@@ -650,6 +847,27 @@ namespace Kurenai::Assets
         // バッファ本体は頂点バッファビュー/インデックスバッファビューと同一リソースを共有する
         const bool shaderReadableGeometry = buildMeshletGeometry || device.SupportsSoftwareRaster();
 
+        // モデル単位に連結したメッシュレットの3ブロック(GPUバッファはメッシュのループを
+        // 抜けてから1本ずつ作る。理由はループ内のコメント参照)
+        std::vector<GpuMeshlet> modelMeshlets;
+        std::vector<uint32_t> modelMeshletVertices;
+        std::vector<uint32_t> modelMeshletTriangles;
+        if (buildMeshletGeometry)
+        {
+            size_t totalMeshletCount = 0;
+            size_t totalMeshletVertexCount = 0;
+            size_t totalMeshletTriangleCount = 0;
+            for (const MeshEntry& mesh : meshEntries)
+            {
+                totalMeshletCount += mesh.MeshletCount;
+                totalMeshletVertexCount += mesh.MeshletVertexCount;
+                totalMeshletTriangleCount += mesh.MeshletTriangleCount;
+            }
+            modelMeshlets.reserve(totalMeshletCount);
+            modelMeshletVertices.reserve(totalMeshletVertexCount);
+            modelMeshletTriangles.reserve(totalMeshletTriangleCount);
+        }
+
         model.Meshes.reserve(meshEntries.size());
         for (const MeshEntry& mesh : meshEntries)
         {
@@ -680,7 +898,9 @@ namespace Kurenai::Assets
             outMesh.IndexCount = mesh.IndexCount;
             outMesh.VertexCount = mesh.VertexCount;
 
-            // メッシュ単位のAABBは.kmodel v10がMeshEntryに持っている(パック時に確定した値)
+            // メッシュ単位のAABBは.kmodel v10がMeshEntryに持っている(パック時に確定した値)。
+            // モデルのローカル空間のまま写し、ワールド空間への変換はSceneLoaderが行う
+            // (Modelは複数インスタンスから共有されうるため)
             for (int axis = 0; axis < 3; ++axis)
             {
                 outMesh.BoundsMin[axis] = mesh.BoundsMin[axis];
@@ -715,31 +935,90 @@ namespace Kurenai::Assets
                 device.RegisterBindless(outMesh.IndexBuffer.get());
             }
 
-            if (buildMeshletGeometry && mesh.MeshletCount > 0)
+            if (buildMeshletGeometry && outMesh.MeshletCount > 0)
             {
-                // 3本ともシーン読み込み時に一度書いたら変わらないためStructuredImmutable。
-                // 内容は.kgeomのバイト列そのままで、読み込み後の加工は一切要らない
-                const auto createImmutable = [&](uint64_t offset, uint32_t count, uint32_t stride) {
-                    RHI::BufferDesc desc;
-                    desc.Usage = RHI::BufferUsage::StructuredImmutable;
-                    desc.SizeInBytes = count * stride;
-                    desc.StrideInBytes = stride;
-                    desc.InitialData = geometryPayload.data() + offset;
-                    return device.CreateBuffer(desc);
-                };
+                // メッシュレットの3ブロックは**モデル単位の1本へ連結する**。
+                // メッシュごとに別バッファのままだと1回のDispatchMeshで1メッシュしか
+                // 描けず、メッシュが1,715個あるモデルは必ず1,715ドローになる
+                // (Assets::GpuMeshletのコメント参照)。
+                //
+                // 連結にあたって、ディスク上はメッシュ内相対だったVertexOffset /
+                // TriangleOffsetをモデル基準へ付け替える。この足し込みを忘れると
+                // 「別のメッシュの頂点で描かれた三角形」が出るが、
+                // 位置がでたらめなだけで絵は出てしまうので気づきにくい
+                const uint32_t meshletVertexBase = static_cast<uint32_t>(modelMeshletVertices.size());
+                const uint32_t meshletTriangleBase = static_cast<uint32_t>(modelMeshletTriangles.size());
 
-                outMesh.MeshletBuffer =
-                    createImmutable(mesh.MeshletOffset, mesh.MeshletCount, sizeof(MeshletEntry));
-                outMesh.MeshletVertexBuffer =
-                    createImmutable(mesh.MeshletVertexOffset, mesh.MeshletVertexCount, sizeof(uint32_t));
-                outMesh.MeshletTriangleBuffer =
-                    createImmutable(mesh.MeshletTriangleOffset, mesh.MeshletTriangleCount, sizeof(uint32_t));
+                const auto* srcMeshlets =
+                    reinterpret_cast<const MeshletEntry*>(geometryPayload.data() + mesh.MeshletOffset);
+                const auto* srcMeshletVertices =
+                    reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.MeshletVertexOffset);
+                const auto* srcMeshletTriangles =
+                    reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.MeshletTriangleOffset);
 
-                // メッシュシェーダーはこの3本もResourceDescriptorHeap経由で読む
-                // (頂点バッファは上で登録済み)
-                device.RegisterBindless(outMesh.MeshletBuffer.get());
-                device.RegisterBindless(outMesh.MeshletVertexBuffer.get());
-                device.RegisterBindless(outMesh.MeshletTriangleBuffer.get());
+                // 【LOD0の段だけを載せる】v10からメッシュレット配列は離散LODの全段を
+                // 連結して持っており、MeshEntry::MeshletCountは**全段の合計**である。
+                // そのまま回すと、簡略化した段まで同じ場所へ重ねて描かれる。
+                // 描くのはLOD0(必ず要素0から始まる)だけで、段を選ぶのはStage 6の担当。
+                //
+                // 【間接参照テーブルは全段ぶんをそのまま連結する】LOD0のメッシュレットが
+                // 指すのはブロックの先頭側なので、後ろに他の段のデータが付いていても
+                // オフセットは正しいまま。段ごとに切り詰めるとStage 6で結局入れ直すことになる
+                outMesh.MeshletOffset = static_cast<uint32_t>(modelMeshlets.size());
+                // ディスク上のメッシュレットが本当に所属メッシュと同じ材質を指しているか。
+                //
+                // 【なぜ確かめるのか】1モデル1ドローは「メッシュレットが材質を跨がない」
+                // という前提の上に成り立っている。破れていても絵は出てしまい、
+                // 「一部の面だけ別のテクスチャで描かれる」という形でしか現れない。
+                // v10はMeshletEntry自身がMaterialIndexを持つので、突き合わせれば
+                // パッカーとローダーの食い違いをその場で機械的に検出できる
+                bool meshletMaterialMismatch = false;
+
+                for (uint32_t m = 0; m < outMesh.MeshletCount; ++m)
+                {
+                    const MeshletEntry& src = srcMeshlets[m];
+                    if (src.MaterialIndex != static_cast<uint32_t>(mesh.MaterialIndex))
+                    {
+                        meshletMaterialMismatch = true;
+                    }
+                    GpuMeshlet dst;
+                    dst.VertexOffset = meshletVertexBase + src.VertexOffset;
+                    dst.TriangleOffset = meshletTriangleBase + src.TriangleOffset;
+                    dst.VertexCount = src.VertexCount;
+                    dst.TriangleCount = src.TriangleCount;
+                    dst.BoundsCenter[0] = src.BoundsCenter[0];
+                    dst.BoundsCenter[1] = src.BoundsCenter[1];
+                    dst.BoundsCenter[2] = src.BoundsCenter[2];
+                    dst.BoundsRadius = src.BoundsRadius;
+                    dst.ConeAxis[0] = src.ConeAxis[0];
+                    dst.ConeAxis[1] = src.ConeAxis[1];
+                    dst.ConeAxis[2] = src.ConeAxis[2];
+                    dst.ConeCutoff = src.ConeCutoff;
+                    // 頂点バッファはメッシュ単位のまま。番号は上で登録済み
+                    dst.VertexBufferIndex = outMesh.VertexBuffer->GetBindlessIndex();
+                    // MaterialIndexとFlagsは、メッシュの並びが確定してから
+                    // BuildMeshletMaterialLinksがまとめて埋める(SortMeshesByMaterialが
+                    // メッシュを入れ替えるため、ここで振ると対応が崩れる)
+                    dst.MeshletIndexInMesh = m;
+                    modelMeshlets.push_back(dst);
+                }
+
+                if (meshletMaterialMismatch)
+                {
+                    Core::Logger::Error(
+                        "ModelLoader",
+                        "メッシュレットが所属メッシュと違う材質を指しています(1モデル1ドローの前提が"
+                        "破れています): " + WideToUtf8(filePath));
+                }
+
+                // 間接参照テーブルは中身を書き換えずそのまま連結してよい
+                // (メッシュレット側のオフセットを付け替えたことで辻褄が合う)
+                modelMeshletVertices.insert(
+                    modelMeshletVertices.end(), srcMeshletVertices,
+                    srcMeshletVertices + mesh.MeshletVertexCount);
+                modelMeshletTriangles.insert(
+                    modelMeshletTriangles.end(), srcMeshletTriangles,
+                    srcMeshletTriangles + mesh.MeshletTriangleCount);
             }
 
             if (buildRaytracingGeometry)
@@ -832,7 +1111,25 @@ namespace Kurenai::Assets
             model.Lights.push_back(std::move(light));
         }
 
+        // アルファカットアウトの有無はアセット固有の性質なので、**デバイスの機能に依らず**ここで決める。
+        // BuildMaterialTable の中で立てると、bindless非対応(DX11)ではテーブル自体を作らないため
+        // 「カットアウトを持つモデルなのに常にfalse」になる。今の使用箇所はメッシュレット経路の
+        // 内側だけなので実害は出ないが、バックエンドで 0/1 が変わる値を
+        // アセットの性質として持たせるべきではない
+        for (const Mesh& mesh : model.Meshes)
+        {
+            if (mesh.AlphaCutoff > 0.0f)
+            {
+                model.HasCutoutMaterial = true;
+                break;
+            }
+        }
+
         SortMeshesByMaterial(model);
+        // マテリアルテーブルはメッシュの並びが確定してから作る(番号がずれるため)。
+        // メッシュレットの表はさらにその後 ―― 塊1件ごとにマテリアル番号を書き込むため
+        BuildMaterialTable(device, model);
+        BuildMeshletTables(device, model, modelMeshlets, modelMeshletVertices, modelMeshletTriangles);
 
         const auto endTime = std::chrono::steady_clock::now();
         Core::Logger::Info(

@@ -80,7 +80,17 @@ namespace
     void PrintOut(const std::string& utf8) { std::cout << ToConsoleEncoding(utf8); }
     void PrintErr(const std::string& utf8) { std::cerr << ToConsoleEncoding(utf8); }
 
-    // Dxil65(bindless無し / SM 6.5)を焼かないファイル。
+    // === 焼かないファイルの明示リスト ===
+    //
+    // 【ソースの正規表現で決めない】以前は「RayQuery|ResourceDescriptorHeap|KURENAI_BINDLESS の
+    // どれかがソースに現れたら SM 5.0 では焼かない」という判定にしていた。これは誤りで、
+    // Shadow.hlsl が `#if defined(KURENAI_BINDLESS)` でガードして使い始めた途端、
+    // ガード行そのものに反応して DX11 用のバリアントが丸ごと落ち、DX11 が起動しなくなった。
+    // Bindless.hlsli は「非対応側では既定値へ縮退する」設計なので、マクロ名が出てくることと
+    // 「SM 5.0 で焼けない」ことは無関係である。
+    //
+    // いまはコンパイルを実際に試し、落ちたら**ビルドを止める**。焼かないのはこのリストに
+    // 挙げたファイルだけ。
     //
     // 【ここに足すときの基準】「そのバリアントが選ばれる実行環境では、エンジンがそのシェーダーを
     // 一度も生成しない」ことをエンジン側のコードで確かめてから足すこと。
@@ -104,18 +114,51 @@ namespace
         // このファイルのエントリとしても検出されるが、エンジンは要求しない。
         // ファイル単位で除外するのが正しい
         "GBufferMeshlet.hlsl",
+        // シャドウパスのメッシュシェーダー版。GBufferMeshlet.hlsl と同じ理由
+        // (KURENAI_BINDLESS_BUFFER をガード無しで使い、SupportsMeshShader() の内側でのみ生成される)
+        "ShadowMeshlet.hlsl",
     };
 
-    bool ShouldSkipDxil65(const std::string& fileName)
+    // Dxbc50(d3dcompiler / SM 5.0)を焼かないファイル。DX11 が一度も生成しないもの。
+    //
+    // 【ここに足すときの基準】Dxil65 と同じ ―― エンジン側のガードを確かめてから足す。
+    // DX11 が実際に生成するシェーダーをここへ入れると、DX11 が起動できなくなる。
+    const char* const kSkipDxbc50Files[] = {
+        // インラインレイトレーシング(RayQuery)は SM 6.5 の機能。
+        // DX11 は SupportsRaytracing() が常に false で、これらを生成しない
+        "RTAO.hlsl",
+        "RTReflection.hlsl",
+        "RTShadow.hlsl",
+        "DDGIProbeTrace.hlsl",
+        // 自前ソフトウェアラスタライザは DX12 専用(DX11Device::SupportsSoftwareRaster は常に false)
+        "SoftwareRaster.hlsl",
+        "SoftwareRasterResolve.hlsl",
+        // メッシュシェーダー経路。DX11Device::SupportsMeshShader は常に false。
+        // インクルード展開で拾う VSMain も含めてファイル単位で除外する
+        "GBufferMeshlet.hlsl",
+        "ShadowMeshlet.hlsl",
+    };
+
+    bool Contains(const char* const* list, size_t count, const std::string& fileName)
     {
-        for (const char* name : kSkipDxil65Files)
+        for (size_t i = 0; i < count; ++i)
         {
-            if (fileName == name)
+            if (fileName == list[i])
             {
                 return true;
             }
         }
         return false;
+    }
+
+    bool ShouldSkipDxil65(const std::string& fileName)
+    {
+        return Contains(kSkipDxil65Files, std::size(kSkipDxil65Files), fileName);
+    }
+
+    bool ShouldSkipDxbc50(const std::string& fileName)
+    {
+        return Contains(kSkipDxbc50Files, std::size(kSkipDxbc50Files), fileName);
     }
 
     void PrintUsage()
@@ -445,11 +488,7 @@ int wmain(int argc, wchar_t** argv)
                 continue;
             }
 
-            // SM 5.0 に無い機能を使うファイルは d3dcompiler の対象外。
-            // DX11 はそもそもこれらのシェーダーを生成しない
-            static const std::regex sm6OnlyRe(
-                R"(RayQuery|TraceRay|RaytracingAccelerationStructure|ResourceDescriptorHeap|KURENAI_BINDLESS)");
-            const bool sm6Only = std::regex_search(source, sm6OnlyRe);
+            const bool skipDxbc50 = ShouldSkipDxbc50(result.FileName);
             const bool skipDxil65 = ShouldSkipDxil65(result.FileName);
 
             std::vector<BuiltEntry> built;
@@ -458,8 +497,9 @@ int wmain(int argc, wchar_t** argv)
                 const bool meshPipeline = entry.Stage == ShaderPackageStage::Amplification ||
                                           entry.Stage == ShaderPackageStage::Mesh;
 
-                // Dxbc50 (d3dcompiler / SM 5.0)
-                if (!sm6Only && !meshPipeline)
+                // Dxbc50 (d3dcompiler / SM 5.0)。増幅/メッシュシェーダーには SM 5.0 の
+                // プロファイルが存在しないためステージで弾く
+                if (!skipDxbc50 && !meshPipeline)
                 {
                     CompileResult compiled =
                         ShaderCompiler::CompileDxbc(file.wstring(), entry.Name, entry.Stage, options.DebugBuild);

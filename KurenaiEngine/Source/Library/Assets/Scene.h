@@ -3,7 +3,9 @@
 #include <DirectXMath.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Model.h"
@@ -12,13 +14,81 @@
 
 namespace Kurenai::Assets
 {
+    // 1つのModelInstanceが持てるLODの段数の上限(.ksceneのPathを含む)。
+    // .kmodelのMeshEntryが持つメッシュレットLODの上限(kMaxMeshletLODCount)と、
+    // DDGIボリュームのLODCountの上限に揃えてある。
+    // これ以上粗くしたいものは、段を増やすのではなく別のシーンへ分ける粒度になる
+    inline constexpr size_t kMaxModelLODCount = 4;
+    // モデルインスタンスの常駐状態(ストリーミング)。
+    //
+    // 値が動くのは[Scene]StreamingDistanceを指定したシーンだけで、
+    // 指定が無ければ読み込み時のLoadedのまま変化しない(従来どおりの全常駐)。
+    //
+    // 【なぜ表示を先に用意するか】破棄が早すぎる/範囲内なのに読み込まれない、といった破綻は
+    // 画面を見ても分からない(そこに何も無いのが正しいのか間違いなのか区別できない)。
+    // 常駐状態を位置ごとに見られるようにしておかないと、入れた後で原因を切れない
+    enum class ResidencyState : uint8_t
+    {
+        Unloaded = 0,   // 範囲外。ジオメトリ/テクスチャをGPUに載せていない
+        Loading  = 1,   // 読み込み中
+        Loaded   = 2,   // 常駐。描画できる
+    };
+
+    // メッシュ1つぶんのワールド空間AABB。ModelInstanceが自分のModelのメッシュ数だけ持つ。
+    //
+    // 【なぜ配列でなく構造体にするか】IsAABBVisible(KurenaiEngine3D.cpp)が
+    // const float(&)[3] を2本取るため、min/maxが同じ要素の中に隣り合っている必要がある
+    struct MeshWorldBounds
+    {
+        float Min[3] = { 0.0f, 0.0f, 0.0f };
+        float Max[3] = { 0.0f, 0.0f, 0.0f };
+    };
+
     // シーン内に配置された1つのモデルインスタンス。Modelのジオメトリ自体は
     // ワールド空間原点に焼き込み済み(ModelLoader.cpp参照)のままなので、
     // 実際の配置はWorld/NormalMatrixで頂点シェーダー側にて適用する(KurenaiEngine3D::
     // MakeObjectConstants参照)
     struct ModelInstance
     {
-        Model Model;
+        // 【値ではなく共有ポインタで持つ理由】同じ.kmodelを複数のインスタンスが指せるようにするため。
+        // Modelは頂点/インデックス/テクスチャのGPUリソースを丸ごと抱えるので、同じパスを2回読むと
+        // VRAMに二重に載る(MultiModelTest.ksceneは同じ.kmodelを3回配置しており、実際に3重だった)。
+        // 実体はScene::ModelCacheが所有し、ここはその共有参照になる。
+        //
+        // constなのは、読み込み後にモデルの中身を書き換える経路を作らないため。1つのModelを
+        // 複数のインスタンスが共有するので、片方から書き換えるともう片方に波及する。
+        // 唯一の例外だったRaytracingSceneのCPUコピー解放はScene::ModelCache側を回す形へ移した
+        std::shared_ptr<const Model> Model;
+
+        // モデルLODの2段目以降(.ksceneの[Model]LODPath / LODDistance)。粗くなっていく順。
+        // LODModels[i] は「カメラからの距離が LODDistances[i] 以上」のときに使う段で、
+        // どれにも当てはまらない(=最も近い)ときは上のModelを使う。
+        // LODを持たないインスタンスでは両方とも空になり、従来どおりModelだけが描かれる。
+        //
+        // 【距離はAABBの最近接点まで】中心距離だと1.1km四方のPLATEAUタイルで破綻する
+        // (タイルの端に立っていても中心までは500m以上あるため、近景なのに粗い段が選ばれる)
+        //
+        // 【型を Assets:: で修飾する理由】直前のメンバ名 Model が型名 Model を隠すため、
+        // ここから素の Model と書くと「型ではない」とコンパイルエラーになる(C2327)
+        std::vector<std::shared_ptr<const Assets::Model>> LODModels;
+        std::vector<float> LODDistances;
+
+        // --- ストリーミング([Scene]StreamingDistance 指定時) --------------------------------
+        //
+        // 実体を読み込むのに必要な .kmodel のフルパス。Model / LODModels と同じ並びで、
+        // 先頭が Model、以降が LODModels に対応する。
+        //
+        // 【ストリーミングしないシーンでも埋める】どちらの経路でも同じデータが揃っているほうが、
+        // 「読み込み済みかどうか」の判定を Model が空かどうかの1点に寄せられる
+        std::vector<std::wstring> ModelPaths;
+
+        // 各段が読み込み済みか。ストリーミングしないシーンでは全段が読み込み済みで始まる。
+        // 実体そのものは Model / LODModels の shared_ptr が空かどうかで判る
+        bool IsLODLoaded(size_t level) const
+        {
+            return (level == 0) ? static_cast<bool>(Model) : static_cast<bool>(LODModels[level - 1]);
+        }
+
         DirectX::XMFLOAT4X4 World;          // Scale * Rotation * Translation(転置済み、HLSLへそのまま渡せる形)
         DirectX::XMFLOAT4X4 NormalMatrix;   // Worldの3x3部分の逆転置(4x4に格納、転置済み)
         float TangentSignFlip = 1.0f;       // Worldの行列式が負(ミラーリング)なら-1
@@ -42,6 +112,28 @@ namespace Kurenai::Assets
         // その包絡を取る(シーン全体のAABBを合成しているのと同じループで求めている)
         float WorldBoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float WorldBoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
+        // Model::MeshesのメッシュごとのワールドAABB(要素数はModel.Meshes.size()と同じ)。
+        // 上のWorldBoundsMin/Maxと同じくSceneLoaderが読み込み時に一度だけ求める。
+        //
+        // 【なぜインスタンス側に持つか】Meshのローカル空間AABBはModelが持つが、
+        // ワールド空間の値はインスタンスのWorldに依存する。将来同じModelを複数のインスタンスで
+        // 共有するようになっても壊れないよう、変換後の値はこちらへ置く。
+        //
+        // 【空になることがある】.kmodelがv10より前のメッシュ単位AABBを持たない世代…という
+        // 分岐は無い(v10未満は読み込み自体が拒否される)。空になるのはメッシュ0個のモデルだけ。
+        // 描画側は「要素数がMeshesと一致していること」を前提にしてよいが、
+        // 念のため添字の範囲は確かめること
+        std::vector<MeshWorldBounds> MeshWorldBoundsList;
+
+        // ストリーミングの常駐状態と、いま使っているモデルLODの段(0が最も詳細)。
+        //
+        // 【書き込むのはエンジン側の毎フレーム更新1箇所ずつ】Residencyは
+        // KurenaiEngine3D::UpdateModelStreaming、LODLevelはUpdateModelLODが書く。
+        // SceneLoaderが入れるLoaded/0は「ストリーミングもLODも使わないシーン」の値。
+        // 詳細はResidencyStateのコメント
+        ResidencyState Residency = ResidencyState::Loaded;
+        uint32_t LODLevel = 0;
     };
 
     // 反射プローブ(リフレクションプローブ)。この位置から周囲をキューブマップへキャプチャし、
@@ -148,14 +240,32 @@ namespace Kurenai::Assets
     struct Scene
     {
         std::wstring Name;
-        std::vector<ModelInstance> Instances;
 
         // 全モデルで共有する1x1のフォールバックテクスチャ(白/フラット法線/黒/マゼンタ)。
         //
-        // 【Instancesより後ろに置いてはいけない】メンバはここでの宣言順に構築され、
-        // 逆順に破棄される。Instancesが持つModelはここのテクスチャを生ポインタで指しているため、
-        // 先に破棄されると解放済みを指す。Instancesより前に宣言してこの順序を保証する
+        // 【ModelCache/Instancesより後ろに置いてはいけない】メンバはここでの宣言順に構築され、
+        // 逆順に破棄される。Modelが持つMeshはここのテクスチャを生ポインタで指しているため、
+        // 先に破棄されると解放済みを指す。Modelを持つ2つより前に宣言してこの順序を保証する。
+        //
+        // 【以前はここがInstancesより後ろにあった】コメントは「Instancesより前に宣言する」と
+        // 書いてあるのに、実際の宣言はInstancesの後ろにあった(=破棄はInstancesより先)。
+        // Modelのデストラクタがこの生ポインタを読まないため実害は出ていなかったが、
+        // ModelCacheがModelの実体を所有するようになって順序の重みが増したので、
+        // コメントが元から要求していた並びへ直した
         SharedTexturePool SharedTextures;
+
+        // .kmodelのパス(assetRootDirectoryを含む絶対パス)から読み込み済みModelを引くキャッシュ。
+        // Modelの実体を所有するのはここで、ModelInstance::Modelはこれへの共有参照になる。
+        //
+        // 【SharedTexturesより後ろ・Instancesより前】上のSharedTexturesのコメントの理由で
+        // SharedTexturesより後ろに、そしてInstancesが指す先を先に消さないためInstancesより前に置く
+        // (破棄は Instances -> ModelCache -> SharedTextures の順になる)。
+        //
+        // 【スレッド】読み書きするのはLoaderスレッドのLoadSceneだけで、Renderスレッドは
+        // ApplyLoadedSceneで受け取った後に読むだけ。したがってロックを持たない
+        std::unordered_map<std::wstring, std::shared_ptr<Model>> ModelCache;
+
+        std::vector<ModelInstance> Instances;
 
         // 各ModelInstanceが持つModel::Lights(モデルファイル埋め込みのライト。glTFのKHR_lights_punctual
         // やFBXのライトノード由来)をInstance::Worldでワールド空間へ変換したものと、.kscene自身の
@@ -216,6 +326,30 @@ namespace Kurenai::Assets
         bool HasShadowDistance = false;
         float ShadowDistance = 0.0f;
 
+        // モデルのストリーミングを行う距離[m]。未指定(HasStreamingDistance == false)なら
+        // **従来どおり全モデルを読み込み時に常駐させる**。
+        //
+        // 指定するとLoadSceneは.kmodelの実体を読まず、ヘッダのAABBだけでインスタンスを配置する。
+        // 実体はカメラがこの距離まで近づいたときにLoaderスレッドが読み込む。
+        //
+        // 【この距離はAABBの最近接点まで】モデルLODの切り替え距離(ModelInstance::LODDistances)と
+        // 同じ測り方。中心距離だと巨大なタイルで足元のものが未読み込みのまま残る
+        bool HasStreamingDistance = false;
+        float StreamingDistance = 0.0f;
+
+        // WASD/E/Qでカメラを動かす速度[m/s]。未指定(HasCameraSpeed == false)なら
+        // シーンAABBの対角から自動で決める(KurenaiEngine3D::ResetSceneDependentParams)。
+        //
+        // 【なぜ必要か】従来は moveSpeed = Shift ? 20 : 5 の即値だった。市街地規模のシーン
+        // (Project PLATEAU 東京23区は対角約45km)ではこの速度で端から端まで38分かかり、
+        // シーンを見て回ること自体ができない。逆に速度を上げただけにするとSponza(対角37m)のような
+        // 小さいシーンが操作不能になるため、シーンの規模から決めたうえで個別に上書きできる形にする。
+        //
+        // 【既定値を持たせない理由】ShadowDistanceと同じ。何らかの既定値を入れると、
+        // これまで問題なく操作できていたシーンの挙動が黙って変わる
+        bool HasCameraSpeed = false;
+        float CameraSpeed = 0.0f;
+
         // テクスチャの常駐ミップ制御(テクスチャストリーミング)を有効にするか。
         //
         // 【既定はoff】未指定なら従来どおり全ミップを常駐させる。既存アセットの見え方も
@@ -224,26 +358,19 @@ namespace Kurenai::Assets
         bool TextureStreamingEnabled = false;
         // 必要ミップの推定に足すバイアス[段]。負なら安全側(より詳細なミップを常駐させる)。
         //
-        // 【既定 -3 は実測で決めた】Bistro Exteriorで、常駐ミップ制御をoff/onした画を
+        // 【既定 -2 は実測で決めた】Bistro Exteriorで、常駐ミップ制御をoff/onした画を
         // 同一起動・同一カメラで撮り、32pxタイルごとにラプラシアン分散を比べた結果:
         //
-        //   バイアス  常駐率   比<0.80のタイル   最悪タイル
-        //   (ノイズ下限)  ―        0枚           0.858
-        //     -1       9.9%       6枚           0.359  ← 鉄格子が明確に潰れる
-        //     -2      16.8%       3枚           0.572
-        //     -3      28.6%       0枚           0.852  ← ノイズ下限とほぼ同じ
-        //     -4      44.4%       0枚           0.839
+        //   UV密度の代表値  バイアス  常駐率   比<0.80のタイル   最悪タイル
+        //   (ノイズ下限)       ―        ―          0枚           0.918
+        //   p90              -2      13.8%       14枚           0.175
+        //   中央値            -3      28.6%        0枚           0.852
+        //   p10              -1      12.4%        3枚           0.745
+        //   p10              -2      21.1%        1枚           0.768  ← 既定
         //
-        // -4はノイズ下限と区別できないが、常駐量が1.55倍になる割に改善が
-        // 「比<0.95が8枚→5枚」しかないため-3を採る。
-        //
-        // 【なぜ0でなく負の値が要るのか】CPU側の推定は距離だけを使う等方的な見積もりで、
-        // (1)斜めから見た面が異方性フィルタに要求する細かさ、(2)1メッシュ内でUV密度が
-        // 大きく変わる場合(平らな壁と細かい格子が同じメッシュ)を取りこぼす。
-        // このバイアスはその構造的な過小推定を吸収している。
-        // **つまみを回して合わせているのであって、推定式が正しくなったわけではない。**
-        // 詳細と、推定式そのものを直す道筋は docs/ImplementationDetail.md
-        float TextureStreamingBias = -3.0f;
+        // 残る1枚は暗部のアルファテスト葉で、並べても区別が付かない(絶対値が小さいため
+        // 相対指標だけが大きく動く)。根拠と経緯は docs/ImplementationDetail.md 48章
+        float TextureStreamingBias = -2.0f;
 
         // AO/間接光(SSAO・SSIL)を有効にするか。Furnace Testでは球の縁がAOで暗くなると
         // 「エネルギー損失による暗さ」と区別がつかなくなるため無効にする

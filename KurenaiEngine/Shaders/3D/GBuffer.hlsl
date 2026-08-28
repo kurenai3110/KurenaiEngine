@@ -12,14 +12,26 @@ Texture2D BentNormalTexture : register(t6);
 
 PSOutput PSMain(PSInput input)
 {
+    // マテリアルの読み出し。1モデル1ドローの経路ではマテリアルテーブルから、
+    // 従来のメッシュ単位の経路では定数バッファから読む(GBufferCommon.hlsli)。
+    // **どちらでも以降の式は1行も変わらない**のが要点で、
+    // 経路を切り替えても見た目が一致するのはこの構造による
+    const GpuMaterial material = LoadSurfaceMaterial(input.MaterialIndex);
+
     // baseColor = baseColorTexture * baseColorFactor(glTF仕様)。BaseColorTextureIndexが
     // 無いマテリアルは白1x1のプレースホルダーが差さるため、この乗算だけで
     // 「テクスチャのみ」「係数のみ」「両方」のすべてを正しく扱える
-    float4 baseColorSample = BaseColorTexture.Sample(MaterialSampler, input.UV) * BaseColorFactor;
+    float4 baseColorSample =
+        SampleMaterialTexture(material.BaseColorTextureIndex, BaseColorTexture, input.UV)
+        * material.BaseColorFactor;
 
     // AlphaCutoff<=0(アルファカットアウト無効)の場合、alpha(0〜1)は常にAlphaCutoff以上になるため
     // clipは発火しない。AlphaCutoff>0の場合のみ、alphaがそれを下回るピクセルを破棄する
-    clip(baseColorSample.a - AlphaCutoff);
+    clip(baseColorSample.a - material.AlphaCutoff);
+
+    // モデルLODの切り替え中だけ、2段を画素単位で分け合う(GBufferCommon.hlsli)。
+    // 深度プリパス(DepthPrepass.hlsl)がまったく同じ呼び出しをしていること
+    ApplyLODDither(input.Position.xy);
 
     float3 geometricNormal = normalize(input.Normal);
 
@@ -27,21 +39,27 @@ PSOutput PSMain(PSInput input)
     // サンプリング時にハードウェアがB=0を返すため、Bをそのまま使うとタンジェント空間Zが
     // 常に-1(裏向き)になってしまう。単位ベクトルである前提でX/YからZを再構成する
     // (通常の3チャンネル法線マップに対しても正しく機能する)
-    float2 normalXY = NormalTexture.Sample(MaterialSampler, input.UV).xy * 2.0f - 1.0f;
+    float2 normalXY =
+        SampleMaterialTexture(material.NormalTextureIndex, NormalTexture, input.UV).xy * 2.0f - 1.0f;
     float normalZ = sqrt(saturate(1.0f - dot(normalXY, normalXY)));
     float3 normalSample = float3(normalXY, normalZ);
     float3x3 tbn = ComputeTangentFrame(geometricNormal, input.Tangent);
     float3 N = normalize(mul(normalSample, tbn));
 
-    float3 metallicRoughnessSample = MetallicRoughnessTexture.Sample(MaterialSampler, input.UV).rgb;
-    float metallic = saturate(MetallicFactor * metallicRoughnessSample.b);
+    float3 metallicRoughnessSample = SampleMaterialTexture(
+        material.MetallicRoughnessTextureIndex, MetallicRoughnessTexture, input.UV).rgb;
+    float metallic = saturate(material.MetallicFactor * metallicRoughnessSample.b);
     // RoughnessFactorが負の場合はソースデータにラフネス係数が無かったことを表す
     // (Assets::kInvalidMaterialFactor)。パッカーが勝手な既定値を埋めない方針のため、
     // ここで係数1.0=テクスチャの値をそのまま使う、と解釈する
-    float roughnessFactor = (RoughnessFactor < 0.0f) ? 1.0f : RoughnessFactor;
+    float roughnessFactor = (material.RoughnessFactor < 0.0f) ? 1.0f : material.RoughnessFactor;
     float roughness = clamp(roughnessFactor * metallicRoughnessSample.g, 0.045f, 1.0f);
 
-    float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor;
+    // 【EmissiveIntensityをここで掛ける】シーン全体の自発光倍率。従来経路では
+    // C++側が係数へ掛けたうえでこの値に1.0を入れており、テーブル経路では
+    // 焼き込めないぶんをここで掛ける(GBufferCommon.hlsliのEmissiveIntensity参照)
+    float3 emissive = SampleMaterialTexture(material.EmissiveTextureIndex, EmissiveTexture, input.UV).rgb
+        * material.EmissiveFactor * EmissiveIntensity;
 
     // モーションベクター。今フレームと前フレームの投影位置をどちらも画面UVへ直し、その差を取る。
     //
@@ -62,14 +80,17 @@ PSOutput PSMain(PSInput input)
     // 面ごとに固有の場所を持たないため、そちらで引くと別の場所の遮蔽を読んでしまう(22章)。
     // glTFのocclusionTextureのように元から遮蔽マップを持つアセットもこのUV1側へ寄せてある
     // (パッカーが未ベイク時はUV1をUVと同じ値で埋める)ので、シェーダー側の分岐は不要
-    float occlusionSample = OcclusionTexture.Sample(MaterialSampler, input.LightmapUV).r;
-    float ao = lerp(1.0f, occlusionSample, OcclusionStrength);
+    float occlusionSample =
+        SampleMaterialTexture(material.OcclusionTextureIndex, OcclusionTexture, input.LightmapUV).r;
+    // OcclusionMapScaleは遮蔽マップの有効/無効(1.0 or 0.0)。EmissiveIntensityと同じ理由で
+    // ここで掛ける(従来経路ではC++側が既にOcclusionStrengthへ織り込み、この値は1.0)
+    float ao = lerp(1.0f, occlusionSample, material.OcclusionStrength * OcclusionMapScale);
 
     PSOutput output;
     // aチャンネルは透過率。専用のG-Bufferを増やさずに済むよう空き枠を使っている
     // (従来ここは定数1.0で、消費側はどこも読んでいなかった)。
     // 葉・花弁のように薄いものが裏からの光を透かす量で、0なら従来どおりの不透明な陰影になる
-    output.Albedo = float4(baseColorSample.rgb, Translucency);
+    output.Albedo = float4(baseColorSample.rgb, material.Translucency);
     output.Normal = OctEncode(N);
     // bチャンネルはマテリアルの遮蔽率。DeferredLighting.hlslとSSR.hlslがSSAO/SSILの遮蔽と
     // 乗算して使う(専用のG-Bufferを増やさずに済むよう、空き枠を使っている)
@@ -88,7 +109,8 @@ PSOutput PSMain(PSInput input)
     // ベイカーが使う基底は上のComputeTangentFrameとまったく同じ手順で組まれている。
     // ここでmul(bentTS, tbn)と書けるのは、tbnの行が順にT/B/Nだから。
     // 直交行列なので長さ(=aoB)は変換で保たれる ―― 遮蔽の強さが座標変換で変わってはいけない
-    const float4 bentSample = BentNormalTexture.Sample(MaterialSampler, input.LightmapUV);
+    const float4 bentSample =
+        SampleMaterialTexture(material.BentNormalTextureIndex, BentNormalTexture, input.LightmapUV);
     output.BentNormal = float4(mul(bentSample.xyz, tbn), bentSample.a);
 
     return output;

@@ -108,6 +108,7 @@
     <ClInclude Include="Source\Engine\UI\RenderingPanel.h" />
     <ClInclude Include="Source\Engine\UI\SystemPanel.h" />
     <ClInclude Include="Source\Engine\UI\ScenePanel.h" />
+    <ClInclude Include="Source\Engine\UI\StreamingPanel.h" />
     <ClInclude Include="Source\Engine\UI\PostProcessPanel.h" />
     <ClInclude Include="Source\Engine\UI\DebugViewPanel.h" />
     <ClInclude Include="Source\Engine\UI\LightingPanel.h" />
@@ -124,6 +125,7 @@
     <ClCompile Include="Source\Engine\UI\RenderingPanel.cpp" />
     <ClCompile Include="Source\Engine\UI\SystemPanel.cpp" />
     <ClCompile Include="Source\Engine\UI\ScenePanel.cpp" />
+    <ClCompile Include="Source\Engine\UI\StreamingPanel.cpp" />
     <ClCompile Include="Source\Engine\UI\PostProcessPanel.cpp" />
     <ClCompile Include="Source\Engine\UI\DebugViewPanel.cpp" />
     <ClCompile Include="Source\Engine\UI\LightingPanel.cpp" />
@@ -157,6 +159,7 @@
     <None Include="Shaders\3D\DDGIProbeTrace.hlsl" />
     <None Include="Shaders\3D\RaytracingScene.hlsli" />
     <None Include="Shaders\3D\Shadow.hlsl" />
+    <None Include="Shaders\3D\ShadowMeshlet.hlsl" />
     <None Include="Shaders\3D\TAA.hlsl" />
     <None Include="Shaders\3D\Tonemap.hlsl" />
     <None Include="Shaders\3D\SkyGenerate.hlsl" />

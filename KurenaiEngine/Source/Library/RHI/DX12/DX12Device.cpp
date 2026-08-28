@@ -120,14 +120,24 @@ namespace Kurenai::RHI
         // 末尾なら既存2つのリングの番号空間に一切触れずに済む。
         //
         // 【容量の根拠】登録するのは「シェーダーが動的な番号で選びたいもの」だけで、
-        // 内訳はマテリアルテクスチャ(Bistro Exteriorで182枚)と、モデルごとの
-        // ジオメトリバッファ(頂点+メッシュレット3本+インデックス = メッシュ数×5)。
-        // Bistro Exteriorのメッシュ数は約400なので 182 + 2000 ≒ 2182。
-        // シーン切り替えで解放・再登録されるためフリーリストで回るが、
-        // 複数モデルを並べるシーンに備えて余裕を持たせる。
+        // 内訳は (1) マテリアルテクスチャ、(2) メッシュごとの頂点/インデックスバッファ、
+        // (3) モデルごとのメッシュレット表・メッシュ表・マテリアルテーブル(5本)。
+        //
+        // 【8192では足りない】当初の根拠はBistro Exterior(テクスチャ182枚 + メッシュ約400×5本
+        // ≒ 2182)だったが、PLATEAU LOD2は**1タイルだけでマテリアル1,715・テクスチャ1,714**ある
+        // (実測)。メッシュレット表をモデル単位へ統合した後でも
+        //   テクスチャ 1,714 + メッシュ 1,715×2(頂点+インデックス) + モデル 5 = 5,149 / タイル
+        // で、丸の内2タイルなら約10.3k、23区で LOD2 を4タイル常駐させ LOD1 の671モデル
+        // (671×(2+5) ≒ 4.7k)を足すと約25kになる。
+        //
+        // 【超えたときに静かに壊れる】DX12BindlessTable::Registerは満杯でも例外を投げず、
+        // エラーログを出してkInvalidBindlessIndexを返す。消費側はそれを「テクスチャ無し」と
+        // 解釈して白1x1へ落とすため、**絵はそれらしく出たまま間違う**。
+        // だから上限は「足りるはず」ではなく明確に余裕のある側へ倒す。
+        //
         // シェーダ可視CBV_SRV_UAVヒープの上限はTier 1でも1,000,000ディスクリプタあり、
-        // 8192程度は問題にならない
-        constexpr uint32_t kBindlessDescriptorCapacity = 8192;
+        // 65536でもディスクリプタ1つ32バイト換算で2MBに過ぎない
+        constexpr uint32_t kBindlessDescriptorCapacity = 65536;
 
         // シェーダーがResourceDescriptorHeapでヒープを直接添字することを許可するルートシグネチャの
         // フラグ(D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED)。
@@ -217,10 +227,18 @@ namespace Kurenai::RHI
         // 671×5 + 3 = 3358 まで下がるが、モデル数が増える方向に余裕を持たせておく。
         // 非シェーダー可視ヒープなのでCPUメモリしか消費せず(16384エントリで約512KB)、
         // 引き上げの副作用は小さい。
+        //
+        // 【16384から65536へさらに引き上げた理由】bindless区画へ登録するディスクリプタは、
+        // 必ずこの非シェーダー可視ヒープのSRVを元にコピーされる。つまり
+        // **bindlessの実質的な上限を決めているのはkBindlessDescriptorCapacityではなくこちら**で、
+        // 片方だけ上げても意味がない。PLATEAU LOD2は1タイルでテクスチャ1,714 +
+        // メッシュ1,715×2本 ≒ 5,149を消費するため、複数タイル常駐で16384を超える。
+        // 65536エントリでも約2MB(1ディスクリプタ32バイト換算)。
+        //
         // レンダー側: レンダーターゲットのSRV/UAVに加え、Hi-Zとブルームのミップ別UAV、
         // IBL・反射プローブのキューブマップ(プローブ数×6面×ミップ数のUAV)が効く。
         // どちらも非シェーダー可視ヒープでCPUメモリのみを消費するため、余裕を持った値にしておく
-        constexpr uint32_t kAssetSrvCpuHeapCapacity = 16384;
+        constexpr uint32_t kAssetSrvCpuHeapCapacity = 65536;
         constexpr uint32_t kRenderSrvCpuHeapCapacity = 2048;
 
         DXGI_FORMAT ToDXGIFormat(Format format)
@@ -1461,9 +1479,9 @@ namespace Kurenai::RHI
             Core::Logger::Error("DX12", "メッシュシェーダー非対応の環境でCreateMeshPipelineStateが呼ばれました");
             return nullptr;
         }
-        if (!desc.MeshShader || !desc.PixelShader)
+        if (!desc.MeshShader)
         {
-            Core::Logger::Error("DX12", "CreateMeshPipelineStateにメッシュシェーダーまたはピクセルシェーダーが指定されていません");
+            Core::Logger::Error("DX12", "CreateMeshPipelineStateにメッシュシェーダーが指定されていません");
             return nullptr;
         }
 
@@ -1519,7 +1537,10 @@ namespace Kurenai::RHI
         // (サブオブジェクト自体を省く必要はなく、長さ0なら「無し」として扱われる)
         stream.AS = amplificationShader ? amplificationShader->GetBytecode() : D3D12_SHADER_BYTECODE{ nullptr, 0 };
         stream.MS = meshShader->GetBytecode();
-        stream.PS = pixelShader->GetBytecode();
+        // ピクセルシェーダーも任意。深度だけを書くパス(深度プリパスの不透明ぶん・シャドウ)は
+        // 段ごと省きたいので、長さ0のバイトコードを置いて「無し」にする
+        // (CreatePipelineStateがPixelShader=nullptrを同じ扱いにしているのに揃える)
+        stream.PS = pixelShader ? pixelShader->GetBytecode() : D3D12_SHADER_BYTECODE{ nullptr, 0 };
         stream.Rasterizer = rasterizer;
         stream.Blend = blend;
         stream.DepthStencil = depthStencil;
@@ -3073,6 +3094,16 @@ namespace Kurenai::RHI
         const uint32_t index = m_BindlessTable->Register(srv);
         dx12Buffer->SetBindlessIndex(index);
         return index;
+    }
+
+    uint32_t DX12Device::GetBindlessUsedCount() const
+    {
+        return m_BindlessTable ? m_BindlessTable->GetUsedCount() : 0;
+    }
+
+    uint32_t DX12Device::GetBindlessCapacity() const
+    {
+        return m_BindlessTable ? m_BindlessTable->GetCapacity() : 0;
     }
 
     uint32_t DX12Device::RegisterBindlessUAV(IRHIBuffer* buffer)

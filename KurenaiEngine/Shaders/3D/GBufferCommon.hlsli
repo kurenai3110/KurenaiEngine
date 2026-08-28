@@ -7,6 +7,7 @@
 #ifndef KURENAI_GBUFFER_COMMON_HLSLI
 #define KURENAI_GBUFFER_COMMON_HLSLI
 
+#include "Bindless.hlsli"
 #include "Meshlet.hlsli"
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
@@ -142,18 +143,121 @@ cbuffer ObjectConstants : register(b1)
     // 先頭までしか宣言していないシェーダーがあっても、定数バッファのオフセットは1バイトも
     // 動かない(上のMaterialID・BaseColorFactorのコメントと同じ理由)。
     // 頂点シェーダー経路ではどれも読まれないため、C++側は0のままでも構わない
-    uint VertexBufferIndex;          // StructuredBuffer<MeshVertex>(Assets::Vertexと同じ並び)
+    //
+    // 【表はモデル単位】かつてメッシュごとに別のバッファを指していたが、1回のDispatchMeshで
+    // モデル全体を描けるようにするためモデル単位の1本へ統合した(Assets::GpuMeshlet)。
+    // 頂点バッファの番号はメッシュレット1件ごとが持つので、ここでは渡さない
+    uint MeshletOffset;              // MeshletBufferの中で、このドローが見る範囲の先頭
     uint MeshletBufferIndex;         // StructuredBuffer<Meshlet>
     uint MeshletVertexBufferIndex;   // StructuredBuffer<uint>(頂点バッファへのインデックス)
     uint MeshletTriangleBufferIndex; // StructuredBuffer<uint>(ローカル頂点番号3つを詰めたもの)
-    uint MeshletCount;               // このメッシュのメッシュレット数(増幅シェーダーの範囲外判定用)
+    uint MeshletCount;               // このドローで見るメッシュレット数(増幅シェーダーの範囲外判定用)
 
     // 透過率(0=不透明、1=完全に透ける)。葉・花弁のように薄いものが、裏から当たった光を
     // 透かして表側を光らせる量。GBuffer.hlslがG-BufferのAlbedo.aへ書き、
     // DeferredLighting.hlsl/DirectLighting.hlslの透過項が読む(45章)。
     // 末尾に足しているので、先頭までしか宣言していないシェーダー(Shadow.hlsl等)への影響は無い
     float Translucency;
+
+    // モデルLODの切り替え中に2段をクロスディザで重ねるための係数(末尾に追加)。
+    //
+    //   1.0        LOD切替中ではない。全画素を描く(既定値。これ以外を書かない限り従来と同じ)
+    //   0 < f < 1  切り替え「先」の段。ノイズ < f の画素だけを描く
+    //  -1 < f < 0  切り替え「元」の段。ノイズ >= -f の画素だけを描く
+    //
+    // 【±で対にする理由】先と元がまったく同じノイズを読み、しきい値の両側で分け合うので、
+    // 2段が同じ画素を取り合わない。独立な模様にすると、同じ画素にLOD1の箱とLOD2の建物が
+    // 両方描かれてZファイティングになる(PLATEAUはLOD1とLOD2が同じ建物を二重に持つ)。
+    // 逆に隙間もできない ―― どの画素も必ずどちらか一方が描く。
+    //
+    // 末尾に足した4バイトのスカラーなので、既存シェーダーのオフセットは動かない
+    float DitherFade;
+    // --- マテリアルテーブル経路(1モデル1ドロー)専用 -----------------------------------
+    //
+    // 1回のDispatchMeshでモデル全体を描くと、上のMetallicFactor〜Translucencyのような
+    // 「メッシュごとに違う値」を定数バッファで渡せなくなる。代わりにマテリアルを
+    // StructuredBuffer<GpuMaterial>へ載せ、メッシュシェーダーが出力したMaterialIndexで引く。
+    //
+    // kInvalidBindlessIndexなら従来経路(t0〜t6と上の定数)を使う
+    uint MaterialTableIndex;
+    // 増幅シェーダーがメッシュレットを取捨するマスク(Assets::kGpuMaterialFlag*)。
+    // Rejectのビットが1つでも立っていれば捨て、Requireのビットが揃っていなければ捨てる。
+    // 1ドローでモデル全体を描くと、ドローやPSOの分割では材質を出し分けられないため、
+    // 「どのマテリアルを描くパスなのか」をここで指定する
+    uint MeshletFilterReject;
+    uint MeshletFilterRequire;
+    // シーン全体の自発光の強度倍率と、遮蔽マップの有効/無効(1.0 or 0.0)。
+    //
+    // 【なぜ定数で渡すのか】従来この2つはC++側(MakeObjectConstants)が係数へ
+    // 掛けてから定数バッファへ入れていた。マテリアルテーブルは読み込み時に焼くので
+    // 同じ手が使えず、シェーダー側で掛けるしかない。
+    // **どちらの経路でもピクセルシェーダーは必ず掛ける** ―― 従来経路では
+    // C++側が1.0を入れることで二重に掛からないようにしている
+    float EmissiveIntensity;
+    float OcclusionMapScale;
+    // このドローでメッシュレットカリングの統計を数えるか(0/1)。
+    //
+    // 【パスで分ける必要がある】深度プリパスは G-Buffer とまったく同じ増幅シェーダーを
+    // 使うため、フレーム全体のフラグ(MeshletCullStatsParams.x)だけで判定すると
+    // 同じ塊を1フレームに2回数えてしまい、「1フレームあたりの判定数」が倍になる。
+    // 数えるのは G-Buffer パスだけにする
+    uint MeshletStatsEnabled;
 };
+
+// 画面座標から作る決定的なノイズ(0〜1)。Tonemap.hlslが同名の関数を持つが、あちらは
+// バンディングを散らすためのもので用途が別。ここはLOD切替のクロスディザ専用
+float LODDitherNoise(float2 position)
+{
+    return frac(52.9829189f * frac(dot(position, float2(0.06711056f, 0.00583715f))));
+}
+
+// LOD切替のクロスディザで捨てる画素をclipする。DitherFadeが1.0(既定)なら何もしない。
+//
+// 【深度プリパスとG-Bufferで必ず同じものを呼ぶこと】片方だけが捨てると、
+// 深度は書かれているのに色が書かれない画素ができて穴が開く
+void ApplyLODDither(float2 screenPosition)
+{
+    if (DitherFade < 1.0f)
+    {
+        const float noise = LODDitherNoise(screenPosition);
+        // 【境界を半開区間にする】clipは負のときだけ捨てるので、素直に書くと
+        // noise == |DitherFade| ちょうどの画素で「先」と「元」の両方が生き残り、
+        // その画素だけZファイティングになる。「元」の側をわずかに厳しくして、
+        // 先: noise <= f / 元: noise > f と分けきる。
+        // ずらす量は画素の分け前を目に見えて変えない大きさにしてある
+        const float kBoundaryEpsilon = 1e-5f;
+        clip(DitherFade >= 0.0f ? (DitherFade - noise) : (noise + DitherFade - kBoundaryEpsilon));
+    }
+}
+
+// Assets::GpuMaterial(80バイト、Source/Library/Assets/Model.h)と1対1で対応。
+// **並びとサイズを一致させること。**
+//
+// 【構造化バッファは詰めて並ぶ】定数バッファと違い、StructuredBuffer<T>のTは
+// C++と同じ「メンバの型のアラインメントに従った詰めた配置」になる
+// (GBufferMeshlet.hlslのMeshVertexのコメントと同じ)
+struct GpuMaterial
+{
+    float4 BaseColorFactor;
+    float3 EmissiveFactor;
+    float MetallicFactor;
+    float RoughnessFactor;
+    float AlphaCutoff;
+    float OcclusionStrength;
+    float Translucency;
+    uint BaseColorTextureIndex;
+    uint NormalTextureIndex;
+    uint MetallicRoughnessTextureIndex;
+    uint EmissiveTextureIndex;
+    uint OcclusionTextureIndex;
+    uint BentNormalTextureIndex;
+    uint Flags;
+    uint Padding;
+};
+
+// PSInput::MaterialIndexに入る「マテリアルテーブルを使わない」ことを表す番号。
+// 頂点シェーダー経路(VSMain)がこれを書く
+static const uint kInvalidMaterialIndex = 0xFFFFFFFFu;
 
 Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
@@ -196,6 +300,15 @@ struct PSInput
     // 通常のPSMainは読まず、メッシュレットの分かれ方を目で確かめるデバッグ表示
     // (GBufferMeshlet.hlslのPSMainMeshletDebug)だけが使う
     nointerpolation uint MeshletIndex : TEXCOORD5;
+    // このピクセルのマテリアル番号(Model::MaterialTableBufferの添字)。
+    // メッシュシェーダー経路でだけ実際の番号が入り、従来の頂点シェーダー経路では
+    // kInvalidMaterialIndexになる。
+    //
+    // 【プリミティブ属性ではなく頂点属性でよい】メッシュレットは必ず1つのマテリアルの
+    // 三角形だけで構成される(KurenaiPackerがmeshopt_buildMeshletsをメッシュごとに
+    // 呼んでいるため)。1つの塊の中では全頂点で同じ値になるので、nointerpolationが
+    // 拾う先頭頂点の値がそのまま正しい。上のMeshletIndexとまったく同じ形
+    nointerpolation uint MaterialIndex : TEXCOORD6;
 };
 
 struct PSOutput
@@ -242,7 +355,76 @@ PSInput VSMain(VSInput input)
     output.PrevClip = mul(float4(worldPos, 1.0f), PrevViewProj);
     // この経路はメッシュレットを経由していない(GBufferCommon.hlsliのPSInput参照)
     output.MeshletIndex = kInvalidMeshletIndex;
+    // マテリアルテーブルも使わない。t0〜t6と定数バッファから読む従来経路
+    output.MaterialIndex = kInvalidMaterialIndex;
     return output;
+}
+
+// マテリアルのテクスチャを1枚サンプルする。
+//
+// bindless番号が有効ならResourceDescriptorHeapから、無効なら固定スロット(t0〜t6)へ
+// バインドされているテクスチャから読む。番号が無効になるのは
+//   (1) 従来のメッシュ単位の経路(LoadSurfaceMaterialが無効値を入れる)
+//   (2) bindless非対応環境
+//   (3) bindless区画が満杯で登録に失敗した(ログにエラーが出ている)
+// のいずれか。
+//
+// 【SampleLevelではなくSample】ラスタライズ経路には隣接ピクセルとのUV勾配があるので、
+// ミップはハードウェアに選ばせる。SampleLevelでLOD 0に固定すると遠景がちらつく。
+//
+// 【分岐の中でSampleしてよい理由】暗黙の微分はピクセルクアッド単位で取られる。
+// 1つのクアッドの4画素は必ず同じ三角形=同じメッシュレット=同じマテリアルから来るので、
+// この分岐はクアッド内で必ず一様であり、勾配が壊れることはない
+float4 SampleMaterialTexture(uint bindlessIndex, Texture2D fallbackTexture, float2 uv)
+{
+#if defined(KURENAI_BINDLESS)
+    if (bindlessIndex != kInvalidBindlessIndex)
+    {
+        // NonUniformResourceIndexが要る理由はBindless.hlsliのコメント参照
+        Texture2D<float4> tex = ResourceDescriptorHeap[NonUniformResourceIndex(bindlessIndex)];
+        return tex.Sample(MaterialSampler, uv);
+    }
+#endif
+    return fallbackTexture.Sample(MaterialSampler, uv);
+}
+
+// このピクセルのマテリアルを読み出す。
+//
+// 1モデル1ドローの経路(materialIndexが有効)ではマテリアルテーブルから、
+// 従来のメッシュ単位の経路では定数バッファ(ObjectConstants)から読む。
+// **1本のピクセルシェーダーが両方を賄う**ため、呼び出し側に#ifは要らない。
+//
+// テクスチャ番号は、テーブル経路ならbindless番号、従来経路では
+// kInvalidBindlessIndex(=「t0〜t6を使え」の意味)になる
+GpuMaterial LoadSurfaceMaterial(uint materialIndex)
+{
+    GpuMaterial material;
+
+#if defined(KURENAI_BINDLESS)
+    if (materialIndex != kInvalidMaterialIndex && MaterialTableIndex != kInvalidBindlessIndex)
+    {
+        StructuredBuffer<GpuMaterial> materials = KURENAI_BINDLESS_BUFFER(MaterialTableIndex);
+        return materials[materialIndex];
+    }
+#endif
+
+    material.BaseColorFactor = BaseColorFactor;
+    material.EmissiveFactor = EmissiveFactor;
+    material.MetallicFactor = MetallicFactor;
+    material.RoughnessFactor = RoughnessFactor;
+    material.AlphaCutoff = AlphaCutoff;
+    material.OcclusionStrength = OcclusionStrength;
+    material.Translucency = Translucency;
+    // 無効番号 = 「bindlessではなく従来のt0〜t6から引け」
+    material.BaseColorTextureIndex = kInvalidBindlessIndex;
+    material.NormalTextureIndex = kInvalidBindlessIndex;
+    material.MetallicRoughnessTextureIndex = kInvalidBindlessIndex;
+    material.EmissiveTextureIndex = kInvalidBindlessIndex;
+    material.OcclusionTextureIndex = kInvalidBindlessIndex;
+    material.BentNormalTextureIndex = kInvalidBindlessIndex;
+    material.Flags = 0;
+    material.Padding = 0;
+    return material;
 }
 
 // 頂点接線(xyz)と従法線の向き(w = +1/-1)からTBN行列を構築する。

@@ -21,6 +21,31 @@ namespace DirectX
 
 namespace Kurenai::RHI
 {
+    // LoadFromFileの内部フェーズ別の累計時間(秒)。**呼び出したスレッド全部の合計**なので、
+    // 和は実時間を超えうる。
+    //
+    // 【なぜロック待ちと圧縮を分けて持つのか】GPU BC7圧縮はプロセス内で1つの
+    // D3D11デバイスをミューテックスで直列化して呼ぶ(CompressBC7参照)。ワーカーを
+    // 8本に増やしても、全員がそのミューテックスで待っているだけなら本数を増やす意味は無く、
+    // 逆に「圧縮そのもの」が支配的ならプロセスを分けるかGPU側を見直すことになる。
+    // どちらなのかは**待ち時間と圧縮時間を別々に測らない限り区別がつかない**
+    // (「LoadFromFileに何秒いたか」だけでは両者が混ざる)。
+    // 計測はKurenaiPacker.exeのようなオフラインツールが使う想定で、ランタイムは
+    // .ktexしか読まないためこの経路自体を通らない
+    struct TextureLoadStats
+    {
+        double DecodeSeconds = 0.0;        // WIC/DDS/TGAのデコード
+        double MipSeconds = 0.0;           // GenerateMipMaps
+        double BC7WaitSeconds = 0.0;       // 共有デバイスのミューテックス取得待ち
+        double BC7CompressSeconds = 0.0;   // DirectX::Compress本体(ロック取得後)
+        double DeviceCreateSeconds = 0.0;  // GPU圧縮デバイスの遅延生成(プロセスで1回)
+        uint64_t Count = 0;                // LoadFromFileの呼び出し回数
+    };
+
+    // 累計のスナップショットを返す / 0に戻す。スレッドセーフ
+    KURENAI_LIB_API TextureLoadStats GetTextureLoadStats();
+    KURENAI_LIB_API void ResetTextureLoadStats();
+
     // .ktexのDDSペイロードを「デコードせずにヘッダだけ読んで」得た情報。
     //
     // テクスチャストリーミングは「どのミップから常駐させるか」を決めてから読み込むため、
