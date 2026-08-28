@@ -47,7 +47,7 @@
 
 - **`Assets/` はGit管理外**(180MB規模のため)。**エンジンが実際に読むのは常に `Assets/Packed/`**。
   `Assets/Source/`(`.gltf`等)を `KurenaiPacker.exe` で変換して作る
-- **`.kmodel` は v9 / `.kgeom` は v3。バージョン不一致は読み込みを拒否される。**
+- **`.kmodel` は v10 / `.kgeom` は v4。バージョン不一致は読み込みを拒否される。**
   フォーマットを触ったら既存の `Assets/Packed/` は再パックが要る
 - `Assets/Source/` のうち **Sponza 以外は `Tools/*.py` で再生成できる**(検証用シーンはすべて
   スクリプト生成)。手順は [README.md](README.md)「手順5. アセットの準備」
