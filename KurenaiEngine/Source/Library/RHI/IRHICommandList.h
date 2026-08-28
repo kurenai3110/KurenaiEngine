@@ -160,7 +160,7 @@ namespace Kurenai::RHI
         // InputSlotClassも無く、SetVertexBufferもスロットを取らないため、頂点バッファは常に1本きり。
         // そのため、インスタンスごとに変わる値(ワールド行列など)は
         // SetVertexShaderResourceBufferで頂点シェーダーへ渡したStructuredBufferを
-        // SV_InstanceIDで引く形で受け取る(Shaders/3D/GBufferCommon.hlsliのFetchModelInstance)。
+        // SV_InstanceIDで引く形で受け取る(Shaders/3D/ObjectConstants.hlsliのFetchModelInstance)。
         //
         // 【SV_InstanceIDは0から始まる】D3D11/D3D12ともにStartInstanceLocationは
         // SV_InstanceIDへ加算されない。バッファ内の開始位置は定数バッファ側の値
