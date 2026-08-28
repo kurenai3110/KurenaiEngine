@@ -1913,6 +1913,8 @@ namespace Kurenai
         m_RaytracingAvailable = m_Device->SupportsRaytracing();
         // メッシュシェーダーの可否もここで控える(UIパネルが参照する)
         m_MeshShaderAvailable = m_Device->SupportsMeshShader();
+        // bindless区画の容量も同じ理由でここへ控える(使用数はフレームごとに更新する)
+        m_BindlessCapacity = m_Device->GetBindlessCapacity();
         if (m_RaytracingAvailable)
         {
             RHI::ShaderDesc rtReflectionCsDesc;
@@ -5476,6 +5478,24 @@ namespace Kurenai
             Core::Logger::Info("Perf", cullText);
         }
 
+        // bindless区画の使用状況。**満杯になっても例外は飛ばず、エラーログ1行と
+        // kInvalidBindlessIndex(=白1x1へ落ちる)しか残らない**ため、上限へ近づいていることを
+        // 定期的に見えるようにしておく(IRHIDevice::GetBindlessUsedCountのコメント参照)
+        if (m_Device)
+        {
+            const uint32_t bindlessCapacity = m_Device->GetBindlessCapacity();
+            if (bindlessCapacity > 0)
+            {
+                const uint32_t bindlessUsed = m_Device->GetBindlessUsedCount();
+                char bindlessText[160];
+                std::snprintf(
+                    bindlessText, sizeof(bindlessText), "  bindless: %u / %u ディスクリプタ (%.1f%%)",
+                    bindlessUsed, bindlessCapacity,
+                    100.0 * static_cast<double>(bindlessUsed) / static_cast<double>(bindlessCapacity));
+                Core::Logger::Info("Perf", bindlessText);
+            }
+        }
+
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
         m_FrameStatsGPUTimeSumMs = 0.0;
@@ -5658,6 +5678,10 @@ namespace Kurenai
         // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる
         m_FrustumCullTested = 0;
         m_FrustumCullCulled = 0;
+        // bindless区画の使用数を控える(UIパネルは m_Device へ直接触れないため。
+        // m_MeshShaderAvailable と同じ扱い)。登録はシーン読み込み時にしか起きないので、
+        // フレームごとに1回問い合わせるだけで足りる
+        m_BindlessUsedCount = m_Device ? m_Device->GetBindlessUsedCount() : 0;
 
         // WM_SIZE(Updateスレッド)が記録しておいたリサイズ要求を、スワップチェーンを実際に使う
         // このスレッドで反映する。このフレームのGPUコマンドをまだ1つも積んでいないこの位置で

@@ -240,6 +240,19 @@ namespace Kurenai::UI
         }
         ImGui::Text(
             "メッシュレット: %zu (メッシュ %zu / %zu が保持)", meshletCount, meshletMeshCount, meshCount);
+
+        // bindless区画の使用状況。メッシュシェーダー経路はジオメトリもマテリアルも
+        // ResourceDescriptorHeap経由で引くため、ここが満杯だと**エラーログ1行だけを残して
+        // 白1x1で描かれる**(RegisterBindlessは例外を投げない)。
+        // 「なぜかこのモデルだけ真っ白」で気づく前に見えるようにしておく
+        if (m_Engine.m_BindlessCapacity > 0)
+        {
+            ImGui::Text(
+                "bindless: %u / %u (%.1f%%)", m_Engine.m_BindlessUsedCount, m_Engine.m_BindlessCapacity,
+                100.0f * static_cast<float>(m_Engine.m_BindlessUsedCount)
+                    / static_cast<float>(m_Engine.m_BindlessCapacity));
+        }
+
         if (meshCount > 0 && meshletMeshCount == 0)
         {
             ImGui::TextWrapped(

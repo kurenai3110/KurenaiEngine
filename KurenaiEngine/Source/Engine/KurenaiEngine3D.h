@@ -542,6 +542,11 @@ namespace Kurenai
         // m_DeviceはKurenaiEngineBaseのprotectedメンバで、派生クラスのfriendであるUIパネルから
         // 触れるかはC++の規則の解釈が分かれるため、m_RaytracingAvailableと同じくここへ控える
         bool m_MeshShaderAvailable = false;
+        // bindless区画の容量と使用数(IRHIDevice::GetBindlessCapacity/GetBindlessUsedCountの写し)。
+        // 容量は初期化時に、使用数はフレーム先頭に控える。**満杯でも例外は飛ばず
+        // 白1x1で描かれてしまう**ため、UIとフレーム統計ログの両方へ出す
+        uint32_t m_BindlessCapacity = 0;
+        uint32_t m_BindlessUsedCount = 0;
         // メッシュレット経路を使うか(ImGuiのレンダリングパネルから切り替える)。
         // 対応環境では既定で有効。無効にすると従来の頂点シェーダー描画に戻るため、
         // 見た目の差分を目で比較できる

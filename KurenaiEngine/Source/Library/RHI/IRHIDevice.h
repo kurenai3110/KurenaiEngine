@@ -155,6 +155,16 @@ namespace Kurenai::RHI
         virtual uint32_t RegisterBindless(IRHITexture* texture) = 0;
         virtual uint32_t RegisterBindless(IRHIBuffer* buffer) = 0;
 
+        // bindless区画の使用数と容量。非対応バックエンドは両方0を返す。
+        //
+        // 【なぜ見えるようにするのか】区画が満杯になったときRegisterBindlessは例外を投げず、
+        // エラーログを出してkInvalidBindlessIndexを返す。消費側はそれを「テクスチャ無し」と
+        // 解釈して白1x1へ落とすので、**絵はそれらしく出たまま静かに間違う**。
+        // 上限に近づいていることを事前に見えるようにしておかないと、
+        // 「なぜかこのモデルだけ真っ白」の形でしか気づけない
+        virtual uint32_t GetBindlessUsedCount() const { return 0; }
+        virtual uint32_t GetBindlessCapacity() const { return 0; }
+
         // --- メッシュシェーダー ---------------------------------------------------------------
 
         // 増幅シェーダー/メッシュシェーダーによる描画(DispatchMesh)が使えるか。
