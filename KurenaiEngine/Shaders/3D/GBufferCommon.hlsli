@@ -84,6 +84,21 @@ cbuffer FrameConstants : register(b0)
     // Water.hlslのPSMainが「メッシュ自身のBaseColorFactorではなくこの色を出力Albedoに使う」ために読む
     // (干潟の水の色はシーン側で調整したいパラメータであり、.kmodelを焼き直さずに変えられるようにするため)
     float4 WaterBodyColor;
+    // C++側 FrameConstants の StarsParams / CloudQualityParams。GBuffer.hlsl・Water.hlsl・
+    // GBufferMeshlet.hlsl のいずれも読まないが、cbufferは宣言順でオフセットが決まるため、
+    // これより後ろのフィールドを読むならここへ同じ宣言が要る(飛ばすと以降が32バイトずれ、
+    // コンパイルは通るのに別の値を読む)
+    float4 StarsParams;
+    float4 CloudQualityParams;
+    // Hi-Zオクルージョンカリング(Stage 5-2)。読むのはGBufferMeshlet.hlslの増幅シェーダーだけ。
+    // x=有効フラグ、y=バウンディング球の半径倍率、z=前フレームからのカメラ移動距離[m]、
+    // w=Hi-Zのミップ段数
+    float4 OcclusionCullParams;
+    // xy=Hi-Zのミップ0の解像度[画素]、zw=その逆数
+    float4 HiZScreenParams;
+    // メッシュレットカリングの統計(Stage 5-2)。読むのはGBufferMeshlet.hlslの増幅シェーダーだけ。
+    // x=有効フラグ、y=カウンタバッファのbindless番号(RWStructuredBuffer<uint>、UAVの側)、zw=未使用
+    float4 MeshletCullStatsParams;
 };
 
 // メッシュ単位(将来的にはシーン上のモデルインスタンス単位)の情報。
@@ -167,6 +182,13 @@ cbuffer ObjectConstants : register(b1)
     // C++側が1.0を入れることで二重に掛からないようにしている
     float EmissiveIntensity;
     float OcclusionMapScale;
+    // このドローでメッシュレットカリングの統計を数えるか(0/1)。
+    //
+    // 【パスで分ける必要がある】深度プリパスは G-Buffer とまったく同じ増幅シェーダーを
+    // 使うため、フレーム全体のフラグ(MeshletCullStatsParams.x)だけで判定すると
+    // 同じ塊を1フレームに2回数えてしまい、「1フレームあたりの判定数」が倍になる。
+    // 数えるのは G-Buffer パスだけにする
+    uint MeshletStatsEnabled;
 };
 
 // Assets::GpuMaterial(80バイト、Source/Library/Assets/Model.h)と1対1で対応。

@@ -20,6 +20,7 @@
 
 #include "Assets/RaytracingScene.h"
 #include "Assets/Scene.h"
+#include "Assets/TextureStreaming.h"
 #include "Core/Camera.h"
 #include "Core/CPUProfiler.h"
 
@@ -562,6 +563,49 @@ namespace Kurenai
         bool m_MeshletRenderingEnabled = true;
         // メッシュレットごとの色分け表示。m_MeshletRenderingEnabledが有効なときだけ効く
         bool m_MeshletDebugViewEnabled = false;
+        // 増幅シェーダーのHi-Zオクルージョンカリング(Stage 5-2)。メッシュレットのバウンディング球を
+        // 前フレームのHi-Zへ投影し、「視界内だが手前の何かに完全に隠れている」塊を落とす。
+        //
+        // 【メッシュレット経路でしか効かない】判定を書いてあるのは増幅シェーダーなので、
+        // メッシュシェーダー非対応の環境(基準機のIntel UHD 620を含む)では一切走らない。
+        // これが有効なフレームだけHi-Zパスも構築される(m_HiZTextureのコメント参照)
+        bool m_OcclusionCullingEnabled = Defaults::OcclusionCullingEnabled;
+        // オクルージョン判定でバウンディング球を膨らませる倍率。
+        //
+        // 【1.0が基準】判定に使うHi-Zは前フレームのものなので、そのフレームのカメラ移動ぶんは
+        // 別項(移動距離をそのまま半径へ足す)で吸収している。この倍率が埋めるのはそれとは別の
+        // 誤差 ―― バウンディング球がメッシュレットの実体より緩いこと、およびカメラ回転による
+        // 見え方の変化。ポップ(隠れていないものが消える)が出たら上げる
+        float m_OcclusionCullRadiusScale = Defaults::OcclusionCullRadiusScale;
+
+        // --- メッシュレットカリングの統計(Stage 5-2) ---
+        //
+        // 【「間引き0」だけでは何も分からない】判定式が常に通しているのか、本当に全部
+        // 見えているのかを区別できない。CPU側のフラスタムカリング(m_FrustumCullTested /
+        // m_FrustumCullCulled)が判定数と対で出しているのと同じ理由で、ここでも対で出す。
+        // **オクルージョンは視錐台+コーンとは別のカウンタにする** ―― 合算すると
+        // 「俯瞰(遮蔽が少ない)と街路(遮蔽が多い)で差が出るか」という確認ができない。
+        bool m_MeshletCullStatsEnabled = Defaults::MeshletCullStatsEnabled;
+        // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
+        static constexpr uint32_t kMeshletCullStatsCount = 3;
+        std::unique_ptr<RHI::IRHIBuffer> m_MeshletCullStatsBuffer;
+        // カウンタをCPUへ持ってくるための受け皿。
+        //
+        // 【リングにする理由】コピーを積んだ直後に読んでもGPUはまだ実行していない。
+        // DX12はkFrameCount(=2)フレームぶんCPUが先行するので、3本持って「2フレーム前に
+        // 書いたもの」を読めばGPUの完了を待たずに済む。待つとフレームが直列化し、
+        // 計測のために計測対象を壊すことになる
+        static constexpr uint32_t kMeshletCullStatsRingSize = 3;
+        std::unique_ptr<RHI::IRHIBuffer> m_MeshletCullStatsReadback[kMeshletCullStatsRingSize];
+        // 今フレームが書き込むリングの位置。読むのは (index + 1) % リング長 = 最も古いもの
+        uint32_t m_MeshletCullStatsRingIndex = 0;
+        // カウンタバッファのUAVのbindless番号(RegisterBindlessUAVが払い出す)。
+        // 非対応環境ではkInvalidBindlessIndexのままで、統計は無効になる
+        uint32_t m_MeshletCullStatsBindlessIndex = RHI::kInvalidBindlessIndex;
+        // 直近に読み戻せた値(Perfログの集計に足し込む前の生値)。デバッグ表示にも使う
+        uint32_t m_MeshletCullTested = 0;
+        uint32_t m_MeshletCullFrustumCulled = 0;
+        uint32_t m_MeshletCullOcclusionCulled = 0;
 
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
@@ -724,8 +768,11 @@ namespace Kurenai
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
-        // オクルージョンカリングやSSRのレイマーチング高速化に使えるデータ構造だが、現時点では
-        // それらの利用箇所は未実装で、デバッグ表示(Render Targets - Hi-Z)でのみ確認できる
+        //
+        // 消費者は2つ: デバッグ表示(Render Targets - Hi-Z)と、増幅シェーダーの
+        // オクルージョンカリング(m_OcclusionCullingEnabled)。**どちらも要らないフレームでは
+        // 構築しない** ―― 1280x720で「コピー1回 + ミップ段数-1回のディスパッチ」が走り、
+        // Intel UHD 620での実測で1.19〜1.21ms(GPUフレーム時間30msの約4%)を占めるため
         std::unique_ptr<RHI::IRHIShader> m_HiZCopyComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_HiZCopyPipelineState;
         std::unique_ptr<RHI::IRHIShader> m_HiZDownsampleComputeShader;
@@ -735,6 +782,12 @@ namespace Kurenai
         uint32_t m_HiZMipLevels = 1;
         // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベル
         int32_t m_HiZDebugMipLevel = 0;
+        // m_HiZTextureの中身が「1回でも構築されたHi-Z」になっているか。
+        //
+        // 【オクルージョン判定の門番】CreateHiZTextureが作った直後の中身は未定義で、
+        // それを深度として判定すると視界内のほぼ全部を「隠れている」と誤判定しうる。
+        // 解像度変更・シーン読み込みでfalseへ戻し、Hi-Zパスが1回走ってからtrueにする
+        bool m_HiZValid = false;
 
         // 鏡面反射の手法。どのモードでもLightingパスが適用した鏡面IBLを「差し替える」形で働き、
         // Offならその差し替えを一切行わない(プローブ/グローバルIBLがそのまま残る。20章)
@@ -912,6 +965,13 @@ namespace Kurenai
         bool m_TAAPrevViewProjValid = false;
         // 前フレームのジッター量(UV単位)。速度からジッター差分を取り除くのに使う
         DirectX::XMFLOAT2 m_TAAPrevJitterUv{ 0.0f, 0.0f };
+        // 前フレームのカメラ位置(ワールド)。有効性は m_TAAPrevViewProjValid と同じ
+        // (同じ場所で同じタイミングに書くため)。
+        //
+        // 【何に使うか】Hi-Zオクルージョンカリングが判定に使うHi-Zは1フレーム古く、
+        // シーンが静的である以上ずれの原因はカメラの移動だけ。移動距離をバウンディング球の
+        // 半径へ足せば、そのずれを1次の範囲で保守側へ吸収できる(FrameConstants::OcclusionCullParams.z)
+        DirectX::XMFLOAT3 m_PrevCameraPosition{ 0.0f, 0.0f, 0.0f };
         // 前フレームの実効プリ露出EV100。このエンジンはSceneColorへプリ露出を掛け込んでおり、
         // その値が時間順応で毎フレーム変わる(m_EffectiveExposureEV100)。補正しないと
         // 露出が動いている間ずっと履歴が古い明るさを引きずり、明るさの尾を引く
@@ -2449,6 +2509,13 @@ namespace Kurenai
         // 【破棄順】m_Sceneより後に宣言することで、メンバ破棄順(宣言の逆順)により
         // m_Sceneの頂点/インデックスバッファより先に破棄される
         Assets::RaytracingScene m_RaytracingScene;
+        // テクスチャの常駐ミップ制御。自前のワーカースレッドを持ち、そこがm_Sceneの
+        // IRHITexture*を掴む。
+        //
+        // 【破棄順】m_Sceneより後に宣言し、メンバ破棄順(宣言の逆順)でm_Sceneより先に
+        // 破棄されるようにする。加えて、シーンを差し替えるときはUpdateSceneStreamingが
+        // 明示的にReset()を呼んでワーカーを止める
+        Assets::TextureStreamingManager m_TextureStreaming;
         // m_Sceneと同じくRenderスレッド専有(ScenePanelが選択中のシーンの表示に読む)
         size_t m_CurrentSceneIndex = 0;
         // Updateスレッド専有。UpdateMouseLook/UpdateMovementが書き換え、TickFrameがFrameStateへ
@@ -2612,6 +2679,13 @@ namespace Kurenai
         // 集計期間中の合計(平均はフレーム数で割って出す)
         uint64_t m_FrameStatsCullTestedSum = 0;
         uint64_t m_FrameStatsCullCulledSum = 0;
+        // メッシュレット単位のカリング(増幅シェーダー)の集計。上のCPU側とは別の行に出す ――
+        // 粒度(モデル単位 / メッシュレット単位)も判定の種類も違うので、混ぜると読めなくなる。
+        // 読み戻せなかったフレームは足さないため、フレーム数も別に数える
+        uint64_t m_FrameStatsMeshletTestedSum = 0;
+        uint64_t m_FrameStatsMeshletFrustumCulledSum = 0;
+        uint64_t m_FrameStatsMeshletOcclusionCulledSum = 0;
+        uint32_t m_FrameStatsMeshletSampleCount = 0;
 
         // パス別のドローコール数(1フレーム分)。フラスタムカリングの統計と同じく
         // フレーム先頭でリセットし、LogFrameStatsIfDueが集計期間の平均として出す。
