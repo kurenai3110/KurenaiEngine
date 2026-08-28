@@ -138,7 +138,47 @@ cbuffer ObjectConstants : register(b1)
     // DeferredLighting.hlsl/DirectLighting.hlslの透過項が読む(45章)。
     // 末尾に足しているので、先頭までしか宣言していないシェーダー(Shadow.hlsl等)への影響は無い
     float Translucency;
+
+    // モデルLODの切り替え中に2段をクロスディザで重ねるための係数(末尾に追加)。
+    //
+    //   1.0        LOD切替中ではない。全画素を描く(既定値。これ以外を書かない限り従来と同じ)
+    //   0 < f < 1  切り替え「先」の段。ノイズ < f の画素だけを描く
+    //  -1 < f < 0  切り替え「元」の段。ノイズ >= -f の画素だけを描く
+    //
+    // 【±で対にする理由】先と元がまったく同じノイズを読み、しきい値の両側で分け合うので、
+    // 2段が同じ画素を取り合わない。独立な模様にすると、同じ画素にLOD1の箱とLOD2の建物が
+    // 両方描かれてZファイティングになる(PLATEAUはLOD1とLOD2が同じ建物を二重に持つ)。
+    // 逆に隙間もできない ―― どの画素も必ずどちらか一方が描く。
+    //
+    // 末尾に足した4バイトのスカラーなので、既存シェーダーのオフセットは動かない
+    float DitherFade;
 };
+
+// 画面座標から作る決定的なノイズ(0〜1)。Tonemap.hlslが同名の関数を持つが、あちらは
+// バンディングを散らすためのもので用途が別。ここはLOD切替のクロスディザ専用
+float LODDitherNoise(float2 position)
+{
+    return frac(52.9829189f * frac(dot(position, float2(0.06711056f, 0.00583715f))));
+}
+
+// LOD切替のクロスディザで捨てる画素をclipする。DitherFadeが1.0(既定)なら何もしない。
+//
+// 【深度プリパスとG-Bufferで必ず同じものを呼ぶこと】片方だけが捨てると、
+// 深度は書かれているのに色が書かれない画素ができて穴が開く
+void ApplyLODDither(float2 screenPosition)
+{
+    if (DitherFade < 1.0f)
+    {
+        const float noise = LODDitherNoise(screenPosition);
+        // 【境界を半開区間にする】clipは負のときだけ捨てるので、素直に書くと
+        // noise == |DitherFade| ちょうどの画素で「先」と「元」の両方が生き残り、
+        // その画素だけZファイティングになる。「元」の側をわずかに厳しくして、
+        // 先: noise <= f / 元: noise > f と分けきる。
+        // ずらす量は画素の分け前を目に見えて変えない大きさにしてある
+        const float kBoundaryEpsilon = 1e-5f;
+        clip(DitherFade >= 0.0f ? (DitherFade - noise) : (noise + DitherFade - kBoundaryEpsilon));
+    }
+}
 
 Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);

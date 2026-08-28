@@ -14,6 +14,12 @@
 
 namespace Kurenai::Assets
 {
+    // 1つのModelInstanceが持てるLODの段数の上限(.ksceneのPathを含む)。
+    // .kmodelのMeshEntryが持つメッシュレットLODの上限(kMaxMeshletLODCount)と、
+    // DDGIボリュームのLODCountの上限に揃えてある。
+    // これ以上粗くしたいものは、段を増やすのではなく別のシーンへ分ける粒度になる
+    inline constexpr size_t kMaxModelLODCount = 4;
+
     // シーン内に配置された1つのモデルインスタンス。Modelのジオメトリ自体は
     // ワールド空間原点に焼き込み済み(ModelLoader.cpp参照)のままなので、
     // 実際の配置はWorld/NormalMatrixで頂点シェーダー側にて適用する(KurenaiEngine3D::
@@ -29,6 +35,20 @@ namespace Kurenai::Assets
         // 複数のインスタンスが共有するので、片方から書き換えるともう片方に波及する。
         // 唯一の例外だったRaytracingSceneのCPUコピー解放はScene::ModelCache側を回す形へ移した
         std::shared_ptr<const Model> Model;
+
+        // モデルLODの2段目以降(.ksceneの[Model]LODPath / LODDistance)。粗くなっていく順。
+        // LODModels[i] は「カメラからの距離が LODDistances[i] 以上」のときに使う段で、
+        // どれにも当てはまらない(=最も近い)ときは上のModelを使う。
+        // LODを持たないインスタンスでは両方とも空になり、従来どおりModelだけが描かれる。
+        //
+        // 【距離はAABBの最近接点まで】中心距離だと1.1km四方のPLATEAUタイルで破綻する
+        // (タイルの端に立っていても中心までは500m以上あるため、近景なのに粗い段が選ばれる)
+        //
+        // 【型を Assets:: で修飾する理由】直前のメンバ名 Model が型名 Model を隠すため、
+        // ここから素の Model と書くと「型ではない」とコンパイルエラーになる(C2327)
+        std::vector<std::shared_ptr<const Assets::Model>> LODModels;
+        std::vector<float> LODDistances;
+
         DirectX::XMFLOAT4X4 World;          // Scale * Rotation * Translation(転置済み、HLSLへそのまま渡せる形)
         DirectX::XMFLOAT4X4 NormalMatrix;   // Worldの3x3部分の逆転置(4x4に格納、転置済み)
         float TangentSignFlip = 1.0f;       // Worldの行列式が負(ミラーリング)なら-1

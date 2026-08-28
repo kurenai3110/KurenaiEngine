@@ -2580,6 +2580,51 @@ namespace Kurenai
         // 一致してしまうため、間引いた数が0でないことを数値で確かめられるようにしておく
         uint32_t m_FrustumCullTested = 0;
         uint32_t m_FrustumCullCulled = 0;
+
+        // --- モデルLOD(.ksceneの[Model]LODPath / LODDistance) --------------------------------
+        //
+        // インスタンスごとの「いま使っている段」と、切り替え中のクロスディザの進み具合。
+        // m_Scene.Instancesと同じ添字で並び、ApplyLoadedSceneで作り直す。
+        //
+        // 【Assets::Sceneではなくエンジン側に持つ理由】これは読み込んだデータではなく
+        // カメラ位置から毎フレーム決まる実行時の状態で、Loaderスレッドが作るSceneに
+        // 混ぜると「シーンの内容」と「今の見え方」の境界が曖昧になる
+        struct InstanceLODState
+        {
+            uint32_t CurrentLOD = 0;   // 0 = ModelInstance::Model、1以上は LODModels[n-1]
+            uint32_t PreviousLOD = 0;  // フェード中の切り替え元
+            float FadeT = 1.0f;        // 1.0でフェード完了。0→1へ進み、その間だけ2段を重ねる
+        };
+        std::vector<InstanceLODState> m_InstanceLODStates;
+        // 段の切り替えにかける秒数。0にするとポップする(1.1km四方のタイルが丸ごと入れ替わるため
+        // 目立つ)。根拠は docs/ImplementationDetail.md
+        float m_LODFadeDuration = 0.25f;
+        // 切り替え距離のヒステリシス幅。切替点の±5%を不感帯にして、境界での往復を防ぐ
+        float m_LODHysteresis = 0.05f;
+        // 統計。1フレームあたりの段の切り替え回数と、フェード中のインスタンス数。
+        // 【0なら一度も切り替わっていない】LODが効いているかはここでしか分からない
+        uint32_t m_LODSwitchCount = 0;
+        uint32_t m_LODFadingCount = 0;
+        uint64_t m_FrameStatsLODSwitchSum = 0;
+        // カメラ位置から各インスタンスの段を決め、フェードを進める。
+        // レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと ―― パスごとに測り直すと
+        // 深度プリパスとG-Bufferが違う段を選び、画面に穴が開く
+        void UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds);
+        // instanceIndex番目のインスタンスについて、このフレームで描く段を返す。
+        // フェード中は2件(切り替え先と元)、そうでなければ1件。DitherFadeも一緒に返す
+        struct LODDraw
+        {
+            const Assets::Model* Model = nullptr;
+            float DitherFade = 1.0f;
+        };
+        // 戻り値の件数。fadingなら2、それ以外は1
+        uint32_t GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const;
+        // シャドウ・反射プローブ・DDGI用。常に最も粗い段を返す(影と間接光はテクスチャを読まない)
+        const Assets::Model& GetCoarsestLOD(const Assets::ModelInstance& instance) const;
+        // いま選ばれている段を1つだけ返す(フェード中でも切り替え先だけ)。
+        // 半透明・平面反射・ソフトウェアラスタライザ用 ―― これらはクロスディザを実装しておらず、
+        // 2段を重ねると同じ画素に両方が描かれてしまうため、フェード中も1段に決め打つ
+        const Assets::Model& GetCurrentLOD(size_t instanceIndex) const;
         // 集計期間中の合計(平均はフレーム数で割って出す)
         uint64_t m_FrameStatsCullTestedSum = 0;
         uint64_t m_FrameStatsCullCulledSum = 0;

@@ -823,6 +823,12 @@ namespace Kurenai
             // DirectLighting.hlslの透過項が読む(45章)。
             // 4バイトのスカラーを末尾に足しているだけなので、既存フィールドのオフセットは動かない
             float Translucency;
+            // モデルLODのクロスディザ係数。1.0=切替中でない(全画素を描く)、
+            // 0<f<1=切り替え先、-1<f<0=切り替え元。意味と対称性の理由は
+            // Shaders/3D/GBufferCommon.hlsli の DitherFade のコメントを参照。
+            // 既定を1.0にしたいので、MakeObjectConstantsが明示的に代入する
+            // (ObjectConstants{}のゼロ初期化のままだと全画素が捨てられる)
+            float DitherFade;
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -834,11 +840,15 @@ namespace Kurenai
         // occlusionMapEnabled: マテリアルの遮蔽マップを使うか(m_OcclusionMapEnabled)。
         // 各パスは lerp(1, occlusionSample, OcclusionStrength) で遮蔽率を求めるため、
         // ここで0を渡せばシェーダー側に手を入れずに遮蔽マップの寄与だけを消せる
+        // ditherFade: モデルLODの切り替え中だけ1.0以外を渡す(既定の1.0は「全画素を描く」)。
+        // 呼び出し箇所7つのうち、2段を重ねるのはG-Bufferと深度プリパスだけなので既定値を持たせている。
+        // シャドウ・プローブ・DDGIは常に最も粗い段を1つだけ描くためフェードそのものが起きない
         ObjectConstants MakeObjectConstants(
             const Assets::ModelInstance& instance, const Assets::Mesh& mesh, float emissiveIntensity,
-            bool occlusionMapEnabled)
+            bool occlusionMapEnabled, float ditherFade = 1.0f)
         {
             ObjectConstants constants{};
+            constants.DitherFade = ditherFade;
             constants.World = instance.World;
             constants.NormalMatrix = instance.NormalMatrix;
             constants.MetallicFactor = mesh.MetallicFactor;
@@ -3410,8 +3420,9 @@ namespace Kurenai
 
         const FrustumPlanes swRasterFrustum = ExtractFrustumPlanes(viewProj);
 
-        for (const auto& instance : m_Scene.Instances)
+        for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
         {
+            const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
             ++m_FrustumCullTested;
             if (!IsAABBVisible(swRasterFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
             {
@@ -3419,7 +3430,8 @@ namespace Kurenai
                 continue;
             }
 
-            for (const auto& mesh : instance.Model->Meshes)
+            // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
+            for (const auto& mesh : GetCurrentLOD(instanceIndex).Meshes)
             {
                 // 半透明(alphaMode=BLEND)はハードウェア側でもG-Bufferに描かれないため揃える
                 if (mesh.IsTransparent || mesh.IndexCount < 3)
@@ -4018,6 +4030,130 @@ namespace Kurenai
         m_SceneLoadInFlight = true;
     }
 
+    void KurenaiEngine3D::UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds)
+    {
+        m_LODSwitchCount = 0;
+        m_LODFadingCount = 0;
+
+        if (m_InstanceLODStates.size() != m_Scene.Instances.size())
+        {
+            // シーンが差し替わった直後。状態を作り直す(全インスタンスが最も詳細な段から始まる)
+            m_InstanceLODStates.assign(m_Scene.Instances.size(), InstanceLODState{});
+        }
+
+        for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+        {
+            const Assets::ModelInstance& instance = m_Scene.Instances[i];
+            InstanceLODState& state = m_InstanceLODStates[i];
+
+            const size_t levelCount = instance.LODModels.size() + 1;
+            if (levelCount <= 1)
+            {
+                // LODを持たないインスタンス。従来どおり1段だけ
+                state.CurrentLOD = 0;
+                state.PreviousLOD = 0;
+                state.FadeT = 1.0f;
+                continue;
+            }
+
+            // 【AABBの最近接点までの距離】中心距離だと1.1km四方のPLATEAUタイルで破綻する。
+            // タイルの上に立っていても中心までは500m以上あるため、近景なのに粗い段が選ばれる。
+            // 点がAABBの内側なら距離0になる(各軸の食い込み量が0になるため)
+            float squaredDistance = 0.0f;
+            const float cameraXYZ[3] = { cameraPosition.x, cameraPosition.y, cameraPosition.z };
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float outside = (std::max)(
+                    { instance.WorldBoundsMin[axis] - cameraXYZ[axis],
+                      cameraXYZ[axis] - instance.WorldBoundsMax[axis], 0.0f });
+                squaredDistance += outside * outside;
+            }
+            const float distance = std::sqrt(squaredDistance);
+
+            // 【1フレームに1段だけ動かす】ヒステリシスを素直に書ける。段数の上限は4なので、
+            // 遠くから一気に近づいても数フレームで追いつく
+            uint32_t desired = state.CurrentLOD;
+            if (desired < instance.LODDistances.size() &&
+                distance > instance.LODDistances[desired] * (1.0f + m_LODHysteresis))
+            {
+                desired = desired + 1;
+            }
+            else if (desired > 0 &&
+                     distance < instance.LODDistances[desired - 1] * (1.0f - m_LODHysteresis))
+            {
+                desired = desired - 1;
+            }
+
+            if (desired != state.CurrentLOD)
+            {
+                // フェード中に次の切り替えが来たら、いま描いている「先」を新しい「元」にする。
+                // 3段以上を同時に重ねることはしない(ディザが排他にならず穴が開く)
+                state.PreviousLOD = state.CurrentLOD;
+                state.CurrentLOD = desired;
+                state.FadeT = 0.0f;
+                ++m_LODSwitchCount;
+            }
+            else if (state.FadeT < 1.0f)
+            {
+                state.FadeT = (m_LODFadeDuration > 0.0f)
+                    ? (std::min)(1.0f, state.FadeT + deltaSeconds / m_LODFadeDuration)
+                    : 1.0f;
+            }
+
+            if (state.FadeT < 1.0f)
+            {
+                ++m_LODFadingCount;
+            }
+        }
+    }
+
+    uint32_t KurenaiEngine3D::GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const
+    {
+        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+        const auto modelAt = [&instance](uint32_t level) -> const Assets::Model&
+        {
+            return (level == 0) ? *instance.Model : *instance.LODModels[level - 1];
+        };
+
+        if (instanceIndex >= m_InstanceLODStates.size())
+        {
+            outDraws[0] = { instance.Model.get(), 1.0f };
+            return 1;
+        }
+
+        const InstanceLODState& state = m_InstanceLODStates[instanceIndex];
+        if (state.FadeT >= 1.0f)
+        {
+            outDraws[0] = { &modelAt(state.CurrentLOD), 1.0f };
+            return 1;
+        }
+
+        // 切り替え「先」は +FadeT、「元」は -FadeT。同じノイズをしきい値の両側で分け合うので、
+        // 2段が同じ画素に重ならず(Zファイティングにならず)、隙間もできない
+        outDraws[0] = { &modelAt(state.CurrentLOD), state.FadeT };
+        outDraws[1] = { &modelAt(state.PreviousLOD), -state.FadeT };
+        return 2;
+    }
+
+    const Assets::Model& KurenaiEngine3D::GetCurrentLOD(size_t instanceIndex) const
+    {
+        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+        if (instanceIndex >= m_InstanceLODStates.size())
+        {
+            return *instance.Model;
+        }
+        const uint32_t level = m_InstanceLODStates[instanceIndex].CurrentLOD;
+        return (level == 0) ? *instance.Model : *instance.LODModels[level - 1];
+    }
+
+    const Assets::Model& KurenaiEngine3D::GetCoarsestLOD(const Assets::ModelInstance& instance) const
+    {
+        // 【影と間接光は常に最も粗い段】どちらもテクスチャを読まないので、詳細な段を描く意味が無い。
+        // PLATEAUではLOD2(約1715メッシュ)がLOD1(1メッシュ)になるため、
+        // シャドウのドローコールが4カスケード分まとめて桁で減る
+        return instance.LODModels.empty() ? *instance.Model : *instance.LODModels.back();
+    }
+
     void KurenaiEngine3D::RetireAssets(RetiredAssets&& retired)
     {
         std::lock_guard<std::mutex> lock(m_RetiredAssetsMutex);
@@ -4204,6 +4340,11 @@ namespace Kurenai
         m_Scene = std::move(loaded.Scene);
         m_RaytracingScene = std::move(loaded.RaytracingScene);
         m_CurrentSceneIndex = loaded.SceneIndex;
+
+        // モデルLODの状態はシーンに紐づくので必ず捨てる。
+        // 【要素数の一致だけを見て使い回してはいけない】たまたま同じインスタンス数の
+        // シーンへ切り替えたときに、前のシーンの段とフェード途中の状態が残る
+        m_InstanceLODStates.assign(m_Scene.Instances.size(), InstanceLODState{});
 
         // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
@@ -4552,7 +4693,10 @@ namespace Kurenai
         uint32_t opaqueMeshCount = 0;
         for (const auto& instance : m_Scene.Instances)
         {
-            for (const auto& mesh : instance.Model->Meshes)
+            // 【7545行目のDDGIラスタ経路と同じ段を数えること】ここの数が定数バッファリングの
+            // 予算(ClampDDGIProbesPerFrameToConstantRing)を決めるため、実際に描く段と食い違うと
+            // 予算の見積もりが狂う
+            for (const auto& mesh : GetCoarsestLOD(instance).Meshes)
             {
                 if (!mesh.IsTransparent)
                 {
@@ -5366,6 +5510,7 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
         m_FrameStatsCullTestedSum += m_FrustumCullTested;
         m_FrameStatsCullCulledSum += m_FrustumCullCulled;
+        m_FrameStatsLODSwitchSum += m_LODSwitchCount;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -5476,6 +5621,17 @@ namespace Kurenai
             Core::Logger::Info("Perf", cullText);
         }
 
+        // モデルLOD。【切り替え0回なら一度も効いていない】距離のしきい値が実際の
+        // カメラの動く範囲から外れているか、そもそもLODPathが指定されていない
+        {
+            char lodText[192];
+            std::snprintf(
+                lodText, sizeof(lodText),
+                "  モデルLOD: 切り替え %llu回 / フェード中 %u件 [集計期間の合計と最終フレーム]",
+                static_cast<unsigned long long>(m_FrameStatsLODSwitchSum), m_LODFadingCount);
+            Core::Logger::Info("Perf", lodText);
+        }
+
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
         m_FrameStatsGPUTimeSumMs = 0.0;
@@ -5483,6 +5639,7 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = 0.0f;
         m_FrameStatsCullTestedSum = 0;
         m_FrameStatsCullCulledSum = 0;
+        m_FrameStatsLODSwitchSum = 0;
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
@@ -5895,6 +6052,13 @@ namespace Kurenai
         }
 
         const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
+
+        // モデルLODの段を、レンダーグラフを組む前にこの1回だけ決める。
+        // 【パスごとに測り直してはいけない】深度プリパスとG-Bufferが違う段を選ぶと、
+        // プリパスが深度を書いた画素をG-Bufferが描かず、画面に穴が開く。
+        // G-Bufferパスのラムダはそもそもカメラ位置をキャプチャしていない(半透明パスだけが持つ)ので、
+        // ここで決めてm_InstanceLODStatesへ置く形にしてある
+        UpdateModelLOD(cameraPosition, m_RenderDeltaTime);
 
         // --- TAAのサブピクセルジッター ---
         // 投影行列を1ピクセル未満だけずらして、同じ画素が毎フレームわずかに違う位置をサンプルする
@@ -6981,7 +7145,8 @@ namespace Kurenai
                                 continue;
                             }
 
-                            for (const auto& mesh : instance.Model->Meshes)
+                            // 【影は常に最も粗い段】影はテクスチャを読まないので詳細な段を描く意味が無い
+                            for (const auto& mesh : GetCoarsestLOD(instance).Meshes)
                             {
                                 bindPipelineState(instance.IsMirrored);
 
@@ -7080,7 +7245,8 @@ namespace Kurenai
                     continue;
                 }
 
-                for (const auto& mesh : instance.Model->Meshes)
+                // 【プローブも最も粗い段】焼き込むのは間接光で、細部は残らない
+                for (const auto& mesh : GetCoarsestLOD(instance).Meshes)
                 {
                     // 半透明メッシュはプローブへ焼かない。ProbeCapture.hlslは不透明として描くため、
                     // ガラスを焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに
@@ -7412,7 +7578,8 @@ namespace Kurenai
             // (DX12Buffer.h)ため、整合が取れるまでは入れないほうが安全
             for (const auto& instance : m_Scene.Instances)
             {
-                for (const auto& mesh : instance.Model->Meshes)
+                // 【DDGIも最も粗い段】理由は反射プローブと同じ
+                for (const auto& mesh : GetCoarsestLOD(instance).Meshes)
                 {
                     // 半透明メッシュを焼かない理由は反射プローブと同じ(不透明として描かれるため、
                     // ガラスが壁になって裏の景色が欠ける)
@@ -7851,8 +8018,9 @@ namespace Kurenai
                     RHI::IRHIPipelineState* currentPipelineState = nullptr;
                     // G-Bufferと同じカメラなので、間引かれるモデルも同じになる
                     const FrustumPlanes prepassFrustum = ExtractFrustumPlanes(viewProj);
-                    for (const auto& instance : m_Scene.Instances)
+                    for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
                     {
+                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
                         ++m_FrustumCullTested;
                         if (!IsAABBVisible(prepassFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                         {
@@ -7860,7 +8028,15 @@ namespace Kurenai
                             continue;
                         }
 
-                        for (const auto& mesh : instance.Model->Meshes)
+                        // モデルLOD。フェード中は2段を重ねる。
+                        // 【G-Bufferとまったく同じ組・同じDitherFadeで描くこと】片方だけが捨てた画素は
+                        // 「深度は書かれているのに色が書かれない」穴になる
+                        LODDraw lodDraws[2];
+                        const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                        for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
+                        {
+                        const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
+                        for (const auto& mesh : lodDraws[lodDrawIndex].Model->Meshes)
                         {
                             // BLENDマテリアルはG-Bufferに描かれないので深度も書かない
                             // (書くと後ろのものが消える)
@@ -7871,8 +8047,10 @@ namespace Kurenai
 
                             // カットアウトは切り抜きを反映しないと深度に嘘が入る。
                             // ミラーリングは表裏判定が逆のPSOでないとカリングされる面が入れ替わり、
-                            // G-Bufferと違う深度になってしまう
-                            const bool cutout = mesh.AlphaCutoff > 0.0f;
+                            // G-Bufferと違う深度になってしまう。
+                            // 【LODのフェード中もピクセルシェーダーが要る】カットアウトが無くても
+                            // クロスディザで捨てる画素があるため、PS無しのPSOでは抜けない
+                            const bool cutout = mesh.AlphaCutoff > 0.0f || lodDitherFade < 1.0f;
                             RHI::IRHIPipelineState* const wanted =
                                 cutout ? (instance.IsMirrored ? m_DepthPrepassCutoutPipelineStateMirrored.get()
                                                               : m_DepthPrepassCutoutPipelineState.get())
@@ -7887,7 +8065,7 @@ namespace Kurenai
                             }
 
                             const ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -7901,6 +8079,7 @@ namespace Kurenai
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                         }
+                        }   // モデルLODの段のループ
                     }
                 },
             });
@@ -7984,8 +8163,9 @@ namespace Kurenai
                 // では1つも間引けない。効くのは.kmodelを多数並べるシーンのほう
                 const FrustumPlanes frustum = ExtractFrustumPlanes(viewProj);
 
-                for (const auto& instance : m_Scene.Instances)
+                for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
                 {
+                    const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
                     ++m_FrustumCullTested;
                     if (!IsAABBVisible(frustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                     {
@@ -7993,7 +8173,15 @@ namespace Kurenai
                         continue;
                     }
 
-                    for (const auto& mesh : instance.Model->Meshes)
+                    // モデルLOD。フェード中は2段を重ねる。
+                    // 【深度プリパスとまったく同じ組・同じDitherFadeであること】UpdateModelLODが
+                    // フレーム先頭で1回だけ決めた結果を両方が引くので、ここで距離を測り直さない
+                    LODDraw lodDraws[2];
+                    const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                    for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
+                    {
+                    const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
+                    for (const auto& mesh : lodDraws[lodDrawIndex].Model->Meshes)
                     {
                         // BLENDマテリアル(mesh.IsTransparent)はG-Bufferに書き込まず、専用のTransparentパスで
                         // フォワードシェーディングする(G-Bufferのアルファは常に1.0で半透明合成ができないため)
@@ -8006,7 +8194,7 @@ namespace Kurenai
                         bindPipelineState(instance.IsMirrored, instance.IsWater, useMeshlet);
 
                         const ObjectConstants objectConstants =
-                            MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                            MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8040,6 +8228,7 @@ namespace Kurenai
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                         }
                     }
+                    }   // モデルLODの段のループ
                 }
             },
         });
@@ -8610,8 +8799,9 @@ namespace Kurenai
                 // 半透明もカメラの錐台で間引く。ここは描画リストの構築なので、
                 // 間引いた分はソートの対象からも外れる
                 const FrustumPlanes transparentFrustum = ExtractFrustumPlanes(viewProj);
-                for (const auto& instance : m_Scene.Instances)
+                for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
                 {
+                    const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
                     ++m_FrustumCullTested;
                     if (!IsAABBVisible(transparentFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                     {
@@ -8623,7 +8813,8 @@ namespace Kurenai
                     const float dy = instance.World._24 - cameraPosition.y;
                     const float dz = instance.World._34 - cameraPosition.z;
                     const float distanceSq = dx * dx + dy * dy + dz * dz;
-                    for (const auto& mesh : instance.Model->Meshes)
+                    // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
+                    for (const auto& mesh : GetCurrentLOD(instanceIndex).Meshes)
                     {
                         if (!mesh.IsTransparent)
                         {
@@ -8809,8 +9000,9 @@ namespace Kurenai
                     // 画面には映っていないが水面には映るものが正しく残る
                     const FrustumPlanes reflectionFrustum = ExtractFrustumPlanes(reflectedViewProj);
 
-                    for (const auto& instance : m_Scene.Instances)
+                    for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
                     {
+                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
                         ++m_FrustumCullTested;
                         if (!IsAABBVisible(reflectionFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                         {
@@ -8818,7 +9010,8 @@ namespace Kurenai
                             continue;
                         }
 
-                        for (const auto& mesh : instance.Model->Meshes)
+                        // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
+                        for (const auto& mesh : GetCurrentLOD(instanceIndex).Meshes)
                         {
                             // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
                             // PlanarReflection.hlsl冒頭参照)

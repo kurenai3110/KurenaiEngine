@@ -245,6 +245,11 @@ namespace Kurenai::Assets
             // .kscene [Model]Water(水面マテリアル基盤)。trueならScene構築時に
             // ModelInstance::IsWaterへそのまま反映する
             bool Water = false;
+            // .kscene [Model]LODPath / LODDistance。粗くなっていく順(LODDistanceの昇順)に並ぶ。
+            // Pathが最も詳細な段(LOD0)で、ここには2段目以降だけが入る。
+            // LODPathとLODDistanceは対で、片方だけの指定はエラーにする
+            std::vector<std::wstring> LODPaths;
+            std::vector<float> LODDistances;
         };
 
         struct ParsedLightEntry
@@ -694,6 +699,37 @@ namespace Kurenai::Assets
                         const std::optional<bool> parsed = ParseBoolToken(value);
                         if (!parsed) errorAt(lineNumber, rawLine, "Waterの値はtrue/falseで指定してください");
                         entry.Water = *parsed;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"LODPath"))
+                    {
+                        // 【対で書くことを強制する】LODPathの直前にLODDistanceが埋まっていたら、
+                        // それは前のLODPathに対応する距離が無いまま次の段が来たということ
+                        if (entry.LODPaths.size() != entry.LODDistances.size())
+                        {
+                            errorAt(lineNumber, rawLine, "LODPathの前にLODDistanceが指定されていません(LODPathとLODDistanceは対で書いてください)");
+                        }
+                        if (value.empty()) errorAt(lineNumber, rawLine, "LODPathが空です");
+                        entry.LODPaths.push_back(value);
+                    }
+                    else if (CaseInsensitiveEquals(key, L"LODDistance"))
+                    {
+                        if (entry.LODDistances.size() + 1 != entry.LODPaths.size())
+                        {
+                            errorAt(lineNumber, rawLine, "LODDistanceに対応するLODPathがありません(LODPathを先に書いてください)");
+                        }
+                        float distance = 0.0f;
+                        if (!ParseFloatToken(value, distance)) errorAt(lineNumber, rawLine, "LODDistanceの値が不正です");
+                        if (distance < 1.0f || distance > 1000000.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "LODDistanceは1〜1000000の範囲で指定してください");
+                        }
+                        // 【昇順を強制する】切り替え距離が単調でないと「遠いのに詳細な段」が選ばれる。
+                        // 書き間違えても絵はそれらしく出てしまうので、ここで弾く
+                        if (!entry.LODDistances.empty() && distance <= entry.LODDistances.back())
+                        {
+                            errorAt(lineNumber, rawLine, "LODDistanceは粗くなる順(昇順)に指定してください");
+                        }
+                        entry.LODDistances.push_back(distance);
                     }
                     else
                     {
@@ -1201,6 +1237,21 @@ namespace Kurenai::Assets
                 {
                     throw std::runtime_error("[Model]の" + std::to_string(i + 1) + "番目にPathが指定されていません: " + WideToUtf8(filePath));
                 }
+                // 対の数が合わない = 最後のLODPathにLODDistanceが付いていない
+                const ParsedModelEntry& model = result.Models[i];
+                if (model.LODPaths.size() != model.LODDistances.size())
+                {
+                    throw std::runtime_error(
+                        "[Model]の" + std::to_string(i + 1) + "番目でLODPathにLODDistanceが対応していません: " +
+                        WideToUtf8(filePath));
+                }
+                // Path(LOD0)を含めた段数の上限。MeshEntryの固定長配列やDDGIのLODCountと揃えてある
+                if (model.LODPaths.size() + 1 > kMaxModelLODCount)
+                {
+                    throw std::runtime_error(
+                        "[Model]の" + std::to_string(i + 1) + "番目のLOD段数が上限(" +
+                        std::to_string(kMaxModelLODCount) + "段、Pathを含む)を超えています: " + WideToUtf8(filePath));
+                }
             }
             for (size_t i = 0; i < result.Lights.size(); ++i)
             {
@@ -1436,14 +1487,35 @@ namespace Kurenai::Assets
             //
             // 1x1のフォールバックはシーン全体で1組を共有する(モデルごとに作ると
             // 671モデルのシーンで2000個超の個別リソースになる。ModelLoader.hのコメント参照)
-            auto cached = scene.ModelCache.find(fullModelPath);
-            if (cached == scene.ModelCache.end())
+            const auto acquireModel = [&device, &scene](const std::wstring& path) -> std::shared_ptr<const Model>
             {
-                auto loaded = std::make_shared<Model>(LoadModel(device, fullModelPath, &scene.SharedTextures));
-                cached = scene.ModelCache.emplace(fullModelPath, std::move(loaded)).first;
-            }
-            instance.Model = cached->second;
+                auto cached = scene.ModelCache.find(path);
+                if (cached == scene.ModelCache.end())
+                {
+                    auto loaded = std::make_shared<Model>(LoadModel(device, path, &scene.SharedTextures));
+                    cached = scene.ModelCache.emplace(path, std::move(loaded)).first;
+                }
+                return cached->second;
+            };
+
+            instance.Model = acquireModel(fullModelPath);
             instance.IsWater = parsedModel.Water;
+
+            // モデルLODの2段目以降。同じ粗いモデルを多数のタイルが共有する使い方
+            // (PLATEAUのLOD1タイルなど)を想定しているので、ここもキャッシュを通す
+            instance.LODModels.reserve(parsedModel.LODPaths.size());
+            instance.LODDistances = parsedModel.LODDistances;
+            for (const std::wstring& lodPath : parsedModel.LODPaths)
+            {
+                const std::wstring normalizedLODPath = NormalizePathSeparators(lodPath);
+                if (IsPathEscaping(normalizedLODPath))
+                {
+                    throw std::runtime_error(
+                        "[Model]LODPathがルート外を指しています(絶対パスまたは'..'は使用できません): " +
+                        WideToUtf8(lodPath) + " (" + WideToUtf8(sceneFilePath) + ")");
+                }
+                instance.LODModels.push_back(acquireModel(assetRootDirectory + normalizedLODPath));
+            }
 
             using namespace DirectX;
             const XMMATRIX scaleMatrix = XMMatrixScaling(parsedModel.Scale[0], parsedModel.Scale[1], parsedModel.Scale[2]);
@@ -1582,14 +1654,18 @@ namespace Kurenai::Assets
         // 書式(セクション/キー/必須フィールド/数値範囲)の検証はParseSceneFile自体が行う
         const ParsedScene parsed = ParseSceneFile(sceneFilePath);
 
-        for (const ParsedModelEntry& parsedModel : parsed.Models)
+        // 【LODPathもここで見る】見落とすと、書き間違えたLODPathがKurenaiPackerの--sceneを
+        // 素通りし、実行時にその段へ切り替わって初めて例外になる。切り替わるまで気づけない
+        const auto validateModelFile = [&sceneFilePath, &assetRootDirectory](
+                                           const std::wstring& path, const char* keyName)
         {
-            const std::wstring normalizedPath = NormalizePathSeparators(parsedModel.Path);
+            const std::wstring normalizedPath = NormalizePathSeparators(path);
             if (IsPathEscaping(normalizedPath))
             {
                 throw std::runtime_error(
-                    "[Model]Pathがルート外を指しています(絶対パスまたは'..'は使用できません): " +
-                    WideToUtf8(parsedModel.Path) + " (" + WideToUtf8(sceneFilePath) + ")");
+                    std::string("[Model]") + keyName +
+                    "がルート外を指しています(絶対パスまたは'..'は使用できません): " + WideToUtf8(path) + " (" +
+                    WideToUtf8(sceneFilePath) + ")");
             }
 
             const std::wstring fullModelPath = assetRootDirectory + normalizedPath;
@@ -1597,7 +1673,8 @@ namespace Kurenai::Assets
             std::ifstream modelIn(fullModelPath, std::ios::binary);
             if (!modelIn.is_open())
             {
-                throw std::runtime_error("[Model]Pathが指す.kmodelが見つかりません: " + WideToUtf8(fullModelPath));
+                throw std::runtime_error(
+                    std::string("[Model]") + keyName + "が指す.kmodelが見つかりません: " + WideToUtf8(fullModelPath));
             }
 
             PackageHeader header{};
@@ -1611,6 +1688,15 @@ namespace Kurenai::Assets
                 throw std::runtime_error(
                     ".kmodelのバージョンが対応していません(ファイル: " + std::to_string(header.Version) +
                     ", ランタイム: " + std::to_string(kPackageVersion) + "): " + WideToUtf8(fullModelPath));
+            }
+        };
+
+        for (const ParsedModelEntry& parsedModel : parsed.Models)
+        {
+            validateModelFile(parsedModel.Path, "Path");
+            for (const std::wstring& lodPath : parsedModel.LODPaths)
+            {
+                validateModelFile(lodPath, "LODPath");
             }
         }
     }

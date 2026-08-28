@@ -25,4 +25,10 @@ void PSMainCutout(PSInput input)
     // 向こうで捨てられる(あるいはその逆)と、深度と実際の書き込みが食い違う
     float4 baseColorSample = BaseColorTexture.Sample(MaterialSampler, input.UV) * BaseColorFactor;
     clip(baseColorSample.a - AlphaCutoff);
+
+    // 【モデルLODの切り替え中もこのシェーダーを通す】アルファカットアウトが無い
+    // マテリアル(AlphaCutoff<=0)でも、クロスディザで捨てる画素があるなら
+    // 深度を書いてはいけない。C++側はcutoutだけでなく「フェード中」でもこのPSO を選ぶ。
+    // GBuffer.hlslのPSMainとまったく同じ呼び出しであること
+    ApplyLODDither(input.Position.xy);
 }
