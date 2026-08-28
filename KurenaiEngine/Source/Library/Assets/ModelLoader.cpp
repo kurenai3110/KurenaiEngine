@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -55,6 +56,77 @@ namespace Kurenai::Assets
                 throw std::runtime_error(std::string("パッケージのStringPool参照が範囲外です: ") + fieldNameForError);
             }
             return pool.substr(offset, length);
+        }
+
+        // メッシュのUV密度(モデルローカル1メートルあたりのUV単位)を、三角形を抜き取って見積もる。
+        // 求められない場合(UVが無い・全部縮退している)は0を返す。
+        //
+        // 【中央値を採る】平均は極端に引き伸ばされた三角形1個で飛ぶ。テクスチャストリーミングの
+        // 見積もりに使う値なので、代表値がずれると常駐ミップの選択が丸ごとずれる。
+        //
+        // 【全三角形を見ない】読み込み時間に効く(LOD2の1タイルで11万三角形×1715メッシュ)。
+        // 先頭64個ではなく等間隔に抜くのは、メッシュの一部だけに偏った密度を代表値にしないため
+        float EstimateUVPerLocalMeter(const Vertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount)
+        {
+            constexpr uint32_t kMaxSamples = 64;
+
+            if (vertices == nullptr || indices == nullptr || vertexCount == 0 || indexCount < 3)
+            {
+                return 0.0f;
+            }
+
+            const uint32_t triangleCount = indexCount / 3;
+            const uint32_t stride = std::max(1u, triangleCount / kMaxSamples);
+
+            std::vector<float> densities;
+            densities.reserve(kMaxSamples);
+            for (uint32_t tri = 0; tri < triangleCount; tri += stride)
+            {
+                const uint32_t i0 = indices[tri * 3 + 0];
+                const uint32_t i1 = indices[tri * 3 + 1];
+                const uint32_t i2 = indices[tri * 3 + 2];
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+                {
+                    continue;
+                }
+
+                const Vertex& v0 = vertices[i0];
+                const Vertex& v1 = vertices[i1];
+                const Vertex& v2 = vertices[i2];
+
+                const float e1[3] = { v1.Position[0] - v0.Position[0], v1.Position[1] - v0.Position[1], v1.Position[2] - v0.Position[2] };
+                const float e2[3] = { v2.Position[0] - v0.Position[0], v2.Position[1] - v0.Position[1], v2.Position[2] - v0.Position[2] };
+                const float cross[3] = {
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                };
+                const float localArea =
+                    0.5f * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+
+                const float du1 = v1.UV[0] - v0.UV[0];
+                const float dv1 = v1.UV[1] - v0.UV[1];
+                const float du2 = v2.UV[0] - v0.UV[0];
+                const float dv2 = v2.UV[1] - v0.UV[1];
+                const float uvArea = 0.5f * std::fabs(du1 * dv2 - dv1 * du2);
+
+                // 縮退した三角形(面積0、UVが潰れている)は密度が発散するので除く
+                if (localArea <= 1e-9f || uvArea <= 0.0f)
+                {
+                    continue;
+                }
+
+                densities.push_back(std::sqrt(uvArea / localArea));
+            }
+
+            if (densities.empty())
+            {
+                return 0.0f;
+            }
+
+            const size_t middle = densities.size() / 2;
+            std::nth_element(densities.begin(), densities.begin() + middle, densities.end());
+            return densities[middle];
         }
 
         // テクスチャの読み込みとキャッシュ・共有インスタンス(白/フラット法線/マゼンタ)の管理。
@@ -168,6 +240,9 @@ namespace Kurenai::Assets
                             auto texture = m_Device.CreateTextureFromImage(*item.Image);
                             outTextures[item.Index] = texture.get();
                             m_Model.Textures.push_back(std::move(texture));
+                            // テクスチャストリーミングが常駐ミップを変えるときに読み直す元。
+                            // Texturesと同じ並びになるようここで一緒に積む
+                            m_Model.TexturePaths.push_back(texturePaths[item.Index]);
                         }
                         catch (const std::exception& e)
                         {
@@ -604,6 +679,19 @@ namespace Kurenai::Assets
             outMesh.IndexBuffer = device.CreateBuffer(indexBufferDesc);
             outMesh.IndexCount = mesh.IndexCount;
             outMesh.VertexCount = mesh.VertexCount;
+
+            // メッシュ単位のAABBは.kmodel v10がMeshEntryに持っている(パック時に確定した値)
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                outMesh.BoundsMin[axis] = mesh.BoundsMin[axis];
+                outMesh.BoundsMax[axis] = mesh.BoundsMax[axis];
+            }
+
+            // UV密度はフォーマットに持たせていないため、geometryPayloadが生存している
+            // ここで求める(GPUへ送った後は頂点バッファとしてしか触れない)
+            outMesh.UVPerLocalMeter = EstimateUVPerLocalMeter(
+                reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset), mesh.VertexCount,
+                reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset), mesh.IndexCount);
 
             // アセットが持つメッシュレット数。GPUバッファを作るかどうか(下)とは独立で、
             // メッシュシェーダー非対応の環境でもレイトレーシング側が使うため常に控える。

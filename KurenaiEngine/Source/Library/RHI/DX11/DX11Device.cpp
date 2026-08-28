@@ -101,6 +101,13 @@ namespace Kurenai::RHI
 
         ThrowIfFailed(adapter->GetParent(IID_PPV_ARGS(&m_Factory)), "DXGIファクトリの取得に失敗しました");
 
+        // VRAM使用量の問い合わせ(QueryVideoMemoryInfo)はIDXGIAdapter3にしかない。
+        // 取れなくても描画には影響しないため、警告だけ出して続行する
+        if (FAILED(adapter.As(&m_Adapter)))
+        {
+            Core::Logger::Warning("DX11", "IDXGIAdapter3を取得できませんでした(VRAM使用量を表示できません)");
+        }
+
         // 実行中のGPUが何かをログに残す。どのGPUで測った値なのかが分からないと性能の記録が
         // 後から比較できなくなる。診断目的の情報なので、取得に失敗しても描画は続行する
         DXGI_ADAPTER_DESC adapterDesc{};
@@ -604,6 +611,85 @@ namespace Kurenai::RHI
             "シェーダリソースビューの作成に失敗しました");
 
         return std::make_unique<DX11Texture>(srv);
+    }
+
+    std::unique_ptr<IRHIPendingTextureContents> DX11Device::PrepareTextureContents(
+        IRHITexture* target, const TextureImage& image)
+    {
+        auto* texture = static_cast<DX11Texture*>(target);
+        if (texture == nullptr)
+        {
+            Core::Logger::Error("DX11", "PrepareTextureContents: テクスチャがnullptrです");
+            return nullptr;
+        }
+
+        // 差し替えてよいのは、SRVしか持たないアセット由来のテクスチャに限る。
+        // レンダーターゲット等は他のビューとの整合が取れなくなる
+        if (texture->GetShaderResourceView() == nullptr || texture->HasNonSrvViews())
+        {
+            Core::Logger::Error("DX11", "PrepareTextureContents: SRV以外のビューを持つテクスチャは差し替えられません");
+            return nullptr;
+        }
+
+        // ID3D11Deviceはフリースレッドなので、ここはワーカースレッドから呼んでよい
+        // (フリースレッドでないのはImmediate Contextの方)
+        const DirectX::ScratchImage& scratchImage = image.GetImage();
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        const HRESULT hr = DirectX::CreateShaderResourceView(
+            m_Device.Get(), scratchImage.GetImages(), scratchImage.GetImageCount(), image.GetMetadata(), &srv);
+        if (FAILED(hr))
+        {
+            // 失敗しても元の中身はそのまま。常駐ミップが減らないだけで絵は出続ける
+            Core::Logger::Error("DX11", "PrepareTextureContents: シェーダリソースビューの作成に失敗しました");
+            return nullptr;
+        }
+
+        return std::make_unique<DX11PendingTextureContents>(
+            texture, std::move(srv), static_cast<uint32_t>(image.GetMetadata().mipLevels));
+    }
+
+    std::unique_ptr<IRHIPendingTextureContents> DX11Device::PrepareTiledTextureResidency(
+        IRHITexture* target, const TiledTextureDesc& desc, const TextureImage& image, uint32_t firstMip)
+    {
+        (void)target;
+        (void)desc;
+        (void)image;
+        (void)firstMip;
+        // GetTiledResourcesTier()が0を返すため、上位層はここへ来ないのが正常
+        Core::Logger::Error("DX11", "PrepareTiledTextureResidency: DX11はタイルリソースに対応していません");
+        return nullptr;
+    }
+
+    bool DX11Device::GetVideoMemoryUsage(uint64_t& outUsedBytes, uint64_t& outBudgetBytes) const
+    {
+        if (!m_Adapter)
+        {
+            return false;
+        }
+
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (FAILED(m_Adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+        {
+            return false;
+        }
+        outUsedBytes = info.CurrentUsage;
+        outBudgetBytes = info.Budget;
+        return true;
+    }
+
+    bool DX11Device::CommitTextureContents(IRHIPendingTextureContents* pending)
+    {
+        auto* entry = static_cast<DX11PendingTextureContents*>(pending);
+        if (entry == nullptr || entry->Texture == nullptr || !entry->Srv)
+        {
+            Core::Logger::Error("DX11", "CommitTextureContents: 差し替え待ちの内容が不正です");
+            return false;
+        }
+
+        // 古いテクスチャの実体は、GPUが参照し終えるまでDX11ランタイムが破棄を遅らせる
+        // (DX12のような自前の遅延解放は要らない)
+        entry->Texture->SwapShaderResourceView(std::move(entry->Srv));
+        return true;
     }
 
     std::unique_ptr<IRHITexture> DX11Device::CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
