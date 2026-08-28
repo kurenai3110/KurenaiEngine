@@ -246,5 +246,16 @@ namespace Kurenai::RHI
         // 影響しない(内部で一時的なディスクリプタを使うため)。
         // UAVを持たないバッファを渡すとログを出して何もしない
         virtual void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) = 0;
+
+        // GPU上のバッファの内容を、BufferUsage::Readbackのバッファへ写す(GPUのコピーコマンド)。
+        // 実際にCPUから読むのは IRHIBuffer::ReadbackData で、**数フレーム後に行うこと**。
+        //
+        // 【この呼び出しはコマンドを積むだけ】ここでGPUの完了を待ってはいけない。
+        // 待つとフレームが直列化し、計測のために計測対象を壊すことになる。
+        // 呼び出し側は受け皿をリング状に複数本持ち、十分に古いものを読む。
+        //
+        // srcはコピー元として読める状態へ遷移させる(DX12)。dstがBufferUsage::Readbackでない、
+        // サイズが足りない、いずれかがnullptrならログを出して何もしない
+        virtual void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) = 0;
     };
 }

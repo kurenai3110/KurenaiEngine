@@ -1,5 +1,6 @@
 #include "DX12Buffer.h"
 
+#include <cstring>
 #include <string>
 #include <utility>
 
@@ -45,6 +46,12 @@ namespace Kurenai::RHI
             m_IndexBufferView.BufferLocation = gpuAddress;
             m_IndexBufferView.SizeInBytes = sizeInBytes;
             m_IndexBufferView.Format = DXGI_FORMAT_R32_UINT;
+        }
+        else if (usage == BufferUsage::Readback)
+        {
+            // READBACKヒープのリソースはCOPY_DEST状態でしか作れず、以後その状態から動かせない
+            // (D3D12の仕様)。TransitionToが余計なバリアを積まないよう実態に合わせておく
+            m_CurrentState = D3D12_RESOURCE_STATE_COPY_DEST;
         }
     }
 
@@ -223,6 +230,40 @@ namespace Kurenai::RHI
 
         m_CurrentRingIndex = (m_CurrentRingIndex + 1) % m_RingCapacity;
         return static_cast<uint8_t*>(m_MappedPtr) + static_cast<size_t>(m_CurrentRingIndex) * m_SlotSizeInBytes;
+    }
+
+    bool DX12Buffer::ReadbackData(void* outData, uint32_t sizeInBytes)
+    {
+        if (m_Usage != BufferUsage::Readback)
+        {
+            Core::Logger::Error("DX12", "ReadbackData: BufferUsage::Readback以外のバッファから読もうとしました");
+            return false;
+        }
+        if (outData == nullptr || sizeInBytes == 0)
+        {
+            Core::Logger::Error("DX12", "ReadbackData: 出力先がnullptrかサイズが0です");
+            return false;
+        }
+        if (sizeInBytes > m_SlotSizeInBytes)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "ReadbackData: 要求サイズ(" + std::to_string(sizeInBytes) + ")がバッファサイズ(" +
+                    std::to_string(m_SlotSizeInBytes) + ")を超えています");
+            return false;
+        }
+        if (m_MappedPtr == nullptr)
+        {
+            Core::Logger::Error("DX12", "ReadbackData: リードバックバッファがマップされていません");
+            return false;
+        }
+
+        // 【GPUの完了を待たない】READBACKヒープは作成時からマップしたままにしてあり、
+        // ここは単なるmemcpy。コピーコマンドがまだ実行されていなければ古い内容が返るが、
+        // 待って直列化するよりは呼び出し側にリングを持たせるほうがよい
+        // (IRHIBuffer::ReadbackDataのコメント参照)
+        std::memcpy(outData, m_MappedPtr, sizeInBytes);
+        return true;
     }
 
     uint32_t DX12Buffer::GetSafeUpdatesPerFrame() const

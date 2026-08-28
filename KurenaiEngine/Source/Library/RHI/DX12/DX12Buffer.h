@@ -129,6 +129,10 @@ namespace Kurenai::RHI
         // BufferUsage::IndirectArgsで作成されたか。DispatchIndirectはこれを見て、
         // 引数バッファ以外を渡された場合にログを出して何もしない
         bool IsIndirectArgs() const { return m_Usage == BufferUsage::IndirectArgs; }
+        // BufferUsage::Readbackで作成されたか。CopyBufferToReadbackが行き先を検証するのに使う
+        bool IsReadback() const { return m_Usage == BufferUsage::Readback; }
+        // BufferUsage::Readbackの内容をCPUへ写す。詳細はIRHIBuffer::ReadbackDataのコメント
+        bool ReadbackData(void* outData, uint32_t sizeInBytes) override;
         // UAVディスクリプタを持つか(ClearUnorderedAccessBufferUintの事前判定に使う)
         bool HasUav() const { return m_SrvUavHeap != nullptr && m_UavIndex != kInvalid; }
         // ClearUnorderedAccessViewUint専用のraw(ByteAddress)UAVハンドルを返す。

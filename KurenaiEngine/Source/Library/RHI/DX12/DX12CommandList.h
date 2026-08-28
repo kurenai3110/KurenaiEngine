@@ -55,6 +55,7 @@ namespace Kurenai::RHI
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
         void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) override;
         void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) override;
+        void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
 
     private:
         static constexpr uint32_t kMaxRenderTargets = 8;

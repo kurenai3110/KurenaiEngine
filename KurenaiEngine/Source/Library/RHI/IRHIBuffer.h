@@ -32,5 +32,19 @@ namespace Kurenai::RHI
         // DX11はUpdateBufferごとにMap(WRITE_DISCARD)でドライバに領域をリネームさせるため
         // リングを持たず、実質的な上限が無い(既定のUINT32_MAXがそのまま返る)
         virtual uint32_t GetSafeUpdatesPerFrame() const { return UINT32_MAX; }
+
+        // BufferUsage::Readbackのバッファの内容をCPU側のメモリへ写す。
+        // 読めたらtrue、まだ読めない/このUsageではない場合はfalse。
+        //
+        // 【GPUの完了を待たない】待つとCPUがGPUに追いつくまで止まり、フレームが直列化する。
+        // 計測のためにこれをやると計測対象そのものを変えてしまう。
+        // 呼び出し側はリードバック用のバッファをリング状に複数本持ち、
+        // 「十分に古いフレームのぶん」を読むこと。
+        //
+        // DX11はMap(DO_NOT_WAIT)がまだGPU実行中だとfalseを返す。DX12はCPUから常時
+        // マップできるヒープにあるため常にtrueを返すが、**読めた内容が最新である保証は無い**
+        // (リングが浅ければ古いフレームの値、あるいは一度も書かれていない初期値が返る)。
+        // どちらのバックエンドでも「十分に古いものを読む」という責務は呼び出し側にある
+        virtual bool ReadbackData(void* outData, uint32_t sizeInBytes) { (void)outData; (void)sizeInBytes; return false; }
     };
 }

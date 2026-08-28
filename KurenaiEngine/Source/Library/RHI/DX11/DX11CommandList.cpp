@@ -502,6 +502,30 @@ namespace Kurenai::RHI
         m_Context->ClearUnorderedAccessViewUint(uav, values);
     }
 
+    void DX11CommandList::CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes)
+    {
+        if (dst == nullptr || src == nullptr || sizeInBytes == 0)
+        {
+            Core::Logger::Error("DX11", "CopyBufferToReadback: 引数が不正です。コピーをスキップします");
+            return;
+        }
+
+        auto* dx11Dst = static_cast<DX11Buffer*>(dst);
+        auto* dx11Src = static_cast<DX11Buffer*>(src);
+        if (!dx11Dst->IsReadback())
+        {
+            Core::Logger::Error(
+                "DX11", "CopyBufferToReadback: コピー先がBufferUsage::Readbackではありません。コピーをスキップします");
+            return;
+        }
+
+        // 【リソース状態の遷移は不要】DX11はドライバが暗黙に扱う(DX12との差はここだけ)。
+        // 範囲を指定してコピーするためCopyResourceではなくCopySubresourceRegionを使う
+        // (受け皿がコピー元より大きい場合に、DX12のCopyBufferRegionと同じ意味になる)
+        const D3D11_BOX box{ 0, 0, 0, sizeInBytes, 1, 1 };
+        m_Context->CopySubresourceRegion(dx11Dst->GetBuffer(), 0, 0, 0, 0, dx11Src->GetBuffer(), 0, &box);
+    }
+
     void DX11CommandList::ReleaseComputeUavBindingsAfterDispatch()
     {
         // バインドしたUAVはこのDispatchでのみ有効とし、直後に明示的に解放する(コメントはヘッダ側参照)

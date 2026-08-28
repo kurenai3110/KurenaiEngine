@@ -862,6 +862,30 @@ namespace Kurenai::RHI
         m_Device->GetCommandList()->ResourceBarrier(1, &barrier);
     }
 
+    void DX12CommandList::CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes)
+    {
+        if (dst == nullptr || src == nullptr || sizeInBytes == 0)
+        {
+            Core::Logger::Error("DX12", "CopyBufferToReadback: 引数が不正です。コピーをスキップします");
+            return;
+        }
+
+        auto* dx12Dst = static_cast<DX12Buffer*>(dst);
+        auto* dx12Src = static_cast<DX12Buffer*>(src);
+        if (!dx12Dst->IsReadback())
+        {
+            Core::Logger::Error(
+                "DX12", "CopyBufferToReadback: コピー先がBufferUsage::Readbackではありません。コピーをスキップします");
+            return;
+        }
+
+        // コピー元をCOPY_SOURCEへ。コピー先(READBACKヒープ)はCOPY_DESTから動かせないので遷移しない
+        dx12Src->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        m_Device->GetCommandList()->CopyBufferRegion(
+            dx12Dst->GetResource(), 0, dx12Src->GetResource(), 0, sizeInBytes);
+    }
+
     void DX12CommandList::ReleaseComputeUavBindingsAfterDispatch()
     {
         // このDispatchでUAVとして書き込んだリソースは、直後に別のDispatchやSRVとして読む場合に
