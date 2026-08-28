@@ -245,6 +245,8 @@ namespace Kurenai::Assets
             m_Entries.end());
 
         m_ScanCursor = 0;
+        m_TiledResourcesTier = device.GetTiledResourcesTier();
+        m_TileState.assign(m_Entries.size(), kTileUnknown);
 
         if (m_Entries.empty())
         {
@@ -271,6 +273,7 @@ namespace Kurenai::Assets
             m_Requests.clear();
         }
         m_Entries.clear();
+        m_TileState.clear();
         m_ScanCursor = 0;
     }
 
@@ -315,7 +318,27 @@ namespace Kurenai::Assets
             {
                 RHI::TextureImage image =
                     RHI::TextureImage::LoadFromPackedTexture(entry.Path, request.FirstMip);
-                ready.Pending = device->PrepareTextureContents(entry.Texture, image);
+
+                // タイルリソース経路を先に試す。リソースもSRV番号もbindless番号も変えずに
+                // 済むぶんこちらが軽い。乗らない形(標準ミップが1段も無い=全部ミップテール)なら
+                // nullptrが返るので、リソースごと作り直す従来経路へ落とす。
+                // m_TileStateはこのワーカースレッドだけが書き換える
+                if (m_TiledResourcesTier > 0 && m_TileState[request.EntryIndex] != kTileUnavailable)
+                {
+                    RHI::TiledTextureDesc tiledDesc{};
+                    tiledDesc.Width = entry.Info.Width;
+                    tiledDesc.Height = entry.Info.Height;
+                    tiledDesc.MipLevels = entry.Info.MipLevels;
+                    tiledDesc.DxgiFormat = entry.Info.Format;
+                    ready.Pending =
+                        device->PrepareTiledTextureResidency(entry.Texture, tiledDesc, image, request.FirstMip);
+                    m_TileState[request.EntryIndex] = ready.Pending ? kTileInUse : kTileUnavailable;
+                }
+
+                if (!ready.Pending)
+                {
+                    ready.Pending = device->PrepareTextureContents(entry.Texture, image);
+                }
             }
             catch (const std::exception& e)
             {
@@ -338,6 +361,9 @@ namespace Kurenai::Assets
         {
             return 0;
         }
+
+        // GetStatsはデバイスを受け取らないため、触れるここで拾って控える
+        device.GetTilePoolUsage(m_TilePoolReservedBytes, m_TilePoolUsedBytes);
 
         std::vector<ReadyItem> batch;
         {
@@ -531,10 +557,23 @@ namespace Kurenai::Assets
             stats.Bands[band].MinResidentMips = UINT32_MAX;
         }
 
-        for (const Entry& entry : m_Entries)
+        stats.TiledResourcesTier = m_TiledResourcesTier;
+        stats.TilePoolReservedBytes = m_TilePoolReservedBytes;
+        stats.TilePoolUsedBytes = m_TilePoolUsedBytes;
+
+        for (size_t index = 0; index < m_Entries.size(); ++index)
         {
+            const Entry& entry = m_Entries[index];
             const size_t band = SizeBandOf(entry.Info);
             SizeBandStats& bandStats = stats.Bands[band];
+
+            // m_TileStateはワーカースレッドが書くが、統計表示のための読み出しなので
+            // 1フレーム古い値を拾っても支障は無い
+            if (index < m_TileState.size() && m_TileState[index] == kTileInUse)
+            {
+                ++bandStats.TiledCount;
+                ++stats.TiledTextures;
+            }
 
             const uint64_t residentBytes = RHI::TextureImage::ComputeMipChainBytes(entry.Info, entry.ResidentFirstMip);
             const uint64_t fullBytes = RHI::TextureImage::ComputeMipChainBytes(entry.Info, 0);
@@ -588,10 +627,22 @@ namespace Kurenai::Assets
             static_cast<unsigned long long>(stats.FailedUpdates));
         Core::Logger::Info("TextureStreaming", prefix + summary);
 
+        // 【タイルリソースがどこに効いているか】64KBタイルはBC7で256x256テクセルを覆うため、
+        // 標準ミップを持てない小さいテクスチャは全部がミップテールになり、この経路に乗れない。
+        // 「入れたから減った」ではなく、乗れた枚数とプールの実サイズで語る
+        char tileLine[224];
+        std::snprintf(
+            tileLine, sizeof(tileLine),
+            "タイルリソース: Tier %u / 経路に乗ったテクスチャ %u枚 / プール確保 %.1f MB (うち使用 %.1f MB)",
+            stats.TiledResourcesTier, stats.TiledTextures,
+            static_cast<double>(stats.TilePoolReservedBytes) / (1024.0 * 1024.0),
+            static_cast<double>(stats.TilePoolUsedBytes) / (1024.0 * 1024.0));
+        Core::Logger::Info("TextureStreaming", prefix + tileLine);
+
         // 【サイズ帯ごとに分けて出す】64KBタイルはBC7で256x256テクセルを覆うため、
         // タイル単位の制御が効くのは大きいテクスチャだけになる。
         // 「入れたから減った」ではなく「どの帯にどれだけ効いたか」で語るための内訳
-        Core::Logger::Info("TextureStreaming", prefix + "サイズ帯   枚数   常駐MB  全ミップMB   常駐率  常駐ミップ(最小/平均/最大)  落とした段の平均");
+        Core::Logger::Info("TextureStreaming", prefix + "サイズ帯   枚数  タイル   常駐MB  全ミップMB   常駐率  常駐ミップ(最小/平均/最大)  落とした段の平均");
         for (size_t band = 0; band < kSizeBandCount; ++band)
         {
             const SizeBandStats& b = stats.Bands[band];
@@ -602,8 +653,8 @@ namespace Kurenai::Assets
             char line[256];
             std::snprintf(
                 line, sizeof(line),
-                "%s  %5u  %7.1f  %9.1f  %6.1f%%  %3u / %5.2f / %3u  %5.2f",
-                GetSizeBandName(band), b.TextureCount,
+                "%s  %5u  %6u  %7.1f  %9.1f  %6.1f%%  %3u / %5.2f / %3u  %5.2f",
+                GetSizeBandName(band), b.TextureCount, b.TiledCount,
                 static_cast<double>(b.ResidentBytes) / (1024.0 * 1024.0),
                 static_cast<double>(b.FullBytes) / (1024.0 * 1024.0),
                 b.FullBytes > 0 ? 100.0 * static_cast<double>(b.ResidentBytes) / static_cast<double>(b.FullBytes) : 0.0,

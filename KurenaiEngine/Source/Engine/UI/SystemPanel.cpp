@@ -123,12 +123,19 @@ namespace Kurenai::UI
                     stats.PendingRequests, stats.InFlight);
 
         // サイズ帯ごとの内訳。合計だけ見ると「どの帯に効いたか」を取り違える
+        // タイルリソースの効き所。乗れた枚数を帯ごとに出す
+        ImGui::Text("タイルリソース: Tier %u / 乗ったテクスチャ %u枚 / プール確保 %.1f MB (使用 %.1f MB)",
+                    stats.TiledResourcesTier, stats.TiledTextures,
+                    static_cast<double>(stats.TilePoolReservedBytes) / (1024.0 * 1024.0),
+                    static_cast<double>(stats.TilePoolUsedBytes) / (1024.0 * 1024.0));
+
         if (ImGui::BeginTable(
-                "###TextureStreamingBands", 6,
+                "###TextureStreamingBands", 7,
                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
         {
             ImGui::TableSetupColumn("サイズ帯");
             ImGui::TableSetupColumn("枚数");
+            ImGui::TableSetupColumn("タイル");
             ImGui::TableSetupColumn("常駐MB");
             ImGui::TableSetupColumn("全ミップMB");
             ImGui::TableSetupColumn("常駐率");
@@ -147,6 +154,8 @@ namespace Kurenai::UI
                 ImGui::TextUnformatted(Assets::TextureStreamingManager::GetSizeBandName(band));
                 ImGui::TableNextColumn();
                 ImGui::Text("%u", b.TextureCount);
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", b.TiledCount);
                 ImGui::TableNextColumn();
                 ImGui::Text("%.1f", static_cast<double>(b.ResidentBytes) / (1024.0 * 1024.0));
                 ImGui::TableNextColumn();

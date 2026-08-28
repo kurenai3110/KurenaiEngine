@@ -64,6 +64,11 @@ namespace Kurenai::Assets
             uint64_t SumResidentMips = 0;
             // 落とせているミップ0側の段数の合計(FirstMipの総和)。0なら一段も削れていない
             uint64_t SumDroppedMips = 0;
+            // この帯のうち、タイルリソース経路で扱えている枚数。
+            // **64KBタイルはBC7で256x256テクセルを覆うため、標準ミップを持てない小さい
+            // テクスチャは全部がミップテールになり、この経路に乗れない。**
+            // 「タイルリソースが効くのはどの帯か」はこの数字で答える
+            uint32_t TiledCount = 0;
         };
 
         struct Stats
@@ -77,6 +82,11 @@ namespace Kurenai::Assets
             // 差し替えの累計。**0なら一度も実行されていない**(対照実験で最初に潰す項目)
             uint64_t CommittedUpdates = 0;
             uint64_t FailedUpdates = 0;
+            // タイルリソース経路で扱えているテクスチャ数と、タイルプールの実サイズ
+            uint32_t TiledTextures = 0;
+            uint32_t TiledResourcesTier = 0;
+            uint64_t TilePoolReservedBytes = 0;
+            uint64_t TilePoolUsedBytes = 0;
             SizeBandStats Bands[kSizeBandCount];
         };
 
@@ -181,6 +191,19 @@ namespace Kurenai::Assets
         float m_MipBias = 0.0f;
 
         std::vector<Entry> m_Entries;
+        // m_Entriesと同じ並び。**ワーカースレッドだけが書き換える**(Buildで確保したあと
+        // 要素数は変わらないため、Renderスレッドが統計として読むぶんには安全)。
+        // 0 = まだ判定していない / 1 = タイル経路で動いている / 2 = タイル経路に乗らない
+        static constexpr uint8_t kTileUnknown = 0;
+        static constexpr uint8_t kTileInUse = 1;
+        static constexpr uint8_t kTileUnavailable = 2;
+        std::vector<uint8_t> m_TileState;
+        // IRHIDevice::GetTiledResourcesTier()の写し。0ならタイル経路を試さない
+        uint32_t m_TiledResourcesTier = 0;
+        // タイルプールの実サイズ。CommitReady(デバイスを触れる場所)で拾って控え、
+        // GetStatsはこれを読むだけにする(GetStatsはデバイスを受け取らないため)
+        uint64_t m_TilePoolReservedBytes = 0;
+        uint64_t m_TilePoolUsedBytes = 0;
         // 毎フレーム全件を走査すると数万件では効かないため、フレームごとに一部だけ見る。
         // 目標ミップは距離に対して緩やかにしか変わらないので、数フレームの遅れは見えない
         size_t m_ScanCursor = 0;
