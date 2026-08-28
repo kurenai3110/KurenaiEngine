@@ -127,11 +127,15 @@ cbuffer ObjectConstants : register(b1)
     // 先頭までしか宣言していないシェーダーがあっても、定数バッファのオフセットは1バイトも
     // 動かない(上のMaterialID・BaseColorFactorのコメントと同じ理由)。
     // 頂点シェーダー経路ではどれも読まれないため、C++側は0のままでも構わない
-    uint VertexBufferIndex;          // StructuredBuffer<MeshVertex>(Assets::Vertexと同じ並び)
+    //
+    // 【表はモデル単位】かつてメッシュごとに別のバッファを指していたが、1回のDispatchMeshで
+    // モデル全体を描けるようにするためモデル単位の1本へ統合した(Assets::GpuMeshlet)。
+    // 頂点バッファの番号はメッシュレット1件ごとが持つので、ここでは渡さない
+    uint MeshletOffset;              // MeshletBufferの中で、このドローが見る範囲の先頭
     uint MeshletBufferIndex;         // StructuredBuffer<Meshlet>
     uint MeshletVertexBufferIndex;   // StructuredBuffer<uint>(頂点バッファへのインデックス)
     uint MeshletTriangleBufferIndex; // StructuredBuffer<uint>(ローカル頂点番号3つを詰めたもの)
-    uint MeshletCount;               // このメッシュのメッシュレット数(増幅シェーダーの範囲外判定用)
+    uint MeshletCount;               // このドローで見るメッシュレット数(増幅シェーダーの範囲外判定用)
 
     // 透過率(0=不透明、1=完全に透ける)。葉・花弁のように薄いものが、裏から当たった光を
     // 透かして表側を光らせる量。GBuffer.hlslがG-BufferのAlbedo.aへ書き、

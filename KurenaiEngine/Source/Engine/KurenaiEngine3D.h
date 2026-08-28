@@ -210,7 +210,7 @@ namespace Kurenai
         // 「どのPSOを束ねるか」と「DispatchMeshとDrawIndexedのどちらを積むか」の判断が
         // ずれると即座に破綻するため、判定を1か所に集約する。
         // isWaterがtrueのメッシュは常にfalse(理由は実装のコメント参照)
-        bool ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const;
+        bool ShouldUseMeshletPath(const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const;
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
         // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
         RHI::IRHITexture* GetActiveAOTexture() const;

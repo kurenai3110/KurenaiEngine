@@ -813,11 +813,20 @@ namespace Kurenai
             float MaterialID;
             // メッシュシェーダー経路(Shaders/3D/GBufferMeshlet.hlsl)がジオメトリを引くための
             // bindlessディスクリプタ番号。頂点シェーダー経路では読まれない。
-            // すべて4バイトのスカラーなので、末尾に足しても既存フィールドのオフセットは動かない
-            uint32_t VertexBufferIndex;
+            // すべて4バイトのスカラーなので、末尾に足しても既存フィールドのオフセットは動かない。
+            //
+            // 【3本ともモデル単位】かつてメッシュ単位のバッファを指していたが、
+            // 1回のDispatchMeshでモデル全体を描けるようにするためモデル単位へ統合した
+            // (Assets::GpuMeshletのコメント参照)。頂点バッファの番号はメッシュレット1件ごとに
+            // 持たせてあるので、ここでは渡さない。
+            //
+            // 【MeshletOffsetは旧VertexBufferIndexの枠】読むのはGBufferMeshlet.hlslだけで、
+            // かつ同時に直すため、枠を使い回してもレイアウトのずれは起きない
+            uint32_t MeshletOffset;
             uint32_t MeshletBufferIndex;
             uint32_t MeshletVertexBufferIndex;
             uint32_t MeshletTriangleBufferIndex;
+            // このドローで見るメッシュレット数(増幅シェーダーの範囲外判定用)
             uint32_t MeshletCount;
             // 透過率(0=不透明)。GBufferパスがG-BufferのAlbedo.aへ書き、
             // DirectLighting.hlslの透過項が読む(45章)。
@@ -861,14 +870,15 @@ namespace Kurenai
             // メッシュレット。ModelLoaderが登録済みの番号をそのまま渡す。
             // メッシュシェーダー非対応・メッシュレット未生成の場合は
             // バッファ自体が無く、GetBindlessIndexはkInvalidBindlessIndexを返す
-            // (MeshletCountが0ならメッシュシェーダー経路には入らないため、その値は使われない)
+            // (MeshletCountが0ならメッシュシェーダー経路には入らないため、その値は使われない)。
+            // 表はモデル単位なので、このメッシュのぶんの範囲をMeshletOffset/MeshletCountで示す
             const auto bindlessIndexOf = [](const RHI::IRHIBuffer* buffer) {
                 return buffer ? buffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
             };
-            constants.VertexBufferIndex = bindlessIndexOf(mesh.VertexBuffer.get());
-            constants.MeshletBufferIndex = bindlessIndexOf(mesh.MeshletBuffer.get());
-            constants.MeshletVertexBufferIndex = bindlessIndexOf(mesh.MeshletVertexBuffer.get());
-            constants.MeshletTriangleBufferIndex = bindlessIndexOf(mesh.MeshletTriangleBuffer.get());
+            constants.MeshletOffset = mesh.MeshletOffset;
+            constants.MeshletBufferIndex = bindlessIndexOf(instance.Model.MeshletBuffer.get());
+            constants.MeshletVertexBufferIndex = bindlessIndexOf(instance.Model.MeshletVertexBuffer.get());
+            constants.MeshletTriangleBufferIndex = bindlessIndexOf(instance.Model.MeshletTriangleBuffer.get());
             constants.MeshletCount = mesh.MeshletCount;
             return constants;
         }
@@ -2816,7 +2826,8 @@ namespace Kurenai
                m_DDGIProbeTracePipelineState != nullptr && m_DDGITraceConstantBuffer != nullptr;
     }
 
-    bool KurenaiEngine3D::ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const
+    bool KurenaiEngine3D::ShouldUseMeshletPath(
+        const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const
     {
         // 【水面はメッシュレット経路に載せない】水面のピクセルシェーダーはWater.hlslの
         // PSMainで、G-Buffer本体のPSMainとは別物。メッシュシェーダー版を用意するには
@@ -2830,8 +2841,10 @@ namespace Kurenai
         // メッシュレットが焼かれていない(--no-meshletsでパックされた.kmodel)、
         // またはデバイスが非対応でGPUバッファを作っていない場合はnullptrになる。
         // 【MeshletCountで判定しないこと】あちらはアセットが持つ数そのもので、
-        // メッシュシェーダー非対応の環境でも(レイトレーシングが使うため)0にはならない
-        if (!mesh.MeshletBuffer)
+        // メッシュシェーダー非対応の環境でも(レイトレーシングが使うため)0にはならない。
+        // 表はモデル単位なので、このメッシュ自身が塊を持っているかも併せて見る
+        // (モデル内に塊を持たないメッシュが混ざりうる)
+        if (!model.MeshletBuffer || !model.MaterialTableBuffer || mesh.MeshletCount == 0)
         {
             return false;
         }
@@ -8054,7 +8067,7 @@ namespace Kurenai
                             continue;
                         }
 
-                        const bool useMeshlet = ShouldUseMeshletPath(mesh, instance.IsWater);
+                        const bool useMeshlet = ShouldUseMeshletPath(instance.Model, mesh, instance.IsWater);
                         bindPipelineState(instance.IsMirrored, instance.IsWater, useMeshlet);
 
                         const ObjectConstants objectConstants =

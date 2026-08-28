@@ -60,6 +60,55 @@ namespace Kurenai::Assets
     inline constexpr uint32_t kGpuMaterialFlagTransparent = 1u << 0;  // glTFのalphaMode=BLEND
     inline constexpr uint32_t kGpuMaterialFlagCutout = 1u << 1;       // glTFのalphaMode=MASK
 
+    // モデル1つ分のメッシュレット表(StructuredBuffer<Meshlet>)の1件。
+    // ディスク形式のAssets::MeshletEntry(48バイト、ModelPackage.h)へ
+    // 「どのメッシュの、どのマテリアルの塊か」を足したもの。
+    //
+    // 【なぜメッシュ単位ではなくモデル単位で持つのか】メッシュごとに別のバッファを
+    // 持っていると、1回のDispatchMeshで扱えるのが1メッシュぶんに限られる。
+    // モデル全体のメッシュレットを1本の表にまとめておけば、
+    // 増幅シェーダーが「モデルの全メッシュレット」を1回のディスパッチで見渡せる。
+    //
+    // 【オフセットはモデル基準へ付け替える】MeshletEntry::VertexOffset/TriangleOffsetは
+    // ディスク上ではメッシュ内相対だが、ここではモデル単位に連結した
+    // MeshletVertexBuffer / MeshletTriangleBuffer の中でのオフセットに直してある。
+    //
+    // 【頂点バッファだけはメッシュ単位のまま】.kgeomのペイロードは
+    // [頂点][インデックス][メッシュレット3本] をメッシュごとに連結した並びで、
+    // 頂点ブロックが連続していない。モデル単位の頂点バッファを作るには集めて複製する
+    // 必要があり、それは従来経路(DX11・BLAS・自前ラスタライザ)が使う
+    // メッシュ単位の頂点バッファと二重にVRAMを食う。
+    // 代わりに、メッシュレット1件ごとに「自分の頂点バッファのbindless番号」を持たせて
+    // メッシュシェーダーが選ぶ(自前ラスタライザのSWRasterMeshInfoと同じ方式)。
+    //
+    // HLSL側の対応: Shaders/3D/GBufferMeshlet.hlsl の struct Meshlet。
+    // **並びとサイズを必ず一致させること。**
+    struct GpuMeshlet
+    {
+        uint32_t VertexOffset = 0;         // モデル単位のMeshletVertexBuffer内の要素オフセット
+        uint32_t TriangleOffset = 0;       // モデル単位のMeshletTriangleBuffer内の要素オフセット
+        uint32_t VertexCount = 0;
+        uint32_t TriangleCount = 0;
+        float BoundsCenter[3] = { 0.0f, 0.0f, 0.0f };
+        float BoundsRadius = 0.0f;
+        float ConeAxis[3] = { 0.0f, 0.0f, 0.0f };
+        float ConeCutoff = 1.0f;
+        // この塊が属するメッシュの頂点バッファのbindless番号
+        uint32_t VertexBufferIndex = RHI::kInvalidBindlessIndex;
+        // Model::MaterialTableBuffer 内の番号(= Mesh::MaterialIndex)
+        uint32_t MaterialIndex = 0;
+        // kGpuMaterialFlag* の写し。増幅シェーダーがパスごとの取捨に使う
+        // (1ドローでモデル全体を描くと、ドローの分割で材質を出し分けられなくなるため)
+        uint32_t Flags = 0;
+        // このメッシュ内で何番目の塊か。**モデル内の通し番号ではない。**
+        // メッシュレットの色分け表示(Meshlet.hlsliのMeshletDebugColor)にだけ使う値で、
+        // レイトレーシング側(RaytracingScene.hlsliのRTFindMeshlet)がメッシュ内の番号を
+        // 返すのに合わせてある。揃えないと同じ塊が別の色になり、
+        // 「ラスタとRTが同じジオメトリを見ているか」の確認が成立しない
+        uint32_t MeshletIndexInMesh = 0;
+    };
+    static_assert(sizeof(GpuMeshlet) == 64, "HLSL側のMeshletと一致させるため64バイト固定");
+
     struct Mesh
     {
         std::unique_ptr<RHI::IRHIBuffer> VertexBuffer;
@@ -80,21 +129,18 @@ namespace Kurenai::Assets
 
         // --- メッシュレット(メッシュシェーダー用) ---------------------------------------
         //
-        // KurenaiPackerが焼いた分割情報(Assets::MeshletEntry)と、その2段の間接参照テーブル。
-        // 増幅シェーダーがMeshletBufferのバウンディング球・法線コーンでカリングし、
-        // メッシュシェーダーが生き残ったメッシュレットの頂点/三角形を組み立てる。
-        //
-        // 3本ともBufferUsage::StructuredImmutable。シーン読み込み時に一度書いたら
-        // 変わらないため、ステージングリングを持たないこのUsageがそのまま当てはまる。
+        // 【GPUバッファはModel側にある】メッシュレットの表と2段の間接参照テーブルは
+        // モデル単位で1本ずつ持つ(Model::MeshletBuffer ほか)。ここにあるのは
+        // 「そのモデル単位の表の、どこからいくつがこのメッシュのぶんか」だけ。
         //
         // 【空になる条件】(1) デバイスがメッシュシェーダー非対応、(2) .kmodelが
         // --no-meshletsで焼かれている、のいずれか。
-        // 描画側はMeshletCountではなくMeshletBufferの有無で経路を選ぶこと ――
+        // 描画側はMeshletCountではなくModel::MeshletBufferの有無で経路を選ぶこと ――
         // MeshletCountはアセットが持つメッシュレット数そのもので、メッシュシェーダー
         // 非対応の環境でも(レイトレーシング側が使うため)0にはならない
-        std::unique_ptr<RHI::IRHIBuffer> MeshletBuffer;
-        std::unique_ptr<RHI::IRHIBuffer> MeshletVertexBuffer;
-        std::unique_ptr<RHI::IRHIBuffer> MeshletTriangleBuffer;
+        //
+        // Model::MeshletBuffer内でこのメッシュのメッシュレットが始まる位置
+        uint32_t MeshletOffset = 0;
         // .kmodelが持つメッシュレット数。GPUバッファの有無とは独立
         uint32_t MeshletCount = 0;
         RHI::IRHITexture* BaseColorTexture = nullptr;
@@ -205,6 +251,29 @@ namespace Kurenai::Assets
         // 描画側はこのポインタの有無で経路を選ぶこと
         std::unique_ptr<RHI::IRHIBuffer> MaterialTableBuffer;
         uint32_t MaterialCount = 0;
+        // このモデルにアルファカットアウト(glTFのalphaMode=MASK)のマテリアルが1つでもあるか。
+        // 深度プリパスとシャドウは「ピクセルシェーダーを持たない速い経路」を使いたいので、
+        // カットアウトを含むモデルだけを2ドロー(不透明ぶんとカットアウトぶん)に分ける。
+        // 含まないモデル(PLATEAU LOD2がそう)は1ドローのままで済む
+        bool HasCutoutMaterial = false;
+
+        // --- メッシュレット(メッシュシェーダー用) -----------------------------------------
+        //
+        // KurenaiPackerが焼いた分割情報(Assets::MeshletEntry)を、モデルの全メッシュぶん
+        // 1本へ連結したもの(Assets::GpuMeshlet)と、その2段の間接参照テーブル。
+        // 増幅シェーダーがバウンディング球・法線コーンでカリングし、
+        // メッシュシェーダーが生き残った塊の頂点/三角形を組み立てる。
+        //
+        // 3本ともBufferUsage::StructuredImmutable。シーン読み込み時に一度書いたら
+        // 変わらないため、ステージングリングを持たないこのUsageがそのまま当てはまる。
+        //
+        // 【なぜメッシュ単位ではないのか】GpuMeshletのコメント参照。
+        // メッシュごとに分かれていると、1回のDispatchMeshで1メッシュしか描けない
+        std::unique_ptr<RHI::IRHIBuffer> MeshletBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> MeshletVertexBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> MeshletTriangleBuffer;
+        // MeshletBufferの要素数(モデルの全メッシュのメッシュレット数の総和)
+        uint32_t TotalMeshletCount = 0;
 
         // レイトレーシングでヒット面の陰影を計算するための、このモデル全メッシュ分の
         // 頂点属性とインデックス(Mesh::RaytracingAttributeOffset / RaytracingIndexOffsetが

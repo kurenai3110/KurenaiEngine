@@ -28,7 +28,11 @@
 #include "GBufferCommon.hlsli"
 #include "Bindless.hlsli"
 
-// Assets::MeshletEntry(48バイト)と1対1で対応。並びとサイズを一致させること
+// Assets::GpuMeshlet(64バイト)と1対1で対応。並びとサイズを一致させること。
+//
+// VertexOffset/TriangleOffsetは**モデル単位に連結した表の中でのオフセット**で、
+// ディスク形式(Assets::MeshletEntry)のメッシュ内相対の値ではない。
+// 付け替えはModelLoaderが読み込み時に行っている
 struct Meshlet
 {
     uint VertexOffset;
@@ -39,6 +43,14 @@ struct Meshlet
     float BoundsRadius;
     float3 ConeAxis;
     float ConeCutoff;
+    // この塊が属するメッシュの頂点バッファ(bindless番号)。
+    // 頂点だけはメッシュ単位のバッファのままなので、塊ごとに選ぶ
+    uint VertexBufferIndex;
+    uint MaterialIndex;
+    uint Flags;
+    // このメッシュ内で何番目の塊か。**モデル内の通し番号ではない。**
+    // 色分け表示をレイトレーシング側(RTFindMeshlet)と揃えるためにこの値を使う
+    uint MeshletIndexInMesh;
 };
 
 // Assets::Vertex(56バイト)と1対1で対応。
@@ -170,8 +182,10 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
 
     if (dispatchThreadId < MeshletCount)
     {
+        // 表はモデル単位なので、このドローが見る範囲の先頭(MeshletOffset)を足す
+        const uint meshletIndex = MeshletOffset + dispatchThreadId;
         StructuredBuffer<Meshlet> meshlets = KURENAI_BINDLESS_BUFFER(MeshletBufferIndex);
-        const Meshlet meshlet = meshlets[dispatchThreadId];
+        const Meshlet meshlet = meshlets[meshletIndex];
 
         const float3 centerWorld = mul(float4(meshlet.BoundsCenter, 1.0f), World).xyz;
         const float radiusWorld = meshlet.BoundsRadius * MaxWorldScale();
@@ -183,7 +197,7 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
             // グループ共有のカウンタなら仮定が要らず、頻度も低いので競合の実害も無い
             uint slot;
             InterlockedAdd(s_VisibleCount, 1, slot);
-            s_Payload.MeshletIndices[slot] = dispatchThreadId;
+            s_Payload.MeshletIndices[slot] = meshletIndex;
         }
     }
 
@@ -220,7 +234,11 @@ void MSMain(
     if (groupThreadId < meshlet.VertexCount)
     {
         StructuredBuffer<uint> meshletVertices = KURENAI_BINDLESS_BUFFER(MeshletVertexBufferIndex);
-        StructuredBuffer<MeshVertex> vertices = KURENAI_BINDLESS_BUFFER(VertexBufferIndex);
+        // 【NonUniformResourceIndexが要る】頂点バッファの番号はメッシュレットごとに違い、
+        // 1回のディスパッチでメッシュを跨ぐと同じ波の中で値が発散する。
+        // 付け忘れると未定義動作になるが、**絵はそれらしく出たまま静かに壊れる**
+        StructuredBuffer<MeshVertex> vertices =
+            KURENAI_BINDLESS_BUFFER(NonUniformResourceIndex(meshlet.VertexBufferIndex));
 
         const uint globalVertexIndex = meshletVertices[meshlet.VertexOffset + groupThreadId];
         const MeshVertex vertex = vertices[globalVertexIndex];
@@ -238,7 +256,10 @@ void MSMain(
         output.Tangent = float4(mul(vertex.Tangent.xyz, (float3x3)World), vertex.Tangent.w * TangentSignFlip);
         output.CurClip = output.Position;
         output.PrevClip = mul(float4(worldPos, 1.0f), PrevViewProj);
-        output.MeshletIndex = meshletIndex;
+        // 【モデル内の通し番号ではなくメッシュ内の番号を書く】色分け表示は
+        // レイトレーシング側(RaytracingScene.hlsliのRTFindMeshlet)と同じ色でなければ
+        // 見比べる意味が無く、あちらはメッシュ内の番号を返す
+        output.MeshletIndex = meshlet.MeshletIndexInMesh;
 
         outVertices[groupThreadId] = output;
     }
