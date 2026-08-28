@@ -216,6 +216,19 @@ namespace Kurenai::Assets
         bool HasShadowDistance = false;
         float ShadowDistance = 0.0f;
 
+        // WASD/E/Qでカメラを動かす速度[m/s]。未指定(HasCameraSpeed == false)なら
+        // シーンAABBの対角から自動で決める(KurenaiEngine3D::ResetSceneDependentParams)。
+        //
+        // 【なぜ必要か】従来は moveSpeed = Shift ? 20 : 5 の即値だった。市街地規模のシーン
+        // (Project PLATEAU 東京23区は対角約45km)ではこの速度で端から端まで38分かかり、
+        // シーンを見て回ること自体ができない。逆に速度を上げただけにするとSponza(対角37m)のような
+        // 小さいシーンが操作不能になるため、シーンの規模から決めたうえで個別に上書きできる形にする。
+        //
+        // 【既定値を持たせない理由】ShadowDistanceと同じ。何らかの既定値を入れると、
+        // これまで問題なく操作できていたシーンの挙動が黙って変わる
+        bool HasCameraSpeed = false;
+        float CameraSpeed = 0.0f;
+
         // AO/間接光(SSAO・SSIL)を有効にするか。Furnace Testでは球の縁がAOで暗くなると
         // 「エネルギー損失による暗さ」と区別がつかなくなるため無効にする
         bool AOEnabled = true;

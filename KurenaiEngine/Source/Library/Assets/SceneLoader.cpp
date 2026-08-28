@@ -315,6 +315,8 @@ namespace Kurenai::Assets
             float IBLIntensity = 1.0f;
             bool HasShadowDistance = false;
             float ShadowDistance = 0.0f;
+            bool HasCameraSpeed = false;
+            float CameraSpeed = 0.0f;
             bool AOEnabled = true;
             bool HasSSREnabled = false;
             bool SSREnabled = true;
@@ -570,6 +572,20 @@ namespace Kurenai::Assets
                             errorAt(lineNumber, rawLine, "ShadowDistanceは1〜100000の範囲で指定してください");
                         }
                         result.HasShadowDistance = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CameraSpeed"))
+                    {
+                        if (!ParseFloatToken(value, result.CameraSpeed)) errorAt(lineNumber, rawLine, "CameraSpeedの値が不正です");
+                        // 下限: 0や負値は「動けない/逆走する」になるだけで指定として意味を成さない。
+                        // 0.01 m/s は1mの移動に100秒かかる速度で、実用の下限より十分下にある。
+                        // 上限: 東京23区(対角約45km)の自動値が653 m/s、Shiftで2612 m/sなので、
+                        // 桁の取り違えを弾きつつそれを妨げない位置に置く。
+                        // どちらも打ち間違いを弾くためのもので、実用範囲を狭める意図はない
+                        if (result.CameraSpeed < 0.01f || result.CameraSpeed > 10000.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "CameraSpeedは0.01〜10000の範囲で指定してください");
+                        }
+                        result.HasCameraSpeed = true;
                     }
                     else if (CaseInsensitiveEquals(key, L"AmbientOcclusion"))
                     {
@@ -1317,6 +1333,8 @@ namespace Kurenai::Assets
         scene.IBLIntensity = parsed.IBLIntensity;
         scene.HasShadowDistance = parsed.HasShadowDistance;
         scene.ShadowDistance = parsed.ShadowDistance;
+        scene.HasCameraSpeed = parsed.HasCameraSpeed;
+        scene.CameraSpeed = parsed.CameraSpeed;
 
         // [Scene]Skyboxは[Model]Pathと同じくAssetsルートからの相対パスとして扱い、
         // 同じルート外チェックを適用したうえで絶対パスへ解決してから返す

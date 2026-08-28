@@ -2428,6 +2428,18 @@ namespace Kurenai
         // 書き込み手を1スレッドに保っている
         Core::Camera m_Camera;
 
+        // WASD/E/Qの移動速度[m/s]。Shiftを押している間はDefaults::CameraSpeedShiftMultiplier倍。
+        //
+        // 【スレッド】書き手はRenderスレッド(ScenePanelのスライダとResetSceneDependentParams)、
+        // 読み手はUpdateスレッド(UpdateMovement)。m_TargetFPSと同じく、単一のfloatを跨いで
+        // 読み書きするだけなので同期は置かない ―― 途中の値が1フレーム見えても
+        // 「その1フレームだけ移動量が古い速度で計算される」以上のことは起きない。
+        // m_Camera本体はUpdateスレッド専有のまま(この値はそこへ入力されるだけ)。
+        //
+        // 値はシーン対角から決まるためResetSceneDependentParams()が上書きする。
+        // ここの初期化子は最初のシーンを読むまでの値でしかない
+        float m_CameraSpeed = Defaults::CameraSpeed;
+
         // --- シーン読み込みのハンドオフ -------------------------------------------------------
 
         std::thread m_LoaderThread;

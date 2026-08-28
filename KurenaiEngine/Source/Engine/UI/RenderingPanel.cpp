@@ -392,7 +392,7 @@ namespace Kurenai::UI
         if (m_Engine.m_AOTechnique == AOTechnique::SSAO)
         {
             SliderFloatSceneDependent(
-                "SSAO 半径###SSAORadius", &m_Engine.m_SSAORadius, 0.01f, 5.0f, recalcRequested, "%.3f",
+                "SSAO 半径###SSAORadius", &m_Engine.m_SSAORadius, 0.01f, 5.0f, recalcRequested, "%.3f", 0,
                 "遮蔽を探すサンプリング半径(ワールド単位)。シーン読み込み時にシーンの対角長から"
                 "自動設定されるため、既定値ではなく「シーンから再計算」で戻す");
             SliderFloatEx(
@@ -408,7 +408,7 @@ namespace Kurenai::UI
         else if (m_Engine.m_AOTechnique == AOTechnique::Raytraced)
         {
             SliderFloatSceneDependent(
-                "RT 最大距離###RTAOMaxDistance", &m_Engine.m_RTAOMaxDistance, 0.05f, 10.0f, recalcRequested, "%.3f",
+                "RT 最大距離###RTAOMaxDistance", &m_Engine.m_RTAOMaxDistance, 0.05f, 10.0f, recalcRequested, "%.3f", 0,
                 "遮蔽とバウンス光を探すレイの最大距離(ワールド単位)。シーン読み込み時に"
                 "シーンの対角長から自動設定される。これより遠くにある面は遮蔽物にならず、"
                 "間接光の光源にもならない");
@@ -431,11 +431,11 @@ namespace Kurenai::UI
         else
         {
             SliderFloatSceneDependent(
-                "SSIL 半径###SSILRadius", &m_Engine.m_SSILRadius, 0.01f, 5.0f, recalcRequested, "%.3f",
+                "SSIL 半径###SSILRadius", &m_Engine.m_SSILRadius, 0.01f, 5.0f, recalcRequested, "%.3f", 0,
                 "間接光と遮蔽を探すサンプリング半径(ワールド単位)。シーン読み込み時に"
                 "シーンの対角長から自動設定される");
             SliderFloatSceneDependent(
-                "SSIL 厚み###SSILThickness", &m_Engine.m_SSILThickness, 0.01f, 2.0f, recalcRequested, "%.3f",
+                "SSIL 厚み###SSILThickness", &m_Engine.m_SSILThickness, 0.01f, 2.0f, recalcRequested, "%.3f", 0,
                 "深度バッファ上の1点が持つと仮定する奥行きの厚み。小さすぎると遮蔽が抜け、"
                 "大きすぎると本来遮蔽していない面まで遮蔽扱いになる");
             SliderFloatEx(
@@ -860,10 +860,10 @@ namespace Kurenai::UI
         if (m_Engine.m_ReflectionMode == ReflectionMode::ScreenSpace)
         {
             SliderFloatSceneDependent(
-                "SSR 最大距離###SSRMaxDistance", &m_Engine.m_SSRMaxDistance, 0.1f, 100.0f, recalcRequested, "%.3f",
+                "SSR 最大距離###SSRMaxDistance", &m_Engine.m_SSRMaxDistance, 0.1f, 100.0f, recalcRequested, "%.3f", 0,
                 "反射レイを追跡する最大距離(ワールド単位)。シーン読み込み時に対角長から自動設定される");
             SliderFloatSceneDependent(
-                "SSR 厚み###SSRThickness", &m_Engine.m_SSRThickness, 0.01f, 2.0f, recalcRequested, "%.3f",
+                "SSR 厚み###SSRThickness", &m_Engine.m_SSRThickness, 0.01f, 2.0f, recalcRequested, "%.3f", 0,
                 "深度バッファ上の1点が持つと仮定する奥行きの厚み。ヒット判定の許容量になる");
             SliderFloatEx(
                 "SSR 粗さのしきい値###SSRRoughnessCutoff", &m_Engine.m_SSRRoughnessCutoff, 0.05f, 1.0f,
@@ -874,7 +874,7 @@ namespace Kurenai::UI
         {
             SliderFloatSceneDependent(
                 "RT 最大距離###RTReflectionMaxDistance", &m_Engine.m_RTReflectionMaxDistance, 1.0f, 500.0f,
-                recalcRequested, "%.3f",
+                recalcRequested, "%.3f", 0,
                 "反射レイを追跡する最大距離(ワールド単位)。シーン読み込み時に対角長から自動設定される。"
                 "短くすると速くなるが、本来映るはずの遠景が空に置き換わる");
             SliderFloatEx(

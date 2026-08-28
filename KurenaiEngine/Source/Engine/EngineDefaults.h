@@ -409,6 +409,31 @@ namespace Kurenai::Defaults
     // TAAのシャープネス(Defaults::TAASharpness)と同程度の効き方になる値
     inline constexpr float UpscaleSharpness = 0.25f;
 
+    // --- カメラ操作(WASD/E/Qの移動速度) ---
+    //
+    // 【この値は「シーンを読む前の初期値」でしかない】SSAO半径などと同じく、
+    // シーン読み込みのたびにResetSceneDependentParams()がシーン対角から決め直す。
+    // .ksceneが[Scene]CameraSpeedを持っていればそれが優先される。
+    // UI側は「既定値に戻す」ではなく「シーンから再計算」を提供すること
+    inline constexpr float CameraSpeed = 5.0f;
+    // Shiftを押している間の倍率。20/5 = 4倍という従来の即値をそのまま保つ
+    inline constexpr float CameraSpeedShiftMultiplier = 4.0f;
+    // 自動決定の基準となるシーン対角[m]と、そのときの速度[m/s]。
+    //
+    // 【基準をEmeraldSquareにする理由】従来の5 m/sはこのシーンで手に馴染む値として選ばれていた。
+    // 対角344.6mは Assets/Packed/EmeraldSquare/Day.kmodel のヘッダAABBから実測した値で、
+    // .ksceneのコメント(「対角344.6m、farZ 1378m」)とも一致する。
+    // この基準ならEmeraldSquareはちょうど従来どおりの5 m/sになる
+    inline constexpr float CameraSpeedReferenceDiagonal = 344.6f;
+    // 自動決定の下限[m/s]。
+    //
+    // 【比例させるだけでは小さいシーンが遅くなる】Sponza(対角37.1m)は比例式だと0.54 m/sになり、
+    // 30mの中庭を横切るのに55秒かかる。従来の5 m/sで既に使いやすいシーンをわざわざ遅くする
+    // 理由が無いため、基準対角より小さいシーンでは従来値をそのまま据え置く。
+    // 上限は設けない ―― 東京23区(実測のシーン対角45,014m)は653.14 m/s、Shiftで2,612.55 m/sになり、
+    // 端から端までが68.9秒/17.2秒になる。ここを頭打ちにすると、この機能を入れた目的そのものが消える
+    inline constexpr float CameraSpeedMin = 5.0f;
+
     // --- 同期 ---
     inline constexpr bool VSyncEnabled = false;
     inline constexpr bool FixedFPSEnabled = true;

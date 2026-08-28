@@ -4846,6 +4846,29 @@ namespace Kurenai
         // 半径を伸ばすほど画面上のサンプル間隔が粗くなって破綻するが、RTには
         // その制約が無く、部屋の広さ程度まで伸ばしたほうがバウンス光が正しく回る
         m_RTAOMaxDistance = std::clamp(diagonal * 0.03f, 0.1f, 10.0f);
+
+        // カメラの移動速度。.ksceneが[Scene]CameraSpeedを持っていればそれを使い、
+        // 無ければシーン対角から決める。
+        //
+        // 【比例と下限の2段】基準はEmeraldSquare(対角344.6m)で従来どおりの5 m/sになる比例式。
+        // それより小さいシーンは従来の5 m/sで既に使いやすいので下限で据え置く
+        // (比例だけだとSponza(対角37.1m)が0.54 m/sになり、逆に遅くなる)。
+        // 根拠と実測はEngineDefaults.hのCameraSpeed一式のコメントに置いてある
+        m_CameraSpeed = m_Scene.HasCameraSpeed
+            ? m_Scene.CameraSpeed
+            : (std::max)(
+                  Defaults::CameraSpeedMin,
+                  diagonal / Defaults::CameraSpeedReferenceDiagonal * Defaults::CameraSpeed);
+
+        // 【必ずログに出す】速度は絵に写らないため、「効いていない」と「効いているが
+        // 想定と違う値になっている」を見た目では区別できない。シーンごとの実効値を残しておく
+        char cameraSpeedText[192];
+        std::snprintf(
+            cameraSpeedText, sizeof(cameraSpeedText),
+            "カメラ移動速度: %.2f m/s (Shift時 %.2f m/s) [シーン対角 %.1f m / %s]",
+            m_CameraSpeed, m_CameraSpeed * Defaults::CameraSpeedShiftMultiplier, diagonal,
+            m_Scene.HasCameraSpeed ? "[Scene]CameraSpeedの指定" : "対角からの自動決定");
+        Core::Logger::Info("KurenaiEngine3D", cameraSpeedText);
     }
 
     // 歩き回る視点のカメラの近平面を求める。シーン対角に比例させつつ、上限で頭打ちにする。
@@ -5547,7 +5570,12 @@ namespace Kurenai
     {
         // メッセージベースの入力API(IsKeyDown)を使う。GetAsyncKeyStateと異なりウィンドウが
         // フォーカスを失っている間は反応せず、PostMessageによるテスト自動化とも整合する
-        const float moveSpeed = IsKeyDown(VK_SHIFT) ? 20.0f : 5.0f;
+        //
+        // 【速度は即値ではなくシーンから決まる】m_CameraSpeedは.ksceneの[Scene]CameraSpeed、
+        // 無ければシーン対角から自動で決まる(ResetSceneDependentParams)。Shiftの倍率は
+        // 従来の 20/5 = 4倍をそのまま保つ
+        const float moveSpeed =
+            m_CameraSpeed * (IsKeyDown(VK_SHIFT) ? Defaults::CameraSpeedShiftMultiplier : 1.0f);
         const float moveAmount = moveSpeed * deltaTime;
 
         const DirectX::XMFLOAT3 forward = m_Camera.GetForward();
