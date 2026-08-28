@@ -1225,6 +1225,15 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_ShadowMeshShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletPipelineStateMirrored;
+        // アルファカットアウト(glTFのalphaMode=MASK)の影。ピクセルシェーダーは
+        // 頂点シェーダー経路とメッシュシェーダー経路で共有する。
+        // **DX11でも効く**(bindlessもメッシュシェーダーも要らない)
+        std::unique_ptr<RHI::IRHIShader> m_ShadowCutoutVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_ShadowCutoutPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowCutoutPipelineStateMirrored;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletCutoutPipelineStateMirrored;
         // 全カスケードの深度を1つのTexture2DArray(スライス番号=カスケード番号)として保持する。
         // 書き込みはスライスごとの個別DSV(RenderGraphPassDesc::DepthTargetArraySlice)で行い、
         // 読み取りは配列全体を指す1本のSRV(t4)を1回バインドするだけでよい。シェーダ側は

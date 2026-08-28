@@ -2255,9 +2255,31 @@ namespace Kurenai
         shadowPsDesc.EntryPoint = "PSMain";
         m_ShadowPixelShader = m_Device->CreateShader(shadowPsDesc);
 
+        // アルファカットアウト用。切り抜きを反映しないと、葉や柵のように
+        // テクスチャで抜く前提のマテリアルが板ポリゴンのまま影を落とす
+        RHI::ShaderDesc shadowCutoutVsDesc;
+        shadowCutoutVsDesc.Stage = RHI::ShaderStage::Vertex;
+        shadowCutoutVsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowCutoutVsDesc.EntryPoint = "VSMainCutout";
+        m_ShadowCutoutVertexShader = m_Device->CreateShader(shadowCutoutVsDesc);
+
+        RHI::ShaderDesc shadowCutoutPsDesc;
+        shadowCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
+        shadowCutoutPsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowCutoutPsDesc.EntryPoint = "PSMainCutout";
+        m_ShadowCutoutPixelShader = m_Device->CreateShader(shadowCutoutPsDesc);
+
         const std::vector<RHI::InputElementDesc> shadowInputLayout =
         {
             { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+        };
+
+        // カットアウトはベースカラーのアルファを引くためUVも要る。
+        // オフセット24はAssets::Vertexの並び(Position 0 / Normal 12 / UV 24)から
+        const std::vector<RHI::InputElementDesc> shadowCutoutInputLayout =
+        {
+            { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+            { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
         };
 
         RHI::PipelineStateDesc shadowPipelineDesc;
@@ -2271,6 +2293,22 @@ namespace Kurenai
         // シャドウマップへ内側の面の深度が書かれ、影の形と自己遮蔽の出方がずれる
         shadowPipelineDesc.FrontCounterClockwise = true;
         m_ShadowPipelineStateMirrored = m_Device->CreatePipelineState(shadowPipelineDesc);
+
+        // アルファカットアウト用(頂点シェーダー経路)。切り抜きを反映して深度を書く。
+        // 【DX11でも効く】bindlessもメッシュシェーダーも要らないので、両バックエンドで同じ影になる
+        if (m_ShadowCutoutVertexShader && m_ShadowCutoutPixelShader)
+        {
+            RHI::PipelineStateDesc shadowCutoutDesc;
+            shadowCutoutDesc.InputLayout = shadowCutoutInputLayout;
+            shadowCutoutDesc.VertexShader = m_ShadowCutoutVertexShader.get();
+            shadowCutoutDesc.PixelShader = m_ShadowCutoutPixelShader.get();
+            shadowCutoutDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            shadowCutoutDesc.HasDepthStencil = true;
+            shadowCutoutDesc.FrontCounterClockwise = false;
+            m_ShadowCutoutPipelineState = m_Device->CreatePipelineState(shadowCutoutDesc);
+            shadowCutoutDesc.FrontCounterClockwise = true;
+            m_ShadowCutoutPipelineStateMirrored = m_Device->CreatePipelineState(shadowCutoutDesc);
+        }
 
         // メッシュシェーダー版のシャドウPSO。
         //
@@ -2294,6 +2332,18 @@ namespace Kurenai
             m_ShadowMeshletPipelineState = m_Device->CreateMeshPipelineState(shadowMeshDesc);
             shadowMeshDesc.FrontCounterClockwise = true;
             m_ShadowMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+
+            // カットアウト用。ピクセルシェーダーは頂点シェーダー経路と共有する
+            // (ShadowMeshlet.hlslのShadowPSInputとShadow.hlslのCutoutPSInputは
+            //  同じ並び・同じセマンティクスにしてある)
+            if (m_ShadowCutoutPixelShader)
+            {
+                shadowMeshDesc.PixelShader = m_ShadowCutoutPixelShader.get();
+                shadowMeshDesc.FrontCounterClockwise = false;
+                m_ShadowMeshletCutoutPipelineState = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+                shadowMeshDesc.FrontCounterClockwise = true;
+                m_ShadowMeshletCutoutPipelineStateMirrored = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+            }
         }
 
         // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する。
@@ -7179,17 +7229,29 @@ namespace Kurenai
                         // ミラーリングされたインスタンスは表裏が入れ替わるため、GBufferパスと同じく
                         // 表裏判定を反転したパイプラインへ切り替える(切り替え時はb0も張り直す)
                         RHI::IRHIPipelineState* currentPipelineState = m_ShadowPipelineState.get();
-                        const auto bindPipelineState = [&](bool mirrored)
+                        const auto bindShadowPipelineState = [&](RHI::IRHIPipelineState* wanted)
                         {
-                            RHI::IRHIPipelineState* const wanted =
-                                mirrored ? m_ShadowPipelineStateMirrored.get() : m_ShadowPipelineState.get();
-                            if (wanted == currentPipelineState)
+                            if (!wanted || wanted == currentPipelineState)
                             {
                                 return;
                             }
                             cmd->SetPipelineState(wanted);
                             cmd->SetConstantBuffer(0, m_ShadowCascadeConstantBuffer.get());
+                            // カットアウトのピクセルシェーダーがベースカラーを引くためサンプラーが要る。
+                            // 不透明用のPSOはピクセルシェーダーを持たないので無害
+                            cmd->SetSamplerSet(m_MaterialSamplers.get());
                             currentPipelineState = wanted;
+                        };
+                        // アルファカットアウトのマテリアルは切り抜きを反映して深度を書く。
+                        // PSOが作れていない場合は従来どおり切り抜きを見ない(影が板のままになる)
+                        const auto selectShadowPipelineState = [&](bool mirrored, bool cutout)
+                        {
+                            if (cutout && m_ShadowCutoutPipelineState)
+                            {
+                                return mirrored ? m_ShadowCutoutPipelineStateMirrored.get()
+                                                : m_ShadowCutoutPipelineState.get();
+                            }
+                            return mirrored ? m_ShadowPipelineStateMirrored.get() : m_ShadowPipelineState.get();
                         };
 
                         // このカスケードのライト正射影に対して視錐台カリングする。
@@ -7207,40 +7269,68 @@ namespace Kurenai
 
                             // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
                             //
-                            // 【マスクを0にして全部通す】このパスは従来、半透明もカットアウトも
-                            // 区別せず全メッシュを描いていた(ピクセルシェーダーが空で、
-                            // アルファを一切見ていない)。ふるい分けを入れると影の出方が変わって
-                            // しまうため、ここでは意図的に何も落とさない
+                            // 【半透明は落とさない】このパスは従来から、BLENDのメッシュも
+                            // 実体のまま影を落としている。ここでふるい分けると影の出方が変わって
+                            // しまうため、意図的に何も落とさない(カットアウトの切り抜きだけは
+                            // 下で反映する ―― そちらは板ポリゴンの影が出る明確な不具合だった)。
+                            //
+                            // 【カットアウトを持つモデルだけ2回に分ける】不透明ぶんは
+                            // ピクセルシェーダーを持たないPSOで描きたいので、
+                            // 切り抜きが要るぶんとは同じドローにまとめられない
                             if (m_ShadowMeshletPipelineState && ShouldUseModelMeshletPath(instance))
                             {
-                                RHI::IRHIPipelineState* const wanted =
-                                    instance.IsMirrored ? m_ShadowMeshletPipelineStateMirrored.get()
-                                                        : m_ShadowMeshletPipelineState.get();
-                                if (wanted && wanted != currentPipelineState)
-                                {
-                                    cmd->SetPipelineState(wanted);
-                                    cmd->SetConstantBuffer(0, m_ShadowCascadeConstantBuffer.get());
-                                    currentPipelineState = wanted;
-                                }
-
-                                const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                    instance, m_EmissiveIntensity, m_OcclusionMapEnabled, 0, 0);
-                                cmd->UpdateBuffer(
-                                    m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                                cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
-
                                 constexpr uint32_t kAmplificationGroupSize = 32;
                                 const uint32_t groupCount =
                                     (instance.Model.TotalMeshletCount + kAmplificationGroupSize - 1)
                                     / kAmplificationGroupSize;
-                                cmd->DispatchMesh(groupCount, 1, 1);
-                                ++m_DrawCallsShadow;
+
+                                const auto dispatchShadowMeshlets =
+                                    [&](RHI::IRHIPipelineState* pipelineState, uint32_t rejectMask,
+                                        uint32_t requireMask)
+                                {
+                                    if (!pipelineState)
+                                    {
+                                        return;
+                                    }
+                                    bindShadowPipelineState(pipelineState);
+
+                                    const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                        instance, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask,
+                                        requireMask);
+                                    cmd->UpdateBuffer(
+                                        m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                    cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+                                    cmd->DispatchMesh(groupCount, 1, 1);
+                                    ++m_DrawCallsShadow;
+                                };
+
+                                // カットアウト用のPSOが作れていない場合は、従来どおり
+                                // 切り抜きを見ずに全部を1回で描く(影が板のままになる)
+                                const bool splitCutout =
+                                    instance.Model.HasCutoutMaterial && m_ShadowMeshletCutoutPipelineState;
+
+                                dispatchShadowMeshlets(
+                                    instance.IsMirrored ? m_ShadowMeshletPipelineStateMirrored.get()
+                                                        : m_ShadowMeshletPipelineState.get(),
+                                    splitCutout ? Assets::kGpuMaterialFlagCutout : 0u, 0u);
+
+                                if (splitCutout)
+                                {
+                                    dispatchShadowMeshlets(
+                                        instance.IsMirrored ? m_ShadowMeshletCutoutPipelineStateMirrored.get()
+                                                            : m_ShadowMeshletCutoutPipelineState.get(),
+                                        0u, Assets::kGpuMaterialFlagCutout);
+                                }
                                 continue;
                             }
 
                             for (const auto& mesh : instance.Model.Meshes)
                             {
-                                bindPipelineState(instance.IsMirrored);
+                                // アルファカットアウトは切り抜きを反映して深度を書く。
+                                // 見ないままだと、葉や柵のようにテクスチャで抜く前提の
+                                // マテリアルが板ポリゴンのまま影を落とす
+                                const bool cutout = mesh.AlphaCutoff > 0.0f;
+                                bindShadowPipelineState(selectShadowPipelineState(instance.IsMirrored, cutout));
 
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
@@ -7248,6 +7338,11 @@ namespace Kurenai
                                     MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                                if (cutout)
+                                {
+                                    cmd->SetTexture(0, mesh.BaseColorTexture);
+                                }
 
                                 cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                                 cmd->SetIndexBuffer(mesh.IndexBuffer.get());
