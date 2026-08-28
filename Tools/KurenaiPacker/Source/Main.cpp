@@ -65,6 +65,8 @@ namespace
             "                        印字して終わる。パッケージは書き出さないので-oは不要。\n"
             "                        外部から持ち込んだモデルの--scaleを決めるとき、テクスチャが\n"
             "                        どのスロットへ入ったかを確かめるときに使う\n"
+            "      --timing          解析と書き出しのフェーズ別内訳を追加で印字する(モデルモードのみ)。\n"
+            "                        どこで時間が溶けているかを推測せずに決めるためのもの\n"
             "      --force           既存の.ktexがあっても再圧縮して上書きする(モデルモードのみ)\n"
             "      --jobs <N>        テクスチャ処理のワーカースレッド数(既定: 論理コア数、上限8。モデルモードのみ)\n"
             "      --origin <X,Y,Z>  頂点位置・バウンズからこの座標を引く(--scaleを掛ける前)。\n"
@@ -131,6 +133,7 @@ namespace
         bool ShowHelp = false;
         bool SceneMode = false;
         bool Inspect = false;
+        bool Timing = false;
         bool BakeOcclusion = false;
         bool EnableMeshlets = true;
         unsigned int MeshletLODCount = 4;
@@ -254,6 +257,10 @@ namespace
             else if (arg == L"--inspect")
             {
                 args.Inspect = true;
+            }
+            else if (arg == L"--timing")
+            {
+                args.Timing = true;
             }
             else if (arg == L"--force")
             {
@@ -487,6 +494,21 @@ namespace
         return std::to_string(static_cast<long long>(std::chrono::duration<double, std::milli>(end - start).count()));
     }
 
+    // 秒をミリ秒の整数文字列にする(FormatMsと同じ見え方に揃えるため)
+    std::string FormatSeconds(double seconds)
+    {
+        return std::to_string(static_cast<long long>(seconds * 1000.0));
+    }
+
+    // 比率を固定小数2桁で出す。sprintf_sの書式文字列へ日本語を入れるとC4819が出るため、
+    // 書式はASCIIに限り日本語は連結側へ置く(OcclusionBaker.cppと同じ作法)
+    std::string Format2(double value)
+    {
+        char buffer[64];
+        sprintf_s(buffer, "%.2f", value);
+        return buffer;
+    }
+
     // .tmpへ書いてから完了時のみ本来のパスへリネームする(モデル/テクスチャ書き出しと同じ設計)
     void CopyFileAtomic(const fs::path& source, const fs::path& destination)
     {
@@ -642,10 +664,12 @@ int wmain(int argc, wchar_t** argv)
     const auto startTime = std::chrono::steady_clock::now();
 
     KurenaiPacker::SourceModel sourceModel;
+    KurenaiPacker::ParseTimings parseTimings;
     try
     {
         sourceModel = KurenaiPacker::LoadSourceModel(
-            inputAbsolute.wstring(), args.Scale, args.MaterialOverride, args.OriginOffset);
+            inputAbsolute.wstring(), args.Scale, args.MaterialOverride, args.OriginOffset,
+            args.Timing ? &parseTimings : nullptr);
     }
     catch (const std::exception& e)
     {
@@ -781,6 +805,75 @@ int wmain(int argc, wchar_t** argv)
     std::cout
         << " / 書き出し " << FormatMs(bakeTime, endTime) << "ms"
         << " / 合計 " << FormatMs(startTime, endTime) << "ms\n";
+
+    if (args.Timing)
+    {
+        // 【0の項目は出さない】テクスチャ0枚のPLATEAU LOD1タイルのように、ほとんどの項目が
+        // 0になる入力がある。全部並べると671タイルぶんのログが読めなくなる
+        const auto emit = [](const char* label, double seconds)
+        {
+            if (seconds < 0.0005) { return; }
+            std::cout << " / " << label << " " << FormatSeconds(seconds) << "ms";
+        };
+
+        std::cout << "  解析の内訳:";
+        emit("assimp読み込み", parseTimings.ReadSeconds);
+        emit("ノード収集", parseTimings.CollectSeconds);
+        emit("接線蓄積", parseTimings.TangentSeconds);
+        emit("頂点ループ", parseTimings.VertexSeconds);
+        emit("結合", parseTimings.MergeSeconds);
+        emit("マテリアル", parseTimings.MaterialSeconds);
+        std::cout << "\n";
+
+        const KurenaiPacker::WriteTimings& wt = result.Timings;
+        std::cout << "  書き出しの内訳:";
+        emit("収集", wt.CollectSeconds);
+        emit("スキップ判定", wt.SkipCheckSeconds);
+        emit("テクスチャ", wt.TextureSeconds);
+        emit("エントリ確定", wt.EntrySeconds);
+        emit("遮蔽マップ", wt.OcclusionSeconds);
+        emit("bentNormal", wt.BentNormalSeconds);
+        emit("メッシュレット構築", wt.MeshletSeconds);
+        emit("連結", wt.AppendSeconds);
+        emit(".kgeom書き込み", wt.GeometryWriteSeconds);
+        emit(".kmodel書き込み", wt.ModelWriteSeconds);
+        std::cout << "\n";
+
+        if (wt.WorkerCount > 0)
+        {
+            // 【和は実時間を超えうる】全ワーカーの累計なので上限は実時間×ワーカー数。
+            // 実効並列度がワーカー数に近ければ全員が働いており、1に近ければ1本を残して
+            // 全員がBC7のミューテックスで待っている。ここがスレッドを増やす価値を直接決める
+            const double workerSum = wt.WorkerLoadSeconds + wt.WorkerDdsSeconds + wt.WorkerWriteSeconds;
+            const double effective = wt.TextureSeconds > 0.0 ? workerSum / wt.TextureSeconds : 0.0;
+            std::cout
+                << "  テクスチャ内訳(全ワーカーの累計): 読み込み+ミップ+BC7 " << FormatSeconds(wt.WorkerLoadSeconds) << "ms"
+                << " / DDS化 " << FormatSeconds(wt.WorkerDdsSeconds) << "ms"
+                << " / 書き込み " << FormatSeconds(wt.WorkerWriteSeconds) << "ms\n"
+                << "    ワーカー " << wt.WorkerCount << "本 / フェーズ実時間 " << FormatSeconds(wt.TextureSeconds) << "ms"
+                << " / 実効並列度 " << Format2(effective) << "\n";
+
+            // 【ここが本丸】BC7待ちとBC7圧縮の比が「ワーカーを増やして意味があるか」を決める。
+            // 待ちが支配的なら本数を増やしても待ち行列が伸びるだけで、直列点そのものを
+            // 見直すか、プロセスを分けてデバイスを分けるしかない
+            std::cout
+                << "    LoadFromFileの内訳: デコード " << FormatSeconds(wt.TexDecodeSeconds) << "ms"
+                << " / ミップ " << FormatSeconds(wt.TexMipSeconds) << "ms"
+                << " / BC7待ち " << FormatSeconds(wt.TexBC7WaitSeconds) << "ms"
+                << " / BC7圧縮 " << FormatSeconds(wt.TexBC7CompressSeconds) << "ms"
+                << " / デバイス生成 " << FormatSeconds(wt.TexDeviceCreateSeconds) << "ms\n";
+        }
+
+        // 【プロセスCPU÷実時間を必ず出す】これがワーカー数を超えていたら、内側のライブラリが
+        // 既に自前で並列化しているという意味で、外側にプールを足してはいけない
+        // (DirectXTexのOpenMPと外側8ワーカーが掛かって224スレッドになり、機械が固まった前例がある)
+        const double cpuSeconds = KurenaiPacker::GetProcessCpuSeconds();
+        const double wallSeconds = std::chrono::duration<double>(endTime - startTime).count();
+        std::cout
+            << "  プロセス全体: CPU " << FormatSeconds(cpuSeconds) << "ms"
+            << " (" << Format2(wallSeconds > 0.0 ? cpuSeconds / wallSeconds : 0.0) << "コア相当)"
+            << " / ピークWS " << KurenaiPacker::GetPeakWorkingSetMB() << "MB\n";
+    }
 
     return 0;
 }

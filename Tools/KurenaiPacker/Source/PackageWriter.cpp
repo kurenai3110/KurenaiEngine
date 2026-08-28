@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -48,6 +49,40 @@ namespace KurenaiPacker
 {
     namespace
     {
+        // === 計測 ==============================================================
+        //
+        // OcclusionBaker.cppのBakeTimingsと同じ考え方。書き出しは数十ms〜数分と幅があるが、
+        // now()を呼ぶのはフェーズ境界とメッシュ/テクスチャ1件ごとだけなので影響は無視できる
+        using PhaseClock = std::chrono::steady_clock;
+
+        double PhaseSecondsSince(const PhaseClock::time_point& start)
+        {
+            return std::chrono::duration<double>(PhaseClock::now() - start).count();
+        }
+
+        // スコープを抜けるときに累計へ足す。早期continue/例外があっても取りこぼさない
+        struct ScopedPhase
+        {
+            double& Target;
+            PhaseClock::time_point Start;
+
+            explicit ScopedPhase(double& target) : Target(target), Start(PhaseClock::now()) {}
+            ~ScopedPhase() { Target += PhaseSecondsSince(Start); }
+
+            ScopedPhase(const ScopedPhase&) = delete;
+            ScopedPhase& operator=(const ScopedPhase&) = delete;
+        };
+
+        // ワーカースレッドから積むので、こちらはアトミック。doubleのfetch_addはC++17に無いため
+        // ナノ秒の整数で持つ(実時間の桁でオーバーフローしない)
+        void AddNanos(std::atomic<uint64_t>& target, const PhaseClock::time_point& start)
+        {
+            target.fetch_add(
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    PhaseClock::now() - start).count()),
+                std::memory_order_relaxed);
+        }
+
         // 一時パスへ書いてから完了時のみ本来のパスへリネームする(ランタイム側の
         // .kmodelcache/.ktexcacheと同じ設計。処理が中断されても中途半端な一時
         // ファイルが残るだけで、既存の正常なファイルには影響しない)
@@ -236,6 +271,9 @@ namespace KurenaiPacker
         std::error_code ec;
         fs::create_directories(outputDirectory, ec);
 
+        WriteTimings timings;
+        const auto collectStart = PhaseClock::now();
+
         // === 1. ユニークな(パス,sRGB)テクスチャ要求を、メッシュ走査順で決定的に収集する ===
         std::vector<TextureRequest> requests;
         // key = パス + "|srgb"/"|linear" で重複排除。値はrequests内のインデックス
@@ -298,6 +336,9 @@ namespace KurenaiPacker
         result.MeshCount = sourceModel.Meshes.size();
         result.TextureRequested = requests.size();
 
+        timings.CollectSeconds += PhaseSecondsSince(collectStart);
+
+        const auto skipStart = PhaseClock::now();
         std::vector<size_t> pendingIndices;
         for (size_t i = 0; i < requests.size(); ++i)
         {
@@ -320,6 +361,9 @@ namespace KurenaiPacker
             pendingIndices.push_back(i);
         }
 
+        timings.SkipCheckSeconds += PhaseSecondsSince(skipStart);
+
+        const auto textureStart = PhaseClock::now();
         if (!pendingIndices.empty())
         {
             constexpr unsigned int kMaxWorkers = 8;
@@ -327,6 +371,17 @@ namespace KurenaiPacker
                 ? options.JobCount
                 : std::min(kMaxWorkers, std::max(1u, std::thread::hardware_concurrency()));
             const unsigned int workerCount = std::min(hardwareThreads, static_cast<unsigned int>(pendingIndices.size()));
+
+            // 【実時間ではなく全ワーカーの累計を取る】和が実時間×ワーカー数に近ければ
+            // 全員が働いており、実時間×1に近ければ1本を残して全員が待っている。
+            // BC7圧縮はTextureImage内部のミューテックスで直列化されるため、この比が
+            // 「スレッドを増やして意味があるのか」を直接決める
+            // このモデルのぶんだけを測るため、ワーカーを起こす直前に0へ戻す
+            Kurenai::RHI::ResetTextureLoadStats();
+
+            std::atomic<uint64_t> loadNanos{ 0 };
+            std::atomic<uint64_t> ddsNanos{ 0 };
+            std::atomic<uint64_t> writeNanos{ 0 };
 
             std::atomic<size_t> nextPending{ 0 };
             std::mutex logMutex;
@@ -359,7 +414,9 @@ namespace KurenaiPacker
 
                     try
                     {
+                        const auto loadStart = PhaseClock::now();
                         Kurenai::RHI::TextureImage image = Kurenai::RHI::TextureImage::LoadFromFile(request.SourcePath, request.SRGB);
+                        AddNanos(loadNanos, loadStart);
 
                         // ブロック圧縮で4x4に満たないものは、.ktexにしてもGPUが受け付けない。
                         // ここで例外にして、下のcatchで「フォールバックする」経路へ流す
@@ -371,6 +428,7 @@ namespace KurenaiPacker
                                 + std::to_string(metadata.width) + "x" + std::to_string(metadata.height) + ")");
                         }
 
+                        const auto ddsStart = PhaseClock::now();
                         DirectX::Blob blob;
                         const HRESULT hr = DirectX::SaveToDDSMemory(
                             image.GetImage().GetImages(), image.GetImage().GetImageCount(),
@@ -379,6 +437,7 @@ namespace KurenaiPacker
                         {
                             throw std::runtime_error("DDSエンコードに失敗しました");
                         }
+                        AddNanos(ddsNanos, ddsStart);
 
                         PackedTextureHeader header{};
                         std::memcpy(header.Magic, kPackedTextureMagic, sizeof(kPackedTextureMagic));
@@ -391,7 +450,9 @@ namespace KurenaiPacker
                         std::vector<uint8_t> fileBytes(sizeof(header) + blob.GetBufferSize());
                         std::memcpy(fileBytes.data(), &header, sizeof(header));
                         std::memcpy(fileBytes.data() + sizeof(header), blob.GetBufferPointer(), blob.GetBufferSize());
+                        const auto ktexWriteStart = PhaseClock::now();
                         WriteFileAtomic(request.OutputKtexPath, fileBytes.data(), fileBytes.size());
+                        AddNanos(writeNanos, ktexWriteStart);
 
                         generatedCount.fetch_add(1);
                     }
@@ -430,11 +491,26 @@ namespace KurenaiPacker
                 worker.join();
             }
 
+            const Kurenai::RHI::TextureLoadStats texStats = Kurenai::RHI::GetTextureLoadStats();
+            timings.TexDecodeSeconds = texStats.DecodeSeconds;
+            timings.TexMipSeconds = texStats.MipSeconds;
+            timings.TexBC7WaitSeconds = texStats.BC7WaitSeconds;
+            timings.TexBC7CompressSeconds = texStats.BC7CompressSeconds;
+            timings.TexDeviceCreateSeconds = texStats.DeviceCreateSeconds;
+
+            timings.WorkerCount = workerCount;
+            timings.WorkerLoadSeconds = static_cast<double>(loadNanos.load()) / 1e9;
+            timings.WorkerDdsSeconds = static_cast<double>(ddsNanos.load()) / 1e9;
+            timings.WorkerWriteSeconds = static_cast<double>(writeNanos.load()) / 1e9;
+
             result.TextureGenerated = generatedCount.load();
             // 既存.ktexの検査(上のループ)で数えた分に足し込む。代入にすると消える
             result.TextureFailed += failedCount.load();
         }
 
+        timings.TextureSeconds += PhaseSecondsSince(textureStart);
+
+        const auto entryStart = PhaseClock::now();
         // === 3. TextureEntryを確定させる(失敗したものは除外し、-1として扱う) ===
         std::vector<TextureEntry> textureEntries;
         std::vector<std::string> texturePathStrings; // StringPoolへ書く前段(順序保持)
@@ -466,6 +542,9 @@ namespace KurenaiPacker
             return requestIndex == kNoRequest ? kNoTextureIndex : finalIndexByRequest[requestIndex];
         };
 
+        timings.EntrySeconds += PhaseSecondsSince(entryStart);
+
+        const auto occlusionStart = PhaseClock::now();
         // === 3.5 ベイクした遮蔽マップを.ktexとして書き出す ===
         //
         // 元画像を持たない生成物なので、TextureRequest経由(TextureImage::LoadFromFile)の
@@ -572,6 +651,9 @@ namespace KurenaiPacker
             }
         }
 
+        timings.OcclusionSeconds += PhaseSecondsSince(occlusionStart);
+
+        const auto bentStart = PhaseClock::now();
         // === bent normal(RGBA16F、圧縮なし)の書き出し ===========================
         //
         // 遮蔽マップと違って圧縮しない。BC4/BC7はいずれも符号なしで、bRawの負の成分を表現できない
@@ -681,6 +763,8 @@ namespace KurenaiPacker
             }
         }
 
+        timings.BentNormalSeconds += PhaseSecondsSince(bentStart);
+
         // === 4. .kgeomを書き出す ===
         //
         // メッシュ順に、メッシュごとの
@@ -713,8 +797,10 @@ namespace KurenaiPacker
             const SourceMesh& mesh = sourceModel.Meshes[i];
             MeshEntry& entry = meshEntries[i];
 
+            const auto meshletStart = PhaseClock::now();
             MeshletBuildResult meshlets = BuildMeshlets(
                 mesh.Vertices, mesh.Indices, options.EnableMeshlets, options.MeshletLODCount);
+            timings.MeshletSeconds += PhaseSecondsSince(meshletStart);
 
             // メッシュレットへ材質番号を焼き込む。MeshletBuilderは材質を知らない(知る必要も無い)ので、
             // 「このメッシュの材質」をここで転記する。メッシュとマテリアルは1対1なのでメッシュ番号でよい
@@ -723,6 +809,7 @@ namespace KurenaiPacker
                 meshlet.MaterialIndex = static_cast<uint32_t>(i);
             }
 
+            const auto appendStart = PhaseClock::now();
             entry.VertexOffset = appendBlock(meshlets.Vertices.data(), meshlets.Vertices.size() * sizeof(Vertex));
             entry.IndexOffset = appendBlock(meshlets.Indices.data(), meshlets.Indices.size() * sizeof(uint32_t));
             entry.MeshletOffset =
@@ -731,6 +818,7 @@ namespace KurenaiPacker
                 appendBlock(meshlets.MeshletVertices.data(), meshlets.MeshletVertices.size() * sizeof(uint32_t));
             entry.MeshletTriangleOffset =
                 appendBlock(meshlets.MeshletTriangles.data(), meshlets.MeshletTriangles.size() * sizeof(uint32_t));
+            timings.AppendSeconds += PhaseSecondsSince(appendStart);
 
             entry.MeshletCount = static_cast<uint32_t>(meshlets.Meshlets.size());
             entry.MeshletVertexCount = static_cast<uint32_t>(meshlets.MeshletVertices.size());
@@ -833,6 +921,7 @@ namespace KurenaiPacker
 
         const fs::path kgeomPath = fs::path(kmodelPath).replace_extension(L".kgeom");
         {
+            const ScopedPhase timeGeometryWrite(timings.GeometryWriteSeconds);
             GeometryHeader header{};
             std::memcpy(header.Magic, kGeometryMagic, sizeof(kGeometryMagic));
             header.Version = kGeometryVersion;
@@ -849,6 +938,7 @@ namespace KurenaiPacker
             WriteFileAtomic(kgeomPath, fileBytes.data(), fileBytes.size());
         }
 
+        const auto modelWriteStart = PhaseClock::now();
         // === 5. .kmodelを書き出す(StringPoolを構築してからヘッダ/テーブルをまとめて書く) ===
         std::string stringPool;
         std::vector<TextureEntry> finalTextureEntries = textureEntries;
@@ -941,7 +1031,9 @@ namespace KurenaiPacker
         }
 
         WriteFileAtomic(kmodelPath, fileBytes.data(), fileBytes.size());
+        timings.ModelWriteSeconds += PhaseSecondsSince(modelWriteStart);
 
+        result.Timings = timings;
         return result;
     }
 }
