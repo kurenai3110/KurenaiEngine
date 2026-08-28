@@ -88,7 +88,19 @@ namespace KurenaiPacker
         // ファイルが残るだけで、既存の正常なファイルには影響しない)
         void WriteFileAtomic(const fs::path& path, const void* data, size_t size)
         {
-            const fs::path tmp = fs::path(path).concat(L".tmp");
+            // 【一時ファイル名はプロセスと呼び出しで一意にする】以前は出力パス + ".tmp" 固定で、
+            // 同じ.ktexパスへ向かうパッカーを2つ同時に走らせると**両方が同じ.tmpをtruncで開いて
+            // 交互に書き**、先に終わった側がMoveFileExでリネームした結果、もう片方は
+            // 「消えた.tmp」をリネームしようとして失敗する。その失敗は
+            // 「テクスチャの処理に失敗しました(フォールバックします)」で握り潰されるため、
+            // **終了コードは0のまま.kmodelのテクスチャだけが減る**(実測: Sponzaを2プロセス
+            // 同時にパックして69枚→61枚。警告は出るがexit codeは0)。
+            // 一意にすれば、両者が別々の.tmpへ書いて順にリネームするだけになり、
+            // 最後に書いた側の内容が残る(同じ入力なら中身は同一)
+            static std::atomic<uint64_t> tmpCounter{ 0 };
+            const fs::path tmp = fs::path(path).concat(
+                L"." + std::to_wstring(GetCurrentProcessId()) +
+                L"." + std::to_wstring(tmpCounter.fetch_add(1)) + L".tmp");
             {
                 std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
                 if (!out.is_open())
@@ -104,10 +116,32 @@ namespace KurenaiPacker
                     throw std::runtime_error("ファイルの書き込みに失敗しました: " + WideToUtf8(path.wstring()));
                 }
             }
-            if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+            // 【同じ出力パスへ2プロセスが同時にリネームすると一時的に失敗する】
+            // MoveFileExはリネーム先を一瞬掴むため、別プロセスが同じ瞬間に同じ先へ
+            // リネームしていると ERROR_SHARING_VIOLATION / ERROR_ACCESS_DENIED が返る。
+            // これは恒久的な失敗ではないので短い間隔で数回やり直す。
+            // 諦めた場合は一時ファイルを残さない(名前が実行ごとに変わるため掃除しづらい)
+            constexpr int kRenameAttempts = 10;
+            DWORD lastError = ERROR_SUCCESS;
+            for (int attempt = 0; attempt < kRenameAttempts; ++attempt)
             {
-                throw std::runtime_error("ファイルの確定(rename)に失敗しました: " + WideToUtf8(path.wstring()));
+                if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+                {
+                    return;
+                }
+                lastError = GetLastError();
+                if (lastError != ERROR_SHARING_VIOLATION && lastError != ERROR_ACCESS_DENIED)
+                {
+                    break;
+                }
+                Sleep(5 * (attempt + 1));
             }
+
+            std::error_code removeEc;
+            fs::remove(tmp, removeEc);
+            throw std::runtime_error(
+                "ファイルの確定(rename)に失敗しました(Win32エラー " + std::to_string(lastError) + "): "
+                + WideToUtf8(path.wstring()));
         }
 
         // pathのバイト表現を'/'区切りへ正規化して返す(.kmodel内のStringPoolに書く形式)
