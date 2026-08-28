@@ -1273,7 +1273,9 @@ namespace Kurenai::Assets
         }
     }
 
-    Scene LoadScene(RHI::IRHIDevice& device, const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory)
+    Scene LoadScene(
+        RHI::IRHIDevice& device, const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory,
+        const SceneLoadProgressCallback& progress)
     {
         const ParsedScene parsed = ParseSceneFile(sceneFilePath);
 
@@ -1436,6 +1438,34 @@ namespace Kurenai::Assets
 
         bool boundsInitialized = false;
 
+        // 進捗の通知。呼び出し側のコールバックが投げた例外でシーンの読み込みを失敗させたくないため、
+        // ここで握り潰してログに残す(通知は付随的な機能で、読み込みの成否を左右してはいけない)
+        const size_t totalModels = parsed.Models.size();
+        size_t loadedModels = 0;
+        const auto notifyProgress = [&progress, totalModels](size_t loaded)
+        {
+            if (!progress)
+            {
+                return;
+            }
+            try
+            {
+                progress(loaded, totalModels);
+            }
+            catch (const std::exception& e)
+            {
+                Core::Logger::Error(
+                    "SceneLoader", std::string("読み込み進捗の通知で例外が発生しました(読み込みは継続します): ") + e.what());
+            }
+            catch (...)
+            {
+                Core::Logger::Error("SceneLoader", "読み込み進捗の通知で不明な例外が発生しました(読み込みは継続します)");
+            }
+        };
+        // 【最初に0/Nを通知する】1件目を読み終えるまで総数が分からないと、表示側は
+        // 「何件中の何件目か」を出せない。767モデルのシーンでは1件目だけで数秒かかることもある
+        notifyProgress(0);
+
         for (const ParsedModelEntry& parsedModel : parsed.Models)
         {
             const std::wstring normalizedPath = NormalizePathSeparators(parsedModel.Path);
@@ -1566,6 +1596,9 @@ namespace Kurenai::Assets
             }
 
             scene.Instances.push_back(std::move(instance));
+
+            ++loadedModels;
+            notifyProgress(loadedModels);
         }
 
         return scene;

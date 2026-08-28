@@ -24,6 +24,11 @@ namespace Kurenai
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
 
+        // シーン読み込みの進捗をログへ落とす最短間隔[秒]。
+        // 1モデルごとに出すと767モデルのシーンで767行になるため間引く。
+        // 最初(0/N)と最後(N/N)だけは間隔に関わらず必ず出す
+        constexpr float kSceneLoadProgressLogIntervalSeconds = 1.0f;
+
         // ビュー射影行列から取り出した視錐台の6平面(左/右/下/上/手前/奥)。
         // 各要素は平面の方程式 dot(n, p) + d の (n.xyz, d)
         struct FrustumPlanes
@@ -4016,6 +4021,8 @@ namespace Kurenai
         }
         m_LoadRequestCV.notify_one();
         m_SceneLoadInFlight = true;
+        // 進捗表示にシーン名を出すために、いま読ませているシーンを控える
+        m_SceneLoadingIndex = sceneIndex;
     }
 
     void KurenaiEngine3D::RetireAssets(RetiredAssets&& retired)
@@ -4106,9 +4113,39 @@ namespace Kurenai
         auto loaded = std::make_unique<LoadedScene>();
         loaded->SceneIndex = sceneIndex;
 
+        // 読み込み進捗。UIの進捗ウィンドウ(UIManager)がatomicを読んで出す。
+        //
+        // 【ログにも出す】UIを開いていない・F1で隠している・ヘッドレスに近い確認では
+        // 画面の表示が見えない。一定間隔でログへ落としておけば後からでも追える。
+        // 1件ごとに出すと767行になるため、間隔を空けて間引く
+        m_SceneLoadProgressLoaded.store(0, std::memory_order_relaxed);
+        m_SceneLoadProgressTotal.store(0, std::memory_order_relaxed);
+        const std::wstring& progressSceneFileName = m_SceneFilePaths[sceneIndex];
+        auto lastProgressLogTime = std::chrono::steady_clock::now();
+        const auto onProgress =
+            [this, &lastProgressLogTime, &progressSceneFileName](size_t loadedModels, size_t totalModels)
+        {
+            m_SceneLoadProgressLoaded.store(static_cast<uint32_t>(loadedModels), std::memory_order_relaxed);
+            m_SceneLoadProgressTotal.store(static_cast<uint32_t>(totalModels), std::memory_order_relaxed);
+
+            const auto now = std::chrono::steady_clock::now();
+            const bool isFirstOrLast = (loadedModels == 0) || (loadedModels == totalModels);
+            const bool intervalElapsed =
+                std::chrono::duration<float>(now - lastProgressLogTime).count() >= kSceneLoadProgressLogIntervalSeconds;
+            if (!isFirstOrLast && !intervalElapsed)
+            {
+                return;
+            }
+            lastProgressLogTime = now;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "シーン読み込み: " + std::to_string(loadedModels) + " / " + std::to_string(totalModels) +
+                    " モデル (" + WideToUtf8(progressSceneFileName) + ")");
+        };
+
         try
         {
-            loaded->Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory);
+            loaded->Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory, onProgress);
         }
         catch (const std::exception& e)
         {

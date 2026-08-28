@@ -1099,6 +1099,15 @@ UIは<code>Source/Engine/UI/</code>配下の<code>IPanel</code>実装クラス�
 システム / プロファイラ)。
 </p>
 <p>
+<code>UIManager</code>自身も1つだけウィンドウを持つ ―― <strong>シーン読み込み中の進捗</strong>
+(<code>DrawSceneLoadProgress</code>)である。読み込みは専用のLoaderスレッドで走り、その間
+Renderスレッドはフレームを進め続けるが、<strong>旧シーンは読み込み開始と同時に手放されるため
+画面にはUIとスカイボックスしか出ない</strong>(23章)。671モデルのシーンでは数十秒かかるため、
+「進んでいる」と「固まった」を区別できる手がかりがどこにも無かった。
+パネルではなく<code>UIManager</code>が直接出しているのは、ドックに入れず読み込み中だけ
+画面中央へ重ねるウィンドウで、表示/非表示をユーザーが選ぶ対象ではないため。
+</p>
+<p>
 機能を1つ足すときに触るのは原則「そのパネルの<code>.cpp</code>」だけになる。新しいパネルを
 足す場合だけ、<code>UIManager</code>のコンストラクタへの追加・既定ドックスロットへの追加・
 <code>KurenaiEngine3D.h</code>の前方宣言とfriend宣言・<code>kDockSpaceId</code>の世代繰り上げが

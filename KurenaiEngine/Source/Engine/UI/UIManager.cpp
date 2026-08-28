@@ -2,8 +2,12 @@
 
 #include <imgui.h>
 
+#include <cstdio>
+#include <string>
+
 #include "Core/ImGuiDockLayout.h"
 #include "Core/Logger.h"
+#include "Core/StringUtil.h"
 #include "KurenaiEngine3D.h"
 #include "UI/DebugViewPanel.h"
 #include "UI/LightingPanel.h"
@@ -83,6 +87,69 @@ namespace Kurenai::UI
                 panel->Draw(context);
             }
         }
+
+        // 【パネルより後に描く】読み込み中は他のパネルの上へ重ねたい。
+        // ドックにも入らないので、レイアウトの世代(kDockSpaceId)には影響しない
+        DrawSceneLoadProgress();
+    }
+
+    void UIManager::DrawSceneLoadProgress()
+    {
+        // 読み込みは専用のLoaderスレッドで走り、その間このRenderスレッドはフレームを進め続ける。
+        // ただし旧シーンは読み込み開始と同時に手放されるため、画面にはUIとスカイボックスしか出ない
+        // (KurenaiEngine3D::UpdateSceneStreamingのコメント参照)。
+        // 「進んでいる」と「固まった」を区別できるようにするのがこのウィンドウの役目
+        if (!m_Engine.m_SceneLoadInFlight)
+        {
+            return;
+        }
+
+        const uint32_t loadedModels = m_Engine.m_SceneLoadProgressLoaded.load(std::memory_order_relaxed);
+        const uint32_t totalModels = m_Engine.m_SceneLoadProgressTotal.load(std::memory_order_relaxed);
+
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        if (viewport == nullptr)
+        {
+            // ドックスペース側と同じ理由でここもnullptrを許容する(絵は出続けるので致命ではない)
+            Core::Logger::Error("UIManager", "メインビューポートを取得できないため読み込み進捗を出せません");
+            return;
+        }
+
+        const ImVec2 center(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + viewport->Size.y * 0.5f);
+        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowBgAlpha(0.85f);
+
+        // NoInputs: 進捗はただの表示で、クリックを吸ってはいけない(裏のパネルを操作できなくなる)。
+        // NoSavedSettings: 一時的なウィンドウなのでimgui.iniへ位置を残さない。
+        // NoDocking: ドックへ吸い込まれると読み込み中に見えなくなりうる
+        const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                       ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs |
+                                       ImGuiWindowFlags_NoDocking;
+
+        if (ImGui::Begin("###SceneLoadProgress", nullptr, flags))
+        {
+            const std::wstring& sceneName =
+                (m_Engine.m_SceneLoadingIndex < m_Engine.m_SceneDisplayNames.size())
+                    ? m_Engine.m_SceneDisplayNames[m_Engine.m_SceneLoadingIndex]
+                    : std::wstring();
+            ImGui::Text("シーンを読み込んでいます: %s", Core::WideToUtf8(sceneName).c_str());
+
+            if (totalModels > 0)
+            {
+                const float ratio = static_cast<float>(loadedModels) / static_cast<float>(totalModels);
+                char overlay[64];
+                std::snprintf(overlay, sizeof(overlay), "%u / %u モデル", loadedModels, totalModels);
+                ImGui::ProgressBar(ratio, ImVec2(320.0f, 0.0f), overlay);
+            }
+            else
+            {
+                // .ksceneのパースが終わるまでは総数が分からない。
+                // ここで「0 / 0」と出すより、何をしているかを書くほうが誤解が無い
+                ImGui::TextUnformatted(".kscene を読んでいます...");
+            }
+        }
+        ImGui::End();
     }
 
     float UIManager::DrawMainMenuBar()
