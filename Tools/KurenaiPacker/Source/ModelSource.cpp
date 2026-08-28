@@ -322,7 +322,11 @@ namespace KurenaiPacker
         }
     }
 
-    SourceModel LoadSourceModel(const std::wstring& filePath, float scale, const MaterialOverride& materialOverride)
+    SourceModel LoadSourceModel(
+        const std::wstring& filePath,
+        float scale,
+        const MaterialOverride& materialOverride,
+        const std::optional<std::array<float, 3>>& originOffset)
     {
         Assimp::Importer importer;
         // GenSmoothNormalsは対象アセットは全メッシュが法線を持つため実質ノーオップであり、
@@ -445,7 +449,16 @@ namespace KurenaiPacker
             vertices.reserve(mesh->mNumVertices);
             for (unsigned int v = 0; v < mesh->mNumVertices; ++v)
             {
-                aiVector3D position = (transform * mesh->mVertices[v]) * scale;
+                aiVector3D position = transform * mesh->mVertices[v];
+                if (originOffset)
+                {
+                    // --origin。scaleを掛ける前に引くので、呼び出し側はソースの単位
+                    // (PLATEAUなら平面直角座標のメートル値)のまま指定できる
+                    position.x -= (*originOffset)[0];
+                    position.y -= (*originOffset)[1];
+                    position.z -= (*originOffset)[2];
+                }
+                position *= scale;
                 aiVector3D normal = mesh->HasNormals() ? (normalMatrix * mesh->mNormals[v]) : aiVector3D(0.0f, 1.0f, 0.0f);
                 normal.Normalize();
 

@@ -123,10 +123,22 @@ namespace KurenaiPacker
     // 持たない形式では、センチメートル単位で作成されたアセットを
     // そのまま読み込むと本来の100倍のスケールになってしまうことがあるため、呼び出し側
     // (KurenaiPacker.exeの--scaleオプション)が既知の単位変換係数を明示的に渡す
+    // originOffset: 頂点位置とバウンズから引く座標(ソースの単位のまま、scaleを掛ける前)。
+    //
+    // 【なぜ「自動で中心へ寄せる」ではなく明示指定なのか】地理座標系のように、原点が
+    // 遠く離れた絶対座標でモデルが作られていることがある(Project PLATEAUのFBXは
+    // 平面直角座標系の絶対値で、原点から数十km離れている)。頂点がfloat32であるうえ、
+    // .kmodelのAABBがそのまま巨大になり、シーンAABBの対角から自動決定される遠クリップ面
+    // (farZ = max(100, 対角x4))が桁で狂う。
+    //
+    // このときタイルごとに「自分のAABBの中心」で寄せてしまうと、タイル同士の相対的な
+    // 位置関係が壊れて街が崩れる。**複数のモデルで同じ値を引く**必要があるため、
+    // 自動ではなく呼び出し側が明示する形にしている
     SourceModel LoadSourceModel(
         const std::wstring& filePath,
         float scale = 1.0f,
-        const MaterialOverride& materialOverride = {});
+        const MaterialOverride& materialOverride = {},
+        const std::optional<std::array<float, 3>>& originOffset = std::nullopt);
 
     // assimpが読んだ直後のシーン構造を標準出力へ印字する(パッケージは書き出さない)。
     // 失敗時はLoadSourceModelと同じくstd::runtime_errorを投げる。

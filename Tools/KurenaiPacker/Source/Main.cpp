@@ -25,6 +25,7 @@
 
 #include <Windows.h>
 
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -66,6 +67,10 @@ namespace
             "                        どのスロットへ入ったかを確かめるときに使う\n"
             "      --force           既存の.ktexがあっても再圧縮して上書きする(モデルモードのみ)\n"
             "      --jobs <N>        テクスチャ処理のワーカースレッド数(既定: 論理コア数、上限8。モデルモードのみ)\n"
+            "      --origin <X,Y,Z>  頂点位置・バウンズからこの座標を引く(--scaleを掛ける前)。\n"
+            "                        原点から遠く離れた絶対座標で作られたモデル(地理座標系など)を\n"
+            "                        原点付近へ寄せる。複数のモデルを並べる場合は全部に同じ値を\n"
+            "                        指定すること(タイルごとに変えると相対位置が壊れる)\n"
             "      --scale <S>       頂点位置・バウンズに乗算する係数(既定1.0、モデルモードのみ)。\n"
             "                        OBJ等ファイル自体に単位情報を持たない形式で、センチメートル単位の\n"
             "                        アセットをメートル単位として読み込みたい場合は0.01を指定する\n"
@@ -119,6 +124,7 @@ namespace
         bool Force = false;
         unsigned int JobCount = 0;
         float Scale = 1.0f;
+        std::optional<std::array<float, 3>> OriginOffset;
         bool ShowHelp = false;
         bool SceneMode = false;
         bool Inspect = false;
@@ -378,6 +384,45 @@ namespace
                     return std::nullopt;
                 }
             }
+            else if (arg == L"--origin")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--origin には X,Y,Z が必要です");
+                    return std::nullopt;
+                }
+                // --base-colorと同じ「3要素をカンマ区切り」の書式だが、あちらと違って
+                // 範囲の制約は無い(座標なので負値も巨大な値も正当)
+                const std::wstring token = argv[++i];
+                std::array<float, 3> origin{};
+                size_t start = 0;
+                bool ok = true;
+                for (int axis = 0; axis < 3 && ok; ++axis)
+                {
+                    const size_t comma = token.find(L',', start);
+                    if ((axis < 2 && comma == std::wstring::npos) || (axis == 2 && comma != std::wstring::npos))
+                    {
+                        ok = false;
+                        break;
+                    }
+                    try
+                    {
+                        origin[axis] = std::stof(token.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start));
+                    }
+                    catch (const std::exception&)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    start = comma + 1;
+                }
+                if (!ok)
+                {
+                    PrintError("--origin は X,Y,Z の3要素で指定してください: " + WideToUtf8(token));
+                    return std::nullopt;
+                }
+                args.OriginOffset = origin;
+            }
             else if (arg == L"--scale")
             {
                 if (i + 1 >= argc)
@@ -575,7 +620,8 @@ int wmain(int argc, wchar_t** argv)
     KurenaiPacker::SourceModel sourceModel;
     try
     {
-        sourceModel = KurenaiPacker::LoadSourceModel(inputAbsolute.wstring(), args.Scale, args.MaterialOverride);
+        sourceModel = KurenaiPacker::LoadSourceModel(
+            inputAbsolute.wstring(), args.Scale, args.MaterialOverride, args.OriginOffset);
     }
     catch (const std::exception& e)
     {
@@ -626,6 +672,15 @@ int wmain(int argc, wchar_t** argv)
     }
 
     const auto endTime = std::chrono::steady_clock::now();
+
+    if (args.OriginOffset)
+    {
+        // .ksceneの先頭コメントへ記録できるよう、引いた値をそのまま出す
+        std::cout
+            << "[KurenaiPacker] --origin により ("
+            << (*args.OriginOffset)[0] << ", " << (*args.OriginOffset)[1] << ", " << (*args.OriginOffset)[2]
+            << ") を減算しました\n";
+    }
 
     std::cout
         << "[KurenaiPacker] パック完了: " << WideToUtf8(args.OutputPath) << "\n"
