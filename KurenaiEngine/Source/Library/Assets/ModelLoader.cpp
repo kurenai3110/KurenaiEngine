@@ -350,11 +350,6 @@ namespace Kurenai::Assets
                     material.Flags |= kGpuMaterialFlagCutout;
                 }
 
-                if ((material.Flags & kGpuMaterialFlagCutout) != 0)
-                {
-                    model.HasCutoutMaterial = true;
-                }
-
                 mesh.MaterialIndex = static_cast<uint32_t>(materials.size());
                 materials.push_back(material);
             }
@@ -1015,6 +1010,20 @@ namespace Kurenai::Assets
             light.Name = ReadPoolString(stringPool, entry.NameOffset, entry.NameLength, "LightName");
 
             model.Lights.push_back(std::move(light));
+        }
+
+        // アルファカットアウトの有無はアセット固有の性質なので、**デバイスの機能に依らず**ここで決める。
+        // BuildMaterialTable の中で立てると、bindless非対応(DX11)ではテーブル自体を作らないため
+        // 「カットアウトを持つモデルなのに常にfalse」になる。今の使用箇所はメッシュレット経路の
+        // 内側だけなので実害は出ないが、バックエンドで 0/1 が変わる値を
+        // アセットの性質として持たせるべきではない
+        for (const Mesh& mesh : model.Meshes)
+        {
+            if (mesh.AlphaCutoff > 0.0f)
+            {
+                model.HasCutoutMaterial = true;
+                break;
+            }
         }
 
         SortMeshesByMaterial(model);
