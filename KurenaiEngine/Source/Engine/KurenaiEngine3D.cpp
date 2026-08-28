@@ -1577,6 +1577,21 @@ namespace Kurenai
             gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
             gbufferMeshletDebugPsDesc.EntryPoint = "PSMainMeshletDebug";
             m_GBufferMeshletDebugPixelShader = m_Device->CreateShader(gbufferMeshletDebugPsDesc);
+
+            // シャドウパスのメッシュシェーダー版。G-Buffer版と分けているのは、
+            // シャドウのb0がFrameConstantsではなくCascadeConstantsで、cbufferの
+            // レイアウトが違うため(ShadowMeshlet.hlsl冒頭のコメント参照)
+            RHI::ShaderDesc shadowAsDesc;
+            shadowAsDesc.Stage = RHI::ShaderStage::Amplification;
+            shadowAsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.hlsl";
+            shadowAsDesc.EntryPoint = "ASMain";
+            m_ShadowAmplificationShader = m_Device->CreateShader(shadowAsDesc);
+
+            RHI::ShaderDesc shadowMsDesc;
+            shadowMsDesc.Stage = RHI::ShaderStage::Mesh;
+            shadowMsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.hlsl";
+            shadowMsDesc.EntryPoint = "MSMain";
+            m_ShadowMeshShader = m_Device->CreateShader(shadowMsDesc);
         }
 
         // G-BufferのPSOはEmissiveのフォーマットがバッファ精度に依存するため、
@@ -2256,6 +2271,30 @@ namespace Kurenai
         // シャドウマップへ内側の面の深度が書かれ、影の形と自己遮蔽の出方がずれる
         shadowPipelineDesc.FrontCounterClockwise = true;
         m_ShadowPipelineStateMirrored = m_Device->CreatePipelineState(shadowPipelineDesc);
+
+        // メッシュシェーダー版のシャドウPSO。
+        //
+        // 【これが無いと1ドロー化が片手落ちになる】メッシュレット経路はG-Bufferにしか
+        // 無かったため、モデルを1ドローで描けるようになってもシャドウは従来どおり
+        // メッシュ単位で、しかもカスケード4枚ぶん発行され続ける。
+        // PLATEAU LOD2の1タイル(メッシュ1,715個)ならG-Bufferが1ドローになる一方で
+        // シャドウは6,860ドローのまま、ということになる。
+        //
+        // ピクセルシェーダーは持たない(深度だけを書く)。頂点シェーダー版が
+        // 空のPSMainを渡しているのに合わせず段ごと省いているのは、深度プリパスの
+        // 不透明用PSOと同じ理由(RHIDesc.hのPixelShader=nullptrの扱い)
+        if (m_ShadowAmplificationShader && m_ShadowMeshShader)
+        {
+            RHI::MeshPipelineStateDesc shadowMeshDesc;
+            shadowMeshDesc.AmplificationShader = m_ShadowAmplificationShader.get();
+            shadowMeshDesc.MeshShader = m_ShadowMeshShader.get();
+            shadowMeshDesc.PixelShader = nullptr;
+            shadowMeshDesc.HasDepthStencil = true;
+            shadowMeshDesc.FrontCounterClockwise = false;
+            m_ShadowMeshletPipelineState = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+            shadowMeshDesc.FrontCounterClockwise = true;
+            m_ShadowMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+        }
 
         // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する。
         // 全カスケードを1つのTexture2DArrayにまとめ、スライスごとのDSVで1カスケードずつ描き込む
@@ -7163,6 +7202,39 @@ namespace Kurenai
                             if (!IsAABBVisible(cascadeFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                             {
                                 ++m_FrustumCullCulled;
+                                continue;
+                            }
+
+                            // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
+                            //
+                            // 【マスクを0にして全部通す】このパスは従来、半透明もカットアウトも
+                            // 区別せず全メッシュを描いていた(ピクセルシェーダーが空で、
+                            // アルファを一切見ていない)。ふるい分けを入れると影の出方が変わって
+                            // しまうため、ここでは意図的に何も落とさない
+                            if (m_ShadowMeshletPipelineState && ShouldUseModelMeshletPath(instance))
+                            {
+                                RHI::IRHIPipelineState* const wanted =
+                                    instance.IsMirrored ? m_ShadowMeshletPipelineStateMirrored.get()
+                                                        : m_ShadowMeshletPipelineState.get();
+                                if (wanted && wanted != currentPipelineState)
+                                {
+                                    cmd->SetPipelineState(wanted);
+                                    cmd->SetConstantBuffer(0, m_ShadowCascadeConstantBuffer.get());
+                                    currentPipelineState = wanted;
+                                }
+
+                                const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                    instance, m_EmissiveIntensity, m_OcclusionMapEnabled, 0, 0);
+                                cmd->UpdateBuffer(
+                                    m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                                constexpr uint32_t kAmplificationGroupSize = 32;
+                                const uint32_t groupCount =
+                                    (instance.Model.TotalMeshletCount + kAmplificationGroupSize - 1)
+                                    / kAmplificationGroupSize;
+                                cmd->DispatchMesh(groupCount, 1, 1);
+                                ++m_DrawCallsShadow;
                                 continue;
                             }
 
