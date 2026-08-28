@@ -2627,6 +2627,11 @@ namespace Kurenai
         uint32_t m_DrawCallsGBuffer = 0;
         uint32_t m_DrawCallsShadow = 0;
         uint32_t m_DrawCallsDepthPrepass = 0;
+        // 直前に描き終えたフレームの値。**UIパネルはこちらを読むこと** ――
+        // 上のカウンタはフレーム先頭で0に戻るため、Renderの外で描かれるUIからは常に0に見える
+        uint32_t m_DrawCallsGBufferLastFrame = 0;
+        uint32_t m_DrawCallsShadowLastFrame = 0;
+        uint32_t m_DrawCallsDepthPrepassLastFrame = 0;
         uint64_t m_FrameStatsDrawCallsGBufferSum = 0;
         uint64_t m_FrameStatsDrawCallsShadowSum = 0;
         uint64_t m_FrameStatsDrawCallsDepthPrepassSum = 0;

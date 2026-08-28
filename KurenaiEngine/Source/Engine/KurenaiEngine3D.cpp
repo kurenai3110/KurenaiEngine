@@ -5924,7 +5924,14 @@ namespace Kurenai
         // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる
         m_FrustumCullTested = 0;
         m_FrustumCullCulled = 0;
-        // ドローコール数も同じくフレーム単位。各パスが自分のカウンタを積み上げる
+        // ドローコール数も同じくフレーム単位。各パスが自分のカウンタを積み上げる。
+        //
+        // 【0に戻す前に前フレームの値を控える】UIパネルはRenderの外で描かれるため、
+        // 現在のカウンタを読むと必ずリセット直後の0になる(実際にそう表示されていた)。
+        // 完成した最後のフレームの値を別に持たせる
+        m_DrawCallsGBufferLastFrame = m_DrawCallsGBuffer;
+        m_DrawCallsShadowLastFrame = m_DrawCallsShadow;
+        m_DrawCallsDepthPrepassLastFrame = m_DrawCallsDepthPrepass;
         m_DrawCallsGBuffer = 0;
         m_DrawCallsShadow = 0;
         m_DrawCallsDepthPrepass = 0;

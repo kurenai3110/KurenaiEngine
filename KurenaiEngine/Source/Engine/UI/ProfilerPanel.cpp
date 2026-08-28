@@ -28,8 +28,9 @@ namespace Kurenai::UI
         // 1モデル1ドロー化やGPU駆動描画が効いたかどうかは、GPU時間だけでは切り分けられない
         // (発行回数が減ってもピクセルの仕事量は変わらないため)。発行回数そのものを出す
         ImGui::Text(
-            "ドローコール: G-Buffer %u / シャドウ %u / 深度プリパス %u", m_Engine.m_DrawCallsGBuffer,
-            m_Engine.m_DrawCallsShadow, m_Engine.m_DrawCallsDepthPrepass);
+            "ドローコール: G-Buffer %u / シャドウ %u / 深度プリパス %u",
+            m_Engine.m_DrawCallsGBufferLastFrame, m_Engine.m_DrawCallsShadowLastFrame,
+            m_Engine.m_DrawCallsDepthPrepassLastFrame);
 
         // パスごとの内訳は行数が多いので、左右に並べて縦の長さを半分にする
         if (!ImGui::BeginTable("PassBreakdown", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame))
