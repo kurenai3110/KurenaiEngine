@@ -48,6 +48,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHIPendingTextureContents> PrepareTextureContents(
             IRHITexture* target, const TextureImage& image) override;
         bool CommitTextureContents(IRHIPendingTextureContents* pending) override;
+        bool GetVideoMemoryUsage(uint64_t& outUsedBytes, uint64_t& outBudgetBytes) const override;
         std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
         std::unique_ptr<IRHITexture> CreateTextureFromMemory(uint32_t width, uint32_t height, const void* pixelsRGBA8) override;
         std::unique_ptr<IRHITexture> CreateRenderTexture(uint32_t width, uint32_t height, Format format) override;
@@ -231,7 +232,7 @@ namespace Kurenai::RHI
         void UploadSubmitAndWait();
         // 実際に使われているDXGIアダプタ(GPU名・メモリ量)をログへ出す。
         // 性能計測の値が「どのGPUで測ったものか」を後から追えるようにするための診断出力
-        void LogAdapterInfo() const;
+        void LogAdapterInfo();
 
         Microsoft::WRL::ComPtr<ID3D12Device> m_Device;
         // DXR用のインタフェース。m_DeviceからQueryInterfaceで取得する。
@@ -270,6 +271,8 @@ namespace Kurenai::RHI
         // デバッグビルドでのみ取得する(リリースビルドではnullptrのままDrainDebugMessagesが即座に返る)
         Microsoft::WRL::ComPtr<ID3D12InfoQueue> m_InfoQueue;
         Microsoft::WRL::ComPtr<IDXGIFactory2> m_Factory;
+        // 実際に使われているアダプタ。VRAM使用量(QueryVideoMemoryInfo)を引くために控える
+        Microsoft::WRL::ComPtr<IDXGIAdapter3> m_Adapter;
         Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_CommandQueue;
         Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_CommandAllocators[kFrameCount];
         Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_CommandList;

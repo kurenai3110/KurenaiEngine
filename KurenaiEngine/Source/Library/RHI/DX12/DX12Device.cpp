@@ -242,7 +242,24 @@ namespace Kurenai::RHI
     // 実行中のGPUが何かをログに残す。どのGPUで測った値なのかが分からないと性能の記録が
     // 後から比較できなくなるため、レイトレーシング等の対応状況ログと並べてここで出す。
     // 診断目的の情報であり、取得に失敗しても描画は続行できるので例外は投げない
-    void DX12Device::LogAdapterInfo() const
+    bool DX12Device::GetVideoMemoryUsage(uint64_t& outUsedBytes, uint64_t& outBudgetBytes) const
+    {
+        if (!m_Adapter)
+        {
+            return false;
+        }
+
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (FAILED(m_Adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+        {
+            return false;
+        }
+        outUsedBytes = info.CurrentUsage;
+        outBudgetBytes = info.Budget;
+        return true;
+    }
+
+    void DX12Device::LogAdapterInfo()
     {
         const LUID deviceLuid = m_Device->GetAdapterLuid();
 
@@ -260,6 +277,13 @@ namespace Kurenai::RHI
             if (desc.AdapterLuid.LowPart != deviceLuid.LowPart || desc.AdapterLuid.HighPart != deviceLuid.HighPart)
             {
                 continue;
+            }
+
+            // VRAM使用量の問い合わせ(QueryVideoMemoryInfo)はIDXGIAdapter3にしかないため、
+            // ここで見つけたアダプタを控えておく。取れなくてもGPU名のログは続ける
+            if (FAILED(adapter.As(&m_Adapter)))
+            {
+                Core::Logger::Warning("DX12", "IDXGIAdapter3を取得できませんでした(VRAM使用量を表示できません)");
             }
 
             constexpr uint64_t kBytesPerMiB = 1024ull * 1024ull;

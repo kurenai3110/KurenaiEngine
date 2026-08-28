@@ -5501,6 +5501,20 @@ namespace Kurenai
         {
             m_TextureStreaming.LogStats("periodic");
         }
+
+        // 【自己申告と実測を並べる】常駐管理が積算したバイト数だけを見ていると、
+        // 物差し自体が間違っていても気付けない。OSから見たVRAM使用量と一緒に出す
+        uint64_t usedBytes = 0;
+        uint64_t budgetBytes = 0;
+        if (m_Device->GetVideoMemoryUsage(usedBytes, budgetBytes))
+        {
+            constexpr double kBytesPerMiB = 1024.0 * 1024.0;
+            char vramLine[160];
+            std::snprintf(
+                vramLine, sizeof(vramLine), "VRAM: 使用 %.1f MB / 予算 %.1f MB",
+                static_cast<double>(usedBytes) / kBytesPerMiB, static_cast<double>(budgetBytes) / kBytesPerMiB);
+            Core::Logger::Info("Perf", vramLine);
+        }
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)

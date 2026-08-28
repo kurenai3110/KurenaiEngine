@@ -79,6 +79,13 @@ namespace Kurenai::RHI
         // 実装側がフレーム境界まで生存させてから解放する
         virtual bool CommitTextureContents(IRHIPendingTextureContents* pending) = 0;
 
+        // GPUメモリの実使用量と、ドライバが提示する予算(バイト)。取得できなければfalse。
+        //
+        // 【自己申告と突き合わせるためにある】テクスチャストリーミングは「常駐させた
+        // バイト数」を自分で積算して報告するが、それだけだと物差しの誤りに気付けない。
+        // OSから見た実測値と並べて出すことで、どちらかがおかしいことを検出できる
+        virtual bool GetVideoMemoryUsage(uint64_t& outUsedBytes, uint64_t& outBudgetBytes) const = 0;
+
         virtual std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
         // RGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)のピクセルデータからテクスチャを
         // 作成する。実行時に生成したデータ(フォントアトラス等)をアップロードする用途向け

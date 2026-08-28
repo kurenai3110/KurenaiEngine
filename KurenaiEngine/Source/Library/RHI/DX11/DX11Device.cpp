@@ -101,6 +101,13 @@ namespace Kurenai::RHI
 
         ThrowIfFailed(adapter->GetParent(IID_PPV_ARGS(&m_Factory)), "DXGIファクトリの取得に失敗しました");
 
+        // VRAM使用量の問い合わせ(QueryVideoMemoryInfo)はIDXGIAdapter3にしかない。
+        // 取れなくても描画には影響しないため、警告だけ出して続行する
+        if (FAILED(adapter.As(&m_Adapter)))
+        {
+            Core::Logger::Warning("DX11", "IDXGIAdapter3を取得できませんでした(VRAM使用量を表示できません)");
+        }
+
         // 実行中のGPUが何かをログに残す。どのGPUで測った値なのかが分からないと性能の記録が
         // 後から比較できなくなる。診断目的の情報なので、取得に失敗しても描画は続行する
         DXGI_ADAPTER_DESC adapterDesc{};
@@ -615,6 +622,23 @@ namespace Kurenai::RHI
 
         return std::make_unique<DX11PendingTextureContents>(
             texture, std::move(srv), static_cast<uint32_t>(image.GetMetadata().mipLevels));
+    }
+
+    bool DX11Device::GetVideoMemoryUsage(uint64_t& outUsedBytes, uint64_t& outBudgetBytes) const
+    {
+        if (!m_Adapter)
+        {
+            return false;
+        }
+
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (FAILED(m_Adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+        {
+            return false;
+        }
+        outUsedBytes = info.CurrentUsage;
+        outBudgetBytes = info.Budget;
+        return true;
     }
 
     bool DX11Device::CommitTextureContents(IRHIPendingTextureContents* pending)

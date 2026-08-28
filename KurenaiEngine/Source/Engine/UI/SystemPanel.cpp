@@ -106,6 +106,16 @@ namespace Kurenai::UI
         ImGui::Separator();
         ImGui::Text("追跡 %u枚 / 常駐 %.1f MB / 全ミップなら %.1f MB (%.1f%%)",
                     stats.TrackedTextures, residentMB, fullMB, ratio);
+        // 【自己申告(上)と実測(下)を並べる】片方だけだとどちらの誤りにも気付けない
+        uint64_t usedBytes = 0;
+        uint64_t budgetBytes = 0;
+        if (m_Engine.m_Device->GetVideoMemoryUsage(usedBytes, budgetBytes))
+        {
+            constexpr double kBytesPerMiB = 1024.0 * 1024.0;
+            ImGui::Text("VRAM(OSから見た実測): 使用 %.1f MB / 予算 %.1f MB",
+                        static_cast<double>(usedBytes) / kBytesPerMiB,
+                        static_cast<double>(budgetBytes) / kBytesPerMiB);
+        }
         // 【0なら一度も実行されていない】差分がゼロなのを「効いている」と読み違えないための項目
         ImGui::Text("差し替え累計 %llu件 (失敗 %llu件) / 待ち %u件 / 処理中 %u件",
                     static_cast<unsigned long long>(stats.CommittedUpdates),

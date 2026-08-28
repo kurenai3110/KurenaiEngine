@@ -1,7 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <wrl/client.h>
 
 #include "RHI/IRHIDevice.h"
@@ -28,6 +28,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHIPendingTextureContents> PrepareTextureContents(
             IRHITexture* target, const TextureImage& image) override;
         bool CommitTextureContents(IRHIPendingTextureContents* pending) override;
+        bool GetVideoMemoryUsage(uint64_t& outUsedBytes, uint64_t& outBudgetBytes) const override;
         std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
         std::unique_ptr<IRHITexture> CreateTextureFromMemory(uint32_t width, uint32_t height, const void* pixelsRGBA8) override;
         std::unique_ptr<IRHITexture> CreateRenderTexture(uint32_t width, uint32_t height, Format format) override;
@@ -92,6 +93,8 @@ namespace Kurenai::RHI
             uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray);
 
         Microsoft::WRL::ComPtr<ID3D11Device> m_Device;
+        // VRAM使用量(QueryVideoMemoryInfo)を引くためのアダプタ。Initializeで一度だけ取る
+        Microsoft::WRL::ComPtr<IDXGIAdapter3> m_Adapter;
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
         Microsoft::WRL::ComPtr<IDXGIFactory2> m_Factory;
         std::unique_ptr<DX11CommandList> m_ImmediateCommandList;
