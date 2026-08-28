@@ -467,9 +467,12 @@ Texture2DArrayへ統合する理由とその効果は
 </p>
 <p>
 CPU側の視錐台平面の作り方は増幅シェーダーの<code>IsSphereInFrustum</code>
-(<code>GBufferMeshlet.hlsl</code>、メッシュレット単位のカリング)と同じ平面を作っていますが、
-<strong>向こうは転置済み行列の「列」から、こちらは転置前の「行」から</strong>組み立てます
-(詳細は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 44.1)。
+(<code>GBufferMeshlet.hlsl</code>、メッシュレット単位のカリング)と同じ平面を作ります。
+<strong>どちらも行列の「列」から</strong>組み立てます ―― クリップ座標が
+<code>c = v * M</code>(行ベクトル×行列)なので、<code>c.x</code>は列0との内積になるためです。
+<strong>「行」から作ると転置した行列の平面になり、ほぼ真下を向いたときに100%間引かれます</strong>
+(実際に一度間違えました。正面付近ではそれらしく動くのでYawを振る対照実験では見つかりません)。
+詳細は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 44.1。
 </p>
 
 <h4>効いているかを数値で見る</h4>
