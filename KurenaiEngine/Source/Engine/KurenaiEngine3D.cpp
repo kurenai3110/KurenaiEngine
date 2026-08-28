@@ -3101,6 +3101,40 @@ namespace Kurenai
                 m_DepthPrepassCutoutPipelineStateMirrored = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
             }
 
+            // メッシュシェーダー版の深度プリパス。
+            //
+            // 【これが無いとプリパスがまるごと止まる】かつてプリパスはメッシュレット経路と
+            // 排他だった。プリパスが頂点シェーダーで深度を書き、G-Bufferがメッシュシェーダーで
+            // 描くと、同じ頂点でも変換の丸めが一致する保証が無く、深度が1ulpずれた面が
+            // GREATER_EQUALを通らずに消えるため。**G-Bufferと同じ増幅/メッシュシェーダーを
+            // そのまま使えば変換は文字どおり同一のコードになり、この問題自体が消える。**
+            //
+            // 不透明用はピクセルシェーダーを持たない(段ごと省く)。カットアウト用は
+            // G-Bufferとまったく同じ判定のclipを通す(DepthPrepass.hlsl)
+            if (m_GBufferMeshShader && m_GBufferAmplificationShader)
+            {
+                RHI::MeshPipelineStateDesc prepassMeshDesc;
+                prepassMeshDesc.AmplificationShader = m_GBufferAmplificationShader.get();
+                prepassMeshDesc.MeshShader = m_GBufferMeshShader.get();
+                prepassMeshDesc.PixelShader = nullptr;
+                prepassMeshDesc.HasDepthStencil = true;
+                prepassMeshDesc.ReverseZ = true;
+                prepassMeshDesc.FrontCounterClockwise = false;
+                m_DepthPrepassMeshletPipelineState = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                prepassMeshDesc.FrontCounterClockwise = true;
+                m_DepthPrepassMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+
+                if (m_DepthPrepassCutoutPixelShader)
+                {
+                    prepassMeshDesc.PixelShader = m_DepthPrepassCutoutPixelShader.get();
+                    prepassMeshDesc.FrontCounterClockwise = false;
+                    m_DepthPrepassMeshletCutoutPipelineState = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                    prepassMeshDesc.FrontCounterClockwise = true;
+                    m_DepthPrepassMeshletCutoutPipelineStateMirrored =
+                        m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                }
+            }
+
             // SSAOパス
             RHI::PipelineStateDesc ssaoPipelineDesc;
             ssaoPipelineDesc.VertexShader = m_AOVertexShader.get();
@@ -7982,11 +8016,16 @@ namespace Kurenai
         // プリパスで手前に別のものが書かれていると早期Zに落とされて消える。
         // 中途半端に混ぜるより丸ごと従来経路にするほうが安全
         //
-        // 【メッシュシェーダー経路とは併用しない】プリパスは頂点シェーダー経路で深度を書くが、
-        // G-Buffer側がメッシュシェーダーで描くと同じ頂点でも変換の丸めが一致する保証が無く、
-        // 深度が1ulpずれた面がGREATER_EQUALを通らずに消える
-        const bool meshletPathActive = m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
-        const bool depthPrepassRuns = m_DepthPrepassEnabled && !meshletPathActive
+        // 【メッシュシェーダー経路とも併用できるようになった】かつてプリパスはメッシュレット経路と
+        // 排他だった。プリパスが頂点シェーダーで深度を書き、G-Bufferがメッシュシェーダーで描くと、
+        // 同じ頂点でも変換の丸めが一致する保証が無く、深度が1ulpずれた面がGREATER_EQUALを
+        // 通らずに消えるため。プリパスにもG-Bufferとまったく同じ増幅/メッシュシェーダーを使う
+        // PSOを用意したので、変換は文字どおり同一のコードになりこの問題は起きない。
+        //
+        // メッシュレット版のPSOが作れなかった場合は、その経路で描くモデルだけを
+        // プリパスから外す(下のループ参照)。深度が埋まらないぶん早期Zが効かないだけで、
+        // G-Buffer側が改めて深度を書くため絵は壊れない
+        const bool depthPrepassRuns = m_DepthPrepassEnabled
             && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
         if (depthPrepassRuns)
         {
@@ -8009,6 +8048,68 @@ namespace Kurenai
                         if (!IsAABBVisible(prepassFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                         {
                             ++m_FrustumCullCulled;
+                            continue;
+                        }
+
+                        // G-Bufferが1ドローで描くモデルは、プリパスも同じ増幅/メッシュシェーダーで
+                        // 描く。**同じ判断関数(ShouldUseModelMeshletPath)で経路を選ぶことが要点**で、
+                        // 片方だけがメッシュシェーダーになると深度が一致しない。
+                        //
+                        // 不透明とカットアウトでピクセルシェーダーの有無が変わるため、
+                        // カットアウトのマテリアルを持つモデルだけ2回に分ける。
+                        // 持たないモデル(PLATEAUのタイルがそう)は1回で済む
+                        if (ShouldUseModelMeshletPath(instance))
+                        {
+                            if (!m_DepthPrepassMeshletPipelineState)
+                            {
+                                // メッシュレット版のPSOが無い。このモデルはプリパスから外す
+                                // (早期Zが効かないだけで、G-Buffer側が深度を書くので絵は壊れない)
+                                continue;
+                            }
+
+                            constexpr uint32_t kAmplificationGroupSize = 32;
+                            const uint32_t groupCount =
+                                (instance.Model.TotalMeshletCount + kAmplificationGroupSize - 1)
+                                / kAmplificationGroupSize;
+
+                            const auto dispatchMeshletPrepass =
+                                [&](RHI::IRHIPipelineState* pipelineState, uint32_t rejectMask, uint32_t requireMask)
+                            {
+                                if (!pipelineState)
+                                {
+                                    return;
+                                }
+                                if (pipelineState != currentPipelineState)
+                                {
+                                    cmd->SetPipelineState(pipelineState);
+                                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                                    cmd->SetSamplerSet(m_MaterialSamplers.get());
+                                    currentPipelineState = pipelineState;
+                                }
+
+                                const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                    instance, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask, requireMask);
+                                cmd->UpdateBuffer(
+                                    m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+                                cmd->DispatchMesh(groupCount, 1, 1);
+                                ++m_DrawCallsDepthPrepass;
+                            };
+
+                            // 不透明ぶん(ピクセルシェーダー無し)。半透明とカットアウトを落とす
+                            dispatchMeshletPrepass(
+                                instance.IsMirrored ? m_DepthPrepassMeshletPipelineStateMirrored.get()
+                                                    : m_DepthPrepassMeshletPipelineState.get(),
+                                Assets::kGpuMaterialFlagTransparent | Assets::kGpuMaterialFlagCutout, 0);
+
+                            // カットアウトぶん(clipを通す)。持たないモデルではこの回は発行しない
+                            if (instance.Model.HasCutoutMaterial)
+                            {
+                                dispatchMeshletPrepass(
+                                    instance.IsMirrored ? m_DepthPrepassMeshletCutoutPipelineStateMirrored.get()
+                                                        : m_DepthPrepassMeshletCutoutPipelineState.get(),
+                                    Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout);
+                            }
                             continue;
                         }
 
@@ -8182,8 +8283,14 @@ namespace Kurenai
                             continue;
                         }
 
-                        const bool useMeshlet = ShouldUseMeshletPath(instance.Model, mesh, instance.IsWater);
-                        bindPipelineState(instance.IsMirrored, instance.IsWater, useMeshlet);
+                        // 【ここへ来た時点でメッシュレット経路は使わない】上のモデル単位の
+                        // 判定を通らなかったインスタンス(水面、メッシュレットを持たない
+                        // メッシュが混ざるモデル、メッシュレット描画が無効)なので、
+                        // モデル全体を従来の頂点シェーダーで描く。
+                        // **メッシュ単位でメッシュレット経路へ入れてはいけない** ――
+                        // 深度プリパスは同じ判断関数(ShouldUseModelMeshletPath)で経路を選ぶため、
+                        // ここで食い違うとプリパスの深度とG-Bufferの深度が一致しなくなる
+                        bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
                         const ObjectConstants objectConstants =
                             MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
@@ -8204,23 +8311,10 @@ namespace Kurenai
                             cmd->SetTexture(7, m_WaterNormalMapTexture.get());
                         }
 
-                        if (useMeshlet)
-                        {
-                            // 頂点/インデックスバッファは張らない。増幅シェーダーとメッシュシェーダーが
-                            // bindless経由で自分で読む(ObjectConstantsが番号を運んでいる)。
-                            // 起動するのは「メッシュレット数 ÷ 増幅シェーダーのグループサイズ」だけで、
-                            // 実際にラスタライズされるのはカリングを生き延びたぶんに絞られる
-                            constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
-                            cmd->DispatchMesh((mesh.MeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize, 1, 1);
-                            ++m_DrawCallsGBuffer;
-                        }
-                        else
-                        {
-                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
-                            ++m_DrawCallsGBuffer;
-                        }
+                        cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                        cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        ++m_DrawCallsGBuffer;
                     }
                 }
             },

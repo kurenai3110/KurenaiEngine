@@ -520,6 +520,12 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassPipelineStateMirrored;
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineStateMirrored;
+        // メッシュシェーダー版のプリパス(G-Bufferと同じ増幅/メッシュシェーダーを使う)。
+        // これが無いと、メッシュレット経路で描くモデルの深度をプリパスで埋められない
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletPipelineStateMirrored;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletCutoutPipelineStateMirrored;
         // プリパスを走らせるか。オーバードローが小さいシーンでは、増えるジオメトリ1周ぶんが
         // 省けるピクセルシェーダーより高くつくため切れるようにしてある
         bool m_DepthPrepassEnabled = Defaults::DepthPrepassEnabled;
