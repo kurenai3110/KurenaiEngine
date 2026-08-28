@@ -2639,6 +2639,11 @@ namespace Kurenai
         // 【まず読み込みだけ】破棄はまだ行わない。絵が出ることを確かめてから、
         // kFrameCountフレーム遅延させる解放キューを通して足す
         void UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition);
+        // 常駐が変わったことを記録する。実際の作り直しは静かになってから
+        void RequestRaytracingRebuild();
+        // 出来上がったRaytracingSceneの差し替えと、静かになった後の発注。
+        // UpdateModelStreamingの後にフレーム1回だけ呼ぶ
+        void UpdateRaytracingRebuild();
 
         // Render → Loader の読み込み発注。m_LoadRequestMutexで保護し、
         // シーン切り替えと同じ条件変数で起こす(専用スレッドを増やさない)
@@ -2697,6 +2702,38 @@ namespace Kurenai
         // (shared_ptrの最後の参照が消えてデストラクタが走る)
         std::mutex m_StreamingReleaseMutex;
         std::vector<std::shared_ptr<Assets::Model>> m_StreamingRelease;
+
+        // --- レイトレーシングを常駐の増減へ追随させる ----------------------------------------
+        //
+        // 常駐が変わるとBLAS/TLASと統合バッファが実態と食い違う。作り直して追随させる。
+        // 最後の増減からこの時間だけ静かなら作り直す(走行中は毎フレーム変わりうるため)
+        bool m_RaytracingRebuildPending = false;
+        std::chrono::steady_clock::time_point m_RaytracingRebuildAfter{};
+        static constexpr float kRaytracingRebuildQuietSeconds = 0.5f;
+        std::mutex m_RaytracingRebuiltMutex;
+        std::unique_ptr<Assets::RaytracingScene> m_RaytracingRebuilt;
+        uint64_t m_RaytracingRebuiltGeneration = 0;
+        bool m_RaytracingRebuildRequested = false;   // m_LoadRequestMutexで保護
+        // 再構築が走っている間はtrue。立っている間はRenderスレッド側の差し込みと破棄を見送る。
+        // Loaderスレッドが m_Scene を走査している最中に書き換えると走査中のコンテナが変わるため
+        std::atomic<bool> m_RaytracingRebuildInFlight{ false };
+        // 差し替えた旧RaytracingSceneの破棄待ち。モデルと同じくフレームを寝かせる。
+        //
+        // 【Renderスレッドで破棄してはいけない】RaytracingSceneが持つBLAS/TLASと統合バッファの
+        // ディスクリプタは、ロックを持たないアセット用ヒープ(DX12Device::GetAssetSrvCpuHeap)
+        // から取られている。Loaderスレッドがストリーミングで確保している最中にRenderスレッドが
+        // 解放するとフリーリストが壊れる。寝かせたあとはLoaderスレッドへ渡すこと
+        struct PendingRaytracingRelease
+        {
+            std::unique_ptr<Assets::RaytracingScene> Scene;
+            uint32_t FramesRemaining = 0;
+        };
+        std::vector<PendingRaytracingRelease> m_RaytracingPendingRelease;
+        std::mutex m_RaytracingReleaseMutex;
+        std::vector<std::unique_ptr<Assets::RaytracingScene>> m_RaytracingRelease;
+        // 統計。0なら一度も作り直していない
+        uint64_t m_RaytracingRebuildCount = 0;
+        double m_RaytracingRebuildLastMs = 0.0;
 
         // 統計。【いずれも累計】瞬間値だと短い出来事を取りこぼす(47.9の失敗と同じ)
         uint64_t m_StreamingLoadedTotal = 0;

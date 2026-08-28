@@ -95,6 +95,14 @@ namespace Kurenai::Assets
 
         for (const ModelInstance& instance : scene.Instances)
         {
+            // 【未読み込みは飛ばす】ストリーミング中は実体が無いインスタンスがある。
+            // 下のBLASのループとまったく同じ条件で飛ばすこと ―― 片方だけ飛ばすと
+            // TLASのInstanceIDとInstanceInfoBufferの添字がずれ、
+            // 反射に「別のモデルのマテリアル」が映るという分かりにくい壊れ方をする
+            if (!instance.Model)
+            {
+                continue;
+            }
             const Model& model = *instance.Model;
 
             RaytracingInstanceInfo instanceInfo;
@@ -212,9 +220,15 @@ namespace Kurenai::Assets
         std::vector<RHI::ASInstanceDesc> tlasInstances;
         tlasInstances.reserve(scene.Instances.size());
 
+        uint32_t emittedInstanceIndex = 0;
         for (size_t i = 0; i < scene.Instances.size(); ++i)
         {
             const ModelInstance& instance = scene.Instances[i];
+            // 上の統合バッファのループとまったく同じ条件
+            if (!instance.Model)
+            {
+                continue;
+            }
 
             RHI::BottomLevelASDesc blasDesc;
             blasDesc.Geometries.reserve(instance.Model->Meshes.size());
@@ -258,8 +272,9 @@ namespace Kurenai::Assets
                     tlasInstance.Transform[row][column] = instance.World.m[row][column];
                 }
             }
-            // シェーダーはこの値でInstanceInfoBufferを引く。配列の添字と一致させる
-            tlasInstance.InstanceID = static_cast<uint32_t>(i);
+            // シェーダーはこの値でInstanceInfoBufferを引く。配列の添字と一致させる。
+            // 【iではなく「実際に積んだ番号」】未読み込みを飛ばした分だけiとずれる
+            tlasInstance.InstanceID = emittedInstanceIndex++;
 
             m_BottomLevelAS.push_back(std::move(blas));
             tlasInstances.push_back(tlasInstance);
@@ -276,7 +291,9 @@ namespace Kurenai::Assets
             return false;
         }
 
-        m_InstanceCount = static_cast<uint32_t>(scene.Instances.size());
+        // 【scene.Instances.size()ではない】未読み込みを飛ばした分だけ少ない。
+        // 実際にTLASへ積んだ数を出さないと、常駐4件のときに671と表示されて読む人を惑わせる
+        m_InstanceCount = emittedInstanceIndex;
         m_MeshCount = static_cast<uint32_t>(meshInfos.size());
 
         const float elapsedMs =

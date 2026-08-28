@@ -4110,6 +4110,87 @@ namespace Kurenai
         }
     }
 
+    void KurenaiEngine3D::RequestRaytracingRebuild()
+    {
+        if (!m_Device->SupportsRaytracing() || !m_Scene.HasStreamingDistance)
+        {
+            return;
+        }
+        m_RaytracingRebuildPending = true;
+        m_RaytracingRebuildAfter = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(static_cast<int>(kRaytracingRebuildQuietSeconds * 1000.0f));
+    }
+
+    void KurenaiEngine3D::UpdateRaytracingRebuild()
+    {
+        // --- 出来上がったものを差し替える ---------------------------------------------------
+        {
+            std::unique_ptr<Assets::RaytracingScene> rebuilt;
+            uint64_t generation = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_RaytracingRebuiltMutex);
+                rebuilt = std::move(m_RaytracingRebuilt);
+                generation = m_RaytracingRebuiltGeneration;
+            }
+            if (rebuilt && generation == m_StreamingGeneration)
+            {
+                auto retired = std::make_unique<Assets::RaytracingScene>(std::move(m_RaytracingScene));
+                m_RaytracingPendingRelease.push_back({ std::move(retired), kStreamingReleaseDelayFrames });
+                m_RaytracingScene = std::move(*rebuilt);
+                ++m_RaytracingRebuildCount;
+            }
+        }
+
+        // --- 寝かせ終えたものをLoaderスレッドへ渡す -------------------------------------------
+        //
+        // 【ここでresetしてはいけない】RaytracingSceneが持つディスクリプタは、ロックを持たない
+        // アセット用ヒープから取られている。Loaderスレッドがストリーミングで確保している最中に
+        // Renderスレッドが解放するとフリーリストが壊れる。モデルの破棄と同じ経路へ寄せる
+        if (!m_RaytracingPendingRelease.empty())
+        {
+            std::vector<std::unique_ptr<Assets::RaytracingScene>> ready;
+            for (PendingRaytracingRelease& pending : m_RaytracingPendingRelease)
+            {
+                if (pending.FramesRemaining > 0)
+                {
+                    --pending.FramesRemaining;
+                    continue;
+                }
+                ready.push_back(std::move(pending.Scene));
+            }
+            m_RaytracingPendingRelease.erase(
+                std::remove_if(
+                    m_RaytracingPendingRelease.begin(), m_RaytracingPendingRelease.end(),
+                    [](const PendingRaytracingRelease& pending) { return !pending.Scene; }),
+                m_RaytracingPendingRelease.end());
+
+            if (!ready.empty())
+            {
+                {
+                    std::lock_guard<std::mutex> lock(m_RaytracingReleaseMutex);
+                    for (auto& scene : ready)
+                    {
+                        m_RaytracingRelease.push_back(std::move(scene));
+                    }
+                }
+                m_LoadRequestCV.notify_one();
+            }
+        }
+
+        // --- 静かになったら発注する -----------------------------------------------------------
+        if (!m_RaytracingRebuildPending || std::chrono::steady_clock::now() < m_RaytracingRebuildAfter)
+        {
+            return;
+        }
+        m_RaytracingRebuildPending = false;
+        m_RaytracingRebuildInFlight.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
+            m_RaytracingRebuildRequested = true;
+        }
+        m_LoadRequestCV.notify_one();
+    }
+
     void KurenaiEngine3D::UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition)
     {
         m_StreamingResidentCount = 0;
@@ -4162,6 +4243,17 @@ namespace Kurenai
                 std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
                 loaded.swap(m_StreamingLoaded);
             }
+            // 再構築中はLoaderスレッドが m_Scene を走査しているので差し込まない
+            if (m_RaytracingRebuildInFlight.load(std::memory_order_acquire))
+            {
+                std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
+                for (StreamingLoaded& item : loaded)
+                {
+                    m_StreamingLoaded.push_back(std::move(item));
+                }
+                loaded.clear();
+            }
+
             for (StreamingLoaded& item : loaded)
             {
                 m_StreamingInFlight.erase(item.Path);
@@ -4171,6 +4263,7 @@ namespace Kurenai
                     continue;
                 }
                 ++m_StreamingLoadedTotal;
+                RequestRaytracingRebuild();
                 // 同じパスを指すすべての段へ差し込む(モデル共有。2-1と同じ考え方)
                 auto shared = std::shared_ptr<const Assets::Model>(item.Model);
                 m_Scene.ModelCache[item.Path] = std::move(item.Model);
@@ -4270,6 +4363,8 @@ namespace Kurenai
         // 【モデルは共有されている】同じ.kmodelを複数のインスタンスが指しうるので、
         // 「どれか1つでもまだ要る」なら捨てられない。インスタンス単位ではなく
         // ModelCacheをパス単位で見て、needed に無いものだけを外す
+        // 再構築中は破棄しない(理由は上の差し込みと同じ)
+        if (!m_RaytracingRebuildInFlight.load(std::memory_order_acquire))
         {
             std::vector<std::wstring> evictPaths;
             for (const auto& entry : m_Scene.ModelCache)
@@ -4312,6 +4407,7 @@ namespace Kurenai
                     { std::move(cached->second), kStreamingReleaseDelayFrames });
                 m_Scene.ModelCache.erase(cached);
                 ++m_StreamingEvictedTotal;
+                RequestRaytracingRebuild();
             }
         }
 
@@ -4434,23 +4530,37 @@ namespace Kurenai
                 release.swap(m_StreamingRelease);
             }
             // releaseのデストラクタでGPUリソースが解放される
+
+            // 差し替えられた旧RaytracingSceneも同じ理由でこのスレッドで解放する
+            // (BLAS/TLASと統合バッファのディスクリプタはアセット用ヒープから取られている)
+            std::vector<std::unique_ptr<Assets::RaytracingScene>> scenes;
+            {
+                std::lock_guard<std::mutex> lock(m_RaytracingReleaseMutex);
+                scenes.swap(m_RaytracingRelease);
+            }
         };
 
         for (;;)
         {
             int sceneIndex = -1;
             std::vector<StreamingRequest> streamingRequests;
+            bool raytracingRebuild = false;
             {
                 std::unique_lock<std::mutex> lock(m_LoadRequestMutex);
                 m_LoadRequestCV.wait(lock, [this] {
-                    if (m_LoadRequestSceneIndex >= 0 || !m_StreamingRequests.empty() || m_StopLoaderThread)
+                    if (m_LoadRequestSceneIndex >= 0 || !m_StreamingRequests.empty() ||
+                        m_RaytracingRebuildRequested || m_StopLoaderThread)
                     {
                         return true;
                     }
                     // 破棄だけが積まれている場合も起きる(読み込みが止まっている間に
                     // 破棄が溜まり続けると、遠ざかったモデルのVRAMが解放されない)
-                    std::lock_guard<std::mutex> releaseLock(m_StreamingReleaseMutex);
-                    return !m_StreamingRelease.empty();
+                    {
+                        std::lock_guard<std::mutex> releaseLock(m_StreamingReleaseMutex);
+                        if (!m_StreamingRelease.empty()) { return true; }
+                    }
+                    std::lock_guard<std::mutex> rtLock(m_RaytracingReleaseMutex);
+                    return !m_RaytracingRelease.empty();
                 });
                 if (m_StopLoaderThread && m_LoadRequestSceneIndex < 0)
                 {
@@ -4463,10 +4573,17 @@ namespace Kurenai
                 if (sceneIndex >= 0)
                 {
                     m_StreamingRequests.clear();
+                    // 切り替え前のシーンへの再構築要求は無意味。
+                    // 【フラグを降ろすのを忘れない】立てたままだとRenderスレッドの
+                    // 差し込みと破棄が永久に止まる
+                    m_RaytracingRebuildRequested = false;
+                    m_RaytracingRebuildInFlight.store(false, std::memory_order_release);
                 }
                 else
                 {
                     streamingRequests.swap(m_StreamingRequests);
+                    raytracingRebuild = m_RaytracingRebuildRequested;
+                    m_RaytracingRebuildRequested = false;
                 }
             }
 
@@ -4503,6 +4620,30 @@ namespace Kurenai
                         m_StreamingLoaded.push_back({ request.Path, std::move(model), request.Generation });
                     }
                 }
+                // 【ここでcontinueしない】読み込みと再構築が同時に積まれることがある。
+                // 抜けると再構築要求だけが失われ、m_RaytracingRebuildInFlightが立ったまま戻らない
+            }
+
+            // --- レイトレーシングの作り直し(Loaderスレッドで行う) ---------------------------
+            if (raytracingRebuild)
+            {
+                const auto startTime = std::chrono::steady_clock::now();
+                auto rebuilt = std::make_unique<Assets::RaytracingScene>();
+                if (rebuilt->Build(*m_Device, m_Scene))
+                {
+                    const double elapsedMs =
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startTime).count();
+                    std::lock_guard<std::mutex> lock(m_RaytracingRebuiltMutex);
+                    m_RaytracingRebuildLastMs = elapsedMs;
+                    m_RaytracingRebuilt = std::move(rebuilt);
+                    m_RaytracingRebuiltGeneration = m_StreamingGeneration;
+                }
+                // 【成否にかかわらず必ず降ろす】
+                m_RaytracingRebuildInFlight.store(false, std::memory_order_release);
+            }
+
+            if (sceneIndex < 0)
+            {
                 continue;
             }
 
@@ -4651,8 +4792,8 @@ namespace Kurenai
             {
                 Core::Logger::Info(
                     "KurenaiEngine3D",
-                    "ストリーミング対象のシーンではレイトレーシングの高速化構造を構築しません"
-                    "(常駐の増減に追随する仕組みが未実装のため。反射・RT影・RTAOはスクリーンスペース手法になります)");
+                    "ストリーミング対象のシーンでは、モデルが常駐してからレイトレーシングの"
+                    "高速化構造を構築します(常駐が変わるたびに作り直します)");
             }
             else
             {
@@ -4680,6 +4821,21 @@ namespace Kurenai
         // まだ届いていない完成品を確実に捨てる(そのまま差し込むと別シーンのモデルが混ざる)
         ++m_StreamingGeneration;
         m_StreamingInFlight.clear();
+        m_RaytracingRebuildPending = false;
+        {
+            // 【ここでresetしてはいけない】Renderスレッドでの解放になる。
+            // 受け取り待ちの完成品も、破棄はLoaderスレッドへ回す
+            std::unique_ptr<Assets::RaytracingScene> stale;
+            {
+                std::lock_guard<std::mutex> lock(m_RaytracingRebuiltMutex);
+                stale = std::move(m_RaytracingRebuilt);
+            }
+            if (stale)
+            {
+                std::lock_guard<std::mutex> lock(m_RaytracingReleaseMutex);
+                m_RaytracingRelease.push_back(std::move(stale));
+            }
+        }
         {
             std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
             m_StreamingLoaded.clear();
@@ -5988,10 +6144,12 @@ namespace Kurenai
             char streamText[192];
             std::snprintf(
                 streamText, sizeof(streamText),
-                "  ストリーミング: 常駐 %u / 範囲内 %u (距離 %.0fm) / 読み込み累計 %llu件 / 破棄累計 %llu件",
+                "  ストリーミング: 常駐 %u / 範囲内 %u (距離 %.0fm) / 読み込み累計 %llu件 / 破棄累計 %llu件"
+                " / RT再構築 %llu回(直近 %.1fms)",
                 m_StreamingResidentCount, m_StreamingTargetCount, m_Scene.StreamingDistance,
                 static_cast<unsigned long long>(m_StreamingLoadedTotal),
-                static_cast<unsigned long long>(m_StreamingEvictedTotal));
+                static_cast<unsigned long long>(m_StreamingEvictedTotal),
+                static_cast<unsigned long long>(m_RaytracingRebuildCount), m_RaytracingRebuildLastMs);
             Core::Logger::Info("Perf", streamText);
         }
 
@@ -6426,6 +6584,9 @@ namespace Kurenai
 
         // モデルのストリーミング。【LODの後に呼ぶ】どの段を読むかは選ばれた段で決まる
         UpdateModelStreaming(cameraPosition);
+
+        // レイトレーシングを常駐の増減へ追随させる(ストリーミング時のみ働く)
+        UpdateRaytracingRebuild();
 
         // --- TAAのサブピクセルジッター ---
         // 投影行列を1ピクセル未満だけずらして、同じ画素が毎フレームわずかに違う位置をサンプルする
