@@ -600,8 +600,8 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 <table>
 <thead><tr><th>ファイル</th><th>役割</th><th>マジック/バージョン</th></tr></thead>
 <tbody>
-<tr><td><code>.kmodel</code></td><td>マニフェスト(<code>PackageHeader</code> + <code>TextureEntry[]</code> + <code>MeshEntry[]</code> + <code>LightEntry[]</code> + StringPool)。ジオメトリ・テクスチャの実体は持たず、パスとオフセットだけを持つ</td><td><code>'K','M','D','L'</code> / 5</td></tr>
-<tr><td><code>.kgeom</code></td><td>ジオメトリ実体。頂点(<code>Assets::Vertex</code>そのまま)/インデックス(<code>uint32_t</code>そのまま)ブロックをメッシュ順に16バイト境界で連結しただけで、読み込み後の加工が一切不要</td><td><code>'K','G','E','O'</code> / 1</td></tr>
+<tr><td><code>.kmodel</code></td><td>マニフェスト(<code>PackageHeader</code> + <code>TextureEntry[]</code> + <code>MaterialEntry[]</code> + <code>MeshEntry[]</code> + <code>LightEntry[]</code> + StringPool)。ジオメトリ・テクスチャの実体は持たず、パスとオフセットだけを持つ</td><td><code>'K','M','D','L'</code> / 10</td></tr>
+<tr><td><code>.kgeom</code></td><td>ジオメトリ実体。頂点(<code>Assets::Vertex</code>そのまま)/インデックス(<code>uint32_t</code>そのまま)/メッシュレット3ブロックをメッシュ順に16バイト境界で連結しただけで、読み込み後の加工が一切不要</td><td><code>'K','G','E','O'</code> / 4</td></tr>
 <tr><td><code>.ktex</code></td><td>テクスチャ実体。<code>DirectX::SaveToDDSMemory</code>が出力したDDSファイル全体(BC7圧縮・ミップ生成済み)をそのまま格納</td><td><code>'K','T','E','X'</code> / 1</td></tr>
 </tbody>
 </table>
@@ -629,6 +629,91 @@ v5で<code>OcclusionTextureIndex</code>+<code>OcclusionStrength</code>を<b>末�
 FBXのライトノードに由来するモデル埋め込みライト(11章参照)をそのまま格納したもので、Position/
 Directionはモデルのローカル空間のまま(ワールド変換は<code>SceneLoader.cpp</code>の
 <code>LoadScene</code>が<code>ModelInstance::World</code>で行う)保持する。
+</p>
+<p>
+<b><code>.kmodel</code> v10 で材質を<code>MeshEntry</code>から切り出した。</b>
+テクスチャ番号6つと係数(<code>MetallicFactor</code>/<code>RoughnessFactor</code>/<code>AlphaCutoff</code>/
+<code>EmissiveFactor[3]</code>/<code>BaseColorFactor[4]</code>/<code>OcclusionStrength</code>/
+<code>Translucency</code>/<code>Flags</code>)は<code>MaterialEntry</code>(80バイト)へ移り、
+<code>MeshEntry</code>(128バイト)は<code>MaterialIndex</code>でそれを引く。
+理由はbindless経路にある ―― メッシュシェーダーでモデル全体のメッシュレット総覧を1回の
+<code>DispatchMesh</code>で回して「1モデル=1ドロー」にすると、ピクセルシェーダーは
+「いま描いている三角形がどの材質か」をメッシュ単位の定数バッファからは知れない。
+材質を番号で引ける表として持つ必要がある。
+</p>
+<p>
+<b>メッシュとマテリアルは1対1である。</b>KurenaiPackerがマテリアル単位でメッシュを結合する
+(9章)ため、出力されるメッシュ数は必ず「ジオメトリを持つマテリアルの数」に一致し、
+<code>MaterialCount == MeshCount</code>になる。
+<b><code>--bake-occlusion</code>が焼く遮蔽マップとbent normalはメッシュ単位の成果物</b>で、
+その番号を<code>MaterialEntry</code>へ書いているため、この1対1に依存している。
+将来マテリアルを複数メッシュで共有させるなら、ベイク結果の持ち方を先に決め直すこと。
+</p>
+<p>
+v10ではあわせて<b>メッシュ単位のAABB</b>(<code>MeshEntry::BoundsMin/BoundsMax</code>)を追加した。
+モデル全体のAABBしか無いと、1モデルが多数のメッシュを持つアセット
+(PLATEAUのタイルは1枚が約1.1km四方)ではフラスタムカリングが1つも間引けない。
+このAABBは<b>書き出す頂点から作る</b>(頂点フェッチ最適化でどの三角形からも参照されない頂点が
+落ちるため、入力ではなく出力側を見る)。
+<code>PackageHeader</code>のAABBは<code>ModelSource</code>が全頂点から作った値をそのまま書き、
+<b>メッシュ単位AABBから導出しない</b> ―― 別々に作った2つの値が一致することを検証で
+確かめられるようにするため(片方をもう片方から作ると、その検証は何も言っていないことになる)。
+</p>
+<p>
+<b>メッシュレットは材質と離散LODを持つようになった</b>(<code>MeshletEntry</code>は48→64バイト、
+<code>.kgeom</code>はv4)。<code>MaterialIndex</code>は所属メッシュのものと同じ値で、
+1つのメッシュレットに2つの材質が混ざることは構造上起こらない
+(マテリアル単位で結合したメッシュごとに<code>meshopt_buildMeshlets</code>を呼ぶため)。
+離散LODは段ごとに独立したメッシュレット群を持ち、増幅シェーダーが1段だけ選ぶ形にしてある。
+NaniteのようなDAGは作らない ―― 実装量が桁で小さく、街のタイルに要る精度にはこれで足りる。
+</p>
+<p>
+離散LODで重要な性質が3つある。<b>全段が同じ頂点バッファを共有する</b>
+(<code>meshopt_simplify</code>は頂点を増やさずインデックスを削るだけなので、段が増えても
+頂点は1つも増えない)。<b><code>.kgeom</code>のインデックスブロックはLOD0の三角形だけ</b>で、
+簡略化した段の三角形は入らない ―― レイトレーシングの「三角形番号→メッシュレット」の二分探索も、
+メッシュシェーダーを使わない従来の描画経路も、v9とまったく同じ形のまま動く。
+そして<b><code>MeshEntry::MeshletCount</code>は全段の合計</b>(GPUバッファの確保と境界検証が使う)で、
+<b>描画が回すLOD0の個数は<code>MeshletLODCounts[0]</code></b>のほう。ここを取り違えると
+簡略化した段まで重ねて描かれる。
+</p>
+<p>
+簡略化は段ごとに三角形を半分にし、<b>打ち切り条件</b>を持つ ―― 段数上限
+(<code>kMaxMeshletLODCount</code>=4)に達した / 三角形がメッシュレット2個ぶんを下回った /
+要求した削減の9割に届かなかった(それ以上潰せない形状)。打ち切らないと、もう潰せない形に対しても
+ほぼ同じ三角形数の段が上限まで積まれ、<code>.kgeom</code>が太るだけになる。
+簡略化には<code>meshopt_SimplifyLockBorder</code>を付けて<b>開いた辺(メッシュの縁)を固定する</b>。
+地形タイルのように隣のモデルと辺を共有しているものは、縁が動くとタイル同士の間に隙間が開くため。
+外した場合と実測で比べたが段の数も三角形数も改善しなかったので、固定したままにしている。
+</p>
+<p>
+<b>段ができないメッシュがある。</b>三角形どうしが辺を共有していない(ばらばらの板や小片の
+集まりのような)メッシュは潰せる辺がそもそも無いので、簡略化が1本も進まない ―― これは正常な挙動で、
+モン・サン＝ミシェルの島では11メッシュ中10メッシュがこれに当たった
+(47,600三角形のメッシュが削減0%)。したがって<code>MeshletLODCount</code>はメッシュごとに1〜4と
+まちまちになる。<b>段を選ぶ側は全メッシュが4段ある前提で書いてはいけない。</b>
+辺が繋がっているメッシュでは目標どおり半分ずつ落ちる(PLATEAUのタイルで
+49,372 → 24,676 → 12,320 → 6,144)。
+</p>
+<p>
+<b>埋め込みテクスチャ(FBXの<code>aiScene::mTextures</code>)は一時ファイル経由で取り込む。</b>
+Project PLATEAUのLOD2はテクスチャを1枚もファイルとして配布せず、すべてFBXに埋め込んだうえ、
+マテリアルが指すのは<code>..\FME_TEMP\...\skjp5921.jpg</code>という実在しない一時パスである。
+<code>ResolveTexturePath</code>が実ファイルを見つけられなかったときに
+<code>aiScene::GetEmbeddedTexture</code>(外したらファイル名で線形探索)へ落ち、
+<code>%TEMP%</code>配下へ書き出してからその実パスを既存の経路へ流す。
+バイト列のまま持ち回らないのは、<code>RHI::TextureImage</code>にメモリから読む経路が無く、
+<code>PackageWriter</code>の重複排除・<code>.ktex</code>のミラー・ワーカースレッドへの分配も
+すべて「解決済みのファイルパス」を前提に組まれているため。一時ファイルへ落として既存の経路へ
+合流させれば、変更が解決の1点で済む。取り出し先はRAII(<code>SourceModel</code>が保持)で、
+書き出しが終わってから消える。
+</p>
+<p>
+出力先は<code>_Embedded/&lt;.kmodelの名前&gt;/</code>で、<b>モデルごとに名前空間を分ける</b>。
+埋め込みテクスチャの名前は「シーン内の配列番号+元のファイル名」でモデルの中でしか一意でなく、
+PLATEAUの取り込みのように複数のモデルを同じ出力ディレクトリへパックする運用では別のタイルと
+同名になりうる。そして<code>--force</code>を付けない限り既存の<code>.ktex</code>はスキップされるため、
+<b>後から来たタイルが前のタイルのテクスチャを黙って使う</b>(エラーも警告も出ない)。
 </p>
 <p>
 <code>KurenaiPacker.exe</code>のジオメトリ解析(<code>ModelSource.cpp</code>)は、5章の接線平均化・
@@ -6900,7 +6985,7 @@ Intel UHD 620での実測で1.19〜1.21ms(GPUフレーム時間30msの約4%)を�
 奥(小さい)なら、ブロック内のどの画素から見ても球は隠れています。
 複数テクセルをまとめるときも<strong>min</strong>が保守側です。
 <strong>向きを逆に書いてもコンパイルは通り、絵もそれらしく出ます</strong>ので、
-導出は<code>docs/ImplementationDetail.md</code> 46.1 に残してあります。
+導出は<code>docs/ImplementationDetail.md</code> 47.1 に残してあります。
 </p>
 
 <h3>41.3 1フレーム遅れと、保守側へ倒す規約</h3>

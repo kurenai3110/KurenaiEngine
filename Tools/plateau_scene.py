@@ -13,15 +13,24 @@ import struct
 import sys
 
 
+# 対応する .kmodel の PackageHeader のバージョン。ランタイム(ModelPackage.h の
+# kPackageVersion)と揃える。不一致の .kmodel は再パックが要る
+KMODEL_VERSION = 10
+
+# PackageHeader は v10 で 64 → 72 バイトになった(MaterialCount と Reserved が増えた)。
+# **BoundsMin のオフセット16は動いていない**ので、AABB の読み方自体は変わらない
+KMODEL_HEADER_SIZE = 72
+
+
 def read_kmodel_bounds(path):
     """.kmodel の PackageHeader から (version, boundsMin, boundsMax) を返す"""
     with open(path, 'rb') as f:
-        buf = f.read(64)
-    if len(buf) < 64 or buf[:4] != b'KMDL':
+        buf = f.read(KMODEL_HEADER_SIZE)
+    if len(buf) < KMODEL_HEADER_SIZE or buf[:4] != b'KMDL':
         return None
     (_, version, _, _,
      x0, y0, z0, x1, y1, z1,
-     _, _, _, _, _, _) = struct.unpack('<4sIII3f3fIIIIII', buf)
+     _, _, _, _, _, _, _, _) = struct.unpack('<4sIII3f3fIIIIIIII', buf)
     return version, (x0, y0, z0), (x1, y1, z1)
 
 
@@ -47,14 +56,14 @@ def main():
             print('[ERROR] .kmodel として読めない: %s' % m, file=sys.stderr)
             return 1
         version, bmin, bmax = r
-        if version != 9:
+        if version != KMODEL_VERSION:
             bad_version.append((os.path.basename(m), version))
         for i in range(3):
             lo[i] = min(lo[i], bmin[i])
             hi[i] = max(hi[i], bmax[i])
 
     if bad_version:
-        print('[ERROR] v9 でない .kmodel がある(再パックが要る):', file=sys.stderr)
+        print('[ERROR] v%d でない .kmodel がある(再パックが要る):' % KMODEL_VERSION, file=sys.stderr)
         for name, v in bad_version[:5]:
             print('    %s (v%d)' % (name, v), file=sys.stderr)
         return 1
