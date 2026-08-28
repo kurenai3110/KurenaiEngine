@@ -320,6 +320,8 @@ namespace Kurenai::Assets
             float IBLIntensity = 1.0f;
             bool HasShadowDistance = false;
             float ShadowDistance = 0.0f;
+            bool HasStreamingDistance = false;
+            float StreamingDistance = 0.0f;
             bool AOEnabled = true;
             bool HasSSREnabled = false;
             bool SSREnabled = true;
@@ -575,6 +577,17 @@ namespace Kurenai::Assets
                             errorAt(lineNumber, rawLine, "ShadowDistanceは1〜100000の範囲で指定してください");
                         }
                         result.HasShadowDistance = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"StreamingDistance"))
+                    {
+                        if (!ParseFloatToken(value, result.StreamingDistance)) errorAt(lineNumber, rawLine, "StreamingDistanceの値が不正です");
+                        // 1m未満だと全モデルが未読み込みのままになり、巨大すぎると常駐と変わらない。
+                        // ShadowDistanceと同じ範囲にしてある
+                        if (result.StreamingDistance < 1.0f || result.StreamingDistance > 100000.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "StreamingDistanceは1〜100000の範囲で指定してください");
+                        }
+                        result.HasStreamingDistance = true;
                     }
                     else if (CaseInsensitiveEquals(key, L"AmbientOcclusion"))
                     {
@@ -1368,6 +1381,8 @@ namespace Kurenai::Assets
         scene.IBLIntensity = parsed.IBLIntensity;
         scene.HasShadowDistance = parsed.HasShadowDistance;
         scene.ShadowDistance = parsed.ShadowDistance;
+        scene.HasStreamingDistance = parsed.HasStreamingDistance;
+        scene.StreamingDistance = parsed.StreamingDistance;
 
         // [Scene]Skyboxは[Model]Pathと同じくAssetsルートからの相対パスとして扱い、
         // 同じルート外チェックを適用したうえで絶対パスへ解決してから返す
@@ -1487,8 +1502,17 @@ namespace Kurenai::Assets
             //
             // 1x1のフォールバックはシーン全体で1組を共有する(モデルごとに作ると
             // 671モデルのシーンで2000個超の個別リソースになる。ModelLoader.hのコメント参照)
-            const auto acquireModel = [&device, &scene](const std::wstring& path) -> std::shared_ptr<const Model>
+            // 【ストリーミング時は実体を読まない】ヘッダのAABBだけで配置を決め、
+            // 実体はカメラが近づいたときにLoaderスレッドが読む
+            const bool streaming = scene.HasStreamingDistance;
+
+            const auto acquireModel = [&device, &scene, streaming](const std::wstring& path)
+                -> std::shared_ptr<const Model>
             {
+                if (streaming)
+                {
+                    return nullptr;
+                }
                 auto cached = scene.ModelCache.find(path);
                 if (cached == scene.ModelCache.end())
                 {
@@ -1499,6 +1523,7 @@ namespace Kurenai::Assets
             };
 
             instance.Model = acquireModel(fullModelPath);
+            instance.ModelPaths.push_back(fullModelPath);
             instance.IsWater = parsedModel.Water;
 
             // モデルLODの2段目以降。同じ粗いモデルを多数のタイルが共有する使い方
@@ -1514,7 +1539,9 @@ namespace Kurenai::Assets
                         "[Model]LODPathがルート外を指しています(絶対パスまたは'..'は使用できません): " +
                         WideToUtf8(lodPath) + " (" + WideToUtf8(sceneFilePath) + ")");
                 }
-                instance.LODModels.push_back(acquireModel(assetRootDirectory + normalizedLODPath));
+                const std::wstring fullLODPath = assetRootDirectory + normalizedLODPath;
+                instance.LODModels.push_back(acquireModel(fullLODPath));
+                instance.ModelPaths.push_back(fullLODPath);
             }
 
             using namespace DirectX;
@@ -1550,16 +1577,31 @@ namespace Kurenai::Assets
             XMStoreFloat4x4(&instance.NormalMatrix, XMMatrixTranspose(normalMathSpace));
 
             // モデルのローカル空間AABB(8頂点)をWorldで変換し、シーン全体のAABBへ合成する。
-            // 軸並行のまま変換前のmin/maxだけを使うと回転時に不正確になるため、必ず8頂点全てを変換する
-            const Model& loadedModel = *instance.Model;
+            // 軸並行のまま変換前のmin/maxだけを使うと回転時に不正確になるため、必ず8頂点全てを変換する。
+            //
+            // 【常に.kmodelのヘッダから取る】ストリーミング時は実体が無いのでヘッダしか無いが、
+            // 常駐時もヘッダを使う。両方の経路でシーンAABB(=farZ)と初期カメラが1ビットも
+            // 変わらないことを保証するため ―― 片方だけModel::BoundsMinから取ると、
+            // 「ストリーミングを付けたら遠景の描画距離が変わった」という分かりにくい差が生まれる
+            // (ModelLoaderがヘッダの値をそのままModelへ写しているので、値自体は同じ)
+            const ModelHeaderInfo headerInfo = ReadModelHeader(fullModelPath);
+            if (streaming && headerInfo.LightCount > 0)
+            {
+                // ストリーミング時はモデル埋め込みライトをシーンのライト一覧へ合成できない
+                // (実体を読むまでライトの位置が分からず、破棄で消えてしまうため)
+                Core::Logger::Warning(
+                    "SceneLoader",
+                    "ストリーミング対象の.kmodelに埋め込みライトが" + std::to_string(headerInfo.LightCount) +
+                        "件ありますが、無視されます: " + WideToUtf8(fullModelPath));
+            }
             // インスタンス自身のワールドAABBも同じループで求める(フラスタムカリング用)
             bool instanceBoundsInitialized = false;
             for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
             {
                 const XMVECTOR corner = XMVectorSet(
-                    (cornerIndex & 1) ? loadedModel.BoundsMax[0] : loadedModel.BoundsMin[0],
-                    (cornerIndex & 2) ? loadedModel.BoundsMax[1] : loadedModel.BoundsMin[1],
-                    (cornerIndex & 4) ? loadedModel.BoundsMax[2] : loadedModel.BoundsMin[2],
+                    (cornerIndex & 1) ? headerInfo.BoundsMax[0] : headerInfo.BoundsMin[0],
+                    (cornerIndex & 2) ? headerInfo.BoundsMax[1] : headerInfo.BoundsMin[1],
+                    (cornerIndex & 4) ? headerInfo.BoundsMax[2] : headerInfo.BoundsMin[2],
                     1.0f);
                 const XMVECTOR transformed = XMVector3TransformCoord(corner, worldMathSpace);
                 XMFLOAT3 transformedFloat3;
@@ -1605,7 +1647,10 @@ namespace Kurenai::Assets
             // 平行移動を含まない方向ベクトルとして変換する必要があるため、それぞれ
             // XMVector3TransformCoord/TransformNormalを使い分ける(法線のような逆転置は不要。
             // 接線ベクトルの変換(GBuffer.hlsl)と同じ理由)
-            for (const Light& localLight : instance.Model->Lights)
+            // 【ストリーミング時は合成しない】実体が無いのでライトの位置が分からず、
+            // 仮に読めても破棄のたびに消えることになる。ヘッダのLightCountで警告済み
+            const std::vector<Light> emptyLights;
+            for (const Light& localLight : (streaming ? emptyLights : instance.Model->Lights))
             {
                 Light worldLight = localLight;
 
@@ -1643,6 +1688,34 @@ namespace Kurenai::Assets
         return scene;
     }
 
+    ModelHeaderInfo ReadModelHeader(const std::wstring& modelFilePath)
+    {
+        std::ifstream modelIn(modelFilePath, std::ios::binary);
+        if (!modelIn.is_open())
+        {
+            throw std::runtime_error(".kmodelが見つかりません: " + WideToUtf8(modelFilePath));
+        }
+
+        PackageHeader header{};
+        modelIn.read(reinterpret_cast<char*>(&header), sizeof(header));
+        if (!modelIn || std::memcmp(header.Magic, kPackageMagic, sizeof(kPackageMagic)) != 0)
+        {
+            throw std::runtime_error(".kmodelのマジックナンバーが不正です: " + WideToUtf8(modelFilePath));
+        }
+        if (header.Version != kPackageVersion)
+        {
+            throw std::runtime_error(
+                ".kmodelのバージョンが対応していません(ファイル: " + std::to_string(header.Version) +
+                ", ランタイム: " + std::to_string(kPackageVersion) + "): " + WideToUtf8(modelFilePath));
+        }
+
+        ModelHeaderInfo info;
+        std::memcpy(info.BoundsMin, header.BoundsMin, sizeof(info.BoundsMin));
+        std::memcpy(info.BoundsMax, header.BoundsMax, sizeof(info.BoundsMax));
+        info.LightCount = header.LightCount;
+        return info;
+    }
+
     std::wstring ReadSceneName(const std::wstring& sceneFilePath)
     {
         const ParsedScene parsed = ParseSceneFile(sceneFilePath);
@@ -1669,26 +1742,13 @@ namespace Kurenai::Assets
             }
 
             const std::wstring fullModelPath = assetRootDirectory + normalizedPath;
-
-            std::ifstream modelIn(fullModelPath, std::ios::binary);
-            if (!modelIn.is_open())
+            if (!std::ifstream(fullModelPath, std::ios::binary).is_open())
             {
                 throw std::runtime_error(
                     std::string("[Model]") + keyName + "が指す.kmodelが見つかりません: " + WideToUtf8(fullModelPath));
             }
-
-            PackageHeader header{};
-            modelIn.read(reinterpret_cast<char*>(&header), sizeof(header));
-            if (!modelIn || std::memcmp(header.Magic, kPackageMagic, sizeof(kPackageMagic)) != 0)
-            {
-                throw std::runtime_error(".kmodelのマジックナンバーが不正です: " + WideToUtf8(fullModelPath));
-            }
-            if (header.Version != kPackageVersion)
-            {
-                throw std::runtime_error(
-                    ".kmodelのバージョンが対応していません(ファイル: " + std::to_string(header.Version) +
-                    ", ランタイム: " + std::to_string(kPackageVersion) + "): " + WideToUtf8(fullModelPath));
-            }
+            // マジックナンバーとバージョンの検証はReadModelHeaderが行う(投げる例外も同じ)
+            ReadModelHeader(fullModelPath);
         };
 
         for (const ParsedModelEntry& parsedModel : parsed.Models)

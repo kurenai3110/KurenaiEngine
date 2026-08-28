@@ -284,6 +284,8 @@ namespace Kurenai::UI
         size_t meshCount = 0;
         for (const auto& instance : m_Engine.m_Scene.Instances)
         {
+            // ストリーミング中は未読み込みのインスタンスがある
+            if (!instance.Model) { continue; }
             for (const auto& mesh : instance.Model->Meshes)
             {
                 ++meshCount;
@@ -360,6 +362,8 @@ namespace Kurenai::UI
         size_t triangleCount = 0;
         for (const auto& instance : m_Engine.m_Scene.Instances)
         {
+            // ストリーミング中は未読み込みのインスタンスがある
+            if (!instance.Model) { continue; }
             for (const auto& mesh : instance.Model->Meshes)
             {
                 if (mesh.IsTransparent || mesh.IndexCount < 3)

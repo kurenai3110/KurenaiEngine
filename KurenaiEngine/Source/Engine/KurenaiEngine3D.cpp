@@ -3431,7 +3431,10 @@ namespace Kurenai
             }
 
             // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
-            for (const auto& mesh : GetCurrentLOD(instanceIndex).Meshes)
+            // ストリーミング中で未読み込みなら描かない
+            const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
+            if (!currentModel) { continue; }
+            for (const auto& mesh : currentModel->Meshes)
             {
                 // 半透明(alphaMode=BLEND)はハードウェア側でもG-Bufferに描かれないため揃える
                 if (mesh.IsTransparent || mesh.IndexCount < 3)
@@ -4107,51 +4110,191 @@ namespace Kurenai
         }
     }
 
+    void KurenaiEngine3D::UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition)
+    {
+        m_StreamingResidentCount = 0;
+        m_StreamingTargetCount = 0;
+
+        if (!m_Scene.HasStreamingDistance)
+        {
+            return;
+        }
+
+        // --- Loaderスレッドが仕上げたものを取り込む -----------------------------------------
+        {
+            std::vector<StreamingLoaded> loaded;
+            {
+                std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
+                loaded.swap(m_StreamingLoaded);
+            }
+            for (StreamingLoaded& item : loaded)
+            {
+                m_StreamingInFlight.erase(item.Path);
+                // 【古い世代は捨てる】シーンを切り替えた後に前のシーンのモデルが届くことがある
+                if (item.Generation != m_StreamingGeneration || !item.Model)
+                {
+                    continue;
+                }
+                ++m_StreamingLoadedTotal;
+                // 同じパスを指すすべての段へ差し込む(モデル共有。2-1と同じ考え方)
+                auto shared = std::shared_ptr<const Assets::Model>(item.Model);
+                m_Scene.ModelCache[item.Path] = std::move(item.Model);
+                for (Assets::ModelInstance& instance : m_Scene.Instances)
+                {
+                    for (size_t level = 0; level < instance.ModelPaths.size(); ++level)
+                    {
+                        if (instance.ModelPaths[level] != item.Path)
+                        {
+                            continue;
+                        }
+                        if (level == 0)
+                        {
+                            instance.Model = shared;
+                        }
+                        else
+                        {
+                            instance.LODModels[level - 1] = shared;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- 距離を見て、足りないものを近い順に発注する -------------------------------------
+        //
+        // 【段ごとに要否が違う】いま選ばれている段だけを読めばよい。遠くて粗い段しか使わない
+        // タイルの詳細な段まで読むと、ストリーミングの意味が無くなる
+        struct Candidate
+        {
+            float DistanceSq = 0.0f;
+            const std::wstring* Path = nullptr;
+        };
+        std::vector<Candidate> candidates;
+
+        const float limit = m_Scene.StreamingDistance;
+        const float limitSq = limit * limit;
+        const float cameraXYZ[3] = { cameraPosition.x, cameraPosition.y, cameraPosition.z };
+
+        for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+        {
+            const Assets::ModelInstance& instance = m_Scene.Instances[i];
+            if (instance.ModelPaths.empty())
+            {
+                continue;
+            }
+
+            // モデルLODと同じ「AABBの最近接点まで」の距離
+            float squaredDistance = 0.0f;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float outside = (std::max)(
+                    { instance.WorldBoundsMin[axis] - cameraXYZ[axis],
+                      cameraXYZ[axis] - instance.WorldBoundsMax[axis], 0.0f });
+                squaredDistance += outside * outside;
+            }
+            if (squaredDistance > limitSq)
+            {
+                continue;
+            }
+            ++m_StreamingTargetCount;
+
+            const uint32_t level = (i < m_InstanceLODStates.size()) ? m_InstanceLODStates[i].CurrentLOD : 0u;
+            const size_t levelIndex = (level < instance.ModelPaths.size()) ? level : 0u;
+            if (instance.IsLODLoaded(levelIndex))
+            {
+                ++m_StreamingResidentCount;
+                continue;
+            }
+
+            const std::wstring& path = instance.ModelPaths[levelIndex];
+            if (m_StreamingInFlight.count(path) != 0)
+            {
+                continue;
+            }
+            candidates.push_back({ squaredDistance, &path });
+        }
+
+        if (candidates.empty())
+        {
+            return;
+        }
+
+        // 近い順に発注する。手前のものから絵が埋まるので、遠くの読み込みで手前が待たされない
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const Candidate& a, const Candidate& b) { return a.DistanceSq < b.DistanceSq; });
+
+        // 【1フレームの発注数に上限を置く】Loaderスレッドは1本で、シーン切り替えもここを通る。
+        // 際限なく積むと、切り替え要求が数百件の読み込みの後ろで待たされる
+        constexpr size_t kMaxStreamingRequestsPerFrame = 8;
+        const size_t requestCount = (std::min)(candidates.size(), kMaxStreamingRequestsPerFrame);
+
+        {
+            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
+            for (size_t i = 0; i < requestCount; ++i)
+            {
+                m_StreamingRequests.push_back({ *candidates[i].Path, m_StreamingGeneration });
+                m_StreamingInFlight.insert(*candidates[i].Path);
+            }
+        }
+        m_LoadRequestCV.notify_one();
+    }
+
     uint32_t KurenaiEngine3D::GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const
     {
         const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
-        const auto modelAt = [&instance](uint32_t level) -> const Assets::Model&
+        // ストリーミング中はまだ読み込まれていない段がある。nullptrの段は描画対象から外す
+        const auto modelAt = [&instance](uint32_t level) -> const Assets::Model*
         {
-            return (level == 0) ? *instance.Model : *instance.LODModels[level - 1];
+            return (level == 0) ? instance.Model.get() : instance.LODModels[level - 1].get();
         };
 
         if (instanceIndex >= m_InstanceLODStates.size())
         {
             outDraws[0] = { instance.Model.get(), 1.0f };
-            return 1;
+            return instance.Model ? 1u : 0u;
         }
 
         const InstanceLODState& state = m_InstanceLODStates[instanceIndex];
         if (state.FadeT >= 1.0f)
         {
-            outDraws[0] = { &modelAt(state.CurrentLOD), 1.0f };
-            return 1;
+            outDraws[0] = { modelAt(state.CurrentLOD), 1.0f };
+            return outDraws[0].Model ? 1u : 0u;
         }
 
         // 切り替え「先」は +FadeT、「元」は -FadeT。同じノイズをしきい値の両側で分け合うので、
-        // 2段が同じ画素に重ならず(Zファイティングにならず)、隙間もできない
-        outDraws[0] = { &modelAt(state.CurrentLOD), state.FadeT };
-        outDraws[1] = { &modelAt(state.PreviousLOD), -state.FadeT };
+        // 2段が同じ画素に重ならず(Zファイティングにならず)、隙間もできない。
+        //
+        // 【片方が未読み込みなら、もう片方を全画素で描く】ディザで分け合う相手がいないのに
+        // 半分だけ描くと、その間だけモデルに穴が開く
+        const Assets::Model* const toModel = modelAt(state.CurrentLOD);
+        const Assets::Model* const fromModel = modelAt(state.PreviousLOD);
+        if (!toModel || !fromModel)
+        {
+            const Assets::Model* const only = toModel ? toModel : fromModel;
+            outDraws[0] = { only, 1.0f };
+            return only ? 1u : 0u;
+        }
+        outDraws[0] = { toModel, state.FadeT };
+        outDraws[1] = { fromModel, -state.FadeT };
         return 2;
     }
 
-    const Assets::Model& KurenaiEngine3D::GetCurrentLOD(size_t instanceIndex) const
+    const Assets::Model* KurenaiEngine3D::GetCurrentLOD(size_t instanceIndex) const
     {
         const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
-        if (instanceIndex >= m_InstanceLODStates.size())
-        {
-            return *instance.Model;
-        }
-        const uint32_t level = m_InstanceLODStates[instanceIndex].CurrentLOD;
-        return (level == 0) ? *instance.Model : *instance.LODModels[level - 1];
+        const uint32_t level = (instanceIndex < m_InstanceLODStates.size())
+            ? m_InstanceLODStates[instanceIndex].CurrentLOD
+            : 0u;
+        // ストリーミング中はまだ読み込まれていないことがある。nullptrを返し、呼び出し側が飛ばす
+        return (level == 0) ? instance.Model.get() : instance.LODModels[level - 1].get();
     }
 
-    const Assets::Model& KurenaiEngine3D::GetCoarsestLOD(const Assets::ModelInstance& instance) const
+    const Assets::Model* KurenaiEngine3D::GetCoarsestLOD(const Assets::ModelInstance& instance) const
     {
         // 【影と間接光は常に最も粗い段】どちらもテクスチャを読まないので、詳細な段を描く意味が無い。
         // PLATEAUではLOD2(約1715メッシュ)がLOD1(1メッシュ)になるため、
         // シャドウのドローコールが4カスケード分まとめて桁で減る
-        return instance.LODModels.empty() ? *instance.Model : *instance.LODModels.back();
+        return instance.LODModels.empty() ? instance.Model.get() : instance.LODModels.back().get();
     }
 
     void KurenaiEngine3D::RetireAssets(RetiredAssets&& retired)
@@ -4182,15 +4325,61 @@ namespace Kurenai
         for (;;)
         {
             int sceneIndex = -1;
+            std::vector<StreamingRequest> streamingRequests;
             {
                 std::unique_lock<std::mutex> lock(m_LoadRequestMutex);
-                m_LoadRequestCV.wait(lock, [this] { return m_LoadRequestSceneIndex >= 0 || m_StopLoaderThread; });
+                m_LoadRequestCV.wait(lock, [this] {
+                    return m_LoadRequestSceneIndex >= 0 || !m_StreamingRequests.empty() || m_StopLoaderThread;
+                });
                 if (m_StopLoaderThread && m_LoadRequestSceneIndex < 0)
                 {
                     break;
                 }
                 sceneIndex = m_LoadRequestSceneIndex;
                 m_LoadRequestSceneIndex = -1;
+                // 【シーン切り替えが来たら、溜まっているストリーミング発注は捨てる】
+                // それらは切り替え前のシーンのもので、読んでも差し込む先が無い
+                if (sceneIndex >= 0)
+                {
+                    m_StreamingRequests.clear();
+                }
+                else
+                {
+                    streamingRequests.swap(m_StreamingRequests);
+                }
+            }
+
+            // --- ストリーミングの読み込み ---------------------------------------------------
+            if (!streamingRequests.empty())
+            {
+                if (!m_StreamingTexturePool)
+                {
+                    m_StreamingTexturePool = std::make_unique<Assets::SharedTexturePool>();
+                }
+                for (const StreamingRequest& request : streamingRequests)
+                {
+                    std::shared_ptr<Assets::Model> model;
+                    try
+                    {
+                        model = std::make_shared<Assets::Model>(
+                            Assets::LoadModel(*m_Device, request.Path, m_StreamingTexturePool.get()));
+                    }
+                    catch (const std::exception& error)
+                    {
+                        // 1件の失敗でストリーミング全体を止めない。そのモデルだけが出ないまま続く
+                        Core::Logger::Error(
+                            "KurenaiEngine3D",
+                            "ストリーミングの読み込みに失敗しました: " + WideToUtf8(request.Path) + " (" +
+                                error.what() + ")");
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
+                        // 失敗しても空のまま返す。Renderスレッドが「発注中」から外せないと
+                        // 同じものを永久に再発注し続ける
+                        m_StreamingLoaded.push_back({ request.Path, std::move(model), request.Generation });
+                    }
+                }
+                continue;
             }
 
             // 先に破棄を済ませてから読み込む(Renderスレッドは手放す前にWaitForGPUIdle済み)。
@@ -4220,6 +4409,10 @@ namespace Kurenai
 
         // 停止時に残っている破棄依頼をこのスレッドで片付ける
         destroyRetiredAssets();
+
+        // ストリーミング用の共有テクスチャも、確保したのと同じLoaderスレッドで解放する
+        // (アセット用ディスクリプタヒープはロックを持たない。RetiredAssetsのコメント参照)
+        m_StreamingTexturePool.reset();
 
         if (SUCCEEDED(comResult))
         {
@@ -4320,9 +4513,24 @@ namespace Kurenai
         // レイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの統合バッファを構築する。
         // 非対応環境(DX11、Tier 1.1未満のアダプタ)では何も作らず、描画側は従来の
         // スクリーンスペース手法のまま動く。構築に失敗しても描画は継続する
+        //
+        // 【ストリーミング中のシーンでは構築しない】読み込み時点でモデルの実体が1つも無く、
+        // BLASを作る材料が無い。常駐が増減するたびにTLASと統合バッファを作り直す仕組みは
+        // まだ入れていないため、いまは構築を見送って理由をログに残す
+        // (ストリーミングは既定で無効なので、既存シーンのレイトレーシングは何も変わらない)
         if (m_Device->SupportsRaytracing())
         {
-            loaded->RaytracingScene.Build(*m_Device, loaded->Scene);
+            if (loaded->Scene.HasStreamingDistance)
+            {
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "ストリーミング対象のシーンではレイトレーシングの高速化構造を構築しません"
+                    "(常駐の増減に追随する仕組みが未実装のため。反射・RT影・RTAOはスクリーンスペース手法になります)");
+            }
+            else
+            {
+                loaded->RaytracingScene.Build(*m_Device, loaded->Scene);
+            }
         }
 
         loaded->Camera = ComputeInitialCamera(loaded->Scene);
@@ -4340,6 +4548,15 @@ namespace Kurenai
         m_Scene = std::move(loaded.Scene);
         m_RaytracingScene = std::move(loaded.RaytracingScene);
         m_CurrentSceneIndex = loaded.SceneIndex;
+
+        // ストリーミングの状態もシーンに紐づく。世代を進めることで、切り替え前に発注して
+        // まだ届いていない完成品を確実に捨てる(そのまま差し込むと別シーンのモデルが混ざる)
+        ++m_StreamingGeneration;
+        m_StreamingInFlight.clear();
+        {
+            std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
+            m_StreamingLoaded.clear();
+        }
 
         // モデルLODの状態はシーンに紐づくので必ず捨てる。
         // 【要素数の一致だけを見て使い回してはいけない】たまたま同じインスタンス数の
@@ -4696,7 +4913,10 @@ namespace Kurenai
             // 【7545行目のDDGIラスタ経路と同じ段を数えること】ここの数が定数バッファリングの
             // 予算(ClampDDGIProbesPerFrameToConstantRing)を決めるため、実際に描く段と食い違うと
             // 予算の見積もりが狂う
-            for (const auto& mesh : GetCoarsestLOD(instance).Meshes)
+            // ストリーミング中で未読み込みなら描かない
+            const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+            if (!coarsestModel) { continue; }
+            for (const auto& mesh : coarsestModel->Meshes)
             {
                 if (!mesh.IsTransparent)
                 {
@@ -5634,6 +5854,19 @@ namespace Kurenai
             Core::Logger::Info("Perf", lodText);
         }
 
+        // モデルのストリーミング。【常駐0や読み込み0なら効いていない】
+        // 範囲内なのに常駐していないものが残り続けるなら、発注か受け取りのどこかで詰まっている
+        if (m_Scene.HasStreamingDistance)
+        {
+            char streamText[192];
+            std::snprintf(
+                streamText, sizeof(streamText),
+                "  ストリーミング: 常駐 %u / 範囲内 %u (距離 %.0fm) / 読み込み累計 %llu件",
+                m_StreamingResidentCount, m_StreamingTargetCount, m_Scene.StreamingDistance,
+                static_cast<unsigned long long>(m_StreamingLoadedTotal));
+            Core::Logger::Info("Perf", streamText);
+        }
+
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
         m_FrameStatsGPUTimeSumMs = 0.0;
@@ -6062,6 +6295,9 @@ namespace Kurenai
         // G-Bufferパスのラムダはそもそもカメラ位置をキャプチャしていない(半透明パスだけが持つ)ので、
         // ここで決めてm_InstanceLODStatesへ置く形にしてある
         UpdateModelLOD(cameraPosition, m_RenderDeltaTime);
+
+        // モデルのストリーミング。【LODの後に呼ぶ】どの段を読むかは選ばれた段で決まる
+        UpdateModelStreaming(cameraPosition);
 
         // --- TAAのサブピクセルジッター ---
         // 投影行列を1ピクセル未満だけずらして、同じ画素が毎フレームわずかに違う位置をサンプルする
@@ -7149,7 +7385,10 @@ namespace Kurenai
                             }
 
                             // 【影は常に最も粗い段】影はテクスチャを読まないので詳細な段を描く意味が無い
-                            for (const auto& mesh : GetCoarsestLOD(instance).Meshes)
+                            // ストリーミング中で未読み込みなら描かない
+                            const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                            if (!coarsestModel) { continue; }
+                            for (const auto& mesh : coarsestModel->Meshes)
                             {
                                 bindPipelineState(instance.IsMirrored);
 
@@ -7249,7 +7488,10 @@ namespace Kurenai
                 }
 
                 // 【プローブも最も粗い段】焼き込むのは間接光で、細部は残らない
-                for (const auto& mesh : GetCoarsestLOD(instance).Meshes)
+                // ストリーミング中で未読み込みなら描かない
+                const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                if (!coarsestModel) { continue; }
+                for (const auto& mesh : coarsestModel->Meshes)
                 {
                     // 半透明メッシュはプローブへ焼かない。ProbeCapture.hlslは不透明として描くため、
                     // ガラスを焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに
@@ -7582,7 +7824,10 @@ namespace Kurenai
             for (const auto& instance : m_Scene.Instances)
             {
                 // 【DDGIも最も粗い段】理由は反射プローブと同じ
-                for (const auto& mesh : GetCoarsestLOD(instance).Meshes)
+                // ストリーミング中で未読み込みなら描かない
+                const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                if (!coarsestModel) { continue; }
+                for (const auto& mesh : coarsestModel->Meshes)
                 {
                     // 半透明メッシュを焼かない理由は反射プローブと同じ(不透明として描かれるため、
                     // ガラスが壁になって裏の景色が欠ける)
@@ -8817,7 +9062,10 @@ namespace Kurenai
                     const float dz = instance.World._34 - cameraPosition.z;
                     const float distanceSq = dx * dx + dy * dy + dz * dz;
                     // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
-                    for (const auto& mesh : GetCurrentLOD(instanceIndex).Meshes)
+                    // ストリーミング中で未読み込みなら描かない
+                    const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
+                    if (!currentModel) { continue; }
+                    for (const auto& mesh : currentModel->Meshes)
                     {
                         if (!mesh.IsTransparent)
                         {
@@ -9014,7 +9262,10 @@ namespace Kurenai
                         }
 
                         // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
-                        for (const auto& mesh : GetCurrentLOD(instanceIndex).Meshes)
+                        // ストリーミング中で未読み込みなら描かない
+                        const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
+                        if (!currentModel) { continue; }
+                        for (const auto& mesh : currentModel->Meshes)
                         {
                             // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
                             // PlanarReflection.hlsl冒頭参照)

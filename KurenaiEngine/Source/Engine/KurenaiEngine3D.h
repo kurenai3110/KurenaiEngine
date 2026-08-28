@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <unordered_set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -2601,7 +2602,7 @@ namespace Kurenai
         float m_LODFadeDuration = 0.25f;
         // 切り替え距離のヒステリシス幅。切替点の±5%を不感帯にして、境界での往復を防ぐ
         float m_LODHysteresis = 0.05f;
-        // 統計。1フレームあたりの段の切り替え回数と、フェード中のインスタンス数。
+        // 統計。1フレームあたりの段の切り替え回数と、そのフレームでフェード中のインスタンス数。
         // 【0なら一度も切り替わっていない】LODが効いているかはここでしか分からない
         uint32_t m_LODSwitchCount = 0;
         uint32_t m_LODFadingCount = 0;
@@ -2627,11 +2628,60 @@ namespace Kurenai
         // 戻り値の件数。fadingなら2、それ以外は1
         uint32_t GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const;
         // シャドウ・反射プローブ・DDGI用。常に最も粗い段を返す(影と間接光はテクスチャを読まない)
-        const Assets::Model& GetCoarsestLOD(const Assets::ModelInstance& instance) const;
+        const Assets::Model* GetCoarsestLOD(const Assets::ModelInstance& instance) const;
+
+        // --- モデルのストリーミング(.ksceneの[Scene]StreamingDistance) ----------------------
+        //
+        // カメラ位置から「読むべきなのにまだ無いモデル」を選んでLoaderスレッドへ発注し、
+        // 出来上がったものを受け取ってインスタンスへ差し込む。
+        // レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと。
+        //
+        // 【まず読み込みだけ】破棄はまだ行わない。絵が出ることを確かめてから、
+        // kFrameCountフレーム遅延させる解放キューを通して足す
+        void UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition);
+
+        // Render → Loader の読み込み発注。m_LoadRequestMutexで保護し、
+        // シーン切り替えと同じ条件変数で起こす(専用スレッドを増やさない)
+        struct StreamingRequest
+        {
+            std::wstring Path;
+            uint64_t Generation = 0;
+        };
+        std::vector<StreamingRequest> m_StreamingRequests;
+
+        // Loader → Render の完成品
+        std::mutex m_StreamingLoadedMutex;
+        struct StreamingLoaded
+        {
+            std::wstring Path;
+            std::shared_ptr<Assets::Model> Model;
+            uint64_t Generation = 0;
+        };
+        std::vector<StreamingLoaded> m_StreamingLoaded;
+
+        // 発注済みで、まだ受け取っていないパス(同じものを何度も発注しないため)
+        std::unordered_set<std::wstring> m_StreamingInFlight;
+
+        // 【シーンに紐づく世代番号】シーンを切り替えると進める。古い世代の完成品は捨てる。
+        // これが無いと、切り替え前のシーンのモデルが新しいシーンのインスタンスへ差し込まれる
+        uint64_t m_StreamingGeneration = 0;
+
+        // ストリーミングで読むモデルが使う1x1フォールバックの共有プール。
+        //
+        // 【Assets::Scene::SharedTexturesを使ってはいけない】あちらはシーンが所有しており、
+        // シーン切り替えのときRenderスレッドがstd::moveでRetiredAssetsへ移す。
+        // Loaderスレッドが読み込み中にそれが起きるとプールのアドレスが変わり、解放済みを指す。
+        // こちらはLoaderスレッドだけが作り・使い・捨てるので、その競合が起きない
+        std::unique_ptr<Assets::SharedTexturePool> m_StreamingTexturePool;
+
+        // 統計。【いずれも累計】瞬間値だと短い出来事を取りこぼす(47.9の失敗と同じ)
+        uint64_t m_StreamingLoadedTotal = 0;
+        uint32_t m_StreamingResidentCount = 0;
+        uint32_t m_StreamingTargetCount = 0;
         // いま選ばれている段を1つだけ返す(フェード中でも切り替え先だけ)。
         // 半透明・平面反射・ソフトウェアラスタライザ用 ―― これらはクロスディザを実装しておらず、
         // 2段を重ねると同じ画素に両方が描かれてしまうため、フェード中も1段に決め打つ
-        const Assets::Model& GetCurrentLOD(size_t instanceIndex) const;
+        const Assets::Model* GetCurrentLOD(size_t instanceIndex) const;
         // 集計期間中の合計(平均はフレーム数で割って出す)
         uint64_t m_FrameStatsCullTestedSum = 0;
         uint64_t m_FrameStatsCullCulledSum = 0;

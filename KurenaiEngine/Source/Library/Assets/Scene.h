@@ -49,6 +49,22 @@ namespace Kurenai::Assets
         std::vector<std::shared_ptr<const Assets::Model>> LODModels;
         std::vector<float> LODDistances;
 
+        // --- ストリーミング([Scene]StreamingDistance 指定時) --------------------------------
+        //
+        // 実体を読み込むのに必要な .kmodel のフルパス。Model / LODModels と同じ並びで、
+        // 先頭が Model、以降が LODModels に対応する。
+        //
+        // 【ストリーミングしないシーンでも埋める】どちらの経路でも同じデータが揃っているほうが、
+        // 「読み込み済みかどうか」の判定を Model が空かどうかの1点に寄せられる
+        std::vector<std::wstring> ModelPaths;
+
+        // 各段が読み込み済みか。ストリーミングしないシーンでは全段が読み込み済みで始まる。
+        // 実体そのものは Model / LODModels の shared_ptr が空かどうかで判る
+        bool IsLODLoaded(size_t level) const
+        {
+            return (level == 0) ? static_cast<bool>(Model) : static_cast<bool>(LODModels[level - 1]);
+        }
+
         DirectX::XMFLOAT4X4 World;          // Scale * Rotation * Translation(転置済み、HLSLへそのまま渡せる形)
         DirectX::XMFLOAT4X4 NormalMatrix;   // Worldの3x3部分の逆転置(4x4に格納、転置済み)
         float TangentSignFlip = 1.0f;       // Worldの行列式が負(ミラーリング)なら-1
@@ -263,6 +279,17 @@ namespace Kurenai::Assets
         // 何らかの既定値を入れると、これまで正しく影が出ていたシーンの見え方が黙って変わる
         bool HasShadowDistance = false;
         float ShadowDistance = 0.0f;
+
+        // モデルのストリーミングを行う距離[m]。未指定(HasStreamingDistance == false)なら
+        // **従来どおり全モデルを読み込み時に常駐させる**。
+        //
+        // 指定するとLoadSceneは.kmodelの実体を読まず、ヘッダのAABBだけでインスタンスを配置する。
+        // 実体はカメラがこの距離まで近づいたときにLoaderスレッドが読み込む。
+        //
+        // 【この距離はAABBの最近接点まで】モデルLODの切り替え距離(ModelInstance::LODDistances)と
+        // 同じ測り方。中心距離だと巨大なタイルで足元のものが未読み込みのまま残る
+        bool HasStreamingDistance = false;
+        float StreamingDistance = 0.0f;
 
         // AO/間接光(SSAO・SSIL)を有効にするか。Furnace Testでは球の縁がAOで暗くなると
         // 「エネルギー損失による暗さ」と区別がつかなくなるため無効にする
