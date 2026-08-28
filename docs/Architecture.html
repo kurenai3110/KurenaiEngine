@@ -1094,9 +1094,9 @@ Sample2Dの出力フォルダには<code>KurenaiEngineLibrary.dll</code>・<code
 <h3>13.6 UIモジュールの分割とKurenaiEngine3Dのfriend化</h3>
 <p>
 UIは<code>Source/Engine/UI/</code>配下の<code>IPanel</code>実装クラスへ分割され、
-<code>UI::UIManager</code>が所有・描画する(現在8クラス:
+<code>UI::UIManager</code>が所有・描画する(現在9クラス:
 シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ / デバッグ表示 /
-システム / プロファイラ)。
+<strong>ストリーミング</strong> / システム / プロファイラ)。
 </p>
 <p>
 <code>UIManager</code>自身も1つだけウィンドウを持つ ―― <strong>シーン読み込み中の進捗</strong>
@@ -1106,6 +1106,16 @@ Renderスレッドはフレームを進め続けるが、<strong>旧シーンは
 「進んでいる」と「固まった」を区別できる手がかりがどこにも無かった。
 パネルではなく<code>UIManager</code>が直接出しているのは、ドックに入れず読み込み中だけ
 画面中央へ重ねるウィンドウで、表示/非表示をユーザーが選ぶ対象ではないため。
+</p>
+<p>
+「ストリーミング」パネルは<code>Assets::ModelInstance</code>が持つ
+<code>ResidencyState</code>(常駐 / 読み込み中 / 未読み込み)と<code>LODLevel</code>を、
+各インスタンスのワールドAABBをXZ平面へ落とした<strong>俯瞰の地図</strong>として色分けする。
+<strong>ストリーミング本体とモデルLODはまだ未実装で、現状は全件が「常駐」・LOD段0のまま動かない</strong>
+―― これは先に用意した受け皿である。ストリーミングの破綻(破棄が早すぎる・範囲内なのに
+読み込まれない)は絵からは判別できず、しかも最も見たい破綻は「視界の外で消えている」なので、
+画面を塗り分けても見えない。描画は<code>ImDrawList</code>だけで行いレンダラには触れない
+(理由と表示上の決めごとは<a href="ImplementationDetail.md">ImplementationDetail.md</a> 46.3)。
 </p>
 <p>
 機能を1つ足すときに触るのは原則「そのパネルの<code>.cpp</code>」だけになる。新しいパネルを

@@ -16,6 +16,7 @@
 #include "UI/ReflectionProbePanel.h"
 #include "UI/RenderingPanel.h"
 #include "UI/ScenePanel.h"
+#include "UI/StreamingPanel.h"
 #include "UI/SystemPanel.h"
 #include "UI/UITheme.h"
 
@@ -30,7 +31,7 @@ namespace Kurenai::UI
         // 無い状態ではHasNodeがfalseになり、既定レイアウトが1回だけ組み直される。
         // 進めないと、新しく増えたパネルだけが宙に浮いた状態でユーザーに見えてしまう。
         // (逆に、単に表示名を変えただけならウィンドウIDは"###"以降で決まるため進める必要はない)
-        constexpr unsigned int kDockSpaceId = 0x4B554E45u; // 'KUNE' (世代E: ドローンショーのパネルを外した8パネル構成)
+        constexpr unsigned int kDockSpaceId = 0x4B554E46u; // 'KUNF' (世代F: ストリーミングのパネルを足した9パネル構成)
     }
 
     UIManager::UIManager(KurenaiEngine3D& engine)
@@ -50,6 +51,7 @@ namespace Kurenai::UI
         m_Panels.push_back(std::make_unique<LightingPanel>(engine));
         m_Panels.push_back(std::make_unique<ReflectionProbePanel>(engine));
         m_Panels.push_back(std::make_unique<DebugViewPanel>(engine));
+        m_Panels.push_back(std::make_unique<StreamingPanel>(engine));
         m_Panels.push_back(std::make_unique<SystemPanel>(engine, *this));
         m_Panels.push_back(std::make_unique<ProfilerPanel>(engine));
 
@@ -315,6 +317,7 @@ namespace Kurenai::UI
         static const Core::ImGuiDockSlotDesc kDefaultSlots[] =
         {
             { "###Scenes",         Core::ImGuiDockSlot::Left },
+            { "###Streaming",      Core::ImGuiDockSlot::Left },          // Scenesと同じノード = タブになる
             { "###System",         Core::ImGuiDockSlot::LeftBottom },
             { "###Rendering",      Core::ImGuiDockSlot::Right },
             { "###Post Processing", Core::ImGuiDockSlot::Right },       // Renderingと同じノード = タブになる
