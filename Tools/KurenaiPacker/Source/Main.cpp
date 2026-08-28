@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "Assets/SceneLoader.h"
+#include "Core/Logger.h"
 #include "Core/StringUtil.h"
 #include "ModelSource.h"
 #include "PackageWriter.h"
@@ -65,6 +66,8 @@ namespace
             "                        印字して終わる。パッケージは書き出さないので-oは不要。\n"
             "                        外部から持ち込んだモデルの--scaleを決めるとき、テクスチャが\n"
             "                        どのスロットへ入ったかを確かめるときに使う\n"
+            "      --log-suffix <S>  ログファイル名をKurenaiEngine<S>.logにする。パッカーを同時に\n"
+            "                        複数走らせるとき、ログの奪い合いを避けるために使う\n"
             "      --timing          解析と書き出しのフェーズ別内訳を追加で印字する(モデルモードのみ)。\n"
             "                        どこで時間が溶けているかを推測せずに決めるためのもの\n"
             "      --force           既存の.ktexがあっても再圧縮して上書きする(モデルモードのみ)\n"
@@ -134,6 +137,7 @@ namespace
         bool SceneMode = false;
         bool Inspect = false;
         bool Timing = false;
+        std::wstring LogSuffix;
         bool BakeOcclusion = false;
         bool EnableMeshlets = true;
         unsigned int MeshletLODCount = 4;
@@ -261,6 +265,15 @@ namespace
             else if (arg == L"--timing")
             {
                 args.Timing = true;
+            }
+            else if (arg == L"--log-suffix")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--log-suffix には値が必要です");
+                    return std::nullopt;
+                }
+                args.LogSuffix = argv[++i];
             }
             else if (arg == L"--force")
             {
@@ -605,6 +618,15 @@ int wmain(int argc, wchar_t** argv)
         return 1;
     }
     const CommandLineArgs& args = *parsedArgs;
+
+    // 【最初のログ出力より前に呼ぶ】Core::Loggerはexeの隣のKurenaiEngine<接尾辞>.logを
+    // truncで開くため、パッカーを同時に複数走らせると同じファイルを奪い合い、
+    // 警告(BC7圧縮の失敗など。これらはstderrへは出ずログにしか残らない)が混ざるか消える。
+    // 並列に回す側が呼び出しごとに違う接尾辞を渡せるようにする
+    if (!args.LogSuffix.empty())
+    {
+        Kurenai::Core::Logger::SetFileSuffix(WideToUtf8(args.LogSuffix));
+    }
 
     if (args.ShowHelp)
     {
