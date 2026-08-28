@@ -29,6 +29,10 @@ PSOutput PSMain(PSInput input)
     // clipは発火しない。AlphaCutoff>0の場合のみ、alphaがそれを下回るピクセルを破棄する
     clip(baseColorSample.a - material.AlphaCutoff);
 
+    // モデルLODの切り替え中だけ、2段を画素単位で分け合う(GBufferCommon.hlsli)。
+    // 深度プリパス(DepthPrepass.hlsl)がまったく同じ呼び出しをしていること
+    ApplyLODDither(input.Position.xy);
+
     float3 geometricNormal = normalize(input.Normal);
 
     // BC5(2チャンネル、X/Yのみ)圧縮された法線マップはB/Aチャンネルにデータを持たず、

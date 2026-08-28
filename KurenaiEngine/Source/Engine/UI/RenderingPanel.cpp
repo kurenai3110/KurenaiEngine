@@ -187,6 +187,62 @@ namespace Kurenai::UI
             "モデル単位のカリングは常に有効で、こちらでは切れない");
 
         EndParamGroup();
+
+        // --- モデルLOD(.ksceneの[Model]LODPath / LODDistance) ---
+        ImGui::Separator();
+
+        // 段ごとの常駐インスタンス数を数える。【0段しか出ないならLODが1件も設定されていない】
+        uint32_t levelCounts[Assets::kMaxModelLODCount] = {};
+        uint32_t lodCapableCount = 0;
+        for (size_t i = 0; i < m_Engine.m_Scene.Instances.size(); ++i)
+        {
+            if (m_Engine.m_Scene.Instances[i].LODModels.empty())
+            {
+                continue;
+            }
+            ++lodCapableCount;
+            if (i < m_Engine.m_InstanceLODStates.size())
+            {
+                const uint32_t level = m_Engine.m_InstanceLODStates[i].CurrentLOD;
+                if (level < Assets::kMaxModelLODCount)
+                {
+                    ++levelCounts[level];
+                }
+            }
+        }
+
+        if (lodCapableCount == 0)
+        {
+            ImGui::TextDisabled("モデルLOD: このシーンには LODPath が指定されていない");
+        }
+        else
+        {
+            ImGui::Text("モデルLOD: 対象 %u インスタンス / フェード中 %u", lodCapableCount,
+                        m_Engine.m_LODFadingCount);
+            for (uint32_t level = 0; level < Assets::kMaxModelLODCount; ++level)
+            {
+                if (levelCounts[level] > 0)
+                {
+                    ImGui::Text("    LOD%u: %u", level, levelCounts[level]);
+                }
+            }
+        }
+
+        BeginParamGroup();
+        SliderFloatEx(
+            "LODフェード時間###LODFadeDuration", &m_Engine.m_LODFadeDuration, 0.0f, 5.0f, 0.25f, "%.2f 秒", 0,
+            "モデルLODの段を切り替えるとき、2段をクロスディザで重ねる時間。\n\n"
+            "0にすると重ねずに即座に入れ替わる(ポップする)。\n\n"
+            "【検証に使う】既定の0.25秒はフェードの見え方から決めた値ではない暫定値。"
+            "大きくするとフェードの途中で止めて観察できるので、"
+            "2段が同じ画素を取り合っていないか(Zファイティング)、"
+            "どちらも描かない画素が無いか(穴)をここで確かめる。");
+        SliderFloatEx(
+            "LODヒステリシス###LODHysteresis", &m_Engine.m_LODHysteresis, 0.0f, 0.5f, 0.05f, "%.3f", 0,
+            "切り替え距離の不感帯の幅(割合)。0.05なら切替点の±5%。\n\n"
+            "0にすると切替点のちょうど上でカメラが揺れたときに段が毎フレーム往復し、"
+            "画面がちらつく。A/B比較のたびに絵が変わって計測も濁る。");
+        EndParamGroup();
     }
 
     void RenderingPanel::DrawMeshletSection()
@@ -278,7 +334,9 @@ namespace Kurenai::UI
         size_t meshCount = 0;
         for (const auto& instance : m_Engine.m_Scene.Instances)
         {
-            for (const auto& mesh : instance.Model.Meshes)
+            // ストリーミング中は未読み込みのインスタンスがある
+            if (!instance.Model) { continue; }
+            for (const auto& mesh : instance.Model->Meshes)
             {
                 ++meshCount;
                 meshletCount += mesh.MeshletCount;
@@ -390,7 +448,9 @@ namespace Kurenai::UI
         size_t triangleCount = 0;
         for (const auto& instance : m_Engine.m_Scene.Instances)
         {
-            for (const auto& mesh : instance.Model.Meshes)
+            // ストリーミング中は未読み込みのインスタンスがある
+            if (!instance.Model) { continue; }
+            for (const auto& mesh : instance.Model->Meshes)
             {
                 if (mesh.IsTransparent || mesh.IndexCount < 3)
                 {

@@ -30,4 +30,10 @@ void PSMainCutout(PSInput input)
         SampleMaterialTexture(material.BaseColorTextureIndex, BaseColorTexture, input.UV)
         * material.BaseColorFactor;
     clip(baseColorSample.a - material.AlphaCutoff);
+
+    // 【モデルLODの切り替え中もこのシェーダーを通す】アルファカットアウトが無い
+    // マテリアル(AlphaCutoff<=0)でも、クロスディザで捨てる画素があるなら
+    // 深度を書いてはいけない。C++側はcutoutだけでなく「フェード中」でもこのPSO を選ぶ。
+    // GBuffer.hlslのPSMainとまったく同じ呼び出しであること
+    ApplyLODDither(input.Position.xy);
 }

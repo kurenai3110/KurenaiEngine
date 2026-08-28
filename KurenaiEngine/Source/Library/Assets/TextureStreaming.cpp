@@ -165,7 +165,15 @@ namespace Kurenai::Assets
             // --scaleで縮めたモデルのUV密度をワールド空間の値へ直すのに使う
             const float uniformScale = ExtractUniformScale(instance.World);
 
-            const Model& model = instance.Model;
+            // 【実体が無いことがある】ModelInstance::Modelはshared_ptrで、[Scene]StreamingDistanceを
+            // 使うシーンでは読み込み時点で空。まだ読まれていないモデルのテクスチャは追跡できない
+            // (Buildはシーン読み込み時の1回だけなので、後から常駐したモデルは全ミップのままになる)
+            if (!instance.Model)
+            {
+                continue;
+            }
+
+            const Model& model = *instance.Model;
             if (model.Textures.size() != model.TexturePaths.size())
             {
                 Core::Logger::Error(

@@ -3,7 +3,9 @@
 #include <DirectXMath.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Model.h"
@@ -12,12 +14,15 @@
 
 namespace Kurenai::Assets
 {
+    // 1つのModelInstanceが持てるLODの段数の上限(.ksceneのPathを含む)。
+    // .kmodelのMeshEntryが持つメッシュレットLODの上限(kMaxMeshletLODCount)と、
+    // DDGIボリュームのLODCountの上限に揃えてある。
+    // これ以上粗くしたいものは、段を増やすのではなく別のシーンへ分ける粒度になる
+    inline constexpr size_t kMaxModelLODCount = 4;
     // モデルインスタンスの常駐状態(ストリーミング)。
     //
-    // 【現状はまだ動いていない】ストリーミング本体(距離に応じた読み込みと破棄)は未実装で、
-    // 読み込まれたインスタンスはすべてLoadedのまま変化しない。ここにあるのは
-    // 「常駐状態を色分けして俯瞰図に出す」デバッグ表示の受け皿で、
-    // 値を実際に動かすのはストリーミングを入れる側の責務。
+    // 値が動くのは[Scene]StreamingDistanceを指定したシーンだけで、
+    // 指定が無ければ読み込み時のLoadedのまま変化しない(従来どおりの全常駐)。
     //
     // 【なぜ表示を先に用意するか】破棄が早すぎる/範囲内なのに読み込まれない、といった破綻は
     // 画面を見ても分からない(そこに何も無いのが正しいのか間違いなのか区別できない)。
@@ -45,7 +50,45 @@ namespace Kurenai::Assets
     // MakeObjectConstants参照)
     struct ModelInstance
     {
-        Model Model;
+        // 【値ではなく共有ポインタで持つ理由】同じ.kmodelを複数のインスタンスが指せるようにするため。
+        // Modelは頂点/インデックス/テクスチャのGPUリソースを丸ごと抱えるので、同じパスを2回読むと
+        // VRAMに二重に載る(MultiModelTest.ksceneは同じ.kmodelを3回配置しており、実際に3重だった)。
+        // 実体はScene::ModelCacheが所有し、ここはその共有参照になる。
+        //
+        // constなのは、読み込み後にモデルの中身を書き換える経路を作らないため。1つのModelを
+        // 複数のインスタンスが共有するので、片方から書き換えるともう片方に波及する。
+        // 唯一の例外だったRaytracingSceneのCPUコピー解放はScene::ModelCache側を回す形へ移した
+        std::shared_ptr<const Model> Model;
+
+        // モデルLODの2段目以降(.ksceneの[Model]LODPath / LODDistance)。粗くなっていく順。
+        // LODModels[i] は「カメラからの距離が LODDistances[i] 以上」のときに使う段で、
+        // どれにも当てはまらない(=最も近い)ときは上のModelを使う。
+        // LODを持たないインスタンスでは両方とも空になり、従来どおりModelだけが描かれる。
+        //
+        // 【距離はAABBの最近接点まで】中心距離だと1.1km四方のPLATEAUタイルで破綻する
+        // (タイルの端に立っていても中心までは500m以上あるため、近景なのに粗い段が選ばれる)
+        //
+        // 【型を Assets:: で修飾する理由】直前のメンバ名 Model が型名 Model を隠すため、
+        // ここから素の Model と書くと「型ではない」とコンパイルエラーになる(C2327)
+        std::vector<std::shared_ptr<const Assets::Model>> LODModels;
+        std::vector<float> LODDistances;
+
+        // --- ストリーミング([Scene]StreamingDistance 指定時) --------------------------------
+        //
+        // 実体を読み込むのに必要な .kmodel のフルパス。Model / LODModels と同じ並びで、
+        // 先頭が Model、以降が LODModels に対応する。
+        //
+        // 【ストリーミングしないシーンでも埋める】どちらの経路でも同じデータが揃っているほうが、
+        // 「読み込み済みかどうか」の判定を Model が空かどうかの1点に寄せられる
+        std::vector<std::wstring> ModelPaths;
+
+        // 各段が読み込み済みか。ストリーミングしないシーンでは全段が読み込み済みで始まる。
+        // 実体そのものは Model / LODModels の shared_ptr が空かどうかで判る
+        bool IsLODLoaded(size_t level) const
+        {
+            return (level == 0) ? static_cast<bool>(Model) : static_cast<bool>(LODModels[level - 1]);
+        }
+
         DirectX::XMFLOAT4X4 World;          // Scale * Rotation * Translation(転置済み、HLSLへそのまま渡せる形)
         DirectX::XMFLOAT4X4 NormalMatrix;   // Worldの3x3部分の逆転置(4x4に格納、転置済み)
         float TangentSignFlip = 1.0f;       // Worldの行列式が負(ミラーリング)なら-1
@@ -85,9 +128,9 @@ namespace Kurenai::Assets
 
         // ストリーミングの常駐状態と、いま使っているモデルLODの段(0が最も詳細)。
         //
-        // 【まだ動かす側がいない】どちらもSceneLoaderが読み込み時にLoaded/0を入れたきり
-        // 変化しない。UIの常駐マップがこの2つを色分けして出すので、ストリーミングと
-        // モデルLODを入れる側はここを更新すること(更新しなければ表示は全部「常駐」のまま)。
+        // 【書き込むのはエンジン側の毎フレーム更新1箇所ずつ】Residencyは
+        // KurenaiEngine3D::UpdateModelStreaming、LODLevelはUpdateModelLODが書く。
+        // SceneLoaderが入れるLoaded/0は「ストリーミングもLODも使わないシーン」の値。
         // 詳細はResidencyStateのコメント
         ResidencyState Residency = ResidencyState::Loaded;
         uint32_t LODLevel = 0;
@@ -197,14 +240,32 @@ namespace Kurenai::Assets
     struct Scene
     {
         std::wstring Name;
-        std::vector<ModelInstance> Instances;
 
         // 全モデルで共有する1x1のフォールバックテクスチャ(白/フラット法線/黒/マゼンタ)。
         //
-        // 【Instancesより後ろに置いてはいけない】メンバはここでの宣言順に構築され、
-        // 逆順に破棄される。Instancesが持つModelはここのテクスチャを生ポインタで指しているため、
-        // 先に破棄されると解放済みを指す。Instancesより前に宣言してこの順序を保証する
+        // 【ModelCache/Instancesより後ろに置いてはいけない】メンバはここでの宣言順に構築され、
+        // 逆順に破棄される。Modelが持つMeshはここのテクスチャを生ポインタで指しているため、
+        // 先に破棄されると解放済みを指す。Modelを持つ2つより前に宣言してこの順序を保証する。
+        //
+        // 【以前はここがInstancesより後ろにあった】コメントは「Instancesより前に宣言する」と
+        // 書いてあるのに、実際の宣言はInstancesの後ろにあった(=破棄はInstancesより先)。
+        // Modelのデストラクタがこの生ポインタを読まないため実害は出ていなかったが、
+        // ModelCacheがModelの実体を所有するようになって順序の重みが増したので、
+        // コメントが元から要求していた並びへ直した
         SharedTexturePool SharedTextures;
+
+        // .kmodelのパス(assetRootDirectoryを含む絶対パス)から読み込み済みModelを引くキャッシュ。
+        // Modelの実体を所有するのはここで、ModelInstance::Modelはこれへの共有参照になる。
+        //
+        // 【SharedTexturesより後ろ・Instancesより前】上のSharedTexturesのコメントの理由で
+        // SharedTexturesより後ろに、そしてInstancesが指す先を先に消さないためInstancesより前に置く
+        // (破棄は Instances -> ModelCache -> SharedTextures の順になる)。
+        //
+        // 【スレッド】読み書きするのはLoaderスレッドのLoadSceneだけで、Renderスレッドは
+        // ApplyLoadedSceneで受け取った後に読むだけ。したがってロックを持たない
+        std::unordered_map<std::wstring, std::shared_ptr<Model>> ModelCache;
+
+        std::vector<ModelInstance> Instances;
 
         // 各ModelInstanceが持つModel::Lights(モデルファイル埋め込みのライト。glTFのKHR_lights_punctual
         // やFBXのライトノード由来)をInstance::Worldでワールド空間へ変換したものと、.kscene自身の
@@ -264,6 +325,17 @@ namespace Kurenai::Assets
         // 何らかの既定値を入れると、これまで正しく影が出ていたシーンの見え方が黙って変わる
         bool HasShadowDistance = false;
         float ShadowDistance = 0.0f;
+
+        // モデルのストリーミングを行う距離[m]。未指定(HasStreamingDistance == false)なら
+        // **従来どおり全モデルを読み込み時に常駐させる**。
+        //
+        // 指定するとLoadSceneは.kmodelの実体を読まず、ヘッダのAABBだけでインスタンスを配置する。
+        // 実体はカメラがこの距離まで近づいたときにLoaderスレッドが読み込む。
+        //
+        // 【この距離はAABBの最近接点まで】モデルLODの切り替え距離(ModelInstance::LODDistances)と
+        // 同じ測り方。中心距離だと巨大なタイルで足元のものが未読み込みのまま残る
+        bool HasStreamingDistance = false;
+        float StreamingDistance = 0.0f;
 
         // WASD/E/Qでカメラを動かす速度[m/s]。未指定(HasCameraSpeed == false)なら
         // シーンAABBの対角から自動で決める(KurenaiEngine3D::ResetSceneDependentParams)。

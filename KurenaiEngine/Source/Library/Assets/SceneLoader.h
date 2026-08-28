@@ -44,4 +44,20 @@ namespace Kurenai::Assets
     // LoadSceneと異なりIRHIDeviceを必要とせず、ジオメトリ/テクスチャの実読み込みも行わない
     // (KurenaiPackerはGPUデバイスを持たないため)。失敗時はstd::runtime_errorを投げる
     KURENAI_LIB_API void ValidateScene(const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory);
+
+    // .kmodelのヘッダ(先頭72バイト)だけを読んで、ローカル空間AABBとライト数を取り出す。
+    // ジオメトリもテクスチャも読まないので、モデル本体を常駐させずに配置だけを決められる
+    // (ストリーミングでインスタンスのワールドAABBとシーン全体のAABBを求めるのに使う)。
+    //
+    // マジックナンバーとバージョンの検証も行い、失敗時はstd::runtime_errorを投げる
+    // (ValidateSceneが行っている検証と同じ規則)。
+    struct ModelHeaderInfo
+    {
+        float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+        float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+        // モデルファイルに埋め込まれたライトの数。ストリーミング時は実体を読まないため
+        // これらをシーンのライト一覧へ合成できない。0でなければ呼び出し側が警告を出す
+        uint32_t LightCount = 0;
+    };
+    KURENAI_LIB_API ModelHeaderInfo ReadModelHeader(const std::wstring& modelFilePath);
 }

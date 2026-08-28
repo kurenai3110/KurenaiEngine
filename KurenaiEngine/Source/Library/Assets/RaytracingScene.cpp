@@ -93,9 +93,17 @@ namespace Kurenai::Assets
         std::vector<uint32_t> meshletTriangleOffsets;
         instanceInfos.reserve(scene.Instances.size());
 
-        for (ModelInstance& instance : scene.Instances)
+        for (const ModelInstance& instance : scene.Instances)
         {
-            const Model& model = instance.Model;
+            // 【未読み込みは飛ばす】ストリーミング中は実体が無いインスタンスがある。
+            // 下のBLASのループとまったく同じ条件で飛ばすこと ―― 片方だけ飛ばすと
+            // TLASのInstanceIDとInstanceInfoBufferの添字がずれ、
+            // 反射に「別のモデルのマテリアル」が映るという分かりにくい壊れ方をする
+            if (!instance.Model)
+            {
+                continue;
+            }
+            const Model& model = *instance.Model;
 
             RaytracingInstanceInfo instanceInfo;
             std::memcpy(instanceInfo.NormalMatrix, &instance.NormalMatrix, sizeof(instanceInfo.NormalMatrix));
@@ -189,15 +197,22 @@ namespace Kurenai::Assets
         }
 
         // CPU側のコピーはGPUへ送った時点で用済み。次のシーンを読むまで抱えると
-        // 大規模シーンでは100MB規模の無駄になるため、ここで解放する
-        for (ModelInstance& instance : scene.Instances)
+        // 大規模シーンでは100MB規模の無駄になるため、ここで解放する。
+        //
+        // 【Instancesではなく ModelCache を回す】ModelInstance::Modelは
+        // shared_ptr<const Model> で、インスタンス経由では書き換えられない。
+        // また同じModelを複数のインスタンスが共有するため、Instancesを回すと
+        // 同じ実体に対して何度もclearを呼ぶことになる。実体を所有している
+        // ModelCache側を1回ずつ回すのが正しい
+        for (auto& entry : scene.ModelCache)
         {
-            instance.Model.RaytracingAttributes.clear();
-            instance.Model.RaytracingAttributes.shrink_to_fit();
-            instance.Model.RaytracingIndices.clear();
-            instance.Model.RaytracingIndices.shrink_to_fit();
-            instance.Model.RaytracingMeshletTriangleOffsets.clear();
-            instance.Model.RaytracingMeshletTriangleOffsets.shrink_to_fit();
+            Model& model = *entry.second;
+            model.RaytracingAttributes.clear();
+            model.RaytracingAttributes.shrink_to_fit();
+            model.RaytracingIndices.clear();
+            model.RaytracingIndices.shrink_to_fit();
+            model.RaytracingMeshletTriangleOffsets.clear();
+            model.RaytracingMeshletTriangleOffsets.shrink_to_fit();
         }
 
         // --- BLAS(モデルインスタンスごと)を構築する -----------------------------------------
@@ -205,13 +220,19 @@ namespace Kurenai::Assets
         std::vector<RHI::ASInstanceDesc> tlasInstances;
         tlasInstances.reserve(scene.Instances.size());
 
+        uint32_t emittedInstanceIndex = 0;
         for (size_t i = 0; i < scene.Instances.size(); ++i)
         {
             const ModelInstance& instance = scene.Instances[i];
+            // 上の統合バッファのループとまったく同じ条件
+            if (!instance.Model)
+            {
+                continue;
+            }
 
             RHI::BottomLevelASDesc blasDesc;
-            blasDesc.Geometries.reserve(instance.Model.Meshes.size());
-            for (const Mesh& mesh : instance.Model.Meshes)
+            blasDesc.Geometries.reserve(instance.Model->Meshes.size());
+            for (const Mesh& mesh : instance.Model->Meshes)
             {
                 RHI::ASGeometryDesc geometry;
                 geometry.VertexBuffer = mesh.VertexBuffer.get();
@@ -251,8 +272,9 @@ namespace Kurenai::Assets
                     tlasInstance.Transform[row][column] = instance.World.m[row][column];
                 }
             }
-            // シェーダーはこの値でInstanceInfoBufferを引く。配列の添字と一致させる
-            tlasInstance.InstanceID = static_cast<uint32_t>(i);
+            // シェーダーはこの値でInstanceInfoBufferを引く。配列の添字と一致させる。
+            // 【iではなく「実際に積んだ番号」】未読み込みを飛ばした分だけiとずれる
+            tlasInstance.InstanceID = emittedInstanceIndex++;
 
             m_BottomLevelAS.push_back(std::move(blas));
             tlasInstances.push_back(tlasInstance);
@@ -269,7 +291,9 @@ namespace Kurenai::Assets
             return false;
         }
 
-        m_InstanceCount = static_cast<uint32_t>(scene.Instances.size());
+        // 【scene.Instances.size()ではない】未読み込みを飛ばした分だけ少ない。
+        // 実際にTLASへ積んだ数を出さないと、常駐4件のときに671と表示されて読む人を惑わせる
+        m_InstanceCount = emittedInstanceIndex;
         m_MeshCount = static_cast<uint32_t>(meshInfos.size());
 
         const float elapsedMs =

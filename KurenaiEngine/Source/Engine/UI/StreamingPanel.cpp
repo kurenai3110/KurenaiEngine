@@ -118,9 +118,9 @@ namespace Kurenai::UI
             "インスタンス %zu 件 (常駐 %u / 読み込み中 %u / 未読み込み %u)  最大LOD段 %u",
             instances.size(), loadedCount, loadingCount, unloadedCount, maxLODLevel);
         ItemHelp(
-            "ストリーミング本体(距離に応じた読み込みと破棄)とモデルLODはまだ入っていないため、"
-            "現状は全件が「常駐」・LOD段0のまま動かない。"
-            "入れた側がAssets::ModelInstanceのResidency/LODLevelを更新すると、ここと下の地図が動き出す");
+            "[Scene]StreamingDistanceを書いたシーンだけが動く。書かなければ全件が読み込み時から"
+            "「常駐」のまま変化しない(従来どおりの全常駐)。"
+            "LOD段は[Model]LODPath/LODDistanceを書いたインスタンスだけが0以外になる");
 
         // --- 俯瞰(XZ平面)の地図 ---
         //
