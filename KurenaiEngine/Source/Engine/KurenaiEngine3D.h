@@ -548,6 +548,20 @@ namespace Kurenai
         bool m_MeshletRenderingEnabled = true;
         // メッシュレットごとの色分け表示。m_MeshletRenderingEnabledが有効なときだけ効く
         bool m_MeshletDebugViewEnabled = false;
+        // 増幅シェーダーのHi-Zオクルージョンカリング(Stage 5-2)。メッシュレットのバウンディング球を
+        // 前フレームのHi-Zへ投影し、「視界内だが手前の何かに完全に隠れている」塊を落とす。
+        //
+        // 【メッシュレット経路でしか効かない】判定を書いてあるのは増幅シェーダーなので、
+        // メッシュシェーダー非対応の環境(基準機のIntel UHD 620を含む)では一切走らない。
+        // これが有効なフレームだけHi-Zパスも構築される(m_HiZTextureのコメント参照)
+        bool m_OcclusionCullingEnabled = true;
+        // オクルージョン判定でバウンディング球を膨らませる倍率。
+        //
+        // 【1.0が基準】判定に使うHi-Zは前フレームのものなので、そのフレームのカメラ移動ぶんは
+        // 別項(移動距離をそのまま半径へ足す)で吸収している。この倍率が埋めるのはそれとは別の
+        // 誤差 ―― バウンディング球がメッシュレットの実体より緩いこと、およびカメラ回転による
+        // 見え方の変化。ポップ(隠れていないものが消える)が出たら上げる
+        float m_OcclusionCullRadiusScale = 1.0f;
 
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
@@ -710,8 +724,11 @@ namespace Kurenai
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
-        // オクルージョンカリングやSSRのレイマーチング高速化に使えるデータ構造だが、現時点では
-        // それらの利用箇所は未実装で、デバッグ表示(Render Targets - Hi-Z)でのみ確認できる
+        //
+        // 消費者は2つ: デバッグ表示(Render Targets - Hi-Z)と、増幅シェーダーの
+        // オクルージョンカリング(m_OcclusionCullingEnabled)。**どちらも要らないフレームでは
+        // 構築しない** ―― 1280x720で「コピー1回 + ミップ段数-1回のディスパッチ」が走り、
+        // Intel UHD 620での実測で1.19〜1.21ms(GPUフレーム時間30msの約4%)を占めるため
         std::unique_ptr<RHI::IRHIShader> m_HiZCopyComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_HiZCopyPipelineState;
         std::unique_ptr<RHI::IRHIShader> m_HiZDownsampleComputeShader;
@@ -721,6 +738,12 @@ namespace Kurenai
         uint32_t m_HiZMipLevels = 1;
         // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベル
         int32_t m_HiZDebugMipLevel = 0;
+        // m_HiZTextureの中身が「1回でも構築されたHi-Z」になっているか。
+        //
+        // 【オクルージョン判定の門番】CreateHiZTextureが作った直後の中身は未定義で、
+        // それを深度として判定すると視界内のほぼ全部を「隠れている」と誤判定しうる。
+        // 解像度変更・シーン読み込みでfalseへ戻し、Hi-Zパスが1回走ってからtrueにする
+        bool m_HiZValid = false;
 
         // 鏡面反射の手法。どのモードでもLightingパスが適用した鏡面IBLを「差し替える」形で働き、
         // Offならその差し替えを一切行わない(プローブ/グローバルIBLがそのまま残る。20章)

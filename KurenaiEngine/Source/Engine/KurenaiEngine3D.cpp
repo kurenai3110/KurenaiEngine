@@ -3238,6 +3238,8 @@ namespace Kurenai
             m_HiZMipLevels = ComputeMipLevelCount(width, height);
             m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
             m_HiZDebugMipLevel = 0;
+            // 作り直した直後の中身は未定義。Hi-Zパスが1回走るまでオクルージョン判定を止める
+            m_HiZValid = false;
 
             // タイルライトカリングのライトグリッド。タイル数は解像度に依存するためここで作り直す。
             // 端のタイルは部分的にしか埋まらないので切り上げる
@@ -4441,6 +4443,11 @@ namespace Kurenai
         // ApplyLoadedSceneはRenderスレッドから呼ばれるため、m_Cameraは直接書けないがatomicなら書ける
         // (Renderスレッドが読む。カメラ自体はこの後m_AppliedSceneCamera経由でUpdateスレッドへ渡す)
         m_TAAHistoryValid.store(false, std::memory_order_relaxed);
+
+        // Hi-Zにも前のシーンの深度が入っている。カメラが新シーンの初期位置へ飛ぶ以上、
+        // それで遮蔽を判定すると見えているものを消しうる。TAAの履歴と同じ理由で捨てる
+        // (ApplyLoadedSceneはRenderスレッドから呼ばれ、m_HiZValidもRenderスレッドしか触らない)
+        m_HiZValid = false;
 
         // ホットリロードの基準時刻を、いま読んだファイルの更新時刻で取り直す。
         // これをしないと (1)シーンを切り替えたあとも前のファイルを見続ける
@@ -6126,6 +6133,19 @@ namespace Kurenai
         // 下のconstants.FogParams0組み立て時にusingProceduralSkyを見て決める
         // (SSRパスのwaterAnalyticSkyFlagと同じ、パスの実行可否とシェーダー内の有効フラグを分ける設計)
         const bool fogPassRuns = m_FogEnabled && m_FogDensity > 0.0f;
+
+        // メッシュレット(増幅シェーダー + メッシュシェーダー)経路でG-Bufferを描くか。
+        // メッシュシェーダー非対応のデバイスではPSOが作られないためnullptrになる。
+        //
+        // 【他の「PassRuns」と並べてここに置く理由】この値はG-Bufferパスの登録時だけでなく、
+        // その手前で書き上げるFrameConstantsも見る(オクルージョンカリングの有効フラグ)。
+        // 定数バッファの更新はパス登録より前に一度だけ行うため、判断もそこより前で確定させる
+        const bool meshletPathActive = m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+
+        // 増幅シェーダーのHi-Zオクルージョンカリング(Stage 5-2)をこのフレームで行うか。
+        // 判定を書いてあるのは増幅シェーダーだけなので、メッシュレット経路に乗らないフレームでは
+        // 1つも間引けず、Hi-Zを構築する意味も無い(下のHi-Zパスの登録条件がこれを見る)
+        const bool occlusionCullingActive = m_OcclusionCullingEnabled && meshletPathActive;
 
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
@@ -7833,7 +7853,7 @@ namespace Kurenai
         // 【メッシュシェーダー経路とは併用しない】プリパスは頂点シェーダー経路で深度を書くが、
         // G-Buffer側がメッシュシェーダーで描くと同じ頂点でも変換の丸めが一致する保証が無く、
         // 深度が1ulpずれた面がGREATER_EQUALを通らずに消える
-        const bool meshletPathActive = m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+        // meshletPathActiveはFrameConstantsを書く手前で確定させてある(そちらのコメント参照)
         const bool depthPrepassRuns = m_DepthPrepassEnabled && !meshletPathActive
             && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
         if (depthPrepassRuns)
@@ -8073,15 +8093,32 @@ namespace Kurenai
         }
 
         // --- Hi-Zミップチェーン構築パス: G-Buffer深度から1x1までのミップチェーンをコンピュートシェーダーで
-        //     構築する(現時点では利用箇所は無く、デバッグ表示専用) ---
+        //     構築する ---
         //
-        // 【デバッグ表示中だけ登録する理由】m_HiZTextureを読むのはPresentパスのDebugView::HiZ
-        // (このファイルのDebugView::HiZのcase)だけであり、それ以外のフレームでは構築結果を
-        // 誰も参照しない。にもかかわらず毎フレーム「コピー1回 + ミップ段数-1回のディスパッチ」
-        // (1280x720なら計11回)を走らせていた。Intel UHD 620での実測でこのパスは1.19〜1.21ms、
-        // GPUフレーム時間30msの約4%を占めており、まるごと無駄だった。
-        // SSRのHi-Zトラバース等で使うようになったらこの条件を外すこと
-        if (m_DebugView == DebugView::HiZ)
+        // 【消費者がいるフレームだけ登録する】このパスは「コピー1回 + ミップ段数-1回のディスパッチ」
+        // (1280x720なら計11回)で、Intel UHD 620での実測で1.19〜1.21ms、GPUフレーム時間30msの
+        // 約4%を占める。以前は消費者がPresentパスのDebugView::HiZ表示しか無かったため、
+        // その表示中だけに絞ってこの4%を削った経緯がある。
+        //
+        // Stage 5-2で2人目の消費者(増幅シェーダーのオクルージョンカリング)が付いたが、
+        // **条件を丸ごと外してはいけない** ―― 外すと上の節約がそのまま戻る。
+        // 「消費者がいるフレームか」へ条件を書き換えるのが正しい。メッシュシェーダー非対応の
+        // 環境ではocclusionCullingActiveが常にfalseになり、従来どおり1msを払わずに済む。
+        //
+        // 【1フレーム遅れになる】このパスはGBufferパスより後に登録されるため、増幅シェーダーが
+        // 読むのは前フレームのHi-Zになる。判定側はそれを前提に、前フレームのビュー射影行列
+        // (FrameConstants::PrevViewProj)で投影し、球を保守的に膨らませて吸収している
+        // (GBufferMeshlet.hlslのIsMeshletOccluded参照)
+        const bool hiZPassRuns = (m_DebugView == DebugView::HiZ) || occlusionCullingActive;
+        if (!hiZPassRuns)
+        {
+            // このフレームで作らないなら、次フレームのHi-Zは「何フレームか前の、別のカメラ位置で
+            // 撮った深度」になる。それで遮蔽を判定すると見えているものを消す。
+            // 【トグルを往復させると必ず起きる】メッシュレット描画やオクルージョンを一度OFFにして
+            // ONへ戻す操作で踏むので、"構築しなかった"を必ず記録しておく
+            m_HiZValid = false;
+        }
+        if (hiZPassRuns)
         {
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "HiZ",
@@ -8119,6 +8156,11 @@ namespace Kurenai
                     hizSrcWidth = hizDstWidth;
                     hizSrcHeight = hizDstHeight;
                 }
+
+                // ここまで来たら全ミップに実データが入った。次フレームからオクルージョン判定に使える。
+                // 【Executeの中で立てること】パスの登録だけでは実行されたことにならない
+                // (RenderGraphは登録した全パスを実行するが、条件が変わればこのラムダは呼ばれない)
+                m_HiZValid = true;
             },
         });
         }
