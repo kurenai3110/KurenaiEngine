@@ -28,7 +28,10 @@
 #include "GBufferCommon.hlsli"
 #include "Bindless.hlsli"
 
-// Assets::MeshletEntry(48バイト)と1対1で対応。並びとサイズを一致させること
+// Assets::MeshletEntry(64バイト)と1対1で対応。並びとサイズを一致させること。
+//
+// 【ずれてもコンパイルは通る】StructuredBufferのストライドはC++側が指定するため、
+// ここの宣言が実体と食い違うと、絵が壊れて初めて分かる。ModelPackage.hを触ったら必ずここも見る
 struct Meshlet
 {
     uint VertexOffset;
@@ -39,6 +42,12 @@ struct Meshlet
     float BoundsRadius;
     float3 ConeAxis;
     float ConeCutoff;
+    // v10で追加。このメッシュレットを描く材質と、何段目のLODに属するか。
+    // 増幅シェーダーが段を選ぶようになるまで(Stage 6)は読まれないが、
+    // **宣言しないとストライドがずれる**
+    uint MaterialIndex;
+    uint LODLevel;
+    uint2 Reserved;
 };
 
 // Assets::Vertex(56バイト)と1対1で対応。
