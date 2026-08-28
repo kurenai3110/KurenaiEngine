@@ -35,6 +35,7 @@ using Kurenai::Assets::kPackedTextureMagic;
 using Kurenai::Assets::kPackedTextureVersion;
 using Kurenai::Assets::kTextureEntryFlagSRGB;
 using Kurenai::Assets::LightEntry;
+using Kurenai::Assets::MaterialEntry;
 using Kurenai::Assets::MeshEntry;
 using Kurenai::Assets::PackageHeader;
 using Kurenai::Assets::PackedTextureHeader;
@@ -110,9 +111,30 @@ namespace KurenaiPacker
             const fs::path& sourceModelDirectory,
             const fs::path& outputDirectory,
             bool sRGB,
+            const std::wstring& embeddedTextureDirectory,
+            const std::wstring& outputModelStem,
             std::unordered_map<std::wstring, int>& externalNameCounts,
             bool& outIsExternal)
         {
+            // 埋め込みテクスチャは%TEMP%配下の一時ファイルなので、入力モデルからの相対を取ると
+            // 必ず「外」になる。_External/(外部参照の警告付き)ではなく_Embedded/へ分ける ――
+            // 元のモデルファイルの中にあったものであって、参照が外を向いていたわけではないため。
+            //
+            // 【モデルごとのサブディレクトリへ入れる】埋め込みテクスチャの名前は
+            // 「シーン内の配列番号 + 元のファイル名」でモデルの中でしか一意でない。
+            // PLATEAUの取り込みのように**複数のモデルを同じ出力ディレクトリへパックする**運用では、
+            // 別のタイルの emb0000_17336.jpg が同名になりうる。そして--forceを付けない限り
+            // 既存の.ktexはスキップされるため、**後から来たタイルが前のタイルのテクスチャを
+            // 黙って使う**(エラーも警告も出ない)。.kmodelの名前で名前空間を分けて塞ぐ
+            if (!embeddedTextureDirectory.empty() &&
+                texturePath.rfind(embeddedTextureDirectory, 0) == 0)
+            {
+                outIsExternal = false;
+                fs::path embeddedPath = outputDirectory / L"_Embedded" / outputModelStem / fs::path(texturePath).filename();
+                embeddedPath += (sRGB ? L".srgb.ktex" : L".linear.ktex");
+                return embeddedPath;
+            }
+
             std::error_code ec;
             const fs::path texAbs = fs::weakly_canonical(fs::path(texturePath), ec);
             const fs::path srcDirAbs = fs::weakly_canonical(sourceModelDirectory, ec);
@@ -240,7 +262,9 @@ namespace KurenaiPacker
             request.SourcePath = path;
             request.SRGB = sRGB;
             bool isExternal = false;
-            request.OutputKtexPath = ComputeKtexOutputPath(path, sourceModelDirectory, outputDirectory, sRGB, externalNameCounts, isExternal);
+            request.OutputKtexPath = ComputeKtexOutputPath(
+                path, sourceModelDirectory, outputDirectory, sRGB,
+                options.EmbeddedTextureDirectory, kmodelPath.stem().wstring(), externalNameCounts, isExternal);
             if (isExternal)
             {
                 // std::wcerrは出力先が実コンソールでない場合(リダイレクト等)に失敗しうるため
@@ -308,6 +332,13 @@ namespace KurenaiPacker
             std::mutex logMutex;
             std::atomic<size_t> generatedCount{ 0 };
             std::atomic<size_t> failedCount{ 0 };
+            std::atomic<size_t> completedCount{ 0 };
+
+            // 【逐次進捗を出す理由】PLATEAUのLOD2は1タイルで1,714枚あり、BC7圧縮は
+            // TextureImage内部のミューテックスで直列化される。従来は完了サマリしか出さないため、
+            // 数分〜十数分のあいだ「動いているのか止まっているのか」が区別できなかった。
+            // 何枚ごとに出すかは総数に応じて決める(小さいアセットで無駄に行を増やさない)
+            const size_t progressStep = std::max<size_t>(1, pendingIndices.size() / 20);
 
             auto workerFn = [&]()
             {
@@ -371,6 +402,14 @@ namespace KurenaiPacker
                         std::lock_guard<std::mutex> lock(logMutex);
                         std::cerr << "[KurenaiPacker][Warning] テクスチャの処理に失敗しました(フォールバックします): "
                             << WideToUtf8(request.SourcePath) << " : " << e.what() << "\n";
+                    }
+
+                    const size_t done = completedCount.fetch_add(1) + 1;
+                    if (done % progressStep == 0 || done == pendingIndices.size())
+                    {
+                        std::lock_guard<std::mutex> lock(logMutex);
+                        std::cout << "[KurenaiPacker]   テクスチャ " << done << "/" << pendingIndices.size()
+                            << " (生成 " << generatedCount.load() << " / 失敗 " << failedCount.load() << ")\n";
                     }
                 }
 
@@ -652,6 +691,9 @@ namespace KurenaiPacker
         // 書き出すのは入力のmesh.Vertices/mesh.Indicesではなくこの結果のほう
         std::vector<uint8_t> geometryPayload;
         std::vector<MeshEntry> meshEntries(sourceModel.Meshes.size());
+        // マテリアルはメッシュと1対1(パッカーがマテリアル単位で結合するため。ModelPackage.h参照)。
+        // 番号が一致するのは実装の都合であって規約ではないので、MeshEntry.MaterialIndexへ明示的に書く
+        std::vector<MaterialEntry> materialEntries(sourceModel.Meshes.size());
 
         // 任意の型の配列を1ブロックとして追記し、書き込み開始位置を返す。
         // ブロックの直後は必ず16バイト境界まで0で埋める(kGeometryBlockAlignment)
@@ -671,7 +713,15 @@ namespace KurenaiPacker
             const SourceMesh& mesh = sourceModel.Meshes[i];
             MeshEntry& entry = meshEntries[i];
 
-            const MeshletBuildResult meshlets = BuildMeshlets(mesh.Vertices, mesh.Indices, options.EnableMeshlets);
+            MeshletBuildResult meshlets = BuildMeshlets(
+                mesh.Vertices, mesh.Indices, options.EnableMeshlets, options.MeshletLODCount);
+
+            // メッシュレットへ材質番号を焼き込む。MeshletBuilderは材質を知らない(知る必要も無い)ので、
+            // 「このメッシュの材質」をここで転記する。メッシュとマテリアルは1対1なのでメッシュ番号でよい
+            for (Kurenai::Assets::MeshletEntry& meshlet : meshlets.Meshlets)
+            {
+                meshlet.MaterialIndex = static_cast<uint32_t>(i);
+            }
 
             entry.VertexOffset = appendBlock(meshlets.Vertices.data(), meshlets.Vertices.size() * sizeof(Vertex));
             entry.IndexOffset = appendBlock(meshlets.Indices.data(), meshlets.Indices.size() * sizeof(uint32_t));
@@ -685,48 +735,95 @@ namespace KurenaiPacker
             entry.MeshletCount = static_cast<uint32_t>(meshlets.Meshlets.size());
             entry.MeshletVertexCount = static_cast<uint32_t>(meshlets.MeshletVertices.size());
             entry.MeshletTriangleCount = static_cast<uint32_t>(meshlets.MeshletTriangles.size());
-            entry.Reserved3 = 0u;
+            entry.MeshletLODCount = meshlets.LODCount;
+            for (uint32_t lod = 0; lod < Kurenai::Assets::kMaxMeshletLODCount; ++lod)
+            {
+                entry.MeshletLODOffsets[lod] = meshlets.LODMeshletOffsets[lod];
+                entry.MeshletLODCounts[lod] = meshlets.LODMeshletCounts[lod];
+            }
             result.MeshletCount += meshlets.Meshlets.size();
+            result.MeshletLOD0Count += meshlets.LODMeshletCounts[0];
+            for (uint32_t lod = 0; lod < Kurenai::Assets::kMaxMeshletLODCount; ++lod)
+            {
+                result.MeshletTrianglesByLOD[lod] += meshlets.LODTriangleCounts[lod];
+            }
 
             entry.VertexCount = static_cast<uint32_t>(meshlets.Vertices.size());
             entry.IndexCount = static_cast<uint32_t>(meshlets.Indices.size());
-            entry.MetallicFactor = mesh.MetallicFactor;
-            entry.RoughnessFactor = mesh.RoughnessFactor;
-            entry.AlphaCutoff = mesh.AlphaCutoff;
-            // 透過率。旧い.kmodelではこの枠はReserved(0固定)だったため、
-            // 書き出さないアセットは0=透過なしとして読まれる(ModelPackage.h参照)
-            entry.Translucency = mesh.Translucency;
-            entry.EmissiveFactor[0] = mesh.EmissiveFactor[0];
-            entry.EmissiveFactor[1] = mesh.EmissiveFactor[1];
-            entry.EmissiveFactor[2] = mesh.EmissiveFactor[2];
-            entry.BaseColorTextureIndex = resolveTextureIndex(meshTextureRefs[i].BaseColor);
-            entry.NormalTextureIndex = resolveTextureIndex(meshTextureRefs[i].Normal);
-            entry.MetallicRoughnessTextureIndex = resolveTextureIndex(meshTextureRefs[i].MetallicRoughness);
-            entry.EmissiveTextureIndex = resolveTextureIndex(meshTextureRefs[i].Emissive);
-            entry.Flags = mesh.IsTransparent ? kMeshEntryFlagTransparent : 0u;
-            // 旧Reservedの枠は透過率になった(上で設定済み。ModelPackage.h参照)
-            entry.BaseColorFactor[0] = mesh.BaseColorFactor[0];
-            entry.BaseColorFactor[1] = mesh.BaseColorFactor[1];
-            entry.BaseColorFactor[2] = mesh.BaseColorFactor[2];
-            entry.BaseColorFactor[3] = mesh.BaseColorFactor[3];
-            // ベイクした遮蔽マップがあればそちらを優先する(ソースモデル由来の
-            // occlusionTextureはTEXCOORD0の空間にあり、ベイク時に生成したライトマップUVとは
-            // 座標系が違うため併用できない。--bake-occlusionを指定した時点で
-            // 「AOはこちらで作る」という意思表示とみなす)
-            if (bakedOcclusionIndexByMesh[i] != kNoTextureIndex)
+            entry.MaterialIndex = static_cast<int32_t>(i);
+            entry.Reserved = 0u;
+
+            // === メッシュ単位のAABB(v10で追加) ===
+            //
+            // **書き出す頂点から作る。** 入力のmesh.Verticesではなくメッシュレット化を通した
+            // meshlets.Verticesを見るのは、頂点フェッチ最適化でどの三角形からも参照されない頂点が
+            // 落ちることがあり、実際に描かれる範囲はこちらだから。
+            //
+            // PackageHeaderのAABBはModelSourceが全頂点から作った値をそのまま使い、**ここから
+            // 導出しない。**別々に作った2つの値が一致することを検証で確かめられるようにするため
+            // (片方をもう片方から作ると、その検証は何も言っていないことになる)
+            if (meshlets.Vertices.empty())
             {
-                entry.OcclusionTextureIndex = bakedOcclusionIndexByMesh[i];
-                // ベイク結果はそのまま使ってほしいので強度は1.0固定にする
-                entry.OcclusionStrength = Kurenai::Assets::kDefaultOcclusionStrength;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    entry.BoundsMin[axis] = 0.0f;
+                    entry.BoundsMax[axis] = 0.0f;
+                }
             }
             else
             {
-                entry.OcclusionTextureIndex = resolveTextureIndex(meshTextureRefs[i].Occlusion);
-                entry.OcclusionStrength = mesh.OcclusionStrength;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    entry.BoundsMin[axis] = meshlets.Vertices[0].Position[axis];
+                    entry.BoundsMax[axis] = meshlets.Vertices[0].Position[axis];
+                }
+                for (const Vertex& vertex : meshlets.Vertices)
+                {
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        entry.BoundsMin[axis] = std::min(entry.BoundsMin[axis], vertex.Position[axis]);
+                        entry.BoundsMax[axis] = std::max(entry.BoundsMax[axis], vertex.Position[axis]);
+                    }
+                }
+            }
+
+            // === 材質はMaterialEntryへ(v10) ===
+            MaterialEntry& material = materialEntries[i];
+            material.MetallicFactor = mesh.MetallicFactor;
+            material.RoughnessFactor = mesh.RoughnessFactor;
+            material.AlphaCutoff = mesh.AlphaCutoff;
+            material.Translucency = mesh.Translucency;
+            material.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+            material.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+            material.EmissiveFactor[2] = mesh.EmissiveFactor[2];
+            material.BaseColorTextureIndex = resolveTextureIndex(meshTextureRefs[i].BaseColor);
+            material.NormalTextureIndex = resolveTextureIndex(meshTextureRefs[i].Normal);
+            material.MetallicRoughnessTextureIndex = resolveTextureIndex(meshTextureRefs[i].MetallicRoughness);
+            material.EmissiveTextureIndex = resolveTextureIndex(meshTextureRefs[i].Emissive);
+            material.Flags = mesh.IsTransparent ? kMeshEntryFlagTransparent : 0u;
+            material.BaseColorFactor[0] = mesh.BaseColorFactor[0];
+            material.BaseColorFactor[1] = mesh.BaseColorFactor[1];
+            material.BaseColorFactor[2] = mesh.BaseColorFactor[2];
+            material.BaseColorFactor[3] = mesh.BaseColorFactor[3];
+            // ベイクした遮蔽マップがあればそちらを優先する(ソースモデル由来の
+            // occlusionTextureはTEXCOORD0の空間にあり、ベイク時に生成したライトマップUVとは
+            // 座標系が違うため併用できない。--bake-occlusionを指定した時点で
+            // 「AOはこちらで作る」という意思表示とみなす)。
+            // **ベイク結果はメッシュ単位**なので、材質とメッシュが1対1であることに依存している
+            if (bakedOcclusionIndexByMesh[i] != kNoTextureIndex)
+            {
+                material.OcclusionTextureIndex = bakedOcclusionIndexByMesh[i];
+                // ベイク結果はそのまま使ってほしいので強度は1.0固定にする
+                material.OcclusionStrength = Kurenai::Assets::kDefaultOcclusionStrength;
+            }
+            else
+            {
+                material.OcclusionTextureIndex = resolveTextureIndex(meshTextureRefs[i].Occlusion);
+                material.OcclusionStrength = mesh.OcclusionStrength;
             }
             // bent normalはベイクでしか作られない(ソースモデル由来のものは存在しない)
-            entry.BentNormalTextureIndex = bentNormalIndexByMesh[i];
-            entry.Reserved2 = 0u;
+            material.BentNormalTextureIndex = bentNormalIndexByMesh[i];
+            material.Reserved = 0u;
 
             // 入力ではなく書き出した側を数える。頂点キャッシュ最適化で
             // どの三角形からも参照されない頂点が落ちるため、入力より少なくなることがある
@@ -806,15 +903,18 @@ namespace KurenaiPacker
         header.BoundsMax[1] = sourceModel.BoundsMax[1];
         header.BoundsMax[2] = sourceModel.BoundsMax[2];
         header.MeshCount = static_cast<uint32_t>(meshEntries.size());
+        header.MaterialCount = static_cast<uint32_t>(materialEntries.size());
         header.TextureCount = static_cast<uint32_t>(finalTextureEntries.size());
         header.LightCount = static_cast<uint32_t>(lightEntries.size());
         header.GeometryPathOffset = geometryPathOffset;
         header.GeometryPathLength = static_cast<uint32_t>(geometryPathString.size());
         header.StringPoolSize = static_cast<uint32_t>(stringPool.size());
+        header.Reserved = 0u;
 
         std::vector<uint8_t> fileBytes;
         fileBytes.resize(
-            sizeof(header) + finalTextureEntries.size() * sizeof(TextureEntry) + meshEntries.size() * sizeof(MeshEntry) +
+            sizeof(header) + finalTextureEntries.size() * sizeof(TextureEntry) +
+            materialEntries.size() * sizeof(MaterialEntry) + meshEntries.size() * sizeof(MeshEntry) +
             lightEntries.size() * sizeof(LightEntry) + stringPool.size());
         size_t writeOffset = 0;
         std::memcpy(fileBytes.data() + writeOffset, &header, sizeof(header));
@@ -824,6 +924,9 @@ namespace KurenaiPacker
             std::memcpy(fileBytes.data() + writeOffset, finalTextureEntries.data(), finalTextureEntries.size() * sizeof(TextureEntry));
             writeOffset += finalTextureEntries.size() * sizeof(TextureEntry);
         }
+        // マテリアルはテクスチャ番号を参照するのでテクスチャの後ろ、メッシュの前(ModelPackage.h参照)
+        std::memcpy(fileBytes.data() + writeOffset, materialEntries.data(), materialEntries.size() * sizeof(MaterialEntry));
+        writeOffset += materialEntries.size() * sizeof(MaterialEntry);
         std::memcpy(fileBytes.data() + writeOffset, meshEntries.data(), meshEntries.size() * sizeof(MeshEntry));
         writeOffset += meshEntries.size() * sizeof(MeshEntry);
         if (!lightEntries.empty())
