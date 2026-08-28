@@ -33,10 +33,21 @@ namespace Kurenai
 
         // ビュー射影行列から視錐台の6平面を取り出す(Gribb-Hartmann)。
         //
-        // 【HLSL側(GBufferMeshlet.hlsl の IsSphereInFrustum)と同じ平面を作っている】
-        // 向こうは転置済みの行列を受け取るので「列」から組み立てるが、こちらは転置前
-        // (行ベクトル×行列の規約、c = v * M)なので「行」から組み立てる。
-        // M^T の列0 は M の行0 なので、取り出される平面は同じものになる。
+        // 【必ず「列」から組み立てる】クリップ座標は c = v * M(行ベクトル×行列)なので、
+        // c.x は v と M の列0 の内積、c.w は列3 との内積になる。したがって
+        // 「c.x + c.w >= 0」という左平面の条件は、列0 + 列3 という平面になる。
+        // XMFLOAT4X4 は行優先なので、列0 は (_11, _21, _31, _41) である。
+        //
+        // 【行と取り違えると、真下を向いたときに全部カリングされる】
+        // 実際に一度間違えた。転置した行列の平面になるため、正面付近では
+        // それらしい結果が出てカメラを振れば間引き数も動く ―― 対照実験を通ってしまう。
+        // ほぼ真下(Pitch -85)を向けて「真下のモデルが間引かれないこと」を見て初めて
+        // 100%間引かれていることが分かった。
+        //
+        // HLSL側(GBufferMeshlet.hlsl の IsSphereInFrustum)も同じ平面を作っている。
+        // 向こうが受け取る ViewProj は C++ から転置して渡したもので、HLSLのメモリ
+        // レイアウト(列優先)と合わさって論理的には同じ行列になるため、
+        // 「_m00,_m10,_m20,_m30 で列0を取る」という同じ形になっている。
         //
         // 【Reverse-Zでもこのままでよい】近平面と遠平面の意味は入れ替わるが、
         // 0 <= z <= w という条件自体は変わらないため式は同じ(HLSL側と同じ理由)。
@@ -50,10 +61,10 @@ namespace Kurenai
             XMFLOAT4X4 m;
             XMStoreFloat4x4(&m, viewProj);
 
-            const XMFLOAT4 row0(m._11, m._12, m._13, m._14);
-            const XMFLOAT4 row1(m._21, m._22, m._23, m._24);
-            const XMFLOAT4 row2(m._31, m._32, m._33, m._34);
-            const XMFLOAT4 row3(m._41, m._42, m._43, m._44);
+            const XMFLOAT4 col0(m._11, m._21, m._31, m._41);
+            const XMFLOAT4 col1(m._12, m._22, m._32, m._42);
+            const XMFLOAT4 col2(m._13, m._23, m._33, m._43);
+            const XMFLOAT4 col3(m._14, m._24, m._34, m._44);
 
             const auto add = [](const XMFLOAT4& a, const XMFLOAT4& b) {
                 return XMFLOAT4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
@@ -63,12 +74,12 @@ namespace Kurenai
             };
 
             FrustumPlanes frustum;
-            frustum.Planes[0] = add(row3, row0); // 左   (x >= -w)
-            frustum.Planes[1] = sub(row3, row0); // 右   (x <=  w)
-            frustum.Planes[2] = add(row3, row1); // 下   (y >= -w)
-            frustum.Planes[3] = sub(row3, row1); // 上   (y <=  w)
-            frustum.Planes[4] = row2;            // 手前 (z >=  0)
-            frustum.Planes[5] = sub(row3, row2); // 奥   (z <=  w)
+            frustum.Planes[0] = add(col3, col0); // 左   (x >= -w)
+            frustum.Planes[1] = sub(col3, col0); // 右   (x <=  w)
+            frustum.Planes[2] = add(col3, col1); // 下   (y >= -w)
+            frustum.Planes[3] = sub(col3, col1); // 上   (y <=  w)
+            frustum.Planes[4] = col2;            // 手前 (z >=  0)
+            frustum.Planes[5] = sub(col3, col2); // 奥   (z <=  w)
             return frustum;
         }
 
