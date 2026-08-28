@@ -316,7 +316,7 @@ namespace Kurenai::Assets
             bool HasShadowDistance = false;
             float ShadowDistance = 0.0f;
             bool TextureStreamingEnabled = false;
-            float TextureStreamingBias = -3.0f;
+            float TextureStreamingBias = -2.0f;
             bool AOEnabled = true;
             bool HasSSREnabled = false;
             bool SSREnabled = true;

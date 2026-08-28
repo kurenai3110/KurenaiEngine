@@ -93,7 +93,7 @@ namespace Kurenai::UI
         ImGui::TextDisabled("(?)");
         if (ImGui::IsItemHovered())
         {
-            ImGui::SetTooltip("負なら安全側(より詳細なミップを常駐させる)。既定 -3(実測で決めた。Assets::Scene参照)");
+            ImGui::SetTooltip("負なら安全側(より詳細なミップを常駐させる)。既定 -2(実測で決めた。Assets::Scene参照)");
         }
 
         const Assets::TextureStreamingManager::Stats stats = streaming.GetStats();
