@@ -25,7 +25,9 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHIPipelineState> CreateComputePipelineState(const ComputePipelineStateDesc& desc) override;
         std::unique_ptr<IRHITexture> CreateTextureFromFile(const std::wstring& filePath, bool sRGB) override;
         std::unique_ptr<IRHITexture> CreateTextureFromImage(const TextureImage& image) override;
-        bool ReplaceTextureContents(IRHITexture* target, const TextureImage& image) override;
+        std::unique_ptr<IRHIPendingTextureContents> PrepareTextureContents(
+            IRHITexture* target, const TextureImage& image) override;
+        bool CommitTextureContents(IRHIPendingTextureContents* pending) override;
         std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
         std::unique_ptr<IRHITexture> CreateTextureFromMemory(uint32_t width, uint32_t height, const void* pixelsRGBA8) override;
         std::unique_ptr<IRHITexture> CreateRenderTexture(uint32_t width, uint32_t height, Format format) override;

@@ -39,8 +39,7 @@ namespace Kurenai::RHI
         virtual std::unique_ptr<IRHITexture> CreateTextureFromImage(const TextureImage& image) = 0;
 
         // 既存のテクスチャの中身(リソース実体とSRV)を、別のTextureImageで作り直したもので置き換える。
-        // 成功したらtrue。失敗時はログを出してfalseを返し、元の中身は変更しない
-        // (常駐ミップが減らないだけで絵は出続ける、という安全側へ倒す)。
+        // テクスチャストリーミングが常駐ミップを変えるときに使う。
         //
         // 【なぜ「作り直して差し替える」ではなく「中身だけ入れ替える」のか】
         // Assets::MeshはIRHITexture*の生ポインタでテクスチャを指しており(所有はModel::Textures)、
@@ -49,13 +48,36 @@ namespace Kurenai::RHI
         // ここでオブジェクトの同一性・SRVスロット・bindless番号をすべて保つことで、
         // 呼び出し側は「このテクスチャの中身が変わった」だけを知っていればよくなる。
         //
+        // 【なぜ2段に分かれているのか】この操作は
+        //   (1) GPUリソースを作って全ミップをアップロードする ―― 重い。GPU同期を含む
+        //   (2) ディスクリプタを書き換えて実体を差し替える   ―― 軽い。数百ナノ秒
+        // の2つからなるが、要求されるスレッドが違う。
+        //
+        // (2)が書き換えるのは、DX12CommandList::SetTextureが**描画を記録するたびに
+        // CopyDescriptorsSimpleのコピー元として読む**ディスクリプタそのものである。
+        // 別スレッドから書き換えると、読んでいる最中に書く競合になる。
+        // かといって(1)をRenderスレッドで行うと、内部のGPU同期待ち(UploadSubmitAndWait)が
+        // 前フレームの描画完了まで待つことになり、CPUとGPUのオーバーラップが丸ごと消える。
+        //
+        // そこで(1)はどのスレッドからでも呼べるPrepareTextureContentsへ、
+        // (2)は描画を記録するスレッドから呼ぶCommitTextureContentsへ分けてある。
+        //
         // 【対象】アセット由来の、SRVしか持たないテクスチャに限る。レンダーターゲットや
         // UAVを持つ描画側のテクスチャに対しては失敗する(ビューの整合が取れないため)。
+
+        // 第1段。GPUリソースを作ってアップロードする。**どのスレッドから呼んでもよい。**
+        // 失敗した場合はログを出してnullptrを返す(対象テクスチャは変更しない)。
+        // 戻り値を捨てれば、作りかけのリソースごと何事もなく破棄される
+        virtual std::unique_ptr<IRHIPendingTextureContents> PrepareTextureContents(
+            IRHITexture* target, const TextureImage& image) = 0;
+
+        // 第2段。ディスクリプタを書き換えて実体を差し替える。成功したらtrue。
         //
-        // 【スレッド】アセット用ディスクリプタヒープはロックを持たず、確保・解放を行うのは
-        // Loaderスレッドだけという不変条件がある(DX12Device::GetAssetSrvCpuHeap参照)。
-        // この関数もその不変条件の下で呼ぶこと
-        virtual bool ReplaceTextureContents(IRHITexture* target, const TextureImage& image) = 0;
+        // **描画を記録するスレッドから、そのフレームで最初のSetTextureより前に呼ぶこと。**
+        // ここを守らないと、記録中のコマンドリストがコピー元として読んでいるディスクリプタを
+        // 書き換えることになる。古いリソースはGPUがまだ読んでいる可能性があるため、
+        // 実装側がフレーム境界まで生存させてから解放する
+        virtual bool CommitTextureContents(IRHIPendingTextureContents* pending) = 0;
 
         virtual std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
         // RGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)のピクセルデータからテクスチャを

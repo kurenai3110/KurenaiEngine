@@ -88,4 +88,24 @@ namespace Kurenai::RHI
         uint32_t m_Height = 0;
         uint32_t m_MipLevels = 0;
     };
+
+    // DX11Device::PrepareTextureContentsが作り、CommitTextureContentsが消費する中間物。
+    // DX11はID3D11Deviceがフリースレッドなので、SRVの作成(リソース確保+初期データ転送を含む)を
+    // ワーカースレッドで済ませておける。差し替え自体はポインタの入れ替えだけになる
+    class DX11PendingTextureContents : public IRHIPendingTextureContents
+    {
+    public:
+        DX11PendingTextureContents(
+            DX11Texture* texture, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv, uint32_t mipLevels)
+            : Texture(texture), Srv(std::move(srv)), MipLevels(mipLevels)
+        {
+        }
+
+        IRHITexture* GetTarget() const override { return Texture; }
+        uint32_t GetMipLevels() const override { return MipLevels; }
+
+        DX11Texture* Texture = nullptr;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> Srv;
+        uint32_t MipLevels = 0;
+    };
 }

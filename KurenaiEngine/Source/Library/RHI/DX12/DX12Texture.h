@@ -121,4 +121,27 @@ namespace Kurenai::RHI
         // 番号の意味と返却の作法はDX12BindlessTableを参照
         uint32_t m_BindlessIndex = kInvalidBindlessIndex;
     };
+
+    // DX12Device::PrepareTextureContentsが作り、CommitTextureContentsが消費する中間物。
+    // 「アップロード済みだが、まだどのディスクリプタからも指されていないリソース」を運ぶ
+    class DX12PendingTextureContents : public IRHIPendingTextureContents
+    {
+    public:
+        DX12PendingTextureContents(
+            DX12Texture* texture,
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource,
+            const D3D12_SHADER_RESOURCE_VIEW_DESC& srvDesc,
+            uint32_t mipLevels)
+            : Texture(texture), Resource(std::move(resource)), SrvDesc(srvDesc), MipLevels(mipLevels)
+        {
+        }
+
+        IRHITexture* GetTarget() const override { return Texture; }
+        uint32_t GetMipLevels() const override { return MipLevels; }
+
+        DX12Texture* Texture = nullptr;
+        Microsoft::WRL::ComPtr<ID3D12Resource> Resource;
+        D3D12_SHADER_RESOURCE_VIEW_DESC SrvDesc{};
+        uint32_t MipLevels = 0;
+    };
 }

@@ -582,23 +582,26 @@ namespace Kurenai::RHI
         return std::make_unique<DX11Texture>(srv);
     }
 
-    bool DX11Device::ReplaceTextureContents(IRHITexture* target, const TextureImage& image)
+    std::unique_ptr<IRHIPendingTextureContents> DX11Device::PrepareTextureContents(
+        IRHITexture* target, const TextureImage& image)
     {
         auto* texture = static_cast<DX11Texture*>(target);
         if (texture == nullptr)
         {
-            Core::Logger::Error("DX11", "ReplaceTextureContents: テクスチャがnullptrです");
-            return false;
+            Core::Logger::Error("DX11", "PrepareTextureContents: テクスチャがnullptrです");
+            return nullptr;
         }
 
         // 差し替えてよいのは、SRVしか持たないアセット由来のテクスチャに限る。
         // レンダーターゲット等は他のビューとの整合が取れなくなる
         if (texture->GetShaderResourceView() == nullptr || texture->HasNonSrvViews())
         {
-            Core::Logger::Error("DX11", "ReplaceTextureContents: SRV以外のビューを持つテクスチャは差し替えられません");
-            return false;
+            Core::Logger::Error("DX11", "PrepareTextureContents: SRV以外のビューを持つテクスチャは差し替えられません");
+            return nullptr;
         }
 
+        // ID3D11Deviceはフリースレッドなので、ここはワーカースレッドから呼んでよい
+        // (フリースレッドでないのはImmediate Contextの方)
         const DirectX::ScratchImage& scratchImage = image.GetImage();
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
         const HRESULT hr = DirectX::CreateShaderResourceView(
@@ -606,13 +609,26 @@ namespace Kurenai::RHI
         if (FAILED(hr))
         {
             // 失敗しても元の中身はそのまま。常駐ミップが減らないだけで絵は出続ける
-            Core::Logger::Error("DX11", "ReplaceTextureContents: シェーダリソースビューの作成に失敗しました");
+            Core::Logger::Error("DX11", "PrepareTextureContents: シェーダリソースビューの作成に失敗しました");
+            return nullptr;
+        }
+
+        return std::make_unique<DX11PendingTextureContents>(
+            texture, std::move(srv), static_cast<uint32_t>(image.GetMetadata().mipLevels));
+    }
+
+    bool DX11Device::CommitTextureContents(IRHIPendingTextureContents* pending)
+    {
+        auto* entry = static_cast<DX11PendingTextureContents*>(pending);
+        if (entry == nullptr || entry->Texture == nullptr || !entry->Srv)
+        {
+            Core::Logger::Error("DX11", "CommitTextureContents: 差し替え待ちの内容が不正です");
             return false;
         }
 
         // 古いテクスチャの実体は、GPUが参照し終えるまでDX11ランタイムが破棄を遅らせる
         // (DX12のような自前の遅延解放は要らない)
-        texture->SwapShaderResourceView(std::move(srv));
+        entry->Texture->SwapShaderResourceView(std::move(entry->Srv));
         return true;
     }
 

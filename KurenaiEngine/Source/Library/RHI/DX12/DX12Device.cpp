@@ -1608,26 +1608,27 @@ namespace Kurenai::RHI
             this, m_AssetSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid);
     }
 
-    bool DX12Device::ReplaceTextureContents(IRHITexture* target, const TextureImage& image)
+    std::unique_ptr<IRHIPendingTextureContents> DX12Device::PrepareTextureContents(
+        IRHITexture* target, const TextureImage& image)
     {
         auto* texture = static_cast<DX12Texture*>(target);
         if (texture == nullptr)
         {
-            Core::Logger::Error("DX12", "ReplaceTextureContents: テクスチャがnullptrです");
-            return false;
+            Core::Logger::Error("DX12", "PrepareTextureContents: テクスチャがnullptrです");
+            return nullptr;
         }
 
         // 差し替えてよいのは、アセット用ヒープから確保したSRVだけを持つテクスチャに限る。
         // レンダーターゲットやUAVを持つものは他のビューとの整合が取れなくなる
         if (!texture->HasSrv() || texture->HasRtv() || texture->HasDsv() || texture->HasUav())
         {
-            Core::Logger::Error("DX12", "ReplaceTextureContents: SRV以外のビューを持つテクスチャは差し替えられません");
-            return false;
+            Core::Logger::Error("DX12", "PrepareTextureContents: SRV以外のビューを持つテクスチャは差し替えられません");
+            return nullptr;
         }
         if (texture->GetSrvUavHeap() != m_AssetSrvCpuHeap.get())
         {
-            Core::Logger::Error("DX12", "ReplaceTextureContents: アセット用ヒープ以外から確保されたテクスチャは差し替えられません");
-            return false;
+            Core::Logger::Error("DX12", "PrepareTextureContents: アセット用ヒープ以外から確保されたテクスチャは差し替えられません");
+            return nullptr;
         }
 
         const DirectX::TexMetadata& metadata = image.GetMetadata();
@@ -1640,24 +1641,38 @@ namespace Kurenai::RHI
         catch (const std::exception& e)
         {
             // 失敗しても元の中身はそのまま。常駐ミップが減らないだけで絵は出続ける
-            Core::Logger::Error("DX12", std::string("ReplaceTextureContents: リソースの作成に失敗しました: ") + e.what());
+            Core::Logger::Error("DX12", std::string("PrepareTextureContents: リソースの作成に失敗しました: ") + e.what());
+            return nullptr;
+        }
+
+        return std::make_unique<DX12PendingTextureContents>(
+            texture, std::move(newResource), MakeSrvDesc(metadata), static_cast<uint32_t>(metadata.mipLevels));
+    }
+
+    bool DX12Device::CommitTextureContents(IRHIPendingTextureContents* pending)
+    {
+        auto* entry = static_cast<DX12PendingTextureContents*>(pending);
+        if (entry == nullptr || entry->Texture == nullptr || !entry->Resource)
+        {
+            Core::Logger::Error("DX12", "CommitTextureContents: 差し替え待ちの内容が不正です");
             return false;
         }
 
         // 【同じ番号のディスクリプタを作り直す】新しい番号を払い出さないので、
         // Assets::Meshが持つIRHITexture*も、bindless番号も変わらない
-        const uint32_t srvIndex = texture->GetSrvIndex();
-        const D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = MakeSrvDesc(metadata);
-        m_Device->CreateShaderResourceView(newResource.Get(), &srvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
+        const uint32_t srvIndex = entry->Texture->GetSrvIndex();
+        m_Device->CreateShaderResourceView(
+            entry->Resource.Get(), &entry->SrvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
 
-        const uint32_t bindlessIndex = texture->GetBindlessIndex();
+        const uint32_t bindlessIndex = entry->Texture->GetBindlessIndex();
         if (bindlessIndex != kInvalidBindlessIndex && m_BindlessTable)
         {
             m_BindlessTable->Rebind(bindlessIndex, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
         }
 
         // 古いリソースはGPUがまだ読んでいる可能性がある。ここで手放さず遅延解放キューへ積む
-        RetireResource(texture->SwapResource(std::move(newResource), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+        RetireResource(entry->Texture->SwapResource(
+            std::move(entry->Resource), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
         return true;
     }
 
