@@ -1678,7 +1678,13 @@ namespace Kurenai::Assets
 
         // モデル共有が効いたかを数値で残す。「共有 0件」ならキャッシュが一度も当たっておらず、
         // 同じ.kmodelを複数配置しているシーンでVRAMが二重に載っている
-        // (MultiModelTest.ksceneは同じ.kmodelを3回配置するので、ここが 3配置/1件/2件 になる)。
+        // (MultiModelTest.ksceneは同じ.kmodelを3回配置するので、ここが 3配置/参照3件/1件/2件 になる)。
+        //
+        // 【引く相手は配置数ではなく参照数】LODPathで読んだモデルもModelCacheに入るので、
+        // LODを持つシーンではユニーク数が配置数を上回る。size_t同士で
+        // Instances.size() - ModelCache.size() を引くと桁が回り込み、671配置/ユニーク673件が
+        // 「共有で節約 18446744073709551614件」になっていた(PlateauLODTestで実際に出た)。
+        // 1インスタンスがLODの段数だけ余分にモデルを参照する以上、比較の左辺も参照数にする
         //
         // 【ストリーミング時は共有の話ではない】実体を1つも読んでいないのでModelCacheは空で、
         // そのまま引き算すると「全部を共有で節約した」という嘘の数字になる。別の文言にする
@@ -1692,11 +1698,19 @@ namespace Kurenai::Assets
         }
         else
         {
+            // 1インスタンスが参照するモデルは、基準の1つとLODの段数を足したもの
+            size_t modelReferences = 0;
+            for (const ModelInstance& instance : scene.Instances)
+            {
+                modelReferences += 1 + instance.LODModels.size();
+            }
+
             Core::Logger::Info(
                 "SceneLoader",
-                "モデル " + std::to_string(scene.Instances.size()) + "配置 / ユニーク " +
+                "モデル " + std::to_string(scene.Instances.size()) + "配置 / 参照 " +
+                    std::to_string(modelReferences) + "件(LOD込み) / ユニーク " +
                     std::to_string(scene.ModelCache.size()) + "件 / 共有で節約 " +
-                    std::to_string(scene.Instances.size() - scene.ModelCache.size()) + "件");
+                    std::to_string(modelReferences - scene.ModelCache.size()) + "件");
         }
 
         return scene;
