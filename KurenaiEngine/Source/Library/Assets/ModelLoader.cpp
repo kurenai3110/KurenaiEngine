@@ -289,6 +289,95 @@ namespace Kurenai::Assets
                     return less(a.BentNormalTexture, b.BentNormalTexture);
                 });
         }
+
+        // マテリアルテーブル(Model::MaterialTableBuffer)を組み立てる。
+        //
+        // 【SortMeshesByMaterialの後で呼ぶこと】あちらはメッシュの並びを入れ替えるため、
+        // 先に番号を振ると対応が崩れる。
+        //
+        // 【テクスチャのbindless登録もここで行う】Mesh側のポインタは、モデルが所有する
+        // テクスチャとシーン共有の1x1フォールバックのどちらでもありうるが、
+        // RegisterBindlessは同じリソースに対して同じ番号を返す(冪等)ので区別しなくてよい。
+        // どのメッシュからも参照されないテクスチャは登録されず、区画を無駄にしない。
+        //
+        // 【v9はマテリアルとメッシュが1対1】.kmodel v9のMeshEntryは係数とテクスチャ番号を
+        // 直接持っており、マテリアルテーブルという概念自体が無い。そのため
+        // 「メッシュ1つ = マテリアル1件」として作る。**重複除去は行わない** ――
+        // .kmodelがマテリアルテーブルを持つようになればそちらの番号をそのまま使うので、
+        // ここで独自の集約規則を作ると二重管理になる。
+        // (PLATEAU LOD2はマテリアル1,715件がすべて異なり、集約しても1件も減らない)
+        void BuildMaterialTable(RHI::IRHIDevice& device, Model& model)
+        {
+            if (!device.SupportsBindless() || model.Meshes.empty())
+            {
+                return;
+            }
+
+            const auto registerTexture = [&device](RHI::IRHITexture* texture) {
+                return texture ? device.RegisterBindless(texture) : RHI::kInvalidBindlessIndex;
+            };
+
+            std::vector<GpuMaterial> materials;
+            materials.reserve(model.Meshes.size());
+            for (Mesh& mesh : model.Meshes)
+            {
+                GpuMaterial material;
+                material.BaseColorFactor[0] = mesh.BaseColorFactor[0];
+                material.BaseColorFactor[1] = mesh.BaseColorFactor[1];
+                material.BaseColorFactor[2] = mesh.BaseColorFactor[2];
+                material.BaseColorFactor[3] = mesh.BaseColorFactor[3];
+                material.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+                material.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+                material.EmissiveFactor[2] = mesh.EmissiveFactor[2];
+                material.MetallicFactor = mesh.MetallicFactor;
+                material.RoughnessFactor = mesh.RoughnessFactor;
+                material.AlphaCutoff = mesh.AlphaCutoff;
+                material.OcclusionStrength = mesh.OcclusionStrength;
+                material.Translucency = mesh.Translucency;
+                material.BaseColorTextureIndex = registerTexture(mesh.BaseColorTexture);
+                material.NormalTextureIndex = registerTexture(mesh.NormalTexture);
+                material.MetallicRoughnessTextureIndex = registerTexture(mesh.MetallicRoughnessTexture);
+                material.EmissiveTextureIndex = registerTexture(mesh.EmissiveTexture);
+                material.OcclusionTextureIndex = registerTexture(mesh.OcclusionTexture);
+                material.BentNormalTextureIndex = registerTexture(mesh.BentNormalTexture);
+                material.Flags = 0;
+                if (mesh.IsTransparent)
+                {
+                    material.Flags |= kGpuMaterialFlagTransparent;
+                }
+                if (mesh.AlphaCutoff > 0.0f)
+                {
+                    material.Flags |= kGpuMaterialFlagCutout;
+                }
+
+                mesh.MaterialIndex = static_cast<uint32_t>(materials.size());
+                materials.push_back(material);
+            }
+
+            RHI::BufferDesc desc;
+            desc.Usage = RHI::BufferUsage::StructuredImmutable;
+            desc.SizeInBytes = static_cast<uint32_t>(materials.size() * sizeof(GpuMaterial));
+            desc.StrideInBytes = sizeof(GpuMaterial);
+            desc.InitialData = materials.data();
+            model.MaterialTableBuffer = device.CreateBuffer(desc);
+            if (!model.MaterialTableBuffer)
+            {
+                Core::Logger::Error("ModelLoader", "マテリアルテーブルのバッファ作成に失敗しました");
+                return;
+            }
+
+            model.MaterialCount = static_cast<uint32_t>(materials.size());
+            if (device.RegisterBindless(model.MaterialTableBuffer.get()) == RHI::kInvalidBindlessIndex)
+            {
+                // bindless区画が満杯。ここで諦めておかないと、シェーダーが
+                // 無効番号でテーブルを引こうとする(=未定義動作)ことになる。
+                // テーブルを捨てれば描画側は従来のメッシュ単位経路へ落ちる
+                Core::Logger::Error(
+                    "ModelLoader", "マテリアルテーブルをbindlessへ登録できませんでした(区画が満杯?)");
+                model.MaterialTableBuffer.reset();
+                model.MaterialCount = 0;
+            }
+        }
     }
 
     Model LoadModel(RHI::IRHIDevice& device, const std::wstring& filePath, SharedTexturePool* sharedTextures)
@@ -692,6 +781,8 @@ namespace Kurenai::Assets
         }
 
         SortMeshesByMaterial(model);
+        // マテリアルテーブルはメッシュの並びが確定してから作る(番号がずれるため)
+        BuildMaterialTable(device, model);
 
         const auto endTime = std::chrono::steady_clock::now();
         Core::Logger::Info(

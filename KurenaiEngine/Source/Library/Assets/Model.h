@@ -11,6 +11,55 @@
 
 namespace Kurenai::Assets
 {
+    // 1モデル分のマテリアルテーブル(StructuredBuffer<GpuMaterial>)の1件。
+    //
+    // 【何のためにあるのか】従来、マテリアルはメッシュを描く直前に
+    // cmd->SetTexture(t0..t3,t5,t6) と定数バッファ(ObjectConstants)で渡していた。
+    // これは「1ドロー = 1マテリアル」を強制するため、メッシュが1,715個あるモデル
+    // (PLATEAU LOD2の1タイル)は必ず1,715ドローになる。
+    // テーブルへ載せてピクセルシェーダーが実行時の番号で引けるようにすると、
+    // 1回のDispatchMeshでモデル全体を描いても材質を描き分けられる。
+    //
+    // 【テクスチャはbindless番号で持つ】RaytracingMaterial(RaytracingScene.h)と同じ方式。
+    // IRHIDevice::RegisterBindlessが払い出した番号を入れ、シェーダーは
+    // Shaders/3D/Bindless.hlsliのBindlessSampleでこれを引く。
+    // bindless非対応環境ではkInvalidBindlessIndexが入り、消費側は
+    // 従来のt0..t6経路へ落ちる(=このテーブル自体が作られない)。
+    //
+    // HLSL側の対応: Shaders/3D/GBufferCommon.hlsli の struct GpuMaterial。
+    // **並びとサイズを必ず一致させること。**
+    struct GpuMaterial
+    {
+        float BaseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        float EmissiveFactor[3] = { 0.0f, 0.0f, 0.0f };
+        float MetallicFactor = 0.0f;
+        // 負値ならソースデータに係数が無かったことを表す(Assets::kInvalidMaterialFactor)。
+        // 解釈は消費側の責任で、シェーダーは1.0(テクスチャの値をそのまま使う)として扱う
+        float RoughnessFactor = 1.0f;
+        // 0以下ならアルファカットアウト無効(Assets::Mesh::AlphaCutoffと同じ意味)
+        float AlphaCutoff = 0.0f;
+        float OcclusionStrength = 1.0f;
+        float Translucency = 0.0f;
+        // 以下はbindlessディスクリプタ番号。既定はRHI::kInvalidBindlessIndex(=テクスチャ無し)
+        uint32_t BaseColorTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t NormalTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t MetallicRoughnessTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t EmissiveTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t OcclusionTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t BentNormalTextureIndex = RHI::kInvalidBindlessIndex;
+        // kGpuMaterialFlag* の組み合わせ
+        uint32_t Flags = 0;
+        uint32_t Padding = 0;
+    };
+    static_assert(sizeof(GpuMaterial) == 80, "HLSL側のGpuMaterialと一致させるため80バイト固定");
+
+    // GpuMaterial::Flagsのビット定義。
+    // どちらも「そのマテリアルをどのパスで描くか」の判定に使う ――
+    // 1ドローでモデル全体を描くようになると、パイプラインステートやドローの分割では
+    // 材質ごとの出し分けができなくなるため、増幅シェーダーがこのビットで取捨する
+    inline constexpr uint32_t kGpuMaterialFlagTransparent = 1u << 0;  // glTFのalphaMode=BLEND
+    inline constexpr uint32_t kGpuMaterialFlagCutout = 1u << 1;       // glTFのalphaMode=MASK
+
     struct Mesh
     {
         std::unique_ptr<RHI::IRHIBuffer> VertexBuffer;
@@ -92,6 +141,17 @@ namespace Kurenai::Assets
         // 既定値はModelPackage.hのkDefaultOcclusionStrengthと同じ1.0だが、このヘッダーは
         // ディスク形式の定義に依存させたくないため定数を参照せず直接書いている
         float OcclusionStrength = 1.0f;
+        // Model::MaterialTableBuffer の中でこのメッシュが使うマテリアルの番号。
+        //
+        // 【現状はメッシュと1対1】.kmodel v9はマテリアルテーブルを持たず、マテリアルの
+        // 係数とテクスチャ番号をMeshEntryが直接持っている(=メッシュ1つにマテリアル1つ)。
+        // そのためModelLoaderはメッシュ1つにつき1件のGpuMaterialを作り、その番号を入れる。
+        // .kmodelがマテリアルテーブルを持つようになれば、ここへその番号がそのまま入る
+        // (消費側とシェーダーは書き換え不要)。
+        //
+        // テーブルを作らなかった場合(bindless非対応)は0のまま。そのときはテーブル自体が
+        // 存在せず、描画は従来のt0..t6経路を通るのでこの値は読まれない
+        uint32_t MaterialIndex = 0;
     };
 
     enum class LightType : uint32_t
@@ -134,6 +194,17 @@ namespace Kurenai::Assets
         std::vector<Mesh> Meshes;
         std::vector<std::unique_ptr<RHI::IRHITexture>> Textures;
         std::vector<Light> Lights;
+
+        // --- マテリアルテーブル(bindless経路用) -------------------------------------------
+        //
+        // このモデルの全マテリアル(GpuMaterial)を並べたStructuredImmutableバッファ。
+        // Mesh::MaterialIndexが添字で、ピクセルシェーダーが実行時の番号で引く。
+        //
+        // 【空になる条件】デバイスがbindless非対応。そのときは従来どおり
+        // メッシュを描く直前にSetTexture(t0..t6)で差し替える経路だけが動く。
+        // 描画側はこのポインタの有無で経路を選ぶこと
+        std::unique_ptr<RHI::IRHIBuffer> MaterialTableBuffer;
+        uint32_t MaterialCount = 0;
 
         // レイトレーシングでヒット面の陰影を計算するための、このモデル全メッシュ分の
         // 頂点属性とインデックス(Mesh::RaytracingAttributeOffset / RaytracingIndexOffsetが
