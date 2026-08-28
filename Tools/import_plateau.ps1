@@ -18,15 +18,34 @@
 .PARAMETER Force
     既存の .kmodel があっても作り直す。
 
+.PARAMETER Parallel
+    同時に走らせる KurenaiPacker.exe の数。既定8。
+
+    既定値は推測ではなく掃引して決めた。150タイルの実測(28論理コア)で
+    1→29.9秒 / 4→7.9秒 / 8→4.8秒 / 12→4.4秒 / 16→4.7秒 / 24→4.7秒。
+    8で頭打ちになり、12以降は誤差の範囲。同時に生きるプロセスの
+    ワーキングセット合計は最大でも330MB程度で、メモリの制約にはならない。
+
+    【なぜプロセスを分けるのか】LOD1 のタイルはテクスチャを1枚も持たないため、
+    パッカーは GPU も内部のワーカースレッドも使わず、1タイルの処理は実質1コアで走る。
+    28論理コアの機械で1コアしか使っていないので、プロセスを並べれば素直に効く。
+    (テクスチャの多いモデルでは事情が逆で、GPU の BC7 圧縮が飽和しているため
+     プロセスを分けても速くならない。docs/ImplementationDetail.md 51.6節)
+
+    1にすると従来どおりの直列実行になる。
+
 .EXAMPLE
     Tools\import_plateau.ps1
     Tools\import_plateau.ps1 -Configuration Release
+    Tools\import_plateau.ps1 -Parallel 1        # 直列で回す(切り分け用)
 #>
 
 param(
     [ValidateSet("Debug", "Release", "Both")]
     [string]$Configuration = "Both",
-    [switch]$Force
+    [switch]$Force,
+    [ValidateRange(1, 64)]
+    [int]$Parallel = 8
 )
 
 $ErrorActionPreference = "Stop"
@@ -160,8 +179,10 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $files = Get-ChildItem $lod1Dir -Filter *.fbx | Sort-Object Name
 Write-Host "[4/5] $($files.Count) タイルをパック中..."
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$packed = 0
 $skipped = 0
+
+# パックが要るものだけをキューへ積む
+$queue = [System.Collections.Queue]::new()
 foreach ($f in $files)
 {
     $code = $f.BaseName.Split('_')[0]
@@ -171,11 +192,92 @@ foreach ($f in $files)
         $skipped++
         continue
     }
-    Invoke-Native -Exe $packer -Arguments @($f.FullName, "-o", $out, "--origin", $origin) -What "$code のパック" | Out-Null
-    $packed++
+    $queue.Enqueue([pscustomobject]@{ Code = $code; Src = $f.FullName; Out = $out })
 }
+
+# 子プロセスの出力はコンソールへ出さずタイルごとのファイルへ分ける。
+# 並列で走らせると行が混ざって読めなくなるため(親が出す進捗だけをコンソールへ出す)
+$logDir = Join-Path $env:TEMP ("kurenai_plateau_" + (Get-Date -Format "yyyyMMdd_HHmmss"))
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+$running = [System.Collections.ArrayList]::new()
+$failures = [System.Collections.ArrayList]::new()
+$packed = 0
+$total = $queue.Count
+
+while ($queue.Count -gt 0 -or $running.Count -gt 0)
+{
+    while ($running.Count -lt $Parallel -and $queue.Count -gt 0)
+    {
+        $job = $queue.Dequeue()
+        # Start-Process は -ArgumentList を空白で連結するだけで要素ごとの引用はしない。
+        # パスに空白があると引数が割れるのでこちらで引用する
+        $arguments = @("`"$($job.Src)`"", "-o", "`"$($job.Out)`"", "--origin", $origin,
+                       "--log-suffix", "_$($job.Code)")
+        # -RedirectStandardOutput と -RedirectStandardError に同じパスは渡せない(PS5.1)
+        $p = Start-Process -FilePath $packer -ArgumentList $arguments -WorkingDirectory $repo `
+                -NoNewWindow -PassThru `
+                -RedirectStandardOutput (Join-Path $logDir "$($job.Code).out.log") `
+                -RedirectStandardError  (Join-Path $logDir "$($job.Code).err.log")
+        # 【.Handle を触っておく】これを落とすと WaitForExit 後に ExitCode が空になり、
+        # 失敗が静かに消える
+        $null = $p.Handle
+        [void]$running.Add([pscustomobject]@{ Job = $job; Process = $p })
+    }
+
+    $finished = @($running | Where-Object { $_.Process.HasExited })
+    foreach ($r in $finished)
+    {
+        $r.Process.WaitForExit()
+        $packed++
+        if ($r.Process.ExitCode -ne 0)
+        {
+            [void]$failures.Add($r.Job)
+        }
+        $running.Remove($r)
+    }
+    if ($finished.Count -eq 0)
+    {
+        Start-Sleep -Milliseconds 15
+    }
+    elseif ($packed % 50 -eq 0)
+    {
+        Write-Host ("        $packed/$total ...")
+    }
+}
+
+# 【失敗はその場で止めず、最後に直列でやり直す】671件のうち1件が落ちたときに
+# 残りを捨てるのは無駄が大きい。一時的なファイルの競合はこのやり直しで吸収される
+if ($failures.Count -gt 0)
+{
+    Write-Host ("        失敗 $($failures.Count) 件を直列でやり直します...")
+    $stillFailed = 0
+    foreach ($job in $failures)
+    {
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try
+        {
+            & $packer $job.Src "-o" $job.Out "--origin" $origin 2>&1 | Out-Null
+            $code = $LASTEXITCODE
+        }
+        finally { $ErrorActionPreference = $previous }
+        if ($code -ne 0)
+        {
+            $stillFailed++
+            Write-Host "[ERROR] $($job.Code) のパックに失敗しました(ログ: $logDir\$($job.Code).err.log)"
+        }
+    }
+    if ($stillFailed -gt 0)
+    {
+        Write-Error "[ERROR] $stillFailed 件のパックに失敗しました"
+        exit 1
+    }
+}
+
 $sw.Stop()
-Write-Host ("        新規 $packed / スキップ $skipped / {0:N1}分" -f $sw.Elapsed.TotalMinutes)
+Write-Host ("        新規 $packed / スキップ $skipped / 並列 $Parallel / {0:N1}分" -f $sw.Elapsed.TotalMinutes)
+Write-Host ("        タイルごとのログ: $logDir")
 
 # --- 5. .kscene の生成 ---------------------------------------------------
 & python "$repo\Tools\plateau_scene.py" $outDir $scene
