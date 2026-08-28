@@ -563,6 +563,35 @@ namespace Kurenai
         // 見え方の変化。ポップ(隠れていないものが消える)が出たら上げる
         float m_OcclusionCullRadiusScale = Defaults::OcclusionCullRadiusScale;
 
+        // --- メッシュレットカリングの統計(Stage 5-2) ---
+        //
+        // 【「間引き0」だけでは何も分からない】判定式が常に通しているのか、本当に全部
+        // 見えているのかを区別できない。CPU側のフラスタムカリング(m_FrustumCullTested /
+        // m_FrustumCullCulled)が判定数と対で出しているのと同じ理由で、ここでも対で出す。
+        // **オクルージョンは視錐台+コーンとは別のカウンタにする** ―― 合算すると
+        // 「俯瞰(遮蔽が少ない)と街路(遮蔽が多い)で差が出るか」という確認ができない。
+        bool m_MeshletCullStatsEnabled = Defaults::MeshletCullStatsEnabled;
+        // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
+        static constexpr uint32_t kMeshletCullStatsCount = 3;
+        std::unique_ptr<RHI::IRHIBuffer> m_MeshletCullStatsBuffer;
+        // カウンタをCPUへ持ってくるための受け皿。
+        //
+        // 【リングにする理由】コピーを積んだ直後に読んでもGPUはまだ実行していない。
+        // DX12はkFrameCount(=2)フレームぶんCPUが先行するので、3本持って「2フレーム前に
+        // 書いたもの」を読めばGPUの完了を待たずに済む。待つとフレームが直列化し、
+        // 計測のために計測対象を壊すことになる
+        static constexpr uint32_t kMeshletCullStatsRingSize = 3;
+        std::unique_ptr<RHI::IRHIBuffer> m_MeshletCullStatsReadback[kMeshletCullStatsRingSize];
+        // 今フレームが書き込むリングの位置。読むのは (index + 1) % リング長 = 最も古いもの
+        uint32_t m_MeshletCullStatsRingIndex = 0;
+        // カウンタバッファのUAVのbindless番号(RegisterBindlessUAVが払い出す)。
+        // 非対応環境ではkInvalidBindlessIndexのままで、統計は無効になる
+        uint32_t m_MeshletCullStatsBindlessIndex = RHI::kInvalidBindlessIndex;
+        // 直近に読み戻せた値(Perfログの集計に足し込む前の生値)。デバッグ表示にも使う
+        uint32_t m_MeshletCullTested = 0;
+        uint32_t m_MeshletCullFrustumCulled = 0;
+        uint32_t m_MeshletCullOcclusionCulled = 0;
+
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
         std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
@@ -2613,6 +2642,13 @@ namespace Kurenai
         // 集計期間中の合計(平均はフレーム数で割って出す)
         uint64_t m_FrameStatsCullTestedSum = 0;
         uint64_t m_FrameStatsCullCulledSum = 0;
+        // メッシュレット単位のカリング(増幅シェーダー)の集計。上のCPU側とは別の行に出す ――
+        // 粒度(モデル単位 / メッシュレット単位)も判定の種類も違うので、混ぜると読めなくなる。
+        // 読み戻せなかったフレームは足さないため、フレーム数も別に数える
+        uint64_t m_FrameStatsMeshletTestedSum = 0;
+        uint64_t m_FrameStatsMeshletFrustumCulledSum = 0;
+        uint64_t m_FrameStatsMeshletOcclusionCulledSum = 0;
+        uint32_t m_FrameStatsMeshletSampleCount = 0;
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};

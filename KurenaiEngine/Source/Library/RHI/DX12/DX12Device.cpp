@@ -2381,6 +2381,32 @@ namespace Kurenai::RHI
         return index;
     }
 
+    uint32_t DX12Device::RegisterBindlessUAV(IRHIBuffer* buffer)
+    {
+        if (!m_SupportsBindless || !m_BindlessTable || !buffer)
+        {
+            return kInvalidBindlessIndex;
+        }
+
+        auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+        if (dx12Buffer->GetBindlessUavIndex() != kInvalidBindlessIndex)
+        {
+            return dx12Buffer->GetBindlessUavIndex();
+        }
+
+        if (!dx12Buffer->HasUav())
+        {
+            // UAVを持たないUsage(Vertex/Index/Constant/StructuredReadOnly/StructuredImmutable)。
+            // 無効なハンドルを渡すとでたらめなディスクリプタが区画へ入るため、ここで弾く
+            Core::Logger::Error("DX12", "UAVを持たないバッファがbindless(UAV)へ登録されようとしました");
+            return kInvalidBindlessIndex;
+        }
+
+        const uint32_t index = m_BindlessTable->Register(dx12Buffer->GetUavCpuHandle());
+        dx12Buffer->SetBindlessUavIndex(index);
+        return index;
+    }
+
     uint32_t DX12Device::GetMaxDrawsPerFrame() const
     {
         // AllocateSrvTableBlockが1フレームに払い出せるブロック数と同じ。

@@ -1140,6 +1140,14 @@ namespace Kurenai::RHI
         return kInvalidBindlessIndex;
     }
 
+    uint32_t DX11Device::RegisterBindlessUAV(IRHIBuffer* buffer)
+    {
+        (void)buffer;
+        Core::Logger::Error(
+            "DX11", "RegisterBindlessUAV: DX11はbindlessに対応していません。SupportsBindless()で分岐してください");
+        return kInvalidBindlessIndex;
+    }
+
     std::unique_ptr<IRHIPipelineState> DX11Device::CreateMeshPipelineState(const MeshPipelineStateDesc& desc)
     {
         (void)desc;

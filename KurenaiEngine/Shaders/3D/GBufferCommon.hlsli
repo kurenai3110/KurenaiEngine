@@ -95,6 +95,9 @@ cbuffer FrameConstants : register(b0)
     float4 OcclusionCullParams;
     // xy=Hi-Zのミップ0の解像度[画素]、zw=その逆数
     float4 HiZScreenParams;
+    // メッシュレットカリングの統計(Stage 5-2)。読むのはGBufferMeshlet.hlslの増幅シェーダーだけ。
+    // x=有効フラグ、y=カウンタバッファのbindless番号(RWStructuredBuffer<uint>、UAVの側)、zw=未使用
+    float4 MeshletCullStatsParams;
 };
 
 // メッシュ単位(将来的にはシーン上のモデルインスタンス単位)の情報。

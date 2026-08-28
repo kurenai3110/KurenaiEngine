@@ -161,6 +161,7 @@ namespace Kurenai::RHI
             if (DX12BindlessTable* table = m_Device->GetBindlessTable())
             {
                 table->Unregister(m_BindlessIndex);
+                table->Unregister(m_BindlessUavIndex);
             }
         }
 

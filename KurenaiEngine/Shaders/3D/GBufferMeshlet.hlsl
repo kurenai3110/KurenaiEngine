@@ -74,6 +74,22 @@ struct MeshletPayload
 groupshared MeshletPayload s_Payload;
 groupshared uint s_VisibleCount;
 
+// --- カリング統計 -----------------------------------------------------------------------
+//
+// 【なぜ数えるのか】「間引き0」は、判定式が常に通しているのか本当に全部見えているのかを
+// 区別できない。CPU側のフラスタムカリングが判定数と間引き数を対で出しているのと同じ理由で、
+// ここでも「判定した数」と併せて出す。
+//
+// **オクルージョンは視錐台+コーンとは別のカウンタにする。** 合算すると
+// 「俯瞰と街路で差が出るか」というオクルージョン固有の確認ができない。
+//
+// 【グループ内でまとめてから1回だけ足す】メッシュレット1個ごとにグローバルのカウンタを
+// InterlockedAddすると、都市シーンでは1フレーム数十万回の競合になる。
+// グループ共有のカウンタへ集約し、スレッド0が1グループあたり3回だけ足す
+groupshared uint s_StatsTested;
+groupshared uint s_StatsFrustumCulled;
+groupshared uint s_StatsOcclusionCulled;
+
 // --- カリング -------------------------------------------------------------------------
 
 // バウンディング球(ワールド空間)が視錐台と交差するか。
@@ -282,9 +298,14 @@ bool IsMeshletOccluded(float3 centerWorld, float radiusWorld)
 [numthreads(KURENAI_AMPLIFICATION_GROUP_SIZE, 1, 1)]
 void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV_GroupThreadID)
 {
+    const bool statsEnabled = (MeshletCullStatsParams.x != 0.0f);
+
     if (groupThreadId == 0)
     {
         s_VisibleCount = 0;
+        s_StatsTested = 0;
+        s_StatsFrustumCulled = 0;
+        s_StatsOcclusionCulled = 0;
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -297,9 +318,25 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
         const float radiusWorld = meshlet.BoundsRadius * MaxWorldScale();
 
         // 【この順に判定する】視錐台と法線コーンは定数時間だが、Hi-Z判定は8頂点の投影と
-        // テクスチャ読みを伴う。&&の短絡評価により、画面外・背面の塊ではHi-Zを一切読まない
-        if (IsSphereInFrustum(centerWorld, radiusWorld) && !IsMeshletBackfacing(meshlet, centerWorld) &&
-            !IsMeshletOccluded(centerWorld, radiusWorld))
+        // テクスチャ読みを伴う。先に安いほうで落とせば、画面外・背面の塊ではHi-Zを一切読まない
+        const bool frustumOrConeCulled =
+            !IsSphereInFrustum(centerWorld, radiusWorld) || IsMeshletBackfacing(meshlet, centerWorld);
+        const bool occlusionCulled = !frustumOrConeCulled && IsMeshletOccluded(centerWorld, radiusWorld);
+
+        if (statsEnabled)
+        {
+            InterlockedAdd(s_StatsTested, 1);
+            if (frustumOrConeCulled)
+            {
+                InterlockedAdd(s_StatsFrustumCulled, 1);
+            }
+            else if (occlusionCulled)
+            {
+                InterlockedAdd(s_StatsOcclusionCulled, 1);
+            }
+        }
+
+        if (!frustumOrConeCulled && !occlusionCulled)
         {
             // 【波の幅に依存しない詰め方】WavePrefixCountBitsを使うと1グループが
             // 1波に収まることを暗に仮定することになる(波幅32/64はGPUによって違う)。
@@ -311,6 +348,16 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
     }
 
     GroupMemoryBarrierWithGroupSync();
+
+    // グループ内の集計をグローバルのカウンタへ1回だけ足す。
+    // 【DispatchMeshより前に、かつバリアの後で行うこと】バリアの前だと集計が完了していない
+    if (statsEnabled && groupThreadId == 0)
+    {
+        RWStructuredBuffer<uint> cullStats = KURENAI_BINDLESS_BUFFER((uint)MeshletCullStatsParams.y);
+        InterlockedAdd(cullStats[0], s_StatsTested);
+        InterlockedAdd(cullStats[1], s_StatsFrustumCulled);
+        InterlockedAdd(cullStats[2], s_StatsOcclusionCulled);
+    }
 
     // DispatchMeshはグループ内の全スレッドが同じ引数で1回だけ呼ぶ決まり。
     // バリア後のs_VisibleCountは全スレッドで同じ値になっている

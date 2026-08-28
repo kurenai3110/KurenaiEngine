@@ -403,6 +403,13 @@ namespace Kurenai
             // 同じくHi-Zオクルージョンカリング用。xy=Hi-Zのミップ0の解像度[画素]、zw=その逆数。
             // NDC→UV→テクセル座標の変換に要る(FrameConstantsはレンダー解像度を持っていない)
             DirectX::XMFLOAT4 HiZScreenParams;
+            // メッシュレットカリングの統計(さらに末尾に追加、Stage 5-2)。
+            // x=有効フラグ、y=カウンタバッファのbindless番号(UAVの側)、zw=未使用。
+            //
+            // 【なぜbindlessで渡すのか】メッシュシェーダー用ルートシグネチャはSRVテーブルと
+            // サンプラーテーブルしか持たず、UAVレンジが無い。増幅シェーダーから書き込むには
+            // ResourceDescriptorHeap経由しかない(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXEDは立っている)
+            DirectX::XMFLOAT4 MeshletCullStatsParams;
 
         };
 
@@ -1929,6 +1936,56 @@ namespace Kurenai
         m_RaytracingAvailable = m_Device->SupportsRaytracing();
         // メッシュシェーダーの可否もここで控える(UIパネルが参照する)
         m_MeshShaderAvailable = m_Device->SupportsMeshShader();
+
+        // メッシュレットカリングの統計(Stage 5-2)。増幅シェーダーがカウンタへ数え上げ、
+        // それを数フレーム遅れでCPUへ読み戻してPerfログへ出す。
+        // 増幅シェーダーが走らない環境では一切使わないので、そもそも作らない
+        if (m_MeshShaderAvailable)
+        {
+            try
+            {
+                RHI::BufferDesc cullStatsDesc;
+                cullStatsDesc.Usage = RHI::BufferUsage::Structured;
+                cullStatsDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount;
+                cullStatsDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+                m_MeshletCullStatsBuffer = m_Device->CreateBuffer(cullStatsDesc);
+
+                // 【SRVではなくUAVを登録する】増幅シェーダーは読むのではなく書く。
+                // RegisterBindless(SRV)の番号を渡すと読み取り専用のビューへ書き込むことになる
+                m_MeshletCullStatsBindlessIndex = m_Device->RegisterBindlessUAV(m_MeshletCullStatsBuffer.get());
+                if (m_MeshletCullStatsBindlessIndex == RHI::kInvalidBindlessIndex)
+                {
+                    Core::Logger::Warning(
+                        "KurenaiEngine3D",
+                        "メッシュレットカリングの統計バッファをbindlessへ登録できませんでした(統計を無効にします)");
+                    m_MeshletCullStatsBuffer.reset();
+                }
+                else
+                {
+                    for (uint32_t i = 0; i < kMeshletCullStatsRingSize; ++i)
+                    {
+                        RHI::BufferDesc readbackDesc;
+                        readbackDesc.Usage = RHI::BufferUsage::Readback;
+                        readbackDesc.SizeInBytes = cullStatsDesc.SizeInBytes;
+                        readbackDesc.StrideInBytes = cullStatsDesc.StrideInBytes;
+                        m_MeshletCullStatsReadback[i] = m_Device->CreateBuffer(readbackDesc);
+                    }
+                }
+            }
+            catch (const std::exception& e)
+            {
+                // 統計が作れないだけで描画は成立する。カリング本体は止めない
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    std::string("メッシュレットカリングの統計の初期化に失敗したため無効にします: ") + e.what());
+                m_MeshletCullStatsBuffer.reset();
+                for (auto& readback : m_MeshletCullStatsReadback)
+                {
+                    readback.reset();
+                }
+                m_MeshletCullStatsBindlessIndex = RHI::kInvalidBindlessIndex;
+            }
+        }
         if (m_RaytracingAvailable)
         {
             RHI::ShaderDesc rtReflectionCsDesc;
@@ -5499,6 +5556,31 @@ namespace Kurenai
             Core::Logger::Info("Perf", cullText);
         }
 
+        // メッシュレット単位のカリング(増幅シェーダー)の効き。上のCPU側とは粒度も判定の種類も
+        // 違うので別の行に出す。
+        //
+        // 【オクルージョンを視錐台+コーンと分けて出す】完了条件がここにある ――
+        // 俯瞰(遮蔽が少ない)と街路(遮蔽が多い)でオクルージョンの割合に差が出ることが、
+        // 判定が実際に効いていることの証拠になる。合算すると視錐台の変動に埋もれて分からない
+        if (m_FrameStatsMeshletSampleCount > 0 && m_FrameStatsMeshletTestedSum > 0)
+        {
+            const double samples = static_cast<double>(m_FrameStatsMeshletSampleCount);
+            const double tested = static_cast<double>(m_FrameStatsMeshletTestedSum);
+            const double frustumRatio = 100.0 * static_cast<double>(m_FrameStatsMeshletFrustumCulledSum) / tested;
+            const double occlusionRatio = 100.0 * static_cast<double>(m_FrameStatsMeshletOcclusionCulledSum) / tested;
+
+            char meshletCullText[256];
+            std::snprintf(
+                meshletCullText, sizeof(meshletCullText),
+                "  メッシュレットカリング: 判定 %.1f / 視錐台+コーン %.1f (%.1f%%) / オクルージョン %.1f (%.1f%%)"
+                " [1フレームあたり・%u フレーム分]",
+                tested / samples,
+                static_cast<double>(m_FrameStatsMeshletFrustumCulledSum) / samples, frustumRatio,
+                static_cast<double>(m_FrameStatsMeshletOcclusionCulledSum) / samples, occlusionRatio,
+                m_FrameStatsMeshletSampleCount);
+            Core::Logger::Info("Perf", meshletCullText);
+        }
+
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
         m_FrameStatsGPUTimeSumMs = 0.0;
@@ -5506,6 +5588,10 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = 0.0f;
         m_FrameStatsCullTestedSum = 0;
         m_FrameStatsCullCulledSum = 0;
+        m_FrameStatsMeshletTestedSum = 0;
+        m_FrameStatsMeshletFrustumCulledSum = 0;
+        m_FrameStatsMeshletOcclusionCulledSum = 0;
+        m_FrameStatsMeshletSampleCount = 0;
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
@@ -6163,6 +6249,11 @@ namespace Kurenai
         // 1つも間引けず、Hi-Zを構築する意味も無い(下のHi-Zパスの登録条件がこれを見る)
         const bool occlusionCullingActive = m_OcclusionCullingEnabled && meshletPathActive;
 
+        // メッシュレットカリングの統計をこのフレームで数えるか。
+        // 増幅シェーダーが走らなければ数える相手がいない
+        const bool meshletCullStatsActive =
+            m_MeshletCullStatsEnabled && meshletPathActive && m_MeshletCullStatsBuffer != nullptr;
+
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
@@ -6532,6 +6623,15 @@ namespace Kurenai
             static_cast<float>(m_RenderHeight),
             1.0f / static_cast<float>(std::max(1u, m_RenderWidth)),
             1.0f / static_cast<float>(std::max(1u, m_RenderHeight)),
+        };
+
+        // bindless番号をfloatで運ぶ。番号はkBindlessDescriptorCapacity(8192)未満で、
+        // float32が誤差なく表せる整数の範囲(2^24)に十分収まる
+        constants.MeshletCullStatsParams = {
+            meshletCullStatsActive ? 1.0f : 0.0f,
+            meshletCullStatsActive ? static_cast<float>(m_MeshletCullStatsBindlessIndex) : 0.0f,
+            0.0f,
+            0.0f,
         };
 
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
@@ -7112,6 +7212,9 @@ namespace Kurenai
             // プローブ視点から見える範囲とは何の関係も無い。上でPrevViewProjを
             // 「前フレーム」でない値へ差し替えている以上、判定の前提そのものが崩れている
             captureConstants.OcclusionCullParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+            // 統計も止める。プローブ視点で数えた分がメインカメラの間引き率に混ざると、
+            // 「1フレームあたりの判定数」がプローブを焼いたフレームだけ跳ね上がって読めなくなる
+            captureConstants.MeshletCullStatsParams = { 0.0f, 0.0f, 0.0f, 0.0f };
             cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
             cmd->SetRenderTargets(captureTargets, 2, m_ProbeCaptureDepth.get());
@@ -8001,9 +8104,20 @@ namespace Kurenai
             .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
                                m_GBufferEmissive.get(), m_GBufferVelocity.get(), m_GBufferBentNormal.get() },
             .DepthTarget = m_GBufferDepth.get(),
-            .Execute = [this, &gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive](
-                           RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive,
+                        meshletCullStatsActive](RHI::IRHICommandList* cmd)
             {
+                // カリング統計のカウンタを0へ戻す。増幅シェーダーは加算しかしないので、
+                // 戻さないとフレームをまたいで積み上がる。
+                //
+                // 【このパスの中で行う理由】数えるのも読み戻すのもこのパスなので、
+                // 「クリア→数える→コピー」を1か所にまとめたほうが順序を追いやすい。
+                // 別パスに分けるとRenderGraphの登録順への依存が1本増える
+                if (meshletCullStatsActive)
+                {
+                    cmd->ClearUnorderedAccessBufferUint(m_MeshletCullStatsBuffer.get(), 0);
+                }
+
                 cmd->SetViewport(gbufferViewport);
                 // ClearRenderTargetはバインド済みの全レンダーターゲットを同じ色でクリアするため、
                 // 速度バッファもここで0(=動いていない)になる。ジオメトリが描かれない画素
@@ -8143,6 +8257,19 @@ namespace Kurenai
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
                         }
                     }
+                }
+
+                // 数え終わったカウンタを受け皿へ写す。読むのは数フレーム後(下のリングの説明参照)。
+                //
+                // 【全描画の後で行うこと】ここより前に置くと、まだ発行していない
+                // DispatchMeshの寄与が入らない。コピーはUNORDERED_ACCESS→COPY_SOURCEの
+                // 状態遷移を伴い、その遷移が増幅シェーダーの書き込み完了も保証する
+                if (meshletCullStatsActive)
+                {
+                    cmd->CopyBufferToReadback(
+                        m_MeshletCullStatsReadback[m_MeshletCullStatsRingIndex].get(),
+                        m_MeshletCullStatsBuffer.get(),
+                        static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount);
                 }
             },
         });
@@ -8887,6 +9014,8 @@ namespace Kurenai
                     // Hi-Zオクルージョンカリングも潰す(captureProbeFaceと同じ理由)。
                     // 鏡映カメラから見える範囲とメインカメラのHi-Zは無関係
                     reflectionConstants.OcclusionCullParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+                    // 統計も止める(captureProbeFaceと同じ理由)
+                    reflectionConstants.MeshletCullStatsParams = { 0.0f, 0.0f, 0.0f, 0.0f };
                     reflectionConstants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, -waterPlaneY };
                     cmd->UpdateBuffer(m_PlanarReflectionConstantBuffer.get(), &reflectionConstants, sizeof(reflectionConstants));
 
@@ -10038,6 +10167,42 @@ namespace Kurenai
         });
 
         graph.Execute();
+
+        // --- メッシュレットカリングの統計を読み戻す(Stage 5-2) ---
+        //
+        // 【GPUを待たない】直前に積んだコピーはまだ実行されていないので、リングの中で
+        // **最も古いもの**(kMeshletCullStatsRingSize-1 = 2フレーム前に書いたもの)を読む。
+        // DX12はkFrameCount(=2)フレームぶんCPUが先行するため、2フレーム前のGPU実行は
+        // 完了している。待ちを入れるとフレームが直列化し、計測のために計測対象を壊す。
+        //
+        // 【読めなかったフレームは足さない】DX11のMap(DO_NOT_WAIT)はまだ実行中ならfalseを返す。
+        // 0として集計に足すと間引き率が実際より低く出るので、そのフレームは丸ごと飛ばす
+        if (meshletCullStatsActive)
+        {
+            const uint32_t oldestIndex = (m_MeshletCullStatsRingIndex + 1) % kMeshletCullStatsRingSize;
+            uint32_t counters[kMeshletCullStatsCount] = {};
+            if (m_MeshletCullStatsReadback[oldestIndex] &&
+                m_MeshletCullStatsReadback[oldestIndex]->ReadbackData(counters, sizeof(counters)))
+            {
+                m_MeshletCullTested = counters[0];
+                m_MeshletCullFrustumCulled = counters[1];
+                m_MeshletCullOcclusionCulled = counters[2];
+
+                m_FrameStatsMeshletTestedSum += m_MeshletCullTested;
+                m_FrameStatsMeshletFrustumCulledSum += m_MeshletCullFrustumCulled;
+                m_FrameStatsMeshletOcclusionCulledSum += m_MeshletCullOcclusionCulled;
+                ++m_FrameStatsMeshletSampleCount;
+            }
+            m_MeshletCullStatsRingIndex = (m_MeshletCullStatsRingIndex + 1) % kMeshletCullStatsRingSize;
+        }
+        else
+        {
+            // 統計を切っている間に古い値が残っていると、UIやログが「今もこの数だけ間引いている」
+            // ように見える。切った時点で0へ戻す
+            m_MeshletCullTested = 0;
+            m_MeshletCullFrustumCulled = 0;
+            m_MeshletCullOcclusionCulled = 0;
+        }
 
         // ImGuiはPresentパスでバインドされたバックバッファにそのまま重ねて描画する。
         // GPU側は計測していない(このスコープ専用の描画パイプラインを持たないため)が、
