@@ -153,6 +153,8 @@ namespace Kurenai::RHI
         bool SupportsBindless() const override { return m_SupportsBindless; }
         uint32_t RegisterBindless(IRHITexture* texture) override;
         uint32_t RegisterBindless(IRHIBuffer* buffer) override;
+        uint32_t GetBindlessUsedCount() const override;
+        uint32_t GetBindlessCapacity() const override;
         uint32_t RegisterBindlessUAV(IRHIBuffer* buffer) override;
         bool SupportsMeshShader() const override { return m_SupportsMeshShader; }
         bool SupportsSoftwareRaster() const override { return m_SupportsSoftwareRaster; }

@@ -76,14 +76,18 @@ PSOutput PSMain(PSInput input)
     float roughnessFactor = (RoughnessFactor < 0.0f) ? 1.0f : RoughnessFactor;
     float roughness = clamp(roughnessFactor * metallicRoughnessSample.g, 0.045f, 1.0f);
 
-    float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor;
+    // EmissiveIntensity / OcclusionMapScale は GBuffer.hlsl と同じく必ず掛ける。
+    // 従来経路では C++ 側が係数へ織り込んだうえで 1.0 を入れているので二重にはならない。
+    // 掛けないままにしておくと、将来水面をメッシュレット経路へ載せた瞬間に
+    // **水面だけ自発光倍率と遮蔽マップの ON/OFF が効かなくなる**
+    float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor * EmissiveIntensity;
 
     // モーションベクターの求め方はGBuffer.hlslのPSMainと同じ(GBufferCommon.hlsliのコメント参照)
     float2 currentUv = ClipToUv(input.CurClip) - TAAParams.xy;
     float2 previousUv = ClipToUv(input.PrevClip) - TAAParams.zw;
 
     float occlusionSample = OcclusionTexture.Sample(MaterialSampler, input.LightmapUV).r;
-    float ao = lerp(1.0f, occlusionSample, OcclusionStrength);
+    float ao = lerp(1.0f, occlusionSample, OcclusionStrength * OcclusionMapScale);
 
     PSOutput output;
     // 水中項。メッシュ自身のbaseColorSample.rgb(誘電体でほぼ黒に焼かれている)は使わず、

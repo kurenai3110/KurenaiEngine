@@ -1,3 +1,8 @@
+// KURENAI_SHADER_BINDLESS_ONLY
+// このシェーダーは bindless(KURENAI_BINDLESS)を前提にしており、マクロ未定義では
+// コンパイルできない(KURENAI_BINDLESS_BUFFER にフォールバックが無い)。
+// shader-check はこの印を見て fxc(SM 5.0 / DX11経路)の検証対象から外す。
+// **印を消すと fxc に掛かって失敗する** ―― 黙って検証から漏れることはない。
 // 自前ソフトウェアラスタライザのResolveパス。1スレッド = 1画素。
 //
 // SoftwareRaster.hlslが書いたvisibility buffer(深度と三角形番号を詰めた64bit値)から

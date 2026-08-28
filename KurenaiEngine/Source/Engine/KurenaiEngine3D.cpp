@@ -836,11 +836,20 @@ namespace Kurenai
             float MaterialID;
             // メッシュシェーダー経路(Shaders/3D/GBufferMeshlet.hlsl)がジオメトリを引くための
             // bindlessディスクリプタ番号。頂点シェーダー経路では読まれない。
-            // すべて4バイトのスカラーなので、末尾に足しても既存フィールドのオフセットは動かない
-            uint32_t VertexBufferIndex;
+            // すべて4バイトのスカラーなので、末尾に足しても既存フィールドのオフセットは動かない。
+            //
+            // 【3本ともモデル単位】かつてメッシュ単位のバッファを指していたが、
+            // 1回のDispatchMeshでモデル全体を描けるようにするためモデル単位へ統合した
+            // (Assets::GpuMeshletのコメント参照)。頂点バッファの番号はメッシュレット1件ごとに
+            // 持たせてあるので、ここでは渡さない。
+            //
+            // 【MeshletOffsetは旧VertexBufferIndexの枠】読むのはGBufferMeshlet.hlslだけで、
+            // かつ同時に直すため、枠を使い回してもレイアウトのずれは起きない
+            uint32_t MeshletOffset;
             uint32_t MeshletBufferIndex;
             uint32_t MeshletVertexBufferIndex;
             uint32_t MeshletTriangleBufferIndex;
+            // このドローで見るメッシュレット数(増幅シェーダーの範囲外判定用)
             uint32_t MeshletCount;
             // 透過率(0=不透明)。GBufferパスがG-BufferのAlbedo.aへ書き、
             // DirectLighting.hlslの透過項が読む(45章)。
@@ -852,6 +861,29 @@ namespace Kurenai
             // 既定を1.0にしたいので、MakeObjectConstantsが明示的に代入する
             // (ObjectConstants{}のゼロ初期化のままだと全画素が捨てられる)
             float DitherFade;
+
+            // --- マテリアルテーブル経路(1モデル1ドロー)専用 -------------------------------
+            //
+            // 1回のDispatchMeshでモデル全体を描くと、上のMetallicFactor〜Translucencyのような
+            // 「メッシュごとに違う値」を定数バッファでは渡せない。代わりにマテリアルを
+            // 構造化バッファ(Assets::GpuMaterial)へ載せ、その番号をここで渡す。
+            // kInvalidBindlessIndexならピクセルシェーダーは従来の定数+t0〜t6経路を使う
+            uint32_t MaterialTableIndex;
+            // 増幅シェーダーがメッシュレットを取捨するマスク(Assets::kGpuMaterialFlag*)
+            uint32_t MeshletFilterReject;
+            uint32_t MeshletFilterRequire;
+            // シーン全体の自発光倍率と遮蔽マップの有効/無効(1.0 or 0.0)。
+            //
+            // 【従来経路では必ず1.0を入れる】これまでこの2つはMakeObjectConstantsが
+            // 係数へ掛けてから渡していた。ピクセルシェーダーはどちらの経路でも必ず
+            // 掛けるようにしてあるので、既に織り込み済みの従来経路では1.0でなければ
+            // 二重に掛かる
+            float EmissiveIntensity;
+            float OcclusionMapScale;
+            // このドローでメッシュレットカリングの統計を数えるか(0/1)。
+            // 深度プリパスは G-Buffer と同じ増幅シェーダーを使うため、
+            // フレーム全体のフラグだけだと同じ塊を1フレームに2回数えてしまう
+            uint32_t MeshletStatsEnabled;
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -866,9 +898,11 @@ namespace Kurenai
         // ditherFade: モデルLODの切り替え中だけ1.0以外を渡す(既定の1.0は「全画素を描く」)。
         // 呼び出し箇所7つのうち、2段を重ねるのはG-Bufferと深度プリパスだけなので既定値を持たせている。
         // シャドウ・プローブ・DDGIは常に最も粗い段を1つだけ描くためフェードそのものが起きない
+        // 【モデルは引数で受け取る】meshが属する段のメッシュレット表を指す必要がある。
+        // instance.Modelは最も詳細な段でしかなく、シャドウや粗い段を描くときは食い違う
         ObjectConstants MakeObjectConstants(
-            const Assets::ModelInstance& instance, const Assets::Mesh& mesh, float emissiveIntensity,
-            bool occlusionMapEnabled, float ditherFade = 1.0f)
+            const Assets::ModelInstance& instance, const Assets::Model& model, const Assets::Mesh& mesh,
+            float emissiveIntensity, bool occlusionMapEnabled, float ditherFade = 1.0f)
         {
             ObjectConstants constants{};
             constants.DitherFade = ditherFade;
@@ -894,15 +928,74 @@ namespace Kurenai
             // メッシュレット。ModelLoaderが登録済みの番号をそのまま渡す。
             // メッシュシェーダー非対応・メッシュレット未生成の場合は
             // バッファ自体が無く、GetBindlessIndexはkInvalidBindlessIndexを返す
-            // (MeshletCountが0ならメッシュシェーダー経路には入らないため、その値は使われない)
+            // (MeshletCountが0ならメッシュシェーダー経路には入らないため、その値は使われない)。
+            // 表はモデル単位なので、このメッシュのぶんの範囲をMeshletOffset/MeshletCountで示す
             const auto bindlessIndexOf = [](const RHI::IRHIBuffer* buffer) {
                 return buffer ? buffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
             };
-            constants.VertexBufferIndex = bindlessIndexOf(mesh.VertexBuffer.get());
-            constants.MeshletBufferIndex = bindlessIndexOf(mesh.MeshletBuffer.get());
-            constants.MeshletVertexBufferIndex = bindlessIndexOf(mesh.MeshletVertexBuffer.get());
-            constants.MeshletTriangleBufferIndex = bindlessIndexOf(mesh.MeshletTriangleBuffer.get());
+            constants.MeshletOffset = mesh.MeshletOffset;
+            constants.MeshletBufferIndex = bindlessIndexOf(model.MeshletBuffer.get());
+            constants.MeshletVertexBufferIndex = bindlessIndexOf(model.MeshletVertexBuffer.get());
+            constants.MeshletTriangleBufferIndex = bindlessIndexOf(model.MeshletTriangleBuffer.get());
             constants.MeshletCount = mesh.MeshletCount;
+
+            // メッシュ単位の経路。マテリアルは上の定数とt0〜t6から読むため、
+            // テーブルは使わない(=無効番号)。EmissiveFactorとOcclusionStrengthには
+            // 既にシーン全体の倍率が織り込まれているので、シェーダー側の乗算は1.0にする
+            constants.MaterialTableIndex = RHI::kInvalidBindlessIndex;
+            constants.MeshletFilterReject = 0;
+            constants.MeshletFilterRequire = 0;
+            constants.EmissiveIntensity = 1.0f;
+            constants.OcclusionMapScale = 1.0f;
+            return constants;
+        }
+
+        // 1回のDispatchMeshでモデル全体を描くときの定数。
+        //
+        // 【メッシュ単位の値を入れない】マテリアルの係数もテクスチャもモデル内で
+        // メッシュごとに違うため、定数バッファでは渡せない。ピクセルシェーダーは
+        // メッシュシェーダーが出力したMaterialIndexでマテリアルテーブルを引く。
+        // World/NormalMatrix/TangentSignFlip/MaterialIDだけがインスタンス単位の値で、
+        // これらはモデル全体で共通なので従来どおり定数バッファで渡してよい。
+        //
+        // rejectMask/requireMask: このパスで描くマテリアルの選び方
+        // (Assets::kGpuMaterialFlag*。GBufferCommon.hlsliのMeshletFilter*参照)
+        // 【モデルは引数で受け取る】モデルLODが入り、instance.Modelは「最も詳細な段」でしかない。
+        // シャドウは最も粗い段、G-Buffer/プリパスはそのフレームで選ばれた段を描くので、
+        // どの段のメッシュレット表を指すかは呼び出し側にしか決められない
+        ObjectConstants MakeModelObjectConstants(
+            const Assets::ModelInstance& instance, const Assets::Model& model, float emissiveIntensity,
+            bool occlusionMapEnabled, uint32_t rejectMask, uint32_t requireMask,
+            bool countCullStats = false, float ditherFade = 1.0f)
+        {
+            ObjectConstants constants{};
+            constants.DitherFade = ditherFade;
+            constants.World = instance.World;
+            constants.NormalMatrix = instance.NormalMatrix;
+            constants.TangentSignFlip = instance.TangentSignFlip;
+            // 水面はメッシュレット経路に載せない(ShouldUseMeshletPath)ので常に通常マテリアル
+            constants.MaterialID = 0.0f;
+
+            const auto bindlessIndexOf = [](const RHI::IRHIBuffer* buffer) {
+                return buffer ? buffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
+            };
+            // モデル全体の塊を1回で回すので、範囲は表の先頭から全件
+            constants.MeshletOffset = 0;
+            constants.MeshletBufferIndex = bindlessIndexOf(model.MeshletBuffer.get());
+            constants.MeshletVertexBufferIndex = bindlessIndexOf(model.MeshletVertexBuffer.get());
+            constants.MeshletTriangleBufferIndex = bindlessIndexOf(model.MeshletTriangleBuffer.get());
+            constants.MeshletCount = model.TotalMeshletCount;
+
+            constants.MaterialTableIndex = bindlessIndexOf(model.MaterialTableBuffer.get());
+            constants.MeshletFilterReject = rejectMask;
+            constants.MeshletFilterRequire = requireMask;
+            // マテリアルテーブルは読み込み時に焼くため、シーン全体の倍率は焼き込めない。
+            // ピクセルシェーダーがここの値を掛ける
+            constants.EmissiveIntensity = emissiveIntensity;
+            constants.OcclusionMapScale = occlusionMapEnabled ? 1.0f : 0.0f;
+            // 統計を数えるのは G-Buffer パスだけ。深度プリパスとシャドウは同じ
+            // 増幅シェーダーを使うので、ここで切らないと同じ塊を何度も数えてしまう
+            constants.MeshletStatsEnabled = countCullStats ? 1u : 0u;
             return constants;
         }
 
@@ -1531,6 +1624,21 @@ namespace Kurenai
             gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
             gbufferMeshletDebugPsDesc.EntryPoint = "PSMainMeshletDebug";
             m_GBufferMeshletDebugPixelShader = m_Device->CreateShader(gbufferMeshletDebugPsDesc);
+
+            // シャドウパスのメッシュシェーダー版。G-Buffer版と分けているのは、
+            // シャドウのb0がFrameConstantsではなくCascadeConstantsで、cbufferの
+            // レイアウトが違うため(ShadowMeshlet.hlsl冒頭のコメント参照)
+            RHI::ShaderDesc shadowAsDesc;
+            shadowAsDesc.Stage = RHI::ShaderStage::Amplification;
+            shadowAsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.hlsl";
+            shadowAsDesc.EntryPoint = "ASMain";
+            m_ShadowAmplificationShader = m_Device->CreateShader(shadowAsDesc);
+
+            RHI::ShaderDesc shadowMsDesc;
+            shadowMsDesc.Stage = RHI::ShaderStage::Mesh;
+            shadowMsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.hlsl";
+            shadowMsDesc.EntryPoint = "MSMain";
+            m_ShadowMeshShader = m_Device->CreateShader(shadowMsDesc);
         }
 
         // G-BufferのPSOはEmissiveのフォーマットがバッファ精度に依存するため、
@@ -1946,6 +2054,8 @@ namespace Kurenai
         m_RaytracingAvailable = m_Device->SupportsRaytracing();
         // メッシュシェーダーの可否もここで控える(UIパネルが参照する)
         m_MeshShaderAvailable = m_Device->SupportsMeshShader();
+        // bindless区画の容量も同じ理由でここへ控える(使用数はフレームごとに更新する)
+        m_BindlessCapacity = m_Device->GetBindlessCapacity();
 
         // メッシュレットカリングの統計(Stage 5-2)。増幅シェーダーがカウンタへ数え上げ、
         // それを数フレーム遅れでCPUへ読み戻してPerfログへ出す。
@@ -2242,9 +2352,31 @@ namespace Kurenai
         shadowPsDesc.EntryPoint = "PSMain";
         m_ShadowPixelShader = m_Device->CreateShader(shadowPsDesc);
 
+        // アルファカットアウト用。切り抜きを反映しないと、葉や柵のように
+        // テクスチャで抜く前提のマテリアルが板ポリゴンのまま影を落とす
+        RHI::ShaderDesc shadowCutoutVsDesc;
+        shadowCutoutVsDesc.Stage = RHI::ShaderStage::Vertex;
+        shadowCutoutVsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowCutoutVsDesc.EntryPoint = "VSMainCutout";
+        m_ShadowCutoutVertexShader = m_Device->CreateShader(shadowCutoutVsDesc);
+
+        RHI::ShaderDesc shadowCutoutPsDesc;
+        shadowCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
+        shadowCutoutPsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowCutoutPsDesc.EntryPoint = "PSMainCutout";
+        m_ShadowCutoutPixelShader = m_Device->CreateShader(shadowCutoutPsDesc);
+
         const std::vector<RHI::InputElementDesc> shadowInputLayout =
         {
             { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+        };
+
+        // カットアウトはベースカラーのアルファを引くためUVも要る。
+        // オフセット24はAssets::Vertexの並び(Position 0 / Normal 12 / UV 24)から
+        const std::vector<RHI::InputElementDesc> shadowCutoutInputLayout =
+        {
+            { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+            { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
         };
 
         RHI::PipelineStateDesc shadowPipelineDesc;
@@ -2258,6 +2390,58 @@ namespace Kurenai
         // シャドウマップへ内側の面の深度が書かれ、影の形と自己遮蔽の出方がずれる
         shadowPipelineDesc.FrontCounterClockwise = true;
         m_ShadowPipelineStateMirrored = m_Device->CreatePipelineState(shadowPipelineDesc);
+
+        // アルファカットアウト用(頂点シェーダー経路)。切り抜きを反映して深度を書く。
+        // 【DX11でも効く】bindlessもメッシュシェーダーも要らないので、両バックエンドで同じ影になる
+        if (m_ShadowCutoutVertexShader && m_ShadowCutoutPixelShader)
+        {
+            RHI::PipelineStateDesc shadowCutoutDesc;
+            shadowCutoutDesc.InputLayout = shadowCutoutInputLayout;
+            shadowCutoutDesc.VertexShader = m_ShadowCutoutVertexShader.get();
+            shadowCutoutDesc.PixelShader = m_ShadowCutoutPixelShader.get();
+            shadowCutoutDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            shadowCutoutDesc.HasDepthStencil = true;
+            shadowCutoutDesc.FrontCounterClockwise = false;
+            m_ShadowCutoutPipelineState = m_Device->CreatePipelineState(shadowCutoutDesc);
+            shadowCutoutDesc.FrontCounterClockwise = true;
+            m_ShadowCutoutPipelineStateMirrored = m_Device->CreatePipelineState(shadowCutoutDesc);
+        }
+
+        // メッシュシェーダー版のシャドウPSO。
+        //
+        // 【これが無いと1ドロー化が片手落ちになる】メッシュレット経路はG-Bufferにしか
+        // 無かったため、モデルを1ドローで描けるようになってもシャドウは従来どおり
+        // メッシュ単位で、しかもカスケード4枚ぶん発行され続ける。
+        // PLATEAU LOD2の1タイル(メッシュ1,715個)ならG-Bufferが1ドローになる一方で
+        // シャドウは6,860ドローのまま、ということになる。
+        //
+        // ピクセルシェーダーは持たない(深度だけを書く)。頂点シェーダー版が
+        // 空のPSMainを渡しているのに合わせず段ごと省いているのは、深度プリパスの
+        // 不透明用PSOと同じ理由(RHIDesc.hのPixelShader=nullptrの扱い)
+        if (m_ShadowAmplificationShader && m_ShadowMeshShader)
+        {
+            RHI::MeshPipelineStateDesc shadowMeshDesc;
+            shadowMeshDesc.AmplificationShader = m_ShadowAmplificationShader.get();
+            shadowMeshDesc.MeshShader = m_ShadowMeshShader.get();
+            shadowMeshDesc.PixelShader = nullptr;
+            shadowMeshDesc.HasDepthStencil = true;
+            shadowMeshDesc.FrontCounterClockwise = false;
+            m_ShadowMeshletPipelineState = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+            shadowMeshDesc.FrontCounterClockwise = true;
+            m_ShadowMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+
+            // カットアウト用。ピクセルシェーダーは頂点シェーダー経路と共有する
+            // (ShadowMeshlet.hlslのShadowPSInputとShadow.hlslのCutoutPSInputは
+            //  同じ並び・同じセマンティクスにしてある)
+            if (m_ShadowCutoutPixelShader)
+            {
+                shadowMeshDesc.PixelShader = m_ShadowCutoutPixelShader.get();
+                shadowMeshDesc.FrontCounterClockwise = false;
+                m_ShadowMeshletCutoutPipelineState = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+                shadowMeshDesc.FrontCounterClockwise = true;
+                m_ShadowMeshletCutoutPipelineStateMirrored = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+            }
+        }
 
         // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する。
         // 全カスケードを1つのTexture2DArrayにまとめ、スライスごとのDSVで1カスケードずつ描き込む
@@ -2897,7 +3081,8 @@ namespace Kurenai
                m_DDGIProbeTracePipelineState != nullptr && m_DDGITraceConstantBuffer != nullptr;
     }
 
-    bool KurenaiEngine3D::ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const
+    bool KurenaiEngine3D::ShouldUseMeshletPath(
+        const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const
     {
         // 【水面はメッシュレット経路に載せない】水面のピクセルシェーダーはWater.hlslの
         // PSMainで、G-Buffer本体のPSMainとは別物。メッシュシェーダー版を用意するには
@@ -2911,13 +3096,35 @@ namespace Kurenai
         // メッシュレットが焼かれていない(--no-meshletsでパックされた.kmodel)、
         // またはデバイスが非対応でGPUバッファを作っていない場合はnullptrになる。
         // 【MeshletCountで判定しないこと】あちらはアセットが持つ数そのもので、
-        // メッシュシェーダー非対応の環境でも(レイトレーシングが使うため)0にはならない
-        if (!mesh.MeshletBuffer)
+        // メッシュシェーダー非対応の環境でも(レイトレーシングが使うため)0にはならない。
+        // 表はモデル単位なので、このメッシュ自身が塊を持っているかも併せて見る
+        // (モデル内に塊を持たないメッシュが混ざりうる)
+        if (!model.MeshletBuffer || !model.MaterialTableBuffer || mesh.MeshletCount == 0)
         {
             return false;
         }
 
         return m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+    }
+
+    bool KurenaiEngine3D::ShouldUseModelMeshletPath(
+        const Assets::ModelInstance& instance, const Assets::Model& model) const
+    {
+        // モデル内の1メッシュでも従来経路へ落ちる条件があるなら、モデル全体を従来経路にする。
+        // 混ぜると「1ドローで描いたぶん」と「メッシュ単位で描いたぶん」が同じフレームに
+        // 同居し、食い違いが出たときにどちらのせいか切り分けられなくなる
+        if (!model.AllMeshesHaveMeshlets)
+        {
+            return false;
+        }
+        if (model.Meshes.empty())
+        {
+            return false;
+        }
+
+        // 代表として先頭のメッシュで判定する。AllMeshesHaveMeshletsが真なら
+        // メッシュ間で結果は変わらない(残りの条件はすべてモデル単位/インスタンス単位)
+        return ShouldUseMeshletPath(model, model.Meshes.front(), instance.IsWater);
     }
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAOTexture() const
@@ -3079,6 +3286,40 @@ namespace Kurenai
                 m_DepthPrepassCutoutPipelineState = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
                 depthPrepassPipelineDesc.FrontCounterClockwise = true;
                 m_DepthPrepassCutoutPipelineStateMirrored = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
+            }
+
+            // メッシュシェーダー版の深度プリパス。
+            //
+            // 【これが無いとプリパスがまるごと止まる】かつてプリパスはメッシュレット経路と
+            // 排他だった。プリパスが頂点シェーダーで深度を書き、G-Bufferがメッシュシェーダーで
+            // 描くと、同じ頂点でも変換の丸めが一致する保証が無く、深度が1ulpずれた面が
+            // GREATER_EQUALを通らずに消えるため。**G-Bufferと同じ増幅/メッシュシェーダーを
+            // そのまま使えば変換は文字どおり同一のコードになり、この問題自体が消える。**
+            //
+            // 不透明用はピクセルシェーダーを持たない(段ごと省く)。カットアウト用は
+            // G-Bufferとまったく同じ判定のclipを通す(DepthPrepass.hlsl)
+            if (m_GBufferMeshShader && m_GBufferAmplificationShader)
+            {
+                RHI::MeshPipelineStateDesc prepassMeshDesc;
+                prepassMeshDesc.AmplificationShader = m_GBufferAmplificationShader.get();
+                prepassMeshDesc.MeshShader = m_GBufferMeshShader.get();
+                prepassMeshDesc.PixelShader = nullptr;
+                prepassMeshDesc.HasDepthStencil = true;
+                prepassMeshDesc.ReverseZ = true;
+                prepassMeshDesc.FrontCounterClockwise = false;
+                m_DepthPrepassMeshletPipelineState = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                prepassMeshDesc.FrontCounterClockwise = true;
+                m_DepthPrepassMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+
+                if (m_DepthPrepassCutoutPixelShader)
+                {
+                    prepassMeshDesc.PixelShader = m_DepthPrepassCutoutPixelShader.get();
+                    prepassMeshDesc.FrontCounterClockwise = false;
+                    m_DepthPrepassMeshletCutoutPipelineState = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                    prepassMeshDesc.FrontCounterClockwise = true;
+                    m_DepthPrepassMeshletCutoutPipelineStateMirrored =
+                        m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                }
             }
 
             // SSAOパス
@@ -6105,6 +6346,9 @@ namespace Kurenai
         m_FrameStatsCullCulledSum += m_FrustumCullCulled;
         m_FrameStatsLODSwitchSum += m_LODSwitchCount;
         m_FrameStatsLODFadingSum += m_LODFadingCount;
+        m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
+        m_FrameStatsDrawCallsShadowSum += m_DrawCallsShadow;
+        m_FrameStatsDrawCallsDepthPrepassSum += m_DrawCallsDepthPrepass;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -6243,6 +6487,40 @@ namespace Kurenai
             Core::Logger::Info("Perf", streamText);
         }
 
+        // パス別のドローコール数。**「G-Bufferは減ったがシャドウは減っていない」**のような
+        // 片手落ちは合計値では見えない(シャドウはカスケード4回ぶんが積み上がる)
+        if (m_FrameStatsFrameCount > 0)
+        {
+            const double frames = static_cast<double>(m_FrameStatsFrameCount);
+            char drawText[224];
+            std::snprintf(
+                drawText, sizeof(drawText),
+                "  ドローコール: G-Buffer %.1f / シャドウ %.1f (4カスケード計) / 深度プリパス %.1f "
+                "[1フレームあたり]",
+                static_cast<double>(m_FrameStatsDrawCallsGBufferSum) / frames,
+                static_cast<double>(m_FrameStatsDrawCallsShadowSum) / frames,
+                static_cast<double>(m_FrameStatsDrawCallsDepthPrepassSum) / frames);
+            Core::Logger::Info("Perf", drawText);
+        }
+
+        // bindless区画の使用状況。**満杯になっても例外は飛ばず、エラーログ1行と
+        // kInvalidBindlessIndex(=白1x1へ落ちる)しか残らない**ため、上限へ近づいていることを
+        // 定期的に見えるようにしておく(IRHIDevice::GetBindlessUsedCountのコメント参照)
+        if (m_Device)
+        {
+            const uint32_t bindlessCapacity = m_Device->GetBindlessCapacity();
+            if (bindlessCapacity > 0)
+            {
+                const uint32_t bindlessUsed = m_Device->GetBindlessUsedCount();
+                char bindlessText[160];
+                std::snprintf(
+                    bindlessText, sizeof(bindlessText), "  bindless: %u / %u ディスクリプタ (%.1f%%)",
+                    bindlessUsed, bindlessCapacity,
+                    100.0 * static_cast<double>(bindlessUsed) / static_cast<double>(bindlessCapacity));
+                Core::Logger::Info("Perf", bindlessText);
+            }
+        }
+
         // メッシュレット単位のカリング(増幅シェーダー)の効き。上のCPU側とは粒度も判定の種類も
         // 違うので別の行に出す。
         //
@@ -6277,6 +6555,9 @@ namespace Kurenai
         m_FrameStatsCullCulledSum = 0;
         m_FrameStatsLODSwitchSum = 0;
         m_FrameStatsLODFadingSum = 0;
+        m_FrameStatsDrawCallsGBufferSum = 0;
+        m_FrameStatsDrawCallsShadowSum = 0;
+        m_FrameStatsDrawCallsDepthPrepassSum = 0;
         m_FrameStatsMeshletTestedSum = 0;
         m_FrameStatsMeshletFrustumCulledSum = 0;
         m_FrameStatsMeshletOcclusionCulledSum = 0;
@@ -6478,6 +6759,21 @@ namespace Kurenai
         // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる
         m_FrustumCullTested = 0;
         m_FrustumCullCulled = 0;
+        // ドローコール数も同じくフレーム単位。各パスが自分のカウンタを積み上げる。
+        //
+        // 【0に戻す前に前フレームの値を控える】UIパネルはRenderの外で描かれるため、
+        // 現在のカウンタを読むと必ずリセット直後の0になる(実際にそう表示されていた)。
+        // 完成した最後のフレームの値を別に持たせる
+        m_DrawCallsGBufferLastFrame = m_DrawCallsGBuffer;
+        m_DrawCallsShadowLastFrame = m_DrawCallsShadow;
+        m_DrawCallsDepthPrepassLastFrame = m_DrawCallsDepthPrepass;
+        m_DrawCallsGBuffer = 0;
+        m_DrawCallsShadow = 0;
+        m_DrawCallsDepthPrepass = 0;
+        // bindless区画の使用数を控える(UIパネルは m_Device へ直接触れないため。
+        // m_MeshShaderAvailable と同じ扱い)。登録はシーン読み込み時にしか起きないので、
+        // フレームごとに1回問い合わせるだけで足りる
+        m_BindlessUsedCount = m_Device ? m_Device->GetBindlessUsedCount() : 0;
 
         // WM_SIZE(Updateスレッド)が記録しておいたリサイズ要求を、スワップチェーンを実際に使う
         // このスレッドで反映する。このフレームのGPUコマンドをまだ1つも積んでいないこの位置で
@@ -7865,17 +8161,29 @@ namespace Kurenai
                         // ミラーリングされたインスタンスは表裏が入れ替わるため、GBufferパスと同じく
                         // 表裏判定を反転したパイプラインへ切り替える(切り替え時はb0も張り直す)
                         RHI::IRHIPipelineState* currentPipelineState = m_ShadowPipelineState.get();
-                        const auto bindPipelineState = [&](bool mirrored)
+                        const auto bindShadowPipelineState = [&](RHI::IRHIPipelineState* wanted)
                         {
-                            RHI::IRHIPipelineState* const wanted =
-                                mirrored ? m_ShadowPipelineStateMirrored.get() : m_ShadowPipelineState.get();
-                            if (wanted == currentPipelineState)
+                            if (!wanted || wanted == currentPipelineState)
                             {
                                 return;
                             }
                             cmd->SetPipelineState(wanted);
                             cmd->SetConstantBuffer(0, m_ShadowCascadeConstantBuffer.get());
+                            // カットアウトのピクセルシェーダーがベースカラーを引くためサンプラーが要る。
+                            // 不透明用のPSOはピクセルシェーダーを持たないので無害
+                            cmd->SetSamplerSet(m_MaterialSamplers.get());
                             currentPipelineState = wanted;
+                        };
+                        // アルファカットアウトのマテリアルは切り抜きを反映して深度を書く。
+                        // PSOが作れていない場合は従来どおり切り抜きを見ない(影が板のままになる)
+                        const auto selectShadowPipelineState = [&](bool mirrored, bool cutout)
+                        {
+                            if (cutout && m_ShadowCutoutPipelineState)
+                            {
+                                return mirrored ? m_ShadowCutoutPipelineStateMirrored.get()
+                                                : m_ShadowCutoutPipelineState.get();
+                            }
+                            return mirrored ? m_ShadowPipelineStateMirrored.get() : m_ShadowPipelineState.get();
                         };
 
                         // このカスケードのライト正射影に対して視錐台カリングする。
@@ -7891,24 +8199,92 @@ namespace Kurenai
                                 continue;
                             }
 
-                            // 【影は常に最も粗い段】影はテクスチャを読まないので詳細な段を描く意味が無い
-                            // ストリーミング中で未読み込みなら描かない
+                            // 【影は常に最も粗い段】影はテクスチャを読まないので詳細な段を描く
+                            // 意味が無い。ストリーミング中で未読み込みなら描かない
                             const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
                             if (!coarsestModel) { continue; }
+
+                            // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
+                            //
+                            // 【半透明は落とさない】このパスは従来から、BLENDのメッシュも
+                            // 実体のまま影を落としている。ここでふるい分けると影の出方が変わって
+                            // しまうため、意図的に何も落とさない(カットアウトの切り抜きだけは
+                            // 下で反映する ―― そちらは板ポリゴンの影が出る明確な不具合だった)。
+                            //
+                            // 【カットアウトを持つモデルだけ2回に分ける】不透明ぶんは
+                            // ピクセルシェーダーを持たないPSOで描きたいので、
+                            // 切り抜きが要るぶんとは同じドローにまとめられない
+                            if (m_ShadowMeshletPipelineState && ShouldUseModelMeshletPath(instance, *coarsestModel))
+                            {
+                                constexpr uint32_t kAmplificationGroupSize = 32;
+                                const uint32_t groupCount =
+                                    (coarsestModel->TotalMeshletCount + kAmplificationGroupSize - 1)
+                                    / kAmplificationGroupSize;
+
+                                const auto dispatchShadowMeshlets =
+                                    [&](RHI::IRHIPipelineState* pipelineState, uint32_t rejectMask,
+                                        uint32_t requireMask)
+                                {
+                                    if (!pipelineState)
+                                    {
+                                        return;
+                                    }
+                                    bindShadowPipelineState(pipelineState);
+
+                                    const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                        instance, *coarsestModel, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask,
+                                        requireMask);
+                                    cmd->UpdateBuffer(
+                                        m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                    cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+                                    cmd->DispatchMesh(groupCount, 1, 1);
+                                    ++m_DrawCallsShadow;
+                                };
+
+                                // カットアウト用のPSOが作れていない場合は、従来どおり
+                                // 切り抜きを見ずに全部を1回で描く(影が板のままになる)
+                                const bool splitCutout =
+                                    coarsestModel->HasCutoutMaterial && m_ShadowMeshletCutoutPipelineState;
+
+                                dispatchShadowMeshlets(
+                                    instance.IsMirrored ? m_ShadowMeshletPipelineStateMirrored.get()
+                                                        : m_ShadowMeshletPipelineState.get(),
+                                    splitCutout ? Assets::kGpuMaterialFlagCutout : 0u, 0u);
+
+                                if (splitCutout)
+                                {
+                                    dispatchShadowMeshlets(
+                                        instance.IsMirrored ? m_ShadowMeshletCutoutPipelineStateMirrored.get()
+                                                            : m_ShadowMeshletCutoutPipelineState.get(),
+                                        0u, Assets::kGpuMaterialFlagCutout);
+                                }
+                                continue;
+                            }
+
                             for (const auto& mesh : coarsestModel->Meshes)
                             {
-                                bindPipelineState(instance.IsMirrored);
+                                // アルファカットアウトは切り抜きを反映して深度を書く。
+                                // 見ないままだと、葉や柵のようにテクスチャで抜く前提の
+                                // マテリアルが板ポリゴンのまま影を落とす
+                                const bool cutout = mesh.AlphaCutoff > 0.0f;
+                                bindShadowPipelineState(selectShadowPipelineState(instance.IsMirrored, cutout));
 
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
                                 const ObjectConstants objectConstants =
-                                    MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                    MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                                if (cutout)
+                                {
+                                    cmd->SetTexture(0, mesh.BaseColorTexture);
+                                }
 
                                 cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                                 cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                                 cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                                ++m_DrawCallsShadow;
                             }
                         }
                     }
@@ -8017,7 +8393,7 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8350,7 +8726,7 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8759,11 +9135,16 @@ namespace Kurenai
         // プリパスで手前に別のものが書かれていると早期Zに落とされて消える。
         // 中途半端に混ぜるより丸ごと従来経路にするほうが安全
         //
-        // 【メッシュシェーダー経路とは併用しない】プリパスは頂点シェーダー経路で深度を書くが、
-        // G-Buffer側がメッシュシェーダーで描くと同じ頂点でも変換の丸めが一致する保証が無く、
-        // 深度が1ulpずれた面がGREATER_EQUALを通らずに消える
-        // meshletPathActiveはFrameConstantsを書く手前で確定させてある(そちらのコメント参照)
-        const bool depthPrepassRuns = m_DepthPrepassEnabled && !meshletPathActive
+        // 【メッシュシェーダー経路とも併用できるようになった】かつてプリパスはメッシュレット経路と
+        // 排他だった。プリパスが頂点シェーダーで深度を書き、G-Bufferがメッシュシェーダーで描くと、
+        // 同じ頂点でも変換の丸めが一致する保証が無く、深度が1ulpずれた面がGREATER_EQUALを
+        // 通らずに消えるため。プリパスにもG-Bufferとまったく同じ増幅/メッシュシェーダーを使う
+        // PSOを用意したので、変換は文字どおり同一のコードになりこの問題は起きない。
+        //
+        // メッシュレット版のPSOが作れなかった場合は、その経路で描くモデルだけを
+        // プリパスから外す(下のループ参照)。深度が埋まらないぶん早期Zが効かないだけで、
+        // G-Buffer側が改めて深度を書くため絵は壊れない
+        const bool depthPrepassRuns = m_DepthPrepassEnabled
             && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
         if (depthPrepassRuns)
         {
@@ -8798,7 +9179,80 @@ namespace Kurenai
                         for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
                         {
                         const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
-                        for (const auto& mesh : lodDraws[lodDrawIndex].Model->Meshes)
+                        const Assets::Model& lodModel = *lodDraws[lodDrawIndex].Model;
+
+                        // G-Bufferが1ドローで描くモデルは、プリパスも同じ増幅/メッシュシェーダーで
+                        // 描く。**同じ判断関数(ShouldUseModelMeshletPath)で経路を選ぶことが要点**で、
+                        // 片方だけがメッシュシェーダーになると深度が一致しない。
+                        //
+                        // 不透明とカットアウトでピクセルシェーダーの有無が変わるため、
+                        // カットアウトのマテリアルを持つモデルだけ2回に分ける。
+                        // 持たないモデル(PLATEAUのタイルがそう)は1回で済む
+                        if (ShouldUseModelMeshletPath(instance, lodModel))
+                        {
+                            // 【フェード中は1ドロー経路のプリパスを外す】不透明用のPSOは
+                            // ピクセルシェーダーを持たないためApplyLODDitherを通せず、
+                            // 捨てるはずの画素まで深度を書いてG-Bufferとの食い違いで穴が開く。
+                            // 早期Zが効かなくなるだけで、G-Buffer側が深度を書くので絵は壊れない
+                            if (lodDitherFade < 1.0f)
+                            {
+                                continue;
+                            }
+
+                            if (!m_DepthPrepassMeshletPipelineState)
+                            {
+                                // メッシュレット版のPSOが無い。このモデルはプリパスから外す
+                                // (早期Zが効かないだけで、G-Buffer側が深度を書くので絵は壊れない)
+                                continue;
+                            }
+
+                            constexpr uint32_t kAmplificationGroupSize = 32;
+                            const uint32_t groupCount =
+                                (lodModel.TotalMeshletCount + kAmplificationGroupSize - 1)
+                                / kAmplificationGroupSize;
+
+                            const auto dispatchMeshletPrepass =
+                                [&](RHI::IRHIPipelineState* pipelineState, uint32_t rejectMask, uint32_t requireMask)
+                            {
+                                if (!pipelineState)
+                                {
+                                    return;
+                                }
+                                if (pipelineState != currentPipelineState)
+                                {
+                                    cmd->SetPipelineState(pipelineState);
+                                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                                    cmd->SetSamplerSet(m_MaterialSamplers.get());
+                                    currentPipelineState = pipelineState;
+                                }
+
+                                const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                    instance, lodModel, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask, requireMask);
+                                cmd->UpdateBuffer(
+                                    m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+                                cmd->DispatchMesh(groupCount, 1, 1);
+                                ++m_DrawCallsDepthPrepass;
+                            };
+
+                            // 不透明ぶん(ピクセルシェーダー無し)。半透明とカットアウトを落とす
+                            dispatchMeshletPrepass(
+                                instance.IsMirrored ? m_DepthPrepassMeshletPipelineStateMirrored.get()
+                                                    : m_DepthPrepassMeshletPipelineState.get(),
+                                Assets::kGpuMaterialFlagTransparent | Assets::kGpuMaterialFlagCutout, 0);
+
+                            // カットアウトぶん(clipを通す)。持たないモデルではこの回は発行しない
+                            if (lodModel.HasCutoutMaterial)
+                            {
+                                dispatchMeshletPrepass(
+                                    instance.IsMirrored ? m_DepthPrepassMeshletCutoutPipelineStateMirrored.get()
+                                                        : m_DepthPrepassMeshletCutoutPipelineState.get(),
+                                    Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout);
+                            }
+                            continue;
+                        }
+
+                        for (const auto& mesh : lodModel.Meshes)
                         {
                             // BLENDマテリアルはG-Bufferに描かれないので深度も書かない
                             // (書くと後ろのものが消える)
@@ -8827,7 +9281,7 @@ namespace Kurenai
                             }
 
                             const ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
+                                MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8840,6 +9294,7 @@ namespace Kurenai
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            ++m_DrawCallsDepthPrepass;
                         }
                         }   // モデルLODの段のループ
                     }
@@ -8981,7 +9436,36 @@ namespace Kurenai
                     for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
                     {
                     const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
-                    for (const auto& mesh : lodDraws[lodDrawIndex].Model->Meshes)
+                    const Assets::Model& lodModel = *lodDraws[lodDrawIndex].Model;
+
+                    // モデル全体を1回のDispatchMeshで描ける場合はメッシュのループへ入らない。
+                    // マテリアルはメッシュシェーダーが出力した番号でピクセルシェーダーが引くため、
+                    // メッシュごとのSetTextureも定数バッファの更新も要らない。
+                    //
+                    // 【BLENDだけは増幅シェーダーが落とす】半透明はG-Bufferに書かず専用の
+                    // Transparentパスでフォワードシェーディングする。ドローを分けられない以上、
+                    // メッシュレット単位のふるい分けでしか除外できない
+                    if (ShouldUseModelMeshletPath(instance, lodModel))
+                    {
+                        bindPipelineState(instance.IsMirrored, false, true);
+
+                        const ObjectConstants objectConstants = MakeModelObjectConstants(
+                            instance, lodModel, m_EmissiveIntensity, m_OcclusionMapEnabled,
+                            Assets::kGpuMaterialFlagTransparent, 0, /*countCullStats=*/true, lodDitherFade);
+                        cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                        cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                        // 起動するのは「モデル全体のメッシュレット数 ÷ 増幅シェーダーのグループサイズ」。
+                        // 実際にラスタライズされるのはカリングとふるい分けを生き延びたぶんに絞られる
+                        constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
+                        const uint32_t groupCount =
+                            (lodModel.TotalMeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize;
+                        cmd->DispatchMesh(groupCount, 1, 1);
+                        ++m_DrawCallsGBuffer;
+                        continue;
+                    }
+
+                    for (const auto& mesh : lodModel.Meshes)
                     {
                         // BLENDマテリアル(mesh.IsTransparent)はG-Bufferに書き込まず、専用のTransparentパスで
                         // フォワードシェーディングする(G-Bufferのアルファは常に1.0で半透明合成ができないため)
@@ -8990,11 +9474,17 @@ namespace Kurenai
                             continue;
                         }
 
-                        const bool useMeshlet = ShouldUseMeshletPath(mesh, instance.IsWater);
-                        bindPipelineState(instance.IsMirrored, instance.IsWater, useMeshlet);
+                        // 【ここへ来た時点でメッシュレット経路は使わない】上のモデル単位の
+                        // 判定を通らなかったインスタンス(水面、メッシュレットを持たない
+                        // メッシュが混ざるモデル、メッシュレット描画が無効)なので、
+                        // モデル全体を従来の頂点シェーダーで描く。
+                        // **メッシュ単位でメッシュレット経路へ入れてはいけない** ――
+                        // 深度プリパスは同じ判断関数(ShouldUseModelMeshletPath)で経路を選ぶため、
+                        // ここで食い違うとプリパスの深度とG-Bufferの深度が一致しなくなる
+                        bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
                         const ObjectConstants objectConstants =
-                            MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
+                            MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9012,21 +9502,10 @@ namespace Kurenai
                             cmd->SetTexture(7, m_WaterNormalMapTexture.get());
                         }
 
-                        if (useMeshlet)
-                        {
-                            // 頂点/インデックスバッファは張らない。増幅シェーダーとメッシュシェーダーが
-                            // bindless経由で自分で読む(ObjectConstantsが番号を運んでいる)。
-                            // 起動するのは「メッシュレット数 ÷ 増幅シェーダーのグループサイズ」だけで、
-                            // 実際にラスタライズされるのはカリングを生き延びたぶんに絞られる
-                            constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
-                            cmd->DispatchMesh((mesh.MeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize, 1, 1);
-                        }
-                        else
-                        {
-                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
-                        }
+                        cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                        cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        ++m_DrawCallsGBuffer;
                     }
                     }   // モデルLODの段のループ
                 }
@@ -9627,6 +10106,8 @@ namespace Kurenai
                 struct TransparentDraw
                 {
                     const Assets::ModelInstance* Instance;
+                    // 【段も覚える】meshが属する段のメッシュレット表を指す必要がある
+                    const Assets::Model* Model;
                     const Assets::Mesh* Mesh;
                     float DistanceSq;
                 };
@@ -9658,7 +10139,7 @@ namespace Kurenai
                         {
                             continue;
                         }
-                        draws.push_back({ &instance, &mesh, distanceSq });
+                        draws.push_back({ &instance, currentModel, &mesh, distanceSq });
                     }
                 }
                 if (draws.empty())
@@ -9725,7 +10206,9 @@ namespace Kurenai
                     bindPipelineState(draw.Instance->IsMirrored);
 
                     const ObjectConstants objectConstants =
-                        MakeObjectConstants(*draw.Instance, *draw.Mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                        MakeObjectConstants(
+                            *draw.Instance, *draw.Model, *draw.Mesh, m_EmissiveIntensity,
+                            m_OcclusionMapEnabled);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9869,7 +10352,7 @@ namespace Kurenai
                             bindPipelineState(!instance.IsMirrored);
 
                             const ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 

@@ -11,6 +11,104 @@
 
 namespace Kurenai::Assets
 {
+    // 1モデル分のマテリアルテーブル(StructuredBuffer<GpuMaterial>)の1件。
+    //
+    // 【何のためにあるのか】従来、マテリアルはメッシュを描く直前に
+    // cmd->SetTexture(t0..t3,t5,t6) と定数バッファ(ObjectConstants)で渡していた。
+    // これは「1ドロー = 1マテリアル」を強制するため、メッシュが1,715個あるモデル
+    // (PLATEAU LOD2の1タイル)は必ず1,715ドローになる。
+    // テーブルへ載せてピクセルシェーダーが実行時の番号で引けるようにすると、
+    // 1回のDispatchMeshでモデル全体を描いても材質を描き分けられる。
+    //
+    // 【テクスチャはbindless番号で持つ】RaytracingMaterial(RaytracingScene.h)と同じ方式。
+    // IRHIDevice::RegisterBindlessが払い出した番号を入れ、シェーダーは
+    // Shaders/3D/Bindless.hlsliのBindlessSampleでこれを引く。
+    // bindless非対応環境ではkInvalidBindlessIndexが入り、消費側は
+    // 従来のt0..t6経路へ落ちる(=このテーブル自体が作られない)。
+    //
+    // HLSL側の対応: Shaders/3D/GBufferCommon.hlsli の struct GpuMaterial。
+    // **並びとサイズを必ず一致させること。**
+    struct GpuMaterial
+    {
+        float BaseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        float EmissiveFactor[3] = { 0.0f, 0.0f, 0.0f };
+        float MetallicFactor = 0.0f;
+        // 負値ならソースデータに係数が無かったことを表す(Assets::kInvalidMaterialFactor)。
+        // 解釈は消費側の責任で、シェーダーは1.0(テクスチャの値をそのまま使う)として扱う
+        float RoughnessFactor = 1.0f;
+        // 0以下ならアルファカットアウト無効(Assets::Mesh::AlphaCutoffと同じ意味)
+        float AlphaCutoff = 0.0f;
+        float OcclusionStrength = 1.0f;
+        float Translucency = 0.0f;
+        // 以下はbindlessディスクリプタ番号。既定はRHI::kInvalidBindlessIndex(=テクスチャ無し)
+        uint32_t BaseColorTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t NormalTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t MetallicRoughnessTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t EmissiveTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t OcclusionTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t BentNormalTextureIndex = RHI::kInvalidBindlessIndex;
+        // kGpuMaterialFlag* の組み合わせ
+        uint32_t Flags = 0;
+        uint32_t Padding = 0;
+    };
+    static_assert(sizeof(GpuMaterial) == 80, "HLSL側のGpuMaterialと一致させるため80バイト固定");
+
+    // GpuMaterial::Flagsのビット定義。
+    // どちらも「そのマテリアルをどのパスで描くか」の判定に使う ――
+    // 1ドローでモデル全体を描くようになると、パイプラインステートやドローの分割では
+    // 材質ごとの出し分けができなくなるため、増幅シェーダーがこのビットで取捨する
+    inline constexpr uint32_t kGpuMaterialFlagTransparent = 1u << 0;  // glTFのalphaMode=BLEND
+    inline constexpr uint32_t kGpuMaterialFlagCutout = 1u << 1;       // glTFのalphaMode=MASK
+
+    // モデル1つ分のメッシュレット表(StructuredBuffer<Meshlet>)の1件。
+    // ディスク形式のAssets::MeshletEntry(48バイト、ModelPackage.h)へ
+    // 「どのメッシュの、どのマテリアルの塊か」を足したもの。
+    //
+    // 【なぜメッシュ単位ではなくモデル単位で持つのか】メッシュごとに別のバッファを
+    // 持っていると、1回のDispatchMeshで扱えるのが1メッシュぶんに限られる。
+    // モデル全体のメッシュレットを1本の表にまとめておけば、
+    // 増幅シェーダーが「モデルの全メッシュレット」を1回のディスパッチで見渡せる。
+    //
+    // 【オフセットはモデル基準へ付け替える】MeshletEntry::VertexOffset/TriangleOffsetは
+    // ディスク上ではメッシュ内相対だが、ここではモデル単位に連結した
+    // MeshletVertexBuffer / MeshletTriangleBuffer の中でのオフセットに直してある。
+    //
+    // 【頂点バッファだけはメッシュ単位のまま】.kgeomのペイロードは
+    // [頂点][インデックス][メッシュレット3本] をメッシュごとに連結した並びで、
+    // 頂点ブロックが連続していない。モデル単位の頂点バッファを作るには集めて複製する
+    // 必要があり、それは従来経路(DX11・BLAS・自前ラスタライザ)が使う
+    // メッシュ単位の頂点バッファと二重にVRAMを食う。
+    // 代わりに、メッシュレット1件ごとに「自分の頂点バッファのbindless番号」を持たせて
+    // メッシュシェーダーが選ぶ(自前ラスタライザのSWRasterMeshInfoと同じ方式)。
+    //
+    // HLSL側の対応: Shaders/3D/GBufferMeshlet.hlsl の struct Meshlet。
+    // **並びとサイズを必ず一致させること。**
+    struct GpuMeshlet
+    {
+        uint32_t VertexOffset = 0;         // モデル単位のMeshletVertexBuffer内の要素オフセット
+        uint32_t TriangleOffset = 0;       // モデル単位のMeshletTriangleBuffer内の要素オフセット
+        uint32_t VertexCount = 0;
+        uint32_t TriangleCount = 0;
+        float BoundsCenter[3] = { 0.0f, 0.0f, 0.0f };
+        float BoundsRadius = 0.0f;
+        float ConeAxis[3] = { 0.0f, 0.0f, 0.0f };
+        float ConeCutoff = 1.0f;
+        // この塊が属するメッシュの頂点バッファのbindless番号
+        uint32_t VertexBufferIndex = RHI::kInvalidBindlessIndex;
+        // Model::MaterialTableBuffer 内の番号(= Mesh::MaterialIndex)
+        uint32_t MaterialIndex = 0;
+        // kGpuMaterialFlag* の写し。増幅シェーダーがパスごとの取捨に使う
+        // (1ドローでモデル全体を描くと、ドローの分割で材質を出し分けられなくなるため)
+        uint32_t Flags = 0;
+        // このメッシュ内で何番目の塊か。**モデル内の通し番号ではない。**
+        // メッシュレットの色分け表示(Meshlet.hlsliのMeshletDebugColor)にだけ使う値で、
+        // レイトレーシング側(RaytracingScene.hlsliのRTFindMeshlet)がメッシュ内の番号を
+        // 返すのに合わせてある。揃えないと同じ塊が別の色になり、
+        // 「ラスタとRTが同じジオメトリを見ているか」の確認が成立しない
+        uint32_t MeshletIndexInMesh = 0;
+    };
+    static_assert(sizeof(GpuMeshlet) == 64, "HLSL側のMeshletと一致させるため64バイト固定");
+
     struct Mesh
     {
         std::unique_ptr<RHI::IRHIBuffer> VertexBuffer;
@@ -31,21 +129,18 @@ namespace Kurenai::Assets
 
         // --- メッシュレット(メッシュシェーダー用) ---------------------------------------
         //
-        // KurenaiPackerが焼いた分割情報(Assets::MeshletEntry)と、その2段の間接参照テーブル。
-        // 増幅シェーダーがMeshletBufferのバウンディング球・法線コーンでカリングし、
-        // メッシュシェーダーが生き残ったメッシュレットの頂点/三角形を組み立てる。
-        //
-        // 3本ともBufferUsage::StructuredImmutable。シーン読み込み時に一度書いたら
-        // 変わらないため、ステージングリングを持たないこのUsageがそのまま当てはまる。
+        // 【GPUバッファはModel側にある】メッシュレットの表と2段の間接参照テーブルは
+        // モデル単位で1本ずつ持つ(Model::MeshletBuffer ほか)。ここにあるのは
+        // 「そのモデル単位の表の、どこからいくつがこのメッシュのぶんか」だけ。
         //
         // 【空になる条件】(1) デバイスがメッシュシェーダー非対応、(2) .kmodelが
         // --no-meshletsで焼かれている、のいずれか。
-        // 描画側はMeshletCountではなくMeshletBufferの有無で経路を選ぶこと ――
+        // 描画側はMeshletCountではなくModel::MeshletBufferの有無で経路を選ぶこと ――
         // MeshletCountはアセットが持つメッシュレット数そのもので、メッシュシェーダー
         // 非対応の環境でも(レイトレーシング側が使うため)0にはならない
-        std::unique_ptr<RHI::IRHIBuffer> MeshletBuffer;
-        std::unique_ptr<RHI::IRHIBuffer> MeshletVertexBuffer;
-        std::unique_ptr<RHI::IRHIBuffer> MeshletTriangleBuffer;
+        //
+        // Model::MeshletBuffer内でこのメッシュのメッシュレットが始まる位置
+        uint32_t MeshletOffset = 0;
         // .kmodelが持つメッシュレット数。GPUバッファの有無とは独立
         uint32_t MeshletCount = 0;
 
@@ -118,6 +213,17 @@ namespace Kurenai::Assets
         // 既定値はModelPackage.hのkDefaultOcclusionStrengthと同じ1.0だが、このヘッダーは
         // ディスク形式の定義に依存させたくないため定数を参照せず直接書いている
         float OcclusionStrength = 1.0f;
+        // Model::MaterialTableBuffer の中でこのメッシュが使うマテリアルの番号。
+        //
+        // 【現状はメッシュと1対1】.kmodel v9はマテリアルテーブルを持たず、マテリアルの
+        // 係数とテクスチャ番号をMeshEntryが直接持っている(=メッシュ1つにマテリアル1つ)。
+        // そのためModelLoaderはメッシュ1つにつき1件のGpuMaterialを作り、その番号を入れる。
+        // .kmodelがマテリアルテーブルを持つようになれば、ここへその番号がそのまま入る
+        // (消費側とシェーダーは書き換え不要)。
+        //
+        // テーブルを作らなかった場合(bindless非対応)は0のまま。そのときはテーブル自体が
+        // 存在せず、描画は従来のt0..t6経路を通るのでこの値は読まれない
+        uint32_t MaterialIndex = 0;
     };
 
     enum class LightType : uint32_t
@@ -165,6 +271,48 @@ namespace Kurenai::Assets
         // そもそもTexturesへ入らないため、両者の要素数は常に一致する
         std::vector<std::wstring> TexturePaths;
         std::vector<Light> Lights;
+
+        // --- マテリアルテーブル(bindless経路用) -------------------------------------------
+        //
+        // このモデルの全マテリアル(GpuMaterial)を並べたStructuredImmutableバッファ。
+        // Mesh::MaterialIndexが添字で、ピクセルシェーダーが実行時の番号で引く。
+        //
+        // 【空になる条件】デバイスがbindless非対応。そのときは従来どおり
+        // メッシュを描く直前にSetTexture(t0..t6)で差し替える経路だけが動く。
+        // 描画側はこのポインタの有無で経路を選ぶこと
+        std::unique_ptr<RHI::IRHIBuffer> MaterialTableBuffer;
+        uint32_t MaterialCount = 0;
+        // このモデルにアルファカットアウト(glTFのalphaMode=MASK)のマテリアルが1つでもあるか。
+        // 深度プリパスとシャドウは「ピクセルシェーダーを持たない速い経路」を使いたいので、
+        // カットアウトを含むモデルだけを2ドロー(不透明ぶんとカットアウトぶん)に分ける。
+        // 含まないモデル(PLATEAU LOD2がそう)は1ドローのままで済む
+        bool HasCutoutMaterial = false;
+
+        // --- メッシュレット(メッシュシェーダー用) -----------------------------------------
+        //
+        // KurenaiPackerが焼いた分割情報(Assets::MeshletEntry)を、モデルの全メッシュぶん
+        // 1本へ連結したもの(Assets::GpuMeshlet)と、その2段の間接参照テーブル。
+        // 増幅シェーダーがバウンディング球・法線コーンでカリングし、
+        // メッシュシェーダーが生き残った塊の頂点/三角形を組み立てる。
+        //
+        // 3本ともBufferUsage::StructuredImmutable。シーン読み込み時に一度書いたら
+        // 変わらないため、ステージングリングを持たないこのUsageがそのまま当てはまる。
+        //
+        // 【なぜメッシュ単位ではないのか】GpuMeshletのコメント参照。
+        // メッシュごとに分かれていると、1回のDispatchMeshで1メッシュしか描けない
+        std::unique_ptr<RHI::IRHIBuffer> MeshletBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> MeshletVertexBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> MeshletTriangleBuffer;
+        // MeshletBufferの要素数(モデルの全メッシュのメッシュレット数の総和)
+        uint32_t TotalMeshletCount = 0;
+        // このモデルの**すべての**メッシュがメッシュレットを持っているか。
+        //
+        // 【1モデル1ドローの前提条件】1回のDispatchMeshで描けるのはメッシュレットの表に
+        // 載っているものだけ。1つでも塊を持たないメッシュがあると、そのメッシュだけが
+        // 描かれずに消える。混在させて別途DrawIndexedで補うこともできるが、
+        // 経路が2つ走ることで深度や丸めの食い違いを持ち込むより、
+        // モデル単位で従来経路へ落とすほうが切り分けやすい
+        bool AllMeshesHaveMeshlets = false;
 
         // レイトレーシングでヒット面の陰影を計算するための、このモデル全メッシュ分の
         // 頂点属性とインデックス(Mesh::RaytracingAttributeOffset / RaytracingIndexOffsetが

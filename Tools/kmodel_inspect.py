@@ -318,6 +318,17 @@ def check_meshlets(model):
                     report["OutOfRange"].append(
                         "メッシュ%d メッシュレット%d の LODLevel=%d が段%d の範囲に入っています"
                         % (mesh_index, m, e["LODLevel"], lod))
+
+                # 【v10 は番号を直接突き合わせられる】MeshletEntry 自身が MaterialIndex を持つので、
+                # 所属メッシュのものと一致するかを見ればよい。
+                # 下の頂点番号による検出は間接的で、
+                # **MaterialIndex だけが壊れているケースを見逃す**。
+                # ランタイム側(ModelLoader.cpp の meshletMaterialMismatch)はこの番号を見ているので、
+                # 検査ツールが見逃すと「ツールは通るが起動するとエラーログが出る」ことになる
+                if version >= 10 and e["MaterialIndex"] != mesh["MaterialIndex"]:
+                    report["CrossMaterialMeshlets"].append(
+                        "メッシュ%d(材質%s) メッシュレット%d: MaterialIndex=%s が所属メッシュの材質と違います"
+                        % (mesh_index, mesh["MaterialIndex"], m, e["MaterialIndex"]))
                 for t in range(e["TriangleCount"]):
                     to = mesh["MeshletTriangleOffset"] + (e["TriangleOffset"] + t) * 4
                     packed = struct.unpack_from("<I", payload, to)[0]
