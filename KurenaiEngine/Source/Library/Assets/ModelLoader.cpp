@@ -465,6 +465,22 @@ namespace Kurenai::Assets
             }
 
             model.TotalMeshletCount = static_cast<uint32_t>(meshlets.size());
+
+            // 1モデル1ドローにできるかの前提条件。1つでも塊を持たないメッシュがあると、
+            // そのメッシュは表に載っておらず、1回のDispatchMeshでは描かれずに消える
+            model.AllMeshesHaveMeshlets = true;
+            for (const Mesh& mesh : model.Meshes)
+            {
+                if (mesh.MeshletCount == 0)
+                {
+                    model.AllMeshesHaveMeshlets = false;
+                    Core::Logger::Warning(
+                        "ModelLoader",
+                        "メッシュレットを持たないメッシュがあるため、このモデルは1ドロー化できません"
+                        "(メッシュ単位の描画へ落とします)");
+                    break;
+                }
+            }
         }
     }
 

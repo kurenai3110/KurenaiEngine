@@ -211,6 +211,9 @@ namespace Kurenai
         // ずれると即座に破綻するため、判定を1か所に集約する。
         // isWaterがtrueのメッシュは常にfalse(理由は実装のコメント参照)
         bool ShouldUseMeshletPath(const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const;
+        // このインスタンスを「1回のDispatchMeshでモデル全体」の経路で描けるか。
+        // 描けない場合は従来どおりメッシュ単位のループで描く
+        bool ShouldUseModelMeshletPath(const Assets::ModelInstance& instance) const;
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
         // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
         RHI::IRHITexture* GetActiveAOTexture() const;

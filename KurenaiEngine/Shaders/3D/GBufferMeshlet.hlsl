@@ -190,7 +190,15 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
         const float3 centerWorld = mul(float4(meshlet.BoundsCenter, 1.0f), World).xyz;
         const float radiusWorld = meshlet.BoundsRadius * MaxWorldScale();
 
-        if (IsSphereInFrustum(centerWorld, radiusWorld) && !IsMeshletBackfacing(meshlet, centerWorld))
+        // 材質によるふるい分け。1回のDispatchMeshでモデル全体を描くようになると、
+        // ドローやPSOの分割では「半透明はG-Bufferに描かない」のような出し分けができない。
+        // どのマテリアルを描くパスなのかを定数バッファのマスクで受け取り、ここで捨てる
+        // (GBufferCommon.hlsliのMeshletFilterReject/Require参照)
+        const bool materialAccepted = (meshlet.Flags & MeshletFilterReject) == 0
+            && (meshlet.Flags & MeshletFilterRequire) == MeshletFilterRequire;
+
+        if (materialAccepted && IsSphereInFrustum(centerWorld, radiusWorld)
+            && !IsMeshletBackfacing(meshlet, centerWorld))
         {
             // 【波の幅に依存しない詰め方】WavePrefixCountBitsを使うと1グループが
             // 1波に収まることを暗に仮定することになる(波幅32/64はGPUによって違う)。
@@ -260,6 +268,10 @@ void MSMain(
         // レイトレーシング側(RaytracingScene.hlsliのRTFindMeshlet)と同じ色でなければ
         // 見比べる意味が無く、あちらはメッシュ内の番号を返す
         output.MeshletIndex = meshlet.MeshletIndexInMesh;
+        // ピクセルシェーダーがマテリアルテーブルを引くための番号。
+        // 塊の中では全頂点で同じ値になる(メッシュレットは材質を跨がない)ので、
+        // PSInput側のnointerpolationがそのまま正しい値を拾う
+        output.MaterialIndex = meshlet.MaterialIndex;
 
         outVertices[groupThreadId] = output;
     }

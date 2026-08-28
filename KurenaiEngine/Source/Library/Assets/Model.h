@@ -274,6 +274,14 @@ namespace Kurenai::Assets
         std::unique_ptr<RHI::IRHIBuffer> MeshletTriangleBuffer;
         // MeshletBufferの要素数(モデルの全メッシュのメッシュレット数の総和)
         uint32_t TotalMeshletCount = 0;
+        // このモデルの**すべての**メッシュがメッシュレットを持っているか。
+        //
+        // 【1モデル1ドローの前提条件】1回のDispatchMeshで描けるのはメッシュレットの表に
+        // 載っているものだけ。1つでも塊を持たないメッシュがあると、そのメッシュだけが
+        // 描かれずに消える。混在させて別途DrawIndexedで補うこともできるが、
+        // 経路が2つ走ることで深度や丸めの食い違いを持ち込むより、
+        // モデル単位で従来経路へ落とすほうが切り分けやすい
+        bool AllMeshesHaveMeshlets = false;
 
         // レイトレーシングでヒット面の陰影を計算するための、このモデル全メッシュ分の
         // 頂点属性とインデックス(Mesh::RaytracingAttributeOffset / RaytracingIndexOffsetが

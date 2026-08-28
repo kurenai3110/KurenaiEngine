@@ -832,6 +832,25 @@ namespace Kurenai
             // DirectLighting.hlslの透過項が読む(45章)。
             // 4バイトのスカラーを末尾に足しているだけなので、既存フィールドのオフセットは動かない
             float Translucency;
+
+            // --- マテリアルテーブル経路(1モデル1ドロー)専用 -------------------------------
+            //
+            // 1回のDispatchMeshでモデル全体を描くと、上のMetallicFactor〜Translucencyのような
+            // 「メッシュごとに違う値」を定数バッファでは渡せない。代わりにマテリアルを
+            // 構造化バッファ(Assets::GpuMaterial)へ載せ、その番号をここで渡す。
+            // kInvalidBindlessIndexならピクセルシェーダーは従来の定数+t0〜t6経路を使う
+            uint32_t MaterialTableIndex;
+            // 増幅シェーダーがメッシュレットを取捨するマスク(Assets::kGpuMaterialFlag*)
+            uint32_t MeshletFilterReject;
+            uint32_t MeshletFilterRequire;
+            // シーン全体の自発光倍率と遮蔽マップの有効/無効(1.0 or 0.0)。
+            //
+            // 【従来経路では必ず1.0を入れる】これまでこの2つはMakeObjectConstantsが
+            // 係数へ掛けてから渡していた。ピクセルシェーダーはどちらの経路でも必ず
+            // 掛けるようにしてあるので、既に織り込み済みの従来経路では1.0でなければ
+            // 二重に掛かる
+            float EmissiveIntensity;
+            float OcclusionMapScale;
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -880,6 +899,56 @@ namespace Kurenai
             constants.MeshletVertexBufferIndex = bindlessIndexOf(instance.Model.MeshletVertexBuffer.get());
             constants.MeshletTriangleBufferIndex = bindlessIndexOf(instance.Model.MeshletTriangleBuffer.get());
             constants.MeshletCount = mesh.MeshletCount;
+
+            // メッシュ単位の経路。マテリアルは上の定数とt0〜t6から読むため、
+            // テーブルは使わない(=無効番号)。EmissiveFactorとOcclusionStrengthには
+            // 既にシーン全体の倍率が織り込まれているので、シェーダー側の乗算は1.0にする
+            constants.MaterialTableIndex = RHI::kInvalidBindlessIndex;
+            constants.MeshletFilterReject = 0;
+            constants.MeshletFilterRequire = 0;
+            constants.EmissiveIntensity = 1.0f;
+            constants.OcclusionMapScale = 1.0f;
+            return constants;
+        }
+
+        // 1回のDispatchMeshでモデル全体を描くときの定数。
+        //
+        // 【メッシュ単位の値を入れない】マテリアルの係数もテクスチャもモデル内で
+        // メッシュごとに違うため、定数バッファでは渡せない。ピクセルシェーダーは
+        // メッシュシェーダーが出力したMaterialIndexでマテリアルテーブルを引く。
+        // World/NormalMatrix/TangentSignFlip/MaterialIDだけがインスタンス単位の値で、
+        // これらはモデル全体で共通なので従来どおり定数バッファで渡してよい。
+        //
+        // rejectMask/requireMask: このパスで描くマテリアルの選び方
+        // (Assets::kGpuMaterialFlag*。GBufferCommon.hlsliのMeshletFilter*参照)
+        ObjectConstants MakeModelObjectConstants(
+            const Assets::ModelInstance& instance, float emissiveIntensity, bool occlusionMapEnabled,
+            uint32_t rejectMask, uint32_t requireMask)
+        {
+            ObjectConstants constants{};
+            constants.World = instance.World;
+            constants.NormalMatrix = instance.NormalMatrix;
+            constants.TangentSignFlip = instance.TangentSignFlip;
+            // 水面はメッシュレット経路に載せない(ShouldUseMeshletPath)ので常に通常マテリアル
+            constants.MaterialID = 0.0f;
+
+            const auto bindlessIndexOf = [](const RHI::IRHIBuffer* buffer) {
+                return buffer ? buffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
+            };
+            // モデル全体の塊を1回で回すので、範囲は表の先頭から全件
+            constants.MeshletOffset = 0;
+            constants.MeshletBufferIndex = bindlessIndexOf(instance.Model.MeshletBuffer.get());
+            constants.MeshletVertexBufferIndex = bindlessIndexOf(instance.Model.MeshletVertexBuffer.get());
+            constants.MeshletTriangleBufferIndex = bindlessIndexOf(instance.Model.MeshletTriangleBuffer.get());
+            constants.MeshletCount = instance.Model.TotalMeshletCount;
+
+            constants.MaterialTableIndex = bindlessIndexOf(instance.Model.MaterialTableBuffer.get());
+            constants.MeshletFilterReject = rejectMask;
+            constants.MeshletFilterRequire = requireMask;
+            // マテリアルテーブルは読み込み時に焼くため、シーン全体の倍率は焼き込めない。
+            // ピクセルシェーダーがここの値を掛ける
+            constants.EmissiveIntensity = emissiveIntensity;
+            constants.OcclusionMapScale = occlusionMapEnabled ? 1.0f : 0.0f;
             return constants;
         }
 
@@ -2850,6 +2919,25 @@ namespace Kurenai
         }
 
         return m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+    }
+
+    bool KurenaiEngine3D::ShouldUseModelMeshletPath(const Assets::ModelInstance& instance) const
+    {
+        // モデル内の1メッシュでも従来経路へ落ちる条件があるなら、モデル全体を従来経路にする。
+        // 混ぜると「1ドローで描いたぶん」と「メッシュ単位で描いたぶん」が同じフレームに
+        // 同居し、食い違いが出たときにどちらのせいか切り分けられなくなる
+        if (!instance.Model.AllMeshesHaveMeshlets)
+        {
+            return false;
+        }
+        if (instance.Model.Meshes.empty())
+        {
+            return false;
+        }
+
+        // 代表として先頭のメッシュで判定する。AllMeshesHaveMeshletsが真なら
+        // メッシュ間で結果は変わらない(残りの条件はすべてモデル単位/インスタンス単位)
+        return ShouldUseMeshletPath(instance.Model, instance.Model.Meshes.front(), instance.IsWater);
     }
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAOTexture() const
@@ -8055,6 +8143,33 @@ namespace Kurenai
                     if (!IsAABBVisible(frustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                     {
                         ++m_FrustumCullCulled;
+                        continue;
+                    }
+
+                    // モデル全体を1回のDispatchMeshで描ける場合はメッシュのループへ入らない。
+                    // マテリアルはメッシュシェーダーが出力した番号でピクセルシェーダーが引くため、
+                    // メッシュごとのSetTextureも定数バッファの更新も要らない。
+                    //
+                    // 【BLENDだけは増幅シェーダーが落とす】半透明はG-Bufferに書かず専用の
+                    // Transparentパスでフォワードシェーディングする。ドローを分けられない以上、
+                    // メッシュレット単位のふるい分けでしか除外できない
+                    if (ShouldUseModelMeshletPath(instance))
+                    {
+                        bindPipelineState(instance.IsMirrored, false, true);
+
+                        const ObjectConstants objectConstants = MakeModelObjectConstants(
+                            instance, m_EmissiveIntensity, m_OcclusionMapEnabled,
+                            Assets::kGpuMaterialFlagTransparent, 0);
+                        cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                        cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                        // 起動するのは「モデル全体のメッシュレット数 ÷ 増幅シェーダーのグループサイズ」。
+                        // 実際にラスタライズされるのはカリングとふるい分けを生き延びたぶんに絞られる
+                        constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
+                        const uint32_t groupCount =
+                            (instance.Model.TotalMeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize;
+                        cmd->DispatchMesh(groupCount, 1, 1);
+                        ++m_DrawCallsGBuffer;
                         continue;
                     }
 
