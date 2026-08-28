@@ -5366,6 +5366,10 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
         m_FrameStatsCullTestedSum += m_FrustumCullTested;
         m_FrameStatsCullCulledSum += m_FrustumCullCulled;
+        for (uint32_t i = 0; i < kDrawCallPassCount; ++i)
+        {
+            m_FrameStatsDrawCallSums[i] += m_DrawCalls[i];
+        }
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -5476,6 +5480,37 @@ namespace Kurenai
             Core::Logger::Info("Perf", cullText);
         }
 
+        // ドローコール数の内訳。インスタンシングやメッシュレット経路の1ドロー化が効いたかは
+        // ここでしか分からない(絵もフレーム時間も、効いていなくても同じに見える)
+        if (m_FrameStatsFrameCount > 0)
+        {
+            uint64_t totalSum = 0;
+            for (const uint64_t sum : m_FrameStatsDrawCallSums)
+            {
+                totalSum += sum;
+            }
+
+            if (totalSum > 0)
+            {
+                const auto perFrame = [this](DrawCallPass pass) {
+                    return static_cast<double>(m_FrameStatsDrawCallSums[static_cast<uint32_t>(pass)])
+                        / m_FrameStatsFrameCount;
+                };
+
+                char drawText[256];
+                std::snprintf(
+                    drawText, sizeof(drawText),
+                    "  ドローコール: 合計 %.1f [1フレームあたり] "
+                    "(シャドウ %.1f / 深度 %.1f / G-Buffer %.1f / プローブ %.1f / DDGI %.1f / 半透明 %.1f / 平面反射 %.1f)",
+                    static_cast<double>(totalSum) / m_FrameStatsFrameCount,
+                    perFrame(DrawCallPass::Shadow), perFrame(DrawCallPass::DepthPrepass),
+                    perFrame(DrawCallPass::GBuffer), perFrame(DrawCallPass::ProbeCapture),
+                    perFrame(DrawCallPass::DDGICapture), perFrame(DrawCallPass::Transparent),
+                    perFrame(DrawCallPass::PlanarReflection));
+                Core::Logger::Info("Perf", drawText);
+            }
+        }
+
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
         m_FrameStatsGPUTimeSumMs = 0.0;
@@ -5483,6 +5518,10 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = 0.0f;
         m_FrameStatsCullTestedSum = 0;
         m_FrameStatsCullCulledSum = 0;
+        for (uint64_t& sum : m_FrameStatsDrawCallSums)
+        {
+            sum = 0;
+        }
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
@@ -5658,6 +5697,11 @@ namespace Kurenai
         // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる
         m_FrustumCullTested = 0;
         m_FrustumCullCulled = 0;
+        // ドローコール数も同じくフレーム単位
+        for (uint32_t& drawCalls : m_DrawCalls)
+        {
+            drawCalls = 0;
+        }
 
         // WM_SIZE(Updateスレッド)が記録しておいたリサイズ要求を、スワップチェーンを実際に使う
         // このスレッドで反映する。このフレームのGPUコマンドをまだ1つも積んでいないこの位置で
@@ -6995,6 +7039,7 @@ namespace Kurenai
                                 cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                                 cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                                 cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                                CountDrawCall(DrawCallPass::Shadow);
                             }
                         }
                     }
@@ -7110,6 +7155,7 @@ namespace Kurenai
                     cmd->SetTexture(6, mesh.BentNormalTexture);
 
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                    CountDrawCall(DrawCallPass::ProbeCapture);
                 }
             }
 
@@ -7434,6 +7480,7 @@ namespace Kurenai
                     cmd->SetTexture(3, mesh.EmissiveTexture);
 
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                    CountDrawCall(DrawCallPass::DDGICapture);
                 }
             }
 
@@ -7900,6 +7947,7 @@ namespace Kurenai
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            CountDrawCall(DrawCallPass::DepthPrepass);
                         }
                     }
                 },
@@ -8032,12 +8080,14 @@ namespace Kurenai
                             // 実際にラスタライズされるのはカリングを生き延びたぶんに絞られる
                             constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
                             cmd->DispatchMesh((mesh.MeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize, 1, 1);
+                            CountDrawCall(DrawCallPass::GBuffer);
                         }
                         else
                         {
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            CountDrawCall(DrawCallPass::GBuffer);
                         }
                     }
                 }
@@ -8714,6 +8764,7 @@ namespace Kurenai
                     cmd->SetTexture(14, draw.Mesh->BentNormalTexture);
 
                     cmd->DrawIndexed(draw.Mesh->IndexCount, 0, 0);
+                    CountDrawCall(DrawCallPass::Transparent);
                 }
             },
         });
@@ -8842,6 +8893,7 @@ namespace Kurenai
                             cmd->SetTexture(3, mesh.EmissiveTexture);
                             cmd->SetTexture(5, mesh.OcclusionTexture);
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            CountDrawCall(DrawCallPass::PlanarReflection);
                         }
                     }
 

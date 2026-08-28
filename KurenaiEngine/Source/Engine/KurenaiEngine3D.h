@@ -2584,6 +2584,37 @@ namespace Kurenai
         uint64_t m_FrameStatsCullTestedSum = 0;
         uint64_t m_FrameStatsCullCulledSum = 0;
 
+        // ジオメトリの描画発行数(ドローコール数)をパスごとに数えたもの。1フレーム分。
+        //
+        // 【なぜパスごとに分けるのか】ドローコールを減らす仕組み ―― インスタンシング・
+        // メッシュレット経路の1ドロー化 ―― が効いたかどうかは、絵でもフレーム時間でも
+        // 判別できない。「合計が減った」だけでは、どのパスで減ったのかが分からないまま
+        // 「速くなった気がする」で終わってしまう。
+        // シャドウは4カスケードぶんが積み上がるので、G-Bufferの4倍前後になるのが正常。
+        //
+        // 数えるのはモデルのジオメトリを描くものだけで、フルスクリーン三角形(Draw(3,0))や
+        // ドローンショーのビルボードは含めない(シーンの内容で増減せず、増減を見る意味が無いため)
+        enum class DrawCallPass : uint32_t
+        {
+            Shadow,             // カスケードシャドウ(4カスケードの合計)
+            DepthPrepass,       // 深度プリパス
+            GBuffer,            // G-Buffer(頂点シェーダー経路・メッシュシェーダー経路の両方)
+            ProbeCapture,       // 反射プローブの焼き込み
+            DDGICapture,        // DDGIプローブの焼き込み(ラスタ経路)
+            Transparent,        // 半透明フォワード
+            PlanarReflection,   // 平面反射
+            Count,
+        };
+        static constexpr uint32_t kDrawCallPassCount = static_cast<uint32_t>(DrawCallPass::Count);
+
+        // フレーム先頭でリセットし、各パスが積み上げる
+        uint32_t m_DrawCalls[kDrawCallPassCount]{};
+        // 集計期間中の合計(平均はフレーム数で割って出す)
+        uint64_t m_FrameStatsDrawCallSums[kDrawCallPassCount]{};
+
+        // ドローコールを1つ数える。描画を発行した直後に呼ぶこと
+        void CountDrawCall(DrawCallPass pass) { ++m_DrawCalls[static_cast<uint32_t>(pass)]; }
+
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};
 
