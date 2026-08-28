@@ -1,0 +1,26 @@
+# ディザの排他性を測るための検証シーン(モデルLOD)。
+#
+# 【なぜLOD0とLOD1に同じ.kmodelを指定するのか】フェード中は2段が同時に描かれる。
+# 同じモデルなら深度が完全に一致するため、
+#   ・2段が同じ画素を取り合っていれば -> Zファイティング(ちらつき)
+#   ・どちらも描かない画素があれば     -> 穴
+#   ・排他に分け合えていれば           -> 通常描画と見分けがつかない
+# という、見れば判る形になる。違うモデルを並べると「絵が変わった」だけで
+# 排他性そのものを測れない。
+#
+# レンダリングパネルの「LODフェード時間」を大きくすると、フェードの途中で止めて観察できる。
+[Scene]
+Name = LOD ディザ排他性テスト
+
+[Model]
+Path        = MaterialTest/MaterialTest.kmodel
+LODPath     = MaterialTest/MaterialTest.kmodel
+LODDistance = 25
+
+[Camera]
+Position = 0.0, 3.0, 22.0
+Yaw = 180.0
+Pitch = -5.0
+
+[Sun]
+TimeOfDay = 10.0

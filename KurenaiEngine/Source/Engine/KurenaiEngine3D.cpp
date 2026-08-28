@@ -5511,6 +5511,7 @@ namespace Kurenai
         m_FrameStatsCullTestedSum += m_FrustumCullTested;
         m_FrameStatsCullCulledSum += m_FrustumCullCulled;
         m_FrameStatsLODSwitchSum += m_LODSwitchCount;
+        m_FrameStatsLODFadingSum += m_LODFadingCount;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -5627,8 +5628,9 @@ namespace Kurenai
             char lodText[192];
             std::snprintf(
                 lodText, sizeof(lodText),
-                "  モデルLOD: 切り替え %llu回 / フェード中 %u件 [集計期間の合計と最終フレーム]",
-                static_cast<unsigned long long>(m_FrameStatsLODSwitchSum), m_LODFadingCount);
+                "  モデルLOD: 切り替え %llu回 / フェード %llu インスタンス×フレーム [いずれも集計期間の合計]",
+                static_cast<unsigned long long>(m_FrameStatsLODSwitchSum),
+                static_cast<unsigned long long>(m_FrameStatsLODFadingSum));
             Core::Logger::Info("Perf", lodText);
         }
 
@@ -5640,6 +5642,7 @@ namespace Kurenai
         m_FrameStatsCullTestedSum = 0;
         m_FrameStatsCullCulledSum = 0;
         m_FrameStatsLODSwitchSum = 0;
+        m_FrameStatsLODFadingSum = 0;
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
