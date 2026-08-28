@@ -481,10 +481,21 @@ namespace Kurenai::RHI
         m_Device->GetCommandList()->DrawInstanced(vertexCount, 1, startVertexLocation, 0);
     }
 
-    void DX12CommandList::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
+    void DX12CommandList::DrawIndexed(
+        uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t instanceCount)
     {
+        if (instanceCount == 0)
+        {
+            Core::Logger::Error("DX12", "DrawIndexed: instanceCountが0のため描画をスキップします");
+            return;
+        }
+
         FlushPendingSrvWrites();
-        m_Device->GetCommandList()->DrawIndexedInstanced(indexCount, 1, startIndexLocation, baseVertexLocation, 0);
+        // 第5引数(StartInstanceLocation)は常に0。SV_InstanceIDへ加算されないため、
+        // ここでずらしても頂点シェーダーからは見えない(IRHICommandList.hの規約どおり
+        // 開始位置は定数バッファで渡す)
+        m_Device->GetCommandList()->DrawIndexedInstanced(
+            indexCount, instanceCount, startIndexLocation, baseVertexLocation, 0);
     }
 
     void DX12CommandList::DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)

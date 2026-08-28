@@ -38,7 +38,9 @@ namespace Kurenai::RHI
         void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
-        void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
+        void DrawIndexed(
+            uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation,
+            uint32_t instanceCount) override;
         void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
