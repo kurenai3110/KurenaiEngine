@@ -5,6 +5,7 @@
 
 #include <DirectXTex.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <cwchar>
@@ -717,6 +718,9 @@ namespace Kurenai::RHI
             ThrowIfFailed(m_Fence->SetEventOnCompletion(fenceValueToWaitFor, m_FenceEvent), "フェンスイベントの設定に失敗しました");
             WaitForSingleObject(m_FenceEvent, INFINITE);
         }
+
+        // GPUが空になったので、遅延解放待ちのリソースは無条件に解放してよい
+        CollectRetiredResources(true);
     }
 
     void DX12Device::SignalFrame()
@@ -743,6 +747,11 @@ namespace Kurenai::RHI
             WaitForSingleObject(m_FenceEvent, INFINITE);
             m_LastFrameGPUWaitTimeMs = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - waitStart).count();
         }
+
+        // フレーム境界で、GPUが使い終わったリソースを回収する。
+        // m_FenceValueをここ(Renderスレッド)でだけ読むことで、どのスレッドから
+        // RetireResourceされても競合しない
+        CollectRetiredResources(false);
 
         ResetCommandList();
     }
@@ -1524,7 +1533,26 @@ namespace Kurenai::RHI
         return std::make_unique<DX12ComputePipelineState>(pso);
     }
 
-    std::unique_ptr<IRHITexture> DX12Device::CreateTextureResourceFromImage(const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image)
+    D3D12_SHADER_RESOURCE_VIEW_DESC DX12Device::MakeSrvDesc(const DirectX::TexMetadata& metadata)
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+        srvDesc.Format = metadata.format;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        if (metadata.IsCubemap())
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            srvDesc.TextureCube.MipLevels = static_cast<UINT>(metadata.mipLevels);
+        }
+        else
+        {
+            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
+        }
+        return srvDesc;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> DX12Device::CreateAndUploadTextureResource(
+        const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image)
     {
         // 初期データのアップロードはm_CommandList(Renderスレッドが毎フレーム使うコマンドリスト)ではなく
         // m_UploadCommandList専用のコマンドリストで行う(詳細はm_UploadCommandListのコメント参照)。
@@ -1560,31 +1588,122 @@ namespace Kurenai::RHI
             CD3DX12_RESOURCE_BARRIER::Transition(resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         m_UploadCommandList->ResourceBarrier(1, &toSrvBarrier);
 
-        // ファイル/デコード済み画像から作るテクスチャ(マテリアル・スカイボックス・プレースホルダ)は
-        // すべてアセット由来。シーン読み込み専用スレッドが確保・解放するためアセット側のヒープを使う
-        const uint32_t srvIndex = m_AssetSrvCpuHeap->Allocate();
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-        srvDesc.Format = metadata.format;
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        if (metadata.IsCubemap())
-        {
-            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-            srvDesc.TextureCube.MipLevels = static_cast<UINT>(metadata.mipLevels);
-        }
-        else
-        {
-            srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            srvDesc.Texture2D.MipLevels = static_cast<UINT>(metadata.mipLevels);
-        }
-        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
-
-        auto texture = std::make_unique<DX12Texture>(
-            this, m_AssetSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid);
-
         // アップロードバッファはこの関数を抜けるまで生存させる必要があるため、ここで同期的に実行完了を待つ
         UploadSubmitAndWait();
 
-        return texture;
+        return resource;
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateTextureResourceFromImage(const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image)
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource = CreateAndUploadTextureResource(metadata, image);
+
+        // ファイル/デコード済み画像から作るテクスチャ(マテリアル・スカイボックス・プレースホルダ)は
+        // すべてアセット由来。シーン読み込み専用スレッドが確保・解放するためアセット側のヒープを使う
+        const uint32_t srvIndex = m_AssetSrvCpuHeap->Allocate();
+        const D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = MakeSrvDesc(metadata);
+        m_Device->CreateShaderResourceView(resource.Get(), &srvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
+
+        return std::make_unique<DX12Texture>(
+            this, m_AssetSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid);
+    }
+
+    bool DX12Device::ReplaceTextureContents(IRHITexture* target, const TextureImage& image)
+    {
+        auto* texture = static_cast<DX12Texture*>(target);
+        if (texture == nullptr)
+        {
+            Core::Logger::Error("DX12", "ReplaceTextureContents: テクスチャがnullptrです");
+            return false;
+        }
+
+        // 差し替えてよいのは、アセット用ヒープから確保したSRVだけを持つテクスチャに限る。
+        // レンダーターゲットやUAVを持つものは他のビューとの整合が取れなくなる
+        if (!texture->HasSrv() || texture->HasRtv() || texture->HasDsv() || texture->HasUav())
+        {
+            Core::Logger::Error("DX12", "ReplaceTextureContents: SRV以外のビューを持つテクスチャは差し替えられません");
+            return false;
+        }
+        if (texture->GetSrvUavHeap() != m_AssetSrvCpuHeap.get())
+        {
+            Core::Logger::Error("DX12", "ReplaceTextureContents: アセット用ヒープ以外から確保されたテクスチャは差し替えられません");
+            return false;
+        }
+
+        const DirectX::TexMetadata& metadata = image.GetMetadata();
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> newResource;
+        try
+        {
+            newResource = CreateAndUploadTextureResource(metadata, image.GetImage());
+        }
+        catch (const std::exception& e)
+        {
+            // 失敗しても元の中身はそのまま。常駐ミップが減らないだけで絵は出続ける
+            Core::Logger::Error("DX12", std::string("ReplaceTextureContents: リソースの作成に失敗しました: ") + e.what());
+            return false;
+        }
+
+        // 【同じ番号のディスクリプタを作り直す】新しい番号を払い出さないので、
+        // Assets::Meshが持つIRHITexture*も、bindless番号も変わらない
+        const uint32_t srvIndex = texture->GetSrvIndex();
+        const D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = MakeSrvDesc(metadata);
+        m_Device->CreateShaderResourceView(newResource.Get(), &srvDesc, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
+
+        const uint32_t bindlessIndex = texture->GetBindlessIndex();
+        if (bindlessIndex != kInvalidBindlessIndex && m_BindlessTable)
+        {
+            m_BindlessTable->Rebind(bindlessIndex, m_AssetSrvCpuHeap->GetCpuHandle(srvIndex));
+        }
+
+        // 古いリソースはGPUがまだ読んでいる可能性がある。ここで手放さず遅延解放キューへ積む
+        RetireResource(texture->SwapResource(std::move(newResource), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE));
+        return true;
+    }
+
+    void DX12Device::RetireResource(Microsoft::WRL::ComPtr<ID3D12Resource> resource)
+    {
+        if (!resource)
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(m_RetiredResourcesMutex);
+        m_RetiredResources.push_back(RetiredResource{ std::move(resource), 0 });
+    }
+
+    void DX12Device::CollectRetiredResources(bool releaseAll)
+    {
+        std::lock_guard<std::mutex> lock(m_RetiredResourcesMutex);
+        if (m_RetiredResources.empty())
+        {
+            return;
+        }
+
+        if (releaseAll)
+        {
+            // WaitForGPUIdle直後専用。GPUは何も実行していないので無条件に解放してよい
+            m_RetiredResources.clear();
+            return;
+        }
+
+        const uint64_t completed = m_Fence ? m_Fence->GetCompletedValue() : 0;
+        auto removeFrom = std::remove_if(
+            m_RetiredResources.begin(), m_RetiredResources.end(),
+            [completed](const RetiredResource& entry) {
+                return entry.FenceValue != 0 && entry.FenceValue <= completed;
+            });
+        m_RetiredResources.erase(removeFrom, m_RetiredResources.end());
+
+        // 未押印のものへ、直前のフレームがシグナルしたフェンス値を押す。
+        // この値が完了した時点で、差し替えを行ったフレームまでのGPU実行はすべて終わっている
+        for (RetiredResource& entry : m_RetiredResources)
+        {
+            if (entry.FenceValue == 0)
+            {
+                entry.FenceValue = m_FenceValue;
+            }
+        }
     }
 
     std::unique_ptr<IRHITexture> DX12Device::CreateTextureFromFile(const std::wstring& filePath, bool sRGB)

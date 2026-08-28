@@ -6,6 +6,7 @@
 #include <dxgi1_4.h>
 #include <memory>
 #include <mutex>
+#include <vector>
 #include <wrl/client.h>
 
 #include "DX12BindlessTable.h"
@@ -44,6 +45,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHIPipelineState> CreateMeshPipelineState(const MeshPipelineStateDesc& desc) override;
         std::unique_ptr<IRHITexture> CreateTextureFromFile(const std::wstring& filePath, bool sRGB) override;
         std::unique_ptr<IRHITexture> CreateTextureFromImage(const TextureImage& image) override;
+        bool ReplaceTextureContents(IRHITexture* target, const TextureImage& image) override;
         std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) override;
         std::unique_ptr<IRHITexture> CreateTextureFromMemory(uint32_t width, uint32_t height, const void* pixelsRGBA8) override;
         std::unique_ptr<IRHITexture> CreateRenderTexture(uint32_t width, uint32_t height, Format format) override;
@@ -206,6 +208,21 @@ namespace Kurenai::RHI
         // 取り出して実際のGPUリソース作成を行う共通処理(CreateTextureFromFile/CreateSolidColorTexture/
         // CreateTextureFromMemoryからも使う)
         std::unique_ptr<IRHITexture> CreateTextureResourceFromImage(const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image);
+        // 上のうち「ID3D12Resourceを作って全ミップをアップロードする」ところだけ。
+        // ReplaceTextureContentsが同じ処理を使うため切り出してある
+        Microsoft::WRL::ComPtr<ID3D12Resource> CreateAndUploadTextureResource(
+            const DirectX::TexMetadata& metadata, const DirectX::ScratchImage& image);
+        // metadataに対応するSRV記述子を組み立てる(2Dとキューブマップの分岐)
+        static D3D12_SHADER_RESOURCE_VIEW_DESC MakeSrvDesc(const DirectX::TexMetadata& metadata);
+        // GPUがまだ参照しているかもしれないリソースを、フェンスの完了を待ってから解放するための
+        // 積み込み口。ストリーミングは毎フレーム少しずつテクスチャを差し替えるため、
+        // 既存の「破棄の前にWaitForGPUIdle()を呼ぶ」運用では止まってしまう。
+        // どのスレッドから呼んでもよい(mutexで守る)
+        void RetireResource(Microsoft::WRL::ComPtr<ID3D12Resource> resource);
+        // 積まれたリソースのうち、GPUが使い終わったものを解放する。
+        // AdvanceToNextFrame(フレーム境界)から呼ぶ。releaseAll=trueならフェンスを見ずに全部解放する
+        // (WaitForGPUIdle直後専用)
+        void CollectRetiredResources(bool releaseAll);
         // m_UploadCommandListへ記録した内容をクローズして実行投入し、完了を同期的に待ってから開き直す。
         // CreateBuffer/CreateTextureFromImageの初期データアップロード専用(詳細はm_UploadCommandListの
         // コメント参照)
@@ -261,6 +278,24 @@ namespace Kurenai::RHI
         uint64_t m_FrameFenceValues[kFrameCount] = {};
         uint32_t m_FrameIndex = 0;
         HANDLE m_FenceEvent = nullptr;
+
+        // 【遅延解放キュー】GPUがまだ参照しているかもしれないリソースの墓場。
+        //
+        // このエンジンの既定の作法は「破棄の前にWaitForGPUIdle()を呼ぶ」(IRHIDevice.h参照)だが、
+        // テクスチャストリーミングは毎フレーム少しずつテクスチャを差し替えるため、
+        // そのたびにGPUを空にしていたら描画が止まる。ここへ積んでフレーム境界で回収する。
+        //
+        // FenceValue==0 は「まだフレーム境界を跨いでいない(未押印)」の意味。
+        // CollectRetiredResourcesがフレーム境界でその時点のm_FenceValueを押し、
+        // そのフェンスが完了した次の回収で解放する。押印をRenderスレッド側で行うことで、
+        // どのスレッドから積まれてもm_FenceValueを競合なく読める
+        struct RetiredResource
+        {
+            Microsoft::WRL::ComPtr<ID3D12Resource> Resource;
+            uint64_t FenceValue = 0;
+        };
+        std::vector<RetiredResource> m_RetiredResources;
+        std::mutex m_RetiredResourcesMutex;
         // 直前のAdvanceToNextFrame()でWaitForSingleObjectに実際に費やした時間(ms)。
         // フェンスが既に満たされていて待たなかった場合は0になる
         float m_LastFrameGPUWaitTimeMs = 0.0f;

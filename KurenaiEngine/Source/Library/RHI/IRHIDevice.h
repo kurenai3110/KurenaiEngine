@@ -37,6 +37,26 @@ namespace Kurenai::RHI
         // デバイスに紐づく処理なので直列に行う必要がある。呼び出し側(ModelLoader::TextureLoader::Prefetch)は
         // この2つを分離することで、大量のテクスチャを持つモデルの読み込みを並列化する
         virtual std::unique_ptr<IRHITexture> CreateTextureFromImage(const TextureImage& image) = 0;
+
+        // 既存のテクスチャの中身(リソース実体とSRV)を、別のTextureImageで作り直したもので置き換える。
+        // 成功したらtrue。失敗時はログを出してfalseを返し、元の中身は変更しない
+        // (常駐ミップが減らないだけで絵は出続ける、という安全側へ倒す)。
+        //
+        // 【なぜ「作り直して差し替える」ではなく「中身だけ入れ替える」のか】
+        // Assets::MeshはIRHITexture*の生ポインタでテクスチャを指しており(所有はModel::Textures)、
+        // さらにbindless対応環境ではSRVの番号がシェーダーの定数バッファへ載る。
+        // 新しいIRHITextureを作って差し替えると、この2種類の参照を全域で貼り替えることになる。
+        // ここでオブジェクトの同一性・SRVスロット・bindless番号をすべて保つことで、
+        // 呼び出し側は「このテクスチャの中身が変わった」だけを知っていればよくなる。
+        //
+        // 【対象】アセット由来の、SRVしか持たないテクスチャに限る。レンダーターゲットや
+        // UAVを持つ描画側のテクスチャに対しては失敗する(ビューの整合が取れないため)。
+        //
+        // 【スレッド】アセット用ディスクリプタヒープはロックを持たず、確保・解放を行うのは
+        // Loaderスレッドだけという不変条件がある(DX12Device::GetAssetSrvCpuHeap参照)。
+        // この関数もその不変条件の下で呼ぶこと
+        virtual bool ReplaceTextureContents(IRHITexture* target, const TextureImage& image) = 0;
+
         virtual std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
         // RGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)のピクセルデータからテクスチャを
         // 作成する。実行時に生成したデータ(フォントアトラス等)をアップロードする用途向け

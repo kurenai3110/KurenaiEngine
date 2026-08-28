@@ -29,5 +29,11 @@ namespace Kurenai::RHI
         // (生成経路が多いため、経路ごとに記録するのではなくリソース側から引いて記録漏れを防ぐ)
         virtual uint32_t GetWidth() const = 0;
         virtual uint32_t GetHeight() const = 0;
+
+        // このテクスチャが実際に持っているミップ段数。
+        //
+        // テクスチャストリーミングの常駐ミップ制御が「今どこまで常駐しているか」を知るために要る。
+        // GetWidth/GetHeightと同じく、生成経路が多いためリソース記述子から引いて記録漏れを防ぐ
+        virtual uint32_t GetMipLevels() const = 0;
     };
 }

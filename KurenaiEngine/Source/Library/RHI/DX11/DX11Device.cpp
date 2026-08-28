@@ -582,6 +582,40 @@ namespace Kurenai::RHI
         return std::make_unique<DX11Texture>(srv);
     }
 
+    bool DX11Device::ReplaceTextureContents(IRHITexture* target, const TextureImage& image)
+    {
+        auto* texture = static_cast<DX11Texture*>(target);
+        if (texture == nullptr)
+        {
+            Core::Logger::Error("DX11", "ReplaceTextureContents: テクスチャがnullptrです");
+            return false;
+        }
+
+        // 差し替えてよいのは、SRVしか持たないアセット由来のテクスチャに限る。
+        // レンダーターゲット等は他のビューとの整合が取れなくなる
+        if (texture->GetShaderResourceView() == nullptr || texture->HasNonSrvViews())
+        {
+            Core::Logger::Error("DX11", "ReplaceTextureContents: SRV以外のビューを持つテクスチャは差し替えられません");
+            return false;
+        }
+
+        const DirectX::ScratchImage& scratchImage = image.GetImage();
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        const HRESULT hr = DirectX::CreateShaderResourceView(
+            m_Device.Get(), scratchImage.GetImages(), scratchImage.GetImageCount(), image.GetMetadata(), &srv);
+        if (FAILED(hr))
+        {
+            // 失敗しても元の中身はそのまま。常駐ミップが減らないだけで絵は出続ける
+            Core::Logger::Error("DX11", "ReplaceTextureContents: シェーダリソースビューの作成に失敗しました");
+            return false;
+        }
+
+        // 古いテクスチャの実体は、GPUが参照し終えるまでDX11ランタイムが破棄を遅らせる
+        // (DX12のような自前の遅延解放は要らない)
+        texture->SwapShaderResourceView(std::move(srv));
+        return true;
+    }
+
     std::unique_ptr<IRHITexture> DX11Device::CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
     {
         const uint8_t pixel[4] = { r, g, b, a };

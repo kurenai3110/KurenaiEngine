@@ -72,6 +72,22 @@ namespace Kurenai::RHI
 
         uint32_t GetWidth() const override { return m_Width; }
         uint32_t GetHeight() const override { return m_Height; }
+        uint32_t GetMipLevels() const override { return m_MipLevels; }
+
+        // このテクスチャのSRVが確保されている非シェーダー可視ヒープと、その中の番号。
+        // DX12Device::ReplaceTextureContentsが「同じ番号のディスクリプタを作り直す」ために引く
+        DX12DescriptorHeap* GetSrvUavHeap() const { return m_SrvUavHeap; }
+        uint32_t GetSrvIndex() const { return m_SrvIndex; }
+        // UAVを持つか(HasRtv/HasDsvは上で定義済み)。ストリーミングの差し替え対象は
+        // SRVしか持たないアセット由来のテクスチャに限るため、その判定に使う
+        bool HasUav() const { return m_UavIndex != kInvalid || !m_MipUavIndices.empty(); }
+
+        // リソース実体を差し替え、古いものを返す(呼び出し側が遅延解放キューへ積む)。
+        // SRV番号もbindless番号も変えないため、Assets::Meshが持つIRHITexture*の
+        // 生ポインタも、シェーダーが定数バッファ経由で持つbindless番号も貼り替えずに済む。
+        // ディスクリプタの作り直しとbindlessの再登録は呼び出し側(DX12Device)が行う
+        Microsoft::WRL::ComPtr<ID3D12Resource> SwapResource(
+            Microsoft::WRL::ComPtr<ID3D12Resource> newResource, D3D12_RESOURCE_STATES newState);
 
         uint32_t GetBindlessIndex() const override { return m_BindlessIndex; }
         // DX12Device::RegisterBindlessが払い出した番号を控える。
@@ -92,10 +108,15 @@ namespace Kurenai::RHI
         std::vector<uint32_t> m_SliceDsvIndices;
         // キューブマップ配列の枚数(非キューブマップ・単一キューブは1)。m_MipUavIndicesのフラット添字計算に使う
         uint32_t m_CubeCount = 1;
-        // ミップ0のピクセルサイズ。生成経路が多く引数からは受け取れないため、
+        // ミップ0のピクセルサイズとミップ段数。生成経路が多く引数からは受け取れないため、
         // コンストラクタでリソース記述子(GetDesc)から求めて控える
         uint32_t m_Width = 0;
         uint32_t m_Height = 0;
+        uint32_t m_MipLevels = 0;
+
+        // m_Resourceの記述子からm_Width/m_Height/m_MipLevelsを取り直す。
+        // コンストラクタとSwapResourceの両方から呼ぶ(片方だけ更新する事故を防ぐ)
+        void CaptureDimensionsFromResource();
         // bindless区画に登録されている場合のみ有効(既定は未登録)。
         // 番号の意味と返却の作法はDX12BindlessTableを参照
         uint32_t m_BindlessIndex = kInvalidBindlessIndex;
