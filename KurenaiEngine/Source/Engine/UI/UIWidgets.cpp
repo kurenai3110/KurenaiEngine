@@ -173,14 +173,14 @@ namespace Kurenai::UI
 
     bool SliderFloatSceneDependent(
         const char* label, float* value, float minValue, float maxValue, bool& outRecalcRequested, const char* format,
-        const char* help)
+        ImGuiSliderFlags flags, const char* help)
     {
         if (!ValidatePointer(value, "SliderFloatSceneDependent", label))
         {
             return false;
         }
 
-        const bool changed = ImGui::SliderFloat(label, value, minValue, maxValue, format);
+        const bool changed = ImGui::SliderFloat(label, value, minValue, maxValue, format, flags);
         ItemHelp(help);
         if (DrawResetContextMenu(kRecalcMenuLabel))
         {

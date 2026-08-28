@@ -56,8 +56,13 @@ namespace Kurenai::UI
 
     // 既定値を持たない(シーンから再計算する)スライダー。
     // 右クリックメニューの文言が「既定値に戻す」ではなく「シーンから再計算」になる。
-    // 再計算が要求されたらtrueを返すので、呼び出し側でResetSceneDependentParams()を呼ぶこと
+    // 再計算が要求されたらtrueを返すので、呼び出し側でResetSceneDependentParams()を呼ぶこと。
+    //
+    // flagsはSliderFloatExと同じくImGuiへそのまま渡す。値域が桁をまたぐものは
+    // ImGuiSliderFlags_Logarithmicを付けないと、小さい側がスライダーの左端に潰れて
+    // 動かせなくなる(カメラ速度はシーンによって5〜653 m/sになり、
+    // スライダーの値域は.ksceneが取れる範囲に合わせて0.1〜10000 m/s)
     bool SliderFloatSceneDependent(
         const char* label, float* value, float minValue, float maxValue, bool& outRecalcRequested,
-        const char* format = "%.3f", const char* help = nullptr);
+        const char* format = "%.3f", ImGuiSliderFlags flags = 0, const char* help = nullptr);
 }

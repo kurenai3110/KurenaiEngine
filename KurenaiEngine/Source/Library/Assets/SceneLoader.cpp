@@ -322,6 +322,8 @@ namespace Kurenai::Assets
             float ShadowDistance = 0.0f;
             bool HasStreamingDistance = false;
             float StreamingDistance = 0.0f;
+            bool HasCameraSpeed = false;
+            float CameraSpeed = 0.0f;
             bool TextureStreamingEnabled = false;
             float TextureStreamingBias = -2.0f;
             bool AOEnabled = true;
@@ -590,6 +592,20 @@ namespace Kurenai::Assets
                             errorAt(lineNumber, rawLine, "StreamingDistanceは1〜100000の範囲で指定してください");
                         }
                         result.HasStreamingDistance = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CameraSpeed"))
+                    {
+                        if (!ParseFloatToken(value, result.CameraSpeed)) errorAt(lineNumber, rawLine, "CameraSpeedの値が不正です");
+                        // 下限: 0や負値は「動けない/逆走する」になるだけで指定として意味を成さない。
+                        // 0.01 m/s は1mの移動に100秒かかる速度で、実用の下限より十分下にある。
+                        // 上限: 東京23区(対角約45km)の自動値が653 m/s、Shiftで2612 m/sなので、
+                        // 桁の取り違えを弾きつつそれを妨げない位置に置く。
+                        // どちらも打ち間違いを弾くためのもので、実用範囲を狭める意図はない
+                        if (result.CameraSpeed < 0.01f || result.CameraSpeed > 10000.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "CameraSpeedは0.01〜10000の範囲で指定してください");
+                        }
+                        result.HasCameraSpeed = true;
                     }
                     else if (CaseInsensitiveEquals(key, L"TextureStreaming"))
                     {
@@ -1339,7 +1355,9 @@ namespace Kurenai::Assets
         }
     }
 
-    Scene LoadScene(RHI::IRHIDevice& device, const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory)
+    Scene LoadScene(
+        RHI::IRHIDevice& device, const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory,
+        const SceneLoadProgressCallback& progress)
     {
         const ParsedScene parsed = ParseSceneFile(sceneFilePath);
 
@@ -1403,6 +1421,8 @@ namespace Kurenai::Assets
         scene.ShadowDistance = parsed.ShadowDistance;
         scene.HasStreamingDistance = parsed.HasStreamingDistance;
         scene.StreamingDistance = parsed.StreamingDistance;
+        scene.HasCameraSpeed = parsed.HasCameraSpeed;
+        scene.CameraSpeed = parsed.CameraSpeed;
 
         // [Scene]Skyboxは[Model]Pathと同じくAssetsルートからの相対パスとして扱い、
         // 同じルート外チェックを適用したうえで絶対パスへ解決してから返す
@@ -1503,6 +1523,34 @@ namespace Kurenai::Assets
         }
 
         bool boundsInitialized = false;
+
+        // 進捗の通知。呼び出し側のコールバックが投げた例外でシーンの読み込みを失敗させたくないため、
+        // ここで握り潰してログに残す(通知は付随的な機能で、読み込みの成否を左右してはいけない)
+        const size_t totalModels = parsed.Models.size();
+        size_t loadedModels = 0;
+        const auto notifyProgress = [&progress, totalModels](size_t loaded)
+        {
+            if (!progress)
+            {
+                return;
+            }
+            try
+            {
+                progress(loaded, totalModels);
+            }
+            catch (const std::exception& e)
+            {
+                Core::Logger::Error(
+                    "SceneLoader", std::string("読み込み進捗の通知で例外が発生しました(読み込みは継続します): ") + e.what());
+            }
+            catch (...)
+            {
+                Core::Logger::Error("SceneLoader", "読み込み進捗の通知で不明な例外が発生しました(読み込みは継続します)");
+            }
+        };
+        // 【最初に0/Nを通知する】1件目を読み終えるまで総数が分からないと、表示側は
+        // 「何件中の何件目か」を出せない。767モデルのシーンでは1件目だけで数秒かかることもある
+        notifyProgress(0);
 
         for (const ParsedModelEntry& parsedModel : parsed.Models)
         {
@@ -1661,6 +1709,54 @@ namespace Kurenai::Assets
                 instanceBoundsInitialized = true;
             }
 
+            // メッシュごとのワールドAABB(メッシュ単位フラスタムカリング用)。
+            // インスタンスのAABBとまったく同じ手順を、Mesh::BoundsMin/Max(.kmodel v10が持つ
+            // メッシュ単位のローカルAABB)に対して繰り返す。
+            //
+            // 【ここでも8頂点すべてを変換する】回転が入ると軸並行でなくなるため、
+            // min/maxだけを変換して包絡を取ってはいけない(上のインスタンスAABBと同じ理由)。
+            // 【毎フレームやらない】Worldは読み込み後に変化しない(書き込みはこの1箇所のみ)
+            //
+            // 【ストリーミング時は作れない】実体を読んでいないのでメッシュ単位のAABBが無い。
+            // 空のままにしておくと IsMeshVisibleWithStats(KurenaiEngine3D.cpp)が
+            // 間引かない側へ倒す。あとから読み込まれた実体のぶんも同じ扱いになる
+            if (instance.Model)
+            {
+                const Model& boundsModel = *instance.Model;
+                instance.MeshWorldBoundsList.resize(boundsModel.Meshes.size());
+                for (size_t meshIndex = 0; meshIndex < boundsModel.Meshes.size(); ++meshIndex)
+                {
+                    const Mesh& sourceMesh = boundsModel.Meshes[meshIndex];
+                    MeshWorldBounds& meshBounds = instance.MeshWorldBoundsList[meshIndex];
+
+                    for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
+                    {
+                        const XMVECTOR corner = XMVectorSet(
+                            (cornerIndex & 1) ? sourceMesh.BoundsMax[0] : sourceMesh.BoundsMin[0],
+                            (cornerIndex & 2) ? sourceMesh.BoundsMax[1] : sourceMesh.BoundsMin[1],
+                            (cornerIndex & 4) ? sourceMesh.BoundsMax[2] : sourceMesh.BoundsMin[2],
+                            1.0f);
+                        XMFLOAT3 transformedFloat3;
+                        XMStoreFloat3(&transformedFloat3, XMVector3TransformCoord(corner, worldMathSpace));
+
+                        const float cornerXYZ[3] = { transformedFloat3.x, transformedFloat3.y, transformedFloat3.z };
+                        for (int axis = 0; axis < 3; ++axis)
+                        {
+                            if (cornerIndex == 0)
+                            {
+                                meshBounds.Min[axis] = cornerXYZ[axis];
+                                meshBounds.Max[axis] = cornerXYZ[axis];
+                            }
+                            else
+                            {
+                                meshBounds.Min[axis] = std::min(meshBounds.Min[axis], cornerXYZ[axis]);
+                                meshBounds.Max[axis] = std::max(meshBounds.Max[axis], cornerXYZ[axis]);
+                            }
+                        }
+                    }
+                }
+            }
+
             // モデルファイル埋め込みのライト(glTFのKHR_lights_punctual・FBXのライトノード由来、
             // ModelLoader.cppがModel::Lightsへ読み込み済み)をInstance::Worldでワールド空間へ変換して
             // シーン全体のライト一覧へ追加する。Positionは平行移動を含む点として、Directionは
@@ -1694,6 +1790,9 @@ namespace Kurenai::Assets
             }
 
             scene.Instances.push_back(std::move(instance));
+
+            ++loadedModels;
+            notifyProgress(loadedModels);
         }
 
         // モデル共有が効いたかを数値で残す。「共有 0件」ならキャッシュが一度も当たっておらず、
