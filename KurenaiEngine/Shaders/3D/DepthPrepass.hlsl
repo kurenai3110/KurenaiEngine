@@ -22,7 +22,12 @@
 void PSMainCutout(PSInput input)
 {
     // 判定はGBuffer.hlslのPSMainと同一でなければならない。ここで通した断片が
-    // 向こうで捨てられる(あるいはその逆)と、深度と実際の書き込みが食い違う
-    float4 baseColorSample = BaseColorTexture.Sample(MaterialSampler, input.UV) * BaseColorFactor;
-    clip(baseColorSample.a - AlphaCutoff);
+    // 向こうで捨てられる(あるいはその逆)と、深度と実際の書き込みが食い違う。
+    // マテリアルの読み出し方も向こうと同じ関数を通す ―― 1モデル1ドローの経路では
+    // マテリアルテーブルから、従来経路では定数バッファから読む
+    const GpuMaterial material = LoadSurfaceMaterial(input.MaterialIndex);
+    float4 baseColorSample =
+        SampleMaterialTexture(material.BaseColorTextureIndex, BaseColorTexture, input.UV)
+        * material.BaseColorFactor;
+    clip(baseColorSample.a - material.AlphaCutoff);
 }

@@ -13,7 +13,7 @@ namespace Kurenai::RHI
         // DX11Textureはビューしか受け取らない(生成経路が10種類以上ありどれも寸法を渡してこない)ため、
         // 経路ごとに記録するのではなくここで一括して求め、記録漏れが起きないようにする。
         // ID3D11Texture2D以外(バッファのSRV等)は寸法を持たないため0のままになる
-        void QueryTextureSize(ID3D11View* view, uint32_t& outWidth, uint32_t& outHeight)
+        void QueryTextureSize(ID3D11View* view, uint32_t& outWidth, uint32_t& outHeight, uint32_t& outMipLevels)
         {
             if (!view)
             {
@@ -37,6 +37,7 @@ namespace Kurenai::RHI
             texture2D->GetDesc(&desc);
             outWidth = desc.Width;
             outHeight = desc.Height;
+            outMipLevels = desc.MipLevels;
         }
     }
 
@@ -56,20 +57,35 @@ namespace Kurenai::RHI
         , m_SliceDsvs(std::move(sliceDsvs))
         , m_CubeCount(cubeCount)
     {
+        CaptureDimensionsFromViews();
+    }
+
+    void DX11Texture::CaptureDimensionsFromViews()
+    {
+        m_Width = 0;
+        m_Height = 0;
+        m_MipLevels = 0;
+
         // 持っているビューを優先順に試す(SRVを持たないレンダーターゲット/深度テクスチャもあるため)
-        QueryTextureSize(m_Srv.Get(), m_Width, m_Height);
+        QueryTextureSize(m_Srv.Get(), m_Width, m_Height, m_MipLevels);
         if (m_Width == 0)
         {
-            QueryTextureSize(m_Rtv.Get(), m_Width, m_Height);
+            QueryTextureSize(m_Rtv.Get(), m_Width, m_Height, m_MipLevels);
         }
         if (m_Width == 0)
         {
-            QueryTextureSize(m_Dsv.Get(), m_Width, m_Height);
+            QueryTextureSize(m_Dsv.Get(), m_Width, m_Height, m_MipLevels);
         }
         if (m_Width == 0)
         {
-            QueryTextureSize(m_Uav.Get(), m_Width, m_Height);
+            QueryTextureSize(m_Uav.Get(), m_Width, m_Height, m_MipLevels);
         }
+    }
+
+    void DX11Texture::SwapShaderResourceView(Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> newSrv)
+    {
+        m_Srv = std::move(newSrv);
+        CaptureDimensionsFromViews();
     }
 
     ID3D11UnorderedAccessView* DX11Texture::GetCubeUnorderedAccessView(uint32_t face, uint32_t mipLevel, uint32_t cubeIndex) const

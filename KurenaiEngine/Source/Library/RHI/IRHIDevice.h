@@ -37,6 +37,82 @@ namespace Kurenai::RHI
         // デバイスに紐づく処理なので直列に行う必要がある。呼び出し側(ModelLoader::TextureLoader::Prefetch)は
         // この2つを分離することで、大量のテクスチャを持つモデルの読み込みを並列化する
         virtual std::unique_ptr<IRHITexture> CreateTextureFromImage(const TextureImage& image) = 0;
+
+        // 既存のテクスチャの中身(リソース実体とSRV)を、別のTextureImageで作り直したもので置き換える。
+        // テクスチャストリーミングが常駐ミップを変えるときに使う。
+        //
+        // 【なぜ「作り直して差し替える」ではなく「中身だけ入れ替える」のか】
+        // Assets::MeshはIRHITexture*の生ポインタでテクスチャを指しており(所有はModel::Textures)、
+        // さらにbindless対応環境ではSRVの番号がシェーダーの定数バッファへ載る。
+        // 新しいIRHITextureを作って差し替えると、この2種類の参照を全域で貼り替えることになる。
+        // ここでオブジェクトの同一性・SRVスロット・bindless番号をすべて保つことで、
+        // 呼び出し側は「このテクスチャの中身が変わった」だけを知っていればよくなる。
+        //
+        // 【なぜ2段に分かれているのか】この操作は
+        //   (1) GPUリソースを作って全ミップをアップロードする ―― 重い。GPU同期を含む
+        //   (2) ディスクリプタを書き換えて実体を差し替える   ―― 軽い。数百ナノ秒
+        // の2つからなるが、要求されるスレッドが違う。
+        //
+        // (2)が書き換えるのは、DX12CommandList::SetTextureが**描画を記録するたびに
+        // CopyDescriptorsSimpleのコピー元として読む**ディスクリプタそのものである。
+        // 別スレッドから書き換えると、読んでいる最中に書く競合になる。
+        // かといって(1)をRenderスレッドで行うと、内部のGPU同期待ち(UploadSubmitAndWait)が
+        // 前フレームの描画完了まで待つことになり、CPUとGPUのオーバーラップが丸ごと消える。
+        //
+        // そこで(1)はどのスレッドからでも呼べるPrepareTextureContentsへ、
+        // (2)は描画を記録するスレッドから呼ぶCommitTextureContentsへ分けてある。
+        //
+        // 【対象】アセット由来の、SRVしか持たないテクスチャに限る。レンダーターゲットや
+        // UAVを持つ描画側のテクスチャに対しては失敗する(ビューの整合が取れないため)。
+
+        // 第1段。GPUリソースを作ってアップロードする。**どのスレッドから呼んでもよい。**
+        // 失敗した場合はログを出してnullptrを返す(対象テクスチャは変更しない)。
+        // 戻り値を捨てれば、作りかけのリソースごと何事もなく破棄される
+        virtual std::unique_ptr<IRHIPendingTextureContents> PrepareTextureContents(
+            IRHITexture* target, const TextureImage& image) = 0;
+
+        // 第2段。ディスクリプタを書き換えて実体を差し替える。成功したらtrue。
+        //
+        // **描画を記録するスレッドから、そのフレームで最初のSetTextureより前に呼ぶこと。**
+        // ここを守らないと、記録中のコマンドリストがコピー元として読んでいるディスクリプタを
+        // 書き換えることになる。古いリソースはGPUがまだ読んでいる可能性があるため、
+        // 実装側がフレーム境界まで生存させてから解放する
+        virtual bool CommitTextureContents(IRHIPendingTextureContents* pending) = 0;
+
+        // GPUメモリの実使用量と、ドライバが提示する予算(バイト)。取得できなければfalse。
+        //
+        // 【自己申告と突き合わせるためにある】テクスチャストリーミングは「常駐させた
+        // バイト数」を自分で積算して報告するが、それだけだと物差しの誤りに気付けない。
+        // OSから見た実測値と並べて出すことで、どちらかがおかしいことを検出できる
+        virtual bool GetVideoMemoryUsage(uint64_t& outUsedBytes, uint64_t& outBudgetBytes) const = 0;
+
+        // タイルリソース(予約リソース)の対応段階。**0なら使わない**。
+        //
+        // DX11は常に0(D3D11.2のTiled Resourcesは使わない。ID3D11DeviceContext2を取っておらず、
+        // 既存のDX12専用機能と同じくDX11では非対応で揃える)。
+        // DX12でもTier 1は0を返す ―― 未マップタイルの読み出しが未定義で、
+        // 落ちないようにするにはダミータイルを全域へ貼る必要があり、常駐量の削減に貢献しないため
+        virtual uint32_t GetTiledResourcesTier() const = 0;
+
+        // タイルリソース(予約リソース)を使って常駐ミップを firstMip へ変える第1段。
+        // 対象がまだタイルリソースでなければ、ここで予約リソースを作って中身ごと置き換える。
+        // imageは firstMip 以降のミップを持つもの(TextureImage::LoadFromPackedTextureの部分読み出し)。
+        //
+        // 使えない場合(タイルリソース非対応・標準ミップが1段も無い・形が対象外)は nullptr を返す。
+        // 呼び出し側は PrepareTextureContents(リソースごと作り直す経路)へ落とすこと。
+        //
+        // 【リソースもSRVもbindless番号も変わらないのが利点】変えるのはタイルの貼り替えと
+        // SRVのResourceMinLODClampだけなので、リソースを作り直す経路と違って
+        // 「実行中のコマンドリストが読んでいるディスクリプタを差し替える」問題が起きない。
+        // 確定(CommitTextureContents)がRenderスレッド限定なのは、そのMinLODClampの
+        // 書き換えがディスクリプタの書き換えだからである
+        virtual std::unique_ptr<IRHIPendingTextureContents> PrepareTiledTextureResidency(
+            IRHITexture* target, const TiledTextureDesc& desc, const TextureImage& image, uint32_t firstMip) = 0;
+
+        // タイルプール(タイルリソースの裏付けになるヒープ)の確保済みバイト数と、
+        // そのうち実際に貼られているバイト数。使っていなければどちらも0
+        virtual void GetTilePoolUsage(uint64_t& outReservedBytes, uint64_t& outUsedBytes) const = 0;
+
         virtual std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
         // RGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)のピクセルデータからテクスチャを
         // 作成する。実行時に生成したデータ(フォントアトラス等)をアップロードする用途向け
@@ -154,6 +230,33 @@ namespace Kurenai::RHI
         // 呼び出し側は結果を保持して使い回すこと(IRHITexture::GetBindlessIndexで取り出せる)
         virtual uint32_t RegisterBindless(IRHITexture* texture) = 0;
         virtual uint32_t RegisterBindless(IRHIBuffer* buffer) = 0;
+
+        // bindless区画の使用数と容量。非対応バックエンドは両方0を返す。
+        //
+        // 【なぜ見えるようにするのか】区画が満杯になったときRegisterBindlessは例外を投げず、
+        // エラーログを出してkInvalidBindlessIndexを返す。消費側はそれを「テクスチャ無し」と
+        // 解釈して白1x1へ落とすので、**絵はそれらしく出たまま静かに間違う**。
+        // 上限に近づいていることを事前に見えるようにしておかないと、
+        // 「なぜかこのモデルだけ真っ白」の形でしか気づけない
+        virtual uint32_t GetBindlessUsedCount() const { return 0; }
+        virtual uint32_t GetBindlessCapacity() const { return 0; }
+
+        // バッファの**UAV**をbindlessヒープへ登録し、シェーダーが使う番号を返す。
+        // 上のRegisterBindlessがSRV(読み取り専用)を登録するのに対し、こちらは書き込める。
+        //
+        // 【なぜ別のAPIなのか】SRVとUAVは別のディスクリプタで、同じリソースでも両方が要る。
+        // ResourceDescriptorHeap[i] を RWStructuredBuffer<T> として受けるにはUAVの側の
+        // 番号でなければならず、SRVの番号を渡すと読み取り専用のビューを書き込みに使うことになる。
+        //
+        // 用途は、グラフィックスのルートシグネチャにUAVレンジを持たないステージ ――
+        // 増幅シェーダー・メッシュシェーダー ―― からカウンタへ書き込むこと。
+        // これらのステージはSRVテーブル経由でしかリソースを受け取れないが、
+        // ルートシグネチャがCBV_SRV_UAV_HEAP_DIRECTLY_INDEXEDを立てているため、
+        // bindless経由でならUAVにも届く。
+        //
+        // UAVを持たないバッファ(Vertex/Index/Constant/StructuredReadOnly/StructuredImmutable)を
+        // 渡すとログを出してkInvalidBindlessIndexを返す
+        virtual uint32_t RegisterBindlessUAV(IRHIBuffer* buffer) = 0;
 
         // --- メッシュシェーダー ---------------------------------------------------------------
 

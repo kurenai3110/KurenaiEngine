@@ -46,6 +46,28 @@ namespace Kurenai::RHI
     KURENAI_LIB_API TextureLoadStats GetTextureLoadStats();
     KURENAI_LIB_API void ResetTextureLoadStats();
 
+    // .ktexのDDSペイロードを「デコードせずにヘッダだけ読んで」得た情報。
+    //
+    // テクスチャストリーミングは「どのミップから常駐させるか」を決めてから読み込むため、
+    // 中身を展開する前に寸法とミップ数を知る必要がある。DDSヘッダはDXT10拡張を含めても
+    // 148バイトしかないので、先頭256バイトだけ読めば足りる
+    // (KurenaiPackerのExistingKtexIsUnsupportedが既に同じ手を使っている)
+    struct PackedTextureInfo
+    {
+        uint32_t Width = 0;
+        uint32_t Height = 0;
+        uint32_t MipLevels = 0;
+        // DXGI_FORMATの値。このヘッダーはd3d12.h/dxgiformat.hに依存させたくないためuint32_tで持つ
+        uint32_t Format = 0;
+        // .ktexの24Bヘッダが持つDDSペイロードのバイト数(DDSヘッダを含む)
+        uint64_t PayloadSize = 0;
+        // .ktexのFlags bit0。実体はDXGIフォーマットが持つので検証用
+        bool SRGB = false;
+        // ミップ単位の部分読み出しが使えるか。2Dの単一テクスチャでミップが2段以上あるものだけtrue
+        // (キューブマップ・テクスチャ配列・ボリュームはミップの並びが単純でないため対象外)
+        bool SupportsPartialMipLoad = false;
+    };
+
     // テクスチャファイルのデコード結果(DirectXTexのTexMetadata/ScratchImage)を保持するクラス。
     // GPUデバイスを一切必要としないため、ワーカースレッドから並列に呼び出せる
     // (GPUリソース作成はIRHIDevice::CreateTextureFromImageへ別途渡す側で行う)。
@@ -71,6 +93,28 @@ namespace Kurenai::RHI
         // ヘッダ検証後、DDSペイロードをDirectX::LoadFromDDSMemoryでデコードするだけなので、
         // WICデコード・ミップ生成・BC7圧縮はいずれも発生しない。失敗時はstd::runtime_errorを投げる
         static TextureImage LoadFromPackedTexture(const std::wstring& filePath);
+
+        // 上と同じだが、ミップ0からfirstMip-1段を読み飛ばして「firstMipを新しいミップ0とする
+        // 小さなテクスチャ」として読む。テクスチャストリーミングの常駐ミップ制御で使う。
+        //
+        // 【なぜ小さなテクスチャとして返すのか】RHIにミップ範囲を指定してアップロードするAPIが無く、
+        // SRVもMipLevels=全段で作りきりになっている。ここで寸法ごと縮めて返せば、
+        // IRHIDevice::CreateTextureFromImage/ReplaceTextureContentsは何も知らずに済み、
+        // シェーダー側の変更も要らない。DDSはミップ0を先頭に降順で連続しているため、
+        // 目的のミップのバイト範囲へseekするだけで読み飛ばせる。
+        //
+        // firstMip==0、あるいは部分読み出しの前提を満たさないファイル(キューブマップ・
+        // テクスチャ配列・ミップ1段)の場合は、警告を出して全ミップを読む上の版へ委譲する
+        // ―― 常駐量が減らないだけで絵は正しく出る、という安全側へ倒す
+        static TextureImage LoadFromPackedTexture(const std::wstring& filePath, uint32_t firstMip);
+
+        // .ktexを展開せずにヘッダだけ読む。失敗時は例外を投げずfalseを返しログを出す
+        // (常駐管理は数万枚を相手にするため、1枚読めないことで走査全体を止めない)
+        static bool TryReadPackedTextureInfo(const std::wstring& filePath, PackedTextureInfo& outInfo);
+
+        // firstMip以降を常駐させた場合のGPU上のバイト数(ミップチェーンの合計)。
+        // 常駐VRAMの自己申告値を積算するために使う
+        static uint64_t ComputeMipChainBytes(const PackedTextureInfo& info, uint32_t firstMip);
 
         // デコード済みデータの総バイト数。並列プリフェッチ時のメモリ使用量制御に使う
         uint64_t GetSizeInBytes() const;
