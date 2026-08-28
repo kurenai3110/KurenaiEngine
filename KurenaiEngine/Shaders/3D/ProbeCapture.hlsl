@@ -74,20 +74,7 @@ cbuffer FrameConstants : register(b0)
     // オフセットの担保にはならず、実際にずれていても気づけないため
 };
 
-// GBuffer.hlsl/Transparent.hlslのObjectConstantsと同じレイアウト
-cbuffer ObjectConstants : register(b1)
-{
-    float4x4 World;
-    float4x4 NormalMatrix;
-    float MetallicFactor;
-    float RoughnessFactor;
-    float TangentSignFlip;
-    float AlphaCutoff;
-    float3 EmissiveFactor;
-    // glTFのocclusionTexture.strength(既定1.0)。GBuffer.hlslと同じ枠
-    float OcclusionStrength;
-    float4 BaseColorFactor;
-};
+#include "ObjectConstants.hlsli"
 
 Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
@@ -135,16 +122,20 @@ struct PSInput
     float2 LightmapUV : TEXCOORD2;
 };
 
-PSInput VSMain(VSInput input)
+PSInput VSMain(VSInput input, uint instanceID : SV_InstanceID)
 {
     PSInput output;
-    float3 worldPos = mul(float4(input.Position, 1.0f), World).xyz;
+    // このインスタンスの変換。インスタンシングが無効なドローでは
+    // ObjectConstantsのWorld/NormalMatrix/TangentSignFlipがそのまま返る
+    const ModelInstanceRecord instance = FetchModelInstance(instanceID);
+    float3 worldPos = mul(float4(input.Position, 1.0f), instance.World).xyz;
     output.Position = mul(float4(worldPos, 1.0f), ViewProj);
-    output.Normal = mul(input.Normal, (float3x3)NormalMatrix);
+    output.Normal = mul(input.Normal, (float3x3)instance.NormalMatrix);
     output.WorldPos = worldPos;
     output.UV = input.UV;
     output.LightmapUV = input.LightmapUV;
-    output.Tangent = float4(mul(input.Tangent.xyz, (float3x3)World), input.Tangent.w * TangentSignFlip);
+    output.Tangent =
+        float4(mul(input.Tangent.xyz, (float3x3)instance.World), input.Tangent.w * instance.TangentSignFlip);
     return output;
 }
 

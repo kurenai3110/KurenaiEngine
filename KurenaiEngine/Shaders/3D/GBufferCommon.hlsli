@@ -85,60 +85,7 @@ cbuffer FrameConstants : register(b0)
     float4 WaterBodyColor;
 };
 
-// メッシュ単位(将来的にはシーン上のモデルインスタンス単位)の情報。
-// DX12のルートシグネチャがCBVをb0/b1の2枠しか持たないため、モデル行列もここへ同居させている
-cbuffer ObjectConstants : register(b1)
-{
-    float4x4 World;
-    // Worldの3x3部分の逆転置(4x4に格納)。回転+非一様スケールで法線が歪むのを防ぐため、
-    // 位置と同じWorldではなくこちらを法線の変換に使う(Architecture.html「法線マッピングの
-    // 接線ベクトル計算」参照)
-    float4x4 NormalMatrix;
-    float MetallicFactor;
-    float RoughnessFactor;
-    // Worldの行列式が負(ミラーリングを含む非一様スケール)の場合は-1。従法線の向きが
-    // 反転するため、頂点接線のw成分(従法線の向き)に掛け合わせて補正する
-    float TangentSignFlip;
-    // 0以下ならアルファカットアウト無効(常に不透明として扱う)。glTFのalphaMode=MASKの
-    // マテリアルのみalphaCutoff(既定0.5)が設定される
-    float AlphaCutoff;
-    float3 EmissiveFactor;
-    // glTFのocclusionTexture.strength(既定1.0)。遮蔽マップの効き具合をlerp(1, ao, strength)で
-    // 調整する
-    float OcclusionStrength;
-    // glTFのpbrMetallicRoughness.baseColorFactor(既定[1,1,1,1])。glTF仕様では
-    // baseColor = baseColorTexture * baseColorFactor と定義されており、テクスチャの有無に
-    // 関わらず常に掛ける。半透明パス(Transparent.hlsl)・プローブ焼き込み(ProbeCapture.hlsl)・
-    // レイトレーシング(RaytracingScene.hlsli)も同じく掛ける。**どれか1つでも落としてはいけない**
-    // ―― 同じメッシュでも「直接見たとき」と「反射プローブ/RT反射に映ったとき」で
-    // 色が食い違う(14章参照)
-    float4 BaseColorFactor;
-    // マテリアル種別ID(末尾に追加)。0=通常マテリアル、1=水面(kMaterialIDWater、上記参照)。
-    // C++側 KurenaiEngine3D::MakeObjectConstants が instance.IsWater に応じて設定する
-    float MaterialID;
-
-    // --- メッシュシェーダー経路(GBufferMeshlet.hlsl)専用 -------------------------------
-    //
-    // メッシュシェーダーには入力アセンブラが無く、頂点もメッシュレットも自分でバッファから
-    // 読むしかない。読む先はbindlessディスクリプタ番号でここから受け取る
-    // (IRHIDevice::RegisterBindlessが払い出した番号。Bindless.hlsli参照)。
-    //
-    // 【末尾に足してあるので既存シェーダーへの影響は無い】Shadow.hlslのように
-    // 先頭までしか宣言していないシェーダーがあっても、定数バッファのオフセットは1バイトも
-    // 動かない(上のMaterialID・BaseColorFactorのコメントと同じ理由)。
-    // 頂点シェーダー経路ではどれも読まれないため、C++側は0のままでも構わない
-    uint VertexBufferIndex;          // StructuredBuffer<MeshVertex>(Assets::Vertexと同じ並び)
-    uint MeshletBufferIndex;         // StructuredBuffer<Meshlet>
-    uint MeshletVertexBufferIndex;   // StructuredBuffer<uint>(頂点バッファへのインデックス)
-    uint MeshletTriangleBufferIndex; // StructuredBuffer<uint>(ローカル頂点番号3つを詰めたもの)
-    uint MeshletCount;               // このメッシュのメッシュレット数(増幅シェーダーの範囲外判定用)
-
-    // 透過率(0=不透明、1=完全に透ける)。葉・花弁のように薄いものが、裏から当たった光を
-    // 透かして表側を光らせる量。GBuffer.hlslがG-BufferのAlbedo.aへ書き、
-    // DeferredLighting.hlsl/DirectLighting.hlslの透過項が読む(45章)。
-    // 末尾に足しているので、先頭までしか宣言していないシェーダー(Shadow.hlsl等)への影響は無い
-    float Translucency;
-};
+#include "ObjectConstants.hlsli"
 
 Texture2D BaseColorTexture : register(t0);
 Texture2D NormalTexture : register(t1);
@@ -206,18 +153,22 @@ float2 ClipToUv(float4 clipPos)
     return (clipPos.xy / clipPos.w) * float2(0.5f, -0.5f) + 0.5f;
 }
 
-PSInput VSMain(VSInput input)
+PSInput VSMain(VSInput input, uint instanceID : SV_InstanceID)
 {
     PSInput output;
-    float3 worldPos = mul(float4(input.Position, 1.0f), World).xyz;
+    // このインスタンスの変換。インスタンシングが無効なドローでは
+    // ObjectConstantsのWorld/NormalMatrix/TangentSignFlipがそのまま返る
+    const ModelInstanceRecord instance = FetchModelInstance(instanceID);
+    float3 worldPos = mul(float4(input.Position, 1.0f), instance.World).xyz;
     output.Position = mul(float4(worldPos, 1.0f), ViewProj);
-    output.Normal = mul(input.Normal, (float3x3)NormalMatrix);
+    output.Normal = mul(input.Normal, (float3x3)instance.NormalMatrix);
     output.WorldPos = worldPos;
     output.UV = input.UV;
     output.LightmapUV = input.LightmapUV;
     // 接線は面上の方向ベクトルなので、法線と異なりinverse-transposeではなく
     // Worldの3x3部分そのままで変換する(位置と同じ変換)
-    output.Tangent = float4(mul(input.Tangent.xyz, (float3x3)World), input.Tangent.w * TangentSignFlip);
+    output.Tangent =
+        float4(mul(input.Tangent.xyz, (float3x3)instance.World), input.Tangent.w * instance.TangentSignFlip);
 
     output.CurClip = output.Position;
     // 前フレームの投影位置。現在のシーンは全インスタンスが静的(ModelInstance::Worldは

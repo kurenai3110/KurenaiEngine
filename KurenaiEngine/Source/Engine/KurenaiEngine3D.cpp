@@ -823,7 +823,26 @@ namespace Kurenai
             // DirectLighting.hlslの透過項が読む(45章)。
             // 4バイトのスカラーを末尾に足しているだけなので、既存フィールドのオフセットは動かない
             float Translucency;
+            // インスタンシング。InstancingEnabledが0以外のとき、頂点シェーダーは
+            // World/NormalMatrix/TangentSignFlipを上の値ではなく
+            // ModelInstances[InstanceBase + SV_InstanceID]から取る
+            // (Shaders/3D/ObjectConstants.hlsliのFetchModelInstance)。
+            // 0のときは従来どおりここの値を使うので、既存の描画は1ビットも変わらない
+            uint32_t InstanceBase;
+            uint32_t InstancingEnabled;
         };
+
+        // インスタンス1体ぶんの変換。Shaders/3D/ObjectConstants.hlsliの
+        // struct ModelInstanceRecord とバイト単位で一致させること(144バイト。
+        // ずれると全インスタンスが見当違いの場所へ飛ぶ)
+        struct alignas(16) GPUModelInstance
+        {
+            DirectX::XMFLOAT4X4 World;
+            DirectX::XMFLOAT4X4 NormalMatrix;
+            float TangentSignFlip;
+            float Padding[3];
+        };
+        static_assert(sizeof(GPUModelInstance) == 144, "GPUModelInstanceはHLSL側と同じ144バイトであること");
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
         // TRS(平行移動・回転・スケール)から計算済み(HLSL側のmul(vec, matrix)規約に合わせて
@@ -870,6 +889,11 @@ namespace Kurenai
             constants.MeshletVertexBufferIndex = bindlessIndexOf(mesh.MeshletVertexBuffer.get());
             constants.MeshletTriangleBufferIndex = bindlessIndexOf(mesh.MeshletTriangleBuffer.get());
             constants.MeshletCount = mesh.MeshletCount;
+
+            // インスタンシングは呼び出し側(バッチを描くパス)が明示的に有効にする。
+            // ここでは常に無効 = 従来どおりinstance.World/NormalMatrixを使う経路にしておく
+            constants.InstanceBase = 0;
+            constants.InstancingEnabled = 0;
             return constants;
         }
 
