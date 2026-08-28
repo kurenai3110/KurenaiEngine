@@ -24,7 +24,7 @@ worktreeで作業している場合は**必ず自分のworktreeのパスを明�
 
 終了コード 0 = 全通過、1 = 1つ以上失敗。失敗時はファイル・エントリ・エラー行を一覧表示する。
 
-現状(2026-08-04時点)の基準値: **31ファイル / 185エントリ / 失敗0**。
+現状(2026-08-29時点)の基準値: **41ファイル / 237エントリ / 失敗0**。
 
 ## スクリプトが何をしているか
 
@@ -74,8 +74,31 @@ DX12パスは`-D KURENAI_BINDLESS=1`の**有無で2回**回す。エンジンは
 どちらの構成も出荷される。増幅/メッシュシェーダーは`ResourceDescriptorHeap`でジオメトリを引く
 bindless経路専用なので、dxcで、定義ありの1回だけコンパイルする。
 
-`RayQuery`・`ResourceDescriptorHeap`・`KURENAI_BINDLESS`などSM 5.0に無いものを使うファイルは
+`RayQuery`・`TraceRay`・`RaytracingAccelerationStructure`・`ResourceDescriptorHeap` を使うファイルは
 fxc(DX11経路)の対象から外す。DX11はこれらの描画パスをそもそも持たない。
+
+### 除外の判定に `KURENAI_BINDLESS` を使ってはいけない
+
+**そのマクロで「分岐している」だけのファイルは、マクロ未定義ならSM 5.0で完全にコンパイルできる。**
+`Shadow.hlsl`がまさにそれで、**DX11は実行時に`D3DCompileFromFile`でこのファイルを読む。**
+文字列を含むだけで除外すると、DX11経路が未検証のまま「失敗0」で通る。
+
+2026-08-29に実際にこの穴を開けた。シャドウのアルファカットアウトでbindlessの分岐を足した結果、
+`Shadow.hlsl`がfxcの対象から静かに外れた。`PSMainCutout`へ`WaveActiveAllTrue`(SM 6.0以降)を
+入れても**「失敗0」で通る**ことを対照実験で確認している。
+しかも`KurenaiEngine3D.cpp`のshadow系`CreateShader`はtry/catchに入っていないため、
+SM 5.0で落ちる変更が入ると**DX11は起動時に例外で死ぬ**。
+
+判定したいのは「マクロ未定義に展開してもSM 5.0の機能しか使わないか」で、これは字面では決まらない。
+そこで**フォールバックを持たない(bindless専用の)シェーダーだけ、ファイル先頭に
+`KURENAI_SHADER_BINDLESS_ONLY`と書く**ことにした(現状は`SoftwareRaster.hlsl`と
+`SoftwareRasterResolve.hlsl`の2本)。**印を付け忘れたらfxcに掛かって失敗する**ので、
+黙って検証から漏れる側には倒れない。
+
+増幅/メッシュシェーダーのファイル(`GBufferMeshlet.hlsl`・`ShadowMeshlet.hlsl`)は
+`ResourceDescriptorHeap`を直接使っているので自動的に外れる。
+
+**「全部通った」を見たら母数も見ること。** 除外が増えれば失敗0のまま検証範囲だけが狭まる。
 
 ## BOMの扱い（重要・fxcとdxcで逆）
 

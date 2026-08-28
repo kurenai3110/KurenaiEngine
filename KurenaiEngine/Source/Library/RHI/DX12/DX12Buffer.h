@@ -129,6 +129,10 @@ namespace Kurenai::RHI
         // BufferUsage::IndirectArgsで作成されたか。DispatchIndirectはこれを見て、
         // 引数バッファ以外を渡された場合にログを出して何もしない
         bool IsIndirectArgs() const { return m_Usage == BufferUsage::IndirectArgs; }
+        // BufferUsage::Readbackで作成されたか。CopyBufferToReadbackが行き先を検証するのに使う
+        bool IsReadback() const { return m_Usage == BufferUsage::Readback; }
+        // BufferUsage::Readbackの内容をCPUへ写す。詳細はIRHIBuffer::ReadbackDataのコメント
+        bool ReadbackData(void* outData, uint32_t sizeInBytes) override;
         // UAVディスクリプタを持つか(ClearUnorderedAccessBufferUintの事前判定に使う)
         bool HasUav() const { return m_SrvUavHeap != nullptr && m_UavIndex != kInvalid; }
         // ClearUnorderedAccessViewUint専用のraw(ByteAddress)UAVハンドルを返す。
@@ -160,6 +164,12 @@ namespace Kurenai::RHI
         // 意味はDX12Texture::SetBindlessIndexと同じ
         void SetBindlessIndex(uint32_t index) { m_BindlessIndex = index; }
 
+        // UAVをbindlessへ登録した番号。SRVの番号(m_BindlessIndex)とは別に持つ ――
+        // 同じリソースでもSRVとUAVは別のディスクリプタで、片方に相乗りさせると
+        // 読み取り専用のビューを書き込みに使う(あるいはその逆)ことになる
+        uint32_t GetBindlessUavIndex() const { return m_BindlessUavIndex; }
+        void SetBindlessUavIndex(uint32_t index) { m_BindlessUavIndex = index; }
+
     private:
         DX12Device* m_Device = nullptr;
         // m_SrvIndex / m_UavIndex の確保元。頂点/インデックス/定数バッファは
@@ -175,6 +185,8 @@ namespace Kurenai::RHI
         uint32_t m_ClearUavIndex = kInvalid;
         // bindless区画に登録されている場合のみ有効(既定は未登録)
         uint32_t m_BindlessIndex = kInvalidBindlessIndex;
+        // UAVをbindless区画へ登録した番号(RegisterBindlessUAV)。SRVとは別枠
+        uint32_t m_BindlessUavIndex = kInvalidBindlessIndex;
         // このバッファがどのUsageで作られたか。SRV/UAVディスクリプタの有無だけでは
         // StructuredReadOnlyとStructuredRWを区別できないため保持する
         BufferUsage m_Usage = BufferUsage::Vertex;

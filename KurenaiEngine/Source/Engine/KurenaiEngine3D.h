@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <unordered_set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -20,6 +21,7 @@
 
 #include "Assets/RaytracingScene.h"
 #include "Assets/Scene.h"
+#include "Assets/TextureStreaming.h"
 #include "Core/Camera.h"
 #include "Core/CPUProfiler.h"
 
@@ -37,6 +39,7 @@ namespace Kurenai::UI
     class SystemPanel;
     class ProfilerPanel;
     class ReflectionProbePanel;
+    class StreamingPanel;
 }
 
 namespace Kurenai
@@ -148,6 +151,7 @@ namespace Kurenai
         friend class UI::SystemPanel;
         friend class UI::ProfilerPanel;
         friend class UI::ReflectionProbePanel;
+        friend class UI::StreamingPanel;
 
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
         // スナップショット。m_TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
@@ -210,7 +214,12 @@ namespace Kurenai
         // 「どのPSOを束ねるか」と「DispatchMeshとDrawIndexedのどちらを積むか」の判断が
         // ずれると即座に破綻するため、判定を1か所に集約する。
         // isWaterがtrueのメッシュは常にfalse(理由は実装のコメント参照)
-        bool ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const;
+        bool ShouldUseMeshletPath(const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const;
+        // このインスタンスを「1回のDispatchMeshでモデル全体」の経路で描けるか。
+        // 描けない場合は従来どおりメッシュ単位のループで描く
+        // modelは「このパスが描く段」。モデルLODが入ったのでinstance.Model(最も詳細な段)とは
+        // 限らず、シャドウは最も粗い段、G-Buffer/プリパスは選ばれた段を渡す
+        bool ShouldUseModelMeshletPath(const Assets::ModelInstance& instance, const Assets::Model& model) const;
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
         // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
         RHI::IRHITexture* GetActiveAOTexture() const;
@@ -517,9 +526,18 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassPipelineStateMirrored;
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineStateMirrored;
+        // メッシュシェーダー版のプリパス(G-Bufferと同じ増幅/メッシュシェーダーを使う)。
+        // これが無いと、メッシュレット経路で描くモデルの深度をプリパスで埋められない
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletPipelineStateMirrored;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletCutoutPipelineStateMirrored;
         // プリパスを走らせるか。オーバードローが小さいシーンでは、増えるジオメトリ1周ぶんが
         // 省けるピクセルシェーダーより高くつくため切れるようにしてある
         bool m_DepthPrepassEnabled = Defaults::DepthPrepassEnabled;
+        // メッシュ単位のフラスタムカリングを行うか(対照実験用。EngineDefaults.h参照)。
+        // OFFのあいだは判定を1回も呼ばないので、統計は「判定なし」になる
+        bool m_MeshCullingEnabled = Defaults::MeshCullingEnabled;
 
         // --- メッシュシェーダー版のジオメトリパス(Shaders/3D/GBufferMeshlet.hlsl) ---------
         //
@@ -542,12 +560,60 @@ namespace Kurenai
         // m_DeviceはKurenaiEngineBaseのprotectedメンバで、派生クラスのfriendであるUIパネルから
         // 触れるかはC++の規則の解釈が分かれるため、m_RaytracingAvailableと同じくここへ控える
         bool m_MeshShaderAvailable = false;
+        // bindless区画の容量と使用数(IRHIDevice::GetBindlessCapacity/GetBindlessUsedCountの写し)。
+        // 容量は初期化時に、使用数はフレーム先頭に控える。**満杯でも例外は飛ばず
+        // 白1x1で描かれてしまう**ため、UIとフレーム統計ログの両方へ出す
+        uint32_t m_BindlessCapacity = 0;
+        uint32_t m_BindlessUsedCount = 0;
         // メッシュレット経路を使うか(ImGuiのレンダリングパネルから切り替える)。
         // 対応環境では既定で有効。無効にすると従来の頂点シェーダー描画に戻るため、
         // 見た目の差分を目で比較できる
         bool m_MeshletRenderingEnabled = true;
         // メッシュレットごとの色分け表示。m_MeshletRenderingEnabledが有効なときだけ効く
         bool m_MeshletDebugViewEnabled = false;
+        // 増幅シェーダーのHi-Zオクルージョンカリング(Stage 5-2)。メッシュレットのバウンディング球を
+        // 前フレームのHi-Zへ投影し、「視界内だが手前の何かに完全に隠れている」塊を落とす。
+        //
+        // 【メッシュレット経路でしか効かない】判定を書いてあるのは増幅シェーダーなので、
+        // メッシュシェーダー非対応の環境(基準機のIntel UHD 620を含む)では一切走らない。
+        // これが有効なフレームだけHi-Zパスも構築される(m_HiZTextureのコメント参照)
+        bool m_OcclusionCullingEnabled = Defaults::OcclusionCullingEnabled;
+        // オクルージョン判定でバウンディング球を膨らませる倍率。
+        //
+        // 【1.0が基準】判定に使うHi-Zは前フレームのものなので、そのフレームのカメラ移動ぶんは
+        // 別項(移動距離をそのまま半径へ足す)で吸収している。この倍率が埋めるのはそれとは別の
+        // 誤差 ―― バウンディング球がメッシュレットの実体より緩いこと、およびカメラ回転による
+        // 見え方の変化。ポップ(隠れていないものが消える)が出たら上げる
+        float m_OcclusionCullRadiusScale = Defaults::OcclusionCullRadiusScale;
+
+        // --- メッシュレットカリングの統計(Stage 5-2) ---
+        //
+        // 【「間引き0」だけでは何も分からない】判定式が常に通しているのか、本当に全部
+        // 見えているのかを区別できない。CPU側のフラスタムカリング(m_FrustumCullTested /
+        // m_FrustumCullCulled)が判定数と対で出しているのと同じ理由で、ここでも対で出す。
+        // **オクルージョンは視錐台+コーンとは別のカウンタにする** ―― 合算すると
+        // 「俯瞰(遮蔽が少ない)と街路(遮蔽が多い)で差が出るか」という確認ができない。
+        bool m_MeshletCullStatsEnabled = Defaults::MeshletCullStatsEnabled;
+        // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
+        static constexpr uint32_t kMeshletCullStatsCount = 3;
+        std::unique_ptr<RHI::IRHIBuffer> m_MeshletCullStatsBuffer;
+        // カウンタをCPUへ持ってくるための受け皿。
+        //
+        // 【リングにする理由】コピーを積んだ直後に読んでもGPUはまだ実行していない。
+        // DX12はkFrameCount(=2)フレームぶんCPUが先行するので、3本持って「2フレーム前に
+        // 書いたもの」を読めばGPUの完了を待たずに済む。待つとフレームが直列化し、
+        // 計測のために計測対象を壊すことになる
+        static constexpr uint32_t kMeshletCullStatsRingSize = 3;
+        std::unique_ptr<RHI::IRHIBuffer> m_MeshletCullStatsReadback[kMeshletCullStatsRingSize];
+        // 今フレームが書き込むリングの位置。読むのは (index + 1) % リング長 = 最も古いもの
+        uint32_t m_MeshletCullStatsRingIndex = 0;
+        // カウンタバッファのUAVのbindless番号(RegisterBindlessUAVが払い出す)。
+        // 非対応環境ではkInvalidBindlessIndexのままで、統計は無効になる
+        uint32_t m_MeshletCullStatsBindlessIndex = RHI::kInvalidBindlessIndex;
+        // 直近に読み戻せた値(Perfログの集計に足し込む前の生値)。デバッグ表示にも使う
+        uint32_t m_MeshletCullTested = 0;
+        uint32_t m_MeshletCullFrustumCulled = 0;
+        uint32_t m_MeshletCullOcclusionCulled = 0;
 
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
@@ -710,8 +776,11 @@ namespace Kurenai
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
-        // オクルージョンカリングやSSRのレイマーチング高速化に使えるデータ構造だが、現時点では
-        // それらの利用箇所は未実装で、デバッグ表示(Render Targets - Hi-Z)でのみ確認できる
+        //
+        // 消費者は2つ: デバッグ表示(Render Targets - Hi-Z)と、増幅シェーダーの
+        // オクルージョンカリング(m_OcclusionCullingEnabled)。**どちらも要らないフレームでは
+        // 構築しない** ―― 1280x720で「コピー1回 + ミップ段数-1回のディスパッチ」が走り、
+        // Intel UHD 620での実測で1.19〜1.21ms(GPUフレーム時間30msの約4%)を占めるため
         std::unique_ptr<RHI::IRHIShader> m_HiZCopyComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_HiZCopyPipelineState;
         std::unique_ptr<RHI::IRHIShader> m_HiZDownsampleComputeShader;
@@ -721,6 +790,12 @@ namespace Kurenai
         uint32_t m_HiZMipLevels = 1;
         // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベル
         int32_t m_HiZDebugMipLevel = 0;
+        // m_HiZTextureの中身が「1回でも構築されたHi-Z」になっているか。
+        //
+        // 【オクルージョン判定の門番】CreateHiZTextureが作った直後の中身は未定義で、
+        // それを深度として判定すると視界内のほぼ全部を「隠れている」と誤判定しうる。
+        // 解像度変更・シーン読み込みでfalseへ戻し、Hi-Zパスが1回走ってからtrueにする
+        bool m_HiZValid = false;
 
         // 鏡面反射の手法。どのモードでもLightingパスが適用した鏡面IBLを「差し替える」形で働き、
         // Offならその差し替えを一切行わない(プローブ/グローバルIBLがそのまま残る。20章)
@@ -898,6 +973,13 @@ namespace Kurenai
         bool m_TAAPrevViewProjValid = false;
         // 前フレームのジッター量(UV単位)。速度からジッター差分を取り除くのに使う
         DirectX::XMFLOAT2 m_TAAPrevJitterUv{ 0.0f, 0.0f };
+        // 前フレームのカメラ位置(ワールド)。有効性は m_TAAPrevViewProjValid と同じ
+        // (同じ場所で同じタイミングに書くため)。
+        //
+        // 【何に使うか】Hi-Zオクルージョンカリングが判定に使うHi-Zは1フレーム古く、
+        // シーンが静的である以上ずれの原因はカメラの移動だけ。移動距離をバウンディング球の
+        // 半径へ足せば、そのずれを1次の範囲で保守側へ吸収できる(FrameConstants::OcclusionCullParams.z)
+        DirectX::XMFLOAT3 m_PrevCameraPosition{ 0.0f, 0.0f, 0.0f };
         // 前フレームの実効プリ露出EV100。このエンジンはSceneColorへプリ露出を掛け込んでおり、
         // その値が時間順応で毎フレーム変わる(m_EffectiveExposureEV100)。補正しないと
         // 露出が動いている間ずっと履歴が古い明るさを引きずり、明るさの尾を引く
@@ -1205,6 +1287,21 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_ShadowPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineStateMirrored;
+        // メッシュシェーダー版のシャドウ(Shaders/3D/ShadowMeshlet.hlsl)。
+        // 非対応環境ではすべてnullptrのままで、描画側は従来のメッシュ単位経路を使う
+        std::unique_ptr<RHI::IRHIShader> m_ShadowAmplificationShader;
+        std::unique_ptr<RHI::IRHIShader> m_ShadowMeshShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletPipelineStateMirrored;
+        // アルファカットアウト(glTFのalphaMode=MASK)の影。ピクセルシェーダーは
+        // 頂点シェーダー経路とメッシュシェーダー経路で共有する。
+        // **DX11でも効く**(bindlessもメッシュシェーダーも要らない)
+        std::unique_ptr<RHI::IRHIShader> m_ShadowCutoutVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_ShadowCutoutPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowCutoutPipelineStateMirrored;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletCutoutPipelineStateMirrored;
         // 全カスケードの深度を1つのTexture2DArray(スライス番号=カスケード番号)として保持する。
         // 書き込みはスライスごとの個別DSV(RenderGraphPassDesc::DepthTargetArraySlice)で行い、
         // 読み取りは配列全体を指す1本のSRV(t4)を1回バインドするだけでよい。シェーダ側は
@@ -2420,6 +2517,13 @@ namespace Kurenai
         // 【破棄順】m_Sceneより後に宣言することで、メンバ破棄順(宣言の逆順)により
         // m_Sceneの頂点/インデックスバッファより先に破棄される
         Assets::RaytracingScene m_RaytracingScene;
+        // テクスチャの常駐ミップ制御。自前のワーカースレッドを持ち、そこがm_Sceneの
+        // IRHITexture*を掴む。
+        //
+        // 【破棄順】m_Sceneより後に宣言し、メンバ破棄順(宣言の逆順)でm_Sceneより先に
+        // 破棄されるようにする。加えて、シーンを差し替えるときはUpdateSceneStreamingが
+        // 明示的にReset()を呼んでワーカーを止める
+        Assets::TextureStreamingManager m_TextureStreaming;
         // m_Sceneと同じくRenderスレッド専有(ScenePanelが選択中のシーンの表示に読む)
         size_t m_CurrentSceneIndex = 0;
         // Updateスレッド専有。UpdateMouseLook/UpdateMovementが書き換え、TickFrameがFrameStateへ
@@ -2427,6 +2531,18 @@ namespace Kurenai
         // (Renderスレッドではなく)UpdateAppliedSceneHandoff経由でこのスレッドが適用することで、
         // 書き込み手を1スレッドに保っている
         Core::Camera m_Camera;
+
+        // WASD/E/Qの移動速度[m/s]。Shiftを押している間はDefaults::CameraSpeedShiftMultiplier倍。
+        //
+        // 【スレッド】書き手はRenderスレッド(ScenePanelのスライダとResetSceneDependentParams)、
+        // 読み手はUpdateスレッド(UpdateMovement)。m_TargetFPSと同じく、単一のfloatを跨いで
+        // 読み書きするだけなので同期は置かない ―― 途中の値が1フレーム見えても
+        // 「その1フレームだけ移動量が古い速度で計算される」以上のことは起きない。
+        // m_Camera本体はUpdateスレッド専有のまま(この値はそこへ入力されるだけ)。
+        //
+        // 値はシーン対角から決まるためResetSceneDependentParams()が上書きする。
+        // ここの初期化子は最初のシーンを読むまでの値でしかない
+        float m_CameraSpeed = Defaults::CameraSpeed;
 
         // --- シーン読み込みのハンドオフ -------------------------------------------------------
 
@@ -2438,6 +2554,22 @@ namespace Kurenai
         // Renderスレッド専有。Loaderスレッドへ発注してから完成品を受け取るまでtrue。
         // 多重発注を防ぐために見る
         bool m_SceneLoadInFlight = false;
+        // Renderスレッド専有。いまLoaderスレッドが読んでいるシーンの番号(m_SceneDisplayNamesの添字)。
+        // 進捗表示にシーン名を出すために持つ ―― m_CurrentSceneIndexは読み込みが完了するまで
+        // 旧シーンを指したままで、m_PendingSceneRequestは発注した時点で-1へ戻る
+        size_t m_SceneLoadingIndex = 0;
+
+        // シーン読み込みの進捗(読み終えたモデル数 / [Model]の総数)。
+        //
+        // 【なぜ要るか】読み込み中は旧シーンを先に手放すため画面にはUIとスカイボックスしか出ない
+        // (UpdateSceneStreamingのコメント参照)。767モデルのシーンでは数十秒かかり、
+        // m_SceneLoadInFlightのboolだけでは「進んでいる」と「固まった」を区別できない。
+        //
+        // 【atomicにする理由】書き手はLoaderスレッド(Assets::LoadSceneのコールバック)、
+        // 読み手はRenderスレッド(UIManagerの進捗ウィンドウ)で、フレーム境界の受け渡しに
+        // 乗らない唯一の値のため。表示だけに使うのでmemory_order_relaxedで足りる
+        std::atomic<uint32_t> m_SceneLoadProgressLoaded{ 0 };
+        std::atomic<uint32_t> m_SceneLoadProgressTotal{ 0 };
 
         // --- .ksceneのホットリロード -----------------------------------------------------
         //
@@ -2580,40 +2712,224 @@ namespace Kurenai
         // 一致してしまうため、間引いた数が0でないことを数値で確かめられるようにしておく
         uint32_t m_FrustumCullTested = 0;
         uint32_t m_FrustumCullCulled = 0;
+
+        // --- モデルLOD(.ksceneの[Model]LODPath / LODDistance) --------------------------------
+        //
+        // インスタンスごとの「いま使っている段」と、切り替え中のクロスディザの進み具合。
+        // m_Scene.Instancesと同じ添字で並び、ApplyLoadedSceneで作り直す。
+        //
+        // 【Assets::Sceneではなくエンジン側に持つ理由】これは読み込んだデータではなく
+        // カメラ位置から毎フレーム決まる実行時の状態で、Loaderスレッドが作るSceneに
+        // 混ぜると「シーンの内容」と「今の見え方」の境界が曖昧になる
+        struct InstanceLODState
+        {
+            uint32_t CurrentLOD = 0;   // 0 = ModelInstance::Model、1以上は LODModels[n-1]
+            uint32_t PreviousLOD = 0;  // フェード中の切り替え元
+            float FadeT = 1.0f;        // 1.0でフェード完了。0→1へ進み、その間だけ2段を重ねる
+        };
+        std::vector<InstanceLODState> m_InstanceLODStates;
+        // 段の切り替えにかける秒数。0にするとポップする(1.1km四方のタイルが丸ごと入れ替わるため
+        // 目立つ)。根拠は docs/ImplementationDetail.md
+        float m_LODFadeDuration = 0.25f;
+        // 切り替え距離のヒステリシス幅。切替点の±5%を不感帯にして、境界での往復を防ぐ
+        float m_LODHysteresis = 0.05f;
+        // 統計。1フレームあたりの段の切り替え回数と、そのフレームでフェード中のインスタンス数。
+        // 【0なら一度も切り替わっていない】LODが効いているかはここでしか分からない
+        uint32_t m_LODSwitchCount = 0;
+        uint32_t m_LODFadingCount = 0;
+        uint64_t m_FrameStatsLODSwitchSum = 0;
+        // 【瞬間値ではなく積算する】m_LODFadingCountをそのままログへ出していたときは、
+        // 集計期間(1秒)の最終フレームの値だけを見ていた。既定のフェードは0.25秒なので
+        // 構造的にほぼ必ず取りこぼし、「フェードが一度も実行されていない」のか
+        // 「実行されたが見ていないだけ」なのかを区別できなかった(実際に取りこぼした)。
+        // 期間中の「フェード中インスタンス×フレーム」を足し込めば、0.25秒のフェードでも
+        // 14フレームぶんとして必ず現れる
+        uint64_t m_FrameStatsLODFadingSum = 0;
+        // カメラ位置から各インスタンスの段を決め、フェードを進める。
+        // レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと ―― パスごとに測り直すと
+        // 深度プリパスとG-Bufferが違う段を選び、画面に穴が開く
+        void UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds);
+        // instanceIndex番目のインスタンスについて、このフレームで描く段を返す。
+        // フェード中は2件(切り替え先と元)、そうでなければ1件。DitherFadeも一緒に返す
+        struct LODDraw
+        {
+            const Assets::Model* Model = nullptr;
+            float DitherFade = 1.0f;
+        };
+        // 戻り値の件数。fadingなら2、それ以外は1
+        uint32_t GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const;
+        // シャドウ・反射プローブ・DDGI用。常に最も粗い段を返す(影と間接光はテクスチャを読まない)
+        const Assets::Model* GetCoarsestLOD(const Assets::ModelInstance& instance) const;
+
+        // --- モデルのストリーミング(.ksceneの[Scene]StreamingDistance) ----------------------
+        //
+        // カメラ位置から「読むべきなのにまだ無いモデル」を選んでLoaderスレッドへ発注し、
+        // 出来上がったものを受け取ってインスタンスへ差し込む。
+        // レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと。
+        //
+        // 【まず読み込みだけ】破棄はまだ行わない。絵が出ることを確かめてから、
+        // kFrameCountフレーム遅延させる解放キューを通して足す
+        void UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition);
+        // 常駐が変わったことを記録する。実際の作り直しは静かになってから
+        void RequestRaytracingRebuild();
+        // 出来上がったRaytracingSceneの差し替えと、静かになった後の発注。
+        // UpdateModelStreamingの後にフレーム1回だけ呼ぶ
+        void UpdateRaytracingRebuild();
+
+        // Render → Loader の読み込み発注。m_LoadRequestMutexで保護し、
+        // シーン切り替えと同じ条件変数で起こす(専用スレッドを増やさない)
+        struct StreamingRequest
+        {
+            std::wstring Path;
+            uint64_t Generation = 0;
+        };
+        std::vector<StreamingRequest> m_StreamingRequests;
+
+        // Loader → Render の完成品
+        std::mutex m_StreamingLoadedMutex;
+        struct StreamingLoaded
+        {
+            std::wstring Path;
+            std::shared_ptr<Assets::Model> Model;
+            uint64_t Generation = 0;
+        };
+        std::vector<StreamingLoaded> m_StreamingLoaded;
+
+        // 発注済みで、まだ受け取っていないパス(同じものを何度も発注しないため)
+        std::unordered_set<std::wstring> m_StreamingInFlight;
+
+        // 【シーンに紐づく世代番号】シーンを切り替えると進める。古い世代の完成品は捨てる。
+        // これが無いと、切り替え前のシーンのモデルが新しいシーンのインスタンスへ差し込まれる
+        uint64_t m_StreamingGeneration = 0;
+
+        // ストリーミングで読むモデルが使う1x1フォールバックの共有プール。
+        //
+        // 【Assets::Scene::SharedTexturesを使ってはいけない】あちらはシーンが所有しており、
+        // シーン切り替えのときRenderスレッドがstd::moveでRetiredAssetsへ移す。
+        // Loaderスレッドが読み込み中にそれが起きるとプールのアドレスが変わり、解放済みを指す。
+        // こちらはLoaderスレッドだけが作り・使い・捨てるので、その競合が起きない
+        std::unique_ptr<Assets::SharedTexturePool> m_StreamingTexturePool;
+
+        // 破棄を寝かせるフレーム数。
+        //
+        // 【なぜ即座に捨ててはいけないか】CPUはGPUの完了を待たずに次フレームの記録を始めるため
+        // (DX12は kFrameCount = 2 フレーム先行する)、いま画面から外れたモデルの頂点バッファを
+        // その場で解放すると、GPUがまだ読んでいる最中のリソースを消すことになる。
+        // シーン切り替えの経路は WaitForGPUIdle でこれを避けているが(RetiredAssetsのコメント)、
+        // ストリーミングの破棄は毎フレーム起こりうるので待つわけにいかない。
+        // 代わりにこの数だけ寝かせてから解放する。DX12の先行分2に1フレームの余裕を足してある
+        static constexpr uint32_t kStreamingReleaseDelayFrames = 3;
+
+        // 破棄待ち。ここに積まれている間はshared_ptrが実体を生かし続ける。
+        // 0になったらLoaderスレッドへ渡す(解放も確保と同じスレッドで行うため)
+        struct PendingModelRelease
+        {
+            std::shared_ptr<Assets::Model> Model;
+            uint32_t FramesRemaining = 0;
+        };
+        std::vector<PendingModelRelease> m_StreamingPendingRelease;
+
+        // Render → Loader の破棄依頼。受け取った側はvectorを空にするだけでよい
+        // (shared_ptrの最後の参照が消えてデストラクタが走る)
+        std::mutex m_StreamingReleaseMutex;
+        std::vector<std::shared_ptr<Assets::Model>> m_StreamingRelease;
+
+        // --- レイトレーシングを常駐の増減へ追随させる ----------------------------------------
+        //
+        // 常駐が変わるとBLAS/TLASと統合バッファが実態と食い違う。作り直して追随させる。
+        // 最後の増減からこの時間だけ静かなら作り直す(走行中は毎フレーム変わりうるため)
+        bool m_RaytracingRebuildPending = false;
+        std::chrono::steady_clock::time_point m_RaytracingRebuildAfter{};
+        static constexpr float kRaytracingRebuildQuietSeconds = 0.5f;
+        std::mutex m_RaytracingRebuiltMutex;
+        std::unique_ptr<Assets::RaytracingScene> m_RaytracingRebuilt;
+        uint64_t m_RaytracingRebuiltGeneration = 0;
+        bool m_RaytracingRebuildRequested = false;   // m_LoadRequestMutexで保護
+        // 再構築が走っている間はtrue。立っている間はRenderスレッド側の差し込みと破棄を見送る。
+        // Loaderスレッドが m_Scene を走査している最中に書き換えると走査中のコンテナが変わるため
+        std::atomic<bool> m_RaytracingRebuildInFlight{ false };
+        // 差し替えた旧RaytracingSceneの破棄待ち。モデルと同じくフレームを寝かせる。
+        //
+        // 【Renderスレッドで破棄してはいけない】RaytracingSceneが持つBLAS/TLASと統合バッファの
+        // ディスクリプタは、ロックを持たないアセット用ヒープ(DX12Device::GetAssetSrvCpuHeap)
+        // から取られている。Loaderスレッドがストリーミングで確保している最中にRenderスレッドが
+        // 解放するとフリーリストが壊れる。寝かせたあとはLoaderスレッドへ渡すこと
+        struct PendingRaytracingRelease
+        {
+            std::unique_ptr<Assets::RaytracingScene> Scene;
+            uint32_t FramesRemaining = 0;
+        };
+        std::vector<PendingRaytracingRelease> m_RaytracingPendingRelease;
+        std::mutex m_RaytracingReleaseMutex;
+        std::vector<std::unique_ptr<Assets::RaytracingScene>> m_RaytracingRelease;
+        // 統計。0なら一度も作り直していない
+        uint64_t m_RaytracingRebuildCount = 0;
+        double m_RaytracingRebuildLastMs = 0.0;
+
+        // 統計。【いずれも累計】瞬間値だと短い出来事を取りこぼす(47.9の失敗と同じ)
+        uint64_t m_StreamingLoadedTotal = 0;
+        uint64_t m_StreamingEvictedTotal = 0;
+        uint32_t m_StreamingResidentCount = 0;
+        uint32_t m_StreamingTargetCount = 0;
+        // いま選ばれている段を1つだけ返す(フェード中でも切り替え先だけ)。
+        // 半透明・平面反射・ソフトウェアラスタライザ用 ―― これらはクロスディザを実装しておらず、
+        // 2段を重ねると同じ画素に両方が描かれてしまうため、フェード中も1段に決め打つ
+        const Assets::Model* GetCurrentLOD(size_t instanceIndex) const;
         // 集計期間中の合計(平均はフレーム数で割って出す)
         uint64_t m_FrameStatsCullTestedSum = 0;
         uint64_t m_FrameStatsCullCulledSum = 0;
+        // メッシュレット単位のカリング(増幅シェーダー)の集計。上のCPU側とは別の行に出す ――
+        // 粒度(モデル単位 / メッシュレット単位)も判定の種類も違うので、混ぜると読めなくなる。
+        // 読み戻せなかったフレームは足さないため、フレーム数も別に数える
+        uint64_t m_FrameStatsMeshletTestedSum = 0;
+        uint64_t m_FrameStatsMeshletFrustumCulledSum = 0;
+        uint64_t m_FrameStatsMeshletOcclusionCulledSum = 0;
+        uint32_t m_FrameStatsMeshletSampleCount = 0;
 
-        // ジオメトリの描画発行数(ドローコール数)をパスごとに数えたもの。1フレーム分。
+        // パス別のドローコール数(1フレーム分)。フラスタムカリングの統計と同じく
+        // フレーム先頭でリセットし、LogFrameStatsIfDueが集計期間の平均として出す。
         //
-        // 【なぜパスごとに分けるのか】ドローコールを減らす仕組み ―― インスタンシング・
-        // メッシュレット経路の1ドロー化 ―― が効いたかどうかは、絵でもフレーム時間でも
-        // 判別できない。「合計が減った」だけでは、どのパスで減ったのかが分からないまま
-        // 「速くなった気がする」で終わってしまう。
-        // シャドウは4カスケードぶんが積み上がるので、G-Bufferの4倍前後になるのが正常。
+        // 【なぜパスごとに分けるのか】フラスタムカリングの統計が全パス合計になっていて、
+        // どのパスが何回描いているのかが分からない。ドローコールの削減はこのエンジンで
+        // これから何度も測る対象(メッシュレットによる1モデル1ドロー化、GPU駆動描画)で、
+        // 「G-Bufferは減ったがシャドウは減っていない」のような片手落ちは
+        // パス別に見ないと気づけない。
         //
-        // 数えるのはモデルのジオメトリを描くものだけで、フルスクリーン三角形(Draw(3,0))や
-        // ドローンショーのビルボードは含めない(シーンの内容で増減せず、増減を見る意味が無いため)
-        enum class DrawCallPass : uint32_t
-        {
-            Shadow,             // カスケードシャドウ(4カスケードの合計)
-            DepthPrepass,       // 深度プリパス
-            GBuffer,            // G-Buffer(頂点シェーダー経路・メッシュシェーダー経路の両方)
-            ProbeCapture,       // 反射プローブの焼き込み
-            DDGICapture,        // DDGIプローブの焼き込み(ラスタ経路)
-            Transparent,        // 半透明フォワード
-            PlanarReflection,   // 平面反射
-            Count,
-        };
-        static constexpr uint32_t kDrawCallPassCount = static_cast<uint32_t>(DrawCallPass::Count);
+        // 数えるのはCPUが発行したDrawIndexed/DispatchMeshの回数で、
+        // 増幅シェーダーがカリングした後に実際にラスタライズされた塊の数ではない
+        uint32_t m_DrawCallsGBuffer = 0;
+        uint32_t m_DrawCallsShadow = 0;
+        uint32_t m_DrawCallsDepthPrepass = 0;
+        // 直前に描き終えたフレームの値。**UIパネルはこちらを読むこと** ――
+        // 上のカウンタはフレーム先頭で0に戻るため、Renderの外で描かれるUIからは常に0に見える
+        uint32_t m_DrawCallsGBufferLastFrame = 0;
+        uint32_t m_DrawCallsShadowLastFrame = 0;
+        uint32_t m_DrawCallsDepthPrepassLastFrame = 0;
+        uint64_t m_FrameStatsDrawCallsGBufferSum = 0;
+        uint64_t m_FrameStatsDrawCallsShadowSum = 0;
+        uint64_t m_FrameStatsDrawCallsDepthPrepassSum = 0;
 
-        // フレーム先頭でリセットし、各パスが積み上げる
-        uint32_t m_DrawCalls[kDrawCallPassCount]{};
-        // 集計期間中の合計(平均はフレーム数で割って出す)
-        uint64_t m_FrameStatsDrawCallSums[kDrawCallPassCount]{};
+        // メッシュ単位フラスタムカリングの統計(1フレーム分)。上のモデル単位とまったく同じ扱い。
+        //
+        // 【絶対に上のカウンタと混ぜない】分母も意味も違う。モデル単位は
+        // 「シーンのインスタンス数」が分母で、メッシュ単位は「モデル単位を通過した
+        // インスタンスのメッシュ数の合計」が分母になる。合算すると、どちらが効いているのか
+        // ―― あるいは片方が一度も実行されていないのか ―― が読めなくなる。
+        //
+        // 【効くシーンが逆】モデル単位は.kmodelを多数並べるシーン(PLATEAUの671タイル)で効き、
+        // 1モデルに数千メッシュを持つアセット(Emerald Square、Bistro)では1つも間引けない。
+        // メッシュ単位はその逆で、後者でしか値が動かない
+        uint32_t m_MeshCullTested = 0;
+        uint32_t m_MeshCullCulled = 0;
 
-        // ドローコールを1つ数える。描画を発行した直後に呼ぶこと
-        void CountDrawCall(DrawCallPass pass) { ++m_DrawCalls[static_cast<uint32_t>(pass)]; }
+        // 完成した最後のフレームの値。UIパネルはRenderの外で描かれるため、上のカウンタを
+        // そのまま読むとリセット直後の0になる(ドローコール数のm_DrawCalls*LastFrameと同じ)
+        uint32_t m_FrustumCullTestedLastFrame = 0;
+        uint32_t m_FrustumCullCulledLastFrame = 0;
+        uint32_t m_MeshCullTestedLastFrame = 0;
+        uint32_t m_MeshCullCulledLastFrame = 0;
+        uint64_t m_FrameStatsMeshCullTestedSum = 0;
+        uint64_t m_FrameStatsMeshCullCulledSum = 0;
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};

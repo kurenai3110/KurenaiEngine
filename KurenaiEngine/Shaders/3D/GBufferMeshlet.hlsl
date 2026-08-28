@@ -28,34 +28,9 @@
 #include "GBufferCommon.hlsli"
 #include "Bindless.hlsli"
 
-// Assets::MeshletEntry(48バイト)と1対1で対応。並びとサイズを一致させること
-struct Meshlet
-{
-    uint VertexOffset;
-    uint TriangleOffset;
-    uint VertexCount;
-    uint TriangleCount;
-    float3 BoundsCenter;
-    float BoundsRadius;
-    float3 ConeAxis;
-    float ConeCutoff;
-};
-
-// Assets::Vertex(56バイト)と1対1で対応。
-//
-// 【構造化バッファは詰めて並ぶ】定数バッファと違い、StructuredBuffer<T>のTは
-// C++と同じ「メンバの型のアラインメントに従った詰めた配置」になる。
-// 定数バッファの規則(float3の直後のfloatが16バイト境界をまたげない等)は適用されない。
-// 実際のオフセットは Position=0 / Normal=12 / UV=24 / Tangent=32 / UV1=48 で、
-// Assets::Vertexと完全に一致する
-struct MeshVertex
-{
-    float3 Position;
-    float3 Normal;
-    float2 UV;
-    float4 Tangent;
-    float2 UV1;
-};
+// 【Meshlet / MeshVertex の定義は Meshlet.hlsli にある】シャドウ版の
+// メッシュシェーダー(ShadowMeshlet.hlsl)と共有するため。写して2つに増やすと
+// 片方だけ直したときにジオメトリの読み方が静かに食い違う
 
 // 増幅シェーダー1グループが判定するメッシュレット数。
 // 生き残ったメッシュレット番号をペイロードで渡すため、ペイロードの配列長でもある。
@@ -74,55 +49,27 @@ struct MeshletPayload
 groupshared MeshletPayload s_Payload;
 groupshared uint s_VisibleCount;
 
+// --- カリング統計 -----------------------------------------------------------------------
+//
+// 【なぜ数えるのか】「間引き0」は、判定式が常に通しているのか本当に全部見えているのかを
+// 区別できない。CPU側のフラスタムカリングが判定数と間引き数を対で出しているのと同じ理由で、
+// ここでも「判定した数」と併せて出す。
+//
+// **オクルージョンは視錐台+コーンとは別のカウンタにする。** 合算すると
+// 「俯瞰と街路で差が出るか」というオクルージョン固有の確認ができない。
+//
+// 【グループ内でまとめてから1回だけ足す】メッシュレット1個ごとにグローバルのカウンタを
+// InterlockedAddすると、都市シーンでは1フレーム数十万回の競合になる。
+// グループ共有のカウンタへ集約し、スレッド0が1グループあたり3回だけ足す
+groupshared uint s_StatsTested;
+groupshared uint s_StatsFrustumCulled;
+groupshared uint s_StatsOcclusionCulled;
+
 // --- カリング -------------------------------------------------------------------------
 
-// バウンディング球(ワールド空間)が視錐台と交差するか。
-//
-// 平面はViewProjから直接取り出す。このエンジンはmul(vector, matrix)の規約なので
-// clip.x = dot(v, ViewProjの0列目)、clip.w = dot(v, ViewProjの3列目) になる。
-// クリップ空間の条件 -w <= x <= w、-w <= y <= w、0 <= z <= w をそれぞれ
-// 「dot(平面, v) >= 0」の形に直したものが6枚の平面。
-//
-// 【Reverse-Zでもこのままでよい】近平面と遠平面の意味は入れ替わるが、
-// 0 <= z <= w という条件自体は変わらないため、平面の式は同じで済む。
-//
-// 【TAAのジッターは無視してよい】ViewProjにはサブピクセルのジッターが乗っているが、
-// ずれはピクセル単位以下で、バウンディング球という保守的な近似の余裕に埋もれる
-bool IsSphereInFrustum(float3 center, float radius)
-{
-    // ViewProjの列ベクトル(HLSLのfloat4x4は行優先の添字なので、列は_mXY表記で取り出す)
-    const float4 col0 = float4(ViewProj._m00, ViewProj._m10, ViewProj._m20, ViewProj._m30);
-    const float4 col1 = float4(ViewProj._m01, ViewProj._m11, ViewProj._m21, ViewProj._m31);
-    const float4 col2 = float4(ViewProj._m02, ViewProj._m12, ViewProj._m22, ViewProj._m32);
-    const float4 col3 = float4(ViewProj._m03, ViewProj._m13, ViewProj._m23, ViewProj._m33);
-
-    float4 planes[6];
-    planes[0] = col3 + col0; // 左   (x >= -w)
-    planes[1] = col3 - col0; // 右   (x <=  w)
-    planes[2] = col3 + col1; // 下   (y >= -w)
-    planes[3] = col3 - col1; // 上   (y <=  w)
-    planes[4] = col2;        // 手前 (z >=  0)
-    planes[5] = col3 - col2; // 奥   (z <=  w)
-
-    [unroll]
-    for (uint i = 0; i < 6; ++i)
-    {
-        // 平面を正規化しないと「距離」の尺度が平面ごとに変わり、radiusと比較できない
-        const float length3 = length(planes[i].xyz);
-        if (length3 <= 0.0f)
-        {
-            // 射影行列が退化している(想定外)。カリングを諦めて通す
-            continue;
-        }
-
-        const float4 plane = planes[i] / length3;
-        if (dot(plane.xyz, center) + plane.w < -radius)
-        {
-            return false;
-        }
-    }
-    return true;
-}
+// 【錐台カリングとスケール計算は Meshlet.hlsli にある】シャドウ版と共有するため。
+// 視錐台平面を行から作るか列から作るかは過去に取り違えて100%誤検出した箇所で、
+// 実装を2つに増やすと片方だけが壊れたまま気づけない(実装史39章)
 
 // 法線コーンによる背面カリング。この塊の三角形の法線がすべて
 // 「軸ConeAxisを中心とする半頂角acos(ConeCutoff)の円錐」に収まることを利用し、
@@ -146,15 +93,124 @@ bool IsMeshletBackfacing(Meshlet meshlet, float3 centerWorld)
     return dot(viewDir, axisWorld) >= meshlet.ConeCutoff;
 }
 
-// Worldに含まれる最大スケールを求める。バウンディング球の半径をワールド空間へ移すのに使う。
-// 3軸で違うスケールがかかっている場合、最大のものを使えば球は必ず元の形状を包む
-float MaxWorldScale()
+// --- Hi-Zオクルージョンカリング ---------------------------------------------------------
+//
+// 【判定の向きはReverse-Zで決まる。逆に書いても絵は出るので注意】
+// このエンジンはReverse-Z(近平面 NDC z=1.0 / 遠平面 z=0.0、深度比較はGREATER)で、
+// HiZ.hlslはミップを2x2の**最小値**で縮約している。つまり
+//
+//     Hi-Zの1テクセル = そのブロック内で「最も遠い」可視サーフェスの深度
+//
+// なので、球の最も手前の点(=NDC zが最大の点)ですらその値より奥(小さい)なら、
+// ブロック内のどの画素から見ても球は隠れている:
+//
+//     遮蔽されている ⟺ 球のmaxNdcZ < カバーするテクセルのHi-Zのmin
+//
+// 保守側(間引きすぎない側)はHi-Zの値を小さく取る方向なので、複数テクセルをまとめるときも
+// minで正しい。maxを取ると「本当は見えているものを消す」側へ倒れる。
+//
+// 【Hi-Zは1フレーム古い】構築パス(RenderGraphの"HiZ")はG-Bufferパスより後に登録されており、
+// ここで読めるのは前フレームの深度から作ったチェーンになる。したがって投影には
+// 今フレームのViewProjではなく**PrevViewProj**(そのHi-Zの元になった深度を描いた行列そのもの)
+// を使い、そのうえでカメラ移動ぶんだけ球を膨らませて視差のずれを保守側へ吸収する。
+Texture2D<float> HiZTexture : register(t8);
+
+bool IsMeshletOccluded(float3 centerWorld, float radiusWorld)
 {
-    // mul(vector, matrix)規約なので、ローカルのx/y/z軸はWorldの各行に対応する
-    const float sx = length(float3(World._m00, World._m01, World._m02));
-    const float sy = length(float3(World._m10, World._m11, World._m12));
-    const float sz = length(float3(World._m20, World._m21, World._m22));
-    return max(sx, max(sy, sz));
+    if (OcclusionCullParams.x == 0.0f)
+    {
+        return false;
+    }
+
+    // 1フレーム古いHi-Zで判定するための保守的な膨張。
+    //   - 半径倍率: バウンディング球がメッシュレットの実体より緩いこと、カメラ回転による見え方の変化
+    //   - カメラ移動距離: 前フレームからの視差ずれ。シーンが静的なので原因はカメラの移動だけ
+    // 2項は別々の失敗に効くので、片方を上げてももう片方の穴は塞がらない
+    const float radius = radiusWorld * OcclusionCullParams.y + OcclusionCullParams.z;
+
+    // 球を包むワールドAABBの8頂点を前フレームのクリップ空間へ運ぶ。
+    // 球のまま扱わないのは、透視投影で球の輪郭が楕円になり、保守的な画面矩形を
+    // 閉じた式で出すのが面倒なため。AABBは球より大きいので必ず保守側に倒れる
+    float2 ndcMin = float2(1e30f, 1e30f);
+    float2 ndcMax = float2(-1e30f, -1e30f);
+    float maxNdcZ = -1e30f;
+
+    [unroll]
+    for (uint i = 0; i < 8; ++i)
+    {
+        const float3 corner = centerWorld + float3(
+            (i & 1) ? radius : -radius,
+            (i & 2) ? radius : -radius,
+            (i & 4) ? radius : -radius);
+
+        const float4 clip = mul(float4(corner, 1.0f), PrevViewProj);
+
+        // 【wが0以下の頂点が1つでもあれば判定を諦めて通す】カメラの後ろ、あるいは
+        // 近平面をまたぐAABBでは、w除算が符号を反転させて画面矩形が裏返る。
+        // そのまま進めると「足元の巨大なタイルが丸ごと消える」という壊れ方をする。
+        // ここは間引かない側へ倒すのが常に安全
+        if (clip.w <= 0.0f)
+        {
+            return false;
+        }
+
+        const float3 ndc = clip.xyz / clip.w;
+        ndcMin = min(ndcMin, ndc.xy);
+        ndcMax = max(ndcMax, ndc.xy);
+        // Reverse-Zなのでzが大きいほど手前。球の「最も手前の点」を取る
+        maxNdcZ = max(maxNdcZ, ndc.z);
+    }
+
+    // NDC(x,y ∈ [-1,1]、yは上が+1)からUV(y は下が+1)へ。**ここでYの符号を反転する。**
+    // 反転を忘れると上下が入れ替わったブロックのHi-Zと比べることになり、
+    // 「空を見上げているのに間引き率だけは出る」というもっともらしい壊れ方をする
+    const float2 uvMin = float2(ndcMin.x * 0.5f + 0.5f, -ndcMax.y * 0.5f + 0.5f);
+    const float2 uvMax = float2(ndcMax.x * 0.5f + 0.5f, -ndcMin.y * 0.5f + 0.5f);
+
+    // 【前フレームの画面からはみ出していたら判定を諦めて通す】
+    // 視錐台判定は**今フレームの**ViewProjで行っているのに対し、こちらは前フレームの行列で
+    // 投影している。カメラが回った直後は「今フレームは画面内だが前フレームは画面外」という
+    // 塊が画面の縁に必ず生まれ、その塊のUVは[0,1]の外へ出る。
+    //
+    // そこでUVを画面端へクランプすると、**まったく別の場所のHi-Zと深度を比べる**ことになり、
+    // たまたまそこに手前の面があれば消える。カメラを振ったときだけ画面の縁が欠ける、という
+    // 追いにくい壊れ方をするので、はみ出した時点で間引かない側へ倒す。
+    //
+    // 縁に接する塊を取りこぼすことになるが、画面内部の塊数に対して縁は一列ぶんしかない。
+    // カメラ移動距離による半径の膨張ではこの誤差は埋まらない(原因が並進ではなく回転のため)
+    if (uvMin.x < 0.0f || uvMin.y < 0.0f || uvMax.x > 1.0f || uvMax.y > 1.0f)
+    {
+        return false;
+    }
+
+    const float2 hiZSize = HiZScreenParams.xy;
+    const float2 texelMin = uvMin * hiZSize;
+    const float2 texelMax = uvMax * hiZSize;
+
+    // 矩形が高々2x2テクセルに収まる段を選ぶ。ceil(log2(辺の長さ))が
+    // 「1テクセルの幅が辺の長さ以上になる最小の段」になる
+    const float sizeInTexels = max(texelMax.x - texelMin.x, texelMax.y - texelMin.y);
+    const uint mipCount = (uint)OcclusionCullParams.w;
+    const uint mip = (uint)clamp(ceil(log2(max(sizeInTexels, 1.0f))), 0.0f, (float)(mipCount - 1));
+
+    // 選んだ段でのテクセル座標。ミップNの解像度は floor(mip0 / 2^N)(1未満にはならない)で、
+    // これはHiZ.hlslが1段ずつ半分にしていった結果ともD3Dのミップ寸法とも一致する
+    // (floor(floor(x/2)/2) = floor(x/4) のため)
+    const float2 mipSize = max(floor(hiZSize / (float)(1u << mip)), float2(1.0f, 1.0f));
+    const int2 mipMaxCoord = (int2)mipSize - int2(1, 1);
+    const int2 coordMin = clamp((int2)floor(uvMin * mipSize), int2(0, 0), mipMaxCoord);
+    const int2 coordMax = clamp((int2)floor(uvMax * mipSize), int2(0, 0), mipMaxCoord);
+
+    // 2x2を読んでminを取る。段の選び方から矩形はこの範囲に収まっているはずだが、
+    // 端数の丸めで1テクセルはみ出しうるので、座標はクランプ済みのものを使う
+    const float d00 = HiZTexture.Load(int3(coordMin.x, coordMin.y, mip));
+    const float d10 = HiZTexture.Load(int3(coordMax.x, coordMin.y, mip));
+    const float d01 = HiZTexture.Load(int3(coordMin.x, coordMax.y, mip));
+    const float d11 = HiZTexture.Load(int3(coordMax.x, coordMax.y, mip));
+    const float hiZMin = min(min(d00, d10), min(d01, d11));
+
+    // 球の最も手前の点ですら、そのブロックで最も遠い可視面より奥なら隠れている
+    return maxNdcZ < hiZMin;
 }
 
 // --- 増幅シェーダー -------------------------------------------------------------------
@@ -162,32 +218,77 @@ float MaxWorldScale()
 [numthreads(KURENAI_AMPLIFICATION_GROUP_SIZE, 1, 1)]
 void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV_GroupThreadID)
 {
+    const bool statsEnabled = (MeshletCullStatsParams.x != 0.0f) && (MeshletStatsEnabled != 0u);
+
     if (groupThreadId == 0)
     {
         s_VisibleCount = 0;
+        s_StatsTested = 0;
+        s_StatsFrustumCulled = 0;
+        s_StatsOcclusionCulled = 0;
     }
     GroupMemoryBarrierWithGroupSync();
 
     if (dispatchThreadId < MeshletCount)
     {
+        // 表はモデル単位なので、このドローが見る範囲の先頭(MeshletOffset)を足す
+        const uint meshletIndex = MeshletOffset + dispatchThreadId;
         StructuredBuffer<Meshlet> meshlets = KURENAI_BINDLESS_BUFFER(MeshletBufferIndex);
-        const Meshlet meshlet = meshlets[dispatchThreadId];
+        const Meshlet meshlet = meshlets[meshletIndex];
 
         const float3 centerWorld = mul(float4(meshlet.BoundsCenter, 1.0f), World).xyz;
-        const float radiusWorld = meshlet.BoundsRadius * MaxWorldScale();
+        const float radiusWorld = meshlet.BoundsRadius * MeshletMaxWorldScale(World);
 
-        if (IsSphereInFrustum(centerWorld, radiusWorld) && !IsMeshletBackfacing(meshlet, centerWorld))
+        // 材質によるふるい分け(GBufferCommon.hlsliのMeshletFilterReject/Require参照)。
+        // G-Bufferでは半透明(BLEND)を落とす。
+        //
+        // 【材質で落ちた塊はカリングの統計に数えない】数えると、そのパスが除外している
+        // 材質のぶんだけ「間引き率」が薄まり、俯瞰と街路の差を見る目的に使えなくなる
+        const bool materialAccepted =
+            MeshletPassesMaterialFilter(meshlet.Flags, MeshletFilterReject, MeshletFilterRequire);
+
+        // 【この順に判定する】視錐台と法線コーンは定数時間だが、Hi-Z判定は8頂点の投影と
+        // テクスチャ読みを伴う。先に安いほうで落とせば、画面外・背面の塊ではHi-Zを一切読まない
+        const bool frustumOrConeCulled = !MeshletSphereInFrustum(ViewProj, centerWorld, radiusWorld)
+            || IsMeshletBackfacing(meshlet, centerWorld);
+        const bool occlusionCulled =
+            materialAccepted && !frustumOrConeCulled && IsMeshletOccluded(centerWorld, radiusWorld);
+
+        if (statsEnabled && materialAccepted)
+        {
+            InterlockedAdd(s_StatsTested, 1);
+            if (frustumOrConeCulled)
+            {
+                InterlockedAdd(s_StatsFrustumCulled, 1);
+            }
+            else if (occlusionCulled)
+            {
+                InterlockedAdd(s_StatsOcclusionCulled, 1);
+            }
+        }
+
+        if (materialAccepted && !frustumOrConeCulled && !occlusionCulled)
         {
             // 【波の幅に依存しない詰め方】WavePrefixCountBitsを使うと1グループが
             // 1波に収まることを暗に仮定することになる(波幅32/64はGPUによって違う)。
             // グループ共有のカウンタなら仮定が要らず、頻度も低いので競合の実害も無い
             uint slot;
             InterlockedAdd(s_VisibleCount, 1, slot);
-            s_Payload.MeshletIndices[slot] = dispatchThreadId;
+            s_Payload.MeshletIndices[slot] = meshletIndex;
         }
     }
 
     GroupMemoryBarrierWithGroupSync();
+
+    // グループ内の集計をグローバルのカウンタへ1回だけ足す。
+    // 【DispatchMeshより前に、かつバリアの後で行うこと】バリアの前だと集計が完了していない
+    if (statsEnabled && groupThreadId == 0)
+    {
+        RWStructuredBuffer<uint> cullStats = KURENAI_BINDLESS_BUFFER((uint)MeshletCullStatsParams.y);
+        InterlockedAdd(cullStats[0], s_StatsTested);
+        InterlockedAdd(cullStats[1], s_StatsFrustumCulled);
+        InterlockedAdd(cullStats[2], s_StatsOcclusionCulled);
+    }
 
     // DispatchMeshはグループ内の全スレッドが同じ引数で1回だけ呼ぶ決まり。
     // バリア後のs_VisibleCountは全スレッドで同じ値になっている
@@ -220,7 +321,11 @@ void MSMain(
     if (groupThreadId < meshlet.VertexCount)
     {
         StructuredBuffer<uint> meshletVertices = KURENAI_BINDLESS_BUFFER(MeshletVertexBufferIndex);
-        StructuredBuffer<MeshVertex> vertices = KURENAI_BINDLESS_BUFFER(VertexBufferIndex);
+        // 【NonUniformResourceIndexが要る】頂点バッファの番号はメッシュレットごとに違い、
+        // 1回のディスパッチでメッシュを跨ぐと同じ波の中で値が発散する。
+        // 付け忘れると未定義動作になるが、**絵はそれらしく出たまま静かに壊れる**
+        StructuredBuffer<MeshVertex> vertices =
+            KURENAI_BINDLESS_BUFFER(NonUniformResourceIndex(meshlet.VertexBufferIndex));
 
         const uint globalVertexIndex = meshletVertices[meshlet.VertexOffset + groupThreadId];
         const MeshVertex vertex = vertices[globalVertexIndex];
@@ -238,7 +343,14 @@ void MSMain(
         output.Tangent = float4(mul(vertex.Tangent.xyz, (float3x3)World), vertex.Tangent.w * TangentSignFlip);
         output.CurClip = output.Position;
         output.PrevClip = mul(float4(worldPos, 1.0f), PrevViewProj);
-        output.MeshletIndex = meshletIndex;
+        // 【モデル内の通し番号ではなくメッシュ内の番号を書く】色分け表示は
+        // レイトレーシング側(RaytracingScene.hlsliのRTFindMeshlet)と同じ色でなければ
+        // 見比べる意味が無く、あちらはメッシュ内の番号を返す
+        output.MeshletIndex = meshlet.MeshletIndexInMesh;
+        // ピクセルシェーダーがマテリアルテーブルを引くための番号。
+        // 塊の中では全頂点で同じ値になる(メッシュレットは材質を跨がない)ので、
+        // PSInput側のnointerpolationがそのまま正しい値を拾う
+        output.MaterialIndex = meshlet.MaterialIndex;
 
         outVertices[groupThreadId] = output;
     }

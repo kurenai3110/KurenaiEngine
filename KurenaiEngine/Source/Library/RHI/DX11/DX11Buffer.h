@@ -39,6 +39,14 @@ namespace Kurenai::RHI
             Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav,
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv);
 
+        // BufferUsage::Readback用: D3D11_USAGE_STAGING + CPU_ACCESS_READ。ビューは一切持たない。
+        // ReadbackDataがMapを呼ぶためにイミディエイトコンテキストを控える
+        // (DX12Bufferがm_Deviceを持っているのと同じ理由)
+        DX11Buffer(
+            Microsoft::WRL::ComPtr<ID3D11Buffer> buffer,
+            uint32_t sizeInBytes,
+            Microsoft::WRL::ComPtr<ID3D11DeviceContext> context);
+
         ID3D11Buffer* GetBuffer() const { return m_Buffer.Get(); }
         uint32_t GetStride() const { return m_StrideInBytes; }
         // BufferUsage::Structured / StructuredRWで作成した場合のみ非nullptr(コンピュートシェーダーからのRW用)
@@ -51,6 +59,10 @@ namespace Kurenai::RHI
         bool IsImmutable() const { return m_IsImmutable; }
         // BufferUsage::IndirectArgsで作成されたか(DispatchIndirectが引数バッファを検証するのに使う)
         bool IsIndirectArgs() const { return m_IsIndirectArgs; }
+        // BufferUsage::Readbackで作成されたか(CopyBufferToReadbackが行き先を検証するのに使う)
+        bool IsReadback() const { return m_IsReadback; }
+        // BufferUsage::Readbackの内容をCPUへ写す。詳細はIRHIBuffer::ReadbackDataのコメント
+        bool ReadbackData(void* outData, uint32_t sizeInBytes) override;
 
     private:
         Microsoft::WRL::ComPtr<ID3D11Buffer> m_Buffer;
@@ -60,5 +72,10 @@ namespace Kurenai::RHI
         bool m_IsDynamic = false;
         bool m_IsImmutable = false;
         bool m_IsIndirectArgs = false;
+        bool m_IsReadback = false;
+        // BufferUsage::Readbackでのみ非nullptr。ReadbackDataがMap/Unmapに使う
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
+        // BufferUsage::Readbackでのみ有効(ReadbackDataの範囲検証に使う)
+        uint32_t m_SizeInBytes = 0;
     };
 }

@@ -3,8 +3,10 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Assets/ModelPackage.h"
@@ -16,6 +18,61 @@
 // 実測に基づく判断はここに集約する。
 namespace KurenaiPacker
 {
+    // FBX等に埋め込まれたテクスチャ(aiScene::mTextures)を一時ファイルへ取り出して保持する。
+    // デストラクタで一時ディレクトリごと消す。
+    //
+    // 【なぜ一時ファイルなのか】RHI::TextureImageにはメモリから読む経路が無く
+    // (LoadFromFileとLoadFromPackedTextureの2つだけ)、PackageWriterの重複排除・.ktexの
+    // ミラー・ワーカースレッドへの分配もすべて「解決済みのファイルパス」を前提に組まれている。
+    // バイト列を持ち回る経路を新設するとRHI・PackageWriterの両方へ手が入るのに対し、
+    // 一時ファイルへ落として既存の経路へ合流させれば変更が解決の1点で済む。
+    //
+    // 【なぜ番号を含む決定的な名前なのか】PackageWriterの重複排除キーは
+    // 「解決済みフルパス|sRGB」なので、同じ埋め込みテクスチャを複数のマテリアルが参照したとき、
+    // 取り出し先のパスが一致していなければ同じ画像を何度もBC7圧縮することになる。
+    // aiSceneのテクスチャ配列番号を名前に含め、一度取り出したものは同じパスを返す
+    class EmbeddedTextureStore
+    {
+    public:
+        EmbeddedTextureStore() = default;
+        ~EmbeddedTextureStore();
+
+        EmbeddedTextureStore(const EmbeddedTextureStore&) = delete;
+        EmbeddedTextureStore& operator=(const EmbeddedTextureStore&) = delete;
+
+        // 取り出し先の一時ディレクトリ(末尾は区切り文字)。まだ何も取り出していなければ空
+        const std::wstring& Directory() const { return m_Directory; }
+
+        // 取り出し済みの枚数(同じテクスチャを何度参照しても1と数える)
+        size_t ExtractedCount() const { return m_Extracted.size(); }
+
+        // 圧縮済みブロブ(JPEG/PNG/TIFF等)をそのまま書き出す。formatHintはaiTexture::achFormatHint。
+        // 取り出せなければ空文字列を返す(呼び出し側は従来どおりの「見つからない」扱いへ落ちる)
+        std::wstring StoreCompressed(
+            unsigned int textureIndex,
+            const std::string& formatHint,
+            const std::string& originalName,
+            const void* data,
+            size_t sizeInBytes);
+
+        // 非圧縮のARGB8888(aiTexture::mHeight != 0)をPNGとして書き出す。
+        // PNGにするのは、DDS/TGAで書くとTextureImage::LoadFromFileが「圧縮・ミップ済みの
+        // 配布形式」とみなしてミップ生成もBC7圧縮も行わないため(他のテクスチャと扱いが揃わない)
+        std::wstring StoreUncompressed(
+            unsigned int textureIndex,
+            const std::string& originalName,
+            const void* bgraTexels,
+            unsigned int width,
+            unsigned int height);
+
+    private:
+        // 一時ディレクトリを必要になった時点で作る。失敗したら空を返す
+        bool EnsureDirectory();
+
+        std::wstring m_Directory;
+        std::unordered_map<unsigned int, std::wstring> m_Extracted;
+    };
+
     struct SourceMesh
     {
         std::vector<Kurenai::Assets::Vertex> Vertices;
@@ -81,6 +138,11 @@ namespace KurenaiPacker
         std::vector<SourceLight> Lights;
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
+        // 埋め込みテクスチャの取り出し先。**SourceModelが生きている間は消えない**ことが重要で、
+        // WriteModelPackageがワーカースレッドから実ファイルとして読むため、書き出しが終わるまで
+        // 保持し続ける必要がある。埋め込みが1枚も無ければnullptr
+        std::shared_ptr<EmbeddedTextureStore> EmbeddedTextures;
     };
 
     // 解析後に全マテリアルへ強制的に適用する係数の上書き。
@@ -134,11 +196,29 @@ namespace KurenaiPacker
     // このときタイルごとに「自分のAABBの中心」で寄せてしまうと、タイル同士の相対的な
     // 位置関係が壊れて街が崩れる。**複数のモデルで同じ値を引く**必要があるため、
     // 自動ではなく呼び出し側が明示する形にしている
+    // 解析(LoadSourceModel)のフェーズ別の累計秒。メッシュをまたいで積算する。
+    //
+    // 【なぜ解析側にも計装が要るのか】「パックが遅い」の律速は入力によって正反対になる。
+    // 埋め込みテクスチャ1714枚のPLATEAU LOD2は書き出しが98%だが、テクスチャ0枚の
+    // LOD1タイルは**解析が63%**で書き出しは37%しかない(実測)。どちらの経路を触るべきかは
+    // 測らないと決められないので、OcclusionBakerのBakeTimingsと同じ形で分けて出す
+    struct ParseTimings
+    {
+        double ReadSeconds = 0.0;      // assimpのImporter::ReadFile(外部ライブラリ)
+        double CollectSeconds = 0.0;   // ノード階層を辿ってメッシュ×ワールド行列を集める
+        double TangentSeconds = 0.0;   // 位置+法線をキーにした接線の蓄積(自前・ハッシュマップ)
+        double VertexSeconds = 0.0;    // 頂点ループ(行列適用・正規化・接線の引き当て・AABB更新)
+        double MergeSeconds = 0.0;     // インデックスの平坦化とマテリアル別アキュムレータへの結合
+        double MaterialSeconds = 0.0;  // マテリアル走査とテクスチャパスの解決(埋め込みの取り出しを含む)
+    };
+
+    // outTimings: 非nullptrならフェーズ別の所要時間を書き込む。nullptrなら計測しない
     SourceModel LoadSourceModel(
         const std::wstring& filePath,
         float scale = 1.0f,
         const MaterialOverride& materialOverride = {},
-        const std::optional<std::array<float, 3>>& originOffset = std::nullopt);
+        const std::optional<std::array<float, 3>>& originOffset = std::nullopt,
+        ParseTimings* outTimings = nullptr);
 
     // assimpが読んだ直後のシーン構造を標準出力へ印字する(パッケージは書き出さない)。
     // 失敗時はLoadSourceModelと同じくstd::runtime_errorを投げる。
@@ -152,5 +232,12 @@ namespace KurenaiPacker
     //
     // scale: 印字するバウンディングボックスへ乗算する係数。--scaleに与える値の妥当性を
     // 「既知の寸法(車両の全長、建物の高さ)と合うか」で判定するためのもの
+    // ピークワーキングセット(MB)。「読めるが遅い」のか「メモリを食い潰す」のかを切り分ける
+    double GetPeakWorkingSetMB();
+
+    // プロセスが消費したCPU時間(全スレッドの合計、秒)。実時間で割ると「何コア相当を
+    // 使ったか」になる。ワーカー数を超えていたら内側のライブラリが既に並列化している
+    double GetProcessCpuSeconds();
+
     void InspectModel(const std::wstring& filePath, float scale = 1.0f);
 }

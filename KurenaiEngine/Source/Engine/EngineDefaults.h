@@ -41,6 +41,17 @@ namespace Kurenai::Defaults
     // オーバードローが小さいシーンでは損になる
     inline constexpr bool DepthPrepassEnabled = true;
 
+    // --- フラスタムカリング ---
+    // メッシュ単位のフラスタムカリング(モデル単位の判定を通ったあとの、もう一段)。
+    //
+    // 【切れるようにしてある理由は対照実験のため】カリングは「効いていない」と
+    // 「間引きすぎて物が消えた」のどちらも絵からは判別しにくい。同じ起動の中で
+    // ON/OFFを切り替えて絵と間引き数を比べられないと、「差分ゼロ」が
+    // 「変わらないのが正しい」なのか「そもそも実行されていない」なのかを区別できない。
+    // OFFにすると判定を1回も呼ばないので、統計は「判定なし」になる。
+    // モデル単位のカリングは常に有効(こちらは切れない)
+    inline constexpr bool MeshCullingEnabled = true;
+
     // --- シャドウ ---
     inline constexpr bool ShadowEnabled = true;
     inline constexpr float ShadowLightSize = 0.02f;
@@ -409,6 +420,31 @@ namespace Kurenai::Defaults
     // TAAのシャープネス(Defaults::TAASharpness)と同程度の効き方になる値
     inline constexpr float UpscaleSharpness = 0.25f;
 
+    // --- カメラ操作(WASD/E/Qの移動速度) ---
+    //
+    // 【この値は「シーンを読む前の初期値」でしかない】SSAO半径などと同じく、
+    // シーン読み込みのたびにResetSceneDependentParams()がシーン対角から決め直す。
+    // .ksceneが[Scene]CameraSpeedを持っていればそれが優先される。
+    // UI側は「既定値に戻す」ではなく「シーンから再計算」を提供すること
+    inline constexpr float CameraSpeed = 5.0f;
+    // Shiftを押している間の倍率。20/5 = 4倍という従来の即値をそのまま保つ
+    inline constexpr float CameraSpeedShiftMultiplier = 4.0f;
+    // 自動決定の基準となるシーン対角[m]と、そのときの速度[m/s]。
+    //
+    // 【基準をEmeraldSquareにする理由】従来の5 m/sはこのシーンで手に馴染む値として選ばれていた。
+    // 対角344.6mは Assets/Packed/EmeraldSquare/Day.kmodel のヘッダAABBから実測した値で、
+    // .ksceneのコメント(「対角344.6m、farZ 1378m」)とも一致する。
+    // この基準ならEmeraldSquareはちょうど従来どおりの5 m/sになる
+    inline constexpr float CameraSpeedReferenceDiagonal = 344.6f;
+    // 自動決定の下限[m/s]。
+    //
+    // 【比例させるだけでは小さいシーンが遅くなる】Sponza(対角37.1m)は比例式だと0.54 m/sになり、
+    // 30mの中庭を横切るのに55秒かかる。従来の5 m/sで既に使いやすいシーンをわざわざ遅くする
+    // 理由が無いため、基準対角より小さいシーンでは従来値をそのまま据え置く。
+    // 上限は設けない ―― 東京23区(実測のシーン対角45,014m)は653.14 m/s、Shiftで2,612.55 m/sになり、
+    // 端から端までが68.9秒/17.2秒になる。ここを頭打ちにすると、この機能を入れた目的そのものが消える
+    inline constexpr float CameraSpeedMin = 5.0f;
+
     // --- 同期 ---
     inline constexpr bool VSyncEnabled = false;
     inline constexpr bool FixedFPSEnabled = true;
@@ -486,4 +522,28 @@ namespace Kurenai::Defaults
     // 【シーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
     // 「1画素を割るとちらつく」という事実はどのシーン・どのショーでも変わらない
     inline constexpr float DroneShowMinScreenRadius = 0.002f;
+
+    // --- Hi-Zオクルージョンカリング(Stage 5-2) ---
+    // 増幅シェーダーがメッシュレットのバウンディング球を前フレームのHi-Zへ投影し、
+    // 「視界内だが手前の何かに完全に隠れている」塊を落とす。
+    //
+    // 既定は有効。メッシュシェーダー経路でしか動かないので、非対応環境
+    // (DX11、および基準機のIntel UHD 620)ではこの値に関わらず一切走らない
+    inline constexpr bool OcclusionCullingEnabled = true;
+    // バウンディング球を膨らませる倍率。
+    //
+    // 【1.0が基準であることに根拠がある】判定に使うHi-Zは1フレーム古いが、その時間差から
+    // 来る視差ずれは別項(前フレームからのカメラ移動距離をそのまま半径へ足す)が受け持っている。
+    // この倍率が埋めるのはそれとは別の誤差 ―― バウンディング球がメッシュレットの実体より
+    // 緩いこと、およびカメラ回転による見え方の変化。どちらもワールド半径に比例するとは
+    // 限らないため、まず「膨らませない」1.0から始め、ポップが出たら実測で上げる。
+    // 最初から余裕を持たせると、効いていないのか判定が緩いのか区別できなくなる
+    inline constexpr float OcclusionCullRadiusScale = 1.0f;
+    // メッシュレットカリングの間引き数を数え、Perfログへ出すか。
+    //
+    // 【既定は有効】この機能は「効いているか」を数値でしか確かめられない ―― 保守的な判定が
+    // 正しく働いていれば絵は1画素も変わらないので、絵からは間引けているかどうかが分からない。
+    // 既定で切っておくと「有効にしたのに何も起きない」の切り分けが毎回必要になる。
+    // 増幅シェーダーのアトミックはグループ単位に集約してあり、切るのは実測して重いと分かってから
+    inline constexpr bool MeshletCullStatsEnabled = true;
 }

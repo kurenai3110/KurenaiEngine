@@ -57,6 +57,31 @@ namespace Kurenai::RHI
         return heapIndex;
     }
 
+    bool DX12BindlessTable::Rebind(uint32_t heapIndex, D3D12_CPU_DESCRIPTOR_HANDLE sourceCpuHandle)
+    {
+        if (!m_Device || !m_Heap || heapIndex == kInvalidBindlessIndex)
+        {
+            return false;
+        }
+
+        if (heapIndex < m_BaseIndex || heapIndex >= m_BaseIndex + m_Capacity)
+        {
+            Core::Logger::Error("DX12", "bindless区画の範囲外の番号で再登録が要求されました: " + std::to_string(heapIndex));
+            return false;
+        }
+
+        if (sourceCpuHandle.ptr == 0)
+        {
+            Core::Logger::Error("DX12", "bindlessの再登録へ無効なディスクリプタハンドルが渡されました");
+            return false;
+        }
+
+        // Registerと違い番号は払い出さず、既にある番号の中身だけを上書きする
+        m_Device->CopyDescriptorsSimple(
+            1, m_Heap->GetCpuHandle(heapIndex), sourceCpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        return true;
+    }
+
     void DX12BindlessTable::Unregister(uint32_t heapIndex)
     {
         if (heapIndex == kInvalidBindlessIndex)

@@ -116,8 +116,8 @@ exit /b 0</Command>
     <!-- meshoptimizer(MIT)のメッシュレット生成。xatlasと同じくライブラリ化せず
          必要なソースだけを直接取り込む(CMakeビルドは不要)。
          使うのは clusterizer(buildMeshlets)・meshletutils(computeMeshletBounds)・
-         vcacheoptimizer / vfetchoptimizer(メッシュレット化前の頂点並べ替え)と、
-         それらが共有するアロケータの5本 -->
+         vcacheoptimizer / vfetchoptimizer(メッシュレット化前の頂点並べ替え)・
+         simplifier(メッシュレットの離散LOD)と、それらが共有するアロケータの6本 -->
     <ClCompile Include="..\..\ThirdParty\meshoptimizer\src\clusterizer.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <SDLCheck>false</SDLCheck>
@@ -134,6 +134,11 @@ exit /b 0</Command>
       <ConformanceMode>false</ConformanceMode>
     </ClCompile>
     <ClCompile Include="..\..\ThirdParty\meshoptimizer\src\vfetchoptimizer.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <ConformanceMode>false</ConformanceMode>
+    </ClCompile>
+    <ClCompile Include="..\..\ThirdParty\meshoptimizer\src\simplifier.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <SDLCheck>false</SDLCheck>
       <ConformanceMode>false</ConformanceMode>
