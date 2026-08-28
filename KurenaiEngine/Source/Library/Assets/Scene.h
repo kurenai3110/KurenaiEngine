@@ -3,7 +3,9 @@
 #include <DirectXMath.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Model.h"
@@ -18,7 +20,15 @@ namespace Kurenai::Assets
     // MakeObjectConstants参照)
     struct ModelInstance
     {
-        Model Model;
+        // 【値ではなく共有ポインタで持つ理由】同じ.kmodelを複数のインスタンスが指せるようにするため。
+        // Modelは頂点/インデックス/テクスチャのGPUリソースを丸ごと抱えるので、同じパスを2回読むと
+        // VRAMに二重に載る(MultiModelTest.ksceneは同じ.kmodelを3回配置しており、実際に3重だった)。
+        // 実体はScene::ModelCacheが所有し、ここはその共有参照になる。
+        //
+        // constなのは、読み込み後にモデルの中身を書き換える経路を作らないため。1つのModelを
+        // 複数のインスタンスが共有するので、片方から書き換えるともう片方に波及する。
+        // 唯一の例外だったRaytracingSceneのCPUコピー解放はScene::ModelCache側を回す形へ移した
+        std::shared_ptr<const Model> Model;
         DirectX::XMFLOAT4X4 World;          // Scale * Rotation * Translation(転置済み、HLSLへそのまま渡せる形)
         DirectX::XMFLOAT4X4 NormalMatrix;   // Worldの3x3部分の逆転置(4x4に格納、転置済み)
         float TangentSignFlip = 1.0f;       // Worldの行列式が負(ミラーリング)なら-1
@@ -148,14 +158,32 @@ namespace Kurenai::Assets
     struct Scene
     {
         std::wstring Name;
-        std::vector<ModelInstance> Instances;
 
         // 全モデルで共有する1x1のフォールバックテクスチャ(白/フラット法線/黒/マゼンタ)。
         //
-        // 【Instancesより後ろに置いてはいけない】メンバはここでの宣言順に構築され、
-        // 逆順に破棄される。Instancesが持つModelはここのテクスチャを生ポインタで指しているため、
-        // 先に破棄されると解放済みを指す。Instancesより前に宣言してこの順序を保証する
+        // 【ModelCache/Instancesより後ろに置いてはいけない】メンバはここでの宣言順に構築され、
+        // 逆順に破棄される。Modelが持つMeshはここのテクスチャを生ポインタで指しているため、
+        // 先に破棄されると解放済みを指す。Modelを持つ2つより前に宣言してこの順序を保証する。
+        //
+        // 【以前はここがInstancesより後ろにあった】コメントは「Instancesより前に宣言する」と
+        // 書いてあるのに、実際の宣言はInstancesの後ろにあった(=破棄はInstancesより先)。
+        // Modelのデストラクタがこの生ポインタを読まないため実害は出ていなかったが、
+        // ModelCacheがModelの実体を所有するようになって順序の重みが増したので、
+        // コメントが元から要求していた並びへ直した
         SharedTexturePool SharedTextures;
+
+        // .kmodelのパス(assetRootDirectoryを含む絶対パス)から読み込み済みModelを引くキャッシュ。
+        // Modelの実体を所有するのはここで、ModelInstance::Modelはこれへの共有参照になる。
+        //
+        // 【SharedTexturesより後ろ・Instancesより前】上のSharedTexturesのコメントの理由で
+        // SharedTexturesより後ろに、そしてInstancesが指す先を先に消さないためInstancesより前に置く
+        // (破棄は Instances -> ModelCache -> SharedTextures の順になる)。
+        //
+        // 【スレッド】読み書きするのはLoaderスレッドのLoadSceneだけで、Renderスレッドは
+        // ApplyLoadedSceneで受け取った後に読むだけ。したがってロックを持たない
+        std::unordered_map<std::wstring, std::shared_ptr<Model>> ModelCache;
+
+        std::vector<ModelInstance> Instances;
 
         // 各ModelInstanceが持つModel::Lights(モデルファイル埋め込みのライト。glTFのKHR_lights_punctual
         // やFBXのライトノード由来)をInstance::Worldでワールド空間へ変換したものと、.kscene自身の

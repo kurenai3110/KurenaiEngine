@@ -3419,7 +3419,7 @@ namespace Kurenai
                 continue;
             }
 
-            for (const auto& mesh : instance.Model.Meshes)
+            for (const auto& mesh : instance.Model->Meshes)
             {
                 // 半透明(alphaMode=BLEND)はハードウェア側でもG-Bufferに描かれないため揃える
                 if (mesh.IsTransparent || mesh.IndexCount < 3)
@@ -4552,7 +4552,7 @@ namespace Kurenai
         uint32_t opaqueMeshCount = 0;
         for (const auto& instance : m_Scene.Instances)
         {
-            for (const auto& mesh : instance.Model.Meshes)
+            for (const auto& mesh : instance.Model->Meshes)
             {
                 if (!mesh.IsTransparent)
                 {
@@ -6981,7 +6981,7 @@ namespace Kurenai
                                 continue;
                             }
 
-                            for (const auto& mesh : instance.Model.Meshes)
+                            for (const auto& mesh : instance.Model->Meshes)
                             {
                                 bindPipelineState(instance.IsMirrored);
 
@@ -7080,7 +7080,7 @@ namespace Kurenai
                     continue;
                 }
 
-                for (const auto& mesh : instance.Model.Meshes)
+                for (const auto& mesh : instance.Model->Meshes)
                 {
                     // 半透明メッシュはプローブへ焼かない。ProbeCapture.hlslは不透明として描くため、
                     // ガラスを焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに
@@ -7412,7 +7412,7 @@ namespace Kurenai
             // (DX12Buffer.h)ため、整合が取れるまでは入れないほうが安全
             for (const auto& instance : m_Scene.Instances)
             {
-                for (const auto& mesh : instance.Model.Meshes)
+                for (const auto& mesh : instance.Model->Meshes)
                 {
                     // 半透明メッシュを焼かない理由は反射プローブと同じ(不透明として描かれるため、
                     // ガラスが壁になって裏の景色が欠ける)
@@ -7860,7 +7860,7 @@ namespace Kurenai
                             continue;
                         }
 
-                        for (const auto& mesh : instance.Model.Meshes)
+                        for (const auto& mesh : instance.Model->Meshes)
                         {
                             // BLENDマテリアルはG-Bufferに描かれないので深度も書かない
                             // (書くと後ろのものが消える)
@@ -7993,7 +7993,7 @@ namespace Kurenai
                         continue;
                     }
 
-                    for (const auto& mesh : instance.Model.Meshes)
+                    for (const auto& mesh : instance.Model->Meshes)
                     {
                         // BLENDマテリアル(mesh.IsTransparent)はG-Bufferに書き込まず、専用のTransparentパスで
                         // フォワードシェーディングする(G-Bufferのアルファは常に1.0で半透明合成ができないため)
@@ -8623,7 +8623,7 @@ namespace Kurenai
                     const float dy = instance.World._24 - cameraPosition.y;
                     const float dz = instance.World._34 - cameraPosition.z;
                     const float distanceSq = dx * dx + dy * dy + dz * dz;
-                    for (const auto& mesh : instance.Model.Meshes)
+                    for (const auto& mesh : instance.Model->Meshes)
                     {
                         if (!mesh.IsTransparent)
                         {
@@ -8818,7 +8818,7 @@ namespace Kurenai
                             continue;
                         }
 
-                        for (const auto& mesh : instance.Model.Meshes)
+                        for (const auto& mesh : instance.Model->Meshes)
                         {
                             // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
                             // PlanarReflection.hlsl冒頭参照)

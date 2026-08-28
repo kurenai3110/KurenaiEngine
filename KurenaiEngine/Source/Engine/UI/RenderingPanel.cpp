@@ -228,7 +228,7 @@ namespace Kurenai::UI
         size_t meshCount = 0;
         for (const auto& instance : m_Engine.m_Scene.Instances)
         {
-            for (const auto& mesh : instance.Model.Meshes)
+            for (const auto& mesh : instance.Model->Meshes)
             {
                 ++meshCount;
                 meshletCount += mesh.MeshletCount;
@@ -304,7 +304,7 @@ namespace Kurenai::UI
         size_t triangleCount = 0;
         for (const auto& instance : m_Engine.m_Scene.Instances)
         {
-            for (const auto& mesh : instance.Model.Meshes)
+            for (const auto& mesh : instance.Model->Meshes)
             {
                 if (mesh.IsTransparent || mesh.IndexCount < 3)
                 {

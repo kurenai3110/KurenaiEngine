@@ -93,9 +93,9 @@ namespace Kurenai::Assets
         std::vector<uint32_t> meshletTriangleOffsets;
         instanceInfos.reserve(scene.Instances.size());
 
-        for (ModelInstance& instance : scene.Instances)
+        for (const ModelInstance& instance : scene.Instances)
         {
-            const Model& model = instance.Model;
+            const Model& model = *instance.Model;
 
             RaytracingInstanceInfo instanceInfo;
             std::memcpy(instanceInfo.NormalMatrix, &instance.NormalMatrix, sizeof(instanceInfo.NormalMatrix));
@@ -189,15 +189,22 @@ namespace Kurenai::Assets
         }
 
         // CPU側のコピーはGPUへ送った時点で用済み。次のシーンを読むまで抱えると
-        // 大規模シーンでは100MB規模の無駄になるため、ここで解放する
-        for (ModelInstance& instance : scene.Instances)
+        // 大規模シーンでは100MB規模の無駄になるため、ここで解放する。
+        //
+        // 【Instancesではなく ModelCache を回す】ModelInstance::Modelは
+        // shared_ptr<const Model> で、インスタンス経由では書き換えられない。
+        // また同じModelを複数のインスタンスが共有するため、Instancesを回すと
+        // 同じ実体に対して何度もclearを呼ぶことになる。実体を所有している
+        // ModelCache側を1回ずつ回すのが正しい
+        for (auto& entry : scene.ModelCache)
         {
-            instance.Model.RaytracingAttributes.clear();
-            instance.Model.RaytracingAttributes.shrink_to_fit();
-            instance.Model.RaytracingIndices.clear();
-            instance.Model.RaytracingIndices.shrink_to_fit();
-            instance.Model.RaytracingMeshletTriangleOffsets.clear();
-            instance.Model.RaytracingMeshletTriangleOffsets.shrink_to_fit();
+            Model& model = *entry.second;
+            model.RaytracingAttributes.clear();
+            model.RaytracingAttributes.shrink_to_fit();
+            model.RaytracingIndices.clear();
+            model.RaytracingIndices.shrink_to_fit();
+            model.RaytracingMeshletTriangleOffsets.clear();
+            model.RaytracingMeshletTriangleOffsets.shrink_to_fit();
         }
 
         // --- BLAS(モデルインスタンスごと)を構築する -----------------------------------------
@@ -210,8 +217,8 @@ namespace Kurenai::Assets
             const ModelInstance& instance = scene.Instances[i];
 
             RHI::BottomLevelASDesc blasDesc;
-            blasDesc.Geometries.reserve(instance.Model.Meshes.size());
-            for (const Mesh& mesh : instance.Model.Meshes)
+            blasDesc.Geometries.reserve(instance.Model->Meshes.size());
+            for (const Mesh& mesh : instance.Model->Meshes)
             {
                 RHI::ASGeometryDesc geometry;
                 geometry.VertexBuffer = mesh.VertexBuffer.get();

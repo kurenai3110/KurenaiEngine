@@ -1431,9 +1431,18 @@ namespace Kurenai::Assets
             const std::wstring fullModelPath = assetRootDirectory + normalizedPath;
 
             ModelInstance instance;
+            // 同じ.kmodelを指すインスタンスは実体を共有する。読み込みは初回だけで、
+            // 2回目以降はキャッシュの共有参照を配るだけになる(VRAMの二重常駐を避ける)。
+            //
             // 1x1のフォールバックはシーン全体で1組を共有する(モデルごとに作ると
             // 671モデルのシーンで2000個超の個別リソースになる。ModelLoader.hのコメント参照)
-            instance.Model = LoadModel(device, fullModelPath, &scene.SharedTextures);
+            auto cached = scene.ModelCache.find(fullModelPath);
+            if (cached == scene.ModelCache.end())
+            {
+                auto loaded = std::make_shared<Model>(LoadModel(device, fullModelPath, &scene.SharedTextures));
+                cached = scene.ModelCache.emplace(fullModelPath, std::move(loaded)).first;
+            }
+            instance.Model = cached->second;
             instance.IsWater = parsedModel.Water;
 
             using namespace DirectX;
@@ -1470,7 +1479,7 @@ namespace Kurenai::Assets
 
             // モデルのローカル空間AABB(8頂点)をWorldで変換し、シーン全体のAABBへ合成する。
             // 軸並行のまま変換前のmin/maxだけを使うと回転時に不正確になるため、必ず8頂点全てを変換する
-            const Model& loadedModel = instance.Model;
+            const Model& loadedModel = *instance.Model;
             // インスタンス自身のワールドAABBも同じループで求める(フラスタムカリング用)
             bool instanceBoundsInitialized = false;
             for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
@@ -1524,7 +1533,7 @@ namespace Kurenai::Assets
             // 平行移動を含まない方向ベクトルとして変換する必要があるため、それぞれ
             // XMVector3TransformCoord/TransformNormalを使い分ける(法線のような逆転置は不要。
             // 接線ベクトルの変換(GBuffer.hlsl)と同じ理由)
-            for (const Light& localLight : instance.Model.Lights)
+            for (const Light& localLight : instance.Model->Lights)
             {
                 Light worldLight = localLight;
 
@@ -1549,6 +1558,15 @@ namespace Kurenai::Assets
 
             scene.Instances.push_back(std::move(instance));
         }
+
+        // モデル共有が効いたかを数値で残す。「共有 0件」ならキャッシュが一度も当たっておらず、
+        // 同じ.kmodelを複数配置しているシーンでVRAMが二重に載っている
+        // (MultiModelTest.ksceneは同じ.kmodelを3回配置するので、ここが 3配置/1件/2件 になる)
+        Core::Logger::Info(
+            "SceneLoader",
+            "モデル " + std::to_string(scene.Instances.size()) + "配置 / ユニーク " +
+                std::to_string(scene.ModelCache.size()) + "件 / 共有で節約 " +
+                std::to_string(scene.Instances.size() - scene.ModelCache.size()) + "件");
 
         return scene;
     }
