@@ -12,11 +12,15 @@
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 
+#include <DirectXTex.h>
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
@@ -100,6 +104,230 @@ namespace KurenaiPacker
             }
 
             return directory + rawPath;
+        }
+
+        // aiTexture::achFormatHintを拡張子として使える形へ均す。assimpのバージョンや形式によって
+        // "jpg" / "*.jpg" / "JPG" / 空文字 のいずれもありうるため、英数字だけを小文字で拾う
+        std::string SanitizeFormatHint(const char* hint)
+        {
+            std::string result;
+            if (hint == nullptr)
+            {
+                return result;
+            }
+            for (const char* p = hint; *p != '\0' && result.size() < 8; ++p)
+            {
+                const unsigned char c = static_cast<unsigned char>(*p);
+                if (std::isalnum(c))
+                {
+                    result.push_back(static_cast<char>(std::tolower(c)));
+                }
+            }
+            return result;
+        }
+
+        // achFormatHintが当てにならなかったときに、先頭バイトから形式を当てる。
+        // 【推測で拡張子を付けない】拡張子はTextureImage::LoadFromFileの分岐そのものなので、
+        // 間違えるとDDS/TGA扱いになってミップもBC7も行われない。当てられなければ空を返し、
+        // 呼び出し側に警告を出させる
+        std::string GuessExtensionFromMagic(const unsigned char* data, size_t size)
+        {
+            if (data == nullptr || size < 4)
+            {
+                return std::string();
+            }
+            if (data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF)
+            {
+                return "jpg";
+            }
+            if (data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G')
+            {
+                return "png";
+            }
+            if ((data[0] == 'I' && data[1] == 'I' && data[2] == 0x2A && data[3] == 0x00) ||
+                (data[0] == 'M' && data[1] == 'M' && data[2] == 0x00 && data[3] == 0x2A))
+            {
+                return "tif";
+            }
+            if (data[0] == 'D' && data[1] == 'D' && data[2] == 'S' && data[3] == ' ')
+            {
+                return "dds";
+            }
+            if (data[0] == 'B' && data[1] == 'M')
+            {
+                return "bmp";
+            }
+            return std::string();
+        }
+
+        // 一時ファイル名に使えない文字を落とす。埋め込みテクスチャのmFilenameは
+        // "..\..\FME_TEMP\...\skjp5921.jpg" のようなパスを名乗ることがあるため、
+        // ディレクトリ部を捨ててから使う
+        std::wstring SanitizeFileNameStem(const std::string& name)
+        {
+            const std::wstring wide = Utf8ToWide(name);
+            const size_t slashPos = wide.find_last_of(L"/\\");
+            std::wstring base = slashPos == std::wstring::npos ? wide : wide.substr(slashPos + 1);
+            const size_t dotPos = base.find_last_of(L'.');
+            if (dotPos != std::wstring::npos)
+            {
+                base = base.substr(0, dotPos);
+            }
+
+            std::wstring result;
+            for (wchar_t c : base)
+            {
+                if (c == L'\\' || c == L'/' || c == L':' || c == L'*' || c == L'?' ||
+                    c == L'"' || c == L'<' || c == L'>' || c == L'|' || c < 32)
+                {
+                    continue;
+                }
+                result.push_back(c);
+                if (result.size() >= 48)
+                {
+                    break;
+                }
+            }
+            return result;
+        }
+
+        // sceneのテクスチャ配列から、そのポインタの位置(番号)を求める。
+        // GetEmbeddedTextureはポインタしか返さず、番号は決定的なファイル名を作るのに要る
+        bool FindEmbeddedTextureIndex(const aiScene* scene, const aiTexture* texture, unsigned int& outIndex)
+        {
+            for (unsigned int i = 0; i < scene->mNumTextures; ++i)
+            {
+                if (scene->mTextures[i] == texture)
+                {
+                    outIndex = i;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // 埋め込みテクスチャを、assimpの検索(GetEmbeddedTexture)で見つからなかった場合に
+        // ベース名だけで線形探索する。
+        //
+        // 【なぜ要るのか】Project PLATEAUのLOD2はマテリアルが
+        // "..\..\FME_TEMP\wbrun_1648613083830_64256\...\skjp5921.jpg" という実在しない一時パスを
+        // 指しており、aiTexture側のmFilenameがどう入っているかは配布物によって違う。
+        // assimpの突き合わせが外れても、ファイル名が一致すれば同じ画像とみなしてよい
+        const aiTexture* FindEmbeddedTextureByFileName(const aiScene* scene, const std::string& rawPath)
+        {
+            const size_t slashPos = rawPath.find_last_of("/\\");
+            std::string fileName = slashPos == std::string::npos ? rawPath : rawPath.substr(slashPos + 1);
+            if (fileName.empty())
+            {
+                return nullptr;
+            }
+            std::transform(fileName.begin(), fileName.end(), fileName.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+            for (unsigned int i = 0; i < scene->mNumTextures; ++i)
+            {
+                const aiTexture* texture = scene->mTextures[i];
+                std::string candidate = texture->mFilename.C_Str();
+                const size_t candidateSlash = candidate.find_last_of("/\\");
+                if (candidateSlash != std::string::npos)
+                {
+                    candidate = candidate.substr(candidateSlash + 1);
+                }
+                std::transform(candidate.begin(), candidate.end(), candidate.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (!candidate.empty() && candidate == fileName)
+                {
+                    return texture;
+                }
+            }
+            return nullptr;
+        }
+
+        // テクスチャ参照(assimpが返した生のパス)を、実際に読めるファイルパスへ解決する。
+        // 実ファイルが見つからなければ埋め込みテクスチャを探し、見つかれば一時ファイルへ取り出す。
+        //
+        // 【従来の挙動を変えないこと】実ファイルが見つかった場合も、埋め込みも無い場合も、
+        // 戻り値はResolveTexturePathと完全に同じ。埋め込みが実在するときにだけ経路が増える
+        std::wstring ResolveTextureReference(
+            const aiScene* scene,
+            const std::shared_ptr<EmbeddedTextureStore>& store,
+            const std::wstring& directory,
+            const aiString& rawTexPath)
+        {
+            const std::string rawUtf8 = UriDecode(rawTexPath.C_Str());
+            const std::wstring rawWide = Utf8ToWide(rawUtf8);
+            const std::wstring resolved = ResolveTexturePath(directory, rawWide);
+            if (FileExists(resolved))
+            {
+                return resolved;
+            }
+
+            if (scene == nullptr || scene->mNumTextures == 0 || !store)
+            {
+                return resolved;
+            }
+
+            // assimpの規約("*N"表記とファイル名照合)で引く。外したらベース名で線形に探す
+            const aiTexture* texture = scene->GetEmbeddedTexture(rawTexPath.C_Str());
+            const char* foundBy = "GetEmbeddedTexture";
+            if (texture == nullptr)
+            {
+                texture = FindEmbeddedTextureByFileName(scene, rawUtf8);
+                foundBy = "ファイル名の線形探索";
+            }
+            if (texture == nullptr)
+            {
+                return resolved;
+            }
+
+            unsigned int textureIndex = 0;
+            if (!FindEmbeddedTextureIndex(scene, texture, textureIndex))
+            {
+                Kurenai::Core::Logger::Warning("KurenaiPacker",
+                    "埋め込みテクスチャの配列番号を特定できませんでした: " + rawUtf8);
+                return resolved;
+            }
+
+            std::wstring extracted;
+            if (texture->mHeight == 0)
+            {
+                // 圧縮ブロブ(JPEG/PNG/TIFF等)。mWidthがバイト数
+                extracted = store->StoreCompressed(
+                    textureIndex,
+                    SanitizeFormatHint(texture->achFormatHint),
+                    texture->mFilename.C_Str(),
+                    texture->pcData,
+                    static_cast<size_t>(texture->mWidth));
+            }
+            else
+            {
+                // 非圧縮のARGB8888。aiTexelはb,g,r,aの順に並んでおりBGRA8と同じ配置
+                extracted = store->StoreUncompressed(
+                    textureIndex,
+                    texture->mFilename.C_Str(),
+                    texture->pcData,
+                    texture->mWidth,
+                    texture->mHeight);
+            }
+
+            if (extracted.empty())
+            {
+                Kurenai::Core::Logger::Warning("KurenaiPacker",
+                    "埋め込みテクスチャの取り出しに失敗しました(このスロットは指定なしとして扱われます): " + rawUtf8);
+                return resolved;
+            }
+
+            // 【全件は出さない】LOD2は1タイルで1,714枚あり、1行ずつ出すとログが実用にならない。
+            // 経路が正しいことを確かめるのに要るのは先頭の数件で、総数はパック完了の
+            // サマリ(「埋め込みテクスチャ N枚を取り出し」)が受け持つ
+            constexpr size_t kVerboseExtractionLogCount = 5;
+            if (store->ExtractedCount() <= kVerboseExtractionLogCount)
+            {
+                Kurenai::Core::Logger::Info("KurenaiPacker",
+                    std::string("埋め込みテクスチャを取り出しました(") + foundBy + "): "
+                    + rawUtf8 + " -> " + WideToUtf8(extracted));
+            }
+            return extracted;
         }
 
         // 位置・法線が一致する頂点は、assimp内部では複数の面にまたがって別インスタンスとして
@@ -322,6 +550,205 @@ namespace KurenaiPacker
         }
     }
 
+    // === EmbeddedTextureStore ===
+
+    EmbeddedTextureStore::~EmbeddedTextureStore()
+    {
+        if (m_Directory.empty())
+        {
+            return;
+        }
+        // 【デストラクタから例外を出さない】後始末に失敗してもパック結果は既に書けているので、
+        // 落とさずに警告だけ残す(一時ファイルは%TEMP%配下なのでOSの掃除でも消える)
+        std::error_code ec;
+        const uintmax_t removed = std::filesystem::remove_all(std::filesystem::path(m_Directory), ec);
+        if (ec)
+        {
+            Kurenai::Core::Logger::Warning("KurenaiPacker",
+                "埋め込みテクスチャの一時ディレクトリを削除できませんでした(" + ec.message() + "): "
+                + WideToUtf8(m_Directory));
+        }
+        else
+        {
+            Kurenai::Core::Logger::Info("KurenaiPacker",
+                "埋め込みテクスチャの一時ディレクトリを削除しました(" + std::to_string(removed) + "項目): "
+                + WideToUtf8(m_Directory));
+        }
+    }
+
+    bool EmbeddedTextureStore::EnsureDirectory()
+    {
+        if (!m_Directory.empty())
+        {
+            return true;
+        }
+
+        wchar_t tempRoot[MAX_PATH + 1] = {};
+        const DWORD length = GetTempPathW(MAX_PATH, tempRoot);
+        if (length == 0 || length > MAX_PATH)
+        {
+            Kurenai::Core::Logger::Error("KurenaiPacker",
+                "一時ディレクトリのパスを取得できませんでした(GetTempPathW)");
+            return false;
+        }
+
+        // 同じプロセスで複数のモデルを扱う場合や、前回の残骸がある場合に備えて連番で退避する
+        for (unsigned int attempt = 0; attempt < 64; ++attempt)
+        {
+            std::wstring candidate = std::wstring(tempRoot) + L"KurenaiPacker_"
+                + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(attempt);
+            if (CreateDirectoryW(candidate.c_str(), nullptr))
+            {
+                m_Directory = candidate + L"\\";
+                Kurenai::Core::Logger::Info("KurenaiPacker",
+                    "埋め込みテクスチャの取り出し先: " + WideToUtf8(m_Directory));
+                return true;
+            }
+            if (GetLastError() != ERROR_ALREADY_EXISTS)
+            {
+                Kurenai::Core::Logger::Error("KurenaiPacker",
+                    "一時ディレクトリを作成できませんでした(GetLastError=" + std::to_string(GetLastError())
+                    + "): " + WideToUtf8(candidate));
+                return false;
+            }
+        }
+
+        Kurenai::Core::Logger::Error("KurenaiPacker",
+            "一時ディレクトリの候補が64件とも既に存在するため、埋め込みテクスチャを取り出せません");
+        return false;
+    }
+
+    std::wstring EmbeddedTextureStore::StoreCompressed(
+        unsigned int textureIndex,
+        const std::string& formatHint,
+        const std::string& originalName,
+        const void* data,
+        size_t sizeInBytes)
+    {
+        const auto it = m_Extracted.find(textureIndex);
+        if (it != m_Extracted.end())
+        {
+            return it->second;
+        }
+        if (data == nullptr || sizeInBytes == 0)
+        {
+            Kurenai::Core::Logger::Warning("KurenaiPacker",
+                "埋め込みテクスチャ" + std::to_string(textureIndex) + "の中身が空です");
+            return std::wstring();
+        }
+        if (!EnsureDirectory())
+        {
+            return std::wstring();
+        }
+
+        std::string extension = formatHint;
+        if (extension.empty() || extension == "bin")
+        {
+            extension = GuessExtensionFromMagic(static_cast<const unsigned char*>(data), sizeInBytes);
+        }
+        if (extension.empty())
+        {
+            Kurenai::Core::Logger::Warning("KurenaiPacker",
+                "埋め込みテクスチャ" + std::to_string(textureIndex)
+                + "の形式を判別できませんでした(achFormatHintも先頭バイトも一致せず)");
+            return std::wstring();
+        }
+
+        const std::wstring stem = SanitizeFileNameStem(originalName);
+        wchar_t indexText[16] = {};
+        swprintf_s(indexText, L"emb%04u", textureIndex);
+        std::wstring fileName = indexText;
+        if (!stem.empty())
+        {
+            fileName += L"_" + stem;
+        }
+        fileName += L"." + Utf8ToWide(extension);
+
+        const std::wstring fullPath = m_Directory + fileName;
+        std::ofstream file(fullPath, std::ios::binary);
+        if (!file)
+        {
+            Kurenai::Core::Logger::Error("KurenaiPacker",
+                "埋め込みテクスチャを書き出せませんでした: " + WideToUtf8(fullPath));
+            return std::wstring();
+        }
+        file.write(static_cast<const char*>(data), static_cast<std::streamsize>(sizeInBytes));
+        if (!file)
+        {
+            Kurenai::Core::Logger::Error("KurenaiPacker",
+                "埋め込みテクスチャの書き出しが途中で失敗しました: " + WideToUtf8(fullPath));
+            return std::wstring();
+        }
+        file.close();
+
+        m_Extracted.emplace(textureIndex, fullPath);
+        return fullPath;
+    }
+
+    std::wstring EmbeddedTextureStore::StoreUncompressed(
+        unsigned int textureIndex,
+        const std::string& originalName,
+        const void* bgraTexels,
+        unsigned int width,
+        unsigned int height)
+    {
+        const auto it = m_Extracted.find(textureIndex);
+        if (it != m_Extracted.end())
+        {
+            return it->second;
+        }
+        if (bgraTexels == nullptr || width == 0 || height == 0)
+        {
+            Kurenai::Core::Logger::Warning("KurenaiPacker",
+                "埋め込みテクスチャ" + std::to_string(textureIndex) + "の寸法が不正です");
+            return std::wstring();
+        }
+        if (!EnsureDirectory())
+        {
+            return std::wstring();
+        }
+
+        DirectX::Image image{};
+        image.width = width;
+        image.height = height;
+        image.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        image.rowPitch = static_cast<size_t>(width) * 4;
+        image.slicePitch = image.rowPitch * height;
+        image.pixels = const_cast<uint8_t*>(static_cast<const uint8_t*>(bgraTexels));
+
+        const std::wstring stem = SanitizeFileNameStem(originalName);
+        wchar_t indexText[16] = {};
+        swprintf_s(indexText, L"emb%04u", textureIndex);
+        std::wstring fileName = indexText;
+        if (!stem.empty())
+        {
+            fileName += L"_" + stem;
+        }
+        fileName += L".png";
+        const std::wstring fullPath = m_Directory + fileName;
+
+        // WICはCOMを要求する。ここは(ワーカースレッドではなく)解析中の呼び出し元スレッドなので、
+        // この場で初期化して使い終わったら戻す
+        const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const bool comInitialized = SUCCEEDED(coHr);
+        const HRESULT hr = DirectX::SaveToWICFile(
+            image, DirectX::WIC_FLAGS_NONE, DirectX::GetWICCodec(DirectX::WIC_CODEC_PNG), fullPath.c_str());
+        if (comInitialized)
+        {
+            CoUninitialize();
+        }
+        if (FAILED(hr))
+        {
+            Kurenai::Core::Logger::Error("KurenaiPacker",
+                "非圧縮の埋め込みテクスチャをPNGへ書き出せませんでした(hr=0x"
+                + std::to_string(static_cast<unsigned long>(hr)) + "): " + WideToUtf8(fullPath));
+            return std::wstring();
+        }
+
+        m_Extracted.emplace(textureIndex, fullPath);
+        return fullPath;
+    }
+
     SourceModel LoadSourceModel(
         const std::wstring& filePath,
         float scale,
@@ -349,6 +776,15 @@ namespace KurenaiPacker
         const std::wstring directory = GetDirectory(filePath);
 
         SourceModel model;
+
+        // 埋め込みテクスチャを持つモデルでだけ取り出し先を用意する。
+        // 一時ディレクトリの実体は最初の1枚を取り出す時点で作られる(EnsureDirectory)
+        if (scene->mNumTextures > 0)
+        {
+            model.EmbeddedTextures = std::make_shared<EmbeddedTextureStore>();
+            Kurenai::Core::Logger::Info("KurenaiPacker",
+                "埋め込みテクスチャを" + std::to_string(scene->mNumTextures) + "枚検出しました");
+        }
 
         std::vector<std::pair<const aiMesh*, aiMatrix4x4>> meshNodes;
         CollectMeshNodes(scene, scene->mRootNode, aiMatrix4x4(), meshNodes);
@@ -583,7 +1019,7 @@ namespace KurenaiPacker
             if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS ||
                 material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)
             {
-                outMesh.BaseColorPath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
+                outMesh.BaseColorPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
             }
 
             // OBJ形式は法線マップをaiTextureType_NORMALSではなくmap_bump(aiTextureType_HEIGHT)として
@@ -591,7 +1027,7 @@ namespace KurenaiPacker
             if (material->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS ||
                 material->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS)
             {
-                outMesh.NormalPath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
+                outMesh.NormalPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
             }
 
             // glTFのmetallicRoughnessテクスチャはG=ラフネス、B=メタリックを1枚に格納しており、
@@ -607,12 +1043,12 @@ namespace KurenaiPacker
                 (materialOverride.SpecularAsOrm &&
                  material->GetTexture(aiTextureType_SPECULAR, 0, &texPath) == AI_SUCCESS))
             {
-                outMesh.MetallicRoughnessPath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
+                outMesh.MetallicRoughnessPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
             }
 
             if (material->GetTexture(aiTextureType_EMISSIVE, 0, &texPath) == AI_SUCCESS)
             {
-                outMesh.EmissivePath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
+                outMesh.EmissivePath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
             }
 
             // ベイク済みアンビエントオクルージョン(遮蔽マップ)。
@@ -629,7 +1065,7 @@ namespace KurenaiPacker
             if (material->GetTexture(aiTextureType_LIGHTMAP, 0, &texPath) == AI_SUCCESS ||
                 material->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texPath) == AI_SUCCESS)
             {
-                outMesh.OcclusionPath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
+                outMesh.OcclusionPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
             }
             else if (materialOverride.SpecularAsOrm && !outMesh.MetallicRoughnessPath.empty())
             {

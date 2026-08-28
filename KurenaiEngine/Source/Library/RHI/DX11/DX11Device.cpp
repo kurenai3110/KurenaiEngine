@@ -193,6 +193,30 @@ namespace Kurenai::RHI
             return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, uav);
         }
 
+        // GPUが書いた値をCPUで読むための受け皿。ステージングバッファとして作る。
+        // シェーダーからは見えないのでBindFlagsは0(ビューも張らない)
+        if (desc.Usage == BufferUsage::Readback)
+        {
+            if (desc.SizeInBytes == 0)
+            {
+                Core::Logger::Error("DX11", "Readbackバッファのサイズが0です。作成を中止します");
+                throw std::runtime_error("Readbackバッファのサイズが不正です");
+            }
+
+            D3D11_BUFFER_DESC readbackDesc{};
+            readbackDesc.ByteWidth = desc.SizeInBytes;
+            readbackDesc.Usage = D3D11_USAGE_STAGING;
+            readbackDesc.BindFlags = 0;
+            readbackDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> readbackBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&readbackDesc, nullptr, &readbackBuffer),
+                "リードバックバッファの作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(readbackBuffer, desc.SizeInBytes, m_Context);
+        }
+
         // 間接ディスパッチの引数バッファ。D3D11はDRAWINDIRECT_ARGSと構造化バッファを同時に
         // 指定できないため、raw(ByteAddress)バッファとして作りHLSL側もRWByteAddressBufferで受ける
         // (RHIEnums.hのBufferUsage::IndirectArgsのコメント参照)
@@ -1199,6 +1223,14 @@ namespace Kurenai::RHI
         (void)buffer;
         Core::Logger::Error(
             "DX11", "RegisterBindless: DX11はbindlessに対応していません。SupportsBindless()で分岐してください");
+        return kInvalidBindlessIndex;
+    }
+
+    uint32_t DX11Device::RegisterBindlessUAV(IRHIBuffer* buffer)
+    {
+        (void)buffer;
+        Core::Logger::Error(
+            "DX11", "RegisterBindlessUAV: DX11はbindlessに対応していません。SupportsBindless()で分岐してください");
         return kInvalidBindlessIndex;
     }
 

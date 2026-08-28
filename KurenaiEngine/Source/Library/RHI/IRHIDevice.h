@@ -231,6 +231,23 @@ namespace Kurenai::RHI
         virtual uint32_t RegisterBindless(IRHITexture* texture) = 0;
         virtual uint32_t RegisterBindless(IRHIBuffer* buffer) = 0;
 
+        // バッファの**UAV**をbindlessヒープへ登録し、シェーダーが使う番号を返す。
+        // 上のRegisterBindlessがSRV(読み取り専用)を登録するのに対し、こちらは書き込める。
+        //
+        // 【なぜ別のAPIなのか】SRVとUAVは別のディスクリプタで、同じリソースでも両方が要る。
+        // ResourceDescriptorHeap[i] を RWStructuredBuffer<T> として受けるにはUAVの側の
+        // 番号でなければならず、SRVの番号を渡すと読み取り専用のビューを書き込みに使うことになる。
+        //
+        // 用途は、グラフィックスのルートシグネチャにUAVレンジを持たないステージ ――
+        // 増幅シェーダー・メッシュシェーダー ―― からカウンタへ書き込むこと。
+        // これらのステージはSRVテーブル経由でしかリソースを受け取れないが、
+        // ルートシグネチャがCBV_SRV_UAV_HEAP_DIRECTLY_INDEXEDを立てているため、
+        // bindless経由でならUAVにも届く。
+        //
+        // UAVを持たないバッファ(Vertex/Index/Constant/StructuredReadOnly/StructuredImmutable)を
+        // 渡すとログを出してkInvalidBindlessIndexを返す
+        virtual uint32_t RegisterBindlessUAV(IRHIBuffer* buffer) = 0;
+
         // --- メッシュシェーダー ---------------------------------------------------------------
 
         // 増幅シェーダー/メッシュシェーダーによる描画(DispatchMesh)が使えるか。

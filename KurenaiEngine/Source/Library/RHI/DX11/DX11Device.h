@@ -89,6 +89,7 @@ namespace Kurenai::RHI
         bool SupportsBindless() const override { return false; }
         uint32_t RegisterBindless(IRHITexture* texture) override;
         uint32_t RegisterBindless(IRHIBuffer* buffer) override;
+        uint32_t RegisterBindlessUAV(IRHIBuffer* buffer) override;
         bool SupportsMeshShader() const override { return false; }
         std::unique_ptr<IRHIPipelineState> CreateMeshPipelineState(const MeshPipelineStateDesc& desc) override;
         // コンピュートシェーダーによる自前ラスタライザもD3D12専用。DX11のコンピュートシェーダーは

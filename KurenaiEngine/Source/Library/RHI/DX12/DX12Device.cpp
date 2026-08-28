@@ -1192,6 +1192,40 @@ namespace Kurenai::RHI
                 kStructuredReadOnlyUploadRingCapacity);
         }
 
+        // GPUが書いた値をCPUで読むための受け皿。READBACKヒープに作り、作成時から
+        // マップしたままにしておく(ReadbackDataは単なるmemcpyで済む)。
+        // シェーダーからは見えないのでSRVもUAVも張らない
+        if (desc.Usage == BufferUsage::Readback)
+        {
+            if (desc.SizeInBytes == 0)
+            {
+                Core::Logger::Error("DX12", "Readbackバッファのサイズが0です。作成を中止します");
+                throw std::runtime_error("Readbackバッファのサイズが不正です");
+            }
+
+            const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_READBACK);
+            const CD3DX12_RESOURCE_DESC resourceDesc = CD3DX12_RESOURCE_DESC::Buffer(desc.SizeInBytes);
+
+            Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+            ThrowIfFailed(
+                m_Device->CreateCommittedResource(
+                    // READBACKヒープのリソースはCOPY_DEST状態でしか作れない(D3D12の仕様)
+                    &heapProps, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(&resource)),
+                "リードバックバッファの作成に失敗しました");
+
+            // 【永続マップする】読むたびにMap/Unmapすると、Unmapへ渡す書き込み範囲の指定を
+            // 誤ったときにドライバがキャッシュを吐き出して遅くなる。読み取り専用なので
+            // マップしたままで問題は無い(定数バッファのUPLOADヒープと同じ扱い)
+            void* mappedPtr = nullptr;
+            // 読み取り範囲は「全体」。CPUが書かないのでUnmapは破棄時のドライバ任せでよい
+            const D3D12_RANGE readRange{ 0, desc.SizeInBytes };
+            ThrowIfFailed(resource->Map(0, &readRange, &mappedPtr), "リードバックバッファのマップに失敗しました");
+
+            return std::make_unique<DX12Buffer>(
+                this, resource, mappedPtr, desc.SizeInBytes, desc.StrideInBytes, BufferUsage::Readback);
+        }
+
         // 間接ディスパッチの引数バッファ。コンピュートシェーダーがRWByteAddressBufferとして
         // スレッドグループ数を書き、そのままExecuteIndirectへ渡す。
         // CPUからは書かないため初期データもステージングリングも持たず、DEFAULTヒープに
@@ -2984,6 +3018,32 @@ namespace Kurenai::RHI
 
         const uint32_t index = m_BindlessTable->Register(srv);
         dx12Buffer->SetBindlessIndex(index);
+        return index;
+    }
+
+    uint32_t DX12Device::RegisterBindlessUAV(IRHIBuffer* buffer)
+    {
+        if (!m_SupportsBindless || !m_BindlessTable || !buffer)
+        {
+            return kInvalidBindlessIndex;
+        }
+
+        auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+        if (dx12Buffer->GetBindlessUavIndex() != kInvalidBindlessIndex)
+        {
+            return dx12Buffer->GetBindlessUavIndex();
+        }
+
+        if (!dx12Buffer->HasUav())
+        {
+            // UAVを持たないUsage(Vertex/Index/Constant/StructuredReadOnly/StructuredImmutable)。
+            // 無効なハンドルを渡すとでたらめなディスクリプタが区画へ入るため、ここで弾く
+            Core::Logger::Error("DX12", "UAVを持たないバッファがbindless(UAV)へ登録されようとしました");
+            return kInvalidBindlessIndex;
+        }
+
+        const uint32_t index = m_BindlessTable->Register(dx12Buffer->GetUavCpuHandle());
+        dx12Buffer->SetBindlessUavIndex(index);
         return index;
     }
 

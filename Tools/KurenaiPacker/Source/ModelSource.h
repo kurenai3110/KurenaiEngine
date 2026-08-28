@@ -3,8 +3,10 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Assets/ModelPackage.h"
@@ -16,6 +18,61 @@
 // 実測に基づく判断はここに集約する。
 namespace KurenaiPacker
 {
+    // FBX等に埋め込まれたテクスチャ(aiScene::mTextures)を一時ファイルへ取り出して保持する。
+    // デストラクタで一時ディレクトリごと消す。
+    //
+    // 【なぜ一時ファイルなのか】RHI::TextureImageにはメモリから読む経路が無く
+    // (LoadFromFileとLoadFromPackedTextureの2つだけ)、PackageWriterの重複排除・.ktexの
+    // ミラー・ワーカースレッドへの分配もすべて「解決済みのファイルパス」を前提に組まれている。
+    // バイト列を持ち回る経路を新設するとRHI・PackageWriterの両方へ手が入るのに対し、
+    // 一時ファイルへ落として既存の経路へ合流させれば変更が解決の1点で済む。
+    //
+    // 【なぜ番号を含む決定的な名前なのか】PackageWriterの重複排除キーは
+    // 「解決済みフルパス|sRGB」なので、同じ埋め込みテクスチャを複数のマテリアルが参照したとき、
+    // 取り出し先のパスが一致していなければ同じ画像を何度もBC7圧縮することになる。
+    // aiSceneのテクスチャ配列番号を名前に含め、一度取り出したものは同じパスを返す
+    class EmbeddedTextureStore
+    {
+    public:
+        EmbeddedTextureStore() = default;
+        ~EmbeddedTextureStore();
+
+        EmbeddedTextureStore(const EmbeddedTextureStore&) = delete;
+        EmbeddedTextureStore& operator=(const EmbeddedTextureStore&) = delete;
+
+        // 取り出し先の一時ディレクトリ(末尾は区切り文字)。まだ何も取り出していなければ空
+        const std::wstring& Directory() const { return m_Directory; }
+
+        // 取り出し済みの枚数(同じテクスチャを何度参照しても1と数える)
+        size_t ExtractedCount() const { return m_Extracted.size(); }
+
+        // 圧縮済みブロブ(JPEG/PNG/TIFF等)をそのまま書き出す。formatHintはaiTexture::achFormatHint。
+        // 取り出せなければ空文字列を返す(呼び出し側は従来どおりの「見つからない」扱いへ落ちる)
+        std::wstring StoreCompressed(
+            unsigned int textureIndex,
+            const std::string& formatHint,
+            const std::string& originalName,
+            const void* data,
+            size_t sizeInBytes);
+
+        // 非圧縮のARGB8888(aiTexture::mHeight != 0)をPNGとして書き出す。
+        // PNGにするのは、DDS/TGAで書くとTextureImage::LoadFromFileが「圧縮・ミップ済みの
+        // 配布形式」とみなしてミップ生成もBC7圧縮も行わないため(他のテクスチャと扱いが揃わない)
+        std::wstring StoreUncompressed(
+            unsigned int textureIndex,
+            const std::string& originalName,
+            const void* bgraTexels,
+            unsigned int width,
+            unsigned int height);
+
+    private:
+        // 一時ディレクトリを必要になった時点で作る。失敗したら空を返す
+        bool EnsureDirectory();
+
+        std::wstring m_Directory;
+        std::unordered_map<unsigned int, std::wstring> m_Extracted;
+    };
+
     struct SourceMesh
     {
         std::vector<Kurenai::Assets::Vertex> Vertices;
@@ -81,6 +138,11 @@ namespace KurenaiPacker
         std::vector<SourceLight> Lights;
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
+        // 埋め込みテクスチャの取り出し先。**SourceModelが生きている間は消えない**ことが重要で、
+        // WriteModelPackageがワーカースレッドから実ファイルとして読むため、書き出しが終わるまで
+        // 保持し続ける必要がある。埋め込みが1枚も無ければnullptr
+        std::shared_ptr<EmbeddedTextureStore> EmbeddedTextures;
     };
 
     // 解析後に全マテリアルへ強制的に適用する係数の上書き。

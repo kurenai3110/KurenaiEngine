@@ -132,7 +132,7 @@ DX12を使うなら `dxcompiler.dll` と `dxil.dll` も。**この2つが無い�
 KurenaiPacker.exe で変換する)。手順は [README.md](../../../README.md)「手順5. アセットの準備」。
 `Assets\Source\` は Sponza を除いて `Tools\*.py` で再生成できる。
 
-なお **`.kmodel` は v9 / `.kgeom` は v3** で、バージョン不一致は読み込みを拒否される。
+なお **`.kmodel` は v10 / `.kgeom` は v4** で、バージョン不一致は読み込みを拒否される。
 古い `Assets\Packed\` が残っている場合は再パックが要る。
 
 ## 起動と、通ったかどうかの判定

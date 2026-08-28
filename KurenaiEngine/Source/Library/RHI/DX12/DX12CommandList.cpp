@@ -301,18 +301,44 @@ namespace Kurenai::RHI
 
     void DX12CommandList::SetTexture(uint32_t slot, IRHITexture* texture)
     {
+        BindTexture(slot, texture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, "SetTexture");
+    }
+
+    void DX12CommandList::SetTextureAllStages(uint32_t slot, IRHITexture* texture)
+    {
+        // ピクセルシェーダー以外のグラフィックスステージ(増幅シェーダー・メッシュシェーダー)からも
+        // 読めるよう、NON_PIXELも立てて遷移させる。ディスクリプタの張り方はSetTextureと同一
+        // (メッシュシェーダー用ルートシグネチャはSRVテーブルの可視性をALLにしてある)
+        BindTexture(
+            slot, texture,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            "SetTextureAllStages");
+    }
+
+    void DX12CommandList::BindTexture(
+        uint32_t slot, IRHITexture* texture, D3D12_RESOURCE_STATES state, const char* callerName)
+    {
         if (slot >= kTextureSlotCount)
         {
             Core::Logger::Error(
                 "DX12",
-                "SetTexture: スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0〜t" +
+                std::string(callerName) + ": スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0〜t" +
                     std::to_string(kTextureSlotCount - 1) + ")。バインドをスキップします");
+            return;
+        }
+
+        if (texture == nullptr)
+        {
+            // nullptrをそのまま進めるとTransitionToでnull参照になる
+            // (SetComputeShaderResourceBufferが同じ状況をエラーにしているのと同じ扱い)
+            Core::Logger::Error(
+                "DX12", std::string(callerName) + ": テクスチャがnullptrです。バインドをスキップします");
             return;
         }
 
         auto* dx12Texture = static_cast<DX12Texture*>(texture);
         auto* cmdList = m_Device->GetCommandList();
-        dx12Texture->TransitionTo(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        dx12Texture->TransitionTo(cmdList, state);
 
         // SRVテーブルの割り当て・CopyDescriptorsはこの場では行わず、コピー元だけ記録しておく。
         // 実際の割り当て・コピーはDraw直前のFlushPendingSrvWrites()でまとめて行う(そこで
@@ -834,6 +860,30 @@ namespace Kurenai::RHI
         // 後続のディスパッチがクリア後の値を読むことを保証する
         const D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(dx12Buffer->GetResource());
         m_Device->GetCommandList()->ResourceBarrier(1, &barrier);
+    }
+
+    void DX12CommandList::CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes)
+    {
+        if (dst == nullptr || src == nullptr || sizeInBytes == 0)
+        {
+            Core::Logger::Error("DX12", "CopyBufferToReadback: 引数が不正です。コピーをスキップします");
+            return;
+        }
+
+        auto* dx12Dst = static_cast<DX12Buffer*>(dst);
+        auto* dx12Src = static_cast<DX12Buffer*>(src);
+        if (!dx12Dst->IsReadback())
+        {
+            Core::Logger::Error(
+                "DX12", "CopyBufferToReadback: コピー先がBufferUsage::Readbackではありません。コピーをスキップします");
+            return;
+        }
+
+        // コピー元をCOPY_SOURCEへ。コピー先(READBACKヒープ)はCOPY_DESTから動かせないので遷移しない
+        dx12Src->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        m_Device->GetCommandList()->CopyBufferRegion(
+            dx12Dst->GetResource(), 0, dx12Src->GetResource(), 0, sizeInBytes);
     }
 
     void DX12CommandList::ReleaseComputeUavBindingsAfterDispatch()
