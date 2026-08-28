@@ -3993,6 +3993,11 @@ namespace Kurenai
         const size_t sceneIndex = static_cast<size_t>(m_PendingSceneRequest);
         m_PendingSceneRequest = -1;
 
+        // 【WaitForGPUIdleより前に止める】テクスチャストリーミングのワーカーは
+        // 旧シーンのIRHITexture*を掴んだままGPUリソースを作っている。旧シーンを手放す前に
+        // 必ず止めて、走っている要求を捨てる
+        m_TextureStreaming.Reset();
+
         // 旧シーンのGPUリソースを手放す前に、GPUが旧シーンを参照するコマンド(直前まで提出されていた
         // 描画コマンド)の実行を終えるまで待つ。特にDX12はCPUがGPU完了を待たずに次フレームの記録を
         // 始める多重バッファリング設計のため、これを省くとGPUがまだ読んでいるバッファ/テクスチャを
@@ -4376,6 +4381,11 @@ namespace Kurenai
                     std::to_string(kMaxReflectionProbes) + "個のみ使用します: " + std::to_string(m_ReflectionProbes.size()) + "個");
             m_ReflectionProbes.resize(kMaxReflectionProbes);
         }
+        // テクスチャの常駐ミップ制御。既定はoffで、.ksceneが明示したシーンだけが有効になる
+        // (未指定のシーンは従来どおり全ミップ常駐のままで、見え方もVRAMも変わらない)
+        m_TextureStreaming.Configure(m_Scene.TextureStreamingEnabled, m_Scene.TextureStreamingBias);
+        m_TextureStreaming.Build(m_Scene, *m_Device);
+
         m_SelectedProbeIndex = m_ReflectionProbes.empty() ? -1 : 0;
         m_ProbeDebugIndex = 0;
         m_ProbeBaked = false;
@@ -5483,6 +5493,14 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = 0.0f;
         m_FrameStatsCullTestedSum = 0;
         m_FrameStatsCullCulledSum = 0;
+
+        // テクスチャの常駐ミップの内訳。**サイズ帯ごとに分けて出す** ――
+        // 64KBタイルはBC7で256x256テクセルを覆うため、ミップ/タイル単位の制御が効くのは
+        // 大きいテクスチャに偏る。「入れたから減った」ではなくどの帯に効いたかで語るため
+        if (m_TextureStreaming.IsEnabled())
+        {
+            m_TextureStreaming.LogStats("periodic");
+        }
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
@@ -5669,6 +5687,13 @@ namespace Kurenai
         // 旧シーンの破棄(WaitForGPUIdleを伴う)もここで行うため、このフレームのGPUコマンドを
         // まだ1つも積んでいないこの位置で呼ぶこと
         UpdateSceneStreaming();
+
+        // テクスチャの常駐ミップ差し替えを確定する。
+        // **このフレームで最初にSetTextureを呼ぶより前でなければならない** ――
+        // DX12CommandList::SetTextureは描画を記録するたびにテクスチャのSRVディスクリプタを
+        // コピー元として読むため、記録が始まってから書き換えると読みながら書くことになる
+        // (詳細はIRHIDevice::PrepareTextureContentsのコメント)
+        m_TextureStreaming.CommitReady(*m_Device);
 
         if (m_Window->GetWidth() == 0 || m_Window->GetHeight() == 0)
         {
@@ -5895,6 +5920,13 @@ namespace Kurenai
         }
 
         const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
+
+        // テクスチャの常駐ミップの目標を更新し、差のあるものをワーカーへ積む。
+        // 実際の差し替えは次フレーム以降のCommitReady(このフレームの先頭で呼んだもの)で確定する。
+        // 画面の高さは内部レンダー解像度を使う(ウィンドウ解像度ではない。
+        // 内部解像度を下げているときは必要なテクセル密度もその分下がる)
+        m_TextureStreaming.UpdateTargets(
+            cameraPosition, std::tan(frameState.Camera.GetFovY() * 0.5f), m_RenderHeight, m_RenderDeltaTime);
 
         // --- TAAのサブピクセルジッター ---
         // 投影行列を1ピクセル未満だけずらして、同じ画素が毎フレームわずかに違う位置をサンプルする

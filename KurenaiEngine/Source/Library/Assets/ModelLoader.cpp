@@ -58,6 +58,29 @@ namespace Kurenai::Assets
             return pool.substr(offset, length);
         }
 
+        // メッシュのローカルAABBを頂点から求める。頂点が1つも無い場合は何もしない
+        void ComputeMeshBounds(const Vertex* vertices, uint32_t vertexCount, float outMin[3], float outMax[3])
+        {
+            if (vertices == nullptr || vertexCount == 0)
+            {
+                return;
+            }
+
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                outMin[axis] = vertices[0].Position[axis];
+                outMax[axis] = vertices[0].Position[axis];
+            }
+            for (uint32_t v = 1; v < vertexCount; ++v)
+            {
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    outMin[axis] = std::min(outMin[axis], vertices[v].Position[axis]);
+                    outMax[axis] = std::max(outMax[axis], vertices[v].Position[axis]);
+                }
+            }
+        }
+
         // メッシュのUV密度(モデルローカル1メートルあたりのUV単位)を、三角形を抜き取って見積もる。
         // 求められない場合(UVが無い・全部縮退している)は0を返す。
         //
@@ -240,6 +263,9 @@ namespace Kurenai::Assets
                             auto texture = m_Device.CreateTextureFromImage(*item.Image);
                             outTextures[item.Index] = texture.get();
                             m_Model.Textures.push_back(std::move(texture));
+                            // テクスチャストリーミングが常駐ミップを変えるときに読み直す元。
+                            // Texturesと同じ並びになるようここで一緒に積む
+                            m_Model.TexturePaths.push_back(texturePaths[item.Index]);
                         }
                         catch (const std::exception& e)
                         {
@@ -639,10 +665,13 @@ namespace Kurenai::Assets
             outMesh.IndexCount = mesh.IndexCount;
             outMesh.VertexCount = mesh.VertexCount;
 
-            // テクスチャストリーミングの見積もりに使うUV密度。geometryPayloadがまだ生存している
-            // ここでしか元データを読めない(GPUへ送った後は頂点バッファとしてしか触れない)
+            // テクスチャストリーミングの見積もりに使うメッシュ単位のAABBとUV密度。
+            // geometryPayloadがまだ生存しているここでしか元データを読めない
+            // (GPUへ送った後は頂点バッファとしてしか触れない)
+            const auto* meshVertices = reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset);
+            ComputeMeshBounds(meshVertices, mesh.VertexCount, outMesh.BoundsMin, outMesh.BoundsMax);
             outMesh.UVPerLocalMeter = EstimateUVPerLocalMeter(
-                reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset), mesh.VertexCount,
+                meshVertices, mesh.VertexCount,
                 reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset), mesh.IndexCount);
 
             // アセットが持つメッシュレット数。GPUバッファを作るかどうか(下)とは独立で、

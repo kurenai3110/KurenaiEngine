@@ -39,12 +39,124 @@ namespace Kurenai::UI
         {
             DrawGraphicsAPISection();
         }
+        if (ImGui::CollapsingHeader("テクスチャストリーミング###TextureStreaming"))
+        {
+            DrawTextureStreamingSection();
+        }
         if (ImGui::CollapsingHeader("UI###UI", ImGuiTreeNodeFlags_DefaultOpen))
         {
             DrawUISection();
         }
 
         ImGui::End();
+    }
+
+    void SystemPanel::DrawTextureStreamingSection()
+    {
+        Assets::TextureStreamingManager& streaming = m_Engine.m_TextureStreaming;
+
+        if (!streaming.IsBuilt())
+        {
+            ImGui::TextUnformatted("このシーンでは常駐ミップ制御が組まれていません");
+            ImGui::TextWrapped(
+                "既定は無効です(.ksceneの[Scene] TextureStreaming = true で有効になります)。"
+                "検証のためにこの場で組むこともできます。");
+            if (ImGui::Button("このシーンで組む###BuildTextureStreaming"))
+            {
+                streaming.Configure(true, m_Engine.m_Scene.TextureStreamingBias);
+                streaming.Build(m_Engine.m_Scene, *m_Engine.m_Device);
+            }
+            return;
+        }
+
+        // A/Bの対照。offにすると全ミップ常駐へ戻していくので、常駐率が100%へ戻りきってから測る
+        bool active = streaming.IsActive();
+        if (ImGui::Checkbox("常駐ミップ制御を効かせる###TextureStreamingActive", &active))
+        {
+            streaming.SetActive(active);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip(
+                "外すと全ミップ常駐へ戻す。追跡表は壊さないので、同じ起動の中で\n"
+                "off/onを比べられる。戻りきる(常駐率100%%)まで待ってから測ること");
+        }
+
+        float bias = streaming.GetMipBias();
+        if (ImGui::SliderFloat("ミップバイアス###TextureStreamingBias", &bias, -4.0f, 2.0f, "%.2f 段"))
+        {
+            streaming.SetMipBias(bias);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("負なら安全側(より詳細なミップを常駐させる)。既定 -3(実測で決めた。Assets::Scene参照)");
+        }
+
+        const Assets::TextureStreamingManager::Stats stats = streaming.GetStats();
+        const double residentMB = static_cast<double>(stats.ResidentBytes) / (1024.0 * 1024.0);
+        const double fullMB = static_cast<double>(stats.FullBytes) / (1024.0 * 1024.0);
+        const double ratio = stats.FullBytes > 0
+            ? 100.0 * static_cast<double>(stats.ResidentBytes) / static_cast<double>(stats.FullBytes)
+            : 0.0;
+
+        ImGui::Separator();
+        ImGui::Text("追跡 %u枚 / 常駐 %.1f MB / 全ミップなら %.1f MB (%.1f%%)",
+                    stats.TrackedTextures, residentMB, fullMB, ratio);
+        // 【0なら一度も実行されていない】差分がゼロなのを「効いている」と読み違えないための項目
+        ImGui::Text("差し替え累計 %llu件 (失敗 %llu件) / 待ち %u件 / 処理中 %u件",
+                    static_cast<unsigned long long>(stats.CommittedUpdates),
+                    static_cast<unsigned long long>(stats.FailedUpdates),
+                    stats.PendingRequests, stats.InFlight);
+
+        // サイズ帯ごとの内訳。合計だけ見ると「どの帯に効いたか」を取り違える
+        if (ImGui::BeginTable(
+                "###TextureStreamingBands", 6,
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+        {
+            ImGui::TableSetupColumn("サイズ帯");
+            ImGui::TableSetupColumn("枚数");
+            ImGui::TableSetupColumn("常駐MB");
+            ImGui::TableSetupColumn("全ミップMB");
+            ImGui::TableSetupColumn("常駐率");
+            ImGui::TableSetupColumn("常駐ミップ 最小/平均/最大");
+            ImGui::TableHeadersRow();
+
+            for (size_t band = 0; band < Assets::TextureStreamingManager::kSizeBandCount; ++band)
+            {
+                const auto& b = stats.Bands[band];
+                if (b.TextureCount == 0)
+                {
+                    continue;
+                }
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(Assets::TextureStreamingManager::GetSizeBandName(band));
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", b.TextureCount);
+                ImGui::TableNextColumn();
+                ImGui::Text("%.1f", static_cast<double>(b.ResidentBytes) / (1024.0 * 1024.0));
+                ImGui::TableNextColumn();
+                ImGui::Text("%.1f", static_cast<double>(b.FullBytes) / (1024.0 * 1024.0));
+                ImGui::TableNextColumn();
+                ImGui::Text(
+                    "%.1f%%",
+                    b.FullBytes > 0 ? 100.0 * static_cast<double>(b.ResidentBytes) / static_cast<double>(b.FullBytes) : 0.0);
+                ImGui::TableNextColumn();
+                ImGui::Text("%u / %.2f / %u", b.MinResidentMips,
+                            static_cast<double>(b.SumResidentMips) / static_cast<double>(b.TextureCount),
+                            b.MaxResidentMips);
+            }
+            ImGui::EndTable();
+        }
+
+        if (ImGui::Button("いまの内訳をログへ###LogTextureStreaming"))
+        {
+            streaming.LogStats("ui");
+        }
     }
 
     void SystemPanel::DrawDisplaySection()

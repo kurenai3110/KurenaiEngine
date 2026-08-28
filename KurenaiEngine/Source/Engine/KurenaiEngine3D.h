@@ -20,6 +20,7 @@
 
 #include "Assets/RaytracingScene.h"
 #include "Assets/Scene.h"
+#include "Assets/TextureStreaming.h"
 #include "Core/Camera.h"
 #include "Core/CPUProfiler.h"
 
@@ -2420,6 +2421,13 @@ namespace Kurenai
         // 【破棄順】m_Sceneより後に宣言することで、メンバ破棄順(宣言の逆順)により
         // m_Sceneの頂点/インデックスバッファより先に破棄される
         Assets::RaytracingScene m_RaytracingScene;
+        // テクスチャの常駐ミップ制御。自前のワーカースレッドを持ち、そこがm_Sceneの
+        // IRHITexture*を掴む。
+        //
+        // 【破棄順】m_Sceneより後に宣言し、メンバ破棄順(宣言の逆順)でm_Sceneより先に
+        // 破棄されるようにする。加えて、シーンを差し替えるときはUpdateSceneStreamingが
+        // 明示的にReset()を呼んでワーカーを止める
+        Assets::TextureStreamingManager m_TextureStreaming;
         // m_Sceneと同じくRenderスレッド専有(ScenePanelが選択中のシーンの表示に読む)
         size_t m_CurrentSceneIndex = 0;
         // Updateスレッド専有。UpdateMouseLook/UpdateMovementが書き換え、TickFrameがFrameStateへ

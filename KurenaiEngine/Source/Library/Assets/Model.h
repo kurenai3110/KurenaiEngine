@@ -49,6 +49,17 @@ namespace Kurenai::Assets
         // .kmodelが持つメッシュレット数。GPUバッファの有無とは独立
         uint32_t MeshletCount = 0;
 
+        // このメッシュのモデルローカル空間でのAABB。ModelLoaderが読み込み時に頂点から求める。
+        //
+        // 【なぜモデル単位のAABBでは足りないか】1つのモデルが街区全体を覆うことがある
+        // (Bistro Exteriorは132メッシュで1インスタンス、AABBは109x32x115m)。
+        // カメラがそのAABBの内側に入ると、モデル単位の距離は全メッシュで0になり、
+        // 「どのテクスチャも最大解像度が要る」としか言えなくなる。PLATEAUのLOD2タイル
+        // (1.1km四方)で街路に降りたときも同じことが起きる。
+        // テクスチャストリーミングが距離を測るにはメッシュ単位の広がりが要る
+        float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+        float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
         // このメッシュのUVが「モデルローカル1メートルあたり何UV単位に相当するか」。
         // W×Hのテクスチャを貼ったときのテクセル密度は UVPerLocalMeter * sqrt(W*H) [texels/m] になる。
         //
@@ -147,6 +158,11 @@ namespace Kurenai::Assets
     {
         std::vector<Mesh> Meshes;
         std::vector<std::unique_ptr<RHI::IRHITexture>> Textures;
+        // Texturesと同じ並びの.ktexへの絶対パス。テクスチャストリーミングが
+        // 常駐ミップを変えるときに「どのファイルから読み直すか」を知るために要る。
+        // 読み込みに失敗してプレースホルダー(白/フラット法線)へ落ちたテクスチャは
+        // そもそもTexturesへ入らないため、両者の要素数は常に一致する
+        std::vector<std::wstring> TexturePaths;
         std::vector<Light> Lights;
 
         // レイトレーシングでヒット面の陰影を計算するための、このモデル全メッシュ分の

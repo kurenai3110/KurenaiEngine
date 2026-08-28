@@ -32,6 +32,10 @@ namespace Kurenai::UI
         void DrawQualityPresetSection();
         void DrawResolutionSection();
         void DrawGraphicsAPISection();
+        // テクスチャの常駐ミップ制御の状態表示とA/B用のつまみ。
+        // サイズ帯ごとの内訳をここに出すのは、タイル/ミップ単位の制御が
+        // 大きいテクスチャにしか効かないため(合計だけ見ると効きどころを取り違える)
+        void DrawTextureStreamingSection();
         void DrawUISection();
 
         KurenaiEngine3D& m_Engine;

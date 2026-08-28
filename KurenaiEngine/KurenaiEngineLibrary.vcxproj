@@ -122,6 +122,7 @@ exit /b 0</Command>
     <ClInclude Include="Source\Library\Assets\ModelPackage.h" />
     <ClInclude Include="Source\Library\Assets\Scene.h" />
     <ClInclude Include="Source\Library\Assets\SceneLoader.h" />
+    <ClInclude Include="Source\Library\Assets\TextureStreaming.h" />
     <ClInclude Include="Source\Library\Assets\ShowPackage.h" />
     <ClInclude Include="Source\Library\Assets\ShowLoader.h" />
     <ClInclude Include="Source\Library\RHI\RHIEnums.h" />
@@ -194,6 +195,7 @@ exit /b 0</Command>
     <ClCompile Include="Source\Library\Assets\ModelLoader.cpp" />
     <ClCompile Include="Source\Library\Assets\RaytracingScene.cpp" />
     <ClCompile Include="Source\Library\Assets\SceneLoader.cpp" />
+    <ClCompile Include="Source\Library\Assets\TextureStreaming.cpp" />
     <ClCompile Include="Source\Library\Assets\ShowLoader.cpp" />
     <ClCompile Include="Source\Library\RHI\TextureImage.cpp" />
     <ClCompile Include="Source\Library\RHI\ImGuiContextSetup.cpp" />
