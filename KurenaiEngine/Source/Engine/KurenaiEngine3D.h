@@ -2589,6 +2589,24 @@ namespace Kurenai
         uint64_t m_FrameStatsCullTestedSum = 0;
         uint64_t m_FrameStatsCullCulledSum = 0;
 
+        // パス別のドローコール数(1フレーム分)。フラスタムカリングの統計と同じく
+        // フレーム先頭でリセットし、LogFrameStatsIfDueが集計期間の平均として出す。
+        //
+        // 【なぜパスごとに分けるのか】フラスタムカリングの統計が全パス合計になっていて、
+        // どのパスが何回描いているのかが分からない。ドローコールの削減はこのエンジンで
+        // これから何度も測る対象(メッシュレットによる1モデル1ドロー化、GPU駆動描画)で、
+        // 「G-Bufferは減ったがシャドウは減っていない」のような片手落ちは
+        // パス別に見ないと気づけない。
+        //
+        // 数えるのはCPUが発行したDrawIndexed/DispatchMeshの回数で、
+        // 増幅シェーダーがカリングした後に実際にラスタライズされた塊の数ではない
+        uint32_t m_DrawCallsGBuffer = 0;
+        uint32_t m_DrawCallsShadow = 0;
+        uint32_t m_DrawCallsDepthPrepass = 0;
+        uint64_t m_FrameStatsDrawCallsGBufferSum = 0;
+        uint64_t m_FrameStatsDrawCallsShadowSum = 0;
+        uint64_t m_FrameStatsDrawCallsDepthPrepassSum = 0;
+
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};
 

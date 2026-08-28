@@ -5368,6 +5368,9 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
         m_FrameStatsCullTestedSum += m_FrustumCullTested;
         m_FrameStatsCullCulledSum += m_FrustumCullCulled;
+        m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
+        m_FrameStatsDrawCallsShadowSum += m_DrawCallsShadow;
+        m_FrameStatsDrawCallsDepthPrepassSum += m_DrawCallsDepthPrepass;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -5478,6 +5481,22 @@ namespace Kurenai
             Core::Logger::Info("Perf", cullText);
         }
 
+        // パス別のドローコール数。**「G-Bufferは減ったがシャドウは減っていない」**のような
+        // 片手落ちは合計値では見えない(シャドウはカスケード4回ぶんが積み上がる)
+        if (m_FrameStatsFrameCount > 0)
+        {
+            const double frames = static_cast<double>(m_FrameStatsFrameCount);
+            char drawText[224];
+            std::snprintf(
+                drawText, sizeof(drawText),
+                "  ドローコール: G-Buffer %.1f / シャドウ %.1f (4カスケード計) / 深度プリパス %.1f "
+                "[1フレームあたり]",
+                static_cast<double>(m_FrameStatsDrawCallsGBufferSum) / frames,
+                static_cast<double>(m_FrameStatsDrawCallsShadowSum) / frames,
+                static_cast<double>(m_FrameStatsDrawCallsDepthPrepassSum) / frames);
+            Core::Logger::Info("Perf", drawText);
+        }
+
         // bindless区画の使用状況。**満杯になっても例外は飛ばず、エラーログ1行と
         // kInvalidBindlessIndex(=白1x1へ落ちる)しか残らない**ため、上限へ近づいていることを
         // 定期的に見えるようにしておく(IRHIDevice::GetBindlessUsedCountのコメント参照)
@@ -5503,6 +5522,9 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = 0.0f;
         m_FrameStatsCullTestedSum = 0;
         m_FrameStatsCullCulledSum = 0;
+        m_FrameStatsDrawCallsGBufferSum = 0;
+        m_FrameStatsDrawCallsShadowSum = 0;
+        m_FrameStatsDrawCallsDepthPrepassSum = 0;
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
@@ -5678,6 +5700,10 @@ namespace Kurenai
         // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる
         m_FrustumCullTested = 0;
         m_FrustumCullCulled = 0;
+        // ドローコール数も同じくフレーム単位。各パスが自分のカウンタを積み上げる
+        m_DrawCallsGBuffer = 0;
+        m_DrawCallsShadow = 0;
+        m_DrawCallsDepthPrepass = 0;
         // bindless区画の使用数を控える(UIパネルは m_Device へ直接触れないため。
         // m_MeshShaderAvailable と同じ扱い)。登録はシーン読み込み時にしか起きないので、
         // フレームごとに1回問い合わせるだけで足りる
@@ -7019,6 +7045,7 @@ namespace Kurenai
                                 cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                                 cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                                 cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                                ++m_DrawCallsShadow;
                             }
                         }
                     }
@@ -7924,6 +7951,7 @@ namespace Kurenai
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            ++m_DrawCallsDepthPrepass;
                         }
                     }
                 },
@@ -8056,12 +8084,14 @@ namespace Kurenai
                             // 実際にラスタライズされるのはカリングを生き延びたぶんに絞られる
                             constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
                             cmd->DispatchMesh((mesh.MeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize, 1, 1);
+                            ++m_DrawCallsGBuffer;
                         }
                         else
                         {
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            ++m_DrawCallsGBuffer;
                         }
                     }
                 }
