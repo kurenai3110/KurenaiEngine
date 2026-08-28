@@ -2029,28 +2029,58 @@ namespace Kurenai
 
             // DDGIのプローブ取得(コンピュートシェーダー。プローブから6面ぶんのレイを撃ち、
             // ラスタ経路と同じ形のスクラッチキューブを直接埋める)
-            RHI::ShaderDesc ddgiTraceCsDesc;
-            ddgiTraceCsDesc.Stage = RHI::ShaderStage::Compute;
-            ddgiTraceCsDesc.FilePath = shaderDirectory + L"DDGIProbeTrace.kshader";
-            ddgiTraceCsDesc.EntryPoint = "CSMain";
-            m_DDGIProbeTraceComputeShader = m_Device->CreateShader(ddgiTraceCsDesc);
-            m_DDGIProbeTracePipelineState =
-                m_Device->CreateComputePipelineState({ m_DDGIProbeTraceComputeShader.get() });
+            //
+            // 【失敗しても他のRTパスを巻き込まない】このシェーダーはコンピュートシェーダーの中で
+            // テクスチャを微分付きにサンプルするため、DXILの検証がSM 6.6を要求する
+            // (Derivatives in CS/MS/AS is SM 6.6+)。RayQuery自体はSM 6.5で足りるので、
+            // 「DXR Tier 1.1に対応していて、かつSM 6.5のバリアントで動いている」環境
+            // (ビルドマシンのWindows SDKが古くbindlessバリアントを焼けなかった場合など)では、
+            // 上のRT反射/RTシャドウ/RTAOは作れるのにこれだけ作れない。
+            // ここで捕まえてDDGIのレイ取得だけをラスタ経路へ戻す(自前ラスタライザと同じ扱い)
+            try
+            {
+                RHI::ShaderDesc ddgiTraceCsDesc;
+                ddgiTraceCsDesc.Stage = RHI::ShaderStage::Compute;
+                ddgiTraceCsDesc.FilePath = shaderDirectory + L"DDGIProbeTrace.kshader";
+                ddgiTraceCsDesc.EntryPoint = "CSMain";
+                m_DDGIProbeTraceComputeShader = m_Device->CreateShader(ddgiTraceCsDesc);
+                m_DDGIProbeTracePipelineState =
+                    m_Device->CreateComputePipelineState({ m_DDGIProbeTraceComputeShader.get() });
 
-            RHI::BufferDesc ddgiTraceConstantBufferDesc;
-            ddgiTraceConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-            ddgiTraceConstantBufferDesc.SizeInBytes = sizeof(DDGITraceConstants);
-            // プローブ1個につき6面ぶん書き換えるため、既定の段数では
-            // 更新プローブ数を増やしたときに足りなくなる(1フレーム最大64プローブ×6面=384回)
-            ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
-            m_DDGITraceConstantBuffer = m_Device->CreateBuffer(ddgiTraceConstantBufferDesc);
+                RHI::BufferDesc ddgiTraceConstantBufferDesc;
+                ddgiTraceConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+                ddgiTraceConstantBufferDesc.SizeInBytes = sizeof(DDGITraceConstants);
+                // プローブ1個につき6面ぶん書き換えるため、既定の段数では
+                // 更新プローブ数を増やしたときに足りなくなる(1フレーム最大64プローブ×6面=384回)
+                ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
+                m_DDGITraceConstantBuffer = m_Device->CreateBuffer(ddgiTraceConstantBufferDesc);
+
+                m_DDGIRaytracedTraceAvailable = true;
+            }
+            catch (const std::exception& e)
+            {
+                // ShouldRunRaytracedDDGITraceがパイプラインステートのnullを見ているため、
+                // ここで捨てておけばレイ取得はラスタ経路のまま動く
+                m_DDGIProbeTracePipelineState.reset();
+                m_DDGIProbeTraceComputeShader.reset();
+                m_DDGITraceConstantBuffer.reset();
+                m_DDGIRaytracedTraceAvailable = false;
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    std::string("DDGIのレイ取得(DXR)を用意できませんでした。ラスタライズ経路で動作します"
+                                "(DDGIProbeTrace.hlslはシェーダーモデル6.6を要求します): ") + e.what());
+            }
 
             // レイトレーシングが使える環境ではDDGIのレイ取得も既定でDXRにする。
             // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
-            m_DDGIRayMode = DDGIRayModeForCapability(true);
+            m_DDGIRayMode = DDGIRayModeForCapability(m_DDGIRaytracedTraceAvailable);
 
             Core::Logger::Info(
-                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウ・AO/GI・DDGIでRaytracedを選択可能)");
+                "KurenaiEngine3D",
+                m_DDGIRaytracedTraceAvailable
+                    ? "レイトレーシングを利用できます(反射・シャドウ・AO/GI・DDGIでRaytracedを選択可能)"
+                    : "レイトレーシングを利用できます(反射・シャドウ・AOでRaytracedを選択可能。DDGIのレイ取得は"
+                      "ラスタライズのみ)");
         }
         else
         {

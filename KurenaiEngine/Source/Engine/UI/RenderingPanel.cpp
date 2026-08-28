@@ -738,7 +738,9 @@ namespace Kurenai::UI
         static const char* kDDGIRayModeNamesWithRT[] = { "ラスタライズ", "レイトレーシング (DXR)" };
         static const char* kDDGIRayModeNamesWithoutRT[] = { "ラスタライズ" };
 
-        const bool ddgiRtAvailable = m_Engine.m_RaytracingAvailable;
+        // m_RaytracingAvailableではなくこちらを見る。DDGIのレイ取得CSだけはSM 6.6を要求するため、
+        // 他のRTパスが使えてもここだけ作れない環境がある(m_DDGIRaytracedTraceAvailableの宣言参照)
+        const bool ddgiRtAvailable = m_Engine.m_DDGIRaytracedTraceAvailable;
         const char* const* ddgiRayModeNames = ddgiRtAvailable ? kDDGIRayModeNamesWithRT : kDDGIRayModeNamesWithoutRT;
         const int ddgiRayModeCount =
             ddgiRtAvailable ? IM_ARRAYSIZE(kDDGIRayModeNamesWithRT) : IM_ARRAYSIZE(kDDGIRayModeNamesWithoutRT);
