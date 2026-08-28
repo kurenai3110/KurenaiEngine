@@ -48,6 +48,20 @@ namespace Kurenai::Assets
         std::unique_ptr<RHI::IRHIBuffer> MeshletTriangleBuffer;
         // .kmodelが持つメッシュレット数。GPUバッファの有無とは独立
         uint32_t MeshletCount = 0;
+
+        // このメッシュのUVが「モデルローカル1メートルあたり何UV単位に相当するか」。
+        // W×Hのテクスチャを貼ったときのテクセル密度は UVPerLocalMeter * sqrt(W*H) [texels/m] になる。
+        //
+        // 【テクスチャの寸法を掛けずにUV空間の値で持つ理由】1つのメッシュはベースカラー・
+        // 法線・メタリックラフネスと寸法の違うテクスチャを同時に参照しうる。UV密度は
+        // メッシュの性質、テクセル密度はテクスチャとの組み合わせの性質なので、前者だけを持つ。
+        //
+        // テクスチャストリーミングが「距離いくつなら何段目のミップで足りるか」を
+        // CPUで見積もるために使う(Sampler Feedbackを使わない理由はdocs/ImplementationDetail.md)。
+        // ModelLoaderが読み込み時に三角形を最大64個サンプリングして中央値を取る。
+        // 求められなかった場合(UVが無い・縮退している)は0で、その場合は
+        // 常駐ミップを削らない(見積もれないものを削ると静かにぼける)
+        float UVPerLocalMeter = 0.0f;
         RHI::IRHITexture* BaseColorTexture = nullptr;
         RHI::IRHITexture* NormalTexture = nullptr;
         RHI::IRHITexture* MetallicRoughnessTexture = nullptr;
