@@ -169,7 +169,8 @@ namespace Kurenai::UI
             "実測(Sponza / 1280x720 / DX11)でビット一致を確認している。\n\n"
             "実測(Sponza): GBuffer 14.11ms が GBuffer 6.62ms + DepthPrepass 1.42ms になった"
             "(同フレームのTonemap比で0.671倍)。この内訳からこのシーンのオーバードローは2.05倍。\n\n"
-            "「メッシュレット描画」が有効な間は自動で止まる(深度が一致する保証が無いため)");
+            "【メッシュレット描画とも併用できる】プリパスにもG-Bufferとまったく同じ"
+            "増幅/メッシュシェーダーを使うPSOがあるため、変換は同一のコードになり深度が一致する");
 
         EndParamGroup();
     }
@@ -199,15 +200,14 @@ namespace Kurenai::UI
 
         CheckboxEx(
             "メッシュレット描画を有効にする###EnableMeshlet", &m_Engine.m_MeshletRenderingEnabled, true,
-            // 【深度プリパスと併用されない】理由は下のツールチップ本文と
-            // KurenaiEngine3D側のmeshletPathActiveのコメント
-            // 【深度プリパスと併用されない】プリパスは頂点シェーダー経路で深度を書くため、
-            // メッシュレット描画が有効な間はプリパスごと止まる(KurenaiEngine3D側のmeshletPathActive)。
             "無効にすると従来の頂点シェーダー + DrawIndexedで描く。"
             "切り替えても見た目は一致するはずで、変わる場合はメッシュシェーダー側の変換が"
             "頂点シェーダーとずれている。\n\n"
-            "【有効な間は深度プリパスが止まる】プリパスは頂点シェーダー経路で深度を書くため、"
-            "メッシュシェーダーで描いたG-Bufferと深度が一致する保証が無い");
+            "【有効だとモデル全体が1ドローになる】マテリアルはメッシュシェーダーが出力した"
+            "番号でピクセルシェーダーがテーブルから引くため、メッシュごとにテクスチャを"
+            "差し替える必要が無くなる。発行回数はプロファイラパネルのドローコール数で確認できる。\n\n"
+            "【深度プリパスとも併用できる】プリパスにもG-Bufferと同じ増幅/メッシュシェーダーを"
+            "使うPSOがあるため、変換が同一のコードになり深度が一致する");
 
         CheckboxEx(
             "メッシュレットを色分けして表示###MeshletDebugView", &m_Engine.m_MeshletDebugViewEnabled, false,
@@ -276,6 +276,19 @@ namespace Kurenai::UI
         }
         ImGui::Text(
             "メッシュレット: %zu (メッシュ %zu / %zu が保持)", meshletCount, meshletMeshCount, meshCount);
+
+        // bindless区画の使用状況。メッシュシェーダー経路はジオメトリもマテリアルも
+        // ResourceDescriptorHeap経由で引くため、ここが満杯だと**エラーログ1行だけを残して
+        // 白1x1で描かれる**(RegisterBindlessは例外を投げない)。
+        // 「なぜかこのモデルだけ真っ白」で気づく前に見えるようにしておく
+        if (m_Engine.m_BindlessCapacity > 0)
+        {
+            ImGui::Text(
+                "bindless: %u / %u (%.1f%%)", m_Engine.m_BindlessUsedCount, m_Engine.m_BindlessCapacity,
+                100.0f * static_cast<float>(m_Engine.m_BindlessUsedCount)
+                    / static_cast<float>(m_Engine.m_BindlessCapacity));
+        }
+
         if (meshCount > 0 && meshletMeshCount == 0)
         {
             ImGui::TextWrapped(

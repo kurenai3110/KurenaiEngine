@@ -211,7 +211,10 @@ namespace Kurenai
         // 「どのPSOを束ねるか」と「DispatchMeshとDrawIndexedのどちらを積むか」の判断が
         // ずれると即座に破綻するため、判定を1か所に集約する。
         // isWaterがtrueのメッシュは常にfalse(理由は実装のコメント参照)
-        bool ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const;
+        bool ShouldUseMeshletPath(const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const;
+        // このインスタンスを「1回のDispatchMeshでモデル全体」の経路で描けるか。
+        // 描けない場合は従来どおりメッシュ単位のループで描く
+        bool ShouldUseModelMeshletPath(const Assets::ModelInstance& instance) const;
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
         // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
         RHI::IRHITexture* GetActiveAOTexture() const;
@@ -518,6 +521,12 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassPipelineStateMirrored;
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineStateMirrored;
+        // メッシュシェーダー版のプリパス(G-Bufferと同じ増幅/メッシュシェーダーを使う)。
+        // これが無いと、メッシュレット経路で描くモデルの深度をプリパスで埋められない
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletPipelineStateMirrored;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletCutoutPipelineStateMirrored;
         // プリパスを走らせるか。オーバードローが小さいシーンでは、増えるジオメトリ1周ぶんが
         // 省けるピクセルシェーダーより高くつくため切れるようにしてある
         bool m_DepthPrepassEnabled = Defaults::DepthPrepassEnabled;
@@ -543,6 +552,11 @@ namespace Kurenai
         // m_DeviceはKurenaiEngineBaseのprotectedメンバで、派生クラスのfriendであるUIパネルから
         // 触れるかはC++の規則の解釈が分かれるため、m_RaytracingAvailableと同じくここへ控える
         bool m_MeshShaderAvailable = false;
+        // bindless区画の容量と使用数(IRHIDevice::GetBindlessCapacity/GetBindlessUsedCountの写し)。
+        // 容量は初期化時に、使用数はフレーム先頭に控える。**満杯でも例外は飛ばず
+        // 白1x1で描かれてしまう**ため、UIとフレーム統計ログの両方へ出す
+        uint32_t m_BindlessCapacity = 0;
+        uint32_t m_BindlessUsedCount = 0;
         // メッシュレット経路を使うか(ImGuiのレンダリングパネルから切り替える)。
         // 対応環境では既定で有効。無効にすると従来の頂点シェーダー描画に戻るため、
         // 見た目の差分を目で比較できる
@@ -1265,6 +1279,21 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_ShadowPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineStateMirrored;
+        // メッシュシェーダー版のシャドウ(Shaders/3D/ShadowMeshlet.hlsl)。
+        // 非対応環境ではすべてnullptrのままで、描画側は従来のメッシュ単位経路を使う
+        std::unique_ptr<RHI::IRHIShader> m_ShadowAmplificationShader;
+        std::unique_ptr<RHI::IRHIShader> m_ShadowMeshShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletPipelineStateMirrored;
+        // アルファカットアウト(glTFのalphaMode=MASK)の影。ピクセルシェーダーは
+        // 頂点シェーダー経路とメッシュシェーダー経路で共有する。
+        // **DX11でも効く**(bindlessもメッシュシェーダーも要らない)
+        std::unique_ptr<RHI::IRHIShader> m_ShadowCutoutVertexShader;
+        std::unique_ptr<RHI::IRHIShader> m_ShadowCutoutPixelShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowCutoutPipelineStateMirrored;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletCutoutPipelineState;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletCutoutPipelineStateMirrored;
         // 全カスケードの深度を1つのTexture2DArray(スライス番号=カスケード番号)として保持する。
         // 書き込みはスライスごとの個別DSV(RenderGraphPassDesc::DepthTargetArraySlice)で行い、
         // 読み取りは配列全体を指す1本のSRV(t4)を1回バインドするだけでよい。シェーダ側は
@@ -2657,6 +2686,29 @@ namespace Kurenai
         uint64_t m_FrameStatsMeshletFrustumCulledSum = 0;
         uint64_t m_FrameStatsMeshletOcclusionCulledSum = 0;
         uint32_t m_FrameStatsMeshletSampleCount = 0;
+
+        // パス別のドローコール数(1フレーム分)。フラスタムカリングの統計と同じく
+        // フレーム先頭でリセットし、LogFrameStatsIfDueが集計期間の平均として出す。
+        //
+        // 【なぜパスごとに分けるのか】フラスタムカリングの統計が全パス合計になっていて、
+        // どのパスが何回描いているのかが分からない。ドローコールの削減はこのエンジンで
+        // これから何度も測る対象(メッシュレットによる1モデル1ドロー化、GPU駆動描画)で、
+        // 「G-Bufferは減ったがシャドウは減っていない」のような片手落ちは
+        // パス別に見ないと気づけない。
+        //
+        // 数えるのはCPUが発行したDrawIndexed/DispatchMeshの回数で、
+        // 増幅シェーダーがカリングした後に実際にラスタライズされた塊の数ではない
+        uint32_t m_DrawCallsGBuffer = 0;
+        uint32_t m_DrawCallsShadow = 0;
+        uint32_t m_DrawCallsDepthPrepass = 0;
+        // 直前に描き終えたフレームの値。**UIパネルはこちらを読むこと** ――
+        // 上のカウンタはフレーム先頭で0に戻るため、Renderの外で描かれるUIからは常に0に見える
+        uint32_t m_DrawCallsGBufferLastFrame = 0;
+        uint32_t m_DrawCallsShadowLastFrame = 0;
+        uint32_t m_DrawCallsDepthPrepassLastFrame = 0;
+        uint64_t m_FrameStatsDrawCallsGBufferSum = 0;
+        uint64_t m_FrameStatsDrawCallsShadowSum = 0;
+        uint64_t m_FrameStatsDrawCallsDepthPrepassSum = 0;
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};
