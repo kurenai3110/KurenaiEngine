@@ -35,12 +35,33 @@ namespace Kurenai::RHI
     {
         // 生成経路が多く引数では寸法を受け取らないため、リソース記述子から求めて控える
         // (経路ごとに記録すると追加時に漏れる。DX11Textureも同じ方針)
-        if (m_Resource)
+        CaptureDimensionsFromResource();
+    }
+
+    void DX12Texture::CaptureDimensionsFromResource()
+    {
+        if (!m_Resource)
         {
-            const D3D12_RESOURCE_DESC desc = m_Resource->GetDesc();
-            m_Width = static_cast<uint32_t>(desc.Width);
-            m_Height = desc.Height;
+            m_Width = 0;
+            m_Height = 0;
+            m_MipLevels = 0;
+            return;
         }
+
+        const D3D12_RESOURCE_DESC desc = m_Resource->GetDesc();
+        m_Width = static_cast<uint32_t>(desc.Width);
+        m_Height = desc.Height;
+        m_MipLevels = desc.MipLevels;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D12Resource> DX12Texture::SwapResource(
+        Microsoft::WRL::ComPtr<ID3D12Resource> newResource, D3D12_RESOURCE_STATES newState)
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> old = std::move(m_Resource);
+        m_Resource = std::move(newResource);
+        m_CurrentState = newState;
+        CaptureDimensionsFromResource();
+        return old;
     }
 
     DX12Texture::~DX12Texture()

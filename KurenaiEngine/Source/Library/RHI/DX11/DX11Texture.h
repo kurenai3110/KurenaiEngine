@@ -53,8 +53,27 @@ namespace Kurenai::RHI
 
         uint32_t GetWidth() const override { return m_Width; }
         uint32_t GetHeight() const override { return m_Height; }
+        uint32_t GetMipLevels() const override { return m_MipLevels; }
+
+        // レンダーターゲット・深度・UAVのいずれかを持つか。ストリーミングの差し替え対象は
+        // SRVしか持たないアセット由来のテクスチャに限るため、その判定に使う
+        bool HasNonSrvViews() const
+        {
+            return m_Rtv || m_Dsv || m_Uav || !m_MipUavs.empty() || !m_SliceDsvs.empty();
+        }
+
+        // SRVを差し替える。IRHITextureのオブジェクト同一性は保たれるため、
+        // Assets::Meshが持つIRHITexture*の生ポインタを貼り替えずに済む。
+        //
+        // 【古いテクスチャの寿命】DX11は「GPUが参照し終えるまで実体の破棄を遅らせる」ことを
+        // ランタイムが保証しているため、ここでComPtrを手放してよい(DX12は自前で
+        // Nフレーム遅延解放する必要がある。DX12Device::RetireResource参照)
+        void SwapShaderResourceView(Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> newSrv);
 
     private:
+        // 手持ちのビューからm_Width/m_Height/m_MipLevelsを取り直す
+        void CaptureDimensionsFromViews();
+
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_Srv;
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> m_Rtv;
         Microsoft::WRL::ComPtr<ID3D11DepthStencilView> m_Dsv;
@@ -63,9 +82,30 @@ namespace Kurenai::RHI
         std::vector<Microsoft::WRL::ComPtr<ID3D11DepthStencilView>> m_SliceDsvs;
         // キューブマップ配列の枚数(非キューブマップ・単一キューブは1)。m_MipUavsのフラット添字計算に使う
         uint32_t m_CubeCount = 1;
-        // ミップ0のピクセルサイズ。生成経路が多く引数からは受け取れないため、コンストラクタで
-        // 手持ちのビュー(SRV→RTV→DSV→UAVの順)からリソースを引いてGetDescで求める
+        // ミップ0のピクセルサイズとミップ段数。生成経路が多く引数からは受け取れないため、
+        // コンストラクタで手持ちのビュー(SRV→RTV→DSV→UAVの順)からリソースを引いてGetDescで求める
         uint32_t m_Width = 0;
         uint32_t m_Height = 0;
+        uint32_t m_MipLevels = 0;
+    };
+
+    // DX11Device::PrepareTextureContentsが作り、CommitTextureContentsが消費する中間物。
+    // DX11はID3D11Deviceがフリースレッドなので、SRVの作成(リソース確保+初期データ転送を含む)を
+    // ワーカースレッドで済ませておける。差し替え自体はポインタの入れ替えだけになる
+    class DX11PendingTextureContents : public IRHIPendingTextureContents
+    {
+    public:
+        DX11PendingTextureContents(
+            DX11Texture* texture, Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv, uint32_t mipLevels)
+            : Texture(texture), Srv(std::move(srv)), MipLevels(mipLevels)
+        {
+        }
+
+        IRHITexture* GetTarget() const override { return Texture; }
+        uint32_t GetMipLevels() const override { return MipLevels; }
+
+        DX11Texture* Texture = nullptr;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> Srv;
+        uint32_t MipLevels = 0;
     };
 }

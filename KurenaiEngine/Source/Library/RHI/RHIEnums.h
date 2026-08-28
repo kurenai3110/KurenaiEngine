@@ -67,6 +67,20 @@ namespace Kurenai::RHI
         // CPUからは書き込まない(UpdateBufferは受け付けない)。初期化は
         // IRHICommandList::ClearUnorderedAccessBufferUintで行う
         IndirectArgs,
+        // GPUが書いた値をCPUで読むための受け皿。CPUからは読むだけで、シェーダーからは
+        // 一切見えない(SRVもUAVも持たない)。
+        //
+        // 【なぜ専用のUsageが要るのか】このRHIには「GPUのバッファをCPUへ持ってくる」経路が
+        // 一つも無く、GPU上でしか分からない数(カリングで何個間引いたか等)を
+        // 報告する手段が無かった。他のUsageはどれもCPU→GPUの向きしか持たない。
+        //
+        // 【使い方】IRHICommandList::CopyBufferToReadbackでGPU側のバッファから内容を写し、
+        // **数フレーム後に** IRHIBuffer::ReadbackData で読む。コピーを積んだ直後に読むと
+        // GPUがまだ実行していないので、リング状に複数本用意して十分に古いものを読むこと
+        // (DX12Device::kFrameCountぶんCPUが先行する)。
+        // ReadbackDataはGPUの完了を待たない ―― 待つとフレームが直列化し、
+        // 「計測のために計測対象を壊す」ことになる
+        Readback,
     };
 
     enum class PrimitiveTopology

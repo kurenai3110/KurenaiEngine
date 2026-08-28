@@ -258,6 +258,8 @@
     <li><a href="#ch38">38. ドローンショーと星空</a></li>
     <li><a href="#meshlet">39. メッシュレットとbindless(メッシュシェーダー / レイトレーシングとの統合)</a></li>
     <li><a href="#swraster">40. コンピュートシェーダーによる自前ソフトウェアラスタライザ</a></li>
+    <li><a href="#hizocclusion">41. Hi-Zオクルージョンカリング</a></li>
+    <li><a href="#texturestreaming">42. テクスチャの常駐ミップ制御(テクスチャストリーミング)</a></li>
   </ol>
 </nav>
 
@@ -6944,7 +6946,235 @@ RHIの抽象を片肺にしないために実装はしてあるが、DX11経路�
 
 </section>
 
+<section id="hizocclusion">
+<h2>41. Hi-Zオクルージョンカリング</h2>
+
+<p>
+増幅シェーダー(<code>GBufferMeshlet.hlsl</code>の<code>ASMain</code>)が、メッシュレットの
+バウンディング球を<strong>前フレームのHi-Z</strong>へ投影し、「視錐台の内側にあるが手前の何かに
+完全に隠れている」塊を落とします。既に視錐台カリングと法線コーンによる背面カリングを
+行っている場所へ条件を1つ足しただけで、<strong>新しいパスもバッファも増えていません</strong>。
+</p>
+
+<p>
+視錐台カリングは「視界の外」しか落とせません。街路に立つと視界内のほぼ全部が手前の建物に
+隠れますが、そこは1つも落とせない ―― この非対称が、都市シーンでオクルージョンカリングが
+効く理由です。
+</p>
+
+<h3>41.1 Hi-Zミップチェーンの構築</h3>
+
+<p>
+<code>HiZ.hlsl</code>がG-Buffer深度から1x1までのミップチェーンをコンピュートシェーダーで作ります。
+各ミップは2x2ブロックの<strong>最小値</strong>で、Reverse-Zのため「そのブロック内で最も遠い
+可視サーフェス」を表します。
+</p>
+
+<p>
+<strong>このパスは消費者がいるフレームだけ登録します。</strong>消費者は2つで、
+Presentパスのデバッグ表示(<code>DebugView::HiZ</code>)と、この章のオクルージョンカリングです。
+どちらも要らないフレームでは「コピー1回 + ミップ段数-1回のディスパッチ」がまるごと無駄になり、
+Intel UHD 620での実測で1.19〜1.21ms(GPUフレーム時間30msの約4%)を占めます。
+</p>
+
+<h3>41.2 判定の向き(Reverse-Z)</h3>
+
+<pre><code>遮蔽されている ⟺ 球の最も手前の点の NDC z &lt; カバーするテクセルの Hi-Z の min</code></pre>
+
+<p>
+球の最前面(Reverse-ZではNDC zが最大の点)ですら「そのブロックで最も遠い可視面」より
+奥(小さい)なら、ブロック内のどの画素から見ても球は隠れています。
+複数テクセルをまとめるときも<strong>min</strong>が保守側です。
+<strong>向きを逆に書いてもコンパイルは通り、絵もそれらしく出ます</strong>ので、
+導出は<code>docs/ImplementationDetail.md</code> 47.1 に残してあります。
+</p>
+
+<h3>41.3 1フレーム遅れと、保守側へ倒す規約</h3>
+
+<p>
+Hi-Zの構築パスはG-Bufferパスより後に登録されるため、増幅シェーダーが読めるのは
+前フレームのチェーンです。したがって投影には今フレームの<code>ViewProj</code>ではなく
+<strong><code>PrevViewProj</code></strong>(そのHi-Zの元になった深度を描いた行列そのもの)を使い、
+球を保守的に膨らませます。膨張は2項で、<strong>それぞれ別の誤差に効きます</strong>:
+</p>
+
+<ul>
+<li><strong>前フレームからのカメラ移動距離</strong>[m]をそのまま半径へ足す ――
+カメラの<strong>並進</strong>による視差ずれ。シーンが静的である以上、原因は並進だけなので1次まで吸収できる</li>
+<li><strong>半径倍率</strong>(既定1.0) ―― バウンディング球がメッシュレットの実体より緩いこと、
+およびカメラの<strong>回転</strong>による見え方の変化</li>
+</ul>
+
+<p>
+判定を諦めて<strong>通す</strong>経路が2つあります。どちらも欠くと
+「カメラを振ったときだけ画面の一部が欠ける」という追いにくい壊れ方をします:
+</p>
+
+<ol>
+<li>球を包むAABBの8頂点に<code>w &lt;= 0</code>が1つでもあれば通す(近平面をまたぐと
+w除算が符号を反転させ、画面矩形が裏返る)</li>
+<li>投影した矩形が<strong>前フレームの画面からはみ出していたら</strong>通す。
+視錐台判定は今フレームの行列で行うため、カメラが回った直後は「今は画面内だが前フレームは画面外」の
+塊が画面の縁に必ず生まれる。UVを画面端へクランプすると、まったく別の場所のHi-Zと深度を比べることになる</li>
+</ol>
+
+<p>
+<strong>判定を行うかどうかはCPUが明示的なフラグで渡します</strong>
+(<code>FrameConstants::OcclusionCullParams.x</code>)。プローブキャプチャと平面反射のパスは
+<code>PrevViewProj</code>へ<code>ViewProj</code>を入れて潰しており、行列の中身から
+「前フレームかどうか」を推し量ると、そこで判定が動いて別視点の行列で投影し、
+見えているものを消します。Hi-Zが1度も構築されていないフレーム(解像度変更直後・シーン読み込み直後・
+構築しなかったフレームの次)も同じフラグで無効になります。
+</p>
+
+<h3>41.4 カリング統計</h3>
+
+<p>
+増幅シェーダーが<strong>[判定 / 視錐台+コーンで間引き / オクルージョンで間引き]</strong>の3つを
+数え上げ、GPU→CPUのリードバック(3段リング、GPUの完了を待たない)で持ち帰って
+Perfログへ1秒ごとに出します。
+</p>
+
+<p>
+<strong>オクルージョンを視錐台+コーンと分けて出すことに意味があります。</strong>
+保守的な判定が正しく働いていれば絵は1画素も変わらないため、
+効いているかどうかは数値でしか確かめられません。そして
+<strong>俯瞰(遮蔽が少ない)と街路(遮蔽が多い)で割合に差が出ること</strong>が、
+判定が実際に効いていることの証拠になります ―― 合算すると視錐台の変動に埋もれて分かりません。
+</p>
+
+<h3>41.5 DX12＋SM6.6 でしか効かない機能</h3>
+
+<p>
+判定を書いてあるのは増幅シェーダーだけなので、メッシュシェーダーに対応しない環境では
+この機能は一切走りません。性能の基準機であるIntel UHD Graphics 620はこれに該当します。
+</p>
+
+<table>
+<tr><th>機能</th><th>必要なもの</th><th>非対応環境での挙動</th></tr>
+<tr><td>メッシュレット描画</td><td>DX12 / メッシュシェーダー Tier 1 / SM 6.6(bindless)</td><td>従来の頂点シェーダー + DrawIndexed</td></tr>
+<tr><td><strong>Hi-Zオクルージョンカリング</strong></td><td>上と同じ(増幅シェーダーで判定するため)</td><td>判定を行わない。Hi-Zパスの構築も走らない</td></tr>
+<tr><td>カリング統計のリードバック</td><td>上と同じ + bindlessのUAV登録</td><td>統計を出さない</td></tr>
+<tr><td>レイトレーシング(反射 / シャドウ / AO / DDGI)</td><td>DX12 / DXR Tier 1.1</td><td>スクリーンスペースの手法へ縮退</td></tr>
+</table>
+
+<h3>41.6 実測(RTX 4070 Ti / DX12 / Release / 1280x720 / PlateauTokyo23ku)</h3>
+
+<table>
+<tr><th>視点</th><th>判定</th><th>視錐台+コーン</th><th>オクルージョン</th><th>GBufferパス</th><th>GPU合計</th></tr>
+<tr><td>俯瞰(1400mから真下)</td><td>4,362</td><td>2,661 (61.0%)</td><td><strong>0 (0.0%)</strong></td><td>0.80ms</td><td>4.28ms</td></tr>
+<tr><td>街路 / 無効</td><td>85,875</td><td>14,708 (17.1%)</td><td>0 (0.0%)</td><td>2.16ms</td><td>4.48ms</td></tr>
+<tr><td>街路 / 有効</td><td>85,875</td><td>14,708 (17.1%)</td><td><strong>69,599 (81.0%)</strong></td><td><strong>0.17ms</strong></td><td><strong>2.12ms</strong></td></tr>
+</table>
+
+<p>
+10フレームの中央値。すべての区間でGPU待ち=0.00ms。Hi-Z構築そのものは0.07ms。
+<strong>俯瞰の0.0%は「効いていない」ではありません</strong> ――
+真下を見下ろす視点では建物どうしがほとんど重ならないので、0.0%が正しい値です。
+</p>
+
+</section>
+
+<section id="texturestreaming">
+<h2>42. テクスチャの常駐ミップ制御(テクスチャストリーミング)</h2>
+
+<p>
+カメラからの距離とメッシュのUV密度から「このテクスチャは何段目のミップから常駐していれば
+足りるか」を<strong>CPUで</strong>見積もり、足りているぶんだけを<code>.ktex</code>から
+読み直します。<code>.kscene</code>の<code>[Scene] TextureStreaming = true</code>を
+書いたシーンだけで働き、<strong>既定は無効</strong>です。
+</p>
+
+<p>
+PLATEAU の LOD2 はタイル1枚でテクスチャ 1,714枚 / BC7＋ミップで 2,165MB あり、
+対してジオメトリは 11.1MB しかありません。<strong>テクスチャがジオメトリの195倍</strong>で、
+VRAMの支配項はここにあります。モデル単位のストリーミングは全か無かなので、
+LOD0のタイルが1枚視界に入るだけで 2.17GB を丸ごと払うことになります。
+</p>
+
+<h3>42.1 「小さいテクスチャ」として読む</h3>
+
+<p>
+<code>.ktex</code> は「24バイトのヘッダ ＋ DDSファイル全体」で、DDSはミップ0を先頭に降順で
+連続しています。<code>TextureImage::LoadFromPackedTexture(path, firstMip)</code> は目的の
+ミップのバイト範囲へシークして読み、<strong>firstMip を新しいミップ0とする小さなテクスチャ</strong>
+として返します。呼び出し側から見れば単に寸法の小さいテクスチャなので、
+<strong>RHIにもシェーダーにも変更が要りません</strong>。
+</p>
+
+<h3>42.2 差し替えは2段(Prepare / Commit)</h3>
+
+<p>
+常駐ミップを変える操作は「GPUリソースを作ってアップロードする(重い)」と
+「ディスクリプタを書き換える(軽い)」からなりますが、<strong>要求されるスレッドが違います</strong>。
+<code>DX12CommandList::SetTexture</code>は描画を記録するたびにテクスチャのSRVディスクリプタを
+コピー元として読むため、別スレッドから書き換えると読みながら書く競合になります。
+一方、リソース生成をRenderスレッドで行うと内部のGPU同期待ちが前フレームの完了まで待ち、
+CPUとGPUのオーバーラップが消えます。
+</p>
+
+<table>
+<tr><th>段</th><th>API</th><th>呼ぶスレッド</th></tr>
+<tr><td>1</td><td><code>IRHIDevice::PrepareTextureContents</code></td><td>どれでもよい</td></tr>
+<tr><td>2</td><td><code>IRHIDevice::CommitTextureContents</code></td><td><strong>描画記録スレッド。そのフレーム最初のSetTextureより前</strong></td></tr>
+</table>
+
+<p>
+差し替えても<strong>IRHITextureのオブジェクト同一性・SRVスロット・bindless番号は保たれます</strong>。
+<code>Assets::Mesh</code>はテクスチャを生ポインタで指しており、bindless環境ではSRVの番号が
+シェーダーの定数バッファにも載るため、新しいオブジェクトを作ると参照の張り替えが全域に波及します。
+古いリソースはGPUがまだ読んでいる可能性があるので、フレーム境界でフェンスの完了を見る
+遅延解放キューを通します。
+</p>
+
+<h3>42.3 距離はメッシュ単位で測る</h3>
+
+<p>
+<strong>モデルインスタンス単位のAABBまでの距離では成立しません。</strong>街区全体を覆う
+1インスタンス(Bistro Exteriorは132メッシュでAABB 109×32×115m)の内側にカメラが入ると、
+距離が全参照で0になり「常に最大解像度が要る」以外を返せなくなります。PLATEAUのLOD2タイルは
+1.1km四方なので、街路に降りれば必ずこの状態になります。
+<code>.kmodel</code> v10 の <code>MeshEntry</code> が持つメッシュ単位のAABBを
+ワールドへ変換して使います。
+</p>
+
+<h3>42.4 DX12タイルリソース</h3>
+
+<p>
+<code>GetTiledResourcesTier()</code>が2以上を返す環境では、予約リソース
+(<code>CreateReservedResource</code>)とタイルプール(<code>ID3D12Heap</code>)を使い、
+<code>UpdateTileMappings</code>でタイルを貼り替えます。リソースもSRVもbindless番号も
+変わらないため、42.2 のディスクリプタ競合が原理的に起きません。
+サンプルされる下限はSRVの<code>ResourceMinLODClamp</code>で押さえます。
+</p>
+
+<p>
+<strong>ミップテールは一括でしかマップ/アンマップできないため常に常駐させます。</strong>
+64KBタイルはBC7で256×256テクセルを覆うので、128px以下のテクスチャは全部がミップテールになり
+この経路に乗りません。<strong>タイルリソースが効くのは大きいテクスチャだけ</strong>です。
+タイルの形とミップテールの構成はアダプタ依存なので、
+<code>ID3D12Device::GetResourceTiling</code>の実測値を使います。
+</p>
+
+<h3>42.5 DX12＋Tier 2以上でしか効かない部分</h3>
+
+<table>
+<tr><th>機能</th><th>DX11</th><th>DX12</th></tr>
+<tr><td>ミップ常駐制御(42.1〜42.3)</td><td>○</td><td>○</td></tr>
+<tr><td>タイルリソース(42.4)</td><td>×</td><td>Tier 2以上でのみ○</td></tr>
+</table>
+
+<p>
+Tier 1 は未マップタイルの読み出しが未定義(デバイス削除もありうる)なので使いません。
+非対応の場合はミップ常駐制御だけで動きます ―― <strong>絵は変わらず、常駐量の削り方が
+粗くなるだけ</strong>です。根拠と実測値は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 48章。
+</p>
+
+</section>
+
 </main>
+
 
 <footer>KurenaiEngine 実装者向けドキュメント</footer>
 
