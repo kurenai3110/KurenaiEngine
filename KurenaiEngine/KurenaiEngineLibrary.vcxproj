@@ -170,6 +170,7 @@ exit /b 0</Command>
     <ClInclude Include="Source\Library\RHI\DX12\DX12ImGuiBackend.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12GPUProfiler.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Texture.h" />
+    <ClInclude Include="Source\Library\RHI\DX12\DX12TilePool.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12SamplerSet.h" />
     <ClInclude Include="..\ThirdParty\imgui\imgui.h" />
     <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_win32.h" />
@@ -224,6 +225,7 @@ exit /b 0</Command>
     <ClCompile Include="Source\Library\RHI\DX12\DX12ImGuiBackend.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12GPUProfiler.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Texture.cpp" />
+    <ClCompile Include="Source\Library\RHI\DX12\DX12TilePool.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12SamplerSet.cpp" />
     <!-- 配布されているDirectXTex.libはDesktop_2022向けにD3D11用ソースのみでビルドされておりD3D12関数を含まないため、
          D3D12ヘルパー(CreateTextureEx/PrepareUpload等)のみこのプロジェクトで直接コンパイルする -->

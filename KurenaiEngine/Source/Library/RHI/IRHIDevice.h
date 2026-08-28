@@ -86,6 +86,33 @@ namespace Kurenai::RHI
         // OSから見た実測値と並べて出すことで、どちらかがおかしいことを検出できる
         virtual bool GetVideoMemoryUsage(uint64_t& outUsedBytes, uint64_t& outBudgetBytes) const = 0;
 
+        // タイルリソース(予約リソース)の対応段階。**0なら使わない**。
+        //
+        // DX11は常に0(D3D11.2のTiled Resourcesは使わない。ID3D11DeviceContext2を取っておらず、
+        // 既存のDX12専用機能と同じくDX11では非対応で揃える)。
+        // DX12でもTier 1は0を返す ―― 未マップタイルの読み出しが未定義で、
+        // 落ちないようにするにはダミータイルを全域へ貼る必要があり、常駐量の削減に貢献しないため
+        virtual uint32_t GetTiledResourcesTier() const = 0;
+
+        // タイルリソース(予約リソース)を使って常駐ミップを firstMip へ変える第1段。
+        // 対象がまだタイルリソースでなければ、ここで予約リソースを作って中身ごと置き換える。
+        // imageは firstMip 以降のミップを持つもの(TextureImage::LoadFromPackedTextureの部分読み出し)。
+        //
+        // 使えない場合(タイルリソース非対応・標準ミップが1段も無い・形が対象外)は nullptr を返す。
+        // 呼び出し側は PrepareTextureContents(リソースごと作り直す経路)へ落とすこと。
+        //
+        // 【リソースもSRVもbindless番号も変わらないのが利点】変えるのはタイルの貼り替えと
+        // SRVのResourceMinLODClampだけなので、リソースを作り直す経路と違って
+        // 「実行中のコマンドリストが読んでいるディスクリプタを差し替える」問題が起きない。
+        // 確定(CommitTextureContents)がRenderスレッド限定なのは、そのMinLODClampの
+        // 書き換えがディスクリプタの書き換えだからである
+        virtual std::unique_ptr<IRHIPendingTextureContents> PrepareTiledTextureResidency(
+            IRHITexture* target, const TiledTextureDesc& desc, const TextureImage& image, uint32_t firstMip) = 0;
+
+        // タイルプール(タイルリソースの裏付けになるヒープ)の確保済みバイト数と、
+        // そのうち実際に貼られているバイト数。使っていなければどちらも0
+        virtual void GetTilePoolUsage(uint64_t& outReservedBytes, uint64_t& outUsedBytes) const = 0;
+
         virtual std::unique_ptr<IRHITexture> CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a) = 0;
         // RGBA8(1ピクセル4バイト、行間パディングなしのタイトパッキング)のピクセルデータからテクスチャを
         // 作成する。実行時に生成したデータ(フォントアトラス等)をアップロードする用途向け

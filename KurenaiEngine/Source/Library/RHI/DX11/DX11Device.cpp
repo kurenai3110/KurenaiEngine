@@ -624,6 +624,18 @@ namespace Kurenai::RHI
             texture, std::move(srv), static_cast<uint32_t>(image.GetMetadata().mipLevels));
     }
 
+    std::unique_ptr<IRHIPendingTextureContents> DX11Device::PrepareTiledTextureResidency(
+        IRHITexture* target, const TiledTextureDesc& desc, const TextureImage& image, uint32_t firstMip)
+    {
+        (void)target;
+        (void)desc;
+        (void)image;
+        (void)firstMip;
+        // GetTiledResourcesTier()が0を返すため、上位層はここへ来ないのが正常
+        Core::Logger::Error("DX11", "PrepareTiledTextureResidency: DX11はタイルリソースに対応していません");
+        return nullptr;
+    }
+
     bool DX11Device::GetVideoMemoryUsage(uint64_t& outUsedBytes, uint64_t& outBudgetBytes) const
     {
         if (!m_Adapter)
