@@ -219,6 +219,16 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 - `.obj`/`.mtl`も入力に使えます。OBJ形式は単位情報を持たないため、センチメートル単位で作成された
   アセットはそのままだと100倍の大きさになります。その場合は`--scale <係数>`で補正してください
   (例: Amazon Lumberyard Bistroの`.obj`配布は`--scale 0.01`)
+- `--origin <X,Y,Z>` で、頂点位置とバウンズからその座標を引きます(`--scale`を掛ける**前**に
+  引くので、ソースの単位のまま指定できます)。**地理座標系のように原点が遠く離れた絶対座標で
+  作られたモデル**を原点付近へ寄せるためのものです(Project PLATEAUのFBXは平面直角座標系の
+  絶対値で、系原点から数十km離れています)。頂点はfloat32であるうえ、`.kmodel`のAABBもそのまま
+  巨大になり、シーンAABBの対角から自動決定される遠クリップ面(`farZ = max(100, 対角×4)`)が
+  桁で狂います。
+
+  > **複数のモデルを並べるなら、全部に同じ値を指定してください。** タイルごとに
+  > 「自分のAABBの中心」で寄せると、タイル同士の相対的な位置関係が壊れて街が崩れます。
+  > 自動で中心化せず明示指定にしているのはこのためです
 - マテリアルから取り込むテクスチャは**ベースカラー・法線・メタリック/ラフネス・自発光・遮蔽マップ**の
   5枚です。遮蔽マップ(ベイク済みアンビエントオクルージョン)はglTFの`occlusionTexture`(強度
   `strength`も反映)と、`AMBIENT_OCCLUSION`スロットを持つ形式から取り込みます。持たないマテリアルは
@@ -359,6 +369,43 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 > 出典: NVIDIA ORCA - NVIDIA Emerald Square v4.1 / Nicholas Hull, Kate Anderson, Nir Benty (2017)
 > <https://developer.nvidia.com/orca/nvidia-emerald-square> 。植生はSpeedTreeのORCAアセットです。
 > 商用利用が必要な場合はこのアセットを使えません。
+
+#### 大規模な都市の確認用シーン(Project PLATEAU 東京都23区)
+
+東京23区全域の建築物です。3次メッシュ(約1km四方)ごとの`.kmodel`を**671個**並べた
+約33km四方のシーンで、`.kmodel`を多数並べたときの読み込みとカリングの確認に使います。
+**取得から配布までは`Tools\import_plateau.ps1`が一括で行います**
+(既にあるものは飛ばすので何度実行しても構いません):
+
+```
+Tools\import_plateau.ps1
+Samples\Sample3D\Build\Bin\x64\Release\Sample3D.exe -scene PlateauTokyo23ku
+```
+
+スクリプトは ダウンロード(約2.99GB) → `bldg/lod1`の展開(671ファイル) → 共通原点の算出 →
+671タイルのパック → `.kscene`の生成と配置 → 出力フォルダへの配布 を順に行います。
+`.kscene`は`Tools\plateau_scene.py`が機械生成します(671個の`[Model]`を手で書けないため)。
+
+- **`--origin`が要ります。** このFBXはEPSG:6677(JGD2011 平面直角座標系 第9系)の絶対座標で、
+  系原点から北へ最大52km離れています。**全タイルで同じ値**(`-8096,0,-36118`)を引きます。
+  値は`Tools\plateau_mesh.py origin`が全タイルのメッシュコードから算出します
+- **`--scale`は要りません。** `UnitScaleFactor=1`でそのままメートルです
+- **軸は実測で確定させました。** FBXはZ-upで「X=東 / Y=北 / Z=標高」ですが、assimpがZ-up→Y-upへ
+  変換し`aiProcess_ConvertToLeftHanded`も入るため、パッカーが扱う時点では
+  **「X=東 / Y=標高 / Z=北」**になります。西新宿タイル(`53394525`)を`--inspect`した実測値
+  `X -13218.99〜-12034.59 / Y 27.34〜267.02 / Z -35171.98〜-34122.55`が、メッシュコードから
+  計算した期待範囲と符号ごと一致することを確認しています。**街が鏡像になっていても一見
+  気づけない**ため、画像ではなく座標の数値で突き合わせています
+- **`[Scene] ShadowDistance = 500`を指定しています。** このシーンの`farZ`は180kmで、
+  指定しないと第1カスケードが数kmを2048²の1枚で覆うことになり、近景の影が事実上消えます
+- LOD1の建築物は「航空レーザ測量の高さで押し出した箱」で、**マテリアルは`DefaultMaterial`
+  1件のみ・テクスチャは0枚**です。灰色に見えるのが正しい状態です
+  (実写テクスチャは同じ配布物のLOD2にありますが、こちらはまだ取り込んでいません)
+
+> **ライセンス: 公共データ利用規約(PDL1.0) / CC BY 4.0 互換。商用利用可・要出典表示。**
+> 出典: 国土交通省 Project PLATEAU「3D都市モデル(Project PLATEAU)東京都23区」
+> <https://www.geospatial.jp/ckan/dataset/plateau-tokyo23ku> 。
+> 著作権は各地方公共団体に帰属します。
 
 #### メッシュレット / bindless / レイトレーシングの確認用シーン(ドラゴン)
 
