@@ -1,0 +1,1082 @@
+# KurenaiEngine シーンファイル - インスタンシングの効果測定用
+#
+# Tools/generate_instancing_test.py が生成する(手で編集しないこと)。
+#   python Tools/generate_instancing_test.py Scenes/InstancingTest.kscene
+#
+# 同じ .kmodel を格子状に 256 体並べたシーン。インスタンシングが有効なら、
+# 同じモデル・同じミラーリングのインスタンスが1回のドローへまとまる。
+# 無効なら1体ずつ描かれるので、性能ログのドローコール数が 256 倍近く違う。
+#
+# 格子の一部(32 体)はX軸のみ負スケールにしてある。ワインディングが反転するため
+# 別のパイプラインステートで描く必要があり、**インスタンシングでも別のバッチに
+# 分かれなければならない**。まとめてしまうと片方が裏面として捨てられ、絵から消える。
+#
+# 影がドローコールの主な発生源(4カスケード)なので、ShadowDistance は既定のままにしてある。
+
+[Scene]
+Name = Instancing Test
+# 空の輝度に引っ張られず、板の明るさで比較できるようにする(EmeraldSquare と同じ値)
+Exposure = 15
+
+[Camera]
+# 格子全体が視錐台に入る俯瞰。ここから前進すると視錐台カリングが効き始めるので、
+# 「カリングとインスタンシングのどちらで減ったのか」を分けて見られる
+Position = 0.0, 270.0, 270.0
+Yaw = 180.0
+Pitch = -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, -135.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, -135.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, -135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, -117.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, -117.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, -117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, -99.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, -99.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, -99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, -81.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, -81.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, -81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, -63.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, -63.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, -63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, -45.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, -45.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, -45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, -27.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, -27.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, -27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, -9.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, -9.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, -9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, 9.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, 9.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, 9.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, 27.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, 27.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, 27.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, 45.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, 45.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, 45.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, 63.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, 63.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, 63.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, 81.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, 81.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, 81.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, 99.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, 99.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, 99.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, 117.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, 117.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, 117.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -135.0, 0, 135.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -117.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -99.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -81.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -63.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -45.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -27.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = -9.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 9.0, 0, 135.0
+Scale = -1, 1, 1
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 27.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 45.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 63.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 81.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 99.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 117.0, 0, 135.0
+
+[Model]
+Path = MeshletStage/MeshletStage.kmodel
+Translation = 135.0, 0, 135.0
