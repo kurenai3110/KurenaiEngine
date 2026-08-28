@@ -1015,24 +1015,30 @@ namespace KurenaiPacker
             timings.VertexSeconds += PhaseSecondsSince(vertexLoopStart);
 
             const auto mergeStart = PhaseClock::now();
-            std::vector<uint32_t> indices;
-            indices.reserve(static_cast<size_t>(mesh->mNumFaces) * 3);
+            MergedMeshAccumulator& accum = meshesByMaterial[mesh->mMaterialIndex];
+            // 頂点を足す前に基準を取る(足した後だと自分の頂点数まで含んでしまう)
+            const uint32_t indexBase = static_cast<uint32_t>(accum.Vertices.size());
+            accum.Vertices.insert(accum.Vertices.end(), vertices.begin(), vertices.end());
+
+            // 【reserveで「ぴったりのサイズ」を要求してはいけない】ここは以前
+            //     accum.Indices.reserve(accum.Indices.size() + indices.size());
+            // としていたが、reserveは要求どおりの容量へ確保し直すためvectorの倍々成長が
+            // 無効になり、**メッシュを1つ足すたびに全体をコピーし直す**(O(N^2))。
+            // PLATEAUのタイルは入力メッシュが1382個あってマテリアルが1つしかないため、
+            // 1つのアキュムレータへ1382回追記することになり、これだけで解析時間の51%を
+            // 占めていた(12タイルの実測で786ms / 解析1530ms)。push_backに任せて
+            // 償却O(N)へ戻す。
+            //
+            // あわせて、面インデックスを一度std::vectorへ集めてから移し替えるのをやめ、
+            // 直接追記する(中間バッファの確保とコピーが1メッシュにつき1回消える)。
+            // 追記の順序も値も従来とまったく同じで、出力は1バイトも変わらない
             for (unsigned int f = 0; f < mesh->mNumFaces; ++f)
             {
                 const aiFace& face = mesh->mFaces[f];
                 for (unsigned int idx = 0; idx < face.mNumIndices; ++idx)
                 {
-                    indices.push_back(face.mIndices[idx]);
+                    accum.Indices.push_back(indexBase + face.mIndices[idx]);
                 }
-            }
-
-            MergedMeshAccumulator& accum = meshesByMaterial[mesh->mMaterialIndex];
-            const uint32_t indexBase = static_cast<uint32_t>(accum.Vertices.size());
-            accum.Vertices.insert(accum.Vertices.end(), vertices.begin(), vertices.end());
-            accum.Indices.reserve(accum.Indices.size() + indices.size());
-            for (uint32_t idx : indices)
-            {
-                accum.Indices.push_back(indexBase + idx);
             }
             timings.MergeSeconds += PhaseSecondsSince(mergeStart);
         }
