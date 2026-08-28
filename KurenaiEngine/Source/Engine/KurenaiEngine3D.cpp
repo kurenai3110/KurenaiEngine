@@ -4115,6 +4115,41 @@ namespace Kurenai
         m_StreamingResidentCount = 0;
         m_StreamingTargetCount = 0;
 
+        // 破棄待ちを1フレーム進める。0になったものだけLoaderスレッドへ渡す。
+        // 【ストリーミングを使わないシーンでも回す】シーンを切り替えた直後に、
+        // 前のシーンで積んだ分が残っていることがある
+        if (!m_StreamingPendingRelease.empty())
+        {
+            std::vector<std::shared_ptr<Assets::Model>> ready;
+            for (PendingModelRelease& pending : m_StreamingPendingRelease)
+            {
+                if (pending.FramesRemaining > 0)
+                {
+                    --pending.FramesRemaining;
+                    continue;
+                }
+                ready.push_back(std::move(pending.Model));
+            }
+            m_StreamingPendingRelease.erase(
+                std::remove_if(
+                    m_StreamingPendingRelease.begin(), m_StreamingPendingRelease.end(),
+                    [](const PendingModelRelease& pending) { return !pending.Model; }),
+                m_StreamingPendingRelease.end());
+
+            if (!ready.empty())
+            {
+                {
+                    std::lock_guard<std::mutex> lock(m_StreamingReleaseMutex);
+                    for (std::shared_ptr<Assets::Model>& model : ready)
+                    {
+                        m_StreamingRelease.push_back(std::move(model));
+                    }
+                }
+                // Loaderスレッドが寝ていると破棄が溜まり続けるので起こす
+                m_LoadRequestCV.notify_one();
+            }
+        }
+
         if (!m_Scene.HasStreamingDistance)
         {
             return;
@@ -4171,8 +4206,15 @@ namespace Kurenai
         };
         std::vector<Candidate> candidates;
 
+        // 破棄しない(=まだ要る)パスの集合。読み込みの判定より広い距離で集める
+        std::unordered_set<std::wstring> neededPaths;
+
         const float limit = m_Scene.StreamingDistance;
         const float limitSq = limit * limit;
+        // 【破棄は読み込みより遠くで行う】同じ距離でやると、境界上でカメラが揺れるたびに
+        // 読み込みと破棄が交互に起きて、ディスクアクセスが止まらなくなる。
+        // 1.25倍の不感帯を置く(モデルLODのヒステリシスと同じ考え方)
+        const float evictLimitSq = (limit * 1.25f) * (limit * 1.25f);
         const float cameraXYZ[3] = { cameraPosition.x, cameraPosition.y, cameraPosition.z };
 
         for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
@@ -4192,6 +4234,15 @@ namespace Kurenai
                       cameraXYZ[axis] - instance.WorldBoundsMax[axis], 0.0f });
                 squaredDistance += outside * outside;
             }
+            // 破棄の不感帯(1.25倍)の内側にあるものは、読み込み対象でなくても捨てない
+            if (squaredDistance <= evictLimitSq)
+            {
+                for (const std::wstring& path : instance.ModelPaths)
+                {
+                    neededPaths.insert(path);
+                }
+            }
+
             if (squaredDistance > limitSq)
             {
                 continue;
@@ -4212,6 +4263,56 @@ namespace Kurenai
                 continue;
             }
             candidates.push_back({ squaredDistance, &path });
+        }
+
+        // --- 遠ざかったものを破棄する ---------------------------------------------------------
+        //
+        // 【モデルは共有されている】同じ.kmodelを複数のインスタンスが指しうるので、
+        // 「どれか1つでもまだ要る」なら捨てられない。インスタンス単位ではなく
+        // ModelCacheをパス単位で見て、needed に無いものだけを外す
+        {
+            std::vector<std::wstring> evictPaths;
+            for (const auto& entry : m_Scene.ModelCache)
+            {
+                if (neededPaths.count(entry.first) == 0)
+                {
+                    evictPaths.push_back(entry.first);
+                }
+            }
+
+            for (const std::wstring& path : evictPaths)
+            {
+                // インスタンス側の参照を外す。描画ループは未読み込みとして飛ばす
+                for (Assets::ModelInstance& instance : m_Scene.Instances)
+                {
+                    for (size_t level = 0; level < instance.ModelPaths.size(); ++level)
+                    {
+                        if (instance.ModelPaths[level] != path)
+                        {
+                            continue;
+                        }
+                        if (level == 0)
+                        {
+                            instance.Model.reset();
+                        }
+                        else
+                        {
+                            instance.LODModels[level - 1].reset();
+                        }
+                    }
+                }
+
+                auto cached = m_Scene.ModelCache.find(path);
+                if (cached == m_Scene.ModelCache.end())
+                {
+                    continue;
+                }
+                // 実体はここで消さず、GPUが読み終わるまで寝かせる
+                m_StreamingPendingRelease.push_back(
+                    { std::move(cached->second), kStreamingReleaseDelayFrames });
+                m_Scene.ModelCache.erase(cached);
+                ++m_StreamingEvictedTotal;
+            }
         }
 
         if (candidates.empty())
@@ -4322,6 +4423,19 @@ namespace Kurenai
             // retiredのデストラクタでGPUリソースが解放される
         };
 
+        // ストリーミングで遠ざかったモデルの破棄。Renderスレッドが
+        // kStreamingReleaseDelayFrames フレーム寝かせたものだけがここへ来る
+        // (RetiredAssetsと違いWaitForGPUIdleは通っていない。遅延がその代わり)
+        const auto destroyStreamedModels = [this]()
+        {
+            std::vector<std::shared_ptr<Assets::Model>> release;
+            {
+                std::lock_guard<std::mutex> lock(m_StreamingReleaseMutex);
+                release.swap(m_StreamingRelease);
+            }
+            // releaseのデストラクタでGPUリソースが解放される
+        };
+
         for (;;)
         {
             int sceneIndex = -1;
@@ -4329,7 +4443,14 @@ namespace Kurenai
             {
                 std::unique_lock<std::mutex> lock(m_LoadRequestMutex);
                 m_LoadRequestCV.wait(lock, [this] {
-                    return m_LoadRequestSceneIndex >= 0 || !m_StreamingRequests.empty() || m_StopLoaderThread;
+                    if (m_LoadRequestSceneIndex >= 0 || !m_StreamingRequests.empty() || m_StopLoaderThread)
+                    {
+                        return true;
+                    }
+                    // 破棄だけが積まれている場合も起きる(読み込みが止まっている間に
+                    // 破棄が溜まり続けると、遠ざかったモデルのVRAMが解放されない)
+                    std::lock_guard<std::mutex> releaseLock(m_StreamingReleaseMutex);
+                    return !m_StreamingRelease.empty();
                 });
                 if (m_StopLoaderThread && m_LoadRequestSceneIndex < 0)
                 {
@@ -4348,6 +4469,9 @@ namespace Kurenai
                     streamingRequests.swap(m_StreamingRequests);
                 }
             }
+
+            // 破棄は毎ループ引き取る。読み込みより先に行うことでVRAMのピークを下げる
+            destroyStreamedModels();
 
             // --- ストリーミングの読み込み ---------------------------------------------------
             if (!streamingRequests.empty())
@@ -4409,6 +4533,9 @@ namespace Kurenai
 
         // 停止時に残っている破棄依頼をこのスレッドで片付ける
         destroyRetiredAssets();
+
+        // 破棄待ちの残りもここで片付ける
+        destroyStreamedModels();
 
         // ストリーミング用の共有テクスチャも、確保したのと同じLoaderスレッドで解放する
         // (アセット用ディスクリプタヒープはロックを持たない。RetiredAssetsのコメント参照)
@@ -5861,9 +5988,10 @@ namespace Kurenai
             char streamText[192];
             std::snprintf(
                 streamText, sizeof(streamText),
-                "  ストリーミング: 常駐 %u / 範囲内 %u (距離 %.0fm) / 読み込み累計 %llu件",
+                "  ストリーミング: 常駐 %u / 範囲内 %u (距離 %.0fm) / 読み込み累計 %llu件 / 破棄累計 %llu件",
                 m_StreamingResidentCount, m_StreamingTargetCount, m_Scene.StreamingDistance,
-                static_cast<unsigned long long>(m_StreamingLoadedTotal));
+                static_cast<unsigned long long>(m_StreamingLoadedTotal),
+                static_cast<unsigned long long>(m_StreamingEvictedTotal));
             Core::Logger::Info("Perf", streamText);
         }
 

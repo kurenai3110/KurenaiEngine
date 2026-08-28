@@ -1678,12 +1678,26 @@ namespace Kurenai::Assets
 
         // モデル共有が効いたかを数値で残す。「共有 0件」ならキャッシュが一度も当たっておらず、
         // 同じ.kmodelを複数配置しているシーンでVRAMが二重に載っている
-        // (MultiModelTest.ksceneは同じ.kmodelを3回配置するので、ここが 3配置/1件/2件 になる)
-        Core::Logger::Info(
-            "SceneLoader",
-            "モデル " + std::to_string(scene.Instances.size()) + "配置 / ユニーク " +
-                std::to_string(scene.ModelCache.size()) + "件 / 共有で節約 " +
-                std::to_string(scene.Instances.size() - scene.ModelCache.size()) + "件");
+        // (MultiModelTest.ksceneは同じ.kmodelを3回配置するので、ここが 3配置/1件/2件 になる)。
+        //
+        // 【ストリーミング時は共有の話ではない】実体を1つも読んでいないのでModelCacheは空で、
+        // そのまま引き算すると「全部を共有で節約した」という嘘の数字になる。別の文言にする
+        if (scene.HasStreamingDistance)
+        {
+            Core::Logger::Info(
+                "SceneLoader",
+                "モデル " + std::to_string(scene.Instances.size()) +
+                    "配置 / 実体は未読み込み(ストリーミング、距離 " +
+                    std::to_string(static_cast<int>(scene.StreamingDistance)) + "m)");
+        }
+        else
+        {
+            Core::Logger::Info(
+                "SceneLoader",
+                "モデル " + std::to_string(scene.Instances.size()) + "配置 / ユニーク " +
+                    std::to_string(scene.ModelCache.size()) + "件 / 共有で節約 " +
+                    std::to_string(scene.Instances.size() - scene.ModelCache.size()) + "件");
+        }
 
         return scene;
     }

@@ -2674,8 +2674,33 @@ namespace Kurenai
         // こちらはLoaderスレッドだけが作り・使い・捨てるので、その競合が起きない
         std::unique_ptr<Assets::SharedTexturePool> m_StreamingTexturePool;
 
+        // 破棄を寝かせるフレーム数。
+        //
+        // 【なぜ即座に捨ててはいけないか】CPUはGPUの完了を待たずに次フレームの記録を始めるため
+        // (DX12は kFrameCount = 2 フレーム先行する)、いま画面から外れたモデルの頂点バッファを
+        // その場で解放すると、GPUがまだ読んでいる最中のリソースを消すことになる。
+        // シーン切り替えの経路は WaitForGPUIdle でこれを避けているが(RetiredAssetsのコメント)、
+        // ストリーミングの破棄は毎フレーム起こりうるので待つわけにいかない。
+        // 代わりにこの数だけ寝かせてから解放する。DX12の先行分2に1フレームの余裕を足してある
+        static constexpr uint32_t kStreamingReleaseDelayFrames = 3;
+
+        // 破棄待ち。ここに積まれている間はshared_ptrが実体を生かし続ける。
+        // 0になったらLoaderスレッドへ渡す(解放も確保と同じスレッドで行うため)
+        struct PendingModelRelease
+        {
+            std::shared_ptr<Assets::Model> Model;
+            uint32_t FramesRemaining = 0;
+        };
+        std::vector<PendingModelRelease> m_StreamingPendingRelease;
+
+        // Render → Loader の破棄依頼。受け取った側はvectorを空にするだけでよい
+        // (shared_ptrの最後の参照が消えてデストラクタが走る)
+        std::mutex m_StreamingReleaseMutex;
+        std::vector<std::shared_ptr<Assets::Model>> m_StreamingRelease;
+
         // 統計。【いずれも累計】瞬間値だと短い出来事を取りこぼす(47.9の失敗と同じ)
         uint64_t m_StreamingLoadedTotal = 0;
+        uint64_t m_StreamingEvictedTotal = 0;
         uint32_t m_StreamingResidentCount = 0;
         uint32_t m_StreamingTargetCount = 0;
         // いま選ばれている段を1つだけ返す(フェード中でも切り替え先だけ)。
