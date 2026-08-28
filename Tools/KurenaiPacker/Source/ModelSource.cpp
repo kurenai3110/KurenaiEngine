@@ -2,6 +2,8 @@
 
 #include <Windows.h>
 
+#include <psapi.h>
+
 #include <assimp/GltfMaterial.h>
 #include <assimp/Importer.hpp>
 #include <assimp/ObjMaterial.h>
@@ -12,8 +14,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -317,7 +322,11 @@ namespace KurenaiPacker
         }
     }
 
-    SourceModel LoadSourceModel(const std::wstring& filePath, float scale, const MaterialOverride& materialOverride)
+    SourceModel LoadSourceModel(
+        const std::wstring& filePath,
+        float scale,
+        const MaterialOverride& materialOverride,
+        const std::optional<std::array<float, 3>>& originOffset)
     {
         Assimp::Importer importer;
         // GenSmoothNormalsは対象アセットは全メッシュが法線を持つため実質ノーオップであり、
@@ -440,7 +449,16 @@ namespace KurenaiPacker
             vertices.reserve(mesh->mNumVertices);
             for (unsigned int v = 0; v < mesh->mNumVertices; ++v)
             {
-                aiVector3D position = (transform * mesh->mVertices[v]) * scale;
+                aiVector3D position = transform * mesh->mVertices[v];
+                if (originOffset)
+                {
+                    // --origin。scaleを掛ける前に引くので、呼び出し側はソースの単位
+                    // (PLATEAUなら平面直角座標のメートル値)のまま指定できる
+                    position.x -= (*originOffset)[0];
+                    position.y -= (*originOffset)[1];
+                    position.z -= (*originOffset)[2];
+                }
+                position *= scale;
                 aiVector3D normal = mesh->HasNormals() ? (normalMatrix * mesh->mNormals[v]) : aiVector3D(0.0f, 1.0f, 0.0f);
                 normal.Normalize();
 
@@ -578,8 +596,16 @@ namespace KurenaiPacker
 
             // glTFのmetallicRoughnessテクスチャはG=ラフネス、B=メタリックを1枚に格納しており、
             // assimpはこれをROUGHNESS/METALNESSの両方のテクスチャタイプとして同じ画像を指す
+            //
+            // --specular-as-orm指定時は、どちらも無い場合にaiTextureType_SPECULARも見る。
+            // FBXのSpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を入れる規約の
+            // アセット用(MaterialOverride::SpecularAsOrmのコメント参照)。チャンネルの割り当ては
+            // glTFのmetallicRoughness(G=ラフネス/B=メタリック)と一致するため、
+            // GBuffer.hlslのサンプリングはそのままでよい
             if (material->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS)
+                material->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS ||
+                (materialOverride.SpecularAsOrm &&
+                 material->GetTexture(aiTextureType_SPECULAR, 0, &texPath) == AI_SUCCESS))
             {
                 outMesh.MetallicRoughnessPath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
             }
@@ -604,6 +630,19 @@ namespace KurenaiPacker
                 material->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texPath) == AI_SUCCESS)
             {
                 outMesh.OcclusionPath = ResolveTexturePath(directory, Utf8ToWide(UriDecode(texPath.C_Str())));
+            }
+            else if (materialOverride.SpecularAsOrm && !outMesh.MetallicRoughnessPath.empty())
+            {
+                // ORMのRチャンネルは遮蔽なので、同じ画像を遮蔽スロットとしても使う。
+                //
+                // 【ktexは増えない】PackageWriterのテクスチャ要求は「解決済みパス|sRGBの要否」を
+                // キーに重複排除するため、metallicRoughnessと同じパス・同じlinear指定のこの要求は
+                // 同一エントリに畳まれる。
+                //
+                // 【UV1で引かれても正しい】遮蔽マップはシェーダー側で常にUV1(TEXCOORD1)から引くが、
+                // --bake-occlusionを行わない場合UV1にはUV0が複製される(Assets/Vertex.hのコメント)。
+                // ORMはUV0の空間で作られているため、これで意図どおりの位置が引ける
+                outMesh.OcclusionPath = outMesh.MetallicRoughnessPath;
             }
 
             // glTFのocclusionTexture.strength。ラフネス係数と異なり既定値がglTF仕様で1.0と
@@ -709,6 +748,27 @@ namespace KurenaiPacker
             outMesh.AlphaCutoff = (hasAlphaMode && std::strcmp(alphaMode.C_Str(), "MASK") == 0) ? alphaCutoff : 0.0f;
             outMesh.IsTransparent = hasAlphaMode && std::strcmp(alphaMode.C_Str(), "BLEND") == 0;
 
+            // --alpha-cutout <マテリアル名>=<しきい値>。上のalphaMode判定はglTF専用で、
+            // FBX/OBJには対応する情報が無い。SpeedTreeの葉のように「BaseColorのアルファで抜く」
+            // 前提で作られたマテリアルは、指定しないと不透明な板として描かれる
+            // (Bistro(OBJ)の葉で実際に起きている既知の破綻と同じもの)
+            if (!materialOverride.AlphaCutoff.empty())
+            {
+                aiString materialName;
+                if (material->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS)
+                {
+                    const auto found = materialOverride.AlphaCutoff.find(materialName.C_Str());
+                    if (found != materialOverride.AlphaCutoff.end())
+                    {
+                        outMesh.AlphaCutoff = found->second;
+                        // カットアウトと半透明は排他(glTFのalphaModeがOPAQUE/MASK/BLENDの
+                        // いずれか1つであるのと同じ)。明示的にカットアウトを指定した以上、
+                        // 後段のOPACITY/Tf由来の半透明判定に横取りされないようにする
+                        outMesh.IsTransparent = false;
+                    }
+                }
+            }
+
             // 透過率(葉・花弁のような薄いものが裏からの光を透かす量)。
             // glTFにこれを表す標準のプロパティが無いため、--translucent <マテリアル名>=<値> で
             // 外から与える。名前が一致したマテリアルにだけ設定する
@@ -813,5 +873,333 @@ namespace KurenaiPacker
         }
 
         return model;
+    }
+
+    namespace
+    {
+        // aiTextureTypeの列挙と表示名。マテリアルが「どのスロットに」テクスチャを持っているかを
+        // 網羅して出すためのもの。LoadSourceModelが実際に読むのはBASE_COLOR/DIFFUSE、
+        // NORMALS/HEIGHT、DIFFUSE_ROUGHNESS/METALNESS、EMISSIVE、LIGHTMAP/AMBIENT_OCCLUSIONの
+        // 5系統だけなので、それ以外(SPECULAR等)に入っているものは取りこぼされている
+        struct TextureTypeName
+        {
+            aiTextureType Type;
+            const char* Name;
+        };
+
+        const TextureTypeName kTextureTypeNames[] = {
+            { aiTextureType_DIFFUSE,            "DIFFUSE" },
+            { aiTextureType_SPECULAR,           "SPECULAR" },
+            { aiTextureType_AMBIENT,            "AMBIENT" },
+            { aiTextureType_EMISSIVE,           "EMISSIVE" },
+            { aiTextureType_HEIGHT,             "HEIGHT" },
+            { aiTextureType_NORMALS,            "NORMALS" },
+            { aiTextureType_SHININESS,          "SHININESS" },
+            { aiTextureType_OPACITY,            "OPACITY" },
+            { aiTextureType_DISPLACEMENT,       "DISPLACEMENT" },
+            { aiTextureType_LIGHTMAP,           "LIGHTMAP" },
+            { aiTextureType_REFLECTION,         "REFLECTION" },
+            { aiTextureType_BASE_COLOR,         "BASE_COLOR" },
+            { aiTextureType_NORMAL_CAMERA,      "NORMAL_CAMERA" },
+            { aiTextureType_EMISSION_COLOR,     "EMISSION_COLOR" },
+            { aiTextureType_METALNESS,          "METALNESS" },
+            { aiTextureType_DIFFUSE_ROUGHNESS,  "DIFFUSE_ROUGHNESS" },
+            { aiTextureType_AMBIENT_OCCLUSION,  "AMBIENT_OCCLUSION" },
+            { aiTextureType_UNKNOWN,            "UNKNOWN" },
+        };
+
+        // LoadSourceModelが実際に読むスロットかどうか。falseなら「入っているのに使われない」
+        bool IsSlotConsumedByPacker(aiTextureType type)
+        {
+            switch (type)
+            {
+            case aiTextureType_BASE_COLOR:
+            case aiTextureType_DIFFUSE:
+            case aiTextureType_NORMALS:
+            case aiTextureType_HEIGHT:
+            case aiTextureType_DIFFUSE_ROUGHNESS:
+            case aiTextureType_METALNESS:
+            case aiTextureType_EMISSIVE:
+            case aiTextureType_LIGHTMAP:
+            case aiTextureType_AMBIENT_OCCLUSION:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        unsigned int CountNodes(const aiNode* node)
+        {
+            unsigned int count = 1;
+            for (unsigned int i = 0; i < node->mNumChildren; ++i)
+            {
+                count += CountNodes(node->mChildren[i]);
+            }
+            return count;
+        }
+
+        // aiMetadataの1エントリを型に応じて文字列化する
+        std::string FormatMetadataEntry(const aiMetadata* metadata, unsigned int index)
+        {
+            switch (metadata->mValues[index].mType)
+            {
+            case AI_BOOL:     return *static_cast<bool*>(metadata->mValues[index].mData) ? "true" : "false";
+            case AI_INT32:    return std::to_string(*static_cast<int32_t*>(metadata->mValues[index].mData));
+            case AI_UINT64:   return std::to_string(*static_cast<uint64_t*>(metadata->mValues[index].mData));
+            case AI_FLOAT:    return std::to_string(*static_cast<float*>(metadata->mValues[index].mData));
+            case AI_DOUBLE:   return std::to_string(*static_cast<double*>(metadata->mValues[index].mData));
+            case AI_AISTRING: return static_cast<aiString*>(metadata->mValues[index].mData)->C_Str();
+            default:          return "(未対応の型)";
+            }
+        }
+
+        // ピークワーキングセット(MB)。巨大なFBXが「読めるが遅い」のか「メモリを食い潰す」のかを
+        // 切り分けるために出す。K32版を直接呼ぶことでpsapi.libへのリンクを増やさない
+        double GetPeakWorkingSetMB()
+        {
+            PROCESS_MEMORY_COUNTERS counters{};
+            counters.cb = sizeof(counters);
+            if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)))
+            {
+                Kurenai::Core::Logger::Warning("ModelSource", "プロセスのメモリ情報を取得できませんでした");
+                return 0.0;
+            }
+            return static_cast<double>(counters.PeakWorkingSetSize) / (1024.0 * 1024.0);
+        }
+    }
+
+    void InspectModel(const std::wstring& filePath, float scale)
+    {
+        Assimp::Importer importer;
+
+        // LoadSourceModelと完全に同じポストプロセスで読む。ここで違う設定を使うと
+        // 「inspectでは正しく見えたのにパックすると違う」という最悪の食い違いが起きる
+        const auto readStart = std::chrono::steady_clock::now();
+        const aiScene* scene = importer.ReadFile(
+            WideToUtf8(filePath),
+            aiProcess_Triangulate | aiProcess_ConvertToLeftHanded | aiProcess_JoinIdenticalVertices);
+        const auto readEnd = std::chrono::steady_clock::now();
+
+        if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode)
+        {
+            throw std::runtime_error(std::string("モデルの読み込みに失敗しました: ") + importer.GetErrorString());
+        }
+
+        const double readMs = std::chrono::duration<double, std::milli>(readEnd - readStart).count();
+
+        std::cout << std::fixed;
+        std::cout << "[KurenaiPacker][inspect] " << WideToUtf8(filePath) << "\n";
+        std::cout << "  読み込み: " << std::setprecision(0) << readMs << "ms"
+                  << " / ピークワーキングセット " << std::setprecision(1) << GetPeakWorkingSetMB() << "MB\n";
+
+        // --- シーン全体の規模 ---
+        std::cout << "  規模: ノード " << CountNodes(scene->mRootNode)
+                  << " / メッシュ " << scene->mNumMeshes
+                  << " / マテリアル " << scene->mNumMaterials
+                  << " / 埋め込みテクスチャ " << scene->mNumTextures
+                  << " / ライト " << scene->mNumLights
+                  << " / カメラ " << scene->mNumCameras
+                  << " / アニメーション " << scene->mNumAnimations << "\n";
+
+        // --- メタデータ(FBXのUnitScaleFactor/UpAxis等) ---
+        // 単位系と上方向軸はここにしか出ない。--scaleの値を決める一次情報になる
+        if (scene->mMetaData && scene->mMetaData->mNumProperties > 0)
+        {
+            std::cout << "  メタデータ:\n";
+            for (unsigned int i = 0; i < scene->mMetaData->mNumProperties; ++i)
+            {
+                std::cout << "    " << scene->mMetaData->mKeys[i].C_Str()
+                          << " = " << FormatMetadataEntry(scene->mMetaData, i) << "\n";
+            }
+        }
+        else
+        {
+            std::cout << "  メタデータ: なし\n";
+        }
+
+        // --- ルートノードの変換行列 ---
+        // assimpのFBXインポータは、FBXのUpAxis/FrontAxis/CoordAxisによる軸変換行列に
+        // UnitScaleFactorを掛けてここへ後乗算する(FBXConverter.cpp correctRootTransform)。
+        // つまり「対角に100が入っている」なら、頂点は読み込んだ時点で既に100倍されている
+        const aiMatrix4x4& root = scene->mRootNode->mTransformation;
+        std::cout << std::setprecision(6);
+        std::cout << "  ルート変換行列(この対角に単位換算の倍率が入る):\n";
+        std::cout << "    [" << root.a1 << ", " << root.a2 << ", " << root.a3 << ", " << root.a4 << "]\n";
+        std::cout << "    [" << root.b1 << ", " << root.b2 << ", " << root.b3 << ", " << root.b4 << "]\n";
+        std::cout << "    [" << root.c1 << ", " << root.c2 << ", " << root.c3 << ", " << root.c4 << "]\n";
+        std::cout << "    [" << root.d1 << ", " << root.d2 << ", " << root.d3 << ", " << root.d4 << "]\n";
+
+        // --- ノード変換を適用した全体バウンズ(LoadSourceModelと同じ経路) ---
+        std::vector<std::pair<const aiMesh*, aiMatrix4x4>> meshNodes;
+        CollectMeshNodes(scene, scene->mRootNode, aiMatrix4x4(), meshNodes);
+
+        float boundsMin[3] = { 0.0f, 0.0f, 0.0f };
+        float boundsMax[3] = { 0.0f, 0.0f, 0.0f };
+        bool boundsInitialized = false;
+        // メッシュがノード階層から何回参照されているか(インスタンス化の倍率)
+        std::unordered_map<const aiMesh*, unsigned int> referenceCount;
+        uint64_t totalInstancedVertices = 0;
+        uint64_t totalInstancedTriangles = 0;
+
+        for (const auto& [mesh, transform] : meshNodes)
+        {
+            ++referenceCount[mesh];
+            totalInstancedVertices += mesh->mNumVertices;
+            totalInstancedTriangles += mesh->mNumFaces;
+
+            if (!mesh->HasPositions())
+            {
+                continue;
+            }
+            for (unsigned int v = 0; v < mesh->mNumVertices; ++v)
+            {
+                const aiVector3D position = (transform * mesh->mVertices[v]) * scale;
+                const float p[3] = { position.x, position.y, position.z };
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    if (!boundsInitialized)
+                    {
+                        boundsMin[axis] = p[axis];
+                        boundsMax[axis] = p[axis];
+                    }
+                    else
+                    {
+                        boundsMin[axis] = (std::min)(boundsMin[axis], p[axis]);
+                        boundsMax[axis] = (std::max)(boundsMax[axis], p[axis]);
+                    }
+                }
+                boundsInitialized = true;
+            }
+        }
+
+        uint64_t uniqueVertices = 0;
+        uint64_t uniqueTriangles = 0;
+        for (unsigned int i = 0; i < scene->mNumMeshes; ++i)
+        {
+            uniqueVertices += scene->mMeshes[i]->mNumVertices;
+            uniqueTriangles += scene->mMeshes[i]->mNumFaces;
+        }
+
+        std::cout << std::setprecision(3);
+        std::cout << "  頂点: ユニーク " << uniqueVertices
+                  << " / インスタンス展開後 " << totalInstancedVertices << "\n";
+        std::cout << "  三角形: ユニーク " << uniqueTriangles
+                  << " / インスタンス展開後 " << totalInstancedTriangles << "\n";
+
+        if (boundsInitialized)
+        {
+            const float sizeX = boundsMax[0] - boundsMin[0];
+            const float sizeY = boundsMax[1] - boundsMin[1];
+            const float sizeZ = boundsMax[2] - boundsMin[2];
+            const float diagonal = std::sqrt(sizeX * sizeX + sizeY * sizeY + sizeZ * sizeZ);
+
+            std::cout << "  バウンズ(--scale " << scale << " 適用後):\n";
+            std::cout << "    min = (" << boundsMin[0] << ", " << boundsMin[1] << ", " << boundsMin[2] << ")\n";
+            std::cout << "    max = (" << boundsMax[0] << ", " << boundsMax[1] << ", " << boundsMax[2] << ")\n";
+            std::cout << "    大きさ = (" << sizeX << ", " << sizeY << ", " << sizeZ << ")"
+                      << " / 対角 " << diagonal << "\n";
+            // エンジンはシーンAABBの対角から遠クリップ面を自動決定する(farZ = max(100, 対角*4))。
+            // スケールを間違えるとここが桁で狂い、カスケードシャドウが近景で無効化される
+            std::cout << "    このモデル単体なら farZ = " << (std::max)(100.0f, diagonal * 4.0f) << "\n";
+        }
+        else
+        {
+            std::cout << "  バウンズ: 頂点が1つも無い\n";
+        }
+
+        // --- 頂点数の多いメッシュ上位10件 ---
+        // 「1メッシュだけが極端に重い」形になっていないかを見る。カリングやLODの
+        // 効き方が変わるため、総頂点数だけでは判断できない
+        std::vector<unsigned int> meshOrder(scene->mNumMeshes);
+        for (unsigned int i = 0; i < scene->mNumMeshes; ++i)
+        {
+            meshOrder[i] = i;
+        }
+        std::sort(meshOrder.begin(), meshOrder.end(), [scene](unsigned int a, unsigned int b) {
+            return scene->mMeshes[a]->mNumVertices > scene->mMeshes[b]->mNumVertices;
+        });
+
+        const unsigned int topCount = (std::min)(10u, scene->mNumMeshes);
+        if (topCount > 0)
+        {
+            std::cout << "  頂点数の多いメッシュ上位" << topCount << "件:\n";
+            for (unsigned int i = 0; i < topCount; ++i)
+            {
+                const aiMesh* mesh = scene->mMeshes[meshOrder[i]];
+                const auto refIt = referenceCount.find(mesh);
+                const unsigned int refs = refIt == referenceCount.end() ? 0 : refIt->second;
+                const double share = uniqueVertices > 0
+                    ? 100.0 * static_cast<double>(mesh->mNumVertices) / static_cast<double>(uniqueVertices)
+                    : 0.0;
+                std::cout << "    [" << meshOrder[i] << "] 頂点 " << mesh->mNumVertices
+                          << " (" << std::setprecision(1) << share << "%)"
+                          << " / 三角形 " << mesh->mNumFaces
+                          << " / 参照 " << refs << "回"
+                          << " / マテリアル " << mesh->mMaterialIndex
+                          << " / 名前 \"" << mesh->mName.C_Str() << "\"\n";
+                std::cout << std::setprecision(3);
+            }
+        }
+
+        // --- 埋め込みテクスチャ ---
+        // mHeight==0 なら圧縮ブロブ(JPEG/PNG等がそのまま入っている)、非0なら生RGBA。
+        // KurenaiPackerは現状これを読まないため、埋め込みのみのモデルはテクスチャが落ちる
+        if (scene->mNumTextures > 0)
+        {
+            const unsigned int showCount = (std::min)(10u, scene->mNumTextures);
+            std::cout << "  埋め込みテクスチャ(先頭" << showCount << "件 / 全" << scene->mNumTextures << "件):\n";
+            for (unsigned int i = 0; i < showCount; ++i)
+            {
+                const aiTexture* texture = scene->mTextures[i];
+                std::cout << "    [" << i << "] 形式ヒント \"" << texture->achFormatHint << "\""
+                          << " / " << (texture->mHeight == 0
+                                        ? ("圧縮ブロブ " + std::to_string(texture->mWidth) + "バイト")
+                                        : ("生RGBA " + std::to_string(texture->mWidth) + "x" + std::to_string(texture->mHeight)))
+                          << " / 名前 \"" << texture->mFilename.C_Str() << "\"\n";
+            }
+        }
+
+        // --- マテリアルごとのテクスチャスロット ---
+        // ここが「ORMがSPECULARに入っていてパッカーに読まれない」のような食い違いを
+        // 見つける唯一の場所。パッカーが読まないスロットには [パッカー未使用] を付ける
+        std::cout << "  マテリアル(" << scene->mNumMaterials << "件):\n";
+        for (unsigned int m = 0; m < scene->mNumMaterials; ++m)
+        {
+            const aiMaterial* material = scene->mMaterials[m];
+            aiString materialName;
+            material->Get(AI_MATKEY_NAME, materialName);
+            std::cout << "    [" << m << "] \"" << materialName.C_Str() << "\"";
+
+            bool anySlot = false;
+            for (const TextureTypeName& entry : kTextureTypeNames)
+            {
+                const unsigned int count = material->GetTextureCount(entry.Type);
+                for (unsigned int t = 0; t < count; ++t)
+                {
+                    aiString texPath;
+                    if (material->GetTexture(entry.Type, t, &texPath) != AI_SUCCESS)
+                    {
+                        continue;
+                    }
+                    if (!anySlot)
+                    {
+                        std::cout << "\n";
+                        anySlot = true;
+                    }
+                    std::cout << "        " << entry.Name;
+                    if (!IsSlotConsumedByPacker(entry.Type))
+                    {
+                        std::cout << " [パッカー未使用]";
+                    }
+                    std::cout << " -> " << texPath.C_Str() << "\n";
+                }
+            }
+            if (!anySlot)
+            {
+                std::cout << " (テクスチャ無し)\n";
+            }
+        }
+
+        std::cout << "  ピークワーキングセット(最終): " << std::setprecision(1) << GetPeakWorkingSetMB() << "MB\n";
     }
 }

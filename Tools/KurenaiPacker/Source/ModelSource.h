@@ -99,6 +99,23 @@ namespace KurenaiPacker
         // (メタリック等の「全マテリアルへ一律」とは違い、木の中でも花弁だけを
         //  透けさせたい、という使い方になるため)
         std::map<std::string, float> Translucency;
+        // マテリアル名 → アルファカットアウトのしきい値。
+        // FBX/OBJにはglTFのalphaMode(OPAQUE/MASK/BLEND)に相当する情報が無いため、
+        // 「BaseColorのアルファで抜く」前提で作られた葉や草のマテリアルであっても
+        // 解析だけでは判別できず、不透明な板として描かれてしまう。外から名前で指定する
+        std::map<std::string, float> AlphaCutoff;
+        // aiTextureType_SPECULARに入っているテクスチャをmetallicRoughnessとして読むか。
+        //
+        // FBXのSpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を格納する
+        // 規約のアセットがある(NVIDIA Emerald Squareがこれで、README.txtに明記されている)。
+        // assimpはFBXのSpecularColorをaiTextureType_SPECULARへ入れるため、既定の
+        // DIFFUSE_ROUGHNESS/METALNESSしか見ない解決では1枚も拾えない。
+        //
+        // 【無条件に見てはいけない】SpecularColorが本来の「鏡面反射色」であるアセット
+        // (Specular/Glossinessワークフロー)では、色マップがそのままメタリック/ラフネスとして
+        // 読まれ、全面が金属になる。既存アセットを再パックしたときに静かに壊れるため、
+        // 指定したときだけ有効にする
+        bool SpecularAsOrm = false;
     };
 
     // モデルファイルをassimpで解析する。失敗時はstd::runtime_errorを投げる。
@@ -106,8 +123,34 @@ namespace KurenaiPacker
     // 持たない形式では、センチメートル単位で作成されたアセットを
     // そのまま読み込むと本来の100倍のスケールになってしまうことがあるため、呼び出し側
     // (KurenaiPacker.exeの--scaleオプション)が既知の単位変換係数を明示的に渡す
+    // originOffset: 頂点位置とバウンズから引く座標(ソースの単位のまま、scaleを掛ける前)。
+    //
+    // 【なぜ「自動で中心へ寄せる」ではなく明示指定なのか】地理座標系のように、原点が
+    // 遠く離れた絶対座標でモデルが作られていることがある(Project PLATEAUのFBXは
+    // 平面直角座標系の絶対値で、原点から数十km離れている)。頂点がfloat32であるうえ、
+    // .kmodelのAABBがそのまま巨大になり、シーンAABBの対角から自動決定される遠クリップ面
+    // (farZ = max(100, 対角x4))が桁で狂う。
+    //
+    // このときタイルごとに「自分のAABBの中心」で寄せてしまうと、タイル同士の相対的な
+    // 位置関係が壊れて街が崩れる。**複数のモデルで同じ値を引く**必要があるため、
+    // 自動ではなく呼び出し側が明示する形にしている
     SourceModel LoadSourceModel(
         const std::wstring& filePath,
         float scale = 1.0f,
-        const MaterialOverride& materialOverride = {});
+        const MaterialOverride& materialOverride = {},
+        const std::optional<std::array<float, 3>>& originOffset = std::nullopt);
+
+    // assimpが読んだ直後のシーン構造を標準出力へ印字する(パッケージは書き出さない)。
+    // 失敗時はLoadSourceModelと同じくstd::runtime_errorを投げる。
+    //
+    // 外部から持ち込んだモデルは、単位系(FBXのUnitScaleFactor)・上方向軸・テクスチャが
+    // どのスロットへ入るか・ノード数の規模が事前に分からない。これらは「assimpに読ませれば
+    // 全部分かる」ものだが、LoadSourceModel + WriteModelPackage を通すとテクスチャ変換と
+    // メッシュレット構築と数GBの書き出しまで走ってしまい、「スケールを知りたいだけ」の
+    // 一度の確認に毎回それを払うことになる(147MBのFBXで実測して判断するには非現実的で、
+    // 試行のたびに出力先も数GB埋まる)。読み込んだ直後で止める経路を分けておく。
+    //
+    // scale: 印字するバウンディングボックスへ乗算する係数。--scaleに与える値の妥当性を
+    // 「既知の寸法(車両の全長、建物の高さ)と合うか」で判定するためのもの
+    void InspectModel(const std::wstring& filePath, float scale = 1.0f);
 }

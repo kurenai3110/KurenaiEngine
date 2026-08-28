@@ -2572,6 +2572,18 @@ namespace Kurenai
         // 平均だけではスパイクが埋もれるため、集計期間中のフレーム間隔の最悪値も残す
         float m_FrameStatsWorstFrameTimeMs = 0.0f;
 
+        // モデル単位フラスタムカリングの統計(1フレーム分)。フレーム先頭でリセットし、
+        // LogFrameStatsIfDueが集計期間の合計として出す。
+        //
+        // 【何のために出すか】カリングは「効いていない」と「間引きすぎて物が消えた」の
+        // どちらも絵からは判別しにくい。判定式が常にtrueを返していても既存シーンの絵は
+        // 一致してしまうため、間引いた数が0でないことを数値で確かめられるようにしておく
+        uint32_t m_FrustumCullTested = 0;
+        uint32_t m_FrustumCullCulled = 0;
+        // 集計期間中の合計(平均はフレーム数で割って出す)
+        uint64_t m_FrameStatsCullTestedSum = 0;
+        uint64_t m_FrameStatsCullCulledSum = 0;
+
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};
 

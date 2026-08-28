@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Model.h"
+#include "ModelLoader.h"
 #include "ShowLoader.h"
 
 namespace Kurenai::Assets
@@ -31,6 +32,16 @@ namespace Kurenai::Assets
         // 通常PSOではなく水面専用PSO(Water.hlsl)で描画し、G-BufferのMaterial.aへ水面のマテリアルID
         // (kMaterialIDWater、Shaders/3D/GBufferCommon.hlsli)を書き込む(水面マテリアル基盤)
         bool IsWater = false;
+
+        // Model::BoundsMin/MaxをWorldで変換した、ワールド空間の軸並行バウンディングボックス。
+        // フラスタムカリングの判定に使う。
+        //
+        // 【読み込み時に一度だけ求める】Worldは読み込み後に変化しない(書き込みはSceneLoaderの
+        // 1箇所のみ)ため、毎フレーム8頂点を変換し直す必要がない。
+        // 回転が入ると軸並行でなくなるので、min/maxだけを変換するのではなく必ず8頂点を変換して
+        // その包絡を取る(シーン全体のAABBを合成しているのと同じループで求めている)
+        float WorldBoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+        float WorldBoundsMax[3] = { 0.0f, 0.0f, 0.0f };
     };
 
     // 反射プローブ(リフレクションプローブ)。この位置から周囲をキューブマップへキャプチャし、
@@ -139,6 +150,13 @@ namespace Kurenai::Assets
         std::wstring Name;
         std::vector<ModelInstance> Instances;
 
+        // 全モデルで共有する1x1のフォールバックテクスチャ(白/フラット法線/黒/マゼンタ)。
+        //
+        // 【Instancesより後ろに置いてはいけない】メンバはここでの宣言順に構築され、
+        // 逆順に破棄される。Instancesが持つModelはここのテクスチャを生ポインタで指しているため、
+        // 先に破棄されると解放済みを指す。Instancesより前に宣言してこの順序を保証する
+        SharedTexturePool SharedTextures;
+
         // 各ModelInstanceが持つModel::Lights(モデルファイル埋め込みのライト。glTFのKHR_lights_punctual
         // やFBXのライトノード由来)をInstance::Worldでワールド空間へ変換したものと、.kscene自身の
         // [Light]セクションで直接指定されたライト(元からワールド空間)を合成した、シーン全体の
@@ -183,6 +201,20 @@ namespace Kurenai::Assets
         //  既定の0.5のままだと球だけが半分の明るさになり検証が成立しない)
         bool HasIBLIntensityOverride = false;
         float IBLIntensity = 1.0f;
+
+        // カスケードシャドウを打ち切る距離[m]。未指定(HasShadowDistance == false)なら
+        // 従来どおりカメラの遠クリップ面までを4カスケードで分割する。
+        //
+        // 【なぜ必要か】遠クリップ面はシーンAABBの対角から自動決定される
+        // (farZ = max(100, 対角×4)、KurenaiEngine3D::ComputeInitialCamera)。数十km規模のシーンでは
+        // farZが100km級になり、カスケードの分割範囲がそのまま伸びるため、第1カスケードが
+        // 数kmを2048x2048の1枚で覆うことになって近景の影が事実上消える。
+        // シャドウだけを手前で打ち切れば、遠景の描画距離を保ったまま近景の影の密度を戻せる。
+        //
+        // 【既定値を持たせない理由】「指定しなければ従来の挙動」を保証するためにフラグで分ける。
+        // 何らかの既定値を入れると、これまで正しく影が出ていたシーンの見え方が黙って変わる
+        bool HasShadowDistance = false;
+        float ShadowDistance = 0.0f;
 
         // AO/間接光(SSAO・SSIL)を有効にするか。Furnace Testでは球の縁がAOで暗くなると
         // 「エネルギー損失による暗さ」と区別がつかなくなるため無効にする

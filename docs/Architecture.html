@@ -382,6 +382,17 @@ G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_F
 粗くカバーします。
 </p>
 <p>
+<strong>分割する範囲は既定でカメラの近クリップ面〜遠クリップ面そのもの</strong>で、シャドウ専用の
+打ち切り距離は持ちません。遠クリップ面はシーンAABBの対角から自動決定される
+(<code>farZ = max(100, 対角×4)</code>)ため、数十km規模のシーンでは<code>farZ</code>が
+100km級になり、<strong>第1カスケードが数kmを2048x2048の1枚で覆うことになって近景の影が
+事実上消えます</strong>。これを避けたい場合は<code>.kscene</code>の
+<code>[Scene] ShadowDistance</code>でカスケードの分割範囲だけを手前で打ち切れます
+(遠景の描画距離はそのまま)。<strong>未指定なら従来どおりの挙動</strong>で、
+書かなかったシーンの見え方は変わりません。範囲と既定値を持たせない理由は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 44.6。
+</p>
+<p>
 分割境界は対数分割(遠くのカスケードほど急激に広がる)と均等分割(どのカスケードも同じ奥行き)を
 按分するPractical Split Scheme(GPU Gems 3, Dimitrov 2007)を使っています
 (<code>KurenaiEngine3D::ComputeCascadeSplits</code>)。各カスケードのライト視点正射影は、その
@@ -439,6 +450,54 @@ Texture2DArrayへ統合する理由とその効果は
 <a href="ImplementationDetail.md">ImplementationDetail.md</a> 4章。
 </p>
 </section>
+
+<h3>4.9 モデル単位のフラスタムカリング</h3>
+<p>
+各描画パスは<code>Scene::Instances</code>を走査してドローコールを発行しますが、その手前で
+<strong>インスタンスのワールドAABBが視錐台の外にあるものを丸ごと飛ばします</strong>。
+判定は<code>ExtractFrustumPlanes</code>(ビュー射影行列から6平面をGribb-Hartmannで取り出す)と
+<code>IsAABBVisible</code>(平面ごとにp-vertexだけを見る保守的な判定)の2つで、
+どちらもRHIに触れないためDX11/DX12で共通です。
+</p>
+<p>
+<strong>錐台はパスごとに違うものを使います。</strong> G-Buffer・深度プリパス・半透明は
+メインカメラ、シャドウは<strong>カスケードごとのライト正射影</strong>、平面反射は鏡映カメラ、
+反射プローブはキューブ面ごとの錐台です。カメラを裏返しても、ライト視点の錐台に入っている
+モデルは影を落とし続けます。
+</p>
+<p>
+CPU側の視錐台平面の作り方は増幅シェーダーの<code>IsSphereInFrustum</code>
+(<code>GBufferMeshlet.hlsl</code>、メッシュレット単位のカリング)と同じ平面を作っていますが、
+<strong>向こうは転置済み行列の「列」から、こちらは転置前の「行」から</strong>組み立てます
+(詳細は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 44.1)。
+</p>
+
+<h4>効いているかを数値で見る</h4>
+<p>
+性能ログ(<code>KurenaiEngine3D::LogFrameStatsIfDue</code>)へ「判定した数 / 間引いた数」を出します。
+<strong>「間引き0」だけでは、判定式が常に通しているのか本当に全部視界内なのかを区別できない</strong>
+ためです。判定式が常にtrueを返していても既存シーンの絵は完全に一致してしまいます。
+</p>
+
+<h4>4.9.1 既知の制約</h4>
+<ul>
+<li><strong>メッシュ単位ではできません。</strong> <code>Assets::Mesh</code>はAABBを持たず、
+AABBがあるのは<code>Assets::Model</code>だけです(<code>Model.h</code>)。したがって
+<strong>1モデルに多数のメッシュを持つアセット(Bistro、Emerald Square)では1つも間引けません</strong>。
+効くのは<code>.kmodel</code>を多数<code>[Model]</code>として並べるシーンのほうです。</li>
+<li><strong>DDGIのプローブキャプチャには入れていません。</strong> このループの描画回数は
+<code>ClampDDGIProbesPerFrameToConstantRing</code>が「同じ条件で数えること」を前提に
+定数バッファの予算を決めており、カリングを入れると予算計算と食い違います。
+定数バッファの予算超過は例外ではなくログ1行で続行し、描画が静かに壊れます
+(<code>DX12Buffer.h</code>)。</li>
+<li>ソフトウェアラスタライザのパスでは、<strong>全インスタンスが間引かれたフレームでも
+visibility bufferを必ずクリアします</strong>。散布書き込みなので、クリアせずに戻ると
+前フレームの絵が焼き付いて残ります。</li>
+</ul>
+<p>
+この機能をいつ・なぜ入れたのか(過去に測定で却下した経緯を含む)は
+<a href="ImplementationHistory.md">ImplementationHistory.md</a> 48章。
+</p>
 
 <section id="tangent">
 <h2>5. 法線マッピングの接線ベクトル計算</h2>
@@ -662,6 +721,138 @@ assimpのOBJインポータの有効化手順、マテリアル単位マージ�
 半透明判定、MTLの<code>Ns</code>からのラフネス変換、<code>--scale</code>の決め方は
 <a href="ImplementationDetail.md">ImplementationDetail.md</a> 11章。
 </p>
+
+<h3>11.6 FBX都市アセットの変換(NVIDIA Emerald Square)</h3>
+<p>
+<code>Assets/Packed/EmeraldSquare/Day.kmodel</code>は
+<a href="https://developer.nvidia.com/orca/nvidia-emerald-square">NVIDIA Emerald Square</a>(ORCA)の
+FBX配布を直接パックしたものです。<strong>リポジトリで初めてFBXを入力にしたアセット</strong>で、
+glTF/OBJでは表に出なかった前提がいくつか崩れました。取得から配布までは
+<code>Tools/import_emerald_square.ps1</code>が一括で行います。
+</p>
+<pre><code>KurenaiPacker.exe ThirdParty/SourceModels/EmeraldSquare_v4_1/EmeraldSquare_Day.fbx \
+  -o Assets/Packed/EmeraldSquare/Day.kmodel \
+  --specular-as-orm --alpha-cutout "&lt;.DoubleSidedの29マテリアル&gt;=0.5"</code></pre>
+<p>
+Bistroと同じく<strong>中間形式を経由しません</strong>。FBXはassimpの
+<code>LoadSourceModel</code>経路でそのまま読みます。
+</p>
+
+<h4>この変換のために増やした3つのオプション</h4>
+<ul>
+<li><code>--inspect</code> ―― パッケージを書き出さず、assimpが読んだ直後のシーン構造(単位系・
+上方向軸・ルート変換行列・ノード数・スケール適用後のバウンズ・マテリアルごとのテクスチャスロット・
+埋め込みテクスチャ)を印字して終わる。<strong>外部から持ち込んだモデルの素性は「読ませれば分かる」が、
+そのために数GBの書き出しまで走らせるのは現実的でない</strong>ため、読み込み直後で止める経路を分けた。
+パッカーが消費しないスロットには<code>[パッカー未使用]</code>が付く。</li>
+<li><code>--specular-as-orm</code> ―― <code>aiTextureType_SPECULAR</code>のテクスチャを
+metallicRoughnessと遮蔽として読む。<strong>SpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を
+入れる規約のFBX向け</strong>。チャンネルの割り当てがglTFのmetallicRoughnessと一致するため
+シェーダー側の変更は不要。<strong>フラグ制</strong>にしてあるのは、SpecularColorが本来の鏡面反射色である
+アセットに無条件で適用すると全面が金属になり、既存アセットの再パックで静かに壊れるため。</li>
+<li><code>--alpha-cutout &lt;マテリアル名&gt;=&lt;しきい値&gt;</code> ―― 名前が一致したマテリアルを
+アルファカットアウトにする。<strong>アルファモード(OPAQUE/MASK/BLEND)はglTFにしかない情報</strong>で、
+FBX/OBJでは「アルファで抜く前提の葉」を解析だけでは判別できない。既存の
+<code>--translucent</code>と同じ「名前で外から与える」形にそろえてある。</li>
+</ul>
+
+<h4>ブロック圧縮テクスチャの寸法チェック</h4>
+<p>
+テクスチャがブロック圧縮(BC1〜BC7)で幅か高さが4未満の場合、警告を出してそのスロットを
+フォールバックとして扱います。ブロック圧縮は4×4ピクセルを1ブロックとして符号化するため、
+1×1などは<strong>シェーダリソースビューの作成が<code>E_INVALIDARG</code>で失敗します</strong>。
+配布アセットには「法線マップ無し」を表す1×1のダミーが圧縮形式のまま置かれていることがあり
+(このアセットでは法線マップ115枚中6枚)、パック時に弾かないと実行のたびに転送失敗のエラーが出ます。
+<strong>既存の<code>.ktex</code>を再利用する経路でも同じ検査をします</strong> ――
+<code>--force</code>時だけの検査にすると、一度生成した不正な<code>.ktex</code>を
+<code>.kmodel</code>が参照し続け、再パックしても直らないためです。
+</p>
+
+<h4>11.6.1 既知の制約</h4>
+<ul>
+<li><strong>両面描画を持たないため、植生の葉を裏から見ると欠ける可能性がある。</strong>
+エンジンは<code>CULL_BACK</code>固定で、このアセットの<code>.DoubleSided</code>マテリアルは
+名前のとおり両面前提で作られている。桜(<a href="ImplementationDetail.md">ImplementationDetail.md</a> 40章)は
+巻き順と法線を反転した複製を持たせて対処しているが、このアセットは複製を持たない。
+街路レベルの構図では破綻が見えていないが、確認しきってはいない。</li>
+<li><strong>法線マップ3枚がフォールバックされる</strong>(<code>Painted_Metal</code> /
+<code>Emissive_Light_2</code> / <code>Emissive_Light_Inst</code>)。上記の1×1ブロック圧縮のため。
+配布物側の作りで、絵への影響は軽微。</li>
+<li><strong>ライセンスがCC BY-NC-SA 3.0 Unported(非商用のみ・継承あり)</strong>で、
+リポジトリの他のアセット(SponzaやBistroはCC BY相当)と条件が違う。</li>
+</ul>
+<p>
+<code>--scale</code>を付けない根拠、<code>--specular-as-orm</code>の対照実験、
+カットアウト対象をDDSのFourCCで裏取りした過程は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 43章。
+</p>
+
+<h3>11.7 地理座標系のアセットの変換(Project PLATEAU 東京都23区)</h3>
+<p>
+<code>Assets/Packed/Plateau/*.kmodel</code>は国土交通省 Project PLATEAU の
+「3D都市モデル 東京都23区」建築物LOD1のFBX配布を、3次メッシュ(約1km四方)のタイルごとに
+パックしたものです。<strong>1つのシーンに671個の<code>.kmodel</code>を並べた初めてのアセット</strong>で、
+これまで「1モデル＝1シーン」を前提にしていた箇所がいくつも表に出ました。
+取得から配布までは<code>Tools/import_plateau.ps1</code>が一括で行います。
+</p>
+<pre><code>KurenaiPacker.exe &lt;展開先&gt;/bldg/lod1/&lt;メッシュコード&gt;_bldg_6677.fbx \
+  -o Assets/Packed/Plateau/&lt;メッシュコード&gt;.kmodel --origin -8096,0,-36118</code></pre>
+
+<h4><code>--origin</code> ―― なぜ「自動で中心へ寄せる」ではないのか</h4>
+<p>
+PLATEAUの頂点はEPSG:6677(JGD2011 平面直角座標系 第9系)の<strong>絶対座標</strong>で、
+系原点から北へ最大52km離れています。頂点はfloat32であるうえ、<code>.kmodel</code>のAABBも
+そのまま巨大になり、シーンAABBの対角から自動決定される遠クリップ面
+(<code>farZ = max(100, 対角×4)</code>)が桁で狂います。
+</p>
+<p>
+そこで頂点位置とバウンズから一定の座標を引きますが、<strong>これを自動化してはいけません</strong>。
+タイルごとに「自分のAABBの中心」で寄せると、タイル同士の相対的な位置関係が壊れて街が崩れます。
+<strong>複数のモデルで同じ値を引く必要がある</strong>ため、<code>--recenter</code>のような自動ではなく
+<code>--origin &lt;X,Y,Z&gt;</code>の明示指定にしています。値は
+<code>Tools/plateau_mesh.py origin</code>が全タイルのメッシュコードから算出します
+(671タイルの中心 = 東 -8096m / 北 -36118m)。
+</p>
+<p>
+減算は<strong><code>--scale</code>を掛ける前</strong>に行います。こうすると呼び出し側は
+ソースの単位(PLATEAUなら平面直角座標のメートル値)のまま指定でき、地図と直接突き合わせられます。
+標高(Y)は引きません ―― T.P.(東京湾平均海面)基準の絶対標高で23区は概ね0〜60mと小さく、
+引くと地面が原点より下へ潜って扱いにくくなるためです。
+</p>
+
+<h4>軸の対応は画像ではなく座標の数値で確定させた</h4>
+<p>
+FBX自体はZ-up(<code>UpAxis=2</code>)で「FBX X = 東 / FBX Y = 北 / FBX Z = 標高」ですが、
+assimpがZ-up→Y-upへ変換し、さらに<code>aiProcess_ConvertToLeftHanded</code>が入るため、
+KurenaiPackerが扱う時点では<strong>「X = 東 / Y = 標高 / Z = 北」</strong>になります。
+</p>
+<p>
+<strong>街が鏡像になっていても一見して気づけません。</strong>そのため絵で判断せず、
+西新宿タイル(<code>53394525</code>)を<code>--inspect</code>した実測値
+</p>
+<pre><code>X -13218.99〜-12034.59   (期待した東 -13186〜-12055 と一致)
+Y      27.34〜  267.02   (T.P.標高。都庁の243mを含む)
+Z -35171.98〜-34122.55   (期待した北 -35192〜-34266 と一致)</code></pre>
+<p>
+を、メッシュコードから決定的に計算した期待範囲と<strong>符号ごと</strong>突き合わせて確定しました。
+検算は<code>Tools/plateau_mesh.py rect &lt;メッシュコード&gt;</code>で再現できます。
+</p>
+
+<h4>既知の制約</h4>
+<ul>
+<li><strong>LOD1にテクスチャは無い。</strong>マテリアルは<code>DefaultMaterial</code>1件のみで、
+埋め込みテクスチャは0。「航空レーザ測量の高さで押し出した箱」なので、灰色に見えるのが正しい状態。
+実写テクスチャは同じ配布物のLOD2にあるが、まだ取り込んでいない。</li>
+<li><strong><code>dem</code>(地形)と<code>tran</code>(道路)を入れていない。</strong>
+これらは6桁＝2次メッシュ(約10km四方)で、<code>bldg</code>の3次メッシュとは分割単位が違う。</li>
+<li><strong>スクリーンスペース系のパラメータが全て上限に張り付く。</strong>
+<code>ResetSceneDependentParams</code>がシーン対角に比例させているSSAO半径・SSR距離・
+RT反射距離・RTAO距離は、対角45kmではいずれもクランプの上限になる。
+数十km規模ではこれらは相対的に「点」であり、近景の質はEmerald Squareのシーンで見る、
+という役割分担にしている。</li>
+<li><strong><code>.kscene</code>は機械生成物。</strong>671個の<code>[Model]</code>を手で書けないため
+<code>Tools/plateau_scene.py</code>が出力する。先頭コメントに変換コマンドと判断の根拠が入る。</li>
+</ul>
 </section>
 
 <section id="lights">

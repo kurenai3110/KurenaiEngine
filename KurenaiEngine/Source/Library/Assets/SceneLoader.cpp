@@ -313,6 +313,8 @@ namespace Kurenai::Assets
             std::wstring SkyboxPath;
             bool HasIBLIntensity = false;
             float IBLIntensity = 1.0f;
+            bool HasShadowDistance = false;
+            float ShadowDistance = 0.0f;
             bool AOEnabled = true;
             bool HasSSREnabled = false;
             bool SSREnabled = true;
@@ -555,6 +557,19 @@ namespace Kurenai::Assets
                         if (!ParseFloatToken(value, result.IBLIntensity)) errorAt(lineNumber, rawLine, "IBLIntensityの値が不正です");
                         if (result.IBLIntensity < 0.0f) errorAt(lineNumber, rawLine, "IBLIntensityは0以上で指定してください");
                         result.HasIBLIntensity = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"ShadowDistance"))
+                    {
+                        if (!ParseFloatToken(value, result.ShadowDistance)) errorAt(lineNumber, rawLine, "ShadowDistanceの値が不正です");
+                        // 下限: 近クリップ面は最大でも0.1mなので、それを下回ると影が1枚も出ない。
+                        // 上限: シャドウマップ1枚(2048x2048)で覆って意味のある範囲を大きく超えると、
+                        // 打ち切る意味がなくなる(既定のfarZ側でどのみち制限される)。
+                        // どちらも打ち間違い(0や桁の取り違え)を弾くためのもの
+                        if (result.ShadowDistance < 1.0f || result.ShadowDistance > 100000.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "ShadowDistanceは1〜100000の範囲で指定してください");
+                        }
+                        result.HasShadowDistance = true;
                     }
                     else if (CaseInsensitiveEquals(key, L"AmbientOcclusion"))
                     {
@@ -1300,6 +1315,8 @@ namespace Kurenai::Assets
         scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;
+        scene.HasShadowDistance = parsed.HasShadowDistance;
+        scene.ShadowDistance = parsed.ShadowDistance;
 
         // [Scene]Skyboxは[Model]Pathと同じくAssetsルートからの相対パスとして扱い、
         // 同じルート外チェックを適用したうえで絶対パスへ解決してから返す
@@ -1414,7 +1431,9 @@ namespace Kurenai::Assets
             const std::wstring fullModelPath = assetRootDirectory + normalizedPath;
 
             ModelInstance instance;
-            instance.Model = LoadModel(device, fullModelPath);
+            // 1x1のフォールバックはシーン全体で1組を共有する(モデルごとに作ると
+            // 671モデルのシーンで2000個超の個別リソースになる。ModelLoader.hのコメント参照)
+            instance.Model = LoadModel(device, fullModelPath, &scene.SharedTextures);
             instance.IsWater = parsedModel.Water;
 
             using namespace DirectX;
@@ -1452,6 +1471,8 @@ namespace Kurenai::Assets
             // モデルのローカル空間AABB(8頂点)をWorldで変換し、シーン全体のAABBへ合成する。
             // 軸並行のまま変換前のmin/maxだけを使うと回転時に不正確になるため、必ず8頂点全てを変換する
             const Model& loadedModel = instance.Model;
+            // インスタンス自身のワールドAABBも同じループで求める(フラスタムカリング用)
+            bool instanceBoundsInitialized = false;
             for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
             {
                 const XMVECTOR corner = XMVectorSet(
@@ -1479,6 +1500,22 @@ namespace Kurenai::Assets
                     scene.BoundsMax[1] = std::max(scene.BoundsMax[1], transformedFloat3.y);
                     scene.BoundsMax[2] = std::max(scene.BoundsMax[2], transformedFloat3.z);
                 }
+
+                const float cornerXYZ[3] = { transformedFloat3.x, transformedFloat3.y, transformedFloat3.z };
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    if (!instanceBoundsInitialized)
+                    {
+                        instance.WorldBoundsMin[axis] = cornerXYZ[axis];
+                        instance.WorldBoundsMax[axis] = cornerXYZ[axis];
+                    }
+                    else
+                    {
+                        instance.WorldBoundsMin[axis] = std::min(instance.WorldBoundsMin[axis], cornerXYZ[axis]);
+                        instance.WorldBoundsMax[axis] = std::max(instance.WorldBoundsMax[axis], cornerXYZ[axis]);
+                    }
+                }
+                instanceBoundsInitialized = true;
             }
 
             // モデルファイル埋め込みのライト(glTFのKHR_lights_punctual・FBXのライトノード由来、

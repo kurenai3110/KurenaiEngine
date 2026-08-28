@@ -64,9 +64,12 @@ namespace Kurenai::Assets
         class TextureLoader
         {
         public:
-            TextureLoader(RHI::IRHIDevice& device, Model& model)
+            // sharedTextures が非nullなら、1x1のフォールバック(白/フラット法線/黒/マゼンタ)を
+            // そちらから借りる。nullならモデル自身が持つ(従来の挙動)
+            TextureLoader(RHI::IRHIDevice& device, Model& model, SharedTexturePool* sharedTextures)
                 : m_Device(device)
                 , m_Model(model)
+                , m_SharedTextures(sharedTextures)
             {
             }
 
@@ -185,25 +188,13 @@ namespace Kurenai::Assets
 
             RHI::IRHITexture* GetWhite()
             {
-                if (!m_White)
-                {
-                    auto texture = m_Device.CreateSolidColorTexture(255, 255, 255, 255);
-                    m_White = texture.get();
-                    m_Model.Textures.push_back(std::move(texture));
-                }
-                return m_White;
+                return Acquire(m_White, m_SharedTextures ? &m_SharedTextures->White : nullptr, 255, 255, 255, 255);
             }
 
             RHI::IRHITexture* GetFlatNormal()
             {
-                if (!m_FlatNormal)
-                {
-                    // タンジェント空間で(0,0,1)、すなわち「法線マップなし」を表す色
-                    auto texture = m_Device.CreateSolidColorTexture(128, 128, 255, 255);
-                    m_FlatNormal = texture.get();
-                    m_Model.Textures.push_back(std::move(texture));
-                }
-                return m_FlatNormal;
+                // タンジェント空間で(0,0,1)、すなわち「法線マップなし」を表す色
+                return Acquire(m_FlatNormal, m_SharedTextures ? &m_SharedTextures->FlatNormal : nullptr, 128, 128, 255, 255);
             }
 
             // bent normalを持たないマテリアルのフォールバック。
@@ -215,31 +206,53 @@ namespace Kurenai::Assets
             // 完全遮蔽(SO=0)と区別がつかなくなる(34章)
             RHI::IRHITexture* GetBlack()
             {
-                if (!m_Black)
-                {
-                    auto texture = m_Device.CreateSolidColorTexture(0, 0, 0, 0);
-                    m_Black = texture.get();
-                    m_Model.Textures.push_back(std::move(texture));
-                }
-                return m_Black;
+                return Acquire(m_Black, m_SharedTextures ? &m_SharedTextures->Black : nullptr, 0, 0, 0, 0);
             }
 
             // 読み込みに失敗したBaseColor/MetallicRoughnessテクスチャの代替。目立つ色にすることで
             // モデル全体の読み込みは継続しつつ問題箇所が分かるようにする
             RHI::IRHITexture* GetMagentaPlaceholder()
             {
-                if (!m_Magenta)
-                {
-                    auto texture = m_Device.CreateSolidColorTexture(255, 0, 255, 255);
-                    m_Magenta = texture.get();
-                    m_Model.Textures.push_back(std::move(texture));
-                }
-                return m_Magenta;
+                return Acquire(m_Magenta, m_SharedTextures ? &m_SharedTextures->Magenta : nullptr, 255, 0, 255, 255);
             }
 
         private:
+            // 1x1の定数テクスチャを1つ返す。共有プールがあればそこへ、無ければモデルへ所有させる。
+            //
+            // localCache はどちらの経路でも使う。共有プール経由でも、2回目以降にプールの
+            // メンバを読みに行くコストを省ける(1モデルあたり最大4スロット×メッシュ数だけ呼ばれる)
+            RHI::IRHITexture* Acquire(
+                RHI::IRHITexture*& localCache,
+                RHI::IRHITexture** sharedSlot,
+                uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+            {
+                if (localCache)
+                {
+                    return localCache;
+                }
+
+                if (sharedSlot)
+                {
+                    if (!*sharedSlot)
+                    {
+                        auto texture = m_Device.CreateSolidColorTexture(r, g, b, a);
+                        *sharedSlot = texture.get();
+                        m_SharedTextures->Owned.push_back(std::move(texture));
+                    }
+                    localCache = *sharedSlot;
+                    return localCache;
+                }
+
+                auto texture = m_Device.CreateSolidColorTexture(r, g, b, a);
+                localCache = texture.get();
+                m_Model.Textures.push_back(std::move(texture));
+                return localCache;
+            }
+
             RHI::IRHIDevice& m_Device;
             Model& m_Model;
+            // 非nullなら1x1のフォールバックをここから借りる(所有もこちら)
+            SharedTexturePool* m_SharedTextures = nullptr;
             RHI::IRHITexture* m_White = nullptr;
             RHI::IRHITexture* m_FlatNormal = nullptr;
             RHI::IRHITexture* m_Black = nullptr;
@@ -278,7 +291,7 @@ namespace Kurenai::Assets
         }
     }
 
-    Model LoadModel(RHI::IRHIDevice& device, const std::wstring& filePath)
+    Model LoadModel(RHI::IRHIDevice& device, const std::wstring& filePath, SharedTexturePool* sharedTextures)
     {
         const auto startTime = std::chrono::steady_clock::now();
         const std::wstring directory = GetDirectory(filePath);
@@ -453,7 +466,7 @@ namespace Kurenai::Assets
         model.BoundsMax[1] = header.BoundsMax[1];
         model.BoundsMax[2] = header.BoundsMax[2];
 
-        TextureLoader textureLoader(device, model);
+        TextureLoader textureLoader(device, model, sharedTextures);
         std::vector<RHI::IRHITexture*> resolvedTextures;
         textureLoader.LoadAll(texturePaths, resolvedTextures);
 

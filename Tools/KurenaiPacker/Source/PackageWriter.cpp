@@ -140,6 +140,57 @@ namespace KurenaiPacker
             return outPath;
         }
 
+        // ブロック圧縮(BC1〜BC7)は4x4ピクセルを1ブロックとして符号化するため、幅または高さが
+        // 4未満のテクスチャはD3D11/DX12のシェーダリソースビュー作成がE_INVALIDARGで失敗する。
+        //
+        // 【なぜパック時に弾くのか】配布アセットには「法線マップ無し」を表す1x1のダミーが
+        // ブロック圧縮のまま置かれていることがある(NVIDIA Emerald Squareの法線マップ115枚中
+        // 6枚が1x1のATI2)。これをそのまま.ktexにすると、.kmodelは正常なテクスチャとして
+        // 参照し続け、実行のたびにModelLoaderがGPU転送に失敗してエラーログを出す。
+        // パックの時点で分かることを実行時のエラーに先送りしない
+        bool IsUnsupportedBlockCompressed(const DirectX::TexMetadata& metadata)
+        {
+            return DirectX::IsCompressed(metadata.format) && (metadata.width < 4 || metadata.height < 4);
+        }
+
+        // 既存の.ktexの中身が上記の条件に当たるかを、DDSペイロードのメタデータから判定する。
+        // 判定できない場合(読めない・壊れている)はfalseを返す ―― ここは「使えないものを
+        // 見つける」ための検査であり、読めないことを理由に既存の正常なテクスチャを
+        // 捨ててはいけない
+        bool ExistingKtexIsUnsupported(const fs::path& ktexPath)
+        {
+            std::ifstream file(ktexPath, std::ios::binary);
+            if (!file)
+            {
+                return false;
+            }
+
+            Kurenai::Assets::PackedTextureHeader header{};
+            file.read(reinterpret_cast<char*>(&header), sizeof(header));
+            if (!file || std::memcmp(header.Magic, Kurenai::Assets::kPackedTextureMagic, sizeof(header.Magic)) != 0)
+            {
+                return false;
+            }
+
+            // DDSヘッダだけ読めれば足りる(DXT10拡張ヘッダを含めても148バイト)
+            constexpr size_t kDdsHeaderProbeBytes = 256;
+            const size_t probeSize = static_cast<size_t>(
+                std::min<uint64_t>(header.PayloadSize, kDdsHeaderProbeBytes));
+            std::vector<uint8_t> probe(probeSize);
+            file.read(reinterpret_cast<char*>(probe.data()), static_cast<std::streamsize>(probeSize));
+            if (!file)
+            {
+                return false;
+            }
+
+            DirectX::TexMetadata metadata{};
+            if (FAILED(DirectX::GetMetadataFromDDSMemory(probe.data(), probe.size(), DirectX::DDS_FLAGS_NONE, metadata)))
+            {
+                return false;
+            }
+            return IsUnsupportedBlockCompressed(metadata);
+        }
+
         // 頂点/インデックスブロックの境界を16バイトへ切り上げる
         uint64_t AlignUp(uint64_t value, uint64_t alignment)
         {
@@ -228,6 +279,17 @@ namespace KurenaiPacker
         {
             if (!options.Force && fs::exists(requests[i].OutputKtexPath))
             {
+                // 既存を再利用する場合も、中身がGPUで扱えない寸法でないかは確かめる。
+                // --forceを付けたときにしか検査しない作りにすると、一度生成してしまった
+                // 不正な.ktexを.kmodelが参照し続け、実行のたびに転送失敗が出る
+                if (ExistingKtexIsUnsupported(requests[i].OutputKtexPath))
+                {
+                    requests[i].Failed = true;
+                    ++result.TextureFailed;
+                    std::cerr << "[KurenaiPacker][Warning] 既存の.ktexがブロック圧縮で4x4未満のため参照しません(フォールバックします): "
+                        << WideToUtf8(requests[i].SourcePath) << "\n";
+                    continue;
+                }
                 ++result.TextureSkippedExisting;
                 continue;
             }
@@ -267,6 +329,16 @@ namespace KurenaiPacker
                     try
                     {
                         Kurenai::RHI::TextureImage image = Kurenai::RHI::TextureImage::LoadFromFile(request.SourcePath, request.SRGB);
+
+                        // ブロック圧縮で4x4に満たないものは、.ktexにしてもGPUが受け付けない。
+                        // ここで例外にして、下のcatchで「フォールバックする」経路へ流す
+                        const DirectX::TexMetadata& metadata = image.GetImage().GetMetadata();
+                        if (IsUnsupportedBlockCompressed(metadata))
+                        {
+                            throw std::runtime_error(
+                                "ブロック圧縮テクスチャの寸法が4x4未満のためGPUが扱えません("
+                                + std::to_string(metadata.width) + "x" + std::to_string(metadata.height) + ")");
+                        }
 
                         DirectX::Blob blob;
                         const HRESULT hr = DirectX::SaveToDDSMemory(
@@ -320,7 +392,8 @@ namespace KurenaiPacker
             }
 
             result.TextureGenerated = generatedCount.load();
-            result.TextureFailed = failedCount.load();
+            // 既存.ktexの検査(上のループ)で数えた分に足し込む。代入にすると消える
+            result.TextureFailed += failedCount.load();
         }
 
         // === 3. TextureEntryを確定させる(失敗したものは除外し、-1として扱う) ===

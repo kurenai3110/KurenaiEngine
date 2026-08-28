@@ -71,8 +71,15 @@ namespace Kurenai::RHI
         constexpr uint32_t kMaxSrvTableBlocksPerFrame = 4096;
         // 定数バッファ(Usage==Constant)がリングとして持つスロット数。CPUがGPU完了を待たずに次フレームを
         // 記録し始めるため、直近kFrameCountフレームぶんのUpdateBuffer回数(メッシュ数など)を
-        // 十分上回る値にしておく
-        constexpr uint32_t kConstantBufferRingCapacity = 8192;
+        // 十分上回る値にしておく。
+        //
+        // 【8192から32768へ引き上げた理由】1フレームに安全に書ける回数はこの値÷kFrameCountで、
+        // 8192では4096回だった。多数の.kmodelを並べるシーン(PLATEAUの東京23区LOD1は671モデル)では
+        // G-Buffer 671 + シャドウ4カスケード×671 = 3355回、深度プリパスが走る構成だと4026回に達し、
+        // 余裕が1.7%しか残らない。**超過しても例外は投げずログを1回出して続行する**ため、
+        // 気づかないまま描画結果が壊れる(DX12Buffer.hのコメント参照)。
+        // 1スロット256バイトなので、32768段でもUPLOADヒープの消費は8MB。
+        constexpr uint32_t kConstantBufferRingCapacity = 32768;
 
         // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t16, u0〜u3)。
         // SRVが17必要なのはレイトレーシングのパス(RT反射)で、TLAS + G-Buffer(Albedo/Normal/Material/Depth) +
@@ -188,12 +195,21 @@ namespace Kurenai::RHI
         // メッシュごとのジオメトリバッファが効く。メッシュ数は約400で、1メッシュあたり
         // 頂点1 + メッシュレット3 + インデックス1 = 5本(ShaderReadableな頂点/インデックスは
         // メッシュシェーダーとソフトウェアラスタライザのどちらかが使える環境でのみ作られる)。
-        // 合計で 182 + 400×5 + 6 ≒ 2188 になるため4096まで引き上げてある。
+        // 合計で 182 + 400×5 + 6 ≒ 2188 だった。
         // シーン切り替え時は旧シーンを先に破棄してから新シーンを読むため二重確保は起きない。
+        //
+        // 【4096から16384へ引き上げた理由】上の見積もりは「1モデルに数百メッシュ」という
+        // 構成しか想定していない。多数の.kmodelを[Model]として並べるシーン(PLATEAUの
+        // 東京23区LOD1は671タイル=671モデル)では、モデルごとに1x1のプレースホルダ3枚が
+        // 加わるため 671×(3+2+3) = 5368 となり、約512モデル目でthrowしていた。
+        // プレースホルダをデバイス単位で共有するようにしたので実際の消費は
+        // 671×5 + 3 = 3358 まで下がるが、モデル数が増える方向に余裕を持たせておく。
+        // 非シェーダー可視ヒープなのでCPUメモリしか消費せず(16384エントリで約512KB)、
+        // 引き上げの副作用は小さい。
         // レンダー側: レンダーターゲットのSRV/UAVに加え、Hi-Zとブルームのミップ別UAV、
         // IBL・反射プローブのキューブマップ(プローブ数×6面×ミップ数のUAV)が効く。
         // どちらも非シェーダー可視ヒープでCPUメモリのみを消費するため、余裕を持った値にしておく
-        constexpr uint32_t kAssetSrvCpuHeapCapacity = 4096;
+        constexpr uint32_t kAssetSrvCpuHeapCapacity = 16384;
         constexpr uint32_t kRenderSrvCpuHeapCapacity = 2048;
 
         DXGI_FORMAT ToDXGIFormat(Format format)

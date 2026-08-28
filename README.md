@@ -219,6 +219,16 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 - `.obj`/`.mtl`も入力に使えます。OBJ形式は単位情報を持たないため、センチメートル単位で作成された
   アセットはそのままだと100倍の大きさになります。その場合は`--scale <係数>`で補正してください
   (例: Amazon Lumberyard Bistroの`.obj`配布は`--scale 0.01`)
+- `--origin <X,Y,Z>` で、頂点位置とバウンズからその座標を引きます(`--scale`を掛ける**前**に
+  引くので、ソースの単位のまま指定できます)。**地理座標系のように原点が遠く離れた絶対座標で
+  作られたモデル**を原点付近へ寄せるためのものです(Project PLATEAUのFBXは平面直角座標系の
+  絶対値で、系原点から数十km離れています)。頂点はfloat32であるうえ、`.kmodel`のAABBもそのまま
+  巨大になり、シーンAABBの対角から自動決定される遠クリップ面(`farZ = max(100, 対角×4)`)が
+  桁で狂います。
+
+  > **複数のモデルを並べるなら、全部に同じ値を指定してください。** タイルごとに
+  > 「自分のAABBの中心」で寄せると、タイル同士の相対的な位置関係が壊れて街が崩れます。
+  > 自動で中心化せず明示指定にしているのはこのためです
 - マテリアルから取り込むテクスチャは**ベースカラー・法線・メタリック/ラフネス・自発光・遮蔽マップ**の
   5枚です。遮蔽マップ(ベイク済みアンビエントオクルージョン)はglTFの`occlusionTexture`(強度
   `strength`も反映)と、`AMBIENT_OCCLUSION`スロットを持つ形式から取り込みます。持たないマテリアルは
@@ -283,6 +293,33 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 - `--metallic <V>` / `--roughness <V>` / `--base-color <R,G,B>` で、全マテリアルのPBR係数を
   上書きできます。マテリアルを持たない生の`.obj`(3Dスキャンの配布物など)へ検証用の
   マテリアルを与えるためのものです
+- `--alpha-cutout <マテリアル名>=<しきい値>` で、指定した名前のマテリアルをアルファカットアウトに
+  します(ベースカラーのアルファがしきい値未満の画素を捨てます)。複数指定できます。
+  **glTF以外の形式で葉や草を正しく描くにはこれが要ります** — アルファモード(OPAQUE/MASK/BLEND)は
+  glTFにしかない情報で、FBX/OBJでは「アルファで抜く前提のマテリアル」を解析だけでは判別できず、
+  指定しないと不透明な板として描かれます
+- `--specular-as-orm` を付けると、`aiTextureType_SPECULAR`のテクスチャをメタリック/ラフネスと
+  遮蔽マップとして読みます。**SpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を
+  格納する規約のFBX向け**です(NVIDIA Emerald Squareがこれ)。チャンネルの割り当てがglTFの
+  metallicRoughnessと一致するため、テクスチャの加工は要りません。
+  ただし**SpecularColorが本来の鏡面反射色であるアセットに指定すると全面が金属になります**。
+  そのため既定では無効で、指定したときだけ有効になります
+- `--inspect` を付けると、**パッケージを書き出さずに**assimpが読んだ直後のシーン構造を印字して
+  終わります(`-o`は不要)。単位系(FBXの`UnitScaleFactor`)・上方向軸・ルート変換行列・ノード数・
+  スケール適用後のバウンズ・マテリアルごとのテクスチャスロット・埋め込みテクスチャの一覧が出ます。
+  **外部から持ち込んだモデルの`--scale`を決めるとき、テクスチャがどのスロットへ入ったかを
+  確かめるとき**に使います。パッカーが読まないスロットには`[パッカー未使用]`が付きます
+
+  ```
+  Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+    ThirdParty\SourceModels\EmeraldSquare_v4_1\EmeraldSquare_Day.fbx --inspect
+  ```
+
+- テクスチャが**ブロック圧縮(BC1〜BC7)で幅か高さが4未満**の場合は、警告を出してそのスロットを
+  フォールバック(白1x1/フラット法線)として扱います。ブロック圧縮は4x4ピクセル単位で符号化される
+  ため、1x1などはGPUのシェーダリソースビュー作成が失敗します。配布アセットには「法線マップ無し」を
+  表す1x1のダミーが圧縮形式のまま置かれていることがあり(Emerald Squareの法線マップ115枚中6枚)、
+  パックの時点で弾かないと実行のたびに転送失敗のエラーが出ます
 
 > **`.kmodel`の形式が v9、`.kgeom`が v3 になりました。** v6でライトマップUVを頂点へ追加し、
 > v7でbent normalのテクスチャ参照をメッシュへ追加し、v8でbent normalの格納空間を
@@ -292,6 +329,83 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 > 不一致で読み込みを拒否されるため、既存の`Assets\Packed\`はKurenaiPacker.exeで
 > **再パックが必要**です
 > (テクスチャの`.ktex`はそのまま流用されるため、`--force`を付けなければ短時間で終わります)。
+
+#### 現代の街並みの確認用シーン(NVIDIA Emerald Square)
+
+商業街区4ブロック(約230m四方)の屋外シーンです。中低層のビルとストリートファニチャ、
+SpeedTreeの植生、バス、高さ108mの展望塔が入ります。**取得から配布までは
+`Tools\import_emerald_square.ps1`が一括で行います**(既にあるものは飛ばすので何度実行しても構いません):
+
+```
+Tools\import_emerald_square.ps1
+Samples\Sample3D\Build\Bin\x64\Release\Sample3D.exe -scene EmeraldSquare
+```
+
+手で行う場合は、ZIPを`ThirdParty\SourceModels\`へ展開してから次を実行します
+(カットアウト対象は`.DoubleSided`で終わる29マテリアル。一覧はスクリプト内にあります):
+
+```
+curl -L -o EmeraldSquare_v4_1.zip https://developer.nvidia.com/emerald-square
+Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+  ThirdParty\SourceModels\EmeraldSquare_v4_1\EmeraldSquare_Day.fbx ^
+  -o Assets\Packed\EmeraldSquare\Day.kmodel ^
+  --specular-as-orm --alpha-cutout "Grass_blades.DoubleSided=0.5" (...29件)
+Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+  --scene Scenes\EmeraldSquare.kscene -o Assets\Packed\Scenes\EmeraldSquare.kscene
+```
+
+- **`--scale`は要りません。** このFBXは`UnitScaleFactor=100`と宣言していますが、assimpが読んだ
+  直後のルート変換行列は単位行列で、頂点はそのままメートルです(`--inspect`で確認できます:
+  バウンズ230.1×113.2×230.2m、展望塔の高さ108.25m)。`--scale 0.01`を付けると1/100になります
+- **`--specular-as-orm`が要ります。** ORMがFBXのSpecularColorスロットに入っているため、
+  既定の解決では220マテリアル全部が1枚も拾えません(テクスチャ要求が225枚→336枚に変わります)
+- **`--alpha-cutout`が要ります。** 付けないと葉や草が不透明な板として描かれます
+- ダウンロードURLは302で署名付きURLへ飛びます。トークンは短時間で失効するので、直リンクを
+  控えず必ず`/emerald-square`からリダイレクトを辿ってください(認証は不要です)
+- 法線マップ3枚(`Painted_Metal` / `Emissive_Light_2` / `Emissive_Light_Inst`)は1x1のブロック圧縮
+  なのでフォールバックされ、パック時に警告が出ます。配布物側の作りで、絵への影響は軽微です
+
+> **ライセンス: CC BY-NC-SA 3.0 Unported(非商用のみ・継承あり)。**
+> 出典: NVIDIA ORCA - NVIDIA Emerald Square v4.1 / Nicholas Hull, Kate Anderson, Nir Benty (2017)
+> <https://developer.nvidia.com/orca/nvidia-emerald-square> 。植生はSpeedTreeのORCAアセットです。
+> 商用利用が必要な場合はこのアセットを使えません。
+
+#### 大規模な都市の確認用シーン(Project PLATEAU 東京都23区)
+
+東京23区全域の建築物です。3次メッシュ(約1km四方)ごとの`.kmodel`を**671個**並べた
+約33km四方のシーンで、`.kmodel`を多数並べたときの読み込みとカリングの確認に使います。
+**取得から配布までは`Tools\import_plateau.ps1`が一括で行います**
+(既にあるものは飛ばすので何度実行しても構いません):
+
+```
+Tools\import_plateau.ps1
+Samples\Sample3D\Build\Bin\x64\Release\Sample3D.exe -scene PlateauTokyo23ku
+```
+
+スクリプトは ダウンロード(約2.99GB) → `bldg/lod1`の展開(671ファイル) → 共通原点の算出 →
+671タイルのパック → `.kscene`の生成と配置 → 出力フォルダへの配布 を順に行います。
+`.kscene`は`Tools\plateau_scene.py`が機械生成します(671個の`[Model]`を手で書けないため)。
+
+- **`--origin`が要ります。** このFBXはEPSG:6677(JGD2011 平面直角座標系 第9系)の絶対座標で、
+  系原点から北へ最大52km離れています。**全タイルで同じ値**(`-8096,0,-36118`)を引きます。
+  値は`Tools\plateau_mesh.py origin`が全タイルのメッシュコードから算出します
+- **`--scale`は要りません。** `UnitScaleFactor=1`でそのままメートルです
+- **軸は実測で確定させました。** FBXはZ-upで「X=東 / Y=北 / Z=標高」ですが、assimpがZ-up→Y-upへ
+  変換し`aiProcess_ConvertToLeftHanded`も入るため、パッカーが扱う時点では
+  **「X=東 / Y=標高 / Z=北」**になります。西新宿タイル(`53394525`)を`--inspect`した実測値
+  `X -13218.99〜-12034.59 / Y 27.34〜267.02 / Z -35171.98〜-34122.55`が、メッシュコードから
+  計算した期待範囲と符号ごと一致することを確認しています。**街が鏡像になっていても一見
+  気づけない**ため、画像ではなく座標の数値で突き合わせています
+- **`[Scene] ShadowDistance = 500`を指定しています。** このシーンの`farZ`は180kmで、
+  指定しないと第1カスケードが数kmを2048²の1枚で覆うことになり、近景の影が事実上消えます
+- LOD1の建築物は「航空レーザ測量の高さで押し出した箱」で、**マテリアルは`DefaultMaterial`
+  1件のみ・テクスチャは0枚**です。灰色に見えるのが正しい状態です
+  (実写テクスチャは同じ配布物のLOD2にありますが、こちらはまだ取り込んでいません)
+
+> **ライセンス: 公共データ利用規約(PDL1.0) / CC BY 4.0 互換。商用利用可・要出典表示。**
+> 出典: 国土交通省 Project PLATEAU「3D都市モデル(Project PLATEAU)東京都23区」
+> <https://www.geospatial.jp/ckan/dataset/plateau-tokyo23ku> 。
+> 著作権は各地方公共団体に帰属します。
 
 #### メッシュレット / bindless / レイトレーシングの確認用シーン(ドラゴン)
 
@@ -342,6 +456,20 @@ Path = BistroMcGuire/Exterior.kmodel
 Position = 21.5, 16.0, -53.5
 Yaw = 0.0
 ```
+
+`[Scene]`に`ShadowDistance`を書くと、**カスケードシャドウの分割範囲をその距離で打ち切れます**
+(単位はメートル、1〜100000)。影の遠クリップだけが手前になり、シーンの描画距離は変わりません。
+
+```ini
+[Scene]
+Name = 広いシーン
+ShadowDistance = 500
+```
+
+遠クリップ面はシーンの大きさから自動で決まるため(`farZ = max(100, AABBの対角×4)`)、
+数十km規模のシーンでは`farZ`が100km級になり、**第1カスケードが数kmを2048x2048の1枚で覆うことに
+なって近景の影が消えます**。これを避けるためのものです。**書かなければ従来どおりの挙動**なので、
+既存のシーンの見え方は変わりません。
 
 `[ReflectionProbe]`セクションを書くと、その位置から周囲をキャプチャした環境マップ(反射プローブ)を
 配置できます。屋内など、シーン全体で共通のスカイボックス由来の環境光では空が映り込んでしまう場所で、
@@ -766,6 +894,11 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
 - `Assets/Source/Sponza/` — [glTF-Sample-Models](https://github.com/KhronosGroup/glTF-Sample-Models) のSponzaモデル(glTF形式)
 - `Assets/Source/BistroMcGuire/` — [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)のMorgan McGuire版OBJ配布([awesome-3d-meshes](https://github.com/Graphify-Labs/awesome-3d-meshes)経由、`ThirdParty/SourceModels/`内の7z/zipアーカイブを展開したもの)。
   KurenaiPacker内蔵のassimp OBJインポータで直接パックする(`--scale 0.01`が必要)。詳細・展開手順は[実装者向けドキュメント](docs/Architecture.html)11章を参照
+- `ThirdParty/SourceModels/EmeraldSquare_v4_1/` — [NVIDIA Emerald Square](https://developer.nvidia.com/orca/nvidia-emerald-square)(ORCA)。
+  商業街区4ブロックの屋外シーン。**このアセットだけは`Assets/Source/`を経由せず、展開先から直接
+  パックします**(配布物がFBX+外部DDSで完結しており、中間形式へ変換する必要がないため)。
+  `Tools/import_emerald_square.ps1`が取得から配布まで行います。
+  **ライセンスはCC BY-NC-SA 3.0 Unported(非商用のみ)** で、他のアセットと条件が違う点に注意してください
 - `Assets/Source/FurnaceTest/` — White Furnace Test用の金属球列(`metallic=1.0`、粗さ0.0〜1.0の11個)。
   一様な放射輝度のキューブマップ(`Assets/Packed/Skybox/UniformWhite.dds`)と合わせて
   `Tools/generate_furnace_test.py` で再生成できる

@@ -24,6 +24,86 @@ namespace Kurenai
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
 
+        // ビュー射影行列から取り出した視錐台の6平面(左/右/下/上/手前/奥)。
+        // 各要素は平面の方程式 dot(n, p) + d の (n.xyz, d)
+        struct FrustumPlanes
+        {
+            DirectX::XMFLOAT4 Planes[6];
+        };
+
+        // ビュー射影行列から視錐台の6平面を取り出す(Gribb-Hartmann)。
+        //
+        // 【必ず「列」から組み立てる】クリップ座標は c = v * M(行ベクトル×行列)なので、
+        // c.x は v と M の列0 の内積、c.w は列3 との内積になる。したがって
+        // 「c.x + c.w >= 0」という左平面の条件は、列0 + 列3 という平面になる。
+        // XMFLOAT4X4 は行優先なので、列0 は (_11, _21, _31, _41) である。
+        //
+        // 【行と取り違えると、真下を向いたときに全部カリングされる】
+        // 実際に一度間違えた。転置した行列の平面になるため、正面付近では
+        // それらしい結果が出てカメラを振れば間引き数も動く ―― 対照実験を通ってしまう。
+        // ほぼ真下(Pitch -85)を向けて「真下のモデルが間引かれないこと」を見て初めて
+        // 100%間引かれていることが分かった。
+        //
+        // HLSL側(GBufferMeshlet.hlsl の IsSphereInFrustum)も同じ平面を作っている。
+        // 向こうが受け取る ViewProj は C++ から転置して渡したもので、HLSLのメモリ
+        // レイアウト(列優先)と合わさって論理的には同じ行列になるため、
+        // 「_m00,_m10,_m20,_m30 で列0を取る」という同じ形になっている。
+        //
+        // 【Reverse-Zでもこのままでよい】近平面と遠平面の意味は入れ替わるが、
+        // 0 <= z <= w という条件自体は変わらないため式は同じ(HLSL側と同じ理由)。
+        //
+        // 【正規化しない】球との比較では半径と尺度を合わせる必要があるため向こうは正規化するが、
+        // ここが判定するのはAABBで、見るのは符号だけなので不要
+        FrustumPlanes ExtractFrustumPlanes(DirectX::FXMMATRIX viewProj)
+        {
+            using namespace DirectX;
+
+            XMFLOAT4X4 m;
+            XMStoreFloat4x4(&m, viewProj);
+
+            const XMFLOAT4 col0(m._11, m._21, m._31, m._41);
+            const XMFLOAT4 col1(m._12, m._22, m._32, m._42);
+            const XMFLOAT4 col2(m._13, m._23, m._33, m._43);
+            const XMFLOAT4 col3(m._14, m._24, m._34, m._44);
+
+            const auto add = [](const XMFLOAT4& a, const XMFLOAT4& b) {
+                return XMFLOAT4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
+            };
+            const auto sub = [](const XMFLOAT4& a, const XMFLOAT4& b) {
+                return XMFLOAT4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
+            };
+
+            FrustumPlanes frustum;
+            frustum.Planes[0] = add(col3, col0); // 左   (x >= -w)
+            frustum.Planes[1] = sub(col3, col0); // 右   (x <=  w)
+            frustum.Planes[2] = add(col3, col1); // 下   (y >= -w)
+            frustum.Planes[3] = sub(col3, col1); // 上   (y <=  w)
+            frustum.Planes[4] = col2;            // 手前 (z >=  0)
+            frustum.Planes[5] = sub(col3, col2); // 奥   (z <=  w)
+            return frustum;
+        }
+
+        // ワールド空間の軸並行バウンディングボックスが視錐台と交わるか。
+        // 「完全に外」と確定できたときだけfalseを返す保守的な判定(偽陽性は出るが偽陰性は出ない)。
+        //
+        // 各平面について、平面の法線方向へ最も進んだ頂点(p-vertex)だけを見る。
+        // それが平面の裏側にあるなら、AABBの8頂点すべてが裏側にあることになる
+        bool IsAABBVisible(const FrustumPlanes& frustum, const float (&boundsMin)[3], const float (&boundsMax)[3])
+        {
+            for (const DirectX::XMFLOAT4& plane : frustum.Planes)
+            {
+                const float px = (plane.x >= 0.0f) ? boundsMax[0] : boundsMin[0];
+                const float py = (plane.y >= 0.0f) ? boundsMax[1] : boundsMin[1];
+                const float pz = (plane.z >= 0.0f) ? boundsMax[2] : boundsMin[2];
+
+                if (plane.x * px + plane.y * py + plane.z * pz + plane.w < 0.0f)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         // 濁り(タービディティ)からMie(エアロゾル)密度の倍率を求める。
         //
         // 【Preethamの定義をそのまま持ち込んではいけない】Preethamのタービディティは
@@ -3328,8 +3408,17 @@ namespace Kurenai
         uint32_t firstTriangle = 0;
         bool overflowed = false;
 
+        const FrustumPlanes swRasterFrustum = ExtractFrustumPlanes(viewProj);
+
         for (const auto& instance : m_Scene.Instances)
         {
+            ++m_FrustumCullTested;
+            if (!IsAABBVisible(swRasterFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+            {
+                ++m_FrustumCullCulled;
+                continue;
+            }
+
             for (const auto& mesh : instance.Model.Meshes)
             {
                 // 半透明(alphaMode=BLEND)はハードウェア側でもG-Bufferに描かれないため揃える
@@ -3391,6 +3480,13 @@ namespace Kurenai
 
         if (meshInfos.empty())
         {
+            // 描くものが1つも無くても、visibility bufferは必ずクリアしてから戻る。
+            //
+            // 【クリアせずに戻ってはいけない】このバッファは散布書き込みで、三角形が当たらなかった
+            // 画素には前フレームの値が残る(下の「0. クリア」のコメント参照)。カリングで全インスタンスが
+            // 落ちたフレームだけ前フレームの絵が焼き付いて残る、という形で出る
+            cmd->ClearUnorderedAccessBufferUint(m_SoftwareRasterVisibilityBuffer.get(), 0);
+            cmd->ClearUnorderedAccessBufferUint(m_SoftwareRasterIndirectArgsBuffer.get(), 0);
             return;
         }
 
@@ -4854,7 +4950,15 @@ namespace Kurenai
     void KurenaiEngine3D::ComputeCascadeSplits(const Core::Camera& camera, float (&outSplits)[kCascadeCount]) const
     {
         const float nearZ = camera.GetNearZ();
-        const float farZ = camera.GetFarZ();
+        // [Scene]ShadowDistanceが指定されていれば、そこでカスケードの分割範囲を打ち切る。
+        //
+        // 【なぜ必要か】遠クリップ面はシーンAABBの対角から自動で決まる(farZ = max(100, 対角×4))。
+        // 数十km規模のシーンではfarZが100km級になり、分割範囲がそのまま伸びるため
+        // 第1カスケードが数kmを2048x2048の1枚で覆うことになって近景の影が消える。
+        // 【未指定なら従来どおり】書かなかったシーンの見え方は1ピクセルも変えない
+        const float farZ = m_Scene.HasShadowDistance
+            ? (std::min)(camera.GetFarZ(), m_Scene.ShadowDistance)
+            : camera.GetFarZ();
         const float lambda = 0.75f;
 
         for (uint32_t i = 0; i < kCascadeCount; ++i)
@@ -5260,6 +5364,8 @@ namespace Kurenai
         m_FrameStatsGPUTimeSumMs += m_GPUProfiler ? m_GPUProfiler->GetTotalFrameTimeMs() : 0.0f;
         m_FrameStatsGPUWaitSumMs += m_Device->GetLastFrameGPUWaitTimeMs();
         m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
+        m_FrameStatsCullTestedSum += m_FrustumCullTested;
+        m_FrameStatsCullCulledSum += m_FrustumCullCulled;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -5353,11 +5459,30 @@ namespace Kurenai
             }
         }
 
+        // フラスタムカリングの効き。「間引いた数が0」は、判定式が常に通しているのか
+        // 本当に全部が視界内なのかを区別できないため、テストした数と併せて出す
+        if (m_FrameStatsCullTestedSum > 0 && m_FrameStatsFrameCount > 0)
+        {
+            const double testedPerFrame = static_cast<double>(m_FrameStatsCullTestedSum) / m_FrameStatsFrameCount;
+            const double culledPerFrame = static_cast<double>(m_FrameStatsCullCulledSum) / m_FrameStatsFrameCount;
+            const double ratio = 100.0 * static_cast<double>(m_FrameStatsCullCulledSum)
+                / static_cast<double>(m_FrameStatsCullTestedSum);
+
+            char cullText[192];
+            std::snprintf(
+                cullText, sizeof(cullText),
+                "  フラスタムカリング: 判定 %.1f / 間引き %.1f (%.1f%%) [1フレームあたり・全パス合計]",
+                testedPerFrame, culledPerFrame, ratio);
+            Core::Logger::Info("Perf", cullText);
+        }
+
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
         m_FrameStatsGPUTimeSumMs = 0.0;
         m_FrameStatsGPUWaitSumMs = 0.0;
         m_FrameStatsWorstFrameTimeMs = 0.0f;
+        m_FrameStatsCullTestedSum = 0;
+        m_FrameStatsCullCulledSum = 0;
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
@@ -5530,6 +5655,10 @@ namespace Kurenai
 
     void KurenaiEngine3D::Render(const FrameState& frameState)
     {
+        // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる
+        m_FrustumCullTested = 0;
+        m_FrustumCullCulled = 0;
+
         // WM_SIZE(Updateスレッド)が記録しておいたリサイズ要求を、スワップチェーンを実際に使う
         // このスレッドで反映する。このフレームのGPUコマンドをまだ1つも積んでいないこの位置で
         // 呼ぶこと(DX12SwapChain::Resizeは内部でWaitForGPUIdleを呼び、コマンドリストが
@@ -6839,8 +6968,19 @@ namespace Kurenai
                             currentPipelineState = wanted;
                         };
 
+                        // このカスケードのライト正射影に対して視錐台カリングする。
+                        // カメラではなくライト側の錐台なので、画面外でも影を落とすものは残る
+                        const FrustumPlanes cascadeFrustum = ExtractFrustumPlanes(cascadeViewProj[cascade]);
+
                         for (const auto& instance : m_Scene.Instances)
                         {
+                            ++m_FrustumCullTested;
+                            if (!IsAABBVisible(cascadeFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                            {
+                                ++m_FrustumCullCulled;
+                                continue;
+                            }
+
                             for (const auto& mesh : instance.Model.Meshes)
                             {
                                 bindPipelineState(instance.IsMirrored);
@@ -6927,8 +7067,19 @@ namespace Kurenai
             cmd->SetTexture(12, m_DDGIIrradianceAtlas.get());
             cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
 
+            // このキューブ面の錐台で間引く。6面それぞれで判定するので、どこかの面には入る
+            // モデルが全部消えることはない
+            const FrustumPlanes faceFrustum = ExtractFrustumPlanes(faceViewProj);
+
             for (const auto& instance : m_Scene.Instances)
             {
+                ++m_FrustumCullTested;
+                if (!IsAABBVisible(faceFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                {
+                    ++m_FrustumCullCulled;
+                    continue;
+                }
+
                 for (const auto& mesh : instance.Model.Meshes)
                 {
                     // 半透明メッシュはプローブへ焼かない。ProbeCapture.hlslは不透明として描くため、
@@ -7253,6 +7404,12 @@ namespace Kurenai
             cmd->SetTexture(12, m_DDGIIrradianceAtlas.get());
             cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
 
+            // 【ここにはフラスタムカリングを入れない】このループのドロー数は
+            // ClampDDGIProbesPerFrameToConstantRingが「同じ条件で数えること」を前提に
+            // 定数バッファリングの予算を決めている(同関数のコメント)。カリングは
+            // プローブの位置ごとに結果が変わるため、予算計算と食い違う。
+            // 定数バッファの予算超過は例外ではなくログ1行で続行し、描画が静かに壊れる
+            // (DX12Buffer.h)ため、整合が取れるまでは入れないほうが安全
             for (const auto& instance : m_Scene.Instances)
             {
                 for (const auto& mesh : instance.Model.Meshes)
@@ -7685,15 +7842,24 @@ namespace Kurenai
                 .Name = "DepthPrepass",
                 // レンダーターゲットは持たない(深度だけを書く)
                 .DepthTarget = m_GBufferDepth.get(),
-                .Execute = [this, &gbufferViewport](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gbufferViewport, &viewProj](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
                     // Reverse-Zのため遠平面側(NDC z=0.0)。G-Bufferパスの代わりにここでクリアする
                     cmd->ClearDepth(0.0f);
 
                     RHI::IRHIPipelineState* currentPipelineState = nullptr;
+                    // G-Bufferと同じカメラなので、間引かれるモデルも同じになる
+                    const FrustumPlanes prepassFrustum = ExtractFrustumPlanes(viewProj);
                     for (const auto& instance : m_Scene.Instances)
                     {
+                        ++m_FrustumCullTested;
+                        if (!IsAABBVisible(prepassFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                        {
+                            ++m_FrustumCullCulled;
+                            continue;
+                        }
+
                         for (const auto& mesh : instance.Model.Meshes)
                         {
                             // BLENDマテリアルはG-Bufferに描かれないので深度も書かない
@@ -7751,7 +7917,7 @@ namespace Kurenai
             .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
                                m_GBufferEmissive.get(), m_GBufferVelocity.get(), m_GBufferBentNormal.get() },
             .DepthTarget = m_GBufferDepth.get(),
-            .Execute = [this, &gbufferViewport, depthPrepassRuns](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, depthPrepassRuns, &viewProj](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // ClearRenderTargetはバインド済みの全レンダーターゲットを同じ色でクリアするため、
@@ -7811,8 +7977,22 @@ namespace Kurenai
                     currentPipelineState = wanted;
                 };
 
+                // 視錐台の外にあるモデルは丸ごと飛ばす。
+                //
+                // 【メッシュ単位ではできない】Assets::MeshはAABBを持たず、AABBがあるのはModelだけ
+                // (Model.h)。したがって1モデルに多数のメッシュを持つアセット(Bistro、Emerald Square)
+                // では1つも間引けない。効くのは.kmodelを多数並べるシーンのほう
+                const FrustumPlanes frustum = ExtractFrustumPlanes(viewProj);
+
                 for (const auto& instance : m_Scene.Instances)
                 {
+                    ++m_FrustumCullTested;
+                    if (!IsAABBVisible(frustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                    {
+                        ++m_FrustumCullCulled;
+                        continue;
+                    }
+
                     for (const auto& mesh : instance.Model.Meshes)
                     {
                         // BLENDマテリアル(mesh.IsTransparent)はG-Bufferに書き込まず、専用のTransparentパスで
@@ -8415,7 +8595,7 @@ namespace Kurenai
             },
             .RenderTargets = { m_SceneColor.get() },
             .DepthTarget = m_GBufferDepth.get(),
-            .Execute = [this, &gbufferViewport, &gpuLights, &cameraPosition](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, &gpuLights, &cameraPosition, &viewProj](RHI::IRHICommandList* cmd)
             {
                 // 半透明メッシュをインスタンス単位でカメラからの距離降順(奥から手前)に並べる。
                 // instance.WorldはHLSL(mul(vec, World))に合わせて転置済みのため、ワールド座標の
@@ -8427,8 +8607,18 @@ namespace Kurenai
                     float DistanceSq;
                 };
                 std::vector<TransparentDraw> draws;
+                // 半透明もカメラの錐台で間引く。ここは描画リストの構築なので、
+                // 間引いた分はソートの対象からも外れる
+                const FrustumPlanes transparentFrustum = ExtractFrustumPlanes(viewProj);
                 for (const auto& instance : m_Scene.Instances)
                 {
+                    ++m_FrustumCullTested;
+                    if (!IsAABBVisible(transparentFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                    {
+                        ++m_FrustumCullCulled;
+                        continue;
+                    }
+
                     const float dx = instance.World._14 - cameraPosition.x;
                     const float dy = instance.World._24 - cameraPosition.y;
                     const float dz = instance.World._34 - cameraPosition.z;
@@ -8615,8 +8805,19 @@ namespace Kurenai
                         currentPipelineState = wanted;
                     };
 
+                    // 鏡映カメラの錐台で間引く。カメラ本体の錐台とは別物なので、
+                    // 画面には映っていないが水面には映るものが正しく残る
+                    const FrustumPlanes reflectionFrustum = ExtractFrustumPlanes(reflectedViewProj);
+
                     for (const auto& instance : m_Scene.Instances)
                     {
+                        ++m_FrustumCullTested;
+                        if (!IsAABBVisible(reflectionFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                        {
+                            ++m_FrustumCullCulled;
+                            continue;
+                        }
+
                         for (const auto& mesh : instance.Model.Meshes)
                         {
                             // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
