@@ -522,6 +522,9 @@ namespace Kurenai
         // プリパスを走らせるか。オーバードローが小さいシーンでは、増えるジオメトリ1周ぶんが
         // 省けるピクセルシェーダーより高くつくため切れるようにしてある
         bool m_DepthPrepassEnabled = Defaults::DepthPrepassEnabled;
+        // メッシュ単位のフラスタムカリングを行うか(対照実験用。EngineDefaults.h参照)。
+        // OFFのあいだは判定を1回も呼ばないので、統計は「判定なし」になる
+        bool m_MeshCullingEnabled = Defaults::MeshCullingEnabled;
 
         // --- メッシュシェーダー版のジオメトリパス(Shaders/3D/GBufferMeshlet.hlsl) ---------
         //

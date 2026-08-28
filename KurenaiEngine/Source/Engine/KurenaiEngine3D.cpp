@@ -120,9 +120,16 @@ namespace Kurenai
         // for (const auto& mesh : instance.Model.Meshes) の形で添字を持たない。
         // Meshesはvectorで連続しているため、先頭との差がそのまま添字になる
         bool IsMeshVisibleWithStats(
-            const FrustumPlanes& frustum, const Assets::ModelInstance& instance, const Assets::Mesh& mesh,
-            uint32_t& tested, uint32_t& culled)
+            bool enabled, const FrustumPlanes& frustum, const Assets::ModelInstance& instance,
+            const Assets::Mesh& mesh, uint32_t& tested, uint32_t& culled)
         {
+            if (!enabled)
+            {
+                // 対照実験用のOFF。判定を1回も呼ばないので統計は「判定なし」になり、
+                // 「実行したが間引き0」と区別できる(EngineDefaults.h の MeshCullingEnabled 参照)
+                return true;
+            }
+
             ++tested;
 
             const size_t meshIndex = static_cast<size_t>(&mesh - instance.Model.Meshes.data());
@@ -3480,7 +3487,8 @@ namespace Kurenai
                 // メッシュ単位のカリング。統計はモデル単位とは別カウンタへ入れる。
                 // 【描かないメッシュを弾いた後に置く】分母を「このパスが実際に描くメッシュ」に
                 // 揃えないと、間引き率が薄まって効きが読めなくなる
-                if (!IsMeshVisibleWithStats(swRasterFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                if (!IsMeshVisibleWithStats(
+                        m_MeshCullingEnabled, swRasterFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
                 {
                     continue;
                 }
@@ -7121,7 +7129,8 @@ namespace Kurenai
                                 // メッシュ単位のカリング。錐台はこのカスケードのライト正射影で、
                                 // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)
                                 if (!IsMeshVisibleWithStats(
-                                        cascadeFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                                        m_MeshCullingEnabled, cascadeFrustum, instance, mesh, m_MeshCullTested,
+                                        m_MeshCullCulled))
                                 {
                                     continue;
                                 }
@@ -7236,7 +7245,8 @@ namespace Kurenai
                     }
 
                     // メッシュ単位のカリング。錐台はキューブの1面ぶん
-                    if (!IsMeshVisibleWithStats(faceFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                    if (!IsMeshVisibleWithStats(
+                            m_MeshCullingEnabled, faceFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
                     {
                         continue;
                     }
@@ -8024,7 +8034,8 @@ namespace Kurenai
                             // 遅くなるだけで済むが、逆(プリパスで描いてG-Bufferで間引く)だと
                             // 描かれていないものの深度が残る
                             if (!IsMeshVisibleWithStats(
-                                    prepassFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                                    m_MeshCullingEnabled, prepassFrustum, instance, mesh, m_MeshCullTested,
+                                    m_MeshCullCulled))
                             {
                                 continue;
                             }
@@ -8168,7 +8179,8 @@ namespace Kurenai
 
                         // メッシュ単位のカリング。深度プリパスとまったく同じ錐台・同じ判定
                         // (片方だけで間引くと深度とG-Bufferが食い違う)
-                        if (!IsMeshVisibleWithStats(frustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                        if (!IsMeshVisibleWithStats(
+                                m_MeshCullingEnabled, frustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
                         {
                             continue;
                         }
@@ -8803,7 +8815,8 @@ namespace Kurenai
                         // メッシュ単位のカリング。ここだけはループ内で描かず描画リストを作るので、
                         // 判定はpush_backの直前に入れる(描かないものをリストへ積まない)
                         if (!IsMeshVisibleWithStats(
-                                transparentFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                                m_MeshCullingEnabled, transparentFrustum, instance, mesh, m_MeshCullTested,
+                                m_MeshCullCulled))
                         {
                             continue;
                         }
@@ -9007,7 +9020,8 @@ namespace Kurenai
 
                             // メッシュ単位のカリング。錐台は鏡映カメラのもの
                             if (!IsMeshVisibleWithStats(
-                                    reflectionFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                                    m_MeshCullingEnabled, reflectionFrustum, instance, mesh, m_MeshCullTested,
+                                    m_MeshCullCulled))
                             {
                                 continue;
                             }

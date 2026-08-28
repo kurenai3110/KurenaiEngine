@@ -41,6 +41,17 @@ namespace Kurenai::Defaults
     // オーバードローが小さいシーンでは損になる
     inline constexpr bool DepthPrepassEnabled = true;
 
+    // --- フラスタムカリング ---
+    // メッシュ単位のフラスタムカリング(モデル単位の判定を通ったあとの、もう一段)。
+    //
+    // 【切れるようにしてある理由は対照実験のため】カリングは「効いていない」と
+    // 「間引きすぎて物が消えた」のどちらも絵からは判別しにくい。同じ起動の中で
+    // ON/OFFを切り替えて絵と間引き数を比べられないと、「差分ゼロ」が
+    // 「変わらないのが正しい」なのか「そもそも実行されていない」なのかを区別できない。
+    // OFFにすると判定を1回も呼ばないので、統計は「判定なし」になる。
+    // モデル単位のカリングは常に有効(こちらは切れない)
+    inline constexpr bool MeshCullingEnabled = true;
+
     // --- シャドウ ---
     inline constexpr bool ShadowEnabled = true;
     inline constexpr float ShadowLightSize = 0.02f;
