@@ -453,13 +453,33 @@ Texture2DArrayへ統合する理由とその効果は
 </p>
 </section>
 
-<h3>4.9 モデル単位のフラスタムカリング</h3>
+<h3>4.9 フラスタムカリング(モデル単位とメッシュ単位の2段)</h3>
 <p>
 各描画パスは<code>Scene::Instances</code>を走査してドローコールを発行しますが、その手前で
-<strong>インスタンスのワールドAABBが視錐台の外にあるものを丸ごと飛ばします</strong>。
+<strong>インスタンスのワールドAABBが視錐台の外にあるものを丸ごと飛ばし</strong>、
+通ったインスタンスのメッシュのループで<strong>メッシュのワールドAABBが視錐台の外にあるものを
+さらに飛ばします</strong>。
 判定は<code>ExtractFrustumPlanes</code>(ビュー射影行列から6平面をGribb-Hartmannで取り出す)と
 <code>IsAABBVisible</code>(平面ごとにp-vertexだけを見る保守的な判定)の2つで、
 どちらもRHIに触れないためDX11/DX12で共通です。
+</p>
+<p>
+<strong>2段になっているのは、効くシーンが逆だからです。</strong> モデル単位は
+<code>.kmodel</code>を多数<code>[Model]</code>として並べるシーン(PLATEAU 東京23区の671タイル)で
+効き、<strong>1モデルに数千メッシュを持つアセット(Bistro、Emerald Square、PLATEAUのLOD2タイル)
+では1つも間引けません</strong> ―― モデル全体のAABBが視錐台と交差する限り、全メッシュを
+描くしかないためです。メッシュ単位はその逆で、後者でしか値が動きません。
+<strong>bindlessもメッシュシェーダーも使えない環境(DX11、基準実機のIntel UHD Graphics 620)では、
+これがドローコールを減らす唯一の手段です。</strong>
+</p>
+<p>
+メッシュのローカルAABBは<code>.kmodel</code> v10の<code>MeshEntry</code>が持ち、
+<code>ModelLoader</code>が<code>Assets::Mesh::BoundsMin/Max</code>へ写します。
+それを<code>World</code>で変換したワールドAABBは
+<strong><code>ModelInstance::MeshWorldBoundsList</code>(インスタンス側)</strong>にあります ――
+<code>Model</code>は複数のインスタンスから共有されうるため、ワールド空間の値を
+<code>Model</code>側に持たせてはいけません。変換はインスタンスのAABBと同じく
+<strong>読み込み時に一度だけ</strong>、8頂点すべてを変換して包絡を取ります。
 </p>
 <p>
 <strong>錐台はパスごとに違うものを使います。</strong> G-Buffer・深度プリパス・半透明は
@@ -469,24 +489,32 @@ Texture2DArrayへ統合する理由とその効果は
 </p>
 <p>
 CPU側の視錐台平面の作り方は増幅シェーダーの<code>IsSphereInFrustum</code>
-(<code>GBufferMeshlet.hlsl</code>、メッシュレット単位のカリング)と同じ平面を作っていますが、
-<strong>向こうは転置済み行列の「列」から、こちらは転置前の「行」から</strong>組み立てます
-(詳細は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 44.1)。
+(<code>GBufferMeshlet.hlsl</code>、メッシュレット単位のカリング)と同じ平面を作ります。
+<strong>どちらも行列の「列」から</strong>組み立てます ―― クリップ座標が
+<code>c = v * M</code>(行ベクトル×行列)なので、<code>c.x</code>は列0との内積になるためです。
+<strong>「行」から作ると転置した行列の平面になり、ほぼ真下を向いたときに100%間引かれます</strong>
+(実際に一度間違えました。正面付近ではそれらしく動くのでYawを振る対照実験では見つかりません)。
+詳細は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 44.1。
 </p>
 
 <h4>効いているかを数値で見る</h4>
 <p>
-性能ログ(<code>KurenaiEngine3D::LogFrameStatsIfDue</code>)へ「判定した数 / 間引いた数」を出します。
+性能ログ(<code>KurenaiEngine3D::LogFrameStatsIfDue</code>)とプロファイラパネルへ
+「判定した数 / 間引いた数」を出します。
 <strong>「間引き0」だけでは、判定式が常に通しているのか本当に全部視界内なのかを区別できない</strong>
 ためです。判定式が常にtrueを返していても既存シーンの絵は完全に一致してしまいます。
+</p>
+<p>
+<strong>モデル単位とメッシュ単位は別のカウンタで、絶対に混ぜません。</strong>
+分母が違い(前者はインスタンス数、後者はモデル単位を通過したインスタンスのメッシュ数の合計)、
+効くシーンも逆です。合算すると<strong>どちらが効いたのか ―― あるいは片方が一度も
+実行されていないのか ―― が読めなくなります</strong>。
+判定が1回も走っていないときは、行そのものを出さない(ログ)か「判定なし」と書く(パネル)ことで、
+「間引き0」と区別できるようにしてあります。
 </p>
 
 <h4>4.9.1 既知の制約</h4>
 <ul>
-<li><strong>メッシュ単位ではできません。</strong> <code>Assets::Mesh</code>はAABBを持たず、
-AABBがあるのは<code>Assets::Model</code>だけです(<code>Model.h</code>)。したがって
-<strong>1モデルに多数のメッシュを持つアセット(Bistro、Emerald Square)では1つも間引けません</strong>。
-効くのは<code>.kmodel</code>を多数<code>[Model]</code>として並べるシーンのほうです。</li>
 <li><strong>DDGIのプローブキャプチャには入れていません。</strong> このループの描画回数は
 <code>ClampDDGIProbesPerFrameToConstantRing</code>が「同じ条件で数えること」を前提に
 定数バッファの予算を決めており、カリングを入れると予算計算と食い違います。
@@ -1178,9 +1206,28 @@ Sample2Dの出力フォルダには<code>KurenaiEngineLibrary.dll</code>・<code
 <h3>13.6 UIモジュールの分割とKurenaiEngine3Dのfriend化</h3>
 <p>
 UIは<code>Source/Engine/UI/</code>配下の<code>IPanel</code>実装クラスへ分割され、
-<code>UI::UIManager</code>が所有・描画する(現在8クラス:
+<code>UI::UIManager</code>が所有・描画する(現在9クラス:
 シーン / レンダリング / ポストプロセス / ライティング / 反射プローブ / デバッグ表示 /
-システム / プロファイラ)。
+<strong>ストリーミング</strong> / システム / プロファイラ)。
+</p>
+<p>
+<code>UIManager</code>自身も1つだけウィンドウを持つ ―― <strong>シーン読み込み中の進捗</strong>
+(<code>DrawSceneLoadProgress</code>)である。読み込みは専用のLoaderスレッドで走り、その間
+Renderスレッドはフレームを進め続けるが、<strong>旧シーンは読み込み開始と同時に手放されるため
+画面にはUIとスカイボックスしか出ない</strong>(23章)。671モデルのシーンでは数十秒かかるため、
+「進んでいる」と「固まった」を区別できる手がかりがどこにも無かった。
+パネルではなく<code>UIManager</code>が直接出しているのは、ドックに入れず読み込み中だけ
+画面中央へ重ねるウィンドウで、表示/非表示をユーザーが選ぶ対象ではないため。
+</p>
+<p>
+「ストリーミング」パネルは<code>Assets::ModelInstance</code>が持つ
+<code>ResidencyState</code>(常駐 / 読み込み中 / 未読み込み)と<code>LODLevel</code>を、
+各インスタンスのワールドAABBをXZ平面へ落とした<strong>俯瞰の地図</strong>として色分けする。
+<strong>ストリーミング本体とモデルLODはまだ未実装で、現状は全件が「常駐」・LOD段0のまま動かない</strong>
+―― これは先に用意した受け皿である。ストリーミングの破綻(破棄が早すぎる・範囲内なのに
+読み込まれない)は絵からは判別できず、しかも最も見たい破綻は「視界の外で消えている」なので、
+画面を塗り分けても見えない。描画は<code>ImDrawList</code>だけで行いレンダラには触れない
+(理由と表示上の決めごとは<a href="ImplementationDetail.md">ImplementationDetail.md</a> 50.3)。
 </p>
 <p>
 機能を1つ足すときに触るのは原則「そのパネルの<code>.cpp</code>」だけになる。新しいパネルを

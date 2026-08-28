@@ -38,6 +38,7 @@ namespace Kurenai::UI
     class SystemPanel;
     class ProfilerPanel;
     class ReflectionProbePanel;
+    class StreamingPanel;
 }
 
 namespace Kurenai
@@ -149,6 +150,7 @@ namespace Kurenai
         friend class UI::SystemPanel;
         friend class UI::ProfilerPanel;
         friend class UI::ReflectionProbePanel;
+        friend class UI::StreamingPanel;
 
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
         // スナップショット。m_TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
@@ -530,6 +532,9 @@ namespace Kurenai
         // プリパスを走らせるか。オーバードローが小さいシーンでは、増えるジオメトリ1周ぶんが
         // 省けるピクセルシェーダーより高くつくため切れるようにしてある
         bool m_DepthPrepassEnabled = Defaults::DepthPrepassEnabled;
+        // メッシュ単位のフラスタムカリングを行うか(対照実験用。EngineDefaults.h参照)。
+        // OFFのあいだは判定を1回も呼ばないので、統計は「判定なし」になる
+        bool m_MeshCullingEnabled = Defaults::MeshCullingEnabled;
 
         // --- メッシュシェーダー版のジオメトリパス(Shaders/3D/GBufferMeshlet.hlsl) ---------
         //
@@ -2524,6 +2529,18 @@ namespace Kurenai
         // 書き込み手を1スレッドに保っている
         Core::Camera m_Camera;
 
+        // WASD/E/Qの移動速度[m/s]。Shiftを押している間はDefaults::CameraSpeedShiftMultiplier倍。
+        //
+        // 【スレッド】書き手はRenderスレッド(ScenePanelのスライダとResetSceneDependentParams)、
+        // 読み手はUpdateスレッド(UpdateMovement)。m_TargetFPSと同じく、単一のfloatを跨いで
+        // 読み書きするだけなので同期は置かない ―― 途中の値が1フレーム見えても
+        // 「その1フレームだけ移動量が古い速度で計算される」以上のことは起きない。
+        // m_Camera本体はUpdateスレッド専有のまま(この値はそこへ入力されるだけ)。
+        //
+        // 値はシーン対角から決まるためResetSceneDependentParams()が上書きする。
+        // ここの初期化子は最初のシーンを読むまでの値でしかない
+        float m_CameraSpeed = Defaults::CameraSpeed;
+
         // --- シーン読み込みのハンドオフ -------------------------------------------------------
 
         std::thread m_LoaderThread;
@@ -2534,6 +2551,22 @@ namespace Kurenai
         // Renderスレッド専有。Loaderスレッドへ発注してから完成品を受け取るまでtrue。
         // 多重発注を防ぐために見る
         bool m_SceneLoadInFlight = false;
+        // Renderスレッド専有。いまLoaderスレッドが読んでいるシーンの番号(m_SceneDisplayNamesの添字)。
+        // 進捗表示にシーン名を出すために持つ ―― m_CurrentSceneIndexは読み込みが完了するまで
+        // 旧シーンを指したままで、m_PendingSceneRequestは発注した時点で-1へ戻る
+        size_t m_SceneLoadingIndex = 0;
+
+        // シーン読み込みの進捗(読み終えたモデル数 / [Model]の総数)。
+        //
+        // 【なぜ要るか】読み込み中は旧シーンを先に手放すため画面にはUIとスカイボックスしか出ない
+        // (UpdateSceneStreamingのコメント参照)。767モデルのシーンでは数十秒かかり、
+        // m_SceneLoadInFlightのboolだけでは「進んでいる」と「固まった」を区別できない。
+        //
+        // 【atomicにする理由】書き手はLoaderスレッド(Assets::LoadSceneのコールバック)、
+        // 読み手はRenderスレッド(UIManagerの進捗ウィンドウ)で、フレーム境界の受け渡しに
+        // 乗らない唯一の値のため。表示だけに使うのでmemory_order_relaxedで足りる
+        std::atomic<uint32_t> m_SceneLoadProgressLoaded{ 0 };
+        std::atomic<uint32_t> m_SceneLoadProgressTotal{ 0 };
 
         // --- .ksceneのホットリロード -----------------------------------------------------
         //
@@ -2709,6 +2742,28 @@ namespace Kurenai
         uint64_t m_FrameStatsDrawCallsGBufferSum = 0;
         uint64_t m_FrameStatsDrawCallsShadowSum = 0;
         uint64_t m_FrameStatsDrawCallsDepthPrepassSum = 0;
+
+        // メッシュ単位フラスタムカリングの統計(1フレーム分)。上のモデル単位とまったく同じ扱い。
+        //
+        // 【絶対に上のカウンタと混ぜない】分母も意味も違う。モデル単位は
+        // 「シーンのインスタンス数」が分母で、メッシュ単位は「モデル単位を通過した
+        // インスタンスのメッシュ数の合計」が分母になる。合算すると、どちらが効いているのか
+        // ―― あるいは片方が一度も実行されていないのか ―― が読めなくなる。
+        //
+        // 【効くシーンが逆】モデル単位は.kmodelを多数並べるシーン(PLATEAUの671タイル)で効き、
+        // 1モデルに数千メッシュを持つアセット(Emerald Square、Bistro)では1つも間引けない。
+        // メッシュ単位はその逆で、後者でしか値が動かない
+        uint32_t m_MeshCullTested = 0;
+        uint32_t m_MeshCullCulled = 0;
+
+        // 完成した最後のフレームの値。UIパネルはRenderの外で描かれるため、上のカウンタを
+        // そのまま読むとリセット直後の0になる(ドローコール数のm_DrawCalls*LastFrameと同じ)
+        uint32_t m_FrustumCullTestedLastFrame = 0;
+        uint32_t m_FrustumCullCulledLastFrame = 0;
+        uint32_t m_MeshCullTestedLastFrame = 0;
+        uint32_t m_MeshCullCulledLastFrame = 0;
+        uint64_t m_FrameStatsMeshCullTestedSum = 0;
+        uint64_t m_FrameStatsMeshCullCulledSum = 0;
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};
