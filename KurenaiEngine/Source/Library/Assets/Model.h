@@ -49,7 +49,7 @@ namespace Kurenai::Assets
         // .kmodelが持つメッシュレット数。GPUバッファの有無とは独立
         uint32_t MeshletCount = 0;
 
-        // このメッシュのモデルローカル空間でのAABB。ModelLoaderが読み込み時に頂点から求める。
+        // このメッシュのモデルローカル空間でのAABB。.kmodel v10のMeshEntryが持つ値をそのまま入れる。
         //
         // 【なぜモデル単位のAABBでは足りないか】1つのモデルが街区全体を覆うことがある
         // (Bistro Exteriorは132メッシュで1インスタンス、AABBは109x32x115m)。

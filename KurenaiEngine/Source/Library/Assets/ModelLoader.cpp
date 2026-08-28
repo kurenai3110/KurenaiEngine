@@ -58,29 +58,6 @@ namespace Kurenai::Assets
             return pool.substr(offset, length);
         }
 
-        // メッシュのローカルAABBを頂点から求める。頂点が1つも無い場合は何もしない
-        void ComputeMeshBounds(const Vertex* vertices, uint32_t vertexCount, float outMin[3], float outMax[3])
-        {
-            if (vertices == nullptr || vertexCount == 0)
-            {
-                return;
-            }
-
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                outMin[axis] = vertices[0].Position[axis];
-                outMax[axis] = vertices[0].Position[axis];
-            }
-            for (uint32_t v = 1; v < vertexCount; ++v)
-            {
-                for (int axis = 0; axis < 3; ++axis)
-                {
-                    outMin[axis] = std::min(outMin[axis], vertices[v].Position[axis]);
-                    outMax[axis] = std::max(outMax[axis], vertices[v].Position[axis]);
-                }
-            }
-        }
-
         // メッシュのUV密度(モデルローカル1メートルあたりのUV単位)を、三角形を抜き取って見積もる。
         // 求められない場合(UVが無い・全部縮退している)は0を返す。
         //
@@ -703,13 +680,17 @@ namespace Kurenai::Assets
             outMesh.IndexCount = mesh.IndexCount;
             outMesh.VertexCount = mesh.VertexCount;
 
-            // テクスチャストリーミングの見積もりに使うメッシュ単位のAABBとUV密度。
-            // geometryPayloadがまだ生存しているここでしか元データを読めない
-            // (GPUへ送った後は頂点バッファとしてしか触れない)
-            const auto* meshVertices = reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset);
-            ComputeMeshBounds(meshVertices, mesh.VertexCount, outMesh.BoundsMin, outMesh.BoundsMax);
+            // メッシュ単位のAABBは.kmodel v10がMeshEntryに持っている(パック時に確定した値)
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                outMesh.BoundsMin[axis] = mesh.BoundsMin[axis];
+                outMesh.BoundsMax[axis] = mesh.BoundsMax[axis];
+            }
+
+            // UV密度はフォーマットに持たせていないため、geometryPayloadが生存している
+            // ここで求める(GPUへ送った後は頂点バッファとしてしか触れない)
             outMesh.UVPerLocalMeter = EstimateUVPerLocalMeter(
-                meshVertices, mesh.VertexCount,
+                reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset), mesh.VertexCount,
                 reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset), mesh.IndexCount);
 
             // アセットが持つメッシュレット数。GPUバッファを作るかどうか(下)とは独立で、
