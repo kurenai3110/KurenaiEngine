@@ -109,7 +109,7 @@ namespace Kurenai
         : KurenaiEngineBase(title, width, height, api)
     {
         // ShadersはビルドでKurenaiEngine.dllと同じフォルダにコピーされる
-        const std::wstring shaderPath = GetModuleDirectory() + L"Shaders\\Sprite2D.hlsl";
+        const std::wstring shaderPath = GetModuleDirectory() + L"Shaders\\Sprite2D.kshader";
 
         m_VertexShader = m_Device->CreateShader({ RHI::ShaderStage::Vertex, shaderPath, "VSMain" });
         m_PixelShader = m_Device->CreateShader({ RHI::ShaderStage::Pixel, shaderPath, "PSMain" });
@@ -147,7 +147,7 @@ namespace Kurenai
         // DrawPolyline用。頂点バッファを使わず頂点シェーダがSV_VertexIDで構造化バッファを引くため、
         // 入力レイアウトは空にする(DX11Device::CreatePipelineStateは空ならCreateInputLayoutを
         // 呼ばず、SetPipelineStateがIASetInputLayout(nullptr)を張るのでDX11でも成立する)
-        const std::wstring polylineShaderPath = GetModuleDirectory() + L"Shaders\\Polyline2D.hlsl";
+        const std::wstring polylineShaderPath = GetModuleDirectory() + L"Shaders\\Polyline2D.kshader";
         m_PolylineVertexShader = m_Device->CreateShader({ RHI::ShaderStage::Vertex, polylineShaderPath, "VSPolyline" });
         m_PolylinePixelShader = m_Device->CreateShader({ RHI::ShaderStage::Pixel, polylineShaderPath, "PSPolyline" });
         RHI::PipelineStateDesc polylinePipelineDesc = pipelineDesc;
@@ -163,6 +163,9 @@ namespace Kurenai
         // 1フレームに描ける本数ぶんのステージングリングを確保させる(既定の4本では足りない)
         polylineBufferDesc.MaxUpdatesPerFrame = kMaxPolylinesPerFrame;
         m_PolylineVertexBuffer = m_Device->CreateBuffer(polylineBufferDesc);
+
+        // 全シェーダーの生成が終わったので、読み込んだ.kshaderのキャッシュは捨てる
+        m_Device->ReleaseShaderPackages();
         m_PolylineVertices.reserve(kMaxPolylineVertices);
 
         // 原点中心の単位クアッド(-0.5〜0.5)。スプライトごとの位置/大きさ/回転はWorld行列側で表現する

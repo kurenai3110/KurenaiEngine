@@ -84,13 +84,16 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
-    <!-- KurenaiEngine3D.dllが実行時に参照するShadersをDLLと同じフォルダに揃える。
-         xcopy /D により変更のあったファイルのみコピーし、対象が無い場合の終了コード(1)は
-         ビルド失敗として扱わないようexit /bで無視する -->
+    <!-- HLSLを事前コンパイルして .kshader をOutDirへ生成する。
+         【.hlsl はもうコピーしない】実行時コンパイルを廃止したため、出力フォルダの .hlsl は
+         誰も読まない。コピーを残すと、古いコピーが残っているのに絵が変わらない、という
+         紛らわしい状態を作るだけになる。
+         パッカー自身が更新日時を見て増分で動くので、シェーダーが未変更ならすぐ返る。
+         【失敗したらビルドを止める】ここでHLSLのコンパイルエラーが出る。
+         従来は「C++のビルドが通ってもHLSLは一切検証されていない」状態だった -->
     <PostBuildEvent>
-      <Command>xcopy /Y /I /E /D "$(ProjectDir)Shaders\3D" "$(OutDir)Shaders\"
-exit /b 0</Command>
-      <Message>3DシェーダーをOutDirへコピー</Message>
+      <Command>"$(ProjectDir)..\Tools\KurenaiShaderPacker\Build\Bin\$(Platform)\$(Configuration)\KurenaiShaderPacker.exe" --input "$(ProjectDir)Shaders\3D" --output "$(OutDir)Shaders" --config $(Configuration)</Command>
+      <Message>3DシェーダーをコンパイルしてOutDirへ(.kshader)</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -163,6 +166,21 @@ exit /b 0</Command>
   <ItemGroup>
     <ProjectReference Include="KurenaiEngineLibrary.vcxproj">
       <Project>{7f2c9a41-5b3d-4e68-9a17-0c4e8d2b6f35}</Project>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- シェーダーの事前コンパイルツール。PostBuildEventで実行するため、このDLLより先に
+         建っている必要がある。実行ファイルをリンクするわけではないので
+         ReferenceOutputAssembly / LinkLibraryDependencies は false にする -->
+    <ProjectReference Include="..\Tools\KurenaiShaderPacker\KurenaiShaderPacker.vcxproj">
+      <Project>{24aec059-c8ce-4441-a6d5-826bef22cc2a}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+      <!-- 【構成を明示する】.sln に含まれていないプロジェクトを参照すると、
+           ソリューションの構成対応表が引けず Debug|Win32 でビルドしようとして
+           MSB8013 で落ちる。参照元と同じ構成・x64 を明示的に渡す -->
+      <SetConfiguration>Configuration=$(Configuration)</SetConfiguration>
+      <SetPlatform>Platform=x64</SetPlatform>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

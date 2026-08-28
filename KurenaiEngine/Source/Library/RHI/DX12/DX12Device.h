@@ -9,9 +9,9 @@
 #include <vector>
 #include <wrl/client.h>
 
+#include "Assets/ShaderLoader.h"
 #include "DX12BindlessTable.h"
 #include "DX12DescriptorHeap.h"
-#include "DX12ShaderCompiler.h"
 #include "DX12TilePool.h"
 #include "RHI/IRHIDevice.h"
 
@@ -42,6 +42,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHISwapChain> CreateSwapChain(void* windowHandle, uint32_t width, uint32_t height) override;
         std::unique_ptr<IRHIBuffer> CreateBuffer(const BufferDesc& desc) override;
         std::unique_ptr<IRHIShader> CreateShader(const ShaderDesc& desc) override;
+        void ReleaseShaderPackages() override { m_ShaderPackages.Clear(); }
         std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
         std::unique_ptr<IRHIPipelineState> CreateComputePipelineState(const ComputePipelineStateDesc& desc) override;
         std::unique_ptr<IRHIPipelineState> CreateMeshPipelineState(const MeshPipelineStateDesc& desc) override;
@@ -178,8 +179,11 @@ namespace Kurenai::RHI
         // (非対応環境では上位層が黙って従来手法へフォールバックするため、ログが唯一の手がかりになる)
         void DetectRaytracingSupport();
         // デバイスが対応する最上位のシェーダーモデルを実測してm_HighestShaderModelへ記録し、
-        // dxc(DX12ShaderCompiler)の初期化まで行う。CreateShaderより前に呼ぶ必要がある
-        void DetectShaderModelAndInitCompiler();
+        // 使う.kshaderのバリアントをm_ShaderVariantへ決める。CreateShaderより前に呼ぶ必要がある
+        void DetectShaderModelAndSelectVariant();
+        // 出力フォルダの.kshaderを1つ読んで、そこに焼かれているバリアントのビット集合を返す。
+        // 読めない場合は0を返してログを出す(以降SM 5.0へ縮退する)
+        uint32_t ReadShaderVariantMask();
         // bindless(ResourceDescriptorHeap)が使えるかを判定してm_SupportsBindlessへ記録する。
         // シェーダーモデル判定の後、かつルートシグネチャ作成より前に呼ぶこと
         // (CreateRootSignatureがこの結果でフラグを変えるため)
@@ -288,8 +292,14 @@ namespace Kurenai::RHI
         // D3D12_FEATURE_SHADER_MODELで実測した、このデバイスが対応する最上位のシェーダーモデル。
         // 取得できなかった場合はD3D_SHADER_MODEL_5_1相当として扱う(0のまま)
         D3D_SHADER_MODEL m_HighestShaderModel = static_cast<D3D_SHADER_MODEL>(0);
-        // HLSL→DXILのコンパイラ。IsAvailable()がfalseの場合はd3dcompiler/SM 5.0へフォールバックする
-        DX12ShaderCompiler m_ShaderCompiler;
+        // CreateShaderが読む.kshaderのキャッシュ。ReleaseShaderPackages()で明示的に捨てる
+        Assets::ShaderPackageCache m_ShaderPackages;
+        // .kshaderに焼かれているバリアントのビット集合(ShaderPackageHeader::VariantMask)
+        uint32_t m_ShaderVariantMask = 0;
+        // このデバイスで使うバリアント。DetectShaderModelAndSelectVariantが起動時に1つ決め、
+        // CreateShaderは以降これしか見ない。bindless・メッシュシェーダー・レイトレーシングの
+        // 可否もすべてこの値から決まる
+        Assets::ShaderVariant m_ShaderVariant = Assets::ShaderVariant::Dxbc50;
         // デバッグビルドでのみ取得する(リリースビルドではnullptrのままDrainDebugMessagesが即座に返る)
         Microsoft::WRL::ComPtr<ID3D12InfoQueue> m_InfoQueue;
         Microsoft::WRL::ComPtr<IDXGIFactory2> m_Factory;

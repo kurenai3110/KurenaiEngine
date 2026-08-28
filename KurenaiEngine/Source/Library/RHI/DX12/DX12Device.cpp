@@ -1,6 +1,5 @@
 #include "DX12Device.h"
 
-#include <d3dcompiler.h>
 #include <d3dx12.h>
 
 #include <DirectXTex.h>
@@ -9,8 +8,10 @@
 #include <chrono>
 #include <cstring>
 #include <cwchar>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "DX12AccelerationStructure.h"
@@ -26,12 +27,21 @@
 #include "DX12Texture.h"
 #include "DX12Util.h"
 #include "Core/StringUtil.h"
+#include "RHI/RHIShaderPackage.h"
 #include "RHI/TextureImage.h"
 
 namespace Kurenai::RHI
 {
     namespace
     {
+        // この実行ファイルがDebug構成でビルドされているか。
+        // .kshader側のフラグと突き合わせて、構成の取り違えを警告するためだけに使う
+#if defined(_DEBUG)
+        constexpr bool kIsDebugBuild = true;
+#else
+        constexpr bool kIsDebugBuild = false;
+#endif
+
         // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
         // t0〜t17。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
         // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer+距離キューブ配列
@@ -425,7 +435,7 @@ namespace Kurenai::RHI
         // シェーダーモデルの判定とdxcの初期化はレイトレーシング判定より先に行う。
         // RayQueryを含むシェーダーはSM 6.5でしかコンパイルできないため、
         // DetectRaytracingSupportがこの結果を参照する
-        DetectShaderModelAndInitCompiler();
+        DetectShaderModelAndSelectVariant();
         DetectRaytracingSupport();
         // bindless・メッシュシェーダーの判定もシェーダーモデルに依存するためこの後で行う。
         // ルートシグネチャの作成(CreateRootSignature)がbindlessの可否でフラグを変えるので、
@@ -1378,56 +1388,11 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHIShader> DX12Device::CreateShader(const ShaderDesc& desc)
     {
-        // 通常経路: dxcでDXIL(SM 6.x)へコンパイルする。
-        // SM 6.5でしか使えないインラインレイトレーシング(RayQuery)を扱えるようにするため
-        if (m_ShaderCompiler.IsAvailable())
-        {
-            Microsoft::WRL::ComPtr<ID3DBlob> dxil = m_ShaderCompiler.Compile(desc.FilePath, desc.EntryPoint, desc.Stage);
-            if (!dxil)
-            {
-                // 失敗の詳細はDX12ShaderCompiler::Compileがログ済み。
-                // シェーダが1つでも作れなければ描画は成立しないため、従来どおり例外で止める
-                throw std::runtime_error("シェーダのコンパイルに失敗しました(dxc)");
-            }
-            return std::make_unique<DX12Shader>(desc.Stage, dxil);
-        }
-
-        // フォールバック経路: dxcompiler.dllが無い/デバイスがSM 6.0未満の場合。
-        // レイトレーシングは無効(DetectRaytracingSupport)だが、それ以外は従来どおり動作する
-        const char* target =
-            desc.Stage == ShaderStage::Vertex ? "vs_5_0" : desc.Stage == ShaderStage::Compute ? "cs_5_0" : "ps_5_0";
-
-        UINT compileFlags = 0;
-#if defined(_DEBUG)
-        compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-
-        Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
-        Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
-        HRESULT hr = D3DCompileFromFile(
-            desc.FilePath.c_str(),
-            nullptr,
-            D3D_COMPILE_STANDARD_FILE_INCLUDE,
-            desc.EntryPoint.c_str(),
-            target,
-            compileFlags,
-            0,
-            &bytecode,
-            &errorBlob);
-
-        if (FAILED(hr))
-        {
-            std::string message = "シェーダのコンパイルに失敗しました";
-            if (errorBlob)
-            {
-                message += ": ";
-                message += static_cast<const char*>(errorBlob->GetBufferPointer());
-            }
-            Core::Logger::Error("DX12", message);
-            throw std::runtime_error(message);
-        }
-
-        return std::make_unique<DX12Shader>(desc.Stage, bytecode);
+        // 使うバリアントはDetectShaderModelAndSelectVariantが起動時に1つ決めている。
+        // ここでは選び直さない(シェーダーごとに段が変わると、bindlessの有無が
+        // パスによって食い違うことになる)
+        std::vector<uint8_t> bytecode = LoadShaderBytecode(m_ShaderPackages, desc, m_ShaderVariant, "DX12");
+        return std::make_unique<DX12Shader>(desc.Stage, std::move(bytecode));
     }
 
     std::unique_ptr<IRHIPipelineState> DX12Device::CreatePipelineState(const PipelineStateDesc& desc)
@@ -2757,7 +2722,7 @@ namespace Kurenai::RHI
 
     // --- レイトレーシング -------------------------------------------------------------------
 
-    void DX12Device::DetectShaderModelAndInitCompiler()
+    void DX12Device::DetectShaderModelAndSelectVariant()
     {
         // D3D12_FEATURE_SHADER_MODELは「HighestShaderModelへ聞きたい上限を入れて呼ぶと、
         // 対応している値まで引き下げて返す」APIだが、ランタイムが知らない列挙値を渡すと
@@ -2784,27 +2749,113 @@ namespace Kurenai::RHI
         if (m_HighestShaderModel == static_cast<D3D_SHADER_MODEL>(0))
         {
             Core::Logger::Warning(
-                "DX12", "対応シェーダーモデルを判定できませんでした。d3dcompiler/SM 5.0で動作します");
-            return;
+                "DX12", "対応シェーダーモデルを判定できませんでした。SM 5.0のバリアントで動作します");
         }
 
-        // Initializeは失敗しても例外を投げない(理由はログへ出る)。
-        // 戻り値がfalseの場合はCreateShaderがd3dcompiler/SM 5.0へフォールバックする
-        m_ShaderCompiler.Initialize(m_HighestShaderModel);
+        // 【どのバリアントを使えるかはパッケージ側にも依存する】以前はここでdxcompiler.dllを
+        // ロードし、そのバージョン(IDxcVersionInfo)を見てSM 6.6が使えるかを決めていた。
+        // 事前コンパイルへ移したので、実行時にdxcは居ない。代わりに、ビルド時に
+        // KurenaiShaderPackerが「どのバリアントを焼けたか」をヘッダーのVariantMaskへ
+        // 記録しているので、それを読む。
+        // (「dxcのバージョン = Windows SDKのバージョン」という制約は、実行環境ではなく
+        //  ビルドマシンの話になった)
+        m_ShaderVariantMask = ReadShaderVariantMask();
+
+        const bool hasDxil66 = (m_ShaderVariantMask & (1u << static_cast<uint32_t>(Assets::ShaderVariant::Dxil66))) != 0u;
+        const bool hasDxil65 = (m_ShaderVariantMask & (1u << static_cast<uint32_t>(Assets::ShaderVariant::Dxil65))) != 0u;
+
+        if (hasDxil66 && m_HighestShaderModel >= D3D_SHADER_MODEL_6_6)
+        {
+            m_ShaderVariant = Assets::ShaderVariant::Dxil66;
+            Core::Logger::Info("DX12", "事前コンパイル済みシェーダー: DXIL / SM 6.6(bindless有効)を使用します");
+        }
+        else if (hasDxil65 && m_HighestShaderModel >= D3D_SHADER_MODEL_6_5)
+        {
+            m_ShaderVariant = Assets::ShaderVariant::Dxil65;
+            Core::Logger::Info(
+                "DX12",
+                std::string("事前コンパイル済みシェーダー: DXIL / SM 6.5 を使用します(bindlessは無効。理由: ") +
+                    (hasDxil66 ? "デバイスがSM 6.6に非対応" : "ビルド時のdxcがSM 6.6に非対応でバリアントが焼かれていない") + ")");
+        }
+        else
+        {
+            // SM 6.0〜6.4のデバイス、またはSM 6.xのバリアントが1つも焼かれていない場合。
+            // DXBCはD3D12でもそのまま受け付けられるため、従来の
+            // 「dxcompiler.dllが無いときのd3dcompilerフォールバック」と同じ縮退になる
+            // (レイトレーシング・メッシュシェーダー・自前ラスタライザはいずれも無効)
+            m_ShaderVariant = Assets::ShaderVariant::Dxbc50;
+            Core::Logger::Warning(
+                "DX12",
+                "事前コンパイル済みシェーダー: DXBC / SM 5.0 へ縮退します"
+                "(レイトレーシング・メッシュシェーダー・自前ラスタライザはいずれも無効になります)");
+        }
+    }
+
+    uint32_t DX12Device::ReadShaderVariantMask()
+    {
+        // どの.kshaderも同じパッカーの1回の実行で焼かれるため、VariantMaskは全ファイルで同じ。
+        // 最初に見つかった1つを読めばよい(3Dと2Dで置き場所が違うので、決め打ちのファイル名は使わない)
+        const std::wstring shaderDirectory = Core::GetModuleDirectory() + L"Shaders\\";
+
+        std::error_code ec;
+        if (!std::filesystem::is_directory(shaderDirectory, ec))
+        {
+            Core::Logger::Error(
+                "DX12",
+                "シェーダーフォルダがありません: " + Core::WideToUtf8(shaderDirectory) +
+                    " (ビルド時にKurenaiShaderPackerが.kshaderを生成できていない可能性があります)");
+            return 0u;
+        }
+
+        for (const auto& entry : std::filesystem::directory_iterator(shaderDirectory, ec))
+        {
+            if (!entry.is_regular_file() || entry.path().extension() != L".kshader")
+            {
+                continue;
+            }
+            try
+            {
+                const Assets::ShaderPackageData& package = m_ShaderPackages.Get(entry.path().wstring());
+                if (package.DebugBuild != kIsDebugBuild)
+                {
+                    // 気付きにくい取り違え(Releaseの実行ファイルがDebugの.kshaderを掴む等)を明示する。
+                    // 動作はするので警告に留める
+                    Core::Logger::Warning(
+                        "DX12",
+                        std::string(".kshaderの構成が実行ファイルと食い違っています(パッケージ: ") +
+                            (package.DebugBuild ? "Debug" : "Release") + " / 実行ファイル: " +
+                            (kIsDebugBuild ? "Debug" : "Release") + ")");
+                }
+                return package.VariantMask;
+            }
+            catch (const std::exception& e)
+            {
+                Core::Logger::Error(
+                    "DX12", std::string("シェーダーパッケージを読めませんでした: ") + e.what());
+                return 0u;
+            }
+        }
+
+        Core::Logger::Error(
+            "DX12",
+            ".kshaderが1つも見つかりません: " + Core::WideToUtf8(shaderDirectory) +
+                " (ビルド時にKurenaiShaderPackerが実行されていない可能性があります)");
+        return 0u;
     }
 
     void DX12Device::DetectBindlessSupport()
     {
         m_SupportsBindless = false;
 
-        // シェーダー側の条件。SM 6.6でコンパイルできること(デバイスの対応状況と
-        // dxcompiler.dllのバージョンの両方で決まる。DX12ShaderCompiler::Initialize参照)
-        if (!m_ShaderCompiler.IsAvailable() || !m_ShaderCompiler.SupportsBindless())
+        // シェーダー側の条件。KURENAI_BINDLESS 付きで焼かれたSM 6.6のバリアントを
+        // 実際に使っていること(デバイスの対応状況と、ビルド時にそのバリアントを
+        // 焼けたかの両方で決まる。DetectShaderModelAndSelectVariant参照)
+        if (m_ShaderVariant != Assets::ShaderVariant::Dxil66)
         {
             Core::Logger::Info(
                 "DX12",
-                "bindless非対応: シェーダーモデル6.6でのコンパイルができません"
-                "(ResourceDescriptorHeapにはdxc 1.6以降とSM 6.6対応のGPUが必要です)");
+                "bindless非対応: SM 6.6のシェーダーバリアントを使用していません"
+                "(ResourceDescriptorHeapにはSM 6.6対応のGPUと、ビルド時にSM 6.6を扱えるdxcが必要です)");
             return;
         }
 
@@ -2836,12 +2887,15 @@ namespace Kurenai::RHI
     {
         m_SupportsMeshShader = false;
 
-        // as/msプロファイルはSM 6.5が下限。RayQueryと同じ条件のため、
-        // レイトレーシングが使える環境なら通常ここも通る
-        if (!m_ShaderCompiler.IsAvailable() || !m_ShaderCompiler.SupportsMeshShaderProfile())
+        // このエンジンのメッシュシェーダーはジオメトリをbindlessで引くため、
+        // 増幅/メッシュシェーダーのバイトコードはSM 6.6(bindless)のバリアントにしか焼かれていない。
+        // したがって条件はbindlessと同じ
+        if (m_ShaderVariant != Assets::ShaderVariant::Dxil66)
         {
             Core::Logger::Info(
-                "DX12", "メッシュシェーダー非対応: シェーダーモデル6.5でのコンパイルができません");
+                "DX12",
+                "メッシュシェーダー非対応: SM 6.6のシェーダーバリアントを使用していません"
+                "(このエンジンのメッシュシェーダーはジオメトリをbindlessで引くため)");
             return;
         }
 
@@ -3088,15 +3142,16 @@ namespace Kurenai::RHI
         }
 
         // インラインレイトレーシングのRayQueryはシェーダーモデル6.5で追加された機能で、
-        // DXILを出力できるdxcでしかコンパイルできない。ハードウェアがTier 1.1でも
-        // ここが満たせなければトレースするシェーダーを作れないため非対応として扱う
-        // (Phase 0でdxc/SM 6.xへ移行した理由そのもの)
-        if (!m_ShaderCompiler.IsAvailable() || m_ShaderCompiler.GetShaderModel() < D3D_SHADER_MODEL_6_5)
+        // DXILでしか表現できない。ハードウェアがTier 1.1でも、DXILのバリアント
+        // (Dxil65 / Dxil66)を使っていなければトレースするシェーダーを作れないため
+        // 非対応として扱う(Phase 0でdxc/SM 6.xへ移行した理由そのもの)
+        if (m_ShaderVariant != Assets::ShaderVariant::Dxil65 && m_ShaderVariant != Assets::ShaderVariant::Dxil66)
         {
             Core::Logger::Warning(
                 "DX12",
-                "レイトレーシング非対応: シェーダーモデル6.5でのコンパイルができません"
-                "(RayQueryにはdxcとSM 6.5が必要です。dxcompiler.dllの配置とデバイスの対応状況を確認してください)");
+                "レイトレーシング非対応: DXIL(SM 6.5以上)のシェーダーバリアントを使用していません"
+                "(RayQueryにはSM 6.5が必要です。デバイスの対応状況と、ビルド時に.kshaderへSM 6.xのバリアントが"
+                "焼かれているかを確認してください)");
             m_Device5.Reset();
             return;
         }
