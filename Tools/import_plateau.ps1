@@ -30,7 +30,7 @@
     パッカーは GPU も内部のワーカースレッドも使わず、1タイルの処理は実質1コアで走る。
     28論理コアの機械で1コアしか使っていないので、プロセスを並べれば素直に効く。
     (テクスチャの多いモデルでは事情が逆で、GPU の BC7 圧縮が飽和しているため
-     プロセスを分けても速くならない。docs/ImplementationDetail.md 50.6節)
+     プロセスを分けても速くならない。docs/ImplementationDetail.md 51.6節)
 
     1にすると従来どおりの直列実行になる。
 
@@ -125,6 +125,12 @@ if ($actualBytes -ne $expectedBytes)
 # 破綻する。
 # 【LOD2も入れない】LOD2整備済み80タイルのメッシュコードは全てLOD1側にも存在するため、
 # 同時に読むと同じ建物が二重になりZファイティングを起こす。
+#
+# 【丸の内のLOD2は別のシーンで取り込んでいる】Scenes\PlateauMarunouchi.kscene が
+# 53394600/53394601 の建築物LOD2と、同じ範囲の橋梁・地形・道路を持つ。
+# こちらは dem/tran を含むぶんシーン対角が16.5kmになるので、[Scene]ShadowDistance と
+# [Scene]CameraSpeed を明示して抑えている(README「テクスチャ付きの近景シーン」参照)。
+# このスクリプトが作る23区シーンとは --origin が同じ値なので、座標はそのまま対応する。
 if (-not (Test-Path -LiteralPath $lod1Dir -PathType Container))
 {
     Write-Host "[2/5] bldg/lod1 を展開中(約3.19GB / 671ファイル)..."

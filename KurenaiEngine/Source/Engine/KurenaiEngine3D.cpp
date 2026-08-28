@@ -24,6 +24,11 @@ namespace Kurenai
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
 
+        // シーン読み込みの進捗をログへ落とす最短間隔[秒]。
+        // 1モデルごとに出すと767モデルのシーンで767行になるため間引く。
+        // 最初(0/N)と最後(N/N)だけは間隔に関わらず必ず出す
+        constexpr float kSceneLoadProgressLogIntervalSeconds = 1.0f;
+
         // ビュー射影行列から取り出した視錐台の6平面(左/右/下/上/手前/奥)。
         // 各要素は平面の方程式 dot(n, p) + d の (n.xyz, d)
         struct FrustumPlanes
@@ -100,6 +105,58 @@ namespace Kurenai
                 {
                     return false;
                 }
+            }
+            return true;
+        }
+
+        // メッシュ単位のフラスタムカリング判定。IsAABBVisibleを呼ぶ7つの描画パスすべてが、
+        // モデル単位の判定を通ったあとのメッシュのループから同じ形で呼ぶ。
+        //
+        // 【統計はモデル単位と別のカウンタへ入れる】分母も意味も違うため
+        // (KurenaiEngine3D.h の m_MeshCullTested のコメント参照)。呼び出し側が
+        // どのカウンタを渡すかを見て取れるよう、メンバではなく引数で受ける。
+        //
+        // 【メッシュ番号はポインタ差で引く】各パスのループは
+        // for (const auto& mesh : instance.Model.Meshes) の形で添字を持たない。
+        // Meshesはvectorで連続しているため、先頭との差がそのまま添字になる
+        bool IsMeshVisibleWithStats(
+            bool enabled, const FrustumPlanes& frustum, const Assets::ModelInstance& instance,
+            const Assets::Mesh& mesh, uint32_t& tested, uint32_t& culled)
+        {
+            if (!enabled)
+            {
+                // 対照実験用のOFF。判定を1回も呼ばないので統計は「判定なし」になり、
+                // 「実行したが間引き0」と区別できる(EngineDefaults.h の MeshCullingEnabled 参照)
+                return true;
+            }
+
+            ++tested;
+
+            const size_t meshIndex = static_cast<size_t>(&mesh - instance.Model.Meshes.data());
+            if (meshIndex >= instance.MeshWorldBoundsList.size())
+            {
+                // SceneLoaderが必ずMeshesと同じ要素数で作るのでここへは来ない。
+                // 来た場合は間引かない側(保守側)へ倒す ―― 見えるものを消すより、
+                // 間引けないほうが被害が小さい。毎フレーム何千回も呼ばれるので記録は1回だけ
+                static bool logged = false;
+                if (!logged)
+                {
+                    logged = true;
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "メッシュ単位のワールドAABBが足りません(メッシュ数 " +
+                            std::to_string(instance.Model.Meshes.size()) + " / AABB " +
+                            std::to_string(instance.MeshWorldBoundsList.size()) +
+                            ")。メッシュ単位のフラスタムカリングを行いません");
+                }
+                return true;
+            }
+
+            const Assets::MeshWorldBounds& bounds = instance.MeshWorldBoundsList[meshIndex];
+            if (!IsAABBVisible(frustum, bounds.Min, bounds.Max))
+            {
+                ++culled;
+                return false;
             }
             return true;
         }
@@ -3735,6 +3792,15 @@ namespace Kurenai
                     continue;
                 }
 
+                // メッシュ単位のカリング。統計はモデル単位とは別カウンタへ入れる。
+                // 【描かないメッシュを弾いた後に置く】分母を「このパスが実際に描くメッシュ」に
+                // 揃えないと、間引き率が薄まって効きが読めなくなる
+                if (!IsMeshVisibleWithStats(
+                        m_MeshCullingEnabled, swRasterFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                {
+                    continue;
+                }
+
                 const uint32_t vertexBufferIndex =
                     mesh.VertexBuffer ? mesh.VertexBuffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
                 const uint32_t indexBufferIndex =
@@ -4329,6 +4395,8 @@ namespace Kurenai
         }
         m_LoadRequestCV.notify_one();
         m_SceneLoadInFlight = true;
+        // 進捗表示にシーン名を出すために、いま読ませているシーンを控える
+        m_SceneLoadingIndex = sceneIndex;
     }
 
     void KurenaiEngine3D::RetireAssets(RetiredAssets&& retired)
@@ -4419,9 +4487,39 @@ namespace Kurenai
         auto loaded = std::make_unique<LoadedScene>();
         loaded->SceneIndex = sceneIndex;
 
+        // 読み込み進捗。UIの進捗ウィンドウ(UIManager)がatomicを読んで出す。
+        //
+        // 【ログにも出す】UIを開いていない・F1で隠している・ヘッドレスに近い確認では
+        // 画面の表示が見えない。一定間隔でログへ落としておけば後からでも追える。
+        // 1件ごとに出すと767行になるため、間隔を空けて間引く
+        m_SceneLoadProgressLoaded.store(0, std::memory_order_relaxed);
+        m_SceneLoadProgressTotal.store(0, std::memory_order_relaxed);
+        const std::wstring& progressSceneFileName = m_SceneFilePaths[sceneIndex];
+        auto lastProgressLogTime = std::chrono::steady_clock::now();
+        const auto onProgress =
+            [this, &lastProgressLogTime, &progressSceneFileName](size_t loadedModels, size_t totalModels)
+        {
+            m_SceneLoadProgressLoaded.store(static_cast<uint32_t>(loadedModels), std::memory_order_relaxed);
+            m_SceneLoadProgressTotal.store(static_cast<uint32_t>(totalModels), std::memory_order_relaxed);
+
+            const auto now = std::chrono::steady_clock::now();
+            const bool isFirstOrLast = (loadedModels == 0) || (loadedModels == totalModels);
+            const bool intervalElapsed =
+                std::chrono::duration<float>(now - lastProgressLogTime).count() >= kSceneLoadProgressLogIntervalSeconds;
+            if (!isFirstOrLast && !intervalElapsed)
+            {
+                return;
+            }
+            lastProgressLogTime = now;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "シーン読み込み: " + std::to_string(loadedModels) + " / " + std::to_string(totalModels) +
+                    " モデル (" + WideToUtf8(progressSceneFileName) + ")");
+        };
+
         try
         {
-            loaded->Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory);
+            loaded->Scene = Assets::LoadScene(*m_Device, m_SceneFilePaths[sceneIndex], assetRootDirectory, onProgress);
         }
         catch (const std::exception& e)
         {
@@ -5169,6 +5267,29 @@ namespace Kurenai
         // 半径を伸ばすほど画面上のサンプル間隔が粗くなって破綻するが、RTには
         // その制約が無く、部屋の広さ程度まで伸ばしたほうがバウンス光が正しく回る
         m_RTAOMaxDistance = std::clamp(diagonal * 0.03f, 0.1f, 10.0f);
+
+        // カメラの移動速度。.ksceneが[Scene]CameraSpeedを持っていればそれを使い、
+        // 無ければシーン対角から決める。
+        //
+        // 【比例と下限の2段】基準はEmeraldSquare(対角344.6m)で従来どおりの5 m/sになる比例式。
+        // それより小さいシーンは従来の5 m/sで既に使いやすいので下限で据え置く
+        // (比例だけだとSponza(対角37.1m)が0.54 m/sになり、逆に遅くなる)。
+        // 根拠と実測はEngineDefaults.hのCameraSpeed一式のコメントに置いてある
+        m_CameraSpeed = m_Scene.HasCameraSpeed
+            ? m_Scene.CameraSpeed
+            : (std::max)(
+                  Defaults::CameraSpeedMin,
+                  diagonal / Defaults::CameraSpeedReferenceDiagonal * Defaults::CameraSpeed);
+
+        // 【必ずログに出す】速度は絵に写らないため、「効いていない」と「効いているが
+        // 想定と違う値になっている」を見た目では区別できない。シーンごとの実効値を残しておく
+        char cameraSpeedText[192];
+        std::snprintf(
+            cameraSpeedText, sizeof(cameraSpeedText),
+            "カメラ移動速度: %.2f m/s (Shift時 %.2f m/s) [シーン対角 %.1f m / %s]",
+            m_CameraSpeed, m_CameraSpeed * Defaults::CameraSpeedShiftMultiplier, diagonal,
+            m_Scene.HasCameraSpeed ? "[Scene]CameraSpeedの指定" : "対角からの自動決定");
+        Core::Logger::Info("KurenaiEngine3D", cameraSpeedText);
     }
 
     // 歩き回る視点のカメラの近平面を求める。シーン対角に比例させつつ、上限で頭打ちにする。
@@ -5689,6 +5810,8 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
         m_FrameStatsCullTestedSum += m_FrustumCullTested;
         m_FrameStatsCullCulledSum += m_FrustumCullCulled;
+        m_FrameStatsMeshCullTestedSum += m_MeshCullTested;
+        m_FrameStatsMeshCullCulledSum += m_MeshCullCulled;
         m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
         m_FrameStatsDrawCallsShadowSum += m_DrawCallsShadow;
         m_FrameStatsDrawCallsDepthPrepassSum += m_DrawCallsDepthPrepass;
@@ -5786,21 +5909,31 @@ namespace Kurenai
         }
 
         // フラスタムカリングの効き。「間引いた数が0」は、判定式が常に通しているのか
-        // 本当に全部が視界内なのかを区別できないため、テストした数と併せて出す
-        if (m_FrameStatsCullTestedSum > 0 && m_FrameStatsFrameCount > 0)
+        // 本当に全部が視界内なのかを区別できないため、テストした数と併せて出す。
+        //
+        // 【モデル単位とメッシュ単位を別の行にする】分母も、効くシーンも違う。
+        // モデル単位は.kmodelを多数並べるシーンで効き、1モデルに数千メッシュを持つ
+        // アセットでは1つも間引けない。メッシュ単位はその逆。合算すると、どちらが効いたのか
+        // ―― あるいは片方が一度も実行されていないのか ―― が読めなくなる
+        const auto logCullStats = [this](const char* label, uint64_t testedSum, uint64_t culledSum)
         {
-            const double testedPerFrame = static_cast<double>(m_FrameStatsCullTestedSum) / m_FrameStatsFrameCount;
-            const double culledPerFrame = static_cast<double>(m_FrameStatsCullCulledSum) / m_FrameStatsFrameCount;
-            const double ratio = 100.0 * static_cast<double>(m_FrameStatsCullCulledSum)
-                / static_cast<double>(m_FrameStatsCullTestedSum);
+            if (testedSum == 0 || m_FrameStatsFrameCount == 0)
+            {
+                // 判定が1回も走っていない。「間引き0」と区別が付くよう、行そのものを出さない
+                return;
+            }
+            const double testedPerFrame = static_cast<double>(testedSum) / m_FrameStatsFrameCount;
+            const double culledPerFrame = static_cast<double>(culledSum) / m_FrameStatsFrameCount;
+            const double ratio = 100.0 * static_cast<double>(culledSum) / static_cast<double>(testedSum);
 
-            char cullText[192];
+            char cullText[224];
             std::snprintf(
-                cullText, sizeof(cullText),
-                "  フラスタムカリング: 判定 %.1f / 間引き %.1f (%.1f%%) [1フレームあたり・全パス合計]",
-                testedPerFrame, culledPerFrame, ratio);
+                cullText, sizeof(cullText), "  %s: 判定 %.1f / 間引き %.1f (%.1f%%) [1フレームあたり・全パス合計]",
+                label, testedPerFrame, culledPerFrame, ratio);
             Core::Logger::Info("Perf", cullText);
-        }
+        };
+        logCullStats("フラスタムカリング(モデル単位)", m_FrameStatsCullTestedSum, m_FrameStatsCullCulledSum);
+        logCullStats("フラスタムカリング(メッシュ単位)", m_FrameStatsMeshCullTestedSum, m_FrameStatsMeshCullCulledSum);
 
         // パス別のドローコール数。**「G-Bufferは減ったがシャドウは減っていない」**のような
         // 片手落ちは合計値では見えない(シャドウはカスケード4回ぶんが積み上がる)
@@ -5868,6 +6001,8 @@ namespace Kurenai
         m_FrameStatsWorstFrameTimeMs = 0.0f;
         m_FrameStatsCullTestedSum = 0;
         m_FrameStatsCullCulledSum = 0;
+        m_FrameStatsMeshCullTestedSum = 0;
+        m_FrameStatsMeshCullCulledSum = 0;
         m_FrameStatsDrawCallsGBufferSum = 0;
         m_FrameStatsDrawCallsShadowSum = 0;
         m_FrameStatsDrawCallsDepthPrepassSum = 0;
@@ -5961,7 +6096,12 @@ namespace Kurenai
     {
         // メッセージベースの入力API(IsKeyDown)を使う。GetAsyncKeyStateと異なりウィンドウが
         // フォーカスを失っている間は反応せず、PostMessageによるテスト自動化とも整合する
-        const float moveSpeed = IsKeyDown(VK_SHIFT) ? 20.0f : 5.0f;
+        //
+        // 【速度は即値ではなくシーンから決まる】m_CameraSpeedは.ksceneの[Scene]CameraSpeed、
+        // 無ければシーン対角から自動で決まる(ResetSceneDependentParams)。Shiftの倍率は
+        // 従来の 20/5 = 4倍をそのまま保つ
+        const float moveSpeed =
+            m_CameraSpeed * (IsKeyDown(VK_SHIFT) ? Defaults::CameraSpeedShiftMultiplier : 1.0f);
         const float moveAmount = moveSpeed * deltaTime;
 
         const DirectX::XMFLOAT3 forward = m_Camera.GetForward();
@@ -6069,9 +6209,19 @@ namespace Kurenai
 
     void KurenaiEngine3D::Render(const FrameState& frameState)
     {
-        // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる
+        // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる。
+        // モデル単位とメッシュ単位は別のカウンタで、混ぜない(KurenaiEngine3D.h参照)。
+        //
+        // 【0に戻す前に前フレームの値を控える】ドローコール数と同じ理由で、UIパネルは
+        // Renderの外で描かれるため現在のカウンタを読むと必ずリセット直後の0になる
+        m_FrustumCullTestedLastFrame = m_FrustumCullTested;
+        m_FrustumCullCulledLastFrame = m_FrustumCullCulled;
+        m_MeshCullTestedLastFrame = m_MeshCullTested;
+        m_MeshCullCulledLastFrame = m_MeshCullCulled;
         m_FrustumCullTested = 0;
         m_FrustumCullCulled = 0;
+        m_MeshCullTested = 0;
+        m_MeshCullCulled = 0;
         // ドローコール数も同じくフレーム単位。各パスが自分のカウンタを積み上げる。
         //
         // 【0に戻す前に前フレームの値を控える】UIパネルはRenderの外で描かれるため、
@@ -7558,6 +7708,14 @@ namespace Kurenai
 
                             for (const auto& mesh : instance.Model.Meshes)
                             {
+                                // メッシュ単位のカリング。錐台はこのカスケードのライト正射影で、
+                                // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)
+                                if (!IsMeshVisibleWithStats(
+                                        m_MeshCullingEnabled, cascadeFrustum, instance, mesh, m_MeshCullTested,
+                                        m_MeshCullCulled))
+                                {
+                                    continue;
+                                }
                                 // アルファカットアウトは切り抜きを反映して深度を書く。
                                 // 見ないままだと、葉や柵のようにテクスチャで抜く前提の
                                 // マテリアルが板ポリゴンのまま影を落とす
@@ -7680,6 +7838,13 @@ namespace Kurenai
                     // キャプチャ側にも奥から手前への描画順とブレンドが要り、コストに見合わない
                     // (プローブへ半透明を含めないのは一般的な割り切り)
                     if (mesh.IsTransparent)
+                    {
+                        continue;
+                    }
+
+                    // メッシュ単位のカリング。錐台はキューブの1面ぶん
+                    if (!IsMeshVisibleWithStats(
+                            m_MeshCullingEnabled, faceFrustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
                     {
                         continue;
                     }
@@ -8528,6 +8693,18 @@ namespace Kurenai
                                 continue;
                             }
 
+                            // メッシュ単位のカリング。
+                            // 【G-Bufferと同じ錐台・同じ判定にすること】ここで間引いたメッシュが
+                            // G-Bufferでは描かれると、深度プリパスが埋めていない画素で早期Zが効かず
+                            // 遅くなるだけで済むが、逆(プリパスで描いてG-Bufferで間引く)だと
+                            // 描かれていないものの深度が残る
+                            if (!IsMeshVisibleWithStats(
+                                    m_MeshCullingEnabled, prepassFrustum, instance, mesh, m_MeshCullTested,
+                                    m_MeshCullCulled))
+                            {
+                                continue;
+                            }
+
                             // カットアウトは切り抜きを反映しないと深度に嘘が入る。
                             // ミラーリングは表裏判定が逆のPSOでないとカリングされる面が入れ替わり、
                             // G-Bufferと違う深度になってしまう
@@ -8675,11 +8852,15 @@ namespace Kurenai
                     currentPipelineState = wanted;
                 };
 
-                // 視錐台の外にあるモデルは丸ごと飛ばす。
+                // 視錐台の外にあるモデルは丸ごと飛ばし、通ったモデルの中でさらに
+                // 視錐台の外にあるメッシュを飛ばす(下のメッシュのループ)。
                 //
-                // 【メッシュ単位ではできない】Assets::MeshはAABBを持たず、AABBがあるのはModelだけ
-                // (Model.h)。したがって1モデルに多数のメッシュを持つアセット(Bistro、Emerald Square)
-                // では1つも間引けない。効くのは.kmodelを多数並べるシーンのほう
+                // 【2段になっている理由】モデル単位だけだと、1モデルに多数のメッシュを持つ
+                // アセット(Bistro、Emerald Square、PLATEAUのLOD2タイル)では1つも間引けない
+                // ―― モデル全体のAABBが視錐台と交差する限り全メッシュを描くしかないため。
+                // .kmodel v10がメッシュ単位のAABBを持つようになったので、もう一段入れてある。
+                // 効くシーンが逆(モデル単位は.kmodelを多数並べるシーンで効く)なので、
+                // 統計も別のカウンタで数える
                 const FrustumPlanes frustum = ExtractFrustumPlanes(viewProj);
 
                 for (const auto& instance : m_Scene.Instances)
@@ -8727,6 +8908,13 @@ namespace Kurenai
                             continue;
                         }
 
+                        // メッシュ単位のカリング。深度プリパスとまったく同じ錐台・同じ判定
+                        // (片方だけで間引くと深度とG-Bufferが食い違う)
+                        if (!IsMeshVisibleWithStats(
+                                m_MeshCullingEnabled, frustum, instance, mesh, m_MeshCullTested, m_MeshCullCulled))
+                        {
+                            continue;
+                        }
                         // 【ここへ来た時点でメッシュレット経路は使わない】上のモデル単位の
                         // 判定を通らなかったインスタンス(水面、メッシュレットを持たない
                         // メッシュが混ざるモデル、メッシュレット描画が無効)なので、
@@ -9384,6 +9572,14 @@ namespace Kurenai
                         {
                             continue;
                         }
+                        // メッシュ単位のカリング。ここだけはループ内で描かず描画リストを作るので、
+                        // 判定はpush_backの直前に入れる(描かないものをリストへ積まない)
+                        if (!IsMeshVisibleWithStats(
+                                m_MeshCullingEnabled, transparentFrustum, instance, mesh, m_MeshCullTested,
+                                m_MeshCullCulled))
+                        {
+                            continue;
+                        }
                         draws.push_back({ &instance, &mesh, distanceSq });
                     }
                 }
@@ -9583,6 +9779,14 @@ namespace Kurenai
                             // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
                             // PlanarReflection.hlsl冒頭参照)
                             if (mesh.IsTransparent)
+                            {
+                                continue;
+                            }
+
+                            // メッシュ単位のカリング。錐台は鏡映カメラのもの
+                            if (!IsMeshVisibleWithStats(
+                                    m_MeshCullingEnabled, reflectionFrustum, instance, mesh, m_MeshCullTested,
+                                    m_MeshCullCulled))
                             {
                                 continue;
                             }

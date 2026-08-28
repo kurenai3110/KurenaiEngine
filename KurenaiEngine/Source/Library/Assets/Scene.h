@@ -12,6 +12,33 @@
 
 namespace Kurenai::Assets
 {
+    // モデルインスタンスの常駐状態(ストリーミング)。
+    //
+    // 【現状はまだ動いていない】ストリーミング本体(距離に応じた読み込みと破棄)は未実装で、
+    // 読み込まれたインスタンスはすべてLoadedのまま変化しない。ここにあるのは
+    // 「常駐状態を色分けして俯瞰図に出す」デバッグ表示の受け皿で、
+    // 値を実際に動かすのはストリーミングを入れる側の責務。
+    //
+    // 【なぜ表示を先に用意するか】破棄が早すぎる/範囲内なのに読み込まれない、といった破綻は
+    // 画面を見ても分からない(そこに何も無いのが正しいのか間違いなのか区別できない)。
+    // 常駐状態を位置ごとに見られるようにしておかないと、入れた後で原因を切れない
+    enum class ResidencyState : uint8_t
+    {
+        Unloaded = 0,   // 範囲外。ジオメトリ/テクスチャをGPUに載せていない
+        Loading  = 1,   // 読み込み中
+        Loaded   = 2,   // 常駐。描画できる
+    };
+
+    // メッシュ1つぶんのワールド空間AABB。ModelInstanceが自分のModelのメッシュ数だけ持つ。
+    //
+    // 【なぜ配列でなく構造体にするか】IsAABBVisible(KurenaiEngine3D.cpp)が
+    // const float(&)[3] を2本取るため、min/maxが同じ要素の中に隣り合っている必要がある
+    struct MeshWorldBounds
+    {
+        float Min[3] = { 0.0f, 0.0f, 0.0f };
+        float Max[3] = { 0.0f, 0.0f, 0.0f };
+    };
+
     // シーン内に配置された1つのモデルインスタンス。Modelのジオメトリ自体は
     // ワールド空間原点に焼き込み済み(ModelLoader.cpp参照)のままなので、
     // 実際の配置はWorld/NormalMatrixで頂点シェーダー側にて適用する(KurenaiEngine3D::
@@ -42,6 +69,28 @@ namespace Kurenai::Assets
         // その包絡を取る(シーン全体のAABBを合成しているのと同じループで求めている)
         float WorldBoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float WorldBoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
+        // Model::MeshesのメッシュごとのワールドAABB(要素数はModel.Meshes.size()と同じ)。
+        // 上のWorldBoundsMin/Maxと同じくSceneLoaderが読み込み時に一度だけ求める。
+        //
+        // 【なぜインスタンス側に持つか】Meshのローカル空間AABBはModelが持つが、
+        // ワールド空間の値はインスタンスのWorldに依存する。将来同じModelを複数のインスタンスで
+        // 共有するようになっても壊れないよう、変換後の値はこちらへ置く。
+        //
+        // 【空になることがある】.kmodelがv10より前のメッシュ単位AABBを持たない世代…という
+        // 分岐は無い(v10未満は読み込み自体が拒否される)。空になるのはメッシュ0個のモデルだけ。
+        // 描画側は「要素数がMeshesと一致していること」を前提にしてよいが、
+        // 念のため添字の範囲は確かめること
+        std::vector<MeshWorldBounds> MeshWorldBoundsList;
+
+        // ストリーミングの常駐状態と、いま使っているモデルLODの段(0が最も詳細)。
+        //
+        // 【まだ動かす側がいない】どちらもSceneLoaderが読み込み時にLoaded/0を入れたきり
+        // 変化しない。UIの常駐マップがこの2つを色分けして出すので、ストリーミングと
+        // モデルLODを入れる側はここを更新すること(更新しなければ表示は全部「常駐」のまま)。
+        // 詳細はResidencyStateのコメント
+        ResidencyState Residency = ResidencyState::Loaded;
+        uint32_t LODLevel = 0;
     };
 
     // 反射プローブ(リフレクションプローブ)。この位置から周囲をキューブマップへキャプチャし、
@@ -215,6 +264,19 @@ namespace Kurenai::Assets
         // 何らかの既定値を入れると、これまで正しく影が出ていたシーンの見え方が黙って変わる
         bool HasShadowDistance = false;
         float ShadowDistance = 0.0f;
+
+        // WASD/E/Qでカメラを動かす速度[m/s]。未指定(HasCameraSpeed == false)なら
+        // シーンAABBの対角から自動で決める(KurenaiEngine3D::ResetSceneDependentParams)。
+        //
+        // 【なぜ必要か】従来は moveSpeed = Shift ? 20 : 5 の即値だった。市街地規模のシーン
+        // (Project PLATEAU 東京23区は対角約45km)ではこの速度で端から端まで38分かかり、
+        // シーンを見て回ること自体ができない。逆に速度を上げただけにするとSponza(対角37m)のような
+        // 小さいシーンが操作不能になるため、シーンの規模から決めたうえで個別に上書きできる形にする。
+        //
+        // 【既定値を持たせない理由】ShadowDistanceと同じ。何らかの既定値を入れると、
+        // これまで問題なく操作できていたシーンの挙動が黙って変わる
+        bool HasCameraSpeed = false;
+        float CameraSpeed = 0.0f;
 
         // テクスチャの常駐ミップ制御(テクスチャストリーミング)を有効にするか。
         //

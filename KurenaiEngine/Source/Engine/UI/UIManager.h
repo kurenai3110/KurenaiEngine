@@ -47,6 +47,9 @@ namespace Kurenai::UI
         float DrawMainMenuBar();
         // ドックスペースを張り、必要なら既定レイアウトを組む。各パネルのImGui::Beginより前に呼ぶこと
         void DrawDockSpaceAndLayout(float menuBarHeight);
+        // シーン読み込み中だけ、画面中央へ進捗のウィンドウを重ねる。
+        // ドックに入らない独立したウィンドウで、読み込みが終われば消える
+        void DrawSceneLoadProgress();
 
         KurenaiEngine3D& m_Engine;
         std::vector<std::unique_ptr<IPanel>> m_Panels;
