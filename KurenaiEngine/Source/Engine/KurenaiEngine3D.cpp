@@ -387,6 +387,22 @@ namespace Kurenai
             // 実行時に動かすとボリューム経路と平面経路で雲の形が食い違い、
             // 背景の雲と水面に映る雲が別物になる(Sky.hlsliのCloudRaymarchStepsのコメント参照)
             DirectX::XMFLOAT4 CloudQualityParams;
+            // Hi-Zオクルージョンカリング(さらに末尾に追加、Stage 5-2)。
+            // 読むのはGBufferMeshlet.hlslの増幅シェーダーだけ。
+            //
+            // x=有効フラグ(0で判定そのものを行わない)、y=バウンディング球の半径倍率
+            // (m_OcclusionCullRadiusScale)、z=前フレームからのカメラ移動距離[m]、
+            // w=Hi-Zのミップ段数(m_HiZMipLevels)。
+            //
+            // 【xを明示的なフラグにする理由】判定はPrevViewProjで投影するが、プローブ
+            // キャプチャや平面反射のパスはPrevViewProjへViewProjを入れて潰している
+            // (前フレームという意味を持たない)。そこで判定が動くと、Hi-Zの中身とは
+            // 別の視点の行列で投影して見えているものを消す。行列の中身から推し量るのではなく、
+            // 「メインカメラのG-Bufferパスか」をCPU側で決めてここへ渡す
+            DirectX::XMFLOAT4 OcclusionCullParams;
+            // 同じくHi-Zオクルージョンカリング用。xy=Hi-Zのミップ0の解像度[画素]、zw=その逆数。
+            // NDC→UV→テクセル座標の変換に要る(FrameConstantsはレンダー解像度を持っていない)
+            DirectX::XMFLOAT4 HiZScreenParams;
 
         };
 
@@ -6482,6 +6498,42 @@ namespace Kurenai
             0.0f, 0.0f, 0.0f
         };
 
+        // --- Hi-Zオクルージョンカリング(Stage 5-2)の判定パラメータ ---
+        //
+        // 判定に使うHi-Zは前フレームのもの(構築パスがG-Bufferパスより後に登録されるため)。
+        // したがって「前フレームのHi-Zが実際に作られている」ことと「前フレームのビュー射影行列が
+        // 本物である」ことの両方が要る。どちらかが欠けたフレームでは判定を丸ごと止める ――
+        // 初回フレームや解像度変更の直後にここを通すと、未定義の深度で視界内をまとめて消す
+        const bool occlusionCullEnabledThisFrame =
+            occlusionCullingActive && m_HiZValid && m_TAAPrevViewProjValid;
+
+        // 前フレームからのカメラ移動距離。シーンが静的である以上、1フレームぶんの視差ずれの
+        // 原因はカメラの移動だけなので、その距離をバウンディング球の半径へ足せば
+        // 保守側(間引きすぎない側)へ倒せる。前フレームが無いフレームでは0でよい
+        // (そのフレームは上のフラグで判定自体が止まっている)
+        float cameraMoveDistance = 0.0f;
+        if (m_TAAPrevViewProjValid)
+        {
+            const float dx = cameraPosition.x - m_PrevCameraPosition.x;
+            const float dy = cameraPosition.y - m_PrevCameraPosition.y;
+            const float dz = cameraPosition.z - m_PrevCameraPosition.z;
+            cameraMoveDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        constants.OcclusionCullParams = {
+            occlusionCullEnabledThisFrame ? 1.0f : 0.0f,
+            m_OcclusionCullRadiusScale,
+            cameraMoveDistance,
+            static_cast<float>(m_HiZMipLevels),
+        };
+        // Hi-Zのミップ0はG-Buffer深度と同じ解像度で作られる(CreateRenderTargets)
+        constants.HiZScreenParams = {
+            static_cast<float>(m_RenderWidth),
+            static_cast<float>(m_RenderHeight),
+            1.0f / static_cast<float>(std::max(1u, m_RenderWidth)),
+            1.0f / static_cast<float>(std::max(1u, m_RenderHeight)),
+        };
+
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
 
         // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)が深度値からView空間Zを1除算で
@@ -7056,6 +7108,10 @@ namespace Kurenai
             // 現状これらを読まないが、将来読んだときに黙ってカメラの値を拾うのを防ぐため
             captureConstants.PrevViewProj = captureConstants.ViewProj;
             captureConstants.TAAParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+            // Hi-Zオクルージョンカリングも潰す。Hi-Zはメインカメラ視点の深度で、
+            // プローブ視点から見える範囲とは何の関係も無い。上でPrevViewProjを
+            // 「前フレーム」でない値へ差し替えている以上、判定の前提そのものが崩れている
+            captureConstants.OcclusionCullParams = { 0.0f, 0.0f, 0.0f, 0.0f };
             cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
             cmd->SetRenderTargets(captureTargets, 2, m_ProbeCaptureDepth.get());
@@ -7929,6 +7985,14 @@ namespace Kurenai
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "GBuffer",
+            // 増幅シェーダーのHi-Zオクルージョンカリングが読む(Stage 5-2)。
+            //
+            // 【循環にならない】Hi-Zパスは「G-Buffer深度を読んでHi-Zを書く」ので、依存だけ見ると
+            // 互いを参照しているように見える。しかしRenderGraphのReadsは「それより前に登録された
+            // 書き手」がいるときにだけ辺を張る規則で、Hi-Zパスの登録はこのパスより後なので
+            // 辺は張られない(RenderGraph::ResolveExecutionOrder)。実行順も登録順のまま、
+            // 読むのは前フレームに書かれた内容になる ―― それがこの判定の前提そのもの
+            .Reads = { m_HiZTexture.get() },
             // 深度プリパス(直前に登録される)を通したときは、ここへ来る時点で深度が埋まっており、
             // PSOのDepthAllowEqual(GREATER_EQUAL)によって最前面の断片だけがテストを通る。
             //
@@ -7937,7 +8001,8 @@ namespace Kurenai
             .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
                                m_GBufferEmissive.get(), m_GBufferVelocity.get(), m_GBufferBentNormal.get() },
             .DepthTarget = m_GBufferDepth.get(),
-            .Execute = [this, &gbufferViewport, depthPrepassRuns, &viewProj](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive](
+                           RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // ClearRenderTargetはバインド済みの全レンダーターゲットを同じ色でクリアするため、
@@ -7956,6 +8021,24 @@ namespace Kurenai
                 cmd->SetPipelineState(m_GBufferPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetSamplerSet(m_MaterialSamplers.get());
+
+                // 増幅シェーダーのHi-Zオクルージョンカリング用(t8。GBufferMeshlet.hlsl)。
+                //
+                // 【SetTextureではなくSetTextureAllStagesを使う】SetTextureはリソースを
+                // PIXEL_SHADER_RESOURCEへしか遷移させず、増幅シェーダーからは読めない。
+                //
+                // 【パスの先頭で1回だけでよい】SRVのバインドはDX12CommandList側がシャドウで
+                // 保持しており、SetPipelineStateで無効化されるのはルート引数だけで、
+                // 次のDrawの直前にFlushPendingSrvWritesが張り直す。
+                // ここでPSOを切り替えても、下のbindPipelineStateがCBVとサンプラーを
+                // 張り直すのと違って、テクスチャは張り直す必要が無い。
+                //
+                // 【判定しないフレームではバインドもしない】不要な状態遷移を1つ減らすと同時に、
+                // 「バインドされていないのに間引き率が出た」という取り違えを起こせなくする
+                if (occlusionCullingActive)
+                {
+                    cmd->SetTextureAllStages(8, m_HiZTexture.get());
+                }
 
                 // ミラーリング(Worldの行列式が負)されたインスタンス・水面(ModelInstance::IsWater)
                 // インスタンスの組み合わせ(4通り)に応じてパイプラインを切り替える。上で通常の
@@ -8801,6 +8884,9 @@ namespace Kurenai
                     // TAA関連はカメラ視点のものが入ったままなので明示的に潰す(captureProbeFaceと同じ理由)
                     reflectionConstants.PrevViewProj = reflectionConstants.ViewProj;
                     reflectionConstants.TAAParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+                    // Hi-Zオクルージョンカリングも潰す(captureProbeFaceと同じ理由)。
+                    // 鏡映カメラから見える範囲とメインカメラのHi-Zは無関係
+                    reflectionConstants.OcclusionCullParams = { 0.0f, 0.0f, 0.0f, 0.0f };
                     reflectionConstants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, -waterPlaneY };
                     cmd->UpdateBuffer(m_PlanarReflectionConstantBuffer.get(), &reflectionConstants, sizeof(reflectionConstants));
 
@@ -9980,6 +10066,9 @@ namespace Kurenai
         // そのまま保たれ、履歴テクスチャの中身と行列の対応が1フレームずれない
         m_TAAPrevViewProj = constants.ViewProj;
         m_TAAPrevJitterUv = jitterUv;
+        // Hi-Zオクルージョンカリングが「1フレームぶんの視差ずれ」を見積もるのに使う。
+        // m_TAAPrevViewProjと同じ場所・同じタイミングで書くので有効性の管理も同じで済む
+        m_PrevCameraPosition = { constants.CameraPosition.x, constants.CameraPosition.y, constants.CameraPosition.z };
         m_TAAPrevViewProjValid = true;
         m_TAAPrevEffectiveExposureEV100 = m_EffectiveExposureEV100;
         if (m_TAAEnabled)

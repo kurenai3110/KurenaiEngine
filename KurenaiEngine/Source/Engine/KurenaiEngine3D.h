@@ -554,14 +554,14 @@ namespace Kurenai
         // 【メッシュレット経路でしか効かない】判定を書いてあるのは増幅シェーダーなので、
         // メッシュシェーダー非対応の環境(基準機のIntel UHD 620を含む)では一切走らない。
         // これが有効なフレームだけHi-Zパスも構築される(m_HiZTextureのコメント参照)
-        bool m_OcclusionCullingEnabled = true;
+        bool m_OcclusionCullingEnabled = Defaults::OcclusionCullingEnabled;
         // オクルージョン判定でバウンディング球を膨らませる倍率。
         //
         // 【1.0が基準】判定に使うHi-Zは前フレームのものなので、そのフレームのカメラ移動ぶんは
         // 別項(移動距離をそのまま半径へ足す)で吸収している。この倍率が埋めるのはそれとは別の
         // 誤差 ―― バウンディング球がメッシュレットの実体より緩いこと、およびカメラ回転による
         // 見え方の変化。ポップ(隠れていないものが消える)が出たら上げる
-        float m_OcclusionCullRadiusScale = 1.0f;
+        float m_OcclusionCullRadiusScale = Defaults::OcclusionCullRadiusScale;
 
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
@@ -921,6 +921,13 @@ namespace Kurenai
         bool m_TAAPrevViewProjValid = false;
         // 前フレームのジッター量(UV単位)。速度からジッター差分を取り除くのに使う
         DirectX::XMFLOAT2 m_TAAPrevJitterUv{ 0.0f, 0.0f };
+        // 前フレームのカメラ位置(ワールド)。有効性は m_TAAPrevViewProjValid と同じ
+        // (同じ場所で同じタイミングに書くため)。
+        //
+        // 【何に使うか】Hi-Zオクルージョンカリングが判定に使うHi-Zは1フレーム古く、
+        // シーンが静的である以上ずれの原因はカメラの移動だけ。移動距離をバウンディング球の
+        // 半径へ足せば、そのずれを1次の範囲で保守側へ吸収できる(FrameConstants::OcclusionCullParams.z)
+        DirectX::XMFLOAT3 m_PrevCameraPosition{ 0.0f, 0.0f, 0.0f };
         // 前フレームの実効プリ露出EV100。このエンジンはSceneColorへプリ露出を掛け込んでおり、
         // その値が時間順応で毎フレーム変わる(m_EffectiveExposureEV100)。補正しないと
         // 露出が動いている間ずっと履歴が古い明るさを引きずり、明るさの尾を引く
