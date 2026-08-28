@@ -169,7 +169,8 @@ namespace Kurenai::UI
             "実測(Sponza / 1280x720 / DX11)でビット一致を確認している。\n\n"
             "実測(Sponza): GBuffer 14.11ms が GBuffer 6.62ms + DepthPrepass 1.42ms になった"
             "(同フレームのTonemap比で0.671倍)。この内訳からこのシーンのオーバードローは2.05倍。\n\n"
-            "「メッシュレット描画」が有効な間は自動で止まる(深度が一致する保証が無いため)");
+            "【メッシュレット描画とも併用できる】プリパスにもG-Bufferとまったく同じ"
+            "増幅/メッシュシェーダーを使うPSOがあるため、変換は同一のコードになり深度が一致する");
 
         CheckboxEx(
             "メッシュ単位のフラスタムカリング###MeshCulling", &m_Engine.m_MeshCullingEnabled,
@@ -213,15 +214,14 @@ namespace Kurenai::UI
 
         CheckboxEx(
             "メッシュレット描画を有効にする###EnableMeshlet", &m_Engine.m_MeshletRenderingEnabled, true,
-            // 【深度プリパスと併用されない】理由は下のツールチップ本文と
-            // KurenaiEngine3D側のmeshletPathActiveのコメント
-            // 【深度プリパスと併用されない】プリパスは頂点シェーダー経路で深度を書くため、
-            // メッシュレット描画が有効な間はプリパスごと止まる(KurenaiEngine3D側のmeshletPathActive)。
             "無効にすると従来の頂点シェーダー + DrawIndexedで描く。"
             "切り替えても見た目は一致するはずで、変わる場合はメッシュシェーダー側の変換が"
             "頂点シェーダーとずれている。\n\n"
-            "【有効な間は深度プリパスが止まる】プリパスは頂点シェーダー経路で深度を書くため、"
-            "メッシュシェーダーで描いたG-Bufferと深度が一致する保証が無い");
+            "【有効だとモデル全体が1ドローになる】マテリアルはメッシュシェーダーが出力した"
+            "番号でピクセルシェーダーがテーブルから引くため、メッシュごとにテクスチャを"
+            "差し替える必要が無くなる。発行回数はプロファイラパネルのドローコール数で確認できる。\n\n"
+            "【深度プリパスとも併用できる】プリパスにもG-Bufferと同じ増幅/メッシュシェーダーを"
+            "使うPSOがあるため、変換が同一のコードになり深度が一致する");
 
         CheckboxEx(
             "メッシュレットを色分けして表示###MeshletDebugView", &m_Engine.m_MeshletDebugViewEnabled, false,
@@ -232,6 +232,42 @@ namespace Kurenai::UI
             "反射をレイトレーシングにしていると、反射に映る面も同じ色分けになる。"
             "同じ塊が同じ色で映れば、描画とレイトレーシングが同一のジオメトリを"
             "見ていることの確認になる");
+
+        CheckboxEx(
+            "Hi-Zオクルージョンカリング###OcclusionCulling", &m_Engine.m_OcclusionCullingEnabled,
+            Defaults::OcclusionCullingEnabled,
+            "メッシュレットのバウンディング球を前フレームのHi-Zへ投影し、"
+            "「視界内だが手前の何かに完全に隠れている」塊を落とす。"
+            "錐台カリングは視界の外しか落とせないため、街路のように"
+            "視界内のほぼ全部が手前の建物に隠れる場面ではこちらしか効かない。\n\n"
+            "【有効な間だけHi-Zを毎フレーム構築する】無効にするとHi-Zパスごと止まる"
+            "(Render TargetsのHi-Z表示中を除く)。\n\n"
+            "【純粋な最適化】有効/無効で最終画像が変わってはならない。"
+            "変わるなら判定が緩すぎる(下の半径倍率を上げる)。"
+            "間引き率はPerfログの「メッシュレットカリング」の行に出る");
+
+        SliderFloatEx(
+            "オクルージョンの半径倍率###OcclusionCullRadiusScale", &m_Engine.m_OcclusionCullRadiusScale,
+            1.0f, 4.0f, Defaults::OcclusionCullRadiusScale, "%.2f", 0,
+            "判定に使うバウンディング球をこの倍率で膨らませる。大きいほど間引きが減り、安全側になる。\n\n"
+            "【1フレームぶんのカメラ移動はこの倍率とは別に補正されている】"
+            "判定に使うHi-Zは1フレーム古いが、その時間差の視差ずれは"
+            "前フレームからのカメラ移動距離を半径へ足すことで吸収している。"
+            "この倍率が埋めるのは、バウンディング球がメッシュレットの実体より緩いことと、"
+            "カメラ回転による見え方の変化。\n\n"
+            "【小さくすると陽性対照になる】1.0未満は選べないが、"
+            "上げたときに間引き率が下がることを確認すれば、判定が実際に効いていることの証拠になる");
+
+        CheckboxEx(
+            "カリングの間引き数を数える###MeshletCullStats", &m_Engine.m_MeshletCullStatsEnabled,
+            Defaults::MeshletCullStatsEnabled,
+            "増幅シェーダーが判定数と間引き数を数え、数フレーム遅れでCPUへ読み戻して"
+            "下に表示し、Perfログにも1秒ごとに残す。\n\n"
+            "【切ると何も分からなくなる】保守的な判定が正しく働いていれば絵は1画素も"
+            "変わらないので、間引けているかどうかは数値でしか確かめられない。\n\n"
+            "【計測そのものの負荷を測るために切れるようにしてある】"
+            "増幅シェーダーのアトミックはグループ単位に集約してあるが、"
+            "その負荷は切り替えて実測すること");
 
         EndParamGroup();
 
@@ -254,11 +290,47 @@ namespace Kurenai::UI
         }
         ImGui::Text(
             "メッシュレット: %zu (メッシュ %zu / %zu が保持)", meshletCount, meshletMeshCount, meshCount);
+
+        // bindless区画の使用状況。メッシュシェーダー経路はジオメトリもマテリアルも
+        // ResourceDescriptorHeap経由で引くため、ここが満杯だと**エラーログ1行だけを残して
+        // 白1x1で描かれる**(RegisterBindlessは例外を投げない)。
+        // 「なぜかこのモデルだけ真っ白」で気づく前に見えるようにしておく
+        if (m_Engine.m_BindlessCapacity > 0)
+        {
+            ImGui::Text(
+                "bindless: %u / %u (%.1f%%)", m_Engine.m_BindlessUsedCount, m_Engine.m_BindlessCapacity,
+                100.0f * static_cast<float>(m_Engine.m_BindlessUsedCount)
+                    / static_cast<float>(m_Engine.m_BindlessCapacity));
+        }
+
         if (meshCount > 0 && meshletMeshCount == 0)
         {
             ImGui::TextWrapped(
                 "このシーンのモデルはメッシュレットを持っていない。KurenaiPackerで"
                 "--no-meshletsを付けずに再パックすること");
+        }
+
+        // カリングの効き。**「間引き0」だけでは判定が働いていないのか本当に全部見えているのかを
+        // 区別できない**ため、判定した数と併せて出す。オクルージョンは視錐台+コーンとは
+        // 別に出す(俯瞰と街路で差が出ることが、判定が効いていることの証拠になる)
+        if (m_Engine.m_MeshletCullStatsEnabled)
+        {
+            const uint32_t tested = m_Engine.m_MeshletCullTested;
+            if (tested > 0)
+            {
+                const float frustumPercent = 100.0f * static_cast<float>(m_Engine.m_MeshletCullFrustumCulled) /
+                                             static_cast<float>(tested);
+                const float occlusionPercent = 100.0f * static_cast<float>(m_Engine.m_MeshletCullOcclusionCulled) /
+                                               static_cast<float>(tested);
+                ImGui::Text("判定 %u", tested);
+                ImGui::Text("  視錐台+コーン %u (%.1f%%)", m_Engine.m_MeshletCullFrustumCulled, frustumPercent);
+                ImGui::Text("  オクルージョン %u (%.1f%%)", m_Engine.m_MeshletCullOcclusionCulled, occlusionPercent);
+            }
+            else
+            {
+                // 数フレーム遅れで読み戻すため、起動直後や切り替え直後はここを通る
+                ImGui::TextWrapped("カリング統計: まだ読み戻せていない(数フレームかかる)");
+            }
         }
     }
 

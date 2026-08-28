@@ -194,6 +194,8 @@ namespace Kurenai::RHI
         // メッシュシェーダーが直接起動される)
         IRHIShader* AmplificationShader = nullptr;
         IRHIShader* MeshShader = nullptr;
+        // nullptrでもよい(深度だけを書くパスではピクセルシェーダーの段ごと省ける)。
+        // PipelineStateDesc::PixelShaderと同じ扱い
         IRHIShader* PixelShader = nullptr;
 
         std::vector<Format> RenderTargetFormats;
@@ -214,5 +216,24 @@ namespace Kurenai::RHI
         SamplerFilter Filter = SamplerFilter::Anisotropic;
         SamplerAddressMode AddressMode = SamplerAddressMode::Wrap;
         uint32_t MaxAnisotropy = 16;
+    };
+
+    // タイルリソースとして確保するテクスチャの、**縮めていない元の寸法**。
+    //
+    // 常駐ミップを削ったテクスチャは寸法そのものが小さくなっている(常駐ミップ制御は
+    // 「firstMipを新しいミップ0とする小さなテクスチャ」を作る)ため、そこから元の
+    // 寸法を復元できない。予約リソースは常に元の寸法・元のミップ数で作る必要があるので、
+    // 呼び出し側(.ktexのヘッダを読んでいるAssets::TextureStreamingManager)が渡す。
+    //
+    // 【Formatが RHI::Format ではなくDXGIの生値なのはなぜか】RHI::FormatにはBC系の
+    // 圧縮フォーマットが無く(RHIEnums.h)、テクスチャ生成は元々DirectXTexのメタデータを
+    // そのまま使って RHI の enum を通っていない。ここだけ enum を増やしても
+    // 変換表が増えるだけなので、既存の流儀に合わせてDXGI_FORMATの値を渡す
+    struct TiledTextureDesc
+    {
+        uint32_t Width = 0;
+        uint32_t Height = 0;
+        uint32_t MipLevels = 0;
+        uint32_t DxgiFormat = 0;
     };
 }

@@ -1,11 +1,29 @@
 #pragma once
 
+#include <cstdint>
+
 #include "KurenaiTypes.h"
 
 #include "RHIBindless.h"
 
 namespace Kurenai::RHI
 {
+    class IRHITexture;
+
+    // IRHIDevice::PrepareTextureContentsが返す、差し替え待ちのGPUリソース。
+    // 中身はバックエンドごとに違うため、上位層からは不透明なハンドルとしてだけ扱う。
+    // 破棄すれば差し替えは行われず、作りかけのリソースごと捨てられる
+    class KURENAI_LIB_API IRHIPendingTextureContents
+    {
+    public:
+        virtual ~IRHIPendingTextureContents() = default;
+
+        // 差し替え先のテクスチャ。呼び出し側が「どれが更新されたか」を照合するために使う
+        virtual IRHITexture* GetTarget() const = 0;
+        // 差し替え後に常駐するミップ段数(統計の積算用)
+        virtual uint32_t GetMipLevels() const = 0;
+    };
+
     class KURENAI_LIB_API IRHITexture
     {
     public:
@@ -29,5 +47,11 @@ namespace Kurenai::RHI
         // (生成経路が多いため、経路ごとに記録するのではなくリソース側から引いて記録漏れを防ぐ)
         virtual uint32_t GetWidth() const = 0;
         virtual uint32_t GetHeight() const = 0;
+
+        // このテクスチャが実際に持っているミップ段数。
+        //
+        // テクスチャストリーミングの常駐ミップ制御が「今どこまで常駐しているか」を知るために要る。
+        // GetWidth/GetHeightと同じく、生成経路が多いためリソース記述子から引いて記録漏れを防ぐ
+        virtual uint32_t GetMipLevels() const = 0;
     };
 }

@@ -50,6 +50,20 @@ namespace Kurenai::RHI
         // bindlessが引けないだけで描画は従来経路で続行できるため)
         uint32_t Register(D3D12_CPU_DESCRIPTOR_HANDLE sourceCpuHandle);
 
+        // 既に払い出されている番号の中身だけを、新しいディスクリプタで上書きする。
+        // 番号は変わらないため、シェーダーが定数バッファ経由で持っている番号を貼り替えずに済む。
+        //
+        // 【何のためにあるか】テクスチャストリーミングは常駐ミップを変えるたびに
+        // ID3D12Resourceを作り直すが、そのたびにUnregister/Registerすると
+        // フリーリスト経由で番号が変わりうる。ここで同じ番号へ差し替える。
+        //
+        // 【GPUが実行中のディスクリプタを書き換えることになる】D3D12は実行中の
+        // コマンドリストが参照しているディスクリプタの変更を許さない。ただしここで
+        // 指す先は生きている新しいリソース(古い方はDX12Device::RetireResourceで
+        // Nフレーム生かす)なので、最悪でも「1フレーム早く新しい方をサンプルする」に留まる。
+        // GPUベース検証がこれを咎める場合は、呼び出し側でフレーム境界まで遅らせること
+        bool Rebind(uint32_t heapIndex, D3D12_CPU_DESCRIPTOR_HANDLE sourceCpuHandle);
+
         // Registerが返した番号を返却する。kInvalidBindlessIndexを渡した場合は何もしない
         // (呼び出し側が「登録したかどうか」を分岐せずにデストラクタから呼べるようにするため)。
         //

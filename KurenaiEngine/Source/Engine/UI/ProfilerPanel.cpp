@@ -24,6 +24,14 @@ namespace Kurenai::UI
         // PresentSubmitの計測値からは既に除外済みなので、参考情報として別枠で表示する
         ImGui::Text("GPU待ち: %.3f ms", m_Engine.GetLastFrameGPUWaitTimeMs());
 
+        // パス別のドローコール数(直前フレーム)。**シャドウは4カスケードぶんの合計**。
+        // 1モデル1ドロー化やGPU駆動描画が効いたかどうかは、GPU時間だけでは切り分けられない
+        // (発行回数が減ってもピクセルの仕事量は変わらないため)。発行回数そのものを出す
+        ImGui::Text(
+            "ドローコール: G-Buffer %u / シャドウ %u / 深度プリパス %u",
+            m_Engine.m_DrawCallsGBufferLastFrame, m_Engine.m_DrawCallsShadowLastFrame,
+            m_Engine.m_DrawCallsDepthPrepassLastFrame);
+
         // フラスタムカリングの効き(直前のフレームぶん・全パス合計)。
         //
         // 【ログにも出しているが画面にも出す】ログは1秒間隔の平均で、カメラを振りながら
@@ -46,8 +54,8 @@ namespace Kurenai::UI
             const float ratio = 100.0f * static_cast<float>(culled) / static_cast<float>(tested);
             ImGui::Text("%s: 判定 %u / 間引き %u (%.1f%%)", label, tested, culled, ratio);
         };
-        cullLine("モデル単位", m_Engine.m_FrustumCullTested, m_Engine.m_FrustumCullCulled);
-        cullLine("メッシュ単位", m_Engine.m_MeshCullTested, m_Engine.m_MeshCullCulled);
+        cullLine("モデル単位", m_Engine.m_FrustumCullTestedLastFrame, m_Engine.m_FrustumCullCulledLastFrame);
+        cullLine("メッシュ単位", m_Engine.m_MeshCullTestedLastFrame, m_Engine.m_MeshCullCulledLastFrame);
 
         // パスごとの内訳は行数が多いので、左右に並べて縦の長さを半分にする
         if (!ImGui::BeginTable("PassBreakdown", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame))

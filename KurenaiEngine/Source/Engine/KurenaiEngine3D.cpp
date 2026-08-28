@@ -444,6 +444,29 @@ namespace Kurenai
             // 実行時に動かすとボリューム経路と平面経路で雲の形が食い違い、
             // 背景の雲と水面に映る雲が別物になる(Sky.hlsliのCloudRaymarchStepsのコメント参照)
             DirectX::XMFLOAT4 CloudQualityParams;
+            // Hi-Zオクルージョンカリング(さらに末尾に追加、Stage 5-2)。
+            // 読むのはGBufferMeshlet.hlslの増幅シェーダーだけ。
+            //
+            // x=有効フラグ(0で判定そのものを行わない)、y=バウンディング球の半径倍率
+            // (m_OcclusionCullRadiusScale)、z=前フレームからのカメラ移動距離[m]、
+            // w=Hi-Zのミップ段数(m_HiZMipLevels)。
+            //
+            // 【xを明示的なフラグにする理由】判定はPrevViewProjで投影するが、プローブ
+            // キャプチャや平面反射のパスはPrevViewProjへViewProjを入れて潰している
+            // (前フレームという意味を持たない)。そこで判定が動くと、Hi-Zの中身とは
+            // 別の視点の行列で投影して見えているものを消す。行列の中身から推し量るのではなく、
+            // 「メインカメラのG-Bufferパスか」をCPU側で決めてここへ渡す
+            DirectX::XMFLOAT4 OcclusionCullParams;
+            // 同じくHi-Zオクルージョンカリング用。xy=Hi-Zのミップ0の解像度[画素]、zw=その逆数。
+            // NDC→UV→テクセル座標の変換に要る(FrameConstantsはレンダー解像度を持っていない)
+            DirectX::XMFLOAT4 HiZScreenParams;
+            // メッシュレットカリングの統計(さらに末尾に追加、Stage 5-2)。
+            // x=有効フラグ、y=カウンタバッファのbindless番号(UAVの側)、zw=未使用。
+            //
+            // 【なぜbindlessで渡すのか】メッシュシェーダー用ルートシグネチャはSRVテーブルと
+            // サンプラーテーブルしか持たず、UAVレンジが無い。増幅シェーダーから書き込むには
+            // ResourceDescriptorHeap経由しかない(CBV_SRV_UAV_HEAP_DIRECTLY_INDEXEDは立っている)
+            DirectX::XMFLOAT4 MeshletCullStatsParams;
 
         };
 
@@ -870,16 +893,48 @@ namespace Kurenai
             float MaterialID;
             // メッシュシェーダー経路(Shaders/3D/GBufferMeshlet.hlsl)がジオメトリを引くための
             // bindlessディスクリプタ番号。頂点シェーダー経路では読まれない。
-            // すべて4バイトのスカラーなので、末尾に足しても既存フィールドのオフセットは動かない
-            uint32_t VertexBufferIndex;
+            // すべて4バイトのスカラーなので、末尾に足しても既存フィールドのオフセットは動かない。
+            //
+            // 【3本ともモデル単位】かつてメッシュ単位のバッファを指していたが、
+            // 1回のDispatchMeshでモデル全体を描けるようにするためモデル単位へ統合した
+            // (Assets::GpuMeshletのコメント参照)。頂点バッファの番号はメッシュレット1件ごとに
+            // 持たせてあるので、ここでは渡さない。
+            //
+            // 【MeshletOffsetは旧VertexBufferIndexの枠】読むのはGBufferMeshlet.hlslだけで、
+            // かつ同時に直すため、枠を使い回してもレイアウトのずれは起きない
+            uint32_t MeshletOffset;
             uint32_t MeshletBufferIndex;
             uint32_t MeshletVertexBufferIndex;
             uint32_t MeshletTriangleBufferIndex;
+            // このドローで見るメッシュレット数(増幅シェーダーの範囲外判定用)
             uint32_t MeshletCount;
             // 透過率(0=不透明)。GBufferパスがG-BufferのAlbedo.aへ書き、
             // DirectLighting.hlslの透過項が読む(45章)。
             // 4バイトのスカラーを末尾に足しているだけなので、既存フィールドのオフセットは動かない
             float Translucency;
+
+            // --- マテリアルテーブル経路(1モデル1ドロー)専用 -------------------------------
+            //
+            // 1回のDispatchMeshでモデル全体を描くと、上のMetallicFactor〜Translucencyのような
+            // 「メッシュごとに違う値」を定数バッファでは渡せない。代わりにマテリアルを
+            // 構造化バッファ(Assets::GpuMaterial)へ載せ、その番号をここで渡す。
+            // kInvalidBindlessIndexならピクセルシェーダーは従来の定数+t0〜t6経路を使う
+            uint32_t MaterialTableIndex;
+            // 増幅シェーダーがメッシュレットを取捨するマスク(Assets::kGpuMaterialFlag*)
+            uint32_t MeshletFilterReject;
+            uint32_t MeshletFilterRequire;
+            // シーン全体の自発光倍率と遮蔽マップの有効/無効(1.0 or 0.0)。
+            //
+            // 【従来経路では必ず1.0を入れる】これまでこの2つはMakeObjectConstantsが
+            // 係数へ掛けてから渡していた。ピクセルシェーダーはどちらの経路でも必ず
+            // 掛けるようにしてあるので、既に織り込み済みの従来経路では1.0でなければ
+            // 二重に掛かる
+            float EmissiveIntensity;
+            float OcclusionMapScale;
+            // このドローでメッシュレットカリングの統計を数えるか(0/1)。
+            // 深度プリパスは G-Buffer と同じ増幅シェーダーを使うため、
+            // フレーム全体のフラグだけだと同じ塊を1フレームに2回数えてしまう
+            uint32_t MeshletStatsEnabled;
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -918,15 +973,69 @@ namespace Kurenai
             // メッシュレット。ModelLoaderが登録済みの番号をそのまま渡す。
             // メッシュシェーダー非対応・メッシュレット未生成の場合は
             // バッファ自体が無く、GetBindlessIndexはkInvalidBindlessIndexを返す
-            // (MeshletCountが0ならメッシュシェーダー経路には入らないため、その値は使われない)
+            // (MeshletCountが0ならメッシュシェーダー経路には入らないため、その値は使われない)。
+            // 表はモデル単位なので、このメッシュのぶんの範囲をMeshletOffset/MeshletCountで示す
             const auto bindlessIndexOf = [](const RHI::IRHIBuffer* buffer) {
                 return buffer ? buffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
             };
-            constants.VertexBufferIndex = bindlessIndexOf(mesh.VertexBuffer.get());
-            constants.MeshletBufferIndex = bindlessIndexOf(mesh.MeshletBuffer.get());
-            constants.MeshletVertexBufferIndex = bindlessIndexOf(mesh.MeshletVertexBuffer.get());
-            constants.MeshletTriangleBufferIndex = bindlessIndexOf(mesh.MeshletTriangleBuffer.get());
+            constants.MeshletOffset = mesh.MeshletOffset;
+            constants.MeshletBufferIndex = bindlessIndexOf(instance.Model.MeshletBuffer.get());
+            constants.MeshletVertexBufferIndex = bindlessIndexOf(instance.Model.MeshletVertexBuffer.get());
+            constants.MeshletTriangleBufferIndex = bindlessIndexOf(instance.Model.MeshletTriangleBuffer.get());
             constants.MeshletCount = mesh.MeshletCount;
+
+            // メッシュ単位の経路。マテリアルは上の定数とt0〜t6から読むため、
+            // テーブルは使わない(=無効番号)。EmissiveFactorとOcclusionStrengthには
+            // 既にシーン全体の倍率が織り込まれているので、シェーダー側の乗算は1.0にする
+            constants.MaterialTableIndex = RHI::kInvalidBindlessIndex;
+            constants.MeshletFilterReject = 0;
+            constants.MeshletFilterRequire = 0;
+            constants.EmissiveIntensity = 1.0f;
+            constants.OcclusionMapScale = 1.0f;
+            return constants;
+        }
+
+        // 1回のDispatchMeshでモデル全体を描くときの定数。
+        //
+        // 【メッシュ単位の値を入れない】マテリアルの係数もテクスチャもモデル内で
+        // メッシュごとに違うため、定数バッファでは渡せない。ピクセルシェーダーは
+        // メッシュシェーダーが出力したMaterialIndexでマテリアルテーブルを引く。
+        // World/NormalMatrix/TangentSignFlip/MaterialIDだけがインスタンス単位の値で、
+        // これらはモデル全体で共通なので従来どおり定数バッファで渡してよい。
+        //
+        // rejectMask/requireMask: このパスで描くマテリアルの選び方
+        // (Assets::kGpuMaterialFlag*。GBufferCommon.hlsliのMeshletFilter*参照)
+        ObjectConstants MakeModelObjectConstants(
+            const Assets::ModelInstance& instance, float emissiveIntensity, bool occlusionMapEnabled,
+            uint32_t rejectMask, uint32_t requireMask, bool countCullStats = false)
+        {
+            ObjectConstants constants{};
+            constants.World = instance.World;
+            constants.NormalMatrix = instance.NormalMatrix;
+            constants.TangentSignFlip = instance.TangentSignFlip;
+            // 水面はメッシュレット経路に載せない(ShouldUseMeshletPath)ので常に通常マテリアル
+            constants.MaterialID = 0.0f;
+
+            const auto bindlessIndexOf = [](const RHI::IRHIBuffer* buffer) {
+                return buffer ? buffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
+            };
+            // モデル全体の塊を1回で回すので、範囲は表の先頭から全件
+            constants.MeshletOffset = 0;
+            constants.MeshletBufferIndex = bindlessIndexOf(instance.Model.MeshletBuffer.get());
+            constants.MeshletVertexBufferIndex = bindlessIndexOf(instance.Model.MeshletVertexBuffer.get());
+            constants.MeshletTriangleBufferIndex = bindlessIndexOf(instance.Model.MeshletTriangleBuffer.get());
+            constants.MeshletCount = instance.Model.TotalMeshletCount;
+
+            constants.MaterialTableIndex = bindlessIndexOf(instance.Model.MaterialTableBuffer.get());
+            constants.MeshletFilterReject = rejectMask;
+            constants.MeshletFilterRequire = requireMask;
+            // マテリアルテーブルは読み込み時に焼くため、シーン全体の倍率は焼き込めない。
+            // ピクセルシェーダーがここの値を掛ける
+            constants.EmissiveIntensity = emissiveIntensity;
+            constants.OcclusionMapScale = occlusionMapEnabled ? 1.0f : 0.0f;
+            // 統計を数えるのは G-Buffer パスだけ。深度プリパスとシャドウは同じ
+            // 増幅シェーダーを使うので、ここで切らないと同じ塊を何度も数えてしまう
+            constants.MeshletStatsEnabled = countCullStats ? 1u : 0u;
             return constants;
         }
 
@@ -1555,6 +1664,21 @@ namespace Kurenai
             gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
             gbufferMeshletDebugPsDesc.EntryPoint = "PSMainMeshletDebug";
             m_GBufferMeshletDebugPixelShader = m_Device->CreateShader(gbufferMeshletDebugPsDesc);
+
+            // シャドウパスのメッシュシェーダー版。G-Buffer版と分けているのは、
+            // シャドウのb0がFrameConstantsではなくCascadeConstantsで、cbufferの
+            // レイアウトが違うため(ShadowMeshlet.hlsl冒頭のコメント参照)
+            RHI::ShaderDesc shadowAsDesc;
+            shadowAsDesc.Stage = RHI::ShaderStage::Amplification;
+            shadowAsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.hlsl";
+            shadowAsDesc.EntryPoint = "ASMain";
+            m_ShadowAmplificationShader = m_Device->CreateShader(shadowAsDesc);
+
+            RHI::ShaderDesc shadowMsDesc;
+            shadowMsDesc.Stage = RHI::ShaderStage::Mesh;
+            shadowMsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.hlsl";
+            shadowMsDesc.EntryPoint = "MSMain";
+            m_ShadowMeshShader = m_Device->CreateShader(shadowMsDesc);
         }
 
         // G-BufferのPSOはEmissiveのフォーマットがバッファ精度に依存するため、
@@ -1970,6 +2094,58 @@ namespace Kurenai
         m_RaytracingAvailable = m_Device->SupportsRaytracing();
         // メッシュシェーダーの可否もここで控える(UIパネルが参照する)
         m_MeshShaderAvailable = m_Device->SupportsMeshShader();
+        // bindless区画の容量も同じ理由でここへ控える(使用数はフレームごとに更新する)
+        m_BindlessCapacity = m_Device->GetBindlessCapacity();
+
+        // メッシュレットカリングの統計(Stage 5-2)。増幅シェーダーがカウンタへ数え上げ、
+        // それを数フレーム遅れでCPUへ読み戻してPerfログへ出す。
+        // 増幅シェーダーが走らない環境では一切使わないので、そもそも作らない
+        if (m_MeshShaderAvailable)
+        {
+            try
+            {
+                RHI::BufferDesc cullStatsDesc;
+                cullStatsDesc.Usage = RHI::BufferUsage::Structured;
+                cullStatsDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount;
+                cullStatsDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+                m_MeshletCullStatsBuffer = m_Device->CreateBuffer(cullStatsDesc);
+
+                // 【SRVではなくUAVを登録する】増幅シェーダーは読むのではなく書く。
+                // RegisterBindless(SRV)の番号を渡すと読み取り専用のビューへ書き込むことになる
+                m_MeshletCullStatsBindlessIndex = m_Device->RegisterBindlessUAV(m_MeshletCullStatsBuffer.get());
+                if (m_MeshletCullStatsBindlessIndex == RHI::kInvalidBindlessIndex)
+                {
+                    Core::Logger::Warning(
+                        "KurenaiEngine3D",
+                        "メッシュレットカリングの統計バッファをbindlessへ登録できませんでした(統計を無効にします)");
+                    m_MeshletCullStatsBuffer.reset();
+                }
+                else
+                {
+                    for (uint32_t i = 0; i < kMeshletCullStatsRingSize; ++i)
+                    {
+                        RHI::BufferDesc readbackDesc;
+                        readbackDesc.Usage = RHI::BufferUsage::Readback;
+                        readbackDesc.SizeInBytes = cullStatsDesc.SizeInBytes;
+                        readbackDesc.StrideInBytes = cullStatsDesc.StrideInBytes;
+                        m_MeshletCullStatsReadback[i] = m_Device->CreateBuffer(readbackDesc);
+                    }
+                }
+            }
+            catch (const std::exception& e)
+            {
+                // 統計が作れないだけで描画は成立する。カリング本体は止めない
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    std::string("メッシュレットカリングの統計の初期化に失敗したため無効にします: ") + e.what());
+                m_MeshletCullStatsBuffer.reset();
+                for (auto& readback : m_MeshletCullStatsReadback)
+                {
+                    readback.reset();
+                }
+                m_MeshletCullStatsBindlessIndex = RHI::kInvalidBindlessIndex;
+            }
+        }
         if (m_RaytracingAvailable)
         {
             RHI::ShaderDesc rtReflectionCsDesc;
@@ -2216,9 +2392,31 @@ namespace Kurenai
         shadowPsDesc.EntryPoint = "PSMain";
         m_ShadowPixelShader = m_Device->CreateShader(shadowPsDesc);
 
+        // アルファカットアウト用。切り抜きを反映しないと、葉や柵のように
+        // テクスチャで抜く前提のマテリアルが板ポリゴンのまま影を落とす
+        RHI::ShaderDesc shadowCutoutVsDesc;
+        shadowCutoutVsDesc.Stage = RHI::ShaderStage::Vertex;
+        shadowCutoutVsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowCutoutVsDesc.EntryPoint = "VSMainCutout";
+        m_ShadowCutoutVertexShader = m_Device->CreateShader(shadowCutoutVsDesc);
+
+        RHI::ShaderDesc shadowCutoutPsDesc;
+        shadowCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
+        shadowCutoutPsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowCutoutPsDesc.EntryPoint = "PSMainCutout";
+        m_ShadowCutoutPixelShader = m_Device->CreateShader(shadowCutoutPsDesc);
+
         const std::vector<RHI::InputElementDesc> shadowInputLayout =
         {
             { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+        };
+
+        // カットアウトはベースカラーのアルファを引くためUVも要る。
+        // オフセット24はAssets::Vertexの並び(Position 0 / Normal 12 / UV 24)から
+        const std::vector<RHI::InputElementDesc> shadowCutoutInputLayout =
+        {
+            { "POSITION", 0, RHI::Format::R32G32B32_Float, 0 },
+            { "TEXCOORD", 0, RHI::Format::R32G32_Float, 24 },
         };
 
         RHI::PipelineStateDesc shadowPipelineDesc;
@@ -2232,6 +2430,58 @@ namespace Kurenai
         // シャドウマップへ内側の面の深度が書かれ、影の形と自己遮蔽の出方がずれる
         shadowPipelineDesc.FrontCounterClockwise = true;
         m_ShadowPipelineStateMirrored = m_Device->CreatePipelineState(shadowPipelineDesc);
+
+        // アルファカットアウト用(頂点シェーダー経路)。切り抜きを反映して深度を書く。
+        // 【DX11でも効く】bindlessもメッシュシェーダーも要らないので、両バックエンドで同じ影になる
+        if (m_ShadowCutoutVertexShader && m_ShadowCutoutPixelShader)
+        {
+            RHI::PipelineStateDesc shadowCutoutDesc;
+            shadowCutoutDesc.InputLayout = shadowCutoutInputLayout;
+            shadowCutoutDesc.VertexShader = m_ShadowCutoutVertexShader.get();
+            shadowCutoutDesc.PixelShader = m_ShadowCutoutPixelShader.get();
+            shadowCutoutDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+            shadowCutoutDesc.HasDepthStencil = true;
+            shadowCutoutDesc.FrontCounterClockwise = false;
+            m_ShadowCutoutPipelineState = m_Device->CreatePipelineState(shadowCutoutDesc);
+            shadowCutoutDesc.FrontCounterClockwise = true;
+            m_ShadowCutoutPipelineStateMirrored = m_Device->CreatePipelineState(shadowCutoutDesc);
+        }
+
+        // メッシュシェーダー版のシャドウPSO。
+        //
+        // 【これが無いと1ドロー化が片手落ちになる】メッシュレット経路はG-Bufferにしか
+        // 無かったため、モデルを1ドローで描けるようになってもシャドウは従来どおり
+        // メッシュ単位で、しかもカスケード4枚ぶん発行され続ける。
+        // PLATEAU LOD2の1タイル(メッシュ1,715個)ならG-Bufferが1ドローになる一方で
+        // シャドウは6,860ドローのまま、ということになる。
+        //
+        // ピクセルシェーダーは持たない(深度だけを書く)。頂点シェーダー版が
+        // 空のPSMainを渡しているのに合わせず段ごと省いているのは、深度プリパスの
+        // 不透明用PSOと同じ理由(RHIDesc.hのPixelShader=nullptrの扱い)
+        if (m_ShadowAmplificationShader && m_ShadowMeshShader)
+        {
+            RHI::MeshPipelineStateDesc shadowMeshDesc;
+            shadowMeshDesc.AmplificationShader = m_ShadowAmplificationShader.get();
+            shadowMeshDesc.MeshShader = m_ShadowMeshShader.get();
+            shadowMeshDesc.PixelShader = nullptr;
+            shadowMeshDesc.HasDepthStencil = true;
+            shadowMeshDesc.FrontCounterClockwise = false;
+            m_ShadowMeshletPipelineState = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+            shadowMeshDesc.FrontCounterClockwise = true;
+            m_ShadowMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+
+            // カットアウト用。ピクセルシェーダーは頂点シェーダー経路と共有する
+            // (ShadowMeshlet.hlslのShadowPSInputとShadow.hlslのCutoutPSInputは
+            //  同じ並び・同じセマンティクスにしてある)
+            if (m_ShadowCutoutPixelShader)
+            {
+                shadowMeshDesc.PixelShader = m_ShadowCutoutPixelShader.get();
+                shadowMeshDesc.FrontCounterClockwise = false;
+                m_ShadowMeshletCutoutPipelineState = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+                shadowMeshDesc.FrontCounterClockwise = true;
+                m_ShadowMeshletCutoutPipelineStateMirrored = m_Device->CreateMeshPipelineState(shadowMeshDesc);
+            }
+        }
 
         // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する。
         // 全カスケードを1つのTexture2DArrayにまとめ、スライスごとのDSVで1カスケードずつ描き込む
@@ -2871,7 +3121,8 @@ namespace Kurenai
                m_DDGIProbeTracePipelineState != nullptr && m_DDGITraceConstantBuffer != nullptr;
     }
 
-    bool KurenaiEngine3D::ShouldUseMeshletPath(const Assets::Mesh& mesh, bool isWater) const
+    bool KurenaiEngine3D::ShouldUseMeshletPath(
+        const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const
     {
         // 【水面はメッシュレット経路に載せない】水面のピクセルシェーダーはWater.hlslの
         // PSMainで、G-Buffer本体のPSMainとは別物。メッシュシェーダー版を用意するには
@@ -2885,13 +3136,34 @@ namespace Kurenai
         // メッシュレットが焼かれていない(--no-meshletsでパックされた.kmodel)、
         // またはデバイスが非対応でGPUバッファを作っていない場合はnullptrになる。
         // 【MeshletCountで判定しないこと】あちらはアセットが持つ数そのもので、
-        // メッシュシェーダー非対応の環境でも(レイトレーシングが使うため)0にはならない
-        if (!mesh.MeshletBuffer)
+        // メッシュシェーダー非対応の環境でも(レイトレーシングが使うため)0にはならない。
+        // 表はモデル単位なので、このメッシュ自身が塊を持っているかも併せて見る
+        // (モデル内に塊を持たないメッシュが混ざりうる)
+        if (!model.MeshletBuffer || !model.MaterialTableBuffer || mesh.MeshletCount == 0)
         {
             return false;
         }
 
         return m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+    }
+
+    bool KurenaiEngine3D::ShouldUseModelMeshletPath(const Assets::ModelInstance& instance) const
+    {
+        // モデル内の1メッシュでも従来経路へ落ちる条件があるなら、モデル全体を従来経路にする。
+        // 混ぜると「1ドローで描いたぶん」と「メッシュ単位で描いたぶん」が同じフレームに
+        // 同居し、食い違いが出たときにどちらのせいか切り分けられなくなる
+        if (!instance.Model.AllMeshesHaveMeshlets)
+        {
+            return false;
+        }
+        if (instance.Model.Meshes.empty())
+        {
+            return false;
+        }
+
+        // 代表として先頭のメッシュで判定する。AllMeshesHaveMeshletsが真なら
+        // メッシュ間で結果は変わらない(残りの条件はすべてモデル単位/インスタンス単位)
+        return ShouldUseMeshletPath(instance.Model, instance.Model.Meshes.front(), instance.IsWater);
     }
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAOTexture() const
@@ -3053,6 +3325,40 @@ namespace Kurenai
                 m_DepthPrepassCutoutPipelineState = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
                 depthPrepassPipelineDesc.FrontCounterClockwise = true;
                 m_DepthPrepassCutoutPipelineStateMirrored = m_Device->CreatePipelineState(depthPrepassPipelineDesc);
+            }
+
+            // メッシュシェーダー版の深度プリパス。
+            //
+            // 【これが無いとプリパスがまるごと止まる】かつてプリパスはメッシュレット経路と
+            // 排他だった。プリパスが頂点シェーダーで深度を書き、G-Bufferがメッシュシェーダーで
+            // 描くと、同じ頂点でも変換の丸めが一致する保証が無く、深度が1ulpずれた面が
+            // GREATER_EQUALを通らずに消えるため。**G-Bufferと同じ増幅/メッシュシェーダーを
+            // そのまま使えば変換は文字どおり同一のコードになり、この問題自体が消える。**
+            //
+            // 不透明用はピクセルシェーダーを持たない(段ごと省く)。カットアウト用は
+            // G-Bufferとまったく同じ判定のclipを通す(DepthPrepass.hlsl)
+            if (m_GBufferMeshShader && m_GBufferAmplificationShader)
+            {
+                RHI::MeshPipelineStateDesc prepassMeshDesc;
+                prepassMeshDesc.AmplificationShader = m_GBufferAmplificationShader.get();
+                prepassMeshDesc.MeshShader = m_GBufferMeshShader.get();
+                prepassMeshDesc.PixelShader = nullptr;
+                prepassMeshDesc.HasDepthStencil = true;
+                prepassMeshDesc.ReverseZ = true;
+                prepassMeshDesc.FrontCounterClockwise = false;
+                m_DepthPrepassMeshletPipelineState = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                prepassMeshDesc.FrontCounterClockwise = true;
+                m_DepthPrepassMeshletPipelineStateMirrored = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+
+                if (m_DepthPrepassCutoutPixelShader)
+                {
+                    prepassMeshDesc.PixelShader = m_DepthPrepassCutoutPixelShader.get();
+                    prepassMeshDesc.FrontCounterClockwise = false;
+                    m_DepthPrepassMeshletCutoutPipelineState = m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                    prepassMeshDesc.FrontCounterClockwise = true;
+                    m_DepthPrepassMeshletCutoutPipelineStateMirrored =
+                        m_Device->CreateMeshPipelineState(prepassMeshDesc);
+                }
             }
 
             // SSAOパス
@@ -3295,6 +3601,8 @@ namespace Kurenai
             m_HiZMipLevels = ComputeMipLevelCount(width, height);
             m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
             m_HiZDebugMipLevel = 0;
+            // 作り直した直後の中身は未定義。Hi-Zパスが1回走るまでオクルージョン判定を止める
+            m_HiZValid = false;
 
             // タイルライトカリングのライトグリッド。タイル数は解像度に依存するためここで作り直す。
             // 端のタイルは部分的にしか埋まらないので切り上げる
@@ -4059,6 +4367,11 @@ namespace Kurenai
         const size_t sceneIndex = static_cast<size_t>(m_PendingSceneRequest);
         m_PendingSceneRequest = -1;
 
+        // 【WaitForGPUIdleより前に止める】テクスチャストリーミングのワーカーは
+        // 旧シーンのIRHITexture*を掴んだままGPUリソースを作っている。旧シーンを手放す前に
+        // 必ず止めて、走っている要求を捨てる
+        m_TextureStreaming.Reset();
+
         // 旧シーンのGPUリソースを手放す前に、GPUが旧シーンを参照するコマンド(直前まで提出されていた
         // 描画コマンド)の実行を終えるまで待つ。特にDX12はCPUがGPU完了を待たずに次フレームの記録を
         // 始める多重バッファリング設計のため、これを省くとGPUがまだ読んでいるバッファ/テクスチャを
@@ -4474,6 +4787,11 @@ namespace Kurenai
                     std::to_string(kMaxReflectionProbes) + "個のみ使用します: " + std::to_string(m_ReflectionProbes.size()) + "個");
             m_ReflectionProbes.resize(kMaxReflectionProbes);
         }
+        // テクスチャの常駐ミップ制御。既定はoffで、.ksceneが明示したシーンだけが有効になる
+        // (未指定のシーンは従来どおり全ミップ常駐のままで、見え方もVRAMも変わらない)
+        m_TextureStreaming.Configure(m_Scene.TextureStreamingEnabled, m_Scene.TextureStreamingBias);
+        m_TextureStreaming.Build(m_Scene, *m_Device);
+
         m_SelectedProbeIndex = m_ReflectionProbes.empty() ? -1 : 0;
         m_ProbeDebugIndex = 0;
         m_ProbeBaked = false;
@@ -4539,6 +4857,11 @@ namespace Kurenai
         // ApplyLoadedSceneはRenderスレッドから呼ばれるため、m_Cameraは直接書けないがatomicなら書ける
         // (Renderスレッドが読む。カメラ自体はこの後m_AppliedSceneCamera経由でUpdateスレッドへ渡す)
         m_TAAHistoryValid.store(false, std::memory_order_relaxed);
+
+        // Hi-Zにも前のシーンの深度が入っている。カメラが新シーンの初期位置へ飛ぶ以上、
+        // それで遮蔽を判定すると見えているものを消しうる。TAAの履歴と同じ理由で捨てる
+        // (ApplyLoadedSceneはRenderスレッドから呼ばれ、m_HiZValidもRenderスレッドしか触らない)
+        m_HiZValid = false;
 
         // ホットリロードの基準時刻を、いま読んだファイルの更新時刻で取り直す。
         // これをしないと (1)シーンを切り替えたあとも前のファイルを見続ける
@@ -5489,6 +5812,9 @@ namespace Kurenai
         m_FrameStatsCullCulledSum += m_FrustumCullCulled;
         m_FrameStatsMeshCullTestedSum += m_MeshCullTested;
         m_FrameStatsMeshCullCulledSum += m_MeshCullCulled;
+        m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
+        m_FrameStatsDrawCallsShadowSum += m_DrawCallsShadow;
+        m_FrameStatsDrawCallsDepthPrepassSum += m_DrawCallsDepthPrepass;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -5609,6 +5935,65 @@ namespace Kurenai
         logCullStats("フラスタムカリング(モデル単位)", m_FrameStatsCullTestedSum, m_FrameStatsCullCulledSum);
         logCullStats("フラスタムカリング(メッシュ単位)", m_FrameStatsMeshCullTestedSum, m_FrameStatsMeshCullCulledSum);
 
+        // パス別のドローコール数。**「G-Bufferは減ったがシャドウは減っていない」**のような
+        // 片手落ちは合計値では見えない(シャドウはカスケード4回ぶんが積み上がる)
+        if (m_FrameStatsFrameCount > 0)
+        {
+            const double frames = static_cast<double>(m_FrameStatsFrameCount);
+            char drawText[224];
+            std::snprintf(
+                drawText, sizeof(drawText),
+                "  ドローコール: G-Buffer %.1f / シャドウ %.1f (4カスケード計) / 深度プリパス %.1f "
+                "[1フレームあたり]",
+                static_cast<double>(m_FrameStatsDrawCallsGBufferSum) / frames,
+                static_cast<double>(m_FrameStatsDrawCallsShadowSum) / frames,
+                static_cast<double>(m_FrameStatsDrawCallsDepthPrepassSum) / frames);
+            Core::Logger::Info("Perf", drawText);
+        }
+
+        // bindless区画の使用状況。**満杯になっても例外は飛ばず、エラーログ1行と
+        // kInvalidBindlessIndex(=白1x1へ落ちる)しか残らない**ため、上限へ近づいていることを
+        // 定期的に見えるようにしておく(IRHIDevice::GetBindlessUsedCountのコメント参照)
+        if (m_Device)
+        {
+            const uint32_t bindlessCapacity = m_Device->GetBindlessCapacity();
+            if (bindlessCapacity > 0)
+            {
+                const uint32_t bindlessUsed = m_Device->GetBindlessUsedCount();
+                char bindlessText[160];
+                std::snprintf(
+                    bindlessText, sizeof(bindlessText), "  bindless: %u / %u ディスクリプタ (%.1f%%)",
+                    bindlessUsed, bindlessCapacity,
+                    100.0 * static_cast<double>(bindlessUsed) / static_cast<double>(bindlessCapacity));
+                Core::Logger::Info("Perf", bindlessText);
+            }
+        }
+
+        // メッシュレット単位のカリング(増幅シェーダー)の効き。上のCPU側とは粒度も判定の種類も
+        // 違うので別の行に出す。
+        //
+        // 【オクルージョンを視錐台+コーンと分けて出す】完了条件がここにある ――
+        // 俯瞰(遮蔽が少ない)と街路(遮蔽が多い)でオクルージョンの割合に差が出ることが、
+        // 判定が実際に効いていることの証拠になる。合算すると視錐台の変動に埋もれて分からない
+        if (m_FrameStatsMeshletSampleCount > 0 && m_FrameStatsMeshletTestedSum > 0)
+        {
+            const double samples = static_cast<double>(m_FrameStatsMeshletSampleCount);
+            const double tested = static_cast<double>(m_FrameStatsMeshletTestedSum);
+            const double frustumRatio = 100.0 * static_cast<double>(m_FrameStatsMeshletFrustumCulledSum) / tested;
+            const double occlusionRatio = 100.0 * static_cast<double>(m_FrameStatsMeshletOcclusionCulledSum) / tested;
+
+            char meshletCullText[256];
+            std::snprintf(
+                meshletCullText, sizeof(meshletCullText),
+                "  メッシュレットカリング: 判定 %.1f / 視錐台+コーン %.1f (%.1f%%) / オクルージョン %.1f (%.1f%%)"
+                " [1フレームあたり・%u フレーム分]",
+                tested / samples,
+                static_cast<double>(m_FrameStatsMeshletFrustumCulledSum) / samples, frustumRatio,
+                static_cast<double>(m_FrameStatsMeshletOcclusionCulledSum) / samples, occlusionRatio,
+                m_FrameStatsMeshletSampleCount);
+            Core::Logger::Info("Perf", meshletCullText);
+        }
+
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
         m_FrameStatsGPUTimeSumMs = 0.0;
@@ -5618,6 +6003,35 @@ namespace Kurenai
         m_FrameStatsCullCulledSum = 0;
         m_FrameStatsMeshCullTestedSum = 0;
         m_FrameStatsMeshCullCulledSum = 0;
+        m_FrameStatsDrawCallsGBufferSum = 0;
+        m_FrameStatsDrawCallsShadowSum = 0;
+        m_FrameStatsDrawCallsDepthPrepassSum = 0;
+        m_FrameStatsMeshletTestedSum = 0;
+        m_FrameStatsMeshletFrustumCulledSum = 0;
+        m_FrameStatsMeshletOcclusionCulledSum = 0;
+        m_FrameStatsMeshletSampleCount = 0;
+
+        // テクスチャの常駐ミップの内訳。**サイズ帯ごとに分けて出す** ――
+        // 64KBタイルはBC7で256x256テクセルを覆うため、ミップ/タイル単位の制御が効くのは
+        // 大きいテクスチャに偏る。「入れたから減った」ではなくどの帯に効いたかで語るため
+        if (m_TextureStreaming.IsEnabled())
+        {
+            m_TextureStreaming.LogStats("periodic");
+        }
+
+        // 【自己申告と実測を並べる】常駐管理が積算したバイト数だけを見ていると、
+        // 物差し自体が間違っていても気付けない。OSから見たVRAM使用量と一緒に出す
+        uint64_t usedBytes = 0;
+        uint64_t budgetBytes = 0;
+        if (m_Device->GetVideoMemoryUsage(usedBytes, budgetBytes))
+        {
+            constexpr double kBytesPerMiB = 1024.0 * 1024.0;
+            char vramLine[160];
+            std::snprintf(
+                vramLine, sizeof(vramLine), "VRAM: 使用 %.1f MB / 予算 %.1f MB",
+                static_cast<double>(usedBytes) / kBytesPerMiB, static_cast<double>(budgetBytes) / kBytesPerMiB);
+            Core::Logger::Info("Perf", vramLine);
+        }
     }
 
     void KurenaiEngine3D::UpdateMouseLook(bool imguiWantsMouse)
@@ -5796,11 +6210,33 @@ namespace Kurenai
     void KurenaiEngine3D::Render(const FrameState& frameState)
     {
         // フラスタムカリングの統計はフレーム単位。ここで0に戻し、各描画パスが積み上げる。
-        // モデル単位とメッシュ単位は別のカウンタで、混ぜない(KurenaiEngine3D.h参照)
+        // モデル単位とメッシュ単位は別のカウンタで、混ぜない(KurenaiEngine3D.h参照)。
+        //
+        // 【0に戻す前に前フレームの値を控える】ドローコール数と同じ理由で、UIパネルは
+        // Renderの外で描かれるため現在のカウンタを読むと必ずリセット直後の0になる
+        m_FrustumCullTestedLastFrame = m_FrustumCullTested;
+        m_FrustumCullCulledLastFrame = m_FrustumCullCulled;
+        m_MeshCullTestedLastFrame = m_MeshCullTested;
+        m_MeshCullCulledLastFrame = m_MeshCullCulled;
         m_FrustumCullTested = 0;
         m_FrustumCullCulled = 0;
         m_MeshCullTested = 0;
         m_MeshCullCulled = 0;
+        // ドローコール数も同じくフレーム単位。各パスが自分のカウンタを積み上げる。
+        //
+        // 【0に戻す前に前フレームの値を控える】UIパネルはRenderの外で描かれるため、
+        // 現在のカウンタを読むと必ずリセット直後の0になる(実際にそう表示されていた)。
+        // 完成した最後のフレームの値を別に持たせる
+        m_DrawCallsGBufferLastFrame = m_DrawCallsGBuffer;
+        m_DrawCallsShadowLastFrame = m_DrawCallsShadow;
+        m_DrawCallsDepthPrepassLastFrame = m_DrawCallsDepthPrepass;
+        m_DrawCallsGBuffer = 0;
+        m_DrawCallsShadow = 0;
+        m_DrawCallsDepthPrepass = 0;
+        // bindless区画の使用数を控える(UIパネルは m_Device へ直接触れないため。
+        // m_MeshShaderAvailable と同じ扱い)。登録はシーン読み込み時にしか起きないので、
+        // フレームごとに1回問い合わせるだけで足りる
+        m_BindlessUsedCount = m_Device ? m_Device->GetBindlessUsedCount() : 0;
 
         // WM_SIZE(Updateスレッド)が記録しておいたリサイズ要求を、スワップチェーンを実際に使う
         // このスレッドで反映する。このフレームのGPUコマンドをまだ1つも積んでいないこの位置で
@@ -5812,6 +6248,13 @@ namespace Kurenai
         // 旧シーンの破棄(WaitForGPUIdleを伴う)もここで行うため、このフレームのGPUコマンドを
         // まだ1つも積んでいないこの位置で呼ぶこと
         UpdateSceneStreaming();
+
+        // テクスチャの常駐ミップ差し替えを確定する。
+        // **このフレームで最初にSetTextureを呼ぶより前でなければならない** ――
+        // DX12CommandList::SetTextureは描画を記録するたびにテクスチャのSRVディスクリプタを
+        // コピー元として読むため、記録が始まってから書き換えると読みながら書くことになる
+        // (詳細はIRHIDevice::PrepareTextureContentsのコメント)
+        m_TextureStreaming.CommitReady(*m_Device);
 
         if (m_Window->GetWidth() == 0 || m_Window->GetHeight() == 0)
         {
@@ -6038,6 +6481,13 @@ namespace Kurenai
         }
 
         const DirectX::XMFLOAT3 cameraPosition = frameState.Camera.GetPosition();
+
+        // テクスチャの常駐ミップの目標を更新し、差のあるものをワーカーへ積む。
+        // 実際の差し替えは次フレーム以降のCommitReady(このフレームの先頭で呼んだもの)で確定する。
+        // 画面の高さは内部レンダー解像度を使う(ウィンドウ解像度ではない。
+        // 内部解像度を下げているときは必要なテクセル密度もその分下がる)
+        m_TextureStreaming.UpdateTargets(
+            cameraPosition, std::tan(frameState.Camera.GetFovY() * 0.5f), m_RenderHeight, m_RenderDeltaTime);
 
         // --- TAAのサブピクセルジッター ---
         // 投影行列を1ピクセル未満だけずらして、同じ画素が毎フレームわずかに違う位置をサンプルする
@@ -6269,6 +6719,24 @@ namespace Kurenai
         // 下のconstants.FogParams0組み立て時にusingProceduralSkyを見て決める
         // (SSRパスのwaterAnalyticSkyFlagと同じ、パスの実行可否とシェーダー内の有効フラグを分ける設計)
         const bool fogPassRuns = m_FogEnabled && m_FogDensity > 0.0f;
+
+        // メッシュレット(増幅シェーダー + メッシュシェーダー)経路でG-Bufferを描くか。
+        // メッシュシェーダー非対応のデバイスではPSOが作られないためnullptrになる。
+        //
+        // 【他の「PassRuns」と並べてここに置く理由】この値はG-Bufferパスの登録時だけでなく、
+        // その手前で書き上げるFrameConstantsも見る(オクルージョンカリングの有効フラグ)。
+        // 定数バッファの更新はパス登録より前に一度だけ行うため、判断もそこより前で確定させる
+        const bool meshletPathActive = m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+
+        // 増幅シェーダーのHi-Zオクルージョンカリング(Stage 5-2)をこのフレームで行うか。
+        // 判定を書いてあるのは増幅シェーダーだけなので、メッシュレット経路に乗らないフレームでは
+        // 1つも間引けず、Hi-Zを構築する意味も無い(下のHi-Zパスの登録条件がこれを見る)
+        const bool occlusionCullingActive = m_OcclusionCullingEnabled && meshletPathActive;
+
+        // メッシュレットカリングの統計をこのフレームで数えるか。
+        // 増幅シェーダーが走らなければ数える相手がいない
+        const bool meshletCullStatsActive =
+            m_MeshletCullStatsEnabled && meshletPathActive && m_MeshletCullStatsBuffer != nullptr;
 
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
@@ -6603,6 +7071,51 @@ namespace Kurenai
         constants.CloudQualityParams = {
             static_cast<float>(std::clamp(m_CloudRaymarchSteps, 1u, kCloudRaymarchStepsMax)),
             0.0f, 0.0f, 0.0f
+        };
+
+        // --- Hi-Zオクルージョンカリング(Stage 5-2)の判定パラメータ ---
+        //
+        // 判定に使うHi-Zは前フレームのもの(構築パスがG-Bufferパスより後に登録されるため)。
+        // したがって「前フレームのHi-Zが実際に作られている」ことと「前フレームのビュー射影行列が
+        // 本物である」ことの両方が要る。どちらかが欠けたフレームでは判定を丸ごと止める ――
+        // 初回フレームや解像度変更の直後にここを通すと、未定義の深度で視界内をまとめて消す
+        const bool occlusionCullEnabledThisFrame =
+            occlusionCullingActive && m_HiZValid && m_TAAPrevViewProjValid;
+
+        // 前フレームからのカメラ移動距離。シーンが静的である以上、1フレームぶんの視差ずれの
+        // 原因はカメラの移動だけなので、その距離をバウンディング球の半径へ足せば
+        // 保守側(間引きすぎない側)へ倒せる。前フレームが無いフレームでは0でよい
+        // (そのフレームは上のフラグで判定自体が止まっている)
+        float cameraMoveDistance = 0.0f;
+        if (m_TAAPrevViewProjValid)
+        {
+            const float dx = cameraPosition.x - m_PrevCameraPosition.x;
+            const float dy = cameraPosition.y - m_PrevCameraPosition.y;
+            const float dz = cameraPosition.z - m_PrevCameraPosition.z;
+            cameraMoveDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        constants.OcclusionCullParams = {
+            occlusionCullEnabledThisFrame ? 1.0f : 0.0f,
+            m_OcclusionCullRadiusScale,
+            cameraMoveDistance,
+            static_cast<float>(m_HiZMipLevels),
+        };
+        // Hi-Zのミップ0はG-Buffer深度と同じ解像度で作られる(CreateRenderTargets)
+        constants.HiZScreenParams = {
+            static_cast<float>(m_RenderWidth),
+            static_cast<float>(m_RenderHeight),
+            1.0f / static_cast<float>(std::max(1u, m_RenderWidth)),
+            1.0f / static_cast<float>(std::max(1u, m_RenderHeight)),
+        };
+
+        // bindless番号をfloatで運ぶ。番号はkBindlessDescriptorCapacity(8192)未満で、
+        // float32が誤差なく表せる整数の範囲(2^24)に十分収まる
+        constants.MeshletCullStatsParams = {
+            meshletCullStatsActive ? 1.0f : 0.0f,
+            meshletCullStatsActive ? static_cast<float>(m_MeshletCullStatsBindlessIndex) : 0.0f,
+            0.0f,
+            0.0f,
         };
 
         commandList->UpdateBuffer(m_FrameConstantBuffer.get(), &constants, sizeof(constants));
@@ -7098,17 +7611,29 @@ namespace Kurenai
                         // ミラーリングされたインスタンスは表裏が入れ替わるため、GBufferパスと同じく
                         // 表裏判定を反転したパイプラインへ切り替える(切り替え時はb0も張り直す)
                         RHI::IRHIPipelineState* currentPipelineState = m_ShadowPipelineState.get();
-                        const auto bindPipelineState = [&](bool mirrored)
+                        const auto bindShadowPipelineState = [&](RHI::IRHIPipelineState* wanted)
                         {
-                            RHI::IRHIPipelineState* const wanted =
-                                mirrored ? m_ShadowPipelineStateMirrored.get() : m_ShadowPipelineState.get();
-                            if (wanted == currentPipelineState)
+                            if (!wanted || wanted == currentPipelineState)
                             {
                                 return;
                             }
                             cmd->SetPipelineState(wanted);
                             cmd->SetConstantBuffer(0, m_ShadowCascadeConstantBuffer.get());
+                            // カットアウトのピクセルシェーダーがベースカラーを引くためサンプラーが要る。
+                            // 不透明用のPSOはピクセルシェーダーを持たないので無害
+                            cmd->SetSamplerSet(m_MaterialSamplers.get());
                             currentPipelineState = wanted;
+                        };
+                        // アルファカットアウトのマテリアルは切り抜きを反映して深度を書く。
+                        // PSOが作れていない場合は従来どおり切り抜きを見ない(影が板のままになる)
+                        const auto selectShadowPipelineState = [&](bool mirrored, bool cutout)
+                        {
+                            if (cutout && m_ShadowCutoutPipelineState)
+                            {
+                                return mirrored ? m_ShadowCutoutPipelineStateMirrored.get()
+                                                : m_ShadowCutoutPipelineState.get();
+                            }
+                            return mirrored ? m_ShadowPipelineStateMirrored.get() : m_ShadowPipelineState.get();
                         };
 
                         // このカスケードのライト正射影に対して視錐台カリングする。
@@ -7124,6 +7649,63 @@ namespace Kurenai
                                 continue;
                             }
 
+                            // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
+                            //
+                            // 【半透明は落とさない】このパスは従来から、BLENDのメッシュも
+                            // 実体のまま影を落としている。ここでふるい分けると影の出方が変わって
+                            // しまうため、意図的に何も落とさない(カットアウトの切り抜きだけは
+                            // 下で反映する ―― そちらは板ポリゴンの影が出る明確な不具合だった)。
+                            //
+                            // 【カットアウトを持つモデルだけ2回に分ける】不透明ぶんは
+                            // ピクセルシェーダーを持たないPSOで描きたいので、
+                            // 切り抜きが要るぶんとは同じドローにまとめられない
+                            if (m_ShadowMeshletPipelineState && ShouldUseModelMeshletPath(instance))
+                            {
+                                constexpr uint32_t kAmplificationGroupSize = 32;
+                                const uint32_t groupCount =
+                                    (instance.Model.TotalMeshletCount + kAmplificationGroupSize - 1)
+                                    / kAmplificationGroupSize;
+
+                                const auto dispatchShadowMeshlets =
+                                    [&](RHI::IRHIPipelineState* pipelineState, uint32_t rejectMask,
+                                        uint32_t requireMask)
+                                {
+                                    if (!pipelineState)
+                                    {
+                                        return;
+                                    }
+                                    bindShadowPipelineState(pipelineState);
+
+                                    const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                        instance, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask,
+                                        requireMask);
+                                    cmd->UpdateBuffer(
+                                        m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                    cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+                                    cmd->DispatchMesh(groupCount, 1, 1);
+                                    ++m_DrawCallsShadow;
+                                };
+
+                                // カットアウト用のPSOが作れていない場合は、従来どおり
+                                // 切り抜きを見ずに全部を1回で描く(影が板のままになる)
+                                const bool splitCutout =
+                                    instance.Model.HasCutoutMaterial && m_ShadowMeshletCutoutPipelineState;
+
+                                dispatchShadowMeshlets(
+                                    instance.IsMirrored ? m_ShadowMeshletPipelineStateMirrored.get()
+                                                        : m_ShadowMeshletPipelineState.get(),
+                                    splitCutout ? Assets::kGpuMaterialFlagCutout : 0u, 0u);
+
+                                if (splitCutout)
+                                {
+                                    dispatchShadowMeshlets(
+                                        instance.IsMirrored ? m_ShadowMeshletCutoutPipelineStateMirrored.get()
+                                                            : m_ShadowMeshletCutoutPipelineState.get(),
+                                        0u, Assets::kGpuMaterialFlagCutout);
+                                }
+                                continue;
+                            }
+
                             for (const auto& mesh : instance.Model.Meshes)
                             {
                                 // メッシュ単位のカリング。錐台はこのカスケードのライト正射影で、
@@ -7134,8 +7716,11 @@ namespace Kurenai
                                 {
                                     continue;
                                 }
-
-                                bindPipelineState(instance.IsMirrored);
+                                // アルファカットアウトは切り抜きを反映して深度を書く。
+                                // 見ないままだと、葉や柵のようにテクスチャで抜く前提の
+                                // マテリアルが板ポリゴンのまま影を落とす
+                                const bool cutout = mesh.AlphaCutoff > 0.0f;
+                                bindShadowPipelineState(selectShadowPipelineState(instance.IsMirrored, cutout));
 
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
@@ -7144,9 +7729,15 @@ namespace Kurenai
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
+                                if (cutout)
+                                {
+                                    cmd->SetTexture(0, mesh.BaseColorTexture);
+                                }
+
                                 cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                                 cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                                 cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                                ++m_DrawCallsShadow;
                             }
                         }
                     }
@@ -7188,6 +7779,13 @@ namespace Kurenai
             // 現状これらを読まないが、将来読んだときに黙ってカメラの値を拾うのを防ぐため
             captureConstants.PrevViewProj = captureConstants.ViewProj;
             captureConstants.TAAParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+            // Hi-Zオクルージョンカリングも潰す。Hi-Zはメインカメラ視点の深度で、
+            // プローブ視点から見える範囲とは何の関係も無い。上でPrevViewProjを
+            // 「前フレーム」でない値へ差し替えている以上、判定の前提そのものが崩れている
+            captureConstants.OcclusionCullParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+            // 統計も止める。プローブ視点で数えた分がメインカメラの間引き率に混ざると、
+            // 「1フレームあたりの判定数」がプローブを焼いたフレームだけ跳ね上がって読めなくなる
+            captureConstants.MeshletCullStatsParams = { 0.0f, 0.0f, 0.0f, 0.0f };
             cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
             cmd->SetRenderTargets(captureTargets, 2, m_ProbeCaptureDepth.get());
@@ -7989,11 +8587,16 @@ namespace Kurenai
         // プリパスで手前に別のものが書かれていると早期Zに落とされて消える。
         // 中途半端に混ぜるより丸ごと従来経路にするほうが安全
         //
-        // 【メッシュシェーダー経路とは併用しない】プリパスは頂点シェーダー経路で深度を書くが、
-        // G-Buffer側がメッシュシェーダーで描くと同じ頂点でも変換の丸めが一致する保証が無く、
-        // 深度が1ulpずれた面がGREATER_EQUALを通らずに消える
-        const bool meshletPathActive = m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
-        const bool depthPrepassRuns = m_DepthPrepassEnabled && !meshletPathActive
+        // 【メッシュシェーダー経路とも併用できるようになった】かつてプリパスはメッシュレット経路と
+        // 排他だった。プリパスが頂点シェーダーで深度を書き、G-Bufferがメッシュシェーダーで描くと、
+        // 同じ頂点でも変換の丸めが一致する保証が無く、深度が1ulpずれた面がGREATER_EQUALを
+        // 通らずに消えるため。プリパスにもG-Bufferとまったく同じ増幅/メッシュシェーダーを使う
+        // PSOを用意したので、変換は文字どおり同一のコードになりこの問題は起きない。
+        //
+        // メッシュレット版のPSOが作れなかった場合は、その経路で描くモデルだけを
+        // プリパスから外す(下のループ参照)。深度が埋まらないぶん早期Zが効かないだけで、
+        // G-Buffer側が改めて深度を書くため絵は壊れない
+        const bool depthPrepassRuns = m_DepthPrepassEnabled
             && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
         if (depthPrepassRuns)
         {
@@ -8016,6 +8619,68 @@ namespace Kurenai
                         if (!IsAABBVisible(prepassFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
                         {
                             ++m_FrustumCullCulled;
+                            continue;
+                        }
+
+                        // G-Bufferが1ドローで描くモデルは、プリパスも同じ増幅/メッシュシェーダーで
+                        // 描く。**同じ判断関数(ShouldUseModelMeshletPath)で経路を選ぶことが要点**で、
+                        // 片方だけがメッシュシェーダーになると深度が一致しない。
+                        //
+                        // 不透明とカットアウトでピクセルシェーダーの有無が変わるため、
+                        // カットアウトのマテリアルを持つモデルだけ2回に分ける。
+                        // 持たないモデル(PLATEAUのタイルがそう)は1回で済む
+                        if (ShouldUseModelMeshletPath(instance))
+                        {
+                            if (!m_DepthPrepassMeshletPipelineState)
+                            {
+                                // メッシュレット版のPSOが無い。このモデルはプリパスから外す
+                                // (早期Zが効かないだけで、G-Buffer側が深度を書くので絵は壊れない)
+                                continue;
+                            }
+
+                            constexpr uint32_t kAmplificationGroupSize = 32;
+                            const uint32_t groupCount =
+                                (instance.Model.TotalMeshletCount + kAmplificationGroupSize - 1)
+                                / kAmplificationGroupSize;
+
+                            const auto dispatchMeshletPrepass =
+                                [&](RHI::IRHIPipelineState* pipelineState, uint32_t rejectMask, uint32_t requireMask)
+                            {
+                                if (!pipelineState)
+                                {
+                                    return;
+                                }
+                                if (pipelineState != currentPipelineState)
+                                {
+                                    cmd->SetPipelineState(pipelineState);
+                                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+                                    cmd->SetSamplerSet(m_MaterialSamplers.get());
+                                    currentPipelineState = pipelineState;
+                                }
+
+                                const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                    instance, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask, requireMask);
+                                cmd->UpdateBuffer(
+                                    m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+                                cmd->DispatchMesh(groupCount, 1, 1);
+                                ++m_DrawCallsDepthPrepass;
+                            };
+
+                            // 不透明ぶん(ピクセルシェーダー無し)。半透明とカットアウトを落とす
+                            dispatchMeshletPrepass(
+                                instance.IsMirrored ? m_DepthPrepassMeshletPipelineStateMirrored.get()
+                                                    : m_DepthPrepassMeshletPipelineState.get(),
+                                Assets::kGpuMaterialFlagTransparent | Assets::kGpuMaterialFlagCutout, 0);
+
+                            // カットアウトぶん(clipを通す)。持たないモデルではこの回は発行しない
+                            if (instance.Model.HasCutoutMaterial)
+                            {
+                                dispatchMeshletPrepass(
+                                    instance.IsMirrored ? m_DepthPrepassMeshletCutoutPipelineStateMirrored.get()
+                                                        : m_DepthPrepassMeshletCutoutPipelineState.get(),
+                                    Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout);
+                            }
                             continue;
                         }
 
@@ -8071,6 +8736,7 @@ namespace Kurenai
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            ++m_DrawCallsDepthPrepass;
                         }
                     }
                 },
@@ -8080,6 +8746,14 @@ namespace Kurenai
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "GBuffer",
+            // 増幅シェーダーのHi-Zオクルージョンカリングが読む(Stage 5-2)。
+            //
+            // 【循環にならない】Hi-Zパスは「G-Buffer深度を読んでHi-Zを書く」ので、依存だけ見ると
+            // 互いを参照しているように見える。しかしRenderGraphのReadsは「それより前に登録された
+            // 書き手」がいるときにだけ辺を張る規則で、Hi-Zパスの登録はこのパスより後なので
+            // 辺は張られない(RenderGraph::ResolveExecutionOrder)。実行順も登録順のまま、
+            // 読むのは前フレームに書かれた内容になる ―― それがこの判定の前提そのもの
+            .Reads = { m_HiZTexture.get() },
             // 深度プリパス(直前に登録される)を通したときは、ここへ来る時点で深度が埋まっており、
             // PSOのDepthAllowEqual(GREATER_EQUAL)によって最前面の断片だけがテストを通る。
             //
@@ -8088,8 +8762,20 @@ namespace Kurenai
             .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
                                m_GBufferEmissive.get(), m_GBufferVelocity.get(), m_GBufferBentNormal.get() },
             .DepthTarget = m_GBufferDepth.get(),
-            .Execute = [this, &gbufferViewport, depthPrepassRuns, &viewProj](RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive,
+                        meshletCullStatsActive](RHI::IRHICommandList* cmd)
             {
+                // カリング統計のカウンタを0へ戻す。増幅シェーダーは加算しかしないので、
+                // 戻さないとフレームをまたいで積み上がる。
+                //
+                // 【このパスの中で行う理由】数えるのも読み戻すのもこのパスなので、
+                // 「クリア→数える→コピー」を1か所にまとめたほうが順序を追いやすい。
+                // 別パスに分けるとRenderGraphの登録順への依存が1本増える
+                if (meshletCullStatsActive)
+                {
+                    cmd->ClearUnorderedAccessBufferUint(m_MeshletCullStatsBuffer.get(), 0);
+                }
+
                 cmd->SetViewport(gbufferViewport);
                 // ClearRenderTargetはバインド済みの全レンダーターゲットを同じ色でクリアするため、
                 // 速度バッファもここで0(=動いていない)になる。ジオメトリが描かれない画素
@@ -8107,6 +8793,24 @@ namespace Kurenai
                 cmd->SetPipelineState(m_GBufferPipelineState.get());
                 cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
                 cmd->SetSamplerSet(m_MaterialSamplers.get());
+
+                // 増幅シェーダーのHi-Zオクルージョンカリング用(t8。GBufferMeshlet.hlsl)。
+                //
+                // 【SetTextureではなくSetTextureAllStagesを使う】SetTextureはリソースを
+                // PIXEL_SHADER_RESOURCEへしか遷移させず、増幅シェーダーからは読めない。
+                //
+                // 【パスの先頭で1回だけでよい】SRVのバインドはDX12CommandList側がシャドウで
+                // 保持しており、SetPipelineStateで無効化されるのはルート引数だけで、
+                // 次のDrawの直前にFlushPendingSrvWritesが張り直す。
+                // ここでPSOを切り替えても、下のbindPipelineStateがCBVとサンプラーを
+                // 張り直すのと違って、テクスチャは張り直す必要が無い。
+                //
+                // 【判定しないフレームではバインドもしない】不要な状態遷移を1つ減らすと同時に、
+                // 「バインドされていないのに間引き率が出た」という取り違えを起こせなくする
+                if (occlusionCullingActive)
+                {
+                    cmd->SetTextureAllStages(8, m_HiZTexture.get());
+                }
 
                 // ミラーリング(Worldの行列式が負)されたインスタンス・水面(ModelInstance::IsWater)
                 // インスタンスの組み合わせ(4通り)に応じてパイプラインを切り替える。上で通常の
@@ -8168,6 +8872,33 @@ namespace Kurenai
                         continue;
                     }
 
+                    // モデル全体を1回のDispatchMeshで描ける場合はメッシュのループへ入らない。
+                    // マテリアルはメッシュシェーダーが出力した番号でピクセルシェーダーが引くため、
+                    // メッシュごとのSetTextureも定数バッファの更新も要らない。
+                    //
+                    // 【BLENDだけは増幅シェーダーが落とす】半透明はG-Bufferに書かず専用の
+                    // Transparentパスでフォワードシェーディングする。ドローを分けられない以上、
+                    // メッシュレット単位のふるい分けでしか除外できない
+                    if (ShouldUseModelMeshletPath(instance))
+                    {
+                        bindPipelineState(instance.IsMirrored, false, true);
+
+                        const ObjectConstants objectConstants = MakeModelObjectConstants(
+                            instance, m_EmissiveIntensity, m_OcclusionMapEnabled,
+                            Assets::kGpuMaterialFlagTransparent, 0, /*countCullStats=*/true);
+                        cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                        cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                        // 起動するのは「モデル全体のメッシュレット数 ÷ 増幅シェーダーのグループサイズ」。
+                        // 実際にラスタライズされるのはカリングとふるい分けを生き延びたぶんに絞られる
+                        constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
+                        const uint32_t groupCount =
+                            (instance.Model.TotalMeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize;
+                        cmd->DispatchMesh(groupCount, 1, 1);
+                        ++m_DrawCallsGBuffer;
+                        continue;
+                    }
+
                     for (const auto& mesh : instance.Model.Meshes)
                     {
                         // BLENDマテリアル(mesh.IsTransparent)はG-Bufferに書き込まず、専用のTransparentパスで
@@ -8184,9 +8915,14 @@ namespace Kurenai
                         {
                             continue;
                         }
-
-                        const bool useMeshlet = ShouldUseMeshletPath(mesh, instance.IsWater);
-                        bindPipelineState(instance.IsMirrored, instance.IsWater, useMeshlet);
+                        // 【ここへ来た時点でメッシュレット経路は使わない】上のモデル単位の
+                        // 判定を通らなかったインスタンス(水面、メッシュレットを持たない
+                        // メッシュが混ざるモデル、メッシュレット描画が無効)なので、
+                        // モデル全体を従来の頂点シェーダーで描く。
+                        // **メッシュ単位でメッシュレット経路へ入れてはいけない** ――
+                        // 深度プリパスは同じ判断関数(ShouldUseModelMeshletPath)で経路を選ぶため、
+                        // ここで食い違うとプリパスの深度とG-Bufferの深度が一致しなくなる
+                        bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
                         const ObjectConstants objectConstants =
                             MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
@@ -8207,22 +8943,24 @@ namespace Kurenai
                             cmd->SetTexture(7, m_WaterNormalMapTexture.get());
                         }
 
-                        if (useMeshlet)
-                        {
-                            // 頂点/インデックスバッファは張らない。増幅シェーダーとメッシュシェーダーが
-                            // bindless経由で自分で読む(ObjectConstantsが番号を運んでいる)。
-                            // 起動するのは「メッシュレット数 ÷ 増幅シェーダーのグループサイズ」だけで、
-                            // 実際にラスタライズされるのはカリングを生き延びたぶんに絞られる
-                            constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
-                            cmd->DispatchMesh((mesh.MeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize, 1, 1);
-                        }
-                        else
-                        {
-                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
-                        }
+                        cmd->SetVertexBuffer(mesh.VertexBuffer.get());
+                        cmd->SetIndexBuffer(mesh.IndexBuffer.get());
+                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        ++m_DrawCallsGBuffer;
                     }
+                }
+
+                // 数え終わったカウンタを受け皿へ写す。読むのは数フレーム後(下のリングの説明参照)。
+                //
+                // 【全描画の後で行うこと】ここより前に置くと、まだ発行していない
+                // DispatchMeshの寄与が入らない。コピーはUNORDERED_ACCESS→COPY_SOURCEの
+                // 状態遷移を伴い、その遷移が増幅シェーダーの書き込み完了も保証する
+                if (meshletCullStatsActive)
+                {
+                    cmd->CopyBufferToReadback(
+                        m_MeshletCullStatsReadback[m_MeshletCullStatsRingIndex].get(),
+                        m_MeshletCullStatsBuffer.get(),
+                        static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount);
                 }
             },
         });
@@ -8256,15 +8994,32 @@ namespace Kurenai
         }
 
         // --- Hi-Zミップチェーン構築パス: G-Buffer深度から1x1までのミップチェーンをコンピュートシェーダーで
-        //     構築する(現時点では利用箇所は無く、デバッグ表示専用) ---
+        //     構築する ---
         //
-        // 【デバッグ表示中だけ登録する理由】m_HiZTextureを読むのはPresentパスのDebugView::HiZ
-        // (このファイルのDebugView::HiZのcase)だけであり、それ以外のフレームでは構築結果を
-        // 誰も参照しない。にもかかわらず毎フレーム「コピー1回 + ミップ段数-1回のディスパッチ」
-        // (1280x720なら計11回)を走らせていた。Intel UHD 620での実測でこのパスは1.19〜1.21ms、
-        // GPUフレーム時間30msの約4%を占めており、まるごと無駄だった。
-        // SSRのHi-Zトラバース等で使うようになったらこの条件を外すこと
-        if (m_DebugView == DebugView::HiZ)
+        // 【消費者がいるフレームだけ登録する】このパスは「コピー1回 + ミップ段数-1回のディスパッチ」
+        // (1280x720なら計11回)で、Intel UHD 620での実測で1.19〜1.21ms、GPUフレーム時間30msの
+        // 約4%を占める。以前は消費者がPresentパスのDebugView::HiZ表示しか無かったため、
+        // その表示中だけに絞ってこの4%を削った経緯がある。
+        //
+        // Stage 5-2で2人目の消費者(増幅シェーダーのオクルージョンカリング)が付いたが、
+        // **条件を丸ごと外してはいけない** ―― 外すと上の節約がそのまま戻る。
+        // 「消費者がいるフレームか」へ条件を書き換えるのが正しい。メッシュシェーダー非対応の
+        // 環境ではocclusionCullingActiveが常にfalseになり、従来どおり1msを払わずに済む。
+        //
+        // 【1フレーム遅れになる】このパスはGBufferパスより後に登録されるため、増幅シェーダーが
+        // 読むのは前フレームのHi-Zになる。判定側はそれを前提に、前フレームのビュー射影行列
+        // (FrameConstants::PrevViewProj)で投影し、球を保守的に膨らませて吸収している
+        // (GBufferMeshlet.hlslのIsMeshletOccluded参照)
+        const bool hiZPassRuns = (m_DebugView == DebugView::HiZ) || occlusionCullingActive;
+        if (!hiZPassRuns)
+        {
+            // このフレームで作らないなら、次フレームのHi-Zは「何フレームか前の、別のカメラ位置で
+            // 撮った深度」になる。それで遮蔽を判定すると見えているものを消す。
+            // 【トグルを往復させると必ず起きる】メッシュレット描画やオクルージョンを一度OFFにして
+            // ONへ戻す操作で踏むので、"構築しなかった"を必ず記録しておく
+            m_HiZValid = false;
+        }
+        if (hiZPassRuns)
         {
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "HiZ",
@@ -8302,6 +9057,11 @@ namespace Kurenai
                     hizSrcWidth = hizDstWidth;
                     hizSrcHeight = hizDstHeight;
                 }
+
+                // ここまで来たら全ミップに実データが入った。次フレームからオクルージョン判定に使える。
+                // 【Executeの中で立てること】パスの登録だけでは実行されたことにならない
+                // (RenderGraphは登録した全パスを実行するが、条件が変わればこのラムダは呼ばれない)
+                m_HiZValid = true;
             },
         });
         }
@@ -8950,6 +9710,11 @@ namespace Kurenai
                     // TAA関連はカメラ視点のものが入ったままなので明示的に潰す(captureProbeFaceと同じ理由)
                     reflectionConstants.PrevViewProj = reflectionConstants.ViewProj;
                     reflectionConstants.TAAParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+                    // Hi-Zオクルージョンカリングも潰す(captureProbeFaceと同じ理由)。
+                    // 鏡映カメラから見える範囲とメインカメラのHi-Zは無関係
+                    reflectionConstants.OcclusionCullParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+                    // 統計も止める(captureProbeFaceと同じ理由)
+                    reflectionConstants.MeshletCullStatsParams = { 0.0f, 0.0f, 0.0f, 0.0f };
                     reflectionConstants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, -waterPlaneY };
                     cmd->UpdateBuffer(m_PlanarReflectionConstantBuffer.get(), &reflectionConstants, sizeof(reflectionConstants));
 
@@ -10110,6 +10875,42 @@ namespace Kurenai
 
         graph.Execute();
 
+        // --- メッシュレットカリングの統計を読み戻す(Stage 5-2) ---
+        //
+        // 【GPUを待たない】直前に積んだコピーはまだ実行されていないので、リングの中で
+        // **最も古いもの**(kMeshletCullStatsRingSize-1 = 2フレーム前に書いたもの)を読む。
+        // DX12はkFrameCount(=2)フレームぶんCPUが先行するため、2フレーム前のGPU実行は
+        // 完了している。待ちを入れるとフレームが直列化し、計測のために計測対象を壊す。
+        //
+        // 【読めなかったフレームは足さない】DX11のMap(DO_NOT_WAIT)はまだ実行中ならfalseを返す。
+        // 0として集計に足すと間引き率が実際より低く出るので、そのフレームは丸ごと飛ばす
+        if (meshletCullStatsActive)
+        {
+            const uint32_t oldestIndex = (m_MeshletCullStatsRingIndex + 1) % kMeshletCullStatsRingSize;
+            uint32_t counters[kMeshletCullStatsCount] = {};
+            if (m_MeshletCullStatsReadback[oldestIndex] &&
+                m_MeshletCullStatsReadback[oldestIndex]->ReadbackData(counters, sizeof(counters)))
+            {
+                m_MeshletCullTested = counters[0];
+                m_MeshletCullFrustumCulled = counters[1];
+                m_MeshletCullOcclusionCulled = counters[2];
+
+                m_FrameStatsMeshletTestedSum += m_MeshletCullTested;
+                m_FrameStatsMeshletFrustumCulledSum += m_MeshletCullFrustumCulled;
+                m_FrameStatsMeshletOcclusionCulledSum += m_MeshletCullOcclusionCulled;
+                ++m_FrameStatsMeshletSampleCount;
+            }
+            m_MeshletCullStatsRingIndex = (m_MeshletCullStatsRingIndex + 1) % kMeshletCullStatsRingSize;
+        }
+        else
+        {
+            // 統計を切っている間に古い値が残っていると、UIやログが「今もこの数だけ間引いている」
+            // ように見える。切った時点で0へ戻す
+            m_MeshletCullTested = 0;
+            m_MeshletCullFrustumCulled = 0;
+            m_MeshletCullOcclusionCulled = 0;
+        }
+
         // ImGuiはPresentパスでバインドされたバックバッファにそのまま重ねて描画する。
         // GPU側は計測していない(このスコープ専用の描画パイプラインを持たないため)が、
         // CPU側のコマンド記録コストはDX11/DX12で差が出やすいのでここも計測しておく
@@ -10137,6 +10938,9 @@ namespace Kurenai
         // そのまま保たれ、履歴テクスチャの中身と行列の対応が1フレームずれない
         m_TAAPrevViewProj = constants.ViewProj;
         m_TAAPrevJitterUv = jitterUv;
+        // Hi-Zオクルージョンカリングが「1フレームぶんの視差ずれ」を見積もるのに使う。
+        // m_TAAPrevViewProjと同じ場所・同じタイミングで書くので有効性の管理も同じで済む
+        m_PrevCameraPosition = { constants.CameraPosition.x, constants.CameraPosition.y, constants.CameraPosition.z };
         m_TAAPrevViewProjValid = true;
         m_TAAPrevEffectiveExposureEV100 = m_EffectiveExposureEV100;
         if (m_TAAEnabled)

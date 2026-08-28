@@ -317,6 +317,8 @@ namespace Kurenai::Assets
             float ShadowDistance = 0.0f;
             bool HasCameraSpeed = false;
             float CameraSpeed = 0.0f;
+            bool TextureStreamingEnabled = false;
+            float TextureStreamingBias = -2.0f;
             bool AOEnabled = true;
             bool HasSSREnabled = false;
             bool SSREnabled = true;
@@ -586,6 +588,22 @@ namespace Kurenai::Assets
                             errorAt(lineNumber, rawLine, "CameraSpeedは0.01〜10000の範囲で指定してください");
                         }
                         result.HasCameraSpeed = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"TextureStreaming"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "TextureStreamingの値はtrue/falseで指定してください");
+                        result.TextureStreamingEnabled = *parsedValue;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"TextureStreamingBias"))
+                    {
+                        if (!ParseFloatToken(value, result.TextureStreamingBias)) errorAt(lineNumber, rawLine, "TextureStreamingBiasの値が不正です");
+                        // ミップ段数は多くても十数段なので、これを超える指定は桁の打ち間違い。
+                        // 正側(粗くする)を+4までにしているのは、それ以上はどのみち最小ミップに張り付くため
+                        if (result.TextureStreamingBias < -8.0f || result.TextureStreamingBias > 4.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "TextureStreamingBiasは-8〜4の範囲で指定してください");
+                        }
                     }
                     else if (CaseInsensitiveEquals(key, L"AmbientOcclusion"))
                     {
@@ -1334,6 +1352,8 @@ namespace Kurenai::Assets
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;
         scene.HasShadowDistance = parsed.HasShadowDistance;
+        scene.TextureStreamingEnabled = parsed.TextureStreamingEnabled;
+        scene.TextureStreamingBias = parsed.TextureStreamingBias;
         scene.ShadowDistance = parsed.ShadowDistance;
         scene.HasCameraSpeed = parsed.HasCameraSpeed;
         scene.CameraSpeed = parsed.CameraSpeed;

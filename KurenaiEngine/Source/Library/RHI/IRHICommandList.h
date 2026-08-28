@@ -126,6 +126,23 @@ namespace Kurenai::RHI
         // 一度もバインドしていないスロットを読むと0が返る。この寿命はDX11/DX12で完全に同一で、
         // DX12側はDX12CommandListがバインド状態をシャドウコピーとして保持することで実現している
         virtual void SetTexture(uint32_t slot, IRHITexture* texture) = 0;
+        // SetTextureと同じスロット・同じバインドの寿命だが、**ピクセルシェーダー以外の
+        // グラフィックスステージからも読める状態**にしてバインドする。
+        //
+        // 【なぜ別のAPIが要るのか】DX12のリソース状態はステージ単位で分かれており、
+        // SetTextureはD3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCEへしか遷移させない。
+        // 増幅シェーダー・メッシュシェーダーはピクセルシェーダーとは別のステージなので、
+        // その状態のまま読むとデバッグレイヤーが警告を出し、実際に読める保証も無い。
+        // こちらはPIXEL|NON_PIXELの両方を立てて遷移させる。
+        //
+        // 【DX11では違いが無い】DX11はステージごとにバインド空間が独立しており、
+        // リソース状態という概念自体が無いためSetTextureと同じ実装でよい。
+        // それでも同じ意味で呼べるよう両バックエンドに用意する。
+        //
+        // 用途はG-Bufferパスの増幅シェーダーがHi-Zを読むこと(GBufferMeshlet.hlsl)。
+        // メッシュシェーダー用ルートシグネチャはSRVテーブルの可視性をALLにしてあるので、
+        // ディスクリプタの張り方はSetTextureとまったく同じでよい(DX12Device::CreateMeshRootSignature)
+        virtual void SetTextureAllStages(uint32_t slot, IRHITexture* texture) = 0;
         // このパスで使うサンプラーの組をまとめてバインドする(セットのi番目がレジスタs(i)になる)。
         // セットの中身は初期化時に決まっていて書き換わらないため、ここで切り替わるのは
         // 「どのセットを見るか」だけ(理由はIRHISamplerSet.h)。
@@ -229,5 +246,16 @@ namespace Kurenai::RHI
         // 影響しない(内部で一時的なディスクリプタを使うため)。
         // UAVを持たないバッファを渡すとログを出して何もしない
         virtual void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) = 0;
+
+        // GPU上のバッファの内容を、BufferUsage::Readbackのバッファへ写す(GPUのコピーコマンド)。
+        // 実際にCPUから読むのは IRHIBuffer::ReadbackData で、**数フレーム後に行うこと**。
+        //
+        // 【この呼び出しはコマンドを積むだけ】ここでGPUの完了を待ってはいけない。
+        // 待つとフレームが直列化し、計測のために計測対象を壊すことになる。
+        // 呼び出し側は受け皿をリング状に複数本持ち、十分に古いものを読む。
+        //
+        // srcはコピー元として読める状態へ遷移させる(DX12)。dstがBufferUsage::Readbackでない、
+        // サイズが足りない、いずれかがnullptrならログを出して何もしない
+        virtual void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) = 0;
     };
 }

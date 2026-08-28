@@ -171,8 +171,19 @@ foreach ($f in $files) {
     }
 
     $src = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
-    # SM 5.0 に無い機能を使うファイルは fxc(DX11経路)の対象外。DX11はそもそもこれらを描かない
-    $sm6Only  = $src -match 'RayQuery|TraceRay|RaytracingAccelerationStructure|ResourceDescriptorHeap|KURENAI_BINDLESS'
+    # SM 5.0 に無い機能を使うファイルは fxc(DX11経路)の対象外。DX11はそもそもこれらを描かない。
+    #
+    # 【KURENAI_BINDLESS を含むかどうかで判定してはいけない】そのマクロで**分岐している**だけの
+    # ファイルは、マクロ未定義なら SM 5.0 で完全にコンパイルできる。Shadow.hlsl がまさにそれで、
+    # DX11 は実行時に D3DCompileFromFile でこのファイルを読む。含むだけで外すと、
+    # **DX11 経路が未検証のまま「失敗0」で通る**(しかも shadow の CreateShader は
+    # try/catch に入っていないので、SM 5.0 で落ちる変更が入ると DX11 は起動時に死ぬ)。
+    #
+    # 判定したいのは「マクロ未定義に展開しても SM 5.0 の機能しか使わないか」である。
+    # これは字面では決まらないため、フォールバックを持たない(=bindless 専用の)シェーダーには
+    # ファイル先頭へ KURENAI_SHADER_BINDLESS_ONLY と書いてもらい、それを見る。
+    # **付け忘れたら fxc に掛かって失敗する**ので、黙って検証から漏れることはない
+    $sm6Only  = $src -match 'RayQuery|TraceRay|RaytracingAccelerationStructure|ResourceDescriptorHeap|KURENAI_SHADER_BINDLESS_ONLY'
     $entries  = Get-Entries $src
 
     if ($entries.Count -eq 0) { [void]$noEntry.Add($rel); continue }

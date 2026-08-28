@@ -278,6 +278,28 @@ namespace Kurenai::Assets
         bool HasCameraSpeed = false;
         float CameraSpeed = 0.0f;
 
+        // テクスチャの常駐ミップ制御(テクスチャストリーミング)を有効にするか。
+        //
+        // 【既定はoff】未指定なら従来どおり全ミップを常駐させる。既存アセットの見え方も
+        // VRAM使用量も1ビットも変えないため。PLATEAU LOD2のようにテクスチャが支配的な
+        // シーンだけがonにする。仕組みはAssets::TextureStreamingManager参照
+        bool TextureStreamingEnabled = false;
+        // 必要ミップの推定に足すバイアス[段]。負なら安全側(より詳細なミップを常駐させる)。
+        //
+        // 【既定 -2 は実測で決めた】Bistro Exteriorで、常駐ミップ制御をoff/onした画を
+        // 同一起動・同一カメラで撮り、32pxタイルごとにラプラシアン分散を比べた結果:
+        //
+        //   UV密度の代表値  バイアス  常駐率   比<0.80のタイル   最悪タイル
+        //   (ノイズ下限)       ―        ―          0枚           0.918
+        //   p90              -2      13.8%       14枚           0.175
+        //   中央値            -3      28.6%        0枚           0.852
+        //   p10              -1      12.4%        3枚           0.745
+        //   p10              -2      21.1%        1枚           0.768  ← 既定
+        //
+        // 残る1枚は暗部のアルファテスト葉で、並べても区別が付かない(絶対値が小さいため
+        // 相対指標だけが大きく動く)。根拠と経緯は docs/ImplementationDetail.md 48章
+        float TextureStreamingBias = -2.0f;
+
         // AO/間接光(SSAO・SSIL)を有効にするか。Furnace Testでは球の縁がAOで暗くなると
         // 「エネルギー損失による暗さ」と区別がつかなくなるため無効にする
         bool AOEnabled = true;
