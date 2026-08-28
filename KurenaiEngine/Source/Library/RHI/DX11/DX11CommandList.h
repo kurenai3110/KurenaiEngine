@@ -25,6 +25,7 @@ namespace Kurenai::RHI
         void SetIndexBuffer(IRHIBuffer* buffer) override;
         void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetTexture(uint32_t slot, IRHITexture* texture) override;
+        void SetTextureAllStages(uint32_t slot, IRHITexture* texture) override;
         void SetSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;

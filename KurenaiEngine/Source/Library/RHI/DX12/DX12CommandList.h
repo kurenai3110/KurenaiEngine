@@ -33,6 +33,7 @@ namespace Kurenai::RHI
         void SetIndexBuffer(IRHIBuffer* buffer) override;
         void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetTexture(uint32_t slot, IRHITexture* texture) override;
+        void SetTextureAllStages(uint32_t slot, IRHITexture* texture) override;
         void SetSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
@@ -113,6 +114,9 @@ namespace Kurenai::RHI
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;
         void FlushPendingSrvWrites();
+        // SetTexture / SetTextureAllStages の共通処理。遷移先のリソース状態だけが違う
+        // (前者はPIXEL、後者はPIXEL|NON_PIXEL)。callerNameはログに出す呼び出し元の名前
+        void BindTexture(uint32_t slot, IRHITexture* texture, D3D12_RESOURCE_STATES state, const char* callerName);
         // レンダーターゲット/深度としてバインドされるテクスチャのSRVがシャドウに残っていたら
         // nullディスクリプタへ戻す。D3D11ドライバが同一リソースのSRVとRTVの同時バインドを
         // 検出して自動で解除するのと同じ挙動を再現し、あわせて「RENDER_TARGET状態のリソースを

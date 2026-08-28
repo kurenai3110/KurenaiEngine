@@ -301,18 +301,44 @@ namespace Kurenai::RHI
 
     void DX12CommandList::SetTexture(uint32_t slot, IRHITexture* texture)
     {
+        BindTexture(slot, texture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, "SetTexture");
+    }
+
+    void DX12CommandList::SetTextureAllStages(uint32_t slot, IRHITexture* texture)
+    {
+        // ピクセルシェーダー以外のグラフィックスステージ(増幅シェーダー・メッシュシェーダー)からも
+        // 読めるよう、NON_PIXELも立てて遷移させる。ディスクリプタの張り方はSetTextureと同一
+        // (メッシュシェーダー用ルートシグネチャはSRVテーブルの可視性をALLにしてある)
+        BindTexture(
+            slot, texture,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            "SetTextureAllStages");
+    }
+
+    void DX12CommandList::BindTexture(
+        uint32_t slot, IRHITexture* texture, D3D12_RESOURCE_STATES state, const char* callerName)
+    {
         if (slot >= kTextureSlotCount)
         {
             Core::Logger::Error(
                 "DX12",
-                "SetTexture: スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0〜t" +
+                std::string(callerName) + ": スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0〜t" +
                     std::to_string(kTextureSlotCount - 1) + ")。バインドをスキップします");
+            return;
+        }
+
+        if (texture == nullptr)
+        {
+            // nullptrをそのまま進めるとTransitionToでnull参照になる
+            // (SetComputeShaderResourceBufferが同じ状況をエラーにしているのと同じ扱い)
+            Core::Logger::Error(
+                "DX12", std::string(callerName) + ": テクスチャがnullptrです。バインドをスキップします");
             return;
         }
 
         auto* dx12Texture = static_cast<DX12Texture*>(texture);
         auto* cmdList = m_Device->GetCommandList();
-        dx12Texture->TransitionTo(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        dx12Texture->TransitionTo(cmdList, state);
 
         // SRVテーブルの割り当て・CopyDescriptorsはこの場では行わず、コピー元だけ記録しておく。
         // 実際の割り当て・コピーはDraw直前のFlushPendingSrvWrites()でまとめて行う(そこで

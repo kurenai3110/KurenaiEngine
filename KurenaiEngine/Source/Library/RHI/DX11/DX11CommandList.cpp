@@ -177,6 +177,13 @@ namespace Kurenai::RHI
 
     void DX11CommandList::SetTexture(uint32_t slot, IRHITexture* texture)
     {
+        if (texture == nullptr)
+        {
+            // nullptrをそのまま進めるとGetShaderResourceViewでnull参照になる
+            Core::Logger::Error("DX11", "SetTexture: テクスチャがnullptrです。バインドをスキップします");
+            return;
+        }
+
         auto* dx11Texture = static_cast<DX11Texture*>(texture);
         ID3D11ShaderResourceView* srvs[] = { dx11Texture->GetShaderResourceView() };
         m_Context->PSSetShaderResources(slot, 1, srvs);
@@ -184,6 +191,19 @@ namespace Kurenai::RHI
         {
             m_BoundPixelSrvs[slot] = srvs[0];
         }
+    }
+
+    void DX11CommandList::SetTextureAllStages(uint32_t slot, IRHITexture* texture)
+    {
+        // 【DX11ではSetTextureと同じでよい】このAPIが分かれているのはDX12の都合
+        // (リソース状態がステージ単位で分かれており、増幅シェーダー・メッシュシェーダーから
+        // 読むにはNON_PIXELも立てて遷移させる必要がある)。DX11にはリソース状態という概念が無く、
+        // ステージごとのバインド空間も独立しているため、遷移に相当する処理が存在しない。
+        //
+        // 【そもそもDX11には呼び出し側が来ない】このAPIを使うのは増幅シェーダーへHi-Zを渡す経路で、
+        // DX11はメッシュシェーダー非対応。それでも実装を置くのは、RHIのインターフェースを
+        // 片側だけ実装すると「もう片方は起動して初めて壊れていることが分かる」ため
+        SetTexture(slot, texture);
     }
 
     void DX11CommandList::SetSamplerSet(IRHISamplerSet* samplerSet)
