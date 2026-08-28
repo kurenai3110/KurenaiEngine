@@ -8,6 +8,8 @@
 #include <DirectXTex.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -111,10 +113,34 @@ namespace Kurenai::RHI
         // GPU版Compress()はID3D11Deviceしか受け付けないため、DX12バックエンド利用時でも
         // このデバイスだけは常にD3D11で用意する。将来テクスチャキャッシュ生成を独立した
         // ビルドツールへ切り出す際も、この関数はIRHIDeviceに一切依存していないためそのまま移植できる
+        //
+        // === 計測 ==============================================================
+        //
+        // フェーズ別の累計をナノ秒の整数で持つ(doubleのfetch_addはC++17に無い)。
+        // 複数スレッドから積むためアトミック。計測しているのはKurenaiPackerが通る
+        // LoadFromFile経路だけで、ランタイムが使うLoadFromPackedTextureには入れていない
+        using StatsClock = std::chrono::steady_clock;
+
+        std::atomic<uint64_t>& StatNanos(int index)
+        {
+            // 0=Decode 1=Mip 2=BC7Wait 3=BC7Compress 4=DeviceCreate 5=Count
+            static std::atomic<uint64_t> counters[6] = {};
+            return counters[index];
+        }
+
+        void AddStatNanos(int index, const StatsClock::time_point& start)
+        {
+            StatNanos(index).fetch_add(
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    StatsClock::now() - start).count()),
+                std::memory_order_relaxed);
+        }
+
         ID3D11Device* GetCompressionDevice()
         {
             static Microsoft::WRL::ComPtr<ID3D11Device> device = []() -> Microsoft::WRL::ComPtr<ID3D11Device>
             {
+                const auto deviceCreateStart = StatsClock::now();
                 UINT createDeviceFlags = 0;
 #if defined(_DEBUG)
                 createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
@@ -138,8 +164,10 @@ namespace Kurenai::RHI
                     // GPU圧縮用デバイスが作れない場合はnullptrを返し、呼び出し側(CompressBC7)で
                     // 圧縮失敗として扱う(呼び出し元のLoadFromFileが非圧縮フォールバックする)
                     Core::Logger::Warning("TextureImage", "BC7圧縮用GPUデバイスの作成に失敗しました");
+                    AddStatNanos(4, deviceCreateStart);
                     return nullptr;
                 }
+                AddStatNanos(4, deviceCreateStart);
                 return result;
             }();
             return device.Get();
@@ -155,6 +183,14 @@ namespace Kurenai::RHI
             return mutex;
         }
 
+        // 【この直列化を外しても速くならない(実測)】DirectX::Compressは呼ばれるたびに
+        // GPUCompressBCを作り直してコンピュートシェーダを7本生成するが、その固定費は
+        // 0.96msでBC7圧縮全体の1%しかない(Sponza 69枚で66ms / 6559ms)。
+        // またGPU側が既に飽和しており、パッカーを2プロセス同時に走らせると
+        // テクスチャフェーズは1本6.7秒から2本とも14.4秒へ伸び、合計の壁時計は変わらない。
+        // ワーカーを増やす・デバイスを分ける・圧縮器を使い回す、のいずれも効かない。
+        // 速くしたいなら「圧縮しない」(既存の.ktexを使う)しかない。
+        //
         // GPU(コンピュートシェーダー)でBC7圧縮する。CPU版フォールバックは持たない
         // (ソフトウェアBC7圧縮は実用的な速度が出ないため。詳細はGetCompressionDeviceのコメント参照)。
         // GPU圧縮用デバイスが無い/圧縮呼び出し自体が失敗した場合は失敗のHRESULTを返し、
@@ -169,10 +205,38 @@ namespace Kurenai::RHI
                 return E_FAIL;
             }
 
-            std::lock_guard<std::mutex> lock(CompressionDeviceMutex());
-            return DirectX::Compress(
+            // 【待ちと圧縮を別々に測る】lock_guardのままだと両者が混ざり、
+            // 「ワーカーを増やす意味があるか」を判定できない
+            const auto waitStart = StatsClock::now();
+            std::unique_lock<std::mutex> lock(CompressionDeviceMutex());
+            AddStatNanos(2, waitStart);
+
+            const auto compressStart = StatsClock::now();
+            const HRESULT hr = DirectX::Compress(
                 gpuDevice, srcImages, nimages, metadata, format,
                 DirectX::TEX_COMPRESS_DEFAULT, DirectX::TEX_ALPHA_WEIGHT_DEFAULT, compressed);
+            AddStatNanos(3, compressStart);
+            return hr;
+        }
+    }
+
+    TextureLoadStats GetTextureLoadStats()
+    {
+        TextureLoadStats stats;
+        stats.DecodeSeconds = static_cast<double>(StatNanos(0).load(std::memory_order_relaxed)) / 1e9;
+        stats.MipSeconds = static_cast<double>(StatNanos(1).load(std::memory_order_relaxed)) / 1e9;
+        stats.BC7WaitSeconds = static_cast<double>(StatNanos(2).load(std::memory_order_relaxed)) / 1e9;
+        stats.BC7CompressSeconds = static_cast<double>(StatNanos(3).load(std::memory_order_relaxed)) / 1e9;
+        stats.DeviceCreateSeconds = static_cast<double>(StatNanos(4).load(std::memory_order_relaxed)) / 1e9;
+        stats.Count = StatNanos(5).load(std::memory_order_relaxed);
+        return stats;
+    }
+
+    void ResetTextureLoadStats()
+    {
+        for (int i = 0; i < 6; ++i)
+        {
+            StatNanos(i).store(0, std::memory_order_relaxed);
         }
     }
 
@@ -237,11 +301,15 @@ namespace Kurenai::RHI
             return result;
         }
 
+        StatNanos(5).fetch_add(1, std::memory_order_relaxed);
+
+        const auto decodeStart = StatsClock::now();
         DirectX::TexMetadata rawMetadata{};
         DirectX::ScratchImage rawImage;
         ThrowIfFailed(
             DirectX::LoadFromWICFile(filePath.c_str(), DirectX::WIC_FLAGS_FORCE_RGB, &rawMetadata, rawImage),
             "テクスチャの読み込みに失敗しました: " + WideToUtf8(filePath));
+        AddStatNanos(0, decodeStart);
         if (sRGB)
         {
             rawImage.OverrideFormat(DirectX::MakeSRGB(rawMetadata.format));
@@ -249,8 +317,10 @@ namespace Kurenai::RHI
 
         // ミップマップ生成に失敗しても致命的ではないため、失敗時はミップ無しの元画像のまま
         // 圧縮処理へ進む(サンプラーはミップ無しテクスチャも正しく扱える)
+        const auto mipStart = StatsClock::now();
         DirectX::ScratchImage mipChain;
         const HRESULT mipHr = DirectX::GenerateMipMaps(rawImage.GetImages(), rawImage.GetImageCount(), rawImage.GetMetadata(), DirectX::TEX_FILTER_DEFAULT, 0, mipChain);
+        AddStatNanos(1, mipStart);
         if (FAILED(mipHr))
         {
             Core::Logger::Warning("TextureImage", "ミップマップ生成に失敗したため、ミップ無しのまま使用します: " + WideToUtf8(filePath));
