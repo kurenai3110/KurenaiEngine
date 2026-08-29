@@ -180,9 +180,17 @@ namespace Kurenai::RHI
         // CreateBottomLevelAS/CreateTopLevelASの共通部分。組み立て済みの構築入力を受け取り、
         // 必要なサイズを問い合わせてASバッファとスクラッチバッファを確保し、
         // m_UploadCommandList4へ構築コマンドを積んで完了を同期的に待つ。
-        // createSrvがtrueの場合はTLAS用のSRVも作る。失敗時はログを出してnullptrを返す
+        // createSrvがtrueの場合はTLAS用のSRVも作る。失敗時はログを出してnullptrを返す。
+        //
+        // compactがtrueのときは圧縮(compaction)まで行う。構築時に圧縮後サイズを問い合わせ、
+        // そのサイズで作り直した領域へコピーして元を捨てる。呼び出し側はinputs.Flagsへ
+        // ALLOW_COMPACTIONを立てておくこと(立っていない入力に対しては圧縮を諦めて素の結果を返す)
         std::unique_ptr<IRHIAccelerationStructure> BuildAccelerationStructure(
-            const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, bool createSrv, const char* debugName);
+            const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, bool createSrv, const char* debugName,
+            bool compact = false);
+        // 圧縮したBLASの累計サイズ(圧縮前 / 圧縮後)。効果をログへ出すためだけに持つ
+        std::atomic<uint64_t> m_BlasBytesBeforeCompaction{ 0 };
+        std::atomic<uint64_t> m_BlasBytesAfterCompaction{ 0 };
         // ID3D12Device5 / ID3D12GraphicsCommandList4の取得とレイトレーシングティアの判定を行い、
         // 結果をm_SupportsRaytracingへ記録する。判定結果は必ずログへ残す
         // (非対応環境では上位層が黙って従来手法へフォールバックするため、ログが唯一の手がかりになる)
