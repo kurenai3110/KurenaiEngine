@@ -151,7 +151,42 @@ function Get-StagedTree {
     return $d
 }
 
-# .hlsli はインクルード専用でエントリポイントを持たないため対象外
+# エントリポイントの検出用に #include を再帰的に展開したソースを返す。
+#
+# 【なぜ展開が要るか】エントリポイントが .hlsli 側で定義されていることがある。
+# GBufferCommon.hlsli の VSMain がそれで、エンジンは GBuffer.hlsl / Water.hlsl /
+# DepthPrepass.hlsl を「エントリ VSMain」でコンパイルする(KurenaiEngine3D.cpp の
+# CreateShader)。.hlsl の字面だけを見ていると**この3本の頂点シェーダーが
+# 検査の母数から丸ごと抜け**、壊しても「失敗0」が返る。
+#
+# 展開するのはエントリ検出のためだけで、コンパイル自体は元のファイルに対して行う
+# (インクルードパスは fxc/dxc が解決する)。$sm6Only の判定にも使わないこと ――
+# 展開すると Bindless.hlsli 等の字面が混ざり、DX11 経路が誤って検証対象から外れる
+function Expand-Includes {
+    param([string]$Path, [System.Collections.Generic.HashSet[string]]$Seen)
+
+    if (-not $Seen) { $Seen = New-Object System.Collections.Generic.HashSet[string] }
+    $full = [System.IO.Path]::GetFullPath($Path)
+    if (-not $Seen.Add($full)) { return '' }      # 循環インクルード対策
+    if (-not (Test-Path $full)) { return '' }
+
+    $text = [System.IO.File]::ReadAllText($full, [System.Text.Encoding]::UTF8)
+    $dir  = [System.IO.Path]::GetDirectoryName($full)
+    $sb   = New-Object System.Text.StringBuilder
+    foreach ($line in $text -split "`r?`n") {
+        $m = [regex]::Match($line, '^\s*#include\s+"([^"]+)"')
+        if ($m.Success) {
+            [void]$sb.AppendLine((Expand-Includes -Path (Join-Path $dir $m.Groups[1].Value) -Seen $Seen))
+        } else {
+            [void]$sb.AppendLine($line)
+        }
+    }
+    return $sb.ToString()
+}
+
+# .hlsli 自体はコンパイル単位ではないので走査対象にしない。
+# ただし .hlsli で定義されたエントリポイントは、それを include する .hlsl のものとして
+# 上の Expand-Includes 経由で拾う
 $files = Get-ChildItem $ShaderRoot -Recurse -Filter *.hlsl | Sort-Object FullName
 Write-Host "対象: $($files.Count) ファイル`n"
 
@@ -184,7 +219,14 @@ foreach ($f in $files) {
     # ファイル先頭へ KURENAI_SHADER_BINDLESS_ONLY と書いてもらい、それを見る。
     # **付け忘れたら fxc に掛かって失敗する**ので、黙って検証から漏れることはない
     $sm6Only  = $src -match 'RayQuery|TraceRay|RaytracingAccelerationStructure|ResourceDescriptorHeap|KURENAI_SHADER_BINDLESS_ONLY'
-    $entries  = Get-Entries $src
+    # エントリ検出だけは #include を展開したソースで行う($sm6Only は展開前のまま。上の説明参照)。
+    #
+    # 【bindless専用のファイルは自分のエントリだけ見る】GBufferMeshlet.hlsl は
+    # GBufferCommon.hlsli を include しているため、展開すると共有の VSMain まで
+    # 自分のエントリとして拾ってしまう。エンジンがこのファイルからコンパイルするのは
+    # ASMain/MSMain だけで、VSMain との組み合わせは存在しない。
+    # 存在しない組み合わせを検証して落とすのは偽陽性で、本物の失敗を埋もれさせる
+    $entries  = if ($sm6Only) { Get-Entries $src } else { Get-Entries (Expand-Includes -Path $f.FullName) }
 
     if ($entries.Count -eq 0) { [void]$noEntry.Add($rel); continue }
     if (-not $dxc) { [void]$noEntry.Add("$rel (DX12経路: dxc なし)") }

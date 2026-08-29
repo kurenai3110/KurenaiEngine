@@ -28,36 +28,7 @@ cbuffer CascadeConstants : register(b0)
     float4x4 ViewProj;
 };
 
-// GBufferCommon.hlsliのObjectConstantsと同じレイアウト。
-// **並びを1つでもずらすと別の値を読む**ので、あちらを直したらここも直すこと
-// (Shadow.hlsl・Transparent.hlsl・ProbeCapture.hlslも同じ写しを持っている)。
-//
-// このパスが実際に読むのは World と、メッシュレット/マテリアルテーブル関連だけだが、
-// 定数バッファのオフセットは宣言順で決まるため途中を飛ばせない
-cbuffer ObjectConstants : register(b1)
-{
-    float4x4 World;
-    float4x4 NormalMatrix;
-    float MetallicFactor;
-    float RoughnessFactor;
-    float TangentSignFlip;
-    float AlphaCutoff;
-    float3 EmissiveFactor;
-    float OcclusionStrength;
-    float4 BaseColorFactor;
-    float MaterialID;
-    uint MeshletOffset;
-    uint MeshletBufferIndex;
-    uint MeshletVertexBufferIndex;
-    uint MeshletTriangleBufferIndex;
-    uint MeshletCount;
-    float Translucency;
-    uint MaterialTableIndex;
-    uint MeshletFilterReject;
-    uint MeshletFilterRequire;
-    float EmissiveIntensity;
-    float OcclusionMapScale;
-};
+#include "ObjectConstants.hlsli"
 
 #define KURENAI_AMPLIFICATION_GROUP_SIZE 32
 #define KURENAI_MESH_GROUP_SIZE 128
@@ -93,6 +64,14 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
     }
     GroupMemoryBarrierWithGroupSync();
 
+    // 段は**主カメラ**で決める。ここでViewProj(カスケードの正射影)から決めると、
+    // 影を落とす形と本体の形が違う段になり、影の縁が本体からずれる。
+    // 式はG-Bufferとまったく同じMeshletResolveLODLevelを通す
+    const uint selectedLODLevel = MeshletResolveLODLevel(
+        World, float3(ModelBoundsCenterX, ModelBoundsCenterY, ModelBoundsCenterZ), ModelBoundsRadius,
+        float3(MeshletLODCameraPosX, MeshletLODCameraPosY, MeshletLODCameraPosZ),
+        MeshletLODPixelScale, MeshletLODScreenSize, MeshletLODForced, MeshletLODLevelCap);
+
     if (dispatchThreadId < MeshletCount)
     {
         const uint meshletIndex = MeshletOffset + dispatchThreadId;
@@ -107,9 +86,14 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
         const bool materialAccepted =
             MeshletPassesMaterialFilter(meshlet.Flags, MeshletFilterReject, MeshletFilterRequire);
 
+        // 段による取捨。**これが無いと簡略化した段まで影に重なる。**
+        // 表(Model::MeshletBuffer)には全段が並んでおり、ディスパッチする
+        // グループ数も全段合計から決めているため、落とさなければ全段が描かれる
+        const bool lodAccepted = (MeshletLODLevel(meshlet.Flags) == selectedLODLevel);
+
         // カスケードの正射影でカリングする。カメラではなくライト側の錐台なので、
         // 画面外にあっても影を落とすものは残る
-        if (materialAccepted && MeshletSphereInFrustum(ViewProj, centerWorld, radiusWorld))
+        if (materialAccepted && lodAccepted && MeshletSphereInFrustum(ViewProj, centerWorld, radiusWorld))
         {
             uint slot;
             InterlockedAdd(s_VisibleCount, 1, slot);

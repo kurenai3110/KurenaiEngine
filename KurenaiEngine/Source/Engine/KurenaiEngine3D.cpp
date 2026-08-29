@@ -8,6 +8,8 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <functional>
+#include <limits>
 #include <random>
 
 #include "Assets/SceneLoader.h"
@@ -952,11 +954,80 @@ namespace Kurenai
             // 深度プリパスは G-Buffer と同じ増幅シェーダーを使うため、
             // フレーム全体のフラグだけだと同じ塊を1フレームに2回数えてしまう
             uint32_t MeshletStatsEnabled;
+
+            // --- メッシュレットLOD(Stage 6) ---
+            //
+            // 【GBufferCommon.hlsliのObjectConstantsと1バイトも違ってはいけない】
+            // 向こうがfloat3ではなくスカラー3つで宣言しているのは、定数バッファのfloat3が
+            // 16バイト境界をまたげず、手前に暗黙のパディングが入りうるため。こちらも同じ並びにする
+            float ModelBoundsCenter[3];
+            float ModelBoundsRadius;
+            float MeshletLODCameraPos[3];
+            float MeshletLODPixelScale;
+            float MeshletLODScreenSize;
+            int32_t MeshletLODForced;
+            // メッシュレットの色分けを「塊ごと」ではなく「段ごと」にするか(0/1)
+            uint32_t MeshletDebugColorByLOD;
+            // このモデルが選べる最も粗い段(Assets::Model::MeshletLODLevelCap)
+            uint32_t MeshletLODLevelCap;
+            // インスタンシング。InstancingEnabledが0以外のとき、頂点シェーダーは
+            // World/NormalMatrix/TangentSignFlipを上の値ではなく
+            // ModelInstances[InstanceBase + SV_InstanceID]から取る
+            // (Shaders/3D/ObjectConstants.hlsliのFetchModelInstance)。
+            // 0のときは従来どおりここの値を使うので、既存の描画は1ビットも変わらない
+            uint32_t InstanceBase;
+            uint32_t InstancingEnabled;
             // このドローでHi-Zオクルージョン判定をどう行うか(0=しない / 1=前フレームのHi-Z /
             // 2=今フレームのHi-Z)。値の意味と、パスで分ける必要がある理由は
             // Shaders/3D/GBufferCommon.hlsli の MeshletOcclusionMode を参照
             uint32_t MeshletOcclusionMode;
         };
+
+        // モデルのAABBから外接球を作り、段の選択に要る値を定数へ書き込む。
+        //
+        // 【AABBの外接球を使う】メッシュ単位ではなくモデル単位にするのは、
+        // 1つのモデルの中で段を混ぜないため。段が混ざると、簡略化で頂点が動いた側と
+        // 動いていない側で辺が一致せず、境目に穴が開く
+        void ApplyMeshletLODConstants(
+            ObjectConstants& constants, const Assets::Model& model,
+            const MeshletLODFrameConstants& lod)
+        {
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                constants.ModelBoundsCenter[axis] =
+                    (model.BoundsMin[axis] + model.BoundsMax[axis]) * 0.5f;
+            }
+            const float halfX = (model.BoundsMax[0] - model.BoundsMin[0]) * 0.5f;
+            const float halfY = (model.BoundsMax[1] - model.BoundsMin[1]) * 0.5f;
+            const float halfZ = (model.BoundsMax[2] - model.BoundsMin[2]) * 0.5f;
+            constants.ModelBoundsRadius = std::sqrt(halfX * halfX + halfY * halfY + halfZ * halfZ);
+
+            constants.MeshletLODCameraPos[0] = lod.CameraPos.x;
+            constants.MeshletLODCameraPos[1] = lod.CameraPos.y;
+            constants.MeshletLODCameraPos[2] = lod.CameraPos.z;
+            constants.MeshletLODPixelScale = lod.PixelScale;
+
+            // しきい値はモデルごとに決める。
+            //
+            // 【なぜ画素数の定数を全モデルへ当てはめないか】三角形数はモデルによって3桁違う
+            // (小道具の数千 ⇔ PLATEAUの地形タイルの134万)。単一の値にすると、
+            // 小さいモデルでは早く粗くなりすぎ、地形では一度も段が落ちない。
+            // 基準は「原寸の三角形1つが画面上で1画素を切ったら段を落とす」で、
+            // 直径D画素の円にN個の三角形があるとき平均面積は (πD²/4)/N なので
+            // 1画素を切る直径は sqrt(4N/π)。Qualityはその倍率(大きいほど原寸を保つ)
+            constexpr float kInvPi = 0.31830988618379067f;
+            const float triangles = static_cast<float>(model.TotalTriangleCount);
+            constants.MeshletLODScreenSize =
+                (lod.Quality > 0.0f && triangles > 0.0f)
+                    ? lod.Quality * std::sqrt(4.0f * triangles * kInvPi)
+                    : 0.0f;
+            constants.MeshletLODForced = lod.Forced;
+            constants.MeshletDebugColorByLOD = lod.DebugColorByLOD ? 1u : 0u;
+            // 【全メッシュの共通部分まで畳んだ値を渡す】メッシュごとの段数で
+            // 増幅シェーダーが読み替えると、段を1つしか持たないメッシュだけが
+            // 原寸のまま残り、1つのモデルの中で段が混ざる(境目に穴が開く)
+            constants.MeshletLODLevelCap = model.MeshletLODLevelCap;
+        }
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
         // TRS(平行移動・回転・スケール)から計算済み(HLSL側のmul(vec, matrix)規約に合わせて
@@ -974,7 +1045,8 @@ namespace Kurenai
         // instance.Modelは最も詳細な段でしかなく、シャドウや粗い段を描くときは食い違う
         ObjectConstants MakeObjectConstants(
             const Assets::ModelInstance& instance, const Assets::Model& model, const Assets::Mesh& mesh,
-            float emissiveIntensity, bool occlusionMapEnabled, float ditherFade = 1.0f)
+            float emissiveIntensity, bool occlusionMapEnabled, const MeshletLODFrameConstants& meshletLOD,
+            float ditherFade = 1.0f)
         {
             ObjectConstants constants{};
             constants.DitherFade = ditherFade;
@@ -1009,7 +1081,11 @@ namespace Kurenai
             constants.MeshletBufferIndex = bindlessIndexOf(model.MeshletBuffer.get());
             constants.MeshletVertexBufferIndex = bindlessIndexOf(model.MeshletVertexBuffer.get());
             constants.MeshletTriangleBufferIndex = bindlessIndexOf(model.MeshletTriangleBuffer.get());
-            constants.MeshletCount = mesh.MeshletCount;
+            // 【LOD0の個数ではなく全段の合計】表には全段が並んでおり、増幅シェーダーが
+            // 段を選ぶには選ばれうる段すべてが走査範囲に入っていなければならない。
+            // LOD0の個数のままだと、粗い段を選んでも表の後ろ半分に届かず何も描かれない
+            constants.MeshletCount = mesh.MeshletTotalCount;
+            ApplyMeshletLODConstants(constants, model, meshletLOD);
 
             // メッシュ単位の経路。マテリアルは上の定数とt0〜t6から読むため、
             // テーブルは使わない(=無効番号)。EmissiveFactorとOcclusionStrengthには
@@ -1038,7 +1114,8 @@ namespace Kurenai
         ObjectConstants MakeModelObjectConstants(
             const Assets::ModelInstance& instance, const Assets::Model& model, float emissiveIntensity,
             bool occlusionMapEnabled, uint32_t rejectMask, uint32_t requireMask,
-            bool countCullStats = false, float ditherFade = 1.0f, uint32_t occlusionMode = 0u)
+            const MeshletLODFrameConstants& meshletLOD, bool countCullStats = false,
+            float ditherFade = 1.0f, uint32_t occlusionMode = 0u)
         {
             ObjectConstants constants{};
             constants.DitherFade = ditherFade;
@@ -1056,7 +1133,9 @@ namespace Kurenai
             constants.MeshletBufferIndex = bindlessIndexOf(model.MeshletBuffer.get());
             constants.MeshletVertexBufferIndex = bindlessIndexOf(model.MeshletVertexBuffer.get());
             constants.MeshletTriangleBufferIndex = bindlessIndexOf(model.MeshletTriangleBuffer.get());
+            // TotalMeshletCountは全段の合計(ModelLoaderが表へ全段を載せている)
             constants.MeshletCount = model.TotalMeshletCount;
+            ApplyMeshletLODConstants(constants, model, meshletLOD);
 
             constants.MaterialTableIndex = bindlessIndexOf(model.MaterialTableBuffer.get());
             constants.MeshletFilterReject = rejectMask;
@@ -1716,13 +1795,13 @@ namespace Kurenai
         // ジオメトリパス(G-Buffer書き込み)
         RHI::ShaderDesc gbufferVsDesc;
         gbufferVsDesc.Stage = RHI::ShaderStage::Vertex;
-        gbufferVsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
+        gbufferVsDesc.FilePath = shaderDirectory + L"GBuffer.kshader";
         gbufferVsDesc.EntryPoint = "VSMain";
         m_GBufferVertexShader = m_Device->CreateShader(gbufferVsDesc);
 
         RHI::ShaderDesc gbufferPsDesc;
         gbufferPsDesc.Stage = RHI::ShaderStage::Pixel;
-        gbufferPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
+        gbufferPsDesc.FilePath = shaderDirectory + L"GBuffer.kshader";
         gbufferPsDesc.EntryPoint = "PSMain";
         m_GBufferPixelShader = m_Device->CreateShader(gbufferPsDesc);
 
@@ -1731,7 +1810,7 @@ namespace Kurenai
         // m_GBufferVertexShaderをそのまま共有する(専用のVSは作らない)
         RHI::ShaderDesc gbufferWaterPsDesc;
         gbufferWaterPsDesc.Stage = RHI::ShaderStage::Pixel;
-        gbufferWaterPsDesc.FilePath = shaderDirectory + L"Water.hlsl";
+        gbufferWaterPsDesc.FilePath = shaderDirectory + L"Water.kshader";
         gbufferWaterPsDesc.EntryPoint = "PSMain";
         m_GBufferWaterPixelShader = m_Device->CreateShader(gbufferWaterPsDesc);
 
@@ -1741,7 +1820,7 @@ namespace Kurenai
         {
             RHI::ShaderDesc depthPrepassCutoutPsDesc;
             depthPrepassCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
-            depthPrepassCutoutPsDesc.FilePath = shaderDirectory + L"DepthPrepass.hlsl";
+            depthPrepassCutoutPsDesc.FilePath = shaderDirectory + L"DepthPrepass.kshader";
             depthPrepassCutoutPsDesc.EntryPoint = "PSMainCutout";
             m_DepthPrepassCutoutPixelShader = m_Device->CreateShader(depthPrepassCutoutPsDesc);
         }
@@ -1764,13 +1843,13 @@ namespace Kurenai
         {
             RHI::ShaderDesc gbufferAsDesc;
             gbufferAsDesc.Stage = RHI::ShaderStage::Amplification;
-            gbufferAsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.hlsl";
+            gbufferAsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.kshader";
             gbufferAsDesc.EntryPoint = "ASMain";
             m_GBufferAmplificationShader = m_Device->CreateShader(gbufferAsDesc);
 
             RHI::ShaderDesc gbufferMsDesc;
             gbufferMsDesc.Stage = RHI::ShaderStage::Mesh;
-            gbufferMsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.hlsl";
+            gbufferMsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.kshader";
             gbufferMsDesc.EntryPoint = "MSMain";
             m_GBufferMeshShader = m_Device->CreateShader(gbufferMsDesc);
 
@@ -1778,7 +1857,7 @@ namespace Kurenai
             RHI::ShaderDesc gbufferMeshletDebugPsDesc;
             gbufferMeshletDebugPsDesc.Stage = RHI::ShaderStage::Pixel;
             // 実体はGBuffer.hlsl側(PSMainをそのまま呼んでアルベドだけ差し替えるため)
-            gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
+            gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.kshader";
             gbufferMeshletDebugPsDesc.EntryPoint = "PSMainMeshletDebug";
             m_GBufferMeshletDebugPixelShader = m_Device->CreateShader(gbufferMeshletDebugPsDesc);
 
@@ -1787,13 +1866,13 @@ namespace Kurenai
             // レイアウトが違うため(ShadowMeshlet.hlsl冒頭のコメント参照)
             RHI::ShaderDesc shadowAsDesc;
             shadowAsDesc.Stage = RHI::ShaderStage::Amplification;
-            shadowAsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.hlsl";
+            shadowAsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.kshader";
             shadowAsDesc.EntryPoint = "ASMain";
             m_ShadowAmplificationShader = m_Device->CreateShader(shadowAsDesc);
 
             RHI::ShaderDesc shadowMsDesc;
             shadowMsDesc.Stage = RHI::ShaderStage::Mesh;
-            shadowMsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.hlsl";
+            shadowMsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.kshader";
             shadowMsDesc.EntryPoint = "MSMain";
             m_ShadowMeshShader = m_Device->CreateShader(shadowMsDesc);
         }
@@ -1805,13 +1884,13 @@ namespace Kurenai
         // 直接光を計算しHDRで書き出す)
         RHI::ShaderDesc directLightVsDesc;
         directLightVsDesc.Stage = RHI::ShaderStage::Vertex;
-        directLightVsDesc.FilePath = shaderDirectory + L"DirectLighting.hlsl";
+        directLightVsDesc.FilePath = shaderDirectory + L"DirectLighting.kshader";
         directLightVsDesc.EntryPoint = "VSMain";
         m_DirectLightVertexShader = m_Device->CreateShader(directLightVsDesc);
 
         RHI::ShaderDesc directLightPsDesc;
         directLightPsDesc.Stage = RHI::ShaderStage::Pixel;
-        directLightPsDesc.FilePath = shaderDirectory + L"DirectLighting.hlsl";
+        directLightPsDesc.FilePath = shaderDirectory + L"DirectLighting.kshader";
         directLightPsDesc.EntryPoint = "PSMain";
         m_DirectLightPixelShader = m_Device->CreateShader(directLightPsDesc);
 
@@ -1826,14 +1905,14 @@ namespace Kurenai
         // 3つのピクセルシェーダで使い回す
         RHI::ShaderDesc aoVsDesc;
         aoVsDesc.Stage = RHI::ShaderStage::Vertex;
-        aoVsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        aoVsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
         aoVsDesc.EntryPoint = "VSMain";
         m_AOVertexShader = m_Device->CreateShader(aoVsDesc);
 
         // SSAOパス
         RHI::ShaderDesc ssaoPsDesc;
         ssaoPsDesc.Stage = RHI::ShaderStage::Pixel;
-        ssaoPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        ssaoPsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
         ssaoPsDesc.EntryPoint = "PSMain";
         m_SSAOPixelShader = m_Device->CreateShader(ssaoPsDesc);
 
@@ -1850,7 +1929,7 @@ namespace Kurenai
         // SSILパス(Visibility Bitmask)
         RHI::ShaderDesc ssilPsDesc;
         ssilPsDesc.Stage = RHI::ShaderStage::Pixel;
-        ssilPsDesc.FilePath = shaderDirectory + L"SSIL_VisibilityBitmask.hlsl";
+        ssilPsDesc.FilePath = shaderDirectory + L"SSIL_VisibilityBitmask.kshader";
         ssilPsDesc.EntryPoint = "PSMain";
         m_SSILPixelShader = m_Device->CreateShader(ssilPsDesc);
 
@@ -1862,7 +1941,7 @@ namespace Kurenai
         // AO/GI共通のブラーパス(SSAO.hlslのPSMainBlurを、rgbaフォーマットが同じSSAO/SSIL両方で使い回す)
         RHI::ShaderDesc aoBlurPsDesc;
         aoBlurPsDesc.Stage = RHI::ShaderStage::Pixel;
-        aoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        aoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
         aoBlurPsDesc.EntryPoint = "PSMainBlur";
         m_AOBlurPixelShader = m_Device->CreateShader(aoBlurPsDesc);
 
@@ -1872,13 +1951,13 @@ namespace Kurenai
         // ライティングパス(頂点バッファなしのフルスクリーン三角形)
         RHI::ShaderDesc lightingVsDesc;
         lightingVsDesc.Stage = RHI::ShaderStage::Vertex;
-        lightingVsDesc.FilePath = shaderDirectory + L"DeferredLighting.hlsl";
+        lightingVsDesc.FilePath = shaderDirectory + L"DeferredLighting.kshader";
         lightingVsDesc.EntryPoint = "VSMain";
         m_LightingVertexShader = m_Device->CreateShader(lightingVsDesc);
 
         RHI::ShaderDesc lightingPsDesc;
         lightingPsDesc.Stage = RHI::ShaderStage::Pixel;
-        lightingPsDesc.FilePath = shaderDirectory + L"DeferredLighting.hlsl";
+        lightingPsDesc.FilePath = shaderDirectory + L"DeferredLighting.kshader";
         lightingPsDesc.EntryPoint = "PSMain";
         m_LightingPixelShader = m_Device->CreateShader(lightingPsDesc);
 
@@ -1893,13 +1972,13 @@ namespace Kurenai
         // 出力先はLightingパスと同じSceneColor(R16G16B16A16_Float)
         RHI::ShaderDesc transparentVsDesc;
         transparentVsDesc.Stage = RHI::ShaderStage::Vertex;
-        transparentVsDesc.FilePath = shaderDirectory + L"Transparent.hlsl";
+        transparentVsDesc.FilePath = shaderDirectory + L"Transparent.kshader";
         transparentVsDesc.EntryPoint = "VSMain";
         m_TransparentVertexShader = m_Device->CreateShader(transparentVsDesc);
 
         RHI::ShaderDesc transparentPsDesc;
         transparentPsDesc.Stage = RHI::ShaderStage::Pixel;
-        transparentPsDesc.FilePath = shaderDirectory + L"Transparent.hlsl";
+        transparentPsDesc.FilePath = shaderDirectory + L"Transparent.kshader";
         transparentPsDesc.EntryPoint = "PSMain";
         m_TransparentPixelShader = m_Device->CreateShader(transparentPsDesc);
 
@@ -1929,13 +2008,13 @@ namespace Kurenai
         // SV_VertexIDでビルボードのクアッドを展開する(InputLayoutは空のまま)
         RHI::ShaderDesc droneShowVsDesc;
         droneShowVsDesc.Stage = RHI::ShaderStage::Vertex;
-        droneShowVsDesc.FilePath = shaderDirectory + L"DroneShow.hlsl";
+        droneShowVsDesc.FilePath = shaderDirectory + L"DroneShow.kshader";
         droneShowVsDesc.EntryPoint = "VSMain";
         m_DroneShowVertexShader = m_Device->CreateShader(droneShowVsDesc);
 
         RHI::ShaderDesc droneShowPsDesc;
         droneShowPsDesc.Stage = RHI::ShaderStage::Pixel;
-        droneShowPsDesc.FilePath = shaderDirectory + L"DroneShow.hlsl";
+        droneShowPsDesc.FilePath = shaderDirectory + L"DroneShow.kshader";
         droneShowPsDesc.EntryPoint = "PSMain";
         m_DroneShowPixelShader = m_Device->CreateShader(droneShowPsDesc);
 
@@ -1987,14 +2066,14 @@ namespace Kurenai
         // CSDownsampleをミップ数-1回ディスパッチして1x1まで縮小する
         RHI::ShaderDesc hizCopyCsDesc;
         hizCopyCsDesc.Stage = RHI::ShaderStage::Compute;
-        hizCopyCsDesc.FilePath = shaderDirectory + L"HiZ.hlsl";
+        hizCopyCsDesc.FilePath = shaderDirectory + L"HiZ.kshader";
         hizCopyCsDesc.EntryPoint = "CSCopy";
         m_HiZCopyComputeShader = m_Device->CreateShader(hizCopyCsDesc);
         m_HiZCopyPipelineState = m_Device->CreateComputePipelineState({ m_HiZCopyComputeShader.get() });
 
         RHI::ShaderDesc hizDownsampleCsDesc;
         hizDownsampleCsDesc.Stage = RHI::ShaderStage::Compute;
-        hizDownsampleCsDesc.FilePath = shaderDirectory + L"HiZ.hlsl";
+        hizDownsampleCsDesc.FilePath = shaderDirectory + L"HiZ.kshader";
         hizDownsampleCsDesc.EntryPoint = "CSDownsample";
         m_HiZDownsampleComputeShader = m_Device->CreateShader(hizDownsampleCsDesc);
         m_HiZDownsamplePipelineState = m_Device->CreateComputePipelineState({ m_HiZDownsampleComputeShader.get() });
@@ -2008,7 +2087,7 @@ namespace Kurenai
         // ライトグリッド本体(m_LightTileBuffer)は解像度に依存するためCreateRenderTargetsで作る
         RHI::ShaderDesc lightCullingCsDesc;
         lightCullingCsDesc.Stage = RHI::ShaderStage::Compute;
-        lightCullingCsDesc.FilePath = shaderDirectory + L"LightCulling.hlsl";
+        lightCullingCsDesc.FilePath = shaderDirectory + L"LightCulling.kshader";
         lightCullingCsDesc.EntryPoint = "CSMain";
         m_LightCullingComputeShader = m_Device->CreateShader(lightCullingCsDesc);
         m_LightCullingPipelineState = m_Device->CreateComputePipelineState({ m_LightCullingComputeShader.get() });
@@ -2030,19 +2109,19 @@ namespace Kurenai
             {
                 RHI::ShaderDesc swRasterCsDesc;
                 swRasterCsDesc.Stage = RHI::ShaderStage::Compute;
-                swRasterCsDesc.FilePath = shaderDirectory + L"SoftwareRaster.hlsl";
+                swRasterCsDesc.FilePath = shaderDirectory + L"SoftwareRaster.kshader";
                 swRasterCsDesc.EntryPoint = "CSRaster";
                 m_SoftwareRasterComputeShader = m_Device->CreateShader(swRasterCsDesc);
 
                 RHI::ShaderDesc swRasterLargeCsDesc;
                 swRasterLargeCsDesc.Stage = RHI::ShaderStage::Compute;
-                swRasterLargeCsDesc.FilePath = shaderDirectory + L"SoftwareRaster.hlsl";
+                swRasterLargeCsDesc.FilePath = shaderDirectory + L"SoftwareRaster.kshader";
                 swRasterLargeCsDesc.EntryPoint = "CSRasterLarge";
                 m_SoftwareRasterLargeComputeShader = m_Device->CreateShader(swRasterLargeCsDesc);
 
                 RHI::ShaderDesc swRasterResolveCsDesc;
                 swRasterResolveCsDesc.Stage = RHI::ShaderStage::Compute;
-                swRasterResolveCsDesc.FilePath = shaderDirectory + L"SoftwareRasterResolve.hlsl";
+                swRasterResolveCsDesc.FilePath = shaderDirectory + L"SoftwareRasterResolve.kshader";
                 swRasterResolveCsDesc.EntryPoint = "CSResolve";
                 m_SoftwareRasterResolveComputeShader = m_Device->CreateShader(swRasterResolveCsDesc);
 
@@ -2113,13 +2192,13 @@ namespace Kurenai
         // SSRパス(頂点バッファなしのフルスクリーン三角形。SceneColorとG-Bufferから鏡面反射を計算し加算する)
         RHI::ShaderDesc ssrVsDesc;
         ssrVsDesc.Stage = RHI::ShaderStage::Vertex;
-        ssrVsDesc.FilePath = shaderDirectory + L"SSR.hlsl";
+        ssrVsDesc.FilePath = shaderDirectory + L"SSR.kshader";
         ssrVsDesc.EntryPoint = "VSMain";
         m_SSRVertexShader = m_Device->CreateShader(ssrVsDesc);
 
         RHI::ShaderDesc ssrPsDesc;
         ssrPsDesc.Stage = RHI::ShaderStage::Pixel;
-        ssrPsDesc.FilePath = shaderDirectory + L"SSR.hlsl";
+        ssrPsDesc.FilePath = shaderDirectory + L"SSR.kshader";
         ssrPsDesc.EntryPoint = "PSMain";
         m_SSRPixelShader = m_Device->CreateShader(ssrPsDesc);
 
@@ -2140,13 +2219,13 @@ namespace Kurenai
         // FogParams0/1に入れているため。AerialPerspective.hlsl冒頭参照)
         RHI::ShaderDesc aerialPerspectiveVsDesc;
         aerialPerspectiveVsDesc.Stage = RHI::ShaderStage::Vertex;
-        aerialPerspectiveVsDesc.FilePath = shaderDirectory + L"AerialPerspective.hlsl";
+        aerialPerspectiveVsDesc.FilePath = shaderDirectory + L"AerialPerspective.kshader";
         aerialPerspectiveVsDesc.EntryPoint = "VSMain";
         m_AerialPerspectiveVertexShader = m_Device->CreateShader(aerialPerspectiveVsDesc);
 
         RHI::ShaderDesc aerialPerspectivePsDesc;
         aerialPerspectivePsDesc.Stage = RHI::ShaderStage::Pixel;
-        aerialPerspectivePsDesc.FilePath = shaderDirectory + L"AerialPerspective.hlsl";
+        aerialPerspectivePsDesc.FilePath = shaderDirectory + L"AerialPerspective.kshader";
         aerialPerspectivePsDesc.EntryPoint = "PSMain";
         m_AerialPerspectivePixelShader = m_Device->CreateShader(aerialPerspectivePsDesc);
 
@@ -2162,13 +2241,13 @@ namespace Kurenai
         // (パラメータはFrameConstants末尾のCloudParams0-3等に入っているため)
         RHI::ShaderDesc skyCloudVsDesc;
         skyCloudVsDesc.Stage = RHI::ShaderStage::Vertex;
-        skyCloudVsDesc.FilePath = shaderDirectory + L"SkyCloud.hlsl";
+        skyCloudVsDesc.FilePath = shaderDirectory + L"SkyCloud.kshader";
         skyCloudVsDesc.EntryPoint = "VSMain";
         m_SkyCloudVertexShader = m_Device->CreateShader(skyCloudVsDesc);
 
         RHI::ShaderDesc skyCloudPsDesc;
         skyCloudPsDesc.Stage = RHI::ShaderStage::Pixel;
-        skyCloudPsDesc.FilePath = shaderDirectory + L"SkyCloud.hlsl";
+        skyCloudPsDesc.FilePath = shaderDirectory + L"SkyCloud.kshader";
         skyCloudPsDesc.EntryPoint = "PSMain";
         m_SkyCloudPixelShader = m_Device->CreateShader(skyCloudPsDesc);
 
@@ -2182,13 +2261,13 @@ namespace Kurenai
         // DDGIの低解像度解決パス(雲パスと同じ作り。拡散イラディアンスとinsideWeightを書く)
         RHI::ShaderDesc ddgiResolveVsDesc;
         ddgiResolveVsDesc.Stage = RHI::ShaderStage::Vertex;
-        ddgiResolveVsDesc.FilePath = shaderDirectory + L"DDGIResolve.hlsl";
+        ddgiResolveVsDesc.FilePath = shaderDirectory + L"DDGIResolve.kshader";
         ddgiResolveVsDesc.EntryPoint = "VSMain";
         m_DDGIResolveVertexShader = m_Device->CreateShader(ddgiResolveVsDesc);
 
         RHI::ShaderDesc ddgiResolvePsDesc;
         ddgiResolvePsDesc.Stage = RHI::ShaderStage::Pixel;
-        ddgiResolvePsDesc.FilePath = shaderDirectory + L"DDGIResolve.hlsl";
+        ddgiResolvePsDesc.FilePath = shaderDirectory + L"DDGIResolve.kshader";
         ddgiResolvePsDesc.EntryPoint = "PSMain";
         m_DDGIResolvePixelShader = m_Device->CreateShader(ddgiResolvePsDesc);
 
@@ -2323,7 +2402,7 @@ namespace Kurenai
         {
             RHI::ShaderDesc rtReflectionCsDesc;
             rtReflectionCsDesc.Stage = RHI::ShaderStage::Compute;
-            rtReflectionCsDesc.FilePath = shaderDirectory + L"RTReflection.hlsl";
+            rtReflectionCsDesc.FilePath = shaderDirectory + L"RTReflection.kshader";
             rtReflectionCsDesc.EntryPoint = "CSMain";
             m_RTReflectionComputeShader = m_Device->CreateShader(rtReflectionCsDesc);
             m_RTReflectionPipelineState = m_Device->CreateComputePipelineState({ m_RTReflectionComputeShader.get() });
@@ -2337,7 +2416,7 @@ namespace Kurenai
             // RTReflectionと同じくRayQueryを含むためシェーダーモデル6.5が必要
             RHI::ShaderDesc rtShadowCsDesc;
             rtShadowCsDesc.Stage = RHI::ShaderStage::Compute;
-            rtShadowCsDesc.FilePath = shaderDirectory + L"RTShadow.hlsl";
+            rtShadowCsDesc.FilePath = shaderDirectory + L"RTShadow.kshader";
             rtShadowCsDesc.EntryPoint = "CSMain";
             m_RTShadowComputeShader = m_Device->CreateShader(rtShadowCsDesc);
             m_RTShadowPipelineState = m_Device->CreateComputePipelineState({ m_RTShadowComputeShader.get() });
@@ -2350,7 +2429,7 @@ namespace Kurenai
             // RTAOパス(コンピュートシェーダー。半球へレイを撃ち遮蔽率と間接拡散光を求める)
             RHI::ShaderDesc rtAOCsDesc;
             rtAOCsDesc.Stage = RHI::ShaderStage::Compute;
-            rtAOCsDesc.FilePath = shaderDirectory + L"RTAO.hlsl";
+            rtAOCsDesc.FilePath = shaderDirectory + L"RTAO.kshader";
             rtAOCsDesc.EntryPoint = "CSMain";
             m_RTAOComputeShader = m_Device->CreateShader(rtAOCsDesc);
             m_RTAOPipelineState = m_Device->CreateComputePipelineState({ m_RTAOComputeShader.get() });
@@ -2362,28 +2441,58 @@ namespace Kurenai
 
             // DDGIのプローブ取得(コンピュートシェーダー。プローブから6面ぶんのレイを撃ち、
             // ラスタ経路と同じ形のスクラッチキューブを直接埋める)
-            RHI::ShaderDesc ddgiTraceCsDesc;
-            ddgiTraceCsDesc.Stage = RHI::ShaderStage::Compute;
-            ddgiTraceCsDesc.FilePath = shaderDirectory + L"DDGIProbeTrace.hlsl";
-            ddgiTraceCsDesc.EntryPoint = "CSMain";
-            m_DDGIProbeTraceComputeShader = m_Device->CreateShader(ddgiTraceCsDesc);
-            m_DDGIProbeTracePipelineState =
-                m_Device->CreateComputePipelineState({ m_DDGIProbeTraceComputeShader.get() });
+            //
+            // 【失敗しても他のRTパスを巻き込まない】このシェーダーはコンピュートシェーダーの中で
+            // テクスチャを微分付きにサンプルするため、DXILの検証がSM 6.6を要求する
+            // (Derivatives in CS/MS/AS is SM 6.6+)。RayQuery自体はSM 6.5で足りるので、
+            // 「DXR Tier 1.1に対応していて、かつSM 6.5のバリアントで動いている」環境
+            // (ビルドマシンのWindows SDKが古くbindlessバリアントを焼けなかった場合など)では、
+            // 上のRT反射/RTシャドウ/RTAOは作れるのにこれだけ作れない。
+            // ここで捕まえてDDGIのレイ取得だけをラスタ経路へ戻す(自前ラスタライザと同じ扱い)
+            try
+            {
+                RHI::ShaderDesc ddgiTraceCsDesc;
+                ddgiTraceCsDesc.Stage = RHI::ShaderStage::Compute;
+                ddgiTraceCsDesc.FilePath = shaderDirectory + L"DDGIProbeTrace.kshader";
+                ddgiTraceCsDesc.EntryPoint = "CSMain";
+                m_DDGIProbeTraceComputeShader = m_Device->CreateShader(ddgiTraceCsDesc);
+                m_DDGIProbeTracePipelineState =
+                    m_Device->CreateComputePipelineState({ m_DDGIProbeTraceComputeShader.get() });
 
-            RHI::BufferDesc ddgiTraceConstantBufferDesc;
-            ddgiTraceConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-            ddgiTraceConstantBufferDesc.SizeInBytes = sizeof(DDGITraceConstants);
-            // プローブ1個につき6面ぶん書き換えるため、既定の段数では
-            // 更新プローブ数を増やしたときに足りなくなる(1フレーム最大64プローブ×6面=384回)
-            ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
-            m_DDGITraceConstantBuffer = m_Device->CreateBuffer(ddgiTraceConstantBufferDesc);
+                RHI::BufferDesc ddgiTraceConstantBufferDesc;
+                ddgiTraceConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+                ddgiTraceConstantBufferDesc.SizeInBytes = sizeof(DDGITraceConstants);
+                // プローブ1個につき6面ぶん書き換えるため、既定の段数では
+                // 更新プローブ数を増やしたときに足りなくなる(1フレーム最大64プローブ×6面=384回)
+                ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
+                m_DDGITraceConstantBuffer = m_Device->CreateBuffer(ddgiTraceConstantBufferDesc);
+
+                m_DDGIRaytracedTraceAvailable = true;
+            }
+            catch (const std::exception& e)
+            {
+                // ShouldRunRaytracedDDGITraceがパイプラインステートのnullを見ているため、
+                // ここで捨てておけばレイ取得はラスタ経路のまま動く
+                m_DDGIProbeTracePipelineState.reset();
+                m_DDGIProbeTraceComputeShader.reset();
+                m_DDGITraceConstantBuffer.reset();
+                m_DDGIRaytracedTraceAvailable = false;
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    std::string("DDGIのレイ取得(DXR)を用意できませんでした。ラスタライズ経路で動作します"
+                                "(DDGIProbeTrace.hlslはシェーダーモデル6.6を要求します): ") + e.what());
+            }
 
             // レイトレーシングが使える環境ではDDGIのレイ取得も既定でDXRにする。
             // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
-            m_DDGIRayMode = DDGIRayModeForCapability(true);
+            m_DDGIRayMode = DDGIRayModeForCapability(m_DDGIRaytracedTraceAvailable);
 
             Core::Logger::Info(
-                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウ・AO/GI・DDGIでRaytracedを選択可能)");
+                "KurenaiEngine3D",
+                m_DDGIRaytracedTraceAvailable
+                    ? "レイトレーシングを利用できます(反射・シャドウ・AO/GI・DDGIでRaytracedを選択可能)"
+                    : "レイトレーシングを利用できます(反射・シャドウ・AOでRaytracedを選択可能。DDGIのレイ取得は"
+                      "ラスタライズのみ)");
         }
         else
         {
@@ -2397,13 +2506,13 @@ namespace Kurenai
         // CreatePrecisionDependentPipelineStatesではなくここで一度だけ作ればよい
         RHI::ShaderDesc taaVsDesc;
         taaVsDesc.Stage = RHI::ShaderStage::Vertex;
-        taaVsDesc.FilePath = shaderDirectory + L"TAA.hlsl";
+        taaVsDesc.FilePath = shaderDirectory + L"TAA.kshader";
         taaVsDesc.EntryPoint = "VSMain";
         m_TAAVertexShader = m_Device->CreateShader(taaVsDesc);
 
         RHI::ShaderDesc taaPsDesc;
         taaPsDesc.Stage = RHI::ShaderStage::Pixel;
-        taaPsDesc.FilePath = shaderDirectory + L"TAA.hlsl";
+        taaPsDesc.FilePath = shaderDirectory + L"TAA.kshader";
         taaPsDesc.EntryPoint = "PSMain";
         m_TAAPixelShader = m_Device->CreateShader(taaPsDesc);
 
@@ -2422,13 +2531,13 @@ namespace Kurenai
         // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
         RHI::ShaderDesc tonemapVsDesc;
         tonemapVsDesc.Stage = RHI::ShaderStage::Vertex;
-        tonemapVsDesc.FilePath = shaderDirectory + L"Tonemap.hlsl";
+        tonemapVsDesc.FilePath = shaderDirectory + L"Tonemap.kshader";
         tonemapVsDesc.EntryPoint = "VSMain";
         m_TonemapVertexShader = m_Device->CreateShader(tonemapVsDesc);
 
         RHI::ShaderDesc tonemapPsDesc;
         tonemapPsDesc.Stage = RHI::ShaderStage::Pixel;
-        tonemapPsDesc.FilePath = shaderDirectory + L"Tonemap.hlsl";
+        tonemapPsDesc.FilePath = shaderDirectory + L"Tonemap.kshader";
         tonemapPsDesc.EntryPoint = "PSMain";
         m_TonemapPixelShader = m_Device->CreateShader(tonemapPsDesc);
 
@@ -2448,14 +2557,14 @@ namespace Kurenai
         // レンダーターゲットではなくUAVへ書くのでPSOにフォーマットの指定は要らない
         RHI::ShaderDesc upscaleEasuCsDesc;
         upscaleEasuCsDesc.Stage = RHI::ShaderStage::Compute;
-        upscaleEasuCsDesc.FilePath = shaderDirectory + L"Upscale.hlsl";
+        upscaleEasuCsDesc.FilePath = shaderDirectory + L"Upscale.kshader";
         upscaleEasuCsDesc.EntryPoint = "CSEASU";
         m_UpscaleEASUComputeShader = m_Device->CreateShader(upscaleEasuCsDesc);
         m_UpscaleEASUPipelineState = m_Device->CreateComputePipelineState({ m_UpscaleEASUComputeShader.get() });
 
         RHI::ShaderDesc upscaleRcasCsDesc;
         upscaleRcasCsDesc.Stage = RHI::ShaderStage::Compute;
-        upscaleRcasCsDesc.FilePath = shaderDirectory + L"Upscale.hlsl";
+        upscaleRcasCsDesc.FilePath = shaderDirectory + L"Upscale.kshader";
         upscaleRcasCsDesc.EntryPoint = "CSRCAS";
         m_UpscaleRCASComputeShader = m_Device->CreateShader(upscaleRcasCsDesc);
         m_UpscaleRCASPipelineState = m_Device->CreateComputePipelineState({ m_UpscaleRCASComputeShader.get() });
@@ -2468,7 +2577,7 @@ namespace Kurenai
         // 自動露出パス(輝度ヒストグラムの構築→縮約→時間方向の順応。すべてコンピュートシェーダー)
         RHI::ShaderDesc autoExposureClearCsDesc;
         autoExposureClearCsDesc.Stage = RHI::ShaderStage::Compute;
-        autoExposureClearCsDesc.FilePath = shaderDirectory + L"AutoExposure.hlsl";
+        autoExposureClearCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
         autoExposureClearCsDesc.EntryPoint = "CSClearHistogram";
         m_AutoExposureClearComputeShader = m_Device->CreateShader(autoExposureClearCsDesc);
         m_AutoExposureClearPipelineState =
@@ -2476,7 +2585,7 @@ namespace Kurenai
 
         RHI::ShaderDesc autoExposureHistogramCsDesc;
         autoExposureHistogramCsDesc.Stage = RHI::ShaderStage::Compute;
-        autoExposureHistogramCsDesc.FilePath = shaderDirectory + L"AutoExposure.hlsl";
+        autoExposureHistogramCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
         autoExposureHistogramCsDesc.EntryPoint = "CSHistogram";
         m_AutoExposureHistogramComputeShader = m_Device->CreateShader(autoExposureHistogramCsDesc);
         m_AutoExposureHistogramPipelineState =
@@ -2484,7 +2593,7 @@ namespace Kurenai
 
         RHI::ShaderDesc autoExposureResolveCsDesc;
         autoExposureResolveCsDesc.Stage = RHI::ShaderStage::Compute;
-        autoExposureResolveCsDesc.FilePath = shaderDirectory + L"AutoExposure.hlsl";
+        autoExposureResolveCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
         autoExposureResolveCsDesc.EntryPoint = "CSResolve";
         m_AutoExposureResolveComputeShader = m_Device->CreateShader(autoExposureResolveCsDesc);
         m_AutoExposureResolvePipelineState =
@@ -2510,7 +2619,7 @@ namespace Kurenai
         // ブルームパス(ダウンサンプル/アップサンプルの2エントリ。テクスチャはCreateRenderTargetsで作る)
         RHI::ShaderDesc bloomDownCsDesc;
         bloomDownCsDesc.Stage = RHI::ShaderStage::Compute;
-        bloomDownCsDesc.FilePath = shaderDirectory + L"Bloom.hlsl";
+        bloomDownCsDesc.FilePath = shaderDirectory + L"Bloom.kshader";
         bloomDownCsDesc.EntryPoint = "CSDownsample";
         m_BloomDownsampleComputeShader = m_Device->CreateShader(bloomDownCsDesc);
         m_BloomDownsamplePipelineState =
@@ -2518,7 +2627,7 @@ namespace Kurenai
 
         RHI::ShaderDesc bloomUpCsDesc;
         bloomUpCsDesc.Stage = RHI::ShaderStage::Compute;
-        bloomUpCsDesc.FilePath = shaderDirectory + L"Bloom.hlsl";
+        bloomUpCsDesc.FilePath = shaderDirectory + L"Bloom.kshader";
         bloomUpCsDesc.EntryPoint = "CSUpsample";
         m_BloomUpsampleComputeShader = m_Device->CreateShader(bloomUpCsDesc);
         m_BloomUpsamplePipelineState =
@@ -2532,13 +2641,13 @@ namespace Kurenai
         // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
         RHI::ShaderDesc presentVsDesc;
         presentVsDesc.Stage = RHI::ShaderStage::Vertex;
-        presentVsDesc.FilePath = shaderDirectory + L"Present.hlsl";
+        presentVsDesc.FilePath = shaderDirectory + L"Present.kshader";
         presentVsDesc.EntryPoint = "VSMain";
         m_PresentVertexShader = m_Device->CreateShader(presentVsDesc);
 
         RHI::ShaderDesc presentPsDesc;
         presentPsDesc.Stage = RHI::ShaderStage::Pixel;
-        presentPsDesc.FilePath = shaderDirectory + L"Present.hlsl";
+        presentPsDesc.FilePath = shaderDirectory + L"Present.kshader";
         presentPsDesc.EntryPoint = "PSMain";
         m_PresentPixelShader = m_Device->CreateShader(presentPsDesc);
 
@@ -2555,13 +2664,13 @@ namespace Kurenai
         // シャドウパス(ライト視点への深度のみの描画。頂点入力はPOSITIONのみ使用)
         RHI::ShaderDesc shadowVsDesc;
         shadowVsDesc.Stage = RHI::ShaderStage::Vertex;
-        shadowVsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowVsDesc.FilePath = shaderDirectory + L"Shadow.kshader";
         shadowVsDesc.EntryPoint = "VSMain";
         m_ShadowVertexShader = m_Device->CreateShader(shadowVsDesc);
 
         RHI::ShaderDesc shadowPsDesc;
         shadowPsDesc.Stage = RHI::ShaderStage::Pixel;
-        shadowPsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowPsDesc.FilePath = shaderDirectory + L"Shadow.kshader";
         shadowPsDesc.EntryPoint = "PSMain";
         m_ShadowPixelShader = m_Device->CreateShader(shadowPsDesc);
 
@@ -2569,13 +2678,13 @@ namespace Kurenai
         // テクスチャで抜く前提のマテリアルが板ポリゴンのまま影を落とす
         RHI::ShaderDesc shadowCutoutVsDesc;
         shadowCutoutVsDesc.Stage = RHI::ShaderStage::Vertex;
-        shadowCutoutVsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowCutoutVsDesc.FilePath = shaderDirectory + L"Shadow.kshader";
         shadowCutoutVsDesc.EntryPoint = "VSMainCutout";
         m_ShadowCutoutVertexShader = m_Device->CreateShader(shadowCutoutVsDesc);
 
         RHI::ShaderDesc shadowCutoutPsDesc;
         shadowCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
-        shadowCutoutPsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowCutoutPsDesc.FilePath = shaderDirectory + L"Shadow.kshader";
         shadowCutoutPsDesc.EntryPoint = "PSMainCutout";
         m_ShadowCutoutPixelShader = m_Device->CreateShader(shadowCutoutPsDesc);
 
@@ -2693,14 +2802,14 @@ namespace Kurenai
 
         RHI::ShaderDesc brdfLutCsDesc;
         brdfLutCsDesc.Stage = RHI::ShaderStage::Compute;
-        brdfLutCsDesc.FilePath = shaderDirectory + L"BRDFLUT.hlsl";
+        brdfLutCsDesc.FilePath = shaderDirectory + L"BRDFLUT.kshader";
         brdfLutCsDesc.EntryPoint = "CSMain";
         m_BRDFLUTComputeShader = m_Device->CreateShader(brdfLutCsDesc);
         m_BRDFLUTPipelineState = m_Device->CreateComputePipelineState({ m_BRDFLUTComputeShader.get() });
 
         RHI::ShaderDesc brdfLutCombineCsDesc;
         brdfLutCombineCsDesc.Stage = RHI::ShaderStage::Compute;
-        brdfLutCombineCsDesc.FilePath = shaderDirectory + L"BRDFLUT.hlsl";
+        brdfLutCombineCsDesc.FilePath = shaderDirectory + L"BRDFLUT.kshader";
         brdfLutCombineCsDesc.EntryPoint = "CSCombineEavg";
         m_BRDFLUTCombineComputeShader = m_Device->CreateShader(brdfLutCombineCsDesc);
         if (!m_BRDFLUTCombineComputeShader)
@@ -2727,7 +2836,7 @@ namespace Kurenai
 
         RHI::ShaderDesc cloudShapeNoiseCsDesc;
         cloudShapeNoiseCsDesc.Stage = RHI::ShaderStage::Compute;
-        cloudShapeNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.hlsl";
+        cloudShapeNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.kshader";
         cloudShapeNoiseCsDesc.EntryPoint = "CSGenerateShape";
         m_CloudShapeNoiseComputeShader = m_Device->CreateShader(cloudShapeNoiseCsDesc);
         if (!m_CloudShapeNoiseComputeShader)
@@ -2741,7 +2850,7 @@ namespace Kurenai
 
         RHI::ShaderDesc cloudDetailNoiseCsDesc;
         cloudDetailNoiseCsDesc.Stage = RHI::ShaderStage::Compute;
-        cloudDetailNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.hlsl";
+        cloudDetailNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.kshader";
         cloudDetailNoiseCsDesc.EntryPoint = "CSGenerateDetail";
         m_CloudDetailNoiseComputeShader = m_Device->CreateShader(cloudDetailNoiseCsDesc);
         if (!m_CloudDetailNoiseComputeShader)
@@ -2788,7 +2897,7 @@ namespace Kurenai
 
         RHI::ShaderDesc transmittanceCsDesc;
         transmittanceCsDesc.Stage = RHI::ShaderStage::Compute;
-        transmittanceCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.hlsl";
+        transmittanceCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.kshader";
         transmittanceCsDesc.EntryPoint = "CSTransmittance";
         m_TransmittanceComputeShader = m_Device->CreateShader(transmittanceCsDesc);
         if (!m_TransmittanceComputeShader)
@@ -2801,7 +2910,7 @@ namespace Kurenai
 
         RHI::ShaderDesc multiScatteringCsDesc;
         multiScatteringCsDesc.Stage = RHI::ShaderStage::Compute;
-        multiScatteringCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.hlsl";
+        multiScatteringCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.kshader";
         multiScatteringCsDesc.EntryPoint = "CSMultiScattering";
         m_MultiScatteringComputeShader = m_Device->CreateShader(multiScatteringCsDesc);
         if (!m_MultiScatteringComputeShader)
@@ -2814,7 +2923,7 @@ namespace Kurenai
 
         RHI::ShaderDesc skyViewCsDesc;
         skyViewCsDesc.Stage = RHI::ShaderStage::Compute;
-        skyViewCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.hlsl";
+        skyViewCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.kshader";
         skyViewCsDesc.EntryPoint = "CSSkyView";
         m_SkyViewComputeShader = m_Device->CreateShader(skyViewCsDesc);
         if (!m_SkyViewComputeShader)
@@ -2827,14 +2936,14 @@ namespace Kurenai
 
         RHI::ShaderDesc irradianceCsDesc;
         irradianceCsDesc.Stage = RHI::ShaderStage::Compute;
-        irradianceCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        irradianceCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         irradianceCsDesc.EntryPoint = "CSIrradiance";
         m_IrradianceComputeShader = m_Device->CreateShader(irradianceCsDesc);
         m_IrradiancePipelineState = m_Device->CreateComputePipelineState({ m_IrradianceComputeShader.get() });
 
         RHI::ShaderDesc prefilterCsDesc;
         prefilterCsDesc.Stage = RHI::ShaderStage::Compute;
-        prefilterCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        prefilterCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         prefilterCsDesc.EntryPoint = "CSPrefilter";
         m_PrefilterComputeShader = m_Device->CreateShader(prefilterCsDesc);
         m_PrefilterPipelineState = m_Device->CreateComputePipelineState({ m_PrefilterComputeShader.get() });
@@ -2844,21 +2953,21 @@ namespace Kurenai
         // 詳細はIBLConvolve.hlsl冒頭のコメント参照
         RHI::ShaderDesc projectShCsDesc;
         projectShCsDesc.Stage = RHI::ShaderStage::Compute;
-        projectShCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        projectShCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         projectShCsDesc.EntryPoint = "CSProjectSH";
         m_ProjectSHComputeShader = m_Device->CreateShader(projectShCsDesc);
         m_ProjectSHPipelineState = m_Device->CreateComputePipelineState({ m_ProjectSHComputeShader.get() });
 
         RHI::ShaderDesc projectShFinalCsDesc;
         projectShFinalCsDesc.Stage = RHI::ShaderStage::Compute;
-        projectShFinalCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        projectShFinalCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         projectShFinalCsDesc.EntryPoint = "CSProjectSHFinal";
         m_ProjectSHFinalComputeShader = m_Device->CreateShader(projectShFinalCsDesc);
         m_ProjectSHFinalPipelineState = m_Device->CreateComputePipelineState({ m_ProjectSHFinalComputeShader.get() });
 
         RHI::ShaderDesc evaluateShCsDesc;
         evaluateShCsDesc.Stage = RHI::ShaderStage::Compute;
-        evaluateShCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        evaluateShCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         evaluateShCsDesc.EntryPoint = "CSEvaluateSH";
         m_EvaluateSHComputeShader = m_Device->CreateShader(evaluateShCsDesc);
         m_EvaluateSHPipelineState = m_Device->CreateComputePipelineState({ m_EvaluateSHComputeShader.get() });
@@ -2890,7 +2999,7 @@ namespace Kurenai
 
         RHI::ShaderDesc skyGenerateCsDesc;
         skyGenerateCsDesc.Stage = RHI::ShaderStage::Compute;
-        skyGenerateCsDesc.FilePath = shaderDirectory + L"SkyGenerate.hlsl";
+        skyGenerateCsDesc.FilePath = shaderDirectory + L"SkyGenerate.kshader";
         skyGenerateCsDesc.EntryPoint = "CSGenerateSky";
         m_SkyGenerateComputeShader = m_Device->CreateShader(skyGenerateCsDesc);
         m_SkyGeneratePipelineState = m_Device->CreateComputePipelineState({ m_SkyGenerateComputeShader.get() });
@@ -2904,7 +3013,7 @@ namespace Kurenai
         // 。SkyGenerateより前に実行し、結果をm_SkyParametersBufferへ書く
         RHI::ShaderDesc skyIntegrateCsDesc;
         skyIntegrateCsDesc.Stage = RHI::ShaderStage::Compute;
-        skyIntegrateCsDesc.FilePath = shaderDirectory + L"SkyIntegrate.hlsl";
+        skyIntegrateCsDesc.FilePath = shaderDirectory + L"SkyIntegrate.kshader";
         skyIntegrateCsDesc.EntryPoint = "CSIntegrateSky";
         m_SkyIntegrateComputeShader = m_Device->CreateShader(skyIntegrateCsDesc);
         m_SkyIntegratePipelineState = m_Device->CreateComputePipelineState({ m_SkyIntegrateComputeShader.get() });
@@ -2961,13 +3070,13 @@ namespace Kurenai
 
         RHI::ShaderDesc probeCaptureVsDesc;
         probeCaptureVsDesc.Stage = RHI::ShaderStage::Vertex;
-        probeCaptureVsDesc.FilePath = shaderDirectory + L"ProbeCapture.hlsl";
+        probeCaptureVsDesc.FilePath = shaderDirectory + L"ProbeCapture.kshader";
         probeCaptureVsDesc.EntryPoint = "VSMain";
         m_ProbeCaptureVertexShader = m_Device->CreateShader(probeCaptureVsDesc);
 
         RHI::ShaderDesc probeCapturePsDesc;
         probeCapturePsDesc.Stage = RHI::ShaderStage::Pixel;
-        probeCapturePsDesc.FilePath = shaderDirectory + L"ProbeCapture.hlsl";
+        probeCapturePsDesc.FilePath = shaderDirectory + L"ProbeCapture.kshader";
         probeCapturePsDesc.EntryPoint = "PSMain";
         m_ProbeCapturePixelShader = m_Device->CreateShader(probeCapturePsDesc);
 
@@ -2984,7 +3093,7 @@ namespace Kurenai
 
         RHI::ShaderDesc probeCubeCopyCsDesc;
         probeCubeCopyCsDesc.Stage = RHI::ShaderStage::Compute;
-        probeCubeCopyCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        probeCubeCopyCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         probeCubeCopyCsDesc.EntryPoint = "CSCopyCaptureToCubeFace";
         m_ProbeCubeCopyComputeShader = m_Device->CreateShader(probeCubeCopyCsDesc);
         m_ProbeCubeCopyPipelineState = m_Device->CreateComputePipelineState({ m_ProbeCubeCopyComputeShader.get() });
@@ -3010,13 +3119,13 @@ namespace Kurenai
         // ここではProbeCaptureと同様、解像度に依存しないシェーダー・PSO・定数バッファのみ作る
         RHI::ShaderDesc planarReflectionVsDesc;
         planarReflectionVsDesc.Stage = RHI::ShaderStage::Vertex;
-        planarReflectionVsDesc.FilePath = shaderDirectory + L"PlanarReflection.hlsl";
+        planarReflectionVsDesc.FilePath = shaderDirectory + L"PlanarReflection.kshader";
         planarReflectionVsDesc.EntryPoint = "VSMain";
         m_PlanarReflectionVertexShader = m_Device->CreateShader(planarReflectionVsDesc);
 
         RHI::ShaderDesc planarReflectionPsDesc;
         planarReflectionPsDesc.Stage = RHI::ShaderStage::Pixel;
-        planarReflectionPsDesc.FilePath = shaderDirectory + L"PlanarReflection.hlsl";
+        planarReflectionPsDesc.FilePath = shaderDirectory + L"PlanarReflection.kshader";
         planarReflectionPsDesc.EntryPoint = "PSMain";
         m_PlanarReflectionPixelShader = m_Device->CreateShader(planarReflectionPsDesc);
 
@@ -3059,7 +3168,7 @@ namespace Kurenai
 
         RHI::ShaderDesc ddgiUpdateCsDesc;
         ddgiUpdateCsDesc.Stage = RHI::ShaderStage::Compute;
-        ddgiUpdateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.hlsl";
+        ddgiUpdateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
         ddgiUpdateCsDesc.EntryPoint = "CSUpdateProbe";
         m_DDGIProbeUpdateComputeShader = m_Device->CreateShader(ddgiUpdateCsDesc);
         m_DDGIProbeUpdatePipelineState = m_Device->CreateComputePipelineState({ m_DDGIProbeUpdateComputeShader.get() });
@@ -3069,7 +3178,7 @@ namespace Kurenai
         // 自分のセルの反対側のテクセルを読む必要がある)
         RHI::ShaderDesc ddgiBorderCsDesc;
         ddgiBorderCsDesc.Stage = RHI::ShaderStage::Compute;
-        ddgiBorderCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.hlsl";
+        ddgiBorderCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
         ddgiBorderCsDesc.EntryPoint = "CSCopyBorder";
         m_DDGIBorderCopyComputeShader = m_Device->CreateShader(ddgiBorderCsDesc);
         m_DDGIBorderCopyPipelineState = m_Device->CreateComputePipelineState({ m_DDGIBorderCopyComputeShader.get() });
@@ -3082,7 +3191,7 @@ namespace Kurenai
         // スクロールで未確定になったプローブを、焼き直されるまでサンプリングから外すパス
         RHI::ShaderDesc ddgiInvalidateCsDesc;
         ddgiInvalidateCsDesc.Stage = RHI::ShaderStage::Compute;
-        ddgiInvalidateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.hlsl";
+        ddgiInvalidateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
         ddgiInvalidateCsDesc.EntryPoint = "CSInvalidateProbes";
         m_DDGIInvalidateProbesComputeShader = m_Device->CreateShader(ddgiInvalidateCsDesc);
         m_DDGIInvalidateProbesPipelineState =
@@ -3095,6 +3204,11 @@ namespace Kurenai
         ddgiDirtyBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * kDDGIMaxProbes;
         ddgiDirtyBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         m_DDGIDirtyProbeBuffer = m_Device->CreateBuffer(ddgiDirtyBufferDesc);
+
+        // ここまでで全シェーダーの生成が終わっている。読み込んだ.kshaderはもう誰も読まないので、
+        // バイトコードをプロセスの寿命ぶん抱え続けないよう明示的に捨てる
+        // (このあとCreateShaderを呼ぶことがあれば、必要なパッケージが読み直されるだけ)
+        m_Device->ReleaseShaderPackages();
 
         // シーン読み込み前でもSRVをバインドできるよう、この時点で1プローブぶんのダミーを確保しておく
         RecreateDDGIAtlases();
@@ -4670,6 +4784,295 @@ namespace Kurenai
         m_SceneLoadingIndex = sceneIndex;
     }
 
+    // 同じモデルを指すインスタンスを1回のDrawIndexedへまとめるバッチを作り直す。
+    //
+    // 【レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと】UpdateModelLODが決めた段を読むので
+    // その後、かつどのパスより前。パスごとに組み直すと、深度プリパスとG-Bufferが違うまとめ方をして
+    // 同じ画素を別の経路で描くことになる。
+    //
+    // 【バッチに入れないもの】
+    //   - まだ読み込まれていない段(ストリーミング中)
+    //   - LOD切替のフェード中。DitherFadeはインスタンスごとに違い、定数バッファで渡す値なので
+    //     1ドローにまとめられない。フェードは短時間で終わるので、そのあいだ個別に描けばよい
+    //   - メッシュシェーダー経路に載るモデル。DispatchMeshにインスタンス数の概念が無い
+    //   - まとめる相手がいないもの(1体だけのグループ)。この場合は従来とまったく同じ描画になる
+    // このフレームの描画単位を組み立てる。バッチに入ったインスタンスはバッチとして1回、
+    // 入らなかったものは1体ずつ現れる ―― 全インスタンスがちょうど1回ずつ現れることが要点で、
+    // 取りこぼすと物が消え、二重に出すと同じ場所へ2回描いてZファイティングになる
+    void KurenaiEngine3D::GetInstanceDrawUnits(bool coarsestLOD, std::vector<InstanceDrawUnit>& outUnits) const
+    {
+        const std::vector<InstanceBatch>& batches =
+            coarsestLOD ? m_InstanceBatchesCoarsestLOD : m_InstanceBatchesCurrentLOD;
+        const std::vector<uint8_t>& batched =
+            coarsestLOD ? m_InstanceBatchedCoarsestLOD : m_InstanceBatchedCurrentLOD;
+
+        outUnits.clear();
+        outUnits.reserve(m_Scene.Instances.size());
+
+        for (const InstanceBatch& batch : batches)
+        {
+            InstanceDrawUnit unit;
+            // 代表はバッチの先頭。IsMirrored/IsWaterはバッチ内で同一(グループ化のキー)なので、
+            // どれを代表にしても同じ値になる
+            unit.Instance = &m_Scene.Instances[batch.RepresentativeIndex];
+            unit.InstanceIndex = batch.RepresentativeIndex;
+            unit.Model = batch.Model;
+            unit.InstanceBase = batch.InstanceBase;
+            unit.InstanceCount = batch.InstanceCount;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                unit.WorldBoundsMin[axis] = batch.WorldBoundsMin[axis];
+                unit.WorldBoundsMax[axis] = batch.WorldBoundsMax[axis];
+            }
+            outUnits.push_back(unit);
+        }
+
+        for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+        {
+            if (i < batched.size() && batched[i] != 0)
+            {
+                continue;   // バッチとして既に積んである
+            }
+            InstanceDrawUnit unit;
+            unit.Instance = &m_Scene.Instances[i];
+            unit.InstanceIndex = i;
+            unit.Model = nullptr;   // 段は呼び出し側が決める(フェード中は2段になる)
+            unit.InstanceBase = 0;
+            unit.InstanceCount = 1;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                unit.WorldBoundsMin[axis] = m_Scene.Instances[i].WorldBoundsMin[axis];
+                unit.WorldBoundsMax[axis] = m_Scene.Instances[i].WorldBoundsMax[axis];
+            }
+            outUnits.push_back(unit);
+        }
+    }
+
+    void KurenaiEngine3D::BuildInstanceBatches(RHI::IRHICommandList* commandList)
+    {
+        m_InstanceBatchesCurrentLOD.clear();
+        m_InstanceBatchesCoarsestLOD.clear();
+        m_ModelInstanceRecords.clear();
+        m_InstanceBatchedCurrentLOD.assign(m_Scene.Instances.size(), 0u);
+        m_InstanceBatchedCoarsestLOD.assign(m_Scene.Instances.size(), 0u);
+        m_InstancedBatchCount = 0;
+        m_InstancedInstanceCount = 0;
+
+        if (!m_InstancingEnabled || m_Scene.Instances.empty() || !m_ModelInstanceBuffer)
+        {
+            return;
+        }
+
+        // グループ化のキー。ワインディング(IsMirrored)と水面(IsWater)はパイプラインステートが
+        // 分かれるため、違うものを同じドローへまとめてはいけない
+        struct GroupKey
+        {
+            const Assets::Model* Model;
+            bool IsMirrored;
+            bool IsWater;
+            bool operator==(const GroupKey& other) const
+            {
+                return Model == other.Model && IsMirrored == other.IsMirrored && IsWater == other.IsWater;
+            }
+        };
+
+        // キーごとのインスタンス番号。シーンの並び順で走査するので、同じシーンなら毎フレーム同じ順になる
+        // (順序が揺れるとフレーム間でバッチの内容が変わり、A/B比較の再現性が落ちる)
+        std::vector<std::pair<GroupKey, std::vector<size_t>>> groups;
+
+        // 1つの組(段の選び方)ぶんのバッチを作る。
+        // modelOf: そのインスタンスがこの組で描く段を返す。nullptrならこの組の対象外
+        const auto buildFor =
+            [this, &groups](
+                const std::function<const Assets::Model*(size_t)>& modelOf,
+                std::vector<InstanceBatch>& outBatches, std::vector<uint8_t>& outBatched)
+        {
+            groups.clear();
+            for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+            {
+                const Assets::ModelInstance& instance = m_Scene.Instances[i];
+                const Assets::Model* const model = modelOf(i);
+                if (!model)
+                {
+                    continue;
+                }
+                // メッシュシェーダー経路はDispatchMeshで描くのでまとめられない
+                if (ShouldUseModelMeshletPath(instance, *model))
+                {
+                    continue;
+                }
+
+                const GroupKey key{ model, instance.IsMirrored, instance.IsWater };
+                bool found = false;
+                for (auto& group : groups)
+                {
+                    if (group.first == key)
+                    {
+                        group.second.push_back(i);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    groups.push_back({ key, { i } });
+                }
+            }
+
+            // 【空間セルでソートしてから刻む】上限なしで1バッチにすると、広く散らばった
+            // グループが1つの巨大AABBになり、どのパスからも一度も間引かれなくなる。
+            // セルの幅はシーン対角の1/64を目安にする(バッチの粒度がシーンの規模に追随する)
+            const float diagonalX = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
+            const float diagonalY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
+            const float diagonalZ = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
+            const float diagonal =
+                std::sqrt(diagonalX * diagonalX + diagonalY * diagonalY + diagonalZ * diagonalZ);
+            const float cellSize = std::max(diagonal / 64.0f, 1.0f);
+
+            for (auto& group : groups)
+            {
+                if (group.second.size() < 2)
+                {
+                    // まとめる相手がいない。従来どおり個別に描く(コマンド列は今までと同一)
+                    continue;
+                }
+
+                std::stable_sort(
+                    group.second.begin(), group.second.end(),
+                    [this, cellSize](size_t a, size_t b)
+                    {
+                        const auto cell = [this, cellSize](size_t index, int axis)
+                        {
+                            const float center =
+                                (m_Scene.Instances[index].WorldBoundsMin[axis]
+                                 + m_Scene.Instances[index].WorldBoundsMax[axis]) * 0.5f;
+                            return static_cast<int64_t>(std::floor(center / cellSize));
+                        };
+                        // Z→X→Y の順に見る。格子状の配置ではこれで行ごとにまとまる
+                        const int axes[3] = { 2, 0, 1 };
+                        for (const int axis : axes)
+                        {
+                            const int64_t ca = cell(a, axis);
+                            const int64_t cb = cell(b, axis);
+                            if (ca != cb)
+                            {
+                                return ca < cb;
+                            }
+                        }
+                        return a < b;
+                    });
+
+                for (size_t offset = 0; offset < group.second.size(); offset += kMaxInstancesPerBatch)
+                {
+                    const size_t count = std::min<size_t>(kMaxInstancesPerBatch, group.second.size() - offset);
+                    if (count < 2)
+                    {
+                        // 刻んだ余りが1体だけになった場合。まとめる意味が無いので個別へ回す
+                        continue;
+                    }
+
+                    InstanceBatch batch;
+                    batch.Model = group.first.Model;
+                    batch.IsMirrored = group.first.IsMirrored;
+                    batch.IsWater = group.first.IsWater;
+                    batch.InstanceBase = static_cast<uint32_t>(m_ModelInstanceRecords.size());
+                    batch.InstanceCount = static_cast<uint32_t>(count);
+                    batch.RepresentativeIndex = group.second[offset];
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        batch.WorldBoundsMin[axis] = (std::numeric_limits<float>::max)();
+                        batch.WorldBoundsMax[axis] = std::numeric_limits<float>::lowest();
+                    }
+
+                    for (size_t k = 0; k < count; ++k)
+                    {
+                        const size_t instanceIndex = group.second[offset + k];
+                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+
+                        GPUModelInstance record{};
+                        record.World = instance.World;
+                        record.NormalMatrix = instance.NormalMatrix;
+                        record.TangentSignFlip = instance.TangentSignFlip;
+                        m_ModelInstanceRecords.push_back(record);
+
+                        for (int axis = 0; axis < 3; ++axis)
+                        {
+                            batch.WorldBoundsMin[axis] =
+                                std::min(batch.WorldBoundsMin[axis], instance.WorldBoundsMin[axis]);
+                            batch.WorldBoundsMax[axis] =
+                                std::max(batch.WorldBoundsMax[axis], instance.WorldBoundsMax[axis]);
+                        }
+                        outBatched[instanceIndex] = 1u;
+                    }
+
+                    outBatches.push_back(batch);
+                }
+            }
+        };
+
+        // 組1: そのフレームに選ばれた段(深度プリパス / G-Buffer / 平面反射)。
+        // フェード中(段が2つ)は個別に描くのでバッチへ入れない
+        buildFor(
+            [this](size_t i) -> const Assets::Model*
+            {
+                LODDraw draws[2];
+                if (GetLODDraws(i, draws) != 1)
+                {
+                    return nullptr;
+                }
+                // 【GetCurrentLODと一致するときだけまとめる】GetLODDrawsは、フェード中でも
+                // 片方の段が未ストリーミングなら「読めているほうを全画素で描く」として1を返す。
+                // その段は PreviousLOD のことがあり、GetCurrentLOD は nullptr を返す。
+                // 平面反射パスは単体を GetCurrentLOD で引くので、そこを一致させておかないと
+                // 「まとめられた個体は水面に映るが、同じ状態でまとめられなかった個体は映らない」
+                // という食い違いが出る
+                if (draws[0].Model != GetCurrentLOD(i))
+                {
+                    return nullptr;
+                }
+                return draws[0].Model;
+            },
+            m_InstanceBatchesCurrentLOD, m_InstanceBatchedCurrentLOD);
+
+        // 組2: 常に最も粗い段(シャドウ / 反射プローブ)
+        buildFor(
+            [this](size_t i) -> const Assets::Model* { return GetCoarsestLOD(m_Scene.Instances[i]); },
+            m_InstanceBatchesCoarsestLOD, m_InstanceBatchedCoarsestLOD);
+
+        m_InstancedBatchCount =
+            static_cast<uint32_t>(m_InstanceBatchesCurrentLOD.size() + m_InstanceBatchesCoarsestLOD.size());
+        m_InstancedInstanceCount = static_cast<uint32_t>(m_ModelInstanceRecords.size());
+
+        if (m_ModelInstanceRecords.empty())
+        {
+            return;
+        }
+
+        // 容量はシーン読み込み時に「インスタンス数×2組」で確保してある。超えることは無いが、
+        // 超えたときに黙って壊れないよう検査してログを残す
+        const size_t capacity = m_Scene.Instances.size() * 2;
+        if (m_ModelInstanceRecords.size() > capacity)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "インスタンスバッファの容量(" + std::to_string(capacity) + "件)を超えました("
+                    + std::to_string(m_ModelInstanceRecords.size()) + "件)。このフレームはインスタンシングを見送ります");
+            m_InstanceBatchesCurrentLOD.clear();
+            m_InstanceBatchesCoarsestLOD.clear();
+            std::fill(m_InstanceBatchedCurrentLOD.begin(), m_InstanceBatchedCurrentLOD.end(), 0u);
+            std::fill(m_InstanceBatchedCoarsestLOD.begin(), m_InstanceBatchedCoarsestLOD.end(), 0u);
+            m_InstancedBatchCount = 0;
+            m_InstancedInstanceCount = 0;
+            return;
+        }
+
+        // 【1フレームに1回だけ】どのパスもこの1本を読む。バインドは各パスがDraw直前に張り直す
+        // (頂点シェーダー用SRVはt0の1本しかなく、ドローンショーが同じスロットを使うため)
+        commandList->UpdateBuffer(
+            m_ModelInstanceBuffer.get(), m_ModelInstanceRecords.data(),
+            m_ModelInstanceRecords.size() * sizeof(GPUModelInstance));
+    }
+
     void KurenaiEngine3D::UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds)
     {
         m_LODSwitchCount = 0;
@@ -4850,6 +5253,13 @@ namespace Kurenai
                     --pending.FramesRemaining;
                     continue;
                 }
+                // 【常駐ミップの読み直しが終わるまで待つ】Loaderスレッドがこのモデルの
+                // IRHITexture*を掴んでいる間に解放すると解放済みを触る。
+                // フレーム数の遅延では足りない(1件が数十msかかることがある)
+                if (m_TextureStreaming.IsModelBusy(pending.Model.get()))
+                {
+                    continue;
+                }
                 ready.push_back(std::move(pending.Model));
             }
             m_StreamingPendingRelease.erase(
@@ -4910,12 +5320,14 @@ namespace Kurenai
                 m_Scene.ModelCache[item.Path] = std::move(item.Model);
                 for (Assets::ModelInstance& instance : m_Scene.Instances)
                 {
+                    bool referenced = false;
                     for (size_t level = 0; level < instance.ModelPaths.size(); ++level)
                     {
                         if (instance.ModelPaths[level] != item.Path)
                         {
                             continue;
                         }
+                        referenced = true;
                         if (level == 0)
                         {
                             instance.Model = shared;
@@ -4924,6 +5336,15 @@ namespace Kurenai
                         {
                             instance.LODModels[level - 1] = shared;
                         }
+                    }
+                    // 常駐ミップ制御の追跡表へ入れる。
+                    // 【インスタンスごとに1回だけ】メッシュのAABBはインスタンスのWorldで
+                    // ワールド空間へ移して持つので、参照はインスタンスの数だけ要る。
+                    // 逆に同じインスタンスで2回呼ぶと、同じ参照が二重に積まれる
+                    // (同じパスが複数の段に入っているシーンで起きうる)
+                    if (referenced)
+                    {
+                        m_TextureStreaming.AttachModel(*shared, instance.World, *m_Device);
                     }
                 }
             }
@@ -5052,6 +5473,9 @@ namespace Kurenai
                 {
                     continue;
                 }
+                // 【破棄より前に追跡表から外す】これ以降このモデルへ新しい読み直しは発注されない。
+                // 発注済みのものは破棄待ちの側(IsModelBusy)で待つ
+                m_TextureStreaming.DetachModel(*cached->second);
                 // 実体はここで消さず、GPUが読み終わるまで寝かせる
                 m_StreamingPendingRelease.push_back(
                     { std::move(cached->second), kStreamingReleaseDelayFrames });
@@ -5203,6 +5627,12 @@ namespace Kurenai
                     {
                         return true;
                     }
+                    // 常駐ミップの読み直しもこのスレッドが行う(専用スレッドは立てない)。
+                    // モデルの発注が無い間もこれだけで起きる必要がある
+                    if (m_TextureStreaming.HasPendingRequests())
+                    {
+                        return true;
+                    }
                     // 破棄だけが積まれている場合も起きる(読み込みが止まっている間に
                     // 破棄が溜まり続けると、遠ざかったモデルのVRAMが解放されない)
                     {
@@ -5240,6 +5670,14 @@ namespace Kurenai
             // 破棄は毎ループ引き取る。読み込みより先に行うことでVRAMのピークを下げる
             destroyStreamedModels();
 
+            // 常駐ミップの読み直し。**モデルの読み込みより先に、そして1件ごとに挟む**
+            // (下のループの中でも呼ぶ)。モデル1件の読み込みはPLATEAUのLOD2タイルで
+            // 秒の単位かかるため、まとめて後回しにすると街を流している間じゅう
+            // ミップの差し替えが止まり、近づいた面がぼけたまま残る。
+            // 1回あたりの件数を絞ってあるので、逆にモデルの読み込みが待たされることもない
+            constexpr size_t kTextureRequestsPerSlice = 4;
+            m_TextureStreaming.ProcessRequests(*m_Device, kTextureRequestsPerSlice);
+
             // --- ストリーミングの読み込み ---------------------------------------------------
             if (!streamingRequests.empty())
             {
@@ -5269,6 +5707,8 @@ namespace Kurenai
                         // 同じものを永久に再発注し続ける
                         m_StreamingLoaded.push_back({ request.Path, std::move(model), request.Generation });
                     }
+                    // 1件読むごとにミップの差し替えを挟む(このループの外のコメント参照)
+                    m_TextureStreaming.ProcessRequests(*m_Device, kTextureRequestsPerSlice);
                 }
                 // 【ここでcontinueしない】読み込みと再構築が同時に積まれることがある。
                 // 抜けると再構築要求だけが失われ、m_RaytracingRebuildInFlightが立ったまま戻らない
@@ -5526,6 +5966,32 @@ namespace Kurenai
         // シーンへ切り替えたときに、前のシーンの段とフェード途中の状態が残る
         m_InstanceLODStates.assign(m_Scene.Instances.size(), InstanceLODState{});
 
+        // インスタンシング用のインスタンスバッファをシーンの規模で作り直す。
+        //
+        // 【容量はインスタンス数×2】バッチの組は「そのフレームに選ばれた段」と
+        // 「最も粗い段」の2組あり、同じインスタンスが両方に載る。最悪でも全インスタンスが
+        // 両組でバッチに入るだけなので、これで足りる。
+        // インスタンスが1つも無いシーンではバッファを作らない
+        // (BuildInstanceBatchesがnullptrを見て何もしない)
+        m_ModelInstanceBuffer.reset();
+        if (!m_Scene.Instances.empty())
+        {
+            RHI::BufferDesc instanceBufferDesc;
+            instanceBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+            instanceBufferDesc.SizeInBytes =
+                static_cast<uint32_t>(sizeof(GPUModelInstance) * m_Scene.Instances.size() * 2);
+            instanceBufferDesc.StrideInBytes = sizeof(GPUModelInstance);
+            // 更新はBuildInstanceBatchesの1フレーム1回だけ。DX12のステージングリングは
+            // この値×kFrameCount+1段を常時確保するので、必要最小限にしておく
+            instanceBufferDesc.MaxUpdatesPerFrame = 1;
+            m_ModelInstanceBuffer = m_Device->CreateBuffer(instanceBufferDesc);
+        }
+        m_InstanceBatchesCurrentLOD.clear();
+        m_InstanceBatchesCoarsestLOD.clear();
+        m_InstanceBatchedCurrentLOD.clear();
+        m_InstanceBatchedCoarsestLOD.clear();
+        m_ModelInstanceRecords.clear();
+
         // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
         m_TimeOfDay = m_Scene.SunTimeOfDay;
@@ -5700,6 +6166,17 @@ namespace Kurenai
         // テクスチャの常駐ミップ制御。既定はoffで、.ksceneが明示したシーンだけが有効になる
         // (未指定のシーンは従来どおり全ミップ常駐のままで、見え方もVRAMも変わらない)
         m_TextureStreaming.Configure(m_Scene.TextureStreamingEnabled, m_Scene.TextureStreamingBias);
+        // 【読み出しはLoaderスレッドに相乗りする】専用スレッドは立てない(TextureStreaming.h参照)。
+        // 要求が積まれたらLoaderスレッドを起こす必要があるので、その手段を渡しておく
+        m_TextureStreaming.SetRequestNotifier([this] {
+            // 【notifyの前に必ずm_LoadRequestMutexを取る】Loaderスレッドは
+            // このミューテックスを持ったまま述語を評価してからwaitへ入る。
+            // 取らずにnotifyすると、述語がfalseと出てからwaitへ入るまでの隙間に通知が落ちる。
+            // カメラが止まっていてモデルの発注が無いシーンでは、
+            // 次に起こす材料が他に無いのでミップの差し替えがそのまま止まる
+            { std::lock_guard<std::mutex> lock(m_LoadRequestMutex); }
+            m_LoadRequestCV.notify_one();
+        });
         m_TextureStreaming.Build(m_Scene, *m_Device);
 
         m_SelectedProbeIndex = m_ReflectionProbes.empty() ? -1 : 0;
@@ -6733,6 +7210,8 @@ namespace Kurenai
         m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
         m_FrameStatsDrawCallsShadowSum += m_DrawCallsShadow;
         m_FrameStatsDrawCallsDepthPrepassSum += m_DrawCallsDepthPrepass;
+        m_FrameStatsInstancedBatchSum += m_InstancedBatchCount;
+        m_FrameStatsInstancedInstanceSum += m_InstancedInstanceCount;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -6897,6 +7376,22 @@ namespace Kurenai
             Core::Logger::Info("Perf", drawText);
         }
 
+        // インスタンシングの効き。**ドローコール数とは別建てにする** ――
+        // 「バッチ0」は「まとめられる相手がいない」のか「一度も実行されていない」のかを
+        // 区別できないので、まとめた数(バッチ)とまとめた対象(インスタンス)の両方を出す。
+        // まとめたことで減ったドロー数は (インスタンス数 - バッチ数) x そのモデルのメッシュ数
+        if (m_FrameStatsFrameCount > 0 && m_FrameStatsInstancedBatchSum > 0)
+        {
+            const double frames = static_cast<double>(m_FrameStatsFrameCount);
+            char instText[192];
+            std::snprintf(
+                instText, sizeof(instText),
+                "  インスタンシング: バッチ %.1f / まとめたインスタンス %.1f [1フレームあたり・2組の合計]",
+                static_cast<double>(m_FrameStatsInstancedBatchSum) / frames,
+                static_cast<double>(m_FrameStatsInstancedInstanceSum) / frames);
+            Core::Logger::Info("Perf", instText);
+        }
+
         // bindless区画の使用状況。**満杯になっても例外は飛ばず、エラーログ1行と
         // kInvalidBindlessIndex(=白1x1へ落ちる)しか残らない**ため、上限へ近づいていることを
         // 定期的に見えるようにしておく(IRHIDevice::GetBindlessUsedCountのコメント参照)
@@ -7012,6 +7507,8 @@ namespace Kurenai
         m_FrameStatsDrawCallsGBufferSum = 0;
         m_FrameStatsDrawCallsShadowSum = 0;
         m_FrameStatsDrawCallsDepthPrepassSum = 0;
+        m_FrameStatsInstancedBatchSum = 0;
+        m_FrameStatsInstancedInstanceSum = 0;
         m_FrameStatsMeshletTestedSum = 0;
         m_FrameStatsMeshletFrustumCulledSum = 0;
         m_FrameStatsMeshletOcclusionCulledSum = 0;
@@ -7498,6 +7995,11 @@ namespace Kurenai
         // モデルのストリーミング。【LODの後に呼ぶ】どの段を読むかは選ばれた段で決まる
         UpdateModelStreaming(cameraPosition);
 
+        // インスタンシングのバッチを組み直す。【LODとストリーミングの後】まとめられるかどうかは
+        // 「そのフレームに選ばれた段」と「読み込み済みか」で決まる。レンダーグラフの構築より前に
+        // 1回だけ呼ぶこと ―― パスごとに組み直すと、深度プリパスとG-Bufferが違うまとめ方をする
+        BuildInstanceBatches(commandList);
+
         // レイトレーシングを常駐の増減へ追随させる(ストリーミング時のみ働く)
         UpdateRaytracingRebuild();
 
@@ -7551,6 +8053,26 @@ namespace Kurenai
         const DirectX::XMMATRIX viewMatrix = frameState.Camera.GetViewMatrix();
         const DirectX::XMMATRIX jitteredProj =
             frameState.Camera.GetProjectionMatrix() * DirectX::XMMatrixTranslation(jitterNdc.x, jitterNdc.y, 0.0f);
+
+        // --- メッシュレットLODの段を選ぶ入力を、このフレームぶん一度だけ確定させる ---
+        //
+        // 【全パスへ同じものを配る】シャドウと深度プリパスは同じ増幅シェーダーを使うが、
+        // ViewProjは光源やカスケードのものに差し替わっている。各パスのカメラで段を選ぶと
+        // 影を落とす形と本体の形が違う段になるため、主カメラの値をここで決めて配る。
+        //
+        // 【ジッターの影響を受けない値を使う】拡大率_22はジッター(平行移動)では変化しない。
+        // 仮に変化する量を使うと、段の境目でTAAのジッター周期に合わせて段が振動する
+        {
+            DirectX::XMFLOAT4X4 projForLOD;
+            DirectX::XMStoreFloat4x4(&projForLOD, frameState.Camera.GetProjectionMatrix());
+            m_MeshletLODFrame.CameraPos = frameState.Camera.GetPosition();
+            // 射影行列の_22 = 1/tan(fovY/2)。画面の高さ全体が 2*tan(fovY/2) なので、
+            // 距離1メートルの1メートルは _22 * 高さ / 2 画素になる
+            m_MeshletLODFrame.PixelScale = 0.5f * projForLOD._22 * static_cast<float>(m_RenderHeight);
+            m_MeshletLODFrame.Quality = m_MeshletLODEnabled ? m_MeshletLODQuality : 0.0f;
+            m_MeshletLODFrame.Forced = m_MeshletLODEnabled ? m_MeshletLODForcedLevel : -1;
+            m_MeshletLODFrame.DebugColorByLOD = m_MeshletLODDebugColorEnabled;
+        }
 
         // 有効なライトだけを詰めてt8のライトリストへ渡す。シェーダはLightCount(・ActiveLightCount)の
         // 数までしかループしないため、無効なライトはそもそもGPUへ送らない。DirectLight/Transparentの
@@ -8672,18 +9194,25 @@ namespace Kurenai
                         // カメラではなくライト側の錐台なので、画面外でも影を落とすものは残る
                         const FrustumPlanes cascadeFrustum = ExtractFrustumPlanes(cascadeViewProj[cascade]);
 
-                        for (const auto& instance : m_Scene.Instances)
+                        // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                        // シャドウは常に最も粗い段なので、その組(coarsestLOD=true)を使う
+                        GetInstanceDrawUnits(/*coarsestLOD=*/true, m_DrawUnitScratch);
+                        for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                         {
+                            const Assets::ModelInstance& instance = *unit.Instance;
                             ++m_FrustumCullTested;
-                            if (!IsAABBVisible(cascadeFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                            if (!IsAABBVisible(cascadeFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                             {
                                 ++m_FrustumCullCulled;
                                 continue;
                             }
 
                             // 【影は常に最も粗い段】影はテクスチャを読まないので詳細な段を描く
-                            // 意味が無い。ストリーミング中で未読み込みなら描かない
-                            const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                            // 意味が無い。ストリーミング中で未読み込みなら描かない。
+                            // バッチはどの段を描くかを既に決めてある(全員が同じ段であることが
+                            // バッチの条件そのもの)
+                            const Assets::Model* const coarsestModel =
+                                unit.Model ? unit.Model : GetCoarsestLOD(instance);
                             if (!coarsestModel) { continue; }
 
                             // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
@@ -8715,7 +9244,7 @@ namespace Kurenai
 
                                     const ObjectConstants objectConstants = MakeModelObjectConstants(
                                         instance, *coarsestModel, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask,
-                                        requireMask);
+                                        requireMask, m_MeshletLODFrame);
                                     cmd->UpdateBuffer(
                                         m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
@@ -8746,8 +9275,14 @@ namespace Kurenai
                             for (const auto& mesh : coarsestModel->Meshes)
                             {
                                 // メッシュ単位のカリング。錐台はこのカスケードのライト正射影で、
-                                // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)
-                                if (!IsMeshVisibleWithStats(
+                                // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)。
+                                //
+                                // 【バッチでは行わない】メッシュ単位のワールドAABBは
+                                // 「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。
+                                // 判定を代表インスタンスだけで行うと、他の個体の見えている
+                                // メッシュまで落ちて物が消える
+                                if (!unit.IsBatch()
+                                    && !IsMeshVisibleWithStats(
                                         m_MeshCullingEnabled, cascadeFrustum, instance, *coarsestModel, mesh, m_MeshCullTested,
                                         m_MeshCullCulled))
                                 {
@@ -8761,8 +9296,10 @@ namespace Kurenai
 
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
-                                const ObjectConstants objectConstants =
-                                    MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                ObjectConstants objectConstants =
+                                    MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                                objectConstants.InstanceBase = unit.InstanceBase;
+                                objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8771,9 +9308,17 @@ namespace Kurenai
                                     cmd->SetTexture(0, mesh.BaseColorTexture);
                                 }
 
+                                // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかなく、
+                                // ドローンショーが同じスロットを使う。上書きされたまま描くと
+                                // 全インスタンスがドローンの座標を行列として読んで画面外へ飛ぶ
+                                if (unit.IsBatch())
+                                {
+                                    cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                                }
+
                                 cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                                 cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                                cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                                cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                                 ++m_DrawCallsShadow;
                             }
                         }
@@ -8858,10 +9403,14 @@ namespace Kurenai
             // モデルが全部消えることはない
             const FrustumPlanes faceFrustum = ExtractFrustumPlanes(faceViewProj);
 
-            for (const auto& instance : m_Scene.Instances)
+            // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+            // プローブは常に最も粗い段なので、シャドウと同じ組(coarsestLOD=true)を使う
+            GetInstanceDrawUnits(/*coarsestLOD=*/true, m_DrawUnitScratch);
+            for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
             {
+                const Assets::ModelInstance& instance = *unit.Instance;
                 ++m_FrustumCullTested;
-                if (!IsAABBVisible(faceFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                if (!IsAABBVisible(faceFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                 {
                     ++m_FrustumCullCulled;
                     continue;
@@ -8869,7 +9418,8 @@ namespace Kurenai
 
                 // 【プローブも最も粗い段】焼き込むのは間接光で、細部は残らない
                 // ストリーミング中で未読み込みなら描かない
-                const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                const Assets::Model* const coarsestModel =
+                    unit.Model ? unit.Model : GetCoarsestLOD(instance);
                 if (!coarsestModel) { continue; }
                 for (const auto& mesh : coarsestModel->Meshes)
                 {
@@ -8883,16 +9433,26 @@ namespace Kurenai
                         continue;
                     }
 
-                    // メッシュ単位のカリング。錐台はキューブの1面ぶん
-                    if (!IsMeshVisibleWithStats(
+                    // メッシュ単位のカリング。錐台はキューブの1面ぶん。
+                    // 【バッチでは行わない】理由はG-Bufferパスの同じ箇所を参照
+                    if (!unit.IsBatch()
+                        && !IsMeshVisibleWithStats(
                             m_MeshCullingEnabled, faceFrustum, instance, *coarsestModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                     {
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                    ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                    objectConstants.InstanceBase = unit.InstanceBase;
+                    objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                    // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかない
+                    if (unit.IsBatch())
+                    {
+                        cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                    }
 
                     cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                     cmd->SetIndexBuffer(mesh.IndexBuffer.get());
@@ -8907,7 +9467,7 @@ namespace Kurenai
                     cmd->SetTexture(5, mesh.OcclusionTexture);
                     cmd->SetTexture(6, mesh.BentNormalTexture);
 
-                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                    cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                 }
             }
 
@@ -9223,7 +9783,7 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9899,8 +10459,8 @@ namespace Kurenai
                             {
                                 const ObjectConstants objectConstants = MakeModelObjectConstants(
                                     *draw.Instance, *draw.Model, m_EmissiveIntensity, m_OcclusionMapEnabled,
-                                    draw.RejectMask, draw.RequireMask, draw.CountCullStats, draw.DitherFade,
-                                    draw.OcclusionMode);
+                                    draw.RejectMask, draw.RequireMask, m_MeshletLODFrame,
+                                    draw.CountCullStats, draw.DitherFade, draw.OcclusionMode);
                                 cmd->UpdateBuffer(
                                     m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 if (!m_ObjectConstantBuffer->GetLastUpdateGpuAddress(
@@ -10097,11 +10657,16 @@ namespace Kurenai
                     }
                     // G-Bufferと同じカメラなので、間引かれるモデルも同じになる
                     const FrustumPlanes prepassFrustum = ExtractFrustumPlanes(viewProj);
-                    for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
+                    // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                    // 【G-Bufferとまったく同じ組を使うこと】まとめ方が食い違うと、
+                    // 深度を書いた画素と色を書く画素がずれて穴が開く
+                    GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
+                    for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                     {
-                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+                        const size_t instanceIndex = unit.InstanceIndex;
+                        const Assets::ModelInstance& instance = *unit.Instance;
                         ++m_FrustumCullTested;
-                        if (!IsAABBVisible(prepassFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                        if (!IsAABBVisible(prepassFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                         {
                             ++m_FrustumCullCulled;
                             continue;
@@ -10109,9 +10674,19 @@ namespace Kurenai
 
                         // モデルLOD。フェード中は2段を重ねる。
                         // 【G-Bufferとまったく同じ組・同じDitherFadeで描くこと】片方だけが捨てた画素は
-                        // 「深度は書かれているのに色が書かれない」穴になる
+                        // 「深度は書かれているのに色が書かれない」穴になる。
+                        // バッチはフェード中でないものだけで構成されるので必ず1段(BuildInstanceBatches)
                         LODDraw lodDraws[2];
-                        const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                        uint32_t lodDrawCount;
+                        if (unit.IsBatch())
+                        {
+                            lodDraws[0] = { unit.Model, 1.0f };
+                            lodDrawCount = 1;
+                        }
+                        else
+                        {
+                            lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                        }
                         for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
                         {
                         const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
@@ -10170,7 +10745,8 @@ namespace Kurenai
                                 }
 
                                 const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                    instance, lodModel, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask, requireMask);
+                                    instance, lodModel, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask, requireMask,
+                                    m_MeshletLODFrame);
                                 cmd->UpdateBuffer(
                                     m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
@@ -10209,7 +10785,11 @@ namespace Kurenai
                             // G-Bufferでは描かれると、深度プリパスが埋めていない画素で早期Zが効かず
                             // 遅くなるだけで済むが、逆(プリパスで描いてG-Bufferで間引く)だと
                             // 描かれていないものの深度が残る
-                            if (!IsMeshVisibleWithStats(
+                            // 【バッチでは行わない】メッシュ単位のワールドAABBは
+                            // 「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。
+                            // G-Buffer側も同じ条件で外すので、両者の食い違いは起きない
+                            if (!unit.IsBatch()
+                                && !IsMeshVisibleWithStats(
                                     m_MeshCullingEnabled, prepassFrustum, instance, lodModel, mesh, m_MeshCullTested,
                                     m_MeshCullCulled))
                             {
@@ -10235,8 +10815,10 @@ namespace Kurenai
                                 currentPipelineState = wanted;
                             }
 
-                            const ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
+                            ObjectConstants objectConstants =
+                                MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
+                            objectConstants.InstanceBase = unit.InstanceBase;
+                            objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -10246,9 +10828,16 @@ namespace Kurenai
                                 cmd->SetTexture(0, mesh.BaseColorTexture);
                             }
 
+                            // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかなく、
+                            // ドローンショーが同じスロットを使う
+                            if (unit.IsBatch())
+                            {
+                                cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                            }
+
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                             ++m_DrawCallsDepthPrepass;
                         }
                         }   // モデルLODの段のループ
@@ -10421,11 +11010,15 @@ namespace Kurenai
                     }
                 }
 
-                for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
+                // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                // 【深度プリパスとまったく同じ組を使うこと】まとめ方が食い違うと穴が開く
+                GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
+                for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                 {
-                    const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+                    const size_t instanceIndex = unit.InstanceIndex;
+                    const Assets::ModelInstance& instance = *unit.Instance;
                     ++m_FrustumCullTested;
-                    if (!IsAABBVisible(frustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                    if (!IsAABBVisible(frustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                     {
                         ++m_FrustumCullCulled;
                         continue;
@@ -10433,9 +11026,19 @@ namespace Kurenai
 
                     // モデルLOD。フェード中は2段を重ねる。
                     // 【深度プリパスとまったく同じ組・同じDitherFadeであること】UpdateModelLODが
-                    // フレーム先頭で1回だけ決めた結果を両方が引くので、ここで距離を測り直さない
+                    // フレーム先頭で1回だけ決めた結果を両方が引くので、ここで距離を測り直さない。
+                    // バッチはフェード中でないものだけで構成されるので必ず1段(BuildInstanceBatches)
                     LODDraw lodDraws[2];
-                    const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                    uint32_t lodDrawCount;
+                    if (unit.IsBatch())
+                    {
+                        lodDraws[0] = { unit.Model, 1.0f };
+                        lodDrawCount = 1;
+                    }
+                    else
+                    {
+                        lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                    }
                     for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
                     {
                     const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
@@ -10461,7 +11064,8 @@ namespace Kurenai
 
                         const ObjectConstants objectConstants = MakeModelObjectConstants(
                             instance, lodModel, m_EmissiveIntensity, m_OcclusionMapEnabled,
-                            Assets::kGpuMaterialFlagTransparent, 0, /*countCullStats=*/true, lodDitherFade);
+                            Assets::kGpuMaterialFlagTransparent, 0, m_MeshletLODFrame,
+                            /*countCullStats=*/true, lodDitherFade);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -10486,7 +11090,10 @@ namespace Kurenai
 
                         // メッシュ単位のカリング。深度プリパスとまったく同じ錐台・同じ判定
                         // (片方だけで間引くと深度とG-Bufferが食い違う)
-                        if (!IsMeshVisibleWithStats(
+                        // 【バッチでは行わない】理由と、深度プリパスと条件を揃えることの
+                        // 必要性はプリパス側の同じ箇所を参照
+                        if (!unit.IsBatch()
+                            && !IsMeshVisibleWithStats(
                                 m_MeshCullingEnabled, frustum, instance, lodModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                         {
                             continue;
@@ -10500,8 +11107,10 @@ namespace Kurenai
                         // ここで食い違うとプリパスの深度とG-Bufferの深度が一致しなくなる
                         bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
-                        const ObjectConstants objectConstants =
-                            MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
+                        ObjectConstants objectConstants =
+                            MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
+                        objectConstants.InstanceBase = unit.InstanceBase;
+                        objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -10519,9 +11128,16 @@ namespace Kurenai
                             cmd->SetTexture(7, m_WaterNormalMapTexture.get());
                         }
 
+                        // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかなく、
+                        // ドローンショーが同じスロットを使う
+                        if (unit.IsBatch())
+                        {
+                            cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                        }
+
                         cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                         cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                         ++m_DrawCallsGBuffer;
                     }
                     }   // モデルLODの段のループ
@@ -11226,7 +11842,7 @@ namespace Kurenai
                     const ObjectConstants objectConstants =
                         MakeObjectConstants(
                             *draw.Instance, *draw.Model, *draw.Mesh, m_EmissiveIntensity,
-                            m_OcclusionMapEnabled);
+                            m_OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -11344,19 +11960,26 @@ namespace Kurenai
                     // 画面には映っていないが水面には映るものが正しく残る
                     const FrustumPlanes reflectionFrustum = ExtractFrustumPlanes(reflectedViewProj);
 
-                    for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
+                    // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                    // 深度プリパス/G-Bufferと同じ「そのフレームに選ばれた段」の組を使う
+                    GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
+                    for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                     {
-                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+                        const size_t instanceIndex = unit.InstanceIndex;
+                        const Assets::ModelInstance& instance = *unit.Instance;
                         ++m_FrustumCullTested;
-                        if (!IsAABBVisible(reflectionFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                        if (!IsAABBVisible(reflectionFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                         {
                             ++m_FrustumCullCulled;
                             continue;
                         }
 
                         // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
-                        // ストリーミング中で未読み込みなら描かない
-                        const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
+                        // ストリーミング中で未読み込みなら描かない。
+                        // バッチはフェード中でないものだけで構成されるので、
+                        // unit.Model と GetCurrentLOD は同じ段を指す
+                        const Assets::Model* const currentModel =
+                            unit.Model ? unit.Model : GetCurrentLOD(instanceIndex);
                         if (!currentModel) { continue; }
                         for (const auto& mesh : currentModel->Meshes)
                         {
@@ -11367,20 +11990,34 @@ namespace Kurenai
                                 continue;
                             }
 
-                            // メッシュ単位のカリング。錐台は鏡映カメラのもの
-                            if (!IsMeshVisibleWithStats(
+                            // メッシュ単位のカリング。錐台は鏡映カメラのもの。
+                            // 【バッチでは行わない】理由はG-Bufferパスの同じ箇所を参照
+                            if (!unit.IsBatch()
+                                && !IsMeshVisibleWithStats(
                                     m_MeshCullingEnabled, reflectionFrustum, instance, *currentModel, mesh, m_MeshCullTested,
                                     m_MeshCullCulled))
                             {
                                 continue;
                             }
 
+                            // 鏡映で巻きが反転するため、ミラーリングの有無に対して逆のPSOを選ぶ。
+                            // バッチ内では IsMirrored が同一(グループ化のキー)なので代表で決めてよい
                             bindPipelineState(!instance.IsMirrored);
 
-                            const ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                            ObjectConstants objectConstants =
+                                MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                            objectConstants.InstanceBase = unit.InstanceBase;
+                            objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                            // 【毎回張り直す】このパスはモデルのあとにドローンショーを描き、
+                            // そちらが同じ頂点シェーダー用SRV(t0)へ自分のバッファを張る。
+                            // 張り直さないと全インスタンスがドローンの座標を行列として読む
+                            if (unit.IsBatch())
+                            {
+                                cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                            }
 
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
@@ -11389,7 +12026,7 @@ namespace Kurenai
                             cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                             cmd->SetTexture(3, mesh.EmissiveTexture);
                             cmd->SetTexture(5, mesh.OcclusionTexture);
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                         }
                     }
 

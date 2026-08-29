@@ -1,12 +1,11 @@
 #include "DX11Device.h"
 
-#include <d3dcompiler.h>
-
 #include <DirectXTex.h>
 
 #include <cwchar>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Core/StringUtil.h"
@@ -21,6 +20,7 @@
 #include "DX11SwapChain.h"
 #include "DX11Texture.h"
 #include "DX11Util.h"
+#include "RHI/RHIShaderPackage.h"
 #include "RHI/TextureImage.h"
 
 namespace Kurenai::RHI
@@ -411,61 +411,35 @@ namespace Kurenai::RHI
             return nullptr;
         }
 
-        const char* target =
-            desc.Stage == ShaderStage::Vertex ? "vs_5_0" : desc.Stage == ShaderStage::Compute ? "cs_5_0" : "ps_5_0";
+        // DX11が使うのは常にSM 5.0のバリアント(DXBC)。
+        // このバイトコードは、以前このメソッドがD3DCompileFromFileで実行時に作っていたものと
+        // 同じコンパイラ・同じフラグで、KurenaiShaderPackerがビルド時に焼いたもの
+        std::vector<uint8_t> bytecode =
+            LoadShaderBytecode(m_ShaderPackages, desc, Assets::ShaderVariant::Dxbc50, "DX11");
 
-        UINT compileFlags = 0;
-#if defined(_DEBUG)
-        compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-
-        Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
-        Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
-        HRESULT hr = D3DCompileFromFile(
-            desc.FilePath.c_str(),
-            nullptr,
-            D3D_COMPILE_STANDARD_FILE_INCLUDE,
-            desc.EntryPoint.c_str(),
-            target,
-            compileFlags,
-            0,
-            &bytecode,
-            &errorBlob);
-
-        if (FAILED(hr))
-        {
-            std::string message = "シェーダのコンパイルに失敗しました";
-            if (errorBlob)
-            {
-                message += ": ";
-                message += static_cast<const char*>(errorBlob->GetBufferPointer());
-            }
-            Core::Logger::Error("DX11", message);
-            throw std::runtime_error(message);
-        }
-
+        HRESULT hr = S_OK;
         Microsoft::WRL::ComPtr<ID3D11DeviceChild> shader;
         if (desc.Stage == ShaderStage::Vertex)
         {
             Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader;
-            hr = m_Device->CreateVertexShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &vertexShader);
+            hr = m_Device->CreateVertexShader(bytecode.data(), bytecode.size(), nullptr, &vertexShader);
             shader = vertexShader;
         }
         else if (desc.Stage == ShaderStage::Compute)
         {
             Microsoft::WRL::ComPtr<ID3D11ComputeShader> computeShader;
-            hr = m_Device->CreateComputeShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &computeShader);
+            hr = m_Device->CreateComputeShader(bytecode.data(), bytecode.size(), nullptr, &computeShader);
             shader = computeShader;
         }
         else
         {
             Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader;
-            hr = m_Device->CreatePixelShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &pixelShader);
+            hr = m_Device->CreatePixelShader(bytecode.data(), bytecode.size(), nullptr, &pixelShader);
             shader = pixelShader;
         }
         ThrowIfFailed(hr, "シェーダオブジェクトの作成に失敗しました");
 
-        return std::make_unique<DX11Shader>(desc.Stage, shader, bytecode);
+        return std::make_unique<DX11Shader>(desc.Stage, shader, std::move(bytecode));
     }
 
     std::unique_ptr<IRHIPipelineState> DX11Device::CreatePipelineState(const PipelineStateDesc& desc)
@@ -495,8 +469,8 @@ namespace Kurenai::RHI
             HRESULT hr = m_Device->CreateInputLayout(
                 elements.data(),
                 static_cast<UINT>(elements.size()),
-                vertexShader->GetBytecode()->GetBufferPointer(),
-                vertexShader->GetBytecode()->GetBufferSize(),
+                vertexShader->GetBytecode().data(),
+                vertexShader->GetBytecode().size(),
                 &inputLayout);
             ThrowIfFailed(hr, "入力レイアウトの作成に失敗しました");
         }
