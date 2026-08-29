@@ -838,6 +838,15 @@ namespace Kurenai
         // (RTReflection.hlslはRayQueryを含むためSM 6.5でしかコンパイルできず、
         //  非対応環境で作ろうとすると例外になる)
         bool m_RaytracingAvailable = false;
+        // DDGIのレイ取得をDXRで行えるか。m_RaytracingAvailableとは別に持つ。
+        //
+        // 【なぜ別なのか】DDGIProbeTrace.hlslはコンピュートシェーダーの中でテクスチャを
+        // 微分付きにサンプルするため、DXILの検証がシェーダーモデル6.6を要求する
+        // (Derivatives in CS/MS/AS is SM 6.6+)。RayQuery自体はSM 6.5で足りるので、
+        // 「DXR Tier 1.1に対応していて、かつSM 6.5のシェーダーバリアントで動いている」環境が
+        // 実在しうる ―― その場合、他のRTパスは作れるのにこれだけ作れない。
+        // 作成に失敗したらここをfalseにして、DDGIのレイ取得だけをラスタ経路へ戻す
+        bool m_DDGIRaytracedTraceAvailable = false;
 
         // SSR(Screen Space Reflections)パス: LightingパスのSceneColorを反射先の環境色として
         // 再利用し、G-Buffer(Normal/Material/Depth)からワールド空間でレイマーチングして

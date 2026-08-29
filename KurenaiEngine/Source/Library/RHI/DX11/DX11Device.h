@@ -4,6 +4,7 @@
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 
+#include "Assets/ShaderLoader.h"
 #include "RHI/IRHIDevice.h"
 
 namespace Kurenai::RHI
@@ -21,6 +22,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHISwapChain> CreateSwapChain(void* windowHandle, uint32_t width, uint32_t height) override;
         std::unique_ptr<IRHIBuffer> CreateBuffer(const BufferDesc& desc) override;
         std::unique_ptr<IRHIShader> CreateShader(const ShaderDesc& desc) override;
+        void ReleaseShaderPackages() override { m_ShaderPackages.Clear(); }
         std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) override;
         std::unique_ptr<IRHIPipelineState> CreateComputePipelineState(const ComputePipelineStateDesc& desc) override;
         std::unique_ptr<IRHITexture> CreateTextureFromFile(const std::wstring& filePath, bool sRGB) override;
@@ -102,6 +104,11 @@ namespace Kurenai::RHI
         // 両者はSRVの次元とキューブ枚数以外まったく同じ手順のため1箇所にまとめている
         std::unique_ptr<IRHITexture> CreateCubeTextureInternal(
             uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray);
+
+        // CreateShaderが読む.kshaderのキャッシュ。1つのパッケージは複数のエントリから
+        // 引かれる(GBuffer.kshaderはVSMain/PSMain/PSMainCutout)ため、開き直しを避ける。
+        // ReleaseShaderPackages()で明示的に捨てる
+        Assets::ShaderPackageCache m_ShaderPackages;
 
         Microsoft::WRL::ComPtr<ID3D11Device> m_Device;
         // VRAM使用量(QueryVideoMemoryInfo)を引くためのアダプタ。Initializeで一度だけ取る
