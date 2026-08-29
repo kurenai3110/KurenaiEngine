@@ -56,8 +56,8 @@ KurenaiEngine/
   KurenaiEngine2D.vcxproj       2D API(DynamicLibrary)。KurenaiEngineLibraryにのみ依存
   Source/Engine/                 公開API(KurenaiEngine3D, KurenaiEngine2D, KurenaiEngineBase, KurenaiTypes.h)
   Source/Library/                公開API(低レベル): RHI抽象化層, Window/Camera, モデル/シーン読み込みなど
-  Shaders/3D/                    KurenaiEngine3Dが内部で使うHLSL一式
-  Shaders/2D/                    KurenaiEngine2Dが内部で使うHLSL(Sprite2D.hlsl)
+  Shaders/3D/                    KurenaiEngine3Dが内部で使うHLSL一式(ビルド時に.kshaderへコンパイルされる)
+  Shaders/2D/                    KurenaiEngine2Dが内部で使うHLSL(Sprite2D.hlsl / Polyline2D.hlsl)
 Samples/
   Sample3D/  Sample3D.sln       3Dサンプル(KurenaiEngine3Dを使用)。独立ソリューション
              Build/             Sample3D.exeの出力先(Git管理対象外)
@@ -71,6 +71,10 @@ Tools/
                                        独立ソリューション。エンジンの2つのDLLに依存し、
                                        エンジンでプレビューしながら編隊を作る
                   Build/               KurenaiShowEditor.exeの出力先(Git管理対象外)
+  KurenaiShaderPacker/                 シェーダービルドツール(Application)。HLSLを事前コンパイルして
+                                       .kshaderを生成する。KurenaiEngine3D/2Dのビルドイベントから
+                                       自動で呼ばれる(独立ソリューションは持たない)
+                  Build/               KurenaiShaderPacker.exeとdxcランタイムの出力先(Git管理対象外)
 docs/                           ドキュメント(APIリファレンス・実装者向け)
 ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
 Scenes/                         手書きの.kscene(シーンファイル)。小さなテキストのためGit管理対象
@@ -85,19 +89,29 @@ Build/                          3つのDLL単体の出力先(Git管理対象外)
                                  それが参照するShadersのコピーが揃う
 ```
 
-KurenaiEngine3D.dll/KurenaiEngine2D.dllが実行時に参照するShadersは、ビルド時のPostBuildEventで
-それぞれのDLLと同じフォルダへ自動的にコピーされます。Sample3D/Sample2Dも同様に、自身のビルド後に
-必要なDLLとShadersを自分の出力フォルダへコピーするため、各実行ファイルは
-`Samples\Sample3D\Build\...` / `Samples\Sample2D\Build\...` 以下だけで単独で動作します。
+**シェーダーはビルド時にコンパイルされます。** `KurenaiEngine3D`/`KurenaiEngine2D`のビルドイベントで
+`KurenaiShaderPacker.exe`が走り、`Shaders/3D`・`Shaders/2D`のHLSLを`.kshader`
+(事前コンパイル済みパッケージ)へ焼いてそれぞれのDLLと同じフォルダへ置きます。
+**実行時にHLSLをコンパイルすることはなく、出力フォルダに`.hlsl`は置かれません。**
+Sample3D/Sample2Dも同様に、自身のビルド後に必要なDLLと`.kshader`を自分の出力フォルダへコピーするため、
+各実行ファイルは`Samples\Sample3D\Build\...` / `Samples\Sample2D\Build\...` 以下だけで単独で動作します。
 Sample3Dはさらに`Assets\Packed\`もコピーしますが、Sample2Dは`KurenaiEngine3D.dll`・Assetsのどちらも
 必要としないため同梱しません。
 
-DX12バックエンドはシェーダーをdxc(DirectX Shader Compiler)でコンパイルするため、
-Windows SDKに含まれる`dxcompiler.dll`と`dxil.dll`も同じ仕組みで実行ファイルの隣へコピーされます
-(`KurenaiEngineLibrary`のPostBuildEventがWindows SDKの`bin\<SDKバージョン>\x64`から取得)。
-この2つのDLLが無い場合はログに警告を出したうえで従来のd3dcompiler(シェーダーモデル5.0)で
-動作しますが、レイトレーシング機能は無効になります。DX11バックエンドは常にd3dcompilerを使うため
-これらのDLLを必要としません。
+1つの`.kshader`には、実行環境の能力に応じて選ぶ3つのバリアントが入ります。
+
+| バリアント | コンパイラ | プロファイル | 使う環境 |
+|---|---|---|---|
+| `Dxbc50` | d3dcompiler | `vs_5_0`/`ps_5_0`/`cs_5_0` | DX11の全経路。DX12でもシェーダーモデル6.5未満のデバイス |
+| `Dxil65` | dxc | `*_6_5` | DX12・bindless非対応 |
+| `Dxil66` | dxc | `*_6_6`(`KURENAI_BINDLESS=1`) | DX12・bindless対応 |
+
+どのバリアントが選ばれたかは起動時のログに残ります
+(`事前コンパイル済みシェーダー: DXIL / SM 6.6(bindless有効)を使用します` など)。
+
+dxc(DirectX Shader Compiler)が必要なのは**ビルド時のこのツールだけ**です。
+`dxcompiler.dll`と`dxil.dll`はWindows SDKの`bin\<SDKバージョン>\x64`から
+`KurenaiShaderPacker`の出力フォルダへコピーされ、**実行ファイルの隣には配布されません。**
 
 ## 必要環境
 
@@ -112,11 +126,12 @@ Windows SDKに含まれる`dxcompiler.dll`と`dxil.dll`も同じ仕組みで実�
 各`.vcxproj`は`<WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>`
 (＝インストール済みの最新SDK)を指定しているため、SDKを入れれば設定の変更は要りません。
 
-**10.0.26100を要求する理由はdxcのバージョンです。**
-実行ファイルの隣へ配布される`dxcompiler.dll`はWindows SDKの`bin\<SDKバージョン>\x64`から
+**10.0.26100を要求する理由はdxcのバージョンです。これはビルドマシン側の要件です。**
+`KurenaiShaderPacker`が使う`dxcompiler.dll`はWindows SDKの`bin\<SDKバージョン>\x64`から
 コピーされる(上記のPostBuildEvent)ため、SDKのバージョンがそのままdxcのバージョンになります。
-シェーダーモデル6.6を知らないdxcではbindlessが無効になり、
-bindlessでジオメトリを引くメッシュレット描画とソフトウェアラスタライザも連動して選べなくなります。
+シェーダーモデル6.6を知らないdxcでは`Dxil66`バリアントを焼けず、そのビルド成果物では
+bindlessが無効になり、bindlessでジオメトリを引くメッシュレット描画とソフトウェアラスタライザも
+連動して選べなくなります(ビルド自体は警告を出して続行します)。
 
 | Windows SDK | 同梱されるdxc | SM 6.6 (bindless / メッシュレット / SWラスタ) |
 | --- | --- | --- |
@@ -180,7 +195,9 @@ MSBuild ThirdParty\DirectXTex\DirectXTex\DirectXTex_Desktop_2022.vcxproj /p:Conf
 ビルド確認用です。実際に動かして確認したい場合は、`Samples/Sample3D/Sample3D.sln` または
 `Samples/Sample2D/Sample2D.sln` をビルドしてください(Sample3DはKurenaiEngineLibrary+
 KurenaiEngine3D、Sample2DはKurenaiEngineLibrary+KurenaiEngine2Dをそれぞれプロジェクト参照して
-いるため、必要なDLLも一緒にビルドされます)。
+いるため、必要なDLLも一緒にビルドされます)。シェーダービルドツール`KurenaiShaderPacker`も
+各DLLから参照されているので、明示的にビルドする必要はありません
+(**HLSLのコンパイルエラーはここでビルドが落ちる形で現れます**)。
 
 ```
 MSBuild Samples\Sample3D\Sample3D.sln /p:Configuration=Debug /p:Platform=x64
@@ -189,9 +206,9 @@ MSBuild Samples\Sample3D\Sample3D.sln /p:Configuration=Debug /p:Platform=x64
 各DLLは `Build\Bin\x64\Debug\<プロジェクト名>\` に、`Sample3D.exe`/`Sample2D.exe`はそれぞれ
 `Samples\Sample3D\Build\Bin\x64\Debug\` / `Samples\Sample2D\Build\Bin\x64\Debug\` に出力されます。
 Sample3Dの出力フォルダにはKurenaiEngineLibrary.dll・KurenaiEngine3D.dllと、それが参照する
-Shaders/Assets(`Assets\Packed\`の中身)が、Sample2Dの出力フォルダにはKurenaiEngineLibrary.dll・
-KurenaiEngine2D.dllとSprite2D.hlslのみが自動でコピーされるため、各フォルダはそれだけで完結して
-動作します。**この時点では`Assets\Packed\`が空のため、次の「アセットの準備」を行うまでSample3Dは
+`Shaders\*.kshader`・Assets(`Assets\Packed\`の中身)が、Sample2Dの出力フォルダには
+KurenaiEngineLibrary.dll・KurenaiEngine2D.dllと`Shaders\*.kshader`のみが自動でコピーされるため、
+各フォルダはそれだけで完結して動作します。**この時点では`Assets\Packed\`が空のため、次の「アセットの準備」を行うまでSample3Dは
 表示するモデルがありません。**
 
 ビルドとアセットの準備が済んだら、`Samples\Sample3D\RunDX12.bat`(DX12)または

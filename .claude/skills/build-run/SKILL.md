@@ -24,9 +24,9 @@ slnが5つあり、目的で使い分ける。**「動かして確認したい�
 
 | やりたいこと | 叩くsln | 備考 |
 |---|---|---|
-| 動かして絵を見る(3D) | `Samples\Sample3D\Sample3D.sln` | Library+3Dをプロジェクト参照。DLLも一緒にビルドされる |
-| 動かして絵を見る(2D) | `Samples\Sample2D\Sample2D.sln` | Library+2Dのみ。3DもAssetsも要らない |
-| 3つのDLLが通るかだけ見る | `KurenaiEngine.sln` | ビルド確認用。実行ファイルは出ない |
+| 動かして絵を見る(3D) | `Samples\Sample3D\Sample3D.sln` | Library+3D+ShaderPackerをプロジェクト参照。DLLもシェーダーも一緒にビルドされる |
+| 動かして絵を見る(2D) | `Samples\Sample2D\Sample2D.sln` | Library+2D+ShaderPackerのみ。3DもAssetsも要らない |
+| 3つのDLLが通るかだけ見る | `KurenaiEngine.sln` | ビルド確認用。実行ファイルは出ない(シェーダーは焼かれる) |
 | アセットを変換する | `Tools\KurenaiPacker\KurenaiPacker.sln` | assimp・DirectXTexの事前ビルドが要る |
 | ドローンショーを編集する | `Tools\KurenaiShowEditor\KurenaiShowEditor.sln` | エンジンの2DLLに依存 |
 
@@ -92,15 +92,19 @@ $env:PATH = "$($sdkBin.FullName)\x64;$env:PATH"
 ## 出力先
 
 ```
-Build\Bin\x64\<Config>\<プロジェクト名>\          3つのDLL + それが参照する Shaders\ のコピー
-Samples\Sample3D\Build\Bin\x64\<Config>\          Sample3D.exe + DLL + Shaders\ + Assets\(Packed の中身)
-Samples\Sample2D\Build\Bin\x64\<Config>\          Sample2D.exe + DLL + Sprite2D.hlsl のみ
+Build\Bin\x64\<Config>\<プロジェクト名>\          3つのDLL + 焼いた Shaders\*.kshader
+Samples\Sample3D\Build\Bin\x64\<Config>\          Sample3D.exe + DLL + Shaders\*.kshader + Assets\(Packed の中身)
+Samples\Sample2D\Build\Bin\x64\<Config>\          Sample2D.exe + DLL + Shaders\*.kshader
 Tools\KurenaiPacker\Build\Bin\x64\Release\        KurenaiPacker.exe
+Tools\KurenaiShaderPacker\Build\Bin\x64\<Config>\ KurenaiShaderPacker.exe + dxcompiler.dll / dxil.dll
 ```
 
 DLL・Shaders・Assets のコピーはPostBuildEventで走るので、各出力フォルダはそれだけで完結して動く。
-DX12用の `dxcompiler.dll` / `dxil.dll` も、`KurenaiEngineLibrary` のPostBuildEventが
-Windows SDKの `bin\<SDKバージョン>\x64` からコピーする。
+
+**`KurenaiShaderPacker` はエンジンの2つのDLLよりも先に建つ**(`KurenaiEngine3D` / `KurenaiEngine2D`
+からプロジェクト参照が張ってあり、4つの sln すべてに登録されている)。
+Windows SDK の `bin\<SDKバージョン>\x64` から `dxcompiler.dll` / `dxil.dll` を持ってくるのも
+このツールのPostBuildEventで、**エンジンの配布物には入らない**。
 
 ## ビルド後に必ず確認するもの
 
@@ -111,16 +115,34 @@ Get-ChildItem "$env:CLAUDE_PROJECT_DIR\Samples\Sample3D\Build\Bin\x64\$config" |
 ```
 
 `Sample3D.exe` / `KurenaiEngineLibrary.dll` / `KurenaiEngine3D.dll` / `Shaders\` が揃っていること。
-DX12を使うなら `dxcompiler.dll` と `dxil.dll` も。**この2つが無いと従来のd3dcompiler(SM5.0)に
-落ちてレイトレーシングが無効になる**(ログに警告が出る)。
+`Shaders\` の中身は **`.kshader` だけ**(`.hlsl` があったら以前のビルドの残骸なので消す)。
 
-## 罠: シェーダはビルド対象ではない
+**`dxcompiler.dll` / `dxil.dll` は実行ファイルの隣には来ない。** シェーダーを事前コンパイルへ
+移したので、dxcが要るのはビルド時の `KurenaiShaderPacker` だけになった
+(そちらの出力フォルダにコピーされる)。実行時にどのバリアントが選ばれたかは、
+起動ログの「事前コンパイル済みシェーダー: ...」の行で確認する。
 
-**`.hlsl` は実行時に出力フォルダの `Shaders\` から読まれる。**
-つまり **C++のビルドが通ってもHLSLは一切検証されていない。** シェーダを触ったら必ず起動して確かめる。
+## シェーダはビルド対象(`.hlsl` を触ったらビルドする)
 
-逆に、シェーダだけの変更ならビルドは不要。出力フォルダの `Shaders\` を差し替えて
-起動し直すだけでよい。
+`KurenaiShaderPacker.exe` が `KurenaiEngine3D` / `KurenaiEngine2D` のビルドイベントで走り、
+`.hlsl` を **`.kshader`**(事前コンパイル済みパッケージ)へ焼いて `$(OutDir)Shaders\` へ置く。
+**出力フォルダに `.hlsl` はコピーされない**ので、差し替えて起動し直すやり方は使えない。
+
+- **HLSLのコンパイルエラーはビルドで落ちる。** 全 `.hlsl` の全エントリを3バリアント
+  (SM 5.0 / SM 6.5 / SM 6.6+bindless)で焼くので、ビルドが通れば一括検証も済んでいる
+- パッカーは更新日時で増分に動く。`.hlsl` も `.hlsli` も未変更なら「すべて最新です」と出て即終わる。
+  **`.hlsli` が1本でも変わると全ファイルを焼き直す**(どの `.hlsl` がどれをインクルードしているかを
+  静的に追い切れないため、安全側に倒してある)。フル1回でおよそ10秒(16並列)
+- **コンパイルが通ることと絵が正しいことは別。** シェーダを触ったら起動して確かめる
+- パッカー単体で叩くこともできる:
+
+```powershell
+$packer = "$env:CLAUDE_PROJECT_DIR\Tools\KurenaiShaderPacker\Build\Bin\x64\Release\KurenaiShaderPacker.exe"
+& $packer --input "$env:CLAUDE_PROJECT_DIR\KurenaiEngine\Shaders\3D" `
+          --output "$env:CLAUDE_PROJECT_DIR\Build\Bin\x64\Release\KurenaiEngine3D\Shaders" `
+          --config Release [--force]
+& $packer --dump "<なにか>.kshader"    # 中身(エントリ・バリアント・プロファイル)を印字する
+```
 
 ## 罠: Assets が無くてもビルドと起動は通る
 

@@ -27,7 +27,14 @@ namespace Kurenai::RHI
 
         virtual std::unique_ptr<IRHISwapChain> CreateSwapChain(void* windowHandle, uint32_t width, uint32_t height) = 0;
         virtual std::unique_ptr<IRHIBuffer> CreateBuffer(const BufferDesc& desc) = 0;
+        // ShaderDesc::FilePath には .kshader(KurenaiShaderPackerがビルド時に焼いた
+        // 事前コンパイル済みパッケージ)を指定する。実行時のHLSLコンパイルは行わない
         virtual std::unique_ptr<IRHIShader> CreateShader(const ShaderDesc& desc) = 0;
+        // CreateShaderが読み込んだ.kshaderのキャッシュを解放する。
+        // シェーダーの生成は起動時に一度きりなので、作り終えたら呼んでよい
+        // (呼ばなくても動くが、バイトコードをプロセスの寿命ぶん抱え続けることになる)。
+        // これ以降にCreateShaderを呼べば、必要なパッケージが読み直される
+        virtual void ReleaseShaderPackages() = 0;
         virtual std::unique_ptr<IRHIPipelineState> CreatePipelineState(const PipelineStateDesc& desc) = 0;
         // コンピュートシェーダー(ShaderStage::Computeで作成したIRHIShader)用のパイプラインステート
         virtual std::unique_ptr<IRHIPipelineState> CreateComputePipelineState(const ComputePipelineStateDesc& desc) = 0;
