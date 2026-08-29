@@ -1,8 +1,13 @@
-# KurenaiEngine シーンファイル - Project PLATEAU 東京都23区(建築物 LOD1)
+# KurenaiEngine シーンファイル - Project PLATEAU 東京都23区(全種)
 #
-# 東京23区の全域(671 タイル、約 32.1 km x 31.6 km)の建築物を、3次メッシュ(約1km四方)ごとの
-# .kmodel として並べたもの。LOD1 なので建物は「航空レーザ点群の一律高さを与えた箱」で、
-# テクスチャは持たない。
+# 東京23区の全域(約 33.0 km x 34.0 km)を、建築物・地形・道路・橋梁の4種で構成したもの。
+#
+#   建築物  671 タイル(3次メッシュ=約1km四方)。うち 26 タイルは LOD2 が整備されており、
+#          Path=LOD2 / LODPath=LOD1 の2段LODにしてある(下記)
+#   地形     14 タイル(2次メッシュ=約10km四方)
+#   道路     14 タイル(同上)
+#   橋梁     68 タイル(3次メッシュ)
+#   [Model] 合計 767 件
 #
 # 出典: 国土交通省 Project PLATEAU「3D都市モデル(Project PLATEAU)東京都23区」
 #       https://www.geospatial.jp/ckan/dataset/plateau-tokyo23ku
@@ -15,45 +20,121 @@
 #   Sample3D.exe -scene PlateauTokyo23ku
 #
 # --- 変換コマンド ---
-#   KurenaiPacker.exe <展開先>\bldg\lod1\<メッシュコード>_bldg_6677.fbx ^
-#     -o Assets\Packed\Plateau\<メッシュコード>.kmodel --origin -8096,0,-36118
+#   KurenaiPacker.exe <展開先>\<種別>\<メッシュコード>_*.fbx ^
+#     -o Assets\Packed\Plateau\<種別>\<メッシュコード>.kmodel --origin -8096,0,-36118
 #
-# 【--origin が要る理由】PLATEAU の FBX は EPSG:6677(平面直角座標系 第9系)の絶対座標で、
+# 【--origin は全種で同じ値】PLATEAU の FBX は EPSG:6677(平面直角座標系 第9系)の絶対座標で、
 # 系原点から北へ最大52km離れている。頂点は float32 で、.kmodel の AABB もそのまま巨大になり、
-# シーンAABBの対角から自動決定される遠クリップ面(farZ = max(100, 対角x4))が桁で狂う。
+# 遠クリップ面が桁で狂う。タイルごとに「自分のAABBの中心」で寄せると相対位置が壊れるため、
+# 全種・全タイルで同じ値を引く。値は Tools\plateau_mesh.py origin が算出する。
 #
-# 【全タイルで同じ値を引くこと】タイルごとに「自分のAABBの中心」で寄せると、
-# タイル同士の相対位置が壊れて街が崩れる。値は Tools\plateau_mesh.py origin が
-# 全タイルのメッシュコードから算出する(671タイルの中心 = 東 -8096m / 北 -36118m)。
-#
-# 【軸の対応は実測で確定させた】FBX は Z-up で「X=東 / Y=北 / Z=標高」だが、assimp が
-# Z-up→Y-up へ変換し aiProcess_ConvertToLeftHanded も入るため、パッカーが扱う時点では
-# 「X=東 / Y=標高 / Z=北」になる。西新宿タイル(53394525)を --inspect した実測値
-#   X -13218.99〜-12034.59 / Y 27.34〜267.02 / Z -35171.98〜-34122.55
-# が、メッシュコードから計算した期待範囲(東 -13186〜-12055 / 北 -35192〜-34266)と
-# 符号ごと一致することを確認している。街が鏡像になっていたら一見して気づけないため、
-# 画像ではなく座標の数値で確定させた。Y は T.P.(東京湾平均海面)基準の絶対標高で、
-# 都庁の243mを含む。
-#
-# 【dem(地形)と tran(道路)を入れていない理由】これらは6桁=2次メッシュ(約10km四方)で、
-# bldg の3次メッシュとは分割単位が違う。1枚入れるだけでシーンAABBの対角が14km級になり、
-# farZ が56kmまで伸びてカスケードシャドウが破綻する。
-# 【LOD2 を入れていない理由】LOD2整備済み80タイルのメッシュコードは全て LOD1 側にも
-# 存在するため、同時に読むと同じ建物が二重になり Z ファイティングを起こす。
+# 【brid のファイル名に _6697 を名乗る個体がある】EPSG:6697 は緯度経度系だが、中身は
+# 他と同じ平面直角座標のメートル値だった。全68件のAABBをメッシュコードから計算した
+# 期待矩形と突き合わせて確認済み(Tools\plateau_mesh.py rect で再現できる)。
 #
 # --- シーンの規模と、そこから決まるもの ---
-#   AABB  X -16346 〜 15717 / Y -10 〜 268 / Z -15730 〜 15864
-#   大きさ 32063 x 278 x 31594 m / 対角 45014 m
-#   遠クリップ面 farZ = max(100, 対角x4) = 180057 m
-#
-# 【ShadowDistance を指定している理由】カスケードシャドウの分割範囲は既定で
-# 近クリップ面〜farZ そのもので、シャドウ専用の打ち切りが無い。farZ が 180057m のままだと
-# 第1カスケードが数kmを2048x2048の1枚で覆うことになり、近景の影が事実上消える。
-# 500m で打ち切ると第1カスケードは約31mを覆う(遠景の描画距離は farZ のまま変わらない)。
+#   AABB  X -16903 〜 16095 / Y -11 〜 351 / Z -17881 〜 16117
+#   大きさ 32998 x 361 x 33998 m / 対角 47380 m
+#   遠クリップ面 farZ = max(100, 対角x4) = 189520 m
 
 [Scene]
-Name = PLATEAU 東京23区 (建築物 LOD1)
+Name = PLATEAU 東京23区 (建築物LOD1/LOD2・地形・道路・橋梁)
+
+# 【カスケードの分割範囲を打ち切る】farZ が 189520m のままだと第1カスケードが数kmを
+# 2048x2048の1枚で覆うことになり、近景の影が事実上消える。
+# 500m で打ち切ると第1カスケードは約31mを覆う(遠景の描画距離は farZ のまま変わらない)。
 ShadowDistance = 500
+
+# 【必ず指定する】未指定だとストリーミングが丸ごと無効になり、SceneLoader が
+# 全 LOD 段を起動時に確保する ―― LOD2 の26タイルだけで約9GBになる。
+# 指定するとエンジンは各インスタンスの「現在の LOD 段」だけを読むので、
+# LOD2 は LODDistance の内側にあるタイルにしか載らない。
+#
+# 【値はシーン対角】距離で切ると遠景がそこで途切れる。高度300mからでも数km先まで
+# 見えるので、対角(47380m)まで伸ばして距離による切り捨てを起こさせない。
+# 代償として破棄(この1.25倍より遠いインスタンスが対象)は一度も走らないため、
+# LOD2 は一度載ると降りない。常駐量を抑えるのはミップ常駐制御の役目。
+#
+# 【副作用: メッシュ単位フラスタムカリングが無効になる】SceneLoaderは
+# MeshWorldBoundsList を「読み込み済みの実体」からしか作れず、ストリーミング時は
+# 実体が無いまま構築が終わる。あとから読み込まれたぶんも作り直されないため、
+# 描画側は保守側(間引かない)へ倒れる。実測でメッシュ単位は判定5964/間引き0(0.0%)。
+# モデル単位は85.9%効いており、DX11/Release/1280x720 で 56 FPS 出ているので
+# 実害は出ていないが、「メッシュ単位が0%なのはカリングの不具合ではない」と
+# 分かるようにここへ書いておく。
+StreamingDistance = 47380
+
+# 【対角から自動決定させると速すぎる】対角47kmだと自動値は600m/s級になり、
+# LOD の切り替わりを目で追えない。
+CameraSpeed = 150
+
+# --- 建築物 -------------------------------------------------------------
+# LOD2 を採用した 26 タイルは2段LOD。1500m を超えると LOD1(箱)へ落ちる。
+# 距離は「カメラ位置からインスタンスのAABBの最近接点まで」で測られるので、
+# 自分がいるタイルは0m、隣接タイルは約1.1kmになる。
+#
+# 【LOD2 があっても使っていないタイルが 54 件ある】PLATEAU の LOD2 はタイル全体が
+# 整備されているとは限らず、一部の建物だけのものが混ざる。それを Path(=LOD0) に据えると
+# 近づくほど建物が消えるので、足切りしてある。
+# 判定は「LOD1 の頂点が占める50m格子のセルを LOD2 がどれだけ覆うか」で、しきい値 0.95。
+# (Tools\plateau_lod2_coverage.py で再現できる。AABBの被覆率やジオメトリ量の比では
+#  測れない ―― 建物が2棟でも対角にあればAABBは満杯になり、LOD2は1棟あたりの頂点が
+#  桁で多いのでジオメトリ量は一部整備でもLOD1を超える)
+# 除外したタイルと被覆率:
+#   53392650 被覆 0.476
+#   53392660 被覆 0.457
+#   53392670 被覆 0.228
+#   53393549 被覆 0.091
+#   53393558 被覆 0.262
+#   53393559 被覆 0.503
+#   53393569 被覆 0.404
+#   53393579 被覆 0.300
+#   53393585 被覆 0.306
+#   53393586 被覆 0.357
+#   53393588 被覆 0.087
+#   53393589 被覆 0.397
+#   53393595 被覆 0.333
+#   53393596 被覆 0.450
+#   53393597 被覆 0.010
+#   53393598 被覆 0.769
+#   53393632 被覆 0.279
+#   53393641 被覆 0.441
+#   53393642 被覆 0.646
+#   53393651 被覆 0.917
+#   53393653 被覆 0.783
+#   53393664 被覆 0.116
+#   53393670 被覆 0.067
+#   53393674 被覆 0.647
+#   53393680 被覆 0.727
+#   53393684 被覆 0.265
+#   53393691 被覆 0.931
+#   53393693 被覆 0.494
+#   53394507 被覆 0.331
+#   53394509 被覆 0.905
+#   53394515 被覆 0.008
+#   53394516 被覆 0.068
+#   53394517 被覆 0.387
+#   53394518 被覆 0.210
+#   53394519 被覆 0.026
+#   53394524 被覆 0.019
+#   53394525 被覆 0.742
+#   53394526 被覆 0.487
+#   53394534 被覆 0.078
+#   53394535 被覆 0.695
+#   53394536 被覆 0.511
+#   53394566 被覆 0.038
+#   53394567 被覆 0.106
+#   53394576 被覆 0.452
+#   53394577 被覆 0.833
+#   53394578 被覆 0.088
+#   53394587 被覆 0.069
+#   53394600 被覆 0.869
+#   53394602 被覆 0.852
+#   53394610 被覆 0.615
+#   53394612 被覆 0.501
+#   53394620 被覆 0.522
+#   53394621 被覆 0.770
+#   53394622 被覆 0.178
 
 [Model]
 Path = Plateau/53392546.kmodel
@@ -146,37 +227,55 @@ Path = Plateau/53392598.kmodel
 Path = Plateau/53392599.kmodel
 
 [Model]
-Path = Plateau/53392633.kmodel
+Path = Plateau/BldgLod2/53392633.kmodel
+LODPath = Plateau/53392633.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53392641.kmodel
+Path = Plateau/BldgLod2/53392641.kmodel
+LODPath = Plateau/53392641.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53392642.kmodel
+Path = Plateau/BldgLod2/53392642.kmodel
+LODPath = Plateau/53392642.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53392643.kmodel
+Path = Plateau/BldgLod2/53392643.kmodel
+LODPath = Plateau/53392643.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53392650.kmodel
 
 [Model]
-Path = Plateau/53392651.kmodel
+Path = Plateau/BldgLod2/53392651.kmodel
+LODPath = Plateau/53392651.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53392652.kmodel
+Path = Plateau/BldgLod2/53392652.kmodel
+LODPath = Plateau/53392652.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53392653.kmodel
+Path = Plateau/BldgLod2/53392653.kmodel
+LODPath = Plateau/53392653.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53392660.kmodel
 
 [Model]
-Path = Plateau/53392662.kmodel
+Path = Plateau/BldgLod2/53392662.kmodel
+LODPath = Plateau/53392662.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53392663.kmodel
+Path = Plateau/BldgLod2/53392663.kmodel
+LODPath = Plateau/53392663.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53392670.kmodel
@@ -185,7 +284,9 @@ Path = Plateau/53392670.kmodel
 Path = Plateau/53392671.kmodel
 
 [Model]
-Path = Plateau/53392672.kmodel
+Path = Plateau/BldgLod2/53392672.kmodel
+LODPath = Plateau/53392672.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53392680.kmodel
@@ -554,7 +655,9 @@ Path = Plateau/53393597.kmodel
 Path = Plateau/53393598.kmodel
 
 [Model]
-Path = Plateau/53393599.kmodel
+Path = Plateau/BldgLod2/53393599.kmodel
+LODPath = Plateau/53393599.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53393600.kmodel
@@ -611,7 +714,9 @@ Path = Plateau/53393625.kmodel
 Path = Plateau/53393630.kmodel
 
 [Model]
-Path = Plateau/53393631.kmodel
+Path = Plateau/BldgLod2/53393631.kmodel
+LODPath = Plateau/53393631.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53393632.kmodel
@@ -656,7 +761,9 @@ Path = Plateau/53393650.kmodel
 Path = Plateau/53393651.kmodel
 
 [Model]
-Path = Plateau/53393652.kmodel
+Path = Plateau/BldgLod2/53393652.kmodel
+LODPath = Plateau/53393652.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53393653.kmodel
@@ -680,10 +787,14 @@ Path = Plateau/53393660.kmodel
 Path = Plateau/53393661.kmodel
 
 [Model]
-Path = Plateau/53393662.kmodel
+Path = Plateau/BldgLod2/53393662.kmodel
+LODPath = Plateau/53393662.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53393663.kmodel
+Path = Plateau/BldgLod2/53393663.kmodel
+LODPath = Plateau/53393663.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53393664.kmodel
@@ -707,13 +818,19 @@ Path = Plateau/53393669.kmodel
 Path = Plateau/53393670.kmodel
 
 [Model]
-Path = Plateau/53393671.kmodel
+Path = Plateau/BldgLod2/53393671.kmodel
+LODPath = Plateau/53393671.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53393672.kmodel
+Path = Plateau/BldgLod2/53393672.kmodel
+LODPath = Plateau/53393672.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53393673.kmodel
+Path = Plateau/BldgLod2/53393673.kmodel
+LODPath = Plateau/53393673.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53393674.kmodel
@@ -737,13 +854,19 @@ Path = Plateau/53393679.kmodel
 Path = Plateau/53393680.kmodel
 
 [Model]
-Path = Plateau/53393681.kmodel
+Path = Plateau/BldgLod2/53393681.kmodel
+LODPath = Plateau/53393681.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53393682.kmodel
+Path = Plateau/BldgLod2/53393682.kmodel
+LODPath = Plateau/53393682.kmodel
+LODDistance = 1500
 
 [Model]
-Path = Plateau/53393683.kmodel
+Path = Plateau/BldgLod2/53393683.kmodel
+LODPath = Plateau/53393683.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53393684.kmodel
@@ -764,13 +887,17 @@ Path = Plateau/53393688.kmodel
 Path = Plateau/53393689.kmodel
 
 [Model]
-Path = Plateau/53393690.kmodel
+Path = Plateau/BldgLod2/53393690.kmodel
+LODPath = Plateau/53393690.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53393691.kmodel
 
 [Model]
-Path = Plateau/53393692.kmodel
+Path = Plateau/BldgLod2/53393692.kmodel
+LODPath = Plateau/53393692.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53393693.kmodel
@@ -953,7 +1080,9 @@ Path = Plateau/53394506.kmodel
 Path = Plateau/53394507.kmodel
 
 [Model]
-Path = Plateau/53394508.kmodel
+Path = Plateau/BldgLod2/53394508.kmodel
+LODPath = Plateau/53394508.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53394509.kmodel
@@ -1232,7 +1361,9 @@ Path = Plateau/53394599.kmodel
 Path = Plateau/53394600.kmodel
 
 [Model]
-Path = Plateau/53394601.kmodel
+Path = Plateau/BldgLod2/53394601.kmodel
+LODPath = Plateau/53394601.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53394602.kmodel
@@ -1262,7 +1393,9 @@ Path = Plateau/53394609.kmodel
 Path = Plateau/53394610.kmodel
 
 [Model]
-Path = Plateau/53394611.kmodel
+Path = Plateau/BldgLod2/53394611.kmodel
+LODPath = Plateau/53394611.kmodel
+LODDistance = 1500
 
 [Model]
 Path = Plateau/53394612.kmodel
@@ -2068,14 +2201,311 @@ Path = Plateau/53395730.kmodel
 [Model]
 Path = Plateau/53395731.kmodel
 
-# 街区の広がりが分かる俯瞰。西新宿(--origin適用後で X -5123〜-3939 / Z 946〜1996)を
-# 北東方向に見込む位置に置いている。
+# --- 地形 (14 タイル) ---
+
+[Model]
+Path = Plateau/Dem/533925.kmodel
+
+[Model]
+Path = Plateau/Dem/533926.kmodel
+
+[Model]
+Path = Plateau/Dem/533934.kmodel
+
+[Model]
+Path = Plateau/Dem/533935.kmodel
+
+[Model]
+Path = Plateau/Dem/533936.kmodel
+
+[Model]
+Path = Plateau/Dem/533937.kmodel
+
+[Model]
+Path = Plateau/Dem/533944.kmodel
+
+[Model]
+Path = Plateau/Dem/533945.kmodel
+
+[Model]
+Path = Plateau/Dem/533946.kmodel
+
+[Model]
+Path = Plateau/Dem/533947.kmodel
+
+[Model]
+Path = Plateau/Dem/533954.kmodel
+
+[Model]
+Path = Plateau/Dem/533955.kmodel
+
+[Model]
+Path = Plateau/Dem/533956.kmodel
+
+[Model]
+Path = Plateau/Dem/533957.kmodel
+
+# --- 道路 (14 タイル) ---
+
+[Model]
+Path = Plateau/Tran/533925.kmodel
+
+[Model]
+Path = Plateau/Tran/533926.kmodel
+
+[Model]
+Path = Plateau/Tran/533934.kmodel
+
+[Model]
+Path = Plateau/Tran/533935.kmodel
+
+[Model]
+Path = Plateau/Tran/533936.kmodel
+
+[Model]
+Path = Plateau/Tran/533937.kmodel
+
+[Model]
+Path = Plateau/Tran/533944.kmodel
+
+[Model]
+Path = Plateau/Tran/533945.kmodel
+
+[Model]
+Path = Plateau/Tran/533946.kmodel
+
+[Model]
+Path = Plateau/Tran/533947.kmodel
+
+[Model]
+Path = Plateau/Tran/533954.kmodel
+
+[Model]
+Path = Plateau/Tran/533955.kmodel
+
+[Model]
+Path = Plateau/Tran/533956.kmodel
+
+[Model]
+Path = Plateau/Tran/533957.kmodel
+
+# --- 橋梁 (68 タイル) ---
+
+[Model]
+Path = Plateau/Brid/53392641.kmodel
+
+[Model]
+Path = Plateau/Brid/53392643.kmodel
+
+[Model]
+Path = Plateau/Brid/53392650.kmodel
+
+[Model]
+Path = Plateau/Brid/53392651.kmodel
+
+[Model]
+Path = Plateau/Brid/53392652.kmodel
+
+[Model]
+Path = Plateau/Brid/53392653.kmodel
+
+[Model]
+Path = Plateau/Brid/53392660.kmodel
+
+[Model]
+Path = Plateau/Brid/53392662.kmodel
+
+[Model]
+Path = Plateau/Brid/53392670.kmodel
+
+[Model]
+Path = Plateau/Brid/53392672.kmodel
+
+[Model]
+Path = Plateau/Brid/53393549.kmodel
+
+[Model]
+Path = Plateau/Brid/53393558.kmodel
+
+[Model]
+Path = Plateau/Brid/53393559.kmodel
+
+[Model]
+Path = Plateau/Brid/53393569.kmodel
+
+[Model]
+Path = Plateau/Brid/53393579.kmodel
+
+[Model]
+Path = Plateau/Brid/53393585.kmodel
+
+[Model]
+Path = Plateau/Brid/53393586.kmodel
+
+[Model]
+Path = Plateau/Brid/53393589.kmodel
+
+[Model]
+Path = Plateau/Brid/53393595.kmodel
+
+[Model]
+Path = Plateau/Brid/53393596.kmodel
+
+[Model]
+Path = Plateau/Brid/53393597.kmodel
+
+[Model]
+Path = Plateau/Brid/53393598.kmodel
+
+[Model]
+Path = Plateau/Brid/53393599.kmodel
+
+[Model]
+Path = Plateau/Brid/53393641.kmodel
+
+[Model]
+Path = Plateau/Brid/53393642.kmodel
+
+[Model]
+Path = Plateau/Brid/53393651.kmodel
+
+[Model]
+Path = Plateau/Brid/53393652.kmodel
+
+[Model]
+Path = Plateau/Brid/53393653.kmodel
+
+[Model]
+Path = Plateau/Brid/53393660.kmodel
+
+[Model]
+Path = Plateau/Brid/53393661.kmodel
+
+[Model]
+Path = Plateau/Brid/53393662.kmodel
+
+[Model]
+Path = Plateau/Brid/53393663.kmodel
+
+[Model]
+Path = Plateau/Brid/53393664.kmodel
+
+[Model]
+Path = Plateau/Brid/53393670.kmodel
+
+[Model]
+Path = Plateau/Brid/53393672.kmodel
+
+[Model]
+Path = Plateau/Brid/53393673.kmodel
+
+[Model]
+Path = Plateau/Brid/53393674.kmodel
+
+[Model]
+Path = Plateau/Brid/53393680.kmodel
+
+[Model]
+Path = Plateau/Brid/53393681.kmodel
+
+[Model]
+Path = Plateau/Brid/53393682.kmodel
+
+[Model]
+Path = Plateau/Brid/53393683.kmodel
+
+[Model]
+Path = Plateau/Brid/53393684.kmodel
+
+[Model]
+Path = Plateau/Brid/53393690.kmodel
+
+[Model]
+Path = Plateau/Brid/53393691.kmodel
+
+[Model]
+Path = Plateau/Brid/53393692.kmodel
+
+[Model]
+Path = Plateau/Brid/53393693.kmodel
+
+[Model]
+Path = Plateau/Brid/53394507.kmodel
+
+[Model]
+Path = Plateau/Brid/53394508.kmodel
+
+[Model]
+Path = Plateau/Brid/53394509.kmodel
+
+[Model]
+Path = Plateau/Brid/53394516.kmodel
+
+[Model]
+Path = Plateau/Brid/53394517.kmodel
+
+[Model]
+Path = Plateau/Brid/53394524.kmodel
+
+[Model]
+Path = Plateau/Brid/53394525.kmodel
+
+[Model]
+Path = Plateau/Brid/53394526.kmodel
+
+[Model]
+Path = Plateau/Brid/53394535.kmodel
+
+[Model]
+Path = Plateau/Brid/53394566.kmodel
+
+[Model]
+Path = Plateau/Brid/53394576.kmodel
+
+[Model]
+Path = Plateau/Brid/53394577.kmodel
+
+[Model]
+Path = Plateau/Brid/53394587.kmodel
+
+[Model]
+Path = Plateau/Brid/53394600.kmodel
+
+[Model]
+Path = Plateau/Brid/53394601.kmodel
+
+[Model]
+Path = Plateau/Brid/53394602.kmodel
+
+[Model]
+Path = Plateau/Brid/53394610.kmodel
+
+[Model]
+Path = Plateau/Brid/53394611.kmodel
+
+[Model]
+Path = Plateau/Brid/53394612.kmodel
+
+[Model]
+Path = Plateau/Brid/53394620.kmodel
+
+[Model]
+Path = Plateau/Brid/53394621.kmodel
+
+[Model]
+Path = Plateau/Brid/53394622.kmodel
+
+# 【LOD2 地区が見える位置に置く】以前は高度900mから30km先を見る俯瞰にしていたが、
+# それだと大気遠近で全面が白く飛び、LOD2 のテクスチャも LODDistance の外なので
+# 一度も出ない。採用タイルのうち最も建物が高い 53393599(264.8m / X -19 / Z -1305)を、
+# LODDistance(1500m)の内側から北東に見込む位置へ移した。
+# 手前に LOD2 のテクスチャ付きの街、その奥に LOD1 の箱が地平まで続く絵になる。
 # 【自動配置に任せられない】カメラを書かないとバウンズの20%内側へ置かれ、
 # 33km四方のシーンでは建物の中に埋まる(BistroExterior.kscene と同じ理由)。
 [Camera]
-Position = -6500.0, 900.0, -800.0
-Yaw = 35.0
-Pitch = -22.0
+Position = -1500.0, 300.0, -2400.0
+Yaw = 53.5
+Pitch = -6.0
 
 [Sun]
 TimeOfDay = 10.0

@@ -1697,13 +1697,13 @@ namespace Kurenai
         // ジオメトリパス(G-Buffer書き込み)
         RHI::ShaderDesc gbufferVsDesc;
         gbufferVsDesc.Stage = RHI::ShaderStage::Vertex;
-        gbufferVsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
+        gbufferVsDesc.FilePath = shaderDirectory + L"GBuffer.kshader";
         gbufferVsDesc.EntryPoint = "VSMain";
         m_GBufferVertexShader = m_Device->CreateShader(gbufferVsDesc);
 
         RHI::ShaderDesc gbufferPsDesc;
         gbufferPsDesc.Stage = RHI::ShaderStage::Pixel;
-        gbufferPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
+        gbufferPsDesc.FilePath = shaderDirectory + L"GBuffer.kshader";
         gbufferPsDesc.EntryPoint = "PSMain";
         m_GBufferPixelShader = m_Device->CreateShader(gbufferPsDesc);
 
@@ -1712,7 +1712,7 @@ namespace Kurenai
         // m_GBufferVertexShaderをそのまま共有する(専用のVSは作らない)
         RHI::ShaderDesc gbufferWaterPsDesc;
         gbufferWaterPsDesc.Stage = RHI::ShaderStage::Pixel;
-        gbufferWaterPsDesc.FilePath = shaderDirectory + L"Water.hlsl";
+        gbufferWaterPsDesc.FilePath = shaderDirectory + L"Water.kshader";
         gbufferWaterPsDesc.EntryPoint = "PSMain";
         m_GBufferWaterPixelShader = m_Device->CreateShader(gbufferWaterPsDesc);
 
@@ -1722,7 +1722,7 @@ namespace Kurenai
         {
             RHI::ShaderDesc depthPrepassCutoutPsDesc;
             depthPrepassCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
-            depthPrepassCutoutPsDesc.FilePath = shaderDirectory + L"DepthPrepass.hlsl";
+            depthPrepassCutoutPsDesc.FilePath = shaderDirectory + L"DepthPrepass.kshader";
             depthPrepassCutoutPsDesc.EntryPoint = "PSMainCutout";
             m_DepthPrepassCutoutPixelShader = m_Device->CreateShader(depthPrepassCutoutPsDesc);
         }
@@ -1745,13 +1745,13 @@ namespace Kurenai
         {
             RHI::ShaderDesc gbufferAsDesc;
             gbufferAsDesc.Stage = RHI::ShaderStage::Amplification;
-            gbufferAsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.hlsl";
+            gbufferAsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.kshader";
             gbufferAsDesc.EntryPoint = "ASMain";
             m_GBufferAmplificationShader = m_Device->CreateShader(gbufferAsDesc);
 
             RHI::ShaderDesc gbufferMsDesc;
             gbufferMsDesc.Stage = RHI::ShaderStage::Mesh;
-            gbufferMsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.hlsl";
+            gbufferMsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.kshader";
             gbufferMsDesc.EntryPoint = "MSMain";
             m_GBufferMeshShader = m_Device->CreateShader(gbufferMsDesc);
 
@@ -1759,7 +1759,7 @@ namespace Kurenai
             RHI::ShaderDesc gbufferMeshletDebugPsDesc;
             gbufferMeshletDebugPsDesc.Stage = RHI::ShaderStage::Pixel;
             // 実体はGBuffer.hlsl側(PSMainをそのまま呼んでアルベドだけ差し替えるため)
-            gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.hlsl";
+            gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.kshader";
             gbufferMeshletDebugPsDesc.EntryPoint = "PSMainMeshletDebug";
             m_GBufferMeshletDebugPixelShader = m_Device->CreateShader(gbufferMeshletDebugPsDesc);
 
@@ -1768,13 +1768,13 @@ namespace Kurenai
             // レイアウトが違うため(ShadowMeshlet.hlsl冒頭のコメント参照)
             RHI::ShaderDesc shadowAsDesc;
             shadowAsDesc.Stage = RHI::ShaderStage::Amplification;
-            shadowAsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.hlsl";
+            shadowAsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.kshader";
             shadowAsDesc.EntryPoint = "ASMain";
             m_ShadowAmplificationShader = m_Device->CreateShader(shadowAsDesc);
 
             RHI::ShaderDesc shadowMsDesc;
             shadowMsDesc.Stage = RHI::ShaderStage::Mesh;
-            shadowMsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.hlsl";
+            shadowMsDesc.FilePath = shaderDirectory + L"ShadowMeshlet.kshader";
             shadowMsDesc.EntryPoint = "MSMain";
             m_ShadowMeshShader = m_Device->CreateShader(shadowMsDesc);
         }
@@ -1786,13 +1786,13 @@ namespace Kurenai
         // 直接光を計算しHDRで書き出す)
         RHI::ShaderDesc directLightVsDesc;
         directLightVsDesc.Stage = RHI::ShaderStage::Vertex;
-        directLightVsDesc.FilePath = shaderDirectory + L"DirectLighting.hlsl";
+        directLightVsDesc.FilePath = shaderDirectory + L"DirectLighting.kshader";
         directLightVsDesc.EntryPoint = "VSMain";
         m_DirectLightVertexShader = m_Device->CreateShader(directLightVsDesc);
 
         RHI::ShaderDesc directLightPsDesc;
         directLightPsDesc.Stage = RHI::ShaderStage::Pixel;
-        directLightPsDesc.FilePath = shaderDirectory + L"DirectLighting.hlsl";
+        directLightPsDesc.FilePath = shaderDirectory + L"DirectLighting.kshader";
         directLightPsDesc.EntryPoint = "PSMain";
         m_DirectLightPixelShader = m_Device->CreateShader(directLightPsDesc);
 
@@ -1807,14 +1807,14 @@ namespace Kurenai
         // 3つのピクセルシェーダで使い回す
         RHI::ShaderDesc aoVsDesc;
         aoVsDesc.Stage = RHI::ShaderStage::Vertex;
-        aoVsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        aoVsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
         aoVsDesc.EntryPoint = "VSMain";
         m_AOVertexShader = m_Device->CreateShader(aoVsDesc);
 
         // SSAOパス
         RHI::ShaderDesc ssaoPsDesc;
         ssaoPsDesc.Stage = RHI::ShaderStage::Pixel;
-        ssaoPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        ssaoPsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
         ssaoPsDesc.EntryPoint = "PSMain";
         m_SSAOPixelShader = m_Device->CreateShader(ssaoPsDesc);
 
@@ -1831,7 +1831,7 @@ namespace Kurenai
         // SSILパス(Visibility Bitmask)
         RHI::ShaderDesc ssilPsDesc;
         ssilPsDesc.Stage = RHI::ShaderStage::Pixel;
-        ssilPsDesc.FilePath = shaderDirectory + L"SSIL_VisibilityBitmask.hlsl";
+        ssilPsDesc.FilePath = shaderDirectory + L"SSIL_VisibilityBitmask.kshader";
         ssilPsDesc.EntryPoint = "PSMain";
         m_SSILPixelShader = m_Device->CreateShader(ssilPsDesc);
 
@@ -1843,7 +1843,7 @@ namespace Kurenai
         // AO/GI共通のブラーパス(SSAO.hlslのPSMainBlurを、rgbaフォーマットが同じSSAO/SSIL両方で使い回す)
         RHI::ShaderDesc aoBlurPsDesc;
         aoBlurPsDesc.Stage = RHI::ShaderStage::Pixel;
-        aoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.hlsl";
+        aoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
         aoBlurPsDesc.EntryPoint = "PSMainBlur";
         m_AOBlurPixelShader = m_Device->CreateShader(aoBlurPsDesc);
 
@@ -1853,13 +1853,13 @@ namespace Kurenai
         // ライティングパス(頂点バッファなしのフルスクリーン三角形)
         RHI::ShaderDesc lightingVsDesc;
         lightingVsDesc.Stage = RHI::ShaderStage::Vertex;
-        lightingVsDesc.FilePath = shaderDirectory + L"DeferredLighting.hlsl";
+        lightingVsDesc.FilePath = shaderDirectory + L"DeferredLighting.kshader";
         lightingVsDesc.EntryPoint = "VSMain";
         m_LightingVertexShader = m_Device->CreateShader(lightingVsDesc);
 
         RHI::ShaderDesc lightingPsDesc;
         lightingPsDesc.Stage = RHI::ShaderStage::Pixel;
-        lightingPsDesc.FilePath = shaderDirectory + L"DeferredLighting.hlsl";
+        lightingPsDesc.FilePath = shaderDirectory + L"DeferredLighting.kshader";
         lightingPsDesc.EntryPoint = "PSMain";
         m_LightingPixelShader = m_Device->CreateShader(lightingPsDesc);
 
@@ -1874,13 +1874,13 @@ namespace Kurenai
         // 出力先はLightingパスと同じSceneColor(R16G16B16A16_Float)
         RHI::ShaderDesc transparentVsDesc;
         transparentVsDesc.Stage = RHI::ShaderStage::Vertex;
-        transparentVsDesc.FilePath = shaderDirectory + L"Transparent.hlsl";
+        transparentVsDesc.FilePath = shaderDirectory + L"Transparent.kshader";
         transparentVsDesc.EntryPoint = "VSMain";
         m_TransparentVertexShader = m_Device->CreateShader(transparentVsDesc);
 
         RHI::ShaderDesc transparentPsDesc;
         transparentPsDesc.Stage = RHI::ShaderStage::Pixel;
-        transparentPsDesc.FilePath = shaderDirectory + L"Transparent.hlsl";
+        transparentPsDesc.FilePath = shaderDirectory + L"Transparent.kshader";
         transparentPsDesc.EntryPoint = "PSMain";
         m_TransparentPixelShader = m_Device->CreateShader(transparentPsDesc);
 
@@ -1910,13 +1910,13 @@ namespace Kurenai
         // SV_VertexIDでビルボードのクアッドを展開する(InputLayoutは空のまま)
         RHI::ShaderDesc droneShowVsDesc;
         droneShowVsDesc.Stage = RHI::ShaderStage::Vertex;
-        droneShowVsDesc.FilePath = shaderDirectory + L"DroneShow.hlsl";
+        droneShowVsDesc.FilePath = shaderDirectory + L"DroneShow.kshader";
         droneShowVsDesc.EntryPoint = "VSMain";
         m_DroneShowVertexShader = m_Device->CreateShader(droneShowVsDesc);
 
         RHI::ShaderDesc droneShowPsDesc;
         droneShowPsDesc.Stage = RHI::ShaderStage::Pixel;
-        droneShowPsDesc.FilePath = shaderDirectory + L"DroneShow.hlsl";
+        droneShowPsDesc.FilePath = shaderDirectory + L"DroneShow.kshader";
         droneShowPsDesc.EntryPoint = "PSMain";
         m_DroneShowPixelShader = m_Device->CreateShader(droneShowPsDesc);
 
@@ -1968,14 +1968,14 @@ namespace Kurenai
         // CSDownsampleをミップ数-1回ディスパッチして1x1まで縮小する
         RHI::ShaderDesc hizCopyCsDesc;
         hizCopyCsDesc.Stage = RHI::ShaderStage::Compute;
-        hizCopyCsDesc.FilePath = shaderDirectory + L"HiZ.hlsl";
+        hizCopyCsDesc.FilePath = shaderDirectory + L"HiZ.kshader";
         hizCopyCsDesc.EntryPoint = "CSCopy";
         m_HiZCopyComputeShader = m_Device->CreateShader(hizCopyCsDesc);
         m_HiZCopyPipelineState = m_Device->CreateComputePipelineState({ m_HiZCopyComputeShader.get() });
 
         RHI::ShaderDesc hizDownsampleCsDesc;
         hizDownsampleCsDesc.Stage = RHI::ShaderStage::Compute;
-        hizDownsampleCsDesc.FilePath = shaderDirectory + L"HiZ.hlsl";
+        hizDownsampleCsDesc.FilePath = shaderDirectory + L"HiZ.kshader";
         hizDownsampleCsDesc.EntryPoint = "CSDownsample";
         m_HiZDownsampleComputeShader = m_Device->CreateShader(hizDownsampleCsDesc);
         m_HiZDownsamplePipelineState = m_Device->CreateComputePipelineState({ m_HiZDownsampleComputeShader.get() });
@@ -1989,7 +1989,7 @@ namespace Kurenai
         // ライトグリッド本体(m_LightTileBuffer)は解像度に依存するためCreateRenderTargetsで作る
         RHI::ShaderDesc lightCullingCsDesc;
         lightCullingCsDesc.Stage = RHI::ShaderStage::Compute;
-        lightCullingCsDesc.FilePath = shaderDirectory + L"LightCulling.hlsl";
+        lightCullingCsDesc.FilePath = shaderDirectory + L"LightCulling.kshader";
         lightCullingCsDesc.EntryPoint = "CSMain";
         m_LightCullingComputeShader = m_Device->CreateShader(lightCullingCsDesc);
         m_LightCullingPipelineState = m_Device->CreateComputePipelineState({ m_LightCullingComputeShader.get() });
@@ -2011,19 +2011,19 @@ namespace Kurenai
             {
                 RHI::ShaderDesc swRasterCsDesc;
                 swRasterCsDesc.Stage = RHI::ShaderStage::Compute;
-                swRasterCsDesc.FilePath = shaderDirectory + L"SoftwareRaster.hlsl";
+                swRasterCsDesc.FilePath = shaderDirectory + L"SoftwareRaster.kshader";
                 swRasterCsDesc.EntryPoint = "CSRaster";
                 m_SoftwareRasterComputeShader = m_Device->CreateShader(swRasterCsDesc);
 
                 RHI::ShaderDesc swRasterLargeCsDesc;
                 swRasterLargeCsDesc.Stage = RHI::ShaderStage::Compute;
-                swRasterLargeCsDesc.FilePath = shaderDirectory + L"SoftwareRaster.hlsl";
+                swRasterLargeCsDesc.FilePath = shaderDirectory + L"SoftwareRaster.kshader";
                 swRasterLargeCsDesc.EntryPoint = "CSRasterLarge";
                 m_SoftwareRasterLargeComputeShader = m_Device->CreateShader(swRasterLargeCsDesc);
 
                 RHI::ShaderDesc swRasterResolveCsDesc;
                 swRasterResolveCsDesc.Stage = RHI::ShaderStage::Compute;
-                swRasterResolveCsDesc.FilePath = shaderDirectory + L"SoftwareRasterResolve.hlsl";
+                swRasterResolveCsDesc.FilePath = shaderDirectory + L"SoftwareRasterResolve.kshader";
                 swRasterResolveCsDesc.EntryPoint = "CSResolve";
                 m_SoftwareRasterResolveComputeShader = m_Device->CreateShader(swRasterResolveCsDesc);
 
@@ -2094,13 +2094,13 @@ namespace Kurenai
         // SSRパス(頂点バッファなしのフルスクリーン三角形。SceneColorとG-Bufferから鏡面反射を計算し加算する)
         RHI::ShaderDesc ssrVsDesc;
         ssrVsDesc.Stage = RHI::ShaderStage::Vertex;
-        ssrVsDesc.FilePath = shaderDirectory + L"SSR.hlsl";
+        ssrVsDesc.FilePath = shaderDirectory + L"SSR.kshader";
         ssrVsDesc.EntryPoint = "VSMain";
         m_SSRVertexShader = m_Device->CreateShader(ssrVsDesc);
 
         RHI::ShaderDesc ssrPsDesc;
         ssrPsDesc.Stage = RHI::ShaderStage::Pixel;
-        ssrPsDesc.FilePath = shaderDirectory + L"SSR.hlsl";
+        ssrPsDesc.FilePath = shaderDirectory + L"SSR.kshader";
         ssrPsDesc.EntryPoint = "PSMain";
         m_SSRPixelShader = m_Device->CreateShader(ssrPsDesc);
 
@@ -2121,13 +2121,13 @@ namespace Kurenai
         // FogParams0/1に入れているため。AerialPerspective.hlsl冒頭参照)
         RHI::ShaderDesc aerialPerspectiveVsDesc;
         aerialPerspectiveVsDesc.Stage = RHI::ShaderStage::Vertex;
-        aerialPerspectiveVsDesc.FilePath = shaderDirectory + L"AerialPerspective.hlsl";
+        aerialPerspectiveVsDesc.FilePath = shaderDirectory + L"AerialPerspective.kshader";
         aerialPerspectiveVsDesc.EntryPoint = "VSMain";
         m_AerialPerspectiveVertexShader = m_Device->CreateShader(aerialPerspectiveVsDesc);
 
         RHI::ShaderDesc aerialPerspectivePsDesc;
         aerialPerspectivePsDesc.Stage = RHI::ShaderStage::Pixel;
-        aerialPerspectivePsDesc.FilePath = shaderDirectory + L"AerialPerspective.hlsl";
+        aerialPerspectivePsDesc.FilePath = shaderDirectory + L"AerialPerspective.kshader";
         aerialPerspectivePsDesc.EntryPoint = "PSMain";
         m_AerialPerspectivePixelShader = m_Device->CreateShader(aerialPerspectivePsDesc);
 
@@ -2143,13 +2143,13 @@ namespace Kurenai
         // (パラメータはFrameConstants末尾のCloudParams0-3等に入っているため)
         RHI::ShaderDesc skyCloudVsDesc;
         skyCloudVsDesc.Stage = RHI::ShaderStage::Vertex;
-        skyCloudVsDesc.FilePath = shaderDirectory + L"SkyCloud.hlsl";
+        skyCloudVsDesc.FilePath = shaderDirectory + L"SkyCloud.kshader";
         skyCloudVsDesc.EntryPoint = "VSMain";
         m_SkyCloudVertexShader = m_Device->CreateShader(skyCloudVsDesc);
 
         RHI::ShaderDesc skyCloudPsDesc;
         skyCloudPsDesc.Stage = RHI::ShaderStage::Pixel;
-        skyCloudPsDesc.FilePath = shaderDirectory + L"SkyCloud.hlsl";
+        skyCloudPsDesc.FilePath = shaderDirectory + L"SkyCloud.kshader";
         skyCloudPsDesc.EntryPoint = "PSMain";
         m_SkyCloudPixelShader = m_Device->CreateShader(skyCloudPsDesc);
 
@@ -2163,13 +2163,13 @@ namespace Kurenai
         // DDGIの低解像度解決パス(雲パスと同じ作り。拡散イラディアンスとinsideWeightを書く)
         RHI::ShaderDesc ddgiResolveVsDesc;
         ddgiResolveVsDesc.Stage = RHI::ShaderStage::Vertex;
-        ddgiResolveVsDesc.FilePath = shaderDirectory + L"DDGIResolve.hlsl";
+        ddgiResolveVsDesc.FilePath = shaderDirectory + L"DDGIResolve.kshader";
         ddgiResolveVsDesc.EntryPoint = "VSMain";
         m_DDGIResolveVertexShader = m_Device->CreateShader(ddgiResolveVsDesc);
 
         RHI::ShaderDesc ddgiResolvePsDesc;
         ddgiResolvePsDesc.Stage = RHI::ShaderStage::Pixel;
-        ddgiResolvePsDesc.FilePath = shaderDirectory + L"DDGIResolve.hlsl";
+        ddgiResolvePsDesc.FilePath = shaderDirectory + L"DDGIResolve.kshader";
         ddgiResolvePsDesc.EntryPoint = "PSMain";
         m_DDGIResolvePixelShader = m_Device->CreateShader(ddgiResolvePsDesc);
 
@@ -2248,7 +2248,7 @@ namespace Kurenai
         {
             RHI::ShaderDesc rtReflectionCsDesc;
             rtReflectionCsDesc.Stage = RHI::ShaderStage::Compute;
-            rtReflectionCsDesc.FilePath = shaderDirectory + L"RTReflection.hlsl";
+            rtReflectionCsDesc.FilePath = shaderDirectory + L"RTReflection.kshader";
             rtReflectionCsDesc.EntryPoint = "CSMain";
             m_RTReflectionComputeShader = m_Device->CreateShader(rtReflectionCsDesc);
             m_RTReflectionPipelineState = m_Device->CreateComputePipelineState({ m_RTReflectionComputeShader.get() });
@@ -2262,7 +2262,7 @@ namespace Kurenai
             // RTReflectionと同じくRayQueryを含むためシェーダーモデル6.5が必要
             RHI::ShaderDesc rtShadowCsDesc;
             rtShadowCsDesc.Stage = RHI::ShaderStage::Compute;
-            rtShadowCsDesc.FilePath = shaderDirectory + L"RTShadow.hlsl";
+            rtShadowCsDesc.FilePath = shaderDirectory + L"RTShadow.kshader";
             rtShadowCsDesc.EntryPoint = "CSMain";
             m_RTShadowComputeShader = m_Device->CreateShader(rtShadowCsDesc);
             m_RTShadowPipelineState = m_Device->CreateComputePipelineState({ m_RTShadowComputeShader.get() });
@@ -2275,7 +2275,7 @@ namespace Kurenai
             // RTAOパス(コンピュートシェーダー。半球へレイを撃ち遮蔽率と間接拡散光を求める)
             RHI::ShaderDesc rtAOCsDesc;
             rtAOCsDesc.Stage = RHI::ShaderStage::Compute;
-            rtAOCsDesc.FilePath = shaderDirectory + L"RTAO.hlsl";
+            rtAOCsDesc.FilePath = shaderDirectory + L"RTAO.kshader";
             rtAOCsDesc.EntryPoint = "CSMain";
             m_RTAOComputeShader = m_Device->CreateShader(rtAOCsDesc);
             m_RTAOPipelineState = m_Device->CreateComputePipelineState({ m_RTAOComputeShader.get() });
@@ -2287,28 +2287,58 @@ namespace Kurenai
 
             // DDGIのプローブ取得(コンピュートシェーダー。プローブから6面ぶんのレイを撃ち、
             // ラスタ経路と同じ形のスクラッチキューブを直接埋める)
-            RHI::ShaderDesc ddgiTraceCsDesc;
-            ddgiTraceCsDesc.Stage = RHI::ShaderStage::Compute;
-            ddgiTraceCsDesc.FilePath = shaderDirectory + L"DDGIProbeTrace.hlsl";
-            ddgiTraceCsDesc.EntryPoint = "CSMain";
-            m_DDGIProbeTraceComputeShader = m_Device->CreateShader(ddgiTraceCsDesc);
-            m_DDGIProbeTracePipelineState =
-                m_Device->CreateComputePipelineState({ m_DDGIProbeTraceComputeShader.get() });
+            //
+            // 【失敗しても他のRTパスを巻き込まない】このシェーダーはコンピュートシェーダーの中で
+            // テクスチャを微分付きにサンプルするため、DXILの検証がSM 6.6を要求する
+            // (Derivatives in CS/MS/AS is SM 6.6+)。RayQuery自体はSM 6.5で足りるので、
+            // 「DXR Tier 1.1に対応していて、かつSM 6.5のバリアントで動いている」環境
+            // (ビルドマシンのWindows SDKが古くbindlessバリアントを焼けなかった場合など)では、
+            // 上のRT反射/RTシャドウ/RTAOは作れるのにこれだけ作れない。
+            // ここで捕まえてDDGIのレイ取得だけをラスタ経路へ戻す(自前ラスタライザと同じ扱い)
+            try
+            {
+                RHI::ShaderDesc ddgiTraceCsDesc;
+                ddgiTraceCsDesc.Stage = RHI::ShaderStage::Compute;
+                ddgiTraceCsDesc.FilePath = shaderDirectory + L"DDGIProbeTrace.kshader";
+                ddgiTraceCsDesc.EntryPoint = "CSMain";
+                m_DDGIProbeTraceComputeShader = m_Device->CreateShader(ddgiTraceCsDesc);
+                m_DDGIProbeTracePipelineState =
+                    m_Device->CreateComputePipelineState({ m_DDGIProbeTraceComputeShader.get() });
 
-            RHI::BufferDesc ddgiTraceConstantBufferDesc;
-            ddgiTraceConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-            ddgiTraceConstantBufferDesc.SizeInBytes = sizeof(DDGITraceConstants);
-            // プローブ1個につき6面ぶん書き換えるため、既定の段数では
-            // 更新プローブ数を増やしたときに足りなくなる(1フレーム最大64プローブ×6面=384回)
-            ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
-            m_DDGITraceConstantBuffer = m_Device->CreateBuffer(ddgiTraceConstantBufferDesc);
+                RHI::BufferDesc ddgiTraceConstantBufferDesc;
+                ddgiTraceConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+                ddgiTraceConstantBufferDesc.SizeInBytes = sizeof(DDGITraceConstants);
+                // プローブ1個につき6面ぶん書き換えるため、既定の段数では
+                // 更新プローブ数を増やしたときに足りなくなる(1フレーム最大64プローブ×6面=384回)
+                ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
+                m_DDGITraceConstantBuffer = m_Device->CreateBuffer(ddgiTraceConstantBufferDesc);
+
+                m_DDGIRaytracedTraceAvailable = true;
+            }
+            catch (const std::exception& e)
+            {
+                // ShouldRunRaytracedDDGITraceがパイプラインステートのnullを見ているため、
+                // ここで捨てておけばレイ取得はラスタ経路のまま動く
+                m_DDGIProbeTracePipelineState.reset();
+                m_DDGIProbeTraceComputeShader.reset();
+                m_DDGITraceConstantBuffer.reset();
+                m_DDGIRaytracedTraceAvailable = false;
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    std::string("DDGIのレイ取得(DXR)を用意できませんでした。ラスタライズ経路で動作します"
+                                "(DDGIProbeTrace.hlslはシェーダーモデル6.6を要求します): ") + e.what());
+            }
 
             // レイトレーシングが使える環境ではDDGIのレイ取得も既定でDXRにする。
             // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
-            m_DDGIRayMode = DDGIRayModeForCapability(true);
+            m_DDGIRayMode = DDGIRayModeForCapability(m_DDGIRaytracedTraceAvailable);
 
             Core::Logger::Info(
-                "KurenaiEngine3D", "レイトレーシングを利用できます(反射・シャドウ・AO/GI・DDGIでRaytracedを選択可能)");
+                "KurenaiEngine3D",
+                m_DDGIRaytracedTraceAvailable
+                    ? "レイトレーシングを利用できます(反射・シャドウ・AO/GI・DDGIでRaytracedを選択可能)"
+                    : "レイトレーシングを利用できます(反射・シャドウ・AOでRaytracedを選択可能。DDGIのレイ取得は"
+                      "ラスタライズのみ)");
         }
         else
         {
@@ -2322,13 +2352,13 @@ namespace Kurenai
         // CreatePrecisionDependentPipelineStatesではなくここで一度だけ作ればよい
         RHI::ShaderDesc taaVsDesc;
         taaVsDesc.Stage = RHI::ShaderStage::Vertex;
-        taaVsDesc.FilePath = shaderDirectory + L"TAA.hlsl";
+        taaVsDesc.FilePath = shaderDirectory + L"TAA.kshader";
         taaVsDesc.EntryPoint = "VSMain";
         m_TAAVertexShader = m_Device->CreateShader(taaVsDesc);
 
         RHI::ShaderDesc taaPsDesc;
         taaPsDesc.Stage = RHI::ShaderStage::Pixel;
-        taaPsDesc.FilePath = shaderDirectory + L"TAA.hlsl";
+        taaPsDesc.FilePath = shaderDirectory + L"TAA.kshader";
         taaPsDesc.EntryPoint = "PSMain";
         m_TAAPixelShader = m_Device->CreateShader(taaPsDesc);
 
@@ -2347,13 +2377,13 @@ namespace Kurenai
         // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
         RHI::ShaderDesc tonemapVsDesc;
         tonemapVsDesc.Stage = RHI::ShaderStage::Vertex;
-        tonemapVsDesc.FilePath = shaderDirectory + L"Tonemap.hlsl";
+        tonemapVsDesc.FilePath = shaderDirectory + L"Tonemap.kshader";
         tonemapVsDesc.EntryPoint = "VSMain";
         m_TonemapVertexShader = m_Device->CreateShader(tonemapVsDesc);
 
         RHI::ShaderDesc tonemapPsDesc;
         tonemapPsDesc.Stage = RHI::ShaderStage::Pixel;
-        tonemapPsDesc.FilePath = shaderDirectory + L"Tonemap.hlsl";
+        tonemapPsDesc.FilePath = shaderDirectory + L"Tonemap.kshader";
         tonemapPsDesc.EntryPoint = "PSMain";
         m_TonemapPixelShader = m_Device->CreateShader(tonemapPsDesc);
 
@@ -2373,14 +2403,14 @@ namespace Kurenai
         // レンダーターゲットではなくUAVへ書くのでPSOにフォーマットの指定は要らない
         RHI::ShaderDesc upscaleEasuCsDesc;
         upscaleEasuCsDesc.Stage = RHI::ShaderStage::Compute;
-        upscaleEasuCsDesc.FilePath = shaderDirectory + L"Upscale.hlsl";
+        upscaleEasuCsDesc.FilePath = shaderDirectory + L"Upscale.kshader";
         upscaleEasuCsDesc.EntryPoint = "CSEASU";
         m_UpscaleEASUComputeShader = m_Device->CreateShader(upscaleEasuCsDesc);
         m_UpscaleEASUPipelineState = m_Device->CreateComputePipelineState({ m_UpscaleEASUComputeShader.get() });
 
         RHI::ShaderDesc upscaleRcasCsDesc;
         upscaleRcasCsDesc.Stage = RHI::ShaderStage::Compute;
-        upscaleRcasCsDesc.FilePath = shaderDirectory + L"Upscale.hlsl";
+        upscaleRcasCsDesc.FilePath = shaderDirectory + L"Upscale.kshader";
         upscaleRcasCsDesc.EntryPoint = "CSRCAS";
         m_UpscaleRCASComputeShader = m_Device->CreateShader(upscaleRcasCsDesc);
         m_UpscaleRCASPipelineState = m_Device->CreateComputePipelineState({ m_UpscaleRCASComputeShader.get() });
@@ -2393,7 +2423,7 @@ namespace Kurenai
         // 自動露出パス(輝度ヒストグラムの構築→縮約→時間方向の順応。すべてコンピュートシェーダー)
         RHI::ShaderDesc autoExposureClearCsDesc;
         autoExposureClearCsDesc.Stage = RHI::ShaderStage::Compute;
-        autoExposureClearCsDesc.FilePath = shaderDirectory + L"AutoExposure.hlsl";
+        autoExposureClearCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
         autoExposureClearCsDesc.EntryPoint = "CSClearHistogram";
         m_AutoExposureClearComputeShader = m_Device->CreateShader(autoExposureClearCsDesc);
         m_AutoExposureClearPipelineState =
@@ -2401,7 +2431,7 @@ namespace Kurenai
 
         RHI::ShaderDesc autoExposureHistogramCsDesc;
         autoExposureHistogramCsDesc.Stage = RHI::ShaderStage::Compute;
-        autoExposureHistogramCsDesc.FilePath = shaderDirectory + L"AutoExposure.hlsl";
+        autoExposureHistogramCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
         autoExposureHistogramCsDesc.EntryPoint = "CSHistogram";
         m_AutoExposureHistogramComputeShader = m_Device->CreateShader(autoExposureHistogramCsDesc);
         m_AutoExposureHistogramPipelineState =
@@ -2409,7 +2439,7 @@ namespace Kurenai
 
         RHI::ShaderDesc autoExposureResolveCsDesc;
         autoExposureResolveCsDesc.Stage = RHI::ShaderStage::Compute;
-        autoExposureResolveCsDesc.FilePath = shaderDirectory + L"AutoExposure.hlsl";
+        autoExposureResolveCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
         autoExposureResolveCsDesc.EntryPoint = "CSResolve";
         m_AutoExposureResolveComputeShader = m_Device->CreateShader(autoExposureResolveCsDesc);
         m_AutoExposureResolvePipelineState =
@@ -2435,7 +2465,7 @@ namespace Kurenai
         // ブルームパス(ダウンサンプル/アップサンプルの2エントリ。テクスチャはCreateRenderTargetsで作る)
         RHI::ShaderDesc bloomDownCsDesc;
         bloomDownCsDesc.Stage = RHI::ShaderStage::Compute;
-        bloomDownCsDesc.FilePath = shaderDirectory + L"Bloom.hlsl";
+        bloomDownCsDesc.FilePath = shaderDirectory + L"Bloom.kshader";
         bloomDownCsDesc.EntryPoint = "CSDownsample";
         m_BloomDownsampleComputeShader = m_Device->CreateShader(bloomDownCsDesc);
         m_BloomDownsamplePipelineState =
@@ -2443,7 +2473,7 @@ namespace Kurenai
 
         RHI::ShaderDesc bloomUpCsDesc;
         bloomUpCsDesc.Stage = RHI::ShaderStage::Compute;
-        bloomUpCsDesc.FilePath = shaderDirectory + L"Bloom.hlsl";
+        bloomUpCsDesc.FilePath = shaderDirectory + L"Bloom.kshader";
         bloomUpCsDesc.EntryPoint = "CSUpsample";
         m_BloomUpsampleComputeShader = m_Device->CreateShader(bloomUpCsDesc);
         m_BloomUpsamplePipelineState =
@@ -2457,13 +2487,13 @@ namespace Kurenai
         // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
         RHI::ShaderDesc presentVsDesc;
         presentVsDesc.Stage = RHI::ShaderStage::Vertex;
-        presentVsDesc.FilePath = shaderDirectory + L"Present.hlsl";
+        presentVsDesc.FilePath = shaderDirectory + L"Present.kshader";
         presentVsDesc.EntryPoint = "VSMain";
         m_PresentVertexShader = m_Device->CreateShader(presentVsDesc);
 
         RHI::ShaderDesc presentPsDesc;
         presentPsDesc.Stage = RHI::ShaderStage::Pixel;
-        presentPsDesc.FilePath = shaderDirectory + L"Present.hlsl";
+        presentPsDesc.FilePath = shaderDirectory + L"Present.kshader";
         presentPsDesc.EntryPoint = "PSMain";
         m_PresentPixelShader = m_Device->CreateShader(presentPsDesc);
 
@@ -2480,13 +2510,13 @@ namespace Kurenai
         // シャドウパス(ライト視点への深度のみの描画。頂点入力はPOSITIONのみ使用)
         RHI::ShaderDesc shadowVsDesc;
         shadowVsDesc.Stage = RHI::ShaderStage::Vertex;
-        shadowVsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowVsDesc.FilePath = shaderDirectory + L"Shadow.kshader";
         shadowVsDesc.EntryPoint = "VSMain";
         m_ShadowVertexShader = m_Device->CreateShader(shadowVsDesc);
 
         RHI::ShaderDesc shadowPsDesc;
         shadowPsDesc.Stage = RHI::ShaderStage::Pixel;
-        shadowPsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowPsDesc.FilePath = shaderDirectory + L"Shadow.kshader";
         shadowPsDesc.EntryPoint = "PSMain";
         m_ShadowPixelShader = m_Device->CreateShader(shadowPsDesc);
 
@@ -2494,13 +2524,13 @@ namespace Kurenai
         // テクスチャで抜く前提のマテリアルが板ポリゴンのまま影を落とす
         RHI::ShaderDesc shadowCutoutVsDesc;
         shadowCutoutVsDesc.Stage = RHI::ShaderStage::Vertex;
-        shadowCutoutVsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowCutoutVsDesc.FilePath = shaderDirectory + L"Shadow.kshader";
         shadowCutoutVsDesc.EntryPoint = "VSMainCutout";
         m_ShadowCutoutVertexShader = m_Device->CreateShader(shadowCutoutVsDesc);
 
         RHI::ShaderDesc shadowCutoutPsDesc;
         shadowCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
-        shadowCutoutPsDesc.FilePath = shaderDirectory + L"Shadow.hlsl";
+        shadowCutoutPsDesc.FilePath = shaderDirectory + L"Shadow.kshader";
         shadowCutoutPsDesc.EntryPoint = "PSMainCutout";
         m_ShadowCutoutPixelShader = m_Device->CreateShader(shadowCutoutPsDesc);
 
@@ -2618,14 +2648,14 @@ namespace Kurenai
 
         RHI::ShaderDesc brdfLutCsDesc;
         brdfLutCsDesc.Stage = RHI::ShaderStage::Compute;
-        brdfLutCsDesc.FilePath = shaderDirectory + L"BRDFLUT.hlsl";
+        brdfLutCsDesc.FilePath = shaderDirectory + L"BRDFLUT.kshader";
         brdfLutCsDesc.EntryPoint = "CSMain";
         m_BRDFLUTComputeShader = m_Device->CreateShader(brdfLutCsDesc);
         m_BRDFLUTPipelineState = m_Device->CreateComputePipelineState({ m_BRDFLUTComputeShader.get() });
 
         RHI::ShaderDesc brdfLutCombineCsDesc;
         brdfLutCombineCsDesc.Stage = RHI::ShaderStage::Compute;
-        brdfLutCombineCsDesc.FilePath = shaderDirectory + L"BRDFLUT.hlsl";
+        brdfLutCombineCsDesc.FilePath = shaderDirectory + L"BRDFLUT.kshader";
         brdfLutCombineCsDesc.EntryPoint = "CSCombineEavg";
         m_BRDFLUTCombineComputeShader = m_Device->CreateShader(brdfLutCombineCsDesc);
         if (!m_BRDFLUTCombineComputeShader)
@@ -2652,7 +2682,7 @@ namespace Kurenai
 
         RHI::ShaderDesc cloudShapeNoiseCsDesc;
         cloudShapeNoiseCsDesc.Stage = RHI::ShaderStage::Compute;
-        cloudShapeNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.hlsl";
+        cloudShapeNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.kshader";
         cloudShapeNoiseCsDesc.EntryPoint = "CSGenerateShape";
         m_CloudShapeNoiseComputeShader = m_Device->CreateShader(cloudShapeNoiseCsDesc);
         if (!m_CloudShapeNoiseComputeShader)
@@ -2666,7 +2696,7 @@ namespace Kurenai
 
         RHI::ShaderDesc cloudDetailNoiseCsDesc;
         cloudDetailNoiseCsDesc.Stage = RHI::ShaderStage::Compute;
-        cloudDetailNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.hlsl";
+        cloudDetailNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.kshader";
         cloudDetailNoiseCsDesc.EntryPoint = "CSGenerateDetail";
         m_CloudDetailNoiseComputeShader = m_Device->CreateShader(cloudDetailNoiseCsDesc);
         if (!m_CloudDetailNoiseComputeShader)
@@ -2713,7 +2743,7 @@ namespace Kurenai
 
         RHI::ShaderDesc transmittanceCsDesc;
         transmittanceCsDesc.Stage = RHI::ShaderStage::Compute;
-        transmittanceCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.hlsl";
+        transmittanceCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.kshader";
         transmittanceCsDesc.EntryPoint = "CSTransmittance";
         m_TransmittanceComputeShader = m_Device->CreateShader(transmittanceCsDesc);
         if (!m_TransmittanceComputeShader)
@@ -2726,7 +2756,7 @@ namespace Kurenai
 
         RHI::ShaderDesc multiScatteringCsDesc;
         multiScatteringCsDesc.Stage = RHI::ShaderStage::Compute;
-        multiScatteringCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.hlsl";
+        multiScatteringCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.kshader";
         multiScatteringCsDesc.EntryPoint = "CSMultiScattering";
         m_MultiScatteringComputeShader = m_Device->CreateShader(multiScatteringCsDesc);
         if (!m_MultiScatteringComputeShader)
@@ -2739,7 +2769,7 @@ namespace Kurenai
 
         RHI::ShaderDesc skyViewCsDesc;
         skyViewCsDesc.Stage = RHI::ShaderStage::Compute;
-        skyViewCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.hlsl";
+        skyViewCsDesc.FilePath = shaderDirectory + L"AtmosphereLUT.kshader";
         skyViewCsDesc.EntryPoint = "CSSkyView";
         m_SkyViewComputeShader = m_Device->CreateShader(skyViewCsDesc);
         if (!m_SkyViewComputeShader)
@@ -2752,14 +2782,14 @@ namespace Kurenai
 
         RHI::ShaderDesc irradianceCsDesc;
         irradianceCsDesc.Stage = RHI::ShaderStage::Compute;
-        irradianceCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        irradianceCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         irradianceCsDesc.EntryPoint = "CSIrradiance";
         m_IrradianceComputeShader = m_Device->CreateShader(irradianceCsDesc);
         m_IrradiancePipelineState = m_Device->CreateComputePipelineState({ m_IrradianceComputeShader.get() });
 
         RHI::ShaderDesc prefilterCsDesc;
         prefilterCsDesc.Stage = RHI::ShaderStage::Compute;
-        prefilterCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        prefilterCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         prefilterCsDesc.EntryPoint = "CSPrefilter";
         m_PrefilterComputeShader = m_Device->CreateShader(prefilterCsDesc);
         m_PrefilterPipelineState = m_Device->CreateComputePipelineState({ m_PrefilterComputeShader.get() });
@@ -2769,21 +2799,21 @@ namespace Kurenai
         // 詳細はIBLConvolve.hlsl冒頭のコメント参照
         RHI::ShaderDesc projectShCsDesc;
         projectShCsDesc.Stage = RHI::ShaderStage::Compute;
-        projectShCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        projectShCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         projectShCsDesc.EntryPoint = "CSProjectSH";
         m_ProjectSHComputeShader = m_Device->CreateShader(projectShCsDesc);
         m_ProjectSHPipelineState = m_Device->CreateComputePipelineState({ m_ProjectSHComputeShader.get() });
 
         RHI::ShaderDesc projectShFinalCsDesc;
         projectShFinalCsDesc.Stage = RHI::ShaderStage::Compute;
-        projectShFinalCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        projectShFinalCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         projectShFinalCsDesc.EntryPoint = "CSProjectSHFinal";
         m_ProjectSHFinalComputeShader = m_Device->CreateShader(projectShFinalCsDesc);
         m_ProjectSHFinalPipelineState = m_Device->CreateComputePipelineState({ m_ProjectSHFinalComputeShader.get() });
 
         RHI::ShaderDesc evaluateShCsDesc;
         evaluateShCsDesc.Stage = RHI::ShaderStage::Compute;
-        evaluateShCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        evaluateShCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         evaluateShCsDesc.EntryPoint = "CSEvaluateSH";
         m_EvaluateSHComputeShader = m_Device->CreateShader(evaluateShCsDesc);
         m_EvaluateSHPipelineState = m_Device->CreateComputePipelineState({ m_EvaluateSHComputeShader.get() });
@@ -2815,7 +2845,7 @@ namespace Kurenai
 
         RHI::ShaderDesc skyGenerateCsDesc;
         skyGenerateCsDesc.Stage = RHI::ShaderStage::Compute;
-        skyGenerateCsDesc.FilePath = shaderDirectory + L"SkyGenerate.hlsl";
+        skyGenerateCsDesc.FilePath = shaderDirectory + L"SkyGenerate.kshader";
         skyGenerateCsDesc.EntryPoint = "CSGenerateSky";
         m_SkyGenerateComputeShader = m_Device->CreateShader(skyGenerateCsDesc);
         m_SkyGeneratePipelineState = m_Device->CreateComputePipelineState({ m_SkyGenerateComputeShader.get() });
@@ -2829,7 +2859,7 @@ namespace Kurenai
         // 。SkyGenerateより前に実行し、結果をm_SkyParametersBufferへ書く
         RHI::ShaderDesc skyIntegrateCsDesc;
         skyIntegrateCsDesc.Stage = RHI::ShaderStage::Compute;
-        skyIntegrateCsDesc.FilePath = shaderDirectory + L"SkyIntegrate.hlsl";
+        skyIntegrateCsDesc.FilePath = shaderDirectory + L"SkyIntegrate.kshader";
         skyIntegrateCsDesc.EntryPoint = "CSIntegrateSky";
         m_SkyIntegrateComputeShader = m_Device->CreateShader(skyIntegrateCsDesc);
         m_SkyIntegratePipelineState = m_Device->CreateComputePipelineState({ m_SkyIntegrateComputeShader.get() });
@@ -2886,13 +2916,13 @@ namespace Kurenai
 
         RHI::ShaderDesc probeCaptureVsDesc;
         probeCaptureVsDesc.Stage = RHI::ShaderStage::Vertex;
-        probeCaptureVsDesc.FilePath = shaderDirectory + L"ProbeCapture.hlsl";
+        probeCaptureVsDesc.FilePath = shaderDirectory + L"ProbeCapture.kshader";
         probeCaptureVsDesc.EntryPoint = "VSMain";
         m_ProbeCaptureVertexShader = m_Device->CreateShader(probeCaptureVsDesc);
 
         RHI::ShaderDesc probeCapturePsDesc;
         probeCapturePsDesc.Stage = RHI::ShaderStage::Pixel;
-        probeCapturePsDesc.FilePath = shaderDirectory + L"ProbeCapture.hlsl";
+        probeCapturePsDesc.FilePath = shaderDirectory + L"ProbeCapture.kshader";
         probeCapturePsDesc.EntryPoint = "PSMain";
         m_ProbeCapturePixelShader = m_Device->CreateShader(probeCapturePsDesc);
 
@@ -2909,7 +2939,7 @@ namespace Kurenai
 
         RHI::ShaderDesc probeCubeCopyCsDesc;
         probeCubeCopyCsDesc.Stage = RHI::ShaderStage::Compute;
-        probeCubeCopyCsDesc.FilePath = shaderDirectory + L"IBLConvolve.hlsl";
+        probeCubeCopyCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         probeCubeCopyCsDesc.EntryPoint = "CSCopyCaptureToCubeFace";
         m_ProbeCubeCopyComputeShader = m_Device->CreateShader(probeCubeCopyCsDesc);
         m_ProbeCubeCopyPipelineState = m_Device->CreateComputePipelineState({ m_ProbeCubeCopyComputeShader.get() });
@@ -2935,13 +2965,13 @@ namespace Kurenai
         // ここではProbeCaptureと同様、解像度に依存しないシェーダー・PSO・定数バッファのみ作る
         RHI::ShaderDesc planarReflectionVsDesc;
         planarReflectionVsDesc.Stage = RHI::ShaderStage::Vertex;
-        planarReflectionVsDesc.FilePath = shaderDirectory + L"PlanarReflection.hlsl";
+        planarReflectionVsDesc.FilePath = shaderDirectory + L"PlanarReflection.kshader";
         planarReflectionVsDesc.EntryPoint = "VSMain";
         m_PlanarReflectionVertexShader = m_Device->CreateShader(planarReflectionVsDesc);
 
         RHI::ShaderDesc planarReflectionPsDesc;
         planarReflectionPsDesc.Stage = RHI::ShaderStage::Pixel;
-        planarReflectionPsDesc.FilePath = shaderDirectory + L"PlanarReflection.hlsl";
+        planarReflectionPsDesc.FilePath = shaderDirectory + L"PlanarReflection.kshader";
         planarReflectionPsDesc.EntryPoint = "PSMain";
         m_PlanarReflectionPixelShader = m_Device->CreateShader(planarReflectionPsDesc);
 
@@ -2984,7 +3014,7 @@ namespace Kurenai
 
         RHI::ShaderDesc ddgiUpdateCsDesc;
         ddgiUpdateCsDesc.Stage = RHI::ShaderStage::Compute;
-        ddgiUpdateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.hlsl";
+        ddgiUpdateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
         ddgiUpdateCsDesc.EntryPoint = "CSUpdateProbe";
         m_DDGIProbeUpdateComputeShader = m_Device->CreateShader(ddgiUpdateCsDesc);
         m_DDGIProbeUpdatePipelineState = m_Device->CreateComputePipelineState({ m_DDGIProbeUpdateComputeShader.get() });
@@ -2994,7 +3024,7 @@ namespace Kurenai
         // 自分のセルの反対側のテクセルを読む必要がある)
         RHI::ShaderDesc ddgiBorderCsDesc;
         ddgiBorderCsDesc.Stage = RHI::ShaderStage::Compute;
-        ddgiBorderCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.hlsl";
+        ddgiBorderCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
         ddgiBorderCsDesc.EntryPoint = "CSCopyBorder";
         m_DDGIBorderCopyComputeShader = m_Device->CreateShader(ddgiBorderCsDesc);
         m_DDGIBorderCopyPipelineState = m_Device->CreateComputePipelineState({ m_DDGIBorderCopyComputeShader.get() });
@@ -3007,7 +3037,7 @@ namespace Kurenai
         // スクロールで未確定になったプローブを、焼き直されるまでサンプリングから外すパス
         RHI::ShaderDesc ddgiInvalidateCsDesc;
         ddgiInvalidateCsDesc.Stage = RHI::ShaderStage::Compute;
-        ddgiInvalidateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.hlsl";
+        ddgiInvalidateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
         ddgiInvalidateCsDesc.EntryPoint = "CSInvalidateProbes";
         m_DDGIInvalidateProbesComputeShader = m_Device->CreateShader(ddgiInvalidateCsDesc);
         m_DDGIInvalidateProbesPipelineState =
@@ -3020,6 +3050,11 @@ namespace Kurenai
         ddgiDirtyBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * kDDGIMaxProbes;
         ddgiDirtyBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         m_DDGIDirtyProbeBuffer = m_Device->CreateBuffer(ddgiDirtyBufferDesc);
+
+        // ここまでで全シェーダーの生成が終わっている。読み込んだ.kshaderはもう誰も読まないので、
+        // バイトコードをプロセスの寿命ぶん抱え続けないよう明示的に捨てる
+        // (このあとCreateShaderを呼ぶことがあれば、必要なパッケージが読み直されるだけ)
+        m_Device->ReleaseShaderPackages();
 
         // シーン読み込み前でもSRVをバインドできるよう、この時点で1プローブぶんのダミーを確保しておく
         RecreateDDGIAtlases();

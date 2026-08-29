@@ -87,6 +87,24 @@ $outDir  = "$repo\Assets\Packed\Plateau"
 $scene   = "$repo\Scenes\PlateauTokyo23ku.kscene"
 $sceneOut = "$repo\Assets\Packed\Scenes\PlateauTokyo23ku.kscene"
 
+# 取り込む5種。ZIP内の位置と、パック先のディレクトリの対応。
+#
+# 【LOD1 だけ出力先が Plateau 直下】先に671タイルをここへ置いた経緯があり、
+# 移すと既存の .kscene(PlateauMarunouchi など)の参照が全部変わるうえ、
+# 2.1GB の再パックが要る。実利が無いので配置はそのままにしてある。
+#
+# 【bldg LOD2 と LOD1 は同じメッシュコードで両方存在する】80タイルぶん重なるが、
+# .kscene 側で [Model]Path=LOD2 / LODPath=LOD1 の2段LODとして結び付けるので
+# 二重には描かれない(同時に読むと Z ファイティングを起こすのは、両方を独立した
+# [Model] として置いた場合)。
+$sets = @(
+    [pscustomobject]@{ Name = "bldg LOD1";  Zip = 'bldg/lod1/.*\.fbx$'; Src = "$srcRoot\bldg\lod1"; Out = $outDir },
+    [pscustomobject]@{ Name = "bldg LOD2";  Zip = 'bldg/lod2/.*\.fbx$'; Src = "$srcRoot\bldg\lod2"; Out = "$outDir\BldgLod2" },
+    [pscustomobject]@{ Name = "dem(地形)";  Zip = '/dem/.*\.fbx$';      Src = "$srcRoot\dem";       Out = "$outDir\Dem" },
+    [pscustomobject]@{ Name = "tran(道路)"; Zip = '/tran/.*\.fbx$';     Src = "$srcRoot\tran";      Out = "$outDir\Tran" },
+    [pscustomobject]@{ Name = "brid(橋梁)"; Zip = '/brid/.*\.fbx$';     Src = "$srcRoot\brid";      Out = "$outDir\Brid" }
+)
+
 if (-not (Test-Path -LiteralPath $packer -PathType Leaf))
 {
     Write-Error "[ERROR] KurenaiPacker.exe が見つかりません: $packer (build-run スキルの手順でビルドしてください)"
@@ -117,46 +135,45 @@ if ($actualBytes -ne $expectedBytes)
     Write-Warning "[WARN] ZIPのサイズが実測値と違います(期待 $expectedBytes / 実際 $actualBytes)。配布物が更新された可能性があります"
 }
 
-# --- 2. 展開(建築物のLOD1だけ) -------------------------------------------
+# --- 2. 展開(建築物LOD1/LOD2・地形・道路・橋梁の5種) -----------------------
 #
-# 【dem(地形)とtran(道路)は入れない】これらは6桁=2次メッシュ(約10km四方)で、
-# bldgの3次メッシュ(約1km四方)とは分割単位が違う。1枚入れるだけでシーンAABBの対角が
-# 14km級になり、遠クリップ面(farZ = max(100, 対角x4))が56kmまで伸びてカスケードシャドウが
-# 破綻する。
-# 【LOD2も入れない】LOD2整備済み80タイルのメッシュコードは全てLOD1側にも存在するため、
-# 同時に読むと同じ建物が二重になりZファイティングを起こす。
+# 【dem(地形)とtran(道路)は6桁=2次メッシュ(約10km四方)】bldg/brid の3次メッシュ
+# (約1km四方)とは分割単位が違い、23区だけに切り出せない。そのぶんシーンAABBが広がって
+# 遠クリップ面(farZ = max(100, 対角x4))が伸びるが、[Scene]ShadowDistance で
+# カスケードの分割範囲を打ち切れるようになったので入れられる。
 #
-# 【丸の内のLOD2は別のシーンで取り込んでいる】Scenes\PlateauMarunouchi.kscene が
-# 53394600/53394601 の建築物LOD2と、同じ範囲の橋梁・地形・道路を持つ。
-# こちらは dem/tran を含むぶんシーン対角が16.5kmになるので、[Scene]ShadowDistance と
-# [Scene]CameraSpeed を明示して抑えている(README「テクスチャ付きの近景シーン」参照)。
-# このスクリプトが作る23区シーンとは --origin が同じ値なので、座標はそのまま対応する。
-if (-not (Test-Path -LiteralPath $lod1Dir -PathType Container))
+# 【brid はファイル名が _6697 を名乗る個体が13件ある】名前は EPSG:6697(緯度経度系)だが、
+# 中身は他と同じ平面直角座標のメートル値だった(パック後に全68件のAABBをメッシュコードから
+# 計算した期待矩形と突き合わせて確認する。docs/ImplementationDetail.md 参照)。
+# したがって --origin は全種で同じ値を使う。
+Write-Host "[2/5] ソースを展開中..."
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+try
 {
-    Write-Host "[2/5] bldg/lod1 を展開中(約3.19GB / 671ファイル)..."
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
-    try
+    foreach ($set in $sets)
     {
-        New-Item -ItemType Directory -Force -Path $lod1Dir | Out-Null
-        $targets = $archive.Entries | Where-Object { $_.FullName -match 'bldg/lod1/.*\.fbx$' }
+        if (Test-Path -LiteralPath $set.Src -PathType Container)
+        {
+            $have = @(Get-ChildItem $set.Src -Filter *.fbx -ErrorAction SilentlyContinue).Count
+            Write-Host "        $($set.Name): 展開済み($have ファイル)"
+            continue
+        }
+        New-Item -ItemType Directory -Force -Path $set.Src | Out-Null
+        $targets = @($archive.Entries | Where-Object { $_.FullName -match $set.Zip })
         foreach ($e in $targets)
         {
-            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, (Join-Path $lod1Dir $e.Name), $true)
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, (Join-Path $set.Src $e.Name), $true)
         }
-        Write-Host "        $($targets.Count) ファイルを展開しました"
+        Write-Host "        $($set.Name): $($targets.Count) ファイルを展開しました"
     }
-    catch
-    {
-        Write-Error "[ERROR] 展開に失敗しました: $_"
-        exit 1
-    }
-    finally { $archive.Dispose() }
 }
-else
+catch
 {
-    Write-Host "[2/5] 展開済み: $lod1Dir"
+    Write-Error "[ERROR] 展開に失敗しました: $_"
+    exit 1
 }
+finally { $archive.Dispose() }
 
 # --- 3. 共通原点の算出 ---------------------------------------------------
 #
@@ -175,9 +192,19 @@ $origin = $originLine.Matches[0].Groups[1].Value
 Write-Host "        --origin $origin"
 
 # --- 4. パック -----------------------------------------------------------
-New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-$files = Get-ChildItem $lod1Dir -Filter *.fbx | Sort-Object Name
-Write-Host "[4/5] $($files.Count) タイルをパック中..."
+#
+# 5種それぞれについて同じことをするので関数にしてある。呼び出し側のループは下。
+function Invoke-PackSet
+{
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$SrcDir,
+        [Parameter(Mandatory = $true)][string]$OutPath
+    )
+
+New-Item -ItemType Directory -Force -Path $OutPath | Out-Null
+$files = Get-ChildItem $SrcDir -Filter *.fbx | Sort-Object Name
+Write-Host "        $Label : $($files.Count) タイル"
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $skipped = 0
 
@@ -186,7 +213,7 @@ $queue = [System.Collections.Queue]::new()
 foreach ($f in $files)
 {
     $code = $f.BaseName.Split('_')[0]
-    $out = Join-Path $outDir "$code.kmodel"
+    $out = Join-Path $OutPath "$code.kmodel"
     if ((-not $Force) -and (Test-Path -LiteralPath $out))
     {
         $skipped++
@@ -276,8 +303,19 @@ if ($failures.Count -gt 0)
 }
 
 $sw.Stop()
-Write-Host ("        新規 $packed / スキップ $skipped / 並列 $Parallel / {0:N1}分" -f $sw.Elapsed.TotalMinutes)
-Write-Host ("        タイルごとのログ: $logDir")
+Write-Host ("            新規 $packed / スキップ $skipped / 並列 $Parallel / {0:N1}分" -f $sw.Elapsed.TotalMinutes)
+if ($packed -gt 0) { Write-Host ("            タイルごとのログ: $logDir") }
+
+}   # function Invoke-PackSet
+
+Write-Host "[4/5] パック中..."
+$packAll = [Diagnostics.Stopwatch]::StartNew()
+foreach ($set in $sets)
+{
+    Invoke-PackSet -Label $set.Name -SrcDir $set.Src -OutPath $set.Out
+}
+$packAll.Stop()
+Write-Host ("        5種の合計 {0:N1}分" -f $packAll.Elapsed.TotalMinutes)
 
 # --- 5. .kscene の生成 ---------------------------------------------------
 & python "$repo\Tools\plateau_scene.py" $outDir $scene
