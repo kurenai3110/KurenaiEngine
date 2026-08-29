@@ -326,6 +326,19 @@ namespace Kurenai::UI
             "その負荷は切り替えて実測すること");
 
         CheckboxEx(
+            "Hi-Zを深度プリパスから作る###HiZFromDepthPrepass",
+            &m_Engine.m_HiZFromDepthPrepassEnabled, Defaults::HiZFromDepthPrepass,
+            "Hi-Zミップチェーンを深度プリパスの直後に、そのフレームの深度から作る。\n\n"
+            "【入れるとG-Bufferの判定から1フレーム遅れが消える】投影に前フレームの行列を"
+            "使う必要も、視差ぶんを保守的に膨らませる必要も無くなり、カメラが動いても"
+            "遮蔽の判定がずれない(ポップしない)。\n\n"
+            "【切ると従来どおりG-Bufferの後で作る】次フレームに前フレームのものとして読み、"
+            "球を膨らませて視差を吸収する。深度プリパス自体が無効なフレームでは、"
+            "この項目によらず常にそちらになる(深度が埋まっていないため)。\n\n"
+            "【コストはここを切り替えて総GPU時間で測ること】構築そのものの時間は変わらないが、"
+            "プリパスとG-Bufferの間に入るぶん重なりが減り、深度バッファの状態遷移が1往復増える");
+
+        CheckboxEx(
             "モデル単位のGPUカリング###ModelCullGpu", &m_Engine.m_ModelCullGpuEnabled,
             Defaults::ModelCullGpuEnabled,
             "コンピュートシェーダーが、描画候補のワールドAABBを視錐台とHi-Zで判定し、"

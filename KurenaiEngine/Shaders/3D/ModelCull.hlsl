@@ -27,12 +27,24 @@ cbuffer ModelCullConstants : register(b0)
     // 視錐台判定に使う。**今フレームの**ビュー射影行列(CPU側の判定と揃える)
     float4x4 CullViewProj;
     // Hi-Z判定に使う。**そのHi-Zの元になった深度を描いた行列。**
-    // 構築パスがG-Bufferより後に登録されている現状では前フレームのものになる
+    // 深度プリパスから作る経路では今フレームの行列、Hi-ZをG-Bufferより後に作る
+    // 経路(プリパス無効時)では前フレームの行列が入る。
+    // 取り違えてもコンパイルは通り絵もそれらしく出るので、CPU側が明示的に選ぶ
     float4x4 CullPrevViewProj;
-    // x=候補数、y=Hi-Zのミップ段数、z=オクルージョン判定の有効フラグ、
+    // x=**このディスパッチが受け持つ**候補数、y=Hi-Zのミップ段数、
+    // z=オクルージョン判定の有効フラグ、
     // w=引数配列の先頭オフセット[バイト](手前は区画ごとの発行数が占める)
     uint4 CullParams;
-    // x=区画1つぶんのバイト数、y=区画数、zw=未使用
+    // x=区画1つぶんのバイト数、y=区画数、
+    // z=このディスパッチが受け持つ候補の先頭番号、
+    // w=統計([0..3])を数え始める候補番号。
+    //
+    // 【zとwが要る理由】Hi-Zを深度プリパスから作るとき、判定は2回に分かれる ――
+    // 深度プリパスぶんはプリパスの前に(前フレームのHi-Zで)、G-Bufferぶんは
+    // Hi-Zを作り終えてから(今フレームのHi-Zで)。候補配列は1本のままなので、
+    // どこからどこまでを受け持つかを渡す。
+    // **統計はG-Bufferぶんだけ数える** ―― 両方数えると同じモデルを2回数えることになり、
+    // 「判定 1534」のようにモデル数の2倍が出てCPU側の数と単位が合わなくなる
     uint4 CullRegionParams;
     // xy=Hi-Zのミップ0の解像度[画素]、zw=未使用
     float4 CullHiZScreenParams;
@@ -78,42 +90,57 @@ RWByteAddressBuffer CullDrawArgs : register(u1);
 [numthreads(KURENAI_MODEL_CULL_GROUP_SIZE, 1, 1)]
 void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    const uint index = dispatchThreadId.x;
-    if (index >= CullParams.x)
+    if (dispatchThreadId.x >= CullParams.x)
     {
         return;
     }
+    const uint index = CullRegionParams.z + dispatchThreadId.x;
+    // 統計を数えるのはG-Bufferぶんの候補だけ。詳細はCullRegionParamsのコメント
+    const bool countStats = (index >= CullRegionParams.w);
 
     const ModelCullInstance candidate = CullInstances[index];
 
     // 判定した数。**間引いた数だけでは、判定式が常に通しているのか
     // 本当に全部見えているのかを区別できない**(CPU側の統計と同じ理由)
-    InterlockedAdd(CullCounters[0], 1);
+    if (countStats)
+    {
+        InterlockedAdd(CullCounters[0], 1);
+    }
 
     float4 planes[6];
     ExtractFrustumPlanes(CullViewProj, planes);
     if (!AabbInFrustumPlanes(planes, candidate.BoundsMin, candidate.BoundsMax))
     {
-        InterlockedAdd(CullCounters[1], 1);
+        if (countStats)
+        {
+            InterlockedAdd(CullCounters[1], 1);
+        }
         return;
     }
 
     if (CullParams.z != 0)
     {
-        // 1フレーム古いHi-Zで判定するので、カメラ移動ぶんだけAABBを膨らませて
-        // 視差のずれを保守側へ吸収する
+        // 1フレーム古いHi-Zで判定するときだけ、カメラ移動ぶんだけAABBを膨らませて
+        // 視差のずれを保守側へ吸収する。今フレームのHi-Zならこの値は0で渡される
+        // (膨らませると間引けるものを取りこぼすだけ)
         const float expand = CullExpandParams.x;
         if (IsAabbOccludedByHiZ(
                 CullHiZTexture, CullPrevViewProj,
                 candidate.BoundsMin - expand, candidate.BoundsMax + expand,
                 CullHiZScreenParams.xy, CullParams.y))
         {
-            InterlockedAdd(CullCounters[2], 1);
+            if (countStats)
+            {
+                InterlockedAdd(CullCounters[2], 1);
+            }
             return;
         }
     }
 
-    InterlockedAdd(CullCounters[3], 1);
+    if (countStats)
+    {
+        InterlockedAdd(CullCounters[3], 1);
+    }
 
     // 描くものが無い候補(メッシュレットを持たない段など)は引数に載せない。
     // グループ数0のDispatchMeshは害こそ無いが、発行数を水増しして

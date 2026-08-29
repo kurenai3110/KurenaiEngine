@@ -104,21 +104,29 @@ Texture2D<float> HiZTexture : register(t8);
 
 bool IsMeshletOccluded(float3 centerWorld, float radiusWorld)
 {
-    if (OcclusionCullParams.x == 0.0f)
+    if (OcclusionCullParams.x == 0.0f || MeshletOcclusionMode == 0u)
     {
         return false;
     }
 
+    // 【投影に使う行列は「そのHi-Zを描いた行列」でなければならない】
+    // モード1で読めるのは前フレームの深度から作ったHi-Zなので前フレームの行列、
+    // モード2は同じフレームの深度プリパスから作ったものなので今フレームの行列。
+    // 取り違えてもコンパイルは通り絵もそれらしく出る(GBufferCommon.hlsliのMeshletOcclusionMode参照)
+    const bool usePrevFrame = (MeshletOcclusionMode == 1u);
+    const float4x4 occlusionViewProj = usePrevFrame ? PrevViewProj : ViewProj;
+
     // 1フレーム古いHi-Zで判定するための保守的な膨張。
     //   - 半径倍率: バウンディング球がメッシュレットの実体より緩いこと、カメラ回転による見え方の変化
     //   - カメラ移動距離: 前フレームからの視差ずれ。シーンが静的なので原因はカメラの移動だけ
-    // 2項は別々の失敗に効くので、片方を上げてももう片方の穴は塞がらない
-    const float radius = radiusWorld * OcclusionCullParams.y + OcclusionCullParams.z;
+    // 2項は別々の失敗に効くので、片方を上げてももう片方の穴は塞がらない。
+    // **今フレームのHi-Zならどちらも要らない** ―― ずれる原因そのものが無い
+    const float radius = usePrevFrame
+        ? (radiusWorld * OcclusionCullParams.y + OcclusionCullParams.z)
+        : radiusWorld;
 
-    // 【PrevViewProjを渡すこと】読めるHi-Zは前フレームの深度から作ったものなので、
-    // 投影にはそれを描いた行列を使う(HiZCull.hlsliのコメント参照)
     return IsAabbOccludedByHiZ(
-        HiZTexture, PrevViewProj,
+        HiZTexture, occlusionViewProj,
         centerWorld - radius, centerWorld + radius,
         HiZScreenParams.xy, (uint)OcclusionCullParams.w);
 }

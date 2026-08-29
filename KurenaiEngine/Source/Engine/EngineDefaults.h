@@ -549,6 +549,14 @@ namespace Kurenai::Defaults
     // モデル単位のGPUカリング(Stage 5-3)を走らせるか。
     // メッシュレット経路とHi-Zが要るので、非対応環境では走らない
     inline constexpr bool ModelCullGpuEnabled = true;
+    // Hi-Zを深度プリパスの深度から作るか。
+    //
+    // 【これが有効だとG-Bufferの判定に1フレーム遅れが無くなる】プリパスが書いた
+    // 今フレームの深度から作るため、投影に前フレームの行列を使う必要も、
+    // 視差ぶんを膨らませる必要も無くなり、カメラが動いてもポップしない。
+    // 深度プリパスが走らないフレームでは、この値によらず従来どおり
+    // G-Bufferの後で作り、次フレームに前フレームのものとして読む
+    inline constexpr bool HiZFromDepthPrepass = true;
     // カリング結果で実際に描画発行(ExecuteIndirect)まで行うか。
     //
     // 【切っても判定と計数は動く】falseなら描くのは従来のCPUループのままで、

@@ -952,6 +952,10 @@ namespace Kurenai
             // 深度プリパスは G-Buffer と同じ増幅シェーダーを使うため、
             // フレーム全体のフラグだけだと同じ塊を1フレームに2回数えてしまう
             uint32_t MeshletStatsEnabled;
+            // このドローでHi-Zオクルージョン判定をどう行うか(0=しない / 1=前フレームのHi-Z /
+            // 2=今フレームのHi-Z)。値の意味と、パスで分ける必要がある理由は
+            // Shaders/3D/GBufferCommon.hlsli の MeshletOcclusionMode を参照
+            uint32_t MeshletOcclusionMode;
         };
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
@@ -1034,7 +1038,7 @@ namespace Kurenai
         ObjectConstants MakeModelObjectConstants(
             const Assets::ModelInstance& instance, const Assets::Model& model, float emissiveIntensity,
             bool occlusionMapEnabled, uint32_t rejectMask, uint32_t requireMask,
-            bool countCullStats = false, float ditherFade = 1.0f)
+            bool countCullStats = false, float ditherFade = 1.0f, uint32_t occlusionMode = 0u)
         {
             ObjectConstants constants{};
             constants.DitherFade = ditherFade;
@@ -1064,6 +1068,7 @@ namespace Kurenai
             // 統計を数えるのは G-Buffer パスだけ。深度プリパスとシャドウは同じ
             // 増幅シェーダーを使うので、ここで切らないと同じ塊を何度も数えてしまう
             constants.MeshletStatsEnabled = countCullStats ? 1u : 0u;
+            constants.MeshletOcclusionMode = occlusionMode;
             return constants;
         }
 
@@ -1274,12 +1279,15 @@ namespace Kurenai
         {
             // 視錐台判定に使う。**今フレームの**ビュー射影行列(CPU側の判定と揃える)
             DirectX::XMFLOAT4X4 CullViewProj;
-            // Hi-Z判定に使う。そのHi-Zの元になった深度を描いた行列(現状は前フレーム)
+            // Hi-Z判定に使う。そのHi-Zの元になった深度を描いた行列。
+            // 深度プリパスから作る経路では今フレーム、そうでなければ前フレームのもの
             DirectX::XMFLOAT4X4 CullPrevViewProj;
             // x=候補数、y=Hi-Zのミップ段数、z=オクルージョン判定の有効フラグ、
             // w=引数配列の先頭オフセット[バイト]
             DirectX::XMUINT4 CullParams;
-            // x=区画1つぶんのバイト数、y=区画数、zw=未使用
+            // x=区画1つぶんのバイト数、y=区画数、
+            // z=このディスパッチが受け持つ候補の先頭番号、
+            // w=統計を数え始める候補番号(G-Bufferぶんの先頭)
             DirectX::XMUINT4 CullRegionParams;
             // xy=Hi-Zのミップ0の解像度[画素]、zw=未使用
             DirectX::XMFLOAT4 CullHiZScreenParams;
@@ -1345,6 +1353,9 @@ namespace Kurenai
             // メッシュレット単位のカリング統計を数えるか。
             // **G-Bufferの区画だけtrue** ―― プリパスでも数えると同じメッシュレットを二重に数える
             bool CountCullStats;
+            // Hi-Zオクルージョン判定のモード(0=しない / 1=前フレーム / 2=今フレーム)。
+            // 深度プリパスとG-Bufferで読むHi-Zの中身が違うため区画ごとに変わる
+            uint32_t OcclusionMode;
         };
 
         // widthとheightのうち大きい方が1になるまでのミップ数(width/heightそのものを含む)を返す。
@@ -6961,6 +6972,17 @@ namespace Kurenai
                 m_ModelCullRegionIssued[kModelCullRegionPrepassCutoutMirrored]);
             Core::Logger::Info("Perf", modelCullRegionText);
 
+            // どの経路で判定したか。**間引き数だけでは切り替わったか分からない** ――
+            // カメラが止まっていれば前フレームのHi-Zと今フレームのHi-Zは同じ内容になり、
+            // 新旧どちらの経路でも同じ数が出る。経路そのものを出しておく
+            char modelCullPathText[192];
+            std::snprintf(
+                modelCullPathText, sizeof(modelCullPathText),
+                "  Hi-Zの出どころ: %s / 判定ディスパッチ: プリパスぶん %u + G-Bufferぶん %u",
+                m_HiZFromDepthPrepassLastFrame ? "深度プリパス(今フレーム)" : "G-Bufferの後(前フレーム)",
+                m_ModelCullDispatchCounts[0], m_ModelCullDispatchCounts[1]);
+            Core::Logger::Info("Perf", modelCullPathText);
+
             if (m_ModelCullTested != m_ModelCullComparedCandidateCount ||
                 m_ModelCullFrustumCulled != m_ModelCullComparedCpuFrustumCulled)
             {
@@ -8079,6 +8101,15 @@ namespace Kurenai
         const bool occlusionCullEnabledThisFrame =
             occlusionCullingActive && m_HiZValid && m_TAAPrevViewProjValid;
 
+        // 深度プリパスが走るなら、その深度からHi-Zを作れる。**そのフレームのG-Bufferは
+        // 前フレームのHi-Zを待たなくてよい** ―― 上の2条件はどちらも要らなくなる。
+        // 条件の意味と、プリパス自身が今フレームのHi-Zを使えない理由は、
+        // 下の hiZFromDepthPrepass を定義している箇所のコメントにある
+        const bool depthPrepassRuns = m_DepthPrepassEnabled
+            && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
+        const bool hiZFromDepthPrepass =
+            m_HiZFromDepthPrepassEnabled && occlusionCullingActive && depthPrepassRuns;
+
         // 前フレームからのカメラ移動距離。シーンが静的である以上、1フレームぶんの視差ずれの
         // 原因はカメラの移動だけなので、その距離をバウンディング球の半径へ足せば
         // 保守側(間引きすぎない側)へ倒せる。前フレームが無いフレームでは0でよい
@@ -8092,8 +8123,12 @@ namespace Kurenai
             cameraMoveDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
         }
 
+        // 【フレーム全体の「判定するか」はここ、「どのHi-Zで判定するか」はドローごと】
+        // 深度プリパスから作る経路では、前フレームのHi-Zが無いフレームでも
+        // G-Bufferは今フレームのHi-Zで判定できる。どちらの経路も無いときだけ全体を止める
+        // (ドローごとの選択は ObjectConstants::MeshletOcclusionMode)
         constants.OcclusionCullParams = {
-            occlusionCullEnabledThisFrame ? 1.0f : 0.0f,
+            (occlusionCullEnabledThisFrame || hiZFromDepthPrepass) ? 1.0f : 0.0f,
             m_OcclusionCullRadiusScale,
             cameraMoveDistance,
             static_cast<float>(m_HiZMipLevels),
@@ -9606,8 +9641,8 @@ namespace Kurenai
         // メッシュレット版のPSOが作れなかった場合は、その経路で描くモデルだけを
         // プリパスから外す(下のループ参照)。深度が埋まらないぶん早期Zが効かないだけで、
         // G-Buffer側が改めて深度を書くため絵は壊れない
-        const bool depthPrepassRuns = m_DepthPrepassEnabled
-            && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
+        // (depthPrepassRuns / hiZFromDepthPrepass の宣言は FrameConstants を組む箇所にある)
+
         // --- モデル単位のGPUカリングパス(Stage 5-3) ---
         //
         // 描画候補のワールドAABBを、コンピュートシェーダーが視錐台とHi-Zで判定し、
@@ -9623,6 +9658,29 @@ namespace Kurenai
         // 前フレームに書かれた内容になる。カメラ移動ぶんAABBを膨らませて視差を吸収する
         const bool modelCullGpuActive = m_ModelCullGpuEnabled && meshletPathActive
             && m_ModelCullPipelineState && m_ModelCullCounterBuffer && !m_Scene.Instances.empty();
+
+        // hiZFromDepthPrepass = Hi-Zを**深度プリパスの深度から**作るか(宣言は上流にある)。
+        // 作れるなら、G-Bufferの判定は今フレームのHi-Zで行える ――
+        // 1フレーム遅れも保守的な膨張も要らなくなる。
+        //
+        // 【プリパスが走らないフレームは従来どおり】プリパスが無ければ深度が埋まっておらず、
+        // そこでHi-Zを作っても中身は空になる。その場合はG-Bufferの後で作り、
+        // 次フレームに前フレームのものとして読む(m_HiZValidが立つのもそのとき)。
+        //
+        // 【プリパス自身は今フレームのHi-Zを使えない】そのHi-Zはプリパスの出力から作る。
+        // プリパスは従来どおり前フレームのHi-Zで判定する ―― 保守的なので絵は壊れないし、
+        // 判定を捨てるとプリパスが描くメッシュレットが9倍近くに戻る
+
+        // 前フレームのHi-Zで判定してよいか(深度プリパス、およびプリパスが無いときのG-Buffer)
+        const bool occlusionPrevFrameEnabled = occlusionCullEnabledThisFrame;
+        // 今フレームのHi-Zで判定してよいか(G-Buffer。Hi-Z構築パスが必ず先に走る)
+        const bool occlusionCurrentFrameEnabled = hiZFromDepthPrepass;
+
+        // ObjectConstants::MeshletOcclusionMode と ModelCull のオクルージョン有効フラグへ渡す値
+        const uint32_t prepassOcclusionMode = occlusionPrevFrameEnabled ? 1u : 0u;
+        const uint32_t gbufferOcclusionMode = occlusionCurrentFrameEnabled
+            ? 2u
+            : (occlusionPrevFrameEnabled ? 1u : 0u);
 
         // 区画(=PSO)の対応表。nullptrの区画は候補に載せない(そのぶんは従来のCPUループが描く)
         RHI::IRHIPipelineState* modelCullRegionPipelines[kModelCullRegionCount]{};
@@ -9650,9 +9708,14 @@ namespace Kurenai
 
         // 候補の列挙。**プリパスとG-Bufferの元のループとまったく同じ条件で選ぶこと** ――
         // 選び方がずれると、間引かれてもいないのに描かれないドローが出る
+        //
+        // 【並びは「深度プリパスぶん → G-Bufferぶん」】判定を2回に分けるため、
+        // 各ディスパッチが受け持つ範囲が連続していなければならない
         std::vector<ModelCullDrawCandidate> modelCullDraws;
+        std::vector<ModelCullDrawCandidate> modelCullGBufferDraws;
         std::fill(std::begin(m_ModelCullRegionCandidates), std::end(m_ModelCullRegionCandidates), 0u);
         m_ModelCullCandidateCount = 0;
+        m_ModelCullPrepassCandidateCount = 0;
         m_ModelCullCpuFrustumCulled = 0;
         if (modelCullGpuActive)
         {
@@ -9693,8 +9756,9 @@ namespace Kurenai
                     const bool cpuVisible =
                         IsAABBVisible(cullFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax);
 
-                    const auto addCandidate = [&](uint32_t region, uint32_t rejectMask, uint32_t requireMask,
-                                                  float ditherFade, bool countCullStats)
+                    const auto addCandidate = [&](std::vector<ModelCullDrawCandidate>& list, uint32_t region,
+                                                  uint32_t rejectMask, uint32_t requireMask, float ditherFade,
+                                                  bool countCullStats, uint32_t occlusionMode)
                     {
                         if (!modelCullRegionPipelines[region])
                         {
@@ -9709,9 +9773,12 @@ namespace Kurenai
                         candidate.RequireMask = requireMask;
                         candidate.DitherFade = ditherFade;
                         candidate.CountCullStats = countCullStats;
-                        modelCullDraws.push_back(candidate);
+                        candidate.OcclusionMode = occlusionMode;
+                        list.push_back(candidate);
                         ++m_ModelCullRegionCandidates[region];
-                        if (!cpuVisible)
+                        // 【CPU側の間引き数もG-Bufferぶんだけ数える】GPU側の統計と単位を揃えるため。
+                        // 両方数えると1モデルを2回数え、モデル数の2倍という比べにくい数になる
+                        if (countCullStats && !cpuVisible)
                         {
                             ++m_ModelCullCpuFrustumCulled;
                         }
@@ -9720,8 +9787,10 @@ namespace Kurenai
                     // G-Buffer。半透明(BLEND)だけは増幅シェーダーが落とす ――
                     // G-Bufferに書かず専用のフォワードパスへ回るため
                     addCandidate(
+                        modelCullGBufferDraws,
                         mirrored ? kModelCullRegionGBufferMirrored : kModelCullRegionGBuffer,
-                        Assets::kGpuMaterialFlagTransparent, 0u, lodDitherFade, /*countCullStats=*/true);
+                        Assets::kGpuMaterialFlagTransparent, 0u, lodDitherFade, /*countCullStats=*/true,
+                        gbufferOcclusionMode);
 
                     // 深度プリパス。
                     // 【クロスディザのフェード中は載せない】不透明用のPSOはピクセルシェーダーを
@@ -9732,18 +9801,26 @@ namespace Kurenai
                         continue;
                     }
                     addCandidate(
+                        modelCullDraws,
                         mirrored ? kModelCullRegionPrepassOpaqueMirrored : kModelCullRegionPrepassOpaque,
-                        Assets::kGpuMaterialFlagTransparent | Assets::kGpuMaterialFlagCutout, 0u, 1.0f, false);
+                        Assets::kGpuMaterialFlagTransparent | Assets::kGpuMaterialFlagCutout, 0u, 1.0f, false,
+                        prepassOcclusionMode);
                     // カットアウトぶん(clipを通す)。持たないモデルではこの回は発行しない
                     if (lodModel.HasCutoutMaterial)
                     {
                         addCandidate(
+                            modelCullDraws,
                             mirrored ? kModelCullRegionPrepassCutoutMirrored : kModelCullRegionPrepassCutout,
-                            Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout, 1.0f, false);
+                            Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout, 1.0f, false,
+                            prepassOcclusionMode);
                     }
                 }
             }
 
+            // プリパスぶんを前半、G-Bufferぶんを後半に置く
+            m_ModelCullPrepassCandidateCount = static_cast<uint32_t>(modelCullDraws.size());
+            modelCullDraws.insert(
+                modelCullDraws.end(), modelCullGBufferDraws.begin(), modelCullGBufferDraws.end());
             m_ModelCullCandidateCount = static_cast<uint32_t>(modelCullDraws.size());
             EnsureModelCullCapacity(m_ModelCullCandidateCount);
         }
@@ -9756,91 +9833,133 @@ namespace Kurenai
         const bool modelCullIndirectActive =
             modelCullReady && m_ModelCullIndirectEnabled && m_Device->SupportsIndirectDispatchMesh();
         m_ModelCullIndirectActiveLastFrame = modelCullIndirectActive;
+        m_HiZFromDepthPrepassLastFrame = hiZFromDepthPrepass;
+        m_ModelCullDispatchCounts[0] = hiZFromDepthPrepass
+            ? m_ModelCullPrepassCandidateCount
+            : m_ModelCullCandidateCount;
+        m_ModelCullDispatchCounts[1] = hiZFromDepthPrepass
+            ? (m_ModelCullCandidateCount - m_ModelCullPrepassCandidateCount)
+            : 0u;
 
-        if (modelCullReady)
+        // 候補配列のうち [beginIndex, beginIndex + count) だけを判定するパスを1つ登録する。
+        //
+        // 【2回に分ける必要がある】Hi-Zを深度プリパスの深度から作ると、判定に使えるHi-Zが
+        // フレームの途中で「前フレームのもの」から「今フレームのもの」へ変わる。
+        // 深度プリパスぶんはプリパスより前に前フレームのHi-Zで、G-Bufferぶんは
+        // Hi-Zを作り終えてから今フレームのHi-Zで判定する。
+        // initializeBuffers は候補配列の書き込みとカウンタ初期化を行うか(先頭の1回だけtrue)
+        const auto addModelCullPass =
+            [&](std::string passName, uint32_t beginIndex, uint32_t count, bool initializeBuffers,
+                bool useCurrentFrameHiZ, bool occlusionEnabled)
         {
-            const uint32_t candidateCount = m_ModelCullCandidateCount;
-            const bool occlusionForModelCull = occlusionCullEnabledThisFrame;
+            if (!modelCullReady || (count == 0 && !initializeBuffers))
+            {
+                return;
+            }
             const uint32_t regionStride = m_ModelCullRegionStride;
+            const uint32_t statsBeginIndex = m_ModelCullPrepassCandidateCount;
             graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "ModelCull",
-                // 前フレームのHi-Zを読む。GBufferパスと同じ理由で循環にはならない
-                // (RenderGraphのReadsは、それより前に登録された書き手にだけ辺を張る)
+                .Name = std::move(passName),
+                // Hi-Zを読む。前フレームのものを読む側では、それより前に書き手がいないので
+                // 辺は張られない(RenderGraphのReadsは登録順で解決する)
                 .Reads = { m_HiZTexture.get() },
                 .BufferWrites = { m_ModelCullCounterBuffer.get(), m_ModelCullDrawArgsBuffer.get() },
-                .Execute = [this, candidateCount, occlusionForModelCull, modelCullIndirectActive,
-                            cameraMoveDistance, regionStride, &viewProj,
-                            &modelCullDraws](RHI::IRHICommandList* cmd)
+                .Execute = [this, beginIndex, count, initializeBuffers, useCurrentFrameHiZ, occlusionEnabled,
+                            regionStride, statsBeginIndex, cameraMoveDistance, modelCullIndirectActive,
+                            &viewProj, &modelCullDraws](RHI::IRHICommandList* cmd)
                 {
-                    // 候補ごとのObjectConstantsを定数バッファのリングへ書き、そのスロットの
-                    // GPUアドレスを候補に添える。
-                    //
-                    // 【描画パスではなくここで書く理由】ExecuteIndirectの引数には
-                    // 「このドローが使う定数バッファのアドレス」そのものが要る。アドレスは
-                    // UpdateBufferがリングを1つ進めた後にしか分からず、しかも引数を組み立てるのは
-                    // このパスのコンピュートシェーダーなので、その材料より前に書いておく必要がある。
-                    //
-                    // 【リングは足りている】このぶんの書き込みは、間接描画が有効なら
-                    // プリパスとG-Bufferのループから同じ数だけ消えるので合計は増えない
-                    m_ModelCullUploadScratch.clear();
-                    m_ModelCullUploadScratch.reserve(modelCullDraws.size());
-                    for (const ModelCullDrawCandidate& draw : modelCullDraws)
+                    if (initializeBuffers)
                     {
-                        GpuModelCullInstance candidate{};
-                        candidate.BoundsMin[0] = draw.Instance->WorldBoundsMin[0];
-                        candidate.BoundsMin[1] = draw.Instance->WorldBoundsMin[1];
-                        candidate.BoundsMin[2] = draw.Instance->WorldBoundsMin[2];
-                        candidate.BoundsMax[0] = draw.Instance->WorldBoundsMax[0];
-                        candidate.BoundsMax[1] = draw.Instance->WorldBoundsMax[1];
-                        candidate.BoundsMax[2] = draw.Instance->WorldBoundsMax[2];
-                        candidate.GroupCount = draw.GroupCount;
-                        candidate.RegionIndex = draw.Region;
-
-                        if (modelCullIndirectActive)
+                        // 候補ごとのObjectConstantsを定数バッファのリングへ書き、そのスロットの
+                        // GPUアドレスを候補に添える。
+                        //
+                        // 【描画パスではなくここで書く理由】ExecuteIndirectの引数には
+                        // 「このドローが使う定数バッファのアドレス」そのものが要る。アドレスは
+                        // UpdateBufferがリングを1つ進めた後にしか分からず、しかも引数を組み立てるのは
+                        // このパスのコンピュートシェーダーなので、その材料より前に書いておく必要がある。
+                        //
+                        // 【後半(G-Bufferぶん)もここで書く】2回目のディスパッチのぶんも含めて
+                        // 一度に載せる。リングのスロットは上書きされない限り生き続けるので、
+                        // 使うのが後のパスでも構わない
+                        m_ModelCullUploadScratch.clear();
+                        m_ModelCullUploadScratch.reserve(modelCullDraws.size());
+                        for (const ModelCullDrawCandidate& draw : modelCullDraws)
                         {
-                            const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                *draw.Instance, *draw.Model, m_EmissiveIntensity, m_OcclusionMapEnabled,
-                                draw.RejectMask, draw.RequireMask, draw.CountCullStats, draw.DitherFade);
-                            cmd->UpdateBuffer(
-                                m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                            if (!m_ObjectConstantBuffer->GetLastUpdateGpuAddress(
-                                    candidate.CbvAddress[0], candidate.CbvAddress[1]))
+                            GpuModelCullInstance candidate{};
+                            candidate.BoundsMin[0] = draw.Instance->WorldBoundsMin[0];
+                            candidate.BoundsMin[1] = draw.Instance->WorldBoundsMin[1];
+                            candidate.BoundsMin[2] = draw.Instance->WorldBoundsMin[2];
+                            candidate.BoundsMax[0] = draw.Instance->WorldBoundsMax[0];
+                            candidate.BoundsMax[1] = draw.Instance->WorldBoundsMax[1];
+                            candidate.BoundsMax[2] = draw.Instance->WorldBoundsMax[2];
+                            candidate.GroupCount = draw.GroupCount;
+                            candidate.RegionIndex = draw.Region;
+
+                            if (modelCullIndirectActive)
                             {
-                                // アドレスが取れないバックエンドはそもそも間接描画へ行かない。
-                                // 万一ここへ来たら、嘘のアドレスを引数へ書くよりは
-                                // 「描くものが無い候補」にしてGPUに触らせない
-                                candidate.GroupCount = 0;
+                                const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                    *draw.Instance, *draw.Model, m_EmissiveIntensity, m_OcclusionMapEnabled,
+                                    draw.RejectMask, draw.RequireMask, draw.CountCullStats, draw.DitherFade,
+                                    draw.OcclusionMode);
+                                cmd->UpdateBuffer(
+                                    m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                if (!m_ObjectConstantBuffer->GetLastUpdateGpuAddress(
+                                        candidate.CbvAddress[0], candidate.CbvAddress[1]))
+                                {
+                                    // アドレスが取れないバックエンドはそもそも間接描画へ行かない。
+                                    // 万一ここへ来たら、嘘のアドレスを引数へ書くよりは
+                                    // 「描くものが無い候補」にしてGPUに触らせない
+                                    candidate.GroupCount = 0;
+                                }
                             }
+
+                            m_ModelCullUploadScratch.push_back(candidate);
                         }
+                        cmd->UpdateBuffer(
+                            m_ModelCullInstanceBuffer.get(), m_ModelCullUploadScratch.data(),
+                            static_cast<uint32_t>(
+                                sizeof(GpuModelCullInstance) * m_ModelCullUploadScratch.size()));
 
-                        m_ModelCullUploadScratch.push_back(candidate);
+                        // 加算しかしないので毎フレーム0へ戻す。生き残りを詰める位置も
+                        // このカウンタで取るため、戻さないと2フレーム目以降が範囲外へ書く
+                        cmd->ClearUnorderedAccessBufferUint(m_ModelCullCounterBuffer.get(), 0);
+                        // 引数バッファも同じ理由で戻す。**先頭の発行数だけでなく全体を0にする** ――
+                        // 前フレームの引数が残っていると、件数が減ったときに古い引数が
+                        // 範囲内に居座り、そのぶんが二重に描かれる
+                        cmd->ClearUnorderedAccessBufferUint(m_ModelCullDrawArgsBuffer.get(), 0);
                     }
-                    cmd->UpdateBuffer(
-                        m_ModelCullInstanceBuffer.get(), m_ModelCullUploadScratch.data(),
-                        static_cast<uint32_t>(sizeof(GpuModelCullInstance) * m_ModelCullUploadScratch.size()));
 
-                    // 加算しかしないので毎フレーム0へ戻す。生き残りを詰める位置も
-                    // このカウンタで取るため、戻さないと2フレーム目以降が範囲外へ書く
-                    cmd->ClearUnorderedAccessBufferUint(m_ModelCullCounterBuffer.get(), 0);
-                    // 引数バッファも同じ理由で戻す。**先頭の発行数だけでなく全体を0にする** ――
-                    // 前フレームの引数が残っていると、件数が減ったときに古い引数が
-                    // 範囲内に居座り、そのぶんが二重に描かれる
-                    cmd->ClearUnorderedAccessBufferUint(m_ModelCullDrawArgsBuffer.get(), 0);
+                    if (count == 0)
+                    {
+                        return;
+                    }
 
                     ModelCullConstants cullConstants{};
                     DirectX::XMStoreFloat4x4(
                         &cullConstants.CullViewProj, DirectX::XMMatrixTranspose(viewProj));
-                    cullConstants.CullPrevViewProj =
-                        m_TAAPrevViewProjValid ? m_TAAPrevViewProj : DirectX::XMFLOAT4X4{};
+                    if (useCurrentFrameHiZ)
+                    {
+                        // 今フレームの深度プリパスから作ったHi-Zを読む。投影も今フレームの行列
+                        cullConstants.CullPrevViewProj = cullConstants.CullViewProj;
+                    }
+                    else
+                    {
+                        cullConstants.CullPrevViewProj =
+                            m_TAAPrevViewProjValid ? m_TAAPrevViewProj : DirectX::XMFLOAT4X4{};
+                    }
                     cullConstants.CullParams = {
-                        candidateCount, m_HiZMipLevels, occlusionForModelCull ? 1u : 0u,
-                        kModelCullArgsBaseOffset
+                        count, m_HiZMipLevels, occlusionEnabled ? 1u : 0u, kModelCullArgsBaseOffset
                     };
-                    cullConstants.CullRegionParams = { regionStride, kModelCullRegionCount, 0u, 0u };
+                    cullConstants.CullRegionParams = {
+                        regionStride, kModelCullRegionCount, beginIndex, statsBeginIndex
+                    };
                     cullConstants.CullHiZScreenParams = {
                         static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight), 0.0f, 0.0f
                     };
-                    cullConstants.CullExpandParams = { cameraMoveDistance, 0.0f, 0.0f, 0.0f };
+                    // 今フレームのHi-Zなら視差のずれが無いので膨らませない
+                    cullConstants.CullExpandParams = {
+                        useCurrentFrameHiZ ? 0.0f : cameraMoveDistance, 0.0f, 0.0f, 0.0f
+                    };
                     cmd->UpdateBuffer(m_ModelCullConstantBuffer.get(), &cullConstants, sizeof(cullConstants));
 
                     cmd->SetComputePipelineState(m_ModelCullPipelineState.get());
@@ -9851,10 +9970,66 @@ namespace Kurenai
                     cmd->SetComputeUnorderedAccessBuffer(1, m_ModelCullDrawArgsBuffer.get());
 
                     constexpr uint32_t kModelCullGroupSize = 64; // ModelCull.hlslと一致させること
-                    cmd->Dispatch((candidateCount + kModelCullGroupSize - 1) / kModelCullGroupSize, 1, 1);
+                    cmd->Dispatch((count + kModelCullGroupSize - 1) / kModelCullGroupSize, 1, 1);
                 },
             });
-        }
+        };
+
+        // Hi-Zミップチェーンの構築パス。**登録する場所が2つある**ため関数にしてある。
+        // 深度プリパスが走るなら直後に(今フレームの深度から)、走らないならG-Bufferの後に。
+        // 詳細は下の hiZPassRuns のコメント
+        const auto addHiZPass = [&]()
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "HiZ",
+                .Reads = { m_GBufferDepth.get() },
+                .Writes = { m_HiZTexture.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    HiZConstants hizConstants{};
+                    hizConstants.SrcSize = { m_RenderWidth, m_RenderHeight };
+                    hizConstants.DstSize = { m_RenderWidth, m_RenderHeight };
+                    cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
+
+                    cmd->SetComputePipelineState(m_HiZCopyPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
+                    cmd->SetComputeTexture(0, m_GBufferDepth.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), 0);
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+
+                    cmd->SetComputePipelineState(m_HiZDownsamplePipelineState.get());
+                    uint32_t hizSrcWidth = m_RenderWidth;
+                    uint32_t hizSrcHeight = m_RenderHeight;
+                    for (uint32_t mip = 1; mip < m_HiZMipLevels; ++mip)
+                    {
+                        const uint32_t hizDstWidth = std::max(1u, hizSrcWidth / 2);
+                        const uint32_t hizDstHeight = std::max(1u, hizSrcHeight / 2);
+
+                        hizConstants.SrcSize = { hizSrcWidth, hizSrcHeight };
+                        hizConstants.DstSize = { hizDstWidth, hizDstHeight };
+                        cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
+                        cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
+                        cmd->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), mip - 1);
+                        cmd->SetComputeUnorderedAccessTexture(1, m_HiZTexture.get(), mip);
+                        cmd->Dispatch((hizDstWidth + 7) / 8, (hizDstHeight + 7) / 8, 1);
+
+                        hizSrcWidth = hizDstWidth;
+                        hizSrcHeight = hizDstHeight;
+                    }
+
+                    // ここまで来たら全ミップに実データが入った。
+                    // 【Executeの中で立てること】パスの登録だけでは実行されたことにならない
+                    m_HiZValid = true;
+                },
+            });
+        };
+
+        // 深度プリパスぶんの判定。**プリパスより前**でなければ間接描画の引数が間に合わない。
+        // 読めるHi-Zは前フレームのものなので、保守的に膨らませる従来の経路のまま
+        addModelCullPass(
+            "ModelCull", 0u,
+            hiZFromDepthPrepass ? m_ModelCullPrepassCandidateCount : m_ModelCullCandidateCount,
+            /*initializeBuffers=*/true, /*useCurrentFrameHiZ=*/false, occlusionPrevFrameEnabled);
 
         if (depthPrepassRuns)
         {
@@ -10080,6 +10255,22 @@ namespace Kurenai
                     }
                 },
             });
+        }
+
+        // 深度プリパスが書いた深度からHi-Zを作り、**今フレームのHi-Z**でG-Bufferぶんを判定する。
+        // ここまで来ればプリパスは全不透明ジオメトリの深度を書き終えている ――
+        // 1フレーム遅れも保守的な膨張も要らず、判定はそのまま正確になる。
+        //
+        // 【プリパスの深度は G-Buffer が描くものの部分集合】LODのフェード中のモデルなど、
+        // プリパスから外れるものがある。遮蔽物が減る方向なので間引きが甘くなるだけで、
+        // 見えているものを消す側へは倒れない
+        if (hiZFromDepthPrepass)
+        {
+            addHiZPass();
+            addModelCullPass(
+                "ModelCullGBuffer", m_ModelCullPrepassCandidateCount,
+                m_ModelCullCandidateCount - m_ModelCullPrepassCandidateCount,
+                /*initializeBuffers=*/false, /*useCurrentFrameHiZ=*/true, occlusionCullingActive);
         }
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
@@ -10421,6 +10612,16 @@ namespace Kurenai
         // 読むのは前フレームのHi-Zになる。判定側はそれを前提に、前フレームのビュー射影行列
         // (FrameConstants::PrevViewProj)で投影し、球を保守的に膨らませて吸収している
         // (GBufferMeshlet.hlslのIsMeshletOccluded参照)
+        // Hi-Zミップチェーンの構築。**このパスは条件付きで走らせる。**
+        // 1280x720ならコピー1回+ミップ段数-1回のディスパッチ(計11回)で、Intel UHD 620での
+        // 実測で1.19〜1.21ms、GPUフレーム時間30msの約4%を占める。消費者がいないフレームでは
+        // その4%をまるごと捨てることになるので、条件を丸ごと外してはいけない。
+        //
+        // 【登録する場所は2つある】深度プリパスが走るなら**その直後**に登録済みで
+        // (hiZFromDepthPrepass。今フレームの深度から作り、同じフレームのG-Bufferが読む)、
+        // ここへは来ない。プリパスが走らないフレームだけ、従来どおりG-Bufferの後で作る ――
+        // その場合に読めるのは次フレームで、増幅シェーダーは前フレームのビュー射影行列で
+        // 投影し、球を保守的に膨らませて視差を吸収する(GBufferMeshlet.hlslのIsMeshletOccluded)
         const bool hiZPassRuns = (m_DebugView == DebugView::HiZ) || occlusionCullingActive;
         if (!hiZPassRuns)
         {
@@ -10430,51 +10631,9 @@ namespace Kurenai
             // ONへ戻す操作で踏むので、"構築しなかった"を必ず記録しておく
             m_HiZValid = false;
         }
-        if (hiZPassRuns)
+        if (hiZPassRuns && !hiZFromDepthPrepass)
         {
-        graph.AddPass(Core::RenderGraphPassDesc{
-            .Name = "HiZ",
-            .Reads = { m_GBufferDepth.get() },
-            .Writes = { m_HiZTexture.get() },
-            .Execute = [this](RHI::IRHICommandList* cmd)
-            {
-                HiZConstants hizConstants{};
-                hizConstants.SrcSize = { m_RenderWidth, m_RenderHeight };
-                hizConstants.DstSize = { m_RenderWidth, m_RenderHeight };
-                cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
-
-                cmd->SetComputePipelineState(m_HiZCopyPipelineState.get());
-                cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
-                cmd->SetComputeTexture(0, m_GBufferDepth.get());
-                cmd->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), 0);
-                cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
-
-                cmd->SetComputePipelineState(m_HiZDownsamplePipelineState.get());
-                uint32_t hizSrcWidth = m_RenderWidth;
-                uint32_t hizSrcHeight = m_RenderHeight;
-                for (uint32_t mip = 1; mip < m_HiZMipLevels; ++mip)
-                {
-                    const uint32_t hizDstWidth = std::max(1u, hizSrcWidth / 2);
-                    const uint32_t hizDstHeight = std::max(1u, hizSrcHeight / 2);
-
-                    hizConstants.SrcSize = { hizSrcWidth, hizSrcHeight };
-                    hizConstants.DstSize = { hizDstWidth, hizDstHeight };
-                    cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
-                    cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), mip - 1);
-                    cmd->SetComputeUnorderedAccessTexture(1, m_HiZTexture.get(), mip);
-                    cmd->Dispatch((hizDstWidth + 7) / 8, (hizDstHeight + 7) / 8, 1);
-
-                    hizSrcWidth = hizDstWidth;
-                    hizSrcHeight = hizDstHeight;
-                }
-
-                // ここまで来たら全ミップに実データが入った。次フレームからオクルージョン判定に使える。
-                // 【Executeの中で立てること】パスの登録だけでは実行されたことにならない
-                // (RenderGraphは登録した全パスを実行するが、条件が変わればこのラムダは呼ばれない)
-                m_HiZValid = true;
-            },
-        });
+            addHiZPass();
         }
 
         // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
@@ -12343,7 +12502,9 @@ namespace Kurenai
             // 今フレームのCPU側の結果を、GPUのコピーとまったく同じ位置へ積む。
             // 読むときに同じ位置から取れば、比べるのは同じフレームのもの同士になる
             m_ModelCullCpuFrustumHistory[m_ModelCullRingIndex] = m_ModelCullCpuFrustumCulled;
-            m_ModelCullCandidateHistory[m_ModelCullRingIndex] = m_ModelCullCandidateCount;
+            // 【比べる相手はG-Bufferぶんの候補数】GPU側の「判定」もそこだけを数えている
+            m_ModelCullCandidateHistory[m_ModelCullRingIndex] =
+                m_ModelCullCandidateCount - m_ModelCullPrepassCandidateCount;
 
             const uint32_t oldest = (m_ModelCullRingIndex + 1) % kMeshletCullStatsRingSize;
             uint32_t counters[kModelCullCounterCount] = {};
