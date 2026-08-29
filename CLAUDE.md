@@ -11,7 +11,7 @@
 | やること | スキル |
 |---|---|
 | ビルドと起動 | `build-run` |
-| HLSLの一括コンパイル検証(マージ後・PR取り込み後・`.hlsl`編集後) | `shader-check` |
+| HLSLの一括コンパイル検証(通常はビルドが兼ねる。fxc/dxc単体で切り分けたいとき) | `shader-check` |
 | 描画結果のA/B比較 | `ab-compare` |
 | 実在の風景・建物を参考画像に近づける | `reference-match` |
 
@@ -39,9 +39,13 @@
 - **描画はDeferred Shadingの10パス構成**(シャドウ→ジオメトリ→Hi-Z→直接光→AO/GI→最終合成→
   半透明フォワード→SSR→Tonemap→Present)。**半透明(`alphaMode=BLEND`)だけはG-Bufferに書かず
   専用のフォワードパスへ回る**ため、スクリーンスペース系の効果(SSR等)が効かない
-- **シェーダはビルド対象ではない。** `.hlsl` は実行時に出力フォルダの `Shaders/` から読まれる。
-  **C++のビルドが通ってもHLSLは一切検証されていない**ので、シェーダを触ったら必ず起動して確かめる。
-  逆に、シェーダだけの変更ならビルド不要(出力フォルダの `Shaders/` を差し替えて起動し直せばよい)
+- **シェーダはビルド対象。`.hlsl` を触ったらビルドが要る。** `KurenaiShaderPacker.exe` が
+  `KurenaiEngine3D` / `KurenaiEngine2D` のビルドイベントで走り、`.hlsl` を **`.kshader`**
+  (事前コンパイル済みパッケージ)へ焼いて出力フォルダの `Shaders/` へ置く。実行時のHLSLコンパイルは無い。
+  **出力フォルダに `.hlsl` はコピーされない**ので、差し替えて起動し直すやり方は使えない
+- **HLSLのコンパイルエラーはビルドで落ちる。** 全 `.hlsl` の全エントリを3バリアント
+  (SM 5.0 / SM 6.5 / SM 6.6+bindless)で焼くため、ビルドが通った時点で一括検証も済んでいる。
+  ただし**コンパイルが通ることと絵が正しいことは別**なので、シェーダを触ったら起動して確かめる
 
 # アセット
 
@@ -49,15 +53,21 @@
   `Assets/Source/`(`.gltf`等)を `KurenaiPacker.exe` で変換して作る
 - **`.kmodel` は v10 / `.kgeom` は v4。バージョン不一致は読み込みを拒否される。**
   フォーマットを触ったら既存の `Assets/Packed/` は再パックが要る
+- **`.kshader` は v1。** シェーダーの事前コンパイル済みパッケージで、`Assets/` ではなく
+  ビルド出力の `Shaders/` に出る(Git管理外・ビルドで再生成される)。書式の定義は
+  `KurenaiEngine/Source/Library/Assets/ShaderPackage.h`
 - `Assets/Source/` のうち **Sponza 以外は `Tools/*.py` で再生成できる**(検証用シーンはすべて
   スクリプト生成)。手順は [README.md](README.md)「手順5. アセットの準備」
 - 手書きの `.kscene` だけは `Assets/` の外の `Scenes/` にあり、**こちらはGit管理対象**
 
 # 環境依存の前提
 
-- **dxc のバージョン = Windows SDK のバージョン。** `dxcompiler.dll` はSDKの
-  `bin\<SDKバージョン>\x64` からPostBuildEventでコピーされる。**10.0.26100未満だと SM6.6 が無く、
-  bindless と、bindlessでジオメトリを引くメッシュレット描画が連動して無効になる**
+- **dxc のバージョン = Windows SDK のバージョン。ただし効くのはビルドマシン側。**
+  `dxcompiler.dll` はSDKの `bin\<SDKバージョン>\x64` から `KurenaiShaderPacker` の出力先へ
+  コピーされ、シェーダーを焼くときにだけ使われる(実行環境には配布されない)。
+  **10.0.26100未満だと SM6.6 のバリアントを焼けず、bindless と、bindlessでジオメトリを引く
+  メッシュレット描画が連動して無効になる**。どのバリアントが焼けたかは `.kshader` の
+  `VariantMask` に記録され、起動時のログに「事前コンパイル済みシェーダー: ...」として出る
 - **性能の話の基準になる実機は Intel UHD Graphics 620**(i5-8250U内蔵 / 専用VRAM無し / 60Hz)。
   この実機は **DXR・メッシュシェーダー・bindless(SM6.6)のいずれも非対応**なので、
   RT反射/RTシャドウ/RTAO とメッシュレット経路は**この環境では検証できない**。

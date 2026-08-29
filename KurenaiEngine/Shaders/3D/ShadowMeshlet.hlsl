@@ -64,6 +64,14 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
     }
     GroupMemoryBarrierWithGroupSync();
 
+    // 段は**主カメラ**で決める。ここでViewProj(カスケードの正射影)から決めると、
+    // 影を落とす形と本体の形が違う段になり、影の縁が本体からずれる。
+    // 式はG-Bufferとまったく同じMeshletResolveLODLevelを通す
+    const uint selectedLODLevel = MeshletResolveLODLevel(
+        World, float3(ModelBoundsCenterX, ModelBoundsCenterY, ModelBoundsCenterZ), ModelBoundsRadius,
+        float3(MeshletLODCameraPosX, MeshletLODCameraPosY, MeshletLODCameraPosZ),
+        MeshletLODPixelScale, MeshletLODScreenSize, MeshletLODForced, MeshletLODLevelCap);
+
     if (dispatchThreadId < MeshletCount)
     {
         const uint meshletIndex = MeshletOffset + dispatchThreadId;
@@ -78,9 +86,14 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
         const bool materialAccepted =
             MeshletPassesMaterialFilter(meshlet.Flags, MeshletFilterReject, MeshletFilterRequire);
 
+        // 段による取捨。**これが無いと簡略化した段まで影に重なる。**
+        // 表(Model::MeshletBuffer)には全段が並んでおり、ディスパッチする
+        // グループ数も全段合計から決めているため、落とさなければ全段が描かれる
+        const bool lodAccepted = (MeshletLODLevel(meshlet.Flags) == selectedLODLevel);
+
         // カスケードの正射影でカリングする。カメラではなくライト側の錐台なので、
         // 画面外にあっても影を落とすものは残る
-        if (materialAccepted && MeshletSphereInFrustum(ViewProj, centerWorld, radiusWorld))
+        if (materialAccepted && lodAccepted && MeshletSphereInFrustum(ViewProj, centerWorld, radiusWorld))
         {
             uint slot;
             InterlockedAdd(s_VisibleCount, 1, slot);

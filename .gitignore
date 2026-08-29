@@ -4,6 +4,9 @@
 /Samples/Sample2D/Build/
 /Tools/KurenaiPacker/Build/
 /Tools/KurenaiShowEditor/Build/
+# シェーダービルドツールの出力。exe/pdbに加えてWindows SDKからコピーした
+# dxcompiler.dll(約13.6MB)とdxil.dllが入るため、書き忘れると約19MBが混ざる
+/Tools/KurenaiShaderPacker/Build/
 
 # Visual Studio
 .vs/

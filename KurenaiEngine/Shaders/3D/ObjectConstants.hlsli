@@ -1,15 +1,15 @@
 // モデル描画のパスすべてが共有する、メッシュ単位の定数バッファ(register b1)と、
 // インスタンシングのためのインスタンスバッファ。
 //
-// 【なぜ1本にまとめてあるのか】以前はGBuffer / Shadow / Transparent / ProbeCapture /
-// PlanarReflectionがそれぞれ同じレイアウトを手書きで複製していた。cbufferは宣言順に
-// レイアウトされるため、「読みたいフィールドまでの全フィールドを正しい順序で宣言する」
-// 必要があり、複製のどれか1つで並びがずれると、その1パスだけが静かに壊れる。
-// 実際に2件起きている:
+// 【なぜ1本にまとめてあるのか】以前はGBuffer / Shadow / ShadowMeshlet / Transparent /
+// ProbeCapture / PlanarReflectionがそれぞれ同じレイアウトを手書きで複製していた。
+// cbufferは宣言順にレイアウトされるため、「読みたいフィールドまでの全フィールドを
+// 正しい順序で宣言する」必要があり、複製のどれか1つで並びがずれると、その1パスだけが
+// 静かに壊れる。実際に3件起きている:
 //   - PlanarReflection.hlsl が宣言を1本落として16バイトずれ、水面の鏡像が丸ごと消えた
 //   - Shadow.hlsl が DitherFade を落とし、MaterialTableIndex 以降を4バイトずれて読んでいた
-//     (アルファカットアウトの影が、マテリアルテーブルの番号として DitherFade のビット列
-//      1065353216 を使い、bindlessヒープの範囲外を引いていた)
+//   - ShadowMeshlet.hlsl も同じく DitherFade が抜けており、増幅シェーダーの
+//     マテリアルふるい分けが隣のフィールドをReject/Requireマスクとして使っていた
 // 定義を1箇所にすれば、この失敗の型そのものが無くなる。
 //
 // C++側 KurenaiEngine3D.cpp の struct ObjectConstants とレイアウトを一致させること。
@@ -120,6 +120,46 @@ cbuffer ObjectConstants : register(b1)
     // 数えるのは G-Buffer パスだけにする
     uint MeshletStatsEnabled;
 
+    // --- メッシュレットLOD(Stage 6) ---------------------------------------------------
+    //
+    // 増幅シェーダーがモデルのバウンディング球の投影サイズから段を1つ選ぶ
+    // (Meshlet.hlsliのMeshletSelectLODLevel)。**選択の入力はここの定数だけ**で、
+    // メッシュレットごとの値は一切使わない ―― どのスレッドが計算しても同じ段になり、
+    // 1つのモデル内で段が混ざらないことがこれで保証される。
+    // 混ざると、簡略化で頂点が動いた側と動いていない側の辺が一致せず境目に穴が開く。
+    //
+    // 【4バイトのスカラーだけを末尾に足している】定数バッファの配列は要素ごとに
+    // 16バイトへ詰められるため、uint Offsets[4] のような書き方をすると64バイトを占め、
+    // 先頭までしか宣言していないシェーダー(Shadow.hlsl等)のオフセットまで動きうる
+    // 【float3で宣言しない】定数バッファのfloat3は16バイト境界をまたげないため、
+    // 直前の並び次第で手前に暗黙のパディングが入る。C++側の構造体に同じ詰め物を
+    // 入れ忘れると、そこから後ろの値が全部ずれる。スカラー3つなら並びが確定する
+    float ModelBoundsCenterX;   // モデルローカル空間でのモデル全体の外接球
+    float ModelBoundsCenterY;
+    float ModelBoundsCenterZ;
+    float ModelBoundsRadius;
+    // 【主カメラの値を入れる】シャドウと深度プリパスは同じ増幅シェーダーを使うが、
+    // ViewProjは光源やカスケードのものに差し替わっている。そちらで段を選ぶと
+    // パスごとに違う段が描かれ、影の落ち方と本体の形が食い違う。
+    // C++側は全パスで主カメラの位置と拡大率を入れること
+    float MeshletLODCameraPosX;
+    float MeshletLODCameraPosY;
+    float MeshletLODCameraPosZ;
+    // 距離1メートルにある長さ1メートルが何ピクセルになるか
+    // (= 射影行列の縦方向の拡大率 × レンダーターゲットの高さ / 2)
+    float MeshletLODPixelScale;
+    // 投影直径がこれを下回ったら1段落とす(ピクセル)。0以下なら段の選択を行わない
+    float MeshletLODScreenSize;
+    // 0以上なら自動選択をやめてこの段に固定する(対照実験用)。負なら自動
+    int MeshletLODForced;
+    // メッシュレットの色分け表示を「塊ごと」ではなく「段ごと」に切り替える(0/1)。
+    // 有効なときメッシュシェーダーはMeshletIndexの代わりに段の番号を出力する
+    uint MeshletDebugColorByLOD;
+    // このモデルが選べる最も粗い段(Assets::Model::MeshletLODLevelCap)。
+    // 全メッシュが持っている段の共通部分までCPU側で畳んであるので、
+    // ここで選んだ段は必ずどのメッシュにも存在し、モデル全体が同じ段になる
+    uint MeshletLODLevelCap;
+
     // --- インスタンシング -------------------------------------------------------------
     //
     // InstancingEnabledが0以外のとき、このドローは DrawIndexed(..., instanceCount) で
@@ -133,6 +173,7 @@ cbuffer ObjectConstants : register(b1)
     uint InstanceBase;
     uint InstancingEnabled;
 };
+
 
 // インスタンス1体ぶんの変換。C++側の Kurenai::GPUModelInstance と
 // バイト単位で一致させること(144バイト)
@@ -159,7 +200,8 @@ StructuredBuffer<ModelInstanceRecord> ModelInstances : register(t0);
 // 呼び出し側は分岐を書かなくてよい。
 //
 // 【一様分岐なのでPSOは増えない】条件は定数バッファの値で、ワープ内で分岐しない。
-// メッシュレット経路のようにPSOを何本も増やさずにインスタンシングを足せるのはこのため
+// メッシュレット経路のようにPSOを何本も増やさずにインスタンシングを足せるのはこのため。
+//
 // 【途中でreturnせず、出口を1つにしてある】早期returnの形で書くと、fxcが
 // warning X4000 (use of potentially uninitialized variable) を出す。この関数は
 // モデルを描く頂点シェーダー全部が通るため、放っておくと本物の警告がこれに埋もれる

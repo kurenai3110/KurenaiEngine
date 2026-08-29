@@ -229,6 +229,21 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
     }
     GroupMemoryBarrierWithGroupSync();
 
+    // --- メッシュレットLODの段を選ぶ ---------------------------------------------------
+    //
+    // 【モデル単位で1段に決める】入力はObjectConstantsのバウンディング球とカメラだけで、
+    // メッシュレットごとの値を一切使わない。したがってこのドローの全スレッド・全グループが
+    // 同じ段を出し、1つのモデル内で段が混ざることが原理的に起きない。
+    // 混ざると、簡略化で頂点が動いた側と動いていない側で辺が一致せず境目に穴が開く。
+    //
+    // 【全スレッドが同じ計算を重複して行う】グループ共有メモリへ1回だけ書いて配る手もあるが、
+    // 内容は数命令で、バリアを1つ増やすほうが高くつく。
+    // 式はMeshlet.hlsliに集約してある ―― シャドウと違う段を選ぶと影がずれる
+    const uint selectedLODLevel = MeshletResolveLODLevel(
+        World, float3(ModelBoundsCenterX, ModelBoundsCenterY, ModelBoundsCenterZ), ModelBoundsRadius,
+        float3(MeshletLODCameraPosX, MeshletLODCameraPosY, MeshletLODCameraPosZ),
+        MeshletLODPixelScale, MeshletLODScreenSize, MeshletLODForced, MeshletLODLevelCap);
+
     if (dispatchThreadId < MeshletCount)
     {
         // 表はモデル単位なので、このドローが見る範囲の先頭(MeshletOffset)を足す
@@ -247,14 +262,28 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
         const bool materialAccepted =
             MeshletPassesMaterialFilter(meshlet.Flags, MeshletFilterReject, MeshletFilterRequire);
 
+        // 段による取捨。表には全段が並んでいるので、選んだ段以外を落とさないと
+        // 簡略化した段まで同じ場所へ重なって描かれる。
+        //
+        // 【比べる相手はモデル単位の段だけ】メッシュごとの段数でここを読み替えると、
+        // 段を1つしか持たないメッシュだけが原寸のまま残り、1つのモデルの中で段が混ざる。
+        // 選べる段の上限はCPU側で全メッシュの共通部分まで畳んである
+        // (Assets::Model::MeshletLODLevelCap)ので、ここでは一致だけを見ればよい
+        const bool lodAccepted = (MeshletLODLevel(meshlet.Flags) == selectedLODLevel);
+
+        // 【段で落とした塊はカリングの統計に数えない】数えると、描く対象ですらない塊が
+        // 母数に入って「間引き率」が薄まり、俯瞰と街路の差を見る目的に使えなくなる
+        // (材質で落とした塊を数えないのと同じ理由)
+        const bool considered = materialAccepted && lodAccepted;
+
         // 【この順に判定する】視錐台と法線コーンは定数時間だが、Hi-Z判定は8頂点の投影と
         // テクスチャ読みを伴う。先に安いほうで落とせば、画面外・背面の塊ではHi-Zを一切読まない
         const bool frustumOrConeCulled = !MeshletSphereInFrustum(ViewProj, centerWorld, radiusWorld)
             || IsMeshletBackfacing(meshlet, centerWorld);
         const bool occlusionCulled =
-            materialAccepted && !frustumOrConeCulled && IsMeshletOccluded(centerWorld, radiusWorld);
+            considered && !frustumOrConeCulled && IsMeshletOccluded(centerWorld, radiusWorld);
 
-        if (statsEnabled && materialAccepted)
+        if (statsEnabled && considered)
         {
             InterlockedAdd(s_StatsTested, 1);
             if (frustumOrConeCulled)
@@ -267,7 +296,7 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
             }
         }
 
-        if (materialAccepted && !frustumOrConeCulled && !occlusionCulled)
+        if (considered && !frustumOrConeCulled && !occlusionCulled)
         {
             // 【波の幅に依存しない詰め方】WavePrefixCountBitsを使うと1グループが
             // 1波に収まることを暗に仮定することになる(波幅32/64はGPUによって違う)。
@@ -346,7 +375,13 @@ void MSMain(
         // 【モデル内の通し番号ではなくメッシュ内の番号を書く】色分け表示は
         // レイトレーシング側(RaytracingScene.hlsliのRTFindMeshlet)と同じ色でなければ
         // 見比べる意味が無く、あちらはメッシュ内の番号を返す
-        output.MeshletIndex = meshlet.MeshletIndexInMesh;
+        // 段で色分けするときは、メッシュ内の塊番号ではなく段の番号を流す。
+        // 【PSInputを増やさない】段のためだけにセマンティクスを1本足すと、
+        // 頂点シェーダー経路(GBufferCommon.hlsliのVSMain)にも同じ出力が要る。
+        // 色分けは片方の経路でしか使わないので、既存の枠を使い回すほうが安い
+        output.MeshletIndex = (MeshletDebugColorByLOD != 0u)
+            ? MeshletLODLevel(meshlet.Flags)
+            : meshlet.MeshletIndexInMesh;
         // ピクセルシェーダーがマテリアルテーブルを引くための番号。
         // 塊の中では全頂点で同じ値になる(メッシュレットは材質を跨がない)ので、
         // PSInput側のnointerpolationがそのまま正しい値を拾う

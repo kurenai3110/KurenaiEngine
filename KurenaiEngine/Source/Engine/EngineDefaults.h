@@ -557,4 +557,21 @@ namespace Kurenai::Defaults
     // 既定で切っておくと「有効にしたのに何も起きない」の切り分けが毎回必要になる。
     // 増幅シェーダーのアトミックはグループ単位に集約してあり、切るのは実測して重いと分かってから
     inline constexpr bool MeshletCullStatsEnabled = true;
+
+    // --- メッシュレットLOD(離散LOD。Stage 6) ---------------------------------------------
+    //
+    // 増幅シェーダーがモデルのバウンディング球の投影サイズから段を1つ選ぶ。
+    // KurenaiPackerが焼いた段が無いモデル(段が1つだけ)では何も起きない
+    inline constexpr bool MeshletLODEnabled = true;
+    // しきい値の倍率。段を落とす投影直径は
+    // MeshletLODQuality * sqrt(4 * LOD0の三角形数 / π) [画素]。
+    //
+    // 【1.0の根拠】倍率1.0は「原寸の三角形の平均面積が1画素を切ったところで1段落とす」
+    // にちょうど対応する。そこから先は、原寸を保っても画面に出せる情報が増えない。
+    // 大きくすると原寸を長く保ち(安全側)、小さくすると早く粗くする
+    inline constexpr float MeshletLODQuality = 1.0f;
+    // 段を固定する番号。負なら自動選択。
+    // 【対照実験用】自動のまま数値が動かないとき、「段の選択が効いていない」のか
+    // 「効いた上で変わらない」のかは、段を固定して初めて切り分けられる
+    inline constexpr int32_t MeshletLODForcedLevel = -1;
 }

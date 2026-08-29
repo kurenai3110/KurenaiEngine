@@ -343,10 +343,61 @@ namespace Kurenai::UI
 
         EndParamGroup();
 
+        // --- メッシュレットLOD(離散LOD。Stage 6) ---
+        ImGui::SeparatorText("メッシュレットLOD");
+
+        BeginParamGroup();
+        CheckboxEx(
+            "段を選ぶ###MeshletLOD", &m_Engine.m_MeshletLODEnabled, Defaults::MeshletLODEnabled,
+            "KurenaiPackerが焼いた離散LODの段から、増幅シェーダーがモデルのバウンディング球の"
+            "投影サイズで1段を選ぶ。切ると常に原寸(段0)になる。\n\n"
+            "【1つのモデル内で段は混ざらない】選択の入力はモデルの外接球とカメラだけで、"
+            "メッシュレットごとの値を使わない。混ざると、簡略化で頂点が動いた側と"
+            "動いていない側で辺が一致せず、境目に穴が開く。\n\n"
+            "【効くのは三角形が支配的なモデルだけ】地形タイル(1メッシュ134万三角形)には効くが、"
+            "ビル街のようにドローコールとテクスチャが支配的なシーンでは三角形が減っても速くならない。"
+            "段を持たないモデル(潰せる辺が無く1段しか焼かれなかったもの)では何も起きない");
+
+        SliderFloatEx(
+            "段のしきい値の倍率###MeshletLODQuality", &m_Engine.m_MeshletLODQuality, 0.25f, 8.0f,
+            Defaults::MeshletLODQuality, "%.2f", 0,
+            "段を落とす投影直径 = 倍率 x sqrt(4 x モデルのLOD0三角形数 / π) [画素]。"
+            "大きいほど原寸を長く保つ。\n\n"
+            "【モデルごとに変える理由】三角形数はモデルによって3桁違う"
+            "(小道具の数千とPLATEAUの地形タイルの134万)。単一の画素数を全モデルへ当てはめると、"
+            "小さいモデルでは早く粗くなりすぎ、地形では一度も段が落ちない。\n\n"
+            "【1.0の意味】原寸の三角形の平均面積がちょうど1画素を切るところで1段落とす。"
+            "そこから先は原寸を保っても画面に出せる情報が増えない");
+
+        SliderIntEx(
+            "段を固定###MeshletLODForced", &m_Engine.m_MeshletLODForcedLevel, -1, 3,
+            Defaults::MeshletLODForcedLevel,
+            "-1で自動選択。0〜3を指定すると全モデルをその段に固定する。\n\n"
+            "【対照実験に使う】自動のまま三角形数もフレーム時間も動かないとき、"
+            "「段の選択が一度も効いていない」のか「効いた上で変わらない」のかは、"
+            "ここで段を固定して初めて切り分けられる。0に固定した絵が「段を選ぶ」オフと"
+            "一致すれば、経路そのものは通っている。\n\n"
+            "【段が無いメッシュは動かない】焼かれている段より粗い番号を指定しても、"
+            "そのメッシュは自分の最も粗い段までしか下がらない(下がると画面から消えるため)");
+        CheckboxEx(
+            "色分けを段ごとにする###MeshletLODDebugColor", &m_Engine.m_MeshletLODDebugColorEnabled, false,
+            "上の「メッシュレットを色分けして表示」を、塊ごとの色ではなく段ごとの色にする"
+            "(詳細な順に緑→黄→橙→赤)。\n\n"
+            "【1つのモデルが単色になるのが正しい】段はモデル単位で決まる。"
+            "1つのモデルの中に2色が混ざっていたら、段の選択がメッシュレットごとに"
+            "揺れているということで、境目に穴が開く状態になっている。\n\n"
+            "【この表示でしか見えないもの】段が正しく選ばれているかは三角形数からも分かるが、"
+            "「どのモデルがどの段か」の分布は数値には出ない");
+        EndParamGroup();
+
         // .kmodelが--no-meshletsで焼かれていると、対応環境でも0のままになる。
         // 「有効にしたのに何も変わらない」ときの切り分けに要るので数を出しておく
         size_t meshletCount = 0;
+        // 全段の合計。段0だけの数と比べると、段が焼かれているかが一目で分かる
+        size_t meshletTotalCount = 0;
         size_t meshletMeshCount = 0;
+        // 2段以上を持つメッシュの数
+        size_t meshletLODMeshCount = 0;
         size_t meshCount = 0;
         for (const auto& instance : m_Engine.m_Scene.Instances)
         {
@@ -356,14 +407,34 @@ namespace Kurenai::UI
             {
                 ++meshCount;
                 meshletCount += mesh.MeshletCount;
+                meshletTotalCount += mesh.MeshletTotalCount;
                 if (mesh.MeshletCount > 0)
                 {
                     ++meshletMeshCount;
+                }
+                if (mesh.MeshletLODCount > 1)
+                {
+                    ++meshletLODMeshCount;
                 }
             }
         }
         ImGui::Text(
             "メッシュレット: %zu (メッシュ %zu / %zu が保持)", meshletCount, meshletMeshCount, meshCount);
+
+        // 段ごとの内訳。**段が1段しか焼かれていないシーンでは何をしても数値が動かない**ので、
+        // 「効かない」の理由がアセット側にあることをここで見せる
+        if (meshletTotalCount > meshletCount)
+        {
+            ImGui::Text(
+                "  うち段0: %zu / 全段: %zu (段を持つメッシュ %zu)", meshletCount, meshletTotalCount,
+                meshletLODMeshCount);
+        }
+        else if (meshletMeshCount > 0)
+        {
+            ImGui::TextWrapped(
+                "  このシーンのモデルには段が1つしか焼かれていない。"
+                "メッシュレットLODを切り替えても三角形数は動かない");
+        }
 
         // bindless区画の使用状況。メッシュシェーダー経路はジオメトリもマテリアルも
         // ResourceDescriptorHeap経由で引くため、ここが満杯だと**エラーログ1行だけを残して
@@ -841,7 +912,9 @@ namespace Kurenai::UI
         static const char* kDDGIRayModeNamesWithRT[] = { "ラスタライズ", "レイトレーシング (DXR)" };
         static const char* kDDGIRayModeNamesWithoutRT[] = { "ラスタライズ" };
 
-        const bool ddgiRtAvailable = m_Engine.m_RaytracingAvailable;
+        // m_RaytracingAvailableではなくこちらを見る。DDGIのレイ取得CSだけはSM 6.6を要求するため、
+        // 他のRTパスが使えてもここだけ作れない環境がある(m_DDGIRaytracedTraceAvailableの宣言参照)
+        const bool ddgiRtAvailable = m_Engine.m_DDGIRaytracedTraceAvailable;
         const char* const* ddgiRayModeNames = ddgiRtAvailable ? kDDGIRayModeNamesWithRT : kDDGIRayModeNamesWithoutRT;
         const int ddgiRayModeCount =
             ddgiRtAvailable ? IM_ARRAYSIZE(kDDGIRayModeNamesWithRT) : IM_ARRAYSIZE(kDDGIRayModeNamesWithoutRT);

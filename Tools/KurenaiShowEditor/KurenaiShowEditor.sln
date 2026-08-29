@@ -9,6 +9,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KurenaiEngineLibrary", "..\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KurenaiEngine3D", "..\..\KurenaiEngine\KurenaiEngine3D.vcxproj", "{1D6B4E83-2A97-4C50-B3E8-7F91C5A02D64}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "KurenaiShaderPacker", "..\KurenaiShaderPacker\KurenaiShaderPacker.vcxproj", "{24AEC059-C8CE-4441-A6D5-826BEF22CC2A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -27,6 +29,10 @@ Global
 		{1D6B4E83-2A97-4C50-B3E8-7F91C5A02D64}.Debug|x64.Build.0 = Debug|x64
 		{1D6B4E83-2A97-4C50-B3E8-7F91C5A02D64}.Release|x64.ActiveCfg = Release|x64
 		{1D6B4E83-2A97-4C50-B3E8-7F91C5A02D64}.Release|x64.Build.0 = Release|x64
+		{24AEC059-C8CE-4441-A6D5-826BEF22CC2A}.Debug|x64.ActiveCfg = Debug|x64
+		{24AEC059-C8CE-4441-A6D5-826BEF22CC2A}.Debug|x64.Build.0 = Debug|x64
+		{24AEC059-C8CE-4441-A6D5-826BEF22CC2A}.Release|x64.ActiveCfg = Release|x64
+		{24AEC059-C8CE-4441-A6D5-826BEF22CC2A}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
