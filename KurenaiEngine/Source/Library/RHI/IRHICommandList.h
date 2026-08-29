@@ -169,7 +169,24 @@ namespace Kurenai::RHI
         virtual void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) = 0;
         virtual void Draw(uint32_t vertexCount, uint32_t startVertexLocation) = 0;
-        virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) = 0;
+        // instanceCount: 同じジオメトリを何体ぶん描くか(ハードウェアインスタンシング)。
+        // 既定の1なら従来どおりの単発描画で、発行されるコマンドも同一。
+        //
+        // 【インスタンスごとの値はどこから来るのか】このRHIは頂点ストリームによるインスタンシング
+        // (InputSlotClass = PER_INSTANCE_DATA)を持たない ―― InputElementDescにInputSlotも
+        // InputSlotClassも無く、SetVertexBufferもスロットを取らないため、頂点バッファは常に1本きり。
+        // そのため、インスタンスごとに変わる値(ワールド行列など)は
+        // SetVertexShaderResourceBufferで頂点シェーダーへ渡したStructuredBufferを
+        // SV_InstanceIDで引く形で受け取る(Shaders/3D/ObjectConstants.hlsliのFetchModelInstance)。
+        //
+        // 【SV_InstanceIDは0から始まる】D3D11/D3D12ともにStartInstanceLocationは
+        // SV_InstanceIDへ加算されない。バッファ内の開始位置は定数バッファ側の値
+        // (ObjectConstants::InstanceBase)で渡すこと。
+        //
+        // instanceCountが0のときはログを出して何も描かない(両バックエンド共通)
+        virtual void DrawIndexed(
+            uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation,
+            uint32_t instanceCount = 1) = 0;
 
         // メッシュシェーダーパイプライン(CreateMeshPipelineStateで作ったステートをSetPipelineStateで
         // 設定した状態)での描画。増幅シェーダーがある場合はそちらが、無い場合はメッシュシェーダーが

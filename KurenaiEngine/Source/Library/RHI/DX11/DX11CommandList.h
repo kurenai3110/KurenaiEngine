@@ -31,7 +31,9 @@ namespace Kurenai::RHI
         void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
-        void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
+        void DrawIndexed(
+            uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation,
+            uint32_t instanceCount) override;
         void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
@@ -56,6 +58,12 @@ namespace Kurenai::RHI
         static constexpr uint32_t kMaxRenderTargets = 8;
         // SetComputeUnorderedAccessTexture/Bufferで使えるUAVスロット数(u0〜u3)
         static constexpr uint32_t kComputeUavSlotCount = 4;
+        // SetVertexShaderResourceBufferで使える頂点シェーダのSRVスロット数。
+        // DX11自体は128本持っているが、DX12側はルートSRVを1本しか割り当てていない
+        // (DX12CommandList::kVertexShaderSrvSlotCount)。ここを合わせておかないと
+        // 「DX11では通るがDX12では黙って描画が消える」非対称なバグが書けてしまうため、
+        // DX11側でも同じ上限で弾く。増やすときはDX12のルートシグネチャと同時に直すこと
+        static constexpr uint32_t kVertexShaderSrvSlotCount = 1;
         // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t17)。
         // DX12側のDX12CommandList::kTextureSlotCountおよびDX12Device.cppの
         // ルートシグネチャのSRVレンジと同じ値にしておくこと(3か所)。

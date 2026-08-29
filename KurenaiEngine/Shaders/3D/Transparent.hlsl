@@ -93,23 +93,7 @@ cbuffer FrameConstants : register(b0)
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で
 // 実質未使用だが、同じルートシグネチャ/定数バッファを共有するため並び順を合わせる)。
-// 末尾のBaseColorFactorはGBuffer.hlsl/ProbeCapture.hlslも同じ位置で宣言して使う
-// (Shadow.hlslは深度しか書かないため先頭のWorldまでしか宣言していない)
-cbuffer ObjectConstants : register(b1)
-{
-    float4x4 World;
-    float4x4 NormalMatrix;
-    float MetallicFactor;
-    float RoughnessFactor;
-    float TangentSignFlip;
-    float AlphaCutoff;
-    float3 EmissiveFactor;
-    // glTFのocclusionTexture.strength(既定1.0)。GBuffer.hlslと同じ枠
-    float OcclusionStrength;
-    // glTFのbaseColorFactor(既定[1,1,1,1])。BaseColorTextureと乗算する。テクスチャを持たず
-    // baseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等)を正しく再現するために使う
-    float4 BaseColorFactor;
-};
+#include "ObjectConstants.hlsli"
 
 // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
 struct GPULight

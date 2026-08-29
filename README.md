@@ -562,6 +562,32 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 
 確認の手順は`Scenes\Dragon.kscene`の冒頭コメントに書いてあります。
 
+#### インスタンシングの確認用シーン
+
+`Scenes\InstancingTest.kscene`は、同じ`.kmodel`を格子状に256体並べてインスタンシングの
+効き方を測るためのシーンです。`Tools\generate_instancing_test.py`が生成します。
+
+```
+python Tools\generate_instancing_test.py Scenes\InstancingTest.kscene
+Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+  --scene Scenes\InstancingTest.kscene -o Assets\Packed\Scenes\InstancingTest.kscene
+```
+
+上のメッシュレット確認用ステージ(`MeshletStage.kmodel`)を並べるので、
+モデルの用意はそちらの手順で済んでいます。
+
+**なぜ専用シーンが要るのか**: 同じ`.kmodel`を多重配置しているシーンは`MultiModelTest.kscene`
+(3配置)しかなく、ドローコールの削減が「3 → 1」では計測誤差に埋もれます。PLATEAU 東京23区も
+Sponza も Bistro も全モデルがユニークで、インスタンシングは一度も発動しません。
+
+格子の32体はX軸のみ負スケール(ミラーリング)にしてあります。ワインディングが反転するため
+別のパイプラインステートで描く必要があり、**インスタンシングでも別のバッチへ分かれなければ
+なりません**。まとめると片方が裏面として全部捨てられ、絵から消えます。
+
+「レンダリング」パネルの**ジオメトリ → インスタンシング**でON/OFFを切り替えられます。
+絵は一致したままドローコール数だけが変わるのが正しい挙動です
+(実測: DX11 / RTX 4070 Ti / Release / 1280x720 で 2,364 → 34)。
+
 複数のモデルとカメラ・太陽光の初期値をまとめる`.kscene`(シーンファイル)は、`--scene`を付けて
 検証・配置します(書式の詳細は[docs/KurenaiEngine.html](docs/KurenaiEngine.html) 4.7節を参照)。
 `.kscene`はリポジトリの`Scenes\`に含まれているため、clone直後に自分で書く必要はありません
