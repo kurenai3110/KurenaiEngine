@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -60,6 +61,27 @@ namespace Kurenai::UI
             };
             return (base & IM_COL32_A_MASK) | scale(base, IM_COL32_R_SHIFT) | scale(base, IM_COL32_G_SHIFT) |
                    scale(base, IM_COL32_B_SHIFT);
+        }
+
+        // テクスチャの常駐ミップの色。落とせている段数(ミップ0側から何段捨てたか)で分ける。
+        //
+        // 【段数で切る。バイト比では切らない】常駐率(%)は解像度の帯によって同じ段数でも
+        // 違う値になるため、地図の上で「どこが削れているか」を読むのに向かない。
+        // 見積もり式が過小だとぼけるのは「段を落としすぎた」ときなので、段数で見るのが直接的
+        constexpr ImU32 kColorMip0   = IM_COL32(235, 105,  95, 210);  // 0段 = 赤(mip0が載ったまま)
+        constexpr ImU32 kColorMip1   = IM_COL32(230, 170,  75, 210);  // 1段
+        constexpr ImU32 kColorMip2   = IM_COL32(215, 215,  90, 210);  // 2段
+        constexpr ImU32 kColorMip3   = IM_COL32(110, 200, 175, 210);  // 3段以上
+        constexpr ImU32 kColorMipOff = IM_COL32( 70,  72,  80, 140);  // 追跡していない
+
+        ImU32 MipResidencyColor(float meanDroppedMips)
+        {
+            // 平均なので端数が出る。0.5段以上落ちていれば1段側として読む
+            const int level = static_cast<int>(std::lround(meanDroppedMips));
+            if (level <= 0) { return kColorMip0; }
+            if (level == 1) { return kColorMip1; }
+            if (level == 2) { return kColorMip2; }
+            return kColorMip3;
         }
 
         // 目盛りに使う「きりのいい」長さ[m]を求める。1/2/5 × 10^n の中から
@@ -122,6 +144,33 @@ namespace Kurenai::UI
             "「常駐」のまま変化しない(従来どおりの全常駐)。"
             "LOD段は[Model]LODPath/LODDistanceを書いたインスタンスだけが0以外になる");
 
+        // --- テクスチャの常駐ミップ ---
+        //
+        // 【モデルの常駐と並べて出す】どちらも「いま何がVRAMに載っているか」の話で、
+        // 片方だけ見ても足りない。モデルが常駐していてもテクスチャが全ミップのままなら
+        // 削減は効いていないし、逆にモデルが未読み込みなら常駐ミップの数字は0で当然
+        const Assets::TextureStreamingManager::Stats textureStats = m_Engine.m_TextureStreaming.GetStats();
+        if (!textureStats.Enabled)
+        {
+            ImGui::TextDisabled("テクスチャの常駐ミップ制御: 無効(このシーンは全ミップ常駐)");
+        }
+        else
+        {
+            const double residentMB = static_cast<double>(textureStats.ResidentBytes) / (1024.0 * 1024.0);
+            const double fullMB = static_cast<double>(textureStats.FullBytes) / (1024.0 * 1024.0);
+            ImGui::Text(
+                "テクスチャ %u枚 (%uモデル) / 常駐 %.1f MB ← 全ミップ %.1f MB (%.1f%%) / 発注中 %u",
+                textureStats.TrackedTextures, textureStats.TrackedModels, residentMB, fullMB,
+                textureStats.FullBytes > 0
+                    ? 100.0 * static_cast<double>(textureStats.ResidentBytes) / static_cast<double>(textureStats.FullBytes)
+                    : 0.0,
+                textureStats.InFlight + textureStats.PendingRequests);
+        }
+        ItemHelp(
+            "[Scene]TextureStreamingEnabledを書いたシーンだけが動く。"
+            "サイズ帯ごとの内訳(常駐ミップ数の分布・タイルリソースに乗った枚数)は"
+            "システムパネルの「テクスチャストリーミング」に出る");
+
         // --- 俯瞰(XZ平面)の地図 ---
         //
         // 【北を上にする】画面の横=ワールドX(東が右)、画面の縦=ワールドZを反転(北が上)。
@@ -137,6 +186,19 @@ namespace Kurenai::UI
             "オンにするとカメラ位置を地図の中心に置き続ける。"
             "32km四方のシーンを拡大して見るときは、追従していないとすぐ画面外へ出る");
         EndParamGroup();
+
+        // 【色分けだけはパラメータ群の外に出す】BeginParamGroupは
+        // PushItemWidth(-フォントサイズx10)でラベル用に固定幅を空ける。
+        // ドックで細くなったこのパネルではコンボの幅が0まで潰れて操作できない
+        // (スライダーは細くても掴めるがコンボは開けない)。
+        // ラベルを上に出し、コンボ自体には残り幅すべてを与える
+        ImGui::TextUnformatted("色分け");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::Combo("###StreamingMapColorMode", &m_ColorMode, "モデルの常駐状態\0テクスチャの常駐ミップ\0\0");
+        ItemHelp(
+            "「テクスチャの常駐ミップ」はモデルごとに、落とせているミップ0側の段数の平均で塗る。"
+            "赤(0段)のまま動かない場所があれば、そこは削減が効いていない。"
+            "逆に近くの建物まで青緑(3段以上)になっていたらミップを落としすぎ(ぼける)");
 
         const ImVec2 canvasPos = ImGui::GetCursorScreenPos();
         ImVec2 canvasSize = ImGui::GetContentRegionAvail();
@@ -205,8 +267,9 @@ namespace Kurenai::UI
             toScreen(m_Engine.m_Scene.BoundsMax[0], m_Engine.m_Scene.BoundsMin[2]),
             IM_COL32(70, 75, 85, 255));
 
-        for (const Assets::ModelInstance& instance : instances)
+        for (size_t index = 0; index < instances.size(); ++index)
         {
+            const Assets::ModelInstance& instance = instances[index];
             const ImVec2 topLeft = toScreen(instance.WorldBoundsMin[0], instance.WorldBoundsMax[2]);
             const ImVec2 bottomRight = toScreen(instance.WorldBoundsMax[0], instance.WorldBoundsMin[2]);
 
@@ -215,7 +278,18 @@ namespace Kurenai::UI
             const ImVec2 clampedBottomRight(
                 (std::max)(bottomRight.x, topLeft.x + 1.0f), (std::max)(bottomRight.y, topLeft.y + 1.0f));
 
-            drawList->AddRectFilled(topLeft, clampedBottomRight, ResidencyColor(instance.Residency, instance.LODLevel));
+            ImU32 color = ResidencyColor(instance.Residency, instance.LODLevel);
+            if (m_ColorMode == 1)
+            {
+                // 【いま描いている段のモデルで引く】インスタンスが複数の段を持つとき、
+                // テクスチャを読むのは選ばれている段だけ。別の段の常駐状況を出すと
+                // 「近いのに削れている」ように見えて判断を誤る
+                Assets::TextureStreamingManager::ModelResidency residency;
+                color = m_Engine.m_TextureStreaming.GetModelResidency(m_Engine.GetCurrentLOD(index), residency)
+                    ? MipResidencyColor(residency.MeanDroppedMips)
+                    : kColorMipOff;
+            }
+            drawList->AddRectFilled(topLeft, clampedBottomRight, color);
         }
 
         // カメラの位置と向き。位置は円、向きは前方ベクトルのXZ成分をそのまま線にする
@@ -286,12 +360,28 @@ namespace Kurenai::UI
             ImGui::SameLine();
             ImGui::TextUnformatted(label);
         };
-        legendEntry(kColorLoaded, "常駐");
-        ImGui::SameLine();
-        legendEntry(kColorLoading, "読み込み中");
-        ImGui::SameLine();
-        legendEntry(kColorUnloaded, "未読み込み");
-        ImGui::TextDisabled("LOD段が進むほど暗くなる(赤い点と線はカメラの位置と向き)");
+        if (m_ColorMode == 1)
+        {
+            legendEntry(kColorMip0, "0段");
+            ImGui::SameLine();
+            legendEntry(kColorMip1, "1段");
+            ImGui::SameLine();
+            legendEntry(kColorMip2, "2段");
+            ImGui::SameLine();
+            legendEntry(kColorMip3, "3段以上");
+            ImGui::SameLine();
+            legendEntry(kColorMipOff, "追跡なし");
+            ImGui::TextDisabled("落とせているミップ0側の段数(赤い点と線はカメラの位置と向き)");
+        }
+        else
+        {
+            legendEntry(kColorLoaded, "常駐");
+            ImGui::SameLine();
+            legendEntry(kColorLoading, "読み込み中");
+            ImGui::SameLine();
+            legendEntry(kColorUnloaded, "未読み込み");
+            ImGui::TextDisabled("LOD段が進むほど暗くなる(赤い点と線はカメラの位置と向き)");
+        }
 
         ImGui::End();
     }
