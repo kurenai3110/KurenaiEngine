@@ -8,6 +8,8 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <functional>
+#include <limits>
 #include <random>
 
 #include "Assets/SceneLoader.h"
@@ -961,17 +963,6 @@ namespace Kurenai
             uint32_t InstancingEnabled;
         };
 
-        // インスタンス1体ぶんの変換。Shaders/3D/ObjectConstants.hlsliの
-        // struct ModelInstanceRecord とバイト単位で一致させること(144バイト。
-        // ずれると全インスタンスが見当違いの場所へ飛ぶ)
-        struct alignas(16) GPUModelInstance
-        {
-            DirectX::XMFLOAT4X4 World;
-            DirectX::XMFLOAT4X4 NormalMatrix;
-            float TangentSignFlip;
-            float Padding[3];
-        };
-        static_assert(sizeof(GPUModelInstance) == 144, "GPUModelInstanceはHLSL側と同じ144バイトであること");
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
         // TRS(平行移動・回転・スケール)から計算済み(HLSL側のmul(vec, matrix)規約に合わせて
@@ -4452,6 +4443,285 @@ namespace Kurenai
         m_SceneLoadingIndex = sceneIndex;
     }
 
+    // 同じモデルを指すインスタンスを1回のDrawIndexedへまとめるバッチを作り直す。
+    //
+    // 【レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと】UpdateModelLODが決めた段を読むので
+    // その後、かつどのパスより前。パスごとに組み直すと、深度プリパスとG-Bufferが違うまとめ方をして
+    // 同じ画素を別の経路で描くことになる。
+    //
+    // 【バッチに入れないもの】
+    //   - まだ読み込まれていない段(ストリーミング中)
+    //   - LOD切替のフェード中。DitherFadeはインスタンスごとに違い、定数バッファで渡す値なので
+    //     1ドローにまとめられない。フェードは短時間で終わるので、そのあいだ個別に描けばよい
+    //   - メッシュシェーダー経路に載るモデル。DispatchMeshにインスタンス数の概念が無い
+    //   - まとめる相手がいないもの(1体だけのグループ)。この場合は従来とまったく同じ描画になる
+    // このフレームの描画単位を組み立てる。バッチに入ったインスタンスはバッチとして1回、
+    // 入らなかったものは1体ずつ現れる ―― 全インスタンスがちょうど1回ずつ現れることが要点で、
+    // 取りこぼすと物が消え、二重に出すと同じ場所へ2回描いてZファイティングになる
+    void KurenaiEngine3D::GetInstanceDrawUnits(bool coarsestLOD, std::vector<InstanceDrawUnit>& outUnits) const
+    {
+        const std::vector<InstanceBatch>& batches =
+            coarsestLOD ? m_InstanceBatchesCoarsestLOD : m_InstanceBatchesCurrentLOD;
+        const std::vector<uint8_t>& batched =
+            coarsestLOD ? m_InstanceBatchedCoarsestLOD : m_InstanceBatchedCurrentLOD;
+
+        outUnits.clear();
+        outUnits.reserve(m_Scene.Instances.size());
+
+        for (const InstanceBatch& batch : batches)
+        {
+            InstanceDrawUnit unit;
+            // 代表はバッチの先頭。IsMirrored/IsWaterはバッチ内で同一(グループ化のキー)なので、
+            // どれを代表にしても同じ値になる
+            unit.Instance = &m_Scene.Instances[batch.RepresentativeIndex];
+            unit.InstanceIndex = batch.RepresentativeIndex;
+            unit.Model = batch.Model;
+            unit.InstanceBase = batch.InstanceBase;
+            unit.InstanceCount = batch.InstanceCount;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                unit.WorldBoundsMin[axis] = batch.WorldBoundsMin[axis];
+                unit.WorldBoundsMax[axis] = batch.WorldBoundsMax[axis];
+            }
+            outUnits.push_back(unit);
+        }
+
+        for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+        {
+            if (i < batched.size() && batched[i] != 0)
+            {
+                continue;   // バッチとして既に積んである
+            }
+            InstanceDrawUnit unit;
+            unit.Instance = &m_Scene.Instances[i];
+            unit.InstanceIndex = i;
+            unit.Model = nullptr;   // 段は呼び出し側が決める(フェード中は2段になる)
+            unit.InstanceBase = 0;
+            unit.InstanceCount = 1;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                unit.WorldBoundsMin[axis] = m_Scene.Instances[i].WorldBoundsMin[axis];
+                unit.WorldBoundsMax[axis] = m_Scene.Instances[i].WorldBoundsMax[axis];
+            }
+            outUnits.push_back(unit);
+        }
+    }
+
+    void KurenaiEngine3D::BuildInstanceBatches(RHI::IRHICommandList* commandList)
+    {
+        m_InstanceBatchesCurrentLOD.clear();
+        m_InstanceBatchesCoarsestLOD.clear();
+        m_ModelInstanceRecords.clear();
+        m_InstanceBatchedCurrentLOD.assign(m_Scene.Instances.size(), 0u);
+        m_InstanceBatchedCoarsestLOD.assign(m_Scene.Instances.size(), 0u);
+        m_InstancedBatchCount = 0;
+        m_InstancedInstanceCount = 0;
+
+        if (!m_InstancingEnabled || m_Scene.Instances.empty() || !m_ModelInstanceBuffer)
+        {
+            return;
+        }
+
+        // グループ化のキー。ワインディング(IsMirrored)と水面(IsWater)はパイプラインステートが
+        // 分かれるため、違うものを同じドローへまとめてはいけない
+        struct GroupKey
+        {
+            const Assets::Model* Model;
+            bool IsMirrored;
+            bool IsWater;
+            bool operator==(const GroupKey& other) const
+            {
+                return Model == other.Model && IsMirrored == other.IsMirrored && IsWater == other.IsWater;
+            }
+        };
+
+        // キーごとのインスタンス番号。シーンの並び順で走査するので、同じシーンなら毎フレーム同じ順になる
+        // (順序が揺れるとフレーム間でバッチの内容が変わり、A/B比較の再現性が落ちる)
+        std::vector<std::pair<GroupKey, std::vector<size_t>>> groups;
+
+        // 1つの組(段の選び方)ぶんのバッチを作る。
+        // modelOf: そのインスタンスがこの組で描く段を返す。nullptrならこの組の対象外
+        const auto buildFor =
+            [this, &groups](
+                const std::function<const Assets::Model*(size_t)>& modelOf,
+                std::vector<InstanceBatch>& outBatches, std::vector<uint8_t>& outBatched)
+        {
+            groups.clear();
+            for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+            {
+                const Assets::ModelInstance& instance = m_Scene.Instances[i];
+                const Assets::Model* const model = modelOf(i);
+                if (!model)
+                {
+                    continue;
+                }
+                // メッシュシェーダー経路はDispatchMeshで描くのでまとめられない
+                if (ShouldUseModelMeshletPath(instance, *model))
+                {
+                    continue;
+                }
+
+                const GroupKey key{ model, instance.IsMirrored, instance.IsWater };
+                bool found = false;
+                for (auto& group : groups)
+                {
+                    if (group.first == key)
+                    {
+                        group.second.push_back(i);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    groups.push_back({ key, { i } });
+                }
+            }
+
+            // 【空間セルでソートしてから刻む】上限なしで1バッチにすると、広く散らばった
+            // グループが1つの巨大AABBになり、どのパスからも一度も間引かれなくなる。
+            // セルの幅はシーン対角の1/64を目安にする(バッチの粒度がシーンの規模に追随する)
+            const float diagonalX = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
+            const float diagonalY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
+            const float diagonalZ = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
+            const float diagonal =
+                std::sqrt(diagonalX * diagonalX + diagonalY * diagonalY + diagonalZ * diagonalZ);
+            const float cellSize = std::max(diagonal / 64.0f, 1.0f);
+
+            for (auto& group : groups)
+            {
+                if (group.second.size() < 2)
+                {
+                    // まとめる相手がいない。従来どおり個別に描く(コマンド列は今までと同一)
+                    continue;
+                }
+
+                std::stable_sort(
+                    group.second.begin(), group.second.end(),
+                    [this, cellSize](size_t a, size_t b)
+                    {
+                        const auto cell = [this, cellSize](size_t index, int axis)
+                        {
+                            const float center =
+                                (m_Scene.Instances[index].WorldBoundsMin[axis]
+                                 + m_Scene.Instances[index].WorldBoundsMax[axis]) * 0.5f;
+                            return static_cast<int64_t>(std::floor(center / cellSize));
+                        };
+                        // Z→X→Y の順に見る。格子状の配置ではこれで行ごとにまとまる
+                        const int axes[3] = { 2, 0, 1 };
+                        for (const int axis : axes)
+                        {
+                            const int64_t ca = cell(a, axis);
+                            const int64_t cb = cell(b, axis);
+                            if (ca != cb)
+                            {
+                                return ca < cb;
+                            }
+                        }
+                        return a < b;
+                    });
+
+                for (size_t offset = 0; offset < group.second.size(); offset += kMaxInstancesPerBatch)
+                {
+                    const size_t count = std::min<size_t>(kMaxInstancesPerBatch, group.second.size() - offset);
+                    if (count < 2)
+                    {
+                        // 刻んだ余りが1体だけになった場合。まとめる意味が無いので個別へ回す
+                        continue;
+                    }
+
+                    InstanceBatch batch;
+                    batch.Model = group.first.Model;
+                    batch.IsMirrored = group.first.IsMirrored;
+                    batch.IsWater = group.first.IsWater;
+                    batch.InstanceBase = static_cast<uint32_t>(m_ModelInstanceRecords.size());
+                    batch.InstanceCount = static_cast<uint32_t>(count);
+                    batch.RepresentativeIndex = group.second[offset];
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        batch.WorldBoundsMin[axis] = (std::numeric_limits<float>::max)();
+                        batch.WorldBoundsMax[axis] = std::numeric_limits<float>::lowest();
+                    }
+
+                    for (size_t k = 0; k < count; ++k)
+                    {
+                        const size_t instanceIndex = group.second[offset + k];
+                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+
+                        GPUModelInstance record{};
+                        record.World = instance.World;
+                        record.NormalMatrix = instance.NormalMatrix;
+                        record.TangentSignFlip = instance.TangentSignFlip;
+                        m_ModelInstanceRecords.push_back(record);
+
+                        for (int axis = 0; axis < 3; ++axis)
+                        {
+                            batch.WorldBoundsMin[axis] =
+                                std::min(batch.WorldBoundsMin[axis], instance.WorldBoundsMin[axis]);
+                            batch.WorldBoundsMax[axis] =
+                                std::max(batch.WorldBoundsMax[axis], instance.WorldBoundsMax[axis]);
+                        }
+                        outBatched[instanceIndex] = 1u;
+                    }
+
+                    outBatches.push_back(batch);
+                }
+            }
+        };
+
+        // 組1: そのフレームに選ばれた段(深度プリパス / G-Buffer / 平面反射)。
+        // フェード中(段が2つ)は個別に描くのでバッチへ入れない
+        buildFor(
+            [this](size_t i) -> const Assets::Model*
+            {
+                LODDraw draws[2];
+                if (GetLODDraws(i, draws) != 1)
+                {
+                    return nullptr;
+                }
+                return draws[0].Model;
+            },
+            m_InstanceBatchesCurrentLOD, m_InstanceBatchedCurrentLOD);
+
+        // 組2: 常に最も粗い段(シャドウ / 反射プローブ)
+        buildFor(
+            [this](size_t i) -> const Assets::Model* { return GetCoarsestLOD(m_Scene.Instances[i]); },
+            m_InstanceBatchesCoarsestLOD, m_InstanceBatchedCoarsestLOD);
+
+        m_InstancedBatchCount =
+            static_cast<uint32_t>(m_InstanceBatchesCurrentLOD.size() + m_InstanceBatchesCoarsestLOD.size());
+        m_InstancedInstanceCount = static_cast<uint32_t>(m_ModelInstanceRecords.size());
+
+        if (m_ModelInstanceRecords.empty())
+        {
+            return;
+        }
+
+        // 容量はシーン読み込み時に「インスタンス数×2組」で確保してある。超えることは無いが、
+        // 超えたときに黙って壊れないよう検査してログを残す
+        const size_t capacity = m_Scene.Instances.size() * 2;
+        if (m_ModelInstanceRecords.size() > capacity)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "インスタンスバッファの容量(" + std::to_string(capacity) + "件)を超えました("
+                    + std::to_string(m_ModelInstanceRecords.size()) + "件)。このフレームはインスタンシングを見送ります");
+            m_InstanceBatchesCurrentLOD.clear();
+            m_InstanceBatchesCoarsestLOD.clear();
+            std::fill(m_InstanceBatchedCurrentLOD.begin(), m_InstanceBatchedCurrentLOD.end(), 0u);
+            std::fill(m_InstanceBatchedCoarsestLOD.begin(), m_InstanceBatchedCoarsestLOD.end(), 0u);
+            m_InstancedBatchCount = 0;
+            m_InstancedInstanceCount = 0;
+            return;
+        }
+
+        // 【1フレームに1回だけ】どのパスもこの1本を読む。バインドは各パスがDraw直前に張り直す
+        // (頂点シェーダー用SRVはt0の1本しかなく、ドローンショーが同じスロットを使うため)
+        commandList->UpdateBuffer(
+            m_ModelInstanceBuffer.get(), m_ModelInstanceRecords.data(),
+            m_ModelInstanceRecords.size() * sizeof(GPUModelInstance));
+    }
+
     void KurenaiEngine3D::UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds)
     {
         m_LODSwitchCount = 0;
@@ -5307,6 +5577,32 @@ namespace Kurenai
         // 【要素数の一致だけを見て使い回してはいけない】たまたま同じインスタンス数の
         // シーンへ切り替えたときに、前のシーンの段とフェード途中の状態が残る
         m_InstanceLODStates.assign(m_Scene.Instances.size(), InstanceLODState{});
+
+        // インスタンシング用のインスタンスバッファをシーンの規模で作り直す。
+        //
+        // 【容量はインスタンス数×2】バッチの組は「そのフレームに選ばれた段」と
+        // 「最も粗い段」の2組あり、同じインスタンスが両方に載る。最悪でも全インスタンスが
+        // 両組でバッチに入るだけなので、これで足りる。
+        // インスタンスが1つも無いシーンではバッファを作らない
+        // (BuildInstanceBatchesがnullptrを見て何もしない)
+        m_ModelInstanceBuffer.reset();
+        if (!m_Scene.Instances.empty())
+        {
+            RHI::BufferDesc instanceBufferDesc;
+            instanceBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+            instanceBufferDesc.SizeInBytes =
+                static_cast<uint32_t>(sizeof(GPUModelInstance) * m_Scene.Instances.size() * 2);
+            instanceBufferDesc.StrideInBytes = sizeof(GPUModelInstance);
+            // 更新はBuildInstanceBatchesの1フレーム1回だけ。DX12のステージングリングは
+            // この値×kFrameCount+1段を常時確保するので、必要最小限にしておく
+            instanceBufferDesc.MaxUpdatesPerFrame = 1;
+            m_ModelInstanceBuffer = m_Device->CreateBuffer(instanceBufferDesc);
+        }
+        m_InstanceBatchesCurrentLOD.clear();
+        m_InstanceBatchesCoarsestLOD.clear();
+        m_InstanceBatchedCurrentLOD.clear();
+        m_InstanceBatchedCoarsestLOD.clear();
+        m_ModelInstanceRecords.clear();
 
         // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
@@ -6515,6 +6811,8 @@ namespace Kurenai
         m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
         m_FrameStatsDrawCallsShadowSum += m_DrawCallsShadow;
         m_FrameStatsDrawCallsDepthPrepassSum += m_DrawCallsDepthPrepass;
+        m_FrameStatsInstancedBatchSum += m_InstancedBatchCount;
+        m_FrameStatsInstancedInstanceSum += m_InstancedInstanceCount;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -6679,6 +6977,22 @@ namespace Kurenai
             Core::Logger::Info("Perf", drawText);
         }
 
+        // インスタンシングの効き。**ドローコール数とは別建てにする** ――
+        // 「バッチ0」は「まとめられる相手がいない」のか「一度も実行されていない」のかを
+        // 区別できないので、まとめた数(バッチ)とまとめた対象(インスタンス)の両方を出す。
+        // まとめたことで減ったドロー数は (インスタンス数 - バッチ数) x そのモデルのメッシュ数
+        if (m_FrameStatsFrameCount > 0 && m_FrameStatsInstancedBatchSum > 0)
+        {
+            const double frames = static_cast<double>(m_FrameStatsFrameCount);
+            char instText[192];
+            std::snprintf(
+                instText, sizeof(instText),
+                "  インスタンシング: バッチ %.1f / まとめたインスタンス %.1f [1フレームあたり・2組の合計]",
+                static_cast<double>(m_FrameStatsInstancedBatchSum) / frames,
+                static_cast<double>(m_FrameStatsInstancedInstanceSum) / frames);
+            Core::Logger::Info("Perf", instText);
+        }
+
         // bindless区画の使用状況。**満杯になっても例外は飛ばず、エラーログ1行と
         // kInvalidBindlessIndex(=白1x1へ落ちる)しか残らない**ため、上限へ近づいていることを
         // 定期的に見えるようにしておく(IRHIDevice::GetBindlessUsedCountのコメント参照)
@@ -6736,6 +7050,8 @@ namespace Kurenai
         m_FrameStatsDrawCallsGBufferSum = 0;
         m_FrameStatsDrawCallsShadowSum = 0;
         m_FrameStatsDrawCallsDepthPrepassSum = 0;
+        m_FrameStatsInstancedBatchSum = 0;
+        m_FrameStatsInstancedInstanceSum = 0;
         m_FrameStatsMeshletTestedSum = 0;
         m_FrameStatsMeshletFrustumCulledSum = 0;
         m_FrameStatsMeshletOcclusionCulledSum = 0;
@@ -7221,6 +7537,11 @@ namespace Kurenai
 
         // モデルのストリーミング。【LODの後に呼ぶ】どの段を読むかは選ばれた段で決まる
         UpdateModelStreaming(cameraPosition);
+
+        // インスタンシングのバッチを組み直す。【LODとストリーミングの後】まとめられるかどうかは
+        // 「そのフレームに選ばれた段」と「読み込み済みか」で決まる。レンダーグラフの構築より前に
+        // 1回だけ呼ぶこと ―― パスごとに組み直すと、深度プリパスとG-Bufferが違うまとめ方をする
+        BuildInstanceBatches(commandList);
 
         // レイトレーシングを常駐の増減へ追随させる(ストリーミング時のみ働く)
         UpdateRaytracingRebuild();
@@ -8383,18 +8704,25 @@ namespace Kurenai
                         // カメラではなくライト側の錐台なので、画面外でも影を落とすものは残る
                         const FrustumPlanes cascadeFrustum = ExtractFrustumPlanes(cascadeViewProj[cascade]);
 
-                        for (const auto& instance : m_Scene.Instances)
+                        // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                        // シャドウは常に最も粗い段なので、その組(coarsestLOD=true)を使う
+                        GetInstanceDrawUnits(/*coarsestLOD=*/true, m_DrawUnitScratch);
+                        for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                         {
+                            const Assets::ModelInstance& instance = *unit.Instance;
                             ++m_FrustumCullTested;
-                            if (!IsAABBVisible(cascadeFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                            if (!IsAABBVisible(cascadeFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                             {
                                 ++m_FrustumCullCulled;
                                 continue;
                             }
 
                             // 【影は常に最も粗い段】影はテクスチャを読まないので詳細な段を描く
-                            // 意味が無い。ストリーミング中で未読み込みなら描かない
-                            const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                            // 意味が無い。ストリーミング中で未読み込みなら描かない。
+                            // バッチはどの段を描くかを既に決めてある(全員が同じ段であることが
+                            // バッチの条件そのもの)
+                            const Assets::Model* const coarsestModel =
+                                unit.Model ? unit.Model : GetCoarsestLOD(instance);
                             if (!coarsestModel) { continue; }
 
                             // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
@@ -8457,8 +8785,14 @@ namespace Kurenai
                             for (const auto& mesh : coarsestModel->Meshes)
                             {
                                 // メッシュ単位のカリング。錐台はこのカスケードのライト正射影で、
-                                // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)
-                                if (!IsMeshVisibleWithStats(
+                                // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)。
+                                //
+                                // 【バッチでは行わない】メッシュ単位のワールドAABBは
+                                // 「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。
+                                // 判定を代表インスタンスだけで行うと、他の個体の見えている
+                                // メッシュまで落ちて物が消える
+                                if (!unit.IsBatch()
+                                    && !IsMeshVisibleWithStats(
                                         m_MeshCullingEnabled, cascadeFrustum, instance, *coarsestModel, mesh, m_MeshCullTested,
                                         m_MeshCullCulled))
                                 {
@@ -8472,8 +8806,10 @@ namespace Kurenai
 
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
-                                const ObjectConstants objectConstants =
+                                ObjectConstants objectConstants =
                                     MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                objectConstants.InstanceBase = unit.InstanceBase;
+                                objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8482,9 +8818,17 @@ namespace Kurenai
                                     cmd->SetTexture(0, mesh.BaseColorTexture);
                                 }
 
+                                // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかなく、
+                                // ドローンショーが同じスロットを使う。上書きされたまま描くと
+                                // 全インスタンスがドローンの座標を行列として読んで画面外へ飛ぶ
+                                if (unit.IsBatch())
+                                {
+                                    cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                                }
+
                                 cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                                 cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                                cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                                cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                                 ++m_DrawCallsShadow;
                             }
                         }
@@ -9369,11 +9713,16 @@ namespace Kurenai
                     RHI::IRHIPipelineState* currentPipelineState = nullptr;
                     // G-Bufferと同じカメラなので、間引かれるモデルも同じになる
                     const FrustumPlanes prepassFrustum = ExtractFrustumPlanes(viewProj);
-                    for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
+                    // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                    // 【G-Bufferとまったく同じ組を使うこと】まとめ方が食い違うと、
+                    // 深度を書いた画素と色を書く画素がずれて穴が開く
+                    GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
+                    for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                     {
-                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+                        const size_t instanceIndex = unit.InstanceIndex;
+                        const Assets::ModelInstance& instance = *unit.Instance;
                         ++m_FrustumCullTested;
-                        if (!IsAABBVisible(prepassFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                        if (!IsAABBVisible(prepassFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                         {
                             ++m_FrustumCullCulled;
                             continue;
@@ -9381,9 +9730,19 @@ namespace Kurenai
 
                         // モデルLOD。フェード中は2段を重ねる。
                         // 【G-Bufferとまったく同じ組・同じDitherFadeで描くこと】片方だけが捨てた画素は
-                        // 「深度は書かれているのに色が書かれない」穴になる
+                        // 「深度は書かれているのに色が書かれない」穴になる。
+                        // バッチはフェード中でないものだけで構成されるので必ず1段(BuildInstanceBatches)
                         LODDraw lodDraws[2];
-                        const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                        uint32_t lodDrawCount;
+                        if (unit.IsBatch())
+                        {
+                            lodDraws[0] = { unit.Model, 1.0f };
+                            lodDrawCount = 1;
+                        }
+                        else
+                        {
+                            lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                        }
                         for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
                         {
                         const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
@@ -9474,7 +9833,11 @@ namespace Kurenai
                             // G-Bufferでは描かれると、深度プリパスが埋めていない画素で早期Zが効かず
                             // 遅くなるだけで済むが、逆(プリパスで描いてG-Bufferで間引く)だと
                             // 描かれていないものの深度が残る
-                            if (!IsMeshVisibleWithStats(
+                            // 【バッチでは行わない】メッシュ単位のワールドAABBは
+                            // 「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。
+                            // G-Buffer側も同じ条件で外すので、両者の食い違いは起きない
+                            if (!unit.IsBatch()
+                                && !IsMeshVisibleWithStats(
                                     m_MeshCullingEnabled, prepassFrustum, instance, lodModel, mesh, m_MeshCullTested,
                                     m_MeshCullCulled))
                             {
@@ -9500,8 +9863,10 @@ namespace Kurenai
                                 currentPipelineState = wanted;
                             }
 
-                            const ObjectConstants objectConstants =
+                            ObjectConstants objectConstants =
                                 MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
+                            objectConstants.InstanceBase = unit.InstanceBase;
+                            objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9511,9 +9876,16 @@ namespace Kurenai
                                 cmd->SetTexture(0, mesh.BaseColorTexture);
                             }
 
+                            // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかなく、
+                            // ドローンショーが同じスロットを使う
+                            if (unit.IsBatch())
+                            {
+                                cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                            }
+
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                             ++m_DrawCallsDepthPrepass;
                         }
                         }   // モデルLODの段のループ
@@ -9642,11 +10014,15 @@ namespace Kurenai
                 // 統計も別のカウンタで数える
                 const FrustumPlanes frustum = ExtractFrustumPlanes(viewProj);
 
-                for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
+                // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                // 【深度プリパスとまったく同じ組を使うこと】まとめ方が食い違うと穴が開く
+                GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
+                for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                 {
-                    const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+                    const size_t instanceIndex = unit.InstanceIndex;
+                    const Assets::ModelInstance& instance = *unit.Instance;
                     ++m_FrustumCullTested;
-                    if (!IsAABBVisible(frustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                    if (!IsAABBVisible(frustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                     {
                         ++m_FrustumCullCulled;
                         continue;
@@ -9654,9 +10030,19 @@ namespace Kurenai
 
                     // モデルLOD。フェード中は2段を重ねる。
                     // 【深度プリパスとまったく同じ組・同じDitherFadeであること】UpdateModelLODが
-                    // フレーム先頭で1回だけ決めた結果を両方が引くので、ここで距離を測り直さない
+                    // フレーム先頭で1回だけ決めた結果を両方が引くので、ここで距離を測り直さない。
+                    // バッチはフェード中でないものだけで構成されるので必ず1段(BuildInstanceBatches)
                     LODDraw lodDraws[2];
-                    const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                    uint32_t lodDrawCount;
+                    if (unit.IsBatch())
+                    {
+                        lodDraws[0] = { unit.Model, 1.0f };
+                        lodDrawCount = 1;
+                    }
+                    else
+                    {
+                        lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                    }
                     for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
                     {
                     const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
@@ -9700,7 +10086,10 @@ namespace Kurenai
 
                         // メッシュ単位のカリング。深度プリパスとまったく同じ錐台・同じ判定
                         // (片方だけで間引くと深度とG-Bufferが食い違う)
-                        if (!IsMeshVisibleWithStats(
+                        // 【バッチでは行わない】理由と、深度プリパスと条件を揃えることの
+                        // 必要性はプリパス側の同じ箇所を参照
+                        if (!unit.IsBatch()
+                            && !IsMeshVisibleWithStats(
                                 m_MeshCullingEnabled, frustum, instance, lodModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                         {
                             continue;
@@ -9714,8 +10103,10 @@ namespace Kurenai
                         // ここで食い違うとプリパスの深度とG-Bufferの深度が一致しなくなる
                         bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
-                        const ObjectConstants objectConstants =
+                        ObjectConstants objectConstants =
                             MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, lodDitherFade);
+                        objectConstants.InstanceBase = unit.InstanceBase;
+                        objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9733,9 +10124,16 @@ namespace Kurenai
                             cmd->SetTexture(7, m_WaterNormalMapTexture.get());
                         }
 
+                        // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかなく、
+                        // ドローンショーが同じスロットを使う
+                        if (unit.IsBatch())
+                        {
+                            cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                        }
+
                         cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                         cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                         ++m_DrawCallsGBuffer;
                     }
                     }   // モデルLODの段のループ

@@ -52,6 +52,17 @@ namespace Kurenai::Defaults
     // モデル単位のカリングは常に有効(こちらは切れない)
     inline constexpr bool MeshCullingEnabled = true;
 
+    // インスタンシング(同じモデルを指すインスタンスを1回のDrawIndexedへまとめる)。
+    //
+    // 【切れるようにしてある理由はメッシュ単位カリングと同じ】まとめても絵は変わらないのが
+    // 正しいので、絵だけを見ても効いたかどうかが分からない。同じ起動の中でON/OFFを
+    // 切り替え、ドローコール数が減ることと絵が一致することの両方を確かめられるようにする。
+    //
+    // 効くのは同じ.kmodelを複数配置しているシーンだけ(Scenes/InstancingTest.kscene、
+    // MultiModelTest.kscene)。PLATEAU・Sponza・Bistroは全モデルがユニークなので
+    // ONにしてもバッチが1つも作られず、発行されるコマンドは従来とまったく同じになる
+    inline constexpr bool InstancingEnabled = true;
+
     // --- シャドウ ---
     inline constexpr bool ShadowEnabled = true;
     inline constexpr float ShadowLightSize = 0.02f;

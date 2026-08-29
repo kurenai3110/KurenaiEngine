@@ -28,36 +28,7 @@ cbuffer CascadeConstants : register(b0)
     float4x4 ViewProj;
 };
 
-// GBufferCommon.hlsliのObjectConstantsと同じレイアウト。
-// **並びを1つでもずらすと別の値を読む**ので、あちらを直したらここも直すこと
-// (Shadow.hlsl・Transparent.hlsl・ProbeCapture.hlslも同じ写しを持っている)。
-//
-// このパスが実際に読むのは World と、メッシュレット/マテリアルテーブル関連だけだが、
-// 定数バッファのオフセットは宣言順で決まるため途中を飛ばせない
-cbuffer ObjectConstants : register(b1)
-{
-    float4x4 World;
-    float4x4 NormalMatrix;
-    float MetallicFactor;
-    float RoughnessFactor;
-    float TangentSignFlip;
-    float AlphaCutoff;
-    float3 EmissiveFactor;
-    float OcclusionStrength;
-    float4 BaseColorFactor;
-    float MaterialID;
-    uint MeshletOffset;
-    uint MeshletBufferIndex;
-    uint MeshletVertexBufferIndex;
-    uint MeshletTriangleBufferIndex;
-    uint MeshletCount;
-    float Translucency;
-    uint MaterialTableIndex;
-    uint MeshletFilterReject;
-    uint MeshletFilterRequire;
-    float EmissiveIntensity;
-    float OcclusionMapScale;
-};
+#include "ObjectConstants.hlsli"
 
 #define KURENAI_AMPLIFICATION_GROUP_SIZE 32
 #define KURENAI_MESH_GROUP_SIZE 128

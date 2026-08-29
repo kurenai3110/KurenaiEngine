@@ -95,10 +95,15 @@ struct CutoutPSInput
     nointerpolation uint MaterialIndex : TEXCOORD1;
 };
 
-CutoutPSInput VSMainCutout(VSInputCutout input)
+CutoutPSInput VSMainCutout(VSInputCutout input, uint instanceID : SV_InstanceID)
 {
     CutoutPSInput output;
-    float3 worldPos = mul(float4(input.Position, 1.0f), World).xyz;
+    // 【VSMainと同じくインスタンシングに対応させること】カットアウトのメッシュも
+    // 不透明ぶんと同じバッチのまま DrawIndexed(..., instanceCount) で描かれる。
+    // ここだけ定数バッファのWorldを使うと、バッチ内の全個体の影が
+    // 代表インスタンスの位置に重なって落ちる
+    const ModelInstanceRecord instance = FetchModelInstance(instanceID);
+    float3 worldPos = mul(float4(input.Position, 1.0f), instance.World).xyz;
     output.Position = mul(float4(worldPos, 1.0f), ViewProj);
     output.UV = input.UV;
     // この経路はマテリアルテーブルを使わない(t0と定数バッファから読む)

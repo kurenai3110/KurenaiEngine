@@ -186,6 +186,22 @@ namespace Kurenai::UI
             "呼ばないので、プロファイラパネルのメッシュ単位が「判定なし」になる。\n\n"
             "モデル単位のカリングは常に有効で、こちらでは切れない");
 
+        CheckboxEx(
+            "インスタンシング###Instancing", &m_Engine.m_InstancingEnabled,
+            Defaults::InstancingEnabled,
+            "同じ.kmodelを指すインスタンスをまとめ、1回のDrawIndexedで複数体を描く。"
+            "インスタンスごとに違うワールド行列は、頂点シェーダー専用のStructuredBufferを"
+            "SV_InstanceIDで引いて受け取る。\n\n"
+            "【効くシーンは限られる】PLATEAU・Sponza・Bistroは全モデルがユニークなので、"
+            "ONにしてもバッチが1つも作られず、発行されるコマンドは従来とまったく同じになる。"
+            "効くのはInstancing Test(同じモデルを256体)とMulti Model Test(3体)。\n\n"
+            "【メッシュシェーダー経路には効かない】DispatchMeshにインスタンス数の概念が無いため、"
+            "1モデル1ドローで描けるモデルはまとめない。DX12でメッシュレット描画が有効なあいだは"
+            "働く場面が水面などに限られる。\n\n"
+            "【絵は変わらない】まとめても各インスタンスの変換は同じなので、ON/OFFで画像は一致する。"
+            "切れるようにしてあるのは、その一致とドローコール数の減少を同じ起動の中で"
+            "確かめられるようにするため");
+
         EndParamGroup();
 
         // --- モデルLOD(.ksceneの[Model]LODPath / LODDistance) ---
