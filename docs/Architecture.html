@@ -7215,6 +7215,143 @@ Perfログへ1秒ごとに出します。
 真下を見下ろす視点では建物どうしがほとんど重ならないので、0.0%が正しい値です。
 </p>
 
+<h3>41.7 モデル単位のGPUカリングと <code>ExecuteIndirect</code></h3>
+
+<p>
+上の判定はメッシュレット単位で、増幅シェーダーの中で行われます。遮蔽されたモデルでも
+「メッシュレット数 ÷ 32」だけのスレッドグループは起動し、全部が自分を捨てるという形になります。
+そこで判定を<strong>モデル単位</strong>へも引き上げ、生き残ったモデルだけをGPU自身に
+発行させる経路を持たせています。
+</p>
+
+<p>
+<code>ModelCull.hlsl</code>(コンピュートシェーダー)が1スレッドで1件の描画候補を受け持ち、
+ワールドAABBを<strong>今フレームの視錐台</strong>と<strong>前フレームのHi-Z</strong>で判定します。
+視錐台の平面の取り出しは<code>Frustum.hlsli</code>、Hi-Zの遮蔽判定は<code>HiZCull.hlsli</code>に
+括り出してあり、<strong>増幅シェーダーとまったく同じコードを使います</strong> ――
+判定の向きも平面を列から作ることも、逆に書いてもコンパイルが通り絵もそれらしく出る箇所なので、
+実装を2つ持つと片方だけ壊れたまま残ります。
+</p>
+
+<h4>引数に定数バッファのアドレスそのものを載せる</h4>
+
+<p>
+1回の<code>ExecuteIndirect</code>で複数のモデルを描くため、ドローごとに「どのモデルか」を
+渡す必要があります。D3D12のコマンドシグネチャは
+<code>D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW</code>で
+<strong>ルート定数バッファビュー(b1 = <code>ObjectConstants</code>)をドローごとに差し替えられる</strong>ので、
+これを使っています。<strong>増幅・メッシュ・ピクセルの各シェーダーは1行も変わりません。</strong>
+</p>
+
+<table>
+<tr><th>オフセット</th><th>内容</th></tr>
+<tr><td>+0</td><td>このドローが使う<code>ObjectConstants</code>のGPU仮想アドレス(64bit)</td></tr>
+<tr><td>+8</td><td><code>DispatchMesh</code>のスレッドグループ数 X/Y/Z</td></tr>
+<tr><td>+20</td><td>詰め物(次の要素のアドレスを8バイト境界に載せるため)</td></tr>
+</table>
+
+<p>
+アドレスは<code>IRHIBuffer::GetLastUpdateGpuAddress</code>が返します
+(<strong>直前の<code>UpdateBuffer</code>が書いたリングスロットのアドレス</strong>)。
+HLSLに<code>uint64_t</code>のシェーダーモデル要件を持ち込まないよう、下位/上位32bitに分けて
+渡し、シェーダーは中身を解釈せず引数へ書き写すだけです。
+</p>
+
+<h4>PSOは引数で切り替えられない ―― 6つの区画</h4>
+
+<p>
+<code>ExecuteIndirect</code>が引数から差し替えられるのは<strong>コマンドシグネチャに含めた
+ルートパラメータだけ</strong>で、パイプラインステートは切り替えられません。
+1モデル1ドロー経路で使うPSOは次の6通りあるため、引数バッファを6区画に分け、
+<strong>区画ごとに1回ずつ</strong>発行します(空の区画は発行そのものを省きます)。
+</p>
+
+<table>
+<tr><th>区画</th><th>PSO</th></tr>
+<tr><td>G-Buffer / ミラーリング</td><td><code>m_GBufferMeshletPipelineState</code>(Mirrored)</td></tr>
+<tr><td>深度プリパス 不透明 / ミラーリング</td><td><code>m_DepthPrepassMeshletPipelineState</code>(Mirrored)</td></tr>
+<tr><td>深度プリパス カットアウト / ミラーリング</td><td><code>m_DepthPrepassMeshletCutoutPipelineState</code>(Mirrored)</td></tr>
+</table>
+
+<p>
+引数バッファの先頭256バイトには区画ごとの発行数(uint)が並び、そのまま
+<code>ExecuteIndirect</code>の件数バッファとして渡します。引数配列はその後ろに、
+区画ごとに256バイト境界で並びます。
+</p>
+
+<h4>深度プリパスとG-Bufferは同じ引数で描く</h4>
+
+<p>
+<strong>片方だけ間引くと絵が壊れます。</strong>プリパスが深度を書いたものをG-Bufferが
+描かないと、その画素は「深度はあるのに色が無い」穴になります(逆は早期Zが効かなくなるだけで
+絵は正しい)。そのため<code>ModelCull</code>パスは<strong>深度プリパスより前に登録</strong>し、
+両方が同じ引数で描きます。
+</p>
+
+<p>
+同じ理由で、深度プリパスも<strong>Hi-Zテクスチャ(t8)を自分で張ります</strong>。
+このパスはG-Bufferとまったく同じ増幅シェーダーを使うので、同じ判定を同じ入力で行わなければ
+なりません。DX12のSRVバインドはコマンドリスト側がシャドウで保持しているため、
+<strong>張り忘れてもエラーは出ず、別のパスが張ったテクスチャがそのまま残ります。</strong>
+</p>
+
+<h4>切り分けのための2つのトグル</h4>
+
+<p>
+レンダリングパネルの「メッシュレット」に2つのチェックボックスがあります。
+</p>
+
+<table>
+<tr><th>項目</th><th>意味</th></tr>
+<tr><td>モデル単位のGPUカリング</td><td>判定と計数を行う。切ると引数が作れないので描画もCPUループへ戻る</td></tr>
+<tr><td>カリング結果で間接描画する</td><td>発行を<code>ExecuteIndirect</code>に任せる。切ると判定と計数だけが残る</td></tr>
+</table>
+
+<p>
+分けてあるのは<strong>「判定が正しいか」と「間接描画が速いか」を別々に確かめるため</strong>です。
+判定だけを走らせている間は、GPUの視錐台判定とCPUの<code>IsAABBVisible</code>を突き合わせた
+ログが出て、食い違えば警告になります。間接描画に切り替わったかは、プロファイラの
+ドローコール数が<strong>モデルごとの数から区画ごとの数(PLATEAU 東京23区では
+G-Buffer 145 → 1、深度プリパス 145 → 1)へ落ちる</strong>ことで分かります。
+</p>
+
+<p>
+<strong>DX11とメッシュシェーダー非対応環境では常に従来のCPUループで描きます。</strong>
+D3D11には<code>DispatchMesh</code>に相当するものがないため、
+<code>IRHIDevice::SupportsIndirectDispatchMesh()</code>がfalseを返し、この経路へ入りません。
+</p>
+
+<h3>41.8 実測(モデル単位 / RTX 4070 Ti / DX12 / Release / 1280x720 / PLATEAU 767モデル)</h3>
+
+<table>
+<tr><th>カメラ</th><th>判定</th><th>視錐台</th><th>オクルージョン</th><th>生存</th><th>発行(G-Buffer / プリパス)</th></tr>
+<tr><td>街路(高度39m)</td><td>1534 (CPU 1534)</td><td>1244 (CPU 1244)</td><td><strong>116</strong></td><td>174</td><td>87 / 87</td></tr>
+<tr><td>俯瞰(約1000m)</td><td>1534 (CPU 1534)</td><td>1246 (CPU 1246)</td><td><strong>0</strong></td><td>288</td><td>144 / 144</td></tr>
+</table>
+
+<p>
+<strong>視錐台の判定はCPUと1件も食い違いません。</strong>
+</p>
+
+<p>
+<strong>この表の数はモデル数ではなく候補件数です。</strong>1インスタンスが2区画
+(G-Buffer + 深度プリパス不透明)へ積まれるためすべて2倍になっており、
+1534 = 767モデル × 2、オクルージョン 116 = <strong>58モデル</strong> × 2、
+生存 174 = 87モデル × 2 です。モデル数そのものを見たいなら発行数(87 / 144)を見ます。
+</p>
+
+<p>
+街路では視錐台を通った145モデルのうち<strong>58モデル(40%)</strong>が完全に隠れており、
+俯瞰では0 ―― 41.6節と同じく、これは視点の差であって実装の良し悪しではありません。
+</p>
+
+<p>
+<strong>総GPU時間のON/OFF差は分解能以下でした</strong>(街路 6.43ms / 6.59ms、
+俯瞰 6.81ms / 6.70ms。差の方向が一致しないので、この構成では差があるとは言えません)。
+削れる仕事は既にメッシュレット単位の判定で削れており、この段で消えるのは
+遮蔽されたモデルの増幅シェーダーを起動するぶんだけです。
+</p>
+
 </section>
 
 <section id="texturestreaming">
