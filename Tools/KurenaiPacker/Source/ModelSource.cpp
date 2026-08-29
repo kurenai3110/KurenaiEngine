@@ -6,6 +6,7 @@
 
 #include <assimp/GltfMaterial.h>
 #include <assimp/Importer.hpp>
+#include <assimp/config.h>
 #include <assimp/ObjMaterial.h>
 #include <assimp/light.h>
 #include <assimp/metadata.h>
@@ -37,6 +38,14 @@ namespace KurenaiPacker
 {
     namespace
     {
+        // 法線を持たないアセットに対して assimp が法線を生成するときの、稜線を平均化する
+        // 上限角度。これより開いた稜線は頂点を分けて面法線にする。
+        // 【30度にしてある根拠】PLATEAU の建物は壁と屋根が直角に交わる押し出し形状で、
+        // assimp の既定(175度)ではその直角まで平均化されて丸まる。一方で地形(dem)には
+        // なだらかな起伏があり、面法線だけにすると三角形の切れ目が段差として出る。
+        // 30度なら建物の角は分かれ、地形の緩い勾配は繋がる
+        constexpr float kMaxSmoothingAngleDegrees = 30.0f;
+
         // === 計測 ==============================================================
         //
         // どのフェーズで時間が溶けているかを推測しないための計装(OcclusionBaker.cppの
@@ -785,8 +794,16 @@ namespace KurenaiPacker
         ParseTimings timings;
 
         Assimp::Importer importer;
-        // GenSmoothNormalsは対象アセットは全メッシュが法線を持つため実質ノーオップであり、
-        // 万一法線を持たないメッシュがあった場合のみ後段のフォールバック(上向き固定法線)が使われる。
+        // 【GenSmoothNormalsは法線を持たないアセットのためにある】assimpのこの処理は
+        // 法線を既に持つメッシュには何もしないため、法線付きのアセット(Sponza/Bistro等)の
+        // 出力は変わらない。一方 PLATEAU の FBX は CityGML 由来で法線を1つも持っておらず、
+        // これが無いと後段のフォールバック(上向き固定法線)が全頂点に入る。その結果、
+        // 垂直な壁も真上を向いていることになり、面の向きによる明暗(陰)が一切出なくなる。
+        // 落ち影は法線と無関係に出るので絵は「それらしく」見え、気づきにくい
+        //
+        // 【スムージング角度を絞る】既定の175度ではほぼ全ての稜線が平均化され、建物の
+        // 壁と屋根の直角まで丸まる。この角度より開いた稜線は頂点を分けて面法線にする
+        importer.SetPropertyFloat(AI_CONFIG_PP_GSN_MAX_SMOOTHING_ANGLE, kMaxSmoothingAngleDegrees);
         // 接線はassimpのaiProcess_CalcTangentSpaceに任せず自前で計算する(下記の頂点ループ内、
         // TangentAccumKey関連のコード参照)。CalcTangentSpaceはUV面積がほぼ0(縮退)の三角形で
         // 接線が数値的に不安定になり、位置・法線・UVが完全に同一の頂点間でさえ接線がほぼ正反対に
@@ -796,7 +813,8 @@ namespace KurenaiPacker
         const auto readStart = PhaseClock::now();
         const aiScene* scene = importer.ReadFile(
             WideToUtf8(filePath),
-            aiProcess_Triangulate | aiProcess_ConvertToLeftHanded | aiProcess_JoinIdenticalVertices);
+            aiProcess_Triangulate | aiProcess_ConvertToLeftHanded | aiProcess_JoinIdenticalVertices |
+                aiProcess_GenSmoothNormals);
         timings.ReadSeconds += PhaseSecondsSince(readStart);
 
         if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode)
@@ -1508,6 +1526,44 @@ namespace KurenaiPacker
                   << " / ライト " << scene->mNumLights
                   << " / カメラ " << scene->mNumCameras
                   << " / アニメーション " << scene->mNumAnimations << "\n";
+
+        // --- 頂点属性の有無 ---
+        // 【法線を持たないメッシュがあると陰影が出ない】読み込み側は法線が無ければ
+        // (0,1,0) で埋めるため、垂直な壁も上向きとして陰影計算され、面の向きによる
+        // 明暗が一切出なくなる。落ち影は法線と無関係に出るので絵は「それらしく」見え、
+        // 気づきにくい。ここで元データの時点での有無を確かめられるようにしておく
+        unsigned int meshesWithNormals = 0;
+        unsigned int meshesWithUV = 0;
+        unsigned int meshesWithTangents = 0;
+        for (unsigned int i = 0; i < scene->mNumMeshes; ++i)
+        {
+            const aiMesh* mesh = scene->mMeshes[i];
+            if (mesh == nullptr)
+            {
+                continue;
+            }
+            if (mesh->HasNormals())
+            {
+                ++meshesWithNormals;
+            }
+            if (mesh->HasTextureCoords(0))
+            {
+                ++meshesWithUV;
+            }
+            if (mesh->HasTangentsAndBitangents())
+            {
+                ++meshesWithTangents;
+            }
+        }
+        std::cout << "  頂点属性を持つメッシュ数: 法線 " << meshesWithNormals
+                  << " / UV " << meshesWithUV
+                  << " / 接線 " << meshesWithTangents
+                  << "  (メッシュ総数 " << scene->mNumMeshes << ")\n";
+        if (scene->mNumMeshes > 0 && meshesWithNormals == 0)
+        {
+            std::cout << "  【警告】法線を持つメッシュが1つも無い。このまま焼くと全頂点の法線が\n"
+                         "          (0,1,0) になり、面の向きによる明暗(陰)が出なくなる\n";
+        }
 
         // --- メタデータ(FBXのUnitScaleFactor/UpAxis等) ---
         // 単位系と上方向軸はここにしか出ない。--scaleの値を決める一次情報になる
