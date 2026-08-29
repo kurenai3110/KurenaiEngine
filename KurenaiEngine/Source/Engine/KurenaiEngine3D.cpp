@@ -878,7 +878,69 @@ namespace Kurenai
             // 深度プリパスは G-Buffer と同じ増幅シェーダーを使うため、
             // フレーム全体のフラグだけだと同じ塊を1フレームに2回数えてしまう
             uint32_t MeshletStatsEnabled;
+
+            // --- メッシュレットLOD(Stage 6) ---
+            //
+            // 【GBufferCommon.hlsliのObjectConstantsと1バイトも違ってはいけない】
+            // 向こうがfloat3ではなくスカラー3つで宣言しているのは、定数バッファのfloat3が
+            // 16バイト境界をまたげず、手前に暗黙のパディングが入りうるため。こちらも同じ並びにする
+            float ModelBoundsCenter[3];
+            float ModelBoundsRadius;
+            float MeshletLODCameraPos[3];
+            float MeshletLODPixelScale;
+            float MeshletLODScreenSize;
+            int32_t MeshletLODForced;
+            // メッシュレットの色分けを「塊ごと」ではなく「段ごと」にするか(0/1)
+            uint32_t MeshletDebugColorByLOD;
+            // このモデルが選べる最も粗い段(Assets::Model::MeshletLODLevelCap)
+            uint32_t MeshletLODLevelCap;
         };
+
+        // モデルのAABBから外接球を作り、段の選択に要る値を定数へ書き込む。
+        //
+        // 【AABBの外接球を使う】メッシュ単位ではなくモデル単位にするのは、
+        // 1つのモデルの中で段を混ぜないため。段が混ざると、簡略化で頂点が動いた側と
+        // 動いていない側で辺が一致せず、境目に穴が開く
+        void ApplyMeshletLODConstants(
+            ObjectConstants& constants, const Assets::ModelInstance& instance,
+            const MeshletLODFrameConstants& lod)
+        {
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                constants.ModelBoundsCenter[axis] =
+                    (instance.Model.BoundsMin[axis] + instance.Model.BoundsMax[axis]) * 0.5f;
+            }
+            const float halfX = (instance.Model.BoundsMax[0] - instance.Model.BoundsMin[0]) * 0.5f;
+            const float halfY = (instance.Model.BoundsMax[1] - instance.Model.BoundsMin[1]) * 0.5f;
+            const float halfZ = (instance.Model.BoundsMax[2] - instance.Model.BoundsMin[2]) * 0.5f;
+            constants.ModelBoundsRadius = std::sqrt(halfX * halfX + halfY * halfY + halfZ * halfZ);
+
+            constants.MeshletLODCameraPos[0] = lod.CameraPos.x;
+            constants.MeshletLODCameraPos[1] = lod.CameraPos.y;
+            constants.MeshletLODCameraPos[2] = lod.CameraPos.z;
+            constants.MeshletLODPixelScale = lod.PixelScale;
+
+            // しきい値はモデルごとに決める。
+            //
+            // 【なぜ画素数の定数を全モデルへ当てはめないか】三角形数はモデルによって3桁違う
+            // (小道具の数千 ⇔ PLATEAUの地形タイルの134万)。単一の値にすると、
+            // 小さいモデルでは早く粗くなりすぎ、地形では一度も段が落ちない。
+            // 基準は「原寸の三角形1つが画面上で1画素を切ったら段を落とす」で、
+            // 直径D画素の円にN個の三角形があるとき平均面積は (πD²/4)/N なので
+            // 1画素を切る直径は sqrt(4N/π)。Qualityはその倍率(大きいほど原寸を保つ)
+            constexpr float kInvPi = 0.31830988618379067f;
+            const float triangles = static_cast<float>(instance.Model.TotalTriangleCount);
+            constants.MeshletLODScreenSize =
+                (lod.Quality > 0.0f && triangles > 0.0f)
+                    ? lod.Quality * std::sqrt(4.0f * triangles * kInvPi)
+                    : 0.0f;
+            constants.MeshletLODForced = lod.Forced;
+            constants.MeshletDebugColorByLOD = lod.DebugColorByLOD ? 1u : 0u;
+            // 【全メッシュの共通部分まで畳んだ値を渡す】メッシュごとの段数で
+            // 増幅シェーダーが読み替えると、段を1つしか持たないメッシュだけが
+            // 原寸のまま残り、1つのモデルの中で段が混ざる(境目に穴が開く)
+            constants.MeshletLODLevelCap = instance.Model.MeshletLODLevelCap;
+        }
 
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
         // TRS(平行移動・回転・スケール)から計算済み(HLSL側のmul(vec, matrix)規約に合わせて
@@ -891,7 +953,7 @@ namespace Kurenai
         // ここで0を渡せばシェーダー側に手を入れずに遮蔽マップの寄与だけを消せる
         ObjectConstants MakeObjectConstants(
             const Assets::ModelInstance& instance, const Assets::Mesh& mesh, float emissiveIntensity,
-            bool occlusionMapEnabled)
+            bool occlusionMapEnabled, const MeshletLODFrameConstants& meshletLOD)
         {
             ObjectConstants constants{};
             constants.World = instance.World;
@@ -925,7 +987,11 @@ namespace Kurenai
             constants.MeshletBufferIndex = bindlessIndexOf(instance.Model.MeshletBuffer.get());
             constants.MeshletVertexBufferIndex = bindlessIndexOf(instance.Model.MeshletVertexBuffer.get());
             constants.MeshletTriangleBufferIndex = bindlessIndexOf(instance.Model.MeshletTriangleBuffer.get());
-            constants.MeshletCount = mesh.MeshletCount;
+            // 【LOD0の個数ではなく全段の合計】表には全段が並んでおり、増幅シェーダーが
+            // 段を選ぶには選ばれうる段すべてが走査範囲に入っていなければならない。
+            // LOD0の個数のままだと、粗い段を選んでも表の後ろ半分に届かず何も描かれない
+            constants.MeshletCount = mesh.MeshletTotalCount;
+            ApplyMeshletLODConstants(constants, instance, meshletLOD);
 
             // メッシュ単位の経路。マテリアルは上の定数とt0〜t6から読むため、
             // テーブルは使わない(=無効番号)。EmissiveFactorとOcclusionStrengthには
@@ -950,7 +1016,8 @@ namespace Kurenai
         // (Assets::kGpuMaterialFlag*。GBufferCommon.hlsliのMeshletFilter*参照)
         ObjectConstants MakeModelObjectConstants(
             const Assets::ModelInstance& instance, float emissiveIntensity, bool occlusionMapEnabled,
-            uint32_t rejectMask, uint32_t requireMask, bool countCullStats = false)
+            uint32_t rejectMask, uint32_t requireMask, const MeshletLODFrameConstants& meshletLOD,
+            bool countCullStats = false)
         {
             ObjectConstants constants{};
             constants.World = instance.World;
@@ -967,7 +1034,9 @@ namespace Kurenai
             constants.MeshletBufferIndex = bindlessIndexOf(instance.Model.MeshletBuffer.get());
             constants.MeshletVertexBufferIndex = bindlessIndexOf(instance.Model.MeshletVertexBuffer.get());
             constants.MeshletTriangleBufferIndex = bindlessIndexOf(instance.Model.MeshletTriangleBuffer.get());
+            // TotalMeshletCountは全段の合計(ModelLoaderが表へ全段を載せている)
             constants.MeshletCount = instance.Model.TotalMeshletCount;
+            ApplyMeshletLODConstants(constants, instance, meshletLOD);
 
             constants.MaterialTableIndex = bindlessIndexOf(instance.Model.MaterialTableBuffer.get());
             constants.MeshletFilterReject = rejectMask;
@@ -6383,6 +6452,26 @@ namespace Kurenai
         const DirectX::XMMATRIX jitteredProj =
             frameState.Camera.GetProjectionMatrix() * DirectX::XMMatrixTranslation(jitterNdc.x, jitterNdc.y, 0.0f);
 
+        // --- メッシュレットLODの段を選ぶ入力を、このフレームぶん一度だけ確定させる ---
+        //
+        // 【全パスへ同じものを配る】シャドウと深度プリパスは同じ増幅シェーダーを使うが、
+        // ViewProjは光源やカスケードのものに差し替わっている。各パスのカメラで段を選ぶと
+        // 影を落とす形と本体の形が違う段になるため、主カメラの値をここで決めて配る。
+        //
+        // 【ジッターの影響を受けない値を使う】拡大率_22はジッター(平行移動)では変化しない。
+        // 仮に変化する量を使うと、段の境目でTAAのジッター周期に合わせて段が振動する
+        {
+            DirectX::XMFLOAT4X4 projForLOD;
+            DirectX::XMStoreFloat4x4(&projForLOD, frameState.Camera.GetProjectionMatrix());
+            m_MeshletLODFrame.CameraPos = frameState.Camera.GetPosition();
+            // 射影行列の_22 = 1/tan(fovY/2)。画面の高さ全体が 2*tan(fovY/2) なので、
+            // 距離1メートルの1メートルは _22 * 高さ / 2 画素になる
+            m_MeshletLODFrame.PixelScale = 0.5f * projForLOD._22 * static_cast<float>(m_RenderHeight);
+            m_MeshletLODFrame.Quality = m_MeshletLODEnabled ? m_MeshletLODQuality : 0.0f;
+            m_MeshletLODFrame.Forced = m_MeshletLODEnabled ? m_MeshletLODForcedLevel : -1;
+            m_MeshletLODFrame.DebugColorByLOD = m_MeshletLODDebugColorEnabled;
+        }
+
         // 有効なライトだけを詰めてt8のライトリストへ渡す。シェーダはLightCount(・ActiveLightCount)の
         // 数までしかループしないため、無効なライトはそもそもGPUへ送らない。DirectLight/Transparentの
         // 両パスがこの1つのリストを共有する(FrameConstants.ActiveLightCountに人数を書き込むため、
@@ -7528,7 +7617,7 @@ namespace Kurenai
 
                                     const ObjectConstants objectConstants = MakeModelObjectConstants(
                                         instance, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask,
-                                        requireMask);
+                                        requireMask, m_MeshletLODFrame);
                                     cmd->UpdateBuffer(
                                         m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
@@ -7567,7 +7656,7 @@ namespace Kurenai
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
                                 const ObjectConstants objectConstants =
-                                    MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                    MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -7684,7 +7773,7 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8013,7 +8102,7 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8494,7 +8583,8 @@ namespace Kurenai
                                 }
 
                                 const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                    instance, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask, requireMask);
+                                    instance, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask, requireMask,
+                                    m_MeshletLODFrame);
                                 cmd->UpdateBuffer(
                                     m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
@@ -8546,7 +8636,7 @@ namespace Kurenai
                             }
 
                             const ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8704,7 +8794,8 @@ namespace Kurenai
 
                         const ObjectConstants objectConstants = MakeModelObjectConstants(
                             instance, m_EmissiveIntensity, m_OcclusionMapEnabled,
-                            Assets::kGpuMaterialFlagTransparent, 0, /*countCullStats=*/true);
+                            Assets::kGpuMaterialFlagTransparent, 0, m_MeshletLODFrame,
+                            /*countCullStats=*/true);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8737,7 +8828,7 @@ namespace Kurenai
                         bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
                         const ObjectConstants objectConstants =
-                            MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                            MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9451,7 +9542,7 @@ namespace Kurenai
                     bindPipelineState(draw.Instance->IsMirrored);
 
                     const ObjectConstants objectConstants =
-                        MakeObjectConstants(*draw.Instance, *draw.Mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                        MakeObjectConstants(*draw.Instance, *draw.Mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9590,7 +9681,7 @@ namespace Kurenai
                             bindPipelineState(!instance.IsMirrored);
 
                             const ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                                MakeObjectConstants(instance, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 

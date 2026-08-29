@@ -129,6 +129,9 @@ PSOutput PSMainMeshletDebug(PSInput input)
     PSOutput output = PSMain(input);
     // 色の作り方はMeshlet.hlsliに集約してある(レイトレーシング側と同じ色でなければ
     // 見比べる意味が無いため)
-    output.Albedo = float4(MeshletDebugColor(input.MeshletIndex), 1.0f);
+    // 段で色分けするとき、MeshletIndexには段の番号が入っている(GBufferMeshlet.hlsl)
+    output.Albedo = (MeshletDebugColorByLOD != 0u)
+        ? float4(MeshletLODDebugColor(input.MeshletIndex), 1.0f)
+        : float4(MeshletDebugColor(input.MeshletIndex), 1.0f);
     return output;
 }

@@ -494,11 +494,17 @@ namespace Kurenai::Assets
                     flags |= kGpuMaterialFlagCutout;
                 }
 
-                for (uint32_t m = 0; m < mesh.MeshletCount; ++m)
+                // 【全段へ配ること】材質はメッシュの性質なので、そのメッシュの
+                // どの段の塊にも同じものが要る。LOD0だけに配ると、粗い段を選んだ瞬間に
+                // 半透明・アルファカットアウトのふるい分けが効かなくなる
+                for (uint32_t m = 0; m < mesh.MeshletTotalCount; ++m)
                 {
                     GpuMeshlet& meshlet = meshlets[mesh.MeshletOffset + m];
                     meshlet.MaterialIndex = mesh.MaterialIndex;
-                    meshlet.Flags = flags;
+                    // 【代入ではなくOR】Flagsの上位には詰め替えのときに入れた段のビットが
+                    // 入っている。代入すると段が全部0になり、どのモデルも常に原寸で描かれる
+                    // (絵は正しく出るので、性能が変わらないことでしか気づけない)
+                    meshlet.Flags = (meshlet.Flags & ~kGpuMaterialFlagMask) | flags;
                 }
             }
 
@@ -850,6 +856,9 @@ namespace Kurenai::Assets
         // モデル単位に連結したメッシュレットの3ブロック(GPUバッファはメッシュのループを
         // 抜けてから1本ずつ作る。理由はループ内のコメント参照)
         std::vector<GpuMeshlet> modelMeshlets;
+        // Model::MeshletLODLevelCapは「全メッシュの最小」なので、最初の1件は
+        // 比較ではなく代入で入れる(0で初期化したまま min を取ると常に0になる)
+        bool meshletLODCapInitialized = false;
         std::vector<uint32_t> modelMeshletVertices;
         std::vector<uint32_t> modelMeshletTriangles;
         if (buildMeshletGeometry)
@@ -919,6 +928,10 @@ namespace Kurenai::Assets
             // MeshEntry.MeshletCount(全段の合計)をそのまま渡すと、簡略化した段まで
             // 重ねて描かれる/三角形番号の対応が崩れる。段を選ぶのはメッシュレットLODの実装で行う
             outMesh.MeshletCount = mesh.MeshletLODCount > 0 ? mesh.MeshletLODCounts[0] : 0u;
+            // 全段の合計と段数。増幅シェーダーが段を選ぶには全段をGPUへ載せる必要がある
+            // (Stage 6。載せるのは下のGpuMeshletの詰め替えループ)
+            outMesh.MeshletTotalCount = mesh.MeshletCount;
+            outMesh.MeshletLODCount = mesh.MeshletLODCount;
 
             // 頂点/インデックスのbindless番号。メッシュシェーダー経路は頂点を、
             // 自前ラスタライザ経路は両方を、ResourceDescriptorHeap経由で読む。
@@ -954,14 +967,14 @@ namespace Kurenai::Assets
                 const auto* srcMeshletTriangles =
                     reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.MeshletTriangleOffset);
 
-                // 【LOD0の段だけを載せる】v10からメッシュレット配列は離散LODの全段を
-                // 連結して持っており、MeshEntry::MeshletCountは**全段の合計**である。
-                // そのまま回すと、簡略化した段まで同じ場所へ重ねて描かれる。
-                // 描くのはLOD0(必ず要素0から始まる)だけで、段を選ぶのはStage 6の担当。
+                // 【全段を載せる】v10からメッシュレット配列は離散LODの全段を連結して持つ。
+                // 増幅シェーダーは1つの段だけを選んで描くので、選ばれうる段が表に無いと
+                // 選びようがない。**重ねて描かれないのは、増幅シェーダーが
+                // 段の一致しない塊を落とすからであって、表に載っていないからではない**
+                // (段の判定を外すと全段が同じ場所へ重なって描かれる)。
                 //
-                // 【間接参照テーブルは全段ぶんをそのまま連結する】LOD0のメッシュレットが
-                // 指すのはブロックの先頭側なので、後ろに他の段のデータが付いていても
-                // オフセットは正しいまま。段ごとに切り詰めるとStage 6で結局入れ直すことになる
+                // 【間接参照テーブルも全段ぶんをそのまま連結する】各段のメッシュレットが
+                // 指す先はブロック内に揃っているので、オフセットの付け替えは段によらず同じ
                 outMesh.MeshletOffset = static_cast<uint32_t>(modelMeshlets.size());
                 // ディスク上のメッシュレットが本当に所属メッシュと同じ材質を指しているか。
                 //
@@ -972,7 +985,7 @@ namespace Kurenai::Assets
                 // パッカーとローダーの食い違いをその場で機械的に検出できる
                 bool meshletMaterialMismatch = false;
 
-                for (uint32_t m = 0; m < outMesh.MeshletCount; ++m)
+                for (uint32_t m = 0; m < outMesh.MeshletTotalCount; ++m)
                 {
                     const MeshletEntry& src = srcMeshlets[m];
                     if (src.MaterialIndex != static_cast<uint32_t>(mesh.MaterialIndex))
@@ -994,9 +1007,13 @@ namespace Kurenai::Assets
                     dst.ConeCutoff = src.ConeCutoff;
                     // 頂点バッファはメッシュ単位のまま。番号は上で登録済み
                     dst.VertexBufferIndex = outMesh.VertexBuffer->GetBindlessIndex();
-                    // MaterialIndexとFlagsは、メッシュの並びが確定してから
-                    // BuildMeshletMaterialLinksがまとめて埋める(SortMeshesByMaterialが
-                    // メッシュを入れ替えるため、ここで振ると対応が崩れる)
+                    // MaterialIndexと材質のフラグは、メッシュの並びが確定してから
+                    // BuildMeshletTablesがまとめて埋める(SortMeshesByMaterialが
+                    // メッシュを入れ替えるため、ここで振ると対応が崩れる)。
+                    //
+                    // 段のビットだけはここで入れる。段はディスク上のMeshletEntryが持つ値で、
+                    // メッシュの並び替えとは無関係に決まるため(向こうは材質ビットをORする)
+                    dst.Flags = (src.LODLevel & kGpuMeshletLODLevelMask) << kGpuMeshletLODLevelShift;
                     dst.MeshletIndexInMesh = m;
                     modelMeshlets.push_back(dst);
                 }
@@ -1082,6 +1099,20 @@ namespace Kurenai::Assets
             outMesh.EmissiveFactor[1] = material.EmissiveFactor[1];
             outMesh.EmissiveFactor[2] = material.EmissiveFactor[2];
 
+            // LOD0の三角形数を積む(メッシュレットLODのしきい値の基準。Model::TotalTriangleCount)
+            model.TotalTriangleCount += outMesh.IndexCount / 3;
+
+            // モデルが選べる最も粗い段は、全メッシュが持っている段の共通部分。
+            // 【メッシュレットを持たないメッシュは数えない】そのメッシュは
+            // メッシュシェーダー経路に載らないので、段の上限を縛る理由が無い
+            if (outMesh.MeshletLODCount > 0)
+            {
+                const uint32_t meshCap = outMesh.MeshletLODCount - 1u;
+                model.MeshletLODLevelCap = meshletLODCapInitialized
+                    ? std::min(model.MeshletLODLevelCap, meshCap)
+                    : meshCap;
+                meshletLODCapInitialized = true;
+            }
             model.Meshes.push_back(std::move(outMesh));
         }
 

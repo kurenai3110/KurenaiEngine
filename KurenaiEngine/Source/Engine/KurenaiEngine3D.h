@@ -42,6 +42,28 @@ namespace Kurenai::UI
 
 namespace Kurenai
 {
+    // メッシュレットLODの段を選ぶために、フレーム内の全パスへ配る値(Stage 6)。
+    //
+    // 【主カメラの値である】シャドウと深度プリパスは G-Buffer とまったく同じ増幅シェーダーを
+    // 使うが、そちらのViewProjは光源やカスケードのものに差し替わっている。各パスのカメラで
+    // 段を選ぶと、影を落とす形と本体の形が違う段になり、影の縁が本体からずれる。
+    // 段の選択は主カメラだけで決め、全パスで同じ値を配る
+    struct MeshletLODFrameConstants
+    {
+        DirectX::XMFLOAT3 CameraPos{ 0.0f, 0.0f, 0.0f };
+        // 距離1メートルにある長さ1メートルが何ピクセルになるか
+        // (= 射影行列の縦方向の拡大率 × レンダーターゲットの高さ / 2)
+        float PixelScale = 0.0f;
+        // しきい値の倍率。段を落とす投影直径は
+        // Quality * sqrt(4 * モデルのLOD0三角形数 / π) [画素]。
+        // 0以下なら段の選択を行わない(A/B比較のOFF側)
+        float Quality = 0.0f;
+        // 0以上ならその段に固定する(対照実験用)。負なら自動
+        int32_t Forced = -1;
+        // メッシュレットの色分け表示を「塊ごと」ではなく「段ごと」にするか
+        bool DebugColorByLOD = false;
+    };
+
     // 3Dサンプルプログラム向けの公開API。Deferred Shading(G-Buffer)によるPBRレンダリング、
     // シャドウマッピング、SSAO/SSIL(間接光)、SSR(反射)、ImGuiによる各種設定パネル、
     // 複数シーンの切り替えまでを内包した完結型のレンダラー。
@@ -586,6 +608,20 @@ namespace Kurenai
         // **オクルージョンは視錐台+コーンとは別のカウンタにする** ―― 合算すると
         // 「俯瞰(遮蔽が少ない)と街路(遮蔽が多い)で差が出るか」という確認ができない。
         bool m_MeshletCullStatsEnabled = Defaults::MeshletCullStatsEnabled;
+
+        // --- メッシュレットLOD(離散LOD。Stage 6) ---------------------------------------
+        //
+        // 段を選ぶのは増幅シェーダーで、ここにあるのはその入力。
+        // 【1つのモデル内で段を混ぜない】選択の入力はモデルのバウンディング球とカメラだけで、
+        // メッシュレットごとの値を使わない。段が混ざると、簡略化で頂点が動いた側と
+        // 動いていない側で辺が一致せず、境目に穴が開く
+        bool m_MeshletLODEnabled = Defaults::MeshletLODEnabled;
+        float m_MeshletLODQuality = Defaults::MeshletLODQuality;
+        int32_t m_MeshletLODForcedLevel = Defaults::MeshletLODForcedLevel;
+        // 色分け表示を段ごとにする。上の「メッシュレットを色分け」が有効なときだけ効く
+        bool m_MeshletLODDebugColorEnabled = false;
+        // 毎フレーム主カメラから作り直し、全パスの定数バッファへ同じものを配る
+        MeshletLODFrameConstants m_MeshletLODFrame;
         // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
         static constexpr uint32_t kMeshletCullStatsCount = 3;
         std::unique_ptr<RHI::IRHIBuffer> m_MeshletCullStatsBuffer;
