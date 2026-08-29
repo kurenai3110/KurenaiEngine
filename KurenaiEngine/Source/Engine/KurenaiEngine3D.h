@@ -590,12 +590,8 @@ namespace Kurenai
         // 変換そのものはどちらでも同じだが、**まとめられる相手が違う** ――
         // G-Buffer は各インスタンスがそのフレームに選んだ段、シャドウとプローブは常に
         // 最も粗い段(GetCoarsestLOD)を描くため、同じ組では括れない
-        // 【現在の適用先】深度プリパス / G-Buffer / シャドウの3パスだけ。
-        // 平面反射と反射プローブは GetInstanceDrawUnits をまだ呼んでいない
-        // (頂点シェーダー側は FetchModelInstance を通してあるので、後から呼び出しを
-        //  差し替えれば届く。それまでは InstancingEnabled=0 で従来どおり描く)
-        std::vector<InstanceBatch> m_InstanceBatchesCurrentLOD;   // 深度プリパス / G-Buffer
-        std::vector<InstanceBatch> m_InstanceBatchesCoarsestLOD;  // シャドウ
+        std::vector<InstanceBatch> m_InstanceBatchesCurrentLOD;   // 深度プリパス / G-Buffer / 平面反射
+        std::vector<InstanceBatch> m_InstanceBatchesCoarsestLOD;  // シャドウ / 反射プローブ
         // インスタンスがどちらの組でバッチに入ったか。パスの個別ループはここが立っているものを飛ばす
         std::vector<uint8_t> m_InstanceBatchedCurrentLOD;
         std::vector<uint8_t> m_InstanceBatchedCoarsestLOD;

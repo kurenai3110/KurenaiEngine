@@ -56,9 +56,36 @@ HEADER = """\
 # 影がドローコールの主な発生源(4カスケード)なので、ShadowDistance は既定のままにしてある。
 
 [Scene]
-Name = Instancing Test
+Name = Instancing Test{suffix}
 # 空の輝度に引っ張られず、板の明るさで比較できるようにする(EmeraldSquare と同じ値)
-Exposure = 15
+Exposure = 15{sceneExtra}
+"""
+
+WATER_AND_PROBE = """
+# --- 平面反射と反射プローブを通すための追加(--with-reflections) ---
+#
+# インスタンシングは深度プリパス / G-Buffer / シャドウのほかに、
+# **反射プローブの焼き込み**と**平面反射**でも働く。どちらも通らないシーンだけで
+# 確かめていると、その2経路は「絵が合っている」ことにも「壊れている」ことにも
+# 気付けない(実際に、カットアウトの影の欠落を検証シーンが通っていなかったために
+# 見逃した前例がある)。
+#
+# 水面はモン・サン=ミシェルの4000m四方の板を借りる。板は水面より上(y=3)に置いてある。
+
+[Model]
+Path = MontSaintMichelStudy/Water.kmodel
+Translation = 0, 0, 0
+Water = true
+
+[Water]
+NormalMap = MontSaintMichelStudy/WaterNormal.png
+
+[ReflectionProbe]
+Name = Grid Center
+Position = 0, {probeY:.1f}, 0
+Shape = Box
+BoxExtents = {probeExtent:.1f}, 12.0, {probeExtent:.1f}
+BlendDistance = 2.0
 """
 
 CAMERA = """
@@ -80,6 +107,9 @@ def main():
                         help='格子の間隔[m](既定18。モデルのXZの広がり12mより広く取り重ならないようにする)')
     parser.add_argument('--mirror-every', type=int, default=8,
                         help='何体ごとにミラーリング(X軸の負スケール)にするか(既定8)')
+    parser.add_argument('--with-reflections', action='store_true',
+                        help='水面(平面反射)と反射プローブを足す。この2つのパスも'
+                             'インスタンシングの対象なので、通さないと検証できない')
     args = parser.parse_args()
 
     if args.grid < 1:
@@ -102,8 +132,11 @@ def main():
             is_mirrored = (index % args.mirror_every) == 0
             if is_mirrored:
                 mirrored += 1
+            # 水面を張るときは板を水面より上へ持ち上げる。水面下にあるものは
+            # 平面反射のクリップ平面で落とされ、反射に何も映らなくなる
+            y = 3.0 if args.with_reflections else 0.0
             lines = ['[Model]', 'Path = %s' % MODEL_PATH,
-                     'Translation = %.1f, 0, %.1f' % (x, z)]
+                     'Translation = %.1f, %.1f, %.1f' % (x, y, z)]
             if is_mirrored:
                 # X軸のみ負 = 行列式が負。ワインディングが反転する
                 lines.append('Scale = -1, 1, 1')
@@ -118,7 +151,27 @@ def main():
     extent = (args.grid - 1) * args.spacing
     camera = CAMERA.format(x=0.0, y=extent, z=extent, yaw=180.0, pitch=-45.0)
 
-    text = HEADER.format(count=count, mirrored=mirrored) + camera + '\n' + '\n\n'.join(entries) + '\n'
+    # 【[Scene]節に書くこと】ScreenSpaceReflection は [Scene] のキーなので、
+    # [Camera] より後ろに置くと別の節の未知キーとして警告になり、値が効かない
+    scene_extra = ''
+    if args.with_reflections:
+        # 【明示しないと平面反射パスが走らない】エンジンの既定は「レイトレーシングが
+        # 使えない環境では反射なし」で、DX11 では書かない限り無効になる。
+        # それではこのシーンを作った目的(平面反射でインスタンシングが働くことの確認)を果たせない
+        scene_extra = chr(10) + 'ScreenSpaceReflection = true'
+
+    extra = ''
+    if args.with_reflections:
+        # 水面(平面反射パス)と反射プローブ(プローブ焼き込みパス)。
+        # どちらもインスタンシングの対象パスなので、通さないとその経路が検証できない。
+        # 水面はモン・サン=ミシェルの4000m四方の板をそのまま借りる
+        extra = WATER_AND_PROBE.format(
+            probeY=8.0, probeExtent=max(extent * 0.6, 20.0))
+
+    text = (HEADER.format(count=count, mirrored=mirrored, sceneExtra=scene_extra,
+                          suffix=' (Reflections)' if args.with_reflections else '')
+            + camera + extra
+            + '\n' + '\n\n'.join(entries) + '\n')
 
     with open(args.out_path, 'w', encoding='utf-8', newline='\r\n') as f:
         f.write(text)

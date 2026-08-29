@@ -8913,10 +8913,14 @@ namespace Kurenai
             // モデルが全部消えることはない
             const FrustumPlanes faceFrustum = ExtractFrustumPlanes(faceViewProj);
 
-            for (const auto& instance : m_Scene.Instances)
+            // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+            // プローブは常に最も粗い段なので、シャドウと同じ組(coarsestLOD=true)を使う
+            GetInstanceDrawUnits(/*coarsestLOD=*/true, m_DrawUnitScratch);
+            for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
             {
+                const Assets::ModelInstance& instance = *unit.Instance;
                 ++m_FrustumCullTested;
-                if (!IsAABBVisible(faceFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                if (!IsAABBVisible(faceFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                 {
                     ++m_FrustumCullCulled;
                     continue;
@@ -8924,7 +8928,8 @@ namespace Kurenai
 
                 // 【プローブも最も粗い段】焼き込むのは間接光で、細部は残らない
                 // ストリーミング中で未読み込みなら描かない
-                const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                const Assets::Model* const coarsestModel =
+                    unit.Model ? unit.Model : GetCoarsestLOD(instance);
                 if (!coarsestModel) { continue; }
                 for (const auto& mesh : coarsestModel->Meshes)
                 {
@@ -8938,16 +8943,26 @@ namespace Kurenai
                         continue;
                     }
 
-                    // メッシュ単位のカリング。錐台はキューブの1面ぶん
-                    if (!IsMeshVisibleWithStats(
+                    // メッシュ単位のカリング。錐台はキューブの1面ぶん。
+                    // 【バッチでは行わない】理由はG-Bufferパスの同じ箇所を参照
+                    if (!unit.IsBatch()
+                        && !IsMeshVisibleWithStats(
                             m_MeshCullingEnabled, faceFrustum, instance, *coarsestModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                     {
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                    ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                    objectConstants.InstanceBase = unit.InstanceBase;
+                    objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                    // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかない
+                    if (unit.IsBatch())
+                    {
+                        cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                    }
 
                     cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                     cmd->SetIndexBuffer(mesh.IndexBuffer.get());
@@ -8962,7 +8977,7 @@ namespace Kurenai
                     cmd->SetTexture(5, mesh.OcclusionTexture);
                     cmd->SetTexture(6, mesh.BentNormalTexture);
 
-                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                    cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                 }
             }
 
@@ -10963,19 +10978,26 @@ namespace Kurenai
                     // 画面には映っていないが水面には映るものが正しく残る
                     const FrustumPlanes reflectionFrustum = ExtractFrustumPlanes(reflectedViewProj);
 
-                    for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
+                    // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                    // 深度プリパス/G-Bufferと同じ「そのフレームに選ばれた段」の組を使う
+                    GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
+                    for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                     {
-                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+                        const size_t instanceIndex = unit.InstanceIndex;
+                        const Assets::ModelInstance& instance = *unit.Instance;
                         ++m_FrustumCullTested;
-                        if (!IsAABBVisible(reflectionFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                        if (!IsAABBVisible(reflectionFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                         {
                             ++m_FrustumCullCulled;
                             continue;
                         }
 
                         // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
-                        // ストリーミング中で未読み込みなら描かない
-                        const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
+                        // ストリーミング中で未読み込みなら描かない。
+                        // バッチはフェード中でないものだけで構成されるので、
+                        // unit.Model と GetCurrentLOD は同じ段を指す
+                        const Assets::Model* const currentModel =
+                            unit.Model ? unit.Model : GetCurrentLOD(instanceIndex);
                         if (!currentModel) { continue; }
                         for (const auto& mesh : currentModel->Meshes)
                         {
@@ -10986,20 +11008,34 @@ namespace Kurenai
                                 continue;
                             }
 
-                            // メッシュ単位のカリング。錐台は鏡映カメラのもの
-                            if (!IsMeshVisibleWithStats(
+                            // メッシュ単位のカリング。錐台は鏡映カメラのもの。
+                            // 【バッチでは行わない】理由はG-Bufferパスの同じ箇所を参照
+                            if (!unit.IsBatch()
+                                && !IsMeshVisibleWithStats(
                                     m_MeshCullingEnabled, reflectionFrustum, instance, *currentModel, mesh, m_MeshCullTested,
                                     m_MeshCullCulled))
                             {
                                 continue;
                             }
 
+                            // 鏡映で巻きが反転するため、ミラーリングの有無に対して逆のPSOを選ぶ。
+                            // バッチ内では IsMirrored が同一(グループ化のキー)なので代表で決めてよい
                             bindPipelineState(!instance.IsMirrored);
 
-                            const ObjectConstants objectConstants =
+                            ObjectConstants objectConstants =
                                 MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled);
+                            objectConstants.InstanceBase = unit.InstanceBase;
+                            objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                            // 【毎回張り直す】このパスはモデルのあとにドローンショーを描き、
+                            // そちらが同じ頂点シェーダー用SRV(t0)へ自分のバッファを張る。
+                            // 張り直さないと全インスタンスがドローンの座標を行列として読む
+                            if (unit.IsBatch())
+                            {
+                                cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                            }
 
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
@@ -11008,7 +11044,7 @@ namespace Kurenai
                             cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                             cmd->SetTexture(3, mesh.EmissiveTexture);
                             cmd->SetTexture(5, mesh.OcclusionTexture);
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                         }
                     }
 
