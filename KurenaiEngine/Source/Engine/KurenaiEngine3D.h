@@ -220,6 +220,9 @@ namespace Kurenai
         // modelは「このパスが描く段」。モデルLODが入ったのでinstance.Model(最も詳細な段)とは
         // 限らず、シャドウは最も粗い段、G-Buffer/プリパスは選ばれた段を渡す
         bool ShouldUseModelMeshletPath(const Assets::ModelInstance& instance, const Assets::Model& model) const;
+        // モデル単位のGPUカリングが使うバッファを、候補数に足りる大きさで用意する。
+        // シーン切り替えとストリーミングでインスタンス数が変わるため、足りなくなったときだけ作り直す
+        void EnsureModelCullCapacity(uint32_t candidateCount);
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
         // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
         RHI::IRHITexture* GetActiveAOTexture() const;
@@ -614,6 +617,51 @@ namespace Kurenai
         uint32_t m_MeshletCullTested = 0;
         uint32_t m_MeshletCullFrustumCulled = 0;
         uint32_t m_MeshletCullOcclusionCulled = 0;
+
+        // --- モデル単位のGPUカリング(Stage 5-3) ---
+        //
+        // コンピュートシェーダー(ModelCull.hlsl)が、描画候補のワールドAABBを
+        // 視錐台とHi-Zで判定し、生き残ったものの DispatchMesh 引数を詰める。
+        //
+        // 【この段階では描画を発行しない】カウンタを埋めてCPU側の判定と突き合わせるところまで。
+        // ExecuteIndirect へ繋ぐのはそれが合ってから ―― いきなり繋ぐとGPUハングの
+        // 切り分けができない(計画のStage 5-3の段取り)。
+        bool m_ModelCullGpuEnabled = Defaults::ModelCullGpuEnabled;
+        std::unique_ptr<RHI::IRHIShader> m_ModelCullComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ModelCullPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullConstantBuffer;
+        // 描画候補(GpuModelCullInstance)の配列。毎フレームCPUから書き直す
+        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullInstanceBuffer;
+        // [判定, 視錐台で間引き, オクルージョンで間引き, 生き残り]
+        static constexpr uint32_t kModelCullCounterCount = 4;
+        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullCounterBuffer;
+        // 生き残った候補の DispatchMesh 引数(uint4 × 候補数)
+        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullDrawArgsBuffer;
+        // 受け皿。リングの理由と段数はメッシュレット統計と同じ
+        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullReadback[kMeshletCullStatsRingSize];
+        uint32_t m_ModelCullRingIndex = 0;
+        // m_ModelCullInstanceBuffer / m_ModelCullDrawArgsBuffer が収まる候補数。
+        // 1インスタンスがLODのクロスディザで最大2件の候補を出すため、インスタンス数の2倍で確保する
+        uint32_t m_ModelCullCapacity = 0;
+        // このフレームにCPUが積んだ候補数。GPUが数えた「判定」と一致するはず ――
+        // 一致しなければ、積み方か数え方のどちらかが壊れている
+        uint32_t m_ModelCullCandidateCount = 0;
+        // 直近に読み戻せた値
+        uint32_t m_ModelCullTested = 0;
+        uint32_t m_ModelCullFrustumCulled = 0;
+        uint32_t m_ModelCullOcclusionCulled = 0;
+        uint32_t m_ModelCullSurvived = 0;
+        // 同じフレームでCPU側が視錐台で間引いた数。GPUの「視錐台で間引き」と突き合わせる。
+        //
+        // 【GPUの数値は2フレーム遅れなので、CPU側も同じだけ遅らせて比べる】
+        // 今フレームのCPU値と2フレーム前のGPU値を比べると、カメラが動いている間は
+        // 常に食い違って見える。リードバックと同じリングに積んで、同じフレームのものを比べる
+        uint32_t m_ModelCullCpuFrustumCulled = 0;
+        uint32_t m_ModelCullCpuFrustumHistory[kMeshletCullStatsRingSize]{};
+        uint32_t m_ModelCullCandidateHistory[kMeshletCullStatsRingSize]{};
+        // 上のリングから取り出した、GPUの数値と同じフレームのCPU側の値(ログの比較に使う)
+        uint32_t m_ModelCullComparedCpuFrustumCulled = 0;
+        uint32_t m_ModelCullComparedCandidateCount = 0;
 
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;

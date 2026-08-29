@@ -27,6 +27,7 @@
 // そこからピクセルシェーダーをコンパイルさせない方が安全なため
 #include "GBufferCommon.hlsli"
 #include "Bindless.hlsli"
+#include "HiZCull.hlsli"
 
 // 【Meshlet / MeshVertex の定義は Meshlet.hlsli にある】シャドウ版の
 // メッシュシェーダー(ShadowMeshlet.hlsl)と共有するため。写して2つに増やすと
@@ -95,24 +96,10 @@ bool IsMeshletBackfacing(Meshlet meshlet, float3 centerWorld)
 
 // --- Hi-Zオクルージョンカリング ---------------------------------------------------------
 //
-// 【判定の向きはReverse-Zで決まる。逆に書いても絵は出るので注意】
-// このエンジンはReverse-Z(近平面 NDC z=1.0 / 遠平面 z=0.0、深度比較はGREATER)で、
-// HiZ.hlslはミップを2x2の**最小値**で縮約している。つまり
-//
-//     Hi-Zの1テクセル = そのブロック内で「最も遠い」可視サーフェスの深度
-//
-// なので、球の最も手前の点(=NDC zが最大の点)ですらその値より奥(小さい)なら、
-// ブロック内のどの画素から見ても球は隠れている:
-//
-//     遮蔽されている ⟺ 球のmaxNdcZ < カバーするテクセルのHi-Zのmin
-//
-// 保守側(間引きすぎない側)はHi-Zの値を小さく取る方向なので、複数テクセルをまとめるときも
-// minで正しい。maxを取ると「本当は見えているものを消す」側へ倒れる。
-//
-// 【Hi-Zは1フレーム古い】構築パス(RenderGraphの"HiZ")はG-Bufferパスより後に登録されており、
-// ここで読めるのは前フレームの深度から作ったチェーンになる。したがって投影には
-// 今フレームのViewProjではなく**PrevViewProj**(そのHi-Zの元になった深度を描いた行列そのもの)
-// を使い、そのうえでカメラ移動ぶんだけ球を膨らませて視差のずれを保守側へ吸収する。
+// 【判定そのものは HiZCull.hlsli にある】モデル単位で同じ判定を行うコンピュートシェーダー
+// (ModelCull.hlsl)と共有するため。判定の向きはReverse-Zで決まり、逆に書いても
+// コンパイルは通り絵もそれらしく出るので、実装を2つに増やすと片方だけが
+// 「間引きすぎる」あるいは「一度も間引かない」まま気づけない。
 Texture2D<float> HiZTexture : register(t8);
 
 bool IsMeshletOccluded(float3 centerWorld, float radiusWorld)
@@ -128,89 +115,12 @@ bool IsMeshletOccluded(float3 centerWorld, float radiusWorld)
     // 2項は別々の失敗に効くので、片方を上げてももう片方の穴は塞がらない
     const float radius = radiusWorld * OcclusionCullParams.y + OcclusionCullParams.z;
 
-    // 球を包むワールドAABBの8頂点を前フレームのクリップ空間へ運ぶ。
-    // 球のまま扱わないのは、透視投影で球の輪郭が楕円になり、保守的な画面矩形を
-    // 閉じた式で出すのが面倒なため。AABBは球より大きいので必ず保守側に倒れる
-    float2 ndcMin = float2(1e30f, 1e30f);
-    float2 ndcMax = float2(-1e30f, -1e30f);
-    float maxNdcZ = -1e30f;
-
-    [unroll]
-    for (uint i = 0; i < 8; ++i)
-    {
-        const float3 corner = centerWorld + float3(
-            (i & 1) ? radius : -radius,
-            (i & 2) ? radius : -radius,
-            (i & 4) ? radius : -radius);
-
-        const float4 clip = mul(float4(corner, 1.0f), PrevViewProj);
-
-        // 【wが0以下の頂点が1つでもあれば判定を諦めて通す】カメラの後ろ、あるいは
-        // 近平面をまたぐAABBでは、w除算が符号を反転させて画面矩形が裏返る。
-        // そのまま進めると「足元の巨大なタイルが丸ごと消える」という壊れ方をする。
-        // ここは間引かない側へ倒すのが常に安全
-        if (clip.w <= 0.0f)
-        {
-            return false;
-        }
-
-        const float3 ndc = clip.xyz / clip.w;
-        ndcMin = min(ndcMin, ndc.xy);
-        ndcMax = max(ndcMax, ndc.xy);
-        // Reverse-Zなのでzが大きいほど手前。球の「最も手前の点」を取る
-        maxNdcZ = max(maxNdcZ, ndc.z);
-    }
-
-    // NDC(x,y ∈ [-1,1]、yは上が+1)からUV(y は下が+1)へ。**ここでYの符号を反転する。**
-    // 反転を忘れると上下が入れ替わったブロックのHi-Zと比べることになり、
-    // 「空を見上げているのに間引き率だけは出る」というもっともらしい壊れ方をする
-    const float2 uvMin = float2(ndcMin.x * 0.5f + 0.5f, -ndcMax.y * 0.5f + 0.5f);
-    const float2 uvMax = float2(ndcMax.x * 0.5f + 0.5f, -ndcMin.y * 0.5f + 0.5f);
-
-    // 【前フレームの画面からはみ出していたら判定を諦めて通す】
-    // 視錐台判定は**今フレームの**ViewProjで行っているのに対し、こちらは前フレームの行列で
-    // 投影している。カメラが回った直後は「今フレームは画面内だが前フレームは画面外」という
-    // 塊が画面の縁に必ず生まれ、その塊のUVは[0,1]の外へ出る。
-    //
-    // そこでUVを画面端へクランプすると、**まったく別の場所のHi-Zと深度を比べる**ことになり、
-    // たまたまそこに手前の面があれば消える。カメラを振ったときだけ画面の縁が欠ける、という
-    // 追いにくい壊れ方をするので、はみ出した時点で間引かない側へ倒す。
-    //
-    // 縁に接する塊を取りこぼすことになるが、画面内部の塊数に対して縁は一列ぶんしかない。
-    // カメラ移動距離による半径の膨張ではこの誤差は埋まらない(原因が並進ではなく回転のため)
-    if (uvMin.x < 0.0f || uvMin.y < 0.0f || uvMax.x > 1.0f || uvMax.y > 1.0f)
-    {
-        return false;
-    }
-
-    const float2 hiZSize = HiZScreenParams.xy;
-    const float2 texelMin = uvMin * hiZSize;
-    const float2 texelMax = uvMax * hiZSize;
-
-    // 矩形が高々2x2テクセルに収まる段を選ぶ。ceil(log2(辺の長さ))が
-    // 「1テクセルの幅が辺の長さ以上になる最小の段」になる
-    const float sizeInTexels = max(texelMax.x - texelMin.x, texelMax.y - texelMin.y);
-    const uint mipCount = (uint)OcclusionCullParams.w;
-    const uint mip = (uint)clamp(ceil(log2(max(sizeInTexels, 1.0f))), 0.0f, (float)(mipCount - 1));
-
-    // 選んだ段でのテクセル座標。ミップNの解像度は floor(mip0 / 2^N)(1未満にはならない)で、
-    // これはHiZ.hlslが1段ずつ半分にしていった結果ともD3Dのミップ寸法とも一致する
-    // (floor(floor(x/2)/2) = floor(x/4) のため)
-    const float2 mipSize = max(floor(hiZSize / (float)(1u << mip)), float2(1.0f, 1.0f));
-    const int2 mipMaxCoord = (int2)mipSize - int2(1, 1);
-    const int2 coordMin = clamp((int2)floor(uvMin * mipSize), int2(0, 0), mipMaxCoord);
-    const int2 coordMax = clamp((int2)floor(uvMax * mipSize), int2(0, 0), mipMaxCoord);
-
-    // 2x2を読んでminを取る。段の選び方から矩形はこの範囲に収まっているはずだが、
-    // 端数の丸めで1テクセルはみ出しうるので、座標はクランプ済みのものを使う
-    const float d00 = HiZTexture.Load(int3(coordMin.x, coordMin.y, mip));
-    const float d10 = HiZTexture.Load(int3(coordMax.x, coordMin.y, mip));
-    const float d01 = HiZTexture.Load(int3(coordMin.x, coordMax.y, mip));
-    const float d11 = HiZTexture.Load(int3(coordMax.x, coordMax.y, mip));
-    const float hiZMin = min(min(d00, d10), min(d01, d11));
-
-    // 球の最も手前の点ですら、そのブロックで最も遠い可視面より奥なら隠れている
-    return maxNdcZ < hiZMin;
+    // 【PrevViewProjを渡すこと】読めるHi-Zは前フレームの深度から作ったものなので、
+    // 投影にはそれを描いた行列を使う(HiZCull.hlsliのコメント参照)
+    return IsAabbOccludedByHiZ(
+        HiZTexture, PrevViewProj,
+        centerWorld - radius, centerWorld + radius,
+        HiZScreenParams.xy, (uint)OcclusionCullParams.w);
 }
 
 // --- 増幅シェーダー -------------------------------------------------------------------

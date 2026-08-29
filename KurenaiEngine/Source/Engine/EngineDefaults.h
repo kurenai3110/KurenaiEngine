@@ -546,4 +546,11 @@ namespace Kurenai::Defaults
     // 既定で切っておくと「有効にしたのに何も起きない」の切り分けが毎回必要になる。
     // 増幅シェーダーのアトミックはグループ単位に集約してあり、切るのは実測して重いと分かってから
     inline constexpr bool MeshletCullStatsEnabled = true;
+    // モデル単位のGPUカリング(Stage 5-3)を走らせるか。
+    //
+    // 【既定は有効だが、この段階では描画発行に繋がっていない】判定して数えるだけで、
+    // 実際に描くものはCPU側のループが決めている。CPUの判定と突き合わせて
+    // 「GPU側の判定が正しいか」を確かめるための段。ExecuteIndirect へ繋ぐのはその後。
+    // メッシュレット経路とHi-Zが要るので、非対応環境では走らない
+    inline constexpr bool ModelCullGpuEnabled = true;
 }

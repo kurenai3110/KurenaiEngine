@@ -325,6 +325,17 @@ namespace Kurenai::UI
             "増幅シェーダーのアトミックはグループ単位に集約してあるが、"
             "その負荷は切り替えて実測すること");
 
+        CheckboxEx(
+            "モデル単位のGPUカリング###ModelCullGpu", &m_Engine.m_ModelCullGpuEnabled,
+            Defaults::ModelCullGpuEnabled,
+            "コンピュートシェーダーが、描画候補のワールドAABBを視錐台とHi-Zで判定し、"
+            "生き残りのDispatchMesh引数と統計をGPU上に作る。\n\n"
+            "【まだ描画発行には繋がっていない】実際に描くものを決めているのはCPU側のループのまま。"
+            "GPUの判定がCPUと一致することを先に確かめるための段で、切っても絵は変わらない。\n\n"
+            "【このパスのコストはここを切り替えて測ること】"
+            "GPU内訳のパス別の値は、直後のリソース遷移による待ちを吸ってしまうことがある。"
+            "総GPU時間のON/OFF差のほうが信用できる");
+
         EndParamGroup();
 
         // .kmodelが--no-meshletsで焼かれていると、対応環境でも0のままになる。
