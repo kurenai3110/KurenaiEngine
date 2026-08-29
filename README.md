@@ -483,6 +483,24 @@ Samples\Sample3D\Build\Bin\x64\Release\Sample3D.exe -scene PlateauTokyo23ku
   以前の高度900mの俯瞰は、大気遠近で全面が白く飛ぶうえ、LOD2がLODDistanceの外なので
   一度も出ませんでした
 
+##### メッシュレットLODの検証用シーン(dem / 地形)
+
+メッシュレットLODが効くのは「三角形そのものが支配的コスト」のモデルだけです。
+PLATEAU でそれに当たるのは **dem(地形)** で、1タイルが2次メッシュ(約10km四方)の1メッシュ、
+三角形は100万の桁にのぼる一方でテクスチャを1枚も持ちません。
+ビル街を混ぜるとドローコールとテクスチャのコストが上乗せされ、三角形を減らした効果が
+総フレーム時間から読めなくなるため、dem だけのシーンを別に用意しています。
+
+```
+python Tools\plateau_dem_scene.py Assets\Packed\Plateau\Dem Scenes\PlateauDem.kscene
+Samples\Sample3D\Build\Bin\x64\Release\Sample3D.exe -dx12 -scene PlateauDem
+```
+
+- **`-dx12` が要ります。** 段を選ぶのは増幅シェーダーなので、DX11 では一度も実行されません
+- **カメラをモデルの外接球の外へ置いています。** 段は外接球の投影サイズで決まるため、
+  球の内側にカメラがあると投影サイズが振り切れて常に原寸(段0)になり、
+  段の選択が一度も走らないまま「効かなかった」と読み違えます
+
 > **ライセンス: 公共データ利用規約(PDL1.0) / CC BY 4.0 互換。商用利用可・要出典表示。**
 > 出典: 国土交通省 Project PLATEAU「3D都市モデル(Project PLATEAU)東京都23区」
 > <https://www.geospatial.jp/ckan/dataset/plateau-tokyo23ku> 。

@@ -202,6 +202,46 @@ cbuffer ObjectConstants : register(b1)
     // 同じ塊を1フレームに2回数えてしまい、「1フレームあたりの判定数」が倍になる。
     // 数えるのは G-Buffer パスだけにする
     uint MeshletStatsEnabled;
+
+    // --- メッシュレットLOD(Stage 6) ---------------------------------------------------
+    //
+    // 増幅シェーダーがモデルのバウンディング球の投影サイズから段を1つ選ぶ
+    // (Meshlet.hlsliのMeshletSelectLODLevel)。**選択の入力はここの定数だけ**で、
+    // メッシュレットごとの値は一切使わない ―― どのスレッドが計算しても同じ段になり、
+    // 1つのモデル内で段が混ざらないことがこれで保証される。
+    // 混ざると、簡略化で頂点が動いた側と動いていない側の辺が一致せず境目に穴が開く。
+    //
+    // 【4バイトのスカラーだけを末尾に足している】定数バッファの配列は要素ごとに
+    // 16バイトへ詰められるため、uint Offsets[4] のような書き方をすると64バイトを占め、
+    // 先頭までしか宣言していないシェーダー(Shadow.hlsl等)のオフセットまで動きうる
+    // 【float3で宣言しない】定数バッファのfloat3は16バイト境界をまたげないため、
+    // 直前の並び次第で手前に暗黙のパディングが入る。C++側の構造体に同じ詰め物を
+    // 入れ忘れると、そこから後ろの値が全部ずれる。スカラー3つなら並びが確定する
+    float ModelBoundsCenterX;   // モデルローカル空間でのモデル全体の外接球
+    float ModelBoundsCenterY;
+    float ModelBoundsCenterZ;
+    float ModelBoundsRadius;
+    // 【主カメラの値を入れる】シャドウと深度プリパスは同じ増幅シェーダーを使うが、
+    // ViewProjは光源やカスケードのものに差し替わっている。そちらで段を選ぶと
+    // パスごとに違う段が描かれ、影の落ち方と本体の形が食い違う。
+    // C++側は全パスで主カメラの位置と拡大率を入れること
+    float MeshletLODCameraPosX;
+    float MeshletLODCameraPosY;
+    float MeshletLODCameraPosZ;
+    // 距離1メートルにある長さ1メートルが何ピクセルになるか
+    // (= 射影行列の縦方向の拡大率 × レンダーターゲットの高さ / 2)
+    float MeshletLODPixelScale;
+    // 投影直径がこれを下回ったら1段落とす(ピクセル)。0以下なら段の選択を行わない
+    float MeshletLODScreenSize;
+    // 0以上なら自動選択をやめてこの段に固定する(対照実験用)。負なら自動
+    int MeshletLODForced;
+    // メッシュレットの色分け表示を「塊ごと」ではなく「段ごと」に切り替える(0/1)。
+    // 有効なときメッシュシェーダーはMeshletIndexの代わりに段の番号を出力する
+    uint MeshletDebugColorByLOD;
+    // このモデルが選べる最も粗い段(Assets::Model::MeshletLODLevelCap)。
+    // 全メッシュが持っている段の共通部分までCPU側で畳んであるので、
+    // ここで選んだ段は必ずどのメッシュにも存在し、モデル全体が同じ段になる
+    uint MeshletLODLevelCap;
 };
 
 // 画面座標から作る決定的なノイズ(0〜1)。Tonemap.hlslが同名の関数を持つが、あちらは

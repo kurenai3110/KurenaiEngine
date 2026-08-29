@@ -261,6 +261,7 @@
     <li><a href="#hizocclusion">41. Hi-Zオクルージョンカリング</a></li>
     <li><a href="#texturestreaming">42. テクスチャの常駐ミップ制御(テクスチャストリーミング)</a></li>
     <li><a href="#shaderpackage">43. シェーダーの事前コンパイル(<code>.kshader</code>)</a></li>
+    <li><a href="#meshletlod">44. メッシュレットLOD(離散LOD)</a></li>
   </ol>
 </nav>
 
@@ -7206,6 +7207,7 @@ Perfログへ1秒ごとに出します。
 <tr><td>メッシュレット描画</td><td>DX12 / メッシュシェーダー Tier 1 / SM 6.6(bindless)</td><td>従来の頂点シェーダー + DrawIndexed</td></tr>
 <tr><td><strong>Hi-Zオクルージョンカリング</strong></td><td>上と同じ(増幅シェーダーで判定するため)</td><td>判定を行わない。Hi-Zパスの構築も走らない</td></tr>
 <tr><td>カリング統計のリードバック</td><td>上と同じ + bindlessのUAV登録</td><td>統計を出さない</td></tr>
+<tr><td><strong>メッシュレットLOD(43章)</strong></td><td>上と同じ(増幅シェーダーが段を選ぶため)</td><td>段を選ばない。常に原寸(段0)で描かれる</td></tr>
 <tr><td>レイトレーシング(反射 / シャドウ / AO / DDGI)</td><td>DX12 / DXR Tier 1.1</td><td>スクリーンスペースの手法へ縮退</td></tr>
 </table>
 
@@ -7430,6 +7432,113 @@ bindlessの有無がパスによって食い違います)。
 経緯は<a href="ImplementationHistory.md">ImplementationHistory.md</a> 58章、
 根拠は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 54章。
 </p>
+<section id="meshletlod">
+<h2>44. メッシュレットLOD(離散LOD)</h2>
+
+<p>
+KurenaiPackerがメッシュごとに<code>meshopt_simplify</code>で段を焼き(三角形をおよそ半分ずつ落とす)、
+全段のメッシュレットを1本の表へ並べておきます。描画時は<strong>増幅シェーダーが段を1つ選び、
+その段に属さない塊を落とす</strong>だけです。焼き込み側の仕様は<a href="#assets">.kmodel v10</a>を参照してください。
+</p>
+
+<p>
+<strong>DX12 + SM 6.6 専用です。</strong> 段を選ぶのが増幅シェーダーなので、メッシュシェーダー経路でしか効きません
+(41.5の表)。性能の基準機であるIntel UHD Graphics 620では一度も実行されません。
+</p>
+
+<h3>43.1 段はモデル単位で1つに決まる</h3>
+
+<p>
+混ざらないことは<strong>2つ</strong>で担保しています。片方だけでは足りません。
+</p>
+
+<ol>
+<li>段の選択に使う入力は<code>ObjectConstants</code>の<strong>モデル外接球とカメラだけ</strong>。
+そのためどのスレッド・どのグループが計算しても同じ段になります</li>
+<li>選べる段の上限を、<strong>全メッシュが持っている段の共通部分までCPU側で畳んであります</strong>
+(<code>Assets::Model::MeshletLODLevelCap</code>)</li>
+</ol>
+
+<p>
+(2)が無いと、段の数はメッシュごとに違うため、段を1つしか持たないメッシュだけが原寸のまま残り、
+1つのモデルの中で段が混ざります。材質の境目でメッシュが分かれているモデルは、
+その境目で実際に辺を共有しています。上限を畳むと、段を1つしか持たないメッシュを
+1つでも含むモデルは常に原寸になります ―― <strong>保守的ですが、穴が開かないことを優先します</strong>。
+</p>
+
+<p>
+混ぜてはいけないのは、<code>meshopt_simplify</code>が段ごとに頂点を動かすためです。
+隣り合うメッシュレットが違う段だと、動いた側と動いていない側で辺が一致せず境目に穴が開きます。
+「穴が出たら直す」のではなく、<strong>混ざりようのない作りにしてある</strong>のが設計上の要点です。
+その代償として粒度は粗くなります(43.5)。
+</p>
+
+<h3>43.2 選び方</h3>
+
+<pre><code>投影直径[画素] = 2 × r × pixelScale / sqrt(d² - r²)      (d ≦ r なら画面いっぱい扱い)
+しきい値[画素] = MeshletLODQuality × sqrt(4 × モデルのLOD0三角形数 / π)
+段            = 投影直径がしきい値の 1/2^n を下回るごとに1つ粗くする(上限3)</code></pre>
+
+<p>
+<code>pixelScale</code>は「距離1メートルにある長さ1メートルが何画素になるか」
+(= 射影行列の縦方向の拡大率 × レンダーターゲットの高さ / 2)です。
+<strong>しきい値がモデルごとに変わる</strong>のは、三角形数がモデルによって3桁違うためです
+(根拠は<code>docs/ImplementationDetail.md</code> 54.3)。
+</p>
+
+<p>
+<strong>シャドウと深度プリパスにも同じ段を渡します。</strong> 両者はG-Bufferとまったく同じ増幅シェーダーを使いますが、
+<code>ViewProj</code>は光源やカスケードのものに差し替わっています。各パスのカメラで段を選ぶと、
+影を落とす形と本体の形が違う段になるため、<strong>主カメラの位置と拡大率を全パスへ配ります</strong>。
+</p>
+
+<h3>43.3 表には全段が載っている</h3>
+
+<p>
+ランタイムのメッシュレット表(<code>Model::MeshletBuffer</code>)はLOD0だけでなく<strong>全段</strong>を連結して持ちます。
+重なって描かれないのは「表に無いから」ではなく「増幅シェーダーが段の一致しない塊を落としているから」で、
+段の判定を外すと全段が同じ場所へ重なって描かれます。
+</p>
+
+<p>
+一方 <code>Assets::Mesh::MeshletCount</code> は<strong>LOD0の個数のまま</strong>です。
+レイトレーシング(三角形番号→メッシュレットの二分探索)と従来の頂点シェーダー経路は
+<code>.kgeom</code>のインデックスブロック ―― すなわちLOD0の三角形 ―― しか見ないためで、
+全段の合計は <code>Mesh::MeshletTotalCount</code> が持ちます。
+</p>
+
+<h3>43.4 段の解決は1箇所に集約する</h3>
+
+<p>
+段を決めるのは <code>Meshlet.hlsli</code> の <code>MeshletResolveLODLevel</code> だけで、
+G-Buffer・シャドウ・深度プリパスがすべてこの関数を通ります。
+<strong>パスごとに同じ式を書くと、片方だけ直したときに「影の形と本体の形が違う段になる」
+という追いにくい壊れ方をします。</strong>
+</p>
+
+<p>
+増幅シェーダーは選んだ段と塊の段の<strong>一致だけ</strong>を見ます。
+メッシュごとの段数でシェーダー側が読み替えると段が混ざるため、
+その調整はCPU側の上限(43.1の(2))で済ませてあります。
+塊自身の段は <code>GpuMeshlet::Flags</code> の上位ビットに詰めてあります(64バイト固定を保つため)。
+</p>
+
+<h3>43.5 効く範囲と効かない範囲</h3>
+
+<table>
+<tr><th>対象</th><th>効くか</th><th>理由</th></tr>
+<tr><td>PLATEAU dem(地形) / 遠くのタイル</td><td><strong>効く</strong></td><td>1タイル1メッシュで134万三角形。段が4つ焼かれる</td></tr>
+<tr><td>PLATEAU dem / <strong>足元のタイル</strong></td><td><strong>効かない</strong></td><td>段はモデル単位。1辺10kmのタイルは、その上に立つかぎり常に段0</td></tr>
+<tr><td>PLATEAU bldg LOD2(ビル街)</td><td><strong>効かない</strong></td><td>全メッシュが段を1つしか持たない。1メッシュ平均154三角形では潰せる辺が無い</td></tr>
+</table>
+
+<p>
+実測(RTX 4070 Ti / DX12 / Release / 1280x720 / <code>PlateauDem</code> / 同一カメラ)では、
+判定した塊が 13,796 → 6,881 に半減し、G-Bufferパスは 0.150ms → 0.070ms(<strong>53%減</strong>)、
+シャドウパスは 0.120ms → 0.070ms になりました。
+ビル街では判定した塊が 15,743 のまま動きません。数値は<code>docs/ImplementationDetail.md</code> 54.6 / 54.7 にあります。
+</p>
+
 </section>
 
 </main>

@@ -60,6 +60,23 @@ namespace Kurenai::Assets
     inline constexpr uint32_t kGpuMaterialFlagTransparent = 1u << 0;  // glTFのalphaMode=BLEND
     inline constexpr uint32_t kGpuMaterialFlagCutout = 1u << 1;       // glTFのalphaMode=MASK
 
+    // GpuMeshlet::Flagsは材質フラグとメッシュレットLODの段を1つのuintへ詰めている。
+    // 下位8bitが上のkGpuMaterialFlag*で、上位に段を置く。
+    //
+    // 【なぜ専用のフィールドを増やさないのか】GpuMeshletは64バイト固定で、HLSL側の
+    // Meshletと1バイトも違ってはいけない。段のために5バイト目を足すと構造体が80バイトへ
+    // 伸び、地形タイル1枚(25,904塊)で414KB、モデル全体では25%の増加になる。
+    // 段は0〜3の2bitで足りるので、材質フラグの空きビットへ入れるほうが安い。
+    //
+    // 【材質の判定では必ずマスクすること】MeshletPassesMaterialFilterは
+    // (flags & rejectMask)==0 で捨てるかを決める。段のビットを混ぜたまま渡しても
+    // rejectMaskが下位ビットしか使っていないうちは偶然通るが、
+    // マスクを1つ足した瞬間に「特定の段だけ描かれない」という形で壊れる
+    inline constexpr uint32_t kGpuMaterialFlagMask = 0xFFu;
+    // この塊自身が何段目か(0が原寸)
+    inline constexpr uint32_t kGpuMeshletLODLevelShift = 8u;
+    inline constexpr uint32_t kGpuMeshletLODLevelMask = 0x3u;
+
     // モデル1つ分のメッシュレット表(StructuredBuffer<Meshlet>)の1件。
     // ディスク形式のAssets::MeshletEntry(48バイト、ModelPackage.h)へ
     // 「どのメッシュの、どのマテリアルの塊か」を足したもの。
@@ -141,8 +158,17 @@ namespace Kurenai::Assets
         //
         // Model::MeshletBuffer内でこのメッシュのメッシュレットが始まる位置
         uint32_t MeshletOffset = 0;
-        // .kmodelが持つメッシュレット数。GPUバッファの有無とは独立
+        // .kmodelが持つメッシュレット数。GPUバッファの有無とは独立。
+        //
+        // 【LOD0の個数であって全段の合計ではない】レイトレーシング(RaytracingMeshletOffsetが
+        // 指す三角形オフセット表)と従来の頂点シェーダー経路は、.kgeomのインデックスブロック
+        // ―― すなわちLOD0の三角形 ―― しか見ない。全段の合計を入れると三角形番号の対応が崩れる
         uint32_t MeshletCount = 0;
+        // 全段を合わせたメッシュレット数。Model::MeshletBufferにはこの数だけ載っている。
+        // 増幅シェーダーが段を選ぶには、選ばれうる段すべてを走査範囲に入れる必要がある
+        uint32_t MeshletTotalCount = 0;
+        // 焼かれている段の数(1〜kMaxMeshletLODCount)。1なら段の選択は何もしないのと同じ
+        uint32_t MeshletLODCount = 0;
 
         // このメッシュのモデルローカル空間でのAABB。.kmodel v10のMeshEntryが持つ値をそのまま入れる。
         //
@@ -310,6 +336,30 @@ namespace Kurenai::Assets
         std::unique_ptr<RHI::IRHIBuffer> MeshletTriangleBuffer;
         // MeshletBufferの要素数(モデルの全メッシュのメッシュレット数の総和)
         uint32_t TotalMeshletCount = 0;
+        // このモデルが選べる最も粗い段。**全メッシュが持っている段のうち最小のもの**
+        // (= min over メッシュ (MeshletLODCount - 1))。
+        //
+        // 【なぜモデル単位で1つに畳むのか】段の数はメッシュごとに違う ――
+        // 潰せる辺を持たないメッシュはLOD0しか焼かれない(MeshletBuilder.cpp)。
+        // メッシュごとに min(選んだ段, そのメッシュの最も粗い段) で読み替えると、
+        // **1つのモデルの中で段が混ざる**。混ざると、簡略化で頂点が動いた側と
+        // 動いていない側で辺が一致せず境目に穴が開く(材質の境目でメッシュが
+        // 分かれているモデルは、その境目で実際に辺を共有している)。
+        //
+        // ここで全メッシュの共通部分まで落としておけば、増幅シェーダーが選んだ段は
+        // 必ずどのメッシュにも存在し、モデル全体が同じ段で描かれる。
+        // 段を1つしか持たないメッシュが1つでもあれば、そのモデルは常に原寸になる
+        // ―― 保守的だが、穴が開かないことのほうを優先する
+        uint32_t MeshletLODLevelCap = 0;
+        // LOD0の三角形数の合計(= 各メッシュのIndexCountの総和 / 3)。
+        //
+        // メッシュレットLODのしきい値をモデルごとに決めるために使う。
+        // 「原寸の三角形1つが画面上で1画素を切ったら段を落とす」を基準にすると、
+        // 直径D画素の円の中にN個の三角形があるとき平均面積は (πD²/4)/N なので、
+        // 1画素を切る直径は D = sqrt(4N/π)。三角形数はモデルによって3桁違う
+        // (小道具の数千とPLATEAUの地形タイルの134万)ため、
+        // 単一の画素数を全モデルへ当てはめると必ずどちらかが破綻する
+        uint32_t TotalTriangleCount = 0;
         // このモデルの**すべての**メッシュがメッシュレットを持っているか。
         //
         // 【1モデル1ドローの前提条件】1回のDispatchMeshで描けるのはメッシュレットの表に
