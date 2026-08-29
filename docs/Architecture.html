@@ -608,6 +608,102 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 ポインタでソートする(DX12バックエンドの「直前の描画と同じテクスチャならSRVテーブルを使い回す」
 最適化のヒット率を上げるため)。
 </p>
+
+<h3>9.1 インスタンシング(同じモデルを1ドローへまとめる)</h3>
+
+<p>
+同じ<code>.kmodel</code>を指すインスタンスを<code>DrawIndexed(..., instanceCount)</code>の
+1回にまとめる。インスタンスごとに違う<code>World</code>/<code>NormalMatrix</code>/
+<code>TangentSignFlip</code>は定数バッファでは渡せないため、頂点シェーダー専用のSRV(t0)へ
+バインドした<code>StructuredBuffer&lt;ModelInstanceRecord&gt;</code>を
+<code>SV_InstanceID</code>で引く(<code>Shaders/3D/ObjectConstants.hlsli</code>の
+<code>FetchModelInstance</code>)。<code>ObjectConstants</code>の
+<code>InstancingEnabled</code>が0のときは従来どおり定数バッファの値を返すので、
+まとめられなかったインスタンスの描画は1ビットも変わらない。
+</p>
+
+<p>
+<strong>頂点ストリーム方式(<code>InputSlotClass = PER_INSTANCE_DATA</code>)は採れない。</strong>
+このRHIの<code>InputElementDesc</code>は<code>InputSlot</code>も<code>InputSlotClass</code>も
+持たず、<code>SetVertexBuffer</code>もスロットを取らないため、頂点バッファは常に1本きりである。
+また<strong>D3D11/D3D12とも<code>StartInstanceLocation</code>は<code>SV_InstanceID</code>へ
+加算されない</strong>(<code>SV_InstanceID</code>は常に0から始まる)ので、バッファ内の開始位置は
+ドロー引数では伝えられない。定数バッファの<code>InstanceBase</code>で渡している。
+</p>
+
+<h4>まとめる単位(バッチ)</h4>
+
+<p>
+グループ化のキーは<strong>(モデル, <code>IsMirrored</code>, <code>IsWater</code>)</strong>。
+後ろ2つはパイプラインステートが分かれるため、違うものを同じドローへまとめてはいけない
+――まとめると片方が裏面として全部捨てられる。
+グループは空間セルでソートしてから<code>kMaxInstancesPerBatch</code>(128)で刻む。
+上限が無いと「街灯を市街全域に5000個」のようなグループが1つの巨大AABBになり、
+<strong>どのパスからも一度も間引かれなくなる</strong>。
+</p>
+
+<p>
+バッチの一覧は<strong>2組</strong>持つ。G-Bufferは各インスタンスがそのフレームに選んだ段を、
+シャドウは常に最も粗い段(<code>GetCoarsestLOD</code>)を描くため、同じ組では括れないためである。
+変換そのものは同じなので、レコードは1本のバッファへ2区画として載せ、
+<strong>更新は1フレームに1回だけ</strong>行う。パスごとに詰め直す案を採らないのは、
+DX12の<code>StructuredReadOnly</code>が
+<code>MaxUpdatesPerFrame × kFrameCount + 1</code>段のUPLOADヒープを常時確保するためで、
+反射プローブの6面ぶんを見込むとVRAMが跳ねる。
+</p>
+
+<p>
+バッチに<strong>入れない</strong>ものが4つある。
+</p>
+<ul>
+<li>まだ読み込まれていない段(ストリーミング中)</li>
+<li>LOD切替のフェード中。<code>DitherFade</code>はインスタンスごとに違う定数で、1ドローにまとめられない</li>
+<li><strong>メッシュシェーダー経路に載るモデル。</strong><code>DispatchMesh</code>にインスタンス数の
+概念が無い。<strong>DX12でメッシュレット描画が有効なあいだ、この機能が働くのは水面・メッシュレットを
+持たないモデル・メッシュレット描画を切ったときに限られる</strong></li>
+<li>まとめる相手がいないもの(1体だけのグループ)。従来とまったく同じ描画になる</li>
+</ul>
+
+<h4>描画側</h4>
+
+<p>
+バッチと、まとめられなかった1体を<code>InstanceDrawUnit</code>という同じ形にして
+<strong>1つのループで回す</strong>。バッチ用の描画コードを別に書くと
+「まとめたときだけ条件を間違える」類のずれが入り込むためで、判定も定数もドロー発行も1か所に保つ。
+シーンの全インスタンスが<strong>ちょうど1回ずつ</strong>描画単位として現れることが不変条件で、
+取りこぼすと物が消え、二重に出すと同じ場所へ2回描いてZファイティングになる。
+</p>
+
+<p>
+適用先は<strong>深度プリパス / G-Buffer / シャドウ</strong>の3パス。
+半透明パスは距離降順ソートで描いており、まとめると前後関係が破れるため対象にしない。
+DDGIのラスタ経路はプローブ数の予算計算とドロー数を突き合わせる契約があるため対象にしない。
+反射プローブと平面反射は頂点シェーダー側だけ通してあり、呼び出しの差し替えは今後行う。
+</p>
+
+<p>
+<strong>バッチ内ではメッシュ単位カリングを行わない。</strong>メッシュのワールドAABBは
+「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。代表インスタンスだけで判定すると
+他の個体の見えているメッシュまで落ちて物が消える。
+<strong>深度プリパスとG-Bufferで同じ条件にしてある</strong>ことが要点で、片方だけが外すと
+深度を書いた画素と色を書く画素がずれて穴が開く。
+</p>
+
+<p>
+<strong>描画の直前に必ず<code>SetVertexShaderResourceBuffer</code>を張り直す。</strong>
+頂点シェーダー用SRVはDX11/DX12ともt0の1本しかなく、ドローンショーが同じスロットを使う。
+上書きされたまま描くと、全インスタンスがドローンの座標を行列として読んで画面外へ飛ぶ。
+</p>
+
+<p>
+効くのは同じモデルを並べたシーンだけである。実測(RTX 4070 Ti / Release / 1280x720 /
+<code>InstancingTest.kscene</code> 256体 / DX11)ではドローコールが
+<strong>2,364(G-Buffer 512 / シャドウ 1,340 / 深度プリパス 512)から
+34(6 / 22 / 6)へ</strong>、CPUフレーム時間が0.52msから0.32ms、GPUフレーム時間が
+5.5〜6.5msから0.63msになった。<strong>絵はDX11/DX12とも画素完全一致</strong>である。
+一方でPLATEAU・Sponza・Bistroは全モデルがユニークなのでバッチが1つも作られず、
+発行されるコマンド列は従来と同一になる。
+</p>
 </section>
 
 <section id="cache">
@@ -7103,8 +7199,9 @@ RHIの抽象を片肺にしないために実装はしてあるが、DX11経路�
 
 <p>
 増幅シェーダー(<code>GBufferMeshlet.hlsl</code>の<code>ASMain</code>)が、メッシュレットの
-バウンディング球を<strong>前フレームのHi-Z</strong>へ投影し、「視錐台の内側にあるが手前の何かに
-完全に隠れている」塊を落とします。既に視錐台カリングと法線コーンによる背面カリングを
+バウンディング球をHi-Zへ投影し、「視錐台の内側にあるが手前の何かに
+完全に隠れている」塊を落とします。<strong>どのフレームのHi-Zを読むかはドローごとに決まります</strong>
+(41.9節。深度プリパスから作る経路では G-Buffer は今フレームのものを読みます)。既に視錐台カリングと法線コーンによる背面カリングを
 行っている場所へ条件を1つ足しただけで、<strong>新しいパスもバッファも増えていません</strong>。
 </p>
 
@@ -7226,6 +7323,238 @@ Perfログへ1秒ごとに出します。
 真下を見下ろす視点では建物どうしがほとんど重ならないので、0.0%が正しい値です。
 </p>
 
+<h3>41.7 モデル単位のGPUカリングと <code>ExecuteIndirect</code></h3>
+
+<p>
+上の判定はメッシュレット単位で、増幅シェーダーの中で行われます。遮蔽されたモデルでも
+「メッシュレット数 ÷ 32」だけのスレッドグループは起動し、全部が自分を捨てるという形になります。
+そこで判定を<strong>モデル単位</strong>へも引き上げ、生き残ったモデルだけをGPU自身に
+発行させる経路を持たせています。
+</p>
+
+<p>
+<code>ModelCull.hlsl</code>(コンピュートシェーダー)が1スレッドで1件の描画候補を受け持ち、
+ワールドAABBを<strong>今フレームの視錐台</strong>と<strong>前フレームのHi-Z</strong>で判定します。
+視錐台の平面の取り出しは<code>Frustum.hlsli</code>、Hi-Zの遮蔽判定は<code>HiZCull.hlsli</code>に
+括り出してあり、<strong>増幅シェーダーとまったく同じコードを使います</strong> ――
+判定の向きも平面を列から作ることも、逆に書いてもコンパイルが通り絵もそれらしく出る箇所なので、
+実装を2つ持つと片方だけ壊れたまま残ります。
+</p>
+
+<h4>引数に定数バッファのアドレスそのものを載せる</h4>
+
+<p>
+1回の<code>ExecuteIndirect</code>で複数のモデルを描くため、ドローごとに「どのモデルか」を
+渡す必要があります。D3D12のコマンドシグネチャは
+<code>D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW</code>で
+<strong>ルート定数バッファビュー(b1 = <code>ObjectConstants</code>)をドローごとに差し替えられる</strong>ので、
+これを使っています。<strong>増幅・メッシュ・ピクセルの各シェーダーは1行も変わりません。</strong>
+</p>
+
+<table>
+<tr><th>オフセット</th><th>内容</th></tr>
+<tr><td>+0</td><td>このドローが使う<code>ObjectConstants</code>のGPU仮想アドレス(64bit)</td></tr>
+<tr><td>+8</td><td><code>DispatchMesh</code>のスレッドグループ数 X/Y/Z</td></tr>
+<tr><td>+20</td><td>詰め物(次の要素のアドレスを8バイト境界に載せるため)</td></tr>
+</table>
+
+<p>
+アドレスは<code>IRHIBuffer::GetLastUpdateGpuAddress</code>が返します
+(<strong>直前の<code>UpdateBuffer</code>が書いたリングスロットのアドレス</strong>)。
+HLSLに<code>uint64_t</code>のシェーダーモデル要件を持ち込まないよう、下位/上位32bitに分けて
+渡し、シェーダーは中身を解釈せず引数へ書き写すだけです。
+</p>
+
+<h4>PSOは引数で切り替えられない ―― 6つの区画</h4>
+
+<p>
+<code>ExecuteIndirect</code>が引数から差し替えられるのは<strong>コマンドシグネチャに含めた
+ルートパラメータだけ</strong>で、パイプラインステートは切り替えられません。
+1モデル1ドロー経路で使うPSOは次の6通りあるため、引数バッファを6区画に分け、
+<strong>区画ごとに1回ずつ</strong>発行します(空の区画は発行そのものを省きます)。
+</p>
+
+<table>
+<tr><th>区画</th><th>PSO</th></tr>
+<tr><td>G-Buffer / ミラーリング</td><td><code>m_GBufferMeshletPipelineState</code>(Mirrored)</td></tr>
+<tr><td>深度プリパス 不透明 / ミラーリング</td><td><code>m_DepthPrepassMeshletPipelineState</code>(Mirrored)</td></tr>
+<tr><td>深度プリパス カットアウト / ミラーリング</td><td><code>m_DepthPrepassMeshletCutoutPipelineState</code>(Mirrored)</td></tr>
+</table>
+
+<p>
+引数バッファの先頭256バイトには区画ごとの発行数(uint)が並び、そのまま
+<code>ExecuteIndirect</code>の件数バッファとして渡します。引数配列はその後ろに、
+区画ごとに256バイト境界で並びます。
+</p>
+
+<h4>深度プリパスとG-Bufferは同じ引数で描く</h4>
+
+<p>
+<strong>片方だけ間引くと絵が壊れます。</strong>プリパスが深度を書いたものをG-Bufferが
+描かないと、その画素は「深度はあるのに色が無い」穴になります(逆は早期Zが効かなくなるだけで
+絵は正しい)。そのため<code>ModelCull</code>パスは<strong>深度プリパスより前に登録</strong>し、
+両方が同じ引数で描きます。
+</p>
+
+<p>
+同じ理由で、深度プリパスも<strong>Hi-Zテクスチャ(t8)を自分で張ります</strong>。
+このパスはG-Bufferとまったく同じ増幅シェーダーを使うので、同じ判定を同じ入力で行わなければ
+なりません。DX12のSRVバインドはコマンドリスト側がシャドウで保持しているため、
+<strong>張り忘れてもエラーは出ず、別のパスが張ったテクスチャがそのまま残ります。</strong>
+</p>
+
+<h4>切り分けのための2つのトグル</h4>
+
+<p>
+レンダリングパネルの「メッシュレット」に2つのチェックボックスがあります。
+</p>
+
+<table>
+<tr><th>項目</th><th>意味</th></tr>
+<tr><td>モデル単位のGPUカリング</td><td>判定と計数を行う。切ると引数が作れないので描画もCPUループへ戻る</td></tr>
+<tr><td>カリング結果で間接描画する</td><td>発行を<code>ExecuteIndirect</code>に任せる。切ると判定と計数だけが残る</td></tr>
+</table>
+
+<p>
+分けてあるのは<strong>「判定が正しいか」と「間接描画が速いか」を別々に確かめるため</strong>です。
+判定だけを走らせている間は、GPUの視錐台判定とCPUの<code>IsAABBVisible</code>を突き合わせた
+ログが出て、食い違えば警告になります。間接描画に切り替わったかは、プロファイラの
+ドローコール数が<strong>モデルごとの数から区画ごとの数(PLATEAU 東京23区では
+G-Buffer 145 → 1、深度プリパス 145 → 1)へ落ちる</strong>ことで分かります。
+</p>
+
+<p>
+<strong>DX11とメッシュシェーダー非対応環境では常に従来のCPUループで描きます。</strong>
+D3D11には<code>DispatchMesh</code>に相当するものがないため、
+<code>IRHIDevice::SupportsIndirectDispatchMesh()</code>がfalseを返し、この経路へ入りません。
+</p>
+
+<h3>41.8 実測(モデル単位 / RTX 4070 Ti / DX12 / Release / 1280x720 / PLATEAU 767モデル)</h3>
+
+<table>
+<tr><th>カメラ</th><th>判定</th><th>視錐台</th><th>オクルージョン</th><th>生存</th><th>発行(G-Buffer / プリパス)</th></tr>
+<tr><td>街路(高度39m)</td><td>1534 (CPU 1534)</td><td>1244 (CPU 1244)</td><td><strong>116</strong></td><td>174</td><td>87 / 87</td></tr>
+<tr><td>俯瞰(約1000m)</td><td>1534 (CPU 1534)</td><td>1246 (CPU 1246)</td><td><strong>0</strong></td><td>288</td><td>144 / 144</td></tr>
+</table>
+
+<p>
+<strong>視錐台の判定はCPUと1件も食い違いません。</strong>
+</p>
+
+<p>
+<strong>この表の数は候補件数で、モデル数の2倍です。</strong>1インスタンスが2区画
+(G-Buffer + 深度プリパス不透明)へ積まれるためで、1534 = 767モデル × 2、
+オクルージョン 116 = 58モデル × 2、生存 174 = 87モデル × 2 です。
+<strong>この単位は41.9節で直しました</strong> ―― 統計をG-Bufferぶんの候補だけで
+数えるようにしたので、以降のログはモデル数そのものになります。この表は当時の値です。
+</p>
+
+<p>
+街路では視錐台を通った145モデルのうち<strong>58モデル(40%)</strong>が完全に隠れており、
+俯瞰では0 ―― 41.6節と同じく、これは視点の差であって実装の良し悪しではありません。
+</p>
+
+<p>
+<strong>総GPU時間のON/OFF差は分解能以下でした</strong>(街路 6.43ms / 6.59ms、
+俯瞰 6.81ms / 6.70ms。差の方向が一致しないので、この構成では差があるとは言えません)。
+削れる仕事は既にメッシュレット単位の判定で削れており、この段で消えるのは
+遮蔽されたモデルの増幅シェーダーを起動するぶんだけです。
+</p>
+
+<h3>41.9 Hi-Z を深度プリパスの深度から作る</h3>
+
+<p>
+41.1〜41.8 の判定が読む Hi-Z は<strong>前フレームのもの</strong>でした。構築パスが
+G-Buffer より後に登録されていたためで、その1フレーム遅れを、前フレームのビュー射影行列で
+投影し、バウンディング球を保守的に膨らませることで吸収していました。
+</p>
+
+<p>
+深度プリパスは G-Buffer より前に走り、全不透明ジオメトリの深度を書き終えています。
+<strong>そこから Hi-Z を作れば、G-Buffer の判定は今フレームの深度で行えます</strong> ――
+1フレーム遅れも、膨張も、前フレームの Hi-Z が揃うのを待つ必要も無くなります。
+</p>
+
+<pre>
+ModelCull          深度プリパスぶんの判定(前フレームのHi-Z)
+DepthPrepass       ExecuteIndirect で発行
+HiZ                ここで構築。今フレームの深度、全不透明ジオメトリ入り
+ModelCullGBuffer   G-Bufferぶんの判定(今フレームのHi-Z)
+GBuffer            ExecuteIndirect で発行
+</pre>
+
+<h4>同じテクスチャが、フレームの途中で別の中身になる</h4>
+
+<p>
+深度プリパスと G-Buffer は<strong>まったく同じ増幅シェーダー</strong>を使います。
+ところがそのシェーダーが読む <code>HiZTexture</code> は、プリパスの時点では前フレームの中身、
+G-Buffer の時点では今フレームの中身です。<strong>同じテクスチャなのに投影に使うべき行列が
+違う</strong>ため、フレーム全体のフラグでは分けられません。
+<code>ObjectConstants::MeshletOcclusionMode</code> をドローごとに渡します。
+</p>
+
+<table>
+<tr><th>値</th><th>意味</th><th>投影行列</th><th>半径</th></tr>
+<tr><td>0</td><td>判定しない</td><td>―</td><td>―</td></tr>
+<tr><td>1</td><td>前フレームの Hi-Z</td><td><code>PrevViewProj</code></td><td>radius × 倍率 + カメラ移動距離</td></tr>
+<tr><td>2</td><td>今フレームの Hi-Z</td><td><code>ViewProj</code></td><td>radius(膨らませない)</td></tr>
+</table>
+
+<p>
+モデル単位の判定も同じ理由で2回のディスパッチに分かれます。候補配列を
+「プリパスぶん → G-Bufferぶん」の順に並べ、範囲(先頭番号と件数)で切っています。
+</p>
+
+<h4>深度プリパス自身は今フレームの Hi-Z を使えない</h4>
+
+<p>
+その Hi-Z はプリパスの出力から作るためです。プリパスは<strong>従来どおり前フレームの
+Hi-Z で判定します</strong> ―― 保守側へ倒れるだけで絵は壊れませんし、判定を捨てると
+プリパスがラスタライズするメッシュレットが街路の実測で 11,321 から 103,868 へ
+(およそ9倍に)戻ります。
+</p>
+
+<p>
+<strong>プリパスの深度は G-Buffer が描くものの部分集合です。</strong>LODのクロスディザで
+フェード中のモデルなど、プリパスから外れるものがあります。遮蔽物が減る方向なので
+間引きが甘くなるだけで、見えているものを消す側へは倒れません。
+</p>
+
+<h4>切り替えのトグルと、経路のログ</h4>
+
+<p>
+レンダリングパネルの「Hi-Zを深度プリパスから作る」で切り替えられます。深度プリパスが
+走らないフレームでは、この項目によらず常に従来どおり G-Buffer の後で作ります
+(深度が埋まっていないため)。
+</p>
+
+<p>
+<strong>間引き数からは切り替わったかどうかが分かりません。</strong>カメラが止まっていれば
+前フレームの Hi-Z と今フレームの Hi-Z は同じ中身になり、膨張項もカメラ移動距離なので0に
+なるため、新旧どちらでも同じ数が出ます。そこで<strong>経路そのものを <code>Perf</code>
+ログへ出しています。</strong>
+</p>
+
+<pre>
+Hi-Zの出どころ: 深度プリパス(今フレーム) / 判定ディスパッチ: プリパスぶん 767 + G-Bufferぶん 767
+Hi-Zの出どころ: G-Bufferの後(前フレーム) / 判定ディスパッチ: プリパスぶん 1534 + G-Bufferぶん 0
+</pre>
+
+<h4>統計の単位</h4>
+
+<p>
+統計は<strong>G-Bufferぶんの候補だけ</strong>で数えます。両方の区画で数えると1モデルを
+2回数えることになり、カウンタがモデル数の2倍になります(41.8節の表がその状態でした)。
+CPU側の突き合わせ用カウンタも同じ範囲に揃えてあるので、ログの
+「判定 767 (CPU候補 767)」はそのままモデル数です。
+</p>
+
+<p>
+<strong>この変更のGPUコストはまだ測れていません。</strong>検証機のVRAM使用量が予算を
+超えており(9811.8 MB / 9442〜9677 MB)、GPUがページングするため総GPU時間のA/Bが
+取れませんでした。詳細は <code>ImplementationDetail.md</code> 47.16節。
+</p>
+
 </section>
 
 <section id="texturestreaming">
@@ -7280,7 +7609,35 @@ CPUとGPUのオーバーラップが消えます。
 遅延解放キューを通します。
 </p>
 
-<h3>42.3 距離はメッシュ単位で測る</h3>
+<p>
+第1段を走らせるのは<strong>モデルストリーミングと同じLoaderスレッド</strong>です
+(<code>KurenaiEngine3D::LoaderThreadMain</code> が
+<code>TextureStreamingManager::ProcessRequests</code> を呼びます)。
+<strong>専用スレッドは立てません。</strong>別に立てると同じディスクを2本で奪い合い、
+GPUアップロードがモデル読み込みと並走してVRAMのピークが二重になります。
+モデル1件を読むごとに割り込ませるので、街を流している最中もミップの差し替えは止まりません。
+<code>ProcessRequests</code> は追跡表(<code>m_Entries</code>)を一切参照せず、
+必要な情報は要求が写しで持ちます。これでRenderスレッド側の付け外しとロック無しで共存します。
+</p>
+
+<h3>42.3 追跡表はモデルの出入りに追随する</h3>
+
+<p>
+<code>[Scene]StreamingDistance</code> を使うシーンでは、シーン読み込みの時点でモデルの実体が
+1つもありません。<code>AttachModel</code> / <code>DetachModel</code> が
+<code>UpdateModelStreaming</code> の差し込み・破棄と同じ場所で呼ばれ、追跡表が出入りします。
+</p>
+
+<p>
+枠(添字)は<strong>詰めずに使い回します</strong>。発注済みの要求は枠の添字で戻ってくるため、
+配列から要素を消して詰めると別のテクスチャの結果として適用されてしまいます。
+Detachでは世代を1つ進めて空き枠へ返し、戻ってきた結果は世代が一致するものだけを適用します。
+また<strong>読み直し中のモデルは破棄させません</strong> ——
+<code>IsModelBusy()</code> が発注中かをモデル単位で答え、破棄待ちの列がそれを見て解放を先送りします
+(フレーム数の遅延では足りません。1件が数十msかかることがあります)。
+</p>
+
+<h3>42.4 距離はメッシュ単位で測る</h3>
 
 <p>
 <strong>モデルインスタンス単位のAABBまでの距離では成立しません。</strong>街区全体を覆う
@@ -7291,7 +7648,7 @@ CPUとGPUのオーバーラップが消えます。
 ワールドへ変換して使います。
 </p>
 
-<h3>42.4 DX12タイルリソース</h3>
+<h3>42.5 DX12タイルリソース</h3>
 
 <p>
 <code>GetTiledResourcesTier()</code>が2以上を返す環境では、予約リソース
@@ -7309,7 +7666,7 @@ CPUとGPUのオーバーラップが消えます。
 <code>ID3D12Device::GetResourceTiling</code>の実測値を使います。
 </p>
 
-<h3>42.5 DX12＋Tier 2以上でしか効かない部分</h3>
+<h3>42.6 DX12＋Tier 2以上でしか効かない部分</h3>
 
 <table>
 <tr><th>機能</th><th>DX11</th><th>DX12</th></tr>

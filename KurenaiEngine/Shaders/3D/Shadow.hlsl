@@ -10,38 +10,7 @@ cbuffer CascadeConstants : register(b0)
     float4x4 ViewProj;
 };
 
-// GBuffer.hlslのObjectConstantsと同じレイアウト(不透明の描画ではWorldしか使わないが、
-// 同じルートシグネチャ/定数バッファを共有するため並び順を合わせる)。
-//
-// 【AlphaCutoff以降まで宣言を伸ばしてある】アルファカットアウトのマテリアルは
-// 切り抜きを反映しないと影の形が実物と食い違うため、下のPSMainCutoutが
-// AlphaCutoff / BaseColorFactor と、1モデル1ドローの経路ではマテリアルテーブルの
-// 番号まで読む。**並びを1つでもずらすと別の値を読む**ので、
-// GBufferCommon.hlsli側を直したらここも直すこと
-cbuffer ObjectConstants : register(b1)
-{
-    float4x4 World;
-    float4x4 NormalMatrix;
-    float MetallicFactor;
-    float RoughnessFactor;
-    float TangentSignFlip;
-    float AlphaCutoff;
-    float3 EmissiveFactor;
-    float OcclusionStrength;
-    float4 BaseColorFactor;
-    float MaterialID;
-    uint MeshletOffset;
-    uint MeshletBufferIndex;
-    uint MeshletVertexBufferIndex;
-    uint MeshletTriangleBufferIndex;
-    uint MeshletCount;
-    float Translucency;
-    uint MaterialTableIndex;
-    uint MeshletFilterReject;
-    uint MeshletFilterRequire;
-    float EmissiveIntensity;
-    float OcclusionMapScale;
-};
+#include "ObjectConstants.hlsli"
 
 // Assets::GpuMaterial(80バイト)と1対1で対応。GBufferCommon.hlsliの同名の宣言と
 // **並びとサイズを必ず一致させること**
@@ -82,10 +51,13 @@ struct PSInput
     float4 Position : SV_POSITION;
 };
 
-PSInput VSMain(VSInput input)
+PSInput VSMain(VSInput input, uint instanceID : SV_InstanceID)
 {
     PSInput output;
-    float3 worldPos = mul(float4(input.Position, 1.0f), World).xyz;
+    // このインスタンスの変換。インスタンシングが無効なドローでは
+    // ObjectConstantsのWorld/NormalMatrix/TangentSignFlipがそのまま返る
+    const ModelInstanceRecord instance = FetchModelInstance(instanceID);
+    float3 worldPos = mul(float4(input.Position, 1.0f), instance.World).xyz;
     output.Position = mul(float4(worldPos, 1.0f), ViewProj);
     return output;
 }
@@ -123,10 +95,15 @@ struct CutoutPSInput
     nointerpolation uint MaterialIndex : TEXCOORD1;
 };
 
-CutoutPSInput VSMainCutout(VSInputCutout input)
+CutoutPSInput VSMainCutout(VSInputCutout input, uint instanceID : SV_InstanceID)
 {
     CutoutPSInput output;
-    float3 worldPos = mul(float4(input.Position, 1.0f), World).xyz;
+    // 【VSMainと同じくインスタンシングに対応させること】カットアウトのメッシュも
+    // 不透明ぶんと同じバッチのまま DrawIndexed(..., instanceCount) で描かれる。
+    // ここだけ定数バッファのWorldを使うと、バッチ内の全個体の影が
+    // 代表インスタンスの位置に重なって落ちる
+    const ModelInstanceRecord instance = FetchModelInstance(instanceID);
+    float3 worldPos = mul(float4(input.Position, 1.0f), instance.World).xyz;
     output.Position = mul(float4(worldPos, 1.0f), ViewProj);
     output.UV = input.UV;
     // この経路はマテリアルテーブルを使わない(t0と定数バッファから読む)

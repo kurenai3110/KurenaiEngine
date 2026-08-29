@@ -39,7 +39,9 @@ namespace Kurenai::RHI
         void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
-        void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
+        void DrawIndexed(
+            uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation,
+            uint32_t instanceCount) override;
         void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
@@ -54,6 +56,9 @@ namespace Kurenai::RHI
         void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
         void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) override;
+        void DispatchMeshIndirect(
+            IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount,
+            uint32_t countOffsetInBytes) override;
         void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) override;
         void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
 

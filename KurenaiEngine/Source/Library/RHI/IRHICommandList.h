@@ -169,7 +169,24 @@ namespace Kurenai::RHI
         virtual void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) = 0;
         virtual void Draw(uint32_t vertexCount, uint32_t startVertexLocation) = 0;
-        virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) = 0;
+        // instanceCount: 同じジオメトリを何体ぶん描くか(ハードウェアインスタンシング)。
+        // 既定の1なら従来どおりの単発描画で、発行されるコマンドも同一。
+        //
+        // 【インスタンスごとの値はどこから来るのか】このRHIは頂点ストリームによるインスタンシング
+        // (InputSlotClass = PER_INSTANCE_DATA)を持たない ―― InputElementDescにInputSlotも
+        // InputSlotClassも無く、SetVertexBufferもスロットを取らないため、頂点バッファは常に1本きり。
+        // そのため、インスタンスごとに変わる値(ワールド行列など)は
+        // SetVertexShaderResourceBufferで頂点シェーダーへ渡したStructuredBufferを
+        // SV_InstanceIDで引く形で受け取る(Shaders/3D/ObjectConstants.hlsliのFetchModelInstance)。
+        //
+        // 【SV_InstanceIDは0から始まる】D3D11/D3D12ともにStartInstanceLocationは
+        // SV_InstanceIDへ加算されない。バッファ内の開始位置は定数バッファ側の値
+        // (ObjectConstants::InstanceBase)で渡すこと。
+        //
+        // instanceCountが0のときはログを出して何も描かない(両バックエンド共通)
+        virtual void DrawIndexed(
+            uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation,
+            uint32_t instanceCount = 1) = 0;
 
         // メッシュシェーダーパイプライン(CreateMeshPipelineStateで作ったステートをSetPipelineStateで
         // 設定した状態)での描画。増幅シェーダーがある場合はそちらが、無い場合はメッシュシェーダーが
@@ -237,6 +254,30 @@ namespace Kurenai::RHI
         // 引数バッファ以外のUsageを渡すとログを出して何もしない。
         // Dispatchと同じく、この呼び出しの直後にUAVスロットは全解除される
         virtual void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) = 0;
+
+        // 増幅シェーダーの間接起動(DX12のExecuteIndirect)。1件ぶんの引数は24バイトで、
+        //   +0  : このドローが使う定数バッファ(b1)のGPU仮想アドレス(64bit)
+        //   +8  : DispatchMeshのスレッドグループ数X/Y/Z(uint3)
+        // という並び。末尾4バイトは詰め物で、アドレスを8バイト境界に載せるために置いてある。
+        //
+        // 【b1を引数に含める理由】1回のExecuteIndirectで複数のモデルを描くため、
+        // 「どのモデルか」をドローごとに渡す手段が要る。ルート定数で番号だけ渡して
+        // 構造化バッファから引く手もあるが、それだと増幅/メッシュ/ピクセルの3本すべてで
+        // 定数の読み方を書き換えることになる。定数バッファのアドレス自体を差し替えれば
+        // シェーダー側は1行も変わらない。
+        //
+        // countOffsetInBytesの位置には実際に発行する件数(uint32)が入っていること。
+        // maxCommandCountはその上限(GPUが書いた件数がこれを超えることは無いと保証する値)。
+        // どちらのオフセットも4の倍数であること。
+        //
+        // 【DX11には無い】メッシュシェーダー自体が無いため、呼ぶとログを出して何もしない。
+        // 呼び出し側は IRHIDevice::SupportsIndirectDispatchMesh() で分岐すること
+        // 【Shaders/3D/ModelCull.hlsl の KURENAI_INDIRECT_ARG_STRIDE と一致させること】
+        // あちらがこの並びで引数を書き込む
+        static constexpr uint32_t kDispatchMeshIndirectArgStride = 24;
+        virtual void DispatchMeshIndirect(
+            IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount,
+            uint32_t countOffsetInBytes) = 0;
 
         // UAVを持つバッファ全体を、指定した符号なし整数値で埋める。散布書き込みされる
         // バッファ(自前ラスタライザのvisibility bufferや間接ディスパッチ引数)を毎フレーム

@@ -231,6 +231,19 @@ namespace Kurenai::RHI
 
     void DX11CommandList::SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer)
     {
+        // 【DX12に合わせて上限を検査する】DX11はステージごとにSRVスロットを128本持つので
+        // t0以外でも素通りしてしまうが、DX12側はルートSRV1本しか割り当てておらず
+        // (DX12CommandList::kVertexShaderSrvSlotCount)、範囲外はログを出してバインドを捨てる。
+        // 検査が片側にしか無いと「DX11では映るがDX12では消える」形の非対称なバグを作れてしまう
+        if (slot >= kVertexShaderSrvSlotCount)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "SetVertexShaderResourceBuffer: スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0のみ)。"
+                "バインドをスキップします");
+            return;
+        }
+
         if (buffer == nullptr)
         {
             Core::Logger::Error(
@@ -316,9 +329,27 @@ namespace Kurenai::RHI
         m_Context->Draw(vertexCount, startVertexLocation);
     }
 
-    void DX11CommandList::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
+    void DX11CommandList::DrawIndexed(
+        uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t instanceCount)
     {
-        m_Context->DrawIndexed(indexCount, startIndexLocation, baseVertexLocation);
+        if (instanceCount == 0)
+        {
+            Core::Logger::Error("DX11", "DrawIndexed: instanceCountが0のため描画をスキップします");
+            return;
+        }
+
+        // instanceCount==1でもDrawIndexedInstancedで発行してよい(D3D11の仕様上まったく同じ描画になる)が、
+        // 従来経路のコマンドを1バイトも変えないために、1のときは元のDrawIndexedをそのまま呼ぶ
+        if (instanceCount == 1)
+        {
+            m_Context->DrawIndexed(indexCount, startIndexLocation, baseVertexLocation);
+            return;
+        }
+
+        // 第5引数(StartInstanceLocation)は常に0。SV_InstanceIDへ加算されないため、
+        // ここでずらしても頂点シェーダーからは見えない(IRHICommandList.hの規約どおり
+        // 開始位置は定数バッファで渡す)
+        m_Context->DrawIndexedInstanced(indexCount, instanceCount, startIndexLocation, baseVertexLocation, 0);
     }
 
     void DX11CommandList::DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
@@ -474,6 +505,20 @@ namespace Kurenai::RHI
 
         m_Context->DispatchIndirect(dx11Buffer->GetBuffer(), offsetInBytes);
         ReleaseComputeUavBindingsAfterDispatch();
+    }
+
+    // 【DX11にメッシュシェーダーは無い】D3D11にはDispatchMeshに相当するものが無く、
+    // 増幅シェーダーも存在しない。呼び出し側は IRHIDevice::SupportsIndirectDispatchMesh() で
+    // 分岐して従来のCPUループへ縮退するため、ここへ来るのは分岐漏れのときだけ
+    void DX11CommandList::DispatchMeshIndirect(
+        IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount, uint32_t countOffsetInBytes)
+    {
+        (void)argsBuffer;
+        (void)argsOffsetInBytes;
+        (void)maxCommandCount;
+        (void)countOffsetInBytes;
+        Core::Logger::Error(
+            "DX11", "DispatchMeshIndirect: DX11はメッシュシェーダーに対応していません。描画をスキップします");
     }
 
     // 【DX11では呼び出し側が存在しない】理由はDispatchIndirectのコメントと同じ

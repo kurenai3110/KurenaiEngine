@@ -52,6 +52,17 @@ namespace Kurenai::Defaults
     // モデル単位のカリングは常に有効(こちらは切れない)
     inline constexpr bool MeshCullingEnabled = true;
 
+    // インスタンシング(同じモデルを指すインスタンスを1回のDrawIndexedへまとめる)。
+    //
+    // 【切れるようにしてある理由はメッシュ単位カリングと同じ】まとめても絵は変わらないのが
+    // 正しいので、絵だけを見ても効いたかどうかが分からない。同じ起動の中でON/OFFを
+    // 切り替え、ドローコール数が減ることと絵が一致することの両方を確かめられるようにする。
+    //
+    // 効くのは同じ.kmodelを複数配置しているシーンだけ(Scenes/InstancingTest.kscene、
+    // MultiModelTest.kscene)。PLATEAU・Sponza・Bistroは全モデルがユニークなので
+    // ONにしてもバッチが1つも作られず、発行されるコマンドは従来とまったく同じになる
+    inline constexpr bool InstancingEnabled = true;
+
     // --- シャドウ ---
     inline constexpr bool ShadowEnabled = true;
     inline constexpr float ShadowLightSize = 0.02f;
@@ -546,6 +557,24 @@ namespace Kurenai::Defaults
     // 既定で切っておくと「有効にしたのに何も起きない」の切り分けが毎回必要になる。
     // 増幅シェーダーのアトミックはグループ単位に集約してあり、切るのは実測して重いと分かってから
     inline constexpr bool MeshletCullStatsEnabled = true;
+    // モデル単位のGPUカリング(Stage 5-3)を走らせるか。
+    // メッシュレット経路とHi-Zが要るので、非対応環境では走らない
+    inline constexpr bool ModelCullGpuEnabled = true;
+    // Hi-Zを深度プリパスの深度から作るか。
+    //
+    // 【これが有効だとG-Bufferの判定に1フレーム遅れが無くなる】プリパスが書いた
+    // 今フレームの深度から作るため、投影に前フレームの行列を使う必要も、
+    // 視差ぶんを膨らませる必要も無くなり、カメラが動いてもポップしない。
+    // 深度プリパスが走らないフレームでは、この値によらず従来どおり
+    // G-Bufferの後で作り、次フレームに前フレームのものとして読む
+    inline constexpr bool HiZFromDepthPrepass = true;
+    // カリング結果で実際に描画発行(ExecuteIndirect)まで行うか。
+    //
+    // 【切っても判定と計数は動く】falseなら描くのは従来のCPUループのままで、
+    // GPU側の判定はカウンタに残る。「判定が正しいか」と「間接描画が速いか」は
+    // 別々に確かめたいので、トグルを分けてある。
+    // DX11とメッシュシェーダー非対応環境では、この値によらず従来のCPUループへ縮退する
+    inline constexpr bool ModelCullIndirectEnabled = true;
 
     // --- メッシュレットLOD(離散LOD。Stage 6) ---------------------------------------------
     //

@@ -186,6 +186,22 @@ namespace Kurenai::UI
             "呼ばないので、プロファイラパネルのメッシュ単位が「判定なし」になる。\n\n"
             "モデル単位のカリングは常に有効で、こちらでは切れない");
 
+        CheckboxEx(
+            "インスタンシング###Instancing", &m_Engine.m_InstancingEnabled,
+            Defaults::InstancingEnabled,
+            "同じ.kmodelを指すインスタンスをまとめ、1回のDrawIndexedで複数体を描く。"
+            "インスタンスごとに違うワールド行列は、頂点シェーダー専用のStructuredBufferを"
+            "SV_InstanceIDで引いて受け取る。\n\n"
+            "【効くシーンは限られる】PLATEAU・Sponza・Bistroは全モデルがユニークなので、"
+            "ONにしてもバッチが1つも作られず、発行されるコマンドは従来とまったく同じになる。"
+            "効くのはInstancing Test(同じモデルを256体)とMulti Model Test(3体)。\n\n"
+            "【メッシュシェーダー経路には効かない】DispatchMeshにインスタンス数の概念が無いため、"
+            "1モデル1ドローで描けるモデルはまとめない。DX12でメッシュレット描画が有効なあいだは"
+            "働く場面が水面などに限られる。\n\n"
+            "【絵は変わらない】まとめても各インスタンスの変換は同じなので、ON/OFFで画像は一致する。"
+            "切れるようにしてあるのは、その一致とドローコール数の減少を同じ起動の中で"
+            "確かめられるようにするため");
+
         EndParamGroup();
 
         // --- モデルLOD(.ksceneの[Model]LODPath / LODDistance) ---
@@ -324,6 +340,40 @@ namespace Kurenai::UI
             "【計測そのものの負荷を測るために切れるようにしてある】"
             "増幅シェーダーのアトミックはグループ単位に集約してあるが、"
             "その負荷は切り替えて実測すること");
+
+        CheckboxEx(
+            "Hi-Zを深度プリパスから作る###HiZFromDepthPrepass",
+            &m_Engine.m_HiZFromDepthPrepassEnabled, Defaults::HiZFromDepthPrepass,
+            "Hi-Zミップチェーンを深度プリパスの直後に、そのフレームの深度から作る。\n\n"
+            "【入れるとG-Bufferの判定から1フレーム遅れが消える】投影に前フレームの行列を"
+            "使う必要も、視差ぶんを保守的に膨らませる必要も無くなり、カメラが動いても"
+            "遮蔽の判定がずれない(ポップしない)。\n\n"
+            "【切ると従来どおりG-Bufferの後で作る】次フレームに前フレームのものとして読み、"
+            "球を膨らませて視差を吸収する。深度プリパス自体が無効なフレームでは、"
+            "この項目によらず常にそちらになる(深度が埋まっていないため)。\n\n"
+            "【コストはここを切り替えて総GPU時間で測ること】構築そのものの時間は変わらないが、"
+            "プリパスとG-Bufferの間に入るぶん重なりが減り、深度バッファの状態遷移が1往復増える");
+
+        CheckboxEx(
+            "モデル単位のGPUカリング###ModelCullGpu", &m_Engine.m_ModelCullGpuEnabled,
+            Defaults::ModelCullGpuEnabled,
+            "コンピュートシェーダーが、描画候補のワールドAABBを視錐台とHi-Zで判定し、"
+            "生き残りのExecuteIndirect引数と統計をGPU上に作る。\n\n"
+            "【切ると下の間接描画も止まる】判定が無ければ引数が作れないため、"
+            "描画は従来のCPUループへ戻る。\n\n"
+            "【このパスのコストはここを切り替えて測ること】"
+            "GPU内訳のパス別の値は、直後のリソース遷移による待ちを吸ってしまうことがある。"
+            "総GPU時間のON/OFF差のほうが信用できる");
+
+        CheckboxEx(
+            "カリング結果で間接描画する###ModelCullIndirect", &m_Engine.m_ModelCullIndirectEnabled,
+            Defaults::ModelCullIndirectEnabled,
+            "生き残った候補だけをExecuteIndirectで発行する。深度プリパスとG-Bufferの"
+            "1モデル1ドロー経路が、CPUのループではなくこの引数で描かれるようになる。\n\n"
+            "【切っても判定と計数は動く】切ると描画だけが従来のCPUループへ戻る。"
+            "「判定が正しいか」と「間接描画が速いか」を別々に確かめるためトグルを分けてある。\n\n"
+            "【DX11とメッシュシェーダー非対応環境では効かない】"
+            "その場合は入れてもCPUループのまま描かれる(Perfログの発行数が0のままになる)");
 
         EndParamGroup();
 

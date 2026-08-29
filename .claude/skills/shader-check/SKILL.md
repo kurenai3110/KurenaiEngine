@@ -19,14 +19,21 @@ description: HLSLをfxc/dxc単体で一括コンパイル検証するときに�
 - パッカーの除外規則(`Tools\KurenaiShaderPacker\Source\Main.cpp` の `kSkipDxil65Files` と
   SM6専用ファイルの判定)が実態と合っているかを確かめたいとき
 
-### このスクリプトの取りこぼし(パッカーとの違い)
+### エントリポイントの検出規則(パッカーと揃えること)
 
-**このスクリプトは `.hlsl` しか走査せず、`#include` を展開しない。**
-そのためエントリポイントの実体が `.hlsli` 側にあるものを検出できない
-――例えば `GBuffer.hlsl` の `VSMain` は実体が `GBufferCommon.hlsli:224` にあり、
-**このスクリプトでは一度も検証されていない**。パッカー側
-(`Tools\KurenaiShaderPacker\Source\ShaderEntryScanner.cpp`)はインクルードを展開してから走査する。
-検出規則を変えるときは**両方を直すこと。**
+**このスクリプトも `#include` を再帰展開してからエントリを探す。**
+エントリポイントの実体が `.hlsli` 側にあるものがあるためで、`GBuffer.hlsl` の
+`VSMain` は実体が `GBufferCommon.hlsli` にある。展開していなかった頃は
+**G-Buffer / Water / 深度プリパスの頂点シェーダーが検査の母数に1つも入っておらず、
+壊しても「失敗0」が返る状態だった**(237→246エントリで気付いた)。
+
+ただし**bindless専用のファイルは自分のエントリだけを見る。**
+`GBufferMeshlet.hlsl` は `GBufferCommon.hlsli` を include しているため展開すると
+共有の `VSMain` まで拾うが、エンジンがこのファイルから作るのは `ASMain`/`MSMain` だけで、
+その組み合わせは存在しない。存在しない組み合わせで落とすのは偽陽性になる。
+
+パッカー側(`Tools\KurenaiShaderPacker\Source\ShaderEntryScanner.cpp`)も
+インクルードを展開してから走査する。検出規則を変えるときは**両方を直すこと。**
 
 ## 実行
 

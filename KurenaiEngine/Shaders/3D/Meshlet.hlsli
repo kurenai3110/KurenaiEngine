@@ -8,6 +8,8 @@
 #ifndef KURENAI_MESHLET_HLSLI
 #define KURENAI_MESHLET_HLSLI
 
+#include "Frustum.hlsli"
+
 // メッシュレットに属さない/引けないことを表す番号。
 // ラスタ側は従来の頂点シェーダーで描かれたピクセル、RT側はメッシュレットを持たない
 // .kmodel(--no-meshletsでパックしたもの)にヒットした場合がこれにあたる
@@ -176,57 +178,15 @@ uint MeshletSelectLODLevel(float projectedDiameter, float screenSize, uint maxLe
 
 // バウンディング球(ワールド空間)が視錐台と交差するか。
 //
-// 平面はViewProjから直接取り出す。このエンジンはmul(vector, matrix)の規約なので
-// clip.x = dot(v, ViewProjの0列目)、clip.w = dot(v, ViewProjの3列目) になる。
-// クリップ空間の条件 -w <= x <= w、-w <= y <= w、0 <= z <= w をそれぞれ
-// 「dot(平面, v) >= 0」の形に直したものが6枚の平面。
-//
-// 【行ではなく列から作ること】列と行を取り違えると、特定の視線方向でだけ
-// 100%誤検出する(真下を向いたときに全部消える等)。しかもYawを振る対照実験は
-// 素通りしてしまうため、絵を見ているだけでは気づけない(実装史39章)。
-//
-// 【Reverse-Zでもこのままでよい】近平面と遠平面の意味は入れ替わるが、
-// 0 <= z <= w という条件自体は変わらないため、平面の式は同じで済む。
-//
-// 【正射影でもそのまま使える】シャドウのカスケードは平行光の正射影だが、
-// クリップ空間の条件は透視投影と同じなのでこの導出がそのまま当てはまる。
-//
-// 【TAAのジッターは無視してよい】ViewProjにはサブピクセルのジッターが乗っているが、
-// ずれはピクセル単位以下で、バウンディング球という保守的な近似の余裕に埋もれる
+// 【平面の取り出しは Frustum.hlsli にある】行から作るか列から作るかの取り違えは
+// 過去に「真下を向いたときだけ100%誤検出する」壊れ方をした箇所で、しかもYawを振る
+// 対照実験は素通りする(実装史39章)。モデル単位で同じ判定を行うコンピュートシェーダー
+// (ModelCull.hlsl)と実装を分けないよう、取り出しは1箇所に集めてある
 bool MeshletSphereInFrustum(float4x4 viewProj, float3 center, float radius)
 {
-    // ViewProjの列ベクトル(HLSLのfloat4x4は行優先の添字なので、列は_mXY表記で取り出す)
-    const float4 col0 = float4(viewProj._m00, viewProj._m10, viewProj._m20, viewProj._m30);
-    const float4 col1 = float4(viewProj._m01, viewProj._m11, viewProj._m21, viewProj._m31);
-    const float4 col2 = float4(viewProj._m02, viewProj._m12, viewProj._m22, viewProj._m32);
-    const float4 col3 = float4(viewProj._m03, viewProj._m13, viewProj._m23, viewProj._m33);
-
     float4 planes[6];
-    planes[0] = col3 + col0; // 左   (x >= -w)
-    planes[1] = col3 - col0; // 右   (x <=  w)
-    planes[2] = col3 + col1; // 下   (y >= -w)
-    planes[3] = col3 - col1; // 上   (y <=  w)
-    planes[4] = col2;        // 手前 (z >=  0)
-    planes[5] = col3 - col2; // 奥   (z <=  w)
-
-    [unroll]
-    for (uint i = 0; i < 6; ++i)
-    {
-        // 平面を正規化しないと「距離」の尺度が平面ごとに変わり、radiusと比較できない
-        const float length3 = length(planes[i].xyz);
-        if (length3 <= 0.0f)
-        {
-            // 射影行列が退化している(想定外)。カリングを諦めて通す
-            continue;
-        }
-
-        const float4 plane = planes[i] / length3;
-        if (dot(plane.xyz, center) + plane.w < -radius)
-        {
-            return false;
-        }
-    }
-    return true;
+    ExtractFrustumPlanes(viewProj, planes);
+    return SphereInFrustumPlanes(planes, center, radius);
 }
 
 // Worldに含まれる最大スケールを求める。バウンディング球の半径をワールド空間へ移すのに使う。

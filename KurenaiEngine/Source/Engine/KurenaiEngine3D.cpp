@@ -8,6 +8,8 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <functional>
+#include <limits>
 #include <random>
 
 #include "Assets/SceneLoader.h"
@@ -968,6 +970,17 @@ namespace Kurenai
             uint32_t MeshletDebugColorByLOD;
             // このモデルが選べる最も粗い段(Assets::Model::MeshletLODLevelCap)
             uint32_t MeshletLODLevelCap;
+            // インスタンシング。InstancingEnabledが0以外のとき、頂点シェーダーは
+            // World/NormalMatrix/TangentSignFlipを上の値ではなく
+            // ModelInstances[InstanceBase + SV_InstanceID]から取る
+            // (Shaders/3D/ObjectConstants.hlsliのFetchModelInstance)。
+            // 0のときは従来どおりここの値を使うので、既存の描画は1ビットも変わらない
+            uint32_t InstanceBase;
+            uint32_t InstancingEnabled;
+            // このドローでHi-Zオクルージョン判定をどう行うか(0=しない / 1=前フレームのHi-Z /
+            // 2=今フレームのHi-Z)。値の意味と、パスで分ける必要がある理由は
+            // Shaders/3D/GBufferCommon.hlsli の MeshletOcclusionMode を参照
+            uint32_t MeshletOcclusionMode;
         };
 
         // モデルのAABBから外接球を作り、段の選択に要る値を定数へ書き込む。
@@ -1102,7 +1115,7 @@ namespace Kurenai
             const Assets::ModelInstance& instance, const Assets::Model& model, float emissiveIntensity,
             bool occlusionMapEnabled, uint32_t rejectMask, uint32_t requireMask,
             const MeshletLODFrameConstants& meshletLOD, bool countCullStats = false,
-            float ditherFade = 1.0f)
+            float ditherFade = 1.0f, uint32_t occlusionMode = 0u)
         {
             ObjectConstants constants{};
             constants.DitherFade = ditherFade;
@@ -1134,6 +1147,7 @@ namespace Kurenai
             // 統計を数えるのは G-Buffer パスだけ。深度プリパスとシャドウは同じ
             // 増幅シェーダーを使うので、ここで切らないと同じ塊を何度も数えてしまう
             constants.MeshletStatsEnabled = countCullStats ? 1u : 0u;
+            constants.MeshletOcclusionMode = occlusionMode;
             return constants;
         }
 
@@ -1337,6 +1351,90 @@ namespace Kurenai
         {
             DirectX::XMUINT2 SrcSize;
             DirectX::XMUINT2 DstSize;
+        };
+
+        // ModelCull.hlsl の cbuffer ModelCullConstants と並びを一致させること
+        struct alignas(16) ModelCullConstants
+        {
+            // 視錐台判定に使う。**今フレームの**ビュー射影行列(CPU側の判定と揃える)
+            DirectX::XMFLOAT4X4 CullViewProj;
+            // Hi-Z判定に使う。そのHi-Zの元になった深度を描いた行列。
+            // 深度プリパスから作る経路では今フレーム、そうでなければ前フレームのもの
+            DirectX::XMFLOAT4X4 CullPrevViewProj;
+            // x=候補数、y=Hi-Zのミップ段数、z=オクルージョン判定の有効フラグ、
+            // w=引数配列の先頭オフセット[バイト]
+            DirectX::XMUINT4 CullParams;
+            // x=区画1つぶんのバイト数、y=区画数、
+            // z=このディスパッチが受け持つ候補の先頭番号、
+            // w=統計を数え始める候補番号(G-Bufferぶんの先頭)
+            DirectX::XMUINT4 CullRegionParams;
+            // xy=Hi-Zのミップ0の解像度[画素]、zw=未使用
+            DirectX::XMFLOAT4 CullHiZScreenParams;
+            // x=AABBを膨らませる量[m](前フレームからのカメラ移動距離)、yzw=未使用
+            DirectX::XMFLOAT4 CullExpandParams;
+        };
+
+        // 間接描画の行き先の区画。**PSOごとに1区画**で、1区画につき1回ExecuteIndirectする。
+        // 1回のExecuteIndirectで切り替えられるのは引数に含めたルートパラメータだけで、
+        // PSOは切り替えられないため、まとめられない。
+        //
+        // 深度プリパスとG-Bufferの両方をここで面倒を見るのは、**片方だけ間引くと絵が壊れる**
+        // ため。プリパスが深度を書いたものをG-Bufferが描かないと、その画素は
+        // 「深度はあるのに色が無い」穴になる(逆向き ―― プリパスが描かずG-Bufferが描く ――
+        // は早期Zが効かなくなるだけで絵は正しい)
+        enum ModelCullRegion : uint32_t
+        {
+            kModelCullRegionGBuffer = 0,
+            kModelCullRegionGBufferMirrored,
+            kModelCullRegionPrepassOpaque,
+            kModelCullRegionPrepassOpaqueMirrored,
+            kModelCullRegionPrepassCutout,
+            kModelCullRegionPrepassCutoutMirrored,
+            kModelCullRegionCount,
+        };
+
+        // 引数バッファの先頭に置く「区画ごとの発行数」の領域。ExecuteIndirectの
+        // 件数バッファとしてそのまま渡す(1区画あたりuint1つ)。
+        //
+        // 【256バイトに切り上げる】後ろに続く引数配列の先頭を、GPU仮想アドレスが
+        // 8バイト境界に載る位置から始めるため。24バイト刻みの配列は先頭さえ揃えば
+        // 以降もすべて8の倍数になる(24は8の倍数)
+        constexpr uint32_t kModelCullArgsBaseOffset = 256;
+        static_assert(
+            kModelCullArgsBaseOffset >= sizeof(uint32_t) * kModelCullRegionCount,
+            "区画ごとの発行数が引数配列の領域へはみ出している");
+        static_assert(
+            (RHI::IRHICommandList::kDispatchMeshIndirectArgStride % 8) == 0,
+            "引数の刻みが8の倍数でないと、2件目以降のGPU仮想アドレスが境界を割る");
+
+        // 区画1つぶんのバイト数。区画の境目も8バイト境界に載せたいので256へ切り上げる
+        uint32_t ComputeModelCullRegionStride(uint32_t capacity)
+        {
+            const uint32_t bytes = RHI::IRHICommandList::kDispatchMeshIndirectArgStride * capacity;
+            return (bytes + 255u) & ~255u;
+        }
+
+        // 間接描画の候補1件。カリング前の列挙結果で、行き先の区画(= PSO)まで確定している。
+        //
+        // 【ObjectConstantsの中身はここに持たない】GPUへ載せる直前(ModelCullパスの中)で作る。
+        // 引数に書き込むのは定数バッファのリングスロットのGPUアドレスで、それは
+        // UpdateBufferを呼んだ後にしか分からないため
+        struct ModelCullDrawCandidate
+        {
+            const Assets::ModelInstance* Instance;
+            const Assets::Model* Model;
+            uint32_t Region;
+            uint32_t GroupCount;
+            // 増幅シェーダーがメッシュレットを取捨するマスク(Assets::kGpuMaterialFlag*)
+            uint32_t RejectMask;
+            uint32_t RequireMask;
+            float DitherFade;
+            // メッシュレット単位のカリング統計を数えるか。
+            // **G-Bufferの区画だけtrue** ―― プリパスでも数えると同じメッシュレットを二重に数える
+            bool CountCullStats;
+            // Hi-Zオクルージョン判定のモード(0=しない / 1=前フレーム / 2=今フレーム)。
+            // 深度プリパスとG-Bufferで読むHi-Zの中身が違うため区画ごとに変わる
+            uint32_t OcclusionMode;
         };
 
         // widthとheightのうち大きい方が1になるまでのミップ数(width/heightそのものを含む)を返す。
@@ -2244,6 +2342,62 @@ namespace Kurenai
                 m_MeshletCullStatsBindlessIndex = RHI::kInvalidBindlessIndex;
             }
         }
+
+        // モデル単位のGPUカリング(Stage 5-3)。判定はコンピュートシェーダーで行い、
+        // 生き残りの DispatchMesh 引数と統計をGPU上に作る。
+        //
+        // 【メッシュレット経路が使えるときだけ作る】判定結果の行き先(ExecuteIndirect)も、
+        // 判定に使うHi-Zも、メッシュシェーダー経路の話でしか意味を持たない
+        if (m_MeshShaderAvailable)
+        {
+            try
+            {
+                RHI::ShaderDesc modelCullCsDesc;
+                modelCullCsDesc.Stage = RHI::ShaderStage::Compute;
+                modelCullCsDesc.FilePath = shaderDirectory + L"ModelCull.kshader";
+                modelCullCsDesc.EntryPoint = "CSMain";
+                m_ModelCullComputeShader = m_Device->CreateShader(modelCullCsDesc);
+                m_ModelCullPipelineState =
+                    m_Device->CreateComputePipelineState({ m_ModelCullComputeShader.get() });
+
+                RHI::BufferDesc modelCullConstantDesc;
+                modelCullConstantDesc.Usage = RHI::BufferUsage::Constant;
+                modelCullConstantDesc.SizeInBytes = sizeof(ModelCullConstants);
+                m_ModelCullConstantBuffer = m_Device->CreateBuffer(modelCullConstantDesc);
+
+                RHI::BufferDesc modelCullCounterDesc;
+                modelCullCounterDesc.Usage = RHI::BufferUsage::Structured;
+                modelCullCounterDesc.SizeInBytes =
+                    static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount;
+                modelCullCounterDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+                m_ModelCullCounterBuffer = m_Device->CreateBuffer(modelCullCounterDesc);
+
+                for (uint32_t i = 0; i < kMeshletCullStatsRingSize; ++i)
+                {
+                    RHI::BufferDesc readbackDesc;
+                    readbackDesc.Usage = RHI::BufferUsage::Readback;
+                    readbackDesc.SizeInBytes = modelCullCounterDesc.SizeInBytes;
+                    readbackDesc.StrideInBytes = modelCullCounterDesc.StrideInBytes;
+                    m_ModelCullReadback[i] = m_Device->CreateBuffer(readbackDesc);
+                }
+            }
+            catch (const std::exception& e)
+            {
+                // カリングが作れないだけで描画は成立する(CPU側のループがそのまま描く)
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    std::string("モデル単位のGPUカリングの初期化に失敗したため無効にします: ") + e.what());
+                m_ModelCullComputeShader.reset();
+                m_ModelCullPipelineState.reset();
+                m_ModelCullConstantBuffer.reset();
+                m_ModelCullCounterBuffer.reset();
+                for (auto& readback : m_ModelCullReadback)
+                {
+                    readback.reset();
+                }
+            }
+        }
+
         if (m_RaytracingAvailable)
         {
             RHI::ShaderDesc rtReflectionCsDesc;
@@ -3278,6 +3432,98 @@ namespace Kurenai
         }
 
         return m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+    }
+
+    void KurenaiEngine3D::EnsureModelCullCapacity(uint32_t candidateCount)
+    {
+        if (candidateCount == 0 || !m_ModelCullPipelineState)
+        {
+            return;
+        }
+        if (m_ModelCullInstanceBuffer && m_ModelCullDrawArgsBuffer && candidateCount <= m_ModelCullCapacity)
+        {
+            return;
+        }
+
+        // 作り直しの頻度を下げるため、必要数ぴったりではなく少し余裕を持たせる。
+        // シーン切り替えとストリーミングで候補数は増減する
+        const uint32_t capacity = std::max<uint32_t>(64u, candidateCount + candidateCount / 4u);
+
+        try
+        {
+            // 候補の配列。毎フレームCPUから書き直すのでStructuredReadOnly。
+            // 1フレームに1回しか書かないためMaxUpdatesPerFrameは既定のままでよい
+            RHI::BufferDesc instanceDesc;
+            instanceDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+            instanceDesc.SizeInBytes = static_cast<uint32_t>(sizeof(GpuModelCullInstance)) * capacity;
+            instanceDesc.StrideInBytes = static_cast<uint32_t>(sizeof(GpuModelCullInstance));
+            instanceDesc.MaxUpdatesPerFrame = 1;
+            auto instanceBuffer = m_Device->CreateBuffer(instanceDesc);
+
+            // 生き残りの DispatchMesh 引数。そのままExecuteIndirectへ渡すのでIndirectArgs。
+            //
+            // 【区画ごとに配列を分ける】PSOはExecuteIndirectの引数では切り替えられないため、
+            // ミラーリングの有無・プリパスの不透明/カットアウトを別の配列へ詰め、
+            // PSOごとに1回ずつ発行する。
+            // 先頭のkModelCullArgsBaseOffsetバイトは区画ごとの発行数(uint)が占める
+            RHI::BufferDesc drawArgsDesc;
+            drawArgsDesc.Usage = RHI::BufferUsage::IndirectArgs;
+            drawArgsDesc.SizeInBytes =
+                kModelCullArgsBaseOffset + ComputeModelCullRegionStride(capacity) * kModelCullRegionCount;
+            drawArgsDesc.StrideInBytes = RHI::IRHICommandList::kDispatchMeshIndirectArgStride;
+            auto drawArgsBuffer = m_Device->CreateBuffer(drawArgsDesc);
+
+            // 【作り終えてから差し替える】途中で例外が出たときに、古いバッファを
+            // 手放した状態で戻ってしまうのを避ける
+            m_ModelCullInstanceBuffer = std::move(instanceBuffer);
+            m_ModelCullDrawArgsBuffer = std::move(drawArgsBuffer);
+            m_ModelCullCapacity = capacity;
+            m_ModelCullRegionStride = ComputeModelCullRegionStride(capacity);
+        }
+        catch (const std::exception& e)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                std::string("モデル単位のGPUカリングのバッファを作れませんでした(この機能を止めます): ") + e.what());
+            m_ModelCullInstanceBuffer.reset();
+            m_ModelCullDrawArgsBuffer.reset();
+            m_ModelCullCapacity = 0;
+            m_ModelCullRegionStride = 0;
+        }
+    }
+
+    bool KurenaiEngine3D::IssueModelCullIndirect(
+        RHI::IRHICommandList* cmd, uint32_t region, RHI::IRHIPipelineState* pipelineState,
+        RHI::IRHIPipelineState*& currentPipelineState)
+    {
+        if (!cmd || region >= kModelCullRegionCount || !pipelineState || !m_ModelCullDrawArgsBuffer)
+        {
+            return false;
+        }
+        // GPUが書く発行数の上限。候補が1件も無い区画はExecuteIndirectごと省く
+        const uint32_t maxCommandCount = m_ModelCullRegionCandidates[region];
+        if (maxCommandCount == 0)
+        {
+            return false;
+        }
+
+        if (pipelineState != currentPipelineState)
+        {
+            cmd->SetPipelineState(pipelineState);
+            cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
+            cmd->SetSamplerSet(m_MaterialSamplers.get());
+            currentPipelineState = pipelineState;
+        }
+
+        // 【b1(ObjectConstants)はここでは張らない】コマンドシグネチャがドローごとに
+        // 差し替える。ここで張っても最初のドローで上書きされるだけで、意味が無いどころか
+        // 「張ってあるから大丈夫」という誤解の元になる
+        cmd->DispatchMeshIndirect(
+            m_ModelCullDrawArgsBuffer.get(),
+            kModelCullArgsBaseOffset + region * m_ModelCullRegionStride,
+            maxCommandCount,
+            region * static_cast<uint32_t>(sizeof(uint32_t)));
+        return true;
     }
 
     bool KurenaiEngine3D::ShouldUseModelMeshletPath(
@@ -4538,6 +4784,295 @@ namespace Kurenai
         m_SceneLoadingIndex = sceneIndex;
     }
 
+    // 同じモデルを指すインスタンスを1回のDrawIndexedへまとめるバッチを作り直す。
+    //
+    // 【レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと】UpdateModelLODが決めた段を読むので
+    // その後、かつどのパスより前。パスごとに組み直すと、深度プリパスとG-Bufferが違うまとめ方をして
+    // 同じ画素を別の経路で描くことになる。
+    //
+    // 【バッチに入れないもの】
+    //   - まだ読み込まれていない段(ストリーミング中)
+    //   - LOD切替のフェード中。DitherFadeはインスタンスごとに違い、定数バッファで渡す値なので
+    //     1ドローにまとめられない。フェードは短時間で終わるので、そのあいだ個別に描けばよい
+    //   - メッシュシェーダー経路に載るモデル。DispatchMeshにインスタンス数の概念が無い
+    //   - まとめる相手がいないもの(1体だけのグループ)。この場合は従来とまったく同じ描画になる
+    // このフレームの描画単位を組み立てる。バッチに入ったインスタンスはバッチとして1回、
+    // 入らなかったものは1体ずつ現れる ―― 全インスタンスがちょうど1回ずつ現れることが要点で、
+    // 取りこぼすと物が消え、二重に出すと同じ場所へ2回描いてZファイティングになる
+    void KurenaiEngine3D::GetInstanceDrawUnits(bool coarsestLOD, std::vector<InstanceDrawUnit>& outUnits) const
+    {
+        const std::vector<InstanceBatch>& batches =
+            coarsestLOD ? m_InstanceBatchesCoarsestLOD : m_InstanceBatchesCurrentLOD;
+        const std::vector<uint8_t>& batched =
+            coarsestLOD ? m_InstanceBatchedCoarsestLOD : m_InstanceBatchedCurrentLOD;
+
+        outUnits.clear();
+        outUnits.reserve(m_Scene.Instances.size());
+
+        for (const InstanceBatch& batch : batches)
+        {
+            InstanceDrawUnit unit;
+            // 代表はバッチの先頭。IsMirrored/IsWaterはバッチ内で同一(グループ化のキー)なので、
+            // どれを代表にしても同じ値になる
+            unit.Instance = &m_Scene.Instances[batch.RepresentativeIndex];
+            unit.InstanceIndex = batch.RepresentativeIndex;
+            unit.Model = batch.Model;
+            unit.InstanceBase = batch.InstanceBase;
+            unit.InstanceCount = batch.InstanceCount;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                unit.WorldBoundsMin[axis] = batch.WorldBoundsMin[axis];
+                unit.WorldBoundsMax[axis] = batch.WorldBoundsMax[axis];
+            }
+            outUnits.push_back(unit);
+        }
+
+        for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+        {
+            if (i < batched.size() && batched[i] != 0)
+            {
+                continue;   // バッチとして既に積んである
+            }
+            InstanceDrawUnit unit;
+            unit.Instance = &m_Scene.Instances[i];
+            unit.InstanceIndex = i;
+            unit.Model = nullptr;   // 段は呼び出し側が決める(フェード中は2段になる)
+            unit.InstanceBase = 0;
+            unit.InstanceCount = 1;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                unit.WorldBoundsMin[axis] = m_Scene.Instances[i].WorldBoundsMin[axis];
+                unit.WorldBoundsMax[axis] = m_Scene.Instances[i].WorldBoundsMax[axis];
+            }
+            outUnits.push_back(unit);
+        }
+    }
+
+    void KurenaiEngine3D::BuildInstanceBatches(RHI::IRHICommandList* commandList)
+    {
+        m_InstanceBatchesCurrentLOD.clear();
+        m_InstanceBatchesCoarsestLOD.clear();
+        m_ModelInstanceRecords.clear();
+        m_InstanceBatchedCurrentLOD.assign(m_Scene.Instances.size(), 0u);
+        m_InstanceBatchedCoarsestLOD.assign(m_Scene.Instances.size(), 0u);
+        m_InstancedBatchCount = 0;
+        m_InstancedInstanceCount = 0;
+
+        if (!m_InstancingEnabled || m_Scene.Instances.empty() || !m_ModelInstanceBuffer)
+        {
+            return;
+        }
+
+        // グループ化のキー。ワインディング(IsMirrored)と水面(IsWater)はパイプラインステートが
+        // 分かれるため、違うものを同じドローへまとめてはいけない
+        struct GroupKey
+        {
+            const Assets::Model* Model;
+            bool IsMirrored;
+            bool IsWater;
+            bool operator==(const GroupKey& other) const
+            {
+                return Model == other.Model && IsMirrored == other.IsMirrored && IsWater == other.IsWater;
+            }
+        };
+
+        // キーごとのインスタンス番号。シーンの並び順で走査するので、同じシーンなら毎フレーム同じ順になる
+        // (順序が揺れるとフレーム間でバッチの内容が変わり、A/B比較の再現性が落ちる)
+        std::vector<std::pair<GroupKey, std::vector<size_t>>> groups;
+
+        // 1つの組(段の選び方)ぶんのバッチを作る。
+        // modelOf: そのインスタンスがこの組で描く段を返す。nullptrならこの組の対象外
+        const auto buildFor =
+            [this, &groups](
+                const std::function<const Assets::Model*(size_t)>& modelOf,
+                std::vector<InstanceBatch>& outBatches, std::vector<uint8_t>& outBatched)
+        {
+            groups.clear();
+            for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+            {
+                const Assets::ModelInstance& instance = m_Scene.Instances[i];
+                const Assets::Model* const model = modelOf(i);
+                if (!model)
+                {
+                    continue;
+                }
+                // メッシュシェーダー経路はDispatchMeshで描くのでまとめられない
+                if (ShouldUseModelMeshletPath(instance, *model))
+                {
+                    continue;
+                }
+
+                const GroupKey key{ model, instance.IsMirrored, instance.IsWater };
+                bool found = false;
+                for (auto& group : groups)
+                {
+                    if (group.first == key)
+                    {
+                        group.second.push_back(i);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    groups.push_back({ key, { i } });
+                }
+            }
+
+            // 【空間セルでソートしてから刻む】上限なしで1バッチにすると、広く散らばった
+            // グループが1つの巨大AABBになり、どのパスからも一度も間引かれなくなる。
+            // セルの幅はシーン対角の1/64を目安にする(バッチの粒度がシーンの規模に追随する)
+            const float diagonalX = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
+            const float diagonalY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
+            const float diagonalZ = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
+            const float diagonal =
+                std::sqrt(diagonalX * diagonalX + diagonalY * diagonalY + diagonalZ * diagonalZ);
+            const float cellSize = std::max(diagonal / 64.0f, 1.0f);
+
+            for (auto& group : groups)
+            {
+                if (group.second.size() < 2)
+                {
+                    // まとめる相手がいない。従来どおり個別に描く(コマンド列は今までと同一)
+                    continue;
+                }
+
+                std::stable_sort(
+                    group.second.begin(), group.second.end(),
+                    [this, cellSize](size_t a, size_t b)
+                    {
+                        const auto cell = [this, cellSize](size_t index, int axis)
+                        {
+                            const float center =
+                                (m_Scene.Instances[index].WorldBoundsMin[axis]
+                                 + m_Scene.Instances[index].WorldBoundsMax[axis]) * 0.5f;
+                            return static_cast<int64_t>(std::floor(center / cellSize));
+                        };
+                        // Z→X→Y の順に見る。格子状の配置ではこれで行ごとにまとまる
+                        const int axes[3] = { 2, 0, 1 };
+                        for (const int axis : axes)
+                        {
+                            const int64_t ca = cell(a, axis);
+                            const int64_t cb = cell(b, axis);
+                            if (ca != cb)
+                            {
+                                return ca < cb;
+                            }
+                        }
+                        return a < b;
+                    });
+
+                for (size_t offset = 0; offset < group.second.size(); offset += kMaxInstancesPerBatch)
+                {
+                    const size_t count = std::min<size_t>(kMaxInstancesPerBatch, group.second.size() - offset);
+                    if (count < 2)
+                    {
+                        // 刻んだ余りが1体だけになった場合。まとめる意味が無いので個別へ回す
+                        continue;
+                    }
+
+                    InstanceBatch batch;
+                    batch.Model = group.first.Model;
+                    batch.IsMirrored = group.first.IsMirrored;
+                    batch.IsWater = group.first.IsWater;
+                    batch.InstanceBase = static_cast<uint32_t>(m_ModelInstanceRecords.size());
+                    batch.InstanceCount = static_cast<uint32_t>(count);
+                    batch.RepresentativeIndex = group.second[offset];
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        batch.WorldBoundsMin[axis] = (std::numeric_limits<float>::max)();
+                        batch.WorldBoundsMax[axis] = std::numeric_limits<float>::lowest();
+                    }
+
+                    for (size_t k = 0; k < count; ++k)
+                    {
+                        const size_t instanceIndex = group.second[offset + k];
+                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+
+                        GPUModelInstance record{};
+                        record.World = instance.World;
+                        record.NormalMatrix = instance.NormalMatrix;
+                        record.TangentSignFlip = instance.TangentSignFlip;
+                        m_ModelInstanceRecords.push_back(record);
+
+                        for (int axis = 0; axis < 3; ++axis)
+                        {
+                            batch.WorldBoundsMin[axis] =
+                                std::min(batch.WorldBoundsMin[axis], instance.WorldBoundsMin[axis]);
+                            batch.WorldBoundsMax[axis] =
+                                std::max(batch.WorldBoundsMax[axis], instance.WorldBoundsMax[axis]);
+                        }
+                        outBatched[instanceIndex] = 1u;
+                    }
+
+                    outBatches.push_back(batch);
+                }
+            }
+        };
+
+        // 組1: そのフレームに選ばれた段(深度プリパス / G-Buffer / 平面反射)。
+        // フェード中(段が2つ)は個別に描くのでバッチへ入れない
+        buildFor(
+            [this](size_t i) -> const Assets::Model*
+            {
+                LODDraw draws[2];
+                if (GetLODDraws(i, draws) != 1)
+                {
+                    return nullptr;
+                }
+                // 【GetCurrentLODと一致するときだけまとめる】GetLODDrawsは、フェード中でも
+                // 片方の段が未ストリーミングなら「読めているほうを全画素で描く」として1を返す。
+                // その段は PreviousLOD のことがあり、GetCurrentLOD は nullptr を返す。
+                // 平面反射パスは単体を GetCurrentLOD で引くので、そこを一致させておかないと
+                // 「まとめられた個体は水面に映るが、同じ状態でまとめられなかった個体は映らない」
+                // という食い違いが出る
+                if (draws[0].Model != GetCurrentLOD(i))
+                {
+                    return nullptr;
+                }
+                return draws[0].Model;
+            },
+            m_InstanceBatchesCurrentLOD, m_InstanceBatchedCurrentLOD);
+
+        // 組2: 常に最も粗い段(シャドウ / 反射プローブ)
+        buildFor(
+            [this](size_t i) -> const Assets::Model* { return GetCoarsestLOD(m_Scene.Instances[i]); },
+            m_InstanceBatchesCoarsestLOD, m_InstanceBatchedCoarsestLOD);
+
+        m_InstancedBatchCount =
+            static_cast<uint32_t>(m_InstanceBatchesCurrentLOD.size() + m_InstanceBatchesCoarsestLOD.size());
+        m_InstancedInstanceCount = static_cast<uint32_t>(m_ModelInstanceRecords.size());
+
+        if (m_ModelInstanceRecords.empty())
+        {
+            return;
+        }
+
+        // 容量はシーン読み込み時に「インスタンス数×2組」で確保してある。超えることは無いが、
+        // 超えたときに黙って壊れないよう検査してログを残す
+        const size_t capacity = m_Scene.Instances.size() * 2;
+        if (m_ModelInstanceRecords.size() > capacity)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "インスタンスバッファの容量(" + std::to_string(capacity) + "件)を超えました("
+                    + std::to_string(m_ModelInstanceRecords.size()) + "件)。このフレームはインスタンシングを見送ります");
+            m_InstanceBatchesCurrentLOD.clear();
+            m_InstanceBatchesCoarsestLOD.clear();
+            std::fill(m_InstanceBatchedCurrentLOD.begin(), m_InstanceBatchedCurrentLOD.end(), 0u);
+            std::fill(m_InstanceBatchedCoarsestLOD.begin(), m_InstanceBatchedCoarsestLOD.end(), 0u);
+            m_InstancedBatchCount = 0;
+            m_InstancedInstanceCount = 0;
+            return;
+        }
+
+        // 【1フレームに1回だけ】どのパスもこの1本を読む。バインドは各パスがDraw直前に張り直す
+        // (頂点シェーダー用SRVはt0の1本しかなく、ドローンショーが同じスロットを使うため)
+        commandList->UpdateBuffer(
+            m_ModelInstanceBuffer.get(), m_ModelInstanceRecords.data(),
+            m_ModelInstanceRecords.size() * sizeof(GPUModelInstance));
+    }
+
     void KurenaiEngine3D::UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds)
     {
         m_LODSwitchCount = 0;
@@ -4718,6 +5253,13 @@ namespace Kurenai
                     --pending.FramesRemaining;
                     continue;
                 }
+                // 【常駐ミップの読み直しが終わるまで待つ】Loaderスレッドがこのモデルの
+                // IRHITexture*を掴んでいる間に解放すると解放済みを触る。
+                // フレーム数の遅延では足りない(1件が数十msかかることがある)
+                if (m_TextureStreaming.IsModelBusy(pending.Model.get()))
+                {
+                    continue;
+                }
                 ready.push_back(std::move(pending.Model));
             }
             m_StreamingPendingRelease.erase(
@@ -4778,12 +5320,14 @@ namespace Kurenai
                 m_Scene.ModelCache[item.Path] = std::move(item.Model);
                 for (Assets::ModelInstance& instance : m_Scene.Instances)
                 {
+                    bool referenced = false;
                     for (size_t level = 0; level < instance.ModelPaths.size(); ++level)
                     {
                         if (instance.ModelPaths[level] != item.Path)
                         {
                             continue;
                         }
+                        referenced = true;
                         if (level == 0)
                         {
                             instance.Model = shared;
@@ -4792,6 +5336,15 @@ namespace Kurenai
                         {
                             instance.LODModels[level - 1] = shared;
                         }
+                    }
+                    // 常駐ミップ制御の追跡表へ入れる。
+                    // 【インスタンスごとに1回だけ】メッシュのAABBはインスタンスのWorldで
+                    // ワールド空間へ移して持つので、参照はインスタンスの数だけ要る。
+                    // 逆に同じインスタンスで2回呼ぶと、同じ参照が二重に積まれる
+                    // (同じパスが複数の段に入っているシーンで起きうる)
+                    if (referenced)
+                    {
+                        m_TextureStreaming.AttachModel(*shared, instance.World, *m_Device);
                     }
                 }
             }
@@ -4920,6 +5473,9 @@ namespace Kurenai
                 {
                     continue;
                 }
+                // 【破棄より前に追跡表から外す】これ以降このモデルへ新しい読み直しは発注されない。
+                // 発注済みのものは破棄待ちの側(IsModelBusy)で待つ
+                m_TextureStreaming.DetachModel(*cached->second);
                 // 実体はここで消さず、GPUが読み終わるまで寝かせる
                 m_StreamingPendingRelease.push_back(
                     { std::move(cached->second), kStreamingReleaseDelayFrames });
@@ -5071,6 +5627,12 @@ namespace Kurenai
                     {
                         return true;
                     }
+                    // 常駐ミップの読み直しもこのスレッドが行う(専用スレッドは立てない)。
+                    // モデルの発注が無い間もこれだけで起きる必要がある
+                    if (m_TextureStreaming.HasPendingRequests())
+                    {
+                        return true;
+                    }
                     // 破棄だけが積まれている場合も起きる(読み込みが止まっている間に
                     // 破棄が溜まり続けると、遠ざかったモデルのVRAMが解放されない)
                     {
@@ -5108,6 +5670,14 @@ namespace Kurenai
             // 破棄は毎ループ引き取る。読み込みより先に行うことでVRAMのピークを下げる
             destroyStreamedModels();
 
+            // 常駐ミップの読み直し。**モデルの読み込みより先に、そして1件ごとに挟む**
+            // (下のループの中でも呼ぶ)。モデル1件の読み込みはPLATEAUのLOD2タイルで
+            // 秒の単位かかるため、まとめて後回しにすると街を流している間じゅう
+            // ミップの差し替えが止まり、近づいた面がぼけたまま残る。
+            // 1回あたりの件数を絞ってあるので、逆にモデルの読み込みが待たされることもない
+            constexpr size_t kTextureRequestsPerSlice = 4;
+            m_TextureStreaming.ProcessRequests(*m_Device, kTextureRequestsPerSlice);
+
             // --- ストリーミングの読み込み ---------------------------------------------------
             if (!streamingRequests.empty())
             {
@@ -5137,6 +5707,8 @@ namespace Kurenai
                         // 同じものを永久に再発注し続ける
                         m_StreamingLoaded.push_back({ request.Path, std::move(model), request.Generation });
                     }
+                    // 1件読むごとにミップの差し替えを挟む(このループの外のコメント参照)
+                    m_TextureStreaming.ProcessRequests(*m_Device, kTextureRequestsPerSlice);
                 }
                 // 【ここでcontinueしない】読み込みと再構築が同時に積まれることがある。
                 // 抜けると再構築要求だけが失われ、m_RaytracingRebuildInFlightが立ったまま戻らない
@@ -5406,6 +5978,32 @@ namespace Kurenai
         // シーンへ切り替えたときに、前のシーンの段とフェード途中の状態が残る
         m_InstanceLODStates.assign(m_Scene.Instances.size(), InstanceLODState{});
 
+        // インスタンシング用のインスタンスバッファをシーンの規模で作り直す。
+        //
+        // 【容量はインスタンス数×2】バッチの組は「そのフレームに選ばれた段」と
+        // 「最も粗い段」の2組あり、同じインスタンスが両方に載る。最悪でも全インスタンスが
+        // 両組でバッチに入るだけなので、これで足りる。
+        // インスタンスが1つも無いシーンではバッファを作らない
+        // (BuildInstanceBatchesがnullptrを見て何もしない)
+        m_ModelInstanceBuffer.reset();
+        if (!m_Scene.Instances.empty())
+        {
+            RHI::BufferDesc instanceBufferDesc;
+            instanceBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+            instanceBufferDesc.SizeInBytes =
+                static_cast<uint32_t>(sizeof(GPUModelInstance) * m_Scene.Instances.size() * 2);
+            instanceBufferDesc.StrideInBytes = sizeof(GPUModelInstance);
+            // 更新はBuildInstanceBatchesの1フレーム1回だけ。DX12のステージングリングは
+            // この値×kFrameCount+1段を常時確保するので、必要最小限にしておく
+            instanceBufferDesc.MaxUpdatesPerFrame = 1;
+            m_ModelInstanceBuffer = m_Device->CreateBuffer(instanceBufferDesc);
+        }
+        m_InstanceBatchesCurrentLOD.clear();
+        m_InstanceBatchesCoarsestLOD.clear();
+        m_InstanceBatchedCurrentLOD.clear();
+        m_InstanceBatchedCoarsestLOD.clear();
+        m_ModelInstanceRecords.clear();
+
         // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
         m_TimeOfDay = m_Scene.SunTimeOfDay;
@@ -5580,6 +6178,17 @@ namespace Kurenai
         // テクスチャの常駐ミップ制御。既定はoffで、.ksceneが明示したシーンだけが有効になる
         // (未指定のシーンは従来どおり全ミップ常駐のままで、見え方もVRAMも変わらない)
         m_TextureStreaming.Configure(m_Scene.TextureStreamingEnabled, m_Scene.TextureStreamingBias);
+        // 【読み出しはLoaderスレッドに相乗りする】専用スレッドは立てない(TextureStreaming.h参照)。
+        // 要求が積まれたらLoaderスレッドを起こす必要があるので、その手段を渡しておく
+        m_TextureStreaming.SetRequestNotifier([this] {
+            // 【notifyの前に必ずm_LoadRequestMutexを取る】Loaderスレッドは
+            // このミューテックスを持ったまま述語を評価してからwaitへ入る。
+            // 取らずにnotifyすると、述語がfalseと出てからwaitへ入るまでの隙間に通知が落ちる。
+            // カメラが止まっていてモデルの発注が無いシーンでは、
+            // 次に起こす材料が他に無いのでミップの差し替えがそのまま止まる
+            { std::lock_guard<std::mutex> lock(m_LoadRequestMutex); }
+            m_LoadRequestCV.notify_one();
+        });
         m_TextureStreaming.Build(m_Scene, *m_Device);
 
         m_SelectedProbeIndex = m_ReflectionProbes.empty() ? -1 : 0;
@@ -6613,6 +7222,8 @@ namespace Kurenai
         m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
         m_FrameStatsDrawCallsShadowSum += m_DrawCallsShadow;
         m_FrameStatsDrawCallsDepthPrepassSum += m_DrawCallsDepthPrepass;
+        m_FrameStatsInstancedBatchSum += m_InstancedBatchCount;
+        m_FrameStatsInstancedInstanceSum += m_InstancedInstanceCount;
 
         const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
@@ -6777,6 +7388,22 @@ namespace Kurenai
             Core::Logger::Info("Perf", drawText);
         }
 
+        // インスタンシングの効き。**ドローコール数とは別建てにする** ――
+        // 「バッチ0」は「まとめられる相手がいない」のか「一度も実行されていない」のかを
+        // 区別できないので、まとめた数(バッチ)とまとめた対象(インスタンス)の両方を出す。
+        // まとめたことで減ったドロー数は (インスタンス数 - バッチ数) x そのモデルのメッシュ数
+        if (m_FrameStatsFrameCount > 0 && m_FrameStatsInstancedBatchSum > 0)
+        {
+            const double frames = static_cast<double>(m_FrameStatsFrameCount);
+            char instText[192];
+            std::snprintf(
+                instText, sizeof(instText),
+                "  インスタンシング: バッチ %.1f / まとめたインスタンス %.1f [1フレームあたり・2組の合計]",
+                static_cast<double>(m_FrameStatsInstancedBatchSum) / frames,
+                static_cast<double>(m_FrameStatsInstancedInstanceSum) / frames);
+            Core::Logger::Info("Perf", instText);
+        }
+
         // bindless区画の使用状況。**満杯になっても例外は飛ばず、エラーログ1行と
         // kInvalidBindlessIndex(=白1x1へ落ちる)しか残らない**ため、上限へ近づいていることを
         // 定期的に見えるようにしておく(IRHIDevice::GetBindlessUsedCountのコメント参照)
@@ -6820,6 +7447,64 @@ namespace Kurenai
             Core::Logger::Info("Perf", meshletCullText);
         }
 
+        // モデル単位のGPUカリング(Stage 5-3)。
+        //
+        // 【判定数と視錐台の間引き数がCPUと一致することが合格条件】GPUは同じAABBを
+        // 同じ視錐台で判定しているので、一致しなければ平面の作り方か候補の積み方が壊れている。
+        // **間接描画はこの数を信じて描く**ので、食い違ったまま進むと絵が消えてから
+        // 原因を探すことになる。だから食い違いは警告として残す
+        if (m_ModelCullTested > 0)
+        {
+            char modelCullText[256];
+            std::snprintf(
+                modelCullText, sizeof(modelCullText),
+                "  モデル単位GPUカリング: 判定 %u (CPU候補 %u) / 視錐台 %u (CPU %u) / オクルージョン %u / 生存 %u",
+                m_ModelCullTested, m_ModelCullComparedCandidateCount,
+                m_ModelCullFrustumCulled, m_ModelCullComparedCpuFrustumCulled,
+                m_ModelCullOcclusionCulled, m_ModelCullSurvived);
+            Core::Logger::Info("Perf", modelCullText);
+
+            // 区画ごとの発行数。**間引きの数だけ見ても、間接描画が本当に描いているかは分からない** ――
+            // 描画発行に繋がっていなければここは全部0のままで、絵はCPUループが出している
+            char modelCullRegionText[256];
+            std::snprintf(
+                modelCullRegionText, sizeof(modelCullRegionText),
+                "  モデル単位GPU発行(%s): G-Buffer %u+%u / プリパス不透明 %u+%u / プリパスカットアウト %u+%u",
+                m_ModelCullIndirectActiveLastFrame ? "間接描画" : "計数のみ",
+                m_ModelCullRegionIssued[kModelCullRegionGBuffer],
+                m_ModelCullRegionIssued[kModelCullRegionGBufferMirrored],
+                m_ModelCullRegionIssued[kModelCullRegionPrepassOpaque],
+                m_ModelCullRegionIssued[kModelCullRegionPrepassOpaqueMirrored],
+                m_ModelCullRegionIssued[kModelCullRegionPrepassCutout],
+                m_ModelCullRegionIssued[kModelCullRegionPrepassCutoutMirrored]);
+            Core::Logger::Info("Perf", modelCullRegionText);
+
+            // どの経路で判定したか。**間引き数だけでは切り替わったか分からない** ――
+            // カメラが止まっていれば前フレームのHi-Zと今フレームのHi-Zは同じ内容になり、
+            // 新旧どちらの経路でも同じ数が出る。経路そのものを出しておく
+            char modelCullPathText[192];
+            std::snprintf(
+                modelCullPathText, sizeof(modelCullPathText),
+                "  Hi-Zの出どころ: %s / 判定ディスパッチ: プリパスぶん %u + G-Bufferぶん %u",
+                m_HiZFromDepthPrepassLastFrame ? "深度プリパス(今フレーム)" : "G-Bufferの後(前フレーム)",
+                m_ModelCullDispatchCounts[0], m_ModelCullDispatchCounts[1]);
+            Core::Logger::Info("Perf", modelCullPathText);
+
+            if (m_ModelCullTested != m_ModelCullComparedCandidateCount ||
+                m_ModelCullFrustumCulled != m_ModelCullComparedCpuFrustumCulled)
+            {
+                // 【黙って進めない】食い違ったままExecuteIndirectへ繋ぐと、
+                // 絵が消えてから原因を探すことになる
+                Core::Logger::Warning(
+                    "Perf",
+                    "モデル単位GPUカリングの判定がCPUと食い違っています(判定 " +
+                        std::to_string(m_ModelCullTested) + " vs " +
+                        std::to_string(m_ModelCullComparedCandidateCount) + " / 視錐台 " +
+                        std::to_string(m_ModelCullFrustumCulled) + " vs " +
+                        std::to_string(m_ModelCullComparedCpuFrustumCulled) + ")");
+            }
+        }
+
         m_FrameStatsFrameCount = 0;
         m_FrameStatsCPUTimeSumMs = 0.0;
         m_FrameStatsGPUTimeSumMs = 0.0;
@@ -6834,6 +7519,8 @@ namespace Kurenai
         m_FrameStatsDrawCallsGBufferSum = 0;
         m_FrameStatsDrawCallsShadowSum = 0;
         m_FrameStatsDrawCallsDepthPrepassSum = 0;
+        m_FrameStatsInstancedBatchSum = 0;
+        m_FrameStatsInstancedInstanceSum = 0;
         m_FrameStatsMeshletTestedSum = 0;
         m_FrameStatsMeshletFrustumCulledSum = 0;
         m_FrameStatsMeshletOcclusionCulledSum = 0;
@@ -7319,6 +8006,11 @@ namespace Kurenai
 
         // モデルのストリーミング。【LODの後に呼ぶ】どの段を読むかは選ばれた段で決まる
         UpdateModelStreaming(cameraPosition);
+
+        // インスタンシングのバッチを組み直す。【LODとストリーミングの後】まとめられるかどうかは
+        // 「そのフレームに選ばれた段」と「読み込み済みか」で決まる。レンダーグラフの構築より前に
+        // 1回だけ呼ぶこと ―― パスごとに組み直すと、深度プリパスとG-Bufferが違うまとめ方をする
+        BuildInstanceBatches(commandList);
 
         // レイトレーシングを常駐の増減へ追随させる(ストリーミング時のみ働く)
         UpdateRaytracingRebuild();
@@ -7943,6 +8635,15 @@ namespace Kurenai
         const bool occlusionCullEnabledThisFrame =
             occlusionCullingActive && m_HiZValid && m_TAAPrevViewProjValid;
 
+        // 深度プリパスが走るなら、その深度からHi-Zを作れる。**そのフレームのG-Bufferは
+        // 前フレームのHi-Zを待たなくてよい** ―― 上の2条件はどちらも要らなくなる。
+        // 条件の意味と、プリパス自身が今フレームのHi-Zを使えない理由は、
+        // 下の hiZFromDepthPrepass を定義している箇所のコメントにある
+        const bool depthPrepassRuns = m_DepthPrepassEnabled
+            && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
+        const bool hiZFromDepthPrepass =
+            m_HiZFromDepthPrepassEnabled && occlusionCullingActive && depthPrepassRuns;
+
         // 前フレームからのカメラ移動距離。シーンが静的である以上、1フレームぶんの視差ずれの
         // 原因はカメラの移動だけなので、その距離をバウンディング球の半径へ足せば
         // 保守側(間引きすぎない側)へ倒せる。前フレームが無いフレームでは0でよい
@@ -7956,8 +8657,12 @@ namespace Kurenai
             cameraMoveDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
         }
 
+        // 【フレーム全体の「判定するか」はここ、「どのHi-Zで判定するか」はドローごと】
+        // 深度プリパスから作る経路では、前フレームのHi-Zが無いフレームでも
+        // G-Bufferは今フレームのHi-Zで判定できる。どちらの経路も無いときだけ全体を止める
+        // (ドローごとの選択は ObjectConstants::MeshletOcclusionMode)
         constants.OcclusionCullParams = {
-            occlusionCullEnabledThisFrame ? 1.0f : 0.0f,
+            (occlusionCullEnabledThisFrame || hiZFromDepthPrepass) ? 1.0f : 0.0f,
             m_OcclusionCullRadiusScale,
             cameraMoveDistance,
             static_cast<float>(m_HiZMipLevels),
@@ -8501,18 +9206,25 @@ namespace Kurenai
                         // カメラではなくライト側の錐台なので、画面外でも影を落とすものは残る
                         const FrustumPlanes cascadeFrustum = ExtractFrustumPlanes(cascadeViewProj[cascade]);
 
-                        for (const auto& instance : m_Scene.Instances)
+                        // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                        // シャドウは常に最も粗い段なので、その組(coarsestLOD=true)を使う
+                        GetInstanceDrawUnits(/*coarsestLOD=*/true, m_DrawUnitScratch);
+                        for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                         {
+                            const Assets::ModelInstance& instance = *unit.Instance;
                             ++m_FrustumCullTested;
-                            if (!IsAABBVisible(cascadeFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                            if (!IsAABBVisible(cascadeFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                             {
                                 ++m_FrustumCullCulled;
                                 continue;
                             }
 
                             // 【影は常に最も粗い段】影はテクスチャを読まないので詳細な段を描く
-                            // 意味が無い。ストリーミング中で未読み込みなら描かない
-                            const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                            // 意味が無い。ストリーミング中で未読み込みなら描かない。
+                            // バッチはどの段を描くかを既に決めてある(全員が同じ段であることが
+                            // バッチの条件そのもの)
+                            const Assets::Model* const coarsestModel =
+                                unit.Model ? unit.Model : GetCoarsestLOD(instance);
                             if (!coarsestModel) { continue; }
 
                             // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
@@ -8575,8 +9287,14 @@ namespace Kurenai
                             for (const auto& mesh : coarsestModel->Meshes)
                             {
                                 // メッシュ単位のカリング。錐台はこのカスケードのライト正射影で、
-                                // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)
-                                if (!IsMeshVisibleWithStats(
+                                // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)。
+                                //
+                                // 【バッチでは行わない】メッシュ単位のワールドAABBは
+                                // 「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。
+                                // 判定を代表インスタンスだけで行うと、他の個体の見えている
+                                // メッシュまで落ちて物が消える
+                                if (!unit.IsBatch()
+                                    && !IsMeshVisibleWithStats(
                                         m_MeshCullingEnabled, cascadeFrustum, instance, *coarsestModel, mesh, m_MeshCullTested,
                                         m_MeshCullCulled))
                                 {
@@ -8590,8 +9308,10 @@ namespace Kurenai
 
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
-                                const ObjectConstants objectConstants =
+                                ObjectConstants objectConstants =
                                     MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                                objectConstants.InstanceBase = unit.InstanceBase;
+                                objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -8600,9 +9320,17 @@ namespace Kurenai
                                     cmd->SetTexture(0, mesh.BaseColorTexture);
                                 }
 
+                                // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかなく、
+                                // ドローンショーが同じスロットを使う。上書きされたまま描くと
+                                // 全インスタンスがドローンの座標を行列として読んで画面外へ飛ぶ
+                                if (unit.IsBatch())
+                                {
+                                    cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                                }
+
                                 cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                                 cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                                cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                                cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                                 ++m_DrawCallsShadow;
                             }
                         }
@@ -8687,10 +9415,14 @@ namespace Kurenai
             // モデルが全部消えることはない
             const FrustumPlanes faceFrustum = ExtractFrustumPlanes(faceViewProj);
 
-            for (const auto& instance : m_Scene.Instances)
+            // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+            // プローブは常に最も粗い段なので、シャドウと同じ組(coarsestLOD=true)を使う
+            GetInstanceDrawUnits(/*coarsestLOD=*/true, m_DrawUnitScratch);
+            for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
             {
+                const Assets::ModelInstance& instance = *unit.Instance;
                 ++m_FrustumCullTested;
-                if (!IsAABBVisible(faceFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                if (!IsAABBVisible(faceFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                 {
                     ++m_FrustumCullCulled;
                     continue;
@@ -8698,7 +9430,8 @@ namespace Kurenai
 
                 // 【プローブも最も粗い段】焼き込むのは間接光で、細部は残らない
                 // ストリーミング中で未読み込みなら描かない
-                const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
+                const Assets::Model* const coarsestModel =
+                    unit.Model ? unit.Model : GetCoarsestLOD(instance);
                 if (!coarsestModel) { continue; }
                 for (const auto& mesh : coarsestModel->Meshes)
                 {
@@ -8712,16 +9445,26 @@ namespace Kurenai
                         continue;
                     }
 
-                    // メッシュ単位のカリング。錐台はキューブの1面ぶん
-                    if (!IsMeshVisibleWithStats(
+                    // メッシュ単位のカリング。錐台はキューブの1面ぶん。
+                    // 【バッチでは行わない】理由はG-Bufferパスの同じ箇所を参照
+                    if (!unit.IsBatch()
+                        && !IsMeshVisibleWithStats(
                             m_MeshCullingEnabled, faceFrustum, instance, *coarsestModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                     {
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                    ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                    objectConstants.InstanceBase = unit.InstanceBase;
+                    objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                    // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかない
+                    if (unit.IsBatch())
+                    {
+                        cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                    }
 
                     cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                     cmd->SetIndexBuffer(mesh.IndexBuffer.get());
@@ -8736,7 +9479,7 @@ namespace Kurenai
                     cmd->SetTexture(5, mesh.OcclusionTexture);
                     cmd->SetTexture(6, mesh.BentNormalTexture);
 
-                    cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                    cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                 }
             }
 
@@ -9470,28 +10213,472 @@ namespace Kurenai
         // メッシュレット版のPSOが作れなかった場合は、その経路で描くモデルだけを
         // プリパスから外す(下のループ参照)。深度が埋まらないぶん早期Zが効かないだけで、
         // G-Buffer側が改めて深度を書くため絵は壊れない
-        const bool depthPrepassRuns = m_DepthPrepassEnabled
-            && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
+        // (depthPrepassRuns / hiZFromDepthPrepass の宣言は FrameConstants を組む箇所にある)
+
+        // --- モデル単位のGPUカリングパス(Stage 5-3) ---
+        //
+        // 描画候補のワールドAABBを、コンピュートシェーダーが視錐台とHi-Zで判定し、
+        // 生き残ったものだけの ExecuteIndirect 引数をGPU上に作る。
+        // 深度プリパスとG-Bufferは、その引数でまとめて描く。
+        //
+        // 【深度プリパスより前に登録すること】RenderGraphは登録順で実行する。
+        // 引数を使うのはプリパスとG-Bufferの両方なので、どちらよりも前にいる必要がある。
+        // **片方だけ間引くと絵が壊れる** ―― プリパスが深度を書いたものをG-Bufferが
+        // 描かないと、その画素は「深度はあるのに色が無い」穴になる。
+        //
+        // 【Hi-Zは前フレームのもの】Hi-Zパスの登録はG-Bufferより後なので、ここが読むのは
+        // 前フレームに書かれた内容になる。カメラ移動ぶんAABBを膨らませて視差を吸収する
+        const bool modelCullGpuActive = m_ModelCullGpuEnabled && meshletPathActive
+            && m_ModelCullPipelineState && m_ModelCullCounterBuffer && !m_Scene.Instances.empty();
+
+        // hiZFromDepthPrepass = Hi-Zを**深度プリパスの深度から**作るか(宣言は上流にある)。
+        // 作れるなら、G-Bufferの判定は今フレームのHi-Zで行える ――
+        // 1フレーム遅れも保守的な膨張も要らなくなる。
+        //
+        // 【プリパスが走らないフレームは従来どおり】プリパスが無ければ深度が埋まっておらず、
+        // そこでHi-Zを作っても中身は空になる。その場合はG-Bufferの後で作り、
+        // 次フレームに前フレームのものとして読む(m_HiZValidが立つのもそのとき)。
+        //
+        // 【プリパス自身は今フレームのHi-Zを使えない】そのHi-Zはプリパスの出力から作る。
+        // プリパスは従来どおり前フレームのHi-Zで判定する ―― 保守的なので絵は壊れないし、
+        // 判定を捨てるとプリパスが描くメッシュレットが9倍近くに戻る
+
+        // 前フレームのHi-Zで判定してよいか(深度プリパス、およびプリパスが無いときのG-Buffer)
+        const bool occlusionPrevFrameEnabled = occlusionCullEnabledThisFrame;
+        // 今フレームのHi-Zで判定してよいか(G-Buffer。Hi-Z構築パスが必ず先に走る)
+        const bool occlusionCurrentFrameEnabled = hiZFromDepthPrepass;
+
+        // ObjectConstants::MeshletOcclusionMode と ModelCull のオクルージョン有効フラグへ渡す値
+        const uint32_t prepassOcclusionMode = occlusionPrevFrameEnabled ? 1u : 0u;
+        const uint32_t gbufferOcclusionMode = occlusionCurrentFrameEnabled
+            ? 2u
+            : (occlusionPrevFrameEnabled ? 1u : 0u);
+
+        // 区画(=PSO)の対応表。nullptrの区画は候補に載せない(そのぶんは従来のCPUループが描く)
+        RHI::IRHIPipelineState* modelCullRegionPipelines[kModelCullRegionCount]{};
+        if (modelCullGpuActive)
+        {
+            const bool meshletDebug = m_MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
+            modelCullRegionPipelines[kModelCullRegionGBuffer] = meshletDebug
+                ? m_GBufferMeshletDebugPipelineState.get()
+                : m_GBufferMeshletPipelineState.get();
+            modelCullRegionPipelines[kModelCullRegionGBufferMirrored] = meshletDebug
+                ? m_GBufferMeshletDebugPipelineStateMirrored.get()
+                : m_GBufferMeshletPipelineStateMirrored.get();
+            if (depthPrepassRuns)
+            {
+                modelCullRegionPipelines[kModelCullRegionPrepassOpaque] =
+                    m_DepthPrepassMeshletPipelineState.get();
+                modelCullRegionPipelines[kModelCullRegionPrepassOpaqueMirrored] =
+                    m_DepthPrepassMeshletPipelineStateMirrored.get();
+                modelCullRegionPipelines[kModelCullRegionPrepassCutout] =
+                    m_DepthPrepassMeshletCutoutPipelineState.get();
+                modelCullRegionPipelines[kModelCullRegionPrepassCutoutMirrored] =
+                    m_DepthPrepassMeshletCutoutPipelineStateMirrored.get();
+            }
+        }
+
+        // 候補の列挙。**プリパスとG-Bufferの元のループとまったく同じ条件で選ぶこと** ――
+        // 選び方がずれると、間引かれてもいないのに描かれないドローが出る
+        //
+        // 【並びは「深度プリパスぶん → G-Bufferぶん」】判定を2回に分けるため、
+        // 各ディスパッチが受け持つ範囲が連続していなければならない
+        std::vector<ModelCullDrawCandidate> modelCullDraws;
+        std::vector<ModelCullDrawCandidate> modelCullGBufferDraws;
+        std::fill(std::begin(m_ModelCullRegionCandidates), std::end(m_ModelCullRegionCandidates), 0u);
+        m_ModelCullCandidateCount = 0;
+        m_ModelCullPrepassCandidateCount = 0;
+        m_ModelCullCpuFrustumCulled = 0;
+        if (modelCullGpuActive)
+        {
+            // 突き合わせ相手のCPU側の判定。G-Bufferのループが使うものと同じ錐台
+            const FrustumPlanes cullFrustum = ExtractFrustumPlanes(viewProj);
+            modelCullDraws.reserve(m_Scene.Instances.size() * 2);
+
+            for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
+            {
+                const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+
+                // モデルLOD。フェード中は2段を重ねる。
+                // 【プリパス・G-Bufferとまったく同じ組であること】UpdateModelLODがフレーム先頭で
+                // 1回だけ決めた結果を全員が引くので、ここで距離を測り直さない
+                LODDraw lodDraws[2]{};
+                const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
+                {
+                    const Assets::Model& lodModel = *lodDraws[lodDrawIndex].Model;
+                    if (!ShouldUseModelMeshletPath(instance, lodModel))
+                    {
+                        continue;
+                    }
+
+                    // 起動するのは「モデル全体のメッシュレット数 ÷ 増幅シェーダーのグループサイズ」。
+                    // 実際にラスタライズされるのはカリングとふるい分けを生き延びたぶんに絞られる
+                    constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
+                    const uint32_t groupCount =
+                        (lodModel.TotalMeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize;
+                    if (groupCount == 0)
+                    {
+                        continue;
+                    }
+
+                    const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
+                    const bool mirrored = instance.IsMirrored;
+                    // 同じ候補をCPU側の判定なら間引くか。GPUの「視錐台で間引いた数」と突き合わせる
+                    const bool cpuVisible =
+                        IsAABBVisible(cullFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax);
+
+                    const auto addCandidate = [&](std::vector<ModelCullDrawCandidate>& list, uint32_t region,
+                                                  uint32_t rejectMask, uint32_t requireMask, float ditherFade,
+                                                  bool countCullStats, uint32_t occlusionMode)
+                    {
+                        if (!modelCullRegionPipelines[region])
+                        {
+                            return;
+                        }
+                        ModelCullDrawCandidate candidate{};
+                        candidate.Instance = &instance;
+                        candidate.Model = &lodModel;
+                        candidate.Region = region;
+                        candidate.GroupCount = groupCount;
+                        candidate.RejectMask = rejectMask;
+                        candidate.RequireMask = requireMask;
+                        candidate.DitherFade = ditherFade;
+                        candidate.CountCullStats = countCullStats;
+                        candidate.OcclusionMode = occlusionMode;
+                        list.push_back(candidate);
+                        ++m_ModelCullRegionCandidates[region];
+                        // 【CPU側の間引き数もG-Bufferぶんだけ数える】GPU側の統計と単位を揃えるため。
+                        // 両方数えると1モデルを2回数え、モデル数の2倍という比べにくい数になる
+                        if (countCullStats && !cpuVisible)
+                        {
+                            ++m_ModelCullCpuFrustumCulled;
+                        }
+                    };
+
+                    // G-Buffer。半透明(BLEND)だけは増幅シェーダーが落とす ――
+                    // G-Bufferに書かず専用のフォワードパスへ回るため
+                    addCandidate(
+                        modelCullGBufferDraws,
+                        mirrored ? kModelCullRegionGBufferMirrored : kModelCullRegionGBuffer,
+                        Assets::kGpuMaterialFlagTransparent, 0u, lodDitherFade, /*countCullStats=*/true,
+                        gbufferOcclusionMode);
+
+                    // 深度プリパス。
+                    // 【クロスディザのフェード中は載せない】不透明用のPSOはピクセルシェーダーを
+                    // 持たずApplyLODDitherを通せないため、捨てるはずの画素まで深度を書いて
+                    // G-Bufferとの食い違いで穴が開く(元のループと同じ条件)
+                    if (!depthPrepassRuns || lodDitherFade < 1.0f)
+                    {
+                        continue;
+                    }
+                    addCandidate(
+                        modelCullDraws,
+                        mirrored ? kModelCullRegionPrepassOpaqueMirrored : kModelCullRegionPrepassOpaque,
+                        Assets::kGpuMaterialFlagTransparent | Assets::kGpuMaterialFlagCutout, 0u, 1.0f, false,
+                        prepassOcclusionMode);
+                    // カットアウトぶん(clipを通す)。持たないモデルではこの回は発行しない
+                    if (lodModel.HasCutoutMaterial)
+                    {
+                        addCandidate(
+                            modelCullDraws,
+                            mirrored ? kModelCullRegionPrepassCutoutMirrored : kModelCullRegionPrepassCutout,
+                            Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout, 1.0f, false,
+                            prepassOcclusionMode);
+                    }
+                }
+            }
+
+            // プリパスぶんを前半、G-Bufferぶんを後半に置く
+            m_ModelCullPrepassCandidateCount = static_cast<uint32_t>(modelCullDraws.size());
+            modelCullDraws.insert(
+                modelCullDraws.end(), modelCullGBufferDraws.begin(), modelCullGBufferDraws.end());
+            m_ModelCullCandidateCount = static_cast<uint32_t>(modelCullDraws.size());
+            EnsureModelCullCapacity(m_ModelCullCandidateCount);
+        }
+
+        // ここまで来て初めてバッファが揃っているかが分かる(容量確保は失敗しうる)
+        const bool modelCullReady = modelCullGpuActive && m_ModelCullCandidateCount > 0
+            && m_ModelCullInstanceBuffer && m_ModelCullDrawArgsBuffer;
+        // 実際に描画発行まで任せるか。
+        // 【DX11とメッシュシェーダー非対応環境では常にfalse】従来のCPUループへ縮退する
+        const bool modelCullIndirectActive =
+            modelCullReady && m_ModelCullIndirectEnabled && m_Device->SupportsIndirectDispatchMesh();
+        m_ModelCullIndirectActiveLastFrame = modelCullIndirectActive;
+        m_HiZFromDepthPrepassLastFrame = hiZFromDepthPrepass;
+        m_ModelCullDispatchCounts[0] = hiZFromDepthPrepass
+            ? m_ModelCullPrepassCandidateCount
+            : m_ModelCullCandidateCount;
+        m_ModelCullDispatchCounts[1] = hiZFromDepthPrepass
+            ? (m_ModelCullCandidateCount - m_ModelCullPrepassCandidateCount)
+            : 0u;
+
+        // 候補配列のうち [beginIndex, beginIndex + count) だけを判定するパスを1つ登録する。
+        //
+        // 【2回に分ける必要がある】Hi-Zを深度プリパスの深度から作ると、判定に使えるHi-Zが
+        // フレームの途中で「前フレームのもの」から「今フレームのもの」へ変わる。
+        // 深度プリパスぶんはプリパスより前に前フレームのHi-Zで、G-Bufferぶんは
+        // Hi-Zを作り終えてから今フレームのHi-Zで判定する。
+        // initializeBuffers は候補配列の書き込みとカウンタ初期化を行うか(先頭の1回だけtrue)
+        const auto addModelCullPass =
+            [&](std::string passName, uint32_t beginIndex, uint32_t count, bool initializeBuffers,
+                bool useCurrentFrameHiZ, bool occlusionEnabled)
+        {
+            if (!modelCullReady || (count == 0 && !initializeBuffers))
+            {
+                return;
+            }
+            const uint32_t regionStride = m_ModelCullRegionStride;
+            const uint32_t statsBeginIndex = m_ModelCullPrepassCandidateCount;
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = std::move(passName),
+                // Hi-Zを読む。前フレームのものを読む側では、それより前に書き手がいないので
+                // 辺は張られない(RenderGraphのReadsは登録順で解決する)
+                .Reads = { m_HiZTexture.get() },
+                .BufferWrites = { m_ModelCullCounterBuffer.get(), m_ModelCullDrawArgsBuffer.get() },
+                .Execute = [this, beginIndex, count, initializeBuffers, useCurrentFrameHiZ, occlusionEnabled,
+                            regionStride, statsBeginIndex, cameraMoveDistance, modelCullIndirectActive,
+                            &viewProj, &modelCullDraws](RHI::IRHICommandList* cmd)
+                {
+                    if (initializeBuffers)
+                    {
+                        // 候補ごとのObjectConstantsを定数バッファのリングへ書き、そのスロットの
+                        // GPUアドレスを候補に添える。
+                        //
+                        // 【描画パスではなくここで書く理由】ExecuteIndirectの引数には
+                        // 「このドローが使う定数バッファのアドレス」そのものが要る。アドレスは
+                        // UpdateBufferがリングを1つ進めた後にしか分からず、しかも引数を組み立てるのは
+                        // このパスのコンピュートシェーダーなので、その材料より前に書いておく必要がある。
+                        //
+                        // 【後半(G-Bufferぶん)もここで書く】2回目のディスパッチのぶんも含めて
+                        // 一度に載せる。リングのスロットは上書きされない限り生き続けるので、
+                        // 使うのが後のパスでも構わない
+                        m_ModelCullUploadScratch.clear();
+                        m_ModelCullUploadScratch.reserve(modelCullDraws.size());
+                        for (const ModelCullDrawCandidate& draw : modelCullDraws)
+                        {
+                            GpuModelCullInstance candidate{};
+                            candidate.BoundsMin[0] = draw.Instance->WorldBoundsMin[0];
+                            candidate.BoundsMin[1] = draw.Instance->WorldBoundsMin[1];
+                            candidate.BoundsMin[2] = draw.Instance->WorldBoundsMin[2];
+                            candidate.BoundsMax[0] = draw.Instance->WorldBoundsMax[0];
+                            candidate.BoundsMax[1] = draw.Instance->WorldBoundsMax[1];
+                            candidate.BoundsMax[2] = draw.Instance->WorldBoundsMax[2];
+                            candidate.GroupCount = draw.GroupCount;
+                            candidate.RegionIndex = draw.Region;
+
+                            if (modelCullIndirectActive)
+                            {
+                                const ObjectConstants objectConstants = MakeModelObjectConstants(
+                                    *draw.Instance, *draw.Model, m_EmissiveIntensity, m_OcclusionMapEnabled,
+                                    draw.RejectMask, draw.RequireMask, m_MeshletLODFrame,
+                                    draw.CountCullStats, draw.DitherFade, draw.OcclusionMode);
+                                cmd->UpdateBuffer(
+                                    m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
+                                if (!m_ObjectConstantBuffer->GetLastUpdateGpuAddress(
+                                        candidate.CbvAddress[0], candidate.CbvAddress[1]))
+                                {
+                                    // アドレスが取れないバックエンドはそもそも間接描画へ行かない。
+                                    // 万一ここへ来たら、嘘のアドレスを引数へ書くよりは
+                                    // 「描くものが無い候補」にしてGPUに触らせない
+                                    candidate.GroupCount = 0;
+                                }
+                            }
+
+                            m_ModelCullUploadScratch.push_back(candidate);
+                        }
+                        cmd->UpdateBuffer(
+                            m_ModelCullInstanceBuffer.get(), m_ModelCullUploadScratch.data(),
+                            static_cast<uint32_t>(
+                                sizeof(GpuModelCullInstance) * m_ModelCullUploadScratch.size()));
+
+                        // 加算しかしないので毎フレーム0へ戻す。生き残りを詰める位置も
+                        // このカウンタで取るため、戻さないと2フレーム目以降が範囲外へ書く
+                        cmd->ClearUnorderedAccessBufferUint(m_ModelCullCounterBuffer.get(), 0);
+                        // 引数バッファも同じ理由で戻す。**先頭の発行数だけでなく全体を0にする** ――
+                        // 前フレームの引数が残っていると、件数が減ったときに古い引数が
+                        // 範囲内に居座り、そのぶんが二重に描かれる
+                        cmd->ClearUnorderedAccessBufferUint(m_ModelCullDrawArgsBuffer.get(), 0);
+                    }
+
+                    if (count == 0)
+                    {
+                        return;
+                    }
+
+                    ModelCullConstants cullConstants{};
+                    DirectX::XMStoreFloat4x4(
+                        &cullConstants.CullViewProj, DirectX::XMMatrixTranspose(viewProj));
+                    if (useCurrentFrameHiZ)
+                    {
+                        // 今フレームの深度プリパスから作ったHi-Zを読む。投影も今フレームの行列
+                        cullConstants.CullPrevViewProj = cullConstants.CullViewProj;
+                    }
+                    else
+                    {
+                        cullConstants.CullPrevViewProj =
+                            m_TAAPrevViewProjValid ? m_TAAPrevViewProj : DirectX::XMFLOAT4X4{};
+                    }
+                    cullConstants.CullParams = {
+                        count, m_HiZMipLevels, occlusionEnabled ? 1u : 0u, kModelCullArgsBaseOffset
+                    };
+                    cullConstants.CullRegionParams = {
+                        regionStride, kModelCullRegionCount, beginIndex, statsBeginIndex
+                    };
+                    cullConstants.CullHiZScreenParams = {
+                        static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight), 0.0f, 0.0f
+                    };
+                    // 今フレームのHi-Zなら視差のずれが無いので膨らませない
+                    cullConstants.CullExpandParams = {
+                        useCurrentFrameHiZ ? 0.0f : cameraMoveDistance, 0.0f, 0.0f, 0.0f
+                    };
+                    cmd->UpdateBuffer(m_ModelCullConstantBuffer.get(), &cullConstants, sizeof(cullConstants));
+
+                    cmd->SetComputePipelineState(m_ModelCullPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_ModelCullConstantBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(0, m_ModelCullInstanceBuffer.get());
+                    cmd->SetComputeTexture(1, m_HiZTexture.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_ModelCullCounterBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(1, m_ModelCullDrawArgsBuffer.get());
+
+                    constexpr uint32_t kModelCullGroupSize = 64; // ModelCull.hlslと一致させること
+                    cmd->Dispatch((count + kModelCullGroupSize - 1) / kModelCullGroupSize, 1, 1);
+                },
+            });
+        };
+
+        // Hi-Zミップチェーンの構築パス。**登録する場所が2つある**ため関数にしてある。
+        // 深度プリパスが走るなら直後に(今フレームの深度から)、走らないならG-Bufferの後に。
+        // 詳細は下の hiZPassRuns のコメント
+        const auto addHiZPass = [&]()
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "HiZ",
+                .Reads = { m_GBufferDepth.get() },
+                .Writes = { m_HiZTexture.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    HiZConstants hizConstants{};
+                    hizConstants.SrcSize = { m_RenderWidth, m_RenderHeight };
+                    hizConstants.DstSize = { m_RenderWidth, m_RenderHeight };
+                    cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
+
+                    cmd->SetComputePipelineState(m_HiZCopyPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
+                    cmd->SetComputeTexture(0, m_GBufferDepth.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), 0);
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+
+                    cmd->SetComputePipelineState(m_HiZDownsamplePipelineState.get());
+                    uint32_t hizSrcWidth = m_RenderWidth;
+                    uint32_t hizSrcHeight = m_RenderHeight;
+                    for (uint32_t mip = 1; mip < m_HiZMipLevels; ++mip)
+                    {
+                        const uint32_t hizDstWidth = std::max(1u, hizSrcWidth / 2);
+                        const uint32_t hizDstHeight = std::max(1u, hizSrcHeight / 2);
+
+                        hizConstants.SrcSize = { hizSrcWidth, hizSrcHeight };
+                        hizConstants.DstSize = { hizDstWidth, hizDstHeight };
+                        cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
+                        cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
+                        cmd->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), mip - 1);
+                        cmd->SetComputeUnorderedAccessTexture(1, m_HiZTexture.get(), mip);
+                        cmd->Dispatch((hizDstWidth + 7) / 8, (hizDstHeight + 7) / 8, 1);
+
+                        hizSrcWidth = hizDstWidth;
+                        hizSrcHeight = hizDstHeight;
+                    }
+
+                    // ここまで来たら全ミップに実データが入った。
+                    // 【Executeの中で立てること】パスの登録だけでは実行されたことにならない
+                    m_HiZValid = true;
+                },
+            });
+        };
+
+        // 深度プリパスぶんの判定。**プリパスより前**でなければ間接描画の引数が間に合わない。
+        // 読めるHi-Zは前フレームのものなので、保守的に膨らませる従来の経路のまま
+        addModelCullPass(
+            "ModelCull", 0u,
+            hiZFromDepthPrepass ? m_ModelCullPrepassCandidateCount : m_ModelCullCandidateCount,
+            /*initializeBuffers=*/true, /*useCurrentFrameHiZ=*/false, occlusionPrevFrameEnabled);
+
         if (depthPrepassRuns)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "DepthPrepass",
+                // 増幅シェーダーのHi-Zオクルージョンカリングが読む
+                // (G-Bufferパスと同じ理由で循環にはならない)
+                .Reads = { m_HiZTexture.get() },
                 // レンダーターゲットは持たない(深度だけを書く)
                 .DepthTarget = m_GBufferDepth.get(),
-                .Execute = [this, &gbufferViewport, &viewProj](RHI::IRHICommandList* cmd)
+                // 間接描画の引数(直前のModelCullパスが書いたもの)
+                .BufferReads = { m_ModelCullDrawArgsBuffer.get() },
+                .Execute = [this, &gbufferViewport, &viewProj, modelCullIndirectActive,
+                            occlusionCullingActive](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
                     // Reverse-Zのため遠平面側(NDC z=0.0)。G-Bufferパスの代わりにここでクリアする
                     cmd->ClearDepth(0.0f);
 
+                    // 増幅シェーダーのHi-Zオクルージョンカリング用(t8。GBufferMeshlet.hlsl)。
+                    //
+                    // 【プリパスでも張ること】このパスはG-Bufferとまったく同じ増幅シェーダーを
+                    // 使うので、同じ判定を同じ入力で行わなければならない。
+                    // **張り忘れてもエラーは出ない** ―― SRVのバインドはコマンドリスト側が
+                    // シャドウで保持しており、別のパスが8番へ張ったテクスチャがそのまま残る。
+                    // そうなるとプリパスとG-Bufferで間引くメッシュレットが食い違い、
+                    // プリパスだけが描いた面は「深度はあるのに色が無い」穴になる
+                    if (occlusionCullingActive)
+                    {
+                        cmd->SetTextureAllStages(8, m_HiZTexture.get());
+                    }
+
                     RHI::IRHIPipelineState* currentPipelineState = nullptr;
+
+                    // 1モデル1ドロー経路ぶんは、GPUが間引いた結果をそのまま発行する。
+                    // 【下のCPUループより先に出す】どちらが先でも深度テストが前後関係を
+                    // 決めるので絵は変わらないが、件数の多いこちらを先に流すほうが
+                    // 後続のCPUループがGPUの実行と重なる
+                    if (modelCullIndirectActive)
+                    {
+                        if (IssueModelCullIndirect(
+                                cmd, kModelCullRegionPrepassOpaque, m_DepthPrepassMeshletPipelineState.get(),
+                                currentPipelineState))
+                        {
+                            ++m_DrawCallsDepthPrepass;
+                        }
+                        if (IssueModelCullIndirect(
+                                cmd, kModelCullRegionPrepassOpaqueMirrored,
+                                m_DepthPrepassMeshletPipelineStateMirrored.get(), currentPipelineState))
+                        {
+                            ++m_DrawCallsDepthPrepass;
+                        }
+                        if (IssueModelCullIndirect(
+                                cmd, kModelCullRegionPrepassCutout,
+                                m_DepthPrepassMeshletCutoutPipelineState.get(), currentPipelineState))
+                        {
+                            ++m_DrawCallsDepthPrepass;
+                        }
+                        if (IssueModelCullIndirect(
+                                cmd, kModelCullRegionPrepassCutoutMirrored,
+                                m_DepthPrepassMeshletCutoutPipelineStateMirrored.get(), currentPipelineState))
+                        {
+                            ++m_DrawCallsDepthPrepass;
+                        }
+                    }
                     // G-Bufferと同じカメラなので、間引かれるモデルも同じになる
                     const FrustumPlanes prepassFrustum = ExtractFrustumPlanes(viewProj);
-                    for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
+                    // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                    // 【G-Bufferとまったく同じ組を使うこと】まとめ方が食い違うと、
+                    // 深度を書いた画素と色を書く画素がずれて穴が開く
+                    GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
+                    for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                     {
-                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+                        const size_t instanceIndex = unit.InstanceIndex;
+                        const Assets::ModelInstance& instance = *unit.Instance;
                         ++m_FrustumCullTested;
-                        if (!IsAABBVisible(prepassFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                        if (!IsAABBVisible(prepassFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                         {
                             ++m_FrustumCullCulled;
                             continue;
@@ -9499,9 +10686,19 @@ namespace Kurenai
 
                         // モデルLOD。フェード中は2段を重ねる。
                         // 【G-Bufferとまったく同じ組・同じDitherFadeで描くこと】片方だけが捨てた画素は
-                        // 「深度は書かれているのに色が書かれない」穴になる
+                        // 「深度は書かれているのに色が書かれない」穴になる。
+                        // バッチはフェード中でないものだけで構成されるので必ず1段(BuildInstanceBatches)
                         LODDraw lodDraws[2];
-                        const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                        uint32_t lodDrawCount;
+                        if (unit.IsBatch())
+                        {
+                            lodDraws[0] = { unit.Model, 1.0f };
+                            lodDrawCount = 1;
+                        }
+                        else
+                        {
+                            lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                        }
                         for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
                         {
                         const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
@@ -9516,6 +10713,13 @@ namespace Kurenai
                         // 持たないモデル(PLATEAUのタイルがそう)は1回で済む
                         if (ShouldUseModelMeshletPath(instance, lodModel))
                         {
+                            // 間接描画が有効なら、この経路のドローは上でまとめて発行済み。
+                            // **ここで描くと二重になる**
+                            if (modelCullIndirectActive)
+                            {
+                                continue;
+                            }
+
                             // 【フェード中は1ドロー経路のプリパスを外す】不透明用のPSOは
                             // ピクセルシェーダーを持たないためApplyLODDitherを通せず、
                             // 捨てるはずの画素まで深度を書いてG-Bufferとの食い違いで穴が開く。
@@ -9593,7 +10797,11 @@ namespace Kurenai
                             // G-Bufferでは描かれると、深度プリパスが埋めていない画素で早期Zが効かず
                             // 遅くなるだけで済むが、逆(プリパスで描いてG-Bufferで間引く)だと
                             // 描かれていないものの深度が残る
-                            if (!IsMeshVisibleWithStats(
+                            // 【バッチでは行わない】メッシュ単位のワールドAABBは
+                            // 「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。
+                            // G-Buffer側も同じ条件で外すので、両者の食い違いは起きない
+                            if (!unit.IsBatch()
+                                && !IsMeshVisibleWithStats(
                                     m_MeshCullingEnabled, prepassFrustum, instance, lodModel, mesh, m_MeshCullTested,
                                     m_MeshCullCulled))
                             {
@@ -9619,8 +10827,10 @@ namespace Kurenai
                                 currentPipelineState = wanted;
                             }
 
-                            const ObjectConstants objectConstants =
+                            ObjectConstants objectConstants =
                                 MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
+                            objectConstants.InstanceBase = unit.InstanceBase;
+                            objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9630,15 +10840,38 @@ namespace Kurenai
                                 cmd->SetTexture(0, mesh.BaseColorTexture);
                             }
 
+                            // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかなく、
+                            // ドローンショーが同じスロットを使う
+                            if (unit.IsBatch())
+                            {
+                                cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                            }
+
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                             ++m_DrawCallsDepthPrepass;
                         }
                         }   // モデルLODの段のループ
                     }
                 },
             });
+        }
+
+        // 深度プリパスが書いた深度からHi-Zを作り、**今フレームのHi-Z**でG-Bufferぶんを判定する。
+        // ここまで来ればプリパスは全不透明ジオメトリの深度を書き終えている ――
+        // 1フレーム遅れも保守的な膨張も要らず、判定はそのまま正確になる。
+        //
+        // 【プリパスの深度は G-Buffer が描くものの部分集合】LODのフェード中のモデルなど、
+        // プリパスから外れるものがある。遮蔽物が減る方向なので間引きが甘くなるだけで、
+        // 見えているものを消す側へは倒れない
+        if (hiZFromDepthPrepass)
+        {
+            addHiZPass();
+            addModelCullPass(
+                "ModelCullGBuffer", m_ModelCullPrepassCandidateCount,
+                m_ModelCullCandidateCount - m_ModelCullPrepassCandidateCount,
+                /*initializeBuffers=*/false, /*useCurrentFrameHiZ=*/true, occlusionCullingActive);
         }
 
         // --- ジオメトリパス: G-Bufferへ書き込む(常に指定した内部解像度) ---
@@ -9660,8 +10893,10 @@ namespace Kurenai
             .RenderTargets = { m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
                                m_GBufferEmissive.get(), m_GBufferVelocity.get(), m_GBufferBentNormal.get() },
             .DepthTarget = m_GBufferDepth.get(),
+            // 間接描画の引数を読む(ModelCullパスが書いたもの)
+            .BufferReads = { m_ModelCullDrawArgsBuffer.get() },
             .Execute = [this, &gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive,
-                        meshletCullStatsActive](RHI::IRHICommandList* cmd)
+                        meshletCullStatsActive, modelCullIndirectActive](RHI::IRHICommandList* cmd)
             {
                 // カリング統計のカウンタを0へ戻す。増幅シェーダーは加算しかしないので、
                 // 戻さないとフレームをまたいで積み上がる。
@@ -9761,11 +10996,41 @@ namespace Kurenai
                 // 統計も別のカウンタで数える
                 const FrustumPlanes frustum = ExtractFrustumPlanes(viewProj);
 
-                for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
+                // 1モデル1ドロー経路ぶんは、GPUが間引いた結果をそのまま発行する。
+                // 【下のCPUループより先に出す】どちらが先でも深度テストが前後関係を
+                // 決めるので絵は変わらないが、件数の多いこちらを先に流すほうが
+                // 後続のCPUループがGPUの実行と重なる。
+                // 選ぶPSOはbindPipelineState(mirrored, false, true)と同じもの
+                if (modelCullIndirectActive)
                 {
-                    const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+                    const bool meshletDebug = m_MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
+                    if (IssueModelCullIndirect(
+                            cmd, kModelCullRegionGBuffer,
+                            meshletDebug ? m_GBufferMeshletDebugPipelineState.get()
+                                         : m_GBufferMeshletPipelineState.get(),
+                            currentPipelineState))
+                    {
+                        ++m_DrawCallsGBuffer;
+                    }
+                    if (IssueModelCullIndirect(
+                            cmd, kModelCullRegionGBufferMirrored,
+                            meshletDebug ? m_GBufferMeshletDebugPipelineStateMirrored.get()
+                                         : m_GBufferMeshletPipelineStateMirrored.get(),
+                            currentPipelineState))
+                    {
+                        ++m_DrawCallsGBuffer;
+                    }
+                }
+
+                // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                // 【深度プリパスとまったく同じ組を使うこと】まとめ方が食い違うと穴が開く
+                GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
+                for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
+                {
+                    const size_t instanceIndex = unit.InstanceIndex;
+                    const Assets::ModelInstance& instance = *unit.Instance;
                     ++m_FrustumCullTested;
-                    if (!IsAABBVisible(frustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                    if (!IsAABBVisible(frustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                     {
                         ++m_FrustumCullCulled;
                         continue;
@@ -9773,9 +11038,19 @@ namespace Kurenai
 
                     // モデルLOD。フェード中は2段を重ねる。
                     // 【深度プリパスとまったく同じ組・同じDitherFadeであること】UpdateModelLODが
-                    // フレーム先頭で1回だけ決めた結果を両方が引くので、ここで距離を測り直さない
+                    // フレーム先頭で1回だけ決めた結果を両方が引くので、ここで距離を測り直さない。
+                    // バッチはフェード中でないものだけで構成されるので必ず1段(BuildInstanceBatches)
                     LODDraw lodDraws[2];
-                    const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                    uint32_t lodDrawCount;
+                    if (unit.IsBatch())
+                    {
+                        lodDraws[0] = { unit.Model, 1.0f };
+                        lodDrawCount = 1;
+                    }
+                    else
+                    {
+                        lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
+                    }
                     for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
                     {
                     const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
@@ -9790,6 +11065,13 @@ namespace Kurenai
                     // メッシュレット単位のふるい分けでしか除外できない
                     if (ShouldUseModelMeshletPath(instance, lodModel))
                     {
+                        // 間接描画が有効なら、この経路のドローはこのループの前に
+                        // まとめて発行済み。**ここで描くと二重になる**
+                        if (modelCullIndirectActive)
+                        {
+                            continue;
+                        }
+
                         bindPipelineState(instance.IsMirrored, false, true);
 
                         const ObjectConstants objectConstants = MakeModelObjectConstants(
@@ -9820,7 +11102,10 @@ namespace Kurenai
 
                         // メッシュ単位のカリング。深度プリパスとまったく同じ錐台・同じ判定
                         // (片方だけで間引くと深度とG-Bufferが食い違う)
-                        if (!IsMeshVisibleWithStats(
+                        // 【バッチでは行わない】理由と、深度プリパスと条件を揃えることの
+                        // 必要性はプリパス側の同じ箇所を参照
+                        if (!unit.IsBatch()
+                            && !IsMeshVisibleWithStats(
                                 m_MeshCullingEnabled, frustum, instance, lodModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                         {
                             continue;
@@ -9834,8 +11119,10 @@ namespace Kurenai
                         // ここで食い違うとプリパスの深度とG-Bufferの深度が一致しなくなる
                         bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
-                        const ObjectConstants objectConstants =
+                        ObjectConstants objectConstants =
                             MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
+                        objectConstants.InstanceBase = unit.InstanceBase;
+                        objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                         cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9853,9 +11140,16 @@ namespace Kurenai
                             cmd->SetTexture(7, m_WaterNormalMapTexture.get());
                         }
 
+                        // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかなく、
+                        // ドローンショーが同じスロットを使う
+                        if (unit.IsBatch())
+                        {
+                            cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                        }
+
                         cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                         cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                        cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                        cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                         ++m_DrawCallsGBuffer;
                     }
                     }   // モデルLODの段のループ
@@ -9875,6 +11169,31 @@ namespace Kurenai
                 }
             },
         });
+
+        // --- モデル単位GPUカリングのカウンタを受け皿へ写すパス ---
+        //
+        // 【ディスパッチと同じパスに置かない・すぐ後ろにも置かない】
+        // UNORDERED_ACCESS→COPY_SOURCE の遷移は直前のUAV書き込みを流し切る。
+        // ディスパッチの直後に置くと、その待ちがModelCullパスのGPU時間に乗って
+        // 「671スレッドの判定に1ms」というありえない値に見える。
+        // G-Bufferパスより後ろに置けば、待ちは描画と重なって消える
+        // (メッシュレット統計のコピーが重いG-Bufferパスの末尾にあって
+        //  表面化していないのと同じ構図)。
+        //
+        // **別パスにしてあるので、その待ち自体も独立した数値として見られる**
+        if (modelCullReady)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "ModelCullReadback",
+                .BufferReads = { m_ModelCullCounterBuffer.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    cmd->CopyBufferToReadback(
+                        m_ModelCullReadback[m_ModelCullRingIndex].get(), m_ModelCullCounterBuffer.get(),
+                        static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount);
+                },
+            });
+        }
 
         // --- 自前ソフトウェアラスタライザパス(46章): 三角形をコンピュートシェーダーで
         //     ラスタライズし、専用のバッファへ深度・法線・フラット陰影を書く ---
@@ -9921,6 +11240,16 @@ namespace Kurenai
         // 読むのは前フレームのHi-Zになる。判定側はそれを前提に、前フレームのビュー射影行列
         // (FrameConstants::PrevViewProj)で投影し、球を保守的に膨らませて吸収している
         // (GBufferMeshlet.hlslのIsMeshletOccluded参照)
+        // Hi-Zミップチェーンの構築。**このパスは条件付きで走らせる。**
+        // 1280x720ならコピー1回+ミップ段数-1回のディスパッチ(計11回)で、Intel UHD 620での
+        // 実測で1.19〜1.21ms、GPUフレーム時間30msの約4%を占める。消費者がいないフレームでは
+        // その4%をまるごと捨てることになるので、条件を丸ごと外してはいけない。
+        //
+        // 【登録する場所は2つある】深度プリパスが走るなら**その直後**に登録済みで
+        // (hiZFromDepthPrepass。今フレームの深度から作り、同じフレームのG-Bufferが読む)、
+        // ここへは来ない。プリパスが走らないフレームだけ、従来どおりG-Bufferの後で作る ――
+        // その場合に読めるのは次フレームで、増幅シェーダーは前フレームのビュー射影行列で
+        // 投影し、球を保守的に膨らませて視差を吸収する(GBufferMeshlet.hlslのIsMeshletOccluded)
         const bool hiZPassRuns = (m_DebugView == DebugView::HiZ) || occlusionCullingActive;
         if (!hiZPassRuns)
         {
@@ -9930,51 +11259,9 @@ namespace Kurenai
             // ONへ戻す操作で踏むので、"構築しなかった"を必ず記録しておく
             m_HiZValid = false;
         }
-        if (hiZPassRuns)
+        if (hiZPassRuns && !hiZFromDepthPrepass)
         {
-        graph.AddPass(Core::RenderGraphPassDesc{
-            .Name = "HiZ",
-            .Reads = { m_GBufferDepth.get() },
-            .Writes = { m_HiZTexture.get() },
-            .Execute = [this](RHI::IRHICommandList* cmd)
-            {
-                HiZConstants hizConstants{};
-                hizConstants.SrcSize = { m_RenderWidth, m_RenderHeight };
-                hizConstants.DstSize = { m_RenderWidth, m_RenderHeight };
-                cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
-
-                cmd->SetComputePipelineState(m_HiZCopyPipelineState.get());
-                cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
-                cmd->SetComputeTexture(0, m_GBufferDepth.get());
-                cmd->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), 0);
-                cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
-
-                cmd->SetComputePipelineState(m_HiZDownsamplePipelineState.get());
-                uint32_t hizSrcWidth = m_RenderWidth;
-                uint32_t hizSrcHeight = m_RenderHeight;
-                for (uint32_t mip = 1; mip < m_HiZMipLevels; ++mip)
-                {
-                    const uint32_t hizDstWidth = std::max(1u, hizSrcWidth / 2);
-                    const uint32_t hizDstHeight = std::max(1u, hizSrcHeight / 2);
-
-                    hizConstants.SrcSize = { hizSrcWidth, hizSrcHeight };
-                    hizConstants.DstSize = { hizDstWidth, hizDstHeight };
-                    cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
-                    cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_HiZTexture.get(), mip - 1);
-                    cmd->SetComputeUnorderedAccessTexture(1, m_HiZTexture.get(), mip);
-                    cmd->Dispatch((hizDstWidth + 7) / 8, (hizDstHeight + 7) / 8, 1);
-
-                    hizSrcWidth = hizDstWidth;
-                    hizSrcHeight = hizDstHeight;
-                }
-
-                // ここまで来たら全ミップに実データが入った。次フレームからオクルージョン判定に使える。
-                // 【Executeの中で立てること】パスの登録だけでは実行されたことにならない
-                // (RenderGraphは登録した全パスを実行するが、条件が変わればこのラムダは呼ばれない)
-                m_HiZValid = true;
-            },
-        });
+            addHiZPass();
         }
 
         // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
@@ -10685,19 +11972,26 @@ namespace Kurenai
                     // 画面には映っていないが水面には映るものが正しく残る
                     const FrustumPlanes reflectionFrustum = ExtractFrustumPlanes(reflectedViewProj);
 
-                    for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
+                    // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
+                    // 深度プリパス/G-Bufferと同じ「そのフレームに選ばれた段」の組を使う
+                    GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
+                    for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
                     {
-                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+                        const size_t instanceIndex = unit.InstanceIndex;
+                        const Assets::ModelInstance& instance = *unit.Instance;
                         ++m_FrustumCullTested;
-                        if (!IsAABBVisible(reflectionFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
+                        if (!IsAABBVisible(reflectionFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
                         {
                             ++m_FrustumCullCulled;
                             continue;
                         }
 
                         // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
-                        // ストリーミング中で未読み込みなら描かない
-                        const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
+                        // ストリーミング中で未読み込みなら描かない。
+                        // バッチはフェード中でないものだけで構成されるので、
+                        // unit.Model と GetCurrentLOD は同じ段を指す
+                        const Assets::Model* const currentModel =
+                            unit.Model ? unit.Model : GetCurrentLOD(instanceIndex);
                         if (!currentModel) { continue; }
                         for (const auto& mesh : currentModel->Meshes)
                         {
@@ -10708,20 +12002,34 @@ namespace Kurenai
                                 continue;
                             }
 
-                            // メッシュ単位のカリング。錐台は鏡映カメラのもの
-                            if (!IsMeshVisibleWithStats(
+                            // メッシュ単位のカリング。錐台は鏡映カメラのもの。
+                            // 【バッチでは行わない】理由はG-Bufferパスの同じ箇所を参照
+                            if (!unit.IsBatch()
+                                && !IsMeshVisibleWithStats(
                                     m_MeshCullingEnabled, reflectionFrustum, instance, *currentModel, mesh, m_MeshCullTested,
                                     m_MeshCullCulled))
                             {
                                 continue;
                             }
 
+                            // 鏡映で巻きが反転するため、ミラーリングの有無に対して逆のPSOを選ぶ。
+                            // バッチ内では IsMirrored が同一(グループ化のキー)なので代表で決めてよい
                             bindPipelineState(!instance.IsMirrored);
 
-                            const ObjectConstants objectConstants =
+                            ObjectConstants objectConstants =
                                 MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                            objectConstants.InstanceBase = unit.InstanceBase;
+                            objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                             cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
+
+                            // 【毎回張り直す】このパスはモデルのあとにドローンショーを描き、
+                            // そちらが同じ頂点シェーダー用SRV(t0)へ自分のバッファを張る。
+                            // 張り直さないと全インスタンスがドローンの座標を行列として読む
+                            if (unit.IsBatch())
+                            {
+                                cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
+                            }
 
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
@@ -10730,7 +12038,7 @@ namespace Kurenai
                             cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
                             cmd->SetTexture(3, mesh.EmissiveTexture);
                             cmd->SetTexture(5, mesh.OcclusionTexture);
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                            cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                         }
                     }
 
@@ -11834,6 +13142,44 @@ namespace Kurenai
             m_MeshletCullTested = 0;
             m_MeshletCullFrustumCulled = 0;
             m_MeshletCullOcclusionCulled = 0;
+        }
+
+        // --- モデル単位のGPUカリングの結果を読み戻す(Stage 5-3) ---
+        // リングの理由も「読めなかったフレームは足さない」もメッシュレット統計と同じ
+        if (modelCullReady)
+        {
+            // 今フレームのCPU側の結果を、GPUのコピーとまったく同じ位置へ積む。
+            // 読むときに同じ位置から取れば、比べるのは同じフレームのもの同士になる
+            m_ModelCullCpuFrustumHistory[m_ModelCullRingIndex] = m_ModelCullCpuFrustumCulled;
+            // 【比べる相手はG-Bufferぶんの候補数】GPU側の「判定」もそこだけを数えている
+            m_ModelCullCandidateHistory[m_ModelCullRingIndex] =
+                m_ModelCullCandidateCount - m_ModelCullPrepassCandidateCount;
+
+            const uint32_t oldest = (m_ModelCullRingIndex + 1) % kMeshletCullStatsRingSize;
+            uint32_t counters[kModelCullCounterCount] = {};
+            if (m_ModelCullReadback[oldest] &&
+                m_ModelCullReadback[oldest]->ReadbackData(counters, sizeof(counters)))
+            {
+                m_ModelCullTested = counters[0];
+                m_ModelCullFrustumCulled = counters[1];
+                m_ModelCullOcclusionCulled = counters[2];
+                m_ModelCullSurvived = counters[3];
+                for (uint32_t region = 0; region < kModelCullRegionCount; ++region)
+                {
+                    m_ModelCullRegionIssued[region] = counters[4 + region];
+                }
+                m_ModelCullComparedCpuFrustumCulled = m_ModelCullCpuFrustumHistory[oldest];
+                m_ModelCullComparedCandidateCount = m_ModelCullCandidateHistory[oldest];
+            }
+            m_ModelCullRingIndex = (m_ModelCullRingIndex + 1) % kMeshletCullStatsRingSize;
+        }
+        else
+        {
+            m_ModelCullTested = 0;
+            m_ModelCullFrustumCulled = 0;
+            m_ModelCullOcclusionCulled = 0;
+            m_ModelCullSurvived = 0;
+            std::fill(std::begin(m_ModelCullRegionIssued), std::end(m_ModelCullRegionIssued), 0u);
         }
 
         // ImGuiはPresentパスでバインドされたバックバッファにそのまま重ねて描画する。

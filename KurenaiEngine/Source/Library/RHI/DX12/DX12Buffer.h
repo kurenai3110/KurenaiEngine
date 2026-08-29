@@ -133,6 +133,8 @@ namespace Kurenai::RHI
         bool IsReadback() const { return m_Usage == BufferUsage::Readback; }
         // BufferUsage::Readbackの内容をCPUへ写す。詳細はIRHIBuffer::ReadbackDataのコメント
         bool ReadbackData(void* outData, uint32_t sizeInBytes) override;
+        // 直前のUpdateBufferが進めたリングスロットのGPU仮想アドレス。詳細はIRHIBuffer側のコメント
+        bool GetLastUpdateGpuAddress(uint32_t& outAddressLow, uint32_t& outAddressHigh) const override;
         // UAVディスクリプタを持つか(ClearUnorderedAccessBufferUintの事前判定に使う)
         bool HasUav() const { return m_SrvUavHeap != nullptr && m_UavIndex != kInvalid; }
         // ClearUnorderedAccessViewUint専用のraw(ByteAddress)UAVハンドルを返す。
