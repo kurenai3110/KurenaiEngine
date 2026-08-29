@@ -4613,6 +4613,13 @@ namespace Kurenai
                     --pending.FramesRemaining;
                     continue;
                 }
+                // 【常駐ミップの読み直しが終わるまで待つ】Loaderスレッドがこのモデルの
+                // IRHITexture*を掴んでいる間に解放すると解放済みを触る。
+                // フレーム数の遅延では足りない(1件が数十msかかることがある)
+                if (m_TextureStreaming.IsModelBusy(pending.Model.get()))
+                {
+                    continue;
+                }
                 ready.push_back(std::move(pending.Model));
             }
             m_StreamingPendingRelease.erase(
@@ -4673,12 +4680,14 @@ namespace Kurenai
                 m_Scene.ModelCache[item.Path] = std::move(item.Model);
                 for (Assets::ModelInstance& instance : m_Scene.Instances)
                 {
+                    bool referenced = false;
                     for (size_t level = 0; level < instance.ModelPaths.size(); ++level)
                     {
                         if (instance.ModelPaths[level] != item.Path)
                         {
                             continue;
                         }
+                        referenced = true;
                         if (level == 0)
                         {
                             instance.Model = shared;
@@ -4687,6 +4696,15 @@ namespace Kurenai
                         {
                             instance.LODModels[level - 1] = shared;
                         }
+                    }
+                    // 常駐ミップ制御の追跡表へ入れる。
+                    // 【インスタンスごとに1回だけ】メッシュのAABBはインスタンスのWorldで
+                    // ワールド空間へ移して持つので、参照はインスタンスの数だけ要る。
+                    // 逆に同じインスタンスで2回呼ぶと、同じ参照が二重に積まれる
+                    // (同じパスが複数の段に入っているシーンで起きうる)
+                    if (referenced)
+                    {
+                        m_TextureStreaming.AttachModel(*shared, instance.World, *m_Device);
                     }
                 }
             }
@@ -4815,6 +4833,9 @@ namespace Kurenai
                 {
                     continue;
                 }
+                // 【破棄より前に追跡表から外す】これ以降このモデルへ新しい読み直しは発注されない。
+                // 発注済みのものは破棄待ちの側(IsModelBusy)で待つ
+                m_TextureStreaming.DetachModel(*cached->second);
                 // 実体はここで消さず、GPUが読み終わるまで寝かせる
                 m_StreamingPendingRelease.push_back(
                     { std::move(cached->second), kStreamingReleaseDelayFrames });
@@ -4966,6 +4987,12 @@ namespace Kurenai
                     {
                         return true;
                     }
+                    // 常駐ミップの読み直しもこのスレッドが行う(専用スレッドは立てない)。
+                    // モデルの発注が無い間もこれだけで起きる必要がある
+                    if (m_TextureStreaming.HasPendingRequests())
+                    {
+                        return true;
+                    }
                     // 破棄だけが積まれている場合も起きる(読み込みが止まっている間に
                     // 破棄が溜まり続けると、遠ざかったモデルのVRAMが解放されない)
                     {
@@ -5003,6 +5030,14 @@ namespace Kurenai
             // 破棄は毎ループ引き取る。読み込みより先に行うことでVRAMのピークを下げる
             destroyStreamedModels();
 
+            // 常駐ミップの読み直し。**モデルの読み込みより先に、そして1件ごとに挟む**
+            // (下のループの中でも呼ぶ)。モデル1件の読み込みはPLATEAUのLOD2タイルで
+            // 秒の単位かかるため、まとめて後回しにすると街を流している間じゅう
+            // ミップの差し替えが止まり、近づいた面がぼけたまま残る。
+            // 1回あたりの件数を絞ってあるので、逆にモデルの読み込みが待たされることもない
+            constexpr size_t kTextureRequestsPerSlice = 4;
+            m_TextureStreaming.ProcessRequests(*m_Device, kTextureRequestsPerSlice);
+
             // --- ストリーミングの読み込み ---------------------------------------------------
             if (!streamingRequests.empty())
             {
@@ -5032,6 +5067,8 @@ namespace Kurenai
                         // 同じものを永久に再発注し続ける
                         m_StreamingLoaded.push_back({ request.Path, std::move(model), request.Generation });
                     }
+                    // 1件読むごとにミップの差し替えを挟む(このループの外のコメント参照)
+                    m_TextureStreaming.ProcessRequests(*m_Device, kTextureRequestsPerSlice);
                 }
                 // 【ここでcontinueしない】読み込みと再構築が同時に積まれることがある。
                 // 抜けると再構築要求だけが失われ、m_RaytracingRebuildInFlightが立ったまま戻らない
@@ -5463,6 +5500,17 @@ namespace Kurenai
         // テクスチャの常駐ミップ制御。既定はoffで、.ksceneが明示したシーンだけが有効になる
         // (未指定のシーンは従来どおり全ミップ常駐のままで、見え方もVRAMも変わらない)
         m_TextureStreaming.Configure(m_Scene.TextureStreamingEnabled, m_Scene.TextureStreamingBias);
+        // 【読み出しはLoaderスレッドに相乗りする】専用スレッドは立てない(TextureStreaming.h参照)。
+        // 要求が積まれたらLoaderスレッドを起こす必要があるので、その手段を渡しておく
+        m_TextureStreaming.SetRequestNotifier([this] {
+            // 【notifyの前に必ずm_LoadRequestMutexを取る】Loaderスレッドは
+            // このミューテックスを持ったまま述語を評価してからwaitへ入る。
+            // 取らずにnotifyすると、述語がfalseと出てからwaitへ入るまでの隙間に通知が落ちる。
+            // カメラが止まっていてモデルの発注が無いシーンでは、
+            // 次に起こす材料が他に無いのでミップの差し替えがそのまま止まる
+            { std::lock_guard<std::mutex> lock(m_LoadRequestMutex); }
+            m_LoadRequestCV.notify_one();
+        });
         m_TextureStreaming.Build(m_Scene, *m_Device);
 
         m_SelectedProbeIndex = m_ReflectionProbes.empty() ? -1 : 0;

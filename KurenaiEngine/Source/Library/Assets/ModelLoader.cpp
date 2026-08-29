@@ -179,6 +179,9 @@ namespace Kurenai::Assets
                     std::optional<RHI::TextureImage> Image;
                     std::string ErrorMessage;
                     uint64_t SizeInBytes = 0;
+                    // .ktexのヘッダ情報。常駐ミップ制御が使う(Model::TextureInfosのコメント参照)。
+                    // **ここで取るのは、後でRenderスレッドに読ませないため**
+                    RHI::PackedTextureInfo Info{};
                 };
 
                 std::mutex queueMutex;
@@ -210,6 +213,8 @@ namespace Kurenai::Assets
                             RHI::TextureImage image = RHI::TextureImage::LoadFromPackedTexture(texturePaths[index]);
                             item.SizeInBytes = image.GetSizeInBytes();
                             item.Image = std::move(image);
+                            // 読めなくてもテクスチャ自体は使える(常駐ミップ制御の対象から外れるだけ)
+                            RHI::TextureImage::TryReadPackedTextureInfo(texturePaths[index], item.Info);
                         }
                         catch (const std::exception& e)
                         {
@@ -252,6 +257,7 @@ namespace Kurenai::Assets
                             // テクスチャストリーミングが常駐ミップを変えるときに読み直す元。
                             // Texturesと同じ並びになるようここで一緒に積む
                             m_Model.TexturePaths.push_back(texturePaths[item.Index]);
+                            m_Model.TextureInfos.push_back(item.Info);
                         }
                         catch (const std::exception& e)
                         {
