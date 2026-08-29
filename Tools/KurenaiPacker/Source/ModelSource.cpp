@@ -1509,6 +1509,44 @@ namespace KurenaiPacker
                   << " / カメラ " << scene->mNumCameras
                   << " / アニメーション " << scene->mNumAnimations << "\n";
 
+        // --- 頂点属性の有無 ---
+        // 【法線を持たないメッシュがあると陰影が出ない】読み込み側は法線が無ければ
+        // (0,1,0) で埋めるため、垂直な壁も上向きとして陰影計算され、面の向きによる
+        // 明暗が一切出なくなる。落ち影は法線と無関係に出るので絵は「それらしく」見え、
+        // 気づきにくい。ここで元データの時点での有無を確かめられるようにしておく
+        unsigned int meshesWithNormals = 0;
+        unsigned int meshesWithUV = 0;
+        unsigned int meshesWithTangents = 0;
+        for (unsigned int i = 0; i < scene->mNumMeshes; ++i)
+        {
+            const aiMesh* mesh = scene->mMeshes[i];
+            if (mesh == nullptr)
+            {
+                continue;
+            }
+            if (mesh->HasNormals())
+            {
+                ++meshesWithNormals;
+            }
+            if (mesh->HasTextureCoords(0))
+            {
+                ++meshesWithUV;
+            }
+            if (mesh->HasTangentsAndBitangents())
+            {
+                ++meshesWithTangents;
+            }
+        }
+        std::cout << "  頂点属性を持つメッシュ数: 法線 " << meshesWithNormals
+                  << " / UV " << meshesWithUV
+                  << " / 接線 " << meshesWithTangents
+                  << "  (メッシュ総数 " << scene->mNumMeshes << ")\n";
+        if (scene->mNumMeshes > 0 && meshesWithNormals == 0)
+        {
+            std::cout << "  【警告】法線を持つメッシュが1つも無い。このまま焼くと全頂点の法線が\n"
+                         "          (0,1,0) になり、面の向きによる明暗(陰)が出なくなる\n";
+        }
+
         // --- メタデータ(FBXのUnitScaleFactor/UpAxis等) ---
         // 単位系と上方向軸はここにしか出ない。--scaleの値を決める一次情報になる
         if (scene->mMetaData && scene->mMetaData->mNumProperties > 0)
