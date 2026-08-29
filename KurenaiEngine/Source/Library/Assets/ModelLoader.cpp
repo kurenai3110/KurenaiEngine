@@ -907,7 +907,9 @@ namespace Kurenai::Assets
             outMesh.IndexCount = mesh.IndexCount;
             outMesh.VertexCount = mesh.VertexCount;
 
-            // メッシュ単位のAABBは.kmodel v10がMeshEntryに持っている(パック時に確定した値)
+            // メッシュ単位のAABBは.kmodel v10がMeshEntryに持っている(パック時に確定した値)。
+            // モデルのローカル空間のまま写し、ワールド空間への変換はSceneLoaderが行う
+            // (Modelは複数インスタンスから共有されうるため)
             for (int axis = 0; axis < 3; ++axis)
             {
                 outMesh.BoundsMin[axis] = mesh.BoundsMin[axis];

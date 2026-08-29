@@ -37,6 +37,31 @@ namespace KurenaiPacker
 {
     namespace
     {
+        // === 計測 ==============================================================
+        //
+        // どのフェーズで時間が溶けているかを推測しないための計装(OcclusionBaker.cppの
+        // BakeTimingsと同じ考え方)。解析は数十ms〜数秒で、now()の呼び出しは
+        // メッシュごと・フェーズごとにしか入れないため、計測自体の影響は無視できる
+        using PhaseClock = std::chrono::steady_clock;
+
+        double PhaseSecondsSince(const PhaseClock::time_point& start)
+        {
+            return std::chrono::duration<double>(PhaseClock::now() - start).count();
+        }
+
+        // スコープを抜けるときに累計へ足す。早期continueのあるブロックでも取りこぼさない
+        struct ScopedPhase
+        {
+            double& Target;
+            PhaseClock::time_point Start;
+
+            explicit ScopedPhase(double& target) : Target(target), Start(PhaseClock::now()) {}
+            ~ScopedPhase() { Target += PhaseSecondsSince(Start); }
+
+            ScopedPhase(const ScopedPhase&) = delete;
+            ScopedPhase& operator=(const ScopedPhase&) = delete;
+        };
+
         // glTFのテクスチャURI(aiMaterial::GetTextureが返すaiString)はRFC 3986のURIであり、
         // ファイル名中の空白などは"%20"のようにパーセントエンコードされている。assimpは
         // このデコードを行わず生のURI文字列をそのまま返すため、デコードせずファイルパスとして
@@ -753,8 +778,12 @@ namespace KurenaiPacker
         const std::wstring& filePath,
         float scale,
         const MaterialOverride& materialOverride,
-        const std::optional<std::array<float, 3>>& originOffset)
+        const std::optional<std::array<float, 3>>& originOffset,
+        ParseTimings* outTimings)
     {
+        // outTimingsがnullptrでも分岐を増やさずに済むよう、常にローカルへ積んで最後に転記する
+        ParseTimings timings;
+
         Assimp::Importer importer;
         // GenSmoothNormalsは対象アセットは全メッシュが法線を持つため実質ノーオップであり、
         // 万一法線を持たないメッシュがあった場合のみ後段のフォールバック(上向き固定法線)が使われる。
@@ -764,9 +793,11 @@ namespace KurenaiPacker
         // なることがある。JoinIdenticalVerticesは重複頂点を減らせるため付けておく
         // (自前の接線平均化は位置+法線をキーにしており重複頂点の有無に依存しないため、
         // 平均化の正しさ自体には影響しない)
+        const auto readStart = PhaseClock::now();
         const aiScene* scene = importer.ReadFile(
             WideToUtf8(filePath),
             aiProcess_Triangulate | aiProcess_ConvertToLeftHanded | aiProcess_JoinIdenticalVertices);
+        timings.ReadSeconds += PhaseSecondsSince(readStart);
 
         if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode)
         {
@@ -787,7 +818,9 @@ namespace KurenaiPacker
         }
 
         std::vector<std::pair<const aiMesh*, aiMatrix4x4>> meshNodes;
+        const auto collectStart = PhaseClock::now();
         CollectMeshNodes(scene, scene->mRootNode, aiMatrix4x4(), meshNodes);
+        timings.CollectSeconds += PhaseSecondsSince(collectStart);
 
         bool boundsInitialized = false;
 
@@ -831,6 +864,7 @@ namespace KurenaiPacker
             std::unordered_map<TangentAccumKey, aiVector3D, TangentAccumKeyHash> bitangentAccum;
             if (mesh->HasTextureCoords(0))
             {
+                const ScopedPhase timeTangent(timings.TangentSeconds);
                 tangentAccum.reserve(mesh->mNumVertices);
                 bitangentAccum.reserve(mesh->mNumVertices);
                 for (unsigned int f = 0; f < mesh->mNumFaces; ++f)
@@ -881,6 +915,7 @@ namespace KurenaiPacker
                 }
             }
 
+            const auto vertexLoopStart = PhaseClock::now();
             std::vector<Vertex> vertices;
             vertices.reserve(mesh->mNumVertices);
             for (unsigned int v = 0; v < mesh->mNumVertices; ++v)
@@ -977,30 +1012,40 @@ namespace KurenaiPacker
                     model.BoundsMax[2] = std::max(model.BoundsMax[2], position.z);
                 }
             }
+            timings.VertexSeconds += PhaseSecondsSince(vertexLoopStart);
 
-            std::vector<uint32_t> indices;
-            indices.reserve(static_cast<size_t>(mesh->mNumFaces) * 3);
+            const auto mergeStart = PhaseClock::now();
+            MergedMeshAccumulator& accum = meshesByMaterial[mesh->mMaterialIndex];
+            // 頂点を足す前に基準を取る(足した後だと自分の頂点数まで含んでしまう)
+            const uint32_t indexBase = static_cast<uint32_t>(accum.Vertices.size());
+            accum.Vertices.insert(accum.Vertices.end(), vertices.begin(), vertices.end());
+
+            // 【reserveで「ぴったりのサイズ」を要求してはいけない】ここは以前
+            //     accum.Indices.reserve(accum.Indices.size() + indices.size());
+            // としていたが、reserveは要求どおりの容量へ確保し直すためvectorの倍々成長が
+            // 無効になり、**メッシュを1つ足すたびに全体をコピーし直す**(O(N^2))。
+            // PLATEAUのタイルは入力メッシュが1382個あってマテリアルが1つしかないため、
+            // 1つのアキュムレータへ1382回追記することになり、これだけで解析時間の51%を
+            // 占めていた(12タイルの実測で786ms / 解析1530ms)。push_backに任せて
+            // 償却O(N)へ戻す。
+            //
+            // あわせて、面インデックスを一度std::vectorへ集めてから移し替えるのをやめ、
+            // 直接追記する(中間バッファの確保とコピーが1メッシュにつき1回消える)。
+            // 追記の順序も値も従来とまったく同じで、出力は1バイトも変わらない
             for (unsigned int f = 0; f < mesh->mNumFaces; ++f)
             {
                 const aiFace& face = mesh->mFaces[f];
                 for (unsigned int idx = 0; idx < face.mNumIndices; ++idx)
                 {
-                    indices.push_back(face.mIndices[idx]);
+                    accum.Indices.push_back(indexBase + face.mIndices[idx]);
                 }
             }
-
-            MergedMeshAccumulator& accum = meshesByMaterial[mesh->mMaterialIndex];
-            const uint32_t indexBase = static_cast<uint32_t>(accum.Vertices.size());
-            accum.Vertices.insert(accum.Vertices.end(), vertices.begin(), vertices.end());
-            accum.Indices.reserve(accum.Indices.size() + indices.size());
-            for (uint32_t idx : indices)
-            {
-                accum.Indices.push_back(indexBase + idx);
-            }
+            timings.MergeSeconds += PhaseSecondsSince(mergeStart);
         }
 
         // マテリアルインデックスの昇順(assimpのマテリアル配列順)に処理することで、
         // 生成される.kmodelのメッシュ順が実行のたびに変わらないようにする
+        const auto materialStart = PhaseClock::now();
         for (unsigned int materialIndex = 0; materialIndex < scene->mNumMaterials; ++materialIndex)
         {
             const auto accumIt = meshesByMaterial.find(materialIndex);
@@ -1307,7 +1352,12 @@ namespace KurenaiPacker
                 // アルファは上書きしない(不透明度はalphaMode/Tf由来の判定を尊重する)
             }
         }
+        timings.MaterialSeconds += PhaseSecondsSince(materialStart);
 
+        if (outTimings)
+        {
+            *outTimings = timings;
+        }
         return model;
     }
 
@@ -1389,19 +1439,41 @@ namespace KurenaiPacker
             }
         }
 
-        // ピークワーキングセット(MB)。巨大なFBXが「読めるが遅い」のか「メモリを食い潰す」のかを
-        // 切り分けるために出す。K32版を直接呼ぶことでpsapi.libへのリンクを増やさない
-        double GetPeakWorkingSetMB()
+    }
+
+    // ピークワーキングセット(MB)。巨大なFBXが「読めるが遅い」のか「メモリを食い潰す」のかを
+    // 切り分けるために出す。K32版を直接呼ぶことでpsapi.libへのリンクを増やさない
+    double GetPeakWorkingSetMB()
+    {
+        PROCESS_MEMORY_COUNTERS counters{};
+        counters.cb = sizeof(counters);
+        if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)))
         {
-            PROCESS_MEMORY_COUNTERS counters{};
-            counters.cb = sizeof(counters);
-            if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)))
-            {
-                Kurenai::Core::Logger::Warning("ModelSource", "プロセスのメモリ情報を取得できませんでした");
-                return 0.0;
-            }
-            return static_cast<double>(counters.PeakWorkingSetSize) / (1024.0 * 1024.0);
+            Kurenai::Core::Logger::Warning("ModelSource", "プロセスのメモリ情報を取得できませんでした");
+            return 0.0;
         }
+        return static_cast<double>(counters.PeakWorkingSetSize) / (1024.0 * 1024.0);
+    }
+
+    // プロセスが消費したCPU時間(カーネル+ユーザー、全スレッドの合計)。
+    //
+    // 【実時間で割った値を必ず見る】これがワーカー数を超えていたら、呼んでいるライブラリが
+    // 内部で自前に並列化しているという意味で、外側にスレッドプールを足してはいけない。
+    // 過去にDirectXTexのOpenMPと外側8ワーカーが掛かって8x28=224スレッドになり、
+    // 機械が固まったことがある。数を上限で抑える前に、まずこの比を測ること
+    double GetProcessCpuSeconds()
+    {
+        FILETIME creation{}, exit{}, kernel{}, user{};
+        if (!GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user))
+        {
+            Kurenai::Core::Logger::Warning("ModelSource", "プロセスのCPU時間を取得できませんでした");
+            return 0.0;
+        }
+        // FILETIMEは100ナノ秒単位。ULARGE_INTEGER経由で64bitへ組み直す
+        ULARGE_INTEGER k{}, u{};
+        k.LowPart = kernel.dwLowDateTime;   k.HighPart = kernel.dwHighDateTime;
+        u.LowPart = user.dwLowDateTime;     u.HighPart = user.dwHighDateTime;
+        return static_cast<double>(k.QuadPart + u.QuadPart) * 1e-7;
     }
 
     void InspectModel(const std::wstring& filePath, float scale)

@@ -172,6 +172,76 @@ namespace Kurenai::UI
             "【メッシュレット描画とも併用できる】プリパスにもG-Bufferとまったく同じ"
             "増幅/メッシュシェーダーを使うPSOがあるため、変換は同一のコードになり深度が一致する");
 
+        CheckboxEx(
+            "メッシュ単位のフラスタムカリング###MeshCulling", &m_Engine.m_MeshCullingEnabled,
+            Defaults::MeshCullingEnabled,
+            "モデル単位のカリングを通ったあとに、メッシュのワールドAABBでもう一段間引く。"
+            "1モデルに数千メッシュを持つアセット(Emerald Square、Bistro、PLATEAUのLOD2タイル)では"
+            "モデル単位が1つも間引けないため、ここが唯一の削減手段になる"
+            "(bindlessもメッシュシェーダーも使えないDX11では特に)。\n\n"
+            "【絵は変わらない】視錐台の外にあるメッシュだけを落とす保守的な判定なので、"
+            "ON/OFFで画像は一致する。\n\n"
+            "【切れるようにしてあるのは対照実験のため】差分ゼロが「変わらないのが正しい」なのか"
+            "「そもそも実行されていない」なのかは絵からは区別できない。OFFにすると判定を1回も"
+            "呼ばないので、プロファイラパネルのメッシュ単位が「判定なし」になる。\n\n"
+            "モデル単位のカリングは常に有効で、こちらでは切れない");
+
+        EndParamGroup();
+
+        // --- モデルLOD(.ksceneの[Model]LODPath / LODDistance) ---
+        ImGui::Separator();
+
+        // 段ごとの常駐インスタンス数を数える。【0段しか出ないならLODが1件も設定されていない】
+        uint32_t levelCounts[Assets::kMaxModelLODCount] = {};
+        uint32_t lodCapableCount = 0;
+        for (size_t i = 0; i < m_Engine.m_Scene.Instances.size(); ++i)
+        {
+            if (m_Engine.m_Scene.Instances[i].LODModels.empty())
+            {
+                continue;
+            }
+            ++lodCapableCount;
+            if (i < m_Engine.m_InstanceLODStates.size())
+            {
+                const uint32_t level = m_Engine.m_InstanceLODStates[i].CurrentLOD;
+                if (level < Assets::kMaxModelLODCount)
+                {
+                    ++levelCounts[level];
+                }
+            }
+        }
+
+        if (lodCapableCount == 0)
+        {
+            ImGui::TextDisabled("モデルLOD: このシーンには LODPath が指定されていない");
+        }
+        else
+        {
+            ImGui::Text("モデルLOD: 対象 %u インスタンス / フェード中 %u", lodCapableCount,
+                        m_Engine.m_LODFadingCount);
+            for (uint32_t level = 0; level < Assets::kMaxModelLODCount; ++level)
+            {
+                if (levelCounts[level] > 0)
+                {
+                    ImGui::Text("    LOD%u: %u", level, levelCounts[level]);
+                }
+            }
+        }
+
+        BeginParamGroup();
+        SliderFloatEx(
+            "LODフェード時間###LODFadeDuration", &m_Engine.m_LODFadeDuration, 0.0f, 5.0f, 0.25f, "%.2f 秒", 0,
+            "モデルLODの段を切り替えるとき、2段をクロスディザで重ねる時間。\n\n"
+            "0にすると重ねずに即座に入れ替わる(ポップする)。\n\n"
+            "【検証に使う】既定の0.25秒はフェードの見え方から決めた値ではない暫定値。"
+            "大きくするとフェードの途中で止めて観察できるので、"
+            "2段が同じ画素を取り合っていないか(Zファイティング)、"
+            "どちらも描かない画素が無いか(穴)をここで確かめる。");
+        SliderFloatEx(
+            "LODヒステリシス###LODHysteresis", &m_Engine.m_LODHysteresis, 0.0f, 0.5f, 0.05f, "%.3f", 0,
+            "切り替え距離の不感帯の幅(割合)。0.05なら切替点の±5%。\n\n"
+            "0にすると切替点のちょうど上でカメラが揺れたときに段が毎フレーム往復し、"
+            "画面がちらつく。A/B比較のたびに絵が変わって計測も濁る。");
         EndParamGroup();
     }
 
@@ -315,7 +385,9 @@ namespace Kurenai::UI
         size_t meshCount = 0;
         for (const auto& instance : m_Engine.m_Scene.Instances)
         {
-            for (const auto& mesh : instance.Model.Meshes)
+            // ストリーミング中は未読み込みのインスタンスがある
+            if (!instance.Model) { continue; }
+            for (const auto& mesh : instance.Model->Meshes)
             {
                 ++meshCount;
                 meshletCount += mesh.MeshletCount;
@@ -447,7 +519,9 @@ namespace Kurenai::UI
         size_t triangleCount = 0;
         for (const auto& instance : m_Engine.m_Scene.Instances)
         {
-            for (const auto& mesh : instance.Model.Meshes)
+            // ストリーミング中は未読み込みのインスタンスがある
+            if (!instance.Model) { continue; }
+            for (const auto& mesh : instance.Model->Meshes)
             {
                 if (mesh.IsTransparent || mesh.IndexCount < 3)
                 {
@@ -535,7 +609,7 @@ namespace Kurenai::UI
         if (m_Engine.m_AOTechnique == AOTechnique::SSAO)
         {
             SliderFloatSceneDependent(
-                "SSAO 半径###SSAORadius", &m_Engine.m_SSAORadius, 0.01f, 5.0f, recalcRequested, "%.3f",
+                "SSAO 半径###SSAORadius", &m_Engine.m_SSAORadius, 0.01f, 5.0f, recalcRequested, "%.3f", 0,
                 "遮蔽を探すサンプリング半径(ワールド単位)。シーン読み込み時にシーンの対角長から"
                 "自動設定されるため、既定値ではなく「シーンから再計算」で戻す");
             SliderFloatEx(
@@ -551,7 +625,7 @@ namespace Kurenai::UI
         else if (m_Engine.m_AOTechnique == AOTechnique::Raytraced)
         {
             SliderFloatSceneDependent(
-                "RT 最大距離###RTAOMaxDistance", &m_Engine.m_RTAOMaxDistance, 0.05f, 10.0f, recalcRequested, "%.3f",
+                "RT 最大距離###RTAOMaxDistance", &m_Engine.m_RTAOMaxDistance, 0.05f, 10.0f, recalcRequested, "%.3f", 0,
                 "遮蔽とバウンス光を探すレイの最大距離(ワールド単位)。シーン読み込み時に"
                 "シーンの対角長から自動設定される。これより遠くにある面は遮蔽物にならず、"
                 "間接光の光源にもならない");
@@ -574,11 +648,11 @@ namespace Kurenai::UI
         else
         {
             SliderFloatSceneDependent(
-                "SSIL 半径###SSILRadius", &m_Engine.m_SSILRadius, 0.01f, 5.0f, recalcRequested, "%.3f",
+                "SSIL 半径###SSILRadius", &m_Engine.m_SSILRadius, 0.01f, 5.0f, recalcRequested, "%.3f", 0,
                 "間接光と遮蔽を探すサンプリング半径(ワールド単位)。シーン読み込み時に"
                 "シーンの対角長から自動設定される");
             SliderFloatSceneDependent(
-                "SSIL 厚み###SSILThickness", &m_Engine.m_SSILThickness, 0.01f, 2.0f, recalcRequested, "%.3f",
+                "SSIL 厚み###SSILThickness", &m_Engine.m_SSILThickness, 0.01f, 2.0f, recalcRequested, "%.3f", 0,
                 "深度バッファ上の1点が持つと仮定する奥行きの厚み。小さすぎると遮蔽が抜け、"
                 "大きすぎると本来遮蔽していない面まで遮蔽扱いになる");
             SliderFloatEx(
@@ -1003,10 +1077,10 @@ namespace Kurenai::UI
         if (m_Engine.m_ReflectionMode == ReflectionMode::ScreenSpace)
         {
             SliderFloatSceneDependent(
-                "SSR 最大距離###SSRMaxDistance", &m_Engine.m_SSRMaxDistance, 0.1f, 100.0f, recalcRequested, "%.3f",
+                "SSR 最大距離###SSRMaxDistance", &m_Engine.m_SSRMaxDistance, 0.1f, 100.0f, recalcRequested, "%.3f", 0,
                 "反射レイを追跡する最大距離(ワールド単位)。シーン読み込み時に対角長から自動設定される");
             SliderFloatSceneDependent(
-                "SSR 厚み###SSRThickness", &m_Engine.m_SSRThickness, 0.01f, 2.0f, recalcRequested, "%.3f",
+                "SSR 厚み###SSRThickness", &m_Engine.m_SSRThickness, 0.01f, 2.0f, recalcRequested, "%.3f", 0,
                 "深度バッファ上の1点が持つと仮定する奥行きの厚み。ヒット判定の許容量になる");
             SliderFloatEx(
                 "SSR 粗さのしきい値###SSRRoughnessCutoff", &m_Engine.m_SSRRoughnessCutoff, 0.05f, 1.0f,
@@ -1017,7 +1091,7 @@ namespace Kurenai::UI
         {
             SliderFloatSceneDependent(
                 "RT 最大距離###RTReflectionMaxDistance", &m_Engine.m_RTReflectionMaxDistance, 1.0f, 500.0f,
-                recalcRequested, "%.3f",
+                recalcRequested, "%.3f", 0,
                 "反射レイを追跡する最大距離(ワールド単位)。シーン読み込み時に対角長から自動設定される。"
                 "短くすると速くなるが、本来映るはずの遠景が空に置き換わる");
             SliderFloatEx(

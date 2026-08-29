@@ -10,6 +10,7 @@
 
 #include "Core/Logger.h"
 #include "Core/StringUtil.h"
+#include "EngineDefaults.h"
 #include "KurenaiEngine3D.h"
 #include "UI/UIWidgets.h"
 
@@ -80,6 +81,55 @@ namespace Kurenai::UI
             "飛び回りながら空・水面・露出を詰めるときに使う。"
             "効くのは同じシーンの読み直しのときだけで、下の一覧で別のシーンへ切り替えたときは"
             "オンでも新しいシーンのカメラが適用される");
+        EndParamGroup();
+
+        // --- カメラの移動速度 ---
+        //
+        // 【なぜシーンパネルに置くか】速度はシーンの規模そのものから決まる値で、
+        // 描画の設定(Rendering / Post Processing)ではない。.ksceneの[Scene]CameraSpeedが
+        // 出所で、書いていなければシーン対角から自動決定される
+        ImGui::SeparatorText("カメラの移動速度");
+
+        // 【説明文の数値は定数から組み立てる】文中へ直書きすると、EngineDefaults.hの値を
+        // 変えたときにここだけが嘘になる(同じ数値を2箇所に書くと必ずずれる、というのが
+        // EngineDefaults.h冒頭の方針)。文言は変わらないので一度だけ組めばよい
+        static const std::string cameraSpeedHelp = []
+        {
+            // 【日本語の文へ書式指定子を混ぜない】このファイルはBOM無しUTF-8で、コンパイラは
+            // 実行時文字セットのコードページとして読む。日本語のバイト列と%指定子が隣接すると
+            // 書式の解析がずれ、C4474(引数が多すぎる)になる。数値だけ先に文字列へ直して連結する
+            const auto format = [](float value)
+            {
+                char buffer[32];
+                // %gは末尾の0を落とすので、4.0は"4"、344.6は"344.6"になる
+                std::snprintf(buffer, sizeof(buffer), "%g", static_cast<double>(value));
+                return std::string(buffer);
+            };
+            return
+                "WASD/E/Qでカメラを動かす速さ。Shiftを押している間は" +
+                format(Defaults::CameraSpeedShiftMultiplier) +
+                "倍になる。.ksceneの[Scene]CameraSpeedが指定されていればその値、"
+                "無ければシーンAABBの対角から自動で決まる(基準はEmeraldSquareの対角" +
+                format(Defaults::CameraSpeedReferenceDiagonal) + "mで" + format(Defaults::CameraSpeed) +
+                " m/s、それより小さいシーンは" + format(Defaults::CameraSpeedMin) +
+                " m/s据え置き)。既定値ではなく「シーンから再計算」で戻す";
+        }();
+
+        BeginParamGroup();
+        bool recalcRequested = false;
+        SliderFloatSceneDependent(
+            // スライダーの値域は.ksceneの[Scene]CameraSpeedが取れる範囲(0.01〜10000)に合わせる。
+            // 下限を0.1にしてあるのは、対数目盛りの左端に実用外の桁を並べても意味が無いため
+            "移動速度###CameraSpeed", &m_Engine.m_CameraSpeed, 0.1f, 10000.0f, recalcRequested, "%.2f m/s",
+            // 【対数目盛りにする】自動決定でも5〜653 m/sと3桁またぐため、線形だと
+            // 小さい側がスライダーの左端に潰れて動かせない
+            ImGuiSliderFlags_Logarithmic,
+            cameraSpeedHelp.c_str());
+        ImGui::Text("Shift時: %.2f m/s", m_Engine.m_CameraSpeed * Defaults::CameraSpeedShiftMultiplier);
+        if (recalcRequested)
+        {
+            m_Engine.ResetSceneDependentParams();
+        }
         EndParamGroup();
 
         // --- 現在のカメラを[Camera]の書式で書き出す ---

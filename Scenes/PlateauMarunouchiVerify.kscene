@@ -1,0 +1,63 @@
+# KurenaiEngine シーンファイル - 丸の内LOD2の検証用(霞と雲を切った固定カメラ)
+#
+# PlateauMarunouchi.kscene と同じ6モデルを、検証に必要な条件だけ変えて並べたもの。
+# 見た目のためのシーンではないので、通常の確認には PlateauMarunouchi.kscene を使うこと。
+#
+# 【何を確かめるためのものか】
+#   1. 地形(dem)が実際に描画されているか
+#      本番シーンでは大気遠近の霞で地表が白く飛び、建物が宙に浮いて見える。
+#      霞を切らないと「地面が無い」のか「霞で見えない」のかを区別できない。
+#   2. メッシュ単位フラスタムカリングの ON/OFF で絵が変わらないこと
+#      間引きが50%前後になるこのシーンは、Emerald Squareの真下向き(0.3%)より
+#      強い裏付けになる。雲が動くと画素差がノイズに埋もれるので雲も消す。
+#
+# 【カメラを固定する】キー入力で動かすとフレームごとに間引き数も画素も変わり、
+# A/B比較が成立しない。位置・向きはここで決め打ちにして一切動かさない。
+#
+# 出典・ライセンス・変換コマンドは PlateauMarunouchi.kscene を参照。
+
+[Scene]
+Name = PLATEAU 丸の内 検証用 (霞と雲なし)
+ShadowDistance = 500
+CameraSpeed = 30
+
+# 【霞を切る】これが目的そのもの。地表が白く飛ぶのを止める
+[Fog]
+Enabled = false
+
+# 【雲を消す】雲はフレームごとに流れるため、設定を変えずに撮った2枚でも空の画素が変わる。
+# Emerald Squareの既定視点では、それだけで画素の6.7%が動いた。
+# Coverage=0 にすればノイズ下限が0になり、ON/OFFの差だけを読める
+[Cloud]
+Coverage = 0.0
+
+[Model]
+Path = Plateau/BldgLod2/53394600.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53394601.kmodel
+
+[Model]
+Path = Plateau/Brid/53394600.kmodel
+
+[Model]
+Path = Plateau/Brid/53394601.kmodel
+
+[Model]
+Path = Plateau/Dem/533946.kmodel
+
+[Model]
+Path = Plateau/Tran/533946.kmodel
+
+# 【地形が視野に入る位置を選ぶ】dem(2次メッシュ533946)のAABBは Z -864〜8385 で、
+# 建物(Z -1000〜250)の南端は地形の範囲外にある。北(+Z)を向けば地形の上を見渡せる。
+# Yaw 0 = +Z 方向(ComputeInitialCameraの分岐と同じ規約)。
+# 高さ250m・俯角20度なら、手前の建物群と奥の地表の両方が1枚に入る。
+[Camera]
+Position = 1700.0, 250.0, -700.0
+Yaw = 0.0
+Pitch = -20.0
+
+[Sun]
+TimeOfDay = 10.0
+Shadow = true

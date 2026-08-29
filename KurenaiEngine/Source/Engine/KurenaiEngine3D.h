@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <unordered_set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,6 +39,7 @@ namespace Kurenai::UI
     class SystemPanel;
     class ProfilerPanel;
     class ReflectionProbePanel;
+    class StreamingPanel;
 }
 
 namespace Kurenai
@@ -171,6 +173,7 @@ namespace Kurenai
         friend class UI::SystemPanel;
         friend class UI::ProfilerPanel;
         friend class UI::ReflectionProbePanel;
+        friend class UI::StreamingPanel;
 
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
         // スナップショット。m_TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
@@ -236,7 +239,9 @@ namespace Kurenai
         bool ShouldUseMeshletPath(const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const;
         // このインスタンスを「1回のDispatchMeshでモデル全体」の経路で描けるか。
         // 描けない場合は従来どおりメッシュ単位のループで描く
-        bool ShouldUseModelMeshletPath(const Assets::ModelInstance& instance) const;
+        // modelは「このパスが描く段」。モデルLODが入ったのでinstance.Model(最も詳細な段)とは
+        // 限らず、シャドウは最も粗い段、G-Buffer/プリパスは選ばれた段を渡す
+        bool ShouldUseModelMeshletPath(const Assets::ModelInstance& instance, const Assets::Model& model) const;
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
         // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
         RHI::IRHITexture* GetActiveAOTexture() const;
@@ -552,6 +557,9 @@ namespace Kurenai
         // プリパスを走らせるか。オーバードローが小さいシーンでは、増えるジオメトリ1周ぶんが
         // 省けるピクセルシェーダーより高くつくため切れるようにしてある
         bool m_DepthPrepassEnabled = Defaults::DepthPrepassEnabled;
+        // メッシュ単位のフラスタムカリングを行うか(対照実験用。EngineDefaults.h参照)。
+        // OFFのあいだは判定を1回も呼ばないので、統計は「判定なし」になる
+        bool m_MeshCullingEnabled = Defaults::MeshCullingEnabled;
 
         // --- メッシュシェーダー版のジオメトリパス(Shaders/3D/GBufferMeshlet.hlsl) ---------
         //
@@ -2560,6 +2568,18 @@ namespace Kurenai
         // 書き込み手を1スレッドに保っている
         Core::Camera m_Camera;
 
+        // WASD/E/Qの移動速度[m/s]。Shiftを押している間はDefaults::CameraSpeedShiftMultiplier倍。
+        //
+        // 【スレッド】書き手はRenderスレッド(ScenePanelのスライダとResetSceneDependentParams)、
+        // 読み手はUpdateスレッド(UpdateMovement)。m_TargetFPSと同じく、単一のfloatを跨いで
+        // 読み書きするだけなので同期は置かない ―― 途中の値が1フレーム見えても
+        // 「その1フレームだけ移動量が古い速度で計算される」以上のことは起きない。
+        // m_Camera本体はUpdateスレッド専有のまま(この値はそこへ入力されるだけ)。
+        //
+        // 値はシーン対角から決まるためResetSceneDependentParams()が上書きする。
+        // ここの初期化子は最初のシーンを読むまでの値でしかない
+        float m_CameraSpeed = Defaults::CameraSpeed;
+
         // --- シーン読み込みのハンドオフ -------------------------------------------------------
 
         std::thread m_LoaderThread;
@@ -2570,6 +2590,22 @@ namespace Kurenai
         // Renderスレッド専有。Loaderスレッドへ発注してから完成品を受け取るまでtrue。
         // 多重発注を防ぐために見る
         bool m_SceneLoadInFlight = false;
+        // Renderスレッド専有。いまLoaderスレッドが読んでいるシーンの番号(m_SceneDisplayNamesの添字)。
+        // 進捗表示にシーン名を出すために持つ ―― m_CurrentSceneIndexは読み込みが完了するまで
+        // 旧シーンを指したままで、m_PendingSceneRequestは発注した時点で-1へ戻る
+        size_t m_SceneLoadingIndex = 0;
+
+        // シーン読み込みの進捗(読み終えたモデル数 / [Model]の総数)。
+        //
+        // 【なぜ要るか】読み込み中は旧シーンを先に手放すため画面にはUIとスカイボックスしか出ない
+        // (UpdateSceneStreamingのコメント参照)。767モデルのシーンでは数十秒かかり、
+        // m_SceneLoadInFlightのboolだけでは「進んでいる」と「固まった」を区別できない。
+        //
+        // 【atomicにする理由】書き手はLoaderスレッド(Assets::LoadSceneのコールバック)、
+        // 読み手はRenderスレッド(UIManagerの進捗ウィンドウ)で、フレーム境界の受け渡しに
+        // 乗らない唯一の値のため。表示だけに使うのでmemory_order_relaxedで足りる
+        std::atomic<uint32_t> m_SceneLoadProgressLoaded{ 0 };
+        std::atomic<uint32_t> m_SceneLoadProgressTotal{ 0 };
 
         // --- .ksceneのホットリロード -----------------------------------------------------
         //
@@ -2712,6 +2748,169 @@ namespace Kurenai
         // 一致してしまうため、間引いた数が0でないことを数値で確かめられるようにしておく
         uint32_t m_FrustumCullTested = 0;
         uint32_t m_FrustumCullCulled = 0;
+
+        // --- モデルLOD(.ksceneの[Model]LODPath / LODDistance) --------------------------------
+        //
+        // インスタンスごとの「いま使っている段」と、切り替え中のクロスディザの進み具合。
+        // m_Scene.Instancesと同じ添字で並び、ApplyLoadedSceneで作り直す。
+        //
+        // 【Assets::Sceneではなくエンジン側に持つ理由】これは読み込んだデータではなく
+        // カメラ位置から毎フレーム決まる実行時の状態で、Loaderスレッドが作るSceneに
+        // 混ぜると「シーンの内容」と「今の見え方」の境界が曖昧になる
+        struct InstanceLODState
+        {
+            uint32_t CurrentLOD = 0;   // 0 = ModelInstance::Model、1以上は LODModels[n-1]
+            uint32_t PreviousLOD = 0;  // フェード中の切り替え元
+            float FadeT = 1.0f;        // 1.0でフェード完了。0→1へ進み、その間だけ2段を重ねる
+        };
+        std::vector<InstanceLODState> m_InstanceLODStates;
+        // 段の切り替えにかける秒数。0にするとポップする(1.1km四方のタイルが丸ごと入れ替わるため
+        // 目立つ)。根拠は docs/ImplementationDetail.md
+        float m_LODFadeDuration = 0.25f;
+        // 切り替え距離のヒステリシス幅。切替点の±5%を不感帯にして、境界での往復を防ぐ
+        float m_LODHysteresis = 0.05f;
+        // 統計。1フレームあたりの段の切り替え回数と、そのフレームでフェード中のインスタンス数。
+        // 【0なら一度も切り替わっていない】LODが効いているかはここでしか分からない
+        uint32_t m_LODSwitchCount = 0;
+        uint32_t m_LODFadingCount = 0;
+        uint64_t m_FrameStatsLODSwitchSum = 0;
+        // 【瞬間値ではなく積算する】m_LODFadingCountをそのままログへ出していたときは、
+        // 集計期間(1秒)の最終フレームの値だけを見ていた。既定のフェードは0.25秒なので
+        // 構造的にほぼ必ず取りこぼし、「フェードが一度も実行されていない」のか
+        // 「実行されたが見ていないだけ」なのかを区別できなかった(実際に取りこぼした)。
+        // 期間中の「フェード中インスタンス×フレーム」を足し込めば、0.25秒のフェードでも
+        // 14フレームぶんとして必ず現れる
+        uint64_t m_FrameStatsLODFadingSum = 0;
+        // カメラ位置から各インスタンスの段を決め、フェードを進める。
+        // レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと ―― パスごとに測り直すと
+        // 深度プリパスとG-Bufferが違う段を選び、画面に穴が開く
+        void UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds);
+        // instanceIndex番目のインスタンスについて、このフレームで描く段を返す。
+        // フェード中は2件(切り替え先と元)、そうでなければ1件。DitherFadeも一緒に返す
+        struct LODDraw
+        {
+            const Assets::Model* Model = nullptr;
+            float DitherFade = 1.0f;
+        };
+        // 戻り値の件数。fadingなら2、それ以外は1
+        uint32_t GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const;
+        // シャドウ・反射プローブ・DDGI用。常に最も粗い段を返す(影と間接光はテクスチャを読まない)
+        const Assets::Model* GetCoarsestLOD(const Assets::ModelInstance& instance) const;
+
+        // --- モデルのストリーミング(.ksceneの[Scene]StreamingDistance) ----------------------
+        //
+        // カメラ位置から「読むべきなのにまだ無いモデル」を選んでLoaderスレッドへ発注し、
+        // 出来上がったものを受け取ってインスタンスへ差し込む。
+        // レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと。
+        //
+        // 【まず読み込みだけ】破棄はまだ行わない。絵が出ることを確かめてから、
+        // kFrameCountフレーム遅延させる解放キューを通して足す
+        void UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition);
+        // 常駐が変わったことを記録する。実際の作り直しは静かになってから
+        void RequestRaytracingRebuild();
+        // 出来上がったRaytracingSceneの差し替えと、静かになった後の発注。
+        // UpdateModelStreamingの後にフレーム1回だけ呼ぶ
+        void UpdateRaytracingRebuild();
+
+        // Render → Loader の読み込み発注。m_LoadRequestMutexで保護し、
+        // シーン切り替えと同じ条件変数で起こす(専用スレッドを増やさない)
+        struct StreamingRequest
+        {
+            std::wstring Path;
+            uint64_t Generation = 0;
+        };
+        std::vector<StreamingRequest> m_StreamingRequests;
+
+        // Loader → Render の完成品
+        std::mutex m_StreamingLoadedMutex;
+        struct StreamingLoaded
+        {
+            std::wstring Path;
+            std::shared_ptr<Assets::Model> Model;
+            uint64_t Generation = 0;
+        };
+        std::vector<StreamingLoaded> m_StreamingLoaded;
+
+        // 発注済みで、まだ受け取っていないパス(同じものを何度も発注しないため)
+        std::unordered_set<std::wstring> m_StreamingInFlight;
+
+        // 【シーンに紐づく世代番号】シーンを切り替えると進める。古い世代の完成品は捨てる。
+        // これが無いと、切り替え前のシーンのモデルが新しいシーンのインスタンスへ差し込まれる
+        uint64_t m_StreamingGeneration = 0;
+
+        // ストリーミングで読むモデルが使う1x1フォールバックの共有プール。
+        //
+        // 【Assets::Scene::SharedTexturesを使ってはいけない】あちらはシーンが所有しており、
+        // シーン切り替えのときRenderスレッドがstd::moveでRetiredAssetsへ移す。
+        // Loaderスレッドが読み込み中にそれが起きるとプールのアドレスが変わり、解放済みを指す。
+        // こちらはLoaderスレッドだけが作り・使い・捨てるので、その競合が起きない
+        std::unique_ptr<Assets::SharedTexturePool> m_StreamingTexturePool;
+
+        // 破棄を寝かせるフレーム数。
+        //
+        // 【なぜ即座に捨ててはいけないか】CPUはGPUの完了を待たずに次フレームの記録を始めるため
+        // (DX12は kFrameCount = 2 フレーム先行する)、いま画面から外れたモデルの頂点バッファを
+        // その場で解放すると、GPUがまだ読んでいる最中のリソースを消すことになる。
+        // シーン切り替えの経路は WaitForGPUIdle でこれを避けているが(RetiredAssetsのコメント)、
+        // ストリーミングの破棄は毎フレーム起こりうるので待つわけにいかない。
+        // 代わりにこの数だけ寝かせてから解放する。DX12の先行分2に1フレームの余裕を足してある
+        static constexpr uint32_t kStreamingReleaseDelayFrames = 3;
+
+        // 破棄待ち。ここに積まれている間はshared_ptrが実体を生かし続ける。
+        // 0になったらLoaderスレッドへ渡す(解放も確保と同じスレッドで行うため)
+        struct PendingModelRelease
+        {
+            std::shared_ptr<Assets::Model> Model;
+            uint32_t FramesRemaining = 0;
+        };
+        std::vector<PendingModelRelease> m_StreamingPendingRelease;
+
+        // Render → Loader の破棄依頼。受け取った側はvectorを空にするだけでよい
+        // (shared_ptrの最後の参照が消えてデストラクタが走る)
+        std::mutex m_StreamingReleaseMutex;
+        std::vector<std::shared_ptr<Assets::Model>> m_StreamingRelease;
+
+        // --- レイトレーシングを常駐の増減へ追随させる ----------------------------------------
+        //
+        // 常駐が変わるとBLAS/TLASと統合バッファが実態と食い違う。作り直して追随させる。
+        // 最後の増減からこの時間だけ静かなら作り直す(走行中は毎フレーム変わりうるため)
+        bool m_RaytracingRebuildPending = false;
+        std::chrono::steady_clock::time_point m_RaytracingRebuildAfter{};
+        static constexpr float kRaytracingRebuildQuietSeconds = 0.5f;
+        std::mutex m_RaytracingRebuiltMutex;
+        std::unique_ptr<Assets::RaytracingScene> m_RaytracingRebuilt;
+        uint64_t m_RaytracingRebuiltGeneration = 0;
+        bool m_RaytracingRebuildRequested = false;   // m_LoadRequestMutexで保護
+        // 再構築が走っている間はtrue。立っている間はRenderスレッド側の差し込みと破棄を見送る。
+        // Loaderスレッドが m_Scene を走査している最中に書き換えると走査中のコンテナが変わるため
+        std::atomic<bool> m_RaytracingRebuildInFlight{ false };
+        // 差し替えた旧RaytracingSceneの破棄待ち。モデルと同じくフレームを寝かせる。
+        //
+        // 【Renderスレッドで破棄してはいけない】RaytracingSceneが持つBLAS/TLASと統合バッファの
+        // ディスクリプタは、ロックを持たないアセット用ヒープ(DX12Device::GetAssetSrvCpuHeap)
+        // から取られている。Loaderスレッドがストリーミングで確保している最中にRenderスレッドが
+        // 解放するとフリーリストが壊れる。寝かせたあとはLoaderスレッドへ渡すこと
+        struct PendingRaytracingRelease
+        {
+            std::unique_ptr<Assets::RaytracingScene> Scene;
+            uint32_t FramesRemaining = 0;
+        };
+        std::vector<PendingRaytracingRelease> m_RaytracingPendingRelease;
+        std::mutex m_RaytracingReleaseMutex;
+        std::vector<std::unique_ptr<Assets::RaytracingScene>> m_RaytracingRelease;
+        // 統計。0なら一度も作り直していない
+        uint64_t m_RaytracingRebuildCount = 0;
+        double m_RaytracingRebuildLastMs = 0.0;
+
+        // 統計。【いずれも累計】瞬間値だと短い出来事を取りこぼす(47.9の失敗と同じ)
+        uint64_t m_StreamingLoadedTotal = 0;
+        uint64_t m_StreamingEvictedTotal = 0;
+        uint32_t m_StreamingResidentCount = 0;
+        uint32_t m_StreamingTargetCount = 0;
+        // いま選ばれている段を1つだけ返す(フェード中でも切り替え先だけ)。
+        // 半透明・平面反射・ソフトウェアラスタライザ用 ―― これらはクロスディザを実装しておらず、
+        // 2段を重ねると同じ画素に両方が描かれてしまうため、フェード中も1段に決め打つ
+        const Assets::Model* GetCurrentLOD(size_t instanceIndex) const;
         // 集計期間中の合計(平均はフレーム数で割って出す)
         uint64_t m_FrameStatsCullTestedSum = 0;
         uint64_t m_FrameStatsCullCulledSum = 0;
@@ -2745,6 +2944,28 @@ namespace Kurenai
         uint64_t m_FrameStatsDrawCallsGBufferSum = 0;
         uint64_t m_FrameStatsDrawCallsShadowSum = 0;
         uint64_t m_FrameStatsDrawCallsDepthPrepassSum = 0;
+
+        // メッシュ単位フラスタムカリングの統計(1フレーム分)。上のモデル単位とまったく同じ扱い。
+        //
+        // 【絶対に上のカウンタと混ぜない】分母も意味も違う。モデル単位は
+        // 「シーンのインスタンス数」が分母で、メッシュ単位は「モデル単位を通過した
+        // インスタンスのメッシュ数の合計」が分母になる。合算すると、どちらが効いているのか
+        // ―― あるいは片方が一度も実行されていないのか ―― が読めなくなる。
+        //
+        // 【効くシーンが逆】モデル単位は.kmodelを多数並べるシーン(PLATEAUの671タイル)で効き、
+        // 1モデルに数千メッシュを持つアセット(Emerald Square、Bistro)では1つも間引けない。
+        // メッシュ単位はその逆で、後者でしか値が動かない
+        uint32_t m_MeshCullTested = 0;
+        uint32_t m_MeshCullCulled = 0;
+
+        // 完成した最後のフレームの値。UIパネルはRenderの外で描かれるため、上のカウンタを
+        // そのまま読むとリセット直後の0になる(ドローコール数のm_DrawCalls*LastFrameと同じ)
+        uint32_t m_FrustumCullTestedLastFrame = 0;
+        uint32_t m_FrustumCullCulledLastFrame = 0;
+        uint32_t m_MeshCullTestedLastFrame = 0;
+        uint32_t m_MeshCullCulledLastFrame = 0;
+        uint64_t m_FrameStatsMeshCullTestedSum = 0;
+        uint64_t m_FrameStatsMeshCullCulledSum = 0;
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};

@@ -105,6 +105,7 @@ exit /b 0</Command>
     <ClInclude Include="Source\Engine\UI\RenderingPanel.h" />
     <ClInclude Include="Source\Engine\UI\SystemPanel.h" />
     <ClInclude Include="Source\Engine\UI\ScenePanel.h" />
+    <ClInclude Include="Source\Engine\UI\StreamingPanel.h" />
     <ClInclude Include="Source\Engine\UI\PostProcessPanel.h" />
     <ClInclude Include="Source\Engine\UI\DebugViewPanel.h" />
     <ClInclude Include="Source\Engine\UI\LightingPanel.h" />
@@ -121,6 +122,7 @@ exit /b 0</Command>
     <ClCompile Include="Source\Engine\UI\RenderingPanel.cpp" />
     <ClCompile Include="Source\Engine\UI\SystemPanel.cpp" />
     <ClCompile Include="Source\Engine\UI\ScenePanel.cpp" />
+    <ClCompile Include="Source\Engine\UI\StreamingPanel.cpp" />
     <ClCompile Include="Source\Engine\UI\PostProcessPanel.cpp" />
     <ClCompile Include="Source\Engine\UI\DebugViewPanel.cpp" />
     <ClCompile Include="Source\Engine\UI\LightingPanel.cpp" />
