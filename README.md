@@ -56,8 +56,8 @@ KurenaiEngine/
   KurenaiEngine2D.vcxproj       2D API(DynamicLibrary)。KurenaiEngineLibraryにのみ依存
   Source/Engine/                 公開API(KurenaiEngine3D, KurenaiEngine2D, KurenaiEngineBase, KurenaiTypes.h)
   Source/Library/                公開API(低レベル): RHI抽象化層, Window/Camera, モデル/シーン読み込みなど
-  Shaders/3D/                    KurenaiEngine3Dが内部で使うHLSL一式
-  Shaders/2D/                    KurenaiEngine2Dが内部で使うHLSL(Sprite2D.hlsl)
+  Shaders/3D/                    KurenaiEngine3Dが内部で使うHLSL一式(ビルド時に.kshaderへコンパイルされる)
+  Shaders/2D/                    KurenaiEngine2Dが内部で使うHLSL(Sprite2D.hlsl / Polyline2D.hlsl)
 Samples/
   Sample3D/  Sample3D.sln       3Dサンプル(KurenaiEngine3Dを使用)。独立ソリューション
              Build/             Sample3D.exeの出力先(Git管理対象外)
@@ -71,6 +71,10 @@ Tools/
                                        独立ソリューション。エンジンの2つのDLLに依存し、
                                        エンジンでプレビューしながら編隊を作る
                   Build/               KurenaiShowEditor.exeの出力先(Git管理対象外)
+  KurenaiShaderPacker/                 シェーダービルドツール(Application)。HLSLを事前コンパイルして
+                                       .kshaderを生成する。KurenaiEngine3D/2Dのビルドイベントから
+                                       自動で呼ばれる(独立ソリューションは持たない)
+                  Build/               KurenaiShaderPacker.exeとdxcランタイムの出力先(Git管理対象外)
 docs/                           ドキュメント(APIリファレンス・実装者向け)
 ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
 Scenes/                         手書きの.kscene(シーンファイル)。小さなテキストのためGit管理対象
@@ -85,19 +89,29 @@ Build/                          3つのDLL単体の出力先(Git管理対象外)
                                  それが参照するShadersのコピーが揃う
 ```
 
-KurenaiEngine3D.dll/KurenaiEngine2D.dllが実行時に参照するShadersは、ビルド時のPostBuildEventで
-それぞれのDLLと同じフォルダへ自動的にコピーされます。Sample3D/Sample2Dも同様に、自身のビルド後に
-必要なDLLとShadersを自分の出力フォルダへコピーするため、各実行ファイルは
-`Samples\Sample3D\Build\...` / `Samples\Sample2D\Build\...` 以下だけで単独で動作します。
+**シェーダーはビルド時にコンパイルされます。** `KurenaiEngine3D`/`KurenaiEngine2D`のビルドイベントで
+`KurenaiShaderPacker.exe`が走り、`Shaders/3D`・`Shaders/2D`のHLSLを`.kshader`
+(事前コンパイル済みパッケージ)へ焼いてそれぞれのDLLと同じフォルダへ置きます。
+**実行時にHLSLをコンパイルすることはなく、出力フォルダに`.hlsl`は置かれません。**
+Sample3D/Sample2Dも同様に、自身のビルド後に必要なDLLと`.kshader`を自分の出力フォルダへコピーするため、
+各実行ファイルは`Samples\Sample3D\Build\...` / `Samples\Sample2D\Build\...` 以下だけで単独で動作します。
 Sample3Dはさらに`Assets\Packed\`もコピーしますが、Sample2Dは`KurenaiEngine3D.dll`・Assetsのどちらも
 必要としないため同梱しません。
 
-DX12バックエンドはシェーダーをdxc(DirectX Shader Compiler)でコンパイルするため、
-Windows SDKに含まれる`dxcompiler.dll`と`dxil.dll`も同じ仕組みで実行ファイルの隣へコピーされます
-(`KurenaiEngineLibrary`のPostBuildEventがWindows SDKの`bin\<SDKバージョン>\x64`から取得)。
-この2つのDLLが無い場合はログに警告を出したうえで従来のd3dcompiler(シェーダーモデル5.0)で
-動作しますが、レイトレーシング機能は無効になります。DX11バックエンドは常にd3dcompilerを使うため
-これらのDLLを必要としません。
+1つの`.kshader`には、実行環境の能力に応じて選ぶ3つのバリアントが入ります。
+
+| バリアント | コンパイラ | プロファイル | 使う環境 |
+|---|---|---|---|
+| `Dxbc50` | d3dcompiler | `vs_5_0`/`ps_5_0`/`cs_5_0` | DX11の全経路。DX12でもシェーダーモデル6.5未満のデバイス |
+| `Dxil65` | dxc | `*_6_5` | DX12・bindless非対応 |
+| `Dxil66` | dxc | `*_6_6`(`KURENAI_BINDLESS=1`) | DX12・bindless対応 |
+
+どのバリアントが選ばれたかは起動時のログに残ります
+(`事前コンパイル済みシェーダー: DXIL / SM 6.6(bindless有効)を使用します` など)。
+
+dxc(DirectX Shader Compiler)が必要なのは**ビルド時のこのツールだけ**です。
+`dxcompiler.dll`と`dxil.dll`はWindows SDKの`bin\<SDKバージョン>\x64`から
+`KurenaiShaderPacker`の出力フォルダへコピーされ、**実行ファイルの隣には配布されません。**
 
 ## 必要環境
 
@@ -112,11 +126,12 @@ Windows SDKに含まれる`dxcompiler.dll`と`dxil.dll`も同じ仕組みで実�
 各`.vcxproj`は`<WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>`
 (＝インストール済みの最新SDK)を指定しているため、SDKを入れれば設定の変更は要りません。
 
-**10.0.26100を要求する理由はdxcのバージョンです。**
-実行ファイルの隣へ配布される`dxcompiler.dll`はWindows SDKの`bin\<SDKバージョン>\x64`から
+**10.0.26100を要求する理由はdxcのバージョンです。これはビルドマシン側の要件です。**
+`KurenaiShaderPacker`が使う`dxcompiler.dll`はWindows SDKの`bin\<SDKバージョン>\x64`から
 コピーされる(上記のPostBuildEvent)ため、SDKのバージョンがそのままdxcのバージョンになります。
-シェーダーモデル6.6を知らないdxcではbindlessが無効になり、
-bindlessでジオメトリを引くメッシュレット描画とソフトウェアラスタライザも連動して選べなくなります。
+シェーダーモデル6.6を知らないdxcでは`Dxil66`バリアントを焼けず、そのビルド成果物では
+bindlessが無効になり、bindlessでジオメトリを引くメッシュレット描画とソフトウェアラスタライザも
+連動して選べなくなります(ビルド自体は警告を出して続行します)。
 
 | Windows SDK | 同梱されるdxc | SM 6.6 (bindless / メッシュレット / SWラスタ) |
 | --- | --- | --- |
@@ -180,7 +195,9 @@ MSBuild ThirdParty\DirectXTex\DirectXTex\DirectXTex_Desktop_2022.vcxproj /p:Conf
 ビルド確認用です。実際に動かして確認したい場合は、`Samples/Sample3D/Sample3D.sln` または
 `Samples/Sample2D/Sample2D.sln` をビルドしてください(Sample3DはKurenaiEngineLibrary+
 KurenaiEngine3D、Sample2DはKurenaiEngineLibrary+KurenaiEngine2Dをそれぞれプロジェクト参照して
-いるため、必要なDLLも一緒にビルドされます)。
+いるため、必要なDLLも一緒にビルドされます)。シェーダービルドツール`KurenaiShaderPacker`も
+各DLLから参照されているので、明示的にビルドする必要はありません
+(**HLSLのコンパイルエラーはここでビルドが落ちる形で現れます**)。
 
 ```
 MSBuild Samples\Sample3D\Sample3D.sln /p:Configuration=Debug /p:Platform=x64
@@ -189,9 +206,9 @@ MSBuild Samples\Sample3D\Sample3D.sln /p:Configuration=Debug /p:Platform=x64
 各DLLは `Build\Bin\x64\Debug\<プロジェクト名>\` に、`Sample3D.exe`/`Sample2D.exe`はそれぞれ
 `Samples\Sample3D\Build\Bin\x64\Debug\` / `Samples\Sample2D\Build\Bin\x64\Debug\` に出力されます。
 Sample3Dの出力フォルダにはKurenaiEngineLibrary.dll・KurenaiEngine3D.dllと、それが参照する
-Shaders/Assets(`Assets\Packed\`の中身)が、Sample2Dの出力フォルダにはKurenaiEngineLibrary.dll・
-KurenaiEngine2D.dllとSprite2D.hlslのみが自動でコピーされるため、各フォルダはそれだけで完結して
-動作します。**この時点では`Assets\Packed\`が空のため、次の「アセットの準備」を行うまでSample3Dは
+`Shaders\*.kshader`・Assets(`Assets\Packed\`の中身)が、Sample2Dの出力フォルダには
+KurenaiEngineLibrary.dll・KurenaiEngine2D.dllと`Shaders\*.kshader`のみが自動でコピーされるため、
+各フォルダはそれだけで完結して動作します。**この時点では`Assets\Packed\`が空のため、次の「アセットの準備」を行うまでSample3Dは
 表示するモデルがありません。**
 
 ビルドとアセットの準備が済んだら、`Samples\Sample3D\RunDX12.bat`(DX12)または
@@ -395,8 +412,9 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
 
 #### 大規模な都市の確認用シーン(Project PLATEAU 東京都23区)
 
-東京23区全域の建築物です。3次メッシュ(約1km四方)ごとの`.kmodel`を**671個**並べた
-約33km四方のシーンで、`.kmodel`を多数並べたときの読み込みとカリングの確認に使います。
+東京23区全域を、**建築物(LOD1/LOD2)・地形・道路・橋梁の4種**で構成したシーンです。
+`[Model]`は**767件**、広がりは約33km×32kmで、`.kmodel`を多数並べたときの読み込み・カリング・
+モデルLOD・ストリーミングの確認に使います。
 **取得から配布までは`Tools\import_plateau.ps1`が一括で行います**
 (既にあるものは飛ばすので何度実行しても構いません):
 
@@ -405,9 +423,39 @@ Tools\import_plateau.ps1
 Samples\Sample3D\Build\Bin\x64\Release\Sample3D.exe -scene PlateauTokyo23ku
 ```
 
-スクリプトは ダウンロード(約2.99GB) → `bldg/lod1`の展開(671ファイル) → 共通原点の算出 →
-671タイルのパック → `.kscene`の生成と配置 → 出力フォルダへの配布 を順に行います。
-`.kscene`は`Tools\plateau_scene.py`が機械生成します(671個の`[Model]`を手で書けないため)。
+スクリプトは ダウンロード(約2.99GB) → 5種の展開 → 共通原点の算出 → 847タイルのパック →
+`.kscene`の生成と配置 → 出力フォルダへの配布 を順に行います。
+`.kscene`は`Tools\plateau_scene.py`が機械生成します(767個の`[Model]`を手で書けないため)。
+
+| 種別 | タイル | メッシュコード | テクスチャ |
+|---|---:|---|---|
+| 建築物 LOD1 | 671 | 3次(8桁 / 約1km四方) | 無し |
+| 建築物 LOD2 | 80 | 同上 | **あり(JPG 33,353枚)** |
+| 地形(dem) | 14 | 2次(6桁 / 約10km四方) | 無し |
+| 道路(tran) | 14 | 同上 | 無し |
+| 橋梁(brid) | 68 | 3次 | あり(TIF 713枚) |
+
+- **建築物のうち26タイルは2段LOD**です。`Path`にLOD2(テクスチャ付き)、`LODPath`にLOD1(箱)を置き、
+  `LODDistance = 1500`で切り替えます。実測(DX11 / Release / 1280x720 / RTX 4070 Ti)で、
+  近景のG-Bufferドローコールが**2,948**、LODDistanceの外へ出ると**698**まで落ちます
+
+  > **LOD2があっても使っていないタイルが54件あります。** PLATEAUのLOD2は
+  > 「そのタイル全体」が整備されているとは限らず、一部の建物だけのものが混ざります
+  > (`53394515`はLOD1が384セルを占めるのにLOD2は3セル)。そのまま`Path`に据えると
+  > **近づくほど建物が消える**ため、`Tools\plateau_lod2_coverage.py`が測る占有被覆率が
+  > 0.95以上のものだけを採用しています。**AABBの被覆率では測れません** ―― 建物が2棟でも
+  > タイルの対角にあればAABBは満杯になり、実測でAABB被覆1.000・占有被覆0.01のタイルが
+  > 混ざっていました
+
+- **`[Scene] StreamingDistance`を指定しています。** 未指定だとストリーミングが丸ごと無効になり、
+  `SceneLoader`が全LOD段を起動時に確保します(LOD2だけで約10GB)。指定すると各インスタンスの
+  「現在のLOD段」だけを読むので、LOD2はLODDistanceの内側にしか載りません。
+  値はシーン対角(47,380m)で、距離による切り捨てを起こさせない意図です
+
+  > **副作用: メッシュ単位のフラスタムカリングが無効になります。**
+  > `MeshWorldBoundsList`は読み込み済みの実体からしか作れず、ストリーミング時は空のまま
+  > 構築が終わります(描画側は保守側=間引かない方へ倒れます)。実測でメッシュ単位は
+  > 判定5,964 / 間引き0(0.0%)、モデル単位は85.9%です。**0%はカリングの不具合ではありません**
 
 - **パックは既定で8プロセス同時に走ります**(`-Parallel <N>`で変更、1で直列)。LOD1のタイルは
   テクスチャを持たずGPUも内部スレッドも使わないため、プロセスを並べるとそのまま効きます
@@ -424,11 +472,34 @@ Samples\Sample3D\Build\Bin\x64\Release\Sample3D.exe -scene PlateauTokyo23ku
   `X -13218.99〜-12034.59 / Y 27.34〜267.02 / Z -35171.98〜-34122.55`が、メッシュコードから
   計算した期待範囲と符号ごと一致することを確認しています。**街が鏡像になっていても一見
   気づけない**ため、画像ではなく座標の数値で突き合わせています
-- **`[Scene] ShadowDistance = 500`を指定しています。** このシーンの`farZ`は180kmで、
+- **`[Scene] ShadowDistance = 500`を指定しています。** このシーンの`farZ`は190kmで、
   指定しないと第1カスケードが数kmを2048²の1枚で覆うことになり、近景の影が事実上消えます
+- **`[Scene] CameraSpeed = 150`を指定しています。** 対角47kmから自動決定させると600m/s級になり、
+  LODの切り替わりを目で追えません
 - LOD1の建築物は「航空レーザ測量の高さで押し出した箱」で、**マテリアルは`DefaultMaterial`
   1件のみ・テクスチャは0枚**です。灰色に見えるのが正しい状態です
-  (実写テクスチャは同じ配布物のLOD2にあり、下の丸の内シーンで取り込んでいます)
+  (LOD2へ切り替わる26タイルと、下の丸の内シーンでは実写テクスチャが付きます)
+- **初期カメラはLOD2地区が見える位置に置いています**(`-1500, 300, -2400`)。
+  以前の高度900mの俯瞰は、大気遠近で全面が白く飛ぶうえ、LOD2がLODDistanceの外なので
+  一度も出ませんでした
+
+##### メッシュレットLODの検証用シーン(dem / 地形)
+
+メッシュレットLODが効くのは「三角形そのものが支配的コスト」のモデルだけです。
+PLATEAU でそれに当たるのは **dem(地形)** で、1タイルが2次メッシュ(約10km四方)の1メッシュ、
+三角形は100万の桁にのぼる一方でテクスチャを1枚も持ちません。
+ビル街を混ぜるとドローコールとテクスチャのコストが上乗せされ、三角形を減らした効果が
+総フレーム時間から読めなくなるため、dem だけのシーンを別に用意しています。
+
+```
+python Tools\plateau_dem_scene.py Assets\Packed\Plateau\Dem Scenes\PlateauDem.kscene
+Samples\Sample3D\Build\Bin\x64\Release\Sample3D.exe -dx12 -scene PlateauDem
+```
+
+- **`-dx12` が要ります。** 段を選ぶのは増幅シェーダーなので、DX11 では一度も実行されません
+- **カメラをモデルの外接球の外へ置いています。** 段は外接球の投影サイズで決まるため、
+  球の内側にカメラがあると投影サイズが振り切れて常に原寸(段0)になり、
+  段の選択が一度も走らないまま「効かなかった」と読み違えます
 
 > **ライセンス: 公共データ利用規約(PDL1.0) / CC BY 4.0 互換。商用利用可・要出典表示。**
 > 出典: 国土交通省 Project PLATEAU「3D都市モデル(Project PLATEAU)東京都23区」

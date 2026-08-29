@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{24AEC059-C8CE-4441-A6D5-826BEF22CC2A}</ProjectGuid>
+    <RootNamespace>KurenaiShaderPacker</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <!-- ビルドイベントから呼ばれるCLIツールのためコンソールサブシステム -->
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <!-- 【生成物の内容はツールの構成では決まらない】このツールはビルドイベントから呼ばれるだけで、
+       .kshader の中身はコマンドライン引数の config オプションが決める。
+       エンジン側の Debug ビルドから Release のツールを呼べるようにしておくと、
+       ツール自体を2回ビルドせずに済む。ツールは常に Release で建てる想定 -->
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)Build\Bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)Build\Intermediate\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)Build\Bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)Build\Intermediate\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\..\KurenaiEngine\Source\Library;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\..\KurenaiEngine\Source\Library;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <AdditionalDependencies>d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup>
+    <!-- dxcompiler.dll(SM 6.xのコンパイラ本体)とdxil.dll(署名用)をこのツールの隣へ置く。
+         【エンジン側ではなくここへ置く】実行時コンパイルを廃止したので、dxcが要るのは
+         ビルド時のこのツールだけになった。エンジンの配布物からは外れる。
+         「dxcのバージョン = Windows SDKのバージョン」という制約も、実行環境ではなく
+         ビルドマシンの話になる(SDKが古いとSM 6.6のバリアントが焼けず、bindlessが無効になる)。
+         見つからない場合もビルドは止めない(SM 5.0のバリアントだけを焼いて縮退する) -->
+    <PostBuildEvent>
+      <Command>set DXC_BIN=$(WindowsSdkDir)bin\$(TargetPlatformVersion)\x64
+if exist "%DXC_BIN%\dxcompiler.dll" (xcopy /Y /D "%DXC_BIN%\dxcompiler.dll" "$(OutDir)") else (echo [警告] dxcompiler.dll が "%DXC_BIN%" に見つかりません。SM 6.xのバリアントを焼けません)
+if exist "%DXC_BIN%\dxil.dll" (xcopy /Y /D "%DXC_BIN%\dxil.dll" "$(OutDir)") else (echo [警告] dxil.dll が "%DXC_BIN%" に見つかりません。DXILが未署名になります)
+exit /b 0</Command>
+      <Message>dxcランタイム(dxcompiler.dll/dxil.dll)をOutDirへコピー</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="Source\Main.cpp" />
+    <ClCompile Include="Source\ShaderCompiler.cpp" />
+    <ClCompile Include="Source\ShaderEntryScanner.cpp" />
+    <ClCompile Include="Source\ShaderPackageWriter.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Source\ShaderCompiler.h" />
+    <ClInclude Include="Source\ShaderEntryScanner.h" />
+    <ClInclude Include="Source\ShaderPackageWriter.h" />
+    <!-- フォーマットの単一の正。ランタイム(ShaderLoader.cpp)と共有する -->
+    <ClInclude Include="..\..\KurenaiEngine\Source\Library\Assets\ShaderPackage.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

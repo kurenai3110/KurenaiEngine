@@ -260,6 +260,8 @@
     <li><a href="#swraster">40. コンピュートシェーダーによる自前ソフトウェアラスタライザ</a></li>
     <li><a href="#hizocclusion">41. Hi-Zオクルージョンカリング</a></li>
     <li><a href="#texturestreaming">42. テクスチャの常駐ミップ制御(テクスチャストリーミング)</a></li>
+    <li><a href="#shaderpackage">43. シェーダーの事前コンパイル(<code>.kshader</code>)</a></li>
+    <li><a href="#meshletlod">44. メッシュレットLOD(離散LOD)</a></li>
   </ol>
 </nav>
 
@@ -4370,6 +4372,14 @@ DX11も<code>D3D11_CREATE_DEVICE_SINGLETHREADED</code>を指定しておらず
 
 <section id="dxc">
 <h2>27. dxcへの移行(DX12のシェーダーモデル6.x化)</h2>
+<p class="note">
+<strong>この章の実装は43章で事前コンパイルへ移りました。</strong>
+dxcの扱い(動的ロード・<code>dxil.dll</code>による署名・BOM無しUTF-8の読み込み)は
+そのまま<code>Tools/KurenaiShaderPacker/</code>へ移設され、<strong>実行時のシェーダーコンパイルは
+行われません</strong>。<code>DX12ShaderCompiler</code>クラスはエンジンから削除されています。
+この章は「なぜdxcが要るのか」「なぜ<code>-HV 2018</code>に固定するのか」の根拠として残しますが、
+どこで動くかは43章が正です。
+</p>
 <p>
 25章で高速化構造(BLAS/TLAS)までは作れるようになったが、レイを飛ばすHLSLの<code>RayQuery</code>は
 <strong>シェーダーモデル6.5以上</strong>を要求する。<code>d3dcompiler</code>(fxc相当)が出力できるのは
@@ -7197,6 +7207,7 @@ Perfログへ1秒ごとに出します。
 <tr><td>メッシュレット描画</td><td>DX12 / メッシュシェーダー Tier 1 / SM 6.6(bindless)</td><td>従来の頂点シェーダー + DrawIndexed</td></tr>
 <tr><td><strong>Hi-Zオクルージョンカリング</strong></td><td>上と同じ(増幅シェーダーで判定するため)</td><td>判定を行わない。Hi-Zパスの構築も走らない</td></tr>
 <tr><td>カリング統計のリードバック</td><td>上と同じ + bindlessのUAV登録</td><td>統計を出さない</td></tr>
+<tr><td><strong>メッシュレットLOD(43章)</strong></td><td>上と同じ(増幅シェーダーが段を選ぶため)</td><td>段を選ばない。常に原寸(段0)で描かれる</td></tr>
 <tr><td>レイトレーシング(反射 / シャドウ / AO / DDGI)</td><td>DX12 / DXR Tier 1.1</td><td>スクリーンスペースの手法へ縮退</td></tr>
 </table>
 
@@ -7339,6 +7350,221 @@ Tier 1 は未マップタイルの読み出しが未定義(デバイス削除も
 非対応の場合はミップ常駐制御だけで動きます ―― <strong>絵は変わらず、常駐量の削り方が
 粗くなるだけ</strong>です。根拠と実測値は
 <a href="ImplementationDetail.md">ImplementationDetail.md</a> 48章。
+</p>
+
+</section>
+
+<section id="shaderpackage">
+<h2>43. シェーダーの事前コンパイル(<code>.kshader</code>)</h2>
+<p>
+<strong>HLSLはビルド時にコンパイルされ、実行時のコンパイルは行いません。</strong>
+<code>KurenaiShaderPacker.exe</code>(<code>Tools/KurenaiShaderPacker/</code>)が
+<code>KurenaiEngine3D</code> / <code>KurenaiEngine2D</code> のビルドイベントで走り、
+<code>Shaders/3D</code>・<code>Shaders/2D</code> の各<code>.hlsl</code>を
+<code>.kshader</code>(事前コンパイル済みパッケージ)へ焼いて出力フォルダの
+<code>Shaders/</code>へ置きます。<strong>出力フォルダに<code>.hlsl</code>は置かれません。</strong>
+</p>
+<p>
+27章で述べたdxcの扱い(動的ロード・<code>dxil.dll</code>による署名・BOM無しUTF-8の読み込み)は
+<strong>そのままパッカー側へ移設</strong>されています。実行時にdxcは居ません。
+</p>
+
+<h3>43.1 フォーマット</h3>
+<p>
+書式の定義は<code>Source/Library/Assets/ShaderPackage.h</code>が単一の正です
+(<code>.kmodel</code>の<code>ModelPackage.h</code>、<code>.kshow</code>の<code>ShowPackage.h</code>と同じ作法)。
+マジック<code>KSHD</code>、バージョン1。粒度は<strong><code>.hlsl</code> 1本につき1パッケージ</strong>で、
+増分ビルドの単位がそのままファイル単位になります。
+</p>
+<pre><code>[ShaderPackageHeader]
+[ShaderEntry × EntryCount]
+[StringPool]     ← エントリポイント名とプロファイル文字列
+[Bytecode]       ← 各ShaderEntryのOffset/Sizeが指す</code></pre>
+
+<h3>43.2 バリアント(3段)</h3>
+<p>
+1つの<code>.kshader</code>に、実行環境の能力に応じて選ぶ3つのバリアントが入ります。
+</p>
+<table>
+<thead><tr><th>Variant</th><th>コンパイラ</th><th>プロファイル</th><th>define</th><th>使う側</th></tr></thead>
+<tbody>
+<tr><td><code>Dxbc50</code></td><td><code>D3DCompile</code></td><td><code>*_5_0</code></td><td>なし</td><td>DX11の全経路 / DX12でSM 6.5未満のデバイス</td></tr>
+<tr><td><code>Dxil65</code></td><td>dxc</td><td><code>*_6_5</code></td><td>なし</td><td>DX12・bindless非対応</td></tr>
+<tr><td><code>Dxil66</code></td><td>dxc</td><td><code>*_6_6</code></td><td><code>KURENAI_BINDLESS=1</code></td><td>DX12・bindless対応</td></tr>
+</tbody>
+</table>
+<p>
+<code>*_6_0</code>〜<code>*_6_4</code>の段は作りません。RayQueryもメッシュシェーダーもSM 6.5以上を
+要求するため、その層ではどのみち機能が無効になり、D3D12はDXBCを受け付けるので
+<code>Dxbc50</code>へ落とせば従来の縮退と同じになります。
+</p>
+<p class="note">
+SM 5.0の段を<code>fxc.exe</code>ではなく<code>D3DCompile</code>で焼いているのは、
+以前<code>DX11Device::CreateShader</code>が実行時に呼んでいたのがまさにこの関数だからです。
+同じコンパイラを同じフラグで通すため、焼いたバイトコードは移行前と一致します。
+</p>
+
+<h3>43.3 バリアントの選択と能力判定</h3>
+<p>
+<code>DX12Device::DetectShaderModelAndSelectVariant()</code>が起動時に<strong>1つだけ</strong>決め、
+<code>CreateShader</code>は以降選び直しません(シェーダーごとに段が変わると、
+bindlessの有無がパスによって食い違います)。
+</p>
+<ol>
+<li><code>Dxil66</code>が焼かれていて、デバイスがSM 6.6対応 → <code>Dxil66</code></li>
+<li><code>Dxil65</code>が焼かれていて、デバイスがSM 6.5対応 → <code>Dxil65</code></li>
+<li>それ以外 → <code>Dxbc50</code>(レイトレーシング・メッシュシェーダー・自前ラスタライザは無効)</li>
+</ol>
+<p>
+「どのバリアントが焼かれているか」はヘッダーの<code>VariantMask</code>にあり、
+<code>ReadShaderVariantMask()</code>が出力フォルダの<code>.kshader</code>を1つ読んで取得します
+(どのファイルも同じパッカーの1回の実行で焼かれるため全ファイルで同じ)。
+</p>
+<p>
+これにより<code>SupportsBindless()</code> / <code>SupportsMeshShader()</code> /
+<code>SupportsRaytracing()</code>の根拠が変わりました。以前は実行時に
+<code>IDxcVersionInfo</code>でdxcのバージョンを見ていましたが、いまは
+<strong>ビルド時にそのバリアントを焼けたか</strong>とデバイスの対応シェーダーモデルで決まります。
+<strong>「dxcのバージョン = Windows SDKのバージョン」という制約は、実行環境ではなく
+ビルドマシンの話になりました。</strong>
+</p>
+
+<h3>43.4 エントリポイントの列挙</h3>
+<p>
+手書きのマニフェストは持たず、HLSLを構文的に走査して全エントリを検出します
+(<code>ShaderEntryScanner.cpp</code>)。登録し忘れで
+「ビルドは通るのに起動時に落ちる」という壊れ方を構造的に無くすためです。
+</p>
+<p class="note">
+<strong><code>#include</code>を再帰的に展開してから走査します。</strong>
+エントリポイントの実体は<code>.hlsl</code>にあるとは限りません ――
+<code>GBuffer.hlsl</code>の<code>VSMain</code>は<code>GBufferCommon.hlsli</code>にあります。
+展開しないとこれを取りこぼし、起動時に落ちます。
+</p>
+<p>
+それでも検出漏れがあった場合は、<code>LoadShaderBytecode</code>が
+「シェーダーパッケージに該当するエントリがありません」と、何を探して見つからなかったかを
+明示してから例外を投げます。
+</p>
+
+<h3>43.5 読み込みとキャッシュ</h3>
+<p>
+<code>Assets::ShaderPackageCache</code>(<code>Source/Library/Assets/ShaderLoader.h</code>)が
+パス→パッケージのキャッシュを持ちます。1つの<code>.kshader</code>は複数のエントリから
+引かれるためです(<code>GBuffer.kshader</code>は<code>VSMain</code>/<code>PSMain</code>/
+<code>PSMainCutout</code>)。シェーダーの生成は起動時の1回きりなので、
+<code>CreateSceneResources()</code>の完了時に<code>IRHIDevice::ReleaseShaderPackages()</code>で
+明示的に捨てます。
+</p>
+<p>
+経緯は<a href="ImplementationHistory.md">ImplementationHistory.md</a> 58章、
+根拠は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 54章。
+</p>
+<section id="meshletlod">
+<h2>44. メッシュレットLOD(離散LOD)</h2>
+
+<p>
+KurenaiPackerがメッシュごとに<code>meshopt_simplify</code>で段を焼き(三角形をおよそ半分ずつ落とす)、
+全段のメッシュレットを1本の表へ並べておきます。描画時は<strong>増幅シェーダーが段を1つ選び、
+その段に属さない塊を落とす</strong>だけです。焼き込み側の仕様は<a href="#assets">.kmodel v10</a>を参照してください。
+</p>
+
+<p>
+<strong>DX12 + SM 6.6 専用です。</strong> 段を選ぶのが増幅シェーダーなので、メッシュシェーダー経路でしか効きません
+(41.5の表)。性能の基準機であるIntel UHD Graphics 620では一度も実行されません。
+</p>
+
+<h3>43.1 段はモデル単位で1つに決まる</h3>
+
+<p>
+混ざらないことは<strong>2つ</strong>で担保しています。片方だけでは足りません。
+</p>
+
+<ol>
+<li>段の選択に使う入力は<code>ObjectConstants</code>の<strong>モデル外接球とカメラだけ</strong>。
+そのためどのスレッド・どのグループが計算しても同じ段になります</li>
+<li>選べる段の上限を、<strong>全メッシュが持っている段の共通部分までCPU側で畳んであります</strong>
+(<code>Assets::Model::MeshletLODLevelCap</code>)</li>
+</ol>
+
+<p>
+(2)が無いと、段の数はメッシュごとに違うため、段を1つしか持たないメッシュだけが原寸のまま残り、
+1つのモデルの中で段が混ざります。材質の境目でメッシュが分かれているモデルは、
+その境目で実際に辺を共有しています。上限を畳むと、段を1つしか持たないメッシュを
+1つでも含むモデルは常に原寸になります ―― <strong>保守的ですが、穴が開かないことを優先します</strong>。
+</p>
+
+<p>
+混ぜてはいけないのは、<code>meshopt_simplify</code>が段ごとに頂点を動かすためです。
+隣り合うメッシュレットが違う段だと、動いた側と動いていない側で辺が一致せず境目に穴が開きます。
+「穴が出たら直す」のではなく、<strong>混ざりようのない作りにしてある</strong>のが設計上の要点です。
+その代償として粒度は粗くなります(43.5)。
+</p>
+
+<h3>43.2 選び方</h3>
+
+<pre><code>投影直径[画素] = 2 × r × pixelScale / sqrt(d² - r²)      (d ≦ r なら画面いっぱい扱い)
+しきい値[画素] = MeshletLODQuality × sqrt(4 × モデルのLOD0三角形数 / π)
+段            = 投影直径がしきい値の 1/2^n を下回るごとに1つ粗くする(上限3)</code></pre>
+
+<p>
+<code>pixelScale</code>は「距離1メートルにある長さ1メートルが何画素になるか」
+(= 射影行列の縦方向の拡大率 × レンダーターゲットの高さ / 2)です。
+<strong>しきい値がモデルごとに変わる</strong>のは、三角形数がモデルによって3桁違うためです
+(根拠は<code>docs/ImplementationDetail.md</code> 54.3)。
+</p>
+
+<p>
+<strong>シャドウと深度プリパスにも同じ段を渡します。</strong> 両者はG-Bufferとまったく同じ増幅シェーダーを使いますが、
+<code>ViewProj</code>は光源やカスケードのものに差し替わっています。各パスのカメラで段を選ぶと、
+影を落とす形と本体の形が違う段になるため、<strong>主カメラの位置と拡大率を全パスへ配ります</strong>。
+</p>
+
+<h3>43.3 表には全段が載っている</h3>
+
+<p>
+ランタイムのメッシュレット表(<code>Model::MeshletBuffer</code>)はLOD0だけでなく<strong>全段</strong>を連結して持ちます。
+重なって描かれないのは「表に無いから」ではなく「増幅シェーダーが段の一致しない塊を落としているから」で、
+段の判定を外すと全段が同じ場所へ重なって描かれます。
+</p>
+
+<p>
+一方 <code>Assets::Mesh::MeshletCount</code> は<strong>LOD0の個数のまま</strong>です。
+レイトレーシング(三角形番号→メッシュレットの二分探索)と従来の頂点シェーダー経路は
+<code>.kgeom</code>のインデックスブロック ―― すなわちLOD0の三角形 ―― しか見ないためで、
+全段の合計は <code>Mesh::MeshletTotalCount</code> が持ちます。
+</p>
+
+<h3>43.4 段の解決は1箇所に集約する</h3>
+
+<p>
+段を決めるのは <code>Meshlet.hlsli</code> の <code>MeshletResolveLODLevel</code> だけで、
+G-Buffer・シャドウ・深度プリパスがすべてこの関数を通ります。
+<strong>パスごとに同じ式を書くと、片方だけ直したときに「影の形と本体の形が違う段になる」
+という追いにくい壊れ方をします。</strong>
+</p>
+
+<p>
+増幅シェーダーは選んだ段と塊の段の<strong>一致だけ</strong>を見ます。
+メッシュごとの段数でシェーダー側が読み替えると段が混ざるため、
+その調整はCPU側の上限(43.1の(2))で済ませてあります。
+塊自身の段は <code>GpuMeshlet::Flags</code> の上位ビットに詰めてあります(64バイト固定を保つため)。
+</p>
+
+<h3>43.5 効く範囲と効かない範囲</h3>
+
+<table>
+<tr><th>対象</th><th>効くか</th><th>理由</th></tr>
+<tr><td>PLATEAU dem(地形) / 遠くのタイル</td><td><strong>効く</strong></td><td>1タイル1メッシュで134万三角形。段が4つ焼かれる</td></tr>
+<tr><td>PLATEAU dem / <strong>足元のタイル</strong></td><td><strong>効かない</strong></td><td>段はモデル単位。1辺10kmのタイルは、その上に立つかぎり常に段0</td></tr>
+<tr><td>PLATEAU bldg LOD2(ビル街)</td><td><strong>効かない</strong></td><td>全メッシュが段を1つしか持たない。1メッシュ平均154三角形では潰せる辺が無い</td></tr>
+</table>
+
+<p>
+実測(RTX 4070 Ti / DX12 / Release / 1280x720 / <code>PlateauDem</code> / 同一カメラ)では、
+判定した塊が 13,796 → 6,881 に半減し、G-Bufferパスは 0.150ms → 0.070ms(<strong>53%減</strong>)、
+シャドウパスは 0.120ms → 0.070ms になりました。
+ビル街では判定した塊が 15,743 のまま動きません。数値は<code>docs/ImplementationDetail.md</code> 54.6 / 54.7 にあります。
 </p>
 
 </section>

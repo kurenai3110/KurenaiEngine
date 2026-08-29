@@ -1,15 +1,32 @@
 ---
 name: shader-check
-description: KurenaiEngineの全HLSLをまとめてコンパイル検証するときに使う。マージ後・PR取り込み後・シェーダを編集した後の確認用。C++のビルドが通ってもHLSLは未検証のままなので、これを通すまで「ビルドが通った」と言わないこと。Use after merging, after pulling a PR, or after editing any .hlsl to verify all shaders still compile.
+description: HLSLをfxc/dxc単体で一括コンパイル検証するときに使う。通常の検証はビルド(KurenaiShaderPackerが全バリアントを焼く)が兼ねるので不要で、これを使うのはビルドを通さずにHLSLだけ見たいとき、パッカーとコンパイラのどちらが原因かを切り分けたいとき。Use to compile-check HLSL with fxc/dxc directly, when the normal build-time check is not available or when isolating a packer-vs-compiler problem.
 ---
 
 # HLSLの一括コンパイル検証
 
-## なぜ必要か
+## まずビルドを通すこと。これは切り分け用
 
-**シェーダは実行時に出力フォルダの`Shaders\`から読まれる。**
-C++のビルドが通ってもHLSLは一切検証されていない。壊れたシェーダはアプリを起動して
-その描画パスに到達して初めて分かる。マージやPR取り込みの直後は特に危ない。
+**HLSLの一括検証はビルドが兼ねている。** `KurenaiShaderPacker` が
+`KurenaiEngine3D` / `KurenaiEngine2D` のビルドイベントで全 `.hlsl` の全エントリを
+3バリアント(SM 5.0 / SM 6.5 / SM 6.6+bindless)で焼き、1つでも失敗すればビルドが落ちる。
+**通常は `build-run` スキルでビルドすれば済む。**
+
+このスキルを使うのは次の場合:
+
+- ビルドを通さずにHLSLだけ見たいとき(C++が壊れていてビルドが通らない、など)
+- パッカーの不具合とHLSLの不具合を切り分けたいとき(fxc/dxcを直接叩いて確かめる)
+- パッカーの除外規則(`Tools\KurenaiShaderPacker\Source\Main.cpp` の `kSkipDxil65Files` と
+  SM6専用ファイルの判定)が実態と合っているかを確かめたいとき
+
+### このスクリプトの取りこぼし(パッカーとの違い)
+
+**このスクリプトは `.hlsl` しか走査せず、`#include` を展開しない。**
+そのためエントリポイントの実体が `.hlsli` 側にあるものを検出できない
+――例えば `GBuffer.hlsl` の `VSMain` は実体が `GBufferCommon.hlsli:224` にあり、
+**このスクリプトでは一度も検証されていない**。パッカー側
+(`Tools\KurenaiShaderPacker\Source\ShaderEntryScanner.cpp`)はインクルードを展開してから走査する。
+検出規則を変えるときは**両方を直すこと。**
 
 ## 実行
 
@@ -25,6 +42,8 @@ worktreeで作業している場合は**必ず自分のworktreeのパスを明�
 終了コード 0 = 全通過、1 = 1つ以上失敗。失敗時はファイル・エントリ・エラー行を一覧表示する。
 
 現状(2026-08-29時点)の基準値: **41ファイル / 237エントリ / 失敗0**。
+パッカー(ビルド時)の基準値は別に取ること ―― インクルードを展開して走査するぶん、
+検出されるエントリがこのスクリプトより多くなる。
 
 ## スクリプトが何をしているか
 
@@ -43,18 +62,22 @@ worktreeで作業している場合は**必ず自分のworktreeのパスを明�
 
 | 経路 | コンパイラ | プロファイル | 根拠 |
 |---|---|---|---|
-| DX11 | fxc | `vs_5_0`/`ps_5_0`/`cs_5_0` | `DX11Device.cpp`の`D3DCompileFromFile` |
-| DX12 | dxc | `*_6_6` | `DX12Device::CreateShader` |
+| DX11 | fxc | `vs_5_0`/`ps_5_0`/`cs_5_0` | `.kshader`の`Dxbc50`バリアント |
+| DX12 | dxc | `*_6_6` | `.kshader`の`Dxil66`バリアント |
 
-**DX12側をfxcの`*_5_0`で見てはいけない。** `DX12Device::CreateShader`は
-`dxcompiler.dll`がロードできればRTに限らず**全ステージ**をdxcへ流す
-(`D3DCompileFromFile`/`*_5_0`はdxcが無い・SM 6.0未満の環境向けのフォールバック)。
+**DX12側をfxcの`*_5_0`で見てはいけない。** DX12はDXILのバリアントを使い、
+DXBC(`*_5_0`)へ落ちるのはデバイスがSM 6.5未満の場合だけ。
+
+**パッカーとはプロファイルが1つずれている。** パッカーはbindless無しの段を `*_6_5` で焼くが
+(SM 6.5のデバイスでも動く必要があるため)、このスクリプトは `*_6_6` で2回回す。
+そのため `*_6_6` でしか通らないもの(コンピュートシェーダー内の微分など)を
+このスクリプトは見逃す。パッカーの `kSkipDxil65Files` がその差を受け止めている。
 ### `-HV 2018` を必ず渡す（エンジンに合わせる）
 
-**dxc 1.7以降はHLSL 2021が既定**だが、**エンジンはHLSL 2018に固定している。**
-`DX12ShaderCompiler::Compile`が無条件に`-HV 2018`を渡しており
-(`Source/Library/RHI/DX12/DX12ShaderCompiler.cpp`)、理由もコメントにある——
-dxcが将来既定を上げても、配布する`dxcompiler.dll`を差し替えただけで
+**dxc 1.7以降はHLSL 2021が既定**だが、**このコードベースはHLSL 2018に固定している。**
+`ShaderCompiler::CompileDxil`が無条件に`-HV 2018`を渡しており
+(`Tools/KurenaiShaderPacker/Source/ShaderCompiler.cpp`)、理由もコメントにある——
+dxcが将来既定を上げても、`dxcompiler.dll`を差し替えただけで
 既存シェーダーの意味が変わらないようにするため。
 
 したがって**検証側も`-HV 2018`を渡さないと、実際には動くコードを失敗として報告する。**
@@ -112,13 +135,15 @@ SM 5.0で落ちる変更が入ると**DX11は起動時に例外で死ぬ**。
 - スクリプトはdxcを使うとき、**シェーダツリー全体をBOM付きで一時ディレクトリへ複製**して
   そこからコンパイルする。インクルード(`.hlsli`)も同じ問題を起こすため、1ファイルではなく
   ツリーごと複製する必要がある。一時ディレクトリは実行後に削除する
+- **パッカーはこの複製を必要としない。** `dxc.exe` を外から叩くのではなく `dxcompiler.dll` を
+  直接使い、自前のインクルードハンドラ(`Utf8IncludeHandler`)がBOM無しUTF-8を
+  `CP_UTF8` と明示して読むため(`Tools/KurenaiShaderPacker/Source/ShaderCompiler.cpp`)
 
 ## 使いどころ
 
-- `origin/master`を取り込んだ直後
-- PRをマージした直後
-- `.hlsl`を編集したあと、アプリを起動する前
-- 「ビルドが通った」と報告する前
+**通常は不要。** `.hlsl` を編集したら `build-run` スキルでビルドすれば、その中で全バリアントが焼かれ、
+失敗すればビルドが落ちる。マージやPR取り込みの直後も同じ。
 
-`.hlsl`の変更だけを確認したい場合、**ビルドし直す必要はない**
-(実行時に読まれるため、差し替えて起動するだけでよい)。詳しくは `ab-compare` スキル。
+このスキルを使うのは上の「まずビルドを通すこと」の3ケースに当てはまるときだけ。
+**`.hlsl`の変更だけでもビルドは必要**(出力フォルダには `.kshader` しか置かれず、
+`.hlsl` を差し替えて起動し直すやり方は使えない)。詳しくは `ab-compare` スキル。
