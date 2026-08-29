@@ -4679,6 +4679,16 @@ namespace Kurenai
                 {
                     return nullptr;
                 }
+                // 【GetCurrentLODと一致するときだけまとめる】GetLODDrawsは、フェード中でも
+                // 片方の段が未ストリーミングなら「読めているほうを全画素で描く」として1を返す。
+                // その段は PreviousLOD のことがあり、GetCurrentLOD は nullptr を返す。
+                // 平面反射パスは単体を GetCurrentLOD で引くので、そこを一致させておかないと
+                // 「まとめられた個体は水面に映るが、同じ状態でまとめられなかった個体は映らない」
+                // という食い違いが出る
+                if (draws[0].Model != GetCurrentLOD(i))
+                {
+                    return nullptr;
+                }
                 return draws[0].Model;
             },
             m_InstanceBatchesCurrentLOD, m_InstanceBatchedCurrentLOD);

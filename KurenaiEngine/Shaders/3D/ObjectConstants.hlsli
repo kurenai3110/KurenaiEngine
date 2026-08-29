@@ -160,18 +160,23 @@ StructuredBuffer<ModelInstanceRecord> ModelInstances : register(t0);
 //
 // 【一様分岐なのでPSOは増えない】条件は定数バッファの値で、ワープ内で分岐しない。
 // メッシュレット経路のようにPSOを何本も増やさずにインスタンシングを足せるのはこのため
+// 【途中でreturnせず、出口を1つにしてある】早期returnの形で書くと、fxcが
+// warning X4000 (use of potentially uninitialized variable) を出す。この関数は
+// モデルを描く頂点シェーダー全部が通るため、放っておくと本物の警告がこれに埋もれる
 ModelInstanceRecord FetchModelInstance(uint instanceID)
 {
+    ModelInstanceRecord record = (ModelInstanceRecord)0;
     if (InstancingEnabled != 0)
     {
-        return ModelInstances[InstanceBase + instanceID];
+        record = ModelInstances[InstanceBase + instanceID];
     }
-
-    ModelInstanceRecord record;
-    record.World = World;
-    record.NormalMatrix = NormalMatrix;
-    record.TangentSignFlip = TangentSignFlip;
-    record.Padding = float3(0.0f, 0.0f, 0.0f);
+    else
+    {
+        record.World = World;
+        record.NormalMatrix = NormalMatrix;
+        record.TangentSignFlip = TangentSignFlip;
+        record.Padding = float3(0.0f, 0.0f, 0.0f);
+    }
     return record;
 }
 
