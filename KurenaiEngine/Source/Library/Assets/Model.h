@@ -6,6 +6,7 @@
 
 #include "RHI/IRHIBuffer.h"
 #include "RHI/IRHITexture.h"
+#include "RHI/TextureImage.h"
 
 #include "RaytracingGeometry.h"
 
@@ -301,6 +302,13 @@ namespace Kurenai::Assets
         // 読み込みに失敗してプレースホルダー(白/フラット法線)へ落ちたテクスチャは
         // そもそもTexturesへ入らないため、両者の要素数は常に一致する
         std::vector<std::wstring> TexturePaths;
+        // TexturePathsと同じ並びの.ktexヘッダ情報(解像度・ミップ段数・部分読み出しの可否)。
+        //
+        // 【読み込みスレッドで取っておく理由】常駐ミップ制御の追跡表への登録
+        // (TextureStreamingManager::AttachModel)はRenderスレッドで走る。そこでヘッダを
+        // 読みに行くと、モデルが1つ常駐するたびにテクスチャの枚数だけファイルを開くことになり
+        // (PLATEAUのLOD2タイルで数十枚)、街を流している間じゅう描画が止まる
+        std::vector<RHI::PackedTextureInfo> TextureInfos;
         std::vector<Light> Lights;
 
         // --- マテリアルテーブル(bindless経路用) -------------------------------------------

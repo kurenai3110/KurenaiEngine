@@ -148,6 +148,7 @@ namespace Kurenai::Assets
             std::lock_guard<std::mutex> lock(m_StatsMutex);
             m_CommittedUpdates = 0;
             m_FailedUpdates = 0;
+            m_DiscardedUpdates = 0;
             m_InFlightCount = 0;
         }
 
@@ -156,203 +157,339 @@ namespace Kurenai::Assets
             return;
         }
 
-        // IRHITexture* から追跡表の添字を引く。1つの.ktexは1つのModelの中でしか
-        // 共有されないが、Model単位では複数メッシュから参照される
-        std::unordered_map<const RHI::IRHITexture*, size_t> textureToEntry;
+        m_TiledResourcesTier = device.GetTiledResourcesTier();
 
         for (const ModelInstance& instance : scene.Instances)
         {
-            // --scaleで縮めたモデルのUV密度をワールド空間の値へ直すのに使う
-            const float uniformScale = ExtractUniformScale(instance.World);
-
             // 【実体が無いことがある】ModelInstance::Modelはshared_ptrで、[Scene]StreamingDistanceを
-            // 使うシーンでは読み込み時点で空。まだ読まれていないモデルのテクスチャは追跡できない
-            // (Buildはシーン読み込み時の1回だけなので、後から常駐したモデルは全ミップのままになる)
+            // 使うシーンでは読み込み時点で空。それらは後からAttachModelで入ってくる
             if (!instance.Model)
             {
                 continue;
             }
-
-            const Model& model = *instance.Model;
-            if (model.Textures.size() != model.TexturePaths.size())
-            {
-                Core::Logger::Error(
-                    "TextureStreaming",
-                    "テクスチャとパスの数が一致しません(テクスチャ " + std::to_string(model.Textures.size()) +
-                        " / パス " + std::to_string(model.TexturePaths.size()) + ")。このモデルは追跡しません");
-                continue;
-            }
-
-            // このモデルのテクスチャを追跡表へ登録する(まだ登録されていなければ)
-            for (size_t t = 0; t < model.Textures.size(); ++t)
-            {
-                const RHI::IRHITexture* texture = model.Textures[t].get();
-                if (texture == nullptr || textureToEntry.count(texture) != 0)
-                {
-                    continue;
-                }
-
-                RHI::PackedTextureInfo packedInfo{};
-                if (!RHI::TextureImage::TryReadPackedTextureInfo(model.TexturePaths[t], packedInfo))
-                {
-                    // ヘッダが読めないものは触らない(全ミップ常駐のまま)
-                    continue;
-                }
-                if (!packedInfo.SupportsPartialMipLoad)
-                {
-                    continue;
-                }
-
-                Entry entry;
-                entry.Texture = model.Textures[t].get();
-                entry.Path = model.TexturePaths[t];
-                entry.Info = packedInfo;
-                // Buildの時点では全ミップが載っている(ModelLoaderがそう読んでいる)
-                entry.ResidentFirstMip = 0;
-                entry.RequestedFirstMip = 0;
-                textureToEntry.emplace(texture, m_Entries.size());
-                m_Entries.push_back(std::move(entry));
-            }
-
-            // メッシュ→テクスチャの参照を、**メッシュ単位で**登録する。
-            // インスタンス単位にまとめると、街区全体を覆う1インスタンスの内側にカメラが
-            // 入ったときに距離が0になって効かなくなる(Entry::Refのコメント参照)
-            for (const Mesh& mesh : model.Meshes)
-            {
-                if (mesh.UVPerLocalMeter <= 0.0f)
-                {
-                    // UV密度を見積もれなかったメッシュは、そのテクスチャの常駐ミップを削らせない
-                    continue;
-                }
-
-                const RHI::IRHITexture* const referenced[] = {
-                    mesh.BaseColorTexture, mesh.NormalTexture, mesh.MetallicRoughnessTexture,
-                    mesh.EmissiveTexture, mesh.OcclusionTexture, mesh.BentNormalTexture,
-                };
-
-                Entry::Ref ref;
-                TransformBoundsToWorld(mesh.BoundsMin, mesh.BoundsMax, instance.World, ref.BoundsMin, ref.BoundsMax);
-                ref.UVPerWorldMeter = mesh.UVPerLocalMeter / uniformScale;
-
-                for (const RHI::IRHITexture* texture : referenced)
-                {
-                    const auto found = textureToEntry.find(texture);
-                    if (found == textureToEntry.end())
-                    {
-                        continue;
-                    }
-                    m_Entries[found->second].Refs.push_back(ref);
-                }
-            }
+            AttachModel(*instance.Model, instance.World, device);
         }
 
-        // 参照されていないテクスチャ(UV密度を見積もれないメッシュからしか使われていない等)は
-        // 追跡しても目標が決まらないので落とす
-        m_Entries.erase(
-            std::remove_if(m_Entries.begin(), m_Entries.end(), [](const Entry& e) { return e.Refs.empty(); }),
-            m_Entries.end());
-
-        m_ScanCursor = 0;
-        m_TiledResourcesTier = device.GetTiledResourcesTier();
-        m_TileState.assign(m_Entries.size(), kTileUnknown);
-
-        if (m_Entries.empty())
+        if (m_AliveEntries == 0)
         {
-            Core::Logger::Info("TextureStreaming", "追跡対象のテクスチャがありません(常駐ミップ制御は働きません)");
+            // 【エラーではない】ストリーミングを使うシーンでは、この時点で0件なのが正常
+            Core::Logger::Info(
+                "TextureStreaming",
+                "追跡対象のテクスチャは0枚(ストリーミングを使うシーンなら、読み込まれた順にAttachされる)");
             return;
         }
-
-        m_StopRequested = false;
-        m_Worker = std::thread(&TextureStreamingManager::WorkerMain, this, &device);
 
         LogStats("build");
     }
 
-    void TextureStreamingManager::Reset()
+    void TextureStreamingManager::AttachModel(
+        const Model& model, const XMFLOAT4X4& world, RHI::IRHIDevice& device)
     {
-        StopWorker();
-
-        {
-            std::lock_guard<std::mutex> lock(m_ReadyMutex);
-            m_Ready.clear();
-        }
-        {
-            std::lock_guard<std::mutex> lock(m_RequestMutex);
-            m_Requests.clear();
-        }
-        m_Entries.clear();
-        m_TileState.clear();
-        m_ScanCursor = 0;
-    }
-
-    void TextureStreamingManager::StopWorker()
-    {
-        if (!m_Worker.joinable())
+        if (!m_Enabled)
         {
             return;
         }
 
-        m_StopRequested = true;
-        m_RequestCV.notify_all();
-        m_Worker.join();
-        m_StopRequested = false;
+        if (model.Textures.size() != model.TexturePaths.size() ||
+            model.Textures.size() != model.TextureInfos.size())
+        {
+            Core::Logger::Error(
+                "TextureStreaming",
+                "テクスチャ・パス・ヘッダ情報の数が一致しません(テクスチャ " +
+                    std::to_string(model.Textures.size()) + " / パス " +
+                    std::to_string(model.TexturePaths.size()) + " / ヘッダ " +
+                    std::to_string(model.TextureInfos.size()) + ")。このモデルは追跡しません");
+            return;
+        }
+
+        // タイル対応の確認はここでも行う。Buildを通らずAttachから始まる経路があるため
+        m_TiledResourcesTier = device.GetTiledResourcesTier();
+
+        // --scaleで縮めたモデルのUV密度をワールド空間の値へ直すのに使う
+        const float uniformScale = ExtractUniformScale(world);
+        std::vector<size_t>& modelSlots = m_ModelEntries[&model];
+
+        // このモデルのテクスチャを追跡表へ登録する(まだ登録されていなければ)。
+        // 【2回目以降のインスタンスでは何も足さない】枠はテクスチャ単位、参照はメッシュ単位
+        for (size_t t = 0; t < model.Textures.size(); ++t)
+        {
+            RHI::IRHITexture* const texture = model.Textures[t].get();
+            if (texture == nullptr || m_TextureToEntry.count(texture) != 0)
+            {
+                continue;
+            }
+
+            // 【ヘッダは読み込みスレッドが取ってある】ここで開くとRenderスレッドが止まる
+            // (Model::TextureInfosのコメント参照)。読めなかったものはMipLevelsが0のまま来る
+            const RHI::PackedTextureInfo& packedInfo = model.TextureInfos[t];
+            if (packedInfo.MipLevels == 0 || !packedInfo.SupportsPartialMipLoad)
+            {
+                continue;
+            }
+
+            // 空き枠を使い回す。無ければ末尾へ足す
+            size_t slot = 0;
+            if (!m_FreeSlots.empty())
+            {
+                slot = m_FreeSlots.back();
+                m_FreeSlots.pop_back();
+            }
+            else
+            {
+                slot = m_Entries.size();
+                m_Entries.emplace_back();
+            }
+
+            Entry& entry = m_Entries[slot];
+            // 【世代は引き継ぐ】枠を作り直すのではなく、前の持ち主のGenerationの続きを使う。
+            // 進めるのはDetachのときだけで、Attachで0へ戻すと古い結果と衝突する
+            const uint32_t generation = entry.Generation;
+            entry = Entry{};
+            entry.Generation = generation;
+            entry.Owner = &model;
+            entry.Texture = texture;
+            entry.Path = model.TexturePaths[t];
+            entry.Info = packedInfo;
+            entry.Alive = true;
+            // Attachの時点では全ミップが載っている(ModelLoaderがそう読んでいる)
+            entry.ResidentFirstMip = 0;
+            entry.RequestedFirstMip = 0;
+
+            m_TextureToEntry.emplace(texture, slot);
+            modelSlots.push_back(slot);
+            ++m_AliveEntries;
+        }
+
+        // メッシュ→テクスチャの参照を、**メッシュ単位で**登録する。
+        // インスタンス単位にまとめると、街区全体を覆う1インスタンスの内側にカメラが
+        // 入ったときに距離が0になって効かなくなる(Entry::Refのコメント参照)
+        for (const Mesh& mesh : model.Meshes)
+        {
+            if (mesh.UVPerLocalMeter <= 0.0f)
+            {
+                // UV密度を見積もれなかったメッシュは、そのテクスチャの常駐ミップを削らせない
+                continue;
+            }
+
+            const RHI::IRHITexture* const referenced[] = {
+                mesh.BaseColorTexture, mesh.NormalTexture, mesh.MetallicRoughnessTexture,
+                mesh.EmissiveTexture, mesh.OcclusionTexture, mesh.BentNormalTexture,
+            };
+
+            Entry::Ref ref;
+            TransformBoundsToWorld(mesh.BoundsMin, mesh.BoundsMax, world, ref.BoundsMin, ref.BoundsMax);
+            ref.UVPerWorldMeter = mesh.UVPerLocalMeter / uniformScale;
+
+            for (const RHI::IRHITexture* texture : referenced)
+            {
+                const auto found = m_TextureToEntry.find(texture);
+                if (found == m_TextureToEntry.end())
+                {
+                    continue;
+                }
+                Entry& entry = m_Entries[found->second];
+                // 別のモデルのテクスチャを指していることはないはずだが、
+                // 取り違えると他所のモデルの常駐段を狂わせるので確かめる
+                if (entry.Owner == &model)
+                {
+                    entry.Refs.push_back(ref);
+                }
+            }
+        }
+
+        // 参照が付かなかった枠(UV密度を見積もれないメッシュからしか使われていない等)は
+        // 目標が決まらないので、その場で外す。
+        // 【最後のインスタンスを付け終わるまで待てない】どれが最後かは分からないので、
+        // インスタンスごとに判定する。2つ目のインスタンスで初めて参照が付く形はありえない
+        // (メッシュ構成はモデルに属し、インスタンスでは変わらない)
+        for (size_t i = modelSlots.size(); i-- > 0;)
+        {
+            const size_t slot = modelSlots[i];
+            if (m_Entries[slot].Alive && m_Entries[slot].Refs.empty())
+            {
+                m_TextureToEntry.erase(m_Entries[slot].Texture);
+                m_Entries[slot].Alive = false;
+                m_Entries[slot].Owner = nullptr;
+                ++m_Entries[slot].Generation;
+                m_FreeSlots.push_back(slot);
+                --m_AliveEntries;
+                modelSlots.erase(modelSlots.begin() + static_cast<ptrdiff_t>(i));
+            }
+        }
+
+        if (modelSlots.empty())
+        {
+            m_ModelEntries.erase(&model);
+        }
     }
 
-    void TextureStreamingManager::WorkerMain(RHI::IRHIDevice* device)
+    void TextureStreamingManager::DetachModel(const Model& model)
     {
-        // COMを使うのはDirectXTexのWICデコードだけで、.ktexの読み込み経路では走らないが、
-        // ModelLoaderのワーカーと同じく念のため初期化しておく(失敗しても続行する)
-        for (;;)
+        const auto found = m_ModelEntries.find(&model);
+        if (found == m_ModelEntries.end())
+        {
+            return;
+        }
+
+        for (const size_t slot : found->second)
+        {
+            Entry& entry = m_Entries[slot];
+            if (!entry.Alive)
+            {
+                continue;
+            }
+            m_TextureToEntry.erase(entry.Texture);
+            entry.Alive = false;
+            // 【世代を進める】この枠に対して発注済みの結果は、戻ってきても捨てる
+            ++entry.Generation;
+            --m_AliveEntries;
+
+            // 【読み出し中なら枠をまだ返さない】ProcessRequestsがIRHITexture*を掴んでいる。
+            // CommitReadyが結果を引き取ったところで返す
+            if (entry.InFlight)
+            {
+                entry.PendingFree = true;
+            }
+            else
+            {
+                FreeEntrySlot(slot);
+            }
+        }
+        m_ModelEntries.erase(found);
+    }
+
+    void TextureStreamingManager::FreeEntrySlot(size_t slot)
+    {
+        Entry& entry = m_Entries[slot];
+        const uint32_t generation = entry.Generation;
+        entry = Entry{};
+        entry.Generation = generation;
+        m_FreeSlots.push_back(slot);
+    }
+
+    bool TextureStreamingManager::IsModelBusy(const Model* model) const
+    {
+        // 【Detach済みでも残る】破棄を待たせたいのはまさにDetachした直後のモデルなので、
+        // m_ModelEntriesではなく発注数の表で見る
+        return model != nullptr && m_InFlightByModel.count(model) != 0;
+    }
+
+    bool TextureStreamingManager::GetModelResidency(const Model* model, ModelResidency& outResidency) const
+    {
+        outResidency = ModelResidency{};
+        if (model == nullptr)
+        {
+            return false;
+        }
+        const auto found = m_ModelEntries.find(model);
+        if (found == m_ModelEntries.end())
+        {
+            return false;
+        }
+
+        uint64_t droppedSum = 0;
+        for (const size_t slot : found->second)
+        {
+            const Entry& entry = m_Entries[slot];
+            if (!entry.Alive)
+            {
+                continue;
+            }
+            ++outResidency.TrackedTextures;
+            outResidency.ResidentBytes += RHI::TextureImage::ComputeMipChainBytes(entry.Info, entry.ResidentFirstMip);
+            outResidency.FullBytes += RHI::TextureImage::ComputeMipChainBytes(entry.Info, 0);
+            droppedSum += entry.ResidentFirstMip;
+        }
+        if (outResidency.TrackedTextures == 0)
+        {
+            return false;
+        }
+        outResidency.MeanDroppedMips =
+            static_cast<float>(droppedSum) / static_cast<float>(outResidency.TrackedTextures);
+        return true;
+    }
+
+    void TextureStreamingManager::Reset()
+    {
+        {
+            // 【Loaderスレッドが1件抱えている最中に表を捨てない】
+            // 抱えているIRHITexture*はこの後シーンごと破棄される
+            std::unique_lock<std::mutex> lock(m_RequestMutex);
+            m_Requests.clear();
+            m_IdleCV.wait(lock, [this] { return m_Processing == 0; });
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_ReadyMutex);
+            m_Ready.clear();
+        }
+        m_Entries.clear();
+        m_FreeSlots.clear();
+        m_TextureToEntry.clear();
+        m_ModelEntries.clear();
+        m_InFlightByModel.clear();
+        m_AliveEntries = 0;
+        m_ScanCursor = 0;
+    }
+
+    bool TextureStreamingManager::HasPendingRequests() const
+    {
+        std::lock_guard<std::mutex> lock(m_RequestMutex);
+        return !m_Requests.empty();
+    }
+
+    uint32_t TextureStreamingManager::ProcessRequests(RHI::IRHIDevice& device, size_t maxCount)
+    {
+        uint32_t processed = 0;
+        for (size_t i = 0; i < maxCount; ++i)
         {
             Request request;
             {
-                std::unique_lock<std::mutex> lock(m_RequestMutex);
-                m_RequestCV.wait(lock, [this] { return m_StopRequested || !m_Requests.empty(); });
-                if (m_StopRequested)
+                std::lock_guard<std::mutex> lock(m_RequestMutex);
+                if (m_Requests.empty())
                 {
-                    return;
+                    break;
                 }
-                request = m_Requests.front();
+                request = std::move(m_Requests.front());
                 m_Requests.pop_front();
+                // Resetがここで待つ。要求を抱えている間はテクスチャを破棄させない
+                ++m_Processing;
             }
 
-            // EntryのPath/Textureはビルド後に変わらないため、ロック無しで読んでよい
-            const Entry& entry = m_Entries[request.EntryIndex];
-
             ReadyItem ready;
-            ready.EntryIndex = request.EntryIndex;
+            ready.EntrySlot = request.EntrySlot;
+            ready.EntryGeneration = request.EntryGeneration;
             ready.FirstMip = request.FirstMip;
+            ready.TileState = request.TileState;
             try
             {
                 RHI::TextureImage image =
-                    RHI::TextureImage::LoadFromPackedTexture(entry.Path, request.FirstMip);
+                    RHI::TextureImage::LoadFromPackedTexture(request.Path, request.FirstMip);
 
                 // タイルリソース経路を先に試す。リソースもSRV番号もbindless番号も変えずに
                 // 済むぶんこちらが軽い。乗らない形(標準ミップが1段も無い=全部ミップテール)なら
-                // nullptrが返るので、リソースごと作り直す従来経路へ落とす。
-                // m_TileStateはこのワーカースレッドだけが書き換える
-                if (m_TiledResourcesTier > 0 && m_TileState[request.EntryIndex] != kTileUnavailable)
+                // nullptrが返るので、リソースごと作り直す従来経路へ落とす
+                if (m_TiledResourcesTier > 0 && request.TileState != kTileUnavailable)
                 {
                     RHI::TiledTextureDesc tiledDesc{};
-                    tiledDesc.Width = entry.Info.Width;
-                    tiledDesc.Height = entry.Info.Height;
-                    tiledDesc.MipLevels = entry.Info.MipLevels;
-                    tiledDesc.DxgiFormat = entry.Info.Format;
+                    tiledDesc.Width = request.Info.Width;
+                    tiledDesc.Height = request.Info.Height;
+                    tiledDesc.MipLevels = request.Info.MipLevels;
+                    tiledDesc.DxgiFormat = request.Info.Format;
                     ready.Pending =
-                        device->PrepareTiledTextureResidency(entry.Texture, tiledDesc, image, request.FirstMip);
-                    m_TileState[request.EntryIndex] = ready.Pending ? kTileInUse : kTileUnavailable;
+                        device.PrepareTiledTextureResidency(request.Texture, tiledDesc, image, request.FirstMip);
+                    ready.TileState = ready.Pending ? kTileInUse : kTileUnavailable;
                 }
 
                 if (!ready.Pending)
                 {
-                    ready.Pending = device->PrepareTextureContents(entry.Texture, image);
+                    ready.Pending = device.PrepareTextureContents(request.Texture, image);
                 }
             }
             catch (const std::exception& e)
             {
                 Core::Logger::Error(
                     "TextureStreaming",
-                    "常駐ミップの読み直しに失敗しました (" + WideToUtf8(entry.Path) + "): " + e.what());
+                    "常駐ミップの読み直しに失敗しました (" + WideToUtf8(request.Path) + "): " + e.what());
                 ready.Pending.reset();
             }
 
@@ -360,7 +497,14 @@ namespace Kurenai::Assets
                 std::lock_guard<std::mutex> lock(m_ReadyMutex);
                 m_Ready.push_back(std::move(ready));
             }
+            {
+                std::lock_guard<std::mutex> lock(m_RequestMutex);
+                --m_Processing;
+            }
+            m_IdleCV.notify_all();
+            ++processed;
         }
+        return processed;
     }
 
     uint32_t TextureStreamingManager::CommitReady(RHI::IRHIDevice& device)
@@ -391,10 +535,40 @@ namespace Kurenai::Assets
 
         uint32_t committed = 0;
         uint32_t failed = 0;
+        uint32_t discarded = 0;
         for (ReadyItem& item : batch)
         {
-            Entry& entry = m_Entries[item.EntryIndex];
+            // 発注数の表から外す。**Detachされていても外す**(破棄待ちを解く相手)
+            const auto inFlight = m_InFlightByModel.find(item.Owner);
+            if (inFlight != m_InFlightByModel.end() && --inFlight->second == 0)
+            {
+                m_InFlightByModel.erase(inFlight);
+            }
+
+            // 【Detachされた枠を先に返す】DetachModelは世代を進めるので、下の照合では
+            // 必ず不一致になる。ここで拾わないとPendingFreeのまま枠が永久に戻らない。
+            // Detachした枠は返すまで再利用されないため、これが指す先は取り違えようがない
+            if (item.EntrySlot < m_Entries.size() && m_Entries[item.EntrySlot].PendingFree)
+            {
+                m_Entries[item.EntrySlot].InFlight = false;
+                FreeEntrySlot(item.EntrySlot);
+                ++discarded;
+                continue;
+            }
+
+            // 【枠が別のテクスチャへ回っていないか確かめる】モデルがストリーミングで
+            // 出入りするため、発注してから戻るまでの間に枠の持ち主が変わりうる。
+            // 世代が違うものは差し替えず、GPUリソース(item.Pending)ごと捨てる
+            if (item.EntrySlot >= m_Entries.size() ||
+                m_Entries[item.EntrySlot].Generation != item.EntryGeneration)
+            {
+                ++discarded;
+                continue;
+            }
+
+            Entry& entry = m_Entries[item.EntrySlot];
             entry.InFlight = false;
+            entry.TileState = item.TileState;
 
             if (!item.Pending)
             {
@@ -415,7 +589,8 @@ namespace Kurenai::Assets
             std::lock_guard<std::mutex> lock(m_StatsMutex);
             m_CommittedUpdates += committed;
             m_FailedUpdates += failed;
-            m_InFlightCount -= std::min<uint32_t>(m_InFlightCount, committed + failed);
+            m_DiscardedUpdates += discarded;
+            m_InFlightCount -= std::min<uint32_t>(m_InFlightCount, committed + failed + discarded);
         }
         return committed;
     }
@@ -423,7 +598,7 @@ namespace Kurenai::Assets
     void TextureStreamingManager::UpdateTargets(
         const XMFLOAT3& cameraPosition, float tanHalfFovY, uint32_t screenHeight, float deltaTime)
     {
-        if (m_Entries.empty() || screenHeight == 0 || tanHalfFovY <= 0.0f)
+        if (m_AliveEntries == 0 || screenHeight == 0 || tanHalfFovY <= 0.0f)
         {
             return;
         }
@@ -440,7 +615,29 @@ namespace Kurenai::Assets
             {
                 m_ScanCursor = 0;
             }
-            Entry& entry = m_Entries[m_ScanCursor++];
+            const size_t slot = m_ScanCursor++;
+            Entry& entry = m_Entries[slot];
+
+            // 空き枠(Detach済み・まだ使われていない)は飛ばす
+            if (!entry.Alive)
+            {
+                continue;
+            }
+
+            // このEntryぶんの要求を組み立てる。Loaderスレッドが触るのはこの写しだけ
+            const auto makeRequest = [&entry, slot](uint32_t firstMip)
+            {
+                Request request;
+                request.EntrySlot = slot;
+                request.EntryGeneration = entry.Generation;
+                request.FirstMip = firstMip;
+                request.TileState = entry.TileState;
+                request.Owner = entry.Owner;
+                request.Texture = entry.Texture;
+                request.Path = entry.Path;
+                request.Info = entry.Info;
+                return request;
+            };
 
             // 無効にしている間は全ミップ常駐へ戻す(A/Bの対照を同じ起動の中で取るため)。
             // 追跡表は壊さないので、もう一度有効にすればそのまま効き始める
@@ -450,7 +647,7 @@ namespace Kurenai::Assets
                 {
                     entry.InFlight = true;
                     entry.RequestedFirstMip = 0;
-                    newRequests.push_back(Request{ m_ScanCursor - 1, 0 });
+                    newRequests.push_back(makeRequest(0));
                 }
                 entry.CoarserHoldSeconds = 0.0f;
                 continue;
@@ -511,7 +708,7 @@ namespace Kurenai::Assets
 
             entry.InFlight = true;
             entry.RequestedFirstMip = target;
-            newRequests.push_back(Request{ m_ScanCursor - 1, target });
+            newRequests.push_back(makeRequest(target));
         }
 
         if (newRequests.empty())
@@ -527,10 +724,13 @@ namespace Kurenai::Assets
                 if (m_Requests.size() >= kMaxPendingRequests)
                 {
                     // 積みきれなかったぶんは次の走査で拾い直す
-                    m_Entries[request.EntryIndex].InFlight = false;
+                    m_Entries[request.EntrySlot].InFlight = false;
                     continue;
                 }
-                m_Requests.push_back(request);
+                // 【破棄待ちの判定はここで足す】受理したものだけ数える。
+                // 積めなかったぶんまで数えると、モデルの破棄が永久に解けなくなる
+                ++m_InFlightByModel[request.Owner];
+                m_Requests.push_back(std::move(request));
                 ++accepted;
             }
         }
@@ -540,7 +740,10 @@ namespace Kurenai::Assets
                 std::lock_guard<std::mutex> lock(m_StatsMutex);
                 m_InFlightCount += accepted;
             }
-            m_RequestCV.notify_all();
+            if (m_Notifier)
+            {
+                m_Notifier();
+            }
         }
     }
 
@@ -548,7 +751,8 @@ namespace Kurenai::Assets
     {
         Stats stats;
         stats.Enabled = m_Enabled;
-        stats.TrackedTextures = static_cast<uint32_t>(m_Entries.size());
+        stats.TrackedTextures = m_AliveEntries;
+        stats.TrackedModels = static_cast<uint32_t>(m_ModelEntries.size());
         {
             std::lock_guard<std::mutex> lock(m_RequestMutex);
             stats.PendingRequests = static_cast<uint32_t>(m_Requests.size());
@@ -557,6 +761,7 @@ namespace Kurenai::Assets
             std::lock_guard<std::mutex> lock(m_StatsMutex);
             stats.CommittedUpdates = m_CommittedUpdates;
             stats.FailedUpdates = m_FailedUpdates;
+            stats.DiscardedUpdates = m_DiscardedUpdates;
             stats.InFlight = m_InFlightCount;
         }
 
@@ -569,15 +774,17 @@ namespace Kurenai::Assets
         stats.TilePoolReservedBytes = m_TilePoolReservedBytes;
         stats.TilePoolUsedBytes = m_TilePoolUsedBytes;
 
-        for (size_t index = 0; index < m_Entries.size(); ++index)
+        for (const Entry& entry : m_Entries)
         {
-            const Entry& entry = m_Entries[index];
+            // 空き枠は数に入れない
+            if (!entry.Alive)
+            {
+                continue;
+            }
             const size_t band = SizeBandOf(entry.Info);
             SizeBandStats& bandStats = stats.Bands[band];
 
-            // m_TileStateはワーカースレッドが書くが、統計表示のための読み出しなので
-            // 1フレーム古い値を拾っても支障は無い
-            if (index < m_TileState.size() && m_TileState[index] == kTileInUse)
+            if (entry.TileState == kTileInUse)
             {
                 ++bandStats.TiledCount;
                 ++stats.TiledTextures;
@@ -626,13 +833,15 @@ namespace Kurenai::Assets
             ? 100.0 * static_cast<double>(stats.ResidentBytes) / static_cast<double>(stats.FullBytes)
             : 0.0;
 
-        char summary[256];
+        char summary[320];
         std::snprintf(
             summary, sizeof(summary),
-            "追跡 %u枚 / 常駐 %.1f MB / 全ミップなら %.1f MB (%.1f%%) / 差し替え累計 %llu件 (失敗 %llu件)",
-            stats.TrackedTextures, residentMB, fullMB, ratio,
+            "追跡 %u枚 (%uモデル) / 常駐 %.1f MB / 全ミップなら %.1f MB (%.1f%%) / "
+            "差し替え累計 %llu件 (失敗 %llu件 / 破棄で行き先を失ったもの %llu件)",
+            stats.TrackedTextures, stats.TrackedModels, residentMB, fullMB, ratio,
             static_cast<unsigned long long>(stats.CommittedUpdates),
-            static_cast<unsigned long long>(stats.FailedUpdates));
+            static_cast<unsigned long long>(stats.FailedUpdates),
+            static_cast<unsigned long long>(stats.DiscardedUpdates));
         Core::Logger::Info("TextureStreaming", prefix + summary);
 
         // 【タイルリソースがどこに効いているか】64KBタイルはBC7で256x256テクセルを覆うため、

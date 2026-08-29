@@ -7280,7 +7280,35 @@ CPUとGPUのオーバーラップが消えます。
 遅延解放キューを通します。
 </p>
 
-<h3>42.3 距離はメッシュ単位で測る</h3>
+<p>
+第1段を走らせるのは<strong>モデルストリーミングと同じLoaderスレッド</strong>です
+(<code>KurenaiEngine3D::LoaderThreadMain</code> が
+<code>TextureStreamingManager::ProcessRequests</code> を呼びます)。
+<strong>専用スレッドは立てません。</strong>別に立てると同じディスクを2本で奪い合い、
+GPUアップロードがモデル読み込みと並走してVRAMのピークが二重になります。
+モデル1件を読むごとに割り込ませるので、街を流している最中もミップの差し替えは止まりません。
+<code>ProcessRequests</code> は追跡表(<code>m_Entries</code>)を一切参照せず、
+必要な情報は要求が写しで持ちます。これでRenderスレッド側の付け外しとロック無しで共存します。
+</p>
+
+<h3>42.3 追跡表はモデルの出入りに追随する</h3>
+
+<p>
+<code>[Scene]StreamingDistance</code> を使うシーンでは、シーン読み込みの時点でモデルの実体が
+1つもありません。<code>AttachModel</code> / <code>DetachModel</code> が
+<code>UpdateModelStreaming</code> の差し込み・破棄と同じ場所で呼ばれ、追跡表が出入りします。
+</p>
+
+<p>
+枠(添字)は<strong>詰めずに使い回します</strong>。発注済みの要求は枠の添字で戻ってくるため、
+配列から要素を消して詰めると別のテクスチャの結果として適用されてしまいます。
+Detachでは世代を1つ進めて空き枠へ返し、戻ってきた結果は世代が一致するものだけを適用します。
+また<strong>読み直し中のモデルは破棄させません</strong> ——
+<code>IsModelBusy()</code> が発注中かをモデル単位で答え、破棄待ちの列がそれを見て解放を先送りします
+(フレーム数の遅延では足りません。1件が数十msかかることがあります)。
+</p>
+
+<h3>42.4 距離はメッシュ単位で測る</h3>
 
 <p>
 <strong>モデルインスタンス単位のAABBまでの距離では成立しません。</strong>街区全体を覆う
@@ -7291,7 +7319,7 @@ CPUとGPUのオーバーラップが消えます。
 ワールドへ変換して使います。
 </p>
 
-<h3>42.4 DX12タイルリソース</h3>
+<h3>42.5 DX12タイルリソース</h3>
 
 <p>
 <code>GetTiledResourcesTier()</code>が2以上を返す環境では、予約リソース
@@ -7309,7 +7337,7 @@ CPUとGPUのオーバーラップが消えます。
 <code>ID3D12Device::GetResourceTiling</code>の実測値を使います。
 </p>
 
-<h3>42.5 DX12＋Tier 2以上でしか効かない部分</h3>
+<h3>42.6 DX12＋Tier 2以上でしか効かない部分</h3>
 
 <table>
 <tr><th>機能</th><th>DX11</th><th>DX12</th></tr>
