@@ -268,6 +268,11 @@ namespace Kurenai::RHI
         // falseの環境では従来の頂点シェーダー + DrawIndexedで描くこと
         virtual bool SupportsMeshShader() const = 0;
 
+        // IRHICommandList::DispatchMeshIndirectが使えるか。
+        // メッシュシェーダー対応に加えて、間接起動用のコマンドシグネチャの作成に
+        // 成功している必要がある(DX11は常にfalse)
+        virtual bool SupportsIndirectDispatchMesh() const { return false; }
+
         // 増幅シェーダー(任意)+ メッシュシェーダー + ピクセルシェーダーのパイプラインステート。
         // 入力レイアウトを持たない点以外はCreatePipelineStateと同じ扱いができる。
         // 非対応環境・作成失敗時はログを出してnullptrを返す(例外は投げない)

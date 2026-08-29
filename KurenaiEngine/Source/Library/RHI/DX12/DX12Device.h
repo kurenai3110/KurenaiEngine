@@ -156,6 +156,10 @@ namespace Kurenai::RHI
         uint32_t GetBindlessUsedCount() const override;
         uint32_t GetBindlessCapacity() const override;
         uint32_t RegisterBindlessUAV(IRHIBuffer* buffer) override;
+        bool SupportsIndirectDispatchMesh() const override
+        {
+            return m_SupportsMeshShader && m_DispatchMeshCommandSignature != nullptr;
+        }
         bool SupportsMeshShader() const override { return m_SupportsMeshShader; }
         bool SupportsSoftwareRaster() const override { return m_SupportsSoftwareRaster; }
 
@@ -167,6 +171,9 @@ namespace Kurenai::RHI
         // 引数はuint3(スレッドグループ数)1個だけで、内容がパスによらず不変のため
         // デバイス初期化時に1つ作って使い回す
         ID3D12CommandSignature* GetDispatchCommandSignature() const { return m_DispatchCommandSignature.Get(); }
+        // DX12CommandList::DispatchMeshIndirectがExecuteIndirectへ渡すコマンドシグネチャ。
+        // メッシュシェーダー非対応環境とルートシグネチャ作成失敗時はnullptrのまま
+        ID3D12CommandSignature* GetDispatchMeshCommandSignature() const { return m_DispatchMeshCommandSignature.Get(); }
 
     private:
         // CreateBottomLevelAS/CreateTopLevelASの共通部分。組み立て済みの構築入力を受け取り、
@@ -202,6 +209,9 @@ namespace Kurenai::RHI
         void CreateComputeRootSignature();
         // 間接ディスパッチ(ExecuteIndirect)用のコマンドシグネチャを1つだけ作る
         void CreateDispatchCommandSignature();
+        // 間接DispatchMesh用のコマンドシグネチャ。ルート定数バッファビュー(b1)を
+        // 引数から差し替えるため、CreateCommandSignatureへメッシュ用ルートシグネチャを渡す
+        void CreateDispatchMeshCommandSignature();
         // メッシュシェーダーパイプライン専用のルートシグネチャ。非対応環境では何もしない
         void CreateMeshRootSignature();
         // 3つのルートシグネチャが共通で足すbindless関連のフラグ。対応環境でのみ
@@ -367,6 +377,8 @@ namespace Kurenai::RHI
         // 間接ディスパッチ用コマンドシグネチャ(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH 1個)。
         // ルートシグネチャに触らない引数のみのためpRootSignatureはnullptrでよい
         Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchCommandSignature;
+        // 間接DispatchMesh用(CreateDispatchMeshCommandSignature)
+        Microsoft::WRL::ComPtr<ID3D12CommandSignature> m_DispatchMeshCommandSignature;
 
         std::unique_ptr<DX12DescriptorHeap> m_RtvHeap;
         std::unique_ptr<DX12DescriptorHeap> m_DsvHeap;

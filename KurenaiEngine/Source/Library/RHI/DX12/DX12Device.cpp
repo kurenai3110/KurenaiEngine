@@ -40,6 +40,10 @@ namespace Kurenai::RHI
         // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
         // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)
         constexpr uint32_t kTextureSlotCount = 22;
+        // ObjectConstants(b1)を受けるルートパラメータの番号。
+        // CreateRootSignature / CreateMeshRootSignature の rootParams[1] と一致させること。
+        // 間接DispatchMeshのコマンドシグネチャが、この番号のCBVをドローごとに差し替える
+        constexpr uint32_t kRootParamObjectConstants = 1;
         // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
         // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler、s3 = VolumeSampler
         // (役割の定義はShaders/Samplers.hlsli)。どの実体が入るかはパスごとにエンジン側が選んだセットで決まる。
@@ -547,6 +551,7 @@ namespace Kurenai::RHI
         CreateComputeRootSignature();
         CreateMeshRootSignature();
         CreateDispatchCommandSignature();
+        CreateDispatchMeshCommandSignature();
 
         ID3D12DescriptorHeap* heaps[] = { m_ShaderVisibleSrvHeap->GetHeap(), m_ShaderVisibleSamplerHeap->GetHeap() };
         m_CommandList->SetDescriptorHeaps(2, heaps);
@@ -742,6 +747,50 @@ namespace Kurenai::RHI
         ThrowIfFailed(
             m_Device->CreateCommandSignature(&signatureDesc, nullptr, IID_PPV_ARGS(&m_DispatchCommandSignature)),
             "間接ディスパッチ用コマンドシグネチャの作成に失敗しました");
+    }
+
+    void DX12Device::CreateDispatchMeshCommandSignature()
+    {
+        // メッシュシェーダーが無ければ間接起動する相手がいない。
+        // CreateMeshRootSignatureがルートシグネチャの作成に失敗した場合も
+        // そこでm_SupportsMeshShaderが降りているので、ここは呼ばれても素通りする
+        if (!m_SupportsMeshShader || !m_MeshRootSignature)
+        {
+            return;
+        }
+
+        // 引数は「ルート定数バッファビュー(b1)」と「DispatchMeshのスレッドグループ数」の2つ。
+        //
+        // 【ルートシグネチャを渡す必要がある】引数バッファがルートシグネチャの内容
+        // (ここではルートパラメータ1のCBV)を書き換えるため、DispatchIndirect側のように
+        // nullptrでは作成できない。渡すのは実際に描画で使うメッシュ用ルートシグネチャで、
+        // これと違うPSOでExecuteIndirectするとデバッグレイヤが弾く
+        D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[2]{};
+        argumentDescs[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW;
+        argumentDescs[0].ConstantBufferView.RootParameterIndex = kRootParamObjectConstants;
+        argumentDescs[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH;
+
+        // 8(CBVのGPU仮想アドレス) + 12(uint3) = 20バイトだが、24へ切り上げる。
+        // 【切り上げる理由】次の要素の先頭に来るGPU仮想アドレスを8バイト境界へ載せるため。
+        // ByteStrideは引数の合計より大きくてよい(隙間は読まれない)
+        D3D12_COMMAND_SIGNATURE_DESC signatureDesc{};
+        signatureDesc.ByteStride = IRHICommandList::kDispatchMeshIndirectArgStride;
+        signatureDesc.NumArgumentDescs = 2;
+        signatureDesc.pArgumentDescs = argumentDescs;
+
+        const HRESULT hr = m_Device->CreateCommandSignature(
+            &signatureDesc, m_MeshRootSignature.Get(), IID_PPV_ARGS(&m_DispatchMeshCommandSignature));
+        if (FAILED(hr))
+        {
+            // ここで落とすとメッシュシェーダー描画そのものが止まる。間接起動を諦めれば
+            // 従来のCPUループで描けるため、警告に留めてnullptrのままにする
+            // (DX12Device::SupportsIndirectDispatchMeshがfalseを返し、呼び出し側が縮退する)
+            Core::Logger::Warning(
+                "DX12",
+                std::string("間接DispatchMesh用コマンドシグネチャの作成に失敗しました") +
+                    "(間接描画を無効にします) hr=" + std::to_string(static_cast<long>(hr)));
+            m_DispatchMeshCommandSignature.Reset();
+        }
     }
 
     void DX12Device::ExecuteCommandList()
