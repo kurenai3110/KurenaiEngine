@@ -606,6 +606,102 @@ SSRのレイマーチング高速化の土台として使えます。現時点�
 ポインタでソートする(DX12バックエンドの「直前の描画と同じテクスチャならSRVテーブルを使い回す」
 最適化のヒット率を上げるため)。
 </p>
+
+<h3>9.1 インスタンシング(同じモデルを1ドローへまとめる)</h3>
+
+<p>
+同じ<code>.kmodel</code>を指すインスタンスを<code>DrawIndexed(..., instanceCount)</code>の
+1回にまとめる。インスタンスごとに違う<code>World</code>/<code>NormalMatrix</code>/
+<code>TangentSignFlip</code>は定数バッファでは渡せないため、頂点シェーダー専用のSRV(t0)へ
+バインドした<code>StructuredBuffer&lt;ModelInstanceRecord&gt;</code>を
+<code>SV_InstanceID</code>で引く(<code>Shaders/3D/ObjectConstants.hlsli</code>の
+<code>FetchModelInstance</code>)。<code>ObjectConstants</code>の
+<code>InstancingEnabled</code>が0のときは従来どおり定数バッファの値を返すので、
+まとめられなかったインスタンスの描画は1ビットも変わらない。
+</p>
+
+<p>
+<strong>頂点ストリーム方式(<code>InputSlotClass = PER_INSTANCE_DATA</code>)は採れない。</strong>
+このRHIの<code>InputElementDesc</code>は<code>InputSlot</code>も<code>InputSlotClass</code>も
+持たず、<code>SetVertexBuffer</code>もスロットを取らないため、頂点バッファは常に1本きりである。
+また<strong>D3D11/D3D12とも<code>StartInstanceLocation</code>は<code>SV_InstanceID</code>へ
+加算されない</strong>(<code>SV_InstanceID</code>は常に0から始まる)ので、バッファ内の開始位置は
+ドロー引数では伝えられない。定数バッファの<code>InstanceBase</code>で渡している。
+</p>
+
+<h4>まとめる単位(バッチ)</h4>
+
+<p>
+グループ化のキーは<strong>(モデル, <code>IsMirrored</code>, <code>IsWater</code>)</strong>。
+後ろ2つはパイプラインステートが分かれるため、違うものを同じドローへまとめてはいけない
+――まとめると片方が裏面として全部捨てられる。
+グループは空間セルでソートしてから<code>kMaxInstancesPerBatch</code>(128)で刻む。
+上限が無いと「街灯を市街全域に5000個」のようなグループが1つの巨大AABBになり、
+<strong>どのパスからも一度も間引かれなくなる</strong>。
+</p>
+
+<p>
+バッチの一覧は<strong>2組</strong>持つ。G-Bufferは各インスタンスがそのフレームに選んだ段を、
+シャドウは常に最も粗い段(<code>GetCoarsestLOD</code>)を描くため、同じ組では括れないためである。
+変換そのものは同じなので、レコードは1本のバッファへ2区画として載せ、
+<strong>更新は1フレームに1回だけ</strong>行う。パスごとに詰め直す案を採らないのは、
+DX12の<code>StructuredReadOnly</code>が
+<code>MaxUpdatesPerFrame × kFrameCount + 1</code>段のUPLOADヒープを常時確保するためで、
+反射プローブの6面ぶんを見込むとVRAMが跳ねる。
+</p>
+
+<p>
+バッチに<strong>入れない</strong>ものが4つある。
+</p>
+<ul>
+<li>まだ読み込まれていない段(ストリーミング中)</li>
+<li>LOD切替のフェード中。<code>DitherFade</code>はインスタンスごとに違う定数で、1ドローにまとめられない</li>
+<li><strong>メッシュシェーダー経路に載るモデル。</strong><code>DispatchMesh</code>にインスタンス数の
+概念が無い。<strong>DX12でメッシュレット描画が有効なあいだ、この機能が働くのは水面・メッシュレットを
+持たないモデル・メッシュレット描画を切ったときに限られる</strong></li>
+<li>まとめる相手がいないもの(1体だけのグループ)。従来とまったく同じ描画になる</li>
+</ul>
+
+<h4>描画側</h4>
+
+<p>
+バッチと、まとめられなかった1体を<code>InstanceDrawUnit</code>という同じ形にして
+<strong>1つのループで回す</strong>。バッチ用の描画コードを別に書くと
+「まとめたときだけ条件を間違える」類のずれが入り込むためで、判定も定数もドロー発行も1か所に保つ。
+シーンの全インスタンスが<strong>ちょうど1回ずつ</strong>描画単位として現れることが不変条件で、
+取りこぼすと物が消え、二重に出すと同じ場所へ2回描いてZファイティングになる。
+</p>
+
+<p>
+適用先は<strong>深度プリパス / G-Buffer / シャドウ</strong>の3パス。
+半透明パスは距離降順ソートで描いており、まとめると前後関係が破れるため対象にしない。
+DDGIのラスタ経路はプローブ数の予算計算とドロー数を突き合わせる契約があるため対象にしない。
+反射プローブと平面反射は頂点シェーダー側だけ通してあり、呼び出しの差し替えは今後行う。
+</p>
+
+<p>
+<strong>バッチ内ではメッシュ単位カリングを行わない。</strong>メッシュのワールドAABBは
+「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。代表インスタンスだけで判定すると
+他の個体の見えているメッシュまで落ちて物が消える。
+<strong>深度プリパスとG-Bufferで同じ条件にしてある</strong>ことが要点で、片方だけが外すと
+深度を書いた画素と色を書く画素がずれて穴が開く。
+</p>
+
+<p>
+<strong>描画の直前に必ず<code>SetVertexShaderResourceBuffer</code>を張り直す。</strong>
+頂点シェーダー用SRVはDX11/DX12ともt0の1本しかなく、ドローンショーが同じスロットを使う。
+上書きされたまま描くと、全インスタンスがドローンの座標を行列として読んで画面外へ飛ぶ。
+</p>
+
+<p>
+効くのは同じモデルを並べたシーンだけである。実測(RTX 4070 Ti / Release / 1280x720 /
+<code>InstancingTest.kscene</code> 256体 / DX11)ではドローコールが
+<strong>2,364(G-Buffer 512 / シャドウ 1,340 / 深度プリパス 512)から
+34(6 / 22 / 6)へ</strong>、CPUフレーム時間が0.52msから0.32ms、GPUフレーム時間が
+5.5〜6.5msから0.63msになった。<strong>絵はDX11/DX12とも画素完全一致</strong>である。
+一方でPLATEAU・Sponza・Bistroは全モデルがユニークなのでバッチが1つも作られず、
+発行されるコマンド列は従来と同一になる。
+</p>
 </section>
 
 <section id="cache">

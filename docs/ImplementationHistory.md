@@ -5389,3 +5389,93 @@ SHA256 が一致する。
 いれば、テクスチャが黙って減ったアセットを終了コード0のまま量産していたことになる。
 
 数値と再現手順は [ImplementationDetail.md](ImplementationDetail.md) 51章。
+
+## 58. インスタンシングを入れる(RHIに無かったもの / 複製したcbufferが2本ずれていた)
+
+### 58.1 RHIに「インスタンス数」を渡す道が無かった
+
+着手時点で `IRHICommandList::DrawIndexed` は `(indexCount, startIndexLocation, baseVertexLocation)`
+の3引数しか持たず、**DX12の実装は `DrawIndexedInstanced(..., 1, ...)` と1をハードコード**していた。
+`SV_InstanceID` を使うHLSLも1本も無かった。
+
+頂点ストリームによるインスタンシング(`InputSlotClass = PER_INSTANCE_DATA`)は採れない。
+`InputElementDesc` に `InputSlot` も `InputSlotClass` も無く、`SetVertexBuffer` もスロットを
+取らないため、頂点バッファは常に1本きりだからである。
+代わりに、ドローンショーが既に使っていた**頂点シェーダー専用SRV**
+(`SetVertexShaderResourceBuffer`)へ構造化バッファを載せ、`SV_InstanceID` で引く形にした。
+bindlessを使わないのでDX11でも効く。
+
+ここで一度躓きかけたのが**開始位置の渡し方**である。D3D11/D3D12とも
+`StartInstanceLocation` は `SV_InstanceID` へ加算されない(`SV_InstanceID` は常に0から始まる)。
+ドロー引数では伝えられないので、定数バッファの `InstanceBase` で渡している。
+
+### 58.2 同じレジスタへの二重宣言は通るのか(推測せず実験した)
+
+頂点シェーダー用のルートSRVは **t0**(`D3D12_SHADER_VISIBILITY_VERTEX`)だが、
+`GBufferCommon.hlsli` はピクセルシェーダー用に `Texture2D BaseColorTexture : register(t0)` を
+宣言している。同じファイル内で t0 が二重に宣言されたときコンパイラが通すのかは分からなかった。
+
+通らない場合に備えてルートSRVのレジスタを移す後退線を用意していたが、**先に実験して潰した**。
+`VSMain`(StructuredBuffer t0)と `PSMain`(Texture2D t0)を同居させた使い捨てのHLSLを書き、
+fxc(`vs_5_0`/`ps_5_0`)と dxc(`vs_6_6`/`ps_6_6`)の両方でコンパイルしたところ、
+**4通りとも通った**。エントリポイントごとに片方しか残らないためである。
+後退線は不要になり、他のシェーダーへの影響はゼロで済んだ。
+
+### 58.3 複製したcbufferが2本ずれていた
+
+`ObjectConstants`(b1)は GBufferCommon / Shadow / ShadowMeshlet / Transparent / ProbeCapture /
+PlanarReflection の6本がそれぞれ**手書きで複製**していた。cbufferは宣言順にレイアウトされるため、
+末尾にフィールドを足すには「読みたいところまでの全フィールドを正しい順序で」書く必要がある。
+
+インスタンシングのために2フィールドを足すにあたって全部を突き合わせたところ、
+**2本が既にずれていた**。
+
+| ファイル | 症状 |
+|---|---|
+| `Shadow.hlsl` | `DitherFade` の宣言が抜け、`MaterialTableIndex` 以降が4バイト手前を読む |
+| `ShadowMeshlet.hlsl` | 同上 |
+
+fxcのリフレクション出力で確認した実測: `Shadow.hlsl` は `MaterialTableIndex` が Offset 204。
+C++側の `struct ObjectConstants` では 204 は `DitherFade` で、`MaterialTableIndex` は 208 である。
+
+**実害があったのは `ShadowMeshlet.hlsl` のほう**だった。`Shadow.hlsl` 側は
+`MaterialTableIndex` を読む条件に `input.MaterialIndex != kShadowInvalidMaterialIndex` が
+先にあり、頂点シェーダー経路の `VSMainCutout` は常に無効番号を書くため発火しない。
+一方 `ShadowMeshlet.hlsl` は増幅シェーダーのマテリアルふるい分けで
+`MeshletFilterReject` / `MeshletFilterRequire` を直に読んでおり、**隣のフィールドを
+Rejectマスク・Requireマスクとして使っていた**(DX12のメッシュレット影の経路)。
+
+これは「複製のどれか1つで並びがずれると、その1パスだけが静かに壊れる」という、
+以前 `PlanarReflection.hlsl` が宣言を1本落として水面の鏡像を丸ごと消したのと同じ型の不具合である。
+同じ型が3度目になるため、**宣言を `Shaders/3D/ObjectConstants.hlsli` の1本へまとめた。**
+3Dのモデル描画シェーダーはすべてこれをincludeする。失敗の型そのものが無くなる。
+
+### 58.4 カットアウトの影だけインスタンシングが抜けていた
+
+シャドウパスは不透明とカットアウトで頂点シェーダーが分かれている(`VSMain` / `VSMainCutout`)。
+`VSMain` だけを対応させ、`VSMainCutout` を忘れていた。C++側は `cutout` かどうかで
+パイプラインステートを切り替えるだけで、**カットアウトのメッシュもバッチのまま
+`DrawIndexed(..., instanceCount)` を発行する**。そのため定数バッファの `World`
+(＝代表インスタンスのもの)が使われ、バッチ内の全個体の影が代表の位置に重なって落ちる。
+
+この欠落は**絵では見つからなかった**。検証に使った2つのシーンに `alphaMode = MASK` の
+マテリアルが1つも無く、`VSMainCutout` へ到達しなかったためである
+(`InstancingTest` の `MeshletStage` は `alphaMode` の指定が無く、`MultiModelTest` の
+`MaterialTest` は `BLEND` が1件だけ)。**同じモデルを複数配置し、かつMASKマテリアルを持つ
+シーンを作った瞬間に壊れる**種類のもので、コードを読んで見つけた。
+
+教訓は「検証シーンが機能の入口を通っていないなら、そのシーンで絵が合っていても
+その入口は検証されていない」という一点に尽きる。
+
+### 58.5 効く場所と効かない場所
+
+正直に書くと、**この機能はPLATEAUには効かない。** 671タイルも80タイルも全部ユニークな
+`.kmodel` で、同一モデルの多重配置はシーン全22本のうち `MultiModelTest.kscene`(3配置)
+だけだった。効き方を数値で示すために、同じモデルを256体並べた
+`Scenes/InstancingTest.kscene` を用意している。
+
+**DX12でメッシュレット描画が有効なあいだも効かない。** `DispatchMesh` にインスタンス数の
+概念が無いため、1モデル1ドローで描けるモデルはバッチに入れないようにしている。
+DX12側の経路が動くことは、メッシュレット描画を切って確かめた。
+
+数値と根拠は [ImplementationDetail.md](ImplementationDetail.md) 54章。
