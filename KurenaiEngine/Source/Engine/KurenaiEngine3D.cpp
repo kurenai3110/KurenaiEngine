@@ -5145,9 +5145,21 @@ namespace Kurenai
             // --- レイトレーシングの作り直し(Loaderスレッドで行う) ---------------------------
             if (raytracingRebuild)
             {
+                // 【計測用の一時スイッチ】KURENAI_NO_RT が設定されていたら高速化構造を作らない。
+                // VRAMの内訳(BLAS/TLASがどれだけ占めているか)を切り分けるためだけのもの
+                size_t envLength = 0;
+                char envValue[8] = {};
+                const bool skipRaytracing =
+                    (getenv_s(&envLength, envValue, sizeof(envValue), "KURENAI_NO_RT") == 0 && envLength > 0);
+                if (skipRaytracing)
+                {
+                    Core::Logger::Warning(
+                        "KurenaiEngine3D",
+                        "KURENAI_NO_RTが設定されているため、レイトレーシングの高速化構造を構築しません(計測用)");
+                }
                 const auto startTime = std::chrono::steady_clock::now();
                 auto rebuilt = std::make_unique<Assets::RaytracingScene>();
-                if (rebuilt->Build(*m_Device, m_Scene))
+                if (!skipRaytracing && rebuilt->Build(*m_Device, m_Scene))
                 {
                     const double elapsedMs =
                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startTime).count();
