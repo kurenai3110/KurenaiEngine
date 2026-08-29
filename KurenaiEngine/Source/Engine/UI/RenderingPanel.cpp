@@ -329,12 +329,22 @@ namespace Kurenai::UI
             "モデル単位のGPUカリング###ModelCullGpu", &m_Engine.m_ModelCullGpuEnabled,
             Defaults::ModelCullGpuEnabled,
             "コンピュートシェーダーが、描画候補のワールドAABBを視錐台とHi-Zで判定し、"
-            "生き残りのDispatchMesh引数と統計をGPU上に作る。\n\n"
-            "【まだ描画発行には繋がっていない】実際に描くものを決めているのはCPU側のループのまま。"
-            "GPUの判定がCPUと一致することを先に確かめるための段で、切っても絵は変わらない。\n\n"
+            "生き残りのExecuteIndirect引数と統計をGPU上に作る。\n\n"
+            "【切ると下の間接描画も止まる】判定が無ければ引数が作れないため、"
+            "描画は従来のCPUループへ戻る。\n\n"
             "【このパスのコストはここを切り替えて測ること】"
             "GPU内訳のパス別の値は、直後のリソース遷移による待ちを吸ってしまうことがある。"
             "総GPU時間のON/OFF差のほうが信用できる");
+
+        CheckboxEx(
+            "カリング結果で間接描画する###ModelCullIndirect", &m_Engine.m_ModelCullIndirectEnabled,
+            Defaults::ModelCullIndirectEnabled,
+            "生き残った候補だけをExecuteIndirectで発行する。深度プリパスとG-Bufferの"
+            "1モデル1ドロー経路が、CPUのループではなくこの引数で描かれるようになる。\n\n"
+            "【切っても判定と計数は動く】切ると描画だけが従来のCPUループへ戻る。"
+            "「判定が正しいか」と「間接描画が速いか」を別々に確かめるためトグルを分けてある。\n\n"
+            "【DX11とメッシュシェーダー非対応環境では効かない】"
+            "その場合は入れてもCPUループのまま描かれる(Perfログの発行数が0のままになる)");
 
         EndParamGroup();
 

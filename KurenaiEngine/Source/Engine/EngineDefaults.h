@@ -547,10 +547,13 @@ namespace Kurenai::Defaults
     // 増幅シェーダーのアトミックはグループ単位に集約してあり、切るのは実測して重いと分かってから
     inline constexpr bool MeshletCullStatsEnabled = true;
     // モデル単位のGPUカリング(Stage 5-3)を走らせるか。
-    //
-    // 【既定は有効だが、この段階では描画発行に繋がっていない】判定して数えるだけで、
-    // 実際に描くものはCPU側のループが決めている。CPUの判定と突き合わせて
-    // 「GPU側の判定が正しいか」を確かめるための段。ExecuteIndirect へ繋ぐのはその後。
     // メッシュレット経路とHi-Zが要るので、非対応環境では走らない
     inline constexpr bool ModelCullGpuEnabled = true;
+    // カリング結果で実際に描画発行(ExecuteIndirect)まで行うか。
+    //
+    // 【切っても判定と計数は動く】falseなら描くのは従来のCPUループのままで、
+    // GPU側の判定はカウンタに残る。「判定が正しいか」と「間接描画が速いか」は
+    // 別々に確かめたいので、トグルを分けてある。
+    // DX11とメッシュシェーダー非対応環境では、この値によらず従来のCPUループへ縮退する
+    inline constexpr bool ModelCullIndirectEnabled = true;
 }
