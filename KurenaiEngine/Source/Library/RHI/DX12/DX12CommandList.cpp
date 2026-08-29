@@ -824,6 +824,68 @@ namespace Kurenai::RHI
         ReleaseComputeUavBindingsAfterDispatch();
     }
 
+    void DX12CommandList::DispatchMeshIndirect(
+        IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount, uint32_t countOffsetInBytes)
+    {
+        if (!argsBuffer)
+        {
+            Core::Logger::Error("DX12", "DispatchMeshIndirect: 引数バッファがnullptrです。描画をスキップします");
+            return;
+        }
+        if (maxCommandCount == 0)
+        {
+            // 候補が1件も無いフレーム。エラーではないので黙って何もしない
+            return;
+        }
+
+        if (!m_CurrentPipelineIsMesh)
+        {
+            // 通常のグラフィックスPSOのままだと、コマンドシグネチャが要求する
+            // ルートシグネチャ(メッシュ用)と食い違う。DispatchMeshと同じ理由で早めに知らせる
+            Core::Logger::Error(
+                "DX12", "DispatchMeshIndirect: 先にメッシュシェーダーのパイプラインステートを設定してください");
+            return;
+        }
+
+        auto* dx12Buffer = static_cast<DX12Buffer*>(argsBuffer);
+        if (!dx12Buffer->IsIndirectArgs())
+        {
+            Core::Logger::Error(
+                "DX12", "DispatchMeshIndirect: BufferUsage::IndirectArgs以外のバッファが渡されました。描画をスキップします");
+            return;
+        }
+        if ((argsOffsetInBytes % 4) != 0 || (countOffsetInBytes % 4) != 0)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "DispatchMeshIndirect: オフセット(引数 " + std::to_string(argsOffsetInBytes) + " / 件数 " +
+                    std::to_string(countOffsetInBytes) + ")が4の倍数ではありません。描画をスキップします");
+            return;
+        }
+
+        ID3D12CommandSignature* signature = m_Device->GetDispatchMeshCommandSignature();
+        if (!signature)
+        {
+            Core::Logger::Error("DX12", "DispatchMeshIndirect: コマンドシグネチャが未作成です。描画をスキップします");
+            return;
+        }
+
+        // 【引数バッファと件数バッファが同じ1本であること】D3D12はこの2つに別々の
+        // リソース状態を要求しないため同居させてよく、遷移も1回で済む。
+        // 別リソースにすると、片方だけINDIRECT_ARGUMENTへ遷移し忘れても
+        // デバッグレイヤ無しでは黙って壊れる
+        dx12Buffer->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
+        // 【DispatchMeshと同じくここで張る】SRVテーブル(ルートパラメータ2)はSetPipelineStateで
+        // 無効化されたままで、描画の直前にディスクリプタのブロックを払い出して張り直す設計。
+        // これを飛ばすと、シェーダーが宣言しているテーブルが未バインドのまま実行される
+        FlushPendingSrvWrites();
+
+        m_Device->GetCommandList()->ExecuteIndirect(
+            signature, maxCommandCount, dx12Buffer->GetResource(), argsOffsetInBytes, dx12Buffer->GetResource(),
+            countOffsetInBytes);
+    }
+
     void DX12CommandList::ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value)
     {
         if (!buffer)

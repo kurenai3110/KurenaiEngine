@@ -233,6 +233,26 @@ namespace Kurenai::RHI
         return static_cast<uint8_t*>(m_MappedPtr) + static_cast<size_t>(m_CurrentRingIndex) * m_SlotSizeInBytes;
     }
 
+    bool DX12Buffer::GetLastUpdateGpuAddress(uint32_t& outAddressLow, uint32_t& outAddressHigh) const
+    {
+        // 【Constant限定】このアドレスを使うのはルート定数バッファビューを引数バッファへ
+        // 書き込む経路だけで、そこには256バイト境界に載ったスロットしか渡せない。
+        // UPLOADヒープにスロット単位のリングを持つのはConstantだけなので、他は弾く
+        if (m_Usage != BufferUsage::Constant || !m_Resource)
+        {
+            Core::Logger::Error(
+                "DX12", "GetLastUpdateGpuAddress: BufferUsage::Constant以外のバッファが渡されました");
+            return false;
+        }
+
+        // 【SetConstantBufferとまったく同じアドレスであること】あちらはルート引数へ直接書き、
+        // こちらは引数バッファ経由で同じ値を渡す。式を写すと片方だけ直したときに静かにずれる
+        const D3D12_GPU_VIRTUAL_ADDRESS address = GetGPUVirtualAddress();
+        outAddressLow = static_cast<uint32_t>(address & 0xFFFFFFFFull);
+        outAddressHigh = static_cast<uint32_t>(address >> 32);
+        return true;
+    }
+
     bool DX12Buffer::ReadbackData(void* outData, uint32_t sizeInBytes)
     {
         if (m_Usage != BufferUsage::Readback)

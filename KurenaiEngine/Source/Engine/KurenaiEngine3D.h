@@ -254,6 +254,14 @@ namespace Kurenai
         // modelは「このパスが描く段」。モデルLODが入ったのでinstance.Model(最も詳細な段)とは
         // 限らず、シャドウは最も粗い段、G-Buffer/プリパスは選ばれた段を渡す
         bool ShouldUseModelMeshletPath(const Assets::ModelInstance& instance, const Assets::Model& model) const;
+        // モデル単位のGPUカリングが使うバッファを、候補数に足りる大きさで用意する。
+        // シーン切り替えとストリーミングでインスタンス数が変わるため、足りなくなったときだけ作り直す
+        void EnsureModelCullCapacity(uint32_t candidateCount);
+        // 間接描画で1区画ぶんを発行する。区画が空、またはPSOが無ければ何もせずfalseを返す。
+        // currentPipelineStateは呼び出し側のPSOキャッシュで、切り替えたら書き換える
+        bool IssueModelCullIndirect(
+            RHI::IRHICommandList* cmd, uint32_t region, RHI::IRHIPipelineState* pipelineState,
+            RHI::IRHIPipelineState*& currentPipelineState);
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
         // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
         RHI::IRHITexture* GetActiveAOTexture() const;
@@ -759,6 +767,128 @@ namespace Kurenai
         uint32_t m_MeshletCullTested = 0;
         uint32_t m_MeshletCullFrustumCulled = 0;
         uint32_t m_MeshletCullOcclusionCulled = 0;
+
+        // --- モデル単位のGPUカリング(Stage 5-3) ---
+        //
+        // コンピュートシェーダー(ModelCull.hlsl)が、描画候補のワールドAABBを
+        // 視錐台とHi-Zで判定し、生き残ったものだけの ExecuteIndirect 引数を詰める。
+        // 深度プリパスとG-Bufferは、その引数でまとめて描く。
+        //
+        // 【行き先をPSOごとに分ける】1回のExecuteIndirectで切り替えられるのは引数に
+        // 含めたルートパラメータだけで、PSOは切り替えられない。ミラーリングの有無と
+        // 深度プリパスの不透明/カットアウトはPSOが違うため区画を分け、1区画につき
+        // 1回ずつ発行する。
+        //
+        // 【プリパスとG-Bufferを同じ引数で描く理由】片方だけ間引くと絵が壊れる。
+        // プリパスが深度を書いたものをG-Bufferが描かないと、その画素は
+        // 「深度はあるのに色が無い」穴になる
+        enum ModelCullRegion : uint32_t
+        {
+            kModelCullRegionGBuffer = 0,
+            kModelCullRegionGBufferMirrored,
+            kModelCullRegionPrepassOpaque,
+            kModelCullRegionPrepassOpaqueMirrored,
+            kModelCullRegionPrepassCutout,
+            kModelCullRegionPrepassCutoutMirrored,
+            kModelCullRegionCount,
+        };
+        // 引数バッファの先頭に置く「区画ごとの発行数」の領域。ExecuteIndirectの
+        // 件数バッファとしてそのまま渡す(1区画あたりuint1つ)。
+        //
+        // 【256バイトに切り上げる】後ろに続く引数配列の先頭を、定数バッファのGPUアドレスが
+        // 8バイト境界に載る位置から始めるため
+        static constexpr uint32_t kModelCullArgsBaseOffset = 256;
+        static_assert(
+            kModelCullArgsBaseOffset >= sizeof(uint32_t) * kModelCullRegionCount,
+            "区画ごとの発行数が引数配列の領域へはみ出している");
+
+        // ModelCull.hlsl の struct ModelCullInstance と1対1で対応(48バイト)。
+        // **構造化バッファは詰めて並ぶ**ので、float3の直後にuintが来る配置がそのまま一致する
+        struct GpuModelCullInstance
+        {
+            float BoundsMin[3];
+            uint32_t GroupCount;
+            float BoundsMax[3];
+            // 出力先の区画番号(= PSO。ModelCullRegion)
+            uint32_t RegionIndex;
+            // このドローが使うObjectConstantsのGPU仮想アドレス([0]=下位32bit、[1]=上位32bit)
+            uint32_t CbvAddress[2];
+            uint32_t Padding[2];
+        };
+        static_assert(sizeof(GpuModelCullInstance) == 48, "ModelCull.hlslのModelCullInstanceと一致させること");
+
+        // Hi-Zを深度プリパスの深度から作るか。切ると従来どおりG-Bufferの後で作り、
+        // 判定は前フレームのHi-Zで行う(意味と効果はDefaults::HiZFromDepthPrepass)
+        bool m_HiZFromDepthPrepassEnabled = Defaults::HiZFromDepthPrepass;
+        bool m_ModelCullGpuEnabled = Defaults::ModelCullGpuEnabled;
+        // カリング結果で実際に描画発行まで行うか。falseなら判定と計数だけ行い、
+        // 描くのは従来のCPUループのまま(コストと効果をA/Bで測るためのトグル)
+        bool m_ModelCullIndirectEnabled = Defaults::ModelCullIndirectEnabled;
+        std::unique_ptr<RHI::IRHIShader> m_ModelCullComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_ModelCullPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullConstantBuffer;
+        // 描画候補(GpuModelCullInstance)の配列。毎フレームCPUから書き直す
+        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullInstanceBuffer;
+        // [判定, 視錐台で間引き, オクルージョンで間引き, 生き残り] + 区画ごとの発行数。
+        //
+        // 【前の4つはモデル数】数えるのはG-Bufferぶんの候補だけで、そこは1モデル1件になる
+        // (m_ModelCullPrepassCandidateCount のコメント参照)。深度プリパスぶんも数えると
+        // 1モデルを2回数えてしまい、CPU側の判定と単位が合わなくなる
+        static constexpr uint32_t kModelCullCounterCount = 4 + kModelCullRegionCount;
+        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullCounterBuffer;
+        // ExecuteIndirectへそのまま渡すバッファ。先頭に区画ごとの発行数が並び、
+        // kModelCullArgsBaseOffset から先が区画ごとの引数配列
+        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullDrawArgsBuffer;
+        // 区画1つぶんのバイト数(ComputeModelCullRegionStride)。描画パスが
+        // 自分の区画の先頭オフセットを求めるのに使う
+        uint32_t m_ModelCullRegionStride = 0;
+        // 区画ごとの候補数。ExecuteIndirectへ渡すmaxCommandCount(GPUが書く発行数の上限)
+        uint32_t m_ModelCullRegionCandidates[kModelCullRegionCount]{};
+        // GPUへ載せる直前の候補配列。毎フレームの確保を避けるため使い回す
+        std::vector<GpuModelCullInstance> m_ModelCullUploadScratch;
+        // 受け皿。リングの理由と段数はメッシュレット統計と同じ
+        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullReadback[kMeshletCullStatsRingSize];
+        uint32_t m_ModelCullRingIndex = 0;
+        // m_ModelCullInstanceBuffer / m_ModelCullDrawArgsBuffer が収まる候補数。
+        // 1インスタンスがLODのクロスディザで最大2件の候補を出すため、インスタンス数の2倍で確保する
+        uint32_t m_ModelCullCapacity = 0;
+        // このフレームにCPUが積んだ候補数(プリパスぶん + G-Bufferぶん)
+        uint32_t m_ModelCullCandidateCount = 0;
+        // そのうち深度プリパスぶんの数。候補配列の前半を占め、G-Bufferぶんが後半に続く。
+        //
+        // 【この境目が2つの役目を持つ】判定を2回に分けるときの区切りであり、
+        // 統計を数え始める位置でもある。**統計はG-Bufferぶんだけで数える** ――
+        // 両方数えると1モデルを2回数え、CPU側の数と単位が合わなくなる
+        uint32_t m_ModelCullPrepassCandidateCount = 0;
+        // 直近に読み戻せた値
+        uint32_t m_ModelCullTested = 0;
+        uint32_t m_ModelCullFrustumCulled = 0;
+        uint32_t m_ModelCullOcclusionCulled = 0;
+        uint32_t m_ModelCullSurvived = 0;
+        // 区画ごとにGPUが実際に発行したドロー数(読み戻した値)。
+        // ここが0のまま絵が出ているなら、間接描画ではなく従来のCPUループが描いている
+        uint32_t m_ModelCullRegionIssued[kModelCullRegionCount]{};
+        // 上の値がどの経路のものか。ログで「間接描画で描いた」と「数えただけ」を区別する
+        bool m_ModelCullIndirectActiveLastFrame = false;
+        // Hi-Zを深度プリパスから作った経路だったか。
+        //
+        // 【これが無いと切り替えを確かめられない】カメラが止まっていると新旧どちらの経路でも
+        // 間引き数が一致する(前フレームのHi-Zと今フレームのHi-Zが同じ内容になるため)。
+        // 「差が出ない」を合格と読まないために、経路そのものをログへ出す
+        bool m_HiZFromDepthPrepassLastFrame = false;
+        // 判定を2回に分けたときの、それぞれが受け持った候補数(プリパスぶん / G-Bufferぶん)
+        uint32_t m_ModelCullDispatchCounts[2]{};
+        // 同じフレームでCPU側が視錐台で間引いた数。GPUの「視錐台で間引き」と突き合わせる。
+        //
+        // 【GPUの数値は2フレーム遅れなので、CPU側も同じだけ遅らせて比べる】
+        // 今フレームのCPU値と2フレーム前のGPU値を比べると、カメラが動いている間は
+        // 常に食い違って見える。リードバックと同じリングに積んで、同じフレームのものを比べる
+        uint32_t m_ModelCullCpuFrustumCulled = 0;
+        uint32_t m_ModelCullCpuFrustumHistory[kMeshletCullStatsRingSize]{};
+        uint32_t m_ModelCullCandidateHistory[kMeshletCullStatsRingSize]{};
+        // 上のリングから取り出した、GPUの数値と同じフレームのCPU側の値(ログの比較に使う)
+        uint32_t m_ModelCullComparedCpuFrustumCulled = 0;
+        uint32_t m_ModelCullComparedCandidateCount = 0;
 
         std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
         std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;

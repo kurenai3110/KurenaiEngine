@@ -255,6 +255,30 @@ namespace Kurenai::RHI
         // Dispatchと同じく、この呼び出しの直後にUAVスロットは全解除される
         virtual void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) = 0;
 
+        // 増幅シェーダーの間接起動(DX12のExecuteIndirect)。1件ぶんの引数は24バイトで、
+        //   +0  : このドローが使う定数バッファ(b1)のGPU仮想アドレス(64bit)
+        //   +8  : DispatchMeshのスレッドグループ数X/Y/Z(uint3)
+        // という並び。末尾4バイトは詰め物で、アドレスを8バイト境界に載せるために置いてある。
+        //
+        // 【b1を引数に含める理由】1回のExecuteIndirectで複数のモデルを描くため、
+        // 「どのモデルか」をドローごとに渡す手段が要る。ルート定数で番号だけ渡して
+        // 構造化バッファから引く手もあるが、それだと増幅/メッシュ/ピクセルの3本すべてで
+        // 定数の読み方を書き換えることになる。定数バッファのアドレス自体を差し替えれば
+        // シェーダー側は1行も変わらない。
+        //
+        // countOffsetInBytesの位置には実際に発行する件数(uint32)が入っていること。
+        // maxCommandCountはその上限(GPUが書いた件数がこれを超えることは無いと保証する値)。
+        // どちらのオフセットも4の倍数であること。
+        //
+        // 【DX11には無い】メッシュシェーダー自体が無いため、呼ぶとログを出して何もしない。
+        // 呼び出し側は IRHIDevice::SupportsIndirectDispatchMesh() で分岐すること
+        // 【Shaders/3D/ModelCull.hlsl の KURENAI_INDIRECT_ARG_STRIDE と一致させること】
+        // あちらがこの並びで引数を書き込む
+        static constexpr uint32_t kDispatchMeshIndirectArgStride = 24;
+        virtual void DispatchMeshIndirect(
+            IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount,
+            uint32_t countOffsetInBytes) = 0;
+
         // UAVを持つバッファ全体を、指定した符号なし整数値で埋める。散布書き込みされる
         // バッファ(自前ラスタライザのvisibility bufferや間接ディスパッチ引数)を毎フレーム
         // 初期値へ戻す用途向け。

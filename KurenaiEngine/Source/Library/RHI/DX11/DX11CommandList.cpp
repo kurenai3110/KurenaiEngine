@@ -507,6 +507,20 @@ namespace Kurenai::RHI
         ReleaseComputeUavBindingsAfterDispatch();
     }
 
+    // 【DX11にメッシュシェーダーは無い】D3D11にはDispatchMeshに相当するものが無く、
+    // 増幅シェーダーも存在しない。呼び出し側は IRHIDevice::SupportsIndirectDispatchMesh() で
+    // 分岐して従来のCPUループへ縮退するため、ここへ来るのは分岐漏れのときだけ
+    void DX11CommandList::DispatchMeshIndirect(
+        IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount, uint32_t countOffsetInBytes)
+    {
+        (void)argsBuffer;
+        (void)argsOffsetInBytes;
+        (void)maxCommandCount;
+        (void)countOffsetInBytes;
+        Core::Logger::Error(
+            "DX11", "DispatchMeshIndirect: DX11はメッシュシェーダーに対応していません。描画をスキップします");
+    }
+
     // 【DX11では呼び出し側が存在しない】理由はDispatchIndirectのコメントと同じ
     void DX11CommandList::ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value)
     {

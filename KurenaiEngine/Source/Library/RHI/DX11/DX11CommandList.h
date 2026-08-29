@@ -48,6 +48,9 @@ namespace Kurenai::RHI
         void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
         void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) override;
+        void DispatchMeshIndirect(
+            IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount,
+            uint32_t countOffsetInBytes) override;
         void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) override;
         void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
 
