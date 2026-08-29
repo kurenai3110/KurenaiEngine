@@ -2354,7 +2354,7 @@ namespace Kurenai
             {
                 RHI::ShaderDesc modelCullCsDesc;
                 modelCullCsDesc.Stage = RHI::ShaderStage::Compute;
-                modelCullCsDesc.FilePath = shaderDirectory + L"ModelCull.hlsl";
+                modelCullCsDesc.FilePath = shaderDirectory + L"ModelCull.kshader";
                 modelCullCsDesc.EntryPoint = "CSMain";
                 m_ModelCullComputeShader = m_Device->CreateShader(modelCullCsDesc);
                 m_ModelCullPipelineState =
