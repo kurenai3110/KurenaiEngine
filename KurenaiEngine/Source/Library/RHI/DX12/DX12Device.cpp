@@ -3251,8 +3251,19 @@ namespace Kurenai::RHI
     }
 
     std::unique_ptr<IRHIAccelerationStructure> DX12Device::BuildAccelerationStructure(
-        const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, bool createSrv, const char* debugName)
+        const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& inputs, bool createSrv, const char* debugName,
+        bool compact)
     {
+        // 圧縮はALLOW_COMPACTIONを立てて構築した結果にしか行えない。
+        // 立っていない入力で圧縮を求められたら、黙って素の結果を返さずに理由を残す
+        if (compact && (inputs.Flags & D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION) == 0)
+        {
+            Core::Logger::Error(
+                "DX12",
+                std::string(debugName) + ": ALLOW_COMPACTIONが立っていないため圧縮を行いません(呼び出し側の指定漏れ)");
+            compact = false;
+        }
+
         D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuildInfo{};
         m_Device5->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuildInfo);
         if (prebuildInfo.ResultDataMaxSizeInBytes == 0)
@@ -3292,6 +3303,24 @@ namespace Kurenai::RHI
             return nullptr;
         }
 
+        // 圧縮するときは、構築と同じコマンドリストで「圧縮後に必要なサイズ」を書き出させる。
+        // 読み出しはCPUからなのでREADBACKヒープへ受ける
+        Microsoft::WRL::ComPtr<ID3D12Resource> compactedSizeReadback;
+        if (compact)
+        {
+            const CD3DX12_HEAP_PROPERTIES readbackProps(D3D12_HEAP_TYPE_READBACK);
+            const CD3DX12_RESOURCE_DESC readbackDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(uint64_t));
+            if (FAILED(m_Device->CreateCommittedResource(
+                    &readbackProps, D3D12_HEAP_FLAG_NONE, &readbackDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(&compactedSizeReadback))))
+            {
+                // 読み戻し先が作れないだけなら、圧縮を諦めて素のASで続行する(描画は成立する)
+                Core::Logger::Error(
+                    "DX12", std::string(debugName) + ": 圧縮後サイズの読み戻しバッファ作成に失敗しました。圧縮せずに続けます");
+                compact = false;
+            }
+        }
+
         {
             // m_UploadCommandListへの記録は複数スレッドから同時に来うるため、
             // CreateBuffer/CreateTextureFromImageと同じミューテックスで直列化する
@@ -3301,7 +3330,22 @@ namespace Kurenai::RHI
             buildDesc.Inputs = inputs;
             buildDesc.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
             buildDesc.DestAccelerationStructureData = result->GetGPUVirtualAddress();
-            m_UploadCommandList4->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+
+            if (compact)
+            {
+                // 【EmitはBuildと同じ呼び出しへ渡す】別途EmitRaytracingAccelerationStructurePostbuildInfoを
+                // 呼ぶ形でもよいが、その場合は構築完了を待つUAVバリアを自分で挟む必要がある。
+                // BuildRaytracingAccelerationStructureの引数として渡せば順序はドライバが保証する
+                D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postbuildDesc{};
+                postbuildDesc.InfoType =
+                    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE;
+                postbuildDesc.DestBuffer = compactedSizeReadback->GetGPUVirtualAddress();
+                m_UploadCommandList4->BuildRaytracingAccelerationStructure(&buildDesc, 1, &postbuildDesc);
+            }
+            else
+            {
+                m_UploadCommandList4->BuildRaytracingAccelerationStructure(&buildDesc, 0, nullptr);
+            }
 
             // TLASの構築はBLASの構築完了を前提とするため、UAVバリアで順序を保証する。
             // このエンジンではBLASを1本ずつ同期的に構築するため実際には不要だが、
@@ -3312,6 +3356,55 @@ namespace Kurenai::RHI
             // スクラッチバッファ(ローカル変数)がこの関数を抜けるまでに解放されないよう、
             // 構築の完了をここで同期的に待つ。CreateBufferの初期データアップロードと同じ扱い
             UploadSubmitAndWait();
+        }
+
+        if (compact)
+        {
+            // --- 圧縮後サイズを読み、そのサイズの領域へコピーして元を捨てる ---------------
+            uint64_t compactedSize = 0;
+            void* mapped = nullptr;
+            const D3D12_RANGE readRange{ 0, sizeof(uint64_t) };
+            if (SUCCEEDED(compactedSizeReadback->Map(0, &readRange, &mapped)) && mapped)
+            {
+                std::memcpy(&compactedSize, mapped, sizeof(uint64_t));
+                const D3D12_RANGE writeRange{ 0, 0 };
+                compactedSizeReadback->Unmap(0, &writeRange);
+            }
+            else
+            {
+                Core::Logger::Error(
+                    "DX12", std::string(debugName) + ": 圧縮後サイズの読み出しに失敗しました。圧縮せずに続けます");
+            }
+
+            // 0や元より大きい値が返ることは無いはずだが、返ってきたら圧縮しない。
+            // 信用してバッファを作ると、コピー先が足りずGPUが落ちる
+            if (compactedSize > 0 && compactedSize < prebuildInfo.ResultDataMaxSizeInBytes)
+            {
+                const CD3DX12_RESOURCE_DESC compactedDesc =
+                    CD3DX12_RESOURCE_DESC::Buffer(compactedSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+                Microsoft::WRL::ComPtr<ID3D12Resource> compacted;
+                if (SUCCEEDED(m_Device->CreateCommittedResource(
+                        &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &compactedDesc,
+                        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr, IID_PPV_ARGS(&compacted))))
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(m_UploadMutex);
+                        m_UploadCommandList4->CopyRaytracingAccelerationStructure(
+                            compacted->GetGPUVirtualAddress(), result->GetGPUVirtualAddress(),
+                            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+                        // コピー元(result)をこの関数の終わりで解放するため、完了を待つ
+                        UploadSubmitAndWait();
+                    }
+                    m_BlasBytesBeforeCompaction.fetch_add(prebuildInfo.ResultDataMaxSizeInBytes, std::memory_order_relaxed);
+                    m_BlasBytesAfterCompaction.fetch_add(compactedSize, std::memory_order_relaxed);
+                    result = compacted;   // 以降は圧縮版を使う。元はここでの代入で解放される
+                }
+                else
+                {
+                    Core::Logger::Error(
+                        "DX12", std::string(debugName) + ": 圧縮先バッファの作成に失敗しました。圧縮せずに続けます");
+                }
+            }
         }
 
         uint32_t srvIndex = DX12AccelerationStructure::kInvalid;
@@ -3386,13 +3479,22 @@ namespace Kurenai::RHI
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
         inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
-        // シーンは読み込み後に変形しない前提のため、更新(ALLOW_UPDATE)ではなくトレース速度を優先する
-        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        // シーンは読み込み後に変形しない前提のため、更新(ALLOW_UPDATE)ではなくトレース速度を優先する。
+        //
+        // 【ALLOW_COMPACTIONを併せて立てる】BLASはドライバが最悪ケースで確保するため、実際に必要な
+        // 量より大きい。PLATEAU 東京23区(三角形5,914万)では高速化構造だけで5.16GBを占め、
+        // 専用VRAM 11,994MBのRTX 4070 Tiでも予算(9.0〜9.9GB)を超えてGPU待ちが出ていた
+        // (docs/ImplementationDetail.md 58章)。圧縮はトレース性能を落とさずにこれを縮める。
+        // 代償は構築時間で、圧縮後サイズの読み戻しとコピーのぶんGPUの同期が1回増える
+        inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE |
+                       D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
         inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
         inputs.NumDescs = static_cast<UINT>(geometryDescs.size());
         inputs.pGeometryDescs = geometryDescs.data();
 
-        return BuildAccelerationStructure(inputs, /*createSrv=*/false, "BLAS");
+        // 【TLASは圧縮しない】インスタンス数ぶんしか無く小さいうえ、ストリーミングで常駐が
+        // 変わるたびに作り直すため、圧縮のコストに見合わない
+        return BuildAccelerationStructure(inputs, /*createSrv=*/false, "BLAS", /*compact=*/true);
     }
 
     std::unique_ptr<IRHIAccelerationStructure> DX12Device::CreateTopLevelAS(const TopLevelASDesc& desc)
@@ -3462,6 +3564,19 @@ namespace Kurenai::RHI
         inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
         inputs.NumDescs = static_cast<UINT>(instanceDescs.size());
         inputs.InstanceDescs = instanceBuffer->GetGPUVirtualAddress();
+
+        // 【ここでBLAS圧縮の効果を出す】TLASはシーンにつき1回しか作らないため、
+        // 直前に積み上がったBLASの累計をまとめて報告できる。BLAS1本ごとに出すと767行になる
+        const uint64_t before = m_BlasBytesBeforeCompaction.exchange(0, std::memory_order_relaxed);
+        const uint64_t after = m_BlasBytesAfterCompaction.exchange(0, std::memory_order_relaxed);
+        if (before > 0)
+        {
+            Core::Logger::Info(
+                "DX12",
+                "BLASの圧縮: " + std::to_string(before / (1024 * 1024)) + "MB -> " +
+                    std::to_string(after / (1024 * 1024)) + "MB (" +
+                    std::to_string(100 - (after * 100 / before)) + "% 削減)");
+        }
 
         return BuildAccelerationStructure(inputs, /*createSrv=*/true, "TLAS");
     }
