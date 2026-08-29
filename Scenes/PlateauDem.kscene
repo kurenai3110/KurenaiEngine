@@ -1,0 +1,57 @@
+# KurenaiEngine シーンファイル - Project PLATEAU 東京都23区(地形 dem)
+#
+# 【メッシュレットLOD(Stage 6)の検証専用シーン】
+# 三角形そのものが支配的コストになるモデルだけを並べてある。dem は1タイルが
+# 2次メッシュ(約10km四方)の1メッシュで、三角形は100万の桁にのぼる一方、
+# テクスチャを1枚も持たない。bldg を混ぜるとドローコールとテクスチャのコストが
+# 上乗せされ、三角形を減らした効果が総フレーム時間から読めなくなる。
+#
+# 出典: 国土交通省 Project PLATEAU「3D都市モデル(Project PLATEAU)東京都23区」
+#       https://www.geospatial.jp/ckan/dataset/plateau-tokyo23ku
+#       ライセンス: 公共データ利用規約(PDL1.0) / CC BY 4.0 互換。商用利用可・要出典表示。
+#       著作権は各地方公共団体に帰属する。
+#
+# 【このファイルは機械生成されたもの】 Tools\plateau_dem_scene.py が出力する:
+#   python Tools\plateau_dem_scene.py Assets\Packed\Plateau\Dem Scenes\PlateauDem.kscene
+#   Sample3D.exe -dx12 -scene PlateauDem
+#
+# --- 変換コマンド ---
+#   KurenaiPacker.exe <展開先>\dem\<メッシュコード>_dem_6677.fbx ^
+#     -o Assets\Packed\Plateau\Dem\<メッシュコード>.kmodel --origin -8096,0,-36118
+#
+# 【--origin は bldg と同じ値を引くこと】種別ごとに違う値で寄せると、
+# 地形と建物の相対位置が壊れて建物が地面から浮く/沈む。
+#
+# --- シーンの規模と、そこから決まるもの ---
+#   [Model] 1 件
+#   AABB  X 552 〜 11868 / Y -10 〜 32 / Z -864 〜 8385
+#   大きさ 11317 x 42 x 9248 m / 対角 14615 m
+#   遠クリップ面 farZ = max(100, 対角x4) = 58460 m
+#   外接球の半径 7308 m / カメラ距離 15346 m (半径の2.1倍)
+#
+# 【カメラを外接球の外へ置いている理由】メッシュレットLODの段はモデルの外接球の
+# 投影サイズで決まる。カメラが球の内側にあると投影サイズが振り切れて常に段0になり、
+# 段の選択が一度も実行されないまま「効かなかった」と読み違える。
+#
+# 【ShadowDistance】farZ が 58460m あるため、指定しないと第1カスケードが数kmを
+# 1枚で覆い、地形の起伏の影が消える。
+
+[Scene]
+Name = PLATEAU 地形 (dem / メッシュレットLOD検証)
+ShadowDistance = 2000
+
+[Model]
+Path = Plateau/Dem/533946.kmodel
+
+# 【自動配置に任せられない】カメラを書かないとバウンズの20%内側へ置かれ、
+# 外接球の内側に入って段が一度も落ちなくなる(上記の理由)。
+[Camera]
+Position = -4271.5, 3982.6, -6720.8
+Yaw = 45.0
+Pitch = -15.0
+
+# 起伏を読むには斜めから当てる。真上からだと地形が平坦に見える
+[Sun]
+TimeOfDay = 9.0
+AzimuthDegrees = 150.0
+Shadow = true
