@@ -96,12 +96,9 @@ float3 EvaluateDirectBRDF(
     return (diffuse + specular) * NdotL;
 }
 
-float DistanceAttenuation(float distSq, float range)
-{
-    float factor = distSq / max(range * range, 1e-4f);
-    float window = saturate(1.0f - factor * factor);
-    return (window * window) / max(distSq, 0.0001f);
-}
+// 距離減衰。定義は LightAttenuation.hlsli にただ1つある(複製すると、
+// このプローブ焼き込みだけが新しいライトの種類を素のポイントライトとして評価してしまう)
+#include "LightAttenuation.hlsli"
 
 float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float angleOffset)
 {
