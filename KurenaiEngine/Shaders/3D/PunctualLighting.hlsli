@@ -157,6 +157,103 @@ float3 EvaluateTranslucency(float3 N, float3 V, float3 L, float3 albedo, float t
     return albedo * (translucency * backNdotL * lobe / PI);
 }
 
+// ライト1灯について、シャドウを掛ける前に決まる幾何と減衰。
+// 「そのライトはこのピクセルに寄与しうるか」の early-out もここで済ませる
+struct PunctualGeometry
+{
+    float3 L;          // ピクセルから光源へ向かう単位ベクトル
+    float Atten;       // 距離減衰 × スポット減衰
+    float Distance;    // 光源までの距離(平行光は 1e30)
+    bool Contributes;  // false ならこの灯の寄与は厳密に0
+};
+
+// early-out は効きの強い順(距離→減衰→スポット円錐→NdotL)に並べる。
+//
+// 【この関数を参照実装と確率的サンプリングで共有する理由】確率的サンプリングは
+// 「寄与しうる灯の集合」を定義域とし、そこから確率で1灯選んで割り戻す。定義域が
+// 参照実装とずれると期待値がずれる(=バイアス)。early-outの並びは寄与の値を変えないが、
+// **どの灯が寄与0とみなされるかを決めている**ので、式そのものと同じ重さで一致させる必要がある
+PunctualGeometry EvaluatePunctualGeometry(GPULight light, float3 worldPos, float3 N, float translucency)
+{
+    PunctualGeometry result;
+    result.L = float3(0.0f, 1.0f, 0.0f);
+    result.Atten = 0.0f;
+    result.Distance = 1e30f;
+    result.Contributes = false;
+
+    const uint lightType = (uint)light.PositionType.w;
+    const float range = light.ColorRange.w;
+
+    float atten = 1.0f;
+    float3 L;
+    float distanceToLight = 1e30f;
+
+    if (lightType == 0u) // Directional
+    {
+        L = normalize(-light.DirectionAngle.xyz);
+    }
+    else
+    {
+        const float3 toLight = light.PositionType.xyz - worldPos;
+        const float distSq = dot(toLight, toLight);
+        if (distSq > range * range)
+        {
+            return result;
+        }
+
+        atten = DistanceAttenuation(distSq, range);
+        if (atten <= 0.0f)
+        {
+            return result;
+        }
+
+        const float dist = sqrt(max(distSq, 1e-16f));
+        distanceToLight = dist;
+        L = toLight / dist;
+
+        if (lightType == 2u) // Spot
+        {
+            const float spotAtten =
+                SpotAttenuation(light.DirectionAngle.xyz, L, light.DirectionAngle.w, light.Params.x);
+            if (spotAtten <= 0.0f)
+            {
+                return result;
+            }
+            atten *= spotAtten;
+        }
+    }
+
+    // 【透過するマテリアルではNdotL<=0でも打ち切らない】薄いものは裏から当たった光を
+    // 透かすため、その側にこそ寄与がある
+    if (dot(N, L) <= 0.0f && translucency <= 0.0f)
+    {
+        return result;
+    }
+
+    result.L = L;
+    result.Atten = atten;
+    result.Distance = distanceToLight;
+    result.Contributes = true;
+    return result;
+}
+
+// 1灯ぶんの寄与(反射 + 透過、シャドウ適用済み)。shadow は可視率(0=完全に影, 1=遮蔽なし)。
+// 参照実装と確率的サンプリングが**同じ式**で足し合わせるためにここへ置く
+float3 EvaluatePunctualContribution(
+    GPULight light, PunctualGeometry geometry, float3 N, float3 V, float NdotV, float3 albedo, float metallic,
+    float roughness, float translucency, SpecularEnergyContext energy, float shadow)
+{
+    const float3 reflected =
+        EvaluateDirectBRDF(N, V, geometry.L, NdotV, albedo, metallic, roughness, energy);
+    // 透過側の遮蔽は太陽と同じ扱い(遮蔽側も光を通すぶんを下限として残す)
+    const float transmissionShadow = lerp(saturate(translucency * kTranslucencyShadowFloor), 1.0f, shadow);
+    const float3 transmitted =
+        EvaluateTranslucency(N, V, geometry.L, albedo, translucency) * transmissionShadow;
+
+    return reflected * shadow * light.ColorRange.rgb * geometry.Atten +
+           transmitted * light.ColorRange.rgb * geometry.Atten;
+}
+
 #endif // KURENAI_PUNCTUAL_LIGHTING_BRDF
 
 #endif // KURENAI_PUNCTUAL_LIGHTING_HLSLI

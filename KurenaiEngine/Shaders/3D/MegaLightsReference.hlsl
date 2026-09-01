@@ -177,52 +177,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     for (uint i = 0u; i < lightCount; ++i)
     {
         const GPULight light = Lights[i];
-        const uint lightType = (uint)light.PositionType.w;
-        const float range = light.ColorRange.w;
 
-        float3 L;
-        float atten = 1.0f;
-        float distanceToLight = 1e30f;
-
-        if (lightType == 0u) // Directional
-        {
-            L = normalize(-light.DirectionAngle.xyz);
-        }
-        else
-        {
-            const float3 toLight = light.PositionType.xyz - worldPos;
-            const float distSq = dot(toLight, toLight);
-            if (distSq > range * range)
-            {
-                continue;
-            }
-
-            atten = DistanceAttenuation(distSq, range);
-            if (atten <= 0.0f)
-            {
-                continue;
-            }
-
-            const float dist = sqrt(max(distSq, 1e-16f));
-            distanceToLight = dist;
-            L = toLight / dist;
-
-            if (lightType == 2u) // Spot
-            {
-                const float spotAtten =
-                    SpotAttenuation(light.DirectionAngle.xyz, L, light.DirectionAngle.w, light.Params.x);
-                if (spotAtten <= 0.0f)
-                {
-                    continue;
-                }
-                atten *= spotAtten;
-            }
-        }
-
-        // 透過するマテリアルでは NdotL<=0 の側にこそ寄与があるので打ち切らない
-        // (DirectLighting.hlsl の EvaluateLight と同じ判定にすること)
-        const float NdotL = dot(N, L);
-        if (NdotL <= 0.0f && translucency <= 0.0f)
+        // 幾何・減衰・early-out は PunctualLighting.hlsli の共有定義を使う。
+        // 確率的サンプリング側とここで「どの灯が寄与0とみなされるか」がずれると、
+        // 定義域が変わって期待値が一致しなくなる
+        const PunctualGeometry geometry = EvaluatePunctualGeometry(light, worldPos, N, translucency);
+        if (!geometry.Contributes)
         {
             continue;
         }
@@ -232,18 +192,17 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 0 の灯も撃たない ―― 既存経路の扱いと揃えるため
         if (shadowRayCount > 0u && light.Params.y > 0.5f)
         {
-            const float slopeScale = 1.0f / max(NdotL, kMinSlopeScaleNdotL);
+            const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
             const float originBias =
                 (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
             // punctual なので方向が1つに決まり、何本撃っても同じ答えになる。
             // 本数を活かせるのは光源に半径が入ってから(GPULight.Params.z を使う段階)
-            shadow = TraceLightVisibility(worldPos + N * originBias, L, originBias, distanceToLight);
+            shadow = TraceLightVisibility(
+                worldPos + N * originBias, geometry.L, originBias, geometry.Distance);
         }
 
-        const float3 reflected = EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy);
-        const float transmissionShadow = lerp(saturate(translucency * kTranslucencyShadowFloor), 1.0f, shadow);
-        const float3 transmitted = EvaluateTranslucency(N, V, L, albedo, translucency) * transmissionShadow;
-        directLight += reflected * shadow * light.ColorRange.rgb * atten + transmitted * light.ColorRange.rgb * atten;
+        directLight += EvaluatePunctualContribution(
+            light, geometry, N, V, NdotV, albedo, metallic, roughness, translucency, energy, shadow);
     }
 
     MegaLightsOutput[pixel] = float4(directLight, 1.0f);
