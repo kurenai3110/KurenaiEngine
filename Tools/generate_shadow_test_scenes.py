@@ -266,6 +266,19 @@ def main():
         parser.error("--grid は1以上を指定してください")
 
     write_scene("ScreenSpaceShadowTest.kscene", generate_screen_space_shadow_test())
+    # --- ライト数スケーリングの測定用(段階7)---
+    # 【同じカメラ・同じ配置で灯数だけを変える】ライト数に対して MegaLights の合計msが
+    # 横ばいかを測るためのもの。格子の一辺を変えるので、灯数は 4/36/144/529/1024 になる
+    # (LightTest.kmodel 埋め込みの2灯が加わる)。Range は格子が広がっても
+    # 1タイルあたりの灯数が増えるよう固定する
+    for scaling_grid in (2, 6, 12, 23, 32):
+        write_scene(
+            "LightScale%d.kscene" % (scaling_grid * scaling_grid),
+            generate_many_lights_test(scaling_grid, args.intensity, args.light_range, args.height),
+        )
+    print("LightScale: " + ", ".join(
+        "%d灯" % (g * g + 2) for g in (2, 6, 12, 23, 32)))
+
     write_scene(
         "ManyLightsTest.kscene",
         generate_many_lights_test(args.grid, args.intensity, args.light_range, args.height),
