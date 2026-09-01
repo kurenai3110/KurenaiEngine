@@ -14,6 +14,7 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "Core/Logger.h"
@@ -136,6 +137,521 @@ namespace Kurenai::Assets
             const size_t index = densities.size() / 10;
             std::nth_element(densities.begin(), densities.begin() + index, densities.end());
             return densities[index];
+        }
+
+        // 光源のかたまりの長さ尺度[m]。**分割と併合の両方をこの1つが決める。** 0で両方とも行わない。
+        //   ・連結成分がこの寸法より大きければ、等間隔グリッドで割る
+        //   ・別々の連結成分でも重心がこの距離より近ければ、1つへ併合する
+        //
+        // 【根拠の軸は測光の「5倍則」】発光体の最大寸法の5倍以上離れれば、点光源近似の誤差は
+        // 1%以下になる。1m を選ぶと 5m 以遠で1%に収まり、屋内で照明の効き方を判断する距離
+        // スケール(およそ5m)と噛み合う。
+        //
+        // 【併合が要る理由は実測で決まった】段Bまで通すと EmeraldSquare が 3370個になり、
+        // kMaxLights(1024)を大きく超える。**上限で切り捨てて逃げてはいけない** ――
+        // その3370個を面積の大きい順に並べても、上位256個で総面積の46.7%、
+        // 上位1024個でも84.9%にしかならず、発光の相当量を黙って捨てることになる。
+        // 面積の分布は最小 3.6e-4 / 中央値 8.2e-2 / 最大 3.66 m^2 で、
+        // 上位が支配していない ―― 切り捨てが安全になる形の裾ではない。
+        // 併合ならエネルギーは厳密に保存される(総面積 864.231 m^2 は3段すべてで同値)。
+        //
+        // 実測(メッシュ内で完結。段ごとの個数):
+        //           段A(連結成分)  段A+B(分割後)  段C(併合後)  最近接クラスタ間
+        //   Bistro         7             7            7          2.96 m
+        //   ProbeTest     14            28           28          1.86 m
+        //   EmeraldSquare 1427        3370          651          0.011 m
+        //
+        // 【段Bは個数を増やす側にも働く】ProbeTest は連結成分14個が分割で28個になっている。
+        // 「分割を切れば併合の効果が分かる」わけではない ―― 両方を同時に切ると
+        // ProbeTest では符号すら逆に見える
+        //
+        // 【平面パネルには効かない】分割しても面積等価半径とRangeの比は変わらない
+        // (A ∝ s^2 かつ Range ∝ sqrt(E*A) ∝ s)。改善するのは「位置の局所性」だけで、
+        // 大きくて明るい壁の近似の質そのものは三角形メッシュライトでしか直らない
+        constexpr float kEmissiveClusterScale = 1.0f;
+
+        // エミッシブなメッシュの三角形を「光源のかたまり」へ分け、プロキシの元になる量を求める。
+        //
+        // 【1メッシュ = 1かたまり にしてはいけない】Bistro の内装は「1マテリアル・1メッシュに
+        // 複数の電球」という持ち方をしている。メッシュのAABBを1個の光源にすると部屋全体を包む
+        // 灯になり、docs/ImplementationHistory.md にある「エミッシブの位置を手で割り出して
+        // ポイントライトを置く」運用に逆戻りする。
+        //
+        // 【段取りは2段】
+        //   段A: 位置で溶接してから連結成分を取る。しきい値以外にパラメータが無く、
+        //        物理的に離れた器具はこれだけで割れる
+        //   段B: 連結成分がまだ大きいとき(蛍光灯の長い列など)だけ、等間隔グリッドで割る
+        //   段C: 近すぎるかたまりどうしを併合する。街区の看板のように「小さな面がばらばらに
+        //        大量にある」形は段Aで数千個に割れてしまい、ライト数の上限を超える
+        //
+        // 【決定的であること】乱数を使わないのはもちろん、unordered_map の**反復順に依存しない**
+        // ように書く(添字は必ず三角形の走査順で採番し、段Cの種は面積と重心で順序を決める)。
+        // 起動ごとに灯の位置や順番が変わると、A/B比較そのものが成立しなくなる。
+        std::vector<EmissiveCluster> BuildEmissiveClusters(
+            const Vertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount,
+            const float boundsMin[3], const float boundsMax[3], float clusterScale)
+        {
+            std::vector<EmissiveCluster> result;
+            if (vertices == nullptr || indices == nullptr || vertexCount == 0 || indexCount < 3)
+            {
+                return result;
+            }
+            const uint32_t triangleCount = indexCount / 3;
+
+            // --- 頂点を位置で溶接する ---
+            //
+            // 【素の頂点番号で連結成分を取ってはいけない】.kgeom の頂点は meshopt を通した後で、
+            // 法線やUVが違えば同じ位置でも別の頂点になっている。溶接を省くと**1個の電球が
+            // 数十片に割れる**。しかも「細かい光源がたくさん出た」だけに見えるので気付けない。
+            //
+            // 【しきい値はメッシュの大きさに比例させる】絶対値で固定すると、1.1km四方の
+            // PLATEAU タイルで float32 の分解能(1000m 付近で約 6e-5)を割り込む。
+            // 相対 1e-5 は float32 の仮数(約 1.2e-7 相対)に対して十分な余裕があり、
+            // DCC の頂点溶接許容(ふつう 1e-4 m 前後)よりは細かい
+            float diagonal = 0.0f;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float d = boundsMax[axis] - boundsMin[axis];
+                diagonal += d * d;
+            }
+            diagonal = std::sqrt(diagonal);
+            const float weldEpsilon = std::clamp(1e-5f * diagonal, 1e-5f, 1e-3f);
+            const float invWeld = 1.0f / weldEpsilon;
+
+            struct QuantizedKey
+            {
+                int64_t X, Y, Z;
+                bool operator==(const QuantizedKey& other) const
+                {
+                    return X == other.X && Y == other.Y && Z == other.Z;
+                }
+            };
+            struct QuantizedKeyHash
+            {
+                size_t operator()(const QuantizedKey& k) const
+                {
+                    size_t h = static_cast<size_t>(k.X) * 0x9E3779B97F4A7C15ull;
+                    h ^= static_cast<size_t>(k.Y) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    h ^= static_cast<size_t>(k.Z) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    return h;
+                }
+            };
+
+            // union-find の親配列。溶接と三角形の連結の両方に使う
+            std::vector<uint32_t> parent(vertexCount);
+            for (uint32_t v = 0; v < vertexCount; ++v)
+            {
+                parent[v] = v;
+            }
+            // 経路圧縮。再帰にすると頂点数ぶんの深さになりうるのでループで書く
+            const auto findRoot = [&parent](uint32_t v) -> uint32_t
+            {
+                uint32_t root = v;
+                while (parent[root] != root) { root = parent[root]; }
+                while (parent[v] != root) { const uint32_t next = parent[v]; parent[v] = root; v = next; }
+                return root;
+            };
+            // 【小さい番号を親にする】結合の向きを入力順に依存させないための決定性の要件
+            const auto unite = [&parent, &findRoot](uint32_t a, uint32_t b)
+            {
+                const uint32_t ra = findRoot(a);
+                const uint32_t rb = findRoot(b);
+                if (ra == rb) { return; }
+                if (ra < rb) { parent[rb] = ra; } else { parent[ra] = rb; }
+            };
+
+            {
+                std::unordered_map<QuantizedKey, uint32_t, QuantizedKeyHash> weldMap;
+                weldMap.reserve(vertexCount);
+                for (uint32_t v = 0; v < vertexCount; ++v)
+                {
+                    QuantizedKey key;
+                    key.X = std::llround(static_cast<double>(vertices[v].Position[0]) * invWeld);
+                    key.Y = std::llround(static_cast<double>(vertices[v].Position[1]) * invWeld);
+                    key.Z = std::llround(static_cast<double>(vertices[v].Position[2]) * invWeld);
+                    const auto inserted = weldMap.emplace(key, v);
+                    if (!inserted.second)
+                    {
+                        unite(inserted.first->second, v);
+                    }
+                }
+            }
+
+            // --- 三角形の3頂点をつないで連結成分にする ---
+            for (uint32_t tri = 0; tri < triangleCount; ++tri)
+            {
+                const uint32_t i0 = indices[tri * 3 + 0];
+                const uint32_t i1 = indices[tri * 3 + 1];
+                const uint32_t i2 = indices[tri * 3 + 2];
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+                {
+                    continue;
+                }
+                unite(i0, i1);
+                unite(i1, i2);
+            }
+
+            // --- 三角形を「かたまり」へ割り当てて累積する ---
+            struct GroupKey
+            {
+                uint32_t Root;
+                int64_t CellX, CellY, CellZ; // 段Bのグリッドセル(分割しないときは常に0)
+                bool operator==(const GroupKey& o) const
+                {
+                    return Root == o.Root && CellX == o.CellX && CellY == o.CellY && CellZ == o.CellZ;
+                }
+            };
+            struct GroupKeyHash
+            {
+                size_t operator()(const GroupKey& k) const
+                {
+                    size_t h = static_cast<size_t>(k.Root) * 0x9E3779B97F4A7C15ull;
+                    h ^= static_cast<size_t>(k.CellX) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    h ^= static_cast<size_t>(k.CellY) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    h ^= static_cast<size_t>(k.CellZ) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    return h;
+                }
+            };
+
+            struct Accum
+            {
+                double Area = 0.0;
+                double CentroidSum[3] = { 0.0, 0.0, 0.0 }; // Σ A_i c_i
+                double NormalSum[3] = { 0.0, 0.0, 0.0 };   // Σ A_i n_i (= Σ cross_i / 2)
+                double OwnMoment = 0.0;                    // Σ (A_i/36)(|ab|^2+|bc|^2+|ca|^2)
+                float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+                float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+                uint32_t TriangleCount = 0;
+            };
+            std::vector<Accum> groups;
+            std::unordered_map<GroupKey, uint32_t, GroupKeyHash> groupIndexOf;
+            std::vector<uint32_t> triangleGroup(triangleCount, 0xFFFFFFFFu);
+
+            const bool splitEnabled = clusterScale > 0.0f;
+            const float invSplit = splitEnabled ? (1.0f / clusterScale) : 0.0f;
+
+            for (uint32_t tri = 0; tri < triangleCount; ++tri)
+            {
+                const uint32_t i0 = indices[tri * 3 + 0];
+                const uint32_t i1 = indices[tri * 3 + 1];
+                const uint32_t i2 = indices[tri * 3 + 2];
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+                {
+                    continue;
+                }
+                const float* p0 = vertices[i0].Position;
+                const float* p1 = vertices[i1].Position;
+                const float* p2 = vertices[i2].Position;
+
+                const double e1[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
+                const double e2[3] = { static_cast<double>(p2[0]) - p0[0], static_cast<double>(p2[1]) - p0[1], static_cast<double>(p2[2]) - p0[2] };
+                const double cross[3] = {
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                };
+                const double area =
+                    0.5 * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+                // 縮退した三角形は面積0で法線の向きも決まらない。重心にも寄与しないので飛ばす
+                if (area <= 1e-12)
+                {
+                    continue;
+                }
+
+                const double centroid[3] = {
+                    (static_cast<double>(p0[0]) + p1[0] + p2[0]) / 3.0,
+                    (static_cast<double>(p0[1]) + p1[1] + p2[1]) / 3.0,
+                    (static_cast<double>(p0[2]) + p1[2] + p2[2]) / 3.0,
+                };
+
+                GroupKey key{};
+                key.Root = findRoot(i0);
+                key.CellX = key.CellY = key.CellZ = 0;
+                if (splitEnabled)
+                {
+                    // 【重心でセルを決める】頂点で決めると1枚の三角形が複数セルに跨る。
+                    // セルの原点はメッシュのAABB最小コーナーで、インスタンス変換に依存しない
+                    key.CellX = static_cast<int64_t>(std::floor((centroid[0] - boundsMin[0]) * invSplit));
+                    key.CellY = static_cast<int64_t>(std::floor((centroid[1] - boundsMin[1]) * invSplit));
+                    key.CellZ = static_cast<int64_t>(std::floor((centroid[2] - boundsMin[2]) * invSplit));
+                }
+
+                uint32_t groupIndex;
+                const auto found = groupIndexOf.find(key);
+                if (found == groupIndexOf.end())
+                {
+                    groupIndex = static_cast<uint32_t>(groups.size());
+                    groupIndexOf.emplace(key, groupIndex);
+                    groups.emplace_back();
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        groups[groupIndex].BoundsMin[axis] = p0[axis];
+                        groups[groupIndex].BoundsMax[axis] = p0[axis];
+                    }
+                }
+                else
+                {
+                    groupIndex = found->second;
+                }
+                triangleGroup[tri] = groupIndex;
+
+                Accum& acc = groups[groupIndex];
+                acc.Area += area;
+                acc.TriangleCount += 1u;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    acc.CentroidSum[axis] += area * centroid[axis];
+                    // Σ A_i n_i は Σ cross_i / 2 と厳密に等しい(crossの長さが 2*A_i)。
+                    // 正規化してから面積を掛け直すより丸めが1段少ない
+                    acc.NormalSum[axis] += 0.5 * cross[axis];
+                    acc.BoundsMin[axis] = std::min({ acc.BoundsMin[axis], p0[axis], p1[axis], p2[axis] });
+                    acc.BoundsMax[axis] = std::max({ acc.BoundsMax[axis], p0[axis], p1[axis], p2[axis] });
+                }
+
+                // 三角形自身の広がり(自分の重心まわりの二次モーメント)。
+                // ∫|x-g|^2 dA = (A/36)(|ab|^2 + |bc|^2 + |ca|^2)
+                //
+                // 【これを落とすと三角形1枚のかたまりで半径が厳密に0になる】重心の散らばりだけを
+                // 見ると1枚しかないときに0になる。半径0は点光源を意味し、半影が消え、
+                // 近傍のクランプ(d^2 + R^2)も効かなくなる
+                const double ab[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
+                const double bc[3] = { static_cast<double>(p2[0]) - p1[0], static_cast<double>(p2[1]) - p1[1], static_cast<double>(p2[2]) - p1[2] };
+                const double ca[3] = { static_cast<double>(p0[0]) - p2[0], static_cast<double>(p0[1]) - p2[1], static_cast<double>(p0[2]) - p2[2] };
+                const double edgeSq =
+                    ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2] +
+                    bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2] +
+                    ca[0] * ca[0] + ca[1] * ca[1] + ca[2] * ca[2];
+                acc.OwnMoment += area * edgeSq / 36.0;
+            }
+
+            if (groups.empty())
+            {
+                return result;
+            }
+
+            // --- 段C: 近すぎるかたまりを併合する ---
+            //
+            // 【上限で切り捨てて逃げてはいけない】街区の看板のように「小さな発光面がばらばらに
+            // 大量にある」形は段Aで数千個に割れる。面積の大きい順に上位を残す形にすると、
+            // EmeraldSquare では上位256個で総面積の46.7%にしかならず、発光の半分以上を
+            // 黙って捨てることになる。併合ならエネルギーは厳密に保存される
+            constexpr uint32_t kUnassigned = 0xFFFFFFFFu;
+            std::vector<uint32_t> mergedOf(groups.size(), kUnassigned);
+            uint32_t mergedCount = 0;
+            if (clusterScale > 0.0f)
+            {
+                std::vector<double> provisional(groups.size() * 3, 0.0);
+                for (size_t g = 0; g < groups.size(); ++g)
+                {
+                    const double inv = (groups[g].Area > 0.0) ? (1.0 / groups[g].Area) : 0.0;
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        provisional[g * 3 + axis] = groups[g].CentroidSum[axis] * inv;
+                    }
+                }
+
+                // 【総当たりにしない】三角形の多いメッシュではかたまりが数百〜数千になり、
+                // O(n^2) の距離判定が読み込み時間に効く。セル幅を併合距離に取れば、
+                // 距離が併合距離以下の相手は必ず隣接27セルの中にいる
+                const double invCell = 1.0 / clusterScale;
+                std::unordered_map<QuantizedKey, std::vector<uint32_t>, QuantizedKeyHash> cellMap;
+                cellMap.reserve(groups.size());
+                std::vector<QuantizedKey> cellOf(groups.size());
+                for (size_t g = 0; g < groups.size(); ++g)
+                {
+                    QuantizedKey cell;
+                    cell.X = static_cast<int64_t>(std::floor(provisional[g * 3 + 0] * invCell));
+                    cell.Y = static_cast<int64_t>(std::floor(provisional[g * 3 + 1] * invCell));
+                    cell.Z = static_cast<int64_t>(std::floor(provisional[g * 3 + 2] * invCell));
+                    cellOf[g] = cell;
+                    cellMap[cell].push_back(static_cast<uint32_t>(g));
+                }
+
+                // 【種の順序で結果が決まるので、順序を完全に決めておく】面積の大きい順。
+                // 同値は重心の辞書順で割る(浮動小数の同値は起きうるので添字までは落とさない)
+                std::vector<uint32_t> order(groups.size());
+                for (size_t g = 0; g < groups.size(); ++g)
+                {
+                    order[g] = static_cast<uint32_t>(g);
+                }
+                std::sort(
+                    order.begin(), order.end(),
+                    [&groups, &provisional](uint32_t a, uint32_t b)
+                    {
+                        if (groups[a].Area != groups[b].Area) { return groups[a].Area > groups[b].Area; }
+                        for (int axis = 0; axis < 3; ++axis)
+                        {
+                            const double pa = provisional[a * 3 + axis];
+                            const double pb = provisional[b * 3 + axis];
+                            if (pa != pb) { return pa < pb; }
+                        }
+                        return a < b;
+                    });
+
+                const double mergeDistSq = static_cast<double>(clusterScale) * clusterScale;
+                for (const uint32_t seed : order)
+                {
+                    if (mergedOf[seed] != kUnassigned)
+                    {
+                        continue;
+                    }
+                    const uint32_t target = mergedCount++;
+                    mergedOf[seed] = target;
+
+                    const QuantizedKey base = cellOf[seed];
+                    for (int64_t dz = -1; dz <= 1; ++dz)
+                    {
+                        for (int64_t dy = -1; dy <= 1; ++dy)
+                        {
+                            for (int64_t dx = -1; dx <= 1; ++dx)
+                            {
+                                QuantizedKey probe{ base.X + dx, base.Y + dy, base.Z + dz };
+                                const auto it = cellMap.find(probe);
+                                if (it == cellMap.end())
+                                {
+                                    continue;
+                                }
+                                // セル内は添字の昇順で並んでいる(挿入順がそのまま昇順)
+                                for (const uint32_t candidate : it->second)
+                                {
+                                    if (mergedOf[candidate] != kUnassigned)
+                                    {
+                                        continue;
+                                    }
+                                    double distSq = 0.0;
+                                    for (int axis = 0; axis < 3; ++axis)
+                                    {
+                                        const double d =
+                                            provisional[candidate * 3 + axis] - provisional[seed * 3 + axis];
+                                        distSq += d * d;
+                                    }
+                                    if (distSq <= mergeDistSq)
+                                    {
+                                        mergedOf[candidate] = target;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+                for (size_t g = 0; g < groups.size(); ++g)
+                {
+                    mergedOf[g] = mergedCount++;
+                }
+            }
+
+            // 併合後の累積へ畳む(面積・重心・法線・自分の広がりはすべて単純な和になる)
+            std::vector<Accum> merged(mergedCount);
+            std::vector<bool> mergedInitialized(mergedCount, false);
+            for (size_t g = 0; g < groups.size(); ++g)
+            {
+                Accum& dst = merged[mergedOf[g]];
+                const Accum& src = groups[g];
+                dst.Area += src.Area;
+                dst.OwnMoment += src.OwnMoment;
+                dst.TriangleCount += src.TriangleCount;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    dst.CentroidSum[axis] += src.CentroidSum[axis];
+                    dst.NormalSum[axis] += src.NormalSum[axis];
+                    dst.BoundsMin[axis] = mergedInitialized[mergedOf[g]]
+                        ? std::min(dst.BoundsMin[axis], src.BoundsMin[axis]) : src.BoundsMin[axis];
+                    dst.BoundsMax[axis] = mergedInitialized[mergedOf[g]]
+                        ? std::max(dst.BoundsMax[axis], src.BoundsMax[axis]) : src.BoundsMax[axis];
+                }
+                mergedInitialized[mergedOf[g]] = true;
+            }
+            groups.swap(merged);
+            for (uint32_t& g : triangleGroup)
+            {
+                if (g != 0xFFFFFFFFu)
+                {
+                    g = mergedOf[g];
+                }
+            }
+
+            // --- 二次モーメントの第2段(重心が確定してから、重心の散らばりを足す) ---
+            std::vector<double> centroidSpread(groups.size(), 0.0);
+            for (uint32_t tri = 0; tri < triangleCount; ++tri)
+            {
+                const uint32_t groupIndex = triangleGroup[tri];
+                if (groupIndex == 0xFFFFFFFFu)
+                {
+                    continue;
+                }
+                const float* p0 = vertices[indices[tri * 3 + 0]].Position;
+                const float* p1 = vertices[indices[tri * 3 + 1]].Position;
+                const float* p2 = vertices[indices[tri * 3 + 2]].Position;
+                const double e1[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
+                const double e2[3] = { static_cast<double>(p2[0]) - p0[0], static_cast<double>(p2[1]) - p0[1], static_cast<double>(p2[2]) - p0[2] };
+                const double cross[3] = {
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                };
+                const double area =
+                    0.5 * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+                const Accum& acc = groups[groupIndex];
+                const double invArea = (acc.Area > 0.0) ? (1.0 / acc.Area) : 0.0;
+                double distSq = 0.0;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    const double c = (static_cast<double>(p0[axis]) + p1[axis] + p2[axis]) / 3.0;
+                    const double d = c - acc.CentroidSum[axis] * invArea;
+                    distSq += d * d;
+                }
+                centroidSpread[groupIndex] += area * distSq;
+            }
+
+            // --- かたまりごとの値を確定する ---
+            result.reserve(groups.size());
+            for (size_t g = 0; g < groups.size(); ++g)
+            {
+                const Accum& acc = groups[g];
+                if (acc.Area <= 0.0 || acc.TriangleCount == 0)
+                {
+                    continue;
+                }
+                const double invArea = 1.0 / acc.Area;
+
+                EmissiveCluster cluster;
+                cluster.Area = static_cast<float>(acc.Area);
+                cluster.TriangleCount = acc.TriangleCount;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    cluster.Centroid[axis] = static_cast<float>(acc.CentroidSum[axis] * invArea);
+                    cluster.BoundsMin[axis] = acc.BoundsMin[axis];
+                    cluster.BoundsMax[axis] = acc.BoundsMax[axis];
+                }
+
+                // 指向性 κ = |Σ A_i n_i| / Σ A_i。閉じた曲面なら0、平らな片面なら1
+                const double normalLength = std::sqrt(
+                    acc.NormalSum[0] * acc.NormalSum[0] + acc.NormalSum[1] * acc.NormalSum[1] +
+                    acc.NormalSum[2] * acc.NormalSum[2]);
+                cluster.Directionality = static_cast<float>(std::clamp(normalLength * invArea, 0.0, 1.0));
+                if (normalLength > 1e-12)
+                {
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        cluster.AverageNormal[axis] = static_cast<float>(acc.NormalSum[axis] / normalLength);
+                    }
+                }
+                // 打ち消し合って向きが決まらない場合(閉じた形・両面)は既定値のまま。
+                // そのとき κ もほぼ0なので寄与はほぼ等方になり、向きは効かない
+
+                // 面積等価の円板半径。平行軸の定理により、かたまり全体の二次モーメントは
+                // 「三角形自身の広がり」と「重心の散らばり」の和になる。
+                // 半径 a の一様な円板では 2*moment/A = a^2 なので、定義どおり a に戻る
+                const double moment = acc.OwnMoment + centroidSpread[g];
+                cluster.SourceRadius = static_cast<float>(std::sqrt(std::max(0.0, 2.0 * moment * invArea)));
+
+                result.push_back(cluster);
+            }
+
+            return result;
         }
 
         // テクスチャの読み込みとキャッシュ・共有インスタンス(白/フラット法線/マゼンタ)の管理。
@@ -883,6 +1399,11 @@ namespace Kurenai::Assets
             modelMeshletTriangles.reserve(totalMeshletTriangleCount);
         }
 
+        // エミッシブから起こした光源の集計(読み込み後に1行だけログへ出す)。
+        // メッシュごとに出すとEmeraldSquareで12行になり、他のログに埋もれる
+        uint32_t emissiveMeshCount = 0;
+        uint32_t emissiveClusterCount = 0;
+
         model.Meshes.reserve(meshEntries.size());
         for (const MeshEntry& mesh : meshEntries)
         {
@@ -1107,6 +1628,25 @@ namespace Kurenai::Assets
             outMesh.EmissiveFactor[1] = material.EmissiveFactor[1];
             outMesh.EmissiveFactor[2] = material.EmissiveFactor[2];
 
+            // エミッシブなメッシュを光源のかたまりへ分ける。geometryPayloadが生存している
+            // ここでしか元データを読めないため、UV密度の見積もりと同じ場所で行う。
+            //
+            // 【判定は係数そのもので行う。材質名で選んではいけない】BistroMcGuire の
+            // exterior.mtl には `Spotlight_Emissive` という名前で Ke=0 の材質があり、
+            // 逆に map_Ke を持つ看板(Shopsign_Book_Store)も Ke=0 なので画面では真っ黒になる。
+            // GBuffer.hlsl は係数とテクスチャを乗算するので、係数が0の面は光って見えない。
+            // 係数で判定すれば「光源化される集合」と「画面で光って見える集合」が厳密に一致する
+            if (outMesh.EmissiveFactor[0] > 0.0f || outMesh.EmissiveFactor[1] > 0.0f ||
+                outMesh.EmissiveFactor[2] > 0.0f)
+            {
+                outMesh.EmissiveClusters = BuildEmissiveClusters(
+                    reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset), mesh.VertexCount,
+                    reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset), mesh.IndexCount,
+                    outMesh.BoundsMin, outMesh.BoundsMax, kEmissiveClusterScale);
+                emissiveMeshCount += 1u;
+                emissiveClusterCount += static_cast<uint32_t>(outMesh.EmissiveClusters.size());
+            }
+
             // LOD0の三角形数を積む(メッシュレットLODのしきい値の基準。Model::TotalTriangleCount)
             model.TotalTriangleCount += outMesh.IndexCount / 3;
 
@@ -1122,6 +1662,18 @@ namespace Kurenai::Assets
                 meshletLODCapInitialized = true;
             }
             model.Meshes.push_back(std::move(outMesh));
+        }
+
+        // 【0件でも黙らない】エミッシブなメッシュが有るのにかたまりが0個なら、
+        // 溶接や縮退の判定が効きすぎている。逆にメッシュ1個から数十個出ていたら
+        // 溶接が効いていない(法線違いで頂点が割れたまま連結成分を取った形)。
+        // どちらも絵からは分からないので、数を出しておく
+        if (emissiveMeshCount > 0)
+        {
+            Core::Logger::Info(
+                "ModelLoader",
+                "エミッシブな光源: " + std::to_string(emissiveClusterCount) + "個(" +
+                    std::to_string(emissiveMeshCount) + "メッシュ由来)");
         }
 
         model.Lights.reserve(lightEntries.size());
