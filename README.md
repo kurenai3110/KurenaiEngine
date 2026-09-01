@@ -1206,6 +1206,10 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   `Tools/generate_occlusion_test.py` で再生成できる
 - `Assets/Source/LightTest/` — ポイント/スポット/平行光の検証用シーン(床・壁・粗さ違いの球4個)。
   `Tools/generate_light_test.py` で再生成できる
+- `Assets/Source/PenumbraTest/` — 球光源の半影の測定用。半径0.6mの球を**軸上の指定した高さ1個だけ**
+  浮かべた形状で、高さ違い(4/6/7/8m)のモデルを作る。`Tools/generate_penumbra_test.py` で再生成できる。
+  **1モデル1遮蔽物**なのは、複数個を並べると測れないため(光源を遠くに置くと真上から見て影が遮蔽物の
+  真後ろに隠れ、近くに置くと軸外の影が床から落ちる)
 - `Assets/Source/ProbeTest/` — 反射プローブの検証用シーン。中央の仕切り壁で「密閉の西室(暖色)」と
   「天井が開いた東室(寒色・太陽光)」に分かれたホールと、その間を貫く金属球列(`metallic=1.0`、
   粗さ0.05)。床は磨いた石(粗さ0.06)で、壁のエミッシブ帯の映り込みから視差補正の効きを読み取る。
@@ -1243,7 +1247,9 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   (`BistroInterior.kscene`はライトもプローブも持たない素の読み込み確認用として残してあります)。
   `ScreenSpaceShadowTest.kscene`(接触影の目視確認用)と`ManyLightsTest.kscene`(タイルライトカリング用に
   ポイントライトを格子状に64灯配置)の2つだけは手書きではなく`Tools/generate_shadow_test_scenes.py`で
-  生成します(ジオメトリは`LightTest.kmodel`を流用するため、生成されるのは`.kscene`だけです)
+  生成します(ジオメトリは`LightTest.kmodel`を流用するため、生成されるのは`.kscene`だけです)。
+  半影の測定用の`PenumbraTest.kscene`・`PenumbraH{4,6,7,8}.kscene`も同じスクリプトが生成します
+  (こちらは`PenumbraTest`のモデルを使うため、先に`Tools/generate_penumbra_test.py`を走らせてパックします)
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
 - `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる。既定では空をGPUで手続き生成するため通常は使われず、Procedural Skyを無効にしたときのフォールバックと、`[Scene]Skybox`を明示するシーン向けのアセットとして残っている
 

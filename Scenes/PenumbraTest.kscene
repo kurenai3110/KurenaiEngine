@@ -1,0 +1,37 @@
+# 球光源の半影の測定用シーン。
+# Tools/generate_shadow_test_scenes.py で生成される(手で編集しない)。
+#
+# MegaLights を有効(Stochastic か Reference)にして使う。従来のライトループと
+# スクリーンスペースシャドウは光源を点として扱うため、このシーンでも半影は出ない。
+#
+# 確認手順: -megalights 1 -megalightsrays 64 が半影の真値。
+# -megalights 2 はそれを1本のレイで推定するので、蓄積平均が真値へ寄る。
+# SourceRadius = 0 にすると点光源と完全に一致すること(退化テスト)も、ここで確かめる。
+
+[Scene]
+Name = Penumbra Test
+
+[Model]
+Path = LightTest/LightTest.kmodel
+
+[Camera]
+# 球の影が伸びる先(手前側)を見下ろす。影の縁の勾配を画素で測るための固定カメラ
+Position = 0.0, 4.0, -9.0
+Yaw = 0.0
+Pitch = -22.0
+
+[Sun]
+# 太陽を切り、球光源1灯だけで照らす
+Shadow = false
+Enabled = false
+
+[Light]
+# 球の真上やや奥。影が手前へ伸びるので、接地点から影の先まで一続きに見える
+Type = Point
+Position = 0.0, 8.0, 4.0
+Color = 1.0, 1.0, 1.0
+Intensity = 300.0
+Range = 40.0
+# 光源そのものの半径[m]。0なら点光源(ハードシャドウ)
+SourceRadius = 0.50
+CastShadow = true

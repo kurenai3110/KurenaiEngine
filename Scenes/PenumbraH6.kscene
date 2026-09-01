@@ -1,0 +1,35 @@
+# 半影の幅が「遮蔽物と受光面の距離」に比例することの測定用シーン。
+# Tools/generate_shadow_test_scenes.py で生成される(手で編集しない)。
+#
+# ジオメトリは Tools/generate_penumbra_test.py が作る PenumbraTest.kmodel
+# (同じ球を高さ 1 / 2 / 4 / 8 m へ浮かべたもの)。
+#
+# 測り方: 影あり(-megalightsrays 256)を影なし(-megalightsrays 0)で割ると
+# 可視率が出る。床の距離減衰が約分されるので影の縁だけを測れる。
+# SourceRadius=0 を対照に取ること(半影が消えるはず)。
+
+[Scene]
+Name = Penumbra Height Test
+
+[Model]
+Path = PenumbraTest/PenumbraH6.kmodel
+
+[Camera]
+# 真上から見下ろす。斜めから見ると遠近で幅が縮み、距離依存と混ざる
+Position = 0.0, 48.0, 0.0
+Yaw = 0.0
+Pitch = -89.9
+
+[Sun]
+Shadow = false
+Enabled = false
+
+[Light]
+# 遮蔽物の真上・遠方。高く置くほど w = 2R*h/(H-h) が h への比例に近づく
+Type = Point
+Position = 0.0, 10.0, 0.0
+Color = 1.0, 1.0, 1.0
+Intensity = 4000.0
+Range = 200.0
+SourceRadius = 0.50
+CastShadow = true
