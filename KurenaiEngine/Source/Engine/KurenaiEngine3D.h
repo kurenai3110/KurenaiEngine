@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <map>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -185,6 +186,14 @@ namespace Kurenai
         void SetMegaLightsSpatial(int enabled, int neighborCount, int radius, int useMIS);
         // 初期サンプルの可視レイ(遮蔽されたサンプルをリザーバごと殺す)の有無。負の値は既定のまま
         void SetMegaLightsInitialVisibility(int enabled);
+        // 【計測専用】GPUの区間計測をウォームアップ後に指定枚数ぶん集計し、
+        // パス名ごとの平均[ms]をCSVへ書き出して終了する。
+        //
+        // 【Perfログでは段階7の測定ができない】あちらは0.05ms未満のパスを落とし、
+        // しかも1フレームの代表値しか出さない。ライト数が少ないとMegaLightsのパスが
+        // 消えてしまい、「ライト数に対して横ばいか」を測れない
+        void SetPerfDump(const wchar_t* path, int frames);
+
         // デノイザの有無、a-trousの段数、時間累積の上限。負/0は既定のまま
         void SetMegaLightsDenoise(int enabled, int atrousPasses, int maxFrames);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま
@@ -1389,6 +1398,15 @@ namespace Kurenai
         uint32_t m_MegaLightsDumpCopyFrame = 0;
         bool m_MegaLightsDumpIssued = false;
         bool m_MegaLightsDumpDone = false;
+        // --- GPU計測の書き出し(計測専用) ---
+        std::wstring m_PerfDumpPath;
+        int32_t m_PerfDumpTargetFrames = 0;
+        int32_t m_PerfDumpWarmupFrames = 0;
+        int32_t m_PerfDumpCollected = 0;
+        bool m_PerfDumpDone = false;
+        // パス名 -> 合計時間[ms]。同じ名前のパスが1フレームに複数あるぶんも足し込む
+        // (a-trousは段の数だけ同名で登録される。**合計が知りたいので足すのが正しい**)
+        std::map<std::string, double> m_PerfDumpTotals;
 
         // --- 雲(低解像度の専用パス) ---
         // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを

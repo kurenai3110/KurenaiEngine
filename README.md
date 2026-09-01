@@ -924,6 +924,7 @@ Samples\Sample3D\RunDX12.bat -debug
 | `-megalightssamples <M>` | 確率的サンプリングが1ピクセルあたりに候補プールから引く数(RISのM)。影レイの本数はこれとは独立で常に1本 |
 | `-megalightstemporal <0\|1>` | 時間再利用(前フレームの自分が選んだ灯を再投影して借りる)の有無。**既定は有効** — 1枚あたりの\|相対誤差\|中央値が6.0倍良くなる |
 | `-megalightstemporalmclamp <上限>` | 履歴のMの上限。上げるほど収束は速いがゴーストが出る |
+| `-perfdump <パス>` / `-perfdumpframes <枚数>` | **計測専用**。GPUの区間計測をウォームアップ後に平均してCSVへ書き出す。Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので性能測定には使えない |
 | `-megalightsdenoise <0\|1>` | デノイザ(時間累積 + エッジ停止付き a-trous)の有無。**既定は有効** |
 | `-megalightsdenoiseatrous <段数>` | a-trous の段数(0で時間累積のみ)。**既定は2** — 多いほど良いわけではなく、4段は画質もエネルギーも2段に劣る(根拠は `docs/ImplementationDetail.md` 61.7d) |
 | `-megalightsdenoiseframes <上限>` | 時間累積の上限フレーム数。TAAより短くすること |

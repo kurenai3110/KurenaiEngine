@@ -501,6 +501,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsDenoise = ParseIntOption(L"-megalightsdenoise", -1);
         const int megaLightsDenoiseAtrous = ParseIntOption(L"-megalightsdenoiseatrous", -1);
         const int megaLightsDenoiseFrames = ParseIntOption(L"-megalightsdenoiseframes", -1);
+        // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
+        // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
+        const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
+        const int perfDumpFrames = ParseIntOption(L"-perfdumpframes", 120);
 
         for (;;)
         {
@@ -559,6 +563,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetMegaLightsDenoise(
                     megaLightsDenoise, megaLightsDenoiseAtrous, megaLightsDenoiseFrames);
+            }
+            if (!perfDumpPath.empty())
+            {
+                engine.SetPerfDump(perfDumpPath.c_str(), perfDumpFrames);
             }
             engine.Run();
 
