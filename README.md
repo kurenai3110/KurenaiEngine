@@ -924,6 +924,9 @@ Samples\Sample3D\RunDX12.bat -debug
 | `-megalightssamples <M>` | 確率的サンプリングが1ピクセルあたりに候補プールから引く数(RISのM)。影レイの本数はこれとは独立で常に1本 |
 | `-megalightstemporal <0\|1>` | 時間再利用(前フレームの自分が選んだ灯を再投影して借りる)の有無。**既定は有効** — 1枚あたりの\|相対誤差\|中央値が6.0倍良くなる |
 | `-megalightstemporalmclamp <上限>` | 履歴のMの上限。上げるほど収束は速いがゴーストが出る |
+| `-megalightsdenoise <0\|1>` | デノイザ(時間累積 + エッジ停止付き a-trous)の有無。**既定は有効** |
+| `-megalightsdenoiseatrous <段数>` | a-trous の段数(0で時間累積のみ)。**既定は2** — 多いほど良いわけではなく、4段は画質もエネルギーも2段に劣る(根拠は `docs/ImplementationDetail.md` 61.7d) |
+| `-megalightsdenoiseframes <上限>` | 時間累積の上限フレーム数。TAAより短くすること |
 | `-megalightsperturb <0\|1\|2>` | **検証専用**。蓄積開始時にシーンへ摂動を加える(`1` = 全ライトを消す / `2` = 露出を+2段跳ばす)。時間再利用の追従を測るためのもの |
 | `-megalightsspatial <0\|1>` | 空間再利用(近傍が選んだ灯を借りる)の有無。**既定は無効** — 不偏だが影の縁の分散と約1msのコストに見合う改善がまだ無いため(根拠は `docs/ImplementationDetail.md` 61.7) |
 | `-megalightsspatialmis <0\|1>` | 空間再利用の結合方式(`0` = confidence重み、`1` = 不偏化) |

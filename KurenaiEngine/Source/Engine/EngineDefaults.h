@@ -373,6 +373,21 @@ namespace Kurenai::Defaults
     // 160で46.8フレーム(60Hzで0.78秒)、64で19.6フレーム(0.33秒)、640で185フレーム(3.1秒)。
     // 根拠と測り方は docs/ImplementationDetail.md 61.7b.1〜61.7b.2
     inline constexpr int MegaLightsTemporalMClamp = 160;
+    // デノイザ(時間累積 + エッジ停止付き à-trous)。
+    // 時空間再利用が「どの灯を選ぶか」を改善するのに対し、こちらは出た色をならす。
+    // **TAAの手前で落とすこと** ―― TAAはノイズを信号の広がりと解釈して履歴を棄却するので、
+    // ノイズを残したまま渡すとノイズもAAも両方失う
+    inline constexpr bool MegaLightsDenoiseEnabled = true;
+    // a-trous の段数。段ごとにステップ幅が倍になるので、4段で半径16画素ぶんに届く。
+    // 【2段にしてあるのはエネルギー損失とのトレードオフ】輝度のエッジ停止は原理的に
+    // 平均を暗い側へ寄せる(裾の重い分布では明るいタップほど強く弾かれる)。実測で
+    // 総和の相対差は 1段 -1.11% / 2段 -2.48% / 4段 -5.81% と段数に対して積み上がる一方、
+    // 誤差の中央値は 2段で底(0.0030)を打ち4段では悪化する(0.0055)。
+    // **画質でも2段が最良で、しかも損失が半分以下**。根拠は docs/ImplementationDetail.md 61.7d
+    inline constexpr int MegaLightsDenoiseAtrousPasses = 2;
+    // 時間累積の上限フレーム数。**TAAより短くすること** ―― 長いとTAAのゴーストと重なって
+    // 二重に尾を引き、どちらが原因か切り分けられなくなる
+    inline constexpr int MegaLightsDenoiseMaxFrames = 32;
 
     // --- シャドウ(スクリーンスペース) ---
     // ポイント/スポットライトの影。深度バッファに写っている面しか遮蔽物にできず、

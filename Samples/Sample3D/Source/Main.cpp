@@ -496,6 +496,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightsperturb <0|1|2>。【検証専用】蓄積開始時の摂動
         // (1=全ライトを消す / 2=露出を+2段跳ばす)。時間再利用の追従を測るためのもの
         const int megaLightsPerturb = ParseIntOption(L"-megalightsperturb", -1);
+        // -megalightsdenoise <0|1> / -megalightsdenoiseatrous <段数> /
+        // -megalightsdenoiseframes <上限>。デノイザ(時間累積 + a-trous)
+        const int megaLightsDenoise = ParseIntOption(L"-megalightsdenoise", -1);
+        const int megaLightsDenoiseAtrous = ParseIntOption(L"-megalightsdenoiseatrous", -1);
+        const int megaLightsDenoiseFrames = ParseIntOption(L"-megalightsdenoiseframes", -1);
 
         for (;;)
         {
@@ -549,6 +554,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsPerturb >= 0)
             {
                 engine.SetMegaLightsPerturb(megaLightsPerturb);
+            }
+            if (megaLightsDenoise >= 0 || megaLightsDenoiseAtrous >= 0 || megaLightsDenoiseFrames > 0)
+            {
+                engine.SetMegaLightsDenoise(
+                    megaLightsDenoise, megaLightsDenoiseAtrous, megaLightsDenoiseFrames);
             }
             engine.Run();
 

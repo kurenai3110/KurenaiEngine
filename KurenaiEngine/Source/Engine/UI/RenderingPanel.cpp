@@ -212,6 +212,28 @@ namespace Kurenai::UI
                 "Mを増やしてもレイは増えない。ここがライト数からコストを切り離している部分");
 
             CheckboxEx(
+                "デノイザ###MegaLightsDenoise", &m_Engine.m_MegaLightsDenoiseEnabled,
+                Defaults::MegaLightsDenoiseEnabled,
+                "時間累積とエッジ停止付きa-trousで、出た色を空間・時間へならす。\n\n"
+                "【時空間再利用とは別物】あちらはリザーバ(どの灯を選ぶか)を混ぜて実効サンプル数を"
+                "増やす。こちらは残ったノイズを落とす。\n\n"
+                "【TAAの手前で落とすこと】TAAはノイズを信号の広がりと解釈して履歴を毎フレーム棄却"
+                "するので、ノイズを残したまま渡すとノイズもAAも両方失う");
+
+            if (m_Engine.m_MegaLightsDenoiseEnabled)
+            {
+                SliderIntEx(
+                    "a-trousの段数###MegaLightsDenoiseAtrous", &m_Engine.m_MegaLightsDenoiseAtrousPasses,
+                    0, 5, Defaults::MegaLightsDenoiseAtrousPasses,
+                    "段ごとにステップ幅が倍になるので、4段で半径16画素ぶんに届く。0で時間累積のみ");
+                SliderIntEx(
+                    "時間累積の上限###MegaLightsDenoiseFrames", &m_Engine.m_MegaLightsDenoiseMaxFrames,
+                    1, 64, Defaults::MegaLightsDenoiseMaxFrames,
+                    "何フレームぶんまで混ぜるか。**TAAより短くすること** ―― 長いとTAAのゴーストと"
+                    "重なって二重に尾を引き、どちらが原因か切り分けられなくなる");
+            }
+
+            CheckboxEx(
                 "時間再利用###MegaLightsTemporal", &m_Engine.m_MegaLightsTemporalEnabled,
                 Defaults::MegaLightsTemporalEnabled,
                 "前フレームの自分が選んだ灯を、速度ベクトルで再投影して借りる。"

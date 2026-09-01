@@ -1550,6 +1550,18 @@ namespace Kurenai
             DirectX::XMUINT4 Params4;
         };
 
+        // MegaLightsDenoise.hlsl側のcbuffer MegaLightsDenoiseConstantsと一致させること
+        struct alignas(16) MegaLightsDenoiseConstants
+        {
+            // x=出力幅, y=出力高, z=履歴が使えるか, w=à-trousの段(0起点)
+            DirectX::XMUINT4 Params0;
+            // x=à-trousのステップ幅, y=時間累積の上限フレーム数,
+            // z=輝度のエッジ停止の強さ, w=法線のエッジ停止の指数
+            DirectX::XMFLOAT4 Params1;
+            // x=深度のエッジ停止の強さ, yzw=未使用
+            DirectX::XMFLOAT4 Params2;
+        };
+
         // MegaLightsReference.hlsl側のcbuffer MegaLightsConstantsと一致させる必要がある
         struct alignas(16) MegaLightsConstants
         {
@@ -2573,6 +2585,31 @@ namespace Kurenai
             m_MegaLightsTemporalComputeShader = m_Device->CreateShader(megaLightsTemporalCsDesc);
             m_MegaLightsTemporalPipelineState =
                 m_Device->CreateComputePipelineState({ m_MegaLightsTemporalComputeShader.get() });
+
+            // デノイザ。3エントリ(時間累積 / à-trous / 復調戻し)を1ファイルに置く。
+            // パッカーは1ファイル内の複数の[numthreads]を自動で見つける
+            {
+                RHI::ShaderDesc denoiseDesc;
+                denoiseDesc.Stage = RHI::ShaderStage::Compute;
+                denoiseDesc.FilePath = shaderDirectory + L"MegaLightsDenoise.kshader";
+                denoiseDesc.EntryPoint = "CSTemporalAccum";
+                m_MegaLightsDenoiseTemporalShader = m_Device->CreateShader(denoiseDesc);
+                m_MegaLightsDenoiseTemporalPSO =
+                    m_Device->CreateComputePipelineState({ m_MegaLightsDenoiseTemporalShader.get() });
+                denoiseDesc.EntryPoint = "CSAtrous";
+                m_MegaLightsDenoiseAtrousShader = m_Device->CreateShader(denoiseDesc);
+                m_MegaLightsDenoiseAtrousPSO =
+                    m_Device->CreateComputePipelineState({ m_MegaLightsDenoiseAtrousShader.get() });
+                denoiseDesc.EntryPoint = "CSRemodulate";
+                m_MegaLightsDenoiseRemodulateShader = m_Device->CreateShader(denoiseDesc);
+                m_MegaLightsDenoiseRemodulatePSO =
+                    m_Device->CreateComputePipelineState({ m_MegaLightsDenoiseRemodulateShader.get() });
+
+                RHI::BufferDesc denoiseCbDesc;
+                denoiseCbDesc.Usage = RHI::BufferUsage::Constant;
+                denoiseCbDesc.SizeInBytes = sizeof(MegaLightsDenoiseConstants);
+                m_MegaLightsDenoiseConstantBuffer = m_Device->CreateBuffer(denoiseCbDesc);
+            }
 
             RHI::BufferDesc megaLightsStochasticConstantBufferDesc;
             megaLightsStochasticConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -3630,6 +3667,36 @@ namespace Kurenai
         }
     }
 
+    void KurenaiEngine3D::SetMegaLightsDenoise(int enabled, int atrousPasses, int maxFrames)
+    {
+        // 負の値・0は「既定のまま」。他のMegaLightsオプションと同じ約束
+        if (enabled >= 0)
+        {
+            m_MegaLightsDenoiseEnabled = (enabled != 0);
+            // 切り替えた瞬間の履歴は今の設定で作られたものではないので捨てる
+            m_MegaLightsDenoiseHistoryValid = false;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                std::string("MegaLightsのデノイザを") + (m_MegaLightsDenoiseEnabled ? "有効" : "無効") +
+                    "にしました");
+        }
+        // 0段は「時間累積だけ」で意味があるので弾かない
+        if (atrousPasses >= 0)
+        {
+            m_MegaLightsDenoiseAtrousPasses = atrousPasses;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザのa-trousの段数を設定しました: " + std::to_string(atrousPasses));
+        }
+        if (maxFrames > 0)
+        {
+            m_MegaLightsDenoiseMaxFrames = maxFrames;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザの時間累積の上限を設定しました: " + std::to_string(maxFrames));
+        }
+    }
+
     void KurenaiEngine3D::SetMegaLightsPerturb(int mode)
     {
         if (mode < 0 || mode > 2)
@@ -4407,6 +4474,25 @@ namespace Kurenai
                 // 別の画素のものになる。RHIにバッファのクリアが無いので、初回は
                 // シェーダ側で「履歴を使わない」と判断させる
                 m_MegaLightsHistoryValid = false;
+                // デノイザの作業用テクスチャ。整数フォーマットが無いRHIなのですべてfloat。
+                // 【履歴もping-pongにする】RenderGraphはWARの辺を張らないので、
+                // 読む側と書く側が同じだと条件分岐でパスが消えた瞬間に静かに壊れる
+                for (int denoiseIndex = 0; denoiseIndex < 2; ++denoiseIndex)
+                {
+                    m_MegaLightsDenoiseHistory[denoiseIndex] =
+                        m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+                    m_MegaLightsDenoiseMoments[denoiseIndex] =
+                        m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+                    m_MegaLightsDenoisePing[denoiseIndex] =
+                        m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+                    m_MegaLightsDenoiseMomentPing[denoiseIndex] =
+                        m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+                }
+                m_MegaLightsDenoisedTexture =
+                    m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+                // 解像度が変わると履歴の添字の意味が変わる。バッファのクリアが無いRHIなので、
+                // シェーダ側へ「履歴を読むな」と伝える
+                m_MegaLightsDenoiseHistoryValid = false;
             }
 
             // MegaLightsの蓄積バッファ(計測専用)。1画素につきfloat4。
@@ -12166,6 +12252,172 @@ namespace Kurenai
             });
         }
 
+        // --- デノイザ(段階5): 時間累積 + エッジ停止付き a-trous ---
+        // 【蓄積パス(計測)より前に置く】計測したいのはデノイズ後の絵。
+        // 【TAAより前に落とす】ノイズを残したまま渡すとTAAが履歴を毎フレーム棄却し、
+        // ノイズもAAも両方失う(MegaLightsDenoise.hlsl 冒頭)
+        const bool megaLightsDenoiseRuns = ShouldRunMegaLights() &&
+                                           m_MegaLightsMode == MegaLightsMode::Stochastic &&
+                                           m_MegaLightsDenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
+                                           m_MegaLightsDenoisedTexture != nullptr;
+        if (megaLightsDenoiseRuns)
+        {
+            const uint32_t denoiseWrite = m_MegaLightsDenoiseHistoryIndex;
+            const uint32_t denoiseRead = denoiseWrite ^ 1u;
+            const int atrousPasses = std::clamp(m_MegaLightsDenoiseAtrousPasses, 0, 5);
+
+            const auto updateDenoiseConstants =
+                [this](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
+            {
+                MegaLightsDenoiseConstants denoiseConstants{};
+                denoiseConstants.Params0 = {
+                    m_RenderWidth, m_RenderHeight, m_MegaLightsDenoiseHistoryValid ? 1u : 0u, pass
+                };
+                denoiseConstants.Params1 = {
+                    stepWidth,
+                    static_cast<float>(std::max(1, m_MegaLightsDenoiseMaxFrames)),
+                    // 輝度のエッジ停止の強さ(SVGFの慣例値4.0)。大きいほど広く混ぜる
+                    4.0f,
+                    // 法線のエッジ停止の指数(同128)
+                    128.0f,
+                };
+                // 深度のエッジ停止。View空間Zに対する相対差で見るので無次元
+                denoiseConstants.Params2 = { 0.02f, 0.0f, 0.0f, 0.0f };
+                cmd->UpdateBuffer(
+                    m_MegaLightsDenoiseConstantBuffer.get(), &denoiseConstants, sizeof(denoiseConstants));
+            };
+
+            // G-Bufferの束縛。**DX12はSetPipelineStateのたびにルート引数を無効化する**ので
+            // パスごとに張り直す
+            const auto bindDenoiseCommon = [this](RHI::IRHICommandList* cmd)
+            {
+                cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                cmd->SetComputeConstantBuffer(1, m_MegaLightsDenoiseConstantBuffer.get());
+                cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+                cmd->SetComputeTexture(1, m_GBufferNormal.get());
+                cmd->SetComputeTexture(2, m_GBufferDepth.get());
+                cmd->SetComputeTexture(3, m_GBufferAlbedo.get());
+                cmd->SetComputeTexture(4, m_GBufferMaterial.get());
+                cmd->SetComputeTexture(5, m_GBufferVelocity.get());
+            };
+
+            // --- 時間累積: 生出力を復調して履歴と混ぜる ---
+            // 【履歴もここで書く】SVGFは1段目のa-trous出力を履歴にするが、こちらは時間累積の
+            // 出力をそのまま履歴にしている。パスが1本減るぶん履歴のノイズは多いが、
+            // 指数移動平均が均すので破綻はしない。差が問題になったら分ける
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "MegaLightsDenoiseTemporal",
+                .Reads =
+                {
+                    m_MegaLightsTexture.get(), m_GBufferAlbedo.get(), m_GBufferNormal.get(),
+                    m_GBufferMaterial.get(), m_GBufferDepth.get(), m_GBufferVelocity.get(),
+                    m_MegaLightsDenoiseHistory[denoiseRead].get(),
+                    m_MegaLightsDenoiseMoments[denoiseRead].get(),
+                },
+                .Writes =
+                {
+                    m_MegaLightsDenoisePing[0].get(), m_MegaLightsDenoiseMomentPing[0].get(),
+                    m_MegaLightsDenoiseHistory[denoiseWrite].get(),
+                    m_MegaLightsDenoiseMoments[denoiseWrite].get(),
+                },
+                .Execute =
+                    [this, denoiseRead, denoiseWrite, updateDenoiseConstants,
+                     bindDenoiseCommon](RHI::IRHICommandList* cmd)
+                {
+                    updateDenoiseConstants(cmd, 0u, 1.0f);
+                    cmd->SetComputePipelineState(m_MegaLightsDenoiseTemporalPSO.get());
+                    bindDenoiseCommon(cmd);
+                    cmd->SetComputeTexture(6, m_MegaLightsTexture.get());
+                    // 【読むのは前フレームが書いた側】今フレームはもう片方へ書くので
+                    // 同一フレーム内でのWARが生じない(RenderGraphはWARの辺を張らない)
+                    cmd->SetComputeTexture(7, m_MegaLightsDenoiseHistory[denoiseRead].get());
+                    cmd->SetComputeTexture(8, m_MegaLightsDenoiseMoments[denoiseRead].get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_MegaLightsDenoisePing[0].get());
+                    cmd->SetComputeUnorderedAccessTexture(1, m_MegaLightsDenoiseMomentPing[0].get());
+                    cmd->SetComputeUnorderedAccessTexture(2, m_MegaLightsDenoiseHistory[denoiseWrite].get());
+                    cmd->SetComputeUnorderedAccessTexture(3, m_MegaLightsDenoiseMoments[denoiseWrite].get());
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                },
+            });
+
+            // --- a-trous: 段ごとにステップ幅を倍にしてping-pong ---
+            for (int atrousPass = 0; atrousPass < atrousPasses; ++atrousPass)
+            {
+                const int atrousSrc = atrousPass & 1;
+                const int atrousDst = atrousSrc ^ 1;
+                const float atrousStep = static_cast<float>(1 << atrousPass);
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "MegaLightsDenoiseAtrous",
+                    .Reads =
+                    {
+                        m_MegaLightsDenoisePing[atrousSrc].get(),
+                        m_MegaLightsDenoiseMomentPing[atrousSrc].get(),
+                        m_GBufferNormal.get(), m_GBufferDepth.get(), m_GBufferAlbedo.get(),
+                        m_GBufferMaterial.get(), m_GBufferVelocity.get(),
+                    },
+                    .Writes =
+                    {
+                        m_MegaLightsDenoisePing[atrousDst].get(),
+                        m_MegaLightsDenoiseMomentPing[atrousDst].get(),
+                    },
+                    .Execute =
+                        [this, atrousSrc, atrousDst, atrousPass, atrousStep, updateDenoiseConstants,
+                         bindDenoiseCommon](RHI::IRHICommandList* cmd)
+                    {
+                        updateDenoiseConstants(cmd, static_cast<uint32_t>(atrousPass + 1), atrousStep);
+                        cmd->SetComputePipelineState(m_MegaLightsDenoiseAtrousPSO.get());
+                        bindDenoiseCommon(cmd);
+                        cmd->SetComputeTexture(6, m_MegaLightsDenoisePing[atrousSrc].get());
+                        // t7は使わないが、DX12は宣言したリソースを全部束縛しないと壊れる
+                        cmd->SetComputeTexture(7, m_MegaLightsDenoisePing[atrousSrc].get());
+                        cmd->SetComputeTexture(8, m_MegaLightsDenoiseMomentPing[atrousSrc].get());
+                        cmd->SetComputeUnorderedAccessTexture(0, m_MegaLightsDenoisePing[atrousDst].get());
+                        cmd->SetComputeUnorderedAccessTexture(
+                            1, m_MegaLightsDenoiseMomentPing[atrousDst].get());
+                        cmd->SetComputeUnorderedAccessTexture(2, m_MegaLightsDenoisePing[atrousDst].get());
+                        cmd->SetComputeUnorderedAccessTexture(
+                            3, m_MegaLightsDenoiseMomentPing[atrousDst].get());
+                        cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                    },
+                });
+            }
+
+            // --- 復調を戻して最終出力にする ---
+            const int denoiseFinalSrc = atrousPasses & 1;
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "MegaLightsDenoiseRemodulate",
+                .Reads =
+                {
+                    m_MegaLightsDenoisePing[denoiseFinalSrc].get(),
+                    m_MegaLightsDenoiseMomentPing[denoiseFinalSrc].get(),
+                    m_GBufferAlbedo.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                    m_GBufferNormal.get(), m_GBufferVelocity.get(),
+                },
+                .Writes = { m_MegaLightsDenoisedTexture.get() },
+                .Execute =
+                    [this, denoiseFinalSrc, updateDenoiseConstants,
+                     bindDenoiseCommon](RHI::IRHICommandList* cmd)
+                {
+                    updateDenoiseConstants(cmd, 0u, 1.0f);
+                    cmd->SetComputePipelineState(m_MegaLightsDenoiseRemodulatePSO.get());
+                    bindDenoiseCommon(cmd);
+                    cmd->SetComputeTexture(6, m_MegaLightsDenoisePing[denoiseFinalSrc].get());
+                    cmd->SetComputeTexture(7, m_MegaLightsDenoisePing[denoiseFinalSrc].get());
+                    cmd->SetComputeTexture(8, m_MegaLightsDenoiseMomentPing[denoiseFinalSrc].get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_MegaLightsDenoisedTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(1, m_MegaLightsDenoisedTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(2, m_MegaLightsDenoisedTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(3, m_MegaLightsDenoisedTexture.get());
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                },
+            });
+        }
+
+        // 計測が読む先。デノイザを通したフレームはその出力になる
+        RHI::IRHITexture* const megaLightsAccumSourceTexture =
+            (megaLightsDenoiseRuns && m_MegaLightsDenoisedTexture) ? m_MegaLightsDenoisedTexture.get()
+                                                                   : m_MegaLightsTexture.get();
+
         // --- MegaLightsの蓄積パス(計測専用): 出力を線形空間でフレーム方向へ足し込む。
         //     トーンマップ後の8bitをN枚平均しても、トーンマップが凹関数なので
         //     「偏りが無くてもノイズがあるだけで平均が低く出る」。線形で足す場所がここに要る ---
@@ -12181,9 +12433,12 @@ namespace Kurenai
             const uint32_t accumReset = (m_MegaLightsAccumFrames == 0u) ? 1u : 0u;
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLightsAccum",
-                .Reads = { m_MegaLightsTexture.get() },
+                // 【計測はデノイズ後の絵を測る】デノイザを通したフレームはその出力を読む。
+                // ここを生出力のままにすると、デノイザのON/OFFで測定値が1ビットも動かず
+                // 「効いていない」と誤診する(実際に一度そう出た)
+                .Reads = { megaLightsAccumSourceTexture },
                 .BufferWrites = { m_MegaLightsAccumBuffer.get() },
-                .Execute = [this, accumReset](RHI::IRHICommandList* cmd)
+                .Execute = [this, accumReset, megaLightsAccumSourceTexture](RHI::IRHICommandList* cmd)
                 {
                     MegaLightsAccumConstants accumConstants{};
                     accumConstants.Params0 = { m_RenderWidth, m_RenderHeight, accumReset, 0u };
@@ -12191,7 +12446,7 @@ namespace Kurenai
 
                     cmd->SetComputePipelineState(m_MegaLightsAccumPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_MegaLightsAccumConstantBuffer.get());
-                    cmd->SetComputeTexture(0, m_MegaLightsTexture.get());
+                    cmd->SetComputeTexture(0, megaLightsAccumSourceTexture);
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessBuffer(0, m_MegaLightsAccumBuffer.get());
                     cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
@@ -12332,8 +12587,14 @@ namespace Kurenai
 
         // 直接光パスがt7へバインドするMegaLightsの寄与。上と同じ理由で、読まれないフレームでも
         // 何かを張る必要がある(非対応環境ではそもそもテクスチャを確保していない)
-        RHI::IRHITexture* const megaLightsTextureForBinding =
+        // デノイズを通したフレームはその出力を、通さないフレームは生出力を読む。
+        // **DirectLighting.hlsl 側は変わらない**(同じ t7)ので、非MegaLights経路には影響しない
+        RHI::IRHITexture* megaLightsTextureForBinding =
             m_MegaLightsTexture ? m_MegaLightsTexture.get() : m_GBufferDepth.get();
+        if (megaLightsDenoiseRuns && m_MegaLightsDenoisedTexture)
+        {
+            megaLightsTextureForBinding = m_MegaLightsDenoisedTexture.get();
+        }
 
         // --- 直接光パス: G-Buffer+シャドウマップ(またはRTシャドウの可視率)からPBRの直接光
         //     (拡散+鏡面反射、シャドウ適用済み)を計算しHDRで書き出す(常に指定した内部解像度)。
@@ -14267,6 +14528,25 @@ namespace Kurenai
             }
             // 露出はパスの有無に関わらず記録する(次に走ったときの比較の基準になる)
             m_MegaLightsPrevEffectiveExposureEV100 = m_EffectiveExposureEV100;
+
+            // デノイザの履歴も同じ場所で反転する。今フレームの書き込み先が次フレームの履歴になる
+            // 【時間再利用の有無には依存しない】デノイザは「出た色」をならすもので、
+            // リザーバを混ぜる時間再利用とは独立に効く。条件を混ぜると、片方を切ったときに
+            // もう片方の履歴まで無効になって原因が分からなくなる
+            const bool denoiseRan = ShouldRunMegaLights() &&
+                                    m_MegaLightsMode == MegaLightsMode::Stochastic &&
+                                    m_MegaLightsDenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
+                                    m_MegaLightsDenoisedTexture != nullptr;
+            if (denoiseRan)
+            {
+                m_MegaLightsDenoiseHistoryIndex ^= 1u;
+                m_MegaLightsDenoiseHistoryValid = true;
+            }
+            else
+            {
+                // 走らなかったフレームを挟むと履歴が途切れる(中身が古い)
+                m_MegaLightsDenoiseHistoryValid = false;
+            }
         }
 
         if (m_TAAEnabled)

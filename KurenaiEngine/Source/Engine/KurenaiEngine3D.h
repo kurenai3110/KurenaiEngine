@@ -185,6 +185,8 @@ namespace Kurenai
         void SetMegaLightsSpatial(int enabled, int neighborCount, int radius, int useMIS);
         // 初期サンプルの可視レイ(遮蔽されたサンプルをリザーバごと殺す)の有無。負の値は既定のまま
         void SetMegaLightsInitialVisibility(int enabled);
+        // デノイザの有無、a-trousの段数、時間累積の上限。負/0は既定のまま
+        void SetMegaLightsDenoise(int enabled, int atrousPasses, int maxFrames);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま
         void SetMegaLightsTemporal(int enabled, int mClamp);
 
@@ -1281,6 +1283,30 @@ namespace Kurenai
         // (RenderGraphは前方走査でRAWの辺しか張らない。詳細は生成箇所のコメント)
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirHistory[2];
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsHistoryGuide[2];
+        // --- デノイザ(段階5) ---
+        // 【時空間再利用とは別物】あちらはリザーバ(どの灯を選ぶか)を混ぜ、こちらは出た色を
+        // 空間・時間へならす。TAAの手前でノイズを落とすためのもの
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseTemporalShader;
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseAtrousShader;
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseRemodulateShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsDenoiseTemporalPSO;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsDenoiseAtrousPSO;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsDenoiseRemodulatePSO;
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsDenoiseConstantBuffer;
+        // 時間累積の履歴(rgb=復調済みの色)とモーメント。どちらもping-pong。
+        // **RenderGraphがWARの辺を張らない**ので、読む側と書く側を必ず別にする
+        std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoiseHistory[2];
+        std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoiseMoments[2];
+        // à-trous のping-pong用。段ごとに入れ替える
+        std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoisePing[2];
+        std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoiseMomentPing[2];
+        // 復調を戻した最終出力。DirectLightingはこれをt7で読む
+        std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoisedTexture;
+        uint32_t m_MegaLightsDenoiseHistoryIndex = 0u;
+        bool m_MegaLightsDenoiseHistoryValid = false;
+        bool m_MegaLightsDenoiseEnabled = Defaults::MegaLightsDenoiseEnabled;
+        int32_t m_MegaLightsDenoiseAtrousPasses = Defaults::MegaLightsDenoiseAtrousPasses;
+        int32_t m_MegaLightsDenoiseMaxFrames = Defaults::MegaLightsDenoiseMaxFrames;
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsTemporalComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTemporalPipelineState;
         uint32_t m_MegaLightsHistoryIndex = 0u;
