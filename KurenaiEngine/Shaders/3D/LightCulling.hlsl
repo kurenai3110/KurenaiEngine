@@ -41,15 +41,11 @@ cbuffer LightCullingConstants : register(b0)
     float4 ProjParams;
 };
 
-// ライト1灯ぶんのデータ。DirectLighting.hlsl / C++側 GPULight と同じ64バイトのレイアウト
-struct GPULight
-{
-    float4 PositionType;
-    float4 ColorRange;
-    float4 DirectionAngle;
-    float4 Params;
-};
-StructuredBuffer<GPULight> Lights : register(t0);
+// ライト1灯ぶんのデータ(struct GPULight)とライトリストの宣言は PunctualLighting.hlsli にある。
+// このパスが要るのは構造体だけで、BRDFは使わないため KURENAI_PUNCTUAL_LIGHTING_BRDF は定義しない
+// (定義するとPI・SpecularEnergy.hlsli・BRDFLUTTexture・ColorSamplerがすべて要求される)
+#define KURENAI_PUNCTUAL_LIGHT_REGISTER t0
+#include "PunctualLighting.hlsli"
 Texture2D<float> DepthTexture : register(t1);
 
 RWStructuredBuffer<uint> LightTiles : register(u0);
