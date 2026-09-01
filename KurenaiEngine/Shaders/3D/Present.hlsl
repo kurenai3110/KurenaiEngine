@@ -90,6 +90,8 @@ cbuffer PresentConstants : register(b1)
     // Mode 11/14が使う。xy=レンダー解像度(Mode 11はUVからタイル座標を求めるのに、
     // Mode 14はUV単位の速度をピクセル単位へ換算するのに使う), zw=未使用
     float4 TileRenderSize;
+    // Mode 22(MegaLightsの蓄積平均)専用。x=これまでに足したフレーム数, yzw=未使用
+    float4 AccumParams;
 };
 
 Texture2D SourceTexture : register(t0);
@@ -106,6 +108,9 @@ StructuredBuffer<uint> LightTiles : register(t3);
 TextureCubeArray DebugCubeArrayTexture : register(t4);
 // 雲の3Dノイズ(Mode 18)専用。Texture3Dはここまでのどの型とも別なので、さらにスロットを分ける
 Texture3D DebugVolumeTexture : register(t5);
+// MegaLightsの蓄積バッファ(Mode 22)専用。t3(uintの構造化バッファ)とは要素の型が違うため
+// 別のスロットが要る。index = y * TileRenderSize.x + x
+StructuredBuffer<float4> MegaLightsAccumBuffer : register(t6);
 
 struct PSInput
 {
@@ -259,6 +264,22 @@ float4 PSMain(PSInput input) : SV_TARGET
             ? lerp(float3(0.0f, 0.0f, 1.0f), float3(0.0f, 1.0f, 0.0f), t * 2.0f)
             : lerp(float3(0.0f, 1.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), (t - 0.5f) * 2.0f);
         return float4(heat, 1.0f);
+    }
+
+    // MegaLightsの蓄積平均。**計測専用の表示。**
+    // 線形空間で足し込んだ値をフレーム数で割って、Mode 4 とまったく同じトーンマップを掛ける。
+    // 確率的サンプリングの平均が参照実装へ寄っていくかは、この表示どうしを比べて測る
+    // (スクリーンショットをN枚平均する方法は使えない。理由は MegaLightsAccum.hlsl 冒頭)
+    if (Mode == 22)
+    {
+        const uint2 pixelCoord = uint2(saturate(input.UV) * TileRenderSize.xy);
+        const uint index = pixelCoord.y * (uint)TileRenderSize.x + pixelCoord.x;
+        const float frameCount = max(AccumParams.x, 1.0f);
+
+        float3 hdr = MegaLightsAccumBuffer[index].rgb / frameCount * Gain;
+        float3 color = hdr / (hdr + 1.0f);
+        color = pow(color, 1.0f / 2.2f);
+        return float4(color, 1.0f);
     }
 
     // MegaLightsの候補プールが数えた「そのタイルへ届いたライト数」のヒートマップ。

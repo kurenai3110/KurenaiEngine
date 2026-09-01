@@ -236,6 +236,38 @@ namespace
         return index;
     }
 
+    // 「<オプション名> <文字列>」の形の起動オプションを1つ読む。指定が無ければ空文字列を返す
+    std::wstring ParseStringOption(const wchar_t* optionName)
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return std::wstring();
+        }
+
+        std::wstring value;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], optionName) != 0)
+            {
+                continue;
+            }
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    Kurenai::Core::WideToUtf8(optionName) + "の後に値が指定されていないため、無視します");
+                break;
+            }
+            value = argv[i + 1];
+            break;
+        }
+
+        LocalFree(argv);
+        return value;
+    }
+
     // 「<オプション名> <整数>」の形の起動オプションを1つ読む。指定が無い場合と、
     // 値が整数でない場合は notFound をそのまま返す(呼び出し側が「指定なし」を判別できるように)。
     // 検査はParseDebugViewIndexと同じで、末尾までが数字であることまで見る
@@ -442,6 +474,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // どちらも指定が無ければ-1で、その項目は既定のままになる
         const int megaLightsMode = ParseIntOption(L"-megalights", -1);
         const int megaLightsShadowRays = ParseIntOption(L"-megalightsrays", -1);
+        // -megalightsaccum <枚数>。線形空間で足し込む枚数(0で蓄積しない)。
+        // 指定した枚数で止まるので「ちょうどNサンプルの平均」を決定的に撮れる
+        const int megaLightsAccumFrames = ParseIntOption(L"-megalightsaccum", -1);
+        // -megalightsdump <パス>。蓄積し終えた平均を線形のまま生データで書き出す
+        const std::wstring megaLightsDumpPath = ParseStringOption(L"-megalightsdump");
 
         for (;;)
         {
@@ -468,6 +505,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 // どちらも負の値は「既定のまま」。手法だけ・本数だけの指定もできる
                 engine.OverrideMegaLights(megaLightsMode, megaLightsShadowRays);
+            }
+            if (megaLightsAccumFrames >= 0)
+            {
+                engine.SetMegaLightsAccumFrames(megaLightsAccumFrames);
+            }
+            if (!megaLightsDumpPath.empty())
+            {
+                engine.SetMegaLightsDumpPath(megaLightsDumpPath.c_str());
             }
             engine.Run();
 

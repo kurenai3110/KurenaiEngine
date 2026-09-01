@@ -186,17 +186,30 @@ namespace Kurenai::UI
 
         // 手法の選択。反射・影と同じ方針で、非対応環境では選択肢そのものを出さない
         // (上で早期returnしているのでここへは対応環境しか来ない)
-        static const char* kModeNames[] = { "なし", "参照実装 (全灯総当たり)" };
+        static const char* kModeNames[] = { "なし", "参照実装 (全灯総当たり)", "確率的サンプリング" };
 
         int modeIndex = static_cast<int>(m_Engine.m_MegaLightsMode);
         if (ComboEx(
                 "手法###MegaLightsMode", &modeIndex, kModeNames, IM_ARRAYSIZE(kModeNames),
                 Defaults::MegaLightsEnabled ? 1 : 0,
                 "参照実装はカリングもサンプリングも通さず全灯を評価するため、"
-                "ライト数に比例して重い。確率的サンプリング本体を評価するときの"
-                "真値(ノイズの無い基準)を作るためにある"))
+                "ライト数に比例して重い。確率的サンプリングを評価するときの"
+                "真値(ノイズの無い基準)を作るためにある。\n\n"
+                "確率的サンプリングは候補プールからM個引いて1灯へ絞り、影レイを1本だけ撃つ。"
+                "ノイズは乗るが偏りは無く、時間方向に平均すると参照実装へ寄っていく"))
         {
             m_Engine.m_MegaLightsMode = static_cast<KurenaiEngine3D::MegaLightsMode>(modeIndex);
+        }
+
+        if (m_Engine.m_MegaLightsMode == KurenaiEngine3D::MegaLightsMode::Stochastic)
+        {
+            SliderIntEx(
+                "初期候補数 M###MegaLightsSampleCount", &m_Engine.m_MegaLightsSampleCount, 1, 32,
+                Defaults::MegaLightsSampleCount,
+                "1ピクセルあたりに候補プールから引く数。大きいほど寄与の大きい灯を引き当てやすく"
+                "なってノイズが減るが、候補ごとにBRDFを1回評価するぶん重くなる。\n\n"
+                "【影レイの本数はこれとは独立】選ばれた1灯にしか撃たないので常に1本で、"
+                "Mを増やしてもレイは増えない。ここがライト数からコストを切り離している部分");
         }
 
         if (m_Engine.m_MegaLightsMode != KurenaiEngine3D::MegaLightsMode::Off)

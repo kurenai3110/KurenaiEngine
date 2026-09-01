@@ -155,6 +155,26 @@ namespace Kurenai
         // レイトレーシング非対応の環境では手法を変えてもパスが走らない(ShouldRunMegaLights)
         void OverrideMegaLights(int mode, int shadowRayCount);
 
+        // MegaLightsの出力を線形空間で何フレーム足し込むかを設定する(0で蓄積しない)。
+        // 指定した枚数に達したら足すのを止めるので、表示が静止し
+        // 「ちょうどNサンプルの平均」を決定的に撮れる。
+        //
+        // 【何のためにあるのか】確率的サンプリングの正しさは「平均が真値に一致するか」で決まるが、
+        // スクリーンショットはトーンマップ後の8bitで、トーンマップは凹関数のため
+        // **偏りがゼロでもノイズがあるだけで平均が低く出る**。N枚のスクリーンショットを
+        // 平均しても検証にならない。デバッグ表示「MegaLights - 蓄積平均」と対で使う
+        void SetMegaLightsAccumFrames(int frames);
+
+        // 蓄積し終えた平均を、指定パスへ生データ(float4 × 画素数)で書き出す。
+        // 形式: 'K','M','L','A' / uint32 幅 / uint32 高さ / uint32 足したフレーム数 / uint32 予約 /
+        //       そのあとに float4 が 幅×高さ 個(index = y * 幅 + x)。
+        //
+        // 【何のためにあるのか】確率的サンプリングの検証は「平均が真値へ 1/√N で寄るか」を測る。
+        // 画面キャプチャは8bit・トーンマップ後で、丸めだけでRMSEに0.29階調の下限が生まれ、
+        // その下限に隠れて比が読めない。**物差しの分解能が足りないまま原因を断定しないため**、
+        // 線形のまま倍精度で取り出せる経路を用意する
+        void SetMegaLightsDumpPath(const wchar_t* path);
+
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
         // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
         // FrameConstants::CascadeSplitsがXMFLOAT4(4要素)にfar距離を詰めているため、
@@ -1187,8 +1207,9 @@ namespace Kurenai
         // A/Bの基準にするためにある(MegaLightsReference.hlsl冒頭を参照)
         enum class MegaLightsMode
         {
-            Off,       // 従来どおりDirectLighting.hlslのライトループで評価する
-            Reference, // 全灯総当たり+1灯1影レイ。ノイズは無いが遅い(グラウンドトゥルース)
+            Off,        // 従来どおりDirectLighting.hlslのライトループで評価する
+            Reference,  // 全灯総当たり+1灯1影レイ。ノイズは無いが遅い(グラウンドトゥルース)
+            Stochastic, // 候補プールからRISで1灯選び、影レイ1本で評価する。ノイズは乗るが偏りは無い
         };
         MegaLightsMode m_MegaLightsMode = Defaults::MegaLightsEnabled ? MegaLightsMode::Reference
                                                                      : MegaLightsMode::Off;
@@ -1213,6 +1234,58 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsTilePoolConstantBuffer;
         // 候補プール本体(BufferUsage::StructuredRW)。解像度に依存するためCreateRenderTargetsで作り直す
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsTilePoolBuffer;
+
+        // 確率的サンプリング本体(MegaLightsStochastic.hlsl)。候補プールからM個引いてRISで
+        // 1灯へ絞り、影レイ1本で評価する。出力先は参照実装と同じm_MegaLightsTexture
+        // (同じ表示経路・同じ後段のままA/Bが撮れるようにするため)
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsStochasticComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsStochasticPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsStochasticConstantBuffer;
+        // 1ピクセルあたりに候補プールから引く数(RISのM)。影レイの本数はこれとは独立で常に1本
+        int32_t m_MegaLightsSampleCount = Defaults::MegaLightsSampleCount;
+
+        // --- 蓄積平均(計測専用) ---
+        // MegaLightsの出力を線形空間でフレーム方向へ足し込み、フレーム数で割った平均を表示する。
+        //
+        // 【なぜ要るのか】確率的サンプリングの正しさは「平均が真値に一致するか」で決まるが、
+        // 画面キャプチャで得られるのはトーンマップ後の8bitで、トーンマップは凹関数のため
+        // **偏りがゼロでもノイズがあるだけで平均が低く出る**。スクリーンショットをN枚平均しても
+        // 検証にならないので、線形空間で足す場所をエンジン側に持つ
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsAccumComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsAccumPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsAccumConstantBuffer;
+        // 1画素につきfloat4。レイトレーシング非対応の環境では、Presentがt6へ張るための
+        // 1要素だけのダミーになる(DX12はPSO切替でルート引数が無効化されるため、
+        // シェーダが宣言しているリソースは必ず何かをバインドする必要がある)
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsAccumBuffer;
+        // これまでに足したフレーム数。表示側はこれで割る
+        uint32_t m_MegaLightsAccumFrames = 0;
+        // レンダーターゲットを作り直してから何フレーム経ったか。
+        //
+        // 【整定を待たずに足し始めると測定そのものが壊れる】起動直後は内部解像度が
+        // 既定値(1280x720)から実際のウィンドウサイズへ切り替わり、モデルとテクスチャも
+        // ストリーミングで入ってくる。その間の絵を混ぜて平均すると、**別のシーンの平均**を
+        // 測ることになる。実際に、待たずに書き出したときは1280x720のまま吐き出された
+        uint32_t m_MegaLightsAccumWarmupFrames = 0;
+        // 何フレーム待ってから足し始めるか。小さなシーンの読み込みとリサイズが片付く目安
+        static constexpr uint32_t kMegaLightsAccumWarmup = 180;
+        // 何フレーム足したら止めるか。0なら蓄積そのものを行わない。
+        // **止めることに意味がある** ―― 止めれば表示が静止し、「ちょうどNサンプルの平均」を
+        // 決定的に撮れる(1/√Nで誤差が下がるかを測るのに要る)
+        int32_t m_MegaLightsAccumTargetFrames = 0;
+        // 蓄積し終えた平均をこのパスへ生データで書き出す(空なら書き出さない)。
+        //
+        // 【なぜ画面キャプチャでは足りないのか】画面から採れるのは8bitで、しかも
+        // トーンマップを通っている。ここで測りたいのは「平均が真値へ 1/√N で寄るか」で、
+        // 8bitの丸めだけでRMSEに0.29階調の下限が生まれ、その下限に隠れて比が読めなくなる。
+        // 物差しの分解能が足りないまま「1/√Nで落ちていない」と読むと、原因を取り違える
+        std::wstring m_MegaLightsDumpPath;
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsAccumReadback;
+        // コピーを積んだフレーム番号(0なら未発行)。GPUの実行はCPUより数フレーム遅れるので、
+        // 積んだ直後に読んではいけない(IRHICommandList::CopyBufferToReadback のコメント)
+        uint32_t m_MegaLightsDumpCopyFrame = 0;
+        bool m_MegaLightsDumpIssued = false;
+        bool m_MegaLightsDumpDone = false;
 
         // --- 雲(低解像度の専用パス) ---
         // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを
@@ -1603,12 +1676,15 @@ namespace Kurenai
             // 色付けは DebugView::LightTiles とまったく同じで、両者は同じ判定を使うので
             // 同じシーン・同じカメラなら画素単位で一致するはず(定義域のずれの検出用)
             MegaLightsTilePool,
+            // MegaLightsの出力を線形空間で蓄積した平均(計測専用)。参照実装と確率的サンプリングの
+            // これどうしを比べて、平均が真値へ寄るかを測る。蓄積が無効なら最終結果のまま
+            MegaLightsAverage,
         };
         // デバッグ表示の総数。**enumの末尾を足したらここも直すこと**。
         // enumのすぐ隣に置いてあるのは、離れた場所にあると更新を忘れるため
         // (実際に DDGIProbeBackface を足したとき、範囲チェックが古い末尾のままで
         //  起動オプションからの選択が弾かれた)
-        static constexpr int kDebugViewCount = static_cast<int>(DebugView::MegaLightsTilePool) + 1;
+        static constexpr int kDebugViewCount = static_cast<int>(DebugView::MegaLightsAverage) + 1;
 
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように

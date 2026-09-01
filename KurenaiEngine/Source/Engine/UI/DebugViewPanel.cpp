@@ -73,11 +73,12 @@ namespace Kurenai::UI
             "SWラスタ - 法線",
             "MegaLights (ポイント/スポットの直接光)",
             "MegaLights - 候補プール (タイルへ届いたライト数)",
+            "MegaLights - 蓄積平均 (計測用。線形空間でNフレーム平均)",
         };
         static_assert(
-            // 末尾のMegaLightsTilePoolは38
-            static_cast<int>(DebugView::MegaLightsTilePool) == 38,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はMegaLightsTilePool)");
+            // 末尾のMegaLightsAverageは39
+            static_cast<int>(DebugView::MegaLightsAverage) == 39,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はMegaLightsAverage)");
         static_assert(
             IM_ARRAYSIZE(kDebugViewNames) == KurenaiEngine3D::kDebugViewCount,
             "kDebugViewNamesの要素数をDebugViewの総数と一致させること");
