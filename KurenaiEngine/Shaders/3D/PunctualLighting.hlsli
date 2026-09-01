@@ -42,7 +42,8 @@ struct GPULight
     float4 ColorRange;     // rgb=露出済み放射輝度, w=Range
     float4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
     // x=spotAngleOffset, y=CastShadow(1でスクリーンスペースシャドウを撃つ / 0で撃たない),
-    // zw=未使用(エリアライト用に予約)
+    // z=光源そのものの半径[m](0なら点光源。MegaLightsのレイトレース経路でだけ効く),
+    // w=未使用(エリアライト用に予約)
     float4 Params;
 };
 StructuredBuffer<GPULight> Lights : register(KURENAI_PUNCTUAL_LIGHT_REGISTER);

@@ -262,6 +262,11 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
+    // --- 球光源: 狙う点を抽選してリザーバへ持たせる ---
+    // 【選択ループの外で引くこと】ループ内で引くと、候補が無効だった回数で乱数列の位相が
+    // ずれて画素ごとに相関が出る。半径0なら使われないが、引く回数は常に同じにしておく
+    const float2 sampleUV = float2(NextRandom(rngState), NextRandom(rngState));
+
     // --- 初期可視レイ: 遮蔽されていたらここで殺す ---
     // 殺すと「遮蔽で真っ黒になる灯」が近傍へ配られなくなる(RTXDI系の標準の段)。
     // 【ただし空間再利用の不偏化(Z)とは両立しない】殺された画素の実効的な定義域は
@@ -280,8 +285,16 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
                 const float originBias =
                     (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
-                visible = TraceLightVisibility(
-                              worldPos + N * originBias, geometry.L, originBias, geometry.Distance) > 0.0f;
+                // シェード側と同じ点へ撃つ(違う点を狙うと、殺す判断と影の階調が食い違う)
+                const float3 samplePos = MegaLightsLightSamplePosition(
+                    selectedLight.PositionType.xyz, selectedLight.Params.z, sampleUV);
+                const float3 toSample = samplePos - worldPos;
+                const float sampleDist = length(toSample);
+                if (sampleDist > originBias)
+                {
+                    visible = TraceLightVisibility(
+                                  worldPos + N * originBias, toSample / sampleDist, originBias, sampleDist) > 0.0f;
+                }
             }
         }
     }
@@ -300,7 +313,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     MegaLightsReservoir reservoir;
     // ライト番号は16bitへ詰める(kMaxLights = 1024 なので収まる)
     reservoir.LightAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, true);
-    reservoir.SampleUV = 0u;
+    // 球面上のどこを狙ったか。時空間再利用がこの点ごと持ち回るので、借りた側も同じ点へ撃つ
+    // (半径0なら中心になり、点光源と完全に一致する)
+    reservoir.SampleUV = MegaLightsPackSampleUV(sampleUV);
     // 不偏寄与重み W = (1/p̂(y)) * (1/M) * Σw
     reservoir.W = risWeightSum / (float(sampleCount) * selectedTargetPdf);
     reservoir.M = float(sampleCount);

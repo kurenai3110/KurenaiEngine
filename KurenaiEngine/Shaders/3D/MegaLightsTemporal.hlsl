@@ -289,6 +289,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float confidenceSum = 0.0f;
     uint selectedLight = kMegaLightsInvalidLight;
     float selectedTargetPdf = 0.0f;
+    uint selectedSampleUV = 0u;
 
     // 候補は2つだけ(0=現フレーム、1=履歴)。空間再利用と同じ形で回す
     [unroll]
@@ -332,6 +333,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         {
             selectedLight = lightI;
             selectedTargetPdf = pdfSelf;
+            // 【球面上のどこを狙ったかも一緒に引き継ぐ】落とすと借りたサンプルが
+            // 中心を狙い直してしまい、再利用した画素だけ半影が消える
+            selectedSampleUV = candidate.SampleUV;
         }
     }
 
@@ -353,7 +357,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 両方の候補が常に「生成しえた」側に入る。よって分母は素直に ΣM でよい
     MegaLightsReservoir result;
     result.LightAndFlags = MegaLightsPackLightAndFlags(selectedLight, true);
-    result.SampleUV = 0u;
+    result.SampleUV = selectedSampleUV;
     result.W = weightSum / (confidenceSum * selectedTargetPdf);
     result.M = confidenceSum;
     OutputReservoirs[index] = result;

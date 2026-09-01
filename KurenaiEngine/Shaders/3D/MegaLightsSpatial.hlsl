@@ -319,6 +319,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float confidenceSum = 0.0f;
     uint selectedLight = kMegaLightsInvalidLight;
     float selectedTargetPdf = 0.0f;
+    uint selectedSampleUV = 0u;
 
     [loop]
     for (uint i = 0u; i < candidateCount; ++i)
@@ -350,6 +351,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         {
             selectedLight = lightI;
             selectedTargetPdf = pdfSelf;
+            // 【球面上のどこを狙ったかも一緒に引き継ぐ】落とすと借りたサンプルが
+            // 中心を狙い直してしまい、再利用した画素だけ半影が消える
+            selectedSampleUV = candidate[i].SampleUV;
         }
     }
 
@@ -414,7 +418,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     MegaLightsReservoir result;
     result.LightAndFlags = MegaLightsPackLightAndFlags(selectedLight, true);
-    result.SampleUV = 0u;
+    result.SampleUV = selectedSampleUV;
     result.W = weightSum / (denominator * selectedTargetPdf);
     result.M = confidenceSum;
     OutputReservoirs[index] = result;

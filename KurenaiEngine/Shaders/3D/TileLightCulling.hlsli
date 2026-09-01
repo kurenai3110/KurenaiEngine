@@ -135,11 +135,18 @@ void ComputeLightBoundingSphere(GPULight light, float4x4 view, out float3 viewCe
             radius = sphereRadius;
         }
         viewCenter = mul(float4(worldCenter, 1.0f), view).xyz;
+        // ポイントと同じ理由で光源そのものの半径を足す。
+        // 【スポットも早期returnするので、ここにも足すこと】ポイント側だけ直すと
+        // 半影が出るスポットでだけ縁が欠け、原因がスポット固有に見えて追いにくくなる
+        radius += max(light.Params.z, 0.0f);
         return;
     }
 
     viewCenter = mul(float4(worldPosition, 1.0f), view).xyz;
-    radius = range;
+    // 【光源そのものの半径を足すこと】球光源は中心から SourceRadius だけ外へ広がっており、
+    // 中心が Range だけ離れた面でも球の手前側からは光が届く。足さないと光源の近くで
+    // タイルから取りこぼし、球の縁が黒く欠ける(カリングは取りこぼさないことが正しさの条件)
+    radius = range + max(light.Params.z, 0.0f);
 }
 
 // そのライトがタイルへ届くか。平行光は距離減衰を持たず画面全体に届くため常に真。

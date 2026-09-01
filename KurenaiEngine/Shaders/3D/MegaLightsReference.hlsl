@@ -82,6 +82,9 @@ Texture2D BRDFLUTTexture : register(t5);
 #define KURENAI_PUNCTUAL_LIGHT_REGISTER t6
 #define KURENAI_PUNCTUAL_LIGHTING_BRDF
 #include "PunctualLighting.hlsli"
+// 球光源のサンプリング(MegaLightsSampleUnitSphere など)を共有する。
+// 確率的サンプリング側と同じ関数を使わないと、真値と評価対象で狙う点の分布がずれる
+#include "MegaLightsCommon.hlsli"
 
 // 直接光(拡散+鏡面、影と透過を適用済み)。DirectLighting.hlsl が t7 で読んで加算する
 RWTexture2D<float4> MegaLightsOutput : register(u0);
@@ -106,6 +109,25 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 // 定数で置けるが、ポイント/スポットで同じことをすると**光源の向こう側のジオメトリが
 // 遮蔽物になる**。症状は「壁際・天井際のライトが常に真っ暗」で、コピー元の
 // RTShadow.hlsl にはこの罠が無い
+// PCG系の整数ハッシュ。確率的サンプリング側と同じもの
+uint HashUint(uint x)
+{
+    x ^= x >> 17;
+    x *= 0xed5ad4bbu;
+    x ^= x >> 11;
+    x *= 0xac4c1b51u;
+    x ^= x >> 15;
+    x *= 0x31848babu;
+    x ^= x >> 14;
+    return x;
+}
+
+float NextRandom(inout uint state)
+{
+    state = HashUint(state);
+    return float(state) * 2.3283064365e-10f;
+}
+
 float TraceLightVisibility(float3 rayOrigin, float3 L, float originBias, float distanceToLight)
 {
     RayDesc ray;
@@ -195,10 +217,44 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
             const float originBias =
                 (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
-            // punctual なので方向が1つに決まり、何本撃っても同じ答えになる。
-            // 本数を活かせるのは光源に半径が入ってから(GPULight.Params.z を使う段階)
-            shadow = TraceLightVisibility(
-                worldPos + N * originBias, geometry.L, originBias, geometry.Distance);
+            const float sourceRadius = max(light.Params.z, 0.0f);
+
+            if (sourceRadius <= 0.0f)
+            {
+                // 点光源。方向が1つに決まるので何本撃っても同じ答えになる
+                shadow = TraceLightVisibility(
+                    worldPos + N * originBias, geometry.L, originBias, geometry.Distance);
+            }
+            else
+            {
+                // 球光源。球面上の点を shadowRayCount 本ぶん引いて可視率を平均する。
+                // **これが半影の真値**で、本数を上げるほどノイズが減り真の可視率へ寄る。
+                // 確率的サンプリング側は同じ球面から1点だけ引くので、期待値がここに一致する
+                // 【この種にフレーム番号は入らない】参照実装はフレーム番号を受け取っておらず、
+                // 毎フレーム同じサンプル列を引く(=出力は決定的)。したがって
+                // **蓄積枚数を増やしても参照実装のノイズは減らない**。真値としての精度は
+                // 影レイの本数だけで決まるので、半影を測るときは本数を上げること
+                float visibleSum = 0.0f;
+                uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + i * 0x9E3779B9u);
+                [loop]
+                for (uint r = 0u; r < shadowRayCount; ++r)
+                {
+                    const float2 sampleUV = float2(NextRandom(rngState), NextRandom(rngState));
+                    const float3 samplePos =
+                        MegaLightsLightSamplePosition(light.PositionType.xyz, sourceRadius, sampleUV);
+                    const float3 toSample = samplePos - worldPos;
+                    const float sampleDist = length(toSample);
+                    if (sampleDist <= originBias)
+                    {
+                        // 受光点が球の内側。遮蔽を判定しようがないので素通しとする
+                        visibleSum += 1.0f;
+                        continue;
+                    }
+                    visibleSum += TraceLightVisibility(
+                        worldPos + N * originBias, toSample / sampleDist, originBias, sampleDist);
+                }
+                shadow = visibleSum / float(shadowRayCount);
+            }
         }
 
         directLight += EvaluatePunctualContribution(

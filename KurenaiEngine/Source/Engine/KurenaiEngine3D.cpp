@@ -1743,7 +1743,12 @@ namespace Kurenai
             // Params.y = このライトがスクリーンスペースシャドウを落とすか。ライトごとに切れるようにしてあるのは、
             // ピクセルあたりのシャドウレイ数に上限(LightingConstants.LightCount.y)があり、
             // 「影を出したいライト」に予算を回せるようにするため
-            gpuLight.Params = { angleOffset, light.CastShadow ? 1.0f : 0.0f, 0.0f, 0.0f };
+            // Params.z = 光源そのものの半径[m]。0なら点光源。予約枠だった zw のうち z を使う。
+            // 【平行光には入れない】太陽は MegaLights の対象外で、円盤サンプリングは
+            // RTShadow.hlsl が別に持っている
+            const float sourceRadius =
+                (light.Type == Assets::LightType::Directional) ? 0.0f : std::max(0.0f, light.SourceRadius);
+            gpuLight.Params = { angleOffset, light.CastShadow ? 1.0f : 0.0f, sourceRadius, 0.0f };
             return gpuLight;
         }
 

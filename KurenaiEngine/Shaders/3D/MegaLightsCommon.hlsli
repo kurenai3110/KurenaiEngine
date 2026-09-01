@@ -132,6 +132,53 @@ void MegaLightsUnpackMaterial(uint packed, out float metallic, out float roughne
     roughness = float((packed >> 8u) & 0xFFu) / 255.0f;
 }
 
+// --- 球光源のサンプリング(段階6) ---
+//
+// 【何をサンプリングしているか】光源が半径を持つと、遮蔽の判定は「中心へ1本」ではなく
+// 「球面上のどこか1点へ1本」になる。受光点から見て球のどの部分が遮蔽物に隠れているかが
+// 半影そのもので、遮蔽物と受光面が離れるほど球の見かけの大きさに対して影が広がる。
+//
+// 【減衰と目標関数は中心のままにする】半径ぶんの違いは遮蔽の判定にだけ現れるようにしてある。
+// 減衰まで球面上の点で測ると、光源に近い面で 1/d^2 が発散しやすくなるうえ、
+// 目標関数と実際の寄与がずれてRISの効率が落ちる。**期待値は変わらない**
+// (どちらもW側で割り戻すため)ので、安定する側を採る。
+//
+// 【なぜ立体角ではなく球面の一様サンプルか】厳密には「受光点から見た球の可視錐」を
+// 立体角一様にサンプリングするほうが分散が小さい。ただしこちらは受光点に依存するので、
+// **時空間再利用で別の画素へサンプルを渡したときにヤコビアンが要る**。段階6では
+// 光源に固定した球面一様に留め、ヤコビアンが1のまま正しくなるようにしてある
+// (受光点に依存しない写像なのでシフトが恒等になる)。分散を詰めるのは次段階。
+
+// 2つの一様乱数から球面上の点(単位ベクトル)を作る。極に偏らないよう z を一様に取る
+float3 MegaLightsSampleUnitSphere(float2 u)
+{
+    const float z = u.x * 2.0f - 1.0f;
+    const float r = sqrt(saturate(1.0f - z * z));
+    const float phi = 6.28318530718f * u.y;
+    return float3(r * cos(phi), r * sin(phi), z);
+}
+
+// サンプル位置を fp16 x2 でリザーバへ詰める(時空間再利用で持ち回るため)
+uint MegaLightsPackSampleUV(float2 uv)
+{
+    return f32tof16(uv.x) | (f32tof16(uv.y) << 16u);
+}
+
+float2 MegaLightsUnpackSampleUV(uint packed)
+{
+    return float2(f16tof32(packed & 0xFFFFu), f16tof32(packed >> 16u));
+}
+
+// 光源の中心と半径から、実際に狙う点を求める。半径0なら中心そのもの(点光源と完全に一致)
+float3 MegaLightsLightSamplePosition(float3 lightCenter, float sourceRadius, float2 sampleUV)
+{
+    if (sourceRadius <= 0.0f)
+    {
+        return lightCenter;
+    }
+    return lightCenter + MegaLightsSampleUnitSphere(sampleUV) * sourceRadius;
+}
+
 MegaLightsHistoryGuide MegaLightsMakeEmptyGuide()
 {
     MegaLightsHistoryGuide guide;
