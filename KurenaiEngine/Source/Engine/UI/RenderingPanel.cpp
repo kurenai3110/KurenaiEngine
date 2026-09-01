@@ -63,6 +63,10 @@ namespace Kurenai::UI
         {
             DrawLightCullingSection();
         }
+        if (ImGui::CollapsingHeader("MegaLights###MegaLights"))
+        {
+            DrawMegaLightsSection();
+        }
         if (ImGui::CollapsingHeader("水面###Water"))
         {
             DrawWaterSection();
@@ -92,6 +96,15 @@ namespace Kurenai::UI
             "レイマーチするため、画面に写っていない遮蔽物(画面外や手前の面に隠れたもの)は影を落とさない。"
             "得られるのは完全な影ではなく接触影・中距離の遮蔽。どのライトが影を落とすかは"
             "ライティングパネルのライトごとの「影を落とす」で決める");
+
+        // MegaLightsが有効なあいだ、直接光パスのライトループごと止まる。スクリーンスペースシャドウは
+        // そのループの内側で影を掛けるので**丸ごと使われなくなる**。影はレイトレーシングへ
+        // 置き換わるため絵は破綻せず、黙って設定が効かなくなる形になるので明示する
+        if (m_Engine.ShouldRunMegaLights())
+        {
+            ImGui::TextDisabled(
+                "MegaLightsが有効なあいだ、ここの設定は使われません(影はレイトレーシングで求めます)");
+        }
 
         BeginParamGroup();
 
@@ -153,6 +166,55 @@ namespace Kurenai::UI
         ImGui::Text(
             "タイル: %u x %u (1タイルあたり最大%uライト)", m_Engine.m_LightTileCountX, m_Engine.m_LightTileCountY,
             KurenaiEngine3D::kLightTileCapacity);
+    }
+
+    void RenderingPanel::DrawMegaLightsSection()
+    {
+        ImGui::TextWrapped(
+            "ポイント/スポットライトの直接光を専用パスで求め、1灯ごとにTLASへ影レイを撃つ。"
+            "有効なあいだ直接光パスのライトループは止まり、この結果がそのまま使われる。"
+            "太陽は対象外で、従来どおりCSMかRTシャドウが担当する");
+
+        const bool rtAvailable = m_Engine.m_RaytracingAvailable;
+        if (!rtAvailable)
+        {
+            ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
+            return;
+        }
+
+        BeginParamGroup();
+
+        // 手法の選択。反射・影と同じ方針で、非対応環境では選択肢そのものを出さない
+        // (上で早期returnしているのでここへは対応環境しか来ない)
+        static const char* kModeNames[] = { "なし", "参照実装 (全灯総当たり)" };
+
+        int modeIndex = static_cast<int>(m_Engine.m_MegaLightsMode);
+        if (ComboEx(
+                "手法###MegaLightsMode", &modeIndex, kModeNames, IM_ARRAYSIZE(kModeNames),
+                Defaults::MegaLightsEnabled ? 1 : 0,
+                "参照実装はカリングもサンプリングも通さず全灯を評価するため、"
+                "ライト数に比例して重い。確率的サンプリング本体を評価するときの"
+                "真値(ノイズの無い基準)を作るためにある"))
+        {
+            m_Engine.m_MegaLightsMode = static_cast<KurenaiEngine3D::MegaLightsMode>(modeIndex);
+        }
+
+        if (m_Engine.m_MegaLightsMode != KurenaiEngine3D::MegaLightsMode::Off)
+        {
+            SliderIntEx(
+                "影レイ本数###MegaLightsShadowRayCount", &m_Engine.m_MegaLightsShadowRayCount, 0, 16,
+                Defaults::MegaLightsShadowRayCount,
+                "1灯あたりに撃つ影レイの本数。\n\n"
+                "【0にすると恒等テストになる】影を撃たず可視率1で評価するため、"
+                "スクリーンスペースシャドウを切った従来のライトループと数値的に一致するはず。"
+                "BRDF・距離減衰・スポット円錐・プリ露出をまとめて検証できる。\n\n"
+                "ポイント/スポットは光源方向が1つに決まるため、1より大きくしても答えは変わらない"
+                "(光源に半径が入る段階で意味を持つ)");
+            ImGui::TextDisabled("半透明・反射プローブ・DDGIのライトは従来のループのままです");
+            ImGui::TextDisabled("ポイント/スポットのスクリーンスペースシャドウは使われなくなります");
+        }
+
+        EndParamGroup();
     }
 
     void RenderingPanel::DrawGeometrySection()

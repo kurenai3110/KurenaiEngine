@@ -89,6 +89,10 @@ Texture2D DepthTexture : register(t3);
 // ルート引数が無効化されるため、シェーダが宣言しているリソースはモードによらず必ず
 // バインドしなければならない(C++側は非対応環境では代わりに深度テクスチャを張る)
 Texture2D RTShadowTexture : register(t6);
+// MegaLightsパス(MegaLightsReference.hlsl)が書いたポイント/スポットライトの直接光
+// (拡散+鏡面、影と透過を適用済み)。このパスと同じ解像度・同じピクセル格子なので、常にLoadで読む。
+// LightCount.wが1のときだけ読まれるが、t6と同じ理由で必ずバインドしなければならない
+Texture2D MegaLightsTexture : register(t7);
 // ポイント/スポットライトのスクリーンスペースシャドウ。FrameConstants(ViewProj)・
 // LightingConstants(SSSParams0/1)・DataSampler・DepthTextureを参照するため、それらより後でインクルードする
 #include "ScreenSpaceShadow.hlsli"
@@ -289,9 +293,16 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 線形に伸び続けないようにするための予算で、EvaluateLightが消費する
     uint shadowRayBudget = LightCount.y;
 
+    // MegaLightsが走っているフレームでは、ポイント/スポットの寄与(影・透過込み)は
+    // あちらが計算済みなのでそのまま足すだけにし、**このパスのライトループは回さない**。
+    // 回すと同じライトが二重に加算されて2倍明るくなる
+    if (LightCount.w != 0u)
+    {
+        directLight += MegaLightsTexture.Load(int3((int2)input.Position.xy, 0)).rgb;
+    }
     // タイルライトカリング有効時は、このピクセルが属するタイルのリストだけをループする。
     // 無効時は従来どおり全ライトを回す(カリングの有無で結果が変わらないことの検証に使う)
-    if (TileParams.w != 0u)
+    else if (TileParams.w != 0u)
     {
         const uint2 tileCoord = uint2(input.Position.xy) / TileParams.y;
         const uint tileBase = (tileCoord.y * TileParams.x + tileCoord.x) * (1u + TileParams.z);

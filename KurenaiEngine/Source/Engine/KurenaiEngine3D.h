@@ -140,6 +140,21 @@ namespace Kurenai
         // **フレームの記録が始まる前(Run()より前)にだけ呼ぶこと**
         void OverrideDDGILOD(uint32_t lodCount, bool followCamera);
 
+        // MegaLightsの手法と、1灯あたりに撃つ影レイの本数を起動時に上書きする。
+        // mode は KurenaiEngine3D::MegaLightsMode の値(0=なし, 1=参照実装)。
+        // mode / shadowRayCount のどちらも、負の値を渡すとその項目は既定のままにする
+        // (手法だけ・本数だけの指定ができるようにするため)。
+        //
+        // 【何のためにあるのか】SetDebugViewIndex / ForceDDGIRayModeRaster と同じ理由。
+        // MegaLightsの検証は「見て判断する」ものではなく画素値を測るもので、
+        // 影レイ0本(恒等テスト)と従来のライトループの一致を数値で確かめる、といった比較を
+        // 毎回コンボの人手操作でやると再現性が落ちる。**シーンを切り替えると露出(EV100)が
+        // 引き継がれるため、A/Bは必ず起動直後から同じ手順で行うこと。**
+        //
+        // 範囲外の値は無視してログを残す(呼び出し側が範囲を知らなくてよいようにする)。
+        // レイトレーシング非対応の環境では手法を変えてもパスが走らない(ShouldRunMegaLights)
+        void OverrideMegaLights(int mode, int shadowRayCount);
+
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
         // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
         // FrameConstants::CascadeSplitsがXMFLOAT4(4要素)にfar距離を詰めているため、
@@ -244,6 +259,10 @@ namespace Kurenai
         // 「パスを走らせるか」と「その出力を読むか」を同じ1つの述語で判定するための関数
         // (ShouldRunRaytraced*と同じ作法)
         bool ShouldRunRaytracedDDGITrace() const;
+        // このフレームでMegaLightsパスを実行するか。上と同じ作法で1か所に集約している。
+        // これがfalseのときDirectLighting.hlslは従来のライトループへ戻る ―― 「パスを積むか」と
+        // 「ライトループを止めるか」がずれると、ライトが二重に加算されるか、逆に全部消える
+        bool ShouldRunMegaLights() const;
         // このメッシュをメッシュシェーダー経路で描くか。上のShouldRun*と同じく、
         // 「どのPSOを束ねるか」と「DispatchMeshとDrawIndexedのどちらを積むか」の判断が
         // ずれると即座に破綻するため、判定を1か所に集約する。
@@ -1158,6 +1177,33 @@ namespace Kurenai
         int32_t m_RTShadowSampleCount = Defaults::RTShadowSampleCount;
         float m_RTShadowSunAngularRadiusDegrees = Defaults::RTShadowSunAngularRadiusDegrees;
 
+        // --- MegaLights: ポイント/スポットライトの直接光を専用パスで求める経路 ---
+        // 求めた寄与をHDRのテクスチャへ書き、DirectLighting.hlslがt7でそれを読んで加算する
+        // (有効なあいだ、あちらのライトループは回らない)。太陽はこの経路の対象外で、
+        // 従来どおりb0とCSM/RTシャドウが担当する。
+        //
+        // 【現段階は参照実装だけ】確率的サンプリング本体はまだ無い。Referenceは全灯を
+        // 総当たりして1灯ごとに影レイを撃つ、遅いが真値を返す経路で、以降の段階の
+        // A/Bの基準にするためにある(MegaLightsReference.hlsl冒頭を参照)
+        enum class MegaLightsMode
+        {
+            Off,       // 従来どおりDirectLighting.hlslのライトループで評価する
+            Reference, // 全灯総当たり+1灯1影レイ。ノイズは無いが遅い(グラウンドトゥルース)
+        };
+        MegaLightsMode m_MegaLightsMode = Defaults::MegaLightsEnabled ? MegaLightsMode::Reference
+                                                                     : MegaLightsMode::Off;
+        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsReferenceComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsReferencePipelineState;
+        std::unique_ptr<RHI::IRHITexture> m_MegaLightsTexture;
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsConstantBuffer;
+        // 1灯あたりに撃つ影レイの本数。**0にすると影を撃たず可視率1で評価する**。
+        // その状態の出力は、スクリーンスペースシャドウを切った既存のライトループと
+        // 数値的に一致するはずで、BRDF・減衰・スポット円錐・プリ露出をまとめて検証できる
+        // (MegaLightsReference.hlslの「恒等テスト」)。punctualは方向が1つに決まるため、
+        // 1より大きくしても答えは変わらない(光源に半径が入る段階で意味を持つ)
+        int32_t m_MegaLightsShadowRayCount = Defaults::MegaLightsShadowRayCount;
+
         // --- 雲(低解像度の専用パス) ---
         // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを
         // 内部レンダー解像度の1/2(面積で1/4)で評価し、「透過率 + 事前乗算済みの散乱光」を書く。
@@ -1539,12 +1585,16 @@ namespace Kurenai
             SoftwareRaster,       // ソフトウェアラスタライザのフラットな陰影(HDR)
             SoftwareRasterDepth,  // 同 深度(生値)。DebugView::DepthRawと並べて差分を取る
             SoftwareRasterNormal, // 同 法線。DebugView::Normalとまったく同じ符号化・同じ表示
+            // MegaLightsパスが書いたポイント/スポットライトの直接光(トーンマップして表示)。
+            // 上の3つと同じく、パスが実行されていないフレームでは中身が前フレーム/未定義の
+            // 残骸なので、最終結果のまま切り替えない
+            MegaLights,
         };
         // デバッグ表示の総数。**enumの末尾を足したらここも直すこと**。
         // enumのすぐ隣に置いてあるのは、離れた場所にあると更新を忘れるため
         // (実際に DDGIProbeBackface を足したとき、範囲チェックが古い末尾のままで
         //  起動オプションからの選択が弾かれた)
-        static constexpr int kDebugViewCount = static_cast<int>(DebugView::SoftwareRasterNormal) + 1;
+        static constexpr int kDebugViewCount = static_cast<int>(DebugView::MegaLights) + 1;
 
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように

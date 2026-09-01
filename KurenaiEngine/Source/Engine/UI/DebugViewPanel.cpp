@@ -71,11 +71,12 @@ namespace Kurenai::UI
             "SWラスタ (自前ラスタライザのフラット陰影)",
             "SWラスタ - 深度 (生値)",
             "SWラスタ - 法線",
+            "MegaLights (ポイント/スポットの直接光)",
         };
         static_assert(
-            // 末尾のSoftwareRasterNormalは36
-            static_cast<int>(DebugView::SoftwareRasterNormal) == 36,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はSoftwareRasterNormal)");
+            // 末尾のMegaLightsは37
+            static_cast<int>(DebugView::MegaLights) == 37,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はMegaLights)");
         static_assert(
             IM_ARRAYSIZE(kDebugViewNames) == KurenaiEngine3D::kDebugViewCount,
             "kDebugViewNamesの要素数をDebugViewの総数と一致させること");

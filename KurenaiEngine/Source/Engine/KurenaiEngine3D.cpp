@@ -1499,6 +1499,14 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params0;
         };
 
+        // MegaLightsReference.hlsl側のcbuffer MegaLightsConstantsと一致させる必要がある
+        struct alignas(16) MegaLightsConstants
+        {
+            // x: 出力幅, y: 出力高, z: 1灯あたりに撃つ影レイの本数(0なら影を撃たず可視率1。恒等テスト用),
+            // w: 有効ライト数
+            DirectX::XMUINT4 Params0;
+        };
+
         // RTAO.hlsl側のcbuffer RTAOConstantsと一致させる必要がある
         struct alignas(16) RTAOConstants
         {
@@ -1573,7 +1581,9 @@ namespace Kurenai
         // 直接光パス固有のパラメータはすべてここへ足していく
         struct alignas(16) LightingConstants
         {
-            // x=有効ライト数, y=ピクセルあたりに撃つスクリーンスペースシャドウのレイ数の上限, zw=未使用
+            // x=有効ライト数, y=ピクセルあたりに撃つスクリーンスペースシャドウのレイ数の上限,
+            // z=太陽の影の手法(KurenaiEngine3D::ShadowMode。2のときだけRTShadowTexture(t6)を読む),
+            // w=MegaLightsの寄与を使うか(1なら t7 のテクスチャを読み、ライトループを回さない)
             DirectX::XMUINT4 LightCount;
             // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)のパラメータ。
             // x=レイマーチのステップ数, y=最大レイ長(ワールド単位), z=遮蔽とみなす深度差の上限(thickness),
@@ -2425,6 +2435,22 @@ namespace Kurenai
             rtShadowConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
             rtShadowConstantBufferDesc.SizeInBytes = sizeof(RTShadowConstants);
             m_RTShadowConstantBuffer = m_Device->CreateBuffer(rtShadowConstantBufferDesc);
+
+            // MegaLightsの参照実装(コンピュートシェーダー。ポイント/スポットライトを全灯
+            // 総当たりし、届いた1灯ごとに光源までの影レイを撃つ)。以降の確率的サンプリングを
+            // 評価するときの真値を作るためのパスで、RayQueryを含むためシェーダーモデル6.5が要る
+            RHI::ShaderDesc megaLightsRefCsDesc;
+            megaLightsRefCsDesc.Stage = RHI::ShaderStage::Compute;
+            megaLightsRefCsDesc.FilePath = shaderDirectory + L"MegaLightsReference.kshader";
+            megaLightsRefCsDesc.EntryPoint = "CSMain";
+            m_MegaLightsReferenceComputeShader = m_Device->CreateShader(megaLightsRefCsDesc);
+            m_MegaLightsReferencePipelineState =
+                m_Device->CreateComputePipelineState({ m_MegaLightsReferenceComputeShader.get() });
+
+            RHI::BufferDesc megaLightsConstantBufferDesc;
+            megaLightsConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+            megaLightsConstantBufferDesc.SizeInBytes = sizeof(MegaLightsConstants);
+            m_MegaLightsConstantBuffer = m_Device->CreateBuffer(megaLightsConstantBufferDesc);
 
             // RTAOパス(コンピュートシェーダー。半球へレイを撃ち遮蔽率と間接拡散光を求める)
             RHI::ShaderDesc rtAOCsDesc;
@@ -3323,6 +3349,12 @@ namespace Kurenai
                m_RTShadowPipelineState != nullptr && m_RTShadowTexture != nullptr;
     }
 
+    bool KurenaiEngine3D::ShouldRunMegaLights() const
+    {
+        return m_MegaLightsMode != MegaLightsMode::Off && m_RaytracingScene.IsValid() &&
+               m_MegaLightsReferencePipelineState != nullptr && m_MegaLightsTexture != nullptr;
+    }
+
     bool KurenaiEngine3D::ShouldRunRaytracedAO() const
     {
         return m_AOTechnique == AOTechnique::Raytraced && m_RaytracingScene.IsValid() &&
@@ -3343,6 +3375,44 @@ namespace Kurenai
 
         m_DebugView = static_cast<DebugView>(index);
         Core::Logger::Info("KurenaiEngine3D", "デバッグ表示を番号で選択しました: " + std::to_string(index));
+    }
+
+    void KurenaiEngine3D::OverrideMegaLights(int mode, int shadowRayCount)
+    {
+        // 手法の総数はenumの末尾で決まる。値はUIのコンボの並びとも一致している
+        constexpr int kMegaLightsModeCount = static_cast<int>(MegaLightsMode::Reference) + 1;
+        if (mode >= kMegaLightsModeCount)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsの手法の番号が範囲外のため無視します: " + std::to_string(mode) + " (0〜" +
+                    std::to_string(kMegaLightsModeCount - 1) + ")");
+        }
+        // 負の値は「既定のまま」。本数側と同じ約束にしてある
+        else if (mode >= 0)
+        {
+            m_MegaLightsMode = static_cast<MegaLightsMode>(mode);
+            Core::Logger::Info(
+                "KurenaiEngine3D", "MegaLightsの手法を番号で選択しました: " + std::to_string(mode));
+
+            if (m_MegaLightsMode != MegaLightsMode::Off && !m_RaytracingAvailable)
+            {
+                // 黙って何も起きないと「効かないバグ」に見えるので、必ず理由を残す
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "この環境ではレイトレーシングが使えないため、MegaLightsのパスは実行されません"
+                    "(DX12かつDXR Tier 1.1が必要)");
+            }
+        }
+
+        // 負の値は「既定のまま」。0は恒等テストとして意味のある値なので弾かない
+        if (shadowRayCount >= 0)
+        {
+            m_MegaLightsShadowRayCount = shadowRayCount;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsの1灯あたりの影レイ本数を設定しました: " + std::to_string(shadowRayCount));
+        }
     }
 
     void KurenaiEngine3D::ForceDDGIRayModeRaster()
@@ -3955,6 +4025,19 @@ namespace Kurenai
                 // フォーマットはSSAO/SSILと同じaoFormat(バッファ精度の設定に追従する)
                 m_RTAORawTexture = m_Device->CreateUAVTexture(width, height, aoFormat);
                 m_RTAOTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
+                // MegaLightsが書くポイント/スポットライトの直接光(HDR)。DirectLighting.hlslが
+                // t7で読んで加算する。
+                //
+                // 【fp16ではなくfp32にしてある】RT反射やSceneColorと同じR16G16B16A16_Floatで
+                // 十分に見えるが、このテクスチャは参照実装の出力 ―― 以降の段階すべての
+                // 「真値」になる物差しでもある。fp16に落とすと、恒等テスト
+                // (影レイ0本で従来のライトループと一致するか)で**片側だけに寄った差**が出た。
+                // 実測: 3840x2088のManyLightsTestで、fp16は11661画素が1/255だけ暗い側へずれ、
+                // 逆向きは0画素。fp32では差のある画素が13まで減り、符号も両側(9/4)に散った。
+                // 物差し自体が系統的に暗い側へ寄っていると、確率的サンプリングの
+                // バイアス検査(N枚平均が真値へ寄るか)がそのぶん汚染される。
+                // 帯域が問題になったら、参照実装とは別の出力先を用意して測ってから決めること
+                m_MegaLightsTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
             }
             m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
 
@@ -8717,7 +8800,10 @@ namespace Kurenai
             static_cast<uint32_t>(gpuLights.size()),
             static_cast<uint32_t>(std::max(0, m_ScreenSpaceShadowMaxLightsPerPixel)),
             static_cast<uint32_t>(effectiveShadowMode),
-            0u,
+            // MegaLightsが走るフレームは、ポイント/スポットの寄与をあちらが計算済みなので
+            // 直接光パス側のライトループを止める。**「パスを積むか」と同じ述語で決めること** ――
+            // ずれると二重加算(2倍明るい)か、ローカルライトが全部消えるかのどちらかになる
+            ShouldRunMegaLights() ? 1u : 0u,
         };
         lightingConstants.SSSParams0 =
         {
@@ -11315,6 +11401,68 @@ namespace Kurenai
             });
         }
 
+        // --- MegaLightsパス: ポイント/スポットライトの直接光を専用パスで求め、HDRで書き出す。
+        //     直後の直接光パスがt7でこれを読み、自分のライトループは回さない。
+        //
+        //     【必ず直接光パスより前に登録すること】RenderGraphの依存解決は登録順を1回だけ舐める
+        //     前方走査で、Readsは自分より前に登録された書き手しか見つけられない。後ろに置くと
+        //     辺が張られず、依存なし同士は登録順で実行されるため直接光パスが先に走り、
+        //     **前フレームの残骸を読む**(初回は未初期化のfp16でNaNが伝播する) ---
+        if (ShouldRunMegaLights())
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "MegaLights",
+                .Reads =
+                {
+                    m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                    // スペキュラのエネルギー補正でEssを引く。Readsへ挙げることでBRDFLUTBakeパス
+                    // (このLUTの書き手)より後ろに順序付けられる
+                    m_BRDFLUTTexture.get(),
+                },
+                .Writes = { m_MegaLightsTexture.get() },
+                // ライトリストはグラフの外(UpdateBuffer)で更新済みだが、読むものは宣言しておく
+                // というこのコードベースの規約に従う
+                .BufferReads = { m_LightBuffer.get() },
+                .Execute = [this, &gpuLights](RHI::IRHICommandList* cmd)
+                {
+                    MegaLightsConstants megaLightsConstants{};
+                    megaLightsConstants.Params0 =
+                    {
+                        m_RenderWidth,
+                        m_RenderHeight,
+                        static_cast<uint32_t>(std::max(0, m_MegaLightsShadowRayCount)),
+                        static_cast<uint32_t>(gpuLights.size()),
+                    };
+                    cmd->UpdateBuffer(m_MegaLightsConstantBuffer.get(), &megaLightsConstants,
+                                      sizeof(megaLightsConstants));
+
+                    cmd->SetComputePipelineState(m_MegaLightsReferencePipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(1, m_MegaLightsConstantBuffer.get());
+
+                    // BRDF積分LUTをColorSampler(s1、Linear+Clamp)で引くためサンプラーを張る。
+                    // 直前のパスのバインドが残っていることに依存しない
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+
+                    // レジスタ割り当てはMegaLightsReference.hlsl側の宣言と一致させること
+                    cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeTexture(1, m_GBufferNormal.get());
+                    cmd->SetComputeTexture(2, m_GBufferDepth.get());
+                    cmd->SetComputeTexture(3, m_GBufferAlbedo.get());
+                    cmd->SetComputeTexture(4, m_GBufferMaterial.get());
+                    cmd->SetComputeTexture(5, m_BRDFLUTTexture.get());
+                    // ライトが0灯のフレームでも必ずバインドする(DX12はSetPipelineStateのたびに
+                    // ルート引数が無効化されるため、シェーダが宣言しているリソースを未バインドで
+                    // Dispatchすることになる)
+                    cmd->SetComputeShaderResourceBuffer(6, m_LightBuffer.get());
+
+                    // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+                    cmd->SetComputeUnorderedAccessTexture(0, m_MegaLightsTexture.get());
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                },
+            });
+        }
+
         // --- RTシャドウパス: TLASへ太陽の見かけの円盤方向へ影レイを撃ち、可視率(0〜1)を
         //     単チャンネルのテクスチャへ書く。直後の直接光パスがt6でこれを読む ---
         if (ShouldRunRaytracedShadow())
@@ -11360,6 +11508,11 @@ namespace Kurenai
         RHI::IRHITexture* const rtShadowTextureForBinding =
             m_RTShadowTexture ? m_RTShadowTexture.get() : m_GBufferDepth.get();
 
+        // 直接光パスがt7へバインドするMegaLightsの寄与。上と同じ理由で、読まれないフレームでも
+        // 何かを張る必要がある(非対応環境ではそもそもテクスチャを確保していない)
+        RHI::IRHITexture* const megaLightsTextureForBinding =
+            m_MegaLightsTexture ? m_MegaLightsTexture.get() : m_GBufferDepth.get();
+
         // --- 直接光パス: G-Buffer+シャドウマップ(またはRTシャドウの可視率)からPBRの直接光
         //     (拡散+鏡面反射、シャドウ適用済み)を計算しHDRで書き出す(常に指定した内部解像度)。
         //     DeferredLighting/SSILの両方から読まれる ---
@@ -11372,13 +11525,17 @@ namespace Kurenai
                 // RTシャドウの可視率。RTシャドウパスを実行しないフレームではm_GBufferDepthと
                 // 同じポインタになるが、RenderGraphは同じ書き手への多重エッジを弾くため無害
                 rtShadowTextureForBinding,
+                // MegaLightsの寄与。MegaLightsパスはこれより前に登録してあるので、
+                // ここに挙げることでRAWの辺が張られる(実行しないフレームでは
+                // m_GBufferDepthと同じポインタになるが、多重エッジは無害)
+                megaLightsTextureForBinding,
                 // スペキュラのエネルギー補正(14.9節)でEss=brdf.x+brdf.yを引くためBRDF積分LUTを読む。
                 // Readsに挙げることでRenderGraphがBRDFLUTBakeパス(このLUTのWriter)より後に順序付ける
                 m_BRDFLUTTexture.get(),
             },
             .RenderTargets = { m_DirectLightTexture.get() },
-            .Execute = [this, &gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding](
-                           RHI::IRHICommandList* cmd)
+            .Execute = [this, &gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding,
+                        megaLightsTextureForBinding](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
@@ -11398,6 +11555,8 @@ namespace Kurenai
                 cmd->SetTexture(4, m_ShadowCascadeArray.get());
                 // RTシャドウの可視率。LightCount.zがRaytracedのときだけ読まれる
                 cmd->SetTexture(6, rtShadowTextureForBinding);
+                // MegaLightsが求めたポイント/スポットの直接光。LightCount.wが1のときだけ読まれる
+                cmd->SetTexture(7, megaLightsTextureForBinding);
 
                 // ライトが1つも無いフレームでもSetShaderResourceBufferは必ず呼ぶ(SetPipelineStateが
                 // 毎回ルート引数を無効化するため、シェーダが宣言しているリソースを未バインドのまま
@@ -12755,6 +12914,18 @@ namespace Kurenai
         case DebugView::DirectLight:
             presentSourceTexture = m_DirectLightTexture.get();
             presentMode = 4; // HDRのためトーンマッピング(Reinhard)+ガンマ補正して表示
+            break;
+        case DebugView::MegaLights:
+            // MegaLightsが求めたポイント/スポットの直接光。パスが今フレーム実行されていない場合、
+            // バッファの中身は前フレーム/未定義の残骸なので最終結果のまま何も切り替えない
+            // (SWラスタ・PlanarReflection・RTShadowのデバッグ表示と同じ方針)。
+            // ModeはDebugView::DirectLightと同じ4 ―― 並べて差分を取るのが目的なので、
+            // 表示側の処理まで一致させる
+            if (ShouldRunMegaLights())
+            {
+                presentSourceTexture = m_MegaLightsTexture.get();
+                presentMode = 4;
+            }
             break;
         case DebugView::AOIndirectLight:
             presentSourceTexture = activeAOTexture;

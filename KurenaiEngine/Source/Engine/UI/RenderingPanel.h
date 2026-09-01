@@ -31,6 +31,7 @@ namespace Kurenai::UI
         void DrawDDGISection();
         void DrawSSRSection();
         void DrawLightCullingSection();
+        void DrawMegaLightsSection();
         void DrawGeometrySection();
         void DrawMeshletSection();
         void DrawSoftwareRasterSection();
