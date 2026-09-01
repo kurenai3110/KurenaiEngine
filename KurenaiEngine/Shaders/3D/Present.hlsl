@@ -261,6 +261,42 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(heat, 1.0f);
     }
 
+    // MegaLightsの候補プールが数えた「そのタイルへ届いたライト数」のヒートマップ。
+    // **Mode 11とまったく同じ色付けにしてある** ―― 両者は同じ判定
+    // (TileLightCulling.hlsli)を使うので、同じシーン・同じカメラで撮った2枚は
+    // 画素単位で一致するはずであり、一致しなければどちらかの定義域がずれている。
+    //
+    // 【一致するのは到達灯数がタイル容量以下のタイルだけ】容量の概念が無い(K灯を抽出するだけで、
+    // 届いた数は打ち切らない)のでマゼンタは出さない。一方Mode 11は容量を超えるとマゼンタを返すため、
+    // 超過したタイルでは**両者が正しくても色が食い違う**。比べるときは Mode 11 側に
+    // マゼンタが出ていないことを先に確かめること。
+    //
+    // 【比べるときはヒートマップの上限を上げること】既定(8)のままだとライトの多いシーンでは
+    // 一面が赤に飽和し、灯数の違いが色に出ない。飽和した領域どうしの一致は検出力がほとんど無い。
+    // t3はMode 11と共用で、C++側がこのModeのときだけ候補プールのバッファを差し替える
+    if (Mode == 21)
+    {
+        const uint2 pixelCoord = uint2(saturate(input.UV) * TileRenderSize.xy);
+        const uint tileSize = max((uint)TileParams.y, 1u);
+        const uint2 tileCoord = pixelCoord / tileSize;
+        // 候補プールのレイアウトは MegaLightsTilePool.hlsl 冒頭を参照。
+        // base = tileIndex * (4 + 2K)、届いたライト数は [base + 1]
+        const uint candidateCount = (uint)TileParams.z;
+        const uint tileBase = (tileCoord.y * (uint)TileParams.x + tileCoord.x) * (4u + 2u * candidateCount);
+
+        const uint reachableCount = LightTiles[tileBase + 1u];
+        if (reachableCount == 0u)
+        {
+            return float4(0.0f, 0.0f, 0.0f, 1.0f);
+        }
+
+        const float t = saturate(float(reachableCount) / max(TileParams.w, 1.0f));
+        const float3 heat = (t < 0.5f)
+            ? lerp(float3(0.0f, 0.0f, 1.0f), float3(0.0f, 1.0f, 0.0f), t * 2.0f)
+            : lerp(float3(0.0f, 1.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), (t - 0.5f) * 2.0f);
+        return float4(heat, 1.0f);
+    }
+
     // Mode 1/2/5は深度、Mode 7はオクタヘドラルエンコードされた法線を読むため、補間されると
     // ジオメトリの縁で実在しない値になる(Mode 7は縁がにじみ、Mode 2は再構成位置がずれる)。
     // これらだけDataSamplerで引く。それ以外は色バッファなので、レターボックスの拡縮で

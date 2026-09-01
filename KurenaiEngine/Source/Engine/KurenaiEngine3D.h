@@ -1204,6 +1204,16 @@ namespace Kurenai
         // 1より大きくしても答えは変わらない(光源に半径が入る段階で意味を持つ)
         int32_t m_MegaLightsShadowRayCount = Defaults::MegaLightsShadowRayCount;
 
+        // MegaLightsの候補プール(MegaLightsTilePool.hlsl)。タイルごとに「届くライト」を走査し、
+        // 寄与に比例した確率でK灯を重みつきで抽出する。参照実装はこれを使わず全灯を回すため、
+        // 現段階では出力を消費する者がいない(確率的サンプリング本体が入る段階で読み手がつく)。
+        // レイを撃たないパスだがMegaLightsと同時にしか使わないので、生成もRT対応時だけにしてある
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsTilePoolComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTilePoolPipelineState;
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsTilePoolConstantBuffer;
+        // 候補プール本体(BufferUsage::StructuredRW)。解像度に依存するためCreateRenderTargetsで作り直す
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsTilePoolBuffer;
+
         // --- 雲(低解像度の専用パス) ---
         // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを
         // 内部レンダー解像度の1/2(面積で1/4)で評価し、「透過率 + 事前乗算済みの散乱光」を書く。
@@ -1589,12 +1599,16 @@ namespace Kurenai
             // 上の3つと同じく、パスが実行されていないフレームでは中身が前フレーム/未定義の
             // 残骸なので、最終結果のまま切り替えない
             MegaLights,
+            // MegaLightsの候補プールが数えた「そのタイルへ届いたライト数」。
+            // 色付けは DebugView::LightTiles とまったく同じで、両者は同じ判定を使うので
+            // 同じシーン・同じカメラなら画素単位で一致するはず(定義域のずれの検出用)
+            MegaLightsTilePool,
         };
         // デバッグ表示の総数。**enumの末尾を足したらここも直すこと**。
         // enumのすぐ隣に置いてあるのは、離れた場所にあると更新を忘れるため
         // (実際に DDGIProbeBackface を足したとき、範囲チェックが古い末尾のままで
         //  起動オプションからの選択が弾かれた)
-        static constexpr int kDebugViewCount = static_cast<int>(DebugView::MegaLights) + 1;
+        static constexpr int kDebugViewCount = static_cast<int>(DebugView::MegaLightsTilePool) + 1;
 
         DebugView m_DebugView = DebugView::Final;
         // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
@@ -2687,6 +2701,16 @@ namespace Kurenai
         static constexpr uint32_t kLightTileCapacity = 64;
         // ライトグリッド1タイルぶんの要素数(先頭1個がライト数、残りがライトインデックス)
         static constexpr uint32_t kLightTileStride = 1 + kLightTileCapacity;
+
+        // MegaLightsの候補プールが1タイルあたりに抽出する候補の数(K)。
+        // ライトタイルの容量と違い**これは打ち切りではなく抽出数**で、タイルへ何灯届いていても
+        // ここで決めた本数だけを重みつきで取り出す。届いた灯が欠落するわけではない
+        // (どの灯も w_i / SumW の確率で選ばれる)ため、容量超過のような静かな欠落は起きない。
+        // 既定値の根拠はまだ実測していない ―― 段階2の誤差カーブを見てから決める
+        static constexpr uint32_t kMegaLightsTilePoolCapacity = 32;
+        // 候補プール1タイルぶんの要素数。先頭4個がヘッダ(SumW / 届いた灯数 / 有効候補数 / 予約)、
+        // 以降は候補1つにつき2個(ライト番号と重み)。MegaLightsTilePool.hlsl 冒頭のレイアウトと一致させること
+        static constexpr uint32_t kMegaLightsTilePoolStride = 4 + 2 * kMegaLightsTilePoolCapacity;
 
         std::unique_ptr<RHI::IRHIShader> m_LightCullingComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_LightCullingPipelineState;

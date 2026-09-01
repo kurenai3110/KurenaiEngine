@@ -1499,6 +1499,22 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params0;
         };
 
+        // MegaLightsTilePool.hlsl側のcbuffer MegaLightsTilePoolConstantsと並びを一致させること。
+        // 先頭4つはLightCullingConstantsと同じ並びだが、TileParams.wの意味が違う
+        // (あちらは1タイルの容量、こちらは抽出する候補数K)ので構造体は分けてある
+        struct alignas(16) MegaLightsTilePoolConstants
+        {
+            DirectX::XMFLOAT4X4 View;
+            // x=タイル数X, y=タイル数Y, z=有効ライト数, w=1タイルあたりの候補数K
+            DirectX::XMUINT4 TileParams;
+            // x=レンダー解像度の幅, y=同 高さ, zw=未使用
+            DirectX::XMUINT4 RenderSize;
+            // x=射影行列の(0,0)成分, y=同(1,1)成分、z=深度リニアライズ定数a, w=同b
+            DirectX::XMFLOAT4 ProjParams;
+            // x=フレーム番号(候補を毎フレーム引き直すための乱数の種)、yzw=未使用
+            DirectX::XMUINT4 PoolParams;
+        };
+
         // MegaLightsReference.hlsl側のcbuffer MegaLightsConstantsと一致させる必要がある
         struct alignas(16) MegaLightsConstants
         {
@@ -1552,6 +1568,19 @@ namespace Kurenai
         // 十分すぎる余裕を持たせてあるが、構造化バッファなのでこの容量自体がGPU時間へ影響することはない
         // (シェーダはLightCount.xまでしかループしないため)
         constexpr uint32_t kMaxLights = 1024;
+
+        // MegaLightsTilePool.hlsl の kMegaLightsMaxLights と同じ値。あちらはライトごとの重みを
+        // groupshared配列に置くためコンパイル時定数である必要があり、C++からの受け渡しでは代用できない。
+        //
+        // 【なぜ静的検査で縛るのか】候補プールは走査するライト数をこの値で頭打ちにするが、
+        // タイルライトカリング(LightCulling.hlsl)は頭打ちしない。kMaxLightsをこれより大きくすると、
+        // **判定を共有しているのに定義域だけが黙ってずれる**(あぶれた灯はカリングには入るが
+        // 候補プールには入らない)。到達判定の共有では防げない食い違いなので、ここで止める
+        constexpr uint32_t kMegaLightsTilePoolMaxLights = 1024;
+        static_assert(
+            kMaxLights <= kMegaLightsTilePoolMaxLights,
+            "kMaxLightsを増やすなら MegaLightsTilePool.hlsl の kMegaLightsMaxLights も同じ値へ上げること"
+            "(候補プールが走査するライト数の上限。超えるとタイルライトカリングと定義域がずれる)");
 
         // ドローンショーの機体数の上限。構造化バッファをこの容量で固定確保する
         // (32バイト×4096 = 128KB。DEFAULTヒープ本体とステージングリングを足しても
@@ -2451,6 +2480,22 @@ namespace Kurenai
             megaLightsConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
             megaLightsConstantBufferDesc.SizeInBytes = sizeof(MegaLightsConstants);
             m_MegaLightsConstantBuffer = m_Device->CreateBuffer(megaLightsConstantBufferDesc);
+
+            // MegaLightsの候補プール(コンピュートシェーダー。タイルごとに届くライトを走査して
+            // 重みつきでK灯を抽出する)。レイを撃たないのでRayQueryは要らないが、
+            // MegaLightsと同時にしか使わないためここで一緒に作る
+            RHI::ShaderDesc megaLightsTilePoolCsDesc;
+            megaLightsTilePoolCsDesc.Stage = RHI::ShaderStage::Compute;
+            megaLightsTilePoolCsDesc.FilePath = shaderDirectory + L"MegaLightsTilePool.kshader";
+            megaLightsTilePoolCsDesc.EntryPoint = "CSMain";
+            m_MegaLightsTilePoolComputeShader = m_Device->CreateShader(megaLightsTilePoolCsDesc);
+            m_MegaLightsTilePoolPipelineState =
+                m_Device->CreateComputePipelineState({ m_MegaLightsTilePoolComputeShader.get() });
+
+            RHI::BufferDesc megaLightsTilePoolConstantBufferDesc;
+            megaLightsTilePoolConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+            megaLightsTilePoolConstantBufferDesc.SizeInBytes = sizeof(MegaLightsTilePoolConstants);
+            m_MegaLightsTilePoolConstantBuffer = m_Device->CreateBuffer(megaLightsTilePoolConstantBufferDesc);
 
             // RTAOパス(コンピュートシェーダー。半球へレイを撃ち遮蔽率と間接拡散光を求める)
             RHI::ShaderDesc rtAOCsDesc;
@@ -4077,6 +4122,18 @@ namespace Kurenai
                 static_cast<uint32_t>(sizeof(uint32_t)) * kLightTileStride * m_LightTileCountX * m_LightTileCountY;
             lightTileBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
             m_LightTileBuffer = m_Device->CreateBuffer(lightTileBufferDesc);
+
+            // MegaLightsの候補プール。タイルの切り方はライトグリッドと同じで、1タイルあたりの
+            // 要素数だけが違う。非対応環境ではパス自体が走らないので確保しない
+            if (m_RaytracingAvailable)
+            {
+                RHI::BufferDesc tilePoolBufferDesc;
+                tilePoolBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+                tilePoolBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) *
+                                                 kMegaLightsTilePoolStride * m_LightTileCountX * m_LightTileCountY;
+                tilePoolBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+                m_MegaLightsTilePoolBuffer = m_Device->CreateBuffer(tilePoolBufferDesc);
+            }
             m_LightTileOverflowLogged = false;
 
             // ブルームのピラミッド。第0段が半解像度で、以降1段ごとに半分になる。
@@ -11401,6 +11458,58 @@ namespace Kurenai
             });
         }
 
+        // --- MegaLightsの候補プールパス: タイルごとに「そこへ届くライト」を走査し、寄与に比例した
+        //     確率でK灯を重みつきで抽出する。到達判定はタイルライトカリングと共有している
+        //     (TileLightCulling.hlsli)ので、両者の「届いた灯数」は一致するはず。
+        //     現段階では参照実装がこれを読まない(全灯を回す)ため、出力の消費者はまだいない ---
+        if (ShouldRunMegaLights() && m_MegaLightsTilePoolBuffer && m_MegaLightsTilePoolPipelineState)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "MegaLightsPool",
+                .Reads = { m_GBufferDepth.get() },
+                .BufferReads = { m_LightBuffer.get() },
+                .BufferWrites = { m_MegaLightsTilePoolBuffer.get() },
+                .Execute = [this, &gpuLights, viewMatrix, jitteredProj](RHI::IRHICommandList* cmd)
+                {
+                    MegaLightsTilePoolConstants poolConstants{};
+                    DirectX::XMStoreFloat4x4(&poolConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
+                    poolConstants.TileParams =
+                    {
+                        m_LightTileCountX,
+                        m_LightTileCountY,
+                        static_cast<uint32_t>(gpuLights.size()),
+                        kMegaLightsTilePoolCapacity,
+                    };
+                    poolConstants.RenderSize = { m_RenderWidth, m_RenderHeight, 0u, 0u };
+
+                    // タイル錐台の組み立てと深度のリニアライズに使う。LightCullパスと同じ行列から
+                    // 同じ成分を取る(判定を共有している以上、入力もずらしてはいけない)
+                    DirectX::XMFLOAT4X4 projection;
+                    DirectX::XMStoreFloat4x4(&projection, jitteredProj);
+                    poolConstants.ProjParams =
+                    {
+                        projection._11,
+                        projection._22,
+                        projection._33,
+                        projection._43,
+                    };
+                    // 候補を毎フレーム引き直すための種。TAAのフレーム番号を流用する
+                    // (単調増加していればよく、ジッターの位相とは無関係)
+                    poolConstants.PoolParams = { m_TAAFrameIndex, 0u, 0u, 0u };
+
+                    cmd->UpdateBuffer(m_MegaLightsTilePoolConstantBuffer.get(), &poolConstants, sizeof(poolConstants));
+
+                    cmd->SetComputePipelineState(m_MegaLightsTilePoolPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_MegaLightsTilePoolConstantBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(0, m_LightBuffer.get());
+                    cmd->SetComputeTexture(1, m_GBufferDepth.get());
+                    // UAVはDispatch直後に解除されるため毎回バインドし直す
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_MegaLightsTilePoolBuffer.get());
+                    cmd->Dispatch(m_LightTileCountX, m_LightTileCountY, 1);
+                },
+            });
+        }
+
         // --- MegaLightsパス: ポイント/スポットライトの直接光を専用パスで求め、HDRで書き出す。
         //     直後の直接光パスがt7でこれを読み、自分のライトループは回さない。
         //
@@ -13025,6 +13134,16 @@ namespace Kurenai
             presentSourceTexture = m_TonemapTexture.get();
             presentMode = 11;
             break;
+        case DebugView::MegaLightsTilePool:
+            // 候補プールも構造化バッファなのでt3から読む(Present.hlsl Mode 21)。t0の扱いは
+            // Mode 11と同じ。パスが走っていないフレームは中身が前フレーム/未定義の残骸なので、
+            // 最終結果のまま何も切り替えない(他のMegaLights系の表示と同じ方針)
+            if (ShouldRunMegaLights() && m_MegaLightsTilePoolBuffer)
+            {
+                presentSourceTexture = m_TonemapTexture.get();
+                presentMode = 21;
+            }
+            break;
         case DebugView::BentNormal:
             // bent normal(34章)。正規化しないベクトルなので、法線表示(Mode 7)のような
             // オクタヘドラルのデコードは通さず専用のModeで扱う。
@@ -13164,13 +13283,22 @@ namespace Kurenai
         }
         }
 
+        // Mode 11(ライトグリッド)とMode 21(MegaLightsの候補プール)はどちらもt3の構造化バッファを
+        // 読むが、1タイルぶんの要素数が違う。バッファと容量は必ず対で切り替えること
+        // (片方だけ切り替えると、正しいバッファを別のストライドで読んで無関係な値をヒートマップにする)
+        const bool presentUsesTilePool = (presentMode == 21) && m_MegaLightsTilePoolBuffer != nullptr;
+        RHI::IRHIBuffer* const presentTileBuffer =
+            presentUsesTilePool ? m_MegaLightsTilePoolBuffer.get() : m_LightTileBuffer.get();
+        const uint32_t presentTileCapacity =
+            presentUsesTilePool ? kMegaLightsTilePoolCapacity : kLightTileCapacity;
+
         PresentConstants presentConstants{};
         presentConstants.Mode = presentMode;
         presentConstants.TileParams =
         {
             static_cast<float>(m_LightTileCountX),
             static_cast<float>(kLightTileSize),
-            static_cast<float>(kLightTileCapacity),
+            static_cast<float>(presentTileCapacity),
             // ヒートマップで赤に振り切る基準のライト数。容量そのものを基準にすると
             // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
             static_cast<float>(std::max(1, m_LightTileHeatmapMax)),
@@ -13250,12 +13378,14 @@ namespace Kurenai
             .Name = "Present",
             .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture,
                        presentDebugCubeArrayTexture, presentDebugVolumeTexture },
-            // DebugView::LightTilesでライトグリッドを読むため、カリングパスより後に順序付ける
-            .BufferReads = { m_LightTileBuffer.get() },
+            // DebugView::LightTilesでライトグリッドを、DebugView::MegaLightsTilePoolで候補プールを
+            // 読むため、それぞれの書き手より後に順序付ける(表示していないフレームでも
+            // 同じポインタになるだけで無害)
+            .BufferReads = { m_LightTileBuffer.get(), presentTileBuffer },
             .SwapChainTarget = m_SwapChain.get(),
             .Execute = [this, &letterboxViewport, presentSourceTexture, presentDebugCubeTexture,
                         presentDebugArrayTexture, presentDebugCubeArrayTexture,
-                        presentDebugVolumeTexture](RHI::IRHICommandList* cmd)
+                        presentDebugVolumeTexture, presentTileBuffer](RHI::IRHICommandList* cmd)
             {
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
                 cmd->ClearDepth(1.0f);
@@ -13268,9 +13398,9 @@ namespace Kurenai
                 cmd->SetTexture(0, presentSourceTexture);
                 cmd->SetTexture(1, presentDebugCubeTexture);
                 cmd->SetTexture(2, presentDebugArrayTexture);
-                // Mode 11(ライトグリッドのヒートマップ)以外でも、シェーダが宣言しているリソースは
-                // 必ずバインドする(SetPipelineStateが毎回ルート引数を無効化するため)
-                cmd->SetShaderResourceBuffer(3, m_LightTileBuffer.get());
+                // Mode 11(ライトグリッド)/ Mode 21(候補プール)以外でも、シェーダが宣言している
+                // リソースは必ずバインドする(SetPipelineStateが毎回ルート引数を無効化するため)
+                cmd->SetShaderResourceBuffer(3, presentTileBuffer);
                 cmd->SetTexture(4, presentDebugCubeArrayTexture);
                 cmd->SetTexture(5, presentDebugVolumeTexture);
                 cmd->Draw(3, 0);

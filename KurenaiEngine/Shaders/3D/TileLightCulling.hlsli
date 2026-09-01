@@ -64,6 +64,45 @@ TileFrustum MakeTileFrustum(
     return frustum;
 }
 
+// タイルの視錐台スラブを包むView空間のAABBを求める。
+//
+// 【何のためにあるか】MegaLights の候補プールは「そのライトがタイルへどれだけ届くか」を
+// 重みにするが、錐台そのものとの最短距離は求めるのが面倒で、しかも保守的でなくてよい。
+// 錐台を包むAABBで代用すると**距離を過小評価する = 重みを過大評価する**側に倒れる。
+// 重みの過大評価はサンプリングの効率を落とすだけで正しさには影響しないが、
+// 過小評価は「届くのに選ばれない」= バイアスになる。必ずこの向きに倒すこと。
+void TileViewSpaceAABB(
+    uint2 tileCoord, uint2 renderSize, float p00, float p11, float nearestViewZ, float farthestViewZ,
+    out float3 aabbMin, out float3 aabbMax)
+{
+    const float2 tileMin = float2(tileCoord * kTileSize);
+    const float2 tileMax = min(tileMin + float2(kTileSize, kTileSize), float2(renderSize));
+    const float2 invRenderSize = 1.0f / float2(renderSize);
+
+    const float ndcMinX = tileMin.x * invRenderSize.x * 2.0f - 1.0f;
+    const float ndcMaxX = tileMax.x * invRenderSize.x * 2.0f - 1.0f;
+    const float ndcMaxY = 1.0f - tileMin.y * invRenderSize.y * 2.0f;
+    const float ndcMinY = 1.0f - tileMax.y * invRenderSize.y * 2.0f;
+
+    // ndc.x = viewX * p00 / viewZ より viewX = ndc.x * viewZ / p00。
+    // 手前と奥それぞれの断面の4隅を取り、その全体を包む
+    const float zNear = min(nearestViewZ, farthestViewZ);
+    const float zFar = max(nearestViewZ, farthestViewZ);
+    const float invP00 = 1.0f / max(abs(p00), 1e-6f);
+    const float invP11 = 1.0f / max(abs(p11), 1e-6f);
+
+    const float2 nearXY0 = float2(ndcMinX, ndcMinY) * zNear * float2(invP00, invP11);
+    const float2 nearXY1 = float2(ndcMaxX, ndcMaxY) * zNear * float2(invP00, invP11);
+    const float2 farXY0 = float2(ndcMinX, ndcMinY) * zFar * float2(invP00, invP11);
+    const float2 farXY1 = float2(ndcMaxX, ndcMaxY) * zFar * float2(invP00, invP11);
+
+    const float2 minXY = min(min(nearXY0, nearXY1), min(farXY0, farXY1));
+    const float2 maxXY = max(max(nearXY0, nearXY1), max(farXY0, farXY1));
+
+    aabbMin = float3(minXY, zNear);
+    aabbMax = float3(maxXY, zFar);
+}
+
 // ライトの影響範囲を包むView空間の球を求める。
 // ポイントはそのままRangeが半径。スポットは円錐の外接球を使う(円錐そのものとの厳密な判定より
 // 保守的=多めに残るが、カリングは「取りこぼさない」ことが正しさの条件なので保守的側で問題ない)
