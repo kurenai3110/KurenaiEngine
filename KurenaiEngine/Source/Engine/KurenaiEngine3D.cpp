@@ -1534,6 +1534,15 @@ namespace Kurenai
             DirectX::XMUINT4 Params0;
             // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
             DirectX::XMUINT4 Params1;
+            // 空間再利用(MegaLightsSpatial.hlsl)専用。x=借りる近傍の数, y=探す半径(ピクセル),
+            // z=結合の方式(0=confidence重み, 1=生成化バランスヒューリスティック), w=未使用。
+            // **末尾に足すこと** ―― Initial と Shade は Params1 までしか宣言していないので、
+            // 途中へ挿すとあちらのオフセットがずれる
+            DirectX::XMUINT4 Params2;
+            // 同じく空間再利用専用。x=射影行列の(0,0)成分, y=同(1,1)成分, zw=未使用。
+            // MIS重みは「その灯が隣のタイルへ届くか」を判定するために隣のタイルの錐台を
+            // 組み立て直す。**候補プールが使ったのと同じ行列から取ること**(ずれると定義域がずれる)
+            DirectX::XMFLOAT4 Params3;
         };
 
         // MegaLightsReference.hlsl側のcbuffer MegaLightsConstantsと一致させる必要がある
@@ -2518,15 +2527,33 @@ namespace Kurenai
             megaLightsTilePoolConstantBufferDesc.SizeInBytes = sizeof(MegaLightsTilePoolConstants);
             m_MegaLightsTilePoolConstantBuffer = m_Device->CreateBuffer(megaLightsTilePoolConstantBufferDesc);
 
-            // MegaLightsの確率的サンプリング本体(コンピュートシェーダー。候補プールからM個引いて
-            // RISで1灯へ絞り、影レイ1本で評価する)。RayQueryを含むためシェーダーモデル6.5が要る
-            RHI::ShaderDesc megaLightsStochasticCsDesc;
-            megaLightsStochasticCsDesc.Stage = RHI::ShaderStage::Compute;
-            megaLightsStochasticCsDesc.FilePath = shaderDirectory + L"MegaLightsStochastic.kshader";
-            megaLightsStochasticCsDesc.EntryPoint = "CSMain";
-            m_MegaLightsStochasticComputeShader = m_Device->CreateShader(megaLightsStochasticCsDesc);
-            m_MegaLightsStochasticPipelineState =
-                m_Device->CreateComputePipelineState({ m_MegaLightsStochasticComputeShader.get() });
+            // MegaLightsの確率的サンプリング本体(2パス)。
+            // Initialはレイを撃たないのでSM 5.0でも焼けるが、Shadeは RayQuery を含むため
+            // シェーダーモデル6.5が要る(パッカーのkSkipDxbc50Filesを参照)
+            RHI::ShaderDesc megaLightsInitialCsDesc;
+            megaLightsInitialCsDesc.Stage = RHI::ShaderStage::Compute;
+            megaLightsInitialCsDesc.FilePath = shaderDirectory + L"MegaLightsInitialSample.kshader";
+            megaLightsInitialCsDesc.EntryPoint = "CSMain";
+            m_MegaLightsInitialComputeShader = m_Device->CreateShader(megaLightsInitialCsDesc);
+            m_MegaLightsInitialPipelineState =
+                m_Device->CreateComputePipelineState({ m_MegaLightsInitialComputeShader.get() });
+
+            RHI::ShaderDesc megaLightsShadeCsDesc;
+            megaLightsShadeCsDesc.Stage = RHI::ShaderStage::Compute;
+            megaLightsShadeCsDesc.FilePath = shaderDirectory + L"MegaLightsShade.kshader";
+            megaLightsShadeCsDesc.EntryPoint = "CSMain";
+            m_MegaLightsShadeComputeShader = m_Device->CreateShader(megaLightsShadeCsDesc);
+            m_MegaLightsShadePipelineState =
+                m_Device->CreateComputePipelineState({ m_MegaLightsShadeComputeShader.get() });
+
+            // 空間再利用。レイを撃たないのでSM 5.0でも焼ける
+            RHI::ShaderDesc megaLightsSpatialCsDesc;
+            megaLightsSpatialCsDesc.Stage = RHI::ShaderStage::Compute;
+            megaLightsSpatialCsDesc.FilePath = shaderDirectory + L"MegaLightsSpatial.kshader";
+            megaLightsSpatialCsDesc.EntryPoint = "CSMain";
+            m_MegaLightsSpatialComputeShader = m_Device->CreateShader(megaLightsSpatialCsDesc);
+            m_MegaLightsSpatialPipelineState =
+                m_Device->CreateComputePipelineState({ m_MegaLightsSpatialComputeShader.get() });
 
             RHI::BufferDesc megaLightsStochasticConstantBufferDesc;
             megaLightsStochasticConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -3454,8 +3481,9 @@ namespace Kurenai
         // 手法ごとに必要なパイプラインが違う。確率的サンプリングは候補プールも要る
         if (m_MegaLightsMode == MegaLightsMode::Stochastic)
         {
-            return m_MegaLightsStochasticPipelineState != nullptr && m_MegaLightsTilePoolPipelineState != nullptr &&
-                   m_MegaLightsTilePoolBuffer != nullptr;
+            return m_MegaLightsInitialPipelineState != nullptr && m_MegaLightsShadePipelineState != nullptr &&
+                   m_MegaLightsTilePoolPipelineState != nullptr && m_MegaLightsTilePoolBuffer != nullptr &&
+                   m_MegaLightsReservoirBuffer != nullptr;
         }
         return m_MegaLightsReferencePipelineState != nullptr;
     }
@@ -3482,7 +3510,7 @@ namespace Kurenai
         Core::Logger::Info("KurenaiEngine3D", "デバッグ表示を番号で選択しました: " + std::to_string(index));
     }
 
-    void KurenaiEngine3D::OverrideMegaLights(int mode, int shadowRayCount)
+    void KurenaiEngine3D::OverrideMegaLights(int mode, int shadowRayCount, int sampleCount)
     {
         // 手法の総数はenumの末尾で決まる。値はUIのコンボの並びとも一致している
         constexpr int kMegaLightsModeCount = static_cast<int>(MegaLightsMode::Stochastic) + 1;
@@ -3518,6 +3546,15 @@ namespace Kurenai
                 "KurenaiEngine3D",
                 "MegaLightsの1灯あたりの影レイ本数を設定しました: " + std::to_string(shadowRayCount));
         }
+
+        // RISのM。0以下は意味を成さないので1以上に丸める
+        if (sampleCount > 0)
+        {
+            m_MegaLightsSampleCount = sampleCount;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsの初期候補数Mを設定しました: " + std::to_string(sampleCount));
+        }
     }
 
     void KurenaiEngine3D::SetMegaLightsAccumFrames(int frames)
@@ -3536,6 +3573,42 @@ namespace Kurenai
         m_MegaLightsAccumFrames = 0;
         Core::Logger::Info(
             "KurenaiEngine3D", "MegaLightsの蓄積フレーム数を設定しました: " + std::to_string(frames));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsSpatial(int enabled, int neighborCount, int radius, int useMIS)
+    {
+        if (enabled >= 0)
+        {
+            m_MegaLightsSpatialEnabled = (enabled != 0);
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                std::string("MegaLightsの空間再利用を") + (m_MegaLightsSpatialEnabled ? "有効" : "無効") +
+                    "にしました");
+        }
+        // 0は「近傍を借りない」= 実質無効として意味があるので弾かない
+        if (neighborCount >= 0)
+        {
+            m_MegaLightsSpatialNeighborCount = neighborCount;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsの空間再利用で借りる近傍の数を設定しました: " + std::to_string(neighborCount));
+        }
+        if (radius > 0)
+        {
+            m_MegaLightsSpatialRadius = radius;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsの空間再利用の半径を設定しました: " + std::to_string(radius));
+        }
+        if (useMIS >= 0)
+        {
+            m_MegaLightsSpatialMIS = (useMIS != 0);
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                std::string("MegaLightsの空間再利用の結合を") +
+                    (m_MegaLightsSpatialMIS ? "生成化バランスヒューリスティック" : "confidence重み") +
+                    "にしました");
+        }
     }
 
     void KurenaiEngine3D::SetMegaLightsDumpPath(const wchar_t* path)
@@ -4227,6 +4300,16 @@ namespace Kurenai
                                                  kMegaLightsTilePoolStride * m_LightTileCountX * m_LightTileCountY;
                 tilePoolBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
                 m_MegaLightsTilePoolBuffer = m_Device->CreateBuffer(tilePoolBufferDesc);
+
+                // 1画素につき1リザーバ(16バイト)。MegaLightsCommon.hlsli の
+                // MegaLightsReservoir と**ストライドを一致させること**
+                RHI::BufferDesc reservoirBufferDesc;
+                reservoirBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+                reservoirBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4) * width * height;
+                reservoirBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4);
+                m_MegaLightsReservoirBuffer = m_Device->CreateBuffer(reservoirBufferDesc);
+                // 空間再利用の出力先。近傍を読むので入力と同じバッファへは書けない
+                m_MegaLightsReservoirSpatialBuffer = m_Device->CreateBuffer(reservoirBufferDesc);
             }
 
             // MegaLightsの蓄積バッファ(計測専用)。1画素につきfloat4。
@@ -11639,7 +11722,7 @@ namespace Kurenai
         RHI::IRHIBuffer* const tilePoolBufferForBinding =
             m_MegaLightsTilePoolBuffer ? m_MegaLightsTilePoolBuffer.get() : m_LightTileBuffer.get();
 
-        if (ShouldRunMegaLights())
+        if (ShouldRunMegaLights() && m_MegaLightsMode == MegaLightsMode::Reference)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLights",
@@ -11658,51 +11741,20 @@ namespace Kurenai
                 .BufferReads = { m_LightBuffer.get(), tilePoolBufferForBinding },
                 .Execute = [this, &gpuLights, tilePoolBufferForBinding](RHI::IRHICommandList* cmd)
                 {
-                    const bool stochastic = (m_MegaLightsMode == MegaLightsMode::Stochastic);
-
-                    if (stochastic)
+                    MegaLightsConstants megaLightsConstants{};
+                    megaLightsConstants.Params0 =
                     {
-                        MegaLightsStochasticConstants stochasticConstants{};
-                        stochasticConstants.Params0 =
-                        {
-                            m_RenderWidth,
-                            m_RenderHeight,
-                            static_cast<uint32_t>(std::max(1, m_MegaLightsSampleCount)),
-                            // 影レイ本数の意味は参照実装と揃える(0なら影を撃たない=恒等テスト側)。
-                            // 確率的サンプリングは選ばれた1灯にしか撃たないので本数ではなく有無
-                            (m_MegaLightsShadowRayCount > 0) ? 1u : 0u,
-                        };
-                        stochasticConstants.Params1 =
-                        {
-                            m_LightTileCountX,
-                            kLightTileSize,
-                            kMegaLightsTilePoolCapacity,
-                            m_TAAFrameIndex,
-                        };
-                        cmd->UpdateBuffer(m_MegaLightsStochasticConstantBuffer.get(), &stochasticConstants,
-                                          sizeof(stochasticConstants));
-                    }
-                    else
-                    {
-                        MegaLightsConstants megaLightsConstants{};
-                        megaLightsConstants.Params0 =
-                        {
-                            m_RenderWidth,
-                            m_RenderHeight,
-                            static_cast<uint32_t>(std::max(0, m_MegaLightsShadowRayCount)),
-                            static_cast<uint32_t>(gpuLights.size()),
-                        };
-                        cmd->UpdateBuffer(m_MegaLightsConstantBuffer.get(), &megaLightsConstants,
-                                          sizeof(megaLightsConstants));
-                    }
+                        m_RenderWidth,
+                        m_RenderHeight,
+                        static_cast<uint32_t>(std::max(0, m_MegaLightsShadowRayCount)),
+                        static_cast<uint32_t>(gpuLights.size()),
+                    };
+                    cmd->UpdateBuffer(m_MegaLightsConstantBuffer.get(), &megaLightsConstants,
+                                      sizeof(megaLightsConstants));
 
-                    cmd->SetComputePipelineState(
-                        stochastic ? m_MegaLightsStochasticPipelineState.get()
-                                   : m_MegaLightsReferencePipelineState.get());
+                    cmd->SetComputePipelineState(m_MegaLightsReferencePipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
-                    cmd->SetComputeConstantBuffer(
-                        1, stochastic ? m_MegaLightsStochasticConstantBuffer.get()
-                                      : m_MegaLightsConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(1, m_MegaLightsConstantBuffer.get());
 
                     // BRDF積分LUTをColorSampler(s1、Linear+Clamp)で引くためサンプラーを張る。
                     // 直前のパスのバインドが残っていることに依存しない
@@ -11725,6 +11777,171 @@ namespace Kurenai
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+                    cmd->SetComputeUnorderedAccessTexture(0, m_MegaLightsTexture.get());
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                },
+            });
+        }
+
+        // --- 確率的サンプリングは2パスに分かれる ---
+        //   MegaLightsInitial : 候補プールからRISで1灯へ絞り、**リザーバ**として書く(色は作らない)
+        //   MegaLightsShade   : そのリザーバへ影レイを1本撃ち、選ばれた確率で割り戻してHDRを書く
+        //
+        // 【なぜ1パスにまとめないのか】時間・空間の再利用は「どの灯を選んだか」を持ち回って
+        // 現フレームで評価し直す形でしか書けない。選択とシェードが混ざっていると再利用の段を
+        // 差し込む場所が無い。分けておけば両者の間に挟むだけで済む
+        if (ShouldRunMegaLights() && m_MegaLightsMode == MegaLightsMode::Stochastic)
+        {
+            // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
+            // Initial側のExecuteで1回だけ更新すればよい
+            const auto updateStochasticConstants = [this, &jitteredProj](RHI::IRHICommandList* cmd)
+            {
+                MegaLightsStochasticConstants stochasticConstants{};
+                stochasticConstants.Params0 =
+                {
+                    m_RenderWidth,
+                    m_RenderHeight,
+                    static_cast<uint32_t>(std::max(1, m_MegaLightsSampleCount)),
+                    // 影レイ本数の意味は参照実装と揃える(0なら影を撃たない=恒等テスト側)。
+                    // 確率的サンプリングは選ばれた1灯にしか撃たないので本数ではなく有無
+                    (m_MegaLightsShadowRayCount > 0) ? 1u : 0u,
+                };
+                stochasticConstants.Params1 =
+                {
+                    m_LightTileCountX,
+                    kLightTileSize,
+                    kMegaLightsTilePoolCapacity,
+                    m_TAAFrameIndex,
+                };
+                stochasticConstants.Params2 =
+                {
+                    static_cast<uint32_t>(std::max(0, m_MegaLightsSpatialNeighborCount)),
+                    static_cast<uint32_t>(std::max(1, m_MegaLightsSpatialRadius)),
+                    m_MegaLightsSpatialMIS ? 1u : 0u,
+                    0u,
+                };
+                // 候補プールが錐台を組み立てたのと**同じ行列**から取る。ずれると
+                // 「その灯が隣のタイルへ届くか」の判定が候補プールと食い違い、定義域がずれる
+                {
+                    DirectX::XMFLOAT4X4 projection;
+                    DirectX::XMStoreFloat4x4(&projection, jitteredProj);
+                    stochasticConstants.Params3 = { projection._11, projection._22, 0.0f, 0.0f };
+                }
+                cmd->UpdateBuffer(
+                    m_MegaLightsStochasticConstantBuffer.get(), &stochasticConstants, sizeof(stochasticConstants));
+            };
+
+            // 空間再利用を挟むかどうかで、シェードが読むリザーバが変わる
+            const bool spatialRuns = m_MegaLightsSpatialEnabled && m_MegaLightsSpatialPipelineState &&
+                                     m_MegaLightsReservoirSpatialBuffer && m_MegaLightsSpatialNeighborCount > 0;
+            RHI::IRHIBuffer* const shadeReservoirBuffer =
+                spatialRuns ? m_MegaLightsReservoirSpatialBuffer.get() : m_MegaLightsReservoirBuffer.get();
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "MegaLightsInitial",
+                .Reads =
+                {
+                    m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                    m_BRDFLUTTexture.get(),
+                },
+                .BufferReads = { m_LightBuffer.get(), tilePoolBufferForBinding },
+                .BufferWrites = { m_MegaLightsReservoirBuffer.get() },
+                .Execute = [this, tilePoolBufferForBinding, updateStochasticConstants](RHI::IRHICommandList* cmd)
+                {
+                    updateStochasticConstants(cmd);
+
+                    cmd->SetComputePipelineState(m_MegaLightsInitialPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(1, m_MegaLightsStochasticConstantBuffer.get());
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+
+                    // レジスタ割り当てはMegaLightsInitialSample.hlsl側の宣言と一致させること。
+                    // 初期可視レイ(選んだサンプルが遮蔽されていたら殺す)を撃つのでTLASが要る
+                    cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeTexture(1, m_GBufferNormal.get());
+                    cmd->SetComputeTexture(2, m_GBufferDepth.get());
+                    cmd->SetComputeTexture(3, m_GBufferAlbedo.get());
+                    cmd->SetComputeTexture(4, m_GBufferMaterial.get());
+                    cmd->SetComputeTexture(5, m_BRDFLUTTexture.get());
+                    cmd->SetComputeShaderResourceBuffer(6, m_LightBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
+
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_MegaLightsReservoirBuffer.get());
+                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                },
+            });
+
+            // --- 空間再利用: 近傍が選んだ灯を借りて自分の面で評価し直す ---
+            // レイは1本も増えない。候補プールの重みが法線を見られないぶんを、
+            // 「選んだあとで隣から借りる」ことで埋め合わせる
+            if (spatialRuns)
+            {
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "MegaLightsSpatial",
+                    .Reads =
+                    {
+                        m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                        m_BRDFLUTTexture.get(),
+                    },
+                    .BufferReads = { m_LightBuffer.get(), m_MegaLightsReservoirBuffer.get(),
+                                     m_MegaLightsTilePoolBuffer.get() },
+                    .BufferWrites = { m_MegaLightsReservoirSpatialBuffer.get() },
+                    .Execute = [this](RHI::IRHICommandList* cmd)
+                    {
+                        // 定数はInitial側で更新済み(中身はフレーム内で不変)
+                        cmd->SetComputePipelineState(m_MegaLightsSpatialPipelineState.get());
+                        cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(1, m_MegaLightsStochasticConstantBuffer.get());
+                        cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+
+                        // レジスタ割り当てはMegaLightsSpatial.hlsl側の宣言と一致させること。
+                        // このパスもレイを撃たないのでTLASは要らない
+                        cmd->SetComputeTexture(1, m_GBufferNormal.get());
+                        cmd->SetComputeTexture(2, m_GBufferDepth.get());
+                        cmd->SetComputeTexture(3, m_GBufferAlbedo.get());
+                        cmd->SetComputeTexture(4, m_GBufferMaterial.get());
+                        cmd->SetComputeTexture(5, m_BRDFLUTTexture.get());
+                        cmd->SetComputeShaderResourceBuffer(6, m_LightBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(7, m_MegaLightsReservoirBuffer.get());
+                        // MIS重みが「その灯が隣のタイルへ届くか」を判定するのに、
+                        // 候補プールのヘッダ(タイルの深度スラブ)を読む
+                        cmd->SetComputeShaderResourceBuffer(8, m_MegaLightsTilePoolBuffer.get());
+
+                        cmd->SetComputeUnorderedAccessBuffer(0, m_MegaLightsReservoirSpatialBuffer.get());
+                        cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                    },
+                });
+            }
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "MegaLightsShade",
+                .Reads =
+                {
+                    m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
+                    m_BRDFLUTTexture.get(),
+                },
+                .Writes = { m_MegaLightsTexture.get() },
+                .BufferReads = { m_LightBuffer.get(), shadeReservoirBuffer },
+                .Execute = [this, shadeReservoirBuffer](RHI::IRHICommandList* cmd)
+                {
+                    // 定数はInitial側で更新済み。ここでバインドし直すのは、DX12が
+                    // SetPipelineStateのたびにルート引数を無効化するため
+                    cmd->SetComputePipelineState(m_MegaLightsShadePipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(1, m_MegaLightsStochasticConstantBuffer.get());
+                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+
+                    // レジスタ割り当てはMegaLightsShade.hlsl側の宣言と一致させること
+                    cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeTexture(1, m_GBufferNormal.get());
+                    cmd->SetComputeTexture(2, m_GBufferDepth.get());
+                    cmd->SetComputeTexture(3, m_GBufferAlbedo.get());
+                    cmd->SetComputeTexture(4, m_GBufferMaterial.get());
+                    cmd->SetComputeTexture(5, m_BRDFLUTTexture.get());
+                    cmd->SetComputeShaderResourceBuffer(6, m_LightBuffer.get());
+                    // 空間再利用を挟んだフレームはその出力を、挟まないフレームはInitialの出力を読む
+                    cmd->SetComputeShaderResourceBuffer(7, shadeReservoirBuffer);
+
                     cmd->SetComputeUnorderedAccessTexture(0, m_MegaLightsTexture.get());
                     cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
                 },

@@ -15,16 +15,24 @@
 // 定義域がずれると、片方にしか入らないライトが出てサンプリングにバイアスが乗る。
 //
 // 【出力バッファのレイアウト】1本のRWStructuredBuffer<uint>に、タイルごとの固定長ブロックで詰める。
-//   base = tileIndex * (4 + 2 * K)
+//   base = tileIndex * (kMegaLightsTilePoolHeader + 2 * K)
 //   [base + 0]           = asuint(SumW)  そのタイルに届く全灯の重みの合計
 //   [base + 1]           = 届いたライト数(重みが正になった灯の数。デバッグ表示と検証用)
 //   [base + 2]           = 有効な候補数(0 か K。SumW が0なら0)
 //   [base + 3]           = 予約
-//   [base + 4 + 2n + 0]  = n番目の候補のライト番号(無効なスロットは 0xFFFFFFFF)
-//   [base + 4 + 2n + 1]  = asuint(w_i)  その灯の重み
+//   [base + 4]           = asfloat(nearestViewZ)  タイル内で最も手前のサーフェスのView空間Z
+//   [base + 5]           = asfloat(farthestViewZ) 同 最も奥
+//   [base + 6 + 2n + 0]  = n番目の候補のライト番号(無効なスロットは 0xFFFFFFFF)
+//   [base + 6 + 2n + 1]  = asuint(w_i)  その灯の重み
+//
+// 【深度スラブをヘッダへ入れてある理由】空間再利用のMIS重み(生成化バランスヒューリスティック)は
+// 「隣の画素がそのサンプルを生成しえたか」を要る。それは「その灯が隣のタイルへ届くか」で決まり、
+// 判定には隣のタイルの視錐台が要る。錐台の側面はタイル座標から作れるが、**深度スラブだけは
+// そのタイルの深度を走査しないと分からない**ので、ここで書いておく。
+// 無ければ隣のタイルの定義域が分からず、MIS重みが近似になってバイアスが残る
 //
 // 【invPdf ではなく w_i と SumW を別々に持つ理由】空間再利用の MIS 重み(生成化バランス
-// ヘuristic)は「隣のピクセルがこのサンプルを生成しえた確率」を要る。w_i と SumW が
+// ヒューリスティック)は「隣のピクセルがこのサンプルを生成しえた確率」を要る。w_i と SumW が
 // 別々にあれば、隣のタイルの SumW を1回読んで w_i を再計算するだけで p_j(y) が**近似なしに**
 // 求まる。invPdf に畳んでしまうとこれができなくなる。
 //
@@ -51,6 +59,8 @@ cbuffer MegaLightsTilePoolConstants : register(b0)
 #include "PunctualLighting.hlsli"
 // タイル錐台の組み立て・AABB・「そのライトが届くか」の判定。GPULightを使うのでこの順で読む
 #include "TileLightCulling.hlsli"
+// 候補プールのレイアウト(ヘッダの大きさと添字の作り方)。書き手と読み手で1か所に集めてある
+#include "MegaLightsCommon.hlsli"
 
 Texture2D<float> DepthTexture : register(t1);
 
@@ -118,7 +128,7 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 dispatchThreadID : SV_DispatchThre
     }
 
     const uint tileIndex = groupID.y * tileCountX + groupID.x;
-    const uint tileBase = tileIndex * (4u + 2u * candidateCount);
+    const uint tileBase = MegaLightsTilePoolBase(groupID.xy, tileCountX, candidateCount);
 
     if (groupIndex == 0u)
     {
@@ -151,11 +161,15 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 dispatchThreadID : SV_DispatchThre
             TilePool[tileBase + 1u] = 0u;
             TilePool[tileBase + 2u] = 0u;
             TilePool[tileBase + 3u] = 0u;
+            // 深度スラブも書く。読み手(空間再利用のMIS)は有効候補数0で先に打ち切るが、
+            // 「書かずにreturnしない」という約束をここでも守る
+            TilePool[tileBase + 4u] = asuint(0.0f);
+            TilePool[tileBase + 5u] = asuint(0.0f);
         }
         for (uint slot = groupIndex; slot < candidateCount; slot += kTileThreadCount)
         {
-            TilePool[tileBase + 4u + 2u * slot + 0u] = kInvalidLightIndex;
-            TilePool[tileBase + 4u + 2u * slot + 1u] = asuint(0.0f);
+            TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 0u] = kInvalidLightIndex;
+            TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 1u] = asuint(0.0f);
         }
         return;
     }
@@ -268,8 +282,8 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 dispatchThreadID : SV_DispatchThre
             }
         }
 
-        TilePool[tileBase + 4u + 2u * slot + 0u] = pickedIndex;
-        TilePool[tileBase + 4u + 2u * slot + 1u] = asuint(pickedWeight);
+        TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 0u] = pickedIndex;
+        TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 1u] = asuint(pickedWeight);
     }
 
     if (groupIndex == 0u)
@@ -278,5 +292,8 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 dispatchThreadID : SV_DispatchThre
         TilePool[tileBase + 1u] = reachableCount;
         TilePool[tileBase + 2u] = (sumW > 0.0f) ? candidateCount : 0u;
         TilePool[tileBase + 3u] = 0u;
+        // 空間再利用のMIS重みが、隣のタイルの錐台を組み立て直すのに使う
+        TilePool[tileBase + 4u] = asuint(nearestViewZ);
+        TilePool[tileBase + 5u] = asuint(farthestViewZ);
     }
 }

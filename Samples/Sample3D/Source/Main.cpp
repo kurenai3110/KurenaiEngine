@@ -474,11 +474,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // どちらも指定が無ければ-1で、その項目は既定のままになる
         const int megaLightsMode = ParseIntOption(L"-megalights", -1);
         const int megaLightsShadowRays = ParseIntOption(L"-megalightsrays", -1);
+        // -megalightssamples <M>。確率的サンプリングが1ピクセルあたりに候補プールから引く数
+        const int megaLightsSamples = ParseIntOption(L"-megalightssamples", -1);
         // -megalightsaccum <枚数>。線形空間で足し込む枚数(0で蓄積しない)。
         // 指定した枚数で止まるので「ちょうどNサンプルの平均」を決定的に撮れる
         const int megaLightsAccumFrames = ParseIntOption(L"-megalightsaccum", -1);
         // -megalightsdump <パス>。蓄積し終えた平均を線形のまま生データで書き出す
         const std::wstring megaLightsDumpPath = ParseStringOption(L"-megalightsdump");
+        // 空間再利用。-megalightsspatial <0|1> / -megalightsspatialneighbors <k> /
+        // -megalightsspatialradius <ピクセル>
+        const int megaLightsSpatial = ParseIntOption(L"-megalightsspatial", -1);
+        const int megaLightsSpatialNeighbors = ParseIntOption(L"-megalightsspatialneighbors", -1);
+        const int megaLightsSpatialRadius = ParseIntOption(L"-megalightsspatialradius", -1);
+        // -megalightsspatialmis <0=confidence重み|1=生成化バランスヒューリスティック>
+        const int megaLightsSpatialMIS = ParseIntOption(L"-megalightsspatialmis", -1);
 
         for (;;)
         {
@@ -501,10 +510,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 // 段数に0を渡すと「.ksceneの指定のまま」で、追従だけを切り替える
                 engine.OverrideDDGILOD(ddgiLODCount, ddgiFollowCamera);
             }
-            if (megaLightsMode >= 0 || megaLightsShadowRays >= 0)
+            if (megaLightsMode >= 0 || megaLightsShadowRays >= 0 || megaLightsSamples > 0)
             {
-                // どちらも負の値は「既定のまま」。手法だけ・本数だけの指定もできる
-                engine.OverrideMegaLights(megaLightsMode, megaLightsShadowRays);
+                // 負の値は「既定のまま」。手法だけ・本数だけ・M だけの指定もできる
+                engine.OverrideMegaLights(megaLightsMode, megaLightsShadowRays, megaLightsSamples);
             }
             if (megaLightsAccumFrames >= 0)
             {
@@ -513,6 +522,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (!megaLightsDumpPath.empty())
             {
                 engine.SetMegaLightsDumpPath(megaLightsDumpPath.c_str());
+            }
+            if (megaLightsSpatial >= 0 || megaLightsSpatialNeighbors >= 0 || megaLightsSpatialRadius > 0 ||
+                megaLightsSpatialMIS >= 0)
+            {
+                engine.SetMegaLightsSpatial(
+                    megaLightsSpatial, megaLightsSpatialNeighbors, megaLightsSpatialRadius,
+                    megaLightsSpatialMIS);
             }
             engine.Run();
 

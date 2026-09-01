@@ -142,8 +142,9 @@ namespace Kurenai
 
         // MegaLightsの手法と、1灯あたりに撃つ影レイの本数を起動時に上書きする。
         // mode は KurenaiEngine3D::MegaLightsMode の値(0=なし, 1=参照実装)。
-        // mode / shadowRayCount のどちらも、負の値を渡すとその項目は既定のままにする
-        // (手法だけ・本数だけの指定ができるようにするため)。
+        // mode / shadowRayCount / sampleCount のいずれも、負の値を渡すとその項目は既定のままにする
+        // (一部だけの指定ができるようにするため)。sampleCount は確率的サンプリングが
+        // 1ピクセルあたりに候補プールから引く数(RISのM)。
         //
         // 【何のためにあるのか】SetDebugViewIndex / ForceDDGIRayModeRaster と同じ理由。
         // MegaLightsの検証は「見て判断する」ものではなく画素値を測るもので、
@@ -153,7 +154,7 @@ namespace Kurenai
         //
         // 範囲外の値は無視してログを残す(呼び出し側が範囲を知らなくてよいようにする)。
         // レイトレーシング非対応の環境では手法を変えてもパスが走らない(ShouldRunMegaLights)
-        void OverrideMegaLights(int mode, int shadowRayCount);
+        void OverrideMegaLights(int mode, int shadowRayCount, int sampleCount);
 
         // MegaLightsの出力を線形空間で何フレーム足し込むかを設定する(0で蓄積しない)。
         // 指定した枚数に達したら足すのを止めるので、表示が静止し
@@ -174,6 +175,14 @@ namespace Kurenai
         // その下限に隠れて比が読めない。**物差しの分解能が足りないまま原因を断定しないため**、
         // 線形のまま倍精度で取り出せる経路を用意する
         void SetMegaLightsDumpPath(const wchar_t* path);
+
+        // 空間再利用の有無と、借りる近傍の数・半径を起動時に上書きする。
+        // いずれも負の値を渡すとその項目は既定のままにする。
+        //
+        // 【何のためにあるのか】空間再利用は「入れたら誤差が減るはず」の段で、
+        // 有無を切り替えて同じ手順で撮り比べられないと効果を測れない。
+        // UIのつまみで切り替えると再現性が落ちる(SetDebugViewIndexと同じ理由)
+        void SetMegaLightsSpatial(int enabled, int neighborCount, int radius, int useMIS);
 
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
         // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
@@ -1235,12 +1244,39 @@ namespace Kurenai
         // 候補プール本体(BufferUsage::StructuredRW)。解像度に依存するためCreateRenderTargetsで作り直す
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsTilePoolBuffer;
 
-        // 確率的サンプリング本体(MegaLightsStochastic.hlsl)。候補プールからM個引いてRISで
-        // 1灯へ絞り、影レイ1本で評価する。出力先は参照実装と同じm_MegaLightsTexture
+        // 確率的サンプリング本体。2パスに分かれる。
+        //   Initial (MegaLightsInitialSample.hlsl) … 候補プールからM個引きRISで1灯へ絞り、
+        //                                            結果を**リザーバ**として書く(色は作らない)
+        //   Shade   (MegaLightsShade.hlsl)         … そのリザーバへ影レイを1本撃ちHDRを書く
+        //
+        // 【なぜ分けるのか】時間・空間の再利用は「どの灯を選んだか」を持ち回って現フレームで
+        // 評価し直す形でしか書けない。選択とシェードが1パスに混ざっていると再利用の段を
+        // 差し込む場所が無い。出力先は参照実装と同じm_MegaLightsTexture
         // (同じ表示経路・同じ後段のままA/Bが撮れるようにするため)
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsStochasticComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsStochasticPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsInitialComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsInitialPipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsShadeComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsShadePipelineState;
+        // 2パスで共有する定数バッファ(中身はフレーム内で不変なのでInitial側で1回更新する)
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsStochasticConstantBuffer;
+        // 1画素につき1リザーバ(16バイト)。MegaLightsCommon.hlsli の MegaLightsReservoir と
+        // 一致させること。解像度に依存するためCreateRenderTargetsで作り直す。
+        // 空間再利用は「読みながら同じバッファへ書けない」(近傍を読むので競合する)ため2本持つ
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirSpatialBuffer;
+
+        // 空間再利用(MegaLightsSpatial.hlsl)。近傍が選んだ灯を借りて自分の面で評価し直す。
+        // レイは1本も増えない ―― 借りるのは「どの灯か」だけ
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsSpatialComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsSpatialPipelineState;
+        bool m_MegaLightsSpatialEnabled = Defaults::MegaLightsSpatialEnabled;
+        int32_t m_MegaLightsSpatialNeighborCount = Defaults::MegaLightsSpatialNeighborCount;
+        int32_t m_MegaLightsSpatialRadius = Defaults::MegaLightsSpatialRadius;
+        // 結合にMIS重み(生成化バランスヒューリスティック)を使うか。
+        // 単純なconfidence重みは、近傍が自分と違う候補集合から引いている場合に不偏にならない
+        // (実測で総和の相対差が +2.2%)。**切り替えて長時間平均を比べられるようにしてある** ――
+        // 差が出なければどちらかが実装されていない
+        bool m_MegaLightsSpatialMIS = Defaults::MegaLightsSpatialMIS;
         // 1ピクセルあたりに候補プールから引く数(RISのM)。影レイの本数はこれとは独立で常に1本
         int32_t m_MegaLightsSampleCount = Defaults::MegaLightsSampleCount;
 
@@ -2784,9 +2820,10 @@ namespace Kurenai
         // (どの灯も w_i / SumW の確率で選ばれる)ため、容量超過のような静かな欠落は起きない。
         // 既定値の根拠はまだ実測していない ―― 段階2の誤差カーブを見てから決める
         static constexpr uint32_t kMegaLightsTilePoolCapacity = 32;
-        // 候補プール1タイルぶんの要素数。先頭4個がヘッダ(SumW / 届いた灯数 / 有効候補数 / 予約)、
+        // 候補プール1タイルぶんの要素数。先頭6個がヘッダ(SumW / 届いた灯数 / 有効候補数 / 予約 /
+        // 手前のViewZ / 奥のViewZ)、
         // 以降は候補1つにつき2個(ライト番号と重み)。MegaLightsTilePool.hlsl 冒頭のレイアウトと一致させること
-        static constexpr uint32_t kMegaLightsTilePoolStride = 4 + 2 * kMegaLightsTilePoolCapacity;
+        static constexpr uint32_t kMegaLightsTilePoolStride = 6 + 2 * kMegaLightsTilePoolCapacity;
 
         std::unique_ptr<RHI::IRHIShader> m_LightCullingComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_LightCullingPipelineState;

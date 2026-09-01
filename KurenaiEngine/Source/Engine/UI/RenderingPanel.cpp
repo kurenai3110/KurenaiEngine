@@ -210,6 +210,30 @@ namespace Kurenai::UI
                 "なってノイズが減るが、候補ごとにBRDFを1回評価するぶん重くなる。\n\n"
                 "【影レイの本数はこれとは独立】選ばれた1灯にしか撃たないので常に1本で、"
                 "Mを増やしてもレイは増えない。ここがライト数からコストを切り離している部分");
+
+            CheckboxEx(
+                "空間再利用###MegaLightsSpatial", &m_Engine.m_MegaLightsSpatialEnabled,
+                Defaults::MegaLightsSpatialEnabled,
+                "近傍の画素が選んだ灯を借りて、自分の面で評価し直して結合する。"
+                "借りるのは「どの灯か」だけなので、影レイは増えない。\n\n"
+                "【何を直すためのものか】候補プールの重みは設計上、法線を見られない"
+                "(タイル内で画素ごとに法線が違うため)。そのため法線が候補集合と噛み合わない面では"
+                "候補の半分が背向きになり、提案が外れて誤差が集中する。"
+                "実測では球で0.0395に対し床は0.0052。曲面に固有ではなく、"
+                "平らな床でも法線の向き次第で4.2倍悪化する");
+
+            if (m_Engine.m_MegaLightsSpatialEnabled)
+            {
+                SliderIntEx(
+                    "借りる近傍の数###MegaLightsSpatialNeighbors", &m_Engine.m_MegaLightsSpatialNeighborCount,
+                    0, 16, Defaults::MegaLightsSpatialNeighborCount,
+                    "増やすほどノイズは減るが、候補ごとにBRDFを1回評価するぶん重くなる。0で実質無効");
+                SliderIntEx(
+                    "近傍を探す半径###MegaLightsSpatialRadius", &m_Engine.m_MegaLightsSpatialRadius,
+                    1, 64, Defaults::MegaLightsSpatialRadius,
+                    "広げると遠くの良いサンプルを拾えるが、深度・法線・材質の一致条件で"
+                    "弾かれる割合も増える");
+            }
         }
 
         if (m_Engine.m_MegaLightsMode != KurenaiEngine3D::MegaLightsMode::Off)

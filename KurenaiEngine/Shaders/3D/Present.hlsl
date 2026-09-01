@@ -301,9 +301,9 @@ float4 PSMain(PSInput input) : SV_TARGET
         const uint tileSize = max((uint)TileParams.y, 1u);
         const uint2 tileCoord = pixelCoord / tileSize;
         // 候補プールのレイアウトは MegaLightsTilePool.hlsl 冒頭を参照。
-        // base = tileIndex * (4 + 2K)、届いたライト数は [base + 1]
+        // base = tileIndex * (6 + 2K)、届いたライト数は [base + 1](MegaLightsCommon.hlsli 参照)
         const uint candidateCount = (uint)TileParams.z;
-        const uint tileBase = (tileCoord.y * (uint)TileParams.x + tileCoord.x) * (4u + 2u * candidateCount);
+        const uint tileBase = (tileCoord.y * (uint)TileParams.x + tileCoord.x) * (6u + 2u * candidateCount);
 
         const uint reachableCount = LightTiles[tileBase + 1u];
         if (reachableCount == 0u)

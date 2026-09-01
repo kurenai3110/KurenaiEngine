@@ -131,7 +131,8 @@ namespace
         "RTShadow.hlsl",
         "DDGIProbeTrace.hlsl",
         "MegaLightsReference.hlsl",
-        "MegaLightsStochastic.hlsl",
+        "MegaLightsInitialSample.hlsl",
+        "MegaLightsShade.hlsl",
         // 自前ソフトウェアラスタライザは DX12 専用(DX11Device::SupportsSoftwareRaster は常に false)
         "SoftwareRaster.hlsl",
         "SoftwareRasterResolve.hlsl",

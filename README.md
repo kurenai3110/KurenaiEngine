@@ -921,6 +921,11 @@ Samples\Sample3D\RunDX12.bat -debug
 | `-ddgithreshold <値>` | プローブ分類のしきい値を上書きする(`0` で分類を無効にする。A/B比較用) |
 | `-megalights <番号>` | MegaLightsの手法を選ぶ(`0` = なし、`1` = 参照実装、`2` = 確率的サンプリング)。DX12かつDXR Tier 1.1が要る |
 | `-megalightsrays <本数>` | MegaLightsが1灯あたりに撃つ影レイの本数。`0` にすると影を撃たず、従来のライトループと数値的に一致するはずの状態になる(移植の検証用) |
+| `-megalightssamples <M>` | 確率的サンプリングが1ピクセルあたりに候補プールから引く数(RISのM)。影レイの本数はこれとは独立で常に1本 |
+| `-megalightsspatial <0\|1>` | 空間再利用(近傍が選んだ灯を借りる)の有無。**既定は無効** — 現状の実装では入れると曲面で悪化するため(詳細は `Shaders/3D/MegaLightsSpatial.hlsl` 冒頭) |
+| `-megalightsspatialmis <0\|1>` | 空間再利用の結合方式(`0` = confidence重み、`1` = 不偏化) |
+| `-megalightsspatialneighbors <k>` | 借りる近傍の数 |
+| `-megalightsspatialradius <ピクセル>` | 近傍を探す半径 |
 | `-megalightsaccum <枚数>` | MegaLightsの出力を**線形空間で**その枚数だけ足し込み、達したら止める。デバッグ表示「MegaLights - 蓄積平均」と対で使う |
 | `-megalightsdump <パス>` | 足し終えた合計を生データで書き出す。形式は `'K','M','L','A'` + uint32×4(幅 / 高さ / フレーム数 / 予約)+ float32×4 が幅×高さ個。**フレーム数で割ると平均になる** |
 

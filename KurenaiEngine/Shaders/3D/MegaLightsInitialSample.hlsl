@@ -1,26 +1,32 @@
-// MegaLights の確率的サンプリング(初期RIS + 可視レイ + シェード)。
-// ピクセルごとに候補プールから M 個を引いて寄与の大きさで重み付け直し(RIS)、
-// 選ばれた1灯にだけ影レイを撃って、選ばれた確率で割り戻す。
+// MegaLights の初期サンプリング。候補プールから M 個引いて RIS で1灯へ絞り、
+// 結果を**リザーバとして**書き出す(色は作らない。シェードは MegaLightsShade.hlsl)。
+//
+// 【なぜ色ではなくリザーバを書くのか】時間・空間の再利用は「どの灯を選んだか」を
+// 持ち回って現フレームで評価し直す形で行う。色を持ち回ると、遮蔽物が動いたときに
+// 古い明るさが残り続ける。分けておけば、再利用の段が Initial と Shade の間に入るだけで済む。
 //
 // 【なぜこれで全灯評価と同じ答えになるのか】RIS は「粗い提案分布 p で M 個引き、
 // 目標関数 p̂ に比例する重みで1つ選び、最後に 1/p̂ と Σw/M を掛け戻す」形の推定量で、
-// **期待値が Σ_i f_i(全灯の合計)に一致する**。ノイズは乗るが偏りは無い、というのが要点で、
-// 段階2の検証はまさにこれ ―― N枚平均が参照実装(MegaLightsReference.hlsl)へ
-// 1/√N で寄っていくか、頭打ちになったらその値がバイアス、を測る。
+// 期待値が Σ_i f_i(全灯の合計)に一致する。ノイズは乗るが偏りは無い。
 //
 // 【提案分布 p はどこから来るか】候補プール(MegaLightsTilePool.hlsl)がタイルごとに
-// K 個のスロットを持ち、各スロットは p_i = w_i / SumW から**独立同分布に**引かれている。
-// したがってスロットを一様に1つ選べば、それは p からの1サンプルになる。
-// プールは w_i と SumW を別々に保存しているので、p_i はその場で厳密に再現できる。
+// K 個のスロットを持ち、各スロットは p_i = w_i / SumW から独立同分布に引かれている。
+// スロットを一様に1つ選べば、それは p からの1サンプルになる。
 //
 // 【1フレームだけ見ると偏る】プールの K スロットは1タイル内の全ピクセルで共有され、
-// 届いているのにどのスロットにも入らなかった灯はそのフレームでは絶対に選ばれない。
-// これは**プールの実現値で条件付けたときの偏り**で、プールの種にフレーム番号を混ぜて
-// 毎フレーム引き直しているため、時間方向の平均では消える。
-// 逆に言うと、**フレーム番号を混ぜるのをやめると偏ったまま収束しなくなる**。
+// 届いているのにどのスロットにも入らなかった灯はそのフレームでは選ばれない。
+// プールの種にフレーム番号を混ぜて毎フレーム引き直しているため時間平均では消えるが、
+// **混ぜるのをやめると偏ったまま収束しなくなる。**
 //
-// 【1灯ぶんの式は共有する】幾何・early-out・寄与は PunctualLighting.hlsli の共有定義を使う。
-// 参照実装と「どの灯が寄与0とみなされるか」がずれると定義域が変わり、期待値が一致しなくなる。
+// 【初期可視レイ】選び終わったサンプルへ影レイを1本撃ち、遮蔽されていたら W=0 で殺す。
+// これはRTXDI系の標準の段で、**再利用を入れるなら必須**。
+// 遮蔽されたサンプルを残したまま近傍へ配ると、「そこでは真っ黒になる灯」が周囲へ拡散し、
+// 再利用が品質を悪化させる。実測でも、これを入れずに空間再利用を足したときは
+// 球の |相対誤差| 中央値が 0.0309 → 0.0663 と倍以上に悪化した。
+//
+// レイは1本だけで、シェード側の影レイと合わせて1画素あたり2本になる。
+// 【影を二重に掛けてはいけない】ここは「サンプルを殺す」だけで、影の階調は
+// シェード側の1本が決める(殺されたサンプルはそもそもシェードへ渡らない)。
 //
 // DX12 かつ DXR Tier 1.1 のときだけ生成される(RayQuery は SM 6.5 の機能)。
 #include "NormalEncoding.hlsli"
@@ -42,13 +48,13 @@ cbuffer FrameConstants : register(b0)
     float4 CascadeSplits;
     // w にスペキュラのエネルギー補正のモードが入っている
     float4 ShadowParams;
-    // 【宣言はここで止めている】読むのは ShadowParams まで。途中を飛ばして末尾だけを宣言すると
-    // 誤ったオフセットを読み、コンパイルは通り絵も「それらしく」出るため気付けない
+    // 【宣言はここで止めている】読むのは ShadowParams まで。途中を飛ばして末尾だけを
+    // 宣言すると誤ったオフセットを読み、コンパイルは通り絵も「それらしく」出るため気付けない
 };
 
 cbuffer MegaLightsStochasticConstants : register(b1)
 {
-    // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか(0で撃たない)
+    // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか(このパスでは未使用)
     uint4 Params0;
     // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
     uint4 Params1;
@@ -65,16 +71,12 @@ Texture2D BRDFLUTTexture : register(t5);
 #define KURENAI_PUNCTUAL_LIGHT_REGISTER t6
 #define KURENAI_PUNCTUAL_LIGHTING_BRDF
 #include "PunctualLighting.hlsli"
+#include "MegaLightsCommon.hlsli"
 
 // 候補プール。レイアウトは MegaLightsTilePool.hlsl 冒頭を参照
 StructuredBuffer<uint> TilePool : register(t7);
 
-RWTexture2D<float4> MegaLightsOutput : register(u0);
-
-static const float kRayOriginBias = 0.01f;
-static const float kRayOriginBiasSlope = 1e-4f;
-static const float kMinSlopeScaleNdotL = 0.1f;
-static const uint kInvalidLightIndex = 0xFFFFFFFFu;
+RWStructuredBuffer<MegaLightsReservoir> Reservoirs : register(u0);
 
 float3 ReconstructWorldPos(float2 uv, float depth)
 {
@@ -95,8 +97,7 @@ uint HashUint(uint x)
     return x;
 }
 
-// 呼ぶたびに状態を進める乱数。RIS はスロットの抽選と採用判定で2回引くので、
-// 同じ種から独立した値を順に取り出せる形にしておく
+// 呼ぶたびに状態を進める乱数。RIS はスロットの抽選と採用判定で2回引く
 float NextRandom(inout uint state)
 {
     state = HashUint(state);
@@ -108,14 +109,17 @@ float Luminance(float3 c)
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
+static const float kRayOriginBias = 0.01f;
+static const float kRayOriginBiasSlope = 1e-4f;
+static const float kMinSlopeScaleNdotL = 0.1f;
+
 float TraceLightVisibility(float3 rayOrigin, float3 L, float originBias, float distanceToLight)
 {
     RayDesc ray;
     ray.Origin = rayOrigin;
     ray.Direction = L;
     ray.TMin = originBias;
-    // 【光源までの距離で打ち切る】太陽と違い、これを省くと光源の向こう側のジオメトリが
-    // 遮蔽物になり、壁際・天井際のライトが常に真っ暗になる
+    // 光源までの距離で打ち切る(省くと光源の向こう側のジオメトリが遮蔽物になる)
     ray.TMax = max(distanceToLight - originBias, originBias);
 
     RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
@@ -135,12 +139,15 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         return;
     }
 
+    const uint reservoirIndex = pixel.y * outputSize.x + pixel.x;
+
     const float2 uv = (float2(pixel) + 0.5f) / float2(outputSize);
     const float depth = DepthTexture.SampleLevel(DataSampler, uv, 0).r;
     if (depth <= 0.0f)
     {
-        // 背景。【必ず書くこと】RHIにUAVのクリアが無く、書かずにreturnすると前フレームの残骸が残る
-        MegaLightsOutput[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        // 背景。【必ず書くこと】RHIにバッファのクリアが無く、書かずにreturnすると
+        // 前フレームの残骸が残り、シェード側が存在しないサンプルを引く
+        Reservoirs[reservoirIndex] = MegaLightsMakeEmptyReservoir();
         return;
     }
 
@@ -164,14 +171,13 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const uint tileSize = max(Params1.y, 1u);
     const uint2 tileCoord = pixel / tileSize;
     const uint candidateCount = Params1.z;
-    const uint tileBase = (tileCoord.y * Params1.x + tileCoord.x) * (4u + 2u * candidateCount);
+    const uint tileBase = MegaLightsTilePoolBase(tileCoord, Params1.x, candidateCount);
 
     const float sumW = asfloat(TilePool[tileBase + 0u]);
     const uint validCandidates = TilePool[tileBase + 2u];
     if (sumW <= 0.0f || validCandidates == 0u)
     {
-        // このタイルへ届く灯が無い。背景と同じく必ず書く
-        MegaLightsOutput[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        Reservoirs[reservoirIndex] = MegaLightsMakeEmptyReservoir();
         return;
     }
 
@@ -180,23 +186,20 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + Params1.w * 0x9E3779B9u);
 
     float risWeightSum = 0.0f;
-    uint selectedLightIndex = kInvalidLightIndex;
+    uint selectedLightIndex = 0xFFFFFFFFu;
     float selectedTargetPdf = 0.0f;
-    PunctualGeometry selectedGeometry = (PunctualGeometry)0;
 
     [loop]
     for (uint m = 0u; m < sampleCount; ++m)
     {
-        // プールのスロットを一様に1つ引く。スロットは p_i = w_i / SumW から独立同分布に
-        // 引かれているので、これは提案分布 p からの1サンプルになる
         const uint slot = min((uint)(NextRandom(rngState) * float(validCandidates)), validCandidates - 1u);
-        const uint lightIndex = TilePool[tileBase + 4u + 2u * slot + 0u];
-        const float candidateWeight = asfloat(TilePool[tileBase + 4u + 2u * slot + 1u]);
-        // 採用判定の乱数は、候補が無効でも必ず引いて状態を進める
+        const uint lightIndex = TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 0u];
+        const float candidateWeight = asfloat(TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 1u]);
+        // 採用判定の乱数は候補が無効でも必ず引いて状態を進める
         // (引く回数がループの中身で変わると、ピクセルごとに乱数列の位相がずれる)
         const float acceptRandom = NextRandom(rngState);
 
-        if (lightIndex == kInvalidLightIndex || candidateWeight <= 0.0f)
+        if (lightIndex == 0xFFFFFFFFu || candidateWeight <= 0.0f)
         {
             continue;
         }
@@ -205,11 +208,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         const PunctualGeometry geometry = EvaluatePunctualGeometry(light, worldPos, N, translucency);
         if (!geometry.Contributes)
         {
-            // 寄与0の灯は目標関数も0になるのでRISの重みも0。加算する必要が無い
             continue;
         }
 
-        // 目標関数。遮蔽は含めない(含めるにはレイを撃つことになり、RISの意味が無くなる)
+        // 目標関数。遮蔽は含めない(含めるにはレイを撃つことになりRISの意味が無くなる)
         const float3 unshadowed = EvaluatePunctualContribution(
             light, geometry, N, V, NdotV, albedo, metallic, roughness, translucency, energy, 1.0f);
         const float targetPdf = Luminance(unshadowed);
@@ -223,40 +225,60 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         const float risWeight = targetPdf / sourcePdf;
 
         risWeightSum += risWeight;
-        // 重み付きリザーバサンプリング(1個)
         if (acceptRandom < risWeight / risWeightSum)
         {
             selectedLightIndex = lightIndex;
             selectedTargetPdf = targetPdf;
-            selectedGeometry = geometry;
         }
     }
 
-    // 【0除算のガードは必須】どの候補も寄与しないピクセル(屋外の大半)でここを割ると
-    // NaN が出て、直接光→SceneColor→TAAの履歴まで壊れて復帰しなくなる
-    if (selectedLightIndex == kInvalidLightIndex || selectedTargetPdf <= 0.0f || risWeightSum <= 0.0f)
+    // 【0除算のガードは必須】どの候補も寄与しないピクセルでここを割るとNaNが出て、
+    // 直接光→SceneColor→TAAの履歴まで壊れて復帰しなくなる
+    if (selectedLightIndex == 0xFFFFFFFFu || selectedTargetPdf <= 0.0f || risWeightSum <= 0.0f)
     {
-        MegaLightsOutput[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        Reservoirs[reservoirIndex] = MegaLightsMakeEmptyReservoir();
         return;
     }
 
-    // 不偏寄与重み W = (1/p̂(y)) * (1/M) * Σw
-    const float contributionWeight = risWeightSum / (float(sampleCount) * selectedTargetPdf);
-
-    // --- 選ばれた1灯にだけ影レイを撃つ ---
-    const GPULight selectedLight = Lights[selectedLightIndex];
-    float shadow = 1.0f;
-    if (Params0.w != 0u && selectedLight.Params.y > 0.5f)
+    // --- 初期可視レイ: 遮蔽されていたらここで殺す ---
+    // 再利用を入れるなら必須。遮蔽されたサンプルを近傍へ配ると、
+    // 「そこでは真っ黒になる灯」が周囲へ拡散して品質を悪化させる
+    bool visible = true;
+    if (Params0.w != 0u)
     {
-        const float slopeScale = 1.0f / max(dot(N, selectedGeometry.L), kMinSlopeScaleNdotL);
-        const float originBias =
-            (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
-        shadow = TraceLightVisibility(
-            worldPos + N * originBias, selectedGeometry.L, originBias, selectedGeometry.Distance);
+        const GPULight selectedLight = Lights[selectedLightIndex];
+        if (selectedLight.Params.y > 0.5f)
+        {
+            const PunctualGeometry geometry =
+                EvaluatePunctualGeometry(selectedLight, worldPos, N, translucency);
+            if (geometry.Contributes)
+            {
+                const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
+                const float originBias =
+                    (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
+                visible = TraceLightVisibility(
+                              worldPos + N * originBias, geometry.L, originBias, geometry.Distance) > 0.0f;
+            }
+        }
     }
 
-    const float3 contribution = EvaluatePunctualContribution(
-        selectedLight, selectedGeometry, N, V, NdotV, albedo, metallic, roughness, translucency, energy, shadow);
+    if (!visible)
+    {
+        // 【空にする ―― 重みを0にするだけでは足りない】W=0のリザーバは結合で
+        // 選ばれなくなるが、M(confidence)は数えられる。それでよい:
+        // 「M個の候補を見て、遮蔽で寄与0だった」という情報は正しい
+        MegaLightsReservoir killed = MegaLightsMakeEmptyReservoir();
+        killed.M = float(sampleCount);
+        Reservoirs[reservoirIndex] = killed;
+        return;
+    }
 
-    MegaLightsOutput[pixel] = float4(contribution * contributionWeight, 1.0f);
+    MegaLightsReservoir reservoir;
+    // ライト番号は16bitへ詰める(kMaxLights = 1024 なので収まる)
+    reservoir.LightAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, true);
+    reservoir.SampleUV = 0u;
+    // 不偏寄与重み W = (1/p̂(y)) * (1/M) * Σw
+    reservoir.W = risWeightSum / (float(sampleCount) * selectedTargetPdf);
+    reservoir.M = float(sampleCount);
+    Reservoirs[reservoirIndex] = reservoir;
 }
