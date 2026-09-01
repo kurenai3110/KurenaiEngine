@@ -233,6 +233,14 @@ namespace Kurenai::UI
                     1, 64, Defaults::MegaLightsSpatialRadius,
                     "広げると遠くの良いサンプルを拾えるが、深度・法線・材質の一致条件で"
                     "弾かれる割合も増える");
+                CheckboxEx(
+                    "初期可視レイ###MegaLightsInitialVisibility", &m_Engine.m_MegaLightsInitialVisibility,
+                    Defaults::MegaLightsInitialVisibility,
+                    "初期サンプルへ影レイを1本撃ち、遮蔽されていたらリザーバごと殺す"
+                    "(RTXDI系では標準の段)。\n\n"
+                    "【既定は無効】殺された画素の実効的な定義域が変わるのに、結合の不偏化は"
+                    "レイを撃たずに可視率を判定できず、影の縁が暗い側へ偏る。実測でも"
+                    "殺し無しのほうが偏りも裾も良い(根拠は ImplementationDetail 61.7)");
             }
         }
 

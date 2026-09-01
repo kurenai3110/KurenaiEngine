@@ -18,14 +18,16 @@
 // プールの種にフレーム番号を混ぜて毎フレーム引き直しているため時間平均では消えるが、
 // **混ぜるのをやめると偏ったまま収束しなくなる。**
 //
-// 【初期可視レイ】選び終わったサンプルへ影レイを1本撃ち、遮蔽されていたら W=0 で殺す。
-// これはRTXDI系の標準の段で、**再利用を入れるなら必須**。
-// 遮蔽されたサンプルを残したまま近傍へ配ると、「そこでは真っ黒になる灯」が周囲へ拡散し、
-// 再利用が品質を悪化させる。実測でも、これを入れずに空間再利用を足したときは
-// 球の |相対誤差| 中央値が 0.0309 → 0.0663 と倍以上に悪化した。
-//
-// レイは1本だけで、シェード側の影レイと合わせて1画素あたり2本になる。
-// 【影を二重に掛けてはいけない】ここは「サンプルを殺す」だけで、影の階調は
+// 【初期可視レイは既定で撃たない】選んだサンプルへ影レイを1本撃ち、遮蔽されていたら
+// リザーバごと殺す段(RTXDI系では標準)を持っているが、実測で不利と分かったため既定は無効。
+//   ・空間再利用と両立しない: 殺された画素の実効的な定義域が p̂ から p̂・可視率 へ変わるが、
+//     不偏化の分母(Z)はレイを撃たずに可視率を判定できず、影の縁が暗い側へ偏る
+//   ・再利用なしでは純粋な無駄: 殺される(遮蔽された)サンプルはシェード側のレイでも
+//     どうせ0になるので絵は1bitも変わらず、可視なサンプルではレイが2本になるだけ
+// かつて「再利用に必須(入れないと球が倍以上悪化)」と測ったのは、空リザーバの M を
+// 0にしていたバグ入りの状態での測定で、誤り。バグ修正後の実測は逆で、殺し無しのほうが
+// 偏りも裾も良い(数値は docs/ImplementationDetail.md 61.7)。
+// 【影を二重に掛けてはいけない】撃つ場合もここは「サンプルを殺す」だけで、影の階調は
 // シェード側の1本が決める(殺されたサンプルはそもそもシェードへ渡らない)。
 //
 // DX12 かつ DXR Tier 1.1 のときだけ生成される(RayQuery は SM 6.5 の機能)。
@@ -54,10 +56,14 @@ cbuffer FrameConstants : register(b0)
 
 cbuffer MegaLightsStochasticConstants : register(b1)
 {
-    // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか(このパスでは未使用)
+    // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか
     uint4 Params0;
     // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
     uint4 Params1;
+    // xyz=空間再利用用(このパスでは未使用)、w=初期可視レイでリザーバを殺すか。
+    // 【途中のフィールドを飛ばしてはいけない】wだけ欲しくてもxyzごと宣言する
+    // (飛ばすと誤ったオフセットを読み、コンパイルは通り絵もそれらしく出るため気付けない)
+    uint4 Params2;
 };
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
@@ -175,14 +181,20 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     const float sumW = asfloat(TilePool[tileBase + 0u]);
     const uint validCandidates = TilePool[tileBase + 2u];
+    const uint sampleCount = max(Params0.z, 1u);
     if (sumW <= 0.0f || validCandidates == 0u)
     {
-        Reservoirs[reservoirIndex] = MegaLightsMakeEmptyReservoir();
+        // 【空でも M は候補数を持たせる】M はこの画素が「何個の候補を検討したか」で、
+        // 結果が空だったかどうかとは独立。ここを0にすると、空間再利用の分母
+        // (confidenceSum と Z)から「引いたが外した」画素が消えて分母が過小になり、
+        // **明るい側の系統誤差**になる(詳細は選択失敗側のコメント)
+        MegaLightsReservoir empty = MegaLightsMakeEmptyReservoir();
+        empty.M = float(sampleCount);
+        Reservoirs[reservoirIndex] = empty;
         return;
     }
 
     // --- RIS: 候補プールから M 個引いて、寄与の大きさに比例する重みで1つ残す ---
-    const uint sampleCount = max(Params0.z, 1u);
     uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + Params1.w * 0x9E3779B9u);
 
     float risWeightSum = 0.0f;
@@ -236,15 +248,27 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 直接光→SceneColor→TAAの履歴まで壊れて復帰しなくなる
     if (selectedLightIndex == 0xFFFFFFFFu || selectedTargetPdf <= 0.0f || risWeightSum <= 0.0f)
     {
-        Reservoirs[reservoirIndex] = MegaLightsMakeEmptyReservoir();
+        // 【M=0 で書いてはいけない ―― 空間再利用の明るい側の系統誤差の原因だった】
+        // 「M個引いて全部外した(全候補が背向き等)」は、遮蔽で殺した場合と同じく
+        // 「M個の候補を検討して寄与0だった」という正当な結果である。ここを M=0 にすると、
+        // 結合の分母(confidenceSum と、不偏化方式の Z)からこの画素の分だけが消える。
+        // 全部外すのは背向き候補率の高い画素に集中して起きるため、その周囲だけ分母が
+        // 系統的に過小になり、期待値が明るい側へ偏る(不偏性の条件は
+        // 「分母 = 選ばれた灯を生成しえた候補の M の合計」であり、
+        // 外した画素も生成しえた=確率が正だった以上、M ごと数えなければならない)
+        MegaLightsReservoir rejected = MegaLightsMakeEmptyReservoir();
+        rejected.M = float(sampleCount);
+        Reservoirs[reservoirIndex] = rejected;
         return;
     }
 
     // --- 初期可視レイ: 遮蔽されていたらここで殺す ---
-    // 再利用を入れるなら必須。遮蔽されたサンプルを近傍へ配ると、
-    // 「そこでは真っ黒になる灯」が周囲へ拡散して品質を悪化させる
+    // 殺すと「遮蔽で真っ黒になる灯」が近傍へ配られなくなる(RTXDI系の標準の段)。
+    // 【ただし空間再利用の不偏化(Z)とは両立しない】殺された画素の実効的な定義域は
+    // p̂ から p̂・可視率 へ変わるが、Zはレイを撃たずに可視率を判定できないため、
+    // 影の縁に暗い側の系統誤差が残る。Params2.w で切って測れるようにしてある
     bool visible = true;
-    if (Params0.w != 0u)
+    if (Params0.w != 0u && Params2.w != 0u)
     {
         const GPULight selectedLight = Lights[selectedLightIndex];
         if (selectedLight.Params.y > 0.5f)

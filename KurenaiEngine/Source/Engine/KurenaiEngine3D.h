@@ -183,6 +183,8 @@ namespace Kurenai
         // 有無を切り替えて同じ手順で撮り比べられないと効果を測れない。
         // UIのつまみで切り替えると再現性が落ちる(SetDebugViewIndexと同じ理由)
         void SetMegaLightsSpatial(int enabled, int neighborCount, int radius, int useMIS);
+        // 初期サンプルの可視レイ(遮蔽されたサンプルをリザーバごと殺す)の有無。負の値は既定のまま
+        void SetMegaLightsInitialVisibility(int enabled);
 
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
         // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
@@ -1272,11 +1274,14 @@ namespace Kurenai
         bool m_MegaLightsSpatialEnabled = Defaults::MegaLightsSpatialEnabled;
         int32_t m_MegaLightsSpatialNeighborCount = Defaults::MegaLightsSpatialNeighborCount;
         int32_t m_MegaLightsSpatialRadius = Defaults::MegaLightsSpatialRadius;
-        // 結合にMIS重み(生成化バランスヒューリスティック)を使うか。
-        // 単純なconfidence重みは、近傍が自分と違う候補集合から引いている場合に不偏にならない
-        // (実測で総和の相対差が +2.2%)。**切り替えて長時間平均を比べられるようにしてある** ――
+        // 結合を不偏化(Z)にするか。単純なconfidence重みは、近傍が自分と違う候補集合から
+        // 引いている可能性を無視するため不偏にならない(実測で総和の相対差 -8.0%)。
+        // **切り替えて長時間平均を比べられるようにしてある** ――
         // 差が出なければどちらかが実装されていない
         bool m_MegaLightsSpatialMIS = Defaults::MegaLightsSpatialMIS;
+        // 初期サンプルの可視レイでリザーバを殺すか。殺すと影の縁に暗い側の系統誤差が残る
+        // (Zが可視率まで判定できないため)。詳細は EngineDefaults.h のコメント
+        bool m_MegaLightsInitialVisibility = Defaults::MegaLightsInitialVisibility;
         // 1ピクセルあたりに候補プールから引く数(RISのM)。影レイの本数はこれとは独立で常に1本
         int32_t m_MegaLightsSampleCount = Defaults::MegaLightsSampleCount;
 

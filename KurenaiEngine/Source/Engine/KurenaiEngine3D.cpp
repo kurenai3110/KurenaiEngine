@@ -3611,6 +3611,19 @@ namespace Kurenai
         }
     }
 
+    void KurenaiEngine3D::SetMegaLightsInitialVisibility(int enabled)
+    {
+        // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
+        if (enabled >= 0)
+        {
+            m_MegaLightsInitialVisibility = (enabled != 0);
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                std::string("MegaLightsの初期可視レイを") + (m_MegaLightsInitialVisibility ? "有効" : "無効") +
+                    "にしました");
+        }
+    }
+
     void KurenaiEngine3D::SetMegaLightsDumpPath(const wchar_t* path)
     {
         if (path == nullptr || path[0] == L'\0')
@@ -11818,7 +11831,9 @@ namespace Kurenai
                     static_cast<uint32_t>(std::max(0, m_MegaLightsSpatialNeighborCount)),
                     static_cast<uint32_t>(std::max(1, m_MegaLightsSpatialRadius)),
                     m_MegaLightsSpatialMIS ? 1u : 0u,
-                    0u,
+                    // 初期可視レイでリザーバを殺すか(Initialが読む)。殺すと影の縁に
+                    // 暗い側の系統誤差が残るため、切り替えて測れるようにしてある
+                    m_MegaLightsInitialVisibility ? 1u : 0u,
                 };
                 // 候補プールが錐台を組み立てたのと**同じ行列**から取る。ずれると
                 // 「その灯が隣のタイルへ届くか」の判定が候補プールと食い違い、定義域がずれる

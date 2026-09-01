@@ -488,6 +488,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsSpatialRadius = ParseIntOption(L"-megalightsspatialradius", -1);
         // -megalightsspatialmis <0=confidence重み|1=生成化バランスヒューリスティック>
         const int megaLightsSpatialMIS = ParseIntOption(L"-megalightsspatialmis", -1);
+        // -megalightsinitialvis <0|1>。初期サンプルの可視レイ(遮蔽されたサンプルを殺す)の有無
+        const int megaLightsInitialVis = ParseIntOption(L"-megalightsinitialvis", -1);
 
         for (;;)
         {
@@ -529,6 +531,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 engine.SetMegaLightsSpatial(
                     megaLightsSpatial, megaLightsSpatialNeighbors, megaLightsSpatialRadius,
                     megaLightsSpatialMIS);
+            }
+            if (megaLightsInitialVis >= 0)
+            {
+                engine.SetMegaLightsInitialVisibility(megaLightsInitialVis);
             }
             engine.Run();
 
