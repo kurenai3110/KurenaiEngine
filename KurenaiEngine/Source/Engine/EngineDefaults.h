@@ -361,6 +361,18 @@ namespace Kurenai::Defaults
     // 「再利用に必須」という旧実測は空リザーバの M=0 バグ入りの測定で、誤りだった。
     // 数値は docs/ImplementationDetail.md 61.7
     inline constexpr bool MegaLightsInitialVisibility = false;
+    // 時間再利用。前フレームのリザーバを速度ベクトルで再投影して結合する。
+    // 空間再利用と違い、実効サンプル数がフレーム方向に積み上がるので収束が速くなる。
+    // レイは1本も増えない(借りるのは「どの灯か」だけ)
+    inline constexpr bool MegaLightsTemporalEnabled = true;
+    // 履歴のM(これまでに何個の候補から絞ったか)の上限。
+    // 【これは測定ではなく判断】単フレームの品質は上げるほど単調に良くなり、ゴースト
+    // (灯を消しても明るさが残る)は単調に悪くなるので、測定だけでは決まらない。
+    // ReSTIR DIの慣例(初期Mの20倍。既定M=8に対して160)に合わせている。
+    // 実測: 残光は1フレームあたり C/(C+M) の等比で減り、10%まで落ちるのは
+    // 160で46.8フレーム(60Hzで0.78秒)、64で19.6フレーム(0.33秒)、640で185フレーム(3.1秒)。
+    // 根拠と測り方は docs/ImplementationDetail.md 61.7b.1〜61.7b.2
+    inline constexpr int MegaLightsTemporalMClamp = 160;
 
     // --- シャドウ(スクリーンスペース) ---
     // ポイント/スポットライトの影。深度バッファに写っている面しか遮蔽物にできず、

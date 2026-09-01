@@ -212,6 +212,29 @@ namespace Kurenai::UI
                 "Mを増やしてもレイは増えない。ここがライト数からコストを切り離している部分");
 
             CheckboxEx(
+                "時間再利用###MegaLightsTemporal", &m_Engine.m_MegaLightsTemporalEnabled,
+                Defaults::MegaLightsTemporalEnabled,
+                "前フレームの自分が選んだ灯を、速度ベクトルで再投影して借りる。"
+                "実効サンプル数がフレーム方向に積み上がるので、影レイを増やさずに収束が速くなる。\n\n"
+                "【効くのは1枚の絵の品質】実測(N=1)で|相対誤差|の中央値が6.0倍良くなり、"
+                "1枚あたりの偏りも-3.5%から-0.1%になる。長時間の蓄積平均は良くならない"
+                "(フレーム間に相関が入るため)ので、効果を見るときは蓄積枚数を1にすること");
+
+            if (m_Engine.m_MegaLightsTemporalEnabled)
+            {
+                SliderIntEx(
+                    "履歴のMの上限###MegaLightsTemporalMClamp", &m_Engine.m_MegaLightsTemporalMClamp,
+                    8, 640, Defaults::MegaLightsTemporalMClamp,
+                    "履歴が「これまでに何個の候補から絞ったか」の上限。\n\n"
+                    "【上げるほど収束は速いがゴーストが出る】灯を消しても明かりと影が残る。"
+                    "残光は1フレームあたり C/(C+M) の等比で減り、実測がこの式と一致する。"
+                    "残光が10%まで落ちるのは、既定160・M=8で46.8フレーム(60Hzで0.78秒)、"
+                    "64なら19.6フレーム(0.33秒)、640なら185フレーム(3.1秒)。"
+                    "既定160はReSTIR DIの慣例(初期Mの20倍)に合わせた判断で、"
+                    "測定だけでは決まらない(品質は単調に良くなりゴーストは単調に悪くなるため)");
+            }
+
+            CheckboxEx(
                 "空間再利用###MegaLightsSpatial", &m_Engine.m_MegaLightsSpatialEnabled,
                 Defaults::MegaLightsSpatialEnabled,
                 "近傍の画素が選んだ灯を借りて、自分の面で評価し直して結合する。"

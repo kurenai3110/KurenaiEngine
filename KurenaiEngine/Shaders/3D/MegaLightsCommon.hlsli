@@ -90,4 +90,56 @@ bool MegaLightsReservoirIsEmpty(MegaLightsReservoir reservoir)
     return MegaLightsUnpackLight(reservoir.LightAndFlags) == kMegaLightsInvalidLight || reservoir.W <= 0.0f;
 }
 
+// --- 履歴の幾何(時間再利用が「再投影先は同じ面か」を判定するのに使う) ---
+//
+// 【なぜ専用に持つのか】G-Bufferは毎フレーム上書きされ、前フレームの写しはどこにも残らない。
+// 再投影しただけでは、そこに写っているのが同じ面なのか、手前を別の物が横切ったのかが分からない。
+// **C++側の確保(12バイト/画素)と一致させること。**
+struct MegaLightsHistoryGuide
+{
+    // オクタヘドラル符号化した法線(fp16 x2)。G-Bufferと同じ符号化を使う
+    uint NormalOct;
+    // View空間の線形深度。【Reverse-Zの生値を入れてはいけない】
+    // 生値で比べると遠景は常に「一致」・近景は常に「不一致」になり、
+    // 遠景でゴースト・近景でノイズが残るという分かりにくい壊れ方をする
+    float ViewZ;
+    // 材質(金属度と粗さを8bitずつ)。「別の物に化けた」ことの検出用
+    uint Material;
+};
+
+// オクタヘドラル法線(範囲[-1,1]の2成分)を1つのuintへ詰める。
+// f32tof16 は SM5.0 から使えるので3バリアントすべてで通る
+uint MegaLightsPackNormalOct(float2 oct)
+{
+    return f32tof16(oct.x) | (f32tof16(oct.y) << 16u);
+}
+
+float2 MegaLightsUnpackNormalOct(uint packed)
+{
+    return float2(f16tof32(packed & 0xFFFFu), f16tof32(packed >> 16u));
+}
+
+uint MegaLightsPackMaterial(float metallic, float roughness)
+{
+    const uint m = (uint)(saturate(metallic) * 255.0f + 0.5f);
+    const uint r = (uint)(saturate(roughness) * 255.0f + 0.5f);
+    return m | (r << 8u);
+}
+
+void MegaLightsUnpackMaterial(uint packed, out float metallic, out float roughness)
+{
+    metallic = float(packed & 0xFFu) / 255.0f;
+    roughness = float((packed >> 8u) & 0xFFu) / 255.0f;
+}
+
+MegaLightsHistoryGuide MegaLightsMakeEmptyGuide()
+{
+    MegaLightsHistoryGuide guide;
+    guide.NormalOct = 0u;
+    // 背景を表す。時間再利用側はこれを「一致しない」として弾く
+    guide.ViewZ = 0.0f;
+    guide.Material = 0u;
+    return guide;
+}
+
 #endif // KURENAI_MEGALIGHTS_COMMON_HLSLI

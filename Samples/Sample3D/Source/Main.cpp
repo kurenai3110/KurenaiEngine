@@ -490,6 +490,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsSpatialMIS = ParseIntOption(L"-megalightsspatialmis", -1);
         // -megalightsinitialvis <0|1>。初期サンプルの可視レイ(遮蔽されたサンプルを殺す)の有無
         const int megaLightsInitialVis = ParseIntOption(L"-megalightsinitialvis", -1);
+        // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
+        const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
+        const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
+        // -megalightsperturb <0|1|2>。【検証専用】蓄積開始時の摂動
+        // (1=全ライトを消す / 2=露出を+2段跳ばす)。時間再利用の追従を測るためのもの
+        const int megaLightsPerturb = ParseIntOption(L"-megalightsperturb", -1);
 
         for (;;)
         {
@@ -535,6 +541,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsInitialVis >= 0)
             {
                 engine.SetMegaLightsInitialVisibility(megaLightsInitialVis);
+            }
+            if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
+            {
+                engine.SetMegaLightsTemporal(megaLightsTemporal, megaLightsTemporalMClamp);
+            }
+            if (megaLightsPerturb >= 0)
+            {
+                engine.SetMegaLightsPerturb(megaLightsPerturb);
             }
             engine.Run();
 

@@ -185,6 +185,17 @@ namespace Kurenai
         void SetMegaLightsSpatial(int enabled, int neighborCount, int radius, int useMIS);
         // 初期サンプルの可視レイ(遮蔽されたサンプルをリザーバごと殺す)の有無。負の値は既定のまま
         void SetMegaLightsInitialVisibility(int enabled);
+        // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま
+        void SetMegaLightsTemporal(int enabled, int mClamp);
+
+        // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を
+        // 測るためのもので、静止した絵をいくら撮っても測れない側を測る入口。
+        //   0 = 何もしない(既定)
+        //   1 = 全ライトを消す。ゴースト(灯を消しても明かりが残る)の追従フレーム数を測る
+        //   2 = 実効プリ露出EV100を +2 段跳ばす。プリ露出の補正が効いているかを測る
+        // 蓄積ダンプは「総和」を書くので、Nを変えた2本の差を取れば1フレームぶんが取り出せる。
+        // これで追従の時間変化を、フレームごとの読み戻し無しで測れる
+        void SetMegaLightsPerturb(int mode);
 
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
         // それぞれ専用のシャドウマップ・ライト正射影を持たせる。
@@ -1266,6 +1277,31 @@ namespace Kurenai
         // 空間再利用は「読みながら同じバッファへ書けない」(近傍を読むので競合する)ため2本持つ
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirSpatialBuffer;
+        // 時間再利用の履歴リザーバと履歴の幾何。**ping-pongにするのはWAR回避のため**
+        // (RenderGraphは前方走査でRAWの辺しか張らない。詳細は生成箇所のコメント)
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirHistory[2];
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsHistoryGuide[2];
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsTemporalComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTemporalPipelineState;
+        uint32_t m_MegaLightsHistoryIndex = 0u;
+        // 履歴の中身が今の解像度・今のシーンのものとして使えるか。
+        // バッファのクリアが無いRHIなので、無効な間はシェーダへ「履歴を読むな」と伝える
+        bool m_MegaLightsHistoryValid = false;
+        bool m_MegaLightsTemporalEnabled = Defaults::MegaLightsTemporalEnabled;
+        // 履歴のM(何個の候補から絞ったか)の上限。大きいほど収束は速いが、
+        // 新しいサンプルが採用されにくくなり、灯を消しても明るさが残る(ゴースト)
+        int32_t m_MegaLightsTemporalMClamp = Defaults::MegaLightsTemporalMClamp;
+        // 前フレームの実効プリ露出EV100。
+        // 【補正には使っていない】リザーバのWは露出に対して不変(比なので約分される)と
+        // 実測で確かめた ―― TAAのm_TAAPrevEffectiveExposureEV100と違い、掛ける係数は1。
+        // 詳細はKurenaiEngine3D.cppの「プリ露出の補正は入れない」。
+        // 値は、将来この前提を疑うときに差を見られるよう記録だけ続けている
+        float m_MegaLightsPrevEffectiveExposureEV100 = 0.0f;
+        // 【検証専用】蓄積開始時に加える摂動(0=なし / 1=全ライトを消す / 2=露出を+2段跳ばす)。
+        // 静止した絵では測れない「追従」を測るための入口。SetMegaLightsPerturbのコメント参照
+        int32_t m_MegaLightsPerturbMode = 0;
+        // 摂動を適用済みか(蓄積開始の1回だけ効かせる)
+        bool m_MegaLightsPerturbApplied = false;
 
         // 空間再利用(MegaLightsSpatial.hlsl)。近傍が選んだ灯を借りて自分の面で評価し直す。
         // レイは1本も増えない ―― 借りるのは「どの灯か」だけ
