@@ -236,6 +236,50 @@ namespace
         return index;
     }
 
+    // 「<オプション名> <整数>」の形の起動オプションを1つ読む。指定が無い場合と、
+    // 値が整数でない場合は notFound をそのまま返す(呼び出し側が「指定なし」を判別できるように)。
+    // 検査はParseDebugViewIndexと同じで、末尾までが数字であることまで見る
+    int ParseIntOption(const wchar_t* optionName, int notFound)
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return notFound;
+        }
+
+        int value = notFound;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], optionName) != 0)
+            {
+                continue;
+            }
+            const std::string optionNameUtf8 = Kurenai::Core::WideToUtf8(optionName);
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", optionNameUtf8 + "の後に値が指定されていないため、既定のままにします");
+                break;
+            }
+            wchar_t* end = nullptr;
+            const long parsed = wcstol(argv[i + 1], &end, 10);
+            if (end == argv[i + 1] || (end != nullptr && *end != 0))
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    optionNameUtf8 + "の引数が数値ではないため、既定のままにします: " +
+                        Kurenai::Core::WideToUtf8(argv[i + 1]));
+                break;
+            }
+            value = static_cast<int>(parsed);
+            break;
+        }
+
+        LocalFree(argv);
+        return value;
+    }
+
     // コマンドラインの「-scene <名前>」(拡張子を除いたファイル名。例: MontSaintMichel)を、
     // KurenaiEngine3Dが構築するシーン一覧上の番号へ解決する。
     // 一覧の作り方(列挙→_wcsicmpで昇順ソート→Assets::ReadSceneNameが成功したものだけ採用)は
@@ -394,6 +438,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const float ddgiBackfaceThreshold = ParseDDGIBackfaceThreshold();
         const uint32_t ddgiLODCount = ParseDDGILODCount();
         const bool ddgiFollowCamera = ParseDDGIFollowCamera();
+        // -megalights <0=なし|1=参照実装> / -megalightsrays <本数。0で恒等テスト>。
+        // どちらも指定が無ければ-1で、その項目は既定のままになる
+        const int megaLightsMode = ParseIntOption(L"-megalights", -1);
+        const int megaLightsShadowRays = ParseIntOption(L"-megalightsrays", -1);
 
         for (;;)
         {
@@ -415,6 +463,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 // 段数に0を渡すと「.ksceneの指定のまま」で、追従だけを切り替える
                 engine.OverrideDDGILOD(ddgiLODCount, ddgiFollowCamera);
+            }
+            if (megaLightsMode >= 0 || megaLightsShadowRays >= 0)
+            {
+                // どちらも負の値は「既定のまま」。手法だけ・本数だけの指定もできる
+                engine.OverrideMegaLights(megaLightsMode, megaLightsShadowRays);
             }
             engine.Run();
 
