@@ -197,7 +197,8 @@ PunctualGeometry EvaluatePunctualGeometry(GPULight light, float3 worldPos, float
             return result;
         }
 
-        atten = DistanceAttenuation(distSq, range);
+        atten = LightAttenuation(
+            lightType, toLight, distSq, range, light.Params.z, light.DirectionAngle.xyz, light.Params.w);
         if (atten <= 0.0f)
         {
             return result;

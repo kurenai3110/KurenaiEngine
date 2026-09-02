@@ -348,7 +348,8 @@ void EvaluateLight(
             return;
         }
 
-        atten = DistanceAttenuation(distSq, range);
+        atten = LightAttenuation(
+            lightType, toLight, distSq, range, light.Params.z, light.DirectionAngle.xyz, light.Params.w);
         if (atten <= 0.0f)
         {
             return;

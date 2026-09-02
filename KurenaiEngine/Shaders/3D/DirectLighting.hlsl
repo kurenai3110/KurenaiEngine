@@ -164,7 +164,8 @@ float3 EvaluateLight(
             return float3(0.0f, 0.0f, 0.0f);
         }
 
-        atten = DistanceAttenuation(distSq, range);
+        atten = LightAttenuation(
+            lightType, toLight, distSq, range, light.Params.z, light.DirectionAngle.xyz, light.Params.w);
         if (atten <= 0.0f)
         {
             return float3(0.0f, 0.0f, 0.0f);

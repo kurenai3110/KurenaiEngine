@@ -32,4 +32,85 @@ float DistanceAttenuation(float distSq, float range)
     return (window * window) / max(distSq, 0.0001f);
 }
 
+// --- エミッシブ光源プロキシ(LightType 3)の減衰 ---
+//
+// 【何を近似しているか】面積 A・放射輝度 L の平らでない発光体を1点へ潰したもの。
+// ランバート放射面の遠方場は指向性 κ = |Σ A_i n_i| / Σ A_i で決まり、
+//
+//     I(θ) = L * A * [ (1-κ)/4 + κ * max(0, cosθ) ]      θ は発光面の法線から
+//
+// の形にすると**κ によらず全光束が π*L*A に一致する**(∫I dω = L*A*[(1-κ)/4*4π + κ*π])。
+// 両端も厳密で、κ=0(閉じた電球)は等方の L*A/4 ―― 凸閉曲面の全方向平均投影面積が A/4 という
+// Cauchy の投影面積定理そのもの ―― κ=1(平らな片面)はランバートの L*A*cosθ になる。
+//
+// **等方で済ませて I = L*A*(1+κ)/4 とはしない。** κ=1 で光束が真値の2倍になり、
+// 半分がパネルの裏へ漏れる。「壁に貼ってあるから裏は見えない」という前提に頼ることになり、
+// 自立した看板や吊り下げパネルで破綻する。
+//
+// 【分母が d^2 ではなく d^2 + R^2 なのはなぜか】半径 R の円板の軸上照度には閉じた式があり、
+//
+//     厳密   : π*L*R^2 / (R^2 + d^2)
+//     1/d^2  : π*L*R^2 / d^2            ← 1 + (R/d)^2 倍だけ過大
+//
+// なので、分母を d^2 + R^2 にすると**κ=1 の軸上は厳密に一致する**。
+// これ1つで (1) 近傍での 1/d^2 の発散 (2) 発光面が自分自身を照らす問題
+// (面の上では d≈0 かつ cosθ≈0 なので寄与がほぼ0に落ちる) (3) 半影の広がりを決める R との整合
+// が同時に片付く。R は Params.z(面積等価の円板半径)で、球光源の SourceRadius と同じ枠。
+//
+// 【余弦は枝の中で求める】呼び出し側で正規化してから渡す形にすると、
+// 型0/1/2 でも rsqrt が走る。ここで求めれば既存のライトの経路は1命令も増えない。
+float EmissiveProxyAttenuation(
+    float3 toLight,        // 受光点 → 光源中心。正規化しない
+    float distSq,
+    float range,
+    float sourceRadius,    // Params.z
+    float3 lightDirection, // DirectionAngle.xyz = 発光面の平均法線
+    float directionality)  // Params.w = κ
+{
+    // 打ち切りの窓は punctual と同じ形。Range の境界で厳密に0になり、ハードエッジが出ない
+    float factor = distSq / max(range * range, 1e-4f);
+    float window = saturate(1.0f - factor * factor);
+
+    // 発光面から見て受光点がどちら側にあるか。-toLight が「光源から受光点へ」の向き
+    float cosLightSide = -dot(lightDirection, toLight) * rsqrt(max(distSq, 1e-12f));
+    float lobe = (1.0f - directionality) * 0.25f + directionality * saturate(cosLightSide);
+
+    return lobe * (window * window) / max(distSq + sourceRadius * sourceRadius, 0.0001f);
+}
+
+// ライト1灯の距離減衰。**種類による分岐をここへ閉じ込める。**
+//
+// 【呼び出し側に枝を置かない】減衰の式を1か所へ集めたのに分岐を各ライトループへ配ると、
+// 「同期が要る箇所」が式から分岐へ移るだけで何も解決しない。
+float LightAttenuation(
+    uint lightType, float3 toLight, float distSq, float range, float sourceRadius,
+    float3 lightDirection, float directionality)
+{
+    if (lightType == 3u) // EmissiveProxy(Assets::LightType と一致させること)
+    {
+        return EmissiveProxyAttenuation(
+            toLight, distSq, range, sourceRadius, lightDirection, directionality);
+    }
+    return DistanceAttenuation(distSq, range);
+}
+
+// 受光点の向きが分からない場所で使う、方向によらない上界。
+//
+// 【なぜ要るのか】MegaLights の候補プールはタイル単位で重みを作るので、画素ごとの向きを
+// 使えない(タイルの中で法線も位置も違う)。しかもあそこは「届く灯を取りこぼさない」ことが
+// 正しさの条件なので、**過小に見積もってはいけない**。
+// 余弦ローブの最大は cosθ=1 のときの (1-κ)/4 + κ なので、それを掛ける。
+float LightAttenuationUpperBound(
+    uint lightType, float distSq, float range, float sourceRadius, float directionality)
+{
+    if (lightType == 3u)
+    {
+        float factor = distSq / max(range * range, 1e-4f);
+        float window = saturate(1.0f - factor * factor);
+        float lobeMax = (1.0f - directionality) * 0.25f + directionality;
+        return lobeMax * (window * window) / max(distSq + sourceRadius * sourceRadius, 0.0001f);
+    }
+    return DistanceAttenuation(distSq, range);
+}
+
 #endif // KURENAI_LIGHT_ATTENUATION_HLSLI
