@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -268,6 +269,97 @@ namespace Kurenai::RHI
     uint64_t TextureImage::GetSizeInBytes() const
     {
         return static_cast<uint64_t>(m_Impl->Image.GetPixelsSize());
+    }
+
+    bool TextureImage::ExtractLinearThumbnail(uint32_t size, float* outRGB) const
+    {
+        if (size == 0 || outRGB == nullptr)
+        {
+            return false;
+        }
+        const DirectX::TexMetadata& meta = m_Impl->Metadata;
+        if (meta.width == 0 || meta.height == 0 || meta.mipLevels == 0)
+        {
+            return false;
+        }
+
+        // 【ミップ0を使う。小さいミップで代用してはいけない】.ktex のミップは元の .dds が
+        // 持っていたものをそのまま運んでいることがあり、**ガンマ空間で畳まれていると
+        // 線形平均が保存されない**。実測(EmeraldSquare)で 2048^2 のミップ0に対し 32^2 の
+        // ミップ6は Signal_Emissive で 3.0倍、Bus_Etc_Emissive で 2.2倍も暗く出た。
+        // 「暗い背景に明るいグリフ」型のテクスチャほど大きく外す。
+        // 自発光テクスチャは数枚しか無く、読み込み時に1回展開するだけなので実測で問題ない
+        const DirectX::Image* source = m_Impl->Image.GetImage(0, 0, 0);
+        if (source == nullptr)
+        {
+            return false;
+        }
+
+        // 【sRGB→線形は DirectXTex に1回だけやらせる。手で EOTF を掛けない】
+        // DirectXTex は BC*_UNORM_SRGB から非sRGBフォーマットへ変換するとき、
+        // 呼び出し側が指定しなくても TEX_FILTER_SRGB_IN を立てて線形化する
+        // (DirectXTexCompress.cpp の ConvertScanline → DirectXTexConvert.cpp)。
+        // 「展開は符号値をそのまま移すだけ」という思い込みで自前の EOTF を重ねると
+        // **2回掛かる**。実測で灯具のテクスチャが真値の 8.2倍暗くなっていた。
+        // 変換先を float にしておけば SRGB_OUT が立たず、変換はちょうど1回で済む。
+        // 非sRGBのテクスチャは元から線形なので、どちらの経路でも変換は起きない
+        DirectX::ScratchImage converted;
+        const DirectX::Image* linear = source;
+        if (source->format != DXGI_FORMAT_R32G32B32A32_FLOAT)
+        {
+            const HRESULT hr = DirectX::IsCompressed(source->format)
+                ? DirectX::Decompress(*source, DXGI_FORMAT_R32G32B32A32_FLOAT, converted)
+                : DirectX::Convert(
+                      *source, DXGI_FORMAT_R32G32B32A32_FLOAT, DirectX::TEX_FILTER_DEFAULT,
+                      DirectX::TEX_THRESHOLD_DEFAULT, converted);
+            if (FAILED(hr) || converted.GetImageCount() == 0)
+            {
+                return false;
+            }
+            linear = converted.GetImage(0, 0, 0);
+        }
+        if (linear == nullptr || linear->pixels == nullptr || linear->width == 0 || linear->height == 0)
+        {
+            return false;
+        }
+
+        // 【升ごとにソースを引く。ソースを走査して升へ足し込む形にしない】
+        // ソースがサムネイルより小さいと、後者では埋まらない升が残る。そこへ0(真っ黒)が
+        // 入ると平均に混ざる ―― 実測で 16x16 のテクスチャでは升の25%しか埋まらず、
+        // 平均が真値の 1/6 になっていた。升からソースの矩形を引く形なら必ず埋まる
+        for (uint32_t ty = 0; ty < size; ++ty)
+        {
+            const size_t y0 = static_cast<size_t>(ty) * linear->height / size;
+            size_t y1 = static_cast<size_t>(ty + 1) * linear->height / size;
+            if (y1 <= y0) { y1 = y0 + 1; }
+            for (uint32_t tx = 0; tx < size; ++tx)
+            {
+                const size_t x0 = static_cast<size_t>(tx) * linear->width / size;
+                size_t x1 = static_cast<size_t>(tx + 1) * linear->width / size;
+                if (x1 <= x0) { x1 = x0 + 1; }
+
+                double sum[3] = { 0.0, 0.0, 0.0 };
+                size_t count = 0;
+                for (size_t y = y0; y < std::min<size_t>(y1, linear->height); ++y)
+                {
+                    const auto* row = reinterpret_cast<const float*>(linear->pixels + y * linear->rowPitch);
+                    for (size_t x = x0; x < std::min<size_t>(x1, linear->width); ++x)
+                    {
+                        sum[0] += row[x * 4 + 0];
+                        sum[1] += row[x * 4 + 1];
+                        sum[2] += row[x * 4 + 2];
+                        count += 1;
+                    }
+                }
+                const size_t bin = static_cast<size_t>(ty) * size + tx;
+                const double inv = (count > 0) ? (1.0 / static_cast<double>(count)) : 0.0;
+                for (int channel = 0; channel < 3; ++channel)
+                {
+                    outRGB[bin * 3 + channel] = static_cast<float>(sum[channel] * inv);
+                }
+            }
+        }
+        return true;
     }
 
     TextureImage TextureImage::LoadFromFile(const std::wstring& filePath, bool sRGB)

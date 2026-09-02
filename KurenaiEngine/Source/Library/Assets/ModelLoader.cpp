@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "Core/Logger.h"
@@ -138,6 +139,110 @@ namespace Kurenai::Assets
             std::nth_element(densities.begin(), densities.begin() + index, densities.end());
             return densities[index];
         }
+
+        // メッシュが実際に使っているUVの範囲(AABB)。求められなければ false。
+        //
+        // 【自発光テクスチャの平均色に要る】アトラスの一角しか使わないメッシュで
+        // テクスチャ全体の平均を取ると、無関係な部分の色を拾う
+        bool ComputeUVBounds(
+            const Vertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount,
+            float outMin[2], float outMax[2])
+        {
+            if (vertices == nullptr || indices == nullptr || vertexCount == 0 || indexCount == 0)
+            {
+                return false;
+            }
+            bool any = false;
+            for (uint32_t i = 0; i < indexCount; ++i)
+            {
+                const uint32_t v = indices[i];
+                if (v >= vertexCount)
+                {
+                    continue;
+                }
+                for (int axis = 0; axis < 2; ++axis)
+                {
+                    const float uv = vertices[v].UV[axis];
+                    if (!any)
+                    {
+                        outMin[axis] = uv;
+                        outMax[axis] = uv;
+                    }
+                    else
+                    {
+                        outMin[axis] = std::min(outMin[axis], uv);
+                        outMax[axis] = std::max(outMax[axis], uv);
+                    }
+                }
+                any = true;
+            }
+            return any;
+        }
+
+        // 線形サムネイルの、UV矩形に対応する部分だけの平均を取る。
+        //
+        // 【UVが1周を超えていたら全体平均へ落とす】タイリングしているメッシュでは、
+        // AABBがテクスチャ全体より広くなり矩形の意味が無くなる
+        void AverageThumbnailRect(
+            const std::vector<float>& thumbnail, uint32_t size, const float uvMin[2], const float uvMax[2],
+            float outRGB[3])
+        {
+            const bool tiled = (uvMax[0] - uvMin[0] > 1.0f) || (uvMax[1] - uvMin[1] > 1.0f);
+            int x0 = 0, x1 = static_cast<int>(size) - 1, y0 = 0, y1 = static_cast<int>(size) - 1;
+            if (!tiled)
+            {
+                // 【[0,1] の外へ出ている範囲は折り返す】幅が1未満でも UV が 3.0〜3.4 のような
+                // 位置にあることがある。クランプで済ませると端の1テクセルだけを読み、
+                // 黙って無関係な色になる。繰り返し指定なので floor(min) ぶん平行移動すればよい
+                const auto wrapped = [](float lo, float hi, float& outLo, float& outHi)
+                {
+                    const float shift = std::floor(lo);
+                    outLo = lo - shift;
+                    outHi = hi - shift;
+                };
+                float u0 = uvMin[0], u1 = uvMax[0], v0 = uvMin[1], v1 = uvMax[1];
+                wrapped(uvMin[0], uvMax[0], u0, u1);
+                wrapped(uvMin[1], uvMax[1], v0, v1);
+
+                const auto toTexel = [size](float uv)
+                {
+                    const int t = static_cast<int>(std::floor(uv * static_cast<float>(size)));
+                    return std::clamp(t, 0, static_cast<int>(size) - 1);
+                };
+                x0 = toTexel(u0); x1 = toTexel(u1);
+                y0 = toTexel(v0); y1 = toTexel(v1);
+                if (x1 < x0) { std::swap(x0, x1); }
+                if (y1 < y0) { std::swap(y0, y1); }
+            }
+            double sum[3] = { 0.0, 0.0, 0.0 };
+            uint32_t count = 0;
+            for (int y = y0; y <= y1; ++y)
+            {
+                for (int x = x0; x <= x1; ++x)
+                {
+                    const size_t bin = static_cast<size_t>(y) * size + x;
+                    for (int channel = 0; channel < 3; ++channel)
+                    {
+                        sum[channel] += thumbnail[bin * 3 + channel];
+                    }
+                    count += 1u;
+                }
+            }
+            if (count == 0)
+            {
+                outRGB[0] = outRGB[1] = outRGB[2] = 1.0f;
+                return;
+            }
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                outRGB[channel] = static_cast<float>(sum[channel] / count);
+            }
+        }
+
+        // 自発光テクスチャから取る線形サムネイルの一辺。
+        // 【UVの矩形を切り出すために面積が要る】1x1の平均だけだと、アトラスの一角しか使わない
+        // メッシュで無関係な部分の色を拾う。32x32 なら 1枚 12KB で、切り出しにも足りる
+        constexpr uint32_t kEmissiveThumbnailSize = 32;
 
         // 光源のかたまりの長さ尺度[m]。**分割と併合の両方をこの1つが決める。** 0で両方とも行わない。
         //   ・連結成分がこの寸法より大きければ、等間隔グリッドで割る
@@ -674,7 +779,15 @@ namespace Kurenai::Assets
             // リソース化してoutTexturesへ格納する。失敗した添字はoutTextures[i]==nullptrのまま
             // 残すので、呼び出し側(LoadModel)がスロットの種類(BaseColor/Normal/MetallicRoughness)
             // ごとに適切なフォールバック(白/フラット法線/マゼンタ)を選んで埋めること
-            void LoadAll(const std::vector<std::wstring>& texturePaths, std::vector<RHI::IRHITexture*>& outTextures)
+            //
+            // thumbnailIndices に入っている添字については、**線形空間の 32x32 サムネイル**を
+            // outThumbnails へ残す。自発光テクスチャの平均色を求めるためのもので、
+            // デコード済みの TextureImage が生きているのはここだけ(GPUへ送ったら解放される)。
+            // 1枚あたり 32*32*3 float = 12KB しか持たない
+            void LoadAll(
+                const std::vector<std::wstring>& texturePaths, std::vector<RHI::IRHITexture*>& outTextures,
+                const std::unordered_set<int32_t>& thumbnailIndices,
+                std::unordered_map<int32_t, std::vector<float>>& outThumbnails)
             {
                 outTextures.assign(texturePaths.size(), nullptr);
                 if (texturePaths.empty())
@@ -765,6 +878,24 @@ namespace Kurenai::Assets
 
                     if (item.Image.has_value())
                     {
+                        // 【GPUへ送る前にここで取る】デコード済みの画像が生きているのはこの場だけ
+                        if (thumbnailIndices.count(static_cast<int32_t>(item.Index)) != 0)
+                        {
+                            std::vector<float> thumbnail(
+                                static_cast<size_t>(kEmissiveThumbnailSize) * kEmissiveThumbnailSize * 3, 1.0f);
+                            if (item.Image->ExtractLinearThumbnail(kEmissiveThumbnailSize, thumbnail.data()))
+                            {
+                                outThumbnails.emplace(static_cast<int32_t>(item.Index), std::move(thumbnail));
+                            }
+                            else
+                            {
+                                Core::Logger::Warning(
+                                    "ModelLoader",
+                                    "自発光テクスチャの平均色を取り出せませんでした。白として扱います: " +
+                                        WideToUtf8(texturePaths[item.Index]));
+                            }
+                        }
+
                         try
                         {
                             auto texture = m_Device.CreateTextureFromImage(*item.Image);
@@ -1306,7 +1437,21 @@ namespace Kurenai::Assets
 
         TextureLoader textureLoader(device, model, sharedTextures);
         std::vector<RHI::IRHITexture*> resolvedTextures;
-        textureLoader.LoadAll(texturePaths, resolvedTextures);
+        // 自発光の光源プロキシに要るテクスチャだけサムネイルを残す。
+        // **係数が0のマテリアルは対象外** ―― 掛け算の結果が黒になるので光源にもならない
+        // (BistroMcGuire の看板は map_Ke を持つのに Ke=0 で、画面でも真っ黒)
+        std::unordered_set<int32_t> emissiveTextureIndices;
+        for (const MaterialEntry& material : materialEntries)
+        {
+            const bool hasEmissive = material.EmissiveFactor[0] > 0.0f || material.EmissiveFactor[1] > 0.0f ||
+                                     material.EmissiveFactor[2] > 0.0f;
+            if (hasEmissive && material.EmissiveTextureIndex >= 0)
+            {
+                emissiveTextureIndices.insert(material.EmissiveTextureIndex);
+            }
+        }
+        std::unordered_map<int32_t, std::vector<float>> emissiveThumbnails;
+        textureLoader.LoadAll(texturePaths, resolvedTextures, emissiveTextureIndices, emissiveThumbnails);
 
         const auto textureLoadTime = std::chrono::steady_clock::now();
 
@@ -1404,6 +1549,7 @@ namespace Kurenai::Assets
         uint32_t emissiveMeshCount = 0;
         uint32_t emissiveClusterCount = 0;
         uint32_t emissiveTexturedMeshCount = 0;
+        std::vector<float> emissiveTextureLuminances;
 
         model.Meshes.reserve(meshEntries.size());
         for (const MeshEntry& mesh : meshEntries)
@@ -1640,19 +1786,41 @@ namespace Kurenai::Assets
             if (outMesh.EmissiveFactor[0] > 0.0f || outMesh.EmissiveFactor[1] > 0.0f ||
                 outMesh.EmissiveFactor[2] > 0.0f)
             {
+                // 自発光テクスチャの平均色。**係数と掛け合わせたものが実際の放射輝度**で、
+                // 係数だけを見るとテクスチャの黒い部分まで光る面として数えて過大評価する
+                if (material.EmissiveTextureIndex >= 0)
+                {
+                    const auto found = emissiveThumbnails.find(material.EmissiveTextureIndex);
+                    if (found != emissiveThumbnails.end())
+                    {
+                        float uvMin[2] = { 0.0f, 0.0f };
+                        float uvMax[2] = { 1.0f, 1.0f };
+                        ComputeUVBounds(
+                            reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset),
+                            mesh.VertexCount,
+                            reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset),
+                            mesh.IndexCount, uvMin, uvMax);
+                        AverageThumbnailRect(
+                            found->second, kEmissiveThumbnailSize, uvMin, uvMax, outMesh.EmissiveTextureAverage);
+                        // 【全部1.0なら取れていない、全部0.0なら真っ黒を掛けている】
+                        // どちらも絵からは分からないので、分布をログに出せるよう控える
+                        emissiveTextureLuminances.push_back(
+                            0.2126f * outMesh.EmissiveTextureAverage[0] +
+                            0.7152f * outMesh.EmissiveTextureAverage[1] +
+                            0.0722f * outMesh.EmissiveTextureAverage[2]);
+                    }
+                    else
+                    {
+                        // 取り出せなかった。白のまま(過大評価)になるので数えておく
+                        emissiveTexturedMeshCount += 1u;
+                    }
+                }
                 outMesh.EmissiveClusters = BuildEmissiveClusters(
                     reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset), mesh.VertexCount,
                     reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset), mesh.IndexCount,
                     outMesh.BoundsMin, outMesh.BoundsMax, kEmissiveClusterScale);
                 emissiveMeshCount += 1u;
                 emissiveClusterCount += static_cast<uint32_t>(outMesh.EmissiveClusters.size());
-                // 【テクスチャ付きは過大評価になる】Mesh::EmissiveTextureAverage はまだ
-                // 誰も書いておらず常に (1,1,1) なので、テクスチャの黒い部分まで光る面として
-                // 数えてしまう。黙って明るくなるより、読み込み時に知らせる
-                if (material.EmissiveTextureIndex >= 0)
-                {
-                    emissiveTexturedMeshCount += 1u;
-                }
             }
 
             // LOD0の三角形数を積む(メッシュレットLODのしきい値の基準。Model::TotalTriangleCount)
@@ -1682,14 +1850,25 @@ namespace Kurenai::Assets
                 "ModelLoader",
                 "エミッシブな光源: " + std::to_string(emissiveClusterCount) + "個(" +
                     std::to_string(emissiveMeshCount) + "メッシュ由来)");
+            if (!emissiveTextureLuminances.empty())
+            {
+                std::sort(emissiveTextureLuminances.begin(), emissiveTextureLuminances.end());
+                char buffer[192];
+                std::snprintf(
+                    buffer, sizeof(buffer),
+                    "自発光テクスチャの平均色: %zuメッシュ / 輝度 最小 %.4f 中央 %.4f 最大 %.4f",
+                    emissiveTextureLuminances.size(), emissiveTextureLuminances.front(),
+                    emissiveTextureLuminances[emissiveTextureLuminances.size() / 2],
+                    emissiveTextureLuminances.back());
+                Core::Logger::Info("ModelLoader", buffer);
+            }
             if (emissiveTexturedMeshCount > 0)
             {
                 Core::Logger::Warning(
                     "ModelLoader",
-                    "自発光テクスチャを持つメッシュが " + std::to_string(emissiveTexturedMeshCount) +
-                        "個あります。テクスチャの平均色をまだ求めていないため("
-                        "Mesh::EmissiveTextureAverage が常に白)、これらの光源プロキシは"
-                        "実際より明るくなります");
+                    "自発光テクスチャの平均色を取り出せなかったメッシュが " +
+                        std::to_string(emissiveTexturedMeshCount) +
+                        "個あります。白として扱うため、これらの光源プロキシは実際より明るくなります");
             }
         }
 

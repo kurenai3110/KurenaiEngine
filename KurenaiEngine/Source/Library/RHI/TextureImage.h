@@ -119,6 +119,25 @@ namespace Kurenai::RHI
         // デコード済みデータの総バイト数。並列プリフェッチ時のメモリ使用量制御に使う
         uint64_t GetSizeInBytes() const;
 
+        // **線形空間**のサムネイル(size×size、画素あたりRGBの3float)を取り出す。
+        // outRGB は size*size*3 個ぶんの領域を呼び出し側が用意すること。
+        // 取り出せなかった場合は false を返す(呼び出し側は「白」として扱い、警告を出すこと)。
+        //
+        // 【何のためにあるのか】自発光メッシュから光源プロキシを起こすとき、面が実際に
+        // 出している放射輝度は「係数 × テクスチャの平均色」で決まる。係数だけを見ると、
+        // テクスチャの黒い部分まで光る面として数えて過大評価する。
+        //
+        // 【sRGB→線形は必ず平均の前に行う】逆順(平均してから EOTF)にすると、暗い背景に
+        // 明るいグリフが乗った看板で真値0.5に対して0.214が出る(2倍以上暗い)。
+        // この関数は float へ変換した時点で線形になっているものを畳む。
+        // **自前で EOTF を掛けてはいけない** ―― DirectXTex は BC*_UNORM_SRGB から
+        // 非sRGBへ変換するとき、指定しなくても線形化する(2回掛かる)。
+        //
+        // 【ミップ0から求める】.ktex のミップは元の .dds が持っていたものをそのまま
+        // 運んでいることがあり、ガンマ空間で畳まれていると線形平均が保存されない
+        // (実測で 32^2 のミップは 2048^2 のミップ0より 2〜3倍暗く出た)
+        bool ExtractLinearThumbnail(uint32_t size, float* outRGB) const;
+
         // DX11Device/DX12DeviceのCreateTextureFromImage実装専用のアクセサ
         const DirectX::TexMetadata& GetMetadata() const;
         const DirectX::ScratchImage& GetImage() const;
