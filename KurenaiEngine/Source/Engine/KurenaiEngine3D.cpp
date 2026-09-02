@@ -1616,6 +1616,10 @@ namespace Kurenai
         // (シェーダはLightCount.xまでしかループしないため)
         constexpr uint32_t kMaxLights = 1024;
 
+        // GPULight.Params.y のビット。**Shaders/3D/LightAttenuation.hlsli と一致させること**
+        constexpr uint32_t kLightShadowScreenSpace = 1u;
+        constexpr uint32_t kLightShadowRaytraced = 2u;
+
         // MegaLightsTilePool.hlsl の kMegaLightsMaxLights と同じ値。あちらはライトごとの重みを
         // groupshared配列に置くためコンパイル時定数である必要があり、C++からの受け渡しでは代用できない。
         //
@@ -1760,7 +1764,10 @@ namespace Kurenai
             // RTShadow.hlsl が別に持っている
             const float sourceRadius =
                 (light.Type == Assets::LightType::Directional) ? 0.0f : std::max(0.0f, light.SourceRadius);
-            gpuLight.Params = { angleOffset, light.CastShadow ? 1.0f : 0.0f, sourceRadius, 0.0f };
+            // Params.y は影のフラグ。**bit0 = スクリーンスペースシャドウ / bit1 = レイトレース影レイ**
+            // (Shaders/3D/LightAttenuation.hlsli と一致させること)。作者が置いたライトは
+            // 両方を立てる ―― 1つの真偽値だった頃と挙動が変わらない
+            gpuLight.Params = { angleOffset, light.CastShadow ? 3.0f : 0.0f, sourceRadius, 0.0f };
             return gpuLight;
         }
 
@@ -1824,8 +1831,14 @@ namespace Kurenai
             gpuLight.ColorRange = { intensity[0], intensity[1], intensity[2], range };
             // w(spotAngleScale)は使わない。xyz は発光面の平均法線で、余弦ローブの軸になる
             gpuLight.DirectionAngle = { proxy.Direction[0], proxy.Direction[1], proxy.Direction[2], 0.0f };
-            // x=spotAngleOffset(未使用) / y=影を落とすか / z=面積等価の円板半径 / w=指向性κ
-            gpuLight.Params = { 0.0f, 1.0f, proxy.SourceRadius, proxy.Directionality };
+            // x=spotAngleOffset(未使用) / y=影のフラグ / z=面積等価の円板半径 / w=指向性κ
+            //
+            // 【レイトレース影レイだけを立てる】スクリーンスペースシャドウは画素あたりの
+            // レイ数に上限(既定4灯)があり、プロキシは数百灯になりうる。両方立てると
+            // プロキシが予算を食い尽くし、手置きライトの接触影が消える
+            gpuLight.Params = {
+                0.0f, static_cast<float>(kLightShadowRaytraced), proxy.SourceRadius, proxy.Directionality
+            };
             return gpuLight;
         }
 

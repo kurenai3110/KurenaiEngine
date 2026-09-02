@@ -21,6 +21,30 @@
 #ifndef KURENAI_LIGHT_ATTENUATION_HLSLI
 #define KURENAI_LIGHT_ATTENUATION_HLSLI
 
+// --- 影のフラグ(GPULight.Params.y)---
+//
+// 【1つの値に2つの意味を持たせない】以前は「影を落とすか」の真偽値1つで、
+// スクリーンスペースシャドウとレイトレース影レイの**両方**を止めていた。
+// エミッシブから起こした光源プロキシは数百灯になりうるのに、
+// スクリーンスペースシャドウは画素あたりのレイ数に上限(既定4灯)がある。
+// 1つのフラグのままだと「プロキシに影を出す」と決めた瞬間に、その予算を
+// プロキシが食い尽くして手置きライトの接触影が消える。
+//
+// bit0 と bit1 を分ければ、プロキシは bit1 だけを立てられる。
+// 既存のライトは 1.0 から 3.0(両方)へ変えれば挙動が変わらない。
+static const uint kLightShadowScreenSpace = 1u; // スクリーンスペースシャドウを撃つ
+static const uint kLightShadowRaytraced   = 2u; // MegaLights のレイトレース影レイを撃つ
+
+bool LightCastsScreenSpaceShadow(float packedFlags)
+{
+    return (((uint)(packedFlags + 0.5f)) & kLightShadowScreenSpace) != 0u;
+}
+
+bool LightCastsRaytracedShadow(float packedFlags)
+{
+    return (((uint)(packedFlags + 0.5f)) & kLightShadowRaytraced) != 0u;
+}
+
 // Karis 2013 / Frostbite の windowed inverse-square。Range を超えると厳密に0になり、
 // 打ち切り境界でのハードエッジが出ない
 float DistanceAttenuation(float distSq, float range)

@@ -197,7 +197,7 @@ float3 EvaluateLight(
     // ここまで来たライトだけが実際にこのピクセルを照らす。予算が残っていて、かつ
     // そのライトが影を落とす設定(Params.y)ならレイマーチする
     float shadow = 1.0f;
-    if (shadowRayBudget > 0u && light.Params.y > 0.5f)
+    if (shadowRayBudget > 0u && LightCastsScreenSpaceShadow(light.Params.y))
     {
         shadow = ComputeScreenSpaceShadow(worldPos, N, L, distanceToLight, pixelCoord);
         shadowRayBudget -= 1u;

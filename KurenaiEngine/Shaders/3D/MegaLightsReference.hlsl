@@ -212,7 +212,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         float shadow = 1.0f;
         // Params0.z が 0 のときは影を撃たない(恒等テスト)。ライト側の CastShadow(Params.y)が
         // 0 の灯も撃たない ―― 既存経路の扱いと揃えるため
-        if (shadowRayCount > 0u && light.Params.y > 0.5f)
+        if (shadowRayCount > 0u && LightCastsRaytracedShadow(light.Params.y))
         {
             const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
             const float originBias =

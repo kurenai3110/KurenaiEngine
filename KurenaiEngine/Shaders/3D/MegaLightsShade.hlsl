@@ -144,7 +144,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     float shadow = 1.0f;
-    if (Params0.w != 0u && light.Params.y > 0.5f)
+    if (Params0.w != 0u && LightCastsRaytracedShadow(light.Params.y))
     {
         const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
         const float originBias =
