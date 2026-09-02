@@ -71,11 +71,14 @@ namespace Kurenai::UI
             "SWラスタ (自前ラスタライザのフラット陰影)",
             "SWラスタ - 深度 (生値)",
             "SWラスタ - 法線",
+            "MegaLights (ポイント/スポットの直接光)",
+            "MegaLights - 候補プール (タイルへ届いたライト数)",
+            "MegaLights - 蓄積平均 (計測用。線形空間でNフレーム平均)",
         };
         static_assert(
-            // 末尾のSoftwareRasterNormalは36
-            static_cast<int>(DebugView::SoftwareRasterNormal) == 36,
-            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はSoftwareRasterNormal)");
+            // 末尾のMegaLightsAverageは39
+            static_cast<int>(DebugView::MegaLightsAverage) == 39,
+            "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はMegaLightsAverage)");
         static_assert(
             IM_ARRAYSIZE(kDebugViewNames) == KurenaiEngine3D::kDebugViewCount,
             "kDebugViewNamesの要素数をDebugViewの総数と一致させること");
@@ -168,20 +171,44 @@ namespace Kurenai::UI
                 "MultiScatteringは値が小さいので表示輝度の倍率を上げて見る");
         }
 
-        if (m_Engine.m_DebugView == DebugView::LightTiles)
+        // ライトタイルとMegaLightsの候補プールは**同じヒートマップの上限**を共有する。
+        // 両者は同じ到達判定を使うので、同じ上限で撮った2枚は画素単位で一致するはずであり、
+        // つまみが別々だと比べられなくなる
+        if (m_Engine.m_DebugView == DebugView::LightTiles ||
+            m_Engine.m_DebugView == DebugView::MegaLightsTilePool)
         {
-            // ヒートマップの色: 黒=0灯、青=少ない、緑、赤=上限以上、マゼンタ=タイル容量超過
-            ImGui::TextWrapped(
-                "黒=0灯 / 青→緑→赤=ライトが多い / マゼンタ=タイル容量(%uライト)を超過",
-                KurenaiEngine3D::kLightTileCapacity);
+            if (m_Engine.m_DebugView == DebugView::LightTiles)
+            {
+                // ヒートマップの色: 黒=0灯、青=少ない、緑、赤=上限以上、マゼンタ=タイル容量超過
+                ImGui::TextWrapped(
+                    "黒=0灯 / 青→緑→赤=ライトが多い / マゼンタ=タイル容量(%uライト)を超過",
+                    KurenaiEngine3D::kLightTileCapacity);
+            }
+            else
+            {
+                // 候補プールは容量で打ち切らないのでマゼンタは出ない
+                ImGui::TextWrapped(
+                    "黒=0灯 / 青→緑→赤=ライトが多い。"
+                    "「ライトタイル」と同じ判定・同じ色付けなので、2枚は一致するはず。"
+                    "ただし一致するのは到達灯数がタイル容量(%uライト)以下のタイルだけで、"
+                    "「ライトタイル」側にマゼンタが出ていたらそこは比べられない。"
+                    "また下の上限を上げないと、ライトの多いシーンでは一面が赤に飽和して"
+                    "違いが色に出ない(飽和した状態での一致は検出力がほとんど無い)",
+                    KurenaiEngine3D::kLightTileCapacity);
+            }
+
             SliderIntEx(
                 "ヒートマップの上限###HeatmapMax", &m_Engine.m_LightTileHeatmapMax, 1,
                 static_cast<int>(KurenaiEngine3D::kLightTileCapacity), Defaults::LightTileHeatmapMax,
                 "この灯数で赤になるようヒートマップを正規化する。ライトが少ないシーンでは下げると差が見える");
 
-            if (!m_Engine.m_LightCullingEnabled)
+            if (m_Engine.m_DebugView == DebugView::LightTiles && !m_Engine.m_LightCullingEnabled)
             {
                 ImGui::TextWrapped("タイルドライトカリングが無効のため、ライトグリッドは更新されていません");
+            }
+            if (m_Engine.m_DebugView == DebugView::MegaLightsTilePool && !m_Engine.ShouldRunMegaLights())
+            {
+                ImGui::TextWrapped("MegaLightsが無効のため、候補プールは更新されていません");
             }
         }
 

@@ -31,8 +31,17 @@ namespace Kurenai::RHI
         static constexpr uint32_t kFrameLatency = 4;
         // RenderGraphは1フレームに34種以上のパスを登録し、DDGI有効シーンではさらにプローブ数分
         // (DDGIProbesPerFrame、既定16)が加算される。この値が足りないと超過した区間の計測が捨てられ、
-        // 「各パスの計測値の合計」であるGPU Frame Time(ResolveSlot参照)まで過小報告される
-        static constexpr uint32_t kMaxScopesPerFrame = 64;
+        // 「各パスの計測値の合計」であるGPU Frame Time(ResolveSlot参照)まで過小報告される。
+        //
+        // 【DX11側(DX11GPUProfiler.h)と必ず同じ値にすること】バックエンドごとに上限が違うと、
+        // 同じシーンでもDX11とDX12で計測できるパスの数が変わり、GPU Frame Timeを比べられなくなる。
+        //
+        // 64から96へ上げた理由: DDGI有効シーンの常時分(固定パス + Shadow4本 + ModelCull2本 +
+        // DDGI16本)だけで50本前後に達しており、プローブのベイクが走るフレームではさらに増える。
+        // 64のままだと数パス足すだけで超過し、「そのパスはタダらしい」という誤った結論に直結する。
+        // タイムスタンプは1区間あたり2個なので、増やしても費用はクエリヒープと
+        // リードバックバッファのバイト数(kFrameLatency × kQueriesPerSlot × 8B)だけで済む
+        static constexpr uint32_t kMaxScopesPerFrame = 96;
         // 1スロットあたりのタイムスタンプ数: フレーム開始+終了の2つ + 区間ごとの開始/終了2つ
         static constexpr uint32_t kQueriesPerSlot = 2 + kMaxScopesPerFrame * 2;
 

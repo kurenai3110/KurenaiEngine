@@ -263,6 +263,8 @@ namespace Kurenai::Assets
             float Color[3] = { 1.0f, 1.0f, 1.0f };
             float Intensity = 1.0f;
             float Range = 10.0f;
+            // 光源そのものの半径[m]。0なら点光源。正にすると半影が出る(MegaLights経路のみ)
+            float SourceRadius = 0.0f;
             float ConeAngleDegrees = 45.0f;
             // スクリーンスペースシャドウを落とすか。Assets::Light::CastShadowの既定値と揃える
             bool CastShadow = true;
@@ -866,6 +868,11 @@ namespace Kurenai::Assets
                     else if (CaseInsensitiveEquals(key, L"Range"))
                     {
                         if (!ParseFloatToken(value, entry.Range)) errorAt(lineNumber, rawLine, "Rangeの値が不正です");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"SourceRadius"))
+                    {
+                        if (!ParseFloatToken(value, entry.SourceRadius)) errorAt(lineNumber, rawLine, "SourceRadiusの値が不正です");
+                        if (entry.SourceRadius < 0.0f) errorAt(lineNumber, rawLine, "SourceRadiusは0以上で指定してください");
                     }
                     else if (CaseInsensitiveEquals(key, L"ConeAngleDegrees"))
                     {
@@ -1477,6 +1484,7 @@ namespace Kurenai::Assets
             std::memcpy(light.Color, parsedLight.Color, sizeof(light.Color));
             light.Intensity = parsedLight.Intensity;
             light.Range = parsedLight.Range;
+            light.SourceRadius = parsedLight.SourceRadius;
             // .ksceneはコーン角を1つ(外側)しか持たないため、内側も同じ値にしてソフトエッジ無しの
             // 単純な円錐として扱う
             const float outerRadians = DirectX::XMConvertToRadians(parsedLight.ConeAngleDegrees);

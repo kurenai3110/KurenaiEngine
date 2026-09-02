@@ -130,6 +130,13 @@ namespace
         "RTReflection.hlsl",
         "RTShadow.hlsl",
         "DDGIProbeTrace.hlsl",
+        "MegaLightsReference.hlsl",
+        "MegaLightsInitialSample.hlsl",
+        // 空間再利用は不偏化の分母(Z)の判定にバイアス補正レイ(RayQuery)を使う
+        "MegaLightsSpatial.hlsl",
+        // 時間再利用は履歴の固着を防ぐ時間検証レイ(RayQuery)を使う
+        "MegaLightsTemporal.hlsl",
+        "MegaLightsShade.hlsl",
         // 自前ソフトウェアラスタライザは DX12 専用(DX11Device::SupportsSoftwareRaster は常に false)
         "SoftwareRaster.hlsl",
         "SoftwareRasterResolve.hlsl",

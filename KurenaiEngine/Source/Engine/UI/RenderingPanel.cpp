@@ -63,6 +63,10 @@ namespace Kurenai::UI
         {
             DrawLightCullingSection();
         }
+        if (ImGui::CollapsingHeader("MegaLights###MegaLights"))
+        {
+            DrawMegaLightsSection();
+        }
         if (ImGui::CollapsingHeader("水面###Water"))
         {
             DrawWaterSection();
@@ -92,6 +96,15 @@ namespace Kurenai::UI
             "レイマーチするため、画面に写っていない遮蔽物(画面外や手前の面に隠れたもの)は影を落とさない。"
             "得られるのは完全な影ではなく接触影・中距離の遮蔽。どのライトが影を落とすかは"
             "ライティングパネルのライトごとの「影を落とす」で決める");
+
+        // MegaLightsが有効なあいだ、直接光パスのライトループごと止まる。スクリーンスペースシャドウは
+        // そのループの内側で影を掛けるので**丸ごと使われなくなる**。影はレイトレーシングへ
+        // 置き換わるため絵は破綻せず、黙って設定が効かなくなる形になるので明示する
+        if (m_Engine.ShouldRunMegaLights())
+        {
+            ImGui::TextDisabled(
+                "MegaLightsが有効なあいだ、ここの設定は使われません(影はレイトレーシングで求めます)");
+        }
 
         BeginParamGroup();
 
@@ -153,6 +166,145 @@ namespace Kurenai::UI
         ImGui::Text(
             "タイル: %u x %u (1タイルあたり最大%uライト)", m_Engine.m_LightTileCountX, m_Engine.m_LightTileCountY,
             KurenaiEngine3D::kLightTileCapacity);
+    }
+
+    void RenderingPanel::DrawMegaLightsSection()
+    {
+        ImGui::TextWrapped(
+            "ポイント/スポットライトの直接光を専用パスで求め、1灯ごとにTLASへ影レイを撃つ。"
+            "有効なあいだ直接光パスのライトループは止まり、この結果がそのまま使われる。"
+            "太陽は対象外で、従来どおりCSMかRTシャドウが担当する");
+
+        const bool rtAvailable = m_Engine.m_RaytracingAvailable;
+        if (!rtAvailable)
+        {
+            ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
+            return;
+        }
+
+        BeginParamGroup();
+
+        // 手法の選択。反射・影と同じ方針で、非対応環境では選択肢そのものを出さない
+        // (上で早期returnしているのでここへは対応環境しか来ない)
+        static const char* kModeNames[] = { "なし", "参照実装 (全灯総当たり)", "確率的サンプリング" };
+
+        int modeIndex = static_cast<int>(m_Engine.m_MegaLightsMode);
+        if (ComboEx(
+                "手法###MegaLightsMode", &modeIndex, kModeNames, IM_ARRAYSIZE(kModeNames),
+                Defaults::MegaLightsEnabled ? 1 : 0,
+                "参照実装はカリングもサンプリングも通さず全灯を評価するため、"
+                "ライト数に比例して重い。確率的サンプリングを評価するときの"
+                "真値(ノイズの無い基準)を作るためにある。\n\n"
+                "確率的サンプリングは候補プールからM個引いて1灯へ絞り、影レイを1本だけ撃つ。"
+                "ノイズは乗るが偏りは無く、時間方向に平均すると参照実装へ寄っていく"))
+        {
+            m_Engine.m_MegaLightsMode = static_cast<KurenaiEngine3D::MegaLightsMode>(modeIndex);
+        }
+
+        if (m_Engine.m_MegaLightsMode == KurenaiEngine3D::MegaLightsMode::Stochastic)
+        {
+            SliderIntEx(
+                "初期候補数 M###MegaLightsSampleCount", &m_Engine.m_MegaLightsSampleCount, 1, 32,
+                Defaults::MegaLightsSampleCount,
+                "1ピクセルあたりに候補プールから引く数。大きいほど寄与の大きい灯を引き当てやすく"
+                "なってノイズが減るが、候補ごとにBRDFを1回評価するぶん重くなる。\n\n"
+                "【影レイの本数はこれとは独立】選ばれた1灯にしか撃たないので常に1本で、"
+                "Mを増やしてもレイは増えない。ここがライト数からコストを切り離している部分");
+
+            CheckboxEx(
+                "デノイザ###MegaLightsDenoise", &m_Engine.m_MegaLightsDenoiseEnabled,
+                Defaults::MegaLightsDenoiseEnabled,
+                "時間累積とエッジ停止付きa-trousで、出た色を空間・時間へならす。\n\n"
+                "【時空間再利用とは別物】あちらはリザーバ(どの灯を選ぶか)を混ぜて実効サンプル数を"
+                "増やす。こちらは残ったノイズを落とす。\n\n"
+                "【TAAの手前で落とすこと】TAAはノイズを信号の広がりと解釈して履歴を毎フレーム棄却"
+                "するので、ノイズを残したまま渡すとノイズもAAも両方失う");
+
+            if (m_Engine.m_MegaLightsDenoiseEnabled)
+            {
+                SliderIntEx(
+                    "a-trousの段数###MegaLightsDenoiseAtrous", &m_Engine.m_MegaLightsDenoiseAtrousPasses,
+                    0, 5, Defaults::MegaLightsDenoiseAtrousPasses,
+                    "段ごとにステップ幅が倍になるので、4段で半径16画素ぶんに届く。0で時間累積のみ");
+                SliderIntEx(
+                    "時間累積の上限###MegaLightsDenoiseFrames", &m_Engine.m_MegaLightsDenoiseMaxFrames,
+                    1, 64, Defaults::MegaLightsDenoiseMaxFrames,
+                    "何フレームぶんまで混ぜるか。**TAAより短くすること** ―― 長いとTAAのゴーストと"
+                    "重なって二重に尾を引き、どちらが原因か切り分けられなくなる");
+            }
+
+            CheckboxEx(
+                "時間再利用###MegaLightsTemporal", &m_Engine.m_MegaLightsTemporalEnabled,
+                Defaults::MegaLightsTemporalEnabled,
+                "前フレームの自分が選んだ灯を、速度ベクトルで再投影して借りる。"
+                "実効サンプル数がフレーム方向に積み上がるので、影レイを増やさずに収束が速くなる。\n\n"
+                "【効くのは1枚の絵の品質】実測(N=1)で|相対誤差|の中央値が6.0倍良くなり、"
+                "1枚あたりの偏りも-3.5%から-0.1%になる。長時間の蓄積平均は良くならない"
+                "(フレーム間に相関が入るため)ので、効果を見るときは蓄積枚数を1にすること");
+
+            if (m_Engine.m_MegaLightsTemporalEnabled)
+            {
+                SliderIntEx(
+                    "履歴のMの上限###MegaLightsTemporalMClamp", &m_Engine.m_MegaLightsTemporalMClamp,
+                    8, 640, Defaults::MegaLightsTemporalMClamp,
+                    "履歴が「これまでに何個の候補から絞ったか」の上限。\n\n"
+                    "【上げるほど収束は速いがゴーストが出る】灯を消しても明かりと影が残る。"
+                    "残光は1フレームあたり C/(C+M) の等比で減り、実測がこの式と一致する。"
+                    "残光が10%まで落ちるのは、既定160・M=8で46.8フレーム(60Hzで0.78秒)、"
+                    "64なら19.6フレーム(0.33秒)、640なら185フレーム(3.1秒)。"
+                    "既定160はReSTIR DIの慣例(初期Mの20倍)に合わせた判断で、"
+                    "測定だけでは決まらない(品質は単調に良くなりゴーストは単調に悪くなるため)");
+            }
+
+            CheckboxEx(
+                "空間再利用###MegaLightsSpatial", &m_Engine.m_MegaLightsSpatialEnabled,
+                Defaults::MegaLightsSpatialEnabled,
+                "近傍の画素が選んだ灯を借りて、自分の面で評価し直して結合する。"
+                "借りるのは「どの灯か」だけなので、影レイは増えない。\n\n"
+                "【何を直すためのものか】候補プールの重みは設計上、法線を見られない"
+                "(タイル内で画素ごとに法線が違うため)。そのため法線が候補集合と噛み合わない面では"
+                "候補の半分が背向きになり、提案が外れて誤差が集中する。"
+                "実測では球で0.0395に対し床は0.0052。曲面に固有ではなく、"
+                "平らな床でも法線の向き次第で4.2倍悪化する");
+
+            if (m_Engine.m_MegaLightsSpatialEnabled)
+            {
+                SliderIntEx(
+                    "借りる近傍の数###MegaLightsSpatialNeighbors", &m_Engine.m_MegaLightsSpatialNeighborCount,
+                    0, 16, Defaults::MegaLightsSpatialNeighborCount,
+                    "増やすほどノイズは減るが、候補ごとにBRDFを1回評価するぶん重くなる。0で実質無効");
+                SliderIntEx(
+                    "近傍を探す半径###MegaLightsSpatialRadius", &m_Engine.m_MegaLightsSpatialRadius,
+                    1, 64, Defaults::MegaLightsSpatialRadius,
+                    "広げると遠くの良いサンプルを拾えるが、深度・法線・材質の一致条件で"
+                    "弾かれる割合も増える");
+                CheckboxEx(
+                    "初期可視レイ###MegaLightsInitialVisibility", &m_Engine.m_MegaLightsInitialVisibility,
+                    Defaults::MegaLightsInitialVisibility,
+                    "初期サンプルへ影レイを1本撃ち、遮蔽されていたらリザーバごと殺す"
+                    "(RTXDI系では標準の段)。\n\n"
+                    "【既定は無効】殺された画素の実効的な定義域が変わるのに、結合の不偏化は"
+                    "レイを撃たずに可視率を判定できず、影の縁が暗い側へ偏る。実測でも"
+                    "殺し無しのほうが偏りも裾も良い(根拠は ImplementationDetail 61.7)");
+            }
+        }
+
+        if (m_Engine.m_MegaLightsMode != KurenaiEngine3D::MegaLightsMode::Off)
+        {
+            SliderIntEx(
+                "影レイ本数###MegaLightsShadowRayCount", &m_Engine.m_MegaLightsShadowRayCount, 0, 16,
+                Defaults::MegaLightsShadowRayCount,
+                "1灯あたりに撃つ影レイの本数。\n\n"
+                "【0にすると恒等テストになる】影を撃たず可視率1で評価するため、"
+                "スクリーンスペースシャドウを切った従来のライトループと数値的に一致するはず。"
+                "BRDF・距離減衰・スポット円錐・プリ露出をまとめて検証できる。\n\n"
+                "ポイント/スポットは光源方向が1つに決まるため、1より大きくしても答えは変わらない"
+                "(光源に半径が入る段階で意味を持つ)");
+            ImGui::TextDisabled("半透明・反射プローブ・DDGIのライトは従来のループのままです");
+            ImGui::TextDisabled("ポイント/スポットのスクリーンスペースシャドウは使われなくなります");
+        }
+
+        EndParamGroup();
     }
 
     void RenderingPanel::DrawGeometrySection()

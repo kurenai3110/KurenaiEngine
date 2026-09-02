@@ -236,6 +236,125 @@ namespace
         return index;
     }
 
+    // 「<オプション名> <文字列>」の形の起動オプションを1つ読む。指定が無ければ空文字列を返す
+    std::wstring ParseStringOption(const wchar_t* optionName)
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return std::wstring();
+        }
+
+        std::wstring value;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], optionName) != 0)
+            {
+                continue;
+            }
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    Kurenai::Core::WideToUtf8(optionName) + "の後に値が指定されていないため、無視します");
+                break;
+            }
+            value = argv[i + 1];
+            break;
+        }
+
+        LocalFree(argv);
+        return value;
+    }
+
+    // 「<オプション名> <整数>」の形の起動オプションを1つ読む。指定が無い場合と、
+    // 値が整数でない場合は notFound をそのまま返す(呼び出し側が「指定なし」を判別できるように)。
+    // 検査はParseDebugViewIndexと同じで、末尾までが数字であることまで見る
+    int ParseIntOption(const wchar_t* optionName, int notFound)
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return notFound;
+        }
+
+        int value = notFound;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], optionName) != 0)
+            {
+                continue;
+            }
+            const std::string optionNameUtf8 = Kurenai::Core::WideToUtf8(optionName);
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", optionNameUtf8 + "の後に値が指定されていないため、既定のままにします");
+                break;
+            }
+            wchar_t* end = nullptr;
+            const long parsed = wcstol(argv[i + 1], &end, 10);
+            if (end == argv[i + 1] || (end != nullptr && *end != 0))
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    optionNameUtf8 + "の引数が数値ではないため、既定のままにします: " +
+                        Kurenai::Core::WideToUtf8(argv[i + 1]));
+                break;
+            }
+            value = static_cast<int>(parsed);
+            break;
+        }
+
+        LocalFree(argv);
+        return value;
+    }
+
+    // 「<オプション名> <実数>」の形の起動オプションを1つ読む。ParseIntOptionの実数版で、
+    // 検査の仕方(末尾まで数値として読み切れること)も同じ
+    float ParseFloatOption(const wchar_t* optionName, float notFound)
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return notFound;
+        }
+
+        float value = notFound;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], optionName) != 0)
+            {
+                continue;
+            }
+            const std::string optionNameUtf8 = Kurenai::Core::WideToUtf8(optionName);
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", optionNameUtf8 + "の後に値が指定されていないため、既定のままにします");
+                break;
+            }
+            wchar_t* end = nullptr;
+            const double parsed = wcstod(argv[i + 1], &end);
+            if (end == argv[i + 1] || (end != nullptr && *end != 0))
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    optionNameUtf8 + "の引数が数値ではないため、既定のままにします: " +
+                        Kurenai::Core::WideToUtf8(argv[i + 1]));
+                break;
+            }
+            value = static_cast<float>(parsed);
+            break;
+        }
+
+        LocalFree(argv);
+        return value;
+    }
+
     // コマンドラインの「-scene <名前>」(拡張子を除いたファイル名。例: MontSaintMichel)を、
     // KurenaiEngine3Dが構築するシーン一覧上の番号へ解決する。
     // 一覧の作り方(列挙→_wcsicmpで昇順ソート→Assets::ReadSceneNameが成功したものだけ採用)は
@@ -388,12 +507,85 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         Kurenai::GraphicsAPI api = ParseGraphicsAPI();
         uint32_t renderWidth = Kurenai::Defaults::RenderWidth;
         uint32_t renderHeight = Kurenai::Defaults::RenderHeight;
+        {
+            const std::wstring renderRes = ParseStringOption(L"-renderres");
+            if (!renderRes.empty())
+            {
+                unsigned int w = 0u;
+                unsigned int h = 0u;
+                if (swscanf_s(renderRes.c_str(), L"%ux%u", &w, &h) == 2 && w > 0u && h > 0u)
+                {
+                    renderWidth = w;
+                    renderHeight = h;
+                    Kurenai::Core::Logger::Info(
+                        "Main",
+                        "内部レンダー解像度を起動オプションで設定しました: " + std::to_string(w) + "x" +
+                            std::to_string(h));
+                }
+                else
+                {
+                    Kurenai::Core::Logger::Warning(
+                        "Main",
+                        "-renderresの指定が <幅>x<高さ> の形ではないため、既定のままにします: " +
+                            Kurenai::Core::WideToUtf8(renderRes));
+                }
+            }
+        }
         size_t sceneIndex = ParseInitialSceneIndex();
         const int debugViewIndex = ParseDebugViewIndex();
         const bool forceDDGIRaster = ParseForceDDGIRaster();
         const float ddgiBackfaceThreshold = ParseDDGIBackfaceThreshold();
         const uint32_t ddgiLODCount = ParseDDGILODCount();
         const bool ddgiFollowCamera = ParseDDGIFollowCamera();
+        // -megalights <0=なし|1=参照実装> / -megalightsrays <本数。0で恒等テスト>。
+        // どちらも指定が無ければ-1で、その項目は既定のままになる
+        const int megaLightsMode = ParseIntOption(L"-megalights", -1);
+        const int megaLightsShadowRays = ParseIntOption(L"-megalightsrays", -1);
+        // -megalightssamples <M>。確率的サンプリングが1ピクセルあたりに候補プールから引く数
+        const int megaLightsSamples = ParseIntOption(L"-megalightssamples", -1);
+        // -megalightsaccum <枚数>。線形空間で足し込む枚数(0で蓄積しない)。
+        // 指定した枚数で止まるので「ちょうどNサンプルの平均」を決定的に撮れる
+        const int megaLightsAccumFrames = ParseIntOption(L"-megalightsaccum", -1);
+        // -megalightsdump <パス>。蓄積し終えた平均を線形のまま生データで書き出す
+        const std::wstring megaLightsDumpPath = ParseStringOption(L"-megalightsdump");
+        // 空間再利用。-megalightsspatial <0|1> / -megalightsspatialneighbors <k> /
+        // -megalightsspatialradius <ピクセル>
+        const int megaLightsSpatial = ParseIntOption(L"-megalightsspatial", -1);
+        const int megaLightsSpatialNeighbors = ParseIntOption(L"-megalightsspatialneighbors", -1);
+        const int megaLightsSpatialRadius = ParseIntOption(L"-megalightsspatialradius", -1);
+        // -megalightsspatialiters <回数>。空間再利用を何回繰り返すか
+        const int megaLightsSpatialIterations = ParseIntOption(L"-megalightsspatialiters", -1);
+        // -megalightsspatialmis <0=confidence重み|1=生成化バランスヒューリスティック>
+        const int megaLightsSpatialMIS = ParseIntOption(L"-megalightsspatialmis", -1);
+        // -megalightsinitialvis <0|1>。初期サンプルの可視レイ(遮蔽されたサンプルを殺す)の有無
+        const int megaLightsInitialVis = ParseIntOption(L"-megalightsinitialvis", -1);
+        // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
+        const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
+        const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
+        // -megalightsperturb <0|1|2>。【検証専用】蓄積開始時の摂動
+        // (1=全ライトを消す / 2=露出を+2段跳ばす)。時間再利用の追従を測るためのもの
+        const int megaLightsPerturb = ParseIntOption(L"-megalightsperturb", -1);
+        // -megalightsdenoise <0|1> / -megalightsdenoiseatrous <段数> /
+        // -megalightsdenoiseframes <上限>。デノイザ(時間累積 + a-trous)
+        const int megaLightsDenoise = ParseIntOption(L"-megalightsdenoise", -1);
+        const int megaLightsDenoiseAtrous = ParseIntOption(L"-megalightsdenoiseatrous", -1);
+        const int megaLightsDenoiseFrames = ParseIntOption(L"-megalightsdenoiseframes", -1);
+        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
+        const float megaLightsDenoiseSigma = ParseFloatOption(L"-megalightsdenoisesigma", -1.0f);
+        // -megalightsfirefly <k>。ファイアフライの近傍クランプの強さ(0で無効)
+        const float megaLightsFireflyClamp = ParseFloatOption(L"-megalightsfirefly", -1.0f);
+        // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
+        // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
+        const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
+        const int perfDumpFrames = ParseIntOption(L"-perfdumpframes", 120);
+
+        // -autoexposure <0|1>。自動露出の有効/無効。指定が無ければ既定のまま。
+        // 画面で見ていた設定と計測の設定を揃えるために要る(UIからしか切り替えられないと、
+        // 手法の差と設定の差を分けられない)
+        const int autoExposure = ParseIntOption(L"-autoexposure", -1);
+        // -renderres <幅>x<高さ>。内部レンダー解像度。タイルライトカリングと
+        // MegaLightsの候補プールは16レンダー画素のタイルなので、解像度が違うと
+        // タイルと形状の噛み合いが変わる。比較する2回は必ず揃えること
 
         for (;;)
         {
@@ -402,6 +594,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (debugViewIndex >= 0)
             {
                 engine.SetDebugViewIndex(debugViewIndex);
+            }
+            if (autoExposure >= 0)
+            {
+                engine.SetAutoExposureEnabled(autoExposure != 0);
             }
             if (forceDDGIRaster)
             {
@@ -415,6 +611,59 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 // 段数に0を渡すと「.ksceneの指定のまま」で、追従だけを切り替える
                 engine.OverrideDDGILOD(ddgiLODCount, ddgiFollowCamera);
+            }
+            if (megaLightsMode >= 0 || megaLightsShadowRays >= 0 || megaLightsSamples > 0)
+            {
+                // 負の値は「既定のまま」。手法だけ・本数だけ・M だけの指定もできる
+                engine.OverrideMegaLights(megaLightsMode, megaLightsShadowRays, megaLightsSamples);
+            }
+            if (megaLightsAccumFrames >= 0)
+            {
+                engine.SetMegaLightsAccumFrames(megaLightsAccumFrames);
+            }
+            if (!megaLightsDumpPath.empty())
+            {
+                engine.SetMegaLightsDumpPath(megaLightsDumpPath.c_str());
+            }
+            if (megaLightsSpatial >= 0 || megaLightsSpatialNeighbors >= 0 || megaLightsSpatialRadius > 0 ||
+                megaLightsSpatialMIS >= 0)
+            {
+                engine.SetMegaLightsSpatial(
+                    megaLightsSpatial, megaLightsSpatialNeighbors, megaLightsSpatialRadius,
+                    megaLightsSpatialMIS);
+            }
+            if (megaLightsInitialVis >= 0)
+            {
+                engine.SetMegaLightsInitialVisibility(megaLightsInitialVis);
+            }
+            if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
+            {
+                engine.SetMegaLightsTemporal(megaLightsTemporal, megaLightsTemporalMClamp);
+            }
+            if (megaLightsPerturb >= 0)
+            {
+                engine.SetMegaLightsPerturb(megaLightsPerturb);
+            }
+            if (megaLightsDenoise >= 0 || megaLightsDenoiseAtrous >= 0 || megaLightsDenoiseFrames > 0)
+            {
+                engine.SetMegaLightsDenoise(
+                    megaLightsDenoise, megaLightsDenoiseAtrous, megaLightsDenoiseFrames);
+            }
+            if (megaLightsDenoiseSigma > 0.0f)
+            {
+                engine.SetMegaLightsDenoiseSigmaLuminance(megaLightsDenoiseSigma);
+            }
+            if (megaLightsFireflyClamp >= 0.0f)
+            {
+                engine.SetMegaLightsDenoiseFireflyClamp(megaLightsFireflyClamp);
+            }
+            if (megaLightsSpatialIterations > 0)
+            {
+                engine.SetMegaLightsSpatialIterations(megaLightsSpatialIterations);
+            }
+            if (!perfDumpPath.empty())
+            {
+                engine.SetPerfDump(perfDumpPath.c_str(), perfDumpFrames);
             }
             engine.Run();
 

@@ -292,6 +292,14 @@ namespace Kurenai::UI
             ItemHelp("この距離を超えると寄与を打ち切る。物理的な減衰とは別の、描画負荷のための上限");
         }
 
+        ImGui::SliderFloat("光源の半径###LightSourceRadius", &light.SourceRadius, 0.0f, 5.0f, "%.3f m");
+        ItemHelp(
+            "光源そのものの大きさ。0なら点光源でハードシャドウ、正にすると半影が出る。"
+            "半影の幅は「遮蔽物と受光面の距離」に比例して広がる。\n\n"
+            "【MegaLightsのレイトレース経路でだけ効く】従来のライトループとスクリーンスペース"
+            "シャドウは光源を点として扱うため、ここを上げても影の出方は変わらない。"
+            "減衰と明るさも中心までの距離で計算し続けるので、変わるのは影の柔らかさだけ");
+
         if (light.Type != Assets::LightType::Point)
         {
             float yawDegrees = 0.0f;

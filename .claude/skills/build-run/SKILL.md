@@ -1,6 +1,6 @@
 ---
 name: build-run
-description: KurenaiEngine をビルドして起動するときに使う。叩くslnの使い分け、初回セットアップ(submodule・assimp・DirectXTex・fxcのPATH)、シェーダがビルド対象でない罠、起動後のログ確認を含む。Use when asked to build, rebuild, or "ビルドして起動して".
+description: KurenaiEngine をビルドして起動するときに使う。叩くslnの使い分け、初回セットアップ(submodule・assimp・DirectXTex・fxcのPATH)、シェーダもビルド対象であること、起動後のログ確認を含む。Use when asked to build, rebuild, or "ビルドして起動して".
 ---
 
 # ビルドと起動

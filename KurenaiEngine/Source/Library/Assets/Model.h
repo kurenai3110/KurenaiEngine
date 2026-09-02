@@ -277,6 +277,12 @@ namespace Kurenai::Assets
         // FBX は物理単位を持たないため、DCC側のIntensity/100をカンデラ相当として近似する(ModelLoader参照)
         float Intensity = 1.0f;
         float Range = 10.0f;                      // 影響半径。Directional では未使用
+        // 光源そのものの半径[m]。0なら点光源(ハードシャドウ)、正なら球光源になり半影が出る。
+        // 【MegaLightsのレイトレース経路でだけ効く】従来のライトループとスクリーンスペース
+        // シャドウは点として扱う(面光源をサンプリングする仕組みを持たないため)。
+        // 減衰と提案分布は中心までの距離で計算し続ける ―― 半径ぶんの違いは、遮蔽の判定に
+        // 使う「どこを狙うか」にだけ現れる
+        float SourceRadius = 0.0f;
         float SpotInnerConeAngle = 0.4f;          // ラジアン(軸からの半角)。Spot のみ
         float SpotOuterConeAngle = 0.6f;
         bool Enabled = true;
