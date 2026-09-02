@@ -1403,6 +1403,7 @@ namespace Kurenai::Assets
         // メッシュごとに出すとEmeraldSquareで12行になり、他のログに埋もれる
         uint32_t emissiveMeshCount = 0;
         uint32_t emissiveClusterCount = 0;
+        uint32_t emissiveTexturedMeshCount = 0;
 
         model.Meshes.reserve(meshEntries.size());
         for (const MeshEntry& mesh : meshEntries)
@@ -1645,6 +1646,13 @@ namespace Kurenai::Assets
                     outMesh.BoundsMin, outMesh.BoundsMax, kEmissiveClusterScale);
                 emissiveMeshCount += 1u;
                 emissiveClusterCount += static_cast<uint32_t>(outMesh.EmissiveClusters.size());
+                // 【テクスチャ付きは過大評価になる】Mesh::EmissiveTextureAverage はまだ
+                // 誰も書いておらず常に (1,1,1) なので、テクスチャの黒い部分まで光る面として
+                // 数えてしまう。黙って明るくなるより、読み込み時に知らせる
+                if (material.EmissiveTextureIndex >= 0)
+                {
+                    emissiveTexturedMeshCount += 1u;
+                }
             }
 
             // LOD0の三角形数を積む(メッシュレットLODのしきい値の基準。Model::TotalTriangleCount)
@@ -1674,6 +1682,15 @@ namespace Kurenai::Assets
                 "ModelLoader",
                 "エミッシブな光源: " + std::to_string(emissiveClusterCount) + "個(" +
                     std::to_string(emissiveMeshCount) + "メッシュ由来)");
+            if (emissiveTexturedMeshCount > 0)
+            {
+                Core::Logger::Warning(
+                    "ModelLoader",
+                    "自発光テクスチャを持つメッシュが " + std::to_string(emissiveTexturedMeshCount) +
+                        "個あります。テクスチャの平均色をまだ求めていないため("
+                        "Mesh::EmissiveTextureAverage が常に白)、これらの光源プロキシは"
+                        "実際より明るくなります");
+            }
         }
 
         model.Lights.reserve(lightEntries.size());

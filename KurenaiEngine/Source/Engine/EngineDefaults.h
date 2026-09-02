@@ -575,6 +575,25 @@ namespace Kurenai::Defaults
     inline constexpr float SceneExposureEV100 = 15.0f;
     inline constexpr float EmissiveIntensity = 1.0f;
 
+    // --- エミッシブ光源(自発光メッシュを光源として扱う) ---
+    // 自発光面はG-Bufferへ書いて加算されるだけで周囲を照らしていない。読み込み時に
+    // 自発光メッシュから「光源のかたまり」を起こし、GPULight(LightType 3)として
+    // 従来のライトループにもMegaLightsにも流す。
+    // 【既定で無効】既存シーンの絵を変えないため。有効にすると明るさが増える
+    inline constexpr bool EmissiveLightsEnabled = false;
+    // 打ち切り照度τ[表示空間]。この照度まで落ちる距離をRangeにする。
+    //
+    // 【根拠】windowed inverse-square が持ち込む絶対誤差は、u=d/Range とおくと
+    // err(u) = τ(2u^2 - u^6) で、u^4=2/3(u=0.9036)で最大 1.089τ。
+    // **τの1.09倍を決して超えない**ので、安全率を掛けずτひとつで縛れる。
+    // τ=1e-3 なら、反射率0.5の拡散面が返す表示放射輝度は 0.5/π*1e-3 ≒ 1.6e-4 で、
+    // トーンマップ後の8bit量子化ステップ(中間調で約3.9e-3)の1/20以下になる
+    inline constexpr float EmissiveLightsCutoffIrradiance = 1e-3f;
+    // 採用するプロキシ数の上限。手置きライトを押し出さないよう別枠で管理する。
+    // 【超えたら切り捨てではなく併合を疑う】面積の大きい順に上位を残す形は、
+    // EmeraldSquare の実測で上位256個が総面積の46.7%にしかならず、発光の半分以上を捨てる
+    inline constexpr int EmissiveLightsMaxCount = 256;
+
     // --- 星空 ---
     // 夜空に星を描くか。既定はtrueだが、昼は太陽の仰角で完全に0までフェードするため
     // 昼のシーンの絵は1画素も変わらない(Sky.hlsliのEvaluateStarfield参照)

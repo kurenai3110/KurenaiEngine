@@ -312,6 +312,49 @@ namespace
         return value;
     }
 
+    // 「<オプション名> <実数>」の形の起動オプションを1つ読む。ParseIntOptionと同じ約束で、
+    // 指定が無い場合と値が実数でない場合は notFound をそのまま返す
+    float ParseFloatOption(const wchar_t* optionName, float notFound)
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return notFound;
+        }
+
+        float value = notFound;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], optionName) != 0)
+            {
+                continue;
+            }
+            const std::string optionNameUtf8 = Kurenai::Core::WideToUtf8(optionName);
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", optionNameUtf8 + "の後に値が指定されていないため、既定のままにします");
+                break;
+            }
+            wchar_t* end = nullptr;
+            const double parsed = wcstod(argv[i + 1], &end);
+            if (end == argv[i + 1] || (end != nullptr && *end != 0))
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    optionNameUtf8 + "の引数が数値ではないため、既定のままにします: " +
+                        Kurenai::Core::WideToUtf8(argv[i + 1]));
+                break;
+            }
+            value = static_cast<float>(parsed);
+            break;
+        }
+
+        LocalFree(argv);
+        return value;
+    }
+
     // コマンドラインの「-scene <名前>」(拡張子を除いたファイル名。例: MontSaintMichel)を、
     // KurenaiEngine3Dが構築するシーン一覧上の番号へ解決する。
     // 一覧の作り方(列挙→_wcsicmpで昇順ソート→Assets::ReadSceneNameが成功したものだけ採用)は
@@ -501,6 +544,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsDenoise = ParseIntOption(L"-megalightsdenoise", -1);
         const int megaLightsDenoiseAtrous = ParseIntOption(L"-megalightsdenoiseatrous", -1);
         const int megaLightsDenoiseFrames = ParseIntOption(L"-megalightsdenoiseframes", -1);
+        // -emissivelights <0|1>。自発光メッシュを光源として扱うか(既定は無効)。
+        // -emissivelightscutoff <τ> は打ち切り照度、-emissivelightsmax <N> は採用数の上限
+        const int emissiveLights = ParseIntOption(L"-emissivelights", -1);
+        const float emissiveLightsCutoff = ParseFloatOption(L"-emissivelightscutoff", -1.0f);
+        const int emissiveLightsMax = ParseIntOption(L"-emissivelightsmax", -1);
+        // -emissiveintensity <倍率>。シーン全体の自発光の強度(ImGuiの同名スライダと同じ値)。
+        // glTFのemissiveFactorは[0,1]に収まるため、既定の1.0では小さな器具が1階調に届かない
+        const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);
         // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
@@ -563,6 +614,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetMegaLightsDenoise(
                     megaLightsDenoise, megaLightsDenoiseAtrous, megaLightsDenoiseFrames);
+            }
+            if (emissiveLights >= 0 || emissiveLightsCutoff > 0.0f || emissiveLightsMax > 0)
+            {
+                // 有効/無効を指定していない(負)なら、しきい値だけ差し替えて状態は既定のまま
+                engine.SetEmissiveLights(emissiveLights, emissiveLightsCutoff, emissiveLightsMax);
+            }
+            if (emissiveIntensity > 0.0f)
+            {
+                engine.SetEmissiveIntensity(emissiveIntensity);
             }
             if (!perfDumpPath.empty())
             {
