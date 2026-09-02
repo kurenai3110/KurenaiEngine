@@ -1605,8 +1605,10 @@ namespace Kurenai
             DirectX::XMFLOAT4 PositionType;   // xyz=ワールド座標, w=LightType
             DirectX::XMFLOAT4 ColorRange;     // rgb=露出済み放射輝度, w=Range
             DirectX::XMFLOAT4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
-            // x=spotAngleOffset, y=CastShadow(1でスクリーンスペースシャドウを撃つ / 0で撃たない),
-            // zw=未使用(エリアライト用に予約)
+            // x=spotAngleOffset
+            // y=影のフラグ(bit0=画面空間シャドウ / bit1=レイトレース影レイ。kLightShadow* を使う)
+            // z=SourceRadius(球光源の半径 / エミッシブ光源プロキシでは面積等価の円板半径)
+            // w=指向性κ(エミッシブ光源プロキシのみ。それ以外は0)
             DirectX::XMFLOAT4 Params;
         };
         static_assert(sizeof(GPULight) == 64, "GPULightはDirectLighting.hlsl側と64バイトで一致させる必要がある");
@@ -1756,7 +1758,7 @@ namespace Kurenai
                 angleOffset = -cosOuter * angleScale;
             }
             gpuLight.DirectionAngle = { light.Direction[0], light.Direction[1], light.Direction[2], angleScale };
-            // Params.y = このライトがスクリーンスペースシャドウを落とすか。ライトごとに切れるようにしてあるのは、
+            // Params.y = このライトが影を落とすか。ライトごとに切れるようにしてあるのは、
             // ピクセルあたりのシャドウレイ数に上限(LightingConstants.LightCount.y)があり、
             // 「影を出したいライト」に予算を回せるようにするため
             // Params.z = 光源そのものの半径[m]。0なら点光源。予約枠だった zw のうち z を使う。
@@ -1766,8 +1768,12 @@ namespace Kurenai
                 (light.Type == Assets::LightType::Directional) ? 0.0f : std::max(0.0f, light.SourceRadius);
             // Params.y は影のフラグ。**bit0 = スクリーンスペースシャドウ / bit1 = レイトレース影レイ**
             // (Shaders/3D/LightAttenuation.hlsli と一致させること)。作者が置いたライトは
-            // 両方を立てる ―― 1つの真偽値だった頃と挙動が変わらない
-            gpuLight.Params = { angleOffset, light.CastShadow ? 3.0f : 0.0f, sourceRadius, 0.0f };
+            // 両方を立てる ―― 1つの真偽値だった頃と挙動が変わらない。
+            // 【リテラルで 3.0f と書かない】ビットの定義を変えたときに追随しない
+            const float shadowFlags = light.CastShadow
+                                          ? static_cast<float>(kLightShadowScreenSpace | kLightShadowRaytraced)
+                                          : 0.0f;
+            gpuLight.Params = { angleOffset, shadowFlags, sourceRadius, 0.0f };
             return gpuLight;
         }
 
