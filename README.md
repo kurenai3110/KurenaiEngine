@@ -83,9 +83,11 @@ Tools/
                                        使う前に `selftest` を通すこと
   renderdoc_probe.py                   RenderDocをGUI無しで動かし、指定フレームのキャプチャを採って
                                        ドロー一覧・バインド状況を読む。テクスチャは
-                                       texdump_inspect.py が読める形式で書き出せる。
-                                       **Python 3.7 で実行する**(準備は
-                                       docs/ImplementationDetail.md 62.10)
+                                       texdump_inspect.py が読める形式で書き出せる
+  renderdoc_setup.ps1                  上を使う前に一度だけ走らせる。RenderDocのPythonモジュールは
+                                       配布版に入っていないため、インストール済みの版に合わせて
+                                       このPC用にビルドして配置する
+                                       (根拠は docs/ImplementationDetail.md 62.10)
 docs/                           ドキュメント(APIリファレンス・実装者向け)
 ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
 Scenes/                         手書きの.kscene(シーンファイル)。小さなテキストのためGit管理対象

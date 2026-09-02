@@ -6984,15 +6984,35 @@ UNorm8 と Float16 の往復、および `Backend` の往復を検査に足し�
 `save_texture` / `iter_actions` / `fetch_shader` の例まで揃っている。
 それに要る `.pyd` が配布物に無い、というだけだった。
 
-#### 用意の手順(実際に通したもの)
+#### 用意の手順 —— `Tools/renderdoc_setup.ps1` を走らせる
 
-1. **ソースを取る。** `git clone --depth 1 --branch v1.45 --recurse-submodules https://github.com/baldurk/renderdoc.git`
-   —— **インストール済みと同じバージョンにすること**(`.pyd` は `renderdoc.dll` のABIに依存する)
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File Tools\renderdoc_setup.ps1
+```
+
+**バイナリをリポジトリに入れない。** できあがる `.pyd` は「そのPCのPythonのバージョン」と
+「そのPCに入っているRenderDocのバージョン」の両方に縛られるので、commitしても他のPCでは
+動かず、Git履歴に残るだけになる。代わりにこのスクリプトを置いてある。
+
+置き場所は `%LOCALAPPDATA%\KurenaiEngine\renderdoc\renderdoc.pyd`。
+**ユーザー名を含む絶対パスをどこにも書かない**よう環境変数から組み立てており、
+`renderdoc_probe.py` は環境変数が未設定ならここを見る
+(別の場所に置くなら `KURENAI_RENDERDOC_PYMODULE` で指す)。
+
+**持ち回るのは `.pyd` 1枚(6MB)だけでよい。** 本体の `renderdoc.dll` は配布版のものを
+そのまま使える(実測で確認。`textures`/`binds`/`export` が通り、書き出した値も
+エンジンの `-dumptex` とバイト一致した)。自前ビルドの `renderdoc.dll` は要らない。
+
+スクリプトがやっていること(手でやる場合の手順でもある):
+
+1. **インストール済みRenderDocの版を読み、同じタグのソースを取る**
+   —— **バージョンを揃えること**(`.pyd` は `renderdoc.dll` のABIに依存する)
 2. **Python の上書き先を用意する。** `qrenderdoc/Code/pyrenderdoc/python.props` が
    `RENDERDOC_PYTHON_PREFIX64` を見て 3.18〜3.4 を順に探す。要るのは3つ:
    `include\Python.h` / `pythonXY.zip` / `libs\pythonXY.lib`。
    **`pythonXY.zip` はインストーラ版に入っていない**ので、`Lib\` を自分でzipに固める
-   (`test`/`site-packages`/`idlelib` は外してよい。3.7で8MB)
+   (`test`/`site-packages`/`idlelib` は外してよい。3.7で8MB)。
+   **ストア版・embeddable版のPythonは `include`/`libs` を持たないので使えない**
 3. **依存を先に建てる。** `renderdoc.vcxproj` は breakpad の3つのlibを直接参照しているが
    プロジェクト参照にはなっていないため、単体ビルドではリンクで落ちる:
    `3rdparty/breakpad/client/windows/common.vcxproj`、`crash_generation/crash_generation_client.vcxproj`、
@@ -7013,8 +7033,13 @@ msbuild "<src>\qrenderdoc\Code\pyrenderdoc\pyrenderdoc_module.vcxproj" `
   `TRK0005: CL.exe が見つかりません` になるので `v143` を明示する
 - SWIGはリポジトリに同梱されている(`qrenderdoc/3rdparty/swig/swig.exe`)。別途入手は不要
 
-成果物は `<src>\x64\Release\pymodules\renderdoc.pyd`(6.3MB)と `<src>\x64\Release\renderdoc.dll`。
+成果物は `<src>\x64\Release\pymodules\renderdoc.pyd`(6.0MB)。
 **ビルドに使ったのと同じPythonバージョンでしか読めない**(ここでは 3.7.8)。
+
+**まっさらな状態から通ることを確認した。** ソースを消したうえでスクリプトを走らせ、
+clone → プレフィクス生成 → breakpad → モジュール → 配置 → 読み込み確認 まで終了コード0。
+そのうえで環境変数を未設定にしても `renderdoc_probe.py export` が通り、
+値はエンジンの `-dumptex` と `|d| > 0 : 0`(3,686,400バイト)だった。
 
 #### 動くことの確認(実測)
 

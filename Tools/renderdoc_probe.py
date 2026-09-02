@@ -13,11 +13,13 @@
 
 配布版のRenderDocには `renderdoc.pyd` が入っていない(`qrenderdoc.exe` に内蔵されているだけ)。
 ソースからこのモジュールだけをビルドする。手順は `docs/ImplementationDetail.md` 62.10。
-できたら環境変数で場所を教える:
 
-    set KURENAI_RENDERDOC_BUILD=J:\\Claude\\RenderDocPython\\renderdoc-1.45\\x64\\Release
+**持ち回るのは `renderdoc.pyd` 1つだけでよい**(6MB)。本体の `renderdoc.dll` は
+インストール済みのものを使う。置いたら環境変数で場所を教える:
 
-このフォルダに `renderdoc.dll` と `pymodules\\renderdoc.pyd` があること。
+    set KURENAI_RENDERDOC_PYMODULE=<renderdoc.pyd を置いたフォルダ>
+
+**`.pyd` は `renderdoc.dll` のABIに依存する。** RenderDocを更新したら `.pyd` も作り直すこと。
 
 ## 使い方
 
@@ -47,23 +49,56 @@ import struct
 import sys
 
 
+# renderdoc.dll を探す既定の場所。**本体は配布版のものをそのまま使える**ので、
+# 自前ビルドから持ち回るのは renderdoc.pyd だけでよい(実測で確認済み)
+DEFAULT_RENDERDOC_DIRS = [
+    r"C:\Program Files\RenderDoc",
+    r"C:\Program Files (x86)\RenderDoc",
+]
+
+
 def load_renderdoc():
-    """renderdoc モジュールを読み込む。場所は環境変数で受け取る"""
-    build = os.environ.get("KURENAI_RENDERDOC_BUILD", "")
-    if not build:
+    """renderdoc モジュールを読み込む。
+
+    要るのは **`renderdoc.pyd` 1つだけ**(6MB)。本体の `renderdoc.dll` は
+    インストール済みのものを使う。**ただしバージョンが一致していること** ――
+    `.pyd` は `renderdoc.dll` のABIに依存するので、RenderDocを更新したら
+    `.pyd` も作り直しになる(用意の仕方は docs/ImplementationDetail.md 62.10)。
+    """
+    pym = os.environ.get("KURENAI_RENDERDOC_PYMODULE", "")
+    if not pym:
+        # 環境変数が無ければ、setup スクリプトの既定の置き場所を見る。
+        # **ユーザー名を含む絶対パスを書かない** —— %LOCALAPPDATA% から組み立てるので
+        # PCが変わっても同じ式で決まる(Tools/renderdoc_setup.ps1 の -Destination と揃えること)
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            pym = os.path.join(local, "KurenaiEngine", "renderdoc")
+    if not pym or not os.path.isfile(os.path.join(pym, "renderdoc.pyd")):
         raise SystemExit(
-            "環境変数 KURENAI_RENDERDOC_BUILD が未設定です。\n"
-            "renderdoc.dll と pymodules\\renderdoc.pyd があるフォルダを指してください\n"
-            "(用意の仕方は docs/ImplementationDetail.md 62.10)"
+            "renderdoc.pyd が見つかりません(探した場所: %s)。\n"
+            "**このPC用にビルドしてください:**\n"
+            "    powershell -NoProfile -ExecutionPolicy Bypass -File Tools\\renderdoc_setup.ps1\n"
+            "別の場所に置いてあるなら KURENAI_RENDERDOC_PYMODULE で指してください\n"
+            "(根拠と手順は docs/ImplementationDetail.md 62.10)" % (pym or "(未設定)")
         )
-    pym = os.path.join(build, "pymodules")
-    if not os.path.isfile(os.path.join(pym, "renderdoc.pyd")):
-        raise SystemExit("renderdoc.pyd がありません: %s" % pym)
+
+    # 本体のDLL。.pyd と同じ場所にあればそれを、無ければインストール先を使う
+    dll_dir = pym if os.path.isfile(os.path.join(pym, "renderdoc.dll")) else ""
+    if not dll_dir:
+        for d in DEFAULT_RENDERDOC_DIRS:
+            if os.path.isfile(os.path.join(d, "renderdoc.dll")):
+                dll_dir = d
+                break
+    if not dll_dir:
+        raise SystemExit(
+            "renderdoc.dll が見つかりません。RenderDocをインストールするか、\n"
+            "renderdoc.pyd と同じフォルダへ置いてください"
+        )
 
     sys.path.append(pym)
-    os.environ["PATH"] = build + os.pathsep + os.environ["PATH"]
+    os.environ["PATH"] = dll_dir + os.pathsep + os.environ["PATH"]
     if sys.version_info >= (3, 8):
-        os.add_dll_directory(build)
+        os.add_dll_directory(dll_dir)
 
     try:
         import renderdoc as rd

@@ -180,12 +180,18 @@ python Tools/texdump_inspect.py diff  <a.bin> <b.bin>
 どのドローがどのリソースを読み書きしたかは `-dumptex` では原理的に分からない。
 
 `Tools/renderdoc_probe.py` が **GUI無しで**扱う(`qrenderdoc.exe` を起動しない)。
-**Python 3.7 で実行すること**(RenderDocのモジュールはビルドしたPythonでしか読めない)。
-用意の手順は `docs/ImplementationDetail.md` 62.10。
+
+**このPC用のモジュールが要る。** 配布版のRenderDocには入っていないので、一度だけ:
 
 ```
-set KURENAI_RENDERDOC_BUILD=<renderdoc.dll と pymodules\renderdoc.pyd のあるフォルダ>
+powershell -NoProfile -ExecutionPolicy Bypass -File Tools\renderdoc_setup.ps1
+```
 
+置き場所も環境変数もスクリプトが決める(既定は `%LOCALAPPDATA%\KurenaiEngine\renderdoc`)。
+**ビルドに使ったPythonでしか読めない**ので、実行はそのバージョンで行うこと
+(スクリプトが最後に表示する)。根拠は `docs/ImplementationDetail.md` 62.10。
+
+```
 py -3.7 Tools/renderdoc_probe.py capture  --exe <Sample3D.exe> --frame 200 --out <dir> ^
                                           --args "-dx12 -scene MaterialTest -taa 0 ..."
 py -3.7 Tools/renderdoc_probe.py actions  <capture.rdc>            # ドロー/ディスパッチの一覧
