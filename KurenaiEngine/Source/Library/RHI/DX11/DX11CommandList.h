@@ -53,6 +53,8 @@ namespace Kurenai::RHI
             uint32_t countOffsetInBytes) override;
         void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) override;
         void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
+        void CopyTextureToReadback(
+            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel = 0, uint32_t arraySlice = 0) override;
 
     private:
         // Dispatch/DispatchIndirectの後始末。バインドしたUAVを全解除する
@@ -96,6 +98,12 @@ namespace Kurenai::RHI
         // 解放済みのビューをGetResourceで触ってしまうのを防ぐため
         void UnbindPixelSrvForResource(ID3D11Resource* resource);
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_BoundPixelSrvs[kTextureSlotCount];
+
+        // 指定リソースが出力(レンダーターゲット/深度)として張られていたら、出力をすべて外す。
+        // D3D11は出力に張ったままのリソースをコピー元にできず、そのまま
+        // CopySubresourceRegionを呼ぶとデバッグレイヤーが警告を出してコピーが無効になる。
+        // UnbindPixelSrvForResourceの出力版で、リードバックのコピー直前に使う
+        void UnbindRenderTargetsForResource(ID3D11Resource* resource);
 
         // シザー矩形をD3D11へ設定する(SetViewport/SetScissorRect/ResetScissorRectの共通処理)
         void ApplyScissorRect(const ScissorRect& rect);
