@@ -22,7 +22,17 @@
 // 【最近傍で引く。バイリニアにしてはいけない】リザーバはライト番号という離散値を持つので
 // 補間できない。4近傍を見て、幾何が一致する最初のものを採る。
 //
-// レイを撃たないので3バリアントすべてでコンパイルされる。
+// 【時間検証レイ ―― 履歴の固着を防ぐ要】履歴のサンプルは前のフレームの抽選結果で、
+// この画素からの可視性は検証されていない。検証せずに使うと、遮蔽された灯を掴んだ画素が
+// M上限ぶんの慣性で黒いまま固まり、外れた瞬間に明るく戻る ―― これが「遅い明滅」として
+// 見える(実測: 検証なし・M上限640で、256フレーム蓄積しても厳密に0のままの画素が
+// 画面の47%に達した)。初期可視レイが有効なときは、採用した履歴のサンプルへ
+// 1本撃ち直し、遮蔽されていたら殺す(どの灯を殺したかは残す)。これで
+// 「生きているリザーバは、このフレーム・この画素で可視」という不変条件が全パスで成り立ち、
+// 空間再利用の可視性込みの分母(Z)の前提も守られる。
+//
+// RayQuery(SM 6.5)を使うため、DX12 かつ DXR Tier 1.1 のときだけ生成される
+// (KurenaiShaderPacker の kSkipDxbc50Files に登録済み)。
 #include "NormalEncoding.hlsli"
 #include "SpecularEnergy.hlsli"
 
@@ -65,6 +75,8 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     // 混ぜる割合を0にするだけでは足りない(添字の意味が変わっているので中身は別画素のもの)
     uint4 Params4;
 };
+
+RaytracingAccelerationStructure SceneTLAS : register(t0);
 
 Texture2D NormalTexture : register(t1);
 Texture2D DepthTexture : register(t2);
@@ -120,6 +132,28 @@ float NextRandom(inout uint state)
 float Luminance(float3 c)
 {
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+// レイ原点のバイアス。MegaLightsInitialSample.hlsl / MegaLightsShade.hlsl と同じ値を使う
+// (違う値にすると、殺す判定と影の階調が縁で食い違う)
+static const float kRayOriginBias = 0.01f;
+static const float kRayOriginBiasSlope = 1e-4f;
+static const float kMinSlopeScaleNdotL = 0.1f;
+
+float TraceLightVisibility(float3 rayOrigin, float3 L, float originBias, float distanceToLight)
+{
+    RayDesc ray;
+    ray.Origin = rayOrigin;
+    ray.Direction = L;
+    ray.TMin = originBias;
+    // 光源までの距離で打ち切る(省くと光源の向こう側のジオメトリが遮蔽物になる)
+    ray.TMax = max(distanceToLight - originBias, originBias);
+
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
+    query.TraceRayInline(SceneTLAS, RAY_FLAG_NONE, 0xFFu, ray);
+    query.Proceed();
+
+    return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;
 }
 
 // 現フレームのこの画素の面。借りた灯は必ずここで評価し直す
@@ -277,19 +311,70 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 露出を跳ばす摂動(-megalightsperturb 2)で測ること
         // 【Mのクランプ】無いと新しいサンプルが採用されなくなり、灯を消しても残る
         history.M = min(history.M, max(Params3.w, 1.0f));
+
+        // --- 時間検証レイ: 採用した履歴のサンプルがこの画素から見えるかを撃ち直す ---
+        // 検証しないと、遮蔽された灯を掴んだ画素がM上限ぶんの慣性で黒く固まり、
+        // 「遅い明滅」になる(冒頭のコメント)。殺すときはどの灯を殺したかを残す
+        // (空間再利用の分母がこの確定情報を使う。MegaLightsInitialSample.hlsl と同じ)
+        if (Params0.w != 0u && Params2.w != 0u && !MegaLightsReservoirIsEmpty(history))
+        {
+            const uint historyLight = MegaLightsUnpackLight(history.LightAndFlags);
+            const GPULight hLight = Lights[historyLight];
+            if (hLight.Params.y > 0.5f)
+            {
+                const PunctualGeometry hGeometry =
+                    EvaluatePunctualGeometry(hLight, self.WorldPos, self.N, self.Translucency);
+                if (hGeometry.Contributes)
+                {
+                    const float slopeScale =
+                        1.0f / max(dot(self.N, hGeometry.L), kMinSlopeScaleNdotL);
+                    const float originBias =
+                        (kRayOriginBias + length(self.WorldPos - CameraPosition.xyz) * kRayOriginBiasSlope) *
+                        slopeScale;
+                    const float3 samplePos = MegaLightsLightSamplePosition(
+                        hLight.PositionType.xyz, hLight.Params.z,
+                        MegaLightsUnpackSampleUV(history.SampleUV));
+                    const float3 toSample = samplePos - self.WorldPos;
+                    const float sampleDist = length(toSample);
+                    if (sampleDist > originBias &&
+                        TraceLightVisibility(
+                            self.WorldPos + self.N * originBias, toSample / sampleDist, originBias,
+                            sampleDist) <= 0.0f)
+                    {
+                        // 殺す。番号とサンプル点は残し、W=0・可視フラグfalseにする
+                        history.LightAndFlags = MegaLightsPackLightAndFlags(historyLight, false);
+                        history.W = 0.0f;
+                    }
+                    else
+                    {
+                        // このフレーム・この画素で可視を検証済み
+                        history.LightAndFlags = MegaLightsPackLightAndFlags(historyLight, true);
+                    }
+                }
+            }
+        }
     }
     else
     {
         history = MegaLightsMakeEmptyReservoir();
     }
 
-    uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + Params1.w * 0xB5297A4Du + 0x68E31DA4u);
+    // 【ここは判定が実質1回なのでブルーノイズ位相を使える】候補は現フレームと履歴の2つで、
+    // 1つ目は必ず採用される(w/weightSum = 1)。効くのは「履歴へ乗り換えるか」の1回だけで、
+    // WRS の独立性を使わないため、位相を隣どうしで離しても選択確率は厳密に保たれる。
+    // どちらの灯を映すかが画素ごとに決まる場所なので、ここを白色にしておくと
+    // 見た目の粒がそのまま白色ノイズになる
+    const float switchPhase = MegaLightsPixelPhase(pixel, Params1.w, 1u);
+    uint acceptCount = 0u;
 
     float weightSum = 0.0f;
     float confidenceSum = 0.0f;
     uint selectedLight = kMegaLightsInvalidLight;
     float selectedTargetPdf = 0.0f;
     uint selectedSampleUV = 0u;
+    // 選ばれたサンプルが「このフレーム・この画素で可視レイを通過した」証明を持つか。
+    // 現フレーム(i=0)の勝者だけが持ちうる。履歴の勝者は前のフレームの証明なので持たない
+    bool selectedVerified = false;
 
     // 候補は2つだけ(0=現フレーム、1=履歴)。空間再利用と同じ形で回す
     [unroll]
@@ -329,13 +414,18 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         }
 
         weightSum += w;
-        if (NextRandom(rngState) < w / weightSum)
+        const float acceptRandom = (acceptCount == 0u) ? switchPhase
+                                                       : MegaLightsLowDiscrepancy1D(acceptCount, switchPhase);
+        ++acceptCount;
+        if (acceptRandom < w / weightSum)
         {
             selectedLight = lightI;
             selectedTargetPdf = pdfSelf;
             // 【球面上のどこを狙ったかも一緒に引き継ぐ】落とすと借りたサンプルが
             // 中心を狙い直してしまい、再利用した画素だけ半影が消える
             selectedSampleUV = candidate.SampleUV;
+            // 現フレームは初期可視レイ、履歴は時間検証レイが立てたフラグをそのまま使う
+            selectedVerified = MegaLightsUnpackVisible(candidate.LightAndFlags);
         }
     }
 
@@ -343,9 +433,24 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     if (selectedLight == kMegaLightsInvalidLight || selectedTargetPdf <= 0.0f || weightSum <= 0.0f ||
         confidenceSum <= 0.0f)
     {
-        // 【Mは残す】「候補を検討したが全部外れた」という情報は正しく、次の結合の分母に要る
+        // 【Mは残すが、1フレームぶんの空振りで頭打ちにする】「候補を検討したが外れた」
+        // という情報は分母に要る(M=0にすると明るく偏る。61.7の教訓)。
+        // 一方で空のまま confidenceSum を積み上げると、殺され続けた画素のMが履歴上限まで
+        // 肥え太り、やっと当たった弱い灯の W が 8/(8+M) 倍に押し潰される ――
+        // 回復に数百フレームかかり、影の縁に黒い斑点として残る(実測)。
+        // 空のリザーバは「今フレームの空振り」以上の確信を主張してはいけない
+        // 【現フレームが可視レイで殺されていたら、その番号と可視フラグも引き継ぐ】
+        // 消してしまうと、後段の空間再利用の分母(Z)が「この画素はその灯を配れなかった」
+        // ことを知れず、暗い側の系統誤差が時間再利用経由で戻ってくる
+        // (詳細は MegaLightsInitialSample.hlsl の殺し側のコメント)
         MegaLightsReservoir rejected = MegaLightsMakeEmptyReservoir();
-        rejected.M = confidenceSum;
+        if (MegaLightsUnpackLight(current.LightAndFlags) != kMegaLightsInvalidLight &&
+            !MegaLightsUnpackVisible(current.LightAndFlags))
+        {
+            rejected.LightAndFlags = current.LightAndFlags;
+            rejected.SampleUV = current.SampleUV;
+        }
+        rejected.M = min(confidenceSum, float(max(Params0.z, 1u)));
         OutputReservoirs[index] = rejected;
         return;
     }
@@ -355,10 +460,20 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 生成しえたか」を判定する必要があったが、時間再利用の候補はどちらも**同じ画素**で、
     // 履歴は幾何の一致判定を通っている(=同じ面)。同じ面なら候補集合も提案分布も同じなので、
     // 両方の候補が常に「生成しえた」側に入る。よって分母は素直に ΣM でよい
+    // 【分母は素直に ΣM でよい】候補は2つとも同じ画素のストリームで、定義域(タイル)も
+    // 可視性(この画素からの遮蔽)も共有する。勝者は可視レイか時間検証レイを通過して
+    // いるので、その灯は両ストリームから生成されえた ―― どちらの M も数えるのが正しい。
+    // (かつて「現フレームが選ばれた灯を殺していたら M を引く」補正を入れていたが、
+    //  それは履歴を検証しない構成での近似で、検証レイが入った今は逆に偏らせる)
+    const float denominator = confidenceSum;
+
     MegaLightsReservoir result;
-    result.LightAndFlags = MegaLightsPackLightAndFlags(selectedLight, true);
+    // 【可視フラグは証明があるときだけ true】空間再利用の Z がこのフラグを
+    // 「レイを省いてよいか」の判定に使う。履歴の勝者に true を付けると、
+    // 検証していない可視性を確定扱いしてしまう
+    result.LightAndFlags = MegaLightsPackLightAndFlags(selectedLight, selectedVerified);
     result.SampleUV = selectedSampleUV;
-    result.W = weightSum / (confidenceSum * selectedTargetPdf);
+    result.W = weightSum / (denominator * selectedTargetPdf);
     result.M = confidenceSum;
     OutputReservoirs[index] = result;
 }
