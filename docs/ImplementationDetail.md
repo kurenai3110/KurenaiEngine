@@ -6797,3 +6797,319 @@ fp32 にすると差は13画素まで減り、符号も両側に散った。**�
 
 なお **Mode 11 は容量超過をマゼンタで返すが Mode 21 は返さない**ので、超過タイルでは両者が
 正しくても食い違う。比べる前に Mode 11 側にマゼンタが無いことを確かめること。
+
+## 62. 中間レンダーターゲットの生値ダンプ(`-dumptex`)— 実装の根拠
+
+### 62.1 なぜ要ったか
+
+「コンパイルは通るが絵が違う」を切り分ける手段が、事実上スクリーンショットしか無かった。
+`shader-check` はコンパイル検証で終わり、`ab-compare` は最終画面の8bit PNG 2枚を引き算する
+枠内で完結していて、その間 —— 中間バッファの値・シェーダへの計装・座標指定の読み ——
+を扱う手順も道具も無かった。
+
+限界は 61.5 節に既に書かれている: 画面から採れるのは8bitかつトーンマップ後で、
+丸めだけでRMSEに0.29階調の下限が生まれる。MegaLightsではこれを避けるために
+`-megalightsdump`(蓄積バッファ専用の線形float4ダンプ)を用意したが、
+**それ以外のすべてのシェーダには同じ経路が無かった。**
+
+GPU→CPUのリードバックは**バッファについては完成していた**(`CopyBufferToReadback` /
+`IRHIBuffer::ReadbackData`、メッシュレットカリング統計など3箇所で稼働)。
+無かったのは**テクスチャのリードバック**で、`IRHITexture` は全57行、
+`GetWidth/GetHeight/GetMipLevels/GetBindlessIndex` しか持っていなかった。
+
+### 62.2 受け皿を `IRHIBuffer` ではなく `IRHITexture` にした理由
+
+**DX11はTexture2D→Bufferのコピーができない**(`CopySubresourceRegion` は同じ種類の
+リソース間でしか使えない)。DX12は逆に、READBACKヒープにテクスチャを置けず、
+`GetCopyableFootprints` の配置情報つきバッファとして確保するしかない。
+
+両方を満たす形として、`IRHIDevice::CreateReadbackTexture` が返すのは `IRHITexture` にし、
+中身がバッファかテクスチャかはバックエンドに隠した。上位層は
+「受け皿を作る → コピーを積む → 数フレーム後に読む」という、バッファ側とまったく同じ手順で扱える。
+
+### 62.3 行のパディングをRHI側で剥がす理由
+
+DX12は `GetCopyableFootprints` が返す `RowPitch` が256バイト境界へ切り上げられ、
+DX11は `Map` が返す `RowPitch` がドライバ依存で幅×テクセルサイズより大きいことがある。
+
+**剥がす側をRHIの実装に置いた。** DX11の `RowPitch` は Map するまで分からないため、
+上位層に持たせると「確保の時点では知りようのない値」を要求することになる。
+`IRHITexture::ReadbackData` が行ごとに `memcpy` してタイトに詰め直すので、
+**呼び出し側はパディングの存在を一切見ない。**
+
+### 62.4 フォーマット変換表をDX11/DX12で共有した理由
+
+`RHIReadbackFormat.h` に `DescribeReadbackFormat` と `ToReadbackTypedFormat` を置き、
+両バックエンドがこの1つの表を引く。**別々に書くと、片方だけ直したときに
+「DX11では読めるがDX12では別の型として読む」という、絵にもエラーにも出ない食い違いが生まれる。**
+「RHIを変えたらDX11/DX12の両方を直す」という規約を、直し忘れようがない形にしたもの。
+
+深度は DSV(D32_FLOAT) と SRV(R32_FLOAT) を両立させるため `R32_TYPELESS` で作られており、
+typeless のままでは受け皿の記述子に使えない。**同じtypeグループの型付きへ置き換えるのは
+D3D11/D3D12 のどちらでも合法**なので、この置き換えも同じ表に入れてある。
+
+### 62.5 名前表を `DebugView` と共有しなかった理由
+
+3つある。
+
+1. **`DebugView` は「表示モード」でテクスチャと1対1でない。** `Depth` と `DepthRaw` は
+   同じ `m_GBufferDepth` を指し、`LightTiles` はテクスチャではなくバッファを読む
+2. **半分も覆っていない。** 切り分けで見たい `SSILRawTexture` / `TransmittanceLUT` /
+   `TAAHistory` / `ExposureTexture` は `DebugView` に無く、足すには `Present.hlsl` の
+   表示モードを増やすことになる(目視表示のためのコードを、ダンプのために書く羽目になる)
+3. **番号が既に契約になっている。** `-debugview N` とUIコンボと `kDebugViewCount` が
+   番号に依存しており、途中に足すと docs と履歴に記録済みの番号が全部ずれる
+
+代わりに名前引きの表(`KurenaiEngine3D::BuildDumpableTextureTable`)を、
+ポインタが生まれる `CreateRenderTargets` の直後に置いた。**未知の名前が来たら
+有効な名前を全部ログへ並べる** —— UIを見られない利用者にとって、これが唯一の発見手段になる。
+
+### 62.6 既定を180フレームにした理由
+
+`kMegaLightsAccumWarmup`(=180)を**新しい定数を作らずに再利用した。**
+あちらのコメントが理由を既に書いている —— 起動直後は内部解像度が既定値(1280x720)から
+実ウィンドウサイズへ切り替わり、ストリーミングも走っている。
+**実際に、待たずに書き出して1280x720のまま吐き出された記録がある。**
+値が2つに割れると、片方だけ直す事故が起きる。
+
+### 62.7 R11G11B10 の展開をC++ではなくPythonへ置いた理由
+
+このフォーマットを使うのは G-Buffer のエミッシブだけで、**手元のどのシーンでも全画素0だった**
+(MaterialTest / PenumbraH4 / BistroInteriorLit で確認)。
+
+最初はC++側で float32×3 へ展開する実装を書いたが、**一度も非ゼロで動かせないデコーダを
+C++に残すと、いつか非ゼロのデータが来たときに静かに誤った数値を返す。**
+そこで詰まったまま書き出し(`ElementType=4`)、展開を `Tools/texdump_inspect.py` へ移した。
+読み手に置けば、**11bit/10bitの取りうる値をすべて列挙して独立実装と突き合わせる検算**を
+`selftest` で常時回せる(R 2048通り / G 2048通り / B 1024通り、全一致)。
+
+### 62.8 自動終了に `PostQuitMessage` を使わない理由
+
+`PostQuitMessage` は**呼び出したスレッドの**キューへ `WM_QUIT` を積む。
+書き出しの完了を判定するのは Render スレッドで、メッセージを汲むのは Update スレッド
+(`Run()` の `PumpMessages`)なので、Renderスレッドから呼んでも誰も拾わず永久に終わらない。
+
+`PostMessageW(hwnd, WM_CLOSE, 0, 0)` はスレッド安全にウィンドウのキューへ積める。
+`WM_CLOSE` は `Window::HandleMessage` が `m_ShouldClose = true` にするだけなので、
+`Run()` のループが正規の手順で抜け、スレッドの停止も後始末も普段どおり走る。
+
+**読み戻しが60フレーム続けて失敗したら諦める**上限も入れてある。
+`-exitafterdump` と組み合わせた無人実行が静かに固まるのが最悪の失敗のため。
+
+### 62.9 動作の検証(実測)
+
+いずれも Debug ビルド / RTX 4070 Ti / 1280x720 の内部解像度。
+
+**フォーマットごとのサイズが設計どおり**(MaterialTest, DX12, frame=205):
+
+| 名前 | フォーマット | 書き出された形 | バイト数(ヘッダ128を除く) |
+|---|---|---|---|
+| `GBufferDepth` | R32_TYPELESS → Float32 | 1280x720 ch=1 | 3,686,400 |
+| `GBufferAlbedo` | R8G8B8A8_UNorm | 1280x720 ch=4 | 3,686,400 |
+| `GBufferNormal` | R16G16_Float | 1280x720 ch=2 | 3,686,400 |
+| `SceneColor` | R16G16B16A16_Float | 1280x720 ch=4 | 7,372,800 |
+| `DirectLightTexture` | R32G32B32A32_Float | 1280x720 ch=4 | 14,745,600 |
+| `ShadowCascadeArray` (slice 1) | 深度配列 | 2048x2048 ch=1 | 16,777,216 |
+| `HiZTexture` (mip 2) | R32_Float | 320x180 ch=1 | 230,400 |
+
+**読み出しが正しいことの根拠は、独立した3つの一致**:
+
+1. **ジオメトリマスクの整数一致。** 深度・アルベド・法線はフォーマットも型も違うのに、
+   値が0の画素数が **3枚とも 908,350**(921,600中)でぴったり一致した。
+   読み出しがずれていればこの数は揃わない
+2. **DX11とDX12がビット一致。** まったく別実装の2経路(DX11はSTAGINGテクスチャ+`Map`、
+   DX12は`GetCopyableFootprints`+配置バッファ)が、深度・アルベド・シャドウマップで
+   **1ビットも違わない**値を返した(PenumbraH4)。法線だけ 1,843,200 要素中 3 要素が違うが、
+   最大差 0.000031 は Float16 の量子化刻み 0.000488 より小さく、符号も両側に散っている
+   —— DXBC(SM5.0)とDXIL(SM6.6)のコード生成差によるULPで、系統差ではない
+3. **Hi-Z が深度と整合。** mip2 の背景率 98.9% と最大値 0.013035 が、
+   ミップ0の深度(98.6% / 0.013046)に対して min 縮約の関係になっている
+
+**引数が効いていることの対照実験**(これが無いと「一致」を根拠に使えない):
+
+- `-dumptexslice 0` と `1` を PenumbraH4 で比べると **4,194,304 要素中 1,824,724(43.5%)が
+  食い違う。** MaterialTest では両スライスがビット一致するが、それは両方がクリア値 1.0 の
+  ままだからで、**そちらだけを見て「sliceが効いている」とは言えない**
+- 同一条件で2回起動したダンプは**ビット一致**(再現性の下限がゼロ)
+
+**D3D12デバッグレイヤの指摘は0件。** Debugビルドで走らせて、テクスチャコピーに対する
+指摘は出ていない(起動時に出る2件はレイトレーシングの高速化構造に関する既存の別件)。
+
+### 62.9a ヘッダにバックエンドを書く理由(独立検算で出た穴)
+
+上の「DX11とDX12がビット一致」を独立の検証役に確かめさせたところ、**一致そのものは確認できたが、
+「本当に別々のバックエンドで採ったのか」はファイルからは確かめられない**と指摘された。
+
+一致している以上ヘッダを含めて完全にバイト一致するので、2つのファイルは見分けがつかない。
+つまりA/Bで言う「**片方が実行されていない**」を、ダンプだけでは潰せない状態だった。
+
+そこでヘッダに `Backend`(1=DX11 / 2=DX12)を足し、**出所をファイル自身に自己申告させる**ことにした。
+`texdump_inspect.py diff` は比較する2枚のバックエンドを必ず刷り、同じなら
+「同じバックエンド同士の比較です」と明示する。フィールドを足して `SourceName` の位置が
+4バイトずれるため、**形式のバージョンを1から2へ上げた** —— 上げずに読ませると、
+名前の先頭4文字がBackendとして解釈され、名前も4バイトずれた状態で「読めてしまう」。
+
+### 62.9b 自己検査の穴(独立検算で出た穴)
+
+同じ検証で、`selftest` が変異テストに耐えるかを確かめられた。
+`load()` の長さ検査・マジック検査・R11G11B10の仮数ビット数・`stored_channels` の分岐を
+それぞれ壊すと検査は落ちたが、**`as_float()` の UNorm8 の `/ 255.0` を消しても全件PASSした。**
+
+1〜5の項目をすべて Float32 で作っていたため、**UNorm8 の往復が一度も走っていなかった。**
+アルベド(`GBufferAlbedo` は `R8G8B8A8_UNorm`)の数値が255倍ずれても素通りする状態で、
+「全件PASS」は通っていない経路について何も言っていなかった。
+
+UNorm8 と Float16 の往復、および `Backend` の往復を検査に足して34件にした。
+足したあと同じ変異を当て直し、**今度は落ちること**(と、無変異なら通ること)を確認している。
+
+### 62.10 RenderDoc をGUI無しで動かす — 採用。ただしモジュールの自前ビルドが要る
+
+バインドの取り違え(どのドローがどのリソースを読み書きしたか)は、値のダンプでは
+**原理的に分からない**。RenderDoc 1.45 が入っているので、機械的に読めるかを確かめた。
+
+#### 何が障害だったか
+
+配布バイナリには **`renderdoc.pyd`(Pythonモジュール本体)が入っていない。**
+
+| 項目 | 実測 |
+|---|---|
+| `renderdoccmd` に `python` 相当のサブコマンド | **無い**(`capture`/`convert`/`embed`/`extract`/`inject`/`remoteserver`/`replay`/`test`/`thumb`/`version` のみ) |
+| 単体の `renderdoc.pyd` | **無い**。同梱は `renderdoc.dll` と `qrenderdoc.exe`(Python 3.6.4 内蔵)、`python36.zip`(標準ライブラリのみ) |
+| `qrenderdoc --python <script>` | **スクリプトは走る**が、**UIが開いたまま終了しない**(60秒待ってもPIDで殺すしかない) |
+
+**「UIが終わらない」は症状であって理由ではなかった。** 同梱の `renderdoc.chm` を
+`hh.exe -decompile` で展開すると、**UIを介さない正規のヘッドレス経路が文書化されている**
+(`python_api/examples/renderdoc_intro.html`)。素のPythonから
+`rd.InitialiseReplay()` → `rd.OpenCaptureFile()` → `cap.OpenCapture()` と進む形で、
+`save_texture` / `iter_actions` / `fetch_shader` の例まで揃っている。
+それに要る `.pyd` が配布物に無い、というだけだった。
+
+#### 用意の手順(実際に通したもの)
+
+1. **ソースを取る。** `git clone --depth 1 --branch v1.45 --recurse-submodules https://github.com/baldurk/renderdoc.git`
+   —— **インストール済みと同じバージョンにすること**(`.pyd` は `renderdoc.dll` のABIに依存する)
+2. **Python の上書き先を用意する。** `qrenderdoc/Code/pyrenderdoc/python.props` が
+   `RENDERDOC_PYTHON_PREFIX64` を見て 3.18〜3.4 を順に探す。要るのは3つ:
+   `include\Python.h` / `pythonXY.zip` / `libs\pythonXY.lib`。
+   **`pythonXY.zip` はインストーラ版に入っていない**ので、`Lib\` を自分でzipに固める
+   (`test`/`site-packages`/`idlelib` は外してよい。3.7で8MB)
+3. **依存を先に建てる。** `renderdoc.vcxproj` は breakpad の3つのlibを直接参照しているが
+   プロジェクト参照にはなっていないため、単体ビルドではリンクで落ちる:
+   `3rdparty/breakpad/client/windows/common.vcxproj`、`crash_generation/crash_generation_client.vcxproj`、
+   `handler/exception_handler.vcxproj`
+4. **モジュールを建てる。**
+
+```powershell
+$env:RENDERDOC_PYTHON_PREFIX64 = "<用意したprefix>"
+msbuild "<src>\qrenderdoc\Code\pyrenderdoc\pyrenderdoc_module.vcxproj" `
+  /p:Configuration=Release /p:Platform=x64 "/p:SolutionDir=<src>\" `
+  /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0.26100.0 /m
+```
+
+**引っかかった点3つ:**
+
+- `SolutionDir` を渡さないと `util\WindowsSDKTarget.props` の解決に失敗する(`MSB4019`)
+- `.vcxproj` は `PlatformToolset v140`(VS2015)を指定している。VS2022しか無いと
+  `TRK0005: CL.exe が見つかりません` になるので `v143` を明示する
+- SWIGはリポジトリに同梱されている(`qrenderdoc/3rdparty/swig/swig.exe`)。別途入手は不要
+
+成果物は `<src>\x64\Release\pymodules\renderdoc.pyd`(6.3MB)と `<src>\x64\Release\renderdoc.dll`。
+**ビルドに使ったのと同じPythonバージョンでしか読めない**(ここでは 3.7.8)。
+
+#### 動くことの確認(実測)
+
+- 素の Python 3.7 プロセスから `import renderdoc`(460属性)、`InitialiseReplay` /
+  `OpenCaptureFile` / `ShutdownReplay` が通る。**`qrenderdoc.exe` は起動しない**
+- キャプチャの取得も全部スクリプトから行える。`rd.ExecuteAndInject()` でアプリを起動し、
+  `rd.CreateTargetControl()` で繋ぎ、**`TargetControl.QueueCapture(フレーム番号, 1)` で
+  撮るフレームを予約する**。ホットキーに頼らないので対象が決定的に決まる。
+  `ReceiveMessage()` の `NewCapture` で `.rdc` のパスが返る
+- **エンジンの改修は要らなかった。** アプリ内API(`RENDERDOC_GetAPI` / `TriggerCapture`)を
+  組み込む案もあったが、ターゲット制御で足りるので `renderdoc_app.h` の持ち込みも不要
+
+#### 合否 —— 「数字が出た」ではなく「同じ数字が出た」で判定した
+
+`-exitafterdump` と併用して**1回の起動で**キャプチャと `-dumptex` を同時に採り、
+同じフレームの `GBufferAlbedo` を突き合わせた。
+
+**3,686,400バイトが全チャンネル1ビットも違わなかった**(`texdump_inspect diff` で
+`|d| > 0 : 0 / 3,686,400`)。まったく別実装の2経路 —— RenderDocのリプレイと
+エンジン自身のリードバック —— が同じ値を返したので、**両方が正しい**と言える。
+片方だけでは「読めた」以上のことは言えない。
+
+道具は `Tools/renderdoc_probe.py`(`capture` / `actions` / `textures` / `binds` / `export`)。
+`export` は KTXD v2 で書き出すので、**RenderDoc から採った値も `texdump_inspect.py` と
+同じ物差しで測れる。**
+
+#### リソースに名前を付ける — `-dumptex` と同じ表から焼く
+
+最初の照合は「寸法とフォーマットで候補を絞り、総当たりで突き合わせる」形になった。
+リソースに名前が無く、キャプチャ上は `ResourceId::562` としか出なかったため
+(当時 `SetName` はディスクリプタヒープ7個にしか付いていなかった)。
+
+`IRHITexture::SetDebugName` を足して解決した。**名前は `-dumptex` が使うのと同じ表
+(`KurenaiEngine3D::BuildDumpableTextureTable`)から与える。**
+
+- **RHIに増えたのは1メソッドだけ。** 生成APIの引数をいじると、テクスチャの作り方が
+  10種類以上あるぶんすべてを直すことになる。作った後で名前を付ける形にすれば1箇所で済む
+- DX12は `ID3D12Object::SetName`、DX11は `SetPrivateData(WKPDID_D3DDebugObjectName, ...)`
+  (`dxguid.lib` はリンク済み)。**NUL終端を長さに含めない** —— 含めると表示に終端が混ざる
+- **毎フレームは焼かない。** レンダーターゲットを作り直したときだけ立つフラグ
+  (`m_DebugNamesDirty`)を見る。41本の `SetName` を60回/秒で呼ぶ意味がない
+- 何本に名前が付いたかをログに出す。「名前が出ない」ときに、付け忘れなのか
+  その機能が無効でテクスチャ自体が無いのかを、ログだけで切り分けられるようにするため
+
+**同じ名前で両方の経路を指せるのが要点。** `-dumptex GBufferAlbedo` で吸い出した値と、
+キャプチャ上の `GBufferAlbedo` が同じものだと名前だけで分かる。
+`renderdoc_probe.py export --resource GBufferAlbedo` のように名前でも指定できる。
+
+実測(名前を付けた後):
+
+```
+name                         resourceId       size       format
+ShadowCascadeArray           ResourceId::466  2048x2048  R32_TYPELESS
+GBufferAlbedo                ResourceId::562  1280x720   R8G8B8A8_UNORM
+GBufferNormal                ResourceId::563  1280x720   R16G16_FLOAT
+GBufferDepth                 ResourceId::566  1280x720   R32_TYPELESS
+DirectLightTexture           ResourceId::567  1280x720   R32G32B32A32_FLOAT
+SceneColor                   ResourceId::572  1280x720   R16G16B16A16_FLOAT
+HiZTexture                   ResourceId::588  1280x720   R32_FLOAT (11ミップ)
+```
+
+`binds` も名前で読める。DirectLightingのドロー(eid=373)では:
+
+```
+--- ShaderStage.Pixel ---
+  Image  index=1  ResourceId::562  GBufferAlbedo
+  Image  index=2  ResourceId::563  GBufferNormal
+  Image  index=3  ResourceId::564  GBufferMaterial
+  Image  index=4  ResourceId::566  GBufferDepth
+  Image  index=5  ResourceId::466  ShadowCascadeArray
+  Image  index=8  ResourceId::476  BRDFLUTTexture
+--- 出力 ---
+  RTV[0] ResourceId::567  DirectLightTexture
+```
+
+**どのドローが何を読み書きしたかは、値のダンプでは原理的に分からない。** ここが段7の存在理由。
+
+名前を付けた後も両経路の一致は保たれている ——
+`GBufferAlbedo`(UNorm8) 3,686,400バイト、`GBufferNormal`(Float16) 1,843,200要素とも
+`|d| > 0 : 0`。
+
+### 62.11 `.kshader` はバイト再現的ではない(実測)
+
+「シェーダを変えていない」ことをビルド出力のバイト比較で示そうとして、成立しないことが分かった。
+
+**ソースを1文字も変えずに `KurenaiShaderPacker --force` で焼き直すと、48本中37本の
+`.kshader` の内容が変わる**(SHA256で比較。Debug構成、焼き直し 48/48ファイル・255エントリ・
+35.9MB・167秒/16並列)。
+
+したがって:
+
+- **`.kshader` の素のバイト比較を「無変更の証明」に使ってはいけない。** 同じソースから
+  別のバイト列が出るので、差が出ても何も言えない
+- 「ソースを戻したあと、ビルド出力も戻ったか」も、この比較では確かめられない。
+  1本の `.hlsli` を戻しただけで42本が変わるが、その大半は上の非決定性による
+- **「シェーダを変えていない」は `.hlsl` / `.hlsli` の `git diff` が空であることで示す。**
+  バイトコードで示したいなら、`docs/ImplementationHistory.md` 58.7 のように
+  DXILを束縛先で正規化してから比べること
