@@ -286,8 +286,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 const float originBias =
                     (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
                 // シェード側と同じ点へ撃つ(違う点を狙うと、殺す判断と影の階調が食い違う)
-                const float3 samplePos = MegaLightsLightSamplePosition(
-                    selectedLight.PositionType.xyz, selectedLight.Params.z, sampleUV);
+                const float3 samplePos = MegaLightsLightSamplePosition(selectedLight, sampleUV);
                 const float3 toSample = samplePos - worldPos;
                 const float sampleDist = length(toSample);
                 if (sampleDist > originBias)

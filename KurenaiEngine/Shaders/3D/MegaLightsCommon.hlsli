@@ -169,14 +169,45 @@ float2 MegaLightsUnpackSampleUV(uint packed)
     return float2(f16tof32(packed & 0xFFFFu), f16tof32(packed >> 16u));
 }
 
-// 光源の中心と半径から、実際に狙う点を求める。半径0なら中心そのもの(点光源と完全に一致)
-float3 MegaLightsLightSamplePosition(float3 lightCenter, float sourceRadius, float2 sampleUV)
+// 半径Rの円板を面積一様にサンプルする。円板の法線は axis で、接空間はここで作る。
+//
+// 【球面一様と同じくヤコビアンが1のまま】写像が受光点に依存しないので、時空間再利用で
+// 別の画素へサンプルを渡してもシフトが恒等になる(理由は上の球面サンプリングのコメント)。
+// r = R*sqrt(u1) にするのは面積一様にするため。r = R*u1 だと中心へ寄る
+float3 MegaLightsSampleDisk(float3 axis, float radius, float2 u)
 {
+    // axis に直交する適当な基底。axis と平行になりにくい軸を選んで外積する
+    const float3 helper = (abs(axis.y) < 0.99f) ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    const float3 tangent = normalize(cross(helper, axis));
+    const float3 bitangent = cross(axis, tangent);
+
+    const float r = radius * sqrt(saturate(u.x));
+    const float phi = 6.28318530718f * u.y;
+    return tangent * (r * cos(phi)) + bitangent * (r * sin(phi));
+}
+
+// 光源の中心と半径から、実際に狙う点を求める。半径0なら中心そのもの(点光源と完全に一致)。
+//
+// 【エミッシブ光源プロキシ(型3)は球ではなく円板を引く】平らな発光パネルへ球面一様を使うと、
+// **サンプルの約半分がパネルの裏側に落ちる**。受光点からその点へのレイはパネル自身を貫くので
+// 遮蔽と判定され、光が半分ほど暗くなり、しかもノイズとして出る。
+// 「半影が出ている」ように見えるので気付きにくい。
+// 減衰に使った円板近似(分母が d^2 + R^2)とも形が揃う。
+//
+// 【GPULight を受け取る】円板の向きに DirectionAngle.xyz(発光面の平均法線)が要る
+float3 MegaLightsLightSamplePosition(GPULight light, float2 sampleUV)
+{
+    const float sourceRadius = light.Params.z;
     if (sourceRadius <= 0.0f)
     {
-        return lightCenter;
+        return light.PositionType.xyz;
     }
-    return lightCenter + MegaLightsSampleUnitSphere(sampleUV) * sourceRadius;
+    if ((uint)light.PositionType.w == 3u) // EmissiveProxy
+    {
+        return light.PositionType.xyz +
+               MegaLightsSampleDisk(light.DirectionAngle.xyz, sourceRadius, sampleUV);
+    }
+    return light.PositionType.xyz + MegaLightsSampleUnitSphere(sampleUV) * sourceRadius;
 }
 
 MegaLightsHistoryGuide MegaLightsMakeEmptyGuide()

@@ -153,8 +153,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 【球光源はリザーバが持つ点へ撃つ】半径0なら中心そのものなので点光源と完全に一致する。
         // レイの向きと距離だけが変わり、減衰と寄与は中心で評価したものを使う
         // (理由は MegaLightsCommon.hlsli の球光源サンプリングのコメント)
-        const float3 samplePos = MegaLightsLightSamplePosition(
-            light.PositionType.xyz, light.Params.z, MegaLightsUnpackSampleUV(reservoir.SampleUV));
+        const float3 samplePos =
+            MegaLightsLightSamplePosition(light, MegaLightsUnpackSampleUV(reservoir.SampleUV));
         const float3 toSample = samplePos - worldPos;
         const float sampleDist = length(toSample);
         // 受光点が球の内側に入った場合は遮蔽を判定しようがないので素通しにする

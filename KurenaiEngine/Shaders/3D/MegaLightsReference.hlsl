@@ -241,7 +241,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 {
                     const float2 sampleUV = float2(NextRandom(rngState), NextRandom(rngState));
                     const float3 samplePos =
-                        MegaLightsLightSamplePosition(light.PositionType.xyz, sourceRadius, sampleUV);
+                        MegaLightsLightSamplePosition(light, sampleUV);
                     const float3 toSample = samplePos - worldPos;
                     const float sampleDist = length(toSample);
                     if (sampleDist <= originBias)
