@@ -1,0 +1,46 @@
+# DDGI の二重計上(-emissivelightsddgi)を測るためのシーン。
+# Tools/generate_emissive_gi_test.py で生成される(手で編集しない)。
+#
+#   Sample3D.exe -dx12 -scene EmissiveGITest -emissivelights 1 -debugview 26 -emissivelightsddgi 0
+#   同上 -emissivelightsddgi 1
+#   (-ddgiraster を足すと DDGI のラスタ経路になる。**両方の経路を踏むこと**)
+#
+# DDGI のイラディアンスアトラスに差が出ること。**差ゼロを合格にしない。**
+# 差分画素の形を先に見る ―― 対称な十字は ImGui のカーソルであって信号ではない。
+#
+# 【AO/GI を切らない】DDGI が走る条件は AO/GI が有効かつ GIボリュームがあること。
+# EmissiveLightProxy 側はノイズを避けるため切ってあり、あちらでは DDGI が走らない。
+# 【パネルは大きく作ってある】プローブのキャプチャは1面16x16(1テクセル約5.6度)。
+# 小さい発光体はプローブに写らず、写らないものは二重に数えられない。
+
+[Scene]
+Name = Emissive GI Test
+Exposure = 15.0
+TAA = false
+AmbientOcclusion = true
+IBLIntensity = 0.0
+
+[Model]
+Path = EmissiveGITest/EmissiveGITest.kmodel
+
+[Camera]
+Position = 0.00, 1.60, -9.00
+Yaw = 0.0
+Pitch = -8.0
+
+[Sun]
+# 太陽を切り、発光パネルだけで照らす
+Enabled = false
+Shadow = false
+TimeOfDay = 12.0
+
+[GIVolume]
+# パネル(高さ 3.0 m)の**真下**にプローブを敷く。上に出すとパネルの裏を見ることになる
+Name = EmissiveGITest
+Origin = -6.0, 0.25, -6.0
+ProbeSpacing = 1.5, 0.75, 1.5
+ProbeCounts = 9, 4, 9
+NormalBias = 0.25
+ViewBias = 0.10
+Hysteresis = 0.97
+MaxRayDistance = 20.0
