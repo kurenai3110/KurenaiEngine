@@ -441,6 +441,54 @@ def derive_range(intensity):
     return math.sqrt(intensity / illum)
 
 
+# 自発光を与えるマテリアル。「灯そのもの」ではなく**目に見える発光面**を指す。
+# (キー, mtl名, 器具1つあたりの成分を選ぶ規則)。器具の光束は PHOTOMETRY から引く
+EMISSIVE_SURFACES = [
+    ("streetlight", "Streetlight_Glass", None),
+    ("string", "Paris_StringLights_01_White_Color", None),
+    ("string", "Paris_StringLights_01_Blue_Color", None),
+    ("string", "Paris_StringLights_01_Green_Color", None),
+    ("string", "Paris_StringLights_01_Red_Color", None),
+    ("string", "Paris_StringLights_01_Pink_Color", None),
+    ("string", "Paris_StringLights_01_Orange_Color", None),
+    ("awning_a", "MASTER_Light_Bulb", None),
+    ("awning_b", "Spotlight_Emissive", None),
+    ("lantern", "Lantern", ("verts_gt", 1000)),
+    ("vespa", "Vespa_Headlight", None),
+]
+
+REC709 = (0.2126, 0.7152, 0.0722)
+
+
+def emissive_factor(colour, luminance):
+    """色を Rec.709 輝度1へ正規化してから、露出済み輝度を掛ける。
+
+    【正規化する理由】emissive は「テクスチャ × EmissiveFactor」で合成され、
+    自発光テクスチャを持たないマテリアルではテクスチャが白になる。素材色をそのまま
+    掛けると、緑の電球は R と B が 0 のぶん輝度が下がり、同じ光束のはずの白い電球より
+    暗く写る。輝度で正規化すれば、色が違っても明るさが揃う。
+    """
+    y = sum(c * w for c, w in zip(colour, REC709))
+    if y <= 1e-6:
+        return (luminance, luminance, luminance)
+    return tuple(c / y * luminance for c in colour)
+
+
+def exposed_luminance(flux, solid_angle, radius):
+    """発光面の輝度[cd/m^2]を露出済みの値へ直す。
+
+    I = 光束 / 立体角、投影面積 A = pi*r^2 として L = I/A。
+    ライトの色は CPU 側で露出(1/(1.2*2^EV100))を掛けてから送られるのに対し、
+    自発光は露出を通らずそのまま加算されるので、ここで同じ係数を掛けておく
+    (docs/ImplementationDetail.md 61.7h)。
+    """
+    intensity = flux / solid_angle
+    area = math.pi * radius * radius
+    if area <= 1e-9:
+        return 0.0
+    return intensity / area / (1.2 * (2.0 ** SCENE_EXPOSURE))
+
+
 def assign_string_colours(model, bulbs, blue_as_blue):
     """色ごとの内殻メッシュを、外殻の電球へ最近傍で割り当てる。"""
     centres = np.array([b["c"] for b in bulbs])
@@ -461,6 +509,38 @@ def assign_string_colours(model, bulbs, blue_as_blue):
         tally[label] = taken
     missing = [i for i, c in enumerate(colour) if c is None]
     return colour, tally, missing
+
+
+def build_pack_args(model, blue_as_blue):
+    """--emissive の指定を組み立てて (行, 明細) で返す。"""
+    args, rows = [], []
+    bulbs = select_components(model, "Stringlights", ("diag_lt", 1.0))
+    bulb_centres = np.array([b["c"] for b in bulbs])
+    for key, mtl_name, rule in EMISSIVE_SURFACES:
+        comps = select_components(model, mtl_name, rule)
+        # 【White の内殻には街灯のフィラメントが混ざっている】mesh 79 の40成分のうち28個は
+        # 街灯の球の中にあるフィラメントで、ストリング電球ではない。半径がひと回り大きく、
+        # 混ぜたまま中央値を取ると White だけ暗く出る(実測で他色の 1/3)。
+        # 色の割り当てと同じ規則(電球から 0.15m 以内)で絞る
+        if mtl_name in STRING_COLORS:
+            comps = [c for c in comps
+                     if np.linalg.norm(bulb_centres - c["c"], axis=1).min() <= 0.15]
+        if not comps:
+            continue
+        radii = sorted(c["r"] for c in comps)
+        radius = radii[len(radii) // 2]              # 個体差があるので中央値を使う
+        flux, solid, _note = PHOTOMETRY[key]
+        lum = exposed_luminance(flux, solid, radius)
+        if mtl_name in STRING_COLORS:
+            label, rgb = STRING_COLORS[mtl_name]
+            if blue_as_blue and label == "Blue":
+                rgb = BLUE_ACTUAL
+        else:
+            label, rgb = "Incandescent2700K", INCANDESCENT
+        e = emissive_factor(rgb, lum)
+        args.append('--emissive "%s=%.1f,%.1f,%.1f"' % (mtl_name, e[0], e[1], e[2]))
+        rows.append((mtl_name, len(comps), radius, lum, label, e))
+    return args, rows
 
 
 def select_components(model, mtl_name, rule):
@@ -555,14 +635,36 @@ def choose_camera(model, lights):
     eye = np.array([eye_xz[0], ground + eye_height, eye_xz[2]])
     # Yaw は +Z を0度、+X を90度として測る(Camera::GetForward が atan2(dx, dz) 相当)
     yaw = math.degrees(math.atan2(forward[0], forward[2]))
-    # 【灯の重心を狙ってはいけない】灯は頭上(街灯 y≈3〜4.5、ストリングライト y≈3.4〜5.8)に
-    # あるので、重心を狙うと仰角が上を向き、庇の裏だけが画面を占める絵になる(実際そうなった)。
-    # 狙うのは通りの路面。20m 先の地面を見る角度にすると、街灯の作る光溜まりと
-    # そこへ落ちる影が画面に入る。
+    # 【路面と灯の両方を画面へ入れる】FovY=45度なので視野は上下±22.5度しかない。
+    #   ・灯の重心を狙うと仰角が上を向き、庇の裏だけが画面を占める
+    #   ・20m先の路面だけを狙うと、今度は頭上の電球(y≈4.1)が画面の上へ外れる
+    # どちらも実際にやって失敗した。前方の灯と「20m先の路面」の仰角を数えて、
+    # その範囲の中央へ向ける。範囲が視野に収まるかもログに出す。
+    # 【俯角は路面を狙う。灯を画面へ入れようとしないこと】
+    # ここは何度か作り直した。順に:
+    #   1. 前方の灯の重心を狙う → 灯は頭上(y≈4.1)なので真上を向き、庇の裏だけが映った
+    #   2. 20m先の路面を狙う    → 街路と卓が入る良い絵になるが、頭上の電球は画面の上へ外れる
+    #   3. 路面と灯の両方の仰角の中央を狙う → FovY=45度(上下±22.5度)に収まらず検算で落ちた
+    #      (近い電球は仰角+35度、路面は-4.7度で範囲69度)。遠方の灯だけに絞っても
+    #      +4.1度で、庇が画面の2/3を占めたままだった
+    # 結局 2 を採る。
+    #
+    # 【残っている限界】このカメラは**ビストロの庇の真下**にあり、ストリングライトは
+    # その庇に吊られているので、どんな俯角にしても「庇を見上げる」か「電球が外れる」の
+    # どちらかにしかならない。電球を主役にしたいなら車道側へ出る必要があるが、
+    # 位置を決めている規則(通りの軸に沿って灯が最も多く入る点)は車道へ出す動きを持たない。
+    # 位置の選び方から作り直す話なので、ここでは俯角だけで済ませている。**未対応。**
     aim_distance = 20.0
-    pitch = math.degrees(math.atan2(-eye_height, aim_distance))
+    lo = math.degrees(math.atan2(-eye_height, aim_distance))
+    light_elevations = sorted(
+        math.degrees(math.atan2(p[1] - eye[1], float((p - eye) @ forward)))
+        for p in pts if float((p - eye) @ forward) >= 8.0)
+    hi = light_elevations[-max(1, len(light_elevations) // 10)] if light_elevations else lo
+    pitch = lo
+    span = hi - lo
+
     visible = int((((pts - eye) @ forward) > 0).sum())
-    return eye, yaw, pitch, ground, visible, best[1]
+    return eye, yaw, pitch, ground, visible, best[1], span
 
 
 def build_lights(model, blue_as_blue, verbose):
@@ -654,7 +756,7 @@ def overlap_stats(lights):
 
 
 def format_scene(model, lights, camera, tally, counts, worst_overlap, blue_as_blue):
-    eye, yaw, pitch, ground, visible, in_window = camera
+    eye, yaw, pitch, ground, visible, in_window, span = camera
     esc = [l["escape"] for l in lights]
     drops = [l["drop"] for l in lights]
     out = []
@@ -726,6 +828,12 @@ def format_scene(model, lights, camera, tally, counts, worst_overlap, blue_as_bl
     w("# そこへ目線の高さ 1.65m を足している。前方に入る灯は %d 灯。" % visible)
     w("# 俯角は「20m 先の路面を見る角度」。灯の重心を狙うと、灯が頭上にあるぶん仰角が")
     w("# 上を向き、庇の裏だけが画面を占める絵になる(最初にそれで失敗した)。")
+    w("#")
+    w("# 【ストリングライトは画面に入らない】路面と前方の灯の仰角の範囲は %.1f 度あり、" % span)
+    w("# 中央へ向ければ両方入る計算になるが、実際にやると庇が画面の2/3を占める")
+    w("# (+7.4度・+4.1度で試した)。カメラがビストロの庇の真下にあり、電球はその庇に")
+    w("# 吊られているためで、俯角では解けない。車道側へ出るには位置を決める規則ごと")
+    w("# 作り直す必要がある。**未対応。**")
     w("# Yaw は +Z を0度、+X を90度として測る(atan2(dx,dz) であって atan2(dz,dx) ではない)。")
     w("")
     w("[Scene]")
@@ -779,6 +887,8 @@ def main():
     parser.add_argument("--blue-as-blue", action="store_true",
                         help="Blue の電球に Blue.png の色を使う(既定は実際に描かれている白)")
     parser.add_argument("-o", "--output", default=OUT, help="出力する .kscene のパス")
+    parser.add_argument("--print-pack-args", action="store_true",
+                        help="発光面へ与える --emissive の指定を出して終わる(灯の抽出はしない)")
     args = parser.parse_args()
 
     if not os.path.exists(KMODEL):
@@ -789,6 +899,20 @@ def main():
     model = Model(KMODEL, MTL)
     check_material_texture_pairing(model)
     print("マテリアル名とテクスチャの対応: OK")
+
+    if args.print_pack_args:
+        pack_args, rows = build_pack_args(model, args.blue_as_blue)
+        print("発光面の自発光係数(Exposure=%.1f 前提):" % SCENE_EXPOSURE)
+        for mtl_name, n, radius, lum, label, e in rows:
+            print("  %-38s %3d個 半径%.3fm 輝度%8.1f %-18s -> %.1f,%.1f,%.1f"
+                  % (mtl_name, n, radius, lum, label, e[0], e[1], e[2]))
+        print()
+        print(r"KurenaiPacker.exe Assets\Source\BistroMcGuire\exterior.obj ^")
+        print(r"  -o Assets\Packed\BistroMcGuire\Exterior.kmodel ^")
+        for a in pack_args:
+            print("  %s ^" % a)
+        print("  (最後の ^ は消すこと)")
+        return 0
 
     lights, problems, counts, tally, dropped = build_lights(model, args.blue_as_blue, args.report)
     total = len(lights)
@@ -820,8 +944,10 @@ def main():
         problems.append("Range の重なりが %d で、従来経路のタイル容量64に対して余裕がありません" % worst)
 
     camera = choose_camera(model, lights)
-    print("カメラ: (%.3f, %.3f, %.3f) Yaw %.1f Pitch %.1f  地面 %.3f  前方の灯 %d"
-          % (camera[0][0], camera[0][1], camera[0][2], camera[1], camera[2], camera[3], camera[4]))
+    print("カメラ: (%.3f, %.3f, %.3f) Yaw %.1f Pitch %.1f  地面 %.3f  前方の灯 %d  仰角の範囲 %.1f度"
+          % (camera[0][0], camera[0][1], camera[0][2], camera[1], camera[2], camera[3], camera[4], camera[6]))
+    if camera[6] > 45.0:
+        problems.append("路面と灯の仰角の範囲が %.1f 度で FovY=45 度に収まりません" % camera[6])
 
     if problems:
         print("\n検算で問題が出ました:")

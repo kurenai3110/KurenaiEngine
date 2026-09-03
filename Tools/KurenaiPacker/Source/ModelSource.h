@@ -166,6 +166,19 @@ namespace KurenaiPacker
         // 「BaseColorのアルファで抜く」前提で作られた葉や草のマテリアルであっても
         // 解析だけでは判別できず、不透明な板として描かれてしまう。外から名前で指定する
         std::map<std::string, float> AlphaCutoff;
+        // マテリアル名 → 自発光の係数(リニアRGB)。
+        //
+        // WavefrontMTLのKe(AI_MATKEY_COLOR_EMISSIVE)を持たないアセットは、照明器具の
+        // ジオメトリがあっても EmissiveFactor が 0 のまま出る。GBuffer.hlsl は
+        // 「自発光テクスチャ × EmissiveFactor × EmissiveIntensity」で合成するため、
+        // 係数が0だと自発光テクスチャを持つマテリアルまで光らない
+        // (Bistro屋外がこれで、132マテリアル全部の Ke が 0 だった)。
+        //
+        // 【0〜1に収めない】ライトの色は CPU 側で露出を掛けてから送られるのに対し、
+        // 自発光は露出を通らずそのまま加算される(DeferredLighting.hlsl)。
+        // 光源として見えるようにするには露出済みの輝度に相当する値が要るため、
+        // 1を大きく超える値を許す。求め方は docs/ImplementationDetail.md 61.7h
+        std::map<std::string, std::array<float, 3>> Emissive;
         // aiTextureType_SPECULARに入っているテクスチャをmetallicRoughnessとして読むか。
         //
         // FBXのSpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を格納する
