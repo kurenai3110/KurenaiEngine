@@ -337,6 +337,14 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
   **glTF以外の形式で葉や草を正しく描くにはこれが要ります** — アルファモード(OPAQUE/MASK/BLEND)は
   glTFにしかない情報で、FBX/OBJでは「アルファで抜く前提のマテリアル」を解析だけでは判別できず、
   指定しないと不透明な板として描かれます
+- `--emissive <マテリアル名>=<R,G,B>` で、指定した名前のマテリアルへ自発光の係数を与えます。
+  複数指定できます。**照明器具を光らせるにはこれが要ることがあります** — WavefrontMTLの`Ke`を
+  持たないアセットは`EmissiveFactor`が0のまま出て、G-Bufferが
+  「自発光テクスチャ × EmissiveFactor × EmissiveIntensity」で合成する以上、
+  自発光テクスチャを持つマテリアルすら光りません(Bistro屋外は132マテリアル全部の`Ke`が0でした)。
+  **値は0〜1に収めません** — ライトの色はCPU側で露出を掛けてから送られるのに対し、
+  自発光は露出を通らずそのまま加算されるため、露出済みの輝度に相当する値(裸電球で数百)を
+  与えます。求め方は`docs/ImplementationDetail.md` 61.7h
 - `--specular-as-orm` を付けると、`aiTextureType_SPECULAR`のテクスチャをメタリック/ラフネスと
   遮蔽マップとして読みます。**SpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を
   格納する規約のFBX向け**です(NVIDIA Emerald Squareがこれ)。チャンネルの割り当てがglTFの
