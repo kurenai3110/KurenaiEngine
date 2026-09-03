@@ -3682,6 +3682,23 @@ namespace Kurenai
             std::string("自動露出を起動オプションで設定しました: ") + (enabled ? "有効" : "無効"));
     }
 
+    void KurenaiEngine3D::SetOcclusionCullingEnabled(bool enabled)
+    {
+        m_OcclusionCullingEnabled = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("Hi-Zオクルージョンカリングを起動オプションで設定しました: ")
+                + (enabled ? "有効" : "無効"));
+    }
+
+    void KurenaiEngine3D::SetTAAEnabled(bool enabled)
+    {
+        m_TAAEnabled = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("TAAを起動オプションで設定しました: ") + (enabled ? "有効" : "無効"));
+    }
+
     void KurenaiEngine3D::SetPerfDump(const wchar_t* path, int frames)
     {
         if (path == nullptr || path[0] == L'\0' || frames <= 0)
