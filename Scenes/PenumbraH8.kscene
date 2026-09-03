@@ -9,7 +9,7 @@
 # SourceRadius=0 を対照に取ること(半影が消えるはず)。
 
 [Scene]
-Name = Penumbra Height Test
+Name = Penumbra Height Test h=8
 
 [Model]
 Path = PenumbraTest/PenumbraH8.kmodel
