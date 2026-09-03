@@ -199,6 +199,20 @@ namespace Kurenai
         // 揃っていない条件どうしの比較は、差が手法の差なのか設定の差なのか分けられない
         void SetAutoExposureEnabled(bool enabled);
 
+        // 【計測専用】Hi-Zオクルージョンカリングの有効/無効を起動時に決める。
+        //
+        // カリングは保守的でなければならない ―― 有効/無効で絵が1画素も変わらないことが
+        // 正しさの定義そのものになる。その突き合わせをUIのチェックボックスでやると、
+        // 撮影のたびに同じ操作を再現できず、押せていないのを「差分ゼロ＝合格」と
+        // 読み違える(SetDebugViewIndexと同じ理由)。**A/Bは起動直後から同じ手順で行うこと**
+        void SetOcclusionCullingEnabled(bool enabled);
+
+        // 【計測専用】TAAの有効/無効を起動時に決める。
+        //
+        // TAAは時間方向に蓄積するため、フレームレートの揺れがそのまま画素差になる。
+        // 画素単位の一致を測る比較では切っておかないと、再現性の下限が取れない
+        void SetTAAEnabled(bool enabled);
+
         void SetPerfDump(const wchar_t* path, int frames);
 
         // デノイザの有無、a-trousの段数、時間累積の上限。負/0は既定のまま

@@ -7226,6 +7226,24 @@ Presentパスのデバッグ表示(<code>DebugView::HiZ</code>)と、この章�
 Intel UHD 620での実測で1.19〜1.21ms(GPUフレーム時間30msの約4%)を占めます。
 </p>
 
+<p>
+<strong>守るべき不変条件は「ミップNのテクセル群がミップ0の画像を隙間なく覆う」ことです。</strong>
+テクセル k が担当するのは<code>[k*2^N, (k+1)*2^N)</code>で、端数は<strong>最後のテクセルが吸います</strong>。
+ミップの寸法は<code>max(1, 親/2)</code>の切り捨てなので、親の辺が奇数の段では2x2だけでは
+最終行・列がどのテクセルからも読まれません。そこで<strong>辺が奇数のときだけ、最終テクセルが
+端数の1行(列)も読みます</strong>(最悪3x3の9タップ)。
+</p>
+
+<p>
+読む側(<code>HiZCull.hlsli</code>)はこの不変条件に依存して、<strong>ミップ0のテクセル座標を
+<code>mip</code>だけ右シフトした値を担当テクセルの番号として引きます</strong>。
+<code>mipSize</code>を掛けて画面全体へ引き伸ばす対応は担当範囲と一致せず、
+まったく別の場所の深度と比べることになります(1920x1080で最大896行のずれ)。
+<strong>作る側の端数処理と読む側のシフトは対で成り立っている</strong>ので、片方だけ変えないでください。
+根拠と検算の手順は<code>docs/ImplementationDetail.md</code> 47.2a、経緯は
+<code>docs/ImplementationHistory.md</code> 68章にあります。
+</p>
+
 <h3>41.2 判定の向き(Reverse-Z)</h3>
 
 <pre><code>遮蔽されている ⟺ 球の最も手前の点の NDC z &lt; カバーするテクセルの Hi-Z の min</code></pre>

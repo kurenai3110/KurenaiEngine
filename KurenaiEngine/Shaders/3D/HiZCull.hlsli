@@ -108,11 +108,30 @@ bool IsAabbOccludedByHiZ(
     // (floor(floor(x/2)/2) = floor(x/4) のため)
     const float2 mipSize = max(floor(hiZSize / (float)(1u << mip)), float2(1.0f, 1.0f));
     const int2 mipMaxCoord = (int2)mipSize - int2(1, 1);
-    const int2 coordMin = clamp((int2)floor(uvMin * mipSize), int2(0, 0), mipMaxCoord);
-    const int2 coordMax = clamp((int2)floor(uvMax * mipSize), int2(0, 0), mipMaxCoord);
 
-    // 2x2を読んでminを取る。段の選び方から矩形はこの範囲に収まっているはずだが、
-    // 端数の丸めで1テクセルはみ出しうるので、座標はクランプ済みのものを使う
+    // 【mipSizeを掛けてはいけない。ミップ0の座標を右シフトする】
+    // ミップNのテクセル k が担当するのはミップ0の [k*2^N, (k+1)*2^N) で、テクセルは画像の
+    // **先頭から詰めて**並んでいる。一方 mipSize は切り捨てなので mipSize * 2^N < 画像の辺 になり、
+    // 「mipSize枚を画面全体へ引き伸ばす」対応(uv * mipSize)は担当範囲と一致しない。
+    //
+    //   例) 720行なら mip7 は 5 テクセルで、担当は 0〜639 行。引き伸ばすと 700 行目は
+    //       floor(700/720*5)=4 番を読むが、その担当は 512〜639 行 ―― 60行以上も上の、
+    //       **まったく別の場所の深度**と比べることになる。1920x1080では最大896行ずれる。
+    //
+    // これはL85-96が「UVを画面端へクランプすると別の場所と比べる」として避けている失敗と
+    // 同じもので、ミップ側から入り込んだ形になる。ミップ0の座標を mip だけ右シフトすれば、
+    // それがそのまま担当テクセルの番号になる(ピラミッドの構成の逆写像)。
+    //
+    // 最終テクセルへのクランプが安全なのは、HiZ.hlslが奇数段で端数を最終テクセルへ
+    // 吸わせているから。**あちらの端数処理と対で成り立っている**ので、片方だけ戻さないこと。
+    const int2 mip0Min = (int2)floor(uvMin * hiZSize);
+    const int2 mip0Max = (int2)floor(uvMax * hiZSize);
+    const int2 coordMin = clamp(mip0Min >> (int)mip, int2(0, 0), mipMaxCoord);
+    const int2 coordMax = clamp(mip0Max >> (int)mip, int2(0, 0), mipMaxCoord);
+
+    // 2x2を読んでminを取る。**中抜けしない**ことは段の選び方から言える ――
+    // ミップ0側の広がりは高々 2^mip で、差が 2^mip 以下の2つを mip だけ右シフトすれば
+    // 差は高々1になる。したがってcoordMinとcoordMaxの間に読み飛ばすテクセルは無い
     const float d00 = hiZTexture.Load(int3(coordMin.x, coordMin.y, mip));
     const float d10 = hiZTexture.Load(int3(coordMax.x, coordMin.y, mip));
     const float d01 = hiZTexture.Load(int3(coordMin.x, coordMax.y, mip));
