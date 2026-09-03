@@ -6845,7 +6845,18 @@ RHI・DX11/DX12の両実装・ディスクリプタ周りに新しい種類の�
 カリング判定は1メッシュレットに1回しか走らないので、原子加算の競合が実害になる頻度ではない。
 </p>
 <p>
-法線コーンによる背面カリングには落とし穴が1つある。法線の広がりが半球を超えてコーンで表せない場合、
+法線コーンによる背面カリングは、<code>cone_apex</code>を保存していないため
+<strong>meshoptimizerが挙げる「apexを使わず境界球で代用する式」を使わなければなりません</strong>。
+</p>
+<pre><code>dot(center - camera, cone_axis) &gt;= cone_cutoff * length(center - camera) + radius</code></pre>
+<p>
+<strong>apex用の式<code>dot(normalize(apex - camera), axis) &gt;= cutoff</code>に球中心を差し替えたものは、これとは別物です。</strong>
+差は<code>+ radius</code>の項で、落とすとしきい値が本来より小さくなり、まだ表を向いている面がある塊まで消えます。
+抜けた項の大きさは<code>radius / 距離</code>なので<strong>カメラが近いほど効き、遠景では原理的に気づけません</strong>
+(根拠は<code>docs/ImplementationDetail.md</code> 47.2b、経緯は<code>docs/ImplementationHistory.md</code> 69章)。
+</p>
+<p>
+落とし穴がもう1つある。法線の広がりが半球を超えてコーンで表せない場合、
 meshoptimizerは<code>cone_cutoff = 1</code>・<code>cone_axis = (0,0,0)</code>を返す。
 判定式<code>dot(view, axis) &gt;= cutoff</code>自体は<code>0 &gt;= 1</code>で偽になり安全に「通す」側へ倒れるが、
 <strong>長さ0の軸を<code>normalize</code>するとNaNになる</strong>。<code>ConeCutoff &gt;= 1</code>を先に弾く必要がある
