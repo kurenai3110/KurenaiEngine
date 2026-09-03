@@ -1605,8 +1605,10 @@ namespace Kurenai
             DirectX::XMFLOAT4 PositionType;   // xyz=ワールド座標, w=LightType
             DirectX::XMFLOAT4 ColorRange;     // rgb=露出済み放射輝度, w=Range
             DirectX::XMFLOAT4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
-            // x=spotAngleOffset, y=CastShadow(1でスクリーンスペースシャドウを撃つ / 0で撃たない),
-            // zw=未使用(エリアライト用に予約)
+            // x=spotAngleOffset
+            // y=影のフラグ(bit0=画面空間シャドウ / bit1=レイトレース影レイ。kLightShadow* を使う)
+            // z=SourceRadius(球光源の半径 / エミッシブ光源プロキシでは面積等価の円板半径)
+            // w=指向性κ(エミッシブ光源プロキシのみ。それ以外は0)
             DirectX::XMFLOAT4 Params;
         };
         static_assert(sizeof(GPULight) == 64, "GPULightはDirectLighting.hlsl側と64バイトで一致させる必要がある");
@@ -1615,6 +1617,10 @@ namespace Kurenai
         // 十分すぎる余裕を持たせてあるが、構造化バッファなのでこの容量自体がGPU時間へ影響することはない
         // (シェーダはLightCount.xまでしかループしないため)
         constexpr uint32_t kMaxLights = 1024;
+
+        // GPULight.Params.y のビット。**Shaders/3D/LightAttenuation.hlsli と一致させること**
+        constexpr uint32_t kLightShadowScreenSpace = 1u;
+        constexpr uint32_t kLightShadowRaytraced = 2u;
 
         // MegaLightsTilePool.hlsl の kMegaLightsMaxLights と同じ値。あちらはライトごとの重みを
         // groupshared配列に置くためコンパイル時定数である必要があり、C++からの受け渡しでは代用できない。
@@ -1752,7 +1758,7 @@ namespace Kurenai
                 angleOffset = -cosOuter * angleScale;
             }
             gpuLight.DirectionAngle = { light.Direction[0], light.Direction[1], light.Direction[2], angleScale };
-            // Params.y = このライトがスクリーンスペースシャドウを落とすか。ライトごとに切れるようにしてあるのは、
+            // Params.y = このライトが影を落とすか。ライトごとに切れるようにしてあるのは、
             // ピクセルあたりのシャドウレイ数に上限(LightingConstants.LightCount.y)があり、
             // 「影を出したいライト」に予算を回せるようにするため
             // Params.z = 光源そのものの半径[m]。0なら点光源。予約枠だった zw のうち z を使う。
@@ -1760,7 +1766,85 @@ namespace Kurenai
             // RTShadow.hlsl が別に持っている
             const float sourceRadius =
                 (light.Type == Assets::LightType::Directional) ? 0.0f : std::max(0.0f, light.SourceRadius);
-            gpuLight.Params = { angleOffset, light.CastShadow ? 1.0f : 0.0f, sourceRadius, 0.0f };
+            // Params.y は影のフラグ。**bit0 = スクリーンスペースシャドウ / bit1 = レイトレース影レイ**
+            // (Shaders/3D/LightAttenuation.hlsli と一致させること)。作者が置いたライトは
+            // 両方を立てる ―― 1つの真偽値だった頃と挙動が変わらない。
+            // 【リテラルで 3.0f と書かない】ビットの定義を変えたときに追随しない
+            const float shadowFlags = light.CastShadow
+                                          ? static_cast<float>(kLightShadowScreenSpace | kLightShadowRaytraced)
+                                          : 0.0f;
+            gpuLight.Params = { angleOffset, shadowFlags, sourceRadius, 0.0f };
+            return gpuLight;
+        }
+
+        // エミッシブなメッシュから起こした光源プロキシを GPULight へ変換する。
+        //
+        // 【なぜ MakeGPULight と別関数なのか。そして exposure を引数に取らないのか】
+        // ライトとエミッシブは単位系が違う。ライトの Intensity はカンデラで、
+        // MakeGPULight が ComputeExposure(EV100) を掛けて表示空間へ持ち込む。
+        // 一方エミッシブは GBuffer.hlsl が EmissiveFactor をそのまま G-Buffer へ書き、
+        // DeferredLighting が**露出を通さずに**加算する(EV100 のツールチップ自身が
+        // 「太陽・環境光・ポイント/スポットライト」にしか掛からないと書いている)。
+        //
+        // したがって面の測光輝度は L_v = E / exposure で、面積 A の放射強度は I = L_v * A。
+        // これを GPULight へ入れるときに exposure を掛け直すと**約束どおり相殺して消える**:
+        //
+        //     ColorRange.rgb = I * exposure = (E / exposure) * A * exposure = E * A
+        //
+        // 露出が式から消えるので、自動露出が動いても TAA のプリ露出補正が入っても
+        // プロキシと発光面の見た目の対応が崩れない。
+        //
+        // **MakeGPULight へ「Intensity = E*A/exposure」を渡す形にはしない。** 相殺に依存した
+        // 割り算が2箇所へ散り、片方だけ直したときにコンパイルも通り絵も「それらしく」出る。
+        // ここが exposure を受け取らないこと自体が、その事故を構造的に防いでいる。
+        //
+        // 【指向の分配はシェーダ側が持つ】I(θ) = I * [(1-κ)/4 + κ*max(0,cosθ)] の括弧の中は
+        // LightAttenuation.hlsli の型3の枝にある。ここは向きによらない強さだけを入れる
+        GPULight MakeGPULightFromEmissiveProxy(
+            const Assets::EmissiveProxy& proxy, float emissiveIntensity, float cutoffIrradiance,
+            float maxRange)
+        {
+            GPULight gpuLight{};
+
+            const float intensity[3] = {
+                proxy.RadianceBase[0] * emissiveIntensity * proxy.Area,
+                proxy.RadianceBase[1] * emissiveIntensity * proxy.Area,
+                proxy.RadianceBase[2] * emissiveIntensity * proxy.Area,
+            };
+
+            // Range は「最も強い向きでも打ち切り照度τまで落ちる距離」から解く。
+            // 【上界の余弦ローブを使う】タイルカリング(LightAttenuationUpperBound)が同じ
+            // 上界で判定するので、定義域を一致させないと届く灯を取りこぼす
+            const float peak = std::max({ intensity[0], intensity[1], intensity[2] });
+            const float lobeMax = (1.0f - proxy.Directionality) * 0.25f + proxy.Directionality;
+            const float radiusSq = proxy.SourceRadius * proxy.SourceRadius;
+            const float solved = peak * lobeMax / std::max(cutoffIrradiance, 1e-9f) - radiusSq;
+            float range = (solved > 0.0f) ? std::sqrt(solved) : 0.0f;
+            // 下限は 2R。プロキシが自分の発光体の広がりすら覆わないと、
+            // 器具の筐体が真っ暗なまま光っている見た目になる
+            range = std::max(range, 2.0f * proxy.SourceRadius);
+            // 上限。自発光の強度を上げたときに Range が数kmまで伸びて、
+            // タイルカリングが全タイルにヒットするのを止める安全弁
+            if (maxRange > 0.0f)
+            {
+                range = std::min(range, maxRange);
+            }
+
+            gpuLight.PositionType = {
+                proxy.Position[0], proxy.Position[1], proxy.Position[2],
+                static_cast<float>(Assets::LightType::EmissiveProxy)
+            };
+            gpuLight.ColorRange = { intensity[0], intensity[1], intensity[2], range };
+            // w(spotAngleScale)は使わない。xyz は発光面の平均法線で、余弦ローブの軸になる
+            gpuLight.DirectionAngle = { proxy.Direction[0], proxy.Direction[1], proxy.Direction[2], 0.0f };
+            // x=spotAngleOffset(未使用) / y=影のフラグ / z=面積等価の円板半径 / w=指向性κ
+            //
+            // 【レイトレース影レイだけを立てる】スクリーンスペースシャドウは画素あたりの
+            // レイ数に上限(既定4灯)があり、プロキシは数百灯になりうる。両方立てると
+            // プロキシが予算を食い尽くし、手置きライトの接触影が消える
+            gpuLight.Params = {
+                0.0f, static_cast<float>(kLightShadowRaytraced), proxy.SourceRadius, proxy.Directionality
+            };
             return gpuLight;
         }
 
@@ -3571,6 +3655,58 @@ namespace Kurenai
 
         m_DebugView = static_cast<DebugView>(index);
         Core::Logger::Info("KurenaiEngine3D", "デバッグ表示を番号で選択しました: " + std::to_string(index));
+    }
+
+    bool KurenaiEngine3D::ShouldSuppressEmissiveForGI() const
+    {
+        // 【プロキシが1つも無いなら抑止しない】発光面を光源にしていないのに
+        // DDGIから自発光だけ抜くと、その面の照明が丸ごと落ちる
+        return m_EmissiveLightsEnabled && !m_EmissiveLightsDoubleCountGI && !m_EmissiveProxies.empty();
+    }
+
+    void KurenaiEngine3D::SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount, int doubleCountGI)
+    {
+        // 負は「既定のまま」。しきい値だけ差し替えたいときに状態を巻き添えで倒さないため
+        if (enabled >= 0)
+        {
+            m_EmissiveLightsEnabled = (enabled > 0);
+        }
+        // 0以下は「既定のまま」。OverrideMegaLightsの負値と同じ約束にしてある
+        if (cutoffIrradiance > 0.0f)
+        {
+            m_EmissiveLightsCutoffIrradiance = cutoffIrradiance;
+        }
+        if (maxCount > 0)
+        {
+            m_EmissiveLightsMaxCount = maxCount;
+        }
+        if (doubleCountGI >= 0)
+        {
+            m_EmissiveLightsDoubleCountGI = (doubleCountGI > 0);
+        }
+        // 上限の警告は設定を変えたら出し直す(τを上げてRangeを縮めた結果を見たいため)
+        m_EmissiveLightsCapLogged = false;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("エミッシブ光源: ") + (m_EmissiveLightsEnabled ? "有効" : "無効") +
+                " / 打ち切り照度 " + std::to_string(m_EmissiveLightsCutoffIrradiance) + " / 上限 " +
+                std::to_string(m_EmissiveLightsMaxCount) + "個 / プロキシ " +
+                std::to_string(m_EmissiveProxies.size()) + "個 / DDGIの自発光 " +
+                (ShouldSuppressEmissiveForGI() ? "抑止" : "そのまま(二重計上)"));
+    }
+
+    void KurenaiEngine3D::SetEmissiveIntensity(float intensity)
+    {
+        if (intensity <= 0.0f)
+        {
+            return;
+        }
+        m_EmissiveIntensity = intensity;
+        // 倍率を変えるとRangeも変わる(強さから解いているため)。上限の警告を出し直す
+        m_EmissiveLightsCapLogged = false;
+        m_EmissiveLightsValuesLogged = false;
+        Core::Logger::Info(
+            "KurenaiEngine3D", "自発光の強度: " + std::to_string(m_EmissiveIntensity) + "倍");
     }
 
     void KurenaiEngine3D::OverrideMegaLights(int mode, int shadowRayCount, int sampleCount)
@@ -6810,6 +6946,42 @@ namespace Kurenai
         m_Lights = m_Scene.Lights;
         m_SelectedLightIndex = m_Lights.empty() ? -1 : 0;
         m_LightOverflowLogged = false;
+
+        // エミッシブ光源のプロキシ(ワールド空間)。**m_Lightsへは混ぜない**(宣言側の注記参照)。
+        // ImGuiのライト一覧にも出さないので、m_SelectedLightIndexの範囲は変わらない
+        m_EmissiveProxies = m_Scene.EmissiveProxies;
+        // インスタンスごとの「プロキシを起こしたか」。DDGIのラスタ経路で引く。
+        // ストリーミング中のインスタンスはプロキシを作らないので、ここも自動的に立たない
+        m_EmissiveProxyInstances.assign(m_Scene.Instances.size(), false);
+        for (const Assets::EmissiveProxy& proxy : m_EmissiveProxies)
+        {
+            if (proxy.InstanceIndex < m_EmissiveProxyInstances.size())
+            {
+                m_EmissiveProxyInstances[proxy.InstanceIndex] = true;
+            }
+            else
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "エミッシブ光源のインスタンス番号がシーンの範囲外です: " +
+                        std::to_string(proxy.InstanceIndex) + " / " +
+                        std::to_string(m_Scene.Instances.size()) + "個");
+            }
+        }
+        m_EmissiveLightsUsedCount = 0;
+        m_EmissiveLightsCapLogged = false;
+        m_EmissiveLightsValuesLogged = false;
+        // Rangeの上限。自発光の強度を上げたときにRangeが数kmまで伸びて、タイルカリングが
+        // 全タイルにヒットするのを止める安全弁。シーンAABBの対角より長いRangeに意味は無い
+        {
+            float diagonalSq = 0.0f;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float extent = m_Scene.BoundsMax[axis] - m_Scene.BoundsMin[axis];
+                diagonalSq += extent * extent;
+            }
+            m_EmissiveLightsMaxRange = (diagonalSq > 0.0f) ? std::sqrt(diagonalSq) : 0.0f;
+        }
         // 平面反射。新しいシーンでは水面の構成が変わるため、複数水面高さの警告も仕切り直す
         m_PlanarReflectionMultipleWaterLogged = false;
 
@@ -7263,6 +7435,18 @@ namespace Kurenai
         mixBool(m_ProceduralSkyEnabled);
         // 自発光の強度倍率はキャプチャのエミッシブ項へそのまま乗る
         mixFloat(m_EmissiveIntensity);
+        // エミッシブ光源(62章)。プロキシはProbeCapture.hlslのライトループ(t8)にも入るので、
+        // 有効/無効・打ち切り照度・採用数の上限はどれも焼き上がりを変える。
+        // 二重計上の抑止はDDGIのキャプチャから自発光を抜くので、これも焼き上がりを変える。
+        // **混ぜ忘れると「つまみが効かない」型の不具合になる**(このすぐ上の注記と同じ)
+        mixBool(m_EmissiveLightsEnabled);
+        mixFloat(m_EmissiveLightsCutoffIrradiance);
+        mixFloat(static_cast<float>(m_EmissiveLightsMaxCount));
+        mixBool(m_EmissiveLightsDoubleCountGI);
+        // 【上限に当たると採用集合がカメラ依存になる】採用順はカメラからの照度で決まるため、
+        // 上の4つだけでは「カメラを動かしただけで焼く光源が変わったのに署名は同じ」になる。
+        // 切り捨てが起きていないフレームでは0で固定なので、余分な焼き直しは起きない
+        mixBytes(&m_EmissiveLightsSelectionHash, sizeof(m_EmissiveLightsSelectionHash));
 
         // bent normalによる遮蔽(34章)。ProbeCapture.hlslが同じ分岐を持つため、
         // 含め忘れるとつまみを動かしてもプローブの中身だけ古いまま残る
@@ -8781,10 +8965,140 @@ namespace Kurenai
             }
             gpuLights.push_back(MakeGPULight(light, m_EffectiveExposureEV100));
         }
+        // ここまでが作者の置いたライト。以降のプロキシと切り分けるために数を控える
+        const size_t manualLightCount = gpuLights.size();
+
+        // --- エミッシブ光源のプロキシを後ろへ連結する ---
+        //
+        // 【手置きの後ろに置く】容量超過の切り捨ては下でプロキシ側だけに掛ける。
+        // 全体をカメラ距離でソートして切ると、**手置きの遠いライトが黙って消える**。
+        //
+        // 【毎フレーム作り直す】m_EmissiveIntensity のスライダーとτを即座に反映するため。
+        // プロキシ側は倍率も露出も持たない値(RadianceBase)で保持してある
+        m_EmissiveLightsUsedCount = 0;
+        // 切り捨てが起きたときだけ、採用した集合の指紋を残す(起きなければ0のまま)。
+        //
+        // 【プローブの署名に要る】採用順はカメラからの照度で決まるので、**カメラを動かすだけで
+        // プローブが焼く光源の集合が変わる**。署名が変わらないと反射プローブはOnDemandで
+        // 焼き直さず、DDGIは更新を止めたまま、収束済みのプローブだけ古い集合で残る。
+        // 切り捨てが起きない限り集合はシーン固定なので、そのときは0で十分
+        m_EmissiveLightsSelectionHash = 0;
+        if (m_EmissiveLightsEnabled && !m_EmissiveProxies.empty() && manualLightCount < kMaxLights)
+        {
+            const size_t budget = std::min<size_t>(
+                static_cast<size_t>(std::max(0, m_EmissiveLightsMaxCount)), kMaxLights - manualLightCount);
+
+            if (m_EmissiveProxies.size() <= budget)
+            {
+                for (const Assets::EmissiveProxy& proxy : m_EmissiveProxies)
+                {
+                    gpuLights.push_back(MakeGPULightFromEmissiveProxy(
+                        proxy, m_EmissiveIntensity, m_EmissiveLightsCutoffIrradiance,
+                        m_EmissiveLightsMaxRange));
+                }
+            }
+            else
+            {
+                // 【スコアはカメラ位置に届く表示空間の照度】単なるカメラ距離だと、
+                // 遠くの明るい看板より近くの暗い豆電球が残る。
+                // 同値のときは (インスタンス, メッシュ, かたまり) の辞書順で決める ――
+                // 順序が揺れるとライトが出入りしてちらつく
+                std::vector<size_t> order(m_EmissiveProxies.size());
+                for (size_t i = 0; i < order.size(); ++i)
+                {
+                    order[i] = i;
+                }
+                const auto scoreOf = [this, &cameraPosition](size_t index)
+                {
+                    const Assets::EmissiveProxy& p = m_EmissiveProxies[index];
+                    const float dx = p.Position[0] - cameraPosition.x;
+                    const float dy = p.Position[1] - cameraPosition.y;
+                    const float dz = p.Position[2] - cameraPosition.z;
+                    const float distSq = dx * dx + dy * dy + dz * dz;
+                    const float peak = std::max({ p.RadianceBase[0], p.RadianceBase[1], p.RadianceBase[2] }) *
+                                       m_EmissiveIntensity * p.Area;
+                    return peak / std::max(distSq, p.SourceRadius * p.SourceRadius + 1e-6f);
+                };
+                std::stable_sort(
+                    order.begin(), order.end(),
+                    [this, &scoreOf](size_t a, size_t b)
+                    {
+                        const float sa = scoreOf(a);
+                        const float sb = scoreOf(b);
+                        if (sa != sb) { return sa > sb; }
+                        const Assets::EmissiveProxy& pa = m_EmissiveProxies[a];
+                        const Assets::EmissiveProxy& pb = m_EmissiveProxies[b];
+                        if (pa.InstanceIndex != pb.InstanceIndex) { return pa.InstanceIndex < pb.InstanceIndex; }
+                        if (pa.MeshIndex != pb.MeshIndex) { return pa.MeshIndex < pb.MeshIndex; }
+                        return pa.ClusterIndex < pb.ClusterIndex;
+                    });
+                // FNV-1a(64bit)。採用したプロキシの識別子だけを順に混ぜる。
+                // 位置や強さは混ぜない ―― それらはシーン固定で、変わるのは「どれを採ったか」だけ
+                uint64_t selectionHash = 1469598103934665603ull;
+                const auto mixIndex = [&selectionHash](uint32_t value)
+                {
+                    const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
+                    for (size_t b = 0; b < sizeof(value); ++b)
+                    {
+                        selectionHash ^= bytes[b];
+                        selectionHash *= 1099511628211ull;
+                    }
+                };
+                for (size_t i = 0; i < budget; ++i)
+                {
+                    const Assets::EmissiveProxy& proxy = m_EmissiveProxies[order[i]];
+                    mixIndex(proxy.InstanceIndex);
+                    mixIndex(proxy.MeshIndex);
+                    mixIndex(proxy.ClusterIndex);
+                    gpuLights.push_back(MakeGPULightFromEmissiveProxy(
+                        proxy, m_EmissiveIntensity, m_EmissiveLightsCutoffIrradiance, m_EmissiveLightsMaxRange));
+                }
+                m_EmissiveLightsSelectionHash = selectionHash;
+
+                // 【切り捨ては発光を捨てている】併合で減らせないか先に疑うこと。
+                // EmeraldSquare の実測では、面積の大きい順に上位256個を残しても
+                // 総面積の46.7%にしかならない(上位1024個でも84.9%)
+                if (!m_EmissiveLightsCapLogged)
+                {
+                    Core::Logger::Warning(
+                        "KurenaiEngine3D",
+                        "エミッシブ光源が上限(" + std::to_string(budget) + ")を超えたため" +
+                            std::to_string(m_EmissiveProxies.size() - budget) +
+                            "個を捨てました。捨てたぶんの発光は絵から消えます" +
+                            (ShouldSuppressEmissiveForGI()
+                                 ? "。**しかもDDGIからは抑止されたまま**です ―― 捨てた面は"
+                                   "直接光にも間接光にも入らず、純粋なエネルギー損失になります"
+                                 : ""));
+                    m_EmissiveLightsCapLogged = true;
+                }
+            }
+            m_EmissiveLightsUsedCount = static_cast<uint32_t>(gpuLights.size() - manualLightCount);
+
+            // 【「効いていない」と「暗すぎて見えない」を切り分けられるようにする】
+            // 絵の差だけを見ていると、経路が走っていないのか寄与が小さいだけなのかが分からない。
+            // 実際に送った灯数と、代表1灯の強さ・Range・κ を1回だけ出す
+            if (!m_EmissiveLightsValuesLogged && m_EmissiveLightsUsedCount > 0)
+            {
+                const GPULight& sample = gpuLights[manualLightCount];
+                // 【RGBの最大を出す。Rだけを出さない】Rangeはmax(R,G,B)から解いているので、
+                // 色付きの自発光(赤い看板など)でRだけを見るとログからRangeを検算できない
+                const float samplePeak =
+                    std::max({ sample.ColorRange.x, sample.ColorRange.y, sample.ColorRange.z });
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "エミッシブ光源を送信: " + std::to_string(m_EmissiveLightsUsedCount) + "灯(手置き " +
+                        std::to_string(manualLightCount) + "灯) / 先頭の灯 強さ(RGBの最大) " +
+                        std::to_string(samplePeak) + " Range " + std::to_string(sample.ColorRange.w) +
+                        "m 半径 " + std::to_string(sample.Params.z) + "m κ " + std::to_string(sample.Params.w));
+                m_EmissiveLightsValuesLogged = true;
+            }
+        }
 
         // 容量(kMaxLights)を超える場合は、カメラに近い順に先頭kMaxLights灯のみ採用する。
         // 全画面ディファードなのでフラスタムカリングは効果が薄く、これは容量超過時の
-        // 安全弁としてのみ機能する(実データの上限はBistroInteriorの4灯)
+        // 安全弁としてのみ機能する。
+        //
+        // 【ここへ来るのは手置きライトだけで超えたとき】プロキシは上で別枠に収めてある
         if (gpuLights.size() > kMaxLights)
         {
             std::sort(
@@ -10464,12 +10778,31 @@ namespace Kurenai
             // プローブの位置ごとに結果が変わるため、予算計算と食い違う。
             // 定数バッファの予算超過は例外ではなくログ1行で続行し、描画が静かに壊れる
             // (DX12Buffer.h)ため、整合が取れるまでは入れないほうが安全
-            for (const auto& instance : m_Scene.Instances)
+            // 【DDGIからだけ自発光を抜く】プロキシとして起こした発光は既にGPULight(型3)から
+            // 入っているので、プローブが同じ面を「明るい面」として焼くと二重に数える。
+            // **反射プローブでは抑止しない** ―― 同じProbeCapture.hlslを共有しているが、
+            // 鏡面が光源を直接見ているのは二重計上ではなく、消すと看板が鏡に映らなくなる。
+            // だから材質のフラグではなくCPUのパスごとに決めている
+            const bool suppressEmissiveForDDGI = ShouldSuppressEmissiveForGI();
+            uint32_t ddgiDrawnMeshes = 0;
+            uint32_t ddgiEmissiveMeshes = 0;
+            uint32_t ddgiSuppressedMeshes = 0;
+            uint32_t ddgiLODMismatchMeshes = 0;
+            for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
             {
+                const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
                 // 【DDGIも最も粗い段】理由は反射プローブと同じ
                 // ストリーミング中で未読み込みなら描かない
                 const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
                 if (!coarsestModel) { continue; }
+                // 【診断にだけ使う】抑止するかどうかの判定には入れないこと ――
+                // レイトレ側(RaytracingMaterial::Flags)はインスタンスを見ないので、
+                // ここだけ条件を増やすと2経路で判定がずれる軸が1本増える。
+                // いまは「プロキシを作ったインスタンス」と「クラスタを持つメッシュ」が
+                // 必ず一致するため冗長でもあるが、将来プロキシ生成に条件が入ったときに
+                // 静かに乖離する形になる
+                const bool instanceHasProxy =
+                    instanceIndex < m_EmissiveProxyInstances.size() && m_EmissiveProxyInstances[instanceIndex];
                 for (const auto& mesh : coarsestModel->Meshes)
                 {
                     // 半透明メッシュを焼かない理由は反射プローブと同じ(不透明として描かれるため、
@@ -10479,7 +10812,28 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                    // 【シェーダーには手を入れない】倍率を0にすればEmissiveFactorごと0になる。
+                    // 判定をクラスタの有無で行うのは、係数が0でないのにテクスチャの平均が
+                    // 真っ黒でクラスタが出ないメッシュがあり、そちらは光源になっていないため
+                    // 【レイトレ側とまったく同じ述語にする】あちらは
+                    // RaytracingScene.cpp が !mesh.EmissiveClusters.empty() だけで印を付ける。
+                    // 条件が1つでも違うと、環境によって二重計上の有無が変わる
+                    const bool meshIsProxySource = suppressEmissiveForDDGI && !mesh.EmissiveClusters.empty();
+                    const float ddgiEmissiveIntensity = meshIsProxySource ? 0.0f : m_EmissiveIntensity;
+                    ++ddgiDrawnMeshes;
+                    const float emissiveMax =
+                        std::max({ mesh.EmissiveFactor[0], mesh.EmissiveFactor[1], mesh.EmissiveFactor[2] });
+                    if (emissiveMax > 0.0f) { ++ddgiEmissiveMeshes; }
+                    if (meshIsProxySource) { ++ddgiSuppressedMeshes; }
+                    // 【2経路で判定がずれうる唯一の条件】レイトレ側の印は段0のクラスタで付くが、
+                    // こちらが描くのは最も粗い段。粗い段でクラスタが消えている(簡略化で発光
+                    // 三角形が落ちた等)と、レイトレは抑止するのにラスタは抑止せず二重に数える。
+                    // **絵からは分からない**ので、条件に当たったことだけは残す
+                    if (instanceHasProxy && emissiveMax > 0.0f && mesh.EmissiveClusters.empty())
+                    {
+                        ++ddgiLODMismatchMeshes;
+                    }
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, ddgiEmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -10492,6 +10846,27 @@ namespace Kurenai
                     cmd->SetTexture(3, mesh.EmissiveTexture);
 
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                }
+            }
+
+            if (!m_DDGIEmissiveSuppressLoggedRaster)
+            {
+                m_DDGIEmissiveSuppressLoggedRaster = true;
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    std::string("DDGI(ラスタ)の自発光: 抑止 ") + (suppressEmissiveForDDGI ? "する" : "しない") +
+                        " / 描いたメッシュ " + std::to_string(ddgiDrawnMeshes) + "個(うち自発光 " +
+                        std::to_string(ddgiEmissiveMeshes) + "個) / 0にしたメッシュ " +
+                        std::to_string(ddgiSuppressedMeshes) + "個 / 自発光の強度 " +
+                        std::to_string(m_EmissiveIntensity));
+                if (ddgiLODMismatchMeshes > 0)
+                {
+                    Core::Logger::Warning(
+                        "KurenaiEngine3D",
+                        "DDGI(ラスタ)で抑止できない自発光メッシュがあります: " +
+                            std::to_string(ddgiLODMismatchMeshes) +
+                            "個。粗いモデルLODでエミッシブのかたまりが消えているため、"
+                            "レイトレ経路だけが抑止し、この経路では二重計上が残ります");
                 }
             }
 
@@ -10529,12 +10904,25 @@ namespace Kurenai
             traceConstants.Params0 = {
                 probePosition.x, probePosition.y, probePosition.z, static_cast<float>(face)
             };
+            // w = プロキシとして起こされたマテリアルの自発光倍率。0.0で抑止、1.0でそのまま。
+            // ラスタ経路(ObjectConstantsの倍率を0にする)と**同じ判定**から決めること
             traceConstants.Params1 = {
                 static_cast<float>(kDDGICaptureSize),
                 m_EmissiveIntensity,
                 m_DDGISunShadowRayEnabled ? 1.0f : 0.0f,
-                0.0f
+                ShouldSuppressEmissiveForGI() ? 0.0f : 1.0f
             };
+
+            if (!m_DDGIEmissiveSuppressLoggedTrace)
+            {
+                m_DDGIEmissiveSuppressLoggedTrace = true;
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "DDGI(レイトレ)の自発光: Params1.y(強度) " + std::to_string(traceConstants.Params1.y) +
+                        " / Params1.w(プロキシ材質の倍率) " + std::to_string(traceConstants.Params1.w) +
+                        " / プロキシ印の付いた材質 " + std::to_string(m_RaytracingScene.GetEmissiveProxyMaterialCount()) +
+                        "件 / 全メッシュ " + std::to_string(m_RaytracingScene.GetMeshCount()) + "件");
+            }
 
             cmd->SetComputePipelineState(m_DDGIProbeTracePipelineState.get());
             // ヒット面のマテリアルテクスチャをbindlessで引くためs0にWrapが要る(RTAOと同じ理由)

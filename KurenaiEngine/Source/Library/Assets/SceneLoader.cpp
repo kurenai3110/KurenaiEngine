@@ -1560,6 +1560,9 @@ namespace Kurenai::Assets
         // 「何件中の何件目か」を出せない。767モデルのシーンでは1件目だけで数秒かかることもある
         notifyProgress(0);
 
+        // 非一様スケールの警告は1シーンにつき1回だけ出す(767モデルのシーンで毎件出すと埋もれる)
+        bool sceneEmissiveNonUniformLogged = false;
+
         for (const ParsedModelEntry& parsedModel : parsed.Models)
         {
             const std::wstring normalizedPath = NormalizePathSeparators(parsedModel.Path);
@@ -1797,10 +1800,127 @@ namespace Kurenai::Assets
                 scene.Lights.push_back(worldLight);
             }
 
+            // エミッシブなメッシュから起こした光源のかたまり(Mesh::EmissiveClusters、
+            // モデルのローカル空間)をワールド空間へ移す。
+            //
+            // 【Lights とは別の配列へ入れる】作者が置いたライトと自動生成の光源を同じ配列に
+            // すると、ImGui のライト一覧から消せてしまい元のメッシュと食い違う。
+            // ライト数の上限に当たったときの詰める順序も分ける必要がある。
+            //
+            // 【ストリーミング時は作らない】埋め込みライトと同じ理由(上のコメント参照)。
+            // 実体が無いので位置が分からず、破棄のたびに消えることになる。
+            //
+            // 【モデルLODの段0からしか取らない】粗い段で面積が変わると、段が切り替わった
+            // 瞬間に光量が跳ねる。instance.Model は常に段0(LODModels は見ない)
+            if (!streaming && instance.Model)
+            {
+                // 非一様スケールの度合い。面積と半径の換算はここが1に近いことを前提にしている
+                const XMVECTOR scaleRow0 = worldMathSpace.r[0];
+                const XMVECTOR scaleRow1 = worldMathSpace.r[1];
+                const XMVECTOR scaleRow2 = worldMathSpace.r[2];
+                const float axisLength[3] = {
+                    XMVectorGetX(XMVector3Length(scaleRow0)),
+                    XMVectorGetX(XMVector3Length(scaleRow1)),
+                    XMVectorGetX(XMVector3Length(scaleRow2)),
+                };
+                const float maxAxis = std::max({ axisLength[0], axisLength[1], axisLength[2] });
+                const float minAxis = std::min({ axisLength[0], axisLength[1], axisLength[2] });
+                const bool nonUniform = (minAxis > 1e-6f) && ((maxAxis / minAxis) > 1.01f);
+
+                // 等方スケール s なら |det|^(1/3) = s。長さの換算はこれでよい
+                const float absDeterminant = std::fabs(determinant);
+                const float lengthScale =
+                    (absDeterminant > 0.0f) ? std::cbrt(absDeterminant) : 1.0f;
+
+                for (size_t meshIndex = 0; meshIndex < instance.Model->Meshes.size(); ++meshIndex)
+                {
+                    const Mesh& sourceMesh = instance.Model->Meshes[meshIndex];
+                    for (size_t clusterIndex = 0; clusterIndex < sourceMesh.EmissiveClusters.size();
+                         ++clusterIndex)
+                    {
+                        const EmissiveCluster& cluster = sourceMesh.EmissiveClusters[clusterIndex];
+
+                        EmissiveProxy proxy;
+                        const XMVECTOR localCentroid =
+                            XMVectorSet(cluster.Centroid[0], cluster.Centroid[1], cluster.Centroid[2], 0.0f);
+                        XMFLOAT3 worldCentroid;
+                        XMStoreFloat3(&worldCentroid, XMVector3TransformCoord(localCentroid, worldMathSpace));
+                        proxy.Position[0] = worldCentroid.x;
+                        proxy.Position[1] = worldCentroid.y;
+                        proxy.Position[2] = worldCentroid.z;
+
+                        // 【法線は逆転置で移す】すぐ上の埋め込みライトの Direction は
+                        // 「光の進行方向」なので World でそのまま回してよいが、こちらは
+                        // **面の法線**である。同じ扱いにすると非一様スケールで黙ってずれる
+                        const XMVECTOR localNormal = XMVectorSet(
+                            cluster.AverageNormal[0], cluster.AverageNormal[1], cluster.AverageNormal[2], 0.0f);
+                        XMFLOAT3 worldNormal;
+                        XMStoreFloat3(
+                            &worldNormal, XMVector3Normalize(XMVector3TransformNormal(localNormal, normalMathSpace)));
+                        proxy.Direction[0] = worldNormal.x;
+                        proxy.Direction[1] = worldNormal.y;
+                        proxy.Direction[2] = worldNormal.z;
+
+                        // 面積の換算 A_world = A_local * |det(M)| * |M^-T n|。
+                        // 等方スケール s では s^2 へ縮退する(平面のかたまりでは厳密、
+                        // 閉じた形では平均法線1本で代表しているので近似)
+                        const float normalStretch =
+                            XMVectorGetX(XMVector3Length(XMVector3TransformNormal(localNormal, normalMathSpace)));
+                        proxy.Area = cluster.Area * absDeterminant * normalStretch;
+                        proxy.SourceRadius = cluster.SourceRadius * lengthScale;
+                        // κ は形の性質なので、等方スケールでは不変。非一様では近似
+                        proxy.Directionality = cluster.Directionality;
+
+                        // 【シーン全体の倍率も露出も掛けない】倍率は毎フレームのライトリスト
+                        // 構築で掛ける(掛けてしまうとImGuiのスライダーが効かなくなる)。
+                        // 露出はそもそも掛けてはいけない(G-Bufferのエミッシブが露出を通らない)
+                        for (int channel = 0; channel < 3; ++channel)
+                        {
+                            proxy.RadianceBase[channel] =
+                                sourceMesh.EmissiveFactor[channel] * sourceMesh.EmissiveTextureAverage[channel];
+                        }
+
+                        proxy.InstanceIndex = static_cast<uint32_t>(scene.Instances.size());
+                        proxy.MeshIndex = static_cast<uint32_t>(meshIndex);
+                        proxy.ClusterIndex = static_cast<uint32_t>(clusterIndex);
+                        scene.EmissiveProxies.push_back(proxy);
+                    }
+                }
+
+                // 【ずれても「少し明るい/暗い」だけなので絵からは分からない】だから警告を出す
+                if (nonUniform && !sceneEmissiveNonUniformLogged && !instance.Model->Meshes.empty())
+                {
+                    bool hasCluster = false;
+                    for (const Mesh& m : instance.Model->Meshes)
+                    {
+                        if (!m.EmissiveClusters.empty()) { hasCluster = true; break; }
+                    }
+                    if (hasCluster)
+                    {
+                        Core::Logger::Warning(
+                            "SceneLoader",
+                            "非一様スケールのインスタンスにエミッシブ光源があります。面積と半径の換算が"
+                            "近似になります(軸長の比 " + std::to_string(maxAxis / std::max(minAxis, 1e-6f)) +
+                                "): " + WideToUtf8(parsedModel.Path));
+                        sceneEmissiveNonUniformLogged = true;
+                    }
+                }
+            }
+
             scene.Instances.push_back(std::move(instance));
 
             ++loadedModels;
             notifyProgress(loadedModels);
+        }
+
+        // 【手置きライトと別に数える】どちらがいくつあるかが分からないと、上限に当たったときに
+        // 「どちらが押し出されたのか」を切り分けられない
+        if (!scene.EmissiveProxies.empty())
+        {
+            Core::Logger::Info(
+                "SceneLoader",
+                "エミッシブ光源: " + std::to_string(scene.EmissiveProxies.size()) +
+                    "個(ワールド空間) / 手置きライト " + std::to_string(scene.Lights.size()) + "個");
         }
 
         // モデル共有が効いたかを数値で残す。「共有 0件」ならキャッシュが一度も当たっておらず、

@@ -102,6 +102,8 @@ namespace Kurenai::Assets
         // 0以下ならアルファカットアウト無効(Assets::Mesh::AlphaCutoffと同じ意味)
         float AlphaCutoff = 0.0f;
         // bit0: 半透明(glTFのalphaMode=BLEND)
+        // bit1: このメッシュの自発光はエミッシブ光源プロキシとして起こされている
+        //       (kRaytracingMaterialFlag* 参照。Shaders/3D/RaytracingScene.hlsli と一致させること)
         uint32_t Flags = 0;
         // 以下はbindlessディスクリプタ番号。既定はRHI::kInvalidBindlessIndex(=テクスチャ無し)
         uint32_t BaseColorTextureIndex = RHI::kInvalidBindlessIndex;
@@ -112,8 +114,14 @@ namespace Kurenai::Assets
     };
     static_assert(sizeof(RaytracingMaterial) == 64, "HLSL側のRTMaterialと一致させるため64バイト固定");
 
-    // RaytracingMaterial::Flagsのビット定義
+    // RaytracingMaterial::Flagsのビット定義。
+    // **Shaders/3D/RaytracingScene.hlsliのkRTMaterialFlag*と一致させること**
     inline constexpr uint32_t kRaytracingMaterialFlagTransparent = 1u << 0;
+    // 【立てるのは「起こされた」という事実であって、つまみの状態ではない】
+    // 二重計上を抑止するかどうかはフレームごとに変わるうえ、DDGIと反射プローブで
+    // 判断が違う(前者は抑止し、後者はしない)。マテリアル側に状態を持たせると、
+    // パスごとに別の判断をする余地が消える
+    inline constexpr uint32_t kRaytracingMaterialFlagEmissiveProxy = 1u << 1;
 
     // シーン1つ分のレイトレーシング資源(BLAS/TLASと、シェーダーから引くための統合バッファ群)。
     // KurenaiEngine3D::LoadSceneがシーンを読み終えた直後に一度だけBuildし、
@@ -169,6 +177,10 @@ namespace Kurenai::Assets
         uint32_t GetInstanceCount() const { return m_InstanceCount; }
         uint32_t GetMeshCount() const { return m_MeshCount; }
         uint32_t GetTriangleCount() const { return m_TriangleCount; }
+        // kRaytracingMaterialFlagEmissiveProxy を立てた材質の数。
+        // 【0件かどうかが切り分けの起点】DDGIの二重計上の抑止は、印が付いていなければ
+        // シェーダー側で何も起きない。絵からは「効いていない」と区別がつかない
+        uint32_t GetEmissiveProxyMaterialCount() const { return m_EmissiveProxyMaterialCount; }
         // 統合バッファ(頂点属性+インデックス+索引)が占めるGPUメモリの合計バイト数。
         // BLAS/TLAS本体のサイズはドライバが決めるため含まない
         uint64_t GetGeometryBufferBytes() const { return m_GeometryBufferBytes; }
@@ -194,6 +206,7 @@ namespace Kurenai::Assets
         uint32_t m_InstanceCount = 0;
         uint32_t m_MeshCount = 0;
         uint32_t m_TriangleCount = 0;
+        uint32_t m_EmissiveProxyMaterialCount = 0;
         uint64_t m_GeometryBufferBytes = 0;
     };
 }

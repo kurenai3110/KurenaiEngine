@@ -153,7 +153,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // もう一度撃つ必要が無い。フィルタ無効時はフラグに証明の意味が無いので必ず撃つ
     const bool alreadyVerified =
         (Params2.w != 0u) && MegaLightsUnpackVisible(reservoir.LightAndFlags);
-    if (Params0.w != 0u && light.Params.y > 0.5f && !alreadyVerified)
+    if (Params0.w != 0u && LightCastsRaytracedShadow(light.Params.y) && !alreadyVerified)
     {
         const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
         const float originBias =
@@ -163,7 +163,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // レイの向きと距離だけが変わり、減衰と寄与は中心で評価したものを使う
         // (理由は MegaLightsCommon.hlsli の球光源サンプリングのコメント)
         const float3 samplePos = MegaLightsLightSamplePosition(
-            light.PositionType.xyz, light.Params.z, MegaLightsUnpackSampleUV(reservoir.SampleUV));
+            light.PositionType.xyz, light.Params.z, light.DirectionAngle.xyz,
+            (uint)light.PositionType.w, MegaLightsUnpackSampleUV(reservoir.SampleUV));
         const float3 toSample = samplePos - worldPos;
         const float sampleDist = length(toSample);
         // 受光点が球の内側に入った場合は遮蔽を判定しようがないので素通しにする

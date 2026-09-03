@@ -338,7 +338,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     if (Params0.w != 0u && Params2.w != 0u)
     {
         const GPULight selectedLight = Lights[selectedLightIndex];
-        if (selectedLight.Params.y > 0.5f)
+        if (LightCastsRaytracedShadow(selectedLight.Params.y))
         {
             const PunctualGeometry geometry =
                 EvaluatePunctualGeometry(selectedLight, worldPos, N, translucency);
@@ -349,7 +349,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
                 // シェード側と同じ点へ撃つ(違う点を狙うと、殺す判断と影の階調が食い違う)
                 const float3 samplePos = MegaLightsLightSamplePosition(
-                    selectedLight.PositionType.xyz, selectedLight.Params.z, sampleUV);
+                    selectedLight.PositionType.xyz, selectedLight.Params.z,
+                    selectedLight.DirectionAngle.xyz, (uint)selectedLight.PositionType.w, sampleUV);
                 const float3 toSample = samplePos - worldPos;
                 const float sampleDist = length(toSample);
                 if (sampleDist > originBias)

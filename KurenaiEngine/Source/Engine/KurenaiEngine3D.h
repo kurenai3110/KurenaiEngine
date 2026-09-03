@@ -157,6 +157,31 @@ namespace Kurenai
         // レイトレーシング非対応の環境では手法を変えてもパスが走らない(ShouldRunMegaLights)
         void OverrideMegaLights(int mode, int shadowRayCount, int sampleCount);
 
+        // エミッシブ光源(自発光メッシュを光源として扱う)の切り替え。
+        //
+        // 自発光面はG-Bufferへ書いて加算されるだけで周囲を照らしていない。有効にすると、
+        // 読み込み時に自発光メッシュから起こした光源のかたまりをGPULight(LightType 3)として
+        // 従来のライトループにもMegaLightsにも流す。**有効にすると絵が明るくなる。**
+        //
+        // enabled は 0=無効 / 正=有効 / **負なら既定のまま**(OverrideMegaLightsと同じ約束)。
+        // しきい値だけを差し替えたいときに、状態まで巻き添えで倒さないための三値にしてある。
+        // cutoffIrradiance は打ち切り照度τ(0以下で既定のまま)。Rangeをこれから解く。
+        // maxCount は採用するプロキシ数の上限(0以下で既定のまま)。
+        // **上限に当たったら切り捨てではなく併合を疑うこと** ―― 面積の大きい順に上位を
+        // 残す形はEmeraldSquareの実測で発光の半分以上を捨てる。
+        // doubleCountGI は 0=DDGIから自発光を抜く(既定) / 正=抜かずに二重に数える /
+        // **負なら既定のまま**。抑止されるのはDDGIだけで、反射プローブ・RT反射・
+        // G-Bufferの自発光には掛からない(鏡面が光源を直接見ているのは二重計上ではない)
+        void SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount, int doubleCountGI);
+
+        // シーン全体の自発光の強度倍率(ImGuiの「自発光の強度」と同じ値)。0以下で既定のまま。
+        //
+        // 【検証に要る】glTFのemissiveFactorは[0,1]に収まるため、面積の小さい器具は
+        // 物理的に暗すぎて1階調に届かない(実測: Bistroの電球は8bitの1階調の0.36倍)。
+        // 単位の正しさを絵で確かめるには、この倍率を振れる必要がある
+        void SetEmissiveIntensity(float intensity);
+
+
         // MegaLightsの出力を線形空間で何フレーム足し込むかを設定する(0で蓄積しない)。
         // 指定した枚数に達したら足すのを止めるので、表示が静止し
         // 「ちょうどNサンプルの平均」を決定的に撮れる。
@@ -2267,6 +2292,46 @@ namespace Kurenai
         // (KHR_materials_emissive_strengthをインポータが読むようになれば本来はそちらが正しい)
         float m_EmissiveIntensity = Defaults::EmissiveIntensity;
 
+        // --- エミッシブ光源(自発光メッシュを光源として扱う) ---
+        //
+        // SceneLoaderがワールド空間へ変換したプロキシ。**m_Lightsとは別に持つ。**
+        // 作者が置いたライトと自動生成の光源を同じ配列にすると、ImGuiのライト一覧から
+        // 消せてしまい元のメッシュと食い違う。上限超過時に手置きを押し出さないためでもある
+        std::vector<Assets::EmissiveProxy> m_EmissiveProxies;
+        // インスタンスごとに「このインスタンスからプロキシを起こしたか」。
+        // LoadSceneでm_EmissiveProxiesから作る(要素数はm_Scene.Instances.size())。
+        //
+        // 【DDGIのラスタ経路で要る】あちらはモデルLODの粗い段を描くので、
+        // プロキシが持つMeshIndex(段0の番号)では引けない。インスタンス単位で
+        // 判定し、メッシュ側はEmissiveClustersの有無で見る
+        std::vector<bool> m_EmissiveProxyInstances;
+        bool m_EmissiveLightsEnabled = Defaults::EmissiveLightsEnabled;
+        // DDGIにも自発光を加算したままにするか(=二重に数えるか)。既定は抑止する
+        bool m_EmissiveLightsDoubleCountGI = Defaults::EmissiveLightsDoubleCountGI;
+        float m_EmissiveLightsCutoffIrradiance = Defaults::EmissiveLightsCutoffIrradiance;
+        int m_EmissiveLightsMaxCount = Defaults::EmissiveLightsMaxCount;
+        // RangeのクランプにつかうシーンAABBの対角。LoadSceneで一度だけ求める
+        float m_EmissiveLightsMaxRange = 0.0f;
+        // 直近のフレームで実際にGPUへ送ったプロキシの数(ImGuiとログの表示用)
+        uint32_t m_EmissiveLightsUsedCount = 0;
+        // 上限で切り捨てたときの「採用した集合」の指紋。切り捨てが起きなければ0。
+        //
+        // 【プローブの署名に混ぜるためだけにある】採用順はカメラからの照度で決まるので、
+        // 上限に当たっているシーンではカメラを動かすだけで焼く光源の集合が変わる。
+        // 署名へ入れないと、収束済みのプローブだけ古い集合のまま残る
+        uint64_t m_EmissiveLightsSelectionHash = 0;
+        bool m_EmissiveLightsCapLogged = false;
+        // DDGIの二重計上の抑止が「実際に何をしたか」を1回だけログへ出したか。
+        // 【絵から分からない】抑止はプローブのイラディアンスにしか出ず、しかも
+        // 「効いていない」と「効いた結果が小さい」が同じ絵になる。実効値を出すしかない。
+        //
+        // 【2経路で別々に持つ】1つのフラグを共有すると、先に走ったほうがもう一方のログを
+        // 永久に潰す。どちらの経路の話なのか区別できないログは、切り分けの役に立たない
+        bool m_DDGIEmissiveSuppressLoggedRaster = false;
+        bool m_DDGIEmissiveSuppressLoggedTrace = false;
+        // 送信した灯の実効値を1回だけログへ出したか(「走っていない」と「暗い」の切り分け用)
+        bool m_EmissiveLightsValuesLogged = false;
+
         // 反射プローブ(19章): プローブ位置から6方向をProbeCapture.hlslで2Dレンダーターゲットへ描き、
         // IBLConvolve.hlsl CSCopyCaptureToCubeFaceでスクラッチのキューブマップへ組み上げてから、
         // IBLと同じCSIrradiance/CSPrefilterで畳み込んでプローブごとのキューブマップ配列へ書き込む。
@@ -3367,6 +3432,11 @@ namespace Kurenai
         uint32_t GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const;
         // シャドウ・反射プローブ・DDGI用。常に最も粗い段を返す(影と間接光はテクスチャを読まない)
         const Assets::Model* GetCoarsestLOD(const Assets::ModelInstance& instance) const;
+
+        // DDGIから自発光を抜くか。**判定を1か所に置くこと** ―― ラスタ経路(ObjectConstantsの
+        // 倍率)とレイトレ経路(DDGITraceConstants.Params1.w)で条件がずれると、
+        // 環境によって二重計上の有無が変わる。しかも絵は両方それらしく出る
+        bool ShouldSuppressEmissiveForGI() const;
 
         // --- モデルのストリーミング(.ksceneの[Scene]StreamingDistance) ----------------------
         //

@@ -212,7 +212,12 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 dispatchThreadID : SV_DispatchThre
                 // (= 減衰を強めに見積もる)ので、届く灯を取りこぼす方向には倒れない
                 const float3 closest = clamp(viewCenter, aabbMin, aabbMax);
                 const float3 toLight = viewCenter - closest;
-                atten = DistanceAttenuation(dot(toLight, toLight), light.ColorRange.w);
+                // 【向きを使えないので上界を取る】ここは View 空間で、しかもタイルの中で
+                // 画素ごとに位置も法線も違う。エミッシブ光源の余弦ローブは方向に依存するため、
+                // 最大値((1-κ)/4 + κ)を掛ける ―― 過小に見積もると届く灯を取りこぼす
+                atten = LightAttenuationUpperBound(
+                    (uint)light.PositionType.w, dot(toLight, toLight), light.ColorRange.w,
+                    light.Params.z, light.Params.w);
             }
 
             weight = max(intensity * atten, kMinCandidateWeight);

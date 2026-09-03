@@ -570,7 +570,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsDenoise = ParseIntOption(L"-megalightsdenoise", -1);
         const int megaLightsDenoiseAtrous = ParseIntOption(L"-megalightsdenoiseatrous", -1);
         const int megaLightsDenoiseFrames = ParseIntOption(L"-megalightsdenoiseframes", -1);
-        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
+        // -emissivelights <0|1>。自発光メッシュを光源として扱うか(既定は無効)。
+        // -emissivelightscutoff <τ> は打ち切り照度、-emissivelightsmax <N> は採用数の上限。
+        // -emissivelightsddgi <0|1> はDDGIにも自発光を加算するか(=二重に数えるか。既定は0で抑止)
+        const int emissiveLights = ParseIntOption(L"-emissivelights", -1);
+        const float emissiveLightsCutoff = ParseFloatOption(L"-emissivelightscutoff", -1.0f);
+        const int emissiveLightsMax = ParseIntOption(L"-emissivelightsmax", -1);
+        const int emissiveLightsDDGI = ParseIntOption(L"-emissivelightsddgi", -1);
+        // -emissiveintensity <倍率>。シーン全体の自発光の強度(ImGuiの同名スライダと同じ値)。
+        // glTFのemissiveFactorは[0,1]に収まるため、既定の1.0では小さな器具が1階調に届かない
+        const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
         const float megaLightsDenoiseSigma = ParseFloatOption(L"-megalightsdenoisesigma", -1.0f);
         // -megalightsfirefly <k>。ファイアフライの近傍クランプの強さ(0で無効)
         const float megaLightsFireflyClamp = ParseFloatOption(L"-megalightsfirefly", -1.0f);
@@ -671,7 +680,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 engine.SetMegaLightsDenoise(
                     megaLightsDenoise, megaLightsDenoiseAtrous, megaLightsDenoiseFrames);
             }
-            if (megaLightsDenoiseSigma > 0.0f)
+            if (emissiveLights >= 0 || emissiveLightsCutoff > 0.0f || emissiveLightsMax > 0
+                || emissiveLightsDDGI >= 0)
+            {
+                // 有効/無効を指定していない(負)なら、しきい値だけ差し替えて状態は既定のまま
+                engine.SetEmissiveLights(
+                    emissiveLights, emissiveLightsCutoff, emissiveLightsMax, emissiveLightsDDGI);
+            }
+            if (emissiveIntensity > 0.0f)
+            {
+                engine.SetEmissiveIntensity(emissiveIntensity);
+            }            if (megaLightsDenoiseSigma > 0.0f)
             {
                 engine.SetMegaLightsDenoiseSigmaLuminance(megaLightsDenoiseSigma);
             }

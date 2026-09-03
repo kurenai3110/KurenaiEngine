@@ -164,7 +164,8 @@ float3 EvaluateLight(
             return float3(0.0f, 0.0f, 0.0f);
         }
 
-        atten = DistanceAttenuation(distSq, range);
+        atten = LightAttenuation(
+            lightType, toLight, distSq, range, light.Params.z, light.DirectionAngle.xyz, light.Params.w);
         if (atten <= 0.0f)
         {
             return float3(0.0f, 0.0f, 0.0f);
@@ -196,7 +197,7 @@ float3 EvaluateLight(
     // ここまで来たライトだけが実際にこのピクセルを照らす。予算が残っていて、かつ
     // そのライトが影を落とす設定(Params.y)ならレイマーチする
     float shadow = 1.0f;
-    if (shadowRayBudget > 0u && light.Params.y > 0.5f)
+    if (shadowRayBudget > 0u && LightCastsScreenSpaceShadow(light.Params.y))
     {
         shadow = ComputeScreenSpaceShadow(worldPos, N, L, distanceToLight, pixelCoord);
         shadowRayBudget -= 1u;

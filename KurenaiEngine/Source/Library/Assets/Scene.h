@@ -237,6 +237,41 @@ namespace Kurenai::Assets
         std::string Name;
     };
 
+    // エミッシブなメッシュから起こした光源プロキシ1つ分(**ワールド空間**)。
+    // Mesh::EmissiveClusters(ローカル空間)を ModelInstance の変換で移したもので、
+    // SceneLoader が読み込み時に一度だけ作る(シーンは読み込み後に変形しない)。
+    struct EmissiveProxy
+    {
+        // ワールド空間の位置。クラスタの重心そのもの。
+        // 【法線方向へずらさない】面上に置いたままでよい ―― 減衰の分母が d^2 ではなく
+        // d^2 + SourceRadius^2 になっており、面の上では cos も 0 に落ちるため、
+        // 自分自身を照らす寄与はここで既に潰れている(docs/ImplementationDetail.md 62章)
+        float Position[3] = { 0.0f, 0.0f, 0.0f };
+        // 放射の向き(ワールド空間、正規化済み)。
+        // 【NormalMatrix(逆転置)で移すこと】これは光の進行方向ではなく**面の法線**である。
+        // すぐ下にあるモデル埋め込みライトの Direction は World でそのまま回してよいが
+        // (方向ベクトルなので)、こちらを同じように扱うと非一様スケールで黙ってずれる
+        float Direction[3] = { 0.0f, 1.0f, 0.0f };
+        // 面が出している放射輝度。EmissiveFactor × エミッシブテクスチャの平均色。
+        //
+        // 【シーン全体の倍率(m_EmissiveIntensity)も露出も掛けない】倍率は毎フレームの
+        // ライトリスト構築で掛ける ―― そうしないとImGuiのスライダーが効かなくなる。
+        // 露出はそもそも掛けてはいけない(G-Bufferのエミッシブが露出を通らないため。62章)
+        float RadianceBase[3] = { 0.0f, 0.0f, 0.0f };
+        // ワールド空間の総面積[m^2]
+        float Area = 0.0f;
+        // 指向性 κ(Assets::EmissiveCluster::Directionality と同じ量)
+        float Directionality = 0.0f;
+        // ワールド空間の面積等価円板半径[m]
+        float SourceRadius = 0.0f;
+        // どのインスタンスのどのメッシュのどのクラスタか。
+        // 【採用順を決めるときのタイブレークに使う】スコアが同値のときにこの3つ組の辞書順で
+        // 決めると、フレーム間で順序が揺れない(揺れるとライトが出入りしてちらつく)
+        uint32_t InstanceIndex = 0;
+        uint32_t MeshIndex = 0;
+        uint32_t ClusterIndex = 0;
+    };
+
     struct Scene
     {
         std::wstring Name;
@@ -272,6 +307,13 @@ namespace Kurenai::Assets
         // [Light]セクションで直接指定されたライト(元からワールド空間)を合成した、シーン全体の
         // ライト一覧。KurenaiEngine3Dはこれをそのまま読んでGPUのライトバッファを構築する
         std::vector<Light> Lights;
+
+        // エミッシブなメッシュから起こした光源プロキシの一覧(ワールド空間)。
+        // 各ModelInstanceが持つMesh::EmissiveClusters(ローカル空間)をInstance::Worldで
+        // 変換したもの。**Lightsには混ぜない** ―― 作者が置いたライトと自動生成の光源を
+        // 同じ配列にすると、ImGuiのライト一覧から消せてしまい元のメッシュと食い違う。
+        // 上限を超えたときに手置きのライトが押し出されないよう、詰める順序も分ける必要がある
+        std::vector<EmissiveProxy> EmissiveProxies;
 
         // .ksceneの[ReflectionProbe]セクションで配置された反射プローブの一覧(ワールド空間)。
         // ライトと違いモデルファイルへ埋め込む概念が無いため、.ksceneに書かれたものが全て

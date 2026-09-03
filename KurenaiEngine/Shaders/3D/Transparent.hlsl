@@ -312,12 +312,8 @@ void EvaluateIBLSplit(
     outSpecular = prefiltered * specularWeight + irradiance * multiScatterWeight;
 }
 
-float DistanceAttenuation(float distSq, float range)
-{
-    float factor = distSq / max(range * range, 1e-4f);
-    float window = saturate(1.0f - factor * factor);
-    return (window * window) / max(distSq, 0.0001f);
-}
+// 距離減衰。定義は LightAttenuation.hlsli にただ1つある
+#include "LightAttenuation.hlsli"
 
 float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float angleOffset)
 {
@@ -352,7 +348,8 @@ void EvaluateLight(
             return;
         }
 
-        atten = DistanceAttenuation(distSq, range);
+        atten = LightAttenuation(
+            lightType, toLight, distSq, range, light.Params.z, light.DirectionAngle.xyz, light.Params.w);
         if (atten <= 0.0f)
         {
             return;
