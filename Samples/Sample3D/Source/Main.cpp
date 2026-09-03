@@ -589,6 +589,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int occlusionCull = ParseIntOption(L"-occlusioncull", -1);
         // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
         const int taa = ParseIntOption(L"-taa", -1);
+        // -meshlet 0|1。メッシュレット描画の有無。切ると従来の頂点シェーダー経路へ落ち、
+        // メッシュレット単位のカリングが一切かからない。**両経路の絵は一致するのが正しい**
+        // ので、これが「増幅シェーダーが何か落としていないか」を見るときの基準になる
+        const int meshlet = ParseIntOption(L"-meshlet", -1);
         // -renderres <幅>x<高さ>。内部レンダー解像度。タイルライトカリングと
         // MegaLightsの候補プールは16レンダー画素のタイルなので、解像度が違うと
         // タイルと形状の噛み合いが変わる。比較する2回は必ず揃えること
@@ -612,6 +616,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (taa >= 0)
             {
                 engine.SetTAAEnabled(taa != 0);
+            }
+            if (meshlet >= 0)
+            {
+                engine.SetMeshletRenderingEnabled(meshlet != 0);
             }
             if (forceDDGIRaster)
             {
