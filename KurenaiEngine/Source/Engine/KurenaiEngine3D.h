@@ -2263,6 +2263,12 @@ namespace Kurenai
         float m_EmissiveLightsMaxRange = 0.0f;
         // 直近のフレームで実際にGPUへ送ったプロキシの数(ImGuiとログの表示用)
         uint32_t m_EmissiveLightsUsedCount = 0;
+        // 上限で切り捨てたときの「採用した集合」の指紋。切り捨てが起きなければ0。
+        //
+        // 【プローブの署名に混ぜるためだけにある】採用順はカメラからの照度で決まるので、
+        // 上限に当たっているシーンではカメラを動かすだけで焼く光源の集合が変わる。
+        // 署名へ入れないと、収束済みのプローブだけ古い集合のまま残る
+        uint64_t m_EmissiveLightsSelectionHash = 0;
         bool m_EmissiveLightsCapLogged = false;
         // DDGIの二重計上の抑止が「実際に何をしたか」を1回だけログへ出したか。
         // 【絵から分からない】抑止はプローブのイラディアンスにしか出ず、しかも

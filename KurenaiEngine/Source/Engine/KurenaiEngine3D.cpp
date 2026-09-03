@@ -7327,6 +7327,18 @@ namespace Kurenai
         mixBool(m_ProceduralSkyEnabled);
         // 自発光の強度倍率はキャプチャのエミッシブ項へそのまま乗る
         mixFloat(m_EmissiveIntensity);
+        // エミッシブ光源(62章)。プロキシはProbeCapture.hlslのライトループ(t8)にも入るので、
+        // 有効/無効・打ち切り照度・採用数の上限はどれも焼き上がりを変える。
+        // 二重計上の抑止はDDGIのキャプチャから自発光を抜くので、これも焼き上がりを変える。
+        // **混ぜ忘れると「つまみが効かない」型の不具合になる**(このすぐ上の注記と同じ)
+        mixBool(m_EmissiveLightsEnabled);
+        mixFloat(m_EmissiveLightsCutoffIrradiance);
+        mixFloat(static_cast<float>(m_EmissiveLightsMaxCount));
+        mixBool(m_EmissiveLightsDoubleCountGI);
+        // 【上限に当たると採用集合がカメラ依存になる】採用順はカメラからの照度で決まるため、
+        // 上の4つだけでは「カメラを動かしただけで焼く光源が変わったのに署名は同じ」になる。
+        // 切り捨てが起きていないフレームでは0で固定なので、余分な焼き直しは起きない
+        mixBytes(&m_EmissiveLightsSelectionHash, sizeof(m_EmissiveLightsSelectionHash));
 
         // bent normalによる遮蔽(34章)。ProbeCapture.hlslが同じ分岐を持つため、
         // 含め忘れるとつまみを動かしてもプローブの中身だけ古いまま残る
@@ -8856,6 +8868,13 @@ namespace Kurenai
         // 【毎フレーム作り直す】m_EmissiveIntensity のスライダーとτを即座に反映するため。
         // プロキシ側は倍率も露出も持たない値(RadianceBase)で保持してある
         m_EmissiveLightsUsedCount = 0;
+        // 切り捨てが起きたときだけ、採用した集合の指紋を残す(起きなければ0のまま)。
+        //
+        // 【プローブの署名に要る】採用順はカメラからの照度で決まるので、**カメラを動かすだけで
+        // プローブが焼く光源の集合が変わる**。署名が変わらないと反射プローブはOnDemandで
+        // 焼き直さず、DDGIは更新を止めたまま、収束済みのプローブだけ古い集合で残る。
+        // 切り捨てが起きない限り集合はシーン固定なので、そのときは0で十分
+        m_EmissiveLightsSelectionHash = 0;
         if (m_EmissiveLightsEnabled && !m_EmissiveProxies.empty() && manualLightCount < kMaxLights)
         {
             const size_t budget = std::min<size_t>(
@@ -8905,12 +8924,28 @@ namespace Kurenai
                         if (pa.MeshIndex != pb.MeshIndex) { return pa.MeshIndex < pb.MeshIndex; }
                         return pa.ClusterIndex < pb.ClusterIndex;
                     });
+                // FNV-1a(64bit)。採用したプロキシの識別子だけを順に混ぜる。
+                // 位置や強さは混ぜない ―― それらはシーン固定で、変わるのは「どれを採ったか」だけ
+                uint64_t selectionHash = 1469598103934665603ull;
+                const auto mixIndex = [&selectionHash](uint32_t value)
+                {
+                    const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
+                    for (size_t b = 0; b < sizeof(value); ++b)
+                    {
+                        selectionHash ^= bytes[b];
+                        selectionHash *= 1099511628211ull;
+                    }
+                };
                 for (size_t i = 0; i < budget; ++i)
                 {
+                    const Assets::EmissiveProxy& proxy = m_EmissiveProxies[order[i]];
+                    mixIndex(proxy.InstanceIndex);
+                    mixIndex(proxy.MeshIndex);
+                    mixIndex(proxy.ClusterIndex);
                     gpuLights.push_back(MakeGPULightFromEmissiveProxy(
-                        m_EmissiveProxies[order[i]], m_EmissiveIntensity, m_EmissiveLightsCutoffIrradiance,
-                        m_EmissiveLightsMaxRange));
+                        proxy, m_EmissiveIntensity, m_EmissiveLightsCutoffIrradiance, m_EmissiveLightsMaxRange));
                 }
+                m_EmissiveLightsSelectionHash = selectionHash;
 
                 // 【切り捨ては発光を捨てている】併合で減らせないか先に疑うこと。
                 // EmeraldSquare の実測では、面積の大きい順に上位256個を残しても
