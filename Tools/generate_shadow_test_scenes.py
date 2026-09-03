@@ -86,7 +86,12 @@ def generate_many_lights_test(grid, intensity, light_range, height):
         "# (カリングは見た目を変えない最適化であること)も、このシーンで確認する。",
         "",
         "[Scene]",
-        "Name = Many Lights Test",
+        # 【シーン名は一意にすること】ImGuiのシーン一覧は表示名をそのままボタンのラベルに
+        # 使っており(ScenePanel.cpp)、同じ名前が4つ以上同時に見えると
+        # 「Programmer error: N visible items with conflicting IDs」で落ちる。
+        # 以前この関数は灯数によらず "Many Lights Test" を返しており、LightScale 5本と
+        # ManyLightsTest の計6本が同名になっていた
+        f"Name = Many Lights Test {grid * grid + 2}灯",
         "",
         "[Model]",
         f"Path = {MODEL_PATH}",
@@ -207,7 +212,9 @@ def generate_penumbra_height_test(source_radius, height, light_height=10.0):
         "# SourceRadius=0 を対照に取ること(半影が消えるはず)。",
         "",
         "[Scene]",
-        "Name = Penumbra Height Test",
+        # シーン名は一意にすること(理由は generate_many_lights_test のコメント)。
+        # 以前は4本とも "Penumbra Height Test" で同名だった
+        "Name = Penumbra Height Test h=%d" % int(height),
         "",
         "[Model]",
         "Path = PenumbraTest/PenumbraH%d.kmodel" % int(height),

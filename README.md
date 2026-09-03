@@ -1260,7 +1260,35 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   ポイントライトを格子状に64灯配置)の2つだけは手書きではなく`Tools/generate_shadow_test_scenes.py`で
   生成します(ジオメトリは`LightTest.kmodel`を流用するため、生成されるのは`.kscene`だけです)。
   半影の測定用の`PenumbraTest.kscene`・`PenumbraH{4,6,7,8}.kscene`も同じスクリプトが生成します
-  (こちらは`PenumbraTest`のモデルを使うため、先に`Tools/generate_penumbra_test.py`を走らせてパックします)
+  (こちらは`PenumbraTest`のモデルを使うため、先に`Tools/generate_penumbra_test.py`を走らせてパックします)。
+
+  **MegaLights用の2つ**も生成物です。どちらも`-dx12 -megalights 2`で起動しないと
+  MegaLightsは走りません(既定はDX11かつMegaLights無効)。
+
+  - `BistroExteriorNight.kscene` — Bistro屋外の夜景。`Tools/extract_bistro_lights.py`が
+    `Exterior.kmodel`/`.kgeom`を直接読み、街灯・ストリングライトの電球・庇のスポット・
+    壁付けランタン・スクーターのヘッドライトの**実際の器具位置**から灯を導出します。
+    位置・色・光源半径はすべて実測値で、目分量の数値は入っていません。
+    **灯は器具の重心ではなく、そこから真下へ下ろした位置に置かれます** — MegaLightsの
+    影レイは`RAY_FLAG_FORCE_OPAQUE`なので、重心へ置くと器具自身のガラスと笠に遮られて
+    1灯も光りません(絵が暗いだけで例外もログも出ないため、MegaLightsの不具合と誤診しやすい)。
+    スクリプトは灯ごとに脱出率を測り、しきい値を超える位置まで下ろしてから採用します
+  - `MegaLightsNoiseCheck.kscene` — ノイズ測定用(`docs/ImplementationDetail.md` 61.7f/61.7g が
+    使っているシーン)。`BistroInteriorLit` から時刻0・GIVolume無し・露出2.0固定にしたもので、
+    **測定を決定的にするために `-autoexposure 0` と組で使います**
+  - `MegaLightsStage.kscene` — 日常の切り分け用の軽いステージ。
+    `Tools/generate_megalights_stage.py`が2層の回廊・アーチ・手すりの縦桟・中庭の箱・
+    粗さの帯を持つglTFを生成し、灯は`KHR_lights_punctual`として埋め込みます
+    (`.kscene`側に`[Light]`は書きません)。従来の`LightScale`系が「床と壁と球4個」で
+    **影を落とす相手をほとんど持たなかった**のに対し、遮蔽を濃くしてあります
+
+  ```
+  python Tools\generate_megalights_stage.py
+  Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+    Assets\Source\MegaLightsStage\MegaLightsStage.gltf ^
+    -o Assets\Packed\MegaLightsStage\MegaLightsStage.kmodel
+  python Tools\extract_bistro_lights.py
+  ```
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
 - `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる。既定では空をGPUで手続き生成するため通常は使われず、Procedural Skyを無効にしたときのフォールバックと、`[Scene]Skybox`を明示するシーン向けのアセットとして残っている
 

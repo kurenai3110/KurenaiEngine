@@ -11,7 +11,7 @@
 # (カリングは見た目を変えない最適化であること)も、このシーンで確認する。
 
 [Scene]
-Name = Many Lights Test
+Name = Many Lights Test 38灯
 
 [Model]
 Path = LightTest/LightTest.kmodel
