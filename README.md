@@ -973,8 +973,12 @@ Samples\Sample3D\RunDX12.bat -debug
 
 **glTFの`emissiveFactor`は[0,1]に収まるため、既定の強度では小さな照明器具は暗すぎて絵に出ません。**
 Bistro内装の電球は0.5m先で8bitの1階調の0.55倍しか与えません(手置きの800cdライトの約1/9)。
-`KHR_materials_emissive_strength`をインポータが読まないための制約で、実用上は
-`-emissiveintensity`(またはImGuiの「自発光の強度」)を上げて使います。
+`KHR_materials_emissive_strength`をインポータが読まないための制約です。逃げ道は2つあります。
+
+- **アセット側で与える**: `KurenaiPacker --emissive <マテリアル名>=<R,G,B>` で器具のマテリアルへ
+  1.0を超える係数を焼き込む。器具ごとに明るさを変えられるので、こちらが本筋です
+- **シーン全体を持ち上げる**: `-emissiveintensity`(またはImGuiの「自発光の強度」)。
+  全マテリアルへ一様に掛かるので、検証で桁を合わせたいときに使います
 
 単位変換(π・4・露出)の正しさは専用シーンで確かめられます。`Tools/generate_emissive_light_test.py`
 が同じモデルを使う2つのシーンを生成し、片方は自発光のプロキシ、もう片方は**等価な手置きポイント
