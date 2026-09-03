@@ -83,7 +83,9 @@ cbuffer DDGITraceConstants : register(b1)
     float4 TraceParams0;
     // x = キャプチャキューブの1面の解像度、y = エミッシブ強度(ラスタ経路の
     //     ObjectConstants.EmissiveFactorに掛かっているのと同じ倍率)、
-    // z = 太陽の影レイを撃つか(0/1。対照実験用のつまみ)、w = 未使用
+    // z = 太陽の影レイを撃つか(0/1。対照実験用のつまみ),
+    // w = エミッシブ光源プロキシとして起こされたマテリアルの自発光倍率
+    //     (1.0 でそのまま加算 = 二重計上、0.0 で抑止。プロキシでないマテリアルには掛からない)
     float4 TraceParams1;
 };
 
@@ -191,7 +193,18 @@ float3 ShadeProbeRayHit(float3 hitPosition, float3 N, RTMaterial material, float
 
     // エミッシブはラスタ経路と同じ倍率を掛ける
     // (ラスタ側は MakeObjectConstants が EmissiveFactor へ強度を畳み込んでいる)
-    color += material.EmissiveFactor * TraceParams1.y;
+    //
+    // 【プロキシとして起こされた面は、ここで足すと二重に数える】その発光は既に
+    // GPULight(型3)として直接光の側から入っている。抑止するかはCPUが決め、
+    // TraceParams1.w が 0.0(抑止)か 1.0(そのまま)で来る。
+    // **プロキシでないマテリアルには掛からない** ―― 起こされていない発光面まで
+    // 消すと、DDGIからその面の照明が丸ごと落ちる
+    float emissiveScale = TraceParams1.y;
+    if ((material.Flags & kRTMaterialFlagEmissiveProxy) != 0u)
+    {
+        emissiveScale *= TraceParams1.w;
+    }
+    color += material.EmissiveFactor * emissiveScale;
 
     return color;
 }

@@ -79,6 +79,14 @@ struct RTMaterial
     uint Padding;
 };
 
+// RTMaterial.Flags のビット。**Assets::kRaytracingMaterialFlag* と一致させること**
+static const uint kRTMaterialFlagTransparent = 1u;
+// このメッシュの自発光はエミッシブ光源プロキシとして起こされている。
+// **これは「起こされた」という事実であって、抑止するかどうかではない** ――
+// DDGIは抑止し、反射プローブとRT反射は抑止しない(鏡面が光源を直接見ているのは
+// 二重計上ではない)。どうするかはパスごとの定数で決める
+static const uint kRTMaterialFlagEmissiveProxy = 2u;
+
 StructuredBuffer<RTVertexAttribute> RTAttributes : register(KURENAI_RT_ATTRIBUTE_REGISTER);
 StructuredBuffer<uint> RTIndices : register(KURENAI_RT_INDEX_REGISTER);
 StructuredBuffer<RTMeshInfo> RTMeshInfos : register(KURENAI_RT_MESHINFO_REGISTER);

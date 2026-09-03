@@ -61,6 +61,7 @@ namespace Kurenai::Assets
         m_InstanceCount = 0;
         m_MeshCount = 0;
         m_TriangleCount = 0;
+        m_EmissiveProxyMaterialCount = 0;
         m_GeometryBufferBytes = 0;
     }
 
@@ -137,6 +138,19 @@ namespace Kurenai::Assets
                 material.RoughnessFactor = mesh.RoughnessFactor;
                 material.AlphaCutoff = mesh.AlphaCutoff;
                 material.Flags = mesh.IsTransparent ? kRaytracingMaterialFlagTransparent : 0u;
+                // 【判定はクラスタの有無で行う】「エミッシブかどうか」ではない ――
+                // 係数が0でないのにテクスチャの平均が真っ黒でクラスタが1つも出ない
+                // メッシュがあり、そちらは光源になっていないので抑止してはいけない。
+                //
+                // 【ここが見るのは段0だけ】このループは instance.Model(=段0)を回る。
+                // 一方 DDGI のラスタ経路が描くのは最も粗い段なので、簡略化で発光三角形が
+                // 落ちた段ではクラスタが消え、**レイトレは抑止するのにラスタは抑止しない**
+                // という乖離が起きる。KurenaiEngine3D 側がその条件でWarningを出す
+                if (!mesh.EmissiveClusters.empty())
+                {
+                    material.Flags |= kRaytracingMaterialFlagEmissiveProxy;
+                    ++m_EmissiveProxyMaterialCount;
+                }
                 // ヒット面のテクスチャ。bindless非対応環境ではすべて無効値になり、
                 // シェーダーは従来どおり定数の係数だけで陰影を決める
                 material.BaseColorTextureIndex = RegisterMaterialTexture(device, mesh.BaseColorTexture);

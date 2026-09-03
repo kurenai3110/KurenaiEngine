@@ -949,6 +949,7 @@ Samples\Sample3D\RunDX12.bat -debug
 | `-emissiveintensity <倍率>` | シーン全体の自発光の強度(ImGuiの「自発光の強度」と同じ値) |
 | `-emissivelightscutoff <τ>` | 打ち切り照度。光源の影響半径(Range)をここから解く。**既定は 0.001** |
 | `-emissivelightsmax <N>` | 採用するプロキシ数の上限。**既定は 1024**(ライト数の上限と同じ)。手置きライトとは別枠で管理されます |
+| `-emissivelightsddgi <0\|1>` | DDGIにも自発光を加算するか(=同じ発光を二重に数えるか)。**既定は 0**(抑止)。反射プローブ・RT反射・画面上の自発光には掛かりません |
 
 **glTFの`emissiveFactor`は[0,1]に収まるため、既定の強度では小さな照明器具は暗すぎて絵に出ません。**
 Bistro内装の電球は0.5m先で8bitの1階調の0.55倍しか与えません(手置きの800cdライトの約1/9)。

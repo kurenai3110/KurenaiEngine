@@ -3650,7 +3650,14 @@ namespace Kurenai
         Core::Logger::Info("KurenaiEngine3D", "デバッグ表示を番号で選択しました: " + std::to_string(index));
     }
 
-    void KurenaiEngine3D::SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount)
+    bool KurenaiEngine3D::ShouldSuppressEmissiveForGI() const
+    {
+        // 【プロキシが1つも無いなら抑止しない】発光面を光源にしていないのに
+        // DDGIから自発光だけ抜くと、その面の照明が丸ごと落ちる
+        return m_EmissiveLightsEnabled && !m_EmissiveLightsDoubleCountGI && !m_EmissiveProxies.empty();
+    }
+
+    void KurenaiEngine3D::SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount, int doubleCountGI)
     {
         // 負は「既定のまま」。しきい値だけ差し替えたいときに状態を巻き添えで倒さないため
         if (enabled >= 0)
@@ -3666,6 +3673,10 @@ namespace Kurenai
         {
             m_EmissiveLightsMaxCount = maxCount;
         }
+        if (doubleCountGI >= 0)
+        {
+            m_EmissiveLightsDoubleCountGI = (doubleCountGI > 0);
+        }
         // 上限の警告は設定を変えたら出し直す(τを上げてRangeを縮めた結果を見たいため)
         m_EmissiveLightsCapLogged = false;
         Core::Logger::Info(
@@ -3673,7 +3684,8 @@ namespace Kurenai
             std::string("エミッシブ光源: ") + (m_EmissiveLightsEnabled ? "有効" : "無効") +
                 " / 打ち切り照度 " + std::to_string(m_EmissiveLightsCutoffIrradiance) + " / 上限 " +
                 std::to_string(m_EmissiveLightsMaxCount) + "個 / プロキシ " +
-                std::to_string(m_EmissiveProxies.size()) + "個");
+                std::to_string(m_EmissiveProxies.size()) + "個 / DDGIの自発光 " +
+                (ShouldSuppressEmissiveForGI() ? "抑止" : "そのまま(二重計上)"));
     }
 
     void KurenaiEngine3D::SetEmissiveIntensity(float intensity)
@@ -6830,6 +6842,24 @@ namespace Kurenai
         // エミッシブ光源のプロキシ(ワールド空間)。**m_Lightsへは混ぜない**(宣言側の注記参照)。
         // ImGuiのライト一覧にも出さないので、m_SelectedLightIndexの範囲は変わらない
         m_EmissiveProxies = m_Scene.EmissiveProxies;
+        // インスタンスごとの「プロキシを起こしたか」。DDGIのラスタ経路で引く。
+        // ストリーミング中のインスタンスはプロキシを作らないので、ここも自動的に立たない
+        m_EmissiveProxyInstances.assign(m_Scene.Instances.size(), false);
+        for (const Assets::EmissiveProxy& proxy : m_EmissiveProxies)
+        {
+            if (proxy.InstanceIndex < m_EmissiveProxyInstances.size())
+            {
+                m_EmissiveProxyInstances[proxy.InstanceIndex] = true;
+            }
+            else
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "エミッシブ光源のインスタンス番号がシーンの範囲外です: " +
+                        std::to_string(proxy.InstanceIndex) + " / " +
+                        std::to_string(m_Scene.Instances.size()) + "個");
+            }
+        }
         m_EmissiveLightsUsedCount = 0;
         m_EmissiveLightsCapLogged = false;
         m_EmissiveLightsValuesLogged = false;
@@ -8891,7 +8921,11 @@ namespace Kurenai
                         "KurenaiEngine3D",
                         "エミッシブ光源が上限(" + std::to_string(budget) + ")を超えたため" +
                             std::to_string(m_EmissiveProxies.size() - budget) +
-                            "個を捨てました。捨てたぶんの発光は絵から消えます");
+                            "個を捨てました。捨てたぶんの発光は絵から消えます" +
+                            (ShouldSuppressEmissiveForGI()
+                                 ? "。**しかもDDGIからは抑止されたまま**です ―― 捨てた面は"
+                                   "直接光にも間接光にも入らず、純粋なエネルギー損失になります"
+                                 : ""));
                     m_EmissiveLightsCapLogged = true;
                 }
             }
@@ -10601,12 +10635,31 @@ namespace Kurenai
             // プローブの位置ごとに結果が変わるため、予算計算と食い違う。
             // 定数バッファの予算超過は例外ではなくログ1行で続行し、描画が静かに壊れる
             // (DX12Buffer.h)ため、整合が取れるまでは入れないほうが安全
-            for (const auto& instance : m_Scene.Instances)
+            // 【DDGIからだけ自発光を抜く】プロキシとして起こした発光は既にGPULight(型3)から
+            // 入っているので、プローブが同じ面を「明るい面」として焼くと二重に数える。
+            // **反射プローブでは抑止しない** ―― 同じProbeCapture.hlslを共有しているが、
+            // 鏡面が光源を直接見ているのは二重計上ではなく、消すと看板が鏡に映らなくなる。
+            // だから材質のフラグではなくCPUのパスごとに決めている
+            const bool suppressEmissiveForDDGI = ShouldSuppressEmissiveForGI();
+            uint32_t ddgiDrawnMeshes = 0;
+            uint32_t ddgiEmissiveMeshes = 0;
+            uint32_t ddgiSuppressedMeshes = 0;
+            uint32_t ddgiLODMismatchMeshes = 0;
+            for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
             {
+                const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
                 // 【DDGIも最も粗い段】理由は反射プローブと同じ
                 // ストリーミング中で未読み込みなら描かない
                 const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
                 if (!coarsestModel) { continue; }
+                // 【診断にだけ使う】抑止するかどうかの判定には入れないこと ――
+                // レイトレ側(RaytracingMaterial::Flags)はインスタンスを見ないので、
+                // ここだけ条件を増やすと2経路で判定がずれる軸が1本増える。
+                // いまは「プロキシを作ったインスタンス」と「クラスタを持つメッシュ」が
+                // 必ず一致するため冗長でもあるが、将来プロキシ生成に条件が入ったときに
+                // 静かに乖離する形になる
+                const bool instanceHasProxy =
+                    instanceIndex < m_EmissiveProxyInstances.size() && m_EmissiveProxyInstances[instanceIndex];
                 for (const auto& mesh : coarsestModel->Meshes)
                 {
                     // 半透明メッシュを焼かない理由は反射プローブと同じ(不透明として描かれるため、
@@ -10616,7 +10669,28 @@ namespace Kurenai
                         continue;
                     }
 
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                    // 【シェーダーには手を入れない】倍率を0にすればEmissiveFactorごと0になる。
+                    // 判定をクラスタの有無で行うのは、係数が0でないのにテクスチャの平均が
+                    // 真っ黒でクラスタが出ないメッシュがあり、そちらは光源になっていないため
+                    // 【レイトレ側とまったく同じ述語にする】あちらは
+                    // RaytracingScene.cpp が !mesh.EmissiveClusters.empty() だけで印を付ける。
+                    // 条件が1つでも違うと、環境によって二重計上の有無が変わる
+                    const bool meshIsProxySource = suppressEmissiveForDDGI && !mesh.EmissiveClusters.empty();
+                    const float ddgiEmissiveIntensity = meshIsProxySource ? 0.0f : m_EmissiveIntensity;
+                    ++ddgiDrawnMeshes;
+                    const float emissiveMax =
+                        std::max({ mesh.EmissiveFactor[0], mesh.EmissiveFactor[1], mesh.EmissiveFactor[2] });
+                    if (emissiveMax > 0.0f) { ++ddgiEmissiveMeshes; }
+                    if (meshIsProxySource) { ++ddgiSuppressedMeshes; }
+                    // 【2経路で判定がずれうる唯一の条件】レイトレ側の印は段0のクラスタで付くが、
+                    // こちらが描くのは最も粗い段。粗い段でクラスタが消えている(簡略化で発光
+                    // 三角形が落ちた等)と、レイトレは抑止するのにラスタは抑止せず二重に数える。
+                    // **絵からは分からない**ので、条件に当たったことだけは残す
+                    if (instanceHasProxy && emissiveMax > 0.0f && mesh.EmissiveClusters.empty())
+                    {
+                        ++ddgiLODMismatchMeshes;
+                    }
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, ddgiEmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -10629,6 +10703,27 @@ namespace Kurenai
                     cmd->SetTexture(3, mesh.EmissiveTexture);
 
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
+                }
+            }
+
+            if (!m_DDGIEmissiveSuppressLoggedRaster)
+            {
+                m_DDGIEmissiveSuppressLoggedRaster = true;
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    std::string("DDGI(ラスタ)の自発光: 抑止 ") + (suppressEmissiveForDDGI ? "する" : "しない") +
+                        " / 描いたメッシュ " + std::to_string(ddgiDrawnMeshes) + "個(うち自発光 " +
+                        std::to_string(ddgiEmissiveMeshes) + "個) / 0にしたメッシュ " +
+                        std::to_string(ddgiSuppressedMeshes) + "個 / 自発光の強度 " +
+                        std::to_string(m_EmissiveIntensity));
+                if (ddgiLODMismatchMeshes > 0)
+                {
+                    Core::Logger::Warning(
+                        "KurenaiEngine3D",
+                        "DDGI(ラスタ)で抑止できない自発光メッシュがあります: " +
+                            std::to_string(ddgiLODMismatchMeshes) +
+                            "個。粗いモデルLODでエミッシブのかたまりが消えているため、"
+                            "レイトレ経路だけが抑止し、この経路では二重計上が残ります");
                 }
             }
 
@@ -10666,12 +10761,25 @@ namespace Kurenai
             traceConstants.Params0 = {
                 probePosition.x, probePosition.y, probePosition.z, static_cast<float>(face)
             };
+            // w = プロキシとして起こされたマテリアルの自発光倍率。0.0で抑止、1.0でそのまま。
+            // ラスタ経路(ObjectConstantsの倍率を0にする)と**同じ判定**から決めること
             traceConstants.Params1 = {
                 static_cast<float>(kDDGICaptureSize),
                 m_EmissiveIntensity,
                 m_DDGISunShadowRayEnabled ? 1.0f : 0.0f,
-                0.0f
+                ShouldSuppressEmissiveForGI() ? 0.0f : 1.0f
             };
+
+            if (!m_DDGIEmissiveSuppressLoggedTrace)
+            {
+                m_DDGIEmissiveSuppressLoggedTrace = true;
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "DDGI(レイトレ)の自発光: Params1.y(強度) " + std::to_string(traceConstants.Params1.y) +
+                        " / Params1.w(プロキシ材質の倍率) " + std::to_string(traceConstants.Params1.w) +
+                        " / プロキシ印の付いた材質 " + std::to_string(m_RaytracingScene.GetEmissiveProxyMaterialCount()) +
+                        "件 / 全メッシュ " + std::to_string(m_RaytracingScene.GetMeshCount()) + "件");
+            }
 
             cmd->SetComputePipelineState(m_DDGIProbeTracePipelineState.get());
             // ヒット面のマテリアルテクスチャをbindlessで引くためs0にWrapが要る(RTAOと同じ理由)
