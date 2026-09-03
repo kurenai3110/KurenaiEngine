@@ -5448,6 +5448,7 @@ namespace Kurenai
         RetiredAssets retired;
         retired.Scene = std::move(m_Scene);
         retired.RaytracingScene = std::move(m_RaytracingScene);
+        retired.MeshLightScene = std::move(m_MeshLightScene);
         m_Scene = Assets::Scene{};
         m_RaytracingScene = Assets::RaytracingScene{};
         RetireAssets(std::move(retired));
@@ -6611,6 +6612,16 @@ namespace Kurenai
             }
         }
 
+        // メッシュライトの三角形テーブル(段階2)。
+        //
+        // 【DXRの有無に関係なく作る】使うのは MegaLights の経路(DX12+DXR)だけだが、
+        // 構築そのものは頂点の変換とバッファ確保しかしておらず、レイトレーシングに依存しない。
+        // 対応環境でだけ作る形にすると、非対応機で「三角形が出ない」のか
+        // 「そもそも作っていない」のかがログから切り分けられなくなる。
+        // 【打ち切り照度はフレーム不変の定数を渡す】露出や現在のτから導くと、
+        // 参照実装が非決定的になって「同じ入力で同じ真値」が崩れる
+        loaded->MeshLightScene.Build(*m_Device, loaded->Scene, Defaults::EmissiveLightsCutoffIrradiance);
+
         loaded->Camera = ComputeInitialCamera(loaded->Scene);
         return loaded;
     }
@@ -6625,6 +6636,7 @@ namespace Kurenai
 
         m_Scene = std::move(loaded.Scene);
         m_RaytracingScene = std::move(loaded.RaytracingScene);
+        m_MeshLightScene = std::move(loaded.MeshLightScene);
         m_CurrentSceneIndex = loaded.SceneIndex;
 
         // ストリーミングの状態もシーンに紐づく。世代を進めることで、切り替え前に発注して

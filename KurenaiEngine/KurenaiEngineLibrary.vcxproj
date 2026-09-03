@@ -121,6 +121,8 @@
     <ClInclude Include="Source\Library\RHI\RHIBindless.h" />
     <ClInclude Include="Source\Library\RHI\RHIShaderPackage.h" />
     <ClInclude Include="Source\Library\Assets\RaytracingGeometry.h" />
+    <ClInclude Include="Source\Library\Assets\MeshLight.h" />
+    <ClInclude Include="Source\Library\Assets\MeshLightScene.h" />
     <ClInclude Include="Source\Library\Assets\RaytracingScene.h" />
     <ClInclude Include="Source\Library\RHI\IRHIAccelerationStructure.h" />
     <ClInclude Include="Source\Library\RHI\IRHIBuffer.h" />
@@ -185,6 +187,7 @@
     <ClCompile Include="Source\Library\Core\Logger.cpp" />
     <ClCompile Include="Source\Library\Core\RenderGraph.cpp" />
     <ClCompile Include="Source\Library\Assets\ModelLoader.cpp" />
+    <ClCompile Include="Source\Library\Assets\MeshLightScene.cpp" />
     <ClCompile Include="Source\Library\Assets\RaytracingScene.cpp" />
     <ClCompile Include="Source\Library\Assets\SceneLoader.cpp" />
     <ClCompile Include="Source\Library\Assets\TextureStreaming.cpp" />

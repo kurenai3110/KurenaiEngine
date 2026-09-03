@@ -20,6 +20,7 @@
 #include "KurenaiEngineBase.h"
 #include "KurenaiTypes.h"
 
+#include "Assets/MeshLightScene.h"
 #include "Assets/RaytracingScene.h"
 #include "Assets/Scene.h"
 #include "Assets/TextureStreaming.h"
@@ -399,6 +400,8 @@ namespace Kurenai
         {
             Assets::Scene Scene;
             Assets::RaytracingScene RaytracingScene;
+            // メッシュライトの三角形テーブル(段階2)。RaytracingSceneと同じ扱い
+            Assets::MeshLightScene MeshLightScene;
             std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
             // 水面法線マップ版。SkyboxTextureとまったく同じ扱い
             std::unique_ptr<RHI::IRHITexture> WaterNormalMapTexture;
@@ -409,6 +412,7 @@ namespace Kurenai
         {
             Assets::Scene Scene;
             Assets::RaytracingScene RaytracingScene;
+            Assets::MeshLightScene MeshLightScene;
             size_t SceneIndex = 0;
             // シーンの[Scene]Skyboxが読み込み済みのものと異なる場合のみ非nullptr。
             // nullptrなら現在のスカイボックスを維持する
@@ -3138,6 +3142,8 @@ namespace Kurenai
         // 【破棄順】m_Sceneより後に宣言することで、メンバ破棄順(宣言の逆順)により
         // m_Sceneの頂点/インデックスバッファより先に破棄される
         Assets::RaytracingScene m_RaytracingScene;
+        // メッシュライトの三角形テーブル(段階2)。段階1のプロキシと同じ集合から作られる
+        Assets::MeshLightScene m_MeshLightScene;
         // テクスチャの常駐ミップ制御。自前のワーカースレッドを持ち、そこがm_Sceneの
         // IRHITexture*を掴む。
         //
