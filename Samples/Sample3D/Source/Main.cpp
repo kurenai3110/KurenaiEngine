@@ -583,6 +583,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // 画面で見ていた設定と計測の設定を揃えるために要る(UIからしか切り替えられないと、
         // 手法の差と設定の差を分けられない)
         const int autoExposure = ParseIntOption(L"-autoexposure", -1);
+        // -occlusioncull 0|1。Hi-Zオクルージョンカリングの有無。カリングは保守的で
+        // なければならないので、有無で絵が1画素も変わらないことが正しさの定義になる。
+        // その突き合わせをUIのチェックボックスでやると撮影ごとに操作を再現できない
+        const int occlusionCull = ParseIntOption(L"-occlusioncull", -1);
+        // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
+        const int taa = ParseIntOption(L"-taa", -1);
         // -renderres <幅>x<高さ>。内部レンダー解像度。タイルライトカリングと
         // MegaLightsの候補プールは16レンダー画素のタイルなので、解像度が違うと
         // タイルと形状の噛み合いが変わる。比較する2回は必ず揃えること
@@ -598,6 +604,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (autoExposure >= 0)
             {
                 engine.SetAutoExposureEnabled(autoExposure != 0);
+            }
+            if (occlusionCull >= 0)
+            {
+                engine.SetOcclusionCullingEnabled(occlusionCull != 0);
+            }
+            if (taa >= 0)
+            {
+                engine.SetTAAEnabled(taa != 0);
             }
             if (forceDDGIRaster)
             {
