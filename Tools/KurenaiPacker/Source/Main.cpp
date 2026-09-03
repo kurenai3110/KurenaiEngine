@@ -107,6 +107,12 @@ namespace
             "                                  アセットに指定すると全面が金属になるので注意する\n"
             "      --metallic <V>              全マテリアルのメタリック値を上書きする(0〜1)\n"
             "      --roughness <V>             全マテリアルのラフネス値を上書きする(0〜1)\n"
+            "      --emissive <名前>=<R,G,B>   指定した名前のマテリアルへ自発光の係数を与える。\n"
+            "                                  Keを持たないアセットは照明器具のジオメトリが\n"
+            "                                  あってもEmissiveFactorが0のままで、自発光\n"
+            "                                  テクスチャを持つマテリアルすら光らない。\n"
+            "                                  自発光は露出を通らないため1を超える値を取る\n"
+            "                                  (例: --emissive Bulb=156,156,156)\n"
             "      --base-color <R,G,B>        全マテリアルのベースカラー係数を上書きする(各0〜1)\n"
             "                                  生のOBJ等、PBR係数を表現できない形式へ検証用の\n"
             "                                  マテリアルを与えるためのもの\n"
@@ -171,34 +177,49 @@ namespace
         }
     }
 
-    // "R,G,B" 形式をパースする。失敗時はfalseを返す
-    bool ParseBaseColor(const std::wstring& value, std::optional<std::array<float, 3>>& out)
+    // "R,G,B" 形式をパースする。失敗時はfalseを返す。
+    // 上限はオプションによって違う(ベースカラーは0〜1だが、自発光は露出を通らないぶん
+    // 1を大きく超える値を取る。ModelSource.h の MaterialOverride::Emissive を参照)
+    bool ParseRgbTriplet(
+        const std::wstring& option, const std::wstring& value, float maxComponent,
+        std::array<float, 3>& out)
     {
-        std::array<float, 3> color{};
         size_t start = 0;
         for (int i = 0; i < 3; ++i)
         {
             const size_t comma = value.find(L',', start);
             if ((i < 2 && comma == std::wstring::npos) || (i == 2 && comma != std::wstring::npos))
             {
-                PrintError("--base-color は R,G,B の3要素で指定してください: " + WideToUtf8(value));
+                PrintError(WideToUtf8(option) + " は R,G,B の3要素で指定してください: " + WideToUtf8(value));
                 return false;
             }
             try
             {
-                color[i] = std::stof(value.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start));
+                out[i] = std::stof(value.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start));
             }
             catch (const std::exception&)
             {
-                PrintError("--base-color の値が不正です: " + WideToUtf8(value));
+                PrintError(WideToUtf8(option) + " の値が不正です: " + WideToUtf8(value));
                 return false;
             }
-            if (color[i] < 0.0f || color[i] > 1.0f)
+            if (out[i] < 0.0f || out[i] > maxComponent)
             {
-                PrintError("--base-color の各成分は0〜1の範囲で指定してください: " + WideToUtf8(value));
+                PrintError(
+                    WideToUtf8(option) + " の各成分は0〜" + std::to_string(static_cast<int>(maxComponent))
+                    + " の範囲で指定してください: " + WideToUtf8(value));
                 return false;
             }
             start = comma + 1;
+        }
+        return true;
+    }
+
+    bool ParseBaseColor(const std::wstring& value, std::optional<std::array<float, 3>>& out)
+    {
+        std::array<float, 3> color{};
+        if (!ParseRgbTriplet(L"--base-color", value, 1.0f, color))
+        {
+            return false;
         }
         out = color;
         return true;
@@ -396,6 +417,28 @@ namespace
                     return std::nullopt;
                 }
                 args.MaterialOverride.AlphaCutoff[WideToUtf8(token.substr(0, separator))] = value.value_or(0.5f);
+            }
+            else if (arg == L"--emissive")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--emissive には <マテリアル名>=<R,G,B> が必要です");
+                    return std::nullopt;
+                }
+                const std::wstring token = argv[++i];
+                const size_t separator = token.rfind(L'=');
+                if (separator == std::wstring::npos || separator == 0 || separator + 1 >= token.size())
+                {
+                    PrintError("--emissive の書式が不正です(<マテリアル名>=<R,G,B>): " + WideToUtf8(token));
+                    return std::nullopt;
+                }
+                std::array<float, 3> color{};
+                // 上限は「露出済みの輝度」として現実的に取りうる範囲。裸電球で数百になる
+                if (!ParseRgbTriplet(L"--emissive", token.substr(separator + 1), 10000.0f, color))
+                {
+                    return std::nullopt;
+                }
+                args.MaterialOverride.Emissive[WideToUtf8(token.substr(0, separator))] = color;
             }
             else if (arg == L"--specular-as-orm")
             {
