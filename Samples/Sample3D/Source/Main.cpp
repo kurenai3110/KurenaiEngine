@@ -312,8 +312,8 @@ namespace
         return value;
     }
 
-    // 「<オプション名> <実数>」の形の起動オプションを1つ読む。ParseIntOptionと同じ約束で、
-    // 指定が無い場合と値が実数でない場合は notFound をそのまま返す
+    // 「<オプション名> <実数>」の形の起動オプションを1つ読む。ParseIntOptionの実数版で、
+    // 検査の仕方(末尾まで数値として読み切れること)も同じ
     float ParseFloatOption(const wchar_t* optionName, float notFound)
     {
         int argc = 0;
@@ -507,6 +507,30 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         Kurenai::GraphicsAPI api = ParseGraphicsAPI();
         uint32_t renderWidth = Kurenai::Defaults::RenderWidth;
         uint32_t renderHeight = Kurenai::Defaults::RenderHeight;
+        {
+            const std::wstring renderRes = ParseStringOption(L"-renderres");
+            if (!renderRes.empty())
+            {
+                unsigned int w = 0u;
+                unsigned int h = 0u;
+                if (swscanf_s(renderRes.c_str(), L"%ux%u", &w, &h) == 2 && w > 0u && h > 0u)
+                {
+                    renderWidth = w;
+                    renderHeight = h;
+                    Kurenai::Core::Logger::Info(
+                        "Main",
+                        "内部レンダー解像度を起動オプションで設定しました: " + std::to_string(w) + "x" +
+                            std::to_string(h));
+                }
+                else
+                {
+                    Kurenai::Core::Logger::Warning(
+                        "Main",
+                        "-renderresの指定が <幅>x<高さ> の形ではないため、既定のままにします: " +
+                            Kurenai::Core::WideToUtf8(renderRes));
+                }
+            }
+        }
         size_t sceneIndex = ParseInitialSceneIndex();
         const int debugViewIndex = ParseDebugViewIndex();
         const bool forceDDGIRaster = ParseForceDDGIRaster();
@@ -529,6 +553,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsSpatial = ParseIntOption(L"-megalightsspatial", -1);
         const int megaLightsSpatialNeighbors = ParseIntOption(L"-megalightsspatialneighbors", -1);
         const int megaLightsSpatialRadius = ParseIntOption(L"-megalightsspatialradius", -1);
+        // -megalightsspatialiters <回数>。空間再利用を何回繰り返すか
+        const int megaLightsSpatialIterations = ParseIntOption(L"-megalightsspatialiters", -1);
         // -megalightsspatialmis <0=confidence重み|1=生成化バランスヒューリスティック>
         const int megaLightsSpatialMIS = ParseIntOption(L"-megalightsspatialmis", -1);
         // -megalightsinitialvis <0|1>。初期サンプルの可視レイ(遮蔽されたサンプルを殺す)の有無
@@ -553,11 +579,28 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int emissiveLightsDDGI = ParseIntOption(L"-emissivelightsddgi", -1);
         // -emissiveintensity <倍率>。シーン全体の自発光の強度(ImGuiの同名スライダと同じ値)。
         // glTFのemissiveFactorは[0,1]に収まるため、既定の1.0では小さな器具が1階調に届かない
-        const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);
+        const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
+        const float megaLightsDenoiseSigma = ParseFloatOption(L"-megalightsdenoisesigma", -1.0f);
+        // -megalightsfirefly <k>。ファイアフライの近傍クランプの強さ(0で無効)
+        const float megaLightsFireflyClamp = ParseFloatOption(L"-megalightsfirefly", -1.0f);
         // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
         const int perfDumpFrames = ParseIntOption(L"-perfdumpframes", 120);
+
+        // -autoexposure <0|1>。自動露出の有効/無効。指定が無ければ既定のまま。
+        // 画面で見ていた設定と計測の設定を揃えるために要る(UIからしか切り替えられないと、
+        // 手法の差と設定の差を分けられない)
+        const int autoExposure = ParseIntOption(L"-autoexposure", -1);
+        // -occlusioncull 0|1。Hi-Zオクルージョンカリングの有無。カリングは保守的で
+        // なければならないので、有無で絵が1画素も変わらないことが正しさの定義になる。
+        // その突き合わせをUIのチェックボックスでやると撮影ごとに操作を再現できない
+        const int occlusionCull = ParseIntOption(L"-occlusioncull", -1);
+        // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
+        const int taa = ParseIntOption(L"-taa", -1);
+        // -renderres <幅>x<高さ>。内部レンダー解像度。タイルライトカリングと
+        // MegaLightsの候補プールは16レンダー画素のタイルなので、解像度が違うと
+        // タイルと形状の噛み合いが変わる。比較する2回は必ず揃えること
 
         for (;;)
         {
@@ -566,6 +609,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (debugViewIndex >= 0)
             {
                 engine.SetDebugViewIndex(debugViewIndex);
+            }
+            if (autoExposure >= 0)
+            {
+                engine.SetAutoExposureEnabled(autoExposure != 0);
+            }
+            if (occlusionCull >= 0)
+            {
+                engine.SetOcclusionCullingEnabled(occlusionCull != 0);
+            }
+            if (taa >= 0)
+            {
+                engine.SetTAAEnabled(taa != 0);
             }
             if (forceDDGIRaster)
             {
@@ -627,6 +682,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (emissiveIntensity > 0.0f)
             {
                 engine.SetEmissiveIntensity(emissiveIntensity);
+            }            if (megaLightsDenoiseSigma > 0.0f)
+            {
+                engine.SetMegaLightsDenoiseSigmaLuminance(megaLightsDenoiseSigma);
+            }
+            if (megaLightsFireflyClamp >= 0.0f)
+            {
+                engine.SetMegaLightsDenoiseFireflyClamp(megaLightsFireflyClamp);
+            }
+            if (megaLightsSpatialIterations > 0)
+            {
+                engine.SetMegaLightsSpatialIterations(megaLightsSpatialIterations);
             }
             if (!perfDumpPath.empty())
             {

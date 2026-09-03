@@ -39,6 +39,9 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
     // (このパスでは未使用。b1を2パスで共有しているため並びは合わせてある)
     uint4 Params1;
+    // xyz=空間再利用用(このパスでは未使用)、w=初期可視レイの有無。
+    // 可視フラグ付きリザーバのレイ省略が有効かの判定に使う
+    uint4 Params2;
 };
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
@@ -144,7 +147,13 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     float shadow = 1.0f;
-    if (Params0.w != 0u && LightCastsRaytracedShadow(light.Params.y))
+    // 【可視が証明済みのリザーバはレイを省く】可視フィルタが有効なとき(初期可視レイ+
+    // 時間検証レイ+空間再利用の可視性込み目標関数)、生き残ったリザーバの可視フラグは
+    // 「このフレーム・この画素で可視レイを通過した」ことの証明なので、同じレイを
+    // もう一度撃つ必要が無い。フィルタ無効時はフラグに証明の意味が無いので必ず撃つ
+    const bool alreadyVerified =
+        (Params2.w != 0u) && MegaLightsUnpackVisible(reservoir.LightAndFlags);
+    if (Params0.w != 0u && LightCastsRaytracedShadow(light.Params.y) && !alreadyVerified)
     {
         const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
         const float originBias =
@@ -153,8 +162,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 【球光源はリザーバが持つ点へ撃つ】半径0なら中心そのものなので点光源と完全に一致する。
         // レイの向きと距離だけが変わり、減衰と寄与は中心で評価したものを使う
         // (理由は MegaLightsCommon.hlsli の球光源サンプリングのコメント)
-        const float3 samplePos =
-            MegaLightsLightSamplePosition(light, MegaLightsUnpackSampleUV(reservoir.SampleUV));
+        const float3 samplePos = MegaLightsLightSamplePosition(
+            light.PositionType.xyz, light.Params.z, light.DirectionAngle.xyz,
+            (uint)light.PositionType.w, MegaLightsUnpackSampleUV(reservoir.SampleUV));
         const float3 toSample = samplePos - worldPos;
         const float sampleDist = length(toSample);
         // 受光点が球の内側に入った場合は遮蔽を判定しようがないので素通しにする

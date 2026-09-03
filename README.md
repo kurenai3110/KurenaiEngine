@@ -923,19 +923,26 @@ Samples\Sample3D\RunDX12.bat -debug
 | `-megalightsrays <本数>` | MegaLightsが1灯あたりに撃つ影レイの本数。`0` にすると影を撃たず、従来のライトループと数値的に一致するはずの状態になる(移植の検証用) |
 | `-megalightssamples <M>` | 確率的サンプリングが1ピクセルあたりに候補プールから引く数(RISのM)。影レイの本数はこれとは独立で常に1本 |
 | `-megalightstemporal <0\|1>` | 時間再利用(前フレームの自分が選んだ灯を再投影して借りる)の有無。**既定は有効** — 1枚あたりの\|相対誤差\|中央値が6.0倍良くなる |
-| `-megalightstemporalmclamp <上限>` | 履歴のMの上限。上げるほど収束は速いがゴーストが出る |
+| `-megalightstemporalmclamp <上限>` | 履歴のMの上限(**既定は64**)。上げるとフレーム間は静かになるが、各画素の当選灯が凍結して影の縁に点描状の空間ノイズが固定される。ちらつきはデノイザの時間累積が吸うので、上げて抑える必要はない |
 | `-perfdump <パス>` / `-perfdumpframes <枚数>` | **計測専用**。GPUの区間計測をウォームアップ後に平均してCSVへ書き出す。Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので性能測定には使えない |
 | `-megalightsdenoise <0\|1>` | デノイザ(時間累積 + エッジ停止付き a-trous)の有無。**既定は有効** |
-| `-megalightsdenoiseatrous <段数>` | a-trous の段数(0で時間累積のみ)。**既定は2** — 多いほど良いわけではなく、4段は画質もエネルギーも2段に劣る(根拠は `docs/ImplementationDetail.md` 61.7d) |
+| `-megalightsdenoiseatrous <段数>` | a-trous の段数(0で時間累積のみ)。**既定は3**。分散を段ごとに畳んで次段へ渡すようにするまでは段を増やすほど悪化していた(未フィルタの時間分散を全段で使い回していたため)。直したあとは3段と4段が底で、5段で悪化に転じる |
+| `-megalightsdenoisesigma <値>` | 輝度のエッジ停止の強さ(SVGFのσ_l)。**既定は1.5**。本家の慣例値4.0まで上げると誤差もエネルギー損失も一貫して悪化する |
+| `-megalightsfirefly <k>` | 時間累積の前に、5x5近傍の刈り込み平均の k 倍で上側だけ頭打ちにする。**既定は0(無効)** — 入れて測ったが、外れ値が空間的に固まっていて近傍の基準ごと押し上げるため効果がほとんど無く、エネルギーだけ失った |
 | `-megalightsdenoiseframes <上限>` | 時間累積の上限フレーム数。TAAより短くすること |
 | `-megalightsperturb <0\|1\|2>` | **検証専用**。蓄積開始時にシーンへ摂動を加える(`1` = 全ライトを消す / `2` = 露出を+2段跳ばす)。時間再利用の追従を測るためのもの |
-| `-megalightsspatial <0\|1>` | 空間再利用(近傍が選んだ灯を借りる)の有無。**既定は無効** — 不偏だが影の縁の分散と約1msのコストに見合う改善がまだ無いため(根拠は `docs/ImplementationDetail.md` 61.7) |
+| `-megalightsspatial <0\|1>` | 空間再利用(近傍が選んだ灯を借りる)の有無。**既定は有効** — 初期可視レイと組で、1本の影レイの当たり外れが支配する分散を削る。片方だけでは効かない(根拠は `docs/ImplementationDetail.md` 61.7f) |
 | `-megalightsspatialmis <0\|1>` | 空間再利用の結合方式(`0` = confidence重み、`1` = 不偏化) |
 | `-megalightsspatialneighbors <k>` | 借りる近傍の数 |
 | `-megalightsspatialradius <ピクセル>` | 近傍を探す半径 |
-| `-megalightsinitialvis <0\|1>` | 初期サンプルへの可視レイ(遮蔽されたサンプルをリザーバごと殺す)の有無。**既定は無効** — 空間再利用の不偏化と両立せず、再利用なしでは無駄なため |
+| `-megalightsspatialiters <回数>` | 空間再利用を何回繰り返すか(上限2)。**既定は2** — 2回目は1回目の出力を入力にするので実効的な近傍が k から k² へ広がり、1枚あたりの\|相対誤差\|中央値(参照実装が分母)が静止で 0.0286 → 0.0244、遮蔽解除の直後に相当する条件で 0.0663 → 0.0522 になる。近傍の型板は反復ごとに変える。**時間再利用が前提**で、切ると2回目が未検証のサンプルを重ねて数えて +22% 明るくなるため、時間再利用が無いときは自動で1回へ落とす |
+| `-megalightsinitialvis <0\|1>` | 初期サンプルへの可視レイ(遮蔽されたサンプルをリザーバごと殺す)の有無。**既定は有効** — 空間再利用と組で使う。殺した灯の番号を持ち回り、不偏化の分母はバイアス補正レイで厳密に数える(根拠は `docs/ImplementationDetail.md` 61.7f) |
 | `-megalightsaccum <枚数>` | MegaLightsの出力を**線形空間で**その枚数だけ足し込み、達したら止める。デバッグ表示「MegaLights - 蓄積平均」と対で使う |
 | `-megalightsdump <パス>` | 足し終えた合計を生データで書き出す。形式は `'K','M','L','A'` + uint32×4(幅 / 高さ / フレーム数 / 予約)+ float32×4 が幅×高さ個。**フレーム数で割ると平均になる** |
+| `-autoexposure <0\|1>` | 自動露出の有効/無効。UIパネルと同じ状態を起動時から作るためのもの(画面で見ていた設定と計測の設定を揃える) |
+| `-renderres <幅>x<高さ>` | 内部レンダー解像度(例: `1920x1080`)。タイル単位の処理は解像度でタイルと形状の噛み合いが変わるため、比較する2回は必ず揃えること |
+| `-occlusioncull <0\|1>` | Hi-Zオクルージョンカリングの有効/無効。**カリングが正しければ有効/無効で絵は1画素も変わらない**ので、この2回を撮り比べるのが正しさの確認そのものになる(UIのチェックボックスだと撮影ごとに操作を再現できず、押せていないのを「差分ゼロ＝合格」と読み違える) |
+| `-taa <0\|1>` | TAAの有効/無効。TAAは時間方向に蓄積するためフレームレートの揺れがそのまま画素差になる。**画素単位の一致を測るときは切ること** |
 
 ### エミッシブ光源(自発光メッシュを光源として扱う)
 
@@ -1286,7 +1293,35 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   ポイントライトを格子状に64灯配置)の2つだけは手書きではなく`Tools/generate_shadow_test_scenes.py`で
   生成します(ジオメトリは`LightTest.kmodel`を流用するため、生成されるのは`.kscene`だけです)。
   半影の測定用の`PenumbraTest.kscene`・`PenumbraH{4,6,7,8}.kscene`も同じスクリプトが生成します
-  (こちらは`PenumbraTest`のモデルを使うため、先に`Tools/generate_penumbra_test.py`を走らせてパックします)
+  (こちらは`PenumbraTest`のモデルを使うため、先に`Tools/generate_penumbra_test.py`を走らせてパックします)。
+
+  **MegaLights用の2つ**も生成物です。どちらも`-dx12 -megalights 2`で起動しないと
+  MegaLightsは走りません(既定はDX11かつMegaLights無効)。
+
+  - `BistroExteriorNight.kscene` — Bistro屋外の夜景。`Tools/extract_bistro_lights.py`が
+    `Exterior.kmodel`/`.kgeom`を直接読み、街灯・ストリングライトの電球・庇のスポット・
+    壁付けランタン・スクーターのヘッドライトの**実際の器具位置**から灯を導出します。
+    位置・色・光源半径はすべて実測値で、目分量の数値は入っていません。
+    **灯は器具の重心ではなく、そこから真下へ下ろした位置に置かれます** — MegaLightsの
+    影レイは`RAY_FLAG_FORCE_OPAQUE`なので、重心へ置くと器具自身のガラスと笠に遮られて
+    1灯も光りません(絵が暗いだけで例外もログも出ないため、MegaLightsの不具合と誤診しやすい)。
+    スクリプトは灯ごとに脱出率を測り、しきい値を超える位置まで下ろしてから採用します
+  - `MegaLightsNoiseCheck.kscene` — ノイズ測定用(`docs/ImplementationDetail.md` 61.7f/61.7g が
+    使っているシーン)。`BistroInteriorLit` から時刻0・GIVolume無し・露出2.0固定にしたもので、
+    **測定を決定的にするために `-autoexposure 0` と組で使います**
+  - `MegaLightsStage.kscene` — 日常の切り分け用の軽いステージ。
+    `Tools/generate_megalights_stage.py`が2層の回廊・アーチ・手すりの縦桟・中庭の箱・
+    粗さの帯を持つglTFを生成し、灯は`KHR_lights_punctual`として埋め込みます
+    (`.kscene`側に`[Light]`は書きません)。従来の`LightScale`系が「床と壁と球4個」で
+    **影を落とす相手をほとんど持たなかった**のに対し、遮蔽を濃くしてあります
+
+  ```
+  python Tools\generate_megalights_stage.py
+  Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+    Assets\Source\MegaLightsStage\MegaLightsStage.gltf ^
+    -o Assets\Packed\MegaLightsStage\MegaLightsStage.kmodel
+  python Tools\extract_bistro_lights.py
+  ```
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
 - `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる。既定では空をGPUで手続き生成するため通常は使われず、Procedural Skyを無効にしたときのフォールバックと、`[Scene]Skybox`を明示するシーン向けのアセットとして残っている
 

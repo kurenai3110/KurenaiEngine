@@ -217,10 +217,37 @@ namespace Kurenai
         // 【Perfログでは段階7の測定ができない】あちらは0.05ms未満のパスを落とし、
         // しかも1フレームの代表値しか出さない。ライト数が少ないとMegaLightsのパスが
         // 消えてしまい、「ライト数に対して横ばいか」を測れない
+        // 【計測専用】自動露出の有効/無効を起動時に決める。
+        //
+        // UI(PostProcessPanel)は m_AutoExposureEnabled を直接触るが、起動オプションから
+        // 同じ状態を作れないと「画面で見ていた設定」と「計測で走らせた設定」を揃えられない。
+        // 揃っていない条件どうしの比較は、差が手法の差なのか設定の差なのか分けられない
+        void SetAutoExposureEnabled(bool enabled);
+
+        // 【計測専用】Hi-Zオクルージョンカリングの有効/無効を起動時に決める。
+        //
+        // カリングは保守的でなければならない ―― 有効/無効で絵が1画素も変わらないことが
+        // 正しさの定義そのものになる。その突き合わせをUIのチェックボックスでやると、
+        // 撮影のたびに同じ操作を再現できず、押せていないのを「差分ゼロ＝合格」と
+        // 読み違える(SetDebugViewIndexと同じ理由)。**A/Bは起動直後から同じ手順で行うこと**
+        void SetOcclusionCullingEnabled(bool enabled);
+
+        // 【計測専用】TAAの有効/無効を起動時に決める。
+        //
+        // TAAは時間方向に蓄積するため、フレームレートの揺れがそのまま画素差になる。
+        // 画素単位の一致を測る比較では切っておかないと、再現性の下限が取れない
+        void SetTAAEnabled(bool enabled);
+
         void SetPerfDump(const wchar_t* path, int frames);
 
         // デノイザの有無、a-trousの段数、時間累積の上限。負/0は既定のまま
         void SetMegaLightsDenoise(int enabled, int atrousPasses, int maxFrames);
+        // 輝度のエッジ停止の強さ(負なら既定のまま)
+        void SetMegaLightsDenoiseSigmaLuminance(float sigma);
+        // ファイアフライの近傍クランプの強さ(0で無効。負なら既定のまま)
+        void SetMegaLightsDenoiseFireflyClamp(float k);
+        // 空間再利用の反復回数(負なら既定のまま)
+        void SetMegaLightsSpatialIterations(int iterations);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま
         void SetMegaLightsTemporal(int enabled, int mClamp);
 
@@ -1308,11 +1335,21 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsShadePipelineState;
         // 2パスで共有する定数バッファ(中身はフレーム内で不変なのでInitial側で1回更新する)
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsStochasticConstantBuffer;
+        // 空間再利用の反復ごとの定数(中身は共有分と同じで、反復番号だけが違う)。
+        // 【1本を使い回してはいけない】UpdateBuffer は同じフレームで2回書くと
+        // 後の値が両方のパスに見えるため、反復の数だけバッファを分ける
+        static constexpr uint32_t kMegaLightsMaxSpatialIterations = 2u;
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsSpatialConstantBuffer[kMegaLightsMaxSpatialIterations];
         // 1画素につき1リザーバ(16バイト)。MegaLightsCommon.hlsli の MegaLightsReservoir と
         // 一致させること。解像度に依存するためCreateRenderTargetsで作り直す。
         // 空間再利用は「読みながら同じバッファへ書けない」(近傍を読むので競合する)ため2本持つ
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirBuffer;
+        // 画素ごとの「遮蔽が確定した灯」のキャッシュ(影の縁の暗いフリンジ対策)
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsBlockedLightBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirSpatialBuffer;
+        // 空間再利用を2回以上回すときの ping-pong の相方。
+        // 近傍を読むので入力と同じバッファへは書けず、反復のたびに交互に使う
+        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirSpatialBuffer2;
         // 時間再利用の履歴リザーバと履歴の幾何。**ping-pongにするのはWAR回避のため**
         // (RenderGraphは前方走査でRAWの辺しか張らない。詳細は生成箇所のコメント)
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirHistory[2];
@@ -1341,6 +1378,8 @@ namespace Kurenai
         bool m_MegaLightsDenoiseEnabled = Defaults::MegaLightsDenoiseEnabled;
         int32_t m_MegaLightsDenoiseAtrousPasses = Defaults::MegaLightsDenoiseAtrousPasses;
         int32_t m_MegaLightsDenoiseMaxFrames = Defaults::MegaLightsDenoiseMaxFrames;
+        float m_MegaLightsDenoiseSigmaLuminance = Defaults::MegaLightsDenoiseSigmaLuminance;
+        float m_MegaLightsDenoiseFireflyClamp = Defaults::MegaLightsDenoiseFireflyClamp;
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsTemporalComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTemporalPipelineState;
         uint32_t m_MegaLightsHistoryIndex = 0u;
@@ -1370,6 +1409,7 @@ namespace Kurenai
         bool m_MegaLightsSpatialEnabled = Defaults::MegaLightsSpatialEnabled;
         int32_t m_MegaLightsSpatialNeighborCount = Defaults::MegaLightsSpatialNeighborCount;
         int32_t m_MegaLightsSpatialRadius = Defaults::MegaLightsSpatialRadius;
+        int32_t m_MegaLightsSpatialIterations = Defaults::MegaLightsSpatialIterations;
         // 結合を不偏化(Z)にするか。単純なconfidence重みは、近傍が自分と違う候補集合から
         // 引いている可能性を無視するため不偏にならない(実測で総和の相対差 -8.0%)。
         // **切り替えて長時間平均を比べられるようにしてある** ――

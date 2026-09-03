@@ -18,15 +18,16 @@
 // プールの種にフレーム番号を混ぜて毎フレーム引き直しているため時間平均では消えるが、
 // **混ぜるのをやめると偏ったまま収束しなくなる。**
 //
-// 【初期可視レイは既定で撃たない】選んだサンプルへ影レイを1本撃ち、遮蔽されていたら
-// リザーバごと殺す段(RTXDI系では標準)を持っているが、実測で不利と分かったため既定は無効。
-//   ・空間再利用と両立しない: 殺された画素の実効的な定義域が p̂ から p̂・可視率 へ変わるが、
-//     不偏化の分母(Z)はレイを撃たずに可視率を判定できず、影の縁が暗い側へ偏る
-//   ・再利用なしでは純粋な無駄: 殺される(遮蔽された)サンプルはシェード側のレイでも
-//     どうせ0になるので絵は1bitも変わらず、可視なサンプルではレイが2本になるだけ
-// かつて「再利用に必須(入れないと球が倍以上悪化)」と測ったのは、空リザーバの M を
-// 0にしていたバグ入りの状態での測定で、誤り。バグ修正後の実測は逆で、殺し無しのほうが
-// 偏りも裾も良い(数値は docs/ImplementationDetail.md 61.7)。
+// 【初期可視レイは空間再利用と組で使う(どちらも既定で有効)】選んだサンプルへ影レイを
+// 1本撃ち、遮蔽されていたらリザーバごと殺す(RTXDI系では標準の段)。
+// 殺しの意味は「遮蔽で0になるサンプルを近傍へ配らない」ことなので、
+// **空間再利用が無いと絵が1bitも変わらない**(殺されるサンプルはシェード側のレイでも
+// どうせ0)。逆に空間再利用は殺しが無いと実測でほぼ効かない。
+// 【殺すときはどの灯を殺したかをリザーバへ残す】殺された画素のストリームは
+// 「可視な灯しか配れない」形に変わるため、空間再利用の不偏化の分母(Z)は可視性まで
+// 含めて数える必要がある。番号を残せばZ側で確定情報として使え、不明な近傍にだけ
+// バイアス補正レイを撃てば済む(詳細は MegaLightsSpatial.hlsl。
+// 残さない実装は -3.6% 暗く偏った。docs/ImplementationDetail.md 61.7f)。
 // 【影を二重に掛けてはいけない】撃つ場合もここは「サンプルを殺す」だけで、影の階調は
 // シェード側の1本が決める(殺されたサンプルはそもそもシェードへ渡らない)。
 //
@@ -64,6 +65,10 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     // 【途中のフィールドを飛ばしてはいけない】wだけ欲しくてもxyzごと宣言する
     // (飛ばすと誤ったオフセットを読み、コンパイルは通り絵もそれらしく出るため気付けない)
     uint4 Params2;
+    // x=射影(0,0), y=射影(1,1), z=未使用, w=履歴Mの上限(このパスでは未使用)
+    float4 Params3;
+    // x=時間再利用の履歴が有効か(殺しのヒントを読んでよいか)
+    uint4 Params4;
 };
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
@@ -83,6 +88,15 @@ Texture2D BRDFLUTTexture : register(t5);
 StructuredBuffer<uint> TilePool : register(t7);
 
 RWStructuredBuffer<MegaLightsReservoir> Reservoirs : register(u0);
+// 画素ごとの「遮蔽が確定した灯」のキャッシュ(0xFFFFFFFFで無し)。
+// 【なぜ持続させるのか】殺しの持ち回り(リザーバ)はそのフレームに殺しが起きた
+// 画素にしか無い。初期RISが別の灯を引いたフレームには知識が消え、その隙に
+// 空間再利用が遮蔽された支配光を近傍から借りて影レイを無駄にする ――
+// 影の縁に暗い粒のフリンジが残る原因。キャッシュなら毎フレーム効く。
+// 【新鮮さ】殺しで記録し、同じ灯が可視レイを通ったら即消す。支配的な灯は
+// RISがほぼ毎フレーム引き直すので、遮蔽が解けた次のフレームには消える。
+// 履歴が無効なフレーム(解像度変更直後など)は読まずに上書きだけする
+RWStructuredBuffer<uint> BlockedLights : register(u1);
 
 float3 ReconstructWorldPos(float2 uv, float depth)
 {
@@ -154,6 +168,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 背景。【必ず書くこと】RHIにバッファのクリアが無く、書かずにreturnすると
         // 前フレームの残骸が残り、シェード側が存在しないサンプルを引く
         Reservoirs[reservoirIndex] = MegaLightsMakeEmptyReservoir();
+        BlockedLights[reservoirIndex] = 0xFFFFFFFFu;
         return;
     }
 
@@ -180,6 +195,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const uint tileBase = MegaLightsTilePoolBase(tileCoord, Params1.x, candidateCount);
 
     const float sumW = asfloat(TilePool[tileBase + 0u]);
+    // 混合抽出(一様枝 + 重み枝)の割り戻しに要る(MegaLightsTilePool.hlsl)
+    const uint reachableCount = TilePool[tileBase + 1u];
     const uint validCandidates = TilePool[tileBase + 2u];
     const uint sampleCount = max(Params0.z, 1u);
     if (sumW <= 0.0f || validCandidates == 0u)
@@ -191,10 +208,42 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         MegaLightsReservoir empty = MegaLightsMakeEmptyReservoir();
         empty.M = float(sampleCount);
         Reservoirs[reservoirIndex] = empty;
+        // 何も分からなかったフレーム。キャッシュは維持(履歴が無効なら信用できないので消す)
+        if (Params4.x == 0u)
+        {
+            BlockedLights[reservoirIndex] = 0xFFFFFFFFu;
+        }
         return;
     }
 
+    // --- 遮蔽が確定した灯を目標関数から外す(キャッシュ) ---
+    // 影の縁では目標関数を支配する灯が自分からは遮蔽されていることがあり、RISは
+    // 可視性を知らないのでその灯を毎フレーム選んでは殺される ―― デノイザ前の
+    // 暗黒点の主因(実測で1フレームあたり点灯画素の3.6%)。BlockedLights は
+    // その灯の遮蔽が可視レイで確定した画素にだけ入っているので、目標関数を0として
+    // 扱えば抽選が「届く別の灯」へ向かう。
+    // 【16フレームに1回だけ再検証を許す】除外し続けると殺しが起きなくなり、
+    // 遮蔽が解けたことを知る機会(可視レイ)が失われる。位相は画素ごとにずらす。
+    // 静止シーンではキャッシュは常に正しく、期待値は変わらない(目標関数の変更は
+    // RISでは自由で、定義域の縮小は空間再利用の分母のレイ判定が正しく数える)。
+    // 動的シーンでは解けた遮蔽に平均8フレームで気づく(その間はその灯を選ばない
+    // だけで、他の灯の寄与は正しいまま)
+    uint blockedLight = 0xFFFFFFFFu;
+    if (Params4.x != 0u)
+    {
+        const bool retest = ((Params1.w + pixel.x * 3u + pixel.y * 7u) & 15u) == 0u;
+        if (!retest)
+        {
+            blockedLight = BlockedLights[reservoirIndex];
+        }
+    }
+
     // --- RIS: 候補プールから M 個引いて、寄与の大きさに比例する重みで1つ残す ---
+    // 【スロットの抽選だけ低食い違い量列にする】画素ごとの位相をブルーノイズ的に配り、
+    // 同じ画素の中では M 個が均等に散るようにする。周辺分布は一様のままなので
+    // 割り戻しも期待値も変わらない(MegaLightsCommon.hlsli の説明を参照)。
+    // 採用判定は白色のまま ―― あちらは M 回の判定の独立性を使っている
+    const float slotPhase = MegaLightsPixelPhase(pixel, Params1.w, 0u);
     uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + Params1.w * 0x9E3779B9u);
 
     float risWeightSum = 0.0f;
@@ -204,7 +253,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     [loop]
     for (uint m = 0u; m < sampleCount; ++m)
     {
-        const uint slot = min((uint)(NextRandom(rngState) * float(validCandidates)), validCandidates - 1u);
+        const float slotRandom = MegaLightsLowDiscrepancy1D(m, slotPhase);
+        const uint slot = min((uint)(slotRandom * float(validCandidates)), validCandidates - 1u);
         const uint lightIndex = TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 0u];
         const float candidateWeight = asfloat(TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 1u]);
         // 採用判定の乱数は候補が無効でも必ず引いて状態を進める
@@ -215,7 +265,12 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         {
             continue;
         }
-
+        // 遮蔽が確定している灯は目標関数0として扱う(= 選ばない)。提案分布は
+        // 変えていないので「引いたが目標0で外れた」という正当な棄却で、期待値は不変
+        if (lightIndex == blockedLight)
+        {
+            continue;
+        }
         const GPULight light = Lights[lightIndex];
         const PunctualGeometry geometry = EvaluatePunctualGeometry(light, worldPos, N, translucency);
         if (!geometry.Contributes)
@@ -232,8 +287,11 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             continue;
         }
 
-        // 提案分布の確率密度。候補プールが w_i と SumW を別々に持っているので厳密に再現できる
-        const float sourcePdf = candidateWeight / sumW;
+        // 提案分布の確率密度。プールは「一様枝 + 重み枝」の混合で引いている
+        // (MegaLightsTilePool.hlsl)ので、割り戻しも同じ混合式で行う。
+        // プールが w_i / SumW / 届いた灯数 を別々に持っているので厳密に再現できる
+        const float sourcePdf = kMegaLightsUniformMixFraction / float(max(reachableCount, 1u)) +
+                                (1.0f - kMegaLightsUniformMixFraction) * (candidateWeight / sumW);
         const float risWeight = targetPdf / sourcePdf;
 
         risWeightSum += risWeight;
@@ -259,6 +317,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         MegaLightsReservoir rejected = MegaLightsMakeEmptyReservoir();
         rejected.M = float(sampleCount);
         Reservoirs[reservoirIndex] = rejected;
+        if (Params4.x == 0u)
+        {
+            BlockedLights[reservoirIndex] = 0xFFFFFFFFu;
+        }
         return;
     }
 
@@ -286,7 +348,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 const float originBias =
                     (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
                 // シェード側と同じ点へ撃つ(違う点を狙うと、殺す判断と影の階調が食い違う)
-                const float3 samplePos = MegaLightsLightSamplePosition(selectedLight, sampleUV);
+                const float3 samplePos = MegaLightsLightSamplePosition(
+                    selectedLight.PositionType.xyz, selectedLight.Params.z,
+                    selectedLight.DirectionAngle.xyz, (uint)selectedLight.PositionType.w, sampleUV);
                 const float3 toSample = samplePos - worldPos;
                 const float sampleDist = length(toSample);
                 if (sampleDist > originBias)
@@ -300,13 +364,38 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (!visible)
     {
-        // 【空にする ―― 重みを0にするだけでは足りない】W=0のリザーバは結合で
-        // 選ばれなくなるが、M(confidence)は数えられる。それでよい:
-        // 「M個の候補を見て、遮蔽で寄与0だった」という情報は正しい
+        // 【どの灯を殺したかを残す ―― 全部消して書いてはいけない】
+        // W=0 なので結合の選択からは外れる(IsEmptyがtrue)が、
+        // 「この画素はこの灯への可視レイが遮蔽された(V=0 が確定した)」という事実を
+        // ライト番号と可視フラグで持ち回る。空間再利用の不偏化の分母(Z)は
+        // 「その候補が選ばれた灯を生成しえたか」を数えるが、殺された灯は
+        // その候補からは決して出て来られない。番号を消すと Z がそれを知れずに
+        // M を数え、殺しの起きる画素の周囲だけ分母が太って**暗い側の系統誤差**になる
+        // (実測 -3.6%。docs/ImplementationDetail.md 61.7f)。
+        // M は残す ―― 「M個の候補を検討した」ことは事実で、他の灯の Z には数えるべき
         MegaLightsReservoir killed = MegaLightsMakeEmptyReservoir();
+        killed.LightAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, false);
+        killed.SampleUV = MegaLightsPackSampleUV(sampleUV);
         killed.M = float(sampleCount);
         Reservoirs[reservoirIndex] = killed;
+        // 【点光源だけキャッシュする】球光源の殺しは球面上の1点への判定で、
+        // 灯そのものの遮蔽の証明にならない
+        if (Lights[selectedLightIndex].Params.z <= 0.0f)
+        {
+            BlockedLights[reservoirIndex] = selectedLightIndex;
+        }
+        else if (Params4.x == 0u)
+        {
+            BlockedLights[reservoirIndex] = 0xFFFFFFFFu;
+        }
         return;
+    }
+
+    // 可視レイを通った(または影を撃たない灯を選んだ)。キャッシュの灯と同じなら
+    // 「遮蔽が解けた」ことの証明なので消す。違う灯ならキャッシュは維持
+    if (Params4.x == 0u || BlockedLights[reservoirIndex] == selectedLightIndex)
+    {
+        BlockedLights[reservoirIndex] = 0xFFFFFFFFu;
     }
 
     MegaLightsReservoir reservoir;

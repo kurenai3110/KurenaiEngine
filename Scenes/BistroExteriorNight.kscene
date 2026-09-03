@@ -1,0 +1,1161 @@
+# KurenaiEngine シーンファイル - Bistro (McGuire) 屋外の夜景
+#
+# Tools/extract_bistro_lights.py が生成する(手で編集しない)。
+# 灯の位置・色・光源半径はすべて Assets/Packed/BistroMcGuire/Exterior.kmodel と
+# Exterior.kgeom を直接読んで求めた実測値で、目分量の数値は1つも入っていない。
+#
+# --- 何のためのシーンか ---
+# MegaLights の主張は「影付きのローカルライトを、灯数に依存しない固定費で出せる」
+# (docs/ImplementationDetail.md 61.7e.5)。ところが従来の検証シーン(LightScale系)は
+# 床と壁と球4個しかなく、影を落とす相手がいなかった。このシーンは実物の街路に
+# 107 灯を置き、多数の影が重なる様子そのものを見せる。
+#
+# 起動:
+#   Sample3D.exe -scene BistroExteriorNight -dx12 -megalights 2 -autoexposure 0
+# MegaLights は DX12 + DXR Tier 1.1 が必須で、既定は無効。-dx12 を忘れると
+# 「シーンは出るが MegaLights は走っていない」状態になる(差分ゼロを合格と誤読しやすい)。
+#
+# --- 灯の内訳(すべて三角形の連結成分から導出) ---
+#   街灯                        28 灯  (Streetlight_Support_Bulb)
+#   ストリングライトの電球               61 灯  (Stringlights)  ※候補 64 のうち 3 を不採用
+#   庇のスポット(A)                  5 灯  (MASTER_Light_Bulb)  ※候補 10 のうち 5 を不採用
+#   庇のスポット(B)                  7 灯  (Spotlight_Emissive)
+#   壁付けランタン                    5 灯  (Lantern)
+#   スクーターのヘッドライト               1 灯  (Vespa_Headlight)
+#   ストリングライトの色: Blue 19 / Green 11 / Orange 6 / Pink 8 / Red 8 / White 12
+#   ※ Paris_StringLights_01_Blue_Color は名前に反して White.png を参照している。
+#      実際に描かれている白を採っている(--blue-as-blue で Blue.png の色に切替)。
+#
+# --- 灯を器具の重心に置いていない理由(重要) ---
+# MegaLights の影レイは RAY_FLAG_FORCE_OPAQUE なので、ガラスも笠も影レイを完全に遮る。
+# 器具の重心はその器具自身の内側にあるため、重心へ置くと全灯の影レイが自分の器具に
+# 当たり、1灯も光らない(絵が暗いだけで例外もログも出ない)。
+# そこで灯ごとに下半球 192 方向へレイを撃ち、脱出率が 0.35 を超える位置まで器具の外へ
+# 動かしてから採用している。実測された変位は 0.06〜0.52m、脱出率は 0.391〜1.000。
+# 動かす向きは真下を最優先にした24方向。真下だけでは足りない — 背の高い街灯は
+# 電球が中空の支柱の中にあり、真下へ動かしても管の内側に留まる(28本中12本がそうだった)。
+# 脱出率が 0.05 未満か、変位が 0.60m を超えた灯は採用していない
+# (でっち上げの位置を置くくらいなら灯を減らす、という方針)。
+# 脱出率は近傍の全メッシュを相手に測る。1メッシュだけを見ると誤る — 重心を塞いで
+# いるのはまず発光体自身(電球だけを相手にしても 0.000)だが、街灯のガラスだけを
+# 相手にすると 0.198 と出て「筒だから真下へ抜ける」という誤った結論になる。
+#
+# --- Intensity と Range の根拠 ---
+#   街灯                       1200.0 lm /  6.28 sr =  191.0 cd, Range  32.5 m  (60W白熱相当の街灯ランタン(笠で下半球へ))
+#   ストリングライトの電球                60.0 lm / 12.57 sr =    4.8 cd, Range   5.1 m  (5W級の装飾球)
+#   庇のスポット(A)                 400.0 lm /  6.28 sr =   63.7 cd, Range  18.8 m  (庇の小型スポット)
+#   庇のスポット(B)                 400.0 lm /  6.28 sr =   63.7 cd, Range  18.8 m  (庇の小型スポット)
+#   壁付けランタン                   250.0 lm / 12.57 sr =   19.9 cd, Range  10.5 m  (壁付けの装飾ランタン)
+#   スクーターのヘッドライト              700.0 lm /  6.28 sr =  111.4 cd, Range  24.8 m  (スクーターのヘッドライト)
+# Range は「その灯の寄与が sRGB で 0.5 階調を切る距離」。トーンマップ入力が
+# L/(1.2*2^Exposure) で、拡散面の照度が E=pi*L/albedo(albedo=0.15)なので
+# Range = sqrt(I/E)。Exposure=2.0 と対で効くので、露出を変えたら Range も変わる。
+# 地面の標本点を覆う灯の最大数は 40。従来経路(MegaLights OFF)のタイル容量64を
+# 超えると OFF 側が灯を捨てて絵が壊れ、ON/OFF の比較が成立しなくなる。
+#
+# --- カメラ ---
+# 街灯 28 本の XZ を主成分分析して通りの軸を取り、長さ40mの窓に入る灯が
+# 最大(96 灯)になる位置を選んだ。地面の高さ 0.232 m は真下へレイを撃って測った値で、
+# そこへ目線の高さ 1.65m を足している。前方に入る灯は 98 灯。
+# 俯角は「20m 先の路面を見る角度」。灯の重心を狙うと、灯が頭上にあるぶん仰角が
+# 上を向き、庇の裏だけが画面を占める絵になる(最初にそれで失敗した)。
+# Yaw は +Z を0度、+X を90度として測る(atan2(dx,dz) であって atan2(dz,dx) ではない)。
+
+[Scene]
+Name = Bistro (McGuire) - Exterior (Night)
+# 器具光を主役にする露出。値が大きいほど暗く写る(写真のEVと同じ向き)。
+# 石畳(albedo 0.15)が街灯直下で受ける照度から、中間グレー 0.18 に載る値として導出した。
+# 自動露出を切って使うこと(構図で露出が振れると A/B 比較が成立しない)。
+Exposure = 2.0
+# 既定のまま。夜空の寄与は街灯より数桁小さいので、ここを動かしても絵はほぼ変わらない。
+IBLIntensity = 0.5
+# 色付きの電球(緑・赤・紫・橙)が芯から白く抜けないもの。既定の AgX はハイライトを
+# 白へ脱色するため、ストリングライトの色がこのシーンの見どころとして残らない。
+Tonemap = ACES
+
+[Model]
+Path = BistroMcGuire/Exterior.kmodel
+
+[Camera]
+Position = 9.563, 1.882, -7.097
+Yaw = -50.6
+Pitch = -4.7
+
+[Sun]
+# twilightFactor が厳密に 0 になるのは 19.0 以降。22.0 は完全な夜。
+TimeOfDay = 22.0
+# Enabled = false にすると月の平行光まで一緒に消える(枠を共有しているため)。
+# 月は 0.25 lx で街灯より数桁暗く競合しないので、残して夜の地の明るさを作らせる。
+Enabled = true
+# 0.25 lx の平行光に影は見えない。カスケードシャドウ4枚ぶんの実行時間を測定から外す。
+Shadow = false
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.651
+Type = Point
+Position = -28.513, 2.650, 17.194
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.682
+Type = Point
+Position = -26.892, 2.650, 21.060
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.038
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.760
+Type = Point
+Position = -24.585, 3.380, 11.810
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.23m 変位 / 脱出率 0.656
+Type = Point
+Position = -20.805, 4.071, 18.304
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.745
+Type = Point
+Position = -20.171, 3.393, 7.190
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.677
+Type = Point
+Position = -17.731, 3.396, 14.940
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.745
+Type = Point
+Position = -17.258, 3.393, 3.788
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.750
+Type = Point
+Position = -13.399, 3.393, -1.212
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.677
+Type = Point
+Position = -11.937, 3.393, 9.617
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.23m 変位 / 脱出率 0.656
+Type = Point
+Position = -9.639, 4.071, -2.024
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.651
+Type = Point
+Position = -8.432, 3.419, 11.414
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.23m 変位 / 脱出率 0.661 / 半径をクランプ
+Type = Point
+Position = -4.319, 4.066, 4.255
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.035
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.448
+Type = Point
+Position = -2.121, 3.582, 18.283
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.23m 変位 / 脱出率 0.594 / 半径をクランプ
+Type = Point
+Position = -2.073, 4.071, -4.588
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.030
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.33m 変位 / 脱出率 0.755 / 半径をクランプ
+Type = Point
+Position = -1.736, 3.969, -9.948
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.019
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.23m 変位 / 脱出率 0.661 / 半径をクランプ
+Type = Point
+Position = 3.748, 4.071, 21.325
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.035
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.34m 変位 / 脱出率 0.760 / 半径をクランプ
+Type = Point
+Position = 7.834, 3.966, -8.567
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.020
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.661
+Type = Point
+Position = 8.981, 3.907, 20.082
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.693
+Type = Point
+Position = 17.656, 3.835, 34.403
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.656
+Type = Point
+Position = 18.026, 3.835, 41.565
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.708
+Type = Point
+Position = 20.764, 3.409, -12.756
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.34m 変位 / 脱出率 0.760 / 半径をクランプ
+Type = Point
+Position = 21.600, 3.968, -18.728
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.019
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.734
+Type = Point
+Position = 24.463, 3.961, -23.166
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.52m 変位 / 脱出率 0.630
+Type = Point
+Position = 30.009, 3.409, -13.503
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.23m 変位 / 脱出率 0.651
+Type = Point
+Position = 33.319, 4.071, -24.036
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.23m 変位 / 脱出率 0.635 / 半径をクランプ
+Type = Point
+Position = 35.116, 4.071, -18.259
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.034
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.23m 変位 / 脱出率 0.630 / 半径をクランプ
+Type = Point
+Position = 38.812, 4.071, -33.884
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.033
+CastShadow = true
+
+[Light]
+# 街灯 / 色 Incandescent2700K / 器具の重心から 0.23m 変位 / 脱出率 0.630
+Type = Point
+Position = 49.343, 4.071, -34.296
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 191.0
+Range = 32.49
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.17m 変位 / 脱出率 0.536 / 半径をクランプ
+Type = Point
+Position = -13.330, 4.206, -1.566
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.17m 変位 / 脱出率 0.995 / 半径をクランプ
+Type = Point
+Position = -11.832, 3.906, -1.012
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Orange / 器具の重心から 0.17m 変位 / 脱出率 0.990 / 半径をクランプ
+Type = Point
+Position = -10.320, 3.678, -0.464
+Color = 0.9216, 0.4287, 0.0685
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.16m 変位 / 脱出率 0.646 / 半径をクランプ
+Type = Point
+Position = -9.706, 4.587, 9.598
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.037
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.16m 変位 / 脱出率 0.630 / 半径をクランプ
+Type = Point
+Position = -9.043, 4.362, -6.952
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Pink / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -8.798, 3.524, 0.077
+Color = 0.6445, 0.0021, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.16m 変位 / 脱出率 0.964 / 半径をクランプ
+Type = Point
+Position = -8.405, 4.234, 8.895
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.16m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -7.836, 4.033, -6.096
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.08m 変位 / 脱出率 0.521 / 半径をクランプ
+Type = Point
+Position = -7.567, 4.721, 12.331
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.013
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -7.238, 3.440, 0.620
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -7.112, 3.979, 8.187
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -6.611, 3.798, -5.229
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Orange / 器具の重心から 0.17m 変位 / 脱出率 0.797 / 半径をクランプ
+Type = Point
+Position = -6.406, 4.344, 11.462
+Color = 0.9216, 0.4287, 0.0685
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Pink / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -5.782, 3.811, 7.450
+Color = 0.6445, 0.0021, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -5.672, 3.434, 1.154
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -5.394, 3.657, -4.369
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.16m 変位 / 脱出率 0.885 / 半径をクランプ
+Type = Point
+Position = -5.332, 5.276, -10.366
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Pink / 器具の重心から 0.17m 変位 / 脱出率 0.969 / 半径をクランプ
+Type = Point
+Position = -5.189, 4.134, 10.577
+Color = 0.6445, 0.0021, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.20m 変位 / 脱出率 0.682
+Type = Point
+Position = -5.144, 5.636, 16.569
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.044
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.16m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -4.498, 4.895, -9.149
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Red / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -4.426, 3.737, 6.690
+Color = 0.5271, 0.0003, 0.0003
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Pink / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -4.145, 3.607, -3.487
+Color = 0.6445, 0.0021, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.17m 変位 / 脱出率 0.974 / 半径をクランプ
+Type = Point
+Position = -4.104, 3.503, 1.677
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.16m 変位 / 脱出率 0.698 / 半径をクランプ
+Type = Point
+Position = -4.074, 5.235, 15.581
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.038
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Red / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -3.987, 3.993, 9.698
+Color = 0.5271, 0.0003, 0.0003
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Orange / 器具の重心から 0.16m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -3.646, 4.580, -7.927
+Color = 0.9216, 0.4287, 0.0685
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -3.067, 3.763, 5.917
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Orange / 器具の重心から 0.16m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -2.990, 4.851, 14.585
+Color = 0.9216, 0.4287, 0.0685
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Red / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -2.874, 3.656, -2.592
+Color = 0.5271, 0.0003, 0.0003
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Pink / 器具の重心から 0.16m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -2.778, 4.333, -6.702
+Color = 0.6445, 0.0021, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Orange / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -2.754, 3.916, 8.792
+Color = 0.9216, 0.4287, 0.0685
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Red / 器具の重心から 0.17m 変位 / 脱出率 0.708 / 半径をクランプ
+Type = Point
+Position = -2.538, 3.645, 2.187
+Color = 0.5271, 0.0003, 0.0003
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Pink / 器具の重心から 0.16m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -1.889, 4.537, 13.580
+Color = 0.6445, 0.0021, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.16m 変位 / 脱出率 0.964 / 半径をクランプ
+Type = Point
+Position = -1.879, 4.150, -5.452
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.17m 変位 / 脱出率 0.708 / 半径をクランプ
+Type = Point
+Position = -1.770, 3.881, 5.172
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.16m 変位 / 脱出率 0.922 / 半径をクランプ
+Type = Point
+Position = -1.601, 3.804, -1.696
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.17m 変位 / 脱出率 0.979 / 半径をクランプ
+Type = Point
+Position = -1.501, 3.908, 7.868
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.16m 変位 / 脱出率 0.979 / 半径をクランプ
+Type = Point
+Position = -0.967, 4.039, -4.204
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = -0.756, 4.286, 12.552
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.16m 変位 / 脱出率 0.396 / 半径をクランプ
+Type = Point
+Position = -0.387, 4.040, -0.844
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.14m 変位 / 脱出率 0.651 / 半径をクランプ
+Type = Point
+Position = -0.165, 4.030, 6.927
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.029
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.16m 変位 / 脱出率 0.828 / 半径をクランプ
+Type = Point
+Position = -0.034, 4.009, -2.914
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.039
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.14m 変位 / 脱出率 0.771
+Type = Point
+Position = 0.331, 3.719, -11.781
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.036
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.17m 変位 / 脱出率 1.000 / 半径をクランプ
+Type = Point
+Position = 0.386, 4.107, 11.521
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.15m 変位 / 脱出率 0.995
+Type = Point
+Position = 0.836, 3.493, -10.646
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.038
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.17m 変位 / 脱出率 0.823 / 半径をクランプ
+Type = Point
+Position = 0.954, 4.098, 6.042
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.15m 変位 / 脱出率 1.000
+Type = Point
+Position = 1.348, 3.345, -9.497
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.038
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.17m 変位 / 脱出率 0.688 / 半径をクランプ
+Type = Point
+Position = 1.539, 3.999, 10.488
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.15m 変位 / 脱出率 1.000
+Type = Point
+Position = 1.854, 3.275, -8.360
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.037
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Pink / 器具の重心から 0.15m 変位 / 脱出率 1.000
+Type = Point
+Position = 2.373, 3.284, -7.195
+Color = 0.6445, 0.0021, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.037
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Red / 器具の重心から 0.17m 変位 / 脱出率 0.609 / 半径をクランプ
+Type = Point
+Position = 2.695, 3.960, 9.457
+Color = 0.5271, 0.0003, 0.0003
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Red / 器具の重心から 0.15m 変位 / 脱出率 1.000
+Type = Point
+Position = 2.899, 3.374, -6.013
+Color = 0.5271, 0.0003, 0.0003
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.037
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.14m 変位 / 脱出率 0.729
+Type = Point
+Position = 3.424, 3.548, -4.834
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.037
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.14m 変位 / 脱出率 0.635 / 半径をクランプ
+Type = Point
+Position = 4.613, 5.728, -13.506
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.038
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.14m 変位 / 脱出率 0.984
+Type = Point
+Position = 5.064, 5.324, -12.389
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.038
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Orange / 器具の重心から 0.14m 変位 / 脱出率 1.000
+Type = Point
+Position = 5.521, 4.974, -11.258
+Color = 0.9216, 0.4287, 0.0685
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.037
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Pink / 器具の重心から 0.14m 変位 / 脱出率 1.000
+Type = Point
+Position = 5.984, 4.681, -10.114
+Color = 0.6445, 0.0021, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.037
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Blue / 器具の重心から 0.15m 変位 / 脱出率 0.990
+Type = Point
+Position = 6.460, 4.439, -8.936
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.038
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Green / 器具の重心から 0.15m 変位 / 脱出率 0.974
+Type = Point
+Position = 6.939, 4.257, -7.751
+Color = 0.0000, 0.2874, 0.0021
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.038
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 White / 器具の重心から 0.15m 変位 / 脱出率 0.917
+Type = Point
+Position = 7.420, 4.135, -6.558
+Color = 1.0000, 1.0000, 1.0000
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.037
+CastShadow = true
+
+[Light]
+# ストリングライトの電球 / 色 Red / 器具の重心から 0.13m 変位 / 脱出率 0.609 / 半径をクランプ
+Type = Point
+Position = 7.854, 4.108, -5.396
+Color = 0.5271, 0.0003, 0.0003
+Intensity = 4.8
+Range = 5.14
+SourceRadius = 0.033
+CastShadow = true
+
+[Light]
+# 庇のスポット(A) / 色 Incandescent2700K / 器具の重心から 0.08m 変位 / 脱出率 0.531 / 半径をクランプ
+Type = Point
+Position = -1.795, 2.616, 2.230
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.060
+CastShadow = true
+
+[Light]
+# 庇のスポット(A) / 色 Incandescent2700K / 器具の重心から 0.08m 変位 / 脱出率 0.391 / 半径をクランプ
+Type = Point
+Position = -1.206, 4.083, 4.310
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.058
+CastShadow = true
+
+[Light]
+# 庇のスポット(A) / 色 Incandescent2700K / 器具の重心から 0.08m 変位 / 脱出率 0.531 / 半径をクランプ
+Type = Point
+Position = -0.432, 2.625, -0.761
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.064
+CastShadow = true
+
+[Light]
+# 庇のスポット(A) / 色 Incandescent2700K / 器具の重心から 0.09m 変位 / 脱出率 0.464 / 半径をクランプ
+Type = Point
+Position = 2.127, 4.053, 10.383
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.045
+CastShadow = true
+
+[Light]
+# 庇のスポット(A) / 色 Incandescent2700K / 器具の重心から 0.43m 変位 / 脱出率 0.453
+Type = Point
+Position = 8.032, 3.905, -4.187
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.064
+CastShadow = true
+
+[Light]
+# 庇のスポット(B) / 色 Incandescent2700K / 器具の重心から 0.19m 変位 / 脱出率 0.677 / 半径をクランプ
+Type = Point
+Position = -25.605, 8.410, 13.083
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.042
+CastShadow = true
+
+[Light]
+# 庇のスポット(B) / 色 Incandescent2700K / 器具の重心から 0.19m 変位 / 脱出率 0.682 / 半径をクランプ
+Type = Point
+Position = -21.871, 8.410, 8.775
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.042
+CastShadow = true
+
+[Light]
+# 庇のスポット(B) / 色 Incandescent2700K / 器具の重心から 0.19m 変位 / 脱出率 0.714 / 半径をクランプ
+Type = Point
+Position = -18.389, 8.410, 5.851
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.042
+CastShadow = true
+
+[Light]
+# 庇のスポット(B) / 色 Incandescent2700K / 器具の重心から 0.19m 変位 / 脱出率 0.661 / 半径をクランプ
+Type = Point
+Position = -16.129, 8.420, 2.044
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.042
+CastShadow = true
+
+[Light]
+# 庇のスポット(B) / 色 Incandescent2700K / 器具の重心から 0.19m 変位 / 脱出率 0.688 / 半径をクランプ
+Type = Point
+Position = -12.393, 8.420, -2.300
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.042
+CastShadow = true
+
+[Light]
+# 庇のスポット(B) / 色 Incandescent2700K / 器具の重心から 0.06m 変位 / 脱出率 0.594 / 半径をクランプ
+Type = Point
+Position = 9.853, 3.365, 20.955
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.054
+CastShadow = true
+
+[Light]
+# 庇のスポット(B) / 色 Incandescent2700K / 器具の重心から 0.06m 変位 / 脱出率 0.474 / 半径をクランプ
+Type = Point
+Position = 12.333, 3.379, 25.106
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 63.7
+Range = 18.76
+SourceRadius = 0.054
+CastShadow = true
+
+[Light]
+# 壁付けランタン / 色 Incandescent2700K / 器具の重心から 0.27m 変位 / 脱出率 0.495 / 半径をクランプ
+Type = Point
+Position = -1.076, 2.255, 4.817
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 19.9
+Range = 10.49
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# 壁付けランタン / 色 Incandescent2700K / 器具の重心から 0.27m 変位 / 脱出率 0.500 / 半径をクランプ
+Type = Point
+Position = 0.284, 2.256, 7.341
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 19.9
+Range = 10.49
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# 壁付けランタン / 色 Incandescent2700K / 器具の重心から 0.27m 変位 / 脱出率 0.604 / 半径をクランプ
+Type = Point
+Position = 1.620, 2.283, -2.232
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 19.9
+Range = 10.49
+SourceRadius = 0.041
+CastShadow = true
+
+[Light]
+# 壁付けランタン / 色 Incandescent2700K / 器具の重心から 0.27m 変位 / 脱出率 0.516 / 半径をクランプ
+Type = Point
+Position = 4.525, 2.253, -3.182
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 19.9
+Range = 10.49
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# 壁付けランタン / 色 Incandescent2700K / 器具の重心から 0.28m 変位 / 脱出率 0.536 / 半径をクランプ
+Type = Point
+Position = 7.286, 2.253, -4.273
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 19.9
+Range = 10.49
+SourceRadius = 0.040
+CastShadow = true
+
+[Light]
+# スクーターのヘッドライト / 色 Incandescent2700K / 器具の重心から 0.07m 変位 / 脱出率 0.474 / 半径をクランプ
+Type = Point
+Position = -4.906, 1.287, 0.014
+Color = 1.0000, 0.7100, 0.4200
+Intensity = 111.4
+Range = 24.81
+SourceRadius = 0.032
+CastShadow = true
