@@ -3827,6 +3827,15 @@ namespace Kurenai
                 + (enabled ? "有効" : "無効"));
     }
 
+    void KurenaiEngine3D::SetMeshletRenderingEnabled(bool enabled)
+    {
+        m_MeshletRenderingEnabled = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("メッシュレット描画を起動オプションで設定しました: ")
+                + (enabled ? "有効" : "無効"));
+    }
+
     void KurenaiEngine3D::SetTAAEnabled(bool enabled)
     {
         m_TAAEnabled = enabled;

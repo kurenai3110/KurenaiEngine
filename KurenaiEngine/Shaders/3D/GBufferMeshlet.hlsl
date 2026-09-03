@@ -76,11 +76,15 @@ groupshared uint s_StatsOcclusionCulled;
 // 「軸ConeAxisを中心とする半頂角acos(ConeCutoff)の円錐」に収まることを利用し、
 // 視線がその円錐の内側にあれば全部背面なので丸ごと落とす。
 //
+// 【視線は1本ではない】塊は点ではなく半径radiusWorldの球に広がっているので、
+// 球のどこを見るかで視線の向きが変わる。中心への視線1本だけで判定すると、
+// 端ではまだ表を向いている塊まで落とす。その差を埋めるのが下の半径の項
+//
 // 【ConeCutoffが1のメッシュレットは落とさない】法線の広がりが半球を超えて
 // コーンで表せない場合、meshoptimizerはConeCutoff=1・ConeAxis=(0,0,0)を返す。
 // この値だとdot(...)=0 >= 1 が常に偽なので判定自体は安全に「通す」側へ倒れるが、
 // 長さ0の軸をnormalizeするとNaNになるため、先に弾いておく
-bool IsMeshletBackfacing(Meshlet meshlet, float3 centerWorld)
+bool IsMeshletBackfacing(Meshlet meshlet, float3 centerWorld, float radiusWorld)
 {
     if (meshlet.ConeCutoff >= 1.0f)
     {
@@ -90,8 +94,22 @@ bool IsMeshletBackfacing(Meshlet meshlet, float3 centerWorld)
     // コーンの軸は法線と同じく面の向きなので、Worldではなく法線行列で変換する
     // (非一様スケールで向きが歪むのを防ぐ)
     const float3 axisWorld = normalize(mul(meshlet.ConeAxis, (float3x3)NormalMatrix));
-    const float3 viewDir = normalize(centerWorld - CameraPosition.xyz);
-    return dot(viewDir, axisWorld) >= meshlet.ConeCutoff;
+    const float3 toCenter = centerWorld - CameraPosition.xyz;
+
+    // 【半径の項を落とさないこと】meshoptimizer.h が式を3つ挙げている:
+    //
+    //   (a) 平行投影            dot(view, axis) >= cutoff
+    //   (b) 透視投影・apexあり   dot(normalize(apex - camera), axis) >= cutoff
+    //   (c) 透視投影・球で代用   dot(center - camera, axis) >= cutoff * length(center - camera) + radius
+    //
+    // このエンジンはapexを保存していない(ModelPackage.h参照)ので (c) を使う。
+    // **(b) の式に球中心を渡すのは (c) ではない** ―― `+ radius` が抜けた形になり、
+    // しきい値が本来より小さくなって「まだ表を向いている面がある塊」まで落とす。
+    //
+    // 抜けた項の大きさは radius / 距離 なので、**カメラが近いほど効く。**
+    // 遠景の街並みではほぼ0で気づけず、目の前の小物で「細い棒だけが残る」形で出る。
+    // 特異点の無い (c) の形を使う(centerがカメラ位置に一致しても壊れない)
+    return dot(toCenter, axisWorld) >= meshlet.ConeCutoff * length(toCenter) + radiusWorld;
 }
 
 // --- Hi-Zオクルージョンカリング ---------------------------------------------------------
@@ -197,7 +215,7 @@ void ASMain(uint dispatchThreadId : SV_DispatchThreadID, uint groupThreadId : SV
         // 【この順に判定する】視錐台と法線コーンは定数時間だが、Hi-Z判定は8頂点の投影と
         // テクスチャ読みを伴う。先に安いほうで落とせば、画面外・背面の塊ではHi-Zを一切読まない
         const bool frustumOrConeCulled = !MeshletSphereInFrustum(ViewProj, centerWorld, radiusWorld)
-            || IsMeshletBackfacing(meshlet, centerWorld);
+            || IsMeshletBackfacing(meshlet, centerWorld, radiusWorld);
         const bool occlusionCulled =
             considered && !frustumOrConeCulled && IsMeshletOccluded(centerWorld, radiusWorld);
 
