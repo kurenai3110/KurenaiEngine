@@ -1,5 +1,8 @@
 // MegaLights の空間再利用。近傍の画素が選んだ灯を借りて、自分の面で評価し直して結合する。
-// レイは1本も増えない ―― 借りるのは「どの灯か」だけで、影レイは後段の Shade が1本撃つだけ。
+// 【レイは増える】当初は「借りるのは"どの灯か"だけなので影レイは増えない」と書いていたが、
+// 現行は増える ―― 目標関数に可視性を入れるために標的ごとに自分の面から1本撃ち、
+// 不偏化の分母(Z)でも可視性が不明な近傍にバイアス補正レイを撃つ。
+// そのぶん勝者は可視が証明済みになるので Shade 側の影レイを省ける(下記)。
 //
 // 【何を直すためにあるのか】候補プール(MegaLightsTilePool.hlsl)の重みは**設計上、法線を見ない**。
 // タイル内で画素ごとに法線が違うため、法線に依存させると「代表法線からは見えないが、
@@ -27,7 +30,17 @@
 // **切り替えられるようにしてあるのは、長時間平均を比べて差が出ることを確かめるため。**
 // 差が出なければどちらかが実装されていない。
 //
-// レイを撃たないので3バリアントすべてでコンパイルされる。
+// 【初期可視レイが有効なときは、Z の判定を可視性まで含めて行う(バイアス補正レイ)】
+// 殺しが入ると各画素のストリームは「可視な灯しか配れない」形に変わる。Z が可視性を
+// 見ずに M を数えると、殺しの起きる画素の周囲(=影の縁)だけ分母が太り、
+// **影が太く・濃くなる**系統誤差になる(実測 -3.6%。一様ではなく縁に集中するので
+// 見た目に出る)。前提は「全ストリームが可視フィルタ済み」であること ――
+// 現フレームは初期可視レイ、履歴は時間検証レイ(MegaLightsTemporal.hlsl)が保証する。
+// 検証されていない履歴が混ざる構成でこの判定を行うと、遮蔽された灯を正当に運ぶ候補を
+// 誤って外し、参照の1万倍級のファイアフライになる(実測: 総和+17.5%。61.7f)。
+//
+// RayQuery(SM 6.5)を使うため、DX12 かつ DXR Tier 1.1 のときだけ生成される
+// (KurenaiShaderPacker の kSkipDxbc50Files に登録済み)。
 #include "NormalEncoding.hlsli"
 #include "SpecularEnergy.hlsli"
 
@@ -63,7 +76,13 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     // x=射影行列の(0,0)成分, y=同(1,1)成分, zw=未使用。
     // MIS重みが「その灯が隣のタイルへ届くか」を判定するのに、隣のタイルの錐台を組み立て直す
     float4 Params3;
+    // x=時間再利用の履歴が有効か。可視性込みのZを使ってよいかの判定に要る(下記)、
+    // y=空間再利用の反復番号(0起点)。近傍の型板の種に混ぜて、反復ごとに別の近傍を選ばせる、
+    // zw=未使用
+    uint4 Params4;
 };
+
+RaytracingAccelerationStructure SceneTLAS : register(t0);
 
 Texture2D NormalTexture : register(t1);
 Texture2D DepthTexture : register(t2);
@@ -81,6 +100,15 @@ Texture2D BRDFLUTTexture : register(t5);
 StructuredBuffer<MegaLightsReservoir> InputReservoirs : register(t7);
 // 候補プール。ヘッダに入っているタイルの深度スラブから、隣のタイルの錐台を組み立て直す
 StructuredBuffer<uint> TilePool : register(t8);
+// 今フレームの初期リザーバ(時間再利用を挟む前)。
+// 【殺しの持ち回りを読むために別途要る】時間再利用は履歴が勝つと現フレームの殺しを
+// 捨てるため、InputReservoirs だけでは「この画素からその灯は見えない」という
+// 確定情報が届かない。影の縁では近傍が遮蔽された支配光を正当に持っており、
+// この情報無しで借りると毎フレーム影レイを無駄にして黒い斑点になる
+StructuredBuffer<MegaLightsReservoir> InitialReservoirs : register(t9);
+// 画素ごとの「遮蔽が確定した灯」のキャッシュ(MegaLightsInitialSample.hlsl が維持する)。
+// 殺しの持ち回りより寿命が長く、初期RISが別の灯を引いたフレームでも効く
+StructuredBuffer<uint> BlockedLights : register(t10);
 RWStructuredBuffer<MegaLightsReservoir> OutputReservoirs : register(u0);
 
 // 結合に使う候補の最大数(自分 + 近傍)。MIS重みの分母は候補数の2乗で効くため上限を置く
@@ -125,6 +153,28 @@ float NextRandom(inout uint state)
 float Luminance(float3 c)
 {
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+// レイ原点のバイアス。MegaLightsInitialSample.hlsl / MegaLightsShade.hlsl と同じ値を使う
+// (違う値にすると、殺す判定と Z の判定が食い違って縁に細いバイアスが残る)
+static const float kRayOriginBias = 0.01f;
+static const float kRayOriginBiasSlope = 1e-4f;
+static const float kMinSlopeScaleNdotL = 0.1f;
+
+float TraceLightVisibility(float3 rayOrigin, float3 L, float originBias, float distanceToLight)
+{
+    RayDesc ray;
+    ray.Origin = rayOrigin;
+    ray.Direction = L;
+    ray.TMin = originBias;
+    // 光源までの距離で打ち切る(省くと光源の向こう側のジオメトリが遮蔽物になる)
+    ray.TMax = max(distanceToLight - originBias, originBias);
+
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
+    query.TraceRayInline(SceneTLAS, RAY_FLAG_NONE, 0xFFu, ray);
+    query.Proceed();
+
+    return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;
 }
 
 // 1画素ぶんのサーフェス。MIS重みの分母は「隣の画素の面で評価した目標関数」を要るので、
@@ -241,7 +291,17 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     const float viewZ = mul(float4(self.WorldPos, 1.0f), View).z;
-    uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + Params1.w * 0x85EBCA6Bu + 0x27D4EB2Du);
+    // 【乱数にフレーム番号を混ぜない ―― Initial とは逆の選択】近傍の取り方と抽選を
+    // 毎フレーム引き直すと、影の縁で「明るい側から借りたか/影側から借りたか」が
+    // フレームごとに揺れ、半影帯が塊で明滅する(boiling。実測では時間stdの上位帯が
+    // 影の縁に沿って幅広く出た)。画素固定の型板にすれば揺れは静的な空間パターンに
+    // 変わり、そちらはデノイザの a-trous が消せる。新しい情報は Initial(こちらは
+    // フレーム番号を混ぜる)から毎フレーム流れ込むので、収束は止まらない
+    // 【フレーム番号は混ぜない】混ぜると近傍の型板が毎フレーム変わり、ノイズが塊で
+    // 蠢く(boiling)。画素ごとに固定した型板にしてある。
+    // 反復番号だけは混ぜる ―― 同じ型板で2回借りると同じ近傍から借り直すだけになる
+    uint rngState =
+        HashUint(pixel.x + pixel.y * outputSize.x + 0x27D4EB2Du + Params4.y * 0x9E3779B9u);
 
     // --- 候補を集める(0番は自分) ---
     uint2 candidateCoord[kMaxSpatialCandidates];
@@ -321,6 +381,48 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float selectedTargetPdf = 0.0f;
     uint selectedSampleUV = 0u;
 
+    // 自分の画素で「この灯を可視レイで殺した」と確定している標的。
+    // 【影の縁の黒い斑点の対策】遮蔽の境界の画素は、隣(明るい側)がその支配光を
+    // 正当に持っているため、borrow のたびに自分では見えない灯を選び直して
+    // 影レイを無駄にし、黒く沈む。自分の殺しは V=0 の証明なので、その標的の
+    // 実効的な目標関数は 0 ―― 選択から外せば、届く別の灯が選ばれる。
+    // 寄与が0と証明済みの候補を混ぜないだけなので、期待値は変わらない。
+    // 【今フレームの初期リザーバから読む】時間再利用の出力(candidate[0])は履歴が
+    // 勝つと殺しを捨てるため、初期パスの出力を直接見る。両方に殺しがあれば初期を優先
+    uint selfKilledLight = kMegaLightsInvalidLight;
+    uint selfKilledSampleUV = 0u;
+    if (candidate[0].W <= 0.0f && !MegaLightsUnpackVisible(candidate[0].LightAndFlags))
+    {
+        selfKilledLight = MegaLightsUnpackLight(candidate[0].LightAndFlags);
+        selfKilledSampleUV = candidate[0].SampleUV;
+    }
+    {
+        const MegaLightsReservoir initial = InitialReservoirs[index];
+        const uint initialLight = MegaLightsUnpackLight(initial.LightAndFlags);
+        if (initialLight != kMegaLightsInvalidLight && initial.W <= 0.0f &&
+            !MegaLightsUnpackVisible(initial.LightAndFlags))
+        {
+            selfKilledLight = initialLight;
+            selfKilledSampleUV = initial.SampleUV;
+        }
+    }
+    // キャッシュされた遮蔽の確定情報(点光源のみ。持続するので毎フレーム効く)
+    const uint blockedLight = BlockedLights[index];
+
+    // --- 目標関数に可視性を入れる準備 ---
+    // 【なぜ入れるのか】借りた灯が自分から遮蔽されているのを、従来はシェードの影レイで
+    // 初めて知り、そのフレームの画素は黒になっていた(デノイザ前の暗黒点の主因。
+    // 実測で1フレームあたり点灯画素の3.6%)。選択の時点で標的ごとに自分の面から
+    // 1本レイを撃てば、見える灯だけが選ばれる。選ばれた勝者は可視が証明済みになるので
+    // シェード側の影レイを省け、レイの総数はほぼ相殺される。
+    // 分母(Z)は既に可視性込みで数えているので、これで分子と分母の定義が一致する。
+    // 【重複する標的はレイを共有する】候補は同じ支配光を持っていることが多い
+    const bool visibilityTargetAware = (Params0.w != 0u) && (Params2.w != 0u);
+    uint visTargetLight[kMaxSpatialCandidates];
+    uint visTargetUV[kMaxSpatialCandidates];
+    float visTargetValue[kMaxSpatialCandidates];
+    uint visTargetCount = 0u;
+
     [loop]
     for (uint i = 0u; i < candidateCount; ++i)
     {
@@ -333,11 +435,68 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         }
 
         const uint lightI = MegaLightsUnpackLight(candidate[i].LightAndFlags);
+        // 自分から見えないことが確定している標的は選ばない(理由は selfKilledLight の定義)。
+        // 球光源はサンプル点まで一致した場合だけ確定と見なす
+        if (lightI == selfKilledLight &&
+            (Lights[lightI].Params.z <= 0.0f || candidate[i].SampleUV == selfKilledSampleUV))
+        {
+            continue;
+        }
+        // キャッシュ側(点光源のみ記録される)
+        if (lightI == blockedLight)
+        {
+            continue;
+        }
         // 【借りた灯は必ず自分の面で評価し直す】隣で良かった灯がここで良いとは限らない
         const float pdfSelf = TargetPdfOn(self, lightI);
         if (pdfSelf <= 0.0f)
         {
             continue;
+        }
+
+        // --- 可視性(自分の面から標的へ)。重複はレイを共有する ---
+        if (visibilityTargetAware && LightCastsRaytracedShadow(Lights[lightI].Params.y))
+        {
+            float vis = -1.0f;
+            [loop]
+            for (uint t = 0u; t < visTargetCount; ++t)
+            {
+                if (visTargetLight[t] == lightI && visTargetUV[t] == candidate[i].SampleUV)
+                {
+                    vis = visTargetValue[t];
+                    break;
+                }
+            }
+            if (vis < 0.0f)
+            {
+                const float3 samplePos = MegaLightsLightSamplePosition(
+                    Lights[lightI].PositionType.xyz, Lights[lightI].Params.z,
+                    Lights[lightI].DirectionAngle.xyz, (uint)Lights[lightI].PositionType.w,
+                    MegaLightsUnpackSampleUV(candidate[i].SampleUV));
+                const float3 toSample = samplePos - self.WorldPos;
+                const float sampleDist = length(toSample);
+                const float slopeScale =
+                    1.0f / max(dot(self.N, toSample / max(sampleDist, 1e-6f)), kMinSlopeScaleNdotL);
+                const float originBias =
+                    (kRayOriginBias + length(self.WorldPos - CameraPosition.xyz) * kRayOriginBiasSlope) *
+                    slopeScale;
+                vis = (sampleDist > originBias)
+                          ? TraceLightVisibility(
+                                self.WorldPos + self.N * originBias, toSample / sampleDist, originBias,
+                                sampleDist)
+                          : 1.0f;
+                if (visTargetCount < kMaxSpatialCandidates)
+                {
+                    visTargetLight[visTargetCount] = lightI;
+                    visTargetUV[visTargetCount] = candidate[i].SampleUV;
+                    visTargetValue[visTargetCount] = vis;
+                    ++visTargetCount;
+                }
+            }
+            if (vis <= 0.0f)
+            {
+                continue;
+            }
         }
 
         const float w = pdfSelf * candidate[i].W * candidate[i].M;
@@ -377,6 +536,29 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float denominator = confidenceSum;
     if (useMIS)
     {
+        // 【初期可視レイが有効なときは、Z も可視性まで含めて判定する】殺しが入ると
+        // 各候補のストリームは「可視な灯しか配れない」形に変わる。選ばれた灯が見えない
+        // 候補の M を数えると、殺しの起きる画素の周囲だけ分母が太り、暗い側の系統誤差に
+        // なる(実測 -3.6%。docs/ImplementationDetail.md 61.7f)。
+        // この前提が成り立つのは、**履歴も時間検証レイで検証されている**から
+        // (MegaLightsTemporal.hlsl)。検証しない構成でここを有効にすると、履歴由来の
+        // 「遮蔽された灯を正当に運ぶ」候補をレイで分母から外してしまい、
+        // 参照の1万倍級のファイアフライが出る(実測: 総和+17.5%。61.7f.7)。
+        // 可視性の決め方は3通りで、レイは「分からないとき」しか撃たない:
+        //   1. 候補自身が同じ標的(同じ灯・同じサンプル点)を生き残らせている → 可視が確定
+        //   2. 同じ標的を殺している → 遮蔽が確定(分母から外す)
+        //   3. 別の灯を選んでいた/空だった → 分からないので、その候補の面から
+        //      選ばれたサンプル点へバイアス補正レイを1本撃つ
+        // 自分(j=0)にはレイを撃たない ―― 自分から見えないサンプルは Shade の影レイが
+        // どのみち0にするので、ここで数え過ぎても結果に効かない
+        const bool visibilityAware = (Params0.w != 0u) && (Params2.w != 0u) &&
+                                     LightCastsRaytracedShadow(Lights[selectedLight].Params.y);
+        const float selectedRadius = Lights[selectedLight].Params.z;
+        const float3 selectedSamplePos = MegaLightsLightSamplePosition(
+            Lights[selectedLight].PositionType.xyz, selectedRadius,
+            Lights[selectedLight].DirectionAngle.xyz, (uint)Lights[selectedLight].PositionType.w,
+            MegaLightsUnpackSampleUV(selectedSampleUV));
+
         float z = 0.0f;
         [loop]
         for (uint j = 0u; j < candidateCount; ++j)
@@ -404,6 +586,53 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             {
                 continue;
             }
+
+            // 【可視性の判定は全候補に掛ける ―― ただし時間検証レイが前提】
+            // どの候補のストリームも「このフレーム・その画素で可視検証済みの灯しか
+            // 配れない」形になっている(現フレームは初期可視レイ、履歴は時間検証レイ。
+            // MegaLightsTemporal.hlsl)。だから「選ばれた灯がその候補の面から見えない」
+            // ことが分かった候補は、実際にその灯を配れない ―― 分母から外すのが正しい。
+            // 【検証されていない履歴が混ざる構成でこれをやってはいけない】遮蔽された灯を
+            // 正当に運ぶ候補を誤って外し、分子に残った寄与が小さな分母で割られて
+            // 参照の1万倍級のファイアフライになる(実測: 総和+17.5%。61.7f)。
+            // 勝者自身は自分のサンプルについて可視検証済みなので必ず分母に残り、
+            // W = Σw/(Z・p̂) の上界は変わらない(Z ≥ 勝者のM)。
+            if (visibilityAware)
+            {
+                const uint candLight = MegaLightsUnpackLight(candidate[j].LightAndFlags);
+                const bool sameTarget = (candLight == selectedLight) &&
+                    (selectedRadius <= 0.0f || candidate[j].SampleUV == selectedSampleUV);
+                if (sameTarget && MegaLightsUnpackVisible(candidate[j].LightAndFlags))
+                {
+                    // 可視が確定(このフレーム・その画素で検証済み)。レイ不要で数える
+                }
+                else if (sameTarget && candidate[j].W <= 0.0f)
+                {
+                    // 遮蔽が確定(殺しの持ち回り)。分母から外す
+                    continue;
+                }
+                else if (j != 0u)
+                {
+                    // 分からない。バイアス補正レイで確かめる
+                    const float slopeScale =
+                        1.0f / max(dot(surfaceJ.N, normalize(selectedSamplePos - surfaceJ.WorldPos)),
+                                   kMinSlopeScaleNdotL);
+                    const float originBias =
+                        (kRayOriginBias + length(surfaceJ.WorldPos - CameraPosition.xyz) * kRayOriginBiasSlope) *
+                        slopeScale;
+                    const float3 toSample = selectedSamplePos - surfaceJ.WorldPos;
+                    const float sampleDist = length(toSample);
+                    if (sampleDist > originBias &&
+                        TraceLightVisibility(
+                            surfaceJ.WorldPos + surfaceJ.N * originBias, toSample / sampleDist, originBias,
+                            sampleDist) <= 0.0f)
+                    {
+                        continue;
+                    }
+                }
+                // j==0(自分)で可視性が分からない場合は数える ――
+                // 自分から見えないサンプルは Shade の影レイがどのみち0にする
+            }
             z += candidate[j].M;
         }
         // 選ばれたサンプルを出した候補は必ず1つ以上あるはずだが、
@@ -417,7 +646,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 
     MegaLightsReservoir result;
-    result.LightAndFlags = MegaLightsPackLightAndFlags(selectedLight, true);
+    // 【可視フラグ = このフレーム・この画素で可視を証明済みか】目標関数に可視性を
+    // 入れているとき、勝者は自分の面からのレイを通過している ―― シェードは
+    // このフラグを見て影レイを省く
+    result.LightAndFlags = MegaLightsPackLightAndFlags(selectedLight, visibilityTargetAware);
     result.SampleUV = selectedSampleUV;
     result.W = weightSum / (denominator * selectedTargetPdf);
     result.M = confidenceSum;

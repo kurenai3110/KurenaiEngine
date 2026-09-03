@@ -382,12 +382,21 @@ namespace Kurenai::Assets
 
         // 背面カリング用の法線コーン。この塊に含まれる三角形の法線が
         // 「軸ConeAxisを中心とする半頂角acos(ConeCutoff)の円錐」に収まることを表す。
-        // 視線方向をvとして dot(v, ConeAxis) >= ConeCutoff ならすべて背面なので丸ごと落とせる。
+        // 平行投影なら、視線方向をvとして dot(v, ConeAxis) >= ConeCutoff ですべて背面。
         //
         // 【apexを持たない】meshopt_computeMeshletBoundsは円錐の頂点(cone_apex)も返し、
         // 透視投影ではそれを使うほうが厳密になる。ここで持たないのは、apexを使う判定が
-        // 「頂点からメッシュレットへのベクトル」を要求してレジスタと計算を増やす一方、
-        // 実用上はバウンディング球の中心を代用した近似で十分に落とせるため
+        // 「頂点からメッシュレットへのベクトル」を要求してレジスタと計算を増やすため。
+        //
+        // 【apexの代わりに球中心を使うなら、半径の項が要る】meshoptimizer.h が挙げる
+        // 「apexを使わず境界球で代用する式」は
+        //
+        //     dot(center - camera, ConeAxis) >= ConeCutoff * length(center - camera) + BoundsRadius
+        //
+        // で、**apex用の式に中心を差し替えただけでは成立しない。** `+ BoundsRadius` を
+        // 落とすとしきい値が本来より小さくなり、まだ表を向いている面がある塊まで落ちる。
+        // 抜けた項は radius/距離 なのでカメラが近いほど効き、遠景では気づけない
+        // (実装史69章。Bistroの立て看板の木枠が丸ごと消えていた)
         float    ConeAxis[3];
         float    ConeCutoff;               // = cos(角度/2)
 

@@ -6845,7 +6845,18 @@ RHI・DX11/DX12の両実装・ディスクリプタ周りに新しい種類の�
 カリング判定は1メッシュレットに1回しか走らないので、原子加算の競合が実害になる頻度ではない。
 </p>
 <p>
-法線コーンによる背面カリングには落とし穴が1つある。法線の広がりが半球を超えてコーンで表せない場合、
+法線コーンによる背面カリングは、<code>cone_apex</code>を保存していないため
+<strong>meshoptimizerが挙げる「apexを使わず境界球で代用する式」を使わなければなりません</strong>。
+</p>
+<pre><code>dot(center - camera, cone_axis) &gt;= cone_cutoff * length(center - camera) + radius</code></pre>
+<p>
+<strong>apex用の式<code>dot(normalize(apex - camera), axis) &gt;= cutoff</code>に球中心を差し替えたものは、これとは別物です。</strong>
+差は<code>+ radius</code>の項で、落とすとしきい値が本来より小さくなり、まだ表を向いている面がある塊まで消えます。
+抜けた項の大きさは<code>radius / 距離</code>なので<strong>カメラが近いほど効き、遠景では原理的に気づけません</strong>
+(根拠は<code>docs/ImplementationDetail.md</code> 47.2b、経緯は<code>docs/ImplementationHistory.md</code> 69章)。
+</p>
+<p>
+落とし穴がもう1つある。法線の広がりが半球を超えてコーンで表せない場合、
 meshoptimizerは<code>cone_cutoff = 1</code>・<code>cone_axis = (0,0,0)</code>を返す。
 判定式<code>dot(view, axis) &gt;= cutoff</code>自体は<code>0 &gt;= 1</code>で偽になり安全に「通す」側へ倒れるが、
 <strong>長さ0の軸を<code>normalize</code>するとNaNになる</strong>。<code>ConeCutoff &gt;= 1</code>を先に弾く必要がある
@@ -7224,6 +7235,24 @@ RHIの抽象を片肺にしないために実装はしてあるが、DX11経路�
 Presentパスのデバッグ表示(<code>DebugView::HiZ</code>)と、この章のオクルージョンカリングです。
 どちらも要らないフレームでは「コピー1回 + ミップ段数-1回のディスパッチ」がまるごと無駄になり、
 Intel UHD 620での実測で1.19〜1.21ms(GPUフレーム時間30msの約4%)を占めます。
+</p>
+
+<p>
+<strong>守るべき不変条件は「ミップNのテクセル群がミップ0の画像を隙間なく覆う」ことです。</strong>
+テクセル k が担当するのは<code>[k*2^N, (k+1)*2^N)</code>で、端数は<strong>最後のテクセルが吸います</strong>。
+ミップの寸法は<code>max(1, 親/2)</code>の切り捨てなので、親の辺が奇数の段では2x2だけでは
+最終行・列がどのテクセルからも読まれません。そこで<strong>辺が奇数のときだけ、最終テクセルが
+端数の1行(列)も読みます</strong>(最悪3x3の9タップ)。
+</p>
+
+<p>
+読む側(<code>HiZCull.hlsli</code>)はこの不変条件に依存して、<strong>ミップ0のテクセル座標を
+<code>mip</code>だけ右シフトした値を担当テクセルの番号として引きます</strong>。
+<code>mipSize</code>を掛けて画面全体へ引き伸ばす対応は担当範囲と一致せず、
+まったく別の場所の深度と比べることになります(1920x1080で最大896行のずれ)。
+<strong>作る側の端数処理と読む側のシフトは対で成り立っている</strong>ので、片方だけ変えないでください。
+根拠と検算の手順は<code>docs/ImplementationDetail.md</code> 47.2a、経緯は
+<code>docs/ImplementationHistory.md</code> 68章にあります。
 </p>
 
 <h3>41.2 判定の向き(Reverse-Z)</h3>

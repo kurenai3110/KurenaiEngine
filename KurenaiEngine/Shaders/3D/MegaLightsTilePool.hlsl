@@ -17,7 +17,8 @@
 // 【出力バッファのレイアウト】1本のRWStructuredBuffer<uint>に、タイルごとの固定長ブロックで詰める。
 //   base = tileIndex * (kMegaLightsTilePoolHeader + 2 * K)
 //   [base + 0]           = asuint(SumW)  そのタイルに届く全灯の重みの合計
-//   [base + 1]           = 届いたライト数(重みが正になった灯の数。デバッグ表示と検証用)
+//   [base + 1]           = 届いたライト数(重みが正になった灯の数。混合抽出の一様成分の
+//                          割り戻しに使う。デバッグ表示と検証も兼ねる)
 //   [base + 2]           = 有効な候補数(0 か K。SumW が0なら0)
 //   [base + 3]           = 予約
 //   [base + 4]           = asfloat(nearestViewZ)  タイル内で最も手前のサーフェスのView空間Z
@@ -243,10 +244,16 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 dispatchThreadID : SV_DispatchThre
     const float sumW = gsPartialSum[0];
     const uint reachableCount = gsPartialCount[0];
 
-    // --- K個の候補を、重みに比例した確率で抽出する ---
+    // --- K個の候補を抽出する(一様枝と重み枝の混合) ---
+    // 【重みだけで引いてはいけない】距離減衰は光源のそばで発散するため、重みに比例した
+    // 抽出だけだと1灯が K スロットを独占し、その灯が寄与0になる画素が何フレーム待っても
+    // 他の灯を引けなくなる(理由と実測は MegaLightsCommon.hlsli の混合率の定義を参照)。
+    // どちらの枝で選ばれても、1スロットの抽出確率は
+    //   p = 混合率 / 届いた灯数 + (1 - 混合率) * w_i / SumW
+    // で、Initial 側はこの同じ式で割り戻す。
     // 【逆CDF法を使う】リザーバサンプリングでも同じ分布が得られるが、こちらは
-    // p_i = w_i / SumW が厳密に成り立ち、スレッド間の縮約も要らない。
-    // K本のスレッドがそれぞれ独立に累積和を歩く(復元抽出。重複は許容する)
+    // 抽出確率が厳密に成り立ち、スレッド間の縮約も要らない。
+    // K本のスレッドがそれぞれ独立に歩く(復元抽出。重複は許容する)
     for (uint slot = groupIndex; slot < candidateCount; slot += kTileThreadCount)
     {
         uint pickedIndex = kInvalidLightIndex;
@@ -255,18 +262,45 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 dispatchThreadID : SV_DispatchThre
         if (sumW > 0.0f)
         {
             const uint seed = HashUint(tileIndex * 0x9E3779B9u + slot * 0x85EBCA6Bu + PoolParams.x * 0xC2B2AE35u);
-            const float target = UintToUnitFloat(HashUint(seed)) * sumW;
+            const float mixRandom = UintToUnitFloat(HashUint(seed ^ 0x7F4A7C15u));
 
-            float accumulated = 0.0f;
-            [loop]
-            for (uint i = 0u; i < lightCount; ++i)
+            if (mixRandom < kMegaLightsUniformMixFraction && reachableCount > 0u)
             {
-                accumulated += gsWeight[i];
-                if (accumulated > target)
+                // 一様枝: 届いた灯(重みが正の灯)の中から番号で一様に選ぶ
+                const uint targetOrdinal = min(
+                    (uint)(UintToUnitFloat(HashUint(seed ^ 0x94D049BBu)) * float(reachableCount)),
+                    reachableCount - 1u);
+                uint ordinal = 0u;
+                [loop]
+                for (uint i = 0u; i < lightCount; ++i)
                 {
-                    pickedIndex = i;
-                    pickedWeight = gsWeight[i];
-                    break;
+                    if (gsWeight[i] > 0.0f)
+                    {
+                        if (ordinal == targetOrdinal)
+                        {
+                            pickedIndex = i;
+                            pickedWeight = gsWeight[i];
+                            break;
+                        }
+                        ++ordinal;
+                    }
+                }
+            }
+            else
+            {
+                // 重み枝: 逆CDF法
+                const float target = UintToUnitFloat(HashUint(seed)) * sumW;
+                float accumulated = 0.0f;
+                [loop]
+                for (uint i = 0u; i < lightCount; ++i)
+                {
+                    accumulated += gsWeight[i];
+                    if (accumulated > target)
+                    {
+                        pickedIndex = i;
+                        pickedWeight = gsWeight[i];
+                        break;
+                    }
                 }
             }
 

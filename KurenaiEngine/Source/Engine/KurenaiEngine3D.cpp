@@ -2700,6 +2700,13 @@ namespace Kurenai
             megaLightsStochasticConstantBufferDesc.SizeInBytes = sizeof(MegaLightsStochasticConstants);
             m_MegaLightsStochasticConstantBuffer =
                 m_Device->CreateBuffer(megaLightsStochasticConstantBufferDesc);
+            // 空間再利用の反復ごとに1本ずつ。中身は共有分と同じで反復番号だけが違う
+            for (uint32_t spatialIteration = 0u; spatialIteration < kMegaLightsMaxSpatialIterations;
+                 ++spatialIteration)
+            {
+                m_MegaLightsSpatialConstantBuffer[spatialIteration] =
+                    m_Device->CreateBuffer(megaLightsStochasticConstantBufferDesc);
+            }
 
             // 蓄積平均(計測専用)。レイを撃たないがMegaLightsと同時にしか使わないのでここで作る
             RHI::ShaderDesc megaLightsAccumCsDesc;
@@ -3803,6 +3810,40 @@ namespace Kurenai
         }
     }
 
+    void KurenaiEngine3D::SetAutoExposureEnabled(bool enabled)
+    {
+        m_AutoExposureEnabled = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("自動露出を起動オプションで設定しました: ") + (enabled ? "有効" : "無効"));
+    }
+
+    void KurenaiEngine3D::SetOcclusionCullingEnabled(bool enabled)
+    {
+        m_OcclusionCullingEnabled = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("Hi-Zオクルージョンカリングを起動オプションで設定しました: ")
+                + (enabled ? "有効" : "無効"));
+    }
+
+    void KurenaiEngine3D::SetMeshletRenderingEnabled(bool enabled)
+    {
+        m_MeshletRenderingEnabled = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("メッシュレット描画を起動オプションで設定しました: ")
+                + (enabled ? "有効" : "無効"));
+    }
+
+    void KurenaiEngine3D::SetTAAEnabled(bool enabled)
+    {
+        m_TAAEnabled = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("TAAを起動オプションで設定しました: ") + (enabled ? "有効" : "無効"));
+    }
+
     void KurenaiEngine3D::SetPerfDump(const wchar_t* path, int frames)
     {
         if (path == nullptr || path[0] == L'\0' || frames <= 0)
@@ -3821,6 +3862,62 @@ namespace Kurenai
             "KurenaiEngine3D",
             "GPU計測の書き出しを設定しました(計測用): " + Core::WideToUtf8(m_PerfDumpPath) + " / " +
                 std::to_string(frames) + "フレーム");
+    }
+
+    void KurenaiEngine3D::SetMegaLightsSpatialIterations(int iterations)
+    {
+        if (iterations < 1)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsの空間再利用の反復回数に1未満が指定されたため、既定のままにします: " +
+                    std::to_string(iterations));
+            return;
+        }
+        const int clamped = std::min(iterations, static_cast<int>(kMegaLightsMaxSpatialIterations));
+        if (clamped != iterations)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsの空間再利用の反復回数が上限を超えたため頭打ちにしました: " +
+                    std::to_string(iterations) + " -> " + std::to_string(clamped));
+        }
+        m_MegaLightsSpatialIterations = clamped;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsの空間再利用の反復回数を設定しました: " + std::to_string(clamped));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseFireflyClamp(float k)
+    {
+        if (k < 0.0f)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのファイアフライのクランプに負の値が指定されたため、既定のままにします: " +
+                    std::to_string(k));
+            return;
+        }
+        m_MegaLightsDenoiseFireflyClamp = k;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのファイアフライのクランプを設定しました: " + std::to_string(k));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseSigmaLuminance(float sigma)
+    {
+        if (!(sigma > 0.0f))
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザのσ(輝度)に正でない値が指定されたため、既定のままにします: " +
+                    std::to_string(sigma));
+            return;
+        }
+        m_MegaLightsDenoiseSigmaLuminance = sigma;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのデノイザのσ(輝度)を設定しました: " + std::to_string(sigma));
     }
 
     void KurenaiEngine3D::SetMegaLightsDenoise(int enabled, int atrousPasses, int maxFrames)
@@ -4600,8 +4697,19 @@ namespace Kurenai
                 reservoirBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4) * width * height;
                 reservoirBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4);
                 m_MegaLightsReservoirBuffer = m_Device->CreateBuffer(reservoirBufferDesc);
-                // 空間再利用の出力先。近傍を読むので入力と同じバッファへは書けない
+
+                // 画素ごとの「遮蔽が確定した灯」のキャッシュ(uint。0xFFFFFFFFで無し)。
+                // 殺しの持ち回りより寿命が長く、影の縁の暗いフリンジを消すのに要る
+                // (MegaLightsInitialSample.hlsl の BlockedLights のコメント)
+                RHI::BufferDesc blockedBufferDesc;
+                blockedBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+                blockedBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * width * height;
+                blockedBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+                m_MegaLightsBlockedLightBuffer = m_Device->CreateBuffer(blockedBufferDesc);
+                // 空間再利用の出力先。近傍を読むので入力と同じバッファへは書けない。
+                // 2回以上回すときは2本を ping-pong する
                 m_MegaLightsReservoirSpatialBuffer = m_Device->CreateBuffer(reservoirBufferDesc);
+                m_MegaLightsReservoirSpatialBuffer2 = m_Device->CreateBuffer(reservoirBufferDesc);
 
                 // 時間再利用の履歴。**2本のping-pongにするのは、RenderGraphがWARの辺を
                 // 張らないため**。1本で済ませると「今フレームのTemporalが読んだ直後に
@@ -12428,7 +12536,7 @@ namespace Kurenai
         {
             // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
             // Initial側のExecuteで1回だけ更新すればよい
-            const auto updateStochasticConstants = [this, &jitteredProj](RHI::IRHICommandList* cmd)
+            const auto buildStochasticConstants = [this, &jitteredProj](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
                 stochasticConstants.Params0 =
@@ -12482,7 +12590,15 @@ namespace Kurenai
                 }
                 // 履歴が使えるか。解像度が変わった直後は添字の意味が変わっており、
                 // バッファのクリアが無いRHIでは前の内容が別画素のものとして残っている
-                stochasticConstants.Params4 = { m_MegaLightsHistoryValid ? 1u : 0u, 0u, 0u, 0u };
+                // y は空間再利用の反復番号。近傍の型板の種に混ぜて、反復ごとに別の近傍を選ばせる
+                stochasticConstants.Params4 = {
+                    m_MegaLightsHistoryValid ? 1u : 0u, spatialIteration, 0u, 0u
+                };
+                return stochasticConstants;
+            };
+            const auto updateStochasticConstants = [this, buildStochasticConstants](RHI::IRHICommandList* cmd)
+            {
+                const MegaLightsStochasticConstants stochasticConstants = buildStochasticConstants(0u);
                 cmd->UpdateBuffer(
                     m_MegaLightsStochasticConstantBuffer.get(), &stochasticConstants, sizeof(stochasticConstants));
             };
@@ -12497,19 +12613,47 @@ namespace Kurenai
             const bool temporalRuns = m_MegaLightsTemporalEnabled && m_MegaLightsTemporalPipelineState &&
                                       m_MegaLightsReservoirHistory[0] && m_MegaLightsHistoryGuide[0];
             const bool spatialRuns = m_MegaLightsSpatialEnabled && m_MegaLightsSpatialPipelineState &&
-                                     m_MegaLightsReservoirSpatialBuffer && m_MegaLightsSpatialNeighborCount > 0;
+                                     m_MegaLightsReservoirSpatialBuffer &&
+                                     m_MegaLightsReservoirSpatialBuffer2 && m_MegaLightsSpatialNeighborCount > 0;
+            // 反復回数。ping-pongのバッファと定数バッファの本数で上限が決まる。
+            // 【時間再利用を切っているときは1回に落とす】不偏化の分母(Z)の可視性込みの
+            // 判定は「生きているリザーバはこのフレーム・この画素で可視」という不変条件に
+            // 依っており、それを保っているのは時間検証レイである。時間再利用を切ると
+            // 検証が無くなり、2回目の反復が未検証のサンプルを重ねて数えるため
+            // **明るい側へ大きく偏る**(900枚の蓄積平均で参照実装比 +22.4%。1回なら
+            // -0.07% なので反復を重ねたときにだけ出る)。時間再利用があれば不偏
+            //(同じ測定で +0.0% / 誤差の中央値は 0.0379 → 0.0305 と改善)
+            uint32_t spatialIterations =
+                spatialRuns ? static_cast<uint32_t>(std::clamp(
+                                  m_MegaLightsSpatialIterations, 1,
+                                  static_cast<int32_t>(kMegaLightsMaxSpatialIterations)))
+                            : 0u;
+            if (!temporalRuns && spatialIterations > 1u)
+            {
+                spatialIterations = 1u;
+            }
+            // 最後の反復が書いた側をシェードが読む
+            RHI::IRHIBuffer* const spatialPingPong[kMegaLightsMaxSpatialIterations] = {
+                m_MegaLightsReservoirSpatialBuffer.get(), m_MegaLightsReservoirSpatialBuffer2.get()
+            };
 
             // ping-pong。今フレームが書く側と、前フレームが書いた側
             const uint32_t historyWriteIndex = m_MegaLightsHistoryIndex;
             const uint32_t historyReadIndex = m_MegaLightsHistoryIndex ^ 1u;
 
+            // 【履歴は時間再利用の出力に取る ―― 空間再利用の出力を履歴へ戻してはいけない】
+            // 一度、計画(1-3節)どおり「時間→空間の結果を履歴にする」形へ変えたところ、
+            // 発散振動した(隣接フレーム差が63階調。実測)。近傍の履歴に自分の過去の
+            // サンプルが混ざる正帰還ループができ、Wが往復のたびに複利で増幅されるため。
+            // 空間再利用はフレーム内で完結させ、履歴には時間再利用の出力だけを入れる
             RHI::IRHIBuffer* const temporalOutputBuffer =
                 temporalRuns ? m_MegaLightsReservoirHistory[historyWriteIndex].get() : nullptr;
             // 空間再利用の入力 = 時間再利用を挟んだならその出力、挟まないならInitialの出力
             RHI::IRHIBuffer* const reuseInputBuffer =
                 temporalRuns ? temporalOutputBuffer : m_MegaLightsReservoirBuffer.get();
             RHI::IRHIBuffer* const shadeReservoirBuffer =
-                spatialRuns ? m_MegaLightsReservoirSpatialBuffer.get() : reuseInputBuffer;
+                spatialRuns ? spatialPingPong[(spatialIterations - 1u) % kMegaLightsMaxSpatialIterations]
+                            : reuseInputBuffer;
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLightsInitial",
@@ -12519,7 +12663,7 @@ namespace Kurenai
                     m_BRDFLUTTexture.get(),
                 },
                 .BufferReads = { m_LightBuffer.get(), tilePoolBufferForBinding },
-                .BufferWrites = { m_MegaLightsReservoirBuffer.get() },
+                .BufferWrites = { m_MegaLightsReservoirBuffer.get(), m_MegaLightsBlockedLightBuffer.get() },
                 .Execute = [this, tilePoolBufferForBinding, updateStochasticConstants](RHI::IRHICommandList* cmd)
                 {
                     updateStochasticConstants(cmd);
@@ -12541,12 +12685,14 @@ namespace Kurenai
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
 
                     cmd->SetComputeUnorderedAccessBuffer(0, m_MegaLightsReservoirBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(1, m_MegaLightsBlockedLightBuffer.get());
                     cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
                 },
             });
 
             // --- 時間再利用: 前フレームの自分が選んだ灯を再投影して借りる ---
-            // レイは1本も増えない。実効サンプル数がフレーム方向に積み上がるので収束が速くなる
+            // 実効サンプル数がフレーム方向に積み上がるので収束が速くなる。
+            // レイは1本だけ増える(採用した履歴サンプルが今も見えるかを確かめる時間検証レイ)
             if (temporalRuns)
             {
                 graph.AddPass(Core::RenderGraphPassDesc{
@@ -12573,7 +12719,10 @@ namespace Kurenai
                         cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
 
                         // レジスタ割り当てはMegaLightsTemporal.hlsl側の宣言と一致させること。
-                        // このパスもレイを撃たないのでTLASは要らない
+                        // 時間検証レイを撃つのでTLASが要る。
+                        // 【使わないフレームでも必ずバインドする】DX12は宣言された
+                        // リソースが未バインドだと壊れる
+                        cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
                         cmd->SetComputeTexture(1, m_GBufferNormal.get());
                         cmd->SetComputeTexture(2, m_GBufferDepth.get());
                         cmd->SetComputeTexture(3, m_GBufferAlbedo.get());
@@ -12596,10 +12745,21 @@ namespace Kurenai
             }
 
             // --- 空間再利用: 近傍が選んだ灯を借りて自分の面で評価し直す ---
-            // レイは1本も増えない。候補プールの重みが法線を見られないぶんを、
-            // 「選んだあとで隣から借りる」ことで埋め合わせる
-            if (spatialRuns)
+            // 候補プールの重みが法線を見られないぶんを、「選んだあとで隣から借りる」ことで
+            // 埋め合わせる。【レイは増える】目標関数に可視性を入れるために標的ごとに1本、
+            // 不偏化の分母でも可視性が不明な近傍に補正レイを撃つ(MegaLightsSpatial.hlsl 冒頭)。
+            // そのぶん Shade 側の影レイは省ける
+            for (uint32_t spatialIteration = 0u; spatialIteration < spatialIterations; ++spatialIteration)
             {
+                // 1回目の入力は再利用の連鎖の出力、2回目以降は前の反復の出力
+                RHI::IRHIBuffer* const spatialInput =
+                    (spatialIteration == 0u)
+                        ? reuseInputBuffer
+                        : spatialPingPong[(spatialIteration - 1u) % kMegaLightsMaxSpatialIterations];
+                RHI::IRHIBuffer* const spatialOutput =
+                    spatialPingPong[spatialIteration % kMegaLightsMaxSpatialIterations];
+                RHI::IRHIBuffer* const spatialConstants =
+                    m_MegaLightsSpatialConstantBuffer[spatialIteration % kMegaLightsMaxSpatialIterations].get();
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "MegaLightsSpatial",
                     .Reads =
@@ -12607,31 +12767,47 @@ namespace Kurenai
                         m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
                         m_BRDFLUTTexture.get(),
                     },
-                    // 入力は「時間再利用を挟んだならその出力、挟まないならInitialの出力」
-                    .BufferReads = { m_LightBuffer.get(), reuseInputBuffer, m_MegaLightsTilePoolBuffer.get() },
-                    .BufferWrites = { m_MegaLightsReservoirSpatialBuffer.get() },
-                    .Execute = [this, reuseInputBuffer](RHI::IRHICommandList* cmd)
+                    // 入力は「時間再利用を挟んだならその出力、挟まないならInitialの出力」。
+                    // 初期リザーバ(今フレームの殺しの持ち回り)も自画素の遮蔽の確定情報として読む
+                    .BufferReads = { m_LightBuffer.get(), spatialInput, m_MegaLightsTilePoolBuffer.get(),
+                                     m_MegaLightsReservoirBuffer.get(), m_MegaLightsBlockedLightBuffer.get() },
+                    .BufferWrites = { spatialOutput },
+                    .Execute = [this, spatialInput, spatialOutput, spatialConstants, spatialIteration,
+                                buildStochasticConstants](RHI::IRHICommandList* cmd)
                     {
-                        // 定数はInitial側で更新済み(中身はフレーム内で不変)
+                        // 【この定数だけは自分で更新する】反復番号が反復ごとに違うため、
+                        // Initial が更新する共有分は使えない。UpdateBuffer と
+                        // SetConstantBuffer の順序は厳守(逆にすると前フレームの値を読む)
+                        const MegaLightsStochasticConstants iterationConstants =
+                            buildStochasticConstants(spatialIteration);
+                        cmd->UpdateBuffer(spatialConstants, &iterationConstants, sizeof(iterationConstants));
                         cmd->SetComputePipelineState(m_MegaLightsSpatialPipelineState.get());
                         cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
-                        cmd->SetComputeConstantBuffer(1, m_MegaLightsStochasticConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(1, spatialConstants);
                         cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
 
                         // レジスタ割り当てはMegaLightsSpatial.hlsl側の宣言と一致させること。
-                        // このパスもレイを撃たないのでTLASは要らない
+                        // 不偏化の分母(Z)の判定にバイアス補正レイを撃つのでTLASが要る。
+                        // 【使わないフレームでも必ずバインドする】DX12は宣言された
+                        // リソースが未バインドだと壊れる
+                        cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
                         cmd->SetComputeTexture(1, m_GBufferNormal.get());
                         cmd->SetComputeTexture(2, m_GBufferDepth.get());
                         cmd->SetComputeTexture(3, m_GBufferAlbedo.get());
                         cmd->SetComputeTexture(4, m_GBufferMaterial.get());
                         cmd->SetComputeTexture(5, m_BRDFLUTTexture.get());
                         cmd->SetComputeShaderResourceBuffer(6, m_LightBuffer.get());
-                        cmd->SetComputeShaderResourceBuffer(7, reuseInputBuffer);
+                        cmd->SetComputeShaderResourceBuffer(7, spatialInput);
                         // MIS重みが「その灯が隣のタイルへ届くか」を判定するのに、
                         // 候補プールのヘッダ(タイルの深度スラブ)を読む
                         cmd->SetComputeShaderResourceBuffer(8, m_MegaLightsTilePoolBuffer.get());
+                        // 今フレームの初期リザーバ。殺しの持ち回り(=自画素の遮蔽の確定情報)を
+                        // 選択から外すのに使う
+                        cmd->SetComputeShaderResourceBuffer(9, m_MegaLightsReservoirBuffer.get());
+                        // 遮蔽が確定した灯のキャッシュ
+                        cmd->SetComputeShaderResourceBuffer(10, m_MegaLightsBlockedLightBuffer.get());
 
-                        cmd->SetComputeUnorderedAccessBuffer(0, m_MegaLightsReservoirSpatialBuffer.get());
+                        cmd->SetComputeUnorderedAccessBuffer(0, spatialOutput);
                         cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
                     },
                 });
@@ -12684,10 +12860,23 @@ namespace Kurenai
         {
             const uint32_t denoiseWrite = m_MegaLightsDenoiseHistoryIndex;
             const uint32_t denoiseRead = denoiseWrite ^ 1u;
+            // 履歴の妥当性判定に「前フレームの幾何」を使えるか。時間再利用が毎フレーム
+            // 全画素へ書いているガイドで、切っていると更新されないので使えない
+            const bool denoiseGuideValid = m_MegaLightsTemporalEnabled &&
+                                           m_MegaLightsTemporalPipelineState &&
+                                           m_MegaLightsHistoryGuide[0] && m_MegaLightsHistoryValid;
+            // 【読むのは前フレームが書いた側】今フレームの時間再利用はもう片方へ書いている
+            RHI::IRHIBuffer* const denoiseGuideBuffer =
+                m_MegaLightsHistoryGuide[m_MegaLightsHistoryIndex ^ 1u]
+                    ? m_MegaLightsHistoryGuide[m_MegaLightsHistoryIndex ^ 1u].get()
+                    : nullptr;
+            const std::vector<RHI::IRHIBuffer*> denoiseGuideReads =
+                denoiseGuideBuffer ? std::vector<RHI::IRHIBuffer*>{ denoiseGuideBuffer }
+                                   : std::vector<RHI::IRHIBuffer*>{};
             const int atrousPasses = std::clamp(m_MegaLightsDenoiseAtrousPasses, 0, 5);
 
             const auto updateDenoiseConstants =
-                [this](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
+                [this, denoiseGuideValid](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
             {
                 MegaLightsDenoiseConstants denoiseConstants{};
                 denoiseConstants.Params0 = {
@@ -12696,22 +12885,31 @@ namespace Kurenai
                 denoiseConstants.Params1 = {
                     stepWidth,
                     static_cast<float>(std::max(1, m_MegaLightsDenoiseMaxFrames)),
-                    // 輝度のエッジ停止の強さ(SVGFの慣例値4.0)。大きいほど広く混ぜる
-                    4.0f,
+                    // 輝度のエッジ停止の強さ(σ_l)。根拠は EngineDefaults.h の宣言に書いてある
+                    m_MegaLightsDenoiseSigmaLuminance,
                     // 法線のエッジ停止の指数(同128)
                     128.0f,
                 };
-                // 深度のエッジ停止。View空間Zに対する相対差で見るので無次元
-                denoiseConstants.Params2 = { 0.02f, 0.0f, 0.0f, 0.0f };
+                // 深度のエッジ停止(View空間Zに対する相対差なので無次元)と、
+                // ファイアフライの近傍クランプの強さ(近傍平均 + k・標準偏差で頭打ちにする)
+                denoiseConstants.Params2 = {
+                    0.02f, m_MegaLightsDenoiseFireflyClamp, denoiseGuideValid ? 1.0f : 0.0f, 0.0f
+                };
                 cmd->UpdateBuffer(
                     m_MegaLightsDenoiseConstantBuffer.get(), &denoiseConstants, sizeof(denoiseConstants));
             };
 
             // G-Bufferの束縛。**DX12はSetPipelineStateのたびにルート引数を無効化する**ので
             // パスごとに張り直す
-            const auto bindDenoiseCommon = [this](RHI::IRHICommandList* cmd)
+            const auto bindDenoiseCommon = [this, denoiseGuideBuffer](RHI::IRHICommandList* cmd)
             {
                 cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                // 前フレームの幾何。【使わないパスでも必ず張る】DX12はPSO切替でルート引数が
+                // 無効化されるため、宣言したリソースが未バインドだと壊れる
+                if (denoiseGuideBuffer)
+                {
+                    cmd->SetComputeShaderResourceBuffer(0, denoiseGuideBuffer);
+                }
                 cmd->SetComputeConstantBuffer(1, m_MegaLightsDenoiseConstantBuffer.get());
                 cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
                 cmd->SetComputeTexture(1, m_GBufferNormal.get());
@@ -12740,6 +12938,9 @@ namespace Kurenai
                     m_MegaLightsDenoiseHistory[denoiseWrite].get(),
                     m_MegaLightsDenoiseMoments[denoiseWrite].get(),
                 },
+                // 前フレームの幾何は「前フレームが書いた側」なので今フレームに書き手はいない。
+                // 辺は張れないが、ping-pongで別バッファになっているので衝突しない
+                .BufferReads = denoiseGuideReads,
                 .Execute =
                     [this, denoiseRead, denoiseWrite, updateDenoiseConstants,
                      bindDenoiseCommon](RHI::IRHICommandList* cmd)

@@ -1222,6 +1222,25 @@ namespace KurenaiPacker
             outMesh.EmissiveFactor[1] = emissiveColor.g;
             outMesh.EmissiveFactor[2] = emissiveColor.b;
 
+            // --emissive <マテリアル名>=<R,G,B>。Keを持たないアセット(Bistro屋外は
+            // 132マテリアル全部のKeが0)では、照明器具のジオメトリがあっても
+            // EmissiveFactorが0のままで、自発光テクスチャを持つマテリアルすら光らない。
+            // 名前が一致したマテリアルにだけ係数を与える
+            if (!materialOverride.Emissive.empty())
+            {
+                aiString materialName;
+                if (material->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS)
+                {
+                    const auto found = materialOverride.Emissive.find(materialName.C_Str());
+                    if (found != materialOverride.Emissive.end())
+                    {
+                        outMesh.EmissiveFactor[0] = found->second[0];
+                        outMesh.EmissiveFactor[1] = found->second[1];
+                        outMesh.EmissiveFactor[2] = found->second[2];
+                    }
+                }
+            }
+
             // glTFのpbrMetallicRoughness.baseColorFactor(既定[1,1,1,1])。テクスチャを持たず
             // baseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等)を正しく再現するために
             // 読み取る。取得できない場合(FBX/OBJ等、AI_MATKEY_BASE_COLORはglTF専用のため常に失敗する)は
