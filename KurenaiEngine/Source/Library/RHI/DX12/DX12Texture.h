@@ -40,6 +40,24 @@ namespace Kurenai::RHI
         uint32_t ResidentFirstMip = 0;
     };
 
+    // IRHIDevice::CreateReadbackTextureで作られたテクスチャの、CPUから読むための状態。
+    // 通常のテクスチャは持たない(unique_ptrがnullptrのまま)ので、非リードバック経路の負担はゼロ
+    // (DX12TiledTextureStateとまったく同じ持たせ方)
+    struct DX12ReadbackState
+    {
+        // 【READBACKヒープの実体はバッファ】D3D12はREADBACKヒープにテクスチャを置けないため、
+        // GetCopyableFootprintsが返す配置情報つきのバッファとして確保し、
+        // CopyTextureRegionでテクスチャ→バッファのコピーを行う。
+        // RowPitchは256バイト境界へ切り上げられており、行の末尾に詰め物が入る
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT Footprint{};
+        // 作成時から永続マップしている(DX12Bufferのリードバックバッファと同じ扱い)
+        void* MappedPtr = nullptr;
+        // このバッファ全体のバイト数(GetCopyableFootprintsのtotalBytes)
+        uint64_t BufferSizeInBytes = 0;
+        // 呼び出し側へ返す「中身の形」。パディングを剥がしたあとの姿を表す
+        TextureReadbackDesc Desc{};
+    };
+
     // リソース本体に加え、現在のリソース状態(バリア用)とSRV/RTV/DSVの各ディスクリプタインデックスを保持する。
     // RTV/DSVを持たない場合はkInvalidを格納する
     class DX12Texture : public IRHITexture
@@ -63,6 +81,15 @@ namespace Kurenai::RHI
             std::vector<uint32_t> mipUavIndices = {},
             std::vector<uint32_t> sliceDsvIndices = {},
             uint32_t cubeCount = 1);
+
+        // リードバック用テクスチャ専用のコンストラクタ(DX12Device::CreateReadbackTextureが使う)。
+        // 実体はREADBACKヒープのバッファで、ビューもディスクリプタも一切持たない。
+        // 通常のコンストラクタが呼ぶCaptureDimensionsFromResourceは、バッファリソースに対しては
+        // Width=バイト数・Height=1を返してしまうため、こちらはFootprintから寸法を入れる
+        DX12Texture(
+            Microsoft::WRL::ComPtr<ID3D12Resource> readbackResource,
+            std::unique_ptr<DX12ReadbackState> readbackState);
+
         ~DX12Texture() override;
 
         ID3D12Resource* GetResource() const { return m_Resource.Get(); }
@@ -101,6 +128,15 @@ namespace Kurenai::RHI
         uint32_t GetWidth() const override { return m_Width; }
         uint32_t GetHeight() const override { return m_Height; }
         uint32_t GetMipLevels() const override { return m_MipLevels; }
+
+        void SetDebugName(const char* name) override;
+
+        // リードバック用テクスチャとして作られているか(DX12Buffer::IsReadbackと同じ役割)
+        bool IsReadback() const { return m_Readback != nullptr; }
+        const DX12ReadbackState* GetReadbackState() const { return m_Readback.get(); }
+
+        TextureReadbackDesc GetReadbackDesc(uint32_t mipLevel = 0) const override;
+        bool ReadbackData(void* outData, uint32_t sizeInBytes) override;
 
         // このテクスチャのSRVが確保されている非シェーダー可視ヒープと、その中の番号。
         // DX12Device::ReplaceTextureContentsが「同じ番号のディスクリプタを作り直す」ために引く
@@ -155,6 +191,8 @@ namespace Kurenai::RHI
         uint32_t m_BindlessIndex = kInvalidBindlessIndex;
         // タイルリソースとして作られている場合のみ非nullptr(通常のテクスチャは持たない)
         std::unique_ptr<DX12TiledTextureState> m_Tiled;
+        // リードバック用として作られている場合のみ非nullptr(通常のテクスチャは持たない)
+        std::unique_ptr<DX12ReadbackState> m_Readback;
     };
 
     // DX12Device::PrepareTextureContentsが作り、CommitTextureContentsが消費する中間物。

@@ -382,6 +382,8 @@ namespace Kurenai::Assets
             std::wstring DroneShowPath;
             bool HasDroneShowCenter = false;         float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };
             bool HasDroneShowScale = false;          float DroneShowScale = 130.0f;
+            bool HasDroneShowCastLight = false;      bool  DroneShowCastLight = false;
+            bool HasDroneShowCastLightScale = false; float DroneShowCastLightScale = 1.0f;
 
             std::vector<ParsedLightEntry> Lights;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
@@ -1266,6 +1268,19 @@ namespace Kurenai::Assets
                     {
                         readFloat(result.DroneShowScale, result.HasDroneShowScale, 1.0f, 5000.0f, L"Scale");
                     }
+                    else if (CaseInsensitiveEquals(key, L"CastLight"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "CastLightの値はtrue/falseで指定してください");
+                        result.DroneShowCastLight = *parsedValue;
+                        result.HasDroneShowCastLight = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CastLightScale"))
+                    {
+                        readFloat(
+                            result.DroneShowCastLightScale, result.HasDroneShowCastLightScale,
+                            0.0f, 1000.0f, L"CastLightScale");
+                    }
                     else
                     {
                         warnUnknownKey();
@@ -1419,6 +1434,9 @@ namespace Kurenai::Assets
         scene.DroneShowCenter[1] = parsed.DroneShowCenter[1];
         scene.DroneShowCenter[2] = parsed.DroneShowCenter[2];
         scene.HasDroneShowScale = parsed.HasDroneShowScale;             scene.DroneShowScale = parsed.DroneShowScale;
+        scene.HasDroneShowCastLight = parsed.HasDroneShowCastLight;     scene.DroneShowCastLight = parsed.DroneShowCastLight;
+        scene.HasDroneShowCastLightScale = parsed.HasDroneShowCastLightScale;
+        scene.DroneShowCastLightScale = parsed.DroneShowCastLightScale;
         scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;

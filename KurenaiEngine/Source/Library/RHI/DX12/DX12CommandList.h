@@ -61,6 +61,8 @@ namespace Kurenai::RHI
             uint32_t countOffsetInBytes) override;
         void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) override;
         void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
+        void CopyTextureToReadback(
+            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel = 0, uint32_t arraySlice = 0) override;
 
     private:
         static constexpr uint32_t kMaxRenderTargets = 8;

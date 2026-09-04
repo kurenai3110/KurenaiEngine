@@ -298,5 +298,20 @@ namespace Kurenai::RHI
         // srcはコピー元として読める状態へ遷移させる(DX12)。dstがBufferUsage::Readbackでない、
         // サイズが足りない、いずれかがnullptrならログを出して何もしない
         virtual void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) = 0;
+
+        // テクスチャの1サブリソースを、IRHIDevice::CreateReadbackTextureで作った受け皿へ写す。
+        // 実際にCPUから読むのは IRHITexture::ReadbackData で、**数フレーム後に行うこと**。
+        // 約束はCopyBufferToReadbackとまったく同じ(ここでGPUの完了を待ってはいけない)。
+        //
+        // arraySliceは配列テクスチャのスライス番号。キューブマップは6面の配列として扱われるので
+        // face = arraySlice % 6、キューブ配列は cubeIndex = arraySlice / 6 で選ぶ
+        // (DX12Texture::GetCubeUavCpuHandleのフラット添字と同じ規約。専用の引数は持たない)。
+        //
+        // srcはコピー元として読める状態へ遷移させる(DX12)。DX11ではレンダーターゲット/深度として
+        // 出力に張られたままのリソースをコピー元にできないため、張られていれば外す。
+        // dstがリードバック用でない、寸法やフォーマットが食い違う、いずれかがnullptrの場合は
+        // ログを出して何もしない
+        virtual void CopyTextureToReadback(
+            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel = 0, uint32_t arraySlice = 0) = 0;
     };
 }

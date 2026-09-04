@@ -187,6 +187,21 @@ namespace Kurenai::RHI
         // clearDepthの意味はCreateDepthTextureと同じ
         virtual std::unique_ptr<IRHITexture> CreateDepthTextureArray(
             uint32_t width, uint32_t height, uint32_t arraySize, float clearDepth = 1.0f) = 0;
+
+        // GPUが描いたテクスチャの中身をCPUで読むための受け皿を作る。
+        // sourceのmipLevel段と同じ寸法・同じフォーマットを持ち、ビュー(SRV/RTV/DSV/UAV)は
+        // 一切持たない。IRHICommandList::CopyTextureToReadbackでコピーを積み、
+        // **数フレーム後に** IRHITexture::ReadbackDataで読む。
+        //
+        // 【なぜFormatではなくsourceを渡すのか】深度テクスチャはR32_TYPELESSで作られており、
+        // RHIEnums.hのFormat enumでは表せない。sourceからリソース記述子を引く形にすれば、
+        // 呼び出し側が「そのテクスチャが内部で何のDXGI_FORMATか」を知らなくてよくなる。
+        //
+        // 【配列・キューブは1スライスぶん】受け皿は常に1サブリソースぶんの大きさになる。
+        // どのスライスを写すかはCopyTextureToReadback側で選ぶ。
+        // Texture3D・BC圧縮テクスチャは非対応で、ログを出してnullptrを返す
+        // (半端に対応して静かに誤った値を返すより、はっきり断るほうがよい)
+        virtual std::unique_ptr<IRHITexture> CreateReadbackTexture(IRHITexture* source, uint32_t mipLevel = 0) = 0;
         // 1パスがまとめてバインドするサンプラーの組を作る。descs[i]がレジスタs(i)に対応する。
         // countがバックエンドのスロット数(DX12のkSamplerSlotCount)に満たない場合、残りのスロットは
         // 既定のサンプラーで埋められる(DX12は未初期化のディスクリプタがテーブルに含まれると動作が未定義になるため)。

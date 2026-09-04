@@ -29,6 +29,13 @@
 #pragma warning(push)
 #pragma warning(disable: 4251)
 
+namespace Kurenai::Core
+{
+    // IssueTextureDumpsの引数にだけ使う。RenderGraph.hはRHIのヘッダ群を芋づるで引き込むため、
+    // このヘッダをインクルードする側(UIパネル・Sample3D)へ広げないよう前方宣言で済ませる
+    class RenderGraph;
+}
+
 namespace Kurenai::UI
 {
     class UIManager;
@@ -250,6 +257,37 @@ namespace Kurenai
         void SetTAAEnabled(bool enabled);
 
         void SetPerfDump(const wchar_t* path, int frames);
+
+        // 【検証専用】中間レンダーターゲットの中身を、線形の生値のままファイルへ書き出す。
+        // nameは GetDumpableTextureNames() が返す名前(m_を外したメンバ名)。
+        //
+        // 【何のためにあるのか】「コンパイルは通るが絵が違う」を切り分ける唯一の数値経路。
+        // 画面から採れるのは8bit・トーンマップ後で、G-Bufferの法線も深度も間接光も、
+        // 表示のために加工された姿しか見られない。**加工前の値を数えられないと、
+        // 「壊れている」と「そう見えるだけ」を区別できない。**
+        // SetMegaLightsDumpPathが MegaLights の蓄積バッファ専用に用意した経路を、
+        // 任意のレンダーターゲットへ一般化したもの。
+        //
+        // 複数回呼べば1回の起動で複数枚を同じフレームから落とす(GUIの起動は共有資源なので、
+        // 1回の起動で必要な数値が全部取れる形にすること)。
+        // 未知の名前・存在しないテクスチャ・非対応フォーマットはログを出して無視する
+        void AddTextureDump(const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice);
+
+        // 何フレーム目のものを書き出すか。負なら既定(kMegaLightsAccumWarmup)。
+        // **整定を待たずに撮ると、内部解像度が既定値のままの絵を掴む**(実際に起きた)
+        void SetTextureDumpFrame(int frame);
+
+        // 書き出しが全部終わったらウィンドウを閉じる。無人での検証用
+        void SetExitAfterDump(bool enabled);
+
+        // TAAの有無を起動時に上書きするのは SetTAAEnabled(上で宣言済み)。
+        // ダンプの比較では、まずこれを切って再現性の下限をゼロにする ――
+        // TAAのジッタは投影行列を毎フレームずらすため、同じ条件で2回撮っても
+        // ダンプがビット一致しない
+
+        // -dumptex が受け付けるテクスチャ名の一覧(表示・ログ用)。
+        // ClaudeのようなUIを見られない利用者にとって、これが唯一の発見手段になる
+        std::vector<std::string> GetDumpableTextureNames() const;
 
         // デノイザの有無、a-trousの段数、時間累積の上限。負/0は既定のまま
         void SetMegaLightsDenoise(int enabled, int atrousPasses, int maxFrames);
@@ -1179,6 +1217,9 @@ namespace Kurenai
         // (m_LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
         //  パスの中で更新すると先に走る側が未更新の内容を読む)
         std::vector<GPUDrone> m_DroneInstances;
+        // 機体を光源として送るときの、間引いた灯。毎フレームDroneShow::BuildLightSamplesが書き、
+        // gpuLightsの組み立てで手置きライト・エミッシブプロキシの後ろへ連結する
+        std::vector<DroneLightSample> m_DroneLightSamples;
         // 再生器。編隊の点そのものはここが持つ(.kshowから読み込む)
         DroneShow m_DroneShow;
 
@@ -1199,6 +1240,20 @@ namespace Kurenai
         // 【これだけはシーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
         // 「1画素を割ったらちらつく」という事実はどのシーン・どのショーでも変わらないため
         float m_DroneShowMinScreenRadius = Defaults::DroneShowMinScreenRadius;
+        // 機体を光源としても送るか。シーンが決める(「出すか」の一種)
+        bool m_DroneShowCastLight = Defaults::DroneShowCastLight;
+        // 灯の明るさの倍率。1.0がスプライトから導いた物理的な値で、演出用にシーンが上げられる
+        float m_DroneShowCastLightScale = Defaults::DroneShowCastLightScale;
+        // 光源として送る灯の数と、Rangeを逆算する打ち切り照度[lx]。
+        // 【これらもシーンにもショーにも持たせない】MinScreenRadiusと同じで、
+        // タイルライトカリングの容量という描画側の事情で決まる値だから
+        int m_DroneShowLightSampleCount = Defaults::DroneShowLightSampleCount;
+        float m_DroneShowLightCutoffLux = Defaults::DroneShowLightCutoffLux;
+        // 実際に送った灯の数。ログとUIの表示用
+        uint32_t m_DroneShowLightUsedCount = 0;
+        // 容量超過の警告と実効値ログを、それぞれ1回だけ出すためのフラグ
+        bool m_DroneShowLightTileOverflowLogged = false;
+        bool m_DroneShowLightValuesLogged = false;
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
@@ -1556,6 +1611,66 @@ namespace Kurenai
         // パス名 -> 合計時間[ms]。同じ名前のパスが1フレームに複数あるぶんも足し込む
         // (a-trousは段の数だけ同名で登録される。**合計が知りたいので足すのが正しい**)
         std::map<std::string, double> m_PerfDumpTotals;
+
+        // --- 中間レンダーターゲットの生値ダンプ(検証専用。AddTextureDump) ---
+        // 名前 -> テクスチャ の対応表。CreateRenderTargetsでテクスチャを増やしたら
+        // BuildDumpableTextureTableにも足すこと(表の実体はそちらのコメントを参照)
+        struct DumpableTexture
+        {
+            const char* Name = nullptr;
+            RHI::IRHITexture* Texture = nullptr;
+        };
+        // 【毎回作り直す】レンダーターゲットはリサイズやバッファ精度の切り替えで
+        // ポインタごと作り直される。キャッシュすると解放済みのテクスチャを指す
+        std::vector<DumpableTexture> BuildDumpableTextureTable() const;
+
+        // 上の表の名前を、グラフィックスデバッガ向けの名前としてテクスチャへ焼く。
+        //
+        // 【-dumptex と同じ表を使うのが要点】RenderDocのキャプチャ上の名前と
+        // `-dumptex <名前>` の名前が同じ文字列になるので、2つの経路で同じものを見ていることが
+        // 名前だけで分かる。表を1つにしておけば、テクスチャを増やしたときの追従先も1箇所で済む
+        void ApplyDebugNames() const;
+        // 名前を焼き直す必要があるか。レンダーターゲットを作り直すと立てる。
+        // **毎フレーム焼かない** —— 43本のSetNameを60回/秒で呼ぶ意味がない
+        bool m_DebugNamesDirty = true;
+
+        struct TextureDumpRequest
+        {
+            std::string Name; // 表の名前(ファイルのヘッダにも書く)
+            std::wstring Path;
+            uint32_t MipLevel = 0;
+            uint32_t ArraySlice = 0;
+            // 受け皿。m_DeviceはKurenaiEngineBase(基底)のメンバで、派生クラスのメンバは
+            // 基底より先に破棄されるため、デバイスより後に解放される心配は無い
+            // (m_MegaLightsAccumReadbackが同じ場所に置かれているのと同じ理由)
+            std::unique_ptr<RHI::IRHITexture> Readback;
+            RHI::TextureReadbackDesc Desc{};
+            // コピーを積んだフレーム番号。GPUの実行はCPUより数フレーム遅れるので、
+            // 積んだ直後に読んではいけない(IRHICommandList::CopyTextureToReadback のコメント)
+            uint32_t CopyFrame = 0;
+            bool Issued = false;
+            bool Done = false;
+            // 読み戻しに失敗し続けたフレーム数。**無人実行が静かに固まるのを防ぐための打ち切り用**
+            uint32_t FailedFrames = 0;
+        };
+        std::vector<TextureDumpRequest> m_TextureDumps;
+        // 何フレーム目で撮るか。負なら kMegaLightsAccumWarmup を使う
+        // (新しい定数を作らないのは、あちらのコメントに書かれた「整定を待つ理由」が
+        //  そのまま当てはまり、値が2つに割れると片方だけ直す事故が起きるため)
+        int32_t m_TextureDumpFrame = -1;
+        bool m_ExitAfterDump = false;
+        bool m_ExitAfterDumpRequested = false;
+        // 読み戻しを何フレーム失敗し続けたら諦めるか。DX11のMap(DO_NOT_WAIT)は
+        // GPUが詰まっていると何度も失敗しうるので、1フレームで諦めてはいけない
+        static constexpr uint32_t kTextureDumpMaxFailedFrames = 60;
+        // コピーを積んでから読むまでに空けるフレーム数(MegaLightsのダンプと同じ値)
+        static constexpr uint32_t kTextureDumpReadDelayFrames = 5;
+
+        // ダンプの発行(コピーを積む)と、読み戻し・ファイル書き出し。Render()から呼ぶ
+        void IssueTextureDumps(Core::RenderGraph& graph);
+        void ResolveTextureDumps();
+        // 1件ぶんをファイルへ書く。書けたらtrue
+        bool WriteTextureDumpFile(const TextureDumpRequest& request, const std::vector<uint8_t>& pixels) const;
 
         // --- 雲(低解像度の専用パス) ---
         // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを

@@ -8,6 +8,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -508,8 +509,12 @@ namespace Kurenai
             // xyz=いま焼いているプローブのワールド座標、w=処理対象の面(D3Dのキューブ標準順)
             DirectX::XMFLOAT4 Params0;
             // x=キャプチャキューブの1面の解像度、y=エミッシブ強度(ラスタ経路のObjectConstantsへ
-            // 掛かっているのと同じ倍率)、z=太陽の影レイを撃つか(0/1。対照実験用)、w=未使用
+            // 掛かっているのと同じ倍率)、z=太陽の影レイを撃つか(0/1。対照実験用)、
+            // w=プロキシとして起こされたマテリアルの自発光倍率(0で抑止)
             DirectX::XMFLOAT4 Params1;
+            // x=このパスが舐めるライトの数。b0のFrameConstants.ActiveLightCountはメイン描画と
+            // 共有していて差し替えられないため、ここで別に渡す(ドローンの灯を外すため)。yzw=未使用
+            DirectX::XMFLOAT4 Params2;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -5025,11 +5030,496 @@ namespace Kurenai
         m_TAAHistoryValid = false;
         m_TAAHistoryIndex = 0;
 
+        // ポインタが作り直されたので、グラフィックスデバッガ向けの名前を焼き直す
+        m_DebugNamesDirty = true;
+
         // A/B比較の記録用。どちらの構成で描かれたスクリーンショットなのかをログから追えるようにする
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("レンダーターゲットを作成しました (") + std::to_string(width) + "x" + std::to_string(height) +
                 ", バッファ精度=" + (legacyPrecision ? "Legacy8bit" : "HDR") + ")");
+    }
+
+    std::vector<KurenaiEngine3D::DumpableTexture> KurenaiEngine3D::BuildDumpableTextureTable() const
+    {
+        // 名前 -> 中間テクスチャ。AddTextureDump(起動オプション -dumptex)が引く。
+        //
+        // 【DebugViewの番号と共有しない】あちらは「表示モード」でテクスチャと1対1ではない
+        // (DepthとDepthRawは同じm_GBufferDepth、LightTilesはテクスチャではなくバッファを読む)。
+        // さらに切り分けで見たいもの ―― SSILRaw / TransmittanceLUT / TAAHistory / ExposureTexture ――
+        // はDebugViewに存在せず、足すにはPresent.hlslの表示モードを増やすことになる。
+        // 加えてDebugViewの番号は -debugview N として既に契約になっており、
+        // 途中に足すとdocsと履歴に記録済みの番号が全部ずれる。
+        //
+        // 【CreateRenderTargetsの直後に置いてある】ポインタが生まれる場所の隣なら、
+        // テクスチャを増やしたときにここへ足し忘れにくい。
+        // **CreateRenderTargets等でテクスチャを増やしたらここにも足すこと。**
+        //
+        // 名前はメンバ名から m_ を外したもの。中身がnullptr(機能が無効・非対応環境)の
+        // エントリも表には載せる ―― 「名前が無い」と「今は作られていない」は別のことで、
+        // 呼び出し側にそれぞれ別のログを出させるため
+        return {
+            // G-Buffer
+            { "GBufferAlbedo", m_GBufferAlbedo.get() },
+            { "GBufferNormal", m_GBufferNormal.get() },
+            { "GBufferMaterial", m_GBufferMaterial.get() },
+            { "GBufferEmissive", m_GBufferEmissive.get() },
+            { "GBufferDepth", m_GBufferDepth.get() },
+            { "GBufferVelocity", m_GBufferVelocity.get() },
+            { "GBufferBentNormal", m_GBufferBentNormal.get() },
+            // ライティングと間接光
+            { "DirectLightTexture", m_DirectLightTexture.get() },
+            { "SSAORawTexture", m_SSAORawTexture.get() },
+            { "SSAOTexture", m_SSAOTexture.get() },
+            { "SSILRawTexture", m_SSILRawTexture.get() },
+            { "SSILTexture", m_SSILTexture.get() },
+            { "RTAORawTexture", m_RTAORawTexture.get() },
+            { "RTAOTexture", m_RTAOTexture.get() },
+            { "RTShadowTexture", m_RTShadowTexture.get() },
+            { "SceneColor", m_SceneColor.get() },
+            // 反射
+            { "SSRTexture", m_SSRTexture.get() },
+            { "RTReflectionTexture", m_RTReflectionTexture.get() },
+            { "PlanarReflectionColor", m_PlanarReflectionColor.get() },
+            { "PlanarReflectionDepth", m_PlanarReflectionDepth.get() },
+            // MegaLights
+            { "MegaLightsTexture", m_MegaLightsTexture.get() },
+            { "MegaLightsDenoisedTexture", m_MegaLightsDenoisedTexture.get() },
+            // 影・Hi-Z
+            { "ShadowCascadeArray", m_ShadowCascadeArray.get() },
+            { "HiZTexture", m_HiZTexture.get() },
+            // 空と大気
+            { "SkyCloudTexture", m_SkyCloudTexture.get() },
+            { "AerialPerspectiveTexture", m_AerialPerspectiveTexture.get() },
+            { "TransmittanceLUT", m_TransmittanceLUT.get() },
+            { "MultiScatteringLUT", m_MultiScatteringLUT.get() },
+            { "SkyViewLUT", m_SkyViewLUT.get() },
+            // DDGI
+            { "DDGIIrradianceAtlas", m_DDGIIrradianceAtlas.get() },
+            { "DDGIDistanceAtlas", m_DDGIDistanceAtlas.get() },
+            { "DDGIResolveTexture", m_DDGIResolveTexture.get() },
+            { "DDGIResolveDepthTexture", m_DDGIResolveDepthTexture.get() },
+            // IBL
+            { "BRDFLUTTexture", m_BRDFLUTTexture.get() },
+            // ポストプロセスと最終段
+            { "TonemapTexture", m_TonemapTexture.get() },
+            { "UpscaleTexture", m_UpscaleTexture.get() },
+            { "UpscaleSharpTexture", m_UpscaleSharpTexture.get() },
+            { "ExposureTexture", m_ExposureTexture.get() },
+            // TAAの履歴。今フレームの書き込み先が m_TAAHistoryIndex なので、
+            // 「前フレームの履歴」を見たいときは Prev のほうを指定する
+            { "TAAHistory", m_TAAHistory[m_TAAHistoryIndex].get() },
+            { "TAAHistoryPrev", m_TAAHistory[m_TAAHistoryIndex ^ 1u].get() },
+            // 自前ソフトウェアラスタライザ
+            { "SoftwareRasterColor", m_SoftwareRasterColor.get() },
+            { "SoftwareRasterDepth", m_SoftwareRasterDepth.get() },
+            { "SoftwareRasterNormal", m_SoftwareRasterNormal.get() },
+        };
+    }
+
+    void KurenaiEngine3D::ApplyDebugNames() const
+    {
+        uint32_t named = 0;
+        for (const DumpableTexture& entry : BuildDumpableTextureTable())
+        {
+            if (entry.Texture != nullptr)
+            {
+                entry.Texture->SetDebugName(entry.Name);
+                ++named;
+            }
+        }
+        // 何本に名前が付いたかを残す。**「名前が出ない」ときに、付け忘れなのか
+        // その機能が無効でテクスチャ自体が無いのかを、ログだけで切り分けられるようにする**
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "グラフィックスデバッガ向けの名前を付けました: " + std::to_string(named) + "本");
+    }
+
+    std::vector<std::string> KurenaiEngine3D::GetDumpableTextureNames() const
+    {
+        std::vector<std::string> names;
+        for (const DumpableTexture& entry : BuildDumpableTextureTable())
+        {
+            names.emplace_back(entry.Name);
+        }
+        return names;
+    }
+
+    void KurenaiEngine3D::AddTextureDump(const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice)
+    {
+        if (name == nullptr || path == nullptr || name[0] == L'\0' || path[0] == L'\0')
+        {
+            Core::Logger::Error("KurenaiEngine3D", "AddTextureDump: テクスチャ名か出力先が空です");
+            return;
+        }
+
+        TextureDumpRequest request;
+        request.Name = Core::WideToUtf8(name);
+        request.Path = path;
+        request.MipLevel = mipLevel > 0 ? static_cast<uint32_t>(mipLevel) : 0u;
+        request.ArraySlice = arraySlice > 0 ? static_cast<uint32_t>(arraySlice) : 0u;
+        m_TextureDumps.push_back(std::move(request));
+
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "テクスチャの書き出しを予約しました: " + m_TextureDumps.back().Name + " -> " +
+                Core::WideToUtf8(path) + " (mip=" + std::to_string(m_TextureDumps.back().MipLevel) +
+                ", slice=" + std::to_string(m_TextureDumps.back().ArraySlice) + ")");
+    }
+
+    void KurenaiEngine3D::SetTextureDumpFrame(int frame)
+    {
+        m_TextureDumpFrame = frame;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "テクスチャを書き出すフレームを設定しました: " +
+                (frame < 0 ? std::string("既定(") + std::to_string(kMegaLightsAccumWarmup) + ")"
+                           : std::to_string(frame)));
+    }
+
+    void KurenaiEngine3D::SetExitAfterDump(bool enabled)
+    {
+        m_ExitAfterDump = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("書き出し後の自動終了: ") + (enabled ? "有効" : "無効"));
+    }
+
+    void KurenaiEngine3D::IssueTextureDumps(Core::RenderGraph& graph)
+    {
+        if (m_TextureDumps.empty())
+        {
+            return;
+        }
+
+        // 【整定を待つ】起動直後は内部解像度が既定値(1280x720)から実ウィンドウサイズへ切り替わり、
+        // ストリーミングも走っている。待たずに書き出すと1280x720のまま吐き出される
+        // (kMegaLightsAccumWarmupのコメントに、実際にそうなった記録がある)
+        const uint32_t targetFrame =
+            m_TextureDumpFrame >= 0 ? static_cast<uint32_t>(m_TextureDumpFrame) : kMegaLightsAccumWarmup;
+        if (m_TAAFrameIndex < targetFrame)
+        {
+            return;
+        }
+
+        // 【表は毎回作り直す】レンダーターゲットはリサイズやバッファ精度の切り替えで
+        // ポインタごと作り直される。キャッシュすると解放済みのテクスチャを指す
+        const std::vector<DumpableTexture> table = BuildDumpableTextureTable();
+
+        // このフレームでコピーを積むぶん。要求ごとにコピー元を覚えておく
+        struct PendingCopy
+        {
+            size_t RequestIndex = 0;
+            RHI::IRHITexture* Source = nullptr;
+        };
+        std::vector<PendingCopy> pending;
+        std::vector<RHI::IRHITexture*> reads;
+
+        for (size_t i = 0; i < m_TextureDumps.size(); ++i)
+        {
+            TextureDumpRequest& request = m_TextureDumps[i];
+            if (request.Issued || request.Done)
+            {
+                continue;
+            }
+
+            const DumpableTexture* found = nullptr;
+            for (const DumpableTexture& entry : table)
+            {
+                if (_stricmp(entry.Name, request.Name.c_str()) == 0)
+                {
+                    found = &entry;
+                    break;
+                }
+            }
+
+            if (found == nullptr)
+            {
+                // 【有効な名前を全部並べる】UIを見られない利用者にとって、
+                // これが「何が指定できるか」を知る唯一の手段になる
+                std::string names;
+                for (const DumpableTexture& entry : table)
+                {
+                    if (!names.empty())
+                    {
+                        names += ", ";
+                    }
+                    names += entry.Name;
+                }
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "テクスチャの書き出し: 名前が見つかりません: " + request.Name + " / 指定できる名前: " + names);
+                request.Done = true;
+                continue;
+            }
+
+            if (found->Texture == nullptr)
+            {
+                // 名前はあるが、その機能が無効か非対応環境。**「名前が無い」とは別のログにする**
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "テクスチャの書き出し: " + request.Name +
+                        " は今このフレームでは作られていません(機能が無効か、非対応の環境)。書き出しを中止します");
+                request.Done = true;
+                continue;
+            }
+
+            request.Readback = m_Device->CreateReadbackTexture(found->Texture, request.MipLevel);
+            if (!request.Readback)
+            {
+                // CreateReadbackTextureが理由をログへ出している(非対応フォーマット・範囲外のミップ等)
+                Core::Logger::Error(
+                    "KurenaiEngine3D", "テクスチャの書き出し: 受け皿を作れませんでした: " + request.Name);
+                request.Done = true;
+                continue;
+            }
+
+            // 【寸法は今ここで控える】あとで生ポインタから引き直すと、その間にリサイズが起きた場合に
+            // 受け皿の中身と食い違う値をヘッダへ書いてしまう
+            request.Desc = request.Readback->GetReadbackDesc(0);
+            request.Issued = true;
+            request.CopyFrame = m_TAAFrameIndex;
+
+            pending.push_back(PendingCopy{ i, found->Texture });
+            reads.push_back(found->Texture);
+        }
+
+        if (pending.empty())
+        {
+            return;
+        }
+
+        // 【Readsだけを持つパス】書き手より後に順序付けるためにReadsへ入れる。
+        // Writesを持たないので新たな循環依存は作らない(MegaLightsDumpと同じ形)
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "TextureDump",
+            .Reads = std::move(reads),
+            .Execute = [this, pending](RHI::IRHICommandList* cmd)
+            {
+                for (const PendingCopy& copy : pending)
+                {
+                    TextureDumpRequest& request = m_TextureDumps[copy.RequestIndex];
+                    cmd->CopyTextureToReadback(
+                        request.Readback.get(), copy.Source, request.MipLevel, request.ArraySlice);
+                }
+            },
+        });
+    }
+
+    void KurenaiEngine3D::ResolveTextureDumps()
+    {
+        if (m_TextureDumps.empty())
+        {
+            return;
+        }
+
+        bool allDone = true;
+        for (TextureDumpRequest& request : m_TextureDumps)
+        {
+            if (request.Done)
+            {
+                continue;
+            }
+            if (!request.Issued)
+            {
+                allDone = false;
+                continue;
+            }
+
+            // 【積んだ直後に読まない】GPUの実行はCPUより数フレーム遅れる。
+            // 待ちが足りないとエラーにならず、静かに古い/未初期化の中身が返る
+            if (m_TAAFrameIndex - request.CopyFrame < kTextureDumpReadDelayFrames)
+            {
+                allDone = false;
+                continue;
+            }
+
+            const uint32_t rowPitch = request.Desc.Width * request.Desc.BytesPerTexel;
+            const size_t totalBytes = static_cast<size_t>(rowPitch) * request.Desc.Height;
+            if (totalBytes == 0)
+            {
+                Core::Logger::Error(
+                    "KurenaiEngine3D", "テクスチャの書き出し: 中身のサイズが0です: " + request.Name);
+                request.Done = true;
+                continue;
+            }
+
+            std::vector<uint8_t> pixels(totalBytes);
+            if (!request.Readback->ReadbackData(pixels.data(), static_cast<uint32_t>(totalBytes)))
+            {
+                // DX11のMap(DO_NOT_WAIT)はGPUが詰まっていると失敗する。**1回で諦めない**が、
+                // 永遠に待ってもいけない ―― -exitafterdump と組み合わせた無人実行が
+                // 静かに固まるのが最悪の失敗なので、上限を決めて打ち切る
+                ++request.FailedFrames;
+                if (request.FailedFrames >= kTextureDumpMaxFailedFrames)
+                {
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "テクスチャの書き出し: " + std::to_string(kTextureDumpMaxFailedFrames) +
+                            "フレーム続けて読み戻せませんでした。中止します: " + request.Name);
+                    request.Done = true;
+                }
+                else
+                {
+                    allDone = false;
+                }
+                continue;
+            }
+
+            WriteTextureDumpFile(request, pixels);
+            request.Done = true;
+            // 受け皿はもう要らない。数十MBになることがあるので抱え続けない
+            request.Readback.reset();
+        }
+
+        if (allDone && m_ExitAfterDump && !m_ExitAfterDumpRequested)
+        {
+            m_ExitAfterDumpRequested = true;
+            if (m_Window)
+            {
+                // 【PostQuitMessageではない】あれは**呼び出したスレッドの**キューへWM_QUITを積む。
+                // ここはRenderスレッドで、メッセージを汲むのはUpdateスレッド(Run()のPumpMessages)
+                // なので、Renderスレッドから呼んでも誰も拾わず永久に終わらない。
+                // PostMessageWはスレッド安全にウィンドウのキューへ積める。
+                // WM_CLOSEはWindow::HandleMessageがm_ShouldClose=trueにするだけなので、
+                // Run()のループが正規の手順で抜ける(スレッドの停止も後始末も普段どおり走る)
+                Core::Logger::Info("KurenaiEngine3D", "テクスチャの書き出しが完了したので終了します");
+                PostMessageW(m_Window->GetHandle(), WM_CLOSE, 0, 0);
+            }
+            else
+            {
+                Core::Logger::Error(
+                    "KurenaiEngine3D", "書き出し後の自動終了: ウィンドウが無いため終了要求を出せません");
+            }
+        }
+    }
+
+    bool KurenaiEngine3D::WriteTextureDumpFile(
+        const TextureDumpRequest& request, const std::vector<uint8_t>& pixels) const
+    {
+        // ファイル形式(Tools/texdump_inspect.py と一致させること):
+        //   off  size  内容
+        //     0    4   マジック 'K','T','X','D'
+        //     4    4   uint32 Version (=2。v1はBackend欄が無く、SourceNameの位置が4バイト手前)
+        //     8    4   uint32 HeaderBytes (=128。ピクセルデータはここから始まる)
+        //    12    4   uint32 Width
+        //    16    4   uint32 Height
+        //    20    4   uint32 ChannelCount (1..4。ElementType=4では「展開後の」成分数=3)
+        //    24    4   uint32 ElementType (1=UNorm8, 2=Float16, 3=Float32, 4=Packed11_11_10_Float)
+        //    28    4   uint32 BytesPerElement (1/2/4。ElementType=4だけは1テクセルのバイト数=4)
+        //    32    4   uint32 FrameIndex (m_TAAFrameIndex。複数枚が同一フレームかの照合用)
+        //    36    4   uint32 MipLevel
+        //    40    4   uint32 ArraySlice
+        //    44    4   uint32 Backend (1=DX11, 2=DX12)
+        //    48   64   char   SourceName[64] (NUL終端UTF-8。迷子のファイルの自己申告用)
+        //   112   16   予約(0)
+        //   128  ...   ピクセルデータ。**行パディング無し**、上から下・左から右、
+        //              index = (y * Width + x) * ChannelCount。リトルエンディアン
+        //              (ElementType=4だけは 1テクセル=uint32 1個で、展開は読み手が行う)
+        //
+        // 【HeaderBytesを持たせる理由】後からフィールドを足しても、読み手の
+        // 「ここからがデータ」という判断が変わらないようにするため。
+        //
+        // 【DXGI_FORMATは書かない】RHIがD3D固有の型を公開していないうえ、読み手が知りたい
+        // 「量子化の刻み幅」はElementTypeだけで決まる(UNorm8なら1/255、Float16なら半精度)。
+        // 意味を持たない値をヘッダに置くと、いつか誰かがそれを根拠に判断してしまう。
+        //
+        // 【Backendを書く理由】DX11とDX12のダンプは、一致していればヘッダまでバイト一致する。
+        // そうなると「本当に別々のバックエンドで採ったのか」をファイルから確かめられず、
+        // A/Bで言うところの「片方が実行されていない」を潰せない。
+        // 出所をファイル自身に自己申告させる
+        constexpr uint32_t kHeaderBytes = 128;
+        constexpr uint32_t kNameBytes = 64;
+
+        uint32_t elementType = 0;
+        uint32_t bytesPerElement = 0;
+        switch (request.Desc.ElementType)
+        {
+        case RHI::TextureElementType::UNorm8:
+            elementType = 1;
+            bytesPerElement = 1;
+            break;
+        case RHI::TextureElementType::Float16:
+            elementType = 2;
+            bytesPerElement = 2;
+            break;
+        case RHI::TextureElementType::Float32:
+            elementType = 3;
+            bytesPerElement = 4;
+            break;
+        case RHI::TextureElementType::Packed11_11_10_Float:
+            // 1テクセル4バイトに3成分が詰まっている。**ここでは展開せず、詰まったまま書く。**
+            //
+            // 【なぜC++側で展開しないのか】展開の正しさを確かめるには非ゼロのR11G11B10データが要るが、
+            // このフォーマットを使うのはG-Bufferのエミッシブだけで、手元のどのシーンでも全画素0だった
+            // (MaterialTest / PenumbraH4 / BistroInteriorLit で確認)。
+            // 一度も動かせないデコーダをC++に置くと、いつか非ゼロのデータが来たときに
+            // 静かに誤った数値を返す。読み手(Tools/texdump_inspect.py)に置けば、
+            // 11bit/10bitの全ビットパターンを網羅した検算をselftestで常時回せる
+            elementType = 4;
+            bytesPerElement = 4; // 1テクセルあたりのバイト数(1成分あたりではない)
+            break;
+        default:
+            Core::Logger::Error(
+                "KurenaiEngine3D", "テクスチャの書き出し: 解釈できない要素型です: " + request.Name);
+            return false;
+        }
+
+        std::ofstream file(request.Path, std::ios::binary | std::ios::trunc);
+        if (!file)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "テクスチャを書き出せませんでした(ファイルを開けない): " + Core::WideToUtf8(request.Path));
+            return false;
+        }
+
+        const char magic[4] = { 'K', 'T', 'X', 'D' };
+        const uint32_t header[11] = {
+            // 【Backend欄を足したときに上げた】v1とv2はSourceNameの位置が4バイトずれる。
+            // 上げずに黙って読ませると、名前の先頭4文字がBackendとして解釈される
+            2u,                        // Version
+            kHeaderBytes,              // HeaderBytes
+            request.Desc.Width,        // Width
+            request.Desc.Height,       // Height
+            request.Desc.ChannelCount, // ChannelCount
+            elementType,               // ElementType
+            bytesPerElement,           // BytesPerElement
+            m_TAAFrameIndex,           // FrameIndex
+            request.MipLevel,          // MipLevel
+            request.ArraySlice,        // ArraySlice
+            m_GraphicsAPI == GraphicsAPI::DX12 ? 2u : 1u, // Backend
+        };
+        char name[kNameBytes] = {};
+        // 名前が64バイトを超える場合は切り詰める(NUL終端は必ず残す)
+        const size_t nameLength = std::min(request.Name.size(), static_cast<size_t>(kNameBytes - 1));
+        std::memcpy(name, request.Name.data(), nameLength);
+        char reserved[kHeaderBytes - sizeof(magic) - sizeof(header) - kNameBytes] = {};
+
+        file.write(magic, sizeof(magic));
+        file.write(reinterpret_cast<const char*>(header), sizeof(header));
+        file.write(name, sizeof(name));
+        file.write(reserved, sizeof(reserved));
+        file.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+
+        if (!file)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "テクスチャを書き出せませんでした(書き込みに失敗): " + Core::WideToUtf8(request.Path));
+            return false;
+        }
+
+        // 【この行を待って読むこと】ファイルが存在することは書き終わりを意味しない。
+        // 呼び出し側(スキルの手順)はこの行が出てからプロセスを落とす
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "テクスチャを書き出しました: " + Core::WideToUtf8(request.Path) + " (" + request.Name + " " +
+                std::to_string(request.Desc.Width) + "x" + std::to_string(request.Desc.Height) +
+                " ch=" + std::to_string(request.Desc.ChannelCount) + " elem=" + std::to_string(elementType) +
+                " mip=" + std::to_string(request.MipLevel) + " slice=" + std::to_string(request.ArraySlice) +
+                " frame=" + std::to_string(m_TAAFrameIndex) + ")");
+        return true;
     }
 
     void KurenaiEngine3D::CreatePlanarReflectionTargets()
@@ -5065,6 +5555,8 @@ namespace Kurenai
 
         m_PlanarReflectionWidth = width;
         m_PlanarReflectionHeight = height;
+        // ポインタが作り直されたので、グラフィックスデバッガ向けの名前を焼き直す
+        m_DebugNamesDirty = true;
 
         Core::Logger::Info(
             "KurenaiEngine3D",
@@ -7035,6 +7527,11 @@ namespace Kurenai
             m_DroneShowCenter = { m_Scene.DroneShowCenter[0], m_Scene.DroneShowCenter[1], m_Scene.DroneShowCenter[2] };
         }
         if (m_Scene.HasDroneShowScale)          { m_DroneShowScale = m_Scene.DroneShowScale; }
+        if (m_Scene.HasDroneShowCastLight)      { m_DroneShowCastLight = m_Scene.DroneShowCastLight; }
+        if (m_Scene.HasDroneShowCastLightScale) { m_DroneShowCastLightScale = m_Scene.DroneShowCastLightScale; }
+        // 実効値のログと容量の警告はシーンごとに1回ずつ出す(シーンが変われば灯の値も変わる)
+        m_DroneShowLightValuesLogged = false;
+        m_DroneShowLightTileOverflowLogged = false;
         // 【Formationsが空でもSetDataを呼ぶ】呼ばなければ前のシーンのショーがそのまま残る。
         // 空を渡せばDroneShow側がエラーを出してm_HasDataをfalseにするので、
         // 「ショーを持たないシーンへ切り替えたのに前の編隊が飛び続ける」を構造的に防げる
@@ -9103,6 +9600,26 @@ namespace Kurenai
             m_MeshletLODFrame.DebugColorByLOD = m_MeshletLODDebugColorEnabled;
         }
 
+        // --- ドローンショーの機体を評価する ---
+        //
+        // 【ライトリストの組み立てより前でなければならない】機体を光源として送るので、
+        // ここが後ろにあると灯が1フレーム遅れる(編隊が動いている間ずっと、光だけが
+        // 前フレームの位置から当たり続ける)。GPUバッファへの転送は下のグラフ構築直前のまま。
+        // m_DroneShowTimeの更新はRenderThreadMainで既に済んでいる
+        m_DroneInstances.clear();
+        if (m_DroneShowEnabled)
+        {
+            m_DroneShow.Evaluate(m_DroneShowTime, m_DroneShowCenter, m_DroneShowScale, m_DroneInstances);
+            // 【バッファの容量を超える機体は描かない】m_DroneBufferはkMaxDrones分を固定確保して
+            // いるので、それを超えた分をUpdateBufferへ渡すと書き込みが範囲外になる。
+            // .kshowの機体数はエディタ側で上限を掛けているが、外から来たファイルでも
+            // 壊れないよう、ここで切り詰める(光源を作るのも切り詰めた後の配列から)
+            if (m_DroneInstances.size() > kMaxDrones)
+            {
+                m_DroneInstances.resize(kMaxDrones);
+            }
+        }
+
         // 有効なライトだけを詰めてt8のライトリストへ渡す。シェーダはLightCount(・ActiveLightCount)の
         // 数までしかループしないため、無効なライトはそもそもGPUへ送らない。DirectLight/Transparentの
         // 両パスがこの1つのリストを共有する(FrameConstants.ActiveLightCountに人数を書き込むため、
@@ -9246,6 +9763,116 @@ namespace Kurenai
             }
         }
 
+        // ここまでが「焼き込みに入れてよい灯」。プローブと DDGI はこの数までしか舐めない。
+        //
+        // 【ドローンの灯をこの後ろへ置く理由】編隊は毎フレーム動く。反射プローブは
+        // OnDemand で焼くので「焼いた瞬間の編隊」が環境キューブに固定で残り、DDGI は
+        // ヒステリシスで編隊を追いかけ続けて収束しない。どちらも動く光を入れる前提の
+        // 構造になっていないため、この2つからは外す
+        size_t bakedLightCount = gpuLights.size();
+
+        // --- ドローンショーの機体を光源として後ろへ連結する ---
+        //
+        // 【エミッシブプロキシとは単位系が違う】プロキシは露出を掛けない(自発光がG-Bufferで
+        // 露出を通らないため、I*exposure の中で相殺する)。一方ドローンのスプライトは
+        // DroneShowConstants.Params0.x = Brightness * effectiveExposure として露出を通っており、
+        // 単位系としては手置きライト(カンデラ)の側にいる。**ここは掛ける側が正しい**。
+        // 向こうの慣習を写すと桁で外す(docs/ImplementationDetail.md 62.4の表)
+        m_DroneShowLightUsedCount = 0;
+        if (m_DroneShowEnabled && m_DroneShowCastLight && !m_DroneInstances.empty())
+        {
+            // 手置き+プロキシを押し出さないよう、残り容量だけを使う
+            const size_t budget =
+                (gpuLights.size() < kMaxLights) ? (kMaxLights - gpuLights.size()) : 0u;
+            const uint32_t sampleCount = static_cast<uint32_t>(
+                std::min<size_t>(budget, static_cast<size_t>(std::max(0, m_DroneShowLightSampleCount))));
+
+            m_DroneShow.BuildLightSamples(m_DroneInstances, sampleCount, m_DroneLightSamples);
+
+            // 【bakedLightCountを添字に使い回さない】あちらは「焼き込みに入れてよい灯の数」で、
+            // 容量超過の切り詰めが走ると意味が変わる(下の再代入を参照)。
+            // ここで欲しいのは「ドローンの灯の先頭の位置」という別の量なので、別に持つ
+            const size_t firstDroneLightIndex = gpuLights.size();
+
+            const float exposure = ComputeExposure(m_EffectiveExposureEV100);
+            const float cutoffLux = std::max(m_DroneShowLightCutoffLux, 1e-9f);
+            // 演出用の倍率。1.0がスプライトから導いた物理的な値。
+            // 【Rangeにも効かせる】強くした灯を同じRangeで打ち切ると、届くはずの距離で
+            // 切れて「明るくしたのに広がらない」になる。下でpeakから解き直すので自動的に効く
+            const float lightScale = std::max(m_DroneShowCastLightScale, 0.0f);
+            for (const DroneLightSample& rawSample : m_DroneLightSamples)
+            {
+                DroneLightSample sample = rawSample;
+                sample.Intensity = { rawSample.Intensity.x * lightScale, rawSample.Intensity.y * lightScale,
+                                     rawSample.Intensity.z * lightScale };
+
+                GPULight light{};
+                light.PositionType = { sample.Position.x, sample.Position.y, sample.Position.z,
+                                       static_cast<float>(Assets::LightType::Point) };
+
+                // 【Rangeは打ち切り照度から逆算する】MakeGPULightFromEmissiveProxy と同じ考え方。
+                // 点光源(型1)の減衰に半径の項は無いので、あちらの -R² は付けない。
+                // RGBの最大から解くのは、色付きの灯で1chだけ見るとRangeが検算できないため
+                const float peak = std::max({ sample.Intensity.x, sample.Intensity.y, sample.Intensity.z });
+                float range = (peak > 0.0f) ? std::sqrt(peak / cutoffLux) : 0.0f;
+                // 下限は光源自身の広がりを覆う分。上限はエミッシブ光源と同じシーンAABB対角で、
+                // タイルライトカリングが全タイルにヒットするのを止める安全弁
+                range = std::max(range, 2.0f * sample.SourceRadius);
+                if (m_EmissiveLightsMaxRange > 0.0f)
+                {
+                    range = std::min(range, m_EmissiveLightsMaxRange);
+                }
+
+                light.ColorRange = { sample.Intensity.x * exposure, sample.Intensity.y * exposure,
+                                     sample.Intensity.z * exposure, range };
+                light.DirectionAngle = { 0.0f, -1.0f, 0.0f, 0.0f };
+                // 【スクリーンスペースシャドウは立てない】画素あたりのシャドウレイ本数には
+                // 上限(Defaults::ScreenSpaceShadowMaxLightsPerPixel)があり、数十灯を入れると
+                // 手置きライトの接触影を食い潰す(docs/ImplementationDetail.md 62.7と同じ理由)。
+                // Params.z は光源の半径で、減衰には効かずMegaLightsの半影の広がりだけを決める
+                light.Params = { 0.0f, static_cast<float>(kLightShadowRaytraced), sample.SourceRadius, 0.0f };
+                gpuLights.push_back(light);
+            }
+            m_DroneShowLightUsedCount = static_cast<uint32_t>(m_DroneLightSamples.size());
+
+            // 【「効いていない」と「暗すぎて見えない」を切り分ける】エミッシブ光源と同じ理由で、
+            // 実際に送った灯数と代表1灯の実効値を1回だけ出す
+            if (!m_DroneShowLightValuesLogged && m_DroneShowLightUsedCount > 0)
+            {
+                float totalCd = 0.0f;
+                for (const DroneLightSample& sample : m_DroneLightSamples)
+                {
+                    totalCd += std::max({ sample.Intensity.x, sample.Intensity.y, sample.Intensity.z });
+                }
+                const GPULight& first = gpuLights[firstDroneLightIndex];
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "ドローンを光源として送信: " + std::to_string(m_DroneShowLightUsedCount) + "灯(機体 " +
+                        std::to_string(m_DroneInstances.size()) + "機) / 倍率 " +
+                        std::to_string(m_DroneShowCastLightScale) + " / 総光度(RGBの最大の和。倍率込み) " +
+                        std::to_string(totalCd * m_DroneShowCastLightScale) + "cd / 先頭の灯 露出後の強さ " +
+                        std::to_string(std::max({ first.ColorRange.x, first.ColorRange.y, first.ColorRange.z })) +
+                        " Range " + std::to_string(first.ColorRange.w) + "m 半径 " +
+                        std::to_string(first.Params.z) + "m");
+                m_DroneShowLightValuesLogged = true;
+            }
+
+            // 【条件をbudgetで見る】m_DroneShowLightUsedCount == 0 で判定すると、
+            // 灯数の設定を0にしただけのときにも「容量を使い切っています」と誤報する
+            if (budget == 0u && !m_DroneShowLightTileOverflowLogged)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "ドローンを光源として送れませんでした(ライトの容量" + std::to_string(kMaxLights) +
+                        "灯を手置きライトとエミッシブ光源で使い切っています)");
+                m_DroneShowLightTileOverflowLogged = true;
+            }
+        }
+        else
+        {
+            m_DroneLightSamples.clear();
+        }
+
         // 容量(kMaxLights)を超える場合は、カメラに近い順に先頭kMaxLights灯のみ採用する。
         // 全画面ディファードなのでフラスタムカリングは効果が薄く、これは容量超過時の
         // 安全弁としてのみ機能する。
@@ -9267,11 +9894,21 @@ namespace Kurenai
                 });
             gpuLights.resize(kMaxLights);
 
+            // 【bakedLightCountの前提が崩れる】上のソートは配列全体を並べ替えるので、
+            // 「先頭bakedLightCount灯が焼き込みに入れてよい灯」という対応が失われる。
+            // bakedLightCount自身もkMaxLightsを超えうるので、そのまま
+            // ActiveLightCountとして渡すと配列長を超えた読み出しになる。
+            // ここまで来るのは手置きライトだけで1024灯を超えた場合で、そのときは
+            // どれが焼き込み対象かを区別できないため、**全灯を焼き込みへ入れる**側へ倒す
+            // (プローブに入り過ぎるほうが、範囲外を読むより安全)
+            bakedLightCount = gpuLights.size();
+
             if (!m_LightOverflowLogged)
             {
                 Core::Logger::Warning(
                     "KurenaiEngine3D",
-                    "ライト数が上限(" + std::to_string(kMaxLights) + ")を超えたため、カメラに近い順に描画します");
+                    "ライト数が上限(" + std::to_string(kMaxLights) + ")を超えたため、カメラに近い順に描画します"
+                    "(この場合ドローンの灯と焼き込み対象の切り分けは失われます)");
                 m_LightOverflowLogged = true;
             }
         }
@@ -9900,27 +10537,16 @@ namespace Kurenai
             commandList->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
         }
 
-        // --- ドローンショーの機体を評価し、GPUへ送る ---
+        // --- ドローンショーの機体をGPUへ送る ---
         // ライトリストとまったく同じ理由でグラフ構築の前に1回だけ更新する。このバッファは
         // 本描画パスと平面反射パスの2箇所から読まれるため、パスの中で更新すると
-        // 先に走る側が未更新の内容を読んでしまう
-        m_DroneInstances.clear();
-        if (m_DroneShowEnabled)
+        // 先に走る側が未更新の内容を読んでしまう。
+        // 【m_DroneInstancesを作るのはここではない】ライトリストの組み立てが機体の位置を要るため、
+        // Evaluateはそれより前(gpuLightsの直前)へ移してある。ここは転送だけ
+        if (m_DroneShowEnabled && !m_DroneInstances.empty())
         {
-            m_DroneShow.Evaluate(m_DroneShowTime, m_DroneShowCenter, m_DroneShowScale, m_DroneInstances);
-            // 【バッファの容量を超える機体は描かない】m_DroneBufferはkMaxDrones分を固定確保して
-            // いるので、それを超えた分をUpdateBufferへ渡すと書き込みが範囲外になる。
-            // .kshowの機体数はエディタ側で上限を掛けているが、外から来たファイルでも
-            // 壊れないよう、GPUへ渡す直前のここで切り詰める
-            if (m_DroneInstances.size() > kMaxDrones)
-            {
-                m_DroneInstances.resize(kMaxDrones);
-            }
-            if (!m_DroneInstances.empty())
-            {
-                commandList->UpdateBuffer(
-                    m_DroneBuffer.get(), m_DroneInstances.data(), m_DroneInstances.size() * sizeof(GPUDrone));
-            }
+            commandList->UpdateBuffer(
+                m_DroneBuffer.get(), m_DroneInstances.data(), m_DroneInstances.size() * sizeof(GPUDrone));
         }
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
@@ -10500,7 +11126,7 @@ namespace Kurenai
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
         const auto captureProbeFace =
-            [this, &constants, probeFaceProjection, skyTexture](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+            [this, &constants, probeFaceProjection, skyTexture, bakedLightCount](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
             const Assets::ReflectionProbe& probe = m_ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
@@ -10527,6 +11153,10 @@ namespace Kurenai
             // プローブ視点から見える範囲とは何の関係も無い。上でPrevViewProjを
             // 「前フレーム」でない値へ差し替えている以上、判定の前提そのものが崩れている
             captureConstants.OcclusionCullParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+            // ドローンの灯はライトリストの末尾に連結してあるので、数を戻すだけで外れる。
+            // 編隊は毎フレーム動く一方、反射プローブはOnDemandで一度焼いたきりなので、
+            // 入れると「焼いた瞬間の編隊」が環境キューブに固定で残り、以後ずっと映り込む
+            captureConstants.ActiveLightCount.x = static_cast<float>(bakedLightCount);
             // 統計も止める。プローブ視点で数えた分がメインカメラの間引き率に混ざると、
             // 「1フレームあたりの判定数」がプローブを焼いたフレームだけ跳ね上がって読めなくなる
             captureConstants.MeshletCullStatsParams = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -10886,7 +11516,7 @@ namespace Kurenai
         // RWTexture2DArray<float>なので、キューブ配列だけでなく単体のキューブ(=6要素の2D配列)の
         // 面へもそのまま書ける
         const auto captureDDGIProbeFace =
-            [this, &constants, probeFaceProjection, skyTexture](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, &constants, probeFaceProjection, skyTexture, bakedLightCount](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = ComputeDDGIProbePosition(probeIndex);
 
@@ -10899,6 +11529,9 @@ namespace Kurenai
             const DirectX::XMMATRIX faceViewProj = ComputeCubeFaceView(probePosition, face) * probeFaceProjection;
             DirectX::XMStoreFloat4x4(&captureConstants.ViewProj, DirectX::XMMatrixTranspose(faceViewProj));
             captureConstants.CameraPosition = { probePosition.x, probePosition.y, probePosition.z, 0.0f };
+            // 反射プローブと同じ理由でドローンの灯を外す。こちらは焼き直しではなく
+            // ヒステリシスなので固定はされないが、動く光を追いかけ続けて収束しなくなる
+            captureConstants.ActiveLightCount.x = static_cast<float>(bakedLightCount);
             cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
             cmd->SetRenderTargets(captureTargets, 2, m_DDGICaptureDepth.get());
@@ -11048,7 +11681,7 @@ namespace Kurenai
         // RWTexture2DArrayとして張る」メソッドをDX11/DX12の両方へ足す必要がある。
         // ドローとメッシュ走査が消えるのが本題なので、そこは測ってから決める
         const auto traceDDGIProbeFace =
-            [this, skyTexture](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, skyTexture, bakedLightCount](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = ComputeDDGIProbePosition(probeIndex);
 
@@ -11064,6 +11697,9 @@ namespace Kurenai
                 m_DDGISunShadowRayEnabled ? 1.0f : 0.0f,
                 ShouldSuppressEmissiveForGI() ? 0.0f : 1.0f
             };
+            // 舐めるライトの数。ラスタ経路(ProbeCaptureのcaptureConstants)と同じ値にすること。
+            // ここだけ揃っていないと、DX11(ラスタ)とDX12(レイトレ)でDDGIの結果が黙って食い違う
+            traceConstants.Params2 = { static_cast<float>(bakedLightCount), 0.0f, 0.0f, 0.0f };
 
             if (!m_DDGIEmissiveSuppressLoggedTrace)
             {
@@ -15226,6 +15862,19 @@ namespace Kurenai
         const RHI::Viewport letterboxViewport = ComputeLetterboxViewport(
             m_Window->GetWidth(), m_Window->GetHeight(), presentSourceWidth, presentSourceHeight);
 
+        // グラフィックスデバッガ向けの名前を焼く。**フレームの記録とは独立**なので
+        // レンダーグラフへは積まず、ここで直接呼ぶ(ID3D12Object::SetNameはコマンドではない)。
+        // 立っているのは起動直後とレンダーターゲットを作り直した直後だけ
+        if (m_DebugNamesDirty)
+        {
+            ApplyDebugNames();
+            m_DebugNamesDirty = false;
+        }
+
+        // 【Presentより前に積む】書き出す対象は中間バッファなので、Presentの後ろに置く理由が無い。
+        // Readsで書き手より後に順序付くので、この位置に積めば「そのフレームの最終的な中身」が取れる
+        IssueTextureDumps(graph);
+
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Present",
             .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture,
@@ -15414,6 +16063,11 @@ namespace Kurenai
                 }
             }
         }
+
+        // --- 中間レンダーターゲットの生値ダンプ(検証専用) ---
+        // 【perfdumpと同じく毎フレーム走る場所へ置く】積んだコピーを数フレーム後に読む仕組みなので、
+        // ここが毎フレーム呼ばれないと待ちフレームがいつまでも進まない
+        ResolveTextureDumps();
 
         m_TAAPrevEffectiveExposureEV100 = m_EffectiveExposureEV100;
 

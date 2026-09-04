@@ -87,6 +87,12 @@ cbuffer DDGITraceConstants : register(b1)
     // w = エミッシブ光源プロキシとして起こされたマテリアルの自発光倍率
     //     (1.0 でそのまま加算 = 二重計上、0.0 で抑止。プロキシでないマテリアルには掛からない)
     float4 TraceParams1;
+    // x = このパスが舐めるライトの数。**FrameConstants.ActiveLightCount.x ではなくこちらを使う**。
+    //     b0 はメイン描画と同じバッファをそのまま束ねているので差し替えられないが、
+    //     ドローンショーの機体から起こした灯だけはここから外す必要がある(毎フレーム動く光を
+    //     ヒステリシス付きのプローブへ入れると収束しない)。灯はリストの末尾に連結されているので、
+    //     数を減らすだけで外れる。yzw = 未使用
+    float4 TraceParams2;
 };
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
@@ -176,7 +182,8 @@ float3 ShadeProbeRayHit(float3 hitPosition, float3 N, RTMaterial material, float
     }
 
     // --- t7のライトリスト(ラスタ版と同じく影は落とさない) ---
-    const uint lightCount = (uint)ActiveLightCount.x;
+    // 灯数はTraceParams2.xから取る(ActiveLightCount.xではない。理由は宣言のコメント)
+    const uint lightCount = (uint)TraceParams2.x;
     [loop]
     for (uint i = 0; i < lightCount; ++i)
     {

@@ -826,6 +826,35 @@ namespace Kurenai::Defaults
     // 【シーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
     // 「1画素を割るとちらつく」という事実はどのシーン・どのショーでも変わらない
     inline constexpr float DroneShowMinScreenRadius = 0.002f;
+    // 機体を「周囲を照らす光源」としても送るか。
+    // 既定はfalse。有効にしたシーンだけ絵が変わる(Enabledと同じ扱い)。
+    // 光度はショーのBrightnessとRadiusから導くので、明るさのつまみはここには無い
+    // (DroneShow::BuildLightSamplesの導出を参照)
+    inline constexpr bool DroneShowCastLight = false;
+    // 光源として送る灯の数。全機ぶんは送れないので間引く(理由はBuildLightSamplesのコメント)。
+    // 【シーンにもショーにも持たせない】これは描画側の容量で決まる数で、ショーの表現ではない。
+    // 上限はタイルライトカリングの1タイル容量(KurenaiEngine3D::kLightTileCapacity = 64)で、
+    // 超えると溢れた灯が静かに欠落する。手置きライトと同居する余地を残して48にしてある。
+    // 精度は1500機の厳密な逆二乗和に対し、島と水面で平均+3%(最大+9%)。
+    // 灯数を倍にしても最大誤差は+7%までしか縮まらない(docs/ImplementationDetail.md 38.12)
+    inline constexpr int DroneShowLightSampleCount = 48;
+    // 灯の影響半径Rangeを逆算するための打ち切り照度[lx]。R = sqrt(I / この値)。
+    // 満月の地表照度0.25lxの1%で、夜のキー照度(月0.25 + 夜空0.05)に対して2桁下。
+    // 減衰は窓付き逆二乗なので打ち切り境界にハードエッジは出ない(LightAttenuation.hlsli)
+    inline constexpr float DroneShowLightCutoffLux = 2.5e-3f;
+    // 灯の明るさの倍率。**1.0がスプライトから導いた物理的な値**で、既定はそこから動かさない。
+    //
+    // 【なぜ倍率が要るのか】1.0だと絵として見えない。夜の島の明るさは空由来の間接光が
+    // 支配していて、機体の光はその0.6%にしかならない(実測。docs/ImplementationDetail.md 38.13)。
+    // 実物のドローンショーも1.3km先の山を照らしはしないので1.0が正しい振る舞いではあるが、
+    // それでは「機体が周囲を照らす」という機能が絵に出ない。
+    //
+    // 【1.0を既定に残す理由】ここを大きい値にすると、物理的な値がどれだったのかが
+    // 分からなくなる。**演出として上げたいシーンが[DroneShow]CastLightScaleで明示的に上げる** ――
+    // 実際、唯一のサンプルシーン(Scenes/DroneShow.kscene)は8.0を指定している。
+    // 既定とサンプルが食い違って見えるのは意図したもので、「エンジンの既定は物理的な値、
+    // 絵作りはシーンの責任」という分担をそのまま表している
+    inline constexpr float DroneShowCastLightScale = 1.0f;
 
     // --- Hi-Zオクルージョンカリング(Stage 5-2) ---
     // 増幅シェーダーがメッシュレットのバウンディング球を前フレームのHi-Zへ投影し、

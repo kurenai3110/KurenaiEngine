@@ -1,5 +1,6 @@
 #include "DX11CommandList.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -569,6 +570,115 @@ namespace Kurenai::RHI
         // (受け皿がコピー元より大きい場合に、DX12のCopyBufferRegionと同じ意味になる)
         const D3D11_BOX box{ 0, 0, 0, sizeInBytes, 1, 1 };
         m_Context->CopySubresourceRegion(dx11Dst->GetBuffer(), 0, 0, 0, 0, dx11Src->GetBuffer(), 0, &box);
+    }
+
+    void DX11CommandList::UnbindRenderTargetsForResource(ID3D11Resource* resource)
+    {
+        if (resource == nullptr)
+        {
+            return;
+        }
+
+        const auto viewPointsAtResource = [resource](ID3D11View* view)
+        {
+            if (view == nullptr)
+            {
+                return false;
+            }
+            Microsoft::WRL::ComPtr<ID3D11Resource> boundResource;
+            view->GetResource(&boundResource);
+            return boundResource.Get() == resource;
+        };
+
+        bool bound = viewPointsAtResource(m_CurrentDepthStencilView);
+        for (uint32_t i = 0; i < m_CurrentRenderTargetCount && !bound; ++i)
+        {
+            bound = viewPointsAtResource(m_CurrentRenderTargetViews[i]);
+        }
+
+        if (!bound)
+        {
+            return;
+        }
+
+        // 【1本だけ外すのではなく全部外す】OMSetRenderTargetsは配列ごと差し替えるAPIで、
+        // 「n番目だけ外す」という指定ができない。次の描画がSetRenderTargetsを必ず呼ぶので、
+        // ここで空にしておいて困ることはない
+        m_Context->OMSetRenderTargets(0, nullptr, nullptr);
+        for (uint32_t i = 0; i < kMaxRenderTargets; ++i)
+        {
+            m_CurrentRenderTargetViews[i] = nullptr;
+        }
+        m_CurrentRenderTargetCount = 0;
+        m_CurrentDepthStencilView = nullptr;
+    }
+
+    void DX11CommandList::CopyTextureToReadback(
+        IRHITexture* dst, IRHITexture* src, uint32_t mipLevel, uint32_t arraySlice)
+    {
+        if (dst == nullptr || src == nullptr)
+        {
+            Core::Logger::Error("DX11", "CopyTextureToReadback: 引数がnullptrです。コピーをスキップします");
+            return;
+        }
+
+        auto* dx11Dst = static_cast<DX11Texture*>(dst);
+        auto* dx11Src = static_cast<DX11Texture*>(src);
+        if (!dx11Dst->IsReadback())
+        {
+            Core::Logger::Error(
+                "DX11",
+                "CopyTextureToReadback: コピー先がCreateReadbackTextureで作ったテクスチャではありません。"
+                "コピーをスキップします");
+            return;
+        }
+
+        ID3D11Texture2D* srcTexture = dx11Src->GetTexture2D();
+        if (srcTexture == nullptr)
+        {
+            Core::Logger::Error("DX11", "CopyTextureToReadback: コピー元がTexture2Dではありません");
+            return;
+        }
+
+        D3D11_TEXTURE2D_DESC srcDesc{};
+        srcTexture->GetDesc(&srcDesc);
+        if (mipLevel >= srcDesc.MipLevels || arraySlice >= srcDesc.ArraySize)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "CopyTextureToReadback: サブリソースの指定が範囲外です (mipLevel=" + std::to_string(mipLevel) +
+                    "/" + std::to_string(srcDesc.MipLevels) + ", arraySlice=" + std::to_string(arraySlice) + "/" +
+                    std::to_string(srcDesc.ArraySize) + ")");
+            return;
+        }
+
+        // 受け皿はCreateReadbackTextureの時点で「特定のミップ段の寸法」に合わせて作ってある。
+        // 別のミップを指定されるとサイズが合わず、静かに壊れるので突き合わせて弾く
+        const TextureReadbackDesc dstDesc = dx11Dst->GetReadbackDesc(0);
+        const uint32_t mipWidth = std::max<uint32_t>(1u, srcDesc.Width >> mipLevel);
+        const uint32_t mipHeight = std::max<uint32_t>(1u, srcDesc.Height >> mipLevel);
+        if (dstDesc.Width != mipWidth || dstDesc.Height != mipHeight)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "CopyTextureToReadback: 受け皿の寸法(" + std::to_string(dstDesc.Width) + "x" +
+                    std::to_string(dstDesc.Height) + ")がコピー元のミップ" + std::to_string(mipLevel) + "(" +
+                    std::to_string(mipWidth) + "x" + std::to_string(mipHeight) +
+                    ")と一致しません。CreateReadbackTextureに渡したミップと同じものを指定してください");
+            return;
+        }
+
+        // 【DX11特有】リソース状態の遷移は無いが、出力に張ったままのリソースはコピー元にできない。
+        // G-Bufferや深度は直前のパスで出力に張られたままのことがあるので、外してからコピーする
+        // (SRV側はUnbindPixelSrvForResourceが同じ理由で外している)
+        UnbindRenderTargetsForResource(srcTexture);
+
+        const UINT srcSubresource = D3D11CalcSubresource(mipLevel, arraySlice, srcDesc.MipLevels);
+
+        // 【pSrcBoxはnullptr】サブリソース全体をコピーする。深度フォーマットのコピーは
+        // 部分矩形の指定が許されていない(D3D11の制約)
+        m_Context->CopySubresourceRegion(
+            dx11Dst->GetStagingTexture(), 0, 0, 0, 0, srcTexture, srcSubresource, nullptr);
     }
 
     void DX11CommandList::ReleaseComputeUavBindingsAfterDispatch()
