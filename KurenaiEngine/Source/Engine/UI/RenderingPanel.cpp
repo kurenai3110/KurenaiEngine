@@ -186,7 +186,8 @@ namespace Kurenai::UI
 
         // 手法の選択。反射・影と同じ方針で、非対応環境では選択肢そのものを出さない
         // (上で早期returnしているのでここへは対応環境しか来ない)
-        static const char* kModeNames[] = { "なし", "参照実装 (全灯総当たり)", "確率的サンプリング" };
+        static const char* kModeNames[] = { "なし", "参照実装 (全灯総当たり)", "確率的サンプリング",
+                                            "クアッド共有 (1画素1レイ)" };
 
         int modeIndex = static_cast<int>(m_Engine.m_MegaLightsMode);
         if (ComboEx(
@@ -196,12 +197,23 @@ namespace Kurenai::UI
                 "ライト数に比例して重い。確率的サンプリングを評価するときの"
                 "真値(ノイズの無い基準)を作るためにある。\n\n"
                 "確率的サンプリングは候補プールからM個引いて1灯へ絞り、影レイを1本だけ撃つ。"
-                "ノイズは乗るが偏りは無く、時間方向に平均すると参照実装へ寄っていく"))
+                "ノイズは乗るが偏りは無く、時間方向に平均すると参照実装へ寄っていく。"
+                "ただし時間・空間の再利用が追加のレイを撃つため、実測では参照実装と"
+                "ほぼ同じコストになっている。\n\n"
+                "クアッド共有は再利用をやめ、2x2の4画素が撃った4本の結果を共有して平均する。"
+                "レイは1画素1本のままで、影の縁が最大1画素ぼける偏りを受け入れる代わりに"
+                "コストを大きく下げる(UE5 MegaLights の DownsampleFactor=2 と同じ種類の近似)"))
         {
             m_Engine.m_MegaLightsMode = static_cast<KurenaiEngine3D::MegaLightsMode>(modeIndex);
         }
 
-        if (m_Engine.m_MegaLightsMode == KurenaiEngine3D::MegaLightsMode::Stochastic)
+        // 候補プールとRIS、そしてデノイザは確率的サンプリングとクアッド共有で共通。
+        // 違うのは「1画素の推定量をどう良くするか」だけなので、操作もそこだけ分ける
+        const bool megaLightsStochasticUI =
+            m_Engine.m_MegaLightsMode == KurenaiEngine3D::MegaLightsMode::Stochastic;
+        const bool megaLightsQuadUI =
+            m_Engine.m_MegaLightsMode == KurenaiEngine3D::MegaLightsMode::QuadShared;
+        if (megaLightsStochasticUI || megaLightsQuadUI)
         {
             SliderIntEx(
                 "初期候補数 M###MegaLightsSampleCount", &m_Engine.m_MegaLightsSampleCount, 1, 32,
@@ -233,6 +245,37 @@ namespace Kurenai::UI
                     "重なって二重に尾を引き、どちらが原因か切り分けられなくなる");
             }
 
+            if (megaLightsQuadUI)
+            {
+                CheckboxEx(
+                    "クアッド共有###MegaLightsQuadShare", &m_Engine.m_MegaLightsQuadShareEnabled,
+                    Defaults::MegaLightsQuadShareEnabled,
+                    "2x2クアッドの仲間が撃った影レイの結果を借りて、4標本を自分の面で"
+                    "評価し直して平均する。追加のレイは1本も撃たない。\n\n"
+                    "【受け入れている偏り】影の境界がクアッドを横切る画素で可視性が食い違い、"
+                    "硬い影の縁が最大1画素ぼける(2x2の箱フィルタ相当)。箱フィルタは積分を"
+                    "保存するので総和比には出ず、影の縁の帯の誤差にだけ出る。\n\n"
+                    "【切るのは陽性対照のため】切ると自分の標本だけを使う形になり、"
+                    "確率的サンプリングから時間・空間再利用を外した構成と画素単位で一致するはず");
+                CheckboxEx(
+                    "クアッド層化###MegaLightsQuadStratify", &m_Engine.m_MegaLightsQuadStratify,
+                    Defaults::MegaLightsQuadStratify,
+                    "クアッドの4画素へ候補プールのスロットを1/4ずつ割り当て、"
+                    "クアッド全体でスロットを重複なく列挙させる。\n\n"
+                    "【割り戻しは変わらない】プールのスロットは混合分布からのi.i.d.抽出なので、"
+                    "スロットの選び方を変えても引かれる灯の分布は同じ。4人が同じ灯を引く確率が"
+                    "下がるぶん、平均に入る標本の多様性が上がる");
+                CheckboxEx(
+                    "遮蔽キャッシュ###MegaLightsBlockedCache", &m_Engine.m_MegaLightsBlockedCacheEnabled,
+                    Defaults::MegaLightsBlockedCacheEnabled,
+                    "遮蔽が確定した灯を目標関数から外すキャッシュ(16フレームに1回再検査する)。"
+                    "影の縁で支配光を毎フレーム選んでは殺される、という空回りを防ぐ。\n\n"
+                    "【陽性対照では切る】履歴に依存すると、確率的サンプリングとの"
+                    "画素単位の一致が崩れる");
+            }
+
+            if (megaLightsStochasticUI)
+            {
             CheckboxEx(
                 "時間再利用###MegaLightsTemporal", &m_Engine.m_MegaLightsTemporalEnabled,
                 Defaults::MegaLightsTemporalEnabled,
@@ -290,6 +333,7 @@ namespace Kurenai::UI
                     "逆に空間再利用は殺しが無いと効かない。かつて既定を無効にしていた根拠は"
                     "「初期可視レイ無しの空間再利用」の測定で、効く組み合わせを測っていなかった"
                     "(根拠は ImplementationDetail 61.7f)");
+            }
             }
         }
 

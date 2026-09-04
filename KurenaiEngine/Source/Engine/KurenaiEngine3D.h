@@ -261,6 +261,12 @@ namespace Kurenai
         void SetMegaLightsSpatialIterations(int iterations);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま
         void SetMegaLightsTemporal(int enabled, int mClamp);
+        // クアッド共有(手法3)の設定。いずれも負の値ならその項目は既定のまま。
+        //   share    … 2x2の仲間が撃ったレイの結果を借りるか。**0が陽性対照**で、
+        //               手法2から再利用を外した構成と画素単位で一致するはず
+        //   stratify … クアッドの4画素へ候補スロットを分けて引かせるか
+        //   blockedCache … 遮蔽が確定した灯のキャッシュを使うか(陽性対照では0にする)
+        void SetMegaLightsQuadShare(int share, int stratify, int blockedCache);
 
         // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を
         // 測るためのもので、静止した絵をいくら撮っても測れない側を測る入口。
@@ -1298,14 +1304,25 @@ namespace Kurenai
         // (有効なあいだ、あちらのライトループは回らない)。太陽はこの経路の対象外で、
         // 従来どおりb0とCSM/RTシャドウが担当する。
         //
-        // 【現段階は参照実装だけ】確率的サンプリング本体はまだ無い。Referenceは全灯を
-        // 総当たりして1灯ごとに影レイを撃つ、遅いが真値を返す経路で、以降の段階の
-        // A/Bの基準にするためにある(MegaLightsReference.hlsl冒頭を参照)
+        // Referenceは全灯を総当たりして1灯ごとに影レイを撃つ、遅いが真値を返す経路で、
+        // すべての測定の物差しにするためにある(MegaLightsReference.hlsl冒頭を参照)。
+        //
+        // 【StochasticとQuadSharedは同じ問題への別の解き方】どちらも候補プールから
+        // 確率的に灯を選ぶが、1画素の推定量を良くする手段が違う:
+        //   Stochastic … リザーバを時間・空間で再利用する(ReSTIR DI)。厳密に不偏だが、
+        //                 再利用のたびに可視性を確かめるレイと不偏化の分母のための補正レイが要る。
+        //                 実測(BistroExteriorNight 107灯/1280x720/RTX 4070 Ti)で
+        //                 MegaLights合計4.26ms、うちSpatialだけで2.64ms ――
+        //                 **全灯総当たりの参照実装(4.21ms)と同じコスト**になっていた
+        //   QuadShared  … 2x2クアッドの4画素が撃った4本の結果を共有して平均する。
+        //                 追加のレイは1本も撃たない(UE5 MegaLightsのDownsampleFactor=2に相当)。
+        //                 影の縁が最大1画素ぼける偏りを受け入れる代わりにコストを切り下げる
         enum class MegaLightsMode
         {
             Off,        // 従来どおりDirectLighting.hlslのライトループで評価する
             Reference,  // 全灯総当たり+1灯1影レイ。ノイズは無いが遅い(グラウンドトゥルース)
-            Stochastic, // 候補プールからRISで1灯選び、影レイ1本で評価する。ノイズは乗るが偏りは無い
+            Stochastic, // 候補プールからRISで1灯選び、時間・空間再利用で磨く。厳密に不偏だがレイが多い
+            QuadShared, // 1画素1レイのまま、2x2クアッドで可視性を共有して平均する
         };
         MegaLightsMode m_MegaLightsMode = Defaults::MegaLightsEnabled ? MegaLightsMode::Reference
                                                                      : MegaLightsMode::Off;
@@ -1345,6 +1362,13 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsInitialPipelineState;
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsShadeComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsShadePipelineState;
+        // クアッド共有(手法3)の解決パス。Initial が書いた4画素ぶんのリザーバを読み、
+        // **自分の面で評価し直して平均する**。レイを1本も撃たないのでTLASを束縛しない。
+        // Shade と分けてあるのは、あちらが RayQuery を持ちSM6.5でしか焼けないのに対し、
+        // こちらはレイを撃たず3バリアントすべてで焼けるため
+        // (混ぜると使わないTLASを束縛したままレイ経路が残る)
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsResolveComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsResolvePipelineState;
         // 2パスで共有する定数バッファ(中身はフレーム内で不変なのでInitial側で1回更新する)
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsStochasticConstantBuffer;
         // 空間再利用の反復ごとの定数(中身は共有分と同じで、反復番号だけが違う)。
@@ -1432,6 +1456,22 @@ namespace Kurenai
         bool m_MegaLightsInitialVisibility = Defaults::MegaLightsInitialVisibility;
         // 1ピクセルあたりに候補プールから引く数(RISのM)。影レイの本数はこれとは独立で常に1本
         int32_t m_MegaLightsSampleCount = Defaults::MegaLightsSampleCount;
+
+        // --- クアッド共有(手法3) ---
+        // 2x2クアッドの仲間が撃った影レイの結果を借りて平均するか。
+        // **切れるようにしてあるのは陽性対照のため** ―― 切ると自分の標本だけを使う形になり、
+        // 手法2から時間再利用と空間再利用を外した構成と画素単位で一致するはず。
+        // 一致しなければ配線のバグで、共有の効果を測る前にそこを潰す
+        bool m_MegaLightsQuadShareEnabled = Defaults::MegaLightsQuadShareEnabled;
+        // クアッドの4画素へ候補スロットを分けて引かせるか(層化)。
+        // プールのスロットは混合分布からの i.i.d. 抽出なので、スロットの選び方を変えても
+        // **周辺分布は変わらず割り戻しの式はそのまま厳密**。クアッドで重複した灯を
+        // 引く確率が下がるぶん、4標本の多様性が上がる
+        bool m_MegaLightsQuadStratify = Defaults::MegaLightsQuadStratify;
+        // 遮蔽が確定した灯のキャッシュ(BlockedLights)を手法3でも使うか。
+        // 手法3は時間再利用パスを持たないが、キャッシュ自体は Initial が維持している。
+        // **陽性対照では切る**(履歴に依存すると手法2との画素単位の一致が崩れる)
+        bool m_MegaLightsBlockedCacheEnabled = Defaults::MegaLightsBlockedCacheEnabled;
 
         // --- 蓄積平均(計測専用) ---
         // MegaLightsの出力を線形空間でフレーム方向へ足し込み、フレーム数で割った平均を表示する。

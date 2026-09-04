@@ -559,6 +559,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsSpatialMIS = ParseIntOption(L"-megalightsspatialmis", -1);
         // -megalightsinitialvis <0|1>。初期サンプルの可視レイ(遮蔽されたサンプルを殺す)の有無
         const int megaLightsInitialVis = ParseIntOption(L"-megalightsinitialvis", -1);
+        // クアッド共有(-megalights 3)の設定。
+        // -megalightsquadshare <0|1> は2x2の仲間が撃ったレイの結果を借りるか。
+        // **0が陽性対照** ―― 手法2から時間・空間再利用を外した構成と画素単位で一致するはず。
+        // -megalightsquadstratify <0|1> はクアッドの4画素へ候補スロットを分けて引かせるか。
+        // -megalightsblockedcache <0|1> は遮蔽が確定した灯のキャッシュを使うか(陽性対照では0)
+        const int megaLightsQuadShare = ParseIntOption(L"-megalightsquadshare", -1);
+        const int megaLightsQuadStratify = ParseIntOption(L"-megalightsquadstratify", -1);
+        const int megaLightsBlockedCache = ParseIntOption(L"-megalightsblockedcache", -1);
         // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
         const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
         const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
@@ -666,6 +674,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsInitialVis >= 0)
             {
                 engine.SetMegaLightsInitialVisibility(megaLightsInitialVis);
+            }
+            if (megaLightsQuadShare >= 0 || megaLightsQuadStratify >= 0 || megaLightsBlockedCache >= 0)
+            {
+                engine.SetMegaLightsQuadShare(
+                    megaLightsQuadShare, megaLightsQuadStratify, megaLightsBlockedCache);
             }
             if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
             {

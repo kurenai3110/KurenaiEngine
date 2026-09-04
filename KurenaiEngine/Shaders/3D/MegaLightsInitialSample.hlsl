@@ -67,7 +67,9 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     uint4 Params2;
     // x=射影(0,0), y=射影(1,1), z=未使用, w=履歴Mの上限(このパスでは未使用)
     float4 Params3;
-    // x=時間再利用の履歴が有効か(殺しのヒントを読んでよいか)
+    // x=時間再利用の履歴が有効か(殺しのヒントを読んでよいか)、y=空間再利用の反復番号(未使用)、
+    // z=クアッド共有(Resolveが読む。このパスでは未使用)、
+    // w=クアッドで候補スロットを分けて引くか(手法3の層化)
     uint4 Params4;
 };
 
@@ -246,6 +248,35 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float slotPhase = MegaLightsPixelPhase(pixel, Params1.w, 0u);
     uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + Params1.w * 0x9E3779B9u);
 
+    // --- クアッド層化(手法3。Params4.w) ---
+    // 2x2クアッドの4画素へ候補スロットを1/4ずつ割り当て、**クアッド全体でK個のスロットを
+    // 重複なく列挙させる**。手法3は4画素の標本を平均するので、4人が同じ灯を引いてしまうと
+    // 実効的な標本数が減る。
+    //
+    // 【周辺分布は変わらないので割り戻しはそのまま厳密】プールのK個のスロットは
+    // 混合分布(一様枝+重み枝)からの **i.i.d. 抽出** である(MegaLightsTilePool.hlsl)。
+    // スロットの中身を見ずに番号だけで選ぶ限り、どのスロットを引いても得られる灯の分布は
+    // 同じ混合分布のままで、下の sourcePdf の式は変わらない。
+    // 【MegaLightsCommon.hlsli が禁じている層化とは別物】あちらが禁じているのは
+    // 「1つのスロット列の中で (m + phase)/M と等間隔に取る」形で、周辺分布が層の中に
+    // 閉じてしまうために提案と割り戻しが食い違う。こちらは層の中で一様に引いている。
+    // 【レーンの割り当てはクアッドごと・フレームごとに回す】固定すると
+    // 「左上の画素はいつも先頭8スロットから引く」形になり、2画素周期の模様が焼き付く
+    const bool quadStratify = (Params4.w != 0u);
+    uint stratumBase = 0u;
+    uint stratumCount = validCandidates;
+    if (quadStratify && validCandidates >= 4u)
+    {
+        const uint2 quad = pixel >> 1u;
+        const uint lane = (pixel.x & 1u) | ((pixel.y & 1u) << 1u);
+        const uint rotation = HashUint(quad.x + quad.y * 0x9E3779B9u + Params1.w * 0x85EBCA6Bu) & 3u;
+        const uint stratum = (lane + rotation) & 3u;
+        const uint width = validCandidates >> 2u;
+        stratumBase = stratum * width;
+        // 最後の層は端数を引き受ける(K=32なら割り切れるが、Kを変えても定義域が欠けないように)
+        stratumCount = (stratum == 3u) ? (validCandidates - stratumBase) : width;
+    }
+
     float risWeightSum = 0.0f;
     uint selectedLightIndex = 0xFFFFFFFFu;
     float selectedTargetPdf = 0.0f;
@@ -254,7 +285,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     for (uint m = 0u; m < sampleCount; ++m)
     {
         const float slotRandom = MegaLightsLowDiscrepancy1D(m, slotPhase);
-        const uint slot = min((uint)(slotRandom * float(validCandidates)), validCandidates - 1u);
+        // 層化しているときは自分の層の中だけを引く(層化していなければ全スロットが自分の層)
+        const uint slot =
+            stratumBase + min((uint)(slotRandom * float(stratumCount)), stratumCount - 1u);
         const uint lightIndex = TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 0u];
         const float candidateWeight = asfloat(TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 1u]);
         // 採用判定の乱数は候補が無効でも必ず引いて状態を進める

@@ -1527,7 +1527,11 @@ namespace Kurenai
             DirectX::XMUINT4 Params0;
         };
 
-        // MegaLightsStochastic.hlsl側のcbuffer MegaLightsStochasticConstantsと一致させる必要がある
+        // 確率的サンプリング側の cbuffer MegaLightsStochasticConstants と一致させる必要がある。
+        // 読むのは MegaLightsInitialSample.hlsl / MegaLightsTemporal.hlsl /
+        // MegaLightsSpatial.hlsl / MegaLightsShade.hlsl / MegaLightsResolve.hlsl の5本で、
+        // **宣言をどこまで書くかはファイルごとに違う**(Shade は Params2 まで)。
+        // したがって**新しい項目は必ず末尾へ足すこと**
         struct alignas(16) MegaLightsStochasticConstants
         {
             // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか(0で撃たない)
@@ -1546,7 +1550,11 @@ namespace Kurenai
             // z=プリ露出の補正倍率(時間再利用用。今の露出 / 前フレームの露出)、
             // w=履歴のMの上限(同)
             DirectX::XMFLOAT4 Params3;
-            // x=履歴が使えるか(時間再利用用。0なら履歴を読まない)、yzw=未使用
+            // x=履歴が使えるか(時間再利用用。0なら履歴を読まない。Initialは
+            //   遮蔽が確定した灯のキャッシュを信用してよいかの判定にも使う)、
+            // y=空間再利用の反復番号(0起点。近傍の型板の種に混ぜて反復ごとに別の近傍を選ばせる)、
+            // z=クアッド共有を行うか(手法3。Resolveが読む。0なら自分の標本だけを使う)、
+            // w=クアッドで候補スロットを分けて引くか(手法3の層化。Initialが読む)
             DirectX::XMUINT4 Params4;
         };
 
@@ -2655,7 +2663,18 @@ namespace Kurenai
             m_MegaLightsShadePipelineState =
                 m_Device->CreateComputePipelineState({ m_MegaLightsShadeComputeShader.get() });
 
-            // 空間再利用。レイを撃たないのでSM 5.0でも焼ける
+            // クアッド共有(手法3)の解決パス。2x2の仲間が撃った標本を自分の面で評価し直して
+            // 平均する。**レイを1本も撃たない**ので3バリアントすべてで焼ける
+            // (パッカーの kSkipDxbc50Files には入れない)
+            RHI::ShaderDesc megaLightsResolveCsDesc;
+            megaLightsResolveCsDesc.Stage = RHI::ShaderStage::Compute;
+            megaLightsResolveCsDesc.FilePath = shaderDirectory + L"MegaLightsResolve.kshader";
+            megaLightsResolveCsDesc.EntryPoint = "CSMain";
+            m_MegaLightsResolveComputeShader = m_Device->CreateShader(megaLightsResolveCsDesc);
+            m_MegaLightsResolvePipelineState =
+                m_Device->CreateComputePipelineState({ m_MegaLightsResolveComputeShader.get() });
+
+            // 空間再利用。目標関数に可視性を入れるレイと、不偏化の分母のためのバイアス補正レイを撃つ
             RHI::ShaderDesc megaLightsSpatialCsDesc;
             megaLightsSpatialCsDesc.Stage = RHI::ShaderStage::Compute;
             megaLightsSpatialCsDesc.FilePath = shaderDirectory + L"MegaLightsSpatial.kshader";
@@ -3628,12 +3647,21 @@ namespace Kurenai
         {
             return false;
         }
-        // 手法ごとに必要なパイプラインが違う。確率的サンプリングは候補プールも要る
+        // 手法ごとに必要なパイプラインが違う。確率的サンプリングもクアッド共有も
+        // 候補プールと初期RIS(リザーバ)を共有し、そのあとの段だけが違う
         if (m_MegaLightsMode == MegaLightsMode::Stochastic)
         {
             return m_MegaLightsInitialPipelineState != nullptr && m_MegaLightsShadePipelineState != nullptr &&
                    m_MegaLightsTilePoolPipelineState != nullptr && m_MegaLightsTilePoolBuffer != nullptr &&
                    m_MegaLightsReservoirBuffer != nullptr;
+        }
+        if (m_MegaLightsMode == MegaLightsMode::QuadShared)
+        {
+            // Shade ではなく Resolve が色を書く。時間・空間再利用は使わないので、
+            // 履歴バッファや空間再利用のping-pongが無くても走れる
+            return m_MegaLightsInitialPipelineState != nullptr && m_MegaLightsResolvePipelineState != nullptr &&
+                   m_MegaLightsTilePoolPipelineState != nullptr && m_MegaLightsTilePoolBuffer != nullptr &&
+                   m_MegaLightsReservoirBuffer != nullptr && m_MegaLightsHistoryGuide[0] != nullptr;
         }
         return m_MegaLightsReferencePipelineState != nullptr;
     }
@@ -3715,7 +3743,7 @@ namespace Kurenai
     void KurenaiEngine3D::OverrideMegaLights(int mode, int shadowRayCount, int sampleCount)
     {
         // 手法の総数はenumの末尾で決まる。値はUIのコンボの並びとも一致している
-        constexpr int kMegaLightsModeCount = static_cast<int>(MegaLightsMode::Stochastic) + 1;
+        constexpr int kMegaLightsModeCount = static_cast<int>(MegaLightsMode::QuadShared) + 1;
         if (mode >= kMegaLightsModeCount)
         {
             Core::Logger::Warning(
@@ -3999,6 +4027,35 @@ namespace Kurenai
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 std::string("MegaLightsの初期可視レイを") + (m_MegaLightsInitialVisibility ? "有効" : "無効") +
+                    "にしました");
+        }
+    }
+
+    void KurenaiEngine3D::SetMegaLightsQuadShare(int share, int stratify, int blockedCache)
+    {
+        // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
+        if (share >= 0)
+        {
+            m_MegaLightsQuadShareEnabled = (share != 0);
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                std::string("MegaLightsのクアッド共有を") + (m_MegaLightsQuadShareEnabled ? "有効" : "無効") +
+                    "にしました");
+        }
+        if (stratify >= 0)
+        {
+            m_MegaLightsQuadStratify = (stratify != 0);
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                std::string("MegaLightsのクアッド層化を") + (m_MegaLightsQuadStratify ? "有効" : "無効") +
+                    "にしました");
+        }
+        if (blockedCache >= 0)
+        {
+            m_MegaLightsBlockedCacheEnabled = (blockedCache != 0);
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                std::string("MegaLightsの遮蔽キャッシュを") + (m_MegaLightsBlockedCacheEnabled ? "有効" : "無効") +
                     "にしました");
         }
     }
@@ -12523,11 +12580,20 @@ namespace Kurenai
         // 【なぜ1パスにまとめないのか】時間・空間の再利用は「どの灯を選んだか」を持ち回って
         // 現フレームで評価し直す形でしか書けない。選択とシェードが混ざっていると再利用の段を
         // 差し込む場所が無い。分けておけば両者の間に挟むだけで済む
-        if (ShouldRunMegaLights() && m_MegaLightsMode == MegaLightsMode::Stochastic)
+        //
+        // 【クアッド共有(手法3)は Initial をそのまま共有する】違うのは後段だけで、
+        // 時間・空間再利用を挟まずに Resolve が2x2の4標本を平均する。
+        // Initial を共有していることが陽性対照の土台になる ―― 共有を切った手法3は、
+        // 手法2から再利用を外した構成と画素単位で一致するはず
+        const bool megaLightsQuadShared =
+            ShouldRunMegaLights() && m_MegaLightsMode == MegaLightsMode::QuadShared;
+        if (ShouldRunMegaLights() &&
+            (m_MegaLightsMode == MegaLightsMode::Stochastic || megaLightsQuadShared))
         {
             // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
             // Initial側のExecuteで1回だけ更新すればよい
-            const auto buildStochasticConstants = [this, &jitteredProj](uint32_t spatialIteration)
+            const auto buildStochasticConstants =
+                [this, &jitteredProj, megaLightsQuadShared](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
                 stochasticConstants.Params0 =
@@ -12552,8 +12618,11 @@ namespace Kurenai
                     static_cast<uint32_t>(std::max(1, m_MegaLightsSpatialRadius)),
                     m_MegaLightsSpatialMIS ? 1u : 0u,
                     // 初期可視レイでリザーバを殺すか(Initialが読む)。殺すと影の縁に
-                    // 暗い側の系統誤差が残るため、切り替えて測れるようにしてある
-                    m_MegaLightsInitialVisibility ? 1u : 0u,
+                    // 暗い側の系統誤差が残るため、切り替えて測れるようにしてある。
+                    // 【手法3では必ず撃つ】クアッド共有は「Initialが撃った1本」だけを
+                    // 可視性の情報源にしている。切ると全標本が可視フラグ付きで出てきて
+                    // 影が1つも出ない(絵が明るいだけで例外もログも出ない)
+                    (megaLightsQuadShared || m_MegaLightsInitialVisibility) ? 1u : 0u,
                 };
                 // 候補プールが錐台を組み立てたのと**同じ行列**から取る。ずれると
                 // 「その灯が隣のタイルへ届くか」の判定が候補プールと食い違い、定義域がずれる
@@ -12582,8 +12651,20 @@ namespace Kurenai
                 // 履歴が使えるか。解像度が変わった直後は添字の意味が変わっており、
                 // バッファのクリアが無いRHIでは前の内容が別画素のものとして残っている
                 // y は空間再利用の反復番号。近傍の型板の種に混ぜて、反復ごとに別の近傍を選ばせる
+                // z/w はクアッド共有(手法3)。z は Resolve が、w は Initial が読む。
+                //
+                // 【手法3の Params4.x の意味は手法2と違う】手法2では「時間再利用が履歴
+                // リザーバを読んでよいか」だが、手法3に時間再利用は無く、Initial が
+                // 遮蔽の確定した灯のキャッシュを信用してよいかの判定にだけ使う。
+                // **陽性対照では切る**(履歴に依存すると手法2との画素単位の一致が崩れる)
+                const bool historyUsable = megaLightsQuadShared
+                                               ? (m_MegaLightsHistoryValid && m_MegaLightsBlockedCacheEnabled)
+                                               : m_MegaLightsHistoryValid;
                 stochasticConstants.Params4 = {
-                    m_MegaLightsHistoryValid ? 1u : 0u, spatialIteration, 0u, 0u
+                    historyUsable ? 1u : 0u,
+                    spatialIteration,
+                    (megaLightsQuadShared && m_MegaLightsQuadShareEnabled) ? 1u : 0u,
+                    (megaLightsQuadShared && m_MegaLightsQuadStratify) ? 1u : 0u,
                 };
                 return stochasticConstants;
             };
@@ -12601,9 +12682,14 @@ namespace Kurenai
             // 戻すと、空間で混ぜたものを時間でまた混ぜることになり、近傍どうしの相関が
             // フレームをまたいで積み上がる(ノイズが塊で蠢く)。RTXDI系には戻す実装もあるが、
             // まず戻さない形で入れて、必要になったら測ってから変える
-            const bool temporalRuns = m_MegaLightsTemporalEnabled && m_MegaLightsTemporalPipelineState &&
+            // 【手法3は再利用の段をどちらも通さない】リザーバを持ち回らないのが手法3の要点で、
+            // 追加のレイ(可視レイ・時間検証レイ・不偏化の分母のための補正レイ)が
+            // ここから生まれている。1画素1レイという予算はこれを外して初めて成り立つ
+            const bool temporalRuns = !megaLightsQuadShared && m_MegaLightsTemporalEnabled &&
+                                      m_MegaLightsTemporalPipelineState &&
                                       m_MegaLightsReservoirHistory[0] && m_MegaLightsHistoryGuide[0];
-            const bool spatialRuns = m_MegaLightsSpatialEnabled && m_MegaLightsSpatialPipelineState &&
+            const bool spatialRuns = !megaLightsQuadShared && m_MegaLightsSpatialEnabled &&
+                                     m_MegaLightsSpatialPipelineState &&
                                      m_MegaLightsReservoirSpatialBuffer &&
                                      m_MegaLightsReservoirSpatialBuffer2 && m_MegaLightsSpatialNeighborCount > 0;
             // 反復回数。ping-pongのバッファと定数バッファの本数で上限が決まる。
@@ -12804,6 +12890,54 @@ namespace Kurenai
                 });
             }
 
+            if (megaLightsQuadShared)
+            {
+                // --- クアッド共有の解決: 2x2の4標本を自分の面で評価し直して平均する ---
+                // レイを1本も撃たないのでTLASを束縛しない。可視性は Initial が撃った
+                // 1本の結果を仲間から借りる(受け入れた偏りの本体。MegaLightsResolve.hlsl 冒頭)。
+                //
+                // 【履歴ガイドをここで書く】手法3は時間再利用パスを持たないので、
+                // デノイザが「前フレームの幾何」を引くためのガイドを書く者がいなくなる。
+                // 書かないと動く細い形状でデノイザの履歴が構造的に必ず棄却される
+                // (docs/ImplementationDetail.md 61.7g.6)
+                RHI::IRHIBuffer* const guideWriteBuffer = m_MegaLightsHistoryGuide[historyWriteIndex].get();
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "MegaLightsResolve",
+                    .Reads =
+                    {
+                        m_GBufferAlbedo.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(),
+                        m_GBufferDepth.get(), m_BRDFLUTTexture.get(),
+                    },
+                    .Writes = { m_MegaLightsTexture.get() },
+                    .BufferReads = { m_LightBuffer.get(), m_MegaLightsReservoirBuffer.get() },
+                    .BufferWrites = { guideWriteBuffer },
+                    .Execute = [this, guideWriteBuffer](RHI::IRHICommandList* cmd)
+                    {
+                        // 定数はInitial側で更新済み。ここでバインドし直すのは、DX12が
+                        // SetPipelineStateのたびにルート引数を無効化するため
+                        cmd->SetComputePipelineState(m_MegaLightsResolvePipelineState.get());
+                        cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(1, m_MegaLightsStochasticConstantBuffer.get());
+                        cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
+
+                        // レジスタ割り当てはMegaLightsResolve.hlsl側の宣言と一致させること。
+                        // **t0(TLAS)は宣言していない** ―― レイを撃たないパスなので張らない
+                        cmd->SetComputeTexture(1, m_GBufferNormal.get());
+                        cmd->SetComputeTexture(2, m_GBufferDepth.get());
+                        cmd->SetComputeTexture(3, m_GBufferAlbedo.get());
+                        cmd->SetComputeTexture(4, m_GBufferMaterial.get());
+                        cmd->SetComputeTexture(5, m_BRDFLUTTexture.get());
+                        cmd->SetComputeShaderResourceBuffer(6, m_LightBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(7, m_MegaLightsReservoirBuffer.get());
+
+                        cmd->SetComputeUnorderedAccessTexture(0, m_MegaLightsTexture.get());
+                        cmd->SetComputeUnorderedAccessBuffer(1, guideWriteBuffer);
+                        cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
+                    },
+                });
+            }
+            else
+            {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLightsShade",
                 .Reads =
@@ -12837,25 +12971,32 @@ namespace Kurenai
                     cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
                 },
             });
+            }
         }
 
         // --- デノイザ(段階5): 時間累積 + エッジ停止付き a-trous ---
         // 【蓄積パス(計測)より前に置く】計測したいのはデノイズ後の絵。
         // 【TAAより前に落とす】ノイズを残したまま渡すとTAAが履歴を毎フレーム棄却し、
         // ノイズもAAも両方失う(MegaLightsDenoise.hlsl 冒頭)
+        // 手法2と手法3は同じデノイザを共有する(入力は「確率的に作られた1枚の絵」で同じもの)
         const bool megaLightsDenoiseRuns = ShouldRunMegaLights() &&
-                                           m_MegaLightsMode == MegaLightsMode::Stochastic &&
+                                           (m_MegaLightsMode == MegaLightsMode::Stochastic ||
+                                            m_MegaLightsMode == MegaLightsMode::QuadShared) &&
                                            m_MegaLightsDenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
                                            m_MegaLightsDenoisedTexture != nullptr;
         if (megaLightsDenoiseRuns)
         {
             const uint32_t denoiseWrite = m_MegaLightsDenoiseHistoryIndex;
             const uint32_t denoiseRead = denoiseWrite ^ 1u;
-            // 履歴の妥当性判定に「前フレームの幾何」を使えるか。時間再利用が毎フレーム
-            // 全画素へ書いているガイドで、切っていると更新されないので使えない
-            const bool denoiseGuideValid = m_MegaLightsTemporalEnabled &&
-                                           m_MegaLightsTemporalPipelineState &&
-                                           m_MegaLightsHistoryGuide[0] && m_MegaLightsHistoryValid;
+            // 履歴の妥当性判定に「前フレームの幾何」を使えるか。ガイドを毎フレーム全画素へ
+            // 書いているのは、手法2では時間再利用、手法3では Resolve。
+            // どちらも走っていなければ更新されないので使えない
+            const bool denoiseGuideWritten =
+                (m_MegaLightsMode == MegaLightsMode::QuadShared)
+                    ? (m_MegaLightsResolvePipelineState != nullptr)
+                    : (m_MegaLightsTemporalEnabled && m_MegaLightsTemporalPipelineState != nullptr);
+            const bool denoiseGuideValid =
+                denoiseGuideWritten && m_MegaLightsHistoryGuide[0] && m_MegaLightsHistoryValid;
             // 【読むのは前フレームが書いた側】今フレームの時間再利用はもう片方へ書いている
             RHI::IRHIBuffer* const denoiseGuideBuffer =
                 m_MegaLightsHistoryGuide[m_MegaLightsHistoryIndex ^ 1u]
@@ -15173,7 +15314,14 @@ namespace Kurenai
             const bool temporalRan = ShouldRunMegaLights() && m_MegaLightsMode == MegaLightsMode::Stochastic &&
                                      m_MegaLightsTemporalEnabled && m_MegaLightsTemporalPipelineState &&
                                      m_MegaLightsReservoirHistory[0] && m_MegaLightsHistoryGuide[0];
-            if (temporalRan)
+            // 【手法3もガイドを書くので同じ反転が要る】あちらは時間再利用を持たないが、
+            // デノイザが読む「前フレームの幾何」を Resolve が書いている。反転しないと
+            // 同じフレームで書いた側を読むことになり、比べたい「別のフレームの同じ点」に
+            // ならない(そのうえ RenderGraph は WAR の辺を張らないので競合する)
+            const bool quadGuideRan = ShouldRunMegaLights() &&
+                                      m_MegaLightsMode == MegaLightsMode::QuadShared &&
+                                      m_MegaLightsResolvePipelineState && m_MegaLightsHistoryGuide[0];
+            if (temporalRan || quadGuideRan)
             {
                 m_MegaLightsHistoryIndex ^= 1u;
                 // 【1フレーム走ってから有効にする】書いた側を次フレームが読むので、
@@ -15193,7 +15341,8 @@ namespace Kurenai
             // リザーバを混ぜる時間再利用とは独立に効く。条件を混ぜると、片方を切ったときに
             // もう片方の履歴まで無効になって原因が分からなくなる
             const bool denoiseRan = ShouldRunMegaLights() &&
-                                    m_MegaLightsMode == MegaLightsMode::Stochastic &&
+                                    (m_MegaLightsMode == MegaLightsMode::Stochastic ||
+                                     m_MegaLightsMode == MegaLightsMode::QuadShared) &&
                                     m_MegaLightsDenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
                                     m_MegaLightsDenoisedTexture != nullptr;
             if (denoiseRan)
