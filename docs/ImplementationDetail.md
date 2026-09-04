@@ -7009,7 +7009,34 @@ MegaLights経路でも `LightCull`(従来のタイルライトカリング)が�
 **消費者を数えたところ `DirectLighting`(MegaLights時は読まない)と `Present` の
 デバッグ表示(Mode 11)だけ**だった。つまり**通常表示のMegaLights経路では丸ごと無駄**で、
 1026灯で0.198ms(MegaLights合計の7%)を捨てている。デバッグ表示のために残すなら
-`DebugView::LightTiles` を選んでいるときだけ走らせればよい。**未対応。**
+`DebugView::LightTiles` を選んでいるときだけ走らせればよい。
+
+**対応済み(2026-09-05)。** `ShouldRunLightCulling()` を新設し、
+「グリッドを実際に読む者が居るフレームだけ積む」に変えた。真になるのは
+**MegaLightsが走っていないとき、または `DebugView::LightTiles` を選んでいるとき**。
+`ShouldRunMegaLights` と同じ「述語を1か所に集約する」作法で、パスの登録条件・
+容量超過の警告・`LightingConstants.TileParams.w`(グリッドが有効か)の3か所が
+同じ関数を通る。MegaLightsがOFFのフレームでは `m_LightCullingEnabled` と同値なので、
+従来経路の挙動は変わらない。
+
+BistroExteriorNight(107灯)/ 2560x1440 / RTX 4070 Ti / Release / DX12 / 120フレーム平均:
+
+| MegaLights | デバッグ表示 | `LightCull` |
+|---|---|---|
+| OFF | 通常 | 0.142 ms |
+| 手法3 | 通常 | **パスが消える** |
+| 手法3 | ライトタイル | 0.094 ms(**積まれる**) |
+
+削れるのは0.142msで、この構成のMegaLights合計8.13msの1.7%にあたる。
+61.7e.3を書いた当時の1026灯では0.198ms(合計の7%)だったので、
+**灯の多いシーンほど効く**。
+
+3行目は「読み手が居るときだけ積む」の反対側を実測したもの。
+`-debugview 20`(ライトタイル)で起動し、CSVに `LightCull` が戻ることと、
+ヒートマップが**シーンの形状と相関した模様**になることの両方で確かめた。
+前フレームの残骸や未初期化なら出ない絵である。
+なおこの起動のMegaLights側の数値は撮影とウィンドウ状態の影響で膨らむので、
+パスの有無の確認にだけ使う。
 
 #### 61.7e.4 総GPU時間では従来経路のほうが速い
 
