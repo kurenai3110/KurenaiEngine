@@ -86,6 +86,17 @@ Tools/
                                        .kshaderを生成する。KurenaiEngine3D/2Dのビルドイベントから
                                        自動で呼ばれる(独立ソリューションは持たない)
                   Build/               KurenaiShaderPacker.exeとdxcランタイムの出力先(Git管理対象外)
+  kmodel_inspect.py                    .kmodel / .kgeom の中身をJSONで吐く検査ツール
+  texdump_inspect.py                   `-dumptex` が書き出した中間レンダーターゲットの生値を
+                                       数値で調べる(統計・座標指定・差分・PNG化)。
+                                       使う前に `selftest` を通すこと
+  renderdoc_probe.py                   RenderDocをGUI無しで動かし、指定フレームのキャプチャを採って
+                                       ドロー一覧・バインド状況を読む。テクスチャは
+                                       texdump_inspect.py が読める形式で書き出せる
+  renderdoc_setup.ps1                  上を使う前に一度だけ走らせる。RenderDocのPythonモジュールは
+                                       配布版に入っていないため、インストール済みの版に合わせて
+                                       このPC用にビルドして配置する
+                                       (根拠は docs/ImplementationDetail.md 63.10)
 docs/                           ドキュメント(APIリファレンス・実装者向け)
 ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
 Scenes/                         手書きの.kscene(シーンファイル)。小さなテキストのためGit管理対象
@@ -959,6 +970,11 @@ Samples\Sample3D\RunDX12.bat -debug
 | `-megalightstemporal <0\|1>` | 時間再利用(前フレームの自分が選んだ灯を再投影して借りる)の有無。**既定は有効** — 1枚あたりの\|相対誤差\|中央値が6.0倍良くなる |
 | `-megalightstemporalmclamp <上限>` | 履歴のMの上限(**既定は64**)。上げるとフレーム間は静かになるが、各画素の当選灯が凍結して影の縁に点描状の空間ノイズが固定される。ちらつきはデノイザの時間累積が吸うので、上げて抑える必要はない |
 | `-perfdump <パス>` / `-perfdumpframes <枚数>` | **計測専用**。GPUの区間計測をウォームアップ後に平均してCSVへ書き出す。Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので性能測定には使えない |
+| `-dumptex <名前> <パス>` | **検証専用**。中間レンダーターゲット(G-Buffer・深度・シャドウマップ・間接光など)の中身を、線形の生値のままファイルへ書き出す。**繰り返し指定でき、1回の起動で複数枚を同じフレームから落とせる**。読むのは `Tools/texdump_inspect.py`。指定できる名前を知りたいときは存在しない名前を渡すと、有効な名前が全部ログに並ぶ |
+| `-dumptexmip <N>` / `-dumptexslice <N>` | **直前の** `-dumptex` に対するミップ段・配列スライスの指定(既定 `0`)。Hi-Zのミップチェーンやシャドウカスケードの特定の段を見るときに使う |
+| `-dumpframe <N>` | `-dumptex` が何フレーム目のものを書き出すか(既定 `180`)。起動直後は内部解像度の切り替えとストリーミングが走っているため、小さくしすぎると別の状態の絵を掴む |
+| `-exitafterdump` | `-dumptex` が全部書き終わったらウィンドウを閉じる(無人での検証用) |
+| `-taa <0\|1>` | TAAの有無を上書きする。TAAのジッタは投影行列を毎フレームずらすため、同じ条件で2回撮ってもダンプがビット一致しない。A/Bの再現性の下限をゼロにしたいときは `0` |
 | `-megalightsdenoise <0\|1>` | デノイザ(時間累積 + エッジ停止付き a-trous)の有無。**既定は有効** |
 | `-megalightsdenoiseatrous <段数>` | a-trous の段数(0で時間累積のみ)。**既定は3**。分散を段ごとに畳んで次段へ渡すようにするまでは段を増やすほど悪化していた(未フィルタの時間分散を全段で使い回していたため)。直したあとは3段と4段が底で、5段で悪化に転じる |
 | `-megalightsdenoisesigma <値>` | 輝度のエッジ停止の強さ(SVGFのσ_l)。**既定は1.5**。本家の慣例値4.0まで上げると誤差もエネルギー損失も一貫して悪化する |

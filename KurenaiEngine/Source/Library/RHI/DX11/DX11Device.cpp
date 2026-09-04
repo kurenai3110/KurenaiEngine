@@ -2,6 +2,7 @@
 
 #include <DirectXTex.h>
 
+#include <algorithm>
 #include <cwchar>
 #include <stdexcept>
 #include <string>
@@ -20,6 +21,7 @@
 #include "DX11SwapChain.h"
 #include "DX11Texture.h"
 #include "DX11Util.h"
+#include "RHI/RHIReadbackFormat.h"
 #include "RHI/RHIShaderPackage.h"
 #include "RHI/TextureImage.h"
 
@@ -1068,6 +1070,86 @@ namespace Kurenai::RHI
         return std::make_unique<DX11Texture>(
             srv, nullptr, nullptr, nullptr,
             std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>>{}, std::move(sliceDsvs));
+    }
+
+    std::unique_ptr<IRHITexture> DX11Device::CreateReadbackTexture(IRHITexture* source, uint32_t mipLevel)
+    {
+        if (source == nullptr)
+        {
+            Core::Logger::Error("DX11", "CreateReadbackTexture: コピー元がnullptrです");
+            return nullptr;
+        }
+
+        auto* dx11Source = static_cast<DX11Texture*>(source);
+        ID3D11Texture2D* sourceTexture = dx11Source->GetTexture2D();
+        if (sourceTexture == nullptr)
+        {
+            // ビューからTexture2Dを引けない = Texture3D(雲の3Dノイズ)かバッファのビュー。
+            // ファイル形式もCPU側の読み手も2次元を前提にしているため、半端に通さずここで断る
+            Core::Logger::Error(
+                "DX11", "CreateReadbackTexture: Texture2D以外はリードバックに対応していません");
+            return nullptr;
+        }
+
+        D3D11_TEXTURE2D_DESC sourceDesc{};
+        sourceTexture->GetDesc(&sourceDesc);
+        if (mipLevel >= sourceDesc.MipLevels)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "CreateReadbackTexture: ミップレベルが範囲外です (mipLevel=" + std::to_string(mipLevel) +
+                    ", MipLevels=" + std::to_string(sourceDesc.MipLevels) + ")");
+            return nullptr;
+        }
+
+        const uint32_t mipWidth = std::max<uint32_t>(1u, sourceDesc.Width >> mipLevel);
+        const uint32_t mipHeight = std::max<uint32_t>(1u, sourceDesc.Height >> mipLevel);
+
+        // 【DX12とまったく同じ表を引く】RHIReadbackFormat.hに置いてあるのは、
+        // ここを別々に書くと片方だけ直したときに静かに食い違うため
+        const TextureReadbackDesc readbackDesc = DescribeReadbackFormat(sourceDesc.Format, mipWidth, mipHeight);
+        if (readbackDesc.ElementType == TextureElementType::Unknown)
+        {
+            // BC圧縮のアセットテクスチャなど。**黙って0で埋めた結果を返さない**
+            Core::Logger::Error(
+                "DX11",
+                "CreateReadbackTexture: 対応していないフォーマットです (DXGI_FORMAT=" +
+                    std::to_string(static_cast<int>(sourceDesc.Format)) +
+                    ")。RHIReadbackFormat.hの対応表に無いため読み出せません");
+            return nullptr;
+        }
+
+        D3D11_TEXTURE2D_DESC stagingDesc{};
+        stagingDesc.Width = mipWidth;
+        stagingDesc.Height = mipHeight;
+        stagingDesc.MipLevels = 1;
+        stagingDesc.ArraySize = 1;
+        // 【typelessのまま作らない】深度はDSVとSRVを両立させるためR32_TYPELESSで作られている。
+        // typelessのステージングテクスチャをMapしても解釈が決まらないため、型付きに置き換える。
+        // CopySubresourceRegionは同じtypeグループのフォーマット間なら許すので合法
+        // (置き換えの根拠と表はRHIReadbackFormat.hのToReadbackTypedFormat。DX12と共通)
+        stagingDesc.Format = ToReadbackTypedFormat(sourceDesc.Format);
+        stagingDesc.SampleDesc.Count = 1;
+        stagingDesc.SampleDesc.Quality = 0;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.MiscFlags = 0;
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> stagingTexture;
+        const HRESULT hr = m_Device->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
+        if (FAILED(hr))
+        {
+            // 【throwしない】これは描画に必須の資源ではなく、デバッグ用の吸い出しの受け皿。
+            // 確保に失敗しても起動そのものを落とすべきではない
+            Core::Logger::Error(
+                "DX11",
+                "CreateReadbackTexture: リードバックテクスチャの作成に失敗しました (" +
+                    std::to_string(mipWidth) + "x" + std::to_string(mipHeight) + ")");
+            return nullptr;
+        }
+
+        return std::make_unique<DX11Texture>(stagingTexture, m_Context, readbackDesc);
     }
 
     std::unique_ptr<IRHISamplerSet> DX11Device::CreateSamplerSet(const SamplerDesc* descs, uint32_t count)

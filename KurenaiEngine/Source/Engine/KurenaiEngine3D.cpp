@@ -8,6 +8,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -4880,11 +4881,496 @@ namespace Kurenai
         m_TAAHistoryValid = false;
         m_TAAHistoryIndex = 0;
 
+        // ポインタが作り直されたので、グラフィックスデバッガ向けの名前を焼き直す
+        m_DebugNamesDirty = true;
+
         // A/B比較の記録用。どちらの構成で描かれたスクリーンショットなのかをログから追えるようにする
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("レンダーターゲットを作成しました (") + std::to_string(width) + "x" + std::to_string(height) +
                 ", バッファ精度=" + (legacyPrecision ? "Legacy8bit" : "HDR") + ")");
+    }
+
+    std::vector<KurenaiEngine3D::DumpableTexture> KurenaiEngine3D::BuildDumpableTextureTable() const
+    {
+        // 名前 -> 中間テクスチャ。AddTextureDump(起動オプション -dumptex)が引く。
+        //
+        // 【DebugViewの番号と共有しない】あちらは「表示モード」でテクスチャと1対1ではない
+        // (DepthとDepthRawは同じm_GBufferDepth、LightTilesはテクスチャではなくバッファを読む)。
+        // さらに切り分けで見たいもの ―― SSILRaw / TransmittanceLUT / TAAHistory / ExposureTexture ――
+        // はDebugViewに存在せず、足すにはPresent.hlslの表示モードを増やすことになる。
+        // 加えてDebugViewの番号は -debugview N として既に契約になっており、
+        // 途中に足すとdocsと履歴に記録済みの番号が全部ずれる。
+        //
+        // 【CreateRenderTargetsの直後に置いてある】ポインタが生まれる場所の隣なら、
+        // テクスチャを増やしたときにここへ足し忘れにくい。
+        // **CreateRenderTargets等でテクスチャを増やしたらここにも足すこと。**
+        //
+        // 名前はメンバ名から m_ を外したもの。中身がnullptr(機能が無効・非対応環境)の
+        // エントリも表には載せる ―― 「名前が無い」と「今は作られていない」は別のことで、
+        // 呼び出し側にそれぞれ別のログを出させるため
+        return {
+            // G-Buffer
+            { "GBufferAlbedo", m_GBufferAlbedo.get() },
+            { "GBufferNormal", m_GBufferNormal.get() },
+            { "GBufferMaterial", m_GBufferMaterial.get() },
+            { "GBufferEmissive", m_GBufferEmissive.get() },
+            { "GBufferDepth", m_GBufferDepth.get() },
+            { "GBufferVelocity", m_GBufferVelocity.get() },
+            { "GBufferBentNormal", m_GBufferBentNormal.get() },
+            // ライティングと間接光
+            { "DirectLightTexture", m_DirectLightTexture.get() },
+            { "SSAORawTexture", m_SSAORawTexture.get() },
+            { "SSAOTexture", m_SSAOTexture.get() },
+            { "SSILRawTexture", m_SSILRawTexture.get() },
+            { "SSILTexture", m_SSILTexture.get() },
+            { "RTAORawTexture", m_RTAORawTexture.get() },
+            { "RTAOTexture", m_RTAOTexture.get() },
+            { "RTShadowTexture", m_RTShadowTexture.get() },
+            { "SceneColor", m_SceneColor.get() },
+            // 反射
+            { "SSRTexture", m_SSRTexture.get() },
+            { "RTReflectionTexture", m_RTReflectionTexture.get() },
+            { "PlanarReflectionColor", m_PlanarReflectionColor.get() },
+            { "PlanarReflectionDepth", m_PlanarReflectionDepth.get() },
+            // MegaLights
+            { "MegaLightsTexture", m_MegaLightsTexture.get() },
+            { "MegaLightsDenoisedTexture", m_MegaLightsDenoisedTexture.get() },
+            // 影・Hi-Z
+            { "ShadowCascadeArray", m_ShadowCascadeArray.get() },
+            { "HiZTexture", m_HiZTexture.get() },
+            // 空と大気
+            { "SkyCloudTexture", m_SkyCloudTexture.get() },
+            { "AerialPerspectiveTexture", m_AerialPerspectiveTexture.get() },
+            { "TransmittanceLUT", m_TransmittanceLUT.get() },
+            { "MultiScatteringLUT", m_MultiScatteringLUT.get() },
+            { "SkyViewLUT", m_SkyViewLUT.get() },
+            // DDGI
+            { "DDGIIrradianceAtlas", m_DDGIIrradianceAtlas.get() },
+            { "DDGIDistanceAtlas", m_DDGIDistanceAtlas.get() },
+            { "DDGIResolveTexture", m_DDGIResolveTexture.get() },
+            { "DDGIResolveDepthTexture", m_DDGIResolveDepthTexture.get() },
+            // IBL
+            { "BRDFLUTTexture", m_BRDFLUTTexture.get() },
+            // ポストプロセスと最終段
+            { "TonemapTexture", m_TonemapTexture.get() },
+            { "UpscaleTexture", m_UpscaleTexture.get() },
+            { "UpscaleSharpTexture", m_UpscaleSharpTexture.get() },
+            { "ExposureTexture", m_ExposureTexture.get() },
+            // TAAの履歴。今フレームの書き込み先が m_TAAHistoryIndex なので、
+            // 「前フレームの履歴」を見たいときは Prev のほうを指定する
+            { "TAAHistory", m_TAAHistory[m_TAAHistoryIndex].get() },
+            { "TAAHistoryPrev", m_TAAHistory[m_TAAHistoryIndex ^ 1u].get() },
+            // 自前ソフトウェアラスタライザ
+            { "SoftwareRasterColor", m_SoftwareRasterColor.get() },
+            { "SoftwareRasterDepth", m_SoftwareRasterDepth.get() },
+            { "SoftwareRasterNormal", m_SoftwareRasterNormal.get() },
+        };
+    }
+
+    void KurenaiEngine3D::ApplyDebugNames() const
+    {
+        uint32_t named = 0;
+        for (const DumpableTexture& entry : BuildDumpableTextureTable())
+        {
+            if (entry.Texture != nullptr)
+            {
+                entry.Texture->SetDebugName(entry.Name);
+                ++named;
+            }
+        }
+        // 何本に名前が付いたかを残す。**「名前が出ない」ときに、付け忘れなのか
+        // その機能が無効でテクスチャ自体が無いのかを、ログだけで切り分けられるようにする**
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "グラフィックスデバッガ向けの名前を付けました: " + std::to_string(named) + "本");
+    }
+
+    std::vector<std::string> KurenaiEngine3D::GetDumpableTextureNames() const
+    {
+        std::vector<std::string> names;
+        for (const DumpableTexture& entry : BuildDumpableTextureTable())
+        {
+            names.emplace_back(entry.Name);
+        }
+        return names;
+    }
+
+    void KurenaiEngine3D::AddTextureDump(const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice)
+    {
+        if (name == nullptr || path == nullptr || name[0] == L'\0' || path[0] == L'\0')
+        {
+            Core::Logger::Error("KurenaiEngine3D", "AddTextureDump: テクスチャ名か出力先が空です");
+            return;
+        }
+
+        TextureDumpRequest request;
+        request.Name = Core::WideToUtf8(name);
+        request.Path = path;
+        request.MipLevel = mipLevel > 0 ? static_cast<uint32_t>(mipLevel) : 0u;
+        request.ArraySlice = arraySlice > 0 ? static_cast<uint32_t>(arraySlice) : 0u;
+        m_TextureDumps.push_back(std::move(request));
+
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "テクスチャの書き出しを予約しました: " + m_TextureDumps.back().Name + " -> " +
+                Core::WideToUtf8(path) + " (mip=" + std::to_string(m_TextureDumps.back().MipLevel) +
+                ", slice=" + std::to_string(m_TextureDumps.back().ArraySlice) + ")");
+    }
+
+    void KurenaiEngine3D::SetTextureDumpFrame(int frame)
+    {
+        m_TextureDumpFrame = frame;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "テクスチャを書き出すフレームを設定しました: " +
+                (frame < 0 ? std::string("既定(") + std::to_string(kMegaLightsAccumWarmup) + ")"
+                           : std::to_string(frame)));
+    }
+
+    void KurenaiEngine3D::SetExitAfterDump(bool enabled)
+    {
+        m_ExitAfterDump = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("書き出し後の自動終了: ") + (enabled ? "有効" : "無効"));
+    }
+
+    void KurenaiEngine3D::IssueTextureDumps(Core::RenderGraph& graph)
+    {
+        if (m_TextureDumps.empty())
+        {
+            return;
+        }
+
+        // 【整定を待つ】起動直後は内部解像度が既定値(1280x720)から実ウィンドウサイズへ切り替わり、
+        // ストリーミングも走っている。待たずに書き出すと1280x720のまま吐き出される
+        // (kMegaLightsAccumWarmupのコメントに、実際にそうなった記録がある)
+        const uint32_t targetFrame =
+            m_TextureDumpFrame >= 0 ? static_cast<uint32_t>(m_TextureDumpFrame) : kMegaLightsAccumWarmup;
+        if (m_TAAFrameIndex < targetFrame)
+        {
+            return;
+        }
+
+        // 【表は毎回作り直す】レンダーターゲットはリサイズやバッファ精度の切り替えで
+        // ポインタごと作り直される。キャッシュすると解放済みのテクスチャを指す
+        const std::vector<DumpableTexture> table = BuildDumpableTextureTable();
+
+        // このフレームでコピーを積むぶん。要求ごとにコピー元を覚えておく
+        struct PendingCopy
+        {
+            size_t RequestIndex = 0;
+            RHI::IRHITexture* Source = nullptr;
+        };
+        std::vector<PendingCopy> pending;
+        std::vector<RHI::IRHITexture*> reads;
+
+        for (size_t i = 0; i < m_TextureDumps.size(); ++i)
+        {
+            TextureDumpRequest& request = m_TextureDumps[i];
+            if (request.Issued || request.Done)
+            {
+                continue;
+            }
+
+            const DumpableTexture* found = nullptr;
+            for (const DumpableTexture& entry : table)
+            {
+                if (_stricmp(entry.Name, request.Name.c_str()) == 0)
+                {
+                    found = &entry;
+                    break;
+                }
+            }
+
+            if (found == nullptr)
+            {
+                // 【有効な名前を全部並べる】UIを見られない利用者にとって、
+                // これが「何が指定できるか」を知る唯一の手段になる
+                std::string names;
+                for (const DumpableTexture& entry : table)
+                {
+                    if (!names.empty())
+                    {
+                        names += ", ";
+                    }
+                    names += entry.Name;
+                }
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "テクスチャの書き出し: 名前が見つかりません: " + request.Name + " / 指定できる名前: " + names);
+                request.Done = true;
+                continue;
+            }
+
+            if (found->Texture == nullptr)
+            {
+                // 名前はあるが、その機能が無効か非対応環境。**「名前が無い」とは別のログにする**
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "テクスチャの書き出し: " + request.Name +
+                        " は今このフレームでは作られていません(機能が無効か、非対応の環境)。書き出しを中止します");
+                request.Done = true;
+                continue;
+            }
+
+            request.Readback = m_Device->CreateReadbackTexture(found->Texture, request.MipLevel);
+            if (!request.Readback)
+            {
+                // CreateReadbackTextureが理由をログへ出している(非対応フォーマット・範囲外のミップ等)
+                Core::Logger::Error(
+                    "KurenaiEngine3D", "テクスチャの書き出し: 受け皿を作れませんでした: " + request.Name);
+                request.Done = true;
+                continue;
+            }
+
+            // 【寸法は今ここで控える】あとで生ポインタから引き直すと、その間にリサイズが起きた場合に
+            // 受け皿の中身と食い違う値をヘッダへ書いてしまう
+            request.Desc = request.Readback->GetReadbackDesc(0);
+            request.Issued = true;
+            request.CopyFrame = m_TAAFrameIndex;
+
+            pending.push_back(PendingCopy{ i, found->Texture });
+            reads.push_back(found->Texture);
+        }
+
+        if (pending.empty())
+        {
+            return;
+        }
+
+        // 【Readsだけを持つパス】書き手より後に順序付けるためにReadsへ入れる。
+        // Writesを持たないので新たな循環依存は作らない(MegaLightsDumpと同じ形)
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "TextureDump",
+            .Reads = std::move(reads),
+            .Execute = [this, pending](RHI::IRHICommandList* cmd)
+            {
+                for (const PendingCopy& copy : pending)
+                {
+                    TextureDumpRequest& request = m_TextureDumps[copy.RequestIndex];
+                    cmd->CopyTextureToReadback(
+                        request.Readback.get(), copy.Source, request.MipLevel, request.ArraySlice);
+                }
+            },
+        });
+    }
+
+    void KurenaiEngine3D::ResolveTextureDumps()
+    {
+        if (m_TextureDumps.empty())
+        {
+            return;
+        }
+
+        bool allDone = true;
+        for (TextureDumpRequest& request : m_TextureDumps)
+        {
+            if (request.Done)
+            {
+                continue;
+            }
+            if (!request.Issued)
+            {
+                allDone = false;
+                continue;
+            }
+
+            // 【積んだ直後に読まない】GPUの実行はCPUより数フレーム遅れる。
+            // 待ちが足りないとエラーにならず、静かに古い/未初期化の中身が返る
+            if (m_TAAFrameIndex - request.CopyFrame < kTextureDumpReadDelayFrames)
+            {
+                allDone = false;
+                continue;
+            }
+
+            const uint32_t rowPitch = request.Desc.Width * request.Desc.BytesPerTexel;
+            const size_t totalBytes = static_cast<size_t>(rowPitch) * request.Desc.Height;
+            if (totalBytes == 0)
+            {
+                Core::Logger::Error(
+                    "KurenaiEngine3D", "テクスチャの書き出し: 中身のサイズが0です: " + request.Name);
+                request.Done = true;
+                continue;
+            }
+
+            std::vector<uint8_t> pixels(totalBytes);
+            if (!request.Readback->ReadbackData(pixels.data(), static_cast<uint32_t>(totalBytes)))
+            {
+                // DX11のMap(DO_NOT_WAIT)はGPUが詰まっていると失敗する。**1回で諦めない**が、
+                // 永遠に待ってもいけない ―― -exitafterdump と組み合わせた無人実行が
+                // 静かに固まるのが最悪の失敗なので、上限を決めて打ち切る
+                ++request.FailedFrames;
+                if (request.FailedFrames >= kTextureDumpMaxFailedFrames)
+                {
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "テクスチャの書き出し: " + std::to_string(kTextureDumpMaxFailedFrames) +
+                            "フレーム続けて読み戻せませんでした。中止します: " + request.Name);
+                    request.Done = true;
+                }
+                else
+                {
+                    allDone = false;
+                }
+                continue;
+            }
+
+            WriteTextureDumpFile(request, pixels);
+            request.Done = true;
+            // 受け皿はもう要らない。数十MBになることがあるので抱え続けない
+            request.Readback.reset();
+        }
+
+        if (allDone && m_ExitAfterDump && !m_ExitAfterDumpRequested)
+        {
+            m_ExitAfterDumpRequested = true;
+            if (m_Window)
+            {
+                // 【PostQuitMessageではない】あれは**呼び出したスレッドの**キューへWM_QUITを積む。
+                // ここはRenderスレッドで、メッセージを汲むのはUpdateスレッド(Run()のPumpMessages)
+                // なので、Renderスレッドから呼んでも誰も拾わず永久に終わらない。
+                // PostMessageWはスレッド安全にウィンドウのキューへ積める。
+                // WM_CLOSEはWindow::HandleMessageがm_ShouldClose=trueにするだけなので、
+                // Run()のループが正規の手順で抜ける(スレッドの停止も後始末も普段どおり走る)
+                Core::Logger::Info("KurenaiEngine3D", "テクスチャの書き出しが完了したので終了します");
+                PostMessageW(m_Window->GetHandle(), WM_CLOSE, 0, 0);
+            }
+            else
+            {
+                Core::Logger::Error(
+                    "KurenaiEngine3D", "書き出し後の自動終了: ウィンドウが無いため終了要求を出せません");
+            }
+        }
+    }
+
+    bool KurenaiEngine3D::WriteTextureDumpFile(
+        const TextureDumpRequest& request, const std::vector<uint8_t>& pixels) const
+    {
+        // ファイル形式(Tools/texdump_inspect.py と一致させること):
+        //   off  size  内容
+        //     0    4   マジック 'K','T','X','D'
+        //     4    4   uint32 Version (=2。v1はBackend欄が無く、SourceNameの位置が4バイト手前)
+        //     8    4   uint32 HeaderBytes (=128。ピクセルデータはここから始まる)
+        //    12    4   uint32 Width
+        //    16    4   uint32 Height
+        //    20    4   uint32 ChannelCount (1..4。ElementType=4では「展開後の」成分数=3)
+        //    24    4   uint32 ElementType (1=UNorm8, 2=Float16, 3=Float32, 4=Packed11_11_10_Float)
+        //    28    4   uint32 BytesPerElement (1/2/4。ElementType=4だけは1テクセルのバイト数=4)
+        //    32    4   uint32 FrameIndex (m_TAAFrameIndex。複数枚が同一フレームかの照合用)
+        //    36    4   uint32 MipLevel
+        //    40    4   uint32 ArraySlice
+        //    44    4   uint32 Backend (1=DX11, 2=DX12)
+        //    48   64   char   SourceName[64] (NUL終端UTF-8。迷子のファイルの自己申告用)
+        //   112   16   予約(0)
+        //   128  ...   ピクセルデータ。**行パディング無し**、上から下・左から右、
+        //              index = (y * Width + x) * ChannelCount。リトルエンディアン
+        //              (ElementType=4だけは 1テクセル=uint32 1個で、展開は読み手が行う)
+        //
+        // 【HeaderBytesを持たせる理由】後からフィールドを足しても、読み手の
+        // 「ここからがデータ」という判断が変わらないようにするため。
+        //
+        // 【DXGI_FORMATは書かない】RHIがD3D固有の型を公開していないうえ、読み手が知りたい
+        // 「量子化の刻み幅」はElementTypeだけで決まる(UNorm8なら1/255、Float16なら半精度)。
+        // 意味を持たない値をヘッダに置くと、いつか誰かがそれを根拠に判断してしまう。
+        //
+        // 【Backendを書く理由】DX11とDX12のダンプは、一致していればヘッダまでバイト一致する。
+        // そうなると「本当に別々のバックエンドで採ったのか」をファイルから確かめられず、
+        // A/Bで言うところの「片方が実行されていない」を潰せない。
+        // 出所をファイル自身に自己申告させる
+        constexpr uint32_t kHeaderBytes = 128;
+        constexpr uint32_t kNameBytes = 64;
+
+        uint32_t elementType = 0;
+        uint32_t bytesPerElement = 0;
+        switch (request.Desc.ElementType)
+        {
+        case RHI::TextureElementType::UNorm8:
+            elementType = 1;
+            bytesPerElement = 1;
+            break;
+        case RHI::TextureElementType::Float16:
+            elementType = 2;
+            bytesPerElement = 2;
+            break;
+        case RHI::TextureElementType::Float32:
+            elementType = 3;
+            bytesPerElement = 4;
+            break;
+        case RHI::TextureElementType::Packed11_11_10_Float:
+            // 1テクセル4バイトに3成分が詰まっている。**ここでは展開せず、詰まったまま書く。**
+            //
+            // 【なぜC++側で展開しないのか】展開の正しさを確かめるには非ゼロのR11G11B10データが要るが、
+            // このフォーマットを使うのはG-Bufferのエミッシブだけで、手元のどのシーンでも全画素0だった
+            // (MaterialTest / PenumbraH4 / BistroInteriorLit で確認)。
+            // 一度も動かせないデコーダをC++に置くと、いつか非ゼロのデータが来たときに
+            // 静かに誤った数値を返す。読み手(Tools/texdump_inspect.py)に置けば、
+            // 11bit/10bitの全ビットパターンを網羅した検算をselftestで常時回せる
+            elementType = 4;
+            bytesPerElement = 4; // 1テクセルあたりのバイト数(1成分あたりではない)
+            break;
+        default:
+            Core::Logger::Error(
+                "KurenaiEngine3D", "テクスチャの書き出し: 解釈できない要素型です: " + request.Name);
+            return false;
+        }
+
+        std::ofstream file(request.Path, std::ios::binary | std::ios::trunc);
+        if (!file)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "テクスチャを書き出せませんでした(ファイルを開けない): " + Core::WideToUtf8(request.Path));
+            return false;
+        }
+
+        const char magic[4] = { 'K', 'T', 'X', 'D' };
+        const uint32_t header[11] = {
+            // 【Backend欄を足したときに上げた】v1とv2はSourceNameの位置が4バイトずれる。
+            // 上げずに黙って読ませると、名前の先頭4文字がBackendとして解釈される
+            2u,                        // Version
+            kHeaderBytes,              // HeaderBytes
+            request.Desc.Width,        // Width
+            request.Desc.Height,       // Height
+            request.Desc.ChannelCount, // ChannelCount
+            elementType,               // ElementType
+            bytesPerElement,           // BytesPerElement
+            m_TAAFrameIndex,           // FrameIndex
+            request.MipLevel,          // MipLevel
+            request.ArraySlice,        // ArraySlice
+            m_GraphicsAPI == GraphicsAPI::DX12 ? 2u : 1u, // Backend
+        };
+        char name[kNameBytes] = {};
+        // 名前が64バイトを超える場合は切り詰める(NUL終端は必ず残す)
+        const size_t nameLength = std::min(request.Name.size(), static_cast<size_t>(kNameBytes - 1));
+        std::memcpy(name, request.Name.data(), nameLength);
+        char reserved[kHeaderBytes - sizeof(magic) - sizeof(header) - kNameBytes] = {};
+
+        file.write(magic, sizeof(magic));
+        file.write(reinterpret_cast<const char*>(header), sizeof(header));
+        file.write(name, sizeof(name));
+        file.write(reserved, sizeof(reserved));
+        file.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+
+        if (!file)
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "テクスチャを書き出せませんでした(書き込みに失敗): " + Core::WideToUtf8(request.Path));
+            return false;
+        }
+
+        // 【この行を待って読むこと】ファイルが存在することは書き終わりを意味しない。
+        // 呼び出し側(スキルの手順)はこの行が出てからプロセスを落とす
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "テクスチャを書き出しました: " + Core::WideToUtf8(request.Path) + " (" + request.Name + " " +
+                std::to_string(request.Desc.Width) + "x" + std::to_string(request.Desc.Height) +
+                " ch=" + std::to_string(request.Desc.ChannelCount) + " elem=" + std::to_string(elementType) +
+                " mip=" + std::to_string(request.MipLevel) + " slice=" + std::to_string(request.ArraySlice) +
+                " frame=" + std::to_string(m_TAAFrameIndex) + ")");
+        return true;
     }
 
     void KurenaiEngine3D::CreatePlanarReflectionTargets()
@@ -4920,6 +5406,8 @@ namespace Kurenai
 
         m_PlanarReflectionWidth = width;
         m_PlanarReflectionHeight = height;
+        // ポインタが作り直されたので、グラフィックスデバッガ向けの名前を焼き直す
+        m_DebugNamesDirty = true;
 
         Core::Logger::Info(
             "KurenaiEngine3D",
@@ -15121,6 +15609,19 @@ namespace Kurenai
         const RHI::Viewport letterboxViewport = ComputeLetterboxViewport(
             m_Window->GetWidth(), m_Window->GetHeight(), presentSourceWidth, presentSourceHeight);
 
+        // グラフィックスデバッガ向けの名前を焼く。**フレームの記録とは独立**なので
+        // レンダーグラフへは積まず、ここで直接呼ぶ(ID3D12Object::SetNameはコマンドではない)。
+        // 立っているのは起動直後とレンダーターゲットを作り直した直後だけ
+        if (m_DebugNamesDirty)
+        {
+            ApplyDebugNames();
+            m_DebugNamesDirty = false;
+        }
+
+        // 【Presentより前に積む】書き出す対象は中間バッファなので、Presentの後ろに置く理由が無い。
+        // Readsで書き手より後に順序付くので、この位置に積めば「そのフレームの最終的な中身」が取れる
+        IssueTextureDumps(graph);
+
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Present",
             .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture,
@@ -15309,6 +15810,11 @@ namespace Kurenai
                 }
             }
         }
+
+        // --- 中間レンダーターゲットの生値ダンプ(検証専用) ---
+        // 【perfdumpと同じく毎フレーム走る場所へ置く】積んだコピーを数フレーム後に読む仕組みなので、
+        // ここが毎フレーム呼ばれないと待ちフレームがいつまでも進まない
+        ResolveTextureDumps();
 
         m_TAAPrevEffectiveExposureEV100 = m_EffectiveExposureEV100;
 
