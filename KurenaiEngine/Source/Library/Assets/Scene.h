@@ -569,6 +569,17 @@ namespace Kurenai::Assets
         float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };  // 編隊の中心(ワールド座標)
         bool HasDroneShowScale = false;
         float DroneShowScale = 130.0f;      // 編隊の代表半径[m]
+        // 機体を光源としても送るか。灯の明るさはショー(.kshow)のBrightnessとRadiusから
+        // 導かれるので、ここには明るさのつまみを置かない(置くと「同じショーがシーンごとに
+        // 別の明るさで照らす」ことになり、上の分担が崩れる)
+        bool HasDroneShowCastLight = false;
+        bool DroneShowCastLight = false;
+        // 灯の明るさの倍率。1.0がスプライトから導いた物理的な値。
+        // 【これはショーの中身ではない】倍率が変えるのは「この舞台でどれだけ照らして見せるか」で、
+        // ショーそのもの(機体の見た目の明るさ)は.kshowのBrightnessが持ったままである。
+        // 同じショーを別のシーンへ置いたときに、見た目は同じで照らし方だけ変わってよい
+        bool HasDroneShowCastLightScale = false;
+        float DroneShowCastLightScale = 1.0f;
 
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う

@@ -1163,6 +1163,9 @@ namespace Kurenai
         // (m_LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
         //  パスの中で更新すると先に走る側が未更新の内容を読む)
         std::vector<GPUDrone> m_DroneInstances;
+        // 機体を光源として送るときの、間引いた灯。毎フレームDroneShow::BuildLightSamplesが書き、
+        // gpuLightsの組み立てで手置きライト・エミッシブプロキシの後ろへ連結する
+        std::vector<DroneLightSample> m_DroneLightSamples;
         // 再生器。編隊の点そのものはここが持つ(.kshowから読み込む)
         DroneShow m_DroneShow;
 
@@ -1183,6 +1186,20 @@ namespace Kurenai
         // 【これだけはシーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
         // 「1画素を割ったらちらつく」という事実はどのシーン・どのショーでも変わらないため
         float m_DroneShowMinScreenRadius = Defaults::DroneShowMinScreenRadius;
+        // 機体を光源としても送るか。シーンが決める(「出すか」の一種)
+        bool m_DroneShowCastLight = Defaults::DroneShowCastLight;
+        // 灯の明るさの倍率。1.0がスプライトから導いた物理的な値で、演出用にシーンが上げられる
+        float m_DroneShowCastLightScale = Defaults::DroneShowCastLightScale;
+        // 光源として送る灯の数と、Rangeを逆算する打ち切り照度[lx]。
+        // 【これらもシーンにもショーにも持たせない】MinScreenRadiusと同じで、
+        // タイルライトカリングの容量という描画側の事情で決まる値だから
+        int m_DroneShowLightSampleCount = Defaults::DroneShowLightSampleCount;
+        float m_DroneShowLightCutoffLux = Defaults::DroneShowLightCutoffLux;
+        // 実際に送った灯の数。ログとUIの表示用
+        uint32_t m_DroneShowLightUsedCount = 0;
+        // 容量超過の警告と実効値ログを、それぞれ1回だけ出すためのフラグ
+        bool m_DroneShowLightTileOverflowLogged = false;
+        bool m_DroneShowLightValuesLogged = false;
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
