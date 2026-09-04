@@ -182,6 +182,13 @@ namespace Kurenai
         // G-Bufferの自発光には掛からない(鏡面が光源を直接見ているのは二重計上ではない)
         void SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount, int doubleCountGI);
 
+        // 段階2: 発光面を三角形のまま面積分するか(0=無効 / 正=有効 / 負=既定のまま)。
+        //
+        // 【MegaLights 経路でのみ効く】DX11・非DXR・MegaLights無効のときは何も起きず、
+        // 段階1のプロキシがそのまま光る。エミッシブ光源そのものが無効なら三角形も出ない。
+        // **いまは参照実装(全三角形総当たり)しか無いので実シーンでは回らない。**
+        void SetMeshLights(int enabled);
+
         // シーン全体の自発光の強度倍率(ImGuiの「自発光の強度」と同じ値)。0以下で既定のまま。
         //
         // 【検証に要る】glTFのemissiveFactorは[0,1]に収まるため、面積の小さい器具は
@@ -2503,6 +2510,9 @@ namespace Kurenai
         // 判定し、メッシュ側はEmissiveClustersの有無で見る
         std::vector<bool> m_EmissiveProxyInstances;
         bool m_EmissiveLightsEnabled = Defaults::EmissiveLightsEnabled;
+        // 段階2: 発光面を三角形のまま面積分するか。MegaLights 経路でのみ効く
+        // (有効なフレームは参照実装が型3のプロキシを読み飛ばし、代わりに三角形を積む)
+        bool m_MeshLightsEnabled = Defaults::MeshLightsEnabled;
         // DDGIにも自発光を加算したままにするか(=二重に数えるか)。既定は抑止する
         bool m_EmissiveLightsDoubleCountGI = Defaults::EmissiveLightsDoubleCountGI;
         float m_EmissiveLightsCutoffIrradiance = Defaults::EmissiveLightsCutoffIrradiance;

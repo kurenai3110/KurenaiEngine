@@ -794,6 +794,19 @@ namespace Kurenai::Defaults
     // 測るための対照**が要る。差分がゼロなら「抑止が効いていない」を先に疑うこと
     inline constexpr bool EmissiveLightsDoubleCountGI = false;
 
+    // --- メッシュライト(段階2: 発光面を三角形のまま積分する) ---
+    // 段階1のプロキシが発光クラスタを重心1点へ潰すのに対し、こちらは同じクラスタを
+    // 三角形の束のまま面積分する。遠方では両者は一致しなければならず、それが検証になる。
+    //
+    // 【MegaLights 経路だけが切り替わる】プロキシは m_LightBuffer に積んだままで、
+    // MegaLights の参照実装と候補プールだけが型3を読み飛ばす。DDGI・反射プローブ・
+    // RT反射・半透明・平面反射は面光源を扱えないのでプロキシが要る ―― 消すと
+    // それらから発光体の照明だけが消え、しかもそれらしく見える。
+    // DX11 / 非DXR は ShouldRunMegaLights() が偽なので自動的にプロキシへ落ちる。
+    //
+    // 【既定で無効】まだ参照実装(全三角形総当たり)しか無く、実シーンでは回らない
+    inline constexpr bool MeshLightsEnabled = false;
+
     // --- 星空 ---
     // 夜空に星を描くか。既定はtrueだが、昼は太陽の仰角で完全に0までフェードするため
     // 昼のシーンの絵は1画素も変わらない(Sky.hlsliのEvaluateStarfield参照)
