@@ -33,6 +33,39 @@ namespace Kurenai
             return static_cast<float>(h & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
         }
 
+        // --- 機体1機の光度[cd]を、スプライトの見た目そのものから導く ---
+        //
+        // Shaders/3D/DroneShow.hlsl の PSMain は、半径Rのビルボードへ
+        //   L(d) = Color * Intensity * Brightness * glow(d)   [cd/m²]
+        //   glow(u) = (1-u)^kHaloExponent + kCoreWeight * (1-u)^kCoreExponent   (u = d/R)
+        // という放射輝度を書く。ビルボードは常にカメラへ正対するので、どの方向から見ても
+        // 同じ見かけの明るさになる = 等方な点光源とみなせる。その光度はディスクの積分:
+        //
+        //   I = ∫L dA = Color*Intensity*Brightness * R² * 2π∫₀¹ glow(u)·u du
+        //
+        //   ∫₀¹ (1-u)^n · u du = B(2, n+1) = 1 / ((n+1)(n+2))
+        //
+        // なので係数は 2π[1/((a+1)(a+2)) + w/((b+1)(b+2))] で閉じた形になる。
+        // a=2 / b=12 / w=3 では 2π(1/12 + 3/182) = 0.6271678。
+        // Radius=4.0 / Brightness=1.0 なら1機 10.035 cd(白のとき。総光束 4πI = 126 lm)。
+        //
+        // 【シェーダー側の3定数と一致させること】ここを式のまま書いてあるのは、
+        // 定数を1つ変えたときに数値を手で計算し直さずに済ませるため。
+        // DroneShow.hlsl の kHaloExponent / kCoreExponent / kCoreWeight を変えたら
+        // 下の3つも必ず合わせる(ずれても絵は出るが、光と見た目の対応が黙って外れる)。
+        constexpr float kGlowHaloExponent = 2.0f;
+        constexpr float kGlowCoreExponent = 12.0f;
+        constexpr float kGlowCoreWeight = 3.0f;
+
+        constexpr float DiskIntegral(float exponent)
+        {
+            return 1.0f / ((exponent + 1.0f) * (exponent + 2.0f));
+        }
+
+        // ビルボード1枚の放射輝度を光度へ写す係数。半径の二乗に掛ける
+        constexpr float kGlowIntensityFactor =
+            2.0f * kPi * (DiskIntegral(kGlowHaloExponent) + kGlowCoreWeight * DiskIntegral(kGlowCoreExponent));
+
         float Lerp(float a, float b, float t) { return a + (b - a) * t; }
 
         XMFLOAT3 Lerp3(const XMFLOAT3& a, const XMFLOAT3& b, float t)
@@ -156,6 +189,60 @@ namespace Kurenai
             // 機体ごとの明るさのばらつき。全機が完全に同じ輝度だと人工的に見える。
             // 明るさの絶対値(と実効プリ露出)は描画側が定数バッファで一括して掛ける
             drone.Intensity = 0.85f + Hash01(m_Data.Seed, i, 0x77u) * 0.30f;
+        }
+    }
+
+    void DroneShow::BuildLightSamples(
+        const std::vector<GPUDrone>& drones, uint32_t sampleCount, std::vector<DroneLightSample>& outLights) const
+    {
+        outLights.clear();
+
+        const uint32_t droneCount = static_cast<uint32_t>(drones.size());
+        if (droneCount == 0u || sampleCount == 0u)
+        {
+            return;
+        }
+
+        // 機体数より多く採ろうとしたら機体数で頭打ちにする(同じ機体を2回灯にすると
+        // その1機だけが二重に効いて、編隊の一部だけが明るいという静かな偏りになる)
+        const uint32_t count = std::min(sampleCount, droneCount);
+
+        // 間引いたぶんの光量をここで戻す。
+        //
+        // 【厳密には保存されない】戻すのは灯数の重みだけで、機体ごとにばらつく Intensity
+        // (0.85〜1.15)と、編隊の高さで変わる Color は、採った機体のものがそのまま使われる。
+        // 保存されるのは期待値で、実際には間引きの誤差が残る ―― Standard.kshow の実測で
+        // count=48 なら全機の総光度に対して ±0.3% 以内、count を1桁台まで落とすと
+        // −12%〜+26% まで外れる。count を小さくするときはここを承知して使うこと
+        const float sampleWeight = static_cast<float>(droneCount) / static_cast<float>(count);
+
+        outLights.reserve(count);
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            // 添字を等間隔に取る。.kshowの点は方位角順に焼き込まれている(KurenaiShowEditorの
+            // GenerateFormation)ので、等間隔に拾うと編隊の全方位から満遍なく採れる。
+            // 【添字がフレームに依らないこと】ここが再生時刻に依存すると、灯が別の機体へ
+            // 飛び移ってちらつく。iとdroneCountだけで決まる形にしてある
+            const uint32_t index =
+                (count > 1u)
+                    ? static_cast<uint32_t>(
+                          static_cast<uint64_t>(i) * static_cast<uint64_t>(droneCount) / static_cast<uint64_t>(count))
+                    : (droneCount / 2u);
+            const GPUDrone& drone = drones[std::min(index, droneCount - 1u)];
+
+            // ビルボードの見た目そのものから光度を導く(係数の導出はkGlowIntensityFactorのコメント)。
+            // Brightnessは機体側(GPUDrone)ではなく描画側の定数バッファが持っているので、
+            // ここではm_Dataから取る
+            const float scale =
+                m_Data.Brightness * drone.Radius * drone.Radius * kGlowIntensityFactor * drone.Intensity * sampleWeight;
+
+            DroneLightSample sample;
+            sample.Position = drone.Position;
+            sample.Intensity = XMFLOAT3(drone.Color.x * scale, drone.Color.y * scale, drone.Color.z * scale);
+            // 光源そのものの半径。機体の見かけの半径をそのまま入れる。
+            // 減衰には効かず、MegaLightsの球光源サンプリング(半影の広がり)にだけ使われる
+            sample.SourceRadius = drone.Radius;
+            outLights.push_back(sample);
         }
     }
 }

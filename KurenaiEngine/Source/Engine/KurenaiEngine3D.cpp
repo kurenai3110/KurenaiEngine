@@ -508,8 +508,12 @@ namespace Kurenai
             // xyz=いま焼いているプローブのワールド座標、w=処理対象の面(D3Dのキューブ標準順)
             DirectX::XMFLOAT4 Params0;
             // x=キャプチャキューブの1面の解像度、y=エミッシブ強度(ラスタ経路のObjectConstantsへ
-            // 掛かっているのと同じ倍率)、z=太陽の影レイを撃つか(0/1。対照実験用)、w=未使用
+            // 掛かっているのと同じ倍率)、z=太陽の影レイを撃つか(0/1。対照実験用)、
+            // w=プロキシとして起こされたマテリアルの自発光倍率(0で抑止)
             DirectX::XMFLOAT4 Params1;
+            // x=このパスが舐めるライトの数。b0のFrameConstants.ActiveLightCountはメイン描画と
+            // 共有していて差し替えられないため、ここで別に渡す(ドローンの灯を外すため)。yzw=未使用
+            DirectX::XMFLOAT4 Params2;
         };
 
         // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
@@ -6886,6 +6890,11 @@ namespace Kurenai
             m_DroneShowCenter = { m_Scene.DroneShowCenter[0], m_Scene.DroneShowCenter[1], m_Scene.DroneShowCenter[2] };
         }
         if (m_Scene.HasDroneShowScale)          { m_DroneShowScale = m_Scene.DroneShowScale; }
+        if (m_Scene.HasDroneShowCastLight)      { m_DroneShowCastLight = m_Scene.DroneShowCastLight; }
+        if (m_Scene.HasDroneShowCastLightScale) { m_DroneShowCastLightScale = m_Scene.DroneShowCastLightScale; }
+        // 実効値のログと容量の警告はシーンごとに1回ずつ出す(シーンが変われば灯の値も変わる)
+        m_DroneShowLightValuesLogged = false;
+        m_DroneShowLightTileOverflowLogged = false;
         // 【Formationsが空でもSetDataを呼ぶ】呼ばなければ前のシーンのショーがそのまま残る。
         // 空を渡せばDroneShow側がエラーを出してm_HasDataをfalseにするので、
         // 「ショーを持たないシーンへ切り替えたのに前の編隊が飛び続ける」を構造的に防げる
@@ -8951,6 +8960,26 @@ namespace Kurenai
             m_MeshletLODFrame.DebugColorByLOD = m_MeshletLODDebugColorEnabled;
         }
 
+        // --- ドローンショーの機体を評価する ---
+        //
+        // 【ライトリストの組み立てより前でなければならない】機体を光源として送るので、
+        // ここが後ろにあると灯が1フレーム遅れる(編隊が動いている間ずっと、光だけが
+        // 前フレームの位置から当たり続ける)。GPUバッファへの転送は下のグラフ構築直前のまま。
+        // m_DroneShowTimeの更新はRenderThreadMainで既に済んでいる
+        m_DroneInstances.clear();
+        if (m_DroneShowEnabled)
+        {
+            m_DroneShow.Evaluate(m_DroneShowTime, m_DroneShowCenter, m_DroneShowScale, m_DroneInstances);
+            // 【バッファの容量を超える機体は描かない】m_DroneBufferはkMaxDrones分を固定確保して
+            // いるので、それを超えた分をUpdateBufferへ渡すと書き込みが範囲外になる。
+            // .kshowの機体数はエディタ側で上限を掛けているが、外から来たファイルでも
+            // 壊れないよう、ここで切り詰める(光源を作るのも切り詰めた後の配列から)
+            if (m_DroneInstances.size() > kMaxDrones)
+            {
+                m_DroneInstances.resize(kMaxDrones);
+            }
+        }
+
         // 有効なライトだけを詰めてt8のライトリストへ渡す。シェーダはLightCount(・ActiveLightCount)の
         // 数までしかループしないため、無効なライトはそもそもGPUへ送らない。DirectLight/Transparentの
         // 両パスがこの1つのリストを共有する(FrameConstants.ActiveLightCountに人数を書き込むため、
@@ -9094,6 +9123,116 @@ namespace Kurenai
             }
         }
 
+        // ここまでが「焼き込みに入れてよい灯」。プローブと DDGI はこの数までしか舐めない。
+        //
+        // 【ドローンの灯をこの後ろへ置く理由】編隊は毎フレーム動く。反射プローブは
+        // OnDemand で焼くので「焼いた瞬間の編隊」が環境キューブに固定で残り、DDGI は
+        // ヒステリシスで編隊を追いかけ続けて収束しない。どちらも動く光を入れる前提の
+        // 構造になっていないため、この2つからは外す
+        size_t bakedLightCount = gpuLights.size();
+
+        // --- ドローンショーの機体を光源として後ろへ連結する ---
+        //
+        // 【エミッシブプロキシとは単位系が違う】プロキシは露出を掛けない(自発光がG-Bufferで
+        // 露出を通らないため、I*exposure の中で相殺する)。一方ドローンのスプライトは
+        // DroneShowConstants.Params0.x = Brightness * effectiveExposure として露出を通っており、
+        // 単位系としては手置きライト(カンデラ)の側にいる。**ここは掛ける側が正しい**。
+        // 向こうの慣習を写すと桁で外す(docs/ImplementationDetail.md 62.4の表)
+        m_DroneShowLightUsedCount = 0;
+        if (m_DroneShowEnabled && m_DroneShowCastLight && !m_DroneInstances.empty())
+        {
+            // 手置き+プロキシを押し出さないよう、残り容量だけを使う
+            const size_t budget =
+                (gpuLights.size() < kMaxLights) ? (kMaxLights - gpuLights.size()) : 0u;
+            const uint32_t sampleCount = static_cast<uint32_t>(
+                std::min<size_t>(budget, static_cast<size_t>(std::max(0, m_DroneShowLightSampleCount))));
+
+            m_DroneShow.BuildLightSamples(m_DroneInstances, sampleCount, m_DroneLightSamples);
+
+            // 【bakedLightCountを添字に使い回さない】あちらは「焼き込みに入れてよい灯の数」で、
+            // 容量超過の切り詰めが走ると意味が変わる(下の再代入を参照)。
+            // ここで欲しいのは「ドローンの灯の先頭の位置」という別の量なので、別に持つ
+            const size_t firstDroneLightIndex = gpuLights.size();
+
+            const float exposure = ComputeExposure(m_EffectiveExposureEV100);
+            const float cutoffLux = std::max(m_DroneShowLightCutoffLux, 1e-9f);
+            // 演出用の倍率。1.0がスプライトから導いた物理的な値。
+            // 【Rangeにも効かせる】強くした灯を同じRangeで打ち切ると、届くはずの距離で
+            // 切れて「明るくしたのに広がらない」になる。下でpeakから解き直すので自動的に効く
+            const float lightScale = std::max(m_DroneShowCastLightScale, 0.0f);
+            for (const DroneLightSample& rawSample : m_DroneLightSamples)
+            {
+                DroneLightSample sample = rawSample;
+                sample.Intensity = { rawSample.Intensity.x * lightScale, rawSample.Intensity.y * lightScale,
+                                     rawSample.Intensity.z * lightScale };
+
+                GPULight light{};
+                light.PositionType = { sample.Position.x, sample.Position.y, sample.Position.z,
+                                       static_cast<float>(Assets::LightType::Point) };
+
+                // 【Rangeは打ち切り照度から逆算する】MakeGPULightFromEmissiveProxy と同じ考え方。
+                // 点光源(型1)の減衰に半径の項は無いので、あちらの -R² は付けない。
+                // RGBの最大から解くのは、色付きの灯で1chだけ見るとRangeが検算できないため
+                const float peak = std::max({ sample.Intensity.x, sample.Intensity.y, sample.Intensity.z });
+                float range = (peak > 0.0f) ? std::sqrt(peak / cutoffLux) : 0.0f;
+                // 下限は光源自身の広がりを覆う分。上限はエミッシブ光源と同じシーンAABB対角で、
+                // タイルライトカリングが全タイルにヒットするのを止める安全弁
+                range = std::max(range, 2.0f * sample.SourceRadius);
+                if (m_EmissiveLightsMaxRange > 0.0f)
+                {
+                    range = std::min(range, m_EmissiveLightsMaxRange);
+                }
+
+                light.ColorRange = { sample.Intensity.x * exposure, sample.Intensity.y * exposure,
+                                     sample.Intensity.z * exposure, range };
+                light.DirectionAngle = { 0.0f, -1.0f, 0.0f, 0.0f };
+                // 【スクリーンスペースシャドウは立てない】画素あたりのシャドウレイ本数には
+                // 上限(Defaults::ScreenSpaceShadowMaxLightsPerPixel)があり、数十灯を入れると
+                // 手置きライトの接触影を食い潰す(docs/ImplementationDetail.md 62.7と同じ理由)。
+                // Params.z は光源の半径で、減衰には効かずMegaLightsの半影の広がりだけを決める
+                light.Params = { 0.0f, static_cast<float>(kLightShadowRaytraced), sample.SourceRadius, 0.0f };
+                gpuLights.push_back(light);
+            }
+            m_DroneShowLightUsedCount = static_cast<uint32_t>(m_DroneLightSamples.size());
+
+            // 【「効いていない」と「暗すぎて見えない」を切り分ける】エミッシブ光源と同じ理由で、
+            // 実際に送った灯数と代表1灯の実効値を1回だけ出す
+            if (!m_DroneShowLightValuesLogged && m_DroneShowLightUsedCount > 0)
+            {
+                float totalCd = 0.0f;
+                for (const DroneLightSample& sample : m_DroneLightSamples)
+                {
+                    totalCd += std::max({ sample.Intensity.x, sample.Intensity.y, sample.Intensity.z });
+                }
+                const GPULight& first = gpuLights[firstDroneLightIndex];
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "ドローンを光源として送信: " + std::to_string(m_DroneShowLightUsedCount) + "灯(機体 " +
+                        std::to_string(m_DroneInstances.size()) + "機) / 倍率 " +
+                        std::to_string(m_DroneShowCastLightScale) + " / 総光度(RGBの最大の和。倍率込み) " +
+                        std::to_string(totalCd * m_DroneShowCastLightScale) + "cd / 先頭の灯 露出後の強さ " +
+                        std::to_string(std::max({ first.ColorRange.x, first.ColorRange.y, first.ColorRange.z })) +
+                        " Range " + std::to_string(first.ColorRange.w) + "m 半径 " +
+                        std::to_string(first.Params.z) + "m");
+                m_DroneShowLightValuesLogged = true;
+            }
+
+            // 【条件をbudgetで見る】m_DroneShowLightUsedCount == 0 で判定すると、
+            // 灯数の設定を0にしただけのときにも「容量を使い切っています」と誤報する
+            if (budget == 0u && !m_DroneShowLightTileOverflowLogged)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "ドローンを光源として送れませんでした(ライトの容量" + std::to_string(kMaxLights) +
+                        "灯を手置きライトとエミッシブ光源で使い切っています)");
+                m_DroneShowLightTileOverflowLogged = true;
+            }
+        }
+        else
+        {
+            m_DroneLightSamples.clear();
+        }
+
         // 容量(kMaxLights)を超える場合は、カメラに近い順に先頭kMaxLights灯のみ採用する。
         // 全画面ディファードなのでフラスタムカリングは効果が薄く、これは容量超過時の
         // 安全弁としてのみ機能する。
@@ -9115,11 +9254,21 @@ namespace Kurenai
                 });
             gpuLights.resize(kMaxLights);
 
+            // 【bakedLightCountの前提が崩れる】上のソートは配列全体を並べ替えるので、
+            // 「先頭bakedLightCount灯が焼き込みに入れてよい灯」という対応が失われる。
+            // bakedLightCount自身もkMaxLightsを超えうるので、そのまま
+            // ActiveLightCountとして渡すと配列長を超えた読み出しになる。
+            // ここまで来るのは手置きライトだけで1024灯を超えた場合で、そのときは
+            // どれが焼き込み対象かを区別できないため、**全灯を焼き込みへ入れる**側へ倒す
+            // (プローブに入り過ぎるほうが、範囲外を読むより安全)
+            bakedLightCount = gpuLights.size();
+
             if (!m_LightOverflowLogged)
             {
                 Core::Logger::Warning(
                     "KurenaiEngine3D",
-                    "ライト数が上限(" + std::to_string(kMaxLights) + ")を超えたため、カメラに近い順に描画します");
+                    "ライト数が上限(" + std::to_string(kMaxLights) + ")を超えたため、カメラに近い順に描画します"
+                    "(この場合ドローンの灯と焼き込み対象の切り分けは失われます)");
                 m_LightOverflowLogged = true;
             }
         }
@@ -9748,27 +9897,16 @@ namespace Kurenai
             commandList->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
         }
 
-        // --- ドローンショーの機体を評価し、GPUへ送る ---
+        // --- ドローンショーの機体をGPUへ送る ---
         // ライトリストとまったく同じ理由でグラフ構築の前に1回だけ更新する。このバッファは
         // 本描画パスと平面反射パスの2箇所から読まれるため、パスの中で更新すると
-        // 先に走る側が未更新の内容を読んでしまう
-        m_DroneInstances.clear();
-        if (m_DroneShowEnabled)
+        // 先に走る側が未更新の内容を読んでしまう。
+        // 【m_DroneInstancesを作るのはここではない】ライトリストの組み立てが機体の位置を要るため、
+        // Evaluateはそれより前(gpuLightsの直前)へ移してある。ここは転送だけ
+        if (m_DroneShowEnabled && !m_DroneInstances.empty())
         {
-            m_DroneShow.Evaluate(m_DroneShowTime, m_DroneShowCenter, m_DroneShowScale, m_DroneInstances);
-            // 【バッファの容量を超える機体は描かない】m_DroneBufferはkMaxDrones分を固定確保して
-            // いるので、それを超えた分をUpdateBufferへ渡すと書き込みが範囲外になる。
-            // .kshowの機体数はエディタ側で上限を掛けているが、外から来たファイルでも
-            // 壊れないよう、GPUへ渡す直前のここで切り詰める
-            if (m_DroneInstances.size() > kMaxDrones)
-            {
-                m_DroneInstances.resize(kMaxDrones);
-            }
-            if (!m_DroneInstances.empty())
-            {
-                commandList->UpdateBuffer(
-                    m_DroneBuffer.get(), m_DroneInstances.data(), m_DroneInstances.size() * sizeof(GPUDrone));
-            }
+            commandList->UpdateBuffer(
+                m_DroneBuffer.get(), m_DroneInstances.data(), m_DroneInstances.size() * sizeof(GPUDrone));
         }
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
@@ -10348,7 +10486,7 @@ namespace Kurenai
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
         const auto captureProbeFace =
-            [this, &constants, probeFaceProjection, skyTexture](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+            [this, &constants, probeFaceProjection, skyTexture, bakedLightCount](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
             const Assets::ReflectionProbe& probe = m_ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
@@ -10375,6 +10513,10 @@ namespace Kurenai
             // プローブ視点から見える範囲とは何の関係も無い。上でPrevViewProjを
             // 「前フレーム」でない値へ差し替えている以上、判定の前提そのものが崩れている
             captureConstants.OcclusionCullParams = { 0.0f, 0.0f, 0.0f, 0.0f };
+            // ドローンの灯はライトリストの末尾に連結してあるので、数を戻すだけで外れる。
+            // 編隊は毎フレーム動く一方、反射プローブはOnDemandで一度焼いたきりなので、
+            // 入れると「焼いた瞬間の編隊」が環境キューブに固定で残り、以後ずっと映り込む
+            captureConstants.ActiveLightCount.x = static_cast<float>(bakedLightCount);
             // 統計も止める。プローブ視点で数えた分がメインカメラの間引き率に混ざると、
             // 「1フレームあたりの判定数」がプローブを焼いたフレームだけ跳ね上がって読めなくなる
             captureConstants.MeshletCullStatsParams = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -10734,7 +10876,7 @@ namespace Kurenai
         // RWTexture2DArray<float>なので、キューブ配列だけでなく単体のキューブ(=6要素の2D配列)の
         // 面へもそのまま書ける
         const auto captureDDGIProbeFace =
-            [this, &constants, probeFaceProjection, skyTexture](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, &constants, probeFaceProjection, skyTexture, bakedLightCount](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = ComputeDDGIProbePosition(probeIndex);
 
@@ -10747,6 +10889,9 @@ namespace Kurenai
             const DirectX::XMMATRIX faceViewProj = ComputeCubeFaceView(probePosition, face) * probeFaceProjection;
             DirectX::XMStoreFloat4x4(&captureConstants.ViewProj, DirectX::XMMatrixTranspose(faceViewProj));
             captureConstants.CameraPosition = { probePosition.x, probePosition.y, probePosition.z, 0.0f };
+            // 反射プローブと同じ理由でドローンの灯を外す。こちらは焼き直しではなく
+            // ヒステリシスなので固定はされないが、動く光を追いかけ続けて収束しなくなる
+            captureConstants.ActiveLightCount.x = static_cast<float>(bakedLightCount);
             cmd->UpdateBuffer(m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
             cmd->SetRenderTargets(captureTargets, 2, m_DDGICaptureDepth.get());
@@ -10896,7 +11041,7 @@ namespace Kurenai
         // RWTexture2DArrayとして張る」メソッドをDX11/DX12の両方へ足す必要がある。
         // ドローとメッシュ走査が消えるのが本題なので、そこは測ってから決める
         const auto traceDDGIProbeFace =
-            [this, skyTexture](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, skyTexture, bakedLightCount](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = ComputeDDGIProbePosition(probeIndex);
 
@@ -10912,6 +11057,9 @@ namespace Kurenai
                 m_DDGISunShadowRayEnabled ? 1.0f : 0.0f,
                 ShouldSuppressEmissiveForGI() ? 0.0f : 1.0f
             };
+            // 舐めるライトの数。ラスタ経路(ProbeCaptureのcaptureConstants)と同じ値にすること。
+            // ここだけ揃っていないと、DX11(ラスタ)とDX12(レイトレ)でDDGIの結果が黙って食い違う
+            traceConstants.Params2 = { static_cast<float>(bakedLightCount), 0.0f, 0.0f, 0.0f };
 
             if (!m_DDGIEmissiveSuppressLoggedTrace)
             {

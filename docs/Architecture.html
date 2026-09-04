@@ -6681,6 +6681,78 @@ TLASへレイを撃った結果であり、ドローンは手続き的に展開�
 この経路での切り分けには使えない。
 </p>
 
+<h3 id="ch38-11">38.11 機体を光源として扱う(<code>CastLight</code>)</h3>
+
+<p>
+<code>[DroneShow]CastLight = true</code> のとき、機体を<strong>通常の <code>GPULight</code>(型1=Point)として
+既存のライトリストへ連結する</strong>。専用のパスも専用のシェーダーも作らない &mdash;&mdash;
+連結してしまえば、直接光・半透明・平面反射・MegaLights のどの経路も追加の分岐なしで扱える。
+<code>.hlsl</code> の変更は<code>DDGIProbeTrace.hlsl</code>の1本だけである(下記)。
+</p>
+
+<p>
+<strong>1機の光度はスプライトから導く。</strong> ビルボードが書き込む放射輝度をディスク全体で積分すると
+<code>I = Color * Intensity * Brightness * R^2 * 0.627168 [cd]</code> になり、
+ショーの <code>Brightness</code> と <code>Radius</code> から一意に決まる。
+これにより<strong><code>.kshow</code> にフィールドを足さずに済み(v1据え置き)、
+エディタでスプライトを明るくすれば光も必ず連動する</strong>。
+導出と係数の由来は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 38.11節。
+</p>
+
+<p>
+<strong>露出は掛ける側。</strong> ドローンのスプライトは
+<code>DroneShowConstants.Params0.x = Brightness * effectiveExposure</code> として
+露出を通っているので、単位系としては手置きライト(カンデラ)の側にいる。
+エミッシブ光源プロキシ(62章)は逆に露出を掛けない規約なので、
+<strong>あちらの書き方をそのまま写すと桁で外す</strong>。
+</p>
+
+<h4>全機は送れない &mdash;&mdash; 間引いて送る</h4>
+
+<p>
+1500灯は <code>kMaxLights</code>(1024)を超えるうえ、編隊は空の一点に密集するので
+16pxタイルの容量(<code>kLightTileCapacity</code> = 64)を確実に超え、
+<strong>超過分は <code>DirectLighting.hlsl</code> の <code>min()</code> で静かに欠落する</strong>。
+さらに<code>Transparent</code> / <code>PlanarReflection</code> / <code>ProbeShading</code> /
+<code>DDGIProbeTrace</code> の4本はタイルカリングを通らない全灯ループである。
+</p>
+
+<p>
+そこで<strong>添字 <code>i * DroneCount / K</code> の K 機だけを灯にし、光度を <code>DroneCount / K</code> 倍する</strong>
+(<code>DroneShow::BuildLightSamples</code>、既定 K=48)。採る添字が固定で灯が実在の機体そのものなので、
+<strong>モーフ中も機体と同じ軌跡で連続に動きポップしない</strong>。
+空間クラスタリングは所属が飛ぶか格子が動くかで必ずポップする。
+誤差の実測と、方位角順の連続ブロックでは灯数を増やしても誤差が縮まらないことは
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 38.12節。
+</p>
+
+<h4>反射プローブとDDGIからは外す</h4>
+
+<p>
+編隊は毎フレーム動くので、<strong>反射プローブには「焼いた瞬間の編隊」が環境キューブへ固定で残り、
+DDGIはヒステリシスで編隊を追いかけ続けて収束しない</strong>。
+ドローンの灯は<strong>リストの末尾へ連結</strong>し、この2つには<strong>連結前の灯数</strong>
+(<code>bakedLightCount</code>)を渡す。
+</p>
+
+<p>
+ラスタ経路(<code>ProbeCapture.hlsl</code>。反射プローブとDDGIのラスタ焼きが共有)は
+<code>FrameConstants</code> のコピーを持っているので数を差し替えるだけで済む。
+一方<strong>DDGIのレイトレ経路は b0 にメイン描画と同じバッファをそのまま束ねている</strong>ため
+差し替えられず、<code>DDGITraceConstants</code>(b1)へ <code>TraceParams2.x</code> を足して
+そちらから灯数を取るようにした。<strong>ラスタとレイトレで同じ値を渡すこと</strong> &mdash;&mdash;
+ここが揃っていないとDX11とDX12でDDGIの結果が黙って食い違う。
+</p>
+
+<h4>評価の順序</h4>
+
+<p>
+<code>DroneShow::Evaluate</code> は<strong>ライトリストの組み立てより前</strong>で呼ぶ。
+後ろにあると灯が1フレーム遅れ、編隊が動いている間ずっと光だけが前フレームの位置から当たり続ける。
+GPUバッファへの転送は従来どおりレンダーグラフ構築の直前のままでよい。
+</p>
+
 </section>
 
 <section id="meshlet">
