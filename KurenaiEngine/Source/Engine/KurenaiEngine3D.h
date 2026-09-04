@@ -267,6 +267,9 @@ namespace Kurenai
         //   stratify … クアッドの4画素へ候補スロットを分けて引かせるか
         //   blockedCache … 遮蔽が確定した灯のキャッシュを使うか(陽性対照では0にする)
         void SetMegaLightsQuadShare(int share, int stratify, int blockedCache);
+        // クアッド共有(手法3)の1画素あたりの標本数。1〜kMegaLightsMaxSamplesPerPixel。
+        // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
+        void SetMegaLightsQuadSamples(int samples);
 
         // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を
         // 測るためのもので、静止した絵をいくら撮っても測れない側を測る入口。
@@ -385,6 +388,10 @@ namespace Kurenai
         // これがfalseのときDirectLighting.hlslは従来のライトループへ戻る ―― 「パスを積むか」と
         // 「ライトループを止めるか」がずれると、ライトが二重に加算されるか、逆に全部消える
         bool ShouldRunMegaLights() const;
+        // いま1画素あたり何本の標本(リザーバ)を引くか。**バッファの確保も定数バッファも
+        // 必ずこの関数を通すこと** ―― 2か所で別々に計算すると静かに食い違う。
+        // 手法3以外は常に1(手法2の再利用が1画素1リザーバを前提にしているため)
+        int32_t MegaLightsSamplesPerPixel() const;
         // このメッシュをメッシュシェーダー経路で描くか。上のShouldRun*と同じく、
         // 「どのPSOを束ねるか」と「DispatchMeshとDrawIndexedのどちらを積むか」の判断が
         // ずれると即座に破綻するため、判定を1か所に集約する。
@@ -1478,6 +1485,17 @@ namespace Kurenai
         // 手法3は時間再利用パスを持たないが、キャッシュ自体は Initial が維持している。
         // **陽性対照では切る**(履歴に依存すると手法2との画素単位の一致が崩れる)
         bool m_MegaLightsBlockedCacheEnabled = Defaults::MegaLightsBlockedCacheEnabled;
+        // 1画素あたりに引く標本(リザーバ)の数。**手法3だけが1より大きくできる。**
+        // 手法2の時間・空間再利用は「1画素1リザーバ」を前提に添字を組み立てているため。
+        // 影レイの本数はそのままこの数になる(標本ごとに1本撃つ)
+        int32_t m_MegaLightsQuadSamplesPerPixel = Defaults::MegaLightsQuadSamplesPerPixel;
+        // いまリザーババッファを確保したときの標本数。**定数バッファへ渡す値と必ず一致させる**。
+        // 食い違うと Initial が確保外へ書くか Resolve が別画素の標本を読み、
+        // 例外もログも出ないまま絵だけが壊れる
+        int32_t m_MegaLightsAllocatedSamplesPerPixel = 1;
+        // 標本数が変わったのでリザーババッファを作り直す必要がある。
+        // 解像度変更と同じくフレームの先頭(GPUアイドル後)でまとめて処理する
+        bool m_MegaLightsReservoirDirty = false;
 
         // --- 蓄積平均(計測専用) ---
         // MegaLightsの出力を線形空間でフレーム方向へ足し込み、フレーム数で割った平均を表示する。
@@ -3072,6 +3090,10 @@ namespace Kurenai
         // 手前のViewZ / 奥のViewZ)、
         // 以降は候補1つにつき2個(ライト番号と重み)。MegaLightsTilePool.hlsl 冒頭のレイアウトと一致させること
         static constexpr uint32_t kMegaLightsTilePoolStride = 6 + 2 * kMegaLightsTilePoolCapacity;
+        // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
+        //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
+        // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
+        static constexpr int32_t kMegaLightsMaxSamplesPerPixel = 4;
 
         std::unique_ptr<RHI::IRHIShader> m_LightCullingComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_LightCullingPipelineState;

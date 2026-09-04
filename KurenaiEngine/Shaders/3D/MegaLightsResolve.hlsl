@@ -85,6 +85,8 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     // z=クアッド共有を行うか(0なら自分の標本だけを使う。陽性対照で切る),
     // w=クアッド層化(Initial が読む。このパスでは未使用)
     uint4 Params4;
+    // x=1画素あたりの標本数(リザーバの本数)。Initial が同じ数だけ書いている
+    uint4 Params5;
 };
 
 Texture2D NormalTexture : register(t1);
@@ -180,16 +182,18 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const uint2 quadBase = pixel & ~1u;
     const bool shareEnabled = (Params4.z != 0u);
 
+    // 1画素あたりの標本数。Initial が同じ数だけリザーバを書いている。
+    // クアッドの項の数は 採用した仲間の数 × この数 になる
+    const uint samplesPerPixel = max(Params5.x, 1u);
+
     float3 sum = float3(0.0f, 0.0f, 0.0f);
     // 【n は幾何だけで決まる】標本の中身(灯番号・可視性・寄与)を見て増減させてはいけない
     uint acceptedCount = 0u;
-    // 4標本の輝度。デノイザへ渡す分散の種にする(出力の .a)
-    float termLuminance[4];
-    [unroll]
-    for (uint init = 0u; init < 4u; ++init)
-    {
-        termLuminance[init] = 0.0f;
-    }
+    // 項の輝度の和と二乗和。デノイザへ渡す分散の種にする(出力の .a)。
+    // 【配列で持たない】項の数が 4×標本数まで増えるので固定長では受けきれない。
+    // 逐次で足すと「実際に数えた項」だけが分散に入り、数と中身が必ず一致する
+    float lumSum = 0.0f;
+    float lumSquaredSum = 0.0f;
 
     [unroll]
     for (uint j = 0u; j < 4u; ++j)
@@ -237,37 +241,44 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             }
         }
 
-        // ここから先は「採用した仲間」。**どの経路を通っても n には必ず数える**
-        ++acceptedCount;
-
-        const MegaLightsReservoir reservoir = Reservoirs[mate.y * outputSize.x + mate.x];
-        if (MegaLightsReservoirIsEmpty(reservoir))
+        // ここから先は「採用した仲間」。その仲間が持つ標本すべてを項として数える。
+        // **どの経路を通っても n には必ず数える**(空でも殺されていても項0として数える)
+        const uint mateBase = (mate.y * outputSize.x + mate.x) * samplesPerPixel;
+        [loop]
+        for (uint s = 0u; s < samplesPerPixel; ++s)
         {
-            // 空(候補が無かった)か、可視レイで殺された標本。寄与は0だが n には数える
-            continue;
-        }
+            ++acceptedCount;
 
-        const uint lightIndex = MegaLightsUnpackLight(reservoir.LightAndFlags);
-        const GPULight light = Lights[lightIndex];
-        // 【借りた灯は必ず自分の面で評価し直す】隣で良かった灯がここで良いとは限らない。
-        // スポットの円錐外・Range 外・背向きなら寄与は0(それが真の値)
-        const PunctualGeometry geometry = EvaluatePunctualGeometry(light, worldPos, N, translucency);
-        if (!geometry.Contributes)
-        {
-            continue;
-        }
-
-        // 【可視性は仲間のレイの結果を借りる】これが受け入れた偏りの本体。
-        // 影レイを撃たない構成(Params0.w == 0。恒等テスト)や、レイトレース影を
-        // 落とさない灯では Initial が可視フラグを立てているので V=1 になる
-        const float visibility = MegaLightsUnpackVisible(reservoir.LightAndFlags) ? 1.0f : 0.0f;
-
-        const float3 term = EvaluatePunctualContribution(
+            float3 term = float3(0.0f, 0.0f, 0.0f);
+            const MegaLightsReservoir reservoir = Reservoirs[mateBase + s];
+            // 空(候補が無かった)か、可視レイで殺された標本は寄与0のまま
+            if (!MegaLightsReservoirIsEmpty(reservoir))
+            {
+                const uint lightIndex = MegaLightsUnpackLight(reservoir.LightAndFlags);
+                const GPULight light = Lights[lightIndex];
+                // 【借りた灯は必ず自分の面で評価し直す】隣で良かった灯がここで良いとは限らない。
+                // スポットの円錐外・Range 外・背向きなら寄与は0(それが真の値)
+                const PunctualGeometry geometry =
+                    EvaluatePunctualGeometry(light, worldPos, N, translucency);
+                if (geometry.Contributes)
+                {
+                    // 【可視性は仲間のレイの結果を借りる】これが受け入れた偏りの本体。
+                    // 影レイを撃たない構成(Params0.w == 0。恒等テスト)や、レイトレース影を
+                    // 落とさない灯では Initial が可視フラグを立てているので V=1 になる
+                    const float visibility =
+                        MegaLightsUnpackVisible(reservoir.LightAndFlags) ? 1.0f : 0.0f;
+                    term = EvaluatePunctualContribution(
                                light, geometry, N, V, NdotV, albedo, metallic, roughness, translucency,
                                energy, visibility) *
                            reservoir.W;
-        sum += term;
-        termLuminance[j] = Luminance(term);
+                }
+            }
+
+            sum += term;
+            const float termLum = Luminance(term);
+            lumSum += termLum;
+            lumSquaredSum += termLum * termLum;
+        }
     }
 
     if (acceptedCount == 0u)
@@ -287,16 +298,11 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float variance = 0.0f;
     if (acceptedCount > 1u)
     {
-        const float meanLum = Luminance(resolved);
-        float squaredSum = 0.0f;
-        [unroll]
-        for (uint v = 0u; v < 4u; ++v)
-        {
-            const float d = termLuminance[v] - meanLum;
-            squaredSum += d * d;
-        }
-        // 標本平均の分散。項が n 個なので n(n-1) で割る
-        variance = squaredSum / (float(acceptedCount) * float(acceptedCount - 1u));
+        const float n = float(acceptedCount);
+        // Σ(x - x̄)^2 = Σx^2 - (Σx)^2/n。標本平均の分散なので n(n-1) で割る。
+        // 丸めで負に振れることがあるので0で止める
+        const float squaredSum = max(lumSquaredSum - lumSum * lumSum / n, 0.0f);
+        variance = squaredSum / (n * (n - 1.0f));
     }
 
     MegaLightsOutput[pixel] = float4(resolved, variance);

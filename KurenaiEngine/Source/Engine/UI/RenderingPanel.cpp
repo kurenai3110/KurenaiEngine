@@ -260,6 +260,25 @@ namespace Kurenai::UI
 
             if (megaLightsQuadUI)
             {
+                // 【つまみを動かすとリザーババッファを確保し直す】UI経路も
+                // SetMegaLightsQuadSamples を通し、確保と定数バッファがずれないようにする
+                int quadSamples = m_Engine.m_MegaLightsQuadSamplesPerPixel;
+                if (SliderIntEx(
+                        "1画素あたりの標本数###MegaLightsQuadSamples", &quadSamples, 1,
+                        KurenaiEngine3D::kMegaLightsMaxSamplesPerPixel,
+                        Defaults::MegaLightsQuadSamplesPerPixel,
+                        "1画素あたりに候補プールから引く標本(リザーバ)の数。"
+                        "**影レイの本数がそのままこれになる**ので、コストはほぼ比例して増える。\n\n"
+                        "【1本では動いている間のノイズが目に見える】カメラが動くとデノイザの"
+                        "時間累積が効かず、生の推定量がそのまま出る。ノイズの内訳は"
+                        "「どの灯を選ぶか」と「選んだ灯の可視性」で、後者が大きい ―― "
+                        "参照実装を影レイ1本と32本で比べると|相対誤差|のp90が0.37あった。\n\n"
+                        "【UE5も1本ではない】r.MegaLights.NumSamplesPerPixel は 2/4/16 から選ぶ形で、"
+                        "最小でも2である"))
+                {
+                    m_Engine.SetMegaLightsQuadSamples(quadSamples);
+                }
+
                 CheckboxEx(
                     "クアッド共有###MegaLightsQuadShare", &m_Engine.m_MegaLightsQuadShareEnabled,
                     Defaults::MegaLightsQuadShareEnabled,

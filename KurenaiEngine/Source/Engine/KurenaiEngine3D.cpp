@@ -1556,6 +1556,11 @@ namespace Kurenai
             // z=クアッド共有を行うか(手法3。Resolveが読む。0なら自分の標本だけを使う)、
             // w=クアッドで候補スロットを分けて引くか(手法3の層化。Initialが読む)
             DirectX::XMUINT4 Params4;
+            // x=1画素あたりの標本数(リザーバの本数。Initialが書きResolveが読む)。
+            // 手法3だけが1より大きくなる ―― 手法2の時間・空間再利用は
+            // 「1画素1リザーバ」を前提に添字を組み立てているため。
+            // yzw=未使用
+            DirectX::XMUINT4 Params5;
         };
 
         // MegaLightsDenoise.hlsl側のcbuffer MegaLightsDenoiseConstantsと一致させること
@@ -4067,6 +4072,46 @@ namespace Kurenai
         }
     }
 
+    void KurenaiEngine3D::SetMegaLightsQuadSamples(int samples)
+    {
+        // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
+        if (samples < 0)
+        {
+            return;
+        }
+        if (samples < 1 || samples > kMegaLightsMaxSamplesPerPixel)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのクアッド標本数が範囲外のため無視します: " + std::to_string(samples) +
+                    " (1〜" + std::to_string(kMegaLightsMaxSamplesPerPixel) + ")");
+            return;
+        }
+        if (samples == m_MegaLightsQuadSamplesPerPixel)
+        {
+            return;
+        }
+        m_MegaLightsQuadSamplesPerPixel = samples;
+        // リザーババッファの大きさが変わる。GPUが参照していない状態で作り直す必要があるので、
+        // 解像度変更と同じ「フレームの先頭でまとめて作り直す」経路に乗せる
+        m_MegaLightsReservoirDirty = true;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのクアッド標本数を " + std::to_string(m_MegaLightsQuadSamplesPerPixel) +
+                " にしました(影レイの本数も同じ数になります)");
+    }
+
+    int32_t KurenaiEngine3D::MegaLightsSamplesPerPixel() const
+    {
+        // 【手法3以外は必ず1】手法2の時間・空間再利用は「1画素1リザーバ」を前提に
+        // 添字を組み立てているので、ここを1より大きくすると別画素の標本を読む
+        if (m_MegaLightsMode != MegaLightsMode::QuadShared)
+        {
+            return 1;
+        }
+        return std::clamp(m_MegaLightsQuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
+    }
+
     void KurenaiEngine3D::SetMegaLightsDumpPath(const wchar_t* path)
     {
         if (path == nullptr || path[0] == L'\0')
@@ -4757,11 +4802,20 @@ namespace Kurenai
                 tilePoolBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
                 m_MegaLightsTilePoolBuffer = m_Device->CreateBuffer(tilePoolBufferDesc);
 
-                // 1画素につき1リザーバ(16バイト)。MegaLightsCommon.hlsli の
-                // MegaLightsReservoir と**ストライドを一致させること**
+                // 1画素につきN本のリザーバ(1本16バイト)。MegaLightsCommon.hlsli の
+                // MegaLightsReservoir と**ストライドを一致させること**。
+                //
+                // 【手法に関わらずクアッドの標本数で確保する】ここで手法を見て 1 と N を
+                // 切り替えると、手法を切り替えるたびに確保し直しが要る。常に大きい側で
+                // 取っておけば、手法2は先頭の 幅x高さ 本だけを使う形になり無駄なだけで安全。
+                // 定数バッファへ渡す値(MegaLightsSamplesPerPixel())は手法3以外で1になるので、
+                // **確保 >= 実際に使う本数** が常に成り立つ
+                m_MegaLightsAllocatedSamplesPerPixel =
+                    std::clamp(m_MegaLightsQuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
                 RHI::BufferDesc reservoirBufferDesc;
                 reservoirBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-                reservoirBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4) * width * height;
+                reservoirBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4) * width * height *
+                                                  static_cast<uint32_t>(m_MegaLightsAllocatedSamplesPerPixel);
                 reservoirBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4);
                 m_MegaLightsReservoirBuffer = m_Device->CreateBuffer(reservoirBufferDesc);
 
@@ -8722,10 +8776,13 @@ namespace Kurenai
         // ここはApplyPendingResizeの後、かつこのフレームでm_RenderWidth/m_RenderHeightを
         // 読み始めるより前(最初の読み取りはTAAジッター)なので、解像度をまとめて差し替えてよい
         if (m_BufferPrecisionDirty || m_RenderResolutionDirty || m_PlanarReflectionResolutionDirty ||
-            m_UpscaleTargetsDirty)
+            m_UpscaleTargetsDirty || m_MegaLightsReservoirDirty)
         {
             const bool precisionChanged = m_BufferPrecisionDirty;
             m_BufferPrecisionDirty = false;
+            // MegaLightsのリザーババッファは CreateRenderTargets の中で作り直される。
+            // 標本数の変更だけでもここを通す(GPUが参照していない状態が要るため)
+            m_MegaLightsReservoirDirty = false;
 
             const uint32_t previousWidth = m_RenderWidth;
             const uint32_t previousHeight = m_RenderHeight;
@@ -12675,6 +12732,12 @@ namespace Kurenai
                     spatialIteration,
                     (megaLightsQuadShared && m_MegaLightsQuadShareEnabled) ? 1u : 0u,
                     (megaLightsQuadShared && m_MegaLightsQuadStratify) ? 1u : 0u,
+                };
+                // 1画素あたりの標本数。**リザーババッファの確保と必ず同じ値にすること** ――
+                // ずれると Initial が確保外へ書くか、Resolve が別画素の標本を読む
+                // (どちらも例外にならず、絵が「それらしく」出るので気付けない)
+                stochasticConstants.Params5 = {
+                    static_cast<uint32_t>(MegaLightsSamplesPerPixel()), 0u, 0u, 0u
                 };
                 return stochasticConstants;
             };
