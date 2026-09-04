@@ -3680,6 +3680,25 @@ namespace Kurenai
         return m_MegaLightsReferencePipelineState != nullptr;
     }
 
+    bool KurenaiEngine3D::ShouldRunLightCulling() const
+    {
+        if (!m_LightCullingEnabled)
+        {
+            return false;
+        }
+        // ライトグリッドのデバッグ表示は、MegaLightsが走っていてもグリッドそのものを見せるものなので
+        // 実行が要る。**ここを落とすと表示が前フレームの残骸か未初期化の中身になる**
+        if (m_DebugView == DebugView::LightTiles)
+        {
+            return true;
+        }
+        // MegaLightsが走るフレームはポイント/スポットの寄与をあちらが出しており、
+        // DirectLighting.hlslのローカルライトのループはLightCount.wで止まっている。
+        // それでもグリッドだけは毎フレーム作り続けていた ―― 誰も読まない出力で、
+        // 灯数に比例して増える(1026灯で0.198ms。docs 61.7e.3)
+        return !ShouldRunMegaLights();
+    }
+
     bool KurenaiEngine3D::ShouldRunRaytracedAO() const
     {
         return m_AOTechnique == AOTechnique::Raytraced && m_RaytracingScene.IsValid() &&
@@ -9918,7 +9937,10 @@ namespace Kurenai
         // ここで分かるのは「シーンのライト数が容量を超えているので、1つのタイルに集中すれば
         // 超過し得る」という条件までである。実際の超過はデバッグ表示(DebugView::LightTiles)の
         // マゼンタで確認する
-        if (m_LightCullingEnabled && gpuLights.size() > kLightTileCapacity && !m_LightTileOverflowLogged)
+        // 【条件はパスを積む述語と揃える】グリッドを作っていないフレームで警告すると、
+        // 実際には起きない欠落を知らせることになる(MegaLightsが走っていればローカルライトは
+        // グリッドを経由しない)
+        if (ShouldRunLightCulling() && gpuLights.size() > kLightTileCapacity && !m_LightTileOverflowLogged)
         {
             Core::Logger::Warning(
                 "KurenaiEngine3D",
@@ -10525,7 +10547,10 @@ namespace Kurenai
             m_LightTileCountX,
             kLightTileSize,
             kLightTileCapacity,
-            m_LightCullingEnabled ? 1u : 0u,
+            // 「このフレームのライトグリッドは有効か」。**パスを積む述語と同じものを使う** ――
+            // トグルの状態(m_LightCullingEnabled)ではなく実際に書いたかどうかで決める。
+            // なおMegaLightsが走るフレームはLightCount.wが先に効くのでこの枝には入らない
+            ShouldRunLightCulling() ? 1u : 0u,
         };
 
         // ライトリストの中身の更新。**直接光パスや半透明パスの中で呼んではいけない** ――
@@ -13127,8 +13152,11 @@ namespace Kurenai
         // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
         //     インデックスリストをコンピュートシェーダーで作る。直接光パスはそのリストだけをループする。
         //     BufferReads/BufferWritesを宣言しているのは、このパスと直接光パスがどちらもm_GBufferDepthを
-        //     Readsするだけの「読み手同士」で、テクスチャの依存だけでは両者の間に順序が張られないため ---
-        if (m_LightCullingEnabled)
+        //     Readsするだけの「読み手同士」で、テクスチャの依存だけでは両者の間に順序が張られないため。
+        //     **積むかどうかはShouldRunLightCullingが決める。** グリッドの読み手は直接光パスと
+        //     Presentのデバッグ表示しか無く、MegaLightsが走るフレームは前者が止まっているため、
+        //     通常表示では丸ごと無駄になる ---
+        if (ShouldRunLightCulling())
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "LightCull",

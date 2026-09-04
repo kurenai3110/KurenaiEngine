@@ -166,6 +166,18 @@ namespace Kurenai::UI
         ImGui::Text(
             "タイル: %u x %u (1タイルあたり最大%uライト)", m_Engine.m_LightTileCountX, m_Engine.m_LightTileCountY,
             KurenaiEngine3D::kLightTileCapacity);
+
+        // 有効にしていてもパスが積まれないことがあるので、その旨をここで断る。
+        // このチェックボックスだけを見て「効いていない」と読まれないようにする
+        // DebugViewはKurenaiEngine3Dのネストenumなので、この名前空間からは修飾が要る
+        if (m_Engine.ShouldRunMegaLights() &&
+            m_Engine.m_DebugView != KurenaiEngine3D::DebugView::LightTiles)
+        {
+            ImGui::TextWrapped(
+                "MegaLightsが有効なあいだ、直接光パスのライトループは止まっており"
+                "ライトグリッドを読む者が居ないため、このパスは実行していません"
+                "(デバッグ表示の「ライトタイル」を選んだときだけ実行します)");
+        }
     }
 
     void RenderingPanel::DrawMegaLightsSection()
