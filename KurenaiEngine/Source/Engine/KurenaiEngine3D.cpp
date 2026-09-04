@@ -1576,6 +1576,10 @@ namespace Kurenai
             // x: 出力幅, y: 出力高, z: 1灯あたりに撃つ影レイの本数(0なら影を撃たず可視率1。恒等テスト用),
             // w: 有効ライト数
             DirectX::XMUINT4 Params0;
+            // x: フレーム番号。球光源のサンプル列を毎フレーム回すのに使う。
+            // 【混ぜないと蓄積が効かない】固定すると毎フレーム同じ点を引き、
+            // 何枚足しても可視率のばらつきが残る(MegaLightsReference.hlsl)
+            DirectX::XMUINT4 Params1;
         };
 
         // RTAO.hlsl側のcbuffer RTAOConstantsと一致させる必要がある
@@ -12542,6 +12546,9 @@ namespace Kurenai
                         static_cast<uint32_t>(std::max(0, m_MegaLightsShadowRayCount)),
                         static_cast<uint32_t>(gpuLights.size()),
                     };
+                    // 球光源のサンプル列を毎フレーム回す種。確率的サンプリング側と同じ
+                    // フレーム番号を使う(あちらは Params1.w)
+                    megaLightsConstants.Params1 = { m_TAAFrameIndex, 0u, 0u, 0u };
                     cmd->UpdateBuffer(m_MegaLightsConstantBuffer.get(), &megaLightsConstants,
                                       sizeof(megaLightsConstants));
 
