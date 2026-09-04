@@ -27,6 +27,7 @@
 #include "DX12Texture.h"
 #include "DX12Util.h"
 #include "Core/StringUtil.h"
+#include "RHI/RHIReadbackFormat.h"
 #include "RHI/RHIShaderPackage.h"
 #include "RHI/TextureImage.h"
 
@@ -2680,6 +2681,136 @@ namespace Kurenai::RHI
         return std::make_unique<DX12Texture>(
             this, m_RenderSrvCpuHeap.get(), resource, D3D12_RESOURCE_STATE_DEPTH_WRITE, srvIndex, DX12Texture::kInvalid, DX12Texture::kInvalid,
             DX12Texture::kInvalid, std::vector<uint32_t>{}, std::move(sliceDsvIndices));
+    }
+
+    std::unique_ptr<IRHITexture> DX12Device::CreateReadbackTexture(IRHITexture* source, uint32_t mipLevel)
+    {
+        if (source == nullptr)
+        {
+            Core::Logger::Error("DX12", "CreateReadbackTexture: コピー元がnullptrです");
+            return nullptr;
+        }
+
+        auto* dx12Source = static_cast<DX12Texture*>(source);
+        ID3D12Resource* sourceResource = dx12Source->GetResource();
+        if (sourceResource == nullptr)
+        {
+            Core::Logger::Error("DX12", "CreateReadbackTexture: コピー元がリソースを持っていません");
+            return nullptr;
+        }
+
+        D3D12_RESOURCE_DESC sourceDesc = sourceResource->GetDesc();
+        if (sourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+        {
+            // Texture3D(雲の3Dノイズ)とバッファは対象外。ファイル形式もCPU側の読み手も
+            // 2次元を前提にしているため、半端に通さずここで断る
+            Core::Logger::Error(
+                "DX12",
+                "CreateReadbackTexture: Texture2D以外はリードバックに対応していません (Dimension=" +
+                    std::to_string(static_cast<int>(sourceDesc.Dimension)) + ")");
+            return nullptr;
+        }
+        if (mipLevel >= sourceDesc.MipLevels)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "CreateReadbackTexture: ミップレベルが範囲外です (mipLevel=" + std::to_string(mipLevel) +
+                    ", MipLevels=" + std::to_string(sourceDesc.MipLevels) + ")");
+            return nullptr;
+        }
+
+        const uint32_t mipWidth = std::max<uint32_t>(1u, static_cast<uint32_t>(sourceDesc.Width) >> mipLevel);
+        const uint32_t mipHeight = std::max<uint32_t>(1u, sourceDesc.Height >> mipLevel);
+
+        const TextureReadbackDesc readbackDesc = DescribeReadbackFormat(sourceDesc.Format, mipWidth, mipHeight);
+        if (readbackDesc.ElementType == TextureElementType::Unknown)
+        {
+            // BC圧縮のアセットテクスチャなど。**黙って0で埋めた結果を返さない**
+            Core::Logger::Error(
+                "DX12",
+                "CreateReadbackTexture: 対応していないフォーマットです (DXGI_FORMAT=" +
+                    std::to_string(static_cast<int>(sourceDesc.Format)) +
+                    ")。RHIReadbackFormat.hの対応表に無いため読み出せません");
+            return nullptr;
+        }
+
+        // 【typelessのまま配置情報を求めない】深度はDSVとSRVを両立させるためR32_TYPELESSで
+        // 作られている。コピー先の記述子に使う配置情報は型付きフォーマットで求める
+        // (置き換えの根拠はRHIReadbackFormat.hのToReadbackTypedFormat)
+        D3D12_RESOURCE_DESC typedDesc = sourceDesc;
+        typedDesc.Format = ToReadbackTypedFormat(sourceDesc.Format);
+
+        // コピー元のどのサブリソースを写すかで配置情報が変わる(ミップ段ごとに寸法が違う)。
+        // 配列スライスはどれでも同じ配置になるのでスライス0のぶんを求めておき、
+        // 実際にどのスライスを写すかはCopyTextureToReadbackで選ぶ
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT numRows = 0;
+        UINT64 rowSizeInBytes = 0;
+        UINT64 totalBytes = 0;
+        m_Device->GetCopyableFootprints(
+            &typedDesc, mipLevel, 1, 0, &footprint, &numRows, &rowSizeInBytes, &totalBytes);
+
+        if (totalBytes == 0 || numRows == 0)
+        {
+            Core::Logger::Error("DX12", "CreateReadbackTexture: 配置情報を取得できませんでした(サイズが0)");
+            return nullptr;
+        }
+
+        // 求めた配置と、こちらで計算したテクセル寸法が食い違っていないかを検算する。
+        // 食い違ったまま進むと「読めるが中身がずれている」という最も気づきにくい壊れ方になる
+        if (footprint.Footprint.Width != mipWidth || numRows != mipHeight ||
+            rowSizeInBytes != static_cast<UINT64>(mipWidth) * readbackDesc.BytesPerTexel)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "CreateReadbackTexture: 配置情報と寸法が一致しません (footprint=" +
+                    std::to_string(footprint.Footprint.Width) + "x" + std::to_string(numRows) + " rowSize=" +
+                    std::to_string(rowSizeInBytes) + " / 期待=" + std::to_string(mipWidth) + "x" +
+                    std::to_string(mipHeight) + " rowSize=" +
+                    std::to_string(static_cast<UINT64>(mipWidth) * readbackDesc.BytesPerTexel) + ")");
+            return nullptr;
+        }
+
+        // 【READBACKヒープにテクスチャは置けない】D3D12の仕様上、READBACK/UPLOADヒープに
+        // 置けるのはバッファだけ。配置情報つきのバッファとして確保し、
+        // CopyTextureRegionでテクスチャ→バッファのコピーを行う
+        const CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_READBACK);
+        const CD3DX12_RESOURCE_DESC bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(totalBytes);
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        const HRESULT hr = m_Device->CreateCommittedResource(
+            // READBACKヒープのリソースはCOPY_DEST状態でしか作れない(D3D12の仕様)
+            &heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(&resource));
+        if (FAILED(hr))
+        {
+            // 【throwしない】これは描画に必須の資源ではなく、デバッグ用の吸い出しの受け皿。
+            // 大きなテクスチャで確保に失敗しても起動そのものを落とすべきではない
+            Core::Logger::Error(
+                "DX12",
+                "CreateReadbackTexture: リードバックテクスチャの作成に失敗しました (" +
+                    std::to_string(totalBytes) + "バイト)");
+            return nullptr;
+        }
+
+        // 【永続マップする】リードバックバッファ(DX12Device::CreateBuffer)と同じ扱い。
+        // 読むたびにMap/Unmapすると、Unmapへ渡す書き込み範囲の指定を誤ったときに
+        // ドライバがキャッシュを吐き出して遅くなる。読み取り専用なのでマップしたままでよい
+        void* mappedPtr = nullptr;
+        const D3D12_RANGE readRange{ 0, static_cast<SIZE_T>(totalBytes) };
+        if (FAILED(resource->Map(0, &readRange, &mappedPtr)))
+        {
+            Core::Logger::Error("DX12", "CreateReadbackTexture: リードバックテクスチャのマップに失敗しました");
+            return nullptr;
+        }
+
+        auto state = std::make_unique<DX12ReadbackState>();
+        state->Footprint = footprint;
+        state->MappedPtr = mappedPtr;
+        state->BufferSizeInBytes = totalBytes;
+        state->Desc = readbackDesc;
+
+        return std::make_unique<DX12Texture>(std::move(resource), std::move(state));
     }
 
     std::unique_ptr<IRHISamplerSet> DX12Device::CreateSamplerSet(const SamplerDesc* descs, uint32_t count)

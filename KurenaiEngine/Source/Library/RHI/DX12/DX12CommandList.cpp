@@ -959,6 +959,78 @@ namespace Kurenai::RHI
             dx12Dst->GetResource(), 0, dx12Src->GetResource(), 0, sizeInBytes);
     }
 
+    void DX12CommandList::CopyTextureToReadback(
+        IRHITexture* dst, IRHITexture* src, uint32_t mipLevel, uint32_t arraySlice)
+    {
+        if (dst == nullptr || src == nullptr)
+        {
+            Core::Logger::Error("DX12", "CopyTextureToReadback: 引数がnullptrです。コピーをスキップします");
+            return;
+        }
+
+        auto* dx12Dst = static_cast<DX12Texture*>(dst);
+        auto* dx12Src = static_cast<DX12Texture*>(src);
+        if (!dx12Dst->IsReadback())
+        {
+            Core::Logger::Error(
+                "DX12",
+                "CopyTextureToReadback: コピー先がCreateReadbackTextureで作ったテクスチャではありません。"
+                "コピーをスキップします");
+            return;
+        }
+
+        ID3D12Resource* srcResource = dx12Src->GetResource();
+        if (srcResource == nullptr)
+        {
+            Core::Logger::Error("DX12", "CopyTextureToReadback: コピー元がリソースを持っていません");
+            return;
+        }
+
+        const D3D12_RESOURCE_DESC srcDesc = srcResource->GetDesc();
+        if (mipLevel >= srcDesc.MipLevels || arraySlice >= srcDesc.DepthOrArraySize)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "CopyTextureToReadback: サブリソースの指定が範囲外です (mipLevel=" + std::to_string(mipLevel) +
+                    "/" + std::to_string(srcDesc.MipLevels) + ", arraySlice=" + std::to_string(arraySlice) + "/" +
+                    std::to_string(srcDesc.DepthOrArraySize) + ")");
+            return;
+        }
+
+        // 受け皿はCreateReadbackTextureの時点で「特定のミップ段の寸法」に合わせて作ってある。
+        // 別のミップを指定されるとサイズが合わず、はみ出して書くか途中で切れる。
+        // どちらも静かに壊れるので、寸法を突き合わせて弾く
+        const DX12ReadbackState* readback = dx12Dst->GetReadbackState();
+        const uint32_t mipWidth = std::max<uint32_t>(1u, static_cast<uint32_t>(srcDesc.Width) >> mipLevel);
+        const uint32_t mipHeight = std::max<uint32_t>(1u, srcDesc.Height >> mipLevel);
+        if (readback->Desc.Width != mipWidth || readback->Desc.Height != mipHeight)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "CopyTextureToReadback: 受け皿の寸法(" + std::to_string(readback->Desc.Width) + "x" +
+                    std::to_string(readback->Desc.Height) + ")がコピー元のミップ" + std::to_string(mipLevel) +
+                    "(" + std::to_string(mipWidth) + "x" + std::to_string(mipHeight) +
+                    ")と一致しません。CreateReadbackTextureに渡したミップと同じものを指定してください");
+            return;
+        }
+
+        // コピー元をCOPY_SOURCEへ。コピー先(READBACKヒープ)はCOPY_DESTから動かせないので遷移しない。
+        // 【元の状態へ手で戻さない】TransitionToはALL_SUBRESOURCESで遷移させ、現在状態を覚えている。
+        // 次にこのテクスチャを使うSetRenderTargets/SetTextureが必要な遷移を自分で発行するため、
+        // ここで戻すと二重に遷移して状態追跡がずれる
+        dx12Src->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        const UINT srcSubresource =
+            D3D12CalcSubresource(mipLevel, arraySlice, 0, srcDesc.MipLevels, srcDesc.DepthOrArraySize);
+
+        const CD3DX12_TEXTURE_COPY_LOCATION dstLocation(dx12Dst->GetResource(), readback->Footprint);
+        const CD3DX12_TEXTURE_COPY_LOCATION srcLocation(srcResource, srcSubresource);
+
+        // 【pSrcBoxはnullptr】サブリソース全体をコピーする。深度フォーマットのコピーは
+        // 部分矩形の指定が許されておらず(D3D12の制約)、渡すとデバッグレイヤーのエラーになる
+        m_Device->GetCommandList()->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
+    }
+
     void DX12CommandList::ReleaseComputeUavBindingsAfterDispatch()
     {
         // このDispatchでUAVとして書き込んだリソースは、直後に別のDispatchやSRVとして読む場合に
