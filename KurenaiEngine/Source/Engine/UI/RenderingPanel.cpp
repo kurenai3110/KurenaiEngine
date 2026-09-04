@@ -166,6 +166,18 @@ namespace Kurenai::UI
         ImGui::Text(
             "タイル: %u x %u (1タイルあたり最大%uライト)", m_Engine.m_LightTileCountX, m_Engine.m_LightTileCountY,
             KurenaiEngine3D::kLightTileCapacity);
+
+        // 有効にしていてもパスが積まれないことがあるので、その旨をここで断る。
+        // このチェックボックスだけを見て「効いていない」と読まれないようにする
+        // DebugViewはKurenaiEngine3Dのネストenumなので、この名前空間からは修飾が要る
+        if (m_Engine.ShouldRunMegaLights() &&
+            m_Engine.m_DebugView != KurenaiEngine3D::DebugView::LightTiles)
+        {
+            ImGui::TextWrapped(
+                "MegaLightsが有効なあいだ、直接光パスのライトループは止まっており"
+                "ライトグリッドを読む者が居ないため、このパスは実行していません"
+                "(デバッグ表示の「ライトタイル」を選んだときだけ実行します)");
+        }
     }
 
     void RenderingPanel::DrawMegaLightsSection()
@@ -186,7 +198,8 @@ namespace Kurenai::UI
 
         // 手法の選択。反射・影と同じ方針で、非対応環境では選択肢そのものを出さない
         // (上で早期returnしているのでここへは対応環境しか来ない)
-        static const char* kModeNames[] = { "なし", "参照実装 (全灯総当たり)", "確率的サンプリング" };
+        static const char* kModeNames[] = { "なし", "参照実装 (全灯総当たり)", "確率的サンプリング",
+                                            "クアッド共有 (1画素1レイ)" };
 
         int modeIndex = static_cast<int>(m_Engine.m_MegaLightsMode);
         if (ComboEx(
@@ -196,12 +209,23 @@ namespace Kurenai::UI
                 "ライト数に比例して重い。確率的サンプリングを評価するときの"
                 "真値(ノイズの無い基準)を作るためにある。\n\n"
                 "確率的サンプリングは候補プールからM個引いて1灯へ絞り、影レイを1本だけ撃つ。"
-                "ノイズは乗るが偏りは無く、時間方向に平均すると参照実装へ寄っていく"))
+                "ノイズは乗るが偏りは無く、時間方向に平均すると参照実装へ寄っていく。"
+                "ただし時間・空間の再利用が追加のレイを撃つため、実測では参照実装と"
+                "ほぼ同じコストになっている。\n\n"
+                "クアッド共有は再利用をやめ、2x2の4画素が撃った4本の結果を共有して平均する。"
+                "レイは1画素1本のままで、影の縁が最大1画素ぼける偏りを受け入れる代わりに"
+                "コストを大きく下げる(UE5 MegaLights の DownsampleFactor=2 と同じ種類の近似)"))
         {
             m_Engine.m_MegaLightsMode = static_cast<KurenaiEngine3D::MegaLightsMode>(modeIndex);
         }
 
-        if (m_Engine.m_MegaLightsMode == KurenaiEngine3D::MegaLightsMode::Stochastic)
+        // 候補プールとRIS、そしてデノイザは確率的サンプリングとクアッド共有で共通。
+        // 違うのは「1画素の推定量をどう良くするか」だけなので、操作もそこだけ分ける
+        const bool megaLightsStochasticUI =
+            m_Engine.m_MegaLightsMode == KurenaiEngine3D::MegaLightsMode::Stochastic;
+        const bool megaLightsQuadUI =
+            m_Engine.m_MegaLightsMode == KurenaiEngine3D::MegaLightsMode::QuadShared;
+        if (megaLightsStochasticUI || megaLightsQuadUI)
         {
             SliderIntEx(
                 "初期候補数 M###MegaLightsSampleCount", &m_Engine.m_MegaLightsSampleCount, 1, 32,
@@ -210,6 +234,28 @@ namespace Kurenai::UI
                 "なってノイズが減るが、候補ごとにBRDFを1回評価するぶん重くなる。\n\n"
                 "【影レイの本数はこれとは独立】選ばれた1灯にしか撃たないので常に1本で、"
                 "Mを増やしてもレイは増えない。ここがライト数からコストを切り離している部分");
+
+            // 【つまみを動かすと定数バッファへ渡すKが変わる】書き手(候補プール)と
+            // 読み手(Initial・空間再利用・デバッグ表示)がすべて同じメンバ変数から
+            // Kを受け取るよう、UIも必ずセッターを通す
+            int poolCapacity = m_Engine.m_MegaLightsTilePoolCapacity;
+            if (SliderIntEx(
+                    "候補プールの容量 K###MegaLightsTilePoolCapacity", &poolCapacity,
+                    KurenaiEngine3D::kMegaLightsTilePoolMinCapacity,
+                    static_cast<int>(KurenaiEngine3D::kMegaLightsTilePoolCapacity),
+                    Defaults::MegaLightsTilePoolCapacity,
+                    "候補プールが1タイル(16x16画素)あたりに抽出する灯の数。\n\n"
+                    "【1画素あたりの標本数では減らないノイズがここで決まる】プールはタイルに"
+                    "1つしかなく、タイル内の全画素が同じK個から引く。プールの引き方のばらつきは"
+                    "タイル内で共通のオフセットとして乗るので、標本を増やしても平均されず、"
+                    "16画素の格子に揃った塊として残る。\n\n"
+                    "実測(標本数4・デノイザ切・1フレームの誤差): K=32でタイル間7.81・"
+                    "タイル内10.27、K=128で4.03・8.30(8bit階調の中央値)。\n\n"
+                    "【レイの本数は増えない】コストは候補プールのパスだけで、"
+                    "2560x1440・107灯で 0.273→0.321 ms、全体で+1.3%"))
+            {
+                m_Engine.SetMegaLightsTilePoolCapacity(poolCapacity);
+            }
 
             CheckboxEx(
                 "デノイザ###MegaLightsDenoise", &m_Engine.m_MegaLightsDenoiseEnabled,
@@ -226,13 +272,76 @@ namespace Kurenai::UI
                     "a-trousの段数###MegaLightsDenoiseAtrous", &m_Engine.m_MegaLightsDenoiseAtrousPasses,
                     0, 5, Defaults::MegaLightsDenoiseAtrousPasses,
                     "段ごとにステップ幅が倍になるので、4段で半径16画素ぶんに届く。0で時間累積のみ");
+                // 【いま効いている値そのものを触らせる】時間累積の上限は手法ごとに
+                // 別の変数を持っている(手法3にはリザーバの履歴が無く、デノイザだけが
+                // 時間方向の記憶なので長い)。1つのつまみで両方を兼ねると、
+                // 表示している値と実際に効いている値が食い違う
                 SliderIntEx(
-                    "時間累積の上限###MegaLightsDenoiseFrames", &m_Engine.m_MegaLightsDenoiseMaxFrames,
-                    1, 64, Defaults::MegaLightsDenoiseMaxFrames,
-                    "何フレームぶんまで混ぜるか。**TAAより短くすること** ―― 長いとTAAのゴーストと"
-                    "重なって二重に尾を引き、どちらが原因か切り分けられなくなる");
+                    megaLightsQuadUI ? "時間累積の上限###MegaLightsQuadDenoiseFrames"
+                                     : "時間累積の上限###MegaLightsDenoiseFrames",
+                    megaLightsQuadUI ? &m_Engine.m_MegaLightsQuadDenoiseMaxFrames
+                                     : &m_Engine.m_MegaLightsDenoiseMaxFrames,
+                    1, 128,
+                    megaLightsQuadUI ? Defaults::MegaLightsQuadDenoiseMaxFrames
+                                     : Defaults::MegaLightsDenoiseMaxFrames,
+                    "何フレームぶんまで混ぜるか。上げるほどちらつきは減るが、"
+                    "灯や影が動いたときの残光(ゴースト)が長く尾を引く。\n\n"
+                    "残光は指数移動平均そのもので、10%まで落ちるのに 2.30*N フレームかかる"
+                    "(60Hzなら 32で1.2秒 / 64で2.5秒 / 128で4.9秒。実測が理論値と3桁一致)。\n\n"
+                    "【クアッド共有では既定を長くしてある】あちらはリザーバを持ち回らないので、"
+                    "デノイザだけが時間方向の記憶になる");
             }
 
+            if (megaLightsQuadUI)
+            {
+                // 【つまみを動かすとリザーババッファを確保し直す】UI経路も
+                // SetMegaLightsQuadSamples を通し、確保と定数バッファがずれないようにする
+                int quadSamples = m_Engine.m_MegaLightsQuadSamplesPerPixel;
+                if (SliderIntEx(
+                        "1画素あたりの標本数###MegaLightsQuadSamples", &quadSamples, 1,
+                        KurenaiEngine3D::kMegaLightsMaxSamplesPerPixel,
+                        Defaults::MegaLightsQuadSamplesPerPixel,
+                        "1画素あたりに候補プールから引く標本(リザーバ)の数。"
+                        "**影レイの本数がそのままこれになる**ので、コストはほぼ比例して増える。\n\n"
+                        "【1本では動いている間のノイズが目に見える】カメラが動くとデノイザの"
+                        "時間累積が効かず、生の推定量がそのまま出る。ノイズの内訳は"
+                        "「どの灯を選ぶか」と「選んだ灯の可視性」で、後者が大きい ―― "
+                        "参照実装を影レイ1本と32本で比べると|相対誤差|のp90が0.37あった。\n\n"
+                        "【UE5も1本ではない】r.MegaLights.NumSamplesPerPixel は 2/4/16 から選ぶ形で、"
+                        "最小でも2である"))
+                {
+                    m_Engine.SetMegaLightsQuadSamples(quadSamples);
+                }
+
+                CheckboxEx(
+                    "クアッド共有###MegaLightsQuadShare", &m_Engine.m_MegaLightsQuadShareEnabled,
+                    Defaults::MegaLightsQuadShareEnabled,
+                    "2x2クアッドの仲間が撃った影レイの結果を借りて、4標本を自分の面で"
+                    "評価し直して平均する。追加のレイは1本も撃たない。\n\n"
+                    "【受け入れている偏り】影の境界がクアッドを横切る画素で可視性が食い違い、"
+                    "硬い影の縁が最大1画素ぼける(2x2の箱フィルタ相当)。箱フィルタは積分を"
+                    "保存するので総和比には出ず、影の縁の帯の誤差にだけ出る。\n\n"
+                    "【切るのは陽性対照のため】切ると自分の標本だけを使う形になり、"
+                    "確率的サンプリングから時間・空間再利用を外した構成と画素単位で一致するはず");
+                CheckboxEx(
+                    "クアッド層化###MegaLightsQuadStratify", &m_Engine.m_MegaLightsQuadStratify,
+                    Defaults::MegaLightsQuadStratify,
+                    "クアッドの4画素へ候補プールのスロットを1/4ずつ割り当て、"
+                    "クアッド全体でスロットを重複なく列挙させる。\n\n"
+                    "【割り戻しは変わらない】プールのスロットは混合分布からのi.i.d.抽出なので、"
+                    "スロットの選び方を変えても引かれる灯の分布は同じ。4人が同じ灯を引く確率が"
+                    "下がるぶん、平均に入る標本の多様性が上がる");
+                CheckboxEx(
+                    "遮蔽キャッシュ###MegaLightsBlockedCache", &m_Engine.m_MegaLightsBlockedCacheEnabled,
+                    Defaults::MegaLightsBlockedCacheEnabled,
+                    "遮蔽が確定した灯を目標関数から外すキャッシュ(16フレームに1回再検査する)。"
+                    "影の縁で支配光を毎フレーム選んでは殺される、という空回りを防ぐ。\n\n"
+                    "【陽性対照では切る】履歴に依存すると、確率的サンプリングとの"
+                    "画素単位の一致が崩れる");
+            }
+
+            if (megaLightsStochasticUI)
+            {
             CheckboxEx(
                 "時間再利用###MegaLightsTemporal", &m_Engine.m_MegaLightsTemporalEnabled,
                 Defaults::MegaLightsTemporalEnabled,
@@ -250,10 +359,12 @@ namespace Kurenai::UI
                     "履歴が「これまでに何個の候補から絞ったか」の上限。\n\n"
                     "【上げるほど収束は速いがゴーストが出る】灯を消しても明かりと影が残る。"
                     "残光は1フレームあたり C/(C+M) の等比で減り、実測がこの式と一致する。"
-                    "残光が10%まで落ちるのは、既定160・M=8で46.8フレーム(60Hzで0.78秒)、"
-                    "64なら19.6フレーム(0.33秒)、640なら185フレーム(3.1秒)。"
-                    "既定160はReSTIR DIの慣例(初期Mの20倍)に合わせた判断で、"
-                    "測定だけでは決まらない(品質は単調に良くなりゴーストは単調に悪くなるため)");
+                    "残光が10%まで落ちるのは、M=8のとき 32で10.3フレーム(60Hzで0.17秒)、"
+                    "64で19.6フレーム(0.33秒)、160で46.8フレーム(0.78秒)、640で185フレーム(3.1秒)。\n\n"
+                    "【既定は64】大きいと当選灯が凍結して影の縁に点描状の空間ノイズが固定される。"
+                    "ちらつきはデノイザの時間累積が吸うので、ここを上げて抑える必要はない"
+                    "(かつて640にしていたのは、デノイザの時間累積が動いていない状態での測定に"
+                    "基づく判断だった)");
             }
 
             CheckboxEx(
@@ -283,9 +394,12 @@ namespace Kurenai::UI
                     Defaults::MegaLightsInitialVisibility,
                     "初期サンプルへ影レイを1本撃ち、遮蔽されていたらリザーバごと殺す"
                     "(RTXDI系では標準の段)。\n\n"
-                    "【既定は無効】殺された画素の実効的な定義域が変わるのに、結合の不偏化は"
-                    "レイを撃たずに可視率を判定できず、影の縁が暗い側へ偏る。実測でも"
-                    "殺し無しのほうが偏りも裾も良い(根拠は ImplementationDetail 61.7)");
+                    "【既定は有効。空間再利用と組で使う】殺しは「遮蔽で0になるサンプルを"
+                    "近傍へ配らない」ためのもので、空間再利用が無いと絵が1bitも変わらない。"
+                    "逆に空間再利用は殺しが無いと効かない。かつて既定を無効にしていた根拠は"
+                    "「初期可視レイ無しの空間再利用」の測定で、効く組み合わせを測っていなかった"
+                    "(根拠は ImplementationDetail 61.7f)");
+            }
             }
         }
 

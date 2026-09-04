@@ -262,6 +262,7 @@
     <li><a href="#texturestreaming">42. テクスチャの常駐ミップ制御(テクスチャストリーミング)</a></li>
     <li><a href="#shaderpackage">43. シェーダーの事前コンパイル(<code>.kshader</code>)</a></li>
     <li><a href="#meshletlod">44. メッシュレットLOD(離散LOD)</a></li>
+    <li><a href="#texturereadback">45. テクスチャのリードバックと生値ダンプ(<code>-dumptex</code>)</a></li>
   </ol>
 </nav>
 
@@ -6681,6 +6682,78 @@ TLASへレイを撃った結果であり、ドローンは手続き的に展開�
 この経路での切り分けには使えない。
 </p>
 
+<h3 id="ch38-11">38.11 機体を光源として扱う(<code>CastLight</code>)</h3>
+
+<p>
+<code>[DroneShow]CastLight = true</code> のとき、機体を<strong>通常の <code>GPULight</code>(型1=Point)として
+既存のライトリストへ連結する</strong>。専用のパスも専用のシェーダーも作らない &mdash;&mdash;
+連結してしまえば、直接光・半透明・平面反射・MegaLights のどの経路も追加の分岐なしで扱える。
+<code>.hlsl</code> の変更は<code>DDGIProbeTrace.hlsl</code>の1本だけである(下記)。
+</p>
+
+<p>
+<strong>1機の光度はスプライトから導く。</strong> ビルボードが書き込む放射輝度をディスク全体で積分すると
+<code>I = Color * Intensity * Brightness * R^2 * 0.627168 [cd]</code> になり、
+ショーの <code>Brightness</code> と <code>Radius</code> から一意に決まる。
+これにより<strong><code>.kshow</code> にフィールドを足さずに済み(v1据え置き)、
+エディタでスプライトを明るくすれば光も必ず連動する</strong>。
+導出と係数の由来は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 38.11節。
+</p>
+
+<p>
+<strong>露出は掛ける側。</strong> ドローンのスプライトは
+<code>DroneShowConstants.Params0.x = Brightness * effectiveExposure</code> として
+露出を通っているので、単位系としては手置きライト(カンデラ)の側にいる。
+エミッシブ光源プロキシ(62章)は逆に露出を掛けない規約なので、
+<strong>あちらの書き方をそのまま写すと桁で外す</strong>。
+</p>
+
+<h4>全機は送れない &mdash;&mdash; 間引いて送る</h4>
+
+<p>
+1500灯は <code>kMaxLights</code>(1024)を超えるうえ、編隊は空の一点に密集するので
+16pxタイルの容量(<code>kLightTileCapacity</code> = 64)を確実に超え、
+<strong>超過分は <code>DirectLighting.hlsl</code> の <code>min()</code> で静かに欠落する</strong>。
+さらに<code>Transparent</code> / <code>PlanarReflection</code> / <code>ProbeShading</code> /
+<code>DDGIProbeTrace</code> の4本はタイルカリングを通らない全灯ループである。
+</p>
+
+<p>
+そこで<strong>添字 <code>i * DroneCount / K</code> の K 機だけを灯にし、光度を <code>DroneCount / K</code> 倍する</strong>
+(<code>DroneShow::BuildLightSamples</code>、既定 K=48)。採る添字が固定で灯が実在の機体そのものなので、
+<strong>モーフ中も機体と同じ軌跡で連続に動きポップしない</strong>。
+空間クラスタリングは所属が飛ぶか格子が動くかで必ずポップする。
+誤差の実測と、方位角順の連続ブロックでは灯数を増やしても誤差が縮まらないことは
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 38.12節。
+</p>
+
+<h4>反射プローブとDDGIからは外す</h4>
+
+<p>
+編隊は毎フレーム動くので、<strong>反射プローブには「焼いた瞬間の編隊」が環境キューブへ固定で残り、
+DDGIはヒステリシスで編隊を追いかけ続けて収束しない</strong>。
+ドローンの灯は<strong>リストの末尾へ連結</strong>し、この2つには<strong>連結前の灯数</strong>
+(<code>bakedLightCount</code>)を渡す。
+</p>
+
+<p>
+ラスタ経路(<code>ProbeCapture.hlsl</code>。反射プローブとDDGIのラスタ焼きが共有)は
+<code>FrameConstants</code> のコピーを持っているので数を差し替えるだけで済む。
+一方<strong>DDGIのレイトレ経路は b0 にメイン描画と同じバッファをそのまま束ねている</strong>ため
+差し替えられず、<code>DDGITraceConstants</code>(b1)へ <code>TraceParams2.x</code> を足して
+そちらから灯数を取るようにした。<strong>ラスタとレイトレで同じ値を渡すこと</strong> &mdash;&mdash;
+ここが揃っていないとDX11とDX12でDDGIの結果が黙って食い違う。
+</p>
+
+<h4>評価の順序</h4>
+
+<p>
+<code>DroneShow::Evaluate</code> は<strong>ライトリストの組み立てより前</strong>で呼ぶ。
+後ろにあると灯が1フレーム遅れ、編隊が動いている間ずっと光だけが前フレームの位置から当たり続ける。
+GPUバッファへの転送は従来どおりレンダーグラフ構築の直前のままでよい。
+</p>
+
 </section>
 
 <section id="meshlet">
@@ -7927,6 +8000,103 @@ G-Buffer・シャドウ・深度プリパスがすべてこの関数を通りま
 
 </section>
 
+
+<section id="texturereadback">
+<h2>45. テクスチャのリードバックと生値ダンプ(<code>-dumptex</code>)</h2>
+
+<h3>45.1 責務の分担</h3>
+<p>
+GPUが描いた<strong>テクスチャ</strong>の中身をCPUで読むための経路です。
+バッファのリードバック(<code>BufferUsage::Readback</code> /
+<code>IRHICommandList::CopyBufferToReadback</code> / <code>IRHIBuffer::ReadbackData</code>)と
+<strong>約束はまったく同じ</strong>で、GPUの完了を待たず、呼び出し側が十分なフレーム数を
+空けてから読みます。待つとフレームが直列化し、計測のために計測対象を壊すことになるためです。
+</p>
+<table>
+<tr><th>層</th><th>API</th><th>責務</th></tr>
+<tr><td><code>IRHIDevice</code></td><td><code>CreateReadbackTexture(source, mipLevel)</code></td>
+<td>コピー元の指定ミップ段と同じ寸法・同じフォーマットの受け皿を作る。ビューは持たない</td></tr>
+<tr><td><code>IRHICommandList</code></td><td><code>CopyTextureToReadback(dst, src, mip, slice)</code></td>
+<td>1サブリソースぶんのコピーコマンドを積む(<strong>ここでGPUを待たない</strong>)</td></tr>
+<tr><td><code>IRHITexture</code></td><td><code>GetReadbackDesc(mip)</code> / <code>ReadbackData(out, bytes)</code></td>
+<td>中身の形を返す / CPUのメモリへ写す。<strong>行のパディングはここで剥がす</strong></td></tr>
+</table>
+
+<h3>45.2 バックエンドごとの実体が違う</h3>
+<p>
+<strong>受け皿の型を<code>IRHITexture</code>にしてあるのは、DX11とDX12で実体が逆だからです。</strong>
+DX11は<code>CopySubresourceRegion</code>が同じ種類のリソース間でしか使えず
+Texture2D→Bufferのコピーができません。DX12は逆に、READBACKヒープにテクスチャを置けず、
+<code>GetCopyableFootprints</code>が返す配置情報つきの<strong>バッファ</strong>として
+確保するしかありません。どちらかに合わせると片方が書けないため、
+中身がバッファかテクスチャかはバックエンドに隠しています。
+</p>
+<ul>
+<li><strong>DX11</strong>: <code>D3D11_USAGE_STAGING</code> の <code>ID3D11Texture2D</code>。
+<code>Map(D3D11_MAP_READ, DO_NOT_WAIT)</code> で読み、まだ実行中なら<code>false</code>を返す
+(<strong>これはエラーではないのでログを出さない</strong> &mdash;&mdash; 毎フレーム出るとログが埋まる)</li>
+<li><strong>DX12</strong>: READBACKヒープのバッファを<strong>作成時から永続マップ</strong>し、
+読み出しは行ごとの<code>memcpy</code>のみ。<code>ReadbackData</code>は常に<code>true</code>を返すが、
+<strong>読めた内容が最新である保証は無い</strong>(古いフレームの値が返りうる)</li>
+</ul>
+
+<h3>45.3 パディングと typeless の扱い</h3>
+<p>
+DX12は<code>RowPitch</code>が256バイト境界へ切り上げられ、DX11は<code>Map</code>が返す
+<code>RowPitch</code>がドライバ依存で幅×テクセルサイズより大きいことがあります。
+<strong>剥がす側はRHIの実装に置いています</strong> &mdash;&mdash;
+DX11の<code>RowPitch</code>はMapするまで分からず、上位層に持たせると
+「確保の時点では知りようのない値」を要求することになるためです。
+上位層はパディングの存在を一切見ません。
+</p>
+<p>
+深度テクスチャはDSV(<code>D32_FLOAT</code>)とSRV(<code>R32_FLOAT</code>)を両立させるため
+<code>R32_TYPELESS</code>で作られており、typelessのままでは受け皿の記述子に使えません。
+同じtypeグループの型付きフォーマットへ置き換えるのはD3D11/D3D12のどちらでも合法なので、
+<code>RHI/RHIReadbackFormat.h</code> の <code>ToReadbackTypedFormat</code> で置き換えます。
+<strong>この変換表はDX11とDX12で共有しています</strong> &mdash;&mdash;
+別々に書くと、片方だけ直したときに「DX11では読めるがDX12では別の型として読む」という、
+絵にもエラーにも出ない食い違いが生まれるためです。
+</p>
+
+<h3>45.4 対応範囲</h3>
+<table>
+<tr><th>対応する</th><th>対応しない</th></tr>
+<tr><td>Texture2D、テクスチャ配列(スライス指定)、キューブマップ(6面の配列として)、
+任意のミップ段</td>
+<td>Texture3D(雲の3Dノイズ)、BC圧縮のアセットテクスチャ。
+<strong>ログを出して<code>nullptr</code>を返す</strong>(半端に対応して静かに誤った値を返さない)</td></tr>
+</table>
+<p>
+フォーマットは<code>R8G8B8A8_UNorm</code> / <code>R16G16_Float</code> /
+<code>R16G16B16A16_Float</code> / <code>R32_Float</code> / <code>R32G32_Float</code> /
+<code>R32G32B32_Float</code> / <code>R32G32B32A32_Float</code> / <code>R11G11B10_Float</code> と、
+深度の<code>R32_TYPELESS</code>。
+<strong><code>Float16</code>は<code>float</code>へ展開せず生ビットのまま返します</strong>
+(CPU側にhalfデコーダを書かずに済み、変換によるロスも入らない)。
+<code>R11G11B10_Float</code>も詰まったまま書き出し、展開は読み手
+(<code>Tools/texdump_inspect.py</code>)が行います &mdash;&mdash;
+根拠は<code>docs/ImplementationDetail.md</code> 63.7。
+</p>
+
+<h3>45.5 エンジン側の入口</h3>
+<p>
+<code>KurenaiEngine3D::BuildDumpableTextureTable</code> が「名前 &rarr; 中間テクスチャ」の表を
+返し、起動オプション<code>-dumptex &lt;名前&gt; &lt;パス&gt;</code>がこれを引きます。
+<strong>デバッグ表示(<code>DebugView</code>)の番号とは共有していません</strong> &mdash;&mdash;
+あちらは表示モードでテクスチャと1対1ではなく、番号が<code>-debugview N</code>として
+既に契約になっているためです(根拠は<code>docs/ImplementationDetail.md</code> 63.5)。
+</p>
+<p>
+コピーの発行はPresentパスの直前(<code>Reads</code>だけを持つパスとして積むので、
+書き手より後に順序付き、新たな循環依存は作らない)、読み戻しとファイル書き出しは
+<code>graph.Execute()</code>より後の<strong>毎フレーム走る場所</strong>です。
+コピーを積んでから読むまで5フレーム空け、読み戻しが60フレーム続けて失敗したら諦めます
+(<code>-exitafterdump</code>と組み合わせた無人実行が静かに固まるのを防ぐため)。
+</p>
+
+</section>
+
 </main>
 
 
@@ -7934,4 +8104,4 @@ G-Buffer・シャドウ・深度プリパスがすべてこの関数を通りま
 
 </div>
 </body>
-</html>
+</html>

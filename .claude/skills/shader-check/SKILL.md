@@ -1,6 +1,7 @@
 ---
 name: shader-check
 description: HLSLをfxc/dxc単体で一括コンパイル検証するときに使う。通常の検証はビルド(KurenaiShaderPackerが全バリアントを焼く)が兼ねるので不要で、これを使うのはビルドを通さずにHLSLだけ見たいとき、パッカーとコンパイラのどちらが原因かを切り分けたいとき。Use to compile-check HLSL with fxc/dxc directly, when the normal build-time check is not available or when isolating a packer-vs-compiler problem.
+effort: low
 ---
 
 # HLSLの一括コンパイル検証
@@ -153,4 +154,11 @@ SM 5.0で落ちる変更が入ると**DX11は起動時に例外で死ぬ**。
 
 このスキルを使うのは上の「まずビルドを通すこと」の3ケースに当てはまるときだけ。
 **`.hlsl`の変更だけでもビルドは必要**(出力フォルダには `.kshader` しか置かれず、
-`.hlsl` を差し替えて起動し直すやり方は使えない)。詳しくは `ab-compare` スキル。
+`.hlsl` を差し替えて起動し直すやり方は使えない)。
+
+**コンパイルが通ることと絵が正しいことは別。** その先は用件で分かれる:
+
+| 知りたいこと | スキル |
+|---|---|
+| 変更前後で最終画面がどう違うか | `ab-compare` |
+| コンパイルは通っているのに絵が違う。どこで壊れたか | `shader-debug`(中間バッファの値を数値で読む) |

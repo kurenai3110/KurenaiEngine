@@ -120,6 +120,29 @@ namespace Kurenai::RHI
         R11G11B10_Float,
     };
 
+    // リードバックしたテクセルを、CPU側で数値として解釈するときの型。
+    //
+    // 【なぜFormat enumを流用しないのか】深度テクスチャはDSVとSRVの両方を張るために
+    // DXGI_FORMAT_R32_TYPELESSで作られており(DX12Device::CreateDepthTexture /
+    // DX11Device::CreateDepthTexture)、上のFormat enumには対応する値が無い。
+    // また上のFormatは「テクスチャを作るときの指定」で、こちらは「読み出した中身の解釈」と
+    // 役割が違う。混ぜると、作成には使えないFormat値が増えて呼び出し側が判断できなくなる。
+    //
+    // Float16をfloatへ展開せず生ビットのまま返すのは、CPU側にhalfデコーダを書かずに済ませ、
+    // かつ変換によるロスを一切入れないため(numpyなら'<f2'でそのまま読める)
+    enum class TextureElementType
+    {
+        // リードバックの対象外(BC圧縮テクスチャなど、対応表に無いフォーマット)
+        Unknown,
+        UNorm8,  // R8G8B8A8_UNorm
+        Float16, // R16G16_Float / R16G16B16A16_Float
+        Float32, // R32_Float / R32G32B32A32_Float / 深度(R32_TYPELESSをR32_Floatとして読む)
+        // R11G11B10_Float。1テクセル4バイトに3成分が詰まっており、上の3つのように
+        // 「1成分=固定バイト数の配列」として読めない。CPU側で3つのfloatへ展開してから使う
+        // (展開はRHIではなく呼び出し側の責務。RHIは生ビットをタイトに詰めて渡すだけ)
+        Packed11_11_10_Float,
+    };
+
     // サンプラーのフィルタリング方式
     enum class SamplerFilter
     {

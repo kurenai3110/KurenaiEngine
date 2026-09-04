@@ -189,6 +189,31 @@ namespace
         return forceRaster;
     }
 
+    // 値を取らない起動オプション(フラグ)があるか。ParseForceDDGIRasterと同じ処理だが、
+    // フラグが増えるたびに同じ関数を書き足すのをやめて名前で引く形にしたもの
+    bool HasFlagOption(const wchar_t* optionName)
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return false;
+        }
+
+        bool found = false;
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], optionName) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+
+        LocalFree(argv);
+        return found;
+    }
+
     // コマンドラインの「-debugview <番号>」を読む。番号の並びはUIの「デバッグ表示」コンボと同じ。
     // 指定が無ければ-1(=既定のFinalのまま)を返す。
     //
@@ -353,6 +378,94 @@ namespace
 
         LocalFree(argv);
         return value;
+    }
+
+    // 「-dumptex <テクスチャ名> <出力パス>」の指定。**繰り返し指定できる**
+    struct TextureDumpArg
+    {
+        std::wstring Name;
+        std::wstring Path;
+        int MipLevel = 0;
+        int ArraySlice = 0;
+    };
+
+    // -dumptex を全部拾う。直後に続く -dumptexmip / -dumptexslice は「直前の -dumptex」に掛かる。
+    //
+    // 【1回の走査で拾う理由】ParseStringOptionは最初の1件で打ち切るため繰り返しに使えない。
+    // また mip/slice を「どの -dumptex に掛かるか」で決めるには、引数の並び順を見る必要がある。
+    // **1回の起動で必要なバッファを全部吸えること**が肝心で(GUIの起動は共有資源)、
+    // そのために繰り返し指定を受け付ける
+    std::vector<TextureDumpArg> ParseTextureDumps()
+    {
+        std::vector<TextureDumpArg> dumps;
+
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            return dumps;
+        }
+
+        const auto parseIntArg = [](const wchar_t* text, const char* optionName, int& outValue)
+        {
+            wchar_t* end = nullptr;
+            const long parsed = wcstol(text, &end, 10);
+            if (end == text || (end != nullptr && *end != 0) || parsed < 0)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main",
+                    std::string(optionName) + "の引数が0以上の整数ではないため、無視します: " +
+                        Kurenai::Core::WideToUtf8(text));
+                return false;
+            }
+            outValue = static_cast<int>(parsed);
+            return true;
+        };
+
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-dumptex") == 0)
+            {
+                if (i + 2 >= argc)
+                {
+                    Kurenai::Core::Logger::Warning(
+                        "Main", "-dumptex は「-dumptex <テクスチャ名> <出力パス>」の形で指定します。無視します");
+                    break;
+                }
+                TextureDumpArg dump;
+                dump.Name = argv[i + 1];
+                dump.Path = argv[i + 2];
+                dumps.push_back(std::move(dump));
+                i += 2;
+                continue;
+            }
+
+            if (_wcsicmp(argv[i], L"-dumptexmip") == 0 || _wcsicmp(argv[i], L"-dumptexslice") == 0)
+            {
+                const bool isMip = _wcsicmp(argv[i], L"-dumptexmip") == 0;
+                const char* optionName = isMip ? "-dumptexmip" : "-dumptexslice";
+                if (dumps.empty())
+                {
+                    // 直前に -dumptex が無ければ掛ける相手がいない。黙って捨てると
+                    // 「指定したのに効かない」形で気づけないので警告を出す
+                    Kurenai::Core::Logger::Warning(
+                        "Main", std::string(optionName) + " は -dumptex の後に指定します。無視します");
+                    continue;
+                }
+                if (i + 1 >= argc)
+                {
+                    Kurenai::Core::Logger::Warning(
+                        "Main", std::string(optionName) + "の後に値が指定されていないため、無視します");
+                    break;
+                }
+                parseIntArg(argv[i + 1], optionName, isMip ? dumps.back().MipLevel : dumps.back().ArraySlice);
+                ++i;
+                continue;
+            }
+        }
+
+        LocalFree(argv);
+        return dumps;
     }
 
     // コマンドラインの「-scene <名前>」(拡張子を除いたファイル名。例: MontSaintMichel)を、
@@ -559,6 +672,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsSpatialMIS = ParseIntOption(L"-megalightsspatialmis", -1);
         // -megalightsinitialvis <0|1>。初期サンプルの可視レイ(遮蔽されたサンプルを殺す)の有無
         const int megaLightsInitialVis = ParseIntOption(L"-megalightsinitialvis", -1);
+        // クアッド共有(-megalights 3)の設定。
+        // -megalightsquadshare <0|1> は2x2の仲間が撃ったレイの結果を借りるか。
+        // **0が陽性対照** ―― 手法2から時間・空間再利用を外した構成と画素単位で一致するはず。
+        // -megalightsquadstratify <0|1> はクアッドの4画素へ候補スロットを分けて引かせるか。
+        // -megalightsblockedcache <0|1> は遮蔽が確定した灯のキャッシュを使うか(陽性対照では0)
+        const int megaLightsQuadShare = ParseIntOption(L"-megalightsquadshare", -1);
+        const int megaLightsQuadStratify = ParseIntOption(L"-megalightsquadstratify", -1);
+        const int megaLightsBlockedCache = ParseIntOption(L"-megalightsblockedcache", -1);
+        // -megalightsquadsamples <1〜4>。クアッド共有が1画素あたりに引く標本の数。
+        // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
+        const int megaLightsQuadSamples = ParseIntOption(L"-megalightsquadsamples", -1);
+        // -megalightspool <8〜128>。候補プールが1タイルあたりに抽出する灯の数(K)。
+        // 1画素あたりの標本数では減らない「タイル間」のノイズがここで決まる
+        const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
         // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
         const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
         const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
@@ -587,6 +714,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
         const int perfDumpFrames = ParseIntOption(L"-perfdumpframes", 120);
+        // -dumptex <名前> <パス> (繰り返し可) / -dumptexmip <N> / -dumptexslice <N> /
+        // -dumpframe <N> / -exitafterdump。中間レンダーターゲットを線形の生値で書き出す。
+        // 「コンパイルは通るが絵が違う」を、8bitのスクリーンショットではなく数値で切り分けるための経路
+        const std::vector<TextureDumpArg> textureDumps = ParseTextureDumps();
+        const int textureDumpFrame = ParseIntOption(L"-dumpframe", -1);
+        const bool exitAfterDump = HasFlagOption(L"-exitafterdump");
+        // -taa の読み取りは下の `taa` で行う(ダンプの比較でも同じ指定を使う)
 
         // -autoexposure <0|1>。自動露出の有効/無効。指定が無ければ既定のまま。
         // 画面で見ていた設定と計測の設定を揃えるために要る(UIからしか切り替えられないと、
@@ -667,6 +801,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetMegaLightsInitialVisibility(megaLightsInitialVis);
             }
+            if (megaLightsQuadShare >= 0 || megaLightsQuadStratify >= 0 || megaLightsBlockedCache >= 0)
+            {
+                engine.SetMegaLightsQuadShare(
+                    megaLightsQuadShare, megaLightsQuadStratify, megaLightsBlockedCache);
+            }
+            if (megaLightsQuadSamples >= 0)
+            {
+                engine.SetMegaLightsQuadSamples(megaLightsQuadSamples);
+            }
+            if (megaLightsPoolCapacity >= 0)
+            {
+                engine.SetMegaLightsTilePoolCapacity(megaLightsPoolCapacity);
+            }
             if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
             {
                 engine.SetMegaLightsTemporal(megaLightsTemporal, megaLightsTemporalMClamp);
@@ -705,6 +852,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (!perfDumpPath.empty())
             {
                 engine.SetPerfDump(perfDumpPath.c_str(), perfDumpFrames);
+            }
+            // 【ループの中で適用する】APIを切り替えて作り直したときも同じ指定が効くようにする
+            // (debugViewIndexを毎回適用しているのと同じ理由)
+            for (const TextureDumpArg& dump : textureDumps)
+            {
+                engine.AddTextureDump(dump.Name.c_str(), dump.Path.c_str(), dump.MipLevel, dump.ArraySlice);
+            }
+            if (!textureDumps.empty())
+            {
+                engine.SetTextureDumpFrame(textureDumpFrame);
+                engine.SetExitAfterDump(exitAfterDump);
             }
             engine.Run();
 

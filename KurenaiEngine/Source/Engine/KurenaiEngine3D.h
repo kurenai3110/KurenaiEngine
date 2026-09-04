@@ -30,6 +30,13 @@
 #pragma warning(push)
 #pragma warning(disable: 4251)
 
+namespace Kurenai::Core
+{
+    // IssueTextureDumpsの引数にだけ使う。RenderGraph.hはRHIのヘッダ群を芋づるで引き込むため、
+    // このヘッダをインクルードする側(UIパネル・Sample3D)へ広げないよう前方宣言で済ませる
+    class RenderGraph;
+}
+
 namespace Kurenai::UI
 {
     class UIManager;
@@ -252,6 +259,37 @@ namespace Kurenai
 
         void SetPerfDump(const wchar_t* path, int frames);
 
+        // 【検証専用】中間レンダーターゲットの中身を、線形の生値のままファイルへ書き出す。
+        // nameは GetDumpableTextureNames() が返す名前(m_を外したメンバ名)。
+        //
+        // 【何のためにあるのか】「コンパイルは通るが絵が違う」を切り分ける唯一の数値経路。
+        // 画面から採れるのは8bit・トーンマップ後で、G-Bufferの法線も深度も間接光も、
+        // 表示のために加工された姿しか見られない。**加工前の値を数えられないと、
+        // 「壊れている」と「そう見えるだけ」を区別できない。**
+        // SetMegaLightsDumpPathが MegaLights の蓄積バッファ専用に用意した経路を、
+        // 任意のレンダーターゲットへ一般化したもの。
+        //
+        // 複数回呼べば1回の起動で複数枚を同じフレームから落とす(GUIの起動は共有資源なので、
+        // 1回の起動で必要な数値が全部取れる形にすること)。
+        // 未知の名前・存在しないテクスチャ・非対応フォーマットはログを出して無視する
+        void AddTextureDump(const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice);
+
+        // 何フレーム目のものを書き出すか。負なら既定(kMegaLightsAccumWarmup)。
+        // **整定を待たずに撮ると、内部解像度が既定値のままの絵を掴む**(実際に起きた)
+        void SetTextureDumpFrame(int frame);
+
+        // 書き出しが全部終わったらウィンドウを閉じる。無人での検証用
+        void SetExitAfterDump(bool enabled);
+
+        // TAAの有無を起動時に上書きするのは SetTAAEnabled(上で宣言済み)。
+        // ダンプの比較では、まずこれを切って再現性の下限をゼロにする ――
+        // TAAのジッタは投影行列を毎フレームずらすため、同じ条件で2回撮っても
+        // ダンプがビット一致しない
+
+        // -dumptex が受け付けるテクスチャ名の一覧(表示・ログ用)。
+        // ClaudeのようなUIを見られない利用者にとって、これが唯一の発見手段になる
+        std::vector<std::string> GetDumpableTextureNames() const;
+
         // デノイザの有無、a-trousの段数、時間累積の上限。負/0は既定のまま
         void SetMegaLightsDenoise(int enabled, int atrousPasses, int maxFrames);
         // 輝度のエッジ停止の強さ(負なら既定のまま)
@@ -262,6 +300,18 @@ namespace Kurenai
         void SetMegaLightsSpatialIterations(int iterations);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま
         void SetMegaLightsTemporal(int enabled, int mClamp);
+        // クアッド共有(手法3)の設定。いずれも負の値ならその項目は既定のまま。
+        //   share    … 2x2の仲間が撃ったレイの結果を借りるか。**0が陽性対照**で、
+        //               手法2から再利用を外した構成と画素単位で一致するはず
+        //   stratify … クアッドの4画素へ候補スロットを分けて引かせるか
+        //   blockedCache … 遮蔽が確定した灯のキャッシュを使うか(陽性対照では0にする)
+        void SetMegaLightsQuadShare(int share, int stratify, int blockedCache);
+        // クアッド共有(手法3)の1画素あたりの標本数。1〜kMegaLightsMaxSamplesPerPixel。
+        // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
+        void SetMegaLightsQuadSamples(int samples);
+        // 候補プールが1タイルあたりに抽出する灯の数(K)。
+        // kMegaLightsTilePoolMinCapacity 〜 kMegaLightsTilePoolCapacity
+        void SetMegaLightsTilePoolCapacity(int capacity);
 
         // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を
         // 測るためのもので、静止した絵をいくら撮っても測れない側を測る入口。
@@ -380,6 +430,15 @@ namespace Kurenai
         // これがfalseのときDirectLighting.hlslは従来のライトループへ戻る ―― 「パスを積むか」と
         // 「ライトループを止めるか」がずれると、ライトが二重に加算されるか、逆に全部消える
         bool ShouldRunMegaLights() const;
+        // このフレームでタイルライトカリングパスを実行するか。上と同じ作法で1か所に集約している。
+        // **ライトグリッドを実際に読む者が居るときだけ積む** ―― 読み手は
+        // DirectLighting.hlsl のローカルライトのループと Present.hlsl のライトグリッド表示
+        // (Mode 11)の2つしかなく、MegaLightsが走るフレームは前者がLightCount.wで止まっている
+        bool ShouldRunLightCulling() const;
+        // いま1画素あたり何本の標本(リザーバ)を引くか。**バッファの確保も定数バッファも
+        // 必ずこの関数を通すこと** ―― 2か所で別々に計算すると静かに食い違う。
+        // 手法3以外は常に1(手法2の再利用が1画素1リザーバを前提にしているため)
+        int32_t MegaLightsSamplesPerPixel() const;
         // このメッシュをメッシュシェーダー経路で描くか。上のShouldRun*と同じく、
         // 「どのPSOを束ねるか」と「DispatchMeshとDrawIndexedのどちらを積むか」の判断が
         // ずれると即座に破綻するため、判定を1か所に集約する。
@@ -1167,6 +1226,9 @@ namespace Kurenai
         // (m_LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
         //  パスの中で更新すると先に走る側が未更新の内容を読む)
         std::vector<GPUDrone> m_DroneInstances;
+        // 機体を光源として送るときの、間引いた灯。毎フレームDroneShow::BuildLightSamplesが書き、
+        // gpuLightsの組み立てで手置きライト・エミッシブプロキシの後ろへ連結する
+        std::vector<DroneLightSample> m_DroneLightSamples;
         // 再生器。編隊の点そのものはここが持つ(.kshowから読み込む)
         DroneShow m_DroneShow;
 
@@ -1187,6 +1249,20 @@ namespace Kurenai
         // 【これだけはシーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
         // 「1画素を割ったらちらつく」という事実はどのシーン・どのショーでも変わらないため
         float m_DroneShowMinScreenRadius = Defaults::DroneShowMinScreenRadius;
+        // 機体を光源としても送るか。シーンが決める(「出すか」の一種)
+        bool m_DroneShowCastLight = Defaults::DroneShowCastLight;
+        // 灯の明るさの倍率。1.0がスプライトから導いた物理的な値で、演出用にシーンが上げられる
+        float m_DroneShowCastLightScale = Defaults::DroneShowCastLightScale;
+        // 光源として送る灯の数と、Rangeを逆算する打ち切り照度[lx]。
+        // 【これらもシーンにもショーにも持たせない】MinScreenRadiusと同じで、
+        // タイルライトカリングの容量という描画側の事情で決まる値だから
+        int m_DroneShowLightSampleCount = Defaults::DroneShowLightSampleCount;
+        float m_DroneShowLightCutoffLux = Defaults::DroneShowLightCutoffLux;
+        // 実際に送った灯の数。ログとUIの表示用
+        uint32_t m_DroneShowLightUsedCount = 0;
+        // 容量超過の警告と実効値ログを、それぞれ1回だけ出すためのフラグ
+        bool m_DroneShowLightTileOverflowLogged = false;
+        bool m_DroneShowLightValuesLogged = false;
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
@@ -1302,14 +1378,25 @@ namespace Kurenai
         // (有効なあいだ、あちらのライトループは回らない)。太陽はこの経路の対象外で、
         // 従来どおりb0とCSM/RTシャドウが担当する。
         //
-        // 【現段階は参照実装だけ】確率的サンプリング本体はまだ無い。Referenceは全灯を
-        // 総当たりして1灯ごとに影レイを撃つ、遅いが真値を返す経路で、以降の段階の
-        // A/Bの基準にするためにある(MegaLightsReference.hlsl冒頭を参照)
+        // Referenceは全灯を総当たりして1灯ごとに影レイを撃つ、遅いが真値を返す経路で、
+        // すべての測定の物差しにするためにある(MegaLightsReference.hlsl冒頭を参照)。
+        //
+        // 【StochasticとQuadSharedは同じ問題への別の解き方】どちらも候補プールから
+        // 確率的に灯を選ぶが、1画素の推定量を良くする手段が違う:
+        //   Stochastic … リザーバを時間・空間で再利用する(ReSTIR DI)。厳密に不偏だが、
+        //                 再利用のたびに可視性を確かめるレイと不偏化の分母のための補正レイが要る。
+        //                 実測(BistroExteriorNight 107灯/1280x720/RTX 4070 Ti)で
+        //                 MegaLights合計4.26ms、うちSpatialだけで2.64ms ――
+        //                 **全灯総当たりの参照実装(4.21ms)と同じコスト**になっていた
+        //   QuadShared  … 2x2クアッドの4画素が撃った4本の結果を共有して平均する。
+        //                 追加のレイは1本も撃たない(UE5 MegaLightsのDownsampleFactor=2に相当)。
+        //                 影の縁が最大1画素ぼける偏りを受け入れる代わりにコストを切り下げる
         enum class MegaLightsMode
         {
             Off,        // 従来どおりDirectLighting.hlslのライトループで評価する
             Reference,  // 全灯総当たり+1灯1影レイ。ノイズは無いが遅い(グラウンドトゥルース)
-            Stochastic, // 候補プールからRISで1灯選び、影レイ1本で評価する。ノイズは乗るが偏りは無い
+            Stochastic, // 候補プールからRISで1灯選び、時間・空間再利用で磨く。厳密に不偏だがレイが多い
+            QuadShared, // 1画素1レイのまま、2x2クアッドで可視性を共有して平均する
         };
         MegaLightsMode m_MegaLightsMode = Defaults::MegaLightsEnabled ? MegaLightsMode::Reference
                                                                      : MegaLightsMode::Off;
@@ -1326,8 +1413,9 @@ namespace Kurenai
         int32_t m_MegaLightsShadowRayCount = Defaults::MegaLightsShadowRayCount;
 
         // MegaLightsの候補プール(MegaLightsTilePool.hlsl)。タイルごとに「届くライト」を走査し、
-        // 寄与に比例した確率でK灯を重みつきで抽出する。参照実装はこれを使わず全灯を回すため、
-        // 現段階では出力を消費する者がいない(確率的サンプリング本体が入る段階で読み手がつく)。
+        // 寄与に比例した確率でK灯を重みつきで抽出する。読み手は Initial(RISの提案分布)と
+        // Spatial(不偏化の分母で「その灯が隣のタイルへ届くか」を判定する)。
+        // 参照実装はこれを使わず全灯を回すので、参照実装のときは出力が使われない。
         // レイを撃たないパスだがMegaLightsと同時にしか使わないので、生成もRT対応時だけにしてある
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsTilePoolComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTilePoolPipelineState;
@@ -1348,6 +1436,13 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsInitialPipelineState;
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsShadeComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsShadePipelineState;
+        // クアッド共有(手法3)の解決パス。Initial が書いた4画素ぶんのリザーバを読み、
+        // **自分の面で評価し直して平均する**。レイを1本も撃たないのでTLASを束縛しない。
+        // Shade と分けてあるのは、あちらが RayQuery を持ちSM6.5でしか焼けないのに対し、
+        // こちらはレイを撃たず3バリアントすべてで焼けるため
+        // (混ぜると使わないTLASを束縛したままレイ経路が残る)
+        std::unique_ptr<RHI::IRHIShader> m_MegaLightsResolveComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsResolvePipelineState;
         // 2パスで共有する定数バッファ(中身はフレーム内で不変なのでInitial側で1回更新する)
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsStochasticConstantBuffer;
         // 空間再利用の反復ごとの定数(中身は共有分と同じで、反復番号だけが違う)。
@@ -1393,6 +1488,12 @@ namespace Kurenai
         bool m_MegaLightsDenoiseEnabled = Defaults::MegaLightsDenoiseEnabled;
         int32_t m_MegaLightsDenoiseAtrousPasses = Defaults::MegaLightsDenoiseAtrousPasses;
         int32_t m_MegaLightsDenoiseMaxFrames = Defaults::MegaLightsDenoiseMaxFrames;
+        // クアッド共有(手法3)での時間累積の上限。**手法ごとに別に持つ。**
+        // 1つの変数を共有して手法ごとに黙って読み替えると、UIのつまみが示す値と
+        // 実際に効いている値が食い違う(「指定したのに効かない」の型)。
+        // 分けておけば、UIもCLIも「いま効いている値」をそのまま触れる。
+        // 手法3にリザーバの履歴が無いぶんここを長くしている(根拠は EngineDefaults.h)
+        int32_t m_MegaLightsQuadDenoiseMaxFrames = Defaults::MegaLightsQuadDenoiseMaxFrames;
         float m_MegaLightsDenoiseSigmaLuminance = Defaults::MegaLightsDenoiseSigmaLuminance;
         float m_MegaLightsDenoiseFireflyClamp = Defaults::MegaLightsDenoiseFireflyClamp;
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsTemporalComputeShader;
@@ -1435,6 +1536,38 @@ namespace Kurenai
         bool m_MegaLightsInitialVisibility = Defaults::MegaLightsInitialVisibility;
         // 1ピクセルあたりに候補プールから引く数(RISのM)。影レイの本数はこれとは独立で常に1本
         int32_t m_MegaLightsSampleCount = Defaults::MegaLightsSampleCount;
+
+        // --- クアッド共有(手法3) ---
+        // 2x2クアッドの仲間が撃った影レイの結果を借りて平均するか。
+        // **切れるようにしてあるのは陽性対照のため** ―― 切ると自分の標本だけを使う形になり、
+        // 手法2から時間再利用と空間再利用を外した構成と画素単位で一致するはず。
+        // 一致しなければ配線のバグで、共有の効果を測る前にそこを潰す
+        bool m_MegaLightsQuadShareEnabled = Defaults::MegaLightsQuadShareEnabled;
+        // クアッドの4画素へ候補スロットを分けて引かせるか(層化)。
+        // プールのスロットは混合分布からの i.i.d. 抽出なので、スロットの選び方を変えても
+        // **周辺分布は変わらず割り戻しの式はそのまま厳密**。クアッドで重複した灯を
+        // 引く確率が下がるぶん、4標本の多様性が上がる
+        bool m_MegaLightsQuadStratify = Defaults::MegaLightsQuadStratify;
+        // 遮蔽が確定した灯のキャッシュ(BlockedLights)を手法3でも使うか。
+        // 手法3は時間再利用パスを持たないが、キャッシュ自体は Initial が維持している。
+        // **陽性対照では切る**(履歴に依存すると手法2との画素単位の一致が崩れる)
+        bool m_MegaLightsBlockedCacheEnabled = Defaults::MegaLightsBlockedCacheEnabled;
+        // 1画素あたりに引く標本(リザーバ)の数。**手法3だけが1より大きくできる。**
+        // 手法2の時間・空間再利用は「1画素1リザーバ」を前提に添字を組み立てているため。
+        // 影レイの本数はそのままこの数になる(標本ごとに1本撃つ)
+        int32_t m_MegaLightsQuadSamplesPerPixel = Defaults::MegaLightsQuadSamplesPerPixel;
+        // 候補プールが1タイルあたりに抽出する灯の数(K)。
+        // **1画素あたりの標本数では減らないノイズがここで決まる** ―― プールはタイルに1つで、
+        // タイル内の全画素が同じK個から引くので、プールの引き方のばらつきはタイル内で
+        // 共通のオフセットとして乗る(根拠は EngineDefaults.h)
+        int32_t m_MegaLightsTilePoolCapacity = Defaults::MegaLightsTilePoolCapacity;
+        // いまリザーババッファを確保したときの標本数。**定数バッファへ渡す値と必ず一致させる**。
+        // 食い違うと Initial が確保外へ書くか Resolve が別画素の標本を読み、
+        // 例外もログも出ないまま絵だけが壊れる
+        int32_t m_MegaLightsAllocatedSamplesPerPixel = 1;
+        // 標本数が変わったのでリザーババッファを作り直す必要がある。
+        // 解像度変更と同じくフレームの先頭(GPUアイドル後)でまとめて処理する
+        bool m_MegaLightsReservoirDirty = false;
 
         // --- 蓄積平均(計測専用) ---
         // MegaLightsの出力を線形空間でフレーム方向へ足し込み、フレーム数で割った平均を表示する。
@@ -1487,6 +1620,66 @@ namespace Kurenai
         // パス名 -> 合計時間[ms]。同じ名前のパスが1フレームに複数あるぶんも足し込む
         // (a-trousは段の数だけ同名で登録される。**合計が知りたいので足すのが正しい**)
         std::map<std::string, double> m_PerfDumpTotals;
+
+        // --- 中間レンダーターゲットの生値ダンプ(検証専用。AddTextureDump) ---
+        // 名前 -> テクスチャ の対応表。CreateRenderTargetsでテクスチャを増やしたら
+        // BuildDumpableTextureTableにも足すこと(表の実体はそちらのコメントを参照)
+        struct DumpableTexture
+        {
+            const char* Name = nullptr;
+            RHI::IRHITexture* Texture = nullptr;
+        };
+        // 【毎回作り直す】レンダーターゲットはリサイズやバッファ精度の切り替えで
+        // ポインタごと作り直される。キャッシュすると解放済みのテクスチャを指す
+        std::vector<DumpableTexture> BuildDumpableTextureTable() const;
+
+        // 上の表の名前を、グラフィックスデバッガ向けの名前としてテクスチャへ焼く。
+        //
+        // 【-dumptex と同じ表を使うのが要点】RenderDocのキャプチャ上の名前と
+        // `-dumptex <名前>` の名前が同じ文字列になるので、2つの経路で同じものを見ていることが
+        // 名前だけで分かる。表を1つにしておけば、テクスチャを増やしたときの追従先も1箇所で済む
+        void ApplyDebugNames() const;
+        // 名前を焼き直す必要があるか。レンダーターゲットを作り直すと立てる。
+        // **毎フレーム焼かない** —— 43本のSetNameを60回/秒で呼ぶ意味がない
+        bool m_DebugNamesDirty = true;
+
+        struct TextureDumpRequest
+        {
+            std::string Name; // 表の名前(ファイルのヘッダにも書く)
+            std::wstring Path;
+            uint32_t MipLevel = 0;
+            uint32_t ArraySlice = 0;
+            // 受け皿。m_DeviceはKurenaiEngineBase(基底)のメンバで、派生クラスのメンバは
+            // 基底より先に破棄されるため、デバイスより後に解放される心配は無い
+            // (m_MegaLightsAccumReadbackが同じ場所に置かれているのと同じ理由)
+            std::unique_ptr<RHI::IRHITexture> Readback;
+            RHI::TextureReadbackDesc Desc{};
+            // コピーを積んだフレーム番号。GPUの実行はCPUより数フレーム遅れるので、
+            // 積んだ直後に読んではいけない(IRHICommandList::CopyTextureToReadback のコメント)
+            uint32_t CopyFrame = 0;
+            bool Issued = false;
+            bool Done = false;
+            // 読み戻しに失敗し続けたフレーム数。**無人実行が静かに固まるのを防ぐための打ち切り用**
+            uint32_t FailedFrames = 0;
+        };
+        std::vector<TextureDumpRequest> m_TextureDumps;
+        // 何フレーム目で撮るか。負なら kMegaLightsAccumWarmup を使う
+        // (新しい定数を作らないのは、あちらのコメントに書かれた「整定を待つ理由」が
+        //  そのまま当てはまり、値が2つに割れると片方だけ直す事故が起きるため)
+        int32_t m_TextureDumpFrame = -1;
+        bool m_ExitAfterDump = false;
+        bool m_ExitAfterDumpRequested = false;
+        // 読み戻しを何フレーム失敗し続けたら諦めるか。DX11のMap(DO_NOT_WAIT)は
+        // GPUが詰まっていると何度も失敗しうるので、1フレームで諦めてはいけない
+        static constexpr uint32_t kTextureDumpMaxFailedFrames = 60;
+        // コピーを積んでから読むまでに空けるフレーム数(MegaLightsのダンプと同じ値)
+        static constexpr uint32_t kTextureDumpReadDelayFrames = 5;
+
+        // ダンプの発行(コピーを積む)と、読み戻し・ファイル書き出し。Render()から呼ぶ
+        void IssueTextureDumps(Core::RenderGraph& graph);
+        void ResolveTextureDumps();
+        // 1件ぶんをファイルへ書く。書けたらtrue
+        bool WriteTextureDumpFile(const TextureDumpRequest& request, const std::vector<uint8_t>& pixels) const;
 
         // --- 雲(低解像度の専用パス) ---
         // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを
@@ -3023,12 +3216,20 @@ namespace Kurenai
         // ライトタイルの容量と違い**これは打ち切りではなく抽出数**で、タイルへ何灯届いていても
         // ここで決めた本数だけを重みつきで取り出す。届いた灯が欠落するわけではない
         // (どの灯も w_i / SumW の確率で選ばれる)ため、容量超過のような静かな欠落は起きない。
-        // 既定値の根拠はまだ実測していない ―― 段階2の誤差カーブを見てから決める
-        static constexpr uint32_t kMegaLightsTilePoolCapacity = 32;
+        // 【実行時に振れる。ここは確保の上限】1タイルの抽出数Kは
+        // m_MegaLightsTilePoolCapacity が持ち、シェーダへは定数バッファで渡している。
+        // バッファの確保だけがコンパイル時の上限を要るのでここに残す
+        static constexpr uint32_t kMegaLightsTilePoolCapacity = 128;
+        // Kの下限。これを下回るとタイルに届く灯を代表できない
+        static constexpr int32_t kMegaLightsTilePoolMinCapacity = 8;
         // 候補プール1タイルぶんの要素数。先頭6個がヘッダ(SumW / 届いた灯数 / 有効候補数 / 予約 /
         // 手前のViewZ / 奥のViewZ)、
         // 以降は候補1つにつき2個(ライト番号と重み)。MegaLightsTilePool.hlsl 冒頭のレイアウトと一致させること
         static constexpr uint32_t kMegaLightsTilePoolStride = 6 + 2 * kMegaLightsTilePoolCapacity;
+        // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
+        //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
+        // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
+        static constexpr int32_t kMegaLightsMaxSamplesPerPixel = 4;
 
         std::unique_ptr<RHI::IRHIShader> m_LightCullingComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_LightCullingPipelineState;

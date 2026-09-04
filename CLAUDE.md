@@ -13,6 +13,7 @@
 | ビルドと起動 | `build-run` |
 | HLSLの一括コンパイル検証(通常はビルドが兼ねる。fxc/dxc単体で切り分けたいとき) | `shader-check` |
 | 描画結果のA/B比較 | `ab-compare` |
+| コンパイルは通るのに絵が違う(中間バッファの値を数値で読む) | `shader-debug` |
 | 実在の風景・建物を参考画像に近づける | `reference-match` |
 
 アプリの起動・撮影・入力(`verify-app`)、コミットとPR(`commit-flow`)、worktreeの棚卸し
@@ -103,7 +104,7 @@
   開いても効くようにするため。`git clean -xdf` 等で消さないよう注意する。
   別PCへの引き継ぎは `kurenai-claude-config` リポジトリの `Install-ClaudeConfig.ps1` で行う
 - このリポジトリがGit管理するのは、**このファイルと `.claude/skills/` 配下の固有スキル
-  (`build-run` / `shader-check` / `ab-compare` / `reference-match`)だけ**。
+  (`build-run` / `shader-check` / `ab-compare` / `shader-debug` / `reference-match`)だけ**。
   worktreeやcloneに自動で付いてくる必要があるプロジェクト固有の情報だから
 - `.claude/settings.local.json`(PCごとの許可リスト)、worktreeの実体(`.worktrees/` と
   `.claude/worktrees/` の両方。PCによって置き場所が違う)、
