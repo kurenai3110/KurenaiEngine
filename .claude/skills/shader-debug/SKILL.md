@@ -189,7 +189,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Tools\renderdoc_setup.ps1
 
 置き場所も環境変数もスクリプトが決める(既定は `%LOCALAPPDATA%\KurenaiEngine\renderdoc`)。
 **ビルドに使ったPythonでしか読めない**ので、実行はそのバージョンで行うこと
-(スクリプトが最後に表示する)。根拠は `docs/ImplementationDetail.md` 62.10。
+(スクリプトが最後に表示する)。根拠は `docs/ImplementationDetail.md` 63.10。
 
 ```
 py -3.7 Tools/renderdoc_probe.py capture  --exe <Sample3D.exe> --frame 200 --out <dir> ^

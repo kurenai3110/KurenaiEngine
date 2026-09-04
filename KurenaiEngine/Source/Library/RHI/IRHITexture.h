@@ -70,7 +70,7 @@ namespace Kurenai::RHI
         // 【何のためにあるのか】名前が無いと、キャプチャ上では `ResourceId::562` のような
         // 通し番号としてしか出ない。どれがG-Bufferのアルベドで、どれがSceneColorなのかが
         // 分からず、寸法とフォーマットで候補を絞って総当たりで突き合わせることになる
-        // (実際にそうなった。docs/ImplementationDetail.md 62.10)。
+        // (実際にそうなった。docs/ImplementationDetail.md 63.10)。
         //
         // 名前は`-dumptex`が使うものと同じ表から与える(KurenaiEngine3D::BuildDumpableTextureTable)。
         // **2つの経路で呼び名を揃えることが肝心**で、`-dumptex GBufferAlbedo`で吸い出した値と

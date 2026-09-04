@@ -147,7 +147,70 @@ namespace Kurenai::UI
             "シーン全体の自発光にかける倍率。glTFのemissiveFactorは通常1.0以下に収まるため、"
             "アセットを作り直さずにHDRな自発光(照明器具のにじみ)を作るための倍率");
 
+        // --- エミッシブ光源(62章) ---
+        //
+        // 【「自発光の強度」の直下に置く】同じ物理量を動かすつまみが離れていると、
+        // 片方だけ動かして「明るくならない」と悩む形を作る。
+        // 【読み込み時にしか効かないつまみは出さない】クラスタ分割の長さ尺度は
+        // .kmodelを読むときにしか使われない。動かしても何も起きないつまみは嘘になる
+        DrawEmissiveLightControls();
+
         EndParamGroup();
+    }
+
+    void LightingPanel::DrawEmissiveLightControls()
+    {
+        const bool enabledMoved = CheckboxEx(
+            "エミッシブを光源にする###EmissiveLights", &m_Engine.m_EmissiveLightsEnabled,
+            Defaults::EmissiveLightsEnabled,
+            "自発光メッシュから「光源のかたまり」を起こし、GPULight(型3)として直接光へ流す。"
+            "**既定は無効**(既存シーンの絵を変えないため)。有効にすると明るさが増える。"
+            "glTFのemissiveFactorは1.0以下に収まるので、小さな照明器具は上の「自発光の強度」を"
+            "上げないと1階調に届かない");
+
+        // プロキシが1つも無いシーンでは、以下のつまみを動かしても何も起きない。
+        // 「効かないつまみ」を触らせないよう、数を先に見せてから灰色にする
+        ImGui::Text("プロキシ: %zu個 / 送信中: %u灯", m_Engine.m_EmissiveProxies.size(), m_Engine.m_EmissiveLightsUsedCount);
+        const bool hasProxy = !m_Engine.m_EmissiveProxies.empty();
+        ImGui::BeginDisabled(!hasProxy);
+
+        const bool cutoffMoved = SliderFloatEx(
+            "打ち切り照度###EmissiveLightsCutoff", &m_Engine.m_EmissiveLightsCutoffIrradiance,
+            1e-5f, 1e-1f, Defaults::EmissiveLightsCutoffIrradiance, "%.5f", ImGuiSliderFlags_Logarithmic,
+            "この照度まで落ちる距離をRangeにする。窓関数が持ち込む絶対誤差はτの1.09倍を超えない"
+            "ので、安全率を掛けずτひとつで縛れる。**上げるとRangeが縮む** ―― 1タイル64灯の"
+            "上限に当たったときは、採用数を減らすよりこちらを上げるほうがエネルギーを捨てずに済む");
+
+        const bool maxMoved = SliderIntEx(
+            "採用数の上限###EmissiveLightsMax", &m_Engine.m_EmissiveLightsMaxCount, 1, 1024,
+            Defaults::EmissiveLightsMaxCount,
+            "GPUへ送るプロキシ数の上限。手置きライトとは別枠で管理される。"
+            "**切り捨てはエネルギーを捨てる** ―― 上限に当たったら、まずクラスタの併合を疑うこと");
+
+        const bool ddgiMoved = CheckboxEx(
+            "DDGIにも自発光を加算する###EmissiveLightsDDGI", &m_Engine.m_EmissiveLightsDoubleCountGI,
+            Defaults::EmissiveLightsDoubleCountGI,
+            "オンにすると、光源にした発光面をDDGIのプローブも「明るい面」として焼き込む"
+            "(=同じ発光を二重に数える)。既定はオフ(抑止)。"
+            "抑止が掛かるのはDDGIだけで、反射プローブ・RT反射・画面上の自発光は変わらない");
+
+        ImGui::EndDisabled();
+
+        // 【上限とτの警告は出し直す】どちらもRangeと採用数を動かすので、
+        // 変えた結果を見たいときに前回の警告が残っていると判断できない
+        if (enabledMoved || cutoffMoved || maxMoved)
+        {
+            m_Engine.m_EmissiveLightsCapLogged = false;
+            m_Engine.m_EmissiveLightsValuesLogged = false;
+        }
+        // 【プローブの署名へ反映させる】プロキシはProbeCapture.hlslのライトループにも入り、
+        // 二重計上の抑止はDDGIの焼き上がりを変える。署名に入れないと焼き直しが起きず、
+        // **つまみを動かしても収束済みのプローブだけ古いまま残る**(署名側のコメント参照)
+        if (enabledMoved || cutoffMoved || maxMoved || ddgiMoved)
+        {
+            m_Engine.m_DDGIEmissiveSuppressLoggedRaster = false;
+            m_Engine.m_DDGIEmissiveSuppressLoggedTrace = false;
+        }
     }
 
     void LightingPanel::DrawLightsSection(const PanelDrawContext& context)

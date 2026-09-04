@@ -36,6 +36,17 @@ namespace Kurenai
     };
     static_assert(sizeof(GPUDrone) == 32, "GPUDroneはDroneShow.hlslのstruct Droneと同じ32バイトであること");
 
+    // 機体を光源として送るときの1灯ぶん。GPULightではなくここで止めているのは、
+    // GPULightがKurenaiEngine3D.cppの無名名前空間にあり(DirectLighting.hlsl側との
+    // バイト一致を1か所で守るため)、Engine層のここからは見えないからである。
+    // 露出を掛けるのも呼び出し側の仕事(理由はBuildLightSamplesのコメント)。
+    struct DroneLightSample
+    {
+        DirectX::XMFLOAT3 Position;   // ワールド座標[m]
+        DirectX::XMFLOAT3 Intensity;  // 線形RGBごとの光度[cd]。プリ露出は掛けていない
+        float SourceRadius;           // 光源そのものの半径[m]。機体の見かけ半径をそのまま入れる
+    };
+
     class DroneShow
     {
     public:
@@ -49,6 +60,29 @@ namespace Kurenai
         // SetDataを呼んでいない場合は空を返す
         void Evaluate(
             float showTime, const DirectX::XMFLOAT3& center, float scale, std::vector<GPUDrone>& outDrones) const;
+
+        // Evaluateが作った機体から、シーンを照らすための光源をsampleCount灯ぶん作る。
+        //
+        // 【なぜ全機を灯にしないか】1500灯はkMaxLights(1024)を超えるうえ、編隊は空の一点に
+        // 密集するので16pxタイルの容量(kLightTileCapacity=64)を確実に超え、超過分は
+        // DirectLighting.hlslのmin()で**静かに欠落する**。さらにTransparent/PlanarReflection/
+        // ProbeShading/DDGIProbeTraceの4本はタイルカリングを通らない全灯ループである。
+        //
+        // 【なぜ空間クラスタリングではなく間引きか】添字 i*DroneCount/sampleCount の機体を
+        // そのまま灯にし、光度を DroneCount/sampleCount 倍する。採る添字が固定で、灯が実在の
+        // 機体そのものなので、**モーフ中も機体と同じ軌跡で連続に動きポップしない**。
+        // 空間クラスタリング(格子・k-means)は所属が飛ぶか格子が動くかで必ずポップする。
+        // 精度も灯数あたりでは間引きのほうが良い(実測はdocs/ImplementationDetail.md 38.12)。
+        //
+        // 【露出を掛けないこと】ドローンのスプライトはParams0.x = Brightness * effectiveExposure
+        // として露出を通っており、単位系としては手置きライト(カンデラ)の側にいる。
+        // ここではカンデラのまま返し、GPULightへ入れるときにMakeGPULightと同じ
+        // ComputeExposure(EV100)を掛ける。エミッシブプロキシ(露出を掛けない側)の慣習を
+        // 写すと桁で外す(docs/ImplementationDetail.md 62.4の表)。
+        void BuildLightSamples(
+            const std::vector<GPUDrone>& drones,
+            uint32_t sampleCount,
+            std::vector<DroneLightSample>& outLights) const;
 
         // 1巡にかかる時間[秒]。0を返す場合は未読み込み(呼び出し側はこの0でfmodしないこと)
         float LoopDuration() const;

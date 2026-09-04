@@ -1,6 +1,7 @@
 ---
 name: shader-check
 description: HLSLをfxc/dxc単体で一括コンパイル検証するときに使う。通常の検証はビルド(KurenaiShaderPackerが全バリアントを焼く)が兼ねるので不要で、これを使うのはビルドを通さずにHLSLだけ見たいとき、パッカーとコンパイラのどちらが原因かを切り分けたいとき。Use to compile-check HLSL with fxc/dxc directly, when the normal build-time check is not available or when isolating a packer-vs-compiler problem.
+effort: low
 ---
 
 # HLSLの一括コンパイル検証

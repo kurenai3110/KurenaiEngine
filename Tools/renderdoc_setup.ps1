@@ -2,7 +2,7 @@
 #
 # 【なぜ要るのか】配布版のRenderDocには renderdoc.pyd が入っていない
 # (qrenderdoc.exe に内蔵されているだけ)。これが無いとGUI無しでキャプチャを読めない。
-# 根拠と引っかかった点は docs/ImplementationDetail.md 62.10。
+# 根拠と引っかかった点は docs/ImplementationDetail.md 63.10。
 #
 # 【なぜバイナリをリポジトリに入れないのか】できあがる .pyd は
 # 「このPCのPythonのバージョン」と「このPCに入っているRenderDocのバージョン」の

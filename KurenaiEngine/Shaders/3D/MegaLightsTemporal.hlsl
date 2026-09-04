@@ -320,7 +320,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         {
             const uint historyLight = MegaLightsUnpackLight(history.LightAndFlags);
             const GPULight hLight = Lights[historyLight];
-            if (hLight.Params.y > 0.5f)
+            if (LightCastsRaytracedShadow(hLight.Params.y))
             {
                 const PunctualGeometry hGeometry =
                     EvaluatePunctualGeometry(hLight, self.WorldPos, self.N, self.Translucency);
@@ -332,8 +332,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                         (kRayOriginBias + length(self.WorldPos - CameraPosition.xyz) * kRayOriginBiasSlope) *
                         slopeScale;
                     const float3 samplePos = MegaLightsLightSamplePosition(
-                        hLight.PositionType.xyz, hLight.Params.z,
-                        MegaLightsUnpackSampleUV(history.SampleUV));
+                        hLight.PositionType.xyz, hLight.Params.z, hLight.DirectionAngle.xyz,
+                        (uint)hLight.PositionType.w, MegaLightsUnpackSampleUV(history.SampleUV));
                     const float3 toSample = samplePos - self.WorldPos;
                     const float sampleDist = length(toSample);
                     if (sampleDist > originBias &&

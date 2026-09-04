@@ -48,16 +48,11 @@ struct GPULight
 };
 StructuredBuffer<GPULight> Lights : register(KURENAI_PUNCTUAL_LIGHT_REGISTER);
 
-// Karis 2013 / Frostbite の windowed inverse-square。Range を超えると厳密に0になり、
-// 打ち切り境界でのハードエッジが出ない
-float DistanceAttenuation(float distSq, float range)
-{
-    float factor = distSq / max(range * range, 1e-4f); // (d/r)^2
-    float window = saturate(1.0f - factor * factor);   // 1 - (d/r)^4
-    // 光源に極端に近づいたときの発散を抑える。定数1.0を足す実装はシーンスケール依存になるため、
-    // 最小距離二乗でのクランプにする
-    return (window * window) / max(distSq, 0.0001f);
-}
+// 距離減衰(Karis 2013 / Frostbite の windowed inverse-square)。
+// 【定義はここに置かない】同じ式が ProbeShading.hlsli / Transparent.hlsl /
+// PlanarReflection.hlsl にも要る。複製すると、新しいライトの種類を1本にだけ足したときに
+// 残りが素のポイントライトとして評価する(理由と症状は LightAttenuation.hlsli の冒頭)
+#include "LightAttenuation.hlsli"
 
 // Frostbite の lightAngleScale / lightAngleOffset。CPU側(MakeGPULight)で事前計算した値を
 // GPULight.DirectionAngle.w / Params.x として受け取る
@@ -202,7 +197,8 @@ PunctualGeometry EvaluatePunctualGeometry(GPULight light, float3 worldPos, float
             return result;
         }
 
-        atten = DistanceAttenuation(distSq, range);
+        atten = LightAttenuation(
+            lightType, toLight, distSq, range, light.Params.z, light.DirectionAngle.xyz, light.Params.w);
         if (atten <= 0.0f)
         {
             return result;

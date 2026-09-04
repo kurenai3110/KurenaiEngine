@@ -12,7 +12,7 @@
 ## 使う前に: renderdoc.pyd を用意する
 
 配布版のRenderDocには `renderdoc.pyd` が入っていない(`qrenderdoc.exe` に内蔵されているだけ)。
-ソースからこのモジュールだけをビルドする。手順は `docs/ImplementationDetail.md` 62.10。
+ソースからこのモジュールだけをビルドする。手順は `docs/ImplementationDetail.md` 63.10。
 
 **持ち回るのは `renderdoc.pyd` 1つだけでよい**(6MB)。本体の `renderdoc.dll` は
 インストール済みのものを使う。置いたら環境変数で場所を教える:
@@ -39,8 +39,10 @@ RenderDocから採った値もエンジンの `-dumptex` と同じ物差しで�
 - **アプリの起動は1回で済ませる。** `capture` は `-exitafterdump` と併用すると
   アプリが自分で閉じる(ウィンドウを占有する時間が数十秒で済む)
 - キャプチャは数十MB〜数百MBになる。使い終わったら消すこと
-- **リソースに名前が付いていない。** エンジンはD3D12リソースに `SetName` をしていないため、
-  RenderDoc上は `ResourceId::562` のように出る。寸法とフォーマットで絞り込むこと
+- **リソースは `-dumptex` と同じ名前で出る**(`GBufferAlbedo` など)。
+  エンジンが `IRHITexture::SetDebugName` で焼いており、`--resource` は名前でも
+  `ResourceId::562` でも受ける。名前が出ないときは、起動ログの
+  「グラフィックスデバッガ向けの名前を付けました: N本」を先に見ること
 """
 
 import argparse
@@ -63,7 +65,7 @@ def load_renderdoc():
     要るのは **`renderdoc.pyd` 1つだけ**(6MB)。本体の `renderdoc.dll` は
     インストール済みのものを使う。**ただしバージョンが一致していること** ――
     `.pyd` は `renderdoc.dll` のABIに依存するので、RenderDocを更新したら
-    `.pyd` も作り直しになる(用意の仕方は docs/ImplementationDetail.md 62.10)。
+    `.pyd` も作り直しになる(用意の仕方は docs/ImplementationDetail.md 63.10)。
     """
     pym = os.environ.get("KURENAI_RENDERDOC_PYMODULE", "")
     if not pym:
@@ -79,7 +81,7 @@ def load_renderdoc():
             "**このPC用にビルドしてください:**\n"
             "    powershell -NoProfile -ExecutionPolicy Bypass -File Tools\\renderdoc_setup.ps1\n"
             "別の場所に置いてあるなら KURENAI_RENDERDOC_PYMODULE で指してください\n"
-            "(根拠と手順は docs/ImplementationDetail.md 62.10)" % (pym or "(未設定)")
+            "(根拠と手順は docs/ImplementationDetail.md 63.10)" % (pym or "(未設定)")
         )
 
     # 本体のDLL。.pyd と同じ場所にあればそれを、無ければインストール先を使う

@@ -683,7 +683,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsDenoise = ParseIntOption(L"-megalightsdenoise", -1);
         const int megaLightsDenoiseAtrous = ParseIntOption(L"-megalightsdenoiseatrous", -1);
         const int megaLightsDenoiseFrames = ParseIntOption(L"-megalightsdenoiseframes", -1);
-        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
+        // -emissivelights <0|1>。自発光メッシュを光源として扱うか(既定は無効)。
+        // -emissivelightscutoff <τ> は打ち切り照度、-emissivelightsmax <N> は採用数の上限。
+        // -emissivelightsddgi <0|1> はDDGIにも自発光を加算するか(=二重に数えるか。既定は0で抑止)
+        const int emissiveLights = ParseIntOption(L"-emissivelights", -1);
+        const float emissiveLightsCutoff = ParseFloatOption(L"-emissivelightscutoff", -1.0f);
+        const int emissiveLightsMax = ParseIntOption(L"-emissivelightsmax", -1);
+        const int emissiveLightsDDGI = ParseIntOption(L"-emissivelightsddgi", -1);
+        // -emissiveintensity <倍率>。シーン全体の自発光の強度(ImGuiの同名スライダと同じ値)。
+        // glTFのemissiveFactorは[0,1]に収まるため、既定の1.0では小さな器具が1階調に届かない
+        const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
         const float megaLightsDenoiseSigma = ParseFloatOption(L"-megalightsdenoisesigma", -1.0f);
         // -megalightsfirefly <k>。ファイアフライの近傍クランプの強さ(0で無効)
         const float megaLightsFireflyClamp = ParseFloatOption(L"-megalightsfirefly", -1.0f);
@@ -697,13 +706,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const std::vector<TextureDumpArg> textureDumps = ParseTextureDumps();
         const int textureDumpFrame = ParseIntOption(L"-dumpframe", -1);
         const bool exitAfterDump = HasFlagOption(L"-exitafterdump");
-        // -taa <0|1>。ジッタで画素が一致しなくなるのを止める(A/Bの再現性の下限をゼロにする)
-        const int taaEnabled = ParseIntOption(L"-taa", -1);
+        // -taa の読み取りは下の `taa` で行う(ダンプの比較でも同じ指定を使う)
 
         // -autoexposure <0|1>。自動露出の有効/無効。指定が無ければ既定のまま。
         // 画面で見ていた設定と計測の設定を揃えるために要る(UIからしか切り替えられないと、
         // 手法の差と設定の差を分けられない)
         const int autoExposure = ParseIntOption(L"-autoexposure", -1);
+        // -occlusioncull 0|1。Hi-Zオクルージョンカリングの有無。カリングは保守的で
+        // なければならないので、有無で絵が1画素も変わらないことが正しさの定義になる。
+        // その突き合わせをUIのチェックボックスでやると撮影ごとに操作を再現できない
+        const int occlusionCull = ParseIntOption(L"-occlusioncull", -1);
+        // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
+        const int taa = ParseIntOption(L"-taa", -1);
+        // -meshlet 0|1。メッシュレット描画の有無。切ると従来の頂点シェーダー経路へ落ち、
+        // メッシュレット単位のカリングが一切かからない。**両経路の絵は一致するのが正しい**
+        // ので、これが「増幅シェーダーが何か落としていないか」を見るときの基準になる
+        const int meshlet = ParseIntOption(L"-meshlet", -1);
         // -renderres <幅>x<高さ>。内部レンダー解像度。タイルライトカリングと
         // MegaLightsの候補プールは16レンダー画素のタイルなので、解像度が違うと
         // タイルと形状の噛み合いが変わる。比較する2回は必ず揃えること
@@ -719,6 +737,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (autoExposure >= 0)
             {
                 engine.SetAutoExposureEnabled(autoExposure != 0);
+            }
+            if (occlusionCull >= 0)
+            {
+                engine.SetOcclusionCullingEnabled(occlusionCull != 0);
+            }
+            if (taa >= 0)
+            {
+                engine.SetTAAEnabled(taa != 0);
+            }
+            if (meshlet >= 0)
+            {
+                engine.SetMeshletRenderingEnabled(meshlet != 0);
             }
             if (forceDDGIRaster)
             {
@@ -770,7 +800,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 engine.SetMegaLightsDenoise(
                     megaLightsDenoise, megaLightsDenoiseAtrous, megaLightsDenoiseFrames);
             }
-            if (megaLightsDenoiseSigma > 0.0f)
+            if (emissiveLights >= 0 || emissiveLightsCutoff > 0.0f || emissiveLightsMax > 0
+                || emissiveLightsDDGI >= 0)
+            {
+                // 有効/無効を指定していない(負)なら、しきい値だけ差し替えて状態は既定のまま
+                engine.SetEmissiveLights(
+                    emissiveLights, emissiveLightsCutoff, emissiveLightsMax, emissiveLightsDDGI);
+            }
+            if (emissiveIntensity > 0.0f)
+            {
+                engine.SetEmissiveIntensity(emissiveIntensity);
+            }            if (megaLightsDenoiseSigma > 0.0f)
             {
                 engine.SetMegaLightsDenoiseSigmaLuminance(megaLightsDenoiseSigma);
             }
@@ -785,10 +825,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (!perfDumpPath.empty())
             {
                 engine.SetPerfDump(perfDumpPath.c_str(), perfDumpFrames);
-            }
-            if (taaEnabled >= 0)
-            {
-                engine.SetTAAEnabled(taaEnabled != 0);
             }
             // 【ループの中で適用する】APIを切り替えて作り直したときも同じ指定が効くようにする
             // (debugViewIndexを毎回適用しているのと同じ理由)

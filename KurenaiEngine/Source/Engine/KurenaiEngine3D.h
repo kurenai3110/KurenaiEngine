@@ -164,6 +164,31 @@ namespace Kurenai
         // レイトレーシング非対応の環境では手法を変えてもパスが走らない(ShouldRunMegaLights)
         void OverrideMegaLights(int mode, int shadowRayCount, int sampleCount);
 
+        // エミッシブ光源(自発光メッシュを光源として扱う)の切り替え。
+        //
+        // 自発光面はG-Bufferへ書いて加算されるだけで周囲を照らしていない。有効にすると、
+        // 読み込み時に自発光メッシュから起こした光源のかたまりをGPULight(LightType 3)として
+        // 従来のライトループにもMegaLightsにも流す。**有効にすると絵が明るくなる。**
+        //
+        // enabled は 0=無効 / 正=有効 / **負なら既定のまま**(OverrideMegaLightsと同じ約束)。
+        // しきい値だけを差し替えたいときに、状態まで巻き添えで倒さないための三値にしてある。
+        // cutoffIrradiance は打ち切り照度τ(0以下で既定のまま)。Rangeをこれから解く。
+        // maxCount は採用するプロキシ数の上限(0以下で既定のまま)。
+        // **上限に当たったら切り捨てではなく併合を疑うこと** ―― 面積の大きい順に上位を
+        // 残す形はEmeraldSquareの実測で発光の半分以上を捨てる。
+        // doubleCountGI は 0=DDGIから自発光を抜く(既定) / 正=抜かずに二重に数える /
+        // **負なら既定のまま**。抑止されるのはDDGIだけで、反射プローブ・RT反射・
+        // G-Bufferの自発光には掛からない(鏡面が光源を直接見ているのは二重計上ではない)
+        void SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount, int doubleCountGI);
+
+        // シーン全体の自発光の強度倍率(ImGuiの「自発光の強度」と同じ値)。0以下で既定のまま。
+        //
+        // 【検証に要る】glTFのemissiveFactorは[0,1]に収まるため、面積の小さい器具は
+        // 物理的に暗すぎて1階調に届かない(実測: Bistroの電球は8bitの1階調の0.36倍)。
+        // 単位の正しさを絵で確かめるには、この倍率を振れる必要がある
+        void SetEmissiveIntensity(float intensity);
+
+
         // MegaLightsの出力を線形空間で何フレーム足し込むかを設定する(0で蓄積しない)。
         // 指定した枚数に達したら足すのを止めるので、表示が静止し
         // 「ちょうどNサンプルの平均」を決定的に撮れる。
@@ -206,6 +231,31 @@ namespace Kurenai
         // 揃っていない条件どうしの比較は、差が手法の差なのか設定の差なのか分けられない
         void SetAutoExposureEnabled(bool enabled);
 
+        // 【計測専用】Hi-Zオクルージョンカリングの有効/無効を起動時に決める。
+        //
+        // カリングは保守的でなければならない ―― 有効/無効で絵が1画素も変わらないことが
+        // 正しさの定義そのものになる。その突き合わせをUIのチェックボックスでやると、
+        // 撮影のたびに同じ操作を再現できず、押せていないのを「差分ゼロ＝合格」と
+        // 読み違える(SetDebugViewIndexと同じ理由)。**A/Bは起動直後から同じ手順で行うこと**
+        void SetOcclusionCullingEnabled(bool enabled);
+
+        // 【計測専用】メッシュレット描画の有効/無効を起動時に決める。
+        //
+        // 無効にすると従来の頂点シェーダー + DrawIndexed の経路へ落ちる。この経路は
+        // メッシュレット単位のカリング(視錐台・法線コーン・Hi-Z)を一切行わないので、
+        // **「メッシュレット経路が何か落としていないか」を見るときの基準になる。**
+        // 出力するPSInputの中身は両経路で同じにしてあり、絵は一致するのが正しい
+        // (GBufferMeshlet.hlsl 冒頭のコメント)。一致しなければ増幅シェーダーの判定が
+        // 保守的でない。UIのチェックボックスからしか切り替えられないと、
+        // この基準を同じ起動手順で撮れない
+        void SetMeshletRenderingEnabled(bool enabled);
+
+        // 【計測専用】TAAの有効/無効を起動時に決める。
+        //
+        // TAAは時間方向に蓄積するため、フレームレートの揺れがそのまま画素差になる。
+        // 画素単位の一致を測る比較では切っておかないと、再現性の下限が取れない
+        void SetTAAEnabled(bool enabled);
+
         void SetPerfDump(const wchar_t* path, int frames);
 
         // 【検証専用】中間レンダーターゲットの中身を、線形の生値のままファイルへ書き出す。
@@ -230,12 +280,10 @@ namespace Kurenai
         // 書き出しが全部終わったらウィンドウを閉じる。無人での検証用
         void SetExitAfterDump(bool enabled);
 
-        // TAAの有無を起動時に上書きする。
-        //
-        // 【何のためにあるのか】TAAのジッタは投影行列を毎フレームずらすため、
-        // 同じ条件で2回撮ってもダンプがビット一致しない。「変わっていないこと」を
-        // 示したい比較では、まずこれを切って再現性の下限をゼロにする
-        void SetTAAEnabled(bool enabled);
+        // TAAの有無を起動時に上書きするのは SetTAAEnabled(上で宣言済み)。
+        // ダンプの比較では、まずこれを切って再現性の下限をゼロにする ――
+        // TAAのジッタは投影行列を毎フレームずらすため、同じ条件で2回撮っても
+        // ダンプがビット一致しない
 
         // -dumptex が受け付けるテクスチャ名の一覧(表示・ログ用)。
         // ClaudeのようなUIを見られない利用者にとって、これが唯一の発見手段になる
@@ -1153,6 +1201,9 @@ namespace Kurenai
         // (m_LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
         //  パスの中で更新すると先に走る側が未更新の内容を読む)
         std::vector<GPUDrone> m_DroneInstances;
+        // 機体を光源として送るときの、間引いた灯。毎フレームDroneShow::BuildLightSamplesが書き、
+        // gpuLightsの組み立てで手置きライト・エミッシブプロキシの後ろへ連結する
+        std::vector<DroneLightSample> m_DroneLightSamples;
         // 再生器。編隊の点そのものはここが持つ(.kshowから読み込む)
         DroneShow m_DroneShow;
 
@@ -1173,6 +1224,20 @@ namespace Kurenai
         // 【これだけはシーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
         // 「1画素を割ったらちらつく」という事実はどのシーン・どのショーでも変わらないため
         float m_DroneShowMinScreenRadius = Defaults::DroneShowMinScreenRadius;
+        // 機体を光源としても送るか。シーンが決める(「出すか」の一種)
+        bool m_DroneShowCastLight = Defaults::DroneShowCastLight;
+        // 灯の明るさの倍率。1.0がスプライトから導いた物理的な値で、演出用にシーンが上げられる
+        float m_DroneShowCastLightScale = Defaults::DroneShowCastLightScale;
+        // 光源として送る灯の数と、Rangeを逆算する打ち切り照度[lx]。
+        // 【これらもシーンにもショーにも持たせない】MinScreenRadiusと同じで、
+        // タイルライトカリングの容量という描画側の事情で決まる値だから
+        int m_DroneShowLightSampleCount = Defaults::DroneShowLightSampleCount;
+        float m_DroneShowLightCutoffLux = Defaults::DroneShowLightCutoffLux;
+        // 実際に送った灯の数。ログとUIの表示用
+        uint32_t m_DroneShowLightUsedCount = 0;
+        // 容量超過の警告と実効値ログを、それぞれ1回だけ出すためのフラグ
+        bool m_DroneShowLightTileOverflowLogged = false;
+        bool m_DroneShowLightValuesLogged = false;
 
         // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
@@ -2342,6 +2407,46 @@ namespace Kurenai
         // (KHR_materials_emissive_strengthをインポータが読むようになれば本来はそちらが正しい)
         float m_EmissiveIntensity = Defaults::EmissiveIntensity;
 
+        // --- エミッシブ光源(自発光メッシュを光源として扱う) ---
+        //
+        // SceneLoaderがワールド空間へ変換したプロキシ。**m_Lightsとは別に持つ。**
+        // 作者が置いたライトと自動生成の光源を同じ配列にすると、ImGuiのライト一覧から
+        // 消せてしまい元のメッシュと食い違う。上限超過時に手置きを押し出さないためでもある
+        std::vector<Assets::EmissiveProxy> m_EmissiveProxies;
+        // インスタンスごとに「このインスタンスからプロキシを起こしたか」。
+        // LoadSceneでm_EmissiveProxiesから作る(要素数はm_Scene.Instances.size())。
+        //
+        // 【DDGIのラスタ経路で要る】あちらはモデルLODの粗い段を描くので、
+        // プロキシが持つMeshIndex(段0の番号)では引けない。インスタンス単位で
+        // 判定し、メッシュ側はEmissiveClustersの有無で見る
+        std::vector<bool> m_EmissiveProxyInstances;
+        bool m_EmissiveLightsEnabled = Defaults::EmissiveLightsEnabled;
+        // DDGIにも自発光を加算したままにするか(=二重に数えるか)。既定は抑止する
+        bool m_EmissiveLightsDoubleCountGI = Defaults::EmissiveLightsDoubleCountGI;
+        float m_EmissiveLightsCutoffIrradiance = Defaults::EmissiveLightsCutoffIrradiance;
+        int m_EmissiveLightsMaxCount = Defaults::EmissiveLightsMaxCount;
+        // RangeのクランプにつかうシーンAABBの対角。LoadSceneで一度だけ求める
+        float m_EmissiveLightsMaxRange = 0.0f;
+        // 直近のフレームで実際にGPUへ送ったプロキシの数(ImGuiとログの表示用)
+        uint32_t m_EmissiveLightsUsedCount = 0;
+        // 上限で切り捨てたときの「採用した集合」の指紋。切り捨てが起きなければ0。
+        //
+        // 【プローブの署名に混ぜるためだけにある】採用順はカメラからの照度で決まるので、
+        // 上限に当たっているシーンではカメラを動かすだけで焼く光源の集合が変わる。
+        // 署名へ入れないと、収束済みのプローブだけ古い集合のまま残る
+        uint64_t m_EmissiveLightsSelectionHash = 0;
+        bool m_EmissiveLightsCapLogged = false;
+        // DDGIの二重計上の抑止が「実際に何をしたか」を1回だけログへ出したか。
+        // 【絵から分からない】抑止はプローブのイラディアンスにしか出ず、しかも
+        // 「効いていない」と「効いた結果が小さい」が同じ絵になる。実効値を出すしかない。
+        //
+        // 【2経路で別々に持つ】1つのフラグを共有すると、先に走ったほうがもう一方のログを
+        // 永久に潰す。どちらの経路の話なのか区別できないログは、切り分けの役に立たない
+        bool m_DDGIEmissiveSuppressLoggedRaster = false;
+        bool m_DDGIEmissiveSuppressLoggedTrace = false;
+        // 送信した灯の実効値を1回だけログへ出したか(「走っていない」と「暗い」の切り分け用)
+        bool m_EmissiveLightsValuesLogged = false;
+
         // 反射プローブ(19章): プローブ位置から6方向をProbeCapture.hlslで2Dレンダーターゲットへ描き、
         // IBLConvolve.hlsl CSCopyCaptureToCubeFaceでスクラッチのキューブマップへ組み上げてから、
         // IBLと同じCSIrradiance/CSPrefilterで畳み込んでプローブごとのキューブマップ配列へ書き込む。
@@ -3442,6 +3547,11 @@ namespace Kurenai
         uint32_t GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const;
         // シャドウ・反射プローブ・DDGI用。常に最も粗い段を返す(影と間接光はテクスチャを読まない)
         const Assets::Model* GetCoarsestLOD(const Assets::ModelInstance& instance) const;
+
+        // DDGIから自発光を抜くか。**判定を1か所に置くこと** ―― ラスタ経路(ObjectConstantsの
+        // 倍率)とレイトレ経路(DDGITraceConstants.Params1.w)で条件がずれると、
+        // 環境によって二重計上の有無が変わる。しかも絵は両方それらしく出る
+        bool ShouldSuppressEmissiveForGI() const;
 
         // --- モデルのストリーミング(.ksceneの[Scene]StreamingDistance) ----------------------
         //

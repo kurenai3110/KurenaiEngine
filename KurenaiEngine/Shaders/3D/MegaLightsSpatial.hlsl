@@ -455,7 +455,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         }
 
         // --- 可視性(自分の面から標的へ)。重複はレイを共有する ---
-        if (visibilityTargetAware && Lights[lightI].Params.y > 0.5f)
+        if (visibilityTargetAware && LightCastsRaytracedShadow(Lights[lightI].Params.y))
         {
             float vis = -1.0f;
             [loop]
@@ -471,6 +471,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             {
                 const float3 samplePos = MegaLightsLightSamplePosition(
                     Lights[lightI].PositionType.xyz, Lights[lightI].Params.z,
+                    Lights[lightI].DirectionAngle.xyz, (uint)Lights[lightI].PositionType.w,
                     MegaLightsUnpackSampleUV(candidate[i].SampleUV));
                 const float3 toSample = samplePos - self.WorldPos;
                 const float sampleDist = length(toSample);
@@ -551,10 +552,11 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 自分(j=0)にはレイを撃たない ―― 自分から見えないサンプルは Shade の影レイが
         // どのみち0にするので、ここで数え過ぎても結果に効かない
         const bool visibilityAware = (Params0.w != 0u) && (Params2.w != 0u) &&
-                                     (Lights[selectedLight].Params.y > 0.5f);
+                                     LightCastsRaytracedShadow(Lights[selectedLight].Params.y);
         const float selectedRadius = Lights[selectedLight].Params.z;
         const float3 selectedSamplePos = MegaLightsLightSamplePosition(
             Lights[selectedLight].PositionType.xyz, selectedRadius,
+            Lights[selectedLight].DirectionAngle.xyz, (uint)Lights[selectedLight].PositionType.w,
             MegaLightsUnpackSampleUV(selectedSampleUV));
 
         float z = 0.0f;

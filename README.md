@@ -47,6 +47,15 @@ TAA(モーションベクターによる再投影で複数フレームを蓄積�
   なぜその形になったのか(以前どうだったか・何が問題として現れたか・どう直したか)を
   知りたい場合はこちらを参照してください。
 
+### AIコーディングエージェント向け
+
+- **[CLAUDE.md](CLAUDE.md)** — このリポジトリを触るときの前提(描画上の罠・ビルド手順・
+  アセットの形式・ドキュメントの書き分け)。規約の本体はここにあります。
+- **[AGENTS.md](AGENTS.md)** — `AGENTS.md` を読むエージェント(OpenAI Codex など)向けの
+  入口。CLAUDE.md へのポインタと、取り違えやすい3点(Reverse-Z / シェーダはビルド対象 /
+  RHIはDX11・DX12の両方)だけを置いています。**規約はCLAUDE.mdに一本化**しており、
+  ここには複製していません。
+
 ## 構成
 
 ```
@@ -87,7 +96,7 @@ Tools/
   renderdoc_setup.ps1                  上を使う前に一度だけ走らせる。RenderDocのPythonモジュールは
                                        配布版に入っていないため、インストール済みの版に合わせて
                                        このPC用にビルドして配置する
-                                       (根拠は docs/ImplementationDetail.md 62.10)
+                                       (根拠は docs/ImplementationDetail.md 63.10)
 docs/                           ドキュメント(APIリファレンス・実装者向け)
 ThirdParty/                     外部依存ライブラリ(Git Submodule)。imgui, DirectXTex, assimp
 Scenes/                         手書きの.kscene(シーンファイル)。小さなテキストのためGit管理対象
@@ -348,6 +357,14 @@ Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
   **glTF以外の形式で葉や草を正しく描くにはこれが要ります** — アルファモード(OPAQUE/MASK/BLEND)は
   glTFにしかない情報で、FBX/OBJでは「アルファで抜く前提のマテリアル」を解析だけでは判別できず、
   指定しないと不透明な板として描かれます
+- `--emissive <マテリアル名>=<R,G,B>` で、指定した名前のマテリアルへ自発光の係数を与えます。
+  複数指定できます。**照明器具を光らせるにはこれが要ることがあります** — WavefrontMTLの`Ke`を
+  持たないアセットは`EmissiveFactor`が0のまま出て、G-Bufferが
+  「自発光テクスチャ × EmissiveFactor × EmissiveIntensity」で合成する以上、
+  自発光テクスチャを持つマテリアルすら光りません(Bistro屋外は132マテリアル全部の`Ke`が0でした)。
+  **値は0〜1に収めません** — ライトの色はCPU側で露出を掛けてから送られるのに対し、
+  自発光は露出を通らずそのまま加算されるため、露出済みの輝度に相当する値(裸電球で数百)を
+  与えます。求め方は`docs/ImplementationDetail.md` 61.7h
 - `--specular-as-orm` を付けると、`aiTextureType_SPECULAR`のテクスチャをメタリック/ラフネスと
   遮蔽マップとして読みます。**SpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を
   格納する規約のFBX向け**です(NVIDIA Emerald Squareがこれ)。チャンネルの割り当てがglTFの
@@ -857,7 +874,24 @@ Enabled = true
 Path = Shows/Standard.kshow   # Assetsルートからの相対パス([Model]Pathと同じ基準)
 Center = 0, 200, 100          # 編隊の中心(ワールド座標)
 Scale = 140.0                 # 編隊の代表半径[m]。.kshowの点は代表半径1へ正規化されている
+CastLight = true              # 機体を「周囲を照らす光源」としても送る(既定false)
+CastLightScale = 8.0          # 灯の明るさの倍率。1.0がスプライトから導いた物理的な値
 ```
+
+**`CastLight`を有効にすると、機体が地形や水面を実際に照らします。** 1機の光度は
+`.kshow`の`Brightness`と`Radius`から導かれるので、明るさのつまみは増えていません
+(スプライトを明るくすれば光も明るくなります)。1500機をそのまま光源にすることはできない
+(1タイルあたりのライト数の上限を超えて灯が黙って欠落する)ため、48機ぶんを間引いて送り、
+そのぶん光度を割り戻しています。
+
+`CastLightScale`は**演出用の倍率**です。既定の1.0はスプライトから導いた物理的な値ですが、
+夜の地物の明るさは空由来の間接光が支配しているため、その値では絵にほとんど出ません
+(島のリニア輝度で+0.6%)。`Scenes/DroneShow.kscene`は8.0を指定しています
+(+12.8%。島全体に占める機体の光は11%で、夜のシルエットは保たれる範囲)。
+根拠の実測は[docs/ImplementationDetail.md](docs/ImplementationDetail.md)の38.13節にあります。
+
+> **編隊は反射プローブとDDGIには入りません。** 毎フレーム動くので、入れると
+> 反射プローブには焼いた瞬間の編隊が固定で残り、DDGIは編隊を追いかけ続けて収束しません。
 
 すぐ試すには `Sample3D.exe -scene DroneShow` を起動してください
 (`Scenes/DroneShow.kscene`。干潟の夜景の上空で1500機が飛びます)。
@@ -957,6 +991,46 @@ Samples\Sample3D\RunDX12.bat -debug
 | `-megalightsdump <パス>` | 足し終えた合計を生データで書き出す。形式は `'K','M','L','A'` + uint32×4(幅 / 高さ / フレーム数 / 予約)+ float32×4 が幅×高さ個。**フレーム数で割ると平均になる** |
 | `-autoexposure <0\|1>` | 自動露出の有効/無効。UIパネルと同じ状態を起動時から作るためのもの(画面で見ていた設定と計測の設定を揃える) |
 | `-renderres <幅>x<高さ>` | 内部レンダー解像度(例: `1920x1080`)。タイル単位の処理は解像度でタイルと形状の噛み合いが変わるため、比較する2回は必ず揃えること |
+| `-occlusioncull <0\|1>` | Hi-Zオクルージョンカリングの有効/無効。**カリングが正しければ有効/無効で絵は1画素も変わらない**ので、この2回を撮り比べるのが正しさの確認そのものになる(UIのチェックボックスだと撮影ごとに操作を再現できず、押せていないのを「差分ゼロ＝合格」と読み違える) |
+| `-taa <0\|1>` | TAAの有効/無効。TAAは時間方向に蓄積するためフレームレートの揺れがそのまま画素差になる。**画素単位の一致を測るときは切ること** |
+| `-meshlet <0\|1>` | メッシュレット描画の有効/無効。切ると従来の頂点シェーダー + `DrawIndexed` の経路へ落ち、メッシュレット単位のカリング(視錐台・法線コーン・Hi-Z)が一切かからない。**両経路の絵は一致するのが正しい**ので、「増幅シェーダーが見えているものを落としていないか」を見るときの基準になる |
+
+### エミッシブ光源(自発光メッシュを光源として扱う)
+
+自発光(エミッシブ)なメッシュは、G-Bufferへ書かれて加算されるだけで**周囲を照らしていません**。
+`-emissivelights 1` を付けると、読み込み時に自発光メッシュから「光源のかたまり」を起こし、
+通常のライトと同じ `GPULight` として直接光へ流します。**既定は無効です**(有効にすると絵が明るくなります)。
+
+| 引数 | 意味 |
+|---|---|
+| `-emissivelights <0\|1>` | 自発光メッシュを光源として扱うか。**既定は無効** |
+| `-emissiveintensity <倍率>` | シーン全体の自発光の強度(ImGuiの「自発光の強度」と同じ値) |
+| `-emissivelightscutoff <τ>` | 打ち切り照度。光源の影響半径(Range)をここから解く。**既定は 0.001** |
+| `-emissivelightsmax <N>` | 採用するプロキシ数の上限。**既定は 1024**(ライト数の上限と同じ)。手置きライトとは別枠で管理されます |
+| `-emissivelightsddgi <0\|1>` | DDGIにも自発光を加算するか(=同じ発光を二重に数えるか)。**既定は 0**(抑止)。反射プローブ・RT反射・画面上の自発光には掛かりません |
+
+これらは起動後も「ライト」パネルの**「自発光の強度」スライダーの直下**から動かせます
+(引数と同じ4つ + 現在のプロキシ数と送信中の灯数)。プロキシが1つも無いシーンでは
+灰色になります。**クラスタ分割の長さ尺度はここに出していません** ―― 読み込み時にしか
+効かないため、動かしても何も起きないつまみになるからです。
+
+**glTFの`emissiveFactor`は[0,1]に収まるため、既定の強度では小さな照明器具は暗すぎて絵に出ません。**
+Bistro内装の電球は0.5m先で8bitの1階調の0.55倍しか与えません(手置きの800cdライトの約1/9)。
+`KHR_materials_emissive_strength`をインポータが読まないための制約です。逃げ道は2つあります。
+
+- **アセット側で与える**: `KurenaiPacker --emissive <マテリアル名>=<R,G,B>` で器具のマテリアルへ
+  1.0を超える係数を焼き込む。器具ごとに明るさを変えられるので、こちらが本筋です
+- **シーン全体を持ち上げる**: `-emissiveintensity`(またはImGuiの「自発光の強度」)。
+  全マテリアルへ一様に掛かるので、検証で桁を合わせたいときに使います
+
+単位変換(π・4・露出)の正しさは専用シーンで確かめられます。`Tools/generate_emissive_light_test.py`
+が同じモデルを使う2つのシーンを生成し、片方は自発光のプロキシ、もう片方は**等価な手置きポイント
+ライト**で床を照らします。床の明るさに差が出たら単位が間違っています(手順はシーンの先頭コメント)。
+
+DDGIの二重計上(`-emissivelightsddgi`)は**別のシーン**で確かめます。`Tools/generate_emissive_gi_test.py`
+が4×4mの発光パネルを吊るシーンを生成し、`-debugview 26`(DDGIイラディアンスアトラス)を
+つまみの0/1で比べます。**単位検算用のシーンでは測れません** ―― あちらは発光体をわざと小さく
+してあり、プローブのキャプチャ(1面16×16)に写らないためです。
 
 環境変数 `KURENAI_NO_RT` を設定して起動すると、DX12でレイトレーシングの高速化構造(BLAS/TLAS)を構築しません。DXR対応GPUでも非対応時と同じ経路(シャドウはラスタのカスケード、反射はスクリーンスペース)で動くため、**高速化構造がVRAMと性能へ与える影響を同じ実機で切り分けられます**。23区シーンでは高速化構造だけで5.16GBを占め、RTX 4070 Tiでも専用VRAMの予算を超えます(実測は`docs/ImplementationDetail.md` 58章)。
 
@@ -1274,7 +1348,35 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
   ポイントライトを格子状に64灯配置)の2つだけは手書きではなく`Tools/generate_shadow_test_scenes.py`で
   生成します(ジオメトリは`LightTest.kmodel`を流用するため、生成されるのは`.kscene`だけです)。
   半影の測定用の`PenumbraTest.kscene`・`PenumbraH{4,6,7,8}.kscene`も同じスクリプトが生成します
-  (こちらは`PenumbraTest`のモデルを使うため、先に`Tools/generate_penumbra_test.py`を走らせてパックします)
+  (こちらは`PenumbraTest`のモデルを使うため、先に`Tools/generate_penumbra_test.py`を走らせてパックします)。
+
+  **MegaLights用の2つ**も生成物です。どちらも`-dx12 -megalights 2`で起動しないと
+  MegaLightsは走りません(既定はDX11かつMegaLights無効)。
+
+  - `BistroExteriorNight.kscene` — Bistro屋外の夜景。`Tools/extract_bistro_lights.py`が
+    `Exterior.kmodel`/`.kgeom`を直接読み、街灯・ストリングライトの電球・庇のスポット・
+    壁付けランタン・スクーターのヘッドライトの**実際の器具位置**から灯を導出します。
+    位置・色・光源半径はすべて実測値で、目分量の数値は入っていません。
+    **灯は器具の重心ではなく、そこから真下へ下ろした位置に置かれます** — MegaLightsの
+    影レイは`RAY_FLAG_FORCE_OPAQUE`なので、重心へ置くと器具自身のガラスと笠に遮られて
+    1灯も光りません(絵が暗いだけで例外もログも出ないため、MegaLightsの不具合と誤診しやすい)。
+    スクリプトは灯ごとに脱出率を測り、しきい値を超える位置まで下ろしてから採用します
+  - `MegaLightsNoiseCheck.kscene` — ノイズ測定用(`docs/ImplementationDetail.md` 61.7f/61.7g が
+    使っているシーン)。`BistroInteriorLit` から時刻0・GIVolume無し・露出2.0固定にしたもので、
+    **測定を決定的にするために `-autoexposure 0` と組で使います**
+  - `MegaLightsStage.kscene` — 日常の切り分け用の軽いステージ。
+    `Tools/generate_megalights_stage.py`が2層の回廊・アーチ・手すりの縦桟・中庭の箱・
+    粗さの帯を持つglTFを生成し、灯は`KHR_lights_punctual`として埋め込みます
+    (`.kscene`側に`[Light]`は書きません)。従来の`LightScale`系が「床と壁と球4個」で
+    **影を落とす相手をほとんど持たなかった**のに対し、遮蔽を濃くしてあります
+
+  ```
+  python Tools\generate_megalights_stage.py
+  Tools\KurenaiPacker\Build\Bin\x64\Release\KurenaiPacker.exe ^
+    Assets\Source\MegaLightsStage\MegaLightsStage.gltf ^
+    -o Assets\Packed\MegaLightsStage\MegaLightsStage.kmodel
+  python Tools\extract_bistro_lights.py
+  ```
 - `Assets/Packed/` — 上記をKurenaiPacker.exeで変換した`.kmodel`/`.kgeom`/`.ktex`と、検証済みの`.kscene`
 - `Assets/Packed/Skybox/` — 背景表示・IBLの入力となるHDR空キューブマップ(DDS形式、R16G16B16A16_Float、既に圧縮済みのためパッカーを通さず直接ここへ出力する)。`Tools/generate_sky_cubemap.py`(要`pip install numpy`)で再生成できる。既定では空をGPUで手続き生成するため通常は使われず、Procedural Skyを無効にしたときのフォールバックと、`[Scene]Skybox`を明示するシーン向けのアセットとして残っている
 
