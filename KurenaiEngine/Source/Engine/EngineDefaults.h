@@ -669,9 +669,11 @@ namespace Kurenai::Defaults
     // --- 内部レンダー解像度 ---
     // G-Buffer以降すべての中間バッファの解像度。ウィンドウサイズとは独立しており、
     // Presentパスでアスペクト比を保ったままウィンドウへ拡大縮小する(レターボックス/ピラーボックス)。
-    // 実行時に「システム」パネルから変更できる
-    inline constexpr uint32_t RenderWidth = 1280;
-    inline constexpr uint32_t RenderHeight = 720;
+    // 実行時に「システム」パネルから変更できる。
+    // 既定はウィンドウの初期サイズ(1280x720)より大きい1920x1080で、縮小して表示される。
+    // 画素数は720pの2.25倍になるため、非力なGPUではここを下げるのが最初のつまみになる
+    inline constexpr uint32_t RenderWidth = 1920;
+    inline constexpr uint32_t RenderHeight = 1080;
 
     // --- 超解像(FSR1相当のEASU+RCAS。41.23節) ---
     // 有効にすると、上の解像度は「出力解像度」の意味になり、内部レンダー解像度は

@@ -1942,7 +1942,7 @@ namespace Kurenai
         , m_RenderHeight(std::max(1u, renderHeight))
         // 超解像の出力解像度は、無効なうちは内部レンダー解像度と同じ意味を持つ。
         // ここを揃えておかないと、UIで初めて超解像を有効にした瞬間に
-        // 出力解像度が既定値(1280x720)へ飛んでしまう
+        // 出力解像度が既定値(1920x1080)へ飛んでしまう
         , m_UpscaleOutputWidth(std::max(1u, renderWidth))
         , m_UpscaleOutputHeight(std::max(1u, renderHeight))
     {
@@ -5192,8 +5192,9 @@ namespace Kurenai
             return;
         }
 
-        // 【整定を待つ】起動直後は内部解像度が既定値(1280x720)から実ウィンドウサイズへ切り替わり、
-        // ストリーミングも走っている。待たずに書き出すと1280x720のまま吐き出される
+        // 【整定を待つ】起動直後はストリーミングでモデルとテクスチャが入ってくる途中であり、
+        // シーンがRenderResolutionを持つ場合は内部解像度も既定値(1920x1080)から切り替わる。
+        // 待たずに書き出すと、読み込み途中の絵を既定解像度のまま吐き出すことになる
         // (kMegaLightsAccumWarmupのコメントに、実際にそうなった記録がある)
         const uint32_t targetFrame =
             m_TextureDumpFrame >= 0 ? static_cast<uint32_t>(m_TextureDumpFrame) : kMegaLightsAccumWarmup;
