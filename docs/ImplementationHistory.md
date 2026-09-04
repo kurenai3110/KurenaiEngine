@@ -7880,3 +7880,53 @@ Kはシェーダへ定数バッファで渡っており、コンパイル時定�
 一方タイル内の減少率は -10% から -19% まで動くので、幅を持たせて書いた。
 
 Refs: docs/ImplementationDetail.md 61.7m
+
+## 76. 誰も読まないライトグリッドを毎フレーム作っていた
+
+MegaLights の経路でも、従来のタイルライトカリング(`LightCull`)が毎フレーム走っていた。
+
+61.7e.3 で気づいてはいた。`DirectLighting.hlsl` のローカルライトのループは
+MegaLights が走るフレームには `LightCount.w` で止まっているのに、**そのループが読む
+ためだけに存在するタイルリストは作り続けていた**。消費者を数えたところ、その
+ループと `Present.hlsl` のライトグリッド表示(Mode 11)しか無く、通常表示では
+丸ごと無駄だった。当時1026灯で0.198ms、MegaLights 合計の7%。
+
+分かっていながら手を付けなかったのは、**パス名が `MegaLights` で始まらないため
+「MegaLights合計」という指標に出てこなかった**からでもある。手法の比較を
+その合計で回している間、この0.198msは誰の帳簿にも載っていなかった。
+
+### 直し方 ― フラグではなく述語にする
+
+素直に書くと `if (m_LightCullingEnabled && !ShouldRunMegaLights())` だが、
+これだとデバッグ表示が壊れる。`DebugView::LightTiles` はグリッドそのものを
+見せる表示なので、MegaLights が走っていても実行が要る。落とすと
+前フレームの残骸か未初期化の中身をヒートマップにする。
+
+そこで `ShouldRunLightCulling()` を新設した。この関数だけが
+「このフレームのライトグリッドは有効か」を答える。`ShouldRunMegaLights` や
+`ShouldRunRaytraced*` と同じ、**「パスを積むか」と「その出力を読むか」を
+1つの述語で決める**作法。
+
+読み手側も同じ関数へ揃えた:
+
+- パスの登録条件
+- 1タイルの容量超過の警告(グリッドを作っていないフレームで警告すると、
+  実際には起きない欠落を知らせることになる)
+- `LightingConstants.TileParams.w`(グリッドが有効か)。**トグルの状態ではなく
+  実際に書いたかどうかで決める。** MegaLights が OFF のフレームでは
+  `m_LightCullingEnabled` と同値なので、従来経路の挙動は変わらない
+
+### 効果
+
+BistroExteriorNight(107灯)/ 2560x1440 / RTX 4070 Ti / Release / DX12 / 120フレーム平均。
+手法3の CSV から `LightCull` の行が消えることで確認した。
+
+| | `LightCull` |
+|---|---|
+| MegaLights OFF | 0.142 ms |
+| MegaLights 手法3 | パスが消える |
+
+MegaLights 合計8.13msに対して1.7%。**灯が増えるほど効く**性質のもので、
+61.7e.3 の1026灯では合計の7%だった。
+
+Refs: docs/ImplementationDetail.md 61.7e.3
