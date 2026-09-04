@@ -270,6 +270,9 @@ namespace Kurenai
         // クアッド共有(手法3)の1画素あたりの標本数。1〜kMegaLightsMaxSamplesPerPixel。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         void SetMegaLightsQuadSamples(int samples);
+        // 候補プールが1タイルあたりに抽出する灯の数(K)。
+        // kMegaLightsTilePoolMinCapacity 〜 kMegaLightsTilePoolCapacity
+        void SetMegaLightsTilePoolCapacity(int capacity);
 
         // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を
         // 測るためのもので、静止した絵をいくら撮っても測れない側を測る入口。
@@ -1489,6 +1492,11 @@ namespace Kurenai
         // 手法2の時間・空間再利用は「1画素1リザーバ」を前提に添字を組み立てているため。
         // 影レイの本数はそのままこの数になる(標本ごとに1本撃つ)
         int32_t m_MegaLightsQuadSamplesPerPixel = Defaults::MegaLightsQuadSamplesPerPixel;
+        // 候補プールが1タイルあたりに抽出する灯の数(K)。
+        // **1画素あたりの標本数では減らないノイズがここで決まる** ―― プールはタイルに1つで、
+        // タイル内の全画素が同じK個から引くので、プールの引き方のばらつきはタイル内で
+        // 共通のオフセットとして乗る(根拠は EngineDefaults.h)
+        int32_t m_MegaLightsTilePoolCapacity = Defaults::MegaLightsTilePoolCapacity;
         // いまリザーババッファを確保したときの標本数。**定数バッファへ渡す値と必ず一致させる**。
         // 食い違うと Initial が確保外へ書くか Resolve が別画素の標本を読み、
         // 例外もログも出ないまま絵だけが壊れる
@@ -3084,8 +3092,12 @@ namespace Kurenai
         // ライトタイルの容量と違い**これは打ち切りではなく抽出数**で、タイルへ何灯届いていても
         // ここで決めた本数だけを重みつきで取り出す。届いた灯が欠落するわけではない
         // (どの灯も w_i / SumW の確率で選ばれる)ため、容量超過のような静かな欠落は起きない。
-        // 既定値の根拠はまだ実測していない ―― 段階2の誤差カーブを見てから決める
-        static constexpr uint32_t kMegaLightsTilePoolCapacity = 32;
+        // 【実行時に振れる。ここは確保の上限】1タイルの抽出数Kは
+        // m_MegaLightsTilePoolCapacity が持ち、シェーダへは定数バッファで渡している。
+        // バッファの確保だけがコンパイル時の上限を要るのでここに残す
+        static constexpr uint32_t kMegaLightsTilePoolCapacity = 128;
+        // Kの下限。これを下回るとタイルに届く灯を代表できない
+        static constexpr int32_t kMegaLightsTilePoolMinCapacity = 8;
         // 候補プール1タイルぶんの要素数。先頭6個がヘッダ(SumW / 届いた灯数 / 有効候補数 / 予約 /
         // 手前のViewZ / 奥のViewZ)、
         // 以降は候補1つにつき2個(ライト番号と重み)。MegaLightsTilePool.hlsl 冒頭のレイアウトと一致させること

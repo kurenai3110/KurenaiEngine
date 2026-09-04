@@ -4101,6 +4101,34 @@ namespace Kurenai
                 " にしました(影レイの本数も同じ数になります)");
     }
 
+    void KurenaiEngine3D::SetMegaLightsTilePoolCapacity(int capacity)
+    {
+        // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
+        if (capacity < 0)
+        {
+            return;
+        }
+        if (capacity < kMegaLightsTilePoolMinCapacity ||
+            capacity > static_cast<int>(kMegaLightsTilePoolCapacity))
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsの候補プールの容量が範囲外のため無視します: " + std::to_string(capacity) +
+                    " (" + std::to_string(kMegaLightsTilePoolMinCapacity) + "〜" +
+                    std::to_string(kMegaLightsTilePoolCapacity) + ")");
+            return;
+        }
+        if (capacity == m_MegaLightsTilePoolCapacity)
+        {
+            return;
+        }
+        m_MegaLightsTilePoolCapacity = capacity;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsの候補プールの容量を " + std::to_string(m_MegaLightsTilePoolCapacity) +
+                " にしました");
+    }
+
     int32_t KurenaiEngine3D::MegaLightsSamplesPerPixel() const
     {
         // 【手法3以外は必ず1】手法2の時間・空間再利用は「1画素1リザーバ」を前提に
@@ -12531,7 +12559,9 @@ namespace Kurenai
                         m_LightTileCountX,
                         m_LightTileCountY,
                         static_cast<uint32_t>(gpuLights.size()),
-                        kMegaLightsTilePoolCapacity,
+                        // 【書き手と読み手で必ず同じKを使うこと】プールの1タイルぶんの
+                        // 要素数はKから決まるので、食い違うと別タイルの領域を読み書きする
+                        static_cast<uint32_t>(m_MegaLightsTilePoolCapacity),
                     };
                     poolConstants.RenderSize = { m_RenderWidth, m_RenderHeight, 0u, 0u };
 
@@ -12676,7 +12706,8 @@ namespace Kurenai
                 {
                     m_LightTileCountX,
                     kLightTileSize,
-                    kMegaLightsTilePoolCapacity,
+                    // 候補プールを書いたときと同じKでなければならない(上のTileParams.wと同値)
+                    static_cast<uint32_t>(m_MegaLightsTilePoolCapacity),
                     m_TAAFrameIndex,
                 };
                 stochasticConstants.Params2 =
@@ -15103,7 +15134,7 @@ namespace Kurenai
         RHI::IRHIBuffer* const presentTileBuffer =
             presentUsesTilePool ? m_MegaLightsTilePoolBuffer.get() : m_LightTileBuffer.get();
         const uint32_t presentTileCapacity =
-            presentUsesTilePool ? kMegaLightsTilePoolCapacity : kLightTileCapacity;
+            presentUsesTilePool ? static_cast<uint32_t>(m_MegaLightsTilePoolCapacity) : kLightTileCapacity;
 
         PresentConstants presentConstants{};
         presentConstants.Mode = presentMode;

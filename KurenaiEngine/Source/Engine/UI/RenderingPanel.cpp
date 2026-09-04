@@ -223,6 +223,28 @@ namespace Kurenai::UI
                 "【影レイの本数はこれとは独立】選ばれた1灯にしか撃たないので常に1本で、"
                 "Mを増やしてもレイは増えない。ここがライト数からコストを切り離している部分");
 
+            // 【つまみを動かすと定数バッファへ渡すKが変わる】書き手(候補プール)と
+            // 読み手(Initial・空間再利用・デバッグ表示)がすべて同じメンバ変数から
+            // Kを受け取るよう、UIも必ずセッターを通す
+            int poolCapacity = m_Engine.m_MegaLightsTilePoolCapacity;
+            if (SliderIntEx(
+                    "候補プールの容量 K###MegaLightsTilePoolCapacity", &poolCapacity,
+                    KurenaiEngine3D::kMegaLightsTilePoolMinCapacity,
+                    static_cast<int>(KurenaiEngine3D::kMegaLightsTilePoolCapacity),
+                    Defaults::MegaLightsTilePoolCapacity,
+                    "候補プールが1タイル(16x16画素)あたりに抽出する灯の数。\n\n"
+                    "【1画素あたりの標本数では減らないノイズがここで決まる】プールはタイルに"
+                    "1つしかなく、タイル内の全画素が同じK個から引く。プールの引き方のばらつきは"
+                    "タイル内で共通のオフセットとして乗るので、標本を増やしても平均されず、"
+                    "16画素の格子に揃った塊として残る。\n\n"
+                    "実測(標本数4・デノイザ切・1フレームの誤差): K=32でタイル間7.81・"
+                    "タイル内10.27、K=128で4.03・8.30(8bit階調の中央値)。\n\n"
+                    "【レイの本数は増えない】コストは候補プールのパスだけで、"
+                    "2560x1440・107灯で 0.273→0.321 ms、全体で+1.3%"))
+            {
+                m_Engine.SetMegaLightsTilePoolCapacity(poolCapacity);
+            }
+
             CheckboxEx(
                 "デノイザ###MegaLightsDenoise", &m_Engine.m_MegaLightsDenoiseEnabled,
                 Defaults::MegaLightsDenoiseEnabled,

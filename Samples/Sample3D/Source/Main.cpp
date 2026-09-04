@@ -570,6 +570,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightsquadsamples <1〜4>。クアッド共有が1画素あたりに引く標本の数。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         const int megaLightsQuadSamples = ParseIntOption(L"-megalightsquadsamples", -1);
+        // -megalightspool <8〜128>。候補プールが1タイルあたりに抽出する灯の数(K)。
+        // 1画素あたりの標本数では減らない「タイル間」のノイズがここで決まる
+        const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
         // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
         const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
         const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
@@ -686,6 +689,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsQuadSamples >= 0)
             {
                 engine.SetMegaLightsQuadSamples(megaLightsQuadSamples);
+            }
+            if (megaLightsPoolCapacity >= 0)
+            {
+                engine.SetMegaLightsTilePoolCapacity(megaLightsPoolCapacity);
             }
             if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
             {
