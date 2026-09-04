@@ -1322,8 +1322,9 @@ namespace Kurenai
         int32_t m_MegaLightsShadowRayCount = Defaults::MegaLightsShadowRayCount;
 
         // MegaLightsの候補プール(MegaLightsTilePool.hlsl)。タイルごとに「届くライト」を走査し、
-        // 寄与に比例した確率でK灯を重みつきで抽出する。参照実装はこれを使わず全灯を回すため、
-        // 現段階では出力を消費する者がいない(確率的サンプリング本体が入る段階で読み手がつく)。
+        // 寄与に比例した確率でK灯を重みつきで抽出する。読み手は Initial(RISの提案分布)と
+        // Spatial(不偏化の分母で「その灯が隣のタイルへ届くか」を判定する)。
+        // 参照実装はこれを使わず全灯を回すので、参照実装のときは出力が使われない。
         // レイを撃たないパスだがMegaLightsと同時にしか使わないので、生成もRT対応時だけにしてある
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsTilePoolComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTilePoolPipelineState;

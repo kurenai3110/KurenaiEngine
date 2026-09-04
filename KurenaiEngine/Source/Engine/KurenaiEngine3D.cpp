@@ -2634,8 +2634,11 @@ namespace Kurenai
             m_MegaLightsTilePoolConstantBuffer = m_Device->CreateBuffer(megaLightsTilePoolConstantBufferDesc);
 
             // MegaLightsの確率的サンプリング本体(2パス)。
-            // Initialはレイを撃たないのでSM 5.0でも焼けるが、Shadeは RayQuery を含むため
-            // シェーダーモデル6.5が要る(パッカーのkSkipDxbc50Filesを参照)
+            // 【この4本はすべて RayQuery を含む】Initial は初期可視レイ、Temporal は
+            // 時間検証レイ、Spatial は目標関数の可視性とバイアス補正レイ、Shade は影レイ。
+            // したがってシェーダーモデル6.5が要る(パッカーの kSkipDxbc50Files を参照)。
+            // レイを撃たないのは TilePool / Denoise / Accum / Resolve の4本だけで、
+            // そちらは3バリアントすべてで焼かれる
             RHI::ShaderDesc megaLightsInitialCsDesc;
             megaLightsInitialCsDesc.Stage = RHI::ShaderStage::Compute;
             megaLightsInitialCsDesc.FilePath = shaderDirectory + L"MegaLightsInitialSample.kshader";
@@ -2661,7 +2664,7 @@ namespace Kurenai
             m_MegaLightsSpatialPipelineState =
                 m_Device->CreateComputePipelineState({ m_MegaLightsSpatialComputeShader.get() });
 
-            // 時間再利用。空間再利用と同じくレイを撃たないので3バリアントすべてで焼かれる
+            // 時間再利用。採用した履歴サンプルが今も見えるかを確かめる時間検証レイを1本撃つ
             RHI::ShaderDesc megaLightsTemporalCsDesc;
             megaLightsTemporalCsDesc.Stage = RHI::ShaderStage::Compute;
             megaLightsTemporalCsDesc.FilePath = shaderDirectory + L"MegaLightsTemporal.kshader";
