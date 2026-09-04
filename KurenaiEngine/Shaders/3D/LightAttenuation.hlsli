@@ -45,12 +45,25 @@ bool LightCastsRaytracedShadow(float packedFlags)
     return (((uint)(packedFlags + 0.5f)) & kLightShadowRaytraced) != 0u;
 }
 
+// Karis 2013 / Frostbite の打ち切り窓の**唯一の定義**(まだ二乗していない素の窓)。
+// Range で厳密に0になり、打ち切り境界のハードエッジが出ない。
+//
+// 【切り出してある理由】この窓は punctual・エミッシブプロキシ・その上界の3か所で
+// 使われており、段階2の三角形メッシュライト(MeshLighting.hlsli)も影響半径 R で
+// 同じ形で切る。**打ち切りの形がずれると定義域がずれる** ―― 参照実装と確率的
+// サンプリングで「どこまで届くか」が食い違い、絵は出るが期待値がずれる。
+// 二乗する前で返すのは、呼び出し側の (window * window) の掛け順を変えないため
+float LightRangeWindow(float distSq, float range)
+{
+    float factor = distSq / max(range * range, 1e-4f); // (d/r)^2
+    return saturate(1.0f - factor * factor);           // 1 - (d/r)^4
+}
+
 // Karis 2013 / Frostbite の windowed inverse-square。Range を超えると厳密に0になり、
 // 打ち切り境界でのハードエッジが出ない
 float DistanceAttenuation(float distSq, float range)
 {
-    float factor = distSq / max(range * range, 1e-4f); // (d/r)^2
-    float window = saturate(1.0f - factor * factor);   // 1 - (d/r)^4
+    float window = LightRangeWindow(distSq, range);
     // 光源に極端に近づいたときの発散を抑える。定数1.0を足す実装はシーンスケール依存になるため、
     // 最小距離二乗でのクランプにする
     return (window * window) / max(distSq, 0.0001f);
@@ -92,8 +105,7 @@ float EmissiveProxyAttenuation(
     float directionality)  // Params.w = κ
 {
     // 打ち切りの窓は punctual と同じ形。Range の境界で厳密に0になり、ハードエッジが出ない
-    float factor = distSq / max(range * range, 1e-4f);
-    float window = saturate(1.0f - factor * factor);
+    float window = LightRangeWindow(distSq, range);
 
     // 発光面から見て受光点がどちら側にあるか。-toLight が「光源から受光点へ」の向き
     float cosLightSide = -dot(lightDirection, toLight) * rsqrt(max(distSq, 1e-12f));
@@ -129,8 +141,7 @@ float LightAttenuationUpperBound(
 {
     if (lightType == 3u)
     {
-        float factor = distSq / max(range * range, 1e-4f);
-        float window = saturate(1.0f - factor * factor);
+        float window = LightRangeWindow(distSq, range);
         float lobeMax = (1.0f - directionality) * 0.25f + directionality;
         return lobeMax * (window * window) / max(distSq + sourceRadius * sourceRadius, 0.0001f);
     }
