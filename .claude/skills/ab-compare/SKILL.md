@@ -87,8 +87,12 @@ Image.fromarray((np.clip(d * 16, 0, 255)).astype('uint8')).save('diff_x16.png')
 **候補を2つ潰しただけで残りに帰属しない。** 項を1つずつ止めて測ること。
 消去法で決めた結果、第三の要因が単独で効いていた事例がある。
 
+**帰属を報告する前に `double-check`。** 原因の断定と測った数値は、
+`verifier` と Codex の2系統に当てる(線引きは `double-check` 2節)。
+
 ## 関連
 
 - 起動・撮影・クリックの手順は `verify-app` スキル
 - マージ前のHLSL一括検証は `shader-check` スキル
 - 中間バッファの値を数値で読む・シェーダへ計装を入れるのは `shader-debug` スキル
+- 報告前の検算: `double-check`
