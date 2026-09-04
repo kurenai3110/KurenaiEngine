@@ -1414,6 +1414,12 @@ namespace Kurenai
         bool m_MegaLightsDenoiseEnabled = Defaults::MegaLightsDenoiseEnabled;
         int32_t m_MegaLightsDenoiseAtrousPasses = Defaults::MegaLightsDenoiseAtrousPasses;
         int32_t m_MegaLightsDenoiseMaxFrames = Defaults::MegaLightsDenoiseMaxFrames;
+        // クアッド共有(手法3)での時間累積の上限。**手法ごとに別に持つ。**
+        // 1つの変数を共有して手法ごとに黙って読み替えると、UIのつまみが示す値と
+        // 実際に効いている値が食い違う(「指定したのに効かない」の型)。
+        // 分けておけば、UIもCLIも「いま効いている値」をそのまま触れる。
+        // 手法3にリザーバの履歴が無いぶんここを長くしている(根拠は EngineDefaults.h)
+        int32_t m_MegaLightsQuadDenoiseMaxFrames = Defaults::MegaLightsQuadDenoiseMaxFrames;
         float m_MegaLightsDenoiseSigmaLuminance = Defaults::MegaLightsDenoiseSigmaLuminance;
         float m_MegaLightsDenoiseFireflyClamp = Defaults::MegaLightsDenoiseFireflyClamp;
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsTemporalComputeShader;

@@ -238,11 +238,24 @@ namespace Kurenai::UI
                     "a-trousの段数###MegaLightsDenoiseAtrous", &m_Engine.m_MegaLightsDenoiseAtrousPasses,
                     0, 5, Defaults::MegaLightsDenoiseAtrousPasses,
                     "段ごとにステップ幅が倍になるので、4段で半径16画素ぶんに届く。0で時間累積のみ");
+                // 【いま効いている値そのものを触らせる】時間累積の上限は手法ごとに
+                // 別の変数を持っている(手法3にはリザーバの履歴が無く、デノイザだけが
+                // 時間方向の記憶なので長い)。1つのつまみで両方を兼ねると、
+                // 表示している値と実際に効いている値が食い違う
                 SliderIntEx(
-                    "時間累積の上限###MegaLightsDenoiseFrames", &m_Engine.m_MegaLightsDenoiseMaxFrames,
-                    1, 64, Defaults::MegaLightsDenoiseMaxFrames,
-                    "何フレームぶんまで混ぜるか。**TAAより短くすること** ―― 長いとTAAのゴーストと"
-                    "重なって二重に尾を引き、どちらが原因か切り分けられなくなる");
+                    megaLightsQuadUI ? "時間累積の上限###MegaLightsQuadDenoiseFrames"
+                                     : "時間累積の上限###MegaLightsDenoiseFrames",
+                    megaLightsQuadUI ? &m_Engine.m_MegaLightsQuadDenoiseMaxFrames
+                                     : &m_Engine.m_MegaLightsDenoiseMaxFrames,
+                    1, 128,
+                    megaLightsQuadUI ? Defaults::MegaLightsQuadDenoiseMaxFrames
+                                     : Defaults::MegaLightsDenoiseMaxFrames,
+                    "何フレームぶんまで混ぜるか。上げるほどちらつきは減るが、"
+                    "灯や影が動いたときの残光(ゴースト)が長く尾を引く。\n\n"
+                    "残光は指数移動平均そのもので、10%まで落ちるのに 2.30*N フレームかかる"
+                    "(60Hzなら 32で1.2秒 / 64で2.5秒 / 128で4.9秒。実測が理論値と3桁一致)。\n\n"
+                    "【クアッド共有では既定を長くしてある】あちらはリザーバを持ち回らないので、"
+                    "デノイザだけが時間方向の記憶になる");
             }
 
             if (megaLightsQuadUI)

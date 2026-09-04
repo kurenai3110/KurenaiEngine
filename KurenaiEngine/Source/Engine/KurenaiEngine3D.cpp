@@ -3974,7 +3974,10 @@ namespace Kurenai
         }
         if (maxFrames > 0)
         {
+            // 【両方の手法へ入れる】計測用のつまみなので、指定したのに走っている手法の
+            // ほうが読まれない、という取りこぼしを作らない
             m_MegaLightsDenoiseMaxFrames = maxFrames;
+            m_MegaLightsQuadDenoiseMaxFrames = maxFrames;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsのデノイザの時間累積の上限を設定しました: " + std::to_string(maxFrames));
@@ -13014,9 +13017,14 @@ namespace Kurenai
                 denoiseConstants.Params0 = {
                     m_RenderWidth, m_RenderHeight, m_MegaLightsDenoiseHistoryValid ? 1u : 0u, pass
                 };
+                // 時間累積の上限は手法ごとに別の変数を持つ。手法3にはリザーバの履歴が
+                // 無く、デノイザだけが時間方向の記憶なので長くしてある(EngineDefaults.h)
+                const int32_t denoiseMaxFrames = (m_MegaLightsMode == MegaLightsMode::QuadShared)
+                                                     ? m_MegaLightsQuadDenoiseMaxFrames
+                                                     : m_MegaLightsDenoiseMaxFrames;
                 denoiseConstants.Params1 = {
                     stepWidth,
-                    static_cast<float>(std::max(1, m_MegaLightsDenoiseMaxFrames)),
+                    static_cast<float>(std::max(1, denoiseMaxFrames)),
                     // 輝度のエッジ停止の強さ(σ_l)。根拠は EngineDefaults.h の宣言に書いてある
                     m_MegaLightsDenoiseSigmaLuminance,
                     // 法線のエッジ停止の指数(同128)
