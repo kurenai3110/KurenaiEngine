@@ -20,8 +20,10 @@
 #include "Core/RenderGraph.h"
 #include "Core/StringUtil.h"
 #include "Diagnostics/RenderDumpService.h"
+#include "ShaderInterop/CascadeConstants.h"
 #include "ShaderInterop/FrameConstants.h"
 #include "ShaderInterop/GroupSizes.h"
+#include "ShaderInterop/MegaLightsStochasticConstants.h"
 #include "UI/UIManager.h"
 #include "UI/UITheme.h"
 
@@ -278,11 +280,9 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params2;
         };
 
-        // シャドウパスの各カスケード描画専用の定数バッファ(FrameConstantsとは別バッファ)
-        struct alignas(16) CascadeConstants
-        {
-            DirectX::XMFLOAT4X4 ViewProj;
-        };
+        // シャドウパスの各カスケード描画専用(FrameConstantsとは別バッファ)。
+        // 宣言は ShaderInterop/CascadeConstants.h に1本だけ置いている
+        using ShaderInterop::CascadeConstants;
 
         // IBLConvolve.hlsl(CSIrradiance/CSPrefilter)へ、処理対象の面(キューブマップは面ごとに
         // 個別ディスパッチが必要)とCSPrefilterのみが使うラフネス値を渡す専用の定数バッファ
@@ -1311,45 +1311,10 @@ namespace Kurenai
             DirectX::XMUINT4 Params0;
         };
 
-        // 確率的サンプリング側の cbuffer MegaLightsStochasticConstants と一致させる必要がある。
-        // 読むのは MegaLightsInitialSample.hlsl / MegaLightsTemporal.hlsl /
-        // MegaLightsSpatial.hlsl / MegaLightsShade.hlsl / MegaLightsResolve.hlsl の5本で、
-        // **宣言をどこまで書くかはファイルごとに違う**(Shade は Params2 まで)。
-        // したがって**新しい項目は必ず末尾へ足すこと**
-        struct alignas(16) MegaLightsStochasticConstants
-        {
-            // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか(0で撃たない)
-            DirectX::XMUINT4 Params0;
-            // x=候補プールの有効タイル数X(格子ジッター有効時だけ+1)、
-            // y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
-            DirectX::XMUINT4 Params1;
-            // x=借りる近傍の数, y=探す半径(ピクセル),
-            // z=空間再利用の結合方式(0=confidence重み, 1=不偏化のZ),
-            // w=初期可視レイでリザーバを殺すか(Initialが読む)。
-            // **末尾に足すこと** ―― Shade は Params1 までしか宣言していないので、
-            // 途中へ挿すとあちらのオフセットがずれる
-            DirectX::XMUINT4 Params2;
-            // x=射影行列の(0,0)成分, y=同(1,1)成分(空間再利用のMIS用。
-            // 「その灯が隣のタイルへ届くか」を判定するために隣のタイルの錐台を組み立て直す。
-            // **候補プールが使ったのと同じ行列から取ること**。ずれると定義域がずれる)、
-            // z=プリ露出の補正倍率(時間再利用用。今の露出 / 前フレームの露出)、
-            // w=履歴のMの上限(同)
-            DirectX::XMFLOAT4 Params3;
-            // x=履歴が使えるか(時間再利用用。0なら履歴を読まない。Initialは
-            //   遮蔽が確定した灯のキャッシュを信用してよいかの判定にも使う)、
-            // y=空間再利用の反復番号(0起点。近傍の型板の種に混ぜて反復ごとに別の近傍を選ばせる)、
-            // z=クアッド共有を行うか(手法3。Resolveが読む。0なら自分の標本だけを使う)、
-            // w=クアッドで候補スロットを分けて引くか(手法3の層化。Initialが読む)
-            DirectX::XMUINT4 Params4;
-            // x=1画素あたりの標本数(リザーバの本数。Initialが書きResolveが読む)。
-            // 手法3だけが1より大きくなる ―― 手法2の時間・空間再利用は
-            // 「1画素1リザーバ」を前提に添字を組み立てているため。
-            // yzw=未使用
-            DirectX::XMUINT4 Params5;
-            // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用。
-            // 書き手と全読み手で同じ値を使わないと、別タイルの候補を静かに読むため必ず末尾へ置く
-            DirectX::XMUINT4 Params6;
-        };
+        // 確率的サンプリング経路の5本のHLSLが共有する。宣言は
+        // ShaderInterop/MegaLightsStochasticConstants.h に1本だけ置き、HLSL側の
+        // 同名の .hlsli と1対1で対応させている(食い違いはあちらのstatic_assertが止める)
+        using ShaderInterop::MegaLightsStochasticConstants;
 
         // MegaLightsDenoise.hlsl側のcbuffer MegaLightsDenoiseConstantsと一致させること
         struct alignas(16) MegaLightsDenoiseConstants

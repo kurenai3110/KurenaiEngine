@@ -48,30 +48,7 @@ static const float PI = 3.14159265359f;
 
 #include "ShaderInterop/FrameConstants.hlsli"
 
-cbuffer MegaLightsStochasticConstants : register(b1)
-{
-    // x=出力幅, y=出力高, z=初期候補数M(このパスでは未使用), w=影レイを撃つか(未使用)
-    uint4 Params0;
-    // x=候補プールの有効タイル数X(格子ジッター有効時だけ+1)、
-    // y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
-    uint4 Params1;
-    // x=借りる近傍の数, y=探す半径(ピクセル),
-    // z=結合の方式(0=confidence重み, 1=不偏化のZ),
-    // w=初期可視レイでリザーバを殺すか(Initialが読む。このパスでは未使用)
-    uint4 Params2;
-    // x=射影行列の(0,0)成分, y=同(1,1)成分, zw=未使用。
-    // MIS重みが「その灯が隣のタイルへ届くか」を判定するのに、隣のタイルの錐台を組み立て直す
-    float4 Params3;
-    // x=時間再利用の履歴が有効か。可視性込みのZを使ってよいかの判定に要る(下記)、
-    // y=空間再利用の反復番号(0起点)。近傍の型板の種に混ぜて、反復ごとに別の近傍を選ばせる、
-    // zw=未使用
-    uint4 Params4;
-    // Params5はInitial/Resolveが使う1画素あたりの標本数。このパスでは未使用だが、
-    // 末尾のParams6を正しいオフセットで読むため途中を飛ばさず宣言する
-    uint4 Params5;
-    // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用
-    uint4 Params6;
-};
+#include "ShaderInterop/MegaLightsStochasticConstants.hlsli"
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
 

@@ -40,26 +40,7 @@ static const float PI = 3.14159265359f;
 
 #include "ShaderInterop/FrameConstants.hlsli"
 
-cbuffer MegaLightsStochasticConstants : register(b1)
-{
-    // x=出力幅, y=出力高, z=初期候補数M(このパスでは未使用), w=影レイを撃つか(未使用)
-    uint4 Params0;
-    // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
-    uint4 Params1;
-    // xyz=空間再利用用(未使用)、w=初期可視レイの有無(未使用)。
-    // 【途中を飛ばして宣言してはいけない】飛ばすと誤ったオフセットを読み、
-    // コンパイルは通り絵もそれらしく出るため気付けない
-    uint4 Params2;
-    // x=射影行列の(0,0)成分(未使用), y=同(1,1)成分(未使用),
-    // z=未使用(かつてプリ露出の補正倍率を入れていたが、Wは露出に不変と実測で分かった。
-    //   理由は下の「プリ露出の補正は要らない」を参照), w=履歴のMの上限
-    float4 Params3;
-    // x=履歴が使えるか(0なら履歴を読まない), yzw=未使用。
-    // 【0のときは読むこと自体をやめる】解像度が変わった直後などは、履歴バッファに
-    // 前の解像度のままの内容が残っている。RHIにバッファのクリアが無いため、
-    // 混ぜる割合を0にするだけでは足りない(添字の意味が変わっているので中身は別画素のもの)
-    uint4 Params4;
-};
+#include "ShaderInterop/MegaLightsStochasticConstants.hlsli"
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
 

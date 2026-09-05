@@ -54,24 +54,7 @@ static const float PI = 3.14159265359f;
 
 #include "ShaderInterop/FrameConstants.hlsli"
 
-cbuffer MegaLightsStochasticConstants : register(b1)
-{
-    // x=出力幅, y=出力高, z=初期候補数M(このパスでは未使用), w=影レイを撃つか
-    uint4 Params0;
-    // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
-    // (このパスでは未使用。b1 を複数パスで共有しているため並びは合わせてある)
-    uint4 Params1;
-    // xyz=空間再利用用(このパスでは未使用)、w=初期可視レイの有無
-    uint4 Params2;
-    // 空間再利用と時間再利用用(このパスでは未使用)
-    float4 Params3;
-    // x=履歴が有効か, y=空間再利用の反復番号(このパスでは未使用),
-    // z=クアッド共有を行うか(0なら自分の標本だけを使う。陽性対照で切る),
-    // w=クアッド層化(Initial が読む。このパスでは未使用)
-    uint4 Params4;
-    // x=1画素あたりの標本数(リザーバの本数)。Initial が同じ数だけ書いている
-    uint4 Params5;
-};
+#include "ShaderInterop/MegaLightsStochasticConstants.hlsli"
 
 Texture2D NormalTexture : register(t1);
 Texture2D DepthTexture : register(t2);

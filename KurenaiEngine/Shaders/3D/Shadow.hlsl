@@ -5,10 +5,7 @@
 #include "Bindless.hlsli"
 #include "Samplers.hlsli"
 
-cbuffer CascadeConstants : register(b0)
-{
-    float4x4 ViewProj;
-};
+#include "ShaderInterop/CascadeConstants.hlsli"
 
 #include "ObjectConstants.hlsli"
 
