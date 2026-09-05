@@ -8222,3 +8222,67 @@ GPU 30〜130ms のシーンがあるので、その環境では内部解像度�
 素通りしていた**ので、`ShaderInterop/FrameConstants.hlsli` を新設した時点では、
 そのファイルを直しても焼き直されず「古いバイトコードのまま起動する」ことになっていた。
 サブフォルダの `.hlsli` も基準に含めるよう直した。
+
+---
+
+## 82. 宣言を1本にしたら消せる複製が3種類あった
+
+81節でcbufferの宣言を1本にした結果、「フィールドを宣言していないシェーダーでは書けない」
+という制約が消え、同じ式の複製をそのまま共有ヘッダーへ移せるようになった。
+実際に散っていたのは次の3種類である。
+
+| 複製 | 本数 | 移した先 |
+|---|---:|---|
+| `ReconstructWorldPos` | 19 | `ShaderInterop/Common.hlsli` |
+| フルスクリーン三角形の `PSInput` + `VSMain` | 11 | `ShaderInterop/FullscreenTriangle.hlsli` |
+| `MakeSkyParameters` | 5 | `ShaderInterop/SkyFrameParameters.hlsli` |
+
+`ReconstructWorldPos` は 19 本すべてが同じ計算だったが、`const` の有無と中間変数の
+使い方だけが違う2系統に分かれていた。式が短いぶん、食い違っても目で気付きにくい。
+
+`MakeSkyParameters` は 5 本の違いが**2箇所しかなかった** —— 星空のフィールドを埋めるか
+(背景・水面の映り込み・雲パスだけ)と、雲のレイマーチ段数を上書きするか(雲パスだけ)。
+残り 20 行は完全に同じで、`DeferredLighting.hlsl` には「4つとも同時に直すこと」と
+書いてあった。違いを `KURENAI_SKY_WITH_STARS` / `KURENAI_SKY_RAYMARCH_STEPS` の
+2つのマクロへ寄せ、定義を1本にしてこの同期義務を消した。
+
+### なぜ頂点シェーダーだけ別のヘッダーなのか
+
+パッカーは `#include` を展開してからエントリポイントを走査する。フルスクリーンの
+`VSMain` を `Common.hlsli` に置くと、`ReconstructWorldPos` だけが要るコンピュート
+シェーダー(MegaLights の各パスなど)にも `VSMain` が付いて回り、使われない頂点
+シェーダーが焼かれることになる。エントリを含むヘッダーは分けてある。
+
+### スレッドグループサイズ
+
+増幅シェーダーの 32 とメッシュシェーダーの 128 は `GBufferMeshlet.hlsl` と
+`ShadowMeshlet.hlsl` が別々に `#define` しており、C++側の 32 は
+`KurenaiEngine3D.cpp` の 4 箇所に `constexpr` で書かれていた
+(うち2箇所は「GBufferMeshlet.hlslと一致させること」というコメント付き、
+残り2箇所はコメントも無い裸の 32 だった)。HLSL側を
+`ShaderInterop/GroupSizes.hlsli`、C++側を `Source/Engine/ShaderInterop/GroupSizes.h`
+の各1本にまとめた。
+
+**この2つが一致していることを機械で確かめる仕掛けは無い。** HLSLのマクロを
+C++から読めないため、`FrameConstants` の `offsetof` のようには守れない。
+片方を直したらもう片方も直す、という規約のままである。減ったのは
+「同期先が6箇所ある」状態が「1対1になった」ことだけで、そこは正直に書いておく。
+
+### 検証 —— `.kshader` が49本ともバイト単位で一致した
+
+81節と違い、この節の変更は**すべて意味を変えない移動**なので、
+焼き上がったバイトコードが変わらないはずである。実際に確かめた:
+段階4開始時点のシェーダーで焼いた `.kshader` 49本と、移動後に焼いた 49本を
+バイト比較して**全一致**(3バリアント × 259エントリ)。
+正規化DXILの比較を持ち出すまでもなく、生のバイトが同じだった。
+ベースライン比較(6構成)も `判定: 一致`。
+
+### 入れ子のインクルードは fxc と dxc で解決の基準が違う
+
+`ShaderInterop/Common.hlsli` から同じフォルダの `FrameConstants.hlsli` を
+`#include "FrameConstants.hlsli"` と書いたら、**DX11側だけが `error X1507` で落ちた。**
+`D3D_COMPILE_STANDARD_FILE_INCLUDE`(fxc)は入れ子のインクルードを
+**一番外側の `.hlsl` のフォルダ**基準で解決するのに対し、dxc は候補パスを順に
+インクルードハンドラへ渡すため通ってしまう。`ShaderInterop/` 配下のヘッダーどうしでも、
+インクルードは `.hlsl` から見たパスで書くこと。
+
