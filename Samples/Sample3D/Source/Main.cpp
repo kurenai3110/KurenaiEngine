@@ -4,6 +4,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <fstream>
@@ -359,7 +360,7 @@ namespace
             const std::string optionNameUtf8 = Kurenai::Core::WideToUtf8(optionName);
             if (i + 1 >= argc)
             {
-                Kurenai::Core::Logger::Warning(
+                Kurenai::Core::Logger::Error(
                     "Main", optionNameUtf8 + "の後に値が指定されていないため、既定のままにします");
                 break;
             }
@@ -367,7 +368,7 @@ namespace
             const double parsed = wcstod(argv[i + 1], &end);
             if (end == argv[i + 1] || (end != nullptr && *end != 0))
             {
-                Kurenai::Core::Logger::Warning(
+                Kurenai::Core::Logger::Error(
                     "Main",
                     optionNameUtf8 + "の引数が数値ではないため、既定のままにします: " +
                         Kurenai::Core::WideToUtf8(argv[i + 1]));
@@ -779,6 +780,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -probeupdate: 0=Baked、1=OnDemand、2=Realtime。
         const int probeUpdate = ParseIntOption(L"-probeupdate", kMissingValidationOption);
         const int upscale = ParseIntOption(L"-upscale", kMissingValidationOption);
+        constexpr float kMissingFixedTimeStep = (std::numeric_limits<float>::lowest)();
+        const float fixedTimeStep = ParseFloatOption(L"-fixedstep", kMissingFixedTimeStep);
         // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
         const int taa = ParseIntOption(L"-taa", -1);
         // -meshlet 0|1。メッシュレット描画の有無。切ると従来の頂点シェーダー経路へ落ち、
@@ -858,6 +861,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 else
                 {
                     engine.SetUpscaleEnabled(upscale != 0);
+                }
+            }
+            if (fixedTimeStep != kMissingFixedTimeStep)
+            {
+                if (!std::isfinite(fixedTimeStep) || fixedTimeStep <= 0.0f)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-fixedstep の値が不正です: " + std::to_string(fixedTimeStep));
+                }
+                else
+                {
+                    engine.SetFixedTimeStep(fixedTimeStep);
                 }
             }
             if (taa >= 0)

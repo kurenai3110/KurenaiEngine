@@ -269,6 +269,7 @@ namespace Kurenai
         void SetDDGIHalfResolutionEnabled(bool enabled);
         void SetProbeUpdateMode(int mode);
         void SetUpscaleEnabled(bool enabled);
+        void SetFixedTimeStep(float seconds);
 
         void SetPerfDump(const wchar_t* path, int frames);
         void SetPassManifest(const wchar_t* path, int frames);
@@ -3707,6 +3708,7 @@ namespace Kurenai
         // RenderThreadMainが書き、Render()が読む。どちらもRenderスレッドなので追加の排他は不要
         // (m_TimeOfDayと同じ扱い)
         float m_RenderDeltaTime = 0.0f;
+        float m_FixedTimeStep = 0.0f;
 
         // 統計表示用: 1フレームあたりのCPU時間(Renderの呼び出し時間)と、指数移動平均によるFPS。
         // どちらもRenderスレッドのみが書き込み、ImGui描画(同じくRenderスレッド)のみが読むため

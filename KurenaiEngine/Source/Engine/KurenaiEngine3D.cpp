@@ -4048,6 +4048,17 @@ namespace Kurenai
         Core::Logger::Info("KurenaiEngine3D", std::string("超解像を設定しました: ") + (enabled ? "有効" : "無効"));
     }
 
+    void KurenaiEngine3D::SetFixedTimeStep(float seconds)
+    {
+        if (!std::isfinite(seconds) || seconds <= 0.0f)
+        {
+            Core::Logger::Error("KurenaiEngine3D", "SetFixedTimeStep: 0以下の値は設定できません: " + std::to_string(seconds));
+            return;
+        }
+        m_FixedTimeStep = seconds;
+        Core::Logger::Info("KurenaiEngine3D", "固定タイムステップを設定しました: " + std::to_string(seconds) + " 秒");
+    }
+
     void KurenaiEngine3D::SetPerfDump(const wchar_t* path, int frames)
     {
         if (path == nullptr || path[0] == L'\0' || frames <= 0)
@@ -8928,9 +8939,11 @@ namespace Kurenai
     void KurenaiEngine3D::TickFrame()
     {
         const auto now = std::chrono::steady_clock::now();
-        const float deltaTime = std::chrono::duration<float>(now - m_LastFrameTime).count();
+        const float realDeltaTime = std::chrono::duration<float>(now - m_LastFrameTime).count();
         m_LastFrameTime = now;
 
+        // 同じフレーム番号でも実時間が異なると、アニメーションが進んで描画結果を比較できない。
+        const float deltaTime = m_FixedTimeStep > 0.0f ? m_FixedTimeStep : realDeltaTime;
         Update(deltaTime);
 
         // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/UpdateAppliedSceneHandoff)
@@ -8980,8 +8993,9 @@ namespace Kurenai
             m_FrameStateCV.notify_one();
 
             const auto now = std::chrono::steady_clock::now();
-            const float renderDeltaTime = std::chrono::duration<float>(now - m_LastRenderFrameTime).count();
+            const float realRenderDeltaTime = std::chrono::duration<float>(now - m_LastRenderFrameTime).count();
             m_LastRenderFrameTime = now;
+            const float renderDeltaTime = m_FixedTimeStep > 0.0f ? m_FixedTimeStep : realRenderDeltaTime;
             // 自動露出の時間方向の順応で使う(次フレームのRender()が読む)
             m_RenderDeltaTime = renderDeltaTime;
 
@@ -9082,13 +9096,13 @@ namespace Kurenai
             }
 
             // FPSは指数移動平均で平滑化する(生の1/deltaTimeだとフレームごとの揺れが大きく読み取りにくいため)
-            if (renderDeltaTime > 0.0f)
+            if (realRenderDeltaTime > 0.0f)
             {
-                const float instantFPS = 1.0f / renderDeltaTime;
+                const float instantFPS = 1.0f / realRenderDeltaTime;
                 m_FPS = (m_FPS == 0.0f) ? instantFPS : (m_FPS * 0.9f + instantFPS * 0.1f);
             }
 
-            LogFrameStatsIfDue(renderDeltaTime);
+            LogFrameStatsIfDue(realRenderDeltaTime);
         }
 
         if (SUCCEEDED(comResult))
