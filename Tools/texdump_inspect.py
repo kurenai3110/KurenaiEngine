@@ -548,14 +548,30 @@ def cmd_noise(args):
     print("channel  : {}  tile={}  offset={},{}".format(args.channel, args.tile, offset[0], offset[1]))
     print_noise_summary(summary, args.lit_threshold)
     if args.offset_sweep:
-        offsets = [0, args.tile // 4, args.tile // 2, (3 * args.tile) // 4]
+        # 【最大値が主役】格子をフレームごとにずらす手法を評価するとき、固定オフセットの
+        # タイル間は**必ず**下がる ―― 測る格子が相手の格子と合わなくなるだけで、
+        # 中身は何も良くなっていない。**全オフセットでの最大**なら、単なる位相のずれは
+        # どこかのオフセットで再整列するので動かず、ブロック構造が本当に壊れたときだけ下がる。
+        # 合成データで確認済み(格子固定 0.9866@(0,0) / 格子ジッタ 0.6994@(12,10)、画素stdは同等)。
+        #
+        # 刻みを粗くすると最大を取り逃がす(上の例の最大は t/4 刻みの格子に載っていない)ので、
+        # 既定では全オフセットを見る。--sweep-step で粗くできるが、そのときは最大が
+        # 下振れしうることを承知して使うこと。
+        step = max(1, args.sweep_step)
+        offsets = list(range(0, args.tile, step))
         sweep = []
+        best = None
         for y in offsets:
             for x in offsets:
                 result = summarize_noise(values, args.tile, (y, x))
-                sweep.append(noise_percentiles(result["between_std"])[0])
-        print("offset-sweep（タイル間median、16通り）: min={} median={} max={}".format(
-            format_float(np.nanmin(sweep)), format_float(np.nanmedian(sweep)), format_float(np.nanmax(sweep))))
+                value = noise_percentiles(result["between_std"])[0]
+                sweep.append(value)
+                if best is None or value > best[0]:
+                    best = (value, (y, x))
+        print("offset-sweep（タイル間median、{}通り / 刻み{}）: min={} median={} max={} at offset {},{}".format(
+            len(sweep), step, format_float(np.nanmin(sweep)), format_float(np.nanmedian(sweep)),
+            format_float(best[0]), best[1][0], best[1][1]))
+        print("  ← 格子をずらす手法の評価には **max** を使うこと(固定オフセットの値は位相で下がる)")
     return 0
 
 
@@ -1608,6 +1624,66 @@ def cmd_selftest(args):
               control_between < control_inner * 0.2,
               "タイル間 {:.6g} / タイル内 {:.6g}".format(control_between, control_inner))
 
+        # --- 10. 全オフセットの最大は「位相のずれ」で動かず、「格子を壊した」ときだけ下がる ---
+        #
+        # 【なぜこの対照が要るか】タイル格子をフレームごとにずらす手法を、固定オフセットの
+        # タイル間で評価すると**必ず改善して見える**。測る格子が相手と合わなくなるだけで、
+        # 中身は何も良くなっていない。評価に使う統計量が、位相のずれでは動かないことを
+        # 先に示しておく。示さずに掃引すると、物差しの側で外す。
+        print("10. 全オフセット最大は位相不変で、格子を壊したときだけ下がる")
+        # 【厳密な不変ではなく、端の欠けぶんだけずれる】オフセットを付けると完全なタイルの数が
+        # 減る(例: 64画素幅・タイル16なら 4個 → 3個)ため、中央値を取る母集団が変わる。
+        # 画像が小さいとこの影響が大きく出るので、端の欠けが相対的に小さい寸法で確かめる
+        tile10 = 16
+        size10 = 128
+        frames10 = 32
+        rng10 = np.random.default_rng(20260906)
+
+        def planted_series(jitter):
+            """タイル共通の成分を持つ系列。jitter=Trueならフレームごとに格子をずらす"""
+            out = []
+            for _ in range(frames10):
+                coarse = rng10.normal(0.0, 0.05, size=(size10 // tile10 + 2, size10 // tile10 + 2))
+                big = np.repeat(np.repeat(coarse, tile10, axis=0), tile10, axis=1)
+                if jitter:
+                    oy, ox = int(rng10.integers(0, tile10)), int(rng10.integers(0, tile10))
+                else:
+                    oy, ox = 0, 0
+                out.append(big[oy:oy + size10, ox:ox + size10]
+                           + rng10.normal(0.0, 0.01, size=(size10, size10)))
+            return np.asarray(out, dtype=np.float64)
+
+        def sweep_max(series):
+            best = -1.0
+            for oy in range(tile10):
+                for ox in range(tile10):
+                    value = noise_percentiles(summarize_noise(series, tile10, (oy, ox))["between_std"])[0]
+                    if value > best:
+                        best = value
+            return best
+
+        fixed_series = planted_series(False)
+        fixed_max = sweep_max(fixed_series)
+        # 全フレームを同じだけずらす = 純粋な位相のずれ。最大は動いてはいけない
+        shifted_max = sweep_max(np.roll(fixed_series, (5, 7), axis=(1, 2)))
+        jitter_series = planted_series(True)
+        jitter_max = sweep_max(jitter_series)
+
+        # 端のタイルが欠けるぶんだけ母集団が変わるので、厳密な不変にはならない。
+        # ジッタの効き(下の -15%以上)とは桁が違うことが要点
+        check("純粋な位相のずれでは全オフセット最大がほぼ動かない(相対3%以内)",
+              abs(shifted_max - fixed_max) / fixed_max < 0.03,
+              "固定 {:.6g} / 平行移動後 {:.6g}".format(fixed_max, shifted_max))
+        check("フレームごとに格子を振ると全オフセット最大が下がる",
+              jitter_max < fixed_max * 0.85,
+              "固定 {:.6g} / ジッタ {:.6g}".format(fixed_max, jitter_max))
+        # ジッタは「1枚あたりのノイズ量」を減らす手法ではない。総量が変わっていないことも見る
+        fixed_pixel = np.median(np.std(fixed_series, axis=0, ddof=1))
+        jitter_pixel = np.median(np.std(jitter_series, axis=0, ddof=1))
+        check("ジッタは画素ごとの時間stdの総量を変えない(相対20%以内)",
+              abs(jitter_pixel - fixed_pixel) / fixed_pixel < 0.2,
+              "固定 {:.6g} / ジッタ {:.6g}".format(fixed_pixel, jitter_pixel))
+
     print("")
     if failures:
         print("selftest: {} 件中 {} 件が失敗".format(checks, len(failures)))
@@ -1689,7 +1765,10 @@ def main(argv):
     p.add_argument("paths", nargs="+", help="連番のパスまたはglob（3枚以上）")
     p.add_argument("--tile", type=int, default=16, help="完全タイルの一辺（既定16）")
     p.add_argument("--offset", default="0,0", help="Y,X でタイル格子をずらす（既定0,0）")
-    p.add_argument("--offset-sweep", action="store_true", help="0,1/4,1/2,3/4 tile の16格子を比較する")
+    p.add_argument("--offset-sweep", action="store_true",
+                   help="格子オフセットを全通り振り、タイル間の min/median/max を出す(評価に使うのは max)")
+    p.add_argument("--sweep-step", type=int, default=1,
+                   help="--offset-sweep の刻み(既定1=全オフセット)。粗くすると最大を取り逃がす")
     p.add_argument("--channel", default="luma", choices=["rgba", "r", "g", "b", "a", "luma"])
     p.add_argument("--lit-threshold", type=float, default=1e-4, help="時間平均がこれ以下のタイルを別集計する")
     p.set_defaults(func=cmd_noise)
