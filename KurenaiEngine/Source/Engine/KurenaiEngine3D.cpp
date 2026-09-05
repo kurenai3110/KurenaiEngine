@@ -2392,14 +2392,14 @@ namespace Kurenai
                 swRasterIndirectArgsDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
                 m_SoftwareRasterIndirectArgsBuffer = m_Device->CreateBuffer(swRasterIndirectArgsDesc);
 
-                m_SoftwareRasterAvailable = true;
+                m_RenderCapabilities.SoftwareRasterAvailable = true;
             }
             catch (const std::exception& e)
             {
                 Core::Logger::Warning(
                     "KurenaiEngine3D",
                     std::string("ソフトウェアラスタライザの初期化に失敗したため無効にします: ") + e.what());
-                m_SoftwareRasterAvailable = false;
+                m_RenderCapabilities.SoftwareRasterAvailable = false;
                 m_SoftwareRasterComputeShader.reset();
                 m_SoftwareRasterLargeComputeShader.reset();
                 m_SoftwareRasterResolveComputeShader.reset();
@@ -2524,16 +2524,16 @@ namespace Kurenai
         // RT反射パス(コンピュートシェーダー。TLASへ鏡面レイを撃ち反射色を求める)。
         // RTReflection.hlslはRayQueryを含むためシェーダーモデル6.5でしかコンパイルできない。
         // 非対応環境ではシェーダー自体を作らず、UIからもRaytracedを選べないようにする
-        m_RaytracingAvailable = m_Device->SupportsRaytracing();
+        m_RenderCapabilities.RaytracingAvailable = m_Device->SupportsRaytracing();
         // メッシュシェーダーの可否もここで控える(UIパネルが参照する)
-        m_MeshShaderAvailable = m_Device->SupportsMeshShader();
+        m_RenderCapabilities.MeshShaderAvailable = m_Device->SupportsMeshShader();
         // bindless区画の容量も同じ理由でここへ控える(使用数はフレームごとに更新する)
-        m_BindlessCapacity = m_Device->GetBindlessCapacity();
+        m_RenderStats.BindlessCapacity = m_Device->GetBindlessCapacity();
 
         // メッシュレットカリングの統計(Stage 5-2)。増幅シェーダーがカウンタへ数え上げ、
         // それを数フレーム遅れでCPUへ読み戻してPerfログへ出す。
         // 増幅シェーダーが走らない環境では一切使わないので、そもそも作らない
-        if (m_MeshShaderAvailable)
+        if (m_RenderCapabilities.MeshShaderAvailable)
         {
             try
             {
@@ -2585,7 +2585,7 @@ namespace Kurenai
         //
         // 【メッシュレット経路が使えるときだけ作る】判定結果の行き先(ExecuteIndirect)も、
         // 判定に使うHi-Zも、メッシュシェーダー経路の話でしか意味を持たない
-        if (m_MeshShaderAvailable)
+        if (m_RenderCapabilities.MeshShaderAvailable)
         {
             try
             {
@@ -2635,7 +2635,7 @@ namespace Kurenai
             }
         }
 
-        if (m_RaytracingAvailable)
+        if (m_RenderCapabilities.RaytracingAvailable)
         {
             RHI::ShaderDesc rtReflectionCsDesc;
             rtReflectionCsDesc.Stage = RHI::ShaderStage::Compute;
@@ -2839,7 +2839,7 @@ namespace Kurenai
                 ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
                 m_DDGITraceConstantBuffer = m_Device->CreateBuffer(ddgiTraceConstantBufferDesc);
 
-                m_DDGIRaytracedTraceAvailable = true;
+                m_RenderCapabilities.DDGIRaytracedTraceAvailable = true;
             }
             catch (const std::exception& e)
             {
@@ -2848,7 +2848,7 @@ namespace Kurenai
                 m_DDGIProbeTracePipelineState.reset();
                 m_DDGIProbeTraceComputeShader.reset();
                 m_DDGITraceConstantBuffer.reset();
-                m_DDGIRaytracedTraceAvailable = false;
+                m_RenderCapabilities.DDGIRaytracedTraceAvailable = false;
                 Core::Logger::Error(
                     "KurenaiEngine3D",
                     std::string("DDGIのレイ取得(DXR)を用意できませんでした。ラスタライズ経路で動作します"
@@ -2857,11 +2857,11 @@ namespace Kurenai
 
             // レイトレーシングが使える環境ではDDGIのレイ取得も既定でDXRにする。
             // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
-            m_DDGISettings.RayMode = DDGISettings::DDGIRayModeForCapability(m_DDGIRaytracedTraceAvailable);
+            m_DDGISettings.RayMode = DDGISettings::DDGIRayModeForCapability(m_RenderCapabilities.DDGIRaytracedTraceAvailable);
 
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                m_DDGIRaytracedTraceAvailable
+                m_RenderCapabilities.DDGIRaytracedTraceAvailable
                     ? "レイトレーシングを利用できます(反射・シャドウ・AO/GI・DDGIでRaytracedを選択可能)"
                     : "レイトレーシングを利用できます(反射・シャドウ・AOでRaytracedを選択可能。DDGIのレイ取得は"
                       "ラスタライズのみ)");
@@ -3894,7 +3894,7 @@ namespace Kurenai
             Core::Logger::Info(
                 "KurenaiEngine3D", "MegaLightsの手法を番号で選択しました: " + std::to_string(mode));
 
-            if (m_MegaLightsSettings.Mode != MegaLightsMode::Off && !m_RaytracingAvailable)
+            if (m_MegaLightsSettings.Mode != MegaLightsMode::Off && !m_RenderCapabilities.RaytracingAvailable)
             {
                 // 黙って何も起きないと「効かないバグ」に見えるので、必ず理由を残す
                 Core::Logger::Warning(
@@ -5025,7 +5025,7 @@ namespace Kurenai
                 m_DDGIResolveWidth, m_DDGIResolveHeight, RHI::Format::R32_Float);
             // RT反射はコンピュートシェーダーがUAVで書くため、レンダーターゲットではなくUAVテクスチャを作る。
             // 非対応環境ではパス自体が実行されないので確保しない
-            if (m_RaytracingAvailable)
+            if (m_RenderCapabilities.RaytracingAvailable)
             {
                 m_RTReflectionTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);
                 // RTシャドウの可視率(0〜1のスカラー)。RWTexture2D<float>として書くため単チャンネルの
@@ -5091,7 +5091,7 @@ namespace Kurenai
 
             // MegaLightsの候補プール。タイルの切り方はライトグリッドと同じで、1タイルあたりの
             // 要素数だけが違う。非対応環境ではパス自体が走らないので確保しない
-            if (m_RaytracingAvailable)
+            if (m_RenderCapabilities.RaytracingAvailable)
             {
                 RHI::BufferDesc tilePoolBufferDesc;
                 tilePoolBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
@@ -5186,7 +5186,7 @@ namespace Kurenai
             // (DX12はSetPipelineStateのたびにルート引数が無効化されるため、シェーダが
             // 宣言しているリソースを未バインドのままDrawできない)
             {
-                const uint32_t accumElements = m_RaytracingAvailable ? (width * height) : 1u;
+                const uint32_t accumElements = m_RenderCapabilities.RaytracingAvailable ? (width * height) : 1u;
                 RHI::BufferDesc accumBufferDesc;
                 accumBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
                 accumBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(float) * 4) * accumElements;
@@ -5233,7 +5233,7 @@ namespace Kurenai
             // 【内側で捕まえる】ここが落ちてもエンジン全体を止める理由が無い比較用の機能なので、
             // 外側のLegacy8bitフォールバックへ持ち出さず、この機能だけ無効化して続行する
             // (フォールバックしたところでVRAM不足は解決しない。m_PlanarReflectionColorと同じ判断)
-            if (m_SoftwareRasterAvailable)
+            if (m_RenderCapabilities.SoftwareRasterAvailable)
             {
                 try
                 {
@@ -5259,7 +5259,7 @@ namespace Kurenai
                         "KurenaiEngine3D",
                         std::string("ソフトウェアラスタライザのリソース作成に失敗したため無効にします (") +
                             std::to_string(width) + "x" + std::to_string(height) + "): " + e.what());
-                    m_SoftwareRasterAvailable = false;
+                    m_RenderCapabilities.SoftwareRasterAvailable = false;
                     m_SoftwareRasterVisibilityBuffer.reset();
                     m_SoftwareRasterColor.reset();
                     m_SoftwareRasterDepth.reset();
@@ -6920,7 +6920,7 @@ namespace Kurenai
     void KurenaiEngine3D::UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds)
     {
         m_LODSwitchCount = 0;
-        m_LODFadingCount = 0;
+        m_RenderStats.LODFadingCount = 0;
 
         if (m_InstanceLODStates.size() != m_Scene.Instances.size())
         {
@@ -6990,7 +6990,7 @@ namespace Kurenai
 
             if (state.FadeT < 1.0f)
             {
-                ++m_LODFadingCount;
+                ++m_RenderStats.LODFadingCount;
             }
 
             // 常駐マップ(StreamingPanel)が色分けに使う。ここが唯一の書き込み元
@@ -7868,7 +7868,7 @@ namespace Kurenai
         m_SkySettings.SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
         // .ksceneが持つのは「影を出すか」の真偽値だけなので、手法の選択はエンジン側で決める
         // (反射のm_ReflectionSettings.Modeと同じ扱い)。規則はDefaultShadowModeに1か所だけ置いてある
-        m_ShadowSettings.Mode = m_Scene.ShadowEnabled ? ShadowSettings::DefaultShadowMode(m_RaytracingAvailable) : ShadowMode::Off;
+        m_ShadowSettings.Mode = m_Scene.ShadowEnabled ? ShadowSettings::DefaultShadowMode(m_RenderCapabilities.RaytracingAvailable) : ShadowMode::Off;
         m_SkySettings.SunEnabled = m_Scene.SunEnabled;
         m_AmbientOcclusionSettings.Enabled = m_Scene.AOEnabled;
         // .ksceneが持つのは「反射を使うか」の真偽値だけなので、手法の選択はエンジン側で決める。
@@ -7879,8 +7879,8 @@ namespace Kurenai
         // 区別せずに「= true」のときもエンジンの既定へ問い合わせ直すと、DX11ではシーンの指定が
         // 握り潰されて反射が出なくなる(両関数のコメント参照)
         m_ReflectionSettings.Mode = m_Scene.HasSSREnabledOverride
-            ? (m_Scene.SSREnabled ? ReflectionSettings::ReflectionModeForCapability(m_RaytracingAvailable) : ReflectionMode::Off)
-            : ReflectionSettings::DefaultReflectionMode(m_RaytracingAvailable);
+            ? (m_Scene.SSREnabled ? ReflectionSettings::ReflectionModeForCapability(m_RenderCapabilities.RaytracingAvailable) : ReflectionMode::Off)
+            : ReflectionSettings::DefaultReflectionMode(m_RenderCapabilities.RaytracingAvailable);
         // UIの「既定値に戻す」はエンジンの既定ではなくここへ戻す(m_SceneDefaultReflectionMode参照)
         m_SceneDefaultReflectionMode = m_ReflectionSettings.Mode;
         // TAAと内部レンダー解像度。どちらも反射と同じく「キーを書いたシーンだけ」上書きし、
@@ -8055,7 +8055,7 @@ namespace Kurenai
                         std::to_string(m_Scene.Instances.size()) + "個");
             }
         }
-        m_EmissiveLightsUsedCount = 0;
+        m_RenderStats.EmissiveLightsUsedCount = 0;
         m_EmissiveLightsCapLogged = false;
         m_EmissiveLightsValuesLogged = false;
         // Rangeの上限。自発光の強度を上げたときにRangeが数kmまで伸びて、タイルカリングが
@@ -9097,7 +9097,7 @@ namespace Kurenai
             // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく
             // GPU側の処理時間の反映なので差し引く(DX11は常に0が返るため影響しない)
             const float rawCPUTimeMs = std::chrono::duration<float, std::milli>(cpuEnd - cpuStart).count();
-            m_CPUFrameTimeMs = std::max(0.0f, rawCPUTimeMs - m_Device->GetLastFrameGPUWaitTimeMs());
+            m_RenderStats.CPUFrameTimeMs = std::max(0.0f, rawCPUTimeMs - m_Device->GetLastFrameGPUWaitTimeMs());
 
             // 固定FPSモード: このフレームの処理(Time of Day更新+Render+Present)が目標フレーム時間
             // より短く終わった場合、余った時間だけ待機して間隔を揃える。CPU/GPU計測(上記)の後に
@@ -9117,7 +9117,7 @@ namespace Kurenai
             if (realRenderDeltaTime > 0.0f)
             {
                 const float instantFPS = 1.0f / realRenderDeltaTime;
-                m_FPS = (m_FPS == 0.0f) ? instantFPS : (m_FPS * 0.9f + instantFPS * 0.1f);
+                m_RenderStats.FPS = (m_RenderStats.FPS == 0.0f) ? instantFPS : (m_RenderStats.FPS * 0.9f + instantFPS * 0.1f);
             }
 
             LogFrameStatsIfDue(realRenderDeltaTime);
@@ -9147,14 +9147,14 @@ namespace Kurenai
         }
 
         ++m_FrameStatsFrameCount;
-        m_FrameStatsCPUTimeSumMs += m_CPUFrameTimeMs;
+        m_FrameStatsCPUTimeSumMs += m_RenderStats.CPUFrameTimeMs;
         m_FrameStatsGPUTimeSumMs += m_GPUProfiler ? m_GPUProfiler->GetTotalFrameTimeMs() : 0.0f;
         m_FrameStatsGPUWaitSumMs += m_Device->GetLastFrameGPUWaitTimeMs();
         m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
         m_FrameStatsCullTestedSum += m_FrustumCullTested;
         m_FrameStatsCullCulledSum += m_FrustumCullCulled;
         m_FrameStatsLODSwitchSum += m_LODSwitchCount;
-        m_FrameStatsLODFadingSum += m_LODFadingCount;
+        m_FrameStatsLODFadingSum += m_RenderStats.LODFadingCount;
         m_FrameStatsMeshCullTestedSum += m_MeshCullTested;
         m_FrameStatsMeshCullCulledSum += m_MeshCullCulled;
         m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
@@ -9169,7 +9169,7 @@ namespace Kurenai
             return;
         }
 
-        // 集計期間の実測フレーム数から求める。m_FPS(指数移動平均)と違い、この値は
+        // 集計期間の実測フレーム数から求める。m_RenderStats.FPS(指数移動平均)と違い、この値は
         // 期間中に落ちたフレームがそのまま反映される
         const float averageFPS = static_cast<float>(m_FrameStatsFrameCount) / std::max(elapsedSeconds, 1e-6f);
         const double frameCount = static_cast<double>(m_FrameStatsFrameCount);
@@ -9667,10 +9667,10 @@ namespace Kurenai
         //
         // 【0に戻す前に前フレームの値を控える】ドローコール数と同じ理由で、UIパネルは
         // Renderの外で描かれるため現在のカウンタを読むと必ずリセット直後の0になる
-        m_FrustumCullTestedLastFrame = m_FrustumCullTested;
-        m_FrustumCullCulledLastFrame = m_FrustumCullCulled;
-        m_MeshCullTestedLastFrame = m_MeshCullTested;
-        m_MeshCullCulledLastFrame = m_MeshCullCulled;
+        m_RenderStats.FrustumCullTestedLastFrame = m_FrustumCullTested;
+        m_RenderStats.FrustumCullCulledLastFrame = m_FrustumCullCulled;
+        m_RenderStats.MeshCullTestedLastFrame = m_MeshCullTested;
+        m_RenderStats.MeshCullCulledLastFrame = m_MeshCullCulled;
         m_FrustumCullTested = 0;
         m_FrustumCullCulled = 0;
         m_MeshCullTested = 0;
@@ -9680,16 +9680,16 @@ namespace Kurenai
         // 【0に戻す前に前フレームの値を控える】UIパネルはRenderの外で描かれるため、
         // 現在のカウンタを読むと必ずリセット直後の0になる(実際にそう表示されていた)。
         // 完成した最後のフレームの値を別に持たせる
-        m_DrawCallsGBufferLastFrame = m_DrawCallsGBuffer;
-        m_DrawCallsShadowLastFrame = m_DrawCallsShadow;
-        m_DrawCallsDepthPrepassLastFrame = m_DrawCallsDepthPrepass;
+        m_RenderStats.DrawCallsGBufferLastFrame = m_DrawCallsGBuffer;
+        m_RenderStats.DrawCallsShadowLastFrame = m_DrawCallsShadow;
+        m_RenderStats.DrawCallsDepthPrepassLastFrame = m_DrawCallsDepthPrepass;
         m_DrawCallsGBuffer = 0;
         m_DrawCallsShadow = 0;
         m_DrawCallsDepthPrepass = 0;
         // bindless区画の使用数を控える(UIパネルは m_Device へ直接触れないため。
-        // m_MeshShaderAvailable と同じ扱い)。登録はシーン読み込み時にしか起きないので、
+        // m_RenderCapabilities.MeshShaderAvailable と同じ扱い)。登録はシーン読み込み時にしか起きないので、
         // フレームごとに1回問い合わせるだけで足りる
-        m_BindlessUsedCount = m_Device ? m_Device->GetBindlessUsedCount() : 0;
+        m_RenderStats.BindlessUsedCount = m_Device ? m_Device->GetBindlessUsedCount() : 0;
 
         // WM_SIZE(Updateスレッド)が記録しておいたリサイズ要求を、スワップチェーンを実際に使う
         // このスレッドで反映する。このフレームのGPUコマンドをまだ1つも積んでいないこの位置で
@@ -10126,7 +10126,7 @@ namespace Kurenai
         //
         // 【毎フレーム作り直す】m_EmissiveLightSettings.Intensity のスライダーとτを即座に反映するため。
         // プロキシ側は倍率も露出も持たない値(RadianceBase)で保持してある
-        m_EmissiveLightsUsedCount = 0;
+        m_RenderStats.EmissiveLightsUsedCount = 0;
         // 切り捨てが起きたときだけ、採用した集合の指紋を残す(起きなければ0のまま)。
         //
         // 【プローブの署名に要る】採用順はカメラからの照度で決まるので、**カメラを動かすだけで
@@ -10223,12 +10223,12 @@ namespace Kurenai
                     m_EmissiveLightsCapLogged = true;
                 }
             }
-            m_EmissiveLightsUsedCount = static_cast<uint32_t>(gpuLights.size() - manualLightCount);
+            m_RenderStats.EmissiveLightsUsedCount = static_cast<uint32_t>(gpuLights.size() - manualLightCount);
 
             // 【「効いていない」と「暗すぎて見えない」を切り分けられるようにする】
             // 絵の差だけを見ていると、経路が走っていないのか寄与が小さいだけなのかが分からない。
             // 実際に送った灯数と、代表1灯の強さ・Range・κ を1回だけ出す
-            if (!m_EmissiveLightsValuesLogged && m_EmissiveLightsUsedCount > 0)
+            if (!m_EmissiveLightsValuesLogged && m_RenderStats.EmissiveLightsUsedCount > 0)
             {
                 const GPULight& sample = gpuLights[manualLightCount];
                 // 【RGBの最大を出す。Rだけを出さない】Rangeはmax(R,G,B)から解いているので、
@@ -10237,7 +10237,7 @@ namespace Kurenai
                     std::max({ sample.ColorRange.x, sample.ColorRange.y, sample.ColorRange.z });
                 Core::Logger::Info(
                     "KurenaiEngine3D",
-                    "エミッシブ光源を送信: " + std::to_string(m_EmissiveLightsUsedCount) + "灯(手置き " +
+                    "エミッシブ光源を送信: " + std::to_string(m_RenderStats.EmissiveLightsUsedCount) + "灯(手置き " +
                         std::to_string(manualLightCount) + "灯) / 先頭の灯 強さ(RGBの最大) " +
                         std::to_string(samplePeak) + " Range " + std::to_string(sample.ColorRange.w) +
                         "m 半径 " + std::to_string(sample.Params.z) + "m κ " + std::to_string(sample.Params.w));
@@ -13642,7 +13642,7 @@ namespace Kurenai
         // 【なぜハードウェアと比べられるのか】GBufferパスとまったく同じjitteredProjを渡すため、
         // 深度は丸め誤差とフィルルールの差を除いて一致するはず。差が面全体に出たら
         // 座標変換の間違いで、シルエットの±1画素ならフィルルールの差(想定内)
-        const bool softwareRasterPassRuns = m_GeometrySettings.SoftwareRasterEnabled && m_SoftwareRasterAvailable &&
+        const bool softwareRasterPassRuns = m_GeometrySettings.SoftwareRasterEnabled && m_RenderCapabilities.SoftwareRasterAvailable &&
                                             m_SoftwareRasterVisibilityBuffer && !m_Scene.Instances.empty();
         if (softwareRasterPassRuns)
         {
@@ -16606,13 +16606,13 @@ namespace Kurenai
             if (m_MeshletCullStatsReadback[oldestIndex] &&
                 m_MeshletCullStatsReadback[oldestIndex]->ReadbackData(counters, sizeof(counters)))
             {
-                m_MeshletCullTested = counters[0];
-                m_MeshletCullFrustumCulled = counters[1];
-                m_MeshletCullOcclusionCulled = counters[2];
+                m_RenderStats.MeshletCullTested = counters[0];
+                m_RenderStats.MeshletCullFrustumCulled = counters[1];
+                m_RenderStats.MeshletCullOcclusionCulled = counters[2];
 
-                m_FrameStatsMeshletTestedSum += m_MeshletCullTested;
-                m_FrameStatsMeshletFrustumCulledSum += m_MeshletCullFrustumCulled;
-                m_FrameStatsMeshletOcclusionCulledSum += m_MeshletCullOcclusionCulled;
+                m_FrameStatsMeshletTestedSum += m_RenderStats.MeshletCullTested;
+                m_FrameStatsMeshletFrustumCulledSum += m_RenderStats.MeshletCullFrustumCulled;
+                m_FrameStatsMeshletOcclusionCulledSum += m_RenderStats.MeshletCullOcclusionCulled;
                 ++m_FrameStatsMeshletSampleCount;
             }
             m_MeshletCullStatsRingIndex = (m_MeshletCullStatsRingIndex + 1) % kMeshletCullStatsRingSize;
@@ -16621,9 +16621,9 @@ namespace Kurenai
         {
             // 統計を切っている間に古い値が残っていると、UIやログが「今もこの数だけ間引いている」
             // ように見える。切った時点で0へ戻す
-            m_MeshletCullTested = 0;
-            m_MeshletCullFrustumCulled = 0;
-            m_MeshletCullOcclusionCulled = 0;
+            m_RenderStats.MeshletCullTested = 0;
+            m_RenderStats.MeshletCullFrustumCulled = 0;
+            m_RenderStats.MeshletCullOcclusionCulled = 0;
         }
 
         // --- モデル単位のGPUカリングの結果を読み戻す(Stage 5-3) ---

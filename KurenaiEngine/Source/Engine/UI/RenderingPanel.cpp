@@ -187,7 +187,7 @@ namespace Kurenai::UI
             "有効なあいだ直接光パスのライトループは止まり、この結果がそのまま使われる。"
             "太陽は対象外で、従来どおりCSMかRTシャドウが担当する");
 
-        const bool rtAvailable = m_Engine.m_RaytracingAvailable;
+        const bool rtAvailable = m_Engine.m_RenderCapabilities.RaytracingAvailable;
         if (!rtAvailable)
         {
             ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
@@ -514,7 +514,7 @@ namespace Kurenai::UI
         else
         {
             ImGui::Text("モデルLOD: 対象 %u インスタンス / フェード中 %u", lodCapableCount,
-                        m_Engine.m_LODFadingCount);
+                        m_Engine.m_RenderStats.LODFadingCount);
             for (uint32_t level = 0; level < Assets::kMaxModelLODCount; ++level)
             {
                 if (levelCounts[level] > 0)
@@ -552,7 +552,7 @@ namespace Kurenai::UI
             "タイルドライトカリングと同じく純粋な最適化であり、"
             "有効/無効で最終画像が変わってはならない");
 
-        if (!m_Engine.m_MeshShaderAvailable)
+        if (!m_Engine.m_RenderCapabilities.MeshShaderAvailable)
         {
             // 非対応環境(DX11、メッシュシェーダーTier 1未満、bindless非対応)。
             // 影・反射の手法選択と同じく、選べないものは操作させずに理由だけ示す
@@ -754,12 +754,12 @@ namespace Kurenai::UI
         // ResourceDescriptorHeap経由で引くため、ここが満杯だと**エラーログ1行だけを残して
         // 白1x1で描かれる**(RegisterBindlessは例外を投げない)。
         // 「なぜかこのモデルだけ真っ白」で気づく前に見えるようにしておく
-        if (m_Engine.m_BindlessCapacity > 0)
+        if (m_Engine.m_RenderStats.BindlessCapacity > 0)
         {
             ImGui::Text(
-                "bindless: %u / %u (%.1f%%)", m_Engine.m_BindlessUsedCount, m_Engine.m_BindlessCapacity,
-                100.0f * static_cast<float>(m_Engine.m_BindlessUsedCount)
-                    / static_cast<float>(m_Engine.m_BindlessCapacity));
+                "bindless: %u / %u (%.1f%%)", m_Engine.m_RenderStats.BindlessUsedCount, m_Engine.m_RenderStats.BindlessCapacity,
+                100.0f * static_cast<float>(m_Engine.m_RenderStats.BindlessUsedCount)
+                    / static_cast<float>(m_Engine.m_RenderStats.BindlessCapacity));
         }
 
         if (meshCount > 0 && meshletMeshCount == 0)
@@ -774,16 +774,16 @@ namespace Kurenai::UI
         // 別に出す(俯瞰と街路で差が出ることが、判定が効いていることの証拠になる)
         if (m_Engine.m_GeometrySettings.MeshletCullStatsEnabled)
         {
-            const uint32_t tested = m_Engine.m_MeshletCullTested;
+            const uint32_t tested = m_Engine.m_RenderStats.MeshletCullTested;
             if (tested > 0)
             {
-                const float frustumPercent = 100.0f * static_cast<float>(m_Engine.m_MeshletCullFrustumCulled) /
+                const float frustumPercent = 100.0f * static_cast<float>(m_Engine.m_RenderStats.MeshletCullFrustumCulled) /
                                              static_cast<float>(tested);
-                const float occlusionPercent = 100.0f * static_cast<float>(m_Engine.m_MeshletCullOcclusionCulled) /
+                const float occlusionPercent = 100.0f * static_cast<float>(m_Engine.m_RenderStats.MeshletCullOcclusionCulled) /
                                                static_cast<float>(tested);
                 ImGui::Text("判定 %u", tested);
-                ImGui::Text("  視錐台+コーン %u (%.1f%%)", m_Engine.m_MeshletCullFrustumCulled, frustumPercent);
-                ImGui::Text("  オクルージョン %u (%.1f%%)", m_Engine.m_MeshletCullOcclusionCulled, occlusionPercent);
+                ImGui::Text("  視錐台+コーン %u (%.1f%%)", m_Engine.m_RenderStats.MeshletCullFrustumCulled, frustumPercent);
+                ImGui::Text("  オクルージョン %u (%.1f%%)", m_Engine.m_RenderStats.MeshletCullOcclusionCulled, occlusionPercent);
             }
             else
             {
@@ -802,7 +802,7 @@ namespace Kurenai::UI
             "明示的なコードとして持ち、G-Bufferと直接突き合わせられるようにするためのもの。"
             "既存の描画経路には一切寄与せず、結果はデバッグ表示でのみ見る");
 
-        if (!m_Engine.m_SoftwareRasterAvailable)
+        if (!m_Engine.m_RenderCapabilities.SoftwareRasterAvailable)
         {
             // 非対応環境(DX11、SM 6.6未満、Int64ShaderOps非対応、bindless非対応)、
             // あるいはシェーダー/リソースの作成に失敗した場合。
@@ -910,7 +910,7 @@ namespace Kurenai::UI
         };
         static const char* kTechniqueNamesWithoutRT[] = { "SSAO", "SSIL (Visibility Bitmask)" };
 
-        const bool rtAvailable = m_Engine.m_RaytracingAvailable;
+        const bool rtAvailable = m_Engine.m_RenderCapabilities.RaytracingAvailable;
         const char* const* techniqueNames = rtAvailable ? kTechniqueNamesWithRT : kTechniqueNamesWithoutRT;
         const int techniqueCount =
             rtAvailable ? IM_ARRAYSIZE(kTechniqueNamesWithRT) : IM_ARRAYSIZE(kTechniqueNamesWithoutRT);
@@ -1021,7 +1021,7 @@ namespace Kurenai::UI
         };
         static const char* kModeNamesWithoutRT[] = { "なし", "カスケードシャドウマップ (CSM)" };
 
-        const bool rtAvailable = m_Engine.m_RaytracingAvailable;
+        const bool rtAvailable = m_Engine.m_RenderCapabilities.RaytracingAvailable;
         const char* const* modeNames = rtAvailable ? kModeNamesWithRT : kModeNamesWithoutRT;
         const int modeCount = rtAvailable ? IM_ARRAYSIZE(kModeNamesWithRT) : IM_ARRAYSIZE(kModeNamesWithoutRT);
 
@@ -1226,9 +1226,9 @@ namespace Kurenai::UI
         static const char* kDDGIRayModeNamesWithRT[] = { "ラスタライズ", "レイトレーシング (DXR)" };
         static const char* kDDGIRayModeNamesWithoutRT[] = { "ラスタライズ" };
 
-        // m_RaytracingAvailableではなくこちらを見る。DDGIのレイ取得CSだけはSM 6.6を要求するため、
-        // 他のRTパスが使えてもここだけ作れない環境がある(m_DDGIRaytracedTraceAvailableの宣言参照)
-        const bool ddgiRtAvailable = m_Engine.m_DDGIRaytracedTraceAvailable;
+        // m_Engine.m_RenderCapabilities.RaytracingAvailableではなくこちらを見る。DDGIのレイ取得CSだけはSM 6.6を要求するため、
+        // 他のRTパスが使えてもここだけ作れない環境がある(RenderCapabilities::DDGIRaytracedTraceAvailableの宣言参照)
+        const bool ddgiRtAvailable = m_Engine.m_RenderCapabilities.DDGIRaytracedTraceAvailable;
         const char* const* ddgiRayModeNames = ddgiRtAvailable ? kDDGIRayModeNamesWithRT : kDDGIRayModeNamesWithoutRT;
         const int ddgiRayModeCount =
             ddgiRtAvailable ? IM_ARRAYSIZE(kDDGIRayModeNamesWithRT) : IM_ARRAYSIZE(kDDGIRayModeNamesWithoutRT);
@@ -1382,7 +1382,7 @@ namespace Kurenai::UI
         static const char* kModeNamesWithRT[] = { "なし", "スクリーンスペース (SSR)", "レイトレーシング (RT)" };
         static const char* kModeNamesWithoutRT[] = { "なし", "スクリーンスペース (SSR)" };
 
-        const bool rtAvailable = m_Engine.m_RaytracingAvailable;
+        const bool rtAvailable = m_Engine.m_RenderCapabilities.RaytracingAvailable;
         const char* const* modeNames = rtAvailable ? kModeNamesWithRT : kModeNamesWithoutRT;
         const int modeCount = rtAvailable ? IM_ARRAYSIZE(kModeNamesWithRT) : IM_ARRAYSIZE(kModeNamesWithoutRT);
 

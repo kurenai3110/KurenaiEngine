@@ -26,6 +26,8 @@
 #include "Assets/TextureStreaming.h"
 #include "Core/Camera.h"
 #include "Core/CPUProfiler.h"
+#include "Diagnostics/RenderCapabilities.h"
+#include "Diagnostics/RenderStats.h"
 #include "Settings/AmbientOcclusionSettings.h"
 #include "Settings/CloudSettings.h"
 #include "Settings/DDGISettings.h"
@@ -436,7 +438,7 @@ namespace Kurenai
         void CreatePlanarReflectionTargets();
         // 自前ソフトウェアラスタライザパス(46章)の本体。クリア2回とディスパッチ3回を積む。
         // 呼ぶのはRender()のレンダーグラフ登録からのみで、
-        // m_GeometrySettings.SoftwareRasterEnabled && m_SoftwareRasterAvailable のときだけ登録される。
+        // m_GeometrySettings.SoftwareRasterEnabled && m_RenderCapabilities.SoftwareRasterAvailable のときだけ登録される。
         // viewProjはGBufferパスが使ったものとまったく同じ行列(ジッターを含む)を渡すこと ――
         // 別の行列で描くと深度の比較が意味を失う。
         // sunDirectionは光が進む向き(FrameConstants::LightDirectionと同じ規約)
@@ -895,15 +897,12 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_GBufferMeshletDebugPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletDebugPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletDebugPipelineStateMirrored;
-        // このデバイスがメッシュシェーダーを使えるか(IRHIDevice::SupportsMeshShader()の写し)。
-        // m_DeviceはKurenaiEngineBaseのprotectedメンバで、派生クラスのfriendであるUIパネルから
-        // 触れるかはC++の規則の解釈が分かれるため、m_RaytracingAvailableと同じくここへ控える
-        bool m_MeshShaderAvailable = false;
-        // bindless区画の容量と使用数(IRHIDevice::GetBindlessCapacity/GetBindlessUsedCountの写し)。
-        // 容量は初期化時に、使用数はフレーム先頭に控える。**満杯でも例外は飛ばず
-        // 白1x1で描かれてしまう**ため、UIとフレーム統計ログの両方へ出す
-        uint32_t m_BindlessCapacity = 0;
-        uint32_t m_BindlessUsedCount = 0;
+        // 起動時に決まる能力値(メッシュシェーダー・レイトレーシング等)。詳細は
+        // Diagnostics/RenderCapabilities.h
+        RenderCapabilities m_RenderCapabilities;
+        // フレームごとの統計値(ImGuiのプロファイラパネル・性能ログ表示用)。詳細は
+        // Diagnostics/RenderStats.h
+        RenderStats m_RenderStats;
         // 毎フレーム主カメラから作り直し、全パスの定数バッファへ同じものを配る
         MeshletLODFrameConstants m_MeshletLODFrame;
         // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
@@ -922,10 +921,6 @@ namespace Kurenai
         // カウンタバッファのUAVのbindless番号(RegisterBindlessUAVが払い出す)。
         // 非対応環境ではkInvalidBindlessIndexのままで、統計は無効になる
         uint32_t m_MeshletCullStatsBindlessIndex = RHI::kInvalidBindlessIndex;
-        // 直近に読み戻せた値(Perfログの集計に足し込む前の生値)。デバッグ表示にも使う
-        uint32_t m_MeshletCullTested = 0;
-        uint32_t m_MeshletCullFrustumCulled = 0;
-        uint32_t m_MeshletCullOcclusionCulled = 0;
 
         // --- モデル単位のGPUカリング(Stage 5-3) ---
         //
@@ -1099,7 +1094,7 @@ namespace Kurenai
         // RTAOパス: 法線周りの半球へ余弦重みでレイを撃ち、遮蔽率と1バウンスの間接拡散光を求める
         // コンピュートパス。出力はSSAO/SSILとまったく同じ意味・同じフォーマットなので、
         // 後段のAOBlurパスとライティングパスは無変更で使い回せる(27章)。
-        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る。
+        // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る。
         // 生バッファだけはコンピュートがUAVで書くためCreateUAVTextureで作る(ブラー後は従来どおり
         // ピクセルシェーダーが書くレンダーターゲット)
         std::unique_ptr<RHI::IRHIShader> m_RTAOComputeShader;
@@ -1213,20 +1208,6 @@ namespace Kurenai
         // 戻る先はエンジンの既定ではなく**そのシーンを読み込んだ直後の状態**である。
         // ここを取り違えると「既定へ戻したらシーンが要求した反射が消える」ことになる
         ReflectionMode m_SceneDefaultReflectionMode = ReflectionSettings::DefaultReflectionMode(false);
-        // レイトレーシング反射が使える環境か。デバイスのSupportsRaytracing()を初期化時に控えたもので、
-        // UIの選択可否とシェーダー/パイプラインステートを作るかどうかの両方に使う
-        // (RTReflection.hlslはRayQueryを含むためSM 6.5でしかコンパイルできず、
-        //  非対応環境で作ろうとすると例外になる)
-        bool m_RaytracingAvailable = false;
-        // DDGIのレイ取得をDXRで行えるか。m_RaytracingAvailableとは別に持つ。
-        //
-        // 【なぜ別なのか】DDGIProbeTrace.hlslはコンピュートシェーダーの中でテクスチャを
-        // 微分付きにサンプルするため、DXILの検証がシェーダーモデル6.6を要求する
-        // (Derivatives in CS/MS/AS is SM 6.6+)。RayQuery自体はSM 6.5で足りるので、
-        // 「DXR Tier 1.1に対応していて、かつSM 6.5のシェーダーバリアントで動いている」環境が
-        // 実在しうる ―― その場合、他のRTパスは作れるのにこれだけ作れない。
-        // 作成に失敗したらここをfalseにして、DDGIのレイ取得だけをラスタ経路へ戻す
-        bool m_DDGIRaytracedTraceAvailable = false;
 
         // SSR(Screen Space Reflections)パス: LightingパスのSceneColorを反射先の環境色として
         // 再利用し、G-Buffer(Normal/Material/Depth)からワールド空間でレイマーチングして
@@ -1240,7 +1221,7 @@ namespace Kurenai
         // RT反射パス: TLASへ鏡面レイを撃ち、ヒット面を陰影計算して反射色を求めるコンピュートパス。
         // 出力はSSRと同じ「SceneColor + 反射の差し替え」なので、後段(Tonemap)から見ると
         // m_SSRTextureと完全に等価な入れ替え可能なバッファになる。
-        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る
+        // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
         std::unique_ptr<RHI::IRHIShader> m_RTReflectionComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_RTReflectionPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_RTReflectionTexture;
@@ -1249,14 +1230,14 @@ namespace Kurenai
         // RTシャドウパス: TLASへ太陽の見かけの円盤に向けて影レイを撃ち、可視率(0〜1)を
         // 単チャンネルのテクスチャへ書くコンピュートパス。DirectLighting.hlslがt6で読み、
         // CSMのComputeCascadedShadowFactorの戻り値と同じ位置で使う(26章)。
-        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る
+        // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
         std::unique_ptr<RHI::IRHIShader> m_RTShadowComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_RTShadowPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_RTShadowTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_RTShadowConstantBuffer;
 
         MegaLightsSettings m_MegaLightsSettings;
-        // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る
+        // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsReferenceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsReferencePipelineState;
         std::unique_ptr<RHI::IRHITexture> m_MegaLightsTexture;
@@ -2190,8 +2171,6 @@ namespace Kurenai
         bool m_MeshLightsEnabled = Defaults::MeshLightsEnabled;
         // RangeのクランプにつかうシーンAABBの対角。LoadSceneで一度だけ求める
         float m_EmissiveLightsMaxRange = 0.0f;
-        // 直近のフレームで実際にGPUへ送ったプロキシの数(ImGuiとログの表示用)
-        uint32_t m_EmissiveLightsUsedCount = 0;
         // 上限で切り捨てたときの「採用した集合」の指紋。切り捨てが起きなければ0。
         //
         // 【プローブの署名に混ぜるためだけにある】採用順はカメラからの照度で決まるので、
@@ -2386,7 +2365,7 @@ namespace Kurenai
         // 焼き直し待ちのスロット番号(毎フレーム組み直す。GPUへ渡す一時の並び)
         std::vector<uint32_t> m_DDGIDirtyProbeList;
         // DDGIのレイ取得をDXRで行う経路(DDGIProbeTrace.hlsl)。
-        // m_RaytracingAvailableがtrueのときだけ作る(RTAO/RT反射と同じ扱い)
+        // m_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る(RTAO/RT反射と同じ扱い)
         std::unique_ptr<RHI::IRHIShader> m_DDGIProbeTraceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_DDGIProbeTracePipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_DDGITraceConstantBuffer;
@@ -2703,9 +2682,6 @@ namespace Kurenai
         // Present.hlslのMode 7で並べて差分を取れるようにするため
         std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterNormal;
 
-        // デバイスが対応していて、かつシェーダー/リソースの作成に成功したか。
-        // どちらかが欠けたらUIのチェックボックスごと無効化する
-        bool m_SoftwareRasterAvailable = false;
         // 巨大三角形とみなすbbox画素面積のしきい値。
         //
         // 【実行時に振れるようにしている理由】小三角形パス(CSRaster)と巨大三角形パス
@@ -2962,12 +2938,6 @@ namespace Kurenai
         float m_RenderDeltaTime = 0.0f;
         float m_FixedTimeStep = 0.0f;
 
-        // 統計表示用: 1フレームあたりのCPU時間(Renderの呼び出し時間)と、指数移動平均によるFPS。
-        // どちらもRenderスレッドのみが書き込み、ImGui描画(同じくRenderスレッド)のみが読むため
-        // 追加の排他制御は不要
-        float m_CPUFrameTimeMs = 0.0f;
-        float m_FPS = 0.0f;
-
         // 性能ログ(LogFrameStatsIfDue)。プロファイラパネルの表示はその場で消えてしまい後から
         // 比較できないため、FPS・CPU/GPUフレーム時間を一定間隔でログファイルへ残す。
         // すべてRenderスレッドのみが読み書きするため追加の排他制御は不要
@@ -3012,10 +2982,10 @@ namespace Kurenai
         float m_LODHysteresis = 0.05f;
         // 統計。1フレームあたりの段の切り替え回数と、そのフレームでフェード中のインスタンス数。
         // 【0なら一度も切り替わっていない】LODが効いているかはここでしか分からない
+        // (フェード中のインスタンス数はm_RenderStats.LODFadingCountへ出す。UIが読む完成値のため)
         uint32_t m_LODSwitchCount = 0;
-        uint32_t m_LODFadingCount = 0;
         uint64_t m_FrameStatsLODSwitchSum = 0;
-        // 【瞬間値ではなく積算する】m_LODFadingCountをそのままログへ出していたときは、
+        // 【瞬間値ではなく積算する】m_RenderStats.LODFadingCountをそのままログへ出していたときは、
         // 集計期間(1秒)の最終フレームの値だけを見ていた。既定のフェードは0.25秒なので
         // 構造的にほぼ必ず取りこぼし、「フェードが一度も実行されていない」のか
         // 「実行されたが見ていないだけ」なのかを区別できなかった(実際に取りこぼした)。
@@ -3182,11 +3152,9 @@ namespace Kurenai
         uint32_t m_DrawCallsGBuffer = 0;
         uint32_t m_DrawCallsShadow = 0;
         uint32_t m_DrawCallsDepthPrepass = 0;
-        // 直前に描き終えたフレームの値。**UIパネルはこちらを読むこと** ――
-        // 上のカウンタはフレーム先頭で0に戻るため、Renderの外で描かれるUIからは常に0に見える
-        uint32_t m_DrawCallsGBufferLastFrame = 0;
-        uint32_t m_DrawCallsShadowLastFrame = 0;
-        uint32_t m_DrawCallsDepthPrepassLastFrame = 0;
+        // 直前に描き終えたフレームの値はm_RenderStats.DrawCalls*LastFrameへ出す。
+        // **UIパネルはこちらを読むこと** ―― 上のカウンタはフレーム先頭で0に戻るため、
+        // Renderの外で描かれるUIからは常に0に見える
         uint64_t m_FrameStatsDrawCallsGBufferSum = 0;
         uint64_t m_FrameStatsDrawCallsShadowSum = 0;
         uint64_t m_FrameStatsDrawCallsDepthPrepassSum = 0;
@@ -3204,12 +3172,9 @@ namespace Kurenai
         uint32_t m_MeshCullTested = 0;
         uint32_t m_MeshCullCulled = 0;
 
-        // 完成した最後のフレームの値。UIパネルはRenderの外で描かれるため、上のカウンタを
-        // そのまま読むとリセット直後の0になる(ドローコール数のm_DrawCalls*LastFrameと同じ)
-        uint32_t m_FrustumCullTestedLastFrame = 0;
-        uint32_t m_FrustumCullCulledLastFrame = 0;
-        uint32_t m_MeshCullTestedLastFrame = 0;
-        uint32_t m_MeshCullCulledLastFrame = 0;
+        // 完成した最後のフレームの値はm_RenderStats.FrustumCullTestedLastFrame等へ出す。
+        // UIパネルはRenderの外で描かれるため、上のカウンタをそのまま読むと
+        // リセット直後の0になる(ドローコール数のm_RenderStats.DrawCalls*LastFrameと同じ)
         uint64_t m_FrameStatsMeshCullTestedSum = 0;
         uint64_t m_FrameStatsMeshCullCulledSum = 0;
 

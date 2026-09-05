@@ -170,7 +170,7 @@ namespace Kurenai::UI
 
         // プロキシが1つも無いシーンでは、以下のつまみを動かしても何も起きない。
         // 「効かないつまみ」を触らせないよう、数を先に見せてから灰色にする
-        ImGui::Text("プロキシ: %zu個 / 送信中: %u灯", m_Engine.m_EmissiveProxies.size(), m_Engine.m_EmissiveLightsUsedCount);
+        ImGui::Text("プロキシ: %zu個 / 送信中: %u灯", m_Engine.m_EmissiveProxies.size(), m_Engine.m_RenderStats.EmissiveLightsUsedCount);
         const bool hasProxy = !m_Engine.m_EmissiveProxies.empty();
         ImGui::BeginDisabled(!hasProxy);
 

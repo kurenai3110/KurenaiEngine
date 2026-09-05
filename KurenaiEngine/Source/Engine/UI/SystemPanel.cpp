@@ -422,7 +422,7 @@ namespace Kurenai::UI
         EndParamGroup();
 
         ImGui::Text(
-            "レイトレーシング: %s", m_Engine.m_RaytracingAvailable ? "利用可能 (DXR Tier 1.1)" : "利用できません");
+            "レイトレーシング: %s", m_Engine.m_RenderCapabilities.RaytracingAvailable ? "利用可能 (DXR Tier 1.1)" : "利用できません");
     }
 
     void SystemPanel::DrawUISection()

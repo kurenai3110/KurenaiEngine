@@ -17,8 +17,8 @@ namespace Kurenai::UI
             return;
         }
 
-        ImGui::Text("FPS: %.1f", m_Engine.m_FPS);
-        ImGui::Text("CPUフレーム時間: %.3f ms", m_Engine.m_CPUFrameTimeMs);
+        ImGui::Text("FPS: %.1f", m_Engine.m_RenderStats.FPS);
+        ImGui::Text("CPUフレーム時間: %.3f ms", m_Engine.m_RenderStats.CPUFrameTimeMs);
         ImGui::Text("GPUフレーム時間: %.3f ms", m_Engine.m_GPUProfiler->GetTotalFrameTimeMs());
         // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)。CPUフレーム時間や
         // PresentSubmitの計測値からは既に除外済みなので、参考情報として別枠で表示する
@@ -29,8 +29,8 @@ namespace Kurenai::UI
         // (発行回数が減ってもピクセルの仕事量は変わらないため)。発行回数そのものを出す
         ImGui::Text(
             "ドローコール: G-Buffer %u / シャドウ %u / 深度プリパス %u",
-            m_Engine.m_DrawCallsGBufferLastFrame, m_Engine.m_DrawCallsShadowLastFrame,
-            m_Engine.m_DrawCallsDepthPrepassLastFrame);
+            m_Engine.m_RenderStats.DrawCallsGBufferLastFrame, m_Engine.m_RenderStats.DrawCallsShadowLastFrame,
+            m_Engine.m_RenderStats.DrawCallsDepthPrepassLastFrame);
 
         // フラスタムカリングの効き(直前のフレームぶん・全パス合計)。
         //
@@ -54,8 +54,8 @@ namespace Kurenai::UI
             const float ratio = 100.0f * static_cast<float>(culled) / static_cast<float>(tested);
             ImGui::Text("%s: 判定 %u / 間引き %u (%.1f%%)", label, tested, culled, ratio);
         };
-        cullLine("モデル単位", m_Engine.m_FrustumCullTestedLastFrame, m_Engine.m_FrustumCullCulledLastFrame);
-        cullLine("メッシュ単位", m_Engine.m_MeshCullTestedLastFrame, m_Engine.m_MeshCullCulledLastFrame);
+        cullLine("モデル単位", m_Engine.m_RenderStats.FrustumCullTestedLastFrame, m_Engine.m_RenderStats.FrustumCullCulledLastFrame);
+        cullLine("メッシュ単位", m_Engine.m_RenderStats.MeshCullTestedLastFrame, m_Engine.m_RenderStats.MeshCullCulledLastFrame);
 
         // パスごとの内訳は行数が多いので、左右に並べて縦の長さを半分にする
         if (!ImGui::BeginTable("PassBreakdown", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame))
