@@ -17,9 +17,9 @@ namespace Kurenai::UI
             return;
         }
 
-        ImGui::Text("FPS: %.1f", m_Engine.m_RenderStats.FPS);
-        ImGui::Text("CPUフレーム時間: %.3f ms", m_Engine.m_RenderStats.CPUFrameTimeMs);
-        ImGui::Text("GPUフレーム時間: %.3f ms", m_Engine.m_GPUProfiler->GetTotalFrameTimeMs());
+        ImGui::Text("FPS: %.1f", m_Engine.GetRenderStats().FPS);
+        ImGui::Text("CPUフレーム時間: %.3f ms", m_Engine.GetRenderStats().CPUFrameTimeMs);
+        ImGui::Text("GPUフレーム時間: %.3f ms", m_Engine.GetGPUProfiler()->GetTotalFrameTimeMs());
         // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)。CPUフレーム時間や
         // PresentSubmitの計測値からは既に除外済みなので、参考情報として別枠で表示する
         ImGui::Text("GPU待ち: %.3f ms", m_Engine.GetLastFrameGPUWaitTimeMs());
@@ -29,8 +29,8 @@ namespace Kurenai::UI
         // (発行回数が減ってもピクセルの仕事量は変わらないため)。発行回数そのものを出す
         ImGui::Text(
             "ドローコール: G-Buffer %u / シャドウ %u / 深度プリパス %u",
-            m_Engine.m_RenderStats.DrawCallsGBufferLastFrame, m_Engine.m_RenderStats.DrawCallsShadowLastFrame,
-            m_Engine.m_RenderStats.DrawCallsDepthPrepassLastFrame);
+            m_Engine.GetRenderStats().DrawCallsGBufferLastFrame, m_Engine.GetRenderStats().DrawCallsShadowLastFrame,
+            m_Engine.GetRenderStats().DrawCallsDepthPrepassLastFrame);
 
         // フラスタムカリングの効き(直前のフレームぶん・全パス合計)。
         //
@@ -54,8 +54,8 @@ namespace Kurenai::UI
             const float ratio = 100.0f * static_cast<float>(culled) / static_cast<float>(tested);
             ImGui::Text("%s: 判定 %u / 間引き %u (%.1f%%)", label, tested, culled, ratio);
         };
-        cullLine("モデル単位", m_Engine.m_RenderStats.FrustumCullTestedLastFrame, m_Engine.m_RenderStats.FrustumCullCulledLastFrame);
-        cullLine("メッシュ単位", m_Engine.m_RenderStats.MeshCullTestedLastFrame, m_Engine.m_RenderStats.MeshCullCulledLastFrame);
+        cullLine("モデル単位", m_Engine.GetRenderStats().FrustumCullTestedLastFrame, m_Engine.GetRenderStats().FrustumCullCulledLastFrame);
+        cullLine("メッシュ単位", m_Engine.GetRenderStats().MeshCullTestedLastFrame, m_Engine.GetRenderStats().MeshCullCulledLastFrame);
 
         // パスごとの内訳は行数が多いので、左右に並べて縦の長さを半分にする
         if (!ImGui::BeginTable("PassBreakdown", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame))
@@ -68,14 +68,14 @@ namespace Kurenai::UI
 
         ImGui::TableSetColumnIndex(0);
         ImGui::SeparatorText("CPU パス別");
-        for (const auto& result : m_Engine.m_CPUProfiler.GetResults())
+        for (const auto& result : m_Engine.GetCPUProfiler().GetResults())
         {
             ImGui::Text("%s: %.3f ms", result.Name.c_str(), result.TimeMs);
         }
 
         ImGui::TableSetColumnIndex(1);
         ImGui::SeparatorText("GPU パス別");
-        for (const auto& result : m_Engine.m_GPUProfiler->GetResults())
+        for (const auto& result : m_Engine.GetGPUProfiler()->GetResults())
         {
             ImGui::Text("%s: %.3f ms", result.Name.c_str(), result.TimeMs);
         }

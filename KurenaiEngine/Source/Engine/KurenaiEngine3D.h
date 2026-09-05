@@ -389,25 +389,121 @@ namespace Kurenai
         // 描画中に書き換えることになる
         void ApplyDroneShowData(const Assets::ShowData& data);
 
-    private:
-        // UIパネル群(Source/Engine/UI/)は、m_AmbientOcclusionSettings.SSAORadius等のパラメータメンバをImGuiウィジェットへ
-        // アドレスで直接渡すためprivateへアクセスする必要がある。
-        // パラメータを専用の構造体へ切り出して物理的に移動させる案も検討したが、Render()内の
-        // 参照が約200箇所あり、書き換えの過程で1箇所間違えてもコンパイルが通ってしまい静かに
-        // 壊れるため採らない。
-        // friendにしても「UIから触ってよいのはパラメータ用メンバだけで、RHIリソース
-        // (m_GBufferAlbedo等)には触らない」という規約は各パネルの実装側で守ること
-        friend class UI::UIManager;
-        friend class UI::ScenePanel;
-        friend class UI::RenderingPanel;
-        friend class UI::PostProcessPanel;
-        friend class UI::DebugViewPanel;
-        friend class UI::LightingPanel;
-        friend class UI::SystemPanel;
-        friend class UI::ProfilerPanel;
-        friend class UI::ReflectionProbePanel;
-        friend class UI::StreamingPanel;
+        // --- UIパネルから呼ばれる操作 ---
 
+        // シーン切り替えを要求する(ScenePanel = Renderスレッドから呼ばれる)。
+        // 実際の読み込みはLoaderスレッドが行うため即座に戻る。
+        // 読み込み中に再度要求された場合は新しい要求で上書きされる(最後の要求が勝つ)
+        void RequestSceneLoad(size_t sceneIndex);
+        // 平面反射の反射解像度の倍率変更を要求する(RenderingPanel = Renderスレッドから呼ばれる)。
+        // RequestRenderResolutionと同じ方式(要求を記録するだけにしてRender()の先頭でまとめて反映)
+        void RequestPlanarReflectionResolutionScale(float scale);
+        // SSAO/SSILの半径・厚みとSSRの距離・厚みを、現在のシーンの対角長から決め直す。
+        // これらは固定の既定値を持たないため、UIの「既定値に戻す」ではなくこれを呼ぶ
+        // (シーン読み込み時はApplyLoadedSceneから呼ばれる)
+        void ResetSceneDependentParams();
+        // ProfilerPanel用。m_DeviceはKurenaiEngineBaseのprotectedメンバであり、
+        // 派生クラスの外からは直接触れないため、ここで明示的に橋渡しする
+        float GetLastFrameGPUWaitTimeMs() const;
+        // SystemPanelの表示用。m_Windowも同様の理由で橋渡しする。
+        // Windowsのディスプレイ設定で指定されている拡大率(UIの拡大率もこれに追従する)
+        float GetMonitorDpiScale() const;
+        // 超解像の設定をまとめて要求する(SystemPanel = Renderスレッドから呼ばれる)。
+        // 内部でRequestRenderResolution()を呼ぶだけで、レンダーターゲットの作り直しはしない
+        void RequestUpscaleSettings(
+            bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight);
+        // このフレームでMegaLightsパスを実行するか。上のShouldRunRaytraced*と同じ作法で1か所に集約している。
+        // これがfalseのときDirectLighting.hlslは従来のライトループへ戻る ―― 「パスを積むか」と
+        // 「ライトループを止めるか」がずれると、ライトが二重に加算されるか、逆に全部消える
+        bool ShouldRunMegaLights() const;
+        // プリセットを適用する(SystemPanel = Renderスレッドから呼ばれる)
+        void ApplyQualityPreset(QualityPreset preset);
+        // いま選ばれている段を1つだけ返す(フェード中でも切り替え先だけ)。
+        // 半透明・平面反射・ソフトウェアラスタライザ用 ―― これらはクロスディザを実装しておらず、
+        // 2段を重ねると同じ画素に両方が描かれてしまうため、フェード中も1段に決め打つ
+        const Assets::Model* GetCurrentLOD(size_t instanceIndex) const;
+        // 「システム」パネルのグラフィックスAPI切り替えコンボから呼ばれる。
+        // 実際の作り直しはRun()から戻った後に呼び出し側が行う(上のHasPendingGraphicsAPIChange参照)
+        void RequestGraphicsAPIChange(GraphicsAPI api);
+
+        // --- UIパネル向けのアクセサ ---
+        //
+        // UIパネル群(Source/Engine/UI/)がImGuiウィジェットへアドレスで渡すもの、および表示に
+        // 使うものだけをここで名指しする。**この一覧に無いもの(RHIリソース・PSO・履歴バッファ等)
+        // へUIから触らせない**のがこの区画の目的なので、増やすときは本当にUIの表示・操作に
+        // 要るものかを確かめること。
+        // UIが書き換えるものは非const参照(アドレスを渡す/直接代入するため)、読むだけのものは
+        // const(値またはconst参照)で返す。
+        AmbientOcclusionSettings& GetAmbientOcclusionSettings() { return m_AmbientOcclusionSettings; }
+        CloudSettings& GetCloudSettings() { return m_CloudSettings; }
+        DDGISettings& GetDDGISettings() { return m_DDGISettings; }
+        DebugViewSettings& GetDebugViewSettings() { return m_DebugViewSettings; }
+        EmissiveLightSettings& GetEmissiveLightSettings() { return m_EmissiveLightSettings; }
+        FogSettings& GetFogSettings() { return m_FogSettings; }
+        GeometrySettings& GetGeometrySettings() { return m_GeometrySettings; }
+        IBLSettings& GetIBLSettings() { return m_IBLSettings; }
+        MegaLightsSettings& GetMegaLightsSettings() { return m_MegaLightsSettings; }
+        PostProcessSettings& GetPostProcessSettings() { return m_PostProcessSettings; }
+        ReflectionProbeSettings& GetReflectionProbeSettings() { return m_ReflectionProbeSettings; }
+        ReflectionSettings& GetReflectionSettings() { return m_ReflectionSettings; }
+        ShadowSettings& GetShadowSettings() { return m_ShadowSettings; }
+        SkySettings& GetSkySettings() { return m_SkySettings; }
+        StarsSettings& GetStarsSettings() { return m_StarsSettings; }
+        SystemSettings& GetSystemSettings() { return m_SystemSettings; }
+        WaterSettings& GetWaterSettings() { return m_WaterSettings; }
+
+        std::vector<Assets::Light>& GetLights() { return m_Lights; }
+        int& GetSelectedLightIndex() { return m_SelectedLightIndex; }
+        bool& GetBufferPrecisionDirty() { return m_BufferPrecisionDirty; }
+        bool& GetSkyBakeDirty() { return m_SkyBakeDirty; }
+        bool& GetIBLBaked() { return m_IBLBaked; }
+        bool& GetIBLIrradianceBaked() { return m_IBLIrradianceBaked; }
+        bool& GetEmissiveLightsCapLogged() { return m_EmissiveLightsCapLogged; }
+        bool& GetEmissiveLightsValuesLogged() { return m_EmissiveLightsValuesLogged; }
+        bool& GetDDGIEmissiveSuppressLoggedRaster() { return m_DDGIEmissiveSuppressLoggedRaster; }
+        bool& GetDDGIEmissiveSuppressLoggedTrace() { return m_DDGIEmissiveSuppressLoggedTrace; }
+        std::vector<Assets::ReflectionProbe>& GetReflectionProbes() { return m_ReflectionProbes; }
+        int& GetSelectedProbeIndex() { return m_SelectedProbeIndex; }
+        bool& GetProbeBaked() { return m_ProbeBaked; }
+        bool& GetProbeBakeRequested() { return m_ProbeBakeRequested; }
+        bool& GetDDGIUpdateSuspended() { return m_DDGIUpdateSuspended; }
+        uint32_t& GetDDGIStableCycles() { return m_DDGIStableCycles; }
+        Assets::TextureStreamingManager& GetTextureStreaming() { return m_TextureStreaming; }
+
+        // std::atomicは呼び出し側が使っているメモリオーダーの書き方(.load/.store)を
+        // そのまま維持できるよう、値ではなくatomicへの参照を返す
+        std::atomic<bool>& GetTAAHistoryValid() { return m_TAAHistoryValid; }
+        std::atomic<uint32_t>& GetSceneLoadProgressLoaded() { return m_SceneLoadProgressLoaded; }
+        std::atomic<uint32_t>& GetSceneLoadProgressTotal() { return m_SceneLoadProgressTotal; }
+
+        uint32_t GetHiZMipLevels() const { return m_HiZMipLevels; }
+        const std::vector<Assets::EmissiveProxy>& GetEmissiveProxies() const { return m_EmissiveProxies; }
+        const RenderStats& GetRenderStats() const { return m_RenderStats; }
+        RHI::IRHIGPUProfiler* GetGPUProfiler() const { return m_GPUProfiler.get(); }
+        const Core::CPUProfiler& GetCPUProfiler() const { return m_CPUProfiler; }
+        uint32_t GetProbeRealtimeProbeIndex() const { return m_ProbeRealtimeProbeIndex; }
+        uint32_t GetProbeRealtimeFace() const { return m_ProbeRealtimeFace; }
+        const Assets::Scene& GetScene() const { return m_Scene; }
+        const RenderCapabilities& GetRenderCapabilities() const { return m_RenderCapabilities; }
+        bool GetHasGIVolume() const { return m_HasGIVolume; }
+        const Assets::GIVolume& GetGIVolume() const { return m_GIVolume; }
+        uint32_t GetDDGIProbeCount() const { return m_DDGIProbeCount; }
+        bool GetDDGIWarmingUp() const { return m_DDGIWarmingUp; }
+        ReflectionMode GetSceneDefaultReflectionMode() const { return m_SceneDefaultReflectionMode; }
+        bool GetSceneLoadInFlight() const { return m_SceneLoadInFlight; }
+        const std::vector<std::wstring>& GetSceneDisplayNames() const { return m_SceneDisplayNames; }
+        size_t GetSceneLoadingIndex() const { return m_SceneLoadingIndex; }
+        const QualitySettings& GetQualitySettings() const { return m_QualitySettings; }
+        uint32_t GetLightTileCountX() const { return m_LightTileCountX; }
+        uint32_t GetLightTileCountY() const { return m_LightTileCountY; }
+        GraphicsAPI GetGraphicsAPI() const { return m_GraphicsAPI; }
+
+        // m_DeviceはKurenaiEngineBaseのprotectedメンバであり、GetLastFrameGPUWaitTimeMsと
+        // 同じ理由でここから明示的に橋渡しする。
+        // 生成に失敗していればnullptrになりうるので、参照ではなくポインタで返す
+        RHI::IRHIDevice* GetDevice() { return m_Device.get(); }
+
+    private:
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
         // スナップショット。m_SkySettings.TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
         // ここには含めない(RenderThreadMain参照)
@@ -465,10 +561,6 @@ namespace Kurenai
         // 「パスを走らせるか」と「その出力を読むか」を同じ1つの述語で判定するための関数
         // (ShouldRunRaytraced*と同じ作法)
         bool ShouldRunRaytracedDDGITrace() const;
-        // このフレームでMegaLightsパスを実行するか。上と同じ作法で1か所に集約している。
-        // これがfalseのときDirectLighting.hlslは従来のライトループへ戻る ―― 「パスを積むか」と
-        // 「ライトループを止めるか」がずれると、ライトが二重に加算されるか、逆に全部消える
-        bool ShouldRunMegaLights() const;
         // このフレームでタイルライトカリングパスを実行するか。上と同じ作法で1か所に集約している。
         // **ライトグリッドを実際に読む者が居るときだけ積む** ―― 読み手は
         // DirectLighting.hlsl のローカルライトのループと Present.hlsl のライトグリッド表示
@@ -562,17 +654,10 @@ namespace Kurenai
             Core::Camera Camera;
         };
 
-        // シーン切り替えを要求する(ScenePanel = Renderスレッドから呼ばれる)。
-        // 実際の読み込みはLoaderスレッドが行うため即座に戻る。
-        // 読み込み中に再度要求された場合は新しい要求で上書きされる(最後の要求が勝つ)
-        void RequestSceneLoad(size_t sceneIndex);
         // 内部レンダー解像度の変更を要求する(SystemPanel = Renderスレッドから呼ばれる)。
         // レンダーターゲットの作り直しはGPUがそれらを参照していない状態で行う必要があるため、
         // ここでは要求を記録するだけにしてRender()の先頭でまとめて反映する
         void RequestRenderResolution(uint32_t width, uint32_t height);
-        // 平面反射の反射解像度の倍率変更を要求する(RenderingPanel = Renderスレッドから呼ばれる)。
-        // RequestRenderResolutionと同じ方式(要求を記録するだけにしてRender()の先頭でまとめて反映)
-        void RequestPlanarReflectionResolutionScale(float scale);
         // Renderスレッドがフレーム先頭で呼ぶ。保留中の切り替え要求の発注と、
         // 出来上がったシーンの取り込みを行う
         void UpdateSceneStreaming();
@@ -597,10 +682,6 @@ namespace Kurenai
         // 純粋な計算なのでLoaderスレッドから呼べる([Camera]セクションがあればそれを優先する)
         static Core::Camera ComputeInitialCamera(const Assets::Scene& scene);
 
-        // SSAO/SSILの半径・厚みとSSRの距離・厚みを、現在のシーンの対角長から決め直す。
-        // これらは固定の既定値を持たないため、UIの「既定値に戻す」ではなくこれを呼ぶ
-        // (シーン読み込み時はApplyLoadedSceneから呼ばれる)
-        void ResetSceneDependentParams();
         // imguiWantsMouseはImGuiがマウス入力を掴んでいるか(Renderスレッドから
         // m_ImGuiWantCaptureMouse経由で受け取る)。パネルの上で右ドラッグを始めても
         // 視点回転が始まらないようにするために使う
@@ -621,12 +702,6 @@ namespace Kurenai
         // このフレームの計測値を集計し、集計期間(FrameStatsLogIntervalSeconds)ぶん溜まっていれば
         // 1行にまとめてログへ出す。Renderスレッドからフレームごとに呼ぶ
         void LogFrameStatsIfDue(float renderDeltaTime);
-        // ProfilerPanel用。m_DeviceはKurenaiEngineBaseのprotectedメンバであり、派生クラスの
-        // friendから触れるかどうかはC++の規則の解釈が分かれるため、ここで明示的に橋渡しする
-        float GetLastFrameGPUWaitTimeMs() const;
-        // SystemPanelの表示用。m_Windowも同様の理由で橋渡しする。
-        // Windowsのディスプレイ設定で指定されている拡大率(UIの拡大率もこれに追従する)
-        float GetMonitorDpiScale() const;
         // カメラ視錐台をkCascadeCount個の深度範囲に分割する(near/far境界、View空間での距離)。
         // 対数分割と均等分割を混合した実用的な分割(Practical Split Scheme)を使う
         void ComputeCascadeSplits(const Core::Camera& camera, float (&outSplits)[kCascadeCount]) const;
@@ -642,7 +717,6 @@ namespace Kurenai
         // UI(Renderスレッド)が書き、Run()のループ条件(Updateスレッド)が読むためatomic。
         // 実際の作り直しはRun()から戻った後に呼び出し側が行う(上のHasPendingGraphicsAPIChange参照)
         std::atomic<int> m_RequestedGraphicsAPI{ -1 };
-        void RequestGraphicsAPIChange(GraphicsAPI api);
 
         // 起動時に読み込むシーンの番号。コンストラクタ引数をそのまま保持する
         // (APIを切り替えても同じシーンで再開できるようにするため)
@@ -716,10 +790,6 @@ namespace Kurenai
         // FSR1のsharpnessは「何ストップ弱めるか」で0が最大なので、2^(-2*(1-v)) とする
         static float ComputeRcasSharpnessScale(float sharpness);
 
-        // 超解像の設定をまとめて要求する(SystemPanel = Renderスレッドから呼ばれる)。
-        // 内部でRequestRenderResolution()を呼ぶだけで、レンダーターゲットの作り直しはしない
-        void RequestUpscaleSettings(
-            bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight);
         // 出力解像度のテクスチャを作り直す。GPUがそれらを参照していない状態で呼ぶこと
         void CreateUpscaleTargets(uint32_t width, uint32_t height);
         // このフレームで超解像パスを走らせるか(有効かつテクスチャが確保済み)
@@ -1729,14 +1799,18 @@ namespace Kurenai
         // 拡散イラディアンス・プリフィルタ済み鏡面はいずれも本物のTextureCube
         // (CreateUAVTextureCube/CreateMippedUAVTextureCube、面ごとに個別のUAVを持つ)で、
         // IBLConvolve.hlslが面ごとに1回ずつディスパッチして書き込む
+    public:
         // キューブマップの面数(D3D標準順: +X,-X,+Y,-Y,+Z,-Z)。IBLの2つのキューブマップは
         // いずれもこの順で面ごとにディスパッチする(IBLConvolve.hlsl CubeFaceDirectionと一致させる)
         static constexpr uint32_t kCubeFaceCount = 6;
+    private:
         static constexpr uint32_t kIBLIrradianceSize = 32;
         static constexpr uint32_t kIBLPrefilterBaseSize = 128;
+    public:
         // プリフィルタ済み鏡面マップのミップ数(128,64,32,16,8,4の6段)。ラフネス[0,1]を
         // [0, kIBLPrefilterMipLevels-1]のミップ番号へ線形マッピングする(DeferredLighting.hlsl参照)
         static constexpr uint32_t kIBLPrefilterMipLevels = 6;
+    private:
         static constexpr uint32_t kIBLBRDFLUTSize = 128;
         // ボリュメトリック雲の3Dノイズの1辺のテクセル数。
         // Shapeは128^3のRGBA8で8MB、Detailは32^3のRGBA8で128KB。合わせて約8.1MB。
@@ -2023,9 +2097,11 @@ namespace Kurenai
         // IBLと同じCSIrradiance/CSPrefilterで畳み込んでプローブごとのキューブマップ配列へ書き込む。
         // 環境ソースを差し替えるだけなので、シェーダー側の評価式(EvaluateIBL)はIBLと完全に共通。
         //
+    public:
         // キューブマップ配列の枚数上限。TextureCubeArrayは実行時に伸縮できないため固定容量で確保し、
         // これを超えるプローブが置かれたシーンは先頭からこの数だけを採用する(警告ログを出す)
         static constexpr uint32_t kMaxReflectionProbes = 8;
+    private:
         // キャプチャ解像度。プリフィルタ済み鏡面のベース解像度(kIBLPrefilterBaseSize)と揃えることで、
         // ミップ0が「畳み込み無しのキャプチャそのもの」になりデバッグ表示で生の映り込みを確認できる
         static constexpr uint32_t kProbeCaptureSize = kIBLPrefilterBaseSize;
@@ -2365,8 +2441,10 @@ namespace Kurenai
         bool m_PlanarReflectionMultipleWaterLogged = false;
 
         CloudSettings m_CloudSettings;
+    public:
         // 段数の上限。**Sky.hlsliのkCumulusRaymarchStepsMaxと一致させること**
         static constexpr uint32_t kCloudRaymarchStepsMax = 32;
+    private:
         // 風によるノイズ空間の移動量。m_WaterScrollOffsetと同じくUIつまみではなく内部状態で、
         // RenderThreadMainがSky.hlsliのkCloudNoisePeriodと同じ周期でstd::fmodしながら進める
         DirectX::XMFLOAT2 m_CloudScrollOffset{ 0.0f, 0.0f };
@@ -2415,16 +2493,19 @@ namespace Kurenai
         // タイルライトカリングのタイルサイズ(1辺のピクセル数)。
         // LightCulling.hlsl の kTileSize および numthreads と必ず一致させること
         static constexpr uint32_t kLightTileSize = 16;
+    public:
         // 1タイルが保持できるライト数の上限。LightCulling.hlsl の kMaxLightsPerTile および
         // DirectLighting.hlsl の同名の定数と必ず一致させること(バッファのストライドがこの値で決まる)。
         // HLSL側はgroupshared配列のサイズに使うためコンパイル時定数である必要があり、
         // C++からの受け渡しでは代用できないので、3箇所で同じ値を書く形になっている。
         // .cppの無名名前空間ではなくここに置いてあるのは、DebugViewPanelがヒートマップの
-        // 上限としてこの値を使うため(UIパネルはfriendなのでprivateのまま参照できる)
+        // 上限としてこの値を使うため
         static constexpr uint32_t kLightTileCapacity = 64;
+    private:
         // ライトグリッド1タイルぶんの要素数(先頭1個がライト数、残りがライトインデックス)
         static constexpr uint32_t kLightTileStride = 1 + kLightTileCapacity;
 
+    public:
         // MegaLightsの候補プールが1タイルあたりに抽出する候補の数(K)。
         // ライトタイルの容量と違い**これは打ち切りではなく抽出数**で、タイルへ何灯届いていても
         // ここで決めた本数だけを重みつきで取り出す。届いた灯が欠落するわけではない
@@ -2433,16 +2514,19 @@ namespace Kurenai
         // m_MegaLightsSettings.TilePoolCapacity が持ち、シェーダへは定数バッファで渡している。
         // バッファの確保だけがコンパイル時の上限を要るのでここに残す
         static constexpr uint32_t kMegaLightsTilePoolCapacity = 128;
-        // Kの下限。これを下回るとタイルに届く灯を代表できない
+        // Kの下限。これを下回るとタイルに届く灯を代表できない。
         static constexpr int32_t kMegaLightsTilePoolMinCapacity = 8;
+    private:
         // 候補プール1タイルぶんの要素数。先頭6個がヘッダ(SumW / 届いた灯数 / 有効候補数 / 予約 /
         // 手前のViewZ / 奥のViewZ)、
         // 以降は候補1つにつき2個(ライト番号と重み)。MegaLightsTilePool.hlsl 冒頭のレイアウトと一致させること
         static constexpr uint32_t kMegaLightsTilePoolStride = 6 + 2 * kMegaLightsTilePoolCapacity;
+    public:
         // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
         //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
         // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
         static constexpr int32_t kMegaLightsMaxSamplesPerPixel = 4;
+    private:
 
         std::unique_ptr<RHI::IRHIShader> m_LightCullingComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_LightCullingPipelineState;
@@ -2470,8 +2554,10 @@ namespace Kurenai
         // 巨大三角形リストの容量(要素数)。超えた分は描かれず、CSResolveが画面左上を
         // マゼンタで塗って知らせる
         static constexpr uint32_t kSWRasterLargeListCapacity = 4096;
+    public:
         // 1フレームに扱えるメッシュレコード数の上限。Bistro Exteriorで約400
         static constexpr uint32_t kSWRasterMaxMeshes = 2048;
+    private:
         // CSRasterの1グループのスレッド数。SoftwareRaster.hlslの
         // KURENAI_SWRASTER_GROUP_SIZEと一致させること
         static constexpr uint32_t kSWRasterGroupSize = 64;
@@ -2548,8 +2634,6 @@ namespace Kurenai
         // 一式を各メンバへ書き戻す。平面反射の解像度倍率だけはレンダーターゲットの作り直しを
         // 伴うため直接代入せず、RequestPlanarReflectionResolutionScale()経由で要求する
         void ApplyQualitySettings(const QualitySnapshot& settings);
-        // プリセットを適用する(SystemPanel = Renderスレッドから呼ばれる)
-        void ApplyQualityPreset(QualityPreset preset);
 
         // シーンを読み込んだ直後の値。ApplyLoadedSceneが控え、プリセット「高」が戻る先になる
         QualitySnapshot m_SceneDefaultQuality;
@@ -2762,6 +2846,11 @@ namespace Kurenai
             float FadeT = 1.0f;        // 1.0でフェード完了。0→1へ進み、その間だけ2段を重ねる
         };
         std::vector<InstanceLODState> m_InstanceLODStates;
+    public:
+        // RenderingPanel(モデルLOD段ごとの内訳表示)向け。InstanceLODStateがこのクラスの
+        // 入れ子型のため、UIパネル向けのアクセサ一覧とは別にここで公開する
+        const std::vector<InstanceLODState>& GetInstanceLODStates() const { return m_InstanceLODStates; }
+    private:
         // 段の切り替えにかける秒数とヒステリシス幅はm_GeometrySettings.LODFadeDuration /
         // LODHysteresisへ移した
         // 統計。1フレームあたりの段の切り替え回数と、そのフレームでフェード中のインスタンス数。
@@ -2907,10 +2996,6 @@ namespace Kurenai
         uint64_t m_StreamingEvictedTotal = 0;
         uint32_t m_StreamingResidentCount = 0;
         uint32_t m_StreamingTargetCount = 0;
-        // いま選ばれている段を1つだけ返す(フェード中でも切り替え先だけ)。
-        // 半透明・平面反射・ソフトウェアラスタライザ用 ―― これらはクロスディザを実装しておらず、
-        // 2段を重ねると同じ画素に両方が描かれてしまうため、フェード中も1段に決め打つ
-        const Assets::Model* GetCurrentLOD(size_t instanceIndex) const;
         // 集計期間中の合計(平均はフレーム数で割って出す)
         uint64_t m_FrameStatsCullTestedSum = 0;
         uint64_t m_FrameStatsCullCulledSum = 0;

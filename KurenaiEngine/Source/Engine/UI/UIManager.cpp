@@ -101,13 +101,13 @@ namespace Kurenai::UI
         // ただし旧シーンは読み込み開始と同時に手放されるため、画面にはUIとスカイボックスしか出ない
         // (KurenaiEngine3D::UpdateSceneStreamingのコメント参照)。
         // 「進んでいる」と「固まった」を区別できるようにするのがこのウィンドウの役目
-        if (!m_Engine.m_SceneLoadInFlight)
+        if (!m_Engine.GetSceneLoadInFlight())
         {
             return;
         }
 
-        const uint32_t loadedModels = m_Engine.m_SceneLoadProgressLoaded.load(std::memory_order_relaxed);
-        const uint32_t totalModels = m_Engine.m_SceneLoadProgressTotal.load(std::memory_order_relaxed);
+        const uint32_t loadedModels = m_Engine.GetSceneLoadProgressLoaded().load(std::memory_order_relaxed);
+        const uint32_t totalModels = m_Engine.GetSceneLoadProgressTotal().load(std::memory_order_relaxed);
 
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
         if (viewport == nullptr)
@@ -132,8 +132,8 @@ namespace Kurenai::UI
         if (ImGui::Begin("###SceneLoadProgress", nullptr, flags))
         {
             const std::wstring& sceneName =
-                (m_Engine.m_SceneLoadingIndex < m_Engine.m_SceneDisplayNames.size())
-                    ? m_Engine.m_SceneDisplayNames[m_Engine.m_SceneLoadingIndex]
+                (m_Engine.GetSceneLoadingIndex() < m_Engine.GetSceneDisplayNames().size())
+                    ? m_Engine.GetSceneDisplayNames()[m_Engine.GetSceneLoadingIndex()]
                     : std::wstring();
             ImGui::Text("シーンを読み込んでいます: %s", Core::WideToUtf8(sceneName).c_str());
 
@@ -194,7 +194,7 @@ namespace Kurenai::UI
 
         ImGui::Separator();
         ImGui::TextUnformatted(
-            m_Engine.m_GraphicsAPI == GraphicsAPI::DX12 ? "Graphics API: DX12" : "Graphics API: DX11");
+            m_Engine.GetGraphicsAPI() == GraphicsAPI::DX12 ? "Graphics API: DX12" : "Graphics API: DX11");
 
         ImGui::EndMainMenuBar();
         return menuBarHeight;

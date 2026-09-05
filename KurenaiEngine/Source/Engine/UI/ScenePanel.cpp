@@ -61,7 +61,7 @@ namespace Kurenai::UI
 
         if (ImGui::Button("再読み込み###ReloadScene", ImVec2(-FLT_MIN, 0.0f)))
         {
-            m_Engine.RequestSceneLoad(m_Engine.m_CurrentSceneIndex);
+            m_Engine.RequestSceneLoad(m_Engine.GetCurrentSceneIndex());
         }
         // 説明は常時表示ではなくツールチップにする(上記の高さの事情)
         ItemHelp(
@@ -71,12 +71,12 @@ namespace Kurenai::UI
 
         BeginParamGroup();
         CheckboxEx(
-            "変更を自動で反映する###SceneAutoReload", &m_Engine.m_SystemSettings.SceneAutoReloadEnabled, false,
+            "変更を自動で反映する###SceneAutoReload", &m_Engine.GetSystemSettings().SceneAutoReloadEnabled, false,
             "ファイルの更新時刻を250msごとに見て、変わっていたら自動で読み直す。"
             "書式が不正なときは警告を出して見送るのでシーンが空になることはない。"
             "既定はオフ — A/B比較の最中に勝手に読み直されると、同一条件で2回撮る対照が壊れるため");
         CheckboxEx(
-            "カメラを保持する###SceneReloadKeepsCamera", &m_Engine.m_SystemSettings.SceneReloadKeepsCamera, false,
+            "カメラを保持する###SceneReloadKeepsCamera", &m_Engine.GetSystemSettings().SceneReloadKeepsCamera, false,
             "オフ(既定)ならファイルの[Camera]を適用する。オンにすると今の視点のまま読み直すので、"
             "飛び回りながら空・水面・露出を詰めるときに使う。"
             "効くのは同じシーンの読み直しのときだけで、下の一覧で別のシーンへ切り替えたときは"
@@ -120,12 +120,12 @@ namespace Kurenai::UI
         SliderFloatSceneDependent(
             // スライダーの値域は.ksceneの[Scene]CameraSpeedが取れる範囲(0.01〜10000)に合わせる。
             // 下限を0.1にしてあるのは、対数目盛りの左端に実用外の桁を並べても意味が無いため
-            "移動速度###CameraSpeed", &m_Engine.m_SystemSettings.CameraSpeed, 0.1f, 10000.0f, recalcRequested, "%.2f m/s",
+            "移動速度###CameraSpeed", &m_Engine.GetSystemSettings().CameraSpeed, 0.1f, 10000.0f, recalcRequested, "%.2f m/s",
             // 【対数目盛りにする】自動決定でも5〜653 m/sと3桁またぐため、線形だと
             // 小さい側がスライダーの左端に潰れて動かせない
             ImGuiSliderFlags_Logarithmic,
             cameraSpeedHelp.c_str());
-        ImGui::Text("Shift時: %.2f m/s", m_Engine.m_SystemSettings.CameraSpeed * Defaults::CameraSpeedShiftMultiplier);
+        ImGui::Text("Shift時: %.2f m/s", m_Engine.GetSystemSettings().CameraSpeed * Defaults::CameraSpeedShiftMultiplier);
         if (recalcRequested)
         {
             m_Engine.ResetSceneDependentParams();
@@ -162,15 +162,15 @@ namespace Kurenai::UI
         ImGui::SeparatorText("シーンの切り替え");
         ImGui::TextDisabled("ボタンを押すとそのシーンを読み込む");
 
-        for (size_t i = 0; i < m_Engine.m_SceneDisplayNames.size(); ++i)
+        for (size_t i = 0; i < m_Engine.GetSceneDisplayNames().size(); ++i)
         {
-            const bool isCurrent = (i == m_Engine.m_CurrentSceneIndex);
+            const bool isCurrent = (i == m_Engine.GetCurrentSceneIndex());
             if (isCurrent)
             {
                 ImGui::BeginDisabled();
             }
 
-            const std::string label = Core::WideToUtf8(m_Engine.m_SceneDisplayNames[i]);
+            const std::string label = Core::WideToUtf8(m_Engine.GetSceneDisplayNames()[i]);
             if (ImGui::Button(label.c_str(), ImVec2(-FLT_MIN, 0.0f)))
             {
                 // 実際の読み込みはLoaderスレッドが行うため、ここは要求を出すだけで即座に戻る

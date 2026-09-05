@@ -53,7 +53,7 @@ namespace Kurenai::UI
 
     void SystemPanel::DrawTextureStreamingSection()
     {
-        Assets::TextureStreamingManager& streaming = m_Engine.m_TextureStreaming;
+        Assets::TextureStreamingManager& streaming = m_Engine.GetTextureStreaming();
 
         if (!streaming.IsBuilt())
         {
@@ -63,8 +63,8 @@ namespace Kurenai::UI
                 "検証のためにこの場で組むこともできます。");
             if (ImGui::Button("このシーンで組む###BuildTextureStreaming"))
             {
-                streaming.Configure(true, m_Engine.m_Scene.TextureStreamingBias);
-                streaming.Build(m_Engine.m_Scene, *m_Engine.m_Device);
+                streaming.Configure(true, m_Engine.GetScene().TextureStreamingBias);
+                streaming.Build(m_Engine.GetScene(), *m_Engine.GetDevice());
             }
             return;
         }
@@ -109,7 +109,7 @@ namespace Kurenai::UI
         // 【自己申告(上)と実測(下)を並べる】片方だけだとどちらの誤りにも気付けない
         uint64_t usedBytes = 0;
         uint64_t budgetBytes = 0;
-        if (m_Engine.m_Device->GetVideoMemoryUsage(usedBytes, budgetBytes))
+        if (m_Engine.GetDevice()->GetVideoMemoryUsage(usedBytes, budgetBytes))
         {
             constexpr double kBytesPerMiB = 1024.0 * 1024.0;
             ImGui::Text("VRAM(OSから見た実測): 使用 %.1f MB / 予算 %.1f MB",
@@ -183,14 +183,14 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "垂直同期###EnableVSync", &m_Engine.m_SystemSettings.VSyncEnabled, Defaults::VSyncEnabled,
+            "垂直同期###EnableVSync", &m_Engine.GetSystemSettings().VSyncEnabled, Defaults::VSyncEnabled,
             "Presentをディスプレイのリフレッシュに同期させる。ティアリングは消えるが遅延は増える");
 
         CheckboxEx(
-            "フレームレート制限###FixedFPS", &m_Engine.m_SystemSettings.FixedFPSEnabled, Defaults::FixedFPSEnabled,
+            "フレームレート制限###FixedFPS", &m_Engine.GetSystemSettings().FixedFPSEnabled, Defaults::FixedFPSEnabled,
             "指定したフレームレートを超えないように待機を入れる");
 
-        if (m_Engine.m_SystemSettings.FixedFPSEnabled)
+        if (m_Engine.GetSystemSettings().FixedFPSEnabled)
         {
             static const char* kTargetFPSNames[] = { "30", "60", "120" };
             static const float kTargetFPSValues[] = { 30.0f, 60.0f, 120.0f };
@@ -203,7 +203,7 @@ namespace Kurenai::UI
             int defaultIndex = 1;
             for (int i = 0; i < IM_ARRAYSIZE(kTargetFPSValues); ++i)
             {
-                if (kTargetFPSValues[i] == m_Engine.m_SystemSettings.TargetFPS)
+                if (kTargetFPSValues[i] == m_Engine.GetSystemSettings().TargetFPS)
                 {
                     targetFPSIndex = i;
                 }
@@ -217,12 +217,12 @@ namespace Kurenai::UI
                     "目標フレームレート###TargetFPS", &targetFPSIndex, kTargetFPSNames, IM_ARRAYSIZE(kTargetFPSNames),
                     defaultIndex, "上限とするフレームレート"))
             {
-                m_Engine.m_SystemSettings.TargetFPS = kTargetFPSValues[targetFPSIndex];
+                m_Engine.GetSystemSettings().TargetFPS = kTargetFPSValues[targetFPSIndex];
             }
         }
 
         CheckboxEx(
-            "性能をログに記録###FrameStatsLogging", &m_Engine.m_SystemSettings.FrameStatsLoggingEnabled,
+            "性能をログに記録###FrameStatsLogging", &m_Engine.GetSystemSettings().FrameStatsLoggingEnabled,
             Defaults::FrameStatsLoggingEnabled,
             "FPS・CPU/GPUフレーム時間を1秒ごとにログファイルへ書き出す。"
             "このパネルの表示は実行中しか見えないため、後から実行同士を比較するにはこちらを使う");
@@ -252,7 +252,7 @@ namespace Kurenai::UI
         };
         static_assert(IM_ARRAYSIZE(kPresetNames) == IM_ARRAYSIZE(kPresetValues), "表示名と値の並びを一致させること");
 
-        int presetIndex = static_cast<int>(m_Engine.m_QualitySettings.Preset);
+        int presetIndex = static_cast<int>(m_Engine.GetQualitySettings().Preset);
         if (ComboEx(
                 "品質###QualityPresetSelect", &presetIndex, kPresetNames, IM_ARRAYSIZE(kPresetNames),
                 static_cast<int>(QualityPreset::High),
@@ -299,8 +299,8 @@ namespace Kurenai::UI
 
         // 超解像が有効なときComboが指すのは出力解像度、無効なときは内部レンダー解像度。
         // どちらもm_PostProcessSettings.UpscaleOutputWidth/Heightが追いかけているのでこれを見ればよい
-        const uint32_t comboWidth = m_Engine.m_PostProcessSettings.UpscaleOutputWidth;
-        const uint32_t comboHeight = m_Engine.m_PostProcessSettings.UpscaleOutputHeight;
+        const uint32_t comboWidth = m_Engine.GetPostProcessSettings().UpscaleOutputWidth;
+        const uint32_t comboHeight = m_Engine.GetPostProcessSettings().UpscaleOutputHeight;
 
         // 一覧に無い解像度(「ウィンドウサイズに合わせる」で設定した場合など)のときは-1のままにする。
         // ImGuiのComboは範囲外のインデックスを空表示として扱うため、そのままでも壊れない
@@ -321,8 +321,8 @@ namespace Kurenai::UI
         // 変更があった項目に関わらず、最終的にRequestUpscaleSettings()を1回だけ呼ぶ形に統一する。
         // 出力解像度・品質モード・有効/無効のどれが変わっても内部レンダー解像度の導出をやり直す
         // 必要があり、経路を分けると片方だけ更新し忘れる
-        bool upscaleEnabled = m_Engine.m_PostProcessSettings.UpscaleEnabled;
-        int qualityIndex = static_cast<int>(m_Engine.m_PostProcessSettings.UpscaleQuality);
+        bool upscaleEnabled = m_Engine.GetPostProcessSettings().UpscaleEnabled;
+        int qualityIndex = static_cast<int>(m_Engine.GetPostProcessSettings().UpscaleQuality);
         uint32_t outputWidth = comboWidth;
         uint32_t outputHeight = comboHeight;
         bool settingsChanged = false;
@@ -360,7 +360,7 @@ namespace Kurenai::UI
             }
 
             SliderFloatEx(
-                "シャープネス###UpscaleSharpness", &m_Engine.m_PostProcessSettings.UpscaleSharpness, 0.0f, 1.0f,
+                "シャープネス###UpscaleSharpness", &m_Engine.GetPostProcessSettings().UpscaleSharpness, 0.0f, 1.0f,
                 Defaults::UpscaleSharpness, "%.2f", 0,
                 "RCASのシャープ化の強さ。0で無効。拡大後の出力解像度で効くため、"
                 "トーンマップ側のシャープネス(ポストプロセスパネルのTAAシャープネス)は"
@@ -389,11 +389,11 @@ namespace Kurenai::UI
             "(超解像が無効なら内部レンダー解像度がそのまま等倍になる)。"
             "押した時点で1回だけ適用され、その後のウィンドウリサイズには追従しない");
 
-        if (m_Engine.m_PostProcessSettings.UpscaleEnabled)
+        if (m_Engine.GetPostProcessSettings().UpscaleEnabled)
         {
-            ImGui::Text("出力解像度: %u x %u", m_Engine.m_PostProcessSettings.UpscaleOutputWidth, m_Engine.m_PostProcessSettings.UpscaleOutputHeight);
+            ImGui::Text("出力解像度: %u x %u", m_Engine.GetPostProcessSettings().UpscaleOutputWidth, m_Engine.GetPostProcessSettings().UpscaleOutputHeight);
         }
-        ImGui::Text("内部レンダー解像度: %u x %u", m_Engine.m_RenderWidth, m_Engine.m_RenderHeight);
+        ImGui::Text("内部レンダー解像度: %u x %u", m_Engine.GetRenderWidth(), m_Engine.GetRenderHeight());
         ImGui::Text("ウィンドウ(クライアント領域): %u x %u", m_Engine.GetWidth(), m_Engine.GetHeight());
     }
 
@@ -410,7 +410,7 @@ namespace Kurenai::UI
         static const GraphicsAPI kAPIValues[] = { GraphicsAPI::DX11, GraphicsAPI::DX12 };
         static_assert(IM_ARRAYSIZE(kAPINames) == IM_ARRAYSIZE(kAPIValues), "表示名と値の並びを一致させること");
 
-        int apiIndex = static_cast<int>(m_Engine.m_GraphicsAPI);
+        int apiIndex = static_cast<int>(m_Engine.GetGraphicsAPI());
         if (ComboEx(
                 "グラフィックスAPI###GraphicsAPISelect", &apiIndex, kAPINames, IM_ARRAYSIZE(kAPINames),
                 static_cast<int>(GraphicsAPI::DX11),
@@ -424,7 +424,7 @@ namespace Kurenai::UI
         EndParamGroup();
 
         ImGui::Text(
-            "レイトレーシング: %s", m_Engine.m_RenderCapabilities.RaytracingAvailable ? "利用可能 (DXR Tier 1.1)" : "利用できません");
+            "レイトレーシング: %s", m_Engine.GetRenderCapabilities().RaytracingAvailable ? "利用可能 (DXR Tier 1.1)" : "利用できません");
     }
 
     void SystemPanel::DrawUISection()
