@@ -11,10 +11,14 @@ namespace Kurenai::RHI
     class DX11Buffer : public IRHIBuffer
     {
     public:
+        // BufferUsage::Structured用(uavのみ)。BufferUsage::IndirectArgsも
+        // raw UAVを1つだけ持つ同じ構造のため共用し、isIndirectArgsで区別する
+        // (DispatchIndirectがUsageを検証するため)
         DX11Buffer(
             Microsoft::WRL::ComPtr<ID3D11Buffer> buffer,
             uint32_t strideInBytes,
-            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = nullptr);
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav = nullptr,
+            bool isIndirectArgs = false);
 
         // BufferUsage::StructuredReadOnly用: D3D11_USAGE_DYNAMICで作成し、UpdateBufferがMap/Unmap経由で
         // 書き込む。srvは読み取り専用バインド(PSSetShaderResources)用。
@@ -35,6 +39,14 @@ namespace Kurenai::RHI
             Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav,
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv);
 
+        // BufferUsage::Readback用: D3D11_USAGE_STAGING + CPU_ACCESS_READ。ビューは一切持たない。
+        // ReadbackDataがMapを呼ぶためにイミディエイトコンテキストを控える
+        // (DX12Bufferがm_Deviceを持っているのと同じ理由)
+        DX11Buffer(
+            Microsoft::WRL::ComPtr<ID3D11Buffer> buffer,
+            uint32_t sizeInBytes,
+            Microsoft::WRL::ComPtr<ID3D11DeviceContext> context);
+
         ID3D11Buffer* GetBuffer() const { return m_Buffer.Get(); }
         uint32_t GetStride() const { return m_StrideInBytes; }
         // BufferUsage::Structured / StructuredRWで作成した場合のみ非nullptr(コンピュートシェーダーからのRW用)
@@ -45,6 +57,12 @@ namespace Kurenai::RHI
         bool IsDynamic() const { return m_IsDynamic; }
         // D3D11_USAGE_IMMUTABLEで作成されたか(UpdateBufferが更新を弾くのに使う)
         bool IsImmutable() const { return m_IsImmutable; }
+        // BufferUsage::IndirectArgsで作成されたか(DispatchIndirectが引数バッファを検証するのに使う)
+        bool IsIndirectArgs() const { return m_IsIndirectArgs; }
+        // BufferUsage::Readbackで作成されたか(CopyBufferToReadbackが行き先を検証するのに使う)
+        bool IsReadback() const { return m_IsReadback; }
+        // BufferUsage::Readbackの内容をCPUへ写す。詳細はIRHIBuffer::ReadbackDataのコメント
+        bool ReadbackData(void* outData, uint32_t sizeInBytes) override;
 
     private:
         Microsoft::WRL::ComPtr<ID3D11Buffer> m_Buffer;
@@ -53,5 +71,11 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_Srv;
         bool m_IsDynamic = false;
         bool m_IsImmutable = false;
+        bool m_IsIndirectArgs = false;
+        bool m_IsReadback = false;
+        // BufferUsage::Readbackでのみ非nullptr。ReadbackDataがMap/Unmapに使う
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
+        // BufferUsage::Readbackでのみ有効(ReadbackDataの範囲検証に使う)
+        uint32_t m_SizeInBytes = 0;
     };
 }

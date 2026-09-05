@@ -32,6 +32,11 @@ namespace Kurenai::RHI
         std::fill(std::begin(m_PendingSrvHandles), std::end(m_PendingSrvHandles), nullSrv);
         std::fill(std::begin(m_PendingComputeSrvHandles), std::end(m_PendingComputeSrvHandles), nullSrv);
         std::fill(std::begin(m_PendingComputeUavHandles), std::end(m_PendingComputeUavHandles), nullUav);
+
+        // DispatchMeshはID3D12GraphicsCommandList6で追加されたメソッド。
+        // 取得に失敗しても致命的ではない(メッシュシェーダー経路が使えないだけ)ため、
+        // ここでは黙って握り、実際に呼ばれたときにDispatchMeshがログを出す
+        device->GetCommandList()->QueryInterface(IID_PPV_ARGS(&m_CommandList6));
     }
 
     void DX12CommandList::UnbindSrvSlotsBoundTo(IRHITexture* texture)
@@ -166,17 +171,46 @@ namespace Kurenai::RHI
         dxViewport.MaxDepth = viewport.MaxDepth;
         cmdList->RSSetViewports(1, &dxViewport);
 
-        // DX12はD3D11と異なりシザー矩形を必ず設定する必要があるため、ビューポート全体を覆う矩形を張る。
-        // DX11はラスタライザステートがScissorEnable=FALSEでそもそもクリップしないので、
-        // ここでビューポートより内側に丸めると「DX12だけ端が1px欠ける」という差になる。
-        // レターボックス表示ではTopLeftX/Widthが非整数になるため、左上はfloor・右下はceilで
-        // 必ずビューポート全体を含むように切り上げる
-        D3D12_RECT scissorRect{};
-        scissorRect.left = static_cast<LONG>(std::floor(viewport.TopLeftX));
-        scissorRect.top = static_cast<LONG>(std::floor(viewport.TopLeftY));
-        scissorRect.right = static_cast<LONG>(std::ceil(viewport.TopLeftX + viewport.Width));
-        scissorRect.bottom = static_cast<LONG>(std::ceil(viewport.TopLeftY + viewport.Height));
-        cmdList->RSSetScissorRects(1, &scissorRect);
+        // D3D12はシザーが常時有効で、コマンドリストのリセット直後は矩形0本(=全クリップ)なので、
+        // 必ずビューポート全体を覆う矩形を張る。丸め方はDX11と共有するヘルパーに寄せてある
+        // (片方だけ直すとバックエンド間で端の1pxがずれるため。MakeFullViewportScissorRect参照)。
+        // SetScissorRectで絞っていてもここでビューポート全体へ戻る仕様
+        m_CurrentViewport = viewport;
+        m_HasViewport = true;
+        ApplyScissorRect(MakeFullViewportScissorRect(viewport));
+    }
+
+    void DX12CommandList::SetScissorRect(const ScissorRect& rect)
+    {
+        if (!m_HasViewport)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "SetScissorRect: SetViewportより先に呼ばれました。クランプ先のビューポートが"
+                "決まらないため、この呼び出しを無視します");
+            return;
+        }
+        ApplyScissorRect(ClampScissorRectToViewport(rect, m_CurrentViewport));
+    }
+
+    void DX12CommandList::ResetScissorRect()
+    {
+        if (!m_HasViewport)
+        {
+            Core::Logger::Error("DX12", "ResetScissorRect: SetViewportより先に呼ばれました。この呼び出しを無視します");
+            return;
+        }
+        ApplyScissorRect(MakeFullViewportScissorRect(m_CurrentViewport));
+    }
+
+    void DX12CommandList::ApplyScissorRect(const ScissorRect& rect)
+    {
+        D3D12_RECT dxRect{};
+        dxRect.left = rect.Left;
+        dxRect.top = rect.Top;
+        dxRect.right = rect.Right;
+        dxRect.bottom = rect.Bottom;
+        m_Device->GetCommandList()->RSSetScissorRects(1, &dxRect);
     }
 
     void DX12CommandList::SetPipelineState(IRHIPipelineState* pipelineState)
@@ -184,13 +218,25 @@ namespace Kurenai::RHI
         auto* dx12PipelineState = static_cast<DX12PipelineState*>(pipelineState);
         auto* cmdList = m_Device->GetCommandList();
 
+        // メッシュシェーダーPSOは専用のルートシグネチャで作られているため、束ねる方を切り替える。
+        // レイアウト(b0/b1 + SRVテーブル + サンプラーテーブル)は通常のものと同一なので、
+        // 以降のルート引数の張り直しはどちらでも同じコードで済む
+        m_CurrentPipelineIsMesh = dx12PipelineState->IsMeshPipeline();
+        ID3D12RootSignature* rootSignature =
+            m_CurrentPipelineIsMesh ? m_Device->GetMeshRootSignature() : m_Device->GetRootSignature();
+
         // SetGraphicsRootSignatureは以前バインドされていたルート引数をすべて無効化する。
         // DX11のイミディエイトコンテキストはパイプラインステートを切り替えても定数バッファ・SRV・
         // サンプラーのバインドを保持するため、ここでシャドウコピーから全ルート引数を張り直して
         // 挙動を揃える(そうしないと呼び出し側にDX12だけの「SetPipelineStateより後に呼ぶ」制約が残る)
-        cmdList->SetGraphicsRootSignature(m_Device->GetRootSignature());
+        cmdList->SetGraphicsRootSignature(rootSignature);
         cmdList->SetPipelineState(dx12PipelineState->GetPipelineState());
-        cmdList->IASetPrimitiveTopology(dx12PipelineState->GetTopology());
+        // メッシュシェーダーパイプラインには入力アセンブラが無く、トポロジは
+        // メッシュシェーダーの[outputtopology]属性で決まる
+        if (!m_CurrentPipelineIsMesh)
+        {
+            cmdList->IASetPrimitiveTopology(dx12PipelineState->GetTopology());
+        }
 
         // 定数バッファ(ルートパラメータ0/1)。一度もバインドされていないスロットはアドレスが0なので飛ばす
         for (uint32_t slot = 0; slot < kConstantBufferSlotCount; ++slot)
@@ -255,18 +301,44 @@ namespace Kurenai::RHI
 
     void DX12CommandList::SetTexture(uint32_t slot, IRHITexture* texture)
     {
+        BindTexture(slot, texture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, "SetTexture");
+    }
+
+    void DX12CommandList::SetTextureAllStages(uint32_t slot, IRHITexture* texture)
+    {
+        // ピクセルシェーダー以外のグラフィックスステージ(増幅シェーダー・メッシュシェーダー)からも
+        // 読めるよう、NON_PIXELも立てて遷移させる。ディスクリプタの張り方はSetTextureと同一
+        // (メッシュシェーダー用ルートシグネチャはSRVテーブルの可視性をALLにしてある)
+        BindTexture(
+            slot, texture,
+            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            "SetTextureAllStages");
+    }
+
+    void DX12CommandList::BindTexture(
+        uint32_t slot, IRHITexture* texture, D3D12_RESOURCE_STATES state, const char* callerName)
+    {
         if (slot >= kTextureSlotCount)
         {
             Core::Logger::Error(
                 "DX12",
-                "SetTexture: スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0〜t" +
+                std::string(callerName) + ": スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0〜t" +
                     std::to_string(kTextureSlotCount - 1) + ")。バインドをスキップします");
+            return;
+        }
+
+        if (texture == nullptr)
+        {
+            // nullptrをそのまま進めるとTransitionToでnull参照になる
+            // (SetComputeShaderResourceBufferが同じ状況をエラーにしているのと同じ扱い)
+            Core::Logger::Error(
+                "DX12", std::string(callerName) + ": テクスチャがnullptrです。バインドをスキップします");
             return;
         }
 
         auto* dx12Texture = static_cast<DX12Texture*>(texture);
         auto* cmdList = m_Device->GetCommandList();
-        dx12Texture->TransitionTo(cmdList, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        dx12Texture->TransitionTo(cmdList, state);
 
         // SRVテーブルの割り当て・CopyDescriptorsはこの場では行わず、コピー元だけ記録しておく。
         // 実際の割り当て・コピーはDraw直前のFlushPendingSrvWrites()でまとめて行う(そこで
@@ -435,10 +507,43 @@ namespace Kurenai::RHI
         m_Device->GetCommandList()->DrawInstanced(vertexCount, 1, startVertexLocation, 0);
     }
 
-    void DX12CommandList::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
+    void DX12CommandList::DrawIndexed(
+        uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t instanceCount)
     {
+        if (instanceCount == 0)
+        {
+            Core::Logger::Error("DX12", "DrawIndexed: instanceCountが0のため描画をスキップします");
+            return;
+        }
+
         FlushPendingSrvWrites();
-        m_Device->GetCommandList()->DrawIndexedInstanced(indexCount, 1, startIndexLocation, baseVertexLocation, 0);
+        // 第5引数(StartInstanceLocation)は常に0。SV_InstanceIDへ加算されないため、
+        // ここでずらしても頂点シェーダーからは見えない(IRHICommandList.hの規約どおり
+        // 開始位置は定数バッファで渡す)
+        m_Device->GetCommandList()->DrawIndexedInstanced(
+            indexCount, instanceCount, startIndexLocation, baseVertexLocation, 0);
+    }
+
+    void DX12CommandList::DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+    {
+        if (!m_CommandList6)
+        {
+            Core::Logger::Error("DX12", "DispatchMeshが呼ばれましたが、ID3D12GraphicsCommandList6を取得できていません");
+            return;
+        }
+        if (!m_CurrentPipelineIsMesh)
+        {
+            // 通常のグラフィックスPSOのままDispatchMeshを積むと、D3D12のデバッグレイヤーが
+            // 出す前に実行時の挙動が未定義になる。呼び出し順の誤りとして早めに知らせる
+            Core::Logger::Error(
+                "DX12", "DispatchMeshの前にメッシュシェーダーのパイプラインステートが設定されていません");
+            return;
+        }
+
+        // SRVテーブル・サンプラーテーブルの反映は通常の描画とまったく同じ経路を使う。
+        // メッシュ用ルートシグネチャはレイアウトを揃えてあるため、ここで分岐は要らない
+        FlushPendingSrvWrites();
+        m_CommandList6->DispatchMesh(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
     }
 
     void DX12CommandList::SetComputePipelineState(IRHIPipelineState* pipelineState)
@@ -520,6 +625,14 @@ namespace Kurenai::RHI
                 "DX12",
                 "SetComputeShaderResourceBuffer: スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0〜t" +
                     std::to_string(kComputeSrvSlotCount - 1) + ")。バインドをスキップします");
+            return;
+        }
+
+        // nullptrをそのまま進めるとTransitionToでnull参照になる。DX11実装は同じ状況を
+        // ログを残してスキップしているので、挙動を揃える
+        if (!buffer)
+        {
+            Core::Logger::Error("DX12", "SetComputeShaderResourceBuffer: バッファがnullptrのためバインドをスキップします");
             return;
         }
 
@@ -664,7 +777,262 @@ namespace Kurenai::RHI
     {
         FlushPendingComputeWrites();
         m_Device->GetCommandList()->Dispatch(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+        ReleaseComputeUavBindingsAfterDispatch();
+    }
 
+    void DX12CommandList::DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes)
+    {
+        if (!argsBuffer)
+        {
+            Core::Logger::Error("DX12", "DispatchIndirect: 引数バッファがnullptrです。ディスパッチをスキップします");
+            return;
+        }
+
+        auto* dx12Buffer = static_cast<DX12Buffer*>(argsBuffer);
+        if (!dx12Buffer->IsIndirectArgs())
+        {
+            Core::Logger::Error(
+                "DX12", "DispatchIndirect: BufferUsage::IndirectArgs以外のバッファが渡されました。ディスパッチをスキップします");
+            return;
+        }
+        if ((offsetInBytes % 4) != 0)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "DispatchIndirect: offsetInBytes(" + std::to_string(offsetInBytes) +
+                    ")が4の倍数ではありません。ディスパッチをスキップします");
+            return;
+        }
+
+        ID3D12CommandSignature* signature = m_Device->GetDispatchCommandSignature();
+        if (!signature)
+        {
+            Core::Logger::Error("DX12", "DispatchIndirect: コマンドシグネチャが未作成です。ディスパッチをスキップします");
+            return;
+        }
+
+        FlushPendingComputeWrites();
+
+        // 【この遷移はUAVバインドと両立しない】引数バッファ自身をこのディスパッチのUAVスロットへ
+        // 張ったままINDIRECT_ARGUMENTへ遷移させることはできない。引数を書くディスパッチと
+        // それを消費するDispatchIndirectは必ず別の呼び出しに分けること
+        dx12Buffer->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
+        m_Device->GetCommandList()->ExecuteIndirect(
+            signature, 1, dx12Buffer->GetResource(), offsetInBytes, nullptr, 0);
+
+        ReleaseComputeUavBindingsAfterDispatch();
+    }
+
+    void DX12CommandList::DispatchMeshIndirect(
+        IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount, uint32_t countOffsetInBytes)
+    {
+        if (!argsBuffer)
+        {
+            Core::Logger::Error("DX12", "DispatchMeshIndirect: 引数バッファがnullptrです。描画をスキップします");
+            return;
+        }
+        if (maxCommandCount == 0)
+        {
+            // 候補が1件も無いフレーム。エラーではないので黙って何もしない
+            return;
+        }
+
+        if (!m_CurrentPipelineIsMesh)
+        {
+            // 通常のグラフィックスPSOのままだと、コマンドシグネチャが要求する
+            // ルートシグネチャ(メッシュ用)と食い違う。DispatchMeshと同じ理由で早めに知らせる
+            Core::Logger::Error(
+                "DX12", "DispatchMeshIndirect: 先にメッシュシェーダーのパイプラインステートを設定してください");
+            return;
+        }
+
+        auto* dx12Buffer = static_cast<DX12Buffer*>(argsBuffer);
+        if (!dx12Buffer->IsIndirectArgs())
+        {
+            Core::Logger::Error(
+                "DX12", "DispatchMeshIndirect: BufferUsage::IndirectArgs以外のバッファが渡されました。描画をスキップします");
+            return;
+        }
+        if ((argsOffsetInBytes % 4) != 0 || (countOffsetInBytes % 4) != 0)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "DispatchMeshIndirect: オフセット(引数 " + std::to_string(argsOffsetInBytes) + " / 件数 " +
+                    std::to_string(countOffsetInBytes) + ")が4の倍数ではありません。描画をスキップします");
+            return;
+        }
+
+        ID3D12CommandSignature* signature = m_Device->GetDispatchMeshCommandSignature();
+        if (!signature)
+        {
+            Core::Logger::Error("DX12", "DispatchMeshIndirect: コマンドシグネチャが未作成です。描画をスキップします");
+            return;
+        }
+
+        // 【引数バッファと件数バッファが同じ1本であること】D3D12はこの2つに別々の
+        // リソース状態を要求しないため同居させてよく、遷移も1回で済む。
+        // 別リソースにすると、片方だけINDIRECT_ARGUMENTへ遷移し忘れても
+        // デバッグレイヤ無しでは黙って壊れる
+        dx12Buffer->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
+        // 【DispatchMeshと同じくここで張る】SRVテーブル(ルートパラメータ2)はSetPipelineStateで
+        // 無効化されたままで、描画の直前にディスクリプタのブロックを払い出して張り直す設計。
+        // これを飛ばすと、シェーダーが宣言しているテーブルが未バインドのまま実行される
+        FlushPendingSrvWrites();
+
+        m_Device->GetCommandList()->ExecuteIndirect(
+            signature, maxCommandCount, dx12Buffer->GetResource(), argsOffsetInBytes, dx12Buffer->GetResource(),
+            countOffsetInBytes);
+    }
+
+    void DX12CommandList::ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value)
+    {
+        if (!buffer)
+        {
+            Core::Logger::Error("DX12", "ClearUnorderedAccessBufferUint: バッファがnullptrです。クリアをスキップします");
+            return;
+        }
+
+        auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
+        if (!dx12Buffer->HasUav())
+        {
+            Core::Logger::Error(
+                "DX12", "ClearUnorderedAccessBufferUint: UAVを持たないバッファが渡されました。クリアをスキップします");
+            return;
+        }
+
+        // ClearUnorderedAccessViewUintは「シェーダー可視ヒープ上のGPUハンドル」と
+        // 「非シェーダー可視ヒープ上のCPUハンドル」の両方を要求する。後者はバッファが
+        // 作成時から持っているものをそのまま使い、前者はコンピュート用ディスクリプタリングから
+        // 1枠だけ借りてコピーして作る。
+        //
+        // 【バインド状態は変わらない】SetComputeRootDescriptorTableは呼ばないため、
+        // 直前にSetComputeUnorderedAccess*で積んだシャドウには一切影響しない
+        // 構造化バッファのUAVはClearUnorderedAccessView*が受け付けないため、
+        // クリア専用のraw UAVを使う(DX12Buffer::GetOrCreateClearUavCpuHandleのコメント参照)
+        const D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle = dx12Buffer->GetOrCreateClearUavCpuHandle();
+        if (cpuHandle.ptr == 0)
+        {
+            Core::Logger::Error(
+                "DX12", "ClearUnorderedAccessBufferUint: クリア用のUAVを用意できませんでした。クリアをスキップします");
+            return;
+        }
+
+        const uint32_t tableIndex = m_Device->AllocateComputeTableBlock(1);
+        auto* heap = m_Device->GetShaderVisibleSrvHeap();
+        m_Device->GetDevice()->CopyDescriptorsSimple(
+            1, heap->GetCpuHandle(tableIndex), cpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+        dx12Buffer->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        const UINT values[4] = { value, value, value, value };
+        m_Device->GetCommandList()->ClearUnorderedAccessViewUint(
+            heap->GetGpuHandle(tableIndex), cpuHandle, dx12Buffer->GetResource(), values, 0, nullptr);
+
+        // 後続のディスパッチがクリア後の値を読むことを保証する
+        const D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(dx12Buffer->GetResource());
+        m_Device->GetCommandList()->ResourceBarrier(1, &barrier);
+    }
+
+    void DX12CommandList::CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes)
+    {
+        if (dst == nullptr || src == nullptr || sizeInBytes == 0)
+        {
+            Core::Logger::Error("DX12", "CopyBufferToReadback: 引数が不正です。コピーをスキップします");
+            return;
+        }
+
+        auto* dx12Dst = static_cast<DX12Buffer*>(dst);
+        auto* dx12Src = static_cast<DX12Buffer*>(src);
+        if (!dx12Dst->IsReadback())
+        {
+            Core::Logger::Error(
+                "DX12", "CopyBufferToReadback: コピー先がBufferUsage::Readbackではありません。コピーをスキップします");
+            return;
+        }
+
+        // コピー元をCOPY_SOURCEへ。コピー先(READBACKヒープ)はCOPY_DESTから動かせないので遷移しない
+        dx12Src->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        m_Device->GetCommandList()->CopyBufferRegion(
+            dx12Dst->GetResource(), 0, dx12Src->GetResource(), 0, sizeInBytes);
+    }
+
+    void DX12CommandList::CopyTextureToReadback(
+        IRHITexture* dst, IRHITexture* src, uint32_t mipLevel, uint32_t arraySlice)
+    {
+        if (dst == nullptr || src == nullptr)
+        {
+            Core::Logger::Error("DX12", "CopyTextureToReadback: 引数がnullptrです。コピーをスキップします");
+            return;
+        }
+
+        auto* dx12Dst = static_cast<DX12Texture*>(dst);
+        auto* dx12Src = static_cast<DX12Texture*>(src);
+        if (!dx12Dst->IsReadback())
+        {
+            Core::Logger::Error(
+                "DX12",
+                "CopyTextureToReadback: コピー先がCreateReadbackTextureで作ったテクスチャではありません。"
+                "コピーをスキップします");
+            return;
+        }
+
+        ID3D12Resource* srcResource = dx12Src->GetResource();
+        if (srcResource == nullptr)
+        {
+            Core::Logger::Error("DX12", "CopyTextureToReadback: コピー元がリソースを持っていません");
+            return;
+        }
+
+        const D3D12_RESOURCE_DESC srcDesc = srcResource->GetDesc();
+        if (mipLevel >= srcDesc.MipLevels || arraySlice >= srcDesc.DepthOrArraySize)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "CopyTextureToReadback: サブリソースの指定が範囲外です (mipLevel=" + std::to_string(mipLevel) +
+                    "/" + std::to_string(srcDesc.MipLevels) + ", arraySlice=" + std::to_string(arraySlice) + "/" +
+                    std::to_string(srcDesc.DepthOrArraySize) + ")");
+            return;
+        }
+
+        // 受け皿はCreateReadbackTextureの時点で「特定のミップ段の寸法」に合わせて作ってある。
+        // 別のミップを指定されるとサイズが合わず、はみ出して書くか途中で切れる。
+        // どちらも静かに壊れるので、寸法を突き合わせて弾く
+        const DX12ReadbackState* readback = dx12Dst->GetReadbackState();
+        const uint32_t mipWidth = std::max<uint32_t>(1u, static_cast<uint32_t>(srcDesc.Width) >> mipLevel);
+        const uint32_t mipHeight = std::max<uint32_t>(1u, srcDesc.Height >> mipLevel);
+        if (readback->Desc.Width != mipWidth || readback->Desc.Height != mipHeight)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "CopyTextureToReadback: 受け皿の寸法(" + std::to_string(readback->Desc.Width) + "x" +
+                    std::to_string(readback->Desc.Height) + ")がコピー元のミップ" + std::to_string(mipLevel) +
+                    "(" + std::to_string(mipWidth) + "x" + std::to_string(mipHeight) +
+                    ")と一致しません。CreateReadbackTextureに渡したミップと同じものを指定してください");
+            return;
+        }
+
+        // コピー元をCOPY_SOURCEへ。コピー先(READBACKヒープ)はCOPY_DESTから動かせないので遷移しない。
+        // 【元の状態へ手で戻さない】TransitionToはALL_SUBRESOURCESで遷移させ、現在状態を覚えている。
+        // 次にこのテクスチャを使うSetRenderTargets/SetTextureが必要な遷移を自分で発行するため、
+        // ここで戻すと二重に遷移して状態追跡がずれる
+        dx12Src->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+        const UINT srcSubresource =
+            D3D12CalcSubresource(mipLevel, arraySlice, 0, srcDesc.MipLevels, srcDesc.DepthOrArraySize);
+
+        const CD3DX12_TEXTURE_COPY_LOCATION dstLocation(dx12Dst->GetResource(), readback->Footprint);
+        const CD3DX12_TEXTURE_COPY_LOCATION srcLocation(srcResource, srcSubresource);
+
+        // 【pSrcBoxはnullptr】サブリソース全体をコピーする。深度フォーマットのコピーは
+        // 部分矩形の指定が許されておらず(D3D12の制約)、渡すとデバッグレイヤーのエラーになる
+        m_Device->GetCommandList()->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
+    }
+
+    void DX12CommandList::ReleaseComputeUavBindingsAfterDispatch()
+    {
         // このDispatchでUAVとして書き込んだリソースは、直後に別のDispatchやSRVとして読む場合に
         // 書き込み完了を保証する必要があるため、UAVバリアを発行しておく。
         // あわせてUAVスロットのシャドウをnullディスクリプタへ戻す。DX11がDispatch直後に

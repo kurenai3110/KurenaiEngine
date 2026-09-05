@@ -59,7 +59,7 @@
       <PreprocessorDefinitions>_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\KurenaiEngine\Source\Library;$(SolutionDir)..\..\KurenaiEngine\Source\Engine;$(SolutionDir)..\..\ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)..\..\ThirdParty\DirectXTex\Common;$(SolutionDir)..\..\ThirdParty\assimp\include;$(SolutionDir)..\..\ThirdParty\assimp\build\include;$(SolutionDir)..\..\ThirdParty\xatlas\source\xatlas;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\..\KurenaiEngine\Source\Library;$(SolutionDir)..\..\KurenaiEngine\Source\Engine;$(SolutionDir)..\..\ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)..\..\ThirdParty\DirectXTex\Common;$(SolutionDir)..\..\ThirdParty\assimp\include;$(SolutionDir)..\..\ThirdParty\assimp\build\include;$(SolutionDir)..\..\ThirdParty\xatlas\source\xatlas;$(SolutionDir)..\..\ThirdParty\meshoptimizer\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -78,7 +78,7 @@
       <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\KurenaiEngine\Source\Library;$(SolutionDir)..\..\KurenaiEngine\Source\Engine;$(SolutionDir)..\..\ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)..\..\ThirdParty\DirectXTex\Common;$(SolutionDir)..\..\ThirdParty\assimp\include;$(SolutionDir)..\..\ThirdParty\assimp\build\include;$(SolutionDir)..\..\ThirdParty\xatlas\source\xatlas;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\..\KurenaiEngine\Source\Library;$(SolutionDir)..\..\KurenaiEngine\Source\Engine;$(SolutionDir)..\..\ThirdParty\DirectXTex\DirectXTex;$(SolutionDir)..\..\ThirdParty\DirectXTex\Common;$(SolutionDir)..\..\ThirdParty\assimp\include;$(SolutionDir)..\..\ThirdParty\assimp\build\include;$(SolutionDir)..\..\ThirdParty\xatlas\source\xatlas;$(SolutionDir)..\..\ThirdParty\meshoptimizer\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -104,10 +104,46 @@ exit /b 0</Command>
     <ClCompile Include="Source\ModelSource.cpp" />
     <ClCompile Include="Source\OcclusionBaker.cpp" />
     <ClCompile Include="Source\PackageWriter.cpp" />
+    <ClCompile Include="Source\MeshletBuilder.cpp" />
     <!-- xatlas(MIT)のUV展開。ライトマップUVの生成にだけ使うため、ライブラリ化せず
          ソースを直接このプロジェクトへ取り込む(assimpのようなCMakeビルドは不要)。
          サードパーティのコードなので警告レベルを下げ、SDLチェックも外す -->
     <ClCompile Include="..\..\ThirdParty\xatlas\source\xatlas\xatlas.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <ConformanceMode>false</ConformanceMode>
+    </ClCompile>
+    <!-- meshoptimizer(MIT)のメッシュレット生成。xatlasと同じくライブラリ化せず
+         必要なソースだけを直接取り込む(CMakeビルドは不要)。
+         使うのは clusterizer(buildMeshlets)・meshletutils(computeMeshletBounds)・
+         vcacheoptimizer / vfetchoptimizer(メッシュレット化前の頂点並べ替え)・
+         simplifier(メッシュレットの離散LOD)と、それらが共有するアロケータの6本 -->
+    <ClCompile Include="..\..\ThirdParty\meshoptimizer\src\clusterizer.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <ConformanceMode>false</ConformanceMode>
+    </ClCompile>
+    <ClCompile Include="..\..\ThirdParty\meshoptimizer\src\meshletutils.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <ConformanceMode>false</ConformanceMode>
+    </ClCompile>
+    <ClCompile Include="..\..\ThirdParty\meshoptimizer\src\vcacheoptimizer.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <ConformanceMode>false</ConformanceMode>
+    </ClCompile>
+    <ClCompile Include="..\..\ThirdParty\meshoptimizer\src\vfetchoptimizer.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <ConformanceMode>false</ConformanceMode>
+    </ClCompile>
+    <ClCompile Include="..\..\ThirdParty\meshoptimizer\src\simplifier.cpp">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <ConformanceMode>false</ConformanceMode>
+    </ClCompile>
+    <ClCompile Include="..\..\ThirdParty\meshoptimizer\src\allocator.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>
       <SDLCheck>false</SDLCheck>
       <ConformanceMode>false</ConformanceMode>
@@ -117,6 +153,7 @@ exit /b 0</Command>
     <ClInclude Include="Source\ModelSource.h" />
     <ClInclude Include="Source\OcclusionBaker.h" />
     <ClInclude Include="Source\PackageWriter.h" />
+    <ClInclude Include="Source\MeshletBuilder.h" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\KurenaiEngine\KurenaiEngineLibrary.vcxproj">

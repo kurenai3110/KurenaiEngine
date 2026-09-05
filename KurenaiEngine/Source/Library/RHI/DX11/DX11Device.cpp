@@ -1,14 +1,15 @@
 #include "DX11Device.h"
 
-#include <d3dcompiler.h>
-
 #include <DirectXTex.h>
 
+#include <algorithm>
 #include <cwchar>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "Core/StringUtil.h"
 #include "DX11Buffer.h"
 #include "DX11CommandList.h"
 #include "DX11ComputePipelineState.h"
@@ -20,6 +21,8 @@
 #include "DX11SwapChain.h"
 #include "DX11Texture.h"
 #include "DX11Util.h"
+#include "RHI/RHIReadbackFormat.h"
+#include "RHI/RHIShaderPackage.h"
 #include "RHI/TextureImage.h"
 
 namespace Kurenai::RHI
@@ -100,6 +103,32 @@ namespace Kurenai::RHI
 
         ThrowIfFailed(adapter->GetParent(IID_PPV_ARGS(&m_Factory)), "DXGIファクトリの取得に失敗しました");
 
+        // VRAM使用量の問い合わせ(QueryVideoMemoryInfo)はIDXGIAdapter3にしかない。
+        // 取れなくても描画には影響しないため、警告だけ出して続行する
+        if (FAILED(adapter.As(&m_Adapter)))
+        {
+            Core::Logger::Warning("DX11", "IDXGIAdapter3を取得できませんでした(VRAM使用量を表示できません)");
+        }
+
+        // 実行中のGPUが何かをログに残す。どのGPUで測った値なのかが分からないと性能の記録が
+        // 後から比較できなくなる。診断目的の情報なので、取得に失敗しても描画は続行する
+        DXGI_ADAPTER_DESC adapterDesc{};
+        if (SUCCEEDED(adapter->GetDesc(&adapterDesc)))
+        {
+            constexpr uint64_t kBytesPerMiB = 1024ull * 1024ull;
+            Core::Logger::Info(
+                "DX11",
+                "GPU: " + Core::WideToUtf8(adapterDesc.Description) + " (専用VRAM " +
+                    std::to_string(adapterDesc.DedicatedVideoMemory / kBytesPerMiB) + "MB / 専用システムメモリ " +
+                    std::to_string(adapterDesc.DedicatedSystemMemory / kBytesPerMiB) + "MB / 共有システムメモリ " +
+                    std::to_string(adapterDesc.SharedSystemMemory / kBytesPerMiB) + "MB, 機能レベル " +
+                    (selectedFeatureLevel == D3D_FEATURE_LEVEL_11_1 ? "11_1" : "11_0") + ")");
+        }
+        else
+        {
+            Core::Logger::Warning("DX11", "DXGIアダプタの情報を取得できませんでした(GPU名をログに残せません)");
+        }
+
         m_ImmediateCommandList = std::make_unique<DX11CommandList>(m_Context);
 
         // レイトレーシング(DXR)はD3D12の機能でDX11には存在しない。上位層はこの後
@@ -164,6 +193,68 @@ namespace Kurenai::RHI
             ThrowIfFailed(m_Device->CreateUnorderedAccessView(structuredBuffer.Get(), &uavDesc, &uav), "アンオーダードアクセスビューの作成に失敗しました");
 
             return std::make_unique<DX11Buffer>(structuredBuffer, desc.StrideInBytes, uav);
+        }
+
+        // GPUが書いた値をCPUで読むための受け皿。ステージングバッファとして作る。
+        // シェーダーからは見えないのでBindFlagsは0(ビューも張らない)
+        if (desc.Usage == BufferUsage::Readback)
+        {
+            if (desc.SizeInBytes == 0)
+            {
+                Core::Logger::Error("DX11", "Readbackバッファのサイズが0です。作成を中止します");
+                throw std::runtime_error("Readbackバッファのサイズが不正です");
+            }
+
+            D3D11_BUFFER_DESC readbackDesc{};
+            readbackDesc.ByteWidth = desc.SizeInBytes;
+            readbackDesc.Usage = D3D11_USAGE_STAGING;
+            readbackDesc.BindFlags = 0;
+            readbackDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> readbackBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&readbackDesc, nullptr, &readbackBuffer),
+                "リードバックバッファの作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(readbackBuffer, desc.SizeInBytes, m_Context);
+        }
+
+        // 間接ディスパッチの引数バッファ。D3D11はDRAWINDIRECT_ARGSと構造化バッファを同時に
+        // 指定できないため、raw(ByteAddress)バッファとして作りHLSL側もRWByteAddressBufferで受ける
+        // (RHIEnums.hのBufferUsage::IndirectArgsのコメント参照)
+        if (desc.Usage == BufferUsage::IndirectArgs)
+        {
+            // raw UAVは4バイト単位でアドレスを刻むため、サイズも4の倍数でなければ末尾が書けない
+            if (desc.SizeInBytes == 0 || (desc.SizeInBytes % 4) != 0)
+            {
+                Core::Logger::Error("DX11", "IndirectArgsバッファのサイズが0か4の倍数ではありません。作成を中止します");
+                throw std::runtime_error("IndirectArgsバッファのサイズが不正です");
+            }
+
+            D3D11_BUFFER_DESC argsDesc{};
+            argsDesc.ByteWidth = desc.SizeInBytes;
+            argsDesc.Usage = D3D11_USAGE_DEFAULT;
+            argsDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+            argsDesc.MiscFlags = D3D11_RESOURCE_MISC_DRAWINDIRECT_ARGS | D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+
+            Microsoft::WRL::ComPtr<ID3D11Buffer> argsBuffer;
+            ThrowIfFailed(
+                m_Device->CreateBuffer(&argsDesc, nullptr, &argsBuffer),
+                "間接ディスパッチ引数バッファ(IndirectArgs)の作成に失敗しました");
+
+            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+            uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+            uavDesc.Buffer.FirstElement = 0;
+            uavDesc.Buffer.NumElements = desc.SizeInBytes / 4;
+            uavDesc.Buffer.Flags = D3D11_BUFFER_UAV_FLAG_RAW;
+
+            Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView> uav;
+            ThrowIfFailed(
+                m_Device->CreateUnorderedAccessView(argsBuffer.Get(), &uavDesc, &uav),
+                "間接ディスパッチ引数バッファのアンオーダードアクセスビューの作成に失敗しました");
+
+            return std::make_unique<DX11Buffer>(argsBuffer, desc.StrideInBytes, uav, true);
         }
 
         // 読み取り専用の構造化バッファ(StructuredBuffer)。CPUから毎フレームUpdateBufferで書き換える前提
@@ -310,61 +401,47 @@ namespace Kurenai::RHI
 
     std::unique_ptr<IRHIShader> DX11Device::CreateShader(const ShaderDesc& desc)
     {
-        const char* target =
-            desc.Stage == ShaderStage::Vertex ? "vs_5_0" : desc.Stage == ShaderStage::Compute ? "cs_5_0" : "ps_5_0";
-
-        UINT compileFlags = 0;
-#if defined(_DEBUG)
-        compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-
-        Microsoft::WRL::ComPtr<ID3DBlob> bytecode;
-        Microsoft::WRL::ComPtr<ID3DBlob> errorBlob;
-        HRESULT hr = D3DCompileFromFile(
-            desc.FilePath.c_str(),
-            nullptr,
-            D3D_COMPILE_STANDARD_FILE_INCLUDE,
-            desc.EntryPoint.c_str(),
-            target,
-            compileFlags,
-            0,
-            &bytecode,
-            &errorBlob);
-
-        if (FAILED(hr))
+        // 増幅/メッシュシェーダーにはDX11のプロファイルが存在しない。下の三項演算子は
+        // 「Vertexでもcomputeでもなければpixel」という作りのため、弾かないとメッシュシェーダーを
+        // ピクセルシェーダーとしてコンパイルしようとし、原因の分かりにくいエラーになる
+        if (desc.Stage == ShaderStage::Amplification || desc.Stage == ShaderStage::Mesh)
         {
-            std::string message = "シェーダのコンパイルに失敗しました";
-            if (errorBlob)
-            {
-                message += ": ";
-                message += static_cast<const char*>(errorBlob->GetBufferPointer());
-            }
-            Core::Logger::Error("DX11", message);
-            throw std::runtime_error(message);
+            Core::Logger::Error(
+                "DX11",
+                "CreateShader: DX11はメッシュシェーダーパイプラインに対応していません。"
+                "SupportsMeshShader()で分岐してください");
+            return nullptr;
         }
 
+        // DX11が使うのは常にSM 5.0のバリアント(DXBC)。
+        // このバイトコードは、以前このメソッドがD3DCompileFromFileで実行時に作っていたものと
+        // 同じコンパイラ・同じフラグで、KurenaiShaderPackerがビルド時に焼いたもの
+        std::vector<uint8_t> bytecode =
+            LoadShaderBytecode(m_ShaderPackages, desc, Assets::ShaderVariant::Dxbc50, "DX11");
+
+        HRESULT hr = S_OK;
         Microsoft::WRL::ComPtr<ID3D11DeviceChild> shader;
         if (desc.Stage == ShaderStage::Vertex)
         {
             Microsoft::WRL::ComPtr<ID3D11VertexShader> vertexShader;
-            hr = m_Device->CreateVertexShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &vertexShader);
+            hr = m_Device->CreateVertexShader(bytecode.data(), bytecode.size(), nullptr, &vertexShader);
             shader = vertexShader;
         }
         else if (desc.Stage == ShaderStage::Compute)
         {
             Microsoft::WRL::ComPtr<ID3D11ComputeShader> computeShader;
-            hr = m_Device->CreateComputeShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &computeShader);
+            hr = m_Device->CreateComputeShader(bytecode.data(), bytecode.size(), nullptr, &computeShader);
             shader = computeShader;
         }
         else
         {
             Microsoft::WRL::ComPtr<ID3D11PixelShader> pixelShader;
-            hr = m_Device->CreatePixelShader(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), nullptr, &pixelShader);
+            hr = m_Device->CreatePixelShader(bytecode.data(), bytecode.size(), nullptr, &pixelShader);
             shader = pixelShader;
         }
         ThrowIfFailed(hr, "シェーダオブジェクトの作成に失敗しました");
 
-        return std::make_unique<DX11Shader>(desc.Stage, shader, bytecode);
+        return std::make_unique<DX11Shader>(desc.Stage, shader, std::move(bytecode));
     }
 
     std::unique_ptr<IRHIPipelineState> DX11Device::CreatePipelineState(const PipelineStateDesc& desc)
@@ -394,8 +471,8 @@ namespace Kurenai::RHI
             HRESULT hr = m_Device->CreateInputLayout(
                 elements.data(),
                 static_cast<UINT>(elements.size()),
-                vertexShader->GetBytecode()->GetBufferPointer(),
-                vertexShader->GetBytecode()->GetBufferSize(),
+                vertexShader->GetBytecode().data(),
+                vertexShader->GetBytecode().size(),
                 &inputLayout);
             ThrowIfFailed(hr, "入力レイアウトの作成に失敗しました");
         }
@@ -406,7 +483,9 @@ namespace Kurenai::RHI
         D3D11_DEPTH_STENCIL_DESC depthStencilDesc{};
         depthStencilDesc.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
         depthStencilDesc.DepthWriteMask = desc.DepthWriteEnabled ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-        depthStencilDesc.DepthFunc = desc.ReverseZ ? D3D11_COMPARISON_GREATER : D3D11_COMPARISON_LESS;
+        depthStencilDesc.DepthFunc = desc.ReverseZ
+            ? (desc.DepthAllowEqual ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_GREATER)
+            : (desc.DepthAllowEqual ? D3D11_COMPARISON_LESS_EQUAL : D3D11_COMPARISON_LESS);
         depthStencilDesc.StencilEnable = FALSE;
 
         Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilState;
@@ -471,6 +550,15 @@ namespace Kurenai::RHI
         // FrontCounterClockwise以外の挙動は変わらない
         CD3D11_RASTERIZER_DESC rasterizerDesc(D3D11_DEFAULT);
         rasterizerDesc.FrontCounterClockwise = desc.FrontCounterClockwise ? TRUE : FALSE;
+        // IRHICommandList::SetScissorRectを使えるよう常時有効にする。D3D12にはこのフラグ自体が
+        // 存在せず(シザーは常時有効)、有効にすることでDX11/DX12の挙動が揃う。
+        //
+        // 【注意】D3D11のシザー矩形の既定は「矩形0本」であり、ScissorEnable=TRUEのまま
+        // RSSetScissorRectsを一度も呼ばないと全ピクセルがクリップされて何も映らなくなる。
+        // これを防ぐため、DX11CommandList::SetViewportが必ずビューポート全体の矩形を張る
+        // (D3D12もコマンドリストのリセット直後は矩形0本という同じ危険を抱えており、
+        //  現にDX12で描画が出ている事実が「全描画がSetViewportを経由している」ことの裏付けになる)
+        rasterizerDesc.ScissorEnable = TRUE;
 
         Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerState;
         ThrowIfFailed(m_Device->CreateRasterizerState(&rasterizerDesc, &rasterizerState), "ラスタライザステートの作成に失敗しました");
@@ -499,6 +587,85 @@ namespace Kurenai::RHI
             "シェーダリソースビューの作成に失敗しました");
 
         return std::make_unique<DX11Texture>(srv);
+    }
+
+    std::unique_ptr<IRHIPendingTextureContents> DX11Device::PrepareTextureContents(
+        IRHITexture* target, const TextureImage& image)
+    {
+        auto* texture = static_cast<DX11Texture*>(target);
+        if (texture == nullptr)
+        {
+            Core::Logger::Error("DX11", "PrepareTextureContents: テクスチャがnullptrです");
+            return nullptr;
+        }
+
+        // 差し替えてよいのは、SRVしか持たないアセット由来のテクスチャに限る。
+        // レンダーターゲット等は他のビューとの整合が取れなくなる
+        if (texture->GetShaderResourceView() == nullptr || texture->HasNonSrvViews())
+        {
+            Core::Logger::Error("DX11", "PrepareTextureContents: SRV以外のビューを持つテクスチャは差し替えられません");
+            return nullptr;
+        }
+
+        // ID3D11Deviceはフリースレッドなので、ここはワーカースレッドから呼んでよい
+        // (フリースレッドでないのはImmediate Contextの方)
+        const DirectX::ScratchImage& scratchImage = image.GetImage();
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+        const HRESULT hr = DirectX::CreateShaderResourceView(
+            m_Device.Get(), scratchImage.GetImages(), scratchImage.GetImageCount(), image.GetMetadata(), &srv);
+        if (FAILED(hr))
+        {
+            // 失敗しても元の中身はそのまま。常駐ミップが減らないだけで絵は出続ける
+            Core::Logger::Error("DX11", "PrepareTextureContents: シェーダリソースビューの作成に失敗しました");
+            return nullptr;
+        }
+
+        return std::make_unique<DX11PendingTextureContents>(
+            texture, std::move(srv), static_cast<uint32_t>(image.GetMetadata().mipLevels));
+    }
+
+    std::unique_ptr<IRHIPendingTextureContents> DX11Device::PrepareTiledTextureResidency(
+        IRHITexture* target, const TiledTextureDesc& desc, const TextureImage& image, uint32_t firstMip)
+    {
+        (void)target;
+        (void)desc;
+        (void)image;
+        (void)firstMip;
+        // GetTiledResourcesTier()が0を返すため、上位層はここへ来ないのが正常
+        Core::Logger::Error("DX11", "PrepareTiledTextureResidency: DX11はタイルリソースに対応していません");
+        return nullptr;
+    }
+
+    bool DX11Device::GetVideoMemoryUsage(uint64_t& outUsedBytes, uint64_t& outBudgetBytes) const
+    {
+        if (!m_Adapter)
+        {
+            return false;
+        }
+
+        DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+        if (FAILED(m_Adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+        {
+            return false;
+        }
+        outUsedBytes = info.CurrentUsage;
+        outBudgetBytes = info.Budget;
+        return true;
+    }
+
+    bool DX11Device::CommitTextureContents(IRHIPendingTextureContents* pending)
+    {
+        auto* entry = static_cast<DX11PendingTextureContents*>(pending);
+        if (entry == nullptr || entry->Texture == nullptr || !entry->Srv)
+        {
+            Core::Logger::Error("DX11", "CommitTextureContents: 差し替え待ちの内容が不正です");
+            return false;
+        }
+
+        // 古いテクスチャの実体は、GPUが参照し終えるまでDX11ランタイムが破棄を遅らせる
+        // (DX12のような自前の遅延解放は要らない)
+        entry->Texture->SwapShaderResourceView(std::move(entry->Srv));
+        return true;
     }
 
     std::unique_ptr<IRHITexture> DX11Device::CreateSolidColorTexture(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
@@ -905,6 +1072,86 @@ namespace Kurenai::RHI
             std::vector<Microsoft::WRL::ComPtr<ID3D11UnorderedAccessView>>{}, std::move(sliceDsvs));
     }
 
+    std::unique_ptr<IRHITexture> DX11Device::CreateReadbackTexture(IRHITexture* source, uint32_t mipLevel)
+    {
+        if (source == nullptr)
+        {
+            Core::Logger::Error("DX11", "CreateReadbackTexture: コピー元がnullptrです");
+            return nullptr;
+        }
+
+        auto* dx11Source = static_cast<DX11Texture*>(source);
+        ID3D11Texture2D* sourceTexture = dx11Source->GetTexture2D();
+        if (sourceTexture == nullptr)
+        {
+            // ビューからTexture2Dを引けない = Texture3D(雲の3Dノイズ)かバッファのビュー。
+            // ファイル形式もCPU側の読み手も2次元を前提にしているため、半端に通さずここで断る
+            Core::Logger::Error(
+                "DX11", "CreateReadbackTexture: Texture2D以外はリードバックに対応していません");
+            return nullptr;
+        }
+
+        D3D11_TEXTURE2D_DESC sourceDesc{};
+        sourceTexture->GetDesc(&sourceDesc);
+        if (mipLevel >= sourceDesc.MipLevels)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "CreateReadbackTexture: ミップレベルが範囲外です (mipLevel=" + std::to_string(mipLevel) +
+                    ", MipLevels=" + std::to_string(sourceDesc.MipLevels) + ")");
+            return nullptr;
+        }
+
+        const uint32_t mipWidth = std::max<uint32_t>(1u, sourceDesc.Width >> mipLevel);
+        const uint32_t mipHeight = std::max<uint32_t>(1u, sourceDesc.Height >> mipLevel);
+
+        // 【DX12とまったく同じ表を引く】RHIReadbackFormat.hに置いてあるのは、
+        // ここを別々に書くと片方だけ直したときに静かに食い違うため
+        const TextureReadbackDesc readbackDesc = DescribeReadbackFormat(sourceDesc.Format, mipWidth, mipHeight);
+        if (readbackDesc.ElementType == TextureElementType::Unknown)
+        {
+            // BC圧縮のアセットテクスチャなど。**黙って0で埋めた結果を返さない**
+            Core::Logger::Error(
+                "DX11",
+                "CreateReadbackTexture: 対応していないフォーマットです (DXGI_FORMAT=" +
+                    std::to_string(static_cast<int>(sourceDesc.Format)) +
+                    ")。RHIReadbackFormat.hの対応表に無いため読み出せません");
+            return nullptr;
+        }
+
+        D3D11_TEXTURE2D_DESC stagingDesc{};
+        stagingDesc.Width = mipWidth;
+        stagingDesc.Height = mipHeight;
+        stagingDesc.MipLevels = 1;
+        stagingDesc.ArraySize = 1;
+        // 【typelessのまま作らない】深度はDSVとSRVを両立させるためR32_TYPELESSで作られている。
+        // typelessのステージングテクスチャをMapしても解釈が決まらないため、型付きに置き換える。
+        // CopySubresourceRegionは同じtypeグループのフォーマット間なら許すので合法
+        // (置き換えの根拠と表はRHIReadbackFormat.hのToReadbackTypedFormat。DX12と共通)
+        stagingDesc.Format = ToReadbackTypedFormat(sourceDesc.Format);
+        stagingDesc.SampleDesc.Count = 1;
+        stagingDesc.SampleDesc.Quality = 0;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.MiscFlags = 0;
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> stagingTexture;
+        const HRESULT hr = m_Device->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
+        if (FAILED(hr))
+        {
+            // 【throwしない】これは描画に必須の資源ではなく、デバッグ用の吸い出しの受け皿。
+            // 確保に失敗しても起動そのものを落とすべきではない
+            Core::Logger::Error(
+                "DX11",
+                "CreateReadbackTexture: リードバックテクスチャの作成に失敗しました (" +
+                    std::to_string(mipWidth) + "x" + std::to_string(mipHeight) + ")");
+            return nullptr;
+        }
+
+        return std::make_unique<DX11Texture>(stagingTexture, m_Context, readbackDesc);
+    }
+
     std::unique_ptr<IRHISamplerSet> DX11Device::CreateSamplerSet(const SamplerDesc* descs, uint32_t count)
     {
         if (!descs || count == 0)
@@ -1016,6 +1263,39 @@ namespace Kurenai::RHI
         (void)desc;
         Core::Logger::Error(
             "DX11", "CreateTopLevelAS: DX11はレイトレーシングに対応していません。SupportsRaytracing()で分岐してください");
+        return nullptr;
+    }
+
+    uint32_t DX11Device::RegisterBindless(IRHITexture* texture)
+    {
+        (void)texture;
+        Core::Logger::Error(
+            "DX11", "RegisterBindless: DX11はbindlessに対応していません。SupportsBindless()で分岐してください");
+        return kInvalidBindlessIndex;
+    }
+
+    uint32_t DX11Device::RegisterBindless(IRHIBuffer* buffer)
+    {
+        (void)buffer;
+        Core::Logger::Error(
+            "DX11", "RegisterBindless: DX11はbindlessに対応していません。SupportsBindless()で分岐してください");
+        return kInvalidBindlessIndex;
+    }
+
+    uint32_t DX11Device::RegisterBindlessUAV(IRHIBuffer* buffer)
+    {
+        (void)buffer;
+        Core::Logger::Error(
+            "DX11", "RegisterBindlessUAV: DX11はbindlessに対応していません。SupportsBindless()で分岐してください");
+        return kInvalidBindlessIndex;
+    }
+
+    std::unique_ptr<IRHIPipelineState> DX11Device::CreateMeshPipelineState(const MeshPipelineStateDesc& desc)
+    {
+        (void)desc;
+        Core::Logger::Error(
+            "DX11",
+            "CreateMeshPipelineState: DX11はメッシュシェーダーに対応していません。SupportsMeshShader()で分岐してください");
         return nullptr;
     }
 

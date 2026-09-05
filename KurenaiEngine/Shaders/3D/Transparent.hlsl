@@ -76,6 +76,12 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams2;
     float4 DDGIParams3;
     float4 DDGIParams4;
+    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
+    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
+    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
+    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
+    float4 DDGILODOrigin[4];
+    float4 DDGILODBase[4];
     // bent normalによる遮蔽(34章)。DeferredLighting.hlslと同じ規則を適用する
     float4 OcclusionParams;
     // これ以降(TimeParams / Sky* / Cloud* / PlanarReflectionPlane / Fog* / WaterBodyColor)は
@@ -87,23 +93,7 @@ cbuffer FrameConstants : register(b0)
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で
 // 実質未使用だが、同じルートシグネチャ/定数バッファを共有するため並び順を合わせる)。
-// 末尾のBaseColorFactorはGBuffer.hlsl/ProbeCapture.hlslも同じ位置で宣言して使う
-// (Shadow.hlslは深度しか書かないため先頭のWorldまでしか宣言していない)
-cbuffer ObjectConstants : register(b1)
-{
-    float4x4 World;
-    float4x4 NormalMatrix;
-    float MetallicFactor;
-    float RoughnessFactor;
-    float TangentSignFlip;
-    float AlphaCutoff;
-    float3 EmissiveFactor;
-    // glTFのocclusionTexture.strength(既定1.0)。GBuffer.hlslと同じ枠
-    float OcclusionStrength;
-    // glTFのbaseColorFactor(既定[1,1,1,1])。BaseColorTextureと乗算する。テクスチャを持たず
-    // baseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等)を正しく再現するために使う
-    float4 BaseColorFactor;
-};
+#include "ObjectConstants.hlsli"
 
 // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
 struct GPULight
@@ -322,12 +312,8 @@ void EvaluateIBLSplit(
     outSpecular = prefiltered * specularWeight + irradiance * multiScatterWeight;
 }
 
-float DistanceAttenuation(float distSq, float range)
-{
-    float factor = distSq / max(range * range, 1e-4f);
-    float window = saturate(1.0f - factor * factor);
-    return (window * window) / max(distSq, 0.0001f);
-}
+// 距離減衰。定義は LightAttenuation.hlsli にただ1つある
+#include "LightAttenuation.hlsli"
 
 float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float angleOffset)
 {
@@ -362,7 +348,8 @@ void EvaluateLight(
             return;
         }
 
-        atten = DistanceAttenuation(distSq, range);
+        atten = LightAttenuation(
+            lightType, toLight, distSq, range, light.Params.z, light.DirectionAngle.xyz, light.Params.w);
         if (atten <= 0.0f)
         {
             return;

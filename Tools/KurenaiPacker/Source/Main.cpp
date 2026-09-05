@@ -25,6 +25,7 @@
 
 #include <Windows.h>
 
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -35,6 +36,7 @@
 #include <vector>
 
 #include "Assets/SceneLoader.h"
+#include "Core/Logger.h"
 #include "Core/StringUtil.h"
 #include "ModelSource.h"
 #include "PackageWriter.h"
@@ -53,13 +55,27 @@ namespace
             "使い方:\n"
             "  KurenaiPacker.exe <入力モデル> -o <出力.kmodel> [オプション]     モデルをパックする\n"
             "  KurenaiPacker.exe --scene <入力.kscene> -o <出力.kscene>         シーンを検証して配置する\n"
+            "  KurenaiPacker.exe <入力モデル> --inspect [--scale S]             中身を印字するだけ(書き出さない)\n"
             "\n"
             "オプション:\n"
             "  -o, --output <path>   出力先のパス(必須)。モデルモードではこの親ディレクトリが\n"
             "                        .kgeomと.ktexのミラー先ルートになる\n"
             "      --scene <path>    <入力モデル>の代わりに.ksceneを検証・配置するモードにする\n"
+            "      --inspect         assimpが読んだ直後のシーン構造(単位系・上方向軸・ノード数・\n"
+            "                        バウンズ・マテリアルのテクスチャスロット・埋め込みテクスチャ)を\n"
+            "                        印字して終わる。パッケージは書き出さないので-oは不要。\n"
+            "                        外部から持ち込んだモデルの--scaleを決めるとき、テクスチャが\n"
+            "                        どのスロットへ入ったかを確かめるときに使う\n"
+            "      --log-suffix <S>  ログファイル名をKurenaiEngine<S>.logにする。パッカーを同時に\n"
+            "                        複数走らせるとき、ログの奪い合いを避けるために使う\n"
+            "      --timing          解析と書き出しのフェーズ別内訳を追加で印字する(モデルモードのみ)。\n"
+            "                        どこで時間が溶けているかを推測せずに決めるためのもの\n"
             "      --force           既存の.ktexがあっても再圧縮して上書きする(モデルモードのみ)\n"
             "      --jobs <N>        テクスチャ処理のワーカースレッド数(既定: 論理コア数、上限8。モデルモードのみ)\n"
+            "      --origin <X,Y,Z>  頂点位置・バウンズからこの座標を引く(--scaleを掛ける前)。\n"
+            "                        原点から遠く離れた絶対座標で作られたモデル(地理座標系など)を\n"
+            "                        原点付近へ寄せる。複数のモデルを並べる場合は全部に同じ値を\n"
+            "                        指定すること(タイルごとに変えると相対位置が壊れる)\n"
             "      --scale <S>       頂点位置・バウンズに乗算する係数(既定1.0、モデルモードのみ)。\n"
             "                        OBJ等ファイル自体に単位情報を持たない形式で、センチメートル単位の\n"
             "                        アセットをメートル単位として読み込みたい場合は0.01を指定する\n"
@@ -75,12 +91,39 @@ namespace
             "                                  (既定50000、0で分割しない)。巨大な単一メッシュの\n"
             "                                  UV展開が極端に遅くなるのを防ぐ\n"
             "      --unwrap-chunk-triangles <N>  分割後の1チャンクあたりの目標三角形数(既定100000)\n"
+            "      --translucent <名前>=<V>    指定した名前のマテリアルへ透過率(0〜1)を与える。\n"
+            "                                  葉や花弁のように薄いものが、裏から当たった光を透かして\n"
+            "                                  表側が明るく見える量。複数指定できる\n"
+            "                                  (例: --translucent Blossom=0.55)\n"
+            "      --alpha-cutout <名前>=<V>   指定した名前のマテリアルをアルファカットアウトにする。\n"
+            "                                  BaseColorのアルファがV未満の画素を捨てる(0〜1)。\n"
+            "                                  FBX/OBJにはglTFのalphaModeに相当する情報が無いため、\n"
+            "                                  葉や草のように「アルファで抜く」前提のマテリアルは\n"
+            "                                  これを指定しないと不透明な板として描かれる。複数指定できる\n"
+            "      --specular-as-orm           aiTextureType_SPECULARのテクスチャをmetallicRoughnessと\n"
+            "                                  遮蔽マップとして読む。SpecularColorスロットへ\n"
+            "                                  ORM(R=遮蔽/G=ラフネス/B=メタリック)を格納する規約の\n"
+            "                                  FBX向け。SpecularColorが本来の鏡面反射色である\n"
+            "                                  アセットに指定すると全面が金属になるので注意する\n"
             "      --metallic <V>              全マテリアルのメタリック値を上書きする(0〜1)\n"
             "      --roughness <V>             全マテリアルのラフネス値を上書きする(0〜1)\n"
+            "      --emissive <名前>=<R,G,B>   指定した名前のマテリアルへ自発光の係数を与える。\n"
+            "                                  Keを持たないアセットは照明器具のジオメトリが\n"
+            "                                  あってもEmissiveFactorが0のままで、自発光\n"
+            "                                  テクスチャを持つマテリアルすら光らない。\n"
+            "                                  自発光は露出を通らないため1を超える値を取る\n"
+            "                                  (例: --emissive Bulb=156,156,156)\n"
             "      --base-color <R,G,B>        全マテリアルのベースカラー係数を上書きする(各0〜1)\n"
             "                                  生のOBJ等、PBR係数を表現できない形式へ検証用の\n"
             "                                  マテリアルを与えるためのもの\n"
-            "  -h, --help            このヘルプを表示する\n";
+            "      --no-meshlets       メッシュレット(メッシュシェーダー用の分割情報)を生成しない。\n"
+"                                  併せて頂点キャッシュ最適化とインデックスの並べ替えも\n"
+"                                  行わないため、頂点/インデックスは入力の並びのまま出る。\n"
+"                                  見た目の異常がメッシュレット化由来かの切り分けに使う\n"
+"      --meshlet-lods <N>  メッシュレットの離散LODを何段まで作るか(既定4、上限4)。\n"
+"                                  1なら原寸のみ。0は--no-meshletsと同じ。\n"
+"                                  段ごとに三角形を半分にし、それ以上潰せなくなったら打ち切る\n"
+"  -h, --help            このヘルプを表示する\n";
     }
 
     void PrintError(const std::string& message)
@@ -95,9 +138,15 @@ namespace
         bool Force = false;
         unsigned int JobCount = 0;
         float Scale = 1.0f;
+        std::optional<std::array<float, 3>> OriginOffset;
         bool ShowHelp = false;
         bool SceneMode = false;
+        bool Inspect = false;
+        bool Timing = false;
+        std::wstring LogSuffix;
         bool BakeOcclusion = false;
+        bool EnableMeshlets = true;
+        unsigned int MeshletLODCount = 4;
         unsigned int OcclusionResolution = 512;
         unsigned int OcclusionRays = 128;
         unsigned int BentNormalRays = 256;
@@ -128,34 +177,49 @@ namespace
         }
     }
 
-    // "R,G,B" 形式をパースする。失敗時はfalseを返す
-    bool ParseBaseColor(const std::wstring& value, std::optional<std::array<float, 3>>& out)
+    // "R,G,B" 形式をパースする。失敗時はfalseを返す。
+    // 上限はオプションによって違う(ベースカラーは0〜1だが、自発光は露出を通らないぶん
+    // 1を大きく超える値を取る。ModelSource.h の MaterialOverride::Emissive を参照)
+    bool ParseRgbTriplet(
+        const std::wstring& option, const std::wstring& value, float maxComponent,
+        std::array<float, 3>& out)
     {
-        std::array<float, 3> color{};
         size_t start = 0;
         for (int i = 0; i < 3; ++i)
         {
             const size_t comma = value.find(L',', start);
             if ((i < 2 && comma == std::wstring::npos) || (i == 2 && comma != std::wstring::npos))
             {
-                PrintError("--base-color は R,G,B の3要素で指定してください: " + WideToUtf8(value));
+                PrintError(WideToUtf8(option) + " は R,G,B の3要素で指定してください: " + WideToUtf8(value));
                 return false;
             }
             try
             {
-                color[i] = std::stof(value.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start));
+                out[i] = std::stof(value.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start));
             }
             catch (const std::exception&)
             {
-                PrintError("--base-color の値が不正です: " + WideToUtf8(value));
+                PrintError(WideToUtf8(option) + " の値が不正です: " + WideToUtf8(value));
                 return false;
             }
-            if (color[i] < 0.0f || color[i] > 1.0f)
+            if (out[i] < 0.0f || out[i] > maxComponent)
             {
-                PrintError("--base-color の各成分は0〜1の範囲で指定してください: " + WideToUtf8(value));
+                PrintError(
+                    WideToUtf8(option) + " の各成分は0〜" + std::to_string(static_cast<int>(maxComponent))
+                    + " の範囲で指定してください: " + WideToUtf8(value));
                 return false;
             }
             start = comma + 1;
+        }
+        return true;
+    }
+
+    bool ParseBaseColor(const std::wstring& value, std::optional<std::array<float, 3>>& out)
+    {
+        std::array<float, 3> color{};
+        if (!ParseRgbTriplet(L"--base-color", value, 1.0f, color))
+        {
+            return false;
         }
         out = color;
         return true;
@@ -215,6 +279,23 @@ namespace
                 args.SceneMode = true;
                 args.InputPath = argv[++i];
             }
+            else if (arg == L"--inspect")
+            {
+                args.Inspect = true;
+            }
+            else if (arg == L"--timing")
+            {
+                args.Timing = true;
+            }
+            else if (arg == L"--log-suffix")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--log-suffix には値が必要です");
+                    return std::nullopt;
+                }
+                args.LogSuffix = argv[++i];
+            }
             else if (arg == L"--force")
             {
                 args.Force = true;
@@ -233,6 +314,30 @@ namespace
                 catch (const std::exception&)
                 {
                     PrintError("--jobs の値が不正です: " + WideToUtf8(argv[i]));
+                    return std::nullopt;
+                }
+            }
+            else if (arg == L"--no-meshlets")
+            {
+                args.EnableMeshlets = false;
+            }
+            else if (arg == L"--meshlet-lods")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError(WideToUtf8(arg) + " には値が必要です");
+                    return std::nullopt;
+                }
+                // 0(段を作らない=メッシュレット自体を作らない)を許す
+                if (!ParseUnsigned(arg, argv[++i], args.MeshletLODCount, true))
+                {
+                    return std::nullopt;
+                }
+                if (args.MeshletLODCount > Kurenai::Assets::kMaxMeshletLODCount)
+                {
+                    PrintError("--meshlet-lods の上限は "
+                        + std::to_string(Kurenai::Assets::kMaxMeshletLODCount)
+                        + " です(MeshEntryが段ごとの範囲を固定長で持つため)");
                     return std::nullopt;
                 }
             }
@@ -271,6 +376,74 @@ namespace
                     return std::nullopt;
                 }
             }
+            else if (arg == L"--translucent")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--translucent には <マテリアル名>=<値> が必要です");
+                    return std::nullopt;
+                }
+                const std::wstring token = argv[++i];
+                const size_t separator = token.rfind(L'=');
+                if (separator == std::wstring::npos || separator == 0 || separator + 1 >= token.size())
+                {
+                    PrintError("--translucent の書式が不正です(<マテリアル名>=<値>): " + WideToUtf8(token));
+                    return std::nullopt;
+                }
+                std::optional<float> value;
+                if (!ParseUnitScalar(arg, token.substr(separator + 1), value))
+                {
+                    return std::nullopt;
+                }
+                args.MaterialOverride.Translucency[WideToUtf8(token.substr(0, separator))] = value.value_or(0.0f);
+            }
+            else if (arg == L"--alpha-cutout")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--alpha-cutout には <マテリアル名>=<値> が必要です");
+                    return std::nullopt;
+                }
+                const std::wstring token = argv[++i];
+                const size_t separator = token.rfind(L'=');
+                if (separator == std::wstring::npos || separator == 0 || separator + 1 >= token.size())
+                {
+                    PrintError("--alpha-cutout の書式が不正です(<マテリアル名>=<値>): " + WideToUtf8(token));
+                    return std::nullopt;
+                }
+                std::optional<float> value;
+                if (!ParseUnitScalar(arg, token.substr(separator + 1), value))
+                {
+                    return std::nullopt;
+                }
+                args.MaterialOverride.AlphaCutoff[WideToUtf8(token.substr(0, separator))] = value.value_or(0.5f);
+            }
+            else if (arg == L"--emissive")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--emissive には <マテリアル名>=<R,G,B> が必要です");
+                    return std::nullopt;
+                }
+                const std::wstring token = argv[++i];
+                const size_t separator = token.rfind(L'=');
+                if (separator == std::wstring::npos || separator == 0 || separator + 1 >= token.size())
+                {
+                    PrintError("--emissive の書式が不正です(<マテリアル名>=<R,G,B>): " + WideToUtf8(token));
+                    return std::nullopt;
+                }
+                std::array<float, 3> color{};
+                // 上限は「露出済みの輝度」として現実的に取りうる範囲。裸電球で数百になる
+                if (!ParseRgbTriplet(L"--emissive", token.substr(separator + 1), 10000.0f, color))
+                {
+                    return std::nullopt;
+                }
+                args.MaterialOverride.Emissive[WideToUtf8(token.substr(0, separator))] = color;
+            }
+            else if (arg == L"--specular-as-orm")
+            {
+                args.MaterialOverride.SpecularAsOrm = true;
+            }
             else if (arg == L"--metallic" || arg == L"--roughness")
             {
                 if (i + 1 >= argc)
@@ -297,6 +470,45 @@ namespace
                 {
                     return std::nullopt;
                 }
+            }
+            else if (arg == L"--origin")
+            {
+                if (i + 1 >= argc)
+                {
+                    PrintError("--origin には X,Y,Z が必要です");
+                    return std::nullopt;
+                }
+                // --base-colorと同じ「3要素をカンマ区切り」の書式だが、あちらと違って
+                // 範囲の制約は無い(座標なので負値も巨大な値も正当)
+                const std::wstring token = argv[++i];
+                std::array<float, 3> origin{};
+                size_t start = 0;
+                bool ok = true;
+                for (int axis = 0; axis < 3 && ok; ++axis)
+                {
+                    const size_t comma = token.find(L',', start);
+                    if ((axis < 2 && comma == std::wstring::npos) || (axis == 2 && comma != std::wstring::npos))
+                    {
+                        ok = false;
+                        break;
+                    }
+                    try
+                    {
+                        origin[axis] = std::stof(token.substr(start, comma == std::wstring::npos ? std::wstring::npos : comma - start));
+                    }
+                    catch (const std::exception&)
+                    {
+                        ok = false;
+                        break;
+                    }
+                    start = comma + 1;
+                }
+                if (!ok)
+                {
+                    PrintError("--origin は X,Y,Z の3要素で指定してください: " + WideToUtf8(token));
+                    return std::nullopt;
+                }
+                args.OriginOffset = origin;
             }
             else if (arg == L"--scale")
             {
@@ -336,6 +548,21 @@ namespace
     std::string FormatMs(std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point end)
     {
         return std::to_string(static_cast<long long>(std::chrono::duration<double, std::milli>(end - start).count()));
+    }
+
+    // 秒をミリ秒の整数文字列にする(FormatMsと同じ見え方に揃えるため)
+    std::string FormatSeconds(double seconds)
+    {
+        return std::to_string(static_cast<long long>(seconds * 1000.0));
+    }
+
+    // 比率を固定小数2桁で出す。sprintf_sの書式文字列へ日本語を入れるとC4819が出るため、
+    // 書式はASCIIに限り日本語は連結側へ置く(OcclusionBaker.cppと同じ作法)
+    std::string Format2(double value)
+    {
+        char buffer[64];
+        sprintf_s(buffer, "%.2f", value);
+        return buffer;
     }
 
     // .tmpへ書いてから完了時のみ本来のパスへリネームする(モデル/テクスチャ書き出しと同じ設計)
@@ -435,18 +662,37 @@ int wmain(int argc, wchar_t** argv)
     }
     const CommandLineArgs& args = *parsedArgs;
 
+    // 【最初のログ出力より前に呼ぶ】Core::Loggerはexeの隣のKurenaiEngine<接尾辞>.logを
+    // truncで開くため、パッカーを同時に複数走らせると同じファイルを奪い合い、
+    // 警告(BC7圧縮の失敗など。これらはstderrへは出ずログにしか残らない)が混ざるか消える。
+    // 並列に回す側が呼び出しごとに違う接尾辞を渡せるようにする
+    if (!args.LogSuffix.empty())
+    {
+        Kurenai::Core::Logger::SetFileSuffix(WideToUtf8(args.LogSuffix));
+    }
+
     if (args.ShowHelp)
     {
         PrintUsage();
         return 0;
     }
 
-    if (args.InputPath.empty() || args.OutputPath.empty())
+    // --inspectは読んで印字するだけで何も書き出さないため-oを要求しない。
+    // それ以外のモードでは従来どおり入力と出力の両方が要る
+    if (args.InputPath.empty() || (args.OutputPath.empty() && !args.Inspect))
     {
         PrintError(args.SceneMode
             ? "--scene と -o/--output の両方の指定が必要です"
-            : "入力モデルと -o/--output の両方の指定が必要です");
+            : (args.Inspect
+                ? "--inspect には入力モデルの指定が必要です"
+                : "入力モデルと -o/--output の両方の指定が必要です"));
         PrintUsage();
+        return 1;
+    }
+
+    if (args.SceneMode && args.Inspect)
+    {
+        PrintError("--scene と --inspect は同時に指定できません");
         return 1;
     }
 
@@ -465,12 +711,30 @@ int wmain(int argc, wchar_t** argv)
     }
     const std::wstring sourceModelDirectory = inputAbsolute.parent_path().wstring();
 
+    // --inspect: assimpが読んだ構造を印字して終わる。以降のベイク・書き出しには進まない
+    if (args.Inspect)
+    {
+        try
+        {
+            KurenaiPacker::InspectModel(inputAbsolute.wstring(), args.Scale);
+        }
+        catch (const std::exception& e)
+        {
+            PrintError("入力モデルの解析に失敗しました: " + std::string(e.what()));
+            return 2;
+        }
+        return 0;
+    }
+
     const auto startTime = std::chrono::steady_clock::now();
 
     KurenaiPacker::SourceModel sourceModel;
+    KurenaiPacker::ParseTimings parseTimings;
     try
     {
-        sourceModel = KurenaiPacker::LoadSourceModel(inputAbsolute.wstring(), args.Scale, args.MaterialOverride);
+        sourceModel = KurenaiPacker::LoadSourceModel(
+            inputAbsolute.wstring(), args.Scale, args.MaterialOverride, args.OriginOffset,
+            args.Timing ? &parseTimings : nullptr);
     }
     catch (const std::exception& e)
     {
@@ -507,6 +771,12 @@ int wmain(int argc, wchar_t** argv)
     options.Force = args.Force;
     options.JobCount = args.JobCount;
     options.BakedOcclusion = args.BakeOcclusion ? &bakeResult : nullptr;
+    options.EnableMeshlets = args.EnableMeshlets;
+    options.MeshletLODCount = args.MeshletLODCount;
+    if (sourceModel.EmbeddedTextures)
+    {
+        options.EmbeddedTextureDirectory = sourceModel.EmbeddedTextures->Directory();
+    }
 
     KurenaiPacker::PackResult result;
     try
@@ -521,6 +791,15 @@ int wmain(int argc, wchar_t** argv)
 
     const auto endTime = std::chrono::steady_clock::now();
 
+    if (args.OriginOffset)
+    {
+        // .ksceneの先頭コメントへ記録できるよう、引いた値をそのまま出す
+        std::cout
+            << "[KurenaiPacker] --origin により ("
+            << (*args.OriginOffset)[0] << ", " << (*args.OriginOffset)[1] << ", " << (*args.OriginOffset)[2]
+            << ") を減算しました\n";
+    }
+
     std::cout
         << "[KurenaiPacker] パック完了: " << WideToUtf8(args.OutputPath) << "\n"
         << "  メッシュ数: " << result.MeshCount
@@ -530,6 +809,45 @@ int wmain(int argc, wchar_t** argv)
         << " (新規生成 " << result.TextureGenerated
         << " / 既存スキップ " << result.TextureSkippedExisting
         << " / 失敗(フォールバック) " << result.TextureFailed << ")\n";
+
+    if (sourceModel.EmbeddedTextures && sourceModel.EmbeddedTextures->ExtractedCount() > 0)
+    {
+        // 埋め込みテクスチャは「取り出せた枚数」と「テクスチャ要求の数」の両方を見ないと
+        // 落ちているものに気づけない(取り出しに失敗したスロットは-1へフォールバックし、
+        // 要求そのものが立たないため)
+        std::cout << "  埋め込みテクスチャ: " << sourceModel.EmbeddedTextures->ExtractedCount()
+            << "枚を一時ファイルへ取り出しました\n";
+    }
+
+    if (args.EnableMeshlets && args.MeshletLODCount > 0)
+    {
+        std::cout << "  メッシュレット: " << result.MeshletCount << " (LOD0 " << result.MeshletLOD0Count << ")";
+        if (result.MeshletLOD0Count > 0)
+        {
+            // 1メッシュレットあたりの平均三角形数。上限(kMeshletMaxTriangles)に近いほど
+            // 分割が詰まっており、極端に少ない場合はモデルの三角形が散らばっている。
+            // LOD0だけで割る(簡略化した段は三角形が減っているので混ぜると意味が薄れる)
+            std::cout << " (LOD0の1つあたり平均 "
+                      << (result.IndexCount / 3 + result.MeshletLOD0Count / 2) / result.MeshletLOD0Count << "三角形)";
+        }
+        std::cout << "\n";
+
+        if (args.MeshletLODCount > 1 && result.MeshletTrianglesByLOD[0] > 0)
+        {
+            // 【段ごとに出す】段が進んでも三角形が減っていなければ、簡略化が効いていない。
+            // 総数だけを見ていると「段は作れた」で通ってしまう
+            std::cout << "  メッシュレットLOD:";
+            for (unsigned int lod = 0; lod < Kurenai::Assets::kMaxMeshletLODCount; ++lod)
+            {
+                if (lod > 0 && result.MeshletTrianglesByLOD[lod] == 0)
+                {
+                    break;
+                }
+                std::cout << " [" << lod << "] " << result.MeshletTrianglesByLOD[lod] << "三角形";
+            }
+            std::cout << "\n";
+        }
+    }
 
     if (args.BakeOcclusion)
     {
@@ -552,6 +870,75 @@ int wmain(int argc, wchar_t** argv)
     std::cout
         << " / 書き出し " << FormatMs(bakeTime, endTime) << "ms"
         << " / 合計 " << FormatMs(startTime, endTime) << "ms\n";
+
+    if (args.Timing)
+    {
+        // 【0の項目は出さない】テクスチャ0枚のPLATEAU LOD1タイルのように、ほとんどの項目が
+        // 0になる入力がある。全部並べると671タイルぶんのログが読めなくなる
+        const auto emit = [](const char* label, double seconds)
+        {
+            if (seconds < 0.0005) { return; }
+            std::cout << " / " << label << " " << FormatSeconds(seconds) << "ms";
+        };
+
+        std::cout << "  解析の内訳:";
+        emit("assimp読み込み", parseTimings.ReadSeconds);
+        emit("ノード収集", parseTimings.CollectSeconds);
+        emit("接線蓄積", parseTimings.TangentSeconds);
+        emit("頂点ループ", parseTimings.VertexSeconds);
+        emit("結合", parseTimings.MergeSeconds);
+        emit("マテリアル", parseTimings.MaterialSeconds);
+        std::cout << "\n";
+
+        const KurenaiPacker::WriteTimings& wt = result.Timings;
+        std::cout << "  書き出しの内訳:";
+        emit("収集", wt.CollectSeconds);
+        emit("スキップ判定", wt.SkipCheckSeconds);
+        emit("テクスチャ", wt.TextureSeconds);
+        emit("エントリ確定", wt.EntrySeconds);
+        emit("遮蔽マップ", wt.OcclusionSeconds);
+        emit("bentNormal", wt.BentNormalSeconds);
+        emit("メッシュレット構築", wt.MeshletSeconds);
+        emit("連結", wt.AppendSeconds);
+        emit(".kgeom書き込み", wt.GeometryWriteSeconds);
+        emit(".kmodel書き込み", wt.ModelWriteSeconds);
+        std::cout << "\n";
+
+        if (wt.WorkerCount > 0)
+        {
+            // 【和は実時間を超えうる】全ワーカーの累計なので上限は実時間×ワーカー数。
+            // 実効並列度がワーカー数に近ければ全員が働いており、1に近ければ1本を残して
+            // 全員がBC7のミューテックスで待っている。ここがスレッドを増やす価値を直接決める
+            const double workerSum = wt.WorkerLoadSeconds + wt.WorkerDdsSeconds + wt.WorkerWriteSeconds;
+            const double effective = wt.TextureSeconds > 0.0 ? workerSum / wt.TextureSeconds : 0.0;
+            std::cout
+                << "  テクスチャ内訳(全ワーカーの累計): 読み込み+ミップ+BC7 " << FormatSeconds(wt.WorkerLoadSeconds) << "ms"
+                << " / DDS化 " << FormatSeconds(wt.WorkerDdsSeconds) << "ms"
+                << " / 書き込み " << FormatSeconds(wt.WorkerWriteSeconds) << "ms\n"
+                << "    ワーカー " << wt.WorkerCount << "本 / フェーズ実時間 " << FormatSeconds(wt.TextureSeconds) << "ms"
+                << " / 実効並列度 " << Format2(effective) << "\n";
+
+            // 【ここが本丸】BC7待ちとBC7圧縮の比が「ワーカーを増やして意味があるか」を決める。
+            // 待ちが支配的なら本数を増やしても待ち行列が伸びるだけで、直列点そのものを
+            // 見直すか、プロセスを分けてデバイスを分けるしかない
+            std::cout
+                << "    LoadFromFileの内訳: デコード " << FormatSeconds(wt.TexDecodeSeconds) << "ms"
+                << " / ミップ " << FormatSeconds(wt.TexMipSeconds) << "ms"
+                << " / BC7待ち " << FormatSeconds(wt.TexBC7WaitSeconds) << "ms"
+                << " / BC7圧縮 " << FormatSeconds(wt.TexBC7CompressSeconds) << "ms"
+                << " / デバイス生成 " << FormatSeconds(wt.TexDeviceCreateSeconds) << "ms\n";
+        }
+
+        // 【プロセスCPU÷実時間を必ず出す】これがワーカー数を超えていたら、内側のライブラリが
+        // 既に自前で並列化しているという意味で、外側にプールを足してはいけない
+        // (DirectXTexのOpenMPと外側8ワーカーが掛かって224スレッドになり、機械が固まった前例がある)
+        const double cpuSeconds = KurenaiPacker::GetProcessCpuSeconds();
+        const double wallSeconds = std::chrono::duration<double>(endTime - startTime).count();
+        std::cout
+            << "  プロセス全体: CPU " << FormatSeconds(cpuSeconds) << "ms"
+            << " (" << Format2(wallSeconds > 0.0 ? cpuSeconds / wallSeconds : 0.0) << "コア相当)"
+            << " / ピークWS " << KurenaiPacker::GetPeakWorkingSetMB() << "MB\n";
+    }
 
     return 0;
 }

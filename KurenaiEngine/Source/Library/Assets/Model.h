@@ -6,11 +6,175 @@
 
 #include "RHI/IRHIBuffer.h"
 #include "RHI/IRHITexture.h"
+#include "RHI/TextureImage.h"
 
 #include "RaytracingGeometry.h"
 
 namespace Kurenai::Assets
 {
+    // 1モデル分のマテリアルテーブル(StructuredBuffer<GpuMaterial>)の1件。
+    //
+    // 【何のためにあるのか】従来、マテリアルはメッシュを描く直前に
+    // cmd->SetTexture(t0..t3,t5,t6) と定数バッファ(ObjectConstants)で渡していた。
+    // これは「1ドロー = 1マテリアル」を強制するため、メッシュが1,715個あるモデル
+    // (PLATEAU LOD2の1タイル)は必ず1,715ドローになる。
+    // テーブルへ載せてピクセルシェーダーが実行時の番号で引けるようにすると、
+    // 1回のDispatchMeshでモデル全体を描いても材質を描き分けられる。
+    //
+    // 【テクスチャはbindless番号で持つ】RaytracingMaterial(RaytracingScene.h)と同じ方式。
+    // IRHIDevice::RegisterBindlessが払い出した番号を入れ、シェーダーは
+    // Shaders/3D/Bindless.hlsliのBindlessSampleでこれを引く。
+    // bindless非対応環境ではkInvalidBindlessIndexが入り、消費側は
+    // 従来のt0..t6経路へ落ちる(=このテーブル自体が作られない)。
+    //
+    // HLSL側の対応: Shaders/3D/GBufferCommon.hlsli の struct GpuMaterial。
+    // **並びとサイズを必ず一致させること。**
+    struct GpuMaterial
+    {
+        float BaseColorFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        float EmissiveFactor[3] = { 0.0f, 0.0f, 0.0f };
+        float MetallicFactor = 0.0f;
+        // 負値ならソースデータに係数が無かったことを表す(Assets::kInvalidMaterialFactor)。
+        // 解釈は消費側の責任で、シェーダーは1.0(テクスチャの値をそのまま使う)として扱う
+        float RoughnessFactor = 1.0f;
+        // 0以下ならアルファカットアウト無効(Assets::Mesh::AlphaCutoffと同じ意味)
+        float AlphaCutoff = 0.0f;
+        float OcclusionStrength = 1.0f;
+        float Translucency = 0.0f;
+        // 以下はbindlessディスクリプタ番号。既定はRHI::kInvalidBindlessIndex(=テクスチャ無し)
+        uint32_t BaseColorTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t NormalTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t MetallicRoughnessTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t EmissiveTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t OcclusionTextureIndex = RHI::kInvalidBindlessIndex;
+        uint32_t BentNormalTextureIndex = RHI::kInvalidBindlessIndex;
+        // kGpuMaterialFlag* の組み合わせ
+        uint32_t Flags = 0;
+        uint32_t Padding = 0;
+    };
+    static_assert(sizeof(GpuMaterial) == 80, "HLSL側のGpuMaterialと一致させるため80バイト固定");
+
+    // GpuMaterial::Flagsのビット定義。
+    // どちらも「そのマテリアルをどのパスで描くか」の判定に使う ――
+    // 1ドローでモデル全体を描くようになると、パイプラインステートやドローの分割では
+    // 材質ごとの出し分けができなくなるため、増幅シェーダーがこのビットで取捨する
+    inline constexpr uint32_t kGpuMaterialFlagTransparent = 1u << 0;  // glTFのalphaMode=BLEND
+    inline constexpr uint32_t kGpuMaterialFlagCutout = 1u << 1;       // glTFのalphaMode=MASK
+
+    // GpuMeshlet::Flagsは材質フラグとメッシュレットLODの段を1つのuintへ詰めている。
+    // 下位8bitが上のkGpuMaterialFlag*で、上位に段を置く。
+    //
+    // 【なぜ専用のフィールドを増やさないのか】GpuMeshletは64バイト固定で、HLSL側の
+    // Meshletと1バイトも違ってはいけない。段のために5バイト目を足すと構造体が80バイトへ
+    // 伸び、地形タイル1枚(25,904塊)で414KB、モデル全体では25%の増加になる。
+    // 段は0〜3の2bitで足りるので、材質フラグの空きビットへ入れるほうが安い。
+    //
+    // 【材質の判定では必ずマスクすること】MeshletPassesMaterialFilterは
+    // (flags & rejectMask)==0 で捨てるかを決める。段のビットを混ぜたまま渡しても
+    // rejectMaskが下位ビットしか使っていないうちは偶然通るが、
+    // マスクを1つ足した瞬間に「特定の段だけ描かれない」という形で壊れる
+    inline constexpr uint32_t kGpuMaterialFlagMask = 0xFFu;
+    // この塊自身が何段目か(0が原寸)
+    inline constexpr uint32_t kGpuMeshletLODLevelShift = 8u;
+    inline constexpr uint32_t kGpuMeshletLODLevelMask = 0x3u;
+
+    // モデル1つ分のメッシュレット表(StructuredBuffer<Meshlet>)の1件。
+    // ディスク形式のAssets::MeshletEntry(48バイト、ModelPackage.h)へ
+    // 「どのメッシュの、どのマテリアルの塊か」を足したもの。
+    //
+    // 【なぜメッシュ単位ではなくモデル単位で持つのか】メッシュごとに別のバッファを
+    // 持っていると、1回のDispatchMeshで扱えるのが1メッシュぶんに限られる。
+    // モデル全体のメッシュレットを1本の表にまとめておけば、
+    // 増幅シェーダーが「モデルの全メッシュレット」を1回のディスパッチで見渡せる。
+    //
+    // 【オフセットはモデル基準へ付け替える】MeshletEntry::VertexOffset/TriangleOffsetは
+    // ディスク上ではメッシュ内相対だが、ここではモデル単位に連結した
+    // MeshletVertexBuffer / MeshletTriangleBuffer の中でのオフセットに直してある。
+    //
+    // 【頂点バッファだけはメッシュ単位のまま】.kgeomのペイロードは
+    // [頂点][インデックス][メッシュレット3本] をメッシュごとに連結した並びで、
+    // 頂点ブロックが連続していない。モデル単位の頂点バッファを作るには集めて複製する
+    // 必要があり、それは従来経路(DX11・BLAS・自前ラスタライザ)が使う
+    // メッシュ単位の頂点バッファと二重にVRAMを食う。
+    // 代わりに、メッシュレット1件ごとに「自分の頂点バッファのbindless番号」を持たせて
+    // メッシュシェーダーが選ぶ(自前ラスタライザのSWRasterMeshInfoと同じ方式)。
+    //
+    // HLSL側の対応: Shaders/3D/GBufferMeshlet.hlsl の struct Meshlet。
+    // **並びとサイズを必ず一致させること。**
+    struct GpuMeshlet
+    {
+        uint32_t VertexOffset = 0;         // モデル単位のMeshletVertexBuffer内の要素オフセット
+        uint32_t TriangleOffset = 0;       // モデル単位のMeshletTriangleBuffer内の要素オフセット
+        uint32_t VertexCount = 0;
+        uint32_t TriangleCount = 0;
+        float BoundsCenter[3] = { 0.0f, 0.0f, 0.0f };
+        float BoundsRadius = 0.0f;
+        float ConeAxis[3] = { 0.0f, 0.0f, 0.0f };
+        float ConeCutoff = 1.0f;
+        // この塊が属するメッシュの頂点バッファのbindless番号
+        uint32_t VertexBufferIndex = RHI::kInvalidBindlessIndex;
+        // Model::MaterialTableBuffer 内の番号(= Mesh::MaterialIndex)
+        uint32_t MaterialIndex = 0;
+        // kGpuMaterialFlag* の写し。増幅シェーダーがパスごとの取捨に使う
+        // (1ドローでモデル全体を描くと、ドローの分割で材質を出し分けられなくなるため)
+        uint32_t Flags = 0;
+        // このメッシュ内で何番目の塊か。**モデル内の通し番号ではない。**
+        // メッシュレットの色分け表示(Meshlet.hlsliのMeshletDebugColor)にだけ使う値で、
+        // レイトレーシング側(RaytracingScene.hlsliのRTFindMeshlet)がメッシュ内の番号を
+        // 返すのに合わせてある。揃えないと同じ塊が別の色になり、
+        // 「ラスタとRTが同じジオメトリを見ているか」の確認が成立しない
+        uint32_t MeshletIndexInMesh = 0;
+    };
+    static_assert(sizeof(GpuMeshlet) == 64, "HLSL側のMeshletと一致させるため64バイト固定");
+
+    // エミッシブ(自発光)なメッシュから起こした「光源のかたまり」1つ分。**モデルのローカル空間**。
+    //
+    // 【何のためにあるのか】このエンジンのエミッシブ面は G-Buffer へ書いて加算されるだけで、
+    // 周囲を一切照らしていない。ここから点光源のプロキシを作って、従来のライトループにも
+    // MegaLights にも同じ GPULight として流す(根拠は docs/ImplementationDetail.md 62章)。
+    //
+    // 【1メッシュ = 1かたまり ではない】Bistro の内装は「1マテリアル・1メッシュに複数の電球」
+    // という持ち方をしている。メッシュのAABBを1個の光源にすると部屋全体を包む灯になり、
+    // 「エミッシブの位置を手で割り出してポイントライトを置く」という従来の運用に逆戻りする。
+    // ModelLoader が頂点を溶接してから連結成分に分け、必要ならさらに空間分割する。
+    //
+    // 【ワールド空間へ移すのは SceneLoader】Model は複数インスタンスから共有されうるので、
+    // ここはローカル空間のまま持つ(MeshWorldBounds と同じ方針)。
+    struct EmissiveCluster
+    {
+        // 面積で重み付けした重心 Σ(A_i c_i) / ΣA_i。フラックスの1次モーメントそのもの
+        float Centroid[3] = { 0.0f, 0.0f, 0.0f };
+        // 面積で重み付けした法線 Σ(A_i n_i) を正規化したもの。放射の向き
+        float AverageNormal[3] = { 0.0f, 1.0f, 0.0f };
+        // 総面積 ΣA_i [m^2](モデルのローカル空間)
+        float Area = 0.0f;
+        // 指向性 κ = |Σ(A_i n_i)| / ΣA_i ∈ [0,1]。
+        //
+        // 【発散定理そのもの】閉じた曲面(電球のガラス球)は Σ(A_i n_i) = 0 なので κ=0、
+        // 平らな片面のパネルは全法線が揃うので κ=1 になる。
+        // 「閉じた光源か、平らな光源か」を1つの数で表していて、
+        // 遠方場の指向分布 I(θ) = L*A*[ (1-κ)/4 + κ*max(0,cosθ) ] に入る。
+        // この形は κ によらず全光束が π*L*A に一致する(62章に導出)
+        float Directionality = 0.0f;
+        // 二次モーメントから求めた「広がり」の代表半径 sqrt( 2 * ∫|x-C|^2 dA / A )。
+        // 半影の広がりと、近傍で 1/d^2 が発散しないためのクランプの**両方**をこの1つが決める
+        // (見かけの大きさが両方を決めているので物理的に正しい)。
+        //
+        // 【平らな円板では厳密に円板半径になる】一様な円板は ∫|x-C|^2 dA = A a^2 / 2 なので
+        // sqrt(2 * a^2/2) = a。減衰の分母 d^2 + R^2 が円板の軸上照度と厳密に一致する
+        // (docs/ImplementationDetail.md)のは、この一致があってこそ。
+        //
+        // 【閉じた球では √2 R になる(過大)】球殻は全点が中心から R なので sqrt(2R^2) = 1.41R。
+        // そもそも球の軸上照度は πLR^2/d^2 で +R^2 の項を持たない別の式なので、
+        // ここは近似である。半影が約4割広く出る。段階2の三角形メッシュライトで解消する
+        float SourceRadius = 0.0f;
+        // このかたまりのローカル空間AABB。分割の判定とデバッグ表示に使う
+        float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+        float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+        // 何枚の三角形から作ったか(診断用。0のクラスタは作らない)
+        uint32_t TriangleCount = 0;
+    };
+
     struct Mesh
     {
         std::unique_ptr<RHI::IRHIBuffer> VertexBuffer;
@@ -25,6 +189,66 @@ namespace Kurenai::Assets
         // デバイスがレイトレーシング非対応の場合は両配列とも空で、この値は意味を持たない
         uint32_t RaytracingAttributeOffset = 0;
         uint32_t RaytracingIndexOffset = 0;
+        // 同じくModel::RaytracingMeshletTriangleOffsets内でこのメッシュのデータが始まる位置。
+        // 要素数はMeshletCount(メッシュレットを持たない.kmodelでは0)
+        uint32_t RaytracingMeshletOffset = 0;
+
+        // --- メッシュレット(メッシュシェーダー用) ---------------------------------------
+        //
+        // 【GPUバッファはModel側にある】メッシュレットの表と2段の間接参照テーブルは
+        // モデル単位で1本ずつ持つ(Model::MeshletBuffer ほか)。ここにあるのは
+        // 「そのモデル単位の表の、どこからいくつがこのメッシュのぶんか」だけ。
+        //
+        // 【空になる条件】(1) デバイスがメッシュシェーダー非対応、(2) .kmodelが
+        // --no-meshletsで焼かれている、のいずれか。
+        // 描画側はMeshletCountではなくModel::MeshletBufferの有無で経路を選ぶこと ――
+        // MeshletCountはアセットが持つメッシュレット数そのもので、メッシュシェーダー
+        // 非対応の環境でも(レイトレーシング側が使うため)0にはならない
+        //
+        // Model::MeshletBuffer内でこのメッシュのメッシュレットが始まる位置
+        uint32_t MeshletOffset = 0;
+        // .kmodelが持つメッシュレット数。GPUバッファの有無とは独立。
+        //
+        // 【LOD0の個数であって全段の合計ではない】レイトレーシング(RaytracingMeshletOffsetが
+        // 指す三角形オフセット表)と従来の頂点シェーダー経路は、.kgeomのインデックスブロック
+        // ―― すなわちLOD0の三角形 ―― しか見ない。全段の合計を入れると三角形番号の対応が崩れる
+        uint32_t MeshletCount = 0;
+        // 全段を合わせたメッシュレット数。Model::MeshletBufferにはこの数だけ載っている。
+        // 増幅シェーダーが段を選ぶには、選ばれうる段すべてを走査範囲に入れる必要がある
+        uint32_t MeshletTotalCount = 0;
+        // 焼かれている段の数(1〜kMaxMeshletLODCount)。1なら段の選択は何もしないのと同じ
+        uint32_t MeshletLODCount = 0;
+
+        // このメッシュのモデルローカル空間でのAABB。.kmodel v10のMeshEntryが持つ値をそのまま入れる。
+        //
+        // 【なぜモデル単位のAABBでは足りないか】1つのモデルが街区全体を覆うことがある
+        // (Bistro Exteriorは132メッシュで1インスタンス、AABBは109x32x115m)。
+        // カメラがそのAABBの内側に入ると、モデル単位の距離は全メッシュで0になり、
+        // 「どのテクスチャも最大解像度が要る」としか言えなくなる。PLATEAUのLOD2タイル
+        // (1.1km四方)で街路に降りたときも同じことが起きる。
+        // テクスチャストリーミングが距離を測るにはメッシュ単位の広がりが要る。
+        //
+        // 【メッシュ単位のフラスタムカリングも同じ値を使う】モデル単位の判定を通ったあとに
+        // もう一段間引くための材料でもある。判定に使うのはこれをWorldで変換した
+        // ModelInstance::MeshWorldBoundsList のほうで、Modelは複数のインスタンスから
+        // 共有されうるためワールド空間の値をここに持たせてはいけない
+        float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+        float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
+        // このメッシュのUVが「モデルローカル1メートルあたり何UV単位に相当するか」。
+        // W×Hのテクスチャを貼ったときのテクセル密度は UVPerLocalMeter * sqrt(W*H) [texels/m] になる。
+        //
+        // 【テクスチャの寸法を掛けずにUV空間の値で持つ理由】1つのメッシュはベースカラー・
+        // 法線・メタリックラフネスと寸法の違うテクスチャを同時に参照しうる。UV密度は
+        // メッシュの性質、テクセル密度はテクスチャとの組み合わせの性質なので、前者だけを持つ。
+        //
+        // テクスチャストリーミングが「距離いくつなら何段目のミップで足りるか」を
+        // CPUで見積もるために使う(Sampler Feedbackを使わない理由はdocs/ImplementationDetail.md)。
+        // ModelLoaderが読み込み時に三角形を最大64個サンプリングして10パーセンタイルを取る
+        // (最も引き伸ばされている領域が常駐段を縛るため、低い側を採る)。
+        // 求められなかった場合(UVが無い・縮退している)は0で、その場合は
+        // 常駐ミップを削らない(見積もれないものを削ると静かにぼける)
+        float UVPerLocalMeter = 0.0f;
         RHI::IRHITexture* BaseColorTexture = nullptr;
         RHI::IRHITexture* NormalTexture = nullptr;
         RHI::IRHITexture* MetallicRoughnessTexture = nullptr;
@@ -47,9 +271,33 @@ namespace Kurenai::Assets
         // 負値を「係数の指定なし」とみなし1.0(テクスチャの値をそのまま使う)として扱う
         float RoughnessFactor = 0.0f;
         float EmissiveFactor[3] = { 0.0f, 0.0f, 0.0f };
+        // このメッシュのエミッシブテクスチャの平均色(線形空間)。テクスチャが無ければ (1,1,1)。
+        //
+        // 【なぜ要るのか】光源プロキシの明るさは「面が実際に出している放射輝度 × 面積」で決まる。
+        // EmissiveFactor だけを見ると、テクスチャの黒い部分まで光る面として数えて過大評価する
+        // (EmeraldSquare の自発光12マテリアルはすべてテクスチャ付き)。
+        //
+        // ModelLoader が読み込み時に求める。守っている要件は2つ:
+        //   ・**sRGB→線形は平均の前に行う。** 逆順(平均してから EOTF)にすると、暗い背景に
+        //     明るいグリフが乗った看板で真値0.5に対して0.214が出る(2倍以上暗い)
+        //   ・**UVの範囲で切り出す。** アトラスの一角しか使わないメッシュでは、テクスチャ全体の
+        //     平均が無関係な部分の色を拾う
+        //
+        // 取り出せなかった場合は (1,1,1) のままで、そのメッシュのプロキシは過大になる
+        // (読み込み時に警告が出る)
+        float EmissiveTextureAverage[3] = { 1.0f, 1.0f, 1.0f };
+        // このメッシュから起こした光源のかたまり(ローカル空間)。空なら光源にならない。
+        //
+        // 【Mesh のメンバとして持つこと】ModelLoader の SortMeshesByMaterial が std::sort で
+        // メッシュを入れ替えるため、メッシュ番号で引く並列配列にすると対応が黙って崩れる
+        std::vector<EmissiveCluster> EmissiveClusters;
         // 0以下ならアルファカットアウト無効(常に不透明)。glTFのalphaMode=MASKのマテリアルのみ
         // alphaCutoff(既定0.5)が設定される
         float AlphaCutoff = 0.0f;
+        // 透過率(0=不透明、1=完全に透ける)。葉や花弁のように薄いものが、裏から当たった光を
+        // 透かして表側が明るく見える量。0なら従来どおりの不透明な陰影になる。
+        // KurenaiPackerの --translucent <マテリアル名>=<値> で設定する(45章)
+        float Translucency = 0.0f;
         // glTFのalphaMode=BLENDのマテリアルのみtrue。GBufferパス(不透明)には描画されず、
         // 専用のTransparentパス(KurenaiEngine3D::Render参照)でカメラから遠い順にアルファブレンド
         // 合成される。AlphaCutoffとは排他(glTF仕様上alphaModeはOPAQUE/MASK/BLENDのいずれか1つ)
@@ -65,6 +313,17 @@ namespace Kurenai::Assets
         // 既定値はModelPackage.hのkDefaultOcclusionStrengthと同じ1.0だが、このヘッダーは
         // ディスク形式の定義に依存させたくないため定数を参照せず直接書いている
         float OcclusionStrength = 1.0f;
+        // Model::MaterialTableBuffer の中でこのメッシュが使うマテリアルの番号。
+        //
+        // 【現状はメッシュと1対1】.kmodel v9はマテリアルテーブルを持たず、マテリアルの
+        // 係数とテクスチャ番号をMeshEntryが直接持っている(=メッシュ1つにマテリアル1つ)。
+        // そのためModelLoaderはメッシュ1つにつき1件のGpuMaterialを作り、その番号を入れる。
+        // .kmodelがマテリアルテーブルを持つようになれば、ここへその番号がそのまま入る
+        // (消費側とシェーダーは書き換え不要)。
+        //
+        // テーブルを作らなかった場合(bindless非対応)は0のまま。そのときはテーブル自体が
+        // 存在せず、描画は従来のt0..t6経路を通るのでこの値は読まれない
+        uint32_t MaterialIndex = 0;
     };
 
     enum class LightType : uint32_t
@@ -72,7 +331,15 @@ namespace Kurenai::Assets
         Directional = 0,
         Point       = 1,
         Spot        = 2,
-        // 3以降はエリアライト(球/チューブ/矩形)用に予約。今回は未実装
+        // エミッシブなメッシュから起こした光源プロキシ(EmissiveCluster 由来)。
+        //
+        // 【この値は Assets::Light には入らない】プロキシは作者が置くライトではなく、
+        // Scene::EmissiveProxies から毎フレーム GPULight を作るときにだけ現れる。
+        // ImGui のライト一覧にも出さない(消せてしまうと元のメッシュと食い違う)。
+        // ここに書いてあるのは**シェーダ側の分岐と番号を1か所で決めるため**で、
+        // Shaders/3D/LightAttenuation.hlsli の型3と必ず一致させること
+        EmissiveProxy = 3,
+        // 4以降はエリアライト(チューブ/矩形)用に予約。未実装
     };
 
     struct Light
@@ -86,6 +353,12 @@ namespace Kurenai::Assets
         // FBX は物理単位を持たないため、DCC側のIntensity/100をカンデラ相当として近似する(ModelLoader参照)
         float Intensity = 1.0f;
         float Range = 10.0f;                      // 影響半径。Directional では未使用
+        // 光源そのものの半径[m]。0なら点光源(ハードシャドウ)、正なら球光源になり半影が出る。
+        // 【MegaLightsのレイトレース経路でだけ効く】従来のライトループとスクリーンスペース
+        // シャドウは点として扱う(面光源をサンプリングする仕組みを持たないため)。
+        // 減衰と提案分布は中心までの距離で計算し続ける ―― 半径ぶんの違いは、遮蔽の判定に
+        // 使う「どこを狙うか」にだけ現れる
+        float SourceRadius = 0.0f;
         float SpotInnerConeAngle = 0.4f;          // ラジアン(軸からの半角)。Spot のみ
         float SpotOuterConeAngle = 0.6f;
         bool Enabled = true;
@@ -106,7 +379,85 @@ namespace Kurenai::Assets
     {
         std::vector<Mesh> Meshes;
         std::vector<std::unique_ptr<RHI::IRHITexture>> Textures;
+        // Texturesと同じ並びの.ktexへの絶対パス。テクスチャストリーミングが
+        // 常駐ミップを変えるときに「どのファイルから読み直すか」を知るために要る。
+        // 読み込みに失敗してプレースホルダー(白/フラット法線)へ落ちたテクスチャは
+        // そもそもTexturesへ入らないため、両者の要素数は常に一致する
+        std::vector<std::wstring> TexturePaths;
+        // TexturePathsと同じ並びの.ktexヘッダ情報(解像度・ミップ段数・部分読み出しの可否)。
+        //
+        // 【読み込みスレッドで取っておく理由】常駐ミップ制御の追跡表への登録
+        // (TextureStreamingManager::AttachModel)はRenderスレッドで走る。そこでヘッダを
+        // 読みに行くと、モデルが1つ常駐するたびにテクスチャの枚数だけファイルを開くことになり
+        // (PLATEAUのLOD2タイルで数十枚)、街を流している間じゅう描画が止まる
+        std::vector<RHI::PackedTextureInfo> TextureInfos;
         std::vector<Light> Lights;
+
+        // --- マテリアルテーブル(bindless経路用) -------------------------------------------
+        //
+        // このモデルの全マテリアル(GpuMaterial)を並べたStructuredImmutableバッファ。
+        // Mesh::MaterialIndexが添字で、ピクセルシェーダーが実行時の番号で引く。
+        //
+        // 【空になる条件】デバイスがbindless非対応。そのときは従来どおり
+        // メッシュを描く直前にSetTexture(t0..t6)で差し替える経路だけが動く。
+        // 描画側はこのポインタの有無で経路を選ぶこと
+        std::unique_ptr<RHI::IRHIBuffer> MaterialTableBuffer;
+        uint32_t MaterialCount = 0;
+        // このモデルにアルファカットアウト(glTFのalphaMode=MASK)のマテリアルが1つでもあるか。
+        // 深度プリパスとシャドウは「ピクセルシェーダーを持たない速い経路」を使いたいので、
+        // カットアウトを含むモデルだけを2ドロー(不透明ぶんとカットアウトぶん)に分ける。
+        // 含まないモデル(PLATEAU LOD2がそう)は1ドローのままで済む
+        bool HasCutoutMaterial = false;
+
+        // --- メッシュレット(メッシュシェーダー用) -----------------------------------------
+        //
+        // KurenaiPackerが焼いた分割情報(Assets::MeshletEntry)を、モデルの全メッシュぶん
+        // 1本へ連結したもの(Assets::GpuMeshlet)と、その2段の間接参照テーブル。
+        // 増幅シェーダーがバウンディング球・法線コーンでカリングし、
+        // メッシュシェーダーが生き残った塊の頂点/三角形を組み立てる。
+        //
+        // 3本ともBufferUsage::StructuredImmutable。シーン読み込み時に一度書いたら
+        // 変わらないため、ステージングリングを持たないこのUsageがそのまま当てはまる。
+        //
+        // 【なぜメッシュ単位ではないのか】GpuMeshletのコメント参照。
+        // メッシュごとに分かれていると、1回のDispatchMeshで1メッシュしか描けない
+        std::unique_ptr<RHI::IRHIBuffer> MeshletBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> MeshletVertexBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> MeshletTriangleBuffer;
+        // MeshletBufferの要素数(モデルの全メッシュのメッシュレット数の総和)
+        uint32_t TotalMeshletCount = 0;
+        // このモデルが選べる最も粗い段。**全メッシュが持っている段のうち最小のもの**
+        // (= min over メッシュ (MeshletLODCount - 1))。
+        //
+        // 【なぜモデル単位で1つに畳むのか】段の数はメッシュごとに違う ――
+        // 潰せる辺を持たないメッシュはLOD0しか焼かれない(MeshletBuilder.cpp)。
+        // メッシュごとに min(選んだ段, そのメッシュの最も粗い段) で読み替えると、
+        // **1つのモデルの中で段が混ざる**。混ざると、簡略化で頂点が動いた側と
+        // 動いていない側で辺が一致せず境目に穴が開く(材質の境目でメッシュが
+        // 分かれているモデルは、その境目で実際に辺を共有している)。
+        //
+        // ここで全メッシュの共通部分まで落としておけば、増幅シェーダーが選んだ段は
+        // 必ずどのメッシュにも存在し、モデル全体が同じ段で描かれる。
+        // 段を1つしか持たないメッシュが1つでもあれば、そのモデルは常に原寸になる
+        // ―― 保守的だが、穴が開かないことのほうを優先する
+        uint32_t MeshletLODLevelCap = 0;
+        // LOD0の三角形数の合計(= 各メッシュのIndexCountの総和 / 3)。
+        //
+        // メッシュレットLODのしきい値をモデルごとに決めるために使う。
+        // 「原寸の三角形1つが画面上で1画素を切ったら段を落とす」を基準にすると、
+        // 直径D画素の円の中にN個の三角形があるとき平均面積は (πD²/4)/N なので、
+        // 1画素を切る直径は D = sqrt(4N/π)。三角形数はモデルによって3桁違う
+        // (小道具の数千とPLATEAUの地形タイルの134万)ため、
+        // 単一の画素数を全モデルへ当てはめると必ずどちらかが破綻する
+        uint32_t TotalTriangleCount = 0;
+        // このモデルの**すべての**メッシュがメッシュレットを持っているか。
+        //
+        // 【1モデル1ドローの前提条件】1回のDispatchMeshで描けるのはメッシュレットの表に
+        // 載っているものだけ。1つでも塊を持たないメッシュがあると、そのメッシュだけが
+        // 描かれずに消える。混在させて別途DrawIndexedで補うこともできるが、
+        // 経路が2つ走ることで深度や丸めの食い違いを持ち込むより、
+        // モデル単位で従来経路へ落とすほうが切り分けやすい
+        bool AllMeshesHaveMeshlets = false;
 
         // レイトレーシングでヒット面の陰影を計算するための、このモデル全メッシュ分の
         // 頂点属性とインデックス(Mesh::RaytracingAttributeOffset / RaytracingIndexOffsetが
@@ -122,6 +473,11 @@ namespace Kurenai::Assets
         // デバイスがレイトレーシング非対応の場合はそもそも構築されず空のまま
         std::vector<RaytracingVertexAttribute> RaytracingAttributes;
         std::vector<uint32_t> RaytracingIndices;
+        // メッシュレットごとの「メッシュ内での開始三角形番号」(Mesh::RaytracingMeshletOffsetが
+        // メッシュごとの開始位置を指す)。上の2つと同じくRaytracingScene::Buildが
+        // シーン全体の統合バッファへ連結した時点で解放される。
+        // 用途と、MeshletEntryをそのまま持たない理由はRaytracingScene::GetMeshletTriangleOffsetBuffer参照
+        std::vector<uint32_t> RaytracingMeshletTriangleOffsets;
 
         float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };

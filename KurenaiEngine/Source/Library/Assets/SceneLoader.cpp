@@ -245,6 +245,11 @@ namespace Kurenai::Assets
             // .kscene [Model]Water(水面マテリアル基盤)。trueならScene構築時に
             // ModelInstance::IsWaterへそのまま反映する
             bool Water = false;
+            // .kscene [Model]LODPath / LODDistance。粗くなっていく順(LODDistanceの昇順)に並ぶ。
+            // Pathが最も詳細な段(LOD0)で、ここには2段目以降だけが入る。
+            // LODPathとLODDistanceは対で、片方だけの指定はエラーにする
+            std::vector<std::wstring> LODPaths;
+            std::vector<float> LODDistances;
         };
 
         struct ParsedLightEntry
@@ -258,6 +263,8 @@ namespace Kurenai::Assets
             float Color[3] = { 1.0f, 1.0f, 1.0f };
             float Intensity = 1.0f;
             float Range = 10.0f;
+            // 光源そのものの半径[m]。0なら点光源。正にすると半影が出る(MegaLights経路のみ)
+            float SourceRadius = 0.0f;
             float ConeAngleDegrees = 45.0f;
             // スクリーンスペースシャドウを落とすか。Assets::Light::CastShadowの既定値と揃える
             bool CastShadow = true;
@@ -286,6 +293,8 @@ namespace Kurenai::Assets
             float ViewBias = 0.10f;
             float Hysteresis = 0.97f;
             float MaxRayDistance = 8.0f;
+            uint32_t LODCount = 1u;
+            bool FollowCamera = false;
             std::wstring Name;
         };
 
@@ -311,6 +320,14 @@ namespace Kurenai::Assets
             std::wstring SkyboxPath;
             bool HasIBLIntensity = false;
             float IBLIntensity = 1.0f;
+            bool HasShadowDistance = false;
+            float ShadowDistance = 0.0f;
+            bool HasStreamingDistance = false;
+            float StreamingDistance = 0.0f;
+            bool HasCameraSpeed = false;
+            float CameraSpeed = 0.0f;
+            bool TextureStreamingEnabled = false;
+            float TextureStreamingBias = -2.0f;
             bool AOEnabled = true;
             bool HasSSREnabled = false;
             bool SSREnabled = true;
@@ -373,6 +390,8 @@ namespace Kurenai::Assets
             std::wstring DroneShowPath;
             bool HasDroneShowCenter = false;         float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };
             bool HasDroneShowScale = false;          float DroneShowScale = 130.0f;
+            bool HasDroneShowCastLight = false;      bool  DroneShowCastLight = false;
+            bool HasDroneShowCastLightScale = false; float DroneShowCastLightScale = 1.0f;
 
             std::vector<ParsedLightEntry> Lights;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
@@ -562,6 +581,60 @@ namespace Kurenai::Assets
                         if (result.IBLIntensity < 0.0f) errorAt(lineNumber, rawLine, "IBLIntensityは0以上で指定してください");
                         result.HasIBLIntensity = true;
                     }
+                    else if (CaseInsensitiveEquals(key, L"ShadowDistance"))
+                    {
+                        if (!ParseFloatToken(value, result.ShadowDistance)) errorAt(lineNumber, rawLine, "ShadowDistanceの値が不正です");
+                        // 下限: 近クリップ面は最大でも0.1mなので、それを下回ると影が1枚も出ない。
+                        // 上限: シャドウマップ1枚(2048x2048)で覆って意味のある範囲を大きく超えると、
+                        // 打ち切る意味がなくなる(既定のfarZ側でどのみち制限される)。
+                        // どちらも打ち間違い(0や桁の取り違え)を弾くためのもの
+                        if (result.ShadowDistance < 1.0f || result.ShadowDistance > 100000.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "ShadowDistanceは1〜100000の範囲で指定してください");
+                        }
+                        result.HasShadowDistance = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"StreamingDistance"))
+                    {
+                        if (!ParseFloatToken(value, result.StreamingDistance)) errorAt(lineNumber, rawLine, "StreamingDistanceの値が不正です");
+                        // 1m未満だと全モデルが未読み込みのままになり、巨大すぎると常駐と変わらない。
+                        // ShadowDistanceと同じ範囲にしてある
+                        if (result.StreamingDistance < 1.0f || result.StreamingDistance > 100000.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "StreamingDistanceは1〜100000の範囲で指定してください");
+                        }
+                        result.HasStreamingDistance = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CameraSpeed"))
+                    {
+                        if (!ParseFloatToken(value, result.CameraSpeed)) errorAt(lineNumber, rawLine, "CameraSpeedの値が不正です");
+                        // 下限: 0や負値は「動けない/逆走する」になるだけで指定として意味を成さない。
+                        // 0.01 m/s は1mの移動に100秒かかる速度で、実用の下限より十分下にある。
+                        // 上限: 東京23区(対角約45km)の自動値が653 m/s、Shiftで2612 m/sなので、
+                        // 桁の取り違えを弾きつつそれを妨げない位置に置く。
+                        // どちらも打ち間違いを弾くためのもので、実用範囲を狭める意図はない
+                        if (result.CameraSpeed < 0.01f || result.CameraSpeed > 10000.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "CameraSpeedは0.01〜10000の範囲で指定してください");
+                        }
+                        result.HasCameraSpeed = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"TextureStreaming"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "TextureStreamingの値はtrue/falseで指定してください");
+                        result.TextureStreamingEnabled = *parsedValue;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"TextureStreamingBias"))
+                    {
+                        if (!ParseFloatToken(value, result.TextureStreamingBias)) errorAt(lineNumber, rawLine, "TextureStreamingBiasの値が不正です");
+                        // ミップ段数は多くても十数段なので、これを超える指定は桁の打ち間違い。
+                        // 正側(粗くする)を+4までにしているのは、それ以上はどのみち最小ミップに張り付くため
+                        if (result.TextureStreamingBias < -8.0f || result.TextureStreamingBias > 4.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "TextureStreamingBiasは-8〜4の範囲で指定してください");
+                        }
+                    }
                     else if (CaseInsensitiveEquals(key, L"AmbientOcclusion"))
                     {
                         const std::optional<bool> parsedValue = ParseBoolToken(value);
@@ -699,6 +772,37 @@ namespace Kurenai::Assets
                         if (!parsed) errorAt(lineNumber, rawLine, "Waterの値はtrue/falseで指定してください");
                         entry.Water = *parsed;
                     }
+                    else if (CaseInsensitiveEquals(key, L"LODPath"))
+                    {
+                        // 【対で書くことを強制する】LODPathの直前にLODDistanceが埋まっていたら、
+                        // それは前のLODPathに対応する距離が無いまま次の段が来たということ
+                        if (entry.LODPaths.size() != entry.LODDistances.size())
+                        {
+                            errorAt(lineNumber, rawLine, "LODPathの前にLODDistanceが指定されていません(LODPathとLODDistanceは対で書いてください)");
+                        }
+                        if (value.empty()) errorAt(lineNumber, rawLine, "LODPathが空です");
+                        entry.LODPaths.push_back(value);
+                    }
+                    else if (CaseInsensitiveEquals(key, L"LODDistance"))
+                    {
+                        if (entry.LODDistances.size() + 1 != entry.LODPaths.size())
+                        {
+                            errorAt(lineNumber, rawLine, "LODDistanceに対応するLODPathがありません(LODPathを先に書いてください)");
+                        }
+                        float distance = 0.0f;
+                        if (!ParseFloatToken(value, distance)) errorAt(lineNumber, rawLine, "LODDistanceの値が不正です");
+                        if (distance < 1.0f || distance > 1000000.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "LODDistanceは1〜1000000の範囲で指定してください");
+                        }
+                        // 【昇順を強制する】切り替え距離が単調でないと「遠いのに詳細な段」が選ばれる。
+                        // 書き間違えても絵はそれらしく出てしまうので、ここで弾く
+                        if (!entry.LODDistances.empty() && distance <= entry.LODDistances.back())
+                        {
+                            errorAt(lineNumber, rawLine, "LODDistanceは粗くなる順(昇順)に指定してください");
+                        }
+                        entry.LODDistances.push_back(distance);
+                    }
                     else
                     {
                         warnUnknownKey();
@@ -787,6 +891,11 @@ namespace Kurenai::Assets
                     else if (CaseInsensitiveEquals(key, L"Range"))
                     {
                         if (!ParseFloatToken(value, entry.Range)) errorAt(lineNumber, rawLine, "Rangeの値が不正です");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"SourceRadius"))
+                    {
+                        if (!ParseFloatToken(value, entry.SourceRadius)) errorAt(lineNumber, rawLine, "SourceRadiusの値が不正です");
+                        if (entry.SourceRadius < 0.0f) errorAt(lineNumber, rawLine, "SourceRadiusは0以上で指定してください");
                     }
                     else if (CaseInsensitiveEquals(key, L"ConeAngleDegrees"))
                     {
@@ -910,6 +1019,24 @@ namespace Kurenai::Assets
                         {
                             errorAt(lineNumber, rawLine, "MaxRayDistanceは0より大きく200以下で指定してください(分散の計算が桁落ちで潰れるため)");
                         }
+                    }
+                    else if (CaseInsensitiveEquals(key, L"LODCount"))
+                    {
+                        float parsed = 0.0f;
+                        if (!ParseFloatToken(value, parsed)) errorAt(lineNumber, rawLine, "LODCountの値が不正です");
+                        // 段数が増えるとプローブ総数が段数倍になる(=一巡にかかる時間もその分伸びる)。
+                        // 上限はkDDGIMaxLODCountと合わせること
+                        if (parsed < 1.0f || parsed > 4.0f || parsed != std::floor(parsed))
+                        {
+                            errorAt(lineNumber, rawLine, "LODCountは1以上4以下の整数で指定してください");
+                        }
+                        entry.LODCount = static_cast<uint32_t>(parsed);
+                    }
+                    else if (CaseInsensitiveEquals(key, L"FollowCamera"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "FollowCameraの値が不正です");
+                        entry.FollowCamera = *parsedValue;
                     }
                     else if (CaseInsensitiveEquals(key, L"Name"))
                     {
@@ -1191,6 +1318,19 @@ namespace Kurenai::Assets
                     {
                         readFloat(result.DroneShowScale, result.HasDroneShowScale, 1.0f, 5000.0f, L"Scale");
                     }
+                    else if (CaseInsensitiveEquals(key, L"CastLight"))
+                    {
+                        const std::optional<bool> parsedValue = ParseBoolToken(value);
+                        if (!parsedValue) errorAt(lineNumber, rawLine, "CastLightの値はtrue/falseで指定してください");
+                        result.DroneShowCastLight = *parsedValue;
+                        result.HasDroneShowCastLight = true;
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CastLightScale"))
+                    {
+                        readFloat(
+                            result.DroneShowCastLightScale, result.HasDroneShowCastLightScale,
+                            0.0f, 1000.0f, L"CastLightScale");
+                    }
                     else
                     {
                         warnUnknownKey();
@@ -1215,6 +1355,21 @@ namespace Kurenai::Assets
                 if (!result.Models[i].HasPath)
                 {
                     throw std::runtime_error("[Model]の" + std::to_string(i + 1) + "番目にPathが指定されていません: " + WideToUtf8(filePath));
+                }
+                // 対の数が合わない = 最後のLODPathにLODDistanceが付いていない
+                const ParsedModelEntry& model = result.Models[i];
+                if (model.LODPaths.size() != model.LODDistances.size())
+                {
+                    throw std::runtime_error(
+                        "[Model]の" + std::to_string(i + 1) + "番目でLODPathにLODDistanceが対応していません: " +
+                        WideToUtf8(filePath));
+                }
+                // Path(LOD0)を含めた段数の上限。MeshEntryの固定長配列やDDGIのLODCountと揃えてある
+                if (model.LODPaths.size() + 1 > kMaxModelLODCount)
+                {
+                    throw std::runtime_error(
+                        "[Model]の" + std::to_string(i + 1) + "番目のLOD段数が上限(" +
+                        std::to_string(kMaxModelLODCount) + "段、Pathを含む)を超えています: " + WideToUtf8(filePath));
                 }
             }
             for (size_t i = 0; i < result.Lights.size(); ++i)
@@ -1272,7 +1427,9 @@ namespace Kurenai::Assets
         }
     }
 
-    Scene LoadScene(RHI::IRHIDevice& device, const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory)
+    Scene LoadScene(
+        RHI::IRHIDevice& device, const std::wstring& sceneFilePath, const std::wstring& assetRootDirectory,
+        const SceneLoadProgressCallback& progress)
     {
         const ParsedScene parsed = ParseSceneFile(sceneFilePath);
 
@@ -1334,9 +1491,20 @@ namespace Kurenai::Assets
         scene.DroneShowCenter[1] = parsed.DroneShowCenter[1];
         scene.DroneShowCenter[2] = parsed.DroneShowCenter[2];
         scene.HasDroneShowScale = parsed.HasDroneShowScale;             scene.DroneShowScale = parsed.DroneShowScale;
+        scene.HasDroneShowCastLight = parsed.HasDroneShowCastLight;     scene.DroneShowCastLight = parsed.DroneShowCastLight;
+        scene.HasDroneShowCastLightScale = parsed.HasDroneShowCastLightScale;
+        scene.DroneShowCastLightScale = parsed.DroneShowCastLightScale;
         scene.ExposureEV100 = parsed.ExposureEV100;
         scene.HasIBLIntensityOverride = parsed.HasIBLIntensity;
         scene.IBLIntensity = parsed.IBLIntensity;
+        scene.HasShadowDistance = parsed.HasShadowDistance;
+        scene.TextureStreamingEnabled = parsed.TextureStreamingEnabled;
+        scene.TextureStreamingBias = parsed.TextureStreamingBias;
+        scene.ShadowDistance = parsed.ShadowDistance;
+        scene.HasStreamingDistance = parsed.HasStreamingDistance;
+        scene.StreamingDistance = parsed.StreamingDistance;
+        scene.HasCameraSpeed = parsed.HasCameraSpeed;
+        scene.CameraSpeed = parsed.CameraSpeed;
 
         // [Scene]Skyboxは[Model]Pathと同じくAssetsルートからの相対パスとして扱い、
         // 同じルート外チェックを適用したうえで絶対パスへ解決してから返す
@@ -1391,6 +1559,7 @@ namespace Kurenai::Assets
             std::memcpy(light.Color, parsedLight.Color, sizeof(light.Color));
             light.Intensity = parsedLight.Intensity;
             light.Range = parsedLight.Range;
+            light.SourceRadius = parsedLight.SourceRadius;
             // .ksceneはコーン角を1つ(外側)しか持たないため、内側も同じ値にしてソフトエッジ無しの
             // 単純な円錐として扱う
             const float outerRadians = DirectX::XMConvertToRadians(parsedLight.ConeAngleDegrees);
@@ -1428,6 +1597,8 @@ namespace Kurenai::Assets
             volume.ViewBias = parsedVolume.ViewBias;
             volume.Hysteresis = parsedVolume.Hysteresis;
             volume.MaxRayDistance = parsedVolume.MaxRayDistance;
+            volume.LODCount = parsedVolume.LODCount;
+            volume.FollowCamera = parsedVolume.FollowCamera;
             volume.Name = parsedVolume.Name.empty()
                 ? ("GI Volume " + std::to_string(scene.GIVolumes.size()))
                 : WideToUtf8(parsedVolume.Name);
@@ -1435,6 +1606,37 @@ namespace Kurenai::Assets
         }
 
         bool boundsInitialized = false;
+
+        // 進捗の通知。呼び出し側のコールバックが投げた例外でシーンの読み込みを失敗させたくないため、
+        // ここで握り潰してログに残す(通知は付随的な機能で、読み込みの成否を左右してはいけない)
+        const size_t totalModels = parsed.Models.size();
+        size_t loadedModels = 0;
+        const auto notifyProgress = [&progress, totalModels](size_t loaded)
+        {
+            if (!progress)
+            {
+                return;
+            }
+            try
+            {
+                progress(loaded, totalModels);
+            }
+            catch (const std::exception& e)
+            {
+                Core::Logger::Error(
+                    "SceneLoader", std::string("読み込み進捗の通知で例外が発生しました(読み込みは継続します): ") + e.what());
+            }
+            catch (...)
+            {
+                Core::Logger::Error("SceneLoader", "読み込み進捗の通知で不明な例外が発生しました(読み込みは継続します)");
+            }
+        };
+        // 【最初に0/Nを通知する】1件目を読み終えるまで総数が分からないと、表示側は
+        // 「何件中の何件目か」を出せない。767モデルのシーンでは1件目だけで数秒かかることもある
+        notifyProgress(0);
+
+        // 非一様スケールの警告は1シーンにつき1回だけ出す(767モデルのシーンで毎件出すと埋もれる)
+        bool sceneEmissiveNonUniformLogged = false;
 
         for (const ParsedModelEntry& parsedModel : parsed.Models)
         {
@@ -1449,8 +1651,52 @@ namespace Kurenai::Assets
             const std::wstring fullModelPath = assetRootDirectory + normalizedPath;
 
             ModelInstance instance;
-            instance.Model = LoadModel(device, fullModelPath);
+            // 同じ.kmodelを指すインスタンスは実体を共有する。読み込みは初回だけで、
+            // 2回目以降はキャッシュの共有参照を配るだけになる(VRAMの二重常駐を避ける)。
+            //
+            // 1x1のフォールバックはシーン全体で1組を共有する(モデルごとに作ると
+            // 671モデルのシーンで2000個超の個別リソースになる。ModelLoader.hのコメント参照)
+            // 【ストリーミング時は実体を読まない】ヘッダのAABBだけで配置を決め、
+            // 実体はカメラが近づいたときにLoaderスレッドが読む
+            const bool streaming = scene.HasStreamingDistance;
+
+            const auto acquireModel = [&device, &scene, streaming](const std::wstring& path)
+                -> std::shared_ptr<const Model>
+            {
+                if (streaming)
+                {
+                    return nullptr;
+                }
+                auto cached = scene.ModelCache.find(path);
+                if (cached == scene.ModelCache.end())
+                {
+                    auto loaded = std::make_shared<Model>(LoadModel(device, path, &scene.SharedTextures));
+                    cached = scene.ModelCache.emplace(path, std::move(loaded)).first;
+                }
+                return cached->second;
+            };
+
+            instance.Model = acquireModel(fullModelPath);
+            instance.ModelPaths.push_back(fullModelPath);
             instance.IsWater = parsedModel.Water;
+
+            // モデルLODの2段目以降。同じ粗いモデルを多数のタイルが共有する使い方
+            // (PLATEAUのLOD1タイルなど)を想定しているので、ここもキャッシュを通す
+            instance.LODModels.reserve(parsedModel.LODPaths.size());
+            instance.LODDistances = parsedModel.LODDistances;
+            for (const std::wstring& lodPath : parsedModel.LODPaths)
+            {
+                const std::wstring normalizedLODPath = NormalizePathSeparators(lodPath);
+                if (IsPathEscaping(normalizedLODPath))
+                {
+                    throw std::runtime_error(
+                        "[Model]LODPathがルート外を指しています(絶対パスまたは'..'は使用できません): " +
+                        WideToUtf8(lodPath) + " (" + WideToUtf8(sceneFilePath) + ")");
+                }
+                const std::wstring fullLODPath = assetRootDirectory + normalizedLODPath;
+                instance.LODModels.push_back(acquireModel(fullLODPath));
+                instance.ModelPaths.push_back(fullLODPath);
+            }
 
             using namespace DirectX;
             const XMMATRIX scaleMatrix = XMMatrixScaling(parsedModel.Scale[0], parsedModel.Scale[1], parsedModel.Scale[2]);
@@ -1485,14 +1731,31 @@ namespace Kurenai::Assets
             XMStoreFloat4x4(&instance.NormalMatrix, XMMatrixTranspose(normalMathSpace));
 
             // モデルのローカル空間AABB(8頂点)をWorldで変換し、シーン全体のAABBへ合成する。
-            // 軸並行のまま変換前のmin/maxだけを使うと回転時に不正確になるため、必ず8頂点全てを変換する
-            const Model& loadedModel = instance.Model;
+            // 軸並行のまま変換前のmin/maxだけを使うと回転時に不正確になるため、必ず8頂点全てを変換する。
+            //
+            // 【常に.kmodelのヘッダから取る】ストリーミング時は実体が無いのでヘッダしか無いが、
+            // 常駐時もヘッダを使う。両方の経路でシーンAABB(=farZ)と初期カメラが1ビットも
+            // 変わらないことを保証するため ―― 片方だけModel::BoundsMinから取ると、
+            // 「ストリーミングを付けたら遠景の描画距離が変わった」という分かりにくい差が生まれる
+            // (ModelLoaderがヘッダの値をそのままModelへ写しているので、値自体は同じ)
+            const ModelHeaderInfo headerInfo = ReadModelHeader(fullModelPath);
+            if (streaming && headerInfo.LightCount > 0)
+            {
+                // ストリーミング時はモデル埋め込みライトをシーンのライト一覧へ合成できない
+                // (実体を読むまでライトの位置が分からず、破棄で消えてしまうため)
+                Core::Logger::Warning(
+                    "SceneLoader",
+                    "ストリーミング対象の.kmodelに埋め込みライトが" + std::to_string(headerInfo.LightCount) +
+                        "件ありますが、無視されます: " + WideToUtf8(fullModelPath));
+            }
+            // インスタンス自身のワールドAABBも同じループで求める(フラスタムカリング用)
+            bool instanceBoundsInitialized = false;
             for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
             {
                 const XMVECTOR corner = XMVectorSet(
-                    (cornerIndex & 1) ? loadedModel.BoundsMax[0] : loadedModel.BoundsMin[0],
-                    (cornerIndex & 2) ? loadedModel.BoundsMax[1] : loadedModel.BoundsMin[1],
-                    (cornerIndex & 4) ? loadedModel.BoundsMax[2] : loadedModel.BoundsMin[2],
+                    (cornerIndex & 1) ? headerInfo.BoundsMax[0] : headerInfo.BoundsMin[0],
+                    (cornerIndex & 2) ? headerInfo.BoundsMax[1] : headerInfo.BoundsMin[1],
+                    (cornerIndex & 4) ? headerInfo.BoundsMax[2] : headerInfo.BoundsMin[2],
                     1.0f);
                 const XMVECTOR transformed = XMVector3TransformCoord(corner, worldMathSpace);
                 XMFLOAT3 transformedFloat3;
@@ -1514,6 +1777,70 @@ namespace Kurenai::Assets
                     scene.BoundsMax[1] = std::max(scene.BoundsMax[1], transformedFloat3.y);
                     scene.BoundsMax[2] = std::max(scene.BoundsMax[2], transformedFloat3.z);
                 }
+
+                const float cornerXYZ[3] = { transformedFloat3.x, transformedFloat3.y, transformedFloat3.z };
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    if (!instanceBoundsInitialized)
+                    {
+                        instance.WorldBoundsMin[axis] = cornerXYZ[axis];
+                        instance.WorldBoundsMax[axis] = cornerXYZ[axis];
+                    }
+                    else
+                    {
+                        instance.WorldBoundsMin[axis] = std::min(instance.WorldBoundsMin[axis], cornerXYZ[axis]);
+                        instance.WorldBoundsMax[axis] = std::max(instance.WorldBoundsMax[axis], cornerXYZ[axis]);
+                    }
+                }
+                instanceBoundsInitialized = true;
+            }
+
+            // メッシュごとのワールドAABB(メッシュ単位フラスタムカリング用)。
+            // インスタンスのAABBとまったく同じ手順を、Mesh::BoundsMin/Max(.kmodel v10が持つ
+            // メッシュ単位のローカルAABB)に対して繰り返す。
+            //
+            // 【ここでも8頂点すべてを変換する】回転が入ると軸並行でなくなるため、
+            // min/maxだけを変換して包絡を取ってはいけない(上のインスタンスAABBと同じ理由)。
+            // 【毎フレームやらない】Worldは読み込み後に変化しない(書き込みはこの1箇所のみ)
+            //
+            // 【ストリーミング時は作れない】実体を読んでいないのでメッシュ単位のAABBが無い。
+            // 空のままにしておくと IsMeshVisibleWithStats(KurenaiEngine3D.cpp)が
+            // 間引かない側へ倒す。あとから読み込まれた実体のぶんも同じ扱いになる
+            if (instance.Model)
+            {
+                const Model& boundsModel = *instance.Model;
+                instance.MeshWorldBoundsList.resize(boundsModel.Meshes.size());
+                for (size_t meshIndex = 0; meshIndex < boundsModel.Meshes.size(); ++meshIndex)
+                {
+                    const Mesh& sourceMesh = boundsModel.Meshes[meshIndex];
+                    MeshWorldBounds& meshBounds = instance.MeshWorldBoundsList[meshIndex];
+
+                    for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
+                    {
+                        const XMVECTOR corner = XMVectorSet(
+                            (cornerIndex & 1) ? sourceMesh.BoundsMax[0] : sourceMesh.BoundsMin[0],
+                            (cornerIndex & 2) ? sourceMesh.BoundsMax[1] : sourceMesh.BoundsMin[1],
+                            (cornerIndex & 4) ? sourceMesh.BoundsMax[2] : sourceMesh.BoundsMin[2],
+                            1.0f);
+                        XMFLOAT3 transformedFloat3;
+                        XMStoreFloat3(&transformedFloat3, XMVector3TransformCoord(corner, worldMathSpace));
+
+                        const float cornerXYZ[3] = { transformedFloat3.x, transformedFloat3.y, transformedFloat3.z };
+                        for (int axis = 0; axis < 3; ++axis)
+                        {
+                            if (cornerIndex == 0)
+                            {
+                                meshBounds.Min[axis] = cornerXYZ[axis];
+                                meshBounds.Max[axis] = cornerXYZ[axis];
+                            }
+                            else
+                            {
+                                meshBounds.Min[axis] = std::min(meshBounds.Min[axis], cornerXYZ[axis]);
+                                meshBounds.Max[axis] = std::max(meshBounds.Max[axis], cornerXYZ[axis]);
+                            }
+                        }
+                    }
+                }
             }
 
             // モデルファイル埋め込みのライト(glTFのKHR_lights_punctual・FBXのライトノード由来、
@@ -1522,7 +1849,10 @@ namespace Kurenai::Assets
             // 平行移動を含まない方向ベクトルとして変換する必要があるため、それぞれ
             // XMVector3TransformCoord/TransformNormalを使い分ける(法線のような逆転置は不要。
             // 接線ベクトルの変換(GBuffer.hlsl)と同じ理由)
-            for (const Light& localLight : instance.Model.Lights)
+            // 【ストリーミング時は合成しない】実体が無いのでライトの位置が分からず、
+            // 仮に読めても破棄のたびに消えることになる。ヘッダのLightCountで警告済み
+            const std::vector<Light> emptyLights;
+            for (const Light& localLight : (streaming ? emptyLights : instance.Model->Lights))
             {
                 Light worldLight = localLight;
 
@@ -1545,10 +1875,195 @@ namespace Kurenai::Assets
                 scene.Lights.push_back(worldLight);
             }
 
+            // エミッシブなメッシュから起こした光源のかたまり(Mesh::EmissiveClusters、
+            // モデルのローカル空間)をワールド空間へ移す。
+            //
+            // 【Lights とは別の配列へ入れる】作者が置いたライトと自動生成の光源を同じ配列に
+            // すると、ImGui のライト一覧から消せてしまい元のメッシュと食い違う。
+            // ライト数の上限に当たったときの詰める順序も分ける必要がある。
+            //
+            // 【ストリーミング時は作らない】埋め込みライトと同じ理由(上のコメント参照)。
+            // 実体が無いので位置が分からず、破棄のたびに消えることになる。
+            //
+            // 【モデルLODの段0からしか取らない】粗い段で面積が変わると、段が切り替わった
+            // 瞬間に光量が跳ねる。instance.Model は常に段0(LODModels は見ない)
+            if (!streaming && instance.Model)
+            {
+                // 非一様スケールの度合い。面積と半径の換算はここが1に近いことを前提にしている
+                const XMVECTOR scaleRow0 = worldMathSpace.r[0];
+                const XMVECTOR scaleRow1 = worldMathSpace.r[1];
+                const XMVECTOR scaleRow2 = worldMathSpace.r[2];
+                const float axisLength[3] = {
+                    XMVectorGetX(XMVector3Length(scaleRow0)),
+                    XMVectorGetX(XMVector3Length(scaleRow1)),
+                    XMVectorGetX(XMVector3Length(scaleRow2)),
+                };
+                const float maxAxis = std::max({ axisLength[0], axisLength[1], axisLength[2] });
+                const float minAxis = std::min({ axisLength[0], axisLength[1], axisLength[2] });
+                const bool nonUniform = (minAxis > 1e-6f) && ((maxAxis / minAxis) > 1.01f);
+
+                // 等方スケール s なら |det|^(1/3) = s。長さの換算はこれでよい
+                const float absDeterminant = std::fabs(determinant);
+                const float lengthScale =
+                    (absDeterminant > 0.0f) ? std::cbrt(absDeterminant) : 1.0f;
+
+                for (size_t meshIndex = 0; meshIndex < instance.Model->Meshes.size(); ++meshIndex)
+                {
+                    const Mesh& sourceMesh = instance.Model->Meshes[meshIndex];
+                    for (size_t clusterIndex = 0; clusterIndex < sourceMesh.EmissiveClusters.size();
+                         ++clusterIndex)
+                    {
+                        const EmissiveCluster& cluster = sourceMesh.EmissiveClusters[clusterIndex];
+
+                        EmissiveProxy proxy;
+                        const XMVECTOR localCentroid =
+                            XMVectorSet(cluster.Centroid[0], cluster.Centroid[1], cluster.Centroid[2], 0.0f);
+                        XMFLOAT3 worldCentroid;
+                        XMStoreFloat3(&worldCentroid, XMVector3TransformCoord(localCentroid, worldMathSpace));
+                        proxy.Position[0] = worldCentroid.x;
+                        proxy.Position[1] = worldCentroid.y;
+                        proxy.Position[2] = worldCentroid.z;
+
+                        // 【法線は逆転置で移す】すぐ上の埋め込みライトの Direction は
+                        // 「光の進行方向」なので World でそのまま回してよいが、こちらは
+                        // **面の法線**である。同じ扱いにすると非一様スケールで黙ってずれる
+                        const XMVECTOR localNormal = XMVectorSet(
+                            cluster.AverageNormal[0], cluster.AverageNormal[1], cluster.AverageNormal[2], 0.0f);
+                        XMFLOAT3 worldNormal;
+                        XMStoreFloat3(
+                            &worldNormal, XMVector3Normalize(XMVector3TransformNormal(localNormal, normalMathSpace)));
+                        proxy.Direction[0] = worldNormal.x;
+                        proxy.Direction[1] = worldNormal.y;
+                        proxy.Direction[2] = worldNormal.z;
+
+                        // 面積の換算 A_world = A_local * |det(M)| * |M^-T n|。
+                        // 等方スケール s では s^2 へ縮退する(平面のかたまりでは厳密、
+                        // 閉じた形では平均法線1本で代表しているので近似)
+                        const float normalStretch =
+                            XMVectorGetX(XMVector3Length(XMVector3TransformNormal(localNormal, normalMathSpace)));
+                        proxy.Area = cluster.Area * absDeterminant * normalStretch;
+                        proxy.SourceRadius = cluster.SourceRadius * lengthScale;
+                        // κ は形の性質なので、等方スケールでは不変。非一様では近似
+                        proxy.Directionality = cluster.Directionality;
+
+                        // 【シーン全体の倍率も露出も掛けない】倍率は毎フレームのライトリスト
+                        // 構築で掛ける(掛けてしまうとImGuiのスライダーが効かなくなる)。
+                        // 露出はそもそも掛けてはいけない(G-Bufferのエミッシブが露出を通らない)
+                        for (int channel = 0; channel < 3; ++channel)
+                        {
+                            proxy.RadianceBase[channel] =
+                                sourceMesh.EmissiveFactor[channel] * sourceMesh.EmissiveTextureAverage[channel];
+                        }
+
+                        proxy.InstanceIndex = static_cast<uint32_t>(scene.Instances.size());
+                        proxy.MeshIndex = static_cast<uint32_t>(meshIndex);
+                        proxy.ClusterIndex = static_cast<uint32_t>(clusterIndex);
+                        scene.EmissiveProxies.push_back(proxy);
+                    }
+                }
+
+                // 【ずれても「少し明るい/暗い」だけなので絵からは分からない】だから警告を出す
+                if (nonUniform && !sceneEmissiveNonUniformLogged && !instance.Model->Meshes.empty())
+                {
+                    bool hasCluster = false;
+                    for (const Mesh& m : instance.Model->Meshes)
+                    {
+                        if (!m.EmissiveClusters.empty()) { hasCluster = true; break; }
+                    }
+                    if (hasCluster)
+                    {
+                        Core::Logger::Warning(
+                            "SceneLoader",
+                            "非一様スケールのインスタンスにエミッシブ光源があります。面積と半径の換算が"
+                            "近似になります(軸長の比 " + std::to_string(maxAxis / std::max(minAxis, 1e-6f)) +
+                                "): " + WideToUtf8(parsedModel.Path));
+                        sceneEmissiveNonUniformLogged = true;
+                    }
+                }
+            }
+
             scene.Instances.push_back(std::move(instance));
+
+            ++loadedModels;
+            notifyProgress(loadedModels);
+        }
+
+        // 【手置きライトと別に数える】どちらがいくつあるかが分からないと、上限に当たったときに
+        // 「どちらが押し出されたのか」を切り分けられない
+        if (!scene.EmissiveProxies.empty())
+        {
+            Core::Logger::Info(
+                "SceneLoader",
+                "エミッシブ光源: " + std::to_string(scene.EmissiveProxies.size()) +
+                    "個(ワールド空間) / 手置きライト " + std::to_string(scene.Lights.size()) + "個");
+        }
+
+        // モデル共有が効いたかを数値で残す。「共有 0件」ならキャッシュが一度も当たっておらず、
+        // 同じ.kmodelを複数配置しているシーンでVRAMが二重に載っている
+        // (MultiModelTest.ksceneは同じ.kmodelを3回配置するので、ここが 3配置/参照3件/1件/2件 になる)。
+        //
+        // 【引く相手は配置数ではなく参照数】LODPathで読んだモデルもModelCacheに入るので、
+        // LODを持つシーンではユニーク数が配置数を上回る。size_t同士で
+        // Instances.size() - ModelCache.size() を引くと桁が回り込み、671配置/ユニーク673件が
+        // 「共有で節約 18446744073709551614件」になっていた(PlateauLODTestで実際に出た)。
+        // 1インスタンスがLODの段数だけ余分にモデルを参照する以上、比較の左辺も参照数にする
+        //
+        // 【ストリーミング時は共有の話ではない】実体を1つも読んでいないのでModelCacheは空で、
+        // そのまま引き算すると「全部を共有で節約した」という嘘の数字になる。別の文言にする
+        if (scene.HasStreamingDistance)
+        {
+            Core::Logger::Info(
+                "SceneLoader",
+                "モデル " + std::to_string(scene.Instances.size()) +
+                    "配置 / 実体は未読み込み(ストリーミング、距離 " +
+                    std::to_string(static_cast<int>(scene.StreamingDistance)) + "m)");
+        }
+        else
+        {
+            // 1インスタンスが参照するモデルは、基準の1つとLODの段数を足したもの
+            size_t modelReferences = 0;
+            for (const ModelInstance& instance : scene.Instances)
+            {
+                modelReferences += 1 + instance.LODModels.size();
+            }
+
+            Core::Logger::Info(
+                "SceneLoader",
+                "モデル " + std::to_string(scene.Instances.size()) + "配置 / 参照 " +
+                    std::to_string(modelReferences) + "件(LOD込み) / ユニーク " +
+                    std::to_string(scene.ModelCache.size()) + "件 / 共有で節約 " +
+                    std::to_string(modelReferences - scene.ModelCache.size()) + "件");
         }
 
         return scene;
+    }
+
+    ModelHeaderInfo ReadModelHeader(const std::wstring& modelFilePath)
+    {
+        std::ifstream modelIn(modelFilePath, std::ios::binary);
+        if (!modelIn.is_open())
+        {
+            throw std::runtime_error(".kmodelが見つかりません: " + WideToUtf8(modelFilePath));
+        }
+
+        PackageHeader header{};
+        modelIn.read(reinterpret_cast<char*>(&header), sizeof(header));
+        if (!modelIn || std::memcmp(header.Magic, kPackageMagic, sizeof(kPackageMagic)) != 0)
+        {
+            throw std::runtime_error(".kmodelのマジックナンバーが不正です: " + WideToUtf8(modelFilePath));
+        }
+        if (header.Version != kPackageVersion)
+        {
+            throw std::runtime_error(
+                ".kmodelのバージョンが対応していません(ファイル: " + std::to_string(header.Version) +
+                ", ランタイム: " + std::to_string(kPackageVersion) + "): " + WideToUtf8(modelFilePath));
+        }
+
+        ModelHeaderInfo info;
+        std::memcpy(info.BoundsMin, header.BoundsMin, sizeof(info.BoundsMin));
+        std::memcpy(info.BoundsMax, header.BoundsMax, sizeof(info.BoundsMax));
+        info.LightCount = header.LightCount;
+        return info;
     }
 
     std::wstring ReadSceneName(const std::wstring& sceneFilePath)
@@ -1562,35 +2077,36 @@ namespace Kurenai::Assets
         // 書式(セクション/キー/必須フィールド/数値範囲)の検証はParseSceneFile自体が行う
         const ParsedScene parsed = ParseSceneFile(sceneFilePath);
 
-        for (const ParsedModelEntry& parsedModel : parsed.Models)
+        // 【LODPathもここで見る】見落とすと、書き間違えたLODPathがKurenaiPackerの--sceneを
+        // 素通りし、実行時にその段へ切り替わって初めて例外になる。切り替わるまで気づけない
+        const auto validateModelFile = [&sceneFilePath, &assetRootDirectory](
+                                           const std::wstring& path, const char* keyName)
         {
-            const std::wstring normalizedPath = NormalizePathSeparators(parsedModel.Path);
+            const std::wstring normalizedPath = NormalizePathSeparators(path);
             if (IsPathEscaping(normalizedPath))
             {
                 throw std::runtime_error(
-                    "[Model]Pathがルート外を指しています(絶対パスまたは'..'は使用できません): " +
-                    WideToUtf8(parsedModel.Path) + " (" + WideToUtf8(sceneFilePath) + ")");
+                    std::string("[Model]") + keyName +
+                    "がルート外を指しています(絶対パスまたは'..'は使用できません): " + WideToUtf8(path) + " (" +
+                    WideToUtf8(sceneFilePath) + ")");
             }
 
             const std::wstring fullModelPath = assetRootDirectory + normalizedPath;
-
-            std::ifstream modelIn(fullModelPath, std::ios::binary);
-            if (!modelIn.is_open())
-            {
-                throw std::runtime_error("[Model]Pathが指す.kmodelが見つかりません: " + WideToUtf8(fullModelPath));
-            }
-
-            PackageHeader header{};
-            modelIn.read(reinterpret_cast<char*>(&header), sizeof(header));
-            if (!modelIn || std::memcmp(header.Magic, kPackageMagic, sizeof(kPackageMagic)) != 0)
-            {
-                throw std::runtime_error(".kmodelのマジックナンバーが不正です: " + WideToUtf8(fullModelPath));
-            }
-            if (header.Version != kPackageVersion)
+            if (!std::ifstream(fullModelPath, std::ios::binary).is_open())
             {
                 throw std::runtime_error(
-                    ".kmodelのバージョンが対応していません(ファイル: " + std::to_string(header.Version) +
-                    ", ランタイム: " + std::to_string(kPackageVersion) + "): " + WideToUtf8(fullModelPath));
+                    std::string("[Model]") + keyName + "が指す.kmodelが見つかりません: " + WideToUtf8(fullModelPath));
+            }
+            // マジックナンバーとバージョンの検証はReadModelHeaderが行う(投げる例外も同じ)
+            ReadModelHeader(fullModelPath);
+        };
+
+        for (const ParsedModelEntry& parsedModel : parsed.Models)
+        {
+            validateModelFile(parsedModel.Path, "Path");
+            for (const std::wstring& lodPath : parsedModel.LODPaths)
+            {
+                validateModelFile(lodPath, "LODPath");
             }
         }
     }

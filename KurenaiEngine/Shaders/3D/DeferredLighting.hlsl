@@ -11,18 +11,17 @@
 // 空モデル(Perez分布)の共有ヘッダー。背景画素をSkyGenerate.hlslのキューブマップと
 // 同じ関数・同じパラメータで画面解像度評価するために使う。PIを定義しないため、
 // このファイルのPI定義(直後)より前でも後でもインクルード順は問題ない
-// ボリュメトリック積雲が引く3Dノイズのレジスタ。Sky.hlsliはcbufferにもレジスタにも
-// 依存しない方針なので、DDGI.hlsliと同じくインクルードする側がマクロで指定する。
-// 定義しないシェーダー(SkyGenerate/AerialPerspective/PlanarReflection)ではボリュームの
-// 経路がコンパイルされず、従来の平面の経路だけが残る
 // SkyView LUT。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
 // SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
 #define KURENAI_SKYVIEW_REGISTER t20
-#define KURENAI_CLOUD_SHAPE_REGISTER t18
-#define KURENAI_CLOUD_DETAIL_REGISTER t19
-// 焼いたウェザーマップ(H3)。定義しない場合は手続きで評価する経路が残るので絵は出るが、
-// レイマーチの1歩が約10倍高くつく
-#define KURENAI_CLOUD_WEATHER_REGISTER t21
+// 【雲の3Dノイズ(KURENAI_CLOUD_SHAPE/DETAIL_REGISTER)とウェザーマップをここで定義しない理由】
+// このシェーダーは雲を自分で評価しない。雲はSkyCloud.hlsl(低解像度の専用パス)が評価し、
+// 結果を「透過率 + 事前乗算済み散乱光」としてSkyCloudTexture(t18)から、
+// 霞の補正に使うfogInFrontをSkyCloudFogTexture(t22)から受け取る(PSMain参照)。
+// マクロを定義しないことでSky.hlsli側の3Dテクスチャ宣言が消え、t18/t19が空く。
+// このシェーダーはt0〜t22を使い切っている(RHIのkTextureSlotCount=23)ため、
+// この2枠の解放がそのままSkyCloudTextureの置き場所になっている
+
 #include "Sky.hlsli"
 
 static const float PI = 3.14159265359f;
@@ -92,6 +91,12 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams3;
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
+    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
+    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
+    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
+    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
+    float4 DDGILODOrigin[4];
+    float4 DDGILODBase[4];
     // bent normalによる遮蔽(34章)。x=ディフューズAOの出所、y=スペキュラ遮蔽の方式、
     // z=multi-bounce AO、w=未使用。
     // 【この位置を動かさないこと】C++側のFrameConstantsではDDGIParams4の直後に置いてある。
@@ -167,6 +172,27 @@ Texture2D BRDFLUTTexture : register(t10);
 // SkyIntegrate.hlslが書いた空パラメータ。ティント4本と正規化済みの天頂輝度が入る。
 // t11を使う(t17はbent normal(34章)、反射プローブは鏡面専任で拡散側のスロットを持たない)
 StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t11);
+// SkyCloud.hlsl(低解像度の雲パス)の出力。rgb=事前乗算済みの散乱光、a=透過率。
+// 雲の3Dノイズを自前で引かなくなったことで空いたt18に置いている(このファイル冒頭のコメント参照)
+Texture2D SkyCloudTexture : register(t18);
+// DDGIResolve.hlsl(低解像度のDDGIパス)の出力。rgb=イラディアンス、a=insideWeight。
+// DDGIParams4.yが1のときだけ読み、0のときはこのファイル内でSampleDDGIIrradianceを直接呼ぶ
+// (既定は0=直接呼ぶ。低解像度化は深度をまたぐ滲みを伴う近似のため。DDGIResolve.hlsl冒頭参照)。
+// t19はスカイクラウド分離でt18/t19が空いたうちの残り1枠(このファイル冒頭のコメント参照)
+Texture2D DDGIResolveTexture : register(t19);
+// DDGIResolve.hlslがSV_TARGET1へ書いた「そのテクセルが代表している全解像度の深度」(41.24節)。
+// 【なぜ全解像度の深度(t3)から引き直さないのか】引き直しても同じ値になる ―― 向こうも
+// DataSampler(ポイント)で同じUVを引いている ―― が、4テクセルぶんとなると全解像度側は
+// 2テクセルおきの位置になり1回のGatherにまとまらない。低解像度で持っておけば
+// 隣り合う4テクセルなのでGatherRed 1回で済む(UpsampleDDGI参照)
+Texture2D DDGIResolveDepthTexture : register(t21);
+// SkyCloud.hlslがSV_TARGET1へ書いた fogInFront(雲に最初に当たった位置の霞の透過率)。
+// 雲の手前の霞の色を直す補正(P18b。Sky.hlsliのCloudAirlightCorrection参照)にだけ使う。
+// 【なぜSkyCloudTextureのaに同居できないのか】aには既に雲の透過率が入っている。
+// 補正は clearColor * (CloudSkyLight - 1) * (1 - fogInFront) で、CloudSkyLightが
+// float3のため画素ごとに (透過率, fogInFront) の2スカラが要り、RGBA1枚に収まらない。
+// 雲が無い画素には1.0が入る(補正が厳密に0になる中立元)
+Texture2D SkyCloudFogTexture : register(t22);
 
 // グローバルIBLの拡散イラディアンス(t8)・プリフィルタ済み鏡面(t9)・プローブのプリフィルタ済み
 // 鏡面キューブマップ配列(t12)・プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・
@@ -178,11 +204,79 @@ StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t11);
 // SSRとの「足した量と引く量が一致する」不変条件(20章)には影響しない
 #include "DDGI.hlsli"
 
+// DDGIResolveTexture(低解像度)を深度を見ながら引き伸ばす。
+//
+// 【なぜバイリニアでは駄目か】雲(SkyCloudTexture)は視線方向だけの関数で深度に依存しないため
+// 素直なバイリニアで数学的に正しかった。DDGIのイラディアンスは面の位置と法線の関数なので、
+// ジオメトリの輪郭をまたいで補間すると手前の面の間接光が奥の面へ滲む。
+// そこで4テクセルを個別に引き、**中心画素と深度が近いテクセルだけ**を採用する。
+//
+// centerDepth はこの画素のG-Buffer深度(Reverse-Z、生値)。
+// Reverse-Zの生値は概ね 1/z に比例するので、相対差をそのまま近さの尺度に使える
+// (輪郭の検出が目的で、正確な線形深度は要らない)
+float4 UpsampleDDGI(float2 uv, float centerDepth)
+{
+    uint width, height;
+    DDGIResolveTexture.GetDimensions(width, height);
+    const float2 resolution = float2(width, height);
+    const float2 texelSize = 1.0f / resolution;
+
+    // このUVを囲む4テクセルの中心。DDGIResolve.hlslが各テクセルで使ったUVと同じ式になるため、
+    // 「そのテクセルが代表している位置」の深度をここで正しく引き直せる
+    const float2 baseTexel = floor(uv * resolution - 0.5f);
+    const float2 fractional = uv * resolution - 0.5f - baseTexel;
+
+    // 4テクセルぶんの深度を1回で取る(41.24節)。GatherRedが返す並びは
+    // .x=(u0,v1) .y=(u1,v1) .z=(u1,v0) .w=(u0,v0) なので、以降で使う
+    // (0,0)(1,0)(0,1)(1,1) の順へ並べ替えると w, z, x, y になる。
+    //
+    // 【ループにも配列にもしないこと】ここを[unroll]ループ + 添字アクセスで書くと、
+    // ローカル配列でもfloat4の添字でもfxcのコンパイル時間が爆発する
+    // (41.20節と同じ罠。実際にこのシェーダーのコンパイルが数十秒延びた)。
+    // 4本しかないので4成分のベクタ演算として素直に展開する ―― 重みの計算も
+    // 4本まとめて1命令ずつになるため、展開したほうが実行時も速い
+    const float4 tapDepth = DDGIResolveDepthTexture.GatherRed(DataSampler, uv).wzxy;
+
+    // バイリニアの重み。上の並び順に合わせて (1-fx)(1-fy), fx(1-fy), (1-fx)fy, fx*fy
+    const float2 wx = float2(1.0f - fractional.x, fractional.x);
+    const float2 wy = float2(1.0f - fractional.y, fractional.y);
+    float4 weight = float4(wx.x * wy.x, wx.y * wy.x, wx.x * wy.y, wx.y * wy.y);
+
+    // 深度の近さ。相対差2%で概ね1/e。輪郭以外ではほぼ1になり、通常のバイリニアと一致する
+    const float4 relativeDifference = abs(tapDepth - centerDepth) / max(centerDepth, 1e-6f);
+    weight *= exp(-relativeDifference * 50.0f);
+    // 背景(depth<=0)のテクセルはDDGIを持たないので必ず落とす。
+    // 重み0で足すのは「足さない」と厳密に同じ(0倍して加えても和は変わらない)
+    weight = (tapDepth > 0.0f) ? weight : 0.0f;
+
+    const float2 uv00 = (baseTexel + float2(0.0f, 0.0f) + 0.5f) * texelSize;
+    const float2 uv10 = (baseTexel + float2(1.0f, 0.0f) + 0.5f) * texelSize;
+    const float2 uv01 = (baseTexel + float2(0.0f, 1.0f) + 0.5f) * texelSize;
+    const float2 uv11 = (baseTexel + float2(1.0f, 1.0f) + 0.5f) * texelSize;
+
+    // 加算の順序は展開前のループ(i=0..3)と同じにしてある。浮動小数の和は順序で結果が変わるため
+    float4 accumulated = DDGIResolveTexture.SampleLevel(DataSampler, uv00, 0.0f) * weight.x;
+    accumulated += DDGIResolveTexture.SampleLevel(DataSampler, uv10, 0.0f) * weight.y;
+    accumulated += DDGIResolveTexture.SampleLevel(DataSampler, uv01, 0.0f) * weight.z;
+    accumulated += DDGIResolveTexture.SampleLevel(DataSampler, uv11, 0.0f) * weight.w;
+    const float totalWeight = weight.x + weight.y + weight.z + weight.w;
+
+    // 4テクセルすべてが深度的に遠い(細い輪郭の内側など)。ここでDDGIを0にすると
+    // 輪郭に沿って間接光が抜けた黒い縁が出るため、最寄り1テクセルをそのまま採る
+    if (totalWeight <= 1e-6f)
+    {
+        return DDGIResolveTexture.SampleLevel(DataSampler, uv, 0.0f);
+    }
+    return accumulated / totalWeight;
+}
+
 // 環境ソース(プローブとグローバルIBLの重み付き合成)はSampleEnvironmentが返す。プローブと
 // グローバルIBLはどちらも同じ手順で焼かれており(IBLConvolve.hlslを共有している)、解像度・
 // ミップ構成も揃えてあるため、式そのものは同一で引くキューブマップだけが変わる
+// uv/depthはDDGIを低解像度パスから引くとき(DDGIParams4.y > 0.5)のアップサンプルにだけ使う
 float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float metallic, float roughness,
-                   float materialAO, float ssao, float diffuseAO, BentOcclusion bent)
+                   float materialAO, float ssao, float diffuseAO, BentOcclusion bent,
+                   float2 uv, float depth)
 {
     const float NdotV = saturate(dot(N, V));
     const float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
@@ -212,8 +306,20 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // (ボリューム外)はirradianceがSampleEnvironmentの返した値のまま残る
     if (DDGIParams0.w > 0.5f)
     {
+        float3 ddgiIrradiance;
         float ddgiInsideWeight;
-        const float3 ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight);
+        // DDGIParams4.y は「低解像度のDDGIResolveパスの結果を使うか」。
+        // 定数バッファ由来のuniform分岐なので画素ごとに分かれることはない
+        if (DDGIParams4.y > 0.5f)
+        {
+            const float4 resolved = UpsampleDDGI(uv, depth);
+            ddgiIrradiance = resolved.rgb;
+            ddgiInsideWeight = resolved.a;
+        }
+        else
+        {
+            ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight);
+        }
         irradiance = lerp(irradiance, ddgiIrradiance, ddgiInsideWeight);
     }
 
@@ -355,8 +461,29 @@ float4 PSMain(PSInput input) : SV_TARGET
         float3 skyColor;
         if (SkyParams.y > 0.5f)
         {
+            // 【jitterはこのパスでは使われない】雲を評価するのはSkyCloud.hlslであり、
+            // ここが呼ぶのはSkyColorWithoutClouds(雲を踏まない)とCloudAirlightCorrection
+            // (レイマーチを持たない)だけ。他の4つのMakeSkyParametersと中身を揃えるために
+            // 引数と代入はそのまま残してある
             const SkyParameters skyParams = MakeSkyParameters(input.Position.xy);
-            skyColor = SkyColor(rayDir, skyParams);
+            // 雲を含まない空(SkyView LUT + 星)はここでフル解像度のまま評価する。
+            // 太陽・星のような高周波成分がこちら側にあるため、雲の低解像度化で
+            // にじむことがない
+            const float3 clearColor = SkyColorWithoutClouds(rayDir, skyParams);
+            // 雲はSkyCloudパスが低解像度で評価済み。事前乗算のover合成なので、
+            // バイリニアで引き伸ばしてもこの合成の形は変わらない(SkyCloud.hlsl冒頭参照)。
+            // 雲が無い画素には(0,1)が入っており、clearColor*1.0+0.0はIEEE754で
+            // 厳密にclearColorと一致する
+            const float4 cloud = SkyCloudTexture.Sample(ColorSampler, input.UV);
+            // 雲の手前の霞の色を晴天の空色から曇天の空色へ直す(P18b)。
+            // 【なぜここでフル解像度で掛けるか】補正項はclearColorに比例するため、
+            // 低解像度の雲パス側で畳み込むと補正項の中の太陽・星だけがぼける。
+            // CloudSkyLightはフレーム定数なので、画素ごとに要るのはfogInFrontの1chだけ。
+            // 雲が無い画素には1.0が入っており、(1 - 1.0) = 0 で補正は厳密に0になる
+            const float fogInFront = SkyCloudFogTexture.Sample(ColorSampler, input.UV).r;
+            skyColor = clearColor * cloud.a + cloud.rgb
+                     + CloudAirlightCorrection(clearColor, fogInFront, skyParams);
+
         }
         else
         {
@@ -417,7 +544,8 @@ float4 PSMain(PSInput input) : SV_TARGET
         // 反射プローブ(19章)はEvaluateIBL内のSampleEnvironmentで環境ソースへ合成される。
         // プローブが1つも効いていない位置では従来どおりスカイボックス由来のグローバルIBLになる。
         // IBL強度倍率(ShadowParams.z)はEvaluateIBLの中で拡散・鏡面それぞれに掛かっている
-        ambient = EvaluateIBL(N, V, worldPos, albedo, metallic, roughness, materialAO, aoSample.a, diffuseAO, bent);
+        ambient = EvaluateIBL(
+            N, V, worldPos, albedo, metallic, roughness, materialAO, aoSample.a, diffuseAO, bent, input.UV, depth);
     }
     else
     {

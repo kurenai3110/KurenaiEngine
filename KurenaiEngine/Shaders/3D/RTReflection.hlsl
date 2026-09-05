@@ -79,6 +79,12 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams2;
     float4 DDGIParams3;
     float4 DDGIParams4;
+    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
+    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
+    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
+    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
+    float4 DDGILODOrigin[4];
+    float4 DDGILODBase[4];
     // bent normalによる遮蔽(34章)。y=スペキュラ遮蔽の方式を読む。
     // DeferredLighting.hlsl・SSR.hlslとまったく同じ読み方をすること(段差防止)
     float4 OcclusionParams;
@@ -90,7 +96,11 @@ cbuffer RTReflectionConstants : register(b1)
 {
     // xy: 出力サイズ(ピクセル), z: 最大レイ距離(ワールド単位), w: ラフネスカットオフ
     float4 Params0;
-    // x: ヒット面へ影レイを撃つか(1で撃つ), yzw: 未使用
+    // x: ヒット面へ影レイを撃つか(1で撃つ)
+    // y: メッシュレットのデバッグ表示(1で、反射に映る面を陰影の代わりにメッシュレット色で塗る)。
+    //    ラスタ側の色分け(GBufferMeshlet.hlslのPSMainMeshletDebug)と同じ色になるので、
+    //    両者が同じ塊分けを見ていることを目視で確かめられる
+    // zw: 未使用
     float4 Params1;
 };
 
@@ -123,6 +133,11 @@ Texture2D BentNormalTexture : register(t16);
 #define KURENAI_RT_MESHINFO_REGISTER t13
 #define KURENAI_RT_INSTANCEINFO_REGISTER t14
 #define KURENAI_RT_MATERIAL_REGISTER t15
+// メッシュレット表。t8〜t10はReflectionProbe.hlsliが、t16はbent normalが使っているため、
+// このシェーダーで空いているのはt17が最初。
+// これに合わせてDX12のkComputeSrvSlotCountを17→18へ上げてある。
+// KurenaiEngine3D.cppのRT反射パスのバインド(スロット17)と一致させること
+#define KURENAI_RT_MESHLET_REGISTER t17
 #include "RaytracingScene.hlsli"
 
 RWTexture2D<float4> OutputTexture : register(u0);
@@ -297,7 +312,20 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             hitMaterial);
 
         const float3 hitPosition = ray.Origin + ray.Direction * query.CommittedRayT();
-        newRadiance = ShadeHitSurface(hitPosition, hitNormal, hitMaterial, ray.Direction);
+        if (Params1.y > 0.5f)
+        {
+            // メッシュレットのデバッグ表示。陰影を計算せず、当たった三角形が属する
+            // メッシュレットの色をそのまま反射の色にする。
+            // ラスタ側の色分けと同じ塊が同じ色で映れば、描画とレイトレーシングが
+            // 同一のジオメトリ(同じ.kgeom、同じ三角形の並び)を見ていることの確認になる
+            const RTInstanceInfo instanceInfo = RTInstanceInfos[query.CommittedInstanceID()];
+            const RTMeshInfo meshInfo = RTMeshInfos[instanceInfo.MeshInfoOffset + query.CommittedGeometryIndex()];
+            newRadiance = MeshletDebugColor(RTFindMeshlet(meshInfo, query.CommittedPrimitiveIndex()));
+        }
+        else
+        {
+            newRadiance = ShadeHitSurface(hitPosition, hitNormal, hitMaterial, ray.Direction);
+        }
     }
     else
     {

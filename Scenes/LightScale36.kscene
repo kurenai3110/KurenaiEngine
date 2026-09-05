@@ -1,0 +1,317 @@
+# タイルライトカリングの動作確認・性能計測用シーン。
+# Tools/generate_shadow_test_scenes.py で生成される(手で編集しない)。
+#
+# 床面へポイントライトを 6x6 = 36 灯、格子状に分散させる。
+# LightTest.kmodel に埋め込まれた2灯(ポイント+スポット)が加わるため、
+# 実行時の有効ライト数は 38 灯になる。
+#
+# 確認手順: Render Targets の View を Light Tiles にするとタイルごとのライト数が
+# ヒートマップで見える(黒=0灯、青→緑→赤=多い、マゼンタ=タイル容量64の超過)。
+# Lighting > Tiled Light Culling の Enable を ON/OFF しても最終画像は変わらないこと
+# (カリングは見た目を変えない最適化であること)も、このシーンで確認する。
+
+[Scene]
+Name = Many Lights Test 38灯
+
+[Model]
+Path = LightTest/LightTest.kmodel
+
+[Camera]
+# 床全体を俯瞰し、多数のライトが画面内に収まる位置
+Position = 0.0, 6.0, -12.0
+# Yaw/Pitch は度(ドキュメント4.7節)。Pitch = -20.1 で約20度見下ろす
+Yaw = 0.0
+Pitch = -20.1
+
+[Sun]
+Shadow = false
+Enabled = false
+
+[Light]
+Type = Point
+Position = -8.33, 2.00, -8.33
+Color = 0.40, 0.50, 0.40
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -5.00, 2.00, -8.33
+Color = 0.52, 0.50, 0.40
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -1.67, 2.00, -8.33
+Color = 0.64, 0.50, 0.40
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 1.67, 2.00, -8.33
+Color = 0.76, 0.50, 0.40
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 5.00, 2.00, -8.33
+Color = 0.88, 0.50, 0.40
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 8.33, 2.00, -8.33
+Color = 1.00, 0.50, 0.40
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -8.33, 2.00, -5.00
+Color = 0.40, 0.50, 0.52
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -5.00, 2.00, -5.00
+Color = 0.52, 0.50, 0.52
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -1.67, 2.00, -5.00
+Color = 0.64, 0.50, 0.52
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 1.67, 2.00, -5.00
+Color = 0.76, 0.50, 0.52
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 5.00, 2.00, -5.00
+Color = 0.88, 0.50, 0.52
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 8.33, 2.00, -5.00
+Color = 1.00, 0.50, 0.52
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -8.33, 2.00, -1.67
+Color = 0.40, 0.50, 0.64
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -5.00, 2.00, -1.67
+Color = 0.52, 0.50, 0.64
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -1.67, 2.00, -1.67
+Color = 0.64, 0.50, 0.64
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 1.67, 2.00, -1.67
+Color = 0.76, 0.50, 0.64
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 5.00, 2.00, -1.67
+Color = 0.88, 0.50, 0.64
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 8.33, 2.00, -1.67
+Color = 1.00, 0.50, 0.64
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -8.33, 2.00, 1.67
+Color = 0.40, 0.50, 0.76
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -5.00, 2.00, 1.67
+Color = 0.52, 0.50, 0.76
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -1.67, 2.00, 1.67
+Color = 0.64, 0.50, 0.76
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 1.67, 2.00, 1.67
+Color = 0.76, 0.50, 0.76
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 5.00, 2.00, 1.67
+Color = 0.88, 0.50, 0.76
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 8.33, 2.00, 1.67
+Color = 1.00, 0.50, 0.76
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -8.33, 2.00, 5.00
+Color = 0.40, 0.50, 0.88
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -5.00, 2.00, 5.00
+Color = 0.52, 0.50, 0.88
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -1.67, 2.00, 5.00
+Color = 0.64, 0.50, 0.88
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 1.67, 2.00, 5.00
+Color = 0.76, 0.50, 0.88
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 5.00, 2.00, 5.00
+Color = 0.88, 0.50, 0.88
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 8.33, 2.00, 5.00
+Color = 1.00, 0.50, 0.88
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -8.33, 2.00, 8.33
+Color = 0.40, 0.50, 1.00
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -5.00, 2.00, 8.33
+Color = 0.52, 0.50, 1.00
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = -1.67, 2.00, 8.33
+Color = 0.64, 0.50, 1.00
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 1.67, 2.00, 8.33
+Color = 0.76, 0.50, 1.00
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 5.00, 2.00, 8.33
+Color = 0.88, 0.50, 1.00
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+
+[Light]
+Type = Point
+Position = 8.33, 2.00, 8.33
+Color = 1.00, 0.50, 1.00
+Intensity = 300.0
+Range = 5.0
+CastShadow = true
+

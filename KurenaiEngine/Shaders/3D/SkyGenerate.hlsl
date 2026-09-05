@@ -44,25 +44,9 @@ StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t0);
 
 RWTexture2DArray<float4> SkyOut : register(u0);
 
-// キューブマップの1面上のUV([0,1]^2)から方向を求める。
-// IBLConvolve.hlsl の CubeFaceDirection および generate_sky_cubemap.py の face_direction_grid と
-// 完全に同一の規約でなければならない(ずれると空とIBLで方向が食い違う)
-float3 CubeFaceDirection(uint face, float2 uv)
-{
-    float2 ndc = uv * 2.0f - 1.0f;
-    float u = ndc.x;
-    float v = ndc.y;
-
-    float3 dir;
-    if (face == 0)      dir = float3(1.0f, -v, -u);   // +X
-    else if (face == 1) dir = float3(-1.0f, -v, u);   // -X
-    else if (face == 2) dir = float3(u, 1.0f, v);     // +Y
-    else if (face == 3) dir = float3(u, -1.0f, -v);   // -Y
-    else if (face == 4) dir = float3(u, -v, 1.0f);    // +Z
-    else                dir = float3(-u, -v, -1.0f);  // -Z
-
-    return normalize(dir);
-}
+// 面→方向の対応(CubeFaceDirection)はCubeFace.hlsliが唯一の定義。
+// ずれると空とIBLで方向が食い違うため、複製を持たない
+#include "CubeFace.hlsli"
 
 [numthreads(8, 8, 1)]
 void CSGenerateSky(uint3 dispatchThreadID : SV_DispatchThreadID)

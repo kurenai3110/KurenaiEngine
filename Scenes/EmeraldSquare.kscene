@@ -1,0 +1,74 @@
+# KurenaiEngine シーンファイル - NVIDIA Emerald Square (ORCA)
+#
+# 現代の商業街区(4ブロック、約230m四方)。中低層のビルとストリートファニチャ、
+# SpeedTreeの植生、バス、展望塔(高さ108m)が入る。
+#
+# 出典: NVIDIA ORCA - NVIDIA Emerald Square v4.1
+#       https://developer.nvidia.com/orca/nvidia-emerald-square
+#       Nicholas Hull, Kate Anderson, Nir Benty (2017)
+#       ライセンス: CC BY-NC-SA 3.0 Unported (非商用のみ・継承あり)
+#       植生はSpeedTreeのORCAアセット
+#
+# 取得と変換の一式は Tools\import_emerald_square.ps1 にある。手で叩く場合:
+#   curl -L -o EmeraldSquare_v4_1.zip https://developer.nvidia.com/emerald-square
+#     (302で署名付きURLが発行される。トークンは短時間で失効するので直リンクは書かない)
+#   ThirdParty\SourceModels\EmeraldSquare_v4_1\ へ展開する
+#   KurenaiPacker.exe ThirdParty\SourceModels\EmeraldSquare_v4_1\EmeraldSquare_Day.fbx ^
+#     -o Assets\Packed\EmeraldSquare\Day.kmodel --specular-as-orm ^
+#     --alpha-cutout "<.DoubleSidedの29マテリアル>=0.5"
+#
+# --- なぜ --scale を付けないのか ---
+# このFBXは UnitScaleFactor=100 と宣言している(FBXの規約では1単位=100cm=1m)。
+# 数値だけ見ると「センチメートル単位だから0.01が要る」ように見えるが、実測すると
+# assimpが読んだ直後のルート変換行列は単位行列で、頂点はそのままメートルだった
+# (--inspect で確認: バウンズ 230.1 x 113.2 x 230.2m、展望塔の高さ108.25m。
+#  配布元の資料にある108.3mと一致する)。--scale 0.01 を付けると1/100になる。
+#
+# 【スケールを外すと影が静かに壊れる】エンジンはシーンAABBの対角から遠クリップ面を
+# 自動で決める(farZ = max(100, 対角x4))。カスケードシャドウの分割範囲はnearZ〜farZ
+# そのままで、シャドウ専用の打ち切り距離が無い。100倍で入れると farZ が10万m級になり、
+# 第1カスケードが数kmを2048x2048の1枚で覆うことになって近景の影が消える。
+# 絵は出るので気づきにくい。正しいスケールなら対角344.6m、farZ 1378mに収まる。
+#
+# --- なぜ --specular-as-orm が要るのか ---
+# このアセットはORM(R=遮蔽/G=ラフネス/B=メタリック)をFBXのSpecularColorスロットへ
+# 入れている(同梱のREADME.txtに規約が明記されている)。assimpはこれを
+# aiTextureType_SPECULARへ入れるため、既定のDIFFUSE_ROUGHNESS/METALNESSしか見ない
+# 解決では220マテリアル全部が1枚も拾えない。対照実験で確認した差:
+#   --specular-as-orm なし … テクスチャ要求 225枚
+#   --specular-as-orm あり … テクスチャ要求 336枚 (+111枚 = Specular DDSの枚数)
+# チャンネルの割り当てはglTFのmetallicRoughness(G=ラフネス/B=メタリック)と一致するため、
+# テクスチャの再加工は要らない。
+#
+# --- なぜ --alpha-cutout が要るのか ---
+# FBXにはglTFのalphaMode(OPAQUE/MASK/BLEND)に相当する情報が無く、解析だけでは
+# 「アルファで抜く葉」を判別できない。指定しないと不透明な板として描かれる
+# (Bistro(OBJ)の葉と同じ既知の破綻)。対象はマテリアル名末尾が .DoubleSided の29件で、
+# BaseColorが8bitアルファ(DXT5)を持つ26枚のうち植生18枚と対応する。
+
+[Scene]
+Name = NVIDIA Emerald Square (Day)
+
+[Model]
+Path = EmeraldSquare/Day.kmodel
+
+# 街区全体を包む巨大なバウンディングボックス(230m四方)を持つため、自動配置
+# ヒューリスティック(バウンズを20%内側に入った位置)では建物の中に入ってしまう。
+# BistroExterior.kscene と同じ理由で初期位置を明示する。
+#
+# 公園の南西の角に立ち、街区の中心(原点付近)へ向かって北東を見る。菩提樹・生垣・花壇と
+# ベンチ/街灯/フェンスが近景に、通りを挟んだ商業ビルのファサードとバスが中景に入り、
+# 植生のアルファカットアウトとORM由来の質感が1画面で確認できる。
+#
+# 【この位置に至った経緯】(0,6,-95)や(-95,2,-95)は建物の内部で、レンガの壁しか映らなかった。
+# 街区は230m四方で建物が密に建っており、開けているのは公園と通りだけ。まず(-130,60,-130)の
+# 俯瞰で地物の配置を把握してから降りる、という順で決めた
+[Camera]
+Position = -55.0, 2.0, -55.0
+Yaw = 45.0
+Pitch = 1.0
+
+[Sun]
+TimeOfDay = 10.0
+AzimuthDegrees = 135.0
+Shadow = true

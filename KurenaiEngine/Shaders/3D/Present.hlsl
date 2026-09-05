@@ -90,6 +90,8 @@ cbuffer PresentConstants : register(b1)
     // Mode 11/14が使う。xy=レンダー解像度(Mode 11はUVからタイル座標を求めるのに、
     // Mode 14はUV単位の速度をピクセル単位へ換算するのに使う), zw=未使用
     float4 TileRenderSize;
+    // Mode 22(MegaLightsの蓄積平均)専用。x=これまでに足したフレーム数, yzw=未使用
+    float4 AccumParams;
 };
 
 Texture2D SourceTexture : register(t0);
@@ -106,6 +108,9 @@ StructuredBuffer<uint> LightTiles : register(t3);
 TextureCubeArray DebugCubeArrayTexture : register(t4);
 // 雲の3Dノイズ(Mode 18)専用。Texture3Dはここまでのどの型とも別なので、さらにスロットを分ける
 Texture3D DebugVolumeTexture : register(t5);
+// MegaLightsの蓄積バッファ(Mode 22)専用。t3(uintの構造化バッファ)とは要素の型が違うため
+// 別のスロットが要る。index = y * TileRenderSize.x + x
+StructuredBuffer<float4> MegaLightsAccumBuffer : register(t6);
 
 struct PSInput
 {
@@ -186,6 +191,21 @@ float4 PSMain(PSInput input) : SV_TARGET
         return float4(color, 1.0f);
     }
 
+    if (Mode == 20)
+    {
+        // DDGIのプローブ裏面率(22章)。イラディアンスアトラスのαに入っている
+        // 「そのプローブから撃ったレイのうち何割が面の裏側に当たったか」を表示する。
+        //
+        // 【Mode 15/16と同じ場所へ置くこと】この関数の手前でDDGIの分岐が先にreturnするため、
+        // 番号を後ろへ置くと一度も実行されない(19番がその理由で移されている)。
+        //
+        // 率は[0,1]なのでGainは掛けない。壁の内部に埋まったプローブは白へ、
+        // 開けた場所のプローブは黒へ寄る。しきい値をどこへ置くかを目と数値で決めるための表示。
+        // ラスタ経路では裏面を記録できないため、全プローブが黒(0)になる
+        float backfaceRatio = SourceTexture.Sample(DataSampler, input.UV).a;
+        return float4(backfaceRatio, backfaceRatio, backfaceRatio, 1.0f);
+    }
+
     if (Mode == 16)
     {
         // DDGIの距離モーメントアトラス(22章)。R=平均距離、G=平均二乗距離のうち、
@@ -240,6 +260,58 @@ float4 PSMain(PSInput input) : SV_TARGET
 
         // 1灯を青、上限(TileParams.w)を赤として青→緑→赤へ遷移させる
         const float t = saturate(float(lightCount) / max(TileParams.w, 1.0f));
+        const float3 heat = (t < 0.5f)
+            ? lerp(float3(0.0f, 0.0f, 1.0f), float3(0.0f, 1.0f, 0.0f), t * 2.0f)
+            : lerp(float3(0.0f, 1.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), (t - 0.5f) * 2.0f);
+        return float4(heat, 1.0f);
+    }
+
+    // MegaLightsの蓄積平均。**計測専用の表示。**
+    // 線形空間で足し込んだ値をフレーム数で割って、Mode 4 とまったく同じトーンマップを掛ける。
+    // 確率的サンプリングの平均が参照実装へ寄っていくかは、この表示どうしを比べて測る
+    // (スクリーンショットをN枚平均する方法は使えない。理由は MegaLightsAccum.hlsl 冒頭)
+    if (Mode == 22)
+    {
+        const uint2 pixelCoord = uint2(saturate(input.UV) * TileRenderSize.xy);
+        const uint index = pixelCoord.y * (uint)TileRenderSize.x + pixelCoord.x;
+        const float frameCount = max(AccumParams.x, 1.0f);
+
+        float3 hdr = MegaLightsAccumBuffer[index].rgb / frameCount * Gain;
+        float3 color = hdr / (hdr + 1.0f);
+        color = pow(color, 1.0f / 2.2f);
+        return float4(color, 1.0f);
+    }
+
+    // MegaLightsの候補プールが数えた「そのタイルへ届いたライト数」のヒートマップ。
+    // **Mode 11とまったく同じ色付けにしてある** ―― 両者は同じ判定
+    // (TileLightCulling.hlsli)を使うので、同じシーン・同じカメラで撮った2枚は
+    // 画素単位で一致するはずであり、一致しなければどちらかの定義域がずれている。
+    //
+    // 【一致するのは到達灯数がタイル容量以下のタイルだけ】容量の概念が無い(K灯を抽出するだけで、
+    // 届いた数は打ち切らない)のでマゼンタは出さない。一方Mode 11は容量を超えるとマゼンタを返すため、
+    // 超過したタイルでは**両者が正しくても色が食い違う**。比べるときは Mode 11 側に
+    // マゼンタが出ていないことを先に確かめること。
+    //
+    // 【比べるときはヒートマップの上限を上げること】既定(8)のままだとライトの多いシーンでは
+    // 一面が赤に飽和し、灯数の違いが色に出ない。飽和した領域どうしの一致は検出力がほとんど無い。
+    // t3はMode 11と共用で、C++側がこのModeのときだけ候補プールのバッファを差し替える
+    if (Mode == 21)
+    {
+        const uint2 pixelCoord = uint2(saturate(input.UV) * TileRenderSize.xy);
+        const uint tileSize = max((uint)TileParams.y, 1u);
+        const uint2 tileCoord = pixelCoord / tileSize;
+        // 候補プールのレイアウトは MegaLightsTilePool.hlsl 冒頭を参照。
+        // base = tileIndex * (6 + 2K)、届いたライト数は [base + 1](MegaLightsCommon.hlsli 参照)
+        const uint candidateCount = (uint)TileParams.z;
+        const uint tileBase = (tileCoord.y * (uint)TileParams.x + tileCoord.x) * (6u + 2u * candidateCount);
+
+        const uint reachableCount = LightTiles[tileBase + 1u];
+        if (reachableCount == 0u)
+        {
+            return float4(0.0f, 0.0f, 0.0f, 1.0f);
+        }
+
+        const float t = saturate(float(reachableCount) / max(TileParams.w, 1.0f));
         const float3 heat = (t < 0.5f)
             ? lerp(float3(0.0f, 0.0f, 1.0f), float3(0.0f, 1.0f, 0.0f), t * 2.0f)
             : lerp(float3(0.0f, 1.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), (t - 0.5f) * 2.0f);

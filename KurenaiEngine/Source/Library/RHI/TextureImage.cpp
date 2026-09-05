@@ -7,6 +7,10 @@
 
 #include <DirectXTex.h>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
@@ -37,6 +41,64 @@ namespace Kurenai::RHI
             }
         }
 
+        // DDSヘッダだけ読めれば足りる(DXT10拡張ヘッダを含めても148バイト)。
+        // KurenaiPackerのExistingKtexIsUnsupportedと同じ値
+        constexpr size_t kDdsHeaderProbeBytes = 256;
+
+        // DDSファイルのヘッダ長。'DDS 'マジック(4) + DDS_HEADER(124) と、
+        // DXT10拡張がある場合の DDS_HEADER_DXT10(20)。BC7はDXGIフォーマットなので後者になる。
+        // ペイロード長から全ミップのバイト数を引いた差がこのどちらかに一致することで、
+        // 「このファイルは素直な2DのDDSである」ことを検算する
+        constexpr uint64_t kDdsHeaderSize = 4 + 124;
+        constexpr uint64_t kDdsHeaderSizeWithDXT10 = kDdsHeaderSize + 20;
+
+        // ミップmの寸法。DirectXTexと同じく1で下げ止まる
+        size_t MipExtent(size_t base, uint32_t mip)
+        {
+            const size_t value = base >> mip;
+            return value != 0 ? value : 1;
+        }
+
+        // ミップmの1スライス分のバイト数。ブロック圧縮の端数処理を自前で書かず
+        // DirectXTexへ任せる(BC7以外の.dds直読みでも同じ経路が通るようにするため)
+        uint64_t MipSliceBytes(DXGI_FORMAT format, size_t baseWidth, size_t baseHeight, uint32_t mip)
+        {
+            size_t rowPitch = 0;
+            size_t slicePitch = 0;
+            const HRESULT hr = DirectX::ComputePitch(
+                format, MipExtent(baseWidth, mip), MipExtent(baseHeight, mip),
+                rowPitch, slicePitch, DirectX::CP_FLAGS_NONE);
+            if (FAILED(hr))
+            {
+                return 0;
+            }
+            return static_cast<uint64_t>(slicePitch);
+        }
+
+        // .ktexの24Bヘッダを読んで検証する。戻ったときストリームはDDSペイロードの先頭を指す。
+        // 不正な場合はstd::runtime_errorを投げる
+        Assets::PackedTextureHeader ReadPackedTextureHeader(std::istream& in, const std::wstring& filePath)
+        {
+            Assets::PackedTextureHeader header{};
+            in.read(reinterpret_cast<char*>(&header), sizeof(header));
+            if (std::memcmp(header.Magic, Assets::kPackedTextureMagic, sizeof(Assets::kPackedTextureMagic)) != 0)
+            {
+                throw std::runtime_error("パック済みテクスチャのマジックナンバーが不正です: " + WideToUtf8(filePath));
+            }
+            if (header.Version != Assets::kPackedTextureVersion)
+            {
+                throw std::runtime_error(
+                    "パック済みテクスチャのバージョンが対応していません(ファイル: " +
+                    std::to_string(header.Version) + ", ランタイム: " + std::to_string(Assets::kPackedTextureVersion) +
+                    "): " + WideToUtf8(filePath));
+            }
+            if (header.PayloadSize == 0)
+            {
+                throw std::runtime_error("パック済みテクスチャのペイロードが空です: " + WideToUtf8(filePath));
+            }
+            return header;
+        }
+
         bool HasExtension(const std::wstring& path, const wchar_t* extension)
         {
             const size_t extLen = wcslen(extension);
@@ -52,10 +114,34 @@ namespace Kurenai::RHI
         // GPU版Compress()はID3D11Deviceしか受け付けないため、DX12バックエンド利用時でも
         // このデバイスだけは常にD3D11で用意する。将来テクスチャキャッシュ生成を独立した
         // ビルドツールへ切り出す際も、この関数はIRHIDeviceに一切依存していないためそのまま移植できる
+        //
+        // === 計測 ==============================================================
+        //
+        // フェーズ別の累計をナノ秒の整数で持つ(doubleのfetch_addはC++17に無い)。
+        // 複数スレッドから積むためアトミック。計測しているのはKurenaiPackerが通る
+        // LoadFromFile経路だけで、ランタイムが使うLoadFromPackedTextureには入れていない
+        using StatsClock = std::chrono::steady_clock;
+
+        std::atomic<uint64_t>& StatNanos(int index)
+        {
+            // 0=Decode 1=Mip 2=BC7Wait 3=BC7Compress 4=DeviceCreate 5=Count
+            static std::atomic<uint64_t> counters[6] = {};
+            return counters[index];
+        }
+
+        void AddStatNanos(int index, const StatsClock::time_point& start)
+        {
+            StatNanos(index).fetch_add(
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    StatsClock::now() - start).count()),
+                std::memory_order_relaxed);
+        }
+
         ID3D11Device* GetCompressionDevice()
         {
             static Microsoft::WRL::ComPtr<ID3D11Device> device = []() -> Microsoft::WRL::ComPtr<ID3D11Device>
             {
+                const auto deviceCreateStart = StatsClock::now();
                 UINT createDeviceFlags = 0;
 #if defined(_DEBUG)
                 createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
@@ -79,8 +165,10 @@ namespace Kurenai::RHI
                     // GPU圧縮用デバイスが作れない場合はnullptrを返し、呼び出し側(CompressBC7)で
                     // 圧縮失敗として扱う(呼び出し元のLoadFromFileが非圧縮フォールバックする)
                     Core::Logger::Warning("TextureImage", "BC7圧縮用GPUデバイスの作成に失敗しました");
+                    AddStatNanos(4, deviceCreateStart);
                     return nullptr;
                 }
+                AddStatNanos(4, deviceCreateStart);
                 return result;
             }();
             return device.Get();
@@ -96,6 +184,14 @@ namespace Kurenai::RHI
             return mutex;
         }
 
+        // 【この直列化を外しても速くならない(実測)】DirectX::Compressは呼ばれるたびに
+        // GPUCompressBCを作り直してコンピュートシェーダを7本生成するが、その固定費は
+        // 0.96msでBC7圧縮全体の1%しかない(Sponza 69枚で66ms / 6559ms)。
+        // またGPU側が既に飽和しており、パッカーを2プロセス同時に走らせると
+        // テクスチャフェーズは1本6.7秒から2本とも14.4秒へ伸び、合計の壁時計は変わらない。
+        // ワーカーを増やす・デバイスを分ける・圧縮器を使い回す、のいずれも効かない。
+        // 速くしたいなら「圧縮しない」(既存の.ktexを使う)しかない。
+        //
         // GPU(コンピュートシェーダー)でBC7圧縮する。CPU版フォールバックは持たない
         // (ソフトウェアBC7圧縮は実用的な速度が出ないため。詳細はGetCompressionDeviceのコメント参照)。
         // GPU圧縮用デバイスが無い/圧縮呼び出し自体が失敗した場合は失敗のHRESULTを返し、
@@ -110,10 +206,38 @@ namespace Kurenai::RHI
                 return E_FAIL;
             }
 
-            std::lock_guard<std::mutex> lock(CompressionDeviceMutex());
-            return DirectX::Compress(
+            // 【待ちと圧縮を別々に測る】lock_guardのままだと両者が混ざり、
+            // 「ワーカーを増やす意味があるか」を判定できない
+            const auto waitStart = StatsClock::now();
+            std::unique_lock<std::mutex> lock(CompressionDeviceMutex());
+            AddStatNanos(2, waitStart);
+
+            const auto compressStart = StatsClock::now();
+            const HRESULT hr = DirectX::Compress(
                 gpuDevice, srcImages, nimages, metadata, format,
                 DirectX::TEX_COMPRESS_DEFAULT, DirectX::TEX_ALPHA_WEIGHT_DEFAULT, compressed);
+            AddStatNanos(3, compressStart);
+            return hr;
+        }
+    }
+
+    TextureLoadStats GetTextureLoadStats()
+    {
+        TextureLoadStats stats;
+        stats.DecodeSeconds = static_cast<double>(StatNanos(0).load(std::memory_order_relaxed)) / 1e9;
+        stats.MipSeconds = static_cast<double>(StatNanos(1).load(std::memory_order_relaxed)) / 1e9;
+        stats.BC7WaitSeconds = static_cast<double>(StatNanos(2).load(std::memory_order_relaxed)) / 1e9;
+        stats.BC7CompressSeconds = static_cast<double>(StatNanos(3).load(std::memory_order_relaxed)) / 1e9;
+        stats.DeviceCreateSeconds = static_cast<double>(StatNanos(4).load(std::memory_order_relaxed)) / 1e9;
+        stats.Count = StatNanos(5).load(std::memory_order_relaxed);
+        return stats;
+    }
+
+    void ResetTextureLoadStats()
+    {
+        for (int i = 0; i < 6; ++i)
+        {
+            StatNanos(i).store(0, std::memory_order_relaxed);
         }
     }
 
@@ -147,6 +271,97 @@ namespace Kurenai::RHI
         return static_cast<uint64_t>(m_Impl->Image.GetPixelsSize());
     }
 
+    bool TextureImage::ExtractLinearThumbnail(uint32_t size, float* outRGB) const
+    {
+        if (size == 0 || outRGB == nullptr)
+        {
+            return false;
+        }
+        const DirectX::TexMetadata& meta = m_Impl->Metadata;
+        if (meta.width == 0 || meta.height == 0 || meta.mipLevels == 0)
+        {
+            return false;
+        }
+
+        // 【ミップ0を使う。小さいミップで代用してはいけない】.ktex のミップは元の .dds が
+        // 持っていたものをそのまま運んでいることがあり、**ガンマ空間で畳まれていると
+        // 線形平均が保存されない**。実測(EmeraldSquare)で 2048^2 のミップ0に対し 32^2 の
+        // ミップ6は Signal_Emissive で 3.0倍、Bus_Etc_Emissive で 2.2倍も暗く出た。
+        // 「暗い背景に明るいグリフ」型のテクスチャほど大きく外す。
+        // 自発光テクスチャは数枚しか無く、読み込み時に1回展開するだけなので実測で問題ない
+        const DirectX::Image* source = m_Impl->Image.GetImage(0, 0, 0);
+        if (source == nullptr)
+        {
+            return false;
+        }
+
+        // 【sRGB→線形は DirectXTex に1回だけやらせる。手で EOTF を掛けない】
+        // DirectXTex は BC*_UNORM_SRGB から非sRGBフォーマットへ変換するとき、
+        // 呼び出し側が指定しなくても TEX_FILTER_SRGB_IN を立てて線形化する
+        // (DirectXTexCompress.cpp の ConvertScanline → DirectXTexConvert.cpp)。
+        // 「展開は符号値をそのまま移すだけ」という思い込みで自前の EOTF を重ねると
+        // **2回掛かる**。実測で灯具のテクスチャが真値の 8.2倍暗くなっていた。
+        // 変換先を float にしておけば SRGB_OUT が立たず、変換はちょうど1回で済む。
+        // 非sRGBのテクスチャは元から線形なので、どちらの経路でも変換は起きない
+        DirectX::ScratchImage converted;
+        const DirectX::Image* linear = source;
+        if (source->format != DXGI_FORMAT_R32G32B32A32_FLOAT)
+        {
+            const HRESULT hr = DirectX::IsCompressed(source->format)
+                ? DirectX::Decompress(*source, DXGI_FORMAT_R32G32B32A32_FLOAT, converted)
+                : DirectX::Convert(
+                      *source, DXGI_FORMAT_R32G32B32A32_FLOAT, DirectX::TEX_FILTER_DEFAULT,
+                      DirectX::TEX_THRESHOLD_DEFAULT, converted);
+            if (FAILED(hr) || converted.GetImageCount() == 0)
+            {
+                return false;
+            }
+            linear = converted.GetImage(0, 0, 0);
+        }
+        if (linear == nullptr || linear->pixels == nullptr || linear->width == 0 || linear->height == 0)
+        {
+            return false;
+        }
+
+        // 【升ごとにソースを引く。ソースを走査して升へ足し込む形にしない】
+        // ソースがサムネイルより小さいと、後者では埋まらない升が残る。そこへ0(真っ黒)が
+        // 入ると平均に混ざる ―― 実測で 16x16 のテクスチャでは升の25%しか埋まらず、
+        // 平均が真値の 1/6 になっていた。升からソースの矩形を引く形なら必ず埋まる
+        for (uint32_t ty = 0; ty < size; ++ty)
+        {
+            const size_t y0 = static_cast<size_t>(ty) * linear->height / size;
+            size_t y1 = static_cast<size_t>(ty + 1) * linear->height / size;
+            if (y1 <= y0) { y1 = y0 + 1; }
+            for (uint32_t tx = 0; tx < size; ++tx)
+            {
+                const size_t x0 = static_cast<size_t>(tx) * linear->width / size;
+                size_t x1 = static_cast<size_t>(tx + 1) * linear->width / size;
+                if (x1 <= x0) { x1 = x0 + 1; }
+
+                double sum[3] = { 0.0, 0.0, 0.0 };
+                size_t count = 0;
+                for (size_t y = y0; y < std::min<size_t>(y1, linear->height); ++y)
+                {
+                    const auto* row = reinterpret_cast<const float*>(linear->pixels + y * linear->rowPitch);
+                    for (size_t x = x0; x < std::min<size_t>(x1, linear->width); ++x)
+                    {
+                        sum[0] += row[x * 4 + 0];
+                        sum[1] += row[x * 4 + 1];
+                        sum[2] += row[x * 4 + 2];
+                        count += 1;
+                    }
+                }
+                const size_t bin = static_cast<size_t>(ty) * size + tx;
+                const double inv = (count > 0) ? (1.0 / static_cast<double>(count)) : 0.0;
+                for (int channel = 0; channel < 3; ++channel)
+                {
+                    outRGB[bin * 3 + channel] = static_cast<float>(sum[channel] * inv);
+                }
+            }
+        }
+        return true;
+    }
+
     TextureImage TextureImage::LoadFromFile(const std::wstring& filePath, bool sRGB)
     {
         TextureImage result;
@@ -178,11 +393,15 @@ namespace Kurenai::RHI
             return result;
         }
 
+        StatNanos(5).fetch_add(1, std::memory_order_relaxed);
+
+        const auto decodeStart = StatsClock::now();
         DirectX::TexMetadata rawMetadata{};
         DirectX::ScratchImage rawImage;
         ThrowIfFailed(
             DirectX::LoadFromWICFile(filePath.c_str(), DirectX::WIC_FLAGS_FORCE_RGB, &rawMetadata, rawImage),
             "テクスチャの読み込みに失敗しました: " + WideToUtf8(filePath));
+        AddStatNanos(0, decodeStart);
         if (sRGB)
         {
             rawImage.OverrideFormat(DirectX::MakeSRGB(rawMetadata.format));
@@ -190,8 +409,10 @@ namespace Kurenai::RHI
 
         // ミップマップ生成に失敗しても致命的ではないため、失敗時はミップ無しの元画像のまま
         // 圧縮処理へ進む(サンプラーはミップ無しテクスチャも正しく扱える)
+        const auto mipStart = StatsClock::now();
         DirectX::ScratchImage mipChain;
         const HRESULT mipHr = DirectX::GenerateMipMaps(rawImage.GetImages(), rawImage.GetImageCount(), rawImage.GetMetadata(), DirectX::TEX_FILTER_DEFAULT, 0, mipChain);
+        AddStatNanos(1, mipStart);
         if (FAILED(mipHr))
         {
             Core::Logger::Warning("TextureImage", "ミップマップ生成に失敗したため、ミップ無しのまま使用します: " + WideToUtf8(filePath));
@@ -241,23 +462,7 @@ namespace Kurenai::RHI
         {
             in.exceptions(std::ios::failbit | std::ios::badbit);
 
-            Assets::PackedTextureHeader header{};
-            in.read(reinterpret_cast<char*>(&header), sizeof(header));
-            if (std::memcmp(header.Magic, Assets::kPackedTextureMagic, sizeof(Assets::kPackedTextureMagic)) != 0)
-            {
-                throw std::runtime_error("パック済みテクスチャのマジックナンバーが不正です: " + WideToUtf8(filePath));
-            }
-            if (header.Version != Assets::kPackedTextureVersion)
-            {
-                throw std::runtime_error(
-                    "パック済みテクスチャのバージョンが対応していません(ファイル: " +
-                    std::to_string(header.Version) + ", ランタイム: " + std::to_string(Assets::kPackedTextureVersion) +
-                    "): " + WideToUtf8(filePath));
-            }
-            if (header.PayloadSize == 0)
-            {
-                throw std::runtime_error("パック済みテクスチャのペイロードが空です: " + WideToUtf8(filePath));
-            }
+            const Assets::PackedTextureHeader header = ReadPackedTextureHeader(in, filePath);
 
             std::vector<uint8_t> payload(header.PayloadSize);
             in.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
@@ -268,6 +473,211 @@ namespace Kurenai::RHI
                 DirectX::LoadFromDDSMemory(payload.data(), payload.size(), DirectX::DDS_FLAGS_NONE, &result.m_Impl->Metadata, result.m_Impl->Image),
                 "パック済みテクスチャのDDSデコードに失敗しました: " + WideToUtf8(filePath));
 
+            return result;
+        }
+        catch (const std::ios_base::failure&)
+        {
+            throw std::runtime_error("パック済みテクスチャの読み込み中に入出力エラーが発生しました: " + WideToUtf8(filePath));
+        }
+    }
+
+    bool TextureImage::TryReadPackedTextureInfo(const std::wstring& filePath, PackedTextureInfo& outInfo)
+    {
+        outInfo = PackedTextureInfo{};
+
+        std::ifstream in(filePath, std::ios::binary);
+        if (!in.is_open())
+        {
+            Core::Logger::Error("TextureImage", "パック済みテクスチャを開けませんでした: " + WideToUtf8(filePath));
+            return false;
+        }
+
+        Assets::PackedTextureHeader header{};
+        try
+        {
+            in.exceptions(std::ios::failbit | std::ios::badbit);
+            header = ReadPackedTextureHeader(in, filePath);
+        }
+        catch (const std::exception& e)
+        {
+            Core::Logger::Error("TextureImage", std::string("パック済みテクスチャのヘッダを読めませんでした: ") + e.what());
+            return false;
+        }
+
+        // ここから先は「読めなければfalseを返す」だけなので例外を投げさせない
+        in.exceptions(std::ios::goodbit);
+
+        const size_t probeSize = static_cast<size_t>(std::min<uint64_t>(header.PayloadSize, kDdsHeaderProbeBytes));
+        std::vector<uint8_t> probe(probeSize);
+        in.read(reinterpret_cast<char*>(probe.data()), static_cast<std::streamsize>(probeSize));
+        if (in.gcount() != static_cast<std::streamsize>(probeSize))
+        {
+            Core::Logger::Error("TextureImage", "パック済みテクスチャのDDSヘッダを読み切れませんでした: " + WideToUtf8(filePath));
+            return false;
+        }
+
+        DirectX::TexMetadata metadata{};
+        const HRESULT hr = DirectX::GetMetadataFromDDSMemory(probe.data(), probe.size(), DirectX::DDS_FLAGS_NONE, metadata);
+        if (FAILED(hr))
+        {
+            Core::Logger::Error("TextureImage", "パック済みテクスチャのDDSメタデータを取得できませんでした: " + WideToUtf8(filePath));
+            return false;
+        }
+
+        outInfo.Width = static_cast<uint32_t>(metadata.width);
+        outInfo.Height = static_cast<uint32_t>(metadata.height);
+        outInfo.MipLevels = static_cast<uint32_t>(metadata.mipLevels);
+        outInfo.Format = static_cast<uint32_t>(metadata.format);
+        outInfo.PayloadSize = header.PayloadSize;
+        outInfo.SRGB = (header.Flags & Assets::kPackedTextureFlagSRGB) != 0;
+        outInfo.SupportsPartialMipLoad =
+            metadata.dimension == DirectX::TEX_DIMENSION_TEXTURE2D &&
+            metadata.arraySize == 1 &&
+            metadata.depth == 1 &&
+            (metadata.miscFlags & DirectX::TEX_MISC_TEXTURECUBE) == 0 &&
+            metadata.mipLevels > 1;
+        return true;
+    }
+
+    uint64_t TextureImage::ComputeMipChainBytes(const PackedTextureInfo& info, uint32_t firstMip)
+    {
+        if (info.MipLevels == 0 || firstMip >= info.MipLevels)
+        {
+            return 0;
+        }
+
+        const auto format = static_cast<DXGI_FORMAT>(info.Format);
+        uint64_t total = 0;
+        for (uint32_t mip = firstMip; mip < info.MipLevels; ++mip)
+        {
+            total += MipSliceBytes(format, info.Width, info.Height, mip);
+        }
+        return total;
+    }
+
+    TextureImage TextureImage::LoadFromPackedTexture(const std::wstring& filePath, uint32_t firstMip)
+    {
+        if (firstMip == 0)
+        {
+            // 既存経路をそのまま通す(挙動を1ビットも変えない)
+            return LoadFromPackedTexture(filePath);
+        }
+
+        // 部分読み出しの前提を満たすかはヘッダを見ないと分からない。
+        // 満たさない場合は全ミップを読む版へ委譲する ―― 常駐量が減らないだけで絵は正しく出る
+        PackedTextureInfo info{};
+        if (!TryReadPackedTextureInfo(filePath, info) || !info.SupportsPartialMipLoad)
+        {
+            Core::Logger::Warning(
+                "TextureImage",
+                "ミップ単位の部分読み出しに対応しない形式のため全ミップを読み込みます: " + WideToUtf8(filePath));
+            return LoadFromPackedTexture(filePath);
+        }
+
+        const uint32_t clampedFirstMip = std::min(firstMip, info.MipLevels - 1);
+        const uint32_t destMipCount = info.MipLevels - clampedFirstMip;
+        const auto format = static_cast<DXGI_FORMAT>(info.Format);
+
+        // 読み飛ばすバイト数と読むバイト数。DDSはミップ0を先頭に降順で連続している
+        uint64_t skipBytes = 0;
+        uint64_t keepBytes = 0;
+        for (uint32_t mip = 0; mip < info.MipLevels; ++mip)
+        {
+            const uint64_t bytes = MipSliceBytes(format, info.Width, info.Height, mip);
+            if (bytes == 0)
+            {
+                Core::Logger::Warning(
+                    "TextureImage",
+                    "ミップのバイト数を計算できなかったため全ミップを読み込みます: " + WideToUtf8(filePath));
+                return LoadFromPackedTexture(filePath);
+            }
+            if (mip < clampedFirstMip)
+            {
+                skipBytes += bytes;
+            }
+            else
+            {
+                keepBytes += bytes;
+            }
+        }
+
+        // 【検算】ペイロード長から全ミップのバイト数を引いた差がDDSヘッダ長に一致すること。
+        // 一致しないなら、こちらが想定していない並び(パディング等)のファイルなので触らない
+        const uint64_t pixelBytes = skipBytes + keepBytes;
+        if (info.PayloadSize < pixelBytes)
+        {
+            Core::Logger::Warning(
+                "TextureImage",
+                "ペイロードがミップの合計より小さいため全ミップを読み込みます: " + WideToUtf8(filePath));
+            return LoadFromPackedTexture(filePath);
+        }
+        const uint64_t ddsHeaderBytes = info.PayloadSize - pixelBytes;
+        if (ddsHeaderBytes != kDdsHeaderSize && ddsHeaderBytes != kDdsHeaderSizeWithDXT10)
+        {
+            Core::Logger::Warning(
+                "TextureImage",
+                "DDSヘッダ長が想定(" + std::to_string(kDdsHeaderSize) + " または " +
+                    std::to_string(kDdsHeaderSizeWithDXT10) + ")と異なる(" + std::to_string(ddsHeaderBytes) +
+                    ")ため全ミップを読み込みます: " + WideToUtf8(filePath));
+            return LoadFromPackedTexture(filePath);
+        }
+
+        std::vector<char> ioBuffer(1 << 20);
+        std::ifstream in;
+        in.rdbuf()->pubsetbuf(ioBuffer.data(), static_cast<std::streamsize>(ioBuffer.size()));
+        in.open(filePath, std::ios::binary);
+        if (!in.is_open())
+        {
+            throw std::runtime_error("パック済みテクスチャを開けませんでした: " + WideToUtf8(filePath));
+        }
+
+        try
+        {
+            in.exceptions(std::ios::failbit | std::ios::badbit);
+
+            const uint64_t payloadOffset = sizeof(Assets::PackedTextureHeader) + ddsHeaderBytes + skipBytes;
+            in.seekg(static_cast<std::streamoff>(payloadOffset), std::ios::beg);
+
+            std::vector<uint8_t> payload(static_cast<size_t>(keepBytes));
+            in.read(reinterpret_cast<char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+
+            // 読んだバイト列を「firstMipを新しいミップ0とするテクスチャ」として組み立てる。
+            // DDSヘッダを作り直すのではなくScratchImageへ直接置くのは、DDS_HEADER/DXT10の
+            // フラグを自前で組み立てる誤りを持ち込まないため
+            TextureImage result;
+            ThrowIfFailed(
+                result.m_Impl->Image.Initialize2D(
+                    format,
+                    MipExtent(info.Width, clampedFirstMip),
+                    MipExtent(info.Height, clampedFirstMip),
+                    1, destMipCount),
+                "ミップを縮めたテクスチャの確保に失敗しました: " + WideToUtf8(filePath));
+
+            uint64_t offset = 0;
+            for (uint32_t destMip = 0; destMip < destMipCount; ++destMip)
+            {
+                const DirectX::Image* destImage = result.m_Impl->Image.GetImage(destMip, 0, 0);
+                if (destImage == nullptr || destImage->pixels == nullptr)
+                {
+                    throw std::runtime_error("ミップの格納先を取得できませんでした: " + WideToUtf8(filePath));
+                }
+
+                // ScratchImageの各ミップのバイト数が、DDS上の同じミップのバイト数と一致すること。
+                // 一致しなければ並びの前提が崩れているので、黙って壊れた絵を出さずに止める
+                const uint64_t sourceBytes = MipSliceBytes(format, info.Width, info.Height, clampedFirstMip + destMip);
+                if (destImage->slicePitch != static_cast<size_t>(sourceBytes) ||
+                    offset + sourceBytes > payload.size())
+                {
+                    throw std::runtime_error(
+                        "ミップのバイト数がDDS上の並びと一致しません(ミップ" + std::to_string(clampedFirstMip + destMip) +
+                        "): " + WideToUtf8(filePath));
+                }
+
+                std::memcpy(destImage->pixels, payload.data() + offset, static_cast<size_t>(sourceBytes));
+                offset += sourceBytes;
+            }
+
+            result.m_Impl->Metadata = result.m_Impl->Image.GetMetadata();
             return result;
         }
         catch (const std::ios_base::failure&)

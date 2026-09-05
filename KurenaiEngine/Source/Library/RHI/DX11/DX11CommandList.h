@@ -18,17 +18,23 @@ namespace Kurenai::RHI
         void ClearRenderTarget(const ClearColor& color) override;
         void ClearDepth(float depth) override;
         void SetViewport(const Viewport& viewport) override;
+        void SetScissorRect(const ScissorRect& rect) override;
+        void ResetScissorRect() override;
         void SetPipelineState(IRHIPipelineState* pipelineState) override;
         void SetVertexBuffer(IRHIBuffer* buffer) override;
         void SetIndexBuffer(IRHIBuffer* buffer) override;
         void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetTexture(uint32_t slot, IRHITexture* texture) override;
+        void SetTextureAllStages(uint32_t slot, IRHITexture* texture) override;
         void SetSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
-        void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
+        void DrawIndexed(
+            uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation,
+            uint32_t instanceCount) override;
+        void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
         void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
@@ -41,11 +47,28 @@ namespace Kurenai::RHI
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
+        void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) override;
+        void DispatchMeshIndirect(
+            IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount,
+            uint32_t countOffsetInBytes) override;
+        void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) override;
+        void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
+        void CopyTextureToReadback(
+            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel = 0, uint32_t arraySlice = 0) override;
 
     private:
+        // Dispatch/DispatchIndirectの後始末。バインドしたUAVを全解除する
+        void ReleaseComputeUavBindingsAfterDispatch();
+
         static constexpr uint32_t kMaxRenderTargets = 8;
         // SetComputeUnorderedAccessTexture/Bufferで使えるUAVスロット数(u0〜u3)
         static constexpr uint32_t kComputeUavSlotCount = 4;
+        // SetVertexShaderResourceBufferで使える頂点シェーダのSRVスロット数。
+        // DX11自体は128本持っているが、DX12側はルートSRVを1本しか割り当てていない
+        // (DX12CommandList::kVertexShaderSrvSlotCount)。ここを合わせておかないと
+        // 「DX11では通るがDX12では黙って描画が消える」非対称なバグが書けてしまうため、
+        // DX11側でも同じ上限で弾く。増やすときはDX12のルートシグネチャと同時に直すこと
+        static constexpr uint32_t kVertexShaderSrvSlotCount = 1;
         // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t17)。
         // DX12側のDX12CommandList::kTextureSlotCountおよびDX12Device.cppの
         // ルートシグネチャのSRVレンジと同じ値にしておくこと(3か所)。
@@ -56,7 +79,7 @@ namespace Kurenai::RHI
         // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう。
         // **SetTextureは範囲外スロットも素通しするため、漏れていても描画結果には現れない。**
         //
-        // 【現在の22の内訳】最も多く使うDeferredLighting.hlslがt0〜t21をちょうど使い切る:
+        // 【現在の23の内訳】最も多く使うDeferredLighting.hlslがt0〜t22をちょうど使い切る:
         //   t0〜t7   G-Buffer一式(アルベド/直接光/マテリアル/深度/スカイボックス/AO/自発光/法線)
         //   t8,t9    グローバルIBL(放射照度・プリフィルタ済み鏡面)
         //   t10      BRDF LUT
@@ -64,10 +87,12 @@ namespace Kurenai::RHI
         //   t12〜t14 反射プローブ(鏡面専任。拡散はDDGIへ一本化した)
         //   t15,t16  DDGIのオクタヘドラルアトラス2枚
         //   t17      bent normalのG-Buffer(34章)
-        //   t18,t19  雲の形状/ディテールの3Dノイズ
+        //   t18      低解像度の雲パス(SkyCloud.hlsl)の出力。rgb=事前乗算済みの散乱光 / a=透過率
+        //   t19      DDGIResolveが書いた低解像度のイラディアンス
         //   t20      大気散乱のSkyView LUT
-        //   t21      焼いた雲のウェザーマップ(H3。2D。レイマーチの1歩を8倍安くするためのもの)
-        static constexpr uint32_t kTextureSlotCount = 22;
+        //   t21      DDGIResolveが書いた低解像度の深度(41.24節)
+        //   t22      低解像度の雲パスが書いたfogInFront(雲の手前の霞。P18bの補正に使う)
+        static constexpr uint32_t kTextureSlotCount = 23;
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
         // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。
@@ -75,6 +100,18 @@ namespace Kurenai::RHI
         // 解放済みのビューをGetResourceで触ってしまうのを防ぐため
         void UnbindPixelSrvForResource(ID3D11Resource* resource);
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> m_BoundPixelSrvs[kTextureSlotCount];
+
+        // 指定リソースが出力(レンダーターゲット/深度)として張られていたら、出力をすべて外す。
+        // D3D11は出力に張ったままのリソースをコピー元にできず、そのまま
+        // CopySubresourceRegionを呼ぶとデバッグレイヤーが警告を出してコピーが無効になる。
+        // UnbindPixelSrvForResourceの出力版で、リードバックのコピー直前に使う
+        void UnbindRenderTargetsForResource(ID3D11Resource* resource);
+
+        // シザー矩形をD3D11へ設定する(SetViewport/SetScissorRect/ResetScissorRectの共通処理)
+        void ApplyScissorRect(const ScissorRect& rect);
+        // SetScissorRect/ResetScissorRectがクランプ先として使う、直近のSetViewportの値
+        Viewport m_CurrentViewport{};
+        bool m_HasViewport = false;
 
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
         ID3D11RenderTargetView* m_CurrentRenderTargetViews[kMaxRenderTargets] = {};

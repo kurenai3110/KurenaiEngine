@@ -239,7 +239,7 @@ void CSIntegrateSky(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 被覆率0でも1.000にならない。同じ格子・同じ方向で割れば、被覆率0のとき
     // SkyColorWithRayの早期脱出により cloudy と clear が方向ごとに同一の値になり、
     // 和も一致して比が厳密に1.0になる
-    const float3 clearRadiance = SkyClearColor(cloudDir, cloudParams);
+    const float3 clearRadiance = SkyColorWithoutClouds(cloudDir, cloudParams);
     const float3 cloudyRadiance = SkyColorWithRay(
         cloudParams.ViewerPosition, cloudDir, kCloudBackgroundRayDistance, cloudParams);
 

@@ -25,6 +25,9 @@ namespace Kurenai::UI
 
     private:
         void DrawSunSection();
+        // エミッシブ光源(自発光メッシュから起こす光源プロキシ)のつまみ。
+        // 「自発光の強度」スライダーの直下に置く
+        void DrawEmissiveLightControls();
         void DrawLightsSection(const PanelDrawContext& context);
         void DrawSelectedLightEditor();
 

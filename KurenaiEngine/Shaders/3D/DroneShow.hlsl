@@ -88,7 +88,13 @@ PSInput VSMain(uint vertexID : SV_VertexID)
     // ビュー空間で足しているため、Viewが鏡映を含んでいてもクアッド自身の巻きは変わらない
     // (鏡映行列を一度も通らない)。メッシュ描画のようにワインディングを反転したPSOへ
     // 切り替えると、逆に1機残らず裏面として捨てられ水面に何も映らなくなる
-    const uint quadVertex = (corner < 3u) ? corner : (corner - 1u);
+    // 【添字は表で持つ】以前ここは (corner < 3u) ? corner : (corner - 1u) という式だった。
+    // これだと corner 3,4,5 が頂点 2,3,4 になり、2枚目が [2,3,4] = 同じ頂点を2つ持つ
+    // 退化三角形(面積0)になる。**クアッドの半分しか描かれず、円形に切り抜いた結果が
+    // 対角線で切られた半円になる。** 遠景では機体が1〜2画素なので円と区別がつかず、
+    // 絵のA/B比較でも回帰として出ない ―― 式で書くとこの種の取り違えが目視で通ってしまう
+    static const uint kQuadIndices[6] = { 0u, 1u, 2u, 0u, 2u, 3u };
+    const uint quadVertex = kQuadIndices[corner];
     const float2 offset = float2(
         (quadVertex < 2u) ? -1.0f : 1.0f,
         (quadVertex == 0u || quadVertex == 3u) ? -1.0f : 1.0f);

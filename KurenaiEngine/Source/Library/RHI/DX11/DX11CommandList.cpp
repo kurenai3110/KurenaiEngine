@@ -1,6 +1,8 @@
 #include "DX11CommandList.h"
 
+#include <algorithm>
 #include <cstring>
+#include <string>
 #include <utility>
 
 #include "Core/Logger.h"
@@ -89,6 +91,49 @@ namespace Kurenai::RHI
         dxViewport.MinDepth = viewport.MinDepth;
         dxViewport.MaxDepth = viewport.MaxDepth;
         m_Context->RSSetViewports(1, &dxViewport);
+
+        // ラスタライザはScissorEnable=TRUE(DX11Device::CreatePipelineState)。
+        // D3D11のシザー矩形の既定は「矩形0本」なので、有効なまま一度も張らないと
+        // 全ピクセルがクリップされて何も映らなくなる。ここで必ずビューポート全体を張ることで、
+        // SetScissorRectを使わない呼び出し側から見た挙動は従来と変わらない。
+        // (D3D12もコマンドリストのリセット直後は矩形0本という同じ危険があり、
+        //  DX12CommandList::SetViewportが同じ方法で塞いでいる)
+        m_CurrentViewport = viewport;
+        m_HasViewport = true;
+        ApplyScissorRect(MakeFullViewportScissorRect(viewport));
+    }
+
+    void DX11CommandList::SetScissorRect(const ScissorRect& rect)
+    {
+        if (!m_HasViewport)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "SetScissorRect: SetViewportより先に呼ばれました。クランプ先のビューポートが"
+                "決まらないため、この呼び出しを無視します");
+            return;
+        }
+        ApplyScissorRect(ClampScissorRectToViewport(rect, m_CurrentViewport));
+    }
+
+    void DX11CommandList::ResetScissorRect()
+    {
+        if (!m_HasViewport)
+        {
+            Core::Logger::Error("DX11", "ResetScissorRect: SetViewportより先に呼ばれました。この呼び出しを無視します");
+            return;
+        }
+        ApplyScissorRect(MakeFullViewportScissorRect(m_CurrentViewport));
+    }
+
+    void DX11CommandList::ApplyScissorRect(const ScissorRect& rect)
+    {
+        D3D11_RECT dxRect{};
+        dxRect.left = rect.Left;
+        dxRect.top = rect.Top;
+        dxRect.right = rect.Right;
+        dxRect.bottom = rect.Bottom;
+        m_Context->RSSetScissorRects(1, &dxRect);
     }
 
     void DX11CommandList::SetPipelineState(IRHIPipelineState* pipelineState)
@@ -98,7 +143,11 @@ namespace Kurenai::RHI
         m_Context->IASetInputLayout(dx11PipelineState->GetInputLayout());
         m_Context->IASetPrimitiveTopology(dx11PipelineState->GetTopology());
         m_Context->VSSetShader(dx11PipelineState->GetVertexShader()->GetVertexShader(), nullptr, 0);
-        m_Context->PSSetShader(dx11PipelineState->GetPixelShader()->GetPixelShader(), nullptr, 0);
+        // ピクセルシェーダーを持たないパイプライン(深度プリパス)ではnullptrを張って
+        // ピクセルシェーダー段を無効化する。前のパスのものが残ると深度だけを書くつもりが
+        // レンダーターゲットへ書き込んでしまう
+        DX11Shader* const dx11PixelShader = dx11PipelineState->GetPixelShader();
+        m_Context->PSSetShader(dx11PixelShader ? dx11PixelShader->GetPixelShader() : nullptr, nullptr, 0);
         m_Context->OMSetDepthStencilState(dx11PipelineState->GetDepthStencilState(), 0);
         m_Context->OMSetBlendState(dx11PipelineState->GetBlendState(), nullptr, 0xFFFFFFFF);
         m_Context->RSSetState(dx11PipelineState->GetRasterizerState());
@@ -129,6 +178,13 @@ namespace Kurenai::RHI
 
     void DX11CommandList::SetTexture(uint32_t slot, IRHITexture* texture)
     {
+        if (texture == nullptr)
+        {
+            // nullptrをそのまま進めるとGetShaderResourceViewでnull参照になる
+            Core::Logger::Error("DX11", "SetTexture: テクスチャがnullptrです。バインドをスキップします");
+            return;
+        }
+
         auto* dx11Texture = static_cast<DX11Texture*>(texture);
         ID3D11ShaderResourceView* srvs[] = { dx11Texture->GetShaderResourceView() };
         m_Context->PSSetShaderResources(slot, 1, srvs);
@@ -136,6 +192,19 @@ namespace Kurenai::RHI
         {
             m_BoundPixelSrvs[slot] = srvs[0];
         }
+    }
+
+    void DX11CommandList::SetTextureAllStages(uint32_t slot, IRHITexture* texture)
+    {
+        // 【DX11ではSetTextureと同じでよい】このAPIが分かれているのはDX12の都合
+        // (リソース状態がステージ単位で分かれており、増幅シェーダー・メッシュシェーダーから
+        // 読むにはNON_PIXELも立てて遷移させる必要がある)。DX11にはリソース状態という概念が無く、
+        // ステージごとのバインド空間も独立しているため、遷移に相当する処理が存在しない。
+        //
+        // 【そもそもDX11には呼び出し側が来ない】このAPIを使うのは増幅シェーダーへHi-Zを渡す経路で、
+        // DX11はメッシュシェーダー非対応。それでも実装を置くのは、RHIのインターフェースを
+        // 片側だけ実装すると「もう片方は起動して初めて壊れていることが分かる」ため
+        SetTexture(slot, texture);
     }
 
     void DX11CommandList::SetSamplerSet(IRHISamplerSet* samplerSet)
@@ -163,6 +232,19 @@ namespace Kurenai::RHI
 
     void DX11CommandList::SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer)
     {
+        // 【DX12に合わせて上限を検査する】DX11はステージごとにSRVスロットを128本持つので
+        // t0以外でも素通りしてしまうが、DX12側はルートSRV1本しか割り当てておらず
+        // (DX12CommandList::kVertexShaderSrvSlotCount)、範囲外はログを出してバインドを捨てる。
+        // 検査が片側にしか無いと「DX11では映るがDX12では消える」形の非対称なバグを作れてしまう
+        if (slot >= kVertexShaderSrvSlotCount)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "SetVertexShaderResourceBuffer: スロット" + std::to_string(slot) + "は範囲外です(有効なのはt0のみ)。"
+                "バインドをスキップします");
+            return;
+        }
+
         if (buffer == nullptr)
         {
             Core::Logger::Error(
@@ -248,9 +330,38 @@ namespace Kurenai::RHI
         m_Context->Draw(vertexCount, startVertexLocation);
     }
 
-    void DX11CommandList::DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation)
+    void DX11CommandList::DrawIndexed(
+        uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation, uint32_t instanceCount)
     {
-        m_Context->DrawIndexed(indexCount, startIndexLocation, baseVertexLocation);
+        if (instanceCount == 0)
+        {
+            Core::Logger::Error("DX11", "DrawIndexed: instanceCountが0のため描画をスキップします");
+            return;
+        }
+
+        // instanceCount==1でもDrawIndexedInstancedで発行してよい(D3D11の仕様上まったく同じ描画になる)が、
+        // 従来経路のコマンドを1バイトも変えないために、1のときは元のDrawIndexedをそのまま呼ぶ
+        if (instanceCount == 1)
+        {
+            m_Context->DrawIndexed(indexCount, startIndexLocation, baseVertexLocation);
+            return;
+        }
+
+        // 第5引数(StartInstanceLocation)は常に0。SV_InstanceIDへ加算されないため、
+        // ここでずらしても頂点シェーダーからは見えない(IRHICommandList.hの規約どおり
+        // 開始位置は定数バッファで渡す)
+        m_Context->DrawIndexedInstanced(indexCount, instanceCount, startIndexLocation, baseVertexLocation, 0);
+    }
+
+    void DX11CommandList::DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+    {
+        (void)threadGroupCountX;
+        (void)threadGroupCountY;
+        (void)threadGroupCountZ;
+        // 上位層はIRHIDevice::SupportsMeshShader()を見て従来の頂点シェーダー描画へ
+        // 分岐する設計のため、ここへ来るのは分岐漏れ
+        Core::Logger::Error(
+            "DX11", "DispatchMesh: DX11はメッシュシェーダーに対応していません。SupportsMeshShader()で分岐してください");
     }
 
     void DX11CommandList::SetComputePipelineState(IRHIPipelineState* pipelineState)
@@ -362,7 +473,216 @@ namespace Kurenai::RHI
     void DX11CommandList::Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
     {
         m_Context->Dispatch(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+        ReleaseComputeUavBindingsAfterDispatch();
+    }
 
+    // 【DX11では呼び出し側が存在しない】このAPIを使うのはコンピュートシェーダーによる
+    // 自前ラスタライザだけで、そちらはSM 6.6とbindlessを要求するためDX12専用
+    // (IRHIDevice::SupportsSoftwareRaster()はDX11では常にfalse)。
+    // RHIの抽象を片肺にしないため実装は用意してあるが、この経路は実行されない
+    void DX11CommandList::DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes)
+    {
+        if (!argsBuffer)
+        {
+            Core::Logger::Error("DX11", "DispatchIndirect: 引数バッファがnullptrです。ディスパッチをスキップします");
+            return;
+        }
+
+        auto* dx11Buffer = static_cast<DX11Buffer*>(argsBuffer);
+        if (!dx11Buffer->IsIndirectArgs())
+        {
+            Core::Logger::Error(
+                "DX11", "DispatchIndirect: BufferUsage::IndirectArgs以外のバッファが渡されました。ディスパッチをスキップします");
+            return;
+        }
+        if ((offsetInBytes % 4) != 0)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "DispatchIndirect: offsetInBytes(" + std::to_string(offsetInBytes) +
+                    ")が4の倍数ではありません。ディスパッチをスキップします");
+            return;
+        }
+
+        m_Context->DispatchIndirect(dx11Buffer->GetBuffer(), offsetInBytes);
+        ReleaseComputeUavBindingsAfterDispatch();
+    }
+
+    // 【DX11にメッシュシェーダーは無い】D3D11にはDispatchMeshに相当するものが無く、
+    // 増幅シェーダーも存在しない。呼び出し側は IRHIDevice::SupportsIndirectDispatchMesh() で
+    // 分岐して従来のCPUループへ縮退するため、ここへ来るのは分岐漏れのときだけ
+    void DX11CommandList::DispatchMeshIndirect(
+        IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount, uint32_t countOffsetInBytes)
+    {
+        (void)argsBuffer;
+        (void)argsOffsetInBytes;
+        (void)maxCommandCount;
+        (void)countOffsetInBytes;
+        Core::Logger::Error(
+            "DX11", "DispatchMeshIndirect: DX11はメッシュシェーダーに対応していません。描画をスキップします");
+    }
+
+    // 【DX11では呼び出し側が存在しない】理由はDispatchIndirectのコメントと同じ
+    void DX11CommandList::ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value)
+    {
+        if (!buffer)
+        {
+            Core::Logger::Error("DX11", "ClearUnorderedAccessBufferUint: バッファがnullptrです。クリアをスキップします");
+            return;
+        }
+
+        auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
+        ID3D11UnorderedAccessView* uav = dx11Buffer->GetUnorderedAccessView();
+        if (!uav)
+        {
+            Core::Logger::Error(
+                "DX11", "ClearUnorderedAccessBufferUint: UAVを持たないバッファが渡されました。クリアをスキップします");
+            return;
+        }
+
+        // UAVとして触る前に、同一リソースがピクセルシェーダのSRVとして張られていたら外す
+        // (SetComputeUnorderedAccessBufferと同じ理由。DX11はSRVとUAVを同時にバインドできない)
+        UnbindPixelSrvForResource(dx11Buffer->GetBuffer());
+
+        const UINT values[4] = { value, value, value, value };
+        m_Context->ClearUnorderedAccessViewUint(uav, values);
+    }
+
+    void DX11CommandList::CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes)
+    {
+        if (dst == nullptr || src == nullptr || sizeInBytes == 0)
+        {
+            Core::Logger::Error("DX11", "CopyBufferToReadback: 引数が不正です。コピーをスキップします");
+            return;
+        }
+
+        auto* dx11Dst = static_cast<DX11Buffer*>(dst);
+        auto* dx11Src = static_cast<DX11Buffer*>(src);
+        if (!dx11Dst->IsReadback())
+        {
+            Core::Logger::Error(
+                "DX11", "CopyBufferToReadback: コピー先がBufferUsage::Readbackではありません。コピーをスキップします");
+            return;
+        }
+
+        // 【リソース状態の遷移は不要】DX11はドライバが暗黙に扱う(DX12との差はここだけ)。
+        // 範囲を指定してコピーするためCopyResourceではなくCopySubresourceRegionを使う
+        // (受け皿がコピー元より大きい場合に、DX12のCopyBufferRegionと同じ意味になる)
+        const D3D11_BOX box{ 0, 0, 0, sizeInBytes, 1, 1 };
+        m_Context->CopySubresourceRegion(dx11Dst->GetBuffer(), 0, 0, 0, 0, dx11Src->GetBuffer(), 0, &box);
+    }
+
+    void DX11CommandList::UnbindRenderTargetsForResource(ID3D11Resource* resource)
+    {
+        if (resource == nullptr)
+        {
+            return;
+        }
+
+        const auto viewPointsAtResource = [resource](ID3D11View* view)
+        {
+            if (view == nullptr)
+            {
+                return false;
+            }
+            Microsoft::WRL::ComPtr<ID3D11Resource> boundResource;
+            view->GetResource(&boundResource);
+            return boundResource.Get() == resource;
+        };
+
+        bool bound = viewPointsAtResource(m_CurrentDepthStencilView);
+        for (uint32_t i = 0; i < m_CurrentRenderTargetCount && !bound; ++i)
+        {
+            bound = viewPointsAtResource(m_CurrentRenderTargetViews[i]);
+        }
+
+        if (!bound)
+        {
+            return;
+        }
+
+        // 【1本だけ外すのではなく全部外す】OMSetRenderTargetsは配列ごと差し替えるAPIで、
+        // 「n番目だけ外す」という指定ができない。次の描画がSetRenderTargetsを必ず呼ぶので、
+        // ここで空にしておいて困ることはない
+        m_Context->OMSetRenderTargets(0, nullptr, nullptr);
+        for (uint32_t i = 0; i < kMaxRenderTargets; ++i)
+        {
+            m_CurrentRenderTargetViews[i] = nullptr;
+        }
+        m_CurrentRenderTargetCount = 0;
+        m_CurrentDepthStencilView = nullptr;
+    }
+
+    void DX11CommandList::CopyTextureToReadback(
+        IRHITexture* dst, IRHITexture* src, uint32_t mipLevel, uint32_t arraySlice)
+    {
+        if (dst == nullptr || src == nullptr)
+        {
+            Core::Logger::Error("DX11", "CopyTextureToReadback: 引数がnullptrです。コピーをスキップします");
+            return;
+        }
+
+        auto* dx11Dst = static_cast<DX11Texture*>(dst);
+        auto* dx11Src = static_cast<DX11Texture*>(src);
+        if (!dx11Dst->IsReadback())
+        {
+            Core::Logger::Error(
+                "DX11",
+                "CopyTextureToReadback: コピー先がCreateReadbackTextureで作ったテクスチャではありません。"
+                "コピーをスキップします");
+            return;
+        }
+
+        ID3D11Texture2D* srcTexture = dx11Src->GetTexture2D();
+        if (srcTexture == nullptr)
+        {
+            Core::Logger::Error("DX11", "CopyTextureToReadback: コピー元がTexture2Dではありません");
+            return;
+        }
+
+        D3D11_TEXTURE2D_DESC srcDesc{};
+        srcTexture->GetDesc(&srcDesc);
+        if (mipLevel >= srcDesc.MipLevels || arraySlice >= srcDesc.ArraySize)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "CopyTextureToReadback: サブリソースの指定が範囲外です (mipLevel=" + std::to_string(mipLevel) +
+                    "/" + std::to_string(srcDesc.MipLevels) + ", arraySlice=" + std::to_string(arraySlice) + "/" +
+                    std::to_string(srcDesc.ArraySize) + ")");
+            return;
+        }
+
+        // 受け皿はCreateReadbackTextureの時点で「特定のミップ段の寸法」に合わせて作ってある。
+        // 別のミップを指定されるとサイズが合わず、静かに壊れるので突き合わせて弾く
+        const TextureReadbackDesc dstDesc = dx11Dst->GetReadbackDesc(0);
+        const uint32_t mipWidth = std::max<uint32_t>(1u, srcDesc.Width >> mipLevel);
+        const uint32_t mipHeight = std::max<uint32_t>(1u, srcDesc.Height >> mipLevel);
+        if (dstDesc.Width != mipWidth || dstDesc.Height != mipHeight)
+        {
+            Core::Logger::Error(
+                "DX11",
+                "CopyTextureToReadback: 受け皿の寸法(" + std::to_string(dstDesc.Width) + "x" +
+                    std::to_string(dstDesc.Height) + ")がコピー元のミップ" + std::to_string(mipLevel) + "(" +
+                    std::to_string(mipWidth) + "x" + std::to_string(mipHeight) +
+                    ")と一致しません。CreateReadbackTextureに渡したミップと同じものを指定してください");
+            return;
+        }
+
+        // 【DX11特有】リソース状態の遷移は無いが、出力に張ったままのリソースはコピー元にできない。
+        // G-Bufferや深度は直前のパスで出力に張られたままのことがあるので、外してからコピーする
+        // (SRV側はUnbindPixelSrvForResourceが同じ理由で外している)
+        UnbindRenderTargetsForResource(srcTexture);
+
+        const UINT srcSubresource = D3D11CalcSubresource(mipLevel, arraySlice, srcDesc.MipLevels);
+
+        // 【pSrcBoxはnullptr】サブリソース全体をコピーする。深度フォーマットのコピーは
+        // 部分矩形の指定が許されていない(D3D11の制約)
+        m_Context->CopySubresourceRegion(
+            dx11Dst->GetStagingTexture(), 0, 0, 0, 0, srcTexture, srcSubresource, nullptr);
+    }
+
+    void DX11CommandList::ReleaseComputeUavBindingsAfterDispatch()
+    {
         // バインドしたUAVはこのDispatchでのみ有効とし、直後に明示的に解放する(コメントはヘッダ側参照)
         if (m_BoundComputeUavSlotMask != 0)
         {

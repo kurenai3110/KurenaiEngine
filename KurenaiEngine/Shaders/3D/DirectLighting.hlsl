@@ -41,21 +41,10 @@ cbuffer FrameConstants : register(b0)
     // これらが必要になったら、C++の並びどおりに間のフィールドをすべて宣言すること
 };
 
-// ポイント/スポットライト1灯ぶんのデータ。C++側 KurenaiEngine3D.cpp の GPULight と
-// 並び・ストライド(64バイト)を一致させる必要がある。既存の SSAOConstants/SSILConstants と同様、
-// パッキング規則の解釈揺れを避けるためメンバはすべて float4 単位で宣言する
-struct GPULight
-{
-    float4 PositionType;   // xyz=ワールド座標, w=LightType(0=Directional, 1=Point, 2=Spot)
-    // rgb = Color * Intensity[cd] * exposure(EV100)。カンデラ→露出済みの最終放射輝度で、
-    // CPU側(MakeGPULight)で計算してあるためシェーダ側はそのまま乗算するだけでよい
-    float4 ColorRange;     // rgb=露出済み放射輝度, w=Range
-    float4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
-    // x=spotAngleOffset, y=CastShadow(1でスクリーンスペースシャドウを撃つ / 0で撃たない),
-    // zw=未使用(エリアライト用に予約)
-    float4 Params;
-};
-StructuredBuffer<GPULight> Lights : register(t8);
+// struct GPULight と StructuredBuffer<GPULight> Lights : register(t8) は
+// PunctualLighting.hlsli にある(このファイルの下の方、BRDFLUTTexture の宣言の直後で
+// インクルードしている)。BRDF や減衰と同じヘッダーへ置いてあるのは、ライトの評価に
+// 関わる定義を1か所へ集めて MegaLights と食い違わないようにするため
 
 // タイルライトカリング(LightCulling.hlsl)が書いたライトグリッド。レイアウトは
 //   base = tileIndex * (1 + kMaxLightsPerTile)
@@ -100,6 +89,10 @@ Texture2D DepthTexture : register(t3);
 // ルート引数が無効化されるため、シェーダが宣言しているリソースはモードによらず必ず
 // バインドしなければならない(C++側は非対応環境では代わりに深度テクスチャを張る)
 Texture2D RTShadowTexture : register(t6);
+// MegaLightsパス(MegaLightsReference.hlsl)が書いたポイント/スポットライトの直接光
+// (拡散+鏡面、影と透過を適用済み)。このパスと同じ解像度・同じピクセル格子なので、常にLoadで読む。
+// LightCount.wが1のときだけ読まれるが、t6と同じ理由で必ずバインドしなければならない
+Texture2D MegaLightsTexture : register(t7);
 // ポイント/スポットライトのスクリーンスペースシャドウ。FrameConstants(ViewProj)・
 // LightingConstants(SSSParams0/1)・DataSampler・DepthTextureを参照するため、それらより後でインクルードする
 #include "ScreenSpaceShadow.hlsli"
@@ -108,6 +101,13 @@ Texture2D RTShadowTexture : register(t6);
 // Ess = brdf.x + brdf.y を必要とするためバインドしている。
 // t8はライトリスト(StructuredBuffer<GPULight>)が占有しているためt9に置く
 Texture2D BRDFLUTTexture : register(t9);
+
+// GPULight・距離減衰・スポット減衰・Cook-Torrance・透過。MegaLightsの各パスと同じ式を使うための共有ヘッダー。
+// PI・SpecularEnergy.hlsli・BRDFLUTTexture・ColorSampler をすべて宣言したあとでインクルードすること
+// (このヘッダーはPIを自前で定義しない。詳しくはPunctualLighting.hlsli冒頭の「インクルードする側の責務」)
+#define KURENAI_PUNCTUAL_LIGHT_REGISTER t8
+#define KURENAI_PUNCTUAL_LIGHTING_BRDF
+#include "PunctualLighting.hlsli"
 
 struct PSInput
 {
@@ -132,79 +132,6 @@ float3 ReconstructWorldPos(float2 uv, float depth)
     return worldPos.xyz / worldPos.w;
 }
 
-float DistributionGGX(float NdotH, float roughness)
-{
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float d = NdotH * NdotH * (a2 - 1.0f) + 1.0f;
-    return a2 / max(PI * d * d, 1e-6f);
-}
-
-// GeometrySchlickGGX / GeometrySmith はSpecularEnergy.hlsliの共有定義を使う
-// (**Disneyのラフネス再マップ k=(roughness+1)^2/8 をここへ足してはいけない**。理由は同ヘッダー参照)
-
-float3 FresnelSchlick(float cosTheta, float3 F0)
-{
-    return F0 + (1.0f - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
-}
-
-// SpecularEnergyContext(スペキュラのエネルギー補正のうちピクセル内で一定な量)は
-// SpecularEnergy.hlsliの共有定義を使う。
-
-// Cook-Torrance を1灯ぶん評価する(シャドウ・ライト色・減衰は呼び出し側で乗算する)。
-// 太陽(b0)とポイント/スポットライト(t8)の両方から共通で呼ばれる。
-float3 EvaluateDirectBRDF(
-    float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness,
-    SpecularEnergyContext energy)
-{
-    float3 H = normalize(V + L);
-    float NdotL = saturate(dot(N, L));
-    float NdotH = saturate(dot(N, H));
-    float VdotH = saturate(dot(V, H));
-
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    float D = DistributionGGX(NdotH, roughness);
-    float G = GeometrySmith(NdotV, NdotL, roughness);
-    float3 F = FresnelSchlick(VdotH, F0);
-
-    // 補正は鏡面項にのみ掛ける(拡散項kdは変更しない。理由は14.9節)
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energy.Compensation;
-
-    if (energy.Mode == KURENAI_SPEC_COMP_KULLACONTY)
-    {
-        // 加算ローブはE(NdotL)を要る。ライトのループ内から呼ばれるため、勾配に依存しない
-        // SampleLevelを使う(Sampleは動的な分岐・ループ内で勾配が未定義になり得る)
-        const float2 brdfL = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotL, energy.Roughness), 0).rg;
-        specular += SpecularMultiScatterLobe(F0, energy.EssV, brdfL.x + brdfL.y, energy.Eavg, energy.Mode);
-    }
-
-    float3 kd = (1.0f - F) * (1.0f - metallic);
-    float3 diffuse = kd * albedo / PI;
-
-    return (diffuse + specular) * NdotL;
-}
-
-// Karis 2013 / Frostbite の windowed inverse-square。Range を超えると厳密に0になり、
-// 打ち切り境界でのハードエッジが出ない
-float DistanceAttenuation(float distSq, float range)
-{
-    float factor = distSq / max(range * range, 1e-4f); // (d/r)^2
-    float window = saturate(1.0f - factor * factor);   // 1 - (d/r)^4
-    // 光源に極端に近づいたときの発散を抑える。定数1.0を足す実装はシーンスケール依存になるため、
-    // 最小距離二乗でのクランプにする
-    return (window * window) / max(distSq, 0.0001f);
-}
-
-// Frostbite の lightAngleScale / lightAngleOffset。CPU側(MakeGPULight)で事前計算した値を
-// GPULight.DirectionAngle.w / Params.x として受け取る
-//   scale  = 1 / max(0.001, cos(inner) - cos(outer))
-//   offset = -cos(outer) * scale
-float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float angleOffset)
-{
-    float t = saturate(dot(spotDirection, -L) * angleScale + angleOffset);
-    return t * t;
-}
-
 // t8のライトリストを1灯ぶん評価する。early-outは効きの強い順(距離→減衰→スポット円錐→NdotL)に並べる。
 // 影はシャドウマップではなくスクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)で求める。
 //
@@ -214,7 +141,7 @@ float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float an
 // そのピクセルに実際に届いているライトから順に予算が使われる
 float3 EvaluateLight(
     GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
-    SpecularEnergyContext energy, float2 pixelCoord, inout uint shadowRayBudget)
+    float translucency, SpecularEnergyContext energy, float2 pixelCoord, inout uint shadowRayBudget)
 {
     uint lightType = (uint)light.PositionType.w;
     float range = light.ColorRange.w;
@@ -237,7 +164,8 @@ float3 EvaluateLight(
             return float3(0.0f, 0.0f, 0.0f);
         }
 
-        atten = DistanceAttenuation(distSq, range);
+        atten = LightAttenuation(
+            lightType, toLight, distSq, range, light.Params.z, light.DirectionAngle.xyz, light.Params.w);
         if (atten <= 0.0f)
         {
             return float3(0.0f, 0.0f, 0.0f);
@@ -258,7 +186,10 @@ float3 EvaluateLight(
         }
     }
 
-    if (dot(N, L) <= 0.0f)
+    // 【透過するマテリアルではNdotL<=0でも打ち切らない】薄いものは裏から当たった光を
+    // 透かすため、その側にこそ寄与がある(EvaluateTranslucency参照)。
+    // 透過しないマテリアル(translucency=0)は従来どおりここで打ち切る
+    if (dot(N, L) <= 0.0f && translucency <= 0.0f)
     {
         return float3(0.0f, 0.0f, 0.0f);
     }
@@ -266,14 +197,17 @@ float3 EvaluateLight(
     // ここまで来たライトだけが実際にこのピクセルを照らす。予算が残っていて、かつ
     // そのライトが影を落とす設定(Params.y)ならレイマーチする
     float shadow = 1.0f;
-    if (shadowRayBudget > 0u && light.Params.y > 0.5f)
+    if (shadowRayBudget > 0u && LightCastsScreenSpaceShadow(light.Params.y))
     {
         shadow = ComputeScreenSpaceShadow(worldPos, N, L, distanceToLight, pixelCoord);
         shadowRayBudget -= 1u;
     }
 
-    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy)
-        * light.ColorRange.rgb * atten * shadow;
+    const float3 reflected = EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy);
+    // 透過側の遮蔽は太陽と同じ扱い(遮蔽側も光を通すぶんを下限として残す)
+    const float transmissionShadow = lerp(saturate(translucency * kTranslucencyShadowFloor), 1.0f, shadow);
+    const float3 transmitted = EvaluateTranslucency(N, V, L, albedo, translucency) * transmissionShadow;
+    return reflected * shadow * light.ColorRange.rgb * atten + transmitted * light.ColorRange.rgb * atten;
 }
 
 float4 PSMain(PSInput input) : SV_TARGET
@@ -287,7 +221,10 @@ float4 PSMain(PSInput input) : SV_TARGET
     }
 
     float3 worldPos = ReconstructWorldPos(input.UV, depth);
-    float3 albedo = AlbedoTexture.Sample(ColorSampler, input.UV).rgb;
+    // aチャンネルは透過率(GBuffer.hlslが書く)。0なら従来どおりの不透明な陰影になる
+    float4 albedoSample = AlbedoTexture.Sample(ColorSampler, input.UV);
+    float3 albedo = albedoSample.rgb;
+    float translucency = albedoSample.a;
     float3 N = OctDecode(NormalTexture.Sample(DataSampler, input.UV).xy);
     float2 material = MaterialTexture.Sample(DataSampler, input.UV).rg;
     float metallic = material.r;
@@ -311,13 +248,17 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 太陽の寄与だけをこのブロックに閉じ込め、その後は必ずライトリストのループへ進む
     float3 sunL = normalize(-LightDirection.xyz);
     float sunNdotL = saturate(dot(N, sunL));
-    if (sunNdotL > 0.0f)
+    // 【透過はNdotL<=0の側で効く】葉や花弁は薄いので、裏から当たった光が透けて表側を光らせる。
+    // 不透明体としての寄与(上のsunNdotL>0)とは排他なので、シャドウの取得だけ共有できるよう
+    // ここで先に影の可視率を求めておく
+    const bool needSunShadow = (sunNdotL > 0.0f) || (translucency > 0.0f);
+    float sunShadow = 1.0f;
+    if (needSunShadow)
     {
-        float shadow;
         if (LightCount.z == 2u) // Raytraced
         {
             // RTShadow.hlslが同じ解像度・同じピクセル格子へ書いた可視率をそのまま使う
-            shadow = RTShadowTexture.Load(int3((int2)input.Position.xy, 0)).r;
+            sunShadow = RTShadowTexture.Load(int3((int2)input.Position.xy, 0)).r;
         }
         else
         {
@@ -325,9 +266,27 @@ float4 PSMain(PSInput input) : SV_TARGET
             // クリアしたまま何も描かないため、ComputeShadowFactorの深度比較が常に
             // 「影なし」と判定して1.0を返す(シャドウパスのClearDepth参照)
             float viewDepth = mul(float4(worldPos, 1.0f), View).z;
-            shadow = ComputeCascadedShadowFactor(worldPos, viewDepth, sunNdotL);
+            // 【透過側ではNdotLを0で渡す】ComputeCascadedShadowFactorはNdotLを
+            // 法線オフセット(シャドウアクネ対策)に使う。裏から照らされている面では
+            // sunNdotLが0なのでオフセットは掛からず、面そのものの深度で比較される
+            sunShadow = ComputeCascadedShadowFactor(worldPos, viewDepth, sunNdotL);
         }
-        directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energy) * LightColor.rgb * shadow;
+
+        if (sunNdotL > 0.0f)
+        {
+            directLight += EvaluateDirectBRDF(N, V, sunL, NdotV, albedo, metallic, roughness, energy)
+                * LightColor.rgb * sunShadow;
+        }
+
+        // 【透過には不透明体の影をそのまま掛けない】シャドウは「不透明な何かに遮られたか」しか
+        // 答えないが、透過するものが重なっている場合は遮蔽側も光を通す。そのまま掛けると、
+        // 密な樹冠では1枚重なった時点で透過が完全に消える
+        // (実測: 樹冠の平均が (109, 109, 120) → (75, 82, 98) まで落ち、透過を入れた意味が無くなる)。
+        // 遮蔽側の透過ぶんを下限として残す。下限をマテリアル自身の透過率から作るのは、
+        // よく透けるものほど「隣も同じだけ透ける」ため。不透明(translucency=0)なら
+        // 下限も0になり、従来どおり完全な影になる
+        const float transmissionShadow = lerp(saturate(translucency * kTranslucencyShadowFloor), 1.0f, sunShadow);
+        directLight += EvaluateTranslucency(N, V, sunL, albedo, translucency) * LightColor.rgb * transmissionShadow;
     }
 
     // --- t8のライトリスト(スクリーンスペースシャドウ付き) ---
@@ -335,9 +294,16 @@ float4 PSMain(PSInput input) : SV_TARGET
     // 線形に伸び続けないようにするための予算で、EvaluateLightが消費する
     uint shadowRayBudget = LightCount.y;
 
+    // MegaLightsが走っているフレームでは、ポイント/スポットの寄与(影・透過込み)は
+    // あちらが計算済みなのでそのまま足すだけにし、**このパスのライトループは回さない**。
+    // 回すと同じライトが二重に加算されて2倍明るくなる
+    if (LightCount.w != 0u)
+    {
+        directLight += MegaLightsTexture.Load(int3((int2)input.Position.xy, 0)).rgb;
+    }
     // タイルライトカリング有効時は、このピクセルが属するタイルのリストだけをループする。
     // 無効時は従来どおり全ライトを回す(カリングの有無で結果が変わらないことの検証に使う)
-    if (TileParams.w != 0u)
+    else if (TileParams.w != 0u)
     {
         const uint2 tileCoord = uint2(input.Position.xy) / TileParams.y;
         const uint tileBase = (tileCoord.y * TileParams.x + tileCoord.x) * (1u + TileParams.z);
@@ -350,7 +316,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         {
             directLight += EvaluateLight(
                 Lights[LightTiles[tileBase + 1u + t]], worldPos, N, V, NdotV, albedo, metallic, roughness,
-                energy, input.Position.xy, shadowRayBudget);
+                translucency, energy, input.Position.xy, shadowRayBudget);
         }
     }
     else
@@ -359,7 +325,7 @@ float4 PSMain(PSInput input) : SV_TARGET
         for (uint i = 0; i < LightCount.x; ++i)
         {
             directLight += EvaluateLight(
-                Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness, energy,
+                Lights[i], worldPos, N, V, NdotV, albedo, metallic, roughness, translucency, energy,
                 input.Position.xy, shadowRayBudget);
         }
     }

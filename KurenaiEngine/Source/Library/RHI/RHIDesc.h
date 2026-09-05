@@ -14,6 +14,44 @@ namespace Kurenai::RHI
         uint32_t SizeInBytes = 0;
         uint32_t StrideInBytes = 0;
         const void* InitialData = nullptr;
+        // このバッファを、本来の用途に加えてStructuredBuffer<T>としてもシェーダーから
+        // 読めるようにするか(SRVを追加で作る)。BufferUsage::VertexとBufferUsage::Indexに
+        // のみ意味がある。
+        //
+        // メッシュシェーダーには入力アセンブラが無く、頂点は自分でバッファから読むしかない。
+        // コンピュートシェーダーによる自前ラスタライザ(SoftwareRaster.hlsl)はさらに
+        // インデックスも自分で引く。かといって別に同じ内容の構造化バッファを作ると
+        // VRAMを二重に食うため、同一リソースへ本来のビューとSRVの両方を張れるようにする。
+        // StrideInBytesがそのままStructuredBufferの要素サイズになる
+        // (頂点ならsizeof(Vertex)、インデックスなら4 = StructuredBuffer<uint>)。
+        //
+        // DX11実装は参照しない(メッシュシェーダーも自前ラスタライザも存在せず、用途が無いため)
+        bool ShaderReadable = false;
+
+        // BufferUsage::StructuredReadOnlyのバッファを1フレームに何回UpdateBufferするかの上限。
+        // DX12はこの値からステージングリングの段数(値 × kFrameCount + 1)を決める。
+        // CPUはkFrameCountフレームぶん先行して記録するため、これを超えて更新すると
+        // GPUが読み取り中のスロットを上書きして描画結果が静かに壊れる
+        // (DX12Buffer::AdvanceUploadRingAndGetWritePtrがログで検出する)。
+        // 段数ぶんのUPLOADヒープを常時確保するので、大きなバッファに大きな値を与えないこと。
+        //
+        // DX11実装は参照しない(D3D11_USAGE_DYNAMIC + Map(WRITE_DISCARD)はドライバが毎回
+        // リネームするため、1フレームあたりの更新回数に上限が無い)
+        uint32_t MaxUpdatesPerFrame = 4;
+
+        // BufferUsage::Constantのバッファを1フレームに何回UpdateBufferするかの上限。
+        // 0なら実装既定(DX12は8192スロット = 1フレームあたり4096回)を使う。
+        //
+        // 定数バッファも上のStructuredReadOnlyと同じ理由でリングになっている。
+        // メッシュごと・パスごとに書き換えるバッファ(ObjectConstants)は、シーンの
+        // メッシュ数とパス数の積だけ書かれるため、既定では足りないことがある
+        // ―― BistroInteriorLit(不透明59メッシュ)はプローブのキャプチャだけで
+        // 1フレーム6000回を超え、実際にリングを一周して描画が壊れていた。
+        //
+        // DX12はこの値 × kFrameCount ぶんのスロットをUPLOADヒープに常時確保するので、
+        // (1スロットは256バイト境界へ切り上げられる)大きな値は必要なバッファにだけ与えること。
+        // DX11実装は参照しない(MaxUpdatesPerFrameと同じ理由)
+        uint32_t MaxConstantUpdatesPerFrame = 0;
     };
 
     struct ShaderDesc
@@ -114,6 +152,16 @@ namespace Kurenai::RHI
         // 透視投影のメインカメラパスにのみ使う(正射影のシャドウマップはZが線形分布のため対象外)
         bool ReverseZ = false;
 
+        // 深度が等しい断片もテストに通すか(比較をGREATER/LESSからGREATER_EQUAL/LESS_EQUALへ緩める)。
+        // 深度プリパスと組み合わせて使う ―― プリパスが書いた深度と同じ値になる最前面の断片だけを
+        // 通し、それより奥の断片を早期Zで落とすことで、隠れる画素のピクセルシェーダーを省く。
+        //
+        // 【プリパスが無い状態で有効にしても絵は実質変わらない】GREATERとGREATER_EQUALの差が出るのは
+        // 深度がビット単位で等しい面が複数ある場合(同一平面の重なり)だけで、そのとき「先に描いた方が
+        // 残る」が「後に描いた方が残る」に変わる。不透明G-Bufferではどちらも同じ値を書くため、
+        // PSOを2組に増やさずプリパスの有無を切り替えられるよう常にこちらを使う
+        bool DepthAllowEqual = false;
+
         // アルファブレンド設定。既定は不透明(Opaque)。半透明の2Dスプライトなどを描画する場合はAlphaBlendを、
         // 炎・光などの発光エフェクトはAdditiveを、減光表現はMultiplyを、事前乗算済みテクスチャはPremultipliedAlphaを指定する
         BlendMode BlendMode = BlendMode::Opaque;
@@ -134,6 +182,32 @@ namespace Kurenai::RHI
         IRHIShader* ComputeShader = nullptr;
     };
 
+    // 増幅シェーダー(任意)+ メッシュシェーダー + ピクセルシェーダーによる描画のパイプラインステート。
+    //
+    // PipelineStateDescとの違いはInputLayout / VertexShaderを持たないことだけで、
+    // ラスタライザ・深度・ブレンド・レンダーターゲットフォーマットの扱いはすべて同じ。
+    // 同じG-Bufferへ書くパスを頂点シェーダー版とメッシュシェーダー版で切り替えられるよう、
+    // 対応するフィールドは名前も既定値もPipelineStateDescと揃えてある
+    struct MeshPipelineStateDesc
+    {
+        // nullptrでもよい(その場合カリングを行わず、DispatchMeshで指定した数だけ
+        // メッシュシェーダーが直接起動される)
+        IRHIShader* AmplificationShader = nullptr;
+        IRHIShader* MeshShader = nullptr;
+        // nullptrでもよい(深度だけを書くパスではピクセルシェーダーの段ごと省ける)。
+        // PipelineStateDesc::PixelShaderと同じ扱い
+        IRHIShader* PixelShader = nullptr;
+
+        std::vector<Format> RenderTargetFormats;
+        bool HasDepthStencil = false;
+        bool DepthTargetAttached = false;
+        bool DepthWriteEnabled = true;
+        bool ReverseZ = false;
+        bool DepthAllowEqual = false;
+        BlendMode BlendMode = BlendMode::Opaque;
+        bool FrontCounterClockwise = false;
+    };
+
     // サンプラーの記述子。既定値は異方性16x + Wrapで、これまでの固定MIN_MAG_MIP_LINEARより
     // 浅い角度で見る面のボケを抑える。AddressU/V/Wは3軸まとめてAddressModeで指定する
     // (このエンジンでは軸ごとに別のアドレッシングを使う用途が無いため)
@@ -142,5 +216,24 @@ namespace Kurenai::RHI
         SamplerFilter Filter = SamplerFilter::Anisotropic;
         SamplerAddressMode AddressMode = SamplerAddressMode::Wrap;
         uint32_t MaxAnisotropy = 16;
+    };
+
+    // タイルリソースとして確保するテクスチャの、**縮めていない元の寸法**。
+    //
+    // 常駐ミップを削ったテクスチャは寸法そのものが小さくなっている(常駐ミップ制御は
+    // 「firstMipを新しいミップ0とする小さなテクスチャ」を作る)ため、そこから元の
+    // 寸法を復元できない。予約リソースは常に元の寸法・元のミップ数で作る必要があるので、
+    // 呼び出し側(.ktexのヘッダを読んでいるAssets::TextureStreamingManager)が渡す。
+    //
+    // 【Formatが RHI::Format ではなくDXGIの生値なのはなぜか】RHI::FormatにはBC系の
+    // 圧縮フォーマットが無く(RHIEnums.h)、テクスチャ生成は元々DirectXTexのメタデータを
+    // そのまま使って RHI の enum を通っていない。ここだけ enum を増やしても
+    // 変換表が増えるだけなので、既存の流儀に合わせてDXGI_FORMATの値を渡す
+    struct TiledTextureDesc
+    {
+        uint32_t Width = 0;
+        uint32_t Height = 0;
+        uint32_t MipLevels = 0;
+        uint32_t DxgiFormat = 0;
     };
 }

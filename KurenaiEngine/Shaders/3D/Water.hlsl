@@ -76,14 +76,18 @@ PSOutput PSMain(PSInput input)
     float roughnessFactor = (RoughnessFactor < 0.0f) ? 1.0f : RoughnessFactor;
     float roughness = clamp(roughnessFactor * metallicRoughnessSample.g, 0.045f, 1.0f);
 
-    float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor;
+    // EmissiveIntensity / OcclusionMapScale は GBuffer.hlsl と同じく必ず掛ける。
+    // 従来経路では C++ 側が係数へ織り込んだうえで 1.0 を入れているので二重にはならない。
+    // 掛けないままにしておくと、将来水面をメッシュレット経路へ載せた瞬間に
+    // **水面だけ自発光倍率と遮蔽マップの ON/OFF が効かなくなる**
+    float3 emissive = EmissiveTexture.Sample(MaterialSampler, input.UV).rgb * EmissiveFactor * EmissiveIntensity;
 
     // モーションベクターの求め方はGBuffer.hlslのPSMainと同じ(GBufferCommon.hlsliのコメント参照)
     float2 currentUv = ClipToUv(input.CurClip) - TAAParams.xy;
     float2 previousUv = ClipToUv(input.PrevClip) - TAAParams.zw;
 
     float occlusionSample = OcclusionTexture.Sample(MaterialSampler, input.LightmapUV).r;
-    float ao = lerp(1.0f, occlusionSample, OcclusionStrength);
+    float ao = lerp(1.0f, occlusionSample, OcclusionStrength * OcclusionMapScale);
 
     PSOutput output;
     // 水中項。メッシュ自身のbaseColorSample.rgb(誘電体でほぼ黒に焼かれている)は使わず、
@@ -93,7 +97,11 @@ PSOutput PSMain(PSInput input)
     // 拡散項として書くことで、Fresnelによる「見下ろすと水の色/すれすれだと鏡」の切り替わりは
     // 既存のDeferredLighting.hlslの式がそのまま担当する(水面専用の分岐は増やさない)。
     // baseColorSample.aによるアルファカットアウトはこの置き換えとは無関係にそのまま残す(直前のclip参照)
-    output.Albedo = float4(WaterBodyColor.rgb, 1.0f);
+    // aチャンネルは透過率(GBuffer.hlslと共有するPSOutputの規約)。
+    // 水面は葉のような薄い透過体ではなく専用の経路で扱うため、0(透過なし)を書く。
+    // **書き残してはいけない** ―― この構造体はGBuffer.hlslと共有しており、
+    // 書かないとそのチャンネルの内容が未定義になる
+    output.Albedo = float4(WaterBodyColor.rgb, 0.0f);
     output.Normal = OctEncode(N);
     // aチャンネルに水面のマテリアルIDを書く(GBuffer.hlslの通常マテリアルは0.0fのまま)。
     // DebugView::WaterMask(Present.hlsl Mode 17)がこの値をそのままグレースケール表示する

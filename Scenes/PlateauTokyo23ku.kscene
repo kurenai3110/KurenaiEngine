@@ -1,0 +1,2523 @@
+# KurenaiEngine シーンファイル - Project PLATEAU 東京都23区(全種)
+#
+# 東京23区の全域(約 33.0 km x 34.0 km)を、建築物・地形・道路・橋梁の4種で構成したもの。
+#
+#   建築物  671 タイル(3次メッシュ=約1km四方)。うち 26 タイルは LOD2 が整備されており、
+#          Path=LOD2 / LODPath=LOD1 の2段LODにしてある(下記)
+#   地形     14 タイル(2次メッシュ=約10km四方)
+#   道路     14 タイル(同上)
+#   橋梁     68 タイル(3次メッシュ)
+#   [Model] 合計 767 件
+#
+# 出典: 国土交通省 Project PLATEAU「3D都市モデル(Project PLATEAU)東京都23区」
+#       https://www.geospatial.jp/ckan/dataset/plateau-tokyo23ku
+#       ライセンス: 公共データ利用規約(PDL1.0) / CC BY 4.0 互換。商用利用可・要出典表示。
+#       著作権は各地方公共団体に帰属する。
+#
+# 【このファイルは機械生成されたもの】 Tools\plateau_scene.py が出力する。
+# 取得から配布までは Tools\import_plateau.ps1 が一括で行う:
+#   Tools\import_plateau.ps1
+#   Sample3D.exe -scene PlateauTokyo23ku
+#
+# --- 変換コマンド ---
+#   KurenaiPacker.exe <展開先>\<種別>\<メッシュコード>_*.fbx ^
+#     -o Assets\Packed\Plateau\<種別>\<メッシュコード>.kmodel --origin -8096,0,-36118
+#
+# 【--origin は全種で同じ値】PLATEAU の FBX は EPSG:6677(平面直角座標系 第9系)の絶対座標で、
+# 系原点から北へ最大52km離れている。頂点は float32 で、.kmodel の AABB もそのまま巨大になり、
+# 遠クリップ面が桁で狂う。タイルごとに「自分のAABBの中心」で寄せると相対位置が壊れるため、
+# 全種・全タイルで同じ値を引く。値は Tools\plateau_mesh.py origin が算出する。
+#
+# 【brid のファイル名に _6697 を名乗る個体がある】EPSG:6697 は緯度経度系だが、中身は
+# 他と同じ平面直角座標のメートル値だった。全68件のAABBをメッシュコードから計算した
+# 期待矩形と突き合わせて確認済み(Tools\plateau_mesh.py rect で再現できる)。
+#
+# --- シーンの規模と、そこから決まるもの ---
+#   AABB  X -16903 〜 16095 / Y -11 〜 351 / Z -17881 〜 16117
+#   大きさ 32998 x 361 x 33998 m / 対角 47380 m
+#   遠クリップ面 farZ = max(100, 対角x4) = 189520 m
+
+[Scene]
+Name = PLATEAU 東京23区 (建築物LOD1/LOD2・地形・道路・橋梁)
+
+# 【カスケードの分割範囲を打ち切る】farZ が 189520m のままだと第1カスケードが数kmを
+# 2048x2048の1枚で覆うことになり、近景の影が事実上消える。
+# 500m で打ち切ると第1カスケードは約31mを覆う(遠景の描画距離は farZ のまま変わらない)。
+ShadowDistance = 500
+
+# 【必ず指定する】未指定だとストリーミングが丸ごと無効になり、SceneLoader が
+# 全 LOD 段を起動時に確保する ―― LOD2 の26タイルだけで約9GBになる。
+# 指定するとエンジンは各インスタンスの「現在の LOD 段」だけを読むので、
+# LOD2 は LODDistance の内側にあるタイルにしか載らない。
+#
+# 【10km にする根拠は大気遠近】以前はシーン対角(47380m)にしていた。
+# 「距離で切ると遠景が途切れる」という判断だったが、そこまで見えていなかった。
+# 透過率は exp(-消散係数 x 距離) で、既定の 0.00040 だと 5km で 13.5% /
+# 10km で 1.8% / 20km で 0.03% まで落ちる。10km より遠いジオメトリは
+# 載せてはいたが霞に埋もれて一度も見えていない。
+#
+# 対角から 10000m へ下げた実測(RTX 4070 Ti / DX12 / Release / 1280x720 /
+# 初期カメラ)。地上の絵は152万画素で最大差1(量子化誤差)、実質1画素も変わらない:
+#   常駐 767 -> 404 / VRAM 11,086 -> 6,926 MB(予算超過が解消) /
+#   GPU待ち中央値 4.12 -> 0.00 ms / 最悪フレーム 60.50 -> 18.75 ms /
+#   RT高速化構造の構築 49.4 -> 8.5 秒
+#
+# 【消散係数を変えたら測り直す】霞を薄くすると遠くまで見えるようになり、
+# 10km で切ると本当に途切れる。根拠は docs/ImplementationDetail.md 60章。
+#
+# 【副作用: メッシュ単位フラスタムカリングが無効になる】SceneLoaderは
+# MeshWorldBoundsList を「読み込み済みの実体」からしか作れず、ストリーミング時は
+# 実体が無いまま構築が終わる。あとから読み込まれたぶんも作り直されないため、
+# 描画側は保守側(間引かない)へ倒れる。実測でメッシュ単位は判定5964/間引き0(0.0%)。
+# モデル単位は85.9%効いており、DX11/Release/1280x720 で 56 FPS 出ているので
+# 実害は出ていないが、「メッシュ単位が0%なのはカリングの不具合ではない」と
+# 分かるようにここへ書いておく。
+StreamingDistance = 10000
+
+# 【対角から自動決定させると速すぎる】対角47kmだと自動値は600m/s級になり、
+# LOD の切り替わりを目で追えない。
+CameraSpeed = 150
+
+# --- 建築物 -------------------------------------------------------------
+# LOD2 を採用した 26 タイルは2段LOD。1500m を超えると LOD1(箱)へ落ちる。
+# 距離は「カメラ位置からインスタンスのAABBの最近接点まで」で測られるので、
+# 自分がいるタイルは0m、隣接タイルは約1.1kmになる。
+#
+# 【LOD2 があっても使っていないタイルが 54 件ある】PLATEAU の LOD2 はタイル全体が
+# 整備されているとは限らず、一部の建物だけのものが混ざる。それを Path(=LOD0) に据えると
+# 近づくほど建物が消えるので、足切りしてある。
+# 判定は「LOD1 の頂点が占める50m格子のセルを LOD2 がどれだけ覆うか」で、しきい値 0.95。
+# (Tools\plateau_lod2_coverage.py で再現できる。AABBの被覆率やジオメトリ量の比では
+#  測れない ―― 建物が2棟でも対角にあればAABBは満杯になり、LOD2は1棟あたりの頂点が
+#  桁で多いのでジオメトリ量は一部整備でもLOD1を超える)
+# 除外したタイルと被覆率:
+#   53392650 被覆 0.476
+#   53392660 被覆 0.457
+#   53392670 被覆 0.228
+#   53393549 被覆 0.091
+#   53393558 被覆 0.262
+#   53393559 被覆 0.503
+#   53393569 被覆 0.404
+#   53393579 被覆 0.300
+#   53393585 被覆 0.306
+#   53393586 被覆 0.357
+#   53393588 被覆 0.087
+#   53393589 被覆 0.397
+#   53393595 被覆 0.333
+#   53393596 被覆 0.450
+#   53393597 被覆 0.010
+#   53393598 被覆 0.769
+#   53393632 被覆 0.279
+#   53393641 被覆 0.441
+#   53393642 被覆 0.646
+#   53393651 被覆 0.917
+#   53393653 被覆 0.783
+#   53393664 被覆 0.116
+#   53393670 被覆 0.067
+#   53393674 被覆 0.647
+#   53393680 被覆 0.727
+#   53393684 被覆 0.265
+#   53393691 被覆 0.931
+#   53393693 被覆 0.494
+#   53394507 被覆 0.331
+#   53394509 被覆 0.905
+#   53394515 被覆 0.008
+#   53394516 被覆 0.068
+#   53394517 被覆 0.387
+#   53394518 被覆 0.210
+#   53394519 被覆 0.026
+#   53394524 被覆 0.019
+#   53394525 被覆 0.742
+#   53394526 被覆 0.487
+#   53394534 被覆 0.078
+#   53394535 被覆 0.695
+#   53394536 被覆 0.511
+#   53394566 被覆 0.038
+#   53394567 被覆 0.106
+#   53394576 被覆 0.452
+#   53394577 被覆 0.833
+#   53394578 被覆 0.088
+#   53394587 被覆 0.069
+#   53394600 被覆 0.869
+#   53394602 被覆 0.852
+#   53394610 被覆 0.615
+#   53394612 被覆 0.501
+#   53394620 被覆 0.522
+#   53394621 被覆 0.770
+#   53394622 被覆 0.178
+
+[Model]
+Path = Plateau/53392546.kmodel
+
+[Model]
+Path = Plateau/53392547.kmodel
+
+[Model]
+Path = Plateau/53392556.kmodel
+
+[Model]
+Path = Plateau/53392557.kmodel
+
+[Model]
+Path = Plateau/53392558.kmodel
+
+[Model]
+Path = Plateau/53392559.kmodel
+
+[Model]
+Path = Plateau/53392565.kmodel
+
+[Model]
+Path = Plateau/53392566.kmodel
+
+[Model]
+Path = Plateau/53392567.kmodel
+
+[Model]
+Path = Plateau/53392568.kmodel
+
+[Model]
+Path = Plateau/53392569.kmodel
+
+[Model]
+Path = Plateau/53392574.kmodel
+
+[Model]
+Path = Plateau/53392575.kmodel
+
+[Model]
+Path = Plateau/53392576.kmodel
+
+[Model]
+Path = Plateau/53392577.kmodel
+
+[Model]
+Path = Plateau/53392578.kmodel
+
+[Model]
+Path = Plateau/53392579.kmodel
+
+[Model]
+Path = Plateau/53392584.kmodel
+
+[Model]
+Path = Plateau/53392585.kmodel
+
+[Model]
+Path = Plateau/53392586.kmodel
+
+[Model]
+Path = Plateau/53392587.kmodel
+
+[Model]
+Path = Plateau/53392588.kmodel
+
+[Model]
+Path = Plateau/53392589.kmodel
+
+[Model]
+Path = Plateau/53392593.kmodel
+
+[Model]
+Path = Plateau/53392594.kmodel
+
+[Model]
+Path = Plateau/53392595.kmodel
+
+[Model]
+Path = Plateau/53392596.kmodel
+
+[Model]
+Path = Plateau/53392597.kmodel
+
+[Model]
+Path = Plateau/53392598.kmodel
+
+[Model]
+Path = Plateau/53392599.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53392633.kmodel
+LODPath = Plateau/53392633.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53392641.kmodel
+LODPath = Plateau/53392641.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53392642.kmodel
+LODPath = Plateau/53392642.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53392643.kmodel
+LODPath = Plateau/53392643.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53392650.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53392651.kmodel
+LODPath = Plateau/53392651.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53392652.kmodel
+LODPath = Plateau/53392652.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53392653.kmodel
+LODPath = Plateau/53392653.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53392660.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53392662.kmodel
+LODPath = Plateau/53392662.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53392663.kmodel
+LODPath = Plateau/53392663.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53392670.kmodel
+
+[Model]
+Path = Plateau/53392671.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53392672.kmodel
+LODPath = Plateau/53392672.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53392680.kmodel
+
+[Model]
+Path = Plateau/53392681.kmodel
+
+[Model]
+Path = Plateau/53392690.kmodel
+
+[Model]
+Path = Plateau/53392691.kmodel
+
+[Model]
+Path = Plateau/53392692.kmodel
+
+[Model]
+Path = Plateau/53393439.kmodel
+
+[Model]
+Path = Plateau/53393447.kmodel
+
+[Model]
+Path = Plateau/53393448.kmodel
+
+[Model]
+Path = Plateau/53393449.kmodel
+
+[Model]
+Path = Plateau/53393457.kmodel
+
+[Model]
+Path = Plateau/53393458.kmodel
+
+[Model]
+Path = Plateau/53393459.kmodel
+
+[Model]
+Path = Plateau/53393466.kmodel
+
+[Model]
+Path = Plateau/53393467.kmodel
+
+[Model]
+Path = Plateau/53393468.kmodel
+
+[Model]
+Path = Plateau/53393469.kmodel
+
+[Model]
+Path = Plateau/53393476.kmodel
+
+[Model]
+Path = Plateau/53393477.kmodel
+
+[Model]
+Path = Plateau/53393478.kmodel
+
+[Model]
+Path = Plateau/53393479.kmodel
+
+[Model]
+Path = Plateau/53393487.kmodel
+
+[Model]
+Path = Plateau/53393488.kmodel
+
+[Model]
+Path = Plateau/53393489.kmodel
+
+[Model]
+Path = Plateau/53393496.kmodel
+
+[Model]
+Path = Plateau/53393497.kmodel
+
+[Model]
+Path = Plateau/53393498.kmodel
+
+[Model]
+Path = Plateau/53393499.kmodel
+
+[Model]
+Path = Plateau/53393503.kmodel
+
+[Model]
+Path = Plateau/53393504.kmodel
+
+[Model]
+Path = Plateau/53393505.kmodel
+
+[Model]
+Path = Plateau/53393506.kmodel
+
+[Model]
+Path = Plateau/53393507.kmodel
+
+[Model]
+Path = Plateau/53393508.kmodel
+
+[Model]
+Path = Plateau/53393509.kmodel
+
+[Model]
+Path = Plateau/53393511.kmodel
+
+[Model]
+Path = Plateau/53393512.kmodel
+
+[Model]
+Path = Plateau/53393513.kmodel
+
+[Model]
+Path = Plateau/53393514.kmodel
+
+[Model]
+Path = Plateau/53393515.kmodel
+
+[Model]
+Path = Plateau/53393516.kmodel
+
+[Model]
+Path = Plateau/53393517.kmodel
+
+[Model]
+Path = Plateau/53393518.kmodel
+
+[Model]
+Path = Plateau/53393519.kmodel
+
+[Model]
+Path = Plateau/53393520.kmodel
+
+[Model]
+Path = Plateau/53393521.kmodel
+
+[Model]
+Path = Plateau/53393522.kmodel
+
+[Model]
+Path = Plateau/53393523.kmodel
+
+[Model]
+Path = Plateau/53393524.kmodel
+
+[Model]
+Path = Plateau/53393525.kmodel
+
+[Model]
+Path = Plateau/53393526.kmodel
+
+[Model]
+Path = Plateau/53393527.kmodel
+
+[Model]
+Path = Plateau/53393528.kmodel
+
+[Model]
+Path = Plateau/53393529.kmodel
+
+[Model]
+Path = Plateau/53393530.kmodel
+
+[Model]
+Path = Plateau/53393531.kmodel
+
+[Model]
+Path = Plateau/53393532.kmodel
+
+[Model]
+Path = Plateau/53393533.kmodel
+
+[Model]
+Path = Plateau/53393534.kmodel
+
+[Model]
+Path = Plateau/53393535.kmodel
+
+[Model]
+Path = Plateau/53393536.kmodel
+
+[Model]
+Path = Plateau/53393537.kmodel
+
+[Model]
+Path = Plateau/53393538.kmodel
+
+[Model]
+Path = Plateau/53393539.kmodel
+
+[Model]
+Path = Plateau/53393540.kmodel
+
+[Model]
+Path = Plateau/53393541.kmodel
+
+[Model]
+Path = Plateau/53393542.kmodel
+
+[Model]
+Path = Plateau/53393543.kmodel
+
+[Model]
+Path = Plateau/53393544.kmodel
+
+[Model]
+Path = Plateau/53393545.kmodel
+
+[Model]
+Path = Plateau/53393546.kmodel
+
+[Model]
+Path = Plateau/53393547.kmodel
+
+[Model]
+Path = Plateau/53393548.kmodel
+
+[Model]
+Path = Plateau/53393549.kmodel
+
+[Model]
+Path = Plateau/53393550.kmodel
+
+[Model]
+Path = Plateau/53393551.kmodel
+
+[Model]
+Path = Plateau/53393552.kmodel
+
+[Model]
+Path = Plateau/53393553.kmodel
+
+[Model]
+Path = Plateau/53393554.kmodel
+
+[Model]
+Path = Plateau/53393555.kmodel
+
+[Model]
+Path = Plateau/53393556.kmodel
+
+[Model]
+Path = Plateau/53393557.kmodel
+
+[Model]
+Path = Plateau/53393558.kmodel
+
+[Model]
+Path = Plateau/53393559.kmodel
+
+[Model]
+Path = Plateau/53393560.kmodel
+
+[Model]
+Path = Plateau/53393561.kmodel
+
+[Model]
+Path = Plateau/53393562.kmodel
+
+[Model]
+Path = Plateau/53393563.kmodel
+
+[Model]
+Path = Plateau/53393564.kmodel
+
+[Model]
+Path = Plateau/53393565.kmodel
+
+[Model]
+Path = Plateau/53393566.kmodel
+
+[Model]
+Path = Plateau/53393567.kmodel
+
+[Model]
+Path = Plateau/53393568.kmodel
+
+[Model]
+Path = Plateau/53393569.kmodel
+
+[Model]
+Path = Plateau/53393570.kmodel
+
+[Model]
+Path = Plateau/53393571.kmodel
+
+[Model]
+Path = Plateau/53393572.kmodel
+
+[Model]
+Path = Plateau/53393573.kmodel
+
+[Model]
+Path = Plateau/53393574.kmodel
+
+[Model]
+Path = Plateau/53393575.kmodel
+
+[Model]
+Path = Plateau/53393576.kmodel
+
+[Model]
+Path = Plateau/53393577.kmodel
+
+[Model]
+Path = Plateau/53393578.kmodel
+
+[Model]
+Path = Plateau/53393579.kmodel
+
+[Model]
+Path = Plateau/53393580.kmodel
+
+[Model]
+Path = Plateau/53393581.kmodel
+
+[Model]
+Path = Plateau/53393582.kmodel
+
+[Model]
+Path = Plateau/53393583.kmodel
+
+[Model]
+Path = Plateau/53393584.kmodel
+
+[Model]
+Path = Plateau/53393585.kmodel
+
+[Model]
+Path = Plateau/53393586.kmodel
+
+[Model]
+Path = Plateau/53393587.kmodel
+
+[Model]
+Path = Plateau/53393588.kmodel
+
+[Model]
+Path = Plateau/53393589.kmodel
+
+[Model]
+Path = Plateau/53393590.kmodel
+
+[Model]
+Path = Plateau/53393591.kmodel
+
+[Model]
+Path = Plateau/53393592.kmodel
+
+[Model]
+Path = Plateau/53393593.kmodel
+
+[Model]
+Path = Plateau/53393594.kmodel
+
+[Model]
+Path = Plateau/53393595.kmodel
+
+[Model]
+Path = Plateau/53393596.kmodel
+
+[Model]
+Path = Plateau/53393597.kmodel
+
+[Model]
+Path = Plateau/53393598.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53393599.kmodel
+LODPath = Plateau/53393599.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53393600.kmodel
+
+[Model]
+Path = Plateau/53393601.kmodel
+
+[Model]
+Path = Plateau/53393602.kmodel
+
+[Model]
+Path = Plateau/53393604.kmodel
+
+[Model]
+Path = Plateau/53393605.kmodel
+
+[Model]
+Path = Plateau/53393610.kmodel
+
+[Model]
+Path = Plateau/53393611.kmodel
+
+[Model]
+Path = Plateau/53393613.kmodel
+
+[Model]
+Path = Plateau/53393614.kmodel
+
+[Model]
+Path = Plateau/53393615.kmodel
+
+[Model]
+Path = Plateau/53393616.kmodel
+
+[Model]
+Path = Plateau/53393620.kmodel
+
+[Model]
+Path = Plateau/53393621.kmodel
+
+[Model]
+Path = Plateau/53393622.kmodel
+
+[Model]
+Path = Plateau/53393623.kmodel
+
+[Model]
+Path = Plateau/53393624.kmodel
+
+[Model]
+Path = Plateau/53393625.kmodel
+
+[Model]
+Path = Plateau/53393630.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53393631.kmodel
+LODPath = Plateau/53393631.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53393632.kmodel
+
+[Model]
+Path = Plateau/53393633.kmodel
+
+[Model]
+Path = Plateau/53393634.kmodel
+
+[Model]
+Path = Plateau/53393635.kmodel
+
+[Model]
+Path = Plateau/53393636.kmodel
+
+[Model]
+Path = Plateau/53393640.kmodel
+
+[Model]
+Path = Plateau/53393641.kmodel
+
+[Model]
+Path = Plateau/53393642.kmodel
+
+[Model]
+Path = Plateau/53393643.kmodel
+
+[Model]
+Path = Plateau/53393644.kmodel
+
+[Model]
+Path = Plateau/53393646.kmodel
+
+[Model]
+Path = Plateau/53393647.kmodel
+
+[Model]
+Path = Plateau/53393650.kmodel
+
+[Model]
+Path = Plateau/53393651.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53393652.kmodel
+LODPath = Plateau/53393652.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53393653.kmodel
+
+[Model]
+Path = Plateau/53393654.kmodel
+
+[Model]
+Path = Plateau/53393655.kmodel
+
+[Model]
+Path = Plateau/53393656.kmodel
+
+[Model]
+Path = Plateau/53393657.kmodel
+
+[Model]
+Path = Plateau/53393660.kmodel
+
+[Model]
+Path = Plateau/53393661.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53393662.kmodel
+LODPath = Plateau/53393662.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53393663.kmodel
+LODPath = Plateau/53393663.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53393664.kmodel
+
+[Model]
+Path = Plateau/53393665.kmodel
+
+[Model]
+Path = Plateau/53393666.kmodel
+
+[Model]
+Path = Plateau/53393667.kmodel
+
+[Model]
+Path = Plateau/53393668.kmodel
+
+[Model]
+Path = Plateau/53393669.kmodel
+
+[Model]
+Path = Plateau/53393670.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53393671.kmodel
+LODPath = Plateau/53393671.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53393672.kmodel
+LODPath = Plateau/53393672.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53393673.kmodel
+LODPath = Plateau/53393673.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53393674.kmodel
+
+[Model]
+Path = Plateau/53393675.kmodel
+
+[Model]
+Path = Plateau/53393676.kmodel
+
+[Model]
+Path = Plateau/53393677.kmodel
+
+[Model]
+Path = Plateau/53393678.kmodel
+
+[Model]
+Path = Plateau/53393679.kmodel
+
+[Model]
+Path = Plateau/53393680.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53393681.kmodel
+LODPath = Plateau/53393681.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53393682.kmodel
+LODPath = Plateau/53393682.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/BldgLod2/53393683.kmodel
+LODPath = Plateau/53393683.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53393684.kmodel
+
+[Model]
+Path = Plateau/53393685.kmodel
+
+[Model]
+Path = Plateau/53393686.kmodel
+
+[Model]
+Path = Plateau/53393687.kmodel
+
+[Model]
+Path = Plateau/53393688.kmodel
+
+[Model]
+Path = Plateau/53393689.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53393690.kmodel
+LODPath = Plateau/53393690.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53393691.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53393692.kmodel
+LODPath = Plateau/53393692.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53393693.kmodel
+
+[Model]
+Path = Plateau/53393694.kmodel
+
+[Model]
+Path = Plateau/53393695.kmodel
+
+[Model]
+Path = Plateau/53393696.kmodel
+
+[Model]
+Path = Plateau/53393697.kmodel
+
+[Model]
+Path = Plateau/53393698.kmodel
+
+[Model]
+Path = Plateau/53393699.kmodel
+
+[Model]
+Path = Plateau/53393770.kmodel
+
+[Model]
+Path = Plateau/53393780.kmodel
+
+[Model]
+Path = Plateau/53393790.kmodel
+
+[Model]
+Path = Plateau/53394406.kmodel
+
+[Model]
+Path = Plateau/53394407.kmodel
+
+[Model]
+Path = Plateau/53394408.kmodel
+
+[Model]
+Path = Plateau/53394409.kmodel
+
+[Model]
+Path = Plateau/53394416.kmodel
+
+[Model]
+Path = Plateau/53394417.kmodel
+
+[Model]
+Path = Plateau/53394418.kmodel
+
+[Model]
+Path = Plateau/53394419.kmodel
+
+[Model]
+Path = Plateau/53394427.kmodel
+
+[Model]
+Path = Plateau/53394428.kmodel
+
+[Model]
+Path = Plateau/53394429.kmodel
+
+[Model]
+Path = Plateau/53394436.kmodel
+
+[Model]
+Path = Plateau/53394437.kmodel
+
+[Model]
+Path = Plateau/53394438.kmodel
+
+[Model]
+Path = Plateau/53394439.kmodel
+
+[Model]
+Path = Plateau/53394447.kmodel
+
+[Model]
+Path = Plateau/53394448.kmodel
+
+[Model]
+Path = Plateau/53394449.kmodel
+
+[Model]
+Path = Plateau/53394456.kmodel
+
+[Model]
+Path = Plateau/53394457.kmodel
+
+[Model]
+Path = Plateau/53394458.kmodel
+
+[Model]
+Path = Plateau/53394459.kmodel
+
+[Model]
+Path = Plateau/53394465.kmodel
+
+[Model]
+Path = Plateau/53394466.kmodel
+
+[Model]
+Path = Plateau/53394467.kmodel
+
+[Model]
+Path = Plateau/53394468.kmodel
+
+[Model]
+Path = Plateau/53394469.kmodel
+
+[Model]
+Path = Plateau/53394475.kmodel
+
+[Model]
+Path = Plateau/53394476.kmodel
+
+[Model]
+Path = Plateau/53394477.kmodel
+
+[Model]
+Path = Plateau/53394478.kmodel
+
+[Model]
+Path = Plateau/53394479.kmodel
+
+[Model]
+Path = Plateau/53394485.kmodel
+
+[Model]
+Path = Plateau/53394486.kmodel
+
+[Model]
+Path = Plateau/53394487.kmodel
+
+[Model]
+Path = Plateau/53394488.kmodel
+
+[Model]
+Path = Plateau/53394489.kmodel
+
+[Model]
+Path = Plateau/53394495.kmodel
+
+[Model]
+Path = Plateau/53394496.kmodel
+
+[Model]
+Path = Plateau/53394497.kmodel
+
+[Model]
+Path = Plateau/53394498.kmodel
+
+[Model]
+Path = Plateau/53394499.kmodel
+
+[Model]
+Path = Plateau/53394500.kmodel
+
+[Model]
+Path = Plateau/53394501.kmodel
+
+[Model]
+Path = Plateau/53394502.kmodel
+
+[Model]
+Path = Plateau/53394503.kmodel
+
+[Model]
+Path = Plateau/53394504.kmodel
+
+[Model]
+Path = Plateau/53394505.kmodel
+
+[Model]
+Path = Plateau/53394506.kmodel
+
+[Model]
+Path = Plateau/53394507.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53394508.kmodel
+LODPath = Plateau/53394508.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53394509.kmodel
+
+[Model]
+Path = Plateau/53394510.kmodel
+
+[Model]
+Path = Plateau/53394511.kmodel
+
+[Model]
+Path = Plateau/53394512.kmodel
+
+[Model]
+Path = Plateau/53394513.kmodel
+
+[Model]
+Path = Plateau/53394514.kmodel
+
+[Model]
+Path = Plateau/53394515.kmodel
+
+[Model]
+Path = Plateau/53394516.kmodel
+
+[Model]
+Path = Plateau/53394517.kmodel
+
+[Model]
+Path = Plateau/53394518.kmodel
+
+[Model]
+Path = Plateau/53394519.kmodel
+
+[Model]
+Path = Plateau/53394520.kmodel
+
+[Model]
+Path = Plateau/53394521.kmodel
+
+[Model]
+Path = Plateau/53394522.kmodel
+
+[Model]
+Path = Plateau/53394523.kmodel
+
+[Model]
+Path = Plateau/53394524.kmodel
+
+[Model]
+Path = Plateau/53394525.kmodel
+
+[Model]
+Path = Plateau/53394526.kmodel
+
+[Model]
+Path = Plateau/53394527.kmodel
+
+[Model]
+Path = Plateau/53394528.kmodel
+
+[Model]
+Path = Plateau/53394529.kmodel
+
+[Model]
+Path = Plateau/53394530.kmodel
+
+[Model]
+Path = Plateau/53394531.kmodel
+
+[Model]
+Path = Plateau/53394532.kmodel
+
+[Model]
+Path = Plateau/53394533.kmodel
+
+[Model]
+Path = Plateau/53394534.kmodel
+
+[Model]
+Path = Plateau/53394535.kmodel
+
+[Model]
+Path = Plateau/53394536.kmodel
+
+[Model]
+Path = Plateau/53394537.kmodel
+
+[Model]
+Path = Plateau/53394538.kmodel
+
+[Model]
+Path = Plateau/53394539.kmodel
+
+[Model]
+Path = Plateau/53394540.kmodel
+
+[Model]
+Path = Plateau/53394541.kmodel
+
+[Model]
+Path = Plateau/53394542.kmodel
+
+[Model]
+Path = Plateau/53394543.kmodel
+
+[Model]
+Path = Plateau/53394544.kmodel
+
+[Model]
+Path = Plateau/53394545.kmodel
+
+[Model]
+Path = Plateau/53394546.kmodel
+
+[Model]
+Path = Plateau/53394547.kmodel
+
+[Model]
+Path = Plateau/53394548.kmodel
+
+[Model]
+Path = Plateau/53394549.kmodel
+
+[Model]
+Path = Plateau/53394550.kmodel
+
+[Model]
+Path = Plateau/53394551.kmodel
+
+[Model]
+Path = Plateau/53394552.kmodel
+
+[Model]
+Path = Plateau/53394553.kmodel
+
+[Model]
+Path = Plateau/53394554.kmodel
+
+[Model]
+Path = Plateau/53394555.kmodel
+
+[Model]
+Path = Plateau/53394556.kmodel
+
+[Model]
+Path = Plateau/53394557.kmodel
+
+[Model]
+Path = Plateau/53394558.kmodel
+
+[Model]
+Path = Plateau/53394559.kmodel
+
+[Model]
+Path = Plateau/53394560.kmodel
+
+[Model]
+Path = Plateau/53394561.kmodel
+
+[Model]
+Path = Plateau/53394562.kmodel
+
+[Model]
+Path = Plateau/53394563.kmodel
+
+[Model]
+Path = Plateau/53394564.kmodel
+
+[Model]
+Path = Plateau/53394565.kmodel
+
+[Model]
+Path = Plateau/53394566.kmodel
+
+[Model]
+Path = Plateau/53394567.kmodel
+
+[Model]
+Path = Plateau/53394568.kmodel
+
+[Model]
+Path = Plateau/53394569.kmodel
+
+[Model]
+Path = Plateau/53394570.kmodel
+
+[Model]
+Path = Plateau/53394571.kmodel
+
+[Model]
+Path = Plateau/53394572.kmodel
+
+[Model]
+Path = Plateau/53394573.kmodel
+
+[Model]
+Path = Plateau/53394574.kmodel
+
+[Model]
+Path = Plateau/53394575.kmodel
+
+[Model]
+Path = Plateau/53394576.kmodel
+
+[Model]
+Path = Plateau/53394577.kmodel
+
+[Model]
+Path = Plateau/53394578.kmodel
+
+[Model]
+Path = Plateau/53394579.kmodel
+
+[Model]
+Path = Plateau/53394580.kmodel
+
+[Model]
+Path = Plateau/53394581.kmodel
+
+[Model]
+Path = Plateau/53394582.kmodel
+
+[Model]
+Path = Plateau/53394583.kmodel
+
+[Model]
+Path = Plateau/53394584.kmodel
+
+[Model]
+Path = Plateau/53394585.kmodel
+
+[Model]
+Path = Plateau/53394586.kmodel
+
+[Model]
+Path = Plateau/53394587.kmodel
+
+[Model]
+Path = Plateau/53394588.kmodel
+
+[Model]
+Path = Plateau/53394589.kmodel
+
+[Model]
+Path = Plateau/53394590.kmodel
+
+[Model]
+Path = Plateau/53394591.kmodel
+
+[Model]
+Path = Plateau/53394592.kmodel
+
+[Model]
+Path = Plateau/53394593.kmodel
+
+[Model]
+Path = Plateau/53394594.kmodel
+
+[Model]
+Path = Plateau/53394595.kmodel
+
+[Model]
+Path = Plateau/53394596.kmodel
+
+[Model]
+Path = Plateau/53394597.kmodel
+
+[Model]
+Path = Plateau/53394598.kmodel
+
+[Model]
+Path = Plateau/53394599.kmodel
+
+[Model]
+Path = Plateau/53394600.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53394601.kmodel
+LODPath = Plateau/53394601.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53394602.kmodel
+
+[Model]
+Path = Plateau/53394603.kmodel
+
+[Model]
+Path = Plateau/53394604.kmodel
+
+[Model]
+Path = Plateau/53394605.kmodel
+
+[Model]
+Path = Plateau/53394606.kmodel
+
+[Model]
+Path = Plateau/53394607.kmodel
+
+[Model]
+Path = Plateau/53394608.kmodel
+
+[Model]
+Path = Plateau/53394609.kmodel
+
+[Model]
+Path = Plateau/53394610.kmodel
+
+[Model]
+Path = Plateau/BldgLod2/53394611.kmodel
+LODPath = Plateau/53394611.kmodel
+LODDistance = 1500
+
+[Model]
+Path = Plateau/53394612.kmodel
+
+[Model]
+Path = Plateau/53394613.kmodel
+
+[Model]
+Path = Plateau/53394614.kmodel
+
+[Model]
+Path = Plateau/53394615.kmodel
+
+[Model]
+Path = Plateau/53394616.kmodel
+
+[Model]
+Path = Plateau/53394617.kmodel
+
+[Model]
+Path = Plateau/53394618.kmodel
+
+[Model]
+Path = Plateau/53394619.kmodel
+
+[Model]
+Path = Plateau/53394620.kmodel
+
+[Model]
+Path = Plateau/53394621.kmodel
+
+[Model]
+Path = Plateau/53394622.kmodel
+
+[Model]
+Path = Plateau/53394623.kmodel
+
+[Model]
+Path = Plateau/53394624.kmodel
+
+[Model]
+Path = Plateau/53394625.kmodel
+
+[Model]
+Path = Plateau/53394626.kmodel
+
+[Model]
+Path = Plateau/53394627.kmodel
+
+[Model]
+Path = Plateau/53394628.kmodel
+
+[Model]
+Path = Plateau/53394629.kmodel
+
+[Model]
+Path = Plateau/53394630.kmodel
+
+[Model]
+Path = Plateau/53394631.kmodel
+
+[Model]
+Path = Plateau/53394632.kmodel
+
+[Model]
+Path = Plateau/53394633.kmodel
+
+[Model]
+Path = Plateau/53394634.kmodel
+
+[Model]
+Path = Plateau/53394635.kmodel
+
+[Model]
+Path = Plateau/53394636.kmodel
+
+[Model]
+Path = Plateau/53394637.kmodel
+
+[Model]
+Path = Plateau/53394638.kmodel
+
+[Model]
+Path = Plateau/53394639.kmodel
+
+[Model]
+Path = Plateau/53394640.kmodel
+
+[Model]
+Path = Plateau/53394641.kmodel
+
+[Model]
+Path = Plateau/53394642.kmodel
+
+[Model]
+Path = Plateau/53394643.kmodel
+
+[Model]
+Path = Plateau/53394644.kmodel
+
+[Model]
+Path = Plateau/53394645.kmodel
+
+[Model]
+Path = Plateau/53394646.kmodel
+
+[Model]
+Path = Plateau/53394647.kmodel
+
+[Model]
+Path = Plateau/53394648.kmodel
+
+[Model]
+Path = Plateau/53394649.kmodel
+
+[Model]
+Path = Plateau/53394650.kmodel
+
+[Model]
+Path = Plateau/53394651.kmodel
+
+[Model]
+Path = Plateau/53394652.kmodel
+
+[Model]
+Path = Plateau/53394653.kmodel
+
+[Model]
+Path = Plateau/53394654.kmodel
+
+[Model]
+Path = Plateau/53394655.kmodel
+
+[Model]
+Path = Plateau/53394656.kmodel
+
+[Model]
+Path = Plateau/53394657.kmodel
+
+[Model]
+Path = Plateau/53394658.kmodel
+
+[Model]
+Path = Plateau/53394659.kmodel
+
+[Model]
+Path = Plateau/53394660.kmodel
+
+[Model]
+Path = Plateau/53394661.kmodel
+
+[Model]
+Path = Plateau/53394662.kmodel
+
+[Model]
+Path = Plateau/53394663.kmodel
+
+[Model]
+Path = Plateau/53394664.kmodel
+
+[Model]
+Path = Plateau/53394665.kmodel
+
+[Model]
+Path = Plateau/53394666.kmodel
+
+[Model]
+Path = Plateau/53394667.kmodel
+
+[Model]
+Path = Plateau/53394668.kmodel
+
+[Model]
+Path = Plateau/53394669.kmodel
+
+[Model]
+Path = Plateau/53394670.kmodel
+
+[Model]
+Path = Plateau/53394671.kmodel
+
+[Model]
+Path = Plateau/53394672.kmodel
+
+[Model]
+Path = Plateau/53394673.kmodel
+
+[Model]
+Path = Plateau/53394674.kmodel
+
+[Model]
+Path = Plateau/53394675.kmodel
+
+[Model]
+Path = Plateau/53394676.kmodel
+
+[Model]
+Path = Plateau/53394677.kmodel
+
+[Model]
+Path = Plateau/53394678.kmodel
+
+[Model]
+Path = Plateau/53394679.kmodel
+
+[Model]
+Path = Plateau/53394680.kmodel
+
+[Model]
+Path = Plateau/53394681.kmodel
+
+[Model]
+Path = Plateau/53394682.kmodel
+
+[Model]
+Path = Plateau/53394683.kmodel
+
+[Model]
+Path = Plateau/53394684.kmodel
+
+[Model]
+Path = Plateau/53394685.kmodel
+
+[Model]
+Path = Plateau/53394686.kmodel
+
+[Model]
+Path = Plateau/53394687.kmodel
+
+[Model]
+Path = Plateau/53394688.kmodel
+
+[Model]
+Path = Plateau/53394689.kmodel
+
+[Model]
+Path = Plateau/53394690.kmodel
+
+[Model]
+Path = Plateau/53394691.kmodel
+
+[Model]
+Path = Plateau/53394692.kmodel
+
+[Model]
+Path = Plateau/53394693.kmodel
+
+[Model]
+Path = Plateau/53394694.kmodel
+
+[Model]
+Path = Plateau/53394695.kmodel
+
+[Model]
+Path = Plateau/53394696.kmodel
+
+[Model]
+Path = Plateau/53394697.kmodel
+
+[Model]
+Path = Plateau/53394698.kmodel
+
+[Model]
+Path = Plateau/53394699.kmodel
+
+[Model]
+Path = Plateau/53394700.kmodel
+
+[Model]
+Path = Plateau/53394710.kmodel
+
+[Model]
+Path = Plateau/53394711.kmodel
+
+[Model]
+Path = Plateau/53394720.kmodel
+
+[Model]
+Path = Plateau/53394721.kmodel
+
+[Model]
+Path = Plateau/53394722.kmodel
+
+[Model]
+Path = Plateau/53394730.kmodel
+
+[Model]
+Path = Plateau/53394731.kmodel
+
+[Model]
+Path = Plateau/53394732.kmodel
+
+[Model]
+Path = Plateau/53394733.kmodel
+
+[Model]
+Path = Plateau/53394740.kmodel
+
+[Model]
+Path = Plateau/53394741.kmodel
+
+[Model]
+Path = Plateau/53394742.kmodel
+
+[Model]
+Path = Plateau/53394743.kmodel
+
+[Model]
+Path = Plateau/53394750.kmodel
+
+[Model]
+Path = Plateau/53394751.kmodel
+
+[Model]
+Path = Plateau/53394752.kmodel
+
+[Model]
+Path = Plateau/53394760.kmodel
+
+[Model]
+Path = Plateau/53394761.kmodel
+
+[Model]
+Path = Plateau/53394762.kmodel
+
+[Model]
+Path = Plateau/53394770.kmodel
+
+[Model]
+Path = Plateau/53394771.kmodel
+
+[Model]
+Path = Plateau/53394780.kmodel
+
+[Model]
+Path = Plateau/53394781.kmodel
+
+[Model]
+Path = Plateau/53394790.kmodel
+
+[Model]
+Path = Plateau/53394791.kmodel
+
+[Model]
+Path = Plateau/53395405.kmodel
+
+[Model]
+Path = Plateau/53395406.kmodel
+
+[Model]
+Path = Plateau/53395407.kmodel
+
+[Model]
+Path = Plateau/53395408.kmodel
+
+[Model]
+Path = Plateau/53395409.kmodel
+
+[Model]
+Path = Plateau/53395415.kmodel
+
+[Model]
+Path = Plateau/53395416.kmodel
+
+[Model]
+Path = Plateau/53395417.kmodel
+
+[Model]
+Path = Plateau/53395418.kmodel
+
+[Model]
+Path = Plateau/53395419.kmodel
+
+[Model]
+Path = Plateau/53395425.kmodel
+
+[Model]
+Path = Plateau/53395426.kmodel
+
+[Model]
+Path = Plateau/53395427.kmodel
+
+[Model]
+Path = Plateau/53395428.kmodel
+
+[Model]
+Path = Plateau/53395429.kmodel
+
+[Model]
+Path = Plateau/53395436.kmodel
+
+[Model]
+Path = Plateau/53395437.kmodel
+
+[Model]
+Path = Plateau/53395438.kmodel
+
+[Model]
+Path = Plateau/53395439.kmodel
+
+[Model]
+Path = Plateau/53395500.kmodel
+
+[Model]
+Path = Plateau/53395501.kmodel
+
+[Model]
+Path = Plateau/53395502.kmodel
+
+[Model]
+Path = Plateau/53395503.kmodel
+
+[Model]
+Path = Plateau/53395504.kmodel
+
+[Model]
+Path = Plateau/53395505.kmodel
+
+[Model]
+Path = Plateau/53395506.kmodel
+
+[Model]
+Path = Plateau/53395507.kmodel
+
+[Model]
+Path = Plateau/53395508.kmodel
+
+[Model]
+Path = Plateau/53395509.kmodel
+
+[Model]
+Path = Plateau/53395510.kmodel
+
+[Model]
+Path = Plateau/53395511.kmodel
+
+[Model]
+Path = Plateau/53395512.kmodel
+
+[Model]
+Path = Plateau/53395513.kmodel
+
+[Model]
+Path = Plateau/53395514.kmodel
+
+[Model]
+Path = Plateau/53395515.kmodel
+
+[Model]
+Path = Plateau/53395516.kmodel
+
+[Model]
+Path = Plateau/53395517.kmodel
+
+[Model]
+Path = Plateau/53395518.kmodel
+
+[Model]
+Path = Plateau/53395519.kmodel
+
+[Model]
+Path = Plateau/53395520.kmodel
+
+[Model]
+Path = Plateau/53395521.kmodel
+
+[Model]
+Path = Plateau/53395522.kmodel
+
+[Model]
+Path = Plateau/53395523.kmodel
+
+[Model]
+Path = Plateau/53395524.kmodel
+
+[Model]
+Path = Plateau/53395525.kmodel
+
+[Model]
+Path = Plateau/53395526.kmodel
+
+[Model]
+Path = Plateau/53395527.kmodel
+
+[Model]
+Path = Plateau/53395528.kmodel
+
+[Model]
+Path = Plateau/53395529.kmodel
+
+[Model]
+Path = Plateau/53395530.kmodel
+
+[Model]
+Path = Plateau/53395531.kmodel
+
+[Model]
+Path = Plateau/53395532.kmodel
+
+[Model]
+Path = Plateau/53395533.kmodel
+
+[Model]
+Path = Plateau/53395534.kmodel
+
+[Model]
+Path = Plateau/53395535.kmodel
+
+[Model]
+Path = Plateau/53395536.kmodel
+
+[Model]
+Path = Plateau/53395537.kmodel
+
+[Model]
+Path = Plateau/53395538.kmodel
+
+[Model]
+Path = Plateau/53395539.kmodel
+
+[Model]
+Path = Plateau/53395540.kmodel
+
+[Model]
+Path = Plateau/53395541.kmodel
+
+[Model]
+Path = Plateau/53395542.kmodel
+
+[Model]
+Path = Plateau/53395543.kmodel
+
+[Model]
+Path = Plateau/53395544.kmodel
+
+[Model]
+Path = Plateau/53395545.kmodel
+
+[Model]
+Path = Plateau/53395546.kmodel
+
+[Model]
+Path = Plateau/53395547.kmodel
+
+[Model]
+Path = Plateau/53395548.kmodel
+
+[Model]
+Path = Plateau/53395549.kmodel
+
+[Model]
+Path = Plateau/53395551.kmodel
+
+[Model]
+Path = Plateau/53395552.kmodel
+
+[Model]
+Path = Plateau/53395553.kmodel
+
+[Model]
+Path = Plateau/53395554.kmodel
+
+[Model]
+Path = Plateau/53395555.kmodel
+
+[Model]
+Path = Plateau/53395556.kmodel
+
+[Model]
+Path = Plateau/53395600.kmodel
+
+[Model]
+Path = Plateau/53395601.kmodel
+
+[Model]
+Path = Plateau/53395602.kmodel
+
+[Model]
+Path = Plateau/53395603.kmodel
+
+[Model]
+Path = Plateau/53395604.kmodel
+
+[Model]
+Path = Plateau/53395605.kmodel
+
+[Model]
+Path = Plateau/53395606.kmodel
+
+[Model]
+Path = Plateau/53395607.kmodel
+
+[Model]
+Path = Plateau/53395608.kmodel
+
+[Model]
+Path = Plateau/53395609.kmodel
+
+[Model]
+Path = Plateau/53395610.kmodel
+
+[Model]
+Path = Plateau/53395611.kmodel
+
+[Model]
+Path = Plateau/53395612.kmodel
+
+[Model]
+Path = Plateau/53395613.kmodel
+
+[Model]
+Path = Plateau/53395614.kmodel
+
+[Model]
+Path = Plateau/53395615.kmodel
+
+[Model]
+Path = Plateau/53395616.kmodel
+
+[Model]
+Path = Plateau/53395617.kmodel
+
+[Model]
+Path = Plateau/53395618.kmodel
+
+[Model]
+Path = Plateau/53395619.kmodel
+
+[Model]
+Path = Plateau/53395620.kmodel
+
+[Model]
+Path = Plateau/53395621.kmodel
+
+[Model]
+Path = Plateau/53395622.kmodel
+
+[Model]
+Path = Plateau/53395623.kmodel
+
+[Model]
+Path = Plateau/53395624.kmodel
+
+[Model]
+Path = Plateau/53395625.kmodel
+
+[Model]
+Path = Plateau/53395626.kmodel
+
+[Model]
+Path = Plateau/53395627.kmodel
+
+[Model]
+Path = Plateau/53395628.kmodel
+
+[Model]
+Path = Plateau/53395629.kmodel
+
+[Model]
+Path = Plateau/53395630.kmodel
+
+[Model]
+Path = Plateau/53395631.kmodel
+
+[Model]
+Path = Plateau/53395632.kmodel
+
+[Model]
+Path = Plateau/53395633.kmodel
+
+[Model]
+Path = Plateau/53395634.kmodel
+
+[Model]
+Path = Plateau/53395635.kmodel
+
+[Model]
+Path = Plateau/53395636.kmodel
+
+[Model]
+Path = Plateau/53395637.kmodel
+
+[Model]
+Path = Plateau/53395638.kmodel
+
+[Model]
+Path = Plateau/53395639.kmodel
+
+[Model]
+Path = Plateau/53395640.kmodel
+
+[Model]
+Path = Plateau/53395641.kmodel
+
+[Model]
+Path = Plateau/53395642.kmodel
+
+[Model]
+Path = Plateau/53395643.kmodel
+
+[Model]
+Path = Plateau/53395644.kmodel
+
+[Model]
+Path = Plateau/53395645.kmodel
+
+[Model]
+Path = Plateau/53395646.kmodel
+
+[Model]
+Path = Plateau/53395647.kmodel
+
+[Model]
+Path = Plateau/53395648.kmodel
+
+[Model]
+Path = Plateau/53395649.kmodel
+
+[Model]
+Path = Plateau/53395650.kmodel
+
+[Model]
+Path = Plateau/53395651.kmodel
+
+[Model]
+Path = Plateau/53395652.kmodel
+
+[Model]
+Path = Plateau/53395653.kmodel
+
+[Model]
+Path = Plateau/53395654.kmodel
+
+[Model]
+Path = Plateau/53395655.kmodel
+
+[Model]
+Path = Plateau/53395656.kmodel
+
+[Model]
+Path = Plateau/53395657.kmodel
+
+[Model]
+Path = Plateau/53395658.kmodel
+
+[Model]
+Path = Plateau/53395659.kmodel
+
+[Model]
+Path = Plateau/53395660.kmodel
+
+[Model]
+Path = Plateau/53395661.kmodel
+
+[Model]
+Path = Plateau/53395662.kmodel
+
+[Model]
+Path = Plateau/53395663.kmodel
+
+[Model]
+Path = Plateau/53395664.kmodel
+
+[Model]
+Path = Plateau/53395665.kmodel
+
+[Model]
+Path = Plateau/53395667.kmodel
+
+[Model]
+Path = Plateau/53395670.kmodel
+
+[Model]
+Path = Plateau/53395671.kmodel
+
+[Model]
+Path = Plateau/53395672.kmodel
+
+[Model]
+Path = Plateau/53395674.kmodel
+
+[Model]
+Path = Plateau/53395675.kmodel
+
+[Model]
+Path = Plateau/53395676.kmodel
+
+[Model]
+Path = Plateau/53395681.kmodel
+
+[Model]
+Path = Plateau/53395700.kmodel
+
+[Model]
+Path = Plateau/53395710.kmodel
+
+[Model]
+Path = Plateau/53395720.kmodel
+
+[Model]
+Path = Plateau/53395730.kmodel
+
+[Model]
+Path = Plateau/53395731.kmodel
+
+# --- 地形 (14 タイル) ---
+
+[Model]
+Path = Plateau/Dem/533925.kmodel
+
+[Model]
+Path = Plateau/Dem/533926.kmodel
+
+[Model]
+Path = Plateau/Dem/533934.kmodel
+
+[Model]
+Path = Plateau/Dem/533935.kmodel
+
+[Model]
+Path = Plateau/Dem/533936.kmodel
+
+[Model]
+Path = Plateau/Dem/533937.kmodel
+
+[Model]
+Path = Plateau/Dem/533944.kmodel
+
+[Model]
+Path = Plateau/Dem/533945.kmodel
+
+[Model]
+Path = Plateau/Dem/533946.kmodel
+
+[Model]
+Path = Plateau/Dem/533947.kmodel
+
+[Model]
+Path = Plateau/Dem/533954.kmodel
+
+[Model]
+Path = Plateau/Dem/533955.kmodel
+
+[Model]
+Path = Plateau/Dem/533956.kmodel
+
+[Model]
+Path = Plateau/Dem/533957.kmodel
+
+# --- 道路 (14 タイル) ---
+
+[Model]
+Path = Plateau/Tran/533925.kmodel
+
+[Model]
+Path = Plateau/Tran/533926.kmodel
+
+[Model]
+Path = Plateau/Tran/533934.kmodel
+
+[Model]
+Path = Plateau/Tran/533935.kmodel
+
+[Model]
+Path = Plateau/Tran/533936.kmodel
+
+[Model]
+Path = Plateau/Tran/533937.kmodel
+
+[Model]
+Path = Plateau/Tran/533944.kmodel
+
+[Model]
+Path = Plateau/Tran/533945.kmodel
+
+[Model]
+Path = Plateau/Tran/533946.kmodel
+
+[Model]
+Path = Plateau/Tran/533947.kmodel
+
+[Model]
+Path = Plateau/Tran/533954.kmodel
+
+[Model]
+Path = Plateau/Tran/533955.kmodel
+
+[Model]
+Path = Plateau/Tran/533956.kmodel
+
+[Model]
+Path = Plateau/Tran/533957.kmodel
+
+# --- 橋梁 (68 タイル) ---
+
+[Model]
+Path = Plateau/Brid/53392641.kmodel
+
+[Model]
+Path = Plateau/Brid/53392643.kmodel
+
+[Model]
+Path = Plateau/Brid/53392650.kmodel
+
+[Model]
+Path = Plateau/Brid/53392651.kmodel
+
+[Model]
+Path = Plateau/Brid/53392652.kmodel
+
+[Model]
+Path = Plateau/Brid/53392653.kmodel
+
+[Model]
+Path = Plateau/Brid/53392660.kmodel
+
+[Model]
+Path = Plateau/Brid/53392662.kmodel
+
+[Model]
+Path = Plateau/Brid/53392670.kmodel
+
+[Model]
+Path = Plateau/Brid/53392672.kmodel
+
+[Model]
+Path = Plateau/Brid/53393549.kmodel
+
+[Model]
+Path = Plateau/Brid/53393558.kmodel
+
+[Model]
+Path = Plateau/Brid/53393559.kmodel
+
+[Model]
+Path = Plateau/Brid/53393569.kmodel
+
+[Model]
+Path = Plateau/Brid/53393579.kmodel
+
+[Model]
+Path = Plateau/Brid/53393585.kmodel
+
+[Model]
+Path = Plateau/Brid/53393586.kmodel
+
+[Model]
+Path = Plateau/Brid/53393589.kmodel
+
+[Model]
+Path = Plateau/Brid/53393595.kmodel
+
+[Model]
+Path = Plateau/Brid/53393596.kmodel
+
+[Model]
+Path = Plateau/Brid/53393597.kmodel
+
+[Model]
+Path = Plateau/Brid/53393598.kmodel
+
+[Model]
+Path = Plateau/Brid/53393599.kmodel
+
+[Model]
+Path = Plateau/Brid/53393641.kmodel
+
+[Model]
+Path = Plateau/Brid/53393642.kmodel
+
+[Model]
+Path = Plateau/Brid/53393651.kmodel
+
+[Model]
+Path = Plateau/Brid/53393652.kmodel
+
+[Model]
+Path = Plateau/Brid/53393653.kmodel
+
+[Model]
+Path = Plateau/Brid/53393660.kmodel
+
+[Model]
+Path = Plateau/Brid/53393661.kmodel
+
+[Model]
+Path = Plateau/Brid/53393662.kmodel
+
+[Model]
+Path = Plateau/Brid/53393663.kmodel
+
+[Model]
+Path = Plateau/Brid/53393664.kmodel
+
+[Model]
+Path = Plateau/Brid/53393670.kmodel
+
+[Model]
+Path = Plateau/Brid/53393672.kmodel
+
+[Model]
+Path = Plateau/Brid/53393673.kmodel
+
+[Model]
+Path = Plateau/Brid/53393674.kmodel
+
+[Model]
+Path = Plateau/Brid/53393680.kmodel
+
+[Model]
+Path = Plateau/Brid/53393681.kmodel
+
+[Model]
+Path = Plateau/Brid/53393682.kmodel
+
+[Model]
+Path = Plateau/Brid/53393683.kmodel
+
+[Model]
+Path = Plateau/Brid/53393684.kmodel
+
+[Model]
+Path = Plateau/Brid/53393690.kmodel
+
+[Model]
+Path = Plateau/Brid/53393691.kmodel
+
+[Model]
+Path = Plateau/Brid/53393692.kmodel
+
+[Model]
+Path = Plateau/Brid/53393693.kmodel
+
+[Model]
+Path = Plateau/Brid/53394507.kmodel
+
+[Model]
+Path = Plateau/Brid/53394508.kmodel
+
+[Model]
+Path = Plateau/Brid/53394509.kmodel
+
+[Model]
+Path = Plateau/Brid/53394516.kmodel
+
+[Model]
+Path = Plateau/Brid/53394517.kmodel
+
+[Model]
+Path = Plateau/Brid/53394524.kmodel
+
+[Model]
+Path = Plateau/Brid/53394525.kmodel
+
+[Model]
+Path = Plateau/Brid/53394526.kmodel
+
+[Model]
+Path = Plateau/Brid/53394535.kmodel
+
+[Model]
+Path = Plateau/Brid/53394566.kmodel
+
+[Model]
+Path = Plateau/Brid/53394576.kmodel
+
+[Model]
+Path = Plateau/Brid/53394577.kmodel
+
+[Model]
+Path = Plateau/Brid/53394587.kmodel
+
+[Model]
+Path = Plateau/Brid/53394600.kmodel
+
+[Model]
+Path = Plateau/Brid/53394601.kmodel
+
+[Model]
+Path = Plateau/Brid/53394602.kmodel
+
+[Model]
+Path = Plateau/Brid/53394610.kmodel
+
+[Model]
+Path = Plateau/Brid/53394611.kmodel
+
+[Model]
+Path = Plateau/Brid/53394612.kmodel
+
+[Model]
+Path = Plateau/Brid/53394620.kmodel
+
+[Model]
+Path = Plateau/Brid/53394621.kmodel
+
+[Model]
+Path = Plateau/Brid/53394622.kmodel
+
+# 【LOD2 地区が見える位置に置く】以前は高度900mから30km先を見る俯瞰にしていたが、
+# それだと大気遠近で全面が白く飛び、LOD2 のテクスチャも LODDistance の外なので
+# 一度も出ない。採用タイルのうち最も建物が高い 53393599(264.8m / X -19 / Z -1305)を、
+# LODDistance(1500m)の内側から北東に見込む位置へ移した。
+# 手前に LOD2 のテクスチャ付きの街、その奥に LOD1 の箱が地平まで続く絵になる。
+# 【自動配置に任せられない】カメラを書かないとバウンズの20%内側へ置かれ、
+# 33km四方のシーンでは建物の中に埋まる(BistroExterior.kscene と同じ理由)。
+[Camera]
+Position = -1500.0, 300.0, -2400.0
+Yaw = 53.5
+Pitch = -6.0
+
+[Sun]
+TimeOfDay = 10.0
+AzimuthDegrees = 150.0
+Shadow = true

@@ -3,21 +3,92 @@
 #include <DirectXMath.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "Model.h"
+#include "ModelLoader.h"
 #include "ShowLoader.h"
 
 namespace Kurenai::Assets
 {
+    // 1つのModelInstanceが持てるLODの段数の上限(.ksceneのPathを含む)。
+    // .kmodelのMeshEntryが持つメッシュレットLODの上限(kMaxMeshletLODCount)と、
+    // DDGIボリュームのLODCountの上限に揃えてある。
+    // これ以上粗くしたいものは、段を増やすのではなく別のシーンへ分ける粒度になる
+    inline constexpr size_t kMaxModelLODCount = 4;
+    // モデルインスタンスの常駐状態(ストリーミング)。
+    //
+    // 値が動くのは[Scene]StreamingDistanceを指定したシーンだけで、
+    // 指定が無ければ読み込み時のLoadedのまま変化しない(従来どおりの全常駐)。
+    //
+    // 【なぜ表示を先に用意するか】破棄が早すぎる/範囲内なのに読み込まれない、といった破綻は
+    // 画面を見ても分からない(そこに何も無いのが正しいのか間違いなのか区別できない)。
+    // 常駐状態を位置ごとに見られるようにしておかないと、入れた後で原因を切れない
+    enum class ResidencyState : uint8_t
+    {
+        Unloaded = 0,   // 範囲外。ジオメトリ/テクスチャをGPUに載せていない
+        Loading  = 1,   // 読み込み中
+        Loaded   = 2,   // 常駐。描画できる
+    };
+
+    // メッシュ1つぶんのワールド空間AABB。ModelInstanceが自分のModelのメッシュ数だけ持つ。
+    //
+    // 【なぜ配列でなく構造体にするか】IsAABBVisible(KurenaiEngine3D.cpp)が
+    // const float(&)[3] を2本取るため、min/maxが同じ要素の中に隣り合っている必要がある
+    struct MeshWorldBounds
+    {
+        float Min[3] = { 0.0f, 0.0f, 0.0f };
+        float Max[3] = { 0.0f, 0.0f, 0.0f };
+    };
+
     // シーン内に配置された1つのモデルインスタンス。Modelのジオメトリ自体は
     // ワールド空間原点に焼き込み済み(ModelLoader.cpp参照)のままなので、
     // 実際の配置はWorld/NormalMatrixで頂点シェーダー側にて適用する(KurenaiEngine3D::
     // MakeObjectConstants参照)
     struct ModelInstance
     {
-        Model Model;
+        // 【値ではなく共有ポインタで持つ理由】同じ.kmodelを複数のインスタンスが指せるようにするため。
+        // Modelは頂点/インデックス/テクスチャのGPUリソースを丸ごと抱えるので、同じパスを2回読むと
+        // VRAMに二重に載る(MultiModelTest.ksceneは同じ.kmodelを3回配置しており、実際に3重だった)。
+        // 実体はScene::ModelCacheが所有し、ここはその共有参照になる。
+        //
+        // constなのは、読み込み後にモデルの中身を書き換える経路を作らないため。1つのModelを
+        // 複数のインスタンスが共有するので、片方から書き換えるともう片方に波及する。
+        // 唯一の例外だったRaytracingSceneのCPUコピー解放はScene::ModelCache側を回す形へ移した
+        std::shared_ptr<const Model> Model;
+
+        // モデルLODの2段目以降(.ksceneの[Model]LODPath / LODDistance)。粗くなっていく順。
+        // LODModels[i] は「カメラからの距離が LODDistances[i] 以上」のときに使う段で、
+        // どれにも当てはまらない(=最も近い)ときは上のModelを使う。
+        // LODを持たないインスタンスでは両方とも空になり、従来どおりModelだけが描かれる。
+        //
+        // 【距離はAABBの最近接点まで】中心距離だと1.1km四方のPLATEAUタイルで破綻する
+        // (タイルの端に立っていても中心までは500m以上あるため、近景なのに粗い段が選ばれる)
+        //
+        // 【型を Assets:: で修飾する理由】直前のメンバ名 Model が型名 Model を隠すため、
+        // ここから素の Model と書くと「型ではない」とコンパイルエラーになる(C2327)
+        std::vector<std::shared_ptr<const Assets::Model>> LODModels;
+        std::vector<float> LODDistances;
+
+        // --- ストリーミング([Scene]StreamingDistance 指定時) --------------------------------
+        //
+        // 実体を読み込むのに必要な .kmodel のフルパス。Model / LODModels と同じ並びで、
+        // 先頭が Model、以降が LODModels に対応する。
+        //
+        // 【ストリーミングしないシーンでも埋める】どちらの経路でも同じデータが揃っているほうが、
+        // 「読み込み済みかどうか」の判定を Model が空かどうかの1点に寄せられる
+        std::vector<std::wstring> ModelPaths;
+
+        // 各段が読み込み済みか。ストリーミングしないシーンでは全段が読み込み済みで始まる。
+        // 実体そのものは Model / LODModels の shared_ptr が空かどうかで判る
+        bool IsLODLoaded(size_t level) const
+        {
+            return (level == 0) ? static_cast<bool>(Model) : static_cast<bool>(LODModels[level - 1]);
+        }
+
         DirectX::XMFLOAT4X4 World;          // Scale * Rotation * Translation(転置済み、HLSLへそのまま渡せる形)
         DirectX::XMFLOAT4X4 NormalMatrix;   // Worldの3x3部分の逆転置(4x4に格納、転置済み)
         float TangentSignFlip = 1.0f;       // Worldの行列式が負(ミラーリング)なら-1
@@ -31,6 +102,38 @@ namespace Kurenai::Assets
         // 通常PSOではなく水面専用PSO(Water.hlsl)で描画し、G-BufferのMaterial.aへ水面のマテリアルID
         // (kMaterialIDWater、Shaders/3D/GBufferCommon.hlsli)を書き込む(水面マテリアル基盤)
         bool IsWater = false;
+
+        // Model::BoundsMin/MaxをWorldで変換した、ワールド空間の軸並行バウンディングボックス。
+        // フラスタムカリングの判定に使う。
+        //
+        // 【読み込み時に一度だけ求める】Worldは読み込み後に変化しない(書き込みはSceneLoaderの
+        // 1箇所のみ)ため、毎フレーム8頂点を変換し直す必要がない。
+        // 回転が入ると軸並行でなくなるので、min/maxだけを変換するのではなく必ず8頂点を変換して
+        // その包絡を取る(シーン全体のAABBを合成しているのと同じループで求めている)
+        float WorldBoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+        float WorldBoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+
+        // Model::MeshesのメッシュごとのワールドAABB(要素数はModel.Meshes.size()と同じ)。
+        // 上のWorldBoundsMin/Maxと同じくSceneLoaderが読み込み時に一度だけ求める。
+        //
+        // 【なぜインスタンス側に持つか】Meshのローカル空間AABBはModelが持つが、
+        // ワールド空間の値はインスタンスのWorldに依存する。将来同じModelを複数のインスタンスで
+        // 共有するようになっても壊れないよう、変換後の値はこちらへ置く。
+        //
+        // 【空になることがある】.kmodelがv10より前のメッシュ単位AABBを持たない世代…という
+        // 分岐は無い(v10未満は読み込み自体が拒否される)。空になるのはメッシュ0個のモデルだけ。
+        // 描画側は「要素数がMeshesと一致していること」を前提にしてよいが、
+        // 念のため添字の範囲は確かめること
+        std::vector<MeshWorldBounds> MeshWorldBoundsList;
+
+        // ストリーミングの常駐状態と、いま使っているモデルLODの段(0が最も詳細)。
+        //
+        // 【書き込むのはエンジン側の毎フレーム更新1箇所ずつ】Residencyは
+        // KurenaiEngine3D::UpdateModelStreaming、LODLevelはUpdateModelLODが書く。
+        // SceneLoaderが入れるLoaded/0は「ストリーミングもLODも使わないシーン」の値。
+        // 詳細はResidencyStateのコメント
+        ResidencyState Residency = ResidencyState::Loaded;
+        uint32_t LODLevel = 0;
     };
 
     // 反射プローブ(リフレクションプローブ)。この位置から周囲をキューブマップへキャプチャし、
@@ -115,12 +218,88 @@ namespace Kurenai::Assets
         // 判定の意味は変わらない。プローブ間隔の数倍を目安にする
         float MaxRayDistance = 8.0f;
 
+        // クリップマップLODの段数。1なら従来どおりの単一格子。
+        //
+        // LOD k は間隔が ProbeSpacing * 2^k、プローブ数は全LOD共通なので、
+        // 覆う範囲はLODが1つ上がるごとに2倍になる。近くは密に、遠くは粗くしたい
+        // 広いシーン(島全体など)のためのもの。
+        // プローブの総数は ProbeCounts の積 × LODCount になる
+        uint32_t LODCount = 1u;
+
+        // 各LODの原点をカメラへ追従させるか。falseなら従来どおりOriginに固定する。
+        //
+        // 【追従させるときは必ずそのLOD自身の格子へスナップする】スナップすれば、
+        // カメラが動いてもプローブのワールド座標は動かない(動くのは「どのプローブが
+        // 範囲に入っているか」だけ)ので、範囲に残ったプローブの焼き上がりを使い回せる。
+        // スナップしないと毎フレーム全プローブが焼き直しになる
+        bool FollowCamera = false;
+
         std::string Name;
+    };
+
+    // エミッシブなメッシュから起こした光源プロキシ1つ分(**ワールド空間**)。
+    // Mesh::EmissiveClusters(ローカル空間)を ModelInstance の変換で移したもので、
+    // SceneLoader が読み込み時に一度だけ作る(シーンは読み込み後に変形しない)。
+    struct EmissiveProxy
+    {
+        // ワールド空間の位置。クラスタの重心そのもの。
+        // 【法線方向へずらさない】面上に置いたままでよい ―― 減衰の分母が d^2 ではなく
+        // d^2 + SourceRadius^2 になっており、面の上では cos も 0 に落ちるため、
+        // 自分自身を照らす寄与はここで既に潰れている(docs/ImplementationDetail.md 62章)
+        float Position[3] = { 0.0f, 0.0f, 0.0f };
+        // 放射の向き(ワールド空間、正規化済み)。
+        // 【NormalMatrix(逆転置)で移すこと】これは光の進行方向ではなく**面の法線**である。
+        // すぐ下にあるモデル埋め込みライトの Direction は World でそのまま回してよいが
+        // (方向ベクトルなので)、こちらを同じように扱うと非一様スケールで黙ってずれる
+        float Direction[3] = { 0.0f, 1.0f, 0.0f };
+        // 面が出している放射輝度。EmissiveFactor × エミッシブテクスチャの平均色。
+        //
+        // 【シーン全体の倍率(m_EmissiveIntensity)も露出も掛けない】倍率は毎フレームの
+        // ライトリスト構築で掛ける ―― そうしないとImGuiのスライダーが効かなくなる。
+        // 露出はそもそも掛けてはいけない(G-Bufferのエミッシブが露出を通らないため。62章)
+        float RadianceBase[3] = { 0.0f, 0.0f, 0.0f };
+        // ワールド空間の総面積[m^2]
+        float Area = 0.0f;
+        // 指向性 κ(Assets::EmissiveCluster::Directionality と同じ量)
+        float Directionality = 0.0f;
+        // ワールド空間の面積等価円板半径[m]
+        float SourceRadius = 0.0f;
+        // どのインスタンスのどのメッシュのどのクラスタか。
+        // 【採用順を決めるときのタイブレークに使う】スコアが同値のときにこの3つ組の辞書順で
+        // 決めると、フレーム間で順序が揺れない(揺れるとライトが出入りしてちらつく)
+        uint32_t InstanceIndex = 0;
+        uint32_t MeshIndex = 0;
+        uint32_t ClusterIndex = 0;
     };
 
     struct Scene
     {
         std::wstring Name;
+
+        // 全モデルで共有する1x1のフォールバックテクスチャ(白/フラット法線/黒/マゼンタ)。
+        //
+        // 【ModelCache/Instancesより後ろに置いてはいけない】メンバはここでの宣言順に構築され、
+        // 逆順に破棄される。Modelが持つMeshはここのテクスチャを生ポインタで指しているため、
+        // 先に破棄されると解放済みを指す。Modelを持つ2つより前に宣言してこの順序を保証する。
+        //
+        // 【以前はここがInstancesより後ろにあった】コメントは「Instancesより前に宣言する」と
+        // 書いてあるのに、実際の宣言はInstancesの後ろにあった(=破棄はInstancesより先)。
+        // Modelのデストラクタがこの生ポインタを読まないため実害は出ていなかったが、
+        // ModelCacheがModelの実体を所有するようになって順序の重みが増したので、
+        // コメントが元から要求していた並びへ直した
+        SharedTexturePool SharedTextures;
+
+        // .kmodelのパス(assetRootDirectoryを含む絶対パス)から読み込み済みModelを引くキャッシュ。
+        // Modelの実体を所有するのはここで、ModelInstance::Modelはこれへの共有参照になる。
+        //
+        // 【SharedTexturesより後ろ・Instancesより前】上のSharedTexturesのコメントの理由で
+        // SharedTexturesより後ろに、そしてInstancesが指す先を先に消さないためInstancesより前に置く
+        // (破棄は Instances -> ModelCache -> SharedTextures の順になる)。
+        //
+        // 【スレッド】読み書きするのはLoaderスレッドのLoadSceneだけで、Renderスレッドは
+        // ApplyLoadedSceneで受け取った後に読むだけ。したがってロックを持たない
+        std::unordered_map<std::wstring, std::shared_ptr<Model>> ModelCache;
+
         std::vector<ModelInstance> Instances;
 
         // 各ModelInstanceが持つModel::Lights(モデルファイル埋め込みのライト。glTFのKHR_lights_punctual
@@ -128,6 +307,13 @@ namespace Kurenai::Assets
         // [Light]セクションで直接指定されたライト(元からワールド空間)を合成した、シーン全体の
         // ライト一覧。KurenaiEngine3Dはこれをそのまま読んでGPUのライトバッファを構築する
         std::vector<Light> Lights;
+
+        // エミッシブなメッシュから起こした光源プロキシの一覧(ワールド空間)。
+        // 各ModelInstanceが持つMesh::EmissiveClusters(ローカル空間)をInstance::Worldで
+        // 変換したもの。**Lightsには混ぜない** ―― 作者が置いたライトと自動生成の光源を
+        // 同じ配列にすると、ImGuiのライト一覧から消せてしまい元のメッシュと食い違う。
+        // 上限を超えたときに手置きのライトが押し出されないよう、詰める順序も分ける必要がある
+        std::vector<EmissiveProxy> EmissiveProxies;
 
         // .ksceneの[ReflectionProbe]セクションで配置された反射プローブの一覧(ワールド空間)。
         // ライトと違いモデルファイルへ埋め込む概念が無いため、.ksceneに書かれたものが全て
@@ -167,6 +353,66 @@ namespace Kurenai::Assets
         //  既定の0.5のままだと球だけが半分の明るさになり検証が成立しない)
         bool HasIBLIntensityOverride = false;
         float IBLIntensity = 1.0f;
+
+        // カスケードシャドウを打ち切る距離[m]。未指定(HasShadowDistance == false)なら
+        // 従来どおりカメラの遠クリップ面までを4カスケードで分割する。
+        //
+        // 【なぜ必要か】遠クリップ面はシーンAABBの対角から自動決定される
+        // (farZ = max(100, 対角×4)、KurenaiEngine3D::ComputeInitialCamera)。数十km規模のシーンでは
+        // farZが100km級になり、カスケードの分割範囲がそのまま伸びるため、第1カスケードが
+        // 数kmを2048x2048の1枚で覆うことになって近景の影が事実上消える。
+        // シャドウだけを手前で打ち切れば、遠景の描画距離を保ったまま近景の影の密度を戻せる。
+        //
+        // 【既定値を持たせない理由】「指定しなければ従来の挙動」を保証するためにフラグで分ける。
+        // 何らかの既定値を入れると、これまで正しく影が出ていたシーンの見え方が黙って変わる
+        bool HasShadowDistance = false;
+        float ShadowDistance = 0.0f;
+
+        // モデルのストリーミングを行う距離[m]。未指定(HasStreamingDistance == false)なら
+        // **従来どおり全モデルを読み込み時に常駐させる**。
+        //
+        // 指定するとLoadSceneは.kmodelの実体を読まず、ヘッダのAABBだけでインスタンスを配置する。
+        // 実体はカメラがこの距離まで近づいたときにLoaderスレッドが読み込む。
+        //
+        // 【この距離はAABBの最近接点まで】モデルLODの切り替え距離(ModelInstance::LODDistances)と
+        // 同じ測り方。中心距離だと巨大なタイルで足元のものが未読み込みのまま残る
+        bool HasStreamingDistance = false;
+        float StreamingDistance = 0.0f;
+
+        // WASD/E/Qでカメラを動かす速度[m/s]。未指定(HasCameraSpeed == false)なら
+        // シーンAABBの対角から自動で決める(KurenaiEngine3D::ResetSceneDependentParams)。
+        //
+        // 【なぜ必要か】従来は moveSpeed = Shift ? 20 : 5 の即値だった。市街地規模のシーン
+        // (Project PLATEAU 東京23区は対角約45km)ではこの速度で端から端まで38分かかり、
+        // シーンを見て回ること自体ができない。逆に速度を上げただけにするとSponza(対角37m)のような
+        // 小さいシーンが操作不能になるため、シーンの規模から決めたうえで個別に上書きできる形にする。
+        //
+        // 【既定値を持たせない理由】ShadowDistanceと同じ。何らかの既定値を入れると、
+        // これまで問題なく操作できていたシーンの挙動が黙って変わる
+        bool HasCameraSpeed = false;
+        float CameraSpeed = 0.0f;
+
+        // テクスチャの常駐ミップ制御(テクスチャストリーミング)を有効にするか。
+        //
+        // 【既定はoff】未指定なら従来どおり全ミップを常駐させる。既存アセットの見え方も
+        // VRAM使用量も1ビットも変えないため。PLATEAU LOD2のようにテクスチャが支配的な
+        // シーンだけがonにする。仕組みはAssets::TextureStreamingManager参照
+        bool TextureStreamingEnabled = false;
+        // 必要ミップの推定に足すバイアス[段]。負なら安全側(より詳細なミップを常駐させる)。
+        //
+        // 【既定 -2 は実測で決めた】Bistro Exteriorで、常駐ミップ制御をoff/onした画を
+        // 同一起動・同一カメラで撮り、32pxタイルごとにラプラシアン分散を比べた結果:
+        //
+        //   UV密度の代表値  バイアス  常駐率   比<0.80のタイル   最悪タイル
+        //   (ノイズ下限)       ―        ―          0枚           0.918
+        //   p90              -2      13.8%       14枚           0.175
+        //   中央値            -3      28.6%        0枚           0.852
+        //   p10              -1      12.4%        3枚           0.745
+        //   p10              -2      21.1%        1枚           0.768  ← 既定
+        //
+        // 残る1枚は暗部のアルファテスト葉で、並べても区別が付かない(絶対値が小さいため
+        // 相対指標だけが大きく動く)。根拠と経緯は docs/ImplementationDetail.md 48章
+        float TextureStreamingBias = -2.0f;
 
         // AO/間接光(SSAO・SSIL)を有効にするか。Furnace Testでは球の縁がAOで暗くなると
         // 「エネルギー損失による暗さ」と区別がつかなくなるため無効にする
@@ -346,6 +592,17 @@ namespace Kurenai::Assets
         float DroneShowCenter[3] = { 0.0f, 220.0f, 260.0f };  // 編隊の中心(ワールド座標)
         bool HasDroneShowScale = false;
         float DroneShowScale = 130.0f;      // 編隊の代表半径[m]
+        // 機体を光源としても送るか。灯の明るさはショー(.kshow)のBrightnessとRadiusから
+        // 導かれるので、ここには明るさのつまみを置かない(置くと「同じショーがシーンごとに
+        // 別の明るさで照らす」ことになり、上の分担が崩れる)
+        bool HasDroneShowCastLight = false;
+        bool DroneShowCastLight = false;
+        // 灯の明るさの倍率。1.0がスプライトから導いた物理的な値。
+        // 【これはショーの中身ではない】倍率が変えるのは「この舞台でどれだけ照らして見せるか」で、
+        // ショーそのもの(機体の見た目の明るさ)は.kshowのBrightnessが持ったままである。
+        // 同じショーを別のシーンへ置いたときに、見た目は同じで照らし方だけ変わってよい
+        bool HasDroneShowCastLightScale = false;
+        float DroneShowCastLightScale = 1.0f;
 
         // 各ModelInstanceのAABB(Modelのローカル空間Bounds)をWorldで変換し合成した、
         // シーン全体のワールド空間AABB。ComputeInitialCamera/ComputeLightViewProjが使う

@@ -1,0 +1,55 @@
+# エミッシブ光源の単位変換(π と 4 と露出)を検算するためのシーン。
+# Tools/generate_emissive_light_test.py で生成される(手で編集しない)。
+#
+# EmissiveLightProxy と EmissiveLightRef は**ジオメトリもカメラも露出も同一**で、
+# 床を照らす経路だけが違う。床の明るさに差が出たら単位変換が間違っている。
+#
+# 【両側に同じ -emissiveintensity を渡すこと】倍率は G-Buffer の自発光にも掛かるので、
+# 片側だけに渡すと球の見た目が変わり、球の位置にだけ大きな差が出る(実際に踏んだ)。
+# 【スクリーンスペースシャドウは切っておくこと】プロキシは常に影を落とす設定で、
+# 参照側の点光源は CastShadow=false。SSS を有効にすると片側だけ球の影が落ちる。
+#
+# 確認手順(**DX11 で走らせること**。DX12 だと影レイが球自身に当たる):
+#   Sample3D.exe -scene EmissiveLightProxy -emissivelights 1 -emissiveintensity 500 -emissivelightscutoff 0.5
+#   Sample3D.exe -scene EmissiveLightRef   -emissivelights 0
+# 床の同じ画素どうしを比べる。系統差は 0.221%(プロキシの分母が d^2 + R^2 のぶん)。
+# こちらは等価な手置きポイントライト。-emissivelights 0 で走らせる
+
+[Scene]
+Name = Emissive Light Test (Reference)
+# 露出を固定する。等価な点光源の強度が exposure に依存するため、これを外すと比較が壊れる
+Exposure = 15.0
+# 比較にノイズを混ぜない
+TAA = false
+AmbientOcclusion = false
+IBLIntensity = 0.0
+
+[Model]
+Path = EmissiveLightTest/EmissiveLightTest.kmodel
+
+[Camera]
+Position = 0.00, 4.50, -7.00
+Yaw = 0.0
+Pitch = -28.0
+
+[Sun]
+# 太陽を切り、確かめたい光だけで照らす
+Enabled = false
+Shadow = false
+# **昼に固定する。** 自動露出のバイアスが 0 でないと等価性が成り立たない ――
+# 手置きライトは exposure(Effective) を掛けたあと Tonemap の 2^(Effective-Scene) で
+# 相殺されるが、自発光とプロキシは相殺相手を持たずバイアスがそのまま残る
+# (docs/ImplementationDetail.md 62.4)
+TimeOfDay = 12.0
+
+[Light]
+# プロキシと等価になるよう生成した値。手で書き換えない
+#   Intensity = L * A * (1-κ)/4 / exposure
+#   Range     = プロキシが打ち切り照度から解いた値
+Type = Point
+Position = 0.0, 3.0000, 0.0
+Color = 1.0, 1.0, 1.0
+Intensity = 617111.0638
+Range = 5.6007
+# 影を出すと参照側だけ球に遮られる。両方とも影なしで比べる
+CastShadow = false

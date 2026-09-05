@@ -8,9 +8,11 @@
 #include "RHI/TextureImage.h"
 #include "Assets/ModelPackage.h"
 #include "Core/StringUtil.h"
+#include "MeshletBuilder.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -34,6 +36,7 @@ using Kurenai::Assets::kPackedTextureMagic;
 using Kurenai::Assets::kPackedTextureVersion;
 using Kurenai::Assets::kTextureEntryFlagSRGB;
 using Kurenai::Assets::LightEntry;
+using Kurenai::Assets::MaterialEntry;
 using Kurenai::Assets::MeshEntry;
 using Kurenai::Assets::PackageHeader;
 using Kurenai::Assets::PackedTextureHeader;
@@ -46,12 +49,58 @@ namespace KurenaiPacker
 {
     namespace
     {
+        // === 計測 ==============================================================
+        //
+        // OcclusionBaker.cppのBakeTimingsと同じ考え方。書き出しは数十ms〜数分と幅があるが、
+        // now()を呼ぶのはフェーズ境界とメッシュ/テクスチャ1件ごとだけなので影響は無視できる
+        using PhaseClock = std::chrono::steady_clock;
+
+        double PhaseSecondsSince(const PhaseClock::time_point& start)
+        {
+            return std::chrono::duration<double>(PhaseClock::now() - start).count();
+        }
+
+        // スコープを抜けるときに累計へ足す。早期continue/例外があっても取りこぼさない
+        struct ScopedPhase
+        {
+            double& Target;
+            PhaseClock::time_point Start;
+
+            explicit ScopedPhase(double& target) : Target(target), Start(PhaseClock::now()) {}
+            ~ScopedPhase() { Target += PhaseSecondsSince(Start); }
+
+            ScopedPhase(const ScopedPhase&) = delete;
+            ScopedPhase& operator=(const ScopedPhase&) = delete;
+        };
+
+        // ワーカースレッドから積むので、こちらはアトミック。doubleのfetch_addはC++17に無いため
+        // ナノ秒の整数で持つ(実時間の桁でオーバーフローしない)
+        void AddNanos(std::atomic<uint64_t>& target, const PhaseClock::time_point& start)
+        {
+            target.fetch_add(
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    PhaseClock::now() - start).count()),
+                std::memory_order_relaxed);
+        }
+
         // 一時パスへ書いてから完了時のみ本来のパスへリネームする(ランタイム側の
         // .kmodelcache/.ktexcacheと同じ設計。処理が中断されても中途半端な一時
         // ファイルが残るだけで、既存の正常なファイルには影響しない)
         void WriteFileAtomic(const fs::path& path, const void* data, size_t size)
         {
-            const fs::path tmp = fs::path(path).concat(L".tmp");
+            // 【一時ファイル名はプロセスと呼び出しで一意にする】以前は出力パス + ".tmp" 固定で、
+            // 同じ.ktexパスへ向かうパッカーを2つ同時に走らせると**両方が同じ.tmpをtruncで開いて
+            // 交互に書き**、先に終わった側がMoveFileExでリネームした結果、もう片方は
+            // 「消えた.tmp」をリネームしようとして失敗する。その失敗は
+            // 「テクスチャの処理に失敗しました(フォールバックします)」で握り潰されるため、
+            // **終了コードは0のまま.kmodelのテクスチャだけが減る**(実測: Sponzaを2プロセス
+            // 同時にパックして69枚→61枚。警告は出るがexit codeは0)。
+            // 一意にすれば、両者が別々の.tmpへ書いて順にリネームするだけになり、
+            // 最後に書いた側の内容が残る(同じ入力なら中身は同一)
+            static std::atomic<uint64_t> tmpCounter{ 0 };
+            const fs::path tmp = fs::path(path).concat(
+                L"." + std::to_wstring(GetCurrentProcessId()) +
+                L"." + std::to_wstring(tmpCounter.fetch_add(1)) + L".tmp");
             {
                 std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
                 if (!out.is_open())
@@ -67,10 +116,32 @@ namespace KurenaiPacker
                     throw std::runtime_error("ファイルの書き込みに失敗しました: " + WideToUtf8(path.wstring()));
                 }
             }
-            if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+            // 【同じ出力パスへ2プロセスが同時にリネームすると一時的に失敗する】
+            // MoveFileExはリネーム先を一瞬掴むため、別プロセスが同じ瞬間に同じ先へ
+            // リネームしていると ERROR_SHARING_VIOLATION / ERROR_ACCESS_DENIED が返る。
+            // これは恒久的な失敗ではないので短い間隔で数回やり直す。
+            // 諦めた場合は一時ファイルを残さない(名前が実行ごとに変わるため掃除しづらい)
+            constexpr int kRenameAttempts = 10;
+            DWORD lastError = ERROR_SUCCESS;
+            for (int attempt = 0; attempt < kRenameAttempts; ++attempt)
             {
-                throw std::runtime_error("ファイルの確定(rename)に失敗しました: " + WideToUtf8(path.wstring()));
+                if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
+                {
+                    return;
+                }
+                lastError = GetLastError();
+                if (lastError != ERROR_SHARING_VIOLATION && lastError != ERROR_ACCESS_DENIED)
+                {
+                    break;
+                }
+                Sleep(5 * (attempt + 1));
             }
+
+            std::error_code removeEc;
+            fs::remove(tmp, removeEc);
+            throw std::runtime_error(
+                "ファイルの確定(rename)に失敗しました(Win32エラー " + std::to_string(lastError) + "): "
+                + WideToUtf8(path.wstring()));
         }
 
         // pathのバイト表現を'/'区切りへ正規化して返す(.kmodel内のStringPoolに書く形式)
@@ -109,9 +180,30 @@ namespace KurenaiPacker
             const fs::path& sourceModelDirectory,
             const fs::path& outputDirectory,
             bool sRGB,
+            const std::wstring& embeddedTextureDirectory,
+            const std::wstring& outputModelStem,
             std::unordered_map<std::wstring, int>& externalNameCounts,
             bool& outIsExternal)
         {
+            // 埋め込みテクスチャは%TEMP%配下の一時ファイルなので、入力モデルからの相対を取ると
+            // 必ず「外」になる。_External/(外部参照の警告付き)ではなく_Embedded/へ分ける ――
+            // 元のモデルファイルの中にあったものであって、参照が外を向いていたわけではないため。
+            //
+            // 【モデルごとのサブディレクトリへ入れる】埋め込みテクスチャの名前は
+            // 「シーン内の配列番号 + 元のファイル名」でモデルの中でしか一意でない。
+            // PLATEAUの取り込みのように**複数のモデルを同じ出力ディレクトリへパックする**運用では、
+            // 別のタイルの emb0000_17336.jpg が同名になりうる。そして--forceを付けない限り
+            // 既存の.ktexはスキップされるため、**後から来たタイルが前のタイルのテクスチャを
+            // 黙って使う**(エラーも警告も出ない)。.kmodelの名前で名前空間を分けて塞ぐ
+            if (!embeddedTextureDirectory.empty() &&
+                texturePath.rfind(embeddedTextureDirectory, 0) == 0)
+            {
+                outIsExternal = false;
+                fs::path embeddedPath = outputDirectory / L"_Embedded" / outputModelStem / fs::path(texturePath).filename();
+                embeddedPath += (sRGB ? L".srgb.ktex" : L".linear.ktex");
+                return embeddedPath;
+            }
+
             std::error_code ec;
             const fs::path texAbs = fs::weakly_canonical(fs::path(texturePath), ec);
             const fs::path srcDirAbs = fs::weakly_canonical(sourceModelDirectory, ec);
@@ -139,6 +231,57 @@ namespace KurenaiPacker
             return outPath;
         }
 
+        // ブロック圧縮(BC1〜BC7)は4x4ピクセルを1ブロックとして符号化するため、幅または高さが
+        // 4未満のテクスチャはD3D11/DX12のシェーダリソースビュー作成がE_INVALIDARGで失敗する。
+        //
+        // 【なぜパック時に弾くのか】配布アセットには「法線マップ無し」を表す1x1のダミーが
+        // ブロック圧縮のまま置かれていることがある(NVIDIA Emerald Squareの法線マップ115枚中
+        // 6枚が1x1のATI2)。これをそのまま.ktexにすると、.kmodelは正常なテクスチャとして
+        // 参照し続け、実行のたびにModelLoaderがGPU転送に失敗してエラーログを出す。
+        // パックの時点で分かることを実行時のエラーに先送りしない
+        bool IsUnsupportedBlockCompressed(const DirectX::TexMetadata& metadata)
+        {
+            return DirectX::IsCompressed(metadata.format) && (metadata.width < 4 || metadata.height < 4);
+        }
+
+        // 既存の.ktexの中身が上記の条件に当たるかを、DDSペイロードのメタデータから判定する。
+        // 判定できない場合(読めない・壊れている)はfalseを返す ―― ここは「使えないものを
+        // 見つける」ための検査であり、読めないことを理由に既存の正常なテクスチャを
+        // 捨ててはいけない
+        bool ExistingKtexIsUnsupported(const fs::path& ktexPath)
+        {
+            std::ifstream file(ktexPath, std::ios::binary);
+            if (!file)
+            {
+                return false;
+            }
+
+            Kurenai::Assets::PackedTextureHeader header{};
+            file.read(reinterpret_cast<char*>(&header), sizeof(header));
+            if (!file || std::memcmp(header.Magic, Kurenai::Assets::kPackedTextureMagic, sizeof(header.Magic)) != 0)
+            {
+                return false;
+            }
+
+            // DDSヘッダだけ読めれば足りる(DXT10拡張ヘッダを含めても148バイト)
+            constexpr size_t kDdsHeaderProbeBytes = 256;
+            const size_t probeSize = static_cast<size_t>(
+                std::min<uint64_t>(header.PayloadSize, kDdsHeaderProbeBytes));
+            std::vector<uint8_t> probe(probeSize);
+            file.read(reinterpret_cast<char*>(probe.data()), static_cast<std::streamsize>(probeSize));
+            if (!file)
+            {
+                return false;
+            }
+
+            DirectX::TexMetadata metadata{};
+            if (FAILED(DirectX::GetMetadataFromDDSMemory(probe.data(), probe.size(), DirectX::DDS_FLAGS_NONE, metadata)))
+            {
+                return false;
+            }
+            return IsUnsupportedBlockCompressed(metadata);
+        }
+
         // 頂点/インデックスブロックの境界を16バイトへ切り上げる
         uint64_t AlignUp(uint64_t value, uint64_t alignment)
         {
@@ -161,6 +304,9 @@ namespace KurenaiPacker
         const fs::path outputDirectory = kmodelPath.parent_path();
         std::error_code ec;
         fs::create_directories(outputDirectory, ec);
+
+        WriteTimings timings;
+        const auto collectStart = PhaseClock::now();
 
         // === 1. ユニークな(パス,sRGB)テクスチャ要求を、メッシュ走査順で決定的に収集する ===
         std::vector<TextureRequest> requests;
@@ -188,7 +334,9 @@ namespace KurenaiPacker
             request.SourcePath = path;
             request.SRGB = sRGB;
             bool isExternal = false;
-            request.OutputKtexPath = ComputeKtexOutputPath(path, sourceModelDirectory, outputDirectory, sRGB, externalNameCounts, isExternal);
+            request.OutputKtexPath = ComputeKtexOutputPath(
+                path, sourceModelDirectory, outputDirectory, sRGB,
+                options.EmbeddedTextureDirectory, kmodelPath.stem().wstring(), externalNameCounts, isExternal);
             if (isExternal)
             {
                 // std::wcerrは出力先が実コンソールでない場合(リダイレクト等)に失敗しうるため
@@ -222,17 +370,34 @@ namespace KurenaiPacker
         result.MeshCount = sourceModel.Meshes.size();
         result.TextureRequested = requests.size();
 
+        timings.CollectSeconds += PhaseSecondsSince(collectStart);
+
+        const auto skipStart = PhaseClock::now();
         std::vector<size_t> pendingIndices;
         for (size_t i = 0; i < requests.size(); ++i)
         {
             if (!options.Force && fs::exists(requests[i].OutputKtexPath))
             {
+                // 既存を再利用する場合も、中身がGPUで扱えない寸法でないかは確かめる。
+                // --forceを付けたときにしか検査しない作りにすると、一度生成してしまった
+                // 不正な.ktexを.kmodelが参照し続け、実行のたびに転送失敗が出る
+                if (ExistingKtexIsUnsupported(requests[i].OutputKtexPath))
+                {
+                    requests[i].Failed = true;
+                    ++result.TextureFailed;
+                    std::cerr << "[KurenaiPacker][Warning] 既存の.ktexがブロック圧縮で4x4未満のため参照しません(フォールバックします): "
+                        << WideToUtf8(requests[i].SourcePath) << "\n";
+                    continue;
+                }
                 ++result.TextureSkippedExisting;
                 continue;
             }
             pendingIndices.push_back(i);
         }
 
+        timings.SkipCheckSeconds += PhaseSecondsSince(skipStart);
+
+        const auto textureStart = PhaseClock::now();
         if (!pendingIndices.empty())
         {
             constexpr unsigned int kMaxWorkers = 8;
@@ -241,10 +406,28 @@ namespace KurenaiPacker
                 : std::min(kMaxWorkers, std::max(1u, std::thread::hardware_concurrency()));
             const unsigned int workerCount = std::min(hardwareThreads, static_cast<unsigned int>(pendingIndices.size()));
 
+            // 【実時間ではなく全ワーカーの累計を取る】和が実時間×ワーカー数に近ければ
+            // 全員が働いており、実時間×1に近ければ1本を残して全員が待っている。
+            // BC7圧縮はTextureImage内部のミューテックスで直列化されるため、この比が
+            // 「スレッドを増やして意味があるのか」を直接決める
+            // このモデルのぶんだけを測るため、ワーカーを起こす直前に0へ戻す
+            Kurenai::RHI::ResetTextureLoadStats();
+
+            std::atomic<uint64_t> loadNanos{ 0 };
+            std::atomic<uint64_t> ddsNanos{ 0 };
+            std::atomic<uint64_t> writeNanos{ 0 };
+
             std::atomic<size_t> nextPending{ 0 };
             std::mutex logMutex;
             std::atomic<size_t> generatedCount{ 0 };
             std::atomic<size_t> failedCount{ 0 };
+            std::atomic<size_t> completedCount{ 0 };
+
+            // 【逐次進捗を出す理由】PLATEAUのLOD2は1タイルで1,714枚あり、BC7圧縮は
+            // TextureImage内部のミューテックスで直列化される。従来は完了サマリしか出さないため、
+            // 数分〜十数分のあいだ「動いているのか止まっているのか」が区別できなかった。
+            // 何枚ごとに出すかは総数に応じて決める(小さいアセットで無駄に行を増やさない)
+            const size_t progressStep = std::max<size_t>(1, pendingIndices.size() / 20);
 
             auto workerFn = [&]()
             {
@@ -265,8 +448,21 @@ namespace KurenaiPacker
 
                     try
                     {
+                        const auto loadStart = PhaseClock::now();
                         Kurenai::RHI::TextureImage image = Kurenai::RHI::TextureImage::LoadFromFile(request.SourcePath, request.SRGB);
+                        AddNanos(loadNanos, loadStart);
 
+                        // ブロック圧縮で4x4に満たないものは、.ktexにしてもGPUが受け付けない。
+                        // ここで例外にして、下のcatchで「フォールバックする」経路へ流す
+                        const DirectX::TexMetadata& metadata = image.GetImage().GetMetadata();
+                        if (IsUnsupportedBlockCompressed(metadata))
+                        {
+                            throw std::runtime_error(
+                                "ブロック圧縮テクスチャの寸法が4x4未満のためGPUが扱えません("
+                                + std::to_string(metadata.width) + "x" + std::to_string(metadata.height) + ")");
+                        }
+
+                        const auto ddsStart = PhaseClock::now();
                         DirectX::Blob blob;
                         const HRESULT hr = DirectX::SaveToDDSMemory(
                             image.GetImage().GetImages(), image.GetImage().GetImageCount(),
@@ -275,6 +471,7 @@ namespace KurenaiPacker
                         {
                             throw std::runtime_error("DDSエンコードに失敗しました");
                         }
+                        AddNanos(ddsNanos, ddsStart);
 
                         PackedTextureHeader header{};
                         std::memcpy(header.Magic, kPackedTextureMagic, sizeof(kPackedTextureMagic));
@@ -287,7 +484,9 @@ namespace KurenaiPacker
                         std::vector<uint8_t> fileBytes(sizeof(header) + blob.GetBufferSize());
                         std::memcpy(fileBytes.data(), &header, sizeof(header));
                         std::memcpy(fileBytes.data() + sizeof(header), blob.GetBufferPointer(), blob.GetBufferSize());
+                        const auto ktexWriteStart = PhaseClock::now();
                         WriteFileAtomic(request.OutputKtexPath, fileBytes.data(), fileBytes.size());
+                        AddNanos(writeNanos, ktexWriteStart);
 
                         generatedCount.fetch_add(1);
                     }
@@ -298,6 +497,14 @@ namespace KurenaiPacker
                         std::lock_guard<std::mutex> lock(logMutex);
                         std::cerr << "[KurenaiPacker][Warning] テクスチャの処理に失敗しました(フォールバックします): "
                             << WideToUtf8(request.SourcePath) << " : " << e.what() << "\n";
+                    }
+
+                    const size_t done = completedCount.fetch_add(1) + 1;
+                    if (done % progressStep == 0 || done == pendingIndices.size())
+                    {
+                        std::lock_guard<std::mutex> lock(logMutex);
+                        std::cout << "[KurenaiPacker]   テクスチャ " << done << "/" << pendingIndices.size()
+                            << " (生成 " << generatedCount.load() << " / 失敗 " << failedCount.load() << ")\n";
                     }
                 }
 
@@ -318,10 +525,26 @@ namespace KurenaiPacker
                 worker.join();
             }
 
+            const Kurenai::RHI::TextureLoadStats texStats = Kurenai::RHI::GetTextureLoadStats();
+            timings.TexDecodeSeconds = texStats.DecodeSeconds;
+            timings.TexMipSeconds = texStats.MipSeconds;
+            timings.TexBC7WaitSeconds = texStats.BC7WaitSeconds;
+            timings.TexBC7CompressSeconds = texStats.BC7CompressSeconds;
+            timings.TexDeviceCreateSeconds = texStats.DeviceCreateSeconds;
+
+            timings.WorkerCount = workerCount;
+            timings.WorkerLoadSeconds = static_cast<double>(loadNanos.load()) / 1e9;
+            timings.WorkerDdsSeconds = static_cast<double>(ddsNanos.load()) / 1e9;
+            timings.WorkerWriteSeconds = static_cast<double>(writeNanos.load()) / 1e9;
+
             result.TextureGenerated = generatedCount.load();
-            result.TextureFailed = failedCount.load();
+            // 既存.ktexの検査(上のループ)で数えた分に足し込む。代入にすると消える
+            result.TextureFailed += failedCount.load();
         }
 
+        timings.TextureSeconds += PhaseSecondsSince(textureStart);
+
+        const auto entryStart = PhaseClock::now();
         // === 3. TextureEntryを確定させる(失敗したものは除外し、-1として扱う) ===
         std::vector<TextureEntry> textureEntries;
         std::vector<std::string> texturePathStrings; // StringPoolへ書く前段(順序保持)
@@ -353,6 +576,9 @@ namespace KurenaiPacker
             return requestIndex == kNoRequest ? kNoTextureIndex : finalIndexByRequest[requestIndex];
         };
 
+        timings.EntrySeconds += PhaseSecondsSince(entryStart);
+
+        const auto occlusionStart = PhaseClock::now();
         // === 3.5 ベイクした遮蔽マップを.ktexとして書き出す ===
         //
         // 元画像を持たない生成物なので、TextureRequest経由(TextureImage::LoadFromFile)の
@@ -459,6 +685,9 @@ namespace KurenaiPacker
             }
         }
 
+        timings.OcclusionSeconds += PhaseSecondsSince(occlusionStart);
+
+        const auto bentStart = PhaseClock::now();
         // === bent normal(RGBA16F、圧縮なし)の書き出し ===========================
         //
         // 遮蔽マップと違って圧縮しない。BC4/BC7はいずれも符号なしで、bRawの負の成分を表現できない
@@ -568,75 +797,165 @@ namespace KurenaiPacker
             }
         }
 
-        // === 4. .kgeomを書き出す(メッシュ順に頂点/インデックスブロックを16バイト境界で連結) ===
+        timings.BentNormalSeconds += PhaseSecondsSince(bentStart);
+
+        // === 4. .kgeomを書き出す ===
+        //
+        // メッシュ順に、メッシュごとの
+        // [頂点][インデックス][メッシュレット][メッシュレット頂点][メッシュレット三角形]
+        // を16バイト境界で連結する。
+        //
+        // メッシュレット化は頂点の並びとインデックスの並びの両方を変えるため、
+        // 書き出すのは入力のmesh.Vertices/mesh.Indicesではなくこの結果のほう
         std::vector<uint8_t> geometryPayload;
         std::vector<MeshEntry> meshEntries(sourceModel.Meshes.size());
+        // マテリアルはメッシュと1対1(パッカーがマテリアル単位で結合するため。ModelPackage.h参照)。
+        // 番号が一致するのは実装の都合であって規約ではないので、MeshEntry.MaterialIndexへ明示的に書く
+        std::vector<MaterialEntry> materialEntries(sourceModel.Meshes.size());
+
+        // 任意の型の配列を1ブロックとして追記し、書き込み開始位置を返す。
+        // ブロックの直後は必ず16バイト境界まで0で埋める(kGeometryBlockAlignment)
+        const auto appendBlock = [&geometryPayload](const void* data, size_t byteCount) -> uint64_t {
+            const uint64_t offset = geometryPayload.size();
+            geometryPayload.resize(geometryPayload.size() + byteCount);
+            if (byteCount > 0)
+            {
+                std::memcpy(geometryPayload.data() + offset, data, byteCount);
+            }
+            geometryPayload.resize(AlignUp(geometryPayload.size(), kGeometryBlockAlignment), 0);
+            return offset;
+        };
+
         for (size_t i = 0; i < sourceModel.Meshes.size(); ++i)
         {
             const SourceMesh& mesh = sourceModel.Meshes[i];
             MeshEntry& entry = meshEntries[i];
 
-            entry.VertexOffset = geometryPayload.size();
-            const size_t vertexBytes = mesh.Vertices.size() * sizeof(Vertex);
-            geometryPayload.resize(geometryPayload.size() + vertexBytes);
-            if (vertexBytes > 0)
-            {
-                std::memcpy(geometryPayload.data() + entry.VertexOffset, mesh.Vertices.data(), vertexBytes);
-            }
-            geometryPayload.resize(AlignUp(geometryPayload.size(), kGeometryBlockAlignment), 0);
+            const auto meshletStart = PhaseClock::now();
+            MeshletBuildResult meshlets = BuildMeshlets(
+                mesh.Vertices, mesh.Indices, options.EnableMeshlets, options.MeshletLODCount);
+            timings.MeshletSeconds += PhaseSecondsSince(meshletStart);
 
-            entry.IndexOffset = geometryPayload.size();
-            const size_t indexBytes = mesh.Indices.size() * sizeof(uint32_t);
-            geometryPayload.resize(geometryPayload.size() + indexBytes);
-            if (indexBytes > 0)
+            // メッシュレットへ材質番号を焼き込む。MeshletBuilderは材質を知らない(知る必要も無い)ので、
+            // 「このメッシュの材質」をここで転記する。メッシュとマテリアルは1対1なのでメッシュ番号でよい
+            for (Kurenai::Assets::MeshletEntry& meshlet : meshlets.Meshlets)
             {
-                std::memcpy(geometryPayload.data() + entry.IndexOffset, mesh.Indices.data(), indexBytes);
+                meshlet.MaterialIndex = static_cast<uint32_t>(i);
             }
-            geometryPayload.resize(AlignUp(geometryPayload.size(), kGeometryBlockAlignment), 0);
 
-            entry.VertexCount = static_cast<uint32_t>(mesh.Vertices.size());
-            entry.IndexCount = static_cast<uint32_t>(mesh.Indices.size());
-            entry.MetallicFactor = mesh.MetallicFactor;
-            entry.RoughnessFactor = mesh.RoughnessFactor;
-            entry.AlphaCutoff = mesh.AlphaCutoff;
-            entry.EmissiveFactor[0] = mesh.EmissiveFactor[0];
-            entry.EmissiveFactor[1] = mesh.EmissiveFactor[1];
-            entry.EmissiveFactor[2] = mesh.EmissiveFactor[2];
-            entry.BaseColorTextureIndex = resolveTextureIndex(meshTextureRefs[i].BaseColor);
-            entry.NormalTextureIndex = resolveTextureIndex(meshTextureRefs[i].Normal);
-            entry.MetallicRoughnessTextureIndex = resolveTextureIndex(meshTextureRefs[i].MetallicRoughness);
-            entry.EmissiveTextureIndex = resolveTextureIndex(meshTextureRefs[i].Emissive);
-            entry.Flags = mesh.IsTransparent ? kMeshEntryFlagTransparent : 0u;
+            const auto appendStart = PhaseClock::now();
+            entry.VertexOffset = appendBlock(meshlets.Vertices.data(), meshlets.Vertices.size() * sizeof(Vertex));
+            entry.IndexOffset = appendBlock(meshlets.Indices.data(), meshlets.Indices.size() * sizeof(uint32_t));
+            entry.MeshletOffset =
+                appendBlock(meshlets.Meshlets.data(), meshlets.Meshlets.size() * sizeof(Kurenai::Assets::MeshletEntry));
+            entry.MeshletVertexOffset =
+                appendBlock(meshlets.MeshletVertices.data(), meshlets.MeshletVertices.size() * sizeof(uint32_t));
+            entry.MeshletTriangleOffset =
+                appendBlock(meshlets.MeshletTriangles.data(), meshlets.MeshletTriangles.size() * sizeof(uint32_t));
+            timings.AppendSeconds += PhaseSecondsSince(appendStart);
+
+            entry.MeshletCount = static_cast<uint32_t>(meshlets.Meshlets.size());
+            entry.MeshletVertexCount = static_cast<uint32_t>(meshlets.MeshletVertices.size());
+            entry.MeshletTriangleCount = static_cast<uint32_t>(meshlets.MeshletTriangles.size());
+            entry.MeshletLODCount = meshlets.LODCount;
+            for (uint32_t lod = 0; lod < Kurenai::Assets::kMaxMeshletLODCount; ++lod)
+            {
+                entry.MeshletLODOffsets[lod] = meshlets.LODMeshletOffsets[lod];
+                entry.MeshletLODCounts[lod] = meshlets.LODMeshletCounts[lod];
+            }
+            result.MeshletCount += meshlets.Meshlets.size();
+            result.MeshletLOD0Count += meshlets.LODMeshletCounts[0];
+            for (uint32_t lod = 0; lod < Kurenai::Assets::kMaxMeshletLODCount; ++lod)
+            {
+                result.MeshletTrianglesByLOD[lod] += meshlets.LODTriangleCounts[lod];
+            }
+
+            entry.VertexCount = static_cast<uint32_t>(meshlets.Vertices.size());
+            entry.IndexCount = static_cast<uint32_t>(meshlets.Indices.size());
+            entry.MaterialIndex = static_cast<int32_t>(i);
             entry.Reserved = 0u;
-            entry.BaseColorFactor[0] = mesh.BaseColorFactor[0];
-            entry.BaseColorFactor[1] = mesh.BaseColorFactor[1];
-            entry.BaseColorFactor[2] = mesh.BaseColorFactor[2];
-            entry.BaseColorFactor[3] = mesh.BaseColorFactor[3];
-            // ベイクした遮蔽マップがあればそちらを優先する(ソースモデル由来の
-            // occlusionTextureはTEXCOORD0の空間にあり、ベイク時に生成したライトマップUVとは
-            // 座標系が違うため併用できない。--bake-occlusionを指定した時点で
-            // 「AOはこちらで作る」という意思表示とみなす)
-            if (bakedOcclusionIndexByMesh[i] != kNoTextureIndex)
+
+            // === メッシュ単位のAABB(v10で追加) ===
+            //
+            // **書き出す頂点から作る。** 入力のmesh.Verticesではなくメッシュレット化を通した
+            // meshlets.Verticesを見るのは、頂点フェッチ最適化でどの三角形からも参照されない頂点が
+            // 落ちることがあり、実際に描かれる範囲はこちらだから。
+            //
+            // PackageHeaderのAABBはModelSourceが全頂点から作った値をそのまま使い、**ここから
+            // 導出しない。**別々に作った2つの値が一致することを検証で確かめられるようにするため
+            // (片方をもう片方から作ると、その検証は何も言っていないことになる)
+            if (meshlets.Vertices.empty())
             {
-                entry.OcclusionTextureIndex = bakedOcclusionIndexByMesh[i];
-                // ベイク結果はそのまま使ってほしいので強度は1.0固定にする
-                entry.OcclusionStrength = Kurenai::Assets::kDefaultOcclusionStrength;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    entry.BoundsMin[axis] = 0.0f;
+                    entry.BoundsMax[axis] = 0.0f;
+                }
             }
             else
             {
-                entry.OcclusionTextureIndex = resolveTextureIndex(meshTextureRefs[i].Occlusion);
-                entry.OcclusionStrength = mesh.OcclusionStrength;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    entry.BoundsMin[axis] = meshlets.Vertices[0].Position[axis];
+                    entry.BoundsMax[axis] = meshlets.Vertices[0].Position[axis];
+                }
+                for (const Vertex& vertex : meshlets.Vertices)
+                {
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        entry.BoundsMin[axis] = std::min(entry.BoundsMin[axis], vertex.Position[axis]);
+                        entry.BoundsMax[axis] = std::max(entry.BoundsMax[axis], vertex.Position[axis]);
+                    }
+                }
+            }
+
+            // === 材質はMaterialEntryへ(v10) ===
+            MaterialEntry& material = materialEntries[i];
+            material.MetallicFactor = mesh.MetallicFactor;
+            material.RoughnessFactor = mesh.RoughnessFactor;
+            material.AlphaCutoff = mesh.AlphaCutoff;
+            material.Translucency = mesh.Translucency;
+            material.EmissiveFactor[0] = mesh.EmissiveFactor[0];
+            material.EmissiveFactor[1] = mesh.EmissiveFactor[1];
+            material.EmissiveFactor[2] = mesh.EmissiveFactor[2];
+            material.BaseColorTextureIndex = resolveTextureIndex(meshTextureRefs[i].BaseColor);
+            material.NormalTextureIndex = resolveTextureIndex(meshTextureRefs[i].Normal);
+            material.MetallicRoughnessTextureIndex = resolveTextureIndex(meshTextureRefs[i].MetallicRoughness);
+            material.EmissiveTextureIndex = resolveTextureIndex(meshTextureRefs[i].Emissive);
+            material.Flags = mesh.IsTransparent ? kMeshEntryFlagTransparent : 0u;
+            material.BaseColorFactor[0] = mesh.BaseColorFactor[0];
+            material.BaseColorFactor[1] = mesh.BaseColorFactor[1];
+            material.BaseColorFactor[2] = mesh.BaseColorFactor[2];
+            material.BaseColorFactor[3] = mesh.BaseColorFactor[3];
+            // ベイクした遮蔽マップがあればそちらを優先する(ソースモデル由来の
+            // occlusionTextureはTEXCOORD0の空間にあり、ベイク時に生成したライトマップUVとは
+            // 座標系が違うため併用できない。--bake-occlusionを指定した時点で
+            // 「AOはこちらで作る」という意思表示とみなす)。
+            // **ベイク結果はメッシュ単位**なので、材質とメッシュが1対1であることに依存している
+            if (bakedOcclusionIndexByMesh[i] != kNoTextureIndex)
+            {
+                material.OcclusionTextureIndex = bakedOcclusionIndexByMesh[i];
+                // ベイク結果はそのまま使ってほしいので強度は1.0固定にする
+                material.OcclusionStrength = Kurenai::Assets::kDefaultOcclusionStrength;
+            }
+            else
+            {
+                material.OcclusionTextureIndex = resolveTextureIndex(meshTextureRefs[i].Occlusion);
+                material.OcclusionStrength = mesh.OcclusionStrength;
             }
             // bent normalはベイクでしか作られない(ソースモデル由来のものは存在しない)
-            entry.BentNormalTextureIndex = bentNormalIndexByMesh[i];
-            entry.Reserved2 = 0u;
+            material.BentNormalTextureIndex = bentNormalIndexByMesh[i];
+            material.Reserved = 0u;
 
-            result.VertexCount += mesh.Vertices.size();
-            result.IndexCount += mesh.Indices.size();
+            // 入力ではなく書き出した側を数える。頂点キャッシュ最適化で
+            // どの三角形からも参照されない頂点が落ちるため、入力より少なくなることがある
+            result.VertexCount += meshlets.Vertices.size();
+            result.IndexCount += meshlets.Indices.size();
         }
 
         const fs::path kgeomPath = fs::path(kmodelPath).replace_extension(L".kgeom");
         {
+            const ScopedPhase timeGeometryWrite(timings.GeometryWriteSeconds);
             GeometryHeader header{};
             std::memcpy(header.Magic, kGeometryMagic, sizeof(kGeometryMagic));
             header.Version = kGeometryVersion;
@@ -653,6 +972,7 @@ namespace KurenaiPacker
             WriteFileAtomic(kgeomPath, fileBytes.data(), fileBytes.size());
         }
 
+        const auto modelWriteStart = PhaseClock::now();
         // === 5. .kmodelを書き出す(StringPoolを構築してからヘッダ/テーブルをまとめて書く) ===
         std::string stringPool;
         std::vector<TextureEntry> finalTextureEntries = textureEntries;
@@ -707,15 +1027,18 @@ namespace KurenaiPacker
         header.BoundsMax[1] = sourceModel.BoundsMax[1];
         header.BoundsMax[2] = sourceModel.BoundsMax[2];
         header.MeshCount = static_cast<uint32_t>(meshEntries.size());
+        header.MaterialCount = static_cast<uint32_t>(materialEntries.size());
         header.TextureCount = static_cast<uint32_t>(finalTextureEntries.size());
         header.LightCount = static_cast<uint32_t>(lightEntries.size());
         header.GeometryPathOffset = geometryPathOffset;
         header.GeometryPathLength = static_cast<uint32_t>(geometryPathString.size());
         header.StringPoolSize = static_cast<uint32_t>(stringPool.size());
+        header.Reserved = 0u;
 
         std::vector<uint8_t> fileBytes;
         fileBytes.resize(
-            sizeof(header) + finalTextureEntries.size() * sizeof(TextureEntry) + meshEntries.size() * sizeof(MeshEntry) +
+            sizeof(header) + finalTextureEntries.size() * sizeof(TextureEntry) +
+            materialEntries.size() * sizeof(MaterialEntry) + meshEntries.size() * sizeof(MeshEntry) +
             lightEntries.size() * sizeof(LightEntry) + stringPool.size());
         size_t writeOffset = 0;
         std::memcpy(fileBytes.data() + writeOffset, &header, sizeof(header));
@@ -725,6 +1048,9 @@ namespace KurenaiPacker
             std::memcpy(fileBytes.data() + writeOffset, finalTextureEntries.data(), finalTextureEntries.size() * sizeof(TextureEntry));
             writeOffset += finalTextureEntries.size() * sizeof(TextureEntry);
         }
+        // マテリアルはテクスチャ番号を参照するのでテクスチャの後ろ、メッシュの前(ModelPackage.h参照)
+        std::memcpy(fileBytes.data() + writeOffset, materialEntries.data(), materialEntries.size() * sizeof(MaterialEntry));
+        writeOffset += materialEntries.size() * sizeof(MaterialEntry);
         std::memcpy(fileBytes.data() + writeOffset, meshEntries.data(), meshEntries.size() * sizeof(MeshEntry));
         writeOffset += meshEntries.size() * sizeof(MeshEntry);
         if (!lightEntries.empty())
@@ -739,7 +1065,9 @@ namespace KurenaiPacker
         }
 
         WriteFileAtomic(kmodelPath, fileBytes.data(), fileBytes.size());
+        timings.ModelWriteSeconds += PhaseSecondsSince(modelWriteStart);
 
+        result.Timings = timings;
         return result;
     }
 }

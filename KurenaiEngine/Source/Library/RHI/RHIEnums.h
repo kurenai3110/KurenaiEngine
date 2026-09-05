@@ -7,6 +7,18 @@ namespace Kurenai::RHI
         Vertex,
         Pixel,
         Compute,
+        // メッシュシェーダーパイプライン(DX12かつメッシュシェーダー Tier 1 以上、SM 6.5)。
+        // 入力アセンブラを持たず、頂点/インデックスはシェーダー自身がバッファから読む。
+        //
+        // Amplification(増幅シェーダー)はメッシュシェーダーの前段で、メッシュレット単位の
+        // カリング(錐台・法線コーン)を行って生き残ったメッシュレットだけをDispatchMeshで
+        // 起動する。Meshはメッシュレット1つ分の頂点/三角形をラスタライザへ出力する。
+        //
+        // DX11にはこのパイプラインが存在しないため、DX11バックエンドはこの2つのステージで
+        // シェーダーを作成しようとするとログを出してnullptrを返す
+        // (呼び出し側はIRHIDevice::SupportsMeshShader()で事前に確認すること)
+        Amplification,
+        Mesh,
     };
 
     enum class BufferUsage
@@ -43,6 +55,32 @@ namespace Kurenai::RHI
         // ステージング領域が本体の数倍のUPLOADヒープを占有してしまう。
         // このUsageはUpdateBufferを受け付けない(呼ぶとログを出して無視される)
         StructuredImmutable,
+        // 間接ディスパッチ(IRHICommandList::DispatchIndirect)の引数バッファ。
+        // uint3(スレッドグループ数X/Y/Z)をコンピュートシェーダーが書き、そのまま
+        // DispatchIndirectへ渡す。「発行するグループ数がGPU上でしか分からない」場合に使う。
+        //
+        // 【構造化バッファにできない】D3D11はD3D11_RESOURCE_MISC_DRAWINDIRECT_ARGSと
+        // D3D11_RESOURCE_MISC_BUFFER_STRUCTUREDを同時に指定できないため、
+        // raw(ByteAddress)バッファとして作りHLSL側もRWByteAddressBufferで受ける。
+        // DX12にはこの制約は無いが、シェーダーを1本で済ませるため同じ形に揃えている。
+        //
+        // CPUからは書き込まない(UpdateBufferは受け付けない)。初期化は
+        // IRHICommandList::ClearUnorderedAccessBufferUintで行う
+        IndirectArgs,
+        // GPUが書いた値をCPUで読むための受け皿。CPUからは読むだけで、シェーダーからは
+        // 一切見えない(SRVもUAVも持たない)。
+        //
+        // 【なぜ専用のUsageが要るのか】このRHIには「GPUのバッファをCPUへ持ってくる」経路が
+        // 一つも無く、GPU上でしか分からない数(カリングで何個間引いたか等)を
+        // 報告する手段が無かった。他のUsageはどれもCPU→GPUの向きしか持たない。
+        //
+        // 【使い方】IRHICommandList::CopyBufferToReadbackでGPU側のバッファから内容を写し、
+        // **数フレーム後に** IRHIBuffer::ReadbackData で読む。コピーを積んだ直後に読むと
+        // GPUがまだ実行していないので、リング状に複数本用意して十分に古いものを読むこと
+        // (DX12Device::kFrameCountぶんCPUが先行する)。
+        // ReadbackDataはGPUの完了を待たない ―― 待つとフレームが直列化し、
+        // 「計測のために計測対象を壊す」ことになる
+        Readback,
     };
 
     enum class PrimitiveTopology
@@ -80,6 +118,29 @@ namespace Kurenai::RHI
         // 買っているのは精度ではなく1.0超のヘッドルームなので、「1.0を超えたい」場合にのみ使うこと
         // (広い面積の淡いHDR値を格納するとバンディングし得る。その場合はR16G16B16A16_Floatへ上げる)
         R11G11B10_Float,
+    };
+
+    // リードバックしたテクセルを、CPU側で数値として解釈するときの型。
+    //
+    // 【なぜFormat enumを流用しないのか】深度テクスチャはDSVとSRVの両方を張るために
+    // DXGI_FORMAT_R32_TYPELESSで作られており(DX12Device::CreateDepthTexture /
+    // DX11Device::CreateDepthTexture)、上のFormat enumには対応する値が無い。
+    // また上のFormatは「テクスチャを作るときの指定」で、こちらは「読み出した中身の解釈」と
+    // 役割が違う。混ぜると、作成には使えないFormat値が増えて呼び出し側が判断できなくなる。
+    //
+    // Float16をfloatへ展開せず生ビットのまま返すのは、CPU側にhalfデコーダを書かずに済ませ、
+    // かつ変換によるロスを一切入れないため(numpyなら'<f2'でそのまま読める)
+    enum class TextureElementType
+    {
+        // リードバックの対象外(BC圧縮テクスチャなど、対応表に無いフォーマット)
+        Unknown,
+        UNorm8,  // R8G8B8A8_UNorm
+        Float16, // R16G16_Float / R16G16B16A16_Float
+        Float32, // R32_Float / R32G32B32A32_Float / 深度(R32_TYPELESSをR32_Floatとして読む)
+        // R11G11B10_Float。1テクセル4バイトに3成分が詰まっており、上の3つのように
+        // 「1成分=固定バイト数の配列」として読めない。CPU側で3つのfloatへ展開してから使う
+        // (展開はRHIではなく呼び出し側の責務。RHIは生ビットをタイトに詰めて渡すだけ)
+        Packed11_11_10_Float,
     };
 
     // サンプラーのフィルタリング方式

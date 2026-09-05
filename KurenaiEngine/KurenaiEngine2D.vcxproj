@@ -84,13 +84,10 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
-    <!-- KurenaiEngine2D.dllが実行時に参照するShaders(Sprite2D.hlsl)をDLLと同じフォルダに揃える。
-         xcopy /D により変更のあったファイルのみコピーし、対象が無い場合の終了コード(1)は
-         ビルド失敗として扱わないようexit /bで無視する -->
+    <!-- HLSLを事前コンパイルして .kshader をOutDirへ生成する(3D側と同じ。理由はそちらのコメント参照) -->
     <PostBuildEvent>
-      <Command>xcopy /Y /I /E /D "$(ProjectDir)Shaders\2D" "$(OutDir)Shaders\"
-exit /b 0</Command>
-      <Message>2DシェーダーをOutDirへコピー</Message>
+      <Command>"$(ProjectDir)..\Tools\KurenaiShaderPacker\Build\Bin\$(Platform)\$(Configuration)\KurenaiShaderPacker.exe" --input "$(ProjectDir)Shaders\2D" --output "$(OutDir)Shaders" --config $(Configuration)</Command>
+      <Message>2DシェーダーをコンパイルしてOutDirへ(.kshader)</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -102,10 +99,26 @@ exit /b 0</Command>
   </ItemGroup>
   <ItemGroup>
     <None Include="Shaders\2D\Sprite2D.hlsl" />
+    <None Include="Shaders\2D\Polyline2D.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="KurenaiEngineLibrary.vcxproj">
       <Project>{7f2c9a41-5b3d-4e68-9a17-0c4e8d2b6f35}</Project>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- シェーダーの事前コンパイルツール。PostBuildEventで実行するため、このDLLより先に
+         建っている必要がある。実行ファイルをリンクするわけではないので
+         ReferenceOutputAssembly / LinkLibraryDependencies は false にする -->
+    <ProjectReference Include="..\Tools\KurenaiShaderPacker\KurenaiShaderPacker.vcxproj">
+      <Project>{24aec059-c8ce-4441-a6d5-826bef22cc2a}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+      <!-- 【構成を明示する】.sln に含まれていないプロジェクトを参照すると、
+           ソリューションの構成対応表が引けず Debug|Win32 でビルドしようとして
+           MSB8013 で落ちる。参照元と同じ構成・x64 を明示的に渡す -->
+      <SetConfiguration>Configuration=$(Configuration)</SetConfiguration>
+      <SetPlatform>Platform=x64</SetPlatform>
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

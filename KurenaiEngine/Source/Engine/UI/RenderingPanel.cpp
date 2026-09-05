@@ -25,6 +25,19 @@ namespace Kurenai::UI
         {
             DrawAOSection();
         }
+        if (ImGui::CollapsingHeader("ジオメトリ###Geometry"))
+        {
+            DrawGeometrySection();
+        }
+        if (ImGui::CollapsingHeader("メッシュレット###Meshlet"))
+        {
+            DrawMeshletSection();
+        }
+        if (ImGui::CollapsingHeader("ソフトウェアラスタライザ###SoftwareRaster"))
+        {
+            DrawSoftwareRasterSection();
+        }
+
         if (ImGui::CollapsingHeader("シャドウ###Shadow"))
         {
             DrawShadowSection();
@@ -49,6 +62,10 @@ namespace Kurenai::UI
         if (ImGui::CollapsingHeader("タイルドライトカリング###LightCulling"))
         {
             DrawLightCullingSection();
+        }
+        if (ImGui::CollapsingHeader("MegaLights###MegaLights"))
+        {
+            DrawMegaLightsSection();
         }
         if (ImGui::CollapsingHeader("水面###Water"))
         {
@@ -79,6 +96,15 @@ namespace Kurenai::UI
             "レイマーチするため、画面に写っていない遮蔽物(画面外や手前の面に隠れたもの)は影を落とさない。"
             "得られるのは完全な影ではなく接触影・中距離の遮蔽。どのライトが影を落とすかは"
             "ライティングパネルのライトごとの「影を落とす」で決める");
+
+        // MegaLightsが有効なあいだ、直接光パスのライトループごと止まる。スクリーンスペースシャドウは
+        // そのループの内側で影を掛けるので**丸ごと使われなくなる**。影はレイトレーシングへ
+        // 置き換わるため絵は破綻せず、黙って設定が効かなくなる形になるので明示する
+        if (m_Engine.ShouldRunMegaLights())
+        {
+            ImGui::TextDisabled(
+                "MegaLightsが有効なあいだ、ここの設定は使われません(影はレイトレーシングで求めます)");
+        }
 
         BeginParamGroup();
 
@@ -140,6 +166,699 @@ namespace Kurenai::UI
         ImGui::Text(
             "タイル: %u x %u (1タイルあたり最大%uライト)", m_Engine.m_LightTileCountX, m_Engine.m_LightTileCountY,
             KurenaiEngine3D::kLightTileCapacity);
+
+        // 有効にしていてもパスが積まれないことがあるので、その旨をここで断る。
+        // このチェックボックスだけを見て「効いていない」と読まれないようにする
+        // DebugViewはKurenaiEngine3Dのネストenumなので、この名前空間からは修飾が要る
+        if (m_Engine.ShouldRunMegaLights() &&
+            m_Engine.m_DebugView != KurenaiEngine3D::DebugView::LightTiles)
+        {
+            ImGui::TextWrapped(
+                "MegaLightsが有効なあいだ、直接光パスのライトループは止まっており"
+                "ライトグリッドを読む者が居ないため、このパスは実行していません"
+                "(デバッグ表示の「ライトタイル」を選んだときだけ実行します)");
+        }
+    }
+
+    void RenderingPanel::DrawMegaLightsSection()
+    {
+        ImGui::TextWrapped(
+            "ポイント/スポットライトの直接光を専用パスで求め、1灯ごとにTLASへ影レイを撃つ。"
+            "有効なあいだ直接光パスのライトループは止まり、この結果がそのまま使われる。"
+            "太陽は対象外で、従来どおりCSMかRTシャドウが担当する");
+
+        const bool rtAvailable = m_Engine.m_RaytracingAvailable;
+        if (!rtAvailable)
+        {
+            ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
+            return;
+        }
+
+        BeginParamGroup();
+
+        // 手法の選択。反射・影と同じ方針で、非対応環境では選択肢そのものを出さない
+        // (上で早期returnしているのでここへは対応環境しか来ない)
+        static const char* kModeNames[] = { "なし", "参照実装 (全灯総当たり)", "確率的サンプリング",
+                                            "クアッド共有 (1画素1レイ)" };
+
+        int modeIndex = static_cast<int>(m_Engine.m_MegaLightsMode);
+        if (ComboEx(
+                "手法###MegaLightsMode", &modeIndex, kModeNames, IM_ARRAYSIZE(kModeNames),
+                Defaults::MegaLightsEnabled ? 1 : 0,
+                "参照実装はカリングもサンプリングも通さず全灯を評価するため、"
+                "ライト数に比例して重い。確率的サンプリングを評価するときの"
+                "真値(ノイズの無い基準)を作るためにある。\n\n"
+                "確率的サンプリングは候補プールからM個引いて1灯へ絞り、影レイを1本だけ撃つ。"
+                "ノイズは乗るが偏りは無く、時間方向に平均すると参照実装へ寄っていく。"
+                "ただし時間・空間の再利用が追加のレイを撃つため、実測では参照実装と"
+                "ほぼ同じコストになっている。\n\n"
+                "クアッド共有は再利用をやめ、2x2の4画素が撃った4本の結果を共有して平均する。"
+                "レイは1画素1本のままで、影の縁が最大1画素ぼける偏りを受け入れる代わりに"
+                "コストを大きく下げる(UE5 MegaLights の DownsampleFactor=2 と同じ種類の近似)"))
+        {
+            m_Engine.m_MegaLightsMode = static_cast<KurenaiEngine3D::MegaLightsMode>(modeIndex);
+        }
+
+        // 候補プールとRIS、そしてデノイザは確率的サンプリングとクアッド共有で共通。
+        // 違うのは「1画素の推定量をどう良くするか」だけなので、操作もそこだけ分ける
+        const bool megaLightsStochasticUI =
+            m_Engine.m_MegaLightsMode == KurenaiEngine3D::MegaLightsMode::Stochastic;
+        const bool megaLightsQuadUI =
+            m_Engine.m_MegaLightsMode == KurenaiEngine3D::MegaLightsMode::QuadShared;
+        if (megaLightsStochasticUI || megaLightsQuadUI)
+        {
+            SliderIntEx(
+                "初期候補数 M###MegaLightsSampleCount", &m_Engine.m_MegaLightsSampleCount, 1, 32,
+                Defaults::MegaLightsSampleCount,
+                "1ピクセルあたりに候補プールから引く数。大きいほど寄与の大きい灯を引き当てやすく"
+                "なってノイズが減るが、候補ごとにBRDFを1回評価するぶん重くなる。\n\n"
+                "【影レイの本数はこれとは独立】選ばれた1灯にしか撃たないので常に1本で、"
+                "Mを増やしてもレイは増えない。ここがライト数からコストを切り離している部分");
+
+            // 【つまみを動かすと定数バッファへ渡すKが変わる】書き手(候補プール)と
+            // 読み手(Initial・空間再利用・デバッグ表示)がすべて同じメンバ変数から
+            // Kを受け取るよう、UIも必ずセッターを通す
+            int poolCapacity = m_Engine.m_MegaLightsTilePoolCapacity;
+            if (SliderIntEx(
+                    "候補プールの容量 K###MegaLightsTilePoolCapacity", &poolCapacity,
+                    KurenaiEngine3D::kMegaLightsTilePoolMinCapacity,
+                    static_cast<int>(KurenaiEngine3D::kMegaLightsTilePoolCapacity),
+                    Defaults::MegaLightsTilePoolCapacity,
+                    "候補プールが1タイル(16x16画素)あたりに抽出する灯の数。\n\n"
+                    "【1画素あたりの標本数では減らないノイズがここで決まる】プールはタイルに"
+                    "1つしかなく、タイル内の全画素が同じK個から引く。プールの引き方のばらつきは"
+                    "タイル内で共通のオフセットとして乗るので、標本を増やしても平均されず、"
+                    "16画素の格子に揃った塊として残る。\n\n"
+                    "実測(標本数4・デノイザ切・1フレームの誤差): K=32でタイル間7.81・"
+                    "タイル内10.27、K=128で4.03・8.30(8bit階調の中央値)。\n\n"
+                    "【レイの本数は増えない】コストは候補プールのパスだけで、"
+                    "2560x1440・107灯で 0.273→0.321 ms、全体で+1.3%"))
+            {
+                m_Engine.SetMegaLightsTilePoolCapacity(poolCapacity);
+            }
+
+            CheckboxEx(
+                "デノイザ###MegaLightsDenoise", &m_Engine.m_MegaLightsDenoiseEnabled,
+                Defaults::MegaLightsDenoiseEnabled,
+                "時間累積とエッジ停止付きa-trousで、出た色を空間・時間へならす。\n\n"
+                "【時空間再利用とは別物】あちらはリザーバ(どの灯を選ぶか)を混ぜて実効サンプル数を"
+                "増やす。こちらは残ったノイズを落とす。\n\n"
+                "【TAAの手前で落とすこと】TAAはノイズを信号の広がりと解釈して履歴を毎フレーム棄却"
+                "するので、ノイズを残したまま渡すとノイズもAAも両方失う");
+
+            if (m_Engine.m_MegaLightsDenoiseEnabled)
+            {
+                SliderIntEx(
+                    "a-trousの段数###MegaLightsDenoiseAtrous", &m_Engine.m_MegaLightsDenoiseAtrousPasses,
+                    0, 5, Defaults::MegaLightsDenoiseAtrousPasses,
+                    "段ごとにステップ幅が倍になるので、4段で半径16画素ぶんに届く。0で時間累積のみ");
+                // 【いま効いている値そのものを触らせる】時間累積の上限は手法ごとに
+                // 別の変数を持っている(手法3にはリザーバの履歴が無く、デノイザだけが
+                // 時間方向の記憶なので長い)。1つのつまみで両方を兼ねると、
+                // 表示している値と実際に効いている値が食い違う
+                SliderIntEx(
+                    megaLightsQuadUI ? "時間累積の上限###MegaLightsQuadDenoiseFrames"
+                                     : "時間累積の上限###MegaLightsDenoiseFrames",
+                    megaLightsQuadUI ? &m_Engine.m_MegaLightsQuadDenoiseMaxFrames
+                                     : &m_Engine.m_MegaLightsDenoiseMaxFrames,
+                    1, 128,
+                    megaLightsQuadUI ? Defaults::MegaLightsQuadDenoiseMaxFrames
+                                     : Defaults::MegaLightsDenoiseMaxFrames,
+                    "何フレームぶんまで混ぜるか。上げるほどちらつきは減るが、"
+                    "灯や影が動いたときの残光(ゴースト)が長く尾を引く。\n\n"
+                    "残光は指数移動平均そのもので、10%まで落ちるのに 2.30*N フレームかかる"
+                    "(60Hzなら 32で1.2秒 / 64で2.5秒 / 128で4.9秒。実測が理論値と3桁一致)。\n\n"
+                    "【クアッド共有では既定を長くしてある】あちらはリザーバを持ち回らないので、"
+                    "デノイザだけが時間方向の記憶になる");
+            }
+
+            if (megaLightsQuadUI)
+            {
+                // 【つまみを動かすとリザーババッファを確保し直す】UI経路も
+                // SetMegaLightsQuadSamples を通し、確保と定数バッファがずれないようにする
+                int quadSamples = m_Engine.m_MegaLightsQuadSamplesPerPixel;
+                if (SliderIntEx(
+                        "1画素あたりの標本数###MegaLightsQuadSamples", &quadSamples, 1,
+                        KurenaiEngine3D::kMegaLightsMaxSamplesPerPixel,
+                        Defaults::MegaLightsQuadSamplesPerPixel,
+                        "1画素あたりに候補プールから引く標本(リザーバ)の数。"
+                        "**影レイの本数がそのままこれになる**ので、コストはほぼ比例して増える。\n\n"
+                        "【1本では動いている間のノイズが目に見える】カメラが動くとデノイザの"
+                        "時間累積が効かず、生の推定量がそのまま出る。ノイズの内訳は"
+                        "「どの灯を選ぶか」と「選んだ灯の可視性」で、後者が大きい ―― "
+                        "参照実装を影レイ1本と32本で比べると|相対誤差|のp90が0.37あった。\n\n"
+                        "【UE5も1本ではない】r.MegaLights.NumSamplesPerPixel は 2/4/16 から選ぶ形で、"
+                        "最小でも2である"))
+                {
+                    m_Engine.SetMegaLightsQuadSamples(quadSamples);
+                }
+
+                CheckboxEx(
+                    "クアッド共有###MegaLightsQuadShare", &m_Engine.m_MegaLightsQuadShareEnabled,
+                    Defaults::MegaLightsQuadShareEnabled,
+                    "2x2クアッドの仲間が撃った影レイの結果を借りて、4標本を自分の面で"
+                    "評価し直して平均する。追加のレイは1本も撃たない。\n\n"
+                    "【受け入れている偏り】影の境界がクアッドを横切る画素で可視性が食い違い、"
+                    "硬い影の縁が最大1画素ぼける(2x2の箱フィルタ相当)。箱フィルタは積分を"
+                    "保存するので総和比には出ず、影の縁の帯の誤差にだけ出る。\n\n"
+                    "【切るのは陽性対照のため】切ると自分の標本だけを使う形になり、"
+                    "確率的サンプリングから時間・空間再利用を外した構成と画素単位で一致するはず");
+                CheckboxEx(
+                    "クアッド層化###MegaLightsQuadStratify", &m_Engine.m_MegaLightsQuadStratify,
+                    Defaults::MegaLightsQuadStratify,
+                    "クアッドの4画素へ候補プールのスロットを1/4ずつ割り当て、"
+                    "クアッド全体でスロットを重複なく列挙させる。\n\n"
+                    "【割り戻しは変わらない】プールのスロットは混合分布からのi.i.d.抽出なので、"
+                    "スロットの選び方を変えても引かれる灯の分布は同じ。4人が同じ灯を引く確率が"
+                    "下がるぶん、平均に入る標本の多様性が上がる");
+                CheckboxEx(
+                    "遮蔽キャッシュ###MegaLightsBlockedCache", &m_Engine.m_MegaLightsBlockedCacheEnabled,
+                    Defaults::MegaLightsBlockedCacheEnabled,
+                    "遮蔽が確定した灯を目標関数から外すキャッシュ(16フレームに1回再検査する)。"
+                    "影の縁で支配光を毎フレーム選んでは殺される、という空回りを防ぐ。\n\n"
+                    "【陽性対照では切る】履歴に依存すると、確率的サンプリングとの"
+                    "画素単位の一致が崩れる");
+            }
+
+            if (megaLightsStochasticUI)
+            {
+            CheckboxEx(
+                "時間再利用###MegaLightsTemporal", &m_Engine.m_MegaLightsTemporalEnabled,
+                Defaults::MegaLightsTemporalEnabled,
+                "前フレームの自分が選んだ灯を、速度ベクトルで再投影して借りる。"
+                "実効サンプル数がフレーム方向に積み上がるので、影レイを増やさずに収束が速くなる。\n\n"
+                "【効くのは1枚の絵の品質】実測(N=1)で|相対誤差|の中央値が6.0倍良くなり、"
+                "1枚あたりの偏りも-3.5%から-0.1%になる。長時間の蓄積平均は良くならない"
+                "(フレーム間に相関が入るため)ので、効果を見るときは蓄積枚数を1にすること");
+
+            if (m_Engine.m_MegaLightsTemporalEnabled)
+            {
+                SliderIntEx(
+                    "履歴のMの上限###MegaLightsTemporalMClamp", &m_Engine.m_MegaLightsTemporalMClamp,
+                    8, 640, Defaults::MegaLightsTemporalMClamp,
+                    "履歴が「これまでに何個の候補から絞ったか」の上限。\n\n"
+                    "【上げるほど収束は速いがゴーストが出る】灯を消しても明かりと影が残る。"
+                    "残光は1フレームあたり C/(C+M) の等比で減り、実測がこの式と一致する。"
+                    "残光が10%まで落ちるのは、M=8のとき 32で10.3フレーム(60Hzで0.17秒)、"
+                    "64で19.6フレーム(0.33秒)、160で46.8フレーム(0.78秒)、640で185フレーム(3.1秒)。\n\n"
+                    "【既定は64】大きいと当選灯が凍結して影の縁に点描状の空間ノイズが固定される。"
+                    "ちらつきはデノイザの時間累積が吸うので、ここを上げて抑える必要はない"
+                    "(かつて640にしていたのは、デノイザの時間累積が動いていない状態での測定に"
+                    "基づく判断だった)");
+            }
+
+            CheckboxEx(
+                "空間再利用###MegaLightsSpatial", &m_Engine.m_MegaLightsSpatialEnabled,
+                Defaults::MegaLightsSpatialEnabled,
+                "近傍の画素が選んだ灯を借りて、自分の面で評価し直して結合する。"
+                "借りるのは「どの灯か」だけなので、影レイは増えない。\n\n"
+                "【何を直すためのものか】候補プールの重みは設計上、法線を見られない"
+                "(タイル内で画素ごとに法線が違うため)。そのため法線が候補集合と噛み合わない面では"
+                "候補の半分が背向きになり、提案が外れて誤差が集中する。"
+                "実測では球で0.0395に対し床は0.0052。曲面に固有ではなく、"
+                "平らな床でも法線の向き次第で4.2倍悪化する");
+
+            if (m_Engine.m_MegaLightsSpatialEnabled)
+            {
+                SliderIntEx(
+                    "借りる近傍の数###MegaLightsSpatialNeighbors", &m_Engine.m_MegaLightsSpatialNeighborCount,
+                    0, 16, Defaults::MegaLightsSpatialNeighborCount,
+                    "増やすほどノイズは減るが、候補ごとにBRDFを1回評価するぶん重くなる。0で実質無効");
+                SliderIntEx(
+                    "近傍を探す半径###MegaLightsSpatialRadius", &m_Engine.m_MegaLightsSpatialRadius,
+                    1, 64, Defaults::MegaLightsSpatialRadius,
+                    "広げると遠くの良いサンプルを拾えるが、深度・法線・材質の一致条件で"
+                    "弾かれる割合も増える");
+                CheckboxEx(
+                    "初期可視レイ###MegaLightsInitialVisibility", &m_Engine.m_MegaLightsInitialVisibility,
+                    Defaults::MegaLightsInitialVisibility,
+                    "初期サンプルへ影レイを1本撃ち、遮蔽されていたらリザーバごと殺す"
+                    "(RTXDI系では標準の段)。\n\n"
+                    "【既定は有効。空間再利用と組で使う】殺しは「遮蔽で0になるサンプルを"
+                    "近傍へ配らない」ためのもので、空間再利用が無いと絵が1bitも変わらない。"
+                    "逆に空間再利用は殺しが無いと効かない。かつて既定を無効にしていた根拠は"
+                    "「初期可視レイ無しの空間再利用」の測定で、効く組み合わせを測っていなかった"
+                    "(根拠は ImplementationDetail 61.7f)");
+            }
+            }
+        }
+
+        if (m_Engine.m_MegaLightsMode != KurenaiEngine3D::MegaLightsMode::Off)
+        {
+            SliderIntEx(
+                "影レイ本数###MegaLightsShadowRayCount", &m_Engine.m_MegaLightsShadowRayCount, 0, 16,
+                Defaults::MegaLightsShadowRayCount,
+                "1灯あたりに撃つ影レイの本数。\n\n"
+                "【0にすると恒等テストになる】影を撃たず可視率1で評価するため、"
+                "スクリーンスペースシャドウを切った従来のライトループと数値的に一致するはず。"
+                "BRDF・距離減衰・スポット円錐・プリ露出をまとめて検証できる。\n\n"
+                "ポイント/スポットは光源方向が1つに決まるため、1より大きくしても答えは変わらない"
+                "(光源に半径が入る段階で意味を持つ)");
+            ImGui::TextDisabled("半透明・反射プローブ・DDGIのライトは従来のループのままです");
+            ImGui::TextDisabled("ポイント/スポットのスクリーンスペースシャドウは使われなくなります");
+        }
+
+        EndParamGroup();
+    }
+
+    void RenderingPanel::DrawGeometrySection()
+    {
+        BeginParamGroup();
+
+        CheckboxEx(
+            "深度プリパスを使う###DepthPrepass", &m_Engine.m_DepthPrepassEnabled, Defaults::DepthPrepassEnabled,
+            "G-Bufferを描く前に不透明ジオメトリの深度だけを先に埋め、隠れる画素の"
+            "ピクセルシェーダー(6テクスチャのサンプルと6枚のレンダーターゲットへの書き込み)を"
+            "早期Zで省く。ジオメトリを1周ぶん余計に描くのと引き換えなので、"
+            "オーバードローが小さいシーンでは損になる。\n\n"
+            "【絵は変わらない】深度が等しい最前面の断片だけを通すので、書かれる値は同じ。"
+            "実測(Sponza / 1280x720 / DX11)でビット一致を確認している。\n\n"
+            "実測(Sponza): GBuffer 14.11ms が GBuffer 6.62ms + DepthPrepass 1.42ms になった"
+            "(同フレームのTonemap比で0.671倍)。この内訳からこのシーンのオーバードローは2.05倍。\n\n"
+            "【メッシュレット描画とも併用できる】プリパスにもG-Bufferとまったく同じ"
+            "増幅/メッシュシェーダーを使うPSOがあるため、変換は同一のコードになり深度が一致する");
+
+        CheckboxEx(
+            "メッシュ単位のフラスタムカリング###MeshCulling", &m_Engine.m_MeshCullingEnabled,
+            Defaults::MeshCullingEnabled,
+            "モデル単位のカリングを通ったあとに、メッシュのワールドAABBでもう一段間引く。"
+            "1モデルに数千メッシュを持つアセット(Emerald Square、Bistro、PLATEAUのLOD2タイル)では"
+            "モデル単位が1つも間引けないため、ここが唯一の削減手段になる"
+            "(bindlessもメッシュシェーダーも使えないDX11では特に)。\n\n"
+            "【絵は変わらない】視錐台の外にあるメッシュだけを落とす保守的な判定なので、"
+            "ON/OFFで画像は一致する。\n\n"
+            "【切れるようにしてあるのは対照実験のため】差分ゼロが「変わらないのが正しい」なのか"
+            "「そもそも実行されていない」なのかは絵からは区別できない。OFFにすると判定を1回も"
+            "呼ばないので、プロファイラパネルのメッシュ単位が「判定なし」になる。\n\n"
+            "モデル単位のカリングは常に有効で、こちらでは切れない");
+
+        CheckboxEx(
+            "インスタンシング###Instancing", &m_Engine.m_InstancingEnabled,
+            Defaults::InstancingEnabled,
+            "同じ.kmodelを指すインスタンスをまとめ、1回のDrawIndexedで複数体を描く。"
+            "インスタンスごとに違うワールド行列は、頂点シェーダー専用のStructuredBufferを"
+            "SV_InstanceIDで引いて受け取る。\n\n"
+            "【効くシーンは限られる】PLATEAU・Sponza・Bistroは全モデルがユニークなので、"
+            "ONにしてもバッチが1つも作られず、発行されるコマンドは従来とまったく同じになる。"
+            "効くのはInstancing Test(同じモデルを256体)とMulti Model Test(3体)。\n\n"
+            "【メッシュシェーダー経路には効かない】DispatchMeshにインスタンス数の概念が無いため、"
+            "1モデル1ドローで描けるモデルはまとめない。DX12でメッシュレット描画が有効なあいだは"
+            "働く場面が水面などに限られる。\n\n"
+            "【絵は変わらない】まとめても各インスタンスの変換は同じなので、ON/OFFで画像は一致する。"
+            "切れるようにしてあるのは、その一致とドローコール数の減少を同じ起動の中で"
+            "確かめられるようにするため");
+
+        EndParamGroup();
+
+        // --- モデルLOD(.ksceneの[Model]LODPath / LODDistance) ---
+        ImGui::Separator();
+
+        // 段ごとの常駐インスタンス数を数える。【0段しか出ないならLODが1件も設定されていない】
+        uint32_t levelCounts[Assets::kMaxModelLODCount] = {};
+        uint32_t lodCapableCount = 0;
+        for (size_t i = 0; i < m_Engine.m_Scene.Instances.size(); ++i)
+        {
+            if (m_Engine.m_Scene.Instances[i].LODModels.empty())
+            {
+                continue;
+            }
+            ++lodCapableCount;
+            if (i < m_Engine.m_InstanceLODStates.size())
+            {
+                const uint32_t level = m_Engine.m_InstanceLODStates[i].CurrentLOD;
+                if (level < Assets::kMaxModelLODCount)
+                {
+                    ++levelCounts[level];
+                }
+            }
+        }
+
+        if (lodCapableCount == 0)
+        {
+            ImGui::TextDisabled("モデルLOD: このシーンには LODPath が指定されていない");
+        }
+        else
+        {
+            ImGui::Text("モデルLOD: 対象 %u インスタンス / フェード中 %u", lodCapableCount,
+                        m_Engine.m_LODFadingCount);
+            for (uint32_t level = 0; level < Assets::kMaxModelLODCount; ++level)
+            {
+                if (levelCounts[level] > 0)
+                {
+                    ImGui::Text("    LOD%u: %u", level, levelCounts[level]);
+                }
+            }
+        }
+
+        BeginParamGroup();
+        SliderFloatEx(
+            "LODフェード時間###LODFadeDuration", &m_Engine.m_LODFadeDuration, 0.0f, 5.0f, 0.25f, "%.2f 秒", 0,
+            "モデルLODの段を切り替えるとき、2段をクロスディザで重ねる時間。\n\n"
+            "0にすると重ねずに即座に入れ替わる(ポップする)。\n\n"
+            "【検証に使う】既定の0.25秒はフェードの見え方から決めた値ではない暫定値。"
+            "大きくするとフェードの途中で止めて観察できるので、"
+            "2段が同じ画素を取り合っていないか(Zファイティング)、"
+            "どちらも描かない画素が無いか(穴)をここで確かめる。");
+        SliderFloatEx(
+            "LODヒステリシス###LODHysteresis", &m_Engine.m_LODHysteresis, 0.0f, 0.5f, 0.05f, "%.3f", 0,
+            "切り替え距離の不感帯の幅(割合)。0.05なら切替点の±5%。\n\n"
+            "0にすると切替点のちょうど上でカメラが揺れたときに段が毎フレーム往復し、"
+            "画面がちらつく。A/B比較のたびに絵が変わって計測も濁る。");
+        EndParamGroup();
+    }
+
+    void RenderingPanel::DrawMeshletSection()
+    {
+        ImGui::TextWrapped(
+            "メッシュを頂点64個・三角形124個までの塊(メッシュレット)に分け、"
+            "増幅シェーダーが塊ごとに錐台カリングと法線コーンによる背面カリングを行ってから、"
+            "生き残った塊だけをメッシュシェーダーがラスタライザへ流す。"
+            "従来の描画はDrawIndexed 1回=メッシュ全体が単位で、画面外の三角形も"
+            "すべてラスタライザまで到達していた。"
+            "タイルドライトカリングと同じく純粋な最適化であり、"
+            "有効/無効で最終画像が変わってはならない");
+
+        if (!m_Engine.m_MeshShaderAvailable)
+        {
+            // 非対応環境(DX11、メッシュシェーダーTier 1未満、bindless非対応)。
+            // 影・反射の手法選択と同じく、選べないものは操作させずに理由だけ示す
+            ImGui::TextWrapped(
+                "この環境ではメッシュシェーダーを使えないため、常に従来の頂点シェーダーで描画する。"
+                "DX12かつメッシュシェーダー Tier 1・シェーダーモデル6.6に対応したGPUが必要");
+            return;
+        }
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "メッシュレット描画を有効にする###EnableMeshlet", &m_Engine.m_MeshletRenderingEnabled, true,
+            "無効にすると従来の頂点シェーダー + DrawIndexedで描く。"
+            "切り替えても見た目は一致するはずで、変わる場合はメッシュシェーダー側の変換が"
+            "頂点シェーダーとずれている。\n\n"
+            "【有効だとモデル全体が1ドローになる】マテリアルはメッシュシェーダーが出力した"
+            "番号でピクセルシェーダーがテーブルから引くため、メッシュごとにテクスチャを"
+            "差し替える必要が無くなる。発行回数はプロファイラパネルのドローコール数で確認できる。\n\n"
+            "【深度プリパスとも併用できる】プリパスにもG-Bufferと同じ増幅/メッシュシェーダーを"
+            "使うPSOがあるため、変換が同一のコードになり深度が一致する");
+
+        CheckboxEx(
+            "メッシュレットを色分けして表示###MeshletDebugView", &m_Engine.m_MeshletDebugViewEnabled, false,
+            "塊ごとに違う色でアルベドを塗る。分割のされ方を目で確かめるためのもので、"
+            "法線・深度・モーションベクターは通常どおり書くため他のパスは破綻しない。"
+            "灰色に見える面はメッシュレットを経由していない(メッシュレットが焼かれていない"
+            "モデル、または水面)。上の「メッシュレット描画」が有効なときだけ効く。"
+            "反射をレイトレーシングにしていると、反射に映る面も同じ色分けになる。"
+            "同じ塊が同じ色で映れば、描画とレイトレーシングが同一のジオメトリを"
+            "見ていることの確認になる");
+
+        CheckboxEx(
+            "Hi-Zオクルージョンカリング###OcclusionCulling", &m_Engine.m_OcclusionCullingEnabled,
+            Defaults::OcclusionCullingEnabled,
+            "メッシュレットのバウンディング球を前フレームのHi-Zへ投影し、"
+            "「視界内だが手前の何かに完全に隠れている」塊を落とす。"
+            "錐台カリングは視界の外しか落とせないため、街路のように"
+            "視界内のほぼ全部が手前の建物に隠れる場面ではこちらしか効かない。\n\n"
+            "【有効な間だけHi-Zを毎フレーム構築する】無効にするとHi-Zパスごと止まる"
+            "(Render TargetsのHi-Z表示中を除く)。\n\n"
+            "【純粋な最適化】有効/無効で最終画像が変わってはならない。"
+            "変わるなら判定が緩すぎる(下の半径倍率を上げる)。"
+            "間引き率はPerfログの「メッシュレットカリング」の行に出る");
+
+        SliderFloatEx(
+            "オクルージョンの半径倍率###OcclusionCullRadiusScale", &m_Engine.m_OcclusionCullRadiusScale,
+            1.0f, 4.0f, Defaults::OcclusionCullRadiusScale, "%.2f", 0,
+            "判定に使うバウンディング球をこの倍率で膨らませる。大きいほど間引きが減り、安全側になる。\n\n"
+            "【1フレームぶんのカメラ移動はこの倍率とは別に補正されている】"
+            "判定に使うHi-Zは1フレーム古いが、その時間差の視差ずれは"
+            "前フレームからのカメラ移動距離を半径へ足すことで吸収している。"
+            "この倍率が埋めるのは、バウンディング球がメッシュレットの実体より緩いことと、"
+            "カメラ回転による見え方の変化。\n\n"
+            "【小さくすると陽性対照になる】1.0未満は選べないが、"
+            "上げたときに間引き率が下がることを確認すれば、判定が実際に効いていることの証拠になる");
+
+        CheckboxEx(
+            "カリングの間引き数を数える###MeshletCullStats", &m_Engine.m_MeshletCullStatsEnabled,
+            Defaults::MeshletCullStatsEnabled,
+            "増幅シェーダーが判定数と間引き数を数え、数フレーム遅れでCPUへ読み戻して"
+            "下に表示し、Perfログにも1秒ごとに残す。\n\n"
+            "【切ると何も分からなくなる】保守的な判定が正しく働いていれば絵は1画素も"
+            "変わらないので、間引けているかどうかは数値でしか確かめられない。\n\n"
+            "【計測そのものの負荷を測るために切れるようにしてある】"
+            "増幅シェーダーのアトミックはグループ単位に集約してあるが、"
+            "その負荷は切り替えて実測すること");
+
+        CheckboxEx(
+            "Hi-Zを深度プリパスから作る###HiZFromDepthPrepass",
+            &m_Engine.m_HiZFromDepthPrepassEnabled, Defaults::HiZFromDepthPrepass,
+            "Hi-Zミップチェーンを深度プリパスの直後に、そのフレームの深度から作る。\n\n"
+            "【入れるとG-Bufferの判定から1フレーム遅れが消える】投影に前フレームの行列を"
+            "使う必要も、視差ぶんを保守的に膨らませる必要も無くなり、カメラが動いても"
+            "遮蔽の判定がずれない(ポップしない)。\n\n"
+            "【切ると従来どおりG-Bufferの後で作る】次フレームに前フレームのものとして読み、"
+            "球を膨らませて視差を吸収する。深度プリパス自体が無効なフレームでは、"
+            "この項目によらず常にそちらになる(深度が埋まっていないため)。\n\n"
+            "【コストはここを切り替えて総GPU時間で測ること】構築そのものの時間は変わらないが、"
+            "プリパスとG-Bufferの間に入るぶん重なりが減り、深度バッファの状態遷移が1往復増える");
+
+        CheckboxEx(
+            "モデル単位のGPUカリング###ModelCullGpu", &m_Engine.m_ModelCullGpuEnabled,
+            Defaults::ModelCullGpuEnabled,
+            "コンピュートシェーダーが、描画候補のワールドAABBを視錐台とHi-Zで判定し、"
+            "生き残りのExecuteIndirect引数と統計をGPU上に作る。\n\n"
+            "【切ると下の間接描画も止まる】判定が無ければ引数が作れないため、"
+            "描画は従来のCPUループへ戻る。\n\n"
+            "【このパスのコストはここを切り替えて測ること】"
+            "GPU内訳のパス別の値は、直後のリソース遷移による待ちを吸ってしまうことがある。"
+            "総GPU時間のON/OFF差のほうが信用できる");
+
+        CheckboxEx(
+            "カリング結果で間接描画する###ModelCullIndirect", &m_Engine.m_ModelCullIndirectEnabled,
+            Defaults::ModelCullIndirectEnabled,
+            "生き残った候補だけをExecuteIndirectで発行する。深度プリパスとG-Bufferの"
+            "1モデル1ドロー経路が、CPUのループではなくこの引数で描かれるようになる。\n\n"
+            "【切っても判定と計数は動く】切ると描画だけが従来のCPUループへ戻る。"
+            "「判定が正しいか」と「間接描画が速いか」を別々に確かめるためトグルを分けてある。\n\n"
+            "【DX11とメッシュシェーダー非対応環境では効かない】"
+            "その場合は入れてもCPUループのまま描かれる(Perfログの発行数が0のままになる)");
+
+        EndParamGroup();
+
+        // --- メッシュレットLOD(離散LOD。Stage 6) ---
+        ImGui::SeparatorText("メッシュレットLOD");
+
+        BeginParamGroup();
+        CheckboxEx(
+            "段を選ぶ###MeshletLOD", &m_Engine.m_MeshletLODEnabled, Defaults::MeshletLODEnabled,
+            "KurenaiPackerが焼いた離散LODの段から、増幅シェーダーがモデルのバウンディング球の"
+            "投影サイズで1段を選ぶ。切ると常に原寸(段0)になる。\n\n"
+            "【1つのモデル内で段は混ざらない】選択の入力はモデルの外接球とカメラだけで、"
+            "メッシュレットごとの値を使わない。混ざると、簡略化で頂点が動いた側と"
+            "動いていない側で辺が一致せず、境目に穴が開く。\n\n"
+            "【効くのは三角形が支配的なモデルだけ】地形タイル(1メッシュ134万三角形)には効くが、"
+            "ビル街のようにドローコールとテクスチャが支配的なシーンでは三角形が減っても速くならない。"
+            "段を持たないモデル(潰せる辺が無く1段しか焼かれなかったもの)では何も起きない");
+
+        SliderFloatEx(
+            "段のしきい値の倍率###MeshletLODQuality", &m_Engine.m_MeshletLODQuality, 0.25f, 8.0f,
+            Defaults::MeshletLODQuality, "%.2f", 0,
+            "段を落とす投影直径 = 倍率 x sqrt(4 x モデルのLOD0三角形数 / π) [画素]。"
+            "大きいほど原寸を長く保つ。\n\n"
+            "【モデルごとに変える理由】三角形数はモデルによって3桁違う"
+            "(小道具の数千とPLATEAUの地形タイルの134万)。単一の画素数を全モデルへ当てはめると、"
+            "小さいモデルでは早く粗くなりすぎ、地形では一度も段が落ちない。\n\n"
+            "【1.0の意味】原寸の三角形の平均面積がちょうど1画素を切るところで1段落とす。"
+            "そこから先は原寸を保っても画面に出せる情報が増えない");
+
+        SliderIntEx(
+            "段を固定###MeshletLODForced", &m_Engine.m_MeshletLODForcedLevel, -1, 3,
+            Defaults::MeshletLODForcedLevel,
+            "-1で自動選択。0〜3を指定すると全モデルをその段に固定する。\n\n"
+            "【対照実験に使う】自動のまま三角形数もフレーム時間も動かないとき、"
+            "「段の選択が一度も効いていない」のか「効いた上で変わらない」のかは、"
+            "ここで段を固定して初めて切り分けられる。0に固定した絵が「段を選ぶ」オフと"
+            "一致すれば、経路そのものは通っている。\n\n"
+            "【段が無いメッシュは動かない】焼かれている段より粗い番号を指定しても、"
+            "そのメッシュは自分の最も粗い段までしか下がらない(下がると画面から消えるため)");
+        CheckboxEx(
+            "色分けを段ごとにする###MeshletLODDebugColor", &m_Engine.m_MeshletLODDebugColorEnabled, false,
+            "上の「メッシュレットを色分けして表示」を、塊ごとの色ではなく段ごとの色にする"
+            "(詳細な順に緑→黄→橙→赤)。\n\n"
+            "【1つのモデルが単色になるのが正しい】段はモデル単位で決まる。"
+            "1つのモデルの中に2色が混ざっていたら、段の選択がメッシュレットごとに"
+            "揺れているということで、境目に穴が開く状態になっている。\n\n"
+            "【この表示でしか見えないもの】段が正しく選ばれているかは三角形数からも分かるが、"
+            "「どのモデルがどの段か」の分布は数値には出ない");
+        EndParamGroup();
+
+        // .kmodelが--no-meshletsで焼かれていると、対応環境でも0のままになる。
+        // 「有効にしたのに何も変わらない」ときの切り分けに要るので数を出しておく
+        size_t meshletCount = 0;
+        // 全段の合計。段0だけの数と比べると、段が焼かれているかが一目で分かる
+        size_t meshletTotalCount = 0;
+        size_t meshletMeshCount = 0;
+        // 2段以上を持つメッシュの数
+        size_t meshletLODMeshCount = 0;
+        size_t meshCount = 0;
+        for (const auto& instance : m_Engine.m_Scene.Instances)
+        {
+            // ストリーミング中は未読み込みのインスタンスがある
+            if (!instance.Model) { continue; }
+            for (const auto& mesh : instance.Model->Meshes)
+            {
+                ++meshCount;
+                meshletCount += mesh.MeshletCount;
+                meshletTotalCount += mesh.MeshletTotalCount;
+                if (mesh.MeshletCount > 0)
+                {
+                    ++meshletMeshCount;
+                }
+                if (mesh.MeshletLODCount > 1)
+                {
+                    ++meshletLODMeshCount;
+                }
+            }
+        }
+        ImGui::Text(
+            "メッシュレット: %zu (メッシュ %zu / %zu が保持)", meshletCount, meshletMeshCount, meshCount);
+
+        // 段ごとの内訳。**段が1段しか焼かれていないシーンでは何をしても数値が動かない**ので、
+        // 「効かない」の理由がアセット側にあることをここで見せる
+        if (meshletTotalCount > meshletCount)
+        {
+            ImGui::Text(
+                "  うち段0: %zu / 全段: %zu (段を持つメッシュ %zu)", meshletCount, meshletTotalCount,
+                meshletLODMeshCount);
+        }
+        else if (meshletMeshCount > 0)
+        {
+            ImGui::TextWrapped(
+                "  このシーンのモデルには段が1つしか焼かれていない。"
+                "メッシュレットLODを切り替えても三角形数は動かない");
+        }
+
+        // bindless区画の使用状況。メッシュシェーダー経路はジオメトリもマテリアルも
+        // ResourceDescriptorHeap経由で引くため、ここが満杯だと**エラーログ1行だけを残して
+        // 白1x1で描かれる**(RegisterBindlessは例外を投げない)。
+        // 「なぜかこのモデルだけ真っ白」で気づく前に見えるようにしておく
+        if (m_Engine.m_BindlessCapacity > 0)
+        {
+            ImGui::Text(
+                "bindless: %u / %u (%.1f%%)", m_Engine.m_BindlessUsedCount, m_Engine.m_BindlessCapacity,
+                100.0f * static_cast<float>(m_Engine.m_BindlessUsedCount)
+                    / static_cast<float>(m_Engine.m_BindlessCapacity));
+        }
+
+        if (meshCount > 0 && meshletMeshCount == 0)
+        {
+            ImGui::TextWrapped(
+                "このシーンのモデルはメッシュレットを持っていない。KurenaiPackerで"
+                "--no-meshletsを付けずに再パックすること");
+        }
+
+        // カリングの効き。**「間引き0」だけでは判定が働いていないのか本当に全部見えているのかを
+        // 区別できない**ため、判定した数と併せて出す。オクルージョンは視錐台+コーンとは
+        // 別に出す(俯瞰と街路で差が出ることが、判定が効いていることの証拠になる)
+        if (m_Engine.m_MeshletCullStatsEnabled)
+        {
+            const uint32_t tested = m_Engine.m_MeshletCullTested;
+            if (tested > 0)
+            {
+                const float frustumPercent = 100.0f * static_cast<float>(m_Engine.m_MeshletCullFrustumCulled) /
+                                             static_cast<float>(tested);
+                const float occlusionPercent = 100.0f * static_cast<float>(m_Engine.m_MeshletCullOcclusionCulled) /
+                                               static_cast<float>(tested);
+                ImGui::Text("判定 %u", tested);
+                ImGui::Text("  視錐台+コーン %u (%.1f%%)", m_Engine.m_MeshletCullFrustumCulled, frustumPercent);
+                ImGui::Text("  オクルージョン %u (%.1f%%)", m_Engine.m_MeshletCullOcclusionCulled, occlusionPercent);
+            }
+            else
+            {
+                // 数フレーム遅れで読み戻すため、起動直後や切り替え直後はここを通る
+                ImGui::TextWrapped("カリング統計: まだ読み戻せていない(数フレームかかる)");
+            }
+        }
+    }
+
+    void RenderingPanel::DrawSoftwareRasterSection()
+    {
+        ImGui::TextWrapped(
+            "三角形をコンピュートシェーダーで自前にラスタライズする比較用の経路(46章)。"
+            "ハードウェアがブラックボックスで行っている処理 ―― 頂点変換・背面カリング・"
+            "スクリーン空間への投影・エッジ関数による被覆判定・深度テスト・透視補正補間 ―― を"
+            "明示的なコードとして持ち、G-Bufferと直接突き合わせられるようにするためのもの。"
+            "既存の描画経路には一切寄与せず、結果はデバッグ表示でのみ見る");
+
+        if (!m_Engine.m_SoftwareRasterAvailable)
+        {
+            // 非対応環境(DX11、SM 6.6未満、Int64ShaderOps非対応、bindless非対応)、
+            // あるいはシェーダー/リソースの作成に失敗した場合。
+            // メッシュレット・影・反射の手法選択と同じく、選べないものは操作させずに理由だけ示す
+            ImGui::TextWrapped(
+                "この環境では利用できない。DX12かつシェーダーモデル6.6・64bit整数の"
+                "シェーダー演算(Int64ShaderOps)・bindless(ResourceDescriptorHeap)の"
+                "すべてに対応したGPUが必要。詳しい理由は起動ログを参照");
+            return;
+        }
+
+        BeginParamGroup();
+
+        CheckboxEx(
+            "ソフトウェアラスタライザを実行する###EnableSoftwareRaster",
+            &m_Engine.m_SoftwareRasterEnabled, false,
+            "有効にすると、G-Bufferパスの直後に専用のパス(SWRaster)が走る。"
+            "出力はデバッグ表示の「SWラスタ」「SWラスタ - 深度 (生値)」「SWラスタ - 法線」で見る。"
+            "無効の間はパスごと登録されないため、コストもVRAM以外は掛からない。\n\n"
+            "【比べ方】深度は「深度 (生値)」と、法線は「法線」と同じ表示モードで出しているので、"
+            "スクリーンショットを撮って差分を取ればよい。TAAを切っておくこと ―― "
+            "有効だとフレームごとに射影行列のジッターが変わり、比較にならない");
+
+        SliderIntEx(
+            "巨大三角形のしきい値 (画素)###SWRasterLargeArea",
+            &m_Engine.m_SoftwareRasterLargeTriangleArea,
+            static_cast<int>(KurenaiEngine3D::kSWRasterMinLargeTriangleArea),
+            static_cast<int>(KurenaiEngine3D::kSWRasterMaxLargeTriangleArea),
+            static_cast<int>(KurenaiEngine3D::kSWRasterDefaultLargeTriangleArea),
+            "スクリーンバウンディングボックスの画素面積がこれを超えた三角形は、1スレッドで塗らず"
+            "巨大三角形パス(1スレッドグループ=1三角形)へ回す。既定の4096は64x64相当。\n\n"
+            "【対照実験に使う】極端に小さくすればほぼ全三角形が巨大三角形パスへ回り、"
+            "極端に大きくすればすべて小三角形パス単独になる。両極端で同じ絵が出れば、"
+            "2つの経路が一致していると言える(「片方が実行されていない」を先に潰す手順)。\n\n"
+            "小三角形パスは1スレッド1三角形なので、この値がそのまま"
+            "「1スレッドが回す最大ループ回数」になる。上げすぎると画面を覆う三角形1個で"
+            "描画が長時間止まる");
+
+        EndParamGroup();
+
+        // 「有効にしたのに何も出ない」ときの切り分け用。半透明とbindless未登録のメッシュは
+        // 対象外なので、シーンのメッシュ数そのものとは一致しない
+        size_t targetMeshCount = 0;
+        size_t triangleCount = 0;
+        for (const auto& instance : m_Engine.m_Scene.Instances)
+        {
+            // ストリーミング中は未読み込みのインスタンスがある
+            if (!instance.Model) { continue; }
+            for (const auto& mesh : instance.Model->Meshes)
+            {
+                if (mesh.IsTransparent || mesh.IndexCount < 3)
+                {
+                    continue;
+                }
+                ++targetMeshCount;
+                triangleCount += mesh.IndexCount / 3;
+            }
+        }
+        ImGui::Text("対象メッシュ: %zu / 三角形: %zu", targetMeshCount, triangleCount);
+        if (targetMeshCount > KurenaiEngine3D::kSWRasterMaxMeshes)
+        {
+            ImGui::TextWrapped(
+                "メッシュ数が上限を超えている。超過分は描画されない"
+                "(上限はKurenaiEngine3D::kSWRasterMaxMeshes)");
+        }
+
+        ImGui::TextWrapped(
+            "【フェーズ1の制約】アルファカットアウト未対応(植栽・日除けは板になる)、"
+            "近平面クリッピング未実装(壁に近づくと三角形が消える)、法線マップは適用しない。"
+            "巨大三角形リストが溢れると画面左上がマゼンタになる");
     }
 
     void RenderingPanel::DrawAOSection()
@@ -206,17 +925,23 @@ namespace Kurenai::UI
         if (m_Engine.m_AOTechnique == AOTechnique::SSAO)
         {
             SliderFloatSceneDependent(
-                "SSAO 半径###SSAORadius", &m_Engine.m_SSAORadius, 0.01f, 5.0f, recalcRequested, "%.3f",
+                "SSAO 半径###SSAORadius", &m_Engine.m_SSAORadius, 0.01f, 5.0f, recalcRequested, "%.3f", 0,
                 "遮蔽を探すサンプリング半径(ワールド単位)。シーン読み込み時にシーンの対角長から"
                 "自動設定されるため、既定値ではなく「シーンから再計算」で戻す");
             SliderFloatEx(
                 "SSAO 強度###SSAOPower", &m_Engine.m_SSAOPower, 0.1f, 4.0f, Defaults::SSAOPower, "%.3f", 0,
                 "遮蔽率にかける指数。大きいほど陰影が濃くなる");
+            SliderUIntEx(
+                "SSAO サンプル数###SSAOKernelSize", &m_Engine.m_SSAOKernelSize, 1, 16, Defaults::SSAOKernelSize,
+                "1画素あたり半球状に何点サンプリングするか。AOパスのコストはほぼこの数に比例する"
+                "(実測: 16→4でAOパスが5.82ms→2.22ms)。減らすほど遮蔽の推定は粗くなるが、"
+                "画素ごとにカーネルをランダム回転させたうえで後段の4x4ブラーで均すため、"
+                "最終画にどれだけ差が出るかはSSAO半径と間接光の強さ次第");
         }
         else if (m_Engine.m_AOTechnique == AOTechnique::Raytraced)
         {
             SliderFloatSceneDependent(
-                "RT 最大距離###RTAOMaxDistance", &m_Engine.m_RTAOMaxDistance, 0.05f, 10.0f, recalcRequested, "%.3f",
+                "RT 最大距離###RTAOMaxDistance", &m_Engine.m_RTAOMaxDistance, 0.05f, 10.0f, recalcRequested, "%.3f", 0,
                 "遮蔽とバウンス光を探すレイの最大距離(ワールド単位)。シーン読み込み時に"
                 "シーンの対角長から自動設定される。これより遠くにある面は遮蔽物にならず、"
                 "間接光の光源にもならない");
@@ -239,11 +964,11 @@ namespace Kurenai::UI
         else
         {
             SliderFloatSceneDependent(
-                "SSIL 半径###SSILRadius", &m_Engine.m_SSILRadius, 0.01f, 5.0f, recalcRequested, "%.3f",
+                "SSIL 半径###SSILRadius", &m_Engine.m_SSILRadius, 0.01f, 5.0f, recalcRequested, "%.3f", 0,
                 "間接光と遮蔽を探すサンプリング半径(ワールド単位)。シーン読み込み時に"
                 "シーンの対角長から自動設定される");
             SliderFloatSceneDependent(
-                "SSIL 厚み###SSILThickness", &m_Engine.m_SSILThickness, 0.01f, 2.0f, recalcRequested, "%.3f",
+                "SSIL 厚み###SSILThickness", &m_Engine.m_SSILThickness, 0.01f, 2.0f, recalcRequested, "%.3f", 0,
                 "深度バッファ上の1点が持つと仮定する奥行きの厚み。小さすぎると遮蔽が抜け、"
                 "大きすぎると本来遮蔽していない面まで遮蔽扱いになる");
             SliderFloatEx(
@@ -479,6 +1204,92 @@ namespace Kurenai::UI
             "無効にすると拡散の環境光が従来どおりグローバルIBL/反射プローブのイラディアンスに戻る");
 
         ImGui::BeginDisabled(!m_Engine.m_DDGIEnabled);
+
+        // レイの取得。Raytracedはレイトレーシング非対応の環境(DX11、あるいはDXR Tier 1.1に
+        // 達していないDX12)では選べないため、選択肢そのものを出さない
+        // (「出ているのに選ぶと何も起きない」より「出ていない」ほうが誤解が少ない。
+        //  DrawSSRSectionと同じ作法。並びはDDGIRayModeと一致させ、RTを末尾に置くこと)
+        static const char* kDDGIRayModeNamesWithRT[] = { "ラスタライズ", "レイトレーシング (DXR)" };
+        static const char* kDDGIRayModeNamesWithoutRT[] = { "ラスタライズ" };
+
+        // m_RaytracingAvailableではなくこちらを見る。DDGIのレイ取得CSだけはSM 6.6を要求するため、
+        // 他のRTパスが使えてもここだけ作れない環境がある(m_DDGIRaytracedTraceAvailableの宣言参照)
+        const bool ddgiRtAvailable = m_Engine.m_DDGIRaytracedTraceAvailable;
+        const char* const* ddgiRayModeNames = ddgiRtAvailable ? kDDGIRayModeNamesWithRT : kDDGIRayModeNamesWithoutRT;
+        const int ddgiRayModeCount =
+            ddgiRtAvailable ? IM_ARRAYSIZE(kDDGIRayModeNamesWithRT) : IM_ARRAYSIZE(kDDGIRayModeNamesWithoutRT);
+
+        int ddgiRayModeIndex = static_cast<int>(m_Engine.m_DDGIRayMode);
+        if (ComboEx(
+                "レイの取得###DDGIRayMode", &ddgiRayModeIndex, ddgiRayModeNames, ddgiRayModeCount,
+                static_cast<int>(KurenaiEngine3D::DDGIRayModeForCapability(ddgiRtAvailable)),
+                "プローブへ入れる放射輝度と距離をどう集めるか。\n\n"
+                "【ラスタライズ】プローブ1個につきシーンを6回描く。1フレームの描画回数が"
+                "メッシュ数に比例して増えるため、大きなシーンでは更新プローブ数が自動的に抑えられる。\n\n"
+                "【レイトレーシング】1スレッド1レイでキューブを直接埋める。メッシュ数はBVHが吸収する。"
+                "太陽の影をカスケードシャドウマップではなく影レイで求めるため、"
+                "カメラから遠いプローブにも影が落ちる。\n"
+                "代わりに法線マップ・ベイク済みAO・bent normalはヒット面で引けないため、"
+                "その分だけラスタライズとは絵が違う"))
+        {
+            m_Engine.m_DDGIRayMode = static_cast<KurenaiEngine3D::DDGIRayMode>(ddgiRayModeIndex);
+            // 収束して停止しているときに切り替えても焼き直されるようにする
+            // (再ベイク署名にはこのモードも混ぜてあるので通常は自動で倒れるが、
+            //  つまみを触った直後に必ず動くほうが確かめやすい)
+            m_Engine.m_DDGIUpdateSuspended = false;
+            m_Engine.m_DDGIStableCycles = 0;
+        }
+
+        if (ddgiRtAvailable)
+        {
+            // 対照実験用のつまみ。切ると「影が落ちない」ラスタ経路と同じ状態になるので、
+            // 振って絵が動くことがレイトレース経路が実際に走っている証拠になる
+            ImGui::BeginDisabled(m_Engine.m_DDGIRayMode != KurenaiEngine3D::DDGIRayMode::Raytraced);
+            if (CheckboxEx(
+                    "太陽の影レイを撃つ###DDGISunShadowRay", &m_Engine.m_DDGISunShadowRayEnabled, true,
+                    "レイトレース経路でのみ有効。切ると太陽の遮蔽を一切見なくなり、"
+                    "ラスタ経路の既知の制約(カメラから遠いプローブに影が落ちない)と同じ状態になる。\n\n"
+                    "常用は有効側。切り替えて絵と数値が動くことを確かめる対照実験のために置いてある"))
+            {
+                m_Engine.m_DDGIUpdateSuspended = false;
+                m_Engine.m_DDGIStableCycles = 0;
+            }
+
+            // プローブ分類。裏面に当たったことを記録できるのはレイトレース経路だけなので、
+            // ラスタ経路では掛からない(αが常に0になるため)
+            if (CheckboxEx(
+                    "プローブ分類を有効にする###DDGIProbeClassification",
+                    &m_Engine.m_DDGIProbeClassificationEnabled, true,
+                    "壁や地面の内部に埋まってしまったプローブを、サンプリングから外す。\n\n"
+                    "埋まったプローブは周囲のほとんどの方向で面の裏側しか見えず、"
+                    "「そこには光が無い」という嘘の情報を周りの面へ配ってしまう。\n\n"
+                    "レイトレース経路でのみ有効(裏面に当たったことを記録できるのがこちらだけのため)"))
+            {
+                m_Engine.m_DDGIUpdateSuspended = false;
+                m_Engine.m_DDGIStableCycles = 0;
+            }
+
+            ImGui::BeginDisabled(!m_Engine.m_DDGIProbeClassificationEnabled);
+            SliderFloatEx(
+                "裏面率のしきい値###DDGIBackfaceThreshold", &m_Engine.m_DDGIBackfaceThreshold, 0.0f, 1.0f, 0.5f,
+                "%.3f", 0,
+                "プローブから撃ったレイのうち、この割合を超えて「面の裏側」に当たったプローブを"
+                "信用しない。既定の0.5は「全レイの半分より多くが裏面 = そのプローブは外より内側にいる」"
+                "という判定にあたる。\n\n"
+                "分布はデバッグ表示の「DDGI - プローブ裏面率」で確認できる。開けた場所のプローブは"
+                "ほぼ0に寄り、埋まったプローブほど1に近づく。ただし二山に分かれるとは限らず"
+                "(Sponzaは分かれるがBistroInteriorLitは連続的に減るだけ)、値は"
+                "A/Bで効果の向きを見て決めること。\n\n"
+                "焼き直しは不要(アトラスには率そのものが入っており、しきい値は読み出し時に掛かる)");
+            ImGui::EndDisabled();
+
+            ImGui::EndDisabled();
+        }
+        else
+        {
+            ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
+        }
+
         SliderFloatEx(
             "DDGI 強度###DDGIIntensity", &m_Engine.m_DDGIIntensity, 0.0f, 2.0f, Defaults::DDGIIntensity, "%.3f", 0,
             "拡散間接光の倍率。SSILと寄与が重なるぶんを実測で調整するためのつまみ");
@@ -486,6 +1297,55 @@ namespace Kurenai::UI
             "1フレームの更新プローブ数###DDGIProbesPerFrame", &m_Engine.m_DDGIProbesPerFrame, 1, 64,
             Defaults::DDGIProbesPerFrame,
             "多いほど光の変化への追従が速くなるが、1プローブにつきシーンを6回描くため負荷も比例して上がる");
+
+        // 表示名と値の並びは必ず一致させること(目標フレームレートのComboと同じ作法)
+        static const char* kDDGIUpdateModeNames[] = { "常時更新", "多重バウンスまで焼いて停止", "一巡だけ焼いて停止" };
+        static const KurenaiEngine3D::DDGIUpdateMode kDDGIUpdateModeValues[] = {
+            KurenaiEngine3D::DDGIUpdateMode::Always,
+            KurenaiEngine3D::DDGIUpdateMode::ConvergeThenStop,
+            KurenaiEngine3D::DDGIUpdateMode::OverwriteThenStop,
+        };
+        static_assert(
+            IM_ARRAYSIZE(kDDGIUpdateModeNames) == IM_ARRAYSIZE(kDDGIUpdateModeValues),
+            "表示名と値の並びを一致させること");
+
+        int ddgiUpdateModeIndex = static_cast<int>(m_Engine.m_DDGIUpdateMode);
+        if (ComboEx(
+                "更新モード###DDGIUpdateMode", &ddgiUpdateModeIndex, kDDGIUpdateModeNames,
+                IM_ARRAYSIZE(kDDGIUpdateModeNames), static_cast<int>(KurenaiEngine3D::DDGIUpdateMode::Always),
+                "いつ焼くのをやめるか。どのモードでも時間分割であることは変わらない\n\n"
+                "常時更新: 常に焼き続ける(既定)。ヒステリシスで滑らかに追従する\n"
+                "多重バウンスまで焼いて停止: 太陽・時刻・影・ライト・IBL・自発光が変わらなくなったら、"
+                "ヒステリシスを使わない上書きで4巡してから止める。プローブのキャプチャは前巡の"
+                "アトラスを読むので、巡回するほど間接光のバウンスが積み上がる想定\n"
+                "一巡だけ焼いて停止: 同じく上書きだが1巡で止める。最も速く止まる\n"
+                "【4巡と1巡の差はまだ確認できていない】Sponzaの同一カメラで撮り比べると"
+                "ビット一致だった。バウンスの寄与を分離できる計測方法をまだ持っていないため、"
+                "4は保守的に置いた値である\n\n"
+                "止めている間はプローブ更新のコストがゼロになる"
+                "(実測でGPU 40〜47ms・CPU 30msを占めていた)。"
+                "焼き上がりに影響する状態が変わると自動で再開する"))
+        {
+            m_Engine.m_DDGIUpdateMode = kDDGIUpdateModeValues[ddgiUpdateModeIndex];
+            // 「常時更新へ戻したのに止まったまま」を防ぐ(署名が変わるまで再開しないため)
+            m_Engine.m_DDGIUpdateSuspended = false;
+            m_Engine.m_DDGIStableCycles = 0;
+        }
+
+        CheckboxEx(
+            "1/2解像度で評価する###DDGIHalfResolution", &m_Engine.m_DDGIHalfResolution, Defaults::DDGIHalfResolution,
+            "拡散間接光を内部レンダー解像度の1/2で求め、深度を見てアップサンプルする。"
+            "実測(ProbeTest / 1280x720 / DX11)ではLightingパス23.9msのうちDDGIのサンプリングが"
+            "10.2msを占めていた。\n\n"
+            "【雲の低解像度化と違い厳密ではない】雲は視線方向だけの関数なので低解像度化しても"
+            "数学的に等価だったが、DDGIは面の位置と法線の関数なので、ジオメトリの輪郭をまたぐと"
+            "手前の面の間接光が奥へ滲む。深度を見たアップサンプルで抑えてはいるが近似であり、"
+            "そのため既定は無効");
+
+        if (m_Engine.m_DDGIUpdateSuspended)
+        {
+            ImGui::TextUnformatted("更新状態: 収束したため停止中");
+        }
         ImGui::EndDisabled();
 
         ImGui::Text(
@@ -535,10 +1395,10 @@ namespace Kurenai::UI
         if (m_Engine.m_ReflectionMode == ReflectionMode::ScreenSpace)
         {
             SliderFloatSceneDependent(
-                "SSR 最大距離###SSRMaxDistance", &m_Engine.m_SSRMaxDistance, 0.1f, 100.0f, recalcRequested, "%.3f",
+                "SSR 最大距離###SSRMaxDistance", &m_Engine.m_SSRMaxDistance, 0.1f, 100.0f, recalcRequested, "%.3f", 0,
                 "反射レイを追跡する最大距離(ワールド単位)。シーン読み込み時に対角長から自動設定される");
             SliderFloatSceneDependent(
-                "SSR 厚み###SSRThickness", &m_Engine.m_SSRThickness, 0.01f, 2.0f, recalcRequested, "%.3f",
+                "SSR 厚み###SSRThickness", &m_Engine.m_SSRThickness, 0.01f, 2.0f, recalcRequested, "%.3f", 0,
                 "深度バッファ上の1点が持つと仮定する奥行きの厚み。ヒット判定の許容量になる");
             SliderFloatEx(
                 "SSR 粗さのしきい値###SSRRoughnessCutoff", &m_Engine.m_SSRRoughnessCutoff, 0.05f, 1.0f,
@@ -549,7 +1409,7 @@ namespace Kurenai::UI
         {
             SliderFloatSceneDependent(
                 "RT 最大距離###RTReflectionMaxDistance", &m_Engine.m_RTReflectionMaxDistance, 1.0f, 500.0f,
-                recalcRequested, "%.3f",
+                recalcRequested, "%.3f", 0,
                 "反射レイを追跡する最大距離(ワールド単位)。シーン読み込み時に対角長から自動設定される。"
                 "短くすると速くなるが、本来映るはずの遠景が空に置き換わる");
             SliderFloatEx(
@@ -769,6 +1629,13 @@ namespace Kurenai::UI
                 "%.0f m", 0,
                 "雲底から雲頂までの厚み。目安は扁平雲(humilis)が約400m、並雲(mediocris)が約1000m、"
                 "雄大積雲(congestus)が約2500m。厚いほど縦に伸びた入道雲になる");
+            SliderUIntEx(
+                "レイマーチ段数###CloudRaymarchSteps", &m_Engine.m_CloudRaymarchSteps, 1,
+                KurenaiEngine3D::kCloudRaymarchStepsMax, Defaults::CloudRaymarchSteps,
+                "雲底から雲頂までを何段に分けて積分するか。雲パスのコストの主なつまみで、"
+                "1段ごとにウェザーマップのfBm(4オクターブ)と3Dノイズ2枚を引くため、"
+                "コストはほぼこの数に比例する。減らすと雲の内部の階調が段状に粗くなる"
+                "(輪郭ではなく芯の明暗に出る)");
         }
 
         ImGui::SeparatorText("巻雲(高層)");

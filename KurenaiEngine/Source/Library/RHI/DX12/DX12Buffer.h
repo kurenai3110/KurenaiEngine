@@ -28,6 +28,9 @@ namespace Kurenai::RHI
     class DX12Buffer : public IRHIBuffer
     {
     public:
+        // srvUavHeap/srvIndexはBufferDesc::ShaderReadableを指定した頂点バッファでのみ渡す
+        // (頂点バッファビューに加えてStructuredBuffer<T>としてのSRVも張る場合)。
+        // それ以外のUsageでは既定値のまま = SRVを持たない
         DX12Buffer(
             DX12Device* device,
             Microsoft::WRL::ComPtr<ID3D12Resource> resource,
@@ -35,14 +38,18 @@ namespace Kurenai::RHI
             uint32_t sizeInBytes,
             uint32_t strideInBytes,
             BufferUsage usage,
-            uint32_t ringCapacity = 1);
+            uint32_t ringCapacity = 1,
+            DX12DescriptorHeap* srvUavHeap = nullptr,
+            uint32_t srvIndex = 0xFFFFFFFFu);
 
         // 以降のコンストラクタが受け取るsrvUavHeapは、srvIndex/uavIndexを確保した非シェーダー可視ヒープ。
         // このヒープはアセット用と描画用の2本に分かれており(DX12Device::GetAssetSrvCpuHeap参照)、
         // どちらから確保したかを覚えておかないとデストラクタで別のヒープへ返してしまうため保持する
 
         // BufferUsage::Structured(RWStructuredBuffer)用: UAVディスクリプタのインデックスを保持し、
-        // 破棄時にDX12Deviceのディスクリプタヒープへ返却する
+        // 破棄時にDX12Deviceのディスクリプタヒープへ返却する。
+        // BufferUsage::IndirectArgs(raw UAVを1つだけ持つ)も構造が同じためこれを共用し、
+        // usageで区別する(DispatchIndirectがUsageを検証するため)
         static constexpr uint32_t kInvalid = 0xFFFFFFFFu;
         DX12Buffer(
             DX12Device* device,
@@ -50,7 +57,8 @@ namespace Kurenai::RHI
             Microsoft::WRL::ComPtr<ID3D12Resource> resource,
             uint32_t uavIndex,
             uint32_t sizeInBytes,
-            uint32_t strideInBytes);
+            uint32_t strideInBytes,
+            BufferUsage usage = BufferUsage::Structured);
 
         // BufferUsage::StructuredRW用: コンピュートがUAVで書き、ピクセルシェーダがSRVで読むため
         // ディスクリプタを両方持つ。CPUからは書き込まないのでステージングリングは持たない
@@ -118,6 +126,27 @@ namespace Kurenai::RHI
         // BufferUsage::StructuredImmutableで作成されたか。CPU書き込み経路を持たないため、
         // UpdateBufferはこれを見て早期に弾く
         bool IsStructuredImmutable() const { return m_Usage == BufferUsage::StructuredImmutable; }
+        // BufferUsage::IndirectArgsで作成されたか。DispatchIndirectはこれを見て、
+        // 引数バッファ以外を渡された場合にログを出して何もしない
+        bool IsIndirectArgs() const { return m_Usage == BufferUsage::IndirectArgs; }
+        // BufferUsage::Readbackで作成されたか。CopyBufferToReadbackが行き先を検証するのに使う
+        bool IsReadback() const { return m_Usage == BufferUsage::Readback; }
+        // BufferUsage::Readbackの内容をCPUへ写す。詳細はIRHIBuffer::ReadbackDataのコメント
+        bool ReadbackData(void* outData, uint32_t sizeInBytes) override;
+        // 直前のUpdateBufferが進めたリングスロットのGPU仮想アドレス。詳細はIRHIBuffer側のコメント
+        bool GetLastUpdateGpuAddress(uint32_t& outAddressLow, uint32_t& outAddressHigh) const override;
+        // UAVディスクリプタを持つか(ClearUnorderedAccessBufferUintの事前判定に使う)
+        bool HasUav() const { return m_SrvUavHeap != nullptr && m_UavIndex != kInvalid; }
+        // ClearUnorderedAccessViewUint専用のraw(ByteAddress)UAVハンドルを返す。
+        // 無ければ初回呼び出し時に作って以後使い回す(失敗時はポインタ0)。
+        //
+        // 【なぜ通常のUAVを使えないのか】ClearUnorderedAccessView*は構造化バッファのUAVを
+        // 受け付けない(D3D12デバッグレイヤが ID 1156 で弾く)。同じリソースへraw UAVを
+        // 重ねて張ればクリアできる ―― D3D12ではrawビューに作成時フラグが要らず、
+        // ALLOW_UNORDERED_ACCESSさえあればR32_TYPELESS + BUFFER_UAV_FLAG_RAWで作れる。
+        //
+        // 元からrawなUsage(IndirectArgs)は通常のUAVをそのまま返す
+        D3D12_CPU_DESCRIPTOR_HANDLE GetOrCreateClearUavCpuHandle();
         // 現在のリソース状態と異なる場合のみバリアを発行して遷移する(DX12Texture::TransitionToと同じパターン)。
         // BufferUsage::StructuredReadOnly / StructuredRWで使う
         void TransitionTo(ID3D12GraphicsCommandList* commandList, D3D12_RESOURCE_STATES newState);
@@ -126,6 +155,22 @@ namespace Kurenai::RHI
         void* AdvanceUploadRingAndGetWritePtr();
         ID3D12Resource* GetUploadResource() const { return m_UploadResource.Get(); }
         uint64_t GetUploadRingOffset() const { return static_cast<uint64_t>(m_UploadRingIndex) * m_SlotSizeInBytes; }
+
+        uint32_t GetBindlessIndex() const override { return m_BindlessIndex; }
+
+        // CPUはkFrameCountフレームぶん先行して記録するため、1フレームで安全に使えるのは
+        // リング容量のkFrameCount分の1まで(判定はCheckRingOverflowと同じ)。
+        // リングを持たないUsage(m_RingCapacity==1)は上限が無いものとして扱う。
+        // 実装が.cpp側にあるのは、このヘッダーではDX12Deviceが前方宣言でしかないため
+        uint32_t GetSafeUpdatesPerFrame() const override;
+        // 意味はDX12Texture::SetBindlessIndexと同じ
+        void SetBindlessIndex(uint32_t index) { m_BindlessIndex = index; }
+
+        // UAVをbindlessへ登録した番号。SRVの番号(m_BindlessIndex)とは別に持つ ――
+        // 同じリソースでもSRVとUAVは別のディスクリプタで、片方に相乗りさせると
+        // 読み取り専用のビューを書き込みに使う(あるいはその逆)ことになる
+        uint32_t GetBindlessUavIndex() const { return m_BindlessUavIndex; }
+        void SetBindlessUavIndex(uint32_t index) { m_BindlessUavIndex = index; }
 
     private:
         DX12Device* m_Device = nullptr;
@@ -138,6 +183,12 @@ namespace Kurenai::RHI
         uint32_t m_RingCapacity;
         uint32_t m_CurrentRingIndex = 0;
         uint32_t m_UavIndex = kInvalid;
+        // GetOrCreateClearUavCpuHandleが遅延確保するraw UAV。m_SrvUavHeapから取る
+        uint32_t m_ClearUavIndex = kInvalid;
+        // bindless区画に登録されている場合のみ有効(既定は未登録)
+        uint32_t m_BindlessIndex = kInvalidBindlessIndex;
+        // UAVをbindless区画へ登録した番号(RegisterBindlessUAV)。SRVとは別枠
+        uint32_t m_BindlessUavIndex = kInvalidBindlessIndex;
         // このバッファがどのUsageで作られたか。SRV/UAVディスクリプタの有無だけでは
         // StructuredReadOnlyとStructuredRWを区別できないため保持する
         BufferUsage m_Usage = BufferUsage::Vertex;

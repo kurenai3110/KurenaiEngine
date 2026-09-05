@@ -1,5 +1,6 @@
 #include "DX12Buffer.h"
 
+#include <cstring>
 #include <string>
 #include <utility>
 
@@ -16,13 +17,21 @@ namespace Kurenai::RHI
         uint32_t sizeInBytes,
         uint32_t strideInBytes,
         BufferUsage usage,
-        uint32_t ringCapacity)
+        uint32_t ringCapacity,
+        DX12DescriptorHeap* srvUavHeap,
+        uint32_t srvIndex)
         : m_Device(device)
+        , m_SrvUavHeap(srvUavHeap)
         , m_Resource(std::move(resource))
         , m_MappedPtr(mappedPtr)
         , m_SlotSizeInBytes(sizeInBytes)
         , m_RingCapacity(ringCapacity)
         , m_Usage(usage)
+        // 頂点バッファはDEFAULTヒープへ作られ、初期データのアップロード後
+        // VERTEX_AND_CONSTANT_BUFFER状態で置かれる(DX12Device::CreateBuffer)。
+        // ShaderReadableでSRVも張る場合はメッシュシェーダーが非ピクセルシェーダーリソースとして
+        // 読むが、この2状態は共存できるためTransitionToを呼ぶ必要はない
+        , m_SrvIndex(srvIndex)
     {
         const D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = m_Resource->GetGPUVirtualAddress();
 
@@ -38,6 +47,12 @@ namespace Kurenai::RHI
             m_IndexBufferView.SizeInBytes = sizeInBytes;
             m_IndexBufferView.Format = DXGI_FORMAT_R32_UINT;
         }
+        else if (usage == BufferUsage::Readback)
+        {
+            // READBACKヒープのリソースはCOPY_DEST状態でしか作れず、以後その状態から動かせない
+            // (D3D12の仕様)。TransitionToが余計なバリアを積まないよう実態に合わせておく
+            m_CurrentState = D3D12_RESOURCE_STATE_COPY_DEST;
+        }
     }
 
     DX12Buffer::DX12Buffer(
@@ -46,7 +61,8 @@ namespace Kurenai::RHI
         Microsoft::WRL::ComPtr<ID3D12Resource> resource,
         uint32_t uavIndex,
         uint32_t sizeInBytes,
-        uint32_t strideInBytes)
+        uint32_t strideInBytes,
+        BufferUsage usage)
         : m_Device(device)
         , m_SrvUavHeap(srvUavHeap)
         , m_Resource(std::move(resource))
@@ -54,9 +70,10 @@ namespace Kurenai::RHI
         , m_SlotSizeInBytes(sizeInBytes)
         , m_RingCapacity(1)
         , m_UavIndex(uavIndex)
-        , m_Usage(BufferUsage::Structured)
-        // BufferUsage::Structuredのリソースは作成時点でUNORDERED_ACCESS状態になっている
-        // (DX12Device::CreateBuffer参照)。TransitionToが余計なバリアを積まないよう実態に合わせる
+        , m_Usage(usage)
+        // BufferUsage::Structured / IndirectArgsのリソースは作成時点でUNORDERED_ACCESS状態に
+        // なっている(DX12Device::CreateBuffer参照)。
+        // TransitionToが余計なバリアを積まないよう実態に合わせる
         , m_CurrentState(D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
     {
         (void)strideInBytes;
@@ -137,6 +154,17 @@ namespace Kurenai::RHI
 
     DX12Buffer::~DX12Buffer()
     {
+        // bindless区画への登録があれば返却する。UnregisterはkInvalidBindlessIndexを
+        // 渡された場合に何もしないため、登録の有無で分岐する必要はない
+        if (m_Device)
+        {
+            if (DX12BindlessTable* table = m_Device->GetBindlessTable())
+            {
+                table->Unregister(m_BindlessIndex);
+                table->Unregister(m_BindlessUavIndex);
+            }
+        }
+
         if (m_UavIndex != kInvalid)
         {
             m_SrvUavHeap->Free(m_UavIndex);
@@ -145,6 +173,51 @@ namespace Kurenai::RHI
         {
             m_SrvUavHeap->Free(m_SrvIndex);
         }
+        if (m_ClearUavIndex != kInvalid)
+        {
+            m_SrvUavHeap->Free(m_ClearUavIndex);
+        }
+    }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE DX12Buffer::GetOrCreateClearUavCpuHandle()
+    {
+        if (!HasUav())
+        {
+            return D3D12_CPU_DESCRIPTOR_HANDLE{ 0 };
+        }
+
+        // 元からrawなUsage(IndirectArgs)は通常のUAVがそのままクリアに使える
+        if (m_Usage == BufferUsage::IndirectArgs)
+        {
+            return GetUavCpuHandle();
+        }
+
+        if (m_ClearUavIndex != kInvalid)
+        {
+            return m_SrvUavHeap->GetCpuHandle(m_ClearUavIndex);
+        }
+
+        // rawビューは4バイト単位でアドレスを刻むため、サイズが4の倍数でないと末尾を消せない。
+        // 構造化バッファのストライドは4の倍数なので通常ここへは来ない
+        if (m_SlotSizeInBytes == 0 || (m_SlotSizeInBytes % 4) != 0)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "クリア用のraw UAVを作れません(サイズが4の倍数ではありません: " + std::to_string(m_SlotSizeInBytes) + ")");
+            return D3D12_CPU_DESCRIPTOR_HANDLE{ 0 };
+        }
+
+        m_ClearUavIndex = m_SrvUavHeap->Allocate();
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+        uavDesc.Buffer.NumElements = m_SlotSizeInBytes / 4;
+        uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        m_Device->GetDevice()->CreateUnorderedAccessView(
+            m_Resource.Get(), nullptr, &uavDesc, m_SrvUavHeap->GetCpuHandle(m_ClearUavIndex));
+
+        return m_SrvUavHeap->GetCpuHandle(m_ClearUavIndex);
     }
 
     D3D12_GPU_VIRTUAL_ADDRESS DX12Buffer::GetGPUVirtualAddress() const
@@ -158,6 +231,69 @@ namespace Kurenai::RHI
 
         m_CurrentRingIndex = (m_CurrentRingIndex + 1) % m_RingCapacity;
         return static_cast<uint8_t*>(m_MappedPtr) + static_cast<size_t>(m_CurrentRingIndex) * m_SlotSizeInBytes;
+    }
+
+    bool DX12Buffer::GetLastUpdateGpuAddress(uint32_t& outAddressLow, uint32_t& outAddressHigh) const
+    {
+        // 【Constant限定】このアドレスを使うのはルート定数バッファビューを引数バッファへ
+        // 書き込む経路だけで、そこには256バイト境界に載ったスロットしか渡せない。
+        // UPLOADヒープにスロット単位のリングを持つのはConstantだけなので、他は弾く
+        if (m_Usage != BufferUsage::Constant || !m_Resource)
+        {
+            Core::Logger::Error(
+                "DX12", "GetLastUpdateGpuAddress: BufferUsage::Constant以外のバッファが渡されました");
+            return false;
+        }
+
+        // 【SetConstantBufferとまったく同じアドレスであること】あちらはルート引数へ直接書き、
+        // こちらは引数バッファ経由で同じ値を渡す。式を写すと片方だけ直したときに静かにずれる
+        const D3D12_GPU_VIRTUAL_ADDRESS address = GetGPUVirtualAddress();
+        outAddressLow = static_cast<uint32_t>(address & 0xFFFFFFFFull);
+        outAddressHigh = static_cast<uint32_t>(address >> 32);
+        return true;
+    }
+
+    bool DX12Buffer::ReadbackData(void* outData, uint32_t sizeInBytes)
+    {
+        if (m_Usage != BufferUsage::Readback)
+        {
+            Core::Logger::Error("DX12", "ReadbackData: BufferUsage::Readback以外のバッファから読もうとしました");
+            return false;
+        }
+        if (outData == nullptr || sizeInBytes == 0)
+        {
+            Core::Logger::Error("DX12", "ReadbackData: 出力先がnullptrかサイズが0です");
+            return false;
+        }
+        if (sizeInBytes > m_SlotSizeInBytes)
+        {
+            Core::Logger::Error(
+                "DX12",
+                "ReadbackData: 要求サイズ(" + std::to_string(sizeInBytes) + ")がバッファサイズ(" +
+                    std::to_string(m_SlotSizeInBytes) + ")を超えています");
+            return false;
+        }
+        if (m_MappedPtr == nullptr)
+        {
+            Core::Logger::Error("DX12", "ReadbackData: リードバックバッファがマップされていません");
+            return false;
+        }
+
+        // 【GPUの完了を待たない】READBACKヒープは作成時からマップしたままにしてあり、
+        // ここは単なるmemcpy。コピーコマンドがまだ実行されていなければ古い内容が返るが、
+        // 待って直列化するよりは呼び出し側にリングを持たせるほうがよい
+        // (IRHIBuffer::ReadbackDataのコメント参照)
+        std::memcpy(outData, m_MappedPtr, sizeInBytes);
+        return true;
+    }
+
+    uint32_t DX12Buffer::GetSafeUpdatesPerFrame() const
+    {
+        if (m_RingCapacity <= 1u)
+        {
+            return UINT32_MAX;
+        }
+        return m_RingCapacity / DX12Device::kFrameCount;
     }
 
     void DX12Buffer::CheckRingOverflow(
@@ -195,11 +331,27 @@ namespace Kurenai::RHI
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Buffer::GetUavCpuHandle() const
     {
+        // UAVを持たないUsageで呼ばれた場合にでたらめなハンドルを返さないよう、
+        // GetSrvCpuHandleと同じくポインタ0を返して呼び出し側が判定できるようにする
+        if (!HasUav())
+        {
+            return D3D12_CPU_DESCRIPTOR_HANDLE{ 0 };
+        }
         return m_SrvUavHeap->GetCpuHandle(m_UavIndex);
     }
 
     D3D12_CPU_DESCRIPTOR_HANDLE DX12Buffer::GetSrvCpuHandle() const
     {
+        // SRVを持たないUsage(Vertex/Index/Constant、およびShaderReadableを指定しなかった頂点バッファ)は
+        // m_SrvUavHeapがnullptrのまま、m_SrvIndexもkInvalidになる。そのまま計算すると
+        // nullptr参照、あるいは「ヒープ先頭 + 0xFFFFFFFF × ディスクリプタサイズ」という
+        // でたらめなハンドルになり、D3D12へ渡した時点でデバイス削除に至る
+        // (DX12Texture::HasSrvがガードしているのと同じ問題)。
+        // 呼び出し側が無効を判定できるよう、ここではポインタ0を返す
+        if (!m_SrvUavHeap || m_SrvIndex == kInvalid)
+        {
+            return D3D12_CPU_DESCRIPTOR_HANDLE{ 0 };
+        }
         return m_SrvUavHeap->GetCpuHandle(m_SrvIndex);
     }
 

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <d3d12.h>
+#include <wrl/client.h>
 
 #include "RHI/IRHIBuffer.h"
 #include "RHI/IRHICommandList.h"
@@ -25,17 +26,23 @@ namespace Kurenai::RHI
         void ClearRenderTarget(const ClearColor& color) override;
         void ClearDepth(float depth) override;
         void SetViewport(const Viewport& viewport) override;
+        void SetScissorRect(const ScissorRect& rect) override;
+        void ResetScissorRect() override;
         void SetPipelineState(IRHIPipelineState* pipelineState) override;
         void SetVertexBuffer(IRHIBuffer* buffer) override;
         void SetIndexBuffer(IRHIBuffer* buffer) override;
         void SetConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetTexture(uint32_t slot, IRHITexture* texture) override;
+        void SetTextureAllStages(uint32_t slot, IRHITexture* texture) override;
         void SetSamplerSet(IRHISamplerSet* samplerSet) override;
         void SetShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) override;
         void Draw(uint32_t vertexCount, uint32_t startVertexLocation) override;
-        void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) override;
+        void DrawIndexed(
+            uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation,
+            uint32_t instanceCount) override;
+        void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 
         void SetComputePipelineState(IRHIPipelineState* pipelineState) override;
         void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer) override;
@@ -48,9 +55,23 @@ namespace Kurenai::RHI
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
+        void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) override;
+        void DispatchMeshIndirect(
+            IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount,
+            uint32_t countOffsetInBytes) override;
+        void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) override;
+        void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
+        void CopyTextureToReadback(
+            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel = 0, uint32_t arraySlice = 0) override;
 
     private:
         static constexpr uint32_t kMaxRenderTargets = 8;
+
+        // シザー矩形をD3D12へ設定する(SetViewport/SetScissorRect/ResetScissorRectの共通処理)
+        void ApplyScissorRect(const ScissorRect& rect);
+        // SetScissorRect/ResetScissorRectがクランプ先として使う、直近のSetViewportの値
+        Viewport m_CurrentViewport{};
+        bool m_HasViewport = false;
 
         DX12Device* m_Device;
         D3D12_CPU_DESCRIPTOR_HANDLE m_CurrentRenderTargetViews[kMaxRenderTargets]{};
@@ -92,16 +113,19 @@ namespace Kurenai::RHI
         // 反射プローブ(19章)がDeferredLighting.hlslでt11〜t14(イラディアンス配列・プリフィルタ配列・
         // 影響範囲バッファ・距離キューブ配列)を、DDGI(22章)がt15〜t16(イラディアンスアトラス・
         // 距離モーメントアトラス)を使い、さらに空パラメータの構造化バッファ・bent normalの
-        // G-Buffer(34章)・雲の3Dノイズ2枚・大気散乱のSkyView LUT・焼いた雲のウェザーマップ(H3)を
-        // 使うため22スロット必要。
+        // G-Buffer(34章)・低解像度の雲パスの出力・DDGIResolveの出力2枚・大気散乱のSkyView LUT・
+        // 低解像度の雲パスが書いたfogInFrontを使うため23スロット必要。
         // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
         // DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)およびDX11CommandList
         // 側の同名の定数と必ず一致させること
-        static constexpr uint32_t kTextureSlotCount = 22;
+        static constexpr uint32_t kTextureSlotCount = 23;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;
         void FlushPendingSrvWrites();
+        // SetTexture / SetTextureAllStages の共通処理。遷移先のリソース状態だけが違う
+        // (前者はPIXEL、後者はPIXEL|NON_PIXEL)。callerNameはログに出す呼び出し元の名前
+        void BindTexture(uint32_t slot, IRHITexture* texture, D3D12_RESOURCE_STATES state, const char* callerName);
         // レンダーターゲット/深度としてバインドされるテクスチャのSRVがシャドウに残っていたら
         // nullディスクリプタへ戻す。D3D11ドライバが同一リソースのSRVとRTVの同時バインドを
         // 検出して自動で解除するのと同じ挙動を再現し、あわせて「RENDER_TARGET状態のリソースを
@@ -132,10 +156,10 @@ namespace Kurenai::RHI
         // CopyDescriptors・ルートテーブルの再バインドを行う。
         // SRVはDX11と同じく上書きするまで維持され、UAVはDX11がDispatch直後に
         // CSSetUnorderedAccessViewsでnullを張るのに合わせてDispatch直後にnullへ戻す
-        // SRVが17あるのはレイトレーシングのパス(RT反射)がTLAS・G-Buffer・シーンジオメトリに加えて
-        // bent normal(t16、34章)を1回のディスパッチで同時に読むため。DX12Device.cpp側の同名の定数
-        // (ルートシグネチャのSRVレンジ幅)と必ず一致させること
-        static constexpr uint32_t kComputeSrvSlotCount = 17;
+        // SRVが18あるのはレイトレーシングのパス(RT反射)がTLAS・G-Buffer・シーンジオメトリに加えて
+        // bent normal(t16、34章)とメッシュレット表(t17、38章)を1回のディスパッチで同時に読むため。
+        // DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)と必ず一致させること
+        static constexpr uint32_t kComputeSrvSlotCount = 18;
         static constexpr uint32_t kComputeUavSlotCount = 4;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeSrvHandles[kComputeSrvSlotCount]{};
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeUavHandles[kComputeUavSlotCount]{};
@@ -143,5 +167,18 @@ namespace Kurenai::RHI
         // 後続のDispatch/描画がこのDispatchの書き込み完了を確実に見えるようにするため保持する
         ID3D12Resource* m_BoundComputeUavResources[kComputeUavSlotCount]{};
         void FlushPendingComputeWrites();
+        // Dispatch/DispatchIndirectの後始末。UAVとして書いたリソースへUAVバリアを積み、
+        // UAVスロットのシャドウをnullディスクリプタへ戻す(バインドの寿命は1ディスパッチ)
+        void ReleaseComputeUavBindingsAfterDispatch();
+
+        // 直近のSetPipelineStateで設定したのがメッシュシェーダーPSOか。
+        // メッシュシェーダーPSOは専用のルートシグネチャ(DX12Device::GetMeshRootSignature)で
+        // 作られており、DispatchMeshを積む前にそれが束ねられている必要がある。
+        // Draw/DrawIndexedとDispatchMeshで排他になるため、取り違えを検出するのにも使う
+        bool m_CurrentPipelineIsMesh = false;
+        // DispatchMeshを積むためのインタフェース(ID3D12GraphicsCommandList6で追加)。
+        // メッシュシェーダー非対応環境ではnullptrのままで、DispatchMeshはログを出して何もしない。
+        // コンストラクタで一度だけQueryInterfaceして保持する
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList6> m_CommandList6;
     };
 }

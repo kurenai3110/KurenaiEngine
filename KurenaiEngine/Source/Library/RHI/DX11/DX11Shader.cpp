@@ -4,7 +4,7 @@
 
 namespace Kurenai::RHI
 {
-    DX11Shader::DX11Shader(ShaderStage stage, Microsoft::WRL::ComPtr<ID3D11DeviceChild> shader, Microsoft::WRL::ComPtr<ID3DBlob> bytecode)
+    DX11Shader::DX11Shader(ShaderStage stage, Microsoft::WRL::ComPtr<ID3D11DeviceChild> shader, std::vector<uint8_t> bytecode)
         : m_Stage(stage)
         , m_Shader(std::move(shader))
         , m_Bytecode(std::move(bytecode))

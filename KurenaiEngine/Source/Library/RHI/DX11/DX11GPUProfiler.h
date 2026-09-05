@@ -27,7 +27,17 @@ namespace Kurenai::RHI
     private:
         // GPU実行がCPUの記録より数フレーム遅れてもクエリ結果を取りこぼさないためのリングバッファ段数
         static constexpr uint32_t kFrameLatency = 4;
-        static constexpr uint32_t kMaxScopesPerFrame = 16;
+        // RenderGraphは1フレームに34種以上のパスを登録し、DDGI有効シーンではさらにプローブ数分
+        // (DDGIProbesPerFrame、既定16)が加算される。この値が足りないと超過した区間の計測が捨てられ、
+        // 「各パスの計測値の合計」であるGPU Frame Time(ResolveSlot参照)まで過小報告される。
+        //
+        // 【DX12側(DX12GPUProfiler.h)と必ず同じ値にすること】バックエンドごとに上限が違うと、
+        // 同じシーンでもDX11とDX12で計測できるパスの数が変わり、GPU Frame Timeを比べられなくなる。
+        //
+        // 【DX12より確保が重い】あちらはタイムスタンプ1本ぶんの添字で済むが、こちらは
+        // ID3D11Queryのオブジェクトを1区間につき2個、リングの段数だけ前もって作る
+        // (kFrameLatency × kMaxScopesPerFrame × 2 個)。96なら776個で、生成は起動時の1回きり
+        static constexpr uint32_t kMaxScopesPerFrame = 96;
 
         struct FrameSlot
         {
@@ -51,5 +61,8 @@ namespace Kurenai::RHI
 
         std::vector<GPUTimingResult> m_Results;
         float m_TotalFrameTimeMs = 0.0f;
+        // 区間数がkMaxScopesPerFrameを超えたことの警告は毎フレーム出ると
+        // ログのflushでフレーム時間が崩れるため、一度だけ出す
+        bool m_ScopeOverflowLogged = false;
     };
 }

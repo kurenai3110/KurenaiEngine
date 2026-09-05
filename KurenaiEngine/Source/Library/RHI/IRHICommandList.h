@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath> // MakeFullViewportScissorRectのfloor/ceil
+
 #include <cstddef>
 #include <cstdint>
 
@@ -24,6 +26,47 @@ namespace Kurenai::RHI
         float MaxDepth = 1.0f;
     };
 
+    // シザー矩形(ピクセル単位。原点は描画先の左上、Y-down)。
+    // Right/Bottomは半開区間の外側で、「ピクセルpが残る条件はLeft <= p < Right」という
+    // D3D11/D3D12共通の意味論をそのまま使う
+    struct ScissorRect
+    {
+        int32_t Left = 0;
+        int32_t Top = 0;
+        int32_t Right = 0;
+        int32_t Bottom = 0;
+    };
+
+    // ビューポート全体を過不足なく覆うシザー矩形。DX11/DX12の両実装が共有する
+    // (片方だけ丸め方を直すとバックエンド間で端の1pxがずれるため、必ずここへ寄せる)。
+    // レターボックス表示ではTopLeftX/Widthが非整数になるので、左上はfloor・右下はceilで
+    // 外側へ丸めて必ずビューポート全体を含める。外側へ丸めても描画範囲は広がらない
+    // (正射影/透視投影のクリップ空間が既にビューポート境界で厳密にカリングしているため)
+    inline ScissorRect MakeFullViewportScissorRect(const Viewport& viewport)
+    {
+        ScissorRect rect;
+        rect.Left = static_cast<int32_t>(std::floor(viewport.TopLeftX));
+        rect.Top = static_cast<int32_t>(std::floor(viewport.TopLeftY));
+        rect.Right = static_cast<int32_t>(std::ceil(viewport.TopLeftX + viewport.Width));
+        rect.Bottom = static_cast<int32_t>(std::ceil(viewport.TopLeftY + viewport.Height));
+        return rect;
+    }
+
+    // rectをビューポート全体との積へクランプする。D3D12はレンダーターゲット外や負値を含む
+    // シザー矩形を仕様違反として扱うため、RHIの側で必ず正規化してから渡す
+    // (ビューポート外はそもそも描画されないので、クランプしても意味は変わらない)。
+    // 積が空になった場合はLeft==RightまたはTop==Bottomの空矩形になり、以後の描画は出なくなる
+    inline ScissorRect ClampScissorRectToViewport(const ScissorRect& rect, const Viewport& viewport)
+    {
+        const ScissorRect bounds = MakeFullViewportScissorRect(viewport);
+        ScissorRect result;
+        result.Left = rect.Left < bounds.Left ? bounds.Left : (rect.Left > bounds.Right ? bounds.Right : rect.Left);
+        result.Top = rect.Top < bounds.Top ? bounds.Top : (rect.Top > bounds.Bottom ? bounds.Bottom : rect.Top);
+        result.Right = rect.Right > bounds.Right ? bounds.Right : (rect.Right < result.Left ? result.Left : rect.Right);
+        result.Bottom = rect.Bottom > bounds.Bottom ? bounds.Bottom : (rect.Bottom < result.Top ? result.Top : rect.Bottom);
+        return result;
+    }
+
     struct ClearColor
     {
         float R = 0.0f;
@@ -47,7 +90,22 @@ namespace Kurenai::RHI
             IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice = 0) = 0;
         virtual void ClearRenderTarget(const ClearColor& color) = 0;
         virtual void ClearDepth(float depth) = 0;
+        // 【重要】SetViewportはシザー矩形も「そのビューポート全体」へリセットする。
+        // シザーを使わない呼び出し側から見た挙動を従来どおりに保つための仕様なので、
+        // SetScissorRectは必ずSetViewportより後に呼ぶこと(先に呼ぶと上書きされる)
         virtual void SetViewport(const Viewport& viewport) = 0;
+        // 以後の描画を矩形の内側だけに制限する。矩形はピクセル単位・描画先の左上原点(Y-down)で、
+        // 現在のビューポート全体との積へクランプされる(ClampScissorRectToViewport)。
+        // 積が空なら以後の描画は1ピクセルも出ない。
+        //
+        // DX11はこのAPIのためにDX11Device::CreatePipelineStateが全パイプラインステートの
+        // ラスタライザをScissorEnable=TRUEで作っており、DX12はD3D12の仕様上シザーが
+        // 常時有効なので、両バックエンドで挙動は完全に同一。
+        // SetPipelineStateはシザー矩形をリセットしない(D3D11のラスタライザステートも
+        // D3D12のPSOもシザー矩形自体は持たない)ため、パイプラインを切り替えても絞ったまま
+        virtual void SetScissorRect(const ScissorRect& rect) = 0;
+        // SetScissorRectで絞った範囲を、直近のSetViewportで設定したビューポート全体へ戻す
+        virtual void ResetScissorRect() = 0;
         virtual void SetPipelineState(IRHIPipelineState* pipelineState) = 0;
         virtual void SetVertexBuffer(IRHIBuffer* buffer) = 0;
         virtual void SetIndexBuffer(IRHIBuffer* buffer) = 0;
@@ -68,6 +126,23 @@ namespace Kurenai::RHI
         // 一度もバインドしていないスロットを読むと0が返る。この寿命はDX11/DX12で完全に同一で、
         // DX12側はDX12CommandListがバインド状態をシャドウコピーとして保持することで実現している
         virtual void SetTexture(uint32_t slot, IRHITexture* texture) = 0;
+        // SetTextureと同じスロット・同じバインドの寿命だが、**ピクセルシェーダー以外の
+        // グラフィックスステージからも読める状態**にしてバインドする。
+        //
+        // 【なぜ別のAPIが要るのか】DX12のリソース状態はステージ単位で分かれており、
+        // SetTextureはD3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCEへしか遷移させない。
+        // 増幅シェーダー・メッシュシェーダーはピクセルシェーダーとは別のステージなので、
+        // その状態のまま読むとデバッグレイヤーが警告を出し、実際に読める保証も無い。
+        // こちらはPIXEL|NON_PIXELの両方を立てて遷移させる。
+        //
+        // 【DX11では違いが無い】DX11はステージごとにバインド空間が独立しており、
+        // リソース状態という概念自体が無いためSetTextureと同じ実装でよい。
+        // それでも同じ意味で呼べるよう両バックエンドに用意する。
+        //
+        // 用途はG-Bufferパスの増幅シェーダーがHi-Zを読むこと(GBufferMeshlet.hlsl)。
+        // メッシュシェーダー用ルートシグネチャはSRVテーブルの可視性をALLにしてあるので、
+        // ディスクリプタの張り方はSetTextureとまったく同じでよい(DX12Device::CreateMeshRootSignature)
+        virtual void SetTextureAllStages(uint32_t slot, IRHITexture* texture) = 0;
         // このパスで使うサンプラーの組をまとめてバインドする(セットのi番目がレジスタs(i)になる)。
         // セットの中身は初期化時に決まっていて書き換わらないため、ここで切り替わるのは
         // 「どのセットを見るか」だけ(理由はIRHISamplerSet.h)。
@@ -94,7 +169,36 @@ namespace Kurenai::RHI
         virtual void SetVertexShaderResourceBuffer(uint32_t slot, IRHIBuffer* buffer) = 0;
         virtual void UpdateBuffer(IRHIBuffer* buffer, const void* data, size_t sizeInBytes) = 0;
         virtual void Draw(uint32_t vertexCount, uint32_t startVertexLocation) = 0;
-        virtual void DrawIndexed(uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation) = 0;
+        // instanceCount: 同じジオメトリを何体ぶん描くか(ハードウェアインスタンシング)。
+        // 既定の1なら従来どおりの単発描画で、発行されるコマンドも同一。
+        //
+        // 【インスタンスごとの値はどこから来るのか】このRHIは頂点ストリームによるインスタンシング
+        // (InputSlotClass = PER_INSTANCE_DATA)を持たない ―― InputElementDescにInputSlotも
+        // InputSlotClassも無く、SetVertexBufferもスロットを取らないため、頂点バッファは常に1本きり。
+        // そのため、インスタンスごとに変わる値(ワールド行列など)は
+        // SetVertexShaderResourceBufferで頂点シェーダーへ渡したStructuredBufferを
+        // SV_InstanceIDで引く形で受け取る(Shaders/3D/ObjectConstants.hlsliのFetchModelInstance)。
+        //
+        // 【SV_InstanceIDは0から始まる】D3D11/D3D12ともにStartInstanceLocationは
+        // SV_InstanceIDへ加算されない。バッファ内の開始位置は定数バッファ側の値
+        // (ObjectConstants::InstanceBase)で渡すこと。
+        //
+        // instanceCountが0のときはログを出して何も描かない(両バックエンド共通)
+        virtual void DrawIndexed(
+            uint32_t indexCount, uint32_t startIndexLocation, int32_t baseVertexLocation,
+            uint32_t instanceCount = 1) = 0;
+
+        // メッシュシェーダーパイプライン(CreateMeshPipelineStateで作ったステートをSetPipelineStateで
+        // 設定した状態)での描画。増幅シェーダーがある場合はそちらが、無い場合はメッシュシェーダーが
+        // 直接この数だけスレッドグループとして起動される。
+        //
+        // SetVertexBuffer/SetIndexBufferは呼ばない(呼んでも無視される)。ジオメトリは
+        // シェーダー自身がbindless経由でバッファから読む。定数バッファ・テクスチャ・
+        // サンプラーのバインドは通常の描画とまったく同じAPI・同じ寿命で使える。
+        //
+        // DX11およびメッシュシェーダー非対応のDX12環境では、ログを出して何もしない
+        // (呼び出し側はIRHIDevice::SupportsMeshShader()で事前に確認すること)
+        virtual void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) = 0;
 
         // コンピュートシェーダーの発行。グラフィックス用のSetPipelineState/SetConstantBuffer/SetTextureとは
         // レジスタ空間(DX12ではルートシグネチャ)が独立しているため専用のAPIを用意する
@@ -142,5 +246,72 @@ namespace Kurenai::RHI
         // 呼ぶとログを出して何もしない
         virtual void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) = 0;
         virtual void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) = 0;
+        // BufferUsage::IndirectArgsで作ったバッファのoffsetInBytesの位置にあるuint3を
+        // スレッドグループ数として解釈してディスパッチする。offsetInBytesは4の倍数であること。
+        // 「発行するグループ数がGPU上でしか分からない」場合に使う(自前ラスタライザの
+        // 巨大三角形パスがこれにあたる。個数は直前のディスパッチが数え上げる)。
+        //
+        // 引数バッファ以外のUsageを渡すとログを出して何もしない。
+        // Dispatchと同じく、この呼び出しの直後にUAVスロットは全解除される
+        virtual void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) = 0;
+
+        // 増幅シェーダーの間接起動(DX12のExecuteIndirect)。1件ぶんの引数は24バイトで、
+        //   +0  : このドローが使う定数バッファ(b1)のGPU仮想アドレス(64bit)
+        //   +8  : DispatchMeshのスレッドグループ数X/Y/Z(uint3)
+        // という並び。末尾4バイトは詰め物で、アドレスを8バイト境界に載せるために置いてある。
+        //
+        // 【b1を引数に含める理由】1回のExecuteIndirectで複数のモデルを描くため、
+        // 「どのモデルか」をドローごとに渡す手段が要る。ルート定数で番号だけ渡して
+        // 構造化バッファから引く手もあるが、それだと増幅/メッシュ/ピクセルの3本すべてで
+        // 定数の読み方を書き換えることになる。定数バッファのアドレス自体を差し替えれば
+        // シェーダー側は1行も変わらない。
+        //
+        // countOffsetInBytesの位置には実際に発行する件数(uint32)が入っていること。
+        // maxCommandCountはその上限(GPUが書いた件数がこれを超えることは無いと保証する値)。
+        // どちらのオフセットも4の倍数であること。
+        //
+        // 【DX11には無い】メッシュシェーダー自体が無いため、呼ぶとログを出して何もしない。
+        // 呼び出し側は IRHIDevice::SupportsIndirectDispatchMesh() で分岐すること
+        // 【Shaders/3D/ModelCull.hlsl の KURENAI_INDIRECT_ARG_STRIDE と一致させること】
+        // あちらがこの並びで引数を書き込む
+        static constexpr uint32_t kDispatchMeshIndirectArgStride = 24;
+        virtual void DispatchMeshIndirect(
+            IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount,
+            uint32_t countOffsetInBytes) = 0;
+
+        // UAVを持つバッファ全体を、指定した符号なし整数値で埋める。散布書き込みされる
+        // バッファ(自前ラスタライザのvisibility bufferや間接ディスパッチ引数)を毎フレーム
+        // 初期値へ戻す用途向け。
+        //
+        // 【この呼び出しはバインド状態を変えない】SetComputeUnorderedAccess*で張ったスロットには
+        // 影響しない(内部で一時的なディスクリプタを使うため)。
+        // UAVを持たないバッファを渡すとログを出して何もしない
+        virtual void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) = 0;
+
+        // GPU上のバッファの内容を、BufferUsage::Readbackのバッファへ写す(GPUのコピーコマンド)。
+        // 実際にCPUから読むのは IRHIBuffer::ReadbackData で、**数フレーム後に行うこと**。
+        //
+        // 【この呼び出しはコマンドを積むだけ】ここでGPUの完了を待ってはいけない。
+        // 待つとフレームが直列化し、計測のために計測対象を壊すことになる。
+        // 呼び出し側は受け皿をリング状に複数本持ち、十分に古いものを読む。
+        //
+        // srcはコピー元として読める状態へ遷移させる(DX12)。dstがBufferUsage::Readbackでない、
+        // サイズが足りない、いずれかがnullptrならログを出して何もしない
+        virtual void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) = 0;
+
+        // テクスチャの1サブリソースを、IRHIDevice::CreateReadbackTextureで作った受け皿へ写す。
+        // 実際にCPUから読むのは IRHITexture::ReadbackData で、**数フレーム後に行うこと**。
+        // 約束はCopyBufferToReadbackとまったく同じ(ここでGPUの完了を待ってはいけない)。
+        //
+        // arraySliceは配列テクスチャのスライス番号。キューブマップは6面の配列として扱われるので
+        // face = arraySlice % 6、キューブ配列は cubeIndex = arraySlice / 6 で選ぶ
+        // (DX12Texture::GetCubeUavCpuHandleのフラット添字と同じ規約。専用の引数は持たない)。
+        //
+        // srcはコピー元として読める状態へ遷移させる(DX12)。DX11ではレンダーターゲット/深度として
+        // 出力に張られたままのリソースをコピー元にできないため、張られていれば外す。
+        // dstがリードバック用でない、寸法やフォーマットが食い違う、いずれかがnullptrの場合は
+        // ログを出して何もしない
+        virtual void CopyTextureToReadback(
+            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel = 0, uint32_t arraySlice = 0) = 0;
     };
 }

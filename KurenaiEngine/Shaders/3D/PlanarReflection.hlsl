@@ -84,6 +84,12 @@ cbuffer FrameConstants : register(b0)
     float4 DDGIParams3;
     // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
     float4 DDGIParams4;
+    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
+    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
+    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
+    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
+    float4 DDGILODOrigin[4];
+    float4 DDGILODBase[4];
     // bent normalによる遮蔽(34章)。このシェーダーでは読まないが、C++側のFrameConstantsでは
     // DDGIParams4の直後にあるため、**宣言しないと以降のフィールドが16バイトずれる**。
     // 実際このマージで一度宣言し忘れ、PlanarReflectionPlaneが16バイトずれた結果
@@ -128,20 +134,7 @@ cbuffer FrameConstants : register(b0)
     float4 WaterBodyColor;
 };
 
-// GBuffer.hlsl/Transparent.hlsl/ProbeCapture.hlslのObjectConstantsと同じレイアウト
-cbuffer ObjectConstants : register(b1)
-{
-    float4x4 World;
-    float4x4 NormalMatrix;
-    float MetallicFactor;
-    float RoughnessFactor;
-    float TangentSignFlip;
-    float AlphaCutoff;
-    float3 EmissiveFactor;
-    // glTFのocclusionTexture.strength(既定1.0)。GBuffer.hlslと同じ枠
-    float OcclusionStrength;
-    float4 BaseColorFactor;
-};
+#include "ObjectConstants.hlsli"
 
 // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
 struct GPULight
@@ -204,16 +197,20 @@ struct PSInput
     float ClipDistance : SV_ClipDistance0;
 };
 
-PSInput VSMain(VSInput input)
+PSInput VSMain(VSInput input, uint instanceID : SV_InstanceID)
 {
     PSInput output;
-    float3 worldPos = mul(float4(input.Position, 1.0f), World).xyz;
+    // このインスタンスの変換。インスタンシングが無効なドローでは
+    // ObjectConstantsのWorld/NormalMatrix/TangentSignFlipがそのまま返る
+    const ModelInstanceRecord instance = FetchModelInstance(instanceID);
+    float3 worldPos = mul(float4(input.Position, 1.0f), instance.World).xyz;
     output.Position = mul(float4(worldPos, 1.0f), ViewProj);
-    output.Normal = mul(input.Normal, (float3x3)NormalMatrix);
+    output.Normal = mul(input.Normal, (float3x3)instance.NormalMatrix);
     output.WorldPos = worldPos;
     output.UV = input.UV;
     output.LightmapUV = input.LightmapUV;
-    output.Tangent = float4(mul(input.Tangent.xyz, (float3x3)World), input.Tangent.w * TangentSignFlip);
+    output.Tangent =
+        float4(mul(input.Tangent.xyz, (float3x3)instance.World), input.Tangent.w * instance.TangentSignFlip);
     output.ClipDistance = dot(worldPos, PlanarReflectionPlane.xyz) + PlanarReflectionPlane.w;
     return output;
 }
@@ -312,12 +309,8 @@ float3 EvaluateDirectBRDF(
     return (diffuse + specular) * NdotL;
 }
 
-float DistanceAttenuation(float distSq, float range)
-{
-    float factor = distSq / max(range * range, 1e-4f);
-    float window = saturate(1.0f - factor * factor);
-    return (window * window) / max(distSq, 0.0001f);
-}
+// 距離減衰。定義は LightAttenuation.hlsli にただ1つある
+#include "LightAttenuation.hlsli"
 
 float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float angleOffset)
 {
@@ -349,7 +342,8 @@ float3 EvaluateLight(
             return float3(0.0f, 0.0f, 0.0f);
         }
 
-        atten = DistanceAttenuation(distSq, range);
+        atten = LightAttenuation(
+            lightType, toLight, distSq, range, light.Params.z, light.DirectionAngle.xyz, light.Params.w);
         if (atten <= 0.0f)
         {
             return float3(0.0f, 0.0f, 0.0f);

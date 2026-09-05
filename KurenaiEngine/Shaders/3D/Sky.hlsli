@@ -194,6 +194,15 @@ struct SkyParameters
     float  CloudTypeBias;      // 雲の種類の偏り(C4)。0=層雲寄り / 0.5=中立 / 1=雄大積雲寄り。
     float  CloudThickness;     // 雲底から雲頂までの厚み[m](P13b)。0ならレイマーチせず
                                 // 従来の厚みゼロの平面として扱う(巻雲はこちら)
+    // ボリューム経路のレイマーチ段数。**0以下なら kCloudMaxRaymarchSteps(コンパイル時の既定)**
+    // を使う。ApplySkyParametersFromBufferが0で初期化するので、cbufferにこの値を持たない
+    // シェーダー(SkyCloud.hlsl以外)は何もしなくても既定のまま動く。
+    // 【なぜ段数だけを実行時にしたのか】オクターブ数(kCloudOctaves)と太陽マーチの段数
+    // (kCloudSunSteps)はfBmの値そのものを変えるため、これらを動かすと
+    // ボリューム経路(SkyCloud.hlsl)と平面経路(SSR/PlanarReflection/AerialPerspective)で
+    // 雲の形が食い違い、背景の雲と水面に映る雲が別物になる。
+    // レイマーチ段数はボリューム経路にしか存在しないのでその問題が起きない
+    int    CloudRaymarchSteps;
 
     // --- 巻雲。積雲より高層にある2層目。CirrusCoverage <= 0 なら巻雲側の計算は
     // 一切行わない(判断C、SkyColor参照)。判断A(IBLキューブに雲を焼かない)・判断B
@@ -335,6 +344,11 @@ SkyParameters ApplySkyParametersFromBuffer(SkyParameters params, GPUSkyParameter
     // 雲による空の明かりの変化(P18)。大気遠近のin-scatterへ掛ける
     // (SkyParameters::CloudSkyLightのコメント参照)。被覆率0では(1,1,1)
     params.CloudSkyLight = data.CloudSkyLight.xyz;
+    // 【ここで必ず0を入れる】雲のレイマーチ段数は SkyCloud.hlsl だけが cbuffer から上書きする。
+    // この関数は雲を評価しうる全シェーダーが呼ぶので、ここで初期化しておけば
+    // 上書きしないシェーダーでも未初期化のまま EvaluateCloudLayer へ渡ることがない。
+    // 0は「コンパイル時の既定(kCloudMaxRaymarchSteps)を使え」の意味
+    params.CloudRaymarchSteps = 0;
     return params;
 }
 
@@ -709,7 +723,7 @@ static const float kCloudBackgroundRayDistance = 1.0e7f;
 // 「明るい雲頂・灰青の平らな雲底・房どうしの間の落ち影」によるもので、そのすべてが
 // 3次元の自己影から出る。C1で両方を捨て、サンプル位置から太陽方向へ実際にマーチする形にした。
 //
-// ステップ数はシェーダ内定数(コストの主要なつまみ。kCumulusRaymarchStepsと同じ扱い)
+// ステップ数はシェーダ内定数(コストの主要なつまみ。kCloudMaxRaymarchStepsと同じ扱い)
 static const int kCloudSunSteps = 6;
 // 太陽マーチの1歩目の長さを、スラブの厚みに対する比で決める。厚みが変わっても
 // 相対的な細かさが保たれる(kCloudSunStepGrowthで指数的に伸びるので、総距離は厚みの約1.6倍)
@@ -1112,6 +1126,9 @@ struct CloudLayerParams
     // 【C1で ShadowSteps を外した】XZ平面上の2D積分で自己影を求めるステップ数だった。
     // ボリューム経路は3Dの太陽マーチ(kCloudSunSteps)へ移り、平面経路(巻雲)は
     // もともと0=自己影なしだったため、どの層も使わなくなった
+    // スラブのレイマーチ段数の上限(Thickness > 0 の層だけが使う)。0以下なら
+    // kCloudMaxRaymarchSteps(コンパイル時の既定)へ落ちる。SkyParameters::CloudRaymarchSteps参照
+    int    RaymarchSteps;
     // 雲底から雲頂までの厚み[m](P13b)。**0なら従来の厚みゼロの平面として扱う**。
     // 巻雲は0を入れるため、巻雲が通るコードパスはP13b前と1命令も変わらない
     float  Thickness;
@@ -1136,6 +1153,7 @@ CloudLayerParams MakeCumulusLayerParams(SkyParameters params)
     layer.ScrollOffset = params.CloudScrollOffset;
     layer.ForwardG = params.CloudForwardG;
     layer.AnisotropicScale = float2(1.0f, 1.0f); // 積雲は等方(筋状にしない)
+    layer.RaymarchSteps = params.CloudRaymarchSteps;
     layer.Thickness = params.CloudThickness; // 0でなければスラブをレイマーチする(P13b)
     layer.TypeBias = params.CloudTypeBias;
     layer.Albedo = kCumulusAlbedo;
@@ -1165,6 +1183,9 @@ CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
     // 平面経路は縦プロファイルを持たないため読まれない。中立値を入れておく
     layer.TypeBias = 0.5f;
     layer.AnisotropicScale = float2(params.CirrusAnisotropy, 1.0f); // U方向だけ伸ばして筋状にする
+    // 巻雲は厚みゼロ=平面の経路しか通らないのでレイマーチしない。使われない値だが、
+    // 未初期化のまま関数へ渡さないよう明示的に埋めておく
+    layer.RaymarchSteps = 0;
     layer.Albedo = kCirrusAlbedo;
     layer.SingleScatterScale = kCirrusSingleScatterScale;
     layer.AmbientTermMin = kCirrusAmbientTermMin;
@@ -1256,6 +1277,13 @@ Texture3D CloudDetailNoiseTexture : register(KURENAI_CLOUD_DETAIL_REGISTER);
 // 4〜12度の帯が19.3%(384は19.7%)まで戻る。最悪ケースの歩数が半分になる
 static const int kCloudMaxRaymarchSteps = 384;
 static const float kCloudMinStepMeters = 12.0f;
+//
+// 【実行時に振れる(品質プリセット)】SkyParameters::CloudRaymarchSteps が0より大きければ
+// この既定値の代わりに使われる(SkyCloud.hlslがcbufferから渡す)。cbufferにこの値を
+// 持たないシェーダー(SSR/PlanarReflection等の平面経路)は0を渡してくるので既定のまま動く。
+// 定数バッファの中身は保証できるものではないため、シェーダー側でも上限で丸める
+// (SSAOのサンプル数と同じ作法。SSAO.hlslのsampleCount参照)
+static const int kCloudRaymarchStepsHardMax = 512;
 
 // 3Dノイズの水平・垂直の尺度。**水平は「何周するか」の回数、垂直はワールド距離[m]**。
 //
@@ -2170,10 +2198,16 @@ void EvaluateCloudLayer(
         // --- ボリューム(P13b): 層に入ってから出るまでを前から後ろへ積分する ---
         // (P17でレイに沿った等間隔マーチに、C2で1歩の長さがワールド空間の量になった)
         //
+        // 上限ステップ数は実行時に振れる(品質プリセット)。0以下ならコンパイル時の既定へ落とし、
+        // 上側は必ずハード上限で丸める(kCloudRaymarchStepsHardMax のコメント参照)
+        const int maxRaymarchSteps = (layer.RaymarchSteps > 0)
+            ? min(layer.RaymarchSteps, kCloudRaymarchStepsHardMax)
+            : kCloudMaxRaymarchSteps;
+        //
         // 【C2】1歩の長さを「経路長 ÷ 上限ステップ数」と「下限12m」の大きいほうにする。
         // 厚みを変えても1歩が暴れず、経路が長いとき(地平線際)だけ1歩が伸びてコストが有界になる
         const float span = tExit - tEnter;
-        const float stepLength = max(span / float(kCloudMaxRaymarchSteps), kCloudMinStepMeters);
+        const float stepLength = max(span / float(maxRaymarchSteps), kCloudMinStepMeters);
 
         // 【1ステップの光学的深さを stepLength/Thickness で測る理由】(P17)
         // スラブを完全に貫くレイでは全ステップの和が
@@ -2207,7 +2241,7 @@ void EvaluateCloudLayer(
         const float jitterOffset = jitter * stepLength;
 
         [loop]
-        for (int marchStep = 0; marchStep < kCloudMaxRaymarchSteps; ++marchStep)
+        for (int marchStep = 0; marchStep < maxRaymarchSteps; ++marchStep)
         {
             // レイに沿った中点サンプリング。**サンプル位置がワールド座標で決まるのがP17の要**で、
             // 高さとともに横へずれるのが視差の源になる(仰角45度・厚み1,000mなら雲頂は雲底より
@@ -2498,15 +2532,37 @@ float3 EvaluateStarfield(float3 dir, SkyParameters params)
     return result * params.StarsIntensity * params.ZenithLuminance * horizonFade;
 }
 
-// 雲の無い素の空の色。地平線より上はSkyColorUpper、下はプラトー色から接地色へのフェード。
+// 雲を掛ける前の空(晴天の空 + 星 + 地平線より下のフェード)。
+//
 // 【P17でSkyColorから括り出した】雲の合成を「地平線より上のif」の中から外へ出すため
 // (見下ろす視線にも雲が掛かるようにする)、基色を決める部分を独立させた。中身も呼び出し順も
-// P17より前と同じなので、雲が無い画素の値は1ビットも変わらない
-float3 SkyClearColor(float3 dir, SkyParameters params)
+// P17より前と同じなので、雲が無い画素の値は1ビットも変わらない。
+//
+// 【低解像度の雲パスがこの分離に乗っている】雲(EvaluateCloudLayer)は背景1画素あたり
+// 値ノイズを数十回評価するため極端に重く、Intel UHD Graphics 620 / 1280x720 の実測では
+// 積雲14.5ms + 巻雲1.3msとGPUフレーム時間の半分以上を占めていた。一方この関数は
+// SkyView LUTの1サンプルが主で桁違いに軽い。合成が
+// 「clearColor * transmittance + scatteredLight」という事前乗算のover合成になっている
+// おかげで、**雲だけを低解像度で評価して合成しても数学的に厳密**であり、太陽・星のような
+// 高周波成分はこちら側に残るのでフル解像度のまま保てる。
+// この分離を使うのがSkyCloud.hlsl(低解像度の雲パス)とDeferredLighting.hlsl(合成側)。
+//
+// 【星をこちら側で足す理由】星は雲より奥にあるので雲で減光される前に足す必要があり、
+// かつ1画素の点光源なので低解像度化してはいけない。両方をこの位置が満たす。
+// StarsIntensity=0(昼・無効)のときEvaluateStarfieldは即座に0を返し、加算も分岐で
+// 飛ばすので、星を持たない場合と画素まで一致する。
+// dir.y < kGroundFadeStartY(=-0.02)の側で星を足さないのは、EvaluateStarfieldの
+// horizonFade = saturate(dir.y * 6) がそこでは必ず0になり、足しても0だから
+float3 SkyColorWithoutClouds(float3 dir, SkyParameters params)
 {
     if (dir.y >= kGroundFadeStartY)
     {
-        return SkyColorUpper(dir, params);
+        float3 clearColor = SkyColorUpper(dir, params);
+        if (params.StarsIntensity > 0.0f)
+        {
+            clearColor += EvaluateStarfield(dir, params);
+        }
+        return clearColor;
     }
 
     // 水平線より下: プラトー色(kGroundFadeStartYの高さへ射影した方向の空色)から接地色へフェード
@@ -2542,46 +2598,57 @@ float3 SkyClearColor(float3 dir, SkyParameters params)
 // 雲を持たないシーンでは1命令も効かない。
 //
 // 【なぜEvaluateCloudLayerの中でやらないか】層ごとに足すと、2層とも当たったときに
-// 視点から手前の層までの区間を二重に計上する。呼び出し側で1回だけ足せばその心配が無い
+// 視点から手前の層までの区間を二重に計上する。呼び出し側で1回だけ足せばその心配が無い。
+//
+// 【なぜ低解像度の雲パスの中で畳み込まないか】この項は clearColor に比例するため、
+// 低解像度側で畳み込むと補正項の中の太陽・星だけがぼける。そこで雲パスは fogInFront を
+// 別のレンダーターゲットへ出し、合成側(DeferredLighting.hlsl)がフル解像度の
+// clearColor に対してこの関数を呼ぶ。CloudSkyLightはフレーム定数なので、画素ごとに
+// 持ち出すのは fogInFront の1チャンネルだけで済む
 float3 CloudAirlightCorrection(float3 clearColor, float fogInFront, SkyParameters params)
 {
     return clearColor * (params.CloudSkyLight - 1.0f) * (1.0f - fogInFront);
 }
 
-// 起点と長さを持つ1本のレイに沿って空と雲を評価する(P17)。
+// 雲層(積雲+巻雲)だけを、起点と長さを持つ1本のレイに沿って評価する(P17)。
 //   rayOrigin   … レイの起点(ワールド)。背景画素ならカメラ位置、水面の反射なら水面の位置
 //   dir         … 正規化済みの向き
 //   maxDistance … レイの長さ[m]。地物に遮られる場合はそこまでの距離、背景なら
 //                 kCloudBackgroundRayDistance
+// 返すのは事前乗算のover合成に使う3つ:
+//   outTransmittance  … 透過率T
+//   outScatteredLight … 事前乗算済みの散乱光S
+//   outFogInFront     … 雲に最初に当たった位置の霞。CloudAirlightCorrectionが使う
+// 合成は
+//   SkyColorWithoutClouds(dir) * T + S + CloudAirlightCorrection(clearColor, fogInFront)
+// で、これはSkyColorWithRayが行う形と同一である。
 //
 // 【なぜ起点が要るのか】P17より前のSkyColor(dir, params)は方向しか受け取らず、雲層を
 // 「カメラの真上にある無限平面」として扱っていた。そのため水面の反射レイも起点がカメラ扱いに
 // なり、**水面に雲が映らない直接の原因**になっていた(EvaluateCloudLayerの(a)節に4つの症状を
-// まとめてある)
-float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParameters params)
+// まとめてある)。
+//
+// 雲が無い場合(被覆率0、またはレイが層と交差しない)は中立元(透過率1.0 / 散乱光0 /
+// 霞1.0)を返す。合成式は x*1.0 + 0.0 + x*(CSL-1)*0.0 となりIEEE754で厳密にxと一致するため、
+// 分割前の「雲が無いときは雲を持たない空と画素まで一致する」(判断C)は維持される
+void SkyCloudLayersWithRay(
+    float3 rayOrigin, float3 dir, float maxDistance, SkyParameters params,
+    out float outTransmittance, out float3 outScatteredLight, out float outFogInFront)
 {
-    float3 clearColor = SkyClearColor(dir, params);
+    outTransmittance = 1.0f;
+    outScatteredLight = float3(0.0f, 0.0f, 0.0f);
+    outFogInFront = 1.0f;
 
-    // 星は雲より奥にあるので、雲で減光される前のここで足す。
-    // StarsIntensity=0(昼・無効)のときEvaluateStarfieldは即座に0を返し、
-    // この加算自体も分岐で飛ばすので、星を持たない場合と画素まで一致する。
-    // 水平線より下はEvaluateStarfield側のhorizonFadeが0になるため、ここで別扱いしなくてよい
-    if (params.StarsIntensity > 0.0f)
-    {
-        clearColor += EvaluateStarfield(dir, params);
-    }
-
-    // (h) 早期脱出。積雲・巻雲どちらの被覆率も0なら雲の計算を一切行わずclearColorをそのまま返す。
+    // (h) 早期脱出。積雲・巻雲どちらの被覆率も0なら雲の計算を一切行わない。
     // 判断C(被覆率0のときP4完了時点=雲を追加する前と画素まで一致すること)の担保の1つめはここ
-    // ——雲側の計算(EvaluateCloudLayer)は一度も呼ばれず、返す値もSkyClearColorの結果そのまま
-    // なので数値は変わりようがない。
+    // ——雲側の計算(EvaluateCloudLayer)は一度も呼ばれず、中立元がそのまま返る。
     // 【P17で dir.y <= 0 の早期脱出を外した】地平線より下を見る視線にも雲を評価させるため
     // (上空から雲を見下ろせるようにするのが目的)。地上のカメラが見下ろす通常の構図では、
     // 雲層は視点より上にあるのでスラブ交差が空になり、雲は掛からないまま——
     // つまり結果は変わらず、変わるのは「視点が雲より上にあるとき」だけになる
     if (params.CloudCoverage <= 0.0f && params.CirrusCoverage <= 0.0f)
     {
-        return clearColor;
+        return;
     }
 
     // 雲へ掛ける大気遠近(P12)。層に依らない値なのでここで1回だけ組み立て、両層へ渡す。
@@ -2590,8 +2657,9 @@ float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParam
     const CloudFogParams fog = MakeCloudFogParams(params);
 
     // 積雲(下層、P5)。被覆率0でもここへ来る場合があるため(巻雲だけの空)、個別に早期脱出する。
-    // transmittance=1.0/scatteredLight=0の初期値は「雲が無い」ことを表す中立元(下のclearColor*1+0と
-    // 一致する値)であり、CloudCoverage<=0のときEvaluateCloudLayerを呼ばずこの初期値のまま使う
+    // transmittance=1.0/scatteredLight=0の初期値は「雲が無い」ことを表す中立元(合成側の
+    // clearColor*1+0と一致する値)であり、CloudCoverage<=0のときEvaluateCloudLayerを
+    // 呼ばずこの初期値のまま使う
     float cumulusTransmittance = 1.0f;
     float3 cumulusScatter = float3(0.0f, 0.0f, 0.0f);
     float cumulusFogInFront = 1.0f;
@@ -2604,12 +2672,14 @@ float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParam
     }
 
     // 【判断Cの担保の2つめ】巻雲の被覆率が0のとき、EvaluateCloudLayer(巻雲側)を一度も呼ばず、
-    // 積雲だけだったP11着手時点(HEAD)と完全に同一の式(clearColor * T_cumulus + S_cumulus)を
-    // そのまま通す。掛け算・足し算を1つも増やさないことで、浮動小数の最下位ビットまで一致させる
+    // 積雲だけだったP11着手時点と完全に同一の値をそのまま通す。
+    // 掛け算・足し算を1つも増やさないことで、浮動小数の最下位ビットまで一致させる
     if (params.CirrusCoverage <= 0.0f)
     {
-        return clearColor * cumulusTransmittance + cumulusScatter
-             + CloudAirlightCorrection(clearColor, cumulusFogInFront, params);
+        outTransmittance = cumulusTransmittance;
+        outScatteredLight = cumulusScatter;
+        outFogInFront = cumulusFogInFront;
+        return;
     }
 
     // 巻雲(上層、P11)を評価する。巻雲は積雲より高い位置にあるため、巻雲から届く散乱光は
@@ -2630,19 +2700,50 @@ float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParam
     //   散乱光 = S_cumulus + S_cirrus * T_cumulus (巻雲の光は積雲を透過して初めて届く)
     // lerpではなくこの形にするのは、雲の隙間からのぞく青空をそのまま残すため
     // (lerpだと被覆率で単純に混ぜてしまい、隙間の青空まで雲色へ寄ってしまう)
-    const float transmittance = cirrusTransmittance * cumulusTransmittance;
-    const float3 scatteredLight = cumulusScatter + cirrusScatter * cumulusTransmittance;
+    outTransmittance = cirrusTransmittance * cumulusTransmittance;
+    outScatteredLight = cumulusScatter + cirrusScatter * cumulusTransmittance;
     // 【霞の色は手前の層のものを使う】(P18b) 積雲は巻雲より低く、視線に当たっていれば必ず手前にある。
     // 当たっていない(cumulusFogInFront == 1.0)ときだけ巻雲側の霞を見る。
     // 霞が無効なときは両方1.0になり、補正は0になる
-    const float fogInFront =
-        (cumulusFogInFront < 1.0f) ? cumulusFogInFront : cirrusFogInFront;
+    outFogInFront = (cumulusFogInFront < 1.0f) ? cumulusFogInFront : cirrusFogInFront;
+}
+
+// 背景(地物に遮られない視線)用の薄いラッパー。起点は視点、レイ長は実質無限。
+// 低解像度の雲パス(SkyCloud.hlsl)がこれを呼ぶ
+void SkyCloudLayers(
+    float3 dir, SkyParameters params,
+    out float outTransmittance, out float3 outScatteredLight, out float outFogInFront)
+{
+    SkyCloudLayersWithRay(
+        params.ViewerPosition, dir, kCloudBackgroundRayDistance, params,
+        outTransmittance, outScatteredLight, outFogInFront);
+}
+
+// 起点と長さを持つ1本のレイに沿って空と雲を1回で評価する(P17)。雲を分離しない版で、
+// 平面経路の呼び出し側(SSR.hlsl / PlanarReflection.hlsl / SkyGenerate.hlsl)が使う。
+// 背景パスは低解像度化のため分離した経路(SkyCloud.hlsl + DeferredLighting.hlsl)を通る
+float3 SkyColorWithRay(float3 rayOrigin, float3 dir, float maxDistance, SkyParameters params)
+{
+    const float3 clearColor = SkyColorWithoutClouds(dir, params);
+
+    // 判断Cの担保: 被覆率0なら合成の掛け算・足し算を1つも増やさずclearColorをそのまま返す
+    if (params.CloudCoverage <= 0.0f && params.CirrusCoverage <= 0.0f)
+    {
+        return clearColor;
+    }
+
+    float transmittance;
+    float3 scatteredLight;
+    float fogInFront;
+    SkyCloudLayersWithRay(
+        rayOrigin, dir, maxDistance, params, transmittance, scatteredLight, fogInFront);
+
     return clearColor * transmittance + scatteredLight
          + CloudAirlightCorrection(clearColor, fogInFront, params);
 }
 
 // 背景(地物に遮られない視線)用の薄いラッパー。起点は視点、レイ長は実質無限。
-// 呼び出し側(DeferredLighting.hlsl / SkyGenerate.hlsl)の記述をP17より前のまま保つためにある
+// 呼び出し側(SkyGenerate.hlsl)の記述をP17より前のまま保つためにある
 float3 SkyColor(float3 dir, SkyParameters params)
 {
     return SkyColorWithRay(params.ViewerPosition, dir, kCloudBackgroundRayDistance, params);

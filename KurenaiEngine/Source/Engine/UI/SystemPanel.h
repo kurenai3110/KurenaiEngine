@@ -11,8 +11,11 @@ namespace Kurenai::UI
 {
     class UIManager;
 
-    // 画質ではなく動作・表示に関わる設定(垂直同期・フレームレート制限・内部レンダー解像度・
-    // グラフィックスAPI)と、UI自体の操作
+    // 動作・表示に関わる設定(垂直同期・フレームレート制限・内部レンダー解像度・
+    // グラフィックスAPI)と、UI自体の操作。
+    // 加えて品質プリセットもここに置く。個々の画質設定は「レンダリング」「ポストプロセス」
+    // パネルにあるが、プリセットはその両方にまたがる横断的なつまみで、
+    // フレーム時間を一括で振るという役目が内部レンダー解像度と同じ性質のため
     class SystemPanel final : public IPanel
     {
     public:
@@ -26,8 +29,13 @@ namespace Kurenai::UI
 
     private:
         void DrawDisplaySection();
+        void DrawQualityPresetSection();
         void DrawResolutionSection();
         void DrawGraphicsAPISection();
+        // テクスチャの常駐ミップ制御の状態表示とA/B用のつまみ。
+        // サイズ帯ごとの内訳をここに出すのは、タイル/ミップ単位の制御が
+        // 大きいテクスチャにしか効かないため(合計だけ見ると効きどころを取り違える)
+        void DrawTextureStreamingSection();
         void DrawUISection();
 
         KurenaiEngine3D& m_Engine;

@@ -44,25 +44,9 @@ cbuffer IBLFaceConstants : register(b0)
     float SHProjectionSize;
 };
 
-// キューブマップの1面上のUV([0,1]^2)から、その面・そのテクセルが表す方向を求める
-// (D3Dの標準的な面→方向マッピング。KurenaiEngine3D.cpp/generate_sky_cubemap.pyの
-// face_direction_gridと同じ規約に揃えている)
-float3 CubeFaceDirection(uint face, float2 uv)
-{
-    float2 ndc = uv * 2.0f - 1.0f;
-    float u = ndc.x;
-    float v = ndc.y;
-
-    float3 dir;
-    if (face == 0)      dir = float3(1.0f, -v, -u);   // +X
-    else if (face == 1) dir = float3(-1.0f, -v, u);   // -X
-    else if (face == 2) dir = float3(u, 1.0f, v);     // +Y
-    else if (face == 3) dir = float3(u, -1.0f, -v);   // -Y
-    else if (face == 4) dir = float3(u, -v, 1.0f);    // +Z
-    else                dir = float3(-u, -v, -1.0f);  // -Z
-
-    return normalize(dir);
-}
+// 面→方向の対応(CubeFaceDirection)はCubeFace.hlsliが唯一の定義。
+// 焼く側と読む側で1文字でも違うと間接光が見当違いの方向から来るため、複製を持たない
+#include "CubeFace.hlsli"
 
 // キューブ面上の座標(u,v)∈[-1,1]^2が張る立体角(定数倍を除く、形状だけの項)。CSProjectSHが使う。
 // キューブマップのテクセルは平らな面の上では等間隔でも、球面へ投影すると面積が等しくない。

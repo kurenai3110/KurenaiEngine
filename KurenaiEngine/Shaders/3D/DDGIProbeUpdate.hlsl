@@ -20,6 +20,7 @@
 // 混ざったら、そこから求める可視性判定が破綻するため。指数を大きく取った鋭い重みで、
 // dのほぼ真正面だけを拾う。
 #include "Samplers.hlsli"
+#include "CubeFace.hlsli"
 
 static const float PI = 3.14159265359f;
 
@@ -37,6 +38,10 @@ cbuffer DDGIUpdateConstants : register(b0)
 
 TextureCube CaptureRadiance : register(t0);
 TextureCube CaptureDistance : register(t1);
+
+// スクロールで担当する場所が変わってしまったプローブの通し番号(CSInvalidateProbesだけが読む)。
+// 他のエントリでは使わないが、同じファイルの中なので宣言は共有される
+StructuredBuffer<uint> DirtyProbeIndices : register(t2);
 
 // 【R32系である必要がある】ヒステリシスのために前の値を読んでから書くが、型付きUAV読み出しは
 // R32系しか保証されていない(それ以外はTypedUAVLoadAdditionalFormatsが要る)。
@@ -82,24 +87,8 @@ float3 OctahedralToDirection(float2 oct)
 }
 
 // --- キャプチャキューブのレイ列挙 ---
-// IBLConvolve.hlslのCubeFaceDirectionと同じ対応でなければならない。ここがずれると
+// 面→方向の対応(CubeFaceDirection)はCubeFace.hlsliが唯一の定義。ここが焼く側とずれると
 // 「焼いた面の向き」と「読む向き」が食い違い、間接光が見当違いの方向から来る
-float3 CubeFaceDirection(uint face, float2 uv)
-{
-    const float2 ndc = uv * 2.0f - 1.0f;
-    const float u = ndc.x;
-    const float v = ndc.y;
-
-    float3 dir;
-    if (face == 0)      dir = float3(1.0f, -v, -u);   // +X
-    else if (face == 1) dir = float3(-1.0f, -v, u);   // -X
-    else if (face == 2) dir = float3(u, 1.0f, v);     // +Y
-    else if (face == 3) dir = float3(u, -1.0f, -v);   // -Y
-    else if (face == 4) dir = float3(u, -v, 1.0f);    // +Z
-    else                dir = float3(-u, -v, -1.0f);  // -Z
-
-    return normalize(dir);
-}
 
 // キューブ面上の座標(u,v)∈[-1,1]^2 が張る立体角(定数倍を除く)。
 //
@@ -183,7 +172,12 @@ void IntegrateRays(float3 d, float captureSize, float maxRayDistance,
                 // ここへ来る時点で(0,1]に収まっている)。コンパイラへ「負は来ない」と伝えて
                 // pow()の警告X3571を消すために書いている
                 const float sharpWeight = pow(saturate(cosTheta), kDistanceSharpness) * solidAngle;
-                const float rayDistance = min(CaptureDistance.SampleLevel(DataSampler, rayDirection, 0.0f).r, maxRayDistance);
+                // 【abs()が要る】レイトレース経路は裏面ヒットを負の距離で記録する
+                // (プローブ分類のため。DDGIProbeTrace.hlsl参照)。遮蔽の判定に必要なのは
+                // 「どれだけ遠いか」だけなので、符号は落としてから使う。
+                // これを忘れると負の距離がそのまま平均に入り、チェビシェフ判定が壊れる
+                const float rayDistance =
+                    min(abs(CaptureDistance.SampleLevel(DataSampler, rayDirection, 0.0f).r), maxRayDistance);
                 momentSum += float2(rayDistance, rayDistance * rayDistance) * sharpWeight;
                 sharpWeightSum += sharpWeight;
             }
@@ -194,11 +188,72 @@ void IntegrateRays(float3 d, float captureSize, float maxRayDistance,
     distanceMoments = momentSum / max(sharpWeightSum, 1e-8f);
 }
 
+// --- プローブ分類(壁の内部に落ちたプローブを見分ける) ---
+//
+// 【何を測るのか】そのプローブから撃った全レイのうち、何割が「面の裏側」に当たったか。
+// 開けた場所のプローブはほぼ0、壁や地面の内部に埋まったプローブは1に近づく。
+// RTXGIのプローブ分類と同じ考え方で、埋まったプローブは周囲の面から見て
+// 「そこには光が無い」という嘘の情報を配るため、サンプリング側で外せるようにする。
+//
+// 【率そのものをアトラスへ入れる理由】0/1の判定をここで済ませてしまうと、
+// しきい値を変えるたびに全プローブを焼き直すことになり、しきい値の根拠を実測で
+// 決めることもできない。率を入れておけばサンプリング側でしきい値を掛けるだけで済み、
+// デバッグ表示で分布そのものを測れる。
+//
+// 【ラスタ経路では常に0になる】負の距離を書くのはレイトレース経路だけなので、
+// ラスタ経路のプローブはすべて「裏面ヒット率0=有効」として扱われる(従来どおりの挙動)。
+//
+// グループ内の64スレッドで1536本を分担して数える。この関数はグループ内の全スレッドが
+// 必ず呼ぶこと(GroupMemoryBarrierWithGroupSyncを含むため、一部のスレッドだけが
+// 呼ぶとハングする)
+static const uint kProbeUpdateGroupThreads = 64u;
+groupshared uint gBackfaceRayCount[kProbeUpdateGroupThreads];
+
+float ComputeProbeBackfaceRatio(uint groupThreadIndex, float captureSize)
+{
+    const uint size = (uint)captureSize;
+    const uint faceTexels = size * size;
+    const uint totalRays = 6u * faceTexels;
+
+    uint backface = 0u;
+    [loop]
+    for (uint i = groupThreadIndex; i < totalRays; i += kProbeUpdateGroupThreads)
+    {
+        const uint face = i / faceTexels;
+        const uint remainder = i - face * faceTexels;
+        const uint y = remainder / size;
+        const uint x = remainder - y * size;
+
+        const float2 uv = (float2(x, y) + 0.5f) / captureSize;
+        const float3 rayDirection = CubeFaceDirection(face, uv);
+        const float rayDistance = CaptureDistance.SampleLevel(DataSampler, rayDirection, 0.0f).r;
+        if (rayDistance < 0.0f)
+        {
+            ++backface;
+        }
+    }
+
+    gBackfaceRayCount[groupThreadIndex] = backface;
+    GroupMemoryBarrierWithGroupSync();
+
+    // 64要素の直列リダクション。全スレッドが同じ値を得るので、追加の同期は要らない
+    uint totalBackface = 0u;
+    [loop]
+    for (uint k = 0; k < kProbeUpdateGroupThreads; ++k)
+    {
+        totalBackface += gBackfaceRayCount[k];
+    }
+
+    // 分母はヒット数ではなく全レイ本数。開けた場所でヒットが数本しか無いときに
+    // 率が跳ね上がらないようにするため(RTXGIと同じ取り方)
+    return (float)totalBackface / (float)max(totalRays, 1u);
+}
+
 // プローブ1個ぶんのイラディアンスと距離モーメントを焼き直す。
 // ディスパッチは1プローブにつき1回で、スレッドはイラディアンス側と距離側の広いほうに合わせて
 // 起動し、それぞれの範囲外は自分で弾く(2つの解像度が違うため)
 [numthreads(8, 8, 1)]
-void CSUpdateProbe(uint3 dispatchThreadID : SV_DispatchThreadID)
+void CSUpdateProbe(uint3 dispatchThreadID : SV_DispatchThreadID, uint groupThreadIndex : SV_GroupIndex)
 {
     const uint probeIndex = (uint)Params0.x;
     const float hysteresis = Params0.y;
@@ -213,6 +268,10 @@ void CSUpdateProbe(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     const uint3 probeCounts = uint3((uint)Params2.x, (uint)Params2.y, (uint)Params2.z);
     const float preExposure = Params2.w;
+
+    // 【条件分岐より前に置くこと】この関数はグループ同期を含むので、
+    // 一部のスレッドだけが呼ぶとハングする
+    const float backfaceRatio = ComputeProbeBackfaceRatio(groupThreadIndex, captureSize);
 
     const uint2 texel = dispatchThreadID.xy;
 
@@ -237,7 +296,11 @@ void CSUpdateProbe(uint3 dispatchThreadID : SV_DispatchThreadID)
         const uint2 writeAt = ProbeAtlasOrigin(probeIndex, probeCounts, irradianceTexels, border) + border + texel;
         const float3 previous = IrradianceAtlas[writeAt].rgb;
         const float3 blended = overwrite ? irradiance : lerp(irradiance, previous, hysteresis);
-        IrradianceAtlas[writeAt] = float4(blended, 1.0f);
+        // αにはこのプローブの裏面ヒット率を入れる(セル内では定数)。
+        // 【ヒステリシスを掛けない】これは放射輝度ではなく幾何から決まる分類なので、
+        // 前の値と混ぜる意味が無い。ジオメトリが動かない限り毎回同じ値になる。
+        // αを使うことで、サンプリング側の4本のシェーダーへ新しいリソースを配らずに済んでいる
+        IrradianceAtlas[writeAt] = float4(blended, backfaceRatio);
     }
 
     if (texel.x < distanceTexels && texel.y < distanceTexels)
@@ -337,4 +400,44 @@ void CSCopyBorder(uint3 dispatchThreadID : SV_DispatchThreadID)
             }
         }
     }
+}
+
+// --- スクロールで未確定になったプローブを、焼き直されるまでサンプリングから外す ---
+//
+// 【なぜ要るのか】クリップマップの格子がカメラに追従してスクロールすると、
+// 新しく範囲へ入ったプローブのセルには**まだ別の場所のイラディアンス**が入っている。
+// 焼き直されるまでそれを引くと、動いた方向へ光が引きずられる(いちばん醜い破綻)。
+//
+// 【αへ2.0を書く】αはプローブ分類の裏面ヒット率(0〜1)なので、それを超える値を入れれば
+// **どんなしきい値でも必ず外れる**(分類を無効にしたときサンプリング側のしきい値は1.0になるが、
+// 2.0はそれも超える)。専用のリソースもフラグも増やさずに「まだ信用できない」を表せる。
+// 焼き直されると CSUpdateProbe が本来の裏面ヒット率で上書きするので、自動的に復帰する。
+//
+// 1グループ = 1プローブのセル(境界を含む8x8)。numthreadsはセルの一辺と一致させること
+[numthreads(8, 8, 1)]
+void CSInvalidateProbes(uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID)
+{
+    // Params0.x に「無効化するプローブの個数」を入れて呼ぶ(焼き込み用の probeIndex とは別の使い方)
+    const uint dirtyCount = (uint)Params0.x;
+    if (groupID.x >= dirtyCount)
+    {
+        return;
+    }
+
+    const uint irradianceTexels = (uint)Params1.x;
+    const uint border = (uint)Params1.z;
+    const uint cellSize = irradianceTexels + border * 2u;
+    if (groupThreadID.x >= cellSize || groupThreadID.y >= cellSize)
+    {
+        return;
+    }
+
+    const uint3 probeCounts = uint3((uint)Params2.x, (uint)Params2.y, (uint)Params2.z);
+    const uint probeIndex = DirtyProbeIndices[groupID.x];
+    const uint2 writeAt =
+        ProbeAtlasOrigin(probeIndex, probeCounts, irradianceTexels, border) + groupThreadID.xy;
+
+    // rgbはそのまま(焼き直しでどうせ上書きされる)。αだけを「信用できない」印にする
+    const float3 previous = IrradianceAtlas[writeAt].rgb;
+    IrradianceAtlas[writeAt] = float4(previous, 2.0f);
 }
