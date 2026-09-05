@@ -33,6 +33,9 @@
     <ClInclude Include="Source\Engine\Diagnostics\RenderCapabilities.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\RenderDumpService.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
     <ClInclude Include="Source\Engine\Diagnostics\RenderStats.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>
@@ -139,6 +142,9 @@
       <Filter>Source\Engine</Filter>
     </ClCompile>
     <ClCompile Include="Source\Engine\Settings\QualitySettings.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Diagnostics\RenderDumpService.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
     <ClCompile Include="Source\Engine\DroneShow.cpp">
