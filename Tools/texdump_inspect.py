@@ -15,6 +15,9 @@
     python Tools/texdump_inspect.py row    <dump.bin> --y N [--x0 N --x1 N] [--step N]
     python Tools/texdump_inspect.py where  <dump.bin> --pred nan|inf|neg|zero|gt:V|lt:V [--limit N]
     python Tools/texdump_inspect.py diff   <a.bin> <b.bin> [--rel] [--rect x,y,w,h]
+    python Tools/texdump_inspect.py noise  <連番*.bin> [--tile 16] [--offset Y,X]
+                                           [--offset-sweep] [--channel rgba|r|g|b|a|luma]
+                                           [--lit-threshold 1e-4]
     python Tools/texdump_inspect.py png    <dump.bin> -o out.png [--exposure F]
                                            [--channel rgb|r|g|b|a|len]
                                            [--mode linear|srgb|signed|falsecolor] [--range lo,hi]
@@ -34,6 +37,8 @@
 """
 
 import argparse
+import glob
+import math
 import os
 import struct
 import sys
@@ -43,7 +48,7 @@ import numpy as np
 # === ファイル形式 (KurenaiEngine3D::WriteTextureDumpFile と一致させること) ===
 #   off  size  内容
 #     0    4   マジック 'K','T','X','D'
-#     4    4   uint32 Version (=1)
+#     4    4   uint32 Version (=2。v1はBackend欄が無く、名前の位置も違うため拒否する)
 #     8    4   uint32 HeaderBytes (=128。ピクセルデータはここから)
 #    12    4   uint32 Width
 #    16    4   uint32 Height
@@ -349,6 +354,209 @@ def finite_percentiles(values, percents):
     if finite.size == 0:
         return [float("nan")] * len(percents)
     return list(np.percentile(finite, percents))
+
+
+# =============================================================================
+# noise (連番ダンプから、時間ノイズの空間スケールを分けて測る)
+# =============================================================================
+
+
+def parse_offset(text, tile):
+    parts = text.split(",")
+    if len(parts) != 2:
+        raise SystemExit("--offset は Y,X の形で指定します: {}".format(text))
+    try:
+        y, x = (int(part) for part in parts)
+    except ValueError:
+        raise SystemExit("--offset の値が整数ではありません: {}".format(text))
+    if y < 0 or x < 0 or y >= tile or x >= tile:
+        raise SystemExit("--offset は 0 以上 tile 未満です(tile={}): {}".format(tile, text))
+    return y, x
+
+
+def noise_channel(values, spec):
+    """(H,W,C) を時間統計用の1成分へ選ぶ。戻り値は必ずfloat64。"""
+    if spec == "luma":
+        # RGBがあるものはRec.709で輝度化する。2ch以下をRGBと見なすと架空の成分を混ぜるため先頭だけ使う。
+        if values.shape[2] >= 3:
+            return np.tensordot(values[:, :, :3], np.array([0.2126, 0.7152, 0.0722]), axes=([2], [0]))
+        return values[:, :, 0]
+    if spec == "rgba":
+        # rgba指定は、存在する全成分の算術平均で1本の尺度にする。RGB未満のダンプにも同じ指定を使える。
+        return np.mean(values, axis=2, dtype=np.float64)
+    index = "rgba".find(spec)
+    if index < 0 or index >= values.shape[2]:
+        raise SystemExit("--channel {} はこのダンプにありません (ch={})".format(spec, values.shape[2]))
+    return values[:, :, index]
+
+
+def summarize_noise(values, tile, offset):
+    """タイル分解を計算する。表示と分離し、selftestも同じ測り方を通す。"""
+    frames, height, width = values.shape
+    offset_y, offset_x = offset
+    tiles_y = (height - offset_y) // tile
+    tiles_x = (width - offset_x) // tile
+    if tiles_y == 0 or tiles_x == 0:
+        raise SystemExit("--tile {} と --offset {},{} で完全なタイルがありません ({}x{})".format(
+            tile, offset_y, offset_x, width, height))
+
+    used_height = tiles_y * tile
+    used_width = tiles_x * tile
+    cropped = values[:, offset_y:offset_y + used_height, offset_x:offset_x + used_width]
+    # x_p=m_T+r_p と明示して同じ配列から両成分を作る。別経路の丸め誤差を統計差と誤読させない。
+    blocks = cropped.reshape(frames, tiles_y, tile, tiles_x, tile).transpose(0, 1, 3, 2, 4)
+    tile_mean = np.mean(blocks, axis=(3, 4), dtype=np.float64)
+    residual = blocks - tile_mean[:, :, :, None, None]
+    between_var = np.var(tile_mean, axis=0, ddof=1, dtype=np.float64)
+    residual_var = np.var(residual, axis=0, ddof=1, dtype=np.float64)
+    inner_var = np.mean(residual_var, axis=(2, 3), dtype=np.float64)
+    pixel_var = np.var(blocks, axis=0, ddof=1, dtype=np.float64)
+    pixel_var_mean = float(np.mean(pixel_var, dtype=np.float64))
+    decomposed_var = float(np.mean(between_var + inner_var, dtype=np.float64))
+    identity_relative = abs(pixel_var_mean - decomposed_var) / max(abs(pixel_var_mean), 1e-300)
+
+    # lag-1は画素ごとの時系列で測る。定数列は相関が定義できないのでNaNのまま報告する。
+    before = blocks[:-1].reshape(frames - 1, -1)
+    after = blocks[1:].reshape(frames - 1, -1)
+    before = before - np.mean(before, axis=0, dtype=np.float64)
+    after = after - np.mean(after, axis=0, dtype=np.float64)
+    denominator = np.sqrt(np.sum(before * before, axis=0) * np.sum(after * after, axis=0))
+    lag1 = np.full(denominator.shape, np.nan, dtype=np.float64)
+    usable = denominator > 0.0
+    lag1[usable] = np.sum(before[:, usable] * after[:, usable], axis=0) / denominator[usable]
+
+    return {
+        "tiles_y": tiles_y, "tiles_x": tiles_x,
+        "used_pixels": tiles_y * tiles_x * tile * tile,
+        "total_pixels": height * width,
+        "between_std": np.sqrt(between_var),
+        # 【タイル内は画素で集約する】確立した定義(61.7m.1)は
+        # 「画素からそのフレームのタイル平均を引いた残差の時間std」の**全画素の中央値**。
+        # タイル内でいったん分散を平均してからタイルの中央値を取ると別の統計量になり、
+        # 実測で系統的に高く出た(1280x720/K=32 で 46.98 のところ 58.59)。
+        # 恒等式の検算だけは平均どうしで行うので inner_var(タイル平均)も残す
+        "residual_std": np.sqrt(residual_var),
+        "inner_std": np.sqrt(inner_var),
+        "pixel_std": np.sqrt(pixel_var).reshape(-1),
+        "lag1": lag1,
+        "tile_time_mean": np.mean(tile_mean, axis=0, dtype=np.float64),
+        "pixel_var_mean": pixel_var_mean,
+        "decomposed_var": decomposed_var,
+        "identity_relative": identity_relative,
+    }
+
+
+def noise_percentiles(values):
+    return finite_percentiles(np.asarray(values, dtype=np.float64), [50, 90])
+
+
+def print_noise_summary(summary, lit_threshold):
+    total_tiles = summary["between_std"].size
+    unlit = summary["tile_time_mean"] <= lit_threshold
+    print("タイル   : {} x {} = {:,}  完全タイルの画素 {:,} / {:,} (除外 {})".format(
+        summary["tiles_x"], summary["tiles_y"], total_tiles, summary["used_pixels"], summary["total_pixels"],
+        count_line(summary["total_pixels"] - summary["used_pixels"], summary["total_pixels"])))
+    print("未点灯   : 時間平均 <= {:.6g} のタイル {}".format(lit_threshold, count_line(np.count_nonzero(unlit), total_tiles)))
+    # タイル間はタイルで、タイル内は画素で集約する(61.7m.1 の定義)。
+    # 未点灯の除外は**タイル単位**で行う ―― 画素を間引くとタイルが欠けて恒等式が破れる
+    between_all = noise_percentiles(summary["between_std"])
+    between_lit = noise_percentiles(summary["between_std"][~unlit])
+    residual = summary["residual_std"]
+    inner_all = noise_percentiles(residual)
+    inner_lit = noise_percentiles(residual[~unlit])
+    print("{:<8}: 全タイル median={} p90={}  未点灯除外 median={} p90={}".format(
+        "タイル間", format_float(between_all[0]), format_float(between_all[1]),
+        format_float(between_lit[0]), format_float(between_lit[1])))
+    print("{:<8}: 全画素   median={} p90={}  未点灯除外 median={} p90={}".format(
+        "タイル内", format_float(inner_all[0]), format_float(inner_all[1]),
+        format_float(inner_lit[0]), format_float(inner_lit[1])))
+    # 合成は「報告した2つの中央値」から作る(61.7m の表の作り方。√(4.03²+8.30²)=9.22 と一致する)
+    print("{:<8}: 全体 median={}  未点灯除外 median={}   ← √(タイル間²+タイル内²)".format(
+        "合成", format_float(math.hypot(between_all[0], inner_all[0])),
+        format_float(math.hypot(between_lit[0], inner_lit[0]))))
+    pixel_p50, pixel_p90 = noise_percentiles(summary["pixel_std"])
+    lag_p50, _ = noise_percentiles(summary["lag1"])
+    print("画素時間std: median={} p90={}".format(format_float(pixel_p50), format_float(pixel_p90)))
+    print("lag-1自己相関: 画素 {:,} 中 median={}".format(summary["lag1"].size, format_float(lag_p50)))
+    print("恒等式   : mean_p Var(x_p)={:.12g}  Var(m_T)+mean_p Var(r_p)={:.12g}  相対偏差={:.3e}".format(
+        summary["pixel_var_mean"], summary["decomposed_var"], summary["identity_relative"]))
+    if not np.isfinite(summary["identity_relative"]) or summary["identity_relative"] > 1e-9:
+        print("!! 恒等式の相対偏差が 1e-9 を超えました。実装または非有限値の扱いを疑ってください")
+
+
+def cmd_noise(args):
+    print("=== noise ===")
+    if args.tile <= 0:
+        raise SystemExit("--tile は1以上です: {}".format(args.tile))
+    paths = []
+    for pattern in args.paths:
+        matches = sorted(glob.glob(pattern))
+        if not matches:
+            raise SystemExit("一致するファイルがありません: {}".format(pattern))
+        paths.extend(matches)
+    # 同じ引数を二度渡しても二重に平均しない。実体は絶対パスで比較する。
+    unique_paths = []
+    seen_paths = set()
+    for path in paths:
+        absolute = os.path.abspath(path)
+        if absolute not in seen_paths:
+            seen_paths.add(absolute)
+            unique_paths.append(path)
+    if len(unique_paths) < 3:
+        raise SystemExit("noise は3枚以上必要です (実際 {} 枚)".format(len(unique_paths)))
+    dumps = [load(path) for path in unique_paths]
+    dumps.sort(key=lambda dump: dump.frame_index)
+    first = dumps[0]
+    fields = (("width", "幅"), ("height", "高さ"), ("channels", "チャンネル数"),
+              ("element_type", "要素型"), ("name", "SourceName"))
+    mismatches = []
+    for dump in dumps[1:]:
+        for field, label in fields:
+            if getattr(dump, field) != getattr(first, field):
+                mismatches.append("{}: {} ({}) != {} ({})".format(
+                    label, dump.path, getattr(dump, field), first.path, getattr(first, field)))
+    if mismatches:
+        raise SystemExit("連番に一致しないヘッダがあります:\n  " + "\n  ".join(mismatches))
+
+    print("source : {}  {}枚  {}x{} ch={} {}".format(
+        first.name or "(名前なし)", len(dumps), first.width, first.height, first.channels, first.type_name))
+    print("単位     : 線形の生値（階調・8bit値ではない）")
+    frame_indices = [dump.frame_index for dump in dumps]
+    intervals = np.diff(frame_indices)
+    print("FrameIndex: " + ", ".join(str(value) for value in frame_indices))
+    if np.all(intervals == intervals[0]):
+        print("撮影間隔 : {} フレーム（隣接 {:,} 組、一定）".format(int(intervals[0]), intervals.size))
+    else:
+        print("撮影間隔 : 一定ではない（隣接差分: {}）".format(", ".join(str(int(value)) for value in intervals)))
+
+    identical = []
+    payloads = [dump.data.tobytes() for dump in dumps]
+    for right in range(1, len(dumps)):
+        for left in range(right):
+            if payloads[left] == payloads[right]:
+                identical.append((dumps[left].path, dumps[right].path))
+    print("ビット同一: {}".format(count_line(len(identical), len(dumps) * (len(dumps) - 1) // 2)))
+    if identical:
+        print("!! 同じフレームを重複捕獲した可能性があります")
+        for left, right in identical:
+            print("  {} == {}".format(left, right))
+
+    values = np.stack([noise_channel(dump.as_float(), args.channel) for dump in dumps], axis=0).astype(np.float64)
+    print_nonfinite(values, "入力非有限")
+    offset = parse_offset(args.offset, args.tile)
+    summary = summarize_noise(values, args.tile, offset)
+    print("channel  : {}  tile={}  offset={},{}".format(args.channel, args.tile, offset[0], offset[1]))
+    print_noise_summary(summary, args.lit_threshold)
+    if args.offset_sweep:
+        offsets = [0, args.tile // 4, args.tile // 2, (3 * args.tile) // 4]
+        sweep = []
+        for y in offsets:
+            for x in offsets:
+                result = summarize_noise(values, args.tile, (y, x))
+                sweep.append(noise_percentiles(result["between_std"])[0])
+        print("offset-sweep（タイル間median、16通り）: min={} median={} max={}".format(
+            format_float(np.nanmin(sweep)), format_float(np.nanmedian(sweep)), format_float(np.nanmax(sweep))))
+    return 0
 
 
 # =============================================================================
@@ -1351,6 +1559,55 @@ def cmd_selftest(args):
             "実際 {}".format(values[1, 1]),
         )
 
+        # --- 9. 連番ノイズ: 既知のタイル共通成分と画素固有成分を分解できる ---
+        print("9. 連番ノイズのタイル分解")
+        tile = 16
+        width = height = 64
+        frames = 256
+        stride = 3
+        planted_between = 0.04
+        planted_inner = 0.02
+        rng = np.random.default_rng(20260905)
+        noise_paths = []
+        for frame in range(frames):
+            # タイル共通オフセットはタイル間、画素ごとの独立ノイズはタイル内にだけ現れる。
+            common = rng.normal(0.0, planted_between, size=(height // tile, width // tile))
+            common = np.repeat(np.repeat(common, tile, axis=0), tile, axis=1)
+            independent = rng.normal(0.0, planted_inner, size=(height, width))
+            path = os.path.join(workdir, "noise_{:04d}.bin".format(frame))
+            write_dump(path, (common + independent)[:, :, None].astype(np.float32), "SelfTestNoise", 3,
+                       frame_index=frame * stride)
+            noise_paths.append(path)
+        noise_dumps = [load(path) for path in noise_paths]
+        noise_values = np.stack([noise_channel(dump.as_float(), "luma") for dump in noise_dumps], axis=0)
+        noise_summary = summarize_noise(noise_values, tile, (0, 0))
+        between_recovered = noise_percentiles(noise_summary["between_std"])[0]
+        # タイル内は**画素で**集約する(確立した定義。print_noise_summary と同じ量を検算する)
+        inner_recovered = noise_percentiles(noise_summary["residual_std"])[0]
+        relative_tolerance = 0.15
+        check("タイル間が植え込みstdを復元する（許容相対誤差15%）",
+              abs(between_recovered - planted_between) / planted_between <= relative_tolerance,
+              "実際 {:.6g} / 植込み {:.6g}".format(between_recovered, planted_between))
+        check("タイル内が植え込みstdを復元する（許容相対誤差15%）",
+              abs(inner_recovered - planted_inner) / planted_inner <= relative_tolerance,
+              "実際 {:.6g} / 植込み {:.6g}".format(inner_recovered, planted_inner))
+        check("タイル分解の恒等式の相対偏差が1e-9未満", noise_summary["identity_relative"] < 1e-9,
+              "実際 {:.3e}".format(noise_summary["identity_relative"]))
+        frame_steps = np.diff([dump.frame_index for dump in noise_dumps])
+        check("FrameIndexの間隔が書いたstrideと一致", bool(np.all(frame_steps == stride)),
+              "実際 {}".format(frame_steps.tolist()))
+
+        # 対照はタイル共通成分だけを0にする。タイル間の漏れ込みがタイル内より十分小さいことを確認する。
+        control_values = []
+        for frame in range(frames):
+            control_values.append(rng.normal(0.0, planted_inner, size=(height, width)))
+        control_summary = summarize_noise(np.asarray(control_values, dtype=np.float64), tile, (0, 0))
+        control_between = noise_percentiles(control_summary["between_std"])[0]
+        control_inner = noise_percentiles(control_summary["residual_std"])[0]
+        check("タイル共通成分0ならタイル間はタイル内より十分小さい",
+              control_between < control_inner * 0.2,
+              "タイル間 {:.6g} / タイル内 {:.6g}".format(control_between, control_inner))
+
     print("")
     if failures:
         print("selftest: {} 件中 {} 件が失敗".format(checks, len(failures)))
@@ -1427,6 +1684,15 @@ def main(argv):
     p.add_argument("--rect", help="x,y,w,h で範囲を絞る")
     p.add_argument("--force", action="store_true", help="ヘッダが食い違っていても比較する")
     p.set_defaults(func=cmd_diff)
+
+    p = sub.add_parser("noise", help="連番ダンプの時間ノイズをタイル間・タイル内へ分解する")
+    p.add_argument("paths", nargs="+", help="連番のパスまたはglob（3枚以上）")
+    p.add_argument("--tile", type=int, default=16, help="完全タイルの一辺（既定16）")
+    p.add_argument("--offset", default="0,0", help="Y,X でタイル格子をずらす（既定0,0）")
+    p.add_argument("--offset-sweep", action="store_true", help="0,1/4,1/2,3/4 tile の16格子を比較する")
+    p.add_argument("--channel", default="luma", choices=["rgba", "r", "g", "b", "a", "luma"])
+    p.add_argument("--lit-threshold", type=float, default=1e-4, help="時間平均がこれ以下のタイルを別集計する")
+    p.set_defaults(func=cmd_noise)
 
     p = sub.add_parser("png", help="PNGへ書き出す(判定の根拠にはしないこと)")
     p.add_argument("path")
