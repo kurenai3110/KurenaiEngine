@@ -147,6 +147,9 @@
     <ClCompile Include="Source\Engine\Diagnostics\RenderDumpService.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Engine\GI\DDGISystem.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
     <ClCompile Include="Source\Engine\DroneShow.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
