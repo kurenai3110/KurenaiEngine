@@ -5,6 +5,7 @@
 #include <objbase.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -265,6 +266,17 @@ namespace Kurenai
             // (理由はFrameConstants::DDGIParams4のコメント参照)
             DirectX::XMFLOAT4 Params2;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(DDGIUpdateConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
+        static_assert(offsetof(DDGIUpdateConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
+        static_assert(offsetof(DDGIUpdateConstants, Params2) == 32, "Params2 のレイアウトが変わっている");
+        static_assert(sizeof(DDGIUpdateConstants) == 48, "DDGIUpdateConstants の総サイズが変わっている");
 
         // DDGIProbeTrace.hlsl側のcbuffer DDGITraceConstants(register b1)と一致させる必要がある
         struct alignas(16) DDGITraceConstants
@@ -279,6 +291,17 @@ namespace Kurenai
             // 共有していて差し替えられないため、ここで別に渡す(ドローンの灯を外すため)。yzw=未使用
             DirectX::XMFLOAT4 Params2;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(DDGITraceConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
+        static_assert(offsetof(DDGITraceConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
+        static_assert(offsetof(DDGITraceConstants, Params2) == 32, "Params2 のレイアウトが変わっている");
+        static_assert(sizeof(DDGITraceConstants) == 48, "DDGITraceConstants の総サイズが変わっている");
 
         // シャドウパスの各カスケード描画専用(FrameConstantsとは別バッファ)。
         // 宣言は ShaderInterop/CascadeConstants.h に1本だけ置いている
@@ -295,6 +318,18 @@ namespace Kurenai
             float SHWindowLambda = 0.0f;
             float SHProjectionSize = 0.0f;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(IBLFaceConstants, Face) == 0, "Face のレイアウトが変わっている");
+        static_assert(offsetof(IBLFaceConstants, Roughness) == 4, "Roughness のレイアウトが変わっている");
+        static_assert(offsetof(IBLFaceConstants, SHWindowLambda) == 8, "SHWindowLambda のレイアウトが変わっている");
+        static_assert(offsetof(IBLFaceConstants, SHProjectionSize) == 12, "SHProjectionSize のレイアウトが変わっている");
+        static_assert(sizeof(IBLFaceConstants) == 16, "IBLFaceConstants の総サイズが変わっている");
 
         // DeferredLighting.hlsl側のstruct GPUReflectionProbeと並び・ストライド(48バイト)を
         // 一致させる必要がある
@@ -304,6 +339,17 @@ namespace Kurenai
             DirectX::XMFLOAT4 BoxExtents;     // xyz=Box形状の各軸の半径(ハーフエクステント), w=ブレンド距離
             DirectX::XMFLOAT4 ShapeParams;    // x=形状(0=Sphere,1=Box), y=sin(Yaw), z=cos(Yaw), w=未使用
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(GPUReflectionProbe, PositionRadius) == 0, "PositionRadius のレイアウトが変わっている");
+        static_assert(offsetof(GPUReflectionProbe, BoxExtents) == 16, "BoxExtents のレイアウトが変わっている");
+        static_assert(offsetof(GPUReflectionProbe, ShapeParams) == 32, "ShapeParams のレイアウトが変わっている");
+        static_assert(sizeof(GPUReflectionProbe) == 48, "GPUReflectionProbe の総サイズが変わっている");
 
         // キューブマップの1面を撮るためのビュー行列(左手系)。前方向・上方向の組は
         // IBLConvolve.hlslのCubeFaceDirectionが定める面→方向の対応と一致していなければならない
@@ -749,6 +795,48 @@ namespace Kurenai
             // Shaders/3D/GBufferCommon.hlsli の MeshletOcclusionMode を参照
             uint32_t MeshletOcclusionMode;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(ObjectConstants, World) == 0, "World のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, NormalMatrix) == 64, "NormalMatrix のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MetallicFactor) == 128, "MetallicFactor のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, RoughnessFactor) == 132, "RoughnessFactor のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, TangentSignFlip) == 136, "TangentSignFlip のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, AlphaCutoff) == 140, "AlphaCutoff のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, EmissiveFactor) == 144, "EmissiveFactor のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, OcclusionStrength) == 156, "OcclusionStrength のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, BaseColorFactor) == 160, "BaseColorFactor のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MaterialID) == 176, "MaterialID のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletOffset) == 180, "MeshletOffset のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletBufferIndex) == 184, "MeshletBufferIndex のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletVertexBufferIndex) == 188, "MeshletVertexBufferIndex のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletTriangleBufferIndex) == 192, "MeshletTriangleBufferIndex のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletCount) == 196, "MeshletCount のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, Translucency) == 200, "Translucency のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, DitherFade) == 204, "DitherFade のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MaterialTableIndex) == 208, "MaterialTableIndex のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletFilterReject) == 212, "MeshletFilterReject のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletFilterRequire) == 216, "MeshletFilterRequire のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, EmissiveIntensity) == 220, "EmissiveIntensity のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, OcclusionMapScale) == 224, "OcclusionMapScale のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletStatsEnabled) == 228, "MeshletStatsEnabled のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, ModelBoundsCenter) == 232, "ModelBoundsCenter のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, ModelBoundsRadius) == 244, "ModelBoundsRadius のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletLODCameraPos) == 248, "MeshletLODCameraPos のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletLODPixelScale) == 260, "MeshletLODPixelScale のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletLODScreenSize) == 264, "MeshletLODScreenSize のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletLODForced) == 268, "MeshletLODForced のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletDebugColorByLOD) == 272, "MeshletDebugColorByLOD のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletLODLevelCap) == 276, "MeshletLODLevelCap のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, InstanceBase) == 280, "InstanceBase のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, InstancingEnabled) == 284, "InstancingEnabled のレイアウトが変わっている");
+        static_assert(offsetof(ObjectConstants, MeshletOcclusionMode) == 288, "MeshletOcclusionMode のレイアウトが変わっている");
+        static_assert(sizeof(ObjectConstants) == 304, "ObjectConstants の総サイズが変わっている");
 
         // モデルのAABBから外接球を作り、段の選択に要る値を定数へ書き込む。
         //
@@ -939,6 +1027,21 @@ namespace Kurenai
             // Present.hlsl側の以降のフィールドがすべてずれる
             DirectX::XMFLOAT4 AccumParams;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(PresentConstants, Mode) == 0, "Mode のレイアウトが変わっている");
+        static_assert(offsetof(PresentConstants, MipLevel) == 4, "MipLevel のレイアウトが変わっている");
+        static_assert(offsetof(PresentConstants, ArraySlice) == 8, "ArraySlice のレイアウトが変わっている");
+        static_assert(offsetof(PresentConstants, Gain) == 12, "Gain のレイアウトが変わっている");
+        static_assert(offsetof(PresentConstants, TileParams) == 16, "TileParams のレイアウトが変わっている");
+        static_assert(offsetof(PresentConstants, TileRenderSize) == 32, "TileRenderSize のレイアウトが変わっている");
+        static_assert(offsetof(PresentConstants, AccumParams) == 48, "AccumParams のレイアウトが変わっている");
+        static_assert(sizeof(PresentConstants) == 64, "PresentConstants の総サイズが変わっている");
 
         // Tonemap.hlsl側のcbuffer TonemapConstantsと一致させる必要がある
         struct alignas(16) TonemapConstants
@@ -973,6 +1076,26 @@ namespace Kurenai
             // 黒の締め(ブラックポイント)。0で恒等。詳細はTonemap.hlsl側のコメント参照
             float BlackPoint;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(TonemapConstants, Curve) == 0, "Curve のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, ExposureScale) == 4, "ExposureScale のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, DitherStrength) == 8, "DitherStrength のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, UseAutoExposure) == 12, "UseAutoExposure のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, PreExposureEV100) == 16, "PreExposureEV100 のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, BloomStrength) == 20, "BloomStrength のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, MesopicStrength) == 24, "MesopicStrength のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, MesopicAdaptationEV100) == 28, "MesopicAdaptationEV100 のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, Sharpness) == 32, "Sharpness のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, InvRenderWidth) == 36, "InvRenderWidth のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, InvRenderHeight) == 40, "InvRenderHeight のレイアウトが変わっている");
+        static_assert(offsetof(TonemapConstants, BlackPoint) == 44, "BlackPoint のレイアウトが変わっている");
+        static_assert(sizeof(TonemapConstants) == 48, "TonemapConstants の総サイズが変わっている");
 
         // Upscale.hlsl側のcbuffer UpscaleConstantsと一致させる必要がある
         struct alignas(16) UpscaleConstants
@@ -988,6 +1111,21 @@ namespace Kurenai
             float RcasSharpnessScale;
             float UpscalePadding;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(UpscaleConstants, EasuCon0) == 0, "EasuCon0 のレイアウトが変わっている");
+        static_assert(offsetof(UpscaleConstants, EasuCon1) == 16, "EasuCon1 のレイアウトが変わっている");
+        static_assert(offsetof(UpscaleConstants, EasuCon2) == 32, "EasuCon2 のレイアウトが変わっている");
+        static_assert(offsetof(UpscaleConstants, EasuCon3) == 48, "EasuCon3 のレイアウトが変わっている");
+        static_assert(offsetof(UpscaleConstants, OutputSize) == 64, "OutputSize のレイアウトが変わっている");
+        static_assert(offsetof(UpscaleConstants, RcasSharpnessScale) == 72, "RcasSharpnessScale のレイアウトが変わっている");
+        static_assert(offsetof(UpscaleConstants, UpscalePadding) == 76, "UpscalePadding のレイアウトが変わっている");
+        static_assert(sizeof(UpscaleConstants) == 80, "UpscaleConstants の総サイズが変わっている");
 
         // FSR1のFsrEasuCon()と同じ内容。出力画素の整数座標から入力画像の再構成位置を求めるための
         // スケール/オフセットと、12タップぶんの4回のGather4の中心へのオフセットを作る。
@@ -1037,6 +1175,21 @@ namespace Kurenai
             // (意味と、なぜ天頂輝度に混ぜないのかはSky.hlsliのCloudSkyLightのコメント参照)
             DirectX::XMFLOAT4 CloudSkyLight;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(GPUSkyParameters, ZenithTint) == 0, "ZenithTint のレイアウトが変わっている");
+        static_assert(offsetof(GPUSkyParameters, HorizonTint) == 16, "HorizonTint のレイアウトが変わっている");
+        static_assert(offsetof(GPUSkyParameters, GroundTint) == 32, "GroundTint のレイアウトが変わっている");
+        static_assert(offsetof(GPUSkyParameters, SunGlowTint) == 48, "SunGlowTint のレイアウトが変わっている");
+        static_assert(offsetof(GPUSkyParameters, Luminance) == 64, "Luminance のレイアウトが変わっている");
+        static_assert(offsetof(GPUSkyParameters, ModelParams) == 80, "ModelParams のレイアウトが変わっている");
+        static_assert(offsetof(GPUSkyParameters, CloudSkyLight) == 96, "CloudSkyLight のレイアウトが変わっている");
+        static_assert(sizeof(GPUSkyParameters) == 112, "GPUSkyParameters の総サイズが変わっている");
 
         // SkyIntegrate.hlsl側のcbuffer SkyIntegrateConstantsと一致させる必要がある
         struct alignas(16) SkyIntegrateConstants
@@ -1058,6 +1211,22 @@ namespace Kurenai
             // xyz=視点のワールド座標(レイの起点)、w=太陽照度/空照度比
             DirectX::XMFLOAT4 ViewerAndSunRatio;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(SkyIntegrateConstants, SunDirection) == 0, "SunDirection のレイアウトが変わっている");
+        static_assert(offsetof(SkyIntegrateConstants, IntegrateParams) == 16, "IntegrateParams のレイアウトが変わっている");
+        static_assert(offsetof(SkyIntegrateConstants, CloudParams0) == 32, "CloudParams0 のレイアウトが変わっている");
+        static_assert(offsetof(SkyIntegrateConstants, CloudParams1) == 48, "CloudParams1 のレイアウトが変わっている");
+        static_assert(offsetof(SkyIntegrateConstants, CloudParams2) == 64, "CloudParams2 のレイアウトが変わっている");
+        static_assert(offsetof(SkyIntegrateConstants, CloudParams3) == 80, "CloudParams3 のレイアウトが変わっている");
+        static_assert(offsetof(SkyIntegrateConstants, FogParams0) == 96, "FogParams0 のレイアウトが変わっている");
+        static_assert(offsetof(SkyIntegrateConstants, ViewerAndSunRatio) == 112, "ViewerAndSunRatio のレイアウトが変わっている");
+        static_assert(sizeof(SkyIntegrateConstants) == 128, "SkyIntegrateConstants の総サイズが変わっている");
 
         // AtmosphereLUT.hlsl側のcbuffer AtmosphereConstantsと一致させる必要がある。
         // 3つのエントリポイント(Transmittance/MultiScattering/SkyView)が共通で読む
@@ -1068,6 +1237,16 @@ namespace Kurenai
             // x=Mie(エアロゾル)密度の倍率(濁りのスライダー由来)、yzw=未使用
             DirectX::XMFLOAT4 Params0;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(AtmosphereConstants, SunDirection) == 0, "SunDirection のレイアウトが変わっている");
+        static_assert(offsetof(AtmosphereConstants, Params0) == 16, "Params0 のレイアウトが変わっている");
+        static_assert(sizeof(AtmosphereConstants) == 32, "AtmosphereConstants の総サイズが変わっている");
 
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
         struct alignas(16) SkyBakeConstants
@@ -1081,6 +1260,18 @@ namespace Kurenai
             // 太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)
             DirectX::XMFLOAT4 SunDirection;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(SkyBakeConstants, Face) == 0, "Face のレイアウトが変わっている");
+        static_assert(offsetof(SkyBakeConstants, CloudTransmittance) == 4, "CloudTransmittance のレイアウトが変わっている");
+        static_assert(offsetof(SkyBakeConstants, Padding0) == 8, "Padding0 のレイアウトが変わっている");
+        static_assert(offsetof(SkyBakeConstants, SunDirection) == 16, "SunDirection のレイアウトが変わっている");
+        static_assert(sizeof(SkyBakeConstants) == 32, "SkyBakeConstants の総サイズが変わっている");
 
         // Bloom.hlsl側のcbuffer BloomConstantsと一致させる必要がある
         struct alignas(16) BloomConstants
@@ -1101,6 +1292,23 @@ namespace Kurenai
             float ExposureScale;
             float Padding[2];
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(BloomConstants, SrcSize) == 0, "SrcSize のレイアウトが変わっている");
+        static_assert(offsetof(BloomConstants, DstSize) == 8, "DstSize のレイアウトが変わっている");
+        static_assert(offsetof(BloomConstants, Threshold) == 16, "Threshold のレイアウトが変わっている");
+        static_assert(offsetof(BloomConstants, SoftKnee) == 20, "SoftKnee のレイアウトが変わっている");
+        static_assert(offsetof(BloomConstants, ApplyKarisAndThreshold) == 24, "ApplyKarisAndThreshold のレイアウトが変わっている");
+        static_assert(offsetof(BloomConstants, UseAutoExposure) == 28, "UseAutoExposure のレイアウトが変わっている");
+        static_assert(offsetof(BloomConstants, PreExposureEV100) == 32, "PreExposureEV100 のレイアウトが変わっている");
+        static_assert(offsetof(BloomConstants, ExposureScale) == 36, "ExposureScale のレイアウトが変わっている");
+        static_assert(offsetof(BloomConstants, Padding) == 40, "Padding のレイアウトが変わっている");
+        static_assert(sizeof(BloomConstants) == 48, "BloomConstants の総サイズが変わっている");
 
         // AutoExposure.hlsl側のcbuffer AutoExposureConstantsと一致させる必要がある
         struct alignas(16) AutoExposureConstants
@@ -1132,6 +1340,31 @@ namespace Kurenai
             float ResetAdaptation;
             float Padding[3];
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(AutoExposureConstants, InputSize) == 0, "InputSize のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, MinEV100) == 8, "MinEV100 のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, MaxEV100) == 12, "MaxEV100 のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, PreExposureEV100) == 16, "PreExposureEV100 のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, DeltaTime) == 20, "DeltaTime のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, AdaptationSpeedUp) == 24, "AdaptationSpeedUp のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, AdaptationSpeedDown) == 28, "AdaptationSpeedDown のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, LowPercentile) == 32, "LowPercentile のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, HighPercentile) == 36, "HighPercentile のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, ExposureCompensation) == 40, "ExposureCompensation のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, NightRolloffEV) == 44, "NightRolloffEV のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, NightRolloffDarkEV100) == 48, "NightRolloffDarkEV100 のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, NightRolloffBrightEV100) == 52, "NightRolloffBrightEV100 のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, KeyReferenceEV100) == 56, "KeyReferenceEV100 のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, KeyCeilingEV) == 60, "KeyCeilingEV のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, ResetAdaptation) == 64, "ResetAdaptation のレイアウトが変わっている");
+        static_assert(offsetof(AutoExposureConstants, Padding) == 68, "Padding のレイアウトが変わっている");
+        static_assert(sizeof(AutoExposureConstants) == 80, "AutoExposureConstants の総サイズが変わっている");
 
         // HiZ.hlsl側のcbuffer HiZConstantsと一致させる必要がある
         struct alignas(16) HiZConstants
@@ -1139,6 +1372,16 @@ namespace Kurenai
             DirectX::XMUINT2 SrcSize;
             DirectX::XMUINT2 DstSize;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(HiZConstants, SrcSize) == 0, "SrcSize のレイアウトが変わっている");
+        static_assert(offsetof(HiZConstants, DstSize) == 8, "DstSize のレイアウトが変わっている");
+        static_assert(sizeof(HiZConstants) == 16, "HiZConstants の総サイズが変わっている");
 
         // ModelCull.hlsl の cbuffer ModelCullConstants と並びを一致させること
         struct alignas(16) ModelCullConstants
@@ -1160,6 +1403,20 @@ namespace Kurenai
             // x=AABBを膨らませる量[m](前フレームからのカメラ移動距離)、yzw=未使用
             DirectX::XMFLOAT4 CullExpandParams;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(ModelCullConstants, CullViewProj) == 0, "CullViewProj のレイアウトが変わっている");
+        static_assert(offsetof(ModelCullConstants, CullPrevViewProj) == 64, "CullPrevViewProj のレイアウトが変わっている");
+        static_assert(offsetof(ModelCullConstants, CullParams) == 128, "CullParams のレイアウトが変わっている");
+        static_assert(offsetof(ModelCullConstants, CullRegionParams) == 144, "CullRegionParams のレイアウトが変わっている");
+        static_assert(offsetof(ModelCullConstants, CullHiZScreenParams) == 160, "CullHiZScreenParams のレイアウトが変わっている");
+        static_assert(offsetof(ModelCullConstants, CullExpandParams) == 176, "CullExpandParams のレイアウトが変わっている");
+        static_assert(sizeof(ModelCullConstants) == 192, "ModelCullConstants の総サイズが変わっている");
 
         // 間接描画の行き先の区画。**PSOごとに1区画**で、1区画につき1回ExecuteIndirectする。
         // 1回のExecuteIndirectで切り替えられるのは引数に含めたルートパラメータだけで、
@@ -1193,6 +1450,7 @@ namespace Kurenai
         static_assert(
             (RHI::IRHICommandList::kDispatchMeshIndirectArgStride % 8) == 0,
             "引数の刻みが8の倍数でないと、2件目以降のGPU仮想アドレスが境界を割る");
+
 
         // 区画1つぶんのバイト数。区画の境目も8バイト境界に載せたいので256へ切り上げる
         uint32_t ComputeModelCullRegionStride(uint32_t capacity)
@@ -1247,6 +1505,16 @@ namespace Kurenai
             DirectX::XMFLOAT4 Samples[kSSAOKernelSizeMax]; // タンジェント空間の半球カーネル
             DirectX::XMFLOAT4 Params;                      // x: 半径, y: バイアス, z: 強さ(べき乗), w: 使うサンプル数
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(SSAOConstants, Samples) == 0, "Samples のレイアウトが変わっている");
+        static_assert(offsetof(SSAOConstants, Params) == 256, "Params のレイアウトが変わっている");
+        static_assert(sizeof(SSAOConstants) == 272, "SSAOConstants の総サイズが変わっている");
 
         // SSIL_VisibilityBitmask.hlsl側のcbuffer SSILConstantsと一致させる必要がある
         struct alignas(16) SSILConstants
@@ -1254,6 +1522,16 @@ namespace Kurenai
             DirectX::XMFLOAT4 Params0; // x: 半径, y: 厚み(Thickness Heuristic), z: 間接光の強さ, w: AOのべき乗
             DirectX::XMUINT4 Params1;  // x: スライス数, y: スライスあたりのステップ数, z/w: 未使用
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(SSILConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
+        static_assert(offsetof(SSILConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
+        static_assert(sizeof(SSILConstants) == 32, "SSILConstants の総サイズが変わっている");
 
         // SSR.hlsl側のcbuffer SSRConstantsと一致させる必要がある
         struct alignas(16) SSRConstants
@@ -1268,6 +1546,16 @@ namespace Kurenai
             // (m_ReflectionSettings.PlanarDistortion)、zw: 未使用
             DirectX::XMFLOAT4 Params1;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(SSRConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
+        static_assert(offsetof(SSRConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
+        static_assert(sizeof(SSRConstants) == 32, "SSRConstants の総サイズが変わっている");
 
         // RTReflection.hlsl側のcbuffer RTReflectionConstantsと一致させる必要がある
         struct alignas(16) RTReflectionConstants
@@ -1278,6 +1566,16 @@ namespace Kurenai
             // zw: 未使用
             DirectX::XMFLOAT4 Params1;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(RTReflectionConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
+        static_assert(offsetof(RTReflectionConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
+        static_assert(sizeof(RTReflectionConstants) == 32, "RTReflectionConstants の総サイズが変わっている");
 
         // RTShadow.hlsl側のcbuffer RTShadowConstantsと一致させる必要がある
         struct alignas(16) RTShadowConstants
@@ -1285,6 +1583,15 @@ namespace Kurenai
             // xy: 出力サイズ(ピクセル), z: 太陽の見かけの半径(ラジアン), w: 1ピクセルあたりのレイ本数
             DirectX::XMFLOAT4 Params0;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(RTShadowConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
+        static_assert(sizeof(RTShadowConstants) == 16, "RTShadowConstants の総サイズが変わっている");
 
         // MegaLightsTilePool.hlsl側のcbuffer MegaLightsTilePoolConstantsと並びを一致させること。
         // 先頭4つはLightCullingConstantsと同じ並びだが、TileParams.wの意味が違う
@@ -1303,6 +1610,19 @@ namespace Kurenai
             // yz=タイル格子の画素オフセット(各0〜15)、w=未使用
             DirectX::XMUINT4 PoolParams;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(MegaLightsTilePoolConstants, View) == 0, "View のレイアウトが変わっている");
+        static_assert(offsetof(MegaLightsTilePoolConstants, TileParams) == 64, "TileParams のレイアウトが変わっている");
+        static_assert(offsetof(MegaLightsTilePoolConstants, RenderSize) == 80, "RenderSize のレイアウトが変わっている");
+        static_assert(offsetof(MegaLightsTilePoolConstants, ProjParams) == 96, "ProjParams のレイアウトが変わっている");
+        static_assert(offsetof(MegaLightsTilePoolConstants, PoolParams) == 112, "PoolParams のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsTilePoolConstants) == 128, "MegaLightsTilePoolConstants の総サイズが変わっている");
 
         // MegaLightsAccum.hlsl側のcbuffer MegaLightsAccumConstantsと一致させる必要がある
         struct alignas(16) MegaLightsAccumConstants
@@ -1310,6 +1630,15 @@ namespace Kurenai
             // x=出力幅, y=出力高, z=足す前に0で始めるか(1でリセット), w=未使用
             DirectX::XMUINT4 Params0;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(MegaLightsAccumConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsAccumConstants) == 16, "MegaLightsAccumConstants の総サイズが変わっている");
 
         // 確率的サンプリング経路の5本のHLSLが共有する。宣言は
         // ShaderInterop/MegaLightsStochasticConstants.h に1本だけ置き、HLSL側の
@@ -1327,6 +1656,17 @@ namespace Kurenai
             // x=深度のエッジ停止の強さ, yzw=未使用
             DirectX::XMFLOAT4 Params2;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params2) == 32, "Params2 のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsDenoiseConstants) == 48, "MegaLightsDenoiseConstants の総サイズが変わっている");
 
         // MegaLightsReference.hlsl側のcbuffer MegaLightsConstantsと一致させる必要がある
         struct alignas(16) MegaLightsConstants
@@ -1345,6 +1685,17 @@ namespace Kurenai
             // 露出を掛けるとEV100=15で1/39322倍になる。y/z/w: 未使用
             DirectX::XMFLOAT4 Params2;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(MegaLightsConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
+        static_assert(offsetof(MegaLightsConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
+        static_assert(offsetof(MegaLightsConstants, Params2) == 32, "Params2 のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsConstants) == 48, "MegaLightsConstants の総サイズが変わっている");
 
         // RTAO.hlsl側のcbuffer RTAOConstantsと一致させる必要がある
         struct alignas(16) RTAOConstants
@@ -1354,6 +1705,16 @@ namespace Kurenai
             // x: レイ本数, y: 間接光の強さ, z: バウンス面へ影レイを撃つか, w: 未使用
             DirectX::XMFLOAT4 Params1;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(RTAOConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
+        static_assert(offsetof(RTAOConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
+        static_assert(sizeof(RTAOConstants) == 32, "RTAOConstants の総サイズが変わっている");
 
         // TAA.hlsl側のcbuffer TAAConstants(register b1)と並びを一致させる必要がある。
         // TAAパスはb0(FrameConstants)を使わず、必要な行列もすべてこちらへ入れている。
@@ -1374,6 +1735,20 @@ namespace Kurenai
             // y: 静止時のちらつき抑制の強さ(m_PostProcessSettings.TAAAntiFlicker)。zwは未使用
             DirectX::XMFLOAT4 Params1;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(TAAConstants, InvViewProj) == 0, "InvViewProj のレイアウトが変わっている");
+        static_assert(offsetof(TAAConstants, PrevViewProj) == 64, "PrevViewProj のレイアウトが変わっている");
+        static_assert(offsetof(TAAConstants, JitterUv) == 128, "JitterUv のレイアウトが変わっている");
+        static_assert(offsetof(TAAConstants, ScreenParams) == 144, "ScreenParams のレイアウトが変わっている");
+        static_assert(offsetof(TAAConstants, Params0) == 160, "Params0 のレイアウトが変わっている");
+        static_assert(offsetof(TAAConstants, Params1) == 176, "Params1 のレイアウトが変わっている");
+        static_assert(sizeof(TAAConstants) == 192, "TAAConstants の総サイズが変わっている");
 
         // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
         struct alignas(16) GPULight
@@ -1387,6 +1762,17 @@ namespace Kurenai
             // w=指向性κ(エミッシブ光源プロキシのみ。それ以外は0)
             DirectX::XMFLOAT4 Params;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(GPULight, PositionType) == 0, "PositionType のレイアウトが変わっている");
+        static_assert(offsetof(GPULight, ColorRange) == 16, "ColorRange のレイアウトが変わっている");
+        static_assert(offsetof(GPULight, DirectionAngle) == 32, "DirectionAngle のレイアウトが変わっている");
+        static_assert(offsetof(GPULight, Params) == 48, "Params のレイアウトが変わっている");
         static_assert(sizeof(GPULight) == 64, "GPULightはDirectLighting.hlsl側と64バイトで一致させる必要がある");
 
         // t5の構造化バッファに詰めるライトの最大数。実データ(BistroInterior.fbxで4灯)に対しては
@@ -1433,6 +1819,19 @@ namespace Kurenai
             // x=クリップ平面を使うか(0=メイン描画、1=平面反射)、yzw=未使用
             DirectX::XMFLOAT4 Params1;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(DroneShowConstants, View) == 0, "View のレイアウトが変わっている");
+        static_assert(offsetof(DroneShowConstants, Proj) == 64, "Proj のレイアウトが変わっている");
+        static_assert(offsetof(DroneShowConstants, Params0) == 128, "Params0 のレイアウトが変わっている");
+        static_assert(offsetof(DroneShowConstants, ClipPlane) == 144, "ClipPlane のレイアウトが変わっている");
+        static_assert(offsetof(DroneShowConstants, Params1) == 160, "Params1 のレイアウトが変わっている");
+        static_assert(sizeof(DroneShowConstants) == 176, "DroneShowConstants の総サイズが変わっている");
 
         // DirectLighting.hlsl側のcbuffer LightingConstantsと一致させる必要がある。
         // b0はFrameConstantsが使っており定数バッファスロットは2本しか無いため、
@@ -1454,6 +1853,18 @@ namespace Kurenai
             // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=カリング有効フラグ
             DirectX::XMUINT4 TileParams;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(LightingConstants, LightCount) == 0, "LightCount のレイアウトが変わっている");
+        static_assert(offsetof(LightingConstants, SSSParams0) == 16, "SSSParams0 のレイアウトが変わっている");
+        static_assert(offsetof(LightingConstants, SSSParams1) == 32, "SSSParams1 のレイアウトが変わっている");
+        static_assert(offsetof(LightingConstants, TileParams) == 48, "TileParams のレイアウトが変わっている");
+        static_assert(sizeof(LightingConstants) == 64, "LightingConstants の総サイズが変わっている");
 
         // kLightTileSize / kLightTileCapacity / kLightTileStride はKurenaiEngine3Dのstatic constexprへ
         // 移した(DebugViewPanelがヒートマップの上限として参照するため)。定義はKurenaiEngine3D.h
@@ -1469,6 +1880,18 @@ namespace Kurenai
             // x=射影行列の(0,0)成分, y=同(1,1)成分, z=深度リニアライズ定数a, w=同b
             DirectX::XMFLOAT4 ProjParams;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(LightCullingConstants, View) == 0, "View のレイアウトが変わっている");
+        static_assert(offsetof(LightCullingConstants, TileParams) == 64, "TileParams のレイアウトが変わっている");
+        static_assert(offsetof(LightCullingConstants, RenderSize) == 80, "RenderSize のレイアウトが変わっている");
+        static_assert(offsetof(LightCullingConstants, ProjParams) == 96, "ProjParams のレイアウトが変わっている");
+        static_assert(sizeof(LightCullingConstants) == 112, "LightCullingConstants の総サイズが変わっている");
 
         // 自前ソフトウェアラスタライザ用。Shaders/3D/SoftwareRasterCommon.hlsliの
         // cbuffer SWRasterConstants(b1)と並び・サイズを一致させること
@@ -1485,6 +1908,19 @@ namespace Kurenai
             // x=巨大三角形リストの容量、yzw=未使用
             DirectX::XMUINT4 LargeParams;
         };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(SWRasterConstants, ViewProj) == 0, "ViewProj のレイアウトが変わっている");
+        static_assert(offsetof(SWRasterConstants, RenderSize) == 64, "RenderSize のレイアウトが変わっている");
+        static_assert(offsetof(SWRasterConstants, SunDirection) == 80, "SunDirection のレイアウトが変わっている");
+        static_assert(offsetof(SWRasterConstants, DispatchParams) == 96, "DispatchParams のレイアウトが変わっている");
+        static_assert(offsetof(SWRasterConstants, LargeParams) == 112, "LargeParams のレイアウトが変わっている");
+        static_assert(sizeof(SWRasterConstants) == 128, "SWRasterConstants の総サイズが変わっている");
 
         // 自前ソフトウェアラスタライザが読むメッシュ1件ぶんの情報。
         // Shaders/3D/SoftwareRasterCommon.hlsliのSWRasterMeshInfoと並び・サイズを一致させること。
