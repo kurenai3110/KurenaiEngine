@@ -561,6 +561,20 @@ namespace Kurenai::Assets
                     Core::Logger::Warning("SceneLoader", "未知のキーを無視します: " + WideToUtf8(key) + " (" + WideToUtf8(filePath) + ":" + std::to_string(lineNumber) + ")");
                 };
 
+                // 各セクションで共通の数値解析・範囲検証・指定フラグ更新をここへ集約する。
+                const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+                {
+                    if (!ParseFloatToken(value, out))
+                    {
+                        errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
+                    }
+                    if (out < minValue || out > maxValue)
+                    {
+                        errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
+                    }
+                    has = true;
+                };
+
                 switch (currentSection)
                 {
                 case Section::Scene:
@@ -1077,21 +1091,6 @@ namespace Kurenai::Assets
 
                 case Section::Cloud:
                 {
-                    // 数値1つを読んで範囲を確かめ、「指定された」印を立てるだけの処理が続くので
-                    // ラムダにまとめる(範囲外は打ち間違いとみなしてエラーにする)
-                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
-                    {
-                        if (!ParseFloatToken(value, out))
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
-                        }
-                        if (out < minValue || out > maxValue)
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
-                        }
-                        has = true;
-                    };
-
                     if (CaseInsensitiveEquals(key, L"Coverage"))
                     {
                         readFloat(result.CloudCoverage, result.HasCloudCoverage, 0.0f, 1.0f, L"Coverage");
@@ -1154,20 +1153,6 @@ namespace Kurenai::Assets
 
                 case Section::Fog:
                 {
-                    // [Cloud]と同じ作法。範囲外は打ち間違いとみなしてエラーにする
-                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
-                    {
-                        if (!ParseFloatToken(value, out))
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
-                        }
-                        if (out < minValue || out > maxValue)
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
-                        }
-                        has = true;
-                    };
-
                     if (CaseInsensitiveEquals(key, L"Enabled"))
                     {
                         const std::optional<bool> parsedValue = ParseBoolToken(value);
@@ -1198,19 +1183,6 @@ namespace Kurenai::Assets
 
                 case Section::Bloom:
                 {
-                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
-                    {
-                        if (!ParseFloatToken(value, out))
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
-                        }
-                        if (out < minValue || out > maxValue)
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
-                        }
-                        has = true;
-                    };
-
                     if (CaseInsensitiveEquals(key, L"Enabled"))
                     {
                         const std::optional<bool> parsedValue = ParseBoolToken(value);
@@ -1236,20 +1208,6 @@ namespace Kurenai::Assets
 
                 case Section::Stars:
                 {
-                    // [Cloud]/[Fog]と同じ作法。範囲外は打ち間違いとみなしてエラーにする
-                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
-                    {
-                        if (!ParseFloatToken(value, out))
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
-                        }
-                        if (out < minValue || out > maxValue)
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
-                        }
-                        has = true;
-                    };
-
                     if (CaseInsensitiveEquals(key, L"Enabled"))
                     {
                         const std::optional<bool> parsedValue = ParseBoolToken(value);
@@ -1280,19 +1238,6 @@ namespace Kurenai::Assets
 
                 case Section::DroneShow:
                 {
-                    const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
-                    {
-                        if (!ParseFloatToken(value, out))
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
-                        }
-                        if (out < minValue || out > maxValue)
-                        {
-                            errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
-                        }
-                        has = true;
-                    };
-
                     if (CaseInsensitiveEquals(key, L"Enabled"))
                     {
                         const std::optional<bool> parsedValue = ParseBoolToken(value);

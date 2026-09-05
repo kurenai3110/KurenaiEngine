@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -9074,7 +9075,21 @@ namespace Kurenai
             // なっているため、ミューテックスによる保護は要らない
             // (経緯はdocs/ImplementationHistory.md 23章)
             const auto cpuStart = std::chrono::steady_clock::now();
-            Render(frameState);
+            try
+            {
+                Render(frameState);
+            }
+            catch (const std::exception& e)
+            {
+                // この時点でRenderスレッドを終えると、次のTickFrameがフレーム受け渡し待ちのまま
+                // 停止する。例外は記録して次フレームを試み、Run側の通常終了処理で停止させる。
+                Core::Logger::Error("KurenaiEngine3D", std::string("Render中に例外が発生しました: ") + e.what());
+            }
+            catch (...)
+            {
+                // 例外の型が不明でもスレッド関数から抜けるとstd::terminateになるため、必ず記録して継続する。
+                Core::Logger::Error("KurenaiEngine3D", "Render中に不明な例外が発生しました");
+            }
             const auto cpuEnd = std::chrono::steady_clock::now();
             // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく
             // GPU側の処理時間の反映なので差し引く(DX11は常に0が返るため影響しない)

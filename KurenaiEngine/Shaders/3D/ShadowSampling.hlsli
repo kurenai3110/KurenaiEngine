@@ -4,7 +4,7 @@
 //
 // 【インクルードの前提】このファイルは以下が宣言済みであることを前提にしているため、
 // FrameConstants cbufferとSamplers.hlsliの後ろで#includeすること
-// (既存の共有ヘッダーと同様、インクルードガードは持たない):
+// (インクルードガードは二重定義だけを防ぎ、この前提を満たすものではない):
 //   - Samplers.hlsli の DataSampler(s2、Point+Clamp)。既存の2ファイルはいずれも
 //     SpecularEnergy.hlsli経由で間接的にインクルードしている
 //   - FrameConstants の ShadowParams / CascadeSplits / CascadeViewProj
@@ -12,6 +12,9 @@
 // 【なぜ共通化しているか】DirectLighting.hlslとTransparent.hlslにPCSS実装を複製すると、
 // 「片方だけ直すと半透明と不透明で影が食い違う」事故が起きる。実装を1箇所に集約することで、
 // 両者が構造的にずれないようにしている
+
+#ifndef KURENAI_SHADOW_SAMPLING_HLSLI
+#define KURENAI_SHADOW_SAMPLING_HLSLI
 
 // 全カスケードの深度を1枚にまとめたテクスチャ配列。スライス番号がカスケード番号に対応する
 // (エンジン側はKurenaiEngine3D::m_ShadowCascadeArray。CreateDepthTextureArrayで生成)。
@@ -119,3 +122,5 @@ float ComputeCascadedShadowFactor(float3 worldPos, float viewDepth, float NdotL)
 
     return ComputeShadowFactor(cascadeIndex, CascadeViewProj[cascadeIndex], worldPos, NdotL);
 }
+
+#endif

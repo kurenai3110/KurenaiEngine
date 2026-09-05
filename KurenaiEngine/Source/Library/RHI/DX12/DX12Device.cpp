@@ -2047,7 +2047,11 @@ namespace Kurenai::RHI
             }
             if (!m_TilePool->Allocate(tileCount, state->MappedTiles[mip]))
             {
-                Core::Logger::Warning("DX12", "タイルプールが足りずミップを貼れませんでした");
+                Core::Logger::Error(
+                    "DX12",
+                    "タイルプール不足のためテクスチャ(SRV " + std::to_string(texture->GetSrvIndex()) + ", " +
+                        std::to_string(desc.Width) + "x" + std::to_string(desc.Height) + ", ミップ" +
+                        std::to_string(mip) + ")の常駐化を中止します");
                 return nullptr;
             }
             MapStandardMip(resource.Get(), *state, mip, state->MappedTiles[mip]);
@@ -2079,6 +2083,11 @@ namespace Kurenai::RHI
                 const DirectX::Image* src = image.GetImage().GetImage(i, 0, 0);
                 if (src == nullptr)
                 {
+                    Core::Logger::Error(
+                        "DX12",
+                        "テクスチャ(SRV " + std::to_string(texture->GetSrvIndex()) + ", " +
+                            std::to_string(desc.Width) + "x" + std::to_string(desc.Height) + ", ミップ" +
+                            std::to_string(uploadFirst + i) + ")の画像データを取得できず常駐化を中止します");
                     return nullptr;
                 }
                 subresources[i].pData = src->pixels;
