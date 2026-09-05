@@ -318,7 +318,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // (空間再利用の分母がこの確定情報を使う。MegaLightsInitialSample.hlsl と同じ)
         if (Params0.w != 0u && Params2.w != 0u && !MegaLightsReservoirIsEmpty(history))
         {
-            const uint historyLight = MegaLightsUnpackLight(history.LightAndFlags);
+            const uint historyLight = MegaLightsUnpackLight(history.IndexAndFlags);
             const GPULight hLight = Lights[historyLight];
             if (LightCastsRaytracedShadow(hLight.Params.y))
             {
@@ -342,13 +342,13 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                             sampleDist) <= 0.0f)
                     {
                         // 殺す。番号とサンプル点は残し、W=0・可視フラグfalseにする
-                        history.LightAndFlags = MegaLightsPackLightAndFlags(historyLight, false);
+                        history.IndexAndFlags = MegaLightsPackLightAndFlags(historyLight, false);
                         history.W = 0.0f;
                     }
                     else
                     {
                         // このフレーム・この画素で可視を検証済み
-                        history.LightAndFlags = MegaLightsPackLightAndFlags(historyLight, true);
+                        history.IndexAndFlags = MegaLightsPackLightAndFlags(historyLight, true);
                     }
                 }
             }
@@ -399,7 +399,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             continue;
         }
 
-        const uint lightI = MegaLightsUnpackLight(candidate.LightAndFlags);
+        const uint lightI = MegaLightsUnpackLight(candidate.IndexAndFlags);
         // 【借りた灯は必ず現フレームの面で評価し直す】前で良かった灯が今も良いとは限らない
         const float pdfSelf = TargetPdfOn(self, lightI);
         if (pdfSelf <= 0.0f)
@@ -425,7 +425,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             // 中心を狙い直してしまい、再利用した画素だけ半影が消える
             selectedSampleUV = candidate.SampleUV;
             // 現フレームは初期可視レイ、履歴は時間検証レイが立てたフラグをそのまま使う
-            selectedVerified = MegaLightsUnpackVisible(candidate.LightAndFlags);
+            selectedVerified = MegaLightsUnpackVisible(candidate.IndexAndFlags);
         }
     }
 
@@ -444,10 +444,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // ことを知れず、暗い側の系統誤差が時間再利用経由で戻ってくる
         // (詳細は MegaLightsInitialSample.hlsl の殺し側のコメント)
         MegaLightsReservoir rejected = MegaLightsMakeEmptyReservoir();
-        if (MegaLightsUnpackLight(current.LightAndFlags) != kMegaLightsInvalidLight &&
-            !MegaLightsUnpackVisible(current.LightAndFlags))
+        if (MegaLightsUnpackLight(current.IndexAndFlags) != kMegaLightsInvalidLight &&
+            !MegaLightsUnpackVisible(current.IndexAndFlags))
         {
-            rejected.LightAndFlags = current.LightAndFlags;
+            rejected.IndexAndFlags = current.IndexAndFlags;
             rejected.SampleUV = current.SampleUV;
         }
         rejected.M = min(confidenceSum, float(max(Params0.z, 1u)));
@@ -471,7 +471,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 【可視フラグは証明があるときだけ true】空間再利用の Z がこのフラグを
     // 「レイを省いてよいか」の判定に使う。履歴の勝者に true を付けると、
     // 検証していない可視性を確定扱いしてしまう
-    result.LightAndFlags = MegaLightsPackLightAndFlags(selectedLight, selectedVerified);
+    result.IndexAndFlags = MegaLightsPackLightAndFlags(selectedLight, selectedVerified);
     result.SampleUV = selectedSampleUV;
     result.W = weightSum / (denominator * selectedTargetPdf);
     result.M = confidenceSum;
