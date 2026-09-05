@@ -4007,6 +4007,47 @@ namespace Kurenai
             std::string("TAAを起動オプションで設定しました: ") + (enabled ? "有効" : "無効"));
     }
 
+    void KurenaiEngine3D::SetAOTechnique(int technique)
+    {
+        if (technique < static_cast<int>(AOTechnique::SSAO) || technique > static_cast<int>(AOTechnique::Raytraced))
+        {
+            Core::Logger::Error("KurenaiEngine3D", "SetAOTechnique: 不正な値です: " + std::to_string(technique));
+            return;
+        }
+        m_AOTechnique = static_cast<AOTechnique>(technique);
+        Core::Logger::Info("KurenaiEngine3D", "AO手法を設定しました: " + std::to_string(technique));
+    }
+
+    void KurenaiEngine3D::SetSoftwareRasterEnabled(bool enabled)
+    {
+        m_SoftwareRasterEnabled = enabled;
+        Core::Logger::Info("KurenaiEngine3D", std::string("ソフトウェアラスタライザを設定しました: ") + (enabled ? "有効" : "無効"));
+    }
+
+    void KurenaiEngine3D::SetDDGIHalfResolutionEnabled(bool enabled)
+    {
+        m_DDGIHalfResolution = enabled;
+        Core::Logger::Info("KurenaiEngine3D", std::string("DDGI半解像度を設定しました: ") + (enabled ? "有効" : "無効"));
+    }
+
+    void KurenaiEngine3D::SetProbeUpdateMode(int mode)
+    {
+        if (mode < static_cast<int>(ProbeUpdateMode::Baked) || mode > static_cast<int>(ProbeUpdateMode::Realtime))
+        {
+            Core::Logger::Error("KurenaiEngine3D", "SetProbeUpdateMode: 不正な値です: " + std::to_string(mode));
+            return;
+        }
+        m_ProbeUpdateMode = static_cast<ProbeUpdateMode>(mode);
+        Core::Logger::Info("KurenaiEngine3D", "反射プローブ更新モードを設定しました: " + std::to_string(mode));
+    }
+
+    void KurenaiEngine3D::SetUpscaleEnabled(bool enabled)
+    {
+        // UI と同じく、現在の品質モードと出力解像度を保ったまま有効状態だけを変える。
+        RequestUpscaleSettings(enabled, m_UpscaleQualityMode, m_UpscaleOutputWidth, m_UpscaleOutputHeight);
+        Core::Logger::Info("KurenaiEngine3D", std::string("超解像を設定しました: ") + (enabled ? "有効" : "無効"));
+    }
+
     void KurenaiEngine3D::SetPerfDump(const wchar_t* path, int frames)
     {
         if (path == nullptr || path[0] == L'\0' || frames <= 0)
@@ -4025,6 +4066,27 @@ namespace Kurenai
             "KurenaiEngine3D",
             "GPU計測の書き出しを設定しました(計測用): " + Core::WideToUtf8(m_PerfDumpPath) + " / " +
                 std::to_string(frames) + "フレーム");
+    }
+
+    void KurenaiEngine3D::SetPassManifest(const wchar_t* path, int frames)
+    {
+        if (path == nullptr || path[0] == L'\0' || frames < 1)
+        {
+            m_PassManifestPath.clear();
+            m_PassManifestTargetFrames = 1;
+            m_PassManifestIssuedFrames = 0;
+            m_PassManifestIssued = false;
+            Core::Logger::Error("KurenaiEngine3D", "パスマニフェストの出力設定が不正です");
+            return;
+        }
+
+        m_PassManifestPath = path;
+        m_PassManifestTargetFrames = static_cast<uint32_t>(frames);
+        m_PassManifestIssuedFrames = 0;
+        m_PassManifestIssued = false;
+        Core::Logger::Info(
+            "KurenaiEngine3D", "パスマニフェストの出力を設定しました: " + Core::WideToUtf8(path) +
+                " (frames=" + std::to_string(frames) + ")");
     }
 
     void KurenaiEngine3D::SetMegaLightsSpatialIterations(int iterations)
@@ -16448,6 +16510,51 @@ namespace Kurenai
                 cmd->Draw(3, 0);
             },
         });
+
+        // 1枚だけなら既存のテクスチャダンプと同じフレームを使う。複数枚では焼き込みを捕まえるため最初から出す。
+        const uint32_t manifestTargetFrame =
+            m_TextureDumpFrame >= 0 ? static_cast<uint32_t>(m_TextureDumpFrame) : kMegaLightsAccumWarmup;
+        const bool writeSingleManifest =
+            m_PassManifestTargetFrames == 1 && !m_PassManifestIssued && m_TAAFrameIndex >= manifestTargetFrame;
+        const bool writeManifestSequence =
+            m_PassManifestTargetFrames > 1 && m_PassManifestIssuedFrames < m_PassManifestTargetFrames;
+        if (!m_PassManifestPath.empty() && (writeSingleManifest || writeManifestSequence))
+        {
+            const uint32_t manifestSequenceIndex = m_PassManifestIssuedFrames;
+            m_PassManifestIssued = true;
+            ++m_PassManifestIssuedFrames;
+            std::string executionOrderError;
+            const std::string manifest = graph.BuildPassManifest(&executionOrderError);
+            if (!executionOrderError.empty())
+            {
+                Core::Logger::Error("KurenaiEngine3D", "パスマニフェストの実行順を解決できませんでした: " + executionOrderError);
+            }
+
+            const std::wstring outputPath = MakeTextureDumpSequencePath(
+                m_PassManifestPath, m_PassManifestTargetFrames, manifestSequenceIndex);
+            std::ofstream file(outputPath, std::ios::binary);
+            if (!file)
+            {
+                Core::Logger::Error(
+                    "KurenaiEngine3D", "パスマニフェストを書き出せませんでした(ファイルを開けない): " +
+                        Core::WideToUtf8(outputPath));
+            }
+            else
+            {
+                file.write(manifest.data(), static_cast<std::streamsize>(manifest.size()));
+                if (!file)
+                {
+                    Core::Logger::Error(
+                        "KurenaiEngine3D", "パスマニフェストを書き出せませんでした(書き込み失敗): " +
+                            Core::WideToUtf8(outputPath));
+                }
+                else
+                {
+                    Core::Logger::Info(
+                        "KurenaiEngine3D", "パスマニフェストを書き出しました: " + Core::WideToUtf8(outputPath));
+                }
+            }
+        }
 
         graph.Execute();
 

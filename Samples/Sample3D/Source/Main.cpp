@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <exception>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -315,7 +316,7 @@ namespace
             const std::string optionNameUtf8 = Kurenai::Core::WideToUtf8(optionName);
             if (i + 1 >= argc)
             {
-                Kurenai::Core::Logger::Warning(
+                Kurenai::Core::Logger::Error(
                     "Main", optionNameUtf8 + "の後に値が指定されていないため、既定のままにします");
                 break;
             }
@@ -323,7 +324,7 @@ namespace
             const long parsed = wcstol(argv[i + 1], &end, 10);
             if (end == argv[i + 1] || (end != nullptr && *end != 0))
             {
-                Kurenai::Core::Logger::Warning(
+                Kurenai::Core::Logger::Error(
                     "Main",
                     optionNameUtf8 + "の引数が数値ではないため、既定のままにします: " +
                         Kurenai::Core::WideToUtf8(argv[i + 1]));
@@ -746,6 +747,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
         const int perfDumpFrames = ParseIntOption(L"-perfdumpframes", 120);
+        // -passmanifest <パス>。RenderGraph の登録順と実行順を比較用テキストへ書き出す。
+        const std::wstring passManifestPath = ParseStringOption(L"-passmanifest");
+        int passManifestFrames = ParseIntOption(L"-passmanifestframes", 1);
+        if (passManifestFrames < 1)
+        {
+            Kurenai::Core::Logger::Warning("Main", "-passmanifestframes は1以上で指定します。1に丸めます");
+            passManifestFrames = 1;
+        }
         // -dumptex <名前> <パス> (繰り返し可) / -dumptexmip <N> / -dumptexslice <N> /
         // -dumpframe <N> / -exitafterdump。中間レンダーターゲットを線形の生値で書き出す。
         // 「コンパイルは通るが絵が違う」を、8bitのスクリーンショットではなく数値で切り分けるための経路
@@ -762,6 +771,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // なければならないので、有無で絵が1画素も変わらないことが正しさの定義になる。
         // その突き合わせをUIのチェックボックスでやると撮影ごとに操作を再現できない
         const int occlusionCull = ParseIntOption(L"-occlusioncull", -1);
+        constexpr int kMissingValidationOption = (std::numeric_limits<int>::min)();
+        // -aotechnique: 0=SSAO、1=SSIL(Visibility Bitmask)、2=Raytraced AO。
+        const int aoTechnique = ParseIntOption(L"-aotechnique", kMissingValidationOption);
+        const int softwareRaster = ParseIntOption(L"-swraster", kMissingValidationOption);
+        const int ddgiHalfResolution = ParseIntOption(L"-ddgihalfres", kMissingValidationOption);
+        // -probeupdate: 0=Baked、1=OnDemand、2=Realtime。
+        const int probeUpdate = ParseIntOption(L"-probeupdate", kMissingValidationOption);
+        const int upscale = ParseIntOption(L"-upscale", kMissingValidationOption);
         // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
         const int taa = ParseIntOption(L"-taa", -1);
         // -meshlet 0|1。メッシュレット描画の有無。切ると従来の頂点シェーダー経路へ落ち、
@@ -787,6 +804,61 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (occlusionCull >= 0)
             {
                 engine.SetOcclusionCullingEnabled(occlusionCull != 0);
+            }
+            if (aoTechnique != kMissingValidationOption)
+            {
+                if (aoTechnique < 0 || aoTechnique > 2)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-aotechnique の値が範囲外です: " + std::to_string(aoTechnique));
+                }
+                else
+                {
+                    engine.SetAOTechnique(aoTechnique);
+                }
+            }
+            if (softwareRaster != kMissingValidationOption)
+            {
+                if (softwareRaster != 0 && softwareRaster != 1)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-swraster の値が不正です: " + std::to_string(softwareRaster));
+                }
+                else
+                {
+                    engine.SetSoftwareRasterEnabled(softwareRaster != 0);
+                }
+            }
+            if (ddgiHalfResolution != kMissingValidationOption)
+            {
+                if (ddgiHalfResolution != 0 && ddgiHalfResolution != 1)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-ddgihalfres の値が不正です: " + std::to_string(ddgiHalfResolution));
+                }
+                else
+                {
+                    engine.SetDDGIHalfResolutionEnabled(ddgiHalfResolution != 0);
+                }
+            }
+            if (probeUpdate != kMissingValidationOption)
+            {
+                if (probeUpdate < 0 || probeUpdate > 2)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-probeupdate の値が範囲外です: " + std::to_string(probeUpdate));
+                }
+                else
+                {
+                    engine.SetProbeUpdateMode(probeUpdate);
+                }
+            }
+            if (upscale != kMissingValidationOption)
+            {
+                if (upscale != 0 && upscale != 1)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-upscale の値が不正です: " + std::to_string(upscale));
+                }
+                else
+                {
+                    engine.SetUpscaleEnabled(upscale != 0);
+                }
             }
             if (taa >= 0)
             {
@@ -891,6 +963,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetPerfDump(perfDumpPath.c_str(), perfDumpFrames);
             }
+            if (!passManifestPath.empty())
+            {
+                engine.SetPassManifest(passManifestPath.c_str(), passManifestFrames);
+            }
             // 【ループの中で適用する】APIを切り替えて作り直したときも同じ指定が効くようにする
             // (debugViewIndexを毎回適用しているのと同じ理由)
             for (const TextureDumpArg& dump : textureDumps)
@@ -898,9 +974,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 engine.AddTextureDump(
                     dump.Name.c_str(), dump.Path.c_str(), dump.MipLevel, dump.ArraySlice, dump.Frames, dump.Stride);
             }
-            if (!textureDumps.empty())
+            if (!textureDumps.empty() || (!passManifestPath.empty() && passManifestFrames == 1))
             {
                 engine.SetTextureDumpFrame(textureDumpFrame);
+            }
+            if (!textureDumps.empty())
+            {
                 engine.SetExitAfterDump(exitAfterDump);
             }
             engine.Run();

@@ -264,7 +264,14 @@ namespace Kurenai
         // 画素単位の一致を測る比較では切っておかないと、再現性の下限が取れない
         void SetTAAEnabled(bool enabled);
 
+        void SetAOTechnique(int technique);
+        void SetSoftwareRasterEnabled(bool enabled);
+        void SetDDGIHalfResolutionEnabled(bool enabled);
+        void SetProbeUpdateMode(int mode);
+        void SetUpscaleEnabled(bool enabled);
+
         void SetPerfDump(const wchar_t* path, int frames);
+        void SetPassManifest(const wchar_t* path, int frames);
 
         // 【検証専用】中間レンダーターゲットの中身を、線形の生値のままファイルへ書き出す。
         // nameは GetDumpableTextureNames() が返す名前(m_を外したメンバ名)。
@@ -1720,6 +1727,10 @@ namespace Kurenai
         // (新しい定数を作らないのは、あちらのコメントに書かれた「整定を待つ理由」が
         //  そのまま当てはまり、値が2つに割れると片方だけ直す事故が起きるため)
         int32_t m_TextureDumpFrame = -1;
+        std::wstring m_PassManifestPath;
+        uint32_t m_PassManifestTargetFrames = 1;
+        uint32_t m_PassManifestIssuedFrames = 0;
+        bool m_PassManifestIssued = false;
         bool m_ExitAfterDump = false;
         bool m_ExitAfterDumpRequested = false;
         // 読み戻しを何フレーム失敗し続けたら諦めるか。DX11のMap(DO_NOT_WAIT)は
