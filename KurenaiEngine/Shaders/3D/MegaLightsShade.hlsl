@@ -137,7 +137,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 【幾何は保存せず引き直す】リザーバに入れて持ち回ることもできるが、再利用で
     // 別の画素から来たサンプルは、その画素の位置で評価し直さなければ意味が無い。
     // 常に「いまの画素で引き直す」形にしておけば、再利用が入っても同じコードで済む
-    const uint lightIndex = MegaLightsUnpackLight(reservoir.LightAndFlags);
+    const uint lightIndex = MegaLightsUnpackLight(reservoir.IndexAndFlags);
     const GPULight light = Lights[lightIndex];
     const PunctualGeometry geometry = EvaluatePunctualGeometry(light, worldPos, N, translucency);
     if (!geometry.Contributes)
@@ -152,7 +152,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 「このフレーム・この画素で可視レイを通過した」ことの証明なので、同じレイを
     // もう一度撃つ必要が無い。フィルタ無効時はフラグに証明の意味が無いので必ず撃つ
     const bool alreadyVerified =
-        (Params2.w != 0u) && MegaLightsUnpackVisible(reservoir.LightAndFlags);
+        (Params2.w != 0u) && MegaLightsUnpackVisible(reservoir.IndexAndFlags);
     if (Params0.w != 0u && LightCastsRaytracedShadow(light.Params.y) && !alreadyVerified)
     {
         const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);

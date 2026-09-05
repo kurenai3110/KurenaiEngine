@@ -20,6 +20,7 @@
 #include "KurenaiEngineBase.h"
 #include "KurenaiTypes.h"
 
+#include "Assets/MeshLightScene.h"
 #include "Assets/RaytracingScene.h"
 #include "Assets/Scene.h"
 #include "Assets/TextureStreaming.h"
@@ -180,6 +181,13 @@ namespace Kurenai
         // **負なら既定のまま**。抑止されるのはDDGIだけで、反射プローブ・RT反射・
         // G-Bufferの自発光には掛からない(鏡面が光源を直接見ているのは二重計上ではない)
         void SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount, int doubleCountGI);
+
+        // 段階2: 発光面を三角形のまま面積分するか(0=無効 / 正=有効 / 負=既定のまま)。
+        //
+        // 【MegaLights 経路でのみ効く】DX11・非DXR・MegaLights無効のときは何も起きず、
+        // 段階1のプロキシがそのまま光る。エミッシブ光源そのものが無効なら三角形も出ない。
+        // **いまは参照実装(全三角形総当たり)しか無いので実シーンでは回らない。**
+        void SetMeshLights(int enabled);
 
         // シーン全体の自発光の強度倍率(ImGuiの「自発光の強度」と同じ値)。0以下で既定のまま。
         //
@@ -496,6 +504,8 @@ namespace Kurenai
         {
             Assets::Scene Scene;
             Assets::RaytracingScene RaytracingScene;
+            // メッシュライトの三角形テーブル(段階2)。RaytracingSceneと同じ扱い
+            Assets::MeshLightScene MeshLightScene;
             std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
             // 水面法線マップ版。SkyboxTextureとまったく同じ扱い
             std::unique_ptr<RHI::IRHITexture> WaterNormalMapTexture;
@@ -506,6 +516,7 @@ namespace Kurenai
         {
             Assets::Scene Scene;
             Assets::RaytracingScene RaytracingScene;
+            Assets::MeshLightScene MeshLightScene;
             size_t SceneIndex = 0;
             // シーンの[Scene]Skyboxが読み込み済みのものと異なる場合のみ非nullptr。
             // nullptrなら現在のスカイボックスを維持する
@@ -2599,6 +2610,9 @@ namespace Kurenai
         // 判定し、メッシュ側はEmissiveClustersの有無で見る
         std::vector<bool> m_EmissiveProxyInstances;
         bool m_EmissiveLightsEnabled = Defaults::EmissiveLightsEnabled;
+        // 段階2: 発光面を三角形のまま面積分するか。MegaLights 経路でのみ効く
+        // (有効なフレームは参照実装が型3のプロキシを読み飛ばし、代わりに三角形を積む)
+        bool m_MeshLightsEnabled = Defaults::MeshLightsEnabled;
         // DDGIにも自発光を加算したままにするか(=二重に数えるか)。既定は抑止する
         bool m_EmissiveLightsDoubleCountGI = Defaults::EmissiveLightsDoubleCountGI;
         float m_EmissiveLightsCutoffIrradiance = Defaults::EmissiveLightsCutoffIrradiance;
@@ -3506,6 +3520,8 @@ namespace Kurenai
         // 【破棄順】m_Sceneより後に宣言することで、メンバ破棄順(宣言の逆順)により
         // m_Sceneの頂点/インデックスバッファより先に破棄される
         Assets::RaytracingScene m_RaytracingScene;
+        // メッシュライトの三角形テーブル(段階2)。段階1のプロキシと同じ集合から作られる
+        Assets::MeshLightScene m_MeshLightScene;
         // テクスチャの常駐ミップ制御。自前のワーカースレッドを持ち、そこがm_Sceneの
         // IRHITexture*を掴む。
         //

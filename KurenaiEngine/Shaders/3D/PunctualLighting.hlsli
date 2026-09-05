@@ -236,19 +236,37 @@ PunctualGeometry EvaluatePunctualGeometry(GPULight light, float3 worldPos, float
 
 // 1灯ぶんの寄与(反射 + 透過、シャドウ適用済み)。shadow は可視率(0=完全に影, 1=遮蔽なし)。
 // 参照実装と確率的サンプリングが**同じ式**で足し合わせるためにここへ置く
+// 方向 L から来た光に対するこの面の寄与。**減衰の式を一切知らない。**
+//
+// 【なぜ切り出してあるか】段階2のメッシュライトは減衰の式だけが違い、BRDF・透過ローブ・
+// 影の掛け方はまったく同じである。そちら(MeshLighting.hlsli)から式を複製すると、
+// 「一致させ続けなければならない式」が1つ増える。ここを共有すれば増えない。
+//
+// 【lightColor と geometryTerm を分けたまま受け取る理由】掛け算の順序を変えないため。
+// 呼び出し側で積を先に作ると結合が変わって丸めが動き、**punctual の出力がビット一致しなくなる**。
+// 純粋抽出であることを .kshader のバイト比較で示せる形にしておく
+float3 ComposeSurfaceContribution(
+    float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness,
+    float translucency, SpecularEnergyContext energy, float shadow, float3 lightColor, float geometryTerm)
+{
+    const float3 reflected =
+        EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy);
+    // 透過側の遮蔽は太陽と同じ扱い(遮蔽側も光を通すぶんを下限として残す)
+    const float transmissionShadow = lerp(saturate(translucency * kTranslucencyShadowFloor), 1.0f, shadow);
+    const float3 transmitted =
+        EvaluateTranslucency(N, V, L, albedo, translucency) * transmissionShadow;
+
+    return reflected * shadow * lightColor * geometryTerm +
+           transmitted * lightColor * geometryTerm;
+}
+
 float3 EvaluatePunctualContribution(
     GPULight light, PunctualGeometry geometry, float3 N, float3 V, float NdotV, float3 albedo, float metallic,
     float roughness, float translucency, SpecularEnergyContext energy, float shadow)
 {
-    const float3 reflected =
-        EvaluateDirectBRDF(N, V, geometry.L, NdotV, albedo, metallic, roughness, energy);
-    // 透過側の遮蔽は太陽と同じ扱い(遮蔽側も光を通すぶんを下限として残す)
-    const float transmissionShadow = lerp(saturate(translucency * kTranslucencyShadowFloor), 1.0f, shadow);
-    const float3 transmitted =
-        EvaluateTranslucency(N, V, geometry.L, albedo, translucency) * transmissionShadow;
-
-    return reflected * shadow * light.ColorRange.rgb * geometry.Atten +
-           transmitted * light.ColorRange.rgb * geometry.Atten;
+    return ComposeSurfaceContribution(
+        N, V, geometry.L, NdotV, albedo, metallic, roughness, translucency, energy, shadow,
+        light.ColorRange.rgb, geometry.Atten);
 }
 
 #endif // KURENAI_PUNCTUAL_LIGHTING_BRDF

@@ -91,6 +91,34 @@ def edge_band_mask(ref_lum, threshold):
     return relative > threshold
 
 
+def parse_rect(text):
+    """--rect の x0,y0,x1,y1 を読む。x1/y1 は含まない"""
+    parts = text.split(",")
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("--rect は x0,y0,x1,y1 の4つ")
+    try:
+        return tuple(int(p) for p in parts)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--rect の値が整数ではない: {text}")
+
+
+def crop_to_rect(array, rect, width, height):
+    """比較する矩形だけを切り出す。
+
+    【部分集合で測れないと困る理由】総和は「自明に一致する画素」が支配する。
+    半影帯だけ・発光体の近傍だけといった部分集合で同じ指標を出せないと、
+    「変えた領域が正しく変わったか」を測れない(61.7c.5)
+    """
+    x0, y0, x1, y1 = rect
+    x0 = max(0, min(x0, width))
+    x1 = max(0, min(x1, width))
+    y0 = max(0, min(y0, height))
+    y1 = max(0, min(y1, height))
+    if x0 >= x1 or y0 >= y1:
+        raise ValueError(f"--rect が空の矩形になっている: {rect}")
+    return array[y0:y1, x0:x1]
+
+
 def cmd_dump(args):
     ref, rw, rh, rframes = read_dump(args.reference)
     cmp_, cw, ch, cframes = read_dump(args.compare)
@@ -99,6 +127,20 @@ def cmd_dump(args):
 
     print(f"参照 : {args.reference}  {rw}x{rh}  {rframes}フレーム")
     print(f"比較 : {args.compare}  {cw}x{ch}  {cframes}フレーム")
+
+    # 【蓄積枚数の一致を見る】平均にしてあるので枚数が違っても計算はできてしまうが、
+    # 収束の速さを比べる意味が無くなる。揃える運用にしていても、揃っていることを
+    # 確かめずに比べられる形にしてはいけない
+    if rframes != cframes and not args.allow_frame_mismatch:
+        raise ValueError(
+            f"蓄積フレーム数が違います({rframes} と {cframes})。"
+            f"収束の比較にならないので止めます(承知のうえなら --allow-frame-mismatch)"
+        )
+
+    if args.rect is not None:
+        ref = crop_to_rect(ref, args.rect, rw, rh)
+        cmp_ = crop_to_rect(cmp_, args.rect, rw, rh)
+        print(f"比較矩形 : {args.rect}  → {ref.shape[1]}x{ref.shape[0]}")
 
     if args.hash:
         # ビット同一の判定(回帰対照用)。平均ではなく生バイトで比べる
@@ -130,6 +172,10 @@ def cmd_dump(args):
 
     # 死んだ画素 = 参照は光っているのに比較側が厳密に0(61.7f)
     dead = int(np.count_nonzero(lit & (cmp_lum == 0.0)))
+    # 余分な画素 = 参照が消えているのに比較側が点灯している。
+    # 【片側だけ数えてはいけない】dead だけだと「暗く出た」しか見えず、定義域が広がる
+    # 向きの間違い(本来届かない灯を提案している)を見落とす
+    spurious = int(np.count_nonzero((~lit) & (cmp_lum > args.lit_threshold)))
 
     print(f"\n点灯画素 : {lit_count} / {total} ({100.0 * lit_count / total:.1f}%)")
     print(f"総和比 (比較/参照)          : {sum_ratio:.5f}")
@@ -139,6 +185,7 @@ def cmd_dump(args):
     print(f"符号つき相対誤差の中央値    : {np.median(signed_lit):+.5f}")
     print(f"誤差が負側の画素の割合      : {100.0 * np.count_nonzero(signed_lit < 0) / lit_count:.1f}%")
     print(f"死んだ画素                  : {dead}")
+    print(f"余分な画素                  : {spurious}")
 
     # 【平均は載せるが指標にしない】ファイアフライに支配される(61.7h)
     print(f"(参考)相対誤差の平均      : {signed_lit.mean():+.5f}  ← 指標にしないこと")
@@ -318,7 +365,12 @@ def main():
     p_dump.add_argument("compare", help="比較対象のダンプ")
     p_dump.add_argument("--lit-threshold", type=float, default=1e-4, help="点灯とみなす参照の輝度(既定 1e-4)")
     p_dump.add_argument("--edge-threshold", type=float, default=0.25, help="影の縁とみなす3x3の相対レンジ(既定 0.25)")
-    p_dump.add_argument("--hash", action="store_true", help="ビット同一かも判定する(回帰対照用)")
+    p_dump.add_argument("--hash", action="store_true",
+                        help="ビット同一かも判定する(回帰対照用。生バイトで比べるので --rect は無視される)")
+    p_dump.add_argument("--rect", type=parse_rect, default=None,
+                        help="比較する矩形 x0,y0,x1,y1(x1/y1は含まない)。既定は全画面")
+    p_dump.add_argument("--allow-frame-mismatch", action="store_true",
+                        help="蓄積フレーム数が違っても続行する(既定は止める)")
     p_dump.set_defaults(func=cmd_dump)
 
     p_burst = sub.add_parser("burst", help="連写のちらつきを時間stdで測る")

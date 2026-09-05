@@ -66,8 +66,19 @@ cbuffer MegaLightsConstants : register(b1)
     // x=出力幅, y=出力高, z=1灯あたりに撃つ影レイの本数(**0なら影を撃たず可視率1**。恒等テスト用),
     // w=有効ライト数
     uint4 Params0;
-    // x=フレーム番号(球光源のサンプル列を毎フレーム回すのに使う), yzw=未使用
+    // x=フレーム番号(球光源のサンプル列を毎フレーム回すのに使う),
+    // y=発光三角形の枚数(**0ならメッシュライトは無効**。段階1のプロキシがそのまま光る),
+    // zw=未使用
     uint4 Params1;
+    // x=シーン全体の自発光の強度倍率(ImGuiの「自発光の強度」),
+    // y=影響半径の伸縮 sqrt(倍率)。半径は倍率1で焼いてあるので、
+    //   倍率を上げたときに段階1のRangeと同じだけ伸びるようにする, zw=未使用
+    //
+    // 【露出ではない】自発光は露出を通らない経路で、段階1のプロキシも露出抜きで
+    // ColorRange を作っている。ここで露出を掛けるとEV100=15で1/39322倍になり、
+    // 「真っ暗だが厳密に0ではない」という紛らわしい絵になる(実際に踏んだ)。
+    // 倍率のほうは毎フレーム変わるのでテーブルへ焼けず、ここから掛ける
+    float4 Params2;
 };
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
@@ -87,6 +98,10 @@ Texture2D BRDFLUTTexture : register(t5);
 // 球光源のサンプリング(MegaLightsSampleUnitSphere など)を共有する。
 // 確率的サンプリング側と同じ関数を使わないと、真値と評価対象で狙う点の分布がずれる
 #include "MegaLightsCommon.hlsli"
+// 発光三角形の面積分。ComposeSurfaceContribution を PunctualLighting.hlsli から借りるので、
+// **必ずそのあとに**インクルードする。t7 は候補プールがC++側で張るので t8 を使う
+#define KURENAI_MESH_LIGHT_REGISTER t8
+#include "MeshLighting.hlsli"
 
 // 直接光(拡散+鏡面、影と透過を適用済み)。DirectLighting.hlsl が t7 で読んで加算する
 RWTexture2D<float4> MegaLightsOutput : register(u0);
@@ -192,6 +207,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     const uint lightCount = Params0.w;
     const uint shadowRayCount = Params0.z;
+    const uint triangleCount = Params1.y;
+    // 【フレーム単位の1変数に閉じること】画素やタイルごとに切り替えると境界で二重計上し、
+    // 静止画では見えない形で壊れる(docs 参照)
+    const bool meshLightsActive = triangleCount > 0u;
 
     float3 directLight = float3(0.0f, 0.0f, 0.0f);
 
@@ -201,6 +220,16 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     for (uint i = 0u; i < lightCount; ++i)
     {
         const GPULight light = Lights[i];
+
+        // 【メッシュライトが有効なフレームは段階1のプロキシ(型3)を数えない】
+        // 同じ発光体を下の三角形ループが面積分するので、両方積むと真値が二重に数える。
+        // プロキシ自体は m_LightBuffer に残す ―― DDGI・反射プローブ・半透明・平面反射は
+        // 面光源を扱えないのでプロキシが要る(消すとそれらから発光体の照明だけが消え、
+        // しかもそれらしく見える)
+        if (meshLightsActive && (uint)light.PositionType.w == 3u)
+        {
+            continue;
+        }
 
         // 幾何・減衰・early-out は PunctualLighting.hlsli の共有定義を使う。
         // 確率的サンプリング側とここで「どの灯が寄与0とみなされるか」がずれると、
@@ -271,6 +300,69 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         directLight += EvaluatePunctualContribution(
             light, geometry, N, V, NdotV, albedo, metallic, roughness, translucency, energy, shadow);
+    }
+
+    // --- 発光三角形の総当たり ---
+    //
+    // 【これが段階2の真値】1枚ごとに面積一様で sampleCount 点を引き、被積分関数
+    // f_r * cosθ_x * L_e * G を平均する。密度は 1/A で G が A を含むので、
+    // **平均そのものが不偏推定量**になる(重みを別に割る必要がない)。
+    //
+    // 【減衰をサンプル点で測ること ―― 球光源とは逆にする】球光源は「中心で減衰、
+    // 点で遮蔽」という光源モデルの意図的な近似だが、三角形の目的は面積分そのもの。
+    // 中心で減衰を測ってサンプル点へレイを撃つと、面積分ではない別の量の不偏推定量になる。
+    // 引き換えに近距離で 1/d^2 が跳ねる(分散が増える)ことを受け入れる。
+    //
+    // 【実シーンでは動かない】10万三角形 × 影レイは総当たりでは回らない。
+    // 真値が取れるのは小さな専用シーンだけで、これは検証計画の実質的な上限でもある
+    const float meshEmissiveIntensity = Params2.x;
+    const float meshRangeScale = Params2.y;
+    [loop]
+    for (uint t = 0u; t < triangleCount; ++t)
+    {
+        const GPUEmissiveTriangle tri = EmissiveTriangles[t];
+
+        // 影を撃たない恒等テスト(shadowRayCount==0)でも面積分は要るので最低1点は引く
+        const uint sampleCount = max(shadowRayCount, 1u);
+        // 【種にフレーム番号を混ぜる】混ぜないと毎フレーム同じ点を引き、蓄積枚数を
+        // いくら増やしてもばらつきが減らない(球光源で実際に踏んだ罠)。
+        // punctual のループと違う塩を足して、灯 i と三角形 i が同じ列を引かないようにする
+        uint rngState = HashUint(
+            pixel.x + pixel.y * outputSize.x + t * 0x9E3779B9u + Params1.x * 0x85EBCA6Bu + 0x632BE5ABu);
+
+        float3 triangleSum = float3(0.0f, 0.0f, 0.0f);
+        [loop]
+        for (uint s = 0u; s < sampleCount; ++s)
+        {
+            const float2 u = float2(NextRandom(rngState), NextRandom(rngState));
+            const float2 bary = MeshLightSampleBarycentric(u);
+
+            const MeshLightGeometry geometry =
+                EvaluateMeshLightGeometry(tri, bary, worldPos, N, translucency, meshRangeScale);
+            if (!geometry.Contributes)
+            {
+                continue;
+            }
+
+            float shadow = 1.0f;
+            if (shadowRayCount > 0u)
+            {
+                const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
+                const float originBias =
+                    (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
+                // 受光点が発光面に張り付いている場合は遮蔽を判定しようがないので素通しとする
+                if (geometry.Distance > originBias)
+                {
+                    shadow = TraceLightVisibility(
+                        worldPos + N * originBias, geometry.L, originBias, geometry.Distance);
+                }
+            }
+
+            triangleSum += EvaluateMeshLightContribution(
+                tri, geometry, N, V, NdotV, albedo, metallic, roughness, translucency,
+                energy, shadow, meshEmissiveIntensity);
+        }
+        directLight += triangleSum / float(sampleCount);
     }
 
     MegaLightsOutput[pixel] = float4(directLight, 1.0f);
