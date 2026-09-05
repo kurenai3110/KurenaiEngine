@@ -36,6 +36,7 @@
 #include "Settings/GeometrySettings.h"
 #include "Settings/MegaLightsSettings.h"
 #include "Settings/PostProcessSettings.h"
+#include "Settings/QualitySettings.h"
 #include "Settings/ReflectionProbeSettings.h"
 #include "Settings/ReflectionSettings.h"
 #include "Settings/ShadowSettings.h"
@@ -2101,17 +2102,6 @@ namespace Kurenai
         bool m_IBLUseDedicatedIrradiance = Defaults::IBLUseDedicatedIrradiance;
         // bent normalによる遮蔽(34章)。FrameConstants::OcclusionParamsへ載る
         bool m_BentNormalAOSource = Defaults::BentNormalAOSource;
-        // スペキュラ遮蔽の方式。FrameConstants.OcclusionParams.yへ数値として渡し、
-        // SpecularEnergy.hlsliのComposeSpecularOcclusionが切り替える。
-        // 値はComposeSpecularOcclusionのsoModeと一致させること
-        enum class SpecularOcclusionMode
-        {
-            Legacy = 0,  // Frostbite近似(方向を見ない従来近似)
-            Cone = 1,    // 球冠交差(SpecularOcclusionBand。d >= av+as で厳密に0になる)
-            SG = 2,      // 球面ガウス(SpecularOcclusionSG、34.11節。常に正なので凹部が純黒へ潰れない)
-        };
-        SpecularOcclusionMode m_SpecularOcclusionMode =
-            static_cast<SpecularOcclusionMode>(Defaults::SpecularOcclusionMode);
         bool m_MultiBounceAOEnabled = Defaults::MultiBounceAOEnabled;
         // 環境光(間接光)の拡散・鏡面それぞれの倍率。FrameConstants.IBLParams.y / .z として渡す。
         //
@@ -2127,25 +2117,6 @@ namespace Kurenai
         // 光であって、ここで言う環境(空・プローブ)由来のアンビエントとは別の項のため
         float m_AmbientDiffuseScale = Defaults::AmbientDiffuseScale;
         float m_AmbientSpecularScale = Defaults::AmbientSpecularScale;
-        // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)の方式。
-        // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立した選択肢にしている。
-        // FrameConstants.ShadowParams.wへ数値として渡し、共有ヘッダーSpecularEnergy.hlsliを
-        // インクルードする各シェーダー(DirectLighting / DeferredLighting / Transparent /
-        // ProbeCapture、および係数を共有するReflectionProbe.hlsli経由のSSR)が方式を切り替える。
-        // 値はSpecularEnergy.hlsliのKURENAI_SPEC_COMP_*と一致させること。
-        //
-        // 既定がLinearなのは、実使用域(エンジンはラフネスを[0.045, 1.0]にクランプする)では
-        // 3方式のうち最も真値に近いことを多重散乱ランダムウォークとの比較で確認したため(14.9.8節)。
-        // Offは補正しない状態がエネルギー的に不正(粗い面ほど暗い)であることを見るための比較用
-        enum class SpecularCompensationMode
-        {
-            Off = 0,         // 補正なし
-            Linear = 1,      // 1 + F0(1/Ess - 1)  等比級数の第1項
-            Series = 2,      // 1 / (1 - F0(1-Ess)) 等比級数の全項
-            KullaConty = 3,  // 加算ローブ(本来のKulla-Conty。IBL側はFdez-Agüera 2019のsplit-sum形)
-        };
-        SpecularCompensationMode m_SpecularCompensationMode =
-            static_cast<SpecularCompensationMode>(Defaults::SpecularCompensationMode);
         // Enable IBL無効時に使う定数色アンビエントフォールバックの強度倍率。シェーダ側ではなく
         // Render()がFrameConstants.AmbientColorへ書き込む時点でrgb(alphaのdayFactorは除く)に
         // 乗算する(HLSL側は素のAmbientColor.rgbを読むだけでよい)
@@ -2697,33 +2668,25 @@ namespace Kurenai
 
         // --- 品質プリセット(41章) ---------------------------------------------------------
         //
-        // 個別のつまみを一括で振るための横断的な設定。UIの「システム」パネルから適用する。
-        // ここに置いているのは、この時点までにReflectionMode等の入れ子の列挙がすべて
-        // 宣言済みだからで、機能上の所属を示すものではない。
+        // QualityPreset(enum)とその既定値はSettings/QualitySettings.hへ移した
+        // (m_QualitySettings.Preset)。ここに残るのはプリセットが実際に触る設定の一式
+        // (QualitySnapshot)と、それを読み書きする関数だけ。
         //
-        // 【どの項目を入れるかは実測で決めている】Intel UHD Graphics 620 / 1280x720 / DX11 /
-        // Release で5シーンを計測した結果、フレーム時間を支配していたのは以下だった:
-        //   DDGIのプローブ更新 40〜47ms(GIVolumeを持つシーン。フレームの約4割)
-        //   SSR 31ms(水面のあるシーン)
-        //   ボリュメトリック積雲 約10ms(空が画面の大半を占めるシーン)
-        // 逆にシャドウは全シーンで4カスケード合計1ms未満だったため、シャドウ関連は一切触らない。
-        // タイルドライトカリングは見た目を変えない最適化なので常に有効のままにする。
-        // 内部レンダー解像度は独立したつまみ(同じパネルの「解像度」節)であり、ここからは変えない
-        enum class QualityPreset
-        {
-            Low,     // 低
-            Medium,  // 中
-            High,    // 高(= シーンを読み込んだ直後の状態へ戻す)
-        };
+        // 【QualitySnapshotという名前にしている理由】Settings/QualitySettings.hの
+        // struct QualitySettingsと役目がまったく違う(あちらは「今どのプリセットを
+        // 選んでいるか」の静的な設定、こちらは「プリセットが一括で振る個々のつまみの値を
+        // 退避・復元するためのスナップショット」)。同じ名前にすると呼び出し側で
+        // どちらの型か紛らわしくなるため、クラス内のこちらをQualitySnapshotと呼び分ける
+        QualitySettings m_QualitySettings;
 
-        // 品質プリセットが触る設定の一式。
+        // 品質プリセットが触る設定の一式(退避・復元用のスナップショット)。
         //
         // 【プリセット「高」はエンジンの静的な既定ではなく「シーン読み込み直後の値」へ戻す】
         // .ksceneはSSR・TAAを自分で指定できる(ApplyLoadedScene参照。実例として
         // MontSaintMichel.ksceneはどちらも明示的に有効化している)。静的なDefaults::へ戻すと
         // 「高にしたらシーンが要求した反射が消える」ことになる。m_SceneDefaultReflectionModeが
         // UIの右クリック(既定値へ戻す)に対して同じ問題を解いており、プリセットもそれに倣う
-        struct QualitySettings
+        struct QualitySnapshot
         {
             ReflectionMode Reflection = ReflectionMode::Off;
             bool PlanarReflectionEnabled = Defaults::PlanarReflectionEnabled;
@@ -2742,20 +2705,15 @@ namespace Kurenai
         };
 
         // 現在の各メンバから上記の一式を読み出す
-        QualitySettings CaptureQualitySettings() const;
+        QualitySnapshot CaptureQualitySettings() const;
         // 一式を各メンバへ書き戻す。平面反射の解像度倍率だけはレンダーターゲットの作り直しを
         // 伴うため直接代入せず、RequestPlanarReflectionResolutionScale()経由で要求する
-        void ApplyQualitySettings(const QualitySettings& settings);
+        void ApplyQualitySettings(const QualitySnapshot& settings);
         // プリセットを適用する(SystemPanel = Renderスレッドから呼ばれる)
         void ApplyQualityPreset(QualityPreset preset);
 
         // シーンを読み込んだ直後の値。ApplyLoadedSceneが控え、プリセット「高」が戻る先になる
-        QualitySettings m_SceneDefaultQuality;
-        // 最後に適用したプリセット。UIのComboの表示位置に使う。
-        // 【現在の状態を表すものではない】プリセットを適用した後に個別のつまみを動かしても
-        // ここは追従しない(全つまみの変更を捕まえる仕掛けを持たないため)。
-        // Comboは「今どれか」ではなく「どれを一括適用するか」の選択として読むこと
-        QualityPreset m_QualityPreset = QualityPreset::High;
+        QualitySnapshot m_SceneDefaultQuality;
 
         // 現在描画しているシーン。ApplyLoadedScene(Renderスレッド)だけが差し替え、
         // Render()とUIパネル(いずれもRenderスレッド)だけが読む。つまりRenderスレッド専有の状態で、

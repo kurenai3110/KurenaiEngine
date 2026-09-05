@@ -80,7 +80,7 @@ namespace Kurenai::Defaults
     // bent normalによる遮蔽(34章)。
     // BentNormalAOSource: ディフューズAOを aoN = dot(N, bRaw) から取るか(false = 従来のベイクAO)。
     //   既定でbent normal側を使う。同じ積分の別推定量なので見た目は大きく変わらない。
-    // SpecularOcclusionMode: スペキュラ遮蔽の方式。KurenaiEngine3D::SpecularOcclusionMode と
+    // SpecularOcclusionMode: スペキュラ遮蔽の方式。Kurenai::SpecularOcclusionMode と
     //   HLSLのComposeSpecularOcclusionのsoModeに対応する(0=Frostbite近似 / 1=球冠交差 /
     //   2=球面ガウス)。SpecularCompensationModeと同じ理由でintで持つ。
     //   既定は2(SG) ―― 球冠交差(1)は d >= av+as で厳密に0になり、金属の凹部が純黒へ
@@ -98,7 +98,7 @@ namespace Kurenai::Defaults
     inline constexpr float AmbientDiffuseScale = 1.0f;
     inline constexpr float AmbientSpecularScale = 1.0f;
     // スペキュラのマルチスキャッタリング・エネルギー補正の方式。
-    // KurenaiEngine3D::SpecularCompensationMode と HLSL の KURENAI_SPEC_COMP_* に対応する
+    // Kurenai::SpecularCompensationMode と HLSL の KURENAI_SPEC_COMP_* に対応する
     // (0=Off / 1=Linear / 2=Series / 3=Kulla-Conty)。ここを型付きにするには enum を
     // このヘッダーへ持ち込む必要があるが、EngineDefaults.hは値だけを置く方針なのでintで持つ。
     // 既定のLinearは、実使用域で3方式のうち最も真値に近いことを実測で確認した結果(14.9.8節)

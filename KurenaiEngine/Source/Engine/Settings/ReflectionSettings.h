@@ -13,6 +13,24 @@ namespace Kurenai
         Raytraced,   // RT反射(RTReflection.hlsl)。画面外も映るが、DX12かつDXR Tier 1.1が要る
     };
 
+    // スペキュラBRDFのmultiple-scattering energy compensation(Kulla & Conty 2017)の方式。
+    // IBL鏡面・直接光鏡面の両方に効くため、Enable IBLとは独立した選択肢にしている。
+    // FrameConstants.ShadowParams.wへ数値として渡し、共有ヘッダーSpecularEnergy.hlsliを
+    // インクルードする各シェーダー(DirectLighting / DeferredLighting / Transparent /
+    // ProbeCapture、および係数を共有するReflectionProbe.hlsli経由のSSR)が方式を切り替える。
+    // 値はSpecularEnergy.hlsliのKURENAI_SPEC_COMP_*と一致させること。
+    //
+    // 既定がLinearなのは、実使用域(エンジンはラフネスを[0.045, 1.0]にクランプする)では
+    // 3方式のうち最も真値に近いことを多重散乱ランダムウォークとの比較で確認したため(14.9.8節)。
+    // Offは補正しない状態がエネルギー的に不正(粗い面ほど暗い)であることを見るための比較用
+    enum class SpecularCompensationMode
+    {
+        Off = 0,         // 補正なし
+        Linear = 1,      // 1 + F0(1/Ess - 1)  等比級数の第1項
+        Series = 2,      // 1 / (1 - F0(1-Ess)) 等比級数の全項
+        KullaConty = 3,  // 加算ローブ(本来のKulla-Conty。IBL側はFdez-Agüera 2019のsplit-sum形)
+    };
+
     struct ReflectionSettings
     {
         // 「反射を出す」と決まったあとで、環境から**手法だけ**を選ぶ。出すかどうかはここでは決めない。
@@ -52,5 +70,8 @@ namespace Kurenai
         float PlanarResolutionScale = Defaults::PlanarReflectionResolutionScale;
         // 波の法線による画面UVのずらし量(SSR.hlslが読む)
         float PlanarDistortion = Defaults::PlanarReflectionDistortion;
+
+        SpecularCompensationMode SpecularCompensation =
+            static_cast<SpecularCompensationMode>(Defaults::SpecularCompensationMode);
     };
 }

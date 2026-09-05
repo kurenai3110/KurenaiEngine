@@ -266,7 +266,7 @@ namespace Kurenai
             // 変換に使う)。z: IBL強度倍率(m_IBLEnabled=falseの場合は0.0fを渡し、シェーダ側で
             // EvaluateIBLの代わりに定数色アンビエント(AmbientColor.rgb)へフォールバックする)。
             // w: スペキュラのマルチスキャッタリング・エネルギー補正の方式
-            // (m_SpecularCompensationMode。0=Off / 1=Linear / 2=Series / 3=Kulla-Conty。
+            // (m_ReflectionSettings.SpecularCompensation。0=Off / 1=Linear / 2=Series / 3=Kulla-Conty。
             // 共有ヘッダーSpecularEnergy.hlsliのKURENAI_SPEC_COMP_*と一致させること。14.9節)
             DirectX::XMFLOAT4 ShadowParams;
             // 半透明パス(Transparent.hlsl)専用。x=t8のライトリストの有効数。DirectLighting.hlslは
@@ -6360,9 +6360,9 @@ namespace Kurenai
         m_PlanarReflectionResolutionDirty = true;
     }
 
-    KurenaiEngine3D::QualitySettings KurenaiEngine3D::CaptureQualitySettings() const
+    KurenaiEngine3D::QualitySnapshot KurenaiEngine3D::CaptureQualitySettings() const
     {
-        QualitySettings settings;
+        QualitySnapshot settings;
         settings.Reflection = m_ReflectionSettings.Mode;
         settings.PlanarReflectionEnabled = m_ReflectionSettings.PlanarEnabled;
         settings.PlanarReflectionResolutionScale = m_ReflectionSettings.PlanarResolutionScale;
@@ -6380,7 +6380,7 @@ namespace Kurenai
         return settings;
     }
 
-    void KurenaiEngine3D::ApplyQualitySettings(const QualitySettings& settings)
+    void KurenaiEngine3D::ApplyQualitySettings(const QualitySnapshot& settings)
     {
         m_ReflectionSettings.Mode = settings.Reflection;
         m_ReflectionSettings.PlanarEnabled = settings.PlanarReflectionEnabled;
@@ -6413,9 +6413,9 @@ namespace Kurenai
 
     void KurenaiEngine3D::ApplyQualityPreset(QualityPreset preset)
     {
-        m_QualityPreset = preset;
+        m_QualitySettings.Preset = preset;
 
-        // 「高」はシーンを読み込んだ直後の状態へ戻す(QualitySettingsのコメント参照)。
+        // 「高」はシーンを読み込んだ直後の状態へ戻す(QualitySnapshotのコメント参照)。
         // 静的な既定へ戻すと、SSRやTAAを自分で指定しているシーンの意図を壊す
         if (preset == QualityPreset::High)
         {
@@ -6426,7 +6426,7 @@ namespace Kurenai
 
         // 「低」「中」はシーン既定を出発点にして、そこから重い項目だけを落とす。
         // シーンが元から無効にしているものを勝手に有効化しないよう、有効化は一切行わない
-        QualitySettings settings = m_SceneDefaultQuality;
+        QualitySnapshot settings = m_SceneDefaultQuality;
 
         // 実測でGIVolumeを持つシーンの最大負荷(40〜47ms、フレームの約4割)。
         // 1プローブにつきシーンを6回描くため、この値にほぼ比例する
@@ -8183,7 +8183,7 @@ namespace Kurenai
         // シーンを切り替えたらプリセットの選択も「高」へ戻す(新しいシーンに対して前のシーンで
         // 選んだ「低」が適用されたままになるわけではなく、実際に高相当の状態になっているため)
         m_SceneDefaultQuality = CaptureQualitySettings();
-        m_QualityPreset = QualityPreset::High;
+        m_QualitySettings.Preset = QualityPreset::High;
 
         // 初期カメラとウィンドウタイトルはUpdateスレッドが適用する。m_Cameraの書き込み手を
         // 1スレッドに保ち、ウィンドウタイトルもウィンドウを所有するスレッドから設定するため
@@ -8538,7 +8538,7 @@ namespace Kurenai
         // bent normalによる遮蔽(34章)。ProbeCapture.hlslが同じ分岐を持つため、
         // 含め忘れるとつまみを動かしてもプローブの中身だけ古いまま残る
         mixBool(m_BentNormalAOSource);
-        mixFloat(static_cast<float>(m_SpecularOcclusionMode));
+        mixFloat(static_cast<float>(m_AmbientOcclusionSettings.SpecularOcclusion));
         mixBool(m_MultiBounceAOEnabled);
 
         // ライトは構造体ごとダンプすると詰め物(padding)の未初期化バイトを拾い得るため、
@@ -10642,7 +10642,7 @@ namespace Kurenai
         };
         constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
         const float iblIntensity = m_IBLEnabled ? m_IBLIntensity : 0.0f;
-        const float specularEnergyCompensation = static_cast<float>(m_SpecularCompensationMode);
+        const float specularEnergyCompensation = static_cast<float>(m_ReflectionSettings.SpecularCompensation);
         constants.ShadowParams = {
             m_ShadowSettings.LightSize,
             static_cast<float>(kIBLPrefilterMipLevels - 1),
@@ -10658,7 +10658,7 @@ namespace Kurenai
         };
         constants.OcclusionParams = {
             m_BentNormalAOSource ? 1.0f : 0.0f,
-            static_cast<float>(m_SpecularOcclusionMode),
+            static_cast<float>(m_AmbientOcclusionSettings.SpecularOcclusion),
             m_MultiBounceAOEnabled ? 1.0f : 0.0f,
             0.0f };
 

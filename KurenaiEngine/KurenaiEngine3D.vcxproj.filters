@@ -60,6 +60,9 @@
     <ClInclude Include="Source\Engine\Settings\PostProcessSettings.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\QualitySettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
     <ClInclude Include="Source\Engine\Settings\ReflectionProbeSettings.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>

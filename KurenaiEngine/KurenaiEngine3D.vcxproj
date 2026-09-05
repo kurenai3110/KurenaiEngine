@@ -89,6 +89,7 @@
     <ClInclude Include="Source\Engine\Settings\GeometrySettings.h" />
     <ClInclude Include="Source\Engine\Settings\MegaLightsSettings.h" />
     <ClInclude Include="Source\Engine\Settings\PostProcessSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\QualitySettings.h" />
     <ClInclude Include="Source\Engine\Settings\ReflectionProbeSettings.h" />
     <ClInclude Include="Source\Engine\Settings\ReflectionSettings.h" />
     <ClInclude Include="Source\Engine\Settings\ShadowSettings.h" />

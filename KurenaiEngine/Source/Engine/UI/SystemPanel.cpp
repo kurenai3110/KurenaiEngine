@@ -240,20 +240,22 @@ namespace Kurenai::UI
 
         BeginParamGroup();
 
+        using QualityPreset = Kurenai::QualityPreset;
+
         // 表示名と値の並びは必ず一致させること(目標フレームレートのComboと同じ作法)
         static const char* kPresetNames[] = { "低", "中", "高" };
-        static const KurenaiEngine3D::QualityPreset kPresetValues[] =
+        static const QualityPreset kPresetValues[] =
         {
-            KurenaiEngine3D::QualityPreset::Low,
-            KurenaiEngine3D::QualityPreset::Medium,
-            KurenaiEngine3D::QualityPreset::High,
+            QualityPreset::Low,
+            QualityPreset::Medium,
+            QualityPreset::High,
         };
         static_assert(IM_ARRAYSIZE(kPresetNames) == IM_ARRAYSIZE(kPresetValues), "表示名と値の並びを一致させること");
 
-        int presetIndex = static_cast<int>(m_Engine.m_QualityPreset);
+        int presetIndex = static_cast<int>(m_Engine.m_QualitySettings.Preset);
         if (ComboEx(
                 "品質###QualityPresetSelect", &presetIndex, kPresetNames, IM_ARRAYSIZE(kPresetNames),
-                static_cast<int>(KurenaiEngine3D::QualityPreset::High),
+                static_cast<int>(QualityPreset::High),
                 "低: DDGIのプローブ更新を2個/フレームへ、反射(SSR)・平面反射・ボリュメトリック積雲・"
                 "巻雲・星・TAA・ブルーム・スクリーンスペースシャドウを無効化\n"
                 "中: DDGIを4個/フレームへ、反射(SSR)・ボリュメトリック積雲・TAA・ブルーム・"

@@ -18,6 +18,16 @@ namespace Kurenai
         Raytraced,
     };
 
+    // スペキュラ遮蔽の方式。FrameConstants.OcclusionParams.yへ数値として渡し、
+    // SpecularEnergy.hlsliのComposeSpecularOcclusionが切り替える。
+    // 値はComposeSpecularOcclusionのsoModeと一致させること
+    enum class SpecularOcclusionMode
+    {
+        Legacy = 0,  // Frostbite近似(方向を見ない従来近似)
+        Cone = 1,    // 球冠交差(SpecularOcclusionBand。d >= av+as で厳密に0になる)
+        SG = 2,      // 球面ガウス(SpecularOcclusionSG、34.11節。常に正なので凹部が純黒へ潰れない)
+    };
+
     struct AmbientOcclusionSettings
     {
         bool Enabled = Defaults::AOEnabled;
@@ -46,5 +56,8 @@ namespace Kurenai
         float RTAOPower = Defaults::RTAOPower;
         float RTAOIntensity = Defaults::RTAOIntensity;
         bool RTAOBounceShadowRayEnabled = Defaults::RTAOBounceShadowRayEnabled;
+
+        SpecularOcclusionMode SpecularOcclusion =
+            static_cast<SpecularOcclusionMode>(Defaults::SpecularOcclusionMode);
     };
 }

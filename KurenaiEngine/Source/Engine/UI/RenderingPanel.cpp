@@ -1146,12 +1146,14 @@ namespace Kurenai::UI
             "拡散光の遮蔽を aoN = dot(N, bRaw) から求める。無効にすると従来のベイク済みAOを使う。"
             "どちらも同じ積分の別推定量なので、切り替えても見た目はほとんど変わらないのが正常");
         {
+            using SpecularOcclusionMode = Kurenai::SpecularOcclusionMode;
+
             static const char* const kSpecularOcclusionModes[] = {
                 "Frostbite近似(方向を見ない)",
                 "球冠交差",
                 "球面ガウス(推奨)",
             };
-            int mode = static_cast<int>(m_Engine.m_SpecularOcclusionMode);
+            int mode = static_cast<int>(m_Engine.m_AmbientOcclusionSettings.SpecularOcclusion);
             if (ComboEx(
                     "スペキュラ遮蔽の方式###SpecularOcclusionMode", &mode, kSpecularOcclusionModes,
                     IM_ARRAYSIZE(kSpecularOcclusionModes), Defaults::SpecularOcclusionMode,
@@ -1160,8 +1162,8 @@ namespace Kurenai::UI
                     "純黒へ潰れることがある(34.10節)。「球面ガウス」は同じ交差を柔らかい分布に"
                     "置き換えたもので、方向性を保ったまま潰れを避ける(34.11節)。既定は球面ガウス"))
             {
-                m_Engine.m_SpecularOcclusionMode =
-                    static_cast<KurenaiEngine3D::SpecularOcclusionMode>(mode);
+                m_Engine.m_AmbientOcclusionSettings.SpecularOcclusion =
+                    static_cast<SpecularOcclusionMode>(mode);
             }
         }
         CheckboxEx(
@@ -1171,15 +1173,17 @@ namespace Kurenai::UI
             "見た目を大きく変えるため既定では無効");
 
         // IBL鏡面・直接光鏡面の両方に効くため、IBLのON/OFFの内側ではなく独立した項目にする。
-        // 並びはKurenaiEngine3D::SpecularCompensationModeの値と一致させること
+        // 並びはKurenai::SpecularCompensationModeの値と一致させること
         {
+            using SpecularCompensationMode = Kurenai::SpecularCompensationMode;
+
             static const char* const kCompensationModes[] = {
                 "補正なし",
                 "Linear  1+F0(1/Ess-1)",
                 "Series  1/(1-F0(1-Ess))",
                 "Kulla-Conty(加算ローブ)",
             };
-            int mode = static_cast<int>(m_Engine.m_SpecularCompensationMode);
+            int mode = static_cast<int>(m_Engine.m_ReflectionSettings.SpecularCompensation);
             if (ComboEx(
                     "スペキュラのエネルギー補正###SpecularEnergyCompensation", &mode, kCompensationModes,
                     IM_ARRAYSIZE(kCompensationModes), Defaults::SpecularCompensationMode,
@@ -1189,8 +1193,8 @@ namespace Kurenai::UI
                     "相反性を満たす代わりに直接光でライト1灯あたりLUTフェッチが1回増える。\n"
                     "既定のLinearは実使用域で最も真値に近い(14.9.8節)"))
             {
-                m_Engine.m_SpecularCompensationMode =
-                    static_cast<KurenaiEngine3D::SpecularCompensationMode>(mode);
+                m_Engine.m_ReflectionSettings.SpecularCompensation =
+                    static_cast<SpecularCompensationMode>(mode);
             }
         }
 

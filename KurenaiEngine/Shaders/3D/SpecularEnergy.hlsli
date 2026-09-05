@@ -58,7 +58,7 @@ float GeometrySmith(float NdotV, float NdotL, float roughness)
 //
 // ------------------------------------------------------------------------------------
 // 3つの方式を切り替えられるようにしてある(FrameConstants.ShadowParams.w = モード番号)。
-// C++側 KurenaiEngine3D::SpecularCompensationMode と値を一致させること。
+// C++側 Kurenai::SpecularCompensationMode と値を一致させること。
 //
 //   1 Linear : comp = 1 + F0(1/Ess - 1)          補正後アルベド = Ess + F0(1-Ess)
 //              失われたぶんをF0で「1回だけ」跳ね返して戻す等比級数の第1項近似。
