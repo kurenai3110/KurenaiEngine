@@ -8331,3 +8331,60 @@ C++とHLSLの1対1の食い違いで、これは別の話(`offsetof` の `static
 ベースライン比較も `判定: 一致`。MegaLights は手法1(構成C1)・手法2(構成B)・
 手法3(構成C3)がそれぞれ別のパスを走るが、3つとも通っている。
 
+---
+
+## 84. 残りのGPUミラー構造体を固定し、グループサイズは本当に機械で守れるようにした
+
+83節で「HLSL側に複数の宣言があるのは2つだけ」と分かったあと、残る29個(実際に数えると
+`alignas(16)` の構造体は32個)には別の問題が残っていた。**C++側で並べ替えや挿入が起きると、
+HLSL側は1つしか宣言が無くてもやはり静かにずれる。**
+
+32構造体・179フィールドぶんの `offsetof` と 32本の `sizeof`、合わせて211本の
+`static_assert` を各構造体の直後へ置いた。期待値は宣言から独立に計算したもので、
+実測へ合わせたものではない(MSVC x64 では `XMFLOAT4X4`=64B・`XMFLOAT4`/`XMUINT4`=16B・
+`XMUINT2`=8B・スカラ=4Bがすべてアラインメント4なので、メンバ間に詰め物は入らず単純な累積和になる。
+`sizeof` は `alignas(16)` で16の倍数へ切り上がる)。
+
+**これが守るのはC++側だけである。** HLSLの宣言と突き合わせているわけではないので、
+「落ちたらHLSL側も同じだけ動かせ」という合図として使う。各構造体のコメントにもそう書いた。
+
+### グループサイズは -D と #error で本当に機械照合できた
+
+82節では「HLSLのマクロをC++から読めないので機械では守れない」と書いたが、
+**向きを逆にすれば守れる。** `KurenaiShaderPacker` が `ShaderInterop/GroupSizes.h` を取り込み、
+その値を `KURENAI_EXPECT_*` として `-D` で HLSL へ渡す。受け取った `GroupSizes.hlsli` は
+自分の `#define` と突き合わせ、食い違えば `#error` でそのコンパイルを落とす。
+
+**実数値は両側に残したままにしてある。** `-D` が来ない経路(`shader-check` スキルが
+fxc/dxc を直接叩く場合)でも HLSL 単体でコンパイルできる必要があるためで、
+`#if` は `KURENAI_EXPECT_*` が未定義なら丸ごと飛ぶ。置き換えではなく照合にした理由がこれである。
+
+間接引数の刻み(24)だけは本体が `RHI::IRHICommandList::kDispatchMeshIndirectArgStride` にある。
+`GroupSizes.h` は RHI に依存できない(パッカーが取り込むため)ので写しを持ち、
+両者の一致は `KurenaiEngine3D.cpp` の `static_assert` が止める。
+RHI → `GroupSizes.h` → `GroupSizes.hlsli` と、鎖のどの環も機械で繋がっている。
+
+### 発火することを対照実験で確かめた
+
+**落ちない検査は無いのと同じ**なので、4つの値を1つずつ C++ 側だけ壊してビルドした:
+
+| 壊した値 | 出たもの |
+|---|---|
+| `kAmplificationGroupSize` 32→64 | `GBufferMeshlet.hlsl` の `ms_6_6` / `as_6_6` が `#error` で失敗 |
+| `kModelCullGroupSize` 64→128 | `ModelCull.hlsl` の **`cs_5_0`(fxc)** と `cs_6_5` / `cs_6_6` が失敗 |
+| `kSWRasterResolveGroupSize` 8→16 | `SoftwareRasterResolve.hlsl` が `#error` で失敗 |
+| `kDispatchMeshIndirectArgStride` 24→32 | シェーダーより先に C++ の `static_assert` が落ちた |
+
+`cs_5_0` が落ちたことで、**dxc 経路だけでなく fxc(`D3DCompileFromFile`)経路にも
+マクロが渡っている**ことが確かめられた。`ModelCull.hlsl` は `GroupSizes.hlsli` を取り込む
+4本のうち唯一 SM 5.0 でも焼かれるファイルで、この確認ができるのはここだけである。
+
+`KURENAI_MESH_GROUP_SIZE`(128)は照合の対象に入れていない。C++側に対応する値が無く
+(メッシュシェーダーのグループサイズはCPUが割り算に使わない)、突き合わせる相手がいないため。
+
+### 焼き上がりは変わっていない
+
+`-D` を足しても `.kshader` は1バイトも変わらなかった(83節の3本を除いて46本がバイト一致し、
+その3本の差も83節で説明したcbufferサイズのまま)。値が一致していれば `#if` は
+コードを1命令も生まないので、当然ではあるが確かめてある。ベースライン比較も `判定: 一致`。
+
