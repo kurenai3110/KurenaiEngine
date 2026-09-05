@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Shaders">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shaders\2D">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000004}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Source\Engine\KurenaiTypes.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\KurenaiEngine2D.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClCompile Include="Source\Engine\KurenaiEngine2D.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <None Include="Shaders\2D\Sprite2D.hlsl">
+      <Filter>Shaders\2D</Filter>
+    </None>
+    <None Include="Shaders\2D\Polyline2D.hlsl">
+      <Filter>Shaders\2D</Filter>
+    </None>
+  </ItemGroup>
+</Project>
+

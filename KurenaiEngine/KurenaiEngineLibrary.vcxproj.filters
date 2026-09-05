@@ -1,0 +1,413 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Library">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Library\Assets">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Library\Core">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000005}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Library\RHI">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000006}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Library\RHI\DX11">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000007}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Library\RHI\DX12">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000008}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ThirdParty">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000009}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Source\Engine\KurenaiTypes.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\KurenaiEngineBase.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Core\Window.h">
+      <Filter>Source\Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Core\Camera.h">
+      <Filter>Source\Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Core\AudioEngine.h">
+      <Filter>Source\Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Core\CPUProfiler.h">
+      <Filter>Source\Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Core\ImGuiDockLayout.h">
+      <Filter>Source\Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Core\Logger.h">
+      <Filter>Source\Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Core\RenderGraph.h">
+      <Filter>Source\Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Core\StringUtil.h">
+      <Filter>Source\Library\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\Vertex.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\Model.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\ModelLoader.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\ModelPackage.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\Scene.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\SceneLoader.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\TextureStreaming.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\ShowPackage.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\ShowLoader.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\ShaderPackage.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\ShaderLoader.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\RHIEnums.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\RHIDesc.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\RHIBindless.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\RHIShaderPackage.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\RaytracingGeometry.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\MeshLight.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\MeshLightScene.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\Assets\RaytracingScene.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHIAccelerationStructure.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHIBuffer.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHIShader.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHIPipelineState.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHISwapChain.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHICommandList.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHIDevice.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHIImGuiBackend.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\ImGuiContextSetup.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHIGPUProfiler.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHITexture.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\IRHISamplerSet.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\TextureImage.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11Buffer.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11Shader.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11PipelineState.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11ComputePipelineState.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11SwapChain.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11CommandList.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11Device.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11ImGuiBackend.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11GPUProfiler.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11Texture.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11SamplerSet.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX11\DX11Util.h">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12Util.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12DescriptorHeap.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12BindlessTable.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12AccelerationStructure.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12Buffer.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12Shader.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12PipelineState.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12ComputePipelineState.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12SwapChain.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12CommandList.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12Device.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12ImGuiBackend.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12GPUProfiler.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12Texture.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12TilePool.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12SamplerSet.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ThirdParty\imgui\imgui.h">
+      <Filter>ThirdParty</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_win32.h">
+      <Filter>ThirdParty</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_dx11.h">
+      <Filter>ThirdParty</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_dx12.h">
+      <Filter>ThirdParty</Filter>
+    </ClInclude>
+    <ClCompile Include="..\ThirdParty\imgui\imgui.cpp">
+      <Filter>ThirdParty</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\imgui_draw.cpp">
+      <Filter>ThirdParty</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\imgui_tables.cpp">
+      <Filter>ThirdParty</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\imgui_widgets.cpp">
+      <Filter>ThirdParty</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_win32.cpp">
+      <Filter>ThirdParty</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_dx11.cpp">
+      <Filter>ThirdParty</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_dx12.cpp">
+      <Filter>ThirdParty</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\KurenaiEngineBase.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Core\Window.cpp">
+      <Filter>Source\Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Core\Camera.cpp">
+      <Filter>Source\Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Core\AudioEngine.cpp">
+      <Filter>Source\Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Core\CPUProfiler.cpp">
+      <Filter>Source\Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Core\ImGuiDockLayout.cpp">
+      <Filter>Source\Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Core\Logger.cpp">
+      <Filter>Source\Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Core\RenderGraph.cpp">
+      <Filter>Source\Library\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Assets\ModelLoader.cpp">
+      <Filter>Source\Library\Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Assets\MeshLightScene.cpp">
+      <Filter>Source\Library\Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Assets\RaytracingScene.cpp">
+      <Filter>Source\Library\Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Assets\SceneLoader.cpp">
+      <Filter>Source\Library\Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Assets\TextureStreaming.cpp">
+      <Filter>Source\Library\Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Assets\ShowLoader.cpp">
+      <Filter>Source\Library\Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Assets\ShaderLoader.cpp">
+      <Filter>Source\Library\Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\RHIShaderPackage.cpp">
+      <Filter>Source\Library\RHI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\TextureImage.cpp">
+      <Filter>Source\Library\RHI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\ImGuiContextSetup.cpp">
+      <Filter>Source\Library\RHI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11Buffer.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11Shader.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11PipelineState.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11ComputePipelineState.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11SwapChain.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11CommandList.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11Device.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11ImGuiBackend.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11GPUProfiler.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11Texture.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX11\DX11SamplerSet.cpp">
+      <Filter>Source\Library\RHI\DX11</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12DescriptorHeap.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12BindlessTable.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12AccelerationStructure.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12Buffer.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12Shader.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12PipelineState.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12ComputePipelineState.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12SwapChain.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12CommandList.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12Device.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12ImGuiBackend.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12GPUProfiler.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12Texture.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12TilePool.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12SamplerSet.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\DirectXTex\DirectXTex\DirectXTexD3D12.cpp">
+      <Filter>ThirdParty</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>
+

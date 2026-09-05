@@ -1,0 +1,218 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Shaders">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shaders\3D">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\UI">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000005}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ThirdParty">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000006}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Source\Engine\KurenaiTypes.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\KurenaiEngine3D.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\EngineDefaults.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\DroneShow.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\IPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\UIManager.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\UITheme.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\UIWidgets.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\RenderingPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\SystemPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\ScenePanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\StreamingPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\PostProcessPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\DebugViewPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\LightingPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\ProfilerPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\ReflectionProbePanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ThirdParty\imgui\imgui.h">
+      <Filter>ThirdParty</Filter>
+    </ClInclude>
+    <ClCompile Include="Source\Engine\KurenaiEngine3D.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\DroneShow.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\UIManager.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\UITheme.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\UIWidgets.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\RenderingPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\SystemPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\ScenePanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\StreamingPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\PostProcessPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\DebugViewPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\LightingPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\ProfilerPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\ReflectionProbePanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <None Include="Shaders\3D\GBuffer.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\GBufferMeshlet.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SoftwareRaster.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SoftwareRasterResolve.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SoftwareRasterCommon.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\DirectLighting.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\DeferredLighting.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\HiZ.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\LightCulling.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\NormalEncoding.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Bindless.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Meshlet.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SpecularEnergy.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\CubeFace.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\ProbeShading.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\ScreenSpaceShadow.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Present.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SSAO.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SSIL_VisibilityBitmask.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SSR.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\RTReflection.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\RTShadow.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\RTAO.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\DDGIProbeTrace.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\RaytracingScene.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Shadow.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\ShadowMeshlet.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\TAA.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Tonemap.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SkyGenerate.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\AutoExposure.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Bloom.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+  </ItemGroup>
+</Project>
+
