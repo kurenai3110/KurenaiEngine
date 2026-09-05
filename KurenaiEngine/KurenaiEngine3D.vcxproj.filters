@@ -153,6 +153,9 @@
     <ClCompile Include="Source\Engine\Scene\ModelResidencySystem.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Engine\Scene\SceneLoadService.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
     <ClCompile Include="Source\Engine\DroneShow.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
