@@ -1,6 +1,6 @@
 // 空モデル(CIE快晴空、Perez分布)の共有ヘッダー。
 //
-// 現在このヘッダーの利用者は5つある:
+// 現在このヘッダーの利用者は8つある:
 //   (a) SkyGenerate.hlsl         … IBL専用のキューブマップ(256px/面、ミップ無し)をベイクする
 //   (b) DeferredLighting.hlsl    … 深度が書かれていない背景画素を、画面解像度で直接評価する
 //       (キューブマップは256px/面のため、3840px・水平画角68度のカメラでは約20倍に拡大表示され
@@ -10,7 +10,13 @@
 //   (d) AerialPerspective.hlsl   … 大気遠近のin-scatter項。遠方の地物が無限遠で背景の空色へ
 //       厳密に収束するようにするため、フォグの合成先としてこのモデルの色をそのまま使う
 //   (e) PlanarReflection.hlsl    … 平面反射の鏡像にも同じ大気遠近を掛けるため、(d)と同じ理由でin-scatter項に使う
-// 雲はこの5者すべてに自動で行き渡るよう、この共有ヘッダーへ足した(下のSkyParameters::Cloud*と
+//   (f) SkyCloud.hlsl            … 雲(積雲+巻雲)だけを低解像度で評価する専用パス。
+//       SkyCloudLayersを呼ぶ唯一の利用者で、ボリュームレイマーチを持つのもここだけ
+//   (g) SkyIntegrate.hlsl        … 天頂輝度の正規化積分とティントの決定(ComputeSkyTintSet)。
+//       結果をGPUSkyParametersへ書き、(a)〜(f)はそれを読むだけになる
+//   (h) CloudNoiseGenerate.hlsl  … 共有しているのは kCloudNoisePeriod だけ。
+//       焼く3Dノイズのタイル周期を、サンプルする側と一致させるために参照する
+// 雲は空を評価する側すべてに自動で行き渡るよう、この共有ヘッダーへ足した(下のSkyParameters::Cloud*と
 // SkyColor末尾を参照)。ただしIBL用キューブマップ(SkyGenerate.hlsl)には雲を焼き込まない
 // (理由は下の雲セクションの判断Aコメント参照)。大気遠近の消散係数・スケールハイト自体は
 // このヘッダーの管轄ではない(空モデルではなく大気遠近固有の値のため、HeightFog.hlsli側に持つ)。
