@@ -387,6 +387,8 @@ namespace
         std::wstring Path;
         int MipLevel = 0;
         int ArraySlice = 0;
+        int Frames = 1;
+        int Stride = 1;
     };
 
     // -dumptex を全部拾う。直後に続く -dumptexmip / -dumptexslice は「直前の -dumptex」に掛かる。
@@ -440,10 +442,17 @@ namespace
                 continue;
             }
 
-            if (_wcsicmp(argv[i], L"-dumptexmip") == 0 || _wcsicmp(argv[i], L"-dumptexslice") == 0)
+            if (_wcsicmp(argv[i], L"-dumptexmip") == 0 || _wcsicmp(argv[i], L"-dumptexslice") == 0 ||
+                _wcsicmp(argv[i], L"-dumptexframes") == 0 || _wcsicmp(argv[i], L"-dumptexstride") == 0)
             {
                 const bool isMip = _wcsicmp(argv[i], L"-dumptexmip") == 0;
-                const char* optionName = isMip ? "-dumptexmip" : "-dumptexslice";
+                const bool isSlice = _wcsicmp(argv[i], L"-dumptexslice") == 0;
+                const bool isFrames = _wcsicmp(argv[i], L"-dumptexframes") == 0;
+                const bool isStride = _wcsicmp(argv[i], L"-dumptexstride") == 0;
+                const char* optionName = isMip      ? "-dumptexmip"
+                                         : isSlice  ? "-dumptexslice"
+                                         : isFrames ? "-dumptexframes"
+                                                    : "-dumptexstride";
                 if (dumps.empty())
                 {
                     // 直前に -dumptex が無ければ掛ける相手がいない。黙って捨てると
@@ -458,7 +467,23 @@ namespace
                         "Main", std::string(optionName) + "の後に値が指定されていないため、無視します");
                     break;
                 }
-                parseIntArg(argv[i + 1], optionName, isMip ? dumps.back().MipLevel : dumps.back().ArraySlice);
+                int value = 0;
+                if (parseIntArg(argv[i + 1], optionName, value))
+                {
+                    // 枚数と間隔は0だと「撮らない」「無限に待つ」の意味になってしまうので1へ寄せる。
+                    // ミップと配列スライスは0が正当な既定値なのでここには含めない
+                    if ((isFrames || isStride) && value <= 0)
+                    {
+                        Kurenai::Core::Logger::Warning(
+                            "Main", std::string(optionName) + " は1以上で指定してください。1へ補正します: " +
+                                Kurenai::Core::WideToUtf8(argv[i + 1]));
+                        value = 1;
+                    }
+                    if (isMip) dumps.back().MipLevel = value;
+                    else if (isSlice) dumps.back().ArraySlice = value;
+                    else if (isFrames) dumps.back().Frames = value;
+                    else dumps.back().Stride = value;
+                }
                 ++i;
                 continue;
             }
@@ -857,7 +882,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             // (debugViewIndexを毎回適用しているのと同じ理由)
             for (const TextureDumpArg& dump : textureDumps)
             {
-                engine.AddTextureDump(dump.Name.c_str(), dump.Path.c_str(), dump.MipLevel, dump.ArraySlice);
+                engine.AddTextureDump(
+                    dump.Name.c_str(), dump.Path.c_str(), dump.MipLevel, dump.ArraySlice, dump.Frames, dump.Stride);
             }
             if (!textureDumps.empty())
             {

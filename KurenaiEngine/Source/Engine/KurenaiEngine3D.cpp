@@ -5164,7 +5164,30 @@ namespace Kurenai
         return names;
     }
 
-    void KurenaiEngine3D::AddTextureDump(const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice)
+    std::wstring MakeTextureDumpSequencePath(const std::wstring& path, uint32_t targetFrames, uint32_t sequenceIndex)
+    {
+        if (targetFrames <= 1)
+        {
+            return path;
+        }
+
+        wchar_t suffix[16] = {};
+        if (swprintf_s(suffix, L"_%04u", sequenceIndex) < 0)
+        {
+            Core::Logger::Error("KurenaiEngine3D", "テクスチャの書き出し: 連番ファイル名を作れませんでした");
+            return path;
+        }
+        const size_t slash = path.find_last_of(L"\\/");
+        const size_t dot = path.find_last_of(L'.');
+        if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash))
+        {
+            return path.substr(0, dot) + suffix + path.substr(dot);
+        }
+        return path + suffix;
+    }
+
+    void KurenaiEngine3D::AddTextureDump(
+        const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice, int frames, int stride)
     {
         if (name == nullptr || path == nullptr || name[0] == L'\0' || path[0] == L'\0')
         {
@@ -5177,13 +5200,17 @@ namespace Kurenai
         request.Path = path;
         request.MipLevel = mipLevel > 0 ? static_cast<uint32_t>(mipLevel) : 0u;
         request.ArraySlice = arraySlice > 0 ? static_cast<uint32_t>(arraySlice) : 0u;
+        request.TargetFrames = frames > 0 ? static_cast<uint32_t>(frames) : 1u;
+        request.Stride = stride > 0 ? static_cast<uint32_t>(stride) : 1u;
         m_TextureDumps.push_back(std::move(request));
 
         Core::Logger::Info(
             "KurenaiEngine3D",
             "テクスチャの書き出しを予約しました: " + m_TextureDumps.back().Name + " -> " +
                 Core::WideToUtf8(path) + " (mip=" + std::to_string(m_TextureDumps.back().MipLevel) +
-                ", slice=" + std::to_string(m_TextureDumps.back().ArraySlice) + ")");
+                ", slice=" + std::to_string(m_TextureDumps.back().ArraySlice) +
+                ", frames=" + std::to_string(m_TextureDumps.back().TargetFrames) +
+                ", stride=" + std::to_string(m_TextureDumps.back().Stride) + ")");
     }
 
     void KurenaiEngine3D::SetTextureDumpFrame(int frame)
@@ -5229,6 +5256,7 @@ namespace Kurenai
         struct PendingCopy
         {
             size_t RequestIndex = 0;
+            size_t SlotIndex = 0;
             RHI::IRHITexture* Source = nullptr;
         };
         std::vector<PendingCopy> pending;
@@ -5237,8 +5265,20 @@ namespace Kurenai
         for (size_t i = 0; i < m_TextureDumps.size(); ++i)
         {
             TextureDumpRequest& request = m_TextureDumps[i];
-            if (request.Issued || request.Done)
+            if (request.Done || request.IssuedCount >= request.TargetFrames ||
+                (request.AnyIssued && m_TAAFrameIndex - request.LastIssueFrame < request.Stride))
             {
+                continue;
+            }
+
+            size_t slotIndex = request.Slots.size();
+            for (size_t j = 0; j < request.Slots.size(); ++j)
+            {
+                if (!request.Slots[j].Busy) { slotIndex = j; break; }
+            }
+            if (slotIndex == request.Slots.size() && request.RingDepth != 0 && request.Slots.size() >= request.RingDepth)
+            {
+                // 全受け皿が遅延中なら、未回収のコピーを壊さず次フレームへ回す。
                 continue;
             }
 
@@ -5283,23 +5323,82 @@ namespace Kurenai
                 continue;
             }
 
-            request.Readback = m_Device->CreateReadbackTexture(found->Texture, request.MipLevel);
-            if (!request.Readback)
+            if (slotIndex == request.Slots.size())
+            {
+                request.Slots.emplace_back();
+            }
+            TextureDumpSlot& slot = request.Slots[slotIndex];
+            slot.Readback = m_Device->CreateReadbackTexture(found->Texture, request.MipLevel);
+            if (!slot.Readback)
             {
                 // CreateReadbackTextureが理由をログへ出している(非対応フォーマット・範囲外のミップ等)
                 Core::Logger::Error(
                     "KurenaiEngine3D", "テクスチャの書き出し: 受け皿を作れませんでした: " + request.Name);
                 request.Done = true;
+                for (TextureDumpSlot& releaseSlot : request.Slots)
+                {
+                    releaseSlot.Readback.reset();
+                }
                 continue;
             }
 
             // 【寸法は今ここで控える】あとで生ポインタから引き直すと、その間にリサイズが起きた場合に
             // 受け皿の中身と食い違う値をヘッダへ書いてしまう
-            request.Desc = request.Readback->GetReadbackDesc(0);
-            request.Issued = true;
-            request.CopyFrame = m_TAAFrameIndex;
+            slot.Desc = slot.Readback->GetReadbackDesc(0);
+            if (request.IssuedCount == 0)
+            {
+                request.FirstDesc = slot.Desc;
+                const size_t bytesPerSlot =
+                    static_cast<size_t>(slot.Desc.Width) * slot.Desc.BytesPerTexel * slot.Desc.Height;
+                const uint32_t desiredDepth = std::min(request.TargetFrames, kTextureDumpRingDepth);
+                const uint32_t memoryDepth = bytesPerSlot == 0 ? 1u :
+                    static_cast<uint32_t>(std::max<size_t>(1, kTextureDumpRingMaxBytes / bytesPerSlot));
+                const uint32_t ringDepth = std::min(desiredDepth, memoryDepth);
+                request.RingDepth = ringDepth;
+                if (ringDepth < desiredDepth)
+                {
+                    Core::Logger::Warning("KurenaiEngine3D", "テクスチャの書き出し: リング深さを " + std::to_string(ringDepth) +
+                        " へ下げました。実効レートが 1/(遅延+1) に落ちます: " + request.Name);
+                }
+            }
+            else if (slot.Desc.Width != request.FirstDesc.Width ||
+                     slot.Desc.Height != request.FirstDesc.Height ||
+                     slot.Desc.ChannelCount != request.FirstDesc.ChannelCount ||
+                     slot.Desc.ElementType != request.FirstDesc.ElementType)
+            {
+                // 【寸法の違う絵を1つの連番に混ぜない】混ざったまま時間方向の平均や分散を取ると、
+                // エラーにならず静かに間違った数字が出る。ここで打ち切って、何が変わったかを数値で残す
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "テクスチャの書き出し: 連番の途中で寸法か形式が変わったので打ち切ります: " + request.Name +
+                        " (" + std::to_string(request.FirstDesc.Width) + "x" +
+                        std::to_string(request.FirstDesc.Height) +
+                        " ch=" + std::to_string(request.FirstDesc.ChannelCount) +
+                        " elem=" + std::to_string(static_cast<uint32_t>(request.FirstDesc.ElementType)) +
+                        " から " + std::to_string(slot.Desc.Width) + "x" + std::to_string(slot.Desc.Height) +
+                        " ch=" + std::to_string(slot.Desc.ChannelCount) +
+                        " elem=" + std::to_string(static_cast<uint32_t>(slot.Desc.ElementType)) +
+                        " へ変化。" + std::to_string(request.WrittenCount) + "枚まで書けています)");
+                request.Done = true;
+                for (TextureDumpSlot& releaseSlot : request.Slots)
+                {
+                    releaseSlot.Readback.reset();
+                }
+                continue;
+            }
+            slot.CopyFrame = m_TAAFrameIndex;
+            slot.SequenceIndex = request.IssuedCount;
+            slot.FailedFrames = 0;
+            slot.Busy = true;
+            ++request.IssuedCount;
+            request.LastIssueFrame = m_TAAFrameIndex;
+            if (!request.AnyIssued)
+            {
+                request.FirstIssueFrame = m_TAAFrameIndex;
+            }
+            request.AnyIssued = true;
 
-            pending.push_back(PendingCopy{ i, found->Texture });
+            pending.push_back(PendingCopy{ i, slotIndex, found->Texture });
             reads.push_back(found->Texture);
         }
 
@@ -5318,8 +5417,13 @@ namespace Kurenai
                 for (const PendingCopy& copy : pending)
                 {
                     TextureDumpRequest& request = m_TextureDumps[copy.RequestIndex];
+                    if (copy.SlotIndex >= request.Slots.size() || !request.Slots[copy.SlotIndex].Readback)
+                    {
+                        Core::Logger::Error("KurenaiEngine3D", "テクスチャの書き出し: コピー先スロットが無効です: " + request.Name);
+                        continue;
+                    }
                     cmd->CopyTextureToReadback(
-                        request.Readback.get(), copy.Source, request.MipLevel, request.ArraySlice);
+                        request.Slots[copy.SlotIndex].Readback.get(), copy.Source, request.MipLevel, request.ArraySlice);
                 }
             },
         });
@@ -5331,7 +5435,6 @@ namespace Kurenai
         {
             return;
         }
-
         bool allDone = true;
         for (TextureDumpRequest& request : m_TextureDumps)
         {
@@ -5339,56 +5442,97 @@ namespace Kurenai
             {
                 continue;
             }
-            if (!request.Issued)
-            {
-                allDone = false;
-                continue;
-            }
 
-            // 【積んだ直後に読まない】GPUの実行はCPUより数フレーム遅れる。
-            // 待ちが足りないとエラーにならず、静かに古い/未初期化の中身が返る
-            if (m_TAAFrameIndex - request.CopyFrame < kTextureDumpReadDelayFrames)
+            // 【必ず打ち切る】対象のテクスチャがそのフレームで作られなくなると連番は永久に揃わない。
+            // -exitafterdump と組み合わせた無人実行が静かに固まるのが最悪の失敗なので、
+            // 上限を決めて諦める(kTextureDumpMaxFailedFrames が置かれているのと同じ理由)
+            const uint64_t timeout = static_cast<uint64_t>(request.TargetFrames) *
+                std::max(request.Stride, kTextureDumpReadDelayFrames + 1) + kTextureDumpMaxFailedFrames + 120;
+            bool abortedByTimeout = false;
+            if (request.AnyIssued && static_cast<uint64_t>(m_TAAFrameIndex - request.FirstIssueFrame) > timeout)
             {
-                allDone = false;
-                continue;
-            }
-
-            const uint32_t rowPitch = request.Desc.Width * request.Desc.BytesPerTexel;
-            const size_t totalBytes = static_cast<size_t>(rowPitch) * request.Desc.Height;
-            if (totalBytes == 0)
-            {
-                Core::Logger::Error(
-                    "KurenaiEngine3D", "テクスチャの書き出し: 中身のサイズが0です: " + request.Name);
+                Core::Logger::Error("KurenaiEngine3D", "テクスチャの書き出し: " + std::to_string(request.TargetFrames) +
+                    "枚要求のうち" + std::to_string(request.WrittenCount) + "枚しか書けないまま打ち切りました: " + request.Name);
                 request.Done = true;
-                continue;
+                abortedByTimeout = true;
             }
 
-            std::vector<uint8_t> pixels(totalBytes);
-            if (!request.Readback->ReadbackData(pixels.data(), static_cast<uint32_t>(totalBytes)))
+            bool anyBusy = false;
+            for (TextureDumpSlot& slot : request.Slots)
             {
-                // DX11のMap(DO_NOT_WAIT)はGPUが詰まっていると失敗する。**1回で諦めない**が、
-                // 永遠に待ってもいけない ―― -exitafterdump と組み合わせた無人実行が
-                // 静かに固まるのが最悪の失敗なので、上限を決めて打ち切る
-                ++request.FailedFrames;
-                if (request.FailedFrames >= kTextureDumpMaxFailedFrames)
+                if (!slot.Busy)
                 {
-                    Core::Logger::Error(
-                        "KurenaiEngine3D",
-                        "テクスチャの書き出し: " + std::to_string(kTextureDumpMaxFailedFrames) +
-                            "フレーム続けて読み戻せませんでした。中止します: " + request.Name);
-                    request.Done = true;
+                    continue;
                 }
-                else
+                if (m_TAAFrameIndex - slot.CopyFrame < kTextureDumpReadDelayFrames)
                 {
                     allDone = false;
+                    continue;
                 }
-                continue;
+                const uint32_t rowPitch = slot.Desc.Width * slot.Desc.BytesPerTexel;
+                const size_t totalBytes = static_cast<size_t>(rowPitch) * slot.Desc.Height;
+                if (totalBytes == 0 || totalBytes > std::numeric_limits<uint32_t>::max())
+                {
+                    Core::Logger::Error("KurenaiEngine3D", "テクスチャの書き出し: 中間のサイズが不正です: " + request.Name);
+                    slot.Busy = false;
+                    continue;
+                }
+                std::vector<uint8_t> pixels(totalBytes);
+                if (!slot.Readback || !slot.Readback->ReadbackData(pixels.data(), static_cast<uint32_t>(totalBytes)))
+                {
+                    ++slot.FailedFrames;
+                    if (slot.FailedFrames >= kTextureDumpMaxFailedFrames)
+                    {
+                        Core::Logger::Error("KurenaiEngine3D", "テクスチャの書き出し: " +
+                            std::to_string(kTextureDumpMaxFailedFrames) + "フレーム続けて読み戻せませんでした。中止します: " + request.Name);
+                        slot.Busy = false;
+                    }
+                    else
+                    {
+                        allDone = false;
+                    }
+                    continue;
+                }
+                if (WriteTextureDumpFile(request, slot, pixels))
+                {
+                    ++request.WrittenCount;
+                }
+                slot.Busy = false;
             }
 
-            WriteTextureDumpFile(request, pixels);
-            request.Done = true;
-            // 受け皿はもう要らない。数十MBになることがあるので抱え続けない
-            request.Readback.reset();
+            anyBusy = std::any_of(request.Slots.begin(), request.Slots.end(),
+                [](const TextureDumpSlot& slot) { return slot.Busy; });
+            if (!request.Done && request.IssuedCount >= request.TargetFrames && !anyBusy)
+            {
+                request.Done = true;
+            }
+            if (request.Done)
+            {
+                for (TextureDumpSlot& slot : request.Slots)
+                {
+                    slot.Readback.reset();
+                }
+                // 打ち切りのログに枚数がもう入っているので、そのときはサマリを重ねない
+                if (!abortedByTimeout)
+                {
+                    // 【「書けた枚数」を必ず出す】これまでは「諦めた」も完了として扱われ、
+                    // 1枚も書けなくても -exitafterdump が正常終了していた
+                    const std::string summary = "テクスチャの書き出し完了: " + std::to_string(request.TargetFrames) +
+                        "枚中" + std::to_string(request.WrittenCount) + "枚書けました: " + request.Name;
+                    if (request.WrittenCount == 0)
+                    {
+                        Core::Logger::Error("KurenaiEngine3D", summary);
+                    }
+                    else
+                    {
+                        Core::Logger::Info("KurenaiEngine3D", summary);
+                    }
+                }
+            }
+            else
+            {
+                allDone = false;
+            }
         }
 
         if (allDone && m_ExitAfterDump && !m_ExitAfterDumpRequested)
@@ -5414,7 +5558,7 @@ namespace Kurenai
     }
 
     bool KurenaiEngine3D::WriteTextureDumpFile(
-        const TextureDumpRequest& request, const std::vector<uint8_t>& pixels) const
+        const TextureDumpRequest& request, const TextureDumpSlot& slot, const std::vector<uint8_t>& pixels) const
     {
         // ファイル形式(Tools/texdump_inspect.py と一致させること):
         //   off  size  内容
@@ -5452,7 +5596,8 @@ namespace Kurenai
 
         uint32_t elementType = 0;
         uint32_t bytesPerElement = 0;
-        switch (request.Desc.ElementType)
+        const std::wstring outputPath = MakeTextureDumpSequencePath(request.Path, request.TargetFrames, slot.SequenceIndex);
+        switch (slot.Desc.ElementType)
         {
         case RHI::TextureElementType::UNorm8:
             elementType = 1;
@@ -5484,12 +5629,12 @@ namespace Kurenai
             return false;
         }
 
-        std::ofstream file(request.Path, std::ios::binary | std::ios::trunc);
+        std::ofstream file(outputPath, std::ios::binary | std::ios::trunc);
         if (!file)
         {
             Core::Logger::Error(
                 "KurenaiEngine3D",
-                "テクスチャを書き出せませんでした(ファイルを開けない): " + Core::WideToUtf8(request.Path));
+                "テクスチャを書き出せませんでした(ファイルを開けない): " + Core::WideToUtf8(outputPath));
             return false;
         }
 
@@ -5499,12 +5644,13 @@ namespace Kurenai
             // 上げずに黙って読ませると、名前の先頭4文字がBackendとして解釈される
             2u,                        // Version
             kHeaderBytes,              // HeaderBytes
-            request.Desc.Width,        // Width
-            request.Desc.Height,       // Height
-            request.Desc.ChannelCount, // ChannelCount
+            slot.Desc.Width,           // Width
+            slot.Desc.Height,          // Height
+            slot.Desc.ChannelCount,    // ChannelCount
             elementType,               // ElementType
             bytesPerElement,           // BytesPerElement
-            m_TAAFrameIndex,           // FrameIndex
+            // 読み戻し完了時ではなく、画素が属するコピー発行時のフレームを記録する。
+            slot.CopyFrame,            // FrameIndex
             request.MipLevel,          // MipLevel
             request.ArraySlice,        // ArraySlice
             m_GraphicsAPI == GraphicsAPI::DX12 ? 2u : 1u, // Backend
@@ -5525,7 +5671,7 @@ namespace Kurenai
         {
             Core::Logger::Error(
                 "KurenaiEngine3D",
-                "テクスチャを書き出せませんでした(書き込みに失敗): " + Core::WideToUtf8(request.Path));
+                "テクスチャを書き出せませんでした(書き込みに失敗): " + Core::WideToUtf8(outputPath));
             return false;
         }
 
@@ -5533,11 +5679,11 @@ namespace Kurenai
         // 呼び出し側(スキルの手順)はこの行が出てからプロセスを落とす
         Core::Logger::Info(
             "KurenaiEngine3D",
-            "テクスチャを書き出しました: " + Core::WideToUtf8(request.Path) + " (" + request.Name + " " +
-                std::to_string(request.Desc.Width) + "x" + std::to_string(request.Desc.Height) +
-                " ch=" + std::to_string(request.Desc.ChannelCount) + " elem=" + std::to_string(elementType) +
+            "テクスチャを書き出しました: " + Core::WideToUtf8(outputPath) + " (" + request.Name + " " +
+                std::to_string(slot.Desc.Width) + "x" + std::to_string(slot.Desc.Height) +
+                " ch=" + std::to_string(slot.Desc.ChannelCount) + " elem=" + std::to_string(elementType) +
                 " mip=" + std::to_string(request.MipLevel) + " slice=" + std::to_string(request.ArraySlice) +
-                " frame=" + std::to_string(m_TAAFrameIndex) + ")");
+                " frame=" + std::to_string(slot.CopyFrame) + ")");
         return true;
     }
 
