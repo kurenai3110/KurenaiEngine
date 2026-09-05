@@ -1172,7 +1172,8 @@ namespace Kurenai
             // Mode==11(タイルライトカリングのヒートマップ)専用。
             // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数
             DirectX::XMFLOAT4 TileParams;
-            // Mode==11専用。xy=レンダー解像度(UVからタイル座標を求めるのに使う), zw=未使用
+            // xy=レンダー解像度。zw=Mode 21の候補プール格子オフセット。
+            // デバッグ表示も書き手と同じ格子を読まないとA/Bの比較結果が嘘になる
             DirectX::XMFLOAT4 TileRenderSize;
             // Mode==22(MegaLightsの蓄積平均)専用。x=これまでに足したフレーム数, yzw=未使用。
             // **末尾に足すこと** ―― cbufferは宣言順レイアウトなので、途中へ挿すと
@@ -1532,13 +1533,15 @@ namespace Kurenai
         struct alignas(16) MegaLightsTilePoolConstants
         {
             DirectX::XMFLOAT4X4 View;
-            // x=タイル数X, y=タイル数Y, z=有効ライト数, w=1タイルあたりの候補数K
+            // xy=候補プールの有効タイル数(格子ジッター有効時だけ通常のタイル数+1)、
+            // z=有効ライト数, w=1タイルあたりの候補数K
             DirectX::XMUINT4 TileParams;
             // x=レンダー解像度の幅, y=同 高さ, zw=未使用
             DirectX::XMUINT4 RenderSize;
             // x=射影行列の(0,0)成分, y=同(1,1)成分、z=深度リニアライズ定数a, w=同b
             DirectX::XMFLOAT4 ProjParams;
-            // x=フレーム番号(候補を毎フレーム引き直すための乱数の種)、yzw=未使用
+            // x=フレーム番号(候補を毎フレーム引き直すための乱数の種)、
+            // yz=タイル格子の画素オフセット(各0〜15)、w=未使用
             DirectX::XMUINT4 PoolParams;
         };
 
@@ -1558,7 +1561,8 @@ namespace Kurenai
         {
             // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか(0で撃たない)
             DirectX::XMUINT4 Params0;
-            // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
+            // x=候補プールの有効タイル数X(格子ジッター有効時だけ+1)、
+            // y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
             DirectX::XMUINT4 Params1;
             // x=借りる近傍の数, y=探す半径(ピクセル),
             // z=空間再利用の結合方式(0=confidence重み, 1=不偏化のZ),
@@ -1583,6 +1587,9 @@ namespace Kurenai
             // 「1画素1リザーバ」を前提に添字を組み立てているため。
             // yzw=未使用
             DirectX::XMUINT4 Params5;
+            // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用。
+            // 書き手と全読み手で同じ値を使わないと、別タイルの候補を静かに読むため必ず末尾へ置く
+            DirectX::XMUINT4 Params6;
         };
 
         // MegaLightsDenoise.hlsl側のcbuffer MegaLightsDenoiseConstantsと一致させること
@@ -4194,6 +4201,41 @@ namespace Kurenai
                 " にしました");
     }
 
+    void KurenaiEngine3D::SetMegaLightsTileJitter(int mode)
+    {
+        // 負の値は「既定のまま」。未指定時も現在値を起動ログへ残すためreturnしない
+        if (mode >= 0)
+        {
+            if (mode > 2)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsのタイル格子ジッターのモードが範囲外のため無視します: " +
+                        std::to_string(mode) + " (0〜2)");
+            }
+            else
+            {
+                m_MegaLightsTileJitterMode = mode;
+            }
+        }
+
+        if (m_MegaLightsTileJitterMode == 1)
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsのタイル格子ジッター: 有効 (m_TAAFrameIndexのHalton(2,3)を16段階へ量子化)");
+        }
+        else if (m_MegaLightsTileJitterMode == 2)
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D", "MegaLightsのタイル格子ジッター: 有効 (検証用オフセット(0,0)固定)");
+        }
+        else
+        {
+            Core::Logger::Info("KurenaiEngine3D", "MegaLightsのタイル格子ジッター: 無効");
+        }
+    }
+
     int32_t KurenaiEngine3D::MegaLightsSamplesPerPixel() const
     {
         // 【手法3以外は必ず1】手法2の時間・空間再利用は「1画素1リザーバ」を前提に
@@ -4925,8 +4967,11 @@ namespace Kurenai
             {
                 RHI::BufferDesc tilePoolBufferDesc;
                 tilePoolBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+                // ジッター有効時は右端・下端のタイル座標が1つ増える。トグル変更でGPUを
+                // 待って再確保しなくて済むよう、無効時も常に+1ぶんを確保しておく
                 tilePoolBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) *
-                                                 kMegaLightsTilePoolStride * m_LightTileCountX * m_LightTileCountY;
+                                                 kMegaLightsTilePoolStride * (m_LightTileCountX + 1u) *
+                                                 (m_LightTileCountY + 1u);
                 tilePoolBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
                 m_MegaLightsTilePoolBuffer = m_Device->CreateBuffer(tilePoolBufferDesc);
 
@@ -9793,6 +9838,30 @@ namespace Kurenai
         // ようにする。TAAが複数フレームぶんを蓄積することで実質的なスーパーサンプリングになる。
         // TAA無効時はジッターも必ず0にすること(ジッターだけ残ると画面が振動するだけになる)
         ++m_TAAFrameIndex;
+
+        // --- MegaLights候補プールのタイル格子ジッター ---
+        // 書き手・Initial/Spatial・Presentへ配る値をここで一度だけ決める。
+        // 各パスが個別にフレーム番号から導くと、式の片側だけを直した際に別タイルを静かに読むため
+        const bool megaLightsTileJitterEnabled = m_MegaLightsTileJitterMode != 0;
+        DirectX::XMUINT2 megaLightsTileOffset{ 0u, 0u };
+        if (m_MegaLightsTileJitterMode == 1)
+        {
+            // Halton(2,3)を16段階へ量子化する。RadicalInverseは[0,1)だが、丸め誤差でも
+            // 16にならないようタイル幅-1で明示的に押さえる
+            megaLightsTileOffset.x = std::min<uint32_t>(
+                static_cast<uint32_t>(RadicalInverse(m_TAAFrameIndex, 2u) * kLightTileSize),
+                kLightTileSize - 1u);
+            megaLightsTileOffset.y = std::min<uint32_t>(
+                static_cast<uint32_t>(RadicalInverse(m_TAAFrameIndex, 3u) * kLightTileSize),
+                kLightTileSize - 1u);
+        }
+        // 無効時だけ従来のタイル数をそのまま使い、添字・乱数の種・ディスパッチ数を保存する。
+        // モード2は対照実験なので、オフセット0でも有効側と同じ+1タイルを通す
+        const uint32_t megaLightsEffectiveTilesX =
+            megaLightsTileJitterEnabled ? (m_LightTileCountX + 1u) : m_LightTileCountX;
+        const uint32_t megaLightsEffectiveTilesY =
+            megaLightsTileJitterEnabled ? (m_LightTileCountY + 1u) : m_LightTileCountY;
+
         DirectX::XMFLOAT2 jitterOffsetPixels{ 0.0f, 0.0f };
         if (m_TAAEnabled)
         {
@@ -13536,14 +13605,15 @@ namespace Kurenai
                 .Reads = { m_GBufferDepth.get() },
                 .BufferReads = { m_LightBuffer.get() },
                 .BufferWrites = { m_MegaLightsTilePoolBuffer.get() },
-                .Execute = [this, &gpuLights, viewMatrix, jitteredProj](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX,
+                            megaLightsEffectiveTilesY, megaLightsTileOffset](RHI::IRHICommandList* cmd)
                 {
                     MegaLightsTilePoolConstants poolConstants{};
                     DirectX::XMStoreFloat4x4(&poolConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
                     poolConstants.TileParams =
                     {
-                        m_LightTileCountX,
-                        m_LightTileCountY,
+                        megaLightsEffectiveTilesX,
+                        megaLightsEffectiveTilesY,
                         static_cast<uint32_t>(gpuLights.size()),
                         // 【書き手と読み手で必ず同じKを使うこと】プールの1タイルぶんの
                         // 要素数はKから決まるので、食い違うと別タイルの領域を読み書きする
@@ -13564,7 +13634,13 @@ namespace Kurenai
                     };
                     // 候補を毎フレーム引き直すための種。TAAのフレーム番号を流用する
                     // (単調増加していればよく、ジッターの位相とは無関係)
-                    poolConstants.PoolParams = { m_TAAFrameIndex, 0u, 0u, 0u };
+                    poolConstants.PoolParams =
+                    {
+                        m_TAAFrameIndex,
+                        megaLightsTileOffset.x,
+                        megaLightsTileOffset.y,
+                        0u,
+                    };
 
                     cmd->UpdateBuffer(m_MegaLightsTilePoolConstantBuffer.get(), &poolConstants, sizeof(poolConstants));
 
@@ -13574,7 +13650,7 @@ namespace Kurenai
                     cmd->SetComputeTexture(1, m_GBufferDepth.get());
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessBuffer(0, m_MegaLightsTilePoolBuffer.get());
-                    cmd->Dispatch(m_LightTileCountX, m_LightTileCountY, 1);
+                    cmd->Dispatch(megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, 1);
                 },
             });
         }
@@ -13676,7 +13752,8 @@ namespace Kurenai
             // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
-                [this, &jitteredProj, megaLightsQuadShared](uint32_t spatialIteration)
+                [this, &jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
+                 megaLightsTileOffset](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
                 stochasticConstants.Params0 =
@@ -13690,7 +13767,7 @@ namespace Kurenai
                 };
                 stochasticConstants.Params1 =
                 {
-                    m_LightTileCountX,
+                    megaLightsEffectiveTilesX,
                     kLightTileSize,
                     // 候補プールを書いたときと同じKでなければならない(上のTileParams.wと同値)
                     static_cast<uint32_t>(m_MegaLightsTilePoolCapacity),
@@ -13755,6 +13832,11 @@ namespace Kurenai
                 // (どちらも例外にならず、絵が「それらしく」出るので気付けない)
                 stochasticConstants.Params5 = {
                     static_cast<uint32_t>(MegaLightsSamplesPerPixel()), 0u, 0u, 0u
+                };
+                // 候補プールを書いたときと同じ格子オフセット。末尾へ足して、途中までしか
+                // 宣言しない Shade / Temporal / Resolve の既存レイアウトを変えない
+                stochasticConstants.Params6 = {
+                    megaLightsTileOffset.x, megaLightsTileOffset.y, 0u, 0u
                 };
                 return stochasticConstants;
             };
@@ -16134,12 +16216,16 @@ namespace Kurenai
             presentUsesTilePool ? m_MegaLightsTilePoolBuffer.get() : m_LightTileBuffer.get();
         const uint32_t presentTileCapacity =
             presentUsesTilePool ? static_cast<uint32_t>(m_MegaLightsTilePoolCapacity) : kLightTileCapacity;
+        // Mode 21だけは候補プールを書いた有効タイル幅を使う。Mode 11は従来のライトグリッドなので
+        // m_LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
+        const uint32_t presentTileCountX =
+            presentUsesTilePool ? megaLightsEffectiveTilesX : m_LightTileCountX;
 
         PresentConstants presentConstants{};
         presentConstants.Mode = presentMode;
         presentConstants.TileParams =
         {
-            static_cast<float>(m_LightTileCountX),
+            static_cast<float>(presentTileCountX),
             static_cast<float>(kLightTileSize),
             static_cast<float>(presentTileCapacity),
             // ヒートマップで赤に振り切る基準のライト数。容量そのものを基準にすると
@@ -16150,8 +16236,8 @@ namespace Kurenai
         {
             static_cast<float>(m_RenderWidth),
             static_cast<float>(m_RenderHeight),
-            0.0f,
-            0.0f,
+            presentUsesTilePool ? static_cast<float>(megaLightsTileOffset.x) : 0.0f,
+            presentUsesTilePool ? static_cast<float>(megaLightsTileOffset.y) : 0.0f,
         };
         // Mode 22(蓄積平均)が割る数。0で割らないよう下限1
         presentConstants.AccumParams =

@@ -574,6 +574,10 @@ namespace Kurenai::Defaults
     // (バッファの確保がコンパイル時の kMegaLightsTilePoolCapacity で決まるため、
     // 振るにはビルドが要る)
     inline constexpr int MegaLightsTilePoolCapacity = 128;
+    // 候補プールの16x16格子をフレームごとにずらし、タイル内で共通する抽出誤差を
+    // 時間累積後の同じ画面位置へ固定しない。1フレームのノイズ量を減らす機能ではない。
+    // 無効時は従来のタイル添字・乱数の種・ディスパッチ数を保つため既定は無効
+    inline constexpr bool MegaLightsTileJitterEnabled = false;
 
     // --- シャドウ(スクリーンスペース) ---
     // ポイント/スポットライトの影。深度バッファに写っている面しか遮蔽物にできず、

@@ -711,6 +711,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightspool <8〜128>。候補プールが1タイルあたりに抽出する灯の数(K)。
         // 1画素あたりの標本数では減らない「タイル間」のノイズがここで決まる
         const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
+        // -megalightstilejitter <0|1|2>。1=Halton(2,3)で格子をずらす、2=有効だがオフセット0固定
+        const int megaLightsTileJitter = ParseIntOption(L"-megalightstilejitter", -1);
         // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
         const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
         const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
@@ -839,6 +841,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetMegaLightsTilePoolCapacity(megaLightsPoolCapacity);
             }
+            // 未指定時も呼び、既定の無効状態を起動ログへ1行残す
+            engine.SetMegaLightsTileJitter(megaLightsTileJitter);
             if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
             {
                 engine.SetMegaLightsTemporal(megaLightsTemporal, megaLightsTemporalMClamp);

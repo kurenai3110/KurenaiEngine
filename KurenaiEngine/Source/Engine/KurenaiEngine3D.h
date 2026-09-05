@@ -311,6 +311,10 @@ namespace Kurenai
         // 候補プールが1タイルあたりに抽出する灯の数(K)。
         // kMegaLightsTilePoolMinCapacity 〜 kMegaLightsTilePoolCapacity
         void SetMegaLightsTilePoolCapacity(int capacity);
+        // 候補プールのタイル格子を画素単位でずらすモード。
+        // 0=無効(従来とビット同一)、1=Halton(2,3)、2=有効だが検証用にオフセット0固定。
+        // 範囲外はログを出して無視し、負の値では既定値の状態をログへ残す
+        void SetMegaLightsTileJitter(int mode);
 
         // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を
         // 測るためのもので、静止した絵をいくら撮っても測れない側を測る入口。
@@ -1557,6 +1561,9 @@ namespace Kurenai
         // タイル内の全画素が同じK個から引くので、プールの引き方のばらつきはタイル内で
         // 共通のオフセットとして乗る(根拠は EngineDefaults.h)
         int32_t m_MegaLightsTilePoolCapacity = Defaults::MegaLightsTilePoolCapacity;
+        // タイル格子を動かすと共通誤差が時間方向に別の画面位置へ移る。
+        // boolではなくモードなのは、+1タイルの経路を保ったままオフセットだけ0にする対照実験を行うため
+        int32_t m_MegaLightsTileJitterMode = Defaults::MegaLightsTileJitterEnabled ? 1 : 0;
         // いまリザーババッファを確保したときの標本数。**定数バッファへ渡す値と必ず一致させる**。
         // 食い違うと Initial が確保外へ書くか Resolve が別画素の標本を読み、
         // 例外もログも出ないまま絵だけが壊れる

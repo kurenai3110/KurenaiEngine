@@ -67,7 +67,8 @@ cbuffer MegaLightsStochasticConstants : register(b1)
 {
     // x=出力幅, y=出力高, z=初期候補数M(このパスでは未使用), w=影レイを撃つか(未使用)
     uint4 Params0;
-    // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
+    // x=候補プールの有効タイル数X(格子ジッター有効時だけ+1)、
+    // y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
     uint4 Params1;
     // x=借りる近傍の数, y=探す半径(ピクセル),
     // z=結合の方式(0=confidence重み, 1=不偏化のZ),
@@ -80,6 +81,11 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     // y=空間再利用の反復番号(0起点)。近傍の型板の種に混ぜて、反復ごとに別の近傍を選ばせる、
     // zw=未使用
     uint4 Params4;
+    // Params5はInitial/Resolveが使う1画素あたりの標本数。このパスでは未使用だが、
+    // 末尾のParams6を正しいオフセットで読むため途中を飛ばさず宣言する
+    uint4 Params5;
+    // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用
+    uint4 Params6;
 };
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
@@ -250,7 +256,7 @@ float TargetPdfOn(SpatialSurface s, uint lightIndex)
 bool LightInTileDomain(uint lightIndex, uint2 pixelCoord, uint2 outputSize)
 {
     const uint tileSize = max(Params1.y, 1u);
-    const uint2 tileCoord = pixelCoord / tileSize;
+    const uint2 tileCoord = (pixelCoord + Params6.xy) / tileSize;
     const uint candidateCount = Params1.z;
     const uint base = MegaLightsTilePoolBase(tileCoord, Params1.x, candidateCount);
 
@@ -262,8 +268,10 @@ bool LightInTileDomain(uint lightIndex, uint2 pixelCoord, uint2 outputSize)
     const float nearestViewZ = asfloat(TilePool[base + 4u]);
     const float farthestViewZ = asfloat(TilePool[base + 5u]);
 
-    const TileFrustum frustum =
-        MakeTileFrustum(tileCoord, outputSize, Params3.x, Params3.y, nearestViewZ, farthestViewZ);
+    // MISの分母も候補プールを書いたタイルの画素範囲で判定しなければならない
+    const int2 tilePixelOrigin = int2(tileCoord * tileSize) - int2(Params6.xy);
+    const TileFrustum frustum = MakeTileFrustumFromPixelOrigin(
+        tilePixelOrigin, outputSize, Params3.x, Params3.y, nearestViewZ, farthestViewZ);
 
     float3 viewCenter;
     float radius;

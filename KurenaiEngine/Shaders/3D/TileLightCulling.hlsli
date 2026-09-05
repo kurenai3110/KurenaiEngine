@@ -37,14 +37,18 @@ float TileViewZFromDepth(float depth, float a, float b)
     return b / (depth - a);
 }
 
-// タイルの視錐台を組み立てる。
+// 画素原点からタイルの視錐台を組み立てる。原点は格子ジッターで負になりうるためint2。
+// はみ出した範囲を画面内へクランプし、実際に深度を集めた画素範囲より錐台を狭めない
 // 射影行列(行ベクトル規約)は clip.x = viewX * P00、clip.w = viewZ なので ndc.x = viewX * P00 / viewZ。
 // タイルのNDC範囲に入る条件をそのまま平面にする
-TileFrustum MakeTileFrustum(
-    uint2 tileCoord, uint2 renderSize, float p00, float p11, float nearestViewZ, float farthestViewZ)
+TileFrustum MakeTileFrustumFromPixelOrigin(
+    int2 pixelOrigin, uint2 renderSize, float p00, float p11, float nearestViewZ, float farthestViewZ)
 {
-    const float2 tileMin = float2(tileCoord * kTileSize);
-    const float2 tileMax = min(tileMin + float2(kTileSize, kTileSize), float2(renderSize));
+    const float2 unclampedTileMin = float2(pixelOrigin);
+    const float2 renderMax = float2(renderSize);
+    const float2 tileMin = clamp(unclampedTileMin, float2(0.0f, 0.0f), renderMax);
+    const float2 tileMax = clamp(
+        unclampedTileMin + float2(kTileSize, kTileSize), float2(0.0f, 0.0f), renderMax);
     const float2 invRenderSize = 1.0f / float2(renderSize);
 
     const float ndcMinX = tileMin.x * invRenderSize.x * 2.0f - 1.0f;
@@ -64,6 +68,14 @@ TileFrustum MakeTileFrustum(
     return frustum;
 }
 
+// 従来のライトカリングは格子をずらさない。既存の呼び出しと浮動小数点の入力を保つ薄いラッパ
+TileFrustum MakeTileFrustum(
+    uint2 tileCoord, uint2 renderSize, float p00, float p11, float nearestViewZ, float farthestViewZ)
+{
+    return MakeTileFrustumFromPixelOrigin(
+        int2(tileCoord * kTileSize), renderSize, p00, p11, nearestViewZ, farthestViewZ);
+}
+
 // タイルの視錐台スラブを包むView空間のAABBを求める。
 //
 // 【何のためにあるか】MegaLights の候補プールは「そのライトがタイルへどれだけ届くか」を
@@ -71,12 +83,15 @@ TileFrustum MakeTileFrustum(
 // 錐台を包むAABBで代用すると**距離を過小評価する = 重みを過大評価する**側に倒れる。
 // 重みの過大評価はサンプリングの効率を落とすだけで正しさには影響しないが、
 // 過小評価は「届くのに選ばれない」= バイアスになる。必ずこの向きに倒すこと。
-void TileViewSpaceAABB(
-    uint2 tileCoord, uint2 renderSize, float p00, float p11, float nearestViewZ, float farthestViewZ,
+void TileViewSpaceAABBFromPixelOrigin(
+    int2 pixelOrigin, uint2 renderSize, float p00, float p11, float nearestViewZ, float farthestViewZ,
     out float3 aabbMin, out float3 aabbMax)
 {
-    const float2 tileMin = float2(tileCoord * kTileSize);
-    const float2 tileMax = min(tileMin + float2(kTileSize, kTileSize), float2(renderSize));
+    const float2 unclampedTileMin = float2(pixelOrigin);
+    const float2 renderMax = float2(renderSize);
+    const float2 tileMin = clamp(unclampedTileMin, float2(0.0f, 0.0f), renderMax);
+    const float2 tileMax = clamp(
+        unclampedTileMin + float2(kTileSize, kTileSize), float2(0.0f, 0.0f), renderMax);
     const float2 invRenderSize = 1.0f / float2(renderSize);
 
     const float ndcMinX = tileMin.x * invRenderSize.x * 2.0f - 1.0f;
@@ -101,6 +116,15 @@ void TileViewSpaceAABB(
 
     aabbMin = float3(minXY, zNear);
     aabbMax = float3(maxXY, zFar);
+}
+
+// 既存のライトカリング向け。画素原点版へ従来どおり tileCoord * kTileSize を渡す
+void TileViewSpaceAABB(
+    uint2 tileCoord, uint2 renderSize, float p00, float p11, float nearestViewZ, float farthestViewZ,
+    out float3 aabbMin, out float3 aabbMax)
+{
+    TileViewSpaceAABBFromPixelOrigin(
+        int2(tileCoord * kTileSize), renderSize, p00, p11, nearestViewZ, farthestViewZ, aabbMin, aabbMax);
 }
 
 // ライトの影響範囲を包むView空間の球を求める。
