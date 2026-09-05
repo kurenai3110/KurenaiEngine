@@ -49,12 +49,7 @@ static const float kRayOriginBias = 0.01f;
 static const float kRayOriginBiasSlope = 1e-4f;
 static const float kMinSlopeScaleNdotL = 0.1f;
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 float TraceLightVisibility(float3 rayOrigin, float3 L, float originBias, float distanceToLight)
 {

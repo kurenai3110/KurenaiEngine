@@ -91,12 +91,7 @@ Texture2D BentNormalTexture : register(t16);
 
 RWTexture2D<float4> OutputTexture : register(u0);
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 // 指定位置から太陽へ影レイを撃ち、遮られていなければ1、遮られていれば0を返す
 float TraceSunShadow(float3 position, float3 normal, float3 toSun)

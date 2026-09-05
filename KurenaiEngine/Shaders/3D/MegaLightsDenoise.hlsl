@@ -86,12 +86,7 @@ float Luminance(float3 c)
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 // その画素の「反射率」。フィルタの前にこれで割り、後で掛け戻す。
 // **時間累積側とà-trous側で必ず同じ式を使うこと** ―― ずれると掛け戻したときに色が変わる

@@ -108,12 +108,7 @@ float Luminance(float3 c)
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)

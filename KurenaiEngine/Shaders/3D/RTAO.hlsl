@@ -70,12 +70,7 @@ Texture2D DirectLightTexture : register(t8);
 // rgb=間接拡散光(イラディアンス), a=遮蔽率。SSAO/SSILの出力と同じ意味・同じフォーマット
 RWTexture2D<float4> OutputTexture : register(u0);
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 // PCG系の整数ハッシュ。ピクセルごとにサンプル位置を散らすためだけに使う
 uint HashUint(uint x)

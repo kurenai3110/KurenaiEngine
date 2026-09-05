@@ -135,48 +135,7 @@ PSInput VSMain(VSInput input, uint instanceID : SV_InstanceID)
     return output;
 }
 
-// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる。大気遠近の
-// in-scatter項にだけ使う(このパス自体のライティングは従来どおりIBLキューブマップを使う。
-// ファイル冒頭のEvaluateGlobalIBL参照)。
-// SSR.hlsl/DeferredLighting.hlsl/AerialPerspective.hlslのMakeSkyParametersと完全に同一の内容で
-// あること(正規化の扱いを含む)。4つのシェーダーはcbufferをそれぞれ別に宣言しているため
-// 関数そのものは共有できず複製しているが、中身がずれると「背景の空」「水面に映る空」
-// 「フォグの合成先の色」が互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
-SkyParameters MakeSkyParameters(float2 pixelPosition)
-{
-    SkyParameters params;
-    params.SunDirection = normalize(SkySunDirection.xyz);
-    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
-    // 太陽照度/空照度比(SkyParams.zに詰めてある。KurenaiEngine3D.cppのSkyParams.zコメント参照)。
-    // EvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う
-    params.SunToSkyIlluminanceRatio = SkyParams.z;
-    params.CloudCoverage = CloudParams0.x;
-    params.CloudAltitude = CloudParams0.y;
-    params.CloudUvScale = CloudParams0.z;
-    params.CloudDensity = CloudParams0.w;
-    params.CloudScrollOffset = CloudParams1.xy;
-    params.CloudForwardG = CloudParams1.z;
-    // 積雲の厚み[m](CloudParams1.wの枠に詰めてある)。
-    // 0ならレイマーチせず平面として扱う
-    params.CloudThickness = CloudParams1.w;
-    params.CirrusCoverage = CloudParams2.x;
-    params.CirrusAltitude = CloudParams2.y;
-    params.CirrusUvScale = CloudParams2.z;
-    params.CirrusDensity = CloudParams2.w;
-    params.CirrusScrollOffset = CloudParams3.xy;
-    params.CirrusAnisotropy = CloudParams3.z;
-    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
-    params.CloudTypeBias = CloudParams3.w;
-    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer参照)。
-    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける。
-    // 【このCameraPositionは鏡映後のカメラ位置(yが負になる)】このシェーダーはSkyColorUpperしか
-    // 呼ばずEvaluateCloudLayerへ到達しないため影響は無いが、P17でこの引数はレイの起点そのものに
-    // なった。SkyColor/SkyColorWithRayを呼ぶよう変えるなら、鏡映前のカメラ位置を渡し直すこと
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
-    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える
-    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
-    return params;
-}
+#include "ShaderInterop/SkyFrameParameters.hlsli"
 
 // GBuffer.hlsl/ProbeCapture.hlslのComputeTangentFrameと同じ(ピクセル単位でGram-Schmidt再直交化する)
 float3x3 ComputeTangentFrame(float3 N, float4 tangent)

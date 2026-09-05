@@ -66,12 +66,7 @@ Texture2D DepthTexture : register(t2);
 // R32_Floatのため型付きUAV読み書きが保証されている(AutoExposure.hlsl冒頭のコメント参照)
 RWTexture2D<float> VisibilityOutput : register(u0);
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 // PCG系の整数ハッシュ。ピクセルごとにサンプル位置を散らすためだけに使う
 uint HashUint(uint x)

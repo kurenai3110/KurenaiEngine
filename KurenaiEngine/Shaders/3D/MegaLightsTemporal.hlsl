@@ -89,12 +89,7 @@ static const float kMaxRelativeDepthDiff = 0.05f;
 static const float kMinNormalDot = 0.9f;
 static const float kMaxMaterialDiff = 0.1f;
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 uint HashUint(uint x)
 {

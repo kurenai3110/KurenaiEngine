@@ -97,28 +97,9 @@ Texture3D DebugVolumeTexture : register(t5);
 // 別のスロットが要る。index = y * TileRenderSize.x + x
 StructuredBuffer<float4> MegaLightsAccumBuffer : register(t6);
 
-struct PSInput
-{
-    float4 Position : SV_POSITION;
-    float2 UV : TEXCOORD0;
-};
+#include "ShaderInterop/FullscreenTriangle.hlsli"
 
-// 頂点バッファなしで画面全体を覆う三角形を1枚だけ生成する定番のテクニック
-PSInput VSMain(uint vertexID : SV_VertexID)
-{
-    PSInput output;
-    output.UV = float2((vertexID << 1) & 2, vertexID & 2);
-    output.Position = float4(output.UV.x * 2.0f - 1.0f, 1.0f - output.UV.y * 2.0f, 0.0f, 1.0f);
-    return output;
-}
-
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float4 clipPos = float4(ndc, depth, 1.0f);
-    float4 worldPos = mul(clipPos, InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 float4 PSMain(PSInput input) : SV_TARGET
 {

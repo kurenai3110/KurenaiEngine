@@ -96,79 +96,12 @@ Texture2D PlanarReflectionTexture : register(t11);
 // t0〜t11が既に使用済みのためt12を使う
 StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t12);
 
-struct PSInput
-{
-    float4 Position : SV_POSITION;
-    float2 UV : TEXCOORD0;
-};
+#include "ShaderInterop/FullscreenTriangle.hlsli"
 
-// 頂点バッファなしで画面全体を覆う三角形を1枚だけ生成する定番のテクニック
-PSInput VSMain(uint vertexID : SV_VertexID)
-{
-    PSInput output;
-    output.UV = float2((vertexID << 1) & 2, vertexID & 2);
-    output.Position = float4(output.UV.x * 2.0f - 1.0f, 1.0f - output.UV.y * 2.0f, 0.0f, 1.0f);
-    return output;
-}
+#include "ShaderInterop/Common.hlsli"
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float4 clipPos = float4(ndc, depth, 1.0f);
-    float4 worldPos = mul(clipPos, InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
-
-// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる。
-// DeferredLighting.hlsl/AerialPerspective.hlsl/PlanarReflection.hlslのMakeSkyParametersと
-// 完全に同一の内容であること(正規化の扱いを含む)。4つのシェーダーはcbufferをそれぞれ別に
-// 宣言しているため関数そのものは共有できず複製しているが、中身がずれると「背景の空」
-// 「水面に映る空」「フォグの合成先の色」が互いに食い違ってしまうため、
-// 中身を変える場合は必ず4つとも同時に直すこと
-SkyParameters MakeSkyParameters(float2 pixelPosition)
-{
-    SkyParameters params;
-    params.SunDirection = normalize(SkySunDirection.xyz);
-    // ティント4本と天頂輝度はSkyParametersBuffer(t12)にある(SkyIntegrate.hlslが書く)
-    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
-    // 太陽照度/空照度比(SkyParams.zに詰めてある。KurenaiEngine3D.cppのSkyParams.zコメント参照)。
-    // EvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う
-    params.SunToSkyIlluminanceRatio = SkyParams.z;
-    // 雲。DeferredLighting.hlslのMakeSkyParametersと完全に同一の内容であること
-    // (このファイル冒頭のコメントと同じ理由。背景に見える雲と水面に映る雲が食い違ってはいけない)
-    params.CloudCoverage = CloudParams0.x;
-    params.CloudAltitude = CloudParams0.y;
-    params.CloudUvScale = CloudParams0.z;
-    params.CloudDensity = CloudParams0.w;
-    params.CloudScrollOffset = CloudParams1.xy;
-    params.CloudForwardG = CloudParams1.z;
-    // 積雲の厚み[m](CloudParams1.wの枠に詰めてある)。
-    // 0ならレイマーチせず平面として扱う
-    params.CloudThickness = CloudParams1.w;
-    // 巻雲。DeferredLighting.hlslのMakeSkyParametersと完全に同一の内容であること
-    params.CirrusCoverage = CloudParams2.x;
-    params.CirrusAltitude = CloudParams2.y;
-    params.CirrusUvScale = CloudParams2.z;
-    params.CirrusDensity = CloudParams2.w;
-    params.CirrusScrollOffset = CloudParams3.xy;
-    params.CirrusAnisotropy = CloudParams3.z;
-    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
-    params.CloudTypeBias = CloudParams3.w;
-    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
-    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
-    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える
-    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
-    // 星空。水面に映る空にも背景と同じ星を出す(ApplyCloudFogParametersが0で潰した後に上書きする)。
-    // 背景側(DeferredLighting.hlsl)と同じ値を入れること——食い違うと
-    // 「空には出ているのに水面には映らない星」ができる
-    params.StarsIntensity = StarsParams.x;
-    params.StarsDensity = StarsParams.y;
-    params.StarsTwinkle = StarsParams.z;
-    params.StarsPixelAngle = StarsParams.w;
-    params.StarsTime = TimeParams.x;
-    return params;
-}
+#define KURENAI_SKY_WITH_STARS
+#include "ShaderInterop/SkyFrameParameters.hlsli"
 
 // ワールド座標を画面UVとView空間Z(カメラからの距離。値が大きいほど遠い)へ投影する。
 // カメラ背後、または画面外に出た場合はfalseを返す

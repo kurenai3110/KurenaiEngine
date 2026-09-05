@@ -58,20 +58,7 @@ cbuffer TonemapConstants : register(b1)
     float BlackPoint;
 };
 
-struct PSInput
-{
-    float4 Position : SV_POSITION;
-    float2 UV : TEXCOORD0;
-};
-
-// 頂点バッファなしで画面全体を覆う三角形を1枚だけ生成する定番のテクニック
-PSInput VSMain(uint vertexID : SV_VertexID)
-{
-    PSInput output;
-    output.UV = float2((vertexID << 1) & 2, vertexID & 2);
-    output.Position = float4(output.UV.x * 2.0f - 1.0f, 1.0f - output.UV.y * 2.0f, 0.0f, 1.0f);
-    return output;
-}
+#include "ShaderInterop/FullscreenTriangle.hlsli"
 
 // --- Reinhard: c/(c+1)。実装が最も単純だが、ハイライトが彩度を失って灰色へ寄り、
 //     暗部のコントラストも寝る。比較用のリファレンスとして残している

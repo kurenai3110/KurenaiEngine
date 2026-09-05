@@ -132,8 +132,8 @@ struct SkyParameters
     float  SkyIlluminanceOverZenith;
     // 太陽照度/空照度の比。CPU側(KurenaiEngine3D.cpp)のSunLighting::KeyIlluminanceLux /
     // SkyIlluminanceLuxから求め、FrameConstants::SkyParams.z経由で渡ってくる。
-    // ApplySkyParametersFromBufferでは埋まらないため、呼び出し側(各MakeSkyParameters)が
-    // 別途代入すること
+    // ApplySkyParametersFromBufferでは埋まらないため、
+    // ShaderInterop/SkyFrameParameters.hlsliのMakeSkyParametersが別途代入する
     float  SunToSkyIlluminanceRatio;
 
     // --- 雲による空の明かりの変化(P18)。「雲込みの空の照度 ÷ 晴天の空の照度」のRGB ---
@@ -224,7 +224,7 @@ struct SkyParameters
     // 視線が寝るほど斜距離が伸びる(仰角15度で積雲まで5.8km)。掛けないと消散係数を上げたとき
     // 「地物は溶けたのに雲だけ剃刀のようにくっきり」という絵になる(詳細はEvaluateCloudLayer末尾)。
     //
-    // 値はFrameConstants::FogParams0とCameraPosition.yから各MakeSkyParametersが埋める。
+    // 値はFrameConstants::FogParams0とCameraPosition.yからMakeSkyParametersが埋める。
     // ApplySkyParametersFromBufferでは埋まらない(空パラメータバッファはフォグを知らない)ため
     // 呼び出し側が別途代入すること。FogEnabledが0のときEvaluateCloudLayerはフォグの計算を
     // 一切行わず、フォグを持たない場合と厳密に同じ値を返す ---
@@ -253,7 +253,7 @@ struct SkyParameters
     // --- 星空 ---
     // 【SkyColorでしか使わない】星は背景と水面の映り込みにだけ描き、IBLキューブ
     // (SkyGenerate.hlsl)とフォグのin-scatter(AerialPerspective.hlsl)へは入れない。
-    // それらのMakeSkyParametersはStarsIntensityに0を入れること。
+    // それらはKURENAI_SKY_WITH_STARSを定義せず、StarsIntensityを0のままにする。
     // 理由: キューブは256px/面しかなく点光源を焼くとエイリアシングし、
     // プリフィルタ後の鏡面反射でファイアフライになる。星明かりの「照明」としての寄与は
     // KurenaiEngine3D.cppのkStarlightIlluminanceLuxが一様な下限として既にモデル化済みで、
@@ -266,8 +266,7 @@ struct SkyParameters
                                 // サブピクセルのちらつきを防ぐ
 };
 
-// SkyParametersの雲用フォグフィールドを埋めるヘルパ。5つあるMakeSkyParametersが
-// 同じ5行を書き写さないようにここへ1箇所だけ置く(値渡し+戻り値なのは
+// SkyParametersの雲用フォグフィールドを埋めるヘルパ(値渡し+戻り値なのは
 // ApplySkyParametersFromBufferと同じ理由=fxcのX3508回避)。
 // fogParams0はFrameConstants::FogParams0(x=消散係数, y=スケールハイト, z=基準高度, w=有効フラグ)。
 //
@@ -304,10 +303,10 @@ SkyParameters ApplyCloudFogParameters(SkyParameters params, float4 fogParams0, f
     params.ViewerPosition = viewerPosition;
 
     // 【星空は既定で無効にする】この5行はフォグとは無関係だが、あえてここへ置いている。
-    // HLSLのローカル構造体は代入していないメンバの値が未定義で、5つあるMakeSkyParametersの
-    // どれか1つが星のフィールドを埋め忘れると、そのシェーダーはゴミの強度で星を描き始める
+    // HLSLのローカル構造体は代入していないメンバの値が未定義で、星のフィールドを
+    // 埋め忘れたシェーダーはゴミの強度で星を描き始める
     // (IBLキューブへ点光源が焼き込まれ、鏡面反射のファイアフライという分かりにくい形で出る)。
-    // このヘルパは5つ全員が必ず通るので、ここで0にしておけば「明示的に有効化した
+    // 空を評価する経路は必ずこのヘルパを通るので、ここで0にしておけば「明示的に有効化した
     // シェーダーだけが星を描く」という安全側の既定になる。
     // 星を出すシェーダー(DeferredLighting.hlsl / SSR.hlsl)は、この呼び出しの**後**で上書きすること
     params.StarsIntensity = 0.0f;

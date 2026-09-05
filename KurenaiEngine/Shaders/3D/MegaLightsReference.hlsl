@@ -95,12 +95,7 @@ static const float kRayOriginBiasSlope = 1e-4f;
 // 押し出し量を1/NdotLでスケールするときの下限(RTShadow.hlsl と同じ)
 static const float kMinSlopeScaleNdotL = 0.1f;
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 // 1灯ぶんの可視率。punctual なので方向は1つに決まり、半影は出ない(常にハードシャドウ)。
 //

@@ -44,29 +44,9 @@
 Texture2D DepthTexture : register(t2);
 Texture2D NormalTexture : register(t3);
 
-struct PSInput
-{
-    float4 Position : SV_POSITION;
-    float2 UV : TEXCOORD0;
-};
+#include "ShaderInterop/FullscreenTriangle.hlsli"
 
-// 頂点バッファ無しのフルスクリーン三角形(DeferredLighting.hlslのVSMainと同一)
-PSInput VSMain(uint vertexID : SV_VertexID)
-{
-    PSInput output;
-    output.UV = float2((vertexID << 1) & 2, vertexID & 2);
-    output.Position = float4(output.UV.x * 2.0f - 1.0f, 1.0f - output.UV.y * 2.0f, 0.0f, 1.0f);
-    return output;
-}
-
-// DeferredLighting.hlslのReconstructWorldPosと同一の内容
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float4 clipPos = float4(ndc, depth, 1.0f);
-    float4 worldPos = mul(clipPos, InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 struct PSOutput
 {
