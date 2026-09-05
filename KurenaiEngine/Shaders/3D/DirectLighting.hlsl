@@ -16,30 +16,7 @@
 
 static const float PI = 3.14159265359f;
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    // カスケードシャドウマップ(CSM)のカスケードごとのライト視点ビュー・プロジェクション行列
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    // 各カスケードのView空間far距離(x=カスケード0, y=1, z=2, w=3)。ピクセルのView空間深度を
-    // これと比較してどのカスケードのシャドウマップを使うか選ぶ
-    float4 CascadeSplits;
-    // x: PCSS(Percentage Closer Soft Shadows)のライトサイズ(シャドウマップUV空間の係数)。
-    // ブロッカーサーチ・半影の広さの基準になる
-    float4 ShadowParams;
-    // 【宣言はここで止めている】このシェーダーが読むのはShadowParamsまでで、それより後ろは使わない。
-    // C++側のFrameConstantsはこの後ろにTimeParams・Sky*・Cloud*・PlanarReflectionPlane・
-    // Fog*・WaterBodyColorを持つが、cbufferは宣言順レイアウトなので、途中を飛ばして末尾だけを
-    // 宣言すると誤ったオフセットを読む。しかもコンパイルは通り絵も「それらしく」出るため気付けない。
-    // これらが必要になったら、C++の並びどおりに間のフィールドをすべて宣言すること
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 // struct GPULight と StructuredBuffer<GPULight> Lights : register(t8) は
 // PunctualLighting.hlsli にある(このファイルの下の方、BRDFLUTTexture の宣言の直後で

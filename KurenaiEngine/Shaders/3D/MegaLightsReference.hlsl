@@ -41,25 +41,7 @@
 
 static const float PI = 3.14159265359f;
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    // w にスペキュラのエネルギー補正のモードが入っている(MakeSpecularEnergyContextへ渡す)。
-    // DirectLighting.hlsl と同じ値を使わないとエネルギーがずれる
-    float4 ShadowParams;
-    // 【宣言はここで止めている】読むのは ShadowParams まで。cbufferは宣言順レイアウトなので、
-    // 途中を飛ばして末尾だけを宣言すると誤ったオフセットを読む。しかもコンパイルは通り
-    // 絵も「それらしく」出るため気付けない(DirectLighting.hlsl と同じ注意)
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 cbuffer MegaLightsConstants : register(b1)
 {

@@ -55,23 +55,7 @@
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    // カスケードシャドウマップ用(このシェーダでは未使用。オフセット合わせのためだけに宣言する)
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    // 【宣言はここで止めている】このシェーダーが読むのはProjまでで、それより後ろは使わない。
-    // C++側のFrameConstantsはこの後ろにTimeParams・Sky*・Cloud*・PlanarReflectionPlane・
-    // Fog*・WaterBodyColorを持つが、cbufferは宣言順レイアウトなので、途中を飛ばして末尾だけを
-    // 宣言すると誤ったオフセットを読む。しかもコンパイルは通り絵も「それらしく」出るため気付けない。
-    // これらが必要になったら、C++の並びどおりに間のフィールドをすべて宣言すること
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 cbuffer PresentConstants : register(b1)
 {

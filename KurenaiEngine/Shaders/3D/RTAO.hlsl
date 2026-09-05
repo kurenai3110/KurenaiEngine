@@ -35,30 +35,7 @@ static const float kTwoPI = 6.28318530718f;
 // 黄金比の小数部。サンプルごとに方位角をずらす低食い違い量列(Rank-1格子)に使う
 static const float kGoldenRatioFrac = 0.61803398875f;
 
-cbuffer FrameConstants : register(b0)
-{
-    // バウンス面が画面のどこに映っているかを求めるのに使う
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    // xyz=太陽の進行方向(光が飛んでいく向き)。太陽へ向かうベクトルは -LightDirection.xyz
-    float4 LightDirection;
-    // rgb=太陽の放射輝度(露出適用済み)。太陽が無効なシーンでは0が入る
-    float4 LightColor;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    float4 ShadowParams;
-    // 【宣言はここで止めている】このシェーダーが読むのはShadowParamsまでで、それより後ろは使わない。
-    // C++側のFrameConstantsはこの後ろにTimeParams・Sky*・Cloud*・PlanarReflectionPlane・
-    // Fog*・WaterBodyColorを持つが、cbufferは宣言順レイアウトなので、途中を飛ばして末尾だけを
-    // 宣言すると誤ったオフセットを読む。しかもコンパイルは通り絵も「それらしく」出るため気付けない。
-    // これらが必要になったら、C++の並びどおりに間のフィールドをすべて宣言すること
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 cbuffer RTAOConstants : register(b1)
 {

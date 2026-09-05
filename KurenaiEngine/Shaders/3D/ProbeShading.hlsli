@@ -14,11 +14,9 @@
 //   - #include "Samplers.hlsli"        (MaterialSampler / ColorSampler)
 //   - static const float PI            (このヘッダーは自前で定義しない。
 //                                       includer 側の既存の定義と衝突させないため)
-//   - cbuffer FrameConstants : register(b0) を **宣言順どおり DDGIParams4 まで**。
+//   - #include "ShaderInterop/FrameConstants.hlsli"
 //     ここで読むのは LightDirection / LightColor / AmbientColor / ShadowParams /
-//     IBLParams / OcclusionParams / ActiveLightCount / DDGIParams0..4。
-//     途中のフィールドを省くとオフセットがずれ、コンパイルは通るのに
-//     見当違いの値を読む(SSR.hlslが実際に踏んだ罠)
+//     IBLParams / OcclusionParams / ActiveLightCount / DDGIParams0..4
 //   - 下のレジスタマクロをすべて #define しておくこと
 
 #ifndef KURENAI_PROBESHADING_HLSLI

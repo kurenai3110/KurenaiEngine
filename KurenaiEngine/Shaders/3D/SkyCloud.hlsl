@@ -42,62 +42,7 @@
 #define KURENAI_CLOUD_WEATHER_REGISTER t4
 #include "Sky.hlsli"
 
-// C++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること。
-// このシェーダーが実際に読むのは InvViewProj / CameraPosition / TimeParams /
-// SkySunDirection / SkyParams / CloudParams0-3 / FogParams0 / StarsParams だけだが、
-// cbufferのレイアウトは宣言順で決まり途中のフィールドを飛ばせないため、
-// 手前のフィールドはオフセット合わせのためだけに宣言する
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    float4 ShadowParams;
-    float4 ActiveLightCount;
-    float4 IBLParams;
-    float4 ProbeParams;
-    float4 ProbeParams2;
-    float4x4 PrevViewProj;
-    float4 TAAParams;
-    float4 DDGIParams0;
-    float4 DDGIParams1;
-    float4 DDGIParams2;
-    float4 DDGIParams3;
-    float4 DDGIParams4;
-    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
-    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
-    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
-    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
-    float4 DDGILODOrigin[4];
-    float4 DDGILODBase[4];
-    float4 OcclusionParams;
-    // x=星のまたたきに使う時刻
-    float4 TimeParams;
-    // xyz=太陽が「ある」向き(未正規化。MakeSkyParametersでnormalizeする)
-    float4 SkySunDirection;
-    // z=太陽照度/空照度比(EvaluateCloudLayerが雲の明るさの基準に使う)
-    float4 SkyParams;
-    float4 CloudParams0;
-    float4 CloudParams1;
-    float4 CloudParams2;
-    float4 CloudParams3;
-    float4 PlanarReflectionPlane;
-    float4 FogParams0;
-    float4 FogParams1;
-    float4 WaterBodyColor;
-    float4 StarsParams;
-    // x=積雲のボリュームレイマーチの段数(0以下ならSky.hlsliのコンパイル時の既定)。yzwは予備。
-    // **FrameConstantsの末尾にあること**。ここより手前へ入れると、途中までしか宣言していない
-    // 他のシェーダー(AerialPerspective/PlanarReflection等)のオフセットが全部ずれる
-    float4 CloudQualityParams;
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 // SkyIntegrate.hlslが書いた空パラメータ(ティント4本と正規化済みの天頂輝度)
 StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t3);
