@@ -52,7 +52,7 @@ cbuffer FrameConstants : register(b0)
     float4 LightColor;
     float4x4 View;
     float4x4 Proj;
-    // 昼夜サイクル用。rgb=環境光の色(m_AmbientScale乗算済み、KurenaiEngine3D::Render側の
+    // 昼夜サイクル用。rgb=環境光の色(m_IBLSettings.AmbientScale乗算済み、KurenaiEngine3D::Render側の
     // constants.AmbientColor代入部を参照)、a=昼度(0=夜,1=昼)。
     // **昼度をIBLの減衰に使ってはいけない**。手続き空(SkyGenerate.hlsl)は太陽高度に応じて
     // 空自体が暗くなるため、ここで掛けると二重に暗くなる(21.4節)。
@@ -61,7 +61,7 @@ cbuffer FrameConstants : register(b0)
     // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
     float4 CascadeSplits;
     // y: プリフィルタ済み鏡面マップの最大ミップレベル(ミップ数-1)。ラフネス[0,1]をミップ番号へ
-    // 変換するのに使う(EvaluateIBL参照)。z: IBL強度倍率(m_IBLEnabled=falseなら0.0f。
+    // 変換するのに使う(EvaluateIBL参照)。z: IBL強度倍率(m_IBLSettings.Enabled=falseなら0.0f。
     // PSMain側でこれが0以下の場合はEvaluateIBLの代わりにAmbientColor.rgbの定数色アンビエントへ
     // フォールバックする)。x/wはこのシェーダでは未使用
     float4 ShadowParams;

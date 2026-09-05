@@ -59,5 +59,16 @@ namespace Kurenai
 
         SpecularOcclusionMode SpecularOcclusion =
             static_cast<SpecularOcclusionMode>(Defaults::SpecularOcclusionMode);
+
+        // bent normalによる遮蔽(34章)。FrameConstants::OcclusionParamsへ載る
+        bool BentNormalAOSource = Defaults::BentNormalAOSource;
+        bool MultiBounceAOEnabled = Defaults::MultiBounceAOEnabled;
+
+        // マテリアルの遮蔽マップ(glTFのocclusionTexture。22章)を使うか。
+        // 上のEnabled(スクリーンスペースAO/GI)とは完全に別系統で、無効にしても遮蔽マップは
+        // 効き続けるためこのトグルを別に持つ。無効時はObjectConstants.OcclusionStrengthへ0を渡し、
+        // 各パスのlerp(1, occlusionSample, 0) = 1(遮蔽なし)にする方式なのでシェーダー側の変更は不要。
+        // 反射プローブはキャプチャ時の値が焼き込まれるため、切り替えても焼き直すまで反映されない
+        bool OcclusionMapEnabled = Defaults::OcclusionMapEnabled;
     };
 }

@@ -84,9 +84,11 @@
     <ClInclude Include="Source\Engine\Settings\AmbientOcclusionSettings.h" />
     <ClInclude Include="Source\Engine\Settings\CloudSettings.h" />
     <ClInclude Include="Source\Engine\Settings\DDGISettings.h" />
+    <ClInclude Include="Source\Engine\Settings\DebugViewSettings.h" />
     <ClInclude Include="Source\Engine\Settings\EmissiveLightSettings.h" />
     <ClInclude Include="Source\Engine\Settings\FogSettings.h" />
     <ClInclude Include="Source\Engine\Settings\GeometrySettings.h" />
+    <ClInclude Include="Source\Engine\Settings\IBLSettings.h" />
     <ClInclude Include="Source\Engine\Settings\MegaLightsSettings.h" />
     <ClInclude Include="Source\Engine\Settings\PostProcessSettings.h" />
     <ClInclude Include="Source\Engine\Settings\QualitySettings.h" />
@@ -95,6 +97,7 @@
     <ClInclude Include="Source\Engine\Settings\ShadowSettings.h" />
     <ClInclude Include="Source\Engine\Settings\SkySettings.h" />
     <ClInclude Include="Source\Engine\Settings\StarsSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\SystemSettings.h" />
     <ClInclude Include="Source\Engine\Settings\WaterSettings.h" />
     <ClInclude Include="Source\Engine\DroneShow.h" />
     <ClInclude Include="Source\Engine\UI\IPanel.h" />

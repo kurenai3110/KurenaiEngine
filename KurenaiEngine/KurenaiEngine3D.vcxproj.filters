@@ -45,6 +45,9 @@
     <ClInclude Include="Source\Engine\Settings\DDGISettings.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\DebugViewSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
     <ClInclude Include="Source\Engine\Settings\EmissiveLightSettings.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>
@@ -52,6 +55,9 @@
       <Filter>Source\Engine</Filter>
     </ClInclude>
     <ClInclude Include="Source\Engine\Settings\GeometrySettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\IBLSettings.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>
     <ClInclude Include="Source\Engine\Settings\MegaLightsSettings.h">
@@ -76,6 +82,9 @@
       <Filter>Source\Engine</Filter>
     </ClInclude>
     <ClInclude Include="Source\Engine\Settings\StarsSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\SystemSettings.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>
     <ClInclude Include="Source\Engine\Settings\WaterSettings.h">

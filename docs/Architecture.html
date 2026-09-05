@@ -1838,7 +1838,7 @@ Kulla-Contyの補正式は「乗算先が単一散乱の方向アルベドであ
 登録する</b>。
 </p>
 <pre><code>const bool needIrradianceBake =
-    m_IBLUseDedicatedIrradiance || m_DebugView == DebugView::IBLIrradiance;
+    m_IBLSettings.UseDedicatedIrradiance || m_DebugViewSettings.View == DebugView::IBLIrradiance;
 if (needIrradianceBake &amp;&amp; !m_IBLIrradianceBaked) { /* パスを登録 */ }</code></pre>
 <p>
 <code>ShadowParams.y</code>(= ミップ数 - 1 = 最終ミップ番号)は両シェーダで既に利用可能なため
@@ -1856,7 +1856,7 @@ if (needIrradianceBake &amp;&amp; !m_IBLIrradianceBaked) { /* パスを登録 */
 <p>
 環境光(間接光)の<b>拡散成分と鏡面成分に別々に掛かる倍率</b>を、
 <code>FrameConstants.IBLParams.y</code> / <code>.z</code> として渡している
-(C++側は<code>m_AmbientDiffuseScale</code> / <code>m_AmbientSpecularScale</code>、既定は両方1.0)。
+(C++側は<code>m_IBLSettings.AmbientDiffuseScale</code> / <code>m_IBLSettings.AmbientSpecularScale</code>、既定は両方1.0)。
 既存の「IBL 強度」(<code>ShadowParams.z</code>)が拡散と鏡面へ一様に掛かるのに対し、
 こちらは<b>両者の比率を意図的に崩す</b>ための画作り用のつまみである。
 環境の照り返しを保ったまま映り込みだけを増減する、といった調整はIBL強度単独ではできない。
@@ -3726,7 +3726,7 @@ AOを持たないパスへ無条件に掛けても見た目が変わらないこ
 <code>m_AODisabledTexture</code>(遮蔽なし・間接光なし)が差し替わるだけであり、
 G-Bufferの<code>material.b</code>に載った<b>遮蔽マップは素通しで効き続ける</b>。
 遮蔽マップの寄与だけを切って見比べるトグルは
-<code>m_OcclusionMapEnabled</code>(既定ON)で、別系統として持つ。
+<code>m_AmbientOcclusionSettings.OcclusionMapEnabled</code>(既定ON)で、別系統として持つ。
 </p>
 <p>
 実装は<b>シェーダー側に一切手を入れていない</b>。各パスは

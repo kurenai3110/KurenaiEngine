@@ -169,9 +169,8 @@ namespace Kurenai::UI
 
         // 有効にしていてもパスが積まれないことがあるので、その旨をここで断る。
         // このチェックボックスだけを見て「効いていない」と読まれないようにする
-        // DebugViewはKurenaiEngine3Dのネストenumなので、この名前空間からは修飾が要る
         if (m_Engine.ShouldRunMegaLights() &&
-            m_Engine.m_DebugView != KurenaiEngine3D::DebugView::LightTiles)
+            m_Engine.m_DebugViewSettings.View != DebugView::LightTiles)
         {
             ImGui::TextWrapped(
                 "MegaLightsが有効なあいだ、直接光パスのライトループは止まっており"
@@ -440,7 +439,7 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "深度プリパスを使う###DepthPrepass", &m_Engine.m_DepthPrepassEnabled, Defaults::DepthPrepassEnabled,
+            "深度プリパスを使う###DepthPrepass", &m_Engine.m_GeometrySettings.DepthPrepassEnabled, Defaults::DepthPrepassEnabled,
             "G-Bufferを描く前に不透明ジオメトリの深度だけを先に埋め、隠れる画素の"
             "ピクセルシェーダー(6テクスチャのサンプルと6枚のレンダーターゲットへの書き込み)を"
             "早期Zで省く。ジオメトリを1周ぶん余計に描くのと引き換えなので、"
@@ -453,7 +452,7 @@ namespace Kurenai::UI
             "増幅/メッシュシェーダーを使うPSOがあるため、変換は同一のコードになり深度が一致する");
 
         CheckboxEx(
-            "メッシュ単位のフラスタムカリング###MeshCulling", &m_Engine.m_MeshCullingEnabled,
+            "メッシュ単位のフラスタムカリング###MeshCulling", &m_Engine.m_GeometrySettings.MeshCullingEnabled,
             Defaults::MeshCullingEnabled,
             "モデル単位のカリングを通ったあとに、メッシュのワールドAABBでもう一段間引く。"
             "1モデルに数千メッシュを持つアセット(Emerald Square、Bistro、PLATEAUのLOD2タイル)では"
@@ -526,7 +525,7 @@ namespace Kurenai::UI
 
         BeginParamGroup();
         SliderFloatEx(
-            "LODフェード時間###LODFadeDuration", &m_Engine.m_LODFadeDuration, 0.0f, 5.0f, 0.25f, "%.2f 秒", 0,
+            "LODフェード時間###LODFadeDuration", &m_Engine.m_GeometrySettings.LODFadeDuration, 0.0f, 5.0f, 0.25f, "%.2f 秒", 0,
             "モデルLODの段を切り替えるとき、2段をクロスディザで重ねる時間。\n\n"
             "0にすると重ねずに即座に入れ替わる(ポップする)。\n\n"
             "【検証に使う】既定の0.25秒はフェードの見え方から決めた値ではない暫定値。"
@@ -534,7 +533,7 @@ namespace Kurenai::UI
             "2段が同じ画素を取り合っていないか(Zファイティング)、"
             "どちらも描かない画素が無いか(穴)をここで確かめる。");
         SliderFloatEx(
-            "LODヒステリシス###LODHysteresis", &m_Engine.m_LODHysteresis, 0.0f, 0.5f, 0.05f, "%.3f", 0,
+            "LODヒステリシス###LODHysteresis", &m_Engine.m_GeometrySettings.LODHysteresis, 0.0f, 0.5f, 0.05f, "%.3f", 0,
             "切り替え距離の不感帯の幅(割合)。0.05なら切替点の±5%。\n\n"
             "0にすると切替点のちょうど上でカメラが揺れたときに段が毎フレーム往復し、"
             "画面がちらつく。A/B比較のたびに絵が変わって計測も濁る。");
@@ -828,10 +827,10 @@ namespace Kurenai::UI
 
         SliderIntEx(
             "巨大三角形のしきい値 (画素)###SWRasterLargeArea",
-            &m_Engine.m_SoftwareRasterLargeTriangleArea,
-            static_cast<int>(KurenaiEngine3D::kSWRasterMinLargeTriangleArea),
-            static_cast<int>(KurenaiEngine3D::kSWRasterMaxLargeTriangleArea),
-            static_cast<int>(KurenaiEngine3D::kSWRasterDefaultLargeTriangleArea),
+            &m_Engine.m_GeometrySettings.SoftwareRasterLargeTriangleArea,
+            static_cast<int>(GeometrySettings::kSWRasterMinLargeTriangleArea),
+            static_cast<int>(GeometrySettings::kSWRasterMaxLargeTriangleArea),
+            static_cast<int>(GeometrySettings::kSWRasterDefaultLargeTriangleArea),
             "スクリーンバウンディングボックスの画素面積がこれを超えた三角形は、1スレッドで塗らず"
             "巨大三角形パス(1スレッドグループ=1三角形)へ回す。既定の4096は64x64相当。\n\n"
             "【対照実験に使う】極端に小さくすればほぼ全三角形が巨大三角形パスへ回り、"
@@ -889,7 +888,7 @@ namespace Kurenai::UI
         // 遮蔽マップは上のAO/間接光とは別系統(アセットに焼き込まれた遮蔽)なので、
         // AOを切っていても操作できるよう早期returnより前に置く
         CheckboxEx(
-            "マテリアルの遮蔽マップを使う###UseOcclusionMap", &m_Engine.m_OcclusionMapEnabled,
+            "マテリアルの遮蔽マップを使う###UseOcclusionMap", &m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled,
             Defaults::OcclusionMapEnabled,
             "アセットに焼き込まれた遮蔽(glTFのocclusionTexture)を間接光へ掛けるか。"
             "上のAO / 間接光とは独立した別系統で、そちらを無効にしても遮蔽マップは効き続ける。"
@@ -1071,21 +1070,21 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "IBLを有効にする###EnableIBL", &m_Engine.m_IBLEnabled, Defaults::IBLEnabled,
+            "IBLを有効にする###EnableIBL", &m_Engine.m_IBLSettings.Enabled, Defaults::IBLEnabled,
             "空(スカイボックス)を環境光源として使う。無効にすると代わりに一様な環境光を使う");
 
-        if (m_Engine.m_IBLEnabled)
+        if (m_Engine.m_IBLSettings.Enabled)
         {
             SliderFloatEx(
-                "IBL 強度###IBLIntensity", &m_Engine.m_IBLIntensity, 0.0f, 2.0f, Defaults::IBLIntensity, "%.3f", 0,
+                "IBL 強度###IBLIntensity", &m_Engine.m_IBLSettings.Intensity, 0.0f, 2.0f, Defaults::IBLIntensity, "%.3f", 0,
                 "環境光として加える量の倍率");
             CheckboxEx(
-                "専用イラディアンスマップを使う###UseDedicatedIrradiance", &m_Engine.m_IBLUseDedicatedIrradiance,
+                "専用イラディアンスマップを使う###UseDedicatedIrradiance", &m_Engine.m_IBLSettings.UseDedicatedIrradiance,
                 Defaults::IBLUseDedicatedIrradiance,
                 "既定では拡散イラディアンスをプリフィルタ済み鏡面の最終ミップ(粗さ1)から得る。"
                 "これを有効にすると従来の専用イラディアンスマップをその場で焼いて切り替える(検証用)");
 
-            if (m_Engine.m_IBLUseDedicatedIrradiance)
+            if (m_Engine.m_IBLSettings.UseDedicatedIrradiance)
             {
                 // 専用イラディアンスマップを焼く2つの経路(総当たり積分 / 球面調和関数L2)を
                 // A/B比較できるようにする。既定は総当たり積分(false)。
@@ -1096,7 +1095,7 @@ namespace Kurenai::UI
                 // 別の理由で空が焼き直されるまで切り替え前の経路の結果が出続ける
                 // ——つまりA/B比較のために付けたつまみが機能しない(実機で確認した)
                 if (CheckboxEx(
-                        "球面調和関数(SH)で焼く###UseSHIrradiance", &m_Engine.m_IBLUseSHIrradiance,
+                        "球面調和関数(SH)で焼く###UseSHIrradiance", &m_Engine.m_IBLSettings.UseSHIrradiance,
                         Defaults::IBLUseSHIrradiance,
                         "拡散イラディアンスを球面調和関数L2(9項)で焼く高速な経路。理論上どんな照明でも"
                         "数%以内の誤差に収まるが、エミッシブ帯のような小さく明るい光源では暗部が"
@@ -1105,10 +1104,10 @@ namespace Kurenai::UI
                 {
                     m_Engine.m_IBLIrradianceBaked = false;
                 }
-                if (m_Engine.m_IBLUseSHIrradiance)
+                if (m_Engine.m_IBLSettings.UseSHIrradiance)
                 {
                     if (SliderFloatEx(
-                            "SHウィンドウ強度###SHWindowLambda", &m_Engine.m_SHWindowLambda, 0.0f, 0.1f,
+                            "SHウィンドウ強度###SHWindowLambda", &m_Engine.m_IBLSettings.SHWindowLambda, 0.0f, 0.1f,
                             Defaults::SHWindowLambda, "%.4f", 0,
                             "リンギング対策。大きくするほど高次バンドを減衰させ、ボケと引き換えに"
                             "暗部の負のオーバーシュートを抑える。0=無効"))
@@ -1121,19 +1120,19 @@ namespace Kurenai::UI
         else
         {
             SliderFloatEx(
-                "環境光の強さ###AmbientScale", &m_Engine.m_AmbientScale, 0.0f, 3.0f, Defaults::AmbientScale, "%.3f", 0,
+                "環境光の強さ###AmbientScale", &m_Engine.m_IBLSettings.AmbientScale, 0.0f, 3.0f, Defaults::AmbientScale, "%.3f", 0,
                 "IBLを使わないときの、方向を持たない一様な環境光の強さ");
         }
 
         // IBLの有効/無効どちらでも効くため、上の分岐の外に置く。
         // 「IBL 強度」が拡散と鏡面へ一様に掛かるのに対し、この2つは両者の比率を崩すためのもの
         SliderFloatEx(
-            "環境光の拡散倍率###AmbientDiffuseScale", &m_Engine.m_AmbientDiffuseScale, 0.0f, 2.0f,
+            "環境光の拡散倍率###AmbientDiffuseScale", &m_Engine.m_IBLSettings.AmbientDiffuseScale, 0.0f, 2.0f,
             Defaults::AmbientDiffuseScale, "%.3f", 0,
             "環境光(間接光)の拡散成分だけに掛かる倍率。0にすると環境からの照り返しが消え、"
             "映り込みだけが残る。直接光・自発光・SSILの間接光には掛からない");
         SliderFloatEx(
-            "環境光の鏡面倍率###AmbientSpecularScale", &m_Engine.m_AmbientSpecularScale, 0.0f, 2.0f,
+            "環境光の鏡面倍率###AmbientSpecularScale", &m_Engine.m_IBLSettings.AmbientSpecularScale, 0.0f, 2.0f,
             Defaults::AmbientSpecularScale, "%.3f", 0,
             "環境光(間接光)の鏡面成分だけに掛かる倍率。金属やガラスの映り込みの強さを、"
             "環境からの照り返しを保ったまま増減できる。SSRと反射プローブにも同じ倍率が効く");
@@ -1141,7 +1140,7 @@ namespace Kurenai::UI
         // bent normalによる遮蔽(34章)。ベイク済みのbent normalを持つモデルでのみ効く
         // (持たないマテリアルは黒1x1へフォールバックし、どのトグルでも見た目が変わらない)
         CheckboxEx(
-            "ディフューズAOにbent normalを使う###BentNormalAOSource", &m_Engine.m_BentNormalAOSource,
+            "ディフューズAOにbent normalを使う###BentNormalAOSource", &m_Engine.m_AmbientOcclusionSettings.BentNormalAOSource,
             Defaults::BentNormalAOSource,
             "拡散光の遮蔽を aoN = dot(N, bRaw) から求める。無効にすると従来のベイク済みAOを使う。"
             "どちらも同じ積分の別推定量なので、切り替えても見た目はほとんど変わらないのが正常");
@@ -1167,7 +1166,7 @@ namespace Kurenai::UI
             }
         }
         CheckboxEx(
-            "multi-bounce AO###MultiBounceAO", &m_Engine.m_MultiBounceAOEnabled,
+            "multi-bounce AO###MultiBounceAO", &m_Engine.m_AmbientOcclusionSettings.MultiBounceAOEnabled,
             Defaults::MultiBounceAOEnabled,
             "アルベドが明るいほどAOを弱める補正(Jimenez 2016)。物理的にはより正しいが"
             "見た目を大きく変えるため既定では無効");

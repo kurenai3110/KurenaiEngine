@@ -256,14 +256,14 @@ namespace Kurenai
             DirectX::XMFLOAT4X4 View;
             DirectX::XMFLOAT4X4 Proj;
             // 昼夜サイクル用(末尾に追加し、既存シェーダのオフセットは変えない)。rgb=環境光の色
-            // (m_AmbientScale乗算済み、Render()側のconstants.AmbientColor代入部を参照)、
-            // a=昼度(0=夜,1=昼。m_AmbientScaleは掛けない)
+            // (m_IBLSettings.AmbientScale乗算済み、Render()側のconstants.AmbientColor代入部を参照)、
+            // a=昼度(0=夜,1=昼。m_IBLSettings.AmbientScaleは掛けない)
             DirectX::XMFLOAT4 AmbientColor;
             // M2: カスケード選択・PCSS用(末尾に追加)。xyzw = 各カスケードのView空間far距離
             DirectX::XMFLOAT4 CascadeSplits;
             // x: PCSSのライトサイズ(m_ShadowSettings.LightSize)。y: IBLプリフィルタ済み鏡面マップの
             // 最大ミップレベル(kIBLPrefilterMipLevels-1、DeferredLighting.hlslがラフネス→ミップの
-            // 変換に使う)。z: IBL強度倍率(m_IBLEnabled=falseの場合は0.0fを渡し、シェーダ側で
+            // 変換に使う)。z: IBL強度倍率(m_IBLSettings.Enabled=falseの場合は0.0fを渡し、シェーダ側で
             // EvaluateIBLの代わりに定数色アンビエント(AmbientColor.rgb)へフォールバックする)。
             // w: スペキュラのマルチスキャッタリング・エネルギー補正の方式
             // (m_ReflectionSettings.SpecularCompensation。0=Off / 1=Linear / 2=Series / 3=Kulla-Conty。
@@ -279,8 +279,8 @@ namespace Kurenai
             // いるため、roughness=1(α=1)ではGGXインポータンスサンプリングの実効カーネルが
             // コサイン畳み込みへ厳密に退化し、格納値もCSIrradianceと同じE(N)/πになる(14.10節)。
             // 反射プローブの拡散イラディアンスにもまったく同じ規則を適用する(19.7節)。
-            // y: 環境光の拡散倍率(m_AmbientDiffuseScale)、z: 同じく鏡面倍率
-            // (m_AmbientSpecularScale)。どちらもIBLの有効/無効に関わらず効く。w: 未使用
+            // y: 環境光の拡散倍率(m_IBLSettings.AmbientDiffuseScale)、z: 同じく鏡面倍率
+            // (m_IBLSettings.AmbientSpecularScale)。どちらもIBLの有効/無効に関わらず効く。w: 未使用
             DirectX::XMFLOAT4 IBLParams;
             // 反射プローブ用(末尾に追加)。x=有効プローブ数(0ならプローブを使わずグローバルIBLのみ)、
             // y=影響範囲のデバッグ表示フラグ、z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
@@ -1044,7 +1044,7 @@ namespace Kurenai
         // emissiveIntensity: シーン全体の自発光の強度倍率(m_EmissiveLightSettings.Intensity)。glTFの
         // emissiveFactorは通常1.0以下に収まるため、これを掛けないとG-Bufferのエミッシブを
         // HDR化しても照明器具の輝度が1.0を超えず、ブルームが効かない
-        // occlusionMapEnabled: マテリアルの遮蔽マップを使うか(m_OcclusionMapEnabled)。
+        // occlusionMapEnabled: マテリアルの遮蔽マップを使うか(m_AmbientOcclusionSettings.OcclusionMapEnabled)。
         // 各パスは lerp(1, occlusionSample, OcclusionStrength) で遮蔽率を求めるため、
         // ここで0を渡せばシェーダー側に手を入れずに遮蔽マップの寄与だけを消せる
         // ditherFade: モデルLODの切り替え中だけ1.0以外を渡す(既定の1.0は「全画素を描く」)。
@@ -1168,7 +1168,7 @@ namespace Kurenai
             // Mode==10(シャドウマップ配列)ではカスケード番号、
             // Mode==12(反射プローブのキューブマップ配列)では表示するプローブ番号として使う
             float ArraySlice;
-            // デバッグ表示の輝度倍率(m_DebugViewGain)。色として表示するMode 0/3/4にだけ効く
+            // デバッグ表示の輝度倍率(m_DebugViewSettings.Gain)。色として表示するMode 0/3/4にだけ効く
             float Gain;
             // Mode==11(タイルライトカリングのヒートマップ)専用。
             // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数
@@ -3339,7 +3339,7 @@ namespace Kurenai
         m_PrefilterPipelineState = m_Device->CreateComputePipelineState({ m_PrefilterComputeShader.get() });
 
         // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradianceの
-        // 高速な代替で、A/B比較用にトグルで切り替える(m_IBLUseSHIrradiance、既定false)。
+        // 高速な代替で、A/B比較用にトグルで切り替える(m_IBLSettings.UseSHIrradiance、既定false)。
         // 詳細はIBLConvolve.hlsl冒頭のコメント参照
         RHI::ShaderDesc projectShCsDesc;
         projectShCsDesc.Stage = RHI::ShaderStage::Compute;
@@ -3646,7 +3646,7 @@ namespace Kurenai
         m_PresentConstantBuffer = m_Device->CreateBuffer(presentConstantBufferDesc);
 
         // レンダーターゲットを先に作る。CreateRenderTargetsはHDRフォーマットの作成に失敗した場合に
-        // m_BufferPrecisionをLegacy8bitへ落とすフォールバックを持つため、PSOはその結果が
+        // m_SystemSettings.PrecisionをLegacy8bitへ落とすフォールバックを持つため、PSOはその結果が
         // 確定した後に作らなければフォーマットがずれる
         CreateRenderTargets(m_RenderWidth, m_RenderHeight);
         // 平面反射専用のレンダーターゲットも、レンダー解像度が確定したこのタイミングで作る
@@ -3688,7 +3688,7 @@ namespace Kurenai
     {
         // Emissive: 1.0でクリップされると照明器具がHDRな輝度を持てず、ブルームが成立しない。
         // アルファを使わないためR11G11B10_Floatで足りる(帯域はR16G16B16A16_Floatの半分)
-        return m_BufferPrecision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
+        return m_SystemSettings.Precision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
                                                                 : RHI::Format::R11G11B10_Float;
     }
 
@@ -3697,7 +3697,7 @@ namespace Kurenai
         // AO/GIバッファ: rgb=間接拡散光(HDR)、a=遮蔽率。間接光は暗い室内では0.02〜0.1に収まり、
         // UNorm8ではコード5〜26の約20階調しか使えずポスタリゼーションする。
         // aに遮蔽率を持つためアルファ付きのR16G16B16A16_Floatを使う
-        return m_BufferPrecision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
+        return m_SystemSettings.Precision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
                                                                 : RHI::Format::R16G16B16A16_Float;
     }
 
@@ -3746,7 +3746,7 @@ namespace Kurenai
         }
         // ライトグリッドのデバッグ表示は、MegaLightsが走っていてもグリッドそのものを見せるものなので
         // 実行が要る。**ここを落とすと表示が前フレームの残骸か未初期化の中身になる**
-        if (m_DebugView == DebugView::LightTiles)
+        if (m_DebugViewSettings.View == DebugView::LightTiles)
         {
             return true;
         }
@@ -3765,7 +3765,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetDebugViewIndex(int index)
     {
-        // 総数はenumのすぐ隣で定義してある(KurenaiEngine3D.h)
+        // 総数はenumのすぐ隣で定義してある(Settings/DebugViewSettings.h)
         if (index < 0 || index >= kDebugViewCount)
         {
             Core::Logger::Warning(
@@ -3775,7 +3775,7 @@ namespace Kurenai
             return;
         }
 
-        m_DebugView = static_cast<DebugView>(index);
+        m_DebugViewSettings.View = static_cast<DebugView>(index);
         Core::Logger::Info("KurenaiEngine3D", "デバッグ表示を番号で選択しました: " + std::to_string(index));
     }
 
@@ -4817,7 +4817,7 @@ namespace Kurenai
             Core::Logger::Error(
                 "KurenaiEngine3D",
                 std::string("バッファ精度に依存するパイプラインステートの作成に失敗しました (バッファ精度=") +
-                    (m_BufferPrecision == BufferPrecision::Legacy8bit ? "Legacy8bit" : "HDR") + "): " + e.what());
+                    (m_SystemSettings.Precision == BufferPrecision::Legacy8bit ? "Legacy8bit" : "HDR") + "): " + e.what());
             throw;
         }
     }
@@ -4958,9 +4958,9 @@ namespace Kurenai
             return;
         }
 
-        // 中間バッファのフォーマットはm_BufferPrecisionで切り替える(A/B比較用。BufferPrecision参照)。
+        // 中間バッファのフォーマットはm_SystemSettings.Precisionで切り替える(A/B比較用。BufferPrecision参照)。
         // Legacy8bitは「中間バッファをすべてR8G8B8A8_UNorm」にする構成
-        const bool legacyPrecision = (m_BufferPrecision == BufferPrecision::Legacy8bit);
+        const bool legacyPrecision = (m_SystemSettings.Precision == BufferPrecision::Legacy8bit);
 
         // Albedoは両構成ともリニアのR8G8B8A8_UNormのままにする。
         // sRGB格納(R8G8B8A8_UNorm_SRGB)にすれば符号点が暗部へ寄り、暗いマテリアルの量子化は
@@ -5074,7 +5074,7 @@ namespace Kurenai
 
             m_HiZMipLevels = ComputeMipLevelCount(width, height);
             m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
-            m_HiZDebugMipLevel = 0;
+            m_DebugViewSettings.HiZDebugMipLevel = 0;
             // 作り直した直後の中身は未定義。Hi-Zパスが1回走るまでオクルージョン判定を止める
             m_HiZValid = false;
 
@@ -5287,7 +5287,7 @@ namespace Kurenai
                 "KurenaiEngine3D",
                 std::string("HDR精度のレンダーターゲット作成に失敗したためLegacy8bit構成へフォールバックします (") +
                     std::to_string(width) + "x" + std::to_string(height) + "): " + e.what());
-            m_BufferPrecision = BufferPrecision::Legacy8bit;
+            m_SystemSettings.Precision = BufferPrecision::Legacy8bit;
             CreateRenderTargets(width, height);
             return;
         }
@@ -6024,7 +6024,7 @@ namespace Kurenai
                 // 【描かないメッシュを弾いた後に置く】分母を「このパスが実際に描くメッシュ」に
                 // 揃えないと、間引き率が薄まって効きが読めなくなる
                 if (!IsMeshVisibleWithStats(
-                        m_MeshCullingEnabled, swRasterFrustum, instance, *currentModel, mesh, m_MeshCullTested, m_MeshCullCulled))
+                        m_GeometrySettings.MeshCullingEnabled, swRasterFrustum, instance, *currentModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                 {
                     continue;
                 }
@@ -6122,9 +6122,9 @@ namespace Kurenai
             totalTriangles,
             static_cast<uint32_t>(meshInfos.size()),
             static_cast<uint32_t>(std::clamp(
-                m_SoftwareRasterLargeTriangleArea,
-                static_cast<int>(kSWRasterMinLargeTriangleArea),
-                static_cast<int>(kSWRasterMaxLargeTriangleArea))),
+                m_GeometrySettings.SoftwareRasterLargeTriangleArea,
+                static_cast<int>(GeometrySettings::kSWRasterMinLargeTriangleArea),
+                static_cast<int>(GeometrySettings::kSWRasterMaxLargeTriangleArea))),
         };
         constants.LargeParams = { kSWRasterLargeListCapacity, 0u, 0u, 0u };
 
@@ -6517,7 +6517,7 @@ namespace Kurenai
     void KurenaiEngine3D::UpdateSceneHotReloadWatch()
     {
         // 読み込み中・要求が既に積まれている場合は何もしない(多重発注を避ける)
-        if (!m_SceneAutoReloadEnabled || m_SceneLoadInFlight || m_PendingSceneRequest >= 0)
+        if (!m_SystemSettings.SceneAutoReloadEnabled || m_SceneLoadInFlight || m_PendingSceneRequest >= 0)
         {
             return;
         }
@@ -6962,12 +6962,12 @@ namespace Kurenai
             // 遠くから一気に近づいても数フレームで追いつく
             uint32_t desired = state.CurrentLOD;
             if (desired < instance.LODDistances.size() &&
-                distance > instance.LODDistances[desired] * (1.0f + m_LODHysteresis))
+                distance > instance.LODDistances[desired] * (1.0f + m_GeometrySettings.LODHysteresis))
             {
                 desired = desired + 1;
             }
             else if (desired > 0 &&
-                     distance < instance.LODDistances[desired - 1] * (1.0f - m_LODHysteresis))
+                     distance < instance.LODDistances[desired - 1] * (1.0f - m_GeometrySettings.LODHysteresis))
             {
                 desired = desired - 1;
             }
@@ -6983,8 +6983,8 @@ namespace Kurenai
             }
             else if (state.FadeT < 1.0f)
             {
-                state.FadeT = (m_LODFadeDuration > 0.0f)
-                    ? (std::min)(1.0f, state.FadeT + deltaSeconds / m_LODFadeDuration)
+                state.FadeT = (m_GeometrySettings.LODFadeDuration > 0.0f)
+                    ? (std::min)(1.0f, state.FadeT + deltaSeconds / m_GeometrySettings.LODFadeDuration)
                     : 1.0f;
             }
 
@@ -7918,7 +7918,7 @@ namespace Kurenai
         if (m_Scene.HasSkyTurbidity) { m_SkySettings.Turbidity = m_Scene.SkyTurbidity; }
         if (m_Scene.HasIBLIntensityOverride)
         {
-            m_IBLIntensity = m_Scene.IBLIntensity;
+            m_IBLSettings.Intensity = m_Scene.IBLIntensity;
         }
         // シーン全体の露出。IBLIntensityと同じく指定されたときだけ上書きする。
         // 屋外の風景と屋内では被写体の輝度が桁で違うため、エンジンの既定値(屋内基準)を
@@ -8194,7 +8194,7 @@ namespace Kurenai
             // カメラを適用するかどうか。「現在のカメラを保持する」が入っていても
             // ウィンドウタイトルは更新したいので、引き渡し自体は毎回行う。
             // 保持が効くのは同じシーンの読み直しのときだけ(上のisSameSceneReload参照)
-            m_AppliedSceneApplyCamera = !(m_SceneReloadKeepsCamera && isSameSceneReload);
+            m_AppliedSceneApplyCamera = !(m_SystemSettings.SceneReloadKeepsCamera && isSameSceneReload);
             m_AppliedSceneCamera = loaded.Camera;
             m_AppliedSceneTitle = std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name;
         }
@@ -8516,9 +8516,9 @@ namespace Kurenai
         // 手続き空か.ksceneのDDSかで空そのものが変わるため、その切り替えも含める。
         // 拡散・鏡面の倍率もProbeCapture.hlslが同じように適用するため署名へ含める
         // (含め忘れると、つまみを動かしてもプローブの中身だけ古い倍率のまま残る)
-        mixFloat(m_IBLEnabled ? m_IBLIntensity : 0.0f);
-        mixFloat(m_AmbientDiffuseScale);
-        mixFloat(m_AmbientSpecularScale);
+        mixFloat(m_IBLSettings.Enabled ? m_IBLSettings.Intensity : 0.0f);
+        mixFloat(m_IBLSettings.AmbientDiffuseScale);
+        mixFloat(m_IBLSettings.AmbientSpecularScale);
         mixBool(m_SkySettings.ProceduralEnabled);
         // 自発光の強度倍率はキャプチャのエミッシブ項へそのまま乗る
         mixFloat(m_EmissiveLightSettings.Intensity);
@@ -8537,9 +8537,9 @@ namespace Kurenai
 
         // bent normalによる遮蔽(34章)。ProbeCapture.hlslが同じ分岐を持つため、
         // 含め忘れるとつまみを動かしてもプローブの中身だけ古いまま残る
-        mixBool(m_BentNormalAOSource);
+        mixBool(m_AmbientOcclusionSettings.BentNormalAOSource);
         mixFloat(static_cast<float>(m_AmbientOcclusionSettings.SpecularOcclusion));
-        mixBool(m_MultiBounceAOEnabled);
+        mixBool(m_AmbientOcclusionSettings.MultiBounceAOEnabled);
 
         // ライトは構造体ごとダンプすると詰め物(padding)の未初期化バイトを拾い得るため、
         // 使うフィールドだけを明示的に混ぜる
@@ -8601,7 +8601,7 @@ namespace Kurenai
         // それより小さいシーンは従来の5 m/sで既に使いやすいので下限で据え置く
         // (比例だけだとSponza(対角37.1m)が0.54 m/sになり、逆に遅くなる)。
         // 根拠と実測はEngineDefaults.hのCameraSpeed一式のコメントに置いてある
-        m_CameraSpeed = m_Scene.HasCameraSpeed
+        m_SystemSettings.CameraSpeed = m_Scene.HasCameraSpeed
             ? m_Scene.CameraSpeed
             : (std::max)(
                   Defaults::CameraSpeedMin,
@@ -8613,7 +8613,7 @@ namespace Kurenai
         std::snprintf(
             cameraSpeedText, sizeof(cameraSpeedText),
             "カメラ移動速度: %.2f m/s (Shift時 %.2f m/s) [シーン対角 %.1f m / %s]",
-            m_CameraSpeed, m_CameraSpeed * Defaults::CameraSpeedShiftMultiplier, diagonal,
+            m_SystemSettings.CameraSpeed, m_SystemSettings.CameraSpeed * Defaults::CameraSpeedShiftMultiplier, diagonal,
             m_Scene.HasCameraSpeed ? "[Scene]CameraSpeedの指定" : "対角からの自動決定");
         Core::Logger::Info("KurenaiEngine3D", cameraSpeedText);
     }
@@ -9102,10 +9102,10 @@ namespace Kurenai
             // 固定FPSモード: このフレームの処理(Time of Day更新+Render+Present)が目標フレーム時間
             // より短く終わった場合、余った時間だけ待機して間隔を揃える。CPU/GPU計測(上記)の後に
             // 行うことで、この待機時間自体がプロファイラの計測値に混ざらないようにしている
-            if (m_FixedFPSEnabled && m_TargetFPS > 0.0f)
+            if (m_SystemSettings.FixedFPSEnabled && m_SystemSettings.TargetFPS > 0.0f)
             {
                 const auto targetFrameDuration = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                    std::chrono::duration<double>(1.0 / m_TargetFPS));
+                    std::chrono::duration<double>(1.0 / m_SystemSettings.TargetFPS));
                 const auto frameDeadline = now + targetFrameDuration;
                 if (std::chrono::steady_clock::now() < frameDeadline)
                 {
@@ -9135,7 +9135,7 @@ namespace Kurenai
     // 1秒に1回に抑えつつ、実行ごとの記録が残るようにしている
     void KurenaiEngine3D::LogFrameStatsIfDue(float renderDeltaTime)
     {
-        if (!m_FrameStatsLoggingEnabled)
+        if (!m_SystemSettings.FrameStatsLoggingEnabled)
         {
             return;
         }
@@ -9550,11 +9550,11 @@ namespace Kurenai
         // メッセージベースの入力API(IsKeyDown)を使う。GetAsyncKeyStateと異なりウィンドウが
         // フォーカスを失っている間は反応せず、PostMessageによるテスト自動化とも整合する
         //
-        // 【速度は即値ではなくシーンから決まる】m_CameraSpeedは.ksceneの[Scene]CameraSpeed、
+        // 【速度は即値ではなくシーンから決まる】m_SystemSettings.CameraSpeedは.ksceneの[Scene]CameraSpeed、
         // 無ければシーン対角から自動で決まる(ResetSceneDependentParams)。Shiftの倍率は
         // 従来の 20/5 = 4倍をそのまま保つ
         const float moveSpeed =
-            m_CameraSpeed * (IsKeyDown(VK_SHIFT) ? Defaults::CameraSpeedShiftMultiplier : 1.0f);
+            m_SystemSettings.CameraSpeed * (IsKeyDown(VK_SHIFT) ? Defaults::CameraSpeedShiftMultiplier : 1.0f);
         const float moveAmount = moveSpeed * deltaTime;
 
         const DirectX::XMFLOAT3 forward = m_Camera.GetForward();
@@ -10630,18 +10630,18 @@ namespace Kurenai
         // ジッター済みの射影行列を渡す。SSAO/SSILはこの行列でView空間の点を画面へ投影して
         // 深度バッファと突き合わせるため、深度を描いたときと同じ行列でなければサブピクセルぶんずれる
         DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(jitteredProj));
-        // rgb(環境光の色)にm_AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
+        // rgb(環境光の色)にm_IBLSettings.AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
         // (DeferredLighting.hlsl)の強度調整用で、alpha(dayFactor、IBLの夜間減光・背景スカイの
         // 昼夜ブレンドに使う)には掛けない
         constants.AmbientColor =
         {
-            sunLighting.Ambient.x * m_AmbientScale * effectiveExposure,
-            sunLighting.Ambient.y * m_AmbientScale * effectiveExposure,
-            sunLighting.Ambient.z * m_AmbientScale * effectiveExposure,
+            sunLighting.Ambient.x * m_IBLSettings.AmbientScale * effectiveExposure,
+            sunLighting.Ambient.y * m_IBLSettings.AmbientScale * effectiveExposure,
+            sunLighting.Ambient.z * m_IBLSettings.AmbientScale * effectiveExposure,
             sunLighting.Ambient.w,
         };
         constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
-        const float iblIntensity = m_IBLEnabled ? m_IBLIntensity : 0.0f;
+        const float iblIntensity = m_IBLSettings.Enabled ? m_IBLSettings.Intensity : 0.0f;
         const float specularEnergyCompensation = static_cast<float>(m_ReflectionSettings.SpecularCompensation);
         constants.ShadowParams = {
             m_ShadowSettings.LightSize,
@@ -10651,15 +10651,15 @@ namespace Kurenai
         };
         constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
         constants.IBLParams = {
-            m_IBLUseDedicatedIrradiance ? 1.0f : 0.0f,
-            m_AmbientDiffuseScale,
-            m_AmbientSpecularScale,
+            m_IBLSettings.UseDedicatedIrradiance ? 1.0f : 0.0f,
+            m_IBLSettings.AmbientDiffuseScale,
+            m_IBLSettings.AmbientSpecularScale,
             0.0f,
         };
         constants.OcclusionParams = {
-            m_BentNormalAOSource ? 1.0f : 0.0f,
+            m_AmbientOcclusionSettings.BentNormalAOSource ? 1.0f : 0.0f,
             static_cast<float>(m_AmbientOcclusionSettings.SpecularOcclusion),
-            m_MultiBounceAOEnabled ? 1.0f : 0.0f,
+            m_AmbientOcclusionSettings.MultiBounceAOEnabled ? 1.0f : 0.0f,
             0.0f };
 
         // 空の解析評価用。DeferredLighting.hlslが背景画素でSky.hlsliのSkyColorを画面解像度で
@@ -10745,7 +10745,7 @@ namespace Kurenai
             commandList->UpdateBuffer(m_ProbeBuffer.get(), gpuProbes.data(), sizeof(GPUReflectionProbe) * gpuProbes.size());
         }
 
-        const float probeInfluenceDebug = (m_DebugView == DebugView::ProbeInfluence) ? 1.0f : 0.0f;
+        const float probeInfluenceDebug = (m_DebugViewSettings.View == DebugView::ProbeInfluence) ? 1.0f : 0.0f;
         constants.ProbeParams = {
             static_cast<float>(gpuProbes.size()),
             probeInfluenceDebug,
@@ -10932,7 +10932,7 @@ namespace Kurenai
         // 前フレームのHi-Zを待たなくてよい** ―― 上の2条件はどちらも要らなくなる。
         // 条件の意味と、プリパス自身が今フレームのHi-Zを使えない理由は、
         // 下の hiZFromDepthPrepass を定義している箇所のコメントにある
-        const bool depthPrepassRuns = m_DepthPrepassEnabled
+        const bool depthPrepassRuns = m_GeometrySettings.DepthPrepassEnabled
             && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
         const bool hiZFromDepthPrepass =
             m_GeometrySettings.HiZFromDepthPrepassEnabled && occlusionCullingActive && depthPrepassRuns;
@@ -11416,7 +11416,7 @@ namespace Kurenai
         // ときだけ焼く。RenderGraphがReads/Writesから順序付けるため、トグルを入れたその同じ
         // フレームでLightingパスより先に実行される
         const bool needIrradianceBake =
-            m_IBLUseDedicatedIrradiance || m_DebugView == DebugView::IBLIrradiance;
+            m_IBLSettings.UseDedicatedIrradiance || m_DebugViewSettings.View == DebugView::IBLIrradiance;
         if (needIrradianceBake && !m_IBLIrradianceBaked)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -11428,15 +11428,15 @@ namespace Kurenai
                     // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
                     // スライス選択できないため、面ごとに1回ずつディスパッチする。
                     //
-                    // m_IBLUseSHIrradianceでCSIrradiance(総当たり積分、約9,750万
+                    // m_IBLSettings.UseSHIrradianceでCSIrradiance(総当たり積分、約9,750万
                     // サンプル)とSH L2経路(CSProjectSH→CSProjectSHFinal→CSEvaluateSH、
                     // 射影は24,576テクセルを1回ずつ読むだけ)を切り替えられる。
                     // 出力(m_IrradianceTexture)の形・規約はどちらの経路でも完全に同一
-                    if (m_IBLUseSHIrradiance)
+                    if (m_IBLSettings.UseSHIrradiance)
                     {
                         IBLFaceConstants shConstants{};
                         shConstants.SHProjectionSize = static_cast<float>(kSHProjectionSize);
-                        shConstants.SHWindowLambda = m_SHWindowLambda;
+                        shConstants.SHWindowLambda = m_IBLSettings.SHWindowLambda;
 
                         // --- 1. 射影: ソースキューブ全体を1回だけ読んで9個の係数(RGB)へ集約する ---
                         cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &shConstants, sizeof(shConstants));
@@ -11464,7 +11464,7 @@ namespace Kurenai
                         {
                             IBLFaceConstants faceConstants{};
                             faceConstants.Face = face;
-                            faceConstants.SHWindowLambda = m_SHWindowLambda;
+                            faceConstants.SHWindowLambda = m_IBLSettings.SHWindowLambda;
                             cmd->UpdateBuffer(m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
                             cmd->SetComputeConstantBuffer(0, m_IBLPrefilterConstantBuffer.get());
                             cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_IrradianceTexture.get(), face, 0);
@@ -11608,7 +11608,7 @@ namespace Kurenai
                                     bindShadowPipelineState(pipelineState);
 
                                     const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                        instance, *coarsestModel, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, rejectMask,
+                                        instance, *coarsestModel, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, rejectMask,
                                         requireMask, m_MeshletLODFrame);
                                     cmd->UpdateBuffer(
                                         m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -11648,7 +11648,7 @@ namespace Kurenai
                                 // メッシュまで落ちて物が消える
                                 if (!unit.IsBatch()
                                     && !IsMeshVisibleWithStats(
-                                        m_MeshCullingEnabled, cascadeFrustum, instance, *coarsestModel, mesh, m_MeshCullTested,
+                                        m_GeometrySettings.MeshCullingEnabled, cascadeFrustum, instance, *coarsestModel, mesh, m_MeshCullTested,
                                         m_MeshCullCulled))
                                 {
                                     continue;
@@ -11662,7 +11662,7 @@ namespace Kurenai
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
                                 ObjectConstants objectConstants =
-                                    MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                                    MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
                                 objectConstants.InstanceBase = unit.InstanceBase;
                                 objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -11806,12 +11806,12 @@ namespace Kurenai
                     // 【バッチでは行わない】理由はG-Bufferパスの同じ箇所を参照
                     if (!unit.IsBatch()
                         && !IsMeshVisibleWithStats(
-                            m_MeshCullingEnabled, faceFrustum, instance, *coarsestModel, mesh, m_MeshCullTested, m_MeshCullCulled))
+                            m_GeometrySettings.MeshCullingEnabled, faceFrustum, instance, *coarsestModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                     {
                         continue;
                     }
 
-                    ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                    ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
                     objectConstants.InstanceBase = unit.InstanceBase;
                     objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -12195,7 +12195,7 @@ namespace Kurenai
                     {
                         ++ddgiLODMismatchMeshes;
                     }
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, ddgiEmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, ddgiEmissiveIntensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -12907,7 +12907,7 @@ namespace Kurenai
                             if (modelCullIndirectActive)
                             {
                                 const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                    *draw.Instance, *draw.Model, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled,
+                                    *draw.Instance, *draw.Model, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled,
                                     draw.RejectMask, draw.RequireMask, m_MeshletLODFrame,
                                     draw.CountCullStats, draw.DitherFade, draw.OcclusionMode);
                                 cmd->UpdateBuffer(
@@ -13194,7 +13194,7 @@ namespace Kurenai
                                 }
 
                                 const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                    instance, lodModel, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, rejectMask, requireMask,
+                                    instance, lodModel, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, rejectMask, requireMask,
                                     m_MeshletLODFrame);
                                 cmd->UpdateBuffer(
                                     m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -13239,7 +13239,7 @@ namespace Kurenai
                             // G-Buffer側も同じ条件で外すので、両者の食い違いは起きない
                             if (!unit.IsBatch()
                                 && !IsMeshVisibleWithStats(
-                                    m_MeshCullingEnabled, prepassFrustum, instance, lodModel, mesh, m_MeshCullTested,
+                                    m_GeometrySettings.MeshCullingEnabled, prepassFrustum, instance, lodModel, mesh, m_MeshCullTested,
                                     m_MeshCullCulled))
                             {
                                 continue;
@@ -13265,7 +13265,7 @@ namespace Kurenai
                             }
 
                             ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, lodModel, mesh, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
+                                MakeObjectConstants(instance, lodModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
                             objectConstants.InstanceBase = unit.InstanceBase;
                             objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -13512,7 +13512,7 @@ namespace Kurenai
                         bindPipelineState(instance.IsMirrored, false, true);
 
                         const ObjectConstants objectConstants = MakeModelObjectConstants(
-                            instance, lodModel, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled,
+                            instance, lodModel, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled,
                             Assets::kGpuMaterialFlagTransparent, 0, m_MeshletLODFrame,
                             /*countCullStats=*/true, lodDitherFade);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -13543,7 +13543,7 @@ namespace Kurenai
                         // 必要性はプリパス側の同じ箇所を参照
                         if (!unit.IsBatch()
                             && !IsMeshVisibleWithStats(
-                                m_MeshCullingEnabled, frustum, instance, lodModel, mesh, m_MeshCullTested, m_MeshCullCulled))
+                                m_GeometrySettings.MeshCullingEnabled, frustum, instance, lodModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                         {
                             continue;
                         }
@@ -13557,7 +13557,7 @@ namespace Kurenai
                         bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
                         ObjectConstants objectConstants =
-                            MakeObjectConstants(instance, lodModel, mesh, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
+                            MakeObjectConstants(instance, lodModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
                         objectConstants.InstanceBase = unit.InstanceBase;
                         objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -13687,7 +13687,7 @@ namespace Kurenai
         // ここへは来ない。プリパスが走らないフレームだけ、従来どおりG-Bufferの後で作る ――
         // その場合に読めるのは次フレームで、増幅シェーダーは前フレームのビュー射影行列で
         // 投影し、球を保守的に膨らませて視差を吸収する(GBufferMeshlet.hlslのIsMeshletOccluded)
-        const bool hiZPassRuns = (m_DebugView == DebugView::HiZ) || occlusionCullingActive;
+        const bool hiZPassRuns = (m_DebugViewSettings.View == DebugView::HiZ) || occlusionCullingActive;
         if (!hiZPassRuns)
         {
             // このフレームで作らないなら、次フレームのHi-Zは「何フレームか前の、別のカメラ位置で
@@ -15146,7 +15146,7 @@ namespace Kurenai
                         // メッシュ単位のカリング。ここだけはループ内で描かず描画リストを作るので、
                         // 判定はpush_backの直前に入れる(描かないものをリストへ積まない)
                         if (!IsMeshVisibleWithStats(
-                                m_MeshCullingEnabled, transparentFrustum, instance, *currentModel, mesh, m_MeshCullTested,
+                                m_GeometrySettings.MeshCullingEnabled, transparentFrustum, instance, *currentModel, mesh, m_MeshCullTested,
                                 m_MeshCullCulled))
                         {
                             continue;
@@ -15220,7 +15220,7 @@ namespace Kurenai
                     const ObjectConstants objectConstants =
                         MakeObjectConstants(
                             *draw.Instance, *draw.Model, *draw.Mesh, m_EmissiveLightSettings.Intensity,
-                            m_OcclusionMapEnabled, m_MeshletLODFrame);
+                            m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -15372,7 +15372,7 @@ namespace Kurenai
                             // 【バッチでは行わない】理由はG-Bufferパスの同じ箇所を参照
                             if (!unit.IsBatch()
                                 && !IsMeshVisibleWithStats(
-                                    m_MeshCullingEnabled, reflectionFrustum, instance, *currentModel, mesh, m_MeshCullTested,
+                                    m_GeometrySettings.MeshCullingEnabled, reflectionFrustum, instance, *currentModel, mesh, m_MeshCullTested,
                                     m_MeshCullCulled))
                             {
                                 continue;
@@ -15383,7 +15383,7 @@ namespace Kurenai
                             bindPipelineState(!instance.IsMirrored);
 
                             ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                                MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
                             objectConstants.InstanceBase = unit.InstanceBase;
                             objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -15955,7 +15955,7 @@ namespace Kurenai
 
         // このフレームで超解像パスを走らせるか。デバッグ表示中は内部解像度の中間バッファを
         // そのまま等倍で見たいので走らせない(拡大するとバッファの実際の解像度が分からなくなる)
-        const bool upscaleActive = IsUpscaleActive() && m_DebugView == DebugView::Final;
+        const bool upscaleActive = IsUpscaleActive() && m_DebugViewSettings.View == DebugView::Final;
 
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Tonemap",
@@ -16082,7 +16082,7 @@ namespace Kurenai
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = m_RenderWidth;
         uint32_t presentSourceHeight = m_RenderHeight;
-        switch (m_DebugView)
+        switch (m_DebugViewSettings.View)
         {
         case DebugView::Final:
             // Tonemapパスが既にSSR有効/無効を考慮したHDRソースをLDR変換済みのため、そのまま使う。
@@ -16180,8 +16180,8 @@ namespace Kurenai
         case DebugView::HiZ:
             presentSourceTexture = m_HiZTexture.get();
             presentMode = 6; // 指定ミップをSampleLevelで読みグレースケール表示
-            presentSourceWidth = std::max(1u, m_RenderWidth >> m_HiZDebugMipLevel);
-            presentSourceHeight = std::max(1u, m_RenderHeight >> m_HiZDebugMipLevel);
+            presentSourceWidth = std::max(1u, m_RenderWidth >> m_DebugViewSettings.HiZDebugMipLevel);
+            presentSourceHeight = std::max(1u, m_RenderHeight >> m_DebugViewSettings.HiZDebugMipLevel);
             break;
         case DebugView::IBLIrradiance:
             // 本物のTextureCubeのため、SourceTexture(t0、Texture2D)ではなくDebugCubeTexture(t1)を
@@ -16290,7 +16290,7 @@ namespace Kurenai
             // 実寸を渡す。渡さないと画面いっぱいへ引き伸ばされ、セルが正方形に見えなくなる
             // 裏面率はイラディアンスアトラスのαなので、資源も寸法もイラディアンスと同じ
             const bool isIrradiance =
-                (m_DebugView == DebugView::DDGIIrradiance || m_DebugView == DebugView::DDGIProbeBackface);
+                (m_DebugViewSettings.View == DebugView::DDGIIrradiance || m_DebugViewSettings.View == DebugView::DDGIProbeBackface);
             const uint32_t cell = isIrradiance ? kDDGIIrradianceCell : kDDGIDistanceCell;
             const uint32_t columns = m_GIVolume.ProbeCounts[0] * m_GIVolume.ProbeCounts[1];
             const uint32_t rows = m_GIVolume.ProbeCounts[2];
@@ -16298,7 +16298,7 @@ namespace Kurenai
             presentSourceTexture = isIrradiance ? m_DDGIIrradianceAtlas.get() : m_DDGIDistanceAtlas.get();
             // Present.hlslのMode 14はモーションベクター(TAA、23章)が既に使っているため、
             // DDGIのイラディアンス/距離モーメントはMode 15/16にずらしてある
-            presentMode = (m_DebugView == DebugView::DDGIProbeBackface) ? 20 : (isIrradiance ? 15 : 16);
+            presentMode = (m_DebugViewSettings.View == DebugView::DDGIProbeBackface) ? 20 : (isIrradiance ? 15 : 16);
             presentSourceWidth = m_HasGIVolume ? columns * cell : cell;
             presentSourceHeight = m_HasGIVolume ? rows * cell : cell;
             break;
@@ -16359,12 +16359,12 @@ namespace Kurenai
             // 表示側の処理まで完全に一致させる。Present.hlslは無変更のまま使える
             if (softwareRasterPassRuns)
             {
-                if (m_DebugView == DebugView::SoftwareRasterDepth)
+                if (m_DebugViewSettings.View == DebugView::SoftwareRasterDepth)
                 {
                     presentSourceTexture = m_SoftwareRasterDepth.get();
                     presentMode = 5;
                 }
-                else if (m_DebugView == DebugView::SoftwareRasterNormal)
+                else if (m_DebugViewSettings.View == DebugView::SoftwareRasterNormal)
                 {
                     presentSourceTexture = m_SoftwareRasterNormal.get();
                     presentMode = 7;
@@ -16414,7 +16414,7 @@ namespace Kurenai
             static_cast<float>(presentTileCapacity),
             // ヒートマップで赤に振り切る基準のライト数。容量そのものを基準にすると
             // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
-            static_cast<float>(std::max(1, m_LightTileHeatmapMax)),
+            static_cast<float>(std::max(1, m_DebugViewSettings.LightTileHeatmapMax)),
         };
         presentConstants.TileRenderSize =
         {
@@ -16431,30 +16431,30 @@ namespace Kurenai
             0.0f,
             0.0f,
         };
-        if (m_DebugView == DebugView::IBLPrefilter)
+        if (m_DebugViewSettings.View == DebugView::IBLPrefilter)
         {
-            presentConstants.MipLevel = static_cast<float>(m_IBLPrefilterDebugMipLevel);
+            presentConstants.MipLevel = static_cast<float>(m_IBLSettings.PrefilterDebugMipLevel);
         }
-        else if (m_DebugView == DebugView::IBLIrradiance)
+        else if (m_DebugViewSettings.View == DebugView::IBLIrradiance)
         {
             presentConstants.MipLevel = 0.0f; // イラディアンスマップは常に1ミップのみ
         }
-        else if (m_DebugView == DebugView::ProbePrefilter)
+        else if (m_DebugViewSettings.View == DebugView::ProbePrefilter)
         {
             presentConstants.MipLevel = static_cast<float>(m_ReflectionProbeSettings.PrefilterDebugMipLevel);
         }
         else
         {
-            presentConstants.MipLevel = static_cast<float>(m_HiZDebugMipLevel);
+            presentConstants.MipLevel = static_cast<float>(m_DebugViewSettings.HiZDebugMipLevel);
         }
         // ArraySliceはMode 10ではカスケード番号、Mode 12ではプローブ番号として使う。
         // プローブが1つも無い場合でも配列の範囲外を引かないようクランプする
-        if (m_DebugView == DebugView::ProbePrefilter || m_DebugView == DebugView::ProbeDistance)
+        if (m_DebugViewSettings.View == DebugView::ProbePrefilter || m_DebugViewSettings.View == DebugView::ProbeDistance)
         {
             presentConstants.ArraySlice = static_cast<float>(
                 std::clamp(m_ReflectionProbeSettings.DebugIndex, 0, std::max(0, static_cast<int32_t>(m_ReflectionProbes.size()) - 1)));
         }
-        else if (m_DebugView == DebugView::CloudNoiseSlice)
+        else if (m_DebugViewSettings.View == DebugView::CloudNoiseSlice)
         {
             // Mode 18ではW座標(0〜1)として使う。3Dテクスチャなので配列番号ではなく連続値
             presentConstants.ArraySlice = std::clamp(m_CloudSettings.NoiseDebugSlice, 0.0f, 1.0f);
@@ -16466,28 +16466,28 @@ namespace Kurenai
         }
         // Finalの見た目は倍率の影響を受けてはならないため、デバッグ表示のときだけ倍率を掛ける
         // (Gainはゼロ初期化のままだと0倍=真っ黒になるので、必ず明示的に設定すること)
-        if (m_DebugView == DebugView::ProbeDistance || m_DebugView == DebugView::DDGIDistance)
+        if (m_DebugViewSettings.View == DebugView::ProbeDistance || m_DebugViewSettings.View == DebugView::DDGIDistance)
         {
             // 距離は色ではなくワールド距離なので、Debug View Gain(1倍以上)ではなく
             // 「白になる距離」の逆数を渡す。Present.hlsl Mode 13/15の式は他と同じ「値×Gain」のまま。
             // DDGI側は距離がMaxRayDistanceでクランプされているので、そこを白にすると
             // 「クランプに当たっている方向」が一目で分かる
-            const float whiteAt = (m_DebugView == DebugView::DDGIDistance)
+            const float whiteAt = (m_DebugViewSettings.View == DebugView::DDGIDistance)
                 ? m_GIVolume.MaxRayDistance
                 : m_ReflectionProbeSettings.DistanceDebugRange;
             presentConstants.Gain = 1.0f / std::max(whiteAt, 0.01f);
         }
-        else if (m_DebugView == DebugView::DDGIIrradiance)
+        else if (m_DebugViewSettings.View == DebugView::DDGIIrradiance)
         {
             // アトラスは露出非依存の物理量で持っている(FrameConstants::DDGIParams4 参照)ため、
             // そのまま出すと昼は数万倍の値になって白飛びする。表示だけ実効プリ露出を掛けて
             // 他のバッファと同じ表示レンジへ揃える。こうしておくと
             // 「IBL - イラディアンス」の表示と直接見比べられる(22.9.1節の検証がこれに依存している)
-            presentConstants.Gain = m_DebugViewGain * effectiveExposure;
+            presentConstants.Gain = m_DebugViewSettings.Gain * effectiveExposure;
         }
         else
         {
-            presentConstants.Gain = (m_DebugView == DebugView::Final) ? 1.0f : m_DebugViewGain;
+            presentConstants.Gain = (m_DebugViewSettings.View == DebugView::Final) ? 1.0f : m_DebugViewSettings.Gain;
         }
         commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
@@ -16679,7 +16679,7 @@ namespace Kurenai
         // Present呼び出し自体のCPUコストはここで計測しないと、各パスのコマンド記録時間の
         // 合計とCPU Frame Time全体の差分がどこにあるのか分からなくなるため計測しておく
         m_CPUProfiler.BeginScope("PresentSubmit");
-        m_SwapChain->Present(m_VSyncEnabled);
+        m_SwapChain->Present(m_SystemSettings.VSyncEnabled);
         m_CPUProfiler.EndScope(); // PresentSubmit
 
         // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく

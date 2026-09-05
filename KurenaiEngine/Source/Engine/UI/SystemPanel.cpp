@@ -183,14 +183,14 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "垂直同期###EnableVSync", &m_Engine.m_VSyncEnabled, Defaults::VSyncEnabled,
+            "垂直同期###EnableVSync", &m_Engine.m_SystemSettings.VSyncEnabled, Defaults::VSyncEnabled,
             "Presentをディスプレイのリフレッシュに同期させる。ティアリングは消えるが遅延は増える");
 
         CheckboxEx(
-            "フレームレート制限###FixedFPS", &m_Engine.m_FixedFPSEnabled, Defaults::FixedFPSEnabled,
+            "フレームレート制限###FixedFPS", &m_Engine.m_SystemSettings.FixedFPSEnabled, Defaults::FixedFPSEnabled,
             "指定したフレームレートを超えないように待機を入れる");
 
-        if (m_Engine.m_FixedFPSEnabled)
+        if (m_Engine.m_SystemSettings.FixedFPSEnabled)
         {
             static const char* kTargetFPSNames[] = { "30", "60", "120" };
             static const float kTargetFPSValues[] = { 30.0f, 60.0f, 120.0f };
@@ -203,7 +203,7 @@ namespace Kurenai::UI
             int defaultIndex = 1;
             for (int i = 0; i < IM_ARRAYSIZE(kTargetFPSValues); ++i)
             {
-                if (kTargetFPSValues[i] == m_Engine.m_TargetFPS)
+                if (kTargetFPSValues[i] == m_Engine.m_SystemSettings.TargetFPS)
                 {
                     targetFPSIndex = i;
                 }
@@ -217,12 +217,12 @@ namespace Kurenai::UI
                     "目標フレームレート###TargetFPS", &targetFPSIndex, kTargetFPSNames, IM_ARRAYSIZE(kTargetFPSNames),
                     defaultIndex, "上限とするフレームレート"))
             {
-                m_Engine.m_TargetFPS = kTargetFPSValues[targetFPSIndex];
+                m_Engine.m_SystemSettings.TargetFPS = kTargetFPSValues[targetFPSIndex];
             }
         }
 
         CheckboxEx(
-            "性能をログに記録###FrameStatsLogging", &m_Engine.m_FrameStatsLoggingEnabled,
+            "性能をログに記録###FrameStatsLogging", &m_Engine.m_SystemSettings.FrameStatsLoggingEnabled,
             Defaults::FrameStatsLoggingEnabled,
             "FPS・CPU/GPUフレーム時間を1秒ごとにログファイルへ書き出す。"
             "このパネルの表示は実行中しか見えないため、後から実行同士を比較するにはこちらを使う");

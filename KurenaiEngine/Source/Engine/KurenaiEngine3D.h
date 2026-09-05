@@ -31,9 +31,11 @@
 #include "Settings/AmbientOcclusionSettings.h"
 #include "Settings/CloudSettings.h"
 #include "Settings/DDGISettings.h"
+#include "Settings/DebugViewSettings.h"
 #include "Settings/EmissiveLightSettings.h"
 #include "Settings/FogSettings.h"
 #include "Settings/GeometrySettings.h"
+#include "Settings/IBLSettings.h"
 #include "Settings/MegaLightsSettings.h"
 #include "Settings/PostProcessSettings.h"
 #include "Settings/QualitySettings.h"
@@ -42,6 +44,7 @@
 #include "Settings/ShadowSettings.h"
 #include "Settings/SkySettings.h"
 #include "Settings/StarsSettings.h"
+#include "Settings/SystemSettings.h"
 #include "Settings/WaterSettings.h"
 
 #pragma warning(push)
@@ -415,7 +418,7 @@ namespace Kurenai
         };
 
         void CreateSceneResources();
-        // 中間バッファの精度構成(m_BufferPrecision)によって変わるフォーマット。
+        // 中間バッファの精度構成(m_SystemSettings.Precision)によって変わるフォーマット。
         // レンダーターゲットの作成(CreateRenderTargets)と、そこへ描くPSOのRenderTargetFormats
         // 宣言の両方がこれを使う。両者がずれるとD3D12では仕様違反(デバッグレイヤーがID 613を出す)
         // になるため、値の出所をこの2関数に一本化している
@@ -574,7 +577,7 @@ namespace Kurenai
         // 出来上がったシーンの取り込みを行う
         void UpdateSceneStreaming();
         // .ksceneの更新時刻を見て、変わっていれば再読み込みを要求する。
-        // UpdateSceneStreamingの先頭から呼ぶ。m_SceneAutoReloadEnabledがfalseなら何もしない
+        // UpdateSceneStreamingの先頭から呼ぶ。m_SystemSettings.SceneAutoReloadEnabledがfalseなら何もしない
         void UpdateSceneHotReloadWatch();
         // 現在のシーンの.ksceneの最終更新時刻。取得できなければ0を返す
         // (ファイルが一時的に開けない、削除された等。0のときは何もしないのが正しい振る舞い)
@@ -722,20 +725,7 @@ namespace Kurenai
         // このフレームで超解像パスを走らせるか(有効かつテクスチャが確保済み)
         bool IsUpscaleActive() const;
 
-        // 中間バッファの精度構成。HDRが本来採用したい構成で、Legacy8bitは
-        // 「中間バッファはすべてR8G8B8A8_UNorm」にする比較用の経路。
-        //
-        // 精度改善の効果を主観ではなく実測で比較できるようにするために残している。
-        // UNorm8は刻みが絶対値1/255=0.392%で固定なのに対し、half floatは仮数10bitで
-        // 相対2^-11=0.049%が一定のため、両者の相対精度比は格納値vに対して8/vになる
-        // (v=0.1で80倍、v=0.02で401倍)。暗い間接光ほど差が開く
-        // (詳細と各バッファの根拠はdocs/Architecture.html)
-        enum class BufferPrecision
-        {
-            HDR,
-            Legacy8bit,
-        };
-        BufferPrecision m_BufferPrecision = BufferPrecision::HDR;
+        SystemSettings m_SystemSettings;
         // ImGuiでBufferPrecisionが変更されたことをRender()へ伝えるフラグ。レンダーターゲットの
         // 作り直しはGPUがそれらを参照していない状態で行う必要があるため、UI関数の中では実行せず
         // Render()の先頭(RenderGraphの構築より前)でm_Device->WaitForGPUIdle()を挟んで処理する
@@ -777,12 +767,8 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletPipelineStateMirrored;
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletCutoutPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletCutoutPipelineStateMirrored;
-        // プリパスを走らせるか。オーバードローが小さいシーンでは、増えるジオメトリ1周ぶんが
-        // 省けるピクセルシェーダーより高くつくため切れるようにしてある
-        bool m_DepthPrepassEnabled = Defaults::DepthPrepassEnabled;
-        // メッシュ単位のフラスタムカリングを行うか(対照実験用。EngineDefaults.h参照)。
-        // OFFのあいだは判定を1回も呼ばないので、統計は「判定なし」になる
-        bool m_MeshCullingEnabled = Defaults::MeshCullingEnabled;
+        // プリパスを走らせるか・メッシュ単位のフラスタムカリングを行うかは
+        // m_GeometrySettings.DepthPrepassEnabled / MeshCullingEnabledへ移した
 
         // --- インスタンシング(Stage 7) ------------------------------------------------------
         //
@@ -1064,12 +1050,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_DirectLightTexture;
 
         AmbientOcclusionSettings m_AmbientOcclusionSettings;
-        // マテリアルの遮蔽マップ(glTFのocclusionTexture。22章)を使うか。
-        // 上のm_AmbientOcclusionSettings.Enabled(スクリーンスペースAO/GI)とは完全に別系統で、無効にしても遮蔽マップは
-        // 効き続けるためこのトグルを別に持つ。無効時はObjectConstants.OcclusionStrengthへ0を渡し、
-        // 各パスのlerp(1, occlusionSample, 0) = 1(遮蔽なし)にする方式なのでシェーダー側の変更は不要。
-        // 反射プローブはキャプチャ時の値が焼き込まれるため、切り替えても焼き直すまで反映されない
-        bool m_OcclusionMapEnabled = Defaults::OcclusionMapEnabled;
         std::unique_ptr<RHI::IRHITexture> m_AODisabledTexture; // AO無効時に使う、遮蔽なし・間接光なしのテクスチャ
 
         // AO/GI共通のブラーパス(4x4ボックスブラーでrgba全チャンネルを均す。SSAO/SSIL両方から使い回す)
@@ -1194,8 +1174,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_HiZTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_HiZConstantBuffer;
         uint32_t m_HiZMipLevels = 1;
-        // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベル
-        int32_t m_HiZDebugMipLevel = 0;
+        // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベルはm_DebugViewSettings.HiZDebugMipLevelへ移した
         // m_HiZTextureの中身が「1回でも構築されたHi-Z」になっているか。
         //
         // 【オクルージョン判定の門番】CreateHiZTextureが作った直後の中身は未定義で、
@@ -1676,19 +1655,7 @@ namespace Kurenai
         std::vector<DirectX::XMUINT2> m_BloomLevelSizes;
 
 
-        // 垂直同期。既定で無効。有効にするとPresentがvblankまでブロックするため、GPU負荷が軽い
-        // シーンではvsync待ちの間GPUがアイドル→省電力クロックに落ち、次フレームの立ち上がりが
-        // 遅くなる・待ち時間自体もジッタで1vblank/2vblank分を行き来するなど計測値が不安定になる。
-        // 既定はGPU/CPU双方の実処理時間を素直に見られるOFFとし、ティアリングを許容する
-        // (ON時はPresentが即座に返らず、モニタのリフレッシュレートにFPSが制限される)
-        bool m_VSyncEnabled = Defaults::VSyncEnabled;
-
-        // 固定FPSモード。有効時、Renderスレッドが目標FPSより速く回った分だけ待機してフレーム間隔を
-        // 一定に保つ。VSyncはモニタのリフレッシュレート依存かつティアリング防止が目的だが、こちらは
-        // 任意のFPS値に固定できる(物理更新の再現性確保や環境間でのフレーム時間比較などが目的)。
-        // 既定で60fps固定を有効にする
-        bool m_FixedFPSEnabled = Defaults::FixedFPSEnabled;
-        float m_TargetFPS = Defaults::TargetFPS;
+        // 垂直同期・固定FPSモードはm_SystemSettingsへ移した
 
         // Presentパス(選択中のレンダーターゲットをアスペクト比を保ってバックバッファへ拡大縮小表示)
         std::unique_ptr<RHI::IRHIShader> m_PresentVertexShader;
@@ -1696,78 +1663,10 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_PresentPipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_PresentConstantBuffer;
 
-        // デバッグ表示用: Presentパスで最終的に表示するレンダーターゲットの種類
-        enum class DebugView
-        {
-            Final,
-            Albedo,
-            Normal,
-            Material,
-            Emissive,
-            Depth,
-            DepthRaw,           // 深度テクスチャの生値(0〜1)を加工せずそのままグレースケール表示
-            DirectLight,        // DirectLightingパスの結果(HDR、シャドウ適用済みの直接光)をトーンマッピングして表示
-            AOIndirectLight,    // AO/GIバッファのrgb(間接拡散光、ブラー後)をそのまま表示
-            AOIndirectLightRaw, // AO/GIバッファのrgb(間接拡散光、ブラー前の生値)
-            AOOcclusion,        // AO/GIバッファのa(遮蔽率、ブラー後)をグレースケール表示
-            AOOcclusionRaw,     // AO/GIバッファのa(遮蔽率、ブラー前の生値)
-            ShadowMap,          // m_ShadowSettings.DebugCascadeで選択したカスケードのシャドウマップを表示
-            RTShadow,           // RTシャドウの可視率(0=影, 1=光)をグレースケール表示。RTシャドウ未実行時は最終結果
-            SSR,                // 反射パスの出力(SceneColor+反射)。反射がOffのときはSceneColorと同一
-            HiZ,                // Hi-Zミップチェーンの指定ミップ(m_HiZDebugMipLevel)をグレースケール表示
-            IBLIrradiance,      // IBL拡散イラディアンスマップ(TextureCube。現在の視線方向で球面を見回す表示)
-            IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLPrefilterDebugMipLevel、TextureCube)
-            IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス。R=A, G=B, B=Eavg)
-            Bloom,              // ブルームのピラミッド最上段(半解像度、HDR)をトーンマッピングして表示
-            LightTiles,         // タイルライトカリングのライトグリッド(タイルあたりのライト数)をヒートマップ表示
-            // 反射プローブは鏡面専任なので拡散イラディアンスの表示は持たない(拡散はDDGIIrradiance)
-            ProbePrefilter,     // 反射プローブのプリフィルタ済み鏡面(ミップ0がキャプチャ結果そのもの)
-            ProbeInfluence,     // どのプローブが効いているかをプローブ番号ごとの色で塗り分けて表示
-            ProbeDistance,      // 反射プローブの距離キューブ(プローブから見た各方向の被写体までの距離)
-            MotionVector,       // モーションベクター(速度バッファ)。静止で灰色、動くと移動方向に応じて色が付く
-            SceneColorRaw,      // トーンマップ前のHDRシーンカラーをリニアのまま無加工で表示(測定用)
-            DDGIIrradiance,     // DDGIのイラディアンスアトラス(オクタヘドラル2D、22章)
-            DDGIDistance,       // DDGIの距離モーメントアトラス(R=平均距離、G=平均二乗距離)
-            BentNormal,         // bent normal(34章)。Debug View Gainが1なら軸を色表示、
-                                // 1.5より大きいと長さ(=aoB)をグレースケール表示。
-                                // データを持たないマテリアルはマゼンタで塗る
-            WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示
-            PlanarReflection,   // 平面反射パスの出力(m_PlanarReflectionColor)をトーンマッピングして表示
-            CloudNoiseSlice,    // 雲の3Dノイズの任意スライス。m_CloudSettings.NoiseDebugSlice/Detailで選ぶ
-            AtmosphereLUT,      // 大気散乱のLUT。m_AtmosphereLUTDebugMultiで2枚を切り替える
-            DDGIProbeBackface,  // DDGIのプローブ裏面率(イラディアンスアトラスのα、22章)。
-                                // 白いほど「面の裏側ばかり見ている」=壁の内部に埋まっている。
-                                // 分類のしきい値を実測で決めるための表示。ラスタ経路では常に黒
-            // 以下3つは自前ソフトウェアラスタライザ(46章)の出力。パスが実行されていない
-            // フレームでは中身が前フレーム/未定義の残骸なので、最終結果のまま切り替えない
-            SoftwareRaster,       // ソフトウェアラスタライザのフラットな陰影(HDR)
-            SoftwareRasterDepth,  // 同 深度(生値)。DebugView::DepthRawと並べて差分を取る
-            SoftwareRasterNormal, // 同 法線。DebugView::Normalとまったく同じ符号化・同じ表示
-            // MegaLightsパスが書いたポイント/スポットライトの直接光(トーンマップして表示)。
-            // 上の3つと同じく、パスが実行されていないフレームでは中身が前フレーム/未定義の
-            // 残骸なので、最終結果のまま切り替えない
-            MegaLights,
-            // MegaLightsの候補プールが数えた「そのタイルへ届いたライト数」。
-            // 色付けは DebugView::LightTiles とまったく同じで、両者は同じ判定を使うので
-            // 同じシーン・同じカメラなら画素単位で一致するはず(定義域のずれの検出用)
-            MegaLightsTilePool,
-            // MegaLightsの出力を線形空間で蓄積した平均(計測専用)。参照実装と確率的サンプリングの
-            // これどうしを比べて、平均が真値へ寄るかを測る。蓄積が無効なら最終結果のまま
-            MegaLightsAverage,
-        };
-        // デバッグ表示の総数。**enumの末尾を足したらここも直すこと**。
-        // enumのすぐ隣に置いてあるのは、離れた場所にあると更新を忘れるため
-        // (実際に DDGIProbeBackface を足したとき、範囲チェックが古い末尾のままで
-        //  起動オプションからの選択が弾かれた)
-        static constexpr int kDebugViewCount = static_cast<int>(DebugView::MegaLightsAverage) + 1;
-
-        DebugView m_DebugView = DebugView::Final;
-        // デバッグ表示の輝度倍率(Present.hlslのGain)。AO/GIバッファの間接拡散光のように
-        // 値そのものが小さいバッファ(この暗い室内では0.02〜0.1程度)は、等倍で表示しても
-        // ほぼ真っ黒で階調の粗さが判別できない。持ち上げて表示することで、8bit格納時の
-        // ポスタリゼーションが何段あるかを目視で確認できるようにする。
-        // 色として表示するモード(Present.hlsl Mode 0/3/4)にのみ効く
-        float m_DebugViewGain = Defaults::DebugViewGain;
+        // デバッグ表示用: Presentパスで最終的に表示するレンダーターゲットの種類(DebugView enum)と
+        // その表示パラメータはm_DebugViewSettingsへ移した(Settings/DebugViewSettings.h)。
+        // enumとkDebugViewCountも同じヘッダのKurenai名前空間直下にある
+        DebugViewSettings m_DebugViewSettings;
         // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
         // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
         // カスケードシャドウマップ(CSM)。近いカスケードほどテクセル密度が高く、遠いカスケードほど
@@ -2054,7 +1953,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_PrefilterPipelineState;
         // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradianceの高速な
-        // 代替で、m_IBLUseSHIrradianceでA/B比較できるようトグルにしてある。詳細は
+        // 代替で、m_IBLSettings.UseSHIrradianceでA/B比較できるようトグルにしてある。詳細は
         // IBLConvolve.hlsl冒頭のコメントとdocs/Architecture.htmlを参照
         static constexpr uint32_t kSHCoeffCount = 9; // 実数SH L2(l<=2)の項数
         // CSProjectSHの射影に使う離散化解像度(1面の1辺のテクセル数)。
@@ -2074,53 +1973,12 @@ namespace Kurenai
         // 合算した最終係数(9個)。どちらもRGB(float4のxyz、wは詰め物)
         std::unique_ptr<RHI::IRHIBuffer> m_SHPartialSumsBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_SHCoefficientsBuffer;
-        // trueならCSIrradianceの代わりにSH L2経路を使う。既定false(検証で選べるようにしてあるが、
-        // どちらを既定にするかはリンギングの実測(ProbeTestのエミッシブ帯周り)で決めること。
-        // m_IBLUseDedicatedIrradiance/デバッグビューでイラディアンス焼き込みが要る場面でのみ意味を持つ
-        bool m_IBLUseSHIrradiance = Defaults::IBLUseSHIrradiance;
-        // SHのウィンドウ関数(Sloan)の強さ。0=無効(既定)。リンギングが実測で出た場合のつまみ
-        float m_SHWindowLambda = Defaults::SHWindowLambda;
         // プリフィルタ済み鏡面のミップごとの畳み込みで使うラフネス値を渡す専用の定数バッファ
         std::unique_ptr<RHI::IRHIBuffer> m_IBLPrefilterConstantBuffer;
-        // デバッグ表示(Render Targets)で確認するプリフィルタ済み鏡面マップのミップレベル
-        int32_t m_IBLPrefilterDebugMipLevel = 0;
-        // IBL(拡散イラディアンス+プリフィルタ済み鏡面)のON/OFFと強度。無効時はシェーダ側
-        // (DeferredLighting.hlsl)でEvaluateIBLの代わりに定数色アンビエント
-        // (AmbientColor.rgb)へフォールバックする(真っ暗にはしない)。既定値を1.0でなく0.5に
-        // しているのは、明るく補正した空の輝度分布(14.6節)ではIBL全体の寄与が強すぎるため
-        bool m_IBLEnabled = Defaults::IBLEnabled;
-        float m_IBLIntensity = Defaults::IBLIntensity;
-        // 拡散イラディアンスを専用マップ(m_IrradianceTexture)から取るかどうか。既定はfalseで、
-        // プリフィルタ済み鏡面の最終ミップ(roughness=1)を使う。CSPrefilterがV=R=Nを仮定して
-        // いるためroughness=1ではGGXの実効カーネルがコサイン畳み込みへ厳密に退化し、両者は同じ
-        // E(N)/πを格納する(14.10節)。White Furnace Testで画素一致、実スカイボックスでも
-        // 最大2〜4/255の差しか出ないことを実機で確認してあるため、既定では専用マップを使わない。
-        // これによりリフレクションプローブのような実行時のキューブマップ焼き直しから、最も重い
-        // CSIrradiance(約9750万サンプル)を丸ごと省ける。
-        // 畳み込み処理自体はいつでも検証できるよう残してあり、このトグルをONにすると
-        // その場で焼いて(m_IBLIrradianceBaked)従来経路に切り替わる
-        bool m_IBLUseDedicatedIrradiance = Defaults::IBLUseDedicatedIrradiance;
-        // bent normalによる遮蔽(34章)。FrameConstants::OcclusionParamsへ載る
-        bool m_BentNormalAOSource = Defaults::BentNormalAOSource;
-        bool m_MultiBounceAOEnabled = Defaults::MultiBounceAOEnabled;
-        // 環境光(間接光)の拡散・鏡面それぞれの倍率。FrameConstants.IBLParams.y / .z として渡す。
-        //
-        // m_IBLIntensityが拡散と鏡面へ一様に掛かる「環境光全体の明るさ」なのに対し、こちらは
-        // 両者の比率を意図的に崩すための画作り用のつまみ。金属やガラスの映り込みだけを強めたい、
-        // 逆に環境の照り返しを残したまま反射を抑えたい、といった調整がIBL強度単独ではできないため
-        // 分けている。
-        //
-        // 【IBLの有効/無効に関わらず効く】無効時の定数色アンビエントにも同じ倍率を掛ける。
-        // 片方にしか効かないとトグルを切り替えたときにつまみの意味が変わり、比較にならないため。
-        // 【間接光にのみ効く】直接光・自発光には掛けない(遮蔽マップと同じ方針。22.1節)。
-        // SSILの間接拡散光にも掛けない ―― あれはスクリーンスペースで得た周囲のサーフェスからの
-        // 光であって、ここで言う環境(空・プローブ)由来のアンビエントとは別の項のため
-        float m_AmbientDiffuseScale = Defaults::AmbientDiffuseScale;
-        float m_AmbientSpecularScale = Defaults::AmbientSpecularScale;
-        // Enable IBL無効時に使う定数色アンビエントフォールバックの強度倍率。シェーダ側ではなく
-        // Render()がFrameConstants.AmbientColorへ書き込む時点でrgb(alphaのdayFactorは除く)に
-        // 乗算する(HLSL側は素のAmbientColor.rgbを読むだけでよい)
-        float m_AmbientScale = Defaults::AmbientScale;
+        // IBLの有効/強度・SH経路・専用イラディアンス・環境光の拡散/鏡面/フォールバック強度は
+        // m_IBLSettingsへ移した(Settings/IBLSettings.h)。bent normal/multi-bounce AOの
+        // ソース選択はm_AmbientOcclusionSettingsへ移した(Settings/AmbientOcclusionSettings.h)
+        IBLSettings m_IBLSettings;
 
         EmissiveLightSettings m_EmissiveLightSettings;
 
@@ -2598,9 +2456,7 @@ namespace Kurenai
         // 警告ログを出すためのフラグ(m_LightOverflowLoggedと同じ作法)。
         // 実際に超過したかはGPU側にしか無いため、確認はDebugView::LightTilesのマゼンタで行う
         bool m_LightTileOverflowLogged = false;
-        // DebugView::LightTilesのヒートマップで赤に振り切る基準のライト数。容量(64)を基準にすると
-        // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
-        int m_LightTileHeatmapMax = Defaults::LightTileHeatmapMax;
+        // DebugView::LightTilesのヒートマップの上限はm_DebugViewSettings.LightTileHeatmapMaxへ移した
 
         // --- 自前ソフトウェアラスタライザ(46章) -------------------------------------------
         //
@@ -2611,16 +2467,6 @@ namespace Kurenai
         // DX12かつSM 6.6 + Int64ShaderOps + bindlessの環境でのみ動く
         // (IRHIDevice::SupportsSoftwareRaster)。
 
-        // スクリーンbboxの画素面積がこれを超えた三角形は、1スレッドでラスタライズせず
-        // 巨大三角形リストへ回す既定値。4096 = 64x64相当。
-        //
-        // 【この値が上限を決めている】小三角形パスは1スレッド1三角形なので、
-        // このしきい値がそのまま「1スレッドが回す最大ループ回数」になる。
-        // 上げすぎると画面を覆う三角形1個でTDRに達する
-        static constexpr uint32_t kSWRasterDefaultLargeTriangleArea = 4096;
-        // しきい値の可動範囲。UIから振って2つの経路を突き合わせるために使う(下のメンバ参照)
-        static constexpr uint32_t kSWRasterMinLargeTriangleArea = 16;
-        static constexpr uint32_t kSWRasterMaxLargeTriangleArea = 1u << 24;
         // 巨大三角形リストの容量(要素数)。超えた分は描かれず、CSResolveが画面左上を
         // マゼンタで塗って知らせる
         static constexpr uint32_t kSWRasterLargeListCapacity = 4096;
@@ -2653,15 +2499,8 @@ namespace Kurenai
         // Present.hlslのMode 7で並べて差分を取れるようにするため
         std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterNormal;
 
-        // 巨大三角形とみなすbbox画素面積のしきい値。
-        //
-        // 【実行時に振れるようにしている理由】小三角形パス(CSRaster)と巨大三角形パス
-        // (CSRasterLarge)は同じ三角形を別のコードで塗る。極端に小さくすればほぼ全三角形が
-        // 巨大リストへ回り、極端に大きくすればすべてCSRaster単独になるので、
-        // **両極端で同じ絵が出ること**を確かめれば2つの経路が一致していると言える。
-        // ビルドし直さずにこの対照実験ができるよう定数ではなくメンバにしてある
-        // (「片方が実行されていない」という失敗を先に潰すための手順。ab-compareスキル)
-        int m_SoftwareRasterLargeTriangleArea = static_cast<int>(kSWRasterDefaultLargeTriangleArea);
+        // 巨大三角形とみなすbbox画素面積のしきい値と、その既定値・可動範囲(kSWRasterDefault/Min/Max
+        // LargeTriangleArea)はm_GeometrySettings.SoftwareRasterLargeTriangleAreaへ移した
         // メッシュレコード数が容量を超えた最初のフレームだけ警告を出すためのフラグ
         // (m_LightTileOverflowLoggedと同じ作法)
         bool m_SoftwareRasterMeshOverflowLogged = false;
@@ -2748,17 +2587,13 @@ namespace Kurenai
         // 書き込み手を1スレッドに保っている
         Core::Camera m_Camera;
 
-        // WASD/E/Qの移動速度[m/s]。Shiftを押している間はDefaults::CameraSpeedShiftMultiplier倍。
-        //
+        // WASD/E/Qの移動速度[m/s]はm_SystemSettings.CameraSpeedへ移した。
         // 【スレッド】書き手はRenderスレッド(ScenePanelのスライダとResetSceneDependentParams)、
-        // 読み手はUpdateスレッド(UpdateMovement)。m_TargetFPSと同じく、単一のfloatを跨いで
-        // 読み書きするだけなので同期は置かない ―― 途中の値が1フレーム見えても
-        // 「その1フレームだけ移動量が古い速度で計算される」以上のことは起きない。
-        // m_Camera本体はUpdateスレッド専有のまま(この値はそこへ入力されるだけ)。
-        //
-        // 値はシーン対角から決まるためResetSceneDependentParams()が上書きする。
-        // ここの初期化子は最初のシーンを読むまでの値でしかない
-        float m_CameraSpeed = Defaults::CameraSpeed;
+        // 読み手はUpdateスレッド(UpdateMovement)。単一のfloatを跨いで読み書きするだけなので
+        // 同期は置かない ―― 途中の値が1フレーム見えても「その1フレームだけ移動量が古い速度で
+        // 計算される」以上のことは起きない。m_Camera本体はUpdateスレッド専有のまま
+        // (この値はそこへ入力されるだけ)。値はシーン対角から決まるためResetSceneDependentParams()
+        // が上書きする。Settings側の初期化子は最初のシーンを読むまでの値でしかない
 
         // --- シーン読み込みのハンドオフ -------------------------------------------------------
 
@@ -2796,12 +2631,8 @@ namespace Kurenai
         // リポジトリのScenes\*.ksceneからはKurenaiPacker --scene → Assets\Packed → xcopy の
         // 2ホップで届く。エンジンは自分が実際に読んだファイル(m_SceneFilePaths)だけを見る
 
-        // 自動監視の有効/無効。**既定はオフ**。A/B比較の最中に勝手に再読み込みが走ると
-        // 「同一条件で2回撮る」対照が壊れるため、明示的に入れてもらう
-        bool m_SceneAutoReloadEnabled = false;
-        // リロード時に現在のカメラを保持するか。オフ(既定)ならファイルの[Camera]を適用する。
-        // [Camera]を詰めるときと、飛び回りながら空・水面・露出を詰めるときで要求が逆になる
-        bool m_SceneReloadKeepsCamera = false;
+        // 自動監視の有効/無効とリロード時のカメラ保持はm_SystemSettingsへ移した
+        // (SceneAutoReloadEnabled / SceneReloadKeepsCamera)
         // 監視中の.ksceneの更新時刻(FILETIMEを64bitへ詰めたもの)。0は「まだ取得していない」
         uint64_t m_WatchedSceneWriteTime = 0;
         // 検証に失敗した更新時刻。同じ内容で警告ログを繰り返さないために覚えておく
@@ -2896,10 +2727,8 @@ namespace Kurenai
         float m_RenderDeltaTime = 0.0f;
         float m_FixedTimeStep = 0.0f;
 
-        // 性能ログ(LogFrameStatsIfDue)。プロファイラパネルの表示はその場で消えてしまい後から
-        // 比較できないため、FPS・CPU/GPUフレーム時間を一定間隔でログファイルへ残す。
-        // すべてRenderスレッドのみが読み書きするため追加の排他制御は不要
-        bool m_FrameStatsLoggingEnabled = Defaults::FrameStatsLoggingEnabled;
+        // 性能ログ(LogFrameStatsIfDue)の有効/無効はm_SystemSettings.FrameStatsLoggingEnabledへ移した。
+        // 集計状態はすべてRenderスレッドのみが読み書きするため追加の排他制御は不要
         std::chrono::steady_clock::time_point m_FrameStatsWindowStart;
         uint32_t m_FrameStatsFrameCount = 0;
         // 集計期間中の合計。平均を出すためにフレーム数で割る
@@ -2933,11 +2762,8 @@ namespace Kurenai
             float FadeT = 1.0f;        // 1.0でフェード完了。0→1へ進み、その間だけ2段を重ねる
         };
         std::vector<InstanceLODState> m_InstanceLODStates;
-        // 段の切り替えにかける秒数。0にするとポップする(1.1km四方のタイルが丸ごと入れ替わるため
-        // 目立つ)。根拠は docs/ImplementationDetail.md
-        float m_LODFadeDuration = 0.25f;
-        // 切り替え距離のヒステリシス幅。切替点の±5%を不感帯にして、境界での往復を防ぐ
-        float m_LODHysteresis = 0.05f;
+        // 段の切り替えにかける秒数とヒステリシス幅はm_GeometrySettings.LODFadeDuration /
+        // LODHysteresisへ移した
         // 統計。1フレームあたりの段の切り替え回数と、そのフレームでフェード中のインスタンス数。
         // 【0なら一度も切り替わっていない】LODが効いているかはここでしか分からない
         // (フェード中のインスタンス数はm_RenderStats.LODFadingCountへ出す。UIが読む完成値のため)

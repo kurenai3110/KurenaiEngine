@@ -62,5 +62,41 @@ namespace Kurenai
 
         bool LightCullingEnabled = Defaults::LightCullingEnabled;
         bool SoftwareRasterEnabled = Defaults::SoftwareRasterEnabled;
+
+        // --- 深度プリパス(41.22節) ------------------------------------------------------
+        // プリパスを走らせるか。オーバードローが小さいシーンでは、増えるジオメトリ1周ぶんが
+        // 省けるピクセルシェーダーより高くつくため切れるようにしてある
+        bool DepthPrepassEnabled = Defaults::DepthPrepassEnabled;
+        // メッシュ単位のフラスタムカリングを行うか(対照実験用。EngineDefaults.h参照)。
+        // OFFのあいだは判定を1回も呼ばないので、統計は「判定なし」になる
+        bool MeshCullingEnabled = Defaults::MeshCullingEnabled;
+
+        // --- モデルLOD(.ksceneの[Model]LODPath / LODDistance) --------------------------------
+        // 段の切り替えにかける秒数。0にするとポップする(1.1km四方のタイルが丸ごと入れ替わるため
+        // 目立つ)。根拠は docs/ImplementationDetail.md
+        float LODFadeDuration = 0.25f;
+        // 切り替え距離のヒステリシス幅。切替点の±5%を不感帯にして、境界での往復を防ぐ
+        float LODHysteresis = 0.05f;
+
+        // --- 自前ソフトウェアラスタライザ(46章) -------------------------------------------
+        // スクリーンbboxの画素面積がこれを超えた三角形は、1スレッドでラスタライズせず
+        // 巨大三角形リストへ回す既定値。4096 = 64x64相当。
+        //
+        // 【この値が上限を決めている】小三角形パスは1スレッド1三角形なので、
+        // このしきい値がそのまま「1スレッドが回す最大ループ回数」になる。
+        // 上げすぎると画面を覆う三角形1個でTDRに達する
+        static constexpr uint32_t kSWRasterDefaultLargeTriangleArea = 4096;
+        // しきい値の可動範囲。UIから振って2つの経路を突き合わせるために使う(下のメンバ参照)
+        static constexpr uint32_t kSWRasterMinLargeTriangleArea = 16;
+        static constexpr uint32_t kSWRasterMaxLargeTriangleArea = 1u << 24;
+        // 巨大三角形とみなすbbox画素面積のしきい値。
+        //
+        // 【実行時に振れるようにしている理由】小三角形パス(CSRaster)と巨大三角形パス
+        // (CSRasterLarge)は同じ三角形を別のコードで塗る。極端に小さくすればほぼ全三角形が
+        // 巨大リストへ回り、極端に大きくすればすべてCSRaster単独になるので、
+        // **両極端で同じ絵が出ること**を確かめれば2つの経路が一致していると言える。
+        // ビルドし直さずにこの対照実験ができるよう定数ではなくメンバにしてある
+        // (「片方が実行されていない」という失敗を先に潰すための手順。ab-compareスキル)
+        int SoftwareRasterLargeTriangleArea = static_cast<int>(kSWRasterDefaultLargeTriangleArea);
     };
 }
