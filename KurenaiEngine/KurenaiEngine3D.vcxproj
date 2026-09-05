@@ -83,6 +83,7 @@
     <ClInclude Include="Source\Engine\Diagnostics\RenderDumpService.h" />
     <ClInclude Include="Source\Engine\Diagnostics\RenderStats.h" />
     <ClInclude Include="Source\Engine\ShaderInterop\FrameConstants.h" />
+    <ClInclude Include="Source\Engine\ShaderInterop\GroupSizes.h" />
     <ClInclude Include="Source\Engine\Settings\AmbientOcclusionSettings.h" />
     <ClInclude Include="Source\Engine\Settings\CloudSettings.h" />
     <ClInclude Include="Source\Engine\Settings\DDGISettings.h" />

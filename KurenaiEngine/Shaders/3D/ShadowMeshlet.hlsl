@@ -30,8 +30,7 @@ cbuffer CascadeConstants : register(b0)
 
 #include "ObjectConstants.hlsli"
 
-#define KURENAI_AMPLIFICATION_GROUP_SIZE 32
-#define KURENAI_MESH_GROUP_SIZE 128
+#include "ShaderInterop/GroupSizes.hlsli"
 
 struct MeshletPayload
 {

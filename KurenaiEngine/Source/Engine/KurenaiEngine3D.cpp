@@ -21,6 +21,7 @@
 #include "Core/StringUtil.h"
 #include "Diagnostics/RenderDumpService.h"
 #include "ShaderInterop/FrameConstants.h"
+#include "ShaderInterop/GroupSizes.h"
 #include "UI/UIManager.h"
 #include "UI/UITheme.h"
 
@@ -5244,7 +5245,7 @@ namespace Kurenai
         // --- 3. CSResolve: 1スレッド = 1画素 ----------------------------------------------
         //
         // visibility bufferの三角形番号からジオメトリを引き直し、深度・法線・陰影を書く
-        constexpr uint32_t kResolveGroupSize = 8; // SoftwareRasterResolve.hlslと一致させること
+        constexpr uint32_t kResolveGroupSize = ShaderInterop::kSWRasterResolveGroupSize;
         cmd->SetComputePipelineState(m_SoftwareRasterResolvePipelineState.get());
         cmd->SetComputeConstantBuffer(1, m_SoftwareRasterConstantBuffer.get());
         cmd->SetComputeShaderResourceBuffer(0, m_SoftwareRasterMeshInfoBuffer.get());
@@ -8105,10 +8106,10 @@ namespace Kurenai
                             // 切り抜きが要るぶんとは同じドローにまとめられない
                             if (m_ShadowMeshletPipelineState && ShouldUseModelMeshletPath(instance, *coarsestModel))
                             {
-                                constexpr uint32_t kAmplificationGroupSize = 32;
                                 const uint32_t groupCount =
-                                    (coarsestModel->TotalMeshletCount + kAmplificationGroupSize - 1)
-                                    / kAmplificationGroupSize;
+                                    (coarsestModel->TotalMeshletCount
+                                     + ShaderInterop::kAmplificationGroupSize - 1)
+                                    / ShaderInterop::kAmplificationGroupSize;
 
                                 const auto dispatchShadowMeshlets =
                                     [&](RHI::IRHIPipelineState* pipelineState, uint32_t rejectMask,
@@ -9264,9 +9265,8 @@ namespace Kurenai
 
                     // 起動するのは「モデル全体のメッシュレット数 ÷ 増幅シェーダーのグループサイズ」。
                     // 実際にラスタライズされるのはカリングとふるい分けを生き延びたぶんに絞られる
-                    constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
-                    const uint32_t groupCount =
-                        (lodModel.TotalMeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize;
+                    const uint32_t groupCount = (lodModel.TotalMeshletCount
+                        + ShaderInterop::kAmplificationGroupSize - 1) / ShaderInterop::kAmplificationGroupSize;
                     if (groupCount == 0)
                     {
                         continue;
@@ -9491,8 +9491,9 @@ namespace Kurenai
                     cmd->SetComputeUnorderedAccessBuffer(0, m_ModelCullCounterBuffer.get());
                     cmd->SetComputeUnorderedAccessBuffer(1, m_ModelCullDrawArgsBuffer.get());
 
-                    constexpr uint32_t kModelCullGroupSize = 64; // ModelCull.hlslと一致させること
-                    cmd->Dispatch((count + kModelCullGroupSize - 1) / kModelCullGroupSize, 1, 1);
+                    cmd->Dispatch(
+                        (count + ShaderInterop::kModelCullGroupSize - 1) / ShaderInterop::kModelCullGroupSize,
+                        1, 1);
                 },
             });
         };
@@ -9686,10 +9687,10 @@ namespace Kurenai
                                 continue;
                             }
 
-                            constexpr uint32_t kAmplificationGroupSize = 32;
                             const uint32_t groupCount =
-                                (lodModel.TotalMeshletCount + kAmplificationGroupSize - 1)
-                                / kAmplificationGroupSize;
+                                (lodModel.TotalMeshletCount
+                                 + ShaderInterop::kAmplificationGroupSize - 1)
+                                / ShaderInterop::kAmplificationGroupSize;
 
                             const auto dispatchMeshletPrepass =
                                 [&](RHI::IRHIPipelineState* pipelineState, uint32_t rejectMask, uint32_t requireMask)
@@ -10033,9 +10034,8 @@ namespace Kurenai
 
                         // 起動するのは「モデル全体のメッシュレット数 ÷ 増幅シェーダーのグループサイズ」。
                         // 実際にラスタライズされるのはカリングとふるい分けを生き延びたぶんに絞られる
-                        constexpr uint32_t kAmplificationGroupSize = 32; // GBufferMeshlet.hlslと一致させること
-                        const uint32_t groupCount =
-                            (lodModel.TotalMeshletCount + kAmplificationGroupSize - 1) / kAmplificationGroupSize;
+                        const uint32_t groupCount = (lodModel.TotalMeshletCount
+                            + ShaderInterop::kAmplificationGroupSize - 1) / ShaderInterop::kAmplificationGroupSize;
                         cmd->DispatchMesh(groupCount, 1, 1);
                         ++m_DrawCallsGBuffer;
                         continue;

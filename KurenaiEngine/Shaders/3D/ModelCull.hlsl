@@ -16,11 +16,7 @@
 #include "HiZCull.hlsli"
 
 // 引数1件ぶんのバイト数。
-// 【RHI::IRHICommandList::kDispatchMeshIndirectArgStride と一致させること】
-//   +0  : このドローが使う定数バッファ(b1)のGPU仮想アドレス(64bit)
-//   +8  : DispatchMeshのスレッドグループ数X/Y/Z
-//   +20 : 詰め物(次の要素のアドレスを8バイト境界に載せるため)
-#define KURENAI_INDIRECT_ARG_STRIDE 24
+#include "ShaderInterop/GroupSizes.hlsli"
 
 cbuffer ModelCullConstants : register(b0)
 {
@@ -84,8 +80,6 @@ RWStructuredBuffer<uint> CullCounters : register(u0);
 // 【構造化バッファではなくraw】D3D11がDRAWINDIRECT_ARGSと構造化を同時に指定できない
 // 制約に合わせて、RHIのBufferUsage::IndirectArgsはrawで統一してある
 RWByteAddressBuffer CullDrawArgs : register(u1);
-
-#define KURENAI_MODEL_CULL_GROUP_SIZE 64
 
 [numthreads(KURENAI_MODEL_CULL_GROUP_SIZE, 1, 1)]
 void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)

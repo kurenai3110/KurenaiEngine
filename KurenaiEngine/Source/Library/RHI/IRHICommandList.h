@@ -272,7 +272,8 @@ namespace Kurenai::RHI
         //
         // 【DX11には無い】メッシュシェーダー自体が無いため、呼ぶとログを出して何もしない。
         // 呼び出し側は IRHIDevice::SupportsIndirectDispatchMesh() で分岐すること
-        // 【Shaders/3D/ModelCull.hlsl の KURENAI_INDIRECT_ARG_STRIDE と一致させること】
+        // 【Shaders/3D/ShaderInterop/GroupSizes.hlsli の KURENAI_INDIRECT_ARG_STRIDE と
+        // 一致させること】
         // あちらがこの並びで引数を書き込む
         static constexpr uint32_t kDispatchMeshIndirectArgStride = 24;
         virtual void DispatchMeshIndirect(
